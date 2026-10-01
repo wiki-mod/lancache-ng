@@ -1667,9 +1667,9 @@ _ci_build_tools_image() {
 # Why: Provenance labels set once, not per Dockerfile.
 # From: Issue #1683
 _ci_oci_labels() {
-    local service="$1" prefix source base created
-    prefix="$(_ci_manifest_scalar '^  image_prefix:')"
-    source="https://github.com/${prefix}"
+    local service="$1" repo source base created
+    repo="$(_ci_repo)" || return 2
+    source="${GITHUB_SERVER_URL:?GITHUB_SERVER_URL required}/${repo}"
     base="$(_ci_block_entry_field base_images "" alpine)"
     created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'org.opencontainers.image.created=%s\n' "${created}"
@@ -1679,7 +1679,7 @@ _ci_oci_labels() {
     printf 'org.opencontainers.image.url=%s\n' "${source}"
     printf 'org.opencontainers.image.documentation=%s\n' "${source}"
     printf 'org.opencontainers.image.licenses=%s\n' 'AGPL-3.0-or-later'
-    printf 'org.opencontainers.image.vendor=%s\n' "${prefix%%/*}"
+    printf 'org.opencontainers.image.vendor=%s\n' "${repo%%/*}"
     printf 'org.opencontainers.image.title=%s\n' "${service}"
     printf 'org.opencontainers.image.description=%s\n' "LanCache-NG ${service} image"
     if [ -n "${base}" ]; then
@@ -1734,12 +1734,18 @@ _ci_docker_build() {
     if [ "${build_type}" = apk ] || [ "${build_type}" = install ]; then
         args+=(--build-context "ci-scripts=${CI_SCRIPT_DIR}")
     fi
+    # What: capture labels + build-args before reading them.
+    # Why: < <(...) drops a failure; never build without.
+    # From: Issue #1683 | PR #1858
+    local labels bargs
+    labels="$(_ci_oci_labels "${service}")" || return 2
+    bargs="$(ci_cmd_build_args "${service}" --bare "${platform}")" || return 2
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--label "${a}")
-    done < <(_ci_oci_labels "${service}")
+    done <<< "${labels}"
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--build-arg "${a}")
-    done < <(ci_cmd_build_args "${service}" --bare "${platform}")
+    done <<< "${bargs}"
     # What: the build identity keys every layer's cache.
     # Why: ARG change reruns RUN; apk repos never do.
     # From: Issue #1683 | PR #1858
@@ -3656,8 +3662,7 @@ _ci_gh_versions() {
 # From: Issue #1683
 _ci_default_gc_candidates() {
     local prefix owner pkgbase svc vers grc found=0
-    prefix="$(_ci_manifest_scalar '^  image_prefix:[[:space:]]')"
-    [ -n "${prefix}" ] || { ci_log "[CI-ERROR-GC-0017]" "reason=\"SOT image_prefix missing\""; return 2; }
+    prefix="$(_ci_repo)" || { ci_log "[CI-ERROR-GC-0017]" "reason=\"GITHUB_REPOSITORY missing; no package namespace\""; return 2; }
     owner="${prefix%%/*}"
     pkgbase="${prefix#*/}"
     while IFS= read -r svc; do
@@ -3695,8 +3700,7 @@ _ci_default_gc_delete() {
             ;;
     esac
     [ -n "${svc}" ] || { ci_log "[CI-ERROR-GC-0019]" "candidate=\"${candidate}\" reason=\"no service for delete path\""; return 2; }
-    prefix="$(_ci_manifest_scalar '^  image_prefix:[[:space:]]')"
-    [ -n "${prefix}" ] || { ci_log "[CI-ERROR-GC-0017]" "reason=\"SOT image_prefix missing\""; return 2; }
+    prefix="$(_ci_repo)" || { ci_log "[CI-ERROR-GC-0017]" "reason=\"GITHUB_REPOSITORY missing; no package namespace\""; return 2; }
     owner="${prefix%%/*}"
     pkgbase="${prefix#*/}"
     # What: retry a transient GH-API delete.
@@ -3938,9 +3942,8 @@ _ci_validate_report_unpinned() {
 # From: Issue #1683 | PR #1858
 _ci_validate_pin_override() {
     local candidate="$1" prefix images svc image slug digest reg matched=" "
-    prefix="$(_ci_manifest_scalar '^  image_prefix:[[:space:]]')"
-    if [ -z "${prefix}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0005]" "reason=\"no image_prefix in SOT\""
+    if ! prefix="$(_ci_repo)"; then
+        ci_log "[CI-ERROR-VALIDATE-0005]" "reason=\"GITHUB_REPOSITORY missing; no image namespace\""
         return 2
     fi
     if ! images="$(_ci_validate_compose_images)"; then

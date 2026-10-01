@@ -21,6 +21,10 @@ setup() {
     # Why: ci.sh policy uses docker login; tests stub it.
     # From: Issue #1683
     CI_GHCR_LOGIN_CMD="$(_stub ghcrlogin 'exit 0')"; export CI_GHCR_LOGIN_CMD
+    # What: neutral server URL every Actions run provides.
+    # Why: label provenance needs it; no real host in tests.
+    # From: Issue #1683 | PR #1858
+    export GITHUB_SERVER_URL=https://git.example.test
 }
 
 # What: Removes dirs listed in a manifest file.
@@ -100,22 +104,22 @@ teardown() {
     [[ "${output}" == *"CI-ERROR-CORE-0002"* ]]
 }
 
-@test "_ci_repo lowercases a real mixed-case GITHUB_REPOSITORY" {
-    # What: a real mixed-case owner/repo, not pre-lowered.
-    # Why: GHCR needs lowercase; this transform was unseen.
+@test "_ci_repo lowercases a mixed-case GITHUB_REPOSITORY" {
+    # What: a mixed-case owner/repo comes out lowercased.
+    # Why: GHCR image refs must be lowercase.
     # From: Issue #1683 | PR #1858
-    GITHUB_REPOSITORY='Wiki-Mod/LanCache-NG' run _ci_repo
+    GITHUB_REPOSITORY='Owner/Fixture-Repo' run _ci_repo
     [ "${status}" -eq 0 ]
-    [ "${output}" = "wiki-mod/lancache-ng" ]
+    [ "${output}" = "owner/fixture-repo" ]
 }
 
 @test "image-ref builds the one registry service@digest form" {
     # What: Builds <registry>/<repo>/<service>@<digest> ref.
     # Why: scan, sbom, assemble, verify must share the ref.
     # From: Issue #1683
-    GITHUB_REPOSITORY=wiki-mod/lancache-ng run _ci_image_ref build-tools sha256:beef
+    GITHUB_REPOSITORY=owner/fixture-repo run _ci_image_ref build-tools sha256:beef
     [ "${status}" -eq 0 ]
-    [ "${output}" = "ghcr.io/wiki-mod/lancache-ng/build-tools@sha256:beef" ]
+    [ "${output}" = "ghcr.io/owner/fixture-repo/build-tools@sha256:beef" ]
 }
 
 @test "image-ref fails closed and prints no ref without a repo owner" {
@@ -749,7 +753,7 @@ teardown() {
     sed 's/^  registry: ghcr.io$/  registry: example.io/' "${CI_MANIFEST_SOURCE}" > "${m}"
     host="$(CI_MANIFEST="${m}" _ci_registry)"
     [ "${host}" = "example.io" ]
-    tag="$(CI_MANIFEST="${m}" GITHUB_REPOSITORY=wiki-mod/lancache-ng _ci_image_tag proxy linux/amd64 abcd)"
+    tag="$(CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo _ci_image_tag proxy linux/amd64 abcd)"
     [[ "${tag}" == example.io/* ]]
 }
 
@@ -1249,13 +1253,13 @@ _stub() {
     # From: Issue #1613
     CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" \
     CI_SMOKE_CMD="$(_stub sm 'echo "service=$1 smoke=ok image=${CI_SERVICE_IMAGE}"')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=owner/fixture-repo \
         run bash "${CI_SH}" verify proxy sha256:dead linux/amd64
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"smoke=ok image="*"proxy@sha256:dead"* ]]
     CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" \
     CI_SMOKE_CMD="$(_stub sm 'exit 1')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=owner/fixture-repo \
         run bash "${CI_SH}" verify proxy sha256:dead linux/amd64
     [ "${status}" -ne 0 ]
 }
@@ -1322,7 +1326,7 @@ _stub() {
     # From: Issue #1683
     CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" \
     CI_TOOLCHAIN_TEST_CMD="$(_stub tc 'echo "service=$1 tested=ok"')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=owner/fixture-repo \
         run bash "${CI_SH}" verify build-tools sha256:dead linux/amd64
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"verified=sha256:dead"* ]]
@@ -1599,7 +1603,7 @@ RS
     # Why: Confirms the accepted artifact is the real one.
     # From: Issue #1683
     CI_READBACK_CMD="$(_stub rb 'echo sha256:match')" GHCR_USERNAME=u GHCR_TOKEN=t \
-    CI_SMOKE_CMD="$(_stub sm 'echo "service=$1 smoke=ok"')" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    CI_SMOKE_CMD="$(_stub sm 'echo "service=$1 smoke=ok"')" GITHUB_REPOSITORY=owner/fixture-repo \
         run bash "${CI_SH}" verify ui sha256:match
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"verified=sha256:match"* ]]
@@ -2233,7 +2237,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # What: Roots = ledger records + channels + children.
     # Why: The transitive protected set, all states (§101).
     # From: Issue #1683
-    GITHUB_REPOSITORY=wiki-mod/lancache-ng
+    GITHUB_REPOSITORY=owner/fixture-repo
     _ci_ledger_blob() { printf 'id1\tproxy\tlinux/amd64\tPRODUCED_UNVERIFIED\tsha256:led\n'; }
     ci_services() { printf 'proxy\n'; }
     _ci_mutable_channels() { printf 'latest\n'; }
@@ -2250,7 +2254,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # What: toolchain channels and children are roots.
     # Why: else GC orphans the channel index (unpullable).
     # From: Issue #1683 | PR #1858
-    GITHUB_REPOSITORY=wiki-mod/lancache-ng
+    GITHUB_REPOSITORY=owner/fixture-repo
     _ci_ledger_blob() { return 1; }
     ci_services() { printf 'proxy\n'; }
     _ci_mutable_channels() { printf 'nightly\n'; }
@@ -2266,7 +2270,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # What: index digest resolves, one child 404 -> reject.
     # Why: a channel on an unpullable index breaks all jobs.
     # From: Issue #1683 | PR #1858
-    export GITHUB_REPOSITORY=wiki-mod/lancache-ng
+    export GITHUB_REPOSITORY=owner/fixture-repo
     _ci_registry_digest() { echo sha256:idx; }
     _ci_index_raw() { printf '{"manifests":[{"platform":{"architecture":"amd64"},"digest":"sha256:a"},{"platform":{"architecture":"arm64"},"digest":"sha256:b"}]}'; }
     _ci_registry_probe() { echo sha256:ok; }
@@ -2284,7 +2288,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # What: An unreadable ledger refuses; never empty roots.
     # Why: UNKNOWN roots would delete live artifacts (§26).
     # From: Issue #1683
-    GITHUB_REPOSITORY=wiki-mod/lancache-ng
+    GITHUB_REPOSITORY=owner/fixture-repo
     _ci_ledger_blob() { return 2; }
     run _ci_default_gc_roots
     [ "${status}" -eq 2 ]
@@ -2295,7 +2299,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # What: A flaky channel probe refuses the whole run.
     # Why: A transient miss must not drop a live channel.
     # From: Issue #1683
-    GITHUB_REPOSITORY=wiki-mod/lancache-ng
+    GITHUB_REPOSITORY=owner/fixture-repo
     _ci_ledger_blob() { return 1; }
     ci_services() { printf 'proxy\n'; }
     _ci_mutable_channels() { printf 'latest\n'; }
@@ -2309,7 +2313,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # What: SOT without registry refused.
     # Why: Empty host drops channels.
     # From: Issue #1683
-    GITHUB_REPOSITORY=wiki-mod/lancache-ng
+    GITHUB_REPOSITORY=owner/fixture-repo
     local m="${BATS_TEST_TMPDIR}/noreg.yml"
     grep -v '^  registry:' "${CI_MANIFEST_SOURCE}" > "${m}"
     export CI_MANIFEST="${m}"
@@ -2322,7 +2326,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # What: A flaky child read refuses the whole run.
     # Why: Missing children would orphan-delete live arches.
     # From: Issue #1683
-    GITHUB_REPOSITORY=wiki-mod/lancache-ng
+    GITHUB_REPOSITORY=owner/fixture-repo
     _ci_ledger_blob() { printf 'id1\tproxy\tlinux/amd64\tACCEPTED\tsha256:led\n'; }
     ci_services() { printf '\n'; }
     _ci_mutable_channels() { printf '\n'; }
@@ -2336,7 +2340,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # What: A not-found channel is skipped, not a failure.
     # Why: A service never promoted is legitimately absent.
     # From: Issue #1683
-    export GITHUB_REPOSITORY=wiki-mod/lancache-ng
+    export GITHUB_REPOSITORY=owner/fixture-repo
     _ci_ledger_blob() { printf 'id1\tproxy\tlinux/amd64\tACCEPTED\tsha256:led\n'; }
     ci_services() { printf 'proxy\n'; }
     _ci_mutable_channels() { printf 'latest\n'; }
@@ -2456,70 +2460,34 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     [[ "${output}" == *"CI-ERROR-GC-0007"* ]]
 }
 
-@test "default gc candidates emits the version tuple per package" {
-    # What: Each built package's versions become candidates.
-    # Why: The tuple feeds reachability and delete (§97).
-    # From: Issue #1683
-    _ci_gh_versions() { printf 'sha256:aaa\t111\t2020-01-01T00:00:00Z\tsha-abc\n'; }
-    ci_build_targets() { printf 'proxy\n'; }
-    run _ci_default_gc_candidates
+@test "default gc candidates: per-package tuples, 404 skip, fail closed" {
+    # What: owner/repo-scoped versions; 404 skips; empty ok.
+    # Why: all-404, transient error or no repo must refuse.
+    # From: Issue #1683 | PR #1858
+    ci_build_targets() { printf 'svc-a\nsvc-b\n'; }
+    _ci_gh_versions() {
+        [ "$1" = owner ] || return 2
+        case "${MODE}:$2" in
+            ok:fixture-repo%2Fsvc-a) printf 'sha256:aaa\t111\t2020-01-01T00:00:00Z\tsha-a\n' ;;
+            ok:*) return 1 ;;
+            empty:*) return 0 ;;
+            none:*) return 1 ;;
+            *) return 2 ;;
+        esac
+    }
+    export GITHUB_REPOSITORY=Owner/Fixture-Repo
+    MODE=ok run _ci_default_gc_candidates
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"sha256:aaa"* ]]
-    [[ "${output}" == *"111"* ]]
-    [[ "${output}" == *"proxy"* ]]
-}
-
-@test "default gc candidates skips a 404 package without failing" {
-    # What: A not-found package is skipped, not fatal.
-    # Why: External services (netdata) have no GHCR package.
-    # From: Issue #1683
-    _ci_gh_versions() { case "$2" in *netdata*) return 1;; *) printf 'sha256:bbb\t222\t2020-01-01T00:00:00Z\tsha-b\n';; esac; }
-    ci_build_targets() { printf 'proxy\nnetdata\n'; }
-    run _ci_default_gc_candidates
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"sha256:bbb"* ]]
-    [[ "${output}" != *"netdata"* ]]
-}
-
-@test "default gc candidates fails closed when every package 404s" {
-    # What: No package found anywhere refuses the run.
-    # Why: A bad prefix/owner/token must not read as noop.
-    # From: Issue #1683
-    _ci_gh_versions() { return 1; }
-    ci_build_targets() { printf 'proxy\ndns\n'; }
-    run _ci_default_gc_candidates
+    [ "${output}" = "$(printf 'sha256:aaa\t111\t2020-01-01T00:00:00Z\tsha-a\tsvc-a')" ]
+    MODE=empty run _ci_default_gc_candidates
+    [ "${status}" -eq 0 ]; [ -z "${output}" ]
+    MODE=none run _ci_default_gc_candidates
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"CI-ERROR-GC-0020"* ]]
+    MODE=transient run _ci_default_gc_candidates
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-GC-0020"* ]]
-}
-
-@test "default gc candidates counts an existing empty package as found" {
-    # What: An existing package with zero versions is fine.
-    # Why: Empty is not 404; not the no-package case.
-    # From: Issue #1683
-    _ci_gh_versions() { return 0; }
-    ci_build_targets() { printf 'proxy\n'; }
-    run _ci_default_gc_candidates
-    [ "${status}" -eq 0 ]
-}
-
-@test "default gc candidates fails closed on a transient listing error" {
-    # What: A transient GHCR error refuses the whole run.
-    # Why: A half-enumerated candidate set is unsafe.
-    # From: Issue #1683
-    _ci_gh_versions() { return 2; }
-    ci_build_targets() { printf 'proxy\n'; }
-    run _ci_default_gc_candidates
-    [ "${status}" -eq 2 ]
-}
-
-@test "default gc candidates fails closed when image_prefix is missing" {
-    # What: No SOT image_prefix cannot scope candidates.
-    # Why: Guessing the owner could target foreign packages.
-    # From: Issue #1683
-    _ci_manifest_scalar() { printf ''; }
-    run _ci_default_gc_candidates
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-GC-0017"* ]]
+    unset GITHUB_REPOSITORY
+    MODE=ok run _ci_default_gc_candidates
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"CI-ERROR-GC-0017"* ]]
 }
 
 @test "gc is a NOOP when the candidate set is empty" {
@@ -2607,9 +2575,10 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # From: Issue #1683
     gh() { echo "$@" >> "${BATS_TEST_TMPDIR}/gh.log"; }
     export -f gh
-    run _ci_default_gc_delete "$(printf 'sha256:old\t222\t2020-01-01T00:00:00Z\t\tproxy')"
+    GITHUB_REPOSITORY=owner/fixture-repo \
+        run _ci_default_gc_delete "$(printf 'sha256:old\t222\t2020-01-01T00:00:00Z\t\tsvc-a')"
     [ "${status}" -eq 0 ]
-    [[ "$(cat "${BATS_TEST_TMPDIR}/gh.log")" == *"api -X DELETE /orgs/wiki-mod/packages/container/lancache-ng%2Fproxy/versions/222"* ]]
+    [[ "$(cat "${BATS_TEST_TMPDIR}/gh.log")" == *"api -X DELETE /orgs/owner/packages/container/fixture-repo%2Fsvc-a/versions/222"* ]]
 }
 
 @test "default gc delete refuses a candidate with no numeric id" {
@@ -2796,6 +2765,7 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # Why: No stub = real backend, still fail-closed.
     # From: Issue #1683 | PR #1858
     CI_STACK_CANDIDATE_CMD="$(_stub cand 'echo proxy=sha256:x')" \
+    GITHUB_REPOSITORY=owner/fixture-repo \
     CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'exit 3')" \
     TMPDIR="${BATS_TEST_TMPDIR}" GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" validate
@@ -2870,7 +2840,8 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # What: dns pins both dns-standard and dns-ssl.
     # Why: Pin by image, not key (1 service, 2 containers).
     # From: Issue #1683 | PR #1858
-    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "dns-standard\tghcr.io/wiki-mod/lancache-ng/dns:latest\ndns-ssl\tghcr.io/wiki-mod/lancache-ng/dns:latest\n"')" \
+    GITHUB_REPOSITORY=owner/fixture-repo \
+    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "dns-standard\tghcr.io/owner/fixture-repo/dns:latest\ndns-ssl\tghcr.io/owner/fixture-repo/dns:latest\n"')" \
         run _ci_validate_pin_override "dns=sha256:aaa"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"dns-standard:"* ]]
@@ -2882,7 +2853,8 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # What: nats is third-party; it is never pinned.
     # Why: No first-party digest exists for external images.
     # From: Issue #1683 | PR #1858
-    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "nats\tnats:2-alpine@sha256:c11\nproxy\tghcr.io/wiki-mod/lancache-ng/proxy:latest\n"')" \
+    GITHUB_REPOSITORY=owner/fixture-repo \
+    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "nats\tnats:2-alpine@sha256:c11\nproxy\tghcr.io/owner/fixture-repo/proxy:latest\n"')" \
         run _ci_validate_pin_override "proxy=sha256:p"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"proxy@sha256:p"* ]]
@@ -2893,7 +2865,8 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # What: First-party image not in the candidate.
     # Why: Else :latest validates green (silent drift).
     # From: Issue #1683 | PR #1858
-    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "proxy\tghcr.io/wiki-mod/lancache-ng/proxy:latest\n"')" \
+    GITHUB_REPOSITORY=owner/fixture-repo \
+    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "proxy\tghcr.io/owner/fixture-repo/proxy:latest\n"')" \
         run _ci_validate_pin_override "watchdog=sha256:w"
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0007"* ]]
@@ -2903,7 +2876,8 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     # What: netdata first-party, compose uses upstream.
     # Why: Deferred defect stays visible, never a hard fail.
     # From: Issue #1683 | PR #1858
-    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "netdata\tnetdata/netdata@sha256:a13\nproxy\tghcr.io/wiki-mod/lancache-ng/proxy:latest\n"')" \
+    GITHUB_REPOSITORY=owner/fixture-repo \
+    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "netdata\tnetdata/netdata@sha256:a13\nproxy\tghcr.io/owner/fixture-repo/proxy:latest\n"')" \
         run _ci_validate_pin_override "proxy=sha256:p
 netdata=sha256:n"
     [ "${status}" -eq 0 ]
@@ -4277,20 +4251,21 @@ netdata=sha256:n"
     # What: The base build-tools ref from the SOT.
     # Why: One registry-host owner, no env fallback.
     # From: Issue #1683
-    GITHUB_REPOSITORY=wiki-mod/lancache-ng run bash "${CI_SH}" build-tools image
+    GITHUB_REPOSITORY=owner/fixture-repo run bash "${CI_SH}" build-tools image
     [ "${status}" -eq 0 ]
-    [ "${output}" = "ghcr.io/wiki-mod/lancache-ng/build-tools" ]
+    [ "${output}" = "ghcr.io/owner/fixture-repo/build-tools" ]
 }
 
 @test "oci labels emit provenance from the SOT and env" {
     # What: revision/source/licenses/base from SOT+env.
     # Why: Provenance labels have one owner (Plan §7).
     # From: Issue #1683
-    GITHUB_SHA=abc123 run _ci_oci_labels build-tools
+    GITHUB_SHA=abc123 GITHUB_SERVER_URL=https://git.example.test GITHUB_REPOSITORY=Owner/Fixture-Repo \
+        run _ci_oci_labels build-tools
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"image.revision=abc123"* ]]
     [[ "${output}" == *"image.version=abc123"* ]]
-    [[ "${output}" == *"image.source=https://github.com/wiki-mod/lancache-ng"* ]]
+    [[ "${output}" == *"image.source=https://git.example.test/owner/fixture-repo"* ]]
     [[ "${output}" == *"image.licenses=AGPL-3.0-or-later"* ]]
     [[ "${output}" == *"image.title=build-tools"* ]]
     [[ "${output}" == *"image.description=LanCache-NG build-tools image"* ]]
@@ -7145,17 +7120,17 @@ EOF
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
         run _ci_docker_build proxy abc123 linux/amd64
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"buildx build --load"* ]]
-    [[ "${output}" == *"ghcr.io/wiki-mod/lancache-ng/proxy:sha-abc123-amd64"* ]]
+    [[ "${output}" == *"ghcr.io/owner/fixture-repo/proxy:sha-abc123-amd64"* ]]
     [[ "${output}" == *"--platform linux/amd64"* ]]
     [[ "${output}" == *"org.opencontainers.image.title=proxy"* ]]
     [[ "${output}" == *"--build-arg BUILD_IDENTITY=abc123"* ]]
 }
 
-@test "docker-build fails closed on a Dockerfile without ARG BUILD_IDENTITY" {
+@test "docker-build fails closed without ARG BUILD_IDENTITY or build-args" {
     # What: no ARG BUILD_IDENTITY stops before buildx runs.
     # Why: its cache could ship a stale apk layer silently.
     # From: Issue #1683 | PR #1858
@@ -7169,6 +7144,13 @@ EOF
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILD-0013"* ]]
     [[ "${output}" != *"buildx build"* ]]
+    printf 'FROM x\nARG BUILD_IDENTITY\n' > "${r}/svc/Dockerfile"
+    printf 'services:\n  svc-a:\n    context: svc\n    build_type: rust\n' > "${m}"
+    CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo CI_BUILD_TOOLS_IMAGE_CMD='echo bt@sha256:x' \
+        run _ci_docker_build svc-a id1 os/p1
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-BUILDARGS-"* ]]
+    [[ "${output}" != *"buildx build"* ]]
 }
 
 @test "docker-build omits cache-from/cache-to when unset (unchanged default)" {
@@ -7178,7 +7160,7 @@ EOF
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
         run _ci_docker_build proxy abc123 linux/amd64
     [ "${status}" -eq 0 ]
     [[ "${output}" != *"--cache-from"* ]]
@@ -7192,23 +7174,23 @@ EOF
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-        CI_BUILD_CACHE_FROM="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache" \
-        CI_BUILD_CACHE_TO="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache,mode=max" \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
+        CI_BUILD_CACHE_FROM="type=registry,ref=ghcr.io/owner/fixture-repo/proxy:cache" \
+        CI_BUILD_CACHE_TO="type=registry,ref=ghcr.io/owner/fixture-repo/proxy:cache,mode=max" \
         run _ci_docker_build proxy abc123 linux/amd64
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--cache-from type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache"* ]]
-    [[ "${output}" == *"--cache-to type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache,mode=max,ignore-error=true"* ]]
+    [[ "${output}" == *"--cache-from type=registry,ref=ghcr.io/owner/fixture-repo/proxy:cache"* ]]
+    [[ "${output}" == *"--cache-to type=registry,ref=ghcr.io/owner/fixture-repo/proxy:cache,mode=max,ignore-error=true"* ]]
 
     # What: a 2nd service call gets its own cache ref.
     # Why: proves scope is per-call, not one constant value.
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-        CI_BUILD_CACHE_FROM="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/ui:cache" \
-        CI_BUILD_CACHE_TO="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/ui:cache,mode=max" \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo CI_BUILD_TOOLS_IMAGE_CMD='echo bt@sha256:x' \
+        CI_BUILD_CACHE_FROM="type=registry,ref=ghcr.io/owner/fixture-repo/ui:cache" \
+        CI_BUILD_CACHE_TO="type=registry,ref=ghcr.io/owner/fixture-repo/ui:cache,mode=max" \
         run _ci_docker_build ui def456 linux/amd64
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--cache-from type=registry,ref=ghcr.io/wiki-mod/lancache-ng/ui:cache"* ]]
-    [[ "${output}" == *"--cache-to type=registry,ref=ghcr.io/wiki-mod/lancache-ng/ui:cache,mode=max,ignore-error=true"* ]]
+    [[ "${output}" == *"--cache-from type=registry,ref=ghcr.io/owner/fixture-repo/ui:cache"* ]]
+    [[ "${output}" == *"--cache-to type=registry,ref=ghcr.io/owner/fixture-repo/ui:cache,mode=max,ignore-error=true"* ]]
     [[ "${output}" != *"proxy:cache"* ]]
 }
 
@@ -7229,8 +7211,8 @@ case "$*" in
 esac
 EOF
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-        CI_BUILD_CACHE_FROM="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache" \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
+        CI_BUILD_CACHE_FROM="type=registry,ref=ghcr.io/owner/fixture-repo/proxy:cache" \
         run _ci_docker_build proxy abc123 linux/amd64
     [ "${status}" -eq 0 ]
     # What: raw evidence of the miss stays visible.
@@ -7245,11 +7227,11 @@ EOF
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-        CI_BUILD_CACHE_TO="type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache,ignore-error=false" \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
+        CI_BUILD_CACHE_TO="type=registry,ref=ghcr.io/owner/fixture-repo/proxy:cache,ignore-error=false" \
         run _ci_docker_build proxy abc123 linux/amd64
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--cache-to type=registry,ref=ghcr.io/wiki-mod/lancache-ng/proxy:cache,ignore-error=false"* ]]
+    [[ "${output}" == *"--cache-to type=registry,ref=ghcr.io/owner/fixture-repo/proxy:cache,ignore-error=false"* ]]
     [[ "${output}" != *"ignore-error=false,ignore-error=true"* ]]
 }
 
@@ -7260,11 +7242,11 @@ EOF
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
-        CI_BUILD_CACHE_TO="ghcr.io/wiki-mod/lancache-ng/proxy:cache" \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
+        CI_BUILD_CACHE_TO="ghcr.io/owner/fixture-repo/proxy:cache" \
         run _ci_docker_build proxy abc123 linux/amd64
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--cache-to ghcr.io/wiki-mod/lancache-ng/proxy:cache"* ]]
+    [[ "${output}" == *"--cache-to ghcr.io/owner/fixture-repo/proxy:cache"* ]]
     [[ "${output}" == *"CI-WARN-BUILD-0012"* ]]
 }
 
@@ -7275,7 +7257,7 @@ EOF
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\ncase "$*" in *"imagetools inspect"*) echo sha256:deadbeef ;; *) : ;; esac\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
         run _ci_docker_publish proxy abc123 linux/amd64
     [ "${status}" -eq 0 ]
     [ "${output}" = "sha256:deadbeef" ]
@@ -7347,7 +7329,7 @@ case "\$*" in
 esac
 EOF
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
     CI_RETRY_BACKOFF_BASE_SECONDS=0 CI_RETRY_MAX_ATTEMPTS=3 \
         run _ci_docker_publish proxy abc123 linux/amd64
     [ "${status}" -eq 2 ]
@@ -7375,7 +7357,7 @@ case "\$*" in
 esac
 EOF
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng CI_RETRY_BACKOFF_BASE_SECONDS=0 \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo CI_RETRY_BACKOFF_BASE_SECONDS=0 \
         run _ci_docker_build proxy abc123 linux/amd64
     [ "${status}" -eq 0 ]
     [ "$(cat "${cnt}")" -eq 2 ]
@@ -7397,7 +7379,7 @@ case "\$*" in
 esac
 EOF
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng CI_RETRY_BACKOFF_BASE_SECONDS=0 \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo CI_RETRY_BACKOFF_BASE_SECONDS=0 \
         run _ci_docker_build proxy abc123 linux/amd64
     [ "${status}" -eq 2 ]
     [ "$(cat "${cnt}")" -eq 1 ]
@@ -7459,7 +7441,7 @@ _trivy_stub() {
     # Why: The success path returns clean directly.
     # From: Issue #1683
     local bin vt; bin="$(_trivy_stub clean)"; vt="$(_trivy_var_tmp_dir)"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
     CI_TRIVY_SHARED_DIR="${vt}/no-shared" \
     CI_TRIVY_FALLBACK_DIR="${vt}/trivy-cache" \
         run _ci_trivy_scan proxy sha256:abc
@@ -7471,7 +7453,7 @@ _trivy_stub() {
     # Why: Findings fail once; retrying is wasted work.
     # From: Issue #1683
     local bin vt; bin="$(_trivy_stub finding)"; vt="$(_trivy_var_tmp_dir)"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
     CI_TRIVY_SHARED_DIR="${vt}/no-shared" \
     CI_TRIVY_FALLBACK_DIR="${vt}/trivy-cache" \
         run _ci_trivy_scan proxy sha256:abc
@@ -7484,7 +7466,7 @@ _trivy_stub() {
     # Why: A DB outage escalates, never reads as a finding.
     # From: Issue #1683
     local bin vt; bin="$(_trivy_stub db)"; vt="$(_trivy_var_tmp_dir)"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
     CI_TRIVY_SHARED_DIR="${vt}/no-shared" \
     CI_TRIVY_FALLBACK_DIR="${vt}/trivy-cache" \
         CI_TRIVY_MAX=2 CI_TRIVY_BACKOFF=0 run _ci_trivy_scan proxy sha256:abc
@@ -7505,7 +7487,7 @@ _trivy_stub() {
         printf '[ -n "$out" ] && : > "$out"\nexit 0\n'
     } > "${bin}/trivy"
     chmod +x "${bin}/trivy"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
     CI_TRIVY_SHARED_DIR="${vt}/no-shared" \
     CI_TRIVY_FALLBACK_DIR="${vt}/trivy-cache" \
         run _ci_trivy_scan proxy sha256:abc
@@ -7762,7 +7744,7 @@ EOF
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho sha256:match\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng GHCR_USERNAME=u GHCR_TOKEN=t \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" verify ui sha256:match linux/amd64
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"verified=sha256:match"* ]]
@@ -7776,14 +7758,14 @@ EOF
     local log="${BATS_TEST_TMPDIR}/create.log"
     printf '#!/usr/bin/env bash\ncase "$*" in *"imagetools create"*) echo "$*" >> "%s" ;; *"imagetools inspect"*) echo sha256:idx ;; esac\n' "${log}" > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng GITHUB_SHA=deadbeef \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo GITHUB_SHA=deadbeef \
         run _ci_docker_assemble ui linux/amd64=sha256:aaa linux/arm64=sha256:bbb
     [ "${status}" -eq 0 ]
     [ "${output}" = "sha256:idx" ]
     run cat "${log}"
-    [[ "${output}" == *"--tag ghcr.io/wiki-mod/lancache-ng/ui:sha-deadbeef"* ]]
-    [[ "${output}" == *"ghcr.io/wiki-mod/lancache-ng/ui@sha256:aaa"* ]]
-    [[ "${output}" == *"ghcr.io/wiki-mod/lancache-ng/ui@sha256:bbb"* ]]
+    [[ "${output}" == *"--tag ghcr.io/owner/fixture-repo/ui:sha-deadbeef"* ]]
+    [[ "${output}" == *"ghcr.io/owner/fixture-repo/ui@sha256:aaa"* ]]
+    [[ "${output}" == *"ghcr.io/owner/fixture-repo/ui@sha256:bbb"* ]]
 }
 
 # What: bare repo + two host clones for real CAS tests.
@@ -8257,7 +8239,7 @@ case "$*" in
 esac
 SH
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng GITHUB_SHA=deadbeef \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo GITHUB_SHA=deadbeef \
         run _ci_index_lookup ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"sha256:idx"* ]]
@@ -8273,7 +8255,7 @@ SH
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho "not found: manifest unknown" >&2\nexit 1\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng GITHUB_SHA=deadbeef \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo GITHUB_SHA=deadbeef \
         run _ci_index_lookup ui
     [ "${status}" -eq 1 ]
 }
@@ -8285,7 +8267,7 @@ SH
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho "Connection reset by peer" >&2\nexit 1\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" run _ci_index_raw ghcr.io/wiki-mod/lancache-ng/ui:sha-deadbeef
+    PATH="${bin}:${PATH}" run _ci_index_raw ghcr.io/owner/fixture-repo/ui:sha-deadbeef
     [ "${status}" -eq 2 ]
 }
 
@@ -8296,7 +8278,7 @@ SH
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\necho "not found: manifest unknown" >&2\nexit 1\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" run _ci_index_raw ghcr.io/wiki-mod/lancache-ng/ui:sha-deadbeef
+    PATH="${bin}:${PATH}" run _ci_index_raw ghcr.io/owner/fixture-repo/ui:sha-deadbeef
     [ "${status}" -eq 1 ]
 }
 
@@ -8414,12 +8396,12 @@ SH
     local log="${BATS_TEST_TMPDIR}/create.log"
     printf '#!/usr/bin/env bash\ncase "$*" in *"imagetools create"*) echo "$*" >> "%s" ;; esac\n' "${log}" > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
         run _ci_default_channel_move ui latest sha256:abc
     [ "${status}" -eq 0 ]
     run cat "${log}"
-    [[ "${output}" == *"--tag ghcr.io/wiki-mod/lancache-ng/ui:latest"* ]]
-    [[ "${output}" == *"ghcr.io/wiki-mod/lancache-ng/ui@sha256:abc"* ]]
+    [[ "${output}" == *"--tag ghcr.io/owner/fixture-repo/ui:latest"* ]]
+    [[ "${output}" == *"ghcr.io/owner/fixture-repo/ui@sha256:abc"* ]]
 }
 
 @test "default channel readback reads the channel digest" {
@@ -8429,7 +8411,7 @@ SH
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     printf '#!/usr/bin/env bash\ncase " $* " in *" --raw "*) echo "{\\"schemaVersion\\":2}" ;; *) echo sha256:chan ;; esac\n' > "${bin}/docker"
     chmod +x "${bin}/docker"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=wiki-mod/lancache-ng \
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
         run _ci_default_channel_readback ui latest
     [ "${status}" -eq 0 ]
     [ "${output}" = sha256:chan ]

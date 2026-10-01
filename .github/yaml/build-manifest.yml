@@ -591,7 +591,6 @@ codeql_languages:
 release:
   schema: stack-images/v1
   registry: ghcr.io
-  image_prefix: wiki-mod/lancache-ng
   channels:
     sha:
       tag: sha-<commit>
