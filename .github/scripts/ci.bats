@@ -217,6 +217,8 @@ dhcp|dhcp-proxy-env||/dnsmasq.conf.template
 kea|setup-keys-kea||/setup.sh
 rustdf|dockerfile-build-tools||/services/ui/Dockerfile
 prompt|setup-prompt-drift||/setup-cli-simulation.sh
+prompt-setup|setup-prompt-drift||/setup.sh
+prompt-anchor|setup-prompt-drift||-m1
 CASES
 }
 

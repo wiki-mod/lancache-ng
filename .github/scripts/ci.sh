@@ -6790,7 +6790,7 @@ _ci_setup_wizard_rows() {
     # What: emit ask/confirm prompts from setup wizard
     # Why: parse wizard rows for prompt/expect drift checks
     local setup="$1" cs_line esac_line wiz_start
-    cs_line="$(grep -n -m1 '^case "${1:-install}" in$' "${setup}")" || return 3
+    cs_line="$(_ci_capture 1 grep -n -m1 '^case "${1:-install}" in$' "${setup}")" || return 2
     cs_line="${cs_line%%:*}"
     [ -n "${cs_line}" ] || return 3
     esac_line="$(awk -v s="${cs_line}" 'NR>s && /^esac$/{print NR; exit}' "${setup}")"
@@ -6830,7 +6830,9 @@ _ci_check_setup_prompt_drift() {
         ci_log "[CI-ERROR-CHECK-0067]" "path=\"${setup}\" reason=\"setup.sh not found\""
         return 2
     fi
-    if [ "$(grep -c '^case "${1:-install}" in$' "${setup}")" -ne 1 ]; then
+    local anchor_count
+    anchor_count="$(_ci_capture 1 grep -c '^case "${1:-install}" in$' "${setup}")" || return 2
+    if [ "${anchor_count}" -ne 1 ]; then
         ci_error "[CI-ERROR-CHECK-0081]" "reason=\"setup.sh dispatch case anchor not unique\""
         return 1
     fi
