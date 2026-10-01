@@ -3601,7 +3601,7 @@ SH
             *) echo '{"zones":{"lan.":[{"id":"snap1"}]}}' ;;
         esac
     }
-    export CI_REPO_ROOT="${BATS_TEST_TMPDIR}/repo"
+    export CI_REPO_ROOT="${BATS_TEST_TMPDIR}/repo" CI_COMPOSE_FILE=dep/c.yml
     mkdir -p "${CI_REPO_ROOT}"
     printf '%s\n' '#!/usr/bin/env bash' \
         'printf "%s %s\n" "${COMPOSE_PROJECT_NAME}" "$*" > "${CI_REPO_ROOT}/args"' \
@@ -3614,7 +3614,7 @@ SH
         [ "${status}" -eq "${want}" ] || { echo "${case}: ${output}"; return 1; }
         [ "${want}" -eq 0 ] || [[ "${output}" == *"CI-ERROR-VALIDATE-0043"* ]]
         [ "$(cat "${CI_REPO_ROOT}/args")" = \
-            "proj reset-to-last-known-good-config dns deploy/prod lan. snap1 --yes" ]
+            "proj reset-to-last-known-good-config dns dep lan. snap1 --yes" ]
     done <<'CASES'
 ok|0|rolled back to known-good snapshot snap1. Changed rrsets: ["ci-rollback-probe.lan."]
 fails|1|rollback listener rejected the request with HTTP 500
@@ -5680,12 +5680,12 @@ EOF
     # Why: socket-proxy denies unknown container names.
     # From: Issue #1683
     local r="${BATS_TEST_TMPDIR}/repo"
-    mkdir -p "${r}/deploy/prod" "${r}/deploy/quickstart" "${r}/scripts/untracked"
-    _installer_fixture "${r}"
+    mkdir -p "${r}/dep" "${r}/inst" "${r}/scripts/untracked"
+    _stack_fixture "${r}"
     printf 'name: lancache-ng\nservices:\n  proxy:\n    container_name: lancache-proxy\n' \
-        > "${r}/deploy/prod/docker-compose.yml"
+        > "${r}/dep/c.yml"
     printf 'name: lancache-ng\nservices:\n  proxy:\n    container_name: lancache-proxy${LANCACHE_CONTAINER_SUFFIX:-}\n' \
-        > "${r}/deploy/quickstart/docker-compose.yml"
+        > "${r}/inst/c.yml"
     printf 'acl lancache_container path,url_dec -m reg ^/containers/(lancache-proxy)(/|$)\nacl lancache_lifecycle path,url_dec -m reg ^/containers/lancache-proxy/(start|stop|restart|wait)$\n' \
         > "${r}/scripts/untracked/docker-socket-proxy.sh"
     run _ci_check_naming_consistency "${r}"
@@ -5701,7 +5701,7 @@ EOF
     run _ci_check_naming_consistency "${r}"
     [ "${status}" -eq 0 ]
     printf 'name: lancache-ng\nservices:\n  proxy:\n    container_name: lancache-wrong\n' \
-        > "${r}/deploy/prod/docker-compose.yml"
+        > "${r}/dep/c.yml"
     run _ci_check_naming_consistency "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0096"* ]]
@@ -5709,7 +5709,7 @@ EOF
 
 @test "check compose-healthchecks passes clean on the real repo" {
     # What: migrated from check-compose-healthchecks.sh.
-    # Why: rewritten in ci.sh; real deploy/*/ must pass.
+    # Why: rewritten in ci.sh; real stack composes pass.
     # From: Issue #1683 | PR #1858
     run bash "${CI_SH}" check compose-healthchecks
     [ "${status}" -eq 0 ]
@@ -5734,7 +5734,7 @@ EOF
     # What: dhcp-probe is documented as exempt, not a fail.
     # Why: Exclusion contract still applies.
     # From: Issue #1683 | PR #1858
-    local f="${BATS_TEST_TMPDIR}/excl/deploy/prod/docker-compose.yml"
+    local f="${BATS_TEST_TMPDIR}/excl/dep/c.yml"
     mkdir -p "$(dirname "${f}")"
     printf 'services:\n  dhcp-probe:\n    image: x\n' > "${f}"
     run bash "${CI_SH}" check compose-healthchecks "${f}"
@@ -5782,6 +5782,38 @@ EOF
     run bash "${CI_SH}" check proxy-cache-env-doc-drift "${env}" "${doc}"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"scanned=1 checked=0"* ]]
+}
+
+@test "proxy-cache-env-doc-drift reads proxy env_file from the deploy compose" {
+    # What: env_file from compose; 0/2 files, bad doc fail.
+    # Why: the compose owns the path; ci.sh keeps no copy.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/pce" bin="${BATS_TEST_TMPDIR}/pcebin" realgrep
+    local name ef want
+    realgrep="$(command -v grep)"
+    mkdir -p "${r}/dep" "${r}/docs" "${bin}"
+    printf 'CACHE_X=1\n' > "${r}/dep/p.env"
+    printf 'CACHE_X=1\n' > "${r}/dep/q.env"
+    printf '| `CACHE_X` | `2` | x |\n' > "${r}/docs/architecture-ng.md"
+    export CI_REPO_ROOT="${r}" CI_COMPOSE_FILE=dep/c.yml
+    while IFS='|' read -r name ef want; do
+        printf 'services:\n  proxy:\n    image: x\n%b' "${ef}" > "${r}/dep/c.yml"
+        run bash "${CI_SH}" check proxy-cache-env-doc-drift
+        [ "${status}" -ne 0 ] || { echo "${name}: passed"; return 1; }
+        [[ "${output}" == *"${want}"* ]] || { echo "${name}: ${output}"; return 1; }
+    done <<'CASES'
+one|    env_file: [./p.env]\n|CACHE_X: proxy.env=1 vs doc=2
+two|    env_file: [./p.env, ./q.env]\n|CI-ERROR-CHECK-0111
+none||CI-ERROR-CHECK-0111
+bad|  bogus: [\n|CI-ERROR-CHECK-0110
+CASES
+    printf 'services:\n  proxy:\n    image: x\n    env_file: [./p.env]\n' > "${r}/dep/c.yml"
+    printf '#!/usr/bin/env bash\n[ "${!#}" = "%s" ] && { echo boom >&2; exit 2; }\nexec %s "$@"\n' \
+        "${r}/docs/architecture-ng.md" "${realgrep}" > "${bin}/grep"
+    chmod +x "${bin}/grep"
+    PATH="${bin}:${PATH}" run bash "${CI_SH}" check proxy-cache-env-doc-drift
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0112"*"boom"* ]]
 }
 
 @test "check dependabot-docker-base-consistency passes on the real repo" {
@@ -5933,12 +5965,13 @@ EOF
     run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"; [ "${status}" -eq 0 ]
 }
 
-# What: setup.sh line naming the installer compose.
-# Why: checks derive the installer compose from setup.sh.
+# What: neutral deploy + installer compose for a fixture.
+# Why: checks derive both from owners, never real paths.
 # From: Issue #1683 | PR #1858
-_installer_fixture() {
-    printf 'QUICKSTART_COMPOSE="$SCRIPT_DIR/%s"\n' \
-        "${2:-deploy/quickstart/docker-compose.yml}" >> "$1/setup.sh"
+_stack_fixture() {
+    export CI_COMPOSE_FILE=dep/c.yml
+    mkdir -p "$1/dep" "$1/inst"
+    printf 'QUICKSTART_COMPOSE="$SCRIPT_DIR/%s"\n' inst/c.yml >> "$1/setup.sh"
 }
 
 @test "installer compose is read from setup.sh, fail-closed" {
@@ -5967,12 +6000,12 @@ CASES
 # From: Issue #1683 | PR #1858
 _prebuilt_fixture() {
     local root="$1"
-    mkdir -p "${root}/deploy/prod" "${root}/deploy/quickstart"
-    printf 'services:\n  proxy:\n    image: registry.example.test/example/proxy:sha-abc\n' > "${root}/deploy/prod/docker-compose.yml"
-    printf 'services:\n  proxy:\n    image: registry.example.test/example/proxy:sha-abc\n' > "${root}/deploy/quickstart/docker-compose.yml"
+    mkdir -p "${root}/dep" "${root}/inst"
+    printf 'services:\n  proxy:\n    image: registry.example.test/example/proxy:sha-abc\n' > "${root}/dep/c.yml"
+    printf 'services:\n  proxy:\n    image: registry.example.test/example/proxy:sha-abc\n' > "${root}/inst/c.yml"
     printf '# LanCache-NG\nRun: docker compose up -d\n' > "${root}/README.md"
     printf '#!/usr/bin/env bash\n' > "${root}/setup.sh"
-    _installer_fixture "${root}"
+    _stack_fixture "${root}"
 }
 
 @test "check prebuilt-prod passes a prebuilt-only tree" {
@@ -5992,7 +6025,7 @@ _prebuilt_fixture() {
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/prebuilt-build"
     _prebuilt_fixture "${r}"
-    printf 'services:\n  proxy:\n    build: .\n' > "${r}/deploy/prod/docker-compose.yml"
+    printf 'services:\n  proxy:\n    build: .\n' > "${r}/dep/c.yml"
     run bash "${CI_SH}" check prebuilt-prod "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0042"*"declares build:"* ]]
@@ -6015,13 +6048,14 @@ _prebuilt_fixture() {
 # From: Issue #1683 | PR #1858
 _prod_state_wiring_fixture() {
     local root="$1" k
-    mkdir -p "${root}/deploy/prod" "${root}/docs"
-    : > "${root}/deploy/prod/docker-compose.yml"
-    : > "${root}/deploy/prod/.env"
+    _stack_fixture "${root}"
+    mkdir -p "${root}/docs"
+    : > "${root}/dep/c.yml"
+    : > "${root}/dep/.env"
     : > "${root}/docs/backup-restore.md"
     for k in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
-        printf '      - ${%s:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/x}:/y\n' "${k}" >> "${root}/deploy/prod/docker-compose.yml"
-        printf '%s=\n' "${k}" >> "${root}/deploy/prod/.env"
+        printf '      - ${%s:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/x}:/y\n' "${k}" >> "${root}/dep/c.yml"
+        printf '%s=\n' "${k}" >> "${root}/dep/.env"
         printf '%s documented\n' "${k}" >> "${root}/docs/backup-restore.md"
     done
 }
@@ -6043,9 +6077,9 @@ _prod_state_wiring_fixture() {
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/psw-noderive"
     _prod_state_wiring_fixture "${r}"
-    grep -v 'NATS_CONF_DIR' "${r}/deploy/prod/docker-compose.yml" > "${r}/deploy/prod/dc.tmp"
-    printf '      - /hard/coded/nats-conf:/etc/nats\n' >> "${r}/deploy/prod/dc.tmp"
-    mv "${r}/deploy/prod/dc.tmp" "${r}/deploy/prod/docker-compose.yml"
+    grep -v 'NATS_CONF_DIR' "${r}/dep/c.yml" > "${r}/dep/dc.tmp"
+    printf '      - /hard/coded/nats-conf:/etc/nats\n' >> "${r}/dep/dc.tmp"
+    mv "${r}/dep/dc.tmp" "${r}/dep/c.yml"
     run bash "${CI_SH}" check prod-state-wiring "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"NATS_CONF_DIR"* ]]
@@ -6123,9 +6157,9 @@ CASES
 # From: Issue #1683 | PR #1858
 _nats_atomic_fixture() {
     local root="$1" cf
-    mkdir -p "${root}/deploy/prod" "${root}/deploy/quickstart" \
+    mkdir -p "${root}/dep" "${root}/inst" \
         "${root}/services/dns" "${root}/services/ui/src/routes"
-    for cf in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
+    for cf in dep/c.yml inst/c.yml; do
         cat > "${root}/${cf}" <<'EOF'
         tmp_nats_conf="$(mktemp /etc/nats/.nats.conf.XXXXXX)"
         chown 10001:10001 "$$tmp_nats_conf"
@@ -6144,7 +6178,7 @@ EOF
 write_generated_runtime_file "${secondary_dir}/docker-compose.yml"
 write_env_file "${secondary_dir}/.env"
 EOF
-    _installer_fixture "${root}"
+    _stack_fixture "${root}"
 }
 
 @test "check nats-atomic-write passes a fully atomic tree" {
@@ -6164,7 +6198,7 @@ EOF
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/naw-bad"
     _nats_atomic_fixture "${r}"
-    printf 'tmp_nats_conf="$(mktemp /etc/nats/.nats.conf.XXXXXX)"\n' > "${r}/deploy/prod/docker-compose.yml"
+    printf 'tmp_nats_conf="$(mktemp /etc/nats/.nats.conf.XXXXXX)"\n' > "${r}/dep/c.yml"
     run bash "${CI_SH}" check nats-atomic-write "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"atomically replace nats.conf"* ]]
@@ -6175,9 +6209,9 @@ EOF
 # From: Issue #1683 | PR #1858
 _socket_proxy_fixture() {
     local root="$1" cf
-    mkdir -p "${root}/deploy/prod" "${root}/deploy/quickstart" "${root}/scripts/untracked"
-    _installer_fixture "${root}"
-    for cf in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
+    mkdir -p "${root}/dep" "${root}/inst" "${root}/scripts/untracked"
+    _stack_fixture "${root}"
+    for cf in dep/c.yml inst/c.yml; do
         printf '      - scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro\n' > "${root}/${cf}"
     done
     cat > "${root}/scripts/untracked/docker-socket-proxy.sh" <<'EOF'
@@ -6213,7 +6247,7 @@ EOF
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/dsp-exec"
     _socket_proxy_fixture "${r}"
-    printf '        EXEC: "1"\n' >> "${r}/deploy/prod/docker-compose.yml"
+    printf '        EXEC: "1"\n' >> "${r}/dep/c.yml"
     run bash "${CI_SH}" check docker-socket-proxy "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"exec is banned"* ]]
@@ -6236,10 +6270,10 @@ EOF
 # From: Issue #1683 | PR #1858
 _qs_required_env_fixture() {
     local root="$1"
-    mkdir -p "${root}/deploy/quickstart"
-    _installer_fixture "${root}"
-    printf 'services:\n  x:\n    environment:\n      A: ${A:?set A}\n      B: ${B:?set B}\n' > "${root}/deploy/quickstart/docker-compose.yml"
-    printf 'A=1\nB=2\n' > "${root}/deploy/quickstart/.env"
+    mkdir -p "${root}/inst"
+    _stack_fixture "${root}"
+    printf 'services:\n  x:\n    environment:\n      A: ${A:?set A}\n      B: ${B:?set B}\n' > "${root}/inst/c.yml"
+    printf 'A=1\nB=2\n' > "${root}/inst/.env"
 }
 
 @test "check quickstart-required-env passes when all required keys are set" {
@@ -6259,7 +6293,7 @@ _qs_required_env_fixture() {
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/qre-bad"
     _qs_required_env_fixture "${r}"
-    printf 'A=1\n' > "${r}/deploy/quickstart/.env"
+    printf 'A=1\n' > "${r}/inst/.env"
     run bash "${CI_SH}" check quickstart-required-env "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"define non-empty B"* ]]
@@ -6270,10 +6304,10 @@ _qs_required_env_fixture() {
 # From: Issue #1683 | PR #1858
 _dhcp_proxy_env_fixture() {
     local root="$1" k
-    mkdir -p "${root}/deploy/prod" "${root}/deploy/quickstart" \
+    mkdir -p "${root}/dep" "${root}/inst" \
         "${root}/config/prod" "${root}/services/dhcp-proxy"
-    _installer_fixture "${root}"
-    cat > "${root}/deploy/prod/docker-compose.yml" <<'EOF'
+    _stack_fixture "${root}"
+    cat > "${root}/dep/c.yml" <<'EOF'
 services:
   dhcp-proxy:
     image: x
@@ -6281,14 +6315,14 @@ services:
       - ../../config/prod/dhcp-proxy.env
 EOF
     : > "${root}/config/prod/dhcp-proxy.env"
-    : > "${root}/deploy/quickstart/.env"
+    : > "${root}/inst/.env"
     for k in DHCP_PROXY_INTERFACE DHCP_PROXY_ROUTER DHCP_NTP_SERVERS DHCP_PROXY_DOMAIN \
         DHCP_PROXY_BOOT_FILENAME DHCP_PROXY_BOOT_SERVER DHCP_PROXY_CUSTOM_OPTIONS \
         DHCP_PROXY_PXE_BOOT_SERVER DHCP_PROXY_PXE_BOOT_FILENAME_BIOS DHCP_PROXY_PXE_BOOT_FILENAME_UEFI; do
         printf '%s=\n' "${k}" >> "${root}/config/prod/dhcp-proxy.env"
-        printf '%s=\n' "${k}" >> "${root}/deploy/quickstart/.env"
+        printf '%s=\n' "${k}" >> "${root}/inst/.env"
     done
-    cat > "${root}/deploy/quickstart/docker-compose.yml" <<'EOF'
+    cat > "${root}/inst/c.yml" <<'EOF'
         - DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE:-}
         - DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}
         - DHCP_PROXY_PXE_BOOT_SERVER=${DHCP_PROXY_PXE_BOOT_SERVER:-}
@@ -6332,7 +6366,7 @@ EOF
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/dpe-env"
     _dhcp_proxy_env_fixture "${r}"
-    cat > "${r}/deploy/prod/docker-compose.yml" <<'EOF'
+    cat > "${r}/dep/c.yml" <<'EOF'
 services:
   dhcp-proxy:
     image: x
@@ -6400,9 +6434,9 @@ EOF
 # From: Issue #1683 | PR #1858
 _setup_keys_kea_fixture() {
     local root="$1" k
-    mkdir -p "${root}/deploy/quickstart" "${root}/deploy/prod" "${root}/services/dhcp"
-    : > "${root}/deploy/quickstart/.env"
-    : > "${root}/deploy/prod/.env"
+    mkdir -p "${root}/inst" "${root}/dep" "${root}/services/dhcp"
+    : > "${root}/inst/.env"
+    : > "${root}/dep/.env"
     {
         for k in DDNS_TSIG_KEY KEA_CTRL_TOKEN LANCACHE_IMAGE_TAG NATS_DNS_REPLICA_PASSWORD \
             NATS_DNS_REPLICA_USER NATS_DNS_WRITER_PASSWORD NATS_DNS_WRITER_USER \
@@ -6414,7 +6448,7 @@ _setup_keys_kea_fixture() {
         printf 'run_kea_dhcp_activation_preflight "$INSTALL_DIR/.env"\n'
         printf 'nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5\n'
     } > "${root}/setup.sh"
-    _installer_fixture "${root}"
+    _stack_fixture "${root}"
     printf 'RUN apk add nmap\n' > "${root}/services/dhcp/Dockerfile"
     printf 'nmap|/usr/bin/nmap|/bin/nmap)\n' > "${root}/services/dhcp/entrypoint.sh"
 }
@@ -6461,7 +6495,7 @@ _setup_keys_kea_fixture() {
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/skk-nats"
     _setup_keys_kea_fixture "${r}"
-    printf 'NATS_TOKEN=x\n' > "${r}/deploy/quickstart/.env"
+    printf 'NATS_TOKEN=x\n' > "${r}/inst/.env"
     run bash "${CI_SH}" check setup-keys-kea "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"deprecated NATS token"* ]]
@@ -6478,7 +6512,14 @@ _setup_keys_kea_fixture() {
     printf 'echo noop\n' > "${r}/setup.sh"
     run bash "${CI_SH}" check setup-update-safety "${r}"
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0103"* ]]
+    [[ "${output}" == *"CI-ERROR-CHECK-0103"*"no update flow calls"* ]]
+    # What: a flow mutating before its pause is reported.
+    # Why: the guard reads every function, not one window.
+    # From: Issue #1683 | PR #1858
+    printf 'flow() {\n    git -C x pull\n    pause_lancache_convergence_for_update\n}\n' > "${r}/setup.sh"
+    run bash "${CI_SH}" check setup-update-safety "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"flow mutates before its pause:"*"2:     git -C x pull"* ]]
 }
 
 @test "check setup-docker-conflict enforces the real setup.sh Docker RPM guard" {
@@ -6599,8 +6640,8 @@ _logging_matrix_fixture() {
     local root="$1" n
     local -a rows
     read -ra rows <<< "${2:-svc-a}"
-    mkdir -p "${root}/docs" "${root}/services/syslog" "${root}/deploy/quickstart"
-    _installer_fixture "${root}"
+    mkdir -p "${root}/docs" "${root}/services/syslog" "${root}/inst"
+    _stack_fixture "${root}"
     {
         printf '**Logging matrix** (test):\n\n'
         printf '| Service | Logging path | Notes |\n'
@@ -6610,7 +6651,7 @@ _logging_matrix_fixture() {
         done
     } > "${root}/docs/architecture-ng.md"
     printf 'header\njobs:\n  - name: real\n    path: /x\n' > "${root}/services/syslog/netdata-web_log.conf"
-    cat > "${root}/deploy/quickstart/docker-compose.yml" <<'EOF'
+    cat > "${root}/inst/c.yml" <<'EOF'
 services:
   netdata:
     command: |
@@ -6729,7 +6770,7 @@ EOF
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/lm-weblog"
     _logging_matrix_fixture "${r}" "svc-a"
-    cat > "${r}/deploy/quickstart/docker-compose.yml" <<'EOF'
+    cat > "${r}/inst/c.yml" <<'EOF'
 services:
   netdata:
     command: |
@@ -8797,13 +8838,14 @@ _kgs_fingerprint() {
     # Why: AG-OP-006; no image owns it, compose does.
     # From: Issue #1683
     local root="${BATS_TEST_DIRNAME}/../.." bin="${BATS_TEST_TMPDIR}/bin"
-    local cmd lib sb t first frag u
+    local cmd lib sb t first frag u dep
     mkdir -p "${bin}"
     for t in nats-server chown chgrp; do
         printf '#!/bin/sh\nexit 0\n' > "${bin}/${t}"
         chmod +x "${bin}/${t}"
     done
-    cmd="$(docker compose -f "${root}/deploy/prod/docker-compose.yml" \
+    dep="$(_ci_variable CI_COMPOSE_FILE)"
+    cmd="$(docker compose -f "${root}/${dep}" \
         config --format json | jq -er '.services.nats.command[0]')"
     lib="${root}/$(ci_context_path shared-secret)"
     export NATS_DNS_WRITER_USER=w-user NATS_DNS_REPLICA_USER=r-user

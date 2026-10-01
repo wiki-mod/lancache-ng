@@ -7430,7 +7430,7 @@ _ci_check_naming_consistency() {
     local cf
 
     for cf in "${compose_files[@]}"; do
-        [ -f "${cf}" ] || continue
+        [ -f "${cf}" ] || { viol+=("${cf}: compose file missing"); continue; }
         grep -Eq '^name: lancache-ng$' "${cf}" || viol+=("${cf}: missing 'name: lancache-ng'")
     done
 
@@ -7454,7 +7454,10 @@ _ci_check_naming_consistency() {
     for cf in "${compose_files[@]}"; do
         [ -f "${cf}" ] || continue
         local name_suffix=''
-        case "${cf}" in *quickstart*) name_suffix='\$\{LANCACHE_CONTAINER_SUFFIX:-\}' ;; esac
+        # What: installer compose names carry the suffix.
+        # Why: owner-derived; a path substring hid it.
+        # From: Issue #1683 | PR #1858
+        [ "${cf}" = "${root}/${inst}" ] && name_suffix='\$\{LANCACHE_CONTAINER_SUFFIX:-\}'
         while IFS= read -r name; do
             [ -n "${name}" ] || continue
             grep -Eq "^[[:space:]]+container_name: ${name}${name_suffix}\$" "${cf}" || \
@@ -7536,13 +7539,14 @@ _ci_check_naming_consistency() {
 _ci_check_compose_healthchecks() {
     local -a files=("$@")
     if [ "${#files[@]}" -eq 0 ]; then
-        local f
-        for f in "${CI_REPO_ROOT}"/deploy/*/docker-compose.yml; do
+        local f dep
+        dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+        for f in "${CI_REPO_ROOT}/$(dirname "$(dirname "${dep}")")"/*/"$(basename "${dep}")"; do
             [ -f "${f}" ] && files+=("${f}")
         done
     fi
     if [ "${#files[@]}" -eq 0 ]; then
-        ci_log "[CI-ERROR-CHECK-0020]" "reason=\"no deploy/*/docker-compose.yml files found\""
+        ci_log "[CI-ERROR-CHECK-0020]" "reason=\"no stack compose files found\""
         return 2
     fi
     # What: exemptions are per service, never per file path.
@@ -7593,8 +7597,23 @@ _ci_check_compose_healthchecks() {
 # Why: a hand-copied doc default silently goes stale.
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_cache_env_doc_drift() {
-    local proxy_env="${1:-${CI_REPO_ROOT}/config/prod/proxy.env}"
+    local proxy_env="${1:-}" dep raw
     local arch_doc="${2:-${CI_REPO_ROOT}/docs/architecture-ng.md}"
+    if [ -z "${proxy_env}" ]; then
+        # What: the env_file the deploy compose gives proxy.
+        # Why: the compose owns the path; no ci.sh literal.
+        # From: Issue #1683 | PR #1858
+        dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+        if ! raw="$(_ci_compose_env_files "${CI_REPO_ROOT}/${dep}" proxy 2>&1)"; then
+            ci_error "[CI-ERROR-CHECK-0110]" "reason=\"deploy compose unreadable for proxy env_file\"" "${raw}"
+            return 2
+        fi
+        if [ -z "${raw}" ] || [ "$(wc -l <<< "${raw}")" -ne 1 ]; then
+            ci_error "[CI-ERROR-CHECK-0111]" "reason=\"deploy compose proxy needs exactly one env_file\"" "${raw}"
+            return 2
+        fi
+        proxy_env="${raw}"
+    fi
     if [ ! -f "${proxy_env}" ]; then
         ci_log "[CI-ERROR-CHECK-0022]" "path=\"${proxy_env}\" reason=\"proxy.env not found\""
         return 2
@@ -7603,12 +7622,17 @@ _ci_check_proxy_cache_env_doc_drift() {
         ci_log "[CI-ERROR-CHECK-0098]" "path=\"${arch_doc}\" reason=\"architecture doc not found\""
         return 2
     fi
-    local key value doc_row documented scanned=0 checked=0
+    local key value doc_row documented scanned=0 checked=0 rc
     local -a viol=()
     while IFS='=' read -r key value; do
         [[ "${key}" =~ ^CACHE_[A-Z_]+$ ]] || continue
         scanned=$((scanned + 1))
-        doc_row="$(grep -E "^\| \`${key}\` \|" "${arch_doc}" || true)"
+        rc=0
+        doc_row="$(grep -E "^\| \`${key}\` \|" "${arch_doc}" 2>&1)" || rc=$?
+        if [ "${rc}" -gt 1 ]; then
+            ci_error "[CI-ERROR-CHECK-0112]" "path=\"${arch_doc}\" reason=\"architecture doc unreadable\"" "${doc_row}"
+            return 2
+        fi
         [ -n "${doc_row}" ] || continue
         checked=$((checked + 1))
         documented="$(sed -E "s/^\| \`[A-Z_]+\` \| \`([^\`]*)\` \|.*/\1/" <<<"${doc_row}")"
@@ -8045,13 +8069,14 @@ _ci_compose_config_ok() {
     return 0
 }
 
-# What: profile names a compose file declares.
-# Why: the file owns its profiles; no hand-kept SOT list.
+# What: stdout of one compose query; stderr output fails.
+# Why: a warning is an error (AG-VAL-001); raw is kept.
 # From: Issue #1683 | PR #1858
-_ci_compose_profiles() {
-    local out err rc=0
+_ci_compose_query() {
+    local file="$1" env_file="$2" out err rc=0
+    shift 2
     err="$(mktemp)" || return 2
-    out="$(_ci_compose_run "${2:-}" -f "$1" config --profiles 2>"${err}")" || rc=$?
+    out="$(_ci_compose_run "${env_file}" -f "${file}" "$@" 2>"${err}")" || rc=$?
     if [ "${rc}" -ne 0 ] || [ -s "${err}" ]; then
         [ -z "${out}" ] || printf '%s\n' "${out}" >&2
         cat "${err}" >&2
@@ -8060,6 +8085,23 @@ _ci_compose_profiles() {
     fi
     rm -f "${err}"
     [ -z "${out}" ] || printf '%s\n' "${out}"
+}
+
+# What: profile names a compose file declares.
+# Why: the file owns its profiles; no hand-kept SOT list.
+# From: Issue #1683 | PR #1858
+_ci_compose_profiles() {
+    _ci_compose_query "$1" "${2:-}" config --profiles
+}
+
+# What: env_file paths one compose service declares.
+# Why: the compose owns them; docker compose parses it.
+# From: Issue #1683 | PR #1858
+_ci_compose_env_files() {
+    local raw
+    raw="$(_ci_compose_query "$1" "" config --no-env-resolution --format json)" || return 2
+    jq -r --arg s "$2" \
+        '.services[$s].env_file // [] | .[] | if type == "object" then .path else . end' <<< "${raw}"
 }
 
 # What: every stack compose renders clean in every profile.
@@ -8370,13 +8412,28 @@ _ci_check_setup_keys_kea() {
 # From: Issue #1683
 _ci_check_setup_update_safety() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
-    local su="${repo_root}/setup.sh"
+    local su="${repo_root}/setup.sh" pause_out
     local -a viol=()
     [ -f "${su}" ] || { ci_error "[CI-ERROR-CHECK-0062]" "path=\"${su}\" reason=\"setup.sh not found\""; return 2; }
     awk '/This script must be run as root/{r=1} r&&/assert_prebuilt_image_platform_supported/{g=1} r&&!g&&/(install_docker|systemctl enable --now docker)/{f=1} END{exit f?0:1}' "${su}" \
         && viol+=("prebuilt platform guard must run before Docker install or daemon startup")
-    awk '/^cmd_update\(\) \{/{u=1;p=0;next} /^# .*debug subcommand/{u=0} u&&/pause_lancache_convergence_for_update/{p=1} u&&!p&&!/^[[:space:]]*#/&&/(cmd_backup|git -C|cp "\$install_dir\/deploy\/quickstart\/docker-compose\.yml"|migrate_env_for_update|validate_compose_config|docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+(pull|up))/{f=1} END{exit f?0:1}' "${su}" \
-        && viol+=("update must pause the convergence timer before mutating install state")
+    # What: no flow mutates install state before its pause.
+    # Why: per function; the cmd_update window went stale.
+    # From: Issue #1683 | PR #1858
+    if ! pause_out="$(awk '
+        /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/ { fn = $1; sub(/\(\).*/, "", fn); next }
+        /^[[:space:]]*#/ { next }
+        /pause_lancache_convergence_for_update/ { seen[fn] = 1; paused[fn] = 1; next }
+        !paused[fn] && /(sync_repo_to_default_branch|install_quickstart_compose_assets|cmd_backup|git -C|migrate_env_for_update|validate_compose_config|dc_update[[:space:]]+(pull|up)|docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+(pull|up))/ {
+            pend[fn] = pend[fn] NR ": " $0 "\n"
+        }
+        END {
+            for (f in seen) { n++; if (pend[f] != "") { printf "%s mutates before its pause:\n%s", f, pend[f]; bad = 1 } }
+            if (n == 0) { print "no update flow calls pause_lancache_convergence_for_update"; bad = 1 }
+            exit bad
+        }' "${su}")"; then
+        viol+=("update must pause the convergence timer before mutating install state"$'\n'"${pause_out}")
+    fi
     grep -Fq 'systemctl stop lancache-converge.service' "${su}" \
         || viol+=("update must stop the active convergence service before mutating install state")
     awk '/if ! \( cmd_backup --config "\$install_dir" \); then/{b=1;next} b&&/resume_lancache_convergence_after_update true/{r=1} b&&/die "Pre-update rollback backup failed/{d=1;b=0} END{exit r&&d?0:1}' "${su}" \
