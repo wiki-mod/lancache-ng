@@ -4155,6 +4155,34 @@ CASES
     [[ "${output}" != *"MUSL_TARGET"* ]]
 }
 
+@test "rust-build EXIT trap stops the pump, drops the CA, keeps rc" {
+    # What: trap cleans up; a failed step fails, rc is kept.
+    # Why: cleanup state must survive until the EXIT trap.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/rbbin" log="${BATS_TEST_TMPDIR}/rb.log" name main pump ca want code
+    mkdir -p "${bin}"
+    printf '#!/bin/sh\necho "pump $*" >> "%s"\n[ -z "${PUMP_FAIL:-}" ] || { echo pump-boom >&2; exit 1; }\n' "${log}" > "${bin}/distcc-pump"
+    printf '#!/bin/sh\necho "update-ca" >> "%s"\n[ -z "${CA_FAIL:-}" ] || { echo ca-boom >&2; exit 1; }\n' "${log}" > "${bin}/update-ca-certificates"
+    chmod +x "${bin}/distcc-pump" "${bin}/update-ca-certificates"
+    while IFS='|' read -r name main pump ca want code; do
+        : > "${log}"
+        : > "${BATS_TEST_TMPDIR}/ca.crt"
+        run env PATH="${bin}:${PATH}" PUMP_FAIL="${pump}" CA_FAIL="${ca}" bash -c '
+            source "$1"; _CI_RB_CA_FILE="$2"; trap _ci_rust_build_cleanup EXIT
+            _CI_RB_DISTCC=1; _CI_RB_CA=1; exit "$3"' _ "${CI_SH}" "${BATS_TEST_TMPDIR}/ca.crt" "${main}"
+        [ "${status}" -eq "${want}" ] || { echo "${name}: ${status} ${output}"; return 1; }
+        [[ "${output}" == *"${code}"* ]] || { echo "${name}: ${output}"; return 1; }
+        grep -qx 'pump --shutdown' "${log}" || { echo "${name}: no pump stop"; return 1; }
+        grep -qx 'update-ca' "${log}" || { echo "${name}: no CA update"; return 1; }
+        [ ! -e "${BATS_TEST_TMPDIR}/ca.crt" ] || { echo "${name}: CA file kept"; return 1; }
+    done <<'CASES'
+ok|0|||0|
+ca-fail|0||1|1|CI-ERROR-RUSTBUILD-0008
+ca-fail-keeps-rc|3||1|3|ca-boom
+pump-fail|0|1||1|CI-ERROR-RUSTBUILD-0007
+CASES
+}
+
 @test "rust-build fails closed unless MUSL_TARGET is the rustc host" {
     # What: a target other than the rustc host stops early.
     # Why: apk Rust has only its host std; no rustup exists.
@@ -5636,12 +5664,17 @@ EOF
 #!/usr/bin/env bash
 echo "$*" >> "${GH_CALLS}"
 [ "$1 $2" = "issue list" ] && printf '%s' "${STUB_EXISTING:-}"
+[ "$1 $2" = "label create" ] && [ -n "${STUB_LABEL_FAIL:-}" ] && { echo "HTTP 403" >&2; exit 1; }
 exit 0
 EOF
     chmod +x "${stub}"
     export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=1
     : > "${calls}"; STUB_EXISTING='' CI_NIGHTLY_STATUS_CMD="${stub}" run ci_cmd_nightly_status failure "nightly promote"
     [ "${status}" -eq 0 ]; grep -q 'issue create' "${calls}"
+    grep -q '^label create nightly-broken .*--force' "${calls}"
+    : > "${calls}"; STUB_LABEL_FAIL=1 STUB_EXISTING='' CI_NIGHTLY_STATUS_CMD="${stub}" run ci_cmd_nightly_status failure "nightly promote"
+    [ "${status}" -eq 2 ]
+    if grep -q 'issue create' "${calls}"; then return 1; fi
     : > "${calls}"; STUB_EXISTING=42 CI_NIGHTLY_STATUS_CMD="${stub}" run ci_cmd_nightly_status failure "nightly promote"
     [ "${status}" -eq 0 ]; grep -q 'issue comment 42' "${calls}"
     : > "${calls}"; STUB_EXISTING=42 CI_NIGHTLY_STATUS_CMD="${stub}" run ci_cmd_nightly_status success "nightly promote"

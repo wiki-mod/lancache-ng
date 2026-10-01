@@ -1594,8 +1594,11 @@ ci_cmd_nightly_status() {
         "${gh}" issue comment "${existing}" --repo "${repo}" --body "Still failing: ${detail}." || return 2
         printf 'nightly-status=updated issue=%s\n' "${existing}"
     else
-        "${gh}" label create "${label}" --repo "${repo}" --color b60205 \
-            --description "Recurring self-closing tracking issue: ${scope}" 2>/dev/null || true
+        # What: label create-or-update, then the issue.
+        # Why: --force makes an existing label no error.
+        # From: Issue #1683 | PR #1858
+        "${gh}" label create "${label}" --repo "${repo}" --color b60205 --force \
+            --description "Recurring self-closing tracking issue: ${scope}" || return 2
         "${gh}" issue create --repo "${repo}" --label "${label}" --title "[${label}] ${scope}" \
             --body "Standing issue, reused across failures and auto-closed on the next success. ${detail}." >/dev/null || return 2
         printf 'nightly-status=opened label=%s\n' "${label}"
@@ -1896,6 +1899,42 @@ ci_cmd_apk_setup() {
     fi
 }
 
+# What: rust-build cleanup state; globals, not locals.
+# Why: an EXIT trap runs after locals are gone.
+# From: Issue #1683 | PR #1858
+_CI_RB_DISTCC=0
+_CI_RB_CA=0
+_CI_RB_CA_FILE=/usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt
+
+# What: stop the distcc pump if rust-build started it.
+# Why: a failed stop leaves a pump; raw output shown.
+# From: Issue #1683 | PR #1858
+_ci_rust_stop_pump() {
+    local out
+    [ "${_CI_RB_DISTCC}" = 1 ] || return 0
+    _CI_RB_DISTCC=0
+    out="$(distcc-pump --shutdown 2>&1)" && return 0
+    ci_error "[CI-ERROR-RUSTBUILD-0007]" "reason=\"distcc-pump shutdown failed\"" "${out}"
+    return 1
+}
+
+# What: EXIT trap: stop pump, drop proxy CA, keep status.
+# Why: the proxy CA must not outlive the build step.
+# From: Issue #1683 | PR #1858
+_ci_rust_build_cleanup() {
+    local status=$? out failed=0
+    _ci_rust_stop_pump || failed=1
+    if [ "${_CI_RB_CA}" = 1 ]; then
+        _CI_RB_CA=0
+        rm -f "${_CI_RB_CA_FILE}"
+        out="$(update-ca-certificates 2>&1)" || {
+            ci_error "[CI-ERROR-RUSTBUILD-0008]" "reason=\"proxy CA not removed from the trust store\"" "${out}"
+            failed=1
+        }
+    fi
+    [ "${failed}" -eq 0 ] || exit "$(( status != 0 ? status : 1 ))"
+}
+
 # What: In-image rust builder; sccache, opt-in distcc.
 # Why: one owner for dns/ui/watchdog builders (was 3x).
 # From: Issue #1683
@@ -2002,23 +2041,16 @@ ci_cmd_rust_build() {
     # Why: distcc bypasses sccache masquerade wrapping.
     printf '%s\n' '#!/bin/sh' 'case "${1:-}" in' '  distcc|*/distcc) exec "$@" ;;' '  *) exec /usr/local/bin/sccache "$@" ;;' 'esac' > /usr/local/bin/lancache-rustc-wrapper
     chmod +x /usr/local/bin/lancache-rustc-wrapper
-    local distcc_enabled=0 ccache_enabled=0 ca_installed=0 original_path="${PATH}"
-    # What: EXIT trap cleans CA trust and distcc pump.
-    # Why: two EXIT traps would overwrite, leak CA.
-    _rust_build_cleanup() {
-        if [ "${distcc_enabled:-0}" = "1" ]; then distcc-pump --shutdown >/dev/null 2>&1 || true; fi
-        if [ "${ca_installed:-0}" = "1" ]; then
-            rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt
-            update-ca-certificates >/dev/null 2>&1 || true
-        fi
-    }
-    trap _rust_build_cleanup EXIT
+    local ccache_enabled=0 original_path="${PATH}"
+    _CI_RB_DISTCC=0
+    _CI_RB_CA=0
+    trap _ci_rust_build_cleanup EXIT
     # What: trust proxy CA for cargo's crates.io fetch.
     # Why: cleanup trap removes it; never persisted.
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then
-        cp /run/secrets/project_selfhosted_proxy_ca /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt
+        cp /run/secrets/project_selfhosted_proxy_ca "${_CI_RB_CA_FILE}"
         update-ca-certificates >/dev/null
-        ca_installed=1
+        _CI_RB_CA=1
     fi
     local real_cc real_gcc real_cxx real_gxx
     real_cc="$(PATH="${original_path}" command -v cc)"
@@ -2031,8 +2063,7 @@ ci_cmd_rust_build() {
         if [ -s /run/secrets/sccache_dist_config ]; then export SCCACHE_CONF=/run/secrets/sccache_dist_config; sccache --dist-status; fi
     }
     disable_distcc() {
-        if [ "${distcc_enabled:-0}" = "1" ]; then distcc-pump --shutdown >/dev/null 2>&1 || true; fi
-        distcc_enabled=0
+        _ci_rust_stop_pump || return 1
         unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_HOSTS_NO_PUMP DISTCC_FALLBACK CC GCC CXX GXX INCLUDE_SERVER_PORT INCLUDE_SERVER_PID
         PATH="${original_path}"; export PATH
     }
@@ -2081,7 +2112,7 @@ ci_cmd_rust_build() {
             local distcc_wrapper_dir; distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"
             export DISTCC_HOSTS_NO_PUMP="${distcc_hosts_without_pump}"
             export PATH="${distcc_wrapper_dir}:${PATH}" CC=cc GCC=gcc CXX=c++ GXX=g++ DISTCC_FALLBACK=0
-            distcc_enabled=1
+            _CI_RB_DISTCC=1
             if [ -n "${distcc_pump_hosts}" ]; then
                 export DISTCC_POTENTIAL_HOSTS="${distcc_pump_hosts}"
                 unset DISTCC_HOSTS
@@ -2120,7 +2151,7 @@ ci_cmd_rust_build() {
     # What: wrap distcc with ccache (Redis) once distcc up.
     # Why: content-check + remote-id guard stale toolchain.
     configure_ccache() {
-        if [ "${distcc_enabled:-0}" = "1" ] && [ -s /run/secrets/ccache_redis_url ]; then
+        if [ "${_CI_RB_DISTCC}" = "1" ] && [ -s /run/secrets/ccache_redis_url ]; then
             if [ ! -s "${CI_TMPDIR}/ccache-remote-toolchain-id" ]; then
                 echo "[INFO] no verified remote distcc toolchain identity; continuing with plain distcc (no cache layer)." >&2; return 0
             fi
@@ -2160,7 +2191,7 @@ ci_cmd_rust_build() {
             fi
             rm -rf "${ccache_probe_dir}"
         else
-            if [ "${distcc_enabled:-0}" != "1" ]; then
+            if [ "${_CI_RB_DISTCC}" != "1" ]; then
                 echo "[INFO] ccache disabled (distcc is not enabled, nothing to wrap)." >&2
             else
                 echo "[INFO] ccache disabled (no ccache_redis_url secret present)." >&2
@@ -2212,7 +2243,7 @@ ci_cmd_rust_build() {
             if [ "${cargo_status}" = "0" ]; then echo "[INFO] plain distcc fallback (ccache disabled) completed." >&2; rm -f "${cargo_log}"; return 0; fi
             echo "[INFO] plain distcc fallback also failed; falling through to local-compiler retry." >&2
         fi
-        if [ "${distcc_enabled:-0}" = "1" ]; then
+        if [ "${_CI_RB_DISTCC}" = "1" ]; then
             disable_distcc
             unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX
             echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2
@@ -4248,6 +4279,9 @@ _ci_validate_slot_lock() {
         printf '%s\n' "${holder}"
         return 0
     fi
+    # What: reap the dead lock holder; its status is unused.
+    # Why: this path returns 1; its rc adds nothing.
+    # From: Issue #1683 | PR #1858
     wait "${holder}" 2>/dev/null || true
     return 1
 }
@@ -4258,6 +4292,9 @@ _ci_validate_slot_lock() {
 _ci_validate_release() {
     local holder="${1:-}"
     [ -n "${holder}" ] || return 0
+    # What: stop and reap the holder; it may be gone.
+    # Why: best effort; a gone holder is not an error.
+    # From: Issue #1683 | PR #1858
     kill "${holder}" 2>/dev/null || true
     wait "${holder}" 2>/dev/null || true
 }
@@ -4432,6 +4469,9 @@ _ci_validate_await_detached() {
 _ci_validate_network_teardown() {
     local net_id="$1" name out
     name="$(docker network inspect "${net_id}" --format '{{.Name}}' 2>/dev/null)" || return 0
+    # What: wait for detach; a timeout is not fatal here.
+    # Why: the rm below fails with raw output if still busy.
+    # From: Issue #1683 | PR #1858
     _ci_validate_await_detached "${name}" || true
     out="$(docker network rm "${name}" 2>&1)" && return 0
     ci_error "[CI-ERROR-VALIDATE-0053]" "network=\"${name}\" reason=\"network removal failed\"" "${out}"
