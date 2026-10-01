@@ -2342,69 +2342,33 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     [[ "${output}" == *"sha256:led"* ]]
 }
 
-@test "default gc reachable keeps a candidate whose digest is a root" {
-    # What: A root-set member is referenced, kept.
-    # Why: Ledger and channel digests are protected (§101).
+@test "default gc reachable classifies every candidate shape" {
+    # What: roots x candidate -> referenced/unreachable/2.
+    # Why: only old, unreferenced, dated garbage may go.
     # From: Issue #1683
-    CI_GC_ROOTS_FILE="${BATS_TEST_TMPDIR}/roots"
-    printf 'sha256:aaa\nsha256:bbb\n' > "${CI_GC_ROOTS_FILE}"
-    run _ci_default_gc_reachable "$(printf 'sha256:aaa\t123\t2020-01-01T00:00:00Z')"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == "referenced" ]]
-}
-
-@test "default gc reachable keeps a freshly created candidate via the floor" {
-    # What: A recent unreferenced candidate is kept.
-    # Why: Protects in-flight tags before aggregation.
-    # From: Issue #1683
-    CI_GC_ROOTS_FILE="${BATS_TEST_TMPDIR}/roots"
-    printf 'sha256:root\n' > "${CI_GC_ROOTS_FILE}"
-    local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    run _ci_default_gc_reachable "$(printf 'sha256:fresh\t9\t%s' "${now}")"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == "referenced" ]]
-}
-
-@test "default gc reachable marks an old unreferenced candidate unreachable" {
-    # What: Old and unreferenced classifies as garbage.
-    # Why: Past the grace floor with no root is deletable.
-    # From: Issue #1683
-    CI_GC_ROOTS_FILE="${BATS_TEST_TMPDIR}/roots"
-    printf 'sha256:root\n' > "${CI_GC_ROOTS_FILE}"
-    run _ci_default_gc_reachable "$(printf 'sha256:old\t9\t2020-01-01T00:00:00Z')"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == "unreachable" ]]
-}
-
-@test "default gc reachable refuses without a materialized roots file" {
-    # What: No roots file means no safe judgment.
-    # Why: Guessing reachability could delete live images.
-    # From: Issue #1683
-    unset CI_GC_ROOTS_FILE
-    run _ci_default_gc_reachable "$(printf 'sha256:x\t9\t2020-01-01T00:00:00Z')"
-    [ "${status}" -eq 2 ]
-}
-
-@test "default gc reachable refuses a candidate with no created_at" {
-    # What: Missing created_at is UNKNOWN, never a delete.
-    # Why: The floor cannot judge without a timestamp.
-    # From: Issue #1683
-    CI_GC_ROOTS_FILE="${BATS_TEST_TMPDIR}/roots"
-    printf 'sha256:root\n' > "${CI_GC_ROOTS_FILE}"
-    run _ci_default_gc_reachable "sha256:notimestamp"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-GC-0016"* ]]
-}
-
-@test "default gc reachable refuses an unparseable created_at" {
-    # What: A garbage timestamp is UNKNOWN, never a delete.
-    # Why: An unreadable date must not classify as garbage.
-    # From: Issue #1683
-    CI_GC_ROOTS_FILE="${BATS_TEST_TMPDIR}/roots"
-    printf 'sha256:root\n' > "${CI_GC_ROOTS_FILE}"
-    run _ci_default_gc_reachable "$(printf 'sha256:x\t9\tnot-a-date')"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-GC-0016"* ]]
+    local roots cand rc want now
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    while IFS='|' read -r roots cand rc want; do
+        cand="$(printf '%b' "${cand//NOW/${now}}")"
+        if [ "${roots}" = - ]; then
+            unset CI_GC_ROOTS_FILE
+        else
+            export CI_GC_ROOTS_FILE="${BATS_TEST_TMPDIR}/roots"
+            tr ' ' '\n' <<< "${roots}" > "${CI_GC_ROOTS_FILE}"
+        fi
+        run _ci_default_gc_reachable "${cand}"
+        [ "${status}" -eq "${rc}" ] || { echo "${cand}: rc ${status}: ${output}"; return 1; }
+        [[ "${output}" == *"${want}"* ]] || { echo "${cand}: no ${want}: ${output}"; return 1; }
+    done <<'CASES'
+sha256:aaa sha256:bbb|sha256:aaa\t123\t2020-01-01T00:00:00Z|0|referenced
+sha256:root|sha256:fresh\t9\tNOW|0|referenced
+sha256:root|sha256:old\t9\t2020-01-01T00:00:00Z|0|unreachable
+-|sha256:x\t9\t2020-01-01T00:00:00Z|2|
+sha256:root|sha256:notimestamp|2|CI-ERROR-GC-0016
+sha256:root|sha256:x\t9\tnot-a-date|2|CI-ERROR-GC-0016
+sha256:subj|sha256:att\t9\t2020-01-01T00:00:00Z\tsha256-subj|0|referenced
+sha256:other|sha256:att\t9\t2020-01-01T00:00:00Z\tsha256-gone|0|unreachable
+CASES
 }
 
 @test "default gc reachable refuses when the grace value is missing" {
@@ -2417,28 +2381,6 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     run _ci_default_gc_reachable "$(printf 'sha256:x\t9\t2020-01-01T00:00:00Z')"
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-GC-0015"* ]]
-}
-
-@test "default gc reachable keeps an attestation whose subject is a root" {
-    # What: An attestation lives while its subject lives.
-    # Why: sha256-<subj> referrers guard live provenance.
-    # From: Issue #1683
-    CI_GC_ROOTS_FILE="${BATS_TEST_TMPDIR}/roots"
-    printf 'sha256:subj\n' > "${CI_GC_ROOTS_FILE}"
-    run _ci_default_gc_reachable "$(printf 'sha256:att\t9\t2020-01-01T00:00:00Z\tsha256-subj')"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == "referenced" ]]
-}
-
-@test "default gc reachable deletes an attestation of a gone subject" {
-    # What: An orphan attestation past grace is garbage.
-    # Why: No live subject means dead weight.
-    # From: Issue #1683
-    CI_GC_ROOTS_FILE="${BATS_TEST_TMPDIR}/roots"
-    printf 'sha256:other\n' > "${CI_GC_ROOTS_FILE}"
-    run _ci_default_gc_reachable "$(printf 'sha256:att\t9\t2020-01-01T00:00:00Z\tsha256-gone')"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == "unreachable" ]]
 }
 
 @test "gc fails closed on an empty protected-roots set" {
