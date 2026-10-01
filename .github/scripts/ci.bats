@@ -119,6 +119,27 @@ teardown() {
     [[ "${output}" == *"CI-ERROR-CORE-0002"* ]]
 }
 
+@test "every ci.sh error code names exactly one reason" {
+    # What: a code shared by two reasons fails, naming both.
+    # Why: one code per error keeps log lines unambiguous.
+    # From: Issue #1683 | PR #1858
+    local re='(\[CI-[A-Z]+-[A-Z0-9]+-[0-9]{4}\]).*reason=\\"([^\\]*)'
+    local line code reason
+    local -A code_reason=()
+    local -a dup=()
+    while IFS= read -r line; do
+        [[ "${line}" =~ ${re} ]] || continue
+        code="${BASH_REMATCH[1]}"
+        reason="${BASH_REMATCH[2]}"
+        if [ -n "${code_reason[${code}]+x}" ] && [ "${code_reason[${code}]}" != "${reason}" ]; then
+            dup+=("${code}: '${code_reason[${code}]}' vs '${reason}'")
+        fi
+        code_reason["${code}"]="${reason}"
+    done < "${CI_SH}"
+    [ "${#code_reason[@]}" -gt 0 ]
+    [ "${#dup[@]}" -eq 0 ] || { printf '%s\n' "${dup[@]}"; return 1; }
+}
+
 @test "_ci_repo lowercases a mixed-case GITHUB_REPOSITORY" {
     # What: a mixed-case owner/repo comes out lowercased.
     # Why: GHCR image refs must be lowercase.
@@ -2380,7 +2401,7 @@ sha256:root|sha256:fresh\t9\tNOW|0|referenced
 sha256:root|sha256:old\t9\t2020-01-01T00:00:00Z|0|unreachable
 -|sha256:x\t9\t2020-01-01T00:00:00Z|2|
 sha256:root|sha256:notimestamp|2|CI-ERROR-GC-0016
-sha256:root|sha256:x\t9\tnot-a-date|2|CI-ERROR-GC-0016
+sha256:root|sha256:x\t9\tnot-a-date|2|CI-ERROR-GC-0023
 sha256:subj|sha256:att\t9\t2020-01-01T00:00:00Z\tsha256-subj|0|referenced
 sha256:other|sha256:att\t9\t2020-01-01T00:00:00Z\tsha256-gone|0|unreachable
 CASES
@@ -2856,7 +2877,7 @@ svc-x=sha256:n"
     printf 'validation:\n  host_tools: [bash, no-such-tool-x]\n' > "${m}"
     CI_MANIFEST="${m}" run _ci_validate_host_tools
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0056"*'missing="no-such-tool-x"'* ]]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0062"*'missing="no-such-tool-x"'* ]]
     printf 'validation:\n  other: x\n' > "${m}"
     CI_MANIFEST="${m}" run _ci_validate_host_tools
     [ "${status}" -eq 2 ]
@@ -2945,7 +2966,7 @@ SH
             [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
         else
             [ "${status}" -eq 2 ]
-            [[ "${output}" == *"CI-ERROR-VALIDATE-0053"*"boom-down"* ]]
+            [[ "${output}" == *"CI-ERROR-VALIDATE-0058"*"boom-down"* ]]
         fi
     done
 }
@@ -3813,7 +3834,7 @@ CASES
     GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" variables bake-check img@sha256:d
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VARIABLES-0007"* ]]
+    [[ "${output}" == *"CI-ERROR-VARIABLES-0016"* ]]
     [[ "${output}" == *'extra_ca="1"'* ]]
     [[ "${output}" != *"BEGIN CERTIFICATE"* ]]
 }
@@ -3881,7 +3902,7 @@ CASES
     SCCACHE_DIST_AUTH_TOKEN='tok' \
         run bash "${CI_SH}" variables set-runtime
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VARIABLES-0011"* ]]
+    [[ "${output}" == *"CI-ERROR-VARIABLES-0017"* ]]
     [[ "${output}" == *"auth token set without scheduler"* ]]
 }
 
@@ -4116,7 +4137,7 @@ CASES
     chmod +x "${bin}/rustc"
     PATH="${bin}:${PATH}" MUSL_TARGET=arch-b-alpine-linux-musl run bash "${CI_SH}" rust-build svc c1
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-RUSTBUILD-0004"*"host: arch-a-alpine-linux-musl"* ]]
+    [[ "${output}" == *"CI-ERROR-RUSTBUILD-0006"*"host: arch-a-alpine-linux-musl"* ]]
 }
 
 @test "build-args emit a SOT pin; its digest needs a platform" {
@@ -4710,7 +4731,7 @@ CASES
         printf '# %s\n' "${p}" > "${d}/bad.sh"
         run bash "${CI_SH}" check review-chronology "${d}/bad.sh"
         [ "${status}" -ne 0 ] || { echo "want fail: ${p}"; false; }
-        [[ "${output}" == *"CI-ERROR-CHECK-0010"* ]]
+        [[ "${output}" == *"CI-ERROR-CHECK-0080"* ]]
     done
     printf '# noted a %s\n# finding in the code\n' "${r}" > "${d}/bad.sh"
     run bash "${CI_SH}" check review-chronology "${d}/bad.sh"
@@ -4741,7 +4762,7 @@ CASES
     run env CHRONOLOGY_WARN_ONLY=1 bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/badc.sh"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"review-chronology=warn"* ]]
-    [[ "${output}" == *"CI-ERROR-CHECK-0010"* ]]
+    [[ "${output}" == *"CI-ERROR-CHECK-0079"* ]]
 }
 
 @test "check review-chronology diff-scoped mode scans only the PR's changed files" {
@@ -4822,7 +4843,7 @@ STUBEOF
     run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/d.sh"; [ "${status}" -eq 0 ]
     printf '# From: Issue #887\n# duplicate ref #887 here\n' > "${BATS_TEST_TMPDIR}/d.sh"
     run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/d.sh"
-    [ "${status}" -eq 0 ]; [[ "${output}" == *"CI-ERROR-CHECK-0010"* ]]
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"CI-ERROR-CHECK-0078"* ]]
     [[ "${output}" == *"warn-only, PR #1856"* ]]
     printf '# %s in %s here\n' caught review > "${BATS_TEST_TMPDIR}/dirty.sh"
     run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/d.sh"
@@ -4897,7 +4918,7 @@ STUBEOF
     printf 'ask "NewPrompt?" "y"\n' >> "${r}/setup.sh"
     run bash "${CI_SH}" check setup-prompt-drift "${r}"
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0067"* ]]
+    [[ "${output}" == *"CI-ERROR-CHECK-0084"* ]]
     [[ "${output}" == *"NewPrompt?"* ]]
 }
 
@@ -4914,7 +4935,7 @@ STUBEOF
     done
     for t in "feat(bogus): x" "chore(svc-a): x" "not conventional"; do
         CI_MANIFEST="${m}" run bash "${CI_SH}" check pr-title "${t}"
-        [ "${status}" -eq 0 ]; [[ "${output}" == *"CI-ERROR-CHECK-0013"*"pr-title=warn"* ]]
+        [ "${status}" -eq 0 ]; [[ "${output}" == *"CI-ERROR-CHECK-0086"*"pr-title=warn"* ]]
         CI_MANIFEST="${m}" PR_TITLE_LINT_MODE=block run bash "${CI_SH}" check pr-title "${t}"
         [ "${status}" -eq 1 ]; [[ "${output}" == *"reason=\"PR title convention\""* ]]
         CI_MANIFEST="${m}" PR_TITLE_LINT_MODE=block PR_DRAFT=true run bash "${CI_SH}" check pr-title "${t}"
@@ -5019,7 +5040,7 @@ Fixes the thing.
     printf '%s' "${body}" > "${BATS_TEST_TMPDIR}/bad.md"
     run bash "${CI_SH}" check pr-template "${BATS_TEST_TMPDIR}/bad.md"
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0015"* ]]
+    [[ "${output}" == *"CI-ERROR-CHECK-0089"* ]]
     [[ "${output}" == *"Linked Issues: heading not found"* ]]
     [[ "${output}" == *"Type of change: no checkbox marked"* ]]
 }
@@ -5040,7 +5061,7 @@ Fixes the thing.
     } > "${d}/big.yml"
     run bash "${CI_SH}" check workflow-line-limit "${d}"
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0016"* ]]
+    [[ "${output}" == *"CI-ERROR-CHECK-0090"* ]]
 }
 
 @test "check pr-tracking-metadata: context, labels, milestone, fork, draft" {
@@ -5672,7 +5693,7 @@ EOF
         > "${r}/deploy/prod/docker-compose.yml"
     run _ci_check_naming_consistency "${r}"
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0019"* ]]
+    [[ "${output}" == *"CI-ERROR-CHECK-0096"* ]]
 }
 
 @test "check compose-healthchecks passes clean on the real repo" {
@@ -5715,7 +5736,7 @@ EOF
     # From: Issue #1683 | PR #1858
     run bash "${CI_SH}" check compose-healthchecks "${BATS_TEST_TMPDIR}/nope/docker-compose.yml"
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0020"* ]]
+    [[ "${output}" == *"CI-ERROR-CHECK-0097"* ]]
 }
 
 @test "check proxy-cache-env-doc-drift passes clean on the real repo" {
@@ -5865,7 +5886,7 @@ EOF
     printf "FROM \${UNKNOWN_ARG}\n" > "${r}/services/a/Dockerfile"
     run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0031"* ]]
+    [[ "${output}" == *"CI-ERROR-CHECK-0099"* ]]
 }
 
 @test "check dependabot-docker-base-consistency fails with no dependabot.yml" {
@@ -6439,7 +6460,7 @@ _setup_keys_kea_fixture() {
     printf 'echo noop\n' > "${r}/setup.sh"
     run bash "${CI_SH}" check setup-update-safety "${r}"
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0062"* ]]
+    [[ "${output}" == *"CI-ERROR-CHECK-0103"* ]]
 }
 
 @test "check setup-docker-conflict enforces the real setup.sh Docker RPM guard" {
@@ -6453,7 +6474,7 @@ _setup_keys_kea_fixture() {
     printf 'echo noop\n' > "${r}/setup.sh"
     run bash "${CI_SH}" check setup-docker-conflict "${r}"
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0063"* ]]
+    [[ "${output}" == *"CI-ERROR-CHECK-0104"* ]]
 }
 
 @test "check image-channel-resolution enforces the real channel/tag contract" {
@@ -6467,7 +6488,7 @@ _setup_keys_kea_fixture() {
     printf 'echo noop\n' > "${r}/setup.sh"
     run bash "${CI_SH}" check image-channel-resolution "${r}"
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0064"* ]]
+    [[ "${output}" == *"CI-ERROR-CHECK-0105"* ]]
 }
 
 @test "migrate_env_for_update repairs every empty required key" {
@@ -6802,7 +6823,7 @@ CASES
     # From: Issue #1683 | PR #1858
     run bash "${CI_SH}" check changelog-direct-edit "CHANGELOG.md"
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"CI-INFO-CHECK-0001"* ]]
+    [[ "${output}" == *"CI-INFO-CHECK-0002"* ]]
     [[ "${output}" == *"warn-only"* ]]
     [[ "${output}" == *"changelog-direct-edit=warn"* ]]
 }
@@ -7304,7 +7325,7 @@ _trivy_stub() {
     CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-such-share" CI_TRIVY_FALLBACK_DIR="/tmp/whatever" \
         run _ci_trivy_cache_dir
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-SCAN-0007"* ]]
+    [[ "${output}" == *"CI-ERROR-SCAN-0018"* ]]
 }
 
 @test "trivy db fresh is false with no db file" {

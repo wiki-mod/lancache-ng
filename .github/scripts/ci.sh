@@ -1635,7 +1635,7 @@ _ci_require_ghcr_auth() {
         out="$(printf '%s' "${GHCR_TOKEN}" | docker login "${reg}" -u "${GHCR_USERNAME}" --password-stdin 2>&1)" || rc=$?
     fi
     [ "${rc}" -eq 0 ] && return 0
-    ci_error "[CI-ERROR-BUILD-0002]" "reason=\"docker login to GHCR failed\"" "${out}"
+    ci_error "[CI-ERROR-BUILD-0015]" "reason=\"docker login to GHCR failed\"" "${out}"
     return 2
 }
 
@@ -1895,7 +1895,7 @@ ci_cmd_rust_build() {
     # Why: apk Rust has no rustup; host std is the only one.
     # From: Issue #1683 | PR #1858
     local rustc_info; rustc_info="$(rustc -vV)" || { ci_log "[CI-ERROR-RUSTBUILD-0004]" "reason=\"rustc -vV failed in build-tools\""; return 2; }
-    grep -qx "host: ${musl_target}" <<<"${rustc_info}" || { ci_error "[CI-ERROR-RUSTBUILD-0004]" "target=\"${musl_target}\" reason=\"MUSL_TARGET is not the build-tools rustc host\"" "${rustc_info}"; return 2; }
+    grep -qx "host: ${musl_target}" <<<"${rustc_info}" || { ci_error "[CI-ERROR-RUSTBUILD-0006]" "target=\"${musl_target}\" reason=\"MUSL_TARGET is not the build-tools rustc host\"" "${rustc_info}"; return 2; }
     local key_prefix="lancache-${service}" ccache_dir="${CI_TMPDIR}/ccache-${service}"
     # What: distcc bypasses pump for aws-lc headers.
     # Why: pump can't see generated headers; would fail.
@@ -2326,7 +2326,7 @@ _ci_trivy_cache_dir() {
         /tmp|/tmp/*) ci_log "[CI-ERROR-SCAN-0007]" "reason=\"shared trivy cache-dir must not be tmpfs /tmp\" got=\"${shared}\""; return 2 ;;
     esac
     case "${fallback}" in
-        /tmp|/tmp/*) ci_log "[CI-ERROR-SCAN-0007]" "reason=\"fallback trivy cache-dir must not be tmpfs /tmp\" got=\"${fallback}\""; return 2 ;;
+        /tmp|/tmp/*) ci_log "[CI-ERROR-SCAN-0018]" "reason=\"fallback trivy cache-dir must not be tmpfs /tmp\" got=\"${fallback}\""; return 2 ;;
     esac
     if _ci_trivy_dir_writable "${shared}"; then
         printf 'dir=%s source=nfs-shared\n' "${shared}"
@@ -2338,7 +2338,7 @@ _ci_trivy_cache_dir() {
         return 2
     }
     if ! _ci_trivy_dir_writable "${fallback}"; then
-        ci_log "[CI-ERROR-SCAN-0009]" "dir=\"${fallback}\" reason=\"fallback trivy cache-dir failed write probe\""
+        ci_log "[CI-ERROR-SCAN-0019]" "dir=\"${fallback}\" reason=\"fallback trivy cache-dir failed write probe\""
         return 2
     fi
     printf 'dir=%s source=local-fallback\n' "${fallback}"
@@ -2648,7 +2648,7 @@ _ci_publish_one() {
         }
     else
         digest="$(_ci_docker_publish "${service}" "${identity}" "${platform}")" || {
-            ci_log "[CI-ERROR-PUBLISH-0002]" "service=\"${service}\" platform=\"${platform}\" reason=\"docker publish failed\""
+            ci_log "[CI-ERROR-PUBLISH-0005]" "service=\"${service}\" platform=\"${platform}\" reason=\"docker publish failed\""
             return 2
         }
     fi
@@ -3912,7 +3912,7 @@ _ci_default_gc_delete() {
             return 2
             ;;
     esac
-    [ -n "${svc}" ] || { ci_log "[CI-ERROR-GC-0019]" "candidate=\"${candidate}\" reason=\"no service for delete path\""; return 2; }
+    [ -n "${svc}" ] || { ci_log "[CI-ERROR-GC-0021]" "candidate=\"${candidate}\" reason=\"no service for delete path\""; return 2; }
     prefix="$(_ci_repo)" || { ci_log "[CI-ERROR-GC-0017]" "reason=\"GITHUB_REPOSITORY missing; no package namespace\""; return 2; }
     owner="${prefix%%/*}"
     pkgbase="${prefix#*/}"
@@ -3969,7 +3969,7 @@ _ci_default_gc_reachable() {
             return 2
             ;;
     esac
-    [ "${window}" -gt 0 ] || { ci_log "[CI-ERROR-GC-0015]" "value=\"${window}\" reason=\"grace must be greater than zero\""; return 2; }
+    [ "${window}" -gt 0 ] || { ci_log "[CI-ERROR-GC-0022]" "value=\"${window}\" reason=\"grace must be greater than zero\""; return 2; }
     # What: A candidate needs created_at for the floor.
     # Why: No timestamp is UNKNOWN, never a delete.
     # From: Issue #1683
@@ -3977,7 +3977,7 @@ _ci_default_gc_reachable() {
     created_epoch="$(date -d "${created}" +%s 2>/dev/null)" || created_epoch=""
     case "${created_epoch}" in
         ''|*[!0-9]*)
-            ci_log "[CI-ERROR-GC-0016]" "created=\"${created}\" reason=\"created_at unparseable\""
+            ci_log "[CI-ERROR-GC-0023]" "created=\"${created}\" reason=\"created_at unparseable\""
             return 2
             ;;
     esac
@@ -4353,7 +4353,7 @@ _ci_validate_service_list() {
         return 2
     fi
     if ! jq -r ".services|to_entries[]|select(${filter})|.key" <<< "${raw}"; then
-        ci_log "[CI-ERROR-VALIDATE-0006]" "reason=\"compose config is not service JSON\""
+        ci_log "[CI-ERROR-VALIDATE-0057]" "reason=\"compose config is not service JSON\""
         return 2
     fi
 }
@@ -4439,7 +4439,7 @@ _ci_validate_teardown() {
     out="$(docker compose -p "${project}" \
         -f "${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}" \
         down -v --remove-orphans 2>&1)" || {
-        ci_error "[CI-ERROR-VALIDATE-0053]" "project=\"${project}\" reason=\"compose down failed\"" "${out}"
+        ci_error "[CI-ERROR-VALIDATE-0058]" "project=\"${project}\" reason=\"compose down failed\"" "${out}"
         rc=2
     }
     # What: remove what an aborted up still left behind.
@@ -4452,7 +4452,7 @@ _ci_validate_teardown() {
         else
             ids="$(docker "${kind}" ls -q --filter "${label}" 2>&1)"
         fi || {
-            ci_error "[CI-ERROR-VALIDATE-0053]" "kind=\"${kind}\" reason=\"cannot list leftovers\"" "${ids}"
+            ci_error "[CI-ERROR-VALIDATE-0059]" "kind=\"${kind}\" reason=\"cannot list leftovers\"" "${ids}"
             rc=2
             continue
         }
@@ -4465,7 +4465,7 @@ _ci_validate_teardown() {
             continue
         fi
         out="$(docker "${kind}" rm -f "${found[@]}" 2>&1)" || {
-            ci_error "[CI-ERROR-VALIDATE-0053]" "kind=\"${kind}\" reason=\"leftover removal failed\"" "${out}"
+            ci_error "[CI-ERROR-VALIDATE-0060]" "kind=\"${kind}\" reason=\"leftover removal failed\"" "${out}"
             rc=2
         }
     done
@@ -4477,7 +4477,7 @@ _ci_validate_teardown() {
         base="$(_ci_block_entry_field base_images "" alpine)"
         if ! out="$(docker run --rm --network none -v "${LANCACHE_STATE_DIR}:/s" "${base}" \
                 find /s -mindepth 1 -delete 2>&1 && rmdir "${LANCACHE_STATE_DIR}" 2>&1)"; then
-            ci_error "[CI-ERROR-VALIDATE-0053]" "reason=\"per-run state root not removed\"" "${out}"
+            ci_error "[CI-ERROR-VALIDATE-0061]" "reason=\"per-run state root not removed\"" "${out}"
             rc=2
         fi
     fi
@@ -5222,7 +5222,7 @@ _ci_bake_check() {
                         bad=1
                         ;;
                     *)
-                        ci_log "[CI-ERROR-VARIABLES-0007]" "image=\"${image}\" extra_ca=\"${rest}\" reason=\"proxy CA baked into cert store\""
+                        ci_log "[CI-ERROR-VARIABLES-0016]" "image=\"${image}\" extra_ca=\"${rest}\" reason=\"proxy CA baked into cert store\""
                         bad=1
                         ;;
                 esac
@@ -5317,7 +5317,7 @@ _ci_set_runtime() {
         return 2
     fi
     if [ "${sccache_enabled}" = "1" ] && [ -z "${SCCACHE_DIST_SCHEDULER_URL:-}" ] && [ -n "${SCCACHE_DIST_AUTH_TOKEN:-}" ]; then
-        ci_log "[CI-ERROR-VARIABLES-0011]" "reason=\"auth token set without scheduler\""
+        ci_log "[CI-ERROR-VARIABLES-0017]" "reason=\"auth token set without scheduler\""
         return 2
     fi
     if [ "${sccache_enabled}" = "1" ] && [ -z "${SCCACHE_REDIS_URL:-}" ]; then
@@ -5806,7 +5806,7 @@ _ci_dockerfile_arg_default() {
                     val="${val#\'}"; val="${val%\'}"
                     case "${val}" in
                         *\'*)
-                            ci_log "[CI-ERROR-VERSION-0004]" "path=\"${path}\" name=\"${name}\" reason=\"embedded single-quote unsupported\""
+                            ci_log "[CI-ERROR-VERSION-0015]" "path=\"${path}\" name=\"${name}\" reason=\"embedded single-quote unsupported\""
                             return 2
                             ;;
                     esac
@@ -6446,12 +6446,12 @@ _ci_review_chronology_diff_files() {
     git cat-file -e "${CHRONOLOGY_DIFF_BASE_SHA}^{commit}" || {
         ci_log "[CI-ERROR-CHECK-0010]" "reason=\"diff base sha unreachable\""; return 2; }
     git cat-file -e "${GITHUB_SHA}^{commit}" || {
-        ci_log "[CI-ERROR-CHECK-0010]" "reason=\"GITHUB_SHA unreachable\""; return 2; }
+        ci_log "[CI-ERROR-CHECK-0076]" "reason=\"GITHUB_SHA unreachable\""; return 2; }
     local diff_file
     diff_file="$(mktemp -p "${CI_TMPDIR}")"
     if ! git diff -z --name-only --diff-filter=ACMRTUXB \
         "${CHRONOLOGY_DIFF_BASE_SHA}" "${GITHUB_SHA}" > "${diff_file}"; then
-        ci_log "[CI-ERROR-CHECK-0010]" "reason=\"git diff itself failed; not treating as a clean pass\""
+        ci_log "[CI-ERROR-CHECK-0077]" "reason=\"git diff itself failed; not treating as a clean pass\""
         rm -f "${diff_file}"
         return 2
     fi
@@ -6516,15 +6516,15 @@ _ci_check_review_chronology() {
     # Why: a genuine duplicate must warn, never block.
     # From: Issue #1683
     if [ "${#dup_viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0010]" "reason=\"bare #N duplicated outside From: (warn-only, PR #1856)\"" "$(printf '%s\n' "${dup_viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0078]" "reason=\"bare #N duplicated outside From: (warn-only, PR #1856)\"" "$(printf '%s\n' "${dup_viol[@]}")"
     fi
     if [ "${#viol[@]}" -gt 0 ]; then
         if [ "${CHRONOLOGY_WARN_ONLY:-0}" = "1" ]; then
-            ci_error "[CI-ERROR-CHECK-0010]" "reason=\"review-chronology / stale line-ref (warn-only)\"" "$(printf '%s\n' "${viol[@]}")"
+            ci_error "[CI-ERROR-CHECK-0079]" "reason=\"review-chronology / stale line-ref (warn-only)\"" "$(printf '%s\n' "${viol[@]}")"
             printf 'review-chronology=warn files=%s\n' "${#files[@]}"
             return 0
         fi
-        ci_error "[CI-ERROR-CHECK-0010]" "reason=\"review-chronology / stale line-ref\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0080]" "reason=\"review-chronology / stale line-ref\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'review-chronology=clean files=%s\n' "${#files[@]}"
@@ -6682,7 +6682,7 @@ _ci_check_setup_prompt_drift() {
         return 2
     fi
     if [ "$(grep -c '^case "${1:-install}" in$' "${setup}")" -ne 1 ]; then
-        ci_error "[CI-ERROR-CHECK-0067]" "reason=\"setup.sh dispatch case anchor not unique\""
+        ci_error "[CI-ERROR-CHECK-0081]" "reason=\"setup.sh dispatch case anchor not unique\""
         return 1
     fi
     local -a sims=(
@@ -6693,7 +6693,7 @@ _ci_check_setup_prompt_drift() {
     while IFS= read -r r; do [ -n "${r}" ] && rows+=("${r}"); done < <(_ci_setup_wizard_rows "${setup}")
     _ci_procsub_ok "$!" 0 || return 2
     if [ "${#rows[@]}" -eq 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0067]" "reason=\"zero ask/confirm prompts in setup.sh wizard; vacuous\""
+        ci_error "[CI-ERROR-CHECK-0082]" "reason=\"zero ask/confirm prompts in setup.sh wizard; vacuous\""
         return 1
     fi
     while IFS= read -r r; do [ -n "${r}" ] && all_prompts+=("${r}"); done < <(printf '%s\n' "${rows[@]}" | cut -f3 | sort -u)
@@ -6701,7 +6701,7 @@ _ci_check_setup_prompt_drift() {
     while IFS= read -r r; do [ -n "${r}" ] && uncond+=("${r}"); done < <(printf '%s\n' "${rows[@]}" | awk -F'\t' '$1=="UNCOND"{print $2"\t"$3}' | sort -u)
     _ci_procsub_ok "$!" 0 || return 2
     if [ "${#uncond[@]}" -eq 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0067]" "reason=\"zero unconditional prompts in setup.sh wizard; vacuous\""
+        ci_error "[CI-ERROR-CHECK-0083]" "reason=\"zero unconditional prompts in setup.sh wizard; vacuous\""
         return 1
     fi
     local sim pair prompt haystack tcl gpat covered matched checked=0
@@ -6740,7 +6740,7 @@ _ci_check_setup_prompt_drift() {
         done
     done
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0067]" "reason=\"setup.sh/simulation prompt drift (#1176)\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0084]" "reason=\"setup.sh/simulation prompt drift (#1176)\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'setup-prompt-drift=clean sims_checked=%s uncond=%s\n' "${checked}" "${#uncond[@]}"
@@ -6760,7 +6760,7 @@ _ci_check_pr_title() {
     local types scopes
     types="$(_ci_block_entry_list pr_policy "" title_types)"
     if [ -z "${types}" ]; then
-        ci_log "[CI-ERROR-CHECK-0012]" "reason=\"no SOT pr_policy.title_types; FAIL CLOSED\""; return 2
+        ci_log "[CI-ERROR-CHECK-0085]" "reason=\"no SOT pr_policy.title_types; FAIL CLOSED\""; return 2
     fi
     scopes="$(ci_build_targets; _ci_block_keys external_services; _ci_block_entry_list pr_policy "" title_scopes_extra)"
     types="${types//$'\n'/ }"
@@ -6793,11 +6793,11 @@ _ci_check_pr_title() {
     # Why: warn is the required default; block is opt-in.
     # From: Issue #1683 | PR #1858
     if [ "${PR_TITLE_LINT_MODE:-warn}" != "block" ]; then
-        ci_log "[CI-ERROR-CHECK-0013]" "reason=\"warn-mode, non-blocking; must fix before merge\" detail=\"$(printf '%s; ' "${errs[@]}")\""
+        ci_log "[CI-ERROR-CHECK-0086]" "reason=\"warn-mode, non-blocking; must fix before merge\" detail=\"$(printf '%s; ' "${errs[@]}")\""
         printf 'pr-title=warn\n'
         return 0
     fi
-    ci_error "[CI-ERROR-CHECK-0013]" "reason=\"PR title convention\"" "$(printf '%s\n' "${errs[@]}")"
+    ci_error "[CI-ERROR-CHECK-0087]" "reason=\"PR title convention\"" "$(printf '%s\n' "${errs[@]}")"
     return 1
 }
 
@@ -6911,10 +6911,10 @@ _ci_check_pr_template() {
     done
     if [ "${#missing[@]}" -gt 0 ]; then
         if [ "${PR_DRAFT:-false}" = "true" ]; then
-            ci_log "[CI-ERROR-CHECK-0015]" "reason=\"draft, non-blocking\" detail=\"$(printf '%s; ' "${missing[@]}")\""
+            ci_log "[CI-ERROR-CHECK-0088]" "reason=\"draft, non-blocking\" detail=\"$(printf '%s; ' "${missing[@]}")\""
             printf 'pr-template=warn-draft\n'; return 0
         fi
-        ci_error "[CI-ERROR-CHECK-0015]" "reason=\"missing/empty required section(s)\"" "$(printf '%s\n' "${missing[@]}")"
+        ci_error "[CI-ERROR-CHECK-0089]" "reason=\"missing/empty required section(s)\"" "$(printf '%s\n' "${missing[@]}")"
         return 1
     fi
     printf 'pr-template=ok\n'
@@ -6985,7 +6985,7 @@ _ci_check_workflow_line_limit() {
     done < <(find "${dir}" -maxdepth 1 -name '*.yml' -print0)
     _ci_procsub_ok "$!" 0 || return 2
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0016]" "reason=\"workflow size ceiling exceeded\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0090]" "reason=\"workflow size ceiling exceeded\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'workflow-line-limit=clean\n'
@@ -7007,7 +7007,7 @@ _ci_check_pr_tracking_metadata() {
     project_number="$(_ci_block_entry_field pr_policy "" project_number)"
     project_owner="${repo%%/*}"
     if ! [[ "${project_number}" =~ ^[0-9]+$ ]]; then
-        ci_log "[CI-ERROR-CHECK-0017]" "reason=\"no numeric SOT pr_policy.project_number\""
+        ci_log "[CI-ERROR-CHECK-0091]" "reason=\"no numeric SOT pr_policy.project_number\""
         return 2
     fi
     local -a errs=() warns=()
@@ -7056,10 +7056,10 @@ _ci_check_pr_tracking_metadata() {
     for w in "${warns[@]:-}"; do [ -n "${w}" ] && ci_log "[CI-ERROR-CHECK-0017]" "warn=\"${w}\""; done
     if [ "${#errs[@]}" -gt 0 ]; then
         if [ "${PR_DRAFT:-false}" = "true" ]; then
-            ci_log "[CI-ERROR-CHECK-0017]" "reason=\"draft, non-blocking\" detail=\"$(printf '%s; ' "${errs[@]}")\""
+            ci_log "[CI-ERROR-CHECK-0092]" "reason=\"draft, non-blocking\" detail=\"$(printf '%s; ' "${errs[@]}")\""
             printf 'pr-tracking-metadata=warn-draft\n'; return 0
         fi
-        ci_error "[CI-ERROR-CHECK-0017]" "reason=\"AG-GH-008 metadata incomplete\"" "$(printf '%s\n' "${errs[@]}")"
+        ci_error "[CI-ERROR-CHECK-0093]" "reason=\"AG-GH-008 metadata incomplete\"" "$(printf '%s\n' "${errs[@]}")"
         return 1
     fi
     printf 'pr-tracking-metadata=ok\n'
@@ -7182,7 +7182,7 @@ _ci_check_action_node_versions() {
     # Why: unresolved alias is extraction fault.
     # From: Issue #1683 | PR #1858
     if { [ "${#uses_values[@]}" -eq 0 ] || { [ "${#uses_values[@]}" -eq 1 ] && [ -z "${uses_values[0]}" ]; }; } && [ "${#xv[@]}" -eq 0 ]; then
-        ci_log "[CI-ERROR-CHECK-0053]" "reason=\"no uses: steps extracted; scan vacuous\""; return 2
+        ci_log "[CI-ERROR-CHECK-0094]" "reason=\"no uses: steps extracted; scan vacuous\""; return 2
     fi
 
     # What: names the files a resolved ref appears in.
@@ -7312,7 +7312,7 @@ _ci_check_action_node_versions() {
         ci_error "[CI-ERROR-CHECK-0054]" "reason=\"uses: extraction failure (unresolved alias / unparseable step)\"" "$(printf '%s\n' "${xv[@]}")"
     fi
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0053]" "reason=\"deprecated runtime / ref drift / description expression (issue #799/#1095)\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0095]" "reason=\"deprecated runtime / ref drift / description expression (issue #799/#1095)\"" "$(printf '%s\n' "${viol[@]}")"
     fi
     if [ "${#xv[@]}" -gt 0 ] || [ "${#viol[@]}" -gt 0 ]; then
         return 1
@@ -7508,7 +7508,7 @@ _ci_check_naming_consistency() {
 
     unset -f _ci_name_in_allowlist
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0019]" "reason=\"naming-consistency drift (docs/naming-conventions.md)\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0096]" "reason=\"naming-consistency drift (docs/naming-conventions.md)\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'naming-consistency=clean\n'
@@ -7577,7 +7577,7 @@ _ci_check_compose_healthchecks() {
         _ci_procsub_ok "$!" 0 || return 2
     done
     if [ "${checked}" -eq 0 ]; then
-        ci_log "[CI-ERROR-CHECK-0020]" "reason=\"no services found across deploy compose files\""
+        ci_log "[CI-ERROR-CHECK-0097]" "reason=\"no services found across deploy compose files\""
         return 2
     fi
     if [ "${#viol[@]}" -gt 0 ]; then
@@ -7598,7 +7598,7 @@ _ci_check_proxy_cache_env_doc_drift() {
         return 2
     fi
     if [ ! -f "${arch_doc}" ]; then
-        ci_log "[CI-ERROR-CHECK-0022]" "path=\"${arch_doc}\" reason=\"architecture doc not found\""
+        ci_log "[CI-ERROR-CHECK-0098]" "path=\"${arch_doc}\" reason=\"architecture doc not found\""
         return 2
     fi
     local key value doc_row documented scanned=0 checked=0
@@ -7796,7 +7796,7 @@ _ci_dockerfile_final_image() {
     # Why: builder-stage ARGs (BUILD_TOOLS_IMAGE) opaque
     # From: Issue #1683
     if [[ "${final_image}" == *'$'* ]]; then
-        ci_log "[CI-ERROR-CHECK-0031]" "path=\"${dockerfile}\" reason=\"unresolved ARG in final FROM: ${final_image}\""
+        ci_log "[CI-ERROR-CHECK-0099]" "path=\"${dockerfile}\" reason=\"unresolved ARG in final FROM: ${final_image}\""
         return 2
     fi
     printf '%s\n' "${final_image}"
@@ -7932,7 +7932,7 @@ _ci_check_prod_state_wiring() {
             || viol+=("docs/backup-restore.md does not mention ${key}")
     done
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0043]" "reason=\"prod state wiring not LANCACHE_STATE_DIR-derived or undocumented\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0100]" "reason=\"prod state wiring not LANCACHE_STATE_DIR-derived or undocumented\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'prod-state-wiring=clean\n'
@@ -7953,11 +7953,11 @@ _ci_validate_host_tools() {
         [ -n "${t}" ] && ! command -v "${t}" >/dev/null 2>&1 && missing+=("${t}")
     done <<< "${tools}"
     if [ "${#missing[@]}" -gt 0 ]; then
-        ci_log "[CI-ERROR-VALIDATE-0056]" "missing=\"${missing[*]}\" reason=\"host tool missing\""
+        ci_log "[CI-ERROR-VALIDATE-0062]" "missing=\"${missing[*]}\" reason=\"host tool missing\""
         return 2
     fi
     if ! out="$(docker compose version 2>&1)"; then
-        ci_error "[CI-ERROR-VALIDATE-0056]" "reason=\"docker compose plugin unusable\"" "${out}"
+        ci_error "[CI-ERROR-VALIDATE-0063]" "reason=\"docker compose plugin unusable\"" "${out}"
         return 2
     fi
 }
@@ -8044,7 +8044,7 @@ _ci_check_compose_config() {
         msg="$(_ci_compose_target_ok "${repo_root}" "${tok}" "env")" || viol+=("(env-file) ${msg}")
     done
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0044]" "reason=\"deploy compose config invalid\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0101]" "reason=\"deploy compose config invalid\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'compose-config=clean checks=%s\n' "${count}"
@@ -8248,7 +8248,7 @@ _ci_check_dhcp_proxy_env() {
         viol+=("dnsmasq.conf.template must not reintroduce the RFC 5107 dhcp-proxy flag")
     fi
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0048]" "reason=\"dhcp-proxy env/PXE contract violated\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0102]" "reason=\"dhcp-proxy env/PXE contract violated\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'dhcp-proxy-env=clean\n'
@@ -8312,7 +8312,7 @@ _ci_check_setup_update_safety() {
     awk '/^cmd_update_ip\(\) \{/{u=1;g=0;next} /^# .*backup subcommand/{u=0} u&&/assert_prebuilt_image_platform_supported/{g=1} u&&!g&&/(sed -i|docker compose -f)/{f=1} END{exit f?0:1}' "${su}" \
         && viol+=("update-ip must check prebuilt platform support before mutating config")
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0062]" "reason=\"setup.sh update-migration safety contract violated\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0103]" "reason=\"setup.sh update-migration safety contract violated\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'setup-update-safety=clean\n'
@@ -8336,7 +8336,7 @@ _ci_check_setup_docker_conflict() {
         viol+=("Fedora Docker conflict guard must not block stock podman or runc")
     fi
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0063]" "reason=\"setup.sh Docker RPM conflict contract violated\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0104]" "reason=\"setup.sh Docker RPM conflict contract violated\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'setup-docker-conflict=clean\n'
@@ -8400,7 +8400,7 @@ _ci_check_image_channel_resolution() {
     grep -Fq 'fresh installs use `LANCACHE_IMAGE_CHANNEL=nightly` by default pre-1.0' "${repo_root}/docs/release-versioning.md" \
         || viol+=("release docs must document nightly as the pre-1.0 default")
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0064]" "reason=\"image channel/tag resolution contract violated\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0105]" "reason=\"image channel/tag resolution contract violated\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'image-channel-resolution=clean\n'
@@ -8430,18 +8430,18 @@ _ci_check_vex_drift() {
     [ -f "${trivyignore}" ] || { ci_error "[CI-ERROR-CHECK-0050]" "path=\"${trivyignore}\" reason=\".trivyignore.yaml not found\"" "${trivyignore}"; return 2; }
     out="$(_ci_generate_vex "${trivyignore}" "${repo_root}")" || rc=$?
     if [ "${rc}" -eq 2 ]; then
-        ci_error "[CI-ERROR-CHECK-0050]" "reason=\"generate-vex.sh not found\"" "${trivyignore}"; return 2
+        ci_error "[CI-ERROR-CHECK-0106]" "reason=\"generate-vex.sh not found\"" "${trivyignore}"; return 2
     elif [ "${rc}" -ne 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0050]" "reason=\"generate-vex.sh failed\"" "${trivyignore}"; return 1
+        ci_error "[CI-ERROR-CHECK-0107]" "reason=\"generate-vex.sh failed\"" "${trivyignore}"; return 1
     fi
     if ! jq empty <<<"${out}" 2>/dev/null; then
-        ci_error "[CI-ERROR-CHECK-0050]" "reason=\"generate-vex.sh produced invalid JSON\"" "${trivyignore}"
+        ci_error "[CI-ERROR-CHECK-0108]" "reason=\"generate-vex.sh produced invalid JSON\"" "${trivyignore}"
         return 1
     fi
     entry_count="$(grep -c '^  - id:' "${trivyignore}" 2>/dev/null || true)"
     statement_count="$(jq '.statements | length' <<<"${out}")"
     if [ "${entry_count:-0}" -gt 0 ] && [ "${statement_count}" -eq 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0050]" "reason=\"${entry_count} trivyignore entries but 0 VEX statements\"" "${trivyignore}"
+        ci_error "[CI-ERROR-CHECK-0109]" "reason=\"${entry_count} trivyignore entries but 0 VEX statements\"" "${trivyignore}"
         return 1
     fi
     printf 'vex-drift=clean statements=%s\n' "${statement_count}"
@@ -8463,7 +8463,7 @@ _ci_check_changelog_direct_edit() {
     if jq -e 'index("release") != null' <<<"${PR_LABELS_JSON:-[]}" >/dev/null 2>&1; then
         ci_log "[CI-INFO-CHECK-0001]" "reason=\"CHANGELOG.md edited with release label; expected\""
     else
-        ci_log "[CI-INFO-CHECK-0001]" "reason=\"CHANGELOG.md edited directly outside the release flow (issue #893); warn-only\""
+        ci_log "[CI-INFO-CHECK-0002]" "reason=\"CHANGELOG.md edited directly outside the release flow (issue #893); warn-only\""
     fi
     printf 'changelog-direct-edit=warn\n'
 }
