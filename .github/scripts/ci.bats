@@ -3600,6 +3600,34 @@ CASES
         echo "args:"; cat "${args}"; return 1; }
 }
 
+@test "validate probes run in order without a proxy, stop early" {
+    # What: all probes in order, NO_PROXY=*, stop on fail.
+    # Why: a host http_proxy answered the cache probe.
+    # From: Issue #1683 | PR #1858
+    local log="${BATS_TEST_TMPDIR}/probes" p fail=""
+    local -a probes=(dns proxy proxy_stream_map ssl_mitm ssl_dispatch_map
+        ui_nats_dns dns_rollback ui_depends_started secondary_identity)
+    for p in "${probes[@]}"; do
+        eval "_ci_validate_${p}() {
+            echo \"${p} \${NO_PROXY}|\${no_proxy}\" >> '${log}'
+            [ '${p}' != \"\${fail}\" ]
+        }"
+    done
+    export NO_PROXY=keep no_proxy=keep
+    : > "${log}"
+    _ci_validate_probes proj
+    [ "$(cut -d' ' -f1 "${log}" | paste -sd' ')" = "${probes[*]}" ] || {
+        echo "order:"; cat "${log}"; return 1; }
+    [ "$(cut -d' ' -f2 "${log}" | sort -u)" = '*|*' ] || {
+        echo "proxy:"; cat "${log}"; return 1; }
+    [ "${NO_PROXY}|${no_proxy}" = 'keep|keep' ]
+    fail=ssl_mitm; : > "${log}"
+    run _ci_validate_probes proj
+    [ "${status}" -eq 1 ]
+    [ "$(cut -d' ' -f1 "${log}" | paste -sd' ')" = "dns proxy proxy_stream_map ssl_mitm" ] || {
+        echo "early:"; cat "${log}"; return 1; }
+}
+
 @test "validate ssl-mitm fails when proxy IP is missing" {
     # What: Missing proxy container/IP returns rc 2.
     # Why: Cannot TLS-probe without a target.

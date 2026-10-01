@@ -5345,6 +5345,24 @@ _ci_validate_secondary_identity() {
     fi
 }
 
+# What: run every live stack probe in order, stop early.
+# Why: probes target the stack; a host proxy must not.
+# From: Issue #1683 | PR #1858
+_ci_validate_probes() {
+    local project="$1" rc=0
+    local -x NO_PROXY='*' no_proxy='*'
+    _ci_validate_dns "${project}" || rc=$?
+    [ "${rc}" -eq 0 ] && { _ci_validate_proxy "${project}" || rc=$?; }
+    [ "${rc}" -eq 0 ] && { _ci_validate_proxy_stream_map "${project}" || rc=$?; }
+    [ "${rc}" -eq 0 ] && { _ci_validate_ssl_mitm "${project}" || rc=$?; }
+    [ "${rc}" -eq 0 ] && { _ci_validate_ssl_dispatch_map "${project}" || rc=$?; }
+    [ "${rc}" -eq 0 ] && { _ci_validate_ui_nats_dns "${project}" || rc=$?; }
+    [ "${rc}" -eq 0 ] && { _ci_validate_dns_rollback "${project}" || rc=$?; }
+    [ "${rc}" -eq 0 ] && { _ci_validate_ui_depends_started || rc=$?; }
+    [ "${rc}" -eq 0 ] && { _ci_validate_secondary_identity "${project}" || rc=$?; }
+    return "${rc}"
+}
+
 # What: Validate the candidate on one live prod stack.
 # Why: One up, all checks, one teardown (AG-VAL-027).
 # From: Issue #1683 | PR #1858
@@ -5382,15 +5400,7 @@ _ci_default_validate() {
         && _ci_validate_pin_override "${candidate}" > "${pin_ovr}"; then
         if up_out="$(_ci_validate_up "${project}" "${net_ovr}" "${pin_ovr}" 2>&1)"; then
             _ci_validate_wait_healthy "${project}" || rc=$?
-            [ "${rc}" -eq 0 ] && { _ci_validate_dns "${project}" || rc=$?; }
-            [ "${rc}" -eq 0 ] && { _ci_validate_proxy "${project}" || rc=$?; }
-            [ "${rc}" -eq 0 ] && { _ci_validate_proxy_stream_map "${project}" || rc=$?; }
-            [ "${rc}" -eq 0 ] && { _ci_validate_ssl_mitm "${project}" || rc=$?; }
-            [ "${rc}" -eq 0 ] && { _ci_validate_ssl_dispatch_map "${project}" || rc=$?; }
-            [ "${rc}" -eq 0 ] && { _ci_validate_ui_nats_dns "${project}" || rc=$?; }
-            [ "${rc}" -eq 0 ] && { _ci_validate_dns_rollback "${project}" || rc=$?; }
-            [ "${rc}" -eq 0 ] && { _ci_validate_ui_depends_started || rc=$?; }
-            [ "${rc}" -eq 0 ] && { _ci_validate_secondary_identity "${project}" || rc=$?; }
+            [ "${rc}" -eq 0 ] && { _ci_validate_probes "${project}" || rc=$?; }
         elif _ci_validate_is_collision "${up_out}"; then
             ci_error "[CI-ERROR-VALIDATE-0016]" "reason=\"subnet/port collision after slot reservation\"" "${up_out}"
             rc=1
