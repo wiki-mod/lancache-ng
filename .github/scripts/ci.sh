@@ -242,6 +242,20 @@ ci_service_field() {
     _ci_block_entry_field "build_toolchain" "$1" "$2"
 }
 
+# What: read a required target field; empty is an error.
+# Why: no hidden defaults; the SOT must name every field.
+# From: Issue #1683
+_ci_required_field() {
+    local v
+    v="$(ci_service_field "$1" "$2")"
+    if [ -z "${v}" ]; then
+        ci_log "[CI-ERROR-CORE-0009]" \
+            "target=\"$1\" field=\"$2\" reason=\"required SOT field missing\""
+        return 2
+    fi
+    printf '%s\n' "${v}"
+}
+
 # What: Print the named contexts a service rebuilds on.
 # Why: dependency_graph is the SOT edge set (Finding 93).
 # From: Issue #1683
@@ -388,8 +402,7 @@ _ci_paths_touch() {
 _ci_plan_candidate() {
     local service="$1"; shift
     local context ctx ctx_path
-    context="$(ci_service_field "${service}" context)"
-    [ -z "${context}" ] && context="services/${service}"
+    context="$(_ci_required_field "${service}" context)" || return 2
     _ci_paths_touch "${context}" "$@" && return 0
     for ctx in $(ci_service_contexts "${service}"); do
         ctx_path="$(ci_context_path "${ctx}")"
@@ -406,13 +419,15 @@ ci_cmd_plan() {
     local -a changed=()
     _ci_collect_changed changed "$@" || return 2
 
-    local service
+    local service rc
     for service in $(ci_build_targets); do
-        if _ci_plan_candidate "${service}" "${changed[@]}"; then
-            printf '%s=true\n' "${service}"
-        else
-            printf '%s=false\n' "${service}"
-        fi
+        rc=0
+        _ci_plan_candidate "${service}" "${changed[@]}" || rc=$?
+        case "${rc}" in
+            0) printf '%s=true\n' "${service}" ;;
+            1) printf '%s=false\n' "${service}" ;;
+            *) return 2 ;;
+        esac
     done
     ci_log "[CI-INFO-PLAN-0001]" "phase=plan changed=${#changed[@]} note=\"candidates only; identity/CAS decides build\""
 }
@@ -610,7 +625,7 @@ ci_cmd_plan_matrix() {
     local docs_only=false
     _ci_docs_only "${changed[@]}" && docs_only=true
     local service platform include='[]' any=false resolved paction runner authed=false test_services=''
-    local sot_changed=false f path_cand
+    local sot_changed=false f path_cand rc
     # What: SOT change makes every target id candidate.
     # Why: pins live in SOT; identity decides BUILD.
     # From: Issue #1683 | PR #1858
@@ -619,8 +634,9 @@ ci_cmd_plan_matrix() {
     # Why: build-tools generic pipeline, separate assembly.
     # From: Issue #1683
     for service in $(ci_services) $(_ci_block_keys build_toolchain); do
-        path_cand=false
-        _ci_plan_candidate "${service}" "${changed[@]}" && path_cand=true
+        path_cand=false rc=0
+        _ci_plan_candidate "${service}" "${changed[@]}" || rc=$?
+        case "${rc}" in 0) path_cand=true ;; 1) ;; *) return 2 ;; esac
         [ "${path_cand}" = true ] || [ "${sot_changed}" = true ] || continue
         # What: path-changed rust is test candidate (§60).
         # Why: tests run on change, even build reuse (§60).
@@ -787,10 +803,8 @@ _ci_identity_pins() {
 _ci_identity_for() {
     local service="$1" platform="$2" ref="${3:-}"
     local build_type context ctx ctx_path pins
-    build_type="$(ci_service_field "${service}" build_type)"
-    [ -n "${build_type}" ] || build_type="toolchain"
-    context="$(ci_service_field "${service}" context)"
-    [ -z "${context}" ] && context="services/${service}"
+    build_type="$(_ci_required_field "${service}" build_type)" || return 2
+    context="$(_ci_required_field "${service}" context)" || return 2
     # What: compute pins first so a failed pin fails the id.
     # Why: a swallowed sig error must not mint an id.
     # From: Issue #1683
@@ -1712,9 +1726,8 @@ _ci_cache_to_spec() {
 _ci_docker_build() {
     local service="$1" identity="$2" platform="$3"
     local context tag a build_type
-    build_type="$(ci_service_field "${service}" build_type)"
-    context="$(ci_service_field "${service}" context)"
-    [ -z "${context}" ] && context="services/${service}"
+    build_type="$(_ci_required_field "${service}" build_type)" || return 2
+    context="$(_ci_required_field "${service}" context)" || return 2
     tag="$(_ci_image_tag "${service}" "${platform}" "${identity}")"
     # What: the Dockerfile must declare ARG BUILD_IDENTITY.
     # Why: else a stale cached apk layer ships silently.
@@ -2745,8 +2758,7 @@ _ci_smoke_service() {
 # From: Issue #1683 | PR #1858
 _ci_default_test() {
     local service="$1" build_type
-    build_type="$(ci_service_field "${service}" build_type)"
-    [ -n "${build_type}" ] || build_type="toolchain"
+    build_type="$(_ci_required_field "${service}" build_type)" || return 2
     case "${build_type}" in
         rust) _ci_test_rust "${service}" ;;
         apk|install) printf 'service=%s tested=SKIP reason="no source tests; smoke runs at the built digest"\n' "${service}" ;;

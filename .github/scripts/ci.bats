@@ -146,15 +146,43 @@ teardown() {
 # SEMANTIC IMPACT
 # =========================================================
 
-@test "plan picks only proxy for a proxy-only source change" {
-    # What: A service's own context selects it alone.
-    # Why: No unrelated service is a rebuild candidate.
+@test "plan selects exactly the targets whose contexts a path touches" {
+    # What: own context and named contexts pick candidates.
+    # Why: no unrelated target and no prefix-only match.
     # From: Issue #1683
-    run bash "${CI_SH}" plan services/proxy/nginx.conf
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"proxy=true"* ]]
-    [[ "${output}" == *"ui=false"* ]]
-    [[ "${output}" == *"dns=false"* ]]
+    local m="${BATS_TEST_TMPDIR}/m.yml" path want row
+    printf '%s\n' 'services:' '  svc-a:' '    context: dir/a' \
+        '  svc-b:' '    context: dir/b' \
+        'build_toolchain:' '  tool-t:' '    context: dir/t' \
+        'named_contexts:' '  ctx-1:' '    path: shared/one.sh' \
+        '  ctx-2:' '    path: shared/two.txt' \
+        'dependency_graph:' '  svc-a:' '    contexts: [ctx-1, ctx-2]' \
+        '  svc-b:' '    contexts: [ctx-1]' > "${m}"
+    while IFS='|' read -r path want; do
+        CI_MANIFEST="${m}" run bash "${CI_SH}" plan "${path}"
+        [ "${status}" -eq 0 ]
+        row="$(grep -v 'CI-INFO' <<< "${output}" | paste -sd' ' -)"
+        [ "${row}" = "${want}" ] || { echo "${path}: ${row}"; return 1; }
+        [[ "${output}" == *"candidates only; identity/CAS decides build"* ]]
+    done <<'EOF'
+dir/a/f|svc-a=true svc-b=false tool-t=false
+shared/two.txt|svc-a=true svc-b=false tool-t=false
+shared/one.sh|svc-a=true svc-b=true tool-t=false
+dir/t/Dockerfile|svc-a=false svc-b=false tool-t=true
+dir/ab/f|svc-a=false svc-b=false tool-t=false
+EOF
+}
+
+@test "plan fails closed on a target without a SOT context" {
+    # What: a missing context is CORE-0009, not a default.
+    # Why: a guessed path would hide a broken SOT entry.
+    # From: Issue #1683
+    local m="${BATS_TEST_TMPDIR}/m.yml"
+    printf '%s\n' 'services:' '  svc-a:' '    build_type: apk' > "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" plan dir/a/f
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-CORE-0009]"* ]]
+    [[ "${output}" != *"svc-a=false"* ]]
 }
 @test "codeql-impact emits a rust-only matrix on crate source change" {
     # What: crate src change scopes rust only.
@@ -310,58 +338,6 @@ teardown() {
     grep -q -- 'database analyze .*--sarif-category=/language:lang-a' "${log}"
     grep -q -- 'github upload-results --repository=owner/fixture --ref=refs/heads/x' "${log}"
     [ -z "$(ls -A "${t}")" ]
-}
-
-@test "plan rebuilds proxy on a dns-domains (cdn-domains.txt) change" {
-    # What: proxy COPYs cdn-domains.txt (named context).
-    # Why: The dependency edge must select proxy too.
-    # From: Issue #1683
-    run bash "${CI_SH}" plan services/dns/cdn-domains.txt
-    [[ "${output}" == *"proxy=true"* ]]
-}
-
-@test "plan rebuilds every known-good consumer, and no other" {
-    # What: known-good (file) feeds its consumer set.
-    # Why: only the snapshot-holding services rebuild.
-    # From: Issue #1683
-    run bash "${CI_SH}" plan scripts/lib/known-good-snapshots.sh
-    [[ "${output}" == *"proxy=true"* ]]
-    [[ "${output}" == *"dns=true"* ]]
-    [[ "${output}" == *"dhcp-proxy=true"* ]]
-    [[ "${output}" == *"dhcp=false"* ]]
-    [[ "${output}" == *"ui=false"* ]]
-    [[ "${output}" == *"ntp=false"* ]]
-    [[ "${output}" == *"cachehamster=false"* ]]
-}
-
-@test "plan rebuilds every shared-secret consumer, and no other" {
-    # What: shared-secret (file) feeds its consumer set.
-    # Why: dns/dhcp/ui source the lib; ntp does not.
-    # From: Issue #1683
-    run bash "${CI_SH}" plan scripts/lib/shared-secret-bootstrap.sh
-    [[ "${output}" == *"dns=true"* ]]
-    [[ "${output}" == *"dhcp=true"* ]]
-    [[ "${output}" == *"ui=true"* ]]
-    [[ "${output}" == *"ntp=false"* ]]
-    [[ "${output}" == *"cachehamster=false"* ]]
-}
-
-@test "plan emits a candidates-only note, not a build decision" {
-    # What: plan selects candidates; identity decides build.
-    # Why: Keep the §4/§7 separation explicit and visible.
-    # From: Issue #1683
-    run bash "${CI_SH}" plan services/ui/src/main.rs
-    [[ "${output}" == *"candidates only; identity/CAS decides build"* ]]
-}
-
-@test "plan-candidate is true for a touched context, false otherwise" {
-    # What: One candidate rule shared by plan and Base-CI.
-    # Why: No second copy of the path-touch decision.
-    # From: Issue #1683
-    run _ci_plan_candidate proxy services/proxy/Dockerfile
-    [ "${status}" -eq 0 ]
-    run _ci_plan_candidate proxy services/ntp/Dockerfile
-    [ "${status}" -ne 0 ]
 }
 
 @test "platform-field reads apk arch and runner from the SOT, fail-closed" {
