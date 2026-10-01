@@ -5083,16 +5083,42 @@ _anv_run() {
     _anv_run "${r}"; [ "${status}" -ne 0 ]; [[ "${output}" == *"no action.yml"* ]]
 }
 
-@test "check action-node-versions fails an unresolvable pin, warns on infra" {
-    # What: NOTFOUND broken (fail); infra hiccup warns.
-    # Why: Fail-closed bad pin vs cannot-check split.
+@test "check action-node-versions fails a broken pin and an unresolved one" {
+    # What: NOTFOUND is a violation; infra fails closed.
+    # Why: an unverified pin must never report clean.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/anvF"
     _anv_setup "${r}"
     printf 'jobs:\n  b:\n    steps:\n      - uses: o/act@ref-notfound\n' > "${r}/.github/workflows/ci.yml"
-    _anv_run "${r}"; [ "${status}" -ne 0 ]; [[ "${output}" == *"broken pin"* ]]
+    _anv_run "${r}"; [ "${status}" -eq 1 ]; [[ "${output}" == *"broken pin"* ]]
     printf 'jobs:\n  b:\n    steps:\n      - uses: o/act@ref-infra\n' > "${r}/.github/workflows/ci.yml"
-    _anv_run "${r}"; [ "${status}" -eq 0 ]; [[ "${output}" == *"infra hiccup"* ]]
+    _anv_run "${r}"; [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-CHECK-0073]"* ]]
+    [[ "${output}" != *"action-node-versions=clean"* ]]
+}
+
+@test "action manifest fetch maps gh api results to OK/NOTFOUND/INFRA" {
+    # What: dir list then file; 404 dir is NOTFOUND.
+    # Why: one gh api owner; other failures are INFRA.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    cat > "${bin}/gh" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+    *"o/gone/contents"*) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+    *"o/down/contents"*) echo "gh: HTTP 500" >&2; exit 1 ;;
+    *"--jq"*) printf 'README.md\naction.yaml\n' ;;
+    *"action.yaml?ref=r1") printf 'runs:\n  using: node24\n' ;;
+    *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+EOF
+    chmod +x "${bin}/gh"
+    PATH="${bin}:${PATH}" CI_RETRY_MAX_ATTEMPTS=1 run _ci_fetch_action_manifest o act sub r1
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "$(printf 'OK\nruns:\n  using: node24')" ]
+    PATH="${bin}:${PATH}" CI_RETRY_MAX_ATTEMPTS=1 run _ci_fetch_action_manifest o gone "" r1
+    [ "${output##*$'\n'}" = "NOTFOUND" ]
+    PATH="${bin}:${PATH}" CI_RETRY_MAX_ATTEMPTS=1 run _ci_fetch_action_manifest o down "" r1
+    [ "${output##*$'\n'}" = "INFRA" ]
 }
 
 @test "check action-node-versions enforces ref hygiene" {
@@ -5430,51 +5456,6 @@ EOF
     [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-STATUS-0001"* ]]
 }
 
-@test "action-node-versions resolver: yaml fallback, transient retry, permanent stop" {
-    # What: Real curl: .yml->.yaml, 403 retry.
-    # Why: Fetch has no hook; mock proves it.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/anvM" bin="${BATS_TEST_TMPDIR}/anvMbin" cnt="${BATS_TEST_TMPDIR}/anvMcnt"
-    mkdir -p "${r}/.github/workflows" "${bin}"
-    printf 'jobs:\n  b:\n    steps:\n      - uses: o/act@sha1\n' > "${r}/.github/workflows/ci.yml"
-    cat > "${bin}/curl" <<'C1'
-#!/usr/bin/env bash
-out=""; url=""; prev=""
-for a in "$@"; do [ "${prev}" = "-o" ] && out="${a}"; url="${a}"; prev="${a}"; done
-case "${url}" in
-  *action.yaml*) printf 'runs:\n  using: node24\n' > "${out}"; printf '200' ;;
-  *) : > "${out}"; printf '404' ;;
-esac
-C1
-    chmod +x "${bin}/curl"
-    PATH="${bin}:${PATH}" CI_RETRY_BACKOFF_BASE_SECONDS=0 run bash "${CI_SH}" check action-node-versions "${r}"
-    [ "${status}" -eq 0 ] || { echo "fallback: ${output}"; false; }
-    echo 0 > "${cnt}"
-    cat > "${bin}/curl" <<C2
-#!/usr/bin/env bash
-n=\$(cat "${cnt}"); n=\$((n+1)); echo "\$n" > "${cnt}"
-out=""; prev=""
-for a in "\$@"; do [ "\${prev}" = "-o" ] && out="\${a}"; prev="\${a}"; done
-if [ "\$n" -lt 2 ]; then : > "\${out}"; printf '403'; else printf 'runs:\n  using: node24\n' > "\${out}"; printf '200'; fi
-C2
-    chmod +x "${bin}/curl"
-    PATH="${bin}:${PATH}" CI_RETRY_BACKOFF_BASE_SECONDS=0 run bash "${CI_SH}" check action-node-versions "${r}"
-    [ "${status}" -eq 0 ] || { echo "retry: ${output}"; false; }
-    [ "$(cat "${cnt}")" -ge 2 ]
-    echo 0 > "${cnt}"
-    cat > "${bin}/curl" <<C3
-#!/usr/bin/env bash
-n=\$(cat "${cnt}"); echo "\$((n+1))" > "${cnt}"
-out=""; prev=""
-for a in "\$@"; do [ "\${prev}" = "-o" ] && out="\${a}"; prev="\${a}"; done
-: > "\${out}"; printf '401'
-C3
-    chmod +x "${bin}/curl"
-    PATH="${bin}:${PATH}" CI_RETRY_MAX_ATTEMPTS=4 CI_RETRY_BACKOFF_BASE_SECONDS=0 run bash "${CI_SH}" check action-node-versions "${r}"
-    [ "${status}" -eq 0 ]; [[ "${output}" == *"infra hiccup"* ]]
-    [ "$(cat "${cnt}")" -le 2 ]
-}
-
 @test "check governance-guards flags a stale TODO on a closed issue" {
     # What: ci.sh owns the governance scan; bats calls it.
     # Why: TODO on closed issue is stale, must fail loud.
@@ -5487,6 +5468,20 @@ C3
     CI_GOVERNANCE_ISSUE_STATE='42=open' \
         run bash "${CI_SH}" check governance-guards "${BATS_TEST_TMPDIR}/stale.sh"
     [ "${status}" -eq 0 ]
+}
+
+@test "check governance-guards fails closed when the issue state is unknown" {
+    # What: a failed gh api lookup is rc 2, never clean.
+    # Why: an unchecked TODO must not pass as current.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    printf '#!/usr/bin/env bash\necho "gh: HTTP 500" >&2; exit 1\n' > "${bin}/gh"
+    chmod +x "${bin}/gh"
+    printf '# TODO(#42): revisit once fixed\n' > "${BATS_TEST_TMPDIR}/t.sh"
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo CI_RETRY_MAX_ATTEMPTS=1 \
+        run bash "${CI_SH}" check governance-guards "${BATS_TEST_TMPDIR}/t.sh"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" != *"governance-guards=clean"* ]]
 }
 
 @test "check governance-guards requires an open Refs issue for partial-scope text" {

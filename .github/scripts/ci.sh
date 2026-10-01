@@ -6723,60 +6723,34 @@ _ci_action_runs_using() {
     ' | sed -E "s/.*using:[[:space:]]*//; s/[\"']//g; s/[[:space:]]*#.*\$//; s/[[:space:]]+\$//"
 }
 
-# What: Contents-API GET; body on 200, else HTTP.
-# Why: caller classifies; token limit.
-# From: Issue #1683 | PR #1858
-_ci_action_manifest_get() {
-    local url="$1" body status token
-    local -a auth=()
-    token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
-    [ -n "${token}" ] && auth=(-H "Authorization: Bearer ${token}")
-    body="$(mktemp -p "${CI_TMPDIR}")"
-    status="$(curl -sS -o "${body}" -w '%{http_code}' \
-        -H "Accept: application/vnd.github.raw+json" "${auth[@]}" "${url}" 2>/dev/null)" || status="000"
-    if [ "${status}" = "200" ]; then
-        cat "${body}"; rm -f "${body}"; return 0
-    fi
-    rm -f "${body}"
-    printf 'HTTP %s\n' "${status}"
-    return 1
-}
-
 # What: resolve external action manifest for pin.
-# Why: injectable resolver keeps API URL private.
+# Why: one gh api + _ci_retry owner; no own HTTP client.
 # From: Issue #1683 | PR #1858
 _ci_fetch_action_manifest() {
     local owner="$1" repo="$2" subpath="$3" ref="$4"
     # What: caller resolver overrides API path.
-    # Why: tests assert OK/NOTFOUND/INFRA, not curl.
+    # Why: tests assert OK/NOTFOUND/INFRA, not the API.
     # From: Issue #1683 | PR #1858
     if [ -n "${CI_ACTION_MANIFEST_CMD:-}" ]; then
         "${CI_ACTION_MANIFEST_CMD}" "${owner}" "${repo}" "${subpath}" "${ref}"
         return
     fi
-    local base="https://api.github.com/repos/${owner}/${repo}/contents/${subpath:+${subpath}/}"
-    local file url out status n max="${CI_RETRY_MAX_ATTEMPTS:-4}" backoff="${CI_RETRY_BACKOFF_BASE_SECONDS:-1}" cls
+    local dir="repos/${owner}/${repo}/contents${subpath:+/${subpath}}" names out file rc=0
+    # What: list the dir once, then fetch the manifest name.
+    # Why: a 404 on the dir is a broken pin, not infra.
+    # From: Issue #1683 | PR #1858
+    names="$(_ci_retry github-api gh api "${dir}?ref=${ref}" --jq '.[].name')" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        case "${names,,}" in *"http 404"*) printf 'NOTFOUND\n' ;; *) printf 'INFRA\n' ;; esac
+        return 0
+    fi
     for file in action.yml action.yaml; do
-        url="${base}${file}?ref=${ref}"
-        n=0
-        while :; do
-            n=$((n + 1))
-            if out="$(_ci_action_manifest_get "${url}")"; then
-                printf 'OK\n%s\n' "${out}"; return 0
-            fi
-            status="$(printf '%s' "${out}" | grep -oE '[0-9]{3}' | tail -1)"
-            # What: 404 terminal, not error; try .yaml.
-            # Why: some ship action.yaml not .yml.
-            # From: Issue #1683 | PR #1858
-            [ "${status}" = "404" ] && break
-            cls="$(_ci_classify_failure "${out}" github-api)"
-            if [ "${cls}" != "transient" ] || [ "${n}" -ge "${max}" ]; then
-                printf 'INFRA:%s\n' "${status}"; return 0
-            fi
-            sleep "$((n * n * backoff))"
-        done
+        grep -qx -- "${file}" <<< "${names}" || continue
+        out="$(_ci_retry github-api gh api -H 'Accept: application/vnd.github.raw+json' \
+            "${dir}/${file}?ref=${ref}")" || { printf 'INFRA\n'; return 0; }
+        printf 'OK\n%s\n' "${out}"; return 0
     done
-    printf 'NOTFOUND\n'; return 0
+    printf 'NOTFOUND\n'
 }
 
 # What: true if a uses: ref is an external pinned action.
@@ -6814,7 +6788,7 @@ _ci_check_action_node_versions() {
     fi
     scan_files=("${wf_files[@]}" "${act_files[@]}")
 
-    local -a viol=() xv=() warns=() uses_entries=() literal_entries=()
+    local -a viol=() xv=() infra=() uses_entries=() literal_entries=()
     # What: collect every uses: step, resolve anchors.
     # Why: alias not duplicate; only literals count.
     # From: Issue #1683 | PR #1858
@@ -6937,7 +6911,7 @@ _ci_check_action_node_versions() {
                 viol+=("local action '${v}' (in: $(_ci_ando_reffiles "${v}")) has no action.yml/action.yaml"); continue
             fi
             using="$(_ci_action_runs_using < "${resolved_file}")"
-            [ -z "${using}" ] && { warns+=("no runs.using for local action '${v}'; skipped"); continue; }
+            [ -z "${using}" ] && { viol+=("local action '${v}' has no parseable runs.using"); continue; }
             case "${_ci_action_deprecated_runtimes}" in
                 *" ${using} "*) viol+=("local action '${v}' declares runs.using: ${using}, a deprecated Node runtime") ;;
             esac
@@ -6946,28 +6920,32 @@ _ci_check_action_node_versions() {
         _ci_action_ref_is_external "${v}" || continue
         ref="${v##*@}"; key="${v%@*}"
         owner="$(cut -d/ -f1 <<<"${key}")"; repo="$(cut -d/ -f2 <<<"${key}")"; subpath="$(cut -d/ -f3- <<<"${key}")"
-        res="$(_ci_fetch_action_manifest "${owner}" "${repo}" "${subpath}" "${ref}")"
+        res="$(_ci_fetch_action_manifest "${owner}" "${repo}" "${subpath}" "${ref}")" || return 2
         marker="${res%%$'\n'*}"
         case "${marker}" in
             OK)
                 meta="${res#*$'\n'}"
                 using="$(_ci_action_runs_using <<<"${meta}")"
                 if [ -z "${using}" ]; then
-                    warns+=("no parseable runs.using for '${v}' (docker/composite?); skipped")
+                    viol+=("'${v}' has no parseable runs.using")
                 elif case "${_ci_action_deprecated_runtimes}" in *" ${using} "*) true ;; *) false ;; esac; then
                     viol+=("'${v}' (in: $(_ci_ando_reffiles "${v}")) declares runs.using: ${using}, a deprecated Node runtime")
                 fi ;;
             NOTFOUND)
                 viol+=("no action.yml/action.yaml for '${v}' at ref '${ref}' (in: $(_ci_ando_reffiles "${v}")); broken pin") ;;
-            INFRA:*)
-                warns+=("could not resolve '${v}' (HTTP ${marker#INFRA:}); infra hiccup, not failing on it") ;;
+            *)
+                infra+=("${v}") ;;
         esac
     done
     unset -f _ci_ando_reffiles
+    # What: an unresolved pin fails closed, never clean.
+    # Why: an unverified runtime must not pass the gate.
+    # From: Issue #1683 | PR #1858
+    if [ "${#infra[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0073]" "reason=\"action manifest unresolved after retries; FAIL CLOSED\"" "$(printf '%s\n' "${infra[@]}")"
+        return 2
+    fi
 
-    local w
-    local w
-    for w in "${warns[@]:-}"; do [ -n "${w}" ] && ci_log "[CI-ERROR-CHECK-0053]" "warn=\"${w}\""; done
     # What: extraction faults reported apart from pin.
     # Why: parse gap not deprecated-runtime fail.
     # From: Issue #1683 | PR #1858
@@ -6983,8 +6961,8 @@ _ci_check_action_node_versions() {
     printf 'action-node-versions=clean pins=%s\n' "${#uses_values[@]}"
 }
 
-# What: Resolve GitHub issue state (open/closed/unknown).
-# Why: Shared by governance-guards for TODO checks.
+# What: Resolve GitHub issue state; failure returns 2.
+# Why: an unknown state must not hide a stale TODO.
 # From: Issue #1683
 _ci_governance_issue_state() {
     local issue="$1"
@@ -6996,19 +6974,13 @@ _ci_governance_issue_state() {
         done
         printf 'unknown\n'; return 0
     fi
-    if [ -z "${GITHUB_REPOSITORY:-}" ]; then
-        printf 'unknown\n'; return 0
-    fi
-    local -a token_hdr=()
-    if [ -n "${GITHUB_TOKEN:-}" ]; then
-        token_hdr=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
-    elif [ -n "${GH_TOKEN:-}" ]; then
-        token_hdr=(-H "Authorization: Bearer ${GH_TOKEN}")
-    fi
-    local response
-    response="$(curl -fsS -H 'Accept: application/vnd.github+json' "${token_hdr[@]}" \
-        "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${issue}")" || { printf 'unknown\n'; return 0; }
-    jq -r '.state // "unknown"' <<<"${response}"
+    local state repo
+    repo="$(_ci_repo)" || return 2
+    state="$(_ci_retry github-api gh api "repos/${repo}/issues/${issue}" --jq '.state')" || return 2
+    case "${state}" in
+        open|closed) printf '%s\n' "${state}" ;;
+        *) ci_log "[CI-ERROR-CHECK-0074]" "issue=\"${issue}\" state=\"${state}\" reason=\"unexpected issue state\""; return 2 ;;
+    esac
 }
 
 # What: Flag stale TODOs, scope gaps, upload errors.
@@ -7018,20 +6990,27 @@ _ci_check_governance_guards() {
     local -a _ci_override=("$@") changed=()
     local title="${GOVERNANCE_PR_TITLE:-${PR_TITLE:-}}" body="${GOVERNANCE_PR_BODY:-${PR_BODY:-}}"
     local -a viol=()
-    local path line marker issue state
+    local path line marker issue state hits grc
     if [ "$#" -gt 0 ]; then
         _ci_scan_files changed _ci_override || return 2
     fi
     for path in "${changed[@]}"; do
         case "${path}" in *.md|*.mdx|*.rst|*.txt) continue ;; esac
+        # What: grep rc 1 means no marker; rc 2 is an error.
+        # Why: a read error must not pass as a clean file.
+        # From: Issue #1683
+        grc=0; hits="$(grep -nEo '(TODO|FIXME)\(#([0-9]+)\)' "${path}")" || grc=$?
+        if [ "${grc}" -gt 1 ]; then
+            ci_log "[CI-ERROR-CHECK-0075]" "path=\"${path}\" reason=\"grep failed\""; return 2
+        fi
         while IFS= read -r marker; do
             [ -n "${marker}" ] || continue
             line="${marker%%:*}"; marker="${marker#*:}"
             issue="${marker##*#}"; issue="${issue%)*}"
             [[ "${issue}" =~ ^[0-9]+$ ]] || continue
-            state="$(_ci_governance_issue_state "${issue}")"
+            state="$(_ci_governance_issue_state "${issue}")" || return 2
             [ "${state}" = "closed" ] && viol+=("${path}:${line}: stale TODO/FIXME references closed #${issue}")
-        done < <(grep -nEo '(TODO|FIXME)\(#([0-9]+)\)' "${path}" || true)
+        done <<< "${hits}"
     done
     local combined="${title}"
     [ -n "${combined}" ] && [ -n "${body}" ] && combined+=$'\n'
@@ -7045,12 +7024,12 @@ _ci_check_governance_guards() {
         local stripped
         stripped="$(sed -E 's/\b(no|not|none|nothing|without)\b([[:space:]]+[[:alnum:]-]+){0,3}[[:space:]]+(scaffold|TODO|deferred|not covered|not implemented|partial|follow-up required)\b//Ig' <<<"${combined}")"
         if grep -Eiq '(^|[^[:alnum:]])(scaffold|TODO|deferred|not covered|not implemented|partial|follow-up required)([^[:alnum:]]|$)' <<<"${stripped}"; then
-            local open_found=0
-            while IFS= read -r issue; do
-                [ -n "${issue}" ] || continue
-                state="$(_ci_governance_issue_state "${issue}")"
+            local open_found=0 rest="${combined}"
+            while [[ "${rest}" =~ Refs[[:space:]]+#([0-9]+) ]]; do
+                issue="${BASH_REMATCH[1]}"; rest="${rest#*"${BASH_REMATCH[0]}"}"
+                state="$(_ci_governance_issue_state "${issue}")" || return 2
                 [ "${state}" = "open" ] && { open_found=1; break; }
-            done < <(grep -oE 'Refs[[:space:]]+#[0-9]+' <<<"${combined}" | grep -oE '[0-9]+' || true)
+            done
             [ "${open_found}" -eq 1 ] || \
                 viol+=("PR title/body: partial-scope language without an open Refs #... remainder issue")
         fi
