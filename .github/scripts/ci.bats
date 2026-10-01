@@ -5890,19 +5890,26 @@ EOF
     [[ "${output}" == *"CI-ERROR-SCAN-0016"* ]]
 }
 
-@test "procsub check fails a loop whose producer failed" {
-    # What: waits on the producer pid; rc above max fails.
+@test "producer check fails a loop producer rc above max" {
+    # What: rc above max is CORE-0010; at or below passes.
     # Why: a failed producer must not look like no results.
-    # From: Issue #1683
-    local l rc
-    while read -r l; do :; done < <(printf 'a\n'; exit 3)
-    rc=0; _ci_procsub_ok "$!" 0 || rc=$?
-    [ "${rc}" -eq 2 ]
-    while read -r l; do :; done < <(grep zzz <<< 'a')
-    _ci_procsub_ok "$!" 1
-    while read -r l; do :; done < <(grep x "${BATS_TEST_TMPDIR}/none")
-    rc=0; _ci_procsub_ok "$!" 1 || rc=$?
-    [ "${rc}" -eq 2 ]
+    # From: Issue #1683 | PR #1858
+    run _ci_producer_ok 3 0
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CORE-0010"*"rc=3"* ]]
+    run _ci_producer_ok 1 1
+    [ "${status}" -eq 0 ]
+    run _ci_producer_ok 2 1
+    [ "${status}" -eq 2 ]
+}
+
+@test "ci.sh feeds no loop from a process substitution" {
+    # What: no '< <(' producer outside comments in ci.sh.
+    # Why: wait on its pid races bash's reaping (rc 127).
+    # From: Issue #1683 | PR #1858
+    run awk '!/^[[:space:]]*#/ && /< <\(/ { print FILENAME ":" FNR ": " $0 }' "${CI_SH}"
+    [ "${status}" -eq 0 ]
+    [ -z "${output}" ]
 }
 
 @test "version consumers derive from SOT consumer and build_args" {

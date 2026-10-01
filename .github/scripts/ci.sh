@@ -1869,17 +1869,22 @@ _ci_docker_build() {
     # What: value-less --build-arg passes proxy from env.
     # Why: predefined args: used by RUN, not in history.
     # From: Issue #1683 | PR #1858
+    local produced produced_rc=0
+    produced="$(_ci_proxy_names)" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
     while IFS= read -r a; do
+        [ -n "${a}" ] || continue
         args+=(--build-arg "${a}")
-    done < <(_ci_proxy_names)
-    _ci_procsub_ok "$!" 0 || return 2
+    done <<<"${produced}"
     # What: SOT-owned named build contexts (name=path).
     # Why: Dockerfile COPY --from derives it; SOT owns list.
     # From: Issue #1683
+    local produced produced_rc=0
+    produced="$(_ci_block_entry_list services "${service}" external_contexts)" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--build-context "${a}")
-    done < <(_ci_block_entry_list services "${service}" external_contexts)
-    _ci_procsub_ok "$!" 0 || return 2
+    done <<<"${produced}"
     # What: mount build-time secrets at runtime.
     # Why: leak-safe --secret; cleanup removes after.
     # From: Issue #1683
@@ -3216,10 +3221,12 @@ _ci_release_ref() {
 # From: Issue #1683
 _ci_valid_channel() {
     local channel="$1" c
+    local produced produced_rc=0
+    produced="$(_ci_mutable_channels)" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
     while IFS= read -r c; do
         [ "${c}" = "${channel}" ] && return 0
-    done < <(_ci_mutable_channels)
-    _ci_procsub_ok "$!" 0 || return 2
+    done <<<"${produced}"
     return 1
 }
 
@@ -3237,6 +3244,9 @@ _ci_valid_promote_target() {
 # From: Issue #1683
 _ci_stack_candidate_ledger() {
     local service inputs want idx
+    local produced produced_rc=0
+    produced="$(ci_services)" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
     while IFS= read -r service; do
         [ -n "${service}" ] || continue
         inputs="$(_ci_collect_accepted_digests "${service}")" || return "$?"
@@ -3247,8 +3257,7 @@ _ci_stack_candidate_ledger() {
             return 2
         fi
         printf '%s=%s\n' "${service}" "${idx}"
-    done < <(ci_services)
-    _ci_procsub_ok "$!" 0 || return 2
+    done <<<"${produced}"
 }
 
 # What: toolchain promote candidates if fully accepted.
@@ -3298,6 +3307,9 @@ _ci_stack_candidate_pr() {
         ci_log "[CI-ERROR-CANDIDATE-0005]" "reason=\"docker daemon platform unknown; cannot pick PR images\""
         return 2
     fi
+    local produced produced_rc=0
+    produced="$(ci_services)" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
     while IFS= read -r service; do
         [ -n "${service}" ] || continue
         if ! digest="$(_ci_published_digest "${service}" "${platform}")"; then
@@ -3305,8 +3317,7 @@ _ci_stack_candidate_pr() {
             return 2
         fi
         printf '%s=%s\n' "${service}" "${digest}"
-    done < <(ci_services)
-    _ci_procsub_ok "$!" 0 || return 2
+    done <<<"${produced}"
 }
 
 # What: read accepted stack candidate (injectable).
@@ -3968,8 +3979,17 @@ _ci_default_gc_roots() {
     # Why: PRODUCED_UNVERIFIED is pending, not garbage.
     # From: Issue #1683
     [ "${rc}" -eq 0 ] && pairs="$(printf '%s\n' "${blob}" | awk -F'\t' 'NF>=5 && $2!="" && $5!="" {print $2"\t"$5}')"
+    local targets targets_rc=0
+    targets="$(ci_build_targets)" || targets_rc=$?
+    _ci_producer_ok "${targets_rc}" 0 || return 2
+    # What: every build target's channels are roots.
+    # Why: GC candidates include build-tools; skip = orphan.
+    # From: Issue #1683 | PR #1858
     while IFS= read -r svc; do
         [ -n "${svc}" ] || continue
+        local produced produced_rc=0
+        produced="$(_ci_mutable_channels)" || produced_rc=$?
+        _ci_producer_ok "${produced_rc}" 0 || return 2
         while IFS= read -r channel; do
             [ -n "${channel}" ] || continue
             prc=0
@@ -3979,13 +3999,8 @@ _ci_default_gc_roots() {
             # From: Issue #1683
             [ "${prc}" -eq 2 ] && { ci_log "[CI-ERROR-GC-0013]" "service=\"${svc}\" channel=\"${channel}\" reason=\"channel probe UNKNOWN; refusing roots\""; return 2; }
             [ "${prc}" -eq 0 ] && pairs="${pairs}"$'\n'"${svc}"$'\t'"${dig}"
-        done < <(_ci_mutable_channels)
-        _ci_procsub_ok "$!" 0 || return 2
-    # What: every build target's channels are roots.
-    # Why: GC candidates include build-tools; skip = orphan.
-    # From: Issue #1683 | PR #1858
-    done < <(ci_build_targets)
-    _ci_procsub_ok "$!" 0 || return 2
+        done <<<"${produced}"
+    done <<<"${targets}"
     pairs="$(printf '%s\n' "${pairs}" | awk 'NF>0' | LC_ALL=C sort -u)"
     while IFS=$'\t' read -r s d; do
         [ -n "${d}" ] || continue
@@ -4033,6 +4048,9 @@ _ci_default_gc_candidates() {
     prefix="$(_ci_repo)" || { ci_log "[CI-ERROR-GC-0017]" "reason=\"GITHUB_REPOSITORY missing; no package namespace\""; return 2; }
     owner="${prefix%%/*}"
     pkgbase="${prefix#*/}"
+    local produced produced_rc=0
+    produced="$(ci_build_targets)" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
     while IFS= read -r svc; do
         [ -n "${svc}" ] || continue
         grc=0
@@ -4047,8 +4065,7 @@ _ci_default_gc_candidates() {
         # Why: Delete path is package-scoped, not id-only.
         # From: Issue #1683
         [ -n "${vers}" ] && printf '%s\n' "${vers}" | awk -v s="${svc}" 'NF{print $0"\t"s}'
-    done < <(ci_build_targets)
-    _ci_procsub_ok "$!" 0 || return 2
+    done <<<"${produced}"
     # What: No package found anywhere is a config error.
     # Why: All-404 must refuse, not read as a clean noop.
     # From: Issue #1683
@@ -5843,8 +5860,10 @@ _ci_build_tools_arches() {
 _ci_apk_resolve() {
     local base="$1" arch="$2" packages="$3" repos="${4:-}" raw n
     local -a penv=()
-    while IFS= read -r n; do penv+=(-e "${n}"); done < <(_ci_proxy_names)
-    _ci_procsub_ok "$!" 0 || return 2
+    local produced produced_rc=0
+    produced="$(_ci_proxy_names)" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
+    while IFS= read -r n; do [ -n "${n}" ] && penv+=(-e "${n}"); done <<<"${produced}"
     if [ -n "${CI_APK_RESOLVE_CMD:-}" ]; then
         "${CI_APK_RESOLVE_CMD}" "${base}" "${arch}" "${packages}"
         return "$?"
@@ -5987,9 +6006,8 @@ _ci_dockerfile_arg_default() {
     fi
     local -a hits=()
     local raw
-    while IFS= read -r raw; do
-        hits+=("${raw}")
-    done < <(awk -v n="${name}" '
+    local produced produced_rc=0
+    produced="$(awk -v n="${name}" '
         {
             line = $0
             sub(/^[[:space:]]+/, "", line)
@@ -6001,10 +6019,14 @@ _ci_dockerfile_arg_default() {
             rest = substr(line, RLENGTH + 1)
             sub(/^[[:space:]]+/, "", rest)
             sub(/[[:space:]]+$/, "", rest)
-            print rest
+            print "|" rest
         }
-    ' "${path}")
-    _ci_procsub_ok "$!" 0 || return 2
+    ' "${path}")" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
+    while IFS= read -r raw; do
+        [ -n "${raw}" ] || continue
+        hits+=("${raw#|}")
+    done <<<"${produced}"
     if [ "${#hits[@]}" -eq 0 ]; then
         printf 'ABSENT\n'
         return 0
@@ -6291,12 +6313,11 @@ ci_main() {
 # SOURCE-HYGIENE CHECKS
 # =========================================================
 
-# What: fail if the last < <(producer) exited above max.
-# Why: a failed producer must not read as an empty result.
-# From: Issue #1683
-_ci_procsub_ok() {
-    local pid="$1" max="${2:-0}" rc=0
-    wait "${pid}" || rc=$?
+# What: fail a captured loop producer rc above max.
+# Why: wait on a < <() pid races bash's reaping (127).
+# From: Issue #1683 | PR #1858
+_ci_producer_ok() {
+    local rc="$1" max="${2:-0}"
     [ "${rc}" -le "${max}" ] && return 0
     ci_log "[CI-ERROR-CORE-0010]" "rc=${rc} reason=\"loop producer failed; refusing a partial result\""
     return 2
@@ -6448,7 +6469,10 @@ _ci_check_file_headers() {
         p_line="$(printf '%s' "${exp}" | sed -n 1p)"
         s_line="$(printf '%s' "${exp}" | sed -n 2p)"
         legacy="${p_line/LanCache-NG/lancache-ng}"
-        mapfile -t scan < <(head -n 20 -- "${path}")
+        local produced produced_rc=0
+        produced="$(head -n 20 -- "${path}")" || produced_rc=$?
+        _ci_producer_ok "${produced_rc}" 0 || return 2
+        mapfile -t scan <<<"${produced}"
         _ci_header_line1_ok "${path}" "${scan[0]-}" || fails+=("${path}: bad line 1 marker")
         [ "${scan[1]-}" = "${p_line}" ] || fails+=("${path}: line 2 must be: ${p_line}")
         [ "${scan[2]-}" = "${s_line}" ] || fails+=("${path}: line 3 must be: ${s_line}")
@@ -6751,17 +6775,19 @@ _ci_check_review_chronology() {
         if [ -n "${out}" ]; then
             viol+=("${out}")
         fi
+        local produced produced_rc=0
+        produced="$(awk '
+            function isc(l) { return l ~ /^[[:space:]]*(#|\/\/|--|\/\*|\*|<!--|\{#)/ }
+            function pl(l,  p) { p=l; sub(/^[[:space:]]*(#|\/\/|--|\/\*|\*|<!--|\{#)[[:space:]]*/, "", p); return p }
+            { c=isc($0); cur=(c?pl($0):""); if (pc && c) printf "%d\t%s %s\n", NR-1, pp, cur; pc=c; pp=cur }
+        ' "${path}")" || produced_rc=$?
+        _ci_producer_ok "${produced_rc}" 0 || return 2
         while IFS=$'\t' read -r ln joined; do
             [ -n "${ln}" ] || continue
             shopt -s nocasematch
             [[ "${joined}" =~ ${rc} ]] && viol+=("${path}:${ln}: ${joined}")
             shopt -u nocasematch
-        done < <(awk '
-            function isc(l) { return l ~ /^[[:space:]]*(#|\/\/|--|\/\*|\*|<!--|\{#)/ }
-            function pl(l,  p) { p=l; sub(/^[[:space:]]*(#|\/\/|--|\/\*|\*|<!--|\{#)[[:space:]]*/, "", p); return p }
-            { c=isc($0); cur=(c?pl($0):""); if (pc && c) printf "%d\t%s %s\n", NR-1, pp, cur; pc=c; pp=cur }
-        ' "${path}")
-        _ci_procsub_ok "$!" 0 || return 2
+        done <<<"${produced}"
         from_lines="$(_ci_capture 1 grep -EI 'From:' "${path}")" || return 2
         [ -n "${from_lines}" ] || continue
         fnums="$(_ci_capture 1 grep -oEI '#[0-9]+' <<< "${from_lines}")" || return 2
@@ -6838,14 +6864,8 @@ _ci_check_if_without_else_status() {
     local path fi_line status_line
     local -a viol=()
     for path in "${files[@]}"; do
-        while IFS=: read -r kind fi_line status_line; do
-            [ -n "${fi_line}" ] || continue
-            if [ "${kind}" = neg ]; then
-                viol+=("${path}:${status_line}: reads \$? inside 'if ! CMD; then' (line ${fi_line}); that \$? is the negation's 0, not CMD's status -- use 'CMD || rc=\$?' or _ci_capture, or mark '# if-status-safe: <reason>'")
-                continue
-            fi
-            viol+=("${path}:${status_line}: reads \$? after an else-less if (fi at line ${fi_line}); POSIX reports the if's own status 0, not the command's -- use 'if CMD; then STATUS=0; else STATUS=\$?; fi' or mark '# if-status-safe: <reason>'")
-        done < <(awk '
+        local produced produced_rc=0
+        produced="$(awk '
             { lines[NR] = $0 }
             END {
               depth = 0; nc = 0
@@ -6888,8 +6908,16 @@ _ci_check_if_without_else_status() {
                 }
               }
             }
-          ' "${path}")
-        _ci_procsub_ok "$!" 0 || return 2
+          ' "${path}")" || produced_rc=$?
+        _ci_producer_ok "${produced_rc}" 0 || return 2
+        while IFS=: read -r kind fi_line status_line; do
+            [ -n "${fi_line}" ] || continue
+            if [ "${kind}" = neg ]; then
+                viol+=("${path}:${status_line}: reads \$? inside 'if ! CMD; then' (line ${fi_line}); that \$? is the negation's 0, not CMD's status -- use 'CMD || rc=\$?' or _ci_capture, or mark '# if-status-safe: <reason>'")
+                continue
+            fi
+            viol+=("${path}:${status_line}: reads \$? after an else-less if (fi at line ${fi_line}); POSIX reports the if's own status 0, not the command's -- use 'if CMD; then STATUS=0; else STATUS=\$?; fi' or mark '# if-status-safe: <reason>'")
+        done <<<"${produced}"
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0065]" "reason=\"\$? read after else-less if masks status (AG-VAL-029)\"" "$(printf '%s\n' "${viol[@]}")"
@@ -6907,6 +6935,9 @@ _ci_check_docker_run_heredoc_stdin() {
     local path lineno matched trimmed start window last_off invocation
     local -a viol=()
     for path in "${files[@]}"; do
+        local produced produced_rc=0
+        produced="$(grep -noE '(bash|sh)[[:space:]]+-s[[:space:]]*<<' "${path}")" || produced_rc=$?
+        _ci_producer_ok "${produced_rc}" 1 || return 2
         while IFS=: read -r lineno _rest; do
             [ -n "${lineno}" ] || continue
             matched="$(sed -n "${lineno}p" "${path}")"
@@ -6919,8 +6950,7 @@ _ci_check_docker_run_heredoc_stdin() {
             invocation="$(printf '%s\n' "${window}" | tail -n +"${last_off}")"
             grep -qE '(^|[[:space:]])-i([[:space:]]|$)' <<<"${invocation}" && continue
             viol+=("${path}:${lineno}: heredoc-fed 'docker run' (bash -s / sh -s) missing -i; container stdin never attaches so the heredoc runs nothing while the step reports success")
-        done < <(grep -noE '(bash|sh)[[:space:]]+-s[[:space:]]*<<' "${path}")
-        _ci_procsub_ok "$!" 1 || return 2
+        done <<<"${produced}"
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0066]" "reason=\"heredoc docker run missing -i; stdin unattached (AG-VAL-029)\"" "$(printf '%s\n' "${viol[@]}")"
@@ -6987,16 +7017,22 @@ _ci_check_setup_prompt_drift() {
     )
     local -a rows=() all_prompts=() uncond=() viol=()
     local r
-    while IFS= read -r r; do [ -n "${r}" ] && rows+=("${r}"); done < <(_ci_setup_wizard_rows "${setup}")
-    _ci_procsub_ok "$!" 0 || return 2
+    local produced produced_rc=0
+    produced="$(_ci_setup_wizard_rows "${setup}")" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
+    while IFS= read -r r; do [ -n "${r}" ] && rows+=("${r}"); done <<<"${produced}"
     if [ "${#rows[@]}" -eq 0 ]; then
         ci_error "[CI-ERROR-CHECK-0082]" "reason=\"zero ask/confirm prompts in setup.sh wizard; vacuous\""
         return 1
     fi
-    while IFS= read -r r; do [ -n "${r}" ] && all_prompts+=("${r}"); done < <(printf '%s\n' "${rows[@]}" | cut -f3 | sort -u)
-    _ci_procsub_ok "$!" 0 || return 2
-    while IFS= read -r r; do [ -n "${r}" ] && uncond+=("${r}"); done < <(printf '%s\n' "${rows[@]}" | awk -F'\t' '$1=="UNCOND"{print $2"\t"$3}' | sort -u)
-    _ci_procsub_ok "$!" 0 || return 2
+    local produced produced_rc=0
+    produced="$(printf '%s\n' "${rows[@]}" | cut -f3 | sort -u)" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
+    while IFS= read -r r; do [ -n "${r}" ] && all_prompts+=("${r}"); done <<<"${produced}"
+    local produced produced_rc=0
+    produced="$(printf '%s\n' "${rows[@]}" | awk -F'\t' '$1=="UNCOND"{print $2"\t"$3}' | sort -u)" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
+    while IFS= read -r r; do [ -n "${r}" ] && uncond+=("${r}"); done <<<"${produced}"
     if [ "${#uncond[@]}" -eq 0 ]; then
         ci_error "[CI-ERROR-CHECK-0083]" "reason=\"zero unconditional prompts in setup.sh wizard; vacuous\""
         return 1
@@ -7016,9 +7052,11 @@ _ci_check_setup_prompt_drift() {
         fi
         checked=$((checked + 1))
         sim_pats=(); gpats=()
-        while IFS= read -r r; do [ -n "${r}" ] && sim_pats+=("${r}"); done < <(
-            awk '{ t=$0; sub(/^[ \t]+/,"",t); if(index(t,"expect_prompt {")==1){ x=substr(t,length("expect_prompt {")+1); sub(/}.*/,"",x); if(x!="")print x } }' "${sim}")
-        _ci_procsub_ok "$!" 0 || return 2
+        local produced produced_rc=0
+        produced="$(
+            awk '{ t=$0; sub(/^[ \t]+/,"",t); if(index(t,"expect_prompt {")==1){ x=substr(t,length("expect_prompt {")+1); sub(/}.*/,"",x); if(x!="")print x } }' "${sim}")" || produced_rc=$?
+        _ci_producer_ok "${produced_rc}" 0 || return 2
+        while IFS= read -r r; do [ -n "${r}" ] && sim_pats+=("${r}"); done <<<"${produced}"
         if [ "${#sim_pats[@]}" -eq 0 ]; then
             viol+=("${sim}: zero expect_prompt patterns; vacuous or no longer drives the wizard")
             continue
@@ -7133,6 +7171,9 @@ _ci_check_stable_external_images() {
             viol+=("${d}: compose dir missing")
             continue
         fi
+        local produced produced_rc=0
+        produced="$(grep -rhE '^[[:space:]]+image:[[:space:]]' "${d}")" || produced_rc=$?
+        _ci_producer_ok "${produced_rc}" 1 || return 2
         while IFS= read -r line; do
             img="${line#*image:}"; img="${img#"${img%%[![:space:]]*}"}"
             # What: only ${LANCACHE_*} own images skip.
@@ -7153,8 +7194,7 @@ _ci_check_stable_external_images() {
                 *" ${img} "*) ;;
                 *) viol+=("${d}: external pin is not a SOT pin: ${img}") ;;
             esac
-        done < <(grep -rhE '^[[:space:]]+image:[[:space:]]' "${d}")
-        _ci_procsub_ok "$!" 1 || return 2
+        done <<<"${produced}"
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0014]" "reason=\"external image not digest-pinned or not in SOT\"" "$(printf '%s\n' "${viol[@]}")"
@@ -7182,8 +7222,12 @@ _ci_check_pr_template() {
     local template="${CI_REPO_ROOT}/.github/pull_request_template.md"
     local -a sections=()
     if [ -f "${template}" ]; then
-        while IFS= read -r sec; do sections+=("${sec}"); done \
-            < <(grep -oE '^## .+' "${template}" | sed 's/^## //')
+        local produced produced_rc=0
+        produced="$(grep -oE '^## .+' "${template}" | sed 's/^## //')" || produced_rc=$?
+        _ci_producer_ok "${produced_rc}" 1 || return 2
+        while IFS= read -r sec; do
+            [ -n "${sec}" ] && sections+=("${sec}")
+        done <<<"${produced}"
     fi
     if [ "${#sections[@]}" -eq 0 ]; then
         ci_log "[CI-ERROR-CHECK-0015]" "reason=\"no sections found in pull_request_template.md\""
@@ -7279,19 +7323,22 @@ _ci_check_workflow_line_limit() {
     fi
     local file lines bytes block_report block_line block_bytes
     local -a viol=()
-    while IFS= read -r -d '' file; do
+    local produced produced_rc=0
+    produced="$(find "${dir}" -maxdepth 1 -name '*.yml')" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
+    while IFS= read -r file; do
+        [ -n "${file}" ] || continue
         lines="$(wc -l < "${file}")"
         bytes="$(wc -c < "${file}")"
         [ "${lines}" -gt "${max_lines}" ] && viol+=("${file}: ${lines} lines > ${max_lines}")
         [ "${bytes}" -gt "${max_bytes}" ] && viol+=("${file}: ${bytes} bytes > ${max_bytes}")
-        block_report="$(_ci_measure_run_blocks "${file}")"
+        block_report="$(_ci_measure_run_blocks "${file}")" || return 2
         while IFS=$'\t' read -r block_line block_bytes; do
             [ -n "${block_line}" ] || continue
             [ "${block_bytes}" -gt "${max_block}" ] && \
                 viol+=("${file}:${block_line}: run-block ${block_bytes} bytes > ${max_block}")
         done <<<"${block_report}"
-    done < <(find "${dir}" -maxdepth 1 -name '*.yml' -print0)
-    _ci_procsub_ok "$!" 0 || return 2
+    done <<<"${produced}"
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0090]" "reason=\"workflow size ceiling exceeded\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
@@ -7461,7 +7508,11 @@ _ci_check_action_node_versions() {
     local sf line raw resolved anchor
     for sf in "${scan_files[@]}"; do
         local -A anchors=()
+        local produced produced_rc=0
+        produced="$(grep -E '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]+' "${sf}")" || produced_rc=$?
+        _ci_producer_ok "${produced_rc}" 1 || return 2
         while IFS= read -r line; do
+            [ -n "${line}" ] || continue
             raw="$(sed -E 's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*//; s/[[:space:]]*#.*$//; s/[[:space:]]+$//' <<<"${line}")"
             resolved="${raw}"
             if [[ "${raw}" =~ ^\&([A-Za-z0-9_-]+)[[:space:]]+(.+)$ ]]; then
@@ -7479,13 +7530,15 @@ _ci_check_action_node_versions() {
                 literal_entries+=("${sf}"$'\t'"${resolved}")
             fi
             uses_entries+=("${sf}"$'\t'"${resolved}")
-        done < <(grep -E '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]+' "${sf}")
-        _ci_procsub_ok "$!" 1 || return 2
+        done <<<"${produced}"
         unset anchors
     done
 
     local -a uses_values=()
-    mapfile -t uses_values < <(printf '%s\n' "${uses_entries[@]}" | sed $'s/^[^\t]*\t//' | sort -u)
+    local produced produced_rc=0
+    produced="$(printf '%s\n' "${uses_entries[@]}" | sed $'s/^[^\t]*\t//' | sort -u)" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
+    mapfile -t uses_values <<<"${produced}"
     # What: no uses: AND no fail is vacuous.
     # Why: unresolved alias is extraction fault.
     # From: Issue #1683 | PR #1858
@@ -7868,13 +7921,8 @@ _ci_check_compose_healthchecks() {
     local -a viol=()
     for file in "${files[@]}"; do
         [ -f "${file}" ] || continue
-        while IFS=$'\t' read -r svc hc; do
-            [ -n "${svc}" ] || continue
-            checked=$((checked + 1))
-            [ "${hc}" = "1" ] && continue
-            [ -n "${excluded[${svc}]:-}" ] && continue
-            viol+=("${file}: service '${svc}' has no healthcheck:")
-        done < <(awk '
+        local produced produced_rc=0
+        produced="$(awk '
             /^services:[[:space:]]*$/ { insvc = 1; next }
             insvc && /^[A-Za-z]/ {
                 if (name != "") print name "\t" hc
@@ -7886,8 +7934,15 @@ _ci_check_compose_healthchecks() {
             }
             insvc && name != "" && /^    healthcheck:[[:space:]]*$/ { hc = 1 }
             END { if (name != "") print name "\t" hc }
-        ' "${file}")
-        _ci_procsub_ok "$!" 0 || return 2
+        ' "${file}")" || produced_rc=$?
+        _ci_producer_ok "${produced_rc}" 0 || return 2
+        while IFS=$'\t' read -r svc hc; do
+            [ -n "${svc}" ] || continue
+            checked=$((checked + 1))
+            [ "${hc}" = "1" ] && continue
+            [ -n "${excluded[${svc}]:-}" ] && continue
+            viol+=("${file}: service '${svc}' has no healthcheck:")
+        done <<<"${produced}"
     done
     if [ "${checked}" -eq 0 ]; then
         ci_log "[CI-ERROR-CHECK-0097]" "reason=\"no services found across deploy compose files\""
@@ -7931,6 +7986,9 @@ _ci_check_proxy_cache_env_doc_drift() {
     fi
     local key value doc_row documented scanned=0 checked=0 rc
     local -a viol=()
+    local produced produced_rc=0
+    produced="$(grep -E '^CACHE_[A-Z_]+=' "${proxy_env}")" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 1 || return 2
     while IFS='=' read -r key value; do
         [[ "${key}" =~ ^CACHE_[A-Z_]+$ ]] || continue
         scanned=$((scanned + 1))
@@ -7941,8 +7999,7 @@ _ci_check_proxy_cache_env_doc_drift() {
         if [ "${documented}" != "${value}" ]; then
             viol+=("${key}: proxy.env=${value} vs doc=${documented}")
         fi
-    done < <(grep -E '^CACHE_[A-Z_]+=' "${proxy_env}")
-    _ci_procsub_ok "$!" 1 || return 2
+    done <<<"${produced}"
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0023]" "reason=\"proxy.env/doc CACHE_* default drift\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
@@ -8070,6 +8127,9 @@ _ci_dockerfile_final_image() {
     local dockerfile="$1" line instruction remainder image alias name value token
     local seen_from=0 final_image=""
     local -A global_args=() stage_images=()
+    local produced produced_rc=0
+    produced="$(_ci_dockerfile_logical_lines "${dockerfile}")" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
     while IFS= read -r line || [ -n "${line}" ]; do
         line="${line#"${line%%[![:space:]]*}"}"
         instruction="${line%%[[:space:]]*}"
@@ -8114,8 +8174,7 @@ _ci_dockerfile_final_image() {
             stage_images["${alias}"]="${image}"
         fi
         final_image="${image}"
-    done < <(_ci_dockerfile_logical_lines "${dockerfile}")
-    _ci_procsub_ok "$!" 0 || return 2
+    done <<<"${produced}"
     if [ -z "${final_image}" ]; then
         ci_log "[CI-ERROR-CHECK-0031]" "path=\"${dockerfile}\" reason=\"no FROM instruction found\""
         return 2
@@ -8142,10 +8201,12 @@ _ci_check_dependabot_docker_base_consistency() {
     fi
     local -a entries=()
     local line
+    local produced produced_rc=0
+    produced="$(_ci_dependabot_docker_entries "${dependabot_file}")" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
     while IFS= read -r line; do
         [ -n "${line}" ] && entries+=("${line}")
-    done < <(_ci_dependabot_docker_entries "${dependabot_file}")
-    _ci_procsub_ok "$!" 0 || return 2
+    done <<<"${produced}"
     if [ "${#entries[@]}" -eq 0 ]; then
         ci_log "[CI-ERROR-CHECK-0028]" "path=\"${dependabot_file}\" reason=\"no docker-ecosystem directories found\""
         return 2
@@ -8188,8 +8249,10 @@ _ci_check_dependabot_docker_base_consistency() {
         return 2
     fi
     local -a distinct_blocks=()
-    while IFS= read -r b; do [ -n "${b}" ] && distinct_blocks+=("${b}"); done \
-        < <(printf '%s\n' "${blocks_seen[@]}" | sort -un)
+    local produced produced_rc=0
+    produced="$(printf '%s\n' "${blocks_seen[@]}" | sort -un)" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
+    while IFS= read -r b; do [ -n "${b}" ] && distinct_blocks+=("${b}"); done <<<"${produced}"
     local -a viol=()
     local key key_block key_dockerfile
     for b in "${distinct_blocks[@]}"; do
@@ -8582,16 +8645,18 @@ _ci_check_quickstart_required_env() {
     inst="$(_ci_installer_compose "${repo_root}")" || return 2
     env="${repo_root}/$(dirname "${inst}")/.env"
     compose="${repo_root}/${inst}"
+    local produced produced_rc=0
+    produced="$(
+        grep -oE '\$\{[A-Za-z0-9_]+:\?[^}]+\}' "${compose}" \
+            | sed -E 's/^\$\{([^:]+):.*/\1/' \
+            | sort -u
+    )" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
     while IFS= read -r key; do
         [ -n "${key}" ] || continue
         grep -Eq "^${key}=[^[:space:]]+" "${env}" \
             || viol+=("$(dirname "${inst}")/.env must define non-empty ${key} (compose marks it required)")
-    done < <(
-        grep -oE '\$\{[A-Za-z0-9_]+:\?[^}]+\}' "${compose}" \
-            | sed -E 's/^\$\{([^:]+):.*/\1/' \
-            | sort -u
-    )
-    _ci_procsub_ok "$!" 0 || return 2
+    done <<<"${produced}"
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0047]" "reason=\"quickstart required env not defined\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
@@ -9012,10 +9077,12 @@ _ci_check_logging_matrix() {
     unique_row_count="$(awk '{print $3}' <<<"${row_summary}")"
     local -a canonical=()
     local n
+    local produced produced_rc=0
+    produced="$(grep -vE '^##ROWS## ' <<<"${canonical_raw}")" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 1 || return 2
     while IFS= read -r n; do
         [ -n "${n}" ] && canonical+=("${n}")
-    done < <(grep -vE '^##ROWS## ' <<<"${canonical_raw}")
-    _ci_procsub_ok "$!" 1 || return 2
+    done <<<"${produced}"
     if [ "${#canonical[@]}" -eq 0 ]; then
         ci_log "[CI-ERROR-CHECK-0036]" "path=\"${doc}\" reason=\"no logging-matrix rows parsed\""
         return 2
@@ -9117,15 +9184,20 @@ _ci_dockerfile_copies_to() {
     local dockerfile="$1" want="$2" line lineno=0 last_from=0 dest from_val ctx_path
     local -a words real
     local -A aliases=()
+    local produced produced_rc=0
+    produced="$(_ci_dockerfile_logical_lines "${dockerfile}")" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
     while IFS= read -r line; do
         lineno=$((lineno + 1))
         case "${line}" in [Ff][Rr][Oo][Mm]\ *) last_from=${lineno} ;; esac
         if [[ "${line}" =~ [Aa][Ss][[:space:]]+([A-Za-z0-9_.-]+)[[:space:]]*$ ]]; then
             aliases["${BASH_REMATCH[1],,}"]=1
         fi
-    done < <(_ci_dockerfile_logical_lines "${dockerfile}")
-    _ci_procsub_ok "$!" 0 || return 2
+    done <<<"${produced}"
     lineno=0
+    local produced produced_rc=0
+    produced="$(_ci_dockerfile_logical_lines "${dockerfile}")" || produced_rc=$?
+    _ci_producer_ok "${produced_rc}" 0 || return 2
     while IFS= read -r line; do
         lineno=$((lineno + 1))
         [ "${lineno}" -ge "${last_from}" ] || continue
@@ -9159,8 +9231,7 @@ _ci_dockerfile_copies_to() {
         dest="${real[$(( ${#real[@]} - 1 ))]}"
         [ "${dest}" = "${want}" ] && return 0
         case "${dest}" in */) [ "${dest}${want##*/}" = "${want}" ] && return 0 ;; esac
-    done < <(_ci_dockerfile_logical_lines "${dockerfile}")
-    _ci_procsub_ok "$!" 0 || return 2
+    done <<<"${produced}"
     return 1
 }
 
@@ -9261,10 +9332,12 @@ _ci_check_cargo_profile_tuning() {
     tomls="$(git -C "${repo_root}" ls-files '*Cargo.toml')" || { ci_log "[CI-ERROR-CHECK-0071]" "reason=\"git ls-files failed; refusing an empty scan\""; return 2; }
     while IFS= read -r f; do
         [ -n "${f}" ] || continue
+        local produced produced_rc=0
+        produced="$(grep -nE '^[[:space:]]*(lto|codegen-units)[[:space:]]*=' "${repo_root}/${f}")" || produced_rc=$?
+        _ci_producer_ok "${produced_rc}" 1 || return 2
         while IFS= read -r line; do
             [ -n "${line}" ] && viol+=("${f}:${line}")
-        done < <(grep -nE '^[[:space:]]*(lto|codegen-units)[[:space:]]*=' "${repo_root}/${f}")
-        _ci_procsub_ok "$!" 1 || return 2
+        done <<<"${produced}"
     done <<< "${tomls}"
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0059]" "reason=\"Cargo.toml hardcodes [profile] lto/codegen-units; source them from CARGO_PROFILE_RELEASE env (AG-CI-006)\"" "$(printf '%s\n' "${viol[@]}")"
@@ -9286,10 +9359,8 @@ _ci_check_no_source_compiled_tools() {
     dfs="$(git -C "${repo_root}" ls-files '*Dockerfile')" || { ci_log "[CI-ERROR-CHECK-0071]" "reason=\"git ls-files failed; refusing an empty scan\""; return 2; }
     while IFS= read -r df; do
         [ -n "${df}" ] || continue
-        while IFS= read -r tok; do
-            [ -n "${tok}" ] && [ -n "${is_pkg[${tok}]:-}" ] \
-                && viol+=("${df}: cargo install ${tok}; SOT ships it prebuilt in build-tools")
-        done < <(awk '
+        local produced produced_rc=0
+        produced="$(awk '
             match($0, /cargo[ \t]+install[ \t]+/) {
                 r = substr($0, RSTART + RLENGTH)
                 sub(/[&|;].*/, "", r)
@@ -9297,8 +9368,12 @@ _ci_check_no_source_compiled_tools() {
                 for (i = 1; i <= n; i++)
                     if (a[i] != "" && a[i] !~ /^-/) print a[i]
             }
-        ' "${repo_root}/${df}")
-        _ci_procsub_ok "$!" 0 || return 2
+        ' "${repo_root}/${df}")" || produced_rc=$?
+        _ci_producer_ok "${produced_rc}" 0 || return 2
+        while IFS= read -r tok; do
+            [ -n "${tok}" ] && [ -n "${is_pkg[${tok}]:-}" ] \
+                && viol+=("${df}: cargo install ${tok}; SOT ships it prebuilt in build-tools")
+        done <<<"${produced}"
     done <<< "${dfs}"
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0061]" "reason=\"Dockerfile source-compiles a prebuilt SOT tool; consume the build-tools image\"" "$(printf '%s\n' "${viol[@]}")"
