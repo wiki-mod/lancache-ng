@@ -4551,15 +4551,23 @@ _ci_validate_net_override() {
     done <<< "${svcs}"
 }
 
+# What: container id of a compose service; empty if none.
+# Why: docker error is rc 2 with raw, never "no container".
+# From: Issue #1683 | PR #1858
+_ci_validate_cid() {
+    local project="$1" svc="$2" flag="${3:--q}"
+    _ci_capture 0 docker compose -p "${project}" ps "${flag}" "${svc}"
+}
+
 # What: The /27 IP of a compose service container.
 # Why: Checks target the runtime IP, never a fixed one.
 # From: Issue #1683
 _ci_validate_container_ip() {
     local project="$1" svc="$2" net cid ip
     net="${project}_default"
-    cid="$(docker compose -p "${project}" ps -q "${svc}" 2>/dev/null)"
+    cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
     [ -n "${cid}" ] || return 1
-    ip="$(docker inspect -f "{{(index .NetworkSettings.Networks \"${net}\").IPAddress}}" "${cid}" 2>/dev/null)"
+    ip="$(_ci_capture 0 docker inspect -f "{{(index .NetworkSettings.Networks \"${net}\").IPAddress}}" "${cid}")" || return 2
     case "${ip}" in
         *.*.*.*) printf '%s' "${ip}" ;;
         *) return 1 ;;
@@ -4573,7 +4581,10 @@ _ci_validate_await_detached() {
     local name="$1" deadline count
     deadline=$(( SECONDS + ${CI_VALIDATE_DETACH_TIMEOUT:-30} ))
     while [ "${SECONDS}" -lt "${deadline}" ]; do
-        count="$(docker network inspect "${name}" --format '{{len .Containers}}' 2>/dev/null)" || return 0
+        if ! count="$(docker network inspect "${name}" --format '{{len .Containers}}' 2>&1)"; then
+            _ci_validate_network_gone "${name}" "${count}"
+            return "$?"
+        fi
         [ "${count}" = "0" ] && return 0
         sleep 1
     done
@@ -4585,13 +4596,28 @@ _ci_validate_await_detached() {
 # From: Issue #1683 | PR #1858
 _ci_validate_network_teardown() {
     local net_id="$1" name out
-    name="$(docker network inspect "${net_id}" --format '{{.Name}}' 2>/dev/null)" || return 0
+    if ! name="$(docker network inspect "${net_id}" --format '{{.Name}}' 2>&1)"; then
+        _ci_validate_network_gone "${net_id}" "${name}"
+        return "$?"
+    fi
     # What: wait for detach; a timeout is not fatal here.
     # Why: the rm below fails with raw output if still busy.
     # From: Issue #1683 | PR #1858
     _ci_validate_await_detached "${name}" || true
     out="$(docker network rm "${name}" 2>&1)" && return 0
     ci_error "[CI-ERROR-VALIDATE-0053]" "network=\"${name}\" reason=\"network removal failed\"" "${out}"
+    return 2
+}
+
+# What: rc 0 if inspect said "not found", else error.
+# Why: a gone network is done; other errors are UNKNOWN.
+# From: Issue #1683 | PR #1858
+_ci_validate_network_gone() {
+    local name="$1" raw="$2"
+    if [[ "${raw}" == *"not found"* ]]; then
+        return 0
+    fi
+    ci_error "[CI-ERROR-VALIDATE-0064]" "network=\"${name}\" reason=\"network inspect failed\"" "${raw}"
     return 2
 }
 
@@ -4720,9 +4746,9 @@ _ci_validate_wait_one() {
     local project="$1" svc="$2" deadline cid status
     deadline=$(( SECONDS + ${CI_VALIDATE_HEALTH_TIMEOUT:-180} ))
     while [ "${SECONDS}" -lt "${deadline}" ]; do
-        cid="$(docker compose -p "${project}" ps -q "${svc}" 2>/dev/null)"
+        cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
         if [ -n "${cid}" ]; then
-            status="$(docker inspect --format '{{.State.Health.Status}}' "${cid}" 2>/dev/null)" || status=""
+            status="$(_ci_capture 0 docker inspect --format '{{.State.Health.Status}}' "${cid}")" || return 2
             [ "${status}" = "healthy" ] && return 0
             [ "${status}" = "unhealthy" ] && return 1
         fi
@@ -4740,22 +4766,22 @@ _ci_validate_wait_stable() {
     local window="${CI_VALIDATE_STABLE_WINDOW:-20}"
     deadline=$(( SECONDS + ${CI_VALIDATE_HEALTH_TIMEOUT:-180} ))
     while [ "${SECONDS}" -lt "${deadline}" ]; do
-        cid="$(docker compose -p "${project}" ps -aq "${svc}" 2>/dev/null)"
+        cid="$(_ci_validate_cid "${project}" "${svc}" -aq)" || return 2
         if [ -z "${cid}" ]; then
             stable_since=-1
             sleep 2
             continue
         fi
-        status="$(docker inspect --format '{{.State.Status}}' "${cid}" 2>/dev/null)" || status=""
+        status="$(_ci_capture 0 docker inspect --format '{{.State.Status}}' "${cid}")" || return 2
         # What: exit is terminal, not a crash-loop.
         # Why: restart:no exits 0 by design (AG-VAL-027).
         # From: Issue #1683
         if [ "${status}" = "exited" ]; then
-            exitcode="$(docker inspect --format '{{.State.ExitCode}}' "${cid}" 2>/dev/null)" || exitcode=1
+            exitcode="$(_ci_capture 0 docker inspect --format '{{.State.ExitCode}}' "${cid}")" || return 2
             [ "${exitcode}" = "0" ] && return 0
             return 1
         fi
-        started="$(docker inspect --format '{{.State.StartedAt}}' "${cid}" 2>/dev/null)" || started=""
+        started="$(_ci_capture 0 docker inspect --format '{{.State.StartedAt}}' "${cid}")" || return 2
         if [ "${status}" != "running" ]; then
             stable_since=-1
         elif [ "${started}" != "${prev_started}" ]; then
@@ -4880,12 +4906,12 @@ _ci_ssl_dispatch_violations() {
 # From: Issue #1683
 _ci_validate_proxy_stream_map() {
     local project="$1" cid map bad
-    cid="$(docker compose -p "${project}" ps -q proxy 2>/dev/null)"
+    cid="$(_ci_validate_cid "${project}" proxy)" || return 2
     if [ -z "${cid}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0022]" "reason=\"no proxy container for stream-map check\""
         return 2
     fi
-    if ! map="$(docker exec "${cid}" cat /etc/nginx/stream.d/00-stream-targets.conf 2>/dev/null)"; then
+    if ! map="$(_ci_capture 0 docker exec "${cid}" cat /etc/nginx/stream.d/00-stream-targets.conf)"; then
         ci_log "[CI-ERROR-VALIDATE-0019]" "reason=\"could not read proxy stream-target map\""
         return 2
     fi
@@ -4900,27 +4926,39 @@ _ci_validate_proxy_stream_map() {
 # Why: proxy :443 must present a cert we signed.
 # From: Issue #1683
 _ci_validate_ssl_mitm() {
-    local project="$1" ip cid domain ca_subj issuer tmp
+    local project="$1" ip cid domain ca_subj issuer tmp out cert tls_err
     ip="$(_ci_validate_container_ip "${project}" proxy)"
-    cid="$(docker compose -p "${project}" ps -q proxy 2>/dev/null)"
+    cid="$(_ci_validate_cid "${project}" proxy)" || return 2
     domain="$(_ci_validation_dns_domain)"
     if [ -z "${ip}" ] || [ -z "${cid}" ] || [ -z "${domain}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0023]" "reason=\"no proxy container/IP or test domain for ssl-mitm check\""
         return 2
     fi
     tmp="$(mktemp "${CI_TMPDIR}/ci-proxy-ca.XXXXXX")"
-    if ! docker cp "${cid}:/etc/nginx/ssl/ca/ca.crt" "${tmp}" 2>/dev/null; then
-        ci_log "[CI-ERROR-VALIDATE-0024]" "reason=\"could not read proxy LAN CA for ssl-mitm check\""
+    if ! out="$(docker cp "${cid}:/etc/nginx/ssl/ca/ca.crt" "${tmp}" 2>&1)"; then
+        ci_error "[CI-ERROR-VALIDATE-0024]" "reason=\"could not read proxy LAN CA for ssl-mitm check\"" "${out}"
         rm -f "${tmp}"
         return 2
     fi
-    ca_subj="$(openssl x509 -noout -subject -in "${tmp}" 2>/dev/null | sed 's/^subject=//')"
-    issuer="$(openssl s_client -connect "${ip}:443" -servername "${domain}" </dev/null 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null | sed 's/^issuer=//')"
+    ca_subj="$(_ci_capture 0 openssl x509 -noout -subject -in "${tmp}")" || { rm -f "${tmp}"; return 2; }
+    ca_subj="${ca_subj#subject=}"
     rm -f "${tmp}"
+    # What: s_client writes handshake notes to stderr.
+    # Why: raw evidence when the issuer read fails.
+    # From: Issue #1683 | PR #1858
+    tls_err="$(mktemp "${CI_TMPDIR}/ci-tls-err.XXXXXX")"
+    cert="$(openssl s_client -connect "${ip}:443" -servername "${domain}" </dev/null 2>"${tls_err}")"
+    issuer=""
+    if [ -n "${cert}" ]; then
+        issuer="$(openssl x509 -noout -issuer 2>>"${tls_err}" <<<"${cert}")"
+        issuer="${issuer#issuer=}"
+    fi
     if [ -z "${ca_subj}" ] || [ -z "${issuer}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0025]" "domain=\"${domain}\" reason=\"no TLS issuer or CA subject for ssl-mitm check\""
+        ci_error "[CI-ERROR-VALIDATE-0025]" "domain=\"${domain}\" reason=\"no TLS issuer or CA subject for ssl-mitm check\"" "$(cat "${tls_err}")"
+        rm -f "${tls_err}"
         return 1
     fi
+    rm -f "${tls_err}"
     # What: the :443 cert issuer MUST equal our own LAN CA.
     # Why: proves interception, not passthrough.
     # From: Issue #668
@@ -4935,12 +4973,12 @@ _ci_validate_ssl_mitm() {
 # From: Issue #1683
 _ci_validate_ssl_dispatch_map() {
     local project="$1" cid map bad
-    cid="$(docker compose -p "${project}" ps -q proxy 2>/dev/null)"
+    cid="$(_ci_validate_cid "${project}" proxy)" || return 2
     if [ -z "${cid}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0027]" "reason=\"no proxy container for ssl-dispatch-map check\""
         return 2
     fi
-    if ! map="$(docker exec "${cid}" cat /etc/nginx/stream.d/01-ssl-dispatch.conf 2>/dev/null)"; then
+    if ! map="$(_ci_capture 0 docker exec "${cid}" cat /etc/nginx/stream.d/01-ssl-dispatch.conf)"; then
         ci_log "[CI-ERROR-VALIDATE-0028]" "reason=\"could not read proxy ssl-dispatch map (SSL_ENABLED=0?)\""
         return 2
     fi
@@ -4951,11 +4989,29 @@ _ci_validate_ssl_dispatch_map() {
     fi
 }
 
+# What: retry a probe; print its last raw error on fail.
+# Why: a timeout must show why the probe never answered.
+# From: Issue #1683 | PR #1858
+_ci_validate_poll() {
+    local attempts="$1" pause="$2" i out
+    shift 2
+    for i in $(seq 1 "${attempts}"); do
+        if out="$("$@" 2>&1)"; then
+            return 0
+        fi
+        if [ "${i}" -lt "${attempts}" ]; then
+            sleep "${pause}"
+        fi
+    done
+    printf '%s\n' "${out}"
+    return 1
+}
+
 # What: Open a UI session into <jar>, print its CSRF token.
 # Why: One owner for the cookiejar + CSRF extraction.
 # From: Issue #1683
 _ci_validate_ui_session() {
-    local project="$1" jar="$2" ip cookie csrf attempt
+    local project="$1" jar="$2" ip cookie csrf last
     ip="$(_ci_validate_container_ip "${project}" ui)"
     if [ -z "${ip}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0030]" "reason=\"no ui container IP for session check\""
@@ -4964,15 +5020,11 @@ _ci_validate_ui_session() {
     # What: ui has no compose healthcheck; poll /domains.
     # Why: wait_healthy misses ui; prove it answers first.
     # From: Issue #1683
-    for attempt in $(seq 1 30); do
-        curl -fsS -c "${jar}" -o /dev/null "http://${ip}:8080/domains" 2>/dev/null && break
-        if [ "${attempt}" -eq 30 ]; then
-            ci_log "[CI-ERROR-VALIDATE-0031]" "reason=\"ui /domains never answered\""
-            return 1
-        fi
-        sleep 2
-    done
-    cookie="$(awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "${jar}" 2>/dev/null)"
+    if ! last="$(_ci_validate_poll 30 2 curl -fsS -c "${jar}" -o /dev/null "http://${ip}:8080/domains")"; then
+        ci_error "[CI-ERROR-VALIDATE-0031]" "reason=\"ui /domains never answered\"" "${last}"
+        return 1
+    fi
+    cookie="$(_ci_capture 0 awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "${jar}")" || return 2
     csrf="$(printf '%s' "${cookie}" | cut -d. -f3)"
     if [ -z "${csrf}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0032]" "reason=\"no CSRF token in ui session cookie\""
@@ -4991,13 +5043,13 @@ _ci_validate_ui_add_record() {
         ci_log "[CI-ERROR-VALIDATE-0033]" "reason=\"no ui container IP for add-record\""
         return 2
     fi
-    code="$(curl -sS -b "${jar}" -o /dev/null -w '%{http_code}' \
+    code="$(_ci_capture 0 curl -sS -b "${jar}" -o /dev/null -w '%{http_code}' \
         --data-urlencode "csrf_token=${csrf}" \
         --data-urlencode "name=${name}" \
         --data-urlencode "record_type=A" \
         --data-urlencode "content=${content}" \
         --data-urlencode "ttl=60" \
-        "http://${ip}:8080/domains/lan/add" 2>/dev/null)"
+        "http://${ip}:8080/domains/lan/add")" || return 2
     if [ "${code}" != "303" ]; then
         ci_log "[CI-ERROR-VALIDATE-0034]" "code=\"${code}\" reason=\"ui /domains/lan/add did not return 303\""
         return 1
@@ -5014,12 +5066,16 @@ _ci_validate_dns_resolves() {
         ci_log "[CI-ERROR-VALIDATE-0035]" "svc=\"${svc}\" reason=\"no dns IP for resolve check\""
         return 2
     fi
+    local out=""
     for i in $(seq 1 "${attempts}"); do
-        got="$(dig +time=2 +tries=1 +short "@${ip}" A "${fqdn}" | sort -u)"
+        got=""
+        if out="$(dig +time=2 +tries=1 +short "@${ip}" A "${fqdn}" 2>&1)"; then
+            got="$(sort -u <<<"${out}")"
+        fi
         [ "${got}" = "${expected}" ] && return 0
         sleep 1
     done
-    ci_log "[CI-ERROR-VALIDATE-0036]" "svc=\"${svc}\" fqdn=\"${fqdn}\" expected=\"${expected}\" got=\"${got:-}\" reason=\"record did not resolve as expected\""
+    ci_error "[CI-ERROR-VALIDATE-0036]" "svc=\"${svc}\" fqdn=\"${fqdn}\" expected=\"${expected}\" got=\"${got:-}\" reason=\"record did not resolve as expected\"" "${out}"
     return 1
 }
 
@@ -5041,9 +5097,9 @@ _ci_validate_ui_nats_dns() {
 # Why: Real listener HTTP + PATCH + cache flush.
 # From: Issue #1683
 _ci_validate_dns_rollback() {
-    local project="$1" ip cid key jar csrf snap resp code i rc=0 compose
+    local project="$1" ip cid key jar csrf snap resp code rc=0 compose last
     ip="$(_ci_validate_container_ip "${project}" dns-standard)"
-    cid="$(docker compose -p "${project}" ps -q dns-standard 2>/dev/null)"
+    cid="$(_ci_validate_cid "${project}" dns-standard)" || return 2
     if [ -z "${ip}" ] || [ -z "${cid}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0037]" "reason=\"no dns-standard container/IP for rollback check\""
         return 2
@@ -5051,7 +5107,8 @@ _ci_validate_dns_rollback() {
     # What: read PDNS_API_KEY from shared-secrets file.
     # Why: entrypoint resolves it at runtime, not env.
     # From: Issue #858
-    key="$(docker exec "${cid}" cat /var/lib/lancache-secrets/pdns-api-key 2>/dev/null | tr -d '\n')"
+    key="$(_ci_capture 0 docker exec "${cid}" cat /var/lib/lancache-secrets/pdns-api-key)" || return 2
+    key="${key//$'\n'/}"
     if [ -z "${key}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0038]" "reason=\"could not read PDNS_API_KEY from shared-secrets\""
         return 2
@@ -5059,20 +5116,16 @@ _ci_validate_dns_rollback() {
     # What: poll until the rollback listener :8083 accepts.
     # Why: healthy != bound; nats-subscriber binds late.
     # From: Issue #628
-    for i in $(seq 1 30); do
-        curl -fsS -o /dev/null -H "X-API-Key: ${key}" "http://${ip}:8083/snapshots" 2>/dev/null && break
-        if [ "${i}" -eq 30 ]; then
-            ci_log "[CI-ERROR-VALIDATE-0039]" "reason=\"rollback listener :8083 never accepted a connection\""
-            return 1
-        fi
-        sleep 1
-    done
-    code="$(curl -sS -o /dev/null -w '%{http_code}' "http://${ip}:8083/snapshots" 2>/dev/null)"
+    if ! last="$(_ci_validate_poll 30 1 curl -fsS -o /dev/null -H "X-API-Key: ${key}" "http://${ip}:8083/snapshots")"; then
+        ci_error "[CI-ERROR-VALIDATE-0039]" "reason=\"rollback listener :8083 never accepted a connection\"" "${last}"
+        return 1
+    fi
+    code="$(_ci_capture 0 curl -sS -o /dev/null -w '%{http_code}' "http://${ip}:8083/snapshots")" || return 2
     if [ "${code}" != "401" ]; then
         ci_log "[CI-ERROR-VALIDATE-0040]" "code=\"${code}\" reason=\"/snapshots without X-API-Key not 401\""
         return 1
     fi
-    code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'X-API-Key: wrong' "http://${ip}:8083/snapshots" 2>/dev/null)"
+    code="$(_ci_capture 0 curl -sS -o /dev/null -w '%{http_code}' -H 'X-API-Key: wrong' "http://${ip}:8083/snapshots")" || return 2
     if [ "${code}" != "401" ]; then
         ci_log "[CI-ERROR-VALIDATE-0041]" "code=\"${code}\" reason=\"/snapshots with wrong X-API-Key not 401\""
         return 1
@@ -5084,7 +5137,8 @@ _ci_validate_dns_rollback() {
     # What: capture newest lan. snapshot (pre-change state).
     # Why: target this test rolls back to after 2nd write.
     # From: Issue #628
-    snap="$(curl -sS -H "X-API-Key: ${key}" "http://${ip}:8083/snapshots" 2>/dev/null | jq -r '.zones["lan."][0].id // empty')"
+    resp="$(_ci_capture 0 curl -sS -H "X-API-Key: ${key}" "http://${ip}:8083/snapshots")" || { rm -f "${jar}"; return 2; }
+    snap="$(_ci_capture 0 jq -r '.zones["lan."][0].id // empty' <<<"${resp}")" || { rm -f "${jar}"; return 2; }
     if [ -z "${snap}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0042]" "reason=\"no lan. known-good snapshot after first write\""
         rm -f "${jar}"
@@ -5119,8 +5173,9 @@ _ci_validate_dns_rollback() {
 # Why: UI must start even while a dependency crash-loops.
 # From: Issue #1683
 _ci_validate_ui_depends_started() {
-    local bad
-    bad="$(_ci_validate_config_json | jq -r '.services.ui.depends_on // {} | to_entries[] | select(.value.condition == "service_healthy") | .key' 2>/dev/null)"
+    local bad cfg
+    cfg="$(_ci_validate_config_json)" || return 2
+    bad="$(_ci_capture 0 jq -r '.services.ui.depends_on // {} | to_entries[] | select(.value.condition == "service_healthy") | .key' <<<"${cfg}")" || return 2
     if [ -n "${bad}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0044]" "deps=\"${bad}\" reason=\"ui depends_on gates on service_healthy; UI must start independently of dependency health (#763)\""
         return 1
@@ -5132,9 +5187,9 @@ _ci_validate_ui_depends_started() {
 # From: Issue #583
 _ci_register_secondary() {
     local ip="$1" token="$2" name="$3" out code
-    out="$(curl -sS -w '\n%{http_code}' -H 'Content-Type: application/json' \
+    out="$(_ci_capture 0 curl -sS -w '\n%{http_code}' -H 'Content-Type: application/json' \
         -d "{\"token\":\"${token}\",\"name\":\"${name}\"}" \
-        "http://${ip}:8080/api/secondary/register" 2>/dev/null)"
+        "http://${ip}:8080/api/secondary/register")" || return 2
     code="${out##*$'\n'}"
     [ "${code}" = "200" ] || return 1
     printf '%s' "${out%$'\n'*}"
@@ -5146,7 +5201,7 @@ _ci_register_secondary() {
 _ci_validate_secondary_identity() {
     local project="$1" ip cid token a b au bu ap bp
     ip="$(_ci_validate_container_ip "${project}" ui)"
-    cid="$(docker compose -p "${project}" ps -q ui 2>/dev/null)"
+    cid="$(_ci_validate_cid "${project}" ui)" || return 2
     if [ -z "${ip}" ] || [ -z "${cid}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0045]" "reason=\"no ui container/IP for secondary-identity check\""
         return 2
@@ -5154,7 +5209,8 @@ _ci_validate_secondary_identity() {
     # What: read SECONDARY_REGISTRATION_TOKEN from ui file.
     # Why: ui resolves at runtime; not env, not hardcoded.
     # From: Issue #583
-    token="$(docker exec "${cid}" cat /data/lancache-secondary-registration.token 2>/dev/null | tr -d '\n')"
+    token="$(_ci_capture 0 docker exec "${cid}" cat /data/lancache-secondary-registration.token)" || return 2
+    token="${token//$'\n'/}"
     if [ -z "${token}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0046]" "reason=\"could not read SECONDARY_REGISTRATION_TOKEN from ui\""
         return 2

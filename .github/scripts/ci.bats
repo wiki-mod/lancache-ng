@@ -3456,6 +3456,54 @@ SH
     }
     run _ci_validate_container_ip proj proxy
     [ "${status}" -ne 0 ]
+    # What: a docker error is rc 2 with its raw output.
+    # Why: "no container" must not hide a daemon error.
+    # From: Issue #1683 | PR #1858
+    docker() { echo "permission denied on docker.sock" >&2; return 1; }
+    run _ci_validate_container_ip proj proxy
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CORE-0106"*"permission denied on docker.sock"* ]]
+}
+
+@test "validate network inspect: only not-found means gone" {
+    # What: not found = done; other inspect errors = rc 2.
+    # Why: a leftover network must not pass as removed.
+    # From: Issue #1683 | PR #1858
+    docker() { echo "Error response from daemon: network n1 not found" >&2; return 1; }
+    run _ci_validate_network_teardown n1
+    [ "${status}" -eq 0 ]
+    docker() { echo "permission denied" >&2; return 1; }
+    run _ci_validate_network_teardown n1
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0064"*"permission denied"* ]]
+}
+
+@test "validate poll returns on success and shows the last error" {
+    # What: success is rc 0; a timeout prints last error.
+    # Why: a probe timeout must say why it never answered.
+    # From: Issue #1683 | PR #1858
+    sleep() { :; }
+    run _ci_validate_poll 3 1 true
+    [ "${status}" -eq 0 ]
+    [ -z "${output}" ]
+    run _ci_validate_poll 3 1 bash -c 'echo "connection refused" >&2; exit 7'
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"connection refused"* ]]
+}
+
+@test "validate wait_one stops on a docker error with raw output" {
+    # What: an inspect error is rc 2 at once, raw shown.
+    # Why: polling on errors hid them until the timeout.
+    # From: Issue #1683 | PR #1858
+    docker() {
+        case "$*" in
+            *"ps -q"*) echo cid1 ;;
+            inspect*) echo "inspect boom" >&2; return 1 ;;
+        esac
+    }
+    CI_VALIDATE_HEALTH_TIMEOUT=30 run _ci_validate_wait_one proj svc
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CORE-0106"*"inspect boom"* ]]
 }
 
 @test "validate container ip returns the container ipv4" {
@@ -3554,6 +3602,18 @@ SH
     run _ci_validate_ssl_mitm proj
     [ "${status}" -eq 1 ]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0026"* ]]
+    # What: a failed handshake shows s_client's own error.
+    # Why: "no issuer" alone does not say why.
+    # From: Issue #1683 | PR #1858
+    openssl() {
+        case "$*" in
+            *s_client*) echo "connect:errno=111" >&2; return 1 ;;
+            *-subject*) echo "subject=CN=LanCache Root CA" ;;
+        esac
+    }
+    run _ci_validate_ssl_mitm proj
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0025"*"connect:errno=111"* ]]
 }
 
 @test "validate ssl-mitm passes when :443 cert is our LAN CA" {
@@ -3625,6 +3685,15 @@ SH
     run _ci_validate_ui_session proj "${BATS_TEST_TMPDIR}/ci-test-jar"
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0030"* ]]
+    # What: a ui that never answers shows curl's last error.
+    # Why: the timeout alone does not say why.
+    # From: Issue #1683 | PR #1858
+    _ci_validate_container_ip() { echo 172.16.1.9; }
+    curl() { echo "curl: (7) Failed to connect" >&2; return 7; }
+    sleep() { :; }
+    run _ci_validate_ui_session proj "${BATS_TEST_TMPDIR}/ci-test-jar"
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0031"*"Failed to connect"* ]]
 }
 
 @test "validate ui-session extracts the CSRF token" {
