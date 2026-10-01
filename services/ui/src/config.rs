@@ -13,11 +13,6 @@ use std::fs;
 
 const DEFAULT_UI_SESSION_TTL_SECONDS: u64 = 24 * 60 * 60;
 const DEFAULT_UI_SETTINGS_FILE: &str = "/data/lancache-ui-settings.env";
-// What: default PowerDNS state dir and shared-secret dir.
-// Why: config and the root start share one value each.
-// From: Issue #858 | PR #1858
-pub const DEFAULT_DNS_STATE_DIR: &str = "/var/lib/powerdns-state";
-pub const DEFAULT_SHARED_SECRET_DIR: &str = "/var/lib/lancache-secrets";
 
 // Upper bound for SYSLOG_MAX_GB, matching watchdog.sh's maybe_prune_syslog()
 // magnitude guard (`[ "$max_gb" -gt 1048576 ]`). Without a matching ceiling
@@ -854,13 +849,13 @@ impl Config {
             standard_log,
             ssl_log,
             cache_dir,
-            dns_standard_state_dir: env_str("DNS_STANDARD_STATE_DIR", DEFAULT_DNS_STATE_DIR),
-            dns_ssl_state_dir: env_str("DNS_SSL_STATE_DIR", DEFAULT_DNS_STATE_DIR),
+            dns_standard_state_dir: env_str("DNS_STANDARD_STATE_DIR", "/var/lib/powerdns-state"),
+            dns_ssl_state_dir: env_str("DNS_SSL_STATE_DIR", "/var/lib/powerdns-state"),
             // Matches entrypoint.sh's shared-secret-bootstrap library
             // default (LANCACHE_SHARED_SECRET_DIR) exactly, so both sides
             // agree on where "ddns-tsig-key" lives without a second env var
             // most operators would never think to keep in sync.
-            shared_secret_dir: env_str("LANCACHE_SHARED_SECRET_DIR", DEFAULT_SHARED_SECRET_DIR),
+            shared_secret_dir: env_str("LANCACHE_SHARED_SECRET_DIR", "/var/lib/lancache-secrets"),
             proxy_standard_url,
             proxy_ssl_url,
             netdata_url: env_str("NETDATA_URL", "http://netdata:19999"),

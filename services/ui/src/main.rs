@@ -92,10 +92,12 @@ const CSRF_FORM_FIELD: &str = "csrf_token";
 const MAX_CSRF_BODY_BYTES: usize = 1024 * 1024;
 const MAX_UI_SESSION_TTL_SECONDS: u64 = 365 * 24 * 60 * 60;
 const SECONDARY_REGISTRATION_TOKEN_FILE: &str = "/data/lancache-secondary-registration.token";
-// What: the ui log dir; init_tracing writes ui.log there.
-// Why: root start and tracing must agree on one path.
-// From: Issue #1427 | PR #1670
-const UI_LOG_DIR: &str = "/var/log/lancache-ui";
+// What: effective ui log file (UI_LOG_FILE or the default).
+// Why: tracing and the root start must agree on one path.
+// From: Issue #633 | PR #1858
+fn ui_log_file() -> String {
+    std::env::var("UI_LOG_FILE").unwrap_or_else(|_| "/var/log/lancache-ui/ui.log".to_string())
+}
 
 // Pattern-matches every checked-in placeholder form for SECONDARY_REGISTRATION_TOKEN,
 // not just deploy/prod/.env's CHANGE_ME_SECONDARY_REGISTRATION_TOKEN default. An
@@ -249,28 +251,10 @@ fn load_or_create_secondary_registration_token(
     }
 }
 
-// What: env var -> shared-secret file the root start resolves.
-// Why: ui must match the dns/dhcp/nats first-writer value.
+// What: env suffix naming a secret's shared-secret file.
+// Why: compose owns the name, e.g. NATS_PASSWORD_SHARED_SECRET.
 // From: Issue #858 | PR #1858
-const CONTAINER_SHARED_SECRETS: &[(&str, &str)] = &[
-    ("PDNS_API_KEY", "pdns-api-key"),
-    ("NETDATA_ALARM_TOKEN", "netdata-alarm-token"),
-    ("DHCP_API_TOKEN", "kea-ctrl-token"),
-    ("NATS_UI_PASSWORD", "nats-ui-password"),
-    ("NATS_CALLOUT_PASSWORD", "nats-callout-password"),
-    ("NATS_SYS_PASSWORD", "nats-sys-password"),
-    ("NATS_DNS_WRITER_PASSWORD", "nats-dns-writer-password"),
-    ("NATS_DNS_REPLICA_PASSWORD", "nats-dns-replica-password"),
-];
-
-// What: legacy shipped DHCP_API_TOKEN defaults.
-// Why: not generically named, yet they mean "unset".
-// From: Issue #858
-const LEGACY_DHCP_API_TOKEN_DEFAULTS: &[&str] = &[
-    "lancache-dhcp-secret",
-    "lancache-dhcp-dev-secret",
-    "lancache-dhcp-prod-secret",
-];
+const SHARED_SECRET_ENV_SUFFIX: &str = "_SHARED_SECRET";
 
 // What: the shared-secret placeholder rule ("shared" column).
 // Why: every consumer of one secret must decide alike.
@@ -287,7 +271,12 @@ fn shared_secret_is_placeholder(value: &str) -> bool {
 // What: first-writer-wins read-or-create of one shared secret.
 // Why: no split-brain between independent consumers.
 // From: Issue #858 | PR #1775
-fn resolve_shared_secret(dir: &Path, name: &str, current: &str, gid: u32) -> Result<String, String> {
+fn resolve_shared_secret(
+    dir: &Path,
+    name: &str,
+    current: &str,
+    gid: u32,
+) -> Result<String, String> {
     let file = dir.join(name);
     let on_disk = || {
         fs::read_to_string(&file)
@@ -319,7 +308,11 @@ fn resolve_shared_secret(dir: &Path, name: &str, current: &str, gid: u32) -> Res
         .unwrap_or_default();
     let tmp = dir.join(format!(".secret.{}.{nanos}", std::process::id()));
     let created = fs::create_dir_all(dir).and_then(|()| {
-        let mut file = OpenOptions::new().create_new(true).write(true).mode(0o640).open(&tmp)?;
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o640)
+            .open(&tmp)?;
         file.write_all(value.as_bytes())?;
         file.sync_all()
     });
@@ -355,17 +348,46 @@ fn resolve_shared_secret(dir: &Path, name: &str, current: &str, gid: u32) -> Res
     Err(format!("cannot place {}", file.display()))
 }
 
-// What: uid and gid of a passwd entry, e.g. "lancache".
-// Why: the image's adduser owns the id, not this code.
-// From: Issue #1427
-fn passwd_ids(passwd: &str, user: &str) -> Option<(u32, u32)> {
-    passwd.lines().find_map(|line| {
-        let fields: Vec<&str> = line.split(':').collect();
-        match fields.as_slice() {
-            [name, _, uid, gid, ..] if *name == user => Some((uid.parse().ok()?, gid.parse().ok()?)),
-            _ => None,
-        }
-    })
+// What: (VAR, file) for every VAR<suffix>=file env pair.
+// Why: the deployment names each shared file; no list here.
+// From: Issue #858 | PR #1858
+fn shared_secret_requests(
+    env: impl Iterator<Item = (String, String)>,
+) -> Vec<(String, String)> {
+    let mut requests: Vec<(String, String)> = env
+        .filter_map(|(key, name)| {
+            let var = key.strip_suffix(SHARED_SECRET_ENV_SUFFIX)?;
+            (!var.is_empty() && !name.is_empty()).then(|| (var.to_string(), name))
+        })
+        .collect();
+    requests.sort();
+    requests
+}
+
+// What: dirs the ui writes, derived from its own config.
+// Why: chown follows the configured paths, no second list.
+// From: Issue #1427 | PR #1858
+fn ui_written_dirs(cfg: &config::Config, log_file: &Path) -> Vec<std::path::PathBuf> {
+    let files = [
+        &cfg.cdn_domains_file,
+        &cfg.netdata_alarms_file,
+        &cfg.nats_xkey_seed_path,
+        &cfg.desired_state_file,
+        &cfg.nats_conf_path,
+    ];
+    let mut dirs: Vec<std::path::PathBuf> = files
+        .iter()
+        .filter_map(|f| Path::new(f.as_str()).parent().map(Path::to_path_buf))
+        .chain([
+            std::path::PathBuf::from(&cfg.dns_standard_state_dir),
+            std::path::PathBuf::from(&cfg.dns_ssl_state_dir),
+        ])
+        .chain(log_file.parent().map(Path::to_path_buf))
+        .filter(|d| !d.as_os_str().is_empty())
+        .collect();
+    dirs.sort();
+    dirs.dedup();
+    dirs
 }
 
 // What: lchown a tree recursively, never following links.
@@ -404,6 +426,16 @@ fn container_start_fatal(message: &str) -> ! {
     std::process::exit(1);
 }
 
+// What: a required numeric id from the image environment.
+// Why: the Dockerfile owns the runtime uid/gid, not code.
+// From: Issue #1427 | PR #1858
+fn required_env_id(key: &str) -> u32 {
+    let raw = std::env::var(key)
+        .unwrap_or_else(|_| container_start_fatal(&format!("{key} is not set")));
+    raw.parse()
+        .unwrap_or_else(|_| container_start_fatal(&format!("{key}={raw} is not an id")))
+}
+
 // What: started as root: secrets, ownership, then exec as user.
 // Why: the server must never run as root; volumes start root.
 // From: Issue #858 | PR #1858
@@ -414,45 +446,39 @@ fn container_root_start() {
     if euid != 0 {
         return;
     }
-    let passwd = fs::read_to_string("/etc/passwd")
-        .unwrap_or_else(|e| container_start_fatal(&format!("cannot read /etc/passwd: {e}")));
-    let (uid, gid) = passwd_ids(&passwd, "lancache")
-        .unwrap_or_else(|| container_start_fatal("no lancache user in /etc/passwd"));
-    let secret_gid = match std::env::var("LANCACHE_SHARED_SECRET_GID") {
-        Ok(v) => v.parse().unwrap_or_else(|_| {
-            container_start_fatal(&format!("LANCACHE_SHARED_SECRET_GID={v} is not a gid"))
-        }),
-        Err(_) => gid,
-    };
-    let dir = std::env::var("LANCACHE_SHARED_SECRET_DIR")
-        .unwrap_or_else(|_| config::DEFAULT_SHARED_SECRET_DIR.to_string());
+    let uid = required_env_id("UI_RUNTIME_UID");
+    let gid = required_env_id("UI_RUNTIME_GID");
+    let cfg = config::Config::from_env().unwrap_or_else(|e| container_start_fatal(&e));
+    let secret_dir = Path::new(&cfg.shared_secret_dir);
     let mut resolved = Vec::new();
-    for (var, name) in CONTAINER_SHARED_SECRETS {
-        let configured = std::env::var(var).unwrap_or_default();
-        let unset = shared_secret_is_placeholder(&configured)
-            || (*var == "DHCP_API_TOKEN" && LEGACY_DHCP_API_TOKEN_DEFAULTS.contains(&configured.as_str()));
-        let current = if unset { "" } else { configured.as_str() };
-        match resolve_shared_secret(Path::new(&dir), name, current, secret_gid) {
-            Ok(value) => resolved.push((*var, value)),
+    for (var, name) in shared_secret_requests(std::env::vars()) {
+        let configured = std::env::var(&var).unwrap_or_default();
+        let current = if shared_secret_is_placeholder(&configured) {
+            ""
+        } else {
+            configured.as_str()
+        };
+        match resolve_shared_secret(secret_dir, &name, current, gid) {
+            Ok(value) => resolved.push((var, value)),
             Err(err) => container_start_fatal(&format!(
                 "{var} is unset/placeholder and no shared value could be stored ({err}). \
                  Mount the shared-secrets volume, or set {var} to the value the backend uses."
             )),
         }
     }
-    for path in ["/data", "/etc/nats", config::DEFAULT_DNS_STATE_DIR, UI_LOG_DIR] {
-        let path = Path::new(path);
-        if fs::symlink_metadata(path).is_ok()
-            && let Err(e) = chown_tree(path, uid, gid)
+    let log_file = std::path::PathBuf::from(ui_log_file());
+    for dir in ui_written_dirs(&cfg, &log_file) {
+        if fs::symlink_metadata(&dir).is_ok()
+            && let Err(e) = chown_tree(&dir, uid, gid)
         {
-            container_start_fatal(&format!("cannot chown {}: {e}", path.display()));
+            container_start_fatal(&format!("cannot chown {}: {e}", dir.display()));
         }
     }
-    let log_dir = Path::new(UI_LOG_DIR);
-    if log_dir.exists()
+    if let Some(log_dir) = log_file.parent()
+        && log_dir.exists()
         && let Err(e) = open_log_dir_to_group(log_dir)
     {
-        container_start_fatal(&format!("cannot set {UI_LOG_DIR} modes: {e}"));
+        container_start_fatal(&format!("cannot set {} modes: {e}", log_dir.display()));
     }
     let exe = std::env::current_exe()
         .unwrap_or_else(|e| container_start_fatal(&format!("cannot locate own binary: {e}")));
@@ -465,7 +491,7 @@ fn container_root_start() {
         .uid(uid)
         .gid(gid)
         .exec();
-    container_start_fatal(&format!("cannot exec as lancache: {err}"));
+    container_start_fatal(&format!("cannot exec as uid {uid}: {err}"));
 }
 
 // Additive-only migration for the `secondaries` table (issue #583): adds
@@ -1073,7 +1099,7 @@ fn init_tracing() {
     let stdout_layer = tracing_subscriber::fmt::layer();
 
     let ui_log_file =
-        std::env::var("UI_LOG_FILE").unwrap_or_else(|_| format!("{UI_LOG_DIR}/ui.log"));
+        ui_log_file();
     let file_layer = open_ui_log_file(&ui_log_file).map(|file| {
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
@@ -1620,15 +1646,48 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    // What: passwd lookup returns uid/gid; unknown user is None.
-    // Why: the exec target ids come from the image's passwd.
-    // From: Issue #1427
+    // What: only VAR_SHARED_SECRET=name pairs become requests.
+    // Why: the deployment env alone names the shared files.
+    // From: Issue #858 | PR #1858
     #[test]
-    fn passwd_ids_reads_the_named_entry() {
-        let passwd = "root:x:0:0::/root:/bin/sh\nlancache:x:10001:10001::/:/sbin/nologin\n";
-        assert_eq!(passwd_ids(passwd, "lancache"), Some((10001, 10001)));
-        assert_eq!(passwd_ids(passwd, "nobody"), None);
-        assert_eq!(passwd_ids("lancache:x:bad:1::/:/x\n", "lancache"), None);
+    fn shared_secret_requests_come_only_from_suffixed_env() {
+        let env = [
+            ("B_SHARED_SECRET", "file-b"),
+            ("A_SHARED_SECRET", "file-a"),
+            ("_SHARED_SECRET", "no-var"),
+            ("C_SHARED_SECRET", ""),
+            ("A", "value"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()));
+        assert_eq!(
+            shared_secret_requests(env.into_iter()),
+            vec![
+                ("A".to_string(), "file-a".to_string()),
+                ("B".to_string(), "file-b".to_string())
+            ]
+        );
+    }
+
+    // What: written dirs are the config paths' dirs, deduped.
+    // Why: chown must follow configuration, not a fixed list.
+    // From: Issue #1427 | PR #1858
+    #[test]
+    fn ui_written_dirs_follow_the_configured_paths() {
+        let _guard = config::env_test_lock().lock().unwrap();
+        let mut cfg = config::Config::from_env().unwrap();
+        cfg.cdn_domains_file = "/w/data/a".to_string();
+        cfg.netdata_alarms_file = "/w/data/b".to_string();
+        cfg.nats_xkey_seed_path = "/w/data/c".to_string();
+        cfg.desired_state_file = "/w/data/d".to_string();
+        cfg.nats_conf_path = "/w/nats/nats.conf".to_string();
+        cfg.dns_standard_state_dir = "/w/dns".to_string();
+        cfg.dns_ssl_state_dir = "/w/dns".to_string();
+        let dirs = ui_written_dirs(&cfg, Path::new("/w/log/ui.log"));
+        let want: Vec<std::path::PathBuf> = ["/w/data", "/w/dns", "/w/log", "/w/nats"]
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+        assert_eq!(dirs, want);
     }
 
     // What: chown walks a tree but never follows a symlink.

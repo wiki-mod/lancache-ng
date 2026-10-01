@@ -115,15 +115,15 @@ ENV VISUAL=$EDITOR
 
 COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
 COPY services/ui/src/templates /templates
-# What: dhcp-probe runs this binary with --dhcp-probe.
-# Why: retired dhcp-probe.sh; no separate script copied in.
-# From: Issue #1288
 
-# What: keeps UI's fixed runtime gid at 10001
-# Why: nginx logs share this gid; no adm compat path.
-# From: Issue #1427
-RUN addgroup -g 10001 lancache \
-    && adduser -D -H -u 10001 -G lancache -s /sbin/nologin lancache \
+# What: the one ui runtime uid/gid (10001) for user and binary.
+# Why: nginx logs share this gid; the root start drops to it.
+# From: Issue #1427 | PR #1858
+ARG UI_RUNTIME_ID=10001
+ENV UI_RUNTIME_UID=${UI_RUNTIME_ID} \
+    UI_RUNTIME_GID=${UI_RUNTIME_ID}
+RUN addgroup -g "${UI_RUNTIME_ID}" lancache \
+    && adduser -D -H -u "${UI_RUNTIME_ID}" -G lancache -s /sbin/nologin lancache \
     && mkdir -p /data /etc/nats \
     && chown -R lancache:lancache /data /etc/nats
 
@@ -136,24 +136,7 @@ RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
 
 EXPOSE 8080
 
-# Runtime defaults mirror the compose files: one shared cache path is mounted
-# read-only for dashboard reporting, while writes remain owned by proxy/watchdog.
-ENV TEMPLATE_DIR=/templates \
-    CDN_DOMAINS_FILE=/data/cdn-domains.txt \
-    STANDARD_LOG=/var/log/nginx/access.log \
-    SSL_LOG=/var/log/nginx/access.log \
-    CACHE_DIR=/var/cache/proxy \
-    PROXY_SERVICE=proxy \
-    SSL_ENABLED=1 \
-    PROXY_STANDARD_URL=http://proxy \
-    PROXY_SSL_URL=http://proxy \
-    NETDATA_URL=http://netdata:19999 \
-    DNS_STANDARD_SERVICE=dns-standard \
-    DNS_SSL_SERVICE=dns-ssl \
-    PROXY_SSL_SERVICE=proxy \
-    CACHE_MAX_GB=50
-
-# What: the binary itself does the root start, then drops.
+# What: the binary, via PATH; it does the root start itself.
 # Why: no wrapper; secrets, chown and uid drop are in Rust.
 # From: Issue #858 | PR #1858
-ENTRYPOINT ["/usr/local/bin/lancache-ui"]
+ENTRYPOINT ["lancache-ui"]
