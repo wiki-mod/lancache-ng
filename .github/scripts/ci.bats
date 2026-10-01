@@ -1236,50 +1236,6 @@ CASES
     done
 }
 
-@test "smoke fails on an entrypoint lib the image lacks" {
-    # What: real smoke path via a docker stub on PATH.
-    # Why: a missing sourced lib must fail at the digest.
-    # From: Issue #1683 | PR #1858
-    local d="${BATS_TEST_TMPDIR}/img" case kind lib rc want
-    mkdir -p "${d}"
-    printf 'services:\n  svc-a:\n    context: dir/a\n' > "${BATS_TEST_TMPDIR}/m.yml"
-    : > "${d}/lib-ok.sh"
-    mkdir -p "${d}/bin"
-    cat > "${d}/bin/docker" <<'SH'
-#!/usr/bin/env bash
-case "$1" in
-    create) [ "$2" = --quiet ] || echo "pull noise" ; echo "pull noise" >&2; echo cid-1 ;;
-    inspect) [ "$4" = cid-1 ] || { echo "no such container: $4"; exit 1; }
-        case "${KIND}" in
-            inspect-fail) echo "inspect broke"; exit 1 ;;
-            binary) echo /bin/true ;;
-            none) : ;;
-            *) echo "${EP}" ;;
-        esac ;;
-    rm) [ "$2" = cid-1 ] || { echo "no such container: $2"; exit 1; } ;;
-    run) [ "${KIND}" = run-fail ] && { echo "pull broke"; exit 125; }
-        shift 5; exec sh "$@" ;;
-    *) exit 99 ;;
-esac
-SH
-    chmod +x "${d}/bin/docker"
-    while IFS='|' read -r case kind lib rc want; do
-        printf '#!/bin/sh\nset -e\n  . "%s"\nexec true\n' "${lib}" > "${d}/ep.sh"
-        PATH="${d}/bin:${PATH}" KIND="${kind}" EP="${d}/ep.sh" \
-            CI_MANIFEST="${BATS_TEST_TMPDIR}/m.yml" CI_SERVICE_IMAGE=img \
-            run _ci_smoke_service svc-a
-        [ "${status}" -eq "${rc}" ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
-        [[ "${output}" == *"${want}"* ]] || { echo "${case}: no ${want}: ${output}"; return 1; }
-    done <<CASES
-present|script|${d}/lib-ok.sh|0|entrypoint-libs=ok sourced=1
-missing|script|${d}/lib-gone.sh|1|missing: ${d}/ep.sh sources ${d}/lib-gone.sh
-binary|binary|${d}/lib-gone.sh|0|entrypoint-libs=ok sourced=0
-none|none|${d}/lib-gone.sh|0|entrypoint-libs=SKIP
-inspect-fail|inspect-fail|${d}/lib-ok.sh|2|CI-ERROR-TEST-0009
-run-fail|run-fail|${d}/lib-ok.sh|2|CI-ERROR-TEST-0012
-CASES
-}
-
 @test "test build-tools reports ok via the wired smoke backend" {
     # What: A green smoke yields tested=ok for build-tools.
     # Why: The wired toolchain smoke is the real test.
@@ -6780,6 +6736,50 @@ EOF
     run bash "${CI_SH}" check trivy-action-direct-usage "${r}"
     [ "${status}" -eq 1 ]
     [[ "${output}" == *"a/action.yml"* ]]
+}
+
+@test "check entrypoint-lib-wiring: a sourced lib needs a final-stage COPY" {
+    # What: entrypoint source vs final-stage COPY, per case.
+    # Why: a missing lib only fails at container runtime.
+    # From: Issue #1683
+    local r="${BATS_TEST_TMPDIR}/elw" case ep src rc df want
+    mkdir -p "${r}/dir/a"
+    export CI_MANIFEST="${r}/m.yml"
+    printf '%s\n' 'services:' '  svc-a:' '    context: dir/a' \
+        'named_contexts:' '  ctx-n:' '    path: lib' > "${CI_MANIFEST}"
+    while IFS='|' read -r case ep src rc df want; do
+        rm -f "${r}/dir/a/entrypoint.sh" "${r}/dir/a/docker-entrypoint.sh"
+        if [ "${src}" = yes ]; then
+            printf '. /usr/local/lib/lib-x.sh\n' > "${r}/dir/a/${ep}"
+        else
+            printf 'echo nothing sourced\n' > "${r}/dir/a/${ep}"
+        fi
+        printf '%b\n' "${df}" > "${r}/dir/a/Dockerfile"
+        run bash "${CI_SH}" check entrypoint-lib-wiring "${r}"
+        [ "${status}" -eq "${rc}" ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
+        [[ "${output}" == *"${want}"* ]] || { echo "${case}: no ${want}: ${output}"; return 1; }
+    done <<'CASES'
+copy|entrypoint.sh|yes|0|FROM b\nCOPY lib/lib-x.sh /usr/local/lib/lib-x.sh|entrypoint-lib-wiring=clean
+no-copy|entrypoint.sh|yes|1|FROM b\nRUN echo hi|no matching final-stage COPY
+docker-ep|docker-entrypoint.sh|yes|1|FROM b\nRUN echo hi|docker-entrypoint.sh sources
+drift|entrypoint.sh|yes|1|FROM b\nCOPY lib/lib-x.sh /opt/lib/lib-x.sh|CI-ERROR-CHECK-0041
+builder-only|entrypoint.sh|yes|1|FROM b AS bs\nCOPY lib/lib-x.sh /usr/local/lib/lib-x.sh\nFROM b\nRUN echo final|CI-ERROR-CHECK-0041
+dir-copy|entrypoint.sh|yes|0|FROM b\nCOPY lib/ /usr/local/lib/|clean
+nothing-sourced|entrypoint.sh|no|0|FROM b\nRUN echo hi|clean
+from-stage|entrypoint.sh|yes|0|FROM b AS bs\nRUN echo build\nFROM b\nCOPY --from=bs /build/lib-x.sh /usr/local/lib/lib-x.sh|clean
+bad-stage|entrypoint.sh|yes|1|FROM b AS bs\nRUN echo build\nFROM b\nCOPY --from=oldbs /build/lib-x.sh /usr/local/lib/lib-x.sh|CI-ERROR-CHECK-0041
+external|entrypoint.sh|yes|0|FROM b\nCOPY --from=registry.example.test/x/y:1 /x/lib-x.sh /usr/local/lib/lib-x.sh|clean
+named-ctx|entrypoint.sh|yes|0|FROM b\nCOPY --from=ctx-n lib-x.sh /usr/local/lib/lib-x.sh|clean
+CASES
+}
+
+@test "check entrypoint-lib-wiring passes clean and meaningfully on the real repo" {
+    # What: Domain-validation consolidation live in repo.
+    # Why: Guard validates real source lines now.
+    # From: Issue #1683
+    run bash "${CI_SH}" check entrypoint-lib-wiring
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"entrypoint-lib-wiring=clean"* ]]
 }
 
 @test "check changelog-direct-edit is clean when CHANGELOG.md is untouched" {
