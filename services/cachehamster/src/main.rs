@@ -24,7 +24,9 @@ use std::time::Duration;
 use lancache_cachehamster::credential_store::{
     self, CredentialPersistence, load_or_create_master_secret,
 };
-use lancache_cachehamster::stream_fetch::{ByteCounter, fetch_many_and_discard, spawn_throughput_logger};
+use lancache_cachehamster::stream_fetch::{
+    ByteCounter, fetch_many_and_discard, spawn_throughput_logger,
+};
 
 /// What: default location for this service's own persisted secrets.
 /// Why: matches the `/data` volume convention services/ui/src/main.rs's
@@ -60,14 +62,32 @@ fn credential_is_placeholder(value: &str) -> bool {
 /// operator's own decision (maintainer directive), not something this
 /// binary should guess.
 fn resolve_credential_persistence() -> anyhow::Result<CredentialPersistence> {
-    match std::env::var("CACHEHAMSTER_CREDENTIAL_PERSISTENCE").as_deref() {
-        Ok("none") | Err(_) => Ok(CredentialPersistence::None),
-        Ok("persistent") => Ok(CredentialPersistence::Persistent),
-        Ok(other) => anyhow::bail!(
+    parse_credential_persistence(env_value("CACHEHAMSTER_CREDENTIAL_PERSISTENCE").as_deref())
+}
+
+// What: persistence mode from an already-read value.
+// Why: pure, so tests need no process-wide env change.
+// From: Issue #871 | PR #1858
+fn parse_credential_persistence(value: Option<&str>) -> anyhow::Result<CredentialPersistence> {
+    match value {
+        Some("none") | None => Ok(CredentialPersistence::None),
+        Some("persistent") => Ok(CredentialPersistence::Persistent),
+        Some(other) => anyhow::bail!(
             "CACHEHAMSTER_CREDENTIAL_PERSISTENCE must be \"none\" or \"persistent\" (or unset, defaulting \
              to \"none\"); got {other:?}"
         ),
     }
+}
+
+// What: env value; an empty value counts as unset.
+// Why: config/prod env files ship KEY= to mean unset.
+// From: Issue #871 | PR #1858
+fn env_value(name: &str) -> Option<String> {
+    non_empty(std::env::var(name).ok())
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|v| !v.is_empty())
 }
 
 /// Rejects an explicitly-set placeholder outright rather than silently
@@ -103,7 +123,7 @@ fn resolve_steam_credential(
     persistence: CredentialPersistence,
     data_dir: &str,
 ) -> anyhow::Result<Option<String>> {
-    let env_value = reject_placeholder_credential(std::env::var("CACHEHAMSTER_STEAM_CREDENTIAL").ok())?;
+    let env_value = reject_placeholder_credential(env_value("CACHEHAMSTER_STEAM_CREDENTIAL"))?;
 
     match persistence {
         CredentialPersistence::None => Ok(env_value),
@@ -261,6 +281,32 @@ mod tests {
     // *present-and-placeholder* value must be rejected outright rather
     // than silently downgraded to None -- see reject_placeholder_credential's
     // own doc comment for the AG-SEC-002/AG-OP-008 rationale.
+    // What: KEY= from an env_file is unset, not a value.
+    // Why: shipped config must start the scaffold cleanly.
+    // From: Issue #871 | PR #1858
+    #[test]
+    fn empty_env_value_counts_as_unset() {
+        assert_eq!(non_empty(Some(String::new())), None);
+        assert_eq!(non_empty(None), None);
+        assert_eq!(
+            non_empty(Some("persistent".into())),
+            Some("persistent".into())
+        );
+        assert!(matches!(
+            parse_credential_persistence(None),
+            Ok(CredentialPersistence::None)
+        ));
+        assert!(matches!(
+            parse_credential_persistence(Some("persistent")),
+            Ok(CredentialPersistence::Persistent)
+        ));
+        assert!(parse_credential_persistence(Some("bogus")).is_err());
+        assert_eq!(
+            reject_placeholder_credential(non_empty(Some(String::new()))).unwrap(),
+            None
+        );
+    }
+
     #[test]
     fn reject_placeholder_credential_passes_through_none() {
         assert_eq!(reject_placeholder_credential(None).unwrap(), None);
