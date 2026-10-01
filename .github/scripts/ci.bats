@@ -2729,83 +2729,50 @@ CASES
     [ "${status}" -eq 2 ]; [[ "${output}" == *"CI-ERROR-GC-0017"* ]]
 }
 
-@test "gc is a NOOP when the candidate set is empty" {
-    # What: Zero candidates is a clean no-op, not a failure.
-    # Why: DEFAULT=NOOP; a clean repo must exit success.
-    # From: Issue #1683
-    CI_GC_ROOTS_CMD="$(_gc_roots)" CI_GC_CANDIDATES_CMD="$(_stub cands 'true')" \
-        run bash "${CI_SH}" gc
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"result=noop candidates=0"* ]]
-}
-
-@test "gc keeps a candidate that is still referenced" {
-    # What: A referenced candidate is kept, not deleted.
-    # Why: SQLite may be stale; registry truth wins (§97).
-    # From: Issue #1683
-    CI_GC_ROOTS_CMD="$(_gc_roots)" \
-    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-abc')" \
-    CI_GC_REACHABLE_CMD="$(_stub reach 'echo referenced')" \
-        run bash "${CI_SH}" gc
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"candidate=sha-abc action=KEEP"* ]]
-}
-
-@test "gc marks an unreachable candidate DELETE in dry-run" {
-    # What: Dry-run classifies but never deletes.
-    # Why: Default dry-run per SOT deletion_policy.
-    # From: Issue #1683
-    CI_GC_ROOTS_CMD="$(_gc_roots)" \
-    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
-    CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
-        run bash "${CI_SH}" gc
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"candidate=sha-old action=DELETE mode=dry-run"* ]]
-}
-
-@test "gc fails closed on an UNKNOWN reachability verdict" {
-    # What: UNKNOWN neither deletes nor keeps.
-    # Why: UNKNOWN is a probe bug to fix, not a keep/delete.
-    # From: Issue #1683
-    CI_GC_ROOTS_CMD="$(_gc_roots)" \
-    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-x')" \
-    CI_GC_REACHABLE_CMD="$(_stub reach 'echo dunno')" \
-        run bash "${CI_SH}" gc
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-GC-0005"* ]]
-}
-
-@test "gc fails closed when the reachability probe itself fails" {
-    # What: A failed probe stops the pass.
-    # Why: No verdict means no delete decision is safe.
-    # From: Issue #1683
-    CI_GC_ROOTS_CMD="$(_gc_roots)" \
-    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-x')" \
-    CI_GC_REACHABLE_CMD="$(_stub reach 'exit 3')" \
-        run bash "${CI_SH}" gc
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-GC-0004"* ]]
-}
-
-@test "gc rejects an unknown argument" {
-    # What: An unrecognized argument must fail closed.
-    # Why: Fail-closed dispatch (AG-VAL-002).
-    # From: Issue #1683
-    run bash "${CI_SH}" gc --bogus
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-GC-0006"* ]]
-}
-
-@test "gc apply fails closed without GHCR auth" {
-    # What: Deleting artifacts is an authenticated action.
-    # Why: Never anonymous against GHCR (rate-limit).
-    # From: Issue #1683
-    CI_GC_ROOTS_CMD="$(_gc_roots)" \
-    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
-    CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
-        run bash "${CI_SH}" gc --apply
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
+@test "gc pass: every classify and apply outcome from one table" {
+    # What: one gc pass per row: rc, output, deletions.
+    # Why: keep/delete/UNKNOWN/policy/auth share one path.
+    # From: Issue #1683 | PR #1858
+    local name cands reach args auth policy rc want deleted log m w
+    local -a ge av ws
+    while IFS='|' read -r name cands reach args auth policy rc want deleted; do
+        log="${BATS_TEST_TMPDIR}/${name}.deleted"
+        ge=(-u GHCR_USERNAME -u GHCR_TOKEN CI_GC_ROOTS_CMD="$(_gc_roots)"
+            CI_GC_CANDIDATES_CMD="$(_stub "cands-${name}" "${cands}")"
+            CI_GC_DELETE_CMD="$(_stub "del-${name}" "echo \"\$1\" >> '${log}'")")
+        [ "${reach}" = - ] || ge+=(CI_GC_REACHABLE_CMD="$(_stub "reach-${name}" "${reach}")")
+        [ "${auth}" = no ] || ge+=(GHCR_USERNAME=u GHCR_TOKEN=t)
+        if [ "${policy}" != - ]; then
+            m="${BATS_TEST_TMPDIR}/${name}.yml"
+            printf 'retention:\n  deletion_policy: %s\n' "${policy}" > "${m}"
+            ge+=(CI_MANIFEST="${m}")
+        fi
+        av=(); [ "${args}" = - ] || av=("${args}")
+        run env "${ge[@]}" bash "${CI_SH}" gc "${av[@]}"
+        [ "${status}" -eq "${rc}" ] || { echo "${name}: rc ${status}: ${output}"; return 1; }
+        IFS=';' read -r -a ws <<<"${want}"
+        for w in "${ws[@]}"; do
+            [[ "${output}" == *"${w}"* ]] || { echo "${name}: no '${w}': ${output}"; return 1; }
+        done
+        if [ "${deleted}" = - ]; then
+            [ ! -e "${log}" ] || { echo "${name}: deleted $(cat "${log}")"; return 1; }
+        else
+            [[ "$(cat "${log}")" == *"${deleted}"* ]] || { echo "${name}: delete log: $(cat "${log}")"; return 1; }
+        fi
+    done <<'CASES'
+noop|true|-|-|no|-|0|result=noop candidates=0|-
+keep|echo sha-abc|echo referenced|-|no|-|0|candidate=sha-abc action=KEEP|-
+dry-run|echo sha-old|echo unreachable|-|no|-|0|candidate=sha-old action=DELETE mode=dry-run|-
+unknown|echo sha-x|echo dunno|-|no|-|2|CI-ERROR-GC-0005|-
+probe-fail|echo sha-x|exit 3|-|no|-|2|CI-ERROR-GC-0004|-
+bad-arg|true|-|--bogus|no|-|2|CI-ERROR-GC-0006|-
+apply-no-auth|echo sha-old|echo unreachable|--apply|no|-|2|CI-ERROR-BUILD-0002|-
+policy-manual|echo sha-old|echo unreachable|--apply|yes|manual-only|2|CI-ERROR-GC-0008|-
+policy-negated|echo sha-old|echo unreachable|--apply|yes|automation-forbidden|2|CI-ERROR-GC-0008|-
+apply-unknown|printf "sha-good\nsha-bad\n"|case "$1" in *good*) echo unreachable;; *) echo dunno;; esac|--apply|yes|-|2|CI-ERROR-GC-0005|-
+apply-delete|echo sha-old|echo unreachable|--apply|yes|-|0|result=classified keep=0 delete=1 deleted=1 mode=apply|sha-old
+apply-toctou|echo sha-old|f="${BATS_TEST_TMPDIR}/seen"; if [ -f "$f" ]; then echo referenced; else : > "$f"; echo unreachable; fi|--apply|yes|-|0|CI-INFO-GC-0011;deleted=0|-
+CASES
 }
 
 @test "default gc delete calls the GHCR delete endpoint by version id" {
@@ -2859,88 +2826,6 @@ CASES
     CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_gh_versions owner "fixture-repo%2Fsvc-b"
     [ "${status}" -eq 1 ]
     [ "$(cat "${cnt}")" -eq 1 ]
-}
-
-@test "gc apply refuses when the SOT policy forbids automation" {
-    # What: apply obeys the SOT deletion_policy gate.
-    # Why: A manual-only policy must block automated delete.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/sot.yml"
-    printf 'retention:\n  deletion_policy: manual-only\n' > "${m}"
-    CI_MANIFEST="${m}" \
-    CI_GC_ROOTS_CMD="$(_gc_roots)" \
-    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
-    CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
-    CI_GC_DELETE_CMD="$(_stub del 'echo "$1" >> "${BATS_TEST_TMPDIR}/deleted.log"')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" gc --apply
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-GC-0008"* ]]
-    [ ! -f "${BATS_TEST_TMPDIR}/deleted.log" ]
-}
-
-@test "gc apply denies a policy that only contains 'automation'" {
-    # What: A negated automation policy must not delete.
-    # Why: The allow-list is exact, not a substring match.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/sot.yml"
-    printf 'retention:\n  deletion_policy: automation-forbidden\n' > "${m}"
-    CI_MANIFEST="${m}" \
-    CI_GC_ROOTS_CMD="$(_gc_roots)" \
-    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
-    CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
-    CI_GC_DELETE_CMD="$(_stub del 'echo "$1" >> "${BATS_TEST_TMPDIR}/deleted.log"')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" gc --apply
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-GC-0008"* ]]
-    [ ! -f "${BATS_TEST_TMPDIR}/deleted.log" ]
-}
-
-@test "gc apply deletes nothing when any candidate is UNKNOWN" {
-    # What: One UNKNOWN aborts before the delete pass runs.
-    # Why: Two passes: classify all, then delete (safety).
-    # From: Issue #1683
-    CI_GC_ROOTS_CMD="$(_gc_roots)" \
-    CI_GC_CANDIDATES_CMD="$(_stub cands 'printf "sha-good\nsha-bad\n"')" \
-    CI_GC_REACHABLE_CMD="$(_stub reach 'case "$1" in *good*) echo unreachable;; *) echo dunno;; esac')" \
-    CI_GC_DELETE_CMD="$(_stub del 'echo "$1" >> "${BATS_TEST_TMPDIR}/deleted.log"')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" gc --apply
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-GC-0005"* ]]
-    [ ! -f "${BATS_TEST_TMPDIR}/deleted.log" ]
-}
-
-@test "gc apply deletes an unreachable candidate via the backend" {
-    # What: apply deletes verified-unreachable only.
-    # Why: The one destructive path, gated + authed.
-    # From: Issue #1683
-    CI_GC_ROOTS_CMD="$(_gc_roots)" \
-    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
-    CI_GC_REACHABLE_CMD="$(_stub reach 'echo unreachable')" \
-    CI_GC_DELETE_CMD="$(_stub del 'echo "$1" >> "${BATS_TEST_TMPDIR}/deleted.log"')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" gc --apply
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"result=classified keep=0 delete=1 deleted=1 mode=apply"* ]]
-    [[ "$(cat "${BATS_TEST_TMPDIR}/deleted.log")" == *"sha-old"* ]]
-}
-
-@test "gc apply skips a candidate that becomes referenced before delete" {
-    # What: Skip a now-referenced id before delete.
-    # Why: Check-before-write closes the TOCTOU gap.
-    # From: Issue #1683
-    CI_GC_ROOTS_CMD="$(_gc_roots)" \
-    CI_GC_CANDIDATES_CMD="$(_stub cands 'echo sha-old')" \
-    CI_GC_REACHABLE_CMD="$(_stub reach 'f="${BATS_TEST_TMPDIR}/seen"; if [ -f "$f" ]; then echo referenced; else : > "$f"; echo unreachable; fi')" \
-    CI_GC_DELETE_CMD="$(_stub del 'echo "$1" >> "${BATS_TEST_TMPDIR}/deleted.log"')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" gc --apply
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"CI-INFO-GC-0011"* ]]
-    [[ "${output}" == *"deleted=0"* ]]
-    [ ! -f "${BATS_TEST_TMPDIR}/deleted.log" ]
 }
 
 @test "gc keeps a candidate the default probe finds in the roots file" {
