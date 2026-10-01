@@ -1800,6 +1800,21 @@ _ci_docker_build() {
     # Why: ARG change reruns RUN; apk repos never do.
     # From: Issue #1683 | PR #1858
     args+=(--build-arg "BUILD_IDENTITY=${identity}")
+    # What: the build type's CI variables as build-args.
+    # Why: repo/org variables reach the builder (AG-CI-006).
+    # From: Issue #1683 | PR #1858
+    local vnames vname vval vrc
+    vnames="$(_ci_block_entry_list build_variables "" "${build_type}")"
+    while IFS= read -r vname; do
+        [ -n "${vname}" ] || continue
+        vrc=0
+        vval="$(_ci_variable_value "${vname}")" || vrc=$?
+        case "${vrc}" in
+            0) args+=(--build-arg "${vname}=${vval}") ;;
+            1) ;;
+            *) return 2 ;;
+        esac
+    done <<< "${vnames}"
     # What: value-less --build-arg passes proxy from env.
     # Why: predefined args: used by RUN, not in history.
     # From: Issue #1683 | PR #1858
@@ -5104,17 +5119,32 @@ ci_cmd_result_gate() {
 # Why: One rule, no hardcode (AG-CI-006, CARGO_BUILD_JOBS).
 # From: Issue #1683
 _ci_variable() {
-    local name="$1" val
+    local name="$1" rc=0
     if [ -z "${name}" ]; then
         ci_log "[CI-ERROR-VARIABLES-0003]" "reason=\"no variable name given\""
         return 2
     fi
-    val="${!name:-}"
-    if [ -n "${val}" ]; then printf '%s\n' "${val}"; return 0; fi
-    val="$(_ci_manifest_scalar "^  ${name}:[[:space:]]")"
-    if [ -n "${val}" ]; then printf '%s\n' "${val}"; return 0; fi
-    ci_log "[CI-ERROR-VARIABLES-0001]" "name=\"${name}\" reason=\"no env value and no SOT fallback\""
+    _ci_variable_value "${name}" || rc=$?
+    [ "${rc}" -eq 0 ] && return 0
+    [ "${rc}" -eq 1 ] && ci_log "[CI-ERROR-VARIABLES-0001]" "name=\"${name}\" reason=\"no env value, no CI_VARIABLES entry and no SOT fallback\""
     return 2
+}
+
+# What: env, then CI_VARIABLES json, then the SOT default.
+# Why: GitHub vars arrive once as json; no per-name YAML.
+# From: Issue #1683 | PR #1858
+_ci_variable_value() {
+    local name="$1" val=""
+    val="${!name:-}"
+    if [ -z "${val}" ] && [ -n "${CI_VARIABLES:-}" ]; then
+        if ! val="$(jq -er --arg n "${name}" '.[$n] // ""' <<< "${CI_VARIABLES}" 2>&1)"; then
+            ci_error "[CI-ERROR-VARIABLES-0015]" "name=\"${name}\" reason=\"CI_VARIABLES is not a json object\"" "${val}"
+            return 2
+        fi
+    fi
+    [ -n "${val}" ] || val="$(_ci_block_entry_field ci_variables "" "${name}")"
+    [ -n "${val}" ] || return 1
+    printf '%s\n' "${val}"
 }
 
 # What: The build-time secret mount ids (one source).

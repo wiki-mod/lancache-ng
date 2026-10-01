@@ -733,7 +733,7 @@ services:
     container_name: lancache-ui
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
-      # What: shared-secrets volume; the UI entrypoint (root, pre privilege-drop) resolves PDNS_API_KEY/KEA_CTRL_TOKEN from here.
+      # What: shared-secrets volume the ui reads from.
       # Why: must match the server side's resolved value.
       # From: Issue #858
       - shared-secrets:/var/lib/lancache-secrets

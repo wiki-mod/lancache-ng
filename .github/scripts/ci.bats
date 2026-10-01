@@ -3687,6 +3687,22 @@ CASES
     [ "${output}" = "45" ]
 }
 
+@test "variables get reads CI_VARIABLES json; env still wins" {
+    # What: vars json beats SOT; a set env beats the json.
+    # Why: GitHub vars arrive once as json (AG-CI-006).
+    # From: Issue #1683 | PR #1858
+    CI_VARIABLES='{"REPOSITORY_CI_LEDGER_RETENTION_DAYS":"7"}' \
+        run bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
+    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
+    [ "${output}" = "7" ]
+    REPOSITORY_CI_LEDGER_RETENTION_DAYS=9 CI_VARIABLES='{"REPOSITORY_CI_LEDGER_RETENTION_DAYS":"7"}' \
+        run bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
+    [ "${output}" = "9" ]
+    CI_VARIABLES='not json' run bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VARIABLES-0015"* ]]
+}
+
 @test "variables get fails closed with no env and no SOT default" {
     # What: An unknown variable has no value anywhere.
     # Why: Fail closed, never emit an empty value.
@@ -6829,6 +6845,29 @@ _build_fixture() {
         'release:' '  registry: registry.example.test' > "${r}/m.yml"
     cd "${r}" || return 1
     export CI_MANIFEST="${r}/m.yml" GITHUB_REPOSITORY=owner/fixture-repo
+}
+
+@test "docker-build passes the build type's SOT variables" {
+    # What: env > vars json > SOT; unset is never passed.
+    # Why: builders get repo/org vars without a YAML list.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    _build_fixture
+    printf '%s\n' 'ci_variables:' '  V_SOT: from-sot' \
+        'build_variables:' '  apk: [V_ENV, V_JSON, V_SOT, V_NONE]' >> "${CI_MANIFEST}"
+    printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    PATH="${bin}:${PATH}" V_ENV=from-env \
+        CI_VARIABLES='{"V_JSON":"from-json","V_ENV":"json-loses"}' \
+        run _ci_docker_build svc-a abc123 os/p1
+    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
+    [[ "${output}" == *"--build-arg V_ENV=from-env"* ]]
+    [[ "${output}" == *"--build-arg V_JSON=from-json"* ]]
+    [[ "${output}" == *"--build-arg V_SOT=from-sot"* ]]
+    [[ "${output}" != *"V_NONE"* ]]
+    PATH="${bin}:${PATH}" CI_VARIABLES='[' run _ci_docker_build svc-a abc123 os/p1
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VARIABLES-0015"* ]]
 }
 
 @test "docker-build builds a per-identity per-arch tag via buildx" {

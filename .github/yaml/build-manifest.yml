@@ -221,11 +221,6 @@ services:
       - bash --version
   ui:
     context: services/ui
-    # What: named context for the shared-secret lib.
-    # Why: entrypoint sources scripts/lib, not embedded.
-    # From: Issue #858
-    external_contexts:
-      - shared-secret=scripts/lib
     build_type: rust
     # What: the workspace crate (cargo -p) of this service.
     # Why: rust checks target crate not build context
@@ -239,7 +234,6 @@ services:
     packages:
       - ca-certificates
       - coreutils
-      - util-linux
       - nano
       - curl
       - lsof
@@ -538,7 +532,7 @@ dependency_graph:
   watchdog:
     contexts: []
   ui:
-    contexts: [shared-secret]
+    contexts: []
   dhcp:
     contexts: [shared-secret]
   dhcp-proxy:
@@ -617,6 +611,12 @@ ci_variables:
   # Why: AG-VAL-008: a variable, disabled by default.
   # From: Issue #1683
   CI_RUST_VALIDATION: "false"
+
+# What: CI variables each build type passes as build-args.
+# Why: builders read repo/org vars; no YAML or literal copy.
+# From: Issue #1683 | PR #1858
+build_variables:
+  rust: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT]
 
 # What: PR title taxonomy and project board for PR checks.
 # Why: AG-GH-018/008 name one CI policy owner for them.

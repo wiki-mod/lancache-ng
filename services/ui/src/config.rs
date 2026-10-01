@@ -842,6 +842,13 @@ impl Config {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| derive_lancache_image_channel(&lancache_image_tag));
         let auto_update_enabled = env_bool("AUTO_UPDATE_ENABLED", false);
+        let shared_secret_dir = env_str("LANCACHE_SHARED_SECRET_DIR", "/var/lib/lancache-secrets");
+        let secret = |var: &str| shared_secret(&shared_secret_dir, var);
+        let secret_opt = |var: &str| secret(var).map(|v| Some(v).filter(|v| !v.is_empty()));
+        let dhcp_api_token = match env::var("DHCP_API_TOKEN") {
+            Ok(v) if !shared_secret_is_placeholder(&v) => v,
+            _ => secret("KEA_CTRL_TOKEN")?,
+        };
 
         Ok(Self {
             template_dir: env_str("TEMPLATE_DIR", "/templates"),
@@ -851,11 +858,7 @@ impl Config {
             cache_dir,
             dns_standard_state_dir: env_str("DNS_STANDARD_STATE_DIR", "/var/lib/powerdns-state"),
             dns_ssl_state_dir: env_str("DNS_SSL_STATE_DIR", "/var/lib/powerdns-state"),
-            // Matches entrypoint.sh's shared-secret-bootstrap library
-            // default (LANCACHE_SHARED_SECRET_DIR) exactly, so both sides
-            // agree on where "ddns-tsig-key" lives without a second env var
-            // most operators would never think to keep in sync.
-            shared_secret_dir: env_str("LANCACHE_SHARED_SECRET_DIR", "/var/lib/lancache-secrets"),
+            shared_secret_dir: shared_secret_dir.clone(),
             proxy_standard_url,
             proxy_ssl_url,
             netdata_url: env_str("NETDATA_URL", "http://netdata:19999"),
@@ -881,7 +884,7 @@ impl Config {
             dhcp_mode,
             dhcp_api_url,
             ui_settings_file: env_str("UI_SETTINGS_FILE", DEFAULT_UI_SETTINGS_FILE),
-            dhcp_api_token: env_str("DHCP_API_TOKEN", ""),
+            dhcp_api_token,
             kea_config_snapshot_dir: env_str(
                 "KEA_CONFIG_SNAPSHOT_DIR",
                 "/var/lib/kea/config-snapshots",
@@ -900,8 +903,8 @@ impl Config {
             pdns_auth_url: env_str("PDNS_AUTH_URL", "http://dns-standard:8081"),
             pdns_rec_url: env_str("PDNS_REC_URL", "http://dns-standard:8082"),
             dns_rollback_url: env_str("DNS_ROLLBACK_URL", "http://dns-standard:8083"),
-            pdns_api_key: env_str("PDNS_API_KEY", ""),
-            netdata_alarm_token: env_str("NETDATA_ALARM_TOKEN", ""),
+            pdns_api_key: secret("PDNS_API_KEY")?,
+            netdata_alarm_token: secret("NETDATA_ALARM_TOKEN")?,
             netdata_alarms_file: env_str("NETDATA_ALARMS_FILE", "/data/netdata-alarms.json"),
             nats_url: env_str("NATS_URL", "nats://nats:4222"),
             // Issue #866: no defaults for either -- an unset value must mean
@@ -919,15 +922,15 @@ impl Config {
             // value here on purpose -- an unset var must fail startup via
             // validate_runtime_nats_credentials, never silently run with an
             // empty password.
-            nats_ui_password: env_opt("NATS_UI_PASSWORD"),
+            nats_ui_password: secret_opt("NATS_UI_PASSWORD")?,
             nats_dns_writer_user: env_str("NATS_DNS_WRITER_USER", ""),
-            nats_dns_writer_password: env_opt("NATS_DNS_WRITER_PASSWORD"),
+            nats_dns_writer_password: secret_opt("NATS_DNS_WRITER_PASSWORD")?,
             nats_dns_replica_user: env_str("NATS_DNS_REPLICA_USER", ""),
-            nats_dns_replica_password: env_opt("NATS_DNS_REPLICA_PASSWORD"),
+            nats_dns_replica_password: secret_opt("NATS_DNS_REPLICA_PASSWORD")?,
             nats_callout_user: env_str("NATS_CALLOUT_USER", ""),
-            nats_callout_password: env_opt("NATS_CALLOUT_PASSWORD"),
+            nats_callout_password: secret_opt("NATS_CALLOUT_PASSWORD")?,
             nats_sys_user: env_str("NATS_SYS_USER", ""),
-            nats_sys_password: env_opt("NATS_SYS_PASSWORD"),
+            nats_sys_password: secret_opt("NATS_SYS_PASSWORD")?,
             nats_issuer_seed_path: env_str(
                 "NATS_ISSUER_SEED_PATH",
                 "/data/lancache-nats-issuer.seed",
@@ -1044,6 +1047,41 @@ fn env_or(key: &str, default: String) -> String {
 // distinguishable from "set to an empty string").
 fn env_opt(key: &str) -> Option<String> {
     env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+// What: true for empty or a known shared-secret placeholder.
+// Why: every reader of one secret must decide alike.
+// From: Issue #967
+pub(crate) fn shared_secret_is_placeholder(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase().replace('-', "_");
+    normalized.is_empty()
+        || normalized.starts_with("change_me")
+        || normalized.starts_with("changeme")
+        || normalized.starts_with("your_")
+        || normalized.ends_with("_here")
+}
+
+// What: shared-secret file name of a variable (A_B -> a-b).
+// Why: one naming rule replaces any per-secret name list.
+// From: Issue #858 | PR #1858
+fn shared_secret_file_name(var: &str) -> String {
+    var.to_ascii_lowercase().replace('_', "-")
+}
+
+// What: a real env value, else its shared-secret file.
+// Why: backends write the file; the ui only reads it.
+// From: Issue #858 | PR #1858
+fn shared_secret(dir: &str, var: &str) -> Result<String, String> {
+    let configured = env::var(var).unwrap_or_default();
+    if !shared_secret_is_placeholder(&configured) {
+        return Ok(configured);
+    }
+    let path = std::path::Path::new(dir).join(shared_secret_file_name(var));
+    match fs::read_to_string(&path) {
+        Ok(value) => Ok(value.replace('\n', "")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("cannot read {var} from {}: {e}", path.display())),
+    }
 }
 
 // CACHE_DIR is the only runtime cache path as of v0.2.0. The pre-v0.2.0 split
@@ -1274,6 +1312,39 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // What: real env wins; placeholder/empty reads the file.
+    // Why: the ui only reads what its backend wrote.
+    // From: Issue #858 | PR #1858
+    #[test]
+    fn shared_secret_reads_the_file_unless_env_is_real() {
+        let _guard = env_test_lock().lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("lancache-ng-secret-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_str().unwrap();
+        fs::write(dir.join("lcng-test-secret"), "from-file\n").unwrap();
+        for (env_value, want) in [
+            (Some("real-value"), "real-value"),
+            (Some("CHANGE_ME_X"), "from-file"),
+            (Some(""), "from-file"),
+            (None, "from-file"),
+        ] {
+            unsafe {
+                match env_value {
+                    Some(v) => env::set_var("LCNG_TEST_SECRET", v),
+                    None => env::remove_var("LCNG_TEST_SECRET"),
+                }
+            }
+            assert_eq!(shared_secret(d, "LCNG_TEST_SECRET").unwrap(), want);
+        }
+        unsafe {
+            env::remove_var("LCNG_TEST_SECRET");
+        }
+        assert_eq!(shared_secret(d, "LCNG_TEST_ABSENT").unwrap(), "");
+        fs::create_dir(dir.join("lcng-test-dir")).unwrap();
+        assert!(shared_secret(d, "LCNG_TEST_DIR").is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     // Auto mode's entire purpose is to gate HSTS on the request's actual
     // scheme -- a plain-HTTP deployment must never receive

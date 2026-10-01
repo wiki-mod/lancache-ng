@@ -251,119 +251,6 @@ fn load_or_create_secondary_registration_token(
     }
 }
 
-// What: env suffix naming a secret's shared-secret file.
-// Why: compose owns the name, e.g. NATS_PASSWORD_SHARED_SECRET.
-// From: Issue #858 | PR #1858
-const SHARED_SECRET_ENV_SUFFIX: &str = "_SHARED_SECRET";
-
-// What: the shared-secret placeholder rule ("shared" column).
-// Why: every consumer of one secret must decide alike.
-// From: Issue #967
-fn shared_secret_is_placeholder(value: &str) -> bool {
-    let normalized = value.to_ascii_lowercase().replace('-', "_");
-    normalized.is_empty()
-        || normalized.starts_with("change_me")
-        || normalized.starts_with("changeme")
-        || normalized.starts_with("your_")
-        || normalized.ends_with("_here")
-}
-
-// What: first-writer-wins read-or-create of one shared secret.
-// Why: no split-brain between independent consumers.
-// From: Issue #858 | PR #1775
-fn resolve_shared_secret(
-    dir: &Path,
-    name: &str,
-    current: &str,
-    gid: u32,
-) -> Result<String, String> {
-    let file = dir.join(name);
-    let on_disk = || {
-        fs::read_to_string(&file)
-            .ok()
-            .map(|v| v.replace('\n', ""))
-            .filter(|v| !v.is_empty())
-    };
-    if let Some(existing) = on_disk()
-        && (current.is_empty() || existing == current)
-    {
-        return Ok(existing);
-    }
-    // What: a real configured value survives a failed write.
-    // Why: only a disagreeing on-disk value makes it unsafe.
-    // From: PR #1775
-    let conflict_now = || match on_disk() {
-        Some(v) => v != current,
-        None => file.exists(),
-    };
-    let keep_current = || !current.is_empty() && !conflict_now();
-    let value = if current.is_empty() {
-        hex::encode(rand::random::<[u8; 32]>())
-    } else {
-        current.to_string()
-    };
-    let nanos = SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    let tmp = dir.join(format!(".secret.{}.{nanos}", std::process::id()));
-    let created = fs::create_dir_all(dir).and_then(|()| {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(0o640)
-            .open(&tmp)?;
-        file.write_all(value.as_bytes())?;
-        file.sync_all()
-    });
-    if let Err(err) = created {
-        let _ = fs::remove_file(&tmp);
-        return if keep_current() {
-            Ok(current.to_string())
-        } else {
-            Err(format!("cannot write {}: {err}", tmp.display()))
-        };
-    }
-    // What: group-own the file by the reader gid, best effort.
-    // Why: some volumes refuse chgrp; 0640 stays either way.
-    // From: Issue #858
-    let _ = std::os::unix::fs::chown(&tmp, None, Some(gid));
-    let placed = if current.is_empty() {
-        fs::hard_link(&tmp, &file)
-    } else {
-        fs::rename(&tmp, &file)
-    };
-    let _ = fs::remove_file(&tmp);
-    if placed.is_ok() {
-        return Ok(value);
-    }
-    if current.is_empty()
-        && let Some(existing) = on_disk()
-    {
-        return Ok(existing);
-    }
-    if keep_current() {
-        return Ok(current.to_string());
-    }
-    Err(format!("cannot place {}", file.display()))
-}
-
-// What: (VAR, file) for every VAR<suffix>=file env pair.
-// Why: the deployment names each shared file; no list here.
-// From: Issue #858 | PR #1858
-fn shared_secret_requests(
-    env: impl Iterator<Item = (String, String)>,
-) -> Vec<(String, String)> {
-    let mut requests: Vec<(String, String)> = env
-        .filter_map(|(key, name)| {
-            let var = key.strip_suffix(SHARED_SECRET_ENV_SUFFIX)?;
-            (!var.is_empty() && !name.is_empty()).then(|| (var.to_string(), name))
-        })
-        .collect();
-    requests.sort();
-    requests
-}
-
 // What: dirs the ui writes, derived from its own config.
 // Why: chown follows the configured paths, no second list.
 // From: Issue #1427 | PR #1858
@@ -430,8 +317,8 @@ fn container_start_fatal(message: &str) -> ! {
 // Why: the Dockerfile owns the runtime uid/gid, not code.
 // From: Issue #1427 | PR #1858
 fn required_env_id(key: &str) -> u32 {
-    let raw = std::env::var(key)
-        .unwrap_or_else(|_| container_start_fatal(&format!("{key} is not set")));
+    let raw =
+        std::env::var(key).unwrap_or_else(|_| container_start_fatal(&format!("{key} is not set")));
     raw.parse()
         .unwrap_or_else(|_| container_start_fatal(&format!("{key}={raw} is not an id")))
 }
@@ -449,23 +336,6 @@ fn container_root_start() {
     let uid = required_env_id("UI_RUNTIME_UID");
     let gid = required_env_id("UI_RUNTIME_GID");
     let cfg = config::Config::from_env().unwrap_or_else(|e| container_start_fatal(&e));
-    let secret_dir = Path::new(&cfg.shared_secret_dir);
-    let mut resolved = Vec::new();
-    for (var, name) in shared_secret_requests(std::env::vars()) {
-        let configured = std::env::var(&var).unwrap_or_default();
-        let current = if shared_secret_is_placeholder(&configured) {
-            ""
-        } else {
-            configured.as_str()
-        };
-        match resolve_shared_secret(secret_dir, &name, current, gid) {
-            Ok(value) => resolved.push((var, value)),
-            Err(err) => container_start_fatal(&format!(
-                "{var} is unset/placeholder and no shared value could be stored ({err}). \
-                 Mount the shared-secrets volume, or set {var} to the value the backend uses."
-            )),
-        }
-    }
     let log_file = std::path::PathBuf::from(ui_log_file());
     for dir in ui_written_dirs(&cfg, &log_file) {
         if fs::symlink_metadata(&dir).is_ok()
@@ -487,7 +357,6 @@ fn container_root_start() {
     let err = std::process::Command::new(&exe)
         .arg0(argv0)
         .args(args)
-        .envs(resolved)
         .uid(uid)
         .gid(gid)
         .exec();
@@ -1098,8 +967,7 @@ fn init_tracing() {
         .unwrap_or_else(|_| "lancache_ui=info,warn".parse().unwrap());
     let stdout_layer = tracing_subscriber::fmt::layer();
 
-    let ui_log_file =
-        ui_log_file();
+    let ui_log_file = ui_log_file();
     let file_layer = open_ui_log_file(&ui_log_file).map(|file| {
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
@@ -1599,73 +1467,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "lancache-ng-{tag}-{}-{nanos}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("lancache-ng-{tag}-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    // What: generate once, reuse, keep a real value, never rotate.
-    // Why: a rotating handshake secret breaks every consumer.
-    // From: Issue #858 | PR #1858
-    #[test]
-    fn resolve_shared_secret_is_first_writer_wins_and_stable() {
-        let dir = unique_temp_dir("shared-secret");
-        let gid = std::fs::metadata(&dir).unwrap().gid();
-        let first = resolve_shared_secret(&dir, "s", "", gid).unwrap();
-        assert_eq!(first.len(), 64);
-        assert_eq!(resolve_shared_secret(&dir, "s", "", gid).unwrap(), first);
-        let mode = std::fs::metadata(dir.join("s")).unwrap().mode() & 0o777;
-        assert_eq!(mode, 0o640);
-        assert_eq!(
-            resolve_shared_secret(&dir, "s", "real-value", gid).unwrap(),
-            "real-value"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.join("s")).unwrap(),
-            "real-value"
-        );
-        assert_eq!(resolve_shared_secret(&dir, "s", "", gid).unwrap(), "real-value");
-        let leftovers = std::fs::read_dir(&dir).unwrap().count();
-        assert_eq!(leftovers, 1, "temp files must not remain");
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    // What: unwritable dir: real value passes, empty fails closed.
-    // Why: an unstored generated value would split the brain.
-    // From: Issue #858 | PR #1775
-    #[test]
-    fn resolve_shared_secret_fails_closed_without_a_writable_dir() {
-        let dir = unique_temp_dir("shared-secret-ro");
-        let blocker = dir.join("not-a-dir");
-        std::fs::write(&blocker, "x").unwrap();
-        assert_eq!(resolve_shared_secret(&blocker, "s", "real", 0).unwrap(), "real");
-        assert!(resolve_shared_secret(&blocker, "s", "", 0).is_err());
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    // What: only VAR_SHARED_SECRET=name pairs become requests.
-    // Why: the deployment env alone names the shared files.
-    // From: Issue #858 | PR #1858
-    #[test]
-    fn shared_secret_requests_come_only_from_suffixed_env() {
-        let env = [
-            ("B_SHARED_SECRET", "file-b"),
-            ("A_SHARED_SECRET", "file-a"),
-            ("_SHARED_SECRET", "no-var"),
-            ("C_SHARED_SECRET", ""),
-            ("A", "value"),
-        ]
-        .map(|(k, v)| (k.to_string(), v.to_string()));
-        assert_eq!(
-            shared_secret_requests(env.into_iter()),
-            vec![
-                ("A".to_string(), "file-a".to_string()),
-                ("B".to_string(), "file-b".to_string())
-            ]
-        );
     }
 
     // What: written dirs are the config paths' dirs, deduped.
@@ -2122,7 +1927,7 @@ mod tests {
     // From: Issue #967 | PR #1858
     #[test]
     fn shared_secret_is_placeholder_matches_shared_parity_fixture() {
-        assert_parity_column(1, shared_secret_is_placeholder);
+        assert_parity_column(1, config::shared_secret_is_placeholder);
     }
 
     // Covers the three states load_or_create_secondary_registration_token

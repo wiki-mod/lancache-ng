@@ -116,8 +116,8 @@ ENV VISUAL=$EDITOR
 COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
 COPY services/ui/src/templates /templates
 
-# What: the one ui runtime uid/gid (10001) for user and binary.
-# Why: nginx logs share this gid; the root start drops to it.
+# What: one ui runtime uid/gid for user and binary.
+# Why: nginx logs share it; the root start drops to it.
 # From: Issue #1427 | PR #1858
 ARG UI_RUNTIME_ID=10001
 ENV UI_RUNTIME_UID=${UI_RUNTIME_ID} \
