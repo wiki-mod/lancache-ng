@@ -94,13 +94,9 @@ for path in /var/lib/lancache-retention-state /var/log/lancache-watchdog; do
         chown -R lancache:lancache "$path"
     fi
 done
-# What: set modes as the owner after the chown above.
-# Why: root chmod on a lancache-owned path needs FOWNER.
-# From: Issue #1683
-setpriv --reuid=10001 --regid=10001 --clear-groups \
-    chmod 2750 /var/log/lancache-watchdog
-setpriv --reuid=10001 --regid=10001 --clear-groups \
-    find /var/log/lancache-watchdog -maxdepth 1 -type f -exec chmod g+r {} +
+chgrp 10001 /var/log/lancache-watchdog
+chmod 2750 /var/log/lancache-watchdog
+find /var/log/lancache-watchdog -maxdepth 1 -type f -exec chmod g+r {} +
 
 # --reuid/--regid: switch to the fixed lancache uid/gid (10001) the
 # maintainer named, matching services/ui/Dockerfile's existing account.
