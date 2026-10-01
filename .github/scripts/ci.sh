@@ -797,6 +797,17 @@ _ci_tracked_content_ids() {
     done <<< "${listing}"
 }
 
+# What: a service's apk list plus its type's runtime list.
+# Why: image and identity must see one and the same list.
+# From: Issue #1683 | PR #1858
+_ci_service_packages() {
+    local service="$1" own build_type runtime
+    own="$(_ci_block_entry_list services "${service}" packages)" || return 2
+    build_type="$(_ci_required_field "${service}" build_type)" || return 2
+    runtime="$(_ci_block_entry_list build_runtime "${build_type}" packages)" || return 2
+    printf '%s\n%s\n' "${own}" "${runtime}" | awk 'NF && !seen[$0]++'
+}
+
 # What: Print each SOT build_identity input of a type.
 # Why: SOT names the inputs; the build must match the id.
 # From: Issue #1683 | PR #1858
@@ -820,7 +831,8 @@ _ci_identity_pins() {
                 fi
                 ;;
             package_versions)
-                pkgs="$(_ci_block_entry_list services "${service}" packages | tr '\n' ' ')"
+                pkgs="$(_ci_service_packages "${service}")" || return 2
+                pkgs="$(tr '\n' ' ' <<<"${pkgs}")"
                 [ -n "${pkgs// /}" ] || continue
                 base="$(_ci_block_entry_field base_images "" alpine)"
                 arch="$(_ci_platform_apk_arch "${platform}")" || {
@@ -5727,7 +5739,8 @@ _ci_service_build_args() {
     # Why: SOT owns list; Dockerfile derives it
     # From: Issue #1683
     local apk_pkgs
-    apk_pkgs="$(_ci_block_entry_list services "${service}" packages | tr '\n' ' ')"
+    apk_pkgs="$(_ci_service_packages "${service}")" || return 2
+    apk_pkgs="$(tr '\n' ' ' <<<"${apk_pkgs}")"
     apk_pkgs="${apk_pkgs% }"
     if [ -n "${apk_pkgs}" ]; then
         out="${out}${prefix}APK_PACKAGES=${apk_pkgs}"$'\n'

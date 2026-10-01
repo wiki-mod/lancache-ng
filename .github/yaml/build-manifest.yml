@@ -521,6 +521,13 @@ build_identity:
   toolchain:
     inputs: [toolchain_source_sha, base_digest]
 
+# What: apk packages every image of a build type needs.
+# Why: musl rust binaries link libgcc_s.so.1 dynamically.
+# From: Issue #1683 | PR #1858
+build_runtime:
+  rust:
+    packages: [libgcc]
+
 # What: Per-service rebuild edges beyond its own context.
 # Why: plan picks candidates, identity decides the build.
 # From: Issue #1683
