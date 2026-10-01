@@ -4384,10 +4384,12 @@ _ci_validate_await_detached() {
 # Why: Await detach; a stale net poisons reruns.
 # From: Issue #1683 | PR #1858
 _ci_validate_network_teardown() {
-    local net_id="$1" name
+    local net_id="$1" name out
     name="$(docker network inspect "${net_id}" --format '{{.Name}}' 2>/dev/null)" || return 0
     _ci_validate_await_detached "${name}" || true
-    docker network rm "${name}" >/dev/null 2>&1 || true
+    out="$(docker network rm "${name}" 2>&1)" && return 0
+    ci_error "[CI-ERROR-VALIDATE-0053]" "network=\"${name}\" reason=\"network removal failed\"" "${out}"
+    return 2
 }
 
 # What: True for a retryable subnet collision.
@@ -4404,15 +4406,47 @@ _ci_validate_is_collision() {
 # Why: One cleanup point; runs on the fail path.
 # From: Issue #1683 | PR #1858
 _ci_validate_teardown() {
-    local holder="$1" project="$2" net_id
-    docker compose -p "${project}" \
+    local holder="$1" project="$2" net_id out rc=0 kind ids
+    local label="label=com.docker.compose.project=${project}"
+    out="$(docker compose -p "${project}" \
         -f "${CI_COMPOSE_FILE:-deploy/prod/docker-compose.yml}" \
-        down -v --remove-orphans >/dev/null 2>&1 || true
-    while IFS= read -r net_id; do
-        [ -n "${net_id}" ] || continue
-        _ci_validate_network_teardown "${net_id}"
-    done < <(docker network ls --filter "label=com.docker.compose.project=${project}" -q 2>/dev/null)
+        down -v --remove-orphans 2>&1)" || {
+        ci_error "[CI-ERROR-VALIDATE-0053]" "project=\"${project}\" reason=\"compose down failed\"" "${out}"
+        rc=2
+    }
+    # What: remove what an aborted up still left behind.
+    # Why: Created containers pin volumes; next slot breaks.
+    # From: Issue #1683
+    local -a found=()
+    for kind in container volume network; do
+        if [ "${kind}" = container ]; then
+            ids="$(docker container ls -aq --filter "${label}" 2>&1)"
+        else
+            ids="$(docker "${kind}" ls -q --filter "${label}" 2>&1)"
+        fi || {
+            ci_error "[CI-ERROR-VALIDATE-0053]" "kind=\"${kind}\" reason=\"cannot list leftovers\"" "${ids}"
+            rc=2
+            continue
+        }
+        [ -n "${ids}" ] || continue
+        mapfile -t found <<< "${ids}"
+        if [ "${kind}" = network ]; then
+            for net_id in "${found[@]}"; do
+                _ci_validate_network_teardown "${net_id}" || rc=2
+            done
+            continue
+        fi
+        out="$(docker "${kind}" rm -f "${found[@]}" 2>&1)" || {
+            ci_error "[CI-ERROR-VALIDATE-0053]" "kind=\"${kind}\" reason=\"leftover removal failed\"" "${out}"
+            rc=2
+        }
+    done
+    if [ -n "${LANCACHE_STATE_DIR:-}" ] && ! out="$(rm -rf "${LANCACHE_STATE_DIR}" 2>&1)"; then
+        ci_error "[CI-ERROR-VALIDATE-0053]" "reason=\"per-run state root not removed\"" "${out}"
+        rc=2
+    fi
     _ci_validate_release "${holder}"
+    return "${rc}"
 }
 
 # What: Bring the isolated prod stack up detached.
@@ -4916,6 +4950,15 @@ _ci_default_validate() {
     subnet="$(_ci_record_field "${reservation}" subnet)"
     holder="$(_ci_record_field "${reservation}" holder)"
     project="$(_ci_validate_project "${subnet}")" || { _ci_validate_release "${holder}"; return 2; }
+    # What: per-run state root; prod .env names the host's.
+    # Why: isolate runs; never touch a host's real state.
+    # From: Issue #1683
+    export LANCACHE_STATE_DIR="${CI_REPO_ROOT}/.ci-validate-state/${project}"
+    if ! up_out="$(mkdir -p "${LANCACHE_STATE_DIR}/cache" 2>&1)"; then
+        ci_error "[CI-ERROR-VALIDATE-0052]" "reason=\"per-run state root not creatable\"" "${up_out}"
+        _ci_validate_release "${holder}"
+        return 2
+    fi
     net_ovr="$(mktemp "${CI_TMPDIR}/ci-validate-net.XXXXXX.yml")"
     pin_ovr="$(mktemp "${CI_TMPDIR}/ci-validate-pin.XXXXXX.yml")"
     if _ci_validate_net_override "${subnet}" > "${net_ovr}" \
@@ -4941,7 +4984,7 @@ _ci_default_validate() {
     else
         rc=$?
     fi
-    _ci_validate_teardown "${holder}" "${project}"
+    _ci_validate_teardown "${holder}" "${project}" || { [ "${rc}" -ne 0 ] || rc=2; }
     rm -f "${net_ovr}" "${pin_ovr}"
     return "${rc}"
 }

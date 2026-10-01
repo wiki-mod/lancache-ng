@@ -2980,6 +2980,41 @@ netdata=sha256:n"
     [ "${status}" -ne 0 ]
 }
 
+@test "validate teardown removes leftovers and never hides a failure" {
+    # What: down + leftover sweep + state root, raw errors.
+    # Why: an aborted up left containers; masking hid it.
+    # From: Issue #1683
+    local bin="${BATS_TEST_TMPDIR}/bin" log="${BATS_TEST_TMPDIR}/docker.log" mode
+    mkdir -p "${bin}"
+    cat > "${bin}/docker" <<'SH'
+#!/usr/bin/env bash
+echo "$*" >> "${DOCKER_LOG}"
+case "$*" in
+  compose*down*) [ "${DOWN_MODE}" = fail ] && { echo "boom-down" >&2; exit 1; }; exit 0 ;;
+  "container ls"*) echo c1 ;;
+  "volume ls"*) echo v1 ;;
+  "network ls"*) : ;;
+esac
+SH
+    chmod +x "${bin}/docker"
+    for mode in ok fail; do
+        : > "${log}"
+        export LANCACHE_STATE_DIR="${BATS_TEST_TMPDIR}/state-${mode}"
+        mkdir -p "${LANCACHE_STATE_DIR}/cache"
+        PATH="${bin}:${PATH}" DOCKER_LOG="${log}" DOWN_MODE="${mode}" \
+            run _ci_validate_teardown "" proj
+        grep -qx 'container rm -f c1' "${log}"
+        grep -qx 'volume rm -f v1' "${log}"
+        [ ! -e "${LANCACHE_STATE_DIR}" ]
+        if [ "${mode}" = ok ]; then
+            [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
+        else
+            [ "${status}" -eq 2 ]
+            [[ "${output}" == *"CI-ERROR-VALIDATE-0053"*"boom-down"* ]]
+        fi
+    done
+}
+
 @test "validate default tears the stack down even when up fails" {
     # What: Teardown runs on the failure path.
     # Why: A leaked stack holds the slot, poisons reruns.
