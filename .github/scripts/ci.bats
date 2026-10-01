@@ -158,14 +158,25 @@ teardown() {
     [[ "${output}" == *"CI-ERROR-CORE-0106"*'rc="0"'*"warn"* ]]
 }
 
+# What: write <bin>/<tool>; the body comes on stdin.
+# Why: one writer for every PATH-injected tool stub.
+# From: Issue #1683 | PR #1858
+_tool_stub() {
+    local bin="$1" tool="$2"
+    mkdir -p "${bin}"
+    {
+        printf '#!/usr/bin/env bash\n'
+        cat
+    } > "${bin}/${tool}"
+    chmod +x "${bin}/${tool}"
+}
+
 # What: a tool stub that fails one matching argument.
 # Why: proves a tool error is never a clean result.
 # From: Issue #1683 | PR #1858
 _fail_stub() {
     local bin="$1" tool="$2"
-    mkdir -p "${bin}"
-    cat > "${bin}/${tool}" <<'STUB'
-#!/usr/bin/env bash
+    _tool_stub "${bin}" "${tool}" <<'STUB'
 tool="$(basename "$0")"
 for arg in "$@"; do
     if [ -n "${FAIL_MATCH:-}" ] && [[ "${arg}" == *"${FAIL_MATCH}" ]]; then
@@ -176,7 +187,6 @@ done
 PATH="${PATH#*:}"
 exec "${tool}" "$@"
 STUB
-    chmod +x "${bin}/${tool}"
 }
 
 @test "a grep read error fails every check that reads the file" {
@@ -455,8 +465,9 @@ EOF
     local b="${BATS_TEST_TMPDIR}/bundle" m="${BATS_TEST_TMPDIR}/m.yml" log="${BATS_TEST_TMPDIR}/cq.log"
     local t="${BATS_TEST_TMPDIR}/tmp" sha dl
     mkdir -p "${b}/codeql" "${t}"
-    printf '#!/usr/bin/env bash\necho "$*" >> %q\n' "${log}" > "${b}/codeql/codeql"
-    chmod +x "${b}/codeql/codeql"
+    _tool_stub "${b}/codeql" codeql <<STUB
+echo "\$*" >> "${log}"
+STUB
     tar -czf "${BATS_TEST_TMPDIR}/bundle.tgz" -C "${b}" codeql
     sha="$(sha256sum "${BATS_TEST_TMPDIR}/bundle.tgz" | cut -d' ' -f1)"
     printf 'codeql:\n  queries: [q1]\ncodeql_languages:\n  lang-a:\n    paths: [src]\nexternal_versions:\n  codeql:\n    repository: owner/tool\n    release_tag: t1\n    asset: bundle.tgz\n    sha256: %s\n' "${sha}" > "${m}"
@@ -1135,8 +1146,7 @@ _probe_stub() {
 # From: Issue #1683
 _stub() {
     local name="$1" body="$2"
-    printf '#!/usr/bin/env bash\n%s\n' "${body}" > "${BATS_TEST_TMPDIR}/${name}"
-    chmod +x "${BATS_TEST_TMPDIR}/${name}"
+    _tool_stub "${BATS_TEST_TMPDIR}" "${name}" <<<"${body}"
     printf '%s\n' "${BATS_TEST_TMPDIR}/${name}"
 }
 
@@ -1250,8 +1260,9 @@ CASES
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin" log="${BATS_TEST_TMPDIR}/cargo.log"
     mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho "$1" >> %q\n' "${log}" > "${bin}/cargo"
-    chmod +x "${bin}/cargo"
+    _tool_stub "${bin}" cargo <<STUB
+echo "\$1" >> "${log}"
+STUB
     printf '%s\n' 'services:' '  svc-r:' '    build_type: rust' '    crate: crate-r' \
         'ci_variables:' '  CI_RUST_VALIDATION: "false"' > "${BATS_TEST_TMPDIR}/m.yml"
     export CI_MANIFEST="${BATS_TEST_TMPDIR}/m.yml" PATH="${bin}:${PATH}"
@@ -1271,8 +1282,9 @@ CASES
     # From: Issue #1683 | PR #1858
     local root="${BATS_TEST_TMPDIR}/root" bin="${BATS_TEST_TMPDIR}/bin"
     mkdir -p "${root}" "${bin}"
-    printf '#!/usr/bin/env bash\necho "cargo $1 wrapper=${RUSTC_WRAPPER:-none} dir=${SCCACHE_DIR:-none} args=$*"\n' > "${bin}/cargo"
-    chmod +x "${bin}/cargo"
+    _tool_stub "${bin}" cargo <<'STUB'
+echo "cargo $1 wrapper=${RUSTC_WRAPPER:-none} dir=${SCCACHE_DIR:-none} args=$*"
+STUB
     unset SCCACHE_REDIS_URL
     CI_RUST_VALIDATION=true CI_REPO_ROOT="${root}" PATH="${bin}:${PATH}" run _ci_test_rust dns
     [ "${status}" -eq 0 ]
@@ -2127,9 +2139,7 @@ PROMOTE ${ch}" ]
 # Why: publish/sbom/vex assert gh calls without a network.
 # From: Issue #1683
 _release_gh_stub() {
-    local stub="${BATS_TEST_TMPDIR}/relgh"
-    cat > "${stub}" <<'EOF'
-#!/usr/bin/env bash
+    _tool_stub "${BATS_TEST_TMPDIR}" relgh <<'EOF'
 echo "$*" >> "${GH_CALLS}"
 if [ "$1 $2" = "release view" ]; then
     if [ -n "${STUB_VIEW_ERR:-}" ]; then
@@ -2145,7 +2155,7 @@ if [ "$1 $2" = "release view" ]; then
 fi
 exit 0
 EOF
-    chmod +x "${stub}"; printf '%s' "${stub}"
+    printf '%s' "${BATS_TEST_TMPDIR}/relgh"
 }
 
 @test "release-prerelease maps tag shape to the prerelease flag" {
@@ -2900,8 +2910,9 @@ CASES
     # From: Issue #1683 | PR #1858
     local bin="${BATS_TEST_TMPDIR}/bin"
     mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\ncase "$1 $2" in "network ls"|"compose version") exit 0 ;; *) exit 1 ;; esac\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
+    _tool_stub "${bin}" docker <<'STUB'
+case "$1 $2" in "network ls"|"compose version") exit 0 ;; *) exit 1 ;; esac
+STUB
     PATH="${bin}:${PATH}" CI_STACK_CANDIDATE_CMD="$(_stub cand 'echo proxy=sha256:x')" \
     GITHUB_REPOSITORY=owner/fixture-repo \
     CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'exit 3')" \
@@ -3105,8 +3116,7 @@ svc-x=sha256:n"
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin" log="${BATS_TEST_TMPDIR}/docker.log" mode
     mkdir -p "${bin}"
-    cat > "${bin}/docker" <<'SH'
-#!/usr/bin/env bash
+    _tool_stub "${bin}" docker <<'SH'
 echo "$*" >> "${DOCKER_LOG}"
 case "$*" in
   compose*down*) [ "${DOWN_MODE}" = fail ] && { echo "boom-down" >&2; exit 1; }; exit 0 ;;
@@ -3116,7 +3126,6 @@ case "$*" in
   run*) a="$*"; d="${a#*-v }"; d="${d%%:/s *}"; find "${d}" -mindepth 1 -delete ;;
 esac
 SH
-    chmod +x "${bin}/docker"
     local nofile="${BATS_TEST_TMPDIR}/no-compose.yml" m
     grep -v '^  CI_COMPOSE_FILE:' "${CI_MANIFEST}" > "${nofile}"
     for mode in ok fail nofile; do
@@ -4386,23 +4395,20 @@ CASES
     local name main pump ca want code
     export RB_LOG="${BATS_TEST_TMPDIR}/rb.log"
     mkdir -p "${bin}"
-    cat > "${bin}/distcc-pump" <<'STUB'
-#!/bin/sh
+    _tool_stub "${bin}" distcc-pump <<'STUB'
 echo "pump $*" >> "${RB_LOG}"
 if [ -n "${PUMP_FAIL:-}" ]; then
     echo pump-boom >&2
     exit 1
 fi
 STUB
-    cat > "${bin}/update-ca-certificates" <<'STUB'
-#!/bin/sh
+    _tool_stub "${bin}" update-ca-certificates <<'STUB'
 echo "update-ca" >> "${RB_LOG}"
 if [ -n "${CA_FAIL:-}" ]; then
     echo ca-boom >&2
     exit 1
 fi
 STUB
-    chmod +x "${bin}/distcc-pump" "${bin}/update-ca-certificates"
     cat > "${driver}" <<'DRIVER'
 source "${CI_SH}"
 _CI_RB_CA_FILE="${CA_FILE}"
@@ -4451,8 +4457,9 @@ CASES
     # From: Issue #1683 | PR #1858
     local bin="${BATS_TEST_TMPDIR}/bin"
     mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\nprintf "rustc 1.0\\nhost: arch-a-alpine-linux-musl\\n"\n' > "${bin}/rustc"
-    chmod +x "${bin}/rustc"
+    _tool_stub "${bin}" rustc <<'STUB'
+printf "rustc 1.0\nhost: arch-a-alpine-linux-musl\n"
+STUB
     PATH="${bin}:${PATH}" MUSL_TARGET=arch-b-alpine-linux-musl run bash "${CI_SH}" rust-build svc c1
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-RUSTBUILD-0006"*"host: arch-a-alpine-linux-musl"* ]]
@@ -5132,15 +5139,13 @@ CASES
     local real_git; real_git="$(command -v git)"
     local stub_bin="${BATS_TEST_TMPDIR}/stubbin"
     mkdir -p "${stub_bin}"
-    cat > "${stub_bin}/git" <<STUBEOF
-#!/usr/bin/env bash
+    _tool_stub "${stub_bin}" git <<STUBEOF
 if [ "\$1" = "diff" ]; then
     echo "simulated git diff failure" >&2
     exit 128
 fi
 exec "${real_git}" "\$@"
 STUBEOF
-    chmod +x "${stub_bin}/git"
     run env PATH="${stub_bin}:${PATH}" CHRONOLOGY_DIFF_BASE_SHA="${base_sha}" \
         CHRONOLOGY_DIFF_BASE_REF=chrono-base GITHUB_SHA="${head_sha}" \
         bash "${CI_SH}" check review-chronology
@@ -5451,8 +5456,7 @@ Fixes the thing.
     local bin="${BATS_TEST_TMPDIR}/bin" m="${BATS_TEST_TMPDIR}/m.yml" mode
     mkdir -p "${bin}"
     printf 'pr_policy:\n  project_number: 7\n' > "${m}"
-    cat > "${bin}/gh" <<'EOF'
-#!/usr/bin/env bash
+    _tool_stub "${bin}" gh <<'EOF'
 case "${MODE}" in
     failed) echo "gh: HTTP 500" >&2; exit 1 ;;
     hit) n=7 ;;
@@ -5461,7 +5465,6 @@ esac
 [[ " $* " == *" owner=owner "* ]] || n=0
 printf '{"data":{"repository":{"pullRequest":{"projectItems":{"nodes":[{"project":{"number":%s}}]}}}}}' "${n}"
 EOF
-    chmod +x "${bin}/gh"
     for mode in failed hit miss; do
         MODE="${mode}" PATH="${bin}:${PATH}" CI_MANIFEST="${m}" PR_NUMBER=12 \
             GITHUB_REPOSITORY=owner/fixture-repo CI_RETRY_MAX_ATTEMPTS=1 \
@@ -5481,8 +5484,7 @@ EOF
 _anv_setup() {
     local r="$1"
     mkdir -p "${r}/.github/workflows" "${r}/.github/actions"
-    cat > "${r}/resolver" <<'RS'
-#!/usr/bin/env bash
+    _tool_stub "${r}" resolver <<'RS'
 case "$4" in
   *deprecated*) printf 'OK\nname: x\nruns:\n  using: node16\n' ;;
   *notfound*)   printf 'NOTFOUND\n' ;;
@@ -5490,7 +5492,6 @@ case "$4" in
   *)            printf 'OK\nname: x\nruns:\n  using: node24\n' ;;
 esac
 RS
-    chmod +x "${r}/resolver"
 }
 
 # What: Run owner against fixture via fake resolver.
@@ -5556,8 +5557,7 @@ _anv_run() {
     # Why: one gh api owner; other failures are INFRA.
     # From: Issue #1683 | PR #1858
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    cat > "${bin}/gh" <<'EOF'
-#!/usr/bin/env bash
+    _tool_stub "${bin}" gh <<'EOF'
 case "$*" in
     *"o/gone/contents"*) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
     *"o/down/contents"*) echo "gh: HTTP 500" >&2; exit 1 ;;
@@ -5566,7 +5566,6 @@ case "$*" in
     *) echo "unexpected: $*" >&2; exit 1 ;;
 esac
 EOF
-    chmod +x "${bin}/gh"
     PATH="${bin}:${PATH}" CI_RETRY_MAX_ATTEMPTS=1 run _ci_fetch_action_manifest o act sub r1
     [ "${status}" -eq 0 ]
     [ "${output}" = "$(printf 'OK\nruns:\n  using: node24')" ]
@@ -5942,14 +5941,12 @@ EOF
     # Why: Fail=open/update, success=close.
     # From: Issue #1683
     local stub="${BATS_TEST_TMPDIR}/ghstub" calls="${BATS_TEST_TMPDIR}/gh-calls"
-    cat > "${stub}" <<'EOF'
-#!/usr/bin/env bash
+    _tool_stub "${BATS_TEST_TMPDIR}" ghstub <<'EOF'
 echo "$*" >> "${GH_CALLS}"
 [ "$1 $2" = "issue list" ] && printf '%s' "${STUB_EXISTING:-}"
 [ "$1 $2" = "label create" ] && [ -n "${STUB_LABEL_FAIL:-}" ] && { echo "HTTP 403" >&2; exit 1; }
 exit 0
 EOF
-    chmod +x "${stub}"
     export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=1
     : > "${calls}"; STUB_EXISTING='' CI_NIGHTLY_STATUS_CMD="${stub}" run ci_cmd_nightly_status failure "nightly promote"
     [ "${status}" -eq 0 ]; grep -q 'issue create' "${calls}"
@@ -5986,8 +5983,9 @@ EOF
     # Why: an unchecked TODO must not pass as current.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho "gh: HTTP 500" >&2; exit 1\n' > "${bin}/gh"
-    chmod +x "${bin}/gh"
+    _tool_stub "${bin}" gh <<'STUB'
+echo "gh: HTTP 500" >&2; exit 1
+STUB
     printf '# TODO(#42): revisit once fixed\n' > "${BATS_TEST_TMPDIR}/t.sh"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo CI_RETRY_MAX_ATTEMPTS=1 \
         run bash "${CI_SH}" check governance-guards "${BATS_TEST_TMPDIR}/t.sh"
@@ -6472,8 +6470,7 @@ _prod_state_wiring_fixture() {
     export DLOG="${BATS_TEST_TMPDIR}/cc.log"
     mkdir -p "${r}/dep" "${r}/oth" "${bin}"
     : > "${r}/dep/c.yml"; : > "${r}/oth/c.yml"; : > "${r}/oth/.env"
-    cat > "${bin}/docker" <<'SH'
-#!/usr/bin/env bash
+    _tool_stub "${bin}" docker <<'SH'
 echo "$* LISTEN_IP=${LISTEN_IP:-}" >> "${DLOG}"
 case "$*" in
   *"config --profiles"*)
@@ -6483,7 +6480,6 @@ case "$*" in
   *"config --quiet"*) [ -n "${WARN:-}" ] && echo "level=warning drift"; exit 0 ;;
 esac
 SH
-    chmod +x "${bin}/docker"
     printf '%s\n' 'ci_variables:' '  CI_COMPOSE_FILE: dep/c.yml' 'validation:' \
         '  compose_targets: oth/c.yml' '  compose_env_file_targets: oth/c.yml' \
         '  compose_validation_env: LISTEN_IP=fx' > "${m}"
@@ -7317,8 +7313,9 @@ _build_fixture() {
     _build_fixture
     printf '%s\n' 'ci_variables:' '  V_SOT: from-sot' \
         'build_variables:' '  apk: [V_ENV, V_JSON, V_SOT, V_NONE]' >> "${CI_MANIFEST}"
-    printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
+    _tool_stub "${bin}" docker <<'STUB'
+echo "docker $*"
+STUB
     PATH="${bin}:${PATH}" V_ENV=from-env \
         CI_VARIABLES='{"V_JSON":"from-json","V_ENV":"json-loses"}' \
         run _ci_docker_build svc-a abc123 os/p1
@@ -7338,8 +7335,9 @@ _build_fixture() {
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     _build_fixture
-    printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
+    _tool_stub "${bin}" docker <<'STUB'
+echo "docker $*"
+STUB
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
         run _ci_docker_build svc-a abc123 os/p1
     [ "${status}" -eq 0 ]
@@ -7375,8 +7373,9 @@ _build_fixture() {
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     _build_fixture
-    printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
+    _tool_stub "${bin}" docker <<'STUB'
+echo "docker $*"
+STUB
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
         run _ci_docker_build svc-a abc123 os/p1
     [ "${status}" -eq 0 ]
@@ -7390,8 +7389,9 @@ _build_fixture() {
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     _build_fixture
-    printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
+    _tool_stub "${bin}" docker <<'STUB'
+echo "docker $*"
+STUB
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
         CI_BUILD_CACHE_FROM="type=registry,ref=registry.example.test/owner/fixture-repo/svc-a:cache" \
         CI_BUILD_CACHE_TO="type=registry,ref=registry.example.test/owner/fixture-repo/svc-a:cache,mode=max" \
@@ -7418,8 +7418,7 @@ _build_fixture() {
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     _build_fixture
-    cat > "${bin}/docker" <<'EOF'
-#!/usr/bin/env bash
+    _tool_stub "${bin}" docker <<'EOF'
 case "$*" in
     *"--cache-from"*)
         echo "importing cache manifest from target" >&2
@@ -7429,7 +7428,6 @@ case "$*" in
     *) echo "docker $*" ;;
 esac
 EOF
-    chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
         CI_BUILD_CACHE_FROM="type=registry,ref=registry.example.test/owner/fixture-repo/svc-a:cache" \
         run _ci_docker_build svc-a abc123 os/p1
@@ -7445,8 +7443,9 @@ EOF
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     _build_fixture
-    printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
+    _tool_stub "${bin}" docker <<'STUB'
+echo "docker $*"
+STUB
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
         CI_BUILD_CACHE_TO="type=registry,ref=registry.example.test/owner/fixture-repo/svc-a:cache,ignore-error=false" \
         run _ci_docker_build svc-a abc123 os/p1
@@ -7461,8 +7460,9 @@ EOF
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     _build_fixture
-    printf '#!/usr/bin/env bash\necho "docker $*"\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
+    _tool_stub "${bin}" docker <<'STUB'
+echo "docker $*"
+STUB
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
         CI_BUILD_CACHE_TO="registry.example.test/owner/fixture-repo/svc-a:cache" \
         run _ci_docker_build svc-a abc123 os/p1
@@ -7477,8 +7477,9 @@ EOF
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     _build_fixture
-    printf '#!/usr/bin/env bash\ncase "$*" in *"imagetools inspect"*) echo sha256:deadbeef ;; *) : ;; esac\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
+    _tool_stub "${bin}" docker <<'STUB'
+case "$*" in *"imagetools inspect"*) echo sha256:deadbeef ;; *) : ;; esac
+STUB
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
         run _ci_docker_publish svc-a abc123 os/p1
     [ "${status}" -eq 0 ]
@@ -7543,15 +7544,13 @@ EOF
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     _build_fixture
     local buildmarker="${BATS_TEST_TMPDIR}/build-was-called"
-    cat > "${bin}/docker" <<EOF
-#!/usr/bin/env bash
+    _tool_stub "${bin}" docker <<EOF
 case "\$*" in
     *"buildx build"*) printf 'called\n' >> "${buildmarker}"; exit 0 ;;
     *"push "*) echo "connection reset by peer" >&2; exit 1 ;;
     *) : ;;
 esac
 EOF
-    chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
     CI_RETRY_BACKOFF_BASE_SECONDS=0 CI_RETRY_MAX_ATTEMPTS=3 \
         run _ci_docker_publish svc-a abc123 os/p1
@@ -7566,8 +7565,7 @@ EOF
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     _build_fixture
     local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
-    cat > "${bin}/docker" <<EOF
-#!/usr/bin/env bash
+    _tool_stub "${bin}" docker <<EOF
 case "\$*" in
     *"buildx build"*)
         n="\$(( \$(cat "${cnt}") + 1 ))"; printf '%s' "\$n" > "${cnt}"
@@ -7580,7 +7578,6 @@ case "\$*" in
     *) : ;;
 esac
 EOF
-    chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo CI_RETRY_BACKOFF_BASE_SECONDS=0 \
         run _ci_docker_build svc-a abc123 os/p1
     [ "${status}" -eq 0 ]
@@ -7594,8 +7591,7 @@ EOF
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     _build_fixture
     local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
-    cat > "${bin}/docker" <<EOF
-#!/usr/bin/env bash
+    _tool_stub "${bin}" docker <<EOF
 case "\$*" in
     *"buildx build"*)
         printf '%s' "\$(( \$(cat "${cnt}") + 1 ))" > "${cnt}"
@@ -7603,7 +7599,6 @@ case "\$*" in
     *) : ;;
 esac
 EOF
-    chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo CI_RETRY_BACKOFF_BASE_SECONDS=0 \
         run _ci_docker_build svc-a abc123 os/p1
     [ "${status}" -eq 2 ]
@@ -7639,15 +7634,17 @@ _trivy_stub() {
     local mode="$1" bin="${BATS_TEST_TMPDIR}/bin"
     mkdir -p "${bin}"
     {
-        printf '#!/usr/bin/env bash\nout=""\n'
-        printf 'while [ $# -gt 0 ]; do [ "$1" = --output ] && out="$2"; shift; done\n'
-        case "${mode}" in
-            clean)   printf '[ -n "$out" ] && : > "$out"\nexit 0\n' ;;
-            finding) printf '[ -n "$out" ] && echo "HIGH vuln" > "$out"\nexit 1\n' ;;
-            db)      printf 'echo "failed to download vulnerability DB" >&2\nexit 1\n' ;;
-        esac
-    } > "${bin}/trivy"
-    chmod +x "${bin}/trivy"
+        printf 'mode=%s\n' "${mode}"
+        cat <<'STUB'
+out=""
+while [ $# -gt 0 ]; do [ "$1" = --output ] && out="$2"; shift; done
+case "${mode}" in
+    clean) [ -n "$out" ] && : > "$out"; exit 0 ;;
+    finding) [ -n "$out" ] && echo "HIGH vuln" > "$out"; exit 1 ;;
+    db) echo "failed to download vulnerability DB" >&2; exit 1 ;;
+esac
+STUB
+    } | _tool_stub "${bin}" trivy
     printf '%s' "${bin}"
 }
 
@@ -7705,13 +7702,13 @@ _trivy_stub() {
     local vt; vt="$(_trivy_var_tmp_dir)"
     export TLOG="${BATS_TEST_TMPDIR}/t.log"; : > "${TLOG}"
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    {
-        printf '#!/usr/bin/env bash\n'
-        printf 'printf "%%s\\n" "$*" >> "%s"\n' "${TLOG}"
-        printf 'out=""\nwhile [ $# -gt 0 ]; do [ "$1" = --output ] && out="$2"; shift; done\n'
-        printf '[ -n "$out" ] && : > "$out"\nexit 0\n'
-    } > "${bin}/trivy"
-    chmod +x "${bin}/trivy"
+    _tool_stub "${bin}" trivy <<'STUB'
+printf "%s\n" "$*" >> "${TLOG}"
+out=""
+while [ $# -gt 0 ]; do [ "$1" = --output ] && out="$2"; shift; done
+[ -n "$out" ] && : > "$out"
+exit 0
+STUB
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
     CI_TRIVY_SHARED_DIR="${vt}/no-shared" \
     CI_TRIVY_FALLBACK_DIR="${vt}/trivy-cache" \
@@ -7867,12 +7864,10 @@ _trivy_stub() {
     # Why: portably simulates a reclaim rm -rf that fails.
     # From: Issue #1683 | PR #1858
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    {
-        printf '#!/usr/bin/env bash\n'
-        printf 'for a; do [ "$a" = "%s" ] && exit 0; done\n' "${lock}"
-        printf 'exec /bin/rm "$@"\n'
-    } > "${bin}/rm"
-    chmod +x "${bin}/rm"
+    _tool_stub "${bin}" rm <<STUB
+for a; do [ "\$a" = "${lock}" ] && exit 0; done
+exec /bin/rm "\$@"
+STUB
     PATH="${bin}:${PATH}" CI_TRIVY_LOCK_POLL=1 \
         run _ci_trivy_db_lock_run "${cache}" 10 5 -- true
     [ "${status}" -eq 2 ]
@@ -7934,13 +7929,11 @@ _trivy_stub() {
     local cache="${BATS_TEST_TMPDIR}/stale"; mkdir -p "${cache}"
     local next; next="$(date -u -d '+1 day' '+%Y-%m-%dT%H:%M:%SZ')"
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    cat > "${bin}/dl" <<EOF
-#!/usr/bin/env bash
+    _tool_stub "${bin}" dl <<EOF
 mkdir -p "${cache}/db"
 printf 'x' > "${cache}/db/trivy.db"
 printf '{"NextUpdate":"%s"}' "${next}" > "${cache}/db/metadata.json"
 EOF
-    chmod +x "${bin}/dl"
     CI_TRIVY_DB_DOWNLOAD_CMD="${bin}/dl" \
     CI_TRIVY_LOCK_TIMEOUT=5 CI_TRIVY_LOCK_STALE=60 CI_TRIVY_LOCK_POLL=1 \
         run _ci_trivy_db_ensure_fresh "${cache}"
@@ -7977,8 +7970,9 @@ EOF
     # Why: expected == registry digest continues (§23).
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho sha256:match\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
+    _tool_stub "${bin}" docker <<'STUB'
+echo sha256:match
+STUB
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" verify ui sha256:match os/p1
     [ "${status}" -eq 0 ]
@@ -7991,8 +7985,12 @@ EOF
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     local log="${BATS_TEST_TMPDIR}/create.log"
-    printf '#!/usr/bin/env bash\ncase "$*" in *"imagetools create"*) echo "$*" >> "%s" ;; *"imagetools inspect"*) echo sha256:idx ;; esac\n' "${log}" > "${bin}/docker"
-    chmod +x "${bin}/docker"
+    _tool_stub "${bin}" docker <<STUB
+case "\$*" in
+    *"imagetools create"*) echo "\$*" >> "${log}" ;;
+    *"imagetools inspect"*) echo sha256:idx ;;
+esac
+STUB
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo GITHUB_SHA=deadbeef \
         run _ci_docker_assemble svc-a os/p1=sha256:aaa os/p2=sha256:bbb
     [ "${status}" -eq 0 ]
@@ -8117,8 +8115,7 @@ _cas_setup() {
     local realgit; realgit="$(command -v git)"
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
-    cat > "${bin}/git" <<EOF
-#!/usr/bin/env bash
+    _tool_stub "${bin}" git <<EOF
 case "\$*" in
     *"fetch --quiet"*)
         n="\$(( \$(cat "${cnt}") + 1 ))"; printf '%s' "\$n" > "${cnt}"
@@ -8127,7 +8124,6 @@ case "\$*" in
 esac
 exec "${realgit}" "\$@"
 EOF
-    chmod +x "${bin}/git"
     PATH="${bin}:${PATH}" CI_RETRY_BACKOFF_BASE_SECONDS=0 \
         run _ci_lock_release origin refs/ci/lock/t holder-a
     [ "${status}" -eq 0 ]
@@ -8143,8 +8139,7 @@ EOF
     local realgit; realgit="$(command -v git)"
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
-    cat > "${bin}/git" <<EOF
-#!/usr/bin/env bash
+    _tool_stub "${bin}" git <<EOF
 case "\$*" in
     *"fetch --quiet"*)
         printf '%s' "\$(( \$(cat "${cnt}") + 1 ))" > "${cnt}"
@@ -8152,7 +8147,6 @@ case "\$*" in
 esac
 exec "${realgit}" "\$@"
 EOF
-    chmod +x "${bin}/git"
     PATH="${bin}:${PATH}" CI_RETRY_BACKOFF_BASE_SECONDS=0 \
         run _ci_lock_release origin refs/ci/lock/t holder-a
     [ "${status}" -eq 1 ]
@@ -8168,8 +8162,7 @@ EOF
     local realgit; realgit="$(command -v git)"
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
-    cat > "${bin}/git" <<EOF
-#!/usr/bin/env bash
+    _tool_stub "${bin}" git <<EOF
 case "\$*" in
     *"fetch --quiet"*)
         printf '%s' "\$(( \$(cat "${cnt}") + 1 ))" > "${cnt}"
@@ -8177,7 +8170,6 @@ case "\$*" in
 esac
 exec "${realgit}" "\$@"
 EOF
-    chmod +x "${bin}/git"
     PATH="${bin}:${PATH}" CI_RETRY_BACKOFF_BASE_SECONDS=0 CI_RETRY_MAX_ATTEMPTS=3 \
         run _ci_lock_release origin refs/ci/lock/t holder-a
     [ "${status}" -eq 1 ]
@@ -8332,8 +8324,10 @@ EOF
     # Why: not-found is the only build-eligible miss.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho "registry.example.test/x: not found: manifest unknown" >&2\nexit 1\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
+    _tool_stub "${bin}" docker <<'STUB'
+echo "registry.example.test/x: not found: manifest unknown" >&2
+exit 1
+STUB
     PATH="${bin}:${PATH}" run _ci_registry_probe registry.example.test/x/y:z
     [ "${status}" -eq 1 ]
 }
@@ -8343,8 +8337,10 @@ EOF
     # Why: real CI shape; it drove every target UNKNOWN.
     # From: Issue #1683 | PR #1858
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho "ERROR: registry.example.test/x/y:z: not found" >&2\nexit 1\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
+    _tool_stub "${bin}" docker <<'STUB'
+echo "ERROR: registry.example.test/x/y:z: not found" >&2
+exit 1
+STUB
     PATH="${bin}:${PATH}" run _ci_registry_probe registry.example.test/x/y:z
     [ "${status}" -eq 1 ]
 }
@@ -8354,8 +8350,10 @@ EOF
     # Why: a credential problem is not a missing artifact.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho "denied: requested access to the resource" >&2\nexit 1\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
+    _tool_stub "${bin}" docker <<'STUB'
+echo "denied: requested access to the resource" >&2
+exit 1
+STUB
     PATH="${bin}:${PATH}" run _ci_registry_probe registry.example.test/x/y:z
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"[CI-WARN-RESOLVE-0007]"* ]]
@@ -8367,8 +8365,9 @@ EOF
     # Why: the happy path feeds the resolver.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho sha256:ok\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
+    _tool_stub "${bin}" docker <<'STUB'
+echo sha256:ok
+STUB
     PATH="${bin}:${PATH}" run _ci_registry_probe registry.example.test/x/y:z
     [ "${status}" -eq 0 ]
     [ "${output}" = sha256:ok ]
@@ -8419,14 +8418,12 @@ CASES
     # Why: reconcile compares against the real registry.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    cat > "${bin}/docker" <<'SH'
-#!/usr/bin/env bash
+    _tool_stub "${bin}" docker <<'SH'
 case "$*" in
   *--raw*) echo '{"manifests":[{"platform":{"os":"os","architecture":"p1"},"digest":"sha256:a"},{"platform":{"os":"os","architecture":"p2"},"digest":"sha256:b"},{"platform":{"os":"unknown","architecture":"unknown"},"digest":"sha256:att"}]}' ;;
   *) echo sha256:idx ;;
 esac
 SH
-    chmod +x "${bin}/docker"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo GITHUB_SHA=deadbeef \
         run _ci_index_lookup ui
     [ "${status}" -eq 0 ]
@@ -8441,8 +8438,10 @@ SH
     # Why: assemble then creates one from accepted digests.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho "not found: manifest unknown" >&2\nexit 1\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
+    _tool_stub "${bin}" docker <<'STUB'
+echo "not found: manifest unknown" >&2
+exit 1
+STUB
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo GITHUB_SHA=deadbeef \
         run _ci_index_lookup ui
     [ "${status}" -eq 1 ]
@@ -8453,8 +8452,10 @@ SH
     # Why: transient must not read as a missing platform.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho "Connection reset by peer" >&2\nexit 1\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
+    _tool_stub "${bin}" docker <<'STUB'
+echo "Connection reset by peer" >&2
+exit 1
+STUB
     PATH="${bin}:${PATH}" run _ci_index_raw registry.example.test/owner/fixture-repo/ui:sha-deadbeef
     [ "${status}" -eq 2 ]
 }
@@ -8464,8 +8465,10 @@ SH
     # Why: real miss drives assembly, not transient.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    printf '#!/usr/bin/env bash\necho "not found: manifest unknown" >&2\nexit 1\n' > "${bin}/docker"
-    chmod +x "${bin}/docker"
+    _tool_stub "${bin}" docker <<'STUB'
+echo "not found: manifest unknown" >&2
+exit 1
+STUB
     PATH="${bin}:${PATH}" run _ci_index_raw registry.example.test/owner/fixture-repo/ui:sha-deadbeef
     [ "${status}" -eq 1 ]
 }
@@ -8476,8 +8479,7 @@ SH
     # From: Issue #1683 | PR #1858
     local bin="${BATS_TEST_TMPDIR}/bin" mode
     mkdir -p "${bin}"
-    cat > "${bin}/docker" <<'SH'
-#!/usr/bin/env bash
+    _tool_stub "${bin}" docker <<'SH'
 case "${MODE}:$*" in
   nohost:version*) exit 1 ;;
   *:version*) echo "os/p9" ;;
@@ -8487,7 +8489,6 @@ case "${MODE}:$*" in
   *) echo "Connection reset by peer" >&2; exit 1 ;;
 esac
 SH
-    chmod +x "${bin}/docker"
     ci_services() { printf 'svc-a\nsvc-b\n'; }
     _ci_identity_for() { echo "id-$1"; }
     MODE=ok PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo run _ci_stack_candidate_pr
@@ -8582,8 +8583,11 @@ SH
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
     local log="${BATS_TEST_TMPDIR}/create.log"
-    printf '#!/usr/bin/env bash\ncase "$*" in *"imagetools create"*) echo "$*" >> "%s" ;; esac\n' "${log}" > "${bin}/docker"
-    chmod +x "${bin}/docker"
+    _tool_stub "${bin}" docker <<STUB
+case "\$*" in
+    *"imagetools create"*) echo "\$*" >> "${log}" ;;
+esac
+STUB
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
         run _ci_default_channel_move svc-a latest sha256:abc
     [ "${status}" -eq 0 ]
@@ -8597,14 +8601,12 @@ SH
     # Why: one digest reader confirms the promotion.
     # From: Issue #1683
     local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    cat > "${bin}/docker" <<'EOF'
-#!/usr/bin/env bash
+    _tool_stub "${bin}" docker <<'EOF'
 case " $* " in
     *" --raw "*) printf '%s\n' "${INDEX_JSON}" ;;
     *) echo sha256:chan ;;
 esac
 EOF
-    chmod +x "${bin}/docker"
     INDEX_JSON='{"manifests":[{"digest":"sha256:c1","platform":{"os":"o","architecture":"a"}}]}' \
         PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
         run _ci_default_channel_readback svc-a latest
@@ -9151,8 +9153,9 @@ _run_apk_setup() {
     local logf="${BATS_TEST_TMPDIR}/apk-setup.log" d="${BATS_TEST_TMPDIR}/apk-setup-bin" t
     rm -f "${logf}"; mkdir -p "${d}"
     for t in sed apk; do
-        printf '#!/usr/bin/env bash\nprintf "%%s %%s\\n" "$(basename "$0")" "$*" >> "%s"\n' "${logf}" > "${d}/${t}"
-        chmod +x "${d}/${t}"
+        _tool_stub "${d}" "${t}" <<STUB
+printf "%s %s\\n" "\$(basename "\$0")" "\$*" >> "${logf}"
+STUB
     done
     PATH="${d}:${PATH}" bash "${CI_SH}" apk-setup "$@"
     cat "${logf}" 2>/dev/null || true
@@ -9253,8 +9256,9 @@ _kgs_fingerprint() {
     local cmd lib sb t first frag u dep
     mkdir -p "${bin}"
     for t in nats-server chown chgrp; do
-        printf '#!/bin/sh\nexit 0\n' > "${bin}/${t}"
-        chmod +x "${bin}/${t}"
+        _tool_stub "${bin}" "${t}" <<'STUB'
+exit 0
+STUB
     done
     dep="$(_ci_variable CI_COMPOSE_FILE)"
     cmd="$(docker compose -f "${root}/${dep}" \
