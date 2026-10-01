@@ -338,6 +338,58 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    // What: one fixed state, a fresh map each call.
+    // Why: the main loop rebuilds the map every cycle.
+    // From: Issue #1683
+    fn fixed_status(ssl: bool) -> WatchdogStatus {
+        let mut services = HashMap::new();
+        let mut names = vec!["lancache-proxy", "lancache-dns"];
+        if ssl {
+            names.push("lancache-dns-ssl");
+        }
+        for name in names {
+            let health = ServiceHealth::from_reading(&HealthReading::Healthy, 0);
+            services.insert(name.to_string(), health);
+        }
+        WatchdogStatus {
+            updated: "2026-01-02T03:04:05Z".to_string(),
+            services,
+            disk: DiskInfo {
+                cache: DiskHealth {
+                    pct: 12,
+                    status: "green".to_string(),
+                },
+            },
+        }
+    }
+
+    #[test]
+    // What: repeat writes of one state parse back equal.
+    // Why: AG-OP-006; map order may vary, content must not.
+    // From: Issue #1683
+    fn repeated_write_status_converges_to_one_document() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("lancache-watchdog-repeat-{nonce}"));
+        let path = dir.join("status.json");
+        for ssl in [false, true] {
+            let mut docs = Vec::new();
+            for _ in 0..3 {
+                write_status(&path, &fixed_status(ssl)).expect("write_status");
+                let raw = fs::read_to_string(&path).expect("status.json");
+                let doc: serde_json::Value = serde_json::from_str(&raw).expect("json");
+                docs.push(doc);
+            }
+            assert!(docs.windows(2).all(|w| w[0] == w[1]));
+            let keys = docs[0]["services"].as_object().expect("map").len();
+            assert_eq!(keys, if ssl { 3 } else { 2 });
+            assert!(!dir.join("status.json.tmp").exists());
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     fn desired_state_temp_path(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

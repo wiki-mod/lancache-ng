@@ -477,4 +477,40 @@ mod tests {
         // Reachable again while already at 0: no recovery to report.
         assert_eq!(counter.record(true), AlertAction::None);
     }
+
+    // What: one full unhealthy cycle (threshold 3).
+    // Why: shared by the repeat-cycle test below.
+    // From: Issue #1683
+    fn unhealthy_cycle(counter: &mut FailureCounter) -> Vec<Action> {
+        (0..3)
+            .map(|_| counter.record(&HealthReading::Unhealthy, 3))
+            .collect()
+    }
+
+    #[test]
+    // What: repeat cycles restart once each, then reset.
+    // Why: AG-OP-006; repeats must not drift or stack.
+    // From: Issue #1683
+    fn repeated_cycles_restart_once_each_and_converge() {
+        let mut counter = FailureCounter::default();
+        let first = unhealthy_cycle(&mut counter);
+        let restarts = first
+            .iter()
+            .filter(|a| matches!(a, Action::Restart { .. }))
+            .count();
+        assert_eq!(restarts, 1);
+        for _ in 0..4 {
+            assert_eq!(unhealthy_cycle(&mut counter), first);
+            assert_eq!(counter.0, 0);
+        }
+        for _ in 0..3 {
+            counter.record(&HealthReading::Unhealthy, 3);
+            counter.record(&HealthReading::Unhealthy, 3);
+            assert_eq!(
+                counter.record(&HealthReading::Healthy, 3),
+                Action::Recovered
+            );
+            assert_eq!(counter.0, 0);
+        }
+    }
 }

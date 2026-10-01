@@ -7230,7 +7230,7 @@ _ci_check_naming_consistency() {
     local -a compose_files=("${root}/deploy/prod/docker-compose.yml" "${root}/deploy/quickstart/docker-compose.yml")
     local proxy_sh="${root}/scripts/untracked/docker-socket-proxy.sh"
     local docker_client_rs="${root}/services/ui/src/docker_client.rs"
-    local watchdog_sh="${root}/services/watchdog/watchdog.sh"
+    local watchdog_rs="${root}/services/watchdog/src/config.rs"
     local ui_config_rs="${root}/services/ui/src/config.rs"
     local -a viol=()
     local cf
@@ -7278,13 +7278,13 @@ _ci_check_naming_consistency() {
         done <<<"${dc_names}"
     fi
 
-    if [ -f "${watchdog_sh}" ]; then
+    if [ -f "${watchdog_rs}" ]; then
         local wd_names name
-        wd_names="$(grep -oE '\$\{CONTAINER_[A-Z_]+:-lancache-[a-z0-9-]+\}' "${watchdog_sh}" | grep -oE 'lancache-[a-z0-9-]+' | sort -u)"
-        [ -n "${wd_names}" ] || viol+=("${watchdog_sh}: no CONTAINER_*:-lancache-* defaults found")
+        wd_names="$(grep -oE 'const [A-Z_]+: &str = "lancache-[a-z0-9-]+"' "${watchdog_rs}" | grep -oE 'lancache-[a-z0-9-]+' | sort -u)"
+        [ -n "${wd_names}" ] || viol+=("${watchdog_rs}: no const lancache-* container names found")
         while IFS= read -r name; do
             [ -n "${name}" ] || continue
-            _ci_name_in_allowlist "${name}" || viol+=("${watchdog_sh}: defaults '${name}' not in allowlist")
+            _ci_name_in_allowlist "${name}" || viol+=("${watchdog_rs}: names '${name}' not in allowlist")
         done <<<"${wd_names}"
     fi
 
@@ -7711,160 +7711,6 @@ _ci_check_dependabot_docker_base_consistency() {
     fi
     printf 'dependabot-docker-base-consistency=clean dockerfiles=%s blocks=%s\n' \
         "${#base_image_of[@]}" "${#distinct_blocks[@]}"
-}
-
-# What: SOT writer|evidence|marker repeat-run test pairs.
-# Why: the SOT owns the inventory; empty fails closed.
-# From: Issue #1683 | PR #1858
-_ci_idempotence_writer_evidence() {
-    local raw
-    raw="$(_ci_block_entry_list idempotence "" writers)" || return 2
-    if [ -z "${raw}" ]; then
-        ci_log "[CI-ERROR-CHECK-0076]" "reason=\"no SOT idempotence.writers; FAIL CLOSED\""
-        return 2
-    fi
-    printf '%s\n' "${raw}"
-}
-
-# What: True if a name matches repeat/idempoten/converge.
-# Why: extra_marker narrows self-referential evidence files.
-# From: Issue #1683 | PR #1858
-_ci_idempotence_name_has_marker() {
-    local name extra
-    name="$(tr '[:upper:]' '[:lower:]' <<<"$1")"
-    case "${name}" in
-        *repeat*|*idempoten*|*converge*) ;;
-        *) return 1 ;;
-    esac
-    extra="$(tr '[:upper:]' '[:lower:]' <<<"${2:-}")"
-    if [ -n "${extra}" ]; then
-        case "${name}" in
-            *"${extra}"*) return 0 ;;
-            *) return 1 ;;
-        esac
-    fi
-    return 0
-}
-
-# What: Print each active @test title in a bats file.
-# Why: a commented-out @test line must never count.
-# From: Issue #1683 | PR #1858
-_ci_extract_bats_test_titles() {
-    local file="$1" line stripped rest
-    while IFS= read -r line; do
-        stripped="${line#"${line%%[^[:space:]]*}"}"
-        case "${stripped}" in '#'*) continue ;; esac
-        case "${line}" in
-            *'@test "'*)
-                rest="${line#*@test \"}"
-                printf '%s\n' "${rest%%\"*}"
-                ;;
-        esac
-    done < "${file}"
-}
-
-# What: Print each active, non-ignored Rust test fn name.
-# Why: no regex engine; one silently failed on a runner.
-# From: Issue #1683 | PR #1858
-_ci_extract_rust_test_fn_names() {
-    local file="$1" line stripped pending=0 disqualified=0 rest name
-    while IFS= read -r line; do
-        stripped="${line#"${line%%[^[:space:]]*}"}"
-        case "${stripped}" in '//'*) continue ;; esac
-        case "${line}" in
-            *'#[test]'*|*'#[tokio::test]'*)
-                pending=1
-                disqualified=0
-                continue
-                ;;
-        esac
-        if [ "${pending}" -eq 1 ]; then
-            case "${line}" in
-                *'#[ignore'*)
-                    disqualified=1
-                    continue
-                    ;;
-            esac
-            case "${line}" in
-                *'fn '*'('*)
-                    rest="${line#*fn }"
-                    name="${rest%%(*}"
-                    name="${name%%[[:space:]]*}"
-                    [ "${disqualified}" -eq 0 ] && printf '%s\n' "${name}"
-                    pending=0
-                    disqualified=0
-                    ;;
-            esac
-        fi
-    done < "${file}"
-}
-
-# What: True if a bats file has a matching repeat test.
-# Why: shared by every .bats evidence-path check below.
-# From: Issue #1683 | PR #1858
-_ci_has_bats_repeat_test() {
-    local file="$1" extra="${2:-}" title
-    while IFS= read -r title; do
-        _ci_idempotence_name_has_marker "${title}" "${extra}" && return 0
-    done < <(_ci_extract_bats_test_titles "${file}")
-    _ci_procsub_ok "$!" 0 || return 2
-    return 1
-}
-
-# What: True if a Rust file has a matching repeat test.
-# Why: shared by every .rs evidence-path check below.
-# From: Issue #1683 | PR #1858
-_ci_has_rust_repeat_test() {
-    local file="$1" extra="${2:-}" name
-    while IFS= read -r name; do
-        _ci_idempotence_name_has_marker "${name}" "${extra}" && return 0
-    done < <(_ci_extract_rust_test_fn_names "${file}")
-    _ci_procsub_ok "$!" 0 || return 2
-    return 1
-}
-
-# What: Fail if a config-writer lacks repeat-run coverage.
-# Why: a one-shot test can hide a non-convergence bug.
-# From: Issue #1683 | PR #1858
-_ci_check_idempotence_test_coverage() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
-    local -a viol=() fields=()
-    local pair writer_path evidence_path extra_marker count=0
-    while IFS= read -r pair; do
-        [ -n "${pair}" ] || continue
-        count=$((count + 1))
-        IFS='|' read -ra fields <<<"${pair}"
-        writer_path="${repo_root}/${fields[0]}"
-        evidence_path="${repo_root}/${fields[1]}"
-        extra_marker="${fields[2]:-}"
-        if [ ! -f "${writer_path}" ]; then
-            viol+=("config-writer '${fields[0]}' no longer exists")
-            continue
-        fi
-        if [ ! -f "${evidence_path}" ]; then
-            viol+=("'${fields[0]}': evidence file '${fields[1]}' missing")
-            continue
-        fi
-        case "${evidence_path}" in
-            *.bats)
-                _ci_has_bats_repeat_test "${evidence_path}" "${extra_marker}" \
-                    || viol+=("'${fields[0]}': no matching @test in '${fields[1]}'")
-                ;;
-            *.rs)
-                _ci_has_rust_repeat_test "${evidence_path}" "${extra_marker}" \
-                    || viol+=("'${fields[0]}': no matching Rust test in '${fields[1]}'")
-                ;;
-            *)
-                viol+=("'${fields[1]}': unsupported evidence type (want .bats/.rs)")
-                ;;
-        esac
-    done < <(_ci_idempotence_writer_evidence)
-    _ci_procsub_ok "$!" 0 || return 2
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0033]" "reason=\"config-writer(s) missing repeat-run coverage\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'idempotence-test-coverage=clean writers=%s\n' "${count}"
 }
 
 # What: Fail unless prod install paths stay prebuilt-only.
@@ -8968,7 +8814,7 @@ ci_cmd_check_all() {
     local -a repo_wide=(file-headers action-node-versions naming-consistency \
         workflow-line-limit stable-external-images compose-healthchecks \
         proxy-cache-env-doc-drift \
-        dependabot-docker-base-consistency idempotence-test-coverage \
+        dependabot-docker-base-consistency \
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
         docker-socket-proxy quickstart-required-env dhcp-proxy-env \
         setup-keys-kea setup-update-safety setup-docker-conflict setup-prompt-drift image-channel-resolution \
@@ -9026,7 +8872,6 @@ ci_cmd_check() {
         proxy-cache-env-doc-drift) _ci_check_proxy_cache_env_doc_drift "$@" ;;
         changelog-direct-edit) _ci_check_changelog_direct_edit "$@" ;;
         dependabot-docker-base-consistency) _ci_check_dependabot_docker_base_consistency "$@" ;;
-        idempotence-test-coverage) _ci_check_idempotence_test_coverage "$@" ;;
         prebuilt-prod) _ci_check_prebuilt_prod "$@" ;;
         prod-state-wiring) _ci_check_prod_state_wiring "$@" ;;
         compose-config) _ci_check_compose_config "$@" ;;

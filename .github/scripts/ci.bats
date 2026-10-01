@@ -5640,6 +5640,16 @@ EOF
         > "${r}/scripts/untracked/docker-socket-proxy.sh"
     run _ci_check_naming_consistency "${r}"
     [ "${status}" -eq 0 ]
+    mkdir -p "${r}/services/watchdog/src"
+    printf 'const DEFAULT_PROXY: &str = "lancache-other";\n' \
+        > "${r}/services/watchdog/src/config.rs"
+    run _ci_check_naming_consistency "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"names 'lancache-other' not in allowlist"* ]]
+    printf 'const DEFAULT_PROXY: &str = "lancache-proxy";\n' \
+        > "${r}/services/watchdog/src/config.rs"
+    run _ci_check_naming_consistency "${r}"
+    [ "${status}" -eq 0 ]
     printf 'name: lancache-ng\nservices:\n  proxy:\n    container_name: lancache-wrong\n' \
         > "${r}/deploy/prod/docker-compose.yml"
     run _ci_check_naming_consistency "${r}"
@@ -5871,85 +5881,6 @@ EOF
     printf 'ARG BASE=alpine:3.24\nFROM $BASE\n' > "${r}/services/a/Dockerfile"
     printf 'FROM alpine:3.24\n' > "${r}/services/b/Dockerfile"
     run bash "${CI_SH}" check dependabot-docker-base-consistency "${r}"; [ "${status}" -eq 0 ]
-}
-
-# What: neutral writer/evidence tree and SOT.
-# Why: tests the check, not the real writer inventory.
-# From: Issue #1683
-_idempotence_fixture() {
-    local r="$1" at='@test'
-    mkdir -p "${r}/w"
-    printf '%s\n' 'idempotence:' '  writers:' '    - w/a.sh|w/a.bats' \
-        '    - w/b.sh|w/b.rs' '    - w/c.sh|w/c.rs|mark_c' > "${r}/m.yml"
-    : > "${r}/w/a.sh"; : > "${r}/w/b.sh"; : > "${r}/w/c.sh"
-    printf '%s "a converges on rerun" {\n    true\n}\n' "${at}" > "${r}/w/a.bats"
-    printf '#[test]\nfn b_repeat_is_stable() {}\n' > "${r}/w/b.rs"
-    printf '#[test]\nfn c_mark_c_converges() {}\n' > "${r}/w/c.rs"
-    export CI_MANIFEST="${r}/m.yml"
-}
-
-@test "check idempotence-test-coverage passes on the real repo" {
-    # What: every SOT writer has live repeat-run evidence.
-    # Why: AG-OP-006; a stateful writer needs a rerun test.
-    # From: Issue #1683 | PR #1858
-    CI_MANIFEST="${CI_MANIFEST_SOURCE}" run bash "${CI_SH}" check idempotence-test-coverage
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"idempotence-test-coverage=clean"* ]]
-}
-
-@test "check idempotence-test-coverage fails every unproven writer" {
-    # What: each way a writer loses evidence is reported.
-    # Why: disabled, ignored, unmarked tests prove nothing.
-    # From: Issue #1683 | PR #1858
-    local r case want at='@test'
-    while IFS='|' read -r case want; do
-        r="${BATS_TEST_TMPDIR}/idem-${case}"
-        _idempotence_fixture "${r}"
-        case "${case}" in
-            ok) ;;
-            no-writer) rm "${r}/w/a.sh" ;;
-            no-evidence) rm "${r}/w/a.bats" ;;
-            bats-commented) printf '# %s "a converges" {\n# }\n' "${at}" > "${r}/w/a.bats" ;;
-            bats-no-marker) printf '%s "a runs once" {\n    true\n}\n' "${at}" > "${r}/w/a.bats" ;;
-            rs-ignored) printf '#[test]\n#[ignore]\nfn b_repeat_is_stable() {}\n' > "${r}/w/b.rs" ;;
-            rs-ignore-reason) printf '#[test]\n#[ignore = "x"]\nfn b_repeat_is_stable() {}\n' > "${r}/w/b.rs" ;;
-            rs-commented) printf '// #[test]\n// fn b_repeat_is_stable() {}\n' > "${r}/w/b.rs" ;;
-            marker-evasion) printf '#[test]\nfn c_repeat_other() {}\n' > "${r}/w/c.rs" ;;
-            multi) rm "${r}/w/a.bats" "${r}/w/b.rs" ;;
-        esac
-        run bash "${CI_SH}" check idempotence-test-coverage "${r}"
-        if [ "${case}" = ok ]; then
-            [ "${status}" -eq 0 ] || { echo "${case}: ${output}"; return 1; }
-            continue
-        fi
-        [ "${status}" -eq 1 ] || { echo "${case}: rc ${status}"; return 1; }
-        local w
-        for w in ${want}; do
-            [[ "${output}" == *"${w}"* ]] || { echo "${case}: no ${w}"; return 1; }
-        done
-    done <<'EOF'
-ok|
-no-writer|w/a.sh no longer exists
-no-evidence|evidence missing
-bats-commented|w/a.bats
-bats-no-marker|no matching
-rs-ignored|w/b.rs
-rs-ignore-reason|w/b.rs
-rs-commented|w/b.rs
-marker-evasion|w/c.rs
-multi|w/a.sh w/b.sh
-EOF
-}
-
-@test "check idempotence-test-coverage fails closed without SOT writers" {
-    # What: an empty SOT inventory is CHECK-0076, not clean.
-    # Why: zero writers would pass the check vacuously.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/m.yml"
-    printf 'idempotence:\n  writers:\n' > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" check idempotence-test-coverage "${BATS_TEST_TMPDIR}"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-CHECK-0076]"* ]]
 }
 
 # What: seed a minimal prebuilt-only prod/quickstart tree.
@@ -9006,27 +8937,6 @@ _run_apk_setup() {
 # PRODUCT RUNTIME: KNOWN-GOOD CONFIG SNAPSHOTS
 # =========================================================
 
-# What: source named top-level functions of a script.
-# Why: test real runtime functions without running its main.
-# From: Issue #1683
-_load_fns() {
-    local file="$1" out="${BATS_TEST_TMPDIR}/fns-${RANDOM}.sh" fn
-    shift
-    awk -v names=" $* " '
-        /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/ {
-            n = substr($0, 1, index($0, "(") - 1)
-            cap = index(names, " " n " ") > 0
-        }
-        cap { print }
-        cap && /^}$/ { cap = 0 }
-    ' "${file}" > "${out}"
-    # shellcheck source=/dev/null
-    source "${out}"
-    for fn in "$@"; do
-        declare -F "${fn}" >/dev/null || { echo "missing function ${fn} in ${file}"; return 1; }
-    done
-}
-
 # What: stable fingerprint of a snapshot store.
 # Why: equal prints prove no snapshot was added or changed.
 # From: Issue #1683
@@ -9034,43 +8944,114 @@ _kgs_fingerprint() {
     ( cd "$1" && find . -type f | LC_ALL=C sort | xargs -r sha256sum )
 }
 
-@test "dns known-good rollback converges to one fixed point" {
-    # What: broken restarts restore one snapshot, add none.
-    # Why: a snapshotted broken config could be restored.
+@test "known-good rollback converges and retention stays bounded" {
+    # What: lib every adapter sources, neutral validator.
+    # Why: one owner test covers dns, proxy, dhcp-proxy.
     # From: Issue #1683
-    local root="${BATS_TEST_DIRNAME}/../.." bin="${BATS_TEST_TMPDIR}/bin" role tool conf fp1 h1
-    mkdir -p "${bin}"
-    for tool in pdns_recursor pdns_server; do
-        printf '#!/usr/bin/env bash\nd=""; for a in "$@"; do case "$a" in --config-dir=*) d="${a#*=}" ;; esac; done\n! grep -q BROKEN "$d"/*.conf\n' > "${bin}/${tool}"
-        chmod +x "${bin}/${tool}"
+    local lib conf snap="${BATS_TEST_TMPDIR}/snap" fp1 h1 i
+    lib="$(ci_context_path known-good)"
+    # shellcheck source=scripts/lib/known-good-snapshots.sh
+    source "${BATS_TEST_DIRNAME}/../../${lib}"
+    conf="${BATS_TEST_TMPDIR}/svc.conf"
+    for i in 1 2 3 4 5; do
+        printf 'OK v%s\n' "${i}" > "${conf}"
+        kgs_snapshot_create "${snap}" 3 svc "${conf}" 2>/dev/null
     done
-    # shellcheck source=/dev/null
-    source "${root}/scripts/lib/known-good-snapshots.sh"
-    _load_fns "${root}/services/dns/entrypoint.sh" \
-        _dns_recursor_validate_snapshot_or_rollback _dns_auth_validate_snapshot_or_rollback
-    export PATH="${bin}:${PATH}" KEEP_KNOWN_GOOD_CONFIGS=3 PDNS_API_KEY=k
-    export DNS_CONFIG_SNAPSHOT_DIR="${BATS_TEST_TMPDIR}/snap"
-    while read -r role conf; do
-        mkdir -p "${BATS_TEST_TMPDIR}/${role}"
-        conf="${BATS_TEST_TMPDIR}/${role}/${conf}"
-        printf 'OK v1\n' > "${conf}"
-        "_dns_${role}_validate_snapshot_or_rollback" "${conf}" >/dev/null 2>&1
-        printf 'OK v1\n' > "${conf}"
-        "_dns_${role}_validate_snapshot_or_rollback" "${conf}" >/dev/null 2>&1
-        [ "$(cat "${conf}")" = "OK v1" ]
-        printf 'BROKEN v2\n' > "${conf}"
-        run "_dns_${role}_validate_snapshot_or_rollback" "${conf}"
-        [ "${status}" -eq 0 ]; [ "$(cat "${conf}")" = "OK v1" ]
-        fp1="$(_kgs_fingerprint "${DNS_CONFIG_SNAPSHOT_DIR}/${role}")"
-        h1="$(sha256sum < "${conf}")"
-        printf 'BROKEN v2\n' > "${conf}"
-        run "_dns_${role}_validate_snapshot_or_rollback" "${conf}"
-        [ "${status}" -eq 0 ]
-        [ "$(sha256sum < "${conf}")" = "${h1}" ]
-        [ "$(_kgs_fingerprint "${DNS_CONFIG_SNAPSHOT_DIR}/${role}")" = "${fp1}" ]
-        ! grep -rq BROKEN "${DNS_CONFIG_SNAPSHOT_DIR}"
-    done <<'ROLES'
-recursor recursor.conf
-auth pdns.conf
-ROLES
+    [ "$(kgs_list_snapshots "${snap}" | wc -l)" -eq 3 ]
+    printf 'BROKEN\n' > "${conf}"
+    run kgs_snapshot_apply "${snap}" svc "! grep -q BROKEN '${conf}'" "${conf}"
+    [ "${status}" -eq 0 ]
+    [ "$(cat "${conf}")" = "OK v5" ]
+    fp1="$(_kgs_fingerprint "${snap}")"
+    h1="$(sha256sum < "${conf}")"
+    printf 'BROKEN\n' > "${conf}"
+    run kgs_snapshot_apply "${snap}" svc "! grep -q BROKEN '${conf}'" "${conf}"
+    [ "${status}" -eq 0 ]
+    [ "$(sha256sum < "${conf}")" = "${h1}" ]
+    [ "$(_kgs_fingerprint "${snap}")" = "${fp1}" ]
+    ! grep -rq BROKEN "${snap}"
+}
+
+# =========================================================
+# PRODUCT RUNTIME: SHARED SECRETS
+# =========================================================
+
+@test "shared secret is generated once and never rotates on repeat" {
+    # What: lib nats, dns, dhcp and ui resolve secrets with.
+    # Why: AG-OP-006; reruns must not rotate stable secrets.
+    # From: Issue #1683
+    local lib v1 v i
+    lib="$(ci_context_path shared-secret)"
+    # shellcheck source=scripts/lib/shared-secret-bootstrap.sh
+    source "${BATS_TEST_DIRNAME}/../../${lib}"
+    export LANCACHE_SHARED_SECRET_DIR="${BATS_TEST_TMPDIR}/secrets"
+    LANCACHE_SHARED_SECRET_GID="$(id -g)"; export LANCACHE_SHARED_SECRET_GID
+    _gen() { printf 'g\n' >> "${BATS_TEST_TMPDIR}/gen.log"; printf 'v-%s' "${RANDOM}"; }
+    v1="$(resolve_shared_secret s1 "" _gen)"
+    [ -n "${v1}" ]
+    for i in 1 2 3; do
+        v="$(resolve_shared_secret s1 "" _gen)"
+        [ "${v}" = "${v1}" ]
+    done
+    [ "$(wc -l < "${BATS_TEST_TMPDIR}/gen.log")" -eq 1 ]
+    for i in 1 2; do
+        v="$(resolve_shared_secret s1 real-value _gen)"
+        [ "${v}" = real-value ]
+        [ "$(cat "${LANCACHE_SHARED_SECRET_DIR}/s1")" = real-value ]
+    done
+    [ "$(resolve_shared_secret s1 "" _gen)" = real-value ]
+    [ "$(wc -l < "${BATS_TEST_TMPDIR}/gen.log")" -eq 1 ]
+}
+
+@test "prod nats command regenerates nats.conf idempotently" {
+    # What: run the real prod nats command via compose.
+    # Why: AG-OP-006; no image owns it, compose does.
+    # From: Issue #1683
+    local root="${BATS_TEST_DIRNAME}/../.." bin="${BATS_TEST_TMPDIR}/bin"
+    local cmd lib sb t first frag u
+    mkdir -p "${bin}"
+    for t in nats-server chown chgrp; do
+        printf '#!/bin/sh\nexit 0\n' > "${bin}/${t}"
+        chmod +x "${bin}/${t}"
+    done
+    cmd="$(docker compose -f "${root}/deploy/prod/docker-compose.yml" \
+        config --format json | jq -er '.services.nats.command[0]')"
+    lib="${root}/$(ci_context_path shared-secret)"
+    export NATS_DNS_WRITER_USER=w-user NATS_DNS_REPLICA_USER=r-user
+    for t in UI DNS_WRITER DNS_REPLICA CALLOUT SYS; do
+        export "NATS_${t}_PASSWORD=pw-${t}"
+    done
+    for sb in a b; do
+        sb="${BATS_TEST_TMPDIR}/${sb}"
+        mkdir -p "${sb}"
+        # What: undo compose $$ escape; sandbox fixed paths.
+        # Why: the command hardcodes container-only paths.
+        # From: Issue #1683
+        sed -e 's/\$\$/$/g' \
+            -e "s#/tmp/nats\.conf\.template#${sb}/tpl#g" \
+            -e "s#/etc/nats#${sb}/etc#g" \
+            -e "s#/var/log/lancache-nats#${sb}/log#g" \
+            -e "s#/usr/local/lib/shared-secret-bootstrap\.sh#${lib}#g" \
+            <<< "${cmd}" > "${sb}/run.sh"
+        LANCACHE_SHARED_SECRET_DIR="${sb}/sec" PATH="${bin}:${PATH}" \
+            run sh "${sb}/run.sh"
+        [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
+        [ ! -s "${sb}/etc/auth_callout.conf" ]
+    done
+    sb="${BATS_TEST_TMPDIR}/a"
+    first="$(sed "s#${sb}#X#g" "${sb}/etc/nats.conf")"
+    [ "$(sed "s#${BATS_TEST_TMPDIR}/b#X#g" "${BATS_TEST_TMPDIR}/b/etc/nats.conf")" = "${first}" ]
+    frag='auth_callout { issuer: "x" }'
+    printf '%s\n' "${frag}" > "${sb}/etc/auth_callout.conf"
+    LANCACHE_SHARED_SECRET_DIR="${sb}/sec" PATH="${bin}:${PATH}" run sh "${sb}/run.sh"
+    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
+    [ "$(sed "s#${sb}#X#g" "${sb}/etc/nats.conf")" = "${first}" ]
+    [ "$(cat "${sb}/etc/auth_callout.conf")" = "${frag}" ]
+    [ -z "$(find "${sb}/etc" -name '.nats.conf.*')" ]
+    for u in w-user r-user; do
+        awk -v u="user: \"${u}\"" 'index($0, u) { p = 1; next }
+            p && /user:/ { exit } p' "${sb}/etc/nats.conf" > "${sb}/${u}"
+        grep -qF '"lancache.dns.record"' "${sb}/${u}"
+        grep -qF '"lancache.dns.flush"' "${sb}/${u}"
+    done
 }

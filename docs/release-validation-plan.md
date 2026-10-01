@@ -1359,8 +1359,8 @@ explicit pass:**
   repeat-run fixture coverage." `AGENTS.md`'s own `AG-OP-006` row (corrected in PR
   #1409, 2026-08-05) already states this wording was stale: Kea/PDNS/NATS/dhcp-proxy
   config-writers are covered by dedicated repeat-run bats tests (delivered by #640,
-  enforced project-wide by `.github/scripts/ci.sh check idempotence-test-coverage`) —
-  e.g. `tests/bats/nats_conf_entrypoint_idempotence.bats`,
+  then enforced by a name-matching coverage guard, retired in CI 2.0 #1683) —
+  e.g. the former nats entrypoint repeat-run suite,
   `tests/bats/dhcp_proxy_known_good_snapshot.bats`. This document had not been
   synced with that correction until now — a small, concrete instance of exactly the
   drift class Rule-Ref: AG-VAL-033 (adopted via PR #1685, issue #1391) is meant to
@@ -1865,7 +1865,7 @@ omitted):**
 | `scripts/untracked/simulations/setup-reset-kea-config-simulation.sh` | Real CLI-driven Kea config rollback |
 | `scripts/untracked/generate-vex.sh` / `scripts/tracked/check-vex-drift.sh` | OpenVEX document reproducibility and drift detection (PR #1194) |
 | `.github/scripts/ci.bats` (`migrate_env_for_update` behavior tests) | setup.sh `.env` migration is idempotent/convergent (AG-OP-006/007); the former PR #1199 first-`@test` key-drift check was a fixture-coupled structure proxy, dropped in the CI 2.0 rewrite — its real contract is now these behavior tests |
-| `.github/scripts/ci.sh check idempotence-test-coverage` | Every stateful config-writer has repeat-run/idempotence test coverage |
+| `.github/scripts/ci.bats` (repeat-run owner tests) + watchdog Rust tests | Stateful writers converge on rerun (AG-OP-006): known-good rollback, shared secrets, prod nats command; watchdog cycles and `status.json` in `services/watchdog/src/{health,status}.rs` |
 | `scripts/tracked/check-bats-path-filter-coverage.sh` | Every real bats dependency is covered by `build-tools.yml`'s path filters |
 | `scripts/tracked/check-workflow-service-lists.sh` | Hardcoded service arrays stay in sync across workflow files |
 | `scripts/tracked/check-naming-consistency.sh` | Container-name/allowlist/env-var naming contract (`docs/naming-conventions.md`) |
