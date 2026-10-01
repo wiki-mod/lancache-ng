@@ -1164,8 +1164,8 @@ _ci_cas_ref_sha() {
 # Why: Runners have no git user; one identity owner.
 # From: Issue #1683
 _ci_cas_git() {
-    GIT_AUTHOR_NAME=ci-cas GIT_AUTHOR_EMAIL=ci-cas@lancache-ng.invalid \
-    GIT_COMMITTER_NAME=ci-cas GIT_COMMITTER_EMAIL=ci-cas@lancache-ng.invalid \
+    GIT_AUTHOR_NAME=ci-cas GIT_AUTHOR_EMAIL=ci-cas@ci.invalid \
+    GIT_COMMITTER_NAME=ci-cas GIT_COMMITTER_EMAIL=ci-cas@ci.invalid \
         git "$@"
 }
 
@@ -2284,7 +2284,7 @@ _ci_trivy_cache_dir() {
         return "$?"
     fi
     local shared="${CI_TRIVY_SHARED_DIR:-/mnt/trivy-db}"
-    local fallback="${CI_TRIVY_FALLBACK_DIR:-${CI_TMPDIR}/lancache-ng-trivy-cache-fallback}"
+    local fallback="${CI_TRIVY_FALLBACK_DIR:-${CI_TMPDIR}/trivy-cache-fallback}"
     case "${shared}" in
         /tmp|/tmp/*) ci_log "[CI-ERROR-SCAN-0007]" "reason=\"shared trivy cache-dir must not be tmpfs /tmp\" got=\"${shared}\""; return 2 ;;
     esac
@@ -3409,6 +3409,15 @@ _ci_release_prerelease() {
     fi
 }
 
+# What: Print the release-notes start or end marker.
+# Why: one marker owner for writer and replacer; no name.
+# From: Issue #1683
+_ci_release_marker() {
+    local repo
+    repo="$(_ci_repo)" || return 2
+    printf '<!-- %s-image-tags:%s -->\n' "${repo##*/}" "$1"
+}
+
 # What: Render the marker-delimited image provenance block.
 # Why: Records every shipped digest; SOT list, no hardcode.
 # From: Issue #1683
@@ -3416,7 +3425,7 @@ _ci_release_notes_block() {
     local tag="$1" registry repo target img dig
     registry="$(_ci_registry)" || return "$?"
     repo="$(_ci_repo)" || return 2
-    printf '%s\n' "${CI_RELEASE_NOTES_START:-<!-- lancache-ng-image-tags:start -->}"
+    _ci_release_marker start || return 2
     printf 'Images published for %s (commit %s):\n\n' "${tag}" "${GITHUB_SHA:-unknown}"
     for target in $(_ci_published_services) stack; do
         img="${registry}/${repo}/${target}:${tag}"
@@ -3425,7 +3434,7 @@ _ci_release_notes_block() {
     done
     printf '\nProvenance attestations and CycloneDX SBOMs attach per image.\n'
     printf 'OpenVEX from .trivyignore.yaml attaches as vex.openvex.json.\n'
-    printf '%s\n' "${CI_RELEASE_NOTES_END:-<!-- lancache-ng-image-tags:end -->}"
+    _ci_release_marker end || return 2
 }
 
 # What: upload asset to release, replacing any prior.
@@ -3448,8 +3457,8 @@ ci_cmd_release_publish() {
     pre="$(_ci_release_prerelease "${tag}")" || return "$?"
     _ci_require_ghcr_auth || return "$?"
     block="$(_ci_release_notes_block "${tag}")" || return "$?"
-    start="${CI_RELEASE_NOTES_START:-<!-- lancache-ng-image-tags:start -->}"
-    end="${CI_RELEASE_NOTES_END:-<!-- lancache-ng-image-tags:end -->}"
+    start="$(_ci_release_marker start)" || return 2
+    end="$(_ci_release_marker end)" || return 2
     body_file="$(mktemp "${CI_TMPDIR}/ci-release-notes.XXXXXX")"
     if view="$("${gh}" release view "${tag}" --repo "${repo}" --json body,isPrerelease 2>/dev/null)"; then
         local existing_body existing_pre
@@ -4166,7 +4175,9 @@ _ci_validate_reserve() {
 # Why: A per-slot project isolates its /27 net.
 # From: Issue #1683
 _ci_validate_project() {
-    printf 'lancache-ng-validate-%s' "$(printf '%s' "${1}" | tr './' '__')"
+    local repo
+    repo="$(_ci_repo)" || return 2
+    printf '%s-validate-%s' "${repo##*/}" "$(printf '%s' "${1}" | tr './' '__')"
 }
 
 # What: The resolved compose config as JSON.
@@ -4774,7 +4785,7 @@ _ci_default_validate() {
     fi
     subnet="$(_ci_record_field "${reservation}" subnet)"
     holder="$(_ci_record_field "${reservation}" holder)"
-    project="$(_ci_validate_project "${subnet}")"
+    project="$(_ci_validate_project "${subnet}")" || { _ci_validate_release "${holder}"; return 2; }
     net_ovr="$(mktemp "${CI_TMPDIR}/ci-validate-net.XXXXXX.yml")"
     pin_ovr="$(mktemp "${CI_TMPDIR}/ci-validate-pin.XXXXXX.yml")"
     if _ci_validate_net_override "${subnet}" > "${net_ovr}" \

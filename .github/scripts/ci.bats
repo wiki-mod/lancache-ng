@@ -2047,8 +2047,8 @@ EOF
     export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r GITHUB_SHA=deadbeef CI_TMPDIR="${BATS_TEST_TMPDIR}"
     _ci_require_ghcr_auth() { return 0; }
     _ci_registry_digest() { echo "sha256:aaa"; }
-    _ci_published_services() { echo proxy; }
-    local start='<!-- lancache-ng-image-tags:start -->' end='<!-- lancache-ng-image-tags:end -->'
+    _ci_published_services() { echo svc-a; }
+    local start='<!-- r-image-tags:start -->' end='<!-- r-image-tags:end -->'
     : > "${calls}"
     STUB_VIEW="$(jq -nc --arg b "keep-me
 ${start}
@@ -2058,6 +2058,8 @@ tail" '{body:$b, isPrerelease:false}')" \
         CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_publish v1.2.3
     [ "${status}" -eq 0 ]
     grep -q 'release edit v1.2.3' "${calls}"
+    run _ci_release_marker start
+    [ "${output}" = "${start}" ]
 }
 
 @test "release-publish fails closed on a prerelease-state mismatch" {
@@ -2898,7 +2900,7 @@ netdata=sha256:n"
     # What: Teardown runs on the failure path.
     # Why: A leaked stack holds the slot, poisons reruns.
     # From: Issue #1683
-    export TMPDIR="${BATS_TEST_TMPDIR}"
+    export TMPDIR="${BATS_TEST_TMPDIR}" GITHUB_REPOSITORY=owner/fixture-repo
     _ci_validate_reserve() { echo "subnet=172.16.1.32/27 holder=1234"; }
     _ci_validate_net_override() { echo "networks:"; }
     _ci_validate_pin_override() { echo "services:"; }
@@ -2906,7 +2908,7 @@ netdata=sha256:n"
     _ci_validate_teardown() { echo "TEARDOWN holder=$1 project=$2"; }
     run _ci_default_validate "proxy=sha256:x"
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"TEARDOWN holder=1234"* ]]
+    [[ "${output}" == *"TEARDOWN holder=1234 project=fixture-repo-validate-172_16_1_32_27"* ]]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0017"* ]]
 }
 
@@ -2914,7 +2916,7 @@ netdata=sha256:n"
     # What: A pool-overlap up failure is a collision id.
     # Why: Diagnosis points at the slot, not the images.
     # From: Issue #1683
-    export TMPDIR="${BATS_TEST_TMPDIR}"
+    export TMPDIR="${BATS_TEST_TMPDIR}" GITHUB_REPOSITORY=owner/fixture-repo
     _ci_validate_reserve() { echo "subnet=172.16.1.32/27 holder=1234"; }
     _ci_validate_net_override() { echo "networks:"; }
     _ci_validate_pin_override() { echo "services:"; }
