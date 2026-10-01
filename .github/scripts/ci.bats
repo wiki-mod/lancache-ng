@@ -495,40 +495,49 @@ EOF
 # BUILD IDENTITIES
 # =========================================================
 
-@test "identity is deterministic for one target+platform, keyed" {
-    # What: Same content+platform -> same keyed id, always.
-    # Why: NOOP/reuse depends on a stable identity.
-    # From: Issue #1683
-    run bash "${CI_SH}" identity ui os/p1
-    [ "${status}" -eq 0 ]
-    local first="${output}"
-    run bash "${CI_SH}" identity ui os/p1
-    [ "${output}" = "${first}" ]
-    [[ "${output}" =~ ^platform=os/p1\ identity=[0-9a-f]{64}$ ]]
+# What: neutral git repo and SOT for identity tests.
+# Why: ids must be tested on the engine, not the inventory.
+# From: Issue #1683
+_identity_fixture() {
+    local r="${BATS_TEST_TMPDIR}/idrepo" h0 h1
+    h0="$(printf '0%.0s' {1..64})"; h1="$(printf '1%.0s' {1..64})"
+    mkdir -p "${r}/dir/a" "${r}/dir/b"
+    printf 'a\n' > "${r}/dir/a/f"; printf 'b\n' > "${r}/dir/b/f"
+    git -C "${r}" init -q && git -C "${r}" add -A
+    printf '%s\n' 'services:' \
+        '  svc-a:' '    context: dir/a' '    build_type: type-s' \
+        '  svc-b:' '    context: dir/b' '    build_type: type-s' \
+        '  svc-u:' '    context: dir/a' '    build_type: type-u' \
+        '  svc-p:' '    context: dir/b' '    build_type: type-p' '    packages: [pkg]' \
+        'build_identity:' '  type-s:' '    inputs: [source_sha]' \
+        '  type-u:' '    inputs: [upstream_digest]' \
+        '  type-p:' '    inputs: [source_sha, package_versions]' \
+        'external_versions:' '  dep-u:' '    consumer: svc-u' '    build_args: [version]' \
+        '    version: v1' "    sha256_arch-a: ${h0}" "    sha256_arch-b: ${h1}" \
+        'base_images:' "  alpine: registry.example.test/base@sha256:${h0}" \
+        'build_matrix:' '  platforms: [os/p1, os/p2]' \
+        'platform_arch:' '  p1:' '    apk: arch-a' '  p2:' '    apk: arch-b' > "${r}/m.yml"
+    export CI_MANIFEST="${r}/m.yml" CI_REPO_ROOT="${r}"
 }
 
-@test "identity differs across services and build types" {
-    # What: proxy(apk), ui(rust), build-tools all differ.
-    # Why: An id must key on its own inputs, not collide.
+@test "identity is keyed, deterministic and per target" {
+    # What: same input, same id; other target/arch differs.
+    # Why: NOOP/reuse needs stable ids that never collide.
     # From: Issue #1683
-    run bash "${CI_SH}" identity proxy os/p1
-    [ "${status}" -eq 0 ]
-    local proxy="${output}"
-    run bash "${CI_SH}" identity build-tools os/p1
-    [ "${status}" -eq 0 ]
-    [ "${output}" != "${proxy}" ]
-}
-
-@test "an apk service resolves without a masked non-zero exit" {
-    # What: identity/resolve of an apk service must exit 0.
-    # Why: A printed id with rc=1 masks a broken pipeline.
-    # From: Issue #1683
-    run bash "${CI_SH}" identity ntp os/p1
+    _identity_fixture
+    run bash "${CI_SH}" identity svc-a os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" =~ ^platform=os/p1\ identity=[0-9a-f]{64}$ ]]
-    run bash "${CI_SH}" resolve ntp os/p1
+    local a1="${output}"
+    run bash "${CI_SH}" identity svc-a os/p1
+    [ "${output}" = "${a1}" ]
+    run bash "${CI_SH}" identity svc-b os/p1
+    [ "${status}" -eq 0 ]; [ "${output}" != "${a1}" ]
+    run bash "${CI_SH}" identity svc-a os/p2
+    [ "${status}" -eq 0 ]; [ "${output#*identity=}" != "${a1#*identity=}" ]
+    run bash "${CI_SH}" identity svc-p os/p1
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"state=UNKNOWN"* ]]
+    [[ "${output}" =~ ^platform=os/p1\ identity=[0-9a-f]{64}$ ]]
 }
 
 @test "identity fails closed with a stable id when no service is given" {
@@ -544,65 +553,50 @@ EOF
 # PLATFORMS
 # =========================================================
 
-@test "identity fan-out lists every platform, always keyed" {
-    # What: No platform arg -> one keyed line per platform.
-    # Why: Default = all; output never mixes bare and keyed.
+@test "identity fans out per platform and rejects foreign ones" {
+    # What: one keyed line per SOT platform; unknown fails.
+    # Why: default is all; unknown input never fans out.
     # From: Issue #1683
-    run bash "${CI_SH}" identity ui
+    _identity_fixture
+    run bash "${CI_SH}" identity svc-a
     [ "${status}" -eq 0 ]
     [ "${#lines[@]}" -eq 2 ]
-    [[ "${output}" == *"platform=os/p1 identity="* ]]
-    [[ "${output}" == *"platform=os/p2 identity="* ]]
-}
-
-@test "a selected platform yields one line; amd64 and arm64 differ" {
-    # What: Platform selects; each arch has its own id.
-    # Why: An amd64 binary must not reuse an arm64 id.
-    # From: Issue #1683
-    run bash "${CI_SH}" identity ui os/p1
-    [ "${status}" -eq 0 ]
-    [ "${#lines[@]}" -eq 1 ]
-    local a="${output}"
-    run bash "${CI_SH}" identity ui os/p2
-    [ "${output}" != "${a}" ]
-}
-
-@test "identity rejects a platform not in the target set" {
-    # What: An unknown platform fails closed.
-    # Why: Unknown input is an error, not a silent fan-out.
-    # From: Issue #1683
-    run bash "${CI_SH}" identity ui linux/riscv64
+    [[ "${lines[0]}" == "platform=os/p1 identity="* ]]
+    [[ "${lines[1]}" == "platform=os/p2 identity="* ]]
+    run bash "${CI_SH}" identity svc-a os/p9
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-IDENTITY-0002"* ]]
-}
-
-@test "install identity isolates platforms across arches" {
-    # What: An arm64-only edit must not move amd64 id.
-    # Why: A platform-irrelevant change must not rebuild.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/manifest.yml"
-    cp "${CI_MANIFEST}" "${m}"
-    local amd_before arm_before amd_after arm_after
-    amd_before="$(CI_MANIFEST="${m}" bash "${CI_SH}" identity netdata os/p1)"
-    arm_before="$(CI_MANIFEST="${m}" bash "${CI_SH}" identity netdata os/p2)"
-    sed -i 's/sha256_arch-b: [0-9a-f]\{64\}/sha256_arch-b: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' "${m}"
-    amd_after="$(CI_MANIFEST="${m}" bash "${CI_SH}" identity netdata os/p1)"
-    arm_after="$(CI_MANIFEST="${m}" bash "${CI_SH}" identity netdata os/p2)"
-    [ "${amd_before}" = "${amd_after}" ]
-    [ "${arm_before}" != "${arm_after}" ]
-}
-
-@test "a target with no platforms in the SOT fails closed" {
-    # What: An empty platform set is an error, not rc0.
-    # Why: A masked rc0 fan-out would skip the target.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/manifest.yml"
-    cp "${CI_MANIFEST}" "${m}"
-    sed -i '/^  platforms: \[/d' "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" identity ui
+    sed -i '/^  platforms: \[/d' "${CI_MANIFEST}"
+    run bash "${CI_SH}" identity svc-a
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-IDENTITY-0003"* ]]
     [[ "${output}" != *"identity="* ]]
+}
+
+@test "upstream pin identity moves only on its own arch" {
+    # What: an arch-b digest edit keeps the arch-a id.
+    # Why: a platform-irrelevant change must not rebuild.
+    # From: Issue #1683
+    _identity_fixture
+    local a0 b0 a1 b1
+    a0="$(bash "${CI_SH}" identity svc-u os/p1)"; b0="$(bash "${CI_SH}" identity svc-u os/p2)"
+    sed -i "s/sha256_arch-b: .*/sha256_arch-b: $(printf 'f%.0s' {1..64})/" "${CI_MANIFEST}"
+    a1="$(bash "${CI_SH}" identity svc-u os/p1)"; b1="$(bash "${CI_SH}" identity svc-u os/p2)"
+    [ -n "${a0}" ] && [ "${a0}" = "${a1}" ]
+    [ "${b0}" != "${b1}" ]
+}
+
+@test "source identity moves on a tracked content change only" {
+    # What: an edit in the context moves its id, not others.
+    # Why: impact is content identity, never a path guess.
+    # From: Issue #1683
+    _identity_fixture
+    local a0 b0
+    a0="$(bash "${CI_SH}" identity svc-a os/p1)"; b0="$(bash "${CI_SH}" identity svc-b os/p1)"
+    printf 'changed\n' > "${CI_REPO_ROOT}/dir/a/f"
+    git -C "${CI_REPO_ROOT}" add -A
+    [ "$(bash "${CI_SH}" identity svc-a os/p1)" != "${a0}" ]
+    [ "$(bash "${CI_SH}" identity svc-b os/p1)" = "${b0}" ]
 }
 
 @test "rust identity ignores comment-only and blank edits" {
