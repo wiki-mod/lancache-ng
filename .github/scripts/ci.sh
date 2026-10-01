@@ -2772,6 +2772,65 @@ _ci_test_toolchain() {
     printf 'service=%s tested=ok\n' "${service}"
 }
 
+# What: every absolute lib the image entrypoint sources.
+# Why: a missing lib fails only at container start.
+# From: Issue #1683 | PR #1858
+_ci_smoke_entrypoint_libs() {
+    local service="$1" image="$2" cid out eps rc=0
+    local -a ep_argv=()
+    # What: stdout is the id only; stderr stays raw.
+    # Why: pull progress on stderr must not corrupt the id.
+    # From: Issue #1683 | PR #1858
+    if ! cid="$(docker create --quiet "${image}")" || [ -z "${cid}" ]; then
+        ci_log "[CI-ERROR-TEST-0009]" "service=\"${service}\" reason=\"cannot create the image to read its entrypoint\""
+        return 2
+    fi
+    eps="$(docker inspect --format '{{range .Config.Entrypoint}}{{println .}}{{end}}' "${cid}" 2>&1)" || rc=$?
+    out="$(docker rm "${cid}" 2>&1)" || {
+        ci_error "[CI-ERROR-TEST-0010]" "service=\"${service}\" container=\"${cid}\" reason=\"cannot remove the inspect container\"" "${out}"
+        return 2
+    }
+    if [ "${rc}" -ne 0 ]; then
+        ci_error "[CI-ERROR-TEST-0009]" "service=\"${service}\" reason=\"cannot read the image entrypoint\"" "${eps}"
+        return 2
+    fi
+    while IFS= read -r out; do [ -n "${out}" ] && ep_argv+=("${out}"); done <<< "${eps}"
+    if [ "${#ep_argv[@]}" -eq 0 ]; then
+        printf 'service=%s entrypoint-libs=SKIP reason=no entrypoint\n' "${service}"
+        return 0
+    fi
+    # What: in-image check: shell entrypoints' sourced libs.
+    # Why: the image is the truth, not a Dockerfile parse.
+    # From: Issue #1683 | PR #1858
+    rc=0
+    out="$(timeout --kill-after=30s --signal=TERM 5m docker run --rm --entrypoint sh "${image}" -c '
+        n=0 bad=0
+        for f in "$@"; do
+            case "$f" in /*) ;; *) continue ;; esac
+            [ -f "$f" ] || continue
+            IFS= read -r first < "$f" || continue
+            case "$first" in "#!"*sh*) ;; *) continue ;; esac
+            while read -r kw lib _; do
+                case "$kw" in .|source) ;; *) continue ;; esac
+                lib="${lib#\"}"; lib="${lib%\"}"
+                case "$lib" in /*) ;; *) continue ;; esac
+                if [ -r "$lib" ]; then n=$((n + 1)); else echo "missing: $f sources $lib"; bad=1; fi
+            done < "$f"
+        done
+        echo "sourced=$n"
+        exit "$bad"' sh "${ep_argv[@]}" 2>&1)" || rc=$?
+    case "${rc}" in
+        0) ;;
+        1)
+            ci_error "[CI-ERROR-TEST-0011]" "service=\"${service}\" reason=\"entrypoint sources a lib the image lacks\"" "${out}"
+            return 1 ;;
+        *)
+            ci_error "[CI-ERROR-TEST-0012]" "service=\"${service}\" rc=\"${rc}\" reason=\"entrypoint lib check did not run\"" "${out}"
+            return 2 ;;
+    esac
+    printf 'service=%s entrypoint-libs=ok %s\n' "${service}" "${out}"
+}
+
 # What: Execute-smoke a product image's SOT smoke checks.
 # Why: prove apk binaries run, not just exist.
 # From: Issue #1613
@@ -2781,15 +2840,16 @@ _ci_smoke_service() {
         "${CI_SMOKE_CMD}" "${service}"
         return "$?"
     fi
-    checks="$(_ci_block_entry_list services "${service}" smoke)"
-    if [ -z "${checks}" ]; then
-        printf 'service=%s smoke=SKIP reason=no SOT smoke\n' "${service}"
-        return 0
-    fi
     image="${CI_SERVICE_IMAGE:-}"
     if [ -z "${image}" ]; then
         ci_log "[CI-ERROR-TEST-0007]" "service=\"${service}\" reason=\"CI_SERVICE_IMAGE required for the smoke\""
         return 2
+    fi
+    _ci_smoke_entrypoint_libs "${service}" "${image}" || return "$?"
+    checks="$(_ci_block_entry_list services "${service}" smoke)"
+    if [ -z "${checks}" ]; then
+        printf 'service=%s smoke=SKIP reason=no SOT smoke\n' "${service}"
+        return 0
     fi
     local -a cl=()
     while IFS= read -r c; do [ -n "${c}" ] && cl+=("${c}"); done <<< "${checks}"
@@ -8608,97 +8668,6 @@ _ci_check_trivy_action_direct_usage() {
     printf 'trivy-action-direct-usage=clean\n'
 }
 
-# What: True if final stage COPYs to destination.
-# Why: Only runtime stage files exist at run time.
-# From: Issue #1683
-_ci_dockerfile_copies_to() {
-    local dockerfile="$1" want="$2" line lineno=0 last_from=0 dest from_val ctx_path
-    local -a words real
-    local -A aliases=()
-    while IFS= read -r line; do
-        lineno=$((lineno + 1))
-        case "${line}" in [Ff][Rr][Oo][Mm]\ *) last_from=${lineno} ;; esac
-        if [[ "${line}" =~ [Aa][Ss][[:space:]]+([A-Za-z0-9_.-]+)[[:space:]]*$ ]]; then
-            aliases["${BASH_REMATCH[1],,}"]=1
-        fi
-    done < <(_ci_dockerfile_logical_lines "${dockerfile}")
-    _ci_procsub_ok "$!" 0 || return 2
-    lineno=0
-    while IFS= read -r line; do
-        lineno=$((lineno + 1))
-        [ "${lineno}" -ge "${last_from}" ] || continue
-        case "${line}" in [Cc][Oo][Pp][Yy]\ *) : ;; *) continue ;; esac
-        read -ra words <<< "${line}"
-        real=(); from_val=""
-        local w
-        for w in "${words[@]:1}"; do
-            case "${w}" in
-                --from=*) from_val="${w#--from=}"; continue ;;
-                --*) continue ;;
-            esac
-            real+=("${w}")
-        done
-        if [ -n "${from_val}" ]; then
-            case "${from_val}" in
-                *[!0-9]*)
-                    case "${from_val,,}" in
-                        */*|*:*|*.*) : ;;
-                        *)
-                            if [ -z "${aliases[${from_val,,}]:-}" ]; then
-                                ctx_path="$(_ci_block_entry_field named_contexts "${from_val}" path)"
-                                [ -n "${ctx_path}" ] || continue
-                            fi
-                            ;;
-                    esac
-                    ;;
-            esac
-        fi
-        [ "${#real[@]}" -ge 2 ] || continue
-        dest="${real[$(( ${#real[@]} - 1 ))]}"
-        [ "${dest}" = "${want}" ] && return 0
-        case "${dest}" in */) [ "${dest}${want##*/}" = "${want}" ] && return 0 ;; esac
-    done < <(_ci_dockerfile_logical_lines "${dockerfile}")
-    _ci_procsub_ok "$!" 0 || return 2
-    return 1
-}
-
-# What: Sourced lib path must match a COPY destination.
-# Why: source-drift breaks silently only at runtime.
-# From: Issue #1683
-_ci_check_entrypoint_lib_wiring() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
-    local -a viol=()
-    local ep svc svcs ctx name dockerfile line lib_path
-
-    # What: each SOT service context's entrypoint script.
-    # Why: the SOT owns services and paths; no glob/literal.
-    # From: Issue #1683
-    svcs="$(ci_services)" || return 2
-    for svc in ${svcs}; do
-        ctx="$(_ci_required_field "${svc}" context)" || return 2
-        dockerfile="${repo_root}/${ctx}/Dockerfile"
-        for name in entrypoint.sh docker-entrypoint.sh; do
-            ep="${repo_root}/${ctx}/${name}"
-            [ -f "${ep}" ] || continue
-            while IFS= read -r line; do
-                [[ "${line}" =~ ^[[:space:]]*(\.|source)[[:space:]]+\"?(/[^\"[:space:]]+)\"?[[:space:]]*(\#.*)?$ ]] || continue
-                lib_path="${BASH_REMATCH[2]}"
-                if [ ! -f "${dockerfile}" ]; then
-                    viol+=("${ctx}: sources ${lib_path}, no Dockerfile found")
-                    continue
-                fi
-                _ci_dockerfile_copies_to "${dockerfile}" "${lib_path}" ||
-                    viol+=("${ctx}/${name} sources ${lib_path}: no matching final-stage COPY in ${dockerfile}")
-            done < "${ep}"
-        done
-    done
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0041]" "reason=\"entrypoint sources a lib its Dockerfile never COPYs\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'entrypoint-lib-wiring=clean\n'
-}
-
 # What: rust Dockerfiles must use build-tools image.
 # Why: one toolchain owner; no self-compile (AG-CI-008).
 # From: Issue #1683
@@ -8921,7 +8890,7 @@ ci_cmd_check_all() {
         docker-socket-proxy quickstart-required-env dhcp-proxy-env \
         setup-keys-kea setup-update-safety setup-docker-conflict setup-prompt-drift image-channel-resolution \
         vex-drift logging-matrix \
-        trivy-action-direct-usage entrypoint-lib-wiring dockerfile-build-tools \
+        trivy-action-direct-usage dockerfile-build-tools \
         cargo-profile-tuning no-source-compiled-tools codeql-coverage)
     for sub in "${repo_wide[@]}"; do
         ci_cmd_check "${sub}" || rc=1
@@ -8988,7 +8957,6 @@ ci_cmd_check() {
         vex-drift) _ci_check_vex_drift "$@" ;;
         logging-matrix) _ci_check_logging_matrix "$@" ;;
         trivy-action-direct-usage) _ci_check_trivy_action_direct_usage "$@" ;;
-        entrypoint-lib-wiring) _ci_check_entrypoint_lib_wiring "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2
