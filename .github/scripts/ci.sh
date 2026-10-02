@@ -1536,7 +1536,7 @@ _ci_ledger_read() {
     blob="$(_ci_ledger_blob "${remote}")" || rc=$?
     [ "${rc}" -eq 1 ] && return 1
     [ "${rc}" -eq 0 ] || return 2
-    out="$(printf '%s\n' "${blob}" | awk -F'\t' -v id="${identity}" '$1==id {print $4"\t"$5; exit}')"
+    out="$(awk -F'\t' -v id="${identity}" '$1==id {print $4"\t"$5; exit}' <<< "${blob}")"
     [ -n "${out}" ] || return 1
     printf '%s\n' "${out}"
 }
@@ -5017,7 +5017,7 @@ _ci_validate_pin_override() {
                 slug="${image##*/"${prefix}"/}"
                 slug="${slug%%:*}"
                 slug="${slug%%@*}"
-                digest="$(printf '%s\n' "${candidate}" | awk -F= -v s="${slug}" '$1==s{print $2; exit}')"
+                digest="$(awk -F= -v s="${slug}" '$1==s{print $2; exit}' <<< "${candidate}")"
                 if [ -z "${digest}" ]; then
                     ci_log "[CI-ERROR-VALIDATE-0007]" "service=\"${svc}\" slug=\"${slug}\" reason=\"first-party compose image without candidate digest; refusing mutable tag\""
                     return 2
@@ -7814,7 +7814,8 @@ _ci_check_executable_bits() {
     fi
     local -a viol=()
     for path in "${paths[@]}"; do
-        mode="$(git ls-files -s -- "${path}" | awk '{print $1; exit}')"
+        mode="$(_ci_capture 0 git ls-files -s -- "${path}")" || return 2
+        mode="${mode%% *}"
         [ -z "${mode}" ] && continue
         [ "${mode}" = "100755" ] || viol+=("${path}: mode ${mode} not 100755")
     done
@@ -7937,10 +7938,10 @@ _ci_check_review_chronology() {
 # Why: SIGPIPE under pipefail exits 141 (AG-VAL-029).
 # From: Issue #1683
 _ci_check_pipefail_early_exit() {
-    # What: one pipe (not ||) into grep -q/-m/head/sed q.
+    # What: one pipe into grep -q/-m, head, sed q, awk exit.
     # Why: only grep's own option words count, not -eq.
     # From: Issue #1683 | PR #1858
-    local pat='(^|[^|])\|[[:space:]]*(grep([[:space:]]+-[a-zA-Z]+)*[[:space:]]+(-[a-zA-Z]*(q|m[[:space:]]*[0-9])|--(quiet|silent|max-count))|head([[:space:]]|$)|sed[^|]*([[:space:];{]|[0-9])q)'
+    local pat='(^|[^|])\|[[:space:]]*(grep([[:space:]]+-[a-zA-Z]+)*[[:space:]]+(-[a-zA-Z]*(q|m[[:space:]]*[0-9])|--(quiet|silent|max-count))|head([[:space:]]|$)|sed[^|]*([[:space:];{]|[0-9])q|awk[^|]*[^a-zA-Z_]exit([^a-zA-Z_]|$))'
     local -a _ci_override=("$@") files=()
     _ci_scan_files files _ci_override '.github/scripts/*.sh' '.github/scripts/*.bats' '*/Dockerfile' 'Dockerfile' 'services/*.sh' || return 2
     local path out

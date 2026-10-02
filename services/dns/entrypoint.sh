@@ -196,7 +196,7 @@ prepare_log_dir_for_shared_reader "$PDNS_LOG_DIR"
 # Why: Prevent getent crash-loops during startup
 # From: Issue #1164 | PR #1775
 dns_xfr_primary_endpoint() {
-    local endpoint="$1" var_name="${2:-DNS_XFR_PRIMARY}" host port resolved
+    local endpoint="$1" var_name="${2:-DNS_XFR_PRIMARY}" host port resolved hosts
 
     host="${endpoint%%:*}"
     port="${endpoint#*:}"
@@ -215,7 +215,12 @@ dns_xfr_primary_endpoint() {
 
     resolved=""
     for _ in $(seq 1 30); do
-        resolved="$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}')"
+        # What: capture getent first; a miss is a retry.
+        # Why: set -e ends the script on a failing getent.
+        # From: Issue #1683 | PR #1858
+        if hosts="$(getent ahostsv4 "$host" 2>/dev/null)"; then
+            resolved="$(awk '{print $1; exit}' <<< "$hosts")"
+        fi
         [ -n "$resolved" ] && break
         sleep 1
     done
@@ -348,10 +353,13 @@ fi
 # *is* a 172.x Docker bridge address -- the same exclusion here would
 # reject exactly the address needed.
 detect_pdns_local_address() {
-    local ip
-    ip=$(ip -4 route get 1.1.1.1 2>/dev/null \
-        | awk '{for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }}' \
-        || true)
+    local ip="" out
+    # What: capture ip output first; a failure is a miss.
+    # Why: a live pipe into awk exit may SIGPIPE.
+    # From: Issue #1683 | PR #1858
+    if out="$(ip -4 route get 1.1.1.1 2>/dev/null)"; then
+        ip="$(awk '{for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }}' <<< "$out")"
+    fi
     if [ -n "$ip" ]; then
         printf '%s\n' "$ip"
         return 0
@@ -360,9 +368,11 @@ detect_pdns_local_address() {
     # Fallback: first non-loopback IPv4 address on any interface, for the
     # rare case this container has no default route yet but is already
     # reachable on its own bridge address.
-    ip=$(ip -4 addr show \
-        | awk '/inet / && $2 !~ /^127\./ { sub(/\/.*/, "", $2); print $2; exit }' \
-        || true)
+    if out="$(ip -4 addr show 2>&1)"; then
+        ip="$(awk '/inet / && $2 !~ /^127\./ { sub(/\/.*/, "", $2); print $2; exit }' <<< "$out")"
+    else
+        echo "[lancache-dns] WARNING: ip -4 addr show failed: $out" >&2
+    fi
     if [ -n "$ip" ]; then
         printf '%s\n' "$ip"
         return 0

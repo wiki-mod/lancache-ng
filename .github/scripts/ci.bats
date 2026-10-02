@@ -6076,14 +6076,17 @@ STUBEOF
     # What: early-exit consumers fail; lookalikes pass.
     # Why: `||` and a later -eq are no pipe grep option.
     # From: Issue #1683 | PR #1858
-    local f="${BATS_TEST_TMPDIR}/p.sh" g=grep h=head line
+    local f="${BATS_TEST_TMPDIR}/p.sh" g=grep h=head a=awk line
     for line in "x=\"\$(seq 1 9)\"" 'a || grep -q x f' \
-                '[ "$(seq 9 | grep -c 3)" -eq 1 ]' 'seq 9 | sed -n "s/3/x/p"'; do
+                '[ "$(seq 9 | grep -c 3)" -eq 1 ]' 'seq 9 | sed -n "s/3/x/p"' \
+                "awk '{print; exit}' <<< \"\$x\"" "seq 9 | awk '{print \$1}'" \
+                "a || awk '{exit}' f"; do
         printf 'set -o pipefail\n%s\n' "${line}" > "${f}"
         run bash "${CI_SH}" check pipefail-early-exit "${f}"
         [ "${status}" -eq 0 ]
     done
-    for line in "seq 9 | ${g} -q 3" "seq 9 | ${g} -Eiq 3" "seq 9 | ${g} --quiet 3" "seq 9 | ${h} -1"; do
+    for line in "seq 9 | ${g} -q 3" "seq 9 | ${g} -Eiq 3" "seq 9 | ${g} --quiet 3" "seq 9 | ${h} -1" \
+                "seq 9 | ${a} '{print; exit}'" "    | ${a} '\$1 == 3 { print; exit 0 }' \\\\"; do
         printf 'set -o pipefail\n%s\n' "${line}" > "${f}"
         run bash "${CI_SH}" check pipefail-early-exit "${f}"
         [ "${status}" -ne 0 ]
@@ -11010,4 +11013,85 @@ CASES
     PRC=1 MSG="Error: Unable to open database connection" run bash "${s}"
     [[ "${output}" == *"Unable to open database connection"* ]]
     [[ "${output}" != *CANARY* ]]
+}
+
+# What: write a set -euo pipefail script calling dns fns.
+# Why: the entrypoint runs them under exactly these options.
+# From: Issue #1683 | PR #1858
+_dns_tsig_script() {
+    local root="$1" s="$2" call="$3"
+    _load_functions "${root}/scripts/lib/shared-secret-bootstrap.sh" secret_is_placeholder
+    _load_functions "${root}/services/dns/entrypoint.sh" configure_ddns_tsig import_ddns_tsig_key \
+        _dns_set_zone_metadata dns_xfr_primary_endpoint _dns_configure_primary_zone_replication \
+        _dns_ensure_secondary_zone
+    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
+        'pdnsutil() {' '    echo "$*" >> "${CALLS}"' \
+        '    case "${PMODE}:$*" in' \
+        '        fail:*) return 1 ;;' \
+        '        exists:*create-secondary*) echo "Zone '"'"'lan'"'"' exists already" >&2; return 1 ;;' \
+        '        broken:*create-secondary*) echo "Error: backend down" >&2; return 1 ;;' \
+        '    esac' '}' \
+        'getent() { echo x >> "${GETENT}"; [ "$(wc -l < "${GETENT}")" -ge "${RESOLVE_AT}" ] || return 2; echo "10.0.0.5 STREAM $2"; }' \
+        'sleep() { :; }' \
+        "source '${BATS_TEST_TMPDIR}/fns-shared-secret-bootstrap.sh'" \
+        "source '${BATS_TEST_TMPDIR}/fns-entrypoint.sh'" \
+        'DDNS_TSIG_NAME=lancache-ddns-key DDNS_TSIG_ALGORITHM=hmac-sha256' \
+        'DDNS_UPDATE_ZONES=(lan 1.168.192.in-addr.arpa)' \
+        "${call}" 'echo CANARY' > "${s}"
+}
+
+@test "dns tsig and zone replication issue the exact pdnsutil calls" {
+    # What: per case the ordered pdnsutil calls, rc, output.
+    # Why: unset key must revoke; a secondary never writes.
+    # From: Issue #1683 | PR #1858
+    local root s="${BATS_TEST_TMPDIR}/tsig.sh" case call key marker notify pmode rc calls out m
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    m="${BATS_TEST_TMPDIR}/allow-unsigned"
+    export CALLS="${BATS_TEST_TMPDIR}/calls" GETENT="${BATS_TEST_TMPDIR}/getent" RESOLVE_AT=1
+    while IFS='|' read -r case call key marker notify pmode rc calls out; do
+        _dns_tsig_script "${root}" "${s}" "${call}"
+        : > "${CALLS}"; : > "${GETENT}"; rm -f "${m}"
+        [ "${marker}" = 0 ] || : > "${m}"
+        DDNS_TSIG_KEY="${key}" DDNS_ALLOW_UNSIGNED_MARKER="${m}" DNS_XFR_NOTIFY_TARGETS="${notify}" \
+            PMODE="${pmode}" run bash "${s}"
+        [ "${status}" -eq "${rc}" ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
+        [[ "${output}" == *"${out}"* ]] || { echo "${case}: ${output}"; return 1; }
+        [ "$(sed 's#^--config-dir=/etc/pdns/auth ##' "${CALLS}" | paste -sd';')" = "${calls}" ] || {
+            echo "${case}: calls"; cat "${CALLS}"; return 1; }
+    done <<'CASES'
+unset|configure_ddns_tsig||0||ok|0|set-meta lan TSIG-ALLOW-DNSUPDATE;set-meta 1.168.192.in-addr.arpa TSIG-ALLOW-DNSUPDATE;delete-tsig-key lancache-ddns-key|prior authorization has been revoked
+unsetfail|configure_ddns_tsig||0||fail|0|set-meta lan TSIG-ALLOW-DNSUPDATE;set-meta 1.168.192.in-addr.arpa TSIG-ALLOW-DNSUPDATE;delete-tsig-key lancache-ddns-key|CANARY
+key|configure_ddns_tsig|k-real|0||ok|0|import-tsig-key lancache-ddns-key hmac-sha256 k-real;set-meta lan TSIG-ALLOW-DNSUPDATE lancache-ddns-key;set-meta 1.168.192.in-addr.arpa TSIG-ALLOW-DNSUPDATE lancache-ddns-key|Configured TSIG-authenticated DDNS updates
+unsigned|configure_ddns_tsig|k-real|1||ok|0|import-tsig-key lancache-ddns-key hmac-sha256 k-real;set-meta lan TSIG-ALLOW-DNSUPDATE;set-meta 1.168.192.in-addr.arpa TSIG-ALLOW-DNSUPDATE|WARNING: DDNS TSIG enforcement relaxed
+placeholder|configure_ddns_tsig|CHANGE_ME|0||ok|1||FATAL: DDNS_TSIG_KEY is still set to a default placeholder
+import|import_ddns_tsig_key|k-real|0||ok|0|import-tsig-key lancache-ddns-key hmac-sha256 k-real|CANARY
+importempty|import_ddns_tsig_key||0||ok|1||FATAL: DDNS_TSIG_KEY is required
+primary|_dns_configure_primary_zone_replication lan|k|0|dns-ssl:5300,192.0.2.53:5300|ok|0|zone set-kind lan primary;set-meta lan SOA-EDIT-DNSUPDATE INCREASE;set-meta lan SOA-EDIT-API INCREASE;set-meta lan NOTIFY-DNSUPDATE 1;tsigkey activate lan lancache-ddns-key primary;set-meta lan ALSO-NOTIFY 10.0.0.5:5300 192.0.2.53:5300|CANARY
+primarynone|_dns_configure_primary_zone_replication lan|k|0||ok|0|zone set-kind lan primary;set-meta lan SOA-EDIT-DNSUPDATE INCREASE;set-meta lan SOA-EDIT-API INCREASE;set-meta lan NOTIFY-DNSUPDATE 1;tsigkey activate lan lancache-ddns-key primary|CANARY
+secnew|_dns_ensure_secondary_zone lan 192.0.2.10:5300|k|0||ok|0|zone create-secondary lan 192.0.2.10:5300;tsigkey activate lan lancache-ddns-key secondary|CANARY
+secexists|_dns_ensure_secondary_zone lan 192.0.2.10:5300|k|0||exists|0|zone create-secondary lan 192.0.2.10:5300;zone set-kind lan secondary;zone change-primary lan 192.0.2.10:5300;tsigkey activate lan lancache-ddns-key secondary|CANARY
+secbroken|_dns_ensure_secondary_zone lan 192.0.2.10:5300|k|0||broken|1|zone create-secondary lan 192.0.2.10:5300|FATAL: failed to create secondary zone 'lan': Error: backend down
+CASES
+}
+
+@test "dns xfr endpoint keeps IPs, resolves names, fails closed" {
+    # What: IP passthrough, name after retries, bad form.
+    # Why: NOTIFY/AXFR need an IPv4; a bad value must stop.
+    # From: Issue #1683 | PR #1775
+    local root s="${BATS_TEST_TMPDIR}/xfr.sh" case ep at rc out tries
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    export CALLS="${BATS_TEST_TMPDIR}/calls" GETENT="${BATS_TEST_TMPDIR}/getent"
+    while IFS='|' read -r case ep at rc out tries; do
+        _dns_tsig_script "${root}" "${s}" "dns_xfr_primary_endpoint '${ep}' DNS_XFR_PRIMARY; echo"
+        : > "${GETENT}"
+        RESOLVE_AT="${at}" PMODE=ok run bash "${s}"
+        [ "${status}" -eq "${rc}" ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
+        [[ "${output}" == *"${out}"* ]] || { echo "${case}: ${output}"; return 1; }
+        [ "$(wc -l < "${GETENT}")" -eq "${tries}" ] || { echo "${case}: tries $(wc -l < "${GETENT}")"; return 1; }
+    done <<'CASES'
+ip|192.0.2.53:5300|1|0|192.0.2.53:5300|0
+name|dns-ssl:5300|3|0|10.0.0.5:5300|3
+noport|dns-ssl|1|1|FATAL: DNS_XFR_PRIMARY must use host:port form|0
+never|dns-ssl:5300|99|1|did not resolve to an IPv4 address after 30s|30
+CASES
 }
