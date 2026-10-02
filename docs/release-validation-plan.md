@@ -1480,6 +1480,10 @@ explicit pass:**
   pattern, per `AG-CODE-013`) and, separately, evaluate whether the
   `current-dev-auto-close.yml` extraction logic is worth factoring out of
   the inline script into a testable shell/script form.
+  **Resolved 2026-10-02 (PR #1858):** both now read the section through one
+  parser, `_ci_pr_section` in `.github/scripts/ci.sh` (`check pr-template`,
+  `close-linked-issues`), and `.github/scripts/ci.bats` covers the section
+  parse, the closing-keyword grammar and the close/skip/failure paths.
 
 **Known, accepted limitations (not fixable without larger rework — recorded per
 `AG-VAL-029`'s "genuinely unautomatable/impractical" carve-out, not silently

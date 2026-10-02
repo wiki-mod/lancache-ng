@@ -48,7 +48,7 @@ declare -A CI_DISPATCH=(
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-status]=ci_cmd_nightly_status
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [release]=ci_cmd_release [release-validation]=_ci_release_validation_valid
     [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag
-    [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check
+    [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues
     [version]=ci_cmd_version
 )
 
@@ -7981,6 +7981,33 @@ _ci_check_stable_external_images() {
     printf 'stable-external-images=clean\n'
 }
 
+# What: Print "## <heading>" count, then that section's lines.
+# Why: one owner for PR-body sections (template, auto-close).
+# From: Issue #1683 | PR #1858
+_ci_pr_section() {
+    local text="$1" heading="$2" out
+    # What: a heading line outside code fences ends a section.
+    # Why: "# x" in a fence or a "### x" line must not bleed.
+    # From: Issue #1496 | PR #1858
+    if ! out="$(awk -v h="## ${heading}" '
+        { sub(/\r$/, "") }
+        /^(   |  | )?(```|~~~)/ { fence = !fence; if (found == 1) print; next }
+        !fence && match($0, /^#+([ \t]|$)/) && RLENGTH <= 7 {
+            line = $0; sub(/[ \t]+$/, "", line)
+            if (line == h) { count++; if (found == 0) { found = 1; next } }
+            if (found == 1) found = 2
+            next
+        }
+        found == 1 { print }
+        END { printf "%d\n", count }
+    ' <<< "${text}" 2>&1)"; then
+        ci_error "[CI-ERROR-CHECK-0143]" "heading=\"${heading}\" reason=\"PR body section parse failed\"" "${out}"
+        return 2
+    fi
+    printf '%s\n' "${out##*$'\n'}"
+    [ "${out}" = "${out##*$'\n'}" ] || printf '%s\n' "${out%$'\n'*}"
+}
+
 # What: PR body must fill every template section.
 # Why: CONTRIBUTING.md requires all headings completed.
 # From: Issue #1683
@@ -8012,16 +8039,17 @@ _ci_check_pr_template() {
         return 2
     fi
     local -a missing=()
-    local sec content stripped trimmed
+    local sec content stripped trimmed count
     for sec in "${sections[@]}"; do
-        if ! grep -qF "## ${sec}" <<<"${body}"; then
+        content="$(_ci_pr_section "${body}" "${sec}")" || return 2
+        count="${content%%$'\n'*}"
+        if [ "${content}" = "${count}" ]; then content=""; else content="${content#*$'\n'}"; fi
+        if [ "${count}" -eq 0 ]; then
             missing+=("${sec}: heading not found"); continue
         fi
-        content="$(awk -v sec="${sec}" '
-            /^## / && $0 ~ ("^## " sec "$") {found=1; next}
-            found && /^## / {exit}
-            found {print}
-        ' <<<"${body}")"
+        if [ "${count}" -gt 1 ]; then
+            missing+=("${sec}: heading appears ${count} times"); continue
+        fi
         # What: strip HTML comments and code fence markers
         # Why: detect empty vs placeholder-only sections
         stripped="$(awk '
@@ -8637,13 +8665,177 @@ _ci_governance_issue_state() {
         done
         printf 'unknown\n'; return 0
     fi
-    local state repo
+    local meta
+    meta="$(_ci_issue_meta "${issue}")" || return 2
+    printf '%s\n' "${meta#*$'\t'}"
+}
+
+# What: Print "<issue|pr>\t<open|closed>" for a number.
+# Why: /issues/N also serves PRs; callers must tell apart.
+# From: Issue #1683 | PR #1858
+_ci_issue_meta() {
+    local issue="$1" repo meta
     repo="$(_ci_repo)" || return 2
-    state="$(_ci_retry github-api gh api "repos/${repo}/issues/${issue}" --jq '.state')" || return 2
-    case "${state}" in
-        open|closed) printf '%s\n' "${state}" ;;
-        *) ci_log "[CI-ERROR-CHECK-0074]" "issue=\"${issue}\" state=\"${state}\" reason=\"unexpected issue state\""; return 2 ;;
+    meta="$(_ci_retry github-api gh api "repos/${repo}/issues/${issue}" \
+        --jq '[(if has("pull_request") then "pr" else "issue" end), .state] | @tsv')" || return 2
+    case "${meta}" in
+        issue$'\t'open|issue$'\t'closed|pr$'\t'open|pr$'\t'closed) printf '%s\n' "${meta}" ;;
+        *) ci_log "[CI-ERROR-CHECK-0074]" "issue=\"${issue}\" meta=\"${meta}\" reason=\"unexpected issue kind or state\""; return 2 ;;
     esac
+}
+
+# What: Print each issue ref a closing keyword names.
+# Why: GitHub grammar: keyword[:] #N or owner/repo#N.
+# From: Issue #1683 | PR #1858
+_ci_closing_refs() {
+    local text="$1" out
+    # What: skip a match with not/never/cannot/n't before it.
+    # Why: "does not close #5" must never close #5.
+    # From: Issue #1496 | PR #1858
+    if ! out="$(awk -v q="'" '
+        function negated(w,  n, i, k, words, at) {
+            n = split("not never cannot n" q "t", words, " ")
+            for (k = 1; k <= n; k++) {
+                at = 0
+                while ((i = index(substr(w, at + 1), words[k])) > 0) {
+                    at += i
+                    if ((k == n || at == 1 || substr(w, at - 1, 1) !~ /[a-z0-9_]/) && \
+                        length(w) - (at + length(words[k]) - 1) <= 20 && \
+                        substr(w, at + length(words[k]), 1) !~ /[a-z0-9_]/) return 1
+                }
+            }
+            return 0
+        }
+        { t = t $0 "\n" }
+        END {
+            low = tolower(t); pos = 1
+            re = "(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?[ \t\n]+([a-z0-9_.-]+/[a-z0-9_.-]+)?#[0-9]+"
+            while (match(substr(low, pos), re)) {
+                s = pos + RSTART - 1; m = substr(low, s, RLENGTH); pos = s + RLENGTH
+                if (s > 1 && substr(low, s - 1, 1) ~ /[a-z0-9_]/) continue
+                w = substr(low, 1, s - 1); sub(/^.*[.!?\n]/, "", w)
+                if (negated(w)) continue
+                sub(/^[a-z]+:?[ \t\n]+/, "", m); print m
+            }
+        }
+    ' <<< "${text}" 2>&1)"; then
+        ci_error "[CI-ERROR-LINK-0001]" "reason=\"closing keyword parse failed\"" "${out}"
+        return 2
+    fi
+    [ -z "${out}" ] || printf '%s\n' "${out}"
+}
+
+# What: Close issues a merged PR lists under Linked Issues.
+# Why: GitHub auto-closes only on default-branch merges.
+# From: Issue #1137 | PR #1858
+ci_cmd_close_linked_issues() {
+    local dry=0 number="" repo raw rows pr body base url merge section count refs
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --dry-run) dry=1; shift ;;
+            --pr) number="${2:-}"; shift 2 || { ci_log "[CI-ERROR-LINK-0002]" "reason=\"--pr needs a number\""; return 2; } ;;
+            *) ci_log "[CI-ERROR-LINK-0002]" "arg=\"$1\" reason=\"unknown argument\""; return 2 ;;
+        esac
+    done
+    repo="$(_ci_repo)" || return 2
+    local fields='number merged baseRefName url body mergeCommit { oid }'
+    if [ -n "${number}" ]; then
+        # What: a replay of one PR never writes to GitHub.
+        # Why: replays exist to inspect the parse, not to close.
+        # From: Issue #1137 | PR #1858
+        if [ "${dry}" -ne 1 ] || ! [[ "${number}" =~ ^[0-9]+$ ]]; then
+            ci_log "[CI-ERROR-LINK-0003]" "pr=\"${number}\" reason=\"--pr needs a numeric PR and --dry-run\""
+            return 2
+        fi
+        raw="$(_ci_retry github-api gh api graphql -f owner="${repo%%/*}" -f name="${repo#*/}" -F number="${number}" \
+            -f query="query(\$owner: String!, \$name: String!, \$number: Int!) { repository(owner: \$owner, name: \$name) { pullRequest(number: \$number) { ${fields} } } }")" || return 2
+        rows="$(jq -c '[.data.repository.pullRequest]' <<< "${raw}" 2>&1)" || {
+            ci_error "[CI-ERROR-LINK-0004]" "pr=\"${number}\" reason=\"PR lookup unparseable\"" "${rows}"; return 2; }
+    else
+        local branch="${GITHUB_REF#refs/heads/}"
+        if [ "${GITHUB_EVENT_NAME:-}" != push ] || [ "${branch}" = "${GITHUB_REF:-}" ]; then
+            printf 'close-linked-issues=skip reason="not a branch push" event="%s" ref="%s"\n' "${GITHUB_EVENT_NAME:-}" "${GITHUB_REF:-}"
+            return 0
+        fi
+        if [ -z "${CI_DEFAULT_BRANCH:-}" ] || [ -z "${GITHUB_SHA:-}" ]; then
+            ci_log "[CI-ERROR-LINK-0005]" "default=\"${CI_DEFAULT_BRANCH:-}\" sha=\"${GITHUB_SHA:-}\" reason=\"CI_DEFAULT_BRANCH and GITHUB_SHA are required\""
+            return 2
+        fi
+        if [ "${branch}" = "${CI_DEFAULT_BRANCH}" ]; then
+            printf 'close-linked-issues=skip reason="GitHub closes on the default branch" branch="%s"\n' "${branch}"
+            return 0
+        fi
+        raw="$(_ci_retry github-api gh api graphql -f owner="${repo%%/*}" -f name="${repo#*/}" -f oid="${GITHUB_SHA}" \
+            -f query="query(\$owner: String!, \$name: String!, \$oid: GitObjectID!) { repository(owner: \$owner, name: \$name) { object(oid: \$oid) { ... on Commit { associatedPullRequests(first: 10) { nodes { ${fields} } } } } } }")" || return 2
+        rows="$(jq -c --arg b "${branch}" --arg s "${GITHUB_SHA}" '[.data.repository.object.associatedPullRequests.nodes[] | select(.merged and .baseRefName == $b and .mergeCommit.oid == $s)]' <<< "${raw}" 2>&1)" || {
+            ci_error "[CI-ERROR-LINK-0004]" "sha=\"${GITHUB_SHA}\" reason=\"PR lookup unparseable\"" "${rows}"; return 2; }
+    fi
+    count="$(_ci_capture 0 jq -r 'length' <<< "${rows}")" || return 2
+    if [ "${count}" -eq 0 ]; then
+        printf 'close-linked-issues=clean reason="no merged PR for this push" sha="%s"\n' "${GITHUB_SHA:-}"
+        return 0
+    fi
+    if [ "${count}" -gt 1 ]; then
+        ci_error "[CI-ERROR-LINK-0006]" "count=${count} reason=\"several merged PRs share this merge commit\"" "${rows}"
+        return 2
+    fi
+    pr="$(_ci_capture 0 jq -r '.[0].number' <<< "${rows}")" || return 2
+    body="$(_ci_capture 0 jq -r '.[0].body // ""' <<< "${rows}")" || return 2
+    base="$(_ci_capture 0 jq -r '.[0].baseRefName' <<< "${rows}")" || return 2
+    url="$(_ci_capture 0 jq -r '.[0].url' <<< "${rows}")" || return 2
+    merge="$(_ci_capture 0 jq -r '.[0].mergeCommit.oid // ""' <<< "${rows}")" || return 2
+    section="$(_ci_pr_section "${body}" "Linked Issues")" || return 2
+    count="${section%%$'\n'*}"
+    if [ "${section}" = "${count}" ]; then section=""; else section="${section#*$'\n'}"; fi
+    if [ "${count}" -eq 0 ]; then
+        printf 'close-linked-issues=clean pr=%s reason="no Linked Issues section"\n' "${pr}"
+        return 0
+    fi
+    if [ "${count}" -gt 1 ]; then
+        ci_log "[CI-ERROR-LINK-0007]" "pr=${pr} count=${count} reason=\"Linked Issues heading is ambiguous; nothing closed\""
+        return 1
+    fi
+    refs="$(_ci_closing_refs "${section}")" || return 2
+    refs="$(_ci_capture 0 sort -u <<< "${refs}")" || return 2
+    local ref n meta comment out closed=0 skipped=0 mode=done
+    local -a failed=()
+    while IFS= read -r ref; do
+        [ -n "${ref}" ] || continue
+        n="${ref##*#}"
+        if [ "${ref%#*}" != "" ] && [ "${ref%#*}" != "${repo}" ]; then
+            ci_log "[CI-NOTICE-LINK-0008]" "pr=${pr} ref=\"${ref}\" reason=\"other repository; not closed here\""
+            skipped=$((skipped + 1)); continue
+        fi
+        meta="$(_ci_issue_meta "${n}")" || { failed+=("#${n}: lookup failed (raw above)"); continue; }
+        case "${meta}" in
+            pr$'\t'*) ci_log "[CI-NOTICE-LINK-0009]" "pr=${pr} ref=#${n} reason=\"is a pull request\""; skipped=$((skipped + 1)); continue ;;
+            *$'\t'closed) ci_log "[CI-NOTICE-LINK-0010]" "pr=${pr} ref=#${n} reason=\"already closed\""; skipped=$((skipped + 1)); continue ;;
+        esac
+        if [ "${dry}" -eq 1 ]; then
+            printf 'close-linked-issues=would-close pr=%s issue=%s\n' "${pr}" "${n}"
+            closed=$((closed + 1)); continue
+        fi
+        comment="$(_ci_mktemp "${CI_TMPDIR}/ci-link-comment.XXXXXX")" || return 2
+        if ! out="$(printf '## Closed via merge to `%s`\n\nCI closed this issue (`ci.sh close-linked-issues`) because GitHub closes linked issues only for merges into the default branch. Closed by PR #%s (%s), merge commit `%s`. The PR description follows verbatim.\n\n---\n\n%s\n' \
+            "${base}" "${pr}" "${url}" "${merge}" "${body}" 2>&1 > "${comment}")"; then
+            failed+=("#${n}: comment file not written: ${out}"); rm -f "${comment}"; continue
+        fi
+        if ! out="$(_ci_retry github-api gh api -X POST "repos/${repo}/issues/${n}/comments" -F body=@"${comment}")"; then
+            failed+=("#${n}: comment failed (raw above)"); rm -f "${comment}"; continue
+        fi
+        rm -f "${comment}"
+        if ! out="$(_ci_retry github-api gh api -X PATCH "repos/${repo}/issues/${n}" -f state=closed -f state_reason=completed)"; then
+            failed+=("#${n}: close failed after the comment (raw above)"); continue
+        fi
+        ci_log "[CI-INFO-LINK-0011]" "pr=${pr} issue=#${n} reason=\"commented and closed\""
+        closed=$((closed + 1))
+    done <<< "${refs}"
+    if [ "${#failed[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-LINK-0012]" "pr=${pr} closed=${closed} failed=${#failed[@]} reason=\"not every linked issue was processed\"" "$(printf '%s\n' "${failed[@]}")"
+        return 2
+    fi
+    [ "${dry}" -eq 0 ] || mode=dry-run
+    printf 'close-linked-issues=%s pr=%s closed=%s skipped=%s\n' "${mode}" "${pr}" "${closed}" "${skipped}"
 }
 
 # What: Flag stale TODOs, scope gaps, upload errors.

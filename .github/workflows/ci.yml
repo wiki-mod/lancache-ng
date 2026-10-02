@@ -316,6 +316,29 @@ jobs:
           PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: bash .github/scripts/ci.sh cut-release-tag
 
+  # What: close issues a merged PR lists under Linked Issues.
+  # Why: GitHub auto-closes on default-branch merges only.
+  # From: Issue #1137 | PR #1858
+  close-linked-issues:
+    name: close-linked-issues
+    needs: platform
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container: *bt_platform
+    permissions:
+      contents: read
+      packages: read
+      issues: write
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CI_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - *bootstrap
+      - name: Close the issues the merged PR links
+        run: bash .github/scripts/ci.sh close-linked-issues
+
   # What: run diff-scoped and repo-wide guards
   # Why: static checks; own failure domain
   # From: Issue #1683

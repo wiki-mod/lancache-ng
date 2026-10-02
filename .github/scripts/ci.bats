@@ -6147,6 +6147,101 @@ CASES
     [[ "${output}" == *"CI-ERROR-CHECK-0140"*"missing"*"raw:"* ]]
 }
 
+@test "pr section: exact heading, any heading ends it, fences" {
+    # What: count of exact headings, then the section lines.
+    # Why: a fenced "# x" or "### x" must not cut or bleed.
+    # From: Issue #1496 | PR #1858
+    local body
+    body=$'## Summary\nx\n## Linked Issues  \r\nCloses #1\n```bash\n# not a heading\n```\n### Notes\ncloses #2\n## Linked Issuesx\n'
+    run _ci_pr_section "${body}" "Linked Issues"
+    [ "${status}" -eq 0 ]
+    [ "${output}" = $'1\nCloses #1\n```bash\n# not a heading\n```' ]
+    run _ci_pr_section $'## Linked Issues\na\n## Linked Issues\nb' "Linked Issues"
+    [ "${status}" -eq 0 ]; [ "${output%%$'\n'*}" = 2 ]
+    run _ci_pr_section $'### Linked Issues\na' "Linked Issues"
+    [ "${status}" -eq 0 ]; [ "${output}" = 0 ]
+}
+
+@test "closing refs: GitHub keyword grammar and negation" {
+    # What: keyword[:] #N or owner/repo#N; negated ones skip.
+    # Why: "does not close #4" closed real issues (#1496).
+    # From: Issue #1496 | PR #1858
+    local text
+    text=$'Closes #1, FIXES: #2 and resolved Owner/Repo#3.\nThis does not close #4. It doesn\'t fix #5.\nencloses #6, Refs #7.\nNo. Closes #8\nclose#9'
+    run _ci_closing_refs "${text}"
+    [ "${status}" -eq 0 ]
+    [ "${output}" = $'#1\n#2\nowner/repo#3\n#8' ]
+}
+
+# What: gh mock for close-linked-issues; writes are logged.
+# Why: PR lookup, issue meta and writes need no network.
+# From: Issue #1137 | PR #1858
+_lk_setup() {
+    export GITHUB_REPOSITORY=owner/fixture-repo GH_TOKEN=t CI_RETRY_BACKOFF_BASE_SECONDS=0
+    export GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/dev GITHUB_SHA=abc CI_DEFAULT_BRANCH=main
+    export LK_LOG="${BATS_TEST_TMPDIR}/lk.log" LK_FAIL='' LK_BODY
+    LK_BODY=$'## Summary\nx\n## Linked Issues\nCloses #1, fixes owner/fixture-repo#2, resolves other/repo#3\nThis does not close #4.\nCloses #5\nCloses #6\n### Notes\ncloses #7\n'
+    : > "${LK_LOG}"
+    gh() {
+        local a="$*" f
+        case "${a}" in *"${LK_FAIL:-<none>}"*) echo "gh: Not Found (HTTP 404)" >&2; return 1 ;; esac
+        case "${a}" in
+            *"object(oid"*) jq -cn --arg b "${LK_BODY}" '{data: {repository: {object: {associatedPullRequests: {nodes: [
+                {number: 9, merged: true, baseRefName: "dev", url: "u9", body: $b, mergeCommit: {oid: "abc"}},
+                {number: 8, merged: false, baseRefName: "dev", url: "u8", body: "", mergeCommit: null}]}}}}}' ;;
+            *"pullRequest(number"*) jq -cn --arg b "${LK_BODY}" '{data: {repository: {pullRequest:
+                {number: 9, merged: true, baseRefName: "dev", url: "u9", body: $b, mergeCommit: {oid: "abc"}}}}}' ;;
+            *"-X POST"*) f="${a##*body=@}"; { echo "COMMENT ${a}"; cat "${f}"; } >> "${LK_LOG}" ;;
+            *"-X PATCH"*) echo "CLOSE ${a}" >> "${LK_LOG}" ;;
+            *"issues/5 "*) printf 'pr\topen\n' ;;
+            *"issues/6 "*) printf 'issue\tclosed\n' ;;
+            *"issues/"*) printf 'issue\topen\n' ;;
+            *) echo "unexpected gh ${a}" >&2; return 1 ;;
+        esac
+    }
+    export -f gh
+}
+
+@test "close-linked-issues: closes listed open issues only" {
+    # What: #1/#2 close; other repo, PR, closed, ### skip.
+    # Why: mirrors default-branch auto-close for current_dev.
+    # From: Issue #1137 | PR #1858
+    _lk_setup
+    run bash "${CI_SH}" close-linked-issues
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"close-linked-issues=done pr=9 closed=2 skipped=3"* ]]
+    [[ "${output}" == *"CI-NOTICE-LINK-0008"*"other/repo#3"* ]]
+    [[ "${output}" == *"CI-NOTICE-LINK-0009"*"#5"* ]]; [[ "${output}" == *"CI-NOTICE-LINK-0010"*"#6"* ]]
+    [ "$(grep -c '^CLOSE .*repos/owner/fixture-repo/issues/[12] .*state=closed' "${LK_LOG}")" -eq 2 ]
+    grep -qF 'Closed by PR #9 (u9), merge commit `abc`' "${LK_LOG}"
+    grep -qF 'Closes #1, fixes owner/fixture-repo#2' "${LK_LOG}"
+    ! grep -qE 'issues/(3|4|5|6|7)[ /]' "${LK_LOG}"
+}
+
+@test "close-linked-issues: skips, dry run and failure paths" {
+    # What: non-push/default skip; replay writes nothing; rc 2.
+    # Why: a failed issue must stay visible, others still run.
+    # From: Issue #1137 | PR #1858
+    _lk_setup
+    GITHUB_EVENT_NAME=pull_request run bash "${CI_SH}" close-linked-issues
+    [ "${status}" -eq 0 ]; [[ "${output}" == *'skip reason="not a branch push"'* ]]
+    GITHUB_REF=refs/heads/main run bash "${CI_SH}" close-linked-issues
+    [ "${status}" -eq 0 ]; [[ "${output}" == *'skip reason="GitHub closes on the default branch"'* ]]
+    CI_DEFAULT_BRANCH='' run bash "${CI_SH}" close-linked-issues
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"CI-ERROR-LINK-0005"* ]]
+    GITHUB_SHA=other run bash "${CI_SH}" close-linked-issues
+    [ "${status}" -eq 0 ]; [[ "${output}" == *'clean reason="no merged PR for this push"'* ]]
+    run bash "${CI_SH}" close-linked-issues --pr 9
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"CI-ERROR-LINK-0003"* ]]
+    run bash "${CI_SH}" close-linked-issues --dry-run --pr 9
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"close-linked-issues=dry-run pr=9 closed=2 skipped=3"* ]]
+    [ ! -s "${LK_LOG}" ]
+    LK_FAIL='issues/1 ' run bash "${CI_SH}" close-linked-issues
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"CI-ERROR-LINK-0012"*"closed=1 failed=1"*"#1: lookup failed"* ]]
+    LK_BODY=$'## Linked Issues\nCloses #1\n## Linked Issues\nCloses #2' run bash "${CI_SH}" close-linked-issues
+    [ "${status}" -eq 1 ]; [[ "${output}" == *"CI-ERROR-LINK-0007"* ]]
+}
+
 # What: fixture repo + a fake action-manifest resolver.
 # Why: one owner for the harness; asserts contract not curl.
 # From: Issue #1683 | PR #1858

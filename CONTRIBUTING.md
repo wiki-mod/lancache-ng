@@ -69,9 +69,9 @@ The template now exposes visible `Linked Issues` and `Risk / Rollback /
 Follow-up` sections. Fill those in directly instead of relying on hidden
 comments so the rendered PR body always surfaces the tracking and risk
 context reviewers need. `Linked Issues`' exact casing matters: both
-`current-dev-auto-close.yml`'s closing-keyword scanner and
-`scripts/validate-pr-template.sh`'s required-section check match it
-case-sensitively (issue #1496).
+`ci.sh close-linked-issues` (the closing-keyword scanner) and
+`ci.sh check pr-template` (the required-section check) read sections
+through one parser that matches the heading exactly (issue #1496).
 - if the change touches build, CI, or release automation, whether any accelerator (`sccache`, `sccache-dist`, `distcc`, `distcc-pump`, or Buildx cache) is optional, preferred, or a gate
 - whether a GitHub-hosted fallback still works without LAN-only cache assumptions
 
@@ -92,7 +92,7 @@ Track related work explicitly in the PR body:
 - If the PR title or body says scaffold, partial, deferred, not covered, not implemented, or follow-up, keep the PR open-scoped: explain the remainder with `Refs #123` and avoid `Fixes #123` / `Closes #123` unless the full issue is actually complete.
 - When a PR is merged, completion claims must be checked against the merged code on the active development branch (`current_dev` as of #825, not a hardcoded `master`/`v0.2.0` assumption), not just the PR head or narrative.
 - If no issue exists, that's expected and fine per the "Before you start" guidance above for single, well-scoped work implemented immediately — no need to explain why in that case. If work that genuinely should have had an issue (multi-topic, backlog, needs-discussion) shipped without one, explain why in the PR body instead of leaving the relationship unclear.
-- **`Closes #123` is now automated on `current_dev` merges too** (`.github/workflows/current-dev-auto-close.yml`, issue #1137): GitHub's own built-in closing-keyword behavior still only fires on merges to the repository's default branch (`master`), but this project's own workflow now mechanizes the same relay-and-close pattern for `current_dev` merges -- it posts the merged PR's body verbatim as a comment on each referenced, still-open issue and closes it. `Refs #123` is deliberately never matched (non-closing references stay open, as intended). If this automation is ever down or a PR predates it, the manual fallback in the next section still applies.
+- **`Closes #123` is now automated on `current_dev` merges too** (`ci.sh close-linked-issues`, run by the `close-linked-issues` job in `.github/workflows/ci.yml` on every push to a non-default branch, issue #1137): GitHub's own built-in closing-keyword behavior still only fires on merges to the repository's default branch (`master`), but this project's own CI now mechanizes the same relay-and-close pattern for `current_dev` merges -- it posts the merged PR's body verbatim as a comment on each referenced, still-open issue listed under `## Linked Issues` and closes it. `Refs #123` is deliberately never matched (non-closing references stay open, as intended). If this automation is ever down or a PR predates it, the manual fallback in the next section still applies.
 
 ### Closing an issue manually (fallback, current_dev merges)
 
