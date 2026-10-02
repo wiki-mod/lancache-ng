@@ -6,7 +6,7 @@
 # From: Issue #1683
 schema: build-manifest/v1
 
-# What: The product stack: the 10 shipped services.
+# What: The product services this repository builds.
 # Why: One list; matrices/scans/release derive from it.
 # From: Issue #1683
 services:

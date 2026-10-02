@@ -6010,7 +6010,7 @@ EOF
 }
 
 # What: neutral SOT, gh mock and call log for the sweep.
-# Why: refs and issues are fixtures; no SOT mirror.
+# Why: PRs and issues are fixtures; no SOT mirror.
 # From: Issue #1683 | PR #1858
 _ob_setup() {
     local m="${BATS_TEST_TMPDIR}/ob.yml"
@@ -6019,7 +6019,7 @@ _ob_setup() {
         '  long_lived_patterns:' '    - "rel-*"' > "${m}"
     export CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo GH_TOKEN=t
     export CI_RETRY_BACKOFF_BASE_SECONDS=0 OB_CALLS="${BATS_TEST_TMPDIR}/gh.calls"
-    export OB_REFS='' OB_ISSUES='[]' OB_COMMENTS='[]' OB_FAIL=''
+    export OB_REFS='' OB_ISSUES='' OB_MORE='' OB_FAIL=''
     OB_OLD="2020-01-01T00:00:00Z"
     OB_NEW="$(date -u -d "@$(($(date -u +%s) - 60))" +%Y-%m-%dT%H:%M:%SZ)"
     : > "${OB_CALLS}"
@@ -6027,9 +6027,9 @@ _ob_setup() {
         echo "$*" >> "${OB_CALLS}"
         case "$*" in
             *"${OB_FAIL:-<none>}"*) echo "gh: Not Found (HTTP 404)" >&2; return 1 ;;
-            *graphql*) printf '%s' "${OB_REFS}" ;;
-            *"/issues/comments?"*) printf '%s' "${OB_COMMENTS}" ;;
-            *"/issues?state=all&"*) printf '%s' "${OB_ISSUES}" ;;
+            *"refs(refPrefix"*) printf '%s' "${OB_REFS}" ;;
+            *"issue(number"*) printf '%s' "${OB_MORE}" ;;
+            *"issues(first"*) printf '%s' "${OB_ISSUES}" ;;
             *) echo "unexpected gh $*" >&2; return 1 ;;
         esac
     }
@@ -6045,6 +6045,16 @@ _ob_page() {
         author: {name: .[3]}}, associatedPullRequests: {totalCount: (.[2] | tonumber)}}))}}}}'
 }
 
+# What: one issues page; issue 7 has more than 100 comments.
+# Why: drives the per-issue comment paging path.
+# From: Issue #1683 | PR #1858
+_ob_issues() {
+    printf '%s' '{"data":{"repository":{"issues":{"nodes":[
+        {"number":1,"body":"see inbody and prefix-long","comments":{"nodes":[{"body":"pushed `incomment`; see dotted."}],"pageInfo":{"hasNextPage":false}}},
+        {"number":4,"body":"branch inclosed done","comments":{"nodes":[],"pageInfo":{"hasNextPage":false}}},
+        {"number":7,"body":null,"comments":{"nodes":[{"body":"x"}],"pageInfo":{"hasNextPage":true}}}]}}}}'
+}
+
 @test "check orphaned-branches: long-lived, age, PR, references" {
     # What: only old non-long-lived refs with no PR/issue.
     # Why: AG-GH-017; a finding is rc 1 with name and date.
@@ -6055,31 +6065,26 @@ dev|${OB_OLD}|0|a
 rel-1|${OB_OLD}|0|a
 young|${OB_NEW}|0|a
 haspr|${OB_OLD}|2|a
+closedpr|${OB_OLD}|1|a
 inbody|${OB_OLD}|0|a")$(_ob_page "incomment|${OB_OLD}|0|a
-inpr|${OB_OLD}|0|a
 prefix|${OB_OLD}|0|a
 dotted|${OB_OLD}|0|a
 lost|${OB_OLD}|0|Ann Author
 inclosed|${OB_OLD}|0|a
-inprcomment|${OB_OLD}|0|a")"
-    OB_ISSUES='[{"number":1,"state":"open","body":"see inbody and prefix-long"},
-        {"number":4,"state":"closed","body":"branch inclosed done"},
-        {"number":3,"body":"inpr","pull_request":{}}]'
-    OB_COMMENTS='[{"html_url":"https://git.example.test/o/r/issues/2#issuecomment-1","body":"pushed `incomment`; see dotted."},
-        {"html_url":"https://git.example.test/o/r/pull/3#issuecomment-2","body":"inprcomment"}]'
-    export OB_REFS OB_ISSUES OB_COMMENTS
+inlong|${OB_OLD}|0|a")"
+    OB_ISSUES="$(_ob_issues)"
+    OB_MORE='{"data":{"repository":{"issue":{"comments":{"nodes":[{"body":"late inlong"}]}}}}}'
+    export OB_REFS OB_ISSUES OB_MORE
     run bash "${CI_SH}" check orphaned-branches
     [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0139"*"orphaned=4 scanned=13 checked=9"* ]]
+    [[ "${output}" == *"CI-ERROR-CHECK-0139"*"orphaned=2 scanned=13 checked=9"* ]]
     [[ "${output}" == *'branch="lost" last_commit=2020-01-01T00:00:00Z author="Ann Author"'* ]]
+    [[ "${output}" == *'branch="prefix"'* ]]
     local b
-    for b in prefix inpr inprcomment; do
-        [[ "${output}" == *"branch=\"${b}\""* ]]
-    done
-    for b in trunk dev rel-1 young haspr inbody incomment dotted inclosed; do
+    for b in trunk dev rel-1 young haspr closedpr inbody incomment dotted inclosed inlong; do
         [[ "${output}" != *"branch=\"${b}\""* ]]
     done
-    grep -qF 'issues?state=all&' "${OB_CALLS}"
+    grep -qF 'number=7' "${OB_CALLS}"
 }
 
 @test "check orphaned-branches: clean run never lists issues" {
@@ -6093,7 +6098,7 @@ haspr|${OB_OLD}|1|a")"
     run _ci_check_orphaned_branches
     [ "${status}" -eq 0 ]
     [ "${output}" = "orphaned-branches=clean scanned=2 checked=1 no_pr=0" ]
-    ! grep -qF '/issues?' "${OB_CALLS}"
+    ! grep -qF 'issues(first' "${OB_CALLS}"
 }
 
 @test "check orphaned-branches: every failure is coded rc 2" {
@@ -6103,8 +6108,9 @@ haspr|${OB_OLD}|1|a")"
     local case setup want
     while IFS='|' read -r case setup want; do
         _ob_setup
-        OB_REFS="$(_ob_page "lost|${OB_OLD}|0|a")"
-        export OB_REFS
+        OB_REFS="$(_ob_page "lost|${OB_OLD}|0|a")"; OB_ISSUES="$(_ob_issues)"
+        OB_MORE='{"data":{"repository":{"issue":{"comments":{"nodes":[]}}}}}'
+        export OB_REFS OB_ISSUES OB_MORE
         eval "${setup}"
         run _ci_check_orphaned_branches
         echo "case=${case} status=${status} output=${output}"
@@ -6115,13 +6121,13 @@ haspr|${OB_OLD}|1|a")"
 no-token|GH_TOKEN=''|CI-ERROR-CHECK-0130
 bad-age|sed -i 's/3600/1h/' "${CI_MANIFEST}"|CI-ERROR-CHECK-0131
 no-long-lived|printf 'branch_policy:\n  orphan_min_age_seconds: 1\n' > "${CI_MANIFEST}"|CI-ERROR-CHECK-0132
-refs-fail|OB_FAIL=graphql|CI-ERROR-CHECK-0133
-refs-json|OB_REFS='not json'|CI-ERROR-CHECK-0134
-refs-row|OB_REFS='{"data":{"repository":{"refs":{"nodes":[{"name":"x","target":{"committedDate":"2020-01-01T00:00:00Z"},"associatedPullRequests":{}}]}}}}'|CI-ERROR-CHECK-0135
-issues-fail|OB_FAIL='/issues?'|CI-ERROR-CHECK-0136
+refs-fail|OB_FAIL='refs(refPrefix'|CI-ERROR-CHECK-0133
+refs-row|OB_REFS='{"data":{"repository":{"refs":{"nodes":[{"name":"x","target":{"committedDate":"2020-01-01T00:00:00Z"},"associatedPullRequests":{}}]}}}}'|CI-ERROR-CHECK-0134
+refs-json|OB_REFS='not json'|CI-ERROR-CHECK-0135
+issues-fail|OB_FAIL='issues(first'|CI-ERROR-CHECK-0136
 issues-json|OB_ISSUES='{'|CI-ERROR-CHECK-0137
-comments-fail|OB_FAIL='/issues/comments?'|CI-ERROR-CHECK-0138
-comments-json|OB_COMMENTS='[{"body":"x"}]'|CI-ERROR-CHECK-0137
+more-fail|OB_FAIL='issue(number'|CI-ERROR-CHECK-0138
+more-json|OB_MORE='{'|CI-ERROR-CHECK-0141
 match-fail|_ci_unreferenced_names() { ci_error "[CI-ERROR-CHECK-0140]" "x" "y"; return 2; }|CI-ERROR-CHECK-0140
 CASES
 }

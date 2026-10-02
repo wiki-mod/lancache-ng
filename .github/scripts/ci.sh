@@ -8250,7 +8250,7 @@ _ci_unreferenced_names() {
 }
 
 # What: AG-GH-017 sweep: old work branch, no PR or issue.
-# Why: an untracked branch is a finding, never a notice.
+# Why: repo-wide by nature (docs §98); a finding is rc 1.
 # From: Issue #1683 | PR #1858
 _ci_check_orphaned_branches() {
     local repo min_age now names pats raw rows rc=0
@@ -8277,7 +8277,7 @@ _ci_check_orphaned_branches() {
         return 2
     fi
     # What: one paged query: tip date and PR count per ref.
-    # Why: associatedPullRequests counts PRs in any state.
+    # Why: GraphQL budget, not REST; PRs in any state count.
     # From: Issue #1683 | PR #1858
     raw="$(_ci_retry github-api gh api graphql --paginate -f owner="${repo%%/*}" -f name="${repo#*/}" \
         -f query='query($owner: String!, $name: String!, $endCursor: String) { repository(owner: $owner, name: $name) { refs(refPrefix: "refs/heads/", first: 100, after: $endCursor) { nodes { name target { ... on Commit { committedDate author { name } } } associatedPullRequests { totalCount } } pageInfo { hasNextPage endCursor } } } }')" || rc=$?
@@ -8286,7 +8286,7 @@ _ci_check_orphaned_branches() {
         return 2
     fi
     if ! rows="$(jq -r '.data.repository.refs.nodes[] | [.name, .target.committedDate, (.target.committedDate | fromdateiso8601), .associatedPullRequests.totalCount, (.target.author.name // "")] | @tsv' <<< "${raw}" 2>&1)"; then
-        ci_error "[CI-ERROR-CHECK-0134]" "repo=\"${repo}\" reason=\"branch listing unparseable\"" "${rows}"$'\n'"response:"$'\n'"${raw}"
+        ci_error "[CI-ERROR-CHECK-0135]" "repo=\"${repo}\" reason=\"branch listing unparseable\"" "${rows}"$'\n'"response:"$'\n'"${raw}"
         return 2
     fi
     now="$(date -u +%s)"
@@ -8297,7 +8297,7 @@ _ci_check_orphaned_branches() {
         [ -n "${branch}" ] || continue
         scanned=$((scanned + 1))
         if ! [[ "${epoch}" =~ ^[0-9]+$ && "${prs}" =~ ^[0-9]+$ ]]; then
-            ci_log "[CI-ERROR-CHECK-0135]" "branch=\"${branch}\" epoch=\"${epoch}\" prs=\"${prs}\" reason=\"malformed branch row\""
+            ci_log "[CI-ERROR-CHECK-0134]" "branch=\"${branch}\" epoch=\"${epoch}\" prs=\"${prs}\" reason=\"malformed branch row\""
             return 2
         fi
         [ $((now - epoch)) -ge "${min_age}" ] || continue
@@ -8314,35 +8314,41 @@ _ci_check_orphaned_branches() {
         return 0
     fi
     # What: bodies + comments of issues in any state.
-    # Why: AG-GH-017 asks for an issue link, not an open one.
+    # Why: AG-GH-017 asks for an issue link; no PR data here.
     # From: Issue #1683 | PR #1858
-    local corpus out
+    local corpus out more n
     corpus="$(_ci_mktemp "${CI_TMPDIR}/ci-orphan-corpus.XXXXXX")" || return 2
-    raw="$(_ci_retry github-api gh api --paginate "repos/${repo}/issues?state=all&per_page=100")" || rc=$?
+    raw="$(_ci_retry github-api gh api graphql --paginate -f owner="${repo%%/*}" -f name="${repo#*/}" \
+        -f query='query($owner: String!, $name: String!, $endCursor: String) { repository(owner: $owner, name: $name) { issues(first: 100, after: $endCursor) { nodes { number body comments(first: 100) { nodes { body } pageInfo { hasNextPage } } } pageInfo { hasNextPage endCursor } } } }')" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         ci_log "[CI-ERROR-CHECK-0136]" "repo=\"${repo}\" rc=${rc} reason=\"issue listing failed (raw above)\""
         rm -f "${corpus}"
         return 2
     fi
-    # What: drop PR entries and PR conversation comments.
-    # Why: both /issues endpoints also return pull requests.
+    if ! out="$(jq -r '.data.repository.issues.nodes[] | (.body // empty), (.comments.nodes[].body // empty)' <<< "${raw}" 2>&1 > "${corpus}")" \
+        || ! more="$(jq -r '.data.repository.issues.nodes[] | select(.comments.pageInfo.hasNextPage) | .number' <<< "${raw}" 2>&1)"; then
+        ci_error "[CI-ERROR-CHECK-0137]" "repo=\"${repo}\" corpus=\"${corpus}\" reason=\"issue data unparseable or unwritable\"" "${out}"$'\n'"${more}"
+        rm -f "${corpus}"
+        return 2
+    fi
+    # What: page the rest of a thread over 100 comments.
+    # Why: a cut-off thread could hide the branch reference.
     # From: Issue #1683 | PR #1858
-    if ! out="$(jq -r '.[] | select(has("pull_request") | not) | .body // empty' <<< "${raw}" 2>&1 > "${corpus}")"; then
-        ci_error "[CI-ERROR-CHECK-0137]" "repo=\"${repo}\" corpus=\"${corpus}\" reason=\"issue data unparseable or unwritable\"" "${out}"
-        rm -f "${corpus}"
-        return 2
-    fi
-    raw="$(_ci_retry github-api gh api --paginate "repos/${repo}/issues/comments?per_page=100")" || rc=$?
-    if [ "${rc}" -ne 0 ]; then
-        ci_log "[CI-ERROR-CHECK-0138]" "repo=\"${repo}\" rc=${rc} reason=\"issue comment listing failed (raw above)\""
-        rm -f "${corpus}"
-        return 2
-    fi
-    if ! out="$(jq -r '.[] | select(.html_url | contains("/issues/")) | .body // empty' <<< "${raw}" 2>&1 >> "${corpus}")"; then
-        ci_error "[CI-ERROR-CHECK-0137]" "repo=\"${repo}\" corpus=\"${corpus}\" reason=\"issue comments unparseable or unwritable\"" "${out}"
-        rm -f "${corpus}"
-        return 2
-    fi
+    while IFS= read -r n; do
+        [ -n "${n}" ] || continue
+        raw="$(_ci_retry github-api gh api graphql --paginate -f owner="${repo%%/*}" -f name="${repo#*/}" -F number="${n}" \
+            -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { issue(number: $number) { comments(first: 100, after: $endCursor) { nodes { body } pageInfo { hasNextPage endCursor } } } } }')" || rc=$?
+        if [ "${rc}" -ne 0 ]; then
+            ci_log "[CI-ERROR-CHECK-0138]" "repo=\"${repo}\" issue=${n} rc=${rc} reason=\"issue comment listing failed (raw above)\""
+            rm -f "${corpus}"
+            return 2
+        fi
+        if ! out="$(jq -r '.data.repository.issue.comments.nodes[] | .body // empty' <<< "${raw}" 2>&1 >> "${corpus}")"; then
+            ci_error "[CI-ERROR-CHECK-0141]" "repo=\"${repo}\" issue=${n} corpus=\"${corpus}\" reason=\"issue comments unparseable or unwritable\"" "${out}"
+            rm -f "${corpus}"
+            return 2
+        fi
+    done <<< "${more}"
     out="$(_ci_unreferenced_names "$(printf '%s\n' "${noprs[@]}")" "${corpus}")" || rc=$?
     rm -f "${corpus}"
     [ "${rc}" -eq 0 ] || return 2

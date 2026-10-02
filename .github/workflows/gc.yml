@@ -86,3 +86,26 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
         run: bash .github/scripts/ci.sh gc --apply
+
+  # What: AG-GH-017 sweep for branches with no PR or issue.
+  # Why: reachability of refs; read-only repo token only.
+  # From: Issue #1683 | PR #1858
+  orphaned-branches:
+    name: orphaned-branches
+    needs: platform
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+      issues: read
+      pull-requests: read
+    container:
+      image: ${{ needs.platform.outputs.image }}
+      credentials: *ghcr_credentials
+    steps:
+      - *bootstrap
+      - name: Report branches with no PR or issue reference
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/ci.sh check orphaned-branches
