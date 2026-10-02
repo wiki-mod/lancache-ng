@@ -9226,6 +9226,42 @@ _kgs_fingerprint() {
 }
 
 # =========================================================
+# PRODUCT RUNTIME: RETENTION
+# =========================================================
+
+@test "retention stops promptly with rc 0 on SIGTERM mid-sleep" {
+    # What: a real TERM during the interval sleep ends it.
+    # Why: PID 1 bash ignored TERM; docker stop had to kill.
+    # From: Issue #1683 | PR #1858
+    local t="${BATS_TEST_TMPDIR}/ret" pid kid="" c i rc=0
+    mkdir -p "${t}/cache/lancache" "${t}/state" "${t}/log/syslog" "${t}/lib/fb"
+    CACHE_DIR="${t}/cache/lancache" CACHE_DIR_ALLOWED_PREFIX="${t}/cache" \
+        PURGE_STAMP="${t}/state/purge.stamp" SYSLOG_ENABLED=false \
+        SYSLOG_PRUNE_STAMP="${t}/state/syslog.stamp" SYSLOG_LOG_ROOT="${t}/log/syslog" \
+        SYSLOG_LOG_ROOT_ALLOWED_PREFIX="${t}/log" FLUENT_BIT_SELFLOG_DIR="${t}/lib/fb" \
+        FLUENT_BIT_SELFLOG_DIR_ALLOWED_PREFIX="${t}/lib" RETENTION_INTERVAL=60 \
+        bash "${BATS_TEST_DIRNAME}/../../services/watchdog/retention.sh" > "${t}/out.log" 2>&1 &
+    pid=$!
+    for i in $(seq 1 100); do
+        for c in $(cat "/proc/${pid}/task/${pid}/children" 2>&1); do
+            [ "$(cat "/proc/${c}/comm" 2>&1)" = sleep ] && kid="${c}"
+        done
+        [ -n "${kid}" ] && break
+        sleep 0.1
+    done
+    [ -n "${kid}" ] || { echo "never reached the sleep:"; cat "${t}/out.log"; kill "${pid}"; return 1; }
+    kill -TERM "${pid}"
+    for i in $(seq 1 50); do [ -d "/proc/${pid}" ] || break; sleep 0.1; done
+    [ ! -d "/proc/${pid}" ] || { echo "still running 5 s after TERM:"; cat "${t}/out.log"; kill -9 "${pid}"; return 1; }
+    wait "${pid}" || rc=$?
+    echo "rc=${rc}"; cat "${t}/out.log"
+    [ "${rc}" -eq 0 ]
+    grep -q 'retention stopping' "${t}/out.log"
+    c="$(awk '{print $3}' "/proc/${kid}/stat" 2>&1)" || c=gone
+    case "${c}" in Z|gone) ;; *) echo "interval sleep still alive: ${c}"; return 1 ;; esac
+}
+
+# =========================================================
 # PRODUCT RUNTIME: SHARED SECRETS
 # =========================================================
 

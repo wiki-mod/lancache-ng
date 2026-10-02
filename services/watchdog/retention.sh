@@ -661,6 +661,12 @@ fi
 
 log "Retention daemon started. Cache: $CACHE_DIR (valid ${CACHE_VALID_DAYS}d, allowed prefix ${CACHE_DIR_ALLOWED_PREFIX}) | Syslog: $SYSLOG_LOG_ROOT (enabled=$SYSLOG_ENABLED, allowed prefix ${SYSLOG_LOG_ROOT_ALLOWED_PREFIX}) | Fluent-bit self-log: $FLUENT_BIT_SELFLOG_DIR (allowed prefix ${FLUENT_BIT_SELFLOG_DIR_ALLOWED_PREFIX})"
 
+# What: stop promptly on SIGTERM, even mid-sleep.
+# Why: as PID 1 bash ignored TERM; stop hit the kill.
+# From: Issue #1683 | PR #1858
+sleep_pid=""
+trap 'log "SIGTERM/SIGINT received; retention stopping"; [ -z "${sleep_pid}" ] || kill "${sleep_pid}" || true; exit 0' TERM INT
+
 while true; do
     maybe_purge
     maybe_prune_syslog
@@ -670,5 +676,8 @@ while true; do
     # per-cycle cadence must survive at whatever RETENTION_INTERVAL is set
     # to, unlike the two daily-stamped functions above it.
     maybe_rotate_fluent_bit_selflog
-    sleep "$RETENTION_INTERVAL"
+    sleep "$RETENTION_INTERVAL" &
+    sleep_pid=$!
+    wait "${sleep_pid}"
+    sleep_pid=""
 done
