@@ -6016,7 +6016,7 @@ _ob_setup() {
     local m="${BATS_TEST_TMPDIR}/ob.yml"
     printf '%s\n' 'release:' '  channels:' '    stable:' '      ref: refs/heads/trunk' \
         'branch_policy:' '  orphan_min_age_seconds: 3600' '  long_lived: [dev]' \
-        '  long_lived_patterns:' '    - "rel-*"' > "${m}"
+        '  long_lived_regex:' '    - "^rel-"' > "${m}"
     export CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo GH_TOKEN=t
     export CI_RETRY_BACKOFF_BASE_SECONDS=0 OB_CALLS="${BATS_TEST_TMPDIR}/gh.calls"
     export OB_REFS='' OB_ISSUES='' OB_MORE='' OB_FAIL=''
@@ -6073,7 +6073,7 @@ lost|${OB_OLD}|0|Ann Author
 inclosed|${OB_OLD}|0|a
 inlong|${OB_OLD}|0|a")"
     OB_ISSUES="$(_ob_issues)"
-    OB_MORE='{"data":{"repository":{"issue":{"comments":{"nodes":[{"body":"late inlong"}]}}}}}'
+    OB_MORE="$(jq -cn '{data: {repository: {issue: {comments: {nodes: [{body: "late inlong"}]}}}}}')"
     export OB_REFS OB_ISSUES OB_MORE
     run bash "${CI_SH}" check orphaned-branches
     [ "${status}" -eq 1 ]
@@ -6088,7 +6088,7 @@ inlong|${OB_OLD}|0|a")"
 }
 
 @test "check orphaned-branches: clean run never lists issues" {
-    # What: no no-PR candidate -> clean, counts, no issue call.
+    # What: every ref has a PR -> clean, no issue query.
     # Why: success shows what was scanned (5W evidence).
     # From: Issue #1683 | PR #1858
     _ob_setup
@@ -6103,13 +6103,13 @@ haspr|${OB_OLD}|1|a")"
 
 @test "check orphaned-branches: every failure is coded rc 2" {
     # What: token, SOT, API and parse failures fail closed.
-    # Why: a failed lookup must never read as orphan or clean.
+    # Why: a failed lookup never reads as orphan or clean.
     # From: Issue #1683 | PR #1858
     local case setup want
     while IFS='|' read -r case setup want; do
         _ob_setup
         OB_REFS="$(_ob_page "lost|${OB_OLD}|0|a")"; OB_ISSUES="$(_ob_issues)"
-        OB_MORE='{"data":{"repository":{"issue":{"comments":{"nodes":[]}}}}}'
+        OB_MORE="$(jq -cn '{data: {repository: {issue: {comments: {nodes: []}}}}}')"
         export OB_REFS OB_ISSUES OB_MORE
         eval "${setup}"
         run _ci_check_orphaned_branches
@@ -6128,6 +6128,7 @@ issues-fail|OB_FAIL='issues(first'|CI-ERROR-CHECK-0136
 issues-json|OB_ISSUES='{'|CI-ERROR-CHECK-0137
 more-fail|OB_FAIL='issue(number'|CI-ERROR-CHECK-0138
 more-json|OB_MORE='{'|CI-ERROR-CHECK-0141
+bad-regex|sed -i 's/"\^rel-"/"(rel"/' "${CI_MANIFEST}"|CI-ERROR-CORE-0106
 match-fail|_ci_unreferenced_names() { ci_error "[CI-ERROR-CHECK-0140]" "x" "y"; return 2; }|CI-ERROR-CHECK-0140
 CASES
 }

@@ -8200,19 +8200,17 @@ _ci_check_pr_tracking_metadata() {
 }
 
 # What: True if a branch is a SOT long-lived branch.
-# Why: names match exactly; patterns are SOT globs.
+# Why: exact names first, then the SOT POSIX ERE list.
 # From: Issue #1683 | PR #1858
 _ci_branch_long_lived() {
-    local branch="$1" names="$2" pats="$3" hit p
-    hit="$(_ci_capture 1 grep -xF -- "${branch}" <<< "${names}")" || return 2
+    local branch="$1" exact="$2" regexes="$3" hit re
+    hit="$(_ci_capture 1 grep -xF -- "${branch}" <<< "${exact}")" || return 2
     [ -z "${hit}" ] || return 0
-    while IFS= read -r p; do
-        [ -n "${p}" ] || continue
-        # What: unquoted pattern: the SOT entry is a glob.
-        # Why: quoting would match the glob text literally.
-        # From: Issue #1683 | PR #1858
-        case "${branch}" in ${p}) return 0 ;; esac
-    done <<< "${pats}"
+    while IFS= read -r re; do
+        [ -n "${re}" ] || continue
+        hit="$(_ci_capture 1 grep -E -e "${re}" <<< "${branch}")" || return 2
+        [ -z "${hit}" ] || return 0
+    done <<< "${regexes}"
     return 1
 }
 
@@ -8220,11 +8218,11 @@ _ci_branch_long_lived() {
 # Why: ref grammar bounds a name; no substring false hit.
 # From: Issue #1683 | PR #1858
 _ci_unreferenced_names() {
-    local names="$1" file="$2" out
+    local wanted="$1" file="$2" out
     # What: bound = start/end or a char no ref holds.
     # Why: git-check-ref-format; prose quotes also bound.
     # From: Issue #1683 | PR #1858
-    if ! out="$(awk -v names="${names}" -v q="'" '
+    if ! out="$(awk -v names="${wanted}" -v q="'" '
         function bound(c) { return c == "" || c == q || index(" \t\n~^:?*[]\\`\"(),<>;!", c) > 0 }
         BEGIN { n = split(names, want, "\n") }
         { text = text $0 "\n" }
@@ -8253,7 +8251,7 @@ _ci_unreferenced_names() {
 # Why: repo-wide by nature (docs §98); a finding is rc 1.
 # From: Issue #1683 | PR #1858
 _ci_check_orphaned_branches() {
-    local repo min_age now names pats raw rows rc=0
+    local repo min_age now exact regexes raw rows rc=0
     repo="$(_ci_repo)" || return 2
     if [ -z "${GH_TOKEN:-}" ]; then
         ci_log "[CI-ERROR-CHECK-0130]" "repo=\"${repo}\" reason=\"GH_TOKEN is required\""
@@ -8268,11 +8266,11 @@ _ci_check_orphaned_branches() {
     # Why: release.channels owns master; no second literal.
     # From: Issue #1683 | PR #1858
     raw="$(_ci_channel_field ref)" || return 2
-    names="$(awk '$2 ~ /^refs\/heads\// { sub(/^refs\/heads\//, "", $2); print $2 }' <<< "${raw}")"
+    exact="$(awk '$2 ~ /^refs\/heads\// { sub(/^refs\/heads\//, "", $2); print $2 }' <<< "${raw}")"
     raw="$(_ci_block_entry_list branch_policy "" long_lived)" || return 2
-    names+=$'\n'"${raw}"
-    pats="$(_ci_block_entry_list branch_policy "" long_lived_patterns)" || return 2
-    if [ -z "${names//[[:space:]]/}" ]; then
+    exact+=$'\n'"${raw}"
+    regexes="$(_ci_block_entry_list branch_policy "" long_lived_regex)" || return 2
+    if [ -z "${exact//[[:space:]]/}" ]; then
         ci_log "[CI-ERROR-CHECK-0132]" "reason=\"no long-lived branch in the SOT; FAIL CLOSED\""
         return 2
     fi
@@ -8302,7 +8300,7 @@ _ci_check_orphaned_branches() {
         fi
         [ $((now - epoch)) -ge "${min_age}" ] || continue
         live=0
-        _ci_branch_long_lived "${branch}" "${names}" "${pats}" || live=$?
+        _ci_branch_long_lived "${branch}" "${exact}" "${regexes}" || live=$?
         [ "${live}" -ne 2 ] || return 2
         [ "${live}" -ne 0 ] || continue
         old=$((old + 1))
@@ -8314,9 +8312,9 @@ _ci_check_orphaned_branches() {
         return 0
     fi
     # What: bodies + comments of issues in any state.
-    # Why: AG-GH-017 asks for an issue link; no PR data here.
+    # Why: AG-GH-017 needs an issue link; no PR data here.
     # From: Issue #1683 | PR #1858
-    local corpus out more n
+    local corpus out="" more="" n
     corpus="$(_ci_mktemp "${CI_TMPDIR}/ci-orphan-corpus.XXXXXX")" || return 2
     raw="$(_ci_retry github-api gh api graphql --paginate -f owner="${repo%%/*}" -f name="${repo#*/}" \
         -f query='query($owner: String!, $name: String!, $endCursor: String) { repository(owner: $owner, name: $name) { issues(first: 100, after: $endCursor) { nodes { number body comments(first: 100) { nodes { body } pageInfo { hasNextPage } } } pageInfo { hasNextPage endCursor } } } }')" || rc=$?
