@@ -10818,3 +10818,116 @@ STUB
     done < "${root}/services/dns/cdn-domains.txt"
     [ "${bad}" -eq 0 ]
 }
+
+# What: source named top-level functions of a script.
+# Why: tests run product code without running the script.
+# From: Issue #1683 | PR #1858
+_load_functions() {
+    local file="$1" out fn
+    shift
+    out="${BATS_TEST_TMPDIR}/fns-${file##*/}"
+    : > "${out}"
+    for fn in "$@"; do
+        awk -v f="${fn}() {" '$0 == f { c = 1 } c { print } c && /^}$/ { exit }' "${file}" >> "${out}"
+        grep -qxF "${fn}() {" "${out}" || { echo "function ${fn} not found in ${file}"; return 1; }
+    done
+    # shellcheck source=/dev/null
+    source "${out}"
+}
+
+# What: load the dns entrypoint zone functions + validator.
+# Why: shared by the RPZ and SOA tests below.
+# From: Issue #1072 | PR #1858
+_load_dns_zone_functions() {
+    local root
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    # shellcheck source=services/dns/domain-validation.sh
+    source "${root}/services/dns/domain-validation.sh"
+    _load_functions "${root}/services/dns/entrypoint.sh" _dns_generate_rpz_zone _dns_soa_maintain_zone
+}
+
+@test "dns rpz zone maps each domain list shape" {
+    # What: per list: ordered A/AAAA names, IPs, warnings.
+    # Why: bare is exact, .x is wildcard only, bad is out.
+    # From: Issue #1072 | PR #1858
+    local d="${BATS_TEST_TMPDIR}/rpz" case list v6 a aaaa warn
+    _load_dns_zone_functions
+    while IFS='|' read -r case list v6 a aaaa warn; do
+        rm -f "${d}.zone"
+        printf '%b\n' "${list}" > "${d}.txt"
+        run _dns_generate_rpz_zone "${d}.txt" "${d}.zone" 192.0.2.1 "${v6}"
+        [ "${status}" -eq 0 ] || { echo "${case}: ${output}"; return 1; }
+        [ "$(awk '$3 == "IN" && $4 == "A" { print $1 }' "${d}.zone" | paste -sd,)" = "${a}" ] || {
+            echo "${case}: A"; cat "${d}.zone"; return 1; }
+        [ "$(awk '$3 == "IN" && $4 == "AAAA" { print $1 }' "${d}.zone" | paste -sd,)" = "${aaaa}" ] || {
+            echo "${case}: AAAA"; cat "${d}.zone"; return 1; }
+        [ -z "$(awk '$3 == "IN" && (($4 == "A" && $5 != "192.0.2.1") || ($4 == "AAAA" && $5 != "2001:db8::1"))' "${d}.zone")" ]
+        [ "$(grep -c WARNING <<< "${output}")" -eq "${warn%%:*}" ] || { echo "${case}: ${output}"; return 1; }
+        [ "${warn#*:}" = "${warn}" ] || [[ "${output}" == *"RPZ zone: ${warn#*:}"* ]]
+        [ "$(sed -n '1,2p;4p' "${d}.zone" | paste -sd'|')" = '$ORIGIN rpz.|$TTL 60|@ NS localhost.' ]
+    done <<'CASES'
+bare|steam.com\nepic.com\ngog.com||steam.com,epic.com,gog.com||0
+v6|content.steam.com|2001:db8::1|content.steam.com|content.steam.com|0
+noise|# c\n\n  valid.com  \n\t# x\t\n\tanother.com\t||valid.com,another.com||0
+wildcard|.wildcard.com\nnormal.com||*.wildcard.com,normal.com||0
+mixed|exact.com\n.wildcard.com\nsub.exact.com|2001:db8::1|exact.com,*.wildcard.com,sub.exact.com|exact.com,*.wildcard.com,sub.exact.com|0
+order|first.com\n.second.com\nthird.com||first.com,*.second.com,third.com||0
+tld|good.example.com\ncom\nalso-good.example.com||good.example.com,also-good.example.com||1:com
+star|*||||1:*
+disabled|!disabled.example.com\n!.disabled-wild.example.com\n.still.example.com\nenabled.example.com||*.still.example.com,enabled.example.com||0
+CASES
+}
+
+@test "dns rpz serial is 10 digits and never goes backwards" {
+    # What: fresh 10-digit serial; old+1 on a clock skew.
+    # Why: PowerDNS reloads RPZ only on a higher serial.
+    # From: Issue #1072 | PR #1858
+    local d="${BATS_TEST_TMPDIR}/rpz" s1 s2
+    _load_dns_zone_functions
+    printf 'test.com\n' > "${d}.txt"
+    _dns_generate_rpz_zone "${d}.txt" "${d}.zone" 192.0.2.1
+    s1="$(awk '$1 == "@" && $2 == "SOA" { print $5 }' "${d}.zone")"
+    [[ "${s1}" =~ ^[0-9]{10}$ ]] || { echo "serial ${s1}"; return 1; }
+    _dns_generate_rpz_zone "${d}.txt" "${d}.zone" 192.0.2.1
+    s2="$(awk '$1 == "@" && $2 == "SOA" { print $5 }' "${d}.zone")"
+    [ "${s2}" -gt "${s1}" ] || { echo "${s1} -> ${s2}"; return 1; }
+    printf '@ SOA localhost. admin.rpz. 9999999999 3600 900 604800 60\n' > "${d}.zone"
+    _dns_generate_rpz_zone "${d}.txt" "${d}.zone" 192.0.2.1
+    [ "$(awk '$1 == "@" && $2 == "SOA" { print $5 }' "${d}.zone")" = 10000000000 ]
+    grep -qx '@ SOA localhost. admin.rpz. 10000000000 3600 900 604800 60' "${d}.zone"
+}
+
+@test "dns soa maintainer anchors, bumps and normalises the zone" {
+    # What: date anchor, +1, <2^31, refresh/retry, one dot.
+    # Why: an RFC1982 decrease stops secondary transfers.
+    # From: Issue #1095 | PR #1858
+    local log="${BATS_TEST_TMPDIR}/soa" case soa_cur zone want rc path out
+    _load_dns_zone_functions
+    export PDNS_API_KEY=test-key PDNS_SOA_REFRESH=30 PDNS_SOA_RETRY=10
+    # What: the dig mock reads soa_cur, not cur.
+    # Why: dynamic scope shows the callee's empty local cur.
+    # From: Issue #1095 | PR #1858
+    dig() { [ -z "${soa_cur}" ] || printf 'localhost. admin.z. %s 10800 3600 604800 3600\n' "${soa_cur}"; }
+    date() { if [ "$1" = +%y%m%d ]; then echo 260906; else command date "$@"; fi; }
+    curl() {
+        printf '%s\n' "$*" >> "${log}"
+        [[ "$*" != *"%{http_code}"* ]] || { [ "${case}" = http500 ] && echo 500 || echo 204; }
+    }
+    while IFS='|' read -r case soa_cur zone want rc path out; do
+        : > "${log}"
+        run _dns_soa_maintain_zone "${zone}"
+        [ "${status}" -eq "${rc}" ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
+        [ "${out}" = - ] || [[ "${output}" == *"${out}"* ]] || { echo "${case}: ${output}"; return 1; }
+        [ "${want}" = - ] && continue
+        grep -q "\"content\":\"localhost. admin.z. ${want} 30 10 604800 3600\"" "${log}" || { echo "${case}"; cat "${log}"; return 1; }
+        [ "${want}" -lt 2147483648 ]
+        grep -q " ${path} " "${log}" || { echo "${case}: path"; cat "${log}"; return 1; }
+        if grep -q '\.\.' "${log}"; then echo "${case}: double dot"; cat "${log}"; return 1; fi
+    done <<'CASES'
+old|5|lan|260906000|0|http://127.0.0.1:8081/api/v1/servers/localhost/zones/lan.|-
+sameday|260906500|lan.|260906501|0|http://127.0.0.1:8081/api/v1/servers/localhost/zones/lan.|-
+dotted|5|30.172.in-addr.arpa.|260906000|0|http://127.0.0.1:8081/api/v1/servers/localhost/zones/30.172.in-addr.arpa.|-
+nosoa||lan|-|1|-|SOA not readable yet
+http500|5|lan|-|1|-|SOA PATCH failed: HTTP 500
+CASES
+}
