@@ -11161,6 +11161,50 @@ secbroken|_dns_ensure_secondary_zone lan 192.0.2.10:5300|k|0||broken|1|zone crea
 CASES
 }
 
+@test "placeholder detection agrees across lib, setup.sh, healthcheck" {
+    # What: each detector vs its shared fixture column.
+    # Why: one path trusting what another rejects breaks.
+    # From: Issue #967 | PR #1858
+    local root fx value shared setup _r got snip ref auth f n=0
+    local -a composes=()
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    fx="${root}/tests/fixtures/placeholder-detection-cases.txt"
+    _load_functions "${root}/scripts/lib/shared-secret-bootstrap.sh" secret_is_placeholder
+    _load_functions "${root}/setup.sh" secret_value_is_placeholder
+    mapfile -t composes < <(grep -l 'kea-ctrl-token 2>/dev/null' "${root}"/deploy/*/docker-compose.yml)
+    [ "${#composes[@]}" -ge 1 ]
+    # What: the dhcp healthcheck token block, $$ unescaped.
+    # Why: compose runs it in sh; it must match the lib.
+    # From: Issue #967 | PR #1858
+    for f in "${composes[@]}"; do
+        snip="$(awk '/token="\$\$\{KEA_CTRL_TOKEN/ { c = 1 } c { sub(/^[[:space:]]+/, ""); gsub(/\$\$/, "$"); print }
+            /lancache-dhcp-prod-secret/ { c = 0 }' "${f}")"
+        [ -n "${snip}" ] || { echo "${f}: no token block"; return 1; }
+        [ -z "${ref:-}" ] || [ "${snip}" = "${ref}" ] || { echo "${f}: block differs"; return 1; }
+        ref="${snip}"
+        snip="$(awk '/kea-ctrl-token 2>\/dev\/null/ { c = 1 } c { sub(/^[[:space:]]+/, ""); print } /jq -e/ { c = 0 }' "${f}")"
+        [ -n "${snip}" ] || { echo "${f}: no auth block"; return 1; }
+        [ -z "${auth:-}" ] || [ "${snip}" = "${auth}" ] || { echo "${f}: auth block differs"; return 1; }
+        auth="${snip}"
+    done
+    while read -r value shared setup _r; do
+        case "${value}" in ''|\#*) continue ;; esac
+        n=$((n + 1))
+        if secret_is_placeholder "${value}"; then got=placeholder; else got=real; fi
+        [ "${got}" = "${shared}" ] || { echo "lib: ${value} got ${got} want ${shared}"; return 1; }
+        if secret_value_is_placeholder "${value}"; then got=placeholder; else got=real; fi
+        [ "${got}" = "${setup}" ] || { echo "setup.sh: ${value} got ${got} want ${setup}"; return 1; }
+        got="$(KEA_CTRL_TOKEN="${value}" sh -c "${ref}"$'\nprintf "%s" "${token:-}"')"
+        [ "${got:+real}" = "${shared/placeholder/}" ] || { echo "healthcheck: ${value} kept '${got}', lib ${shared}"; return 1; }
+    done < "${fx}"
+    [ "${n}" -gt 0 ]
+    secret_value_is_placeholder ""
+    for value in lancache-dhcp-secret lancache-dhcp-dev-secret lancache-dhcp-prod-secret; do
+        [ -z "$(KEA_CTRL_TOKEN="${value}" sh -c "${ref}"$'\nprintf "%s" "${token:-}"')" ] || { echo "${value} kept"; return 1; }
+    done
+    [ "$(KEA_CTRL_TOKEN=lancache-dev-kea-control-token-change-me sh -c "${ref}"$'\nprintf "%s" "${token:-}"')" = lancache-dev-kea-control-token-change-me ]
+}
+
 @test "dns xfr endpoint keeps IPs, resolves names, fails closed" {
     # What: IP passthrough, name after retries, bad form.
     # Why: NOTIFY/AXFR need an IPv4; a bad value must stop.
