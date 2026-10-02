@@ -10793,3 +10793,28 @@ STUB
         grep -qF '"lancache.dns.flush"' "${sb}/${u}"
     done
 }
+
+@test "domain validator matches the parity fixture and the cdn list" {
+    # What: validator vs shared fixture; cdn list is valid.
+    # Why: a rejected entry silently leaves DNS spoofing.
+    # From: Issue #822 | PR #1858
+    local root line want dom got total=0 bad=0
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    # shellcheck source=services/dns/domain-validation.sh
+    source "${root}/services/dns/domain-validation.sh"
+    while IFS= read -r line || [ -n "${line}" ]; do
+        [[ -z "${line}" || "${line}" == \#* ]] && continue
+        want="${line%% *}"
+        dom="${line#* }"
+        total=$((total + 1))
+        if _is_valid_domain "${dom}"; then got=valid; else got=invalid; fi
+        [ "${got}" = "${want}" ] || { echo "fixture: '${dom}' want ${want} got ${got}"; bad=$((bad + 1)); }
+    done < "${root}/tests/fixtures/domain-validation-cases.txt"
+    [ "${total}" -gt 0 ]
+    while IFS= read -r line || [ -n "${line}" ]; do
+        dom="$(_normalize_domain "${line}")"
+        [[ -z "${dom}" || "${dom}" == \#* ]] && continue
+        _is_valid_domain "${dom}" || { echo "cdn-domains.txt: '${line}' rejected"; bad=$((bad + 1)); }
+    done < "${root}/services/dns/cdn-domains.txt"
+    [ "${bad}" -eq 0 ]
+}
