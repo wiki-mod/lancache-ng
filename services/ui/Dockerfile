@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Admin UI: Rust binary + Tera templates on Alpine.

@@ -6832,6 +6832,14 @@ _ci_check_mutable_refs() {
                 if [ -n "${out}" ]; then
                     viol+=("${path} FROM-untagged: ${out}")
                 fi
+                # What: # syntax= needs an @sha256 pin.
+                # Why: unpinned is pulled anew each build.
+                # From: Issue #1683 | PR #1858
+                out="$(_ci_capture 1 grep -niE '^#[[:space:]]*syntax[[:space:]]*=' "${path}")" || return 2
+                out="$(_ci_capture 1 grep -vE '@sha256:[0-9a-f]{64}' <<< "${out}")" || return 2
+                if [ -n "${out}" ]; then
+                    viol+=("${path} syntax-unpinned: ${out}")
+                fi
                 ;;
         esac
     done

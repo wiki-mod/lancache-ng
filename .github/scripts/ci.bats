@@ -5253,6 +5253,28 @@ CASES
     [[ "${output}" == *"FROM-untagged"* ]]
 }
 
+@test "check mutable-refs maps each # syntax= frontend line" {
+    # What: unpinned frontend fails; @sha256 pin passes.
+    # Why: a mutable frontend is pulled anew on every build.
+    # From: Issue #1683 | PR #1858
+    local d name line want n=0
+    while IFS='|' read -r name line want; do
+        n=$((n + 1)); d="${BATS_TEST_TMPDIR}/syntax${n}"; mkdir -p "${d}"
+        printf '%s\nFROM alpine:3.24\n' "${line}" > "${d}/Dockerfile"
+        run bash "${CI_SH}" check mutable-refs "${d}/Dockerfile"
+        case "${want}" in
+            fail) [ "${status}" -eq 1 ] && [[ "${output}" == *"syntax-unpinned"*"${line}"* ]] ;;
+            pass) [ "${status}" -eq 0 ] && [[ "${output}" != *"syntax-unpinned"* ]] ;;
+        esac || { echo "${name}: rc ${status}: ${output}"; return 1; }
+    done <<'CASES'
+major-tag|# syntax=docker/dockerfile:1|fail
+spaced|#syntax = docker/dockerfile:1.7|fail
+upper|# SYNTAX=docker/dockerfile:1|fail
+pinned|# syntax=docker/dockerfile:1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|pass
+none|# LanCache-NG header line|pass
+CASES
+}
+
 @test "check mutable-refs does not flag a real tag as untagged" {
     # What: AG-WF-027: this found a real bug; fixed here.
     # Why: ':' in the untagged charset false-matched 3.24.
