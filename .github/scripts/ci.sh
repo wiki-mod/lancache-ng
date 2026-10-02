@@ -9338,7 +9338,7 @@ _ci_dockerfile_copies_to() {
 _ci_check_entrypoint_lib_wiring() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
-    local ep svc svcs ctx name dockerfile line lib_path
+    local ep svc svcs ctx name dockerfile line lib_path n_ep=0 n_lib=0
 
     # What: each SOT service context's entrypoint script.
     # Why: the SOT owns services and paths; no glob/literal.
@@ -9350,9 +9350,11 @@ _ci_check_entrypoint_lib_wiring() {
         for name in entrypoint.sh docker-entrypoint.sh; do
             ep="${repo_root}/${ctx}/${name}"
             [ -f "${ep}" ] || continue
+            n_ep=$((n_ep + 1))
             while IFS= read -r line; do
                 [[ "${line}" =~ ^[[:space:]]*(\.|source)[[:space:]]+\"?(/[^\"[:space:]]+)\"?[[:space:]]*(\#.*)?$ ]] || continue
                 lib_path="${BASH_REMATCH[2]}"
+                n_lib=$((n_lib + 1))
                 if [ ! -f "${dockerfile}" ]; then
                     viol+=("${ctx}: sources ${lib_path}, no Dockerfile found")
                     continue
@@ -9366,7 +9368,7 @@ _ci_check_entrypoint_lib_wiring() {
         ci_error "[CI-ERROR-CHECK-0041]" "reason=\"entrypoint sources a lib its Dockerfile never COPYs\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
-    printf 'entrypoint-lib-wiring=clean\n'
+    printf 'entrypoint-lib-wiring=clean entrypoints=%s libs=%s\n' "${n_ep}" "${n_lib}"
 }
 
 # What: rust Dockerfiles must use build-tools image.

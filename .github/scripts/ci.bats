@@ -7214,13 +7214,13 @@ EOF
         [ "${status}" -eq "${rc}" ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
         [[ "${output}" == *"${want}"* ]] || { echo "${case}: no ${want}: ${output}"; return 1; }
     done <<'CASES'
-copy|entrypoint.sh|yes|0|FROM b\nCOPY lib/lib-x.sh /usr/local/lib/lib-x.sh|entrypoint-lib-wiring=clean
+copy|entrypoint.sh|yes|0|FROM b\nCOPY lib/lib-x.sh /usr/local/lib/lib-x.sh|=clean entrypoints=1 libs=1
 no-copy|entrypoint.sh|yes|1|FROM b\nRUN echo hi|no matching final-stage COPY
 docker-ep|docker-entrypoint.sh|yes|1|FROM b\nRUN echo hi|docker-entrypoint.sh sources
 drift|entrypoint.sh|yes|1|FROM b\nCOPY lib/lib-x.sh /opt/lib/lib-x.sh|CI-ERROR-CHECK-0041
 builder-only|entrypoint.sh|yes|1|FROM b AS bs\nCOPY lib/lib-x.sh /usr/local/lib/lib-x.sh\nFROM b\nRUN echo final|CI-ERROR-CHECK-0041
 dir-copy|entrypoint.sh|yes|0|FROM b\nCOPY lib/ /usr/local/lib/|clean
-nothing-sourced|entrypoint.sh|no|0|FROM b\nRUN echo hi|clean
+nothing-sourced|entrypoint.sh|no|0|FROM b\nRUN echo hi|=clean entrypoints=1 libs=0
 from-stage|entrypoint.sh|yes|0|FROM b AS bs\nRUN echo build\nFROM b\nCOPY --from=bs /build/lib-x.sh /usr/local/lib/lib-x.sh|clean
 bad-stage|entrypoint.sh|yes|1|FROM b AS bs\nRUN echo build\nFROM b\nCOPY --from=oldbs /build/lib-x.sh /usr/local/lib/lib-x.sh|CI-ERROR-CHECK-0041
 external|entrypoint.sh|yes|0|FROM b\nCOPY --from=registry.example.test/x/y:1 /x/lib-x.sh /usr/local/lib/lib-x.sh|clean
@@ -7234,7 +7234,10 @@ CASES
     # From: Issue #1683
     run bash "${CI_SH}" check entrypoint-lib-wiring
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"entrypoint-lib-wiring=clean"* ]]
+    # What: the real repo must check at least one lib.
+    # Why: a parser that finds nothing would pass clean.
+    # From: Issue #1683 | PR #1858
+    [[ "${output}" =~ =clean\ entrypoints=([1-9][0-9]*)\ libs=([1-9][0-9]*) ]]
 }
 
 @test "check changelog-direct-edit is clean when CHANGELOG.md is untouched" {
