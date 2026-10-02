@@ -1722,6 +1722,45 @@ RS
 # REGISTRY / PUBLISH / READBACK
 # =========================================================
 
+@test "registry login maps each case; token only via stdin" {
+    # What: login per row; token via stdin, never in argv.
+    # Why: a secret in argv or a log leaks to every reader.
+    # From: Issue #1683 | PR #1858
+    local log="${BATS_TEST_TMPDIR}/login" name user tok cmd dmode rc want w hay
+    local -a ws
+    _ci_registry() { echo registry.example.test; }
+    docker() {
+        echo "argv: $*" >> "${log}"
+        echo "stdin: $(cat)" >> "${log}"
+        [ "${dmode}" = ok ] || { echo "Error response from daemon: unauthorized" >&2; return 1; }
+    }
+    while IFS='|' read -r name user tok cmd dmode rc want; do
+        : > "${log}"
+        unset CI_GHCR_LOGIN_CMD
+        case "${cmd}" in
+            ok) CI_GHCR_LOGIN_CMD="$(_stub loginok 'exit 0')" ;;
+            fail) CI_GHCR_LOGIN_CMD="$(_stub loginbad 'echo denied by stub; exit 1')" ;;
+        esac
+        export CI_GHCR_LOGIN_CMD GHCR_USERNAME="${user}" GHCR_TOKEN="${tok}"
+        [ "${cmd}" != - ] || unset CI_GHCR_LOGIN_CMD
+        run _ci_require_ghcr_auth
+        [ "${status}" -eq "${rc}" ] || { echo "${name}: rc ${status}: ${output}"; return 1; }
+        hay="${output}"$'\n'"$(cat "${log}")"
+        IFS=';' read -r -a ws <<<"${want}"
+        for w in "${ws[@]}"; do
+            [ "${w}" = - ] || [[ "${hay}" == *"${w}"* ]] || { echo "${name}: no '${w}': ${hay}"; return 1; }
+        done
+        [ -z "${tok}" ] || [[ "${output}" != *"${tok}"* ]] || { echo "${name}: token in output"; return 1; }
+        [ -z "${tok}" ] || ! grep -q "^argv: .*${tok}" "${log}" || { echo "${name}: token in argv"; cat "${log}"; return 1; }
+    done <<'CASES'
+no-creds|||-|ok|2|CI-ERROR-BUILD-0002
+cmd-ok|u1|s3cr3t-tok|ok|ok|0|-
+cmd-fail|u1|s3cr3t-tok|fail|ok|2|CI-ERROR-BUILD-0015;registry="<CI_GHCR_LOGIN_CMD>";denied by stub
+docker-ok|u1|s3cr3t-tok|-|ok|0|argv: login registry.example.test -u u1 --password-stdin;stdin: s3cr3t-tok
+docker-fail|u1|s3cr3t-tok|-|fail|2|CI-ERROR-BUILD-0015;registry="registry.example.test";unauthorized
+CASES
+}
+
 @test "publish fails closed without GHCR credentials" {
     # What: Publish is an authenticated GHCR action.
     # Why: Never push anonymously (rate-limit).

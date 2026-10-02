@@ -1739,7 +1739,7 @@ _ci_require_ghcr_auth() {
         out="$(printf '%s' "${GHCR_TOKEN}" | docker login "${reg}" -u "${GHCR_USERNAME}" --password-stdin 2>&1)" || rc=$?
     fi
     [ "${rc}" -eq 0 ] && return 0
-    ci_error "[CI-ERROR-BUILD-0015]" "reason=\"docker login to GHCR failed\"" "${out}"
+    ci_error "[CI-ERROR-BUILD-0015]" "registry=\"${reg:-<CI_GHCR_LOGIN_CMD>}\" reason=\"docker login to the image registry failed\"" "${out}"
     return 2
 }
 
