@@ -11019,7 +11019,7 @@ CASES
 # Why: the entrypoint runs them under exactly these options.
 # From: Issue #1683 | PR #1858
 _dns_tsig_script() {
-    local root="$1" s="$2" call="$3"
+    local root="$1" s="$2" tsig_call="$3"
     _load_functions "${root}/scripts/lib/shared-secret-bootstrap.sh" secret_is_placeholder
     _load_functions "${root}/services/dns/entrypoint.sh" configure_ddns_tsig import_ddns_tsig_key \
         _dns_set_zone_metadata dns_xfr_primary_endpoint _dns_configure_primary_zone_replication \
@@ -11037,19 +11037,19 @@ _dns_tsig_script() {
         "source '${BATS_TEST_TMPDIR}/fns-entrypoint.sh'" \
         'DDNS_TSIG_NAME=lancache-ddns-key DDNS_TSIG_ALGORITHM=hmac-sha256' \
         'DDNS_UPDATE_ZONES=(lan 1.168.192.in-addr.arpa)' \
-        "${call}" 'echo CANARY' > "${s}"
+        "${tsig_call}" 'echo CANARY' > "${s}"
 }
 
 @test "dns tsig and zone replication issue the exact pdnsutil calls" {
     # What: per case the ordered pdnsutil calls, rc, output.
     # Why: unset key must revoke; a secondary never writes.
     # From: Issue #1683 | PR #1858
-    local root s="${BATS_TEST_TMPDIR}/tsig.sh" case call key marker notify pmode rc calls out m
+    local root s="${BATS_TEST_TMPDIR}/tsig.sh" case tsig_call key marker notify pmode rc calls out m
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     m="${BATS_TEST_TMPDIR}/allow-unsigned"
     export CALLS="${BATS_TEST_TMPDIR}/calls" GETENT="${BATS_TEST_TMPDIR}/getent" RESOLVE_AT=1
-    while IFS='|' read -r case call key marker notify pmode rc calls out; do
-        _dns_tsig_script "${root}" "${s}" "${call}"
+    while IFS='|' read -r case tsig_call key marker notify pmode rc calls out; do
+        _dns_tsig_script "${root}" "${s}" "${tsig_call}"
         : > "${CALLS}"; : > "${GETENT}"; rm -f "${m}"
         [ "${marker}" = 0 ] || : > "${m}"
         DDNS_TSIG_KEY="${key}" DDNS_ALLOW_UNSIGNED_MARKER="${m}" DNS_XFR_NOTIFY_TARGETS="${notify}" \
@@ -11094,4 +11094,82 @@ name|dns-ssl:5300|3|0|10.0.0.5:5300|3
 noport|dns-ssl|1|1|FATAL: DNS_XFR_PRIMARY must use host:port form|0
 never|dns-ssl:5300|99|1|did not resolve to an IPv4 address after 30s|30
 CASES
+}
+
+@test "dns config adapters snapshot, roll back and converge" {
+    # What: per role: create, rollback, none, keep, repeat.
+    # Why: a broken config must never start or be stored.
+    # From: Issue #1683 | PR #1858
+    local root bin="${BATS_TEST_TMPDIR}/bin" live="${BATS_TEST_TMPDIR}/live" t
+    local role fn conf label keyline n snap fp h
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    # shellcheck source=scripts/lib/known-good-snapshots.sh
+    source "${root}/$(ci_context_path known-good)"
+    _load_functions "${root}/services/dns/entrypoint.sh" \
+        _dns_recursor_validate_snapshot_or_rollback _dns_auth_validate_snapshot_or_rollback
+    for t in pdns_recursor:recursor.conf pdns_server:pdns.conf; do
+        _tool_stub "${bin}" "${t%%:*}" <<SH
+d=""; for a in "\$@"; do case "\$a" in --config-dir=*) d="\${a#--config-dir=}" ;; esac; done
+if grep -q BROKEN "\${d}/${t#*:}"; then echo "${t%%:*}: bad config" >&2; exit 1; fi
+SH
+    done
+    export PATH="${bin}:${PATH}" PDNS_API_KEY=key-now DNS_CONFIG_SNAPSHOT_DIR="${BATS_TEST_TMPDIR}/snap"
+    mkdir -p "${live}"
+    for role in 'recursor|recursor.conf|dns-recursor|api_key: ' 'auth|pdns.conf|dns-auth|api-key='; do
+        IFS='|' read -r n conf label keyline <<< "${role}"
+        fn="_dns_${n}_validate_snapshot_or_rollback"
+        conf="${live}/${conf}"
+        snap="${DNS_CONFIG_SNAPSHOT_DIR}/${n}"
+        rm -rf "${DNS_CONFIG_SNAPSHOT_DIR}"
+        export KEEP_KNOWN_GOOD_CONFIGS=3 PDNS_API_KEY=key-now
+        printf 'BROKEN\n' > "${conf}"
+        run "${fn}" "${conf}"
+        [ "${status}" -eq 1 ] && [[ "${output}" == *"no known-good ${conf##*/} snapshot is available"* ]] || {
+            echo "${n} none: ${status}: ${output}"; return 1; }
+        [ "$(cat "${conf}")" = BROKEN ]
+        printf '%skey-now\nOK v1\n' "${keyline}" > "${conf}"
+        run "${fn}" "${conf}"
+        [ "${status}" -eq 0 ] && [[ "${output}" == *"[known-good-snapshot][${label}][CREATE]"* ]] || {
+            echo "${n} valid: ${output}"; return 1; }
+        [ "$(kgs_list_snapshots "${snap}" | wc -l)" -eq 1 ]
+        printf 'BROKEN v2\n' > "${conf}"
+        run "${fn}" "${conf}"
+        [ "${status}" -eq 0 ] || { echo "${n} rollback: ${output}"; return 1; }
+        [[ "${output}" == *"generated ${conf##*/} failed validation"*"[known-good-snapshot][${label}][SELECT]"*"NOT the newly generated config"* ]]
+        [[ "${output}" != *"does not match the current PDNS_API_KEY"* ]]
+        [ "$(sed -n 2p "${conf}")" = "OK v1" ]
+        h="$(sha256sum < "${conf}")"
+        fp="$(_kgs_fingerprint "${snap}")"
+        printf 'BROKEN v2\n' > "${conf}"
+        run "${fn}" "${conf}"
+        [ "${status}" -eq 0 ] && [ "$(sha256sum < "${conf}")" = "${h}" ] && [ "$(_kgs_fingerprint "${snap}")" = "${fp}" ] || {
+            echo "${n} repeat is no fixed point"; return 1; }
+        if grep -rq BROKEN "${snap}"; then echo "${n}: broken config snapshotted"; return 1; fi
+        export PDNS_API_KEY=key-rotated
+        run "${fn}" "${conf}"
+        [ "${status}" -eq 0 ] && [[ "${output}" != *"does not match the current PDNS_API_KEY"* ]] || {
+            echo "${n} valid restored config: ${output}"; return 1; }
+        printf 'BROKEN v3\n' > "${conf}"
+        run "${fn}" "${conf}"
+        [ "${status}" -eq 0 ] && [[ "${output}" == *"does not match the current PDNS_API_KEY"* ]] || {
+            echo "${n} stale key: ${output}"; return 1; }
+        export KEEP_KNOWN_GOOD_CONFIGS=2
+        for t in 1 2 3 4; do printf 'OK r%s\n' "${t}" > "${conf}"; "${fn}" "${conf}" > /dev/null; done
+        [ "$(kgs_list_snapshots "${snap}" | wc -l)" -eq 2 ] || { echo "${n}: retention"; return 1; }
+    done
+    # What: auth rollback re-stamps this run's address.
+    # Why: the snapshot holds the prior container address.
+    # From: Issue #1683 | PR #1858
+    rm -rf "${DNS_CONFIG_SNAPSHOT_DIR}"
+    export KEEP_KNOWN_GOOD_CONFIGS=3
+    printf 'local-address=127.0.0.1,172.20.0.2\nOK a1\n' > "${live}/pdns.conf"
+    PDNS_LOCAL_ADDRESS=172.20.0.2 _dns_auth_validate_snapshot_or_rollback "${live}/pdns.conf" > /dev/null
+    printf 'OK r1\n' > "${live}/recursor.conf"
+    _dns_recursor_validate_snapshot_or_rollback "${live}/recursor.conf" > /dev/null
+    printf 'BROKEN\n' > "${live}/pdns.conf"
+    PDNS_LOCAL_ADDRESS=172.20.0.9 run _dns_auth_validate_snapshot_or_rollback "${live}/pdns.conf"
+    [ "${status}" -eq 0 ]
+    [ "$(cat "${live}/pdns.conf")" = $'local-address=127.0.0.1,172.20.0.9\nOK a1' ]
+    [ "$(kgs_list_snapshots "${DNS_CONFIG_SNAPSHOT_DIR}/recursor" | wc -l)" -eq 1 ]
+    [ "$(cat "${live}/recursor.conf")" = "OK r1" ]
 }
