@@ -3058,6 +3058,24 @@ svc-x=sha256:n"
     [[ "${output}" == *"CI-ERROR-VALIDATE-0054"* ]]
 }
 
+@test "validation env base64_32 secrets decode to 32 bytes" {
+    # What: setup.sh base64_32 keys decode in the SOT env.
+    # Why: PowerDNS rejects a non-base64 TSIG key: no AXFR.
+    # From: Issue #1683 | PR #1858
+    local root keys env k v d LC_ALL=C
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    keys="$(sed -nE 's/^[[:space:]]*ensure_secret_env_key ([A-Z_]+) "\$env_file" base64_32$/\1/p' "${root}/setup.sh")"
+    echo "base64_32 keys: ${keys:-<none>}"
+    [ -n "${keys}" ]
+    env="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_validation_env)"
+    for k in ${keys}; do
+        v="$(sed -n "s/^${k}=//p" <<<"${env}")"
+        [ -n "${v}" ] || { echo "${k}: missing from validation env"; return 1; }
+        d="$(base64 -d <<<"${v}" 2>&1)" || { echo "${k}='${v}': ${d}"; return 1; }
+        [ "${#d}" -eq 32 ] || { echo "${k}='${v}': ${#d} bytes"; return 1; }
+    done
+}
+
 @test "compose profile flags cover every profile and fail closed" {
     # What: one --profile pair per profile; read error -> 2.
     # Why: a profiled service must never be skipped.
