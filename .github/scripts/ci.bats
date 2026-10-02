@@ -1159,6 +1159,24 @@ CASES
     [ "$(_ci_classify_failure "fatal: couldn't find remote ref refs/x")" = "permanent" ]
 }
 
+@test "retry classifier: op=accel is transient only on an accelerator outage" {
+    # What: real distcc/sccache/ccache outage lines vs bugs.
+    # Why: a real compile error must fail, never degrade.
+    # From: Issue #1683 | PR #1858
+    local name raw want got
+    while IFS='|' read -r name raw want; do
+        got="$(_ci_classify_failure "${raw}" accel)"
+        [ "${got}" = "${want}" ] || { echo "${name}: got ${got}, want ${want}"; return 1; }
+    done <<'CASES'
+distcc|distcc[13] (dcc_build_somewhere) ERROR: failed to distribute and fallbacks are disabled|transient
+sccache|sccache: error: Timed out waiting for server startup. Maybe the remote service is unreachable?|transient
+ccache|ccache: error: No such file or directory|transient
+c-error|e.c:1:23: error: 'x' undeclared (first use in this function)|permanent
+rust-error|error: could not compile `lancache-ui` (bin "lancache-ui") due to 2 previous errors|permanent
+fetch|error: failed to download from `https://index.crates.io/config.json`|permanent
+CASES
+}
+
 @test "reuse order is cheapest-first and ends in compile" {
     # What: noop..accepted..CAS..caches..compile order.
     # Why: NOOP/reuse always precede build (§7).
@@ -4642,6 +4660,47 @@ STUB
     PATH="${bin}:${PATH}" MUSL_TARGET=arch-b-alpine-linux-musl run bash "${CI_SH}" rust-build svc c1
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-RUSTBUILD-0006"*"host: arch-a-alpine-linux-musl"* ]]
+}
+
+@test "rust cargo build degrades only on an accelerator outage" {
+    # What: cargo stub replays rc|output per call.
+    # Why: a real error ends at call 1 with its rc kept.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/cbin" name cc dc wrap steps want calls codes w
+    local -a ws
+    mkdir -p "${bin}"
+    _tool_stub "${bin}" cargo <<'STUB'
+n=$(( $(cat "${RB_N}") + 1 )); echo "${n}" > "${RB_N}"
+line="$(sed -n "${n}p" "${RB_STEPS}")"
+printf '%s\n' "${line#*|}"
+exit "${line%%|*}"
+STUB
+    disable_ccache() { echo "off ccache"; }
+    disable_distcc() { echo "off distcc"; }
+    export RB_N="${BATS_TEST_TMPDIR}/n" RB_STEPS="${BATS_TEST_TMPDIR}/steps" CI_TMPDIR="${BATS_TEST_TMPDIR}"
+    while IFS='|' read -r name cc dc wrap steps want calls codes; do
+        echo 0 > "${RB_N}"
+        tr ';' '\n' <<<"${steps}" | sed 's/~/|/' > "${RB_STEPS}"
+        ccache_enabled="${cc}" _CI_RB_DISTCC="${dc}" RUSTC_WRAPPER="${wrap}" PATH="${bin}:${PATH}" \
+            run _ci_rust_cargo_build c1 arch-a-alpine-linux-musl 2
+        [ "${status}" -eq "${want}" ] && [ "$(cat "${RB_N}")" -eq "${calls}" ] \
+            || { echo "${name}: rc ${status} calls $(cat "${RB_N}"): ${output}"; return 1; }
+        IFS=',' read -r -a ws <<<"${codes}"
+        for w in "${ws[@]}"; do
+            case "${w}" in
+                !*) [[ "${output}" != *"${w#!}"* ]] ;;
+                *) [[ "${output}" == *"${w}"* ]] ;;
+            esac || { echo "${name}: code ${w}: ${output}"; return 1; }
+        done
+    done <<'CASES'
+real-error-all-on|1|1|w|101~error: could not compile `c1`|101|1|RUSTBUILD-0010,!RUSTBUILD-0011,!off ccache,could not compile
+ok-first|1|1|w|0~done|0|1|!RUSTBUILD-0009
+ccache-outage|1|1|w|1~ccache: error: x;0~done|0|2|RUSTBUILD-0011,off ccache,!off distcc,RUSTBUILD-0009
+distcc-outage|1|1|w|116~failed to distribute;116~failed to distribute;0~done|0|3|off ccache,RUSTBUILD-0011,off distcc,RUSTBUILD-0012,RUSTBUILD-0009
+sccache-outage|0|0|w|101~sccache: error: Timed out;0~done|0|2|RUSTBUILD-0013,RUSTBUILD-0009
+outage-then-error|0|0|w|101~sccache: error: x;101~error: could not compile `c1`|101|2|RUSTBUILD-0013,RUSTBUILD-0010
+nothing-left|0|0||101~sccache: error: x|101|1|RUSTBUILD-0014
+CASES
 }
 
 @test "build-args emit a SOT pin; its digest needs a platform" {
