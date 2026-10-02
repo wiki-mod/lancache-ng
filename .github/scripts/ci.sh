@@ -586,15 +586,20 @@ ci_cmd_codeql_impact() {
 }
 
 # What: print "key:" and each line as a quoted YAML item.
-# Why: raw SOT text like **/x would be a YAML alias.
+# Why: **/x would be an alias; pure bash, no jq needed.
 # From: Issue #1683 | PR #1858
 _ci_yaml_list() {
-    local key="$1" prefix="$2" items="$3" q
-    if ! q="$(jq -Rr --arg p "${prefix}" 'select(length > 0) | $p + tojson' <<< "${items}" 2>&1)"; then
-        ci_error "[CI-ERROR-CODEQL-0015]" "key=\"${key}\" reason=\"YAML list values not encodable\"" "${q}"
-        return 2
-    fi
-    printf '%s:\n%s' "${key}" "${q}"
+    local key="$1" prefix="$2" items="$3" v out=""
+    while IFS= read -r v; do
+        [ -n "${v}" ] || continue
+        if [[ "${v}" == *[[:cntrl:]]* ]]; then
+            ci_error "[CI-ERROR-CODEQL-0015]" "key=\"${key}\" reason=\"control character in a YAML list value\"" "$(printf '%q' "${v}")"
+            return 2
+        fi
+        v="${v//\\/\\\\}"; v="${v//\"/\\\"}"
+        out+=$'\n'"${prefix}\"${v}\""
+    done <<< "${items}"
+    printf '%s:%s' "${key}" "${out}"
 }
 
 # What: Render the CodeQL config file from the SOT.
@@ -7479,11 +7484,11 @@ _ci_check_review_chronology() {
     # Why: a genuine duplicate must warn, never block.
     # From: Issue #1683
     if [ "${#dup_viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0078]" "reason=\"bare #N duplicated outside From: (warn-only, PR #1856)\"" "$(printf '%s\n' "${dup_viol[@]}")"
+        ci_error "[CI-WARN-CHECK-0078]" "reason=\"bare #N duplicated outside From: (warn-only, PR #1856)\"" "$(printf '%s\n' "${dup_viol[@]}")"
     fi
     if [ "${#viol[@]}" -gt 0 ]; then
         if [ "${CHRONOLOGY_WARN_ONLY:-0}" = "1" ]; then
-            ci_error "[CI-ERROR-CHECK-0079]" "reason=\"review-chronology / stale line-ref (warn-only)\"" "$(printf '%s\n' "${viol[@]}")"
+            ci_error "[CI-WARN-CHECK-0079]" "reason=\"review-chronology / stale line-ref (warn-only)\"" "$(printf '%s\n' "${viol[@]}")"
             printf 'review-chronology=warn files=%s\n' "${#files[@]}"
             return 0
         fi
@@ -7873,7 +7878,7 @@ _ci_check_pr_title() {
     # Why: draft titles are expected to settle before ready.
     # From: Issue #1683 | PR #1858
     if [ "${PR_DRAFT:-false}" = "true" ]; then
-        ci_log "[CI-ERROR-CHECK-0013]" "reason=\"draft, non-blocking\" detail=\"$(printf '%s; ' "${errs[@]}")\""
+        ci_log "[CI-WARN-CHECK-0013]" "reason=\"draft, non-blocking\" detail=\"$(printf '%s; ' "${errs[@]}")\""
         printf 'pr-title=warn-draft\n'
         return 0
     fi

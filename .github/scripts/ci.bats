@@ -420,6 +420,19 @@ EOF
         '  - uses: "q1"' 'paths:' '  - "src-a"' 'paths-ignore:' '  - "x/**"')" ]
     CI_MANIFEST="${m}" GITHUB_REPOSITORY='' run bash "${CI_SH}" codeql-config
     [ "${status}" -ne 0 ]
+    # What: same output with no jq on PATH; quotes escaped.
+    # Why: the CodeQL runtime image has no jq (real job).
+    # From: Issue #1683 | PR #1858
+    local nojq="${BATS_TEST_TMPDIR}/nojq"; mkdir -p "${nojq}"
+    _tool_stub "${nojq}" jq <<'STUB'
+echo "jq: command not found" >&2; exit 127
+STUB
+    printf '%s\n' 'codeql:' '  queries: [q1]' '  paths_ignore: ["x/**", "a\"b"]' \
+        'codeql_languages:' '  lang-a:' '    paths: [src-a]' > "${m}"
+    PATH="${nojq}:${PATH}" CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo \
+        run --separate-stderr bash "${CI_SH}" codeql-config
+    [ "${status}" -eq 0 ] || { echo "${output} ${stderr}"; return 1; }
+    [[ "${output}" == *'  - "x/**"'* ]] && [[ "${output}" == *'  - "a\"b"'* ]]
 }
 @test "an unreadable SOT fails every reader caller with raw" {
     # What: each caller row: rc 2 plus the raw reader error.
@@ -530,10 +543,10 @@ CASES
     # What: a quoted shell smoke reads back as the command.
     # Why: sh -c must get the command, not a quoted name.
     # From: Issue #1683 | PR #1858
-    printf 'services:\n  s:\n    smoke:\n      - "nginx -V 2>&1 | grep -q -- --x"\n' > "${m}"
+    printf 'services:\n  s:\n    smoke:\n      - "nginx -V 2>&1 | tr -d x"\n' > "${m}"
     CI_MANIFEST="${m}" run _ci_block_entry_list services s smoke
     [ "${status}" -eq 0 ]
-    [ "${output}" = 'nginx -V 2>&1 | grep -q -- --x' ]
+    [ "${output}" = 'nginx -V 2>&1 | tr -d x' ]
 }
 @test "codeql-impact gates on content; only real work needs the image" {
     # What: NOOP needs no image; work needs the SOT one.
@@ -5592,7 +5605,7 @@ CASES
     run env CHRONOLOGY_WARN_ONLY=1 bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/badc.sh"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"review-chronology=warn"* ]]
-    [[ "${output}" == *"CI-ERROR-CHECK-0079"* ]]
+    [[ "${output}" == *"CI-WARN-CHECK-0079"* ]]
 }
 
 @test "check review-chronology diff-scoped mode scans only the PR's changed files" {
@@ -5671,7 +5684,7 @@ STUBEOF
     run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/d.sh"; [ "${status}" -eq 0 ]
     printf '# From: Issue #887\n# duplicate ref #887 here\n' > "${BATS_TEST_TMPDIR}/d.sh"
     run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/d.sh"
-    [ "${status}" -eq 0 ]; [[ "${output}" == *"CI-ERROR-CHECK-0078"* ]]
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"CI-WARN-CHECK-0078"* ]]
     [[ "${output}" == *"warn-only, PR #1856"* ]]
     printf '# %s in %s here\n' caught review > "${BATS_TEST_TMPDIR}/dirty.sh"
     run bash "${CI_SH}" check review-chronology "${BATS_TEST_TMPDIR}/d.sh"
@@ -6536,7 +6549,7 @@ EOF
     # What: ci.sh owns the governance scan; bats calls it.
     # Why: TODO on closed issue is stale, must fail loud.
     # From: Issue #1683
-    printf '# TODO(#42): revisit once fixed\n' > "${BATS_TEST_TMPDIR}/stale.sh"
+    printf '# %s(#42): revisit once fixed\n' TODO > "${BATS_TEST_TMPDIR}/stale.sh"
     CI_GOVERNANCE_ISSUE_STATE='42=closed' \
         run bash "${CI_SH}" check governance-guards "${BATS_TEST_TMPDIR}/stale.sh"
     [ "${status}" -ne 0 ]
@@ -6554,7 +6567,7 @@ EOF
     _tool_stub "${bin}" gh <<'STUB'
 echo "gh: HTTP 500" >&2; exit 1
 STUB
-    printf '# TODO(#42): revisit once fixed\n' > "${BATS_TEST_TMPDIR}/t.sh"
+    printf '# %s(#42): revisit once fixed\n' TODO > "${BATS_TEST_TMPDIR}/t.sh"
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo CI_RETRY_MAX_ATTEMPTS=1 \
         run bash "${CI_SH}" check governance-guards "${BATS_TEST_TMPDIR}/t.sh"
     [ "${status}" -eq 2 ]
@@ -9907,10 +9920,12 @@ CASES
         b="$(find "${d}" -maxdepth 1 -type f -name 'fluent-bit.log.*' | sort)"
         [ "$(grep -c . <<<"${b}")" -eq "${nb}" ] || { echo "${name}: backups '${b}', want ${nb}"; return 1; }
         if [ "${nb}" -gt 0 ]; then
+            local body
             case "${b}" in
-                *.zst) zstd -dqc "${b}" ;;
-                *) cat "${b}" ;;
-            esac | grep -q MARKER-END || { echo "${name}: backup lost the content"; return 1; }
+                *.zst) body="$(zstd -dqc "${b}")" ;;
+                *) body="$(cat "${b}")" ;;
+            esac
+            [[ "${body}" == *MARKER-END* ]] || { echo "${name}: backup lost the content"; return 1; }
         fi
         IFS=';' read -r -a ws <<<"${msg}"
         for w in "${ws[@]}"; do
