@@ -414,6 +414,53 @@ EOF
     CI_MANIFEST="${m}" GITHUB_REPOSITORY='' run bash "${CI_SH}" codeql-config
     [ "${status}" -ne 0 ]
 }
+@test "an unreadable SOT fails every reader caller with raw" {
+    # What: each caller row: rc 2 plus the raw reader error.
+    # Why: a reader error must never read as an empty value.
+    # From: Issue #1683 | PR #1858
+    local call row
+    while IFS= read -r row; do
+        [ -n "${row}" ] || continue
+        read -r -a call <<< "${row}"
+        CI_MANIFEST="${BATS_TEST_TMPDIR}/missing.yml" GITHUB_REPOSITORY=o/r CI_COMPOSE_FILE=deploy/prod/docker-compose.yml \
+            run "${call[@]}"
+        [ "${status}" -eq 2 ] && [[ "${output}" == *"No such file"* ]] \
+            && [[ "${output}" =~ \[CI-ERROR-CORE-010[789]\]\ block=.*manifest=\".*missing\.yml\" ]] \
+            || { echo "${row}: rc ${status}: ${output}"; return 1; }
+    done <<'CASES'
+ci_service_field svc build_type
+_ci_required_field svc context
+_ci_platforms svc
+_ci_platform_field linux/amd64 apk
+ci_build_targets
+_ci_alpine_build_arg --build-arg
+_ci_service_packages svc
+_ci_apk_repositories svc
+_ci_apk_keys svc
+_ci_build_tools_smoke smoke_tools
+_ci_variable_value CI_UNSET_PROBE_NAME
+_ci_plan_candidate svc a/file
+_ci_identity_for svc linux/amd64
+ci_cmd_codeql_config
+_ci_check_stable_external_images /var/tmp
+_ci_check_dockerfile_build_tools /var/tmp
+CASES
+}
+
+@test "identity fails, never hashes, when a part fails" {
+    # What: a failing content-id part ends with rc 2, no id.
+    # Why: a part lost in the hash pipe minted a wrong id.
+    # From: Issue #1683 | PR #1858
+    local m="${BATS_TEST_TMPDIR}/id.yml"
+    printf 'services:\n  svc:\n    context: c\n    build_type: apk\n' > "${m}"
+    _ci_identity_pins() { echo pins; }
+    _ci_tracked_content_ids() { echo "git: fatal: bad object" >&2; return 2; }
+    CI_MANIFEST="${m}" run _ci_identity_for svc linux/amd64
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"git: fatal: bad object"* ]]
+    [[ ! "${output}" =~ [0-9a-f]{64} ]]
+}
+
 @test "SOT readers unquote YAML scalars; odd quoting fails" {
     # What: list+field rows: plain, "..", '..', bad forms.
     # Why: a kept quote broke the proxy nginx -V smoke.
@@ -2387,7 +2434,7 @@ EOF
     export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r GITHUB_SHA=deadbeef CI_TMPDIR="${BATS_TEST_TMPDIR}"
     _ci_require_ghcr_auth() { return 0; }
     _ci_registry_digest() { echo "sha256:aaa"; }
-    _ci_published_services() { echo proxy; }
+    ci_build_targets() { echo proxy; }
     : > "${calls}"
     STUB_VIEW='' CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_publish v1.2.3-rc.4
     [ "${status}" -eq 0 ]
@@ -2415,7 +2462,7 @@ EOF
     export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r GITHUB_SHA=deadbeef CI_TMPDIR="${BATS_TEST_TMPDIR}"
     _ci_require_ghcr_auth() { return 0; }
     _ci_registry_digest() { echo "sha256:aaa"; }
-    _ci_published_services() { echo svc-a; }
+    ci_build_targets() { echo svc-a; }
     local start='<!-- r-image-tags:start -->' end='<!-- r-image-tags:end -->'
     : > "${calls}"
     STUB_VIEW="$(jq -nc --arg b "keep-me
@@ -2438,7 +2485,7 @@ tail" '{body:$b, isPrerelease:false}')" \
     export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r GITHUB_SHA=deadbeef CI_TMPDIR="${BATS_TEST_TMPDIR}"
     _ci_require_ghcr_auth() { return 0; }
     _ci_registry_digest() { echo "sha256:aaa"; }
-    _ci_published_services() { echo proxy; }
+    ci_build_targets() { echo proxy; }
     STUB_VIEW='{"body":"x","isPrerelease":true}' \
         CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_publish v1.2.3
     [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0005"* ]]
@@ -2485,18 +2532,6 @@ tail" '{body:$b, isPrerelease:false}')" \
     [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0008"* ]]
 }
 
-@test "published-services lists every service plus the toolchain" {
-    # What: every SOT service, then the toolchain target.
-    # Why: SBOM covers every first-party image.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/m.yml"
-    printf '%s\n' 'services:' '  svc-a:' '    build_type: apk' \
-        '  svc-c:' '    build_type: rust' \
-        'build_toolchain:' '  tool-t:' '    build_type: toolchain' > "${m}"
-    CI_MANIFEST="${m}" run _ci_published_services
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "$(printf '%s\n' svc-a svc-c tool-t)" ]
-}
 
 @test "release-sbom-stack builds an SBOM for every published service" {
     # What: One SBOM per first-party image.
@@ -2506,7 +2541,7 @@ tail" '{body:$b, isPrerelease:false}')" \
     export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r CI_TMPDIR="${BATS_TEST_TMPDIR}"
     _ci_require_ghcr_auth() { return 0; }
     _ci_registry_digest() { echo "sha256:aaa"; }
-    _ci_published_services() { printf 'proxy\ndns\n'; }
+    ci_build_targets() { printf 'proxy\ndns\n'; }
     local sbom; sbom="$(_stub sbom 'printf "{}" > "$3"')"
     : > "${calls}"
     CI_SBOM_CMD="${sbom}" CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_sbom_stack v1.2.3
@@ -2549,7 +2584,7 @@ tail" '{body:$b, isPrerelease:false}')" \
     # Why: Content identity determines release need.
     # From: Issue #1683
     export GITHUB_SHA=mysha
-    _ci_published_services() { printf 'proxy\n'; }
+    ci_build_targets() { printf 'proxy\n'; }
     _ci_registry() { echo registry.example.test; }
     _ci_repo() { echo o/r; }
     _ci_registry_digest() { echo sha256:same; }

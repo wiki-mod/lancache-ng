@@ -153,17 +153,22 @@ ci_require_manifest() {
 # Why: One awk reader, no yq/python (AG-REL-001/006).
 # From: Issue #1683
 _ci_block_keys() {
-    local block="$1" mode="${2:-blocks}"
+    local block="$1" mode="${2:-blocks}" all="" out
     # What: mode "all" also lists scalar keys (key: value).
     # Why: base_images holds values, not nested blocks.
     # From: Issue #1683 | PR #1858
-    awk -v block="$block" -v all="$([ "${mode}" = all ] && echo 1)" '
+    [ "${mode}" = all ] && all=1
+    if ! out="$(awk -v block="$block" -v all="${all}" '
         $0 ~ ("^" block ":[[:space:]]*$") { inb = 1; next }
         inb && /^[^[:space:]]/ { inb = 0 }
         inb && (/^  [A-Za-z0-9_.-]+:[[:space:]]*$/ || (all && /^  [A-Za-z0-9_.-]+:/)) {
             key = $1; sub(/:.*$/, "", key); print key
         }
-    ' "${CI_MANIFEST}"
+    ' "${CI_MANIFEST}" 2>&1)"; then
+        ci_error "[CI-ERROR-CORE-0109]" "block=\"${block}\" mode=\"${mode}\" manifest=\"${CI_MANIFEST}\" reason=\"SOT keys unreadable\"" "${out}"
+        return 2
+    fi
+    [ -z "${out}" ] || printf '%s\n' "${out}"
 }
 
 # What: Print the product-stack service names.
@@ -177,7 +182,7 @@ ci_services() {
 # Why: build-tools builds but is never a product service.
 # From: Issue #1683
 ci_build_targets() {
-    ci_services
+    ci_services || return 2
     _ci_block_keys "build_toolchain"
 }
 
@@ -192,14 +197,6 @@ _ci_toolchain_target() {
         return 2
     fi
     printf '%s\n' "${keys}"
-}
-
-# What: Build targets that publish a first-party image.
-# Why: every SOT service and the toolchain ship an image.
-# From: Issue #1683
-_ci_published_services() {
-    ci_services || return 2
-    _ci_block_keys "build_toolchain"
 }
 
 # =========================================================
@@ -251,7 +248,7 @@ _ci_block_entry_field() {
             print unq(val); exit
         }
     ' "${CI_MANIFEST}" 2>&1)"; then
-        ci_error "[CI-ERROR-CORE-0107]" "block=\"${block}\" entry=\"${entry}\" field=\"${field}\" reason=\"SOT field unreadable\"" "${out}"
+        ci_error "[CI-ERROR-CORE-0107]" "block=\"${block}\" entry=\"${entry}\" field=\"${field}\" manifest=\"${CI_MANIFEST}\" reason=\"SOT field unreadable\"" "${out}"
         return 2
     fi
     [ -z "${out}" ] || printf '%s\n' "${out}"
@@ -285,7 +282,7 @@ _ci_block_entry_list() {
         inlist && $0 ~ ("^" fi "[^[:space:]]") { inlist = 0 }
         inlist && /^  [^[:space:]]/ { inlist = 0 }
     ' "${CI_MANIFEST}" 2>&1)"; then
-        ci_error "[CI-ERROR-CORE-0108]" "block=\"${block}\" entry=\"${entry}\" field=\"${field}\" reason=\"SOT list unreadable\"" "${out}"
+        ci_error "[CI-ERROR-CORE-0108]" "block=\"${block}\" entry=\"${entry}\" field=\"${field}\" manifest=\"${CI_MANIFEST}\" reason=\"SOT list unreadable\"" "${out}"
         return 2
     fi
     [ -z "${out}" ] || printf '%s\n' "${out}"
@@ -296,7 +293,7 @@ _ci_block_entry_list() {
 # From: Issue #1683
 ci_service_field() {
     local v
-    v="$(_ci_block_entry_field "services" "$1" "$2")"
+    v="$(_ci_block_entry_field "services" "$1" "$2")" || return 2
     [ -n "${v}" ] && { printf '%s\n' "${v}"; return 0; }
     _ci_block_entry_field "build_toolchain" "$1" "$2"
 }
@@ -306,7 +303,7 @@ ci_service_field() {
 # From: Issue #1683
 _ci_required_field() {
     local v
-    v="$(ci_service_field "$1" "$2")"
+    v="$(ci_service_field "$1" "$2")" || return 2
     if [ -z "${v}" ]; then
         ci_log "[CI-ERROR-CORE-0009]" \
             "target=\"$1\" field=\"$2\" reason=\"required SOT field missing\""
@@ -338,8 +335,8 @@ ci_context_path() {
 # From: Issue #1683
 _ci_service_platforms_override() {
     local service="$1" out
-    out="$(_ci_block_entry_list services "${service}" platforms)"
-    [ -n "${out}" ] || out="$(_ci_block_entry_list build_toolchain "${service}" platforms)"
+    out="$(_ci_block_entry_list services "${service}" platforms)" || return 2
+    [ -n "${out}" ] || out="$(_ci_block_entry_list build_toolchain "${service}" platforms)" || return 2
     printf '%s' "${out}"
 }
 
@@ -355,8 +352,8 @@ _ci_build_matrix_platforms() {
 # From: Issue #1683
 _ci_platforms() {
     local service="$1" out
-    out="$(_ci_service_platforms_override "${service}")"
-    [ -n "${out}" ] || out="$(_ci_build_matrix_platforms)"
+    out="$(_ci_service_platforms_override "${service}")" || return 2
+    [ -n "${out}" ] || out="$(_ci_build_matrix_platforms)" || return 2
     if [ -z "${out}" ]; then
         ci_log "[CI-ERROR-IDENTITY-0003]" "service=\"${service}\" reason=\"no platforms in SOT (override or build_matrix)\""
         return 2
@@ -381,7 +378,7 @@ _ci_valid_platform() {
 # From: Issue #1683
 _ci_platform_field() {
     local arch="${1##*/}" field="$2" val
-    val="$(_ci_block_entry_field platform_arch "${arch}" "${field}")"
+    val="$(_ci_block_entry_field platform_arch "${arch}" "${field}")" || return 2
     [ -n "${val}" ] || return 2
     printf '%s\n' "${val}"
 }
@@ -460,11 +457,12 @@ _ci_paths_touch() {
 # From: Issue #1683
 _ci_plan_candidate() {
     local service="$1"; shift
-    local context ctx ctx_path
+    local context ctx ctx_path ctxs
     context="$(_ci_required_field "${service}" context)" || return 2
     _ci_paths_touch "${context}" "$@" && return 0
-    for ctx in $(ci_service_contexts "${service}"); do
-        ctx_path="$(ci_context_path "${ctx}")"
+    ctxs="$(ci_service_contexts "${service}")" || return 2
+    for ctx in ${ctxs}; do
+        ctx_path="$(ci_context_path "${ctx}")" || return 2
         [ -n "${ctx_path}" ] || continue
         _ci_paths_touch "${ctx_path}" "$@" && return 0
     done
@@ -478,8 +476,9 @@ ci_cmd_plan() {
     local -a changed=()
     _ci_collect_changed changed "$@" || return 2
 
-    local service rc
-    for service in $(ci_build_targets); do
+    local service rc targets
+    targets="$(ci_build_targets)" || return 2
+    for service in ${targets}; do
         rc=0
         _ci_plan_candidate "${service}" "${changed[@]}" || rc=$?
         case "${rc}" in
@@ -530,7 +529,7 @@ ci_cmd_codeql_impact() {
     # What: an admitted language needs the SOT job image.
     # Why: DEFAULT=NOOP; an empty matrix never needs it.
     # From: Issue #1683 | PR #1858
-    img="$(_ci_block_entry_field base_images "" codeql_runtime)"
+    img="$(_ci_block_entry_field base_images "" codeql_runtime)" || return 2
     if [ "${include}" != '[]' ] && [ -z "${img}" ]; then
         ci_log "[CI-ERROR-CODEQL-0012]" "key=\"base_images.codeql_runtime\" reason=\"missing CodeQL job image; FAIL CLOSED\""
         return 2
@@ -606,16 +605,17 @@ _ci_fetch_verified() {
 # Why: SOT owns tag+sha256; no action pin in the YAML.
 # From: Issue #1683 | PR #1858
 _ci_codeql_fetch() {
-    local work="$1" repo tag asset url raw
-    repo="$(_ci_block_entry_field external_versions codeql repository)"
-    tag="$(_ci_block_entry_field external_versions codeql release_tag)"
-    asset="$(_ci_block_entry_field external_versions codeql asset)"
+    local work="$1" repo tag asset url raw sha
+    repo="$(_ci_block_entry_field external_versions codeql repository)" || return 2
+    tag="$(_ci_block_entry_field external_versions codeql release_tag)" || return 2
+    asset="$(_ci_block_entry_field external_versions codeql asset)" || return 2
+    sha="$(_ci_block_entry_field external_versions codeql sha256)" || return 2
     if [ -z "${repo}" ] || [ -z "${tag}" ] || [ -z "${asset}" ]; then
         ci_log "[CI-ERROR-CODEQL-0005]" "key=\"external_versions.codeql\" reason=\"repository/release_tag/asset missing; FAIL CLOSED\""
         return 2
     fi
     url="${GITHUB_SERVER_URL:-https://github.com}/${repo}/releases/download/${tag}/${asset}"
-    _ci_fetch_verified "${url}" "$(_ci_block_entry_field external_versions codeql sha256)" "${work}/${asset}" || return 2
+    _ci_fetch_verified "${url}" "${sha}" "${work}/${asset}" || return 2
     if ! raw="$(tar --no-same-owner -xzf "${work}/${asset}" -C "${work}" 2>&1)"; then
         ci_error "[CI-ERROR-CODEQL-0007]" "asset=\"${asset}\" reason=\"bundle extract failed\"" "${raw}"
         return 2
@@ -662,7 +662,9 @@ ci_cmd_codeql_analyze() {
         ci_log "[CI-ERROR-CODEQL-0002]" "reason=\"language arg required\""
         return 2
     fi
-    if ! grep -qx -- "${lang}" <<< "$(_ci_block_keys codeql_languages)"; then
+    local langs
+    langs="$(_ci_block_keys codeql_languages)" || return 2
+    if ! grep -qx -- "${lang}" <<< "${langs}"; then
         ci_log "[CI-ERROR-CODEQL-0003]" "language=\"${lang}\" reason=\"not a SOT codeql_languages entry\""
         return 2
     fi
@@ -712,7 +714,9 @@ ci_cmd_plan_matrix() {
     # What: build product services and the toolchain.
     # Why: build-tools generic pipeline, separate assembly.
     # From: Issue #1683
-    for service in $(ci_services) $(_ci_block_keys build_toolchain); do
+    local targets svc_type
+    targets="$(ci_build_targets)" || return 2
+    for service in ${targets}; do
         path_cand=false rc=0
         _ci_plan_candidate "${service}" "${changed[@]}" || rc=$?
         case "${rc}" in 0) path_cand=true ;; 1) ;; *) return 2 ;; esac
@@ -720,7 +724,8 @@ ci_cmd_plan_matrix() {
         # What: path-changed rust is test candidate (§60).
         # Why: tests run on change, even build reuse (§60).
         # From: Issue #1683
-        [ "${path_cand}" = true ] && [ "$(ci_service_field "${service}" build_type)" = rust ] \
+        svc_type="$(ci_service_field "${service}" build_type)" || return 2
+        [ "${path_cand}" = true ] && [ "${svc_type}" = rust ] \
             && test_services="${test_services} ${service}"
         # What: auth once, only when a candidate exists.
         # Why: docs-only NOOP: registry zero touches (§63).
@@ -854,7 +859,7 @@ _ci_service_packages() {
 # From: Issue #1683 | PR #1858
 _ci_identity_pins() {
     local service="$1" build_type="$2" platform="$3" inputs input pkgs base arch
-    inputs="$(_ci_block_entry_list build_identity "${build_type}" inputs)"
+    inputs="$(_ci_block_entry_list build_identity "${build_type}" inputs)" || return 2
     if [ -z "${inputs}" ]; then
         ci_log "[CI-ERROR-IDENTITY-0004]" "build_type=\"${build_type}\" reason=\"no SOT build_identity inputs; FAIL CLOSED\""
         return 2
@@ -897,22 +902,25 @@ _ci_identity_pins() {
 # From: Issue #1683
 _ci_identity_for() {
     local service="$1" platform="$2" ref="${3:-}"
-    local build_type context ctx ctx_path pins
+    local build_type context ctx ctx_path ctxs pins part buf
     build_type="$(_ci_required_field "${service}" build_type)" || return 2
     context="$(_ci_required_field "${service}" context)" || return 2
-    # What: compute pins first so a failed pin fails the id.
-    # Why: a swallowed sig error must not mint an id.
-    # From: Issue #1683
+    # What: every id input is captured and checked first.
+    # Why: a failed part in a hash pipe mints a wrong id.
+    # From: Issue #1683 | PR #1858
     pins="$(_ci_identity_pins "${service}" "${build_type}" "${platform}")" || return "$?"
-    {
-        printf 'service=%s\nbuild_type=%s\nplatform=%s\n' "${service}" "${build_type}" "${platform}"
-        _ci_tracked_content_ids "${context}" "${ref}"
-        for ctx in $(ci_service_contexts "${service}"); do
-            ctx_path="$(ci_context_path "${ctx}")"
-            [ -n "${ctx_path}" ] && _ci_tracked_content_ids "${ctx_path}" "${ref}"
-        done
-        printf '%s\n' "${pins}"
-    } | sha256sum | cut -d' ' -f1
+    buf="$(printf 'service=%s\nbuild_type=%s\nplatform=%s' "${service}" "${build_type}" "${platform}")"$'\n'
+    part="$(_ci_tracked_content_ids "${context}" "${ref}")" || return 2
+    [ -z "${part}" ] || buf+="${part}"$'\n'
+    ctxs="$(ci_service_contexts "${service}")" || return 2
+    for ctx in ${ctxs}; do
+        ctx_path="$(ci_context_path "${ctx}")" || return 2
+        [ -n "${ctx_path}" ] || continue
+        part="$(_ci_tracked_content_ids "${ctx_path}" "${ref}")" || return 2
+        [ -z "${part}" ] || buf+="${part}"$'\n'
+    done
+    buf+="${pins}"$'\n'
+    printf '%s' "${buf}" | sha256sum | cut -d' ' -f1
 }
 
 # What: Run one_fn per platform, or one selected platform.
@@ -1896,7 +1904,7 @@ _ci_oci_labels() {
     repo="$(_ci_repo)" || return 2
     source="${GITHUB_SERVER_URL:?GITHUB_SERVER_URL required}/${repo}"
     final="$(_ci_required_field "${service}" final_base)" || return 2
-    base="$(_ci_block_entry_field base_images "" "${final}")"
+    base="$(_ci_block_entry_field base_images "" "${final}")" || return 2
     created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'org.opencontainers.image.created=%s\n' "${created}"
     [ -n "${GITHUB_SHA:-}" ] && printf 'org.opencontainers.image.revision=%s\n' "${GITHUB_SHA}"
@@ -1983,7 +1991,7 @@ _ci_docker_build() {
     # Why: repo/org variables reach the builder (AG-CI-006).
     # From: Issue #1683 | PR #1858
     local vnames vname vval vrc
-    vnames="$(_ci_block_entry_list build_variables "" "${build_type}")"
+    vnames="$(_ci_block_entry_list build_variables "" "${build_type}")" || return 2
     while IFS= read -r vname; do
         [ -n "${vname}" ] || continue
         vrc=0
@@ -2857,7 +2865,7 @@ _ci_build_one() {
     action="$(_ci_record_field "${resolved}" action)"
     identity="$(_ci_record_field "${resolved}" identity)"
     state="$(_ci_record_field "${resolved}" state)"
-    build_type="$(ci_service_field "${service}" build_type)"
+    build_type="$(ci_service_field "${service}" build_type)" || return 2
 
     case "${action}" in
         noop)
@@ -3029,7 +3037,9 @@ ci_cmd_verify() {
     # What: smoke-test every built image at its digest.
     # Why: §25 SERVICE_TESTED follows IDENTITY_VERIFIED.
     # From: Issue #1683 | PR #1858
-    if [ "$(ci_service_field "${service}" build_type)" = toolchain ]; then
+    local verify_type
+    verify_type="$(ci_service_field "${service}" build_type)" || return 2
+    if [ "${verify_type}" = toolchain ]; then
         local CI_TOOLCHAIN_IMAGE
         CI_TOOLCHAIN_IMAGE="$(_ci_image_ref "${service}" "${expected}")"
         _ci_test_toolchain "${service}" || return "$?"
@@ -3065,7 +3075,7 @@ _ci_test_rust() {
         "${CI_RUST_TEST_CMD}" "${service}"
         return "$?"
     fi
-    ctx="$(ci_service_field "${service}" crate)"
+    ctx="$(ci_service_field "${service}" crate)" || return 2
     if [ -z "${ctx}" ]; then
         ci_log "[CI-ERROR-TEST-0005]" "service=\"${service}\" reason=\"no crate in SOT\""
         return 2
@@ -3849,8 +3859,8 @@ _ci_release_validation_valid() {
         return "$?"
     fi
     local rel gov state target layer sub commit paths rows stale="" out
-    rel="$(_ci_block_entry_field release "" validation_state)"
-    gov="$(_ci_block_entry_list release "" governance_paths)"
+    rel="$(_ci_block_entry_field release "" validation_state)" || return 2
+    gov="$(_ci_block_entry_list release "" governance_paths)" || return 2
     target="${GITHUB_SHA:?GITHUB_SHA required}"
     state="${CI_REPO_ROOT}/${rel}"
     if [ -z "${rel}" ] || [ -z "${gov}" ] || ! jq -e '.subsystem_validation' "${state}" >/dev/null; then
@@ -3934,7 +3944,9 @@ _ci_release_notes_block() {
     repo="$(_ci_repo)" || return 2
     _ci_release_marker start || return 2
     printf 'Images published for %s (commit %s):\n\n' "${tag}" "${GITHUB_SHA:-unknown}"
-    for target in $(_ci_published_services) stack; do
+    local targets
+    targets="$(ci_build_targets)" || return 2
+    for target in ${targets} stack; do
         img="${registry}/${repo}/${target}:${tag}"
         dig="$(_ci_registry_digest "${img}")" || return "$?"
         printf -- '- %s -> %s\n' "${img}" "${dig}"
@@ -4039,9 +4051,10 @@ ci_cmd_release_sbom() {
 # Why: one SBOM walk; SOT-driven, skips third-party.
 # From: Issue #1683
 ci_cmd_release_sbom_stack() {
-    local tag="${1:-}" svc
+    local tag="${1:-}" svc targets
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0013]" "reason=\"tag arg required\""; return 2; }
-    for svc in $(_ci_published_services); do
+    targets="$(ci_build_targets)" || return 2
+    for svc in ${targets}; do
         ci_cmd_release_sbom "${svc}" "${tag}" || return "$?"
     done
 }
@@ -4097,11 +4110,12 @@ _ci_next_patch_tag() {
 # Why: content-identity trigger, not path heuristic.
 # From: Issue #1683
 _ci_release_stack_changed() {
-    local base_tag="$1" registry repo sha svc cur rel
+    local base_tag="$1" registry repo sha svc cur rel targets
     registry="$(_ci_registry)" || return 2
     repo="$(_ci_repo)" || return 2
     sha="${GITHUB_SHA:?GITHUB_SHA required}"
-    for svc in $(_ci_published_services); do
+    targets="$(ci_build_targets)" || return 2
+    for svc in ${targets}; do
         cur="$(_ci_registry_digest "${registry}/${repo}/${svc}:sha-${sha}")" || return 2
         rel="$(_ci_registry_probe "${registry}/${repo}/${svc}:${base_tag}")" || rel=""
         [ "${cur}" = "${rel}" ] || return 0
@@ -4942,8 +4956,9 @@ _ci_validate_teardown() {
         # Why: services write as root; runner user cannot.
         # From: Issue #1683
         local base
-        base="$(_ci_block_entry_field base_images "" alpine)"
-        if ! out="$(docker run --rm --network none -v "${LANCACHE_STATE_DIR}:/s" "${base}" \
+        if ! base="$(_ci_block_entry_field base_images "" alpine)"; then
+            rc=2
+        elif ! out="$(docker run --rm --network none -v "${LANCACHE_STATE_DIR}:/s" "${base}" \
                 find /s -mindepth 1 -delete 2>&1 && rmdir "${LANCACHE_STATE_DIR}" 2>&1)"; then
             ci_error "[CI-ERROR-VALIDATE-0061]" "reason=\"per-run state root not removed\"" "${out}"
             rc=2
@@ -5701,7 +5716,7 @@ _ci_variable_value() {
             return 2
         fi
     fi
-    [ -n "${val}" ] || val="$(_ci_block_entry_field ci_variables "" "${name}")"
+    [ -n "${val}" ] || val="$(_ci_block_entry_field ci_variables "" "${name}")" || return 2
     [ -n "${val}" ] || return 1
     printf '%s\n' "${val}"
 }
@@ -5976,10 +5991,10 @@ _ci_service_build_args() {
     # What: external_image field adds one more build-arg.
     # Why: the SOT maps the image; the Dockerfile pins none.
     # From: Issue #1683
-    ext="$(_ci_block_entry_field services "${service}" external_image)"
+    ext="$(_ci_block_entry_field services "${service}" external_image)" || return 2
     if [ -n "${ext}" ]; then
         ext_argname="${ext^^}_IMAGE"
-        val="$(_ci_block_entry_field base_images "" "${ext}")"
+        val="$(_ci_block_entry_field base_images "" "${ext}")" || return 2
         if [ -z "${val}" ]; then
             ci_log "[CI-ERROR-BUILDARGS-0007]" "arg=\"${ext_argname}\" service=\"${service}\" key=\"base_images.${ext}\" reason=\"missing central external image; FAIL CLOSED\""
             return 2
@@ -5989,7 +6004,9 @@ _ci_service_build_args() {
     # What: Rust builders use build-tools image ref
     # Why: SOT owns ref; Dockerfile keeps none
     # From: Issue #1683
-    if [ "$(_ci_block_entry_field services "${service}" build_type)" = rust ]; then
+    local own_type
+    own_type="$(_ci_block_entry_field services "${service}" build_type)" || return 2
+    if [ "${own_type}" = rust ]; then
         # What: identity omits the registry-resolved ref.
         # Why: toolchain_digest keys it; no network in id.
         # From: Issue #1683 | PR #1858
@@ -6001,7 +6018,7 @@ _ci_service_build_args() {
         # What: emit the SOT workspace crate for rust-build.
         # Why: one crate owner; the Dockerfile names none.
         # From: Issue #1683 | PR #1858
-        val="$(_ci_block_entry_field services "${service}" crate)"
+        val="$(_ci_block_entry_field services "${service}" crate)" || return 2
         [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0014]" "arg=\"RUST_CRATE\" service=\"${service}\" reason=\"no crate in SOT; FAIL CLOSED\""; return 2; }
         out="${out}${prefix}RUST_CRATE=${val}"$'\n'
         # What: emit the platform's Alpine musl host triple.
@@ -6106,7 +6123,8 @@ _ci_build_tools_packages() {
     # What: read the exact SOT apk list via the one reader.
     # Why: SOT is the owner; no parse-back, no new parser.
     # From: Issue #1683
-    pkgs="$(_ci_block_entry_list build_toolchain "${tool}" packages | LC_ALL=C sort -u)"
+    pkgs="$(_ci_block_entry_list build_toolchain "${tool}" packages)" || return 2
+    pkgs="$(LC_ALL=C sort -u <<< "${pkgs}")"
     # What: fail closed if the SOT list is empty.
     # Why: an empty list would blind the input check.
     # From: Issue #1683
@@ -6123,7 +6141,7 @@ _ci_build_tools_packages() {
 _ci_build_tools_smoke() {
     local field="$1" items tool
     tool="$(_ci_toolchain_target)" || return 2
-    items="$(_ci_block_entry_list build_toolchain "${tool}" "${field}")"
+    items="$(_ci_block_entry_list build_toolchain "${tool}" "${field}")" || return 2
     if [ -z "${items}" ]; then
         ci_log "[CI-ERROR-BUILDTOOLS-0013]" "field=\"${field}\" reason=\"empty SOT smoke list; FAIL CLOSED\""
         return 2
@@ -6305,7 +6323,7 @@ _ci_build_tools_resolve_image() {
     # From: Issue #1683 | PR #1858
     channel="$(GITHUB_REF="refs/heads/${ref}" CI_PROMOTE_REQUESTED_CHANNEL='' _ci_promote_targets_for_ref)" || return 2
     channel="${channel%%$'\n'*}"
-    [ -n "${channel}" ] || channel="$(_ci_block_entry_field release "" default_channel)"
+    [ -n "${channel}" ] || channel="$(_ci_block_entry_field release "" default_channel)" || return 2
     if [ -z "${channel}" ]; then
         ci_log "[CI-ERROR-BUILDTOOLS-0021]" "reason=\"no SOT release.default_channel; FAIL CLOSED\""
         return 2
@@ -6454,9 +6472,9 @@ _ci_version_consumers() {
     local deps dep target keys ctx
     deps="$(_ci_block_keys external_versions)" || return 2
     for dep in ${deps}; do
-        target="$(_ci_block_entry_field external_versions "${dep}" consumer)"
+        target="$(_ci_block_entry_field external_versions "${dep}" consumer)" || return 2
         [ -n "${target}" ] || continue
-        keys="$(_ci_block_entry_list external_versions "${dep}" build_args)"
+        keys="$(_ci_block_entry_list external_versions "${dep}" build_args)" || return 2
         if [ -z "${keys}" ]; then
             ci_log "[CI-ERROR-VERSION-0010]" "dep=\"${dep}\" reason=\"consumer without SOT build_args\""
             return 2
@@ -6471,7 +6489,7 @@ _ci_version_consumers() {
 # From: Issue #1683 | PR #1858
 _ci_pin_sha() {
     local dep="$1" apk="$2" val
-    val="$(_ci_block_entry_field external_versions "${dep}" "sha256_${apk}")"
+    val="$(_ci_block_entry_field external_versions "${dep}" "sha256_${apk}")" || return 2
     if [ -z "${val}" ]; then
         ci_log "[CI-ERROR-BUILDARGS-0004]" "key=\"external_versions.${dep}.sha256_${apk}\" reason=\"missing central pin; FAIL CLOSED\""
         return 2
@@ -6490,7 +6508,7 @@ _ci_pin_args() {
     local dep="$1" keys="$2" platform="$3" prefix="$4" up key val apk p out=""
     up="${dep^^}"; up="${up//-/_}"
     for key in ${keys}; do
-        val="$(_ci_block_entry_field external_versions "${dep}" "${key}")"
+        val="$(_ci_block_entry_field external_versions "${dep}" "${key}")" || return 2
         if [ -z "${val}" ]; then
             ci_log "[CI-ERROR-BUILDARGS-0004]" "key=\"external_versions.${dep}.${key}\" reason=\"missing central pin; FAIL CLOSED\""
             return 2
@@ -6535,7 +6553,7 @@ _ci_target_pin_args() {
 # From: Issue #1683 | PR #1858
 _ci_alpine_build_arg() {
     local prefix="$1" val
-    val="$(_ci_block_entry_field base_images "" alpine)"
+    val="$(_ci_block_entry_field base_images "" alpine)" || return 2
     if [ -z "${val}" ]; then
         ci_log "[CI-ERROR-BUILDARGS-0003]" "arg=\"ALPINE_IMAGE\" key=\"base_images.alpine\" reason=\"missing central base image; FAIL CLOSED\""
         return 2
@@ -7452,12 +7470,16 @@ _ci_check_pr_title() {
     if [ -z "${title}" ]; then
         ci_log "[CI-ERROR-CHECK-0012]" "reason=\"no PR title given\""; return 2
     fi
-    local types scopes
-    types="$(_ci_block_entry_list pr_policy "" title_types)"
+    local types scopes part
+    types="$(_ci_block_entry_list pr_policy "" title_types)" || return 2
     if [ -z "${types}" ]; then
         ci_log "[CI-ERROR-CHECK-0085]" "reason=\"no SOT pr_policy.title_types; FAIL CLOSED\""; return 2
     fi
-    scopes="$(ci_build_targets; _ci_block_keys external_services; _ci_block_entry_list pr_policy "" title_scopes_extra)"
+    scopes="$(ci_build_targets)" || return 2
+    part="$(_ci_block_keys external_services)" || return 2
+    scopes+=$'\n'"${part}"
+    part="$(_ci_block_entry_list pr_policy "" title_scopes_extra)" || return 2
+    scopes+=$'\n'"${part}"
     types="${types//$'\n'/ }"
     scopes="${scopes//$'\n'/ }"
     local pat='^([a-zA-Z]+)(\(([a-z0-9-]+)\))?(!)?:[[:space:]](.+)$'
@@ -7511,16 +7533,21 @@ _ci_check_stable_external_images() {
     # What: the exact SOT pins (external services + bases).
     # Why: compose must match them; other values are drift.
     # From: Issue #1683 | PR #1858
-    for k in $(_ci_block_keys external_services); do
-        img="$(_ci_block_entry_field external_services "${k}" image)"
+    local keys policy val
+    keys="$(_ci_block_keys external_services)" || return 2
+    for k in ${keys}; do
+        img="$(_ci_block_entry_field external_services "${k}" image)" || return 2
         allowed+="${img} "
         # What: a SOT tag-latest entry may skip the digest.
         # Why: only an explicit SOT policy, never a guess.
         # From: Issue #1683 | PR #1858
-        [ "$(_ci_block_entry_field external_services "${k}" policy)" = tag-latest ] && tagged+="${img} "
+        policy="$(_ci_block_entry_field external_services "${k}" policy)" || return 2
+        [ "${policy}" = tag-latest ] && tagged+="${img} "
     done
-    for k in $(_ci_block_keys base_images all); do
-        allowed+="$(_ci_block_entry_field base_images "" "${k}") "
+    keys="$(_ci_block_keys base_images all)" || return 2
+    for k in ${keys}; do
+        val="$(_ci_block_entry_field base_images "" "${k}")" || return 2
+        allowed+="${val} "
     done
     for d in "${dirs[@]}"; do
         if [ ! -d "${d}" ]; then
@@ -7715,7 +7742,7 @@ _ci_check_pr_tracking_metadata() {
     # What: SOT board number; owner is the repo owner.
     # Why: one CI policy owner (AG-GH-008), no literal.
     # From: Issue #1683 | PR #1858
-    project_number="$(_ci_block_entry_field pr_policy "" project_number)"
+    project_number="$(_ci_block_entry_field pr_policy "" project_number)" || return 2
     project_owner="${repo%%/*}"
     if ! [[ "${project_number}" =~ ^[0-9]+$ ]]; then
         ci_log "[CI-ERROR-CHECK-0091]" "reason=\"no numeric SOT pr_policy.project_number\""
@@ -8471,7 +8498,7 @@ _ci_sot_base_image_arg() {
     local name="$1" val key
     case "${name}" in *_IMAGE) ;; *) return 1 ;; esac
     key="${name%_IMAGE}"
-    val="$(_ci_block_entry_field base_images "" "${key,,}")"
+    val="$(_ci_block_entry_field base_images "" "${key,,}")" || return 2
     [ -n "${val}" ] || return 1
     printf '%s' "${val}"
 }
@@ -8701,7 +8728,7 @@ _ci_check_prod_state_wiring() {
 _ci_validate_host_tools() {
     local tools t out
     local -a missing=()
-    tools="$(_ci_block_entry_list validation "" host_tools)"
+    tools="$(_ci_block_entry_list validation "" host_tools)" || return 2
     if [ -z "${tools}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0056]" "reason=\"no SOT validation.host_tools\""
         return 2
@@ -9142,7 +9169,7 @@ _ci_check_setup_keys_kea() {
     # Why: SOT owns apk lists; Dockerfile consumes
     # From: Issue #1683 | PR #1858
     local dhcp_pkgs
-    dhcp_pkgs="$(_ci_block_entry_list services dhcp packages)"
+    dhcp_pkgs="$(_ci_block_entry_list services dhcp packages)" || return 2
     grep -qx 'nmap' <<< "${dhcp_pkgs}" \
         || viol+=("SOT services.dhcp.packages must install nmap for the Kea discovery preflight")
     grep -Fq 'nmap|/usr/bin/nmap|/bin/nmap)' "${repo_root}/services/dhcp/entrypoint.sh" \
@@ -9575,7 +9602,7 @@ _ci_dockerfile_copies_to() {
                         */*|*:*|*.*) : ;;
                         *)
                             if [ -z "${aliases[${from_val,,}]:-}" ]; then
-                                ctx_path="$(_ci_block_entry_field named_contexts "${from_val}" path)"
+                                ctx_path="$(_ci_block_entry_field named_contexts "${from_val}" path)" || return 2
                                 [ -n "${ctx_path}" ] || continue
                             fi
                             ;;
@@ -9636,9 +9663,12 @@ _ci_check_entrypoint_lib_wiring() {
 _ci_check_dockerfile_build_tools() {
     local repo_root="${1:-${CI_REPO_ROOT:-.}}" service ctx df rc=0
     local -a viol=() tuning=()
-    for service in $(ci_services); do
-        [ "$(ci_service_field "${service}" build_type)" = rust ] || continue
-        ctx="$(ci_service_field "${service}" context)"
+    local services svc_type
+    services="$(ci_services)" || return 2
+    for service in ${services}; do
+        svc_type="$(ci_service_field "${service}" build_type)" || return 2
+        [ "${svc_type}" = rust ] || continue
+        ctx="$(ci_service_field "${service}" context)" || return 2
         df="${repo_root}/${ctx}/Dockerfile"
         if [ ! -f "${df}" ]; then
             viol+=("${service}: no Dockerfile at ${ctx}"); continue
