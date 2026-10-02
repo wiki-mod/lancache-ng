@@ -80,7 +80,7 @@ ci_error() {
 _ci_capture() {
     local okmax="$1" out err rc=0
     shift
-    err="$(mktemp)" || return 2
+    err="$(_ci_mktemp "${CI_TMPDIR}/ci-capture.XXXXXX")" || return 2
     out="$("$@" 2>"${err}")" || rc=$?
     if [ "${rc}" -gt "${okmax}" ] || [ -s "${err}" ]; then
         ci_error "[CI-ERROR-CORE-0106]" "rc=\"${rc}\" cmd=\"$1\" reason=\"command failed or wrote stderr\"" "$(cat "${err}")"
@@ -91,6 +91,35 @@ _ci_capture() {
     [ -z "${out}" ] || printf '%s\n' "${out}"
 }
 
+# What: run a command; failure = caller's id, ctx, rc, raw.
+# Why: one owner for coded command errors; stderr may warn.
+# From: Issue #1683 | PR #1858
+_ci_run() {
+    local id="$1" ctx="$2" err out rc=0
+    shift 2
+    err="$(_ci_mktemp "${CI_TMPDIR}/ci-run.XXXXXX")" || return 2
+    out="$("$@" 2>"${err}")" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        ci_error "${id}" "${ctx} cmd=\"$1\" rc=${rc}" "$(cat "${err}"; [ -z "${out}" ] || printf 'stdout:\n%s\n' "${out}")"
+        rm -f "${err}"
+        return 2
+    fi
+    [ ! -s "${err}" ] || cat "${err}" >&2
+    rm -f "${err}"
+    [ -z "${out}" ] || printf '%s\n' "${out}"
+}
+
+# What: mktemp with its args; coded error, dir and raw.
+# Why: one temp owner; a failure names the path it tried.
+# From: Issue #1683 | PR #1858
+_ci_mktemp() {
+    local out
+    if ! out="$(mktemp "$@" 2>&1)"; then
+        ci_error "[CI-ERROR-CORE-0110]" "args=\"$*\" tmpdir=\"${CI_TMPDIR}\" reason=\"temp path not created\"" "${out}"
+        return 2
+    fi
+    printf '%s\n' "${out}"
+}
 
 # What: Enforce and create the /var/tmp CI temp root.
 # Why: bare mktemp and tools then use disk, not tmpfs.
@@ -100,7 +129,11 @@ _ci_tmp_init() {
         /var/tmp|/var/tmp/*) ;;
         *) ci_log "[CI-ERROR-CORE-0006]" "reason=\"CI temp root must be under /var/tmp, not tmpfs /tmp\" got=\"${CI_TMPDIR}\""; return 2 ;;
     esac
-    mkdir -p "${CI_TMPDIR}" || return 2
+    local out
+    if ! out="$(mkdir -p "${CI_TMPDIR}" 2>&1)"; then
+        ci_error "[CI-ERROR-CORE-0111]" "dir=\"${CI_TMPDIR}\" reason=\"CI temp root not created\"" "${out}"
+        return 2
+    fi
     export TMPDIR="${CI_TMPDIR}"
 }
 
@@ -108,21 +141,31 @@ _ci_tmp_init() {
 # Why: AG-CI-009 proxy; hosted runners have no LAN route.
 # From: Issue #1683 | PR #1858
 _ci_proxy_init() {
-    local http="${PROJECT_SELFHOSTED_PROXY_HTTP:-}"
-    [ "${RUNNER_ENVIRONMENT:-}" = self-hosted ] && [ -n "${http}" ] || return 0
+    local http="${PROJECT_SELFHOSTED_PROXY_HTTP:-}" sys="${CI_SYSTEM_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}"
+    if [ "${RUNNER_ENVIRONMENT:-}" != self-hosted ] || [ -z "${http}" ]; then
+        ci_log "[CI-INFO-CORE-0113]" "proxy=off runner=\"${RUNNER_ENVIRONMENT:-unset}\" http_set=$([ -n "${http}" ] && echo yes || echo no)"
+        return 0
+    fi
     export HTTP_PROXY="${http}" http_proxy="${http}"
     export HTTPS_PROXY="${PROJECT_SELFHOSTED_PROXY_HTTPS:-${http}}"
     export https_proxy="${HTTPS_PROXY}"
     export NO_PROXY="${PROJECT_SELFHOSTED_PROXY_EXCLUSION:-}" no_proxy="${PROJECT_SELFHOSTED_PROXY_EXCLUSION:-}"
     ci_log "[CI-INFO-CORE-0007]" "proxy=on runner=self-hosted no_proxy=\"${NO_PROXY}\""
-    [ -n "${PROJECT_SELFHOSTED_PROXY_CA:-}" ] || return 0
+    if [ -z "${PROJECT_SELFHOSTED_PROXY_CA:-}" ]; then
+        ci_log "[CI-INFO-CORE-0114]" "proxy_ca=off reason=\"PROJECT_SELFHOSTED_PROXY_CA empty\""
+        return 0
+    fi
     # What: job-local bundle = system CAs + proxy CA.
     # Why: cargo/curl via the TLS proxy; never in an image.
     # From: Issue #1683 | PR #1858
-    local bundle
-    bundle="$(umask 077 && mktemp "${CI_TMPDIR}/ci-ca-bundle.XXXXXX")" || return 2
-    { cat "${CI_SYSTEM_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}"; printf '%s\n' "${PROJECT_SELFHOSTED_PROXY_CA}"; } > "${bundle}" || return 2
+    local bundle out
+    bundle="$(umask 077 && _ci_mktemp "${CI_TMPDIR}/ci-ca-bundle.XXXXXX")" || return 2
+    if ! out="$({ cat "${sys}" && printf '%s\n' "${PROJECT_SELFHOSTED_PROXY_CA}"; } 2>&1 > "${bundle}")"; then
+        ci_error "[CI-ERROR-CORE-0112]" "system_bundle=\"${sys}\" bundle=\"${bundle}\" reason=\"proxy CA bundle not built\"" "${out}"
+        return 2
+    fi
     export CARGO_HTTP_CAINFO="${bundle}" CURL_CA_BUNDLE="${bundle}"
+    ci_log "[CI-INFO-CORE-0115]" "proxy_ca=on bundle=\"${bundle}\""
 }
 
 # What: Proxy env names passed through to docker.
@@ -366,20 +409,20 @@ _ci_platforms() {
 # From: Issue #1683
 _ci_valid_platform() {
     local service="$1" platform="$2" p plats
-    plats="$(_ci_platforms "${service}")" || return 1
+    plats="$(_ci_platforms "${service}")" || return 2
     while IFS= read -r p; do
         [ "${p}" = "${platform}" ] && return 0
     done <<< "${plats}"
     return 1
 }
 
-# What: Read a platform's SOT arch attribute, fail-closed.
+# What: platform SOT attribute; rc 1 = unset, caller logs.
 # Why: one owner of platform facts; no per-fact case dup.
-# From: Issue #1683
+# From: Issue #1683 | PR #1858
 _ci_platform_field() {
     local arch="${1##*/}" field="$2" val
     val="$(_ci_block_entry_field platform_arch "${arch}" "${field}")" || return 2
-    [ -n "${val}" ] || return 2
+    [ -n "${val}" ] || return 1
     printf '%s\n' "${val}"
 }
 
@@ -431,7 +474,7 @@ _ci_collect_changed() {
     local -n _arr="$1"; shift
     _arr=()
     local line raw
-    raw="$(_ci_changed_files "$@")" || { ci_log "[CI-ERROR-CORE-0008]" "reason=\"changed-file list unreadable\""; return 2; }
+    raw="$(_ci_changed_files "$@" 2>&1)" || { ci_error "[CI-ERROR-CORE-0008]" "changed_files=\"${CHANGED_FILES:-}\" args=$# reason=\"changed-file list unreadable\"" "${raw}"; return 2; }
     while IFS= read -r line; do
         [ -n "${line}" ] && _arr+=("${line}")
     done <<< "${raw}"
@@ -499,7 +542,10 @@ _ci_path_content_changed() {
         refs="$(_ci_diff_refs)" || return 2
         read -r base head <<<"${refs}"
     fi
-    [ -n "${base}" ] || return 0
+    if [ -z "${base}" ]; then
+        ci_log "[CI-INFO-IMPACT-0012]" "path=\"${path}\" reason=\"no base ref for this event; content counts as changed\""
+        return 0
+    fi
     a="$(_ci_tracked_content_ids "${path}" "${base}")" || return 2
     b="$(_ci_tracked_content_ids "${path}" "${head}")" || return 2
     [ "${a}" != "${b}" ]
@@ -632,8 +678,13 @@ _ci_codeql_fetch() {
 # From: Issue #1683 | PR #1858
 _ci_codeql_run() {
     local lang="$1" work="$2" codeql raw
+    local cfg
     codeql="$(_ci_codeql_fetch "${work}")" || return 2
-    ci_cmd_codeql_config > "${work}/config.yml" || return 2
+    cfg="$(ci_cmd_codeql_config)" || return 2
+    if ! raw="$(printf '%s' "${cfg}" 2>&1 > "${work}/config.yml")"; then
+        ci_error "[CI-ERROR-CODEQL-0016]" "language=\"${lang}\" file=\"${work}/config.yml\" reason=\"CodeQL config not written\"" "${raw}"
+        return 2
+    fi
     if ! raw="$("${codeql}" database create "${work}/db" --language="${lang}" --build-mode=none \
             --source-root="${CI_REPO_ROOT:-.}" --codescanning-config="${work}/config.yml" 2>&1)"; then
         ci_error "[CI-ERROR-CODEQL-0009]" "language=\"${lang}\" reason=\"database create failed\"" "${raw}"
@@ -675,7 +726,7 @@ ci_cmd_codeql_analyze() {
         ci_log "[CI-ERROR-CODEQL-0004]" "missing=\"${missing[*]}\" reason=\"upload context incomplete; FAIL CLOSED\""
         return 2
     fi
-    work="$(mktemp -d "${CI_TMPDIR}/codeql.XXXXXX")" || return 2
+    work="$(_ci_mktemp -d "${CI_TMPDIR}/codeql.XXXXXX")" || return 2
     if _ci_codeql_run "${lang}" "${work}"; then rc=0; else rc=$?; fi
     rm -rf "${work}"
     return "${rc}"
@@ -775,8 +826,12 @@ ci_cmd_plan_matrix() {
 # Why: Identity mixes in pinned SOT values, one reader.
 # From: Issue #1683
 _ci_manifest_scalar() {
-    local path_re="$1"
-    awk -v re="$path_re" '$0 ~ re { val=$0; sub(/^[^:]*:[[:space:]]*/, "", val); print val; exit }' "${CI_MANIFEST}"
+    local path_re="$1" out
+    if ! out="$(awk -v re="$path_re" '$0 ~ re { val=$0; sub(/^[^:]*:[[:space:]]*/, "", val); print val; exit }' "${CI_MANIFEST}" 2>&1)"; then
+        ci_error "[CI-ERROR-CORE-0122]" "pattern=\"${path_re}\" manifest=\"${CI_MANIFEST}\" reason=\"SOT scalar unreadable\"" "${out}"
+        return 2
+    fi
+    [ -z "${out}" ] || printf '%s\n' "${out}"
 }
 
 # What: True only for compiled sources, not copied.
@@ -809,6 +864,19 @@ _ci_rust_strip_is_safe() {
     '
 }
 
+# What: one git call for the identity; stderr is an error.
+# Why: a failed id read must name path, ref and git's text.
+# From: Issue #1683 | PR #1858
+_ci_identity_git() {
+    local path="$1" ref="$2" out
+    shift 2
+    if ! out="$(cd -- "${CI_REPO_ROOT}" && _ci_capture 0 git "$@")"; then
+        ci_log "[CI-ERROR-IDENTITY-0007]" "path=\"${path}\" ref=\"${ref}\" git=\"$1\" repo=\"${CI_REPO_ROOT}\" reason=\"identity input not readable (raw above)\""
+        return 2
+    fi
+    printf '%s' "${out}"
+}
+
 # What: Emit path-keyed content ids of tracked files.
 # Why: Content, not raw bytes or order, is the input.
 # From: Issue #1683
@@ -818,11 +886,11 @@ _ci_tracked_content_ids() {
     # Why: ls-tree ignores globs; diff-tree honours them.
     # From: Issue #1683
     if [ -n "${ref}" ]; then
-        empty="$( cd -- "${CI_REPO_ROOT}" && git hash-object -t tree /dev/null )" || return 2
-        raw="$( cd -- "${CI_REPO_ROOT}" && git diff-tree -r --raw "${empty}" "${ref}" -- "${root}" )" || return 2
+        empty="$(_ci_identity_git "${root}" "${ref}" hash-object -t tree /dev/null)" || return 2
+        raw="$(_ci_identity_git "${root}" "${ref}" diff-tree -r --raw "${empty}" "${ref}" -- "${root}")" || return 2
         listing="$(awk -F'\t' 'NF { split($1, a, " "); print $2 "\t" a[4] }' <<< "${raw}")"
     else
-        raw="$( cd -- "${CI_REPO_ROOT}" && git ls-files -s -- "${root}" )" || return 2
+        raw="$(_ci_identity_git "${root}" "" ls-files -s -- "${root}")" || return 2
         listing="$(awk -F'\t' 'NF { split($1, a, " "); print $2 "\t" a[2] }' <<< "${raw}")"
     fi
     listing="$(LC_ALL=C sort <<< "${listing}")"
@@ -832,7 +900,7 @@ _ci_tracked_content_ids() {
         path="${line%%$'\t'*}"
         oid="${line#*$'\t'}"
         if _ci_source_is_normalizable "${path}"; then
-            blob="$( cd -- "${CI_REPO_ROOT}" && git cat-file blob "${oid}" )" || return 2
+            blob="$(_ci_identity_git "${path}" "${ref}" cat-file blob "${oid}")" || return 2
             if printf '%s' "${blob}" | _ci_rust_strip_is_safe; then
                 norm="$(printf '%s' "${blob}" | _ci_rust_content_hash)"
                 printf '%s\t%s\n' "${path}" "${norm}"
@@ -929,10 +997,13 @@ _ci_identity_for() {
 _ci_for_platforms() {
     local service="$1" platform="$2" invalid_id="$3" one_fn="$4" p plats
     if [ -n "${platform}" ]; then
-        if ! _ci_valid_platform "${service}" "${platform}"; then
-            ci_log "${invalid_id}" "service=\"${service}\" reason=\"platform not in target set\" got=\"${platform}\""
-            return 2
-        fi
+        local vrc=0
+        _ci_valid_platform "${service}" "${platform}" || vrc=$?
+        case "${vrc}" in
+            0) ;;
+            1) ci_log "${invalid_id}" "service=\"${service}\" reason=\"platform not in target set\" got=\"${platform}\""; return 2 ;;
+            *) return 2 ;;
+        esac
         "${one_fn}" "${service}" "${platform}"
         return "$?"
     fi
@@ -969,9 +1040,12 @@ ci_cmd_identity() {
 # Why: Base pins must reflect base, not head.
 # From: Issue #1683
 _ci_manifest_at() {
-    local ref="$1" dest="$2" body
+    local ref="$1" dest="$2" body out
     body="$(cd -- "${CI_REPO_ROOT}" && _ci_capture 0 git show "${ref}:${CI_MANIFEST_REL}")" || return 2
-    printf '%s\n' "${body}" > "${dest}"
+    if ! out="$(printf '%s\n' "${body}" 2>&1 > "${dest}")"; then
+        ci_error "[CI-ERROR-IMPACT-0011]" "ref=\"${ref}\" dest=\"${dest}\" reason=\"base SOT not written\"" "${out}"
+        return 2
+    fi
 }
 
 # What: Emit NOOP or BUILD per target and platform.
@@ -1020,10 +1094,16 @@ _ci_impact_run() {
 # Why: a failed or empty identity is UNKNOWN, never BUILD.
 # From: Issue #1683 | PR #1858
 _ci_impact_classify() {
-    local t="$1" p="$2" hid="$3" base="$4" base_manifest="$5" bid
-    [ -n "${hid}" ] || { printf 'UNKNOWN\n'; return 0; }
-    bid="$(CI_MANIFEST="${base_manifest}" _ci_identity_for "${t}" "${p}" "${base}")" || bid=""
-    [ -n "${bid}" ] || { printf 'UNKNOWN\n'; return 0; }
+    local t="$1" p="$2" hid="$3" base="$4" base_manifest="$5" bid rc=0
+    if [ -z "${hid}" ]; then
+        ci_log "[CI-INFO-IMPACT-0009]" "service=\"${t}\" platform=\"${p}\" reason=\"no head identity; UNKNOWN\""
+        printf 'UNKNOWN\n'; return 0
+    fi
+    bid="$(CI_MANIFEST="${base_manifest}" _ci_identity_for "${t}" "${p}" "${base}")" || rc=$?
+    if [ "${rc}" -ne 0 ] || [ -z "${bid}" ]; then
+        ci_log "[CI-INFO-IMPACT-0010]" "service=\"${t}\" platform=\"${p}\" base=\"${base}\" rc=${rc} reason=\"no base identity (error above if rc>0); UNKNOWN\""
+        printf 'UNKNOWN\n'; return 0
+    fi
     [ "${hid}" = "${bid}" ] && { printf 'NOOP\n'; return 0; }
     printf 'BUILD\n'
 }
@@ -1037,7 +1117,7 @@ ci_cmd_impact() {
         ci_log "[CI-ERROR-IMPACT-0001]" "reason=\"base ref arg required\""
         return 2
     fi
-    base_manifest="$(mktemp -p "${CI_TMPDIR}")"
+    base_manifest="$(_ci_mktemp -p "${CI_TMPDIR}")" || return 2
     _ci_impact_run "${base}" "${head}" "${base_manifest}" || rc=$?
     rm -f "${base_manifest}"
     return "${rc}"
@@ -1274,7 +1354,7 @@ CI_CAS_EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # From: Issue #1683
 _ci_cas_ref_sha() {
     local remote="$1" ref="$2" out err errf rc=0
-    errf="$(mktemp "${CI_TMPDIR}/ci-lsremote.XXXXXX")" || return 2
+    errf="$(_ci_mktemp "${CI_TMPDIR}/ci-lsremote.XXXXXX")" || return 2
     out="$(git ls-remote --exit-code "${remote}" "${ref}" 2>"${errf}")" || rc=$?
     err="$(<"${errf}")"; rm -f "${errf}"
     [ "${rc}" -eq 0 ] && { printf '%s\n' "${out%%$'\t'*}"; return 0; }
@@ -1320,8 +1400,8 @@ _ci_lock_try() {
         sha="$(_ci_cas_note_commit "${note}")" || return 3
         rc=0; raw="$(git push "${remote}" "${sha}:${ref}" 2>&1)" || rc=$?
         [ "${rc}" -eq 0 ] && return 0
-        [ "$(_ci_cas_push_class "${raw}")" = race ] && return 2
-        return 3
+        _ci_cas_push_failed create "${ref}" "${rc}" "${raw}"
+        return "$?"
     fi
     [ "${rc}" -eq 0 ] || return 3
     # What: not routed through _ci_retry (deliberate).
@@ -1338,14 +1418,29 @@ _ci_lock_try() {
     fi
     prev="$(_ci_capture 0 git log -1 --format=%s FETCH_HEAD)" || return 3
     now="$(date +%s)"; age=$(( now - committed ))
-    [ "${age}" -lt "${stale}" ] && return 1
+    if [ "${age}" -lt "${stale}" ]; then
+        ci_log "[CI-INFO-CAS-0006]" "ref=\"${ref}\" holder=\"${prev}\" age=${age}s stale_after=${stale}s reason=\"lock held; waiting\""
+        return 1
+    fi
     sha="$(_ci_cas_note_commit "${note}")" || return 3
     rc=0; raw="$(git push --force-with-lease="${ref}:${cur}" "${remote}" "${sha}:${ref}" 2>&1)" || rc=$?
     if [ "${rc}" -eq 0 ]; then
         ci_log "[CI-INFO-CAS-0001]" "ref=\"${ref}\" note=\"stale lock taken over\" age=\"${age}\" prev=\"${prev}\""
         return 0
     fi
-    [ "$(_ci_cas_push_class "${raw}")" = race ] && return 2
+    _ci_cas_push_failed takeover "${ref}" "${rc}" "${raw}"
+}
+
+# What: log a failed CAS push; rc 2 race, rc 3 failure.
+# Why: race and real failure both need git's raw text.
+# From: Issue #1683 | PR #1858
+_ci_cas_push_failed() {
+    local kind="$1" ref="$2" rc="$3" raw="$4"
+    if [ "$(_ci_cas_push_class "${raw}")" = race ]; then
+        ci_error "[CI-INFO-CAS-0005]" "kind=${kind} ref=\"${ref}\" rc=${rc} reason=\"ref moved; re-read\"" "${raw}"
+        return 2
+    fi
+    ci_error "[CI-ERROR-CAS-0004]" "kind=${kind} ref=\"${ref}\" rc=${rc} reason=\"lock push failed\"" "${raw}"
     return 3
 }
 
@@ -1378,7 +1473,10 @@ _ci_lock_release() {
     # From: Issue #1683
     _ci_retry git git fetch --quiet --depth=1 "${remote}" "${ref}" >/dev/null || return 1
     held="$(_ci_capture 0 git log -1 --format=%s FETCH_HEAD)" || return 1
-    [ "${held}" = "${note}" ] || return 0
+    if [ "${held}" != "${note}" ]; then
+        ci_log "[CI-INFO-CAS-0007]" "ref=\"${ref}\" holder=\"${held}\" mine=\"${note}\" reason=\"lock reassigned; not released\""
+        return 0
+    fi
     _ci_capture 0 git push --quiet --force-with-lease="${ref}:${cur}" "${remote}" ":${ref}" || return 1
     return 0
 }
@@ -1457,7 +1555,7 @@ _ci_ledger_upsert() {
     [ -n "${new}" ] || return 0
     blob="$(_ci_ledger_blob "${remote}")" || rc=$?
     if [ "${rc}" -eq 2 ]; then
-        ci_log "[CI-ERROR-LEDGER-0001]" "reason=\"ledger read UNKNOWN; refusing to write\""
+        ci_log "[CI-ERROR-LEDGER-0001]" "ref=\"${CI_LEDGER_REF}\" remote=\"${remote}\" reason=\"ledger read UNKNOWN (raw above); refusing to write\""
         return 3
     fi
     ids="$(printf '%s\n' "${new}" | awk -F'\t' '{print $1}')"
@@ -1472,8 +1570,14 @@ _ci_ledger_upsert() {
     # What: sort the merged record set deterministically.
     # Why: same inputs -> same blob; §26.4 idempotency.
     merged="$(printf '%s\n%s\n' "${kept}" "${new}" | awk 'NF>0' | LC_ALL=C sort -u)"
-    blobsha="$(printf '%s\n' "${merged}" | git hash-object -w --stdin)" || return 3
-    treesha="$(printf '100644 blob %s\t%s\n' "${blobsha}" "${CI_LEDGER_FILE}" | git mktree)" || return 3
+    if ! blobsha="$(printf '%s\n' "${merged}" | git hash-object -w --stdin 2>&1)"; then
+        ci_error "[CI-ERROR-LEDGER-0002]" "ref=\"${CI_LEDGER_REF}\" records=$(wc -l <<< "${merged}") reason=\"ledger blob not written\"" "${blobsha}"
+        return 3
+    fi
+    if ! treesha="$(printf '100644 blob %s\t%s\n' "${blobsha}" "${CI_LEDGER_FILE}" | git mktree 2>&1)"; then
+        ci_error "[CI-ERROR-LEDGER-0003]" "ref=\"${CI_LEDGER_REF}\" blob=\"${blobsha}\" reason=\"ledger tree not written\"" "${treesha}"
+        return 3
+    fi
     commitsha="$(_ci_ledger_commit "${treesha}" "${parent}" "ledger aggregate")" || return 3
     rc=0
     if [ -n "${parent}" ]; then
@@ -1481,9 +1585,11 @@ _ci_ledger_upsert() {
     else
         raw="$(git push "${remote}" "${commitsha}:${CI_LEDGER_REF}" 2>&1)" || rc=$?
     fi
-    [ "${rc}" -eq 0 ] && return 0
-    [ "$(_ci_cas_push_class "${raw}")" = race ] && return 2
-    return 3
+    if [ "${rc}" -eq 0 ]; then
+        ci_log "[CI-INFO-LEDGER-0004]" "ref=\"${CI_LEDGER_REF}\" commit=\"${commitsha}\" parent=\"${parent:-none}\" records=$(wc -l <<< "${merged}") reason=\"ledger written\""
+        return 0
+    fi
+    _ci_cas_push_failed ledger "${CI_LEDGER_REF}" "${rc}" "${raw}"
 }
 
 # What: Upsert a single record via the batch writer.
@@ -1503,13 +1609,17 @@ _ci_ledger_append() {
 # Why: fail closed on a malformed or partial result.
 # From: Issue #1683
 _ci_result_record() {
-    local f="$1" service platform identity state digest
-    service="$(jq -er '.service' "${f}")" || return 2
-    platform="$(jq -er '.platform' "${f}")" || return 2
-    identity="$(jq -er '.build_identity' "${f}")" || return 2
-    state="$(jq -er '.state' "${f}")" || return 2
-    digest="$(jq -er '.digest' "${f}")" || return 2
-    printf '%s\t%s\t%s\t%s\t%s\n' "${identity}" "${service}" "${platform}" "${state}" "${digest}"
+    local f="$1" out
+    # What: one jq call; each field a non-empty string.
+    # Why: ACCEPTED without a digest accepts nothing.
+    # From: Issue #1683 | PR #1858
+    if ! out="$(jq -er '[.build_identity, .service, .platform, .state, .digest]
+            | if all(type == "string" and length > 0) then @tsv
+              else error("missing or empty field in " + (tojson)) end' "${f}" 2>&1)"; then
+        ci_error "[CI-ERROR-AGGREGATE-0007]" "file=\"${f}\" reason=\"result.json lacks a required field\"" "${out}"
+        return 2
+    fi
+    printf '%s\n' "${out}"
 }
 
 # What: Merge matrix result.json files into one write.
@@ -1561,6 +1671,10 @@ ci_cmd_emit_result() {
         ci_log "[CI-ERROR-RESULT-0003]" "service=\"${service}\" platform=\"${platform}\" reason=\"no published digest to accept\""
         return 2
     }
+    if [ -z "${digest}" ] || [ -z "${identity}" ]; then
+        ci_log "[CI-ERROR-RESULT-0004]" "service=\"${service}\" platform=\"${platform}\" identity=\"${identity}\" digest=\"${digest}\" reason=\"empty identity or digest; nothing to accept\""
+        return 2
+    fi
     jq -cn --arg s "${service}" --arg p "${platform}" --arg i "${identity}" --arg d "${digest}" \
         '{service:$s, platform:$p, build_identity:$i, digest:$d, state:"ACCEPTED"}'
 }
@@ -1582,7 +1696,7 @@ ci_cmd_aggregate_stack() {
     local matrix="${CI_BUILD_MATRIX:-}" dir svc plat pairs
     [ -n "${matrix}" ] || { ci_log "[CI-ERROR-AGGREGATE-0005]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
     pairs="$(_ci_matrix_pairs "${matrix}")" || return 2
-    dir="$(mktemp -d "${CI_TMPDIR}/ci-results.XXXXXX")" || return 2
+    dir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-results.XXXXXX")" || return 2
     while read -r svc plat; do
         [ -n "${svc}" ] || continue
         ci_cmd_emit_result "${svc}" "${plat}" > "${dir}/${svc}-${plat//\//-}.json" || return "$?"
@@ -1637,11 +1751,18 @@ ci_cmd_changed_files() {
     local out="${RUNNER_TEMP:-${CI_TMPDIR}}/changed-files.txt" base head refs
     refs="$(_ci_diff_refs)" || return 2
     read -r base head <<<"${refs}"
+    local list err
     if [ -n "${base}" ]; then
-        ( cd -- "${CI_REPO_ROOT}" && git diff --name-only "${base}" "${head}" ) > "${out}" || return 2
+        list="$(_ci_run "[CI-ERROR-CORE-0117]" "base=\"${base}\" head=\"${head}\" repo=\"${CI_REPO_ROOT}\"" git -C "${CI_REPO_ROOT}" diff --name-only "${base}" "${head}")" || return 2
     else
-        ( cd -- "${CI_REPO_ROOT}" && git ls-files ) > "${out}" || return 2
+        ci_log "[CI-INFO-CORE-0118]" "reason=\"no base ref for this event; every tracked file counts as changed\""
+        list="$(_ci_run "[CI-ERROR-CORE-0119]" "repo=\"${CI_REPO_ROOT}\"" git -C "${CI_REPO_ROOT}" ls-files)" || return 2
     fi
+    if ! err="$( { [ -z "${list}" ] || printf '%s\n' "${list}"; } 2>&1 > "${out}")"; then
+        ci_error "[CI-ERROR-CORE-0120]" "file=\"${out}\" reason=\"changed-file list not written\"" "${err}"
+        return 2
+    fi
+    ci_log "[CI-INFO-CORE-0121]" "file=\"${out}\" paths=$(grep -c . <<< "${list}") base=\"${base:-none}\""
     printf '%s\n' "${out}"
 }
 
@@ -1676,28 +1797,29 @@ ci_cmd_nightly_status() {
     [ -n "${scope}" ] || { ci_log "[CI-ERROR-STATUS-0002]" "reason=\"scope arg required\""; return 2; }
     local repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY required}" gh="${CI_NIGHTLY_STATUS_CMD:-gh}"
     local run_url="${GITHUB_SERVER_URL:-https://github.com}/${repo}/actions/runs/${GITHUB_RUN_ID:-0}" existing
-    existing="$("${gh}" issue list --repo "${repo}" --label "${label}" --state open \
+    local ctx="repo=\"${repo}\" label=\"${label}\" scope=\"${scope}\" outcome=${outcome}"
+    existing="$(_ci_run "[CI-ERROR-STATUS-0003]" "${ctx} step=list" "${gh}" issue list --repo "${repo}" --label "${label}" --state open \
         --json number --jq 'sort_by(.number) | .[0].number // empty')" || return 2
     if [ "${outcome}" = success ]; then
         [ -n "${existing}" ] || { printf 'nightly-status=noop label=%s\n' "${label}"; return 0; }
-        "${gh}" issue comment "${existing}" --repo "${repo}" \
-            --body "Recovered: ${scope} succeeded in ${run_url}. Closing this standing issue; it re-opens if the check fails again." || return 2
-        "${gh}" issue close "${existing}" --repo "${repo}" || return 2
+        _ci_run "[CI-ERROR-STATUS-0004]" "${ctx} step=comment issue=${existing}" "${gh}" issue comment "${existing}" --repo "${repo}" \
+            --body "Recovered: ${scope} succeeded in ${run_url}. Closing this standing issue; it re-opens if the check fails again." >/dev/null || return 2
+        _ci_run "[CI-ERROR-STATUS-0005]" "${ctx} step=close issue=${existing}" "${gh}" issue close "${existing}" --repo "${repo}" >/dev/null || return 2
         printf 'nightly-status=closed issue=%s\n' "${existing}"
         return 0
     fi
     local detail="${scope} failed in ${run_url}"
     [ -n "${failed}" ] && detail="${detail} (failed: ${failed})"
     if [ -n "${existing}" ]; then
-        "${gh}" issue comment "${existing}" --repo "${repo}" --body "Still failing: ${detail}." || return 2
+        _ci_run "[CI-ERROR-STATUS-0006]" "${ctx} step=comment issue=${existing}" "${gh}" issue comment "${existing}" --repo "${repo}" --body "Still failing: ${detail}." >/dev/null || return 2
         printf 'nightly-status=updated issue=%s\n' "${existing}"
     else
         # What: label create-or-update, then the issue.
         # Why: --force makes an existing label no error.
         # From: Issue #1683 | PR #1858
-        "${gh}" label create "${label}" --repo "${repo}" --color b60205 --force \
-            --description "Recurring self-closing tracking issue: ${scope}" || return 2
-        "${gh}" issue create --repo "${repo}" --label "${label}" --title "[${label}] ${scope}" \
+        _ci_run "[CI-ERROR-STATUS-0007]" "${ctx} step=label" "${gh}" label create "${label}" --repo "${repo}" --color b60205 --force \
+            --description "Recurring self-closing tracking issue: ${scope}" >/dev/null || return 2
+        _ci_run "[CI-ERROR-STATUS-0008]" "${ctx} step=create" "${gh}" issue create --repo "${repo}" --label "${label}" --title "[${label}] ${scope}" \
             --body "Standing issue, reused across failures and auto-closed on the next success. ${detail}." >/dev/null || return 2
         printf 'nightly-status=opened label=%s\n' "${label}"
     fi
@@ -1732,7 +1854,7 @@ _ci_sccache_env() {
     # Why: a shared port lets parallel runs collide.
     # From: Issue #1683 | PR #1858
     local probe prc=0 sock_dir
-    sock_dir="$(mktemp -d "${CI_TMPDIR:-/var/tmp}/sccache-srv.XXXXXX")" || return 2
+    sock_dir="$(_ci_mktemp -d "${CI_TMPDIR:-/var/tmp}/sccache-srv.XXXXXX")" || return 2
     export SCCACHE_SERVER_UDS="${sock_dir}/server.sock"
     # What: probe the server; degrade on infra failure.
     # Why: §42: a cache outage costs speed, never the build.
@@ -1849,18 +1971,23 @@ _ci_retry() {
     while :; do
         n=$((n + 1))
         if raw="$("$@" 2>&1)"; then
+            [ "${n}" -eq 1 ] || ci_log "[CI-INFO-BUILD-0017]" "op=${op} cmd=\"$1\" attempt=${n}/${max} reason=\"succeeded after retry\""
             printf '%s\n' "${raw}"
             return 0
         fi
         cls="$(_ci_classify_failure "${raw}" "${op}")"
         if [ "${cls}" != "transient" ] || [ "${n}" -ge "${max}" ]; then
-            ci_error "[CI-ERROR-BUILD-0011]" "reason=\"command failed cls=${cls} attempt=${n}/${max} op=${op}\"" "${raw}"
+            ci_error "[CI-ERROR-BUILD-0011]" "op=${op} cmd=\"$1\" cls=${cls} attempt=${n}/${max} reason=\"command failed\"" "${raw}"
             # What: emit raw failure to the caller too.
             # Why: caller may interpret op-specific reason.
             # From: Issue #1683
             printf '%s\n' "${raw}"
             return 2
         fi
+        # What: each retried failure is logged with its raw.
+        # Why: AG-INT-002: retries show failed attempts.
+        # From: Issue #1683 | PR #1858
+        ci_error "[CI-WARN-BUILD-0016]" "op=${op} cmd=\"$1\" cls=${cls} attempt=${n}/${max} reason=\"transient failure; retrying\"" "${raw}"
         sleep "$((n * n * backoff))"
     done
 }
@@ -2041,7 +2168,10 @@ _ci_docker_build() {
     # From: Issue #1683
     local buildlog rc=0
     buildlog="$(_ci_retry buildx docker buildx build --load --platform "${platform}" --tag "${tag}" "${args[@]}" "${context}")" || rc=$?
-    [ "${rc}" -eq 0 ] || return "${rc}"
+    if [ "${rc}" -ne 0 ]; then
+        ci_log "[CI-ERROR-BUILD-0019]" "service=\"${service}\" platform=\"${platform}\" tag=\"${tag}\" context=\"${context}\" rc=${rc} reason=\"docker buildx build failed (raw above)\""
+        return "${rc}"
+    fi
     printf '%s\n' "${buildlog}" >&2
     printf '%s\n' "${tag}"
 }
@@ -2060,9 +2190,9 @@ ci_cmd_apk_setup() {
     # Why: https fetches pass the TLS proxy; no undo step.
     # From: Issue #1683 | PR #1858
     if [ -s "${ca}" ]; then
-        bundle="$(mktemp -p "${CI_TMPDIR}")" || return 2
+        bundle="$(_ci_mktemp -p "${CI_TMPDIR}")" || return 2
         if ! out="$(cat "${root}/etc/ssl/certs/ca-certificates.crt" "${ca}" 2>&1 > "${bundle}")"; then
-            ci_error "[CI-ERROR-APKSETUP-0002]" "reason=\"proxy CA bundle not built\"" "${out}"
+            ci_error "[CI-ERROR-APKSETUP-0002]" "system_bundle=\"${root}/etc/ssl/certs/ca-certificates.crt\" bundle=\"${bundle}\" reason=\"proxy CA bundle not built\"" "${out}"
             return 2
         fi
         export SSL_CERT_FILE="${bundle}"
@@ -2169,7 +2299,8 @@ _ci_rust_cargo_build() {
     [ "${_CI_RB_DISTCC}" = "1" ] && layers+=(distcc)
     [ -n "${RUSTC_WRAPPER:-}" ] && layers+=(sccache)
     while :; do
-        cargo_log="$(mktemp -p "${CI_TMPDIR}")"; cargo_status_file="$(mktemp -p "${CI_TMPDIR}")"
+        cargo_log="$(_ci_mktemp -p "${CI_TMPDIR}")" || return 2
+        cargo_status_file="$(_ci_mktemp -p "${CI_TMPDIR}")" || { rm -f "${cargo_log}"; return 2; }
         { set +e; cargo build -j "${cargo_jobs}" --release --locked --target "${musl_target}" -p "${crate}" 2>&1; echo "$?" >"${cargo_status_file}"; set -e; } | tee "${cargo_log}"
         cargo_status="$(cat "${cargo_status_file}")"; rm -f "${cargo_status_file}"
         if [ "${cargo_status}" = "0" ]; then
@@ -2370,7 +2501,7 @@ ci_cmd_rust_build() {
     configure_distcc() {
         if [ -s /run/secrets/distcc_potential_hosts ]; then
             local distcc_probe_dir
-            distcc_probe_dir="$(mktemp -d -p "${CI_TMPDIR}")"
+            distcc_probe_dir="$(_ci_mktemp -d -p "${CI_TMPDIR}")" || return 2
             DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; export DISTCC_POTENTIAL_HOSTS
             local -a distcc_host_specs; read -ra distcc_host_specs <<<"${DISTCC_POTENTIAL_HOSTS}"
             local distcc_hosts="" distcc_hosts_with_pump="" distcc_hosts_without_pump="" distcc_host_spec distcc_host_base
@@ -2437,7 +2568,7 @@ ci_cmd_rust_build() {
                 ci_log "[CI-INFO-RUSTBUILD-0026]" "reason=\"ccache off; no remote distcc toolchain identity\""; return 0
             fi
             local ccache_probe_dir
-            ccache_probe_dir="$(mktemp -d -p "${CI_TMPDIR}")"
+            ccache_probe_dir="$(_ci_mktemp -d -p "${CI_TMPDIR}")" || return 2
             ci_log "[CI-INFO-RUSTBUILD-0027]" "reason=\"ccache on over distcc with redis storage\""
             local ccache_redis_endpoint
             ccache_redis_endpoint="$(cat /run/secrets/ccache_redis_url)"
@@ -2526,7 +2657,7 @@ ci_cmd_rust_build() {
     if [ "${ccache_enabled:-0}" = "1" ]; then
         ccache -s
         local ccache_final_stats
-        ccache_final_stats="$(mktemp -p "${CI_TMPDIR}")"
+        ccache_final_stats="$(_ci_mktemp -p "${CI_TMPDIR}")" || return 2
         ccache --print-stats > "${ccache_final_stats}"
         local final_err
         final_err="$(_ci_capture 1 grep -E '^remote_storage_error[[:space:]]+[1-9]' "${ccache_final_stats}")" || return 2
@@ -2546,7 +2677,8 @@ ci_cmd_rust_build() {
 # Why: One digest reader for publish and verify readback.
 # From: Issue #1683
 _ci_registry_digest() {
-    docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}'
+    _ci_run "[CI-ERROR-RESOLVE-0011]" "ref=\"$1\" reason=\"registry digest read failed\"" \
+        docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}'
 }
 
 # What: Probe a tag's digest; 1 not-found, 2 unknown.
@@ -2756,7 +2888,7 @@ _ci_trivy_scan() {
     fresh_rec="$(_ci_trivy_db_ensure_fresh "${cache_dir}")" || return 3
     [ "$(_ci_record_field "${fresh_rec}" present)" = "true" ] && skip_db=1
     ref="$(_ci_image_ref "${service}" "${digest}")"
-    report="$(mktemp "${CI_TMPDIR}/ci-trivy.XXXXXX")"
+    report="$(_ci_mktemp "${CI_TMPDIR}/ci-trivy.XXXXXX")" || return 2
     local -a targs=(trivy image --severity "HIGH,CRITICAL" --exit-code 1
         --ignore-unfixed --scanners "${scanners}" --cache-dir "${cache_dir}")
     [ "${skip_db}" -eq 1 ] && targs+=(--skip-db-update)
@@ -2810,10 +2942,16 @@ _ci_semantic_impact() {
         # From: Issue #1683
         local out rc=0
         out="$("${CI_IMPACT_CMD}" "${service}" "${platform}" "${identity}")" || rc=$?
-        if [ "${rc}" -ne 0 ]; then printf 'UNKNOWN\n'; return 0; fi
+        if [ "${rc}" -ne 0 ]; then
+            ci_error "[CI-WARN-IMPACT-0007]" "service=\"${service}\" platform=\"${platform}\" cmd=\"${CI_IMPACT_CMD}\" rc=${rc} reason=\"impact command failed; UNKNOWN\"" "${out}"
+            printf 'UNKNOWN\n'; return 0
+        fi
         case "${out}" in
             BUILD|NOOP|UNKNOWN) printf '%s\n' "${out}" ;;
-            *) printf 'UNKNOWN\n' ;;
+            *)
+                ci_error "[CI-WARN-IMPACT-0008]" "service=\"${service}\" platform=\"${platform}\" cmd=\"${CI_IMPACT_CMD}\" reason=\"impact command gave no BUILD/NOOP/UNKNOWN; UNKNOWN\"" "${out}"
+                printf 'UNKNOWN\n'
+                ;;
         esac
         return 0
     fi
@@ -2829,11 +2967,11 @@ _ci_semantic_impact() {
         printf 'UNKNOWN\n'
         return 0
     fi
-    bm="$(mktemp -p "${CI_TMPDIR}")" || { printf 'UNKNOWN\n'; return 0; }
+    bm="$(_ci_mktemp -p "${CI_TMPDIR}")" || { printf 'UNKNOWN\n'; return 0; }
     if _ci_manifest_at "${base}" "${bm}" && [ -s "${bm}" ]; then
         v="$(_ci_impact_classify "${service}" "${platform}" "${identity}" "${base}" "${bm}")"
     else
-        ci_log "[CI-INFO-IMPACT-0002]" "base=\"${base}\" reason=\"no SOT at base; UNKNOWN, escalate, BUILD DISACK\""
+        ci_log "[CI-INFO-IMPACT-0006]" "service=\"${service}\" platform=\"${platform}\" base=\"${base}\" reason=\"no SOT at base; UNKNOWN, escalate, BUILD DISACK\""
     fi
     rm -f "${bm}"
     ci_log "[CI-INFO-IMPACT-0004]" "service=\"${service}\" platform=\"${platform}\" base=\"${base}\" head=\"${head}\" impact=${v}"
@@ -2914,7 +3052,7 @@ _ci_build_one() {
     # Why: Positive admission MUST precede any build.
     # From: Issue #1683
     ack="$(_ci_build_ack "${service}" "${platform}" "${identity}" "${state}" "${impact}")" || {
-        ci_log "[CI-ERROR-BUILD-0009]" "service=\"${service}\" platform=\"${platform}\" reason=\"admission conjunction incomplete; no BUILD_ACK\""
+        ci_log "[CI-ERROR-BUILD-0009]" "service=\"${service}\" platform=\"${platform}\" impact=\"${impact}\" state=\"${state}\" identity=\"${identity}\" reason=\"admission needs impact=BUILD, state=MISSING_CONFIRMED and an identity; no BUILD_ACK\""
         return 2
     }
     printf '%s\n' "${ack}"
@@ -2922,9 +3060,14 @@ _ci_build_one() {
     # What: reuse a CAS binary before compiling.
     # Why: an identical binary need not rebuild.
     # From: Issue #1683
-    if [ "${build_type}" = "rust" ] && _ci_cas_lookup "${identity}" >/dev/null; then
-        printf 'service=%s platform=%s result=reuse-binary-cas identity=%s\n' "${service}" "${platform}" "${identity}"
-        return 0
+    if [ "${build_type}" = "rust" ]; then
+        local crc=0
+        _ci_cas_lookup "${identity}" >/dev/null || crc=$?
+        if [ "${crc}" -eq 0 ]; then
+            printf 'service=%s platform=%s result=reuse-binary-cas identity=%s\n' "${service}" "${platform}" "${identity}"
+            return 0
+        fi
+        ci_log "[CI-INFO-BUILD-0018]" "service=\"${service}\" platform=\"${platform}\" identity=\"${identity}\" cas_rc=${crc} cas_cmd=\"${CI_CAS_LOOKUP_CMD:-none}\" reason=\"no CAS binary; compiling\""
     fi
 
     _ci_require_ghcr_auth || return "$?"
@@ -3026,7 +3169,7 @@ ci_cmd_verify() {
         identity="$(_ci_identity_for "${service}" "${platform}")" || return "$?"
         tag="$(_ci_image_tag "${service}" "${platform}" "${identity}")"
         seen="$(_ci_registry_digest "${tag}")" || {
-            ci_log "[CI-ERROR-VERIFY-0003]" "service=\"${service}\" reason=\"readback failed\""
+            ci_log "[CI-ERROR-VERIFY-0006]" "service=\"${service}\" tag=\"${tag}\" reason=\"registry readback failed\""
             return 2
         }
     fi
@@ -3095,8 +3238,8 @@ _ci_test_rust() {
     # From: Issue #1683 | PR #1858
     case "${trc}" in
         0) ;;
-        200) return 2 ;;
-        *) return 1 ;;
+        200) ci_log "[CI-ERROR-TEST-0009]" "service=\"${service}\" crate=\"${ctx}\" reason=\"sccache setup failed (raw above); not a test result\""; return 2 ;;
+        *) ci_log "[CI-ERROR-TEST-0010]" "service=\"${service}\" crate=\"${ctx}\" rc=${trc} reason=\"cargo fmt/clippy/test failed (cargo output above)\""; return 1 ;;
     esac
     printf 'service=%s tested=ok\n' "${service}"
 }
@@ -3247,9 +3390,16 @@ _ci_accepted_digest() {
     local identity rec rc=0
     identity="$(_ci_identity_for "${service}" "${platform}")" || return 2
     rec="$(_ci_ledger_read "$(_ci_ledger_remote)" "${identity}")" || rc=$?
+    if [ "${rc}" -eq 1 ]; then
+        ci_log "[CI-INFO-ASSEMBLE-0008]" "service=\"${service}\" platform=\"${platform}\" identity=\"${identity}\" reason=\"no ledger record\""
+        return 1
+    fi
     [ "${rc}" -eq 0 ] || return "${rc}"
-    [ "$(printf '%s' "${rec}" | cut -f1)" = ACCEPTED ] || return 1
-    printf '%s' "${rec}" | cut -f2
+    if [ "${rec%%$'\t'*}" != ACCEPTED ]; then
+        ci_log "[CI-INFO-ASSEMBLE-0009]" "service=\"${service}\" platform=\"${platform}\" identity=\"${identity}\" record=\"${rec}\" reason=\"ledger record not ACCEPTED\""
+        return 1
+    fi
+    printf '%s' "${rec#*$'\t'}"
 }
 
 # What: Inspect an index raw; 1 not-found, 2 unknown.
@@ -3289,9 +3439,13 @@ _ci_index_lookup() {
     sha="${GITHUB_SHA:?GITHUB_SHA required}"
     tag="${registry}/${repo}/${service}:sha-${sha}"
     idx="$(_ci_registry_probe "${tag}")" || grc=$?
-    [ "${grc}" -eq 0 ] || return 1
-    raw="$(_ci_index_raw "${tag}")" || return 1
-    plats="$(jq -r '.manifests[]? | select(.platform.os!="unknown" and .platform.architecture!="unknown") | "\(.platform.os)/\(.platform.architecture)=\(.digest)"' <<< "${raw}" | tr '\n' ' ')"
+    [ "${grc}" -eq 0 ] || return "${grc}"
+    raw="$(_ci_index_raw "${tag}")" || return "$?"
+    if ! plats="$(jq -r '.manifests[]? | select(.platform.os!="unknown" and .platform.architecture!="unknown") | "\(.platform.os)/\(.platform.architecture)=\(.digest)"' <<< "${raw}" 2>&1)"; then
+        ci_error "[CI-ERROR-ASSEMBLE-0010]" "service=\"${service}\" tag=\"${tag}\" reason=\"existing index unparseable; UNKNOWN\"" "${plats}"$'\n'"index: ${raw}"
+        return 2
+    fi
+    plats="$(tr '\n' ' ' <<< "${plats}")"
     printf '%s %s\n' "${idx}" "${plats% }"
 }
 
@@ -3321,8 +3475,16 @@ _ci_collect_accepted_digests() {
 # Why: Idempotent retry; never overwrite an index.
 # From: Issue #1683
 _ci_reconcile_index() {
-    local service="$1" want="$2" existing ex_digest ex_have
-    existing="$(_ci_index_lookup "${service}")" || return 0
+    local service="$1" want="$2" existing ex_digest ex_have lrc=0
+    existing="$(_ci_index_lookup "${service}")" || lrc=$?
+    case "${lrc}" in
+        0) ;;
+        1) return 0 ;;
+        *)
+            ci_log "[CI-ERROR-ASSEMBLE-0007]" "service=\"${service}\" rc=${lrc} reason=\"existing index state UNKNOWN (raw above); not assembling over it\""
+            return 2
+            ;;
+    esac
     ex_digest="${existing%% *}"
     ex_have="$(_ci_normalize_platform_digests "${existing#* }")"
     if [ "${want}" = "${ex_have}" ]; then
@@ -3371,7 +3533,7 @@ ci_cmd_assemble() {
     _ci_require_ghcr_auth || return "$?"
     local asm_cmd="${CI_ASSEMBLE_CMD:-_ci_docker_assemble}"
     if ! index="$("${asm_cmd}" "${service}" ${inputs})"; then
-        ci_log "[CI-ERROR-ASSEMBLE-0005]" "service=\"${service}\" reason=\"assemble backend failed\""
+        ci_log "[CI-ERROR-ASSEMBLE-0005]" "service=\"${service}\" backend=\"${asm_cmd}\" inputs=\"${inputs}\" reason=\"assemble backend failed (raw above)\""
         return 2
     fi
     printf 'service=%s result=assembled assembled=%s platforms=%s\n' "${service}" "${index}" "${count}"
@@ -3385,7 +3547,8 @@ ci_cmd_assemble() {
 # Why: One release.channels reader; callers filter it.
 # From: Issue #1683
 _ci_channel_field() {
-    awk -v f="$1" '
+    local out
+    if ! out="$(awk -v f="$1" '
         /^release:[[:space:]]*$/ { inr = 1; next }
         inr && /^[A-Za-z]/ { inr = 0; inc = 0 }
         inr && /^  channels:[[:space:]]*$/ { inc = 1; next }
@@ -3395,7 +3558,11 @@ _ci_channel_field() {
             v = $0; sub(/^[^:]*:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
             print ch, v
         }
-    ' "${CI_MANIFEST}"
+    ' "${CI_MANIFEST}" 2>&1)"; then
+        ci_error "[CI-ERROR-CORE-0123]" "field=\"$1\" manifest=\"${CI_MANIFEST}\" reason=\"SOT release.channels unreadable\"" "${out}"
+        return 2
+    fi
+    [ -z "${out}" ] || printf '%s\n' "${out}"
 }
 
 # What: Channels whose field equals a value, one per line.
@@ -3456,28 +3623,37 @@ _ci_valid_promote_target() {
 # Why: promote/validate use digests, no moving tags (§48).
 # From: Issue #1683
 _ci_stack_candidate_ledger() {
-    local service inputs want idx
+    local service idx
     local produced produced_rc=0
     produced="$(ci_services)" || produced_rc=$?
     _ci_producer_ok "${produced_rc}" 0 || return 2
     while IFS= read -r service; do
         [ -n "${service}" ] || continue
-        inputs="$(_ci_collect_accepted_digests "${service}")" || return "$?"
-        want="$(_ci_normalize_platform_digests "${inputs}")"
-        idx="$(_ci_reconcile_index "${service}" "${want}")" || return "$?"
-        if [ -z "${idx}" ]; then
-            ci_log "[CI-ERROR-CANDIDATE-0001]" "service=\"${service}\" reason=\"platforms accepted but no assembled multi-arch index; stack not candidate-ready\""
-            return 2
-        fi
+        idx="$(_ci_candidate_index "${service}")" || return "$?"
         printf '%s=%s\n' "${service}" "${idx}"
     done <<<"${produced}"
+}
+
+# What: a target's assembled index for its accepted digests.
+# Why: one owner for stack and toolchain candidate intake.
+# From: Issue #1683 | PR #1858
+_ci_candidate_index() {
+    local service="$1" inputs want idx
+    inputs="$(_ci_collect_accepted_digests "${service}")" || return "$?"
+    want="$(_ci_normalize_platform_digests "${inputs}")"
+    idx="$(_ci_reconcile_index "${service}" "${want}")" || return "$?"
+    if [ -z "${idx}" ]; then
+        ci_error "[CI-ERROR-CANDIDATE-0001]" "service=\"${service}\" reason=\"platforms accepted but no assembled multi-arch index; not candidate-ready\"" "accepted=${inputs}"
+        return 2
+    fi
+    printf '%s\n' "${idx}"
 }
 
 # What: toolchain promote candidates if fully accepted.
 # Why: promote is the one channel mover (AG-REL-009).
 # From: Issue #1683 | PR #1858
 _ci_toolchain_candidate() {
-    local service inputs want idx p st all plats tools
+    local service idx p st all plats tools
     tools="$(_ci_block_keys build_toolchain)" || return 2
     while IFS= read -r service; do
         [ -n "${service}" ] || continue
@@ -3500,13 +3676,7 @@ _ci_toolchain_candidate() {
             ci_log "[CI-INFO-CANDIDATE-0004]" "service=\"${service}\" reason=\"toolchain not accepted on every platform; channel unchanged\""
             continue
         fi
-        inputs="$(_ci_collect_accepted_digests "${service}")" || return "$?"
-        want="$(_ci_normalize_platform_digests "${inputs}")"
-        idx="$(_ci_reconcile_index "${service}" "${want}")" || return "$?"
-        if [ -z "${idx}" ]; then
-            ci_log "[CI-ERROR-CANDIDATE-0001]" "service=\"${service}\" reason=\"platforms accepted but no assembled multi-arch index; stack not candidate-ready\""
-            return 2
-        fi
+        idx="$(_ci_candidate_index "${service}")" || return "$?"
         printf '%s=%s\n' "${service}" "${idx}"
     done <<< "${tools}"
 }
@@ -3775,7 +3945,9 @@ _ci_promote_targets_for_ref() {
 # Why: one ls-remote reader; injectable for tests.
 # From: Issue #1683
 _ci_ref_tip() {
-    git ls-remote origin "$1" | cut -f1
+    local out
+    out="$(_ci_run "[CI-ERROR-PROMOTE-0016]" "ref=\"$1\" remote=origin reason=\"ref tip lookup failed\"" git ls-remote origin "$1")" || return 2
+    [ -z "${out}" ] || cut -f1 <<< "${out}"
 }
 
 # What: Promote every target the current ref maps to.
@@ -3868,13 +4040,20 @@ _ci_release_validation_valid() {
         return 2
     fi
     gov="${gov//$'\n'/ }"
+    local lcommit
     for layer in last_stack_validation last_ci_validation; do
-        out="$(_ci_release_record_stale "${layer}" "$(jq -r --arg l "${layer}" '.[$l].commit' "${state}")" \
-            "${target}" "" "${gov}")" || return 2
+        if ! lcommit="$(jq -r --arg l "${layer}" '.[$l].commit' "${state}" 2>&1)"; then
+            ci_error "[CI-ERROR-RELEASE-0022]" "state=\"${state}\" layer=\"${layer}\" reason=\"validation layer commit unreadable\"" "${lcommit}"
+            return 2
+        fi
+        out="$(_ci_release_record_stale "${layer}" "${lcommit}" "${target}" "" "${gov}")" || return 2
         stale+="${out:+${out}$'\n'}"
     done
-    rows="$(jq -r '.subsystem_validation | to_entries[] | select(.key | startswith("_") | not)
-        | [.key, (.value.commit // "null"), (.value.path_prefixes | join(" "))] | @tsv' "${state}")" || return 2
+    if ! rows="$(jq -r '.subsystem_validation | to_entries[] | select(.key | startswith("_") | not)
+        | [.key, (.value.commit // "null"), (.value.path_prefixes | join(" "))] | @tsv' "${state}" 2>&1)"; then
+        ci_error "[CI-ERROR-RELEASE-0023]" "state=\"${state}\" reason=\"subsystem validation rows unreadable\"" "${rows}"
+        return 2
+    fi
     while IFS=$'\t' read -r sub commit paths; do
         [ -n "${sub}" ] || continue
         out="$(_ci_release_record_stale "${sub}" "${commit}" "${target}" "${paths}" "${gov}")" || return 2
@@ -3979,8 +4158,8 @@ ci_cmd_release_publish() {
     block="$(_ci_release_notes_block "${tag}")" || return "$?"
     start="$(_ci_release_marker start)" || return 2
     end="$(_ci_release_marker end)" || return 2
-    body_file="$(mktemp "${CI_TMPDIR}/ci-release-notes.XXXXXX")"
-    view_err="$(mktemp "${CI_TMPDIR}/ci-release-view.XXXXXX")"
+    body_file="$(_ci_mktemp "${CI_TMPDIR}/ci-release-notes.XXXXXX")" || return 2
+    view_err="$(_ci_mktemp "${CI_TMPDIR}/ci-release-view.XXXXXX")" || { rm -f "${body_file}"; return 2; }
     view="$("${gh}" release view "${tag}" --repo "${repo}" --json body,isPrerelease 2>"${view_err}")" || view_rc=$?
     # What: only gh's "release not found" means create.
     # Why: auth/network errors are UNKNOWN, not "absent".
@@ -4034,7 +4213,7 @@ ci_cmd_release_sbom() {
     registry="$(_ci_registry)" || return "$?"
     repo="$(_ci_repo)" || return 2
     digest="$(_ci_registry_digest "${registry}/${repo}/${service}:${tag}")" || return "$?"
-    dir="$(mktemp -d "${CI_TMPDIR}/ci-sbom.XXXXXX")"
+    dir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-sbom.XXXXXX")" || return 2
     out="${dir}/${service}.cdx.json"
     "${CI_SBOM_CMD:-_ci_trivy_sbom}" "${service}" "${digest}" "${out}" || rc=$?
     if [ "${rc}" -ne 0 ]; then
@@ -4068,7 +4247,7 @@ ci_cmd_release_vex() {
     local root="${CI_REPO_ROOT:-.}" trivyignore dir out rc=0
     trivyignore="${root}/.trivyignore.yaml"
     [ -s "${trivyignore}" ] || { ci_log "[CI-ERROR-RELEASE-0011]" "path=\"${trivyignore}\" reason=\"trivyignore missing; cannot build release VEX\""; return 2; }
-    dir="$(mktemp -d "${CI_TMPDIR}/ci-vex.XXXXXX")"
+    dir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-vex.XXXXXX")" || return 2
     out="${dir}/vex.openvex.json"
     _ci_generate_vex "${trivyignore}" "${root}" > "${out}" || rc=$?
     if [ "${rc}" -ne 0 ] || [ ! -s "${out}" ]; then
@@ -4129,9 +4308,12 @@ _ci_release_stack_changed() {
 _ci_push_release_tag() {
     local tag="$1" sha="$2" pat="${PROJECT_AUTOMATION_PAT:?PROJECT_AUTOMATION_PAT required to push a release tag}"
     local url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:?}.git"
-    git tag -a "${tag}" "${sha}" -m "Automated patch release ${tag}"
-    git -c "http.${url}.extraheader=AUTHORIZATION: basic $(printf '%s' "x-access-token:${pat}" | base64 -w0)" \
-        push "${url}" "refs/tags/${tag}"
+    _ci_run "[CI-ERROR-RELEASE-0026]" "tag=\"${tag}\" sha=\"${sha}\" reason=\"annotated tag not created\"" \
+        git tag -a "${tag}" "${sha}" -m "Automated patch release ${tag}" >/dev/null || return 2
+    _ci_run "[CI-ERROR-RELEASE-0027]" "tag=\"${tag}\" url=\"${url}\" reason=\"release tag push failed\"" \
+        git -c "http.${url}.extraheader=AUTHORIZATION: basic $(printf '%s' "x-access-token:${pat}" | base64 -w0)" \
+        push "${url}" "refs/tags/${tag}" >/dev/null || return 2
+    ci_log "[CI-INFO-RELEASE-0028]" "tag=\"${tag}\" sha=\"${sha}\" reason=\"release tag pushed\""
 }
 
 # What: 0 tag on origin, 1 absent, 2 lookup failed.
@@ -4153,10 +4335,16 @@ ci_cmd_cut_release_tag() {
         printf 'cut-tag=noop reason=no-base-tag\n'
         return 0
     fi
-    if ! "${CI_STACK_CHANGED_CMD:-_ci_release_stack_changed}" "${base_tag}"; then
-        printf 'cut-tag=noop reason=stack-unchanged base=%s\n' "${base_tag}"
-        return 0
-    fi
+    local changed_rc=0
+    "${CI_STACK_CHANGED_CMD:-_ci_release_stack_changed}" "${base_tag}" || changed_rc=$?
+    case "${changed_rc}" in
+        0) ;;
+        1) printf 'cut-tag=noop reason=stack-unchanged base=%s\n' "${base_tag}"; return 0 ;;
+        *)
+            ci_log "[CI-ERROR-RELEASE-0024]" "base=\"${base_tag}\" rc=${changed_rc} reason=\"stack change unknown (raw above); not cutting, not a noop\""
+            return 2
+            ;;
+    esac
     next_tag="$(_ci_next_patch_tag "${base_tag}")" || return "$?"
     rel_ref="$(_ci_release_ref)" || return 2
     if ! tip="$("${CI_PROMOTE_TIP_CMD:-_ci_ref_tip}" "${rel_ref}")"; then
@@ -4174,6 +4362,7 @@ ci_cmd_cut_release_tag() {
         return 0
     fi
     if [ "${exists_rc}" -ne 1 ]; then
+        ci_log "[CI-ERROR-RELEASE-0021]" "tag=\"${next_tag}\" rc=${exists_rc} reason=\"tag existence unknown (raw above); not cutting\""
         return 2
     fi
     "${CI_TAG_PUSH_CMD:-_ci_push_release_tag}" "${next_tag}" "${GITHUB_SHA:?}" || return "$?"
@@ -4204,7 +4393,7 @@ _ci_default_gc_roots() {
     # Why: UNKNOWN roots would delete live artifacts.
     # From: Issue #1683
     if [ "${rc}" -eq 2 ]; then
-        ci_log "[CI-ERROR-GC-0012]" "reason=\"ledger read UNKNOWN; refusing empty roots\""
+        ci_log "[CI-ERROR-GC-0012]" "remote=\"${remote}\" ref=\"${CI_LEDGER_REF}\" reason=\"ledger read UNKNOWN (raw above); refusing empty roots\""
         return 2
     fi
     # What: Every ledger record is a root, all states.
@@ -4243,7 +4432,17 @@ _ci_default_gc_roots() {
         # Why: Dropping children orphan-deletes arches.
         # From: Issue #1683
         [ "${rc}" -eq 2 ] && { ci_log "[CI-ERROR-GC-0014]" "service=\"${s}\" digest=\"${d}\" reason=\"index child read UNKNOWN; refusing roots\""; return 2; }
-        [ "${rc}" -eq 0 ] && out="${out}$(printf '%s' "${raw}" | jq -r '.manifests[]? | select(.platform.architecture!="unknown") | .digest')"$'\n'
+        if [ "${rc}" -eq 0 ]; then
+            # What: children parsed+checked first.
+            # Why: lost children get deleted as dead.
+            # From: Issue #1683 | PR #1858
+            local kids
+            if ! kids="$(jq -r '.manifests[]? | select(.platform.architecture!="unknown") | .digest' <<< "${raw}" 2>&1)"; then
+                ci_error "[CI-ERROR-GC-0026]" "service=\"${s}\" digest=\"${d}\" reason=\"index children unparseable; refusing roots\"" "${kids}"$'\n'"index: ${raw}"
+                return 2
+            fi
+            out="${out}${kids}"$'\n'
+        fi
     done <<< "${pairs}"
     printf '%s\n' "${out}" | awk 'NF>0' | LC_ALL=C sort -u
 }
@@ -4318,7 +4517,7 @@ _ci_default_gc_delete() {
             ;;
     esac
     [ -n "${svc}" ] || { ci_log "[CI-ERROR-GC-0021]" "candidate=\"${candidate}\" reason=\"no service for delete path\""; return 2; }
-    prefix="$(_ci_repo)" || { ci_log "[CI-ERROR-GC-0017]" "reason=\"GITHUB_REPOSITORY missing; no package namespace\""; return 2; }
+    prefix="$(_ci_repo)" || { ci_log "[CI-ERROR-GC-0024]" "candidate=\"${candidate}\" reason=\"GITHUB_REPOSITORY missing; no package namespace for the delete\""; return 2; }
     owner="${prefix%%/*}"
     pkgbase="${prefix#*/}"
     # What: retry a transient GH-API delete.
@@ -4344,7 +4543,10 @@ _ci_default_gc_reachable() {
     # What: Roots must be materialized by the caller.
     # Why: No roots file means we cannot judge; refuse.
     # From: Issue #1683
-    { [ -n "${CI_GC_ROOTS_FILE:-}" ] && [ -f "${CI_GC_ROOTS_FILE}" ]; } || return 2
+    if [ -z "${CI_GC_ROOTS_FILE:-}" ] || [ ! -f "${CI_GC_ROOTS_FILE}" ]; then
+        ci_log "[CI-ERROR-GC-0027]" "candidate=\"${digest}\" roots_file=\"${CI_GC_ROOTS_FILE:-unset}\" reason=\"no materialized roots file; cannot judge\""
+        return 2
+    fi
     local root_hit
     root_hit="$(_ci_capture 1 grep -xF -- "${digest}" "${CI_GC_ROOTS_FILE}")" || return 2
     if [ -n "${root_hit}" ]; then
@@ -4391,7 +4593,7 @@ _ci_default_gc_reachable() {
     fi
     case "${created_epoch}" in
         ''|*[!0-9]*)
-            ci_log "[CI-ERROR-GC-0023]" "created=\"${created}\" reason=\"created_at unparseable\""
+            ci_error "[CI-ERROR-GC-0025]" "created=\"${created}\" digest=\"${digest}\" reason=\"date gave no epoch seconds\"" "${created_epoch}"
             return 2
             ;;
     esac
@@ -4442,7 +4644,10 @@ ci_cmd_gc() {
                 ;;
         esac
     done
-    if ! roots="$(_ci_gc_roots)"; then return 2; fi
+    if ! roots="$(_ci_gc_roots)"; then
+        ci_log "[CI-ERROR-GC-0028]" "mode=${mode} source=\"${CI_GC_ROOTS_CMD:-_ci_default_gc_roots}\" reason=\"protected roots not derivable (raw above); no gc\""
+        return 2
+    fi
     if [ -z "${roots}" ]; then
         ci_log "[CI-ERROR-GC-0007]" "reason=\"empty protected-roots set; refusing to treat all as unreachable\""
         return 2
@@ -4450,9 +4655,15 @@ ci_cmd_gc() {
     # What: Materialize roots once for the default probe.
     # Why: One read; avoids re-deriving roots per candidate.
     # From: Issue #1683
-    CI_GC_ROOTS_FILE="$(mktemp "${CI_TMPDIR}/ci-gc-roots.XXXXXX")" || return 2
+    CI_GC_ROOTS_FILE="$(_ci_mktemp "${CI_TMPDIR}/ci-gc-roots.XXXXXX")" || return 2
     export CI_GC_ROOTS_FILE
-    printf '%s\n' "${roots}" | awk 'NF>0' > "${CI_GC_ROOTS_FILE}"
+    local werr
+    if ! werr="$(awk 'NF>0' <<< "${roots}" 2>&1 > "${CI_GC_ROOTS_FILE}")"; then
+        ci_error "[CI-ERROR-GC-0029]" "file=\"${CI_GC_ROOTS_FILE}\" reason=\"roots file not written; no gc\"" "${werr}"
+        rm -f "${CI_GC_ROOTS_FILE}"
+        return 2
+    fi
+    ci_log "[CI-INFO-GC-0030]" "mode=${mode} roots=$(grep -c . "${CI_GC_ROOTS_FILE}") reason=\"protected roots materialized\""
     _ci_gc_run "${mode}" || rc=$?
     rm -f "${CI_GC_ROOTS_FILE}"
     unset CI_GC_ROOTS_FILE
@@ -4465,7 +4676,10 @@ ci_cmd_gc() {
 _ci_gc_run() {
     local mode="$1" cands line action policy
     local del=0 keep=0 deleted=0 to_delete=""
-    if ! cands="$(_ci_gc_candidates)"; then return 2; fi
+    if ! cands="$(_ci_gc_candidates)"; then
+        ci_log "[CI-ERROR-GC-0031]" "mode=${mode} source=\"${CI_GC_CANDIDATES_CMD:-_ci_default_gc_candidates}\" reason=\"candidate list not derivable (raw above); no gc\""
+        return 2
+    fi
     if [ -z "${cands}" ]; then
         printf 'gc result=noop candidates=0 mode=%s\n' "${mode}"
         return 0
@@ -4629,12 +4843,19 @@ _ci_validate_subnet() {
 # Why: Per-slot flock; runs never share a /27.
 # From: Issue #1683
 _ci_validate_slot_lock() {
-    local subnet="$1" root key holder
+    local subnet="$1" root key holder out errf
     root="${CI_TMPDIR}/ci-validate-locks"
     key="$(printf '%s' "${subnet}" | tr './' '__')"
-    mkdir -p "${root}"
+    if ! out="$(mkdir -p "${root}" 2>&1)"; then
+        ci_error "[CI-ERROR-VALIDATE-0072]" "dir=\"${root}\" reason=\"slot lock dir not created\"" "${out}"
+        return 2
+    fi
+    errf="${root}/${key}.err"
+    # What: holder stderr goes to a file, not /dev/null.
+    # Why: a missing flock must not read as "slot held".
+    # From: Issue #1683 | PR #1858
     (
-        exec >/dev/null 2>&1
+        exec >/dev/null 2>"${errf}"
         exec 9>"${root}/${key}.lock"
         flock -n 9 || exit 1
         exec sleep infinity
@@ -4649,6 +4870,12 @@ _ci_validate_slot_lock() {
     # Why: this path returns 1; its rc adds nothing.
     # From: Issue #1683 | PR #1858
     wait "${holder}" 2>/dev/null || true
+    if [ -s "${errf}" ]; then
+        ci_error "[CI-ERROR-VALIDATE-0073]" "subnet=\"${subnet}\" lock=\"${root}/${key}.lock\" reason=\"slot lock holder failed\"" "$(cat "${errf}")"
+        rm -f "${errf}"
+        return 2
+    fi
+    rm -f "${errf}"
     return 1
 }
 
@@ -4691,7 +4918,7 @@ _ci_validate_subnet_conflicts() {
     # What: rc 2 when the network list is unknown.
     # Why: a failed docker call must not read as "free".
     # From: Issue #1683 | PR #1858
-    nets="$(docker network ls -q)" || return 2
+    nets="$(_ci_run "[CI-ERROR-VALIDATE-0074]" "target=\"${target}\" reason=\"docker network list failed; overlap unknown\"" docker network ls -q)" || return 2
     local subs
     while IFS= read -r net; do
         [ -n "${net}" ] || continue
@@ -4724,7 +4951,7 @@ _ci_validate_subnet_conflicts() {
 # Why: Retry a fresh slot on a locked candidate.
 # From: Issue #1683
 _ci_validate_reserve() {
-    local run_id run_attempt max n seed subnet holder crc
+    local run_id run_attempt max n seed subnet holder crc lrc overlap
     run_id="${GITHUB_RUN_ID:-$$}"
     run_attempt="${GITHUB_RUN_ATTEMPT:-1}"
     max="${CI_VALIDATE_MAX_SLOTS:-10}"
@@ -4732,16 +4959,22 @@ _ci_validate_reserve() {
         seed="$(_ci_validate_seed "${run_id}" "${run_attempt}" "${n}")"
         subnet="$(_ci_validate_subnet "${seed}")"
         crc=0
-        _ci_validate_subnet_conflicts "${subnet}" >/dev/null || crc=$?
-        [ "${crc}" -eq 0 ] && continue
+        overlap="$(_ci_validate_subnet_conflicts "${subnet}")" || crc=$?
+        if [ "${crc}" -eq 0 ]; then
+            ci_log "[CI-INFO-VALIDATE-0075]" "slot=${n}/${max} subnet=\"${subnet}\" overlaps=\"${overlap}\" reason=\"slot overlaps a live network; next\""
+            continue
+        fi
         if [ "${crc}" -eq 2 ]; then
             ci_log "[CI-ERROR-VALIDATE-0050]" "subnet=\"${subnet}\" reason=\"docker network list failed; cannot prove the slot free\""
             return 2
         fi
-        if holder="$(_ci_validate_slot_lock "${subnet}")"; then
-            printf 'subnet=%s holder=%s\n' "${subnet}" "${holder}"
-            return 0
-        fi
+        lrc=0
+        holder="$(_ci_validate_slot_lock "${subnet}")" || lrc=$?
+        case "${lrc}" in
+            0) printf 'subnet=%s holder=%s\n' "${subnet}" "${holder}"; return 0 ;;
+            1) ci_log "[CI-INFO-VALIDATE-0076]" "slot=${n}/${max} subnet=\"${subnet}\" reason=\"slot lock held by another run; next\"" ;;
+            *) return 2 ;;
+        esac
     done
     return 1
 }
@@ -4768,7 +5001,8 @@ _ci_validate_config_json() {
     local -a pf=()
     flags="$(_ci_compose_profile_flags "${file}")" || return 2
     [ -z "${flags}" ] || mapfile -t pf <<< "${flags}"
-    docker compose -f "${file}" "${pf[@]}" config --format json
+    _ci_run "[CI-ERROR-VALIDATE-0086]" "file=\"${file}\" profiles=\"${flags//$'\n'/ }\" reason=\"docker compose config failed\"" \
+        docker compose -f "${file}" "${pf[@]}" config --format json
 }
 
 # What: Compose service names passing one jq filter.
@@ -4777,7 +5011,7 @@ _ci_validate_config_json() {
 _ci_validate_service_list() {
     local filter="$1" raw
     if ! raw="$(_ci_validate_config_json)"; then
-        ci_log "[CI-ERROR-VALIDATE-0006]" "reason=\"compose config read failed\""
+        ci_log "[CI-ERROR-VALIDATE-0069]" "filter=\"${filter}\" reason=\"compose config read failed\""
         return 2
     fi
     if ! jq -r ".services|to_entries[]|select(${filter})|.key" <<< "${raw}"; then
@@ -5018,17 +5252,21 @@ _ci_validate_no_health_services() {
 # Why: A crash-loop only shows after up exits 0.
 # From: Issue #1683 | PR #1858
 _ci_validate_wait_one() {
-    local project="$1" svc="$2" deadline cid status
+    local project="$1" svc="$2" deadline cid="" status="none"
     deadline=$(( SECONDS + ${CI_VALIDATE_HEALTH_TIMEOUT:-180} ))
     while [ "${SECONDS}" -lt "${deadline}" ]; do
         cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
         if [ -n "${cid}" ]; then
             status="$(_ci_capture 0 docker inspect --format '{{.State.Health.Status}}' "${cid}")" || return 2
             [ "${status}" = "healthy" ] && return 0
-            [ "${status}" = "unhealthy" ] && return 1
+            if [ "${status}" = "unhealthy" ]; then
+                ci_log "[CI-INFO-VALIDATE-0077]" "service=\"${svc}\" container=\"${cid}\" health=unhealthy reason=\"healthcheck reported unhealthy\""
+                return 1
+            fi
         fi
         sleep 2
     done
+    ci_log "[CI-INFO-VALIDATE-0078]" "service=\"${svc}\" container=\"${cid:-none}\" last_health=\"${status}\" timeout=${CI_VALIDATE_HEALTH_TIMEOUT:-180}s reason=\"not healthy before the deadline\""
     return 1
 }
 
@@ -5054,6 +5292,7 @@ _ci_validate_wait_stable() {
         if [ "${status}" = "exited" ]; then
             exitcode="$(_ci_capture 0 docker inspect --format '{{.State.ExitCode}}' "${cid}")" || return 2
             [ "${exitcode}" = "0" ] && return 0
+            ci_log "[CI-INFO-VALIDATE-0079]" "service=\"${svc}\" container=\"${cid}\" exit_code=${exitcode} reason=\"exited non-zero\""
             return 1
         fi
         started="$(_ci_capture 0 docker inspect --format '{{.State.StartedAt}}' "${cid}")" || return 2
@@ -5070,6 +5309,7 @@ _ci_validate_wait_stable() {
         prev_started="${started}"
         sleep 2
     done
+    ci_log "[CI-INFO-VALIDATE-0080]" "service=\"${svc}\" container=\"${cid:-none}\" last_status=\"${status:-none}\" started=\"${prev_started}\" window=${window}s reason=\"not stable for the window before the deadline\""
     return 1
 }
 
@@ -5091,12 +5331,21 @@ _ci_validate_wait_healthy() {
         _ci_validate_wait_stable "${project}" "${svc}" &
         pids+=("$!"); names+=("${svc}"); kinds+=("stability")
     done <<< "${no_health}"
+    local wrc
     for i in "${!pids[@]}"; do
-        if ! wait "${pids[$i]}"; then
-            ci_error "[CI-ERROR-VALIDATE-0009]" "service=\"${names[$i]}\" check=\"${kinds[$i]}\" reason=\"not stable/healthy within timeout\"" \
-                "$(_ci_validate_service_evidence "${project}" "${names[$i]}")"
-            rc=1
-        fi
+        wrc=0; wait "${pids[$i]}" || wrc=$?
+        case "${wrc}" in
+            0) ;;
+            1)
+                ci_error "[CI-ERROR-VALIDATE-0009]" "service=\"${names[$i]}\" check=\"${kinds[$i]}\" reason=\"not stable/healthy (cause above)\"" \
+                    "$(_ci_validate_service_evidence "${project}" "${names[$i]}")"
+                rc=1
+                ;;
+            *)
+                ci_log "[CI-ERROR-VALIDATE-0081]" "service=\"${names[$i]}\" check=\"${kinds[$i]}\" rc=${wrc} reason=\"health state unknown (docker error above)\""
+                [ "${rc}" -eq 1 ] || rc=2
+                ;;
+        esac
     done
     return "${rc}"
 }
@@ -5215,7 +5464,7 @@ _ci_validate_ssl_mitm() {
         ci_log "[CI-ERROR-VALIDATE-0023]" "reason=\"no proxy container/IP or test domain for ssl-mitm check\""
         return 2
     fi
-    tmp="$(mktemp "${CI_TMPDIR}/ci-proxy-ca.XXXXXX")"
+    tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-proxy-ca.XXXXXX")" || return 2
     if ! out="$(docker cp "${cid}:/etc/nginx/ssl/ca/ca.crt" "${tmp}" 2>&1)"; then
         ci_error "[CI-ERROR-VALIDATE-0024]" "reason=\"could not read proxy LAN CA for ssl-mitm check\"" "${out}"
         rm -f "${tmp}"
@@ -5227,7 +5476,7 @@ _ci_validate_ssl_mitm() {
     # What: s_client writes handshake notes to stderr.
     # Why: raw evidence when the issuer read fails.
     # From: Issue #1683 | PR #1858
-    tls_err="$(mktemp "${CI_TMPDIR}/ci-tls-err.XXXXXX")"
+    tls_err="$(_ci_mktemp "${CI_TMPDIR}/ci-tls-err.XXXXXX")" || { rm -f "${tmp}"; return 2; }
     cert="$(openssl s_client -connect "${ip}:443" -servername "${domain}" </dev/null 2>"${tls_err}")"
     issuer=""
     if [ -n "${cert}" ]; then
@@ -5330,7 +5579,10 @@ _ci_validate_ui_add_record() {
         --data-urlencode "record_type=A" \
         --data-urlencode "content=${content}" \
         --data-urlencode "ttl=60" \
-        "http://${ip}:8080/domains/lan/add")" || return 2
+        "http://${ip}:8080/domains/lan/add")" || {
+        ci_log "[CI-ERROR-VALIDATE-0082]" "project=\"${project}\" url=\"http://${ip}:8080/domains/lan/add\" record=\"${name} A ${content}\" reason=\"ui add-record request failed (raw above)\""
+        return 2
+    }
     if [ "${code}" != "303" ]; then
         ci_log "[CI-ERROR-VALIDATE-0034]" "code=\"${code}\" reason=\"ui /domains/lan/add did not return 303\""
         return 1
@@ -5351,7 +5603,7 @@ _ci_validate_dns_resolves() {
     # What: dig stderr kept apart from the compared answer.
     # Why: a warning must not turn a match into a mismatch.
     # From: Issue #1683 | PR #1858
-    dig_err="$(mktemp "${CI_TMPDIR}/ci-dig-err.XXXXXX")"
+    dig_err="$(_ci_mktemp "${CI_TMPDIR}/ci-dig-err.XXXXXX")" || return 2
     for i in $(seq 1 "${attempts}"); do
         got=""
         if out="$(dig +time=2 +tries=1 +short "@${ip}" A "${fqdn}" 2>"${dig_err}")"; then
@@ -5383,7 +5635,7 @@ $(_ci_validate_service_evidence "${project}" "${svc}")"
 # From: Issue #1683
 _ci_validate_ui_nats_dns() {
     local project="$1" jar csrf rc=0
-    jar="$(mktemp "${CI_TMPDIR}/ci-ui-jar.XXXXXX")"
+    jar="$(_ci_mktemp "${CI_TMPDIR}/ci-ui-jar.XXXXXX")" || return 2
     csrf="$(_ci_validate_ui_session "${project}" "${jar}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     _ci_validate_ui_add_record "${project}" "${jar}" "${csrf}" ci-uinats-probe 203.0.113.60 || rc=$?
     rm -f "${jar}"
@@ -5429,7 +5681,7 @@ _ci_validate_dns_rollback() {
         ci_log "[CI-ERROR-VALIDATE-0041]" "code=\"${code}\" reason=\"/snapshots with wrong X-API-Key not 401\""
         return 1
     fi
-    jar="$(mktemp "${CI_TMPDIR}/ci-rb-jar.XXXXXX")"
+    jar="$(_ci_mktemp "${CI_TMPDIR}/ci-rb-jar.XXXXXX")" || return 2
     csrf="$(_ci_validate_ui_session "${project}" "${jar}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     _ci_validate_ui_add_record "${project}" "${jar}" "${csrf}" ci-rollback-probe 203.0.113.70 || { rm -f "${jar}"; return 1; }
     _ci_validate_dns_resolves "${project}" dns-standard ci-rollback-probe.lan. 203.0.113.70 15 || { rm -f "${jar}"; return 1; }
@@ -5488,7 +5740,10 @@ _ci_register_secondary() {
     local ip="$1" token="$2" name="$3" out code
     out="$(_ci_capture 0 curl -sS -w '\n%{http_code}' -H 'Content-Type: application/json' \
         -d "{\"token\":\"${token}\",\"name\":\"${name}\"}" \
-        "http://${ip}:8080/api/secondary/register")" || return 2
+        "http://${ip}:8080/api/secondary/register")" || {
+        ci_log "[CI-ERROR-VALIDATE-0083]" "url=\"http://${ip}:8080/api/secondary/register\" name=\"${name}\" reason=\"secondary register request failed (raw above)\""
+        return 2
+    }
     code="${out##*$'\n'}"
     if [ "${code}" != "200" ]; then
         printf 'register %s: http %s\n%s\n' "${name}" "${code}" "${out%$'\n'*}" >&2
@@ -5514,10 +5769,12 @@ _ci_validate_secondary_identity() {
     # From: Issue #583 | PR #1858
     docker exec "${cid}" test -f "${tf}" || trc=$?
     case "${trc}" in
-        0) token="$(_ci_capture 0 docker exec "${cid}" cat "${tf}")" || return 2 ;;
-        1) token="$(_ci_capture 0 docker exec "${cid}" printenv SECONDARY_REGISTRATION_TOKEN)" || return 2 ;;
+        0) token="$(_ci_capture 0 docker exec "${cid}" cat "${tf}")" || {
+               ci_log "[CI-ERROR-VALIDATE-0084]" "container=\"${cid}\" file=\"${tf}\" reason=\"token file unreadable (raw above)\""; return 2; } ;;
+        1) token="$(_ci_capture 0 docker exec "${cid}" printenv SECONDARY_REGISTRATION_TOKEN)" || {
+               ci_log "[CI-ERROR-VALIDATE-0085]" "container=\"${cid}\" reason=\"no token file and no SECONDARY_REGISTRATION_TOKEN env (raw above)\""; return 2; } ;;
         *)
-            ci_log "[CI-ERROR-VALIDATE-0066]" "rc=${trc} reason=\"token file check in the ui container failed\""
+            ci_log "[CI-ERROR-VALIDATE-0066]" "container=\"${cid}\" file=\"${tf}\" rc=${trc} reason=\"token file check in the ui container failed (docker error above)\""
             return 2
             ;;
     esac
@@ -5590,12 +5847,16 @@ _ci_default_validate() {
     mapfile -t venv <<< "${vfx}"
     export "${venv[@]}"
     if ! up_out="$(mkdir -p "${LANCACHE_STATE_DIR}/cache" 2>&1)"; then
-        ci_error "[CI-ERROR-VALIDATE-0052]" "reason=\"per-run state root not creatable\"" "${up_out}"
+        ci_error "[CI-ERROR-VALIDATE-0052]" "dir=\"${LANCACHE_STATE_DIR}/cache\" project=\"${project}\" reason=\"per-run state root not creatable\"" "${up_out}"
         _ci_validate_release "${holder}"
         return 2
     fi
-    net_ovr="$(mktemp "${CI_TMPDIR}/ci-validate-net.XXXXXX.yml")"
-    pin_ovr="$(mktemp "${CI_TMPDIR}/ci-validate-pin.XXXXXX.yml")"
+    if ! net_ovr="$(_ci_mktemp "${CI_TMPDIR}/ci-validate-net.XXXXXX.yml")" \
+        || ! pin_ovr="$(_ci_mktemp "${CI_TMPDIR}/ci-validate-pin.XXXXXX.yml")"; then
+        rm -f "${net_ovr:-}"
+        _ci_validate_release "${holder}"
+        return 2
+    fi
     if _ci_validate_net_override "${subnet}" > "${net_ovr}" \
         && _ci_validate_pin_override "${candidate}" > "${pin_ovr}"; then
         if up_out="$(_ci_validate_up "${project}" "${net_ovr}" "${pin_ovr}" 2>&1)"; then
@@ -5666,7 +5927,7 @@ ci_cmd_result_gate() {
             # Why: skipped plan/checks would hide a red run.
             platform|plan|checks)
                 if [ "${state}" != success ]; then
-                    ci_log "[CI-ERROR-CORE-0100]" "phase=\"${phase}\" result=\"${state}\""
+                    ci_log "[CI-ERROR-CORE-0100]" "phase=\"${phase}\" result=\"${state}\" results=\"${results}\" reason=\"always-run phase did not succeed\""
                     return 1
                 fi
                 ;;
@@ -5675,7 +5936,7 @@ ci_cmd_result_gate() {
                 case "${state}" in
                     success|skipped) ;;
                     *)
-                        ci_log "[CI-ERROR-CORE-0100]" "phase=\"${phase}\" result=\"${state}\""
+                        ci_log "[CI-ERROR-CORE-0116]" "phase=\"${phase}\" result=\"${state}\" results=\"${results}\" reason=\"phase neither succeeded nor skipped\""
                         return 1
                         ;;
                 esac
@@ -5829,8 +6090,14 @@ _ci_toml_escape() {
 # Why: Secrets go via file mounts, never env or args.
 # From: Issue #1683
 _ci_write_secret() {
-    local path="$1" val="$2"
-    ( umask 077; printf '%s' "${val}" > "${path}" )
+    local path="$1" val="$2" out
+    # What: raw = the redirect error only, never the value.
+    # Why: a secret must not reach the log, its path must.
+    # From: Issue #1683 | PR #1858
+    if ! out="$( ( umask 077; printf '%s' "${val}" > "${path}" ) 2>&1 )"; then
+        ci_error "[CI-ERROR-VARIABLES-0018]" "path=\"${path}\" bytes=${#val} reason=\"build secret not written\"" "${out}"
+        return 2
+    fi
 }
 
 # What: Assemble the sccache dist config TOML file.
@@ -6219,7 +6486,7 @@ _ci_apk_resolve() {
     # Why: the tagged repo needs its key; one fetch owner.
     # From: Issue #1683 | PR #1858
     if [ -n "${keys}" ]; then
-        kdir="$(mktemp -d -p "${CI_TMPDIR}")" || return 2
+        kdir="$(_ci_mktemp -d -p "${CI_TMPDIR}")" || return 2
         for kv in ${keys}; do
             n="${kv%=*}"; n="${n##*/}"
             _ci_fetch_verified "${kv%=*}" "${kv##*=}" "${kdir}/${n}" || { rm -rf "${kdir}"; return 2; }
@@ -6257,13 +6524,11 @@ _ci_apk_resolve() {
 # Why: the whole signature is computed here, not in YAML.
 # From: Issue #1683
 _ci_build_tools_resolve_signature() {
-    local base packages arches arch av versions="" tool repos keys
-    base="$(_ci_build_tools_build_args --bare | sed -n 's/^ALPINE_IMAGE=//p')" || {
-        ci_log "[CI-ERROR-BUILDTOOLS-0009]" "reason=\"no ALPINE_IMAGE from SOT; FAIL CLOSED\""
-        return 2
-    }
+    local base packages arches arch av versions="" tool repos keys args
+    args="$(_ci_build_tools_build_args --bare)" || return 2
+    base="$(sed -n 's/^ALPINE_IMAGE=//p' <<< "${args}")"
     if [ -z "${base}" ]; then
-        ci_log "[CI-ERROR-BUILDTOOLS-0009]" "reason=\"no ALPINE_IMAGE from SOT; FAIL CLOSED\""
+        ci_error "[CI-ERROR-BUILDTOOLS-0009]" "reason=\"no ALPINE_IMAGE in the build-tools build-args; FAIL CLOSED\"" "${args}"
         return 2
     fi
     packages="$(_ci_build_tools_packages | tr '\n' ' ')" || return 2
@@ -6287,11 +6552,18 @@ _ci_build_tools_resolve_signature() {
 # From: Issue #1683
 _ci_matrix_append() {
     local arr="$1"; shift
-    local obj='{}' kv
+    local obj='{}' kv out
     for kv in "$@"; do
-        obj="$(printf '%s' "${obj}" | jq -c --arg k "${kv%%=*}" --arg v "${kv#*=}" '. + {($k):$v}')" || return 2
+        if ! obj="$(jq -c --arg k "${kv%%=*}" --arg v "${kv#*=}" '. + {($k):$v}' <<< "${obj}" 2>&1)"; then
+            ci_error "[CI-ERROR-PLAN-0003]" "entry=\"${kv}\" reason=\"matrix entry not encodable\"" "${obj}"
+            return 2
+        fi
     done
-    printf '%s' "${arr}" | jq -c --argjson o "${obj}" '. + [$o]'
+    if ! out="$(jq -c --argjson o "${obj}" '. + [$o]' <<< "${arr}" 2>&1)"; then
+        ci_error "[CI-ERROR-PLAN-0004]" "entry=\"${obj}\" reason=\"matrix not appendable\"" "${out}"$'\n'"matrix: ${arr}"
+        return 2
+    fi
+    printf '%s' "${out}"
 }
 
 # What: Format a multiline value as a GITHUB_OUTPUT block.
@@ -6510,7 +6782,7 @@ _ci_pin_args() {
     for key in ${keys}; do
         val="$(_ci_block_entry_field external_versions "${dep}" "${key}")" || return 2
         if [ -z "${val}" ]; then
-            ci_log "[CI-ERROR-BUILDARGS-0004]" "key=\"external_versions.${dep}.${key}\" reason=\"missing central pin; FAIL CLOSED\""
+            ci_log "[CI-ERROR-BUILDARGS-0017]" "key=\"external_versions.${dep}.${key}\" platform=\"${platform}\" reason=\"missing central pin; FAIL CLOSED\""
             return 2
         fi
         out="${out}${prefix}${up}_${key^^}=${val}"$'\n'
@@ -6527,7 +6799,10 @@ _ci_pin_args() {
         plats="$(_ci_build_matrix_platforms)" || return 2
         while IFS= read -r p; do
             [ -n "${p}" ] || continue
-            apk="$(_ci_platform_apk_arch "${p}")" || return 2
+            apk="$(_ci_platform_apk_arch "${p}")" || {
+                ci_log "[CI-ERROR-BUILDARGS-0018]" "platform=\"${p}\" dep=\"${dep}\" reason=\"no apk arch mapping for a build_matrix platform; FAIL CLOSED\""
+                return 2
+            }
             val="$(_ci_pin_sha "${dep}" "${apk}")" || return 2
             out="${out}${prefix}${up}_SHA256_${apk^^}=${val}"$'\n'
         done <<< "${plats}"
@@ -6689,6 +6964,19 @@ _ci_producer_ok() {
     return 2
 }
 
+# What: git ls-files in a root; coded error with site+raw.
+# Why: an empty list from a failed ls would scan as clean.
+# From: Issue #1683 | PR #1858
+_ci_ls_files() {
+    local site="$1" root="$2" out
+    shift 2
+    if ! out="$(git -C "${root}" ls-files -- "$@" 2>&1)"; then
+        ci_error "[CI-ERROR-CHECK-0071]" "site=\"${site}\" root=\"${root}\" pathspec=\"$*\" reason=\"git ls-files failed; refusing an empty scan\"" "${out}"
+        return 2
+    fi
+    [ -z "${out}" ] || printf '%s\n' "${out}"
+}
+
 # What: out[]=override if non-empty, else git ls-files spec.
 # Why: 7 checks repeated this override-or-scan boilerplate.
 # From: Issue #1683
@@ -6701,10 +6989,7 @@ _ci_scan_files() {
     # Why: an empty list would report every check as clean.
     # From: Issue #1683 | PR #1858
     if [ "${#_ci_scan_override[@]}" -eq 0 ] || { [ "${CI_SCAN_SCOPE_FILTER:-0}" = 1 ] && [ "$#" -gt 0 ]; }; then
-        if ! _ci_scan_raw="$(git ls-files -- "$@")"; then
-            ci_log "[CI-ERROR-CHECK-0071]" "reason=\"git ls-files failed; refusing an empty scan\""
-            return 2
-        fi
+        _ci_scan_raw="$(_ci_ls_files scan-files . "$@")" || return 2
     fi
     if [ "${#_ci_scan_override[@]}" -gt 0 ]; then
         _ci_scan_in=("${_ci_scan_override[@]}")
@@ -7070,7 +7355,7 @@ _ci_check_executable_bits() {
     local -a owned=(.github/scripts/ci.sh) paths=()
     local h path mode
     local hooks
-    hooks="$(git ls-files -- '.githooks/*')" || { ci_log "[CI-ERROR-CHECK-0071]" "reason=\"git ls-files failed; refusing an empty scan\""; return 2; }
+    hooks="$(_ci_ls_files executable-bits . '.githooks/*')" || return 2
     while IFS= read -r h; do [ -n "${h}" ] && owned+=("${h}"); done <<< "${hooks}"
     # What: a changed-file list only narrows the owned set.
     # Why: Dockerfile/Cargo.toml are no bare-path scripts.
@@ -7105,15 +7390,16 @@ _ci_review_chronology_diff_files() {
         "+refs/heads/${CHRONOLOGY_DIFF_BASE_REF}:refs/remotes/origin/${CHRONOLOGY_DIFF_BASE_REF}" >/dev/null || return 2
     _ci_retry "git-fetch-chronology-base-sha" git fetch --no-tags --depth=1 origin \
         "${CHRONOLOGY_DIFF_BASE_SHA}" >/dev/null || return 2
-    git cat-file -e "${CHRONOLOGY_DIFF_BASE_SHA}^{commit}" || {
-        ci_log "[CI-ERROR-CHECK-0010]" "reason=\"diff base sha unreachable\""; return 2; }
-    git cat-file -e "${GITHUB_SHA}^{commit}" || {
-        ci_log "[CI-ERROR-CHECK-0076]" "reason=\"GITHUB_SHA unreachable\""; return 2; }
+    local out
+    out="$(git cat-file -e "${CHRONOLOGY_DIFF_BASE_SHA}^{commit}" 2>&1)" || {
+        ci_error "[CI-ERROR-CHECK-0010]" "sha=\"${CHRONOLOGY_DIFF_BASE_SHA}\" reason=\"diff base sha unreachable\"" "${out}"; return 2; }
+    out="$(git cat-file -e "${GITHUB_SHA}^{commit}" 2>&1)" || {
+        ci_error "[CI-ERROR-CHECK-0076]" "sha=\"${GITHUB_SHA}\" reason=\"GITHUB_SHA unreachable\"" "${out}"; return 2; }
     local diff_file
-    diff_file="$(mktemp -p "${CI_TMPDIR}")"
-    if ! git diff -z --name-only --diff-filter=ACMRTUXB \
-        "${CHRONOLOGY_DIFF_BASE_SHA}" "${GITHUB_SHA}" > "${diff_file}"; then
-        ci_log "[CI-ERROR-CHECK-0077]" "reason=\"git diff itself failed; not treating as a clean pass\""
+    diff_file="$(_ci_mktemp -p "${CI_TMPDIR}")" || return 2
+    if ! out="$(git diff -z --name-only --diff-filter=ACMRTUXB \
+        "${CHRONOLOGY_DIFF_BASE_SHA}" "${GITHUB_SHA}" 2>&1 > "${diff_file}")"; then
+        ci_error "[CI-ERROR-CHECK-0077]" "base=\"${CHRONOLOGY_DIFF_BASE_SHA}\" head=\"${GITHUB_SHA}\" reason=\"git diff itself failed; not treating as a clean pass\"" "${out}"
         rm -f "${diff_file}"
         return 2
     fi
@@ -7342,9 +7628,15 @@ _ci_setup_wizard_rows() {
     local setup="$1" cs_line esac_line wiz_start
     cs_line="$(_ci_capture 1 grep -n -m1 '^case "${1:-install}" in$' "${setup}")" || return 2
     cs_line="${cs_line%%:*}"
-    [ -n "${cs_line}" ] || return 3
+    if [ -z "${cs_line}" ]; then
+        ci_log "[CI-ERROR-CHECK-0117]" "file=\"${setup}\" anchor='case \"\${1:-install}\" in' reason=\"setup.sh dispatch anchor not found; wizard rows unknown\""
+        return 3
+    fi
     esac_line="$(awk -v s="${cs_line}" 'NR>s && /^esac$/{print NR; exit}' "${setup}")"
-    [ -n "${esac_line}" ] || return 3
+    if [ -z "${esac_line}" ]; then
+        ci_log "[CI-ERROR-CHECK-0118]" "file=\"${setup}\" from_line=${cs_line} reason=\"no esac after the dispatch case; wizard rows unknown\""
+        return 3
+    fi
     wiz_start=$((esac_line + 1))
     tail -n "+${wiz_start}" "${setup}" | awk '
         {
@@ -7715,7 +8007,8 @@ _ci_check_workflow_line_limit() {
         bytes="$(wc -c < "${file}")"
         [ "${lines}" -gt "${max_lines}" ] && viol+=("${file}: ${lines} lines > ${max_lines}")
         [ "${bytes}" -gt "${max_bytes}" ] && viol+=("${file}: ${bytes} bytes > ${max_bytes}")
-        block_report="$(_ci_measure_run_blocks "${file}")" || return 2
+        block_report="$(_ci_measure_run_blocks "${file}")" || {
+            ci_log "[CI-ERROR-CHECK-0122]" "file=\"${file}\" reason=\"run blocks not measurable (raw above)\""; return 2; }
         while IFS=$'\t' read -r block_line block_bytes; do
             [ -n "${block_line}" ] || continue
             [ "${block_bytes}" -gt "${max_block}" ] && \
@@ -7791,7 +8084,7 @@ _ci_check_pr_tracking_metadata() {
         fi
     fi
     local w
-    for w in "${warns[@]:-}"; do [ -n "${w}" ] && ci_log "[CI-ERROR-CHECK-0017]" "warn=\"${w}\""; done
+    for w in "${warns[@]:-}"; do [ -n "${w}" ] && ci_log "[CI-WARN-CHECK-0114]" "pr=\"${pr_number}\" warn=\"${w}\""; done
     if [ "${#errs[@]}" -gt 0 ]; then
         if [ "${PR_DRAFT:-false}" = "true" ]; then
             ci_log "[CI-ERROR-CHECK-0092]" "reason=\"draft, non-blocking\" detail=\"$(printf '%s; ' "${errs[@]}")\""
@@ -8013,7 +8306,8 @@ _ci_check_action_node_versions() {
             if [ -z "${resolved_file}" ]; then
                 viol+=("local action '${v}' (in: $(_ci_ando_reffiles "${v}")) has no action.yml/action.yaml"); continue
             fi
-            using="$(_ci_action_runs_using < "${resolved_file}")"
+            using="$(_ci_action_runs_using < "${resolved_file}")" || {
+                ci_log "[CI-ERROR-CHECK-0121]" "file=\"${resolved_file}\" action=\"${v}\" reason=\"action manifest not readable (raw above)\""; return 2; }
             [ -z "${using}" ] && { viol+=("local action '${v}' has no parseable runs.using"); continue; }
             case "${_ci_action_deprecated_runtimes}" in
                 *" ${using} "*) viol+=("local action '${v}' declares runs.using: ${using}, a deprecated Node runtime") ;;
@@ -9321,7 +9615,10 @@ _ci_generate_vex() {
         "${CI_VEX_GENERATE_CMD}" "${trivyignore}"
         return "$?"
     fi
-    [ -f "${gen}" ] || return 2
+    if [ ! -f "${gen}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0025]" "generator=\"${gen}\" trivyignore=\"${trivyignore}\" reason=\"VEX generator script missing\""
+        return 2
+    fi
     bash "${gen}" "${trivyignore}"
 }
 
@@ -9369,8 +9666,8 @@ _ci_check_changelog_direct_edit() {
     local label_rc=0 label_err
     label_err="$(jq -e 'index("release") != null' <<<"${PR_LABELS_JSON:-[]}" 2>&1 >/dev/null)" || label_rc=$?
     case "${label_rc}" in
-        0) ci_log "[CI-INFO-CHECK-0001]" "reason=\"CHANGELOG.md edited with release label; expected\"" ;;
-        1) ci_log "[CI-INFO-CHECK-0002]" "reason=\"CHANGELOG.md edited directly outside the release flow (issue #893); warn-only\"" ;;
+        0) ci_log "[CI-INFO-CHECK-0115]" "reason=\"CHANGELOG.md edited with release label; expected\"" ;;
+        1) ci_log "[CI-INFO-CHECK-0116]" "reason=\"CHANGELOG.md edited directly outside the release flow (issue #893); warn-only\"" ;;
         *)
             ci_error "[CI-ERROR-CHECK-0112]" "reason=\"PR_LABELS_JSON unreadable\"" "${label_err}"
             return 2
@@ -9427,7 +9724,8 @@ _ci_compose_service_names() {
     local -a profile_flags=()
     flags="$(_ci_compose_profile_flags "${file}")" || return 2
     [ -z "${flags}" ] || mapfile -t profile_flags <<< "${flags}"
-    docker compose -f "${file}" "${profile_flags[@]}" config --services
+    _ci_run "[CI-ERROR-CHECK-0119]" "file=\"${file}\" profiles=\"${flags//$'\n'/ }\" reason=\"docker compose service list failed\"" \
+        docker compose -f "${file}" "${profile_flags[@]}" config --services
 }
 
 # What: --profile flag pairs for every compose profile.
@@ -9453,7 +9751,8 @@ _ci_check_logging_matrix() {
         return 2
     fi
     local canonical_raw
-    canonical_raw="$(_ci_logging_matrix_canonical "${doc}")"
+    canonical_raw="$(_ci_logging_matrix_canonical "${doc}")" || {
+        ci_log "[CI-ERROR-CHECK-0120]" "path=\"${doc}\" reason=\"logging matrix not readable (raw above)\""; return 2; }
     local row_summary raw_row_count unique_row_count
     row_summary="$(_ci_capture 1 grep -E '^##ROWS## ' <<<"${canonical_raw}")" || return 2
     raw_row_count="$(awk '{print $2}' <<<"${row_summary}")"
@@ -9717,7 +10016,7 @@ _ci_check_dockerfile_build_tools() {
 _ci_check_cargo_profile_tuning() {
     local repo_root="${1:-${CI_REPO_ROOT:-.}}" f line tomls
     local -a viol=()
-    tomls="$(git -C "${repo_root}" ls-files '*Cargo.toml')" || { ci_log "[CI-ERROR-CHECK-0071]" "reason=\"git ls-files failed; refusing an empty scan\""; return 2; }
+    tomls="$(_ci_ls_files cargo-profile-tuning "${repo_root}" '*Cargo.toml')" || return 2
     while IFS= read -r f; do
         [ -n "${f}" ] || continue
         local produced produced_rc=0
@@ -9744,7 +10043,7 @@ _ci_check_no_source_compiled_tools() {
     raw="$(_ci_build_tools_packages)" || return 2
     mapfile -t pkgs <<< "${raw}"
     for tok in "${pkgs[@]}"; do [ -n "${tok}" ] && is_pkg["${tok}"]=1; done
-    dfs="$(git -C "${repo_root}" ls-files '*Dockerfile')" || { ci_log "[CI-ERROR-CHECK-0071]" "reason=\"git ls-files failed; refusing an empty scan\""; return 2; }
+    dfs="$(_ci_ls_files no-source-compiled-tools "${repo_root}" '*Dockerfile')" || return 2
     while IFS= read -r df; do
         [ -n "${df}" ] || continue
         local produced produced_rc=0
@@ -9783,7 +10082,7 @@ _ci_check_codeql_coverage() {
         mapfile -t globs <<< "${raw}"
         raw="$(_ci_block_entry_list codeql_languages "${lang}" paths)" || return 2
         mapfile -t paths <<< "${raw}"
-        files="$(git -C "${repo_root}" ls-files -- "${globs[@]}")" || { ci_log "[CI-ERROR-CHECK-0071]" "reason=\"git ls-files failed; refusing an empty scan\""; return 2; }
+        files="$(_ci_ls_files codeql-coverage "${repo_root}" "${globs[@]}")" || return 2
         while IFS= read -r f; do
             [ -n "${f}" ] || continue
             ok=false

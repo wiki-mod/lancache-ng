@@ -94,6 +94,7 @@ teardown() {
     [ "${status}" -eq 1 ]
     CI_PHASE_RESULTS="plan:success build:failure checks:success" run ci_cmd_result_gate
     [ "${status}" -eq 1 ]
+    [[ "${output}" == *'[CI-ERROR-CORE-0116] phase="build" result="failure"'* ]]
     CI_PHASE_RESULTS="platform:skipped plan:success checks:success" run ci_cmd_result_gate
     [ "${status}" -eq 1 ]
     run ci_cmd_result_gate
@@ -141,24 +142,29 @@ teardown() {
     [[ "${output}" == *"CI-ERROR-CORE-0002"* ]]
 }
 
-@test "every ci.sh error code names exactly one reason" {
-    # What: a code shared by two reasons fails, naming both.
-    # Why: one code per error keeps log lines unambiguous.
+@test "every ci.sh message code is used at exactly one site" {
+    # What: a code at two sites fails, naming both lines.
+    # Why: the code is the "where" of a CI log line.
     # From: Issue #1683 | PR #1858
-    local re='(\[CI-[A-Z]+-[A-Z0-9]+-[0-9]{4}\]).*reason=\\"([^\\]*)'
-    local line code reason
-    local -A code_reason=()
+    local re='\[CI-[A-Z]+-([A-Z0-9]+-[0-9]{4})\]'
+    local line n=0 key rest
+    local -A code_site=()
     local -a dup=()
     while IFS= read -r line; do
-        [[ "${line}" =~ ${re} ]] || continue
-        code="${BASH_REMATCH[1]}"
-        reason="${BASH_REMATCH[2]}"
-        if [ -n "${code_reason[${code}]+x}" ] && [ "${code_reason[${code}]}" != "${reason}" ]; then
-            dup+=("${code}: '${code_reason[${code}]}' vs '${reason}'")
-        fi
-        code_reason["${code}"]="${reason}"
+        n=$((n + 1))
+        [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+        rest="${line}"
+        while [[ "${rest}" =~ ${re} ]]; do
+            key="${BASH_REMATCH[1]}"
+            if [ -n "${code_site[${key}]+x}" ]; then
+                dup+=("${key}: line ${code_site[${key}]} and line ${n}")
+            else
+                code_site["${key}"]="${n}"
+            fi
+            rest="${rest#*"${BASH_REMATCH[0]}"}"
+        done
     done < "${CI_SH}"
-    [ "${#code_reason[@]}" -gt 0 ]
+    [ "${#code_site[@]}" -gt 0 ]
     [ "${#dup[@]}" -eq 0 ] || { printf '%s\n' "${dup[@]}"; return 1; }
 }
 
@@ -407,8 +413,9 @@ EOF
     printf '%s\n' 'codeql:' '  queries: [q1]' '  paths_ignore: ["x/**"]' \
         'codeql_languages:' '  lang-a:' '    paths: [src-a]' > "${m}"
     CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo \
-        run bash "${CI_SH}" codeql-config
+        run --separate-stderr bash "${CI_SH}" codeql-config
     [ "${status}" -eq 0 ]
+    [[ "${stderr}" == *"[CI-INFO-CORE-0113] proxy=off"* ]]
     [ "${output}" = "$(printf '%s\n' 'name: fixture-repo-codeql' 'queries:' \
         '  - uses: "q1"' 'paths:' '  - "src-a"' 'paths-ignore:' '  - "x/**"')" ]
     CI_MANIFEST="${m}" GITHUB_REPOSITORY='' run bash "${CI_SH}" codeql-config
@@ -445,6 +452,34 @@ ci_cmd_codeql_config
 _ci_check_stable_external_images /var/tmp
 _ci_check_dockerfile_build_tools /var/tmp
 CASES
+}
+
+@test "core helpers fail with code, context and raw tool error" {
+    # What: real failing input per helper: rc 2, code, raw.
+    # Why: a CI log must show where, with what and why.
+    # From: Issue #1683 | PR #1858
+    local f="${BATS_TEST_TMPDIR}/afile"
+    : > "${f}"
+    run _ci_mktemp -d "${f}/sub.XXXXXX"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-CORE-0110] args=\"-d ${f}/sub.XXXXXX\""* ]]
+    [[ "${output}" == *"Not a directory"* ]]
+    [[ "${f}" == /var/tmp/* ]] || { echo "BATS_TEST_TMPDIR not under /var/tmp: ${f}"; return 1; }
+    CI_TMPDIR="${f}/x" run _ci_tmp_init
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-CORE-0111] dir=\"${f}/x\""* ]]
+    [[ "${output}" == *"Not a directory"* ]]
+    run bash -c 'source "$1"; RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=http://p:3128 PROJECT_SELFHOSTED_PROXY_CA=X CI_SYSTEM_CA_BUNDLE=/nonexistent/ca.pem CI_TMPDIR="$2" _ci_proxy_init' _ "${CI_SH}" "${BATS_TEST_TMPDIR}"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *'[CI-ERROR-CORE-0112] system_bundle="/nonexistent/ca.pem"'* ]]
+    [[ "${output}" == *"No such file"* ]]
+    run bash -c 'source "$1"; RUNNER_ENVIRONMENT=github-hosted _ci_proxy_init' _ "${CI_SH}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *'[CI-INFO-CORE-0113] proxy=off runner="github-hosted" http_set=no'* ]]
+    run _ci_ls_files probe-site "${BATS_TEST_TMPDIR}/nogit-root" '*.sh'
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *'[CI-ERROR-CHECK-0071] site="probe-site"'* ]]
+    [[ "${output}" == *"cannot change to"* || "${output}" == *"No such file"* ]]
 }
 
 @test "identity fails, never hashes, when a part fails" {
@@ -790,17 +825,18 @@ _identity_fixture() {
     # Why: NOOP/reuse needs stable ids that never collide.
     # From: Issue #1683
     _identity_fixture
-    run bash "${CI_SH}" identity svc-a os/p1
+    run --separate-stderr bash "${CI_SH}" identity svc-a os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" =~ ^platform=os/p1\ identity=[0-9a-f]{64}$ ]]
     local a1="${output}"
-    run bash "${CI_SH}" identity svc-a os/p1
+    run --separate-stderr bash "${CI_SH}" identity svc-a os/p1
     [ "${output}" = "${a1}" ]
-    run bash "${CI_SH}" identity svc-b os/p1
-    [ "${status}" -eq 0 ]; [ "${output}" != "${a1}" ]
-    run bash "${CI_SH}" identity svc-a os/p2
-    [ "${status}" -eq 0 ]; [ "${output#*identity=}" != "${a1#*identity=}" ]
-    run bash "${CI_SH}" identity svc-p os/p1
+    run --separate-stderr bash "${CI_SH}" identity svc-b os/p1
+    [ "${status}" -eq 0 ]; [[ "${output}" =~ ^platform=os/p1\ identity=[0-9a-f]{64}$ ]]; [ "${output}" != "${a1}" ]
+    run --separate-stderr bash "${CI_SH}" identity svc-a os/p2
+    [ "${status}" -eq 0 ]; [[ "${output}" =~ ^platform=os/p2\ identity=[0-9a-f]{64}$ ]]
+    [ "${output#*identity=}" != "${a1#*identity=}" ]
+    run --separate-stderr bash "${CI_SH}" identity svc-p os/p1
     [ "${status}" -eq 0 ]
     [[ "${output}" =~ ^platform=os/p1\ identity=[0-9a-f]{64}$ ]]
 }
@@ -823,7 +859,7 @@ _identity_fixture() {
     # Why: default is all; unknown input never fans out.
     # From: Issue #1683
     _identity_fixture
-    run bash "${CI_SH}" identity svc-a
+    run --separate-stderr bash "${CI_SH}" identity svc-a
     [ "${status}" -eq 0 ]
     [ "${#lines[@]}" -eq 2 ]
     [[ "${lines[0]}" == "platform=os/p1 identity="* ]]
@@ -1056,7 +1092,7 @@ _pin_consumer() {
     p="$(_ci_platforms ui)"
     p="${p##*$'\n'}"
     STUB_STATE=PRESENT_ACCEPTED
-    GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" build ui "${p}"
+    GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run --separate-stderr bash "${CI_SH}" build ui "${p}"
     [ "${status}" -eq 0 ]
     [ "${#lines[@]}" -eq 1 ]
     [[ "${output}" == *"platform=${p}"* ]]
@@ -2007,6 +2043,7 @@ _asm_index_stub() {
     STUB_STATE=PRESENT_ACCEPTED
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
     CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
+    CI_INDEX_LOOKUP_CMD="$(_stub noidx 'exit 1')" \
     CI_ASSEMBLE_CMD="$(_stub asm "echo $(_asm_idx)")" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" assemble ui
@@ -2051,6 +2088,7 @@ _asm_index_stub() {
     STUB_STATE=PRESENT_ACCEPTED
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
     CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
+    CI_INDEX_LOOKUP_CMD="$(_stub noidx 'exit 1')" \
     CI_ASSEMBLE_CMD="$(_stub asm "echo $(_asm_idx)")" \
         run bash "${CI_SH}" assemble ui
     [ "${status}" -eq 2 ]
@@ -2637,6 +2675,17 @@ tail" '{body:$b, isPrerelease:false}')" \
         CI_PROMOTE_TIP_CMD="${tipok}" CI_TAG_EXISTS_CMD="$(_stub unknown 'exit 2')" \
         CI_TAG_PUSH_CMD="${push}" run ci_cmd_cut_release_tag
     [ "${status}" -eq 2 ]
+    [[ "${output}" == *'[CI-ERROR-RELEASE-0021] tag="v0.2.1" rc=2'* ]]
+    [ ! -s "${calls}" ]
+    # What: an unknown stack change is rc 2, never a noop.
+    # Why: a registry error never skips a release silently.
+    # From: Issue #1683 | PR #1858
+    : > "${calls}"
+    CI_LAST_RELEASE_TAG_CMD="${base}" CI_STACK_CHANGED_CMD="$(_stub stackunknown 'exit 2')" \
+        CI_TAG_PUSH_CMD="${push}" run ci_cmd_cut_release_tag
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *'[CI-ERROR-RELEASE-0024] base="v0.2.0" rc=2'* ]]
+    [[ "${output}" != *"cut-tag=noop"* ]]
     [ ! -s "${calls}" ]
 }
 
@@ -2739,6 +2788,24 @@ _gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
     run _ci_default_gc_roots
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-GC-0012"* ]]
+}
+
+@test "default gc roots refuses an unparseable index; children never lost" {
+    # What: bad index JSON -> GC-0026 rc 2; no roots out.
+    # Why: lost children would be deleted as unreachable.
+    # From: Issue #1683 | PR #1858
+    GITHUB_REPOSITORY=owner/fixture-repo
+    _ci_ledger_blob() { return 1; }
+    ci_services() { printf 'proxy\n'; }
+    _ci_mutable_channels() { printf 'latest\n'; }
+    _ci_registry_probe() { printf 'sha256:chan\n'; }
+    _ci_index_raw() { printf '{"manifests":[ not json'; }
+    run _ci_default_gc_roots
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *'[CI-ERROR-GC-0026] service="'*'" digest="sha256:chan"'* ]]
+    [[ "${output}" == *"jq: parse error"* ]]
+    [[ "${output}" == *"index: {\"manifests\":[ not json"* ]]
+    [[ "${output}" != *$'\n'"sha256:chan"* ]]
 }
 
 @test "default gc roots refuses on a transient channel probe" {
@@ -3082,7 +3149,7 @@ STUB
     TMPDIR="${BATS_TEST_TMPDIR}" GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" validate
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0006"* ]]
+    [[ "${output}" == *'[CI-ERROR-VALIDATE-0069] filter='*'reason="compose config read failed"'* ]]
 }
 
 @test "validate fails with raw evidence when the stack is unhealthy" {
@@ -3387,8 +3454,20 @@ SH
     first="$(_ci_validate_slot_lock 172.16.1.32/27)"
     [ -n "${first}" ]
     run _ci_validate_slot_lock 172.16.1.32/27
-    [ "${status}" -ne 0 ]
+    [ "${status}" -eq 1 ]
     _ci_validate_release "${first}"
+    # What: a failing flock is rc 2 with raw, not "held".
+    # Why: else every slot reads busy: wrong "no free /27".
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/fbin"; mkdir -p "${bin}"
+    _tool_stub "${bin}" flock <<'STUB'
+echo "flock: cannot open lock file: Read-only file system" >&2
+exit 1
+STUB
+    PATH="${bin}:${PATH}" run _ci_validate_slot_lock 172.16.1.64/27
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *'[CI-ERROR-VALIDATE-0073] subnet="172.16.1.64/27"'* ]]
+    [[ "${output}" == *"Read-only file system"* ]]
 }
 
 @test "validate wait_healthy reports every unhealthy service" {
@@ -4234,7 +4313,7 @@ CASES
     # What: With no env override, the SOT default is used.
     # Why: AG-CI-006 fallback, like CARGO_BUILD_JOBS.
     # From: Issue #1683
-    run bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
+    run --separate-stderr bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
     [ "${status}" -eq 0 ]
     [ "${output}" = "30" ]
 }
@@ -4244,7 +4323,7 @@ CASES
     # Why: AG-CI-006: use the variable when set.
     # From: Issue #1683
     REPOSITORY_CI_LEDGER_RETENTION_DAYS=45 \
-        run bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
+        run --separate-stderr bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
     [ "${status}" -eq 0 ]
     [ "${output}" = "45" ]
 }
@@ -4254,11 +4333,11 @@ CASES
     # Why: GitHub vars arrive once as json (AG-CI-006).
     # From: Issue #1683 | PR #1858
     CI_VARIABLES='{"REPOSITORY_CI_LEDGER_RETENTION_DAYS":"7"}' \
-        run bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
+        run --separate-stderr bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
     [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
     [ "${output}" = "7" ]
     REPOSITORY_CI_LEDGER_RETENTION_DAYS=9 CI_VARIABLES='{"REPOSITORY_CI_LEDGER_RETENTION_DAYS":"7"}' \
-        run bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
+        run --separate-stderr bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
     [ "${output}" = "9" ]
     CI_VARIABLES='not json' run bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
     [ "${status}" -eq 2 ]
@@ -4859,7 +4938,7 @@ CASES
     local m="${BATS_TEST_TMPDIR}/other.yml"
     printf 'services:\n  svc-a:\n    packages:\n      - WRONG_SVC\n' > "${m}"
     printf 'build_toolchain:\n  tool-t:\n    packages:\n      - right-one\n' >> "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-tools packages
+    CI_MANIFEST="${m}" run --separate-stderr bash "${CI_SH}" build-tools packages
     [ "${status}" -eq 0 ]
     [ "${output}" = "right-one" ]
     printf '  tool-u:\n    packages:\n      - other\n' >> "${m}"
@@ -4927,7 +5006,7 @@ CASES
     while IFS= read -r p; do
         [ -n "${p}" ] && want="${want}$(_ci_platform_apk_arch "${p}")"$'\n'
     done <<< "$(_ci_build_matrix_platforms)"
-    run bash "${CI_SH}" build-tools arches
+    run --separate-stderr bash "${CI_SH}" build-tools arches
     [ "${status}" -eq 0 ]
     [ "${output}" = "$(LC_ALL=C sort -u <<< "${want%$'\n'}")" ]
 }
@@ -5064,7 +5143,7 @@ CASES
     grep -v '^  alpine:' "${CI_MANIFEST}" > "${m}"
     CI_MANIFEST="${m}" run bash "${CI_SH}" build-tools resolve-signature
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0009"* ]]
+    [[ "${output}" == *'[CI-ERROR-BUILDARGS-0003] arg="ALPINE_IMAGE" key="base_images.alpine"'* ]]
 }
 
 @test "build-tools rejects an unknown subcommand (fail closed)" {
@@ -5080,7 +5159,7 @@ CASES
     # What: The base build-tools ref from the SOT.
     # Why: One registry-host owner, no env fallback.
     # From: Issue #1683
-    GITHUB_REPOSITORY=owner/fixture-repo run bash "${CI_SH}" build-tools image
+    GITHUB_REPOSITORY=owner/fixture-repo run --separate-stderr bash "${CI_SH}" build-tools image
     [ "${status}" -eq 0 ]
     [ "${output}" = "registry.example.test/owner/fixture-repo/build-tools" ]
 }
@@ -5117,6 +5196,7 @@ CASES
         run bash -c "cd '${d}' && GIT_CEILING_DIRECTORIES='${BATS_TEST_TMPDIR}' bash '${CI_SH}' check ${c}"
         [ "${status}" -eq 2 ] || { echo "want rc2: ${c} -> ${status}"; false; }
         [[ "${output}" == *"CI-ERROR-CHECK-0071"* ]]
+        [[ "${output}" == *"site="* ]] && [[ "${output}" == *"not a git repository"* ]]
         [[ "${output}" != *"=clean"* ]]
     done
 }
@@ -7625,7 +7705,7 @@ CASES
     # From: Issue #1683 | PR #1858
     run bash "${CI_SH}" check changelog-direct-edit "CHANGELOG.md"
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"CI-INFO-CHECK-0002"* ]]
+    [[ "${output}" == *"CI-INFO-CHECK-0116"* ]]
     [[ "${output}" == *"warn-only"* ]]
     [[ "${output}" == *"changelog-direct-edit=warn"* ]]
     # What: unreadable labels JSON fails with jq's error.
@@ -7823,8 +7903,14 @@ STUB
     export -f _flaky
     CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_retry registry _flaky
     [ "${status}" -eq 0 ]
-    [ "${output}" = "ok" ]
+    [ "${lines[-1]}" = "ok" ]
     [ "$(cat "${cnt}")" -eq 3 ]
+    # What: each failed try shows with its raw; then INFO.
+    # Why: AG-INT-002: a late success is no 1st-try pass.
+    # From: Issue #1683 | PR #1858
+    [ "$(grep -c '\[CI-WARN-BUILD-0016\] op=registry cmd="_flaky"' <<< "${output}")" -eq 2 ]
+    [ "$(grep -c '^connection reset by peer$' <<< "${output}")" -eq 2 ]
+    [[ "${output}" == *'[CI-INFO-BUILD-0017] op=registry cmd="_flaky" attempt=3/4'* ]]
 }
 
 @test "_ci_retry fails on the first attempt for a permanent classification" {
@@ -7840,6 +7926,9 @@ STUB
     CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_retry registry _denied
     [ "${status}" -eq 2 ]
     [ "$(cat "${cnt}")" -eq 1 ]
+    [[ "${output}" == *'[CI-ERROR-BUILD-0011] op=registry cmd="_denied" cls=permanent attempt=1/4'* ]]
+    [[ "${output}" == *"HTTP 401 unauthorized"* ]]
+    [[ "${output}" != *"CI-WARN-BUILD-0016"* ]]
 }
 
 @test "_ci_retry exhausts after CI_RETRY_MAX_ATTEMPTS on a persistent transient failure" {
@@ -8765,6 +8854,26 @@ STUB
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo GITHUB_SHA=deadbeef \
         run _ci_index_lookup ui
     [ "${status}" -eq 1 ]
+}
+
+@test "an unreachable registry stops assembly, never re-assembles" {
+    # What: probe UNKNOWN -> lookup rc 2 -> reconcile stops.
+    # Why: never assemble over an unchecked index.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+    _tool_stub "${bin}" docker <<'STUB'
+echo "dial tcp: i/o timeout" >&2
+exit 1
+STUB
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo GITHUB_SHA=deadbeef \
+        run _ci_index_lookup ui
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-WARN-RESOLVE-0007"* ]] && [[ "${output}" == *"i/o timeout"* ]]
+    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo GITHUB_SHA=deadbeef \
+        run _ci_reconcile_index ui "os/p1=sha256:a"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *'[CI-ERROR-ASSEMBLE-0007] service="ui" rc=2'* ]]
+    [[ "${output}" != *"sha256:"* ]]
 }
 
 @test "index_raw reports unknown, not absent, on a transient failure" {
