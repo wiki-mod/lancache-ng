@@ -21,6 +21,31 @@ services:
     build_type: apk
     final_base: alpine
     runner: light
+    # What: final-image apk packages; nginx from nginx.org.
+    # Why: AG-KD-007: stream module only in nginx.org build.
+    # From: Issue #1683 | PR #1858
+    packages:
+      - ca-certificates
+      - openssl
+      - curl
+      - coreutils
+      - bash
+      - nano
+      - findutils
+      - gettext-envsubst
+      - lsof
+      - ripgrep
+      - nginx@nginx
+    # What: nginx.org mainline repo for the base's branch.
+    # Why: ci.sh fills @ALPINE_BRANCH@ from the alpine pin.
+    # From: Issue #1683 | PR #1858
+    apk_repositories:
+      - nginx=http://nginx.org/packages/mainline/alpine/@ALPINE_BRANCH@/main
+    # What: the repo signing key and its sha256 pin.
+    # Why: the tagged repo is trusted only with this key.
+    # From: Issue #1683 | PR #1858
+    apk_keys:
+      - https://nginx.org/keys/nginx_signing.rsa.pub=ff7cf138acc09f2a5029300ab713fe6a1440605fca72e2bab76a4da9206fec87
     # What: execute-smoke checks run post-build by ci.sh.
     # Why: prove apk binaries run, not just exist
     # From: Issue #1613

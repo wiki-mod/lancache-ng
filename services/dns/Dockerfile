@@ -60,7 +60,7 @@ COPY services/dns/nats-subscriber/src services/dns/nats-subscriber/src
 # What: ci.sh owns the rust build accel policy (one owner).
 # Why: AG-CI-005/022/023; bind-mounted, never baked in.
 # From: Issue #1683
-RUN --mount=type=bind,source=.github/scripts/ci.sh,target=/usr/local/bin/ci.sh \
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
@@ -97,23 +97,16 @@ ARG BUILD_IDENTITY
 # From: Issue #1683
 ARG APK_PACKAGES
 # What: bootstrap bash for SHELL compatibility.
-# Why: AG-REL-001 forbids ash; CA handling needs bash.
+# Why: AG-REL-001 forbids ash; ci.sh apk-setup needs bash.
 # From: Issue #1683
 RUN apk add --no-cache bash
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# What: restore CA, update packages, install stack.
-# Why: CA restored (no leak); mandatory update invariant.
-# From: Issue #1683
-RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
-      cp /etc/ssl/certs/ca-certificates.crt /var/tmp/ca-bundle.orig && \
-      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
-    fi && \
-    sed -i 's|^https://|http://|' /etc/apk/repositories && \
-    apk update --no-cache && \
-    apk upgrade --no-cache && \
-    apk add --no-cache ${APK_PACKAGES} && \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /var/tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+# What: shared package setup via ci.sh.
+# Why: ci.sh owns repos, proxy CA, update+upgrade, add.
+# From: Issue #1683 | PR #1858
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    --mount=type=secret,id=project_selfhosted_proxy_ca \
+    bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR

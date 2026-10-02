@@ -41,23 +41,6 @@ SHELL ["/bin/sh", "-c"]
 ENV PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin" \
     RUST_BACKTRACE=1
 
-# What: fail closed if any dhclient build-arg is empty.
-# Why: the reused dhclient apk is a pinned SOT input.
-# From: Issue #1683
-RUN set -eu; \
-    missing=""; \
-    for kv in \
-      "DHCLIENT_VERSION=${DHCLIENT_VERSION}" \
-      "DHCLIENT_ALPINE_BRANCH=${DHCLIENT_ALPINE_BRANCH}" \
-      "DHCLIENT_ARCH=${DHCLIENT_ARCH}" \
-      "DHCLIENT_SHA256=${DHCLIENT_SHA256}"; do \
-      case "$kv" in *=) missing="${missing} ${kv%=}" ;; esac; \
-    done; \
-    if [ -n "$missing" ]; then \
-      echo "[CI-ERROR-BUILDTOOLS-0001] empty build-arg(s):${missing}" >&2; \
-      exit 1; \
-    fi
-
 # What: build identity keys the cache of later layers.
 # Why: a new package set must not reuse a stale apk layer.
 # From: Issue #1683 | PR #1858
@@ -68,36 +51,31 @@ ARG BUILD_IDENTITY
 # From: Issue #1683
 ARG APK_PACKAGES
 
-# What: tagged apk repos (tag=url), supplied from the SOT.
-# Why: the SOT owns the URL; this stage only adds it.
+# What: tagged apk repos and repo keys from the SOT.
+# Why: the SOT owns URL and key pin; this stage adds them.
 # From: Issue #1683 | PR #1858
 ARG APK_TAGGED_REPOS
+ARG APK_KEYS
 
-# What: switches apk's own repositories to plain http.
-# Why: Squid caches http; signed indices keep integrity.
-# From: Issue #1095
-RUN sed -i 's|^https://|http://|' /etc/apk/repositories
-
-# What: add each SOT tagged repo as "@tag url".
-# Why: only tagged packages (trivy) resolve, not global.
+# What: bootstrap bash for ci.sh apk-setup.
+# Why: the alpine base has no bash; ci.sh needs it.
 # From: Issue #1683 | PR #1858
-RUN for kv in ${APK_TAGGED_REPOS}; do echo "@${kv%%=*} ${kv#*=}" >> /etc/apk/repositories; done
+RUN apk add --no-cache bash
 
-# What: install base utils + SOT tools; trust proxy CA.
-# Why: GNU coreutils differ; CA restored before commit.
+# What: shared package setup via ci.sh.
+# Why: ci.sh owns repos, proxy CA, update+upgrade, add.
+# From: Issue #1683 | PR #1858
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    --mount=type=secret,id=project_selfhosted_proxy_ca \
+    bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
+
+# What: distcc-pump name and compiler masquerade links.
+# Why: rust-build runs distcc-pump and the distcc dir.
 # From: Issue #1683
-RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
-      cp /etc/ssl/certs/ca-certificates.crt /var/tmp/ca-bundle.orig; \
-      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
-    fi; \
-    apk update; \
-    apk add --no-cache ${APK_PACKAGES}; \
-    ln -sf /usr/bin/pump /usr/bin/distcc-pump; \
-    distcc_bin="$(command -v distcc)"; \
-    mkdir -p /usr/local/lib/distcc; \
-    for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done; \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /var/tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+RUN ln -sf /usr/bin/pump /usr/bin/distcc-pump \
+    && distcc_bin="$(command -v distcc)" \
+    && mkdir -p /usr/local/lib/distcc \
+    && for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done
 
 # What: verifies the apk-installed curl actually runs
 # Why: catches a missing shared-lib chain at build time

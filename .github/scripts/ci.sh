@@ -206,15 +206,41 @@ _ci_published_services() {
 # SEMANTIC PARSERS
 # =========================================================
 
+# What: awk unq(): YAML '..' and ".." scalars to raw text.
+# Why: one unquote for every SOT reader; odd forms fail.
+# From: Issue #1683 | PR #1858
+_CI_AWK_UNQUOTE='
+    function bad_val(v) { print "unsupported YAML quoting: " v > "/dev/stderr"; exit 3 }
+    function unq(v,  o, t, i, c) {
+        if (substr(v, 1, 1) == q) {
+            if (length(v) < 2 || substr(v, length(v), 1) != q) bad_val(v)
+            v = substr(v, 2, length(v) - 2); t = v; gsub(q q, "", t)
+            if (index(t, q)) bad_val(v)
+            gsub(q q, q, v); return v
+        }
+        if (substr(v, 1, 1) != "\"") return v
+        if (length(v) < 2 || substr(v, length(v), 1) != "\"") bad_val(v)
+        v = substr(v, 2, length(v) - 2); o = ""
+        for (i = 1; i <= length(v); i++) {
+            c = substr(v, i, 1)
+            if (c == "\"") bad_val(v)
+            if (c != "\\") { o = o c; continue }
+            c = substr(v, ++i, 1)
+            if (c == "\"" || c == "\\" || c == "/") o = o c; else bad_val(v)
+        }
+        return o
+    }
+'
+
 # What: Print one field of a block entry.
 # Why: One parser, no per-block duplicate.
 # From: Issue #1683
 _ci_block_entry_field() {
-    local block="$1" entry="$2" field="$3"
+    local block="$1" entry="$2" field="$3" out
     # What: entry="" reads a block-level scalar; quotes cut.
     # Why: base_images has no entry level; one reader.
     # From: Issue #1683 | PR #1858
-    awk -v block="$block" -v entry="$entry" -v field="$field" '
+    if ! out="$(awk -v block="$block" -v entry="$entry" -v field="$field" -v q="'" "${_CI_AWK_UNQUOTE}"'
         $0 ~ ("^" block ":[[:space:]]*$") { inb = 1; inentry = (entry == ""); next }
         inb && /^[^[:space:]]/ { inb = 0 }
         inb && entry != "" && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
@@ -222,21 +248,24 @@ _ci_block_entry_field() {
         }
         inb && inentry && ((entry == "" && index($0, "  " field ":") == 1) || (entry != "" && $1 == (field ":"))) {
             val = $0; sub(/^[[:space:]]*[A-Za-z0-9_.-]+:[[:space:]]*/, "", val)
-            if (val ~ /^".*"$/) val = substr(val, 2, length(val) - 2)
-            print val; exit
+            print unq(val); exit
         }
-    ' "${CI_MANIFEST}"
+    ' "${CI_MANIFEST}" 2>&1)"; then
+        ci_error "[CI-ERROR-CORE-0107]" "block=\"${block}\" entry=\"${entry}\" field=\"${field}\" reason=\"SOT field unreadable\"" "${out}"
+        return 2
+    fi
+    [ -z "${out}" ] || printf '%s\n' "${out}"
 }
 
 # What: Print a block->entry->field list, one item per line.
 # Why: One list reader; inline [..] and block - items alike.
 # From: Issue #1683
 _ci_block_entry_list() {
-    local block="$1" entry="$2" field="$3"
+    local block="$1" entry="$2" field="$3" out
     # What: entry="" reads a 2-level block->field list.
     # Why: build_matrix has no entry level; one reader.
     # From: Issue #1683
-    awk -v block="$block" -v entry="$entry" -v field="$field" '
+    if ! out="$(awk -v block="$block" -v entry="$entry" -v field="$field" -v q="'" "${_CI_AWK_UNQUOTE}"'
         BEGIN { fi = (entry == "") ? "  " : "    "; ii = (entry == "") ? "    " : "      " }
         $0 ~ ("^" block ":[[:space:]]*$") { inb = 1; inentry = (entry == ""); next }
         inb && /^[^[:space:]]/ { inb = 0 }
@@ -246,16 +275,20 @@ _ci_block_entry_list() {
         inb && inentry && $0 ~ ("^" fi field ":[[:space:]]*\\[") {
             line = $0; sub(/^[^[]*\[/, "", line); sub(/\].*$/, "", line)
             gsub(/[[:space:],]+/, " ", line)
-            n = split(line, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") print a[i]
+            n = split(line, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") print unq(a[i])
             exit
         }
         inb && inentry && $0 ~ ("^" fi field ":[[:space:]]*$") { inlist = 1; next }
         inlist && $0 ~ ("^" ii "-[[:space:]]") {
-            it = $0; sub(/^[[:space:]]*-[[:space:]]*/, "", it); print it; next
+            it = $0; sub(/^[[:space:]]*-[[:space:]]*/, "", it); print unq(it); next
         }
         inlist && $0 ~ ("^" fi "[^[:space:]]") { inlist = 0 }
         inlist && /^  [^[:space:]]/ { inlist = 0 }
-    ' "${CI_MANIFEST}"
+    ' "${CI_MANIFEST}" 2>&1)"; then
+        ci_error "[CI-ERROR-CORE-0108]" "block=\"${block}\" entry=\"${entry}\" field=\"${field}\" reason=\"SOT list unreadable\"" "${out}"
+        return 2
+    fi
+    [ -z "${out}" ] || printf '%s\n' "${out}"
 }
 
 # What: Query a service field (services or build_toolchain).
@@ -507,31 +540,39 @@ ci_cmd_codeql_impact() {
     ci_log "[CI-INFO-CODEQL-0001]" "phase=codeql-impact langs=$(printf '%s' "${include}" | jq -r 'length') changed=${#changed[@]}"
 }
 
+# What: print "key:" and each line as a quoted YAML item.
+# Why: raw SOT text like **/x would be a YAML alias.
+# From: Issue #1683 | PR #1858
+_ci_yaml_list() {
+    local key="$1" prefix="$2" items="$3" q
+    if ! q="$(jq -Rr --arg p "${prefix}" 'select(length > 0) | $p + tojson' <<< "${items}" 2>&1)"; then
+        ci_error "[CI-ERROR-CODEQL-0015]" "key=\"${key}\" reason=\"YAML list values not encodable\"" "${q}"
+        return 2
+    fi
+    printf '%s:\n%s' "${key}" "${q}"
+}
+
 # What: Render the CodeQL config file from the SOT.
 # Why: SOT owns scope; the action reads a derived config.
 # From: Issue #1683
 ci_cmd_codeql_config() {
-    local item lang p repo queries langs paths ignore out
+    local lang repo queries langs paths ignore out all="" q
     repo="$(_ci_repo)" || return 2
     queries="$(_ci_block_entry_list codeql "" queries)" || return 2
     langs="$(_ci_block_keys codeql_languages)" || return 2
     ignore="$(_ci_block_entry_list codeql "" paths_ignore)" || return 2
-    out="name: ${repo##*/}-codeql"$'\n''queries:'$'\n'
-    while IFS= read -r item; do
-        [ -n "${item}" ] && out+="  - uses: ${item}"$'\n'
-    done <<< "${queries}"
-    out+='paths:'$'\n'
     while IFS= read -r lang; do
         [ -n "${lang}" ] || continue
         paths="$(_ci_block_entry_list codeql_languages "${lang}" paths)" || return 2
-        while IFS= read -r p; do
-            [ -n "${p}" ] && out+="  - ${p}"$'\n'
-        done <<< "${paths}"
+        all+="${paths}"$'\n'
     done <<< "${langs}"
-    out+='paths-ignore:'$'\n'
-    while IFS= read -r item; do
-        [ -n "${item}" ] && out+="  - ${item}"$'\n'
-    done <<< "${ignore}"
+    out="name: ${repo##*/}-codeql"$'\n'
+    q="$(_ci_yaml_list queries '  - uses: ' "${queries}")" || return 2
+    out+="${q}"$'\n'
+    q="$(_ci_yaml_list paths '  - ' "${all}")" || return 2
+    out+="${q}"$'\n'
+    q="$(_ci_yaml_list paths-ignore '  - ' "${ignore}")" || return 2
+    out+="${q}"$'\n'
     printf '%s' "${out}"
 }
 
@@ -834,10 +875,13 @@ _ci_identity_pins() {
                 pkgs="$(_ci_service_packages "${service}")" || return 2
                 pkgs="$(tr '\n' ' ' <<<"${pkgs}")"
                 [ -n "${pkgs// /}" ] || continue
-                base="$(_ci_block_entry_field base_images "" alpine)"
+                base="$(_ci_block_entry_field base_images "" alpine)" || return 2
                 arch="$(_ci_platform_apk_arch "${platform}")" || {
                     ci_log "[CI-ERROR-IDENTITY-0005]" "platform=\"${platform}\" reason=\"no apk arch; FAIL CLOSED\""; return 2; }
-                _ci_apk_resolve "${base}" "${arch}" "${pkgs% }" "$(_ci_apk_repositories "${service}")" || return 2
+                local repos keys
+                repos="$(_ci_apk_repositories "${service}")" || return 2
+                keys="$(_ci_apk_keys "${service}")" || return 2
+                _ci_apk_resolve "${base}" "${arch}" "${pkgs% }" "${repos}" "${keys}" || return 2
                 printf '\n'
                 ;;
             *)
@@ -1911,12 +1955,10 @@ _ci_docker_build() {
         args+=(--file "${context}/Dockerfile")
         context="."
     fi
-    # What: apk stages bind-mount ci.sh via context.
-    # Why: apk-setup runs in bare final; ci.sh absent.
-    # From: Issue #1683
-    if [ "${build_type}" = apk ]; then
-        args+=(--build-context "ci-scripts=${CI_SCRIPT_DIR}")
-    fi
+    # What: every stage bind-mounts ci.sh via one context.
+    # Why: one mount form for apk-setup and rust-build.
+    # From: Issue #1683 | PR #1858
+    args+=(--build-context "ci-scripts=${CI_SCRIPT_DIR}")
     # What: capture labels + build-args before reading them.
     # Why: < <(...) drops a failure; never build without.
     # From: Issue #1683 | PR #1858
@@ -2000,12 +2042,61 @@ _ci_docker_build() {
 # Why: one owner for http repos + update+upgrade + packages.
 # From: Issue #1683
 ci_cmd_apk_setup() {
-    sed -i 's|^https://|http://|' /etc/apk/repositories
-    apk update --no-cache
-    apk upgrade --no-cache
-    if [ "$#" -gt 0 ]; then
-        apk add --no-cache "$@"
+    local root="${CI_APK_ROOT:-}" out kv name bundle=""
+    local repos="${root}/etc/apk/repositories" ca="${root}/run/secrets/project_selfhosted_proxy_ca"
+    if ! out="$(sed -i 's|^https://|http://|' "${repos}" 2>&1)"; then
+        ci_error "[CI-ERROR-APKSETUP-0001]" "reason=\"apk repositories not switched to http\"" "${out}"
+        return 2
     fi
+    # What: proxy CA only for this process, never the image.
+    # Why: https fetches pass the TLS proxy; no undo step.
+    # From: Issue #1683 | PR #1858
+    if [ -s "${ca}" ]; then
+        bundle="$(mktemp -p "${CI_TMPDIR}")" || return 2
+        if ! out="$(cat "${root}/etc/ssl/certs/ca-certificates.crt" "${ca}" 2>&1 > "${bundle}")"; then
+            ci_error "[CI-ERROR-APKSETUP-0002]" "reason=\"proxy CA bundle not built\"" "${out}"
+            return 2
+        fi
+        export SSL_CERT_FILE="${bundle}"
+    fi
+    local -a plain_pkgs=() tagged_pkgs=()
+    for kv in "$@"; do
+        case "${kv}" in *@*) tagged_pkgs+=("${kv}") ;; *) plain_pkgs+=("${kv}") ;; esac
+    done
+    _ci_apk_step update || return 2
+    _ci_apk_step upgrade || return 2
+    [ "${#plain_pkgs[@]}" -eq 0 ] || _ci_apk_step add "${plain_pkgs[@]}" || return 2
+    [ -n "${APK_KEYS:-}${APK_TAGGED_REPOS:-}" ] || [ "${#tagged_pkgs[@]}" -gt 0 ] || { [ -z "${bundle}" ] || rm -f "${bundle}"; return 0; }
+    # What: tagged repos after the plain set; keys via curl.
+    # Why: the fetch owner needs curl, which apk just added.
+    # From: Issue #1683 | PR #1858
+    for kv in ${APK_KEYS:-}; do
+        name="${kv%=*}"; name="${name##*/}"
+        _ci_fetch_verified "${kv%=*}" "${kv##*=}" "${root}/etc/apk/keys/${name}" || return 2
+    done
+    for kv in ${APK_TAGGED_REPOS:-}; do
+        kv="@${kv%%=*} ${kv#*=}"
+        if ! out="$(printf '%s\n' "${kv}" 2>&1 >> "${repos}")"; then
+            ci_error "[CI-ERROR-APKSETUP-0004]" "repo=\"${kv}\" reason=\"tagged repo not added\"" "${out}"
+            return 2
+        fi
+    done
+    _ci_apk_step update || return 2
+    [ "${#tagged_pkgs[@]}" -eq 0 ] || _ci_apk_step add "${tagged_pkgs[@]}" || return 2
+    [ -z "${bundle}" ] || rm -f "${bundle}"
+}
+
+# What: one apk step, output shown, coded error with raw.
+# Why: every apk call in apk-setup fails the same way.
+# From: Issue #1683 | PR #1858
+_ci_apk_step() {
+    local step="$1" out rc=0
+    shift
+    out="$(apk "${step}" --no-cache "$@" 2>&1)" || rc=$?
+    printf '%s\n' "${out}"
+    [ "${rc}" -eq 0 ] && return 0
+    ci_error "[CI-ERROR-APKSETUP-0005]" "step=\"apk ${step}\" rc=${rc} reason=\"apk step failed\"" "${out}"
+    return 2
 }
 
 # What: rust-build cleanup state; globals, not locals.
@@ -2956,7 +3047,7 @@ ci_cmd_verify() {
 _ci_rust_validation_enabled() {
     local v
     v="$(_ci_variable CI_RUST_VALIDATION)" || return 2
-    [ "${v//\"/}" = true ]
+    [ "${v}" = true ]
 }
 
 # What: Run AG-VAL-008 cargo fmt/clippy/test for a service.
@@ -3040,7 +3131,7 @@ _ci_smoke_service() {
         "${CI_SMOKE_CMD}" "${service}"
         return "$?"
     fi
-    checks="$(_ci_block_entry_list services "${service}" smoke)"
+    checks="$(_ci_block_entry_list services "${service}" smoke)" || return 2
     if [ -z "${checks}" ]; then
         printf 'service=%s smoke=SKIP reason=no SOT smoke\n' "${service}"
         return 0
@@ -4569,6 +4660,13 @@ _ci_ipv4_to_int() {
     printf '%s' "$(( (10#$a << 24) + (10#$b << 16) + (10#$c << 8) + 10#$d ))"
 }
 
+# What: Convert an integer back to a dotted quad.
+# Why: the slot's sub-subnets are computed as integers.
+# From: Issue #1683 | PR #1858
+_ci_int_to_ipv4() {
+    printf '%s.%s.%s.%s' "$(( ($1 >> 24) & 255 ))" "$(( ($1 >> 16) & 255 ))" "$(( ($1 >> 8) & 255 ))" "$(( $1 & 255 ))"
+}
+
 # What: True if a /27 overlaps a live network.
 # Why: CIDR overlap by integer mask; no python.
 # From: Issue #1683
@@ -4685,9 +4783,27 @@ _ci_validate_startable() {
 # Why: Per-run subnet; reset host ports + fixed names.
 # From: Issue #1683
 _ci_validate_net_override() {
-    local subnet="$1" svc svcs
+    local subnet="$1" svc svcs base cfg nets net i=0
     svcs="$(_ci_validate_startable)" || return 2
-    printf 'networks:\n  default:\n    ipam:\n      config:\n        - subnet: %s\n' "${subnet}"
+    cfg="$(_ci_validate_config_json)" || return 2
+    if ! nets="$(jq -r '.networks // {} | keys[] | select(. != "default")' <<< "${cfg}" 2>&1)"; then
+        ci_error "[CI-ERROR-VALIDATE-0067]" "reason=\"compose networks unreadable\"" "${nets}"
+        return 2
+    fi
+    # What: default /28 plus one /29 per other network.
+    # Why: an auto /16 pool could swallow the /27 slot.
+    # From: Issue #1683 | PR #1858
+    base="$(_ci_ipv4_to_int "${subnet%/*}")"
+    printf 'networks:\n  default:\n    ipam:\n      config:\n        - subnet: %s/28\n' "$(_ci_int_to_ipv4 "${base}")"
+    while IFS= read -r net; do
+        [ -n "${net}" ] || continue
+        if [ "${i}" -ge 2 ]; then
+            ci_log "[CI-ERROR-VALIDATE-0068]" "network=\"${net}\" reason=\"more than 2 extra compose networks; the /27 holds 2\""
+            return 2
+        fi
+        printf '  %s:\n    ipam:\n      config:\n        - subnet: %s/29\n' "${net}" "$(_ci_int_to_ipv4 $(( base + 16 + 8 * i )))"
+        i=$(( i + 1 ))
+    done <<< "${nets}"
     printf 'services:\n'
     while IFS= read -r svc; do
         [ -n "${svc}" ] || continue
@@ -5844,6 +5960,8 @@ _ci_build_tools_build_args() {
     # From: Issue #1683 | PR #1858
     pkgs="$(_ci_apk_repositories "${tool}")" || return 2
     out="${out}${prefix}APK_TAGGED_REPOS=${pkgs}"$'\n'
+    pkgs="$(_ci_apk_keys "${tool}")" || return 2
+    [ -z "${pkgs}" ] || out="${out}${prefix}APK_KEYS=${pkgs}"$'\n'
     printf '%s' "${out}"
 }
 
@@ -5911,6 +6029,14 @@ _ci_service_build_args() {
     if [ -n "${apk_pkgs}" ]; then
         out="${out}${prefix}APK_PACKAGES=${apk_pkgs}"$'\n'
     fi
+    # What: the service's tagged repos and repo keys.
+    # Why: apk-setup adds them; the Dockerfile owns none.
+    # From: Issue #1683 | PR #1858
+    local tagged keys
+    tagged="$(_ci_apk_repositories "${service}")" || return 2
+    keys="$(_ci_apk_keys "${service}")" || return 2
+    [ -z "${tagged}" ] || out="${out}${prefix}APK_TAGGED_REPOS=${tagged}"$'\n'
+    [ -z "${keys}" ] || out="${out}${prefix}APK_KEYS=${keys}"$'\n'
     printf '%s' "${out}"
 }
 
@@ -5941,9 +6067,33 @@ ci_cmd_build_args() {
 # Why: each target resolves with its own repos only.
 # From: Issue #1683
 _ci_apk_repositories() {
+    local out tag
+    out="$(_ci_block_entry_list services "$1" apk_repositories)" || return 2
+    [ -n "${out}" ] || out="$(_ci_block_entry_list build_toolchain "$1" apk_repositories)" || return 2
+    # What: @ALPINE_BRANCH@ becomes vX.Y of the alpine pin.
+    # Why: the SOT pin owns the version; repos only follow.
+    # From: Issue #1683 | PR #1858
+    case "${out}" in
+        *@ALPINE_BRANCH@*)
+            tag="$(_ci_block_entry_field base_images "" alpine)" || return 2
+            tag="${tag%@*}"; tag="${tag##*:}"
+            if [[ ! "${tag}" =~ ^[0-9]+\.[0-9]+$ ]]; then
+                ci_log "[CI-ERROR-BUILDARGS-0016]" "tag=\"${tag}\" reason=\"alpine pin tag is not major.minor; no repo branch\""
+                return 2
+            fi
+            out="${out//@ALPINE_BRANCH@/v${tag}}"
+            ;;
+    esac
+    printf '%s' "${out//$'\n'/ }"
+}
+
+# What: a target's SOT apk_keys (url=sha256), space-joined.
+# Why: one key list for apk-setup and the apk resolver.
+# From: Issue #1683 | PR #1858
+_ci_apk_keys() {
     local out
-    out="$(_ci_block_entry_list services "$1" apk_repositories)"
-    [ -n "${out}" ] || out="$(_ci_block_entry_list build_toolchain "$1" apk_repositories)"
+    out="$(_ci_block_entry_list services "$1" apk_keys)" || return 2
+    [ -n "${out}" ] || out="$(_ci_block_entry_list build_toolchain "$1" apk_keys)" || return 2
     printf '%s' "${out//$'\n'/ }"
 }
 
@@ -6037,7 +6187,7 @@ _ci_build_tools_arches() {
 # Why: real apk runs in a container; tests inject it.
 # From: Issue #1683
 _ci_apk_resolve() {
-    local base="$1" arch="$2" packages="$3" repos="${4:-}" raw n
+    local base="$1" arch="$2" packages="$3" repos="${4:-}" keys="${5:-}" raw n kv kdir b64 kenv=""
     local -a penv=()
     local produced produced_rc=0
     produced="$(_ci_proxy_names)" || produced_rc=$?
@@ -6047,20 +6197,38 @@ _ci_apk_resolve() {
         "${CI_APK_RESOLVE_CMD}" "${base}" "${arch}" "${packages}"
         return "$?"
     fi
+    # What: SOT repo keys fetched here, passed in as base64.
+    # Why: the tagged repo needs its key; one fetch owner.
+    # From: Issue #1683 | PR #1858
+    if [ -n "${keys}" ]; then
+        kdir="$(mktemp -d -p "${CI_TMPDIR}")" || return 2
+        for kv in ${keys}; do
+            n="${kv%=*}"; n="${n##*/}"
+            _ci_fetch_verified "${kv%=*}" "${kv##*=}" "${kdir}/${n}" || { rm -rf "${kdir}"; return 2; }
+            if ! b64="$(base64 -w0 "${kdir}/${n}" 2>&1)"; then
+                ci_error "[CI-ERROR-BUILDTOOLS-0022]" "key=\"${n}\" reason=\"repo key not encodable for the resolver\"" "${b64}"
+                rm -rf "${kdir}"
+                return 2
+            fi
+            kenv="${kenv:+${kenv} }${n}=${b64}"
+        done
+        rm -rf "${kdir}"
+    fi
     # What: per-arch clean root with the build's repos.
     # Why: a foreign arch needs its own db and keys.
     # From: Issue #1683 | PR #1858
     if ! raw="$(_ci_retry apk docker run --rm "${penv[@]}" -e ARCH="${arch}" -e PKGS="${packages}" \
-            -e REPOS="${repos}" "${base}" sh -c '
+            -e REPOS="${repos}" -e KEYS="${kenv}" "${base}" sh -c '
         set -e
         r=/var/tmp/apk-root; k="/usr/share/apk/keys/${ARCH}"
         mkdir -p "${r}/etc/apk"
+        for kv in ${KEYS}; do printf "%s" "${kv#*=}" | base64 -d > "${k}/${kv%%=*}"; done
         sed "s|^https://|http://|" /etc/apk/repositories > "${r}/etc/apk/repositories"
         for kv in ${REPOS}; do echo "@${kv%%=*} ${kv#*=}" >> "${r}/etc/apk/repositories"; done
         apk --root "${r}" --arch "${ARCH}" --keys-dir "${k}" --initdb add
         apk --root "${r}" --arch "${ARCH}" --keys-dir "${k}" update
-        apk --root "${r}" --arch "${ARCH}" --keys-dir "${k}" add --simulate ${PKGS}')"; then
-        ci_log "[CI-ERROR-BUILDTOOLS-0020]" "arch=\"${arch}\" reason=\"apk resolve failed\""
+        apk --root "${r}" --arch "${ARCH}" --keys-dir "${k}" add --simulate ${PKGS}' 2>&1)"; then
+        ci_error "[CI-ERROR-BUILDTOOLS-0020]" "arch=\"${arch}\" reason=\"apk resolve failed\"" "${raw}"
         return 2
     fi
     printf '%s\n' "${raw}" | sed -n 's/^.*Installing \([^ ]*\) (\([^)]*\)).*/\1-\2/p' \
@@ -6071,7 +6239,7 @@ _ci_apk_resolve() {
 # Why: the whole signature is computed here, not in YAML.
 # From: Issue #1683
 _ci_build_tools_resolve_signature() {
-    local base packages arches arch av versions="" tool repos
+    local base packages arches arch av versions="" tool repos keys
     base="$(_ci_build_tools_build_args --bare | sed -n 's/^ALPINE_IMAGE=//p')" || {
         ci_log "[CI-ERROR-BUILDTOOLS-0009]" "reason=\"no ALPINE_IMAGE from SOT; FAIL CLOSED\""
         return 2
@@ -6084,8 +6252,9 @@ _ci_build_tools_resolve_signature() {
     arches="$(_ci_build_tools_arches)" || return 2
     tool="$(_ci_toolchain_target)" || return 2
     repos="$(_ci_apk_repositories "${tool}")" || return 2
+    keys="$(_ci_apk_keys "${tool}")" || return 2
     for arch in ${arches}; do
-        av="$(_ci_apk_resolve "${base}" "${arch}" "${packages}" "${repos}")" || return 2
+        av="$(_ci_apk_resolve "${base}" "${arch}" "${packages}" "${repos}" "${keys}")" || return 2
         if [ -z "${av}" ]; then
             ci_log "[CI-ERROR-BUILDTOOLS-0011]" "arch=\"${arch}\" reason=\"no apk versions; FAIL CLOSED\""
             return 2
@@ -9581,9 +9750,9 @@ _ci_check_codeql_coverage() {
     for lang in ${langs}; do
         raw="$(_ci_block_entry_list codeql_languages "${lang}" files)" || return 2
         [ -n "${raw}" ] || continue
-        mapfile -t globs <<< "${raw//\"/}"
+        mapfile -t globs <<< "${raw}"
         raw="$(_ci_block_entry_list codeql_languages "${lang}" paths)" || return 2
-        mapfile -t paths <<< "${raw//\"/}"
+        mapfile -t paths <<< "${raw}"
         files="$(git -C "${repo_root}" ls-files -- "${globs[@]}")" || { ci_log "[CI-ERROR-CHECK-0071]" "reason=\"git ls-files failed; refusing an empty scan\""; return 2; }
         while IFS= read -r f; do
             [ -n "${f}" ] || continue

@@ -410,9 +410,48 @@ EOF
         run bash "${CI_SH}" codeql-config
     [ "${status}" -eq 0 ]
     [ "${output}" = "$(printf '%s\n' 'name: fixture-repo-codeql' 'queries:' \
-        '  - uses: q1' 'paths:' '  - src-a' 'paths-ignore:' '  - "x/**"')" ]
+        '  - uses: "q1"' 'paths:' '  - "src-a"' 'paths-ignore:' '  - "x/**"')" ]
     CI_MANIFEST="${m}" GITHUB_REPOSITORY='' run bash "${CI_SH}" codeql-config
     [ "${status}" -ne 0 ]
+}
+@test "SOT readers unquote YAML scalars; odd quoting fails" {
+    # What: list+field rows: plain, "..", '..', bad forms.
+    # Why: a kept quote broke the proxy nginx -V smoke.
+    # From: Issue #1683 | PR #1858
+    local m="${BATS_TEST_TMPDIR}/q.yml" name line want fn code
+    while IFS='|' read -r name line want; do
+        printf 'b:\n  e:\n    l:\n      - %s\n    f: %s\n    i: [%s]\n' "${line}" "${line}" "${line}" > "${m}"
+        for fn in list field inline; do
+            code="[CI-ERROR-CORE-0108]"
+            case "${fn}" in
+                list) CI_MANIFEST="${m}" run _ci_block_entry_list b e l ;;
+                field) code="[CI-ERROR-CORE-0107]"; CI_MANIFEST="${m}" run _ci_block_entry_field b e f ;;
+                inline) CI_MANIFEST="${m}" run _ci_block_entry_list b e i ;;
+            esac
+            case "${want}" in
+                ERR) [ "${status}" -eq 2 ] && [[ "${output}" == *"${code}"* ]] \
+                    && [[ "${output}" == *"unsupported YAML quoting"* ]] ;;
+                *) [ "${status}" -eq 0 ] && [ "${output}" = "${want}" ] ;;
+            esac || { echo "${name}/${fn}: rc ${status}: ${output}"; return 1; }
+        done
+    done <<'CASES'
+plain|a/**|a/**
+double|"x/**"|x/**
+double-esc|"a\"b\\c\/d"|a"b\c/d
+single|'it''s'|it's
+single-bs|'a\b'|a\b
+bad-escape|"a\nb"|ERR
+open-double|"abc|ERR
+open-single|'abc|ERR
+inner-quote|"a"b"|ERR
+CASES
+    # What: a quoted shell smoke reads back as the command.
+    # Why: sh -c must get the command, not a quoted name.
+    # From: Issue #1683 | PR #1858
+    printf 'services:\n  s:\n    smoke:\n      - "nginx -V 2>&1 | grep -q -- --x"\n' > "${m}"
+    CI_MANIFEST="${m}" run _ci_block_entry_list services s smoke
+    [ "${status}" -eq 0 ]
+    [ "${output}" = 'nginx -V 2>&1 | grep -q -- --x' ]
 }
 @test "codeql-impact gates on content; only real work needs the image" {
     # What: NOOP needs no image; work needs the SOT one.
@@ -3558,17 +3597,27 @@ SH
 }
 
 @test "validate net override isolates and resets services" {
-    # What: Override sets /27, resets ports and names.
-    # Why: No fixed IPs, no port or name collisions.
-    # From: Issue #1683
-    CI_COMPOSE_CONFIG_CMD="$(_stub cfg 'printf "%s" "{\"services\":{\"proxy\":{},\"dhcp\":{\"network_mode\":\"host\"}}}"')" \
-        run _ci_validate_net_override 172.16.1.32/27
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"subnet: 172.16.1.32/27"* ]]
-    [[ "${output}" == *"proxy:"* ]]
-    [[ "${output}" == *"container_name: !reset null"* ]]
-    [[ "${output}" == *"ports: !reset []"* ]]
-    [[ "${output}" != *"dhcp:"* ]]
+    # What: Override splits the /27, resets ports and names.
+    # Why: No auto /16 pool, no port or name collisions.
+    # From: Issue #1683 | PR #1858
+    local name nets want w
+    local -a ws
+    while IFS='|' read -r name nets want; do
+        CI_COMPOSE_CONFIG_CMD="$(_stub "cfg-${name}" "printf '%s' '{\"services\":{\"proxy\":{},\"dhcp\":{\"network_mode\":\"host\"}},\"networks\":{${nets}}}'")" \
+            run _ci_validate_net_override 172.16.1.32/27
+        IFS=';' read -r -a ws <<<"${want}"
+        for w in "${ws[@]}"; do
+            case "${w}" in
+                rc=*) [ "${status}" -eq "${w#rc=}" ] ;;
+                !*) [[ "${output}" != *"${w#!}"* ]] ;;
+                *) [[ "${output}" == *"${w}"* ]] ;;
+            esac || { echo "${name}: '${w}': rc ${status}: ${output}"; return 1; }
+        done
+    done <<'CASES'
+default-only|"default":{}|rc=0;default:;subnet: 172.16.1.32/28;proxy:;container_name: !reset null;ports: !reset [];!dhcp:;!/29
+two-extra|"default":{},"a":{},"b":{"internal":true}|rc=0;subnet: 172.16.1.32/28;a:;subnet: 172.16.1.48/29;b:;subnet: 172.16.1.56/29
+three-extra|"a":{},"b":{},"c":{}|rc=2;CI-ERROR-VALIDATE-0068;network="c"
+CASES
 }
 
 @test "validate container ip refuses a non-ipv4 result" {
@@ -4925,6 +4974,51 @@ CASES
     [[ "${output}" == *"[CI-ERROR-BUILDTOOLS-0020]"* ]]
     [[ "${output}" == *"unable to select packages"* ]]
     [ "$(grep -c -- "-e ARCH=arch-b" "${log}")" -eq 1 ]
+    # What: SOT keys reach apk as base64; a bad pin fails.
+    # Why: a tagged repo resolves only with its pinned key.
+    # From: Issue #1683 | PR #1858
+    local key="${BATS_TEST_TMPDIR}/sig.pub" sha b64
+    printf 'KEYDATA\n' > "${key}"; sha="$(sha256sum "${key}")"; sha="${sha%% *}"; b64="$(base64 -w0 "${key}")"
+    : > "${log}"
+    CI_HTTP_DOWNLOAD_CMD="$(_stub dl "cp '${key}' \"\$2\"")" CI_APK_RESOLVE_CMD='' PATH="${BATS_TEST_TMPDIR}:${PATH}" \
+        run _ci_apk_resolve img/base arch-b zz "${repos}" "http://k.example/sig.pub=${sha}"
+    [ "${status}" -eq 0 ]
+    grep -qF -- "-e KEYS=sig.pub=${b64}" "${log}"
+    : > "${log}"
+    CI_HTTP_DOWNLOAD_CMD="$(_stub dl "cp '${key}' \"\$2\"")" CI_APK_RESOLVE_CMD='' PATH="${BATS_TEST_TMPDIR}:${PATH}" \
+        run _ci_apk_resolve img/base arch-b zz "${repos}" "http://k.example/sig.pub=$(_test_digest a | cut -d: -f2)"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-FETCH-0003"* ]]
+    [ ! -s "${log}" ]
+}
+
+@test "service build-args carry SOT tagged repos and repo keys" {
+    # What: branch from the alpine pin tag; keys verbatim.
+    # Why: the SOT pin owns the version the repo follows.
+    # From: Issue #1683 | PR #1858
+    local m="${BATS_TEST_TMPDIR}/rk.yml" name tag want
+    while IFS='|' read -r name tag want; do
+        printf 'base_images:\n  alpine: "img:%s@sha256:%s"\nservices:\n  svc:\n    context: c\n    build_type: apk\n    apk_repositories:\n      - x=http://h.example/@ALPINE_BRANCH@/main\n    apk_keys:\n      - https://k.example/s.pub=abc\n' \
+            "${tag}" "$(_test_digest a | cut -d: -f2)" > "${m}"
+        CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc --bare
+        case "${want}" in
+            ok) [ "${status}" -eq 0 ] && [[ "${output}" == *"APK_TAGGED_REPOS=x=http://h.example/v${tag}/main"* ]] \
+                && [[ "${output}" == *"APK_KEYS=https://k.example/s.pub=abc"* ]] ;;
+            *) [ "${status}" -ne 0 ] && [[ "${output}" == *"${want}"* ]] ;;
+        esac || { echo "${name}: rc ${status}: ${output}"; return 1; }
+    done <<'CASES'
+release-tag|3.24|ok
+mutable-tag|latest|CI-ERROR-BUILDARGS-0016
+CASES
+    # What: an unreadable key list fails build-args.
+    # Why: a reader error must not pass as "no keys".
+    # From: Issue #1683 | PR #1858
+    printf 'base_images:\n  alpine: "img:3.24@sha256:%s"\nservices:\n  svc:\n    context: c\n    build_type: apk\n    apk_keys:\n      - "https://k.example/s.pub=abc\n' \
+        "$(_test_digest a | cut -d: -f2)" > "${m}"
+    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc --bare
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"[CI-ERROR-CORE-0108]"* ]]
+    [[ "${output}" != *"APK_KEYS="* ]]
 }
 
 @test "build-tools resolve-signature fails closed on a missing central base image" {
@@ -9378,36 +9472,51 @@ CASES
     [ -z "${output}" ]
 }
 
-# What: run apk-setup with stubs, echo call log.
-# Why: shared apk-setup test mechanic.
-# From: Issue #1683
-_run_apk_setup() {
-    local logf="${BATS_TEST_TMPDIR}/apk-setup.log" d="${BATS_TEST_TMPDIR}/apk-setup-bin" t
-    rm -f "${logf}"; mkdir -p "${d}"
-    for t in sed apk; do
-        _tool_stub "${d}" "${t}" <<STUB
-printf "%s %s\\n" "\$(basename "\$0")" "\$*" >> "${logf}"
+@test "apk-setup maps each case: steps, tagged repos, keys, CA" {
+    # What: fixture root + apk stub per row: calls, codes.
+    # Why: one owner sets repos, keys, CA and apk steps.
+    # From: Issue #1683 | PR #1858
+    local name pkgs repos keys ca fail want r bin w key sha
+    local -a ws p
+    bin="${BATS_TEST_TMPDIR}/apkbin"; mkdir -p "${bin}"
+    _tool_stub "${bin}" apk <<'STUB'
+echo "APK $* cert=${SSL_CERT_FILE:-none}"
+if [ -n "${SSL_CERT_FILE:-}" ] && grep -q PROXYCA "${SSL_CERT_FILE}"; then echo "CA-IN-BUNDLE"; fi
+[ "$1" != "${APK_FAIL:-}" ] || { echo "apk-boom"; exit 3; }
 STUB
-    done
-    PATH="${d}:${PATH}" bash "${CI_SH}" apk-setup "$@"
-    cat "${logf}" 2>/dev/null || true
-}
-
-@test "apk-setup switches repos to http, updates, upgrades, then adds packages" {
-    run _run_apk_setup pkg-one pkg-two
-    [ "${status}" -eq 0 ]
-    [ "${lines[0]}" = "sed -i s|^https://|http://| /etc/apk/repositories" ]
-    [ "${lines[1]}" = "apk update --no-cache" ]
-    [ "${lines[2]}" = "apk upgrade --no-cache" ]
-    [ "${lines[3]}" = "apk add --no-cache pkg-one pkg-two" ]
-}
-
-@test "apk-setup with no packages performs update+upgrade but skips apk add" {
-    run _run_apk_setup
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"apk update --no-cache"* ]]
-    [[ "${output}" == *"apk upgrade --no-cache"* ]]
-    [[ "${output}" != *"apk add"* ]]
+    key="${BATS_TEST_TMPDIR}/key.pub"; printf 'KEYDATA\n' > "${key}"
+    sha="$(sha256sum "${key}")"; sha="${sha%% *}"
+    while IFS='|' read -r name pkgs repos keys ca fail want; do
+        r="${BATS_TEST_TMPDIR}/root-${name}"
+        mkdir -p "${r}/etc/apk/keys" "${r}/etc/ssl/certs" "${r}/run/secrets"
+        printf 'https://dl.example/main\n' > "${r}/etc/apk/repositories"
+        printf 'SYSCA\n' > "${r}/etc/ssl/certs/ca-certificates.crt"
+        [ -z "${ca}" ] || printf 'PROXYCA\n' > "${r}/run/secrets/project_selfhosted_proxy_ca"
+        keys="${keys//@SHA@/${sha}}"
+        read -r -a p <<<"${pkgs}"
+        PATH="${bin}:${PATH}" CI_APK_ROOT="${r}" APK_TAGGED_REPOS="${repos}" APK_KEYS="${keys}" APK_FAIL="${fail}" \
+        CI_HTTP_DOWNLOAD_CMD="$(_stub "dl-${name}" "cp '${key}' \"\$2\"")" \
+            run bash "${CI_SH}" apk-setup "${p[@]}"
+        IFS=';' read -r -a ws <<<"${want}"
+        for w in "${ws[@]}"; do
+            case "${w}" in
+                rc=*) [ "${status}" -eq "${w#rc=}" ] ;;
+                file:*) grep -qF -- "${w#file:}" "${r}/etc/apk/repositories" ;;
+                key) [ "$(cat "${r}/etc/apk/keys/key.pub")" = KEYDATA ] ;;
+                nokey) [ ! -e "${r}/etc/apk/keys/key.pub" ] ;;
+                sysca) [ "$(cat "${r}/etc/ssl/certs/ca-certificates.crt")" = SYSCA ] ;;
+                !*) [[ "${output}" != *"${w#!}"* ]] ;;
+                *) [[ "${output}" == *"${w}"* ]] ;;
+            esac || { echo "${name}: '${w}': rc ${status}: ${output}"; return 1; }
+        done
+    done <<'CASES'
+plain|a b|||||rc=0;file:http://dl.example/main;APK update --no-cache;APK upgrade --no-cache;APK add --no-cache a b;!CA-IN-BUNDLE
+no-pkgs||||||rc=0;APK upgrade --no-cache;!APK add
+tagged|curl n@ng|ng=http://ng.example/v3.24/main|http://k.example/key.pub=@SHA@|||rc=0;APK add --no-cache curl;APK add --no-cache n@ng;file:@ng http://ng.example/v3.24/main;key
+key-mismatch|curl n@ng|ng=http://ng.example/main|http://k.example/key.pub=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|||rc=2;CI-ERROR-FETCH-0003;!APK add --no-cache n@ng
+upgrade-fails|a||||upgrade|rc=2;CI-ERROR-APKSETUP-0005;apk-boom;!APK add
+proxy-ca|a|||y||rc=0;CA-IN-BUNDLE;sysca
+CASES
 }
 
 # =========================================================

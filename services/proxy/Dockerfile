@@ -21,34 +21,23 @@ LABEL org.opencontainers.image.description="nginx-based lancache-ng caching prox
 # Why: a new package set must not reuse a stale apk layer.
 # From: Issue #1683 | PR #1858
 ARG BUILD_IDENTITY
-# What: Install nginx.org nginx with CA trust setup
-# Why: nginx.org has stream; the CA passes the TLS proxy.
-# From: Issue #1095
-RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
-    sed -i 's|^https://|http://|' /etc/apk/repositories \
-    && if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
-         cp /etc/ssl/certs/ca-certificates.crt /var/tmp/ca-bundle.orig \
-         && cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
-       fi \
-    && apk update --no-cache \
-    && apk upgrade --no-cache \
-    && apk add --no-cache ca-certificates openssl curl \
-    && if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
-         cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
-       fi \
-    && curl -fsSL -o /etc/apk/keys/nginx_signing.rsa.pub https://nginx.org/keys/nginx_signing.rsa.pub \
-    && printf '%s\n' "@nginx http://nginx.org/packages/mainline/alpine/v$(cut -d. -f1,2 /etc/alpine-release)/main" >> /etc/apk/repositories \
-    && apk update \
-    && apk add --no-cache \
-        nginx@nginx \
-        coreutils \
-        bash \
-        nano \
-        findutils \
-        gettext-envsubst \
-        lsof \
-        ripgrep \
-    && if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /var/tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+# What: apk packages, nginx.org repo and key from the SOT.
+# Why: the SOT owns them; this stage only consumes them.
+# From: Issue #1683 | PR #1858
+ARG APK_PACKAGES
+ARG APK_TAGGED_REPOS
+ARG APK_KEYS
+# What: bootstrap bash for SHELL compatibility.
+# Why: AG-REL-001 forbids ash; ci.sh apk-setup needs bash.
+# From: Issue #1683 | PR #1858
+RUN apk add --no-cache bash
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# What: shared package setup via ci.sh.
+# Why: ci.sh owns repos, keys, proxy CA and apk steps.
+# From: Issue #1683 | PR #1858
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    --mount=type=secret,id=project_selfhosted_proxy_ca \
+    bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
