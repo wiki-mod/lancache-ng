@@ -10984,3 +10984,30 @@ deeponly|.a.ea.com|ea.com|a.ea.com|||0|-
 mixed|!off.com\non1.com\n# c\n\n  on2.com  |on1.com,on2.com||||0|-
 CASES
 }
+
+@test "dns zone create tolerates only 'exists already' under set -e" {
+    # What: each create-zone outcome under set -eu pipefail.
+    # Why: a swallowed backend error leaves a zone missing.
+    # From: Issue #1683 | PR #1858
+    local root s="${BATS_TEST_TMPDIR}/zone.sh" case prc msg want out
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/services/dns/entrypoint.sh" _dns_ensure_zone_exists
+    while IFS='|' read -r case prc msg want out; do
+        printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
+            'pdnsutil() { echo "CALL $*"; [ -z "${MSG}" ] || echo "${MSG}" >&2; return "${PRC}"; }' \
+            "source '${BATS_TEST_TMPDIR}/fns-entrypoint.sh'" \
+            '_dns_ensure_zone_exists lan' 'echo CANARY' > "${s}"
+        PRC="${prc}" MSG="${msg}" run bash "${s}"
+        [ "${status}" -eq "${want}" ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
+        [[ "${output}" == *"${out}"* ]] || { echo "${case}: ${output}"; return 1; }
+    done <<'CASES'
+created|0||0|CANARY
+exists|1|Zone 'lan' exists already|0|CANARY
+upper|1|EXISTS ALREADY|0|CANARY
+reversed|1|Zone 'lan' already exists|1|FATAL: failed to create zone 'lan'
+backend|1|Error: Unable to open database connection|1|FATAL: failed to create zone 'lan': CALL --config-dir=/etc/pdns/auth create-zone lan
+CASES
+    PRC=1 MSG="Error: Unable to open database connection" run bash "${s}"
+    [[ "${output}" == *"Unable to open database connection"* ]]
+    [[ "${output}" != *CANARY* ]]
+}
