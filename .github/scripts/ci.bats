@@ -9362,6 +9362,64 @@ CASES
     [[ "${output}" == *"outside the expected"* ]]
 }
 
+@test "retention purge maps each cache state; stamp only on success" {
+    # What: maybe_purge per cache state, one table.
+    # Why: the stamp means purged; never on a failed pass.
+    # From: Issue #872 | PR #1858
+    local t="${BATS_TEST_TMPDIR}" name state ffail old new stamp msg w
+    local -a ws
+    export CACHE_DIR_ALLOWED_PREFIX="${t}" CACHE_VALID_DAYS=30
+    _load_retention_functions
+    while IFS='|' read -r name state ffail old new stamp msg; do
+        export CACHE_DIR="${t}/${name}/cache" PURGE_STAMP="${t}/${name}/purge.stamp"
+        mkdir -p "${t}/${name}"
+        if [ "${state}" != missing ]; then
+            mkdir -p "${CACHE_DIR}"
+            truncate -s 1M "${CACHE_DIR}/old.bin" "${CACHE_DIR}/new.bin"
+            touch -d '-40 days' "${CACHE_DIR}/old.bin"
+            touch -d '-1 days' "${CACHE_DIR}/new.bin"
+        fi
+        [ "${state}" != stamped ] || date +%s > "${PURGE_STAMP}"
+        if [ "${ffail}" = yes ]; then
+            find() { echo "simulated permission denied" >&2; return 1; }
+        fi
+        run maybe_purge
+        unset -f find
+        [ "${status}" -eq 0 ] || { echo "${name}: rc ${status}: ${output}"; return 1; }
+        case "${old}" in
+            gone) [ ! -e "${CACHE_DIR}/old.bin" ] || { echo "${name}: old.bin kept: ${output}"; return 1; } ;;
+            kept) [ -e "${CACHE_DIR}/old.bin" ] || { echo "${name}: old.bin gone: ${output}"; return 1; } ;;
+        esac
+        [ "${new}" != kept ] || [ -e "${CACHE_DIR}/new.bin" ] || { echo "${name}: new.bin gone"; return 1; }
+        case "${stamp}" in
+            yes) [ -f "${PURGE_STAMP}" ] || { echo "${name}: no stamp: ${output}"; return 1; } ;;
+            no) [ ! -f "${PURGE_STAMP}" ] || { echo "${name}: stamp written: ${output}"; return 1; } ;;
+        esac
+        IFS=';' read -r -a ws <<<"${msg}"
+        for w in "${ws[@]}"; do
+            [ "${w}" = - ] || [[ "${output}" == *"${w}"* ]] || { echo "${name}: no '${w}': ${output}"; return 1; }
+        done
+    done <<'CASES'
+purge|present|no|gone|kept|yes|Purged
+rate-limited|stamped|no|kept|kept|yes|-
+missing-dir|missing|no|-|-|no|does not exist
+find-error|present|yes|kept|kept|no|ERROR: find failed while scanning;simulated permission denied
+CASES
+    # What: a dir that appears later still gets purged.
+    # Why: the missing-dir cycle must not use up the day.
+    # From: Issue #872 | PR #1858
+    export CACHE_DIR="${t}/later/cache" PURGE_STAMP="${t}/later/purge.stamp"
+    mkdir -p "${t}/later"
+    run maybe_purge
+    [ "${status}" -eq 0 ] && [ ! -f "${PURGE_STAMP}" ]
+    mkdir -p "${CACHE_DIR}"
+    truncate -s 1M "${CACHE_DIR}/old.bin"
+    touch -d '-40 days' "${CACHE_DIR}/old.bin"
+    run maybe_purge
+    [ "${status}" -eq 0 ]
+    [ ! -e "${CACHE_DIR}/old.bin" ] && [ -f "${PURGE_STAMP}" ] || { echo "later: ${output}"; return 1; }
+}
+
 @test "retention stops promptly with rc 0 on SIGTERM mid-sleep" {
     # What: a real TERM during the interval sleep ends it.
     # Why: PID 1 bash ignored TERM; docker stop had to kill.
