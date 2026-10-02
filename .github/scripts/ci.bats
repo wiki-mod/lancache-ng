@@ -142,30 +142,30 @@ teardown() {
     [[ "${output}" == *"CI-ERROR-CORE-0002"* ]]
 }
 
-@test "every ci.sh message code is used at exactly one site" {
-    # What: a code at two sites fails, naming both lines.
-    # Why: the code is the "where" of a CI log line.
+@test "exit-evidence is clean on ci.sh and flags each rule" {
+    # What: real ci.sh clean; one fixture per rule fails.
+    # Why: the guard owns the class; prove both directions.
     # From: Issue #1683 | PR #1858
-    local re='\[CI-[A-Z]+-([A-Z0-9]+-[0-9]{4})\]'
-    local line n=0 key rest
-    local -A code_site=()
-    local -a dup=()
-    while IFS= read -r line; do
-        n=$((n + 1))
-        [[ "${line}" =~ ^[[:space:]]*# ]] && continue
-        rest="${line}"
-        while [[ "${rest}" =~ ${re} ]]; do
-            key="${BASH_REMATCH[1]}"
-            if [ -n "${code_site[${key}]+x}" ]; then
-                dup+=("${key}: line ${code_site[${key}]} and line ${n}")
-            else
-                code_site["${key}"]="${n}"
-            fi
-            rest="${rest#*"${BASH_REMATCH[0]}"}"
-        done
-    done < "${CI_SH}"
-    [ "${#code_site[@]}" -gt 0 ]
-    [ "${#dup[@]}" -eq 0 ] || { printf '%s\n' "${dup[@]}"; return 1; }
+    run bash "${CI_SH}" check exit-evidence "${CI_SH}"
+    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
+    [[ "${output}" == *"exit-evidence=clean files=1"* ]]
+    local fx="${BATS_TEST_TMPDIR}/fx.sh" name body
+    while IFS='|' read -r name body; do
+        printf 'f() {\n    %s\n}\n' "${body}" > "${fx}"
+        run bash "${CI_SH}" check exit-evidence "${fx}"
+        [ "${status}" -eq 1 ] && [[ "${output}" == *"[CI-ERROR-CHECK-0124]"* ]] \
+            && [[ "${output}" == *": ${name}"* ]] \
+            || { echo "${name}: rc ${status}: ${output}"; return 1; }
+    done <<'CASES'
+raw-mktemp|t="$(mktemp -d)" || return 2
+for-in-substitution|for s in $(ci_services); do :; done
+reader-in-test|[ "$(ci_service_field svc build_type)" = rust ] && :
+uncoded-external-return|v="$(jq -r .a f.json)" || return 2
+duplicate-code|ci_log "[CI-ERROR-X-0001]" "a"; ci_log "[CI-INFO-X-0001]" "b"
+CASES
+    printf 'f() {\n    t="$(_ci_mktemp -d)" || return 2\n    v="$(jq -r .a f.json 2>&1)" || { ci_error "[CI-ERROR-X-0001]" "c" "${v}"; return 2; }\n}\n' > "${fx}"
+    run bash "${CI_SH}" check exit-evidence "${fx}"
+    [ "${status}" -eq 0 ] || { echo "valid fixture: ${output}"; return 1; }
 }
 
 @test "_ci_capture passes max-ok rc, fails higher rc or stderr" {
@@ -8854,6 +8854,23 @@ STUB
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo GITHUB_SHA=deadbeef \
         run _ci_index_lookup ui
     [ "${status}" -eq 1 ]
+}
+
+@test "assemble-stack walks the matrix; a bad matrix stops with raw" {
+    # What: one assemble per service; bad JSON -> 0011.
+    # Why: a jq error must not walk zero services silently.
+    # From: Issue #1683 | PR #1858
+    local calls="${BATS_TEST_TMPDIR}/asm-calls"
+    : > "${calls}"
+    ci_cmd_assemble() { printf '%s\n' "$1" >> "${calls}"; }
+    CI_BUILD_MATRIX='{"include":[{"service":"ui"},{"service":"dns"},{"service":"ui"}]}' run ci_cmd_assemble_stack
+    [ "${status}" -eq 0 ]
+    [ "$(cat "${calls}")" = "$(printf 'dns\nui')" ]
+    : > "${calls}"
+    CI_BUILD_MATRIX='{"include":[ broken' run ci_cmd_assemble_stack
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"[CI-ERROR-ASSEMBLE-0011]"* ]] && [[ "${output}" == *"jq: parse error"* ]]
+    [ ! -s "${calls}" ]
 }
 
 @test "an unreachable registry stops assembly, never re-assembles" {

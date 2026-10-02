@@ -1770,9 +1770,13 @@ ci_cmd_changed_files() {
 # Why: one matrix walk; iteration in ci.sh (AG-CODE-011).
 # From: Issue #1683
 ci_cmd_assemble_stack() {
-    local matrix="${CI_BUILD_MATRIX:-}" svc
+    local matrix="${CI_BUILD_MATRIX:-}" svc svcs
     [ -n "${matrix}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0006]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
-    for svc in $(printf '%s' "${matrix}" | jq -r '[.include[].service] | unique | .[]'); do
+    if ! svcs="$(jq -r '[.include[].service] | unique | .[]' <<< "${matrix}" 2>&1)"; then
+        ci_error "[CI-ERROR-ASSEMBLE-0011]" "reason=\"CI_BUILD_MATRIX unreadable; no service assembled\"" "${svcs}"$'\n'"matrix: ${matrix}"
+        return 2
+    fi
+    for svc in ${svcs}; do
         ci_cmd_assemble "${svc}" || return "$?"
     done
 }
@@ -5525,7 +5529,7 @@ _ci_validate_ssl_dispatch_map() {
 _ci_validate_poll() {
     local attempts="$1" pause="$2" i out
     shift 2
-    for i in $(seq 1 "${attempts}"); do
+    for (( i = 1; i <= attempts; i++ )); do
         if out="$("$@" 2>&1)"; then
             return 0
         fi
@@ -5604,7 +5608,7 @@ _ci_validate_dns_resolves() {
     # Why: a warning must not turn a match into a mismatch.
     # From: Issue #1683 | PR #1858
     dig_err="$(_ci_mktemp "${CI_TMPDIR}/ci-dig-err.XXXXXX")" || return 2
-    for i in $(seq 1 "${attempts}"); do
+    for (( i = 1; i <= attempts; i++ )); do
         got=""
         if out="$(dig +time=2 +tries=1 +short "@${ip}" A "${fqdn}" 2>"${dig_err}")"; then
             got="$(sort -u <<<"${out}")"
@@ -7515,6 +7519,49 @@ _ci_check_pipefail_early_exit() {
     printf 'pipefail-early-exit=clean files=%s\n' "${#files[@]}"
 }
 
+# What: flag exit paths that lose code, context or raw.
+# Why: AG-INT-002/AG-VAL-029: the class kept coming back.
+# From: Issue #1683 | PR #1858
+_ci_check_exit_evidence() {
+    local -a _ci_override=("$@") files=()
+    _ci_scan_files files _ci_override '.github/scripts/ci.sh' || return 2
+    local path out
+    local -a viol=()
+    for path in "${files[@]}"; do
+        if ! out="$(awk '
+            function strip(s) { gsub(/\047[^\047]*\047/, "", s); return s }
+            /^[a-z_][a-z0-9_]*\(\) \{/ { fn = $1; sub(/\(\).*/, "", fn) }
+            /^[[:space:]]*#/ { next }
+            {
+                s = strip($0)
+                if (fn != "_ci_mktemp" && s ~ /(^|[^_a-z])mktemp([[:space:]]|$)/)
+                    print FILENAME ":" NR ": raw-mktemp: " $0
+                if (s ~ /for [A-Za-z_][A-Za-z0-9_]* in [^;]*\$\(/)
+                    print FILENAME ":" NR ": for-in-substitution: " $0
+                if (s ~ /\[\[? +"\$\((_ci_block_entry_field|_ci_block_entry_list|_ci_block_keys|_ci_manifest_scalar|_ci_channel_field|ci_service_field|ci_services|ci_build_targets|ci_service_contexts|ci_context_path)[ )]/)
+                    print FILENAME ":" NR ": reader-in-test: " $0
+                if (s ~ /^[[:space:]]*(local +)?[A-Za-z_][A-Za-z0-9_]*="\$\((git|docker|jq|curl|gh|awk|sed|tar|cat|date|base64|sha256sum|openssl|dig|find|ls|wc|tr|cut|sort) [^)]*\)" *\|\| *return/)
+                    print FILENAME ":" NR ": uncoded-external-return: " $0
+                line = $0
+                while (match(line, /\[CI-[A-Z]+-[A-Z0-9]+-[0-9][0-9][0-9][0-9]\]/)) {
+                    code = substr(line, RSTART, RLENGTH); sub(/^\[CI-[A-Z]+-/, "", code); sub(/\]$/, "", code)
+                    if (code in site) print FILENAME ":" NR ": duplicate-code " code " (first at line " site[code] "): " $0
+                    else site[code] = NR
+                    line = substr(line, RSTART + RLENGTH)
+                }
+            }' "${path}" 2>&1)"; then
+            ci_error "[CI-ERROR-CHECK-0123]" "file=\"${path}\" reason=\"exit-evidence scan failed\"" "${out}"
+            return 2
+        fi
+        [ -z "${out}" ] || viol+=("${out}")
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0124]" "files=${#files[@]} reason=\"exit path loses code, context or raw (AG-INT-002)\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'exit-evidence=clean files=%s\n' "${#files[@]}"
+}
+
 # What: Flag a $? read first after an else-less if.
 # Why: that $? is the if's own 0 (AG-VAL-030).
 # From: Issue #1683 | PR #1858
@@ -8576,9 +8623,10 @@ _ci_check_naming_consistency() {
 _ci_check_compose_healthchecks() {
     local -a files=("$@")
     if [ "${#files[@]}" -eq 0 ]; then
-        local f dep
+        local f dep top
         dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-        for f in "${CI_REPO_ROOT}/$(dirname "$(dirname "${dep}")")"/*/"$(basename "${dep}")"; do
+        top="${dep%/*}"; top="${top%/*}"
+        for f in "${CI_REPO_ROOT}/${top}"/*/"${dep##*/}"; do
             [ -f "${f}" ] && files+=("${f}")
         done
     fi
@@ -9396,12 +9444,12 @@ _ci_check_dhcp_proxy_env() {
     qc="${repo_root}/${inst}"
     local -a opt=(DHCP_PROXY_INTERFACE DHCP_PROXY_ROUTER DHCP_NTP_SERVERS DHCP_PROXY_DOMAIN DHCP_PROXY_BOOT_FILENAME DHCP_PROXY_BOOT_SERVER DHCP_PROXY_CUSTOM_OPTIONS)
     local -a pxe=(DHCP_PROXY_PXE_BOOT_SERVER DHCP_PROXY_PXE_BOOT_FILENAME_BIOS DHCP_PROXY_PXE_BOOT_FILENAME_UEFI)
-    for f in "${dep}" config/prod/dhcp-proxy.env "$(dirname "${inst}")/.env" \
+    for f in "${dep}" config/prod/dhcp-proxy.env "${inst%/*}/.env" \
         "${inst}" services/dhcp-proxy/entrypoint.sh services/dhcp-proxy/dnsmasq.conf.template; do
         [ -f "${repo_root}/${f}" ] || { ci_error "[CI-ERROR-CHECK-0048]" "path=\"${f}\" reason=\"required dhcp-proxy input missing\"" "missing dhcp-proxy input: ${f}"; return 2; }
     done
     out="$(_ci_dhcp_proxy_env_file_ok "${repo_root}/${dep}" '../../config/prod/dhcp-proxy.env')" || viol+=("${out}")
-    for ef in config/prod/dhcp-proxy.env "$(dirname "${inst}")/.env"; do
+    for ef in config/prod/dhcp-proxy.env "${inst%/*}/.env"; do
         for key in "${opt[@]}" "${pxe[@]}"; do
             grep -Eq "^${key}=" "${repo_root}/${ef}" || viol+=("${ef}: must define ${key} (empty default)")
         done
@@ -10194,7 +10242,7 @@ ci_cmd_check_all() {
     local -a diff_scoped=(line-endings comment-length \
         deny-short-sha language-policy mutable-refs executable-bits \
         pipefail-early-exit if-without-else-status docker-run-heredoc-stdin \
-        review-chronology governance-guards \
+        exit-evidence review-chronology governance-guards \
         changelog-direct-edit)
     for sub in "${diff_scoped[@]}"; do
         CI_SCAN_SCOPE_FILTER=1 ci_cmd_check "${sub}" "${changed[@]}" || rc=1
@@ -10249,6 +10297,7 @@ ci_cmd_check() {
         review-chronology) _ci_check_review_chronology "$@" ;;
         pipefail-early-exit) _ci_check_pipefail_early_exit "$@" ;;
         if-without-else-status) _ci_check_if_without_else_status "$@" ;;
+        exit-evidence) _ci_check_exit_evidence "$@" ;;
         docker-run-heredoc-stdin) _ci_check_docker_run_heredoc_stdin "$@" ;;
         setup-prompt-drift) _ci_check_setup_prompt_drift "$@" ;;
         pr-title) _ci_check_pr_title "$@" ;;
