@@ -1141,6 +1141,12 @@ _ci_classify_failure() {
         *"error: could not compile"*|*"dockerfile parse error"*|*"failed to solve"*"parse"*) printf 'permanent\n'; return 0 ;;
         *"couldn't find remote ref"*|*"fatal: repository"*"not found"*) printf 'permanent\n'; return 0 ;;
     esac
+    # What: a local image that does not exist is permanent.
+    # Why: pushing a missing local tag never heals on retry.
+    # From: Issue #1683 | PR #1858
+    case "${low}" in
+        *"an image does not exist locally"*|*"no such image"*) printf 'permanent\n'; return 0 ;;
+    esac
     # What: buildx's own narrow known-transient signatures.
     # Why: Never a real compile failure (scoped wrappers).
     # From: Issue #1683

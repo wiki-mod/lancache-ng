@@ -1072,6 +1072,8 @@ CASES
     [ "$(_ci_classify_failure 'curl: (22) The requested URL returned error: 404')" = "permanent" ]
     [ "$(_ci_classify_failure 'ERROR: unable to select packages: x (no such package)')" = "permanent" ]
     [ "$(_ci_classify_failure 'ERROR: Not committing changes due to missing repository tags.')" = "permanent" ]
+    [ "$(_ci_classify_failure 'An image does not exist locally with the tag: registry.example.test/o/r/svc')" = "permanent" ]
+    [ "$(_ci_classify_failure 'Error response from daemon: No such image: registry.example.test/o/r/svc:t')" = "permanent" ]
 }
 
 @test "retry classifier: a missing manifest is not_found, auth is not" {
