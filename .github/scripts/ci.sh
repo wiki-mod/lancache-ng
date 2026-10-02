@@ -5885,12 +5885,14 @@ _ci_validate_dns_rollback() {
     _ci_validate_ui_add_record "${project}" "${jar}" "${csrf}" ci-rollback-probe 203.0.113.71 || { rm -f "${jar}"; return 1; }
     _ci_validate_dns_resolves "${project}" dns-standard ci-rollback-probe.lan. 203.0.113.71 15 || { rm -f "${jar}"; return 1; }
     rm -f "${jar}"
+    resp="$(_ci_capture 0 curl -sS -H "X-API-Key: ${key}" "http://${ip}:8083/snapshots")" || return 2
+    last="$(_ci_capture 0 jq -r '.zones["lan."][0].id // empty' <<<"${resp}")" || return 2
     compose="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    # What: roll back through the operator CLI, setup.sh.
-    # Why: §49 client path; API key resolved in container.
+    # What: setup.sh rollback with a wrong host PDNS_API_KEY.
+    # Why: the key must be resolved inside the container.
     # From: Issue #836
-    resp="$(COMPOSE_PROJECT_NAME="${project}" bash "${CI_REPO_ROOT}/setup.sh" \
-        reset-to-last-known-good-config dns "$(dirname "${compose}")" \
+    resp="$(COMPOSE_PROJECT_NAME="${project}" PDNS_API_KEY=CHANGE_ME_host_side_key_never_used \
+        bash "${CI_REPO_ROOT}/setup.sh" reset-to-last-known-good-config dns "$(dirname "${compose}")" \
         lan. "${snap}" --yes 2>&1)" || rc=$?
     case "${rc}:${resp}" in
         *"cache-flush publishes failed"*) rc=1 ;;
@@ -5905,6 +5907,18 @@ _ci_validate_dns_rollback() {
     # Why: proves recursor cache flush reached it.
     # From: Issue #628
     _ci_validate_dns_resolves "${project}" dns-standard ci-rollback-probe.lan. 203.0.113.70 15 || return $?
+    if ! resp="$(_ci_validate_poll 15 1 _ci_validate_new_snapshot "${ip}" "${key}" "${last}")"; then
+        ci_error "[CI-ERROR-VALIDATE-0087]" "previous=\"${last}\" reason=\"no new lan. snapshot after the rollback\"" "${resp}"
+        return 1
+    fi
+}
+
+# What: True if lan.'s newest snapshot id is not $3.
+# Why: a restore must record the restored state too.
+# From: Issue #836
+_ci_validate_new_snapshot() {
+    curl -fsS -H "X-API-Key: $2" "http://$1:8083/snapshots" \
+        | jq -e --arg p "$3" '(.zones["lan."][0].id // "") as $i | $i != "" and $i != $p' >/dev/null
 }
 
 # What: Prove ui.depends_on never gates on service_healthy.

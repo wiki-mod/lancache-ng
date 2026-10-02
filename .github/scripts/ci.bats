@@ -4301,33 +4301,46 @@ CASES
     _ci_validate_ui_session() { echo TOK; }
     _ci_validate_ui_add_record() { return 0; }
     _ci_validate_dns_resolves() { return 0; }
+    sleep() { :; }
+    export CI_REPO_ROOT="${BATS_TEST_TMPDIR}/repo" CI_COMPOSE_FILE=dep/c.yml
+    mkdir -p "${CI_REPO_ROOT}"
+    # What: each snapshot read returns the next id (snapN).
+    # Why: the check needs a new id after the rollback.
+    # From: Issue #836
     curl() {
+        local n
         case "$*" in
             *-w*) echo 401 ;;
             *-o\ /dev/null*) return 0 ;;
-            *) echo '{"zones":{"lan.":[{"id":"snap1"}]}}' ;;
+            *)
+                n="$(cat "${CI_REPO_ROOT}/n")"
+                if [ ! -e "${CI_REPO_ROOT}/static" ] || [ "${n}" -lt 2 ]; then n=$((n + 1)); fi
+                echo "${n}" > "${CI_REPO_ROOT}/n"
+                echo "{\"zones\":{\"lan.\":[{\"id\":\"snap${n}\"}]}}" ;;
         esac
     }
-    export CI_REPO_ROOT="${BATS_TEST_TMPDIR}/repo" CI_COMPOSE_FILE=dep/c.yml
-    mkdir -p "${CI_REPO_ROOT}"
     printf '%s\n' '#!/usr/bin/env bash' \
-        'printf "%s %s\n" "${COMPOSE_PROJECT_NAME}" "$*" > "${CI_REPO_ROOT}/args"' \
+        'printf "%s %s %s\n" "${COMPOSE_PROJECT_NAME}" "${PDNS_API_KEY}" "$*" > "${CI_REPO_ROOT}/args"' \
         'cat "${CI_REPO_ROOT}/out"; exit "$(cat "${CI_REPO_ROOT}/rc")"' \
         > "${CI_REPO_ROOT}/setup.sh"
-    while IFS='|' read -r case want out; do
+    while IFS='|' read -r case want code out; do
         printf '%s\n' "${out}" > "${CI_REPO_ROOT}/out"
+        echo 0 > "${CI_REPO_ROOT}/n"
+        rm -f "${CI_REPO_ROOT}/static"
+        [ "${case}" != nosnap ] || : > "${CI_REPO_ROOT}/static"
         case "${case}" in fails) echo 1 ;; *) echo 0 ;; esac > "${CI_REPO_ROOT}/rc"
         run _ci_validate_dns_rollback proj
         [ "${status}" -eq "${want}" ] || { echo "${case}: ${output}"; return 1; }
-        [ "${want}" -eq 0 ] || [[ "${output}" == *"CI-ERROR-VALIDATE-0043"* ]]
+        [ "${want}" -eq 0 ] || [[ "${output}" == *"CI-ERROR-VALIDATE-${code}"* ]]
         [ "$(cat "${CI_REPO_ROOT}/args")" = \
-            "proj reset-to-last-known-good-config dns dep lan. snap1 --yes" ]
+            "proj CHANGE_ME_host_side_key_never_used reset-to-last-known-good-config dns dep lan. snap1 --yes" ]
     done <<'CASES'
-ok|0|rolled back to known-good snapshot snap1. Changed rrsets: ["ci-rollback-probe.lan."]
-fails|1|rollback listener rejected the request with HTTP 500
-flush|1|rolled back to known-good snapshot snap1. ci-rollback-probe.lan. cache-flush publishes failed
-other-snap|1|rolled back to known-good snapshot snap0. Changed rrsets: ["ci-rollback-probe.lan."]
-no-probe|1|rolled back to known-good snapshot snap1. Changed rrsets: []
+ok|0|-|rolled back to known-good snapshot snap1. Changed rrsets: ["ci-rollback-probe.lan."]
+fails|1|0043|rollback listener rejected the request with HTTP 500
+flush|1|0043|rolled back to known-good snapshot snap1. ci-rollback-probe.lan. cache-flush publishes failed
+other-snap|1|0043|rolled back to known-good snapshot snap0. Changed rrsets: ["ci-rollback-probe.lan."]
+no-probe|1|0043|rolled back to known-good snapshot snap1. Changed rrsets: []
+nosnap|1|0087|rolled back to known-good snapshot snap1. Changed rrsets: ["ci-rollback-probe.lan."]
 CASES
 }
 
