@@ -5888,7 +5888,7 @@ _ci_validate_dns_rollback() {
     resp="$(_ci_capture 0 curl -sS -H "X-API-Key: ${key}" "http://${ip}:8083/snapshots")" || return 2
     last="$(_ci_capture 0 jq -r '.zones["lan."][0].id // empty' <<<"${resp}")" || return 2
     compose="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    # What: setup.sh rollback with a wrong host PDNS_API_KEY.
+    # What: setup.sh rollback, wrong host PDNS_API_KEY.
     # Why: the key must be resolved inside the container.
     # From: Issue #836
     resp="$(COMPOSE_PROJECT_NAME="${project}" PDNS_API_KEY=CHANGE_ME_host_side_key_never_used \
