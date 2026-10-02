@@ -8809,6 +8809,26 @@ _load_setup_update_helpers() {
     } > "${helper_file}"
     # shellcheck source=/dev/null
     source "${helper_file}"
+    # What: host arch and registry are stubbed, never real.
+    # Why: the platform guard otherwise asks GHCR per test.
+    # From: Issue #1683 | PR #1858
+    uname() {
+        if [ "$1" = -m ]; then printf '%s\n' "${SETUP_FAKE_ARCH:-x86_64}"; else command uname "$@"; fi
+    }
+    docker() {
+        case "$*" in
+            "buildx version") [ "${SETUP_FAKE_NO_BUILDX:-0}" = 0 ] ;;
+            "buildx imagetools inspect "*)
+                [ "${SETUP_FAKE_INSPECT_FAIL:-0}" = 0 ] || { echo "fake registry unreachable" >&2; return 1; }
+                if [[ "$*" == *--format* ]]; then
+                    printf '%s\n' "${SETUP_FAKE_SINGLE:-linux/amd64}"
+                else
+                    printf 'Platform:  %s\n' ${SETUP_FAKE_MULTI//,/ }
+                fi
+                ;;
+            *) echo "unexpected docker call: $*" >&2; return 99 ;;
+        esac
+    }
 }
 
 # What: Converged .env, all keys filled.
@@ -8864,6 +8884,55 @@ _write_legacy_env_fixture() {
         'PROXY_ALLOWED_CLIENT_CIDRS=' 'LANCACHE_IMAGE_TAG=v0.2.0' \
         "UI_AUTH_USER=${ui_auth_user}" 'UI_AUTH_PASSWORD=' \
         > "$env_file"
+}
+
+@test "setup.sh image platform guards map host and manifest" {
+    # What: one row per host arch / buildx / manifest case.
+    # Why: a tag lacking this platform must fail closed.
+    # From: Issue #665 | PR #1858
+    local name fn arch nobx fail single multi rc want w
+    local -a ws
+    _load_setup_update_helpers "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    while IFS='|' read -r name fn arch nobx fail single multi rc want; do
+        export SETUP_FAKE_ARCH="${arch}" SETUP_FAKE_NO_BUILDX="${nobx}" \
+            SETUP_FAKE_INSPECT_FAIL="${fail}" SETUP_FAKE_SINGLE="${single}" \
+            SETUP_FAKE_MULTI="${multi}"
+        case "${fn}" in
+            host) run host_image_platform "${arch}" ;;
+            prebuilt) run assert_prebuilt_image_platform_supported ;;
+            resolved) run assert_resolved_image_tag_platform_supported \
+                registry.example.test owner/fixture-repo t1 ;;
+        esac
+        [ "${status}" -eq "${rc}" ] || { echo "${name}: rc ${status}: ${output}"; return 1; }
+        [ "${want}" = - ] && continue
+        IFS=';' read -r -a ws <<<"${want}"
+        for w in "${ws[@]}"; do
+            [[ "${output}" == *"${w}"* ]] || { echo "${name}: no '${w}': ${output}"; return 1; }
+        done
+    done <<'CASES'
+host-x86_64|host|x86_64|0|0|-|-|0|linux/amd64
+host-amd64|host|amd64|0|0|-|-|0|linux/amd64
+host-aarch64|host|aarch64|0|0|-|-|0|linux/arm64
+host-arm64|host|arm64|0|0|-|-|0|linux/arm64
+host-unknown|host|riscv64|0|0|-|-|1|-
+prebuilt-x86_64|prebuilt|x86_64|0|0|-|-|0|-
+prebuilt-aarch64|prebuilt|aarch64|0|0|-|-|0|-
+prebuilt-unknown|prebuilt|riscv64|0|0|-|-|1|linux/amd64 and linux/arm64;'riscv64'
+tag-lacks-platform|resolved|aarch64|0|0|linux/amd64|-|1|does not publish a linux/arm64 image;published: linux/amd64
+tag-single-match|resolved|x86_64|0|0|linux/amd64|-|0|-
+tag-index-fallback|resolved|aarch64|0|0|<no value>/<no value>|linux/amd64,linux/arm64|0|-
+tag-unknown-host|resolved|riscv64|0|0|-|-|1|linux/amd64 and linux/arm64
+tag-no-buildx|resolved|x86_64|1|0|-|-|1|docker buildx is required
+tag-unreachable|resolved|x86_64|0|1|-|-|1|Failed to inspect registry.example.test/owner/fixture-repo/dns:t1;fake registry unreachable
+CASES
+    # What: no docker on PATH fails closed, not silently.
+    # Why: the guard must never skip without its tool.
+    # From: Issue #1683 | PR #1858
+    unset -f docker
+    export SETUP_FAKE_ARCH=x86_64
+    PATH="" run assert_resolved_image_tag_platform_supported registry.example.test owner/fixture-repo t1
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"docker is required"* ]]
 }
 
 @test "migrate_env_for_update is a no-op on an already-converged .env" {
