@@ -2915,11 +2915,45 @@ CASES
     [[ "${output}" == *"CI-ERROR-VALIDATE-0002"* ]]
 }
 
+@test "stack candidate admits only service=sha256:<64 hex> lines" {
+    # What: candidate intake per line shape, one table.
+    # Why: a bad digest must not reach compose or promote.
+    # From: Issue #1683 | PR #1858
+    local a b name lines want f
+    a="$(_test_digest a)"; b="$(_test_digest b)"
+    while IFS='|' read -r name lines want; do
+        f="${BATS_TEST_TMPDIR}/${name}.cand"
+        lines="${lines//@A/${a}}"; lines="${lines//@B/${b}}"
+        case "${lines}" in
+            FAIL3) CI_STACK_CANDIDATE_CMD="$(_stub "c-${name}" 'exit 3')" ;;
+            *) printf '%s\n' "${lines//;/$'\n'}" > "${f}"; CI_STACK_CANDIDATE_CMD="$(_stub "c-${name}" "cat '${f}'")" ;;
+        esac
+        export CI_STACK_CANDIDATE_CMD
+        run _ci_stack_candidate
+        case "${want}" in
+            ok) [ "${status}" -eq 0 ] && [ "${output}" = "$(cat "${f}")" ] ;;
+            rc3) [ "${status}" -eq 3 ] && [[ "${output}" != *CANDIDATE-0006* ]] ;;
+            bad) [ "${status}" -eq 2 ] && [[ "${output}" == *CI-ERROR-CANDIDATE-0006* ]] \
+                && [[ "${output}" == *"${lines##*;}"* ]] ;;
+        esac || { echo "${name}: rc ${status}: ${output}"; return 1; }
+    done <<'CASES'
+one|proxy=@A|ok
+two|proxy=@A;dhcp-proxy=@B|ok
+empty||ok
+source-fails|FAIL3|rc3
+short|proxy=sha256:beef|bad
+no-prefix|proxy=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|bad
+upper-hex|proxy=sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|bad
+no-service|=@A|bad
+error-text|proxy=@A;dns=An image does not exist locally with the tag: x|bad
+CASES
+}
+
 @test "validate fails closed without GHCR auth" {
     # What: Deploying the stack pulls images; needs auth.
     # Why: Never anonymous against GHCR (rate-limit).
     # From: Issue #1683
-    CI_STACK_CANDIDATE_CMD="$(_stub cand 'echo proxy=sha256:x')" \
+    CI_STACK_CANDIDATE_CMD="$(_stub cand "echo proxy=$(_test_digest a)")" \
         run bash "${CI_SH}" validate
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
@@ -2934,7 +2968,7 @@ CASES
     _tool_stub "${bin}" docker <<'STUB'
 case "$1 $2" in "network ls"|"compose version") exit 0 ;; *) exit 1 ;; esac
 STUB
-    PATH="${bin}:${PATH}" CI_STACK_CANDIDATE_CMD="$(_stub cand 'echo proxy=sha256:x')" \
+    PATH="${bin}:${PATH}" CI_STACK_CANDIDATE_CMD="$(_stub cand "echo proxy=$(_test_digest a)")" \
     GITHUB_REPOSITORY=owner/fixture-repo \
     CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'exit 3')" \
     TMPDIR="${BATS_TEST_TMPDIR}" GHCR_USERNAME=u GHCR_TOKEN=t \
@@ -2947,7 +2981,7 @@ STUB
     # What: A failed validation run surfaces its raw output.
     # Why: Raw failure evidence is mandatory (AG-INT-002).
     # From: Issue #1683
-    CI_STACK_CANDIDATE_CMD="$(_stub cand 'echo proxy=sha256:x')" \
+    CI_STACK_CANDIDATE_CMD="$(_stub cand "echo proxy=$(_test_digest a)")" \
     CI_VALIDATE_CMD="$(_stub val 'echo STACK-UNHEALTHY; exit 1')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" validate
@@ -2960,7 +2994,7 @@ STUB
     # What: A passing run yields STACK_ACCEPTED.
     # Why: The one success path feeding promote (§49/§50).
     # From: Issue #1683
-    CI_STACK_CANDIDATE_CMD="$(_stub cand 'echo proxy=sha256:x')" \
+    CI_STACK_CANDIDATE_CMD="$(_stub cand "echo proxy=$(_test_digest a)")" \
     CI_VALIDATE_CMD="$(_stub val 'exit 0')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" validate

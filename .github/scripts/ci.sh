@@ -3406,10 +3406,25 @@ _ci_stack_candidate_pr() {
     done <<<"${produced}"
 }
 
+# What: stack candidate lines, each service=sha256:<hex>.
+# Why: one intake check for validate and promote (§48).
+# From: Issue #1683 | PR #1858
+_ci_stack_candidate() {
+    local out line
+    out="$(_ci_stack_candidate_source "$@")" || return "$?"
+    while IFS= read -r line; do
+        [ -z "${line}" ] && continue
+        [[ "${line}" =~ ^[a-z0-9][a-z0-9._-]*=sha256:[0-9a-f]{64}$ ]] && continue
+        ci_error "[CI-ERROR-CANDIDATE-0006]" "reason=\"candidate line is not service=sha256:<64 hex>; FAIL CLOSED\"" "${out}"
+        return 2
+    done <<<"${out}"
+    [ -z "${out}" ] || printf '%s\n' "${out}"
+}
+
 # What: read accepted stack candidate (injectable).
 # Why: exact-digest candidate (§48); tests/prod differ.
 # From: Issue #1683
-_ci_stack_candidate() {
+_ci_stack_candidate_source() {
     if [ -n "${CI_STACK_CANDIDATE_CMD:-}" ]; then
         "${CI_STACK_CANDIDATE_CMD}" "$@"
         return "$?"
