@@ -651,6 +651,31 @@ release:
     deletion_policy: manual-or-approved-automation-only
     unaggregated_grace_minutes: 1440
 
+# What: Release notes: PR section, skip label, fallback.
+# Why: one owner for release-publish and CHANGELOG.md.
+# From: Issue #894 | PR #1858
+release_notes:
+  pr_section: Changelog
+  skip_label: skip-changelog
+  other_title: Other
+
+# What: Release-notes groups: PR label -> heading (in order).
+# Why: grouping is data; the first matching label wins.
+# From: Issue #894 | PR #1858
+release_notes_categories:
+  bug:
+    title: Fixed
+  enhancement:
+    title: Added
+  documentation:
+    title: Documentation
+  dependencies:
+    title: Dependencies
+  chore:
+    title: Chore / CI
+  ci:
+    title: Chore / CI
+
 # What: CI runtime variables with their fallback defaults.
 # Why: No hardcode, like CARGO_BUILD_JOBS (AG-CI-006).
 # From: Issue #1683

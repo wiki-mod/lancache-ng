@@ -47,7 +47,7 @@ declare -A CI_DISPATCH=(
     [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-status]=ci_cmd_nightly_status
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [release]=ci_cmd_release [release-validation]=_ci_release_validation_valid
-    [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag
+    [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog
     [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues
     [version]=ci_cmd_version
 )
@@ -4123,6 +4123,170 @@ _ci_release_marker() {
     printf '<!-- %s-image-tags:%s -->\n' "${repo##*/}" "$1"
 }
 
+# What: Markdown of the PRs merged since the last release.
+# Why: notes come from PR sections, no manual step.
+# From: Issue #894 | PR #1858
+_ci_release_changes() {
+    local tag="$1" prev repo shallow raw subjects nums
+    repo="$(_ci_repo)" || return 2
+    prev="$(_ci_last_release_tag "${tag}")" || return 2
+    if [ -z "${prev}" ]; then
+        printf '_No earlier vX.Y.Z release: no change list for %s._\n' "${tag}"
+        return 0
+    fi
+    # What: fetch both tags with full history for the range.
+    # Why: CI checkouts are depth 1; log needs both ends.
+    # From: Issue #894 | PR #1858
+    shallow="$(_ci_capture 0 git rev-parse --is-shallow-repository)" || return 2
+    local -a deepen=()
+    [ "${shallow}" != true ] || deepen=(--unshallow)
+    raw="$(_ci_retry git-fetch git fetch -q --no-tags "${deepen[@]}" origin \
+        "+refs/tags/${prev}:refs/tags/${prev}" "+refs/tags/${tag}:refs/tags/${tag}")" || return 2
+    subjects="$(_ci_capture 0 git log --format=%s "${prev}..${tag}")" || return 2
+    # What: "Merge pull request #N ..." and "... (#N)".
+    # Why: GitHub's merge and squash default subjects.
+    # From: Issue #894 | PR #1858
+    nums="$(_ci_capture 0 awk '
+        match($0, /^Merge pull request #[0-9]+/) { print substr($0, 21, RLENGTH - 20); next }
+        match($0, /\(#[0-9]+\)$/) { print substr($0, RSTART + 2, RLENGTH - 3) }
+    ' <<< "${subjects}")" || return 2
+    nums="$(_ci_capture 0 sort -un <<< "${nums}")" || return 2
+    if [ -z "${nums}" ]; then
+        printf '_No pull requests merged since %s._\n' "${prev}"
+        return 0
+    fi
+    local n q="" count=0 rows="" part
+    while IFS= read -r n; do
+        q+=" p${n}: issueOrPullRequest(number: ${n}) { __typename ... on PullRequest { number title url body labels(first: 20) { nodes { name } } } }"
+        count=$((count + 1))
+        if [ "${count}" -eq 50 ]; then
+            part="$(_ci_release_pr_batch "${repo}" "${q}")" || return 2
+            rows+="${part}"$'\n'; q=""; count=0
+        fi
+    done <<< "${nums}"
+    if [ -n "${q}" ]; then
+        part="$(_ci_release_pr_batch "${repo}" "${q}")" || return 2
+        rows+="${part}"$'\n'
+    fi
+    _ci_release_render "${rows}"
+}
+
+# What: Run one aliased PR query; print one JSON per PR.
+# Why: 50 PRs per GraphQL call; issues are dropped here.
+# From: Issue #894 | PR #1858
+_ci_release_pr_batch() {
+    local repo="$1" q="$2" raw out
+    raw="$(_ci_retry github-api gh api graphql -f owner="${repo%%/*}" -f name="${repo#*/}" \
+        -f query="query(\$owner: String!, \$name: String!) { repository(owner: \$owner, name: \$name) {${q} } }")" || return 2
+    if ! out="$(jq -c '.data.repository[] | select(. != null and .__typename == "PullRequest")' <<< "${raw}" 2>&1)"; then
+        ci_error "[CI-ERROR-RELEASE-0029]" "reason=\"PR batch unparseable\"" "${out}"
+        return 2
+    fi
+    [ -z "${out}" ] || printf '%s\n' "${out}"
+}
+
+# What: Group PR JSON lines by SOT label into Markdown.
+# Why: SOT order decides the group; skip label drops a PR.
+# From: Issue #894 | PR #1858
+_ci_release_render() {
+    local rows="$1" labels cat title skip other section pr num url text body
+    labels="$(_ci_block_keys release_notes_categories)" || return 2
+    skip="$(_ci_block_entry_field release_notes "" skip_label)" || return 2
+    other="$(_ci_block_entry_field release_notes "" other_title)" || return 2
+    section="$(_ci_block_entry_field release_notes "" pr_section)" || return 2
+    if [ -z "${labels}" ] || [ -z "${other}" ] || [ -z "${section}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0030]" "reason=\"SOT release_notes or release_notes_categories incomplete\""
+        return 2
+    fi
+    local -a order=()
+    local -A group=()
+    while IFS= read -r pr; do
+        [ -n "${pr}" ] || continue
+        num="$(_ci_capture 0 jq -r '.number' <<< "${pr}")" || return 2
+        title="$(_ci_capture 0 jq -r '.title' <<< "${pr}")" || return 2
+        url="$(_ci_capture 0 jq -r '.url' <<< "${pr}")" || return 2
+        text="$(_ci_capture 0 jq -r '[.labels.nodes[].name] | join("\n")' <<< "${pr}")" || return 2
+        [ -z "${skip}" ] || ! grep -qxF -- "${skip}" <<< "${text}" || continue
+        cat="${other}"
+        while IFS= read -r body; do
+            if grep -qxF -- "${body}" <<< "${text}"; then
+                cat="$(_ci_block_entry_field release_notes_categories "${body}" title)" || return 2
+                break
+            fi
+        done <<< "${labels}"
+        body="$(_ci_capture 0 jq -r '.body // ""' <<< "${pr}")" || return 2
+        body="$(_ci_pr_section "${body}" "${section}")" || return 2
+        if [ "${body}" = "${body%%$'\n'*}" ]; then body=""; else body="${body#*$'\n'}"; fi
+        body="$(_ci_md_strip_comments "${body}")" || return 2
+        body="$(_ci_capture 0 awk 'NF { seen = 1 } seen { buf = buf $0 "\n"; if (NF) { out = out buf; buf = "" } } END { printf "%s", out }' <<< "${body}")" || return 2
+        [ -n "${group[${cat}]+x}" ] || order+=("${cat}")
+        group["${cat}"]+="- #${num} ${title} (${url})"$'\n'
+        [ -z "${body}" ] || group["${cat}"]+="$(sed 's/^/  /' <<< "${body}")"$'\n'
+    done <<< "${rows}"
+    if [ "${#order[@]}" -eq 0 ]; then
+        printf '_No pull requests with release notes._\n'
+        return 0
+    fi
+    local done_titles=$'\n' t
+    while IFS= read -r body; do
+        t="$(_ci_block_entry_field release_notes_categories "${body}" title)" || return 2
+        [[ "${done_titles}" != *$'\n'"${t}"$'\n'* ]] || continue
+        done_titles+="${t}"$'\n'
+        [ -z "${group[${t}]+x}" ] || printf '### %s\n\n%s\n' "${t}" "${group[${t}]}"
+    done <<< "${labels}"
+    [ -z "${group[${other}]+x}" ] || printf '### %s\n\n%s\n' "${other}" "${group[${other}]}"
+}
+
+# What: Print the release notes change list for a tag.
+# Why: maintainer fallback; same generator as the release.
+# From: Issue #894 | PR #1858
+ci_cmd_release_notes() {
+    local tag="${1:-}"
+    [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0031]" "reason=\"tag arg required\""; return 2; }
+    _ci_release_changes "${tag}"
+}
+
+# What: Add a stable tag's change list to CHANGELOG.md.
+# Why: release writes CHANGELOG; no PR edits it by hand.
+# From: Issue #894 | PR #1858
+ci_cmd_release_changelog() {
+    local tag="${1:-}" branch="${CI_DEFAULT_BRANCH:-}" changes file="CHANGELOG.md" head out
+    [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0032]" "reason=\"tag arg required\""; return 2; }
+    if [[ ! "${tag}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+        printf 'release-changelog=skip tag=%s reason="not a stable vX.Y.Z tag"\n' "${tag}"
+        return 0
+    fi
+    head="## [${BASH_REMATCH[1]}]"
+    if [ -z "${branch}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0033]" "reason=\"CI_DEFAULT_BRANCH is required\""
+        return 2
+    fi
+    changes="$(_ci_release_changes "${tag}")" || return 2
+    out="$(_ci_retry git-fetch git fetch -q --no-tags origin "+refs/heads/${branch}:refs/remotes/origin/${branch}")" || return 2
+    out="$(_ci_capture 0 git checkout -q -B ci-release-changelog "origin/${branch}")" || return 2
+    out="$(_ci_capture 1 grep -nF -- "${head} " "${file}")" || return 2
+    if [ -n "${out}" ]; then
+        printf 'release-changelog=exists tag=%s line=%s\n' "${tag}" "${out%%:*}"
+        return 0
+    fi
+    # What: new entry goes above the first "## [" release.
+    # Why: the pending section stays on top (Keep a Changelog).
+    # From: Issue #894 | PR #1858
+    if ! out="$(CI_CHANGES="${changes}" awk -v h="${head} - $(date -u +%Y-%m-%d)" '
+        !done && /^## \[/ { print h "\n\n" ENVIRON["CI_CHANGES"] "\n"; done = 1 }
+        { print }
+        END { if (!done) print "\n" h "\n\n" ENVIRON["CI_CHANGES"] }
+    ' "${file}" 2>&1 > "${file}.new")" || ! out="$(mv "${file}.new" "${file}" 2>&1)"; then
+        ci_error "[CI-ERROR-RELEASE-0034]" "file=\"${file}\" reason=\"CHANGELOG.md not rewritten\"" "${out}"
+        rm -f "${file}.new"
+        return 2
+    fi
+    out="$(_ci_capture 0 git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+        commit -q -m "docs: update CHANGELOG.md for ${tag}" -- "${file}")" || return 2
+    out="$(_ci_retry git-push git push -q origin "HEAD:refs/heads/${branch}")" || return 2
+    printf 'release-changelog=written tag=%s branch=%s\n' "${tag}" "${branch}"
+}
+
 # What: Render the marker-delimited image provenance block.
 # Why: Records every shipped digest; SOT list, no hardcode.
 # From: Issue #1683
@@ -4131,6 +4295,9 @@ _ci_release_notes_block() {
     registry="$(_ci_registry)" || return "$?"
     repo="$(_ci_repo)" || return 2
     _ci_release_marker start || return 2
+    printf '## Changes\n\n'
+    _ci_release_changes "${tag}" || return 2
+    printf '\n## Images\n\n'
     printf 'Images published for %s (commit %s):\n\n' "${tag}" "${GITHUB_SHA:-unknown}"
     local targets
     targets="$(ci_build_targets)" || return 2
@@ -4269,17 +4436,27 @@ ci_cmd_release_vex() {
     printf 'release=vex tag=%s\n' "${tag}"
 }
 
-# What: highest plain vX.Y.Z release tag, or empty.
+# What: highest plain vX.Y.Z tag (below $1 if given).
 # Why: ls-remote skips deep fetch; empty pre-1.0.
 # From: Issue #1683
 _ci_last_release_tag() {
-    local refs tags
+    local below="${1:-}" refs tags
     refs="$(_ci_capture 0 git ls-remote --tags --refs origin 'refs/tags/v[0-9]*.[0-9]*.[0-9]*')" || return 2
     tags="$(_ci_capture 1 grep -oE 'refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' <<<"${refs}")" || return 2
     if [ -z "${tags}" ]; then
         return 0
     fi
-    sed 's#^refs/tags/##' <<<"${tags}" | sort -V | tail -n 1
+    tags="$(sed 's#^refs/tags/##' <<<"${tags}")"
+    if [ -z "${below}" ]; then
+        sort -V <<<"${tags}" | tail -n 1
+        return 0
+    fi
+    # What: an rc tag counts as its base vX.Y.Z here.
+    # Why: notes of vX.Y.Z-rc.N start at the release before.
+    # From: Issue #1683 | PR #1858
+    below="${below%%-*}"
+    tags="$(printf '%s\n%s\n' "${tags}" "${below}" | sort -V -u)"
+    awk -v b="${below}" '$0 == b { exit } { last = $0 } END { if (last != "") print last }' <<<"${tags}"
 }
 
 # What: The next patch tag after a plain vX.Y.Z tag.
@@ -8008,6 +8185,33 @@ _ci_pr_section() {
     [ "${out}" = "${out##*$'\n'}" ] || printf '%s\n' "${out%$'\n'*}"
 }
 
+# What: Drop HTML comments from Markdown text.
+# Why: template hints are not content (template, notes).
+# From: Issue #1683 | PR #1858
+_ci_md_strip_comments() {
+    local out
+    if ! out="$(awk '
+        {
+            line = $0; keep = ""
+            while (1) {
+                if (incm) {
+                    p = index(line, "-->")
+                    if (!p) { line = ""; break }
+                    line = substr(line, p + 3); incm = 0
+                }
+                p = index(line, "<!--")
+                if (!p) { keep = keep line; break }
+                keep = keep substr(line, 1, p - 1); line = substr(line, p + 4); incm = 1
+            }
+            print keep
+        }
+    ' <<< "$1" 2>&1)"; then
+        ci_error "[CI-ERROR-CHECK-0144]" "reason=\"HTML comment strip failed\"" "${out}"
+        return 2
+    fi
+    printf '%s\n' "${out}"
+}
+
 # What: PR body must fill every template section.
 # Why: CONTRIBUTING.md requires all headings completed.
 # From: Issue #1683
@@ -8052,15 +8256,8 @@ _ci_check_pr_template() {
         fi
         # What: strip HTML comments and code fence markers
         # Why: detect empty vs placeholder-only sections
-        stripped="$(awk '
-            { line=$0 }
-            !incm && line ~ /<!--/ && line ~ /-->/ { sub(/<!--.*-->/, "", line) }
-            !incm && line ~ /<!--/ && line !~ /-->/ { sub(/<!--.*/, "", line); incm=1 }
-            incm && line ~ /-->/ { sub(/.*-->/, "", line); incm=0 }
-            incm { next }
-            line ~ /^```/ { next }
-            { print line }
-        ' <<<"${content}")"
+        stripped="$(_ci_md_strip_comments "${content}")" || return 2
+        stripped="$(_ci_capture 1 grep -v '^```' <<<"${stripped}")" || return 2
         trimmed="$(tr -d '[:space:]' <<<"${stripped}")"
         [ -n "${trimmed}" ] || { missing+=("${sec}: empty (only template placeholder left)"); continue; }
         if [ "${sec}" = "Type of change" ] && ! grep -qE '^- \[[xX]\]' <<<"${content}"; then

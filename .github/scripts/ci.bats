@@ -2485,6 +2485,7 @@ EOF
     export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r GITHUB_SHA=deadbeef CI_TMPDIR="${BATS_TEST_TMPDIR}"
     _ci_require_ghcr_auth() { return 0; }
     _ci_registry_digest() { echo "sha256:aaa"; }
+    _ci_release_changes() { echo "- #1 change"; }
     ci_build_targets() { echo proxy; }
     : > "${calls}"
     STUB_VIEW='' CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_publish v1.2.3-rc.4
@@ -2513,6 +2514,7 @@ EOF
     export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r GITHUB_SHA=deadbeef CI_TMPDIR="${BATS_TEST_TMPDIR}"
     _ci_require_ghcr_auth() { return 0; }
     _ci_registry_digest() { echo "sha256:aaa"; }
+    _ci_release_changes() { echo "- #1 change"; }
     ci_build_targets() { echo svc-a; }
     local start='<!-- r-image-tags:start -->' end='<!-- r-image-tags:end -->'
     : > "${calls}"
@@ -2536,6 +2538,7 @@ tail" '{body:$b, isPrerelease:false}')" \
     export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r GITHUB_SHA=deadbeef CI_TMPDIR="${BATS_TEST_TMPDIR}"
     _ci_require_ghcr_auth() { return 0; }
     _ci_registry_digest() { echo "sha256:aaa"; }
+    _ci_release_changes() { echo "- #1 change"; }
     ci_build_targets() { echo proxy; }
     STUB_VIEW='{"body":"x","isPrerelease":true}' \
         CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_publish v1.2.3
@@ -2733,6 +2736,89 @@ tail" '{body:$b, isPrerelease:false}')" \
     [ "${status}" -eq 0 ]
     run _ci_remote_tag_exists v0.9.9
     [ "${status}" -eq 1 ]
+    run _ci_last_release_tag v0.10.0
+    [ "${status}" -eq 0 ]; [ "${output}" = "v0.9.1" ]
+    run _ci_last_release_tag v0.10.0-rc.2
+    [ "${status}" -eq 0 ]; [ "${output}" = "v0.9.1" ]
+    run _ci_last_release_tag v0.2.0
+    [ "${status}" -eq 0 ]; [ -z "${output}" ]
+}
+
+@test "md strip comments keeps text around inline and block comments" {
+    # What: one-line and multi-line HTML comments are dropped.
+    # Why: template hints must not reach checks or notes.
+    # From: Issue #894 | PR #1858
+    run _ci_md_strip_comments $'a <!-- x --> b\nkeep <!-- start\nhidden\nend --> tail'
+    [ "${status}" -eq 0 ]
+    [ "${output}" = $'a  b\nkeep \n\n tail' ]
+}
+
+# What: neutral notes SOT, tagged origin and gh PR mock.
+# Why: real git range and section parse; no network.
+# From: Issue #894 | PR #1858
+_rn_setup() {
+    local work="${BATS_TEST_TMPDIR}/rn" origin="${BATS_TEST_TMPDIR}/rn-origin.git" s
+    printf '%s\n' 'release_notes:' '  pr_section: Changelog' '  skip_label: skip-changelog' '  other_title: Other' \
+        'release_notes_categories:' '  bug:' '    title: Fixed' '  ci:' '    title: CI' > "${BATS_TEST_TMPDIR}/rn.yml"
+    export CI_MANIFEST="${BATS_TEST_TMPDIR}/rn.yml" GITHUB_REPOSITORY=owner/fixture-repo CI_RETRY_BACKOFF_BASE_SECONDS=0
+    git init -q --bare "${origin}"
+    git init -q "${work}"
+    for s in "base" "Merge pull request #5 from x/five" "Nine change (#9)" "Merge pull request #8 from x/eight" "Issue ref (#7)" "plain commit"; do
+        git -C "${work}" -c user.email=a@b -c user.name=b commit -q --allow-empty -m "${s}"
+        [ "${s}" != base ] || git -C "${work}" tag v0.1.0
+    done
+    git -C "${work}" tag v0.2.0
+    git -C "${work}" push -q "${origin}" HEAD:refs/heads/main --tags
+    git clone -q "${origin}" "${BATS_TEST_TMPDIR}/rn-clone"
+    gh() {
+        jq -cn '{data: {repository: {
+            p5: {__typename: "PullRequest", number: 5, title: "Five", url: "u5", labels: {nodes: [{name: "bug"}]},
+                 body: "## Summary\nx\n## Changelog\nFixed X.\n<!-- hint -->\n\n## Other\nno"},
+            p7: {__typename: "Issue"},
+            p8: {__typename: "PullRequest", number: 8, title: "Eight", url: "u8", labels: {nodes: [{name: "skip-changelog"}]}, body: ""},
+            p9: {__typename: "PullRequest", number: 9, title: "Nine", url: "u9", labels: {nodes: []}, body: "no section"}}}}'
+    }
+    export -f gh
+}
+
+@test "release changes: merged PRs since the last tag by label" {
+    # What: merge/squash subjects -> PRs; skip, group, section.
+    # Why: notes list each PR's own Changelog text (#894).
+    # From: Issue #894 | PR #1858
+    _rn_setup
+    cd "${BATS_TEST_TMPDIR}/rn-clone"
+    run _ci_release_changes v0.2.0
+    [ "${status}" -eq 0 ]
+    [ "${output}" = $'### Fixed\n\n- #5 Five (u5)\n  Fixed X.\n\n### Other\n\n- #9 Nine (u9)' ]
+    run _ci_release_changes v0.1.0
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"No earlier vX.Y.Z release"* ]]
+    run bash "${CI_SH}" release-notes v0.2.0
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"- #5 Five (u5)"* ]]
+}
+
+@test "release-changelog adds a stable entry once and pushes it" {
+    # What: entry above the first release; rerun is a no-op.
+    # Why: idempotent release step; rc tags never write it.
+    # From: Issue #894 | PR #1858
+    _rn_setup
+    local work="${BATS_TEST_TMPDIR}/rn"
+    printf '# Changelog\n\nintro\n\n## Pending\n\np\n\n## [0.1.0] - 2026-07-06\n\nold\n' > "${work}/CHANGELOG.md"
+    git -C "${work}" add CHANGELOG.md
+    git -C "${work}" -c user.email=a@b -c user.name=b commit -q -m log
+    git -C "${work}" push -q "${BATS_TEST_TMPDIR}/rn-origin.git" HEAD:refs/heads/main
+    cd "${BATS_TEST_TMPDIR}/rn-clone"
+    _ci_release_changes() { printf -- '- #1 one\n'; }
+    export -f _ci_release_changes
+    CI_DEFAULT_BRANCH='' run ci_cmd_release_changelog v1.2.3
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0033"* ]]
+    run ci_cmd_release_changelog v1.2.3-rc.1
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"release-changelog=skip"* ]]
+    CI_DEFAULT_BRANCH=main run ci_cmd_release_changelog v1.2.3
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"release-changelog=written tag=v1.2.3 branch=main"* ]]
+    run git -C "${BATS_TEST_TMPDIR}/rn-origin.git" show main:CHANGELOG.md
+    [[ "${output}" == *$'## Pending\n\np\n\n## [1.2.3] - '*$'\n\n- #1 one\n\n## [0.1.0] - 2026-07-06'* ]]
+    CI_DEFAULT_BRANCH=main run ci_cmd_release_changelog v1.2.3
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"release-changelog=exists tag=v1.2.3"* ]]
 }
 
 # =========================================================
