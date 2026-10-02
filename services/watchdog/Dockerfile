@@ -12,7 +12,10 @@ ARG ALPINE_IMAGE
 # Why: no mutable default; CI resolves the immutable ref.
 # From: Issue #1683
 ARG BUILD_TOOLS_IMAGE
-FROM ${BUILD_TOOLS_IMAGE} AS watchdog-builder
+# What: scratch only when ci.sh passed no image arg.
+# Why: no baked image; a missing arg fails the build.
+# From: Issue #1683 | PR #1858
+FROM ${BUILD_TOOLS_IMAGE:-scratch} AS watchdog-builder
 
 # What: musl cross-target, supplied by ci.sh per platform.
 # Why: ci.sh owns arch mapping; no uname -m in the image.
@@ -65,7 +68,10 @@ RUN --mount=type=bind,source=.github/scripts/ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
     bash /usr/local/bin/ci.sh rust-build watchdog "${RUST_CRATE}"
 
-FROM ${ALPINE_IMAGE}
+# What: scratch only when ci.sh passed no image arg.
+# Why: no baked image; a missing arg fails the build.
+# From: Issue #1683 | PR #1858
+FROM ${ALPINE_IMAGE:-scratch}
 
 LABEL org.opencontainers.image.description="lancache-ng watchdog: compiled Rust health-check/restart daemon plus the separate file-retention sidecar entrypoint."
 
@@ -113,13 +119,6 @@ RUN addgroup -g 10001 lancache && \
     adduser -D -H -u 10001 -G lancache -s /sbin/nologin lancache && \
     mkdir -p /var/lib/lancache-retention-state && \
     chown lancache:lancache /var/lib/lancache-retention-state
-
-# What: fail build if CI proxy CA leaked into image
-# Why: CA must never persist in a published service image
-# From: Issue #1781 | PR #1783
-RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
-      echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
-    fi
 
 # What: default ENTRYPOINT is the compiled Rust binary now.
 # Why: maintainer decision authorized the ENTRYPOINT swap.

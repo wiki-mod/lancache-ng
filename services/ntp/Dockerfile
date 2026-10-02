@@ -10,7 +10,10 @@
 # Why: SOT base_images.alpine is the sole owner (AG-CI-006).
 # From: Issue #1683
 ARG ALPINE_IMAGE
-FROM ${ALPINE_IMAGE}
+# What: scratch only when ci.sh passed no image arg.
+# Why: no baked image; a missing arg fails the build.
+# From: Issue #1683 | PR #1858
+FROM ${ALPINE_IMAGE:-scratch}
 
 LABEL org.opencontainers.image.description="LanCache-NG-NTP: chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123."
 

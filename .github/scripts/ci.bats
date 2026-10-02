@@ -1807,9 +1807,25 @@ CASES
     ci_cmd_build() { echo "service=$1 platform=$2 result=built identity=i"; }
     ci_cmd_publish() { echo "service=$1 platform=$2 published=sha256:pub identity=i"; }
     ci_cmd_verify() { echo "VERIFY $1 $2 $3"; }
+    _ci_bake_check() { echo "BAKE $1"; }
+    export GITHUB_REPOSITORY=owner/fixture-repo
     run ci_cmd_ship svc-a os/p1
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"VERIFY svc-a sha256:pub os/p1"* ]]
+    [[ "${output}" == *"BAKE "*"/svc-a:sha-i-p1"*"published=sha256:pub"*"VERIFY svc-a sha256:pub os/p1"* ]]
+    _ci_bake_check() { echo "BAKE-FAIL"; return 2; }
+    ci_cmd_publish() { echo PUBLISH-CALLED; }
+    run ci_cmd_ship svc-a os/p1
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"BAKE-FAIL"* ]] && [[ "${output}" != *"PUBLISH-CALLED"* ]]
+    unset GITHUB_REPOSITORY
+    _ci_bake_check() { echo "BAKE-CALLED"; }
+    run ci_cmd_ship svc-a os/p1
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-SHIP-0003"*"GITHUB_REPOSITORY"* ]]
+    [[ "${output}" != *"BAKE-CALLED"* ]] && [[ "${output}" != *"PUBLISH-CALLED"* ]]
+    export GITHUB_REPOSITORY=owner/fixture-repo
+    ci_cmd_publish() { echo "service=$1 platform=$2 published=sha256:pub identity=i"; }
+    _ci_bake_check() { echo "BAKE $1"; }
     ci_cmd_build() { echo "service=$1 platform=$2 result=reuse-accepted identity=i"; }
     ci_cmd_publish() { echo PUBLISH-CALLED; }
     run ci_cmd_ship svc-a os/p1
@@ -4211,14 +4227,34 @@ CASES
     [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
 }
 
-@test "bake-check fails closed with no inspect backend" {
-    # What: No inspect backend is a hard failure.
-    # Why: Unverifiable is not clean (AG-VAL-002).
-    # From: Issue #1683
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" variables bake-check img@sha256:d
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VARIABLES-0004"* ]]
+@test "bake-check default backend reads env and counts the proxy CA" {
+    # What: docker-stub image per case: rc and codes.
+    # Why: the guard must inspect the real built image.
+    # From: Issue #1781 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/bkbin" name ca bundle irc want w
+    local -a ws
+    mkdir -p "${bin}"
+    _tool_stub "${bin}" docker <<'STUB'
+case "$1" in
+    image) [ "${BK_IRC}" = 0 ] || { echo "inspect-boom"; exit 1; }; printf 'PATH=/usr/bin\n%s\n' "${BK_ENV}" ;;
+    run) printf '%b' "${BK_BUNDLE}" ;;
+esac
+STUB
+    while IFS='|' read -r name ca bundle irc want; do
+        PATH="${bin}:${PATH}" PROJECT_SELFHOSTED_PROXY_CA="${ca//;/$'\n'}" BK_BUNDLE="${bundle}" \
+        BK_IRC="${irc}" BK_ENV="LANG=C" GHCR_USERNAME=u GHCR_TOKEN=t \
+            run bash "${CI_SH}" variables bake-check img@sha256:d
+        IFS=',' read -r -a ws <<<"${want}"
+        for w in "${ws[@]}"; do
+            [[ "${output}" == *"${w}"* ]] || { echo "${name}: no '${w}': ${output}"; return 1; }
+        done
+        [[ "${output}" != *"MARKERLINE"* ]] || { echo "${name}: CA bytes leaked"; return 1; }
+    done <<'CASES'
+no-ca-secret|||0|result=clean
+ca-not-baked|BEGIN;MARKERLINE;END|OTHER\nCERT\n|0|result=clean
+ca-baked|BEGIN;MARKERLINE;END|x\nMARKERLINE\ny\nMARKERLINE\n|0|CI-ERROR-VARIABLES-0016,extra_ca="2"
+inspect-fails|||1|CI-ERROR-VARIABLES-0005,inspect-boom
+CASES
 }
 
 @test "bake-check passes on a clean image" {
@@ -6020,6 +6056,27 @@ EOF
     [[ "${output}" == *"must carry no default"* ]]
 }
 
+@test "check dockerfile-build-tools allows only a scratch FROM fallback" {
+    # What: FROM forms of BUILD_TOOLS_IMAGE, one table.
+    # Why: scratch bakes no image; any other default would.
+    # From: Issue #1683 | PR #1858
+    local m="${BATS_TEST_TMPDIR}/sf-manifest.yml" r name from want
+    printf 'services:\n  svc-rust:\n    context: c\n    build_type: rust\n' > "${m}"
+    while IFS='|' read -r name from want; do
+        r="${BATS_TEST_TMPDIR}/sf-${name}"; mkdir -p "${r}/c"
+        printf 'ARG BUILD_TOOLS_IMAGE\n%s\n' "${from}" > "${r}/c/Dockerfile"
+        CI_MANIFEST="${m}" run bash "${CI_SH}" check dockerfile-build-tools "${r}"
+        case "${want}" in
+            clean) [ "${status}" -eq 0 ] ;;
+            *) [ "${status}" -ne 0 ] && [[ "${output}" == *"${want}"* ]] ;;
+        esac || { echo "${name}: rc ${status}: ${output}"; return 1; }
+    done <<'CASES'
+plain|FROM ${BUILD_TOOLS_IMAGE} AS b|clean
+scratch|FROM ${BUILD_TOOLS_IMAGE:-scratch} AS b|clean
+other-default|FROM ${BUILD_TOOLS_IMAGE:-alpine:3.24} AS b|must build FROM
+CASES
+}
+
 @test "check cargo-profile-tuning flags hardcoded [profile] lto/codegen-units" {
     # What: Cargo.toml cannot set [profile] lto/codegen.
     # Why: From CARGO_PROFILE_RELEASE env (AG-CI-006).
@@ -6506,6 +6563,7 @@ CASES
 global-arg|a,b|ARG BASE=alpine:3.24\nFROM ${BASE}\n|FROM alpine:3.24\n|0|=clean dockerfiles=2 blocks=1
 unbraced-arg|a,b|ARG BASE=alpine:3.24\nFROM $BASE\n|FROM alpine:3.24\n|0|=clean dockerfiles=2 blocks=1
 bare-sot-arg|a,b|ARG ALPINE_IMAGE\nFROM ${ALPINE_IMAGE}\n|ARG ALPINE_IMAGE\nFROM ${ALPINE_IMAGE}\n|0|=clean dockerfiles=2 blocks=1
+scratch-fallback|a,b|ARG ALPINE_IMAGE\nFROM ${ALPINE_IMAGE:-scratch}\n|ARG ALPINE_IMAGE\nFROM ${ALPINE_IMAGE}\n|0|=clean dockerfiles=2 blocks=1
 stage-alias|a,b|FROM alpine:3.24 AS builder\nRUN true\nFROM builder\n|FROM alpine:3.24\n|0|=clean dockerfiles=2 blocks=1
 heredoc-from|a,b|FROM alpine:3.24\nRUN <<EOT\nFROM should-be-ignored\nEOT\n|FROM alpine:3.24\n|0|=clean dockerfiles=2 blocks=1
 last-from-lower|a,b|FROM golang:1 AS builder\nRUN true\nfrom alpine:3.24\n|FROM alpine:3.24 AS final\n|0|=clean dockerfiles=2 blocks=1
@@ -7551,7 +7609,7 @@ STUB
             [[ "${output}" != *"${w}"* ]] || { echo "${name}: has '${w}': ${output}"; return 1; }
         done
     done <<'CASES'
-tag|svc-a|abc123|-|-|buildx build --load;@R@/svc-a:sha-abc123-p1;--platform os/p1;org.opencontainers.image.title=svc-a;--build-arg BUILD_IDENTITY=abc123|--cache-from;--cache-to
+tag|svc-a|abc123|-|-|buildx build --load;@R@/svc-a:sha-abc123-p1;--platform os/p1;org.opencontainers.image.title=svc-a;--build-arg BUILD_IDENTITY=abc123;--build-arg BUILDKIT_DOCKERFILE_CHECK=error=true|--cache-from;--cache-to
 wired-a|svc-a|abc123|type=registry,ref=@R@/svc-a:cache|type=registry,ref=@R@/svc-a:cache,mode=max|--cache-from type=registry,ref=@R@/svc-a:cache;--cache-to type=registry,ref=@R@/svc-a:cache,mode=max,ignore-error=true|svc-b:cache
 wired-b|svc-b|def456|type=registry,ref=@R@/svc-b:cache|type=registry,ref=@R@/svc-b:cache,mode=max|--cache-from type=registry,ref=@R@/svc-b:cache;--cache-to type=registry,ref=@R@/svc-b:cache,mode=max,ignore-error=true|svc-a:cache
 ignore-error-kept|svc-a|abc123|-|type=registry,ref=@R@/svc-a:cache,ignore-error=false|--cache-to type=registry,ref=@R@/svc-a:cache,ignore-error=false|ignore-error=false,ignore-error=true;--cache-from

@@ -1933,6 +1933,10 @@ _ci_docker_build() {
     # Why: ARG change reruns RUN; apk repos never do.
     # From: Issue #1683 | PR #1858
     args+=(--build-arg "BUILD_IDENTITY=${identity}")
+    # What: a BuildKit check warning fails the build.
+    # Why: AG-VAL-001: warnings are errors.
+    # From: Issue #1683 | PR #1858
+    args+=(--build-arg "BUILDKIT_DOCKERFILE_CHECK=error=true")
     # What: the build type's CI variables as build-args.
     # Why: repo/org variables reach the builder (AG-CI-006).
     # From: Issue #1683 | PR #1858
@@ -2885,6 +2889,15 @@ ci_cmd_ship() {
     out="$(ci_cmd_build "${service}" "${platform}")" || return "$?"
     printf '%s\n' "${out}"
     case "${out}" in *" result=built "*) ;; *) return 0 ;; esac
+    # What: bake guard on the local image before publish.
+    # Why: a leaked CA or build var must never reach GHCR.
+    # From: Issue #1781 | PR #1858
+    local tag
+    if ! tag="$(_ci_image_tag "${service}" "${platform}" "$(_ci_record_field "${out}" identity)" 2>&1)"; then
+        ci_error "[CI-ERROR-SHIP-0003]" "service=\"${service}\" platform=\"${platform}\" reason=\"built image tag not derivable; no bake check, no publish\"" "${tag}"
+        return 2
+    fi
+    _ci_bake_check "${tag}" || return "$?"
     out="$(ci_cmd_publish "${service}" "${platform}")" || return "$?"
     printf '%s\n' "${out}"
     digest="$(_ci_record_field "${out}" published)"
@@ -5596,6 +5609,23 @@ _ci_bake_env_patterns() {
         GOPROXY SCCACHE_ CCACHE_ DISTCC_
 }
 
+# What: env lines + count of the proxy CA in the bundle.
+# Why: the bake guard inspects the real built image.
+# From: Issue #1781 | PR #1858
+_ci_default_bake_inspect() {
+    local image="$1" envs bundle marker line n=0
+    envs="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${image}" 2>&1)" || { printf '%s\n' "${envs}"; return 2; }
+    while IFS= read -r line; do
+        [ -n "${line}" ] && printf 'env %s\n' "${line}"
+    done <<< "${envs}"
+    marker="$(sed -n '2p' <<< "${PROJECT_SELFHOSTED_PROXY_CA:-}")"
+    if [ -n "${marker}" ]; then
+        bundle="$(docker run --rm --network none --entrypoint cat "${image}" /etc/ssl/certs/ca-certificates.crt 2>&1)" || { printf '%s\n' "${bundle}"; return 2; }
+        n="$(_ci_capture 1 grep -cF -- "${marker}" <<< "${bundle}")" || return 2
+    fi
+    printf 'extra_ca %s\n' "${n:-0}"
+}
+
 # What: Fail if a build-only secret/var is baked in.
 # Why: A baked CA/proxy/accel var leaks and breaks runtime.
 # From: Issue #1683
@@ -5606,11 +5636,7 @@ _ci_bake_check() {
         return 2
     fi
     _ci_require_ghcr_auth || return 2
-    if [ -z "${CI_BAKE_INSPECT_CMD:-}" ]; then
-        ci_log "[CI-ERROR-VARIABLES-0004]" "reason=\"no image-inspect backend (CI_BAKE_INSPECT_CMD unset)\""
-        return 2
-    fi
-    if raw="$("${CI_BAKE_INSPECT_CMD}" "${image}")"; then status=0; else status=$?; fi
+    if raw="$("${CI_BAKE_INSPECT_CMD:-_ci_default_bake_inspect}" "${image}" 2>&1)"; then status=0; else status=$?; fi
     if [ "${status}" -ne 0 ]; then
         ci_error "[CI-ERROR-VARIABLES-0005]" "image=\"${image}\" reason=\"image inspect failed\"" "${raw}"
         return 2
@@ -8310,9 +8336,9 @@ _ci_dockerfile_final_image() {
         seen_from=1
         remainder="${remainder#--platform=* }"
         image="${remainder%%[[:space:]]*}"
-        while [[ "${image}" =~ (\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)) ]]; do
+        while [[ "${image}" =~ (\$\{([A-Za-z_][A-Za-z0-9_]*)(:-[^}]*)?\}|\$([A-Za-z_][A-Za-z0-9_]*)) ]]; do
             token="${BASH_REMATCH[1]}"
-            name="${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}"
+            name="${BASH_REMATCH[2]:-${BASH_REMATCH[4]}}"
             if [[ ! -v "global_args[${name}]" ]]; then
                 local sot_val
                 if sot_val="$(_ci_sot_base_image_arg "${name}")"; then
@@ -9450,7 +9476,7 @@ _ci_check_dockerfile_build_tools() {
         fi
         grep -q 'ARG BUILD_TOOLS_IMAGE' "${df}" \
             || viol+=("${service}: Dockerfile must declare ARG BUILD_TOOLS_IMAGE")
-        grep -Fq 'FROM ${BUILD_TOOLS_IMAGE}' "${df}" \
+        grep -Eq '^FROM \$\{BUILD_TOOLS_IMAGE(:-scratch)?\}([[:space:]]|$)' "${df}" \
             || viol+=("${service}: Dockerfile must build FROM \${BUILD_TOOLS_IMAGE}")
         # What: forbid a mutable default on the ARG.
         # Why: ci.sh supplies the immutable ref (AG-CI-008).

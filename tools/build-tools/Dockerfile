@@ -18,10 +18,10 @@ ARG DHCLIENT_ALPINE_BRANCH
 ARG DHCLIENT_ARCH
 ARG DHCLIENT_SHA256
 
-# What: The single Alpine toolchain stage, base from SOT.
-# Why: apk installs Rust; musl-native, no rustup.
-# From: Issue #1683
-FROM ${ALPINE_IMAGE}
+# What: Alpine toolchain stage; scratch if no image arg.
+# Why: no baked image; a missing arg fails the build.
+# From: Issue #1683 | PR #1858
+FROM ${ALPINE_IMAGE:-scratch}
 
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image (Alpine)."
 
@@ -127,13 +127,6 @@ RUN set -euo pipefail; \
 # Why: required by dns/ui/watchdog; avoids duplicate binary
 # From: Issue #1095 | PR #1691
 RUN ln -sf /usr/bin/gcc /usr/local/bin/musl-gcc
-
-# What: fail build if CI proxy CA leaked into image
-# Why: CA must never persist in published build-tools
-# From: Issue #1095 | PR #1752
-RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
-      echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
-    fi
 
 WORKDIR /workspace
 

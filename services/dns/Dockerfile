@@ -12,7 +12,10 @@ ARG ALPINE_IMAGE
 # Why: no mutable default; CI resolves the immutable ref.
 # From: Issue #1683
 ARG BUILD_TOOLS_IMAGE
-FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder
+# What: scratch only when ci.sh passed no image arg.
+# Why: no baked image; a missing arg fails the build.
+# From: Issue #1683 | PR #1858
+FROM ${BUILD_TOOLS_IMAGE:-scratch} AS subscriber-builder
 
 # What: musl cross-target, supplied by ci.sh per platform.
 # Why: ci.sh owns arch mapping; no uname -m in the image.
@@ -65,7 +68,10 @@ RUN --mount=type=bind,source=.github/scripts/ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
     bash /usr/local/bin/ci.sh rust-build dns "${RUST_CRATE}"
 
-FROM ${ALPINE_IMAGE}
+# What: scratch only when ci.sh passed no image arg.
+# Why: no baked image; a missing arg fails the build.
+# From: Issue #1683 | PR #1858
+FROM ${ALPINE_IMAGE:-scratch}
 
 LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
 
@@ -131,13 +137,6 @@ COPY services/dns/cdn-domains.txt /etc/pdns/cdn-domains.txt
 COPY services/dns/schema.sqlite3.sql /usr/share/lancache-ng/schema.sqlite3.sql
 COPY services/dns/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
-
-# What: fail build if CI proxy CA leaked into image
-# Why: CA must never persist in a published service image
-# From: Issue #1781 | PR #1783
-RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
-      echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
-    fi
 EXPOSE 53/udp 53/tcp 8081 8082 8083
 
 ENTRYPOINT ["/entrypoint.sh"]

@@ -11,9 +11,12 @@
 # From: Issue #1683
 ARG ALPINE_IMAGE
 ARG FLUENT_BIT_IMAGE
-FROM ${FLUENT_BIT_IMAGE} AS fluent-bit-src
+# What: scratch only when ci.sh passed no image arg.
+# Why: no baked image; a missing arg fails the build.
+# From: Issue #1683 | PR #1858
+FROM ${FLUENT_BIT_IMAGE:-scratch} AS fluent-bit-src
 
-FROM ${ALPINE_IMAGE}
+FROM ${ALPINE_IMAGE:-scratch}
 
 LABEL org.opencontainers.image.description="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
 
