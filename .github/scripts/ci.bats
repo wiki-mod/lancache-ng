@@ -3115,6 +3115,16 @@ svc-x=sha256:n"
     done
 }
 
+@test "validation env lets the ui advertise a NATS url" {
+    # What: the validation env sets NATS_ADVERTISE_URL.
+    # Why: without it the ui answers 503 to every register.
+    # From: Issue #866 | PR #1858
+    local env
+    env="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_validation_env)"
+    echo "${env}" | grep '^NATS_'
+    grep -Eq '^NATS_ADVERTISE_URL=[a-z]+://[^[:space:]]+$' <<<"${env}"
+}
+
 @test "compose profile flags cover every profile and fail closed" {
     # What: one --profile pair per profile; read error -> 2.
     # Why: a profiled service must never be skipped.
