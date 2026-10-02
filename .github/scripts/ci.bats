@@ -9268,6 +9268,52 @@ _kgs_fingerprint() {
 # PRODUCT RUNTIME: RETENTION
 # =========================================================
 
+# What: source retention.sh's functions, not its loop.
+# Why: tests call the real code without the daemon.
+# From: Issue #842 | PR #1858
+_load_retention_functions() {
+    local f="${BATS_TEST_TMPDIR}/retention-functions.sh"
+    awk '/^log\(\) \{/ { c = 1 } /^log "Retention daemon started\./ { c = 0 } c { print }' \
+        "${BATS_TEST_DIRNAME}/../../services/watchdog/retention.sh" > "${f}"
+    # shellcheck source=/dev/null
+    source "${f}"
+}
+
+@test "retention is_truthy matches the ui env_bool set" {
+    # What: retention is_truthy per input, one table.
+    # Why: same set as the ui env_bool: 1/true/yes/on.
+    # From: Issue #842 | PR #1858
+    local raw want v
+    _load_retention_functions
+    while IFS='|' read -r raw want; do
+        v="$(printf '%b' "${raw}")"
+        run is_truthy "${v}"
+        [ "${status}" -eq "${want}" ] || { echo "is_truthy [${raw}]: rc ${status}, want ${want}"; return 1; }
+    done <<'CASES'
+1|0
+true|0
+TRUE|0
+True|0
+yes|0
+YES|0
+on|0
+ON|0
+ true |0
+\ton\t|0
+0|1
+false|1
+FALSE|1
+no|1
+off|1
+|1
+   |1
+garbage|1
+1x|1
+truex|1
+yesplease|1
+CASES
+}
+
 @test "retention stops promptly with rc 0 on SIGTERM mid-sleep" {
     # What: a real TERM during the interval sleep ends it.
     # Why: PID 1 bash ignored TERM; docker stop had to kill.
