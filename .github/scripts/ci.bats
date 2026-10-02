@@ -6009,6 +6009,137 @@ EOF
     done
 }
 
+# What: neutral SOT, gh mock and call log for the sweep.
+# Why: refs and issues are fixtures; no SOT mirror.
+# From: Issue #1683 | PR #1858
+_ob_setup() {
+    local m="${BATS_TEST_TMPDIR}/ob.yml"
+    printf '%s\n' 'release:' '  channels:' '    stable:' '      ref: refs/heads/trunk' \
+        'branch_policy:' '  orphan_min_age_seconds: 3600' '  long_lived: [dev]' \
+        '  long_lived_patterns:' '    - "rel-*"' > "${m}"
+    export CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo GH_TOKEN=t
+    export CI_RETRY_BACKOFF_BASE_SECONDS=0 OB_CALLS="${BATS_TEST_TMPDIR}/gh.calls"
+    export OB_REFS='' OB_ISSUES='[]' OB_COMMENTS='[]' OB_FAIL=''
+    OB_OLD="2020-01-01T00:00:00Z"
+    OB_NEW="$(date -u -d "@$(($(date -u +%s) - 60))" +%Y-%m-%dT%H:%M:%SZ)"
+    : > "${OB_CALLS}"
+    gh() {
+        echo "$*" >> "${OB_CALLS}"
+        case "$*" in
+            *"${OB_FAIL:-<none>}"*) echo "gh: Not Found (HTTP 404)" >&2; return 1 ;;
+            *graphql*) printf '%s' "${OB_REFS}" ;;
+            *"/issues/comments?"*) printf '%s' "${OB_COMMENTS}" ;;
+            *"/issues?state=all&"*) printf '%s' "${OB_ISSUES}" ;;
+            *) echo "unexpected gh $*" >&2; return 1 ;;
+        esac
+    }
+    export -f gh
+}
+
+# What: one refs page from "name|date|prs|author" rows.
+# Why: tests state branches, not GraphQL JSON shape.
+# From: Issue #1683 | PR #1858
+_ob_page() {
+    jq -cn --arg rows "$1" '{data: {repository: {refs: {nodes: ($rows | split("\n")
+        | map(select(. != "") | split("|") | {name: .[0], target: {committedDate: .[1],
+        author: {name: .[3]}}, associatedPullRequests: {totalCount: (.[2] | tonumber)}}))}}}}'
+}
+
+@test "check orphaned-branches: long-lived, age, PR, references" {
+    # What: only old non-long-lived refs with no PR/issue.
+    # Why: AG-GH-017; a finding is rc 1 with name and date.
+    # From: Issue #1683 | PR #1858
+    _ob_setup
+    OB_REFS="$(_ob_page "trunk|${OB_OLD}|0|a
+dev|${OB_OLD}|0|a
+rel-1|${OB_OLD}|0|a
+young|${OB_NEW}|0|a
+haspr|${OB_OLD}|2|a
+inbody|${OB_OLD}|0|a")$(_ob_page "incomment|${OB_OLD}|0|a
+inpr|${OB_OLD}|0|a
+prefix|${OB_OLD}|0|a
+dotted|${OB_OLD}|0|a
+lost|${OB_OLD}|0|Ann Author
+inclosed|${OB_OLD}|0|a
+inprcomment|${OB_OLD}|0|a")"
+    OB_ISSUES='[{"number":1,"state":"open","body":"see inbody and prefix-long"},
+        {"number":4,"state":"closed","body":"branch inclosed done"},
+        {"number":3,"body":"inpr","pull_request":{}}]'
+    OB_COMMENTS='[{"html_url":"https://git.example.test/o/r/issues/2#issuecomment-1","body":"pushed `incomment`; see dotted."},
+        {"html_url":"https://git.example.test/o/r/pull/3#issuecomment-2","body":"inprcomment"}]'
+    export OB_REFS OB_ISSUES OB_COMMENTS
+    run bash "${CI_SH}" check orphaned-branches
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0139"*"orphaned=4 scanned=13 checked=9"* ]]
+    [[ "${output}" == *'branch="lost" last_commit=2020-01-01T00:00:00Z author="Ann Author"'* ]]
+    local b
+    for b in prefix inpr inprcomment; do
+        [[ "${output}" == *"branch=\"${b}\""* ]]
+    done
+    for b in trunk dev rel-1 young haspr inbody incomment dotted inclosed; do
+        [[ "${output}" != *"branch=\"${b}\""* ]]
+    done
+    grep -qF 'issues?state=all&' "${OB_CALLS}"
+}
+
+@test "check orphaned-branches: clean run never lists issues" {
+    # What: no no-PR candidate -> clean, counts, no issue call.
+    # Why: success shows what was scanned (5W evidence).
+    # From: Issue #1683 | PR #1858
+    _ob_setup
+    OB_REFS="$(_ob_page "trunk|${OB_OLD}|0|a
+haspr|${OB_OLD}|1|a")"
+    export OB_REFS
+    run _ci_check_orphaned_branches
+    [ "${status}" -eq 0 ]
+    [ "${output}" = "orphaned-branches=clean scanned=2 checked=1 no_pr=0" ]
+    ! grep -qF '/issues?' "${OB_CALLS}"
+}
+
+@test "check orphaned-branches: every failure is coded rc 2" {
+    # What: token, SOT, API and parse failures fail closed.
+    # Why: a failed lookup must never read as orphan or clean.
+    # From: Issue #1683 | PR #1858
+    local case setup want
+    while IFS='|' read -r case setup want; do
+        _ob_setup
+        OB_REFS="$(_ob_page "lost|${OB_OLD}|0|a")"
+        export OB_REFS
+        eval "${setup}"
+        run _ci_check_orphaned_branches
+        echo "case=${case} status=${status} output=${output}"
+        [ "${status}" -eq 2 ]
+        [[ "${output}" == *"${want}"* ]]
+        [[ "${output}" != *"orphaned-branches=clean"* ]]; [[ "${output}" != *"CHECK-0139"* ]]
+    done <<'CASES'
+no-token|GH_TOKEN=''|CI-ERROR-CHECK-0130
+bad-age|sed -i 's/3600/1h/' "${CI_MANIFEST}"|CI-ERROR-CHECK-0131
+no-long-lived|printf 'branch_policy:\n  orphan_min_age_seconds: 1\n' > "${CI_MANIFEST}"|CI-ERROR-CHECK-0132
+refs-fail|OB_FAIL=graphql|CI-ERROR-CHECK-0133
+refs-json|OB_REFS='not json'|CI-ERROR-CHECK-0134
+refs-row|OB_REFS='{"data":{"repository":{"refs":{"nodes":[{"name":"x","target":{"committedDate":"2020-01-01T00:00:00Z"},"associatedPullRequests":{}}]}}}}'|CI-ERROR-CHECK-0135
+issues-fail|OB_FAIL='/issues?'|CI-ERROR-CHECK-0136
+issues-json|OB_ISSUES='{'|CI-ERROR-CHECK-0137
+comments-fail|OB_FAIL='/issues/comments?'|CI-ERROR-CHECK-0138
+comments-json|OB_COMMENTS='[{"body":"x"}]'|CI-ERROR-CHECK-0137
+match-fail|_ci_unreferenced_names() { ci_error "[CI-ERROR-CHECK-0140]" "x" "y"; return 2; }|CI-ERROR-CHECK-0140
+CASES
+}
+
+@test "unreferenced names: ref-grammar bounds; read error rc 2" {
+    # What: a name counts only between ref-grammar bounds.
+    # Why: x4 in x4-long is another ref, not a reference.
+    # From: Issue #1683 | PR #1858
+    local f="${BATS_TEST_TMPDIR}/corpus"
+    printf 'a `x1` b x2.\n(x3)/y x4-long x5_y\n' > "${f}"
+    run _ci_unreferenced_names $'x1\nx2\nx3\nx4\nx5' "${f}"
+    [ "${status}" -eq 0 ]
+    [ "${output}" = $'x4\nx5' ]
+    run _ci_unreferenced_names x1 "${BATS_TEST_TMPDIR}/missing"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0140"*"missing"*"raw:"* ]]
+}
+
 # What: fixture repo + a fake action-manifest resolver.
 # Why: one owner for the harness; asserts contract not curl.
 # From: Issue #1683 | PR #1858

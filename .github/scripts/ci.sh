@@ -8199,6 +8199,165 @@ _ci_check_pr_tracking_metadata() {
     printf 'pr-tracking-metadata=ok\n'
 }
 
+# What: True if a branch is a SOT long-lived branch.
+# Why: names match exactly; patterns are SOT globs.
+# From: Issue #1683 | PR #1858
+_ci_branch_long_lived() {
+    local branch="$1" names="$2" pats="$3" hit p
+    hit="$(_ci_capture 1 grep -xF -- "${branch}" <<< "${names}")" || return 2
+    [ -z "${hit}" ] || return 0
+    while IFS= read -r p; do
+        [ -n "${p}" ] || continue
+        # What: unquoted pattern: the SOT entry is a glob.
+        # Why: quoting would match the glob text literally.
+        # From: Issue #1683 | PR #1858
+        case "${branch}" in ${p}) return 0 ;; esac
+    done <<< "${pats}"
+    return 1
+}
+
+# What: Print each name not referenced in a text file.
+# Why: ref grammar bounds a name; no substring false hit.
+# From: Issue #1683 | PR #1858
+_ci_unreferenced_names() {
+    local names="$1" file="$2" out
+    # What: bound = start/end or a char no ref holds.
+    # Why: git-check-ref-format; prose quotes also bound.
+    # From: Issue #1683 | PR #1858
+    if ! out="$(awk -v names="${names}" -v q="'" '
+        function bound(c) { return c == "" || c == q || index(" \t\n~^:?*[]\\`\"(),<>;!", c) > 0 }
+        BEGIN { n = split(names, want, "\n") }
+        { text = text $0 "\n" }
+        END {
+            for (i = 1; i <= n; i++) {
+                w = want[i]; hit = 0; from = 1
+                if (w == "") continue
+                while (!hit && (p = index(substr(text, from), w)) > 0) {
+                    s = from + p - 1; e = s + length(w)
+                    a = substr(text, e, 1)
+                    if (a == "." || a == "/") a = substr(text, e + 1, 1)
+                    if (bound(s > 1 ? substr(text, s - 1, 1) : "") && bound(a)) hit = 1
+                    from = s + 1
+                }
+                if (!hit) print w
+            }
+        }
+    ' "${file}" 2>&1)"; then
+        ci_error "[CI-ERROR-CHECK-0140]" "file=\"${file}\" reason=\"reference match failed\"" "${out}"
+        return 2
+    fi
+    [ -z "${out}" ] || printf '%s\n' "${out}"
+}
+
+# What: AG-GH-017 sweep: old work branch, no PR or issue.
+# Why: an untracked branch is a finding, never a notice.
+# From: Issue #1683 | PR #1858
+_ci_check_orphaned_branches() {
+    local repo min_age now names pats raw rows rc=0
+    repo="$(_ci_repo)" || return 2
+    if [ -z "${GH_TOKEN:-}" ]; then
+        ci_log "[CI-ERROR-CHECK-0130]" "repo=\"${repo}\" reason=\"GH_TOKEN is required\""
+        return 2
+    fi
+    min_age="$(_ci_block_entry_field branch_policy "" orphan_min_age_seconds)" || return 2
+    if ! [[ "${min_age}" =~ ^[0-9]+$ ]]; then
+        ci_log "[CI-ERROR-CHECK-0131]" "value=\"${min_age}\" reason=\"no numeric SOT branch_policy.orphan_min_age_seconds\""
+        return 2
+    fi
+    # What: long-lived = channel refs + branch_policy lists.
+    # Why: release.channels owns master; no second literal.
+    # From: Issue #1683 | PR #1858
+    raw="$(_ci_channel_field ref)" || return 2
+    names="$(awk '$2 ~ /^refs\/heads\// { sub(/^refs\/heads\//, "", $2); print $2 }' <<< "${raw}")"
+    raw="$(_ci_block_entry_list branch_policy "" long_lived)" || return 2
+    names+=$'\n'"${raw}"
+    pats="$(_ci_block_entry_list branch_policy "" long_lived_patterns)" || return 2
+    if [ -z "${names//[[:space:]]/}" ]; then
+        ci_log "[CI-ERROR-CHECK-0132]" "reason=\"no long-lived branch in the SOT; FAIL CLOSED\""
+        return 2
+    fi
+    # What: one paged query: tip date and PR count per ref.
+    # Why: associatedPullRequests counts PRs in any state.
+    # From: Issue #1683 | PR #1858
+    raw="$(_ci_retry github-api gh api graphql --paginate -f owner="${repo%%/*}" -f name="${repo#*/}" \
+        -f query='query($owner: String!, $name: String!, $endCursor: String) { repository(owner: $owner, name: $name) { refs(refPrefix: "refs/heads/", first: 100, after: $endCursor) { nodes { name target { ... on Commit { committedDate author { name } } } associatedPullRequests { totalCount } } pageInfo { hasNextPage endCursor } } } }')" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        ci_log "[CI-ERROR-CHECK-0133]" "repo=\"${repo}\" rc=${rc} reason=\"branch listing failed (raw above)\""
+        return 2
+    fi
+    if ! rows="$(jq -r '.data.repository.refs.nodes[] | [.name, .target.committedDate, (.target.committedDate | fromdateiso8601), .associatedPullRequests.totalCount, (.target.author.name // "")] | @tsv' <<< "${raw}" 2>&1)"; then
+        ci_error "[CI-ERROR-CHECK-0134]" "repo=\"${repo}\" reason=\"branch listing unparseable\"" "${rows}"$'\n'"response:"$'\n'"${raw}"
+        return 2
+    fi
+    now="$(date -u +%s)"
+    local branch iso epoch prs author live scanned=0 old=0
+    local -a noprs=()
+    local -A when=() who=()
+    while IFS=$'\t' read -r branch iso epoch prs author; do
+        [ -n "${branch}" ] || continue
+        scanned=$((scanned + 1))
+        if ! [[ "${epoch}" =~ ^[0-9]+$ && "${prs}" =~ ^[0-9]+$ ]]; then
+            ci_log "[CI-ERROR-CHECK-0135]" "branch=\"${branch}\" epoch=\"${epoch}\" prs=\"${prs}\" reason=\"malformed branch row\""
+            return 2
+        fi
+        [ $((now - epoch)) -ge "${min_age}" ] || continue
+        live=0
+        _ci_branch_long_lived "${branch}" "${names}" "${pats}" || live=$?
+        [ "${live}" -ne 2 ] || return 2
+        [ "${live}" -ne 0 ] || continue
+        old=$((old + 1))
+        [ "${prs}" -eq 0 ] || continue
+        noprs+=("${branch}"); when["${branch}"]="${iso}"; who["${branch}"]="${author}"
+    done <<< "${rows}"
+    if [ "${#noprs[@]}" -eq 0 ]; then
+        printf 'orphaned-branches=clean scanned=%s checked=%s no_pr=0\n' "${scanned}" "${old}"
+        return 0
+    fi
+    # What: bodies + comments of issues in any state.
+    # Why: AG-GH-017 asks for an issue link, not an open one.
+    # From: Issue #1683 | PR #1858
+    local corpus out
+    corpus="$(_ci_mktemp "${CI_TMPDIR}/ci-orphan-corpus.XXXXXX")" || return 2
+    raw="$(_ci_retry github-api gh api --paginate "repos/${repo}/issues?state=all&per_page=100")" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        ci_log "[CI-ERROR-CHECK-0136]" "repo=\"${repo}\" rc=${rc} reason=\"issue listing failed (raw above)\""
+        rm -f "${corpus}"
+        return 2
+    fi
+    # What: drop PR entries and PR conversation comments.
+    # Why: both /issues endpoints also return pull requests.
+    # From: Issue #1683 | PR #1858
+    if ! out="$(jq -r '.[] | select(has("pull_request") | not) | .body // empty' <<< "${raw}" 2>&1 > "${corpus}")"; then
+        ci_error "[CI-ERROR-CHECK-0137]" "repo=\"${repo}\" corpus=\"${corpus}\" reason=\"issue data unparseable or unwritable\"" "${out}"
+        rm -f "${corpus}"
+        return 2
+    fi
+    raw="$(_ci_retry github-api gh api --paginate "repos/${repo}/issues/comments?per_page=100")" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        ci_log "[CI-ERROR-CHECK-0138]" "repo=\"${repo}\" rc=${rc} reason=\"issue comment listing failed (raw above)\""
+        rm -f "${corpus}"
+        return 2
+    fi
+    if ! out="$(jq -r '.[] | select(.html_url | contains("/issues/")) | .body // empty' <<< "${raw}" 2>&1 >> "${corpus}")"; then
+        ci_error "[CI-ERROR-CHECK-0137]" "repo=\"${repo}\" corpus=\"${corpus}\" reason=\"issue comments unparseable or unwritable\"" "${out}"
+        rm -f "${corpus}"
+        return 2
+    fi
+    out="$(_ci_unreferenced_names "$(printf '%s\n' "${noprs[@]}")" "${corpus}")" || rc=$?
+    rm -f "${corpus}"
+    [ "${rc}" -eq 0 ] || return 2
+    if [ -z "${out}" ]; then
+        printf 'orphaned-branches=clean scanned=%s checked=%s no_pr=%s\n' "${scanned}" "${old}" "${#noprs[@]}"
+        return 0
+    fi
+    local -a found=()
+    while IFS= read -r branch; do
+        found+=("branch=\"${branch}\" last_commit=${when[${branch}]} author=\"${who[${branch}]}\"")
+    done <<< "${out}"
+    ci_error "[CI-ERROR-CHECK-0139]" "orphaned=${#found[@]} scanned=${scanned} checked=${old} reason=\"AG-GH-017: no PR and no issue reference\"" "$(printf '%s\n' "${found[@]}")"
+    return 1
+}
+
 # What: Node runtimes GitHub Actions has retired.
 # Why: a pin on an EoL runtime breaks once GitHub drops it.
 # From: Issue #1683 | PR #1858
@@ -10362,6 +10521,7 @@ ci_cmd_check() {
         pr-template) _ci_check_pr_template "$@" ;;
         workflow-line-limit) _ci_check_workflow_line_limit "$@" ;;
         pr-tracking-metadata) _ci_check_pr_tracking_metadata "$@" ;;
+        orphaned-branches) _ci_check_orphaned_branches "$@" ;;
         action-node-versions) _ci_check_action_node_versions "$@" ;;
         governance-guards) _ci_check_governance_guards "$@" ;;
         naming-consistency) _ci_check_naming_consistency "$@" ;;

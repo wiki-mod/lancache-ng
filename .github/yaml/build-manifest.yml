@@ -682,6 +682,19 @@ pr_policy:
   title_scopes_extra: [setup, ci, governance, docs, scripts, tests]
   project_number: 6
 
+# What: Orphan-branch sweep inputs (AG-GH-017).
+# Why: age gate and long-lived refs are data, not code.
+# From: Issue #1683 | PR #1858
+branch_policy:
+  orphan_min_age_seconds: 3600
+  # What: long-lived refs besides the channel refs.
+  # Why: release.channels already owns the master ref.
+  # From: Issue #1683 | PR #1858
+  long_lived: [current_dev, badges]
+  long_lived_patterns:
+    - "v[0-9]*"
+    - "CI-Automation/*"
+
 # What: Stack-validation check parameters (data, not logic).
 # Why: One SOT for check inputs; logic stays in ci.sh.
 # From: Issue #1683 | PR #1858
