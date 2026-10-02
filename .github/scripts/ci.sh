@@ -5244,6 +5244,14 @@ _ci_validate_net_override() {
         [ -n "${svc}" ] || continue
         printf '  %s:\n    container_name: !reset null\n    ports: !reset []\n' "${svc}"
     done <<< "${svcs}"
+    # What: host-mode services join the /27 when run alone.
+    # Why: a probe runs one isolated; up never starts them.
+    # From: Issue #763 | PR #1858
+    svcs="$(_ci_validate_service_list '.value.network_mode == "host"')" || return 2
+    while IFS= read -r svc; do
+        [ -n "${svc}" ] || continue
+        printf '  %s:\n    network_mode: !reset null\n' "${svc}"
+    done <<< "${svcs}"
 }
 
 # What: container id of a compose service; empty if none.
@@ -5258,10 +5266,18 @@ _ci_validate_cid() {
 # Why: Checks target the runtime IP, never a fixed one.
 # From: Issue #1683
 _ci_validate_container_ip() {
-    local project="$1" svc="$2" net cid ip
-    net="${project}_default"
+    local project="$1" svc="$2" cid
     cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
     [ -n "${cid}" ] || return 1
+    _ci_validate_cid_ip "${project}" "${cid}"
+}
+
+# What: The /27 IP of a container id or name.
+# Why: a compose run container has no service ps entry.
+# From: Issue #763 | PR #1858
+_ci_validate_cid_ip() {
+    local project="$1" cid="$2" net ip
+    net="${project}_default"
     ip="$(_ci_capture 0 docker inspect -f "{{(index .NetworkSettings.Networks \"${net}\").IPAddress}}" "${cid}")" || return 2
     case "${ip}" in
         *.*.*.*) printf '%s' "${ip}" ;;
@@ -5410,13 +5426,21 @@ _ci_validate_up() {
     while IFS= read -r svc; do
         [ -n "${svc}" ] && ci_log "[CI-INFO-VALIDATE-0055]" "service=\"${svc}\" reason=\"host network mode cannot be isolated in a /27; excluded\""
     done <<< "${raw}"
-    local file flags
+    _ci_validate_compose "${project}" "${net_override}" "${pin_override}" up -d "${svcs[@]}"
+}
+
+# What: docker compose on the validate stack with its args.
+# Why: up and run share one file, override and profile list.
+# From: Issue #763 | PR #1858
+_ci_validate_compose() {
+    local project="$1" net_override="$2" pin_override="$3" file flags
+    shift 3
     file="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     local -a pf=()
     flags="$(_ci_compose_profile_flags "${file}")" || return 2
     [ -z "${flags}" ] || mapfile -t pf <<< "${flags}"
     docker compose -p "${project}" -f "${file}" \
-        -f "${net_override}" -f "${pin_override}" "${pf[@]}" up -d "${svcs[@]}"
+        -f "${net_override}" -f "${pin_override}" "${pf[@]}" "$@"
 }
 
 # What: Started services that also have a healthcheck.
@@ -5930,6 +5954,166 @@ _ci_validate_new_snapshot() {
         | jq -e --arg p "$3" '(.zones["lan."][0].id // "") as $i | $i != "" and $i != $p' >/dev/null
 }
 
+# What: One Kea Control Agent command; prints the reply.
+# Why: ready poll, subnet read and rollback check share it.
+# From: Issue #763 | PR #1858
+_ci_validate_kea_cmd() {
+    curl -fsS -u "admin:$2" -H 'Content-Type: application/json' \
+        -d "$3" "http://$1:8000/"
+}
+
+# What: True once Kea answers config-get with result 0.
+# Why: run -d returns before kea-dhcp4 and the agent bind.
+# From: Issue #763 | PR #1858
+_ci_validate_kea_ready() {
+    _ci_validate_kea_cmd "$1" "$2" '{"command":"config-get","service":["dhcp4"]}' \
+        | jq -e '.[0].result == 0' >/dev/null
+}
+
+# What: Kea snapshot ids under <kea dir>, oldest first.
+# Why: the rollback target is the id a ui write added.
+# From: Issue #763 | PR #1858
+_ci_validate_kea_snapshots() {
+    local found p id
+    found="$(_ci_capture 0 find "$1/config-snapshots" -mindepth 2 -maxdepth 2 -name dhcp4.json)" || return 2
+    while IFS= read -r p; do
+        id="${p%/dhcp4.json}"
+        id="${id##*/}"
+        if [[ "${id}" =~ ^[0-9]+$ ]]; then
+            printf '%s\n' "${id}"
+        fi
+    done <<< "${found}" | sort
+}
+
+# What: Count live Kea reservations for one MAC.
+# Why: the rollback must change Kea's state, not a file.
+# From: Issue #763 | PR #1858
+_ci_validate_kea_has() {
+    local cfg
+    cfg="$(_ci_capture 0 _ci_validate_kea_cmd "$1" "$2" '{"command":"config-get","service":["dhcp4"]}')" || return 2
+    _ci_capture 0 jq -r --arg m "$3" \
+        '[.[0].arguments.Dhcp4.subnet4[].reservations[]? | select((."hw-address" | ascii_downcase) == ($m | ascii_downcase))] | length' \
+        <<< "${cfg}"
+}
+
+# What: Add one reservation via the ui, print new snapshot.
+# Why: every ui write must record exactly one new snapshot.
+# From: Issue #763 | PR #1858
+_ci_validate_kea_add() {
+    local uip="$1" jar="$2" csrf="$3" sid="$4" mac="$5" ip="$6" host="$7" dir="$8"
+    local before after new
+    before="$(_ci_validate_kea_snapshots "${dir}")" || return 2
+    _ci_validate_ui_post "${uip}" "${jar}" /dhcp/static/add "csrf_token=${csrf}" \
+        "subnet_id=${sid}" "mac=${mac}" "ip=${ip}" "hostname=${host}" || return $?
+    after="$(_ci_validate_kea_snapshots "${dir}")" || return 2
+    new="$(tail -n 1 <<< "${after}")"
+    if [ -z "${new}" ] || grep -qxF -- "${new}" <<< "${before}"; then
+        ci_log "[CI-ERROR-VALIDATE-0088]" "mac=\"${mac}\" before=\"${before//$'\n'/ }\" after=\"${after//$'\n'/ }\" reason=\"ui reservation write recorded no new Kea snapshot\""
+        return 1
+    fi
+    printf '%s' "${new}"
+}
+
+# What: Two ui writes, setup.sh rollback, live config-get.
+# Why: the CLI fallback must revert Kea's running config.
+# From: Issue #763 | PR #1858
+_ci_validate_kea_round_trip() {
+    local project="$1" kip="$2" uname="$3" cfg token dir subnet resp sid uip
+    local jar csrf base snap inst out n_a n_b rc=0
+    local mac_a=02:00:00:00:07:01 mac_b=02:00:00:00:07:02
+    cfg="$(_ci_validate_config_json)" || return 2
+    token="$(_ci_capture 0 jq -r '.services.dhcp.environment.KEA_CTRL_TOKEN // empty' <<< "${cfg}")" || return 2
+    dir="$(_ci_capture 0 jq -r '.services.dhcp.volumes[]? | select(.target == "/var/lib/kea") | .source' <<< "${cfg}")" || return 2
+    subnet="$(_ci_capture 0 jq -r '.services.dhcp.environment.DHCP_SUBNET // empty' <<< "${cfg}")" || return 2
+    if [ -z "${token}" ] || [ -z "${dir}" ] || [ -z "${subnet}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0089]" "reason=\"dhcp compose config lacks KEA_CTRL_TOKEN, the /var/lib/kea mount or DHCP_SUBNET\""
+        return 2
+    fi
+    if ! out="$(_ci_validate_poll 30 2 _ci_validate_kea_ready "${kip}" "${token}")"; then
+        ci_error "[CI-ERROR-VALIDATE-0090]" "ip=\"${kip}\" reason=\"Kea control agent never answered config-get\"" "${out}"
+        return 1
+    fi
+    resp="$(_ci_capture 0 _ci_validate_kea_cmd "${kip}" "${token}" '{"command":"config-get","service":["dhcp4"]}')" || return 2
+    sid="$(_ci_capture 0 jq -r --arg s "${subnet}" '.[0].arguments.Dhcp4.subnet4[]? | select(.subnet == $s) | .id' <<< "${resp}")" || return 2
+    if [ -z "${sid}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0091]" "subnet=\"${subnet}\" reason=\"no Kea subnet4 entry for DHCP_SUBNET\""
+        return 1
+    fi
+    uip="$(_ci_validate_cid_ip "${project}" "${uname}")" || {
+        rc=$?
+        ci_log "[CI-ERROR-VALIDATE-0092]" "container=\"${uname}\" reason=\"no /27 IP for the Kea ui run container\""
+        return "${rc}"
+    }
+    jar="$(_ci_mktemp "${CI_TMPDIR}/ci-kea-jar.XXXXXX")" || return 2
+    csrf="$(_ci_validate_ui_session "${project}" "${jar}" "${uip}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
+    # What: reservation IPs base+2/+3 of DHCP_SUBNET.
+    # Why: Kea rejects a reservation outside its subnet.
+    # From: Issue #763 | PR #1858
+    base="$(_ci_ipv4_to_int "${subnet%/*}")"
+    snap="$(_ci_validate_kea_add "${uip}" "${jar}" "${csrf}" "${sid}" "${mac_a}" \
+        "$(_ci_int_to_ipv4 $(( base + 2 )))" ci-kea-a "${dir}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
+    _ci_validate_kea_add "${uip}" "${jar}" "${csrf}" "${sid}" "${mac_b}" \
+        "$(_ci_int_to_ipv4 $(( base + 3 )))" ci-kea-b "${dir}" >/dev/null || { rc=$?; rm -f "${jar}"; return "${rc}"; }
+    rm -f "${jar}"
+    inst="$(_ci_mktemp -d "${CI_TMPDIR}/ci-kea-install.XXXXXX")" || return 2
+    # What: install-dir stub: compose marker and Kea .env.
+    # Why: setup.sh reads KEA_* only from <install>/.env.
+    # From: Issue #763 | PR #1858
+    if ! out="$( { : > "${inst}/docker-compose.yml" \
+        && printf 'KEA_CTRL_TOKEN=%s\nKEA_CTRL_HOST=%s\nKEA_DATA_DIR=%s\n' "${token}" "${kip}" "${dir}" > "${inst}/.env"; } 2>&1)"; then
+        ci_error "[CI-ERROR-VALIDATE-0093]" "dir=\"${inst}\" reason=\"setup.sh install-dir stub not written\"" "${out}"
+        rm -rf "${inst}"
+        return 2
+    fi
+    resp="$(bash "${CI_REPO_ROOT}/setup.sh" reset-to-last-known-good-config kea "${inst}" "${snap}" --yes 2>&1)" || rc=$?
+    rm -rf "${inst}"
+    case "${rc}:${resp}" in
+        0:*"Kea rolled back to known-good snapshot ${snap} ("*) ;;
+        *)
+            ci_error "[CI-ERROR-VALIDATE-0094]" "snapshot=\"${snap}\" rc=\"${rc}\" reason=\"setup.sh kea rollback did not report the requested snapshot\"" "${resp}"
+            return 1
+            ;;
+    esac
+    n_a="$(_ci_validate_kea_has "${kip}" "${token}" "${mac_a}")" || return 2
+    n_b="$(_ci_validate_kea_has "${kip}" "${token}" "${mac_b}")" || return 2
+    if [ "${n_a}" != 1 ] || [ "${n_b}" != 0 ]; then
+        ci_log "[CI-ERROR-VALIDATE-0095]" "snapshot=\"${snap}\" a=\"${n_a}\" b=\"${n_b}\" reason=\"live Kea config is not the snapshot state (want a=1 b=0)\""
+        return 1
+    fi
+}
+
+# What: Remove one compose run container of a probe.
+# Why: frees its /27 address before the next probe runs.
+# From: Issue #763 | PR #1858
+_ci_validate_rm_run() {
+    _ci_run "[CI-ERROR-VALIDATE-0099]" "container=\"$1\" reason=\"run container not removed\"" \
+        docker rm -f "$1" >/dev/null
+}
+
+# What: Kea rollback leg on its own run containers.
+# Why: dhcp is host-mode, so up never starts a Kea.
+# From: Issue #763 | PR #1858
+_ci_validate_kea_rollback() {
+    local project="$1" net="$2" pin="$3" kname uname kip rc=0
+    kname="${project}-kea"
+    uname="${project}-kea-ui"
+    _ci_run "[CI-ERROR-VALIDATE-0096]" "project=\"${project}\" service=\"dhcp\" reason=\"Kea run container not started\"" \
+        _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${kname}" dhcp >/dev/null || return $?
+    if ! kip="$(_ci_validate_cid_ip "${project}" "${kname}")"; then
+        ci_log "[CI-ERROR-VALIDATE-0097]" "container=\"${kname}\" reason=\"no /27 IP for the Kea run container\""
+        rc=2
+    elif _ci_run "[CI-ERROR-VALIDATE-0098]" "project=\"${project}\" service=\"ui\" reason=\"Kea ui run container not started\"" \
+        _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${uname}" \
+        -e DHCP_MODE=kea -e "DHCP_API_URL=http://${kip}:8000" ui >/dev/null; then
+        _ci_validate_kea_round_trip "${project}" "${kip}" "${uname}" || rc=$?
+        _ci_validate_rm_run "${uname}" || { [ "${rc}" -ne 0 ] || rc=2; }
+    else
+        rc=2
+    fi
+    _ci_validate_rm_run "${kname}" || { [ "${rc}" -ne 0 ] || rc=2; }
+    return "${rc}"
+}
+
 # What: Prove ui.depends_on never gates on service_healthy.
 # Why: UI must start even while a dependency crash-loops.
 # From: Issue #1683
@@ -6016,7 +6200,7 @@ _ci_validate_secondary_identity() {
 # Why: probes target the stack; a host proxy must not.
 # From: Issue #1683 | PR #1858
 _ci_validate_probes() {
-    local project="$1" rc=0
+    local project="$1" net="$2" pin="$3" rc=0
     local -x NO_PROXY='*' no_proxy='*'
     _ci_validate_dns "${project}" || rc=$?
     [ "${rc}" -eq 0 ] && { _ci_validate_proxy "${project}" || rc=$?; }
@@ -6025,6 +6209,7 @@ _ci_validate_probes() {
     [ "${rc}" -eq 0 ] && { _ci_validate_ssl_dispatch_map "${project}" || rc=$?; }
     [ "${rc}" -eq 0 ] && { _ci_validate_ui_nats_dns "${project}" || rc=$?; }
     [ "${rc}" -eq 0 ] && { _ci_validate_dns_rollback "${project}" || rc=$?; }
+    [ "${rc}" -eq 0 ] && { _ci_validate_kea_rollback "${project}" "${net}" "${pin}" || rc=$?; }
     [ "${rc}" -eq 0 ] && { _ci_validate_ui_depends_started || rc=$?; }
     [ "${rc}" -eq 0 ] && { _ci_validate_secondary_identity "${project}" || rc=$?; }
     return "${rc}"
@@ -6071,7 +6256,7 @@ _ci_default_validate() {
         && _ci_validate_pin_override "${candidate}" > "${pin_ovr}"; then
         if up_out="$(_ci_validate_up "${project}" "${net_ovr}" "${pin_ovr}" 2>&1)"; then
             _ci_validate_wait_healthy "${project}" || rc=$?
-            [ "${rc}" -eq 0 ] && { _ci_validate_probes "${project}" || rc=$?; }
+            [ "${rc}" -eq 0 ] && { _ci_validate_probes "${project}" "${net_ovr}" "${pin_ovr}" || rc=$?; }
         elif _ci_validate_is_collision "${up_out}"; then
             ci_error "[CI-ERROR-VALIDATE-0016]" "reason=\"subnet/port collision after slot reservation\"" "${up_out}"
             rc=1

@@ -3827,10 +3827,19 @@ STUB
             esac || { echo "${name}: '${w}': rc ${status}: ${output}"; return 1; }
         done
     done <<'CASES'
-default-only|"default":{}|rc=0;default:;subnet: 172.16.1.32/28;proxy:;container_name: !reset null;ports: !reset [];!dhcp:;!/29
+default-only|"default":{}|rc=0;default:;subnet: 172.16.1.32/28;proxy:;container_name: !reset null;ports: !reset [];!/29
 two-extra|"default":{},"a":{},"b":{"internal":true}|rc=0;subnet: 172.16.1.32/28;a:;subnet: 172.16.1.48/29;b:;subnet: 172.16.1.56/29
 three-extra|"a":{},"b":{},"c":{}|rc=2;CI-ERROR-VALIDATE-0068;network="c"
 CASES
+    # What: only host-mode services get network_mode reset.
+    # Why: a probe may run one in the /27; up never does.
+    # From: Issue #763 | PR #1858
+    CI_COMPOSE_CONFIG_CMD="$(_stub cfg-host "printf '%s' '{\"services\":{\"proxy\":{},\"dhcp\":{\"network_mode\":\"host\"}},\"networks\":{\"default\":{}}}'")" \
+        run _ci_validate_net_override 172.16.1.32/27
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *$'  dhcp:\n    network_mode: !reset null'* ]]
+    [ "$(grep -c 'network_mode' <<< "${output}")" -eq 1 ]
+    [[ "${output}" != *$'  dhcp:\n    container_name'* ]]
 }
 
 @test "validate container ip refuses a non-ipv4 result" {
@@ -4005,23 +4014,24 @@ CASES
     # From: Issue #1683 | PR #1858
     local log="${BATS_TEST_TMPDIR}/probes" p fail=""
     local -a probes=(dns proxy proxy_stream_map ssl_mitm ssl_dispatch_map
-        ui_nats_dns dns_rollback ui_depends_started secondary_identity)
+        ui_nats_dns dns_rollback kea_rollback ui_depends_started secondary_identity)
     for p in "${probes[@]}"; do
         eval "_ci_validate_${p}() {
-            echo \"${p} \${NO_PROXY}|\${no_proxy}\" >> '${log}'
+            echo \"${p} \${NO_PROXY}|\${no_proxy} \$*\" >> '${log}'
             [ '${p}' != \"\${fail}\" ]
         }"
     done
     export NO_PROXY=keep no_proxy=keep
     : > "${log}"
-    _ci_validate_probes proj
+    _ci_validate_probes proj net.yml pin.yml
     [ "$(cut -d' ' -f1 "${log}" | paste -sd' ')" = "${probes[*]}" ] || {
         echo "order:"; cat "${log}"; return 1; }
     [ "$(cut -d' ' -f2 "${log}" | sort -u)" = '*|*' ] || {
         echo "proxy:"; cat "${log}"; return 1; }
     [ "${NO_PROXY}|${no_proxy}" = 'keep|keep' ]
+    grep -qx 'kea_rollback \*|\* proj net.yml pin.yml' "${log}"
     fail=ssl_mitm; : > "${log}"
-    run _ci_validate_probes proj
+    run _ci_validate_probes proj net.yml pin.yml
     [ "${status}" -eq 1 ]
     [ "$(cut -d' ' -f1 "${log}" | paste -sd' ')" = "dns proxy proxy_stream_map ssl_mitm" ] || {
         echo "early:"; cat "${log}"; return 1; }
@@ -4341,6 +4351,124 @@ flush|1|0043|rolled back to known-good snapshot snap1. ci-rollback-probe.lan. ca
 other-snap|1|0043|rolled back to known-good snapshot snap0. Changed rrsets: ["ci-rollback-probe.lan."]
 no-probe|1|0043|rolled back to known-good snapshot snap1. Changed rrsets: []
 nosnap|1|0087|rolled back to known-good snapshot snap1. Changed rrsets: ["ci-rollback-probe.lan."]
+CASES
+}
+
+@test "validate kea-rollback removes its run containers on every path" {
+    # What: each failure point maps to its code and cleanup.
+    # Why: a leftover run container eats a /27 address.
+    # From: Issue #763 | PR #1858
+    local log="${BATS_TEST_TMPDIR}/kea-run.log" case want code rms
+    _ci_validate_compose() {
+        shift 3
+        echo "compose $*" >> "${log}"
+        case "${case}:$*" in
+            krun:*" dhcp") echo "kea boom" >&2; return 1 ;;
+            urun:*" ui") echo "ui boom" >&2; return 1 ;;
+        esac
+    }
+    _ci_validate_cid_ip() { [ "${case}" != noip ] && echo 172.16.1.40; }
+    _ci_validate_kea_round_trip() { echo "trip $*" >> "${log}"; [ "${case}" != trip ]; }
+    docker() {
+        echo "docker $*" >> "${log}"
+        [ "${case}" != rm ] || { echo "rm boom" >&2; return 1; }
+    }
+    while IFS='|' read -r case want code rms; do
+        : > "${log}"
+        run _ci_validate_kea_rollback proj net.yml pin.yml
+        [ "${status}" -eq "${want}" ] || { echo "${case}: ${output}"; cat "${log}"; return 1; }
+        [ "${code}" = - ] || [[ "${output}" == *"CI-ERROR-VALIDATE-${code}"* ]] || {
+            echo "${case}: ${output}"; return 1; }
+        [ "$(sed -n 's/^docker rm -f //p' "${log}" | paste -sd' ')" = "${rms}" ] || {
+            echo "${case} rm:"; cat "${log}"; return 1; }
+    done <<'CASES'
+ok|0|-|proj-kea-ui proj-kea
+krun|2|0096|
+noip|2|0097|proj-kea
+urun|2|0098|proj-kea
+trip|1|-|proj-kea-ui proj-kea
+rm|2|0099|proj-kea-ui proj-kea
+CASES
+    case=ok
+    : > "${log}"
+    run _ci_validate_kea_rollback proj net.yml pin.yml
+    grep -qx 'compose run -d --no-deps --name proj-kea dhcp' "${log}"
+    grep -qx 'compose run -d --no-deps --name proj-kea-ui -e DHCP_MODE=kea -e DHCP_API_URL=http://172.16.1.40:8000 ui' "${log}"
+    grep -qx 'trip proj 172.16.1.40 proj-kea-ui' "${log}"
+}
+
+@test "validate kea-rollback round trip proves the live rollback" {
+    # What: ui writes, setup.sh rollback, live config-get.
+    # Why: only Kea's live config proves the CLI rollback.
+    # From: Issue #763 | PR #1858
+    local case want code
+    export CI_REPO_ROOT="${BATS_TEST_TMPDIR}/repo"
+    local kea="${CI_REPO_ROOT}/kea"
+    export CI_COMPOSE_CONFIG_CMD="${CI_REPO_ROOT}/cfg"
+    sleep() { :; }
+    _ci_validate_cid_ip() { echo 172.16.1.41; }
+    _ci_validate_ui_session() { echo "$3" > "${CI_REPO_ROOT}/uip"; echo TOK; }
+    # What: a ui post adds the MAC and records a snapshot.
+    # Why: mirrors the ui write path the rollback restores.
+    # From: Issue #763 | PR #1858
+    _ci_validate_ui_post() {
+        local f id
+        echo "post $*" >> "${CI_REPO_ROOT}/posts"
+        for f in "$@"; do
+            case "${f}" in mac=*) echo "${f#mac=}" >> "${CI_REPO_ROOT}/res" ;; esac
+        done
+        [ "${case}" != nosnap ] || return 0
+        id=$(( 100 + $(wc -l < "${CI_REPO_ROOT}/posts") ))
+        mkdir -p "${kea}/config-snapshots/${id}"
+        cp "${CI_REPO_ROOT}/res" "${kea}/config-snapshots/${id}/dhcp4.json"
+    }
+    curl() {
+        [ "${case}" != noready ] || { echo "connection refused" >&2; return 7; }
+        local r=""
+        [ ! -s "${CI_REPO_ROOT}/res" ] || r="$(sed 's/.*/{"hw-address":"&"}/' "${CI_REPO_ROOT}/res" | paste -sd,)"
+        printf '[{"result":0,"arguments":{"Dhcp4":{"subnet4":[{"id":7,"subnet":"%s","reservations":[%s]}]}}}]\n' \
+            "$(cat "${CI_REPO_ROOT}/subnet")" "${r}"
+    }
+    mkdir -p "${CI_REPO_ROOT}"
+    printf '%s\n' '#!/usr/bin/env bash' \
+        'printf "%s\n" "$*" > "${CI_REPO_ROOT}/args"; cp "$3/.env" "${CI_REPO_ROOT}/env"' \
+        'm="$(cat "${CI_REPO_ROOT}/mode")"' \
+        '[ "${m}" != fails ] || { echo "Kea rejected"; exit 1; }' \
+        '[ "${m}" = norevert ] || cp "${KEA_DIR}/config-snapshots/$4/dhcp4.json" "${CI_REPO_ROOT}/res"' \
+        's="$4"; [ "${m}" != other ] || s=999' \
+        'echo "Kea rolled back to known-good snapshot ${s} (validated, applied, and persisted)."' \
+        > "${CI_REPO_ROOT}/setup.sh"
+    export KEA_DIR="${kea}"
+    while IFS='|' read -r case want code; do
+        rm -rf "${kea}" "${CI_REPO_ROOT}/posts" "${CI_REPO_ROOT}/res" "${CI_REPO_ROOT}/args"
+        mkdir -p "${kea}/config-snapshots"
+        echo "${case}" > "${CI_REPO_ROOT}/mode"
+        echo 10.0.0.0/24 > "${CI_REPO_ROOT}/subnet"
+        [ "${case}" != nosubnet ] || echo 10.9.0.0/24 > "${CI_REPO_ROOT}/subnet"
+        printf '%s\n' '#!/usr/bin/env bash' \
+            "printf '%s' '{\"services\":{\"dhcp\":{\"environment\":{$([ "${case}" = noenv ] || echo '"KEA_CTRL_TOKEN":"tok",')\"DHCP_SUBNET\":\"10.0.0.0/24\"},\"volumes\":[{\"source\":\"${kea}\",\"target\":\"/var/lib/kea\"}]}}}'" \
+            > "${CI_REPO_ROOT}/cfg"
+        chmod +x "${CI_REPO_ROOT}/cfg"
+        run _ci_validate_kea_round_trip proj 172.16.1.40 proj-kea-ui
+        [ "${status}" -eq "${want}" ] || { echo "${case}: ${output}"; return 1; }
+        [ "${code}" = - ] || [[ "${output}" == *"CI-ERROR-VALIDATE-${code}"* ]] || {
+            echo "${case}: ${output}"; return 1; }
+        case "${case}" in ok|norevert|other|fails) ;; *) continue ;; esac
+        grep -q 'mac=02:00:00:00:07:01 ip=10.0.0.2 hostname=ci-kea-a' "${CI_REPO_ROOT}/posts"
+        grep -q 'subnet_id=7 mac=02:00:00:00:07:02 ip=10.0.0.3 hostname=ci-kea-b' "${CI_REPO_ROOT}/posts"
+        [ "$(cat "${CI_REPO_ROOT}/uip")" = 172.16.1.41 ]
+        [[ "$(cat "${CI_REPO_ROOT}/args")" == "reset-to-last-known-good-config kea "*"/ci-kea-install."*" 101 --yes" ]]
+        [ "$(cat "${CI_REPO_ROOT}/env")" = \
+            "$(printf 'KEA_CTRL_TOKEN=tok\nKEA_CTRL_HOST=172.16.1.40\nKEA_DATA_DIR=%s' "${kea}")" ]
+    done <<'CASES'
+ok|0|-
+fails|1|0094
+other|1|0094
+norevert|1|0095
+nosnap|1|0088
+noready|1|0090
+nosubnet|1|0091
+noenv|2|0089
 CASES
 }
 
