@@ -5728,8 +5728,8 @@ _ci_validate_poll() {
 # Why: One owner for the cookiejar + CSRF extraction.
 # From: Issue #1683
 _ci_validate_ui_session() {
-    local project="$1" jar="$2" ip cookie csrf last
-    ip="$(_ci_validate_container_ip "${project}" ui)"
+    local project="$1" jar="$2" ip="${3:-}" cookie csrf last
+    [ -n "${ip}" ] || ip="$(_ci_validate_container_ip "${project}" ui)"
     if [ -z "${ip}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0030]" "reason=\"no ui container IP for session check\""
         return 2
@@ -5754,24 +5754,33 @@ _ci_validate_ui_session() {
 # Why: Drives the real UI->NATS->PowerDNS write path.
 # From: Issue #1683
 _ci_validate_ui_add_record() {
-    local project="$1" jar="$2" csrf="$3" name="$4" content="$5" ip code
+    local project="$1" jar="$2" csrf="$3" name="$4" content="$5" ip
     ip="$(_ci_validate_container_ip "${project}" ui)"
     if [ -z "${ip}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0033]" "reason=\"no ui container IP for add-record\""
         return 2
     fi
+    _ci_validate_ui_post "${ip}" "${jar}" /domains/lan/add "csrf_token=${csrf}" \
+        "name=${name}" record_type=A "content=${content}" ttl=60
+}
+
+# What: POST a UI form; rc 0 on 303, 1 other, 2 on error.
+# Why: one owner for the CSRF form post and its 303 check.
+# From: Issue #1683 | PR #1858
+_ci_validate_ui_post() {
+    local ip="$1" jar="$2" path="$3" field code
+    shift 3
+    local -a data=()
+    for field in "$@"; do
+        data+=(--data-urlencode "${field}")
+    done
     code="$(_ci_capture 0 curl -sS -b "${jar}" -o /dev/null -w '%{http_code}' \
-        --data-urlencode "csrf_token=${csrf}" \
-        --data-urlencode "name=${name}" \
-        --data-urlencode "record_type=A" \
-        --data-urlencode "content=${content}" \
-        --data-urlencode "ttl=60" \
-        "http://${ip}:8080/domains/lan/add")" || {
-        ci_log "[CI-ERROR-VALIDATE-0082]" "project=\"${project}\" url=\"http://${ip}:8080/domains/lan/add\" record=\"${name} A ${content}\" reason=\"ui add-record request failed (raw above)\""
+        "${data[@]}" "http://${ip}:8080${path}")" || {
+        ci_log "[CI-ERROR-VALIDATE-0082]" "url=\"http://${ip}:8080${path}\" reason=\"ui form post failed (raw above)\""
         return 2
     }
     if [ "${code}" != "303" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0034]" "code=\"${code}\" reason=\"ui /domains/lan/add did not return 303\""
+        ci_log "[CI-ERROR-VALIDATE-0034]" "url=\"http://${ip}:8080${path}\" code=\"${code}\" reason=\"ui form post did not return 303\""
         return 1
     fi
 }
