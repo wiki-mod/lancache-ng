@@ -9422,6 +9422,97 @@ CASES
     [ ! -e "${CACHE_DIR}/old.bin" ] && [ -f "${PURGE_STAMP}" ] || { echo "later: ${output}"; return 1; }
 }
 
+@test "retention self-log rotation maps size, knobs and copy failure" {
+    # What: self-log rotation per case, one call each.
+    # Why: rotate only over budget; never lose the log.
+    # From: Issue #1236 | PR #1858
+    local t="${BATS_TEST_TMPDIR}" name live mb rot cpfail after nb msg d f b w
+    local -a ws
+    export FLUENT_BIT_SELFLOG_DIR_ALLOWED_PREFIX="${t}"
+    _load_retention_functions
+    while IFS='|' read -r name live mb rot cpfail after nb msg; do
+        d="${t}/${name}"; f="${d}/fluent-bit.log"; mkdir -p "${d}"
+        export FLUENT_BIT_SELFLOG_DIR="${d}" FLUENT_BIT_SELFLOG_MAX_MB="${mb}" FLUENT_BIT_SELFLOG_MAX_ROTATIONS="${rot}"
+        case "${live}" in
+            small) printf 'small\n' > "${f}" ;;
+            big) head -c 1100000 /dev/zero | tr '\0' 'x' > "${f}"; printf '\nMARKER-END\n' >> "${f}" ;;
+        esac
+        [ "${cpfail}" = no ] || cp() { echo "cp: simulated copy failure" >&2; return 1; }
+        run maybe_rotate_fluent_bit_selflog
+        unset -f cp
+        [ "${status}" -eq 0 ] || { echo "${name}: rc ${status}: ${output}"; return 1; }
+        case "${after}" in
+            absent) [ ! -e "${f}" ] ;;
+            small) [ "$(cat "${f}")" = small ] ;;
+            empty) [ ! -s "${f}" ] && [ -e "${f}" ] ;;
+            big) [ "$(stat -c '%s' "${f}")" -gt 1048576 ] ;;
+        esac || { echo "${name}: live file not '${after}': ${output}"; return 1; }
+        b="$(find "${d}" -maxdepth 1 -type f -name 'fluent-bit.log.*' | sort)"
+        [ "$(grep -c . <<<"${b}")" -eq "${nb}" ] || { echo "${name}: backups '${b}', want ${nb}"; return 1; }
+        if [ "${nb}" -gt 0 ]; then
+            case "${b}" in
+                *.zst) zstd -dqc "${b}" ;;
+                *) cat "${b}" ;;
+            esac | grep -q MARKER-END || { echo "${name}: backup lost the content"; return 1; }
+        fi
+        IFS=';' read -r -a ws <<<"${msg}"
+        for w in "${ws[@]}"; do
+            [ "${w}" = - ] || [[ "${output}" == *"${w}"* ]] || { echo "${name}: no '${w}': ${output}"; return 1; }
+        done
+    done <<'CASES'
+no-file|none|1|5|no|absent|0|-
+under-budget|small|1|5|no|small|0|-
+over-budget|big|1|5|no|empty|1|rotating
+copy-fails|big|1|5|yes|big|0|ERROR: failed to copy
+mb-text|small|not-a-number|5|no|small|0|Invalid FLUENT_BIT_SELFLOG_MAX_MB
+mb-zero|small|0|5|no|small|0|below the supported minimum
+mb-huge|small|99999999999999|5|no|small|0|clamping to 1048576
+mb-octal|small|018|5|no|small|0|-
+rot-text|big|1|garbage|no|empty|1|Invalid FLUENT_BIT_SELFLOG_MAX_ROTATIONS
+CASES
+}
+
+@test "retention self-log rotation keeps the newest backups only" {
+    # What: over the cap the oldest backups go first.
+    # Why: the backups themselves must not grow unbounded.
+    # From: Issue #1236 | PR #1858
+    local t="${BATS_TEST_TMPDIR}" d f i before
+    export FLUENT_BIT_SELFLOG_DIR_ALLOWED_PREFIX="${t}" FLUENT_BIT_SELFLOG_MAX_MB=1
+    _load_retention_functions
+    d="${t}/cap3"; f="${d}/fluent-bit.log"; mkdir -p "${d}"
+    for i in 4 3 2 1; do
+        printf 'old-%s\n' "${i}" > "${d}/fluent-bit.log.2026010${i}T000000Z"
+        touch -d "-${i} days" "${d}/fluent-bit.log.2026010${i}T000000Z"
+    done
+    head -c 1100000 /dev/zero | tr '\0' 'x' > "${f}"
+    export FLUENT_BIT_SELFLOG_DIR="${d}" FLUENT_BIT_SELFLOG_MAX_ROTATIONS=3
+    run maybe_rotate_fluent_bit_selflog
+    [ "${status}" -eq 0 ]
+    ls -1 "${d}"
+    [ ! -e "${d}/fluent-bit.log.20260104T000000Z" ] && [ ! -e "${d}/fluent-bit.log.20260103T000000Z" ]
+    [ -e "${d}/fluent-bit.log.20260102T000000Z" ] && [ -e "${d}/fluent-bit.log.20260101T000000Z" ]
+    [ "$(find "${d}" -maxdepth 1 -name 'fluent-bit.log.*' | grep -c .)" -eq 3 ]
+    # What: a second call right after is a no-op.
+    # Why: it runs every cycle; it must keep the backups.
+    # From: Issue #1236 | PR #1858
+    before="$(ls -1 "${d}")"
+    run maybe_rotate_fluent_bit_selflog
+    [ "${status}" -eq 0 ] && [ "$(ls -1 "${d}")" = "${before}" ]
+    # What: a leading-zero cap with an 8 does not abort.
+    # Why: 08 is no octal; the math must stay base 10.
+    # From: Issue #1236 | PR #1858
+    d="${t}/cap08"; f="${d}/fluent-bit.log"; mkdir -p "${d}"
+    for i in 1 2 3 4 5 6 7 8 9; do
+        printf 'old\n' > "${d}/fluent-bit.log.2026010${i}T000000Z"
+        touch -d "-${i} days" "${d}/fluent-bit.log.2026010${i}T000000Z"
+    done
+    head -c 1100000 /dev/zero | tr '\0' 'x' > "${f}"
+    export FLUENT_BIT_SELFLOG_DIR="${d}" FLUENT_BIT_SELFLOG_MAX_ROTATIONS=08
+    run maybe_rotate_fluent_bit_selflog
+    [ "${status}" -eq 0 ] || { echo "cap 08: rc ${status}: ${output}"; return 1; }
+    [ "$(find "${d}" -maxdepth 1 -name 'fluent-bit.log.*' | grep -c .)" -eq 8 ]
+}
+
 @test "retention stops promptly with rc 0 on SIGTERM mid-sleep" {
     # What: a real TERM during the interval sleep ends it.
     # Why: PID 1 bash ignored TERM; docker stop had to kill.
