@@ -8930,73 +8930,45 @@ _write_legacy_env_fixture() {
     dup="$(awk -F= '{print $1}' "${env_file}" | sort | uniq -d)"; [ -z "${dup}" ]
 }
 
-@test "migrate_env_for_update preserves a config/prod PXE value across two runs" {
-    # What: Prod install backfills from config/prod.
-    # Why: AG-OP-009 preservation.
-    # From: Issue #1683 | PR #1546
-    local repo_root env_file pd cd cpe
+@test "migrate_env_for_update keeps config/prod values per row" {
+    # What: prod layout per row: run, edit, run, compare.
+    # Why: AG-OP-009: operator config/prod values survive.
+    # From: Issue #1683 | PR #1858
+    local repo_root name extra cpe_init env_want edit cpe_want
+    local base pd cpe kv
+    local -a kvs
     repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    pd="${BATS_TEST_TMPDIR}/scratch/deploy/prod"; cd="${BATS_TEST_TMPDIR}/scratch/config/prod"
-    mkdir -p "${pd}" "${cd}"; cpe="${cd}/dhcp-proxy.env"; env_file="${pd}/.env"
     _load_setup_update_helpers "${repo_root}"
-    _write_legacy_env_fixture "${env_file}"
-    printf '%s\n' 'DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9' 'DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0' > "${cpe}"
-    run migrate_env_for_update "${pd}"; [ "${status}" -eq 0 ]
-    grep -qx 'DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9' "${env_file}"
-    grep -qx 'DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0' "${env_file}"
-    run migrate_env_for_update "${pd}"; [ "${status}" -eq 0 ]
-    run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "${cpe}"; [ "${output}" = "10.9.9.9" ]
-    run get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "${cpe}"; [ "${output}" = "real-pxelinux.0" ]
-}
-
-@test "migrate_env_for_update preserves a direct config/prod edit after migration" {
-    # What: Direct config/prod edit wins over stale .env.
-    # Why: AG-OP-009 preserve existing operator values.
-    # From: Issue #1683 | PR #1546
-    local repo_root env_file pd cd cpe
-    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    pd="${BATS_TEST_TMPDIR}/scratch/deploy/prod"; cd="${BATS_TEST_TMPDIR}/scratch/config/prod"
-    mkdir -p "${pd}" "${cd}"; cpe="${cd}/dhcp-proxy.env"; env_file="${pd}/.env"
-    _load_setup_update_helpers "${repo_root}"
-    _write_legacy_env_fixture "${env_file}"
-    printf '%s\n' 'DHCP_PROXY_PXE_BOOT_SERVER=10.0.0.1' 'DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=pxelinux.0' > "${cpe}"
-    run migrate_env_for_update "${pd}"; [ "${status}" -eq 0 ]
-    grep -qx 'DHCP_PROXY_PXE_BOOT_SERVER=10.0.0.1' "${env_file}"
-    set_env_key DHCP_PROXY_PXE_BOOT_SERVER "10.0.0.2" "${cpe}"
-    run migrate_env_for_update "${pd}"; [ "${status}" -eq 0 ]
-    run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "${cpe}"; [ "${output}" = "10.0.0.2" ]
-}
-
-@test "migrate_env_for_update tolerates an incomplete hand-edited PXE pair" {
-    # What: Incomplete PXE pair does not abort update.
-    # Why: Hand-edited config/prod may be incomplete.
-    # From: Issue #1683 | PR #1546
-    local repo_root env_file pd cd cpe
-    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    pd="${BATS_TEST_TMPDIR}/scratch/deploy/prod"; cd="${BATS_TEST_TMPDIR}/scratch/config/prod"
-    mkdir -p "${pd}" "${cd}"; cpe="${cd}/dhcp-proxy.env"; env_file="${pd}/.env"
-    _load_setup_update_helpers "${repo_root}"
-    _write_legacy_env_fixture "${env_file}"
-    printf '%s\n' 'DHCP_MODE=dnsmasq-proxy' 'DHCP_SUBNET_START=192.0.2.0' 'DHCP_DNS_PRIMARY=192.0.2.20' 'UPSTREAM_DHCP_IP=192.0.2.1' >> "${env_file}"
-    printf '%s\n' 'DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9' > "${cpe}"
-    run migrate_env_for_update "${pd}"; [ "${status}" -eq 0 ]
-    run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "${cpe}"; [ "${output}" = "10.9.9.9" ]
-}
-
-@test "migrate_env_for_update tolerates an invalid hand-edited value" {
-    # What: Malformed value does not abort update.
-    # Why: Hand-edited files may skip validation.
-    # From: Issue #1683 | PR #1546
-    local repo_root env_file pd cd cpe
-    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    pd="${BATS_TEST_TMPDIR}/scratch/deploy/prod"; cd="${BATS_TEST_TMPDIR}/scratch/config/prod"
-    mkdir -p "${pd}" "${cd}"; cpe="${cd}/dhcp-proxy.env"; env_file="${pd}/.env"
-    _load_setup_update_helpers "${repo_root}"
-    _write_legacy_env_fixture "${env_file}"
-    printf '%s\n' 'DHCP_MODE=dnsmasq-proxy' 'DHCP_SUBNET_START=192.0.2.0' 'DHCP_DNS_PRIMARY=192.0.2.20' 'UPSTREAM_DHCP_IP=192.0.2.1' >> "${env_file}"
-    printf '%s\n' 'DHCP_PROXY_ROUTER=not-an-ip-address' > "${cpe}"
-    run migrate_env_for_update "${pd}"; [ "${status}" -eq 0 ]
-    run get_env_var DHCP_PROXY_ROUTER "${cpe}"; [ "${output}" = "not-an-ip-address" ]
+    while IFS='|' read -r name extra cpe_init env_want edit cpe_want; do
+        base="${BATS_TEST_TMPDIR}/${name}"
+        pd="${base}/deploy/prod"; cpe="${base}/config/prod/dhcp-proxy.env"
+        mkdir -p "${pd}" "${base}/config/prod"
+        _write_legacy_env_fixture "${pd}/.env"
+        [ "${extra}" = - ] || tr ';' '\n' <<<"${extra}" >> "${pd}/.env"
+        tr ';' '\n' <<<"${cpe_init}" > "${cpe}"
+        run migrate_env_for_update "${pd}"
+        [ "${status}" -eq 0 ] || { echo "${name}: run 1 rc ${status}: ${output}"; return 1; }
+        IFS=';' read -r -a kvs <<<"${env_want}"
+        for kv in "${kvs[@]}"; do
+            [ "${kv}" = - ] && continue
+            grep -qx -- "${kv}" "${pd}/.env" || {
+                echo "${name}: .env lacks ${kv}:"; cat "${pd}/.env"; return 1; }
+        done
+        [ "${edit}" = - ] || set_env_key "${edit%%=*}" "${edit#*=}" "${cpe}"
+        run migrate_env_for_update "${pd}"
+        [ "${status}" -eq 0 ] || { echo "${name}: run 2 rc ${status}: ${output}"; return 1; }
+        IFS=';' read -r -a kvs <<<"${cpe_want}"
+        for kv in "${kvs[@]}"; do
+            run get_env_var "${kv%%=*}" "${cpe}"
+            [ "${output}" = "${kv#*=}" ] || {
+                echo "${name}: ${kv%%=*}='${output}' want '${kv#*=}':"; cat "${cpe}"; return 1; }
+        done
+    done <<'CASES'
+repeated|-|DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9;DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0|DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9;DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0|-|DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9;DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0
+direct-edit|-|DHCP_PROXY_PXE_BOOT_SERVER=10.0.0.1;DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=pxelinux.0|DHCP_PROXY_PXE_BOOT_SERVER=10.0.0.1|DHCP_PROXY_PXE_BOOT_SERVER=10.0.0.2|DHCP_PROXY_PXE_BOOT_SERVER=10.0.0.2
+incomplete-pair|DHCP_MODE=dnsmasq-proxy;DHCP_SUBNET_START=192.0.2.0;DHCP_DNS_PRIMARY=192.0.2.20;UPSTREAM_DHCP_IP=192.0.2.1|DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9|-|-|DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9
+invalid-value|DHCP_MODE=dnsmasq-proxy;DHCP_SUBNET_START=192.0.2.0;DHCP_DNS_PRIMARY=192.0.2.20;UPSTREAM_DHCP_IP=192.0.2.1|DHCP_PROXY_ROUTER=not-an-ip-address|-|-|DHCP_PROXY_ROUTER=not-an-ip-address
+CASES
 }
 
 @test "migrate_env_for_update preserves all custom per-service state dirs" {
