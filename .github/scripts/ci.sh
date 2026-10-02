@@ -7536,7 +7536,7 @@ _ci_check_ci_bats() {
     # What: --jobs = max(16, cores); never below 16.
     # Why: the suite is sized for 16-way parallel runs.
     # From: Issue #1683 | PR #1858
-    cpus="$(nproc 2>/dev/null)" || cpus=1
+    cpus="$(_ci_run "[CI-ERROR-CHECK-0127]" "reason=\"cpu count unknown\"" nproc)" || return 2
     jobs=$(( cpus > 16 ? cpus : 16 ))
     ci_log "[CI-INFO-CHECK-0125]" "suite=\"${suite}\" jobs=${jobs} cpus=${cpus} reason=\"running the regression contract\""
     # What: the suite gets PATH, HOME and TMPDIR only.
