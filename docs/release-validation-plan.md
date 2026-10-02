@@ -1866,7 +1866,7 @@ omitted):**
 | `scripts/untracked/simulations/dhcp-relay-flow-simulation.sh` | Real two-segment DHCP relay (PR #1117) |
 | `scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh` | NATS secondary lifecycle, active-disconnect (`connz`/`KICK`), xkey encryption (packet capture + negative control) |
 | `ci.sh validate` (`_ci_validate_dns_rollback`) | Real CLI-driven PowerDNS zone rollback (PR #1152): key resolved inside the container, restored state snapshotted |
-| `scripts/untracked/simulations/setup-reset-kea-config-simulation.sh` | Real CLI-driven Kea config rollback |
+| `ci.sh validate` (`_ci_validate_kea_rollback`) | Real CLI-driven Kea config rollback: two Admin UI reservations, `setup.sh` rollback to the first snapshot, live `config-get` |
 | `scripts/untracked/generate-vex.sh` / `scripts/tracked/check-vex-drift.sh` | OpenVEX document reproducibility and drift detection (PR #1194) |
 | `.github/scripts/ci.bats` (`migrate_env_for_update` behavior tests) | setup.sh `.env` migration is idempotent/convergent (AG-OP-006/007); the former PR #1199 first-`@test` key-drift check was a fixture-coupled structure proxy, dropped in the CI 2.0 rewrite — its real contract is now these behavior tests |
 | `.github/scripts/ci.bats` (repeat-run owner tests) + watchdog Rust tests | Stateful writers converge on rerun (AG-OP-006): known-good rollback, shared secrets, prod nats command; watchdog cycles and `status.json` in `services/watchdog/src/{health,status}.rs` |
