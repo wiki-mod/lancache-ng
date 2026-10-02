@@ -4910,6 +4910,45 @@ CASES
     [[ "${output}" != *"sccache_dist_config"* ]]
 }
 
+@test "distcc wrapper dispatches each invocation shape" {
+    # What: masquerade, CCACHE_PREFIX, aws-lc bypass, loop.
+    # Why: a wrong dispatch runs the wrong compiler.
+    # From: Issue #1533 | PR #1858
+    local d="${BATS_TEST_TMPDIR}/dw" case want argv code w
+    local bin="${d}/bin" masq="${d}/masq"
+    mkdir -p "${bin}" "${masq}"
+    _ci_rust_distcc_wrapper "${bin}/distcc-real" "${bin}/wrapper" "${masq}" > "${bin}/wrapper"
+    chmod +x "${bin}/wrapper"
+    printf '%s\n' '#!/bin/sh' 'printf "REAL hosts=%s argv:" "${DISTCC_HOSTS:-}"' \
+        'for a in "$@"; do printf " [%s]" "$a"; done; printf "\n"' > "${bin}/distcc-real"
+    printf '#!/bin/sh\nexit 0\n' > "${bin}/realcc"
+    chmod +x "${bin}/distcc-real" "${bin}/realcc"
+    for w in cc gcc c++ g++; do ln -sf "${bin}/wrapper" "${masq}/${w}"; done
+    ln -sf "${bin}/wrapper" "${bin}/weird"
+    local gen="-I${d}/target/x/build/aws-lc-sys-1/out/include"
+    while IFS='|' read -r case want argv code; do
+        case "${case}" in
+            masq) run env DISTCC_HOSTS=pump "${masq}/gcc" -c a.c ;;
+            prefix) run env DISTCC_HOSTS=pump "${bin}/wrapper" "${bin}/realcc" -c a.c ;;
+            unknown) run env DISTCC_HOSTS=pump "${bin}/weird" -c a.c ;;
+            awsmasq) run env DISTCC_HOSTS=pump DISTCC_HOSTS_NO_PUMP=plain "${masq}/cc" "${gen}" -c a.c ;;
+            awsprefix) run env DISTCC_HOSTS=pump DISTCC_HOSTS_NO_PUMP=plain "${bin}/wrapper" "${bin}/realcc" "${gen}" ;;
+            loop) run env DISTCC_HOSTS=pump "${bin}/wrapper" "${masq}/cc" -c a.c ;;
+        esac
+        [ "${status}" -eq "${want}" ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
+        argv="${argv//@D@/${d}}"
+        [ "${argv}" = - ] || [[ "${output}" == *"${argv}"* ]] || { echo "${case}: want '${argv}': ${output}"; return 1; }
+        [ "${code}" = - ] || [[ "${output}" == *"${code}"* ]] || { echo "${case}: no ${code}: ${output}"; return 1; }
+    done <<'CASES'
+masq|0|REAL hosts=pump argv: [gcc] [-c] [a.c]|-
+prefix|0|REAL hosts=pump argv: [@D@/bin/realcc] [-c] [a.c]|-
+unknown|0|REAL hosts=pump argv: [cc] [-c] [a.c]|CI-WARN-RUSTBUILD-0017
+awsmasq|0|REAL hosts=plain argv: [cc] [-I@D@/target/x/build/aws-lc-sys-1/out/include] [-c] [a.c]|CI-INFO-RUSTBUILD-0018
+awsprefix|0|REAL hosts=plain argv: [@D@/bin/realcc] [-I@D@/target/x/build/aws-lc-sys-1/out/include]|CI-INFO-RUSTBUILD-0018
+loop|1|-|CI-ERROR-RUSTBUILD-0016
+CASES
+}
+
 @test "set-runtime rejects distcc hosts without a pump host" {
     # What: DISTCC_POTENTIAL_HOSTS needs a ,cpp host.
     # Why: Pump mode needs a cpp-capable host present.

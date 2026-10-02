@@ -2371,38 +2371,12 @@ _ci_rust_cargo_build() {
     done
 }
 
-# What: In-image rust builder; sccache, opt-in distcc.
-# Why: one owner for dns/ui/watchdog builders (was 3x).
-# From: Issue #1683
-ci_cmd_rust_build() {
-    local service="${1:-}" crate="${2:-}" mode="${3:-build}"
-    [ -n "${service}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0001]" "reason=\"service arg required\""; return 2; }
-    [ -n "${crate}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0002]" "reason=\"crate arg required\""; return 2; }
-    # What: mode build (real+cp) or deps (pre-cache, no cp).
-    # Why: services with stub-src dep-cache stage call deps.
-    case "${mode}" in build|deps) ;; *) ci_log "[CI-ERROR-RUSTBUILD-0005]" "mode=\"${mode}\" reason=\"mode must be build or deps\""; return 2 ;; esac
-    local musl_target="${MUSL_TARGET:-}"
-    [ -n "${musl_target}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0003]" "reason=\"MUSL_TARGET env required\""; return 2; }
-    # What: MUSL_TARGET must be the build-tools rustc host.
-    # Why: apk Rust has no rustup; host std is the only one.
-    # From: Issue #1683 | PR #1858
-    local rustc_info
-    rustc_info="$(rustc -vV)" || { ci_log "[CI-ERROR-RUSTBUILD-0004]" "reason=\"rustc -vV failed in build-tools\""; return 2; }
-    grep -qx "host: ${musl_target}" <<<"${rustc_info}" || { ci_error "[CI-ERROR-RUSTBUILD-0006]" "target=\"${musl_target}\" reason=\"MUSL_TARGET is not the build-tools rustc host\"" "${rustc_info}"; return 2; }
-    local key_prefix="lancache-${service}" ccache_dir="${CI_TMPDIR}/ccache-${service}"
-    # What: distcc bypasses pump for aws-lc headers.
-    # Why: pump can't see generated headers; would fail.
-    # From: Issue #1533
-    mkdir -p /usr/local/lib/distcc
-    local distcc_bin
-    distcc_bin="$(command -v distcc)"
-    cp "${distcc_bin}" /usr/local/bin/distcc-real
+# What: Print the distcc wrapper script for given paths.
+# Why: one generator; ci.bats runs it on fixture paths.
+# From: Issue #1533 | PR #1858
+_ci_rust_distcc_wrapper() {
+    printf '#!/bin/sh\nset -eu\ndistcc_real="%s"\nwrapper_self="%s"\nwrapper_dir="%s"\n' "$1" "$2" "$3"
     printf '%s\n' \
-      '#!/bin/sh' \
-      'set -eu' \
-      'distcc_real="/usr/local/bin/distcc-real"' \
-      'wrapper_self="/usr/local/bin/lancache-distcc-wrapper"' \
-      'wrapper_dir="/usr/local/lib/distcc"' \
       'compiler_name="$(basename "$0")"' \
       'case "$compiler_name" in' \
       '  cc|gcc|c++|g++)' \
@@ -2472,8 +2446,37 @@ ci_cmd_rust_build() {
       '  env -u DISTCC_HOSTS -u INCLUDE_SERVER_PORT -u INCLUDE_SERVER_PID -u DISTCC_FALLBACK "$local_compiler" "$@"' \
       '  exit $?' \
       'fi' \
-      'exec "$distcc_real" "$real_compiler" "$@"' \
-      > /usr/local/bin/lancache-distcc-wrapper
+      'exec "$distcc_real" "$real_compiler" "$@"'
+}
+
+# What: In-image rust builder; sccache, opt-in distcc.
+# Why: one owner for dns/ui/watchdog builders (was 3x).
+# From: Issue #1683
+ci_cmd_rust_build() {
+    local service="${1:-}" crate="${2:-}" mode="${3:-build}"
+    [ -n "${service}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0001]" "reason=\"service arg required\""; return 2; }
+    [ -n "${crate}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0002]" "reason=\"crate arg required\""; return 2; }
+    # What: mode build (real+cp) or deps (pre-cache, no cp).
+    # Why: services with stub-src dep-cache stage call deps.
+    case "${mode}" in build|deps) ;; *) ci_log "[CI-ERROR-RUSTBUILD-0005]" "mode=\"${mode}\" reason=\"mode must be build or deps\""; return 2 ;; esac
+    local musl_target="${MUSL_TARGET:-}"
+    [ -n "${musl_target}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0003]" "reason=\"MUSL_TARGET env required\""; return 2; }
+    # What: MUSL_TARGET must be the build-tools rustc host.
+    # Why: apk Rust has no rustup; host std is the only one.
+    # From: Issue #1683 | PR #1858
+    local rustc_info
+    rustc_info="$(rustc -vV)" || { ci_log "[CI-ERROR-RUSTBUILD-0004]" "reason=\"rustc -vV failed in build-tools\""; return 2; }
+    grep -qx "host: ${musl_target}" <<<"${rustc_info}" || { ci_error "[CI-ERROR-RUSTBUILD-0006]" "target=\"${musl_target}\" reason=\"MUSL_TARGET is not the build-tools rustc host\"" "${rustc_info}"; return 2; }
+    local key_prefix="lancache-${service}" ccache_dir="${CI_TMPDIR}/ccache-${service}"
+    # What: distcc bypasses pump for aws-lc headers.
+    # Why: pump can't see generated headers; would fail.
+    # From: Issue #1533
+    mkdir -p /usr/local/lib/distcc
+    local distcc_bin
+    distcc_bin="$(command -v distcc)"
+    cp "${distcc_bin}" /usr/local/bin/distcc-real
+    _ci_rust_distcc_wrapper /usr/local/bin/distcc-real /usr/local/bin/lancache-distcc-wrapper \
+        /usr/local/lib/distcc > /usr/local/bin/lancache-distcc-wrapper
     chmod +x /usr/local/bin/lancache-distcc-wrapper
     local wrapper
     for wrapper in cc gcc c++ g++; do ln -sf /usr/local/bin/lancache-distcc-wrapper "/usr/local/lib/distcc/${wrapper}"; done
