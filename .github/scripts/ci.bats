@@ -3811,11 +3811,18 @@ CASES
     # Why: The written record must actually resolve.
     # From: Issue #1164
     _ci_validate_container_ip() { echo 172.16.1.3; }
-    dig() { echo 10.9.9.9; }
+    dig() { echo "10.9.9.9 $*"; }
     sleep() { :; }
+    _ci_validate_service_evidence() { echo "evidence $1 $2"; }
     run _ci_validate_dns_resolves proj dns-standard x.lan. 203.0.113.60 2
     [ "${status}" -eq 1 ]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0036"* ]]
+    # What: failure ships full dig, zone SOA, service logs.
+    # Why: an empty +short answer alone proves no cause.
+    # From: Issue #1683 | PR #1858
+    [[ "${output}" == *"full answer:"*"@172.16.1.3 A x.lan."* ]]
+    [[ "${output}" == *"zone SOA:"*"@172.16.1.3 SOA lan."* ]]
+    [[ "${output}" == *"service:"*"evidence proj dns-standard"* ]]
     # What: a dig warning plus the right answer matches.
     # Why: stderr is evidence, never part of the answer.
     # From: Issue #1683 | PR #1858

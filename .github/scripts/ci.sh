@@ -5185,7 +5185,17 @@ _ci_validate_dns_resolves() {
         fi
         sleep 1
     done
-    ci_error "[CI-ERROR-VALIDATE-0036]" "svc=\"${svc}\" fqdn=\"${fqdn}\" expected=\"${expected}\" got=\"${got:-}\" reason=\"record did not resolve as expected\"" "${out}$(cat "${dig_err}")"
+    # What: full answer, zone SOA and the service's logs.
+    # Why: +short hides NXDOMAIN vs empty vs SERVFAIL.
+    # From: Issue #1683 | PR #1858
+    ci_error "[CI-ERROR-VALIDATE-0036]" "svc=\"${svc}\" fqdn=\"${fqdn}\" expected=\"${expected}\" got=\"${got:-}\" reason=\"record did not resolve as expected\"" \
+        "${out}$(cat "${dig_err}")
+full answer:
+$(dig +time=2 +tries=1 "@${ip}" A "${fqdn}" 2>&1)
+zone SOA:
+$(dig +time=2 +tries=1 +short "@${ip}" SOA "${fqdn#*.}" 2>&1)
+service:
+$(_ci_validate_service_evidence "${project}" "${svc}")"
     rm -f "${dig_err}"
     return 1
 }
