@@ -1241,6 +1241,12 @@ CASES
     # From: Issue #1683
     [ "$(_ci_classify_failure 'gh: Not Found (HTTP 404)' github-api)" = "permanent" ]
     [ "$(_ci_classify_failure 'gh: Not Found (HTTP 404)' github-api)" != "not_found" ]
+    # What: gh without a token is permanent, not retried.
+    # Why: AG-CI-013: an auth failure must fail at once.
+    # From: Issue #1683 | PR #1858
+    local nologin
+    nologin=$'To get started with GitHub CLI, please run:  gh auth login\nAlternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.'
+    [ "$(_ci_classify_failure "${nologin}" github-api)" = "permanent" ]
 }
 
 @test "retry classifier: op=registry (default) still returns not_found on 404-shaped text" {

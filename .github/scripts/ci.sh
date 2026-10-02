@@ -1253,12 +1253,13 @@ _ci_classify_failure() {
     # Why: Go/curl/gh vary "Connection reset"-style casing.
     # From: Issue #1683
     low="${raw,,}"
-    # What: a GitHub-API 404 is permanent, never not_found.
-    # Why: unlike a registry miss, an API 404 is fatal here.
-    # From: Issue #1683
+    # What: GitHub-API 404 or missing gh login is permanent.
+    # Why: neither heals on retry; an API 404 is no miss.
+    # From: Issue #1683 | PR #1858
     if [ "${op}" = "github-api" ]; then
         case "${low}" in
             *"http 404"*|*"not found"*) printf 'permanent\n'; return 0 ;;
+            *"gh auth login"*|*"populate the gh_token environment variable"*) printf 'permanent\n'; return 0 ;;
         esac
     fi
     # What: op=accel: only an accelerator outage retries.
