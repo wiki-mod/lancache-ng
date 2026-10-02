@@ -34,46 +34,16 @@ permissions:
 
 jobs:
 
-  compute-validation-network:
-    name: derive per-run validation subnet
-    if: inputs.should_run == 'true'
-
-    runs-on: [self-hosted, linux, lancache, lancache-light]
-    timeout-minutes: 45
-    outputs:
-      subnet: ${{ steps.derive.outputs.subnet }}
-      gateway: ${{ steps.derive.outputs.gateway }}
-      proxy_ip: ${{ steps.derive.outputs.proxy_ip }}
-      proxy_ssl_ip: ${{ steps.derive.outputs.proxy_ssl_ip }}
-      dns_standard_ip: ${{ steps.derive.outputs.dns_standard_ip }}
-      dns_ssl_ip: ${{ steps.derive.outputs.dns_ssl_ip }}
-      watchdog_ip: ${{ steps.derive.outputs.watchdog_ip }}
-      netdata_ip: ${{ steps.derive.outputs.netdata_ip }}
-      nats_ip: ${{ steps.derive.outputs.nats_ip }}
-      ui_ip: ${{ steps.derive.outputs.ui_ip }}
-      standard_shim_ip: ${{ steps.derive.outputs.standard_shim_ip }}
-      project_name: ${{ steps.derive.outputs.project_name }}
-      ui_port: ${{ steps.derive.outputs.ui_port }}
-    steps:
-      - uses: &checkout_centraliced_versioning actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Derive validation network
-        id: derive
-        uses: ./.github/actions/derive-validation-network
-
-
   setup-cli-simulation:
     # What: pins the sim to the PR's own immutable image.
     # Why: avoids testing a stale, slow-moving channel tag.
     # From: PR #786
     name: setup.sh CLI simulation
-    # What: chains after the UI/NATS/DNS sim job.
-    # Why: serializes the shared runner slot, not data.
-    needs: [compute-validation-network]
-    if: always() && inputs.should_run == 'true'
+    if: inputs.should_run == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 45
     steps:
-      - uses: *checkout_centraliced_versioning # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # What: authenticate registry before setup.sh.
       # Why: container inherits config via mount.
