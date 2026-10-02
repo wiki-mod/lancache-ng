@@ -316,7 +316,7 @@ jobs:
           PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: bash .github/scripts/ci.sh cut-release-tag
 
-  # What: close issues a merged PR lists under Linked Issues.
+  # What: close issues a merged PR lists as Linked Issues.
   # Why: GitHub auto-closes on default-branch merges only.
   # From: Issue #1137 | PR #1858
   close-linked-issues:

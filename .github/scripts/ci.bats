@@ -6163,8 +6163,8 @@ CASES
 }
 
 @test "closing refs: GitHub keyword grammar and negation" {
-    # What: keyword[:] #N or owner/repo#N; negated ones skip.
-    # Why: "does not close #4" closed real issues (#1496).
+    # What: GitHub keyword grammar; negated matches skip.
+    # Why: negated prose once closed real issues.
     # From: Issue #1496 | PR #1858
     local text
     text=$'Closes #1, FIXES: #2 and resolved Owner/Repo#3.\nThis does not close #4. It doesn\'t fix #5.\nencloses #6, Refs #7.\nNo. Closes #8\nclose#9'
@@ -6203,8 +6203,8 @@ _lk_setup() {
 }
 
 @test "close-linked-issues: closes listed open issues only" {
-    # What: #1/#2 close; other repo, PR, closed, ### skip.
-    # Why: mirrors default-branch auto-close for current_dev.
+    # What: open listed issues close; the rest are skipped.
+    # Why: mirrors GitHub default-branch auto-close.
     # From: Issue #1137 | PR #1858
     _lk_setup
     run bash "${CI_SH}" close-linked-issues
@@ -6219,8 +6219,8 @@ _lk_setup() {
 }
 
 @test "close-linked-issues: skips, dry run and failure paths" {
-    # What: non-push/default skip; replay writes nothing; rc 2.
-    # Why: a failed issue must stay visible, others still run.
+    # What: skips, replay without writes, failure rc 2.
+    # Why: a failed issue stays visible; others still run.
     # From: Issue #1137 | PR #1858
     _lk_setup
     GITHUB_EVENT_NAME=pull_request run bash "${CI_SH}" close-linked-issues

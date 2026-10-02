@@ -7981,13 +7981,13 @@ _ci_check_stable_external_images() {
     printf 'stable-external-images=clean\n'
 }
 
-# What: Print "## <heading>" count, then that section's lines.
-# Why: one owner for PR-body sections (template, auto-close).
+# What: Print the heading count, then the section lines.
+# Why: one parser for PR-body sections (template, close).
 # From: Issue #1683 | PR #1858
 _ci_pr_section() {
     local text="$1" heading="$2" out
-    # What: a heading line outside code fences ends a section.
-    # Why: "# x" in a fence or a "### x" line must not bleed.
+    # What: a heading outside code fences ends the section.
+    # Why: a fenced or a level-3 heading must not bleed.
     # From: Issue #1496 | PR #1858
     if ! out="$(awk -v h="## ${heading}" '
         { sub(/\r$/, "") }
@@ -8689,8 +8689,8 @@ _ci_issue_meta() {
 # From: Issue #1683 | PR #1858
 _ci_closing_refs() {
     local text="$1" out
-    # What: skip a match with not/never/cannot/n't before it.
-    # Why: "does not close #5" must never close #5.
+    # What: skip a match negated by not/never/cannot/n't.
+    # Why: negated prose must never close an issue.
     # From: Issue #1496 | PR #1858
     if ! out="$(awk -v q="'" '
         function negated(w,  n, i, k, words, at) {
@@ -8734,14 +8734,14 @@ ci_cmd_close_linked_issues() {
         case "$1" in
             --dry-run) dry=1; shift ;;
             --pr) number="${2:-}"; shift 2 || { ci_log "[CI-ERROR-LINK-0002]" "reason=\"--pr needs a number\""; return 2; } ;;
-            *) ci_log "[CI-ERROR-LINK-0002]" "arg=\"$1\" reason=\"unknown argument\""; return 2 ;;
+            *) ci_log "[CI-ERROR-LINK-0013]" "arg=\"$1\" reason=\"unknown argument\""; return 2 ;;
         esac
     done
     repo="$(_ci_repo)" || return 2
     local fields='number merged baseRefName url body mergeCommit { oid }'
     if [ -n "${number}" ]; then
         # What: a replay of one PR never writes to GitHub.
-        # Why: replays exist to inspect the parse, not to close.
+        # Why: replays inspect the parse; they never close.
         # From: Issue #1137 | PR #1858
         if [ "${dry}" -ne 1 ] || ! [[ "${number}" =~ ^[0-9]+$ ]]; then
             ci_log "[CI-ERROR-LINK-0003]" "pr=\"${number}\" reason=\"--pr needs a numeric PR and --dry-run\""
@@ -8768,7 +8768,7 @@ ci_cmd_close_linked_issues() {
         raw="$(_ci_retry github-api gh api graphql -f owner="${repo%%/*}" -f name="${repo#*/}" -f oid="${GITHUB_SHA}" \
             -f query="query(\$owner: String!, \$name: String!, \$oid: GitObjectID!) { repository(owner: \$owner, name: \$name) { object(oid: \$oid) { ... on Commit { associatedPullRequests(first: 10) { nodes { ${fields} } } } } } }")" || return 2
         rows="$(jq -c --arg b "${branch}" --arg s "${GITHUB_SHA}" '[.data.repository.object.associatedPullRequests.nodes[] | select(.merged and .baseRefName == $b and .mergeCommit.oid == $s)]' <<< "${raw}" 2>&1)" || {
-            ci_error "[CI-ERROR-LINK-0004]" "sha=\"${GITHUB_SHA}\" reason=\"PR lookup unparseable\"" "${rows}"; return 2; }
+            ci_error "[CI-ERROR-LINK-0014]" "sha=\"${GITHUB_SHA}\" reason=\"PR lookup unparseable\"" "${rows}"; return 2; }
     fi
     count="$(_ci_capture 0 jq -r 'length' <<< "${rows}")" || return 2
     if [ "${count}" -eq 0 ]; then
@@ -8797,7 +8797,7 @@ ci_cmd_close_linked_issues() {
     fi
     refs="$(_ci_closing_refs "${section}")" || return 2
     refs="$(_ci_capture 0 sort -u <<< "${refs}")" || return 2
-    local ref n meta comment out closed=0 skipped=0 mode=done
+    local ref n meta comment out closed=0 skipped=0 mode="done"
     local -a failed=()
     while IFS= read -r ref; do
         [ -n "${ref}" ] || continue
@@ -8834,7 +8834,7 @@ ci_cmd_close_linked_issues() {
         ci_error "[CI-ERROR-LINK-0012]" "pr=${pr} closed=${closed} failed=${#failed[@]} reason=\"not every linked issue was processed\"" "$(printf '%s\n' "${failed[@]}")"
         return 2
     fi
-    [ "${dry}" -eq 0 ] || mode=dry-run
+    [ "${dry}" -eq 0 ] || mode="dry-run"
     printf 'close-linked-issues=%s pr=%s closed=%s skipped=%s\n' "${mode}" "${pr}" "${closed}" "${skipped}"
 }
 
