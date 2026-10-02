@@ -10931,3 +10931,56 @@ nosoa||lan|-|1|-|SOA not readable yet
 http500|5|lan|-|1|-|SOA PATCH failed: HTTP 500
 CASES
 }
+
+@test "proxy domain rows classify each cdn list shape" {
+    # What: roots, extra wildcard/exact hosts, skips.
+    # Why: a wrong class means a wrong or missing cert.
+    # From: Issue #1073 | PR #1858
+    local root d="${BATS_TEST_TMPDIR}/rows" case list u w e r s warn k
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    # shellcheck source=services/dns/domain-validation.sh
+    source "${root}/services/dns/domain-validation.sh"
+    _load_functions "${root}/services/proxy/entrypoint.sh" _proxy_is_one_label_past _collect_domain_rows
+    # What: stub root = last two labels; bad-root.com fails.
+    # Why: the real one needs the public suffix list loaded.
+    # From: Issue #1073 | PR #1858
+    _registrable_domain() {
+        [ "$1" != bad-root.com ] || return 1
+        printf '%s' "${1#"${1%.*.*}".}"
+    }
+    declare -ag _UNIQUE_DOMAINS _EXTRA_WILDCARD_BASES _EXTRA_EXACT_HOSTS
+    declare -Ag _DOMAIN_IS_ROOT _SEEN_EXTRA_WILDCARD_BASE _SEEN_EXTRA_EXACT_HOST _ROOT_HAS_WILDCARD_ENTRY
+    export DOMAINS_FILE="${d}.txt"
+    while IFS='|' read -r case list u w e r s warn; do
+        printf '%b\n' "${list}" > "${DOMAINS_FILE}"
+        _collect_domain_rows 2> "${d}.err" || { echo "${case}: rc $?"; cat "${d}.err"; return 1; }
+        k="$(printf '%s\n' "${!_ROOT_HAS_WILDCARD_ENTRY[@]}" | sort | paste -sd,)"
+        [ "$(IFS=,; echo "${_UNIQUE_DOMAINS[*]}")|$(IFS=,; echo "${_EXTRA_WILDCARD_BASES[*]}")|$(IFS=,; echo "${_EXTRA_EXACT_HOSTS[*]}")|${k}|${_DOMAIN_ROWS_SKIPPED}" \
+            = "${u}|${w}|${e}|${r}|${s}" ] || {
+            echo "${case}: got $(IFS=,; echo "${_UNIQUE_DOMAINS[*]}")|$(IFS=,; echo "${_EXTRA_WILDCARD_BASES[*]}")|$(IFS=,; echo "${_EXTRA_EXACT_HOSTS[*]}")|${k}|${_DOMAIN_ROWS_SKIPPED}"
+            return 1; }
+        if [ "${warn}" = - ]; then
+            [ ! -s "${d}.err" ] || { echo "${case}: unexpected stderr"; cat "${d}.err"; return 1; }
+        else
+            grep -qF "WARNING: ${warn}" "${d}.err" || { echo "${case}: no warning"; cat "${d}.err"; return 1; }
+        fi
+    done <<'CASES'
+disabled|!disabled.com\nenabled.com|enabled.com||||0|-
+disabledwild|!.dis.com\n.on.com|on.com|||on.com|0|-
+invalid|com\ngood.com|good.com||||1|skipping invalid domain entry: com
+noroot|bad-root.com\ngood.com|good.com||||1|could not derive a root domain for: bad-root.com
+deepwild|.a.cdn.ea.com|ea.com|a.cdn.ea.com|||0|-
+rootwild|.ea.com|ea.com|||ea.com|0|-
+deepbare|a.cdn.ea.com|ea.com||a.cdn.ea.com||0|-
+manylabels|a.b.c.d.ea.com|ea.com||a.b.c.d.ea.com||0|-
+onepast|cdn.ea.com|ea.com||||0|-
+bareroot|ea.com|ea.com||||0|-
+distinctwild|.x.ea.com\n.y.ea.com|ea.com|x.ea.com,y.ea.com|||0|-
+dupwild|.x.ea.com\n.x.ea.com|ea.com|x.ea.com|||0|-
+bothways|.a.b.ea.com\na.b.ea.com|ea.com|a.b.ea.com|a.b.ea.com||0|-
+dupexact|a.b.ea.com\na.b.ea.com|ea.com||a.b.ea.com||0|-
+mixedroots|.ea.com\nsteam.com|ea.com,steam.com|||ea.com|0|-
+deeponly|.a.ea.com|ea.com|a.ea.com|||0|-
+mixed|!off.com\non1.com\n# c\n\n  on2.com  |on1.com,on2.com||||0|-
+CASES
+}
