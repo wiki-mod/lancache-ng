@@ -9324,6 +9324,44 @@ yesplease|1
 CASES
 }
 
+@test "retention dir validation maps each path" {
+    # What: validate_retention_dir per input, one table.
+    # Why: a bad CACHE_DIR must never reach find or rm.
+    # From: Issue #842 | PR #1858
+    local t="${BATS_TEST_TMPDIR}" name val rc want
+    _load_retention_functions
+    mkdir -p "${t}/cache/lancache/sub"
+    while IFS='|' read -r name val rc want; do
+        run validate_retention_dir CACHE_DIR "${val//@T@/${t}}" "${t}/cache"
+        [ "${status}" -eq "${rc}" ] || { echo "${name}: rc ${status}: ${output}"; return 1; }
+        [[ "${output}" == *"${want//@T@/${t}}"* ]] || { echo "${name}: no '${want}': ${output}"; return 1; }
+    done <<'CASES'
+real-subdir|@T@/cache/lancache|0|@T@/cache/lancache
+not-yet-created|@T@/cache/not-created-yet|0|@T@/cache/not-created-yet
+traversal-inside|@T@/cache/lancache/sub/../../lancache|0|@T@/cache/lancache
+empty||1|is empty
+relative|relative/path|1|is not an absolute path
+root|/|1|outside the expected
+system-dir|/etc|1|outside the expected
+traversal-outside|@T@/cache/lancache/../../../etc|1|outside the expected
+prefix-itself|@T@/cache|1|itself, not a subdirectory
+CASES
+}
+
+@test "retention purge refuses a cache dir outside its prefix" {
+    # What: maybe_purge refuses outside the prefix.
+    # Why: no find/rm, stamp untouched, so a fix retries.
+    # From: Issue #842 | PR #1858
+    export CACHE_DIR="${BATS_TEST_TMPDIR}/outside/cache"
+    export CACHE_DIR_ALLOWED_PREFIX="${BATS_TEST_TMPDIR}/expected-cache-root"
+    export CACHE_VALID_DAYS=30 PURGE_STAMP="${BATS_TEST_TMPDIR}/purge.stamp"
+    _load_retention_functions
+    run maybe_purge
+    [ "${status}" -eq 0 ]
+    [ ! -f "${PURGE_STAMP}" ]
+    [[ "${output}" == *"outside the expected"* ]]
+}
+
 @test "retention stops promptly with rc 0 on SIGTERM mid-sleep" {
     # What: a real TERM during the interval sleep ends it.
     # Why: PID 1 bash ignored TERM; docker stop had to kill.
