@@ -7160,7 +7160,8 @@ _ci_check_file_headers() {
 # From: Issue #1683
 _ci_check_comment_length() {
     local -a _ci_override=("$@") files=()
-    local file heredoc_on yaml_on rc=0
+    local file heredoc_on yaml_on arc=0
+    local -a bad_files=()
     _ci_scan_files files _ci_override || return 2
     for file in "${files[@]}"; do
         awk '
@@ -7179,7 +7180,8 @@ _ci_check_comment_length() {
                 } else if (blocklen > 0) flush()
             }
             END { if (blocklen > 0) flush(); if (viol > 0) exit 1 }
-        ' "${file}" || rc=1
+        ' "${file}" || arc=$?
+        _ci_comment_length_rc "${file}" || return 2
         case "${file}" in
             *.yml|*.yaml) heredoc_on=0; yaml_on=1 ;;
             *) heredoc_on=1; yaml_on=0 ;;
@@ -7246,10 +7248,27 @@ _ci_check_comment_length() {
                 }
                 flush_run(); if (viol > 0) exit 1
             }
-        ' "${file}" || rc=1
+        ' "${file}" || arc=$?
+        _ci_comment_length_rc "${file}" || return 2
     done
-    [ "${rc}" -eq 0 ] && printf 'comment-length=clean\n'
-    return "${rc}"
+    if [ "${#bad_files[@]}" -gt 0 ]; then
+        ci_log "[CI-ERROR-CHECK-0128]" "files=${#bad_files[@]} scanned=${#files[@]} reason=\"comment contract violations (list above)\""
+        return 1
+    fi
+    printf 'comment-length=clean files=%s\n' "${#files[@]}"
+}
+
+# What: classify one comment scan rc: 1 = violations.
+# Why: a read error (rc 2+) must not count as a finding.
+# From: Issue #1683 | PR #1858
+_ci_comment_length_rc() {
+    local file="$1"
+    case "${arc}" in
+        0) ;;
+        1) case " ${bad_files[*]} " in *" ${file} "*) ;; *) bad_files+=("${file}") ;; esac ;;
+        *) ci_log "[CI-ERROR-CHECK-0129]" "file=\"${file}\" rc=${arc} reason=\"comment scan failed (raw above)\""; return 2 ;;
+    esac
+    arc=0
 }
 
 # What: fail on short-SHA slice of sha-named variable.

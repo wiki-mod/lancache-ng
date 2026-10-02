@@ -5318,6 +5318,19 @@ CASES
     run bash "${CI_SH}" check comment-length
     [ "${status}" -eq 1 ]
     [[ "${output}" == *"a.sh:1:"* ]]
+    [[ "${output}" == *'[CI-ERROR-CHECK-0128] files=1 scanned=1'* ]]
+    # What: a failing scan is rc 2 + CHECK-0129, no finding.
+    # Why: a read error is no comment violation.
+    # From: Issue #1683 | PR #1858
+    local bin="${BATS_TEST_TMPDIR}/abin"; mkdir -p "${bin}"
+    _tool_stub "${bin}" awk <<'STUB'
+echo "awk: fatal: cannot open file for reading" >&2; exit 2
+STUB
+    PATH="${bin}:${PATH}" run bash "${CI_SH}" check comment-length a.sh
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *'[CI-ERROR-CHECK-0129] file="a.sh" rc=2'* ]]
+    [[ "${output}" == *"cannot open file"* ]]
+    [[ "${output}" != *"CHECK-0128"* ]]
 }
 
 @test "check comment-length flags oversize, story-run, refs, From form" {
