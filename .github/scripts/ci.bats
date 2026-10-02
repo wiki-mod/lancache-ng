@@ -9513,6 +9513,101 @@ CASES
     [ "$(find "${d}" -maxdepth 1 -name 'fluent-bit.log.*' | grep -c .)" -eq 8 ]
 }
 
+@test "retention syslog prune maps gate, age, size and knobs" {
+    # What: maybe_prune_syslog per case: files, stamp, log.
+    # Why: age first, then oldest-first; never today's file.
+    # From: Issue #633 | PR #1858
+    local t="${BATS_TEST_TMPDIR}" today name en gb days cd files gone kept stamp msg
+    local d spec f mb age want before after got lo hi w
+    local -a ws
+    today="$(date -u +%Y%m%d).log"
+    export SYSLOG_LOG_ROOT_ALLOWED_PREFIX="${t}"
+    _load_retention_functions
+    while IFS='|' read -r name en gb days cd files gone kept stamp msg; do
+        d="${t}/${name}"
+        export SYSLOG_ENABLED="${en}" SYSLOG_MAX_GB="${gb}" SYSLOG_RETENTION_DAYS="${days}"
+        export SYSLOG_LOG_ROOT="${d}" SYSLOG_PRUNE_STAMP="${t}/${name}.stamp"
+        unset SYSLOG_PRUNE_RETRY_COOLDOWN
+        [ "${cd}" = - ] || export SYSLOG_PRUNE_RETRY_COOLDOWN="${cd}"
+        if [ "${files}" != - ]; then
+            mkdir -p "${d}/hostA"
+            IFS=',' read -r -a ws <<<"${files}"
+            for spec in "${ws[@]}"; do
+                IFS=':' read -r f mb age <<<"${spec}"
+                [ "${f}" = TODAY ] && f="${today}"
+                truncate -s "${mb}M" "${d}/hostA/${f}"
+                touch -d "-${age} days" "${d}/hostA/${f}"
+            done
+        fi
+        before="$(date +%s)"
+        run maybe_prune_syslog
+        after="$(date +%s)"
+        [ "${status}" -eq 0 ] || { echo "${name}: rc ${status}: ${output}"; return 1; }
+        for want in "gone:${gone}" "kept:${kept}"; do
+            IFS=',' read -r -a ws <<<"${want#*:}"
+            for f in "${ws[@]}"; do
+                [ "${f}" = - ] && continue
+                [ "${f}" = TODAY ] && f="${today}"
+                case "${want%%:*}" in
+                    gone) [ ! -e "${d}/hostA/${f}" ] ;;
+                    kept) [ -e "${d}/hostA/${f}" ] ;;
+                esac || { echo "${name}: ${f} not ${want%%:*}: ${output}"; ls -l "${d}/hostA"; return 1; }
+            done
+        done
+        case "${stamp}" in
+            none) [ ! -e "${SYSLOG_PRUNE_STAMP}" ] || { echo "${name}: unexpected stamp"; return 1; } ;;
+            *)
+                got="$(cat "${SYSLOG_PRUNE_STAMP}")" || { echo "${name}: no stamp: ${output}"; return 1; }
+                lo="${before}"; hi="${after}"
+                [ "${stamp}" = now ] || { lo=$(( before - 86400 + ${stamp#retry:} )); hi=$(( after - 86400 + ${stamp#retry:} )); }
+                [ "${got}" -ge "${lo}" ] && [ "${got}" -le "${hi}" ] || { echo "${name}: stamp ${got} not in ${lo}..${hi}"; return 1; }
+                ;;
+        esac
+        IFS=';' read -r -a ws <<<"${msg}"
+        for w in "${ws[@]}"; do
+            [ "${w}" = - ] || [[ "${output}" == *"${w}"* ]] || { echo "${name}: no '${w}': ${output}"; return 1; }
+        done
+    done <<'CASES'
+off-false|false|10|30|-|old.log:1:999|-|old.log|none|-
+off-text|1x|10|30|-|old.log:1:999|-|old.log|none|-
+on-spaced| on |10|30|-|old.log:1:999|old.log|-|now|age > 30d
+age|true|10|30|-|old.log:1:40,new.log:1:1|old.log|new.log|now|removed 1 file(s) older than 30d
+under-budget|true|10|30|-|a.log:1:1,b.log:1:1|-|a.log,b.log|now|no size-based pruning needed
+age-then-size|true|1|30|-|day1.log:100:45,day2.log:500:20,day3.log:700:1|day1.log,day2.log|day3.log|now|size budget, oldest-first
+size-only|true|1|30|-|a.log:400:5,b.log:400:3,c.log:400:1|a.log|b.log,c.log|now|-
+bad-knobs|true|x1|not-a-number|-|a.log:1:1|-|a.log|now|Invalid SYSLOG_MAX_GB;Invalid SYSLOG_RETENTION_DAYS
+gb-zero|true|0|30|-|a.log:1:1|-|a.log|now|below the supported minimum
+gb-ceiling|true|2000000|30|-|a.log:1:1|-|a.log|now|budget=1048576GB
+gb-u32-over|true|9999999999|30|-|a.log:1:1|-|a.log|now|budget=1048576GB
+gb-octal-010|true|010|30|-|a.log:9216:1|-|a.log|now|-
+gb-octal-018|true|018|30|-|a.log:1:1|-|a.log|now|-
+no-root|true|10|30|-|-|-|-|none|does not exist yet
+today-only|true|1|30|-|TODAY:2000:0|-|TODAY|retry:3600|budget still exceeded
+around-today|true|1|30|-|old.log:500:5,TODAY:900:0|old.log|TODAY|now|-
+cooldown-120|true|1|30|120|TODAY:2000:0|-|TODAY|retry:120|retry in 120s
+cooldown-huge|true|1|30|999999|TODAY:2000:0|-|TODAY|retry:86400|clamping to 86400
+CASES
+}
+
+@test "retention syslog prune runs at most once a day" {
+    # What: a second run inside 24h does nothing.
+    # Why: the stamp rate-limits the full tree scan.
+    # From: Issue #633 | PR #1858
+    local d="${BATS_TEST_TMPDIR}/syslog"
+    export SYSLOG_LOG_ROOT_ALLOWED_PREFIX="${BATS_TEST_TMPDIR}" SYSLOG_LOG_ROOT="${d}"
+    export SYSLOG_ENABLED=true SYSLOG_MAX_GB=10 SYSLOG_RETENTION_DAYS=30
+    export SYSLOG_PRUNE_STAMP="${BATS_TEST_TMPDIR}/syslog.stamp"
+    _load_retention_functions
+    mkdir -p "${d}/hostA"
+    truncate -s 1M "${d}/hostA/old.log" "${d}/hostA/new.log"
+    touch -d '-40 days' "${d}/hostA/old.log"
+    run maybe_prune_syslog
+    [ "${status}" -eq 0 ] && [ ! -e "${d}/hostA/old.log" ] && [ -e "${d}/hostA/new.log" ]
+    touch -d '-999 days' "${d}/hostA/new.log"
+    run maybe_prune_syslog
+    [ "${status}" -eq 0 ] && [ -z "${output}" ] && [ -e "${d}/hostA/new.log" ]
+}
+
 @test "retention stops promptly with rc 0 on SIGTERM mid-sleep" {
     # What: a real TERM during the interval sleep ends it.
     # Why: PID 1 bash ignored TERM; docker stop had to kill.
