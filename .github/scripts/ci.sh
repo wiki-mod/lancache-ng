@@ -5312,7 +5312,10 @@ _ci_register_secondary() {
         -d "{\"token\":\"${token}\",\"name\":\"${name}\"}" \
         "http://${ip}:8080/api/secondary/register")" || return 2
     code="${out##*$'\n'}"
-    [ "${code}" = "200" ] || return 1
+    if [ "${code}" != "200" ]; then
+        printf 'register %s: http %s\n%s\n' "${name}" "${code}" "${out%$'\n'*}" >&2
+        return 1
+    fi
     printf '%s' "${out%$'\n'*}"
 }
 
@@ -5320,17 +5323,26 @@ _ci_register_secondary() {
 # Why: per-secondary NATS auth-callout, not shared token.
 # From: Issue #1683
 _ci_validate_secondary_identity() {
-    local project="$1" ip cid token a b au bu ap bp
+    local project="$1" ip cid token a b au bu ap bp trc=0
+    local tf=/data/lancache-secondary-registration.token
     ip="$(_ci_validate_container_ip "${project}" ui)"
     cid="$(_ci_validate_cid "${project}" ui)" || return 2
     if [ -z "${ip}" ] || [ -z "${cid}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0045]" "reason=\"no ui container/IP for secondary-identity check\""
         return 2
     fi
-    # What: read SECONDARY_REGISTRATION_TOKEN from ui file.
-    # Why: ui resolves at runtime; not env, not hardcoded.
-    # From: Issue #583
-    token="$(_ci_capture 0 docker exec "${cid}" cat /data/lancache-secondary-registration.token)" || return 2
+    # What: token as the ui resolves it: its file, else env.
+    # Why: no file when the ui got a real token via env.
+    # From: Issue #583 | PR #1858
+    docker exec "${cid}" test -f "${tf}" || trc=$?
+    case "${trc}" in
+        0) token="$(_ci_capture 0 docker exec "${cid}" cat "${tf}")" || return 2 ;;
+        1) token="$(_ci_capture 0 docker exec "${cid}" printenv SECONDARY_REGISTRATION_TOKEN)" || return 2 ;;
+        *)
+            ci_log "[CI-ERROR-VALIDATE-0066]" "rc=${trc} reason=\"token file check in the ui container failed\""
+            return 2
+            ;;
+    esac
     token="${token//$'\n'/}"
     if [ -z "${token}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0046]" "reason=\"could not read SECONDARY_REGISTRATION_TOKEN from ui\""

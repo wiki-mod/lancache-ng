@@ -3969,66 +3969,58 @@ CASES
     [ "${status}" -eq 0 ]
 }
 
-@test "validate secondary-identity fails when no ui" {
-    # What: Missing ui container/IP returns rc 2.
-    # Why: No target for the register round-trip.
-    # From: Issue #583
-    _ci_validate_container_ip() { :; }
-    docker() { :; }
-    run _ci_validate_secondary_identity proj
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0045"* ]]
-}
-
-@test "validate secondary-identity fails when token is unreadable" {
-    # What: An empty registration token returns rc 2.
-    # Why: Cannot register a secondary without it.
-    # From: Issue #583
-    _ci_validate_container_ip() { echo 172.16.1.9; }
-    docker() { case "$1" in compose) echo cid1 ;; exec) : ;; esac; }
-    run _ci_validate_secondary_identity proj
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0046"* ]]
-}
-
-@test "validate secondary-identity fails when register is not 200" {
-    # What: A non-200 register returns rc 1.
-    # Why: Registration must succeed to compare identities.
-    # From: Issue #583
-    _ci_validate_container_ip() { echo 172.16.1.9; }
-    docker() { case "$1" in compose) echo cid1 ;; exec) echo TOK ;; esac; }
-    curl() { printf 'err\n500'; }
-    run _ci_validate_secondary_identity proj
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0047"* ]]
-}
-
-@test "validate secondary-identity fails when two secondaries share an identity" {
-    # What: identical nats_user/password rc 1.
-    # Why: per-secondary identity must be unique.
-    # From: Issue #583
-    _ci_validate_container_ip() { echo 172.16.1.9; }
-    docker() { case "$1" in compose) echo cid1 ;; exec) echo TOK ;; esac; }
-    curl() { printf '{"nats_user":"same","nats_password":"same"}\n200'; }
-    run _ci_validate_secondary_identity proj
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0049"* ]]
-}
-
-@test "validate secondary-identity passes on distinct identities" {
-    # What: distinct nats_user/password ok.
-    # Why: per-secondary auth identity verified.
-    # From: Issue #583
-    _ci_validate_container_ip() { echo 172.16.1.9; }
-    docker() { case "$1" in compose) echo cid1 ;; exec) echo TOK ;; esac; }
-    curl() {
+@test "validate secondary-identity maps each token and register case" {
+    # What: token source, register and identity per row.
+    # Why: the ui keeps a real env token; no file is made.
+    # From: Issue #583 | PR #1858
+    local args="${BATS_TEST_TMPDIR}/reg" name row_ip ex cu rc want tok w
+    local -a ws
+    _ci_validate_container_ip() { echo "${row_ip}"; }
+    _ci_validate_cid() { echo cid1; }
+    docker() {
         case "$*" in
-            *ci-secondary-a*) printf '{"nats_user":"ua","nats_password":"pa"}\n200' ;;
-            *ci-secondary-b*) printf '{"nats_user":"ub","nats_password":"pb"}\n200' ;;
+            "exec cid1 test -f "*)
+                case "${ex}" in
+                    file|empty) return 0 ;;
+                    env) return 1 ;;
+                    broken) echo "Error: container cid1 is not running" >&2; return 126 ;;
+                esac
+                ;;
+            "exec cid1 cat "*) [ "${ex}" = empty ] || echo TOKF ;;
+            "exec cid1 printenv SECONDARY_REGISTRATION_TOKEN") echo TOKE ;;
+            *) echo "unexpected docker call: $*" >&2; return 99 ;;
         esac
     }
-    run _ci_validate_secondary_identity proj
-    [ "${status}" -eq 0 ]
+    curl() {
+        echo "$*" >> "${args}"
+        case "${cu}:$*" in
+            500:*) printf 'denied\n500' ;;
+            same:*) printf '{"nats_user":"same","nats_password":"same"}\n200' ;;
+            distinct:*ci-secondary-a*) printf '{"nats_user":"ua","nats_password":"pa"}\n200' ;;
+            distinct:*) printf '{"nats_user":"ub","nats_password":"pb"}\n200' ;;
+        esac
+    }
+    while IFS='|' read -r name row_ip ex cu rc want tok; do
+        : > "${args}"
+        run _ci_validate_secondary_identity proj
+        [ "${status}" -eq "${rc}" ] || { echo "${name}: rc ${status}: ${output}"; return 1; }
+        IFS=';' read -r -a ws <<<"${want}"
+        for w in "${ws[@]}"; do
+            [ "${w}" = - ] && continue
+            [[ "${output}" == *"${w}"* ]] || { echo "${name}: no '${w}': ${output}"; return 1; }
+        done
+        [ "${tok}" = - ] && continue
+        [ "$(grep -c "\"token\":\"${tok}\"" "${args}")" -eq 2 ] || {
+            echo "${name}: register not sent with ${tok}:"; cat "${args}"; return 1; }
+    done <<'CASES'
+no-ui||file|distinct|2|CI-ERROR-VALIDATE-0045|-
+empty-token|172.16.1.9|empty|distinct|2|CI-ERROR-VALIDATE-0046|-
+file-check-broken|172.16.1.9|broken|distinct|2|CI-ERROR-VALIDATE-0066;rc=126;cid1 is not running|-
+register-500|172.16.1.9|file|500|1|CI-ERROR-VALIDATE-0047;register ci-secondary-a: http 500;denied|-
+shared-identity|172.16.1.9|file|same|1|CI-ERROR-VALIDATE-0049|TOKF
+file-token|172.16.1.9|file|distinct|0|-|TOKF
+env-token|172.16.1.9|env|distinct|0|-|TOKE
+CASES
 }
 
 # =========================================================
