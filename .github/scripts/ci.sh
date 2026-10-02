@@ -4867,6 +4867,7 @@ _ci_validate_slot_lock() {
     holder=$!
     sleep 0.3
     if kill -0 "${holder}" 2>/dev/null; then
+        rm -f "${errf}"
         printf '%s\n' "${holder}"
         return 0
     fi

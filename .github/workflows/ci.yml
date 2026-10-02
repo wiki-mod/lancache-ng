@@ -82,7 +82,9 @@ jobs:
           git checkout -q FETCH_HEAD
       - name: Resolve the build-tools image
         id: resolve
-        run: echo "image=$(bash .github/scripts/ci.sh build-tools resolve-image)" >> "$GITHUB_OUTPUT"
+        run: |
+          image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
 
   # What: emit identity-filtered build matrices
   # Why: path picks candidates; ci.sh resolves build
@@ -121,7 +123,9 @@ jobs:
       - &collect_changed
         name: Collect changed files
         id: changed
-        run: echo "file=$(bash .github/scripts/ci.sh changed-files)" >> "$GITHUB_OUTPUT"
+        run: |
+          file="$(bash .github/scripts/ci.sh changed-files)"
+          echo "file=${file}" >> "$GITHUB_OUTPUT"
       - name: Plan the build matrices
         id: plan
         env:

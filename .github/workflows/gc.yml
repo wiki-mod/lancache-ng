@@ -62,7 +62,9 @@ jobs:
           git checkout -q FETCH_HEAD
       - name: Resolve the build-tools image
         id: resolve
-        run: echo "image=$(bash .github/scripts/ci.sh build-tools resolve-image)" >> "$GITHUB_OUTPUT"
+        run: |
+          image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
 
   # What: reap unreachable artifacts vs protected roots.
   # Why: reachability decides, not age (§78).

@@ -73,7 +73,9 @@ jobs:
           git checkout -q FETCH_HEAD
       - name: Collect changed files
         id: changed
-        run: echo "file=$(bash .github/scripts/ci.sh changed-files)" >> "$GITHUB_OUTPUT"
+        run: |
+          file="$(bash .github/scripts/ci.sh changed-files)"
+          echo "file=${file}" >> "$GITHUB_OUTPUT"
       - name: Admit CodeQL analysis
         id: impact
         env:
