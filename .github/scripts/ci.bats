@@ -10829,6 +10829,58 @@ CASES
     [ "$(wc -l < "${BATS_TEST_TMPDIR}/gen.log")" -eq 1 ]
 }
 
+@test "shared secret fails closed on conflicts and converges" {
+    # What: unwritable store, races, formats, 20 writers.
+    # Why: services on different secrets lose their link.
+    # From: Issue #858 | PR #1858
+    local lib root d="${BATS_TEST_TMPDIR}/ss" i v
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    lib="$(ci_context_path shared-secret)"
+    # shellcheck source=scripts/lib/shared-secret-bootstrap.sh
+    source "${root}/${lib}"
+    LANCACHE_SHARED_SECRET_GID="$(id -g)"; export LANCACHE_SHARED_SECRET_GID
+    : > "${BATS_TEST_TMPDIR}/file"
+    export LANCACHE_SHARED_SECRET_DIR="${BATS_TEST_TMPDIR}/file/secrets"
+    run resolve_shared_secret k "real-op" lancache_gen_hex32
+    [ "${status}" -eq 0 ]
+    [ "${output}" = real-op ]
+    run resolve_shared_secret k "real-op" lancache_gen_base64_32 require-persist
+    [ "${status}" -ne 0 ]
+    run bash -c 'set -euo pipefail; . "$1"
+        if ! v="$(resolve_shared_secret k real-op lancache_gen_hex32)"; then v=FAILED; fi
+        printf "%s" "${v}"' _ "${root}/${lib}"
+    [ "${status}" -eq 0 ]
+    [ "${output}" = real-op ]
+    export LANCACHE_SHARED_SECRET_DIR="${d}"
+    mkdir -p "${d}"
+    printf 'old' > "${d}/k"
+    mktemp() { return 1; }
+    run resolve_shared_secret k "new-op" lancache_gen_hex32
+    [ "${status}" -ne 0 ]
+    [ "$(cat "${d}/k")" = old ]
+    : > "${d}/e"
+    run resolve_shared_secret e "new-op" lancache_gen_hex32
+    [ "${status}" -ne 0 ]
+    mktemp() { printf 'winner' > "${d}/w"; return 1; }
+    run resolve_shared_secret w "op" lancache_gen_hex32
+    [ "${status}" -ne 0 ]
+    [ "$(cat "${d}/w")" = winner ]
+    unset -f mktemp
+    run resolve_shared_secret h "" lancache_gen_hex32
+    [[ "${output}" =~ ^[0-9a-f]{64}$ ]]
+    [ "$(cat "${d}/h")" = "${output}" ]
+    run resolve_shared_secret b "" lancache_gen_base64_32
+    [ "$(printf '%s' "${output}" | base64 -d | wc -c)" -eq 32 ]
+    mkdir -p "${BATS_TEST_TMPDIR}/out"
+    for i in $(seq 1 20); do
+        ( v="$(resolve_shared_secret race "" lancache_gen_hex32)"; printf '%s\n' "${v}" > "${BATS_TEST_TMPDIR}/out/${i}" ) &
+    done
+    wait
+    [ "$(sort -u "${BATS_TEST_TMPDIR}"/out/* | wc -l)" -eq 1 ]
+    [ "$(cat "${BATS_TEST_TMPDIR}/out/1")" = "$(cat "${d}/race")" ]
+    [ -z "$(find "${d}" -maxdepth 1 -name '.secret.*')" ]
+}
+
 @test "prod nats command regenerates nats.conf idempotently" {
     # What: run the real prod nats command via compose.
     # Why: AG-OP-006; no image owns it, compose does.
