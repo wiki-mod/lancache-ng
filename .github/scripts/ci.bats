@@ -6138,7 +6138,21 @@ EOF
     CHANGED_FILES="" PR_NUMBER="" ci_cmd_check_all services/dns/Dockerfile
     grep -qx 'line-endings|services/dns/Dockerfile' "${log}"
     grep -qx 'action-node-versions|' "${log}"
+    grep -qx 'ci-bats|services/dns/Dockerfile' "${log}"
+    grep -qx 'exit-evidence|services/dns/Dockerfile' "${log}"
     ! grep -q '^pr-title|' "${log}"
+}
+
+@test "ci-bats check skips docs-only and nested runs with a reason" {
+    # What: docs-only and nested bats are NOT-RUN, not PASS.
+    # Why: a skip names why; no suite runs inside itself.
+    # From: Issue #1683 | PR #1858
+    run _ci_check_ci_bats README.md
+    [ "${status}" -eq 0 ]
+    [ "${output}" = 'ci-bats=NOT-RUN reason="already inside a bats run; no nested suite"' ]
+    BATS_TEST_FILENAME="" CI_SCAN_SCOPE_FILTER=1 run _ci_check_ci_bats README.md docs/x.md
+    [ "${status}" -eq 0 ]
+    [ "${output}" = 'ci-bats=NOT-RUN reason="docs-only change" changed=2' ]
 }
 
 @test "check all runs PR-metadata checks when a PR number is present" {

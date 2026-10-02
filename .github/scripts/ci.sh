@@ -7520,6 +7520,37 @@ _ci_check_pipefail_early_exit() {
     printf 'pipefail-early-exit=clean files=%s\n' "${#files[@]}"
 }
 
+# What: run the ci.bats regression contract in CI.
+# Why: tests that never run in CI enforce nothing.
+# From: Issue #1683 | PR #1858
+_ci_check_ci_bats() {
+    local suite="${CI_SCRIPT_DIR}/ci.bats" jobs cpus rc=0
+    if [ -n "${BATS_TEST_FILENAME:-}" ]; then
+        printf 'ci-bats=NOT-RUN reason="already inside a bats run; no nested suite"\n'
+        return 0
+    fi
+    if [ "${CI_SCAN_SCOPE_FILTER:-0}" = 1 ] && [ "$#" -gt 0 ] && _ci_docs_only "$@"; then
+        printf 'ci-bats=NOT-RUN reason="docs-only change" changed=%s\n' "$#"
+        return 0
+    fi
+    # What: --jobs = max(16, cores); never below 16.
+    # Why: the suite is sized for 16-way parallel runs.
+    # From: Issue #1683 | PR #1858
+    cpus="$(nproc 2>/dev/null)" || cpus=1
+    jobs=$(( cpus > 16 ? cpus : 16 ))
+    ci_log "[CI-INFO-CHECK-0125]" "suite=\"${suite}\" jobs=${jobs} cpus=${cpus} reason=\"running the regression contract\""
+    # What: the suite gets PATH, HOME and TMPDIR only.
+    # Why: job vars (scope filter, PR_*) would skew tests.
+    # From: Issue #1683 | PR #1858
+    env -i PATH="${PATH}" HOME="${HOME:-/root}" TMPDIR="${CI_TMPDIR}" \
+        bats --print-output-on-failure --jobs "${jobs}" "${suite}" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        ci_log "[CI-ERROR-CHECK-0126]" "suite=\"${suite}\" rc=${rc} reason=\"ci.bats failed (bats output above)\""
+        return 1
+    fi
+    printf 'ci-bats=clean\n'
+}
+
 # What: flag exit paths that lose code, context or raw.
 # Why: AG-INT-002/AG-VAL-029: the class kept coming back.
 # From: Issue #1683 | PR #1858
@@ -10243,7 +10274,7 @@ ci_cmd_check_all() {
     local -a diff_scoped=(line-endings comment-length \
         deny-short-sha language-policy mutable-refs executable-bits \
         pipefail-early-exit if-without-else-status docker-run-heredoc-stdin \
-        exit-evidence review-chronology governance-guards \
+        exit-evidence ci-bats review-chronology governance-guards \
         changelog-direct-edit)
     for sub in "${diff_scoped[@]}"; do
         CI_SCAN_SCOPE_FILTER=1 ci_cmd_check "${sub}" "${changed[@]}" || rc=1
@@ -10299,6 +10330,7 @@ ci_cmd_check() {
         pipefail-early-exit) _ci_check_pipefail_early_exit "$@" ;;
         if-without-else-status) _ci_check_if_without_else_status "$@" ;;
         exit-evidence) _ci_check_exit_evidence "$@" ;;
+        ci-bats) _ci_check_ci_bats "$@" ;;
         docker-run-heredoc-stdin) _ci_check_docker_run_heredoc_stdin "$@" ;;
         setup-prompt-drift) _ci_check_setup_prompt_drift "$@" ;;
         pr-title) _ci_check_pr_title "$@" ;;
