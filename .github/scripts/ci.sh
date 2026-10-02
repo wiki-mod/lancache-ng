@@ -4426,10 +4426,10 @@ ci_cmd_release_vex() {
     [ -s "${trivyignore}" ] || { ci_log "[CI-ERROR-RELEASE-0011]" "path=\"${trivyignore}\" reason=\"trivyignore missing; cannot build release VEX\""; return 2; }
     dir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-vex.XXXXXX")" || return 2
     out="${dir}/vex.openvex.json"
-    _ci_generate_vex "${trivyignore}" "${root}" > "${out}" || rc=$?
+    _ci_generate_vex "${trivyignore}" > "${out}" || rc=$?
     if [ "${rc}" -ne 0 ] || [ ! -s "${out}" ]; then
         rm -rf "${dir}"
-        ci_log "[CI-ERROR-RELEASE-0012]" "tag=\"${tag}\" reason=\"generate-vex produced no output\""
+        ci_log "[CI-ERROR-RELEASE-0012]" "tag=\"${tag}\" rc=${rc} reason=\"OpenVEX generation failed or empty (raw above)\""
         return 2
     fi
     _ci_release_asset_put "${tag}" "${out}" || { rm -rf "${dir}"; return 2; }
@@ -10474,42 +10474,108 @@ _ci_check_image_channel_resolution() {
 # Why: One VEX generator for drift-check and release attach.
 # From: Issue #1683
 _ci_generate_vex() {
-    local trivyignore="$1" repo_root="${2:-${CI_REPO_ROOT:-.}}"
-    local gen="${repo_root}/scripts/untracked/generate-vex.sh"
-    if [ -n "${CI_VEX_GENERATE_CMD:-}" ]; then
-        "${CI_VEX_GENERATE_CMD}" "${trivyignore}"
-        return "$?"
-    fi
-    if [ ! -f "${gen}" ]; then
-        ci_log "[CI-ERROR-RELEASE-0025]" "generator=\"${gen}\" trivyignore=\"${trivyignore}\" reason=\"VEX generator script missing\""
-        return 2
-    fi
-    bash "${gen}" "${trivyignore}"
+    local trivyignore="$1" fields repo server ts
+    fields="$(_ci_trivyignore_fields "${trivyignore}")" || return 2
+    repo="$(_ci_repo)" || return 2
+    server="${GITHUB_SERVER_URL:-https://github.com}"
+    # What: document time from CI_VEX_TIMESTAMP, else now.
+    # Why: a fixed value makes the document byte-stable.
+    # From: Issue #1683 | PR #1858
+    ts="${CI_VEX_TIMESTAMP:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+    _ci_run "[CI-ERROR-RELEASE-0025]" "trivyignore=\"${trivyignore}\" reason=\"OpenVEX assembly failed\"" \
+        jq -nR --arg repo "${repo}" --arg server "${server}" --arg ts "${ts}" '
+        def stmt($e; $p):
+          ($e.statement // "") as $s
+          | if ($e.status // "") == "not_affected" then
+              (($e.justification // "vulnerable_code_not_present") as $j
+               | if ($j | IN("component_not_present", "vulnerable_code_not_present",
+                      "vulnerable_code_not_in_execute_path",
+                      "vulnerable_code_cannot_be_controlled_by_adversary",
+                      "inline_mitigations_already_exist")) | not
+                 then error("\($e.id): justification \($j) is not an OpenVEX value") else . end
+               | $p + {status: "not_affected", justification: $j,
+                   impact_statement: (if $e.expired_at then "\($s) (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before \($e.expired_at) in case the underlying module pin or upstream situation has changed.)" else $s end)})
+            elif ($e.status // "") == "" then
+              (if $e.justification then error("\($e.id): justification needs status not_affected") else . end
+               | $p + {status: "affected",
+                   action_statement: (if $e.expired_at then "\($s) (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires \($e.expired_at) and must be re-reviewed on or before that date.)" else $s end)})
+            else error("\($e.id): status \($e.status) is not supported (not_affected or none)") end;
+        [inputs | split("\t") | {n: (.[0] | tonumber), k: .[1], v: (.[2:] | join("\t") | gsub("\u001e"; "\n"))}]
+        | group_by(.n)
+        | map(reduce .[] as $f ({paths: []};
+            if $f.k == "path" then .paths += [$f.v] else .[$f.k] = $f.v end))
+        | {"@context": "https://openvex.dev/ns/v0.2.0",
+           "@id": "\($server)/\($repo)/vex/\($repo | split("/")[1])-\($ts)",
+           author: "\($repo | split("/")[1]) release automation (\($server)/\($repo))",
+           timestamp: $ts, version: 1,
+           statements: map(stmt(.; {vulnerability: {name: .id}, timestamp: $ts,
+             products: [{"@id": "pkg:github/\($repo)", subcomponents: (.paths | map({"@id": .}))}]}))}
+        ' <<< "${fields}"
 }
 
-# What: Fail unless generate-vex.sh emits valid OpenVEX.
-# Why: catch VEX generator bugs before post-merge discovery.
+# What: trivyignore vulnerability fields, one per line.
+# Why: strict reader; a shape it does not know fails closed.
+# From: Issue #1683 | PR #1858
+_ci_trivyignore_fields() {
+    local file="$1" out
+    if ! out="$(awk '
+        function fail(m) { printf "line %d: %s: %s\n", NR, m, $0 > "/dev/stderr"; bad = 1; exit 3 }
+        function scalar(v) {
+            if (v ~ /^".*"$/ || v ~ /^\047.*\047$/) { v = substr(v, 2, length(v) - 2); if (v ~ /["\047\\]/) fail("escaped quoted scalar") }
+            else if (v ~ /(^| )#/ || v ~ /^[\[{&*!|>%@`]/) fail("unsupported plain scalar")
+            return v
+        }
+        function flush() { if (on) { print n "\tstatement\t" st; on = 0 } }
+        { match($0, /^ */); ind = RLENGTH; rest = substr($0, ind + 1) }
+        on && rest == "" { if (st != "") nl++; next }
+        on && ind == 6 {
+            if (st == "") st = rest
+            else if (nl) { while (nl-- > 0) st = st "\036"; st = st rest }
+            else st = st " " rest
+            nl = 0; next
+        }
+        on && ind > 6 { fail("more-indented folded line") }
+        on { flush() }
+        rest == "" || rest ~ /^#/ { next }
+        ind == 0 && rest == "vulnerabilities:" { sect = "v"; next }
+        ind == 0 && rest ~ /^[a-z_]+:[ \t]*$/ { sect = "o"; next }
+        ind == 0 { fail("unsupported top-level line") }
+        sect == "o" { next }
+        sect != "v" { fail("line outside a section") }
+        ind == 2 && rest ~ /^- id:/ { v = rest; sub(/^- id:[ \t]*/, "", v); n++; mode = ""; print n "\tid\t" scalar(v); next }
+        ind == 4 && n && rest ~ /^[a-z_]+:/ {
+            k = rest; sub(/:.*/, "", k); v = rest; sub(/^[a-z_]+:[ \t]*/, "", v); mode = ""
+            if (k == "paths" && v == "") { mode = "paths"; next }
+            if (k == "statement" && v == ">-") { on = 1; st = ""; nl = 0; next }
+            if (k == "statement" || k == "status" || k == "justification" || k == "expired_at") { print n "\t" k "\t" scalar(v); next }
+            fail("unsupported entry key")
+        }
+        ind == 6 && mode == "paths" && rest ~ /^- / { v = rest; sub(/^-[ \t]*/, "", v); print n "\tpath\t" scalar(v); next }
+        { fail("unsupported line") }
+        END { flush(); if (bad) exit 3 }
+    ' "${file}" 2>&1)"; then
+        ci_error "[CI-ERROR-RELEASE-0035]" "file=\"${file}\" reason=\"trivyignore not in the supported shape\"" "${out}"
+        return 2
+    fi
+    [ -z "${out}" ] || printf '%s\n' "${out}"
+}
+
+# What: Fail unless the trivyignore yields full OpenVEX.
+# Why: a broken entry must fail here, not at release time.
 # From: Issue #1683 | PR #1858
 _ci_check_vex_drift() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local trivyignore="${repo_root}/.trivyignore.yaml"
-    local out entry_count statement_count rc=0
+    local out entry_count statement_count
     [ -f "${trivyignore}" ] || { ci_error "[CI-ERROR-CHECK-0050]" "path=\"${trivyignore}\" reason=\".trivyignore.yaml not found\"" "${trivyignore}"; return 2; }
-    out="$(_ci_generate_vex "${trivyignore}" "${repo_root}")" || rc=$?
-    if [ "${rc}" -eq 2 ]; then
-        ci_error "[CI-ERROR-CHECK-0106]" "reason=\"generate-vex.sh not found\"" "${trivyignore}"; return 2
-    elif [ "${rc}" -ne 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0107]" "reason=\"generate-vex.sh failed\"" "${trivyignore}"; return 1
-    fi
-    local jq_err
-    if ! jq_err="$(jq empty <<<"${out}" 2>&1)"; then
-        ci_error "[CI-ERROR-CHECK-0108]" "reason=\"generate-vex.sh produced invalid JSON\"" "${jq_err}"
+    if ! out="$(_ci_generate_vex "${trivyignore}")"; then
+        ci_log "[CI-ERROR-CHECK-0107]" "path=\"${trivyignore}\" reason=\"OpenVEX generation failed (raw above)\""
         return 1
     fi
     entry_count="$(_ci_capture 1 grep -c '^  - id:' "${trivyignore}")" || return 2
-    statement_count="$(jq '.statements | length' <<<"${out}")"
-    if [ "${entry_count:-0}" -gt 0 ] && [ "${statement_count}" -eq 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0109]" "reason=\"${entry_count} trivyignore entries but 0 VEX statements\"" "${trivyignore}"
+    statement_count="$(_ci_capture 0 jq '.statements | length' <<< "${out}")" || return 2
+    if [ "${statement_count}" != "${entry_count}" ]; then
+        ci_log "[CI-ERROR-CHECK-0109]" "entries=${entry_count} statements=${statement_count} reason=\"trivyignore entries and VEX statements differ\""
         return 1
     fi
     printf 'vex-drift=clean statements=%s\n' "${statement_count}"

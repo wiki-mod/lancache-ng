@@ -2618,16 +2618,70 @@ tail" '{body:$b, isPrerelease:false}')" \
     # From: Issue #1683
     local gh calls="${BATS_TEST_TMPDIR}/gh-calls"; gh="$(_release_gh_stub)"
     export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r CI_TMPDIR="${BATS_TEST_TMPDIR}" CI_REPO_ROOT="${BATS_TEST_TMPDIR}"
-    printf '  - id: CVE-0\n' > "${BATS_TEST_TMPDIR}/.trivyignore.yaml"
-    local vex; vex="$(_stub vex 'printf "{\"statements\":[]}"')"
+    printf 'vulnerabilities:\n  - id: CVE-0\n    statement: >-\n      x\n' > "${BATS_TEST_TMPDIR}/.trivyignore.yaml"
     : > "${calls}"
-    CI_VEX_GENERATE_CMD="${vex}" CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_vex v1.2.3
+    CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_vex v1.2.3
     [ "${status}" -eq 0 ]
     grep -q 'release upload v1.2.3' "${calls}"
     grep -q 'vex.openvex.json' "${calls}"
+    printf 'vulnerabilities:\n  - id: CVE-0\n    purls: []\n' > "${BATS_TEST_TMPDIR}/.trivyignore.yaml"
+    CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_vex v1.2.3
+    [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0035"*"CI-ERROR-RELEASE-0012"* ]]
     rm -f "${BATS_TEST_TMPDIR}/.trivyignore.yaml"
-    CI_VEX_GENERATE_CMD="${vex}" CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_vex v1.2.3
+    CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_vex v1.2.3
     [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0011"* ]]
+}
+
+@test "openvex generator maps each trivyignore shape" {
+    # What: each entry shape maps to its OpenVEX statement.
+    # Why: wrong status/justification misleads VEX users.
+    # From: Issue #1683 | PR #1858
+    local f="${BATS_TEST_TMPDIR}/ti.yaml" case want code expr out
+    export GITHUB_REPOSITORY=Own/Repo GITHUB_SERVER_URL=https://git.example.test CI_VEX_TIMESTAMP=2026-01-01T00:00:00Z
+    while IFS='|' read -r case want code expr; do
+        case "${case}" in
+            affected) printf 'vulnerabilities:\n  - id: CVE-1\n    paths:\n      - usr/bin/a\n    statement: >-\n      No fix yet.\n    expired_at: 2026-12-31\n' ;;
+            notaff) printf 'vulnerabilities:\n  - id: CVE-2\n    statement: >-\n      Code absent.\n    status: not_affected\n    expired_at: "2026-12-31"\n' ;;
+            override) printf 'vulnerabilities:\n  - id: CVE-3\n    statement: >-\n      x\n    status: not_affected\n    justification: vulnerable_code_cannot_be_controlled_by_adversary\n' ;;
+            align) printf 'vulnerabilities:\n  - id: CVE-4\n    paths:\n      - usr/bin/first\n    statement: >-\n      a\n    status: not_affected\n  - id: CVE-5\n    paths:\n      - usr/bin/second\n    statement: >-\n      b\n' ;;
+            folded) printf '# head\nvulnerabilities:\n  # note\n  - id: CVE-6\n    statement: >-\n      What: one\n      two.\n\n      # kept\n      Why: three\n\n' ;;
+            othersec) printf 'misconfigurations:\n  - id: AVD-1\nvulnerabilities:\n  - id: CVE-7\n    statement: >-\n      x\n' ;;
+            purls) printf 'vulnerabilities:\n  - id: CVE-8\n    purls:\n      - pkg:x\n' ;;
+            indent) printf 'vulnerabilities:\n  - id: CVE-9\n    statement: >-\n      a\n        b\n' ;;
+            literal) printf 'vulnerabilities:\n  - id: CVE-10\n    statement: |\n      a\n' ;;
+            toplevel) printf 'vulnerabilities: []\n' ;;
+            comment) printf 'vulnerabilities:\n  - id: CVE-11 # note\n' ;;
+            fixed) printf 'vulnerabilities:\n  - id: CVE-12\n    status: fixed\n' ;;
+            badjust) printf 'vulnerabilities:\n  - id: CVE-13\n    status: not_affected\n    justification: because\n' ;;
+            orphanjust) printf 'vulnerabilities:\n  - id: CVE-14\n    justification: component_not_present\n' ;;
+        esac > "${f}"
+        run _ci_generate_vex "${f}"
+        [ "${status}" -eq "${want}" ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
+        if [ "${want}" -ne 0 ]; then
+            [[ "${output}" == *"CI-ERROR-RELEASE-${code}"* ]] || { echo "${case}: ${output}"; return 1; }
+            continue
+        fi
+        out="$(jq -r "${expr}" <<< "${output}")" || { echo "${case}: ${output}"; return 1; }
+        [ "${out}" = true ] || { echo "${case}: ${expr} -> ${out}"; echo "${output}"; return 1; }
+    done <<'CASES'
+affected|0|-|.statements[0] | .status == "affected" and (.action_statement | startswith("No fix yet. (Accepted") and contains("expires 2026-12-31")) and .products[0]["@id"] == "pkg:github/own/repo" and .products[0].subcomponents == [{"@id": "usr/bin/a"}] and .timestamp == "2026-01-01T00:00:00Z"
+notaff|0|-|.statements[0] | .status == "not_affected" and .justification == "vulnerable_code_not_present" and (.impact_statement | startswith("Code absent. (Non-exploitability") and contains("2026-12-31")) and has("action_statement") == false
+override|0|-|.statements[0] | .justification == "vulnerable_code_cannot_be_controlled_by_adversary" and .impact_statement == "x"
+align|0|-|(.statements | length) == 2 and .statements[0].status == "not_affected" and .statements[0].products[0].subcomponents[0]["@id"] == "usr/bin/first" and .statements[1].vulnerability.name == "CVE-5" and .statements[1].status == "affected" and .statements[1].action_statement == "b"
+folded|0|-|.statements[0].action_statement == "What: one two.\n# kept Why: three" and ."@context" == "https://openvex.dev/ns/v0.2.0" and ."@id" == "https://git.example.test/own/repo/vex/repo-2026-01-01T00:00:00Z" and .author == "repo release automation (https://git.example.test/own/repo)" and .version == 1
+othersec|0|-|(.statements | length) == 1 and .statements[0].vulnerability.name == "CVE-7"
+purls|2|0035|
+indent|2|0035|
+literal|2|0035|
+toplevel|2|0035|
+comment|2|0035|
+fixed|2|0025|
+badjust|2|0025|
+orphanjust|2|0025|
+CASES
+    run _ci_generate_vex "${f}.missing"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-RELEASE-0035"* ]]
 }
 
 @test "next-patch-tag bumps Z only on a plain vX.Y.Z tag" {
@@ -7715,43 +7769,25 @@ EOF
     [[ "${output}" == *"input missing"* ]]
 }
 
-@test "check vex-drift passes valid non-empty OpenVEX" {
-    # What: generate-vex.sh emits JSON with statements.
-    # Why: the generator smoke test's core success path.
+@test "check vex-drift: one statement per entry, else a finding" {
+    # What: clean on the real file; shape or count -> rc 1.
+    # Why: a broken entry must fail before a release ships.
     # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/vex-ok"
+    local r="${BATS_TEST_TMPDIR}/vex" n
     mkdir -p "${r}"
-    printf 'ignore:\n  - id: CVE-1\n' > "${r}/.trivyignore.yaml"
-    CI_VEX_GENERATE_CMD="$(_stub vg 'printf "{\"statements\":[{\"x\":1}]}"')" \
-        run bash "${CI_SH}" check vex-drift "${r}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"vex-drift=clean"* ]]
-}
-
-@test "check vex-drift fails invalid JSON" {
-    # What: generate-vex.sh emits non-JSON output.
-    # Why: a broken generator must fail closed.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/vex-bad"
-    mkdir -p "${r}"
-    printf 'ignore:\n  - id: CVE-1\n' > "${r}/.trivyignore.yaml"
-    CI_VEX_GENERATE_CMD="$(_stub vg 'printf "not json"')" \
-        run bash "${CI_SH}" check vex-drift "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"invalid JSON"* ]]
-}
-
-@test "check vex-drift fails entries with zero statements" {
-    # What: real ignore entries but an empty statement list.
-    # Why: Empty output broken, JSON or not.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/vex-empty"
-    mkdir -p "${r}"
-    printf 'ignore:\n  - id: CVE-1\n' > "${r}/.trivyignore.yaml"
-    CI_VEX_GENERATE_CMD="$(_stub vg 'printf "{\"statements\":[]}"')" \
-        run bash "${CI_SH}" check vex-drift "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"0 VEX statements"* ]]
+    export GITHUB_REPOSITORY=o/r
+    n="$(grep -c '^  - id:' "${BATS_TEST_DIRNAME}/../../.trivyignore.yaml")"
+    run bash "${CI_SH}" check vex-drift "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
+    [[ "${output}" == *"vex-drift=clean statements=${n}"* ]]
+    printf 'vulnerabilities:\n  - id: CVE-1\n    purls: []\n' > "${r}/.trivyignore.yaml"
+    run bash "${CI_SH}" check vex-drift "${r}"
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-RELEASE-0035"*"line 3"*"CI-ERROR-CHECK-0107"* ]]
+    printf 'misconfigurations:\n  - id: AVD-1\nvulnerabilities:\n  - id: CVE-1\n' > "${r}/.trivyignore.yaml"
+    run bash "${CI_SH}" check vex-drift "${r}"
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0109"*"entries=2 statements=1"* ]]
 }
 
 # What: Seed setup.sh/dhcp for Kea.

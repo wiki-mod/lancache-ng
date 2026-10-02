@@ -149,16 +149,17 @@ Accepted, deliberately-suppressed vulnerability findings live in the repo-root
 periodic re-review). That file is Trivy-specific and not something a downstream
 consumer's non-Trivy tooling can parse.
 
-`scripts/untracked/generate-vex.sh` converts those entries into a standard
-[OpenVEX](https://openvex.dev) JSON document, `vex.openvex.json`. Each
-accepted-vulnerability entry becomes an OpenVEX statement: the vulnerable
-component is present and the finding is accepted or deferred (typically
-because no fixed upstream version exists to bump to yet), so the honest
-status is `affected` with an `action_statement` that carries the acceptance
-rationale and the mandatory re-review date -- not `not_affected`, which
-would assert a non-exploitability claim these entries do not make. If a
-future entry genuinely represents non-exploitability, its status mapping must
-be revisited in the generator rather than blanket-applied.
+`ci.sh` (`_ci_generate_vex`) converts those entries into a standard
+[OpenVEX](https://openvex.dev) v0.2.0 JSON document, `vex.openvex.json`. Each
+entry becomes one OpenVEX statement. An entry without `status:` is an
+accepted, tracked risk: status `affected` with an `action_statement` that
+carries the acceptance rationale and the mandatory re-review date. An entry
+with `status: not_affected` asserts non-exploitability: status
+`not_affected` with a `justification` (default `vulnerable_code_not_present`,
+overridable per entry with one of the OpenVEX justification values) and an
+`impact_statement`. The reader accepts only the shape this file uses
+(`id`, `paths`, a `>-` folded `statement`, `status`, `justification`,
+`expired_at`); any other key, status or line shape fails closed.
 
 **`vex.openvex.json` is not committed to `current_dev`** (changed by Issue
 #1095's F-22 finding; it was committed there through PR #1194, which produced
@@ -173,11 +174,10 @@ exact class of bug it was meant to prevent. Instead:
   checked-out `.trivyignore.yaml` by the release path (`ci.sh release-vex`,
   invoked from `release.yml`), alongside the SBOM and provenance assets that
   belong to the release channel.
-- `scripts/tracked/check-vex-drift.sh` is a generator smoke test: it runs
-  `scripts/untracked/generate-vex.sh` and asserts the result is valid,
-  non-empty OpenVEX JSON, failing a change that breaks the generator or feeds
-  it malformed `.trivyignore.yaml`. The generator-validity invariant is owned
-  by `ci.sh` and enforced as a regression through `ci.bats`.
+- `ci.sh check vex-drift` runs the generator on the checked-out
+  `.trivyignore.yaml` and requires one statement per entry, failing a change
+  that feeds it an unsupported shape, status or justification. The generator
+  and this check are covered by `ci.bats`.
 
 This complements the Vulnerability Management Policy documentation in
 `SECURITY.md` (refs #1130 / #1185).
