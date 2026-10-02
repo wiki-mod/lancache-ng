@@ -7961,6 +7961,33 @@ _ci_check_pipefail_early_exit() {
     printf 'pipefail-early-exit=clean files=%s\n' "${#files[@]}"
 }
 
+# What: Fail a bats [ ] && [ ] check with no || fallback.
+# Why: set -e skips a failing first && term; test passes.
+# From: Issue #1683 | PR #1858
+_ci_check_bats_and_chain() {
+    local -a _ci_override=("$@") files=()
+    _ci_scan_files files _ci_override '.github/scripts/*.bats' || return 2
+    local path out
+    local -a viol=()
+    for path in "${files[@]}"; do
+        out="$(_ci_capture 0 awk '
+            { line = (cont != "" ? cont " " : "") $0; cont = "" }
+            /\\$/ { cont = substr(line, 1, length(line) - 1); if (!start) start = NR; next }
+            line ~ /^[[:space:]]*\[\[?[[:space:]]/ && line ~ /\]\]?[[:space:]]*&&[[:space:]]*\[/ \
+                && line ~ /\]\]?[[:space:]]*$/ && line !~ /\|\|/ {
+                print (start ? start : NR) ": " line
+            }
+            { start = 0 }
+        ' "${path}")" || return 2
+        [ -z "${out}" ] || viol+=("${path}: ${out}")
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0145]" "reason=\"bats assertion chained with && and no || fallback\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'bats-and-chain=clean files=%s\n' "${#files[@]}"
+}
+
 # What: run the ci.bats regression contract in CI.
 # Why: tests that never run in CI enforce nothing.
 # From: Issue #1683 | PR #1858
@@ -11156,7 +11183,7 @@ ci_cmd_check_all() {
     local -a diff_scoped=(line-endings comment-length \
         deny-short-sha language-policy mutable-refs executable-bits \
         pipefail-early-exit if-without-else-status docker-run-heredoc-stdin \
-        exit-evidence ci-bats review-chronology governance-guards \
+        bats-and-chain exit-evidence ci-bats review-chronology governance-guards \
         changelog-direct-edit)
     for sub in "${diff_scoped[@]}"; do
         CI_SCAN_SCOPE_FILTER=1 ci_cmd_check "${sub}" "${changed[@]}" || rc=1
@@ -11210,6 +11237,7 @@ ci_cmd_check() {
         executable-bits) _ci_check_executable_bits "$@" ;;
         review-chronology) _ci_check_review_chronology "$@" ;;
         pipefail-early-exit) _ci_check_pipefail_early_exit "$@" ;;
+        bats-and-chain) _ci_check_bats_and_chain "$@" ;;
         if-without-else-status) _ci_check_if_without_else_status "$@" ;;
         exit-evidence) _ci_check_exit_evidence "$@" ;;
         ci-bats) _ci_check_ci_bats "$@" ;;

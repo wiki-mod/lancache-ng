@@ -432,7 +432,8 @@ STUB
     PATH="${nojq}:${PATH}" CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo \
         run --separate-stderr bash "${CI_SH}" codeql-config
     [ "${status}" -eq 0 ] || { echo "${output} ${stderr}"; return 1; }
-    [[ "${output}" == *'  - "x/**"'* ]] && [[ "${output}" == *'  - "a\"b"'* ]]
+    [[ "${output}" == *'  - "x/**"'* ]]
+    [[ "${output}" == *'  - "a\"b"'* ]]
 }
 @test "an unreadable SOT fails every reader caller with raw" {
     # What: each caller row: rc 2 plus the raw reader error.
@@ -1999,13 +2000,15 @@ CASES
     ci_cmd_publish() { echo PUBLISH-CALLED; }
     run ci_cmd_ship svc-a os/p1
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"BAKE-FAIL"* ]] && [[ "${output}" != *"PUBLISH-CALLED"* ]]
+    [[ "${output}" == *"BAKE-FAIL"* ]]
+    [[ "${output}" != *"PUBLISH-CALLED"* ]]
     unset GITHUB_REPOSITORY
     _ci_bake_check() { echo "BAKE-CALLED"; }
     run ci_cmd_ship svc-a os/p1
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-SHIP-0003"*"GITHUB_REPOSITORY"* ]]
-    [[ "${output}" != *"BAKE-CALLED"* ]] && [[ "${output}" != *"PUBLISH-CALLED"* ]]
+    [[ "${output}" != *"BAKE-CALLED"* ]]
+    [[ "${output}" != *"PUBLISH-CALLED"* ]]
     export GITHUB_REPOSITORY=owner/fixture-repo
     ci_cmd_publish() { echo "service=$1 platform=$2 published=sha256:pub identity=i"; }
     _ci_bake_check() { echo "BAKE $1"; }
@@ -3836,7 +3839,8 @@ STUB
     [ "${a}" = "${b}" ]
     [[ "${a}" == 172.*/27 ]]
     o2="${a#172.}"; o2="${o2%%.*}"
-    [ "${o2}" -ge 16 ] && [ "${o2}" -le 31 ]
+    [ "${o2}" -ge 16 ]
+    [ "${o2}" -le 31 ]
     host="${a%/27}"; host="${host##*.}"
     [ "$(( host % 32 ))" -eq 0 ]
 }
@@ -5017,7 +5021,8 @@ CASES
     local alpine repos
     alpine="$(_ci_block_entry_field base_images "" alpine)"
     repos="$(_ci_block_entry_list build_toolchain build-tools apk_repositories | tr '\n' ' ')"
-    [ -n "${alpine}" ] && [ -n "${repos}" ]
+    [ -n "${alpine}" ]
+    [ -n "${repos}" ]
     run bash "${CI_SH}" build-args build-tools
     [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
     [[ "${output}" == *"--build-arg ALPINE_IMAGE=${alpine}"* ]]
@@ -5577,7 +5582,8 @@ CASES
         run bash -c "cd '${d}' && GIT_CEILING_DIRECTORIES='${BATS_TEST_TMPDIR}' bash '${CI_SH}' check ${c}"
         [ "${status}" -eq 2 ] || { echo "want rc2: ${c} -> ${status}"; false; }
         [[ "${output}" == *"CI-ERROR-CHECK-0071"* ]]
-        [[ "${output}" == *"site="* ]] && [[ "${output}" == *"not a git repository"* ]]
+        [[ "${output}" == *"site="* ]]
+        [[ "${output}" == *"not a git repository"* ]]
         [[ "${output}" != *"=clean"* ]]
     done
 }
@@ -6091,6 +6097,28 @@ STUBEOF
         run bash "${CI_SH}" check pipefail-early-exit "${f}"
         [ "${status}" -ne 0 ]
         [[ "${output}" == *"CI-ERROR-CHECK-0011"* ]]
+    done
+}
+
+@test "check bats-and-chain flags && assertions without a fallback" {
+    # What: [ ] && [ ] fails; || fallback and splits pass.
+    # Why: bats ignores a failing first && term mid-test.
+    # From: Issue #1683 | PR #1858
+    local f="${BATS_TEST_TMPDIR}/t.bats" line a='&&'
+    for line in '    [ 1 -eq 1 ]' "    [ 1 -eq 1 ] ${a} [ 2 -eq 2 ] || { return 1; }" \
+                "    [ 1 -eq 1 ] ${a} [ 2 -eq 2 ] \\\\\n        || { return 1; }" \
+                "    x=1 ${a} y=2" "    grep -q a f ${a} echo" "    [ -n \"\${x}\" ] ${a} rm -f y" \
+                "    [ a = a ] ${a} [ -n b ] ${a} { exit 1; }"; do
+        printf '%b\n' "${line}" > "${f}"
+        run bash "${CI_SH}" check bats-and-chain "${f}"
+        [ "${status}" -eq 0 ] || { echo "pass row: ${line}: ${output}"; return 1; }
+    done
+    for line in "    [ 1 -eq 1 ] ${a} [ 2 -eq 2 ]" "    [[ x == x ]] ${a} [[ y == y ]]" \
+                "    [ 1 -eq 1 ] ${a} [ 2 -eq 2 ] \\\\\n        ${a} [ 3 -eq 3 ]"; do
+        printf '%b\n' "${line}" > "${f}"
+        run bash "${CI_SH}" check bats-and-chain "${f}"
+        [ "${status}" -eq 1 ] || { echo "fail row: ${line}: ${output}"; return 1; }
+        [[ "${output}" == *"CI-ERROR-CHECK-0145"*"t.bats: 1: "* ]]
     done
 }
 
@@ -9495,7 +9523,8 @@ STUB
     : > "${calls}"
     CI_BUILD_MATRIX='{"include":[ broken' run ci_cmd_assemble_stack
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-ASSEMBLE-0011]"* ]] && [[ "${output}" == *"jq: parse error"* ]]
+    [[ "${output}" == *"[CI-ERROR-ASSEMBLE-0011]"* ]]
+    [[ "${output}" == *"jq: parse error"* ]]
     [ ! -s "${calls}" ]
 }
 
@@ -9511,7 +9540,8 @@ STUB
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo GITHUB_SHA=deadbeef \
         run _ci_index_lookup ui
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-WARN-RESOLVE-0007"* ]] && [[ "${output}" == *"i/o timeout"* ]]
+    [[ "${output}" == *"CI-WARN-RESOLVE-0007"* ]]
+    [[ "${output}" == *"i/o timeout"* ]]
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo GITHUB_SHA=deadbeef \
         run _ci_reconcile_index ui "os/p1=sha256:a"
     [ "${status}" -eq 2 ]
@@ -10345,6 +10375,55 @@ _kgs_fingerprint() {
     ! grep -rq BROKEN "${snap}"
 }
 
+@test "known-good library edge cases fail closed" {
+    # What: missing, staging, keep, reject, partial copy.
+    # Why: a bad snapshot must never become the live config.
+    # From: Issue #1683 | PR #1858
+    local lib snap="${BATS_TEST_TMPDIR}/edge" c="${BATS_TEST_TMPDIR}/a.conf" b="${BATS_TEST_TMPDIR}/b.conf" v i new
+    lib="$(ci_context_path known-good)"
+    # shellcheck source=scripts/lib/known-good-snapshots.sh
+    source "${BATS_TEST_DIRNAME}/../../${lib}"
+    v="grep -q '^OK' '${c}'"
+    run kgs_snapshot_create "${snap}" 3 t "${BATS_TEST_TMPDIR}/none.conf"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"[t][FATAL] candidate file missing"* ]]
+    [ -z "$(kgs_list_snapshots "${snap}")" ]
+    printf 'OK\n' > "${c}"
+    run kgs_snapshot_create "${snap}" 3 t "${c}" "${b}"
+    [ "${status}" -ne 0 ]
+    [ -z "$(find "${snap}" -mindepth 1 -maxdepth 1)" ] || { echo "partial snapshot left"; ls -a "${snap}"; return 1; }
+    run kgs_snapshot_apply "${snap}" t "${v}" "${c}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"no known-good snapshots available"* ]]
+    for i in 1 2 3 4 5; do printf 'OK %s\n' "${i}" > "${c}"; kgs_snapshot_create "${snap}" 3 t "${c}" 2> /dev/null; done
+    [ "$(for i in $(kgs_list_snapshots "${snap}"); do cat "${snap}/${i}/a.conf"; done | paste -sd,)" = "OK 3,OK 4,OK 5" ]
+    mkdir -p "${snap}/.staging.x"
+    [ "$(kgs_list_snapshots "${snap}" | wc -l)" -eq 3 ]
+    for i in not-a-number "" 0; do printf 'OK k\n' > "${c}"; kgs_snapshot_create "${snap}" "${i}" t "${c}" 2> /dev/null; done
+    [ "$(kgs_list_snapshots "${snap}" | wc -l)" -eq 3 ] || { echo "clamp"; kgs_list_snapshots "${snap}"; return 1; }
+    new="$(kgs_list_snapshots "${snap}" | tail -n 1)"
+    printf 'BROKEN\n' > "${snap}/${new}/a.conf"
+    printf 'CANDIDATE\n' > "${c}"
+    run kgs_snapshot_apply "${snap}" t "${v}" "${c}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"[t][REJECT]"*"[t][SELECT]"* ]]
+    [ "$(cat "${c}")" = "OK k" ]
+    i="$(kgs_new_snapshot_id)"
+    mkdir -p "${snap}/${i}"
+    printf 'CANDIDATE\n' > "${c}"
+    run kgs_snapshot_apply "${snap}" t "${v}" "${c}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"[t][REJECT] rejected known-good snapshot ${i}: incomplete"* ]]
+    rm -rf "${snap}"
+    printf 'BROKEN\n' > "${c}"
+    kgs_snapshot_create "${snap}" 3 t "${c}" 2> /dev/null
+    printf 'CANDIDATE\n' > "${c}"
+    run kgs_snapshot_apply "${snap}" t "${v}" "${c}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"[t][FATAL]"* ]]
+    [ "$(cat "${c}")" = CANDIDATE ]
+}
+
 # =========================================================
 # PRODUCT RUNTIME: RETENTION
 # =========================================================
@@ -10482,7 +10561,8 @@ CASES
     export CACHE_DIR="${t}/later/cache" PURGE_STAMP="${t}/later/purge.stamp"
     mkdir -p "${t}/later"
     run maybe_purge
-    [ "${status}" -eq 0 ] && [ ! -f "${PURGE_STAMP}" ]
+    [ "${status}" -eq 0 ]
+    [ ! -f "${PURGE_STAMP}" ]
     mkdir -p "${CACHE_DIR}"
     truncate -s 1M "${CACHE_DIR}/old.bin"
     touch -d '-40 days' "${CACHE_DIR}/old.bin"
@@ -10560,15 +10640,18 @@ CASES
     run maybe_rotate_fluent_bit_selflog
     [ "${status}" -eq 0 ]
     ls -1 "${d}"
-    [ ! -e "${d}/fluent-bit.log.20260104T000000Z" ] && [ ! -e "${d}/fluent-bit.log.20260103T000000Z" ]
-    [ -e "${d}/fluent-bit.log.20260102T000000Z" ] && [ -e "${d}/fluent-bit.log.20260101T000000Z" ]
+    [ ! -e "${d}/fluent-bit.log.20260104T000000Z" ]
+    [ ! -e "${d}/fluent-bit.log.20260103T000000Z" ]
+    [ -e "${d}/fluent-bit.log.20260102T000000Z" ]
+    [ -e "${d}/fluent-bit.log.20260101T000000Z" ]
     [ "$(find "${d}" -maxdepth 1 -name 'fluent-bit.log.*' | grep -c .)" -eq 3 ]
     # What: a second call right after is a no-op.
     # Why: it runs every cycle; it must keep the backups.
     # From: Issue #1236 | PR #1858
     before="$(ls -1 "${d}")"
     run maybe_rotate_fluent_bit_selflog
-    [ "${status}" -eq 0 ] && [ "$(ls -1 "${d}")" = "${before}" ]
+    [ "${status}" -eq 0 ]
+    [ "$(ls -1 "${d}")" = "${before}" ]
     # What: a leading-zero cap with an 8 does not abort.
     # Why: 08 is no octal; the math must stay base 10.
     # From: Issue #1236 | PR #1858
@@ -10673,10 +10756,14 @@ CASES
     truncate -s 1M "${d}/hostA/old.log" "${d}/hostA/new.log"
     touch -d '-40 days' "${d}/hostA/old.log"
     run maybe_prune_syslog
-    [ "${status}" -eq 0 ] && [ ! -e "${d}/hostA/old.log" ] && [ -e "${d}/hostA/new.log" ]
+    [ "${status}" -eq 0 ]
+    [ ! -e "${d}/hostA/old.log" ]
+    [ -e "${d}/hostA/new.log" ]
     touch -d '-999 days' "${d}/hostA/new.log"
     run maybe_prune_syslog
-    [ "${status}" -eq 0 ] && [ -z "${output}" ] && [ -e "${d}/hostA/new.log" ]
+    [ "${status}" -eq 0 ]
+    [ -z "${output}" ]
+    [ -e "${d}/hostA/new.log" ]
 }
 
 @test "retention stops promptly with rc 0 on SIGTERM mid-sleep" {
