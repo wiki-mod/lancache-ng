@@ -659,7 +659,7 @@ release_notes:
   skip_label: skip-changelog
   other_title: Other
 
-# What: Release-notes groups: PR label -> heading (in order).
+# What: Release-notes groups: PR label -> heading.
 # Why: grouping is data; the first matching label wins.
 # From: Issue #894 | PR #1858
 release_notes_categories:

@@ -2745,7 +2745,7 @@ tail" '{body:$b, isPrerelease:false}')" \
 }
 
 @test "md strip comments keeps text around inline and block comments" {
-    # What: one-line and multi-line HTML comments are dropped.
+    # What: inline and multi-line HTML comments drop.
     # Why: template hints must not reach checks or notes.
     # From: Issue #894 | PR #1858
     run _ci_md_strip_comments $'a <!-- x --> b\nkeep <!-- start\nhidden\nend --> tail'
@@ -2782,8 +2782,8 @@ _rn_setup() {
 }
 
 @test "release changes: merged PRs since the last tag by label" {
-    # What: merge/squash subjects -> PRs; skip, group, section.
-    # Why: notes list each PR's own Changelog text (#894).
+    # What: merge/squash subjects -> PRs, grouped, skipped.
+    # Why: notes list each PR's own Changelog text.
     # From: Issue #894 | PR #1858
     _rn_setup
     cd "${BATS_TEST_TMPDIR}/rn-clone"

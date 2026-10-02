@@ -4270,7 +4270,7 @@ ci_cmd_release_changelog() {
         return 0
     fi
     # What: new entry goes above the first "## [" release.
-    # Why: the pending section stays on top (Keep a Changelog).
+    # Why: the pending section stays on top.
     # From: Issue #894 | PR #1858
     if ! out="$(CI_CHANGES="${changes}" awk -v h="${head} - $(date -u +%Y-%m-%d)" '
         !done && /^## \[/ { print h "\n\n" ENVIRON["CI_CHANGES"] "\n"; done = 1 }
