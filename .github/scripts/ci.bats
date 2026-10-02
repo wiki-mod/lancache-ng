@@ -1922,6 +1922,48 @@ docker-fail|u1|s3cr3t-tok|-|fail|2|CI-ERROR-BUILD-0015;registry="registry.exampl
 CASES
 }
 
+@test "docker hub login: once, optional, token only via stdin" {
+    # What: no creds notice; half set fails; login once.
+    # Why: anonymous docker.io pulls hit the rate limit.
+    # From: Issue #1095 | PR #1858
+    local log="${BATS_TEST_TMPDIR}/hub" name user tok dmode rc want calls w
+    local -a ws
+    sleep() { :; }
+    docker() {
+        echo "argv: $*" >> "${log}"
+        echo "stdin: $(cat)" >> "${log}"
+        case "${dmode}" in
+            ok) echo "Login Succeeded" ;;
+            auth) echo "Error response from daemon: unauthorized: incorrect username or password" >&2; return 1 ;;
+        esac
+    }
+    while IFS='|' read -r name user tok dmode rc calls want; do
+        : > "${log}"
+        unset _CI_DOCKERHUB_DONE
+        export DOCKERHUB_USERNAME="${user}" DOCKERHUB_TOKEN="${tok}"
+        run _ci_dockerhub_login
+        [ "${status}" -eq "${rc}" ] || { echo "${name}: rc ${status}: ${output}"; return 1; }
+        [ "$(grep -c '^argv:' "${log}")" -eq "${calls}" ] || { echo "${name}: calls"; cat "${log}"; return 1; }
+        IFS=';' read -r -a ws <<<"${want}"
+        for w in "${ws[@]}"; do
+            [ "${w}" = - ] || [[ "${output}"$'\n'"$(cat "${log}")" == *"${w}"* ]] || { echo "${name}: no '${w}': ${output}"; return 1; }
+        done
+        [ -z "${tok}" ] || ! grep -q "^argv: .*${tok}" "${log}" || { echo "${name}: token in argv"; return 1; }
+    done <<'CASES'
+none|||ok|0|0|CI-NOTICE-BUILD-0020
+half|u1||ok|2|0|CI-ERROR-BUILD-0021
+ok|u1|hub-tok|ok|0|1|argv: login -u u1 --password-stdin;stdin: hub-tok
+auth|u1|hub-tok|auth|2|1|CI-ERROR-BUILD-0011;cls=permanent;incorrect username or password
+CASES
+    # What: a second call in the same process is a no-op.
+    # Why: every registry path calls it; log in only once.
+    # From: Issue #1095 | PR #1858
+    : > "${log}"; dmode=ok; unset _CI_DOCKERHUB_DONE
+    export DOCKERHUB_USERNAME=u1 DOCKERHUB_TOKEN=hub-tok
+    _ci_dockerhub_login; _ci_dockerhub_login
+    [ "$(grep -c '^argv:' "${log}")" -eq 1 ]
+}
+
 @test "publish fails closed without GHCR credentials" {
     # What: Publish is an authenticated GHCR action.
     # Why: Never push anonymously (rate-limit).

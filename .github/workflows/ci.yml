@@ -32,6 +32,11 @@ defaults:
 env:
   GHCR_USERNAME: ${{ github.actor }}
   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # What: optional Docker Hub login for ci.sh pulls.
+  # Why: anonymous docker.io pulls hit the shared-IP limit.
+  # From: Issue #1095 | PR #1858
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
   # What: diff refs for every ci.sh step, set once.
   # Why: a step without them saw no base (impact UNKNOWN).
   # From: Issue #1683 | PR #1858

@@ -1938,9 +1938,36 @@ _ci_require_ghcr_auth() {
         reg="$(_ci_registry)" || return "$?"
         out="$(printf '%s' "${GHCR_TOKEN}" | docker login "${reg}" -u "${GHCR_USERNAME}" --password-stdin 2>&1)" || rc=$?
     fi
-    [ "${rc}" -eq 0 ] && return 0
+    if [ "${rc}" -eq 0 ]; then
+        _ci_dockerhub_login
+        return "$?"
+    fi
     ci_error "[CI-ERROR-BUILD-0015]" "registry=\"${reg:-<CI_GHCR_LOGIN_CMD>}\" reason=\"docker login to the image registry failed\"" "${out}"
     return 2
+}
+
+# What: Docker Hub login once, when credentials are set.
+# Why: docker.io pulls hit the anonymous shared-IP limit.
+# From: Issue #1095 | PR #1858
+_ci_dockerhub_login() {
+    [ -z "${_CI_DOCKERHUB_DONE:-}" ] || return 0
+    _CI_DOCKERHUB_DONE=1
+    if [ -z "${DOCKERHUB_USERNAME:-}${DOCKERHUB_TOKEN:-}" ]; then
+        ci_log "[CI-NOTICE-BUILD-0020]" "reason=\"DOCKERHUB_USERNAME/DOCKERHUB_TOKEN not set; docker.io pulls stay anonymous\""
+        return 0
+    fi
+    if [ -z "${DOCKERHUB_USERNAME:-}" ] || [ -z "${DOCKERHUB_TOKEN:-}" ]; then
+        ci_log "[CI-ERROR-BUILD-0021]" "reason=\"only one of DOCKERHUB_USERNAME/DOCKERHUB_TOKEN is set\""
+        return 2
+    fi
+    _ci_retry registry _ci_dockerhub_login_once >/dev/null || return 2
+}
+
+# What: one Docker Hub login, token on stdin only.
+# Why: _ci_retry re-runs it; argv must never hold the token.
+# From: Issue #1095 | PR #1858
+_ci_dockerhub_login_once() {
+    printf '%s' "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
 }
 
 # What: Look up a prebuilt binary in the compiled CAS.
