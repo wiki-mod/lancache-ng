@@ -933,7 +933,16 @@ _ci_tracked_content_ids() {
     done <<< "${listing}"
 }
 
-# What: a service's apk list plus its type's runtime list.
+# What: print the image_base list of a field, then $2.
+# Why: every image extends one base; no per-image copies.
+# From: Issue #1683 | PR #1858
+_ci_image_base_plus() {
+    local field="$1" own="$2" base
+    base="$(_ci_block_entry_list image_base "" "${field}")" || return 2
+    printf '%s\n%s\n' "${base}" "${own}" | awk 'NF && !seen[$0]++'
+}
+
+# What: base, a service's own and its type's apk lists.
 # Why: image and identity must see one and the same list.
 # From: Issue #1683 | PR #1858
 _ci_service_packages() {
@@ -941,7 +950,7 @@ _ci_service_packages() {
     own="$(_ci_block_entry_list services "${service}" packages)" || return 2
     build_type="$(_ci_required_field "${service}" build_type)" || return 2
     runtime="$(_ci_block_entry_list build_runtime "${build_type}" packages)" || return 2
-    printf '%s\n%s\n' "${own}" "${runtime}" | awk 'NF && !seen[$0]++'
+    _ci_image_base_plus packages "${own}"$'\n'"${runtime}"
 }
 
 # What: Print each SOT build_identity input of a type.
@@ -3346,6 +3355,7 @@ _ci_smoke_service() {
         return "$?"
     fi
     checks="$(_ci_block_entry_list services "${service}" smoke)" || return 2
+    checks="$(_ci_image_base_plus smoke "${checks}")" || return 2
     if [ -z "${checks}" ]; then
         printf 'service=%s smoke=SKIP reason=no SOT smoke\n' "${service}"
         return 0
@@ -6856,6 +6866,7 @@ _ci_build_tools_packages() {
     # Why: SOT is the owner; no parse-back, no new parser.
     # From: Issue #1683
     pkgs="$(_ci_block_entry_list build_toolchain "${tool}" packages)" || return 2
+    pkgs="$(_ci_image_base_plus packages "${pkgs}")" || return 2
     pkgs="$(LC_ALL=C sort -u <<< "${pkgs}")"
     # What: fail closed if the SOT list is empty.
     # Why: an empty list would blind the input check.
@@ -6874,6 +6885,9 @@ _ci_build_tools_smoke() {
     local field="$1" items tool
     tool="$(_ci_toolchain_target)" || return 2
     items="$(_ci_block_entry_list build_toolchain "${tool}" "${field}")" || return 2
+    if [ "${field}" = smoke_runs ]; then
+        items="$(_ci_image_base_plus smoke "${items}")" || return 2
+    fi
     if [ -z "${items}" ]; then
         ci_log "[CI-ERROR-BUILDTOOLS-0013]" "field=\"${field}\" reason=\"empty SOT smoke list; FAIL CLOSED\""
         return 2
@@ -10518,7 +10532,7 @@ _ci_check_setup_keys_kea() {
     # Why: SOT owns apk lists; Dockerfile consumes
     # From: Issue #1683 | PR #1858
     local dhcp_pkgs
-    dhcp_pkgs="$(_ci_block_entry_list services dhcp packages)" || return 2
+    dhcp_pkgs="$(_ci_service_packages dhcp)" || return 2
     grep -qx 'nmap' <<< "${dhcp_pkgs}" \
         || viol+=("SOT services.dhcp.packages must install nmap for the Kea discovery preflight")
     grep -Fq 'nmap|/usr/bin/nmap|/bin/nmap)' "${repo_root}/services/dhcp/entrypoint.sh" \

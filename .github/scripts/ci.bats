@@ -5169,11 +5169,11 @@ CASES
 }
 
 @test "image and identity add the build type's runtime packages" {
-    # What: rust gets build_runtime packages once; apk none.
-    # Why: a dynamic musl binary needs libgcc_s at runtime.
+    # What: base, then own, then the type's runtime list.
+    # Why: one base list; libgcc_s only for rust; no dupes.
     # From: Issue #1683 | PR #1858
     local m="${BATS_TEST_TMPDIR}/rt-manifest.yml"
-    printf '%s\n' 'base_images:' '  alpine: "a"' 'services:' \
+    printf '%s\n' 'image_base:' '  packages: [base-b, pkg-a]' 'base_images:' '  alpine: "a"' 'services:' \
         '  svc-rust:' '    context: c' '    crate: c1' '    build_type: rust' '    packages: [pkg-a, rt-x]' \
         '  svc-apk:' '    context: c' '    build_type: apk' '    packages: [pkg-a]' \
         'build_identity:' '  rust:' '    inputs: [package_versions]' \
@@ -5181,16 +5181,16 @@ CASES
     export CI_BUILD_TOOLS_IMAGE_CMD='echo bt-stub@sha256:test'
     CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"APK_PACKAGES=pkg-a rt-x rt-y"* ]]
+    [[ "${output}" == *"APK_PACKAGES=base-b pkg-a rt-x rt-y"* ]]
     CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-apk
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"APK_PACKAGES=pkg-a"* ]]
+    [[ "${output}" == *"APK_PACKAGES=base-b pkg-a"* ]]
     [[ "${output}" != *"rt-"* ]]
     _ci_platform_apk_arch() { echo arch-a; }
     CI_MANIFEST="${m}" CI_APK_RESOLVE_CMD="$(_stub resolve 'echo "pkgs=$3"')" \
         run _ci_identity_pins svc-rust rust os/p1
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"pkgs=pkg-a rt-x rt-y"* ]]
+    [[ "${output}" == *"pkgs=base-b pkg-a rt-x rt-y"* ]]
 }
 
 @test "build-args emits MUSL_TARGET per platform for a rust service" {

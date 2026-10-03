@@ -6,6 +6,55 @@
 # From: Issue #1683
 schema: build-manifest/v1
 
+# What: apk packages and smoke runs every image gets first.
+# Why: one shared base; images list only their extras.
+# From: Issue #1683 | PR #1858
+image_base:
+  packages:
+    - bash
+    - bc
+    - ca-certificates
+    - coreutils
+    - curl
+    - docker-cli
+    - expect
+    - findutils
+    - gettext
+    - gettext-envsubst
+    - git
+    - github-cli
+    - gnupg
+    - grep
+    - jq
+    - lsof
+    - nano
+    - parallel
+    - ripgrep
+    - sed
+    - util-linux
+    - xz
+    - zstd
+  smoke:
+    - bash --version
+    - bc --version
+    - curl --version
+    - docker --version
+    - envsubst --version
+    - expect -v
+    - find --version
+    - gettext --version
+    - gh --version
+    - git --version
+    - gpg --version
+    - grep --version
+    - jq --version
+    - lsof -v
+    - parallel --version
+    - rg --version
+    - sed --version
+    - xz --version
+    - zstd --version
+
 # What: The product services this repository builds.
 # Why: One list; matrices/scans/release derive from it.
 # From: Issue #1683
@@ -25,16 +74,7 @@ services:
     # Why: AG-KD-007: stream module only in nginx.org build.
     # From: Issue #1683 | PR #1858
     packages:
-      - ca-certificates
       - openssl
-      - curl
-      - coreutils
-      - bash
-      - nano
-      - findutils
-      - gettext-envsubst
-      - lsof
-      - ripgrep
       - nginx@nginx
     # What: nginx.org mainline repo for the base's branch.
     # Why: ci.sh fills @ALPINE_BRANCH@ from the alpine pin.
@@ -50,11 +90,6 @@ services:
     # Why: prove apk binaries run, not just exist
     # From: Issue #1613
     smoke:
-      - rg --version
-      - curl --version
-      - lsof -v
-      - envsubst --version
-      - find --version
       - "nginx -V 2>&1 | grep -q -- --with-stream_ssl_preread_module"
   dns:
     context: services/dns
@@ -81,25 +116,11 @@ services:
       - bind-tools
       - sqlite
       - iproute2
-      - grep
-      - coreutils
-      - bash
-      - nano
-      - curl
-      - findutils
-      - gettext-envsubst
-      - lsof
-      - ripgrep
     smoke:
       # What: loader resolves every lib; main never runs.
       # Why: a missing .so (exit 127) slipped to validate.
       # From: Issue #1683 | PR #1858
       - ldd /usr/local/bin/nats-subscriber
-      - find --version
-      - envsubst --version
-      - rg --version
-      - curl --version
-      - lsof -v
   watchdog:
     context: services/watchdog
     build_type: rust
@@ -109,29 +130,11 @@ services:
     crate: lancache-watchdog
     final_base: alpine
     runner: heavy
-    # What: final-image apk packages; the SOT owns the list.
-    # Why: consumers derive; no hardcoding (AG-CI-006)
-    # From: Issue #1683
-    packages:
-      - bash
-      - ca-certificates
-      - coreutils
-      - util-linux
-      - nano
-      - zstd
-      - curl
-      - findutils
-      - lsof
-      - ripgrep
     smoke:
       # What: loader resolves every lib; main never runs.
       # Why: a missing .so (exit 127) slipped to validate.
       # From: Issue #1683 | PR #1858
       - ldd /usr/local/bin/lancache-watchdog
-      - find --version
-      - rg --version
-      - curl --version
-      - lsof -v
   dhcp:
     context: services/dhcp
     # What: named context for the shared-secret lib.
@@ -151,28 +154,14 @@ services:
       - kea-dhcp-ddns
       - kea-admin
       - kea-hook-lease-cmds
-      - bash
       - nmap
       - openssl
-      - jq
       - iptables
-      - nano
-      - curl
-      - findutils
-      - gettext-envsubst
-      - lsof
-      - ripgrep
     # What: execute-smoke checks run post-build by ci.sh.
     # Why: prove apk binaries run, not just exist
     # From: Issue #1613
     smoke:
       - kea-dhcp4 -v
-      - curl --version
-      - jq --version
-      - envsubst --version
-      - rg --version
-      - lsof -v
-      - find --version
   dhcp-proxy:
     context: services/dhcp-proxy
     # What: named context for the known-good lib.
@@ -187,24 +176,12 @@ services:
     # Why: consumers derive; no hardcoding (AG-CI-006)
     # From: Issue #1683
     packages:
-      - bash
       - dnsmasq
-      - coreutils
-      - nano
-      - findutils
-      - gettext-envsubst
-      - lsof
-      - ripgrep
     # What: execute-smoke checks run post-build by ci.sh.
     # Why: prove apk binaries run, not just exist
     # From: Issue #1613
     smoke:
       - dnsmasq --version
-      - envsubst --version
-      - rg --version
-      - lsof -v
-      - find --version
-      - bash --version
   ntp:
     context: services/ntp
     build_type: apk
@@ -214,19 +191,12 @@ services:
     # Why: consumers derive; no hardcoding (AG-CI-006)
     # From: Issue #1683
     packages:
-      - bash
-      - ca-certificates
       - chrony-nts
-      - curl
-      - gettext-envsubst
     # What: execute-smoke checks run post-build by ci.sh.
     # Why: prove apk binaries run, not just exist
     # From: Issue #1613
     smoke:
       - chronyd -v
-      - curl --version
-      - envsubst --version
-      - bash --version
   syslog:
     context: services/syslog
     # What: apk syslog-ng plus copied fluent-bit binary.
@@ -242,16 +212,12 @@ services:
     packages:
       - syslog-ng
       - syslog-ng-json
-      - bash
-      - zstd
       - tzdata
     # What: execute-smoke checks run post-build by ci.sh.
     # Why: prove apk binaries run, not just exist
     # From: Issue #1613
     smoke:
       - syslog-ng --version
-      - zstd --version
-      - bash --version
   ui:
     context: services/ui
     build_type: rust
@@ -261,24 +227,11 @@ services:
     crate: lancache-ui
     final_base: alpine
     runner: heavy
-    # What: final-image apk packages; the SOT owns the list.
-    # Why: consumers derive; no hardcoding (AG-CI-006)
-    # From: Issue #1683
-    packages:
-      - ca-certificates
-      - coreutils
-      - nano
-      - curl
-      - lsof
-      - ripgrep
     smoke:
       # What: loader resolves every lib; main never runs.
       # Why: a missing .so (exit 127) slipped to validate.
       # From: Issue #1683 | PR #1858
       - ldd /usr/local/bin/lancache-ui
-      - rg --version
-      - curl --version
-      - lsof -v
   cachehamster:
     context: services/cachehamster
     # What: Rust compile via BUILD_TOOLS_IMAGE stage.
@@ -291,11 +244,6 @@ services:
     crate: lancache-cachehamster
     final_base: alpine
     runner: heavy
-    # What: final-image apk packages; the SOT owns the list.
-    # Why: consumers derive; no hardcoding (AG-CI-006)
-    # From: Issue #1683
-    packages:
-      - ca-certificates
     smoke:
       # What: loader resolves every lib; main never runs.
       # Why: a missing .so (exit 127) slipped to validate.
@@ -316,41 +264,26 @@ build_toolchain:
     # From: Issue #1683
     packages:
       - actionlint
-      - bash
       - bats
-      - bc
       - bind-tools
       - build-base
-      - ca-certificates
       - cargo
       - cargo-audit
       - ccache
       - clang22
       - cmake
-      - coreutils
-      - curl
       - distcc
       - distcc-pump
-      - docker-cli
       - docker-cli-buildx
       - docker-cli-compose
-      - expect
-      - findutils
       - gawk
-      - gettext
-      - git
-      - github-cli
-      - gnupg
-      - grep
       - iproute2
-      - jq
       - lld22
       - make
       - musl-dev
       - openssl
       - openssl-dev
       - openssl-libs-static
-      - parallel
       - perl
       - pkgconf
       - procps-ng
@@ -361,7 +294,6 @@ build_toolchain:
       - rust-clippy
       - rustfmt
       - sccache
-      - sed
       - shellcheck
       - shfmt
       - sqlite
@@ -371,8 +303,6 @@ build_toolchain:
       # From: Issue #1683
       - trivy@testing=0.74.0-r0
       - tzdata
-      - util-linux
-      - xz
       - zlib-dev
       - zlib-static
     # What: tagged apk repos (tag=url) the packages use.
@@ -464,14 +394,11 @@ build_toolchain:
       - ccache --version
       - actionlint --version
       - bats --version
-      - parallel --version
       - shellcheck --version
       - shfmt --version
-      - docker --version
       - docker compose version
       - docker buildx version
       - dhclient --version
-      - expect -v
       - musl-gcc --version
       - trivy --version
 
