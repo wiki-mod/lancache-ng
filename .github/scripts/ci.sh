@@ -10174,6 +10174,9 @@ _ci_check_nats_atomic_write() {
     ep="${ep#"${repo_root}/"}" su="${su#"${repo_root}/"}"
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     inst="$(_ci_installer_compose "${repo_root}")" || return 2
+    # What: nats bootstrap stages, chowns, then renames.
+    # Why: a restart must keep nats.conf whole and writable.
+    # From: Issue #426
     for cf in "${dep}" "${inst}"; do
         grep -Fq 'tmp_nats_conf="$(mktemp /etc/nats/.nats.conf.XXXXXX)"' "${repo_root}/${cf}" \
             || viol+=("${cf}: NATS must stage the shared config in a temp file inside /etc/nats")
@@ -10182,6 +10185,9 @@ _ci_check_nats_atomic_write() {
         grep -Fq 'mv "$$tmp_nats_conf" /etc/nats/nats.conf' "${repo_root}/${cf}" \
             || viol+=("${cf}: NATS must atomically replace nats.conf after fixing ownership")
     done
+    # What: dns renders its configs via the atomic helper.
+    # Why: a torn pdns or recursor config breaks DNS.
+    # From: Issue #475
     grep -Fq 'render_template_atomic' "${repo_root}/${ep}" \
         || viol+=("${ep}: DNS entrypoint must render generated configs atomically")
     grep -Fq 'mktemp "${target_dir}/.${target_name}.tmp.XXXXXX"' "${repo_root}/${ep}" \
@@ -10196,6 +10202,9 @@ _ci_check_nats_atomic_write() {
     if [ -n "${hit}" ]; then
         viol+=("${ep}: query logging must apply to the staged recursor.conf before replacement")
     fi
+    # What: the secondary's files go through atomic writers.
+    # Why: a torn compose or .env breaks the secondary.
+    # From: Issue #475
     grep -Fq 'write_generated_runtime_file "${secondary_dir}/docker-compose.yml"' "${repo_root}/${su}" \
         || viol+=("${su}: secondary setup must atomically write generated docker-compose.yml")
     grep -Fq 'write_env_file "${secondary_dir}/.env"' "${repo_root}/${su}" \
