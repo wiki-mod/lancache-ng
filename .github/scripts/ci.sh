@@ -10273,6 +10273,53 @@ _ci_check_netdata_isolation() {
     printf 'netdata-isolation=clean\n'
 }
 
+# What: /healthz ACL order and ignored-header hiding.
+# Why: a bare return skips the ACL; ignored headers leak.
+# From: Issue #1683 | PR #1858
+_ci_check_proxy_nginx_policy() {
+    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp first="" blocks=0 b h a d al r
+    local -a viol=()
+    for f in "${repo_root}"/services/proxy/conf.d/*.conf; do
+        out="$(_ci_capture 0 awk '
+            /^[[:space:]]*location = \/healthz \{/ { inb = 1; n++; body = ""; a = 0; d = 0; al = 0; r = 0; next }
+            inb && /^[[:space:]]*\}/ {
+                printf "%s|%d|%d|%d|%d\n", body, a, d, al, r; inb = 0; next }
+            inb { line = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", line); gsub(/[[:space:]]+/, " ", line)
+                body = body line ";"
+                if (line ~ /^allow /) { a++; if (d) d = -1 }
+                if (line == "deny all;") { if (d == 0) d = 1 }
+                if (line ~ /^alias /) al = 1
+                if (line ~ /^return /) r = 1 }' "${f}")" || return 2
+        while IFS='|' read -r b line; do
+            [ -n "${b}" ] || continue
+            blocks=$((blocks + 1))
+            IFS='|' read -r a d al r <<<"${line}"
+            [ "${a}" -ge 1 ] && [ "${d}" -eq 1 ] || viol+=("${f#"${repo_root}/"}: /healthz needs allow lines followed by deny all")
+            [ "${al}" -eq 1 ] && [ "${r}" -eq 0 ] || viol+=("${f#"${repo_root}/"}: /healthz must serve via alias, never return (return skips the ACL)")
+            [ -n "${first}" ] || first="${b}"
+            [ "${b}" = "${first}" ] || viol+=("${f#"${repo_root}/"}: /healthz differs from the first block")
+        done <<<"${out}"
+    done
+    [ "${blocks}" -gt 0 ] || viol+=("services/proxy/conf.d: no /healthz block found")
+    pp="${repo_root}/services/proxy/proxy-params.conf"
+    out="$(_ci_capture 0 awk '
+        $1 == "proxy_ignore_headers" { for (i = 2; i <= NF; i++) { h = $i; sub(/;$/, "", h); ign[h] = 1 } }
+        $1 == "proxy_hide_header" { h = $2; sub(/;$/, "", h); hid[h] = 1 }
+        END {
+            split("Cache-Control Expires Vary Set-Cookie", req, " ")
+            for (i in req) if (!(req[i] in ign)) print "proxy_ignore_headers must include " req[i]
+            for (h in ign) if (!(h in hid)) print "ignored header " h " must also be hidden from clients"
+        }' "${pp}")" || return 2
+    while IFS= read -r h; do
+        [ -z "${h}" ] || viol+=("services/proxy/proxy-params.conf: ${h}")
+    done <<<"${out}"
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0151]" "reason=\"proxy nginx policy violated\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'proxy-nginx-policy=clean healthz_blocks=%s\n' "${blocks}"
+}
+
 # What: proxy CERT_DIR sits on a named volume.
 # Why: an anonymous volume loses leaf certs on recreate.
 # From: Issue #1683 | PR #1858
@@ -11310,7 +11357,7 @@ ci_cmd_check_all() {
         proxy-cache-env-doc-drift \
         dependabot-docker-base-consistency \
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
-        docker-socket-proxy netdata-isolation syslog-logs-volume proxy-cert-volume \
+        docker-socket-proxy netdata-isolation syslog-logs-volume proxy-cert-volume proxy-nginx-policy \
         quickstart-required-env dhcp-proxy-env \
         setup-keys-kea setup-update-safety setup-docker-conflict setup-prompt-drift image-channel-resolution \
         vex-drift logging-matrix \
@@ -11379,6 +11426,7 @@ ci_cmd_check() {
         netdata-isolation) _ci_check_netdata_isolation "$@" ;;
         syslog-logs-volume) _ci_check_syslog_logs_volume "$@" ;;
         proxy-cert-volume) _ci_check_proxy_cert_volume "$@" ;;
+        proxy-nginx-policy) _ci_check_proxy_nginx_policy "$@" ;;
         quickstart-required-env) _ci_check_quickstart_required_env "$@" ;;
         dhcp-proxy-env) _ci_check_dhcp_proxy_env "$@" ;;
         setup-keys-kea) _ci_check_setup_keys_kea "$@" ;;

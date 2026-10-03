@@ -7934,6 +7934,41 @@ nodir|services/proxy/entrypoint.sh|CERT_DIR="/etc/nginx/ssl/certs"|CERT_DIR="${X
 CASES
 }
 
+@test "check proxy-nginx-policy per healthz and header shape" {
+    # What: healthz ACL and alias; hidden ignored headers.
+    # Why: return skips the ACL; ignored headers leak.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/png" case file from to want rc f
+    while IFS='|' read -r case file from to want rc; do
+        rm -rf "${r}"
+        mkdir -p "${r}/services/proxy/conf.d"
+        for f in http https; do
+            printf '%s\n' 'server {' '    location = /healthz {' '        access_log off;' \
+                '        allow 127.0.0.1/32;' '        deny  all;' \
+                '        alias /etc/nginx/lancache-healthz-body.txt;' '    }' '}' > "${r}/services/proxy/conf.d/${f}.conf"
+        done
+        printf '%s\n' 'proxy_ignore_headers   Cache-Control Expires Vary Set-Cookie;' \
+            'proxy_hide_header      Set-Cookie;' 'proxy_hide_header      Vary;' \
+            'proxy_hide_header      Cache-Control;' 'proxy_hide_header      Expires;' > "${r}/services/proxy/proxy-params.conf"
+        awk -v f="${from}" -v t="${to}" 'f != "" && !d && $0 == f { $0 = t; d = 1 } { print }' \
+            "${r}/${file}" > "${r}/x"
+        mv "${r}/x" "${r}/${file}"
+        run bash "${CI_SH}" check proxy-nginx-policy "${r}"
+        [ "${status}" -eq "${rc}" ] || { echo "${case}: rc ${status} ${output}"; return 1; }
+        [[ "${output}" == *"${want}"* ]] || { echo "${case}: ${output}"; return 1; }
+    done <<'CASES'
+ok|services/proxy/proxy-params.conf|||proxy-nginx-policy=clean healthz_blocks=2|0
+open|services/proxy/conf.d/https.conf|        deny  all;|        access_log off;|https.conf: /healthz needs allow lines followed by deny all|1
+noallow|services/proxy/conf.d/http.conf|        allow 127.0.0.1/32;|        access_log off;|http.conf: /healthz needs allow lines followed by deny all|1
+order|services/proxy/conf.d/http.conf|        access_log off;|        deny all;\n        allow 10.0.0.0/8;|http.conf: /healthz needs allow lines followed by deny all|1
+return|services/proxy/conf.d/https.conf|        alias /etc/nginx/lancache-healthz-body.txt;|        return 200 ok;|https.conf: /healthz must serve via alias, never return|1
+drift|services/proxy/conf.d/https.conf|        allow 127.0.0.1/32;|        allow 0.0.0.0/0;|https.conf: /healthz differs from the first block|1
+hidden|services/proxy/proxy-params.conf|proxy_hide_header      Vary;|# Vary shown|ignored header Vary must also be hidden from clients|1
+ignore|services/proxy/proxy-params.conf|proxy_ignore_headers   Cache-Control Expires Vary Set-Cookie;|proxy_ignore_headers   Cache-Control Expires Vary;|proxy_ignore_headers must include Set-Cookie|1
+none|services/proxy/conf.d/http.conf|    location = /healthz {|    location = /status {|clean healthz_blocks=1|0
+CASES
+}
+
 @test "check docker-socket-proxy fails a forbidden broad container rule" {
     # What: Broad rule re-enters allowlist.
     # Why: generic container APIs must stay denied.
