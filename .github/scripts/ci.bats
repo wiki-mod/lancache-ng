@@ -12370,6 +12370,57 @@ CASES
     [ "$(cd "${t}/inst" && ls -A | wc -l)" -eq 2 ]
 }
 
+@test "setup install dir: update env paths and compose args" {
+    # What: env paths per layout; compose -f list per state.
+    # Why: a wrong file list starts the wrong stack.
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" d case ovr nats envline shell want got
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/setup.sh" is_deploy_prod_install_dir runtime_env_file_for_install_dir \
+        deploy_prod_repo_root resolve_update_ip_config_paths _compose_parse_env_value get_env_var_nonempty \
+        nats_secondary_override_active_for_install_dir compose_file_args_for_install_dir
+    mkdir -p "${t}/qs" "${t}/somewhere/prod" "${t}/repo/deploy/prod"
+    [ "$(resolve_update_ip_config_paths "${t}/qs" | paste -sd'|')" = "${t}/qs/.env||" ]
+    [ "$(resolve_update_ip_config_paths "${t}/somewhere/prod" | paste -sd'|')" = "${t}/somewhere/prod/.env||" ]
+    d="$(realpath -m "${t}/repo")"
+    [ "$(resolve_update_ip_config_paths "${t}/repo/deploy/prod" | paste -sd'|')" \
+        = "${t}/repo/deploy/prod/.env|${d}/config/prod/dns-standard.env|${d}/config/prod/dns-ssl.env" ]
+    : > "${t}/repo/deploy/prod/.env.local"
+    [ "$(resolve_update_ip_config_paths "${t}/repo/deploy/prod" | head -1)" = "${t}/repo/deploy/prod/.env.local" ]
+    : > "${t}/qs/.env.local"
+    [ "$(resolve_update_ip_config_paths "${t}/qs" | head -1)" = "${t}/qs/.env" ]
+    while IFS='|' read -r case ovr nats envline shell want; do
+        d="${t}/c-${case}"
+        mkdir -p "${d}"
+        case "${ovr}" in
+            yml) : > "${d}/docker-compose.override.yml" ;;
+            yaml) : > "${d}/docker-compose.override.yaml" ;;
+            both) : > "${d}/docker-compose.override.yml"; : > "${d}/docker-compose.override.yaml" ;;
+        esac
+        [ "${nats}" != file ] || : > "${d}/docker-compose.nats-secondary.yml"
+        printf '%s\n' "${envline}" > "${d}/.env"
+        if [ "${shell}" = - ]; then
+            got="$(unset NATS_BIND_IP; compose_file_args_for_install_dir "${d}" "${d}/.env" | paste -sd' ')"
+        else
+            got="$(NATS_BIND_IP="${shell}" compose_file_args_for_install_dir "${d}" "${d}/.env" | paste -sd' ')"
+        fi
+        [ "${got}" = "${want//D/${d}}" ] || { echo "${case}: ${got}"; return 1; }
+    done <<'CASES'
+base|none|none|IP_STANDARD=192.0.2.10|-|-f D/docker-compose.yml
+natsnofile|none|none|NATS_BIND_IP=192.0.2.5|-|-f D/docker-compose.yml
+natsunset|none|file|IP_STANDARD=192.0.2.10|-|-f D/docker-compose.yml
+natsempty|none|file|NATS_BIND_IP=|-|-f D/docker-compose.yml
+natsquotedempty|none|file|NATS_BIND_IP=""|-|-f D/docker-compose.yml
+natshashvalue|none|file|NATS_BIND_IP=  # like compose|-|-f D/docker-compose.yml -f D/docker-compose.nats-secondary.yml
+natsset|none|file|NATS_BIND_IP=192.0.2.5|-|-f D/docker-compose.yml -f D/docker-compose.nats-secondary.yml
+natsshell|none|file|IP_STANDARD=192.0.2.10|192.0.2.5|-f D/docker-compose.yml -f D/docker-compose.nats-secondary.yml
+yml|yml|none|IP_STANDARD=192.0.2.10|-|-f D/docker-compose.yml -f D/docker-compose.override.yml
+yaml|yaml|none|IP_STANDARD=192.0.2.10|-|-f D/docker-compose.yml -f D/docker-compose.override.yaml
+both|both|none|IP_STANDARD=192.0.2.10|-|-f D/docker-compose.yml -f D/docker-compose.override.yml
+all|yml|file|NATS_BIND_IP='192.0.2.5'|-|-f D/docker-compose.yml -f D/docker-compose.override.yml -f D/docker-compose.nats-secondary.yml
+CASES
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.
