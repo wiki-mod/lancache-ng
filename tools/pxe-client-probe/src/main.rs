@@ -22,10 +22,8 @@
 //! faithful and keeping tcpdump for capture preserves the exact workaround.
 //!
 //! Prints the parsed result as shell-safe KEY='value' lines on stdout, one
-//! recognized field per line, mirroring the convention
-//! scripts/lib/dhcp-lease-parse.sh already established for the Kea
-//! lease-flow simulation -- a key is simply absent from the output if this
-//! probe never received it, callers must not assume every key is present.
+//! recognized field per line -- a key is simply absent from the output if
+//! this probe never received it, callers must not assume every key is present.
 //!
 //! Recognized output keys:
 //!   got_reply     -- "1" if any BOOTP/DHCP reply matching this probe's own
@@ -444,7 +442,7 @@ fn format_ipv4(bytes: &[u8]) -> String {
 fn emit(key: &str, value: &str) {
     // DHCP field values here (IP addresses, filenames, message-type codes)
     // never contain a single quote, so no escaping beyond wrapping in one is
-    // needed -- matching scripts/lib/dhcp-lease-parse.sh's own emit helper.
+    // needed.
     println!("{key}='{value}'");
 }
 
