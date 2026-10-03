@@ -9,8 +9,8 @@
 [package]
 name = "pxe-client-probe"
 version.workspace = true
-edition = "2024"
-license = "AGPL-3.0-or-later"
+edition.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "pxe-client-probe"

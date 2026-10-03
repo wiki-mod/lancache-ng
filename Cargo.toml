@@ -21,6 +21,8 @@ members = [
 # From: Issue #1683 | PR #1858
 [workspace.package]
 version = "0.3.0"
+license = "AGPL-3.0-or-later"
+edition = "2024"
 
 # What: canonical owner of shared direct rust dep versions.
 # Why: consumers derive; one owner ends per-crate drift.

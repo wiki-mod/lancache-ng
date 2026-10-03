@@ -5690,7 +5690,7 @@ CASES
     [[ "${output}" == *"image.revision=abc123"* ]]
     [[ "${output}" == *"image.version=abc123"* ]]
     [[ "${output}" == *"image.source=https://git.example.test/owner/fixture-repo"* ]]
-    [[ "${output}" == *"image.licenses=AGPL-3.0-or-later"* ]]
+    [[ "${output}" == *"image.licenses=L-fixture"* ]]
     [[ "${output}" == *"image.title=tool-t"* ]]
     [[ "${output}" == *"image.description=fixture-repo tool-t image"* ]]
     [[ "${output}" == *"image.base.name=registry.example.test/base-x"* ]]
@@ -8919,7 +8919,7 @@ _build_fixture() {
         '    final_base: base-x' 'base_images:' \
         "  alpine: registry.example.test/base@sha256:$(printf '0%.0s' {1..64})" \
         "  base-x: registry.example.test/base-x@sha256:$(printf '2%.0s' {1..64})" \
-        'release:' '  registry: registry.example.test' > "${r}/m.yml"
+        'release:' '  registry: registry.example.test' '  license: L-fixture' > "${r}/m.yml"
     _sot_ci_variables >> "${r}/m.yml"
     cd "${r}" || return 1
     export CI_MANIFEST="${r}/m.yml" GITHUB_REPOSITORY=owner/fixture-repo
@@ -10286,22 +10286,26 @@ _version_fixture_repo() {
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/rv" m="${BATS_TEST_TMPDIR}/rv.yml"
     mkdir -p "${r}/a"
-    printf 'release:\n  version: 1.2.3\n' > "${m}"
+    local ws='version.workspace = true\nedition.workspace = true\nlicense.workspace = true\n'
+    printf 'release:\n  version: 1.2.3\n  license: L-1\n' > "${m}"
     _sot_ci_variables >> "${m}"
-    printf '[workspace]\nmembers = [\n    "a",\n]\n\n[workspace.package]\nversion = "1.2.3"\n' > "${r}/Cargo.toml"
-    printf '[package]\nname = "a"\nversion.workspace = true\n' > "${r}/a/Cargo.toml"
+    printf '[workspace]\nmembers = [\n    "a",\n]\n\n[workspace.package]\nversion = "1.2.3"\nlicense = "L-1"\n' > "${r}/Cargo.toml"
+    printf "[package]\nname = \"a\"\n${ws}" > "${r}/a/Cargo.toml"
     printf '1.2.3\n' > "${r}/VERSION"
     printf '[[package]]\nname = "a"\nversion = "1.2.3"\n\n[[package]]\nname = "dep"\nversion = "9.9.9"\n' > "${r}/Cargo.lock"
     CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release
     [ "${status}" -eq 0 ]; [[ "${output}" == *"release-version=1.2.3 consumers=clean"* ]]
-    printf '[package]\nname = "a"\nversion = "0.1.0"\n' > "${r}/a/Cargo.toml"
+    printf '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2024"\nlicense.workspace = true\n' > "${r}/a/Cargo.toml"
     printf '1.2.2\n' > "${r}/VERSION"
-    sed -i 's/^version = "1.2.3"$/version = "1.2.0"/' "${r}/Cargo.toml"
+    sed -i 's/^version = "1.2.3"$/version = "1.2.0"/; s/^license = "L-1"$/license = "L-0"/' "${r}/Cargo.toml"
     sed -i 's/^version = "1.2.3"$/version = "1.2.1"/' "${r}/Cargo.lock"
     CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release
     [ "${status}" -eq 1 ]
     [[ "${output}" == *'[CI-ERROR-VERSION-0021]'*'got="1.2.0" want="1.2.3"'* ]]
-    [[ "${output}" == *'[CI-ERROR-VERSION-0022] member="a"'* ]]
+    [[ "${output}" == *'[CI-ERROR-VERSION-0022] member="a" key="version"'* ]]
+    [[ "${output}" == *'[CI-ERROR-VERSION-0022] member="a" key="edition"'* ]]
+    [[ "${output}" != *'key="license"'* ]]
+    [[ "${output}" == *'[CI-ERROR-VERSION-0028]'*'got="L-0" want="L-1"'* ]]
     [[ "${output}" == *'[CI-ERROR-VERSION-0025]'*'package="a" got="1.2.1" want="1.2.3"'* ]]
     [[ "${output}" == *'[CI-ERROR-VERSION-0024]'*'got="1.2.2" want="1.2.3"'* ]]
     # What: sync writes the three copies; reruns are no-ops.
@@ -10309,11 +10313,12 @@ _version_fixture_repo() {
     # From: Issue #1683 | PR #1858
     CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release_sync
     [ "${status}" -eq 0 ]; [ "${output}" = "sync=release-version version=1.2.3 changed=3" ]
-    grep -qx 'version = "1.2.3"' "${r}/Cargo.toml"; [ "$(cat "${r}/VERSION")" = 1.2.3 ]
+    grep -qx 'version = "1.2.3"' "${r}/Cargo.toml"; grep -qx 'license = "L-1"' "${r}/Cargo.toml"
+    [ "$(cat "${r}/VERSION")" = 1.2.3 ]
     [ "$(grep -c '^version = "1.2.3"$' "${r}/Cargo.lock")" -eq 1 ]; grep -qx 'version = "9.9.9"' "${r}/Cargo.lock"
     CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release_sync
     [ "${output}" = "sync=release-version version=1.2.3 changed=0" ]
-    printf '[package]\nname = "a"\nversion.workspace = true\n' > "${r}/a/Cargo.toml"
+    printf "[package]\nname = \"a\"\n${ws}" > "${r}/a/Cargo.toml"
     CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release
     [ "${status}" -eq 0 ]
     sed -i 's#^\(  CI_VERSION_FILE:\).*#\1 nodir/VERSION#' "${m}"
@@ -10392,7 +10397,7 @@ _version_fixture_repo() {
     [ "${status}" -eq 0 ]
     dep="$(_pin_dep)"
     [[ "${output}" == *"sync=${dep} changed=0 reason=nothing-to-write"* ]]
-    [[ "${output}" == *"sync=release-version version=$(_ci_release_version) changed=0"* ]]
+    [[ "${output}" == *"sync=release-version version=$(_ci_release_value version) changed=0"* ]]
     after="$(cd "${root}" && find . -type f -exec sha256sum {} + | LC_ALL=C sort)"
     [ "${before}" = "${after}" ]
 }

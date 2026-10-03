@@ -561,6 +561,10 @@ release:
   # Why: one owner; Cargo, lock, VERSION are synced from it.
   # From: Issue #1683 | PR #1858
   version: 0.3.0
+  # What: SPDX license of the whole project.
+  # Why: crates and image labels read it; no literal copies.
+  # From: Issue #1683 | PR #1858
+  license: AGPL-3.0-or-later
   # What: validation record and its full-invalidation paths.
   # Why: AG-REL-011 gate reads them; no ci.sh literal.
   # From: Issue #1683

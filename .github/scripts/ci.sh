@@ -2254,8 +2254,9 @@ _ci_build_tools_image() {
 # Why: Provenance labels set once, not per Dockerfile.
 # From: Issue #1683
 _ci_oci_labels() {
-    local service="$1" repo source base final created
+    local service="$1" repo source base final created lic
     repo="$(_ci_repo)" || return 2
+    lic="$(_ci_release_value license)" || return 2
     source="${GITHUB_SERVER_URL:?GITHUB_SERVER_URL required}/${repo}"
     final="$(_ci_required_field "${service}" final_base)" || return 2
     base="$(_ci_block_entry_field base_images "" "${final}")" || return 2
@@ -2266,7 +2267,7 @@ _ci_oci_labels() {
     printf 'org.opencontainers.image.source=%s\n' "${source}"
     printf 'org.opencontainers.image.url=%s\n' "${source}"
     printf 'org.opencontainers.image.documentation=%s\n' "${source}"
-    printf 'org.opencontainers.image.licenses=%s\n' 'AGPL-3.0-or-later'
+    printf 'org.opencontainers.image.licenses=%s\n' "${lic}"
     printf 'org.opencontainers.image.vendor=%s\n' "${repo%%/*}"
     printf 'org.opencontainers.image.title=%s\n' "${service}"
     printf 'org.opencontainers.image.description=%s\n' "${repo##*/} ${service} image"
@@ -7618,17 +7619,25 @@ _ci_version_walk() {
 }
 
 
-# What: SOT release.version; empty is an error.
-# Why: one reader for version verify and version sync.
+# What: one SOT release scalar; empty is an error.
+# Why: one reader for version, license, verify and sync.
 # From: Issue #1683 | PR #1858
-_ci_release_version() {
+_ci_release_value() {
     local want
-    want="$(_ci_block_entry_field release "" version)" || return 2
+    want="$(_ci_block_entry_field release "" "$1")" || return 2
     if [ -z "${want}" ]; then
-        ci_log "[CI-ERROR-VERSION-0020]" "reason=\"no SOT release.version\""
+        ci_log "[CI-ERROR-VERSION-0020]" "key=\"release.$1\" reason=\"no SOT value\""
         return 2
     fi
     printf '%s\n' "${want}"
+}
+
+# What: one string key of a [workspace.package] table.
+# Why: verify reads version and license the same way.
+# From: Issue #1683 | PR #1858
+_ci_cargo_ws_value() {
+    awk -v k="$2" '/^\[workspace\.package\]/ { on = 1; next } /^\[/ { on = 0 }
+        on && $1 == k { v = $0; sub(/^[^=]*= *"/, "", v); sub(/".*$/, "", v); print v; exit }' "$1"
 }
 
 # What: package names of a workspace's own members.
@@ -7648,8 +7657,9 @@ _ci_cargo_member_names() {
 # Why: copies are synced on demand, idempotent, not by hand.
 # From: Issue #1683 | PR #1858
 _ci_version_release_sync() {
-    local want lock cargo vfile names f tmp out wrote=0
-    want="$(_ci_release_version)" || return 2
+    local want lic lock cargo vfile names f tmp out wrote=0
+    want="$(_ci_release_value version)" || return 2
+    lic="$(_ci_release_value license)" || return 2
     lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
     cargo="${lock%/*}/Cargo.toml"
     vfile="$(_ci_repo_path CI_VERSION_FILE)" || return 2
@@ -7657,8 +7667,9 @@ _ci_version_release_sync() {
     for f in "${cargo}" "${lock}" "${vfile}"; do
         tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-vsync.XXXXXX")" || return 2
         case "${f}" in
-            "${cargo}") out="$(awk -v v="${want}" '/^\[workspace\.package\]/ { on = 1; print; next } /^\[/ { on = 0 }
-                on && /^version *=/ { print "version = \"" v "\""; next } { print }' "${f}" 2>&1 > "${tmp}")" ;;
+            "${cargo}") out="$(awk -v v="${want}" -v l="${lic}" '/^\[workspace\.package\]/ { on = 1; print; next } /^\[/ { on = 0 }
+                on && $1 == "version" { print "version = \"" v "\""; next }
+                on && $1 == "license" { print "license = \"" l "\""; next } { print }' "${f}" 2>&1 > "${tmp}")" ;;
             "${lock}") out="$(awk -v v="${want}" -v names="${names//$'\n'/ }" 'BEGIN { split(names, a, " "); for (i in a) own[a[i]] = 1 }
                 /^name = / { x = $0; sub(/^name = "/, "", x); sub(/"$/, "", x); hit = (x in own) }
                 hit && /^version = / { print "version = \"" v "\""; hit = 0; next } { print }' "${f}" 2>&1 > "${tmp}")" ;;
@@ -7681,23 +7692,30 @@ _ci_version_release_sync() {
 # Why: one release version owner; consumers must not drift.
 # From: Issue #1683 | PR #1858
 _ci_version_release() {
-    local want got lock cargo vfile members m n rc=0
-    want="$(_ci_release_version)" || return 2
+    local want lic got lock cargo vfile members m n k rc=0
+    want="$(_ci_release_value version)" || return 2
+    lic="$(_ci_release_value license)" || return 2
     lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
     cargo="${lock%/*}/Cargo.toml"
-    got="$(awk '/^\[workspace\.package\]/ { on = 1; next } /^\[/ { on = 0 }
-        on && /^version *=/ { v = $0; sub(/^version *= *"/, "", v); sub(/".*$/, "", v); print v; exit }' "${cargo}")"
+    got="$(_ci_cargo_ws_value "${cargo}" version)"
     if [ "${got}" != "${want}" ]; then
         ci_log "[CI-ERROR-VERSION-0021]" "path=\"${cargo}\" got=\"${got}\" want=\"${want}\" reason=\"workspace.package.version is not SOT release.version\""
+        rc=1
+    fi
+    got="$(_ci_cargo_ws_value "${cargo}" license)"
+    if [ "${got}" != "${lic}" ]; then
+        ci_log "[CI-ERROR-VERSION-0028]" "path=\"${cargo}\" got=\"${got}\" want=\"${lic}\" reason=\"workspace.package.license is not SOT release.license\""
         rc=1
     fi
     members="$(_ci_cargo_members "${cargo}")" || return 2
     while IFS= read -r m; do
         [ -n "${m}" ] || continue
-        if ! grep -Eq '^version\.workspace *= *true$' "${lock%/*}/${m}/Cargo.toml"; then
-            ci_log "[CI-ERROR-VERSION-0022]" "member=\"${m}\" reason=\"member owns its version; use version.workspace = true\""
-            rc=1
-        fi
+        for k in version edition license; do
+            if ! grep -Eq "^${k}\.workspace *= *true$" "${lock%/*}/${m}/Cargo.toml"; then
+                ci_log "[CI-ERROR-VERSION-0022]" "member=\"${m}\" key=\"${k}\" reason=\"member owns its ${k}; use ${k}.workspace = true\""
+                rc=1
+            fi
+        done
     done <<< "${members}"
     m="$(_ci_cargo_member_names "${cargo}")" || return 2
     while IFS= read -r n; do

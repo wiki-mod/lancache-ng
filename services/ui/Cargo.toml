@@ -6,8 +6,8 @@
 [package]
 name = "lancache-ui"
 version.workspace = true
-edition = "2024"
-license = "AGPL-3.0-or-later"
+edition.workspace = true
+license.workspace = true
 
 [lib]
 # Exposes pure, client/external-input-parsing helpers (kea_response_parse,

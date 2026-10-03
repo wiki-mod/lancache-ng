@@ -20,8 +20,8 @@
 [package]
 name = "lancache-watchdog"
 version.workspace = true
-edition = "2024"
-license = "AGPL-3.0-or-later"
+edition.workspace = true
+license.workspace = true
 
 [lib]
 # Exposes every pure, no-I/O module (config parsing/validation, the
