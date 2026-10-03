@@ -1617,8 +1617,9 @@ STUB
         "${CI_MANIFEST}" > "${CI_MANIFEST}.new" && mv "${CI_MANIFEST}.new" "${CI_MANIFEST}"
     _tool_stub "${bin}" docker <<STUB
 echo "docker \$*" >> "${log}"
-cat >> "${log}"
-[ -z "\${LDD_FAIL:-}" ] || { echo "Error loading shared library libx.so" >&2; exit 127; }
+runs="\$(cat)"
+printf '%s\n' "\${runs}" >> "${log}"
+[ -z "\${LDD_FAIL:-}" ] || { printf 'failed: %s\n' "\${runs%%\$'\n'*}"; echo "Error loading shared library libx.so"; exit 127; }
 STUB
     CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" PATH="${bin}:${PATH}" \
     GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=owner/fixture-repo \
@@ -1633,6 +1634,7 @@ STUB
         run bash "${CI_SH}" verify svc-r sha256:dead os/p1
     [ "${status}" -eq 1 ]
     [[ "${output}" == *"CI-ERROR-TEST-0008"*"libx.so"* ]]
+    [[ "${output}" == *'service="svc-r" check="ldd /usr/local/bin/svc-r" reason="execute-smoke failed; missing lib?"'* ]]
 }
 
 @test "test build-tools fails closed without a toolchain image" {
@@ -1676,7 +1678,8 @@ STUB
                 [ "${status}" -eq 0 ]; [[ "${output}" == *"tested=ok"* ]]
             else
                 [ "${status}" -eq 1 ]
-                [[ "${output}" == *"missing no-such-tool-x"* || "${output}" == *"failed: false"* ]]
+                [[ "${output}" == *"[CI-ERROR-TEST-0011]"* ]]
+                [[ "${output}" == *'check="missing no-such-tool-x"'* || "${output}" == *'check="false"'* ]]
             fi
         done
     done

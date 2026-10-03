@@ -3352,7 +3352,8 @@ _ci_test_toolchain() {
     fi
     tools="$(_ci_build_tools_smoke smoke_tools)" || return 2
     runs="$(_ci_build_tools_smoke smoke_runs)" || return 2
-    _ci_image_smoke "${image}" "${tools}" "${runs}" || return "$?"
+    _ci_image_smoke "[CI-ERROR-TEST-0011]" "${service}" "toolchain smoke failed; missing tool or failing run" \
+        "${image}" "${tools}" "${runs}" || return "$?"
     printf 'service=%s tested=ok\n' "${service}"
 }
 
@@ -3376,7 +3377,8 @@ _ci_smoke_service() {
         ci_log "[CI-ERROR-TEST-0007]" "service=\"${service}\" reason=\"CI_SERVICE_IMAGE required for the smoke\""
         return 2
     fi
-    _ci_image_smoke "${image}" "" "${checks}" || return "$?"
+    _ci_image_smoke "[CI-ERROR-TEST-0008]" "${service}" "execute-smoke failed; missing lib?" \
+        "${image}" "" "${checks}" || return "$?"
     printf 'service=%s smoke=ok checks=%s\n' "${service}" "$(grep -c . <<< "${checks}")"
 }
 
@@ -3384,7 +3386,7 @@ _ci_smoke_service() {
 # Why: one executor for product and toolchain smoke.
 # From: Issue #1683 | PR #1858
 _ci_image_smoke() {
-    local image="$1" tools="$2" runs="$3" limit grace out t
+    local code="$1" service="$2" reason="$3" image="$4" tools="$5" runs="$6" limit grace out t
     local -a tl=()
     limit="$(_ci_variable CI_SMOKE_TIMEOUT)" || return 2
     grace="$(_ci_variable CI_SMOKE_KILL_AFTER)" || return 2
@@ -3398,7 +3400,8 @@ _ci_image_smoke() {
                 [ -n "${r}" ] || continue
                 o="$(bash -o pipefail -c "${r}" 2>&1)" || { printf "failed: %s\n%s\n" "${r}" "${o}"; exit 1; }
             done' _ "${tl[@]}" <<< "${runs}" 2>&1)"; then
-        ci_error "[CI-ERROR-TEST-0008]" "image=\"${image}\" reason=\"image smoke failed (missing tool, failing run or lib)\"" "${out}"
+        t="${out%%$'\n'*}"
+        ci_error "${code}" "service=\"${service}\" check=\"${t#failed: }\" reason=\"${reason}\"" "${out}"
         return 1
     fi
 }
