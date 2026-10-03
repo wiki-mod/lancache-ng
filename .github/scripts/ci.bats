@@ -10254,15 +10254,20 @@ EOF
 # VERSION MANAGEMENT
 # =========================================================
 
-# What: Copies the two version-pinned Dockerfiles for sync.
+# What: Copies pin consumers and release-version copies.
 # Why: sync tests must never touch the real repo files.
 # From: Issue #1683 | PR #1858
 _version_fixture_repo() {
-    local root="${BATS_TEST_TMPDIR}/vrepo" dep df rest
+    local root="${BATS_TEST_DIRNAME}/../.." dir="${BATS_TEST_TMPDIR}/vrepo" dep df rest
     while IFS='|' read -r dep df rest; do
-        mkdir -p "${root}/$(dirname "${df}")"
-        cp "${BATS_TEST_DIRNAME}/../../${df}" "${root}/${df}"
+        mkdir -p "${dir}/$(dirname "${df}")"
+        cp "${root}/${df}" "${dir}/${df}"
     done <<< "$(_ci_version_consumers)"
+    for df in Cargo.toml Cargo.lock VERSION $(_ci_cargo_members "${root}/Cargo.toml" | sed 's#$#/Cargo.toml#'); do
+        mkdir -p "${dir}/$(dirname "${df}")"
+        cp "${root}/${df}" "${dir}/${df}"
+    done
+    root="${dir}"
     printf '%s' "${root}"
 }
 
@@ -10286,16 +10291,34 @@ _version_fixture_repo() {
     printf '[workspace]\nmembers = [\n    "a",\n]\n\n[workspace.package]\nversion = "1.2.3"\n' > "${r}/Cargo.toml"
     printf '[package]\nname = "a"\nversion.workspace = true\n' > "${r}/a/Cargo.toml"
     printf '1.2.3\n' > "${r}/VERSION"
+    printf '[[package]]\nname = "a"\nversion = "1.2.3"\n\n[[package]]\nname = "dep"\nversion = "9.9.9"\n' > "${r}/Cargo.lock"
     CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release
     [ "${status}" -eq 0 ]; [[ "${output}" == *"release-version=1.2.3 consumers=clean"* ]]
     printf '[package]\nname = "a"\nversion = "0.1.0"\n' > "${r}/a/Cargo.toml"
     printf '1.2.2\n' > "${r}/VERSION"
     sed -i 's/^version = "1.2.3"$/version = "1.2.0"/' "${r}/Cargo.toml"
+    sed -i 's/^version = "1.2.3"$/version = "1.2.1"/' "${r}/Cargo.lock"
     CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release
     [ "${status}" -eq 1 ]
     [[ "${output}" == *'[CI-ERROR-VERSION-0021]'*'got="1.2.0" want="1.2.3"'* ]]
     [[ "${output}" == *'[CI-ERROR-VERSION-0022] member="a"'* ]]
+    [[ "${output}" == *'[CI-ERROR-VERSION-0025]'*'package="a" got="1.2.1" want="1.2.3"'* ]]
     [[ "${output}" == *'[CI-ERROR-VERSION-0024]'*'got="1.2.2" want="1.2.3"'* ]]
+    # What: sync writes the three copies; reruns are no-ops.
+    # Why: copies follow the SOT; member rule is not a copy.
+    # From: Issue #1683 | PR #1858
+    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release_sync
+    [ "${status}" -eq 0 ]; [ "${output}" = "sync=release-version version=1.2.3 changed=3" ]
+    grep -qx 'version = "1.2.3"' "${r}/Cargo.toml"; [ "$(cat "${r}/VERSION")" = 1.2.3 ]
+    [ "$(grep -c '^version = "1.2.3"$' "${r}/Cargo.lock")" -eq 1 ]; grep -qx 'version = "9.9.9"' "${r}/Cargo.lock"
+    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release_sync
+    [ "${output}" = "sync=release-version version=1.2.3 changed=0" ]
+    printf '[package]\nname = "a"\nversion.workspace = true\n' > "${r}/a/Cargo.toml"
+    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release
+    [ "${status}" -eq 0 ]
+    sed -i 's#^\(  CI_VERSION_FILE:\).*#\1 nodir/VERSION#' "${m}"
+    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release_sync
+    [ "${status}" -eq 2 ]; [[ "${output}" == *'[CI-ERROR-VERSION-0027]'*'nodir/VERSION'*'raw:'*'nodir'* ]]
 }
 
 @test "version verify explicit subcommand matches the default" {
@@ -10369,6 +10392,7 @@ _version_fixture_repo() {
     [ "${status}" -eq 0 ]
     dep="$(_pin_dep)"
     [[ "${output}" == *"sync=${dep} changed=0 reason=nothing-to-write"* ]]
+    [[ "${output}" == *"sync=release-version version=$(_ci_release_version) changed=0"* ]]
     after="$(cd "${root}" && find . -type f -exec sha256sum {} + | LC_ALL=C sort)"
     [ "${before}" = "${after}" ]
 }

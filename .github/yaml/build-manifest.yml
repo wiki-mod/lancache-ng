@@ -558,7 +558,7 @@ release:
   schema: stack-images/v1
   registry: ghcr.io
   # What: current release version of the whole project.
-  # Why: one owner; Cargo and VERSION are checked to it.
+  # Why: one owner; Cargo, lock, VERSION are synced from it.
   # From: Issue #1683 | PR #1858
   version: 0.3.0
   # What: validation record and its full-invalidation paths.

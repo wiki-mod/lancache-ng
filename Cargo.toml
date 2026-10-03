@@ -17,7 +17,7 @@ members = [
 ]
 
 # What: crate version, equal to SOT release.version.
-# Why: cargo cannot read the SOT; version-drift checks it.
+# Why: cargo cannot read the SOT; ci.sh version sync writes.
 # From: Issue #1683 | PR #1858
 [workspace.package]
 version = "0.3.0"

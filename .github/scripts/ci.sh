@@ -7618,16 +7618,71 @@ _ci_version_walk() {
 }
 
 
-# What: Cargo, members and VERSION equal release.version.
-# Why: one release version owner; consumers must not drift.
+# What: SOT release.version; empty is an error.
+# Why: one reader for version verify and version sync.
 # From: Issue #1683 | PR #1858
-_ci_version_release() {
-    local want got lock cargo vfile members m rc=0
+_ci_release_version() {
+    local want
     want="$(_ci_block_entry_field release "" version)" || return 2
     if [ -z "${want}" ]; then
         ci_log "[CI-ERROR-VERSION-0020]" "reason=\"no SOT release.version\""
         return 2
     fi
+    printf '%s\n' "${want}"
+}
+
+# What: package names of a workspace's own members.
+# Why: their Cargo.lock entries carry release.version.
+# From: Issue #1683 | PR #1858
+_ci_cargo_member_names() {
+    local m members
+    members="$(_ci_cargo_members "$1")" || return 2
+    while IFS= read -r m; do
+        [ -n "${m}" ] || continue
+        awk '/^\[package\]/ { on = 1; next } /^\[/ { on = 0 }
+            on && /^name *=/ { v = $0; sub(/^name *= *"/, "", v); sub(/".*$/, "", v); print v; exit }' "${1%/*}/${m}/Cargo.toml" || return 2
+    done <<< "${members}"
+}
+
+# What: write release.version into its derived copies.
+# Why: copies are synced on demand, idempotent, not by hand.
+# From: Issue #1683 | PR #1858
+_ci_version_release_sync() {
+    local want lock cargo vfile names f tmp out wrote=0
+    want="$(_ci_release_version)" || return 2
+    lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
+    cargo="${lock%/*}/Cargo.toml"
+    vfile="$(_ci_repo_path CI_VERSION_FILE)" || return 2
+    names="$(_ci_cargo_member_names "${cargo}")" || return 2
+    for f in "${cargo}" "${lock}" "${vfile}"; do
+        tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-vsync.XXXXXX")" || return 2
+        case "${f}" in
+            "${cargo}") out="$(awk -v v="${want}" '/^\[workspace\.package\]/ { on = 1; print; next } /^\[/ { on = 0 }
+                on && /^version *=/ { print "version = \"" v "\""; next } { print }' "${f}" 2>&1 > "${tmp}")" ;;
+            "${lock}") out="$(awk -v v="${want}" -v names="${names//$'\n'/ }" 'BEGIN { split(names, a, " "); for (i in a) own[a[i]] = 1 }
+                /^name = / { x = $0; sub(/^name = "/, "", x); sub(/"$/, "", x); hit = (x in own) }
+                hit && /^version = / { print "version = \"" v "\""; hit = 0; next } { print }' "${f}" 2>&1 > "${tmp}")" ;;
+            *) out="$(printf '%s\n' "${want}" 2>&1 > "${tmp}")" ;;
+        esac || { ci_error "[CI-ERROR-VERSION-0026]" "path=\"${f}\" reason=\"derived copy not rendered\"" "${out}"; rm -f "${tmp}"; return 2; }
+        if ! cmp -s "${tmp}" "${f}"; then
+            if ! out="$(cp "${tmp}" "${f}" 2>&1)"; then
+                ci_error "[CI-ERROR-VERSION-0027]" "path=\"${f}\" reason=\"derived copy not written\"" "${out}"
+                rm -f "${tmp}"
+                return 2
+            fi
+            wrote=$((wrote + 1))
+        fi
+        rm -f "${tmp}"
+    done
+    printf 'sync=release-version version=%s changed=%s\n' "${want}" "${wrote}"
+}
+
+# What: Cargo, members and VERSION equal release.version.
+# Why: one release version owner; consumers must not drift.
+# From: Issue #1683 | PR #1858
+_ci_version_release() {
+    local want got lock cargo vfile members m n rc=0
+    want="$(_ci_release_version)" || return 2
     lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
     cargo="${lock%/*}/Cargo.toml"
     got="$(awk '/^\[workspace\.package\]/ { on = 1; next } /^\[/ { on = 0 }
@@ -7644,6 +7699,15 @@ _ci_version_release() {
             rc=1
         fi
     done <<< "${members}"
+    m="$(_ci_cargo_member_names "${cargo}")" || return 2
+    while IFS= read -r n; do
+        got="$(awk -v n="${n}" '$0 == "name = \"" n "\"" { on = 1; next }
+            on && /^version = / { v = $0; sub(/^version = "/, "", v); sub(/"$/, "", v); print v; exit }' "${lock}")"
+        if [ "${got}" != "${want}" ]; then
+            ci_log "[CI-ERROR-VERSION-0025]" "path=\"${lock}\" package=\"${n}\" got=\"${got}\" want=\"${want}\" reason=\"lock entry is not SOT release.version\""
+            rc=1
+        fi
+    done <<< "${m}"
     vfile="$(_ci_repo_path CI_VERSION_FILE)" || return 2
     if ! got="$(cat "${vfile}" 2>&1)"; then
         ci_error "[CI-ERROR-VERSION-0023]" "path=\"${vfile}\" reason=\"version file unreadable\"" "${got}"
@@ -7680,7 +7744,8 @@ _ci_version_sync_one() {
 # Why: idempotent; nothing to write if all bare
 # From: Issue #1683 | PR #1858
 _ci_version_sync() {
-    _ci_version_walk _ci_version_sync_one
+    _ci_version_walk _ci_version_sync_one || return "$?"
+    _ci_version_release_sync
 }
 
 # What: version verify/audit/sync for SOT external_versions.
