@@ -231,15 +231,11 @@ pub async fn restart_ui_service(
     let restart_state = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-        let _ = docker_client::restart_service(
-            &restart_state.docker,
-            "ui",
-            &restart_state.config.container_suffix,
-        )
-        .await
-        .inspect_err(|err| {
-            tracing::error!("operator-requested Admin UI self-restart failed: {:#}", err);
-        });
+        let _ = docker_client::restart_service(&restart_state.docker, "ui")
+            .await
+            .inspect_err(|err| {
+                tracing::error!("operator-requested Admin UI self-restart failed: {:#}", err);
+            });
     });
 
     Ok(Html(RESTART_UI_PAGE))

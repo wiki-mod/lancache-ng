@@ -19,8 +19,8 @@ use lancache_watchdog::health::{Action, AlertAction, AlertCounter, FailureCounte
 use lancache_watchdog::status::{self, DiskInfo, ServiceHealth, WatchdogStatus};
 
 /// Alert-only services are never restarted. Their container list is built once
-/// at startup because deployment gates and the coordinated container suffix do
-/// not change during the lifetime of this process.
+/// at startup because deployment gates do not change during the lifetime of
+/// this process.
 ///
 /// `netdata` is deliberately NOT in this set (issue #842's 2026-08-07
 /// restart-capability decision): it is real restart-capable now, wired
@@ -49,26 +49,20 @@ fn resolve_alert_only_targets(
     dhcp_mode: &str,
     logging_enabled: bool,
     ntp_enabled: bool,
-    container_suffix: &str,
 ) -> Vec<String> {
     // ui is never profile-gated in any deploy/*/docker-compose.yml profile,
     // unlike dhcp/dhcp-proxy/syslog/ntp, so it is always monitored here.
-    //
-    // Every deployment container_name uses the same coordinated suffix in
-    // isolated CI stacks. Alert-only names must therefore apply that suffix
-    // too; otherwise get_health() would query a container name that was never
-    // started and report a permanent false "unreachable" state.
-    let mut targets = vec![format!("{}{container_suffix}", config::CONTAINER_UI)];
+    let mut targets = vec![config::CONTAINER_UI.to_string()];
     if let Some(dhcp_container) = config::dhcp_alert_container(dhcp_mode) {
-        targets.push(format!("{dhcp_container}{container_suffix}"));
+        targets.push(dhcp_container.to_string());
     }
     if logging_enabled {
-        targets.push(format!("{}{container_suffix}", config::CONTAINER_SYSLOG));
+        targets.push(config::CONTAINER_SYSLOG.to_string());
     }
     // NTP is profile-gated. Monitoring it when disabled would create a
     // permanent false alert for a container that intentionally does not exist.
     if ntp_enabled {
-        targets.push(format!("{}{container_suffix}", config::CONTAINER_NTP));
+        targets.push(config::CONTAINER_NTP.to_string());
     }
     targets
 }
@@ -76,20 +70,13 @@ fn resolve_alert_only_targets(
 // What: dhcp/ntp targets reconcile_desired_state acts on
 // Why: shared shape for loop call site and tests
 // From: Issue #1437
-fn desired_state_targets(
-    dhcp_mode: &str,
-    ntp_enabled: bool,
-    container_suffix: &str,
-) -> Vec<(&'static str, String)> {
+fn desired_state_targets(dhcp_mode: &str, ntp_enabled: bool) -> Vec<(&'static str, String)> {
     let mut targets = Vec::new();
     if let Some(dhcp_container) = config::dhcp_alert_container(dhcp_mode) {
-        targets.push(("dhcp", format!("{dhcp_container}{container_suffix}")));
+        targets.push(("dhcp", dhcp_container.to_string()));
     }
     if ntp_enabled {
-        targets.push((
-            "ntp",
-            format!("{}{container_suffix}", config::CONTAINER_NTP),
-        ));
+        targets.push(("ntp", config::CONTAINER_NTP.to_string()));
     }
     targets
 }
@@ -139,11 +126,8 @@ async fn reconcile_one(
 // From: Issue #1437
 async fn reconcile_desired_state(client: &DockerProxyClient, settings: &Settings) {
     let desired = status::read_desired_state(&settings.desired_state_file);
-    for (label, container_name) in desired_state_targets(
-        &settings.dhcp_mode,
-        settings.ntp_enabled,
-        &settings.container_suffix,
-    ) {
+    for (label, container_name) in desired_state_targets(&settings.dhcp_mode, settings.ntp_enabled)
+    {
         let desired_state = match label {
             "dhcp" => desired.dhcp,
             "ntp" => desired.ntp,
@@ -206,10 +190,6 @@ struct Settings {
     desired_state_file: PathBuf,
     cache_dir: PathBuf,
     container_names: ContainerNames,
-    // resolve_alert_only_targets() builds names from the plain
-    // config::CONTAINER_* constants rather than ContainerNames, so it needs
-    // the same coordinated suffix separately.
-    container_suffix: String,
     // These gates describe whether optional alert-only containers are part of
     // the running stack. A deployment change recreates this container, so the
     // values are intentionally resolved once at startup.
@@ -275,19 +255,12 @@ fn load_settings() -> Settings {
     // "${SSL_ENABLED:-1}"`.
     let ssl_enabled = config::resolve_bool(env("SSL_ENABLED").as_deref(), true);
 
-    // Keep the suffix as its own setting because both ContainerNames and the
-    // independently-built alert-only target list must use the same value.
-    let container_suffix = env("LANCACHE_CONTAINER_SUFFIX").unwrap_or_default();
-
     let container_names = match config::resolve_container_names(
         env("CONTAINER_PROXY").as_deref(),
         env("CONTAINER_DNS_STANDARD").as_deref(),
         env("CONTAINER_DNS_SSL").as_deref(),
         env("CONTAINER_NATS").as_deref(),
         ssl_enabled,
-        // Empty or unset is the normal deployment shape. A non-empty suffix
-        // is used only by coordinated isolated validation stacks.
-        Some(container_suffix.as_str()),
     ) {
         Ok(names) => names,
         Err(msg) => {
@@ -355,7 +328,6 @@ fn load_settings() -> Settings {
         desired_state_file,
         cache_dir,
         container_names,
-        container_suffix,
         dhcp_mode,
         logging_enabled,
         ntp_enabled,
@@ -403,7 +375,7 @@ async fn main() {
     // netdata is never profile-gated, so it is unconditionally monitored
     // here, matching resolve_alert_only_targets()'s own ui handling.
     monitored.push(MonitoredService {
-        container_name: format!("{}{}", config::CONTAINER_NETDATA, settings.container_suffix),
+        container_name: config::CONTAINER_NETDATA.to_string(),
         restart_after: settings.restart_after,
         grace_period: None,
     });
@@ -420,7 +392,6 @@ async fn main() {
         &settings.dhcp_mode,
         settings.logging_enabled,
         settings.ntp_enabled,
-        &settings.container_suffix,
     );
     let mut alert_only_counters: HashMap<String, AlertCounter> = alert_only_targets
         .iter()
@@ -590,7 +561,7 @@ mod tests {
     // restart-capable `monitored` list in main() (issue #842, 2026-08-07
     // decision) and is no longer resolved here at all.
     fn no_optional_services_enabled_monitors_only_ui() {
-        let targets = resolve_alert_only_targets("disabled", false, false, "");
+        let targets = resolve_alert_only_targets("disabled", false, false);
         assert_eq!(targets, vec!["lancache-ui".to_string()]);
     }
 
@@ -598,7 +569,7 @@ mod tests {
     // NTP_ENABLED must add the real NTP container independently of the DHCP
     // and central-logging gates so degraded NTP health can become observable.
     fn ntp_enabled_adds_the_ntp_container() {
-        let targets = resolve_alert_only_targets("disabled", false, true, "");
+        let targets = resolve_alert_only_targets("disabled", false, true);
         assert!(targets.contains(&"lancache-ntp".to_string()));
     }
 
@@ -606,18 +577,23 @@ mod tests {
     // A disabled NTP profile has no NTP container, even when the other
     // optional services are active, so monitoring it would be a false alert.
     fn ntp_disabled_never_adds_the_ntp_container_even_with_others_enabled() {
-        let targets = resolve_alert_only_targets("kea", true, false, "");
+        let targets = resolve_alert_only_targets("kea", true, false);
         assert!(!targets.contains(&"lancache-ntp".to_string()));
     }
 
     #[test]
     // Independent optional gates must compose without suppressing one another.
     fn all_optional_services_enabled_together() {
-        let targets = resolve_alert_only_targets("kea", true, true, "");
-        assert!(targets.contains(&"lancache-ui".to_string()));
-        assert!(targets.contains(&"lancache-dhcp".to_string()));
-        assert!(targets.contains(&"lancache-syslog".to_string()));
-        assert!(targets.contains(&"lancache-ntp".to_string()));
+        let targets = resolve_alert_only_targets("kea", true, true);
+        assert_eq!(
+            targets,
+            vec![
+                "lancache-ui".to_string(),
+                "lancache-dhcp".to_string(),
+                "lancache-syslog".to_string(),
+                "lancache-ntp".to_string(),
+            ]
+        );
         // netdata is restart-capable now (main()'s own `monitored` list),
         // never resolved by this alert-only function -- see this file's own
         // resolve_alert_only_targets_never_includes_netdata() below for a
@@ -632,31 +608,8 @@ mod tests {
     // (once via AlertCounter, once via FailureCounter) with two independent,
     // disagreeing counters writing the same status.json key.
     fn resolve_alert_only_targets_never_includes_netdata() {
-        let targets = resolve_alert_only_targets("kea", true, true, "");
+        let targets = resolve_alert_only_targets("kea", true, true);
         assert!(!targets.iter().any(|t| t.starts_with("lancache-netdata")));
-    }
-
-    #[test]
-    // A coordinated container suffix must reach every alert-only target, not
-    // only the restart-capable ContainerNames fields.
-    fn resolve_alert_only_targets_applies_the_coordinated_suffix() {
-        let targets = resolve_alert_only_targets("kea", true, true, "-ci1");
-        assert_eq!(
-            targets,
-            vec![
-                "lancache-ui-ci1".to_string(),
-                "lancache-dhcp-ci1".to_string(),
-                "lancache-syslog-ci1".to_string(),
-                "lancache-ntp-ci1".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    // An empty coordinated suffix is deliberately a no-op for every target.
-    fn resolve_alert_only_targets_is_unchanged_with_no_suffix() {
-        let targets = resolve_alert_only_targets("disabled", false, false, "");
-        assert_eq!(targets, vec!["lancache-ui".to_string()]);
     }
 
     // What: only provisioned services are reconcile candidates
@@ -664,7 +617,7 @@ mod tests {
     // From: Issue #1437
     #[test]
     fn desired_state_targets_is_empty_when_neither_service_is_provisioned() {
-        let targets = desired_state_targets("disabled", false, "");
+        let targets = desired_state_targets("disabled", false);
         assert!(targets.is_empty());
     }
 
@@ -673,24 +626,24 @@ mod tests {
     // label -- an operator's start/stop control must not care which
     // container is actually behind it, only that "dhcp" is provisioned.
     fn desired_state_targets_resolves_dhcp_for_either_provisioned_mode() {
-        let kea = desired_state_targets("kea", false, "");
+        let kea = desired_state_targets("kea", false);
         assert_eq!(kea, vec![("dhcp", "lancache-dhcp".to_string())]);
 
-        let dnsmasq = desired_state_targets("dnsmasq-proxy", false, "");
+        let dnsmasq = desired_state_targets("dnsmasq-proxy", false);
         assert_eq!(dnsmasq, vec![("dhcp", "lancache-dhcp-proxy".to_string())]);
     }
 
     #[test]
-    // The coordinated container suffix must reach these targets too, the
-    // same way resolve_alert_only_targets_applies_the_coordinated_suffix
-    // above already proves for the plain alert-only set.
-    fn desired_state_targets_applies_the_coordinated_suffix() {
-        let targets = desired_state_targets("kea", true, "-ci1");
+    // What: dhcp and ntp provisioned yield both targets.
+    // Why: a dropped target leaves its dock action unapplied.
+    // From: Issue #1437 | PR #1858
+    fn desired_state_targets_lists_both_provisioned_services() {
+        let targets = desired_state_targets("kea", true);
         assert_eq!(
             targets,
             vec![
-                ("dhcp", "lancache-dhcp-ci1".to_string()),
-                ("ntp", "lancache-ntp-ci1".to_string()),
+                ("dhcp", "lancache-dhcp".to_string()),
+                ("ntp", "lancache-ntp".to_string()),
             ]
         );
     }

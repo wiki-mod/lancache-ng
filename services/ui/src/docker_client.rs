@@ -33,8 +33,8 @@ pub fn connect_from_env() -> Result<Docker> {
     Docker::connect_with_socket_defaults().context("Failed to connect to Docker socket")
 }
 
-pub async fn restart_service(docker: &Docker, service_name: &str, suffix: &str) -> Result<()> {
-    let id = container_name_for_service(service_name, suffix)?;
+pub async fn restart_service(docker: &Docker, service_name: &str) -> Result<()> {
+    let id = container_name_for_service(service_name)?;
     let options = RestartContainerOptionsBuilder::default().t(5).build();
     docker
         .restart_container(&id, Some(options))
@@ -44,8 +44,8 @@ pub async fn restart_service(docker: &Docker, service_name: &str, suffix: &str) 
     Ok(())
 }
 
-pub async fn start_service(docker: &Docker, service_name: &str, suffix: &str) -> Result<()> {
-    let id = container_name_for_service(service_name, suffix)?;
+pub async fn start_service(docker: &Docker, service_name: &str) -> Result<()> {
+    let id = container_name_for_service(service_name)?;
     docker
         .start_container(&id, None)
         .await
@@ -54,12 +54,8 @@ pub async fn start_service(docker: &Docker, service_name: &str, suffix: &str) ->
     Ok(())
 }
 
-pub async fn stop_service_if_present(
-    docker: &Docker,
-    service_name: &str,
-    suffix: &str,
-) -> Result<()> {
-    let id = container_name_for_service(service_name, suffix)?;
+pub async fn stop_service_if_present(docker: &Docker, service_name: &str) -> Result<()> {
+    let id = container_name_for_service(service_name)?;
     let options = StopContainerOptionsBuilder::default().t(10).build();
     match docker.stop_container(&id, Some(options)).await {
         Ok(()) => {
@@ -99,11 +95,11 @@ pub fn is_container_not_created(err: &anyhow::Error) -> bool {
     })
 }
 
-// What: appends `suffix` to the fixed base name for `service_name`.
-// Why: this was the last hardcoded consumer needing suffix support.
-// From: Issue #1592
-pub fn container_name_for_service(service_name: &str, suffix: &str) -> Result<String> {
-    let base = match service_name {
+// What: the fixed container name for an allowlisted service.
+// Why: the socket-proxy allowlist only knows these names.
+// From: Issue #1592 | PR #1858
+pub fn container_name_for_service(service_name: &str) -> Result<String> {
+    let name = match service_name {
         "proxy" | "lancache-proxy" => "lancache-proxy",
         "dns-standard" | "lancache-dns-standard" => "lancache-dns-standard",
         "dns-ssl" | "lancache-dns-ssl" => "lancache-dns-ssl",
@@ -124,7 +120,7 @@ pub fn container_name_for_service(service_name: &str, suffix: &str) -> Result<St
             service_name
         ),
     };
-    Ok(format!("{base}{suffix}"))
+    Ok(name.to_string())
 }
 
 #[cfg(test)]
@@ -174,35 +170,21 @@ mod tests {
         assert!(!is_container_not_created(&err));
     }
 
-    // What: an empty suffix must match pre-suffix byte-identically.
-    // Why: this is the only production regression that matters.
-    // From: Issue #1592
+    // What: service and container names map to the fixed name.
+    // Why: the socket-proxy allowlist matches these names only.
+    // From: Issue #1592 | PR #1858
     #[test]
-    fn container_name_for_service_with_empty_suffix_matches_pre_suffix_behavior() {
+    fn container_name_for_service_maps_to_the_fixed_name() {
+        assert_eq!(container_name_for_service("nats").unwrap(), "lancache-nats");
         assert_eq!(
-            container_name_for_service("nats", "").unwrap(),
-            "lancache-nats"
-        );
-        assert_eq!(
-            container_name_for_service("proxy", "").unwrap(),
+            container_name_for_service("proxy").unwrap(),
             "lancache-proxy"
         );
     }
 
-    // What: a non-empty suffix is appended to the resolved base name.
-    // Why: CI runs create suffixed container names, UI must use them.
-    // From: Issue #1592
     #[test]
-    fn container_name_for_service_appends_a_non_empty_suffix() {
-        assert_eq!(
-            container_name_for_service("nats", "-e2e-q88wjq").unwrap(),
-            "lancache-nats-e2e-q88wjq"
-        );
-    }
-
-    #[test]
-    fn container_name_for_service_rejects_unknown_service_regardless_of_suffix() {
-        assert!(container_name_for_service("bogus", "-e2e-q88wjq").is_err());
+    fn container_name_for_service_rejects_unknown_service() {
+        assert!(container_name_for_service("bogus").is_err());
     }
 
     // Positive lifecycle case (issue #1486): "ui" must resolve so
@@ -210,9 +192,9 @@ mod tests {
     // "ui", ...) -- this is the one new capability this issue adds here.
     #[test]
     fn container_name_for_service_resolves_ui() {
-        assert_eq!(container_name_for_service("ui", "").unwrap(), "lancache-ui");
+        assert_eq!(container_name_for_service("ui").unwrap(), "lancache-ui");
         assert_eq!(
-            container_name_for_service("lancache-ui", "").unwrap(),
+            container_name_for_service("lancache-ui").unwrap(),
             "lancache-ui"
         );
     }
@@ -226,9 +208,9 @@ mod tests {
     // either one back must fail this test.
     #[test]
     fn container_name_for_service_rejects_watchdog_and_syslog() {
-        assert!(container_name_for_service("watchdog", "").is_err());
-        assert!(container_name_for_service("lancache-watchdog", "").is_err());
-        assert!(container_name_for_service("syslog", "").is_err());
-        assert!(container_name_for_service("lancache-syslog", "").is_err());
+        assert!(container_name_for_service("watchdog").is_err());
+        assert!(container_name_for_service("lancache-watchdog").is_err());
+        assert!(container_name_for_service("syslog").is_err());
+        assert!(container_name_for_service("lancache-syslog").is_err());
     }
 }

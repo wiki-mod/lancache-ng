@@ -9404,17 +9404,10 @@ _ci_check_naming_consistency() {
 
     for cf in "${compose_files[@]}"; do
         [ -f "${cf}" ] || continue
-        local name_suffix=''
-        # What: installer compose names carry the suffix.
-        # Why: owner-derived; a path substring hid it.
-        # From: Issue #1683 | PR #1858
-        if [ "${cf}" = "${root}/${inst}" ]; then
-            name_suffix='\$\{LANCACHE_CONTAINER_SUFFIX:-\}'
-        fi
         while IFS= read -r name; do
             [ -n "${name}" ] || continue
-            grep -Eq "^[[:space:]]+container_name: ${name}${name_suffix}\$" "${cf}" || \
-                viol+=("${cf}: no container_name: ${name}${name_suffix}")
+            grep -Eq "^[[:space:]]+container_name: ${name}\$" "${cf}" || \
+                viol+=("${cf}: no container_name: ${name}")
         done <<<"${allowlist_names}"
     done
 

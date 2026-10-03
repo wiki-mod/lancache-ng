@@ -657,7 +657,7 @@ services:
   # ── Central logging: syslog + fluent-bit combined container ───────────────
 
   syslog-logs-permissions:
-    container_name: lancache-syslog-logs-permissions${LANCACHE_CONTAINER_SUFFIX:-}
+    container_name: lancache-syslog-logs-permissions
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
     profiles: [logging]
     user: "0:0"

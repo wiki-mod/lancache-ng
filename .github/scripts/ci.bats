@@ -7255,7 +7255,7 @@ STUB
     _stack_fixture "${r}"
     printf 'name: lancache-ng\nservices:\n  proxy:\n    container_name: lancache-proxy\n' \
         > "${r}/dep/c.yml"
-    printf 'name: lancache-ng\nservices:\n  proxy:\n    container_name: lancache-proxy${LANCACHE_CONTAINER_SUFFIX:-}\n' \
+    printf 'name: lancache-ng\nservices:\n  proxy:\n    container_name: lancache-proxy\n' \
         > "${r}/inst/c.yml"
     printf 'acl lancache_container path,url_dec -m reg ^/containers/(lancache-proxy)(/|$)\nacl lancache_lifecycle path,url_dec -m reg ^/containers/lancache-proxy/(start|stop|restart|wait)$\n' \
         > "${r}/scripts/untracked/docker-socket-proxy.sh"

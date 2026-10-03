@@ -564,16 +564,12 @@ pub async fn reload_nats_conf(
     if !update_nats_conf(state).await? {
         return Ok(());
     }
-    docker_client::restart_service(
-        &state.docker,
-        &state.config.nats_service,
-        &state.config.container_suffix,
-    )
-    .await
-    // What: uses {e:#} (anyhow's full chain), not {e}.
-    // Why: {e} alone hid the real bollard/Docker-API root cause.
-    // From: Issue #1590
-    .map_err(|e| format!("Failed to restart NATS service: {e:#}").into())
+    docker_client::restart_service(&state.docker, &state.config.nats_service)
+        .await
+        // What: uses {e:#} (anyhow's full chain), not {e}.
+        // Why: {e} alone hid the real bollard/Docker-API root cause.
+        // From: Issue #1590
+        .map_err(|e| format!("Failed to restart NATS service: {e:#}").into())
 }
 
 // What: returns whether the fragment actually changed on disk.

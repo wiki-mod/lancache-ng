@@ -210,9 +210,7 @@ pub async fn update_ntp_settings(
         // Why: hides that NTP stopped and unrecovered from operator
         // From: PR #1610
         if was_enabled
-            && let Err(rollback_err) =
-                docker_client::start_service(&state.docker, "ntp", &state.config.container_suffix)
-                    .await
+            && let Err(rollback_err) = docker_client::start_service(&state.docker, "ntp").await
         {
             return Err(NtpError::config_error(format!(
                 "Failed to persist NTP settings ({persist_err}), and restarting NTP after \
@@ -251,13 +249,9 @@ async fn reconcile_ntp_container_stop(
     was_enabled: bool,
 ) -> Result<(), NtpError> {
     if !ntp_enabled || was_enabled {
-        docker_client::stop_service_if_present(
-            &state.docker,
-            "ntp",
-            &state.config.container_suffix,
-        )
-        .await
-        .map_err(|err| NtpError::config_error(err.to_string()))?;
+        docker_client::stop_service_if_present(&state.docker, "ntp")
+            .await
+            .map_err(|err| NtpError::config_error(err.to_string()))?;
     }
     Ok(())
 }
@@ -270,7 +264,7 @@ async fn reconcile_ntp_container_start(
     ntp_enabled: bool,
 ) -> Result<(), NtpError> {
     if ntp_enabled {
-        docker_client::start_service(&state.docker, "ntp", &state.config.container_suffix)
+        docker_client::start_service(&state.docker, "ntp")
             .await
             .map_err(|err| NtpError::config_error(err.to_string()))?;
     }
