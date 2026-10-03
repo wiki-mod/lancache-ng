@@ -773,10 +773,19 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("nats.conf");
         fs::write(&path, "old").unwrap();
+        let old_inode = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&path).unwrap());
 
         write_nats_conf_atomically(path.to_str().unwrap(), "new").unwrap();
 
         assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        // What: a rename swaps the inode; an in-place write keeps it.
+        // Why: readers must never see a half-written nats.conf.
+        // From: Issue #1683 | PR #1858
+        let new_inode = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&path).unwrap());
+        assert_ne!(
+            old_inode, new_inode,
+            "nats.conf was rewritten in place, not replaced"
+        );
         let leftovers = fs::read_dir(&dir)
             .unwrap()
             .filter_map(Result::ok)

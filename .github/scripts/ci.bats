@@ -7667,8 +7667,7 @@ CASES
 # From: Issue #1683 | PR #1858
 _nats_atomic_fixture() {
     local root="$1" cf
-    mkdir -p "${root}/dep" "${root}/inst" \
-        "${root}/services/dns" "${root}/services/ui/src/routes"
+    mkdir -p "${root}/dep" "${root}/inst" "${root}/services/dns"
     for cf in dep/c.yml inst/c.yml; do
         cat > "${root}/${cf}" <<'EOF'
         tmp_nats_conf="$(mktemp /etc/nats/.nats.conf.XXXXXX)"
@@ -7676,10 +7675,6 @@ _nats_atomic_fixture() {
         mv "$$tmp_nats_conf" /etc/nats/nats.conf
 EOF
     done
-    cat > "${root}/services/ui/src/routes/secondaries.rs" <<'EOF'
-fn write_nats_conf_atomically() {}
-fs::rename(&tmp_path, target)
-EOF
     cat > "${root}/services/dns/entrypoint.sh" <<'EOF'
 render_template_atomic
 mktemp "${target_dir}/.${target_name}.tmp.XXXXXX"

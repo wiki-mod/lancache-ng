@@ -10168,11 +10168,10 @@ _ci_check_compose_config() {
 _ci_check_nats_atomic_write() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
-    local cf dep inst ep rs su
+    local cf dep inst ep su
     ep="$(_ci_service_path dns entrypoint.sh "${repo_root}")" || return 2
-    rs="$(_ci_service_path ui src/routes/secondaries.rs "${repo_root}")" || return 2
     su="$(_ci_installer "${repo_root}")" || return 2
-    ep="${ep#"${repo_root}/"}" rs="${rs#"${repo_root}/"}" su="${su#"${repo_root}/"}"
+    ep="${ep#"${repo_root}/"}" su="${su#"${repo_root}/"}"
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     inst="$(_ci_installer_compose "${repo_root}")" || return 2
     for cf in "${dep}" "${inst}"; do
@@ -10183,10 +10182,6 @@ _ci_check_nats_atomic_write() {
         grep -Fq 'mv "$$tmp_nats_conf" /etc/nats/nats.conf' "${repo_root}/${cf}" \
             || viol+=("${cf}: NATS must atomically replace nats.conf after fixing ownership")
     done
-    grep -Fq 'fn write_nats_conf_atomically(' "${repo_root}/${rs}" \
-        || viol+=("${rs}: Admin UI must keep an atomic nats.conf write helper")
-    grep -Fq 'fs::rename(&tmp_path, target)' "${repo_root}/${rs}" \
-        || viol+=("${rs}: Admin UI nats.conf writes must use temp-file plus rename")
     grep -Fq 'render_template_atomic' "${repo_root}/${ep}" \
         || viol+=("${ep}: DNS entrypoint must render generated configs atomically")
     grep -Fq 'mktemp "${target_dir}/.${target_name}.tmp.XXXXXX"' "${repo_root}/${ep}" \
