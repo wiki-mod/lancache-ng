@@ -10713,8 +10713,8 @@ CASES
 }
 
 @test "migrate_env_for_update keeps config/prod values per row" {
-    # What: prod layout per row: run, edit, run, compare.
-    # Why: AG-OP-009: operator config/prod values survive.
+    # What: two rounds of template hand edits per row
+    # Why: AG-OP-009 edits survive; the checkout stays clean
     # From: Issue #1683 | PR #1858
     local repo_root name extra cpe_init env_want edit cpe_want
     local base pd cpe kv
@@ -10725,9 +10725,14 @@ CASES
         base="${BATS_TEST_TMPDIR}/${name}"
         pd="${base}/deploy/prod"; cpe="${base}/config/prod/dhcp-proxy.env"
         mkdir -p "${pd}" "${base}/config/prod"
+        cp "${repo_root}/config/prod/dhcp-proxy.env" "${cpe}"
+        git -C "${base}" init -q && git -C "${base}" add config
+        git -C "${base}" -c user.email=t@t -c user.name=t commit -qm template
         _write_legacy_env_fixture "${pd}/.env"
         [ "${extra}" = - ] || tr ';' '\n' <<<"${extra}" >> "${pd}/.env"
-        tr ';' '\n' <<<"${cpe_init}" > "${cpe}"
+        IFS=';' read -r -a kvs <<<"${cpe_init}"
+        for kv in "${kvs[@]}"; do set_env_key "${kv%%=*}" "${kv#*=}" "${cpe}"; done
+        adopt_config_prod_edits "${base}" >/dev/null
         run migrate_env_for_update "${pd}"
         [ "${status}" -eq 0 ] || { echo "${name}: run 1 rc ${status}: ${output}"; return 1; }
         IFS=';' read -r -a kvs <<<"${env_want}"
@@ -10737,13 +10742,15 @@ CASES
                 echo "${name}: .env lacks ${kv}:"; cat "${pd}/.env"; return 1; }
         done
         [ "${edit}" = - ] || set_env_key "${edit%%=*}" "${edit#*=}" "${cpe}"
+        adopt_config_prod_edits "${base}" >/dev/null
         run migrate_env_for_update "${pd}"
         [ "${status}" -eq 0 ] || { echo "${name}: run 2 rc ${status}: ${output}"; return 1; }
+        git -C "${base}" diff --quiet HEAD -- config || { echo "${name}: template dirty"; return 1; }
         IFS=';' read -r -a kvs <<<"${cpe_want}"
         for kv in "${kvs[@]}"; do
-            run get_env_var "${kv%%=*}" "${cpe}"
+            run config_prod_value "${kv%%=*}" "${cpe}"
             [ "${output}" = "${kv#*=}" ] || {
-                echo "${name}: ${kv%%=*}='${output}' want '${kv#*=}':"; cat "${cpe}"; return 1; }
+                echo "${name}: ${kv%%=*}='${output}' want '${kv#*=}':"; cat "${cpe%.env}.local.env"; return 1; }
         done
     done <<'CASES'
 repeated|-|DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9;DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0|DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9;DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0|-|DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9;DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0
@@ -13057,33 +13064,36 @@ CASES
 }
 
 @test "setup dhcp-proxy config/prod sync only fills missing keys" {
-    # What: existing keys kept, missing added, no-op cases.
-    # Why: config/prod wins; an update never undoes edits.
+    # What: only non-default values reach .local.env, once.
+    # Why: a later update must not undo an operator value
     # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" c="${BATS_TEST_TMPDIR}/repo/config/prod/dhcp-proxy.env" want
+    local root t="${BATS_TEST_TMPDIR}" c="${BATS_TEST_TMPDIR}/repo/config/prod/dhcp-proxy.env" want tpl
+    local l="${BATS_TEST_TMPDIR}/repo/config/prod/dhcp-proxy.local.env"
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_functions "${root}/setup.sh" is_deploy_prod_install_dir deploy_prod_repo_root env_key_exists \
-        validate_env_value write_env_file set_env_key sync_dhcp_proxy_config_prod_env
+        validate_env_value write_env_file set_env_key get_env_var _compose_parse_env_value \
+        sync_dhcp_proxy_config_prod_env
     die() { printf '%s\n' "$*" >&2; exit 1; }
     print_ok() { :; }
     mkdir -p "${t}/repo/deploy/prod" "${t}/repo/config/prod" "${t}/qs"
     printf '%s\n' 'DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9' 'DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real.0' \
         'DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=' 'DHCP_PROXY_ROUTER=' > "${c}"
-    sync_dhcp_proxy_config_prod_env "${t}/repo/deploy/prod" "${t}/src.env" 10.0.0.2 eth1 10.0.0.1 ntp1 lan \
-        boot.0 10.0.0.3 10.5.5.5 new-bios.0 new-uefi.efi
-    want='DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9#DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real.0#DHCP_PROXY_PXE_BOOT_FILENAME_UEFI='
-    want+='#DHCP_PROXY_ROUTER=#DHCP_RELAY_LOCAL_ADDR=10.0.0.2#DHCP_PROXY_INTERFACE=eth1#DHCP_NTP_SERVERS=ntp1'
+    tpl="$(cat "${c}")"
+    sync_dhcp_proxy_config_prod_env "${t}/repo/deploy/prod" "${t}/src.env" 10.0.0.2 eth1 '' ntp1 lan \
+        boot.0 10.0.0.3 10.9.9.9 real.0 ''
+    want='DHCP_RELAY_LOCAL_ADDR=10.0.0.2#DHCP_PROXY_INTERFACE=eth1#DHCP_NTP_SERVERS=ntp1'
     want+='#DHCP_PROXY_DOMAIN=lan#DHCP_PROXY_BOOT_FILENAME=boot.0#DHCP_PROXY_BOOT_SERVER=10.0.0.3'
-    [ "$(paste -sd'#' "${c}")" = "${want}" ] || { echo "first: $(paste -sd'#' "${c}")"; return 1; }
-    sync_dhcp_proxy_config_prod_env "${t}/repo/deploy/prod" "${t}/src.env" x x x x x x x x x x
-    [ "$(paste -sd'#' "${c}")" = "${want}" ] || { echo "second run changed it"; return 1; }
+    [ "$(paste -sd'#' "${l}")" = "${want}" ] || { echo "first: $(paste -sd'#' "${l}")"; return 1; }
+    [ "$(cat "${c}")" = "${tpl}" ] || { echo "template changed"; return 1; }
+    sync_dhcp_proxy_config_prod_env "${t}/repo/deploy/prod" "${t}/src.env" x x '' x x x x 10.9.9.9 real.0 ''
+    [ "$(paste -sd'#' "${l}")" = "${want}" ] || { echo "second run changed it"; return 1; }
     mkdir -p "${t}/q/a/qs" "${t}/q/config/prod"
     printf 'X=1\n' > "${t}/q/config/prod/dhcp-proxy.env"
     run sync_dhcp_proxy_config_prod_env "${t}/q/a/qs" "${t}/src.env" a b c d e f g h i j
     [ "${status}" -eq 0 ] && [ "$(cat "${t}/q/config/prod/dhcp-proxy.env")" = X=1 ] || { echo "non-prod synced"; return 1; }
-    rm -f "${c}"
+    rm -f "${c}" "${l}"
     run sync_dhcp_proxy_config_prod_env "${t}/repo/deploy/prod" "${t}/src.env" a b c d e f g h i j
-    [ "${status}" -eq 0 ] && [ ! -e "${c}" ] || { echo "missing file created"; return 1; }
+    [ "${status}" -eq 0 ] && [ ! -e "${c}" ] && [ ! -e "${l}" ] || { echo "missing file created"; return 1; }
     run awk '/^migrate_env_for_update\(\) \{$/ { f = 1 } f && /^[[:space:]]*ensure_secret_env_key / { s = NR }
         f && /^[[:space:]]*sync_dhcp_proxy_config_prod_env / && !y { y = NR } f && /^}$/ { exit }
         END { print (s && y > s) ? "after" : "s=" s " y=" y }' "${root}/setup.sh"

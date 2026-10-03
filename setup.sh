@@ -1808,36 +1808,66 @@ resolve_update_ip_config_paths() {
     printf '%s\n%s\n%s\n' "$deploy_env" "$dns_standard_env" "$dns_ssl_env"
 }
 
-# deploy/prod's dhcp-proxy service (deploy/prod/docker-compose.yml) loads its
-# runtime values via `env_file: ../../config/prod/dhcp-proxy.env` -- a static
-# file Compose reads directly, with no `${VAR}` interpolation from
-# .env/.env.local at all (unlike deploy/quickstart's dhcp-proxy service,
-# which wires each value through `environment: - KEY=${KEY:-}`). Every value
-# migrate_env_for_update()/the fresh-install writer resolve for DHCP_PROXY_*
-# and DHCP_RELAY_LOCAL_ADDR therefore never reaches a real deploy/prod
-# container unless it is also written here -- a no-op for a quickstart
-# install (or any other non-deploy/prod install_dir), which has no separate
-# file to sync.
+# What: a config/prod key: <x>.local.env first, else <x>.env
+# Why: local holds operator values; template is the default
+# From: Issue #1683 | PR #1858
+config_prod_value() {
+    local key="$1" template="$2" local_env="${2%.env}.local.env"
+    if env_key_exists "$key" "$local_env"; then
+        get_env_var "$key" "$local_env"
+    else
+        get_env_var "$key" "$template"
+    fi
+}
+
+# What: template edits move into <x>.local.env, newest wins
+# Why: edits survive (AG-OP-009); checkout stays syncable
+# From: Issue #1683 | PR #1858
+adopt_config_prod_edits() {
+    local repo_root="$1" rel template local_env key raw head_file
+    local -a changed
+    [[ -d "$repo_root/.git" ]] || return 0
+    mapfile -t changed < <(git -C "$repo_root" diff --name-only HEAD -- 'config/prod/*.env') \
+        || die "Failed to list edited config/prod files in $repo_root."
+    head_file=$(mktemp) || die "Failed to create a temporary file for config/prod adoption."
+    for rel in "${changed[@]}"; do
+        [[ -n "$rel" && "$rel" != *.local.env ]] || continue
+        template="$repo_root/$rel"
+        local_env="${template%.env}.local.env"
+        git -C "$repo_root" show "HEAD:$rel" > "$head_file" 2>/dev/null || : > "$head_file"
+        while IFS= read -r key; do
+            raw=$(get_env_assignment_value_raw "$key" "$template")
+            [[ "$raw" == "$(get_env_assignment_value_raw "$key" "$head_file")" ]] \
+                && env_key_exists "$key" "$head_file" && continue
+            set_env_assignment "$key" "$raw" "$local_env"
+        done < <(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ {print $1}' "$template")
+        git -C "$repo_root" checkout HEAD -- "$rel" \
+            || die "Failed to restore $rel after moving its edits to ${local_env##*/}."
+        print_ok "Moved local edits of $rel into ${local_env##*/}"
+    done
+    rm -f "$head_file"
+}
+
+# What: resolved dnsmasq-proxy keys into its .local.env
+# Why: dhcp-proxy reads env_file, never .env interpolation
+# From: Issue #1683 | PR #1858
 sync_dhcp_proxy_config_prod_env() {
     local install_dir="$1" source_env_file="$2"
     local dhcp_relay_local_addr="$3" dhcp_proxy_interface="$4" dhcp_proxy_router="$5"
     local dhcp_ntp_servers="$6" dhcp_proxy_domain="$7" dhcp_proxy_boot_filename="$8"
     local dhcp_proxy_boot_server="$9" dhcp_proxy_pxe_boot_server="${10}" dhcp_proxy_pxe_boot_filename_bios="${11}"
     local dhcp_proxy_pxe_boot_filename_uefi="${12}"
-    local repo_root config_prod_env key fallback kv
+    local repo_root config_prod_env local_env key fallback kv
 
     is_deploy_prod_install_dir "$install_dir" || return 0
     repo_root=$(deploy_prod_repo_root "$install_dir")
     config_prod_env="$repo_root/config/prod/dhcp-proxy.env"
+    local_env="${config_prod_env%.env}.local.env"
     [[ -f "$config_prod_env" ]] || return 0
 
-    # config_prod_env, not $source_env_file (.env/.env.local), is what
-    # deploy/prod's real dhcp-proxy container reads, so it is the permanent
-    # authority for every key below. Key presence (including an explicit
-    # empty value) must win here: migrate_env_for_update() permanently adds
-    # these keys to .env, which means .env presence cannot distinguish a later
-    # operator edit from an old migration value. The resolved .env fallback is
-    # used only to initialize a key that config_prod_env does not have yet.
+    # What: local key wins; only non-default values written
+    # Why: a copied default would hide newer defaults
+    # From: Issue #1683 | PR #1858
     for kv in \
         "DHCP_RELAY_LOCAL_ADDR:$dhcp_relay_local_addr" \
         "DHCP_PROXY_INTERFACE:$dhcp_proxy_interface" \
@@ -1852,11 +1882,11 @@ sync_dhcp_proxy_config_prod_env() {
     do
         key="${kv%%:*}"
         fallback="${kv#*:}"
-        if ! env_key_exists "$key" "$config_prod_env"; then
-            set_env_key "$key" "$fallback" "$config_prod_env"
-        fi
+        env_key_exists "$key" "$local_env" && continue
+        [[ "$fallback" == "$(get_env_var "$key" "$config_prod_env")" ]] && continue
+        set_env_key "$key" "$fallback" "$local_env"
     done
-    print_ok "Converged missing dnsmasq-proxy/PXE keys in $config_prod_env from $source_env_file; existing deploy/prod values were preserved because this runtime file is authoritative."
+    print_ok "Converged dnsmasq-proxy/PXE keys from $source_env_file into $local_env; existing local values were preserved."
 }
 
 # Full .env rewrites keep the original owner/mode because the file contains
@@ -2898,22 +2928,9 @@ migrate_env_for_update() {
     dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$env_file")
     dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file")
     upstream_dhcp_ip=$(get_env_var UPSTREAM_DHCP_IP "$env_file")
-    # sync_dhcp_proxy_config_prod_env() (called near the end of this function)
-    # treats config/prod/dhcp-proxy.env as deploy/prod's permanent authority.
-    # For a deploy/prod install, seed each of the ten append_env_key_if_missing
-    # calls below from config/prod/dhcp-proxy.env's own current value instead
-    # of an unconditional "" default. Backfilling with "" would make $env_file
-    # carry an explicit empty for that key from this point on, and every LATER
-    # `setup.sh update` run -- not just the first one after a key's
-    # introduction -- would then read that backfilled empty back as "operator
-    # cleared it" and use it to wipe a real, already-configured
-    # config/prod/dhcp-proxy.env value: a one-time snapshot of $env_file taken
-    # before these appends only defers that wipe to the second run, since the
-    # snapshot itself cannot help a run that starts after the first backfill
-    # already landed. Seeding from config/prod/dhcp-proxy.env's real value
-    # instead makes $env_file converge to match it immediately, so every
-    # later run reads back the same real value from both files and is a
-    # genuine no-op, exactly like every other key in this function.
+    # What: seeds .env from the effective dhcp-proxy value
+    # Why: an empty backfill would override a real value
+    # From: Issue #1683 | PR #1858
     if is_deploy_prod_install_dir "$install_dir"; then
         prodsync_config_env="$(deploy_prod_repo_root "$install_dir")/config/prod/dhcp-proxy.env"
         if [[ -f "$prodsync_config_env" ]]; then
@@ -2930,13 +2947,13 @@ migrate_env_for_update() {
             # `setup.sh update` that previously worked, since this function's
             # own dnsmasq-proxy validation block requires stricter
             # completeness/well-formedness than the container does.
-            prodsync_default_relay_local_addr=$(get_env_var DHCP_RELAY_LOCAL_ADDR "$prodsync_config_env")
+            prodsync_default_relay_local_addr=$(config_prod_value DHCP_RELAY_LOCAL_ADDR "$prodsync_config_env")
             is_valid_ipv4 "$prodsync_default_relay_local_addr" || prodsync_default_relay_local_addr=""
-            prodsync_default_proxy_interface=$(get_env_var DHCP_PROXY_INTERFACE "$prodsync_config_env")
+            prodsync_default_proxy_interface=$(config_prod_value DHCP_PROXY_INTERFACE "$prodsync_config_env")
             is_valid_dhcp_proxy_interface "$prodsync_default_proxy_interface" || prodsync_default_proxy_interface=""
-            prodsync_default_proxy_router=$(get_env_var DHCP_PROXY_ROUTER "$prodsync_config_env")
+            prodsync_default_proxy_router=$(config_prod_value DHCP_PROXY_ROUTER "$prodsync_config_env")
             is_valid_ipv4 "$prodsync_default_proxy_router" || prodsync_default_proxy_router=""
-            prodsync_default_ntp_servers=$(get_env_var DHCP_NTP_SERVERS "$prodsync_config_env")
+            prodsync_default_ntp_servers=$(config_prod_value DHCP_NTP_SERVERS "$prodsync_config_env")
             if [[ -n "$prodsync_default_ntp_servers" ]]; then
                 IFS=',' read -r -a _dhcp_ntp_check <<< "$prodsync_default_ntp_servers"
                 for _dhcp_ntp_ip in "${_dhcp_ntp_check[@]}"; do
@@ -2944,17 +2961,17 @@ migrate_env_for_update() {
                     [[ -z "$_dhcp_ntp_ip" ]] || is_valid_ipv4 "$_dhcp_ntp_ip" || prodsync_default_ntp_servers=""
                 done
             fi
-            prodsync_default_proxy_domain=$(get_env_var DHCP_PROXY_DOMAIN "$prodsync_config_env")
+            prodsync_default_proxy_domain=$(config_prod_value DHCP_PROXY_DOMAIN "$prodsync_config_env")
             is_valid_dhcp_proxy_domain "$prodsync_default_proxy_domain" || prodsync_default_proxy_domain=""
-            prodsync_default_boot_filename=$(get_env_var DHCP_PROXY_BOOT_FILENAME "$prodsync_config_env")
+            prodsync_default_boot_filename=$(config_prod_value DHCP_PROXY_BOOT_FILENAME "$prodsync_config_env")
             is_valid_dhcp_proxy_boot_filename "$prodsync_default_boot_filename" || prodsync_default_boot_filename=""
-            prodsync_default_boot_server=$(get_env_var DHCP_PROXY_BOOT_SERVER "$prodsync_config_env")
+            prodsync_default_boot_server=$(config_prod_value DHCP_PROXY_BOOT_SERVER "$prodsync_config_env")
             is_valid_ipv4 "$prodsync_default_boot_server" || prodsync_default_boot_server=""
-            prodsync_default_pxe_boot_server=$(get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$prodsync_config_env")
+            prodsync_default_pxe_boot_server=$(config_prod_value DHCP_PROXY_PXE_BOOT_SERVER "$prodsync_config_env")
             is_valid_ipv4 "$prodsync_default_pxe_boot_server" || prodsync_default_pxe_boot_server=""
-            prodsync_default_pxe_boot_filename_bios=$(get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$prodsync_config_env")
+            prodsync_default_pxe_boot_filename_bios=$(config_prod_value DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$prodsync_config_env")
             is_valid_dhcp_proxy_boot_filename "$prodsync_default_pxe_boot_filename_bios" || prodsync_default_pxe_boot_filename_bios=""
-            prodsync_default_pxe_boot_filename_uefi=$(get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$prodsync_config_env")
+            prodsync_default_pxe_boot_filename_uefi=$(config_prod_value DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$prodsync_config_env")
             is_valid_dhcp_proxy_boot_filename "$prodsync_default_pxe_boot_filename_uefi" || prodsync_default_pxe_boot_filename_uefi=""
             # The PXE trio must be complete (server + at least one filename)
             # or entirely empty together -- entrypoint.sh tolerates an
@@ -2983,10 +3000,8 @@ migrate_env_for_update() {
     append_env_key_if_missing DHCP_PROXY_DOMAIN "$prodsync_default_proxy_domain" "$env_file"
     append_env_key_if_missing DHCP_PROXY_BOOT_FILENAME "$prodsync_default_boot_filename" "$env_file"
     append_env_key_if_missing DHCP_PROXY_BOOT_SERVER "$prodsync_default_boot_server" "$env_file"
-    # Deliberately still "" here, unlike the seven keys above: this key is
-    # not one of the ten sync_dhcp_proxy_config_prod_env() converges (see
-    # that function's own `for kv in` list), so config/prod/dhcp-proxy.env
-    # has no authoritative value for it to preserve.
+    # What: custom options get an empty .env default
+    # Why: not a synced key, so there is no prod value to seed
     append_env_key_if_missing DHCP_PROXY_CUSTOM_OPTIONS "" "$env_file"
     # Issue #705: PXE boot-pointer fields. Without this convergence step an
     # existing install upgrading via `setup.sh update` would never gain
@@ -3151,23 +3166,9 @@ migrate_env_for_update() {
     [[ -z "$ui_user" && -z "$ui_password" ]] && allow_insecure_ui=true
     append_env_key_if_missing ALLOW_INSECURE_UI "$allow_insecure_ui" "$env_file"
 
-    # A manual deploy/prod install's dhcp-proxy container reads
-    # config/prod/dhcp-proxy.env directly, not $env_file -- see
-    # sync_dhcp_proxy_config_prod_env's own header comment for why writing
-    # only $env_file above would leave deploy/prod's dhcp-proxy container on
-    # stale values regardless of what this function just resolved. Deliberately
-    # last in this function, after every step above that can still `die` (the
-    # ensure_secret_env_key/UI-password generation calls): this is the one
-    # write in this function that reaches a container's live config outside
-    # $env_file, so an aborted update must not leave it applied while $env_file
-    # itself stays at its pre-update state.
-    # $env_file itself is now safe to pass directly: the append_env_key_if_missing
-    # calls above already seeded each of these ten keys from
-    # config/prod/dhcp-proxy.env's own real value on a deploy/prod install
-    # (see the comment above them), so $env_file and config/prod/dhcp-proxy.env
-    # already agree by this point on a first-time migration. On later runs the
-    # runtime config remains authoritative because a migrated .env key cannot
-    # be distinguished from a deliberate edit by key presence alone.
+    # What: writes dhcp-proxy keys after every possible die
+    # Why: an aborted update must not change live config
+    # From: Issue #1683 | PR #1858
     sync_dhcp_proxy_config_prod_env "$install_dir" "$env_file" \
         "$dhcp_relay_local_addr" "$dhcp_proxy_interface" "$dhcp_proxy_router" \
         "$dhcp_ntp_servers" "$dhcp_proxy_domain" "$dhcp_proxy_boot_filename" \
@@ -4823,11 +4824,15 @@ perform_stack_update_flow() {
         sync_repo_to_default_branch "$install_dir"
     fi
 
-    # Quickstart installs keep a copied compose bundle under the install tree.
-    # Refresh those assets before any backup-driven restart so even copied
-    # installs use the current container wiring during the whole update.
-    install_quickstart_compose_assets "$install_dir"
-    print_ok "quickstart compose assets updated"
+    # What: only non-checkout installs get a compose copy
+    # Why: deploy/prod's compose is git-tracked, not a copy
+    # From: Issue #1683 | PR #1858
+    if is_deploy_prod_install_dir "$install_dir"; then
+        adopt_config_prod_edits "$(deploy_prod_repo_root "$install_dir")"
+    else
+        install_quickstart_compose_assets "$install_dir"
+        print_ok "quickstart compose assets updated"
+    fi
 
     print_step "Creating pre-update rollback backup"
     if ! ( cmd_backup --config "$install_dir" ); then
