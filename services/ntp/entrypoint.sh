@@ -162,7 +162,7 @@ is_ip_literal() {
 
 render_ntp_config() {
     # template defaults to the real base config, but is overridable so
-    # tests/bats/ntp_entrypoint_rendering.bats can point this at a throwaway
+    # .github/scripts/ci.bats can point this at a throwaway
     # fixture instead of requiring /etc/chrony/chrony.conf.template to exist
     # on the test host.
     local target="$1" template="${2:-/etc/chrony/chrony.conf.template}"
@@ -263,7 +263,7 @@ validate_ntp_config() {
 # -- `fix_chrony_dir_ownership` below has no parameters to flag, and this
 # function genuinely IS called with real arguments in production code (by
 # that entry point), so shellcheck's premise for SC2120 no longer holds
-# either. tests/bats/ntp_entrypoint_rendering.bats calls this function
+# either. .github/scripts/ci.bats calls this function
 # directly with fixture owners/paths to exercise the exact same logic
 # production uses, without needing a second, divergent test-only
 # reimplementation.

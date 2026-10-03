@@ -7776,6 +7776,60 @@ wdmissing|  watchdog:|  watchdog-x:|watchdog must depend on docker-socket-proxy 
 CASES
 }
 
+@test "check netdata-isolation allows netdata and ui only" {
+    # What: members of netdata-net per compose shape.
+    # Why: any other member could reach the netdata API.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/nd" case from to want
+    while IFS='|' read -r case from to want; do
+        rm -rf "${r}"
+        _stack_fixture "${r}"
+        cat > "${r}/dep/c.yml" <<'YAML'
+services:
+  ui:
+    image: x
+    networks:
+      - default
+      - netdata-net # ui
+  nats:
+    image: x
+    networks:
+      - default # nats
+  probe:
+    image: x
+    profiles: [extra]
+    networks:
+      - default # probe
+  netdata:
+    image: x
+    networks:
+      - netdata-net # netdata
+networks:
+  netdata-net: {}
+  other: {}
+YAML
+        cp "${r}/dep/c.yml" "${r}/inst/c.yml"
+        awk -v f="${from}" -v t="${to}" 'f != "" && !d && $0 == f { $0 = t; d = 1 } { print }' \
+            "${r}/inst/c.yml" > "${r}/inst/x.yml"
+        mv "${r}/inst/x.yml" "${r}/inst/c.yml"
+        run bash "${CI_SH}" check netdata-isolation "${r}"
+        if [ "${want}" = clean ]; then
+            [ "${status}" -eq 0 ] || { echo "${case}: ${output}"; return 1; }
+            [[ "${output}" == *"netdata-isolation=clean"* ]]
+        else
+            [ "${status}" -eq 1 ] || { echo "${case}: rc ${status} ${output}"; return 1; }
+            [[ "${output}" == *"CI-ERROR-CHECK-0146"*"inst/c.yml: ${want}"* ]] || { echo "${case}: ${output}"; return 1; }
+            [[ "${output}" != *"dep/c.yml:"* ]] || { echo "${case}: dep flagged: ${output}"; return 1; }
+        fi
+    done <<'CASES'
+ok|||clean
+natsjoin|      - default # nats|      - netdata-net|netdata-net members must be netdata and ui (got: nats,netdata,ui)
+profiled|      - default # probe|      - netdata-net|netdata-net members must be netdata and ui (got: netdata,probe,ui)
+uimissing|      - netdata-net # ui|      - other|netdata-net members must be netdata and ui (got: netdata)
+netdatadefault|      - netdata-net # netdata|      - netdata-net\n      - default|netdata must join netdata-net only (got: default,netdata-net)
+CASES
+}
+
 @test "check docker-socket-proxy fails a forbidden broad container rule" {
     # What: Broad rule re-enters allowlist.
     # Why: generic container APIs must stay denied.

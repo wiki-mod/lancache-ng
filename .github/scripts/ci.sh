@@ -10056,6 +10056,17 @@ _ci_compose_env_files() {
         '.services[$s].env_file // [] | .[] | if type == "object" then .path else . end' <<< "${raw}"
 }
 
+# What: one compose file as JSON, every profile on.
+# Why: a profiled service is checked like any other.
+# From: Issue #1683 | PR #1858
+_ci_compose_json() {
+    local flags
+    local -a pf=()
+    flags="$(_ci_compose_profile_flags "$1")" || return 2
+    [ -z "${flags}" ] || mapfile -t pf <<< "${flags}"
+    _ci_compose_query "$1" "" "${pf[@]}" config --no-env-resolution --format json
+}
+
 # What: every stack compose renders clean in every profile.
 # Why: profiles come from the file; none is skipped.
 # From: Issue #1683 | PR #1858
@@ -10187,7 +10198,7 @@ _ci_check_docker_socket_proxy() {
         # Why: a dep health flap must not stop them.
         # From: Issue #763 | PR #1858
         local cfg deps line
-        cfg="$(_ci_compose_query "${repo_root}/${cf}" "" config --no-env-resolution --format json)" || return 2
+        cfg="$(_ci_compose_json "${repo_root}/${cf}")" || return 2
         deps="$(_ci_capture 0 jq -r '.services as $s
             | ("ui", "watchdog") as $n | ($s[$n].depends_on // {}) as $d
             | (if ($d["docker-socket-proxy"].condition // "none") != "service_started"
@@ -10233,6 +10244,33 @@ _ci_check_docker_socket_proxy() {
         return 1
     fi
     printf 'docker-socket-proxy=clean\n'
+}
+
+# What: netdata-net holds netdata and the ui, nothing else.
+# Why: any other member could reach the netdata API.
+# From: Issue #1683 | PR #1858
+_ci_check_netdata_isolation() {
+    local repo_root="${1:-${CI_REPO_ROOT}}" cf dep inst cfg out line
+    local -a viol=()
+    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    inst="$(_ci_installer_compose "${repo_root}")" || return 2
+    for cf in "${dep}" "${inst}"; do
+        cfg="$(_ci_compose_json "${repo_root}/${cf}")" || return 2
+        out="$(_ci_capture 0 jq -r '
+            [.services | to_entries[] | select((.value.networks // {}) | has("netdata-net")) | .key] as $m
+            | (if ($m | sort) != ["netdata", "ui"]
+                then "netdata-net members must be netdata and ui (got: \($m | sort | join(",")))" else empty end),
+              ((.services.netdata.networks // {}) | keys | select(. != ["netdata-net"])
+                | "netdata must join netdata-net only (got: \(join(",")))")' <<<"${cfg}")" || return 2
+        while IFS= read -r line; do
+            [ -z "${line}" ] || viol+=("${cf}: ${line}")
+        done <<<"${out}"
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0146]" "reason=\"netdata network isolation violated\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'netdata-isolation=clean\n'
 }
 
 # What: Fail unless .env defines every key.
@@ -11196,7 +11234,7 @@ ci_cmd_check_all() {
         proxy-cache-env-doc-drift \
         dependabot-docker-base-consistency \
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
-        docker-socket-proxy quickstart-required-env dhcp-proxy-env \
+        docker-socket-proxy netdata-isolation quickstart-required-env dhcp-proxy-env \
         setup-keys-kea setup-update-safety setup-docker-conflict setup-prompt-drift image-channel-resolution \
         vex-drift logging-matrix \
         trivy-action-direct-usage entrypoint-lib-wiring dockerfile-build-tools \
@@ -11261,6 +11299,7 @@ ci_cmd_check() {
         compose-config) _ci_check_compose_config "$@" ;;
         nats-atomic-write) _ci_check_nats_atomic_write "$@" ;;
         docker-socket-proxy) _ci_check_docker_socket_proxy "$@" ;;
+        netdata-isolation) _ci_check_netdata_isolation "$@" ;;
         quickstart-required-env) _ci_check_quickstart_required_env "$@" ;;
         dhcp-proxy-env) _ci_check_dhcp_proxy_env "$@" ;;
         setup-keys-kea) _ci_check_setup_keys_kea "$@" ;;
