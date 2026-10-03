@@ -4314,11 +4314,13 @@ ci_cmd_release_changelog() {
     local tag="${1:-}" branch="${CI_DEFAULT_BRANCH:-}" changes file head out
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0032]" "reason=\"tag arg required\""; return 2; }
     file="$(_ci_variable CI_CHANGELOG)" || return 2
-    if [[ ! "${tag}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+    local kind=""
+    if kind="$(_ci_release_tag_kind "${tag}")"; then :; fi
+    if [ "${kind}" != false ]; then
         printf 'release-changelog=skip tag=%s reason="not a stable vX.Y.Z tag"\n' "${tag}"
         return 0
     fi
-    head="## [${BASH_REMATCH[1]}]"
+    head="## [${tag#"${tag%%[0-9]*}"}]"
     if [ -z "${branch}" ]; then
         ci_log "[CI-ERROR-RELEASE-0033]" "reason=\"CI_DEFAULT_BRANCH is required\""
         return 2
