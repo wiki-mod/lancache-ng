@@ -1674,6 +1674,98 @@ install_quickstart_compose_assets() {
     fi
 }
 
+# What: copies a named volume into an empty directory
+# Why: prod keeps it in bind dirs, quickstart in volumes
+# From: Issue #1683 | PR #1858
+copy_volume_to_dir() {
+    local volume="$1" dir="$2"
+    docker volume inspect "$volume" >/dev/null 2>&1 || return 0
+    mkdir -p "$dir" || die "Failed to create $dir for $volume."
+    if [[ -n "$(ls -A "$dir" 2>/dev/null)" ]]; then
+        print_ok "Kept existing $dir; $volume not copied"
+        return 0
+    fi
+    docker run --rm -v "${volume}:/from:ro" -v "${dir}:/to" alpine sh -c 'cp -a /from/. /to/' \
+        || die "Failed to copy Docker volume $volume into $dir. The volume is unchanged."
+    print_ok "Copied $volume into $dir"
+}
+
+# What: a checkout root resolves to deploy/prod
+# Why: commands default to the checkout root
+# From: Issue #1683 | PR #1858
+resolve_stack_dir() {
+    local dir="$1"
+    if [[ ! -f "$dir/docker-compose.yml" && -f "$dir/deploy/prod/docker-compose.yml" ]]; then
+        printf '%s\n' "$dir/deploy/prod"
+    else
+        printf '%s\n' "$dir"
+    fi
+}
+
+# What: true for a quickstart copy outside deploy/prod
+# Why: these installs must converge to deploy/prod on update
+# From: Issue #1683 | PR #1858
+is_quickstart_install() {
+    local dir="$1"
+    ! is_deploy_prod_install_dir "$dir" && [[ -f "$dir/docker-compose.yml" && -f "$PROD_COMPOSE" ]]
+}
+
+# What: converts a quickstart install into deploy/prod
+# Why: AG-KD-008 one profile; AG-OP-007 convergence
+# From: Issue #1683 | PR #1858
+migrate_quickstart_install() {
+    local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" env_local old_env project key value pair volume dir copy
+    env_local="$stack_dir/.env.local"
+    old_env="$old_dir/.env"
+    [[ -f "$old_env" || -f "$env_local" ]] \
+        || die "Cannot migrate $old_dir: neither $old_env nor $env_local exists."
+    print_step "Migrating the quickstart install at $old_dir to $stack_dir"
+    ( cmd_backup --config "$old_dir" ) \
+        || die "Pre-migration backup of $old_dir failed; nothing was changed."
+    project=$(compose_project_name "$old_dir" "$old_env")
+    ( cd "$old_dir" && docker compose --env-file "$old_env" stop ) \
+        || die "Failed to stop the quickstart stack in $old_dir; nothing was changed."
+    if [[ ! -f "$env_local" ]]; then
+        install -m 0600 "$old_env" "$env_local" || die "Failed to create $env_local from $old_env."
+    fi
+    env_key_exists LANCACHE_STATE_DIR "$env_local" || set_env_key LANCACHE_STATE_DIR "$old_dir" "$env_local"
+    # What: relative paths become absolute to old dir
+    # Why: prod resolves them against deploy/prod instead
+    # From: Issue #1683 | PR #1858
+    for key in CACHE_DIR KEA_DATA_DIR NTP_DATA_DIR CACHEHAMSTER_DATA_DIR; do
+        value=$(get_env_var "$key" "$env_local")
+        [[ -n "$value" && "$value" != /* ]] || continue
+        set_env_key "$key" "$(realpath -m "$old_dir/$value")" "$env_local"
+    done
+    value=$(get_env_var LANCACHE_STATE_DIR "$env_local")
+    for pair in pdns-data-standard:PDNS_STANDARD_DIR:pdns-standard pdns-data-ssl:PDNS_SSL_DIR:pdns-ssl \
+        pdns-filter-state:PDNS_FILTER_STATE_DIR:pdns-filter-state nats-data:NATS_DATA_DIR:nats \
+        nats-conf:NATS_CONF_DIR:nats-conf logs-syslog-ng:SYSLOG_NG_LOG_DIR:syslog-ng; do
+        IFS=: read -r volume key dir <<< "$pair"
+        dir=$(get_env_var "$key" "$env_local"); dir="${dir:-$value/${pair##*:}}"
+        copy_volume_to_dir "${project}_${volume}" "$dir"
+    done
+    if [[ -f "$old_dir/certs/ca.crt" && ! -f "$SCRIPT_DIR/certs/ca.crt" ]]; then
+        mkdir -p "$SCRIPT_DIR/certs" && cp -p "$old_dir/certs/ca."* "$SCRIPT_DIR/certs/" \
+            || die "Failed to copy the CA from $old_dir/certs to $SCRIPT_DIR/certs."
+    fi
+    sync_config_prod_local_env "$stack_dir" "$env_local"
+    if systemd_available; then
+        write_lancache_systemd_units "$stack_dir"
+    fi
+    # What: bundle removed last; its absence marks done
+    # Why: an interrupted run resumes on the next update
+    # From: Issue #1683 | PR #1858
+    for copy in "$old_dir/scripts/shared-secret-bootstrap.sh" "$old_dir/scripts/untracked/docker-socket-proxy.sh"; do
+        [[ "$(realpath -m "$copy")" == "$(realpath -m "$DOCKER_SOCKET_PROXY_SCRIPT")" ]] && continue
+        rm -f "$copy" || die "Failed to remove the quickstart copy $copy."
+    done
+    rm -f "$old_dir/docker-compose.yml" "$old_env" || die "Failed to remove the quickstart files in $old_dir."
+    ( cd "$stack_dir" && docker compose --env-file "$env_local" up -d ) \
+        || die "The migrated stack did not start from $stack_dir; restore with: setup.sh restore."
+    print_ok "Quickstart install migrated to $stack_dir"
+}
+
 # What: writes the four lancache systemd units
 # Why: fresh install and migration share one unit definition
 # From: Issue #1683 | PR #1858
@@ -3634,7 +3726,7 @@ cmd_backup() {
             *) install_dir="$1"; shift ;;
         esac
     done
-    install_dir=$(realpath -m "$install_dir")
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")")
     backup_root=$(realpath -m "$backup_root")
     [[ -f "$install_dir/docker-compose.yml" && -f "$(runtime_env_file_for_install_dir "$install_dir")" ]] \
         || die_no_stack_found "$install_dir"
@@ -3808,7 +3900,7 @@ cmd_restore() {
     # Why: EXIT-trap locals vanish once set -e unwinds the frame.
     # From: PR #1775
     install_dir="${2:-/opt/lancache-ng}"
-    install_dir=$(realpath -m "$install_dir")
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")")
     [[ -n "$archive" ]] || die "Usage: $0 restore <backup.tar.gz> [install-dir]"
     [[ -f "$archive" ]] || die "Backup archive not found: $archive"
     # openssl is required here (not just tar/rsync) because the .env
@@ -4827,6 +4919,11 @@ apply_stack_update_ordered() {
 # convergence. Reordering can leave a half-migrated stack running.
 perform_stack_update_flow() {
     local install_dir="$1"
+    if is_quickstart_install "$install_dir"; then
+        migrate_quickstart_install "$install_dir"
+        install_dir="${PROD_COMPOSE%/*}"
+    fi
+    install_dir=$(resolve_stack_dir "$install_dir")
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die_no_stack_found "$install_dir"
     assert_prebuilt_image_platform_supported
@@ -4934,7 +5031,7 @@ perform_stack_update_flow() {
 # ── update subcommand ─────────────────────────────────────────────────────────
 cmd_update() {
     local install_dir="${1:-/opt/lancache-ng}"
-    install_dir=$(realpath -m "$install_dir")
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")")
     perform_stack_update_flow "$install_dir"
 }
 
@@ -4973,7 +5070,7 @@ cmd_auto_update() {
     local install_dir="${1:-/opt/lancache-ng}"
     local env_file auto_update_enabled current_channel current_tag deployed_tag decision
 
-    install_dir=$(realpath -m "$install_dir")
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")")
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die_no_stack_found "$install_dir"
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
@@ -5131,7 +5228,7 @@ cmd_converge_reconcile() {
     local ui_dhcp_mode current_dhcp_mode current_compose_profiles new_compose_profiles current_ssl_enabled
     local current_ntp_enabled ui_logging_enabled current_logging_enabled
 
-    install_dir=$(realpath -m "$install_dir")
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")")
     # A converge tick can fire before the very first install completes (the
     # timer/service are both installed, then enabled, in that order -- see
     # "Installing systemd watchdog"/"Starting stack"); silently skip rather
@@ -5276,6 +5373,7 @@ cmd_converge_reconcile() {
 cmd_debug() {
     local install_dir="${1:-/opt/lancache-ng}"
     local env_file
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")")
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die_no_stack_found "$install_dir"
     cd "$install_dir"
@@ -5549,7 +5647,7 @@ cmd_create_logs_for_issue() {
             *) install_dir="$1"; shift ;;
         esac
     done
-    install_dir=$(realpath -m "$install_dir")
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")")
     dest_root=$(realpath -m "$dest_root")
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die_no_stack_found "$install_dir"
@@ -5741,7 +5839,7 @@ cmd_reset_to_last_known_good_config() {
     # relative to the NEW cwd, silently doubling the path (e.g.
     # "a/b/a/b/.env"). Confirmed empirically while validating this command
     # against a real stack with a relative install-dir argument.
-    install_dir=$(realpath -m "$install_dir")
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")")
 
     # PowerDNS's zone/record snapshots are inherently per-zone (lan.,
     # local.lan., and 20 private reverse zones -- see zone_snapshots.rs's
@@ -6222,7 +6320,7 @@ reset_dns_to_last_known_good_config() {
 # own deploy/prod tree (#666).
 cmd_update_ip() {
     local install_dir="${1:-/opt/lancache-ng}"
-    install_dir=$(realpath -m "$install_dir")
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")")
 
     printf "\n"
     printf "${BOLD}╔═══════════════════════════════════════╗${RESET}\n"

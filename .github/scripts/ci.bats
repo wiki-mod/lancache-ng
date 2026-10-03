@@ -10836,6 +10836,43 @@ CASES
     : > "${dp}/.env.local"
     [ "$(runtime_env_file_for_install_dir "${dp}")" = "${dp}/.env.local" ]
     [ "$(runtime_env_file_for_install_dir /var/lib/lancache)" = "/var/lib/lancache/.env" ]
+    # What: a quickstart install migrates into deploy/prod.
+    # Why: AG-OP-007 convergence; no state or value lost
+    # From: Issue #1683 | PR #1858
+    local co="${BATS_TEST_TMPDIR}/co" qs="${BATS_TEST_TMPDIR}/qs" log="${BATS_TEST_TMPDIR}/docker.log"
+    _load_functions "${repo_root}/setup.sh" compose_project_name
+    mkdir -p "${co}/deploy/prod" "${co}/config/prod" "${co}/scripts/untracked" "${qs}/scripts/untracked" "${qs}/certs"
+    : > "${co}/deploy/prod/docker-compose.yml"; : > "${co}/scripts/untracked/docker-socket-proxy.sh"
+    printf 'CACHE_MAX_SIZE=50g\n' > "${co}/config/prod/proxy.env"
+    printf 'name: lancache-ng\n' > "${qs}/docker-compose.yml"; : > "${qs}/scripts/shared-secret-bootstrap.sh"
+    : > "${qs}/scripts/untracked/docker-socket-proxy.sh"; printf ca > "${qs}/certs/ca.crt"
+    printf '%s\n' IP_STANDARD=192.0.2.10 KEA_DATA_DIR=./kea CACHE_DIR=/srv/cache CACHE_MAX_SIZE=200g > "${qs}/.env"
+    SCRIPT_DIR="${co}" PROD_COMPOSE="${co}/deploy/prod/docker-compose.yml"
+    DOCKER_SOCKET_PROXY_SCRIPT="${co}/scripts/untracked/docker-socket-proxy.sh"
+    cmd_backup() { echo "backup $*" >> "${log}"; }
+    systemd_available() { return 1; }
+    docker() {
+        echo "docker $*" >> "${log}"
+        case "$1 $2" in
+            "volume inspect") [[ "$3" == lancache-ng_pdns-data-standard ]] ;;
+            "run --rm") local a; for a in "$@"; do [[ "${a}" == *:/to ]] && touch "${a%:/to}/copied"; done; true ;;
+        esac
+    }
+    is_quickstart_install "${qs}"
+    migrate_quickstart_install "${qs}" >/dev/null
+    local el="${co}/deploy/prod/.env.local"
+    [ "$(stat -c %a "${el}")" = 600 ]
+    grep -qx IP_STANDARD=192.0.2.10 "${el}"; grep -qx "LANCACHE_STATE_DIR=${qs}" "${el}"
+    grep -qx "KEA_DATA_DIR=${qs}/kea" "${el}"; grep -qx CACHE_DIR=/srv/cache "${el}"
+    [ "$(cat "${co}/config/prod/proxy.local.env")" = CACHE_MAX_SIZE=200g ]
+    [ -e "${qs}/pdns-standard/copied" ] && [ ! -e "${qs}/nats" ] && [ "$(cat "${co}/certs/ca.crt")" = ca ]
+    [ ! -e "${qs}/docker-compose.yml" ] && [ ! -e "${qs}/.env" ] && [ ! -e "${qs}/scripts/shared-secret-bootstrap.sh" ]
+    [ ! -e "${qs}/scripts/untracked/docker-socket-proxy.sh" ] && [ -e "${DOCKER_SOCKET_PROXY_SCRIPT}" ]
+    grep -qx "backup --config ${qs}" "${log}"
+    grep -qx "docker compose --env-file ${qs}/.env stop" "${log}"
+    grep -qx "docker compose --env-file ${el} up -d" "${log}"
+    ! is_quickstart_install "${qs}"
+    [ "$(resolve_stack_dir "${co}")" = "${co}/deploy/prod" ] && [ "$(resolve_stack_dir "${qs}")" = "${qs}" ]
 }
 
 @test "deploy_prod_repo_input_paths snapshots repo-root runtime inputs for deploy/prod" {
