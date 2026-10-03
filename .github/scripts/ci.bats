@@ -12330,6 +12330,46 @@ CASES
         echo "acl cidrs: ${output}"; return 1; }
 }
 
+@test "setup restore: sed-safe paths and stale .env.local" {
+    # What: path filter per shape; stale override moved.
+    # Why: a stale .env.local overrides the restored .env.
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" p want moved
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/setup.sh" restore_path_is_sed_safe restore_clear_stale_env_local_if_unarchived
+    print_warn() { printf 'WARN %s\n' "$*"; }
+    while IFS='|' read -r want p; do
+        p="$(printf '%b' "${p}")"
+        if restore_path_is_sed_safe "${p}"; then [ "${want}" = ok ]; else [ "${want}" = bad ]; fi \
+            || { echo "path '${p}' want ${want}"; return 1; }
+    done <<'CASES'
+ok|/opt/lancache-ng
+ok|/opt/lancache.ng-2
+ok|/srv/lan cache/ng
+bad|/opt/lancache#ng
+bad|/opt/lan&cache
+bad|/opt/lan\\cache
+bad|/opt/lan\ncache
+CASES
+    mkdir -p "${t}/arch" "${t}/inst"
+    run restore_clear_stale_env_local_if_unarchived "${t}/arch" "${t}/inst"
+    [ "${status}" -eq 0 ] && [ -z "${output}" ] && [ -z "$(ls -A "${t}/inst")" ] || { echo "noop: ${output}"; return 1; }
+    printf 'IP_STANDARD=192.0.2.10\n' > "${t}/inst/.env.local"
+    run restore_clear_stale_env_local_if_unarchived "${t}/arch" "${t}/inst"
+    [ "${status}" -eq 0 ]
+    moved="$(cd "${t}/inst" && ls -A)"
+    [[ "${moved}" =~ ^\.env\.local\.pre-restore-[0-9]{8}T[0-9]{6}Z$ ]] || { echo "moved: ${moved}"; return 1; }
+    [ "$(cat "${t}/inst/${moved}")" = IP_STANDARD=192.0.2.10 ]
+    [[ "${output}" == "WARN "*"${moved}"* ]]
+    run restore_clear_stale_env_local_if_unarchived "${t}/arch" "${t}/inst"
+    [ "${status}" -eq 0 ] && [ "$(cd "${t}/inst" && ls -A)" = "${moved}" ] || { echo "second run changed it"; return 1; }
+    printf 'IP_STANDARD=192.0.2.20\n' | tee "${t}/arch/.env.local" > "${t}/inst/.env.local"
+    run restore_clear_stale_env_local_if_unarchived "${t}/arch" "${t}/inst"
+    [ "${status}" -eq 0 ]
+    [ "$(cat "${t}/inst/.env.local")" = IP_STANDARD=192.0.2.20 ]
+    [ "$(cd "${t}/inst" && ls -A | wc -l)" -eq 2 ]
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.
