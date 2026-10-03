@@ -1817,6 +1817,13 @@ ci_cmd_changed_files() {
         return 2
     fi
     ci_log "[CI-INFO-CORE-0121]" "file=\"${out}\" paths=$(grep -c . <<< "${list}") base=\"${base:-none}\""
+    # What: also the step output when a workflow runs this.
+    # Why: YAML only calls ci.sh; no output plumbing there.
+    # From: Issue #1683 | PR #1858
+    if [ -n "${GITHUB_OUTPUT:-}" ] && ! err="$(printf 'file=%s\n' "${out}" 2>&1 >> "${GITHUB_OUTPUT}")"; then
+        ci_error "[CI-ERROR-CORE-0125]" "file=\"${GITHUB_OUTPUT}\" reason=\"changed-files step output not written\"" "${err}"
+        return 2
+    fi
     printf '%s\n' "${out}"
 }
 
@@ -7187,7 +7194,16 @@ _ci_build_tools_resolve_image() {
         ci_log "[CI-ERROR-BUILDTOOLS-0018]" "channel=\"${channel}\" reason=\"no published build-tools digest; FAIL CLOSED\""
         return 2
     fi
-    printf '%s@%s\n' "${image}" "${digest}"
+    image="${image}@${digest}"
+    # What: also the step output when a workflow runs this.
+    # Why: YAML only calls ci.sh; no output plumbing there.
+    # From: Issue #1683 | PR #1858
+    local err
+    if [ -n "${GITHUB_OUTPUT:-}" ] && ! err="$(printf 'image=%s\n' "${image}" 2>&1 >> "${GITHUB_OUTPUT}")"; then
+        ci_error "[CI-ERROR-BUILDTOOLS-0023]" "file=\"${GITHUB_OUTPUT}\" reason=\"image step output not written\"" "${err}"
+        return 2
+    fi
+    printf '%s\n' "${image}"
 }
 
 # What: build-tools lifecycle helpers for the workflow.

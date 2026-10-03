@@ -5544,6 +5544,16 @@ CASES
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"build-tools@sha256:chan"* ]]
     [[ "${output}" != *"APK_CALLED"* ]]
+    # What: under GitHub the ref is also the step output.
+    # Why: workflows only call ci.sh; no echo in the YAML.
+    # From: Issue #1683 | PR #1858
+    local gho="${BATS_TEST_TMPDIR}/gho"
+    : > "${gho}"
+    GITHUB_OUTPUT="${gho}" run _ci_build_tools_resolve_image
+    [ "${status}" -eq 0 ]
+    grep -qx 'image=.*build-tools@sha256:chan' "${gho}"
+    GITHUB_OUTPUT="${BATS_TEST_TMPDIR}/no/such/dir/out" run _ci_build_tools_resolve_image
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-BUILDTOOLS-0023]"* ]]
 }
 
 @test "build-tools signature moves on an arm64-only apk change" {
@@ -8796,6 +8806,19 @@ CASES
     [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
     [ "${output}" = "${b} ${h}" ]
     [ "$(git -C "${sh}" rev-parse --is-shallow-repository)" = false ]
+    # What: under GitHub the list path is also step output.
+    # Why: workflows only call ci.sh; no echo in the YAML.
+    # From: Issue #1683 | PR #1858
+    local gho="${BATS_TEST_TMPDIR}/gho"
+    : > "${gho}"
+    CI_REPO_ROOT="${sh}" GITHUB_EVENT_NAME=push GITHUB_REF="refs/heads/${br}" BEFORE_SHA="${b}" \
+        GITHUB_SHA="${h}" RUNNER_TEMP="${BATS_TEST_TMPDIR}" GITHUB_OUTPUT="${gho}" run ci_cmd_changed_files
+    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
+    grep -qx "file=${BATS_TEST_TMPDIR}/changed-files.txt" "${gho}"
+    CI_REPO_ROOT="${sh}" GITHUB_EVENT_NAME=push GITHUB_REF="refs/heads/${br}" BEFORE_SHA="${b}" \
+        GITHUB_SHA="${h}" RUNNER_TEMP="${BATS_TEST_TMPDIR}" GITHUB_OUTPUT="${BATS_TEST_TMPDIR}/no/dir/o" \
+        run ci_cmd_changed_files
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-CORE-0125]"* ]]
 }
 
 @test "check changelog-direct-edit notices the release label exemption" {

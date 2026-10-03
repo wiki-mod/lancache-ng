@@ -67,9 +67,7 @@ jobs:
           git checkout -q FETCH_HEAD
       - name: Resolve the build-tools image
         id: resolve
-        run: |
-          image="$(bash .github/scripts/ci.sh build-tools resolve-image)"
-          echo "image=${image}" >> "$GITHUB_OUTPUT"
+        run: bash .github/scripts/ci.sh build-tools resolve-image
 
   # What: publish the GitHub release notes and OpenVEX.
   # Why: §6.3 release artifacts; ci.sh is idempotent.
