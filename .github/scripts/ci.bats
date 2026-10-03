@@ -12473,6 +12473,92 @@ CASES
     [ "$(g -C "${t}/co" rev-parse HEAD)" = "${master}" ]
 }
 
+@test "setup env migration and release image tag per input" {
+    # What: migrated keys, proxy mode, tag from git/VERSION.
+    # Why: an update keeps operator values and pins a tag.
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" e="${BATS_TEST_TMPDIR}/.env" case lines args want rc dir
+    local -a a
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/setup.sh" _compose_parse_env_value get_env_var env_key_exists \
+        get_env_assignment_value_raw_nonempty validate_env_value write_env_file set_env_assignment set_env_key \
+        append_env_migrated_assignment_if_missing migrate_proxy_security_mode_for_update \
+        derive_release_archive_image_tag validate_lancache_image_channel validate_lancache_image_tag \
+        validate_lancache_image_prefix validate_lancache_image_registry resolve_lancache_image_prefix \
+        resolve_lancache_image_registry lancache_stack_pointer_channel_for resolve_lancache_stack_channel_tag \
+        resolve_lancache_image_channel resolve_lancache_image_tag
+    die() { printf '%s\n' "$*" >&2; exit 1; }
+    print_ok() { :; }
+    while IFS='|' read -r case lines args want; do
+        printf '%b' "${lines}" > "${e}"
+        read -r -a a <<< "${args}"
+        [ "${a[2]}" != - ] || a[2]=""
+        append_env_migrated_assignment_if_missing "${a[0]}" "${a[1]}" "${a[2]}" "${e}"
+        [ "$(paste -sd'#' "${e}")" = "${want}" ] || { echo "${case}: $(paste -sd'#' "${e}")"; return 1; }
+    done <<'CASES'
+emptytarget|IP_STANDARD=192.0.2.10\nUI_BIND_IP=\n|UI_BIND_IP IP_STANDARD 192.0.2.10|IP_STANDARD=192.0.2.10#UI_BIND_IP=
+copysyntax|CACHE_DIR="/opt/lancache cache" # fast disk\n|CACHE_DIR_STANDARD CACHE_DIR /opt/lancache-ng/cache|CACHE_DIR="/opt/lancache cache" # fast disk#CACHE_DIR_STANDARD="/opt/lancache cache" # fast disk
+keep|CACHE_DIR=/legacy/cache\nCACHE_DIR_STANDARD=/custom/cache\n|CACHE_DIR_STANDARD CACHE_DIR /opt/lancache-ng/cache|CACHE_DIR=/legacy/cache#CACHE_DIR_STANDARD=/custom/cache
+fallback|CACHE_DIR=\n|CACHE_DIR_STANDARD CACHE_DIR /opt/lancache-ng/cache|CACHE_DIR=#CACHE_DIR_STANDARD=/opt/lancache-ng/cache
+nothing|OTHER=1\n|NEW_KEY MISSING_KEY -|OTHER=1
+CASES
+    while IFS='|' read -r case lines want; do
+        printf '%b' "${lines}" > "${e}"
+        migrate_proxy_security_mode_for_update "${e}"
+        [ "$(paste -sd'#' "${e}")" = "${want}" ] || { echo "${case}: $(paste -sd'#' "${e}")"; return 1; }
+    done <<'CASES'
+strictopen|PROXY_SECURITY_MODE=strict\nPROXY_ALLOWED_CLIENT_CIDRS=\n|PROXY_SECURITY_MODE=lazy#PROXY_ALLOWED_CLIENT_CIDRS=
+strictcidr|PROXY_SECURITY_MODE=strict\nPROXY_ALLOWED_CLIENT_CIDRS=192.168.1.0/24\n|PROXY_SECURITY_MODE=strict#PROXY_ALLOWED_CLIENT_CIDRS=192.168.1.0/24
+lazy|PROXY_SECURITY_MODE=lazy\n|PROXY_SECURITY_MODE=lazy
+CASES
+    unset LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_TAG
+    export SCRIPT_DIR="${t}/archive"
+    mkdir -p "${SCRIPT_DIR}"
+    while IFS='|' read -r case want rc; do
+        printf '%s\n' "${case}" > "${SCRIPT_DIR}/VERSION"
+        [ "${case}" != empty ] || : > "${SCRIPT_DIR}/VERSION"
+        run derive_release_archive_image_tag
+        [ "${status}" -eq "${rc}" ] && [ "${output}" = "${want}" ] || { echo "VERSION ${case}: rc ${status} ${output}"; return 1; }
+    done <<'CASES'
+0.2.0|v0.2.0|0
+v1.2.3-rc.1|v1.2.3-rc.1|0
+1.2|Invalid release image tag derived from VERSION: v1.2|2
+empty|VERSION is empty; cannot derive a release image tag.|2
+CASES
+    printf '0.2.0\n' > "${SCRIPT_DIR}/VERSION"
+    [ "$(resolve_lancache_image_channel "${t}/missing.env")" = pinned ]
+    [ "$(LANCACHE_IMAGE_CHANNEL=pinned resolve_lancache_image_tag "${t}/missing.env")" = v0.2.0 ]
+    git() {
+        local a ok=0
+        for a in "$@"; do [ "${a}" != "safe.directory=${STUB_TRUST}" ] || ok=1; done
+        if [ "${ok}" -eq 0 ]; then
+            printf "fatal: detected dubious ownership in repository at '%s'\nTo add an exception for this directory, call:\n\n\tgit config --global --add safe.directory '%s'\n" \
+                "${STUB_TRUST}" "${STUB_TRUST}" >&2
+            return 128
+        fi
+        case "$*" in
+            *"rev-parse --is-inside-work-tree"*) return 0 ;;
+            *"describe --tags --exact-match"*) [ -n "${STUB_TAG}" ] || return 128; printf '%s\n' "${STUB_TAG}" ;;
+            *) return 1 ;;
+        esac
+    }
+    mkdir -p "${t}/real dir"
+    ln -s "${t}/real dir" "${t}/link"
+    while IFS='|' read -r case dir want args; do
+        export SCRIPT_DIR="${t}/${dir}" STUB_TRUST="${t}/real dir" STUB_TAG="${args}"
+        : > "${SCRIPT_DIR}/.git"
+        printf '9.9.9\n' > "${SCRIPT_DIR}/VERSION"
+        run derive_release_archive_image_tag
+        [ "${status}" -eq "${want%%:*}" ] || { echo "${case}: rc ${status} ${output}"; return 1; }
+        [ "$(grep -v '^Note: ' <<< "${output}")" = "${want#*:}" ] || { echo "${case}: ${output}"; return 1; }
+    done <<'CASES'
+tagged|real dir|0:v2.0.0|v2.0.0
+untagged|real dir|1:|
+symlink|link|0:v3.2.1|v3.2.1
+badtag|real dir|2:Invalid release tag from git checkout: release-7|release-7
+CASES
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.
