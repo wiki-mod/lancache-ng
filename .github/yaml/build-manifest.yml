@@ -363,6 +363,7 @@ build_toolchain:
       - sccache
       - sed
       - shellcheck
+      - shfmt
       - sqlite
       - tcpdump
       # What: trivy version-pinned 0.74.0-r0
@@ -441,6 +442,7 @@ build_toolchain:
       - sed
       - sha256sum
       - shellcheck
+      - shfmt
       - sort
       - tar
       - tcpdump
@@ -464,6 +466,7 @@ build_toolchain:
       - bats --version
       - parallel --version
       - shellcheck --version
+      - shfmt --version
       - docker --version
       - docker compose version
       - docker buildx version
