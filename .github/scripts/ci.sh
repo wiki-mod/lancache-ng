@@ -2011,7 +2011,9 @@ _ci_registry() {
 # From: Issue #1683
 _ci_retry() {
     local op="$1"; shift
-    local n=0 max="${CI_RETRY_MAX_ATTEMPTS:-4}" backoff="${CI_RETRY_BACKOFF_BASE_SECONDS:-1}" raw cls
+    local n=0 max backoff raw cls
+    max="$(_ci_variable CI_RETRY_MAX_ATTEMPTS)" || return 2
+    backoff="$(_ci_variable CI_RETRY_BACKOFF_BASE_SECONDS)" || return 2
     while :; do
         n=$((n + 1))
         if raw="$("$@" 2>&1)"; then
@@ -2795,7 +2797,8 @@ _ci_trivy_cache_dir() {
         "${CI_TRIVY_CACHE_DIR_CMD}"
         return "$?"
     fi
-    local shared="${CI_TRIVY_SHARED_DIR:-/mnt/trivy-db}"
+    local shared
+    shared="$(_ci_variable CI_TRIVY_SHARED_DIR)" || return 2
     local fallback="${CI_TRIVY_FALLBACK_DIR:-${CI_TMPDIR}/trivy-cache-fallback}"
     case "${shared}" in
         /tmp|/tmp/*) ci_log "[CI-ERROR-SCAN-0007]" "reason=\"shared trivy cache-dir must not be tmpfs /tmp\" got=\"${shared}\""; return 2 ;;
@@ -2843,7 +2846,8 @@ _ci_trivy_db_lock_run() {
     local cache_dir="$1" lock_timeout="$2" stale_after="$3"; shift 3
     [ "${1:-}" = "--" ] && shift
     local lock_dir="${cache_dir}/.trivy-db-update.lock"
-    local poll="${CI_TRIVY_LOCK_POLL:-5}" waited=0 lock_mtime age mkerr
+    local poll waited=0 lock_mtime age mkerr
+    poll="$(_ci_variable CI_TRIVY_LOCK_POLL)" || return 2
     # What: cache-dir must exist before the lock mkdir.
     # Why: a missing parent must not misread as "locked".
     # From: Issue #1683
@@ -2902,8 +2906,9 @@ _ci_trivy_db_lock_run() {
 # From: Issue #1683
 _ci_trivy_db_ensure_fresh() {
     local cache_dir="$1" rc=0
-    local lock_timeout="${CI_TRIVY_LOCK_TIMEOUT:-900}"
-    local stale_after="${CI_TRIVY_LOCK_STALE:-1200}"
+    local lock_timeout stale_after
+    lock_timeout="$(_ci_variable CI_TRIVY_LOCK_TIMEOUT)" || return 2
+    stale_after="$(_ci_variable CI_TRIVY_LOCK_STALE)" || return 2
     if _ci_trivy_db_fresh "${cache_dir}"; then
         printf 'present=true\n'
         return 0
@@ -2926,9 +2931,9 @@ _ci_trivy_db_ensure_fresh() {
 # From: Issue #1683
 _ci_trivy_scan() {
     local service="$1" digest="$2" ref report n=0 raw
-    local max="${CI_TRIVY_MAX:-4}"
-    local scanners="${CI_TRIVY_SCANNERS:-vuln,secret}"
-    local ignore cache_rec cache_dir fresh_rec skip_db=0
+    local max scanners ignore cache_rec cache_dir fresh_rec skip_db=0
+    max="$(_ci_variable CI_TRIVY_MAX)" || return 2
+    scanners="$(_ci_variable CI_TRIVY_SCANNERS)" || return 2
     ignore="$(_ci_repo_path CI_TRIVY_IGNORE)" || return 2
     cache_rec="$(_ci_trivy_cache_dir)" || return 3
     cache_dir="$(_ci_record_field "${cache_rec}" dir)"
@@ -5179,7 +5184,7 @@ _ci_validate_reserve() {
     local run_id run_attempt max n seed subnet holder crc lrc overlap
     run_id="${GITHUB_RUN_ID:-$$}"
     run_attempt="${GITHUB_RUN_ATTEMPT:-1}"
-    max="${CI_VALIDATE_MAX_SLOTS:-10}"
+    max="$(_ci_variable CI_VALIDATE_MAX_SLOTS)" || return 2
     for (( n=1; n<=max; n++ )); do
         seed="$(_ci_validate_seed "${run_id}" "${run_attempt}" "${n}")"
         subnet="$(_ci_validate_subnet "${seed}")"
@@ -5327,8 +5332,9 @@ _ci_validate_cid_ip() {
 # Why: rm before detach hits 'active endpoints'.
 # From: Issue #1683 | PR #1858
 _ci_validate_await_detached() {
-    local name="$1" deadline count
-    deadline=$(( SECONDS + ${CI_VALIDATE_DETACH_TIMEOUT:-30} ))
+    local name="$1" deadline count timeout
+    timeout="$(_ci_variable CI_VALIDATE_DETACH_TIMEOUT)" || return 2
+    deadline=$(( SECONDS + timeout ))
     while [ "${SECONDS}" -lt "${deadline}" ]; do
         if ! count="$(docker network inspect "${name}" --format '{{len .Containers}}' 2>&1)"; then
             _ci_validate_network_gone "${name}" "${count}"
@@ -5501,8 +5507,9 @@ _ci_validate_no_health_services() {
 # Why: A crash-loop only shows after up exits 0.
 # From: Issue #1683 | PR #1858
 _ci_validate_wait_one() {
-    local project="$1" svc="$2" deadline cid="" status="none"
-    deadline=$(( SECONDS + ${CI_VALIDATE_HEALTH_TIMEOUT:-180} ))
+    local project="$1" svc="$2" deadline cid="" status="none" timeout
+    timeout="$(_ci_variable CI_VALIDATE_HEALTH_TIMEOUT)" || return 2
+    deadline=$(( SECONDS + timeout ))
     while [ "${SECONDS}" -lt "${deadline}" ]; do
         cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
         if [ -n "${cid}" ]; then
@@ -5515,7 +5522,7 @@ _ci_validate_wait_one() {
         fi
         sleep 2
     done
-    ci_log "[CI-INFO-VALIDATE-0078]" "service=\"${svc}\" container=\"${cid:-none}\" last_health=\"${status}\" timeout=${CI_VALIDATE_HEALTH_TIMEOUT:-180}s reason=\"not healthy before the deadline\""
+    ci_log "[CI-INFO-VALIDATE-0078]" "service=\"${svc}\" container=\"${cid:-none}\" last_health=\"${status}\" timeout=${timeout}s reason=\"not healthy before the deadline\""
     return 1
 }
 
@@ -5525,8 +5532,10 @@ _ci_validate_wait_one() {
 _ci_validate_wait_stable() {
     local project="$1" svc="$2" deadline cid status started exitcode
     local prev_started="" stable_since=-1
-    local window="${CI_VALIDATE_STABLE_WINDOW:-20}"
-    deadline=$(( SECONDS + ${CI_VALIDATE_HEALTH_TIMEOUT:-180} ))
+    local window timeout
+    window="$(_ci_variable CI_VALIDATE_STABLE_WINDOW)" || return 2
+    timeout="$(_ci_variable CI_VALIDATE_HEALTH_TIMEOUT)" || return 2
+    deadline=$(( SECONDS + timeout ))
     while [ "${SECONDS}" -lt "${deadline}" ]; do
         cid="$(_ci_validate_cid "${project}" "${svc}" -aq)" || return 2
         if [ -z "${cid}" ]; then
@@ -7927,7 +7936,9 @@ _ci_check_review_chronology() {
         ci_error "[CI-WARN-CHECK-0078]" "reason=\"bare #N duplicated outside From: (warn-only, PR #1856)\"" "$(printf '%s\n' "${dup_viol[@]}")"
     fi
     if [ "${#viol[@]}" -gt 0 ]; then
-        if [ "${CHRONOLOGY_WARN_ONLY:-0}" = "1" ]; then
+        local warn_only
+        warn_only="$(_ci_variable CHRONOLOGY_WARN_ONLY)" || return 2
+        if [ "${warn_only}" = "1" ]; then
             ci_error "[CI-WARN-CHECK-0079]" "reason=\"review-chronology / stale line-ref (warn-only)\"" "$(printf '%s\n' "${viol[@]}")"
             printf 'review-chronology=warn files=%s\n' "${#files[@]}"
             return 0
@@ -8349,7 +8360,9 @@ _ci_check_pr_title() {
     # What: PR_TITLE_LINT_MODE picks warn vs block mode.
     # Why: warn is the required default; block is opt-in.
     # From: Issue #1683 | PR #1858
-    if [ "${PR_TITLE_LINT_MODE:-warn}" != "block" ]; then
+    local lint_mode
+    lint_mode="$(_ci_variable PR_TITLE_LINT_MODE)" || return 2
+    if [ "${lint_mode}" != "block" ]; then
         ci_log "[CI-ERROR-CHECK-0086]" "reason=\"warn-mode, non-blocking; must fix before merge\" detail=\"$(printf '%s; ' "${errs[@]}")\""
         printf 'pr-title=warn\n'
         return 0
@@ -8587,9 +8600,10 @@ _ci_measure_run_blocks() {
 _ci_check_workflow_line_limit() {
     local dir="${1:-}"
     [ -n "${dir}" ] || dir="$(_ci_repo_path CI_WORKFLOW_DIR)" || return 2
-    local max_lines="${MAX_WORKFLOW_LINES:-8999}"
-    local max_bytes="${MAX_WORKFLOW_BYTES:-512000}"
-    local max_block="${MAX_RUN_BLOCK_BYTES:-74000}"
+    local max_lines max_bytes max_block
+    max_lines="$(_ci_variable MAX_WORKFLOW_LINES)" || return 2
+    max_bytes="$(_ci_variable MAX_WORKFLOW_BYTES)" || return 2
+    max_block="$(_ci_variable MAX_RUN_BLOCK_BYTES)" || return 2
     if [ ! -d "${dir}" ]; then
         ci_log "[CI-ERROR-CHECK-0016]" "dir=\"${dir}\" reason=\"not a directory\""
         return 2

@@ -42,6 +42,15 @@ setup() {
     export CI_MANIFEST
 }
 
+# What: the real SOT's ci_variables block, for fixtures.
+# Why: fixture SOTs need the policy values ci.sh reads.
+# From: Issue #1683 | PR #1858
+_sot_ci_variables() {
+    awk '/^ci_variables:/ { on = 1; print; next }
+        on && /^[^ #]/ { exit }
+        on { print }' "${CI_MANIFEST_SOURCE}"
+}
+
 # What: Removes dirs listed in a manifest file.
 # Why: Function lets a test prove the cleanup.
 # From: Issue #1683 | PR #1858
@@ -642,6 +651,7 @@ STUB
     tar -czf "${BATS_TEST_TMPDIR}/bundle.tgz" -C "${b}" codeql
     sha="$(sha256sum "${BATS_TEST_TMPDIR}/bundle.tgz" | cut -d' ' -f1)"
     printf 'codeql:\n  queries: [q1]\ncodeql_languages:\n  lang-a:\n    paths: [src]\nexternal_versions:\n  codeql:\n    repository: owner/tool\n    release_tag: t1\n    asset: bundle.tgz\n    sha256: %s\n' "${sha}" > "${m}"
+    _sot_ci_variables >> "${m}"
     dl="$(_stub dl 'cp "'"${BATS_TEST_TMPDIR}"'/bundle.tgz" "$2"')"
     CI_MANIFEST="${m}" CI_HTTP_DOWNLOAD_CMD="${dl}" TMPDIR="${t}" \
       GITHUB_REPOSITORY=owner/fixture GITHUB_REF=refs/heads/x \
@@ -2877,6 +2887,7 @@ _rn_setup() {
     local work="${BATS_TEST_TMPDIR}/rn" origin="${BATS_TEST_TMPDIR}/rn-origin.git" s
     printf '%s\n' 'release_notes:' '  pr_section: Changelog' '  skip_label: skip-changelog' '  other_title: Other' \
         'release_notes_categories:' '  bug:' '    title: Fixed' '  ci:' '    title: CI' > "${BATS_TEST_TMPDIR}/rn.yml"
+    _sot_ci_variables >> "${BATS_TEST_TMPDIR}/rn.yml"
     export CI_MANIFEST="${BATS_TEST_TMPDIR}/rn.yml" GITHUB_REPOSITORY=owner/fixture-repo CI_RETRY_BACKOFF_BASE_SECONDS=0
     git init -q --bare "${origin}"
     git init -q "${work}"
@@ -6217,6 +6228,7 @@ STUBEOF
     # From: Issue #1683 | PR #1858
     local m="${BATS_TEST_TMPDIR}/m.yml" t
     printf 'services:\n  svc-a:\n    context: a\nbuild_toolchain:\n  tc-x:\n    context: t\nexternal_services:\n  ext-y:\n    image: i\npr_policy:\n  title_types: [feat, fix, security]\n  title_scopes_extra: [area-z]\n' > "${m}"
+    _sot_ci_variables >> "${m}"
     for t in "feat(svc-a): x" "fix(tc-x)!: y" "feat(ext-y): x" "feat(area-z): x" \
              "security: z" "feat!: x" $'feat(svc-a): crlf\r'; do
         CI_MANIFEST="${m}" run bash "${CI_SH}" check pr-title "${t}"
@@ -6359,6 +6371,7 @@ Fixes the thing.
     # From: Issue #1683 | PR #1858
     local m="${BATS_TEST_TMPDIR}/m.yml"
     printf 'pr_policy:\n  project_number: 7\n' > "${m}"
+    _sot_ci_variables >> "${m}"
     export CI_MANIFEST="${m}" PR_NUMBER=12 GITHUB_REPOSITORY=owner/fixture-repo
     PR_NUMBER='' run bash "${CI_SH}" check pr-tracking-metadata
     [ "${status}" -eq 2 ]
@@ -6389,6 +6402,7 @@ Fixes the thing.
     local bin="${BATS_TEST_TMPDIR}/bin" m="${BATS_TEST_TMPDIR}/m.yml" mode
     mkdir -p "${bin}"
     printf 'pr_policy:\n  project_number: 7\n' > "${m}"
+    _sot_ci_variables >> "${m}"
     _tool_stub "${bin}" gh <<'EOF'
 case "${MODE}" in
     failed) echo "gh: HTTP 500" >&2; exit 1 ;;
@@ -6419,6 +6433,7 @@ _ob_setup() {
     printf '%s\n' 'release:' '  channels:' '    stable:' '      ref: refs/heads/trunk' \
         'branch_policy:' '  orphan_min_age_seconds: 3600' '  long_lived: [dev]' \
         '  long_lived_regex:' '    - "^rel-"' > "${m}"
+    _sot_ci_variables >> "${m}"
     export CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo GH_TOKEN=t
     export CI_RETRY_BACKOFF_BASE_SECONDS=0 OB_CALLS="${BATS_TEST_TMPDIR}/gh.calls"
     export OB_REFS='' OB_ISSUES='' OB_MORE='' OB_FAIL=''
@@ -8621,6 +8636,7 @@ _build_fixture() {
         "  alpine: registry.example.test/base@sha256:$(printf '0%.0s' {1..64})" \
         "  base-x: registry.example.test/base-x@sha256:$(printf '2%.0s' {1..64})" \
         'release:' '  registry: registry.example.test' > "${r}/m.yml"
+    _sot_ci_variables >> "${r}/m.yml"
     cd "${r}" || return 1
     export CI_MANIFEST="${r}/m.yml" GITHUB_REPOSITORY=owner/fixture-repo
 }
@@ -8804,6 +8820,15 @@ STUB
     CI_RETRY_BACKOFF_BASE_SECONDS=0 CI_RETRY_MAX_ATTEMPTS=3 run _ci_retry registry _alwaysflaky
     [ "${status}" -eq 2 ]
     [ "$(cat "${cnt}")" -eq 3 ]
+    # What: without env the attempt count is the SOT value.
+    # Why: the bound has one owner; ci.sh holds no literal.
+    # From: Issue #1683 | PR #1858
+    printf '0' > "${cnt}"
+    sed -e 's/^  CI_RETRY_MAX_ATTEMPTS: .*/  CI_RETRY_MAX_ATTEMPTS: 2/' \
+        -e 's/^  CI_RETRY_BACKOFF_BASE_SECONDS: .*/  CI_RETRY_BACKOFF_BASE_SECONDS: 0/' \
+        "${CI_MANIFEST}" > "${BATS_TEST_TMPDIR}/retry.yml"
+    CI_MANIFEST="${BATS_TEST_TMPDIR}/retry.yml" run _ci_retry registry _alwaysflaky
+    [ "${status}" -eq 2 ] && [ "$(cat "${cnt}")" -eq 2 ] || { echo "sot bound: $(cat "${cnt}") ${output}"; return 1; }
 }
 
 @test "publish retry-exhaustion never invokes build (RETRY OPERATION != REBUILD)" {

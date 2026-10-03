@@ -707,6 +707,38 @@ ci_variables:
   CI_WORKFLOW_DIR: .github/workflows
   CI_ACTIONS_DIR: .github/actions
   CI_PR_TEMPLATE: .github/pull_request_template.md
+  # What: attempts and backoff base of the retry owner.
+  # Why: AG-CI-006: a retry/timeout value has one owner.
+  # From: Issue #1683 | PR #1858
+  CI_RETRY_MAX_ATTEMPTS: 4
+  CI_RETRY_BACKOFF_BASE_SECONDS: 1
+  # What: trivy scan attempts, scanners and DB lock timing.
+  # Why: AG-CI-006: scan policy values have one owner.
+  # From: Issue #1683 | PR #1858
+  CI_TRIVY_MAX: 4
+  CI_TRIVY_SCANNERS: vuln,secret
+  CI_TRIVY_SHARED_DIR: /mnt/trivy-db
+  CI_TRIVY_LOCK_POLL: 5
+  CI_TRIVY_LOCK_TIMEOUT: 900
+  CI_TRIVY_LOCK_STALE: 1200
+  # What: validate slot count and timing, in seconds.
+  # Why: AG-CI-006: validate timeouts have one owner.
+  # From: Issue #1683 | PR #1858
+  CI_VALIDATE_MAX_SLOTS: 10
+  CI_VALIDATE_DETACH_TIMEOUT: 30
+  CI_VALIDATE_HEALTH_TIMEOUT: 180
+  CI_VALIDATE_STABLE_WINDOW: 20
+  # What: workflow file and run-block size ceilings.
+  # Why: AG-CI-006: the YAML-stays-thin limits, one owner.
+  # From: Issue #1683 | PR #1858
+  MAX_WORKFLOW_LINES: 8999
+  MAX_WORKFLOW_BYTES: 512000
+  MAX_RUN_BLOCK_BYTES: 74000
+  # What: PR title lint mode (warn|block), chronology mode.
+  # Why: AG-CI-006: check modes are values with one owner.
+  # From: Issue #1683 | PR #1858
+  PR_TITLE_LINT_MODE: warn
+  CHRONOLOGY_WARN_ONLY: 0
 
 # What: CI variables each build type passes as build-args.
 # Why: builders read repo/org vars; no YAML or literal copy.
