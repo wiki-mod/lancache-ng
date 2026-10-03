@@ -11488,6 +11488,38 @@ newline|10.0.0.5\ndhcp-boot=injected,,evil|bios.0|.|.|embedded newline
 CASES
 }
 
+@test "ui settings sourcing: known keys only, literal values" {
+    # What: dhcp-proxy and ntp readers: keys and quotes.
+    # Why: a value from the ui file must never be executed.
+    # From: Issue #1683 | PR #1858
+    local root f="${BATS_TEST_TMPDIR}/ui-settings.env" fn own other
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/services/dhcp-proxy/entrypoint.sh" _dhcp_proxy_source_ui_settings
+    _load_functions "${root}/services/ntp/entrypoint.sh" _ntp_source_ui_settings
+    for fn in _dhcp_proxy_source_ui_settings:DHCP_MODE:NTP_UPSTREAM_SERVERS _ntp_source_ui_settings:NTP_UPSTREAM_SERVERS:DHCP_MODE; do
+        IFS=: read -r fn own other <<< "${fn}"
+        unset "${own}" "${other}"
+        rm -f "${f}"
+        run "${fn}" "${f}"
+        [ "${status}" -eq 0 ]
+        : > "${f}"
+        run "${fn}" "${f}"
+        [ "${status}" -eq 0 ]
+        printf -v "${own}" '%s' from-env
+        printf '# c\n\nnoequals\n%s="dq"\n%s=foreign\n' "${own}" "${other}" > "${f}"
+        "${fn}" "${f}"
+        [ "${!own}" = dq ] || { echo "${fn}: ${own}=${!own}"; return 1; }
+        [ -z "${!other:-}" ] || { echo "${fn}: foreign ${other} set"; return 1; }
+        printf "%s='sq'\n" "${own}" > "${f}"
+        "${fn}" "${f}"
+        [ "${!own}" = sq ]
+        printf '%s=93:$(touch %s/canary)\n' "${own}" "${BATS_TEST_TMPDIR}" > "${f}"
+        "${fn}" "${f}"
+        [ "${!own}" = "93:\$(touch ${BATS_TEST_TMPDIR}/canary)" ]
+        [ ! -e "${BATS_TEST_TMPDIR}/canary" ] || { echo "${fn}: value executed"; return 1; }
+    done
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.
