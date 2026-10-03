@@ -2499,12 +2499,19 @@ _ci_rust_distcc_wrapper() {
       'exec "$distcc_real" "$real_compiler" "$@"'
 }
 
+# What: print the workspace members of a Cargo manifest.
+# Why: one members reader for stubs and version-drift.
+# From: Issue #1683 | PR #1858
+_ci_cargo_members() {
+    awk '/^members *= *\[/ { on = 1; next } on && /^\]/ { exit } on { gsub(/[",[:space:]]/, ""); if ($0 != "") print }' "$1"
+}
+
 # What: stub missing bin/lib targets of workspace members.
 # Why: cargo loads every member; images copy manifests only.
 # From: Issue #1683 | PR #1858
 _ci_rust_member_stubs() {
     local members m sec p f targets
-    members="$(awk '/^members *= *\[/ { on = 1; next } on && /^\]/ { exit } on { gsub(/[",[:space:]]/, ""); if ($0 != "") print }' Cargo.toml)"
+    members="$(_ci_cargo_members Cargo.toml)" || return 2
     if [ -z "${members}" ]; then
         ci_log "[CI-ERROR-RUSTBUILD-0042]" "dir=\"${PWD}\" reason=\"no workspace members in Cargo.toml\""
         return 2
@@ -7434,11 +7441,54 @@ _ci_version_walk() {
 }
 
 
+# What: Cargo, members and VERSION equal release.version.
+# Why: one release version owner; consumers must not drift.
+# From: Issue #1683 | PR #1858
+_ci_version_release() {
+    local want got lock cargo vfile members m rc=0
+    want="$(_ci_block_entry_field release "" version)" || return 2
+    if [ -z "${want}" ]; then
+        ci_log "[CI-ERROR-VERSION-0020]" "reason=\"no SOT release.version\""
+        return 2
+    fi
+    lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
+    cargo="${lock%/*}/Cargo.toml"
+    got="$(awk '/^\[workspace\.package\]/ { on = 1; next } /^\[/ { on = 0 }
+        on && /^version *=/ { v = $0; sub(/^version *= *"/, "", v); sub(/".*$/, "", v); print v; exit }' "${cargo}")"
+    if [ "${got}" != "${want}" ]; then
+        ci_log "[CI-ERROR-VERSION-0021]" "path=\"${cargo}\" got=\"${got}\" want=\"${want}\" reason=\"workspace.package.version is not SOT release.version\""
+        rc=1
+    fi
+    members="$(_ci_cargo_members "${cargo}")" || return 2
+    while IFS= read -r m; do
+        [ -n "${m}" ] || continue
+        if ! grep -Eq '^version\.workspace *= *true$' "${lock%/*}/${m}/Cargo.toml"; then
+            ci_log "[CI-ERROR-VERSION-0022]" "member=\"${m}\" reason=\"member owns its version; use version.workspace = true\""
+            rc=1
+        fi
+    done <<< "${members}"
+    vfile="$(_ci_repo_path CI_VERSION_FILE)" || return 2
+    if ! got="$(cat "${vfile}" 2>&1)"; then
+        ci_error "[CI-ERROR-VERSION-0023]" "path=\"${vfile}\" reason=\"version file unreadable\"" "${got}"
+        return 2
+    fi
+    if [ "${got}" != "${want}" ]; then
+        ci_log "[CI-ERROR-VERSION-0024]" "path=\"${vfile}\" got=\"${got}\" want=\"${want}\" reason=\"version file is not SOT release.version\""
+        rc=1
+    fi
+    [ "${rc}" -eq 0 ] && printf 'release-version=%s consumers=clean\n' "${want}"
+    return "${rc}"
+}
+
 # What: version verify: default, read-only, fails on drift.
 # Why: The one CI gate for SOT-vs-repo version drift.
 # From: Issue #1683 | PR #1858
 _ci_version_verify() {
-    _ci_version_walk _ci_version_diff
+    local rc=0 r=0
+    _ci_version_walk _ci_version_diff || rc=$?
+    _ci_version_release || r=$?
+    [ "${r}" -gt "${rc}" ] && rc="${r}"
+    return "${rc}"
 }
 
 # What: sync consumer's bare ARGs, nothing to update
@@ -11438,7 +11488,7 @@ ci_cmd_check_all() {
         setup-keys-kea setup-update-safety setup-docker-conflict setup-prompt-drift image-channel-resolution \
         vex-drift logging-matrix \
         trivy-action-direct-usage entrypoint-lib-wiring dockerfile-build-tools \
-        cargo-profile-tuning no-source-compiled-tools codeql-coverage)
+        cargo-profile-tuning no-source-compiled-tools codeql-coverage version-drift)
     for sub in "${repo_wide[@]}"; do
         ci_cmd_check "${sub}" || rc=1
     done
@@ -11464,6 +11514,7 @@ ci_cmd_check() {
         cargo-profile-tuning) _ci_check_cargo_profile_tuning "$@" ;;
         no-source-compiled-tools) _ci_check_no_source_compiled_tools "$@" ;;
         codeql-coverage) _ci_check_codeql_coverage "$@" ;;
+        version-drift) _ci_version_verify ;;
         shellcheck) _ci_check_shellcheck "$@" ;;
         actionlint) _ci_check_actionlint "$@" ;;
         line-endings) _ci_check_line_endings "$@" ;;

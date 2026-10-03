@@ -1214,7 +1214,7 @@ dependencies = [
 
 [[package]]
 name = "lancache-cachehamster"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1232,7 +1232,7 @@ dependencies = [
 
 [[package]]
 name = "lancache-ui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1266,7 +1266,7 @@ dependencies = [
 
 [[package]]
 name = "lancache-watchdog"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -1375,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "nats-subscriber"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-nats",
  "axum",

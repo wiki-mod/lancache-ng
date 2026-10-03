@@ -10158,6 +10158,27 @@ _version_fixture_repo() {
     [ "${status}" -eq 0 ]
     dep="$(_pin_dep)"; up="${dep^^}"; up="${up//-/_}"
     [[ "${output}" == *"key=${dep}.consumer.${up}_SHA256 shape=bare"* ]]
+    [[ "${output}" == *"release-version=$(_ci_block_entry_field release "" version) consumers=clean"* ]]
+    # What: each release-version consumer drift has its code.
+    # Why: Cargo, members and VERSION follow release.version.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/rv" m="${BATS_TEST_TMPDIR}/rv.yml"
+    mkdir -p "${r}/a"
+    printf 'release:\n  version: 1.2.3\n' > "${m}"
+    _sot_ci_variables >> "${m}"
+    printf '[workspace]\nmembers = [\n    "a",\n]\n\n[workspace.package]\nversion = "1.2.3"\n' > "${r}/Cargo.toml"
+    printf '[package]\nname = "a"\nversion.workspace = true\n' > "${r}/a/Cargo.toml"
+    printf '1.2.3\n' > "${r}/VERSION"
+    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"release-version=1.2.3 consumers=clean"* ]]
+    printf '[package]\nname = "a"\nversion = "0.1.0"\n' > "${r}/a/Cargo.toml"
+    printf '1.2.2\n' > "${r}/VERSION"
+    sed -i 's/^version = "1.2.3"$/version = "1.2.0"/' "${r}/Cargo.toml"
+    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *'[CI-ERROR-VERSION-0021]'*'got="1.2.0" want="1.2.3"'* ]]
+    [[ "${output}" == *'[CI-ERROR-VERSION-0022] member="a"'* ]]
+    [[ "${output}" == *'[CI-ERROR-VERSION-0024]'*'got="1.2.2" want="1.2.3"'* ]]
 }
 
 @test "version verify explicit subcommand matches the default" {

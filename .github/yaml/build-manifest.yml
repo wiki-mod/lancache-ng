@@ -547,6 +547,10 @@ codeql_languages:
 release:
   schema: stack-images/v1
   registry: ghcr.io
+  # What: current release version of the whole project.
+  # Why: one owner; Cargo and VERSION are checked against it.
+  # From: Issue #1683 | PR #1858
+  version: 0.3.0
   # What: validation record and its full-invalidation paths.
   # Why: AG-REL-011 gate reads them; no ci.sh literal.
   # From: Issue #1683
@@ -624,6 +628,10 @@ ci_variables:
   # Why: plan audits only when this file changed.
   # From: Issue #1683 | PR #1858
   CI_CARGO_LOCK: Cargo.lock
+  # What: the plain version file setup.sh reads for archives.
+  # Why: it must equal release.version; version-drift checks.
+  # From: Issue #1683 | PR #1858
+  CI_VERSION_FILE: VERSION
   # What: the installer script the stack checks read.
   # Why: one path owner; ci.sh holds no installer literal.
   # From: Issue #1683 | PR #1858
