@@ -11360,6 +11360,44 @@ SH
     [ "$(cat "${a}")" = 'allow 10.0.0.0/8;' ]
 }
 
+@test "dhcp-proxy config adapter snapshots, rolls back, reports" {
+    # What: refuse, create, roll back, keep, failed write.
+    # Why: dnsmasq must never start on an invalid config.
+    # From: Issue #1683 | PR #1858
+    local root bin="${BATS_TEST_TMPDIR}/bin" c="${BATS_TEST_TMPDIR}/dnsmasq.conf" i
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    # shellcheck source=scripts/lib/known-good-snapshots.sh
+    source "${root}/$(ci_context_path known-good)"
+    _load_functions "${root}/services/dhcp-proxy/entrypoint.sh" _dhcp_proxy_validate_snapshot_or_rollback
+    _tool_stub "${bin}" dnsmasq <<'SH'
+f=""; while [ $# -gt 0 ]; do case "$1" in -C) f="$2"; shift 2 ;; *) shift ;; esac; done
+if grep -q BROKEN "${f}"; then echo "dnsmasq: syntax check failed" >&2; exit 1; fi
+SH
+    export PATH="${bin}:${PATH}" DHCP_PROXY_CONFIG_SNAPSHOT_DIR="${BATS_TEST_TMPDIR}/snap" KEEP_KNOWN_GOOD_CONFIGS=3
+    printf 'BROKEN\n' > "${c}"
+    run _dhcp_proxy_validate_snapshot_or_rollback "${c}"
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"no known-good dnsmasq config snapshot is available"* ]]
+    [ "$(cat "${c}")" = BROKEN ]
+    printf 'OK v1\n' > "${c}"
+    run _dhcp_proxy_validate_snapshot_or_rollback "${c}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"[known-good-snapshot][dhcp-proxy][CREATE]"* ]]
+    printf 'BROKEN v2\n' > "${c}"
+    run _dhcp_proxy_validate_snapshot_or_rollback "${c}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"generated dnsmasq config failed validation"*"[dhcp-proxy][SELECT]"*"NOT the newly generated config"* ]]
+    [ "$(cat "${c}")" = "OK v1" ]
+    export KEEP_KNOWN_GOOD_CONFIGS=2
+    for i in 1 2 3 4; do printf 'OK r%s\n' "${i}" > "${c}"; _dhcp_proxy_validate_snapshot_or_rollback "${c}" > /dev/null 2>&1; done
+    [ "$(kgs_list_snapshots "${DHCP_PROXY_CONFIG_SNAPSHOT_DIR}" | wc -l)" -eq 2 ]
+    : > "${BATS_TEST_TMPDIR}/file"
+    export DHCP_PROXY_CONFIG_SNAPSHOT_DIR="${BATS_TEST_TMPDIR}/file/snap"
+    run _dhcp_proxy_validate_snapshot_or_rollback "${c}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"[dhcp-proxy][FATAL]"*"rollback protection is degraded"* ]]
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.

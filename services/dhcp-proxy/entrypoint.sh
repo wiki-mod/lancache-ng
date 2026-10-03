@@ -643,7 +643,7 @@ fi
 
 # _dhcp_proxy_validate_snapshot_or_rollback <file...>
 # Factored into its own function (rather than inline top-level script code)
-# so tests/bats/dhcp_proxy_known_good_snapshot.bats can drive the full
+# so .github/scripts/ci.bats can drive the full
 # dnsmasq adapter flow against a stub `dnsmasq` binary without needing to
 # run the rest of this entrypoint.
 _dhcp_proxy_validate_snapshot_or_rollback() {
@@ -658,7 +658,12 @@ _dhcp_proxy_validate_snapshot_or_rollback() {
 
     echo "Validating dnsmasq config..."
     if dnsmasq --test -C "$dnsmasq_conf"; then
-        kgs_snapshot_create "$DHCP_PROXY_CONFIG_SNAPSHOT_DIR" "$KEEP_KNOWN_GOOD_CONFIGS" "dhcp-proxy" "${candidate_files[@]}"
+        # What: a failed snapshot write is reported.
+        # Why: the caller's || turns off set -e here.
+        # From: Issue #1683 | PR #1858
+        if ! kgs_snapshot_create "$DHCP_PROXY_CONFIG_SNAPSHOT_DIR" "$KEEP_KNOWN_GOOD_CONFIGS" "dhcp-proxy" "${candidate_files[@]}"; then
+            echo "WARNING: failed to record this valid dnsmasq config as a known-good snapshot (see FATAL line above); rollback protection is degraded until this succeeds." >&2
+        fi
         return 0
     fi
 
