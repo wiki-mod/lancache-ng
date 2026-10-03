@@ -1,331 +1,107 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# CI workflow that runs CodeQL static analysis (GitHub Actions and Rust languages)
-# on pushes, pull requests, and a daily schedule, uploading SARIF results as security alerts.
-name: CodeQL
 
+# What: CodeQL security analysis; scope owned by SOT
+# Why: own workflow (§73); ci.sh admits, YAML only calls.
+# From: Issue #1683
+name: CI 2.0 CodeQL
 on:
-  push:
-    # current_dev is the active development branch today;
-    # without it, CodeQL silently stopped scanning the branch real work
-    # actually lands on (#709).
-    branches: [master, current_dev]
-    paths-ignore:
-      - "**/*.md"
   pull_request:
-    # current_dev is the active development branch today;
-    # without it, CodeQL silently stopped scanning the branch real work
-    # actually lands on (#709).
-    branches: [master, current_dev]
-    paths-ignore:
-      - "**/*.md"
+  push:
+    branches: [current_dev, master]
   schedule:
-    - cron: "24 3 * * *"
+    - cron: "27 3 * * 1"
   workflow_dispatch:
-
 permissions:
   contents: read
-  security-events: write
-
+concurrency:
+  group: ci-2.0-codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 defaults:
   run:
     shell: bash
-
+# What: GHCR credentials for ci.sh; no login action.
+# Why: auth is ci.sh policy; the workflow only sets env.
+# From: Issue #1683
+env:
+  GHCR_USERNAME: ${{ github.actor }}
+  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # What: Diff refs for ci.sh steps, set once
+  # Why: Step without them has no base reference
+  # From: Issue #1683 | PR #1858
+  BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  BEFORE_SHA: ${{ github.event.before }}
+  # What: LAN proxy inputs; ci.sh applies them self-hosted.
+  # Why: AG-CI-009; ci.sh is the one proxy policy owner.
+  # From: Issue #1683 | PR #1858
+  PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+  PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+  PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
+  PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
 jobs:
-  detect-changes:
-    # Gates the memory-heavy "rust" matrix entry below on whether the diff
-    # actually touches the Rust build CodeQL analyzes, the same efficiency
-    # class of fix as #1253 (narrowing build-tools.yml's image-rebuild
-    # trigger): before this job existed, EVERY push/PR re-ran the full Rust
-    # CodeQL extraction+analysis on the unchanged services/dns/ui crates --
-    # e.g. a docs/CI-only PR like #1247 -- burning lancache-heavy runner time
-    # for zero new signal. The "actions" matrix entry (which scans the
-    # workflow files themselves) is untouched by this job and keeps running
-    # on every trigger; only "rust" is scoped.
-    #
-    # "Analyze (rust)"/"Analyze (actions)" are NOT in current_dev's required
-    # status checks (verified via `gh api repos/wiki-mod/lancache-ng/branches/
-    # current_dev/protection` on 2026-07-25: the required contexts list is
-    # shellcheck, validate-compose, CI scope policy, line endings, file
-    # purpose headers, PR template validation, PR tracking metadata
-    # (labels/milestone/project), validate full-setup image
-    # -- CodeQL is absent from that list), so skipping the rust matrix entry
-    # outright (rather than the self-skip-internally pattern a *required*
-    # check would need, per Rule-Ref: AG-CI-012's "paths-ignore permanently
-    # blocks a required check" trap) cannot strand a PR in a perpetually-pending state.
-    name: detect changed paths (CodeQL rust relevance)
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Real runs are one git diff plus the shared path classifier, comparable
-    # to build-push.yml's own detect-changes job. Keep the same generous floor.
+  # What: Emit CodeQL language matrix from ci.sh
+  # Why: Book runners only for real analysis (§70)
+  # From: Issue #1683
+  impact:
+    name: codeql-impact
+    runs-on: ubuntu-latest
     timeout-minutes: 15
+    # What: Admission runs in build-tools nightly channel
+    # Why: Nothing runs on runner; ci.sh needs its tools
+    # From: Issue #1683 | PR #1858
+    container:
+      image: ghcr.io/${{ github.repository }}/build-tools:nightly
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     outputs:
-      rust_relevant: ${{ steps.filter.outputs.rust_relevant }}
-      superseded: ${{ steps.supersession.outputs.superseded }}
+      matrix: ${{ steps.impact.outputs.codeql-matrix }}
+      image: ${{ steps.impact.outputs.codeql-image }}
     steps:
-      - uses: &checkout_centraliced_versioning actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-
-      # A live remote-head check keeps already-stale runs out of the serialized
-      # analyze jobs below without relying on concurrency admission order.
-      #
-      # PR-only: not applied to push. Every push already runs its analyze
-      # job independently, so scoping this to pull_request trades away
-      # reclaiming a genuinely-superseded push's analyze compute in exchange for
-      # never mis-skipping a push whose only "replacement" was excluded by
-      # paths-ignore. That trade only matters for push, because this
-      # workflow's push trigger has `paths-ignore: ["**/*.md"]`: a follow-up
-      # Markdown-only push moves the branch head without producing any
-      # replacement CodeQL run, and ls-remote can't distinguish that from a
-      # real replacement -- including push here would wrongly mark the still-
-      # current code-change push as superseded and leave it permanently
-      # unscanned until another eligible push or the daily cron.
-      # schedule/workflow_dispatch have no "newer trigger" concept either.
-      #
-      # Deliberately compares against refs/pull/<N>/head, not
-      # refs/pull/<N>/merge -- GitHub regenerates the merge ref on every
-      # base-branch change too, not just on a push to the PR's own head,
-      # which would report "superseded" for reasons unrelated to staleness.
-      - name: Check whether this run is already superseded
-        id: supersession
-        env:
-          CHECK_EVENT_NAME: ${{ github.event_name }}
-          CHECK_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          CHECK_PR_NUMBER: ${{ github.event.pull_request.number }}
+      # What: shallow checkout with persistent auth
+      # Why: ci.sh loads the diff history it needs itself.
+      # From: Issue #1683 | PR #1858
+      - &bootstrap
+        name: Bootstrap the working tree
         run: |
           set -euo pipefail
-
-          superseded=false
-          current_head=""
-
-          if [ "$CHECK_EVENT_NAME" = "pull_request" ]; then
-            : "${CHECK_PR_NUMBER:?pull_request event must carry a PR number}"
-            # github.sha identifies the synthetic merge commit for PR events,
-            # while refs/pull/<N>/head identifies the contributor's head. Use
-            # like-for-like SHAs so a current PR is not rejected as stale.
-            : "${CHECK_PR_HEAD_SHA:?pull_request event must carry a head SHA}"
-            if ! current_head="$(bash scripts/tracked/resolve-remote-ref-with-retry.sh \
-              origin "refs/pull/${CHECK_PR_NUMBER}/head")"; then
-              current_head=""
-            fi
-
-            if [ -z "$current_head" ]; then
-              # Deliberately fails OPEN (superseded=false), same
-              # asymmetric-risk reasoning as build-push.yml's own copy of
-              # this check: an unresolvable ls-remote must never cause a
-              # real commit's analysis to be wrongly skipped, only ever an
-              # already-superseded one.
-              echo "::warning::Could not resolve the current remote head for this pull request; failing open (treating this run as NOT superseded)."
-            elif [ "$current_head" != "$CHECK_PR_HEAD_SHA" ]; then
-              echo "::notice::This PR has already moved to ${current_head} since this run was triggered for ${CHECK_PR_HEAD_SHA}; a newer run already supersedes this one."
-              superseded=true
-            fi
-          fi
-          # push/schedule/workflow_dispatch: no live self-skip here (see the
-          # comment above this step) -- superseded stays false.
-
-          echo "superseded=$superseded" >> "$GITHUB_OUTPUT"
-
-      - name: Determine whether this diff touches the Rust build CodeQL analyzes
-        id: filter
+          git config --global --add safe.directory "${PWD}"
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout -q FETCH_HEAD
+      - name: Collect changed files
+        id: changed
+        run: bash .github/scripts/ci.sh changed-files
+      - name: Admit CodeQL analysis
+        id: impact
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          BEFORE_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
+          CHANGED_FILES: ${{ steps.changed.outputs.file }}
+        run: bash .github/scripts/ci.sh codeql-impact >> "$GITHUB_OUTPUT"
 
-          : "${GITHUB_SHA:?GitHub checkout SHA is required}"
-
-          # Same base/before resolution build-push.yml's detect-changes job
-          # uses (#536's merge-base fix so an unrelated already-merged base
-          # change isn't misattributed to this branch; a push before-SHA
-          # fallback for an all-zeros/force-pushed/unreachable base) --
-          # mirrored inline rather than imported, since GitHub Actions has
-          # no cross-workflow step/job reuse for plain (non-reusable)
-          # workflows.
-          changed_files="$(mktemp)"
-          force_all=false
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            : "${BASE_SHA:?pull request base SHA is required}"
-            merge_base="$(git merge-base "$BASE_SHA" "$GITHUB_SHA")"
-            git diff --name-only "$merge_base" "$GITHUB_SHA" > "$changed_files"
-          else
-            if [ -z "$BEFORE_SHA" ] \
-              || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
-              || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-              echo "::notice::No usable push diff base (before='${BEFORE_SHA:-<empty>}'); treating this push as rust-relevant."
-              force_all=true
-            else
-              git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" > "$changed_files"
-            fi
-          fi
-
-          # Reuse the same per-path rules build-push.yml's detect-changes job
-          # depends on, instead of re-deriving a second, potentially-drifting
-          # copy of "does this touch Rust?": dns_rust is scoped to
-          # services/dns/nats-subscriber/ (the only Rust crate under
-          # services/dns -- the rest of that directory is PowerDNS
-          # config/entrypoint/lua, not analyzed by the rust matrix entry at
-          # all); ui is services/ui/ (a Rust crate at its root); watchdog is
-          # services/watchdog/ (added 2026-08 alongside
-          # services/watchdog/Cargo.toml, #1355 -- also a whole-directory
-          # filter like ui, not split into a Rust-only sub-filter like dns,
-          # since the shell runtime and the Rust crate share one directory);
-          rust_via_shared_classifier=false
-          if [ "$force_all" = "true" ]; then
-            rust_via_shared_classifier=true
-          else
-            classifier_output="$(CHANGED_FILES="$changed_files" bash scripts/untracked/classify-image-impact.sh)"
-            # here-string, not `printf ... | grep -q` (AG-VAL-032): grep -q
-            # can exit on its first match while printf is still writing the
-            # classifier's remaining `key=value` lines, and under pipefail
-            # that can surface as printf's own SIGPIPE (141) instead of
-            # grep's successful match, silently skipping the Rust CodeQL
-            # matrix entry even when a Rust-relevant service changed.
-            if grep -qE '^(dns_rust|ui|watchdog|workflow)=true$' <<<"$classifier_output"; then
-              rust_via_shared_classifier=true
-            fi
-          fi
-
-          # Additive to the shared classifier: a change to this workflow file
-          # itself or its CodeQL config.
-          codeql_self=false
-          if [ "$force_all" = "true" ]; then
-            codeql_self=true
-          elif grep -qE '^\.github/(workflows/codeql\.yml|codeql/)' "$changed_files"; then
-            codeql_self=true
-          fi
-
-          rm -f "$changed_files"
-
-          if [ "$rust_via_shared_classifier" = "true" ] || [ "$codeql_self" = "true" ]; then
-            echo "rust_relevant=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "rust_relevant=false" >> "$GITHUB_OUTPUT"
-          fi
-
+  # What: Analyze each admitted language in SOT image
+  # Why: CodeQL needs glibc; pin lives in SOT only
+  # From: Issue #1683 | PR #1858
   analyze:
-    name: Analyze (${{ matrix.language }})
-    # What: Variable picks GitHub or self-hosted runner pool
-    # Why: GitHub-hosted (4 cores/16GB) avoids self-hosted OOM
-    # From: Issue #1095
-    runs-on: ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && fromJSON('["self-hosted","linux","lancache","codeql","lancache-heavy"]') || 'ubuntu-latest' }}
+    name: CodeQL ${{ matrix.language }}
+    needs: impact
+    if: ${{ fromJSON(needs.impact.outputs.matrix).include[0] != null }}
+    permissions:
+      contents: read
+      security-events: write
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.impact.outputs.image }}
     timeout-minutes: 120
-    needs: detect-changes
-    # Do not add a shared GitHub concurrency group here. GitHub retains only
-    # one pending member per group and does not guarantee admission order, so
-    # an older detect-changes completion could evict the latest pending SHA.
-    # Independent jobs plus the live head checks below guarantee that the
-    # current PR head still reaches analysis; stale jobs self-skip instead.
-    #
-    # Accepted residual risk: a PR pushed to repeatedly at intervals shorter
-    # than the ~2h analyze runtime but longer than detect-changes' own
-    # ~10-17s (so each push's own run genuinely is current when it starts)
-    # can have more than one of its own analyze runs occupy lancache-heavy
-    # simultaneously -- the live head checks only run once, near the start
-    # of each run, not continuously, so a run already past that check keeps
-    # running to completion even after a later push makes it stale. A
-    # source-level cap (counting this PR's other in-progress runs via the
-    # GitHub API) was considered and rejected for now: that API call needs
-    # curl, which per AG-VAL-016 must run inside the build-tools container,
-    # and detect-changes currently has no container step at all -- adding
-    # one would cost real seconds on every PR push for a scenario that is
-    # rare in practice. This is an accepted-for-now tradeoff, not a closed
-    # decision: revisit if it stops being rare, or once this workflow's CI
-    # scheduling gets reworked more broadly (at which point building this
-    # cap alongside that rework is cheaper than bolting it on separately).
-    # `always()` is required here: GitHub implicitly ANDs any custom job
-    # `if:` with `success()` of every `needs` job UNLESS the expression
-    # itself calls one of the status-check functions -- without it, a
-    # `skipped` detect-changes (schedule/workflow_dispatch, which its own
-    # `if:` above doesn't cover) would silently skip THIS job too, including
-    # the 'actions' matrix entry, which must run on every trigger regardless.
-    # Mirrors the identical `always() && (...)` shape used by the Rust jobs.
-    #   - matrix.language == 'actions': always runs. This scans the workflow
-    #     files themselves and must not be skipped by Rust-path scoping.
-    #   - schedule/workflow_dispatch: detect-changes reports `skipped` here,
-    #     caught by the `result != 'success'` fail-safe, same as an
-    #     undeterminable push diff -- both the daily cron and a manual
-    #     dispatch run the full Rust analysis unconditionally.
-    #   - pull_request/push with a determinable diff: gated on
-    #     detect-changes' rust_relevant output.
-    # `always()` runs this job on every trigger (incl. schedule/dispatch, where
-    # detect-changes is skipped). The Rust-relevance gating below is applied at
-    # STEP level, NOT here: GitHub Actions does not expose the `matrix` context
-    # in a job-level `if:` (matrix only exists after expansion, in steps), so a
-    # job-level condition cannot tell the 'actions' matrix leg from 'rust'. The
-    # 'actions' leg therefore always runs its analysis; the 'rust' leg spins up
-    # but skips its (expensive) extraction steps unless Rust is actually
-    # relevant (see the shared `if:` on the Rust setup/build/init/analyze steps).
-    #
-    # The `superseded` check keeps a PR run that is already stale from
-    # consuming an analysis runner: `needs.detect-changes.outputs.superseded` is only ever
-    # the literal string "true" when detect-changes
-    # actually ran and found a newer PR head already landed; a skipped
-    # detect-changes (schedule/dispatch) leaves this output empty, which
-    # correctly does not match 'true' and never blocks those triggers.
-    if: ${{ always() && needs.detect-changes.outputs.superseded != 'true' }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - language: actions
-            build-mode: none
-          - language: rust
-            build-mode: none
+      matrix: ${{ fromJSON(needs.impact.outputs.matrix) }}
     steps:
-      - name: Checkout
-        uses: *checkout_centraliced_versioning # v7.0.1
-
-      # A run can become stale after detect-changes but before a runner admits
-      # this job. Recheck on the runner so stale work stops before CodeQL or a
-      # Rust build, without putting the latest SHA in a lossy concurrency queue.
-      - name: Recheck PR head after runner admission
-        id: admission
-        if: github.event_name == 'pull_request'
+      - *bootstrap
+      - name: Analyze and upload
         env:
-          CHECK_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          CHECK_PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-
-          : "${CHECK_PR_HEAD_SHA:?pull_request event must carry a head SHA}"
-          : "${CHECK_PR_NUMBER:?pull_request event must carry a PR number}"
-          current_head=""
-          if ! current_head="$(bash scripts/tracked/resolve-remote-ref-with-retry.sh \
-            origin "refs/pull/${CHECK_PR_NUMBER}/head")"; then
-            echo "::warning::Could not resolve the current remote head after retry; failing open."
-          fi
-
-          superseded=false
-          if [ -n "$current_head" ] && [ "$current_head" != "$CHECK_PR_HEAD_SHA" ]; then
-            superseded=true
-            echo "::notice::Skipping CodeQL because this queued run targets ${CHECK_PR_HEAD_SHA}, while the PR head is ${current_head}."
-          fi
-          echo "superseded=$superseded" >> "$GITHUB_OUTPUT"
-
-      - name: Initialize CodeQL
-        # What: RAM setting changes with runner pool (no manual sync)
-        # Why: Self-hosted pool OOM'd; GitHub-hosted has more headroom
-        # From: Issue #1095
-        #
-        # 'actions' always analyzes; 'rust' only when Rust is actually relevant
-        # (or on schedule/dispatch where detect-changes is skipped).
-        if: steps.admission.outputs.superseded != 'true' && (matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
-        with:
-          languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build-mode }}
-          config-file: ./.github/codeql/codeql-config.yml
-          ram: ${{ vars.CODEQL_USE_SELF_HOSTED == 'true' && (vars.CODEQL_RAM_MB_SELFHOSTED || '2048') || (vars.CODEQL_RAM_MB_HOSTED || '10240') }}
-          threads: ${{ vars.CODEQL_THREADS || '4' }}
-
-      - name: Perform CodeQL Analysis
-        # Same gate as Initialize CodeQL above: skip the 'rust' analysis when
-        # Rust is not relevant, so init and analyze stay paired.
-        if: steps.admission.outputs.superseded != 'true' && (matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
-        with:
-          category: "/language:${{ matrix.language }}"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LANGUAGE: ${{ matrix.language }}
+        run: bash .github/scripts/ci.sh codeql-analyze "${LANGUAGE}"

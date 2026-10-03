@@ -458,12 +458,8 @@ pub async fn toggle_ddns_allow_unsigned_updates(
 
     // What: Marker write persists intent; restart needed for immediate effect
     // Why: Without restart operator's click silently waits for future restart
-    if let Err(e) = docker_client::restart_service(
-        &state.docker,
-        &state.config.dns_standard_service,
-        &state.config.container_suffix,
-    )
-    .await
+    if let Err(e) =
+        docker_client::restart_service(&state.docker, &state.config.dns_standard_service).await
     {
         // What: Use {:#} format for full Docker API error chain in logs
         // Why: Bare message "Failed to restart" hides actual root cause
@@ -473,12 +469,8 @@ pub async fn toggle_ddns_allow_unsigned_updates(
             e
         );
     }
-    if let Err(e) = docker_client::restart_service(
-        &state.docker,
-        &state.config.dns_ssl_service,
-        &state.config.container_suffix,
-    )
-    .await
+    if let Err(e) =
+        docker_client::restart_service(&state.docker, &state.config.dns_ssl_service).await
     {
         tracing::error!(
             "Restart dns-ssl for ddns-allow-unsigned-updates toggle failed: {:#}",
@@ -547,12 +539,8 @@ async fn is_aaaa_filter_enabled(state: &AppState) -> bool {
 }
 
 async fn restart_ssl(state: &AppState) {
-    if let Err(e) = docker_client::restart_service(
-        &state.docker,
-        &state.config.proxy_ssl_service,
-        &state.config.container_suffix,
-    )
-    .await
+    if let Err(e) =
+        docker_client::restart_service(&state.docker, &state.config.proxy_ssl_service).await
     {
         tracing::error!("Restart proxy service failed: {}", e);
     }
@@ -1954,7 +1942,7 @@ mod tests {
     // >253-char total domain) are intentionally not in the shared fixture --
     // they can't be expressed as static fixture lines -- and stay covered
     // separately by accepts_domain_entries_with_optional_wildcard_marker
-    // above and the bash side's tests/bats/proxy_cert_generation.bats.
+    // above and the bash side's .github/scripts/ci.bats domain test.
     #[test]
     fn is_valid_domain_matches_shared_parity_fixture() {
         // Runtime fs::read_to_string via CARGO_MANIFEST_DIR (this crate's

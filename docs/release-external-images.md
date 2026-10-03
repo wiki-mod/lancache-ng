@@ -149,16 +149,17 @@ Accepted, deliberately-suppressed vulnerability findings live in the repo-root
 by Trivy, and the file is Trivy-specific rather than something a downstream
 consumer's non-Trivy tooling can parse.
 
-`scripts/untracked/generate-vex.sh` converts those entries into a standard
-[OpenVEX](https://openvex.dev) JSON document, `vex.openvex.json`. Each
-accepted-vulnerability entry becomes an OpenVEX statement: the vulnerable
-component is present and the finding is accepted or deferred (typically
-because no fixed upstream version exists to bump to yet), so the honest
-status is `affected` with an `action_statement` that carries the acceptance
-rationale -- not `not_affected`, which
-would assert a non-exploitability claim these entries do not make. If a
-future entry genuinely represents non-exploitability, its status mapping must
-be revisited in the generator rather than blanket-applied.
+`ci.sh` (`_ci_generate_vex`) converts those entries into a standard
+[OpenVEX](https://openvex.dev) v0.2.0 JSON document, `vex.openvex.json`. Each
+entry becomes one OpenVEX statement. An entry without `status:` is an
+accepted, tracked risk: status `affected` with an `action_statement` that
+carries the acceptance rationale. An entry with `status: not_affected`
+asserts non-exploitability: status `not_affected` with a `justification`
+(default `vulnerable_code_not_present`, overridable per entry with one of
+the OpenVEX justification values) and an `impact_statement`. The reader
+accepts only the shape this file uses (`id`, `paths`, a `>-` folded
+`statement`, `status`, `justification`); any other key, status or line
+shape fails closed.
 
 **`vex.openvex.json` is not committed to `current_dev`** (changed by Issue
 #1095's F-22 finding; it was committed there through PR #1194, which produced
@@ -168,35 +169,15 @@ entirely and deterministically derived from `.trivyignore.yaml`, so keeping a
 second, independently-editable copy in the same branch only recreated the
 exact class of bug it was meant to prevent. Instead:
 
-- A dedicated orphan branch, `CI-Automation/vex`, carries only the current
-  `vex.openvex.json` plus a short README. `.github/workflows/vex-regenerate.yml`
-  regenerates and commits to that branch automatically whenever
-  `.trivyignore.yaml` or `scripts/untracked/generate-vex.sh` changes on
-  `current_dev` -- no PR, no review gate, mirroring this repo's existing
-  precedent for other mechanically-reproducible automated commits (e.g.
-  `nightly-refresh.yml`'s channel-tag refresh). The current document is always
-  fetchable at
-  `https://raw.githubusercontent.com/wiki-mod/lancache-ng/CI-Automation/vex/vex.openvex.json`.
-  A failed regeneration does not fail that workflow's own run status (a
-  best-effort, unreviewed `push` automation with no real-time consumer,
-  Issue #1095) but does open/reuse a `vex-generator-broken`-labeled GitHub
-  issue and emit a visible `::error::` annotation -- see that workflow file's
-  own header comment for the documented-exception rationale.
-- `scripts/tracked/check-vex-drift.sh`, run as the "Check VEX generator
-  produces valid OpenVEX JSON" step in the `validate-compose` job, no longer
-  compares two committed copies (there is only one, and it isn't on
-  `current_dev`) -- it is a generator smoke test: run
-  `scripts/untracked/generate-vex.sh` and assert the result is valid,
-  non-empty OpenVEX JSON. This still fails a PR that breaks the generator or
-  feeds it malformed `.trivyignore.yaml`, just without a second-copy
-  comparison.
-- Each release tag's own `vex.openvex.json` asset is regenerated fresh from
-  that exact tag's own checked-out `.trivyignore.yaml` by the release job
-  (`build-push.yml`'s "Attach OpenVEX document to the release" step) --
-  never copied from `CI-Automation/vex`'s current tip, since that branch's
-  automated refresh runs asynchronously off a plain `push` and could still be
-  catching up when a release tag is cut moments after a `.trivyignore.yaml`
-  change lands.
+- The OpenVEX document is a release artifact. Each release tag's own
+  `vex.openvex.json` asset is regenerated fresh from that exact tag's own
+  checked-out `.trivyignore.yaml` by the release path (`ci.sh release-vex`,
+  invoked from `release.yml`), alongside the SBOM and provenance assets that
+  belong to the release channel.
+- `ci.sh check vex-drift` runs the generator on the checked-out
+  `.trivyignore.yaml` and requires one statement per entry, failing a change
+  that feeds it an unsupported shape, status or justification. The generator
+  and this check are covered by `ci.bats`.
 
 This complements the Vulnerability Management Policy documentation in
 `SECURITY.md` (refs #1130 / #1185).

@@ -259,8 +259,9 @@ LAN. The quickstart binds the UI to the LAN IP by default and documents
 `UI_BIND_IP=127.0.0.1` to restrict it further. Separately, `POST
 /api/netdata-alarms`'s token check is scoped to *this* endpoint only — it does
 not change finding #20's underlying fact that Netdata's own API (port 19999,
-reachable only from containers on the `netdata-net` bridge) has no
-authentication of its own.
+reachable from containers on the `netdata-net` bridge and from every service
+with `network_mode: host`, today `dhcp`, `dhcp-proxy` and `dhcp-probe`, which
+share the host's routing to the bridge) has no authentication of its own.
 
 ---
 
@@ -374,9 +375,10 @@ record changes, or subscribes to read cache/DNS metadata.
   requirement (issue #858): an empty/placeholder `NATS_*_PASSWORD` now
   self-heals through the shared-secrets volume the same way `PDNS_API_KEY`/
   `KEA_CTRL_TOKEN`/`DDNS_TSIG_KEY` do, instead of failing at `docker compose up`.
-  The bus still never comes up unauthenticated: the nats/dns/ui entrypoints all
-  resolve the exact same generated value, or exit if the shared-secrets volume
-  is unwritable, before the affected process starts.
+  The bus still never comes up unauthenticated: the nats/dns entrypoints and
+  the `lancache-ui` binary's own root start all resolve the exact same
+  generated value, or exit if the shared-secrets volume is unwritable, before
+  the affected process starts.
 - **Registered secondaries no longer share a credential (issue #583).** Each
   gets its own unique NATS username/password at registration time, issued via
   NATS's auth-callout mechanism (see `services/ui/src/nats_auth_callout.rs`):

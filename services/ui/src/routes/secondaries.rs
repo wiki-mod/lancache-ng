@@ -564,16 +564,12 @@ pub async fn reload_nats_conf(
     if !update_nats_conf(state).await? {
         return Ok(());
     }
-    docker_client::restart_service(
-        &state.docker,
-        &state.config.nats_service,
-        &state.config.container_suffix,
-    )
-    .await
-    // What: uses {e:#} (anyhow's full chain), not {e}.
-    // Why: {e} alone hid the real bollard/Docker-API root cause.
-    // From: Issue #1590
-    .map_err(|e| format!("Failed to restart NATS service: {e:#}").into())
+    docker_client::restart_service(&state.docker, &state.config.nats_service)
+        .await
+        // What: uses {e:#} (anyhow's full chain), not {e}.
+        // Why: {e} alone hid the real bollard/Docker-API root cause.
+        // From: Issue #1590
+        .map_err(|e| format!("Failed to restart NATS service: {e:#}").into())
 }
 
 // What: returns whether the fragment actually changed on disk.
@@ -777,10 +773,19 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("nats.conf");
         fs::write(&path, "old").unwrap();
+        let old_inode = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&path).unwrap());
 
         write_nats_conf_atomically(path.to_str().unwrap(), "new").unwrap();
 
         assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        // What: a rename swaps the inode; an in-place write keeps it.
+        // Why: readers must never see a half-written nats.conf.
+        // From: Issue #1683 | PR #1858
+        let new_inode = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&path).unwrap());
+        assert_ne!(
+            old_inode, new_inode,
+            "nats.conf was rewritten in place, not replaced"
+        );
         let leftovers = fs::read_dir(&dir)
             .unwrap()
             .filter_map(Result::ok)
@@ -800,9 +805,7 @@ mod tests {
     // this code path (the now-removed shared DNS-reader role, #380/#426/#473)
     // *was* a documented no-op, so this repeat-run test intentionally targets
     // real, non-trivial content (the interpolated issuer + auth_users) rather
-    // than assuming that history still applies today. (Test names retain the
-    // `nats_conf` marker the #640 idempotence-coverage guard keys on -- see
-    // scripts/tracked/check-idempotence-test-coverage.sh -- even though since #811 this
+    // than assuming that history still applies today. (Since #811 this
     // writer emits the auth_callout.conf fragment rather than the whole file.)
     #[test]
     fn nats_conf_auth_callout_fragment_render_is_byte_identical_across_repeated_calls() {

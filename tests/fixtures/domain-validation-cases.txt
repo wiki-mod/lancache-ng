@@ -16,7 +16,7 @@
 # generated length-boundary cases (a 64-char label, a >253-char total domain)
 # are intentionally NOT here -- they can't be expressed as static fixture
 # lines -- and instead stay as separate, per-language tests (see
-# tests/bats/proxy_cert_generation.bats and domains.rs's own
+# .github/scripts/ci.bats's domain test and domains.rs's own
 # accepts_domain_entries_with_optional_wildcard_marker test).
 
 valid example.com

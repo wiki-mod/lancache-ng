@@ -291,11 +291,6 @@ pub struct Config {
     // the include target that entrypoint resolves relative to /etc/nats.
     pub nats_auth_callout_path: String,
     pub nats_service: String,
-    // What: appended to every container_name_for_service() lookup.
-    // Why: mirrors watchdog.sh's LANCACHE_CONTAINER_SUFFIX (issue #1415) --
-    // empty for every real install, non-empty only for a suffixed CI run.
-    // From: Issue #1590
-    pub container_suffix: String,
     // Central logging pipeline (#633): written into nats.conf's top-level
     // `log_file:` directive by the nats service's own entrypoint (since #811
     // the Admin UI no longer writes nats.conf, only the auth_callout fragment;
@@ -461,7 +456,6 @@ impl fmt::Debug for Config {
             .field("nats_conf_path", &self.nats_conf_path)
             .field("nats_auth_callout_path", &self.nats_auth_callout_path)
             .field("nats_service", &self.nats_service)
-            .field("container_suffix", &self.container_suffix)
             .field("nats_log_file", &self.nats_log_file)
             .field("dev_mode", &self.dev_mode)
             .field("syslog_enabled", &self.syslog_enabled)
@@ -842,6 +836,13 @@ impl Config {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| derive_lancache_image_channel(&lancache_image_tag));
         let auto_update_enabled = env_bool("AUTO_UPDATE_ENABLED", false);
+        let shared_secret_dir = env_str("LANCACHE_SHARED_SECRET_DIR", "/var/lib/lancache-secrets");
+        let secret = |var: &str| shared_secret(&shared_secret_dir, var);
+        let secret_opt = |var: &str| secret(var).map(|v| Some(v).filter(|v| !v.is_empty()));
+        let dhcp_api_token = match env::var("DHCP_API_TOKEN") {
+            Ok(v) if !shared_secret_is_placeholder(&v) => v,
+            _ => secret("KEA_CTRL_TOKEN")?,
+        };
 
         Ok(Self {
             template_dir: env_str("TEMPLATE_DIR", "/templates"),
@@ -851,11 +852,7 @@ impl Config {
             cache_dir,
             dns_standard_state_dir: env_str("DNS_STANDARD_STATE_DIR", "/var/lib/powerdns-state"),
             dns_ssl_state_dir: env_str("DNS_SSL_STATE_DIR", "/var/lib/powerdns-state"),
-            // Matches entrypoint.sh's shared-secret-bootstrap library
-            // default (LANCACHE_SHARED_SECRET_DIR) exactly, so both sides
-            // agree on where "ddns-tsig-key" lives without a second env var
-            // most operators would never think to keep in sync.
-            shared_secret_dir: env_str("LANCACHE_SHARED_SECRET_DIR", "/var/lib/lancache-secrets"),
+            shared_secret_dir: shared_secret_dir.clone(),
             proxy_standard_url,
             proxy_ssl_url,
             netdata_url: env_str("NETDATA_URL", "http://netdata:19999"),
@@ -881,7 +878,7 @@ impl Config {
             dhcp_mode,
             dhcp_api_url,
             ui_settings_file: env_str("UI_SETTINGS_FILE", DEFAULT_UI_SETTINGS_FILE),
-            dhcp_api_token: env_str("DHCP_API_TOKEN", ""),
+            dhcp_api_token,
             kea_config_snapshot_dir: env_str(
                 "KEA_CONFIG_SNAPSHOT_DIR",
                 "/var/lib/kea/config-snapshots",
@@ -900,8 +897,8 @@ impl Config {
             pdns_auth_url: env_str("PDNS_AUTH_URL", "http://dns-standard:8081"),
             pdns_rec_url: env_str("PDNS_REC_URL", "http://dns-standard:8082"),
             dns_rollback_url: env_str("DNS_ROLLBACK_URL", "http://dns-standard:8083"),
-            pdns_api_key: env_str("PDNS_API_KEY", ""),
-            netdata_alarm_token: env_str("NETDATA_ALARM_TOKEN", ""),
+            pdns_api_key: secret("PDNS_API_KEY")?,
+            netdata_alarm_token: secret("NETDATA_ALARM_TOKEN")?,
             netdata_alarms_file: env_str("NETDATA_ALARMS_FILE", "/data/netdata-alarms.json"),
             nats_url: env_str("NATS_URL", "nats://nats:4222"),
             // Issue #866: no defaults for either -- an unset value must mean
@@ -919,15 +916,15 @@ impl Config {
             // value here on purpose -- an unset var must fail startup via
             // validate_runtime_nats_credentials, never silently run with an
             // empty password.
-            nats_ui_password: env_opt("NATS_UI_PASSWORD"),
+            nats_ui_password: secret_opt("NATS_UI_PASSWORD")?,
             nats_dns_writer_user: env_str("NATS_DNS_WRITER_USER", ""),
-            nats_dns_writer_password: env_opt("NATS_DNS_WRITER_PASSWORD"),
+            nats_dns_writer_password: secret_opt("NATS_DNS_WRITER_PASSWORD")?,
             nats_dns_replica_user: env_str("NATS_DNS_REPLICA_USER", ""),
-            nats_dns_replica_password: env_opt("NATS_DNS_REPLICA_PASSWORD"),
+            nats_dns_replica_password: secret_opt("NATS_DNS_REPLICA_PASSWORD")?,
             nats_callout_user: env_str("NATS_CALLOUT_USER", ""),
-            nats_callout_password: env_opt("NATS_CALLOUT_PASSWORD"),
+            nats_callout_password: secret_opt("NATS_CALLOUT_PASSWORD")?,
             nats_sys_user: env_str("NATS_SYS_USER", ""),
-            nats_sys_password: env_opt("NATS_SYS_PASSWORD"),
+            nats_sys_password: secret_opt("NATS_SYS_PASSWORD")?,
             nats_issuer_seed_path: env_str(
                 "NATS_ISSUER_SEED_PATH",
                 "/data/lancache-nats-issuer.seed",
@@ -952,7 +949,6 @@ impl Config {
                 "/etc/nats/auth_callout.conf",
             ),
             nats_service: env_str("NATS_SERVICE", "nats"),
-            container_suffix: env_str("LANCACHE_CONTAINER_SUFFIX", ""),
             nats_log_file: env_str("NATS_LOG_FILE", "/var/log/lancache-nats/nats.log"),
             dev_mode: env_bool("LANCACHE_DEV_MODE", false),
             // Mirrors watchdog.sh's maybe_prune_syslog() contract (PR3/#757)
@@ -1044,6 +1040,159 @@ fn env_or(key: &str, default: String) -> String {
 // distinguishable from "set to an empty string").
 fn env_opt(key: &str) -> Option<String> {
     env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+// What: true for empty or a known shared-secret placeholder.
+// Why: every reader of one secret must decide alike.
+// From: Issue #967
+pub(crate) fn shared_secret_is_placeholder(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase().replace('-', "_");
+    normalized.is_empty()
+        || normalized.starts_with("change_me")
+        || normalized.starts_with("changeme")
+        || normalized.starts_with("your_")
+        || normalized.ends_with("_here")
+}
+
+// What: shared-secret file name of a variable (A_B -> a-b).
+// Why: one naming rule replaces any per-secret name list.
+// From: Issue #858 | PR #1858
+fn shared_secret_file_name(var: &str) -> String {
+    var.to_ascii_lowercase().replace('_', "-")
+}
+
+// What: the shared-secret env vars the ui consumes.
+// Why: one inventory for the root start and the reader.
+// From: Issue #858 | PR #1858
+pub(crate) const SHARED_SECRET_VARS: [&str; 8] = [
+    "PDNS_API_KEY",
+    "NETDATA_ALARM_TOKEN",
+    "KEA_CTRL_TOKEN",
+    "NATS_UI_PASSWORD",
+    "NATS_DNS_WRITER_PASSWORD",
+    "NATS_DNS_REPLICA_PASSWORD",
+    "NATS_CALLOUT_PASSWORD",
+    "NATS_SYS_PASSWORD",
+];
+
+// What: first-writer-wins read-or-create of one shared secret.
+// Why: no split-brain between independent consumers.
+// From: Issue #858 | PR #1775
+fn resolve_shared_secret(
+    dir: &std::path::Path,
+    name: &str,
+    current: &str,
+    gid: u32,
+) -> Result<String, String> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = dir.join(name);
+    let on_disk = || {
+        fs::read_to_string(&file)
+            .ok()
+            .map(|v| v.replace('\n', ""))
+            .filter(|v| !v.is_empty())
+    };
+    if let Some(existing) = on_disk()
+        && (current.is_empty() || existing == current)
+    {
+        return Ok(existing);
+    }
+    // What: a real configured value survives a failed write.
+    // Why: only a disagreeing on-disk value makes it unsafe.
+    // From: PR #1775
+    let conflict_now = || match on_disk() {
+        Some(v) => v != current,
+        None => file.exists(),
+    };
+    let keep_current = || !current.is_empty() && !conflict_now();
+    let value = if current.is_empty() {
+        hex::encode(rand::random::<[u8; 32]>())
+    } else {
+        current.to_string()
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let tmp = dir.join(format!(".secret.{}.{nanos}", std::process::id()));
+    let created = fs::create_dir_all(dir).and_then(|()| {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o640)
+            .open(&tmp)?;
+        file.write_all(value.as_bytes())?;
+        file.sync_all()
+    });
+    if let Err(err) = created {
+        let _ = fs::remove_file(&tmp);
+        return if keep_current() {
+            Ok(current.to_string())
+        } else {
+            Err(format!("cannot write {}: {err}", tmp.display()))
+        };
+    }
+    // What: group-own the file by the reader gid, best effort.
+    // Why: some volumes refuse chgrp; 0640 stays either way.
+    // From: Issue #858
+    let _ = std::os::unix::fs::chown(&tmp, None, Some(gid));
+    let placed = if current.is_empty() {
+        fs::hard_link(&tmp, &file)
+    } else {
+        fs::rename(&tmp, &file)
+    };
+    let _ = fs::remove_file(&tmp);
+    if placed.is_ok() {
+        return Ok(value);
+    }
+    if current.is_empty()
+        && let Some(existing) = on_disk()
+    {
+        return Ok(existing);
+    }
+    if keep_current() {
+        return Ok(current.to_string());
+    }
+    Err(format!("cannot place {}", file.display()))
+}
+
+// What: read-or-create every ui secret file before the drop.
+// Why: the ui may start before its backend; no split-brain.
+// From: Issue #858 | PR #1858
+pub(crate) fn ensure_shared_secrets(dir: &str, gid: u32) -> Result<(), String> {
+    for var in SHARED_SECRET_VARS {
+        let configured = env::var(var).unwrap_or_default();
+        let current = if shared_secret_is_placeholder(&configured) {
+            ""
+        } else {
+            configured.as_str()
+        };
+        let path = std::path::Path::new(dir);
+        resolve_shared_secret(path, &shared_secret_file_name(var), current, gid)
+            .map_err(|e| format!("{var}: {e}"))?;
+    }
+    Ok(())
+}
+
+// What: a real env value, else its shared-secret file.
+// Why: backends write the file; the ui only reads it.
+// From: Issue #858 | PR #1858
+fn shared_secret(dir: &str, var: &str) -> Result<String, String> {
+    debug_assert!(
+        SHARED_SECRET_VARS.contains(&var),
+        "{var} not in SHARED_SECRET_VARS"
+    );
+    let configured = env::var(var).unwrap_or_default();
+    if !shared_secret_is_placeholder(&configured) {
+        return Ok(configured);
+    }
+    let path = std::path::Path::new(dir).join(shared_secret_file_name(var));
+    match fs::read_to_string(&path) {
+        Ok(value) => Ok(value.replace('\n', "")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("cannot read {var} from {}: {e}", path.display())),
+    }
 }
 
 // CACHE_DIR is the only runtime cache path as of v0.2.0. The pre-v0.2.0 split
@@ -1274,6 +1423,136 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // What: run `f` with the inventory vars cleared, then restore.
+    // Why: tests touch real secret env names under the lock.
+    // From: PR #1858
+    fn with_secret_env_cleared(f: impl FnOnce()) {
+        let saved: Vec<(&str, Option<String>)> = SHARED_SECRET_VARS
+            .iter()
+            .map(|v| (*v, env::var(v).ok()))
+            .collect();
+        unsafe {
+            for v in SHARED_SECRET_VARS {
+                env::remove_var(v);
+            }
+        }
+        f();
+        unsafe {
+            for (v, val) in saved {
+                match val {
+                    Some(x) => env::set_var(v, x),
+                    None => env::remove_var(v),
+                }
+            }
+        }
+    }
+
+    // What: a fresh, unique temp dir for one test.
+    // Why: parallel tests must not share secret files.
+    // From: PR #1858
+    fn secret_test_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("lancache-ng-{tag}-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // What: real env wins; placeholder/empty reads the file.
+    // Why: the ui only reads what its backend wrote.
+    // From: Issue #858 | PR #1858
+    #[test]
+    fn shared_secret_reads_the_file_unless_env_is_real() {
+        let _guard = env_test_lock().lock().unwrap();
+        with_secret_env_cleared(|| {
+            let dir = secret_test_dir("secret-read");
+            let d = dir.to_str().unwrap();
+            fs::write(dir.join("netdata-alarm-token"), "from-file\n").unwrap();
+            for (env_value, want) in [
+                (Some("real-value"), "real-value"),
+                (Some("CHANGE_ME_X"), "from-file"),
+                (Some(""), "from-file"),
+                (None, "from-file"),
+            ] {
+                unsafe {
+                    match env_value {
+                        Some(v) => env::set_var("NETDATA_ALARM_TOKEN", v),
+                        None => env::remove_var("NETDATA_ALARM_TOKEN"),
+                    }
+                }
+                assert_eq!(shared_secret(d, "NETDATA_ALARM_TOKEN").unwrap(), want);
+            }
+            assert_eq!(shared_secret(d, "PDNS_API_KEY").unwrap(), "");
+            fs::create_dir(dir.join("kea-ctrl-token")).unwrap();
+            assert!(shared_secret(d, "KEA_CTRL_TOKEN").is_err());
+            fs::remove_dir_all(dir).unwrap();
+        });
+    }
+
+    // What: generate once, reuse, keep a real value, never rotate.
+    // Why: a rotating handshake secret breaks every consumer.
+    // From: Issue #858 | PR #1858
+    #[test]
+    fn resolve_shared_secret_is_first_writer_wins_and_stable() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = secret_test_dir("secret-resolve");
+        let gid = fs::metadata(&dir).unwrap().gid();
+        let first = resolve_shared_secret(&dir, "s", "", gid).unwrap();
+        assert_eq!(first.len(), 64);
+        assert_eq!(resolve_shared_secret(&dir, "s", "", gid).unwrap(), first);
+        assert_eq!(fs::metadata(dir.join("s")).unwrap().mode() & 0o777, 0o640);
+        assert_eq!(
+            resolve_shared_secret(&dir, "s", "real", gid).unwrap(),
+            "real"
+        );
+        assert_eq!(fs::read_to_string(dir.join("s")).unwrap(), "real");
+        assert_eq!(resolve_shared_secret(&dir, "s", "", gid).unwrap(), "real");
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            1,
+            "temp files must not remain"
+        );
+        let blocker = dir.join("not-a-dir");
+        fs::write(&blocker, "x").unwrap();
+        assert_eq!(
+            resolve_shared_secret(&blocker, "s", "real", gid).unwrap(),
+            "real"
+        );
+        assert!(resolve_shared_secret(&blocker, "s", "", gid).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    // What: a cold start creates every file; a rerun keeps them.
+    // Why: the ui may start first and must not split the brain.
+    // From: Issue #858 | PR #1858
+    #[test]
+    fn ensure_shared_secrets_creates_all_once_then_reader_sees_them() {
+        use std::os::unix::fs::MetadataExt as _;
+        let _guard = env_test_lock().lock().unwrap();
+        with_secret_env_cleared(|| {
+            let dir = secret_test_dir("secret-ensure");
+            let d = dir.to_str().unwrap();
+            let gid = fs::metadata(&dir).unwrap().gid();
+            unsafe {
+                env::set_var("NATS_UI_PASSWORD", "CHANGE_ME_NATS_UI_PASSWORD");
+            }
+            ensure_shared_secrets(d, gid).unwrap();
+            let first: Vec<String> = SHARED_SECRET_VARS
+                .iter()
+                .map(|v| fs::read_to_string(dir.join(shared_secret_file_name(v))).unwrap())
+                .collect();
+            assert!(first.iter().all(|v| v.len() == 64));
+            ensure_shared_secrets(d, gid).unwrap();
+            for (v, want) in SHARED_SECRET_VARS.iter().zip(&first) {
+                assert_eq!(&shared_secret(d, v).unwrap(), want);
+            }
+            fs::remove_dir_all(dir).unwrap();
+        });
+    }
 
     // Auto mode's entire purpose is to gate HSTS on the request's actual
     // scheme -- a plain-HTTP deployment must never receive

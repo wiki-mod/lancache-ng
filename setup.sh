@@ -21,17 +21,8 @@ export LANG=C LC_ALL=C
 # prebuilt images, and start the stack. Development-only behavior belongs behind
 # an explicit future opt-in path, not inside the default first-user flow.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
-QUICKSTART_COMPOSE="$SCRIPT_DIR/deploy/quickstart/docker-compose.yml"
+PROD_COMPOSE="$SCRIPT_DIR/deploy/prod/docker-compose.yml"
 DOCKER_SOCKET_PROXY_SCRIPT="$SCRIPT_DIR/scripts/untracked/docker-socket-proxy.sh"
-# dhcp-probe.sh (formerly copied the same way as the two scripts below) was
-# retired by issue #1288 -- the dhcp-probe container now runs the ui
-# image's own `lancache-ui --dhcp-probe` native CLI mode, so there is no
-# longer a separate script to track a source path for.
-# Shared-secret bootstrap helper (#858): the quickstart nats service sources this
-# to resolve the NATS_*_PASSWORD handshake secrets from the shared-secrets volume.
-# Copied flat into $install_dir/scripts/ like the two scripts above, so the
-# quickstart compose can bind-mount ./scripts/shared-secret-bootstrap.sh.
-SHARED_SECRET_BOOTSTRAP_SCRIPT="$SCRIPT_DIR/scripts/lib/shared-secret-bootstrap.sh"
 DEFAULT_UI_SESSION_TTL_SECONDS=86400
 MAX_UI_SESSION_TTL_SECONDS=31536000
 
@@ -483,7 +474,7 @@ run_kea_dhcp_activation_preflight() {
     # services/ui) and flagged explicitly rather than silently left as
     # unfinished parity. `services/dhcp/Dockerfile` still installs nmap for
     # exactly this call site.
-    if ! output=$(docker compose --env-file "$env_file" -f "$QUICKSTART_COMPOSE" --profile dhcp-kea run --rm --no-deps dhcp \
+    if ! output=$(docker compose --env-file "$env_file" -f "$PROD_COMPOSE" --profile dhcp-kea run --rm --no-deps dhcp \
         nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5 2>&1); then
         print_warn "DHCP discovery preflight could not be executed inside the Kea image."
         print_warn "Kea activation will require an explicit confirmation because the safety check did not complete."
@@ -1628,49 +1619,190 @@ compose_file_args_for_install_dir() {
     printf '%s\n' "${args[@]}"
 }
 
-# Copies the quickstart compose file and helper scripts into install_dir (used
-# on both first install and every update, so copied installs always run the
-# current container wiring). See the inline comment for the #538 workaround
-# that force-removes a stale auto-vivified directory before reinstalling
-# docker-socket-proxy.sh.
-#
-# dhcp-probe.sh is no longer one of these copied assets (issue #1288): the
-# dhcp-probe container now runs the same lancache-ui image's own
-# `--dhcp-probe` CLI mode (a native Rust DHCP probe, see
-# services/ui/src/dhcp_probe_native.rs) instead of a bind-mounted external
-# script, so there is nothing left to install/copy for it -- the compose
-# file's dhcp-probe service no longer declares a `volumes:` entry at all.
-install_quickstart_compose_assets() {
-    local install_dir="$1" socket_proxy_target helper_target
+# What: copies a named volume into an empty directory
+# Why: prod keeps it in bind dirs, quickstart in volumes
+# From: Issue #1683 | PR #1858
+copy_volume_to_dir() {
+    local volume="$1" dir="$2"
+    docker volume inspect "$volume" >/dev/null 2>&1 || return 0
+    mkdir -p "$dir" || die "Failed to create $dir for $volume."
+    if [[ -n "$(ls -A "$dir" 2>/dev/null)" ]]; then
+        print_ok "Kept existing $dir; $volume not copied"
+        return 0
+    fi
+    docker run --rm -v "${volume}:/from:ro" -v "${dir}:/to" alpine sh -c 'cp -a /from/. /to/' \
+        || die "Failed to copy Docker volume $volume into $dir. The volume is unchanged."
+    print_ok "Copied $volume into $dir"
+}
 
-    socket_proxy_target="$install_dir/scripts/untracked/docker-socket-proxy.sh"
-    helper_target="$install_dir/scripts/shared-secret-bootstrap.sh"
-    # docker-socket-proxy.sh's own source moved one directory level deeper
-    # (issue 1095, scripts/untracked/docker-socket-proxy.sh); the
-    # installed copy mirrors that same nesting, so the target directory
-    # needs both levels created, not just the flat "scripts" mkdir that
-    # sufficed before that move.
-    mkdir -p "$install_dir/scripts/untracked"
-    install -m 0644 "$QUICKSTART_COMPOSE" "$install_dir/docker-compose.yml"
-    if [[ -d "$socket_proxy_target" ]]; then
-        rm -rf "$socket_proxy_target"
-    fi
-    if [[ "$(realpath -m "$DOCKER_SOCKET_PROXY_SCRIPT")" != "$(realpath -m "$socket_proxy_target")" ]]; then
-        install -m 0755 "$DOCKER_SOCKET_PROXY_SCRIPT" "$socket_proxy_target"
+# What: a checkout root resolves to deploy/prod
+# Why: commands default to the checkout root
+# From: Issue #1683 | PR #1858
+resolve_stack_dir() {
+    local dir="$1"
+    if [[ ! -f "$dir/docker-compose.yml" && -f "$dir/deploy/prod/docker-compose.yml" ]]; then
+        printf '%s\n' "$dir/deploy/prod"
     else
-        chmod 0755 "$socket_proxy_target"
+        printf '%s\n' "$dir"
     fi
-    # Shared-secret bootstrap helper (#858), same auto-vivified-directory guard
-    # as the two scripts above (#538): the nats service bind-mounts this to
-    # source resolve_shared_secret for the NATS_*_PASSWORD handshake secrets.
-    if [[ -d "$helper_target" ]]; then
-        rm -rf "$helper_target"
+}
+
+# What: true for a quickstart copy outside deploy/prod
+# Why: these installs must converge to deploy/prod on update
+# From: Issue #1683 | PR #1858
+is_quickstart_install() {
+    local dir="$1"
+    ! is_deploy_prod_install_dir "$dir" && [[ -f "$dir/docker-compose.yml" && -f "$PROD_COMPOSE" ]]
+}
+
+# What: converts a quickstart install into deploy/prod
+# Why: AG-KD-008 one profile; AG-OP-007 convergence
+# From: Issue #1683 | PR #1858
+migrate_quickstart_install() {
+    local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" env_local old_env project key value pair volume dir copy
+    env_local="$stack_dir/.env.local"
+    old_env="$old_dir/.env"
+    [[ -f "$old_env" || -f "$env_local" ]] \
+        || die "Cannot migrate $old_dir: neither $old_env nor $env_local exists."
+    print_step "Migrating the quickstart install at $old_dir to $stack_dir"
+    # What: convergence paused for the whole migration
+    # Why: the timer must not run compose mid-migration
+    # From: Issue #1683 | PR #1858
+    UPDATE_CONVERGENCE_PAUSED=0
+    UPDATE_CONVERGENCE_COMPLETED=0
+    trap resume_lancache_convergence_after_failed_update EXIT
+    UPDATE_CONVERGENCE_PAUSED=1
+    pause_lancache_convergence_for_update
+    ( cmd_backup --config "$old_dir" ) \
+        || die "Pre-migration backup of $old_dir failed; nothing was changed."
+    project=$(compose_project_name "$old_dir" "$old_env")
+    ( cd "$old_dir" && docker compose --env-file "$old_env" stop ) \
+        || die "Failed to stop the quickstart stack in $old_dir; nothing was changed."
+    if [[ ! -f "$env_local" ]]; then
+        install -m 0600 "$old_env" "$env_local" || die "Failed to create $env_local from $old_env."
     fi
-    if [[ "$(realpath -m "$SHARED_SECRET_BOOTSTRAP_SCRIPT")" != "$(realpath -m "$helper_target")" ]]; then
-        install -m 0644 "$SHARED_SECRET_BOOTSTRAP_SCRIPT" "$helper_target"
-    else
-        chmod 0644 "$helper_target"
+    env_key_exists LANCACHE_STATE_DIR "$env_local" || set_env_key LANCACHE_STATE_DIR "$old_dir" "$env_local"
+    # What: relative paths become absolute to old dir
+    # Why: prod resolves them against deploy/prod instead
+    # From: Issue #1683 | PR #1858
+    for key in CACHE_DIR KEA_DATA_DIR NTP_DATA_DIR CACHEHAMSTER_DATA_DIR; do
+        value=$(get_env_var "$key" "$env_local")
+        [[ -n "$value" && "$value" != /* ]] || continue
+        set_env_key "$key" "$(realpath -m "$old_dir/$value")" "$env_local"
+    done
+    value=$(get_env_var LANCACHE_STATE_DIR "$env_local")
+    for pair in pdns-data-standard:PDNS_STANDARD_DIR:pdns-standard pdns-data-ssl:PDNS_SSL_DIR:pdns-ssl \
+        pdns-filter-state:PDNS_FILTER_STATE_DIR:pdns-filter-state nats-data:NATS_DATA_DIR:nats \
+        nats-conf:NATS_CONF_DIR:nats-conf logs-syslog-ng:SYSLOG_NG_LOG_DIR:syslog-ng; do
+        IFS=: read -r volume key dir <<< "$pair"
+        dir=$(get_env_var "$key" "$env_local"); dir="${dir:-$value/${pair##*:}}"
+        copy_volume_to_dir "${project}_${volume}" "$dir"
+    done
+    if [[ -f "$old_dir/certs/ca.crt" && ! -f "$SCRIPT_DIR/certs/ca.crt" ]]; then
+        mkdir -p "$SCRIPT_DIR/certs" && cp -p "$old_dir/certs/ca."* "$SCRIPT_DIR/certs/" \
+            || die "Failed to copy the CA from $old_dir/certs to $SCRIPT_DIR/certs."
     fi
+    sync_config_prod_local_env "$stack_dir" "$env_local"
+    if systemd_available; then
+        write_lancache_systemd_units "$stack_dir"
+    fi
+    # What: bundle removed last; its absence marks done
+    # Why: an interrupted run resumes on the next update
+    # From: Issue #1683 | PR #1858
+    for copy in "$old_dir/scripts/shared-secret-bootstrap.sh" "$old_dir/scripts/untracked/docker-socket-proxy.sh"; do
+        [[ "$(realpath -m "$copy")" == "$(realpath -m "$DOCKER_SOCKET_PROXY_SCRIPT")" ]] && continue
+        rm -f "$copy" || die "Failed to remove the quickstart copy $copy."
+    done
+    rm -f "$old_dir/docker-compose.yml" "$old_env" || die "Failed to remove the quickstart files in $old_dir."
+    ( cd "$stack_dir" && docker compose --env-file "$env_local" up -d ) \
+        || die "The migrated stack did not start from $stack_dir; restore with: setup.sh restore."
+    trap - EXIT
+    resume_lancache_convergence_after_update
+    UPDATE_CONVERGENCE_COMPLETED=1
+    print_ok "Quickstart install migrated to $stack_dir"
+}
+
+# What: writes the four lancache systemd units
+# Why: fresh install and migration share one unit definition
+# From: Issue #1683 | PR #1858
+write_lancache_systemd_units() {
+    local stack_dir="$1" setup_sh="$SCRIPT_DIR/setup.sh"
+    local compose="docker compose --env-file .env.local"
+    cat > /etc/systemd/system/lancache.service <<EOF || die "Failed to write lancache.service."
+[Unit]
+Description=LanCache-NG
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=${stack_dir}
+ExecStart=${compose} up -d
+ExecStop=${compose} down
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    # What: reconcile (exit ignored), then converge
+    # Why: a failed reconcile must not stop the drift repair
+    # From: Issue #819
+    cat > /etc/systemd/system/lancache-converge.service <<EOF || die "Failed to write lancache-converge.service."
+[Unit]
+Description=LanCache-NG Convergence Check
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=${stack_dir}
+ExecStart=-${setup_sh} converge-reconcile ${stack_dir}
+ExecStart=${compose} up -d --remove-orphans
+EOF
+    cat > /etc/systemd/system/lancache-converge.timer <<EOF || die "Failed to write lancache-converge.timer."
+[Unit]
+Description=LanCache-NG Convergence Timer
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=lancache-converge.service
+
+[Install]
+WantedBy=timers.target
+EOF
+    # What: daily host-side update runs the on-disk setup.sh
+    # Why: no container gets Docker socket write access
+    # From: Issue #819
+    cat > /etc/systemd/system/lancache-auto-update.service <<EOF || die "Failed to write lancache-auto-update.service."
+[Unit]
+Description=LanCache-NG Scheduled Automatic Update
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=${stack_dir}
+ExecStart=${setup_sh} auto-update ${stack_dir}
+EOF
+    # What: daily, spread over 1h, missed runs caught up
+    # Why: installs must not all hit GHCR at the same minute
+    # From: Issue #819
+    cat > /etc/systemd/system/lancache-auto-update.timer <<EOF || die "Failed to write lancache-auto-update.timer."
+[Unit]
+Description=LanCache-NG Scheduled Automatic Update Timer
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+Unit=lancache-auto-update.service
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload || die "systemctl daemon-reload failed."
 }
 
 # Determines origin's default branch (e.g. master) via the cheap local
@@ -1808,55 +1940,72 @@ resolve_update_ip_config_paths() {
     printf '%s\n%s\n%s\n' "$deploy_env" "$dns_standard_env" "$dns_ssl_env"
 }
 
-# deploy/prod's dhcp-proxy service (deploy/prod/docker-compose.yml) loads its
-# runtime values via `env_file: ../../config/prod/dhcp-proxy.env` -- a static
-# file Compose reads directly, with no `${VAR}` interpolation from
-# .env/.env.local at all (unlike deploy/quickstart's dhcp-proxy service,
-# which wires each value through `environment: - KEY=${KEY:-}`). Every value
-# migrate_env_for_update()/the fresh-install writer resolve for DHCP_PROXY_*
-# and DHCP_RELAY_LOCAL_ADDR therefore never reaches a real deploy/prod
-# container unless it is also written here -- a no-op for a quickstart
-# install (or any other non-deploy/prod install_dir), which has no separate
-# file to sync.
-sync_dhcp_proxy_config_prod_env() {
+# What: a config/prod key: <x>.local.env first, else <x>.env
+# Why: local holds operator values; template is the default
+# From: Issue #1683 | PR #1858
+config_prod_value() {
+    local key="$1" template="$2" local_env="${2%.env}.local.env"
+    if env_key_exists "$key" "$local_env"; then
+        get_env_var "$key" "$local_env"
+    else
+        get_env_var "$key" "$template"
+    fi
+}
+
+# What: template edits move into <x>.local.env, newest wins
+# Why: edits survive (AG-OP-009); checkout stays syncable
+# From: Issue #1683 | PR #1858
+adopt_config_prod_edits() {
+    local repo_root="$1" rel template local_env key raw head_file
+    local -a changed
+    [[ -d "$repo_root/.git" ]] || return 0
+    mapfile -t changed < <(git -C "$repo_root" diff --name-only HEAD -- 'config/prod/*.env') \
+        || die "Failed to list edited config/prod files in $repo_root."
+    head_file=$(mktemp) || die "Failed to create a temporary file for config/prod adoption."
+    for rel in "${changed[@]}"; do
+        [[ -n "$rel" && "$rel" != *.local.env ]] || continue
+        template="$repo_root/$rel"
+        local_env="${template%.env}.local.env"
+        git -C "$repo_root" show "HEAD:$rel" > "$head_file" 2>/dev/null || : > "$head_file"
+        while IFS= read -r key; do
+            raw=$(get_env_assignment_value_raw "$key" "$template")
+            [[ "$raw" == "$(get_env_assignment_value_raw "$key" "$head_file")" ]] \
+                && env_key_exists "$key" "$head_file" && continue
+            set_env_assignment "$key" "$raw" "$local_env"
+        done < <(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ {print $1}' "$template")
+        git -C "$repo_root" checkout HEAD -- "$rel" \
+            || die "Failed to restore $rel after moving its edits to ${local_env##*/}."
+        print_ok "Moved local edits of $rel into ${local_env##*/}"
+    done
+    rm -f "$head_file"
+}
+
+# What: env values differing from a config/prod default
+# Why: env_file services never see .env interpolation
+# From: Issue #1683 | PR #1858
+sync_config_prod_local_env() {
     local install_dir="$1" source_env_file="$2"
-    local dhcp_relay_local_addr="$3" dhcp_proxy_interface="$4" dhcp_proxy_router="$5"
-    local dhcp_ntp_servers="$6" dhcp_proxy_domain="$7" dhcp_proxy_boot_filename="$8"
-    local dhcp_proxy_boot_server="$9" dhcp_proxy_pxe_boot_server="${10}" dhcp_proxy_pxe_boot_filename_bios="${11}"
-    local dhcp_proxy_pxe_boot_filename_uefi="${12}"
-    local repo_root config_prod_env key fallback kv
+    local repo_root template local_env key raw keys
 
     is_deploy_prod_install_dir "$install_dir" || return 0
     repo_root=$(deploy_prod_repo_root "$install_dir")
-    config_prod_env="$repo_root/config/prod/dhcp-proxy.env"
-    [[ -f "$config_prod_env" ]] || return 0
-
-    # config_prod_env, not $source_env_file (.env/.env.local), is what
-    # deploy/prod's real dhcp-proxy container reads, so it is the permanent
-    # authority for every key below. Key presence (including an explicit
-    # empty value) must win here: migrate_env_for_update() permanently adds
-    # these keys to .env, which means .env presence cannot distinguish a later
-    # operator edit from an old migration value. The resolved .env fallback is
-    # used only to initialize a key that config_prod_env does not have yet.
-    for kv in \
-        "DHCP_RELAY_LOCAL_ADDR:$dhcp_relay_local_addr" \
-        "DHCP_PROXY_INTERFACE:$dhcp_proxy_interface" \
-        "DHCP_PROXY_ROUTER:$dhcp_proxy_router" \
-        "DHCP_NTP_SERVERS:$dhcp_ntp_servers" \
-        "DHCP_PROXY_DOMAIN:$dhcp_proxy_domain" \
-        "DHCP_PROXY_BOOT_FILENAME:$dhcp_proxy_boot_filename" \
-        "DHCP_PROXY_BOOT_SERVER:$dhcp_proxy_boot_server" \
-        "DHCP_PROXY_PXE_BOOT_SERVER:$dhcp_proxy_pxe_boot_server" \
-        "DHCP_PROXY_PXE_BOOT_FILENAME_BIOS:$dhcp_proxy_pxe_boot_filename_bios" \
-        "DHCP_PROXY_PXE_BOOT_FILENAME_UEFI:$dhcp_proxy_pxe_boot_filename_uefi"
-    do
-        key="${kv%%:*}"
-        fallback="${kv#*:}"
-        if ! env_key_exists "$key" "$config_prod_env"; then
-            set_env_key "$key" "$fallback" "$config_prod_env"
-        fi
+    for template in "$repo_root"/config/prod/*.env; do
+        [[ -f "$template" && "$template" != *.local.env ]] || continue
+        local_env="${template%.env}.local.env"
+        keys=$(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ {print $1}' "$template") \
+            || die "Failed to read the keys of $template."
+        # What: local key wins; defaults are not copied
+        # Why: a copied default would hide newer defaults
+        # From: Issue #1683 | PR #1858
+        while IFS= read -r key; do
+            [[ -n "$key" ]] && env_key_exists "$key" "$source_env_file" || continue
+            env_key_exists "$key" "$local_env" && continue
+            raw=$(get_env_assignment_value_raw "$key" "$source_env_file")
+            [[ "$raw" == "$(get_env_assignment_value_raw "$key" "$template")" ]] && continue
+            set_env_assignment "$key" "$raw" "$local_env"
+        done <<< "$keys"
     done
-    print_ok "Converged missing dnsmasq-proxy/PXE keys in $config_prod_env from $source_env_file; existing deploy/prod values were preserved because this runtime file is authoritative."
+    print_ok "Converged config/prod overrides from $source_env_file; existing local values were preserved."
 }
 
 # Full .env rewrites keep the original owner/mode because the file contains
@@ -2898,22 +3047,9 @@ migrate_env_for_update() {
     dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$env_file")
     dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file")
     upstream_dhcp_ip=$(get_env_var UPSTREAM_DHCP_IP "$env_file")
-    # sync_dhcp_proxy_config_prod_env() (called near the end of this function)
-    # treats config/prod/dhcp-proxy.env as deploy/prod's permanent authority.
-    # For a deploy/prod install, seed each of the ten append_env_key_if_missing
-    # calls below from config/prod/dhcp-proxy.env's own current value instead
-    # of an unconditional "" default. Backfilling with "" would make $env_file
-    # carry an explicit empty for that key from this point on, and every LATER
-    # `setup.sh update` run -- not just the first one after a key's
-    # introduction -- would then read that backfilled empty back as "operator
-    # cleared it" and use it to wipe a real, already-configured
-    # config/prod/dhcp-proxy.env value: a one-time snapshot of $env_file taken
-    # before these appends only defers that wipe to the second run, since the
-    # snapshot itself cannot help a run that starts after the first backfill
-    # already landed. Seeding from config/prod/dhcp-proxy.env's real value
-    # instead makes $env_file converge to match it immediately, so every
-    # later run reads back the same real value from both files and is a
-    # genuine no-op, exactly like every other key in this function.
+    # What: seeds .env from the effective dhcp-proxy value
+    # Why: an empty backfill would override a real value
+    # From: Issue #1683 | PR #1858
     if is_deploy_prod_install_dir "$install_dir"; then
         prodsync_config_env="$(deploy_prod_repo_root "$install_dir")/config/prod/dhcp-proxy.env"
         if [[ -f "$prodsync_config_env" ]]; then
@@ -2930,13 +3066,13 @@ migrate_env_for_update() {
             # `setup.sh update` that previously worked, since this function's
             # own dnsmasq-proxy validation block requires stricter
             # completeness/well-formedness than the container does.
-            prodsync_default_relay_local_addr=$(get_env_var DHCP_RELAY_LOCAL_ADDR "$prodsync_config_env")
+            prodsync_default_relay_local_addr=$(config_prod_value DHCP_RELAY_LOCAL_ADDR "$prodsync_config_env")
             is_valid_ipv4 "$prodsync_default_relay_local_addr" || prodsync_default_relay_local_addr=""
-            prodsync_default_proxy_interface=$(get_env_var DHCP_PROXY_INTERFACE "$prodsync_config_env")
+            prodsync_default_proxy_interface=$(config_prod_value DHCP_PROXY_INTERFACE "$prodsync_config_env")
             is_valid_dhcp_proxy_interface "$prodsync_default_proxy_interface" || prodsync_default_proxy_interface=""
-            prodsync_default_proxy_router=$(get_env_var DHCP_PROXY_ROUTER "$prodsync_config_env")
+            prodsync_default_proxy_router=$(config_prod_value DHCP_PROXY_ROUTER "$prodsync_config_env")
             is_valid_ipv4 "$prodsync_default_proxy_router" || prodsync_default_proxy_router=""
-            prodsync_default_ntp_servers=$(get_env_var DHCP_NTP_SERVERS "$prodsync_config_env")
+            prodsync_default_ntp_servers=$(config_prod_value DHCP_NTP_SERVERS "$prodsync_config_env")
             if [[ -n "$prodsync_default_ntp_servers" ]]; then
                 IFS=',' read -r -a _dhcp_ntp_check <<< "$prodsync_default_ntp_servers"
                 for _dhcp_ntp_ip in "${_dhcp_ntp_check[@]}"; do
@@ -2944,17 +3080,17 @@ migrate_env_for_update() {
                     [[ -z "$_dhcp_ntp_ip" ]] || is_valid_ipv4 "$_dhcp_ntp_ip" || prodsync_default_ntp_servers=""
                 done
             fi
-            prodsync_default_proxy_domain=$(get_env_var DHCP_PROXY_DOMAIN "$prodsync_config_env")
+            prodsync_default_proxy_domain=$(config_prod_value DHCP_PROXY_DOMAIN "$prodsync_config_env")
             is_valid_dhcp_proxy_domain "$prodsync_default_proxy_domain" || prodsync_default_proxy_domain=""
-            prodsync_default_boot_filename=$(get_env_var DHCP_PROXY_BOOT_FILENAME "$prodsync_config_env")
+            prodsync_default_boot_filename=$(config_prod_value DHCP_PROXY_BOOT_FILENAME "$prodsync_config_env")
             is_valid_dhcp_proxy_boot_filename "$prodsync_default_boot_filename" || prodsync_default_boot_filename=""
-            prodsync_default_boot_server=$(get_env_var DHCP_PROXY_BOOT_SERVER "$prodsync_config_env")
+            prodsync_default_boot_server=$(config_prod_value DHCP_PROXY_BOOT_SERVER "$prodsync_config_env")
             is_valid_ipv4 "$prodsync_default_boot_server" || prodsync_default_boot_server=""
-            prodsync_default_pxe_boot_server=$(get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$prodsync_config_env")
+            prodsync_default_pxe_boot_server=$(config_prod_value DHCP_PROXY_PXE_BOOT_SERVER "$prodsync_config_env")
             is_valid_ipv4 "$prodsync_default_pxe_boot_server" || prodsync_default_pxe_boot_server=""
-            prodsync_default_pxe_boot_filename_bios=$(get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$prodsync_config_env")
+            prodsync_default_pxe_boot_filename_bios=$(config_prod_value DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$prodsync_config_env")
             is_valid_dhcp_proxy_boot_filename "$prodsync_default_pxe_boot_filename_bios" || prodsync_default_pxe_boot_filename_bios=""
-            prodsync_default_pxe_boot_filename_uefi=$(get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$prodsync_config_env")
+            prodsync_default_pxe_boot_filename_uefi=$(config_prod_value DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$prodsync_config_env")
             is_valid_dhcp_proxy_boot_filename "$prodsync_default_pxe_boot_filename_uefi" || prodsync_default_pxe_boot_filename_uefi=""
             # The PXE trio must be complete (server + at least one filename)
             # or entirely empty together -- entrypoint.sh tolerates an
@@ -2983,10 +3119,8 @@ migrate_env_for_update() {
     append_env_key_if_missing DHCP_PROXY_DOMAIN "$prodsync_default_proxy_domain" "$env_file"
     append_env_key_if_missing DHCP_PROXY_BOOT_FILENAME "$prodsync_default_boot_filename" "$env_file"
     append_env_key_if_missing DHCP_PROXY_BOOT_SERVER "$prodsync_default_boot_server" "$env_file"
-    # Deliberately still "" here, unlike the seven keys above: this key is
-    # not one of the ten sync_dhcp_proxy_config_prod_env() converges (see
-    # that function's own `for kv in` list), so config/prod/dhcp-proxy.env
-    # has no authoritative value for it to preserve.
+    # What: custom options get an empty .env default
+    # Why: not a synced key, so there is no prod value to seed
     append_env_key_if_missing DHCP_PROXY_CUSTOM_OPTIONS "" "$env_file"
     # Issue #705: PXE boot-pointer fields. Without this convergence step an
     # existing install upgrading via `setup.sh update` would never gain
@@ -3151,30 +3285,12 @@ migrate_env_for_update() {
     [[ -z "$ui_user" && -z "$ui_password" ]] && allow_insecure_ui=true
     append_env_key_if_missing ALLOW_INSECURE_UI "$allow_insecure_ui" "$env_file"
 
-    # A manual deploy/prod install's dhcp-proxy container reads
-    # config/prod/dhcp-proxy.env directly, not $env_file -- see
-    # sync_dhcp_proxy_config_prod_env's own header comment for why writing
-    # only $env_file above would leave deploy/prod's dhcp-proxy container on
-    # stale values regardless of what this function just resolved. Deliberately
-    # last in this function, after every step above that can still `die` (the
-    # ensure_secret_env_key/UI-password generation calls): this is the one
-    # write in this function that reaches a container's live config outside
-    # $env_file, so an aborted update must not leave it applied while $env_file
-    # itself stays at its pre-update state.
-    # $env_file itself is now safe to pass directly: the append_env_key_if_missing
-    # calls above already seeded each of these ten keys from
-    # config/prod/dhcp-proxy.env's own real value on a deploy/prod install
-    # (see the comment above them), so $env_file and config/prod/dhcp-proxy.env
-    # already agree by this point on a first-time migration. On later runs the
-    # runtime config remains authoritative because a migrated .env key cannot
-    # be distinguished from a deliberate edit by key presence alone.
-    sync_dhcp_proxy_config_prod_env "$install_dir" "$env_file" \
-        "$dhcp_relay_local_addr" "$dhcp_proxy_interface" "$dhcp_proxy_router" \
-        "$dhcp_ntp_servers" "$dhcp_proxy_domain" "$dhcp_proxy_boot_filename" \
-        "$dhcp_proxy_boot_server" "$dhcp_proxy_pxe_boot_server" "$dhcp_proxy_pxe_boot_filename_bios" \
-        "$dhcp_proxy_pxe_boot_filename_uefi"
+    # What: config/prod overrides are the last write
+    # Why: an aborted update must not change live config
+    # From: Issue #1683 | PR #1858
+    sync_config_prod_local_env "$install_dir" "$env_file"
 
-    print_ok ".env is complete for the current quickstart template"
+    print_ok ".env is complete for the current deploy/prod template"
 }
 
 # The apt package that provides a binary sometimes has a different name than
@@ -3566,7 +3682,7 @@ cmd_backup() {
             *) install_dir="$1"; shift ;;
         esac
     done
-    install_dir=$(realpath -m "$install_dir")
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")")
     backup_root=$(realpath -m "$backup_root")
     [[ -f "$install_dir/docker-compose.yml" && -f "$(runtime_env_file_for_install_dir "$install_dir")" ]] \
         || die_no_stack_found "$install_dir"
@@ -3740,7 +3856,7 @@ cmd_restore() {
     # Why: EXIT-trap locals vanish once set -e unwinds the frame.
     # From: PR #1775
     install_dir="${2:-/opt/lancache-ng}"
-    install_dir=$(realpath -m "$install_dir")
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")")
     [[ -n "$archive" ]] || die "Usage: $0 restore <backup.tar.gz> [install-dir]"
     [[ -f "$archive" ]] || die "Backup archive not found: $archive"
     # openssl is required here (not just tar/rsync) because the .env
@@ -3878,19 +3994,16 @@ cmd_restore() {
     restore_compose_volumes "$install_dir" "$backup_dir/docker-volumes"
     print_ok "Files restored from $archive"
 
-    # A quickstart install keeps its own copied docker-compose.yml/scripts
-    # bundle under install_dir rather than a Git checkout, so an archive
-    # taken before a compose/script change (e.g. the pre-single-CACHE_DIR
-    # layout) restores that stale bundle verbatim. Refresh it from this
-    # running setup.sh's own checkout before convergence -- exactly what
-    # cmd_update() already does -- so the migration below never validates or
-    # starts the stack against compose wiring the .env it just produced no
-    # longer matches. Skipped for a deploy/prod (Git-tracked) restore target:
-    # that compose file is managed by the checkout itself, not this bundle,
-    # and restore deliberately does not run a git sync (unlike update).
-    if ! is_deploy_prod_install_dir "$install_dir"; then
-        install_quickstart_compose_assets "$install_dir"
-        print_ok "quickstart compose assets refreshed"
+    # What: a restored quickstart archive migrates to deploy/prod
+    # Why: its old compose bundle no longer matches the checkout
+    # From: Issue #1683 | PR #1858
+    if is_quickstart_install "$install_dir"; then
+        if ! compose_stack_available "$install_dir"; then
+            stack_stopped=0
+            die "Restored a quickstart install, but Docker is not available to migrate it. Install Docker, then run: setup.sh update $install_dir"
+        fi
+        migrate_quickstart_install "$install_dir"
+        install_dir="${PROD_COMPOSE%/*}"
     fi
 
     # Run in a subshell so a die() inside either helper is caught here instead
@@ -4759,6 +4872,11 @@ apply_stack_update_ordered() {
 # convergence. Reordering can leave a half-migrated stack running.
 perform_stack_update_flow() {
     local install_dir="$1"
+    if is_quickstart_install "$install_dir"; then
+        migrate_quickstart_install "$install_dir"
+        install_dir="${PROD_COMPOSE%/*}"
+    fi
+    install_dir=$(resolve_stack_dir "$install_dir")
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die_no_stack_found "$install_dir"
     assert_prebuilt_image_platform_supported
@@ -4780,33 +4898,9 @@ perform_stack_update_flow() {
         print_ok "NATS_BIND_IP is set; keeping the remote-secondary NATS override active for this update"
     fi
 
-    # Must run here -- before sync_repo_to_default_branch,
-    # install_quickstart_compose_assets, or cmd_backup do anything -- not
-    # merely before apply_stack_update_ordered recreates a container, which
-    # is where an earlier version of this baseline capture lived. Real,
-    # live reproduction on issue #1391 (2026-08-05) found that placement too
-    # late: cmd_backup --config's own "stop the stack for a consistent
-    # backup, then restart it" cycle (a few steps below) already restarts
-    # every container using whatever compose/script content
-    # sync_repo_to_default_branch/install_quickstart_compose_assets just
-    # refreshed -- by design, per install_quickstart_compose_assets' own
-    # comment ("so even copied installs use the current container wiring
-    # during the whole update"). A compose-level regression (a changed
-    # healthcheck, env var, volume, etc.) therefore already gets baked into
-    # a real container recreate during THAT restart, before
-    # apply_stack_update_ordered or its old baseline-capture call point ever
-    # ran -- so that later capture point could only ever see the
-    # already-regressed state and would misclassify a real regression as
-    # "pre-existing," exactly the failure mode this whole mechanism exists
-    # to avoid. Capturing here, before any of those steps run, is the actual
-    # last point at which "the current containers" still means "the
-    # pre-update containers" for every mutation this flow performs, not just
-    # the container-recreate ones inside apply_stack_update_ordered.
-    # dc_update config --services is safe to call this early: it only reads
-    # whichever compose files already exist on disk right now (which is
-    # exactly the pre-update set this baseline needs), and does not depend
-    # on anything sync_repo_to_default_branch/install_quickstart_compose_assets
-    # might add or change later.
+    # What: health baseline before sync, backup, restart
+    # Why: a later restart bakes regressions into it
+    # From: Issue #1391
     print_step "Capturing pre-update health baseline"
     local -a _update_baseline_services
     mapfile -t _update_baseline_services < <(dc_update config --services)
@@ -4823,11 +4917,12 @@ perform_stack_update_flow() {
         sync_repo_to_default_branch "$install_dir"
     fi
 
-    # Quickstart installs keep a copied compose bundle under the install tree.
-    # Refresh those assets before any backup-driven restart so even copied
-    # installs use the current container wiring during the whole update.
-    install_quickstart_compose_assets "$install_dir"
-    print_ok "quickstart compose assets updated"
+    # What: deploy/prod template edits move into .local.env
+    # Why: a clean checkout keeps git pulls possible
+    # From: Issue #1683 | PR #1858
+    if is_deploy_prod_install_dir "$install_dir"; then
+        adopt_config_prod_edits "$(deploy_prod_repo_root "$install_dir")"
+    fi
 
     print_step "Creating pre-update rollback backup"
     if ! ( cmd_backup --config "$install_dir" ); then
@@ -4862,7 +4957,7 @@ perform_stack_update_flow() {
 # ── update subcommand ─────────────────────────────────────────────────────────
 cmd_update() {
     local install_dir="${1:-/opt/lancache-ng}"
-    install_dir=$(realpath -m "$install_dir")
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")")
     perform_stack_update_flow "$install_dir"
 }
 
@@ -4901,7 +4996,7 @@ cmd_auto_update() {
     local install_dir="${1:-/opt/lancache-ng}"
     local env_file auto_update_enabled current_channel current_tag deployed_tag decision
 
-    install_dir=$(realpath -m "$install_dir")
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")")
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die_no_stack_found "$install_dir"
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
@@ -5059,7 +5154,7 @@ cmd_converge_reconcile() {
     local ui_dhcp_mode current_dhcp_mode current_compose_profiles new_compose_profiles current_ssl_enabled
     local current_ntp_enabled ui_logging_enabled current_logging_enabled
 
-    install_dir=$(realpath -m "$install_dir")
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")")
     # A converge tick can fire before the very first install completes (the
     # timer/service are both installed, then enabled, in that order -- see
     # "Installing systemd watchdog"/"Starting stack"); silently skip rather
@@ -5204,6 +5299,7 @@ cmd_converge_reconcile() {
 cmd_debug() {
     local install_dir="${1:-/opt/lancache-ng}"
     local env_file
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")")
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die_no_stack_found "$install_dir"
     cd "$install_dir"
@@ -5477,7 +5573,7 @@ cmd_create_logs_for_issue() {
             *) install_dir="$1"; shift ;;
         esac
     done
-    install_dir=$(realpath -m "$install_dir")
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")")
     dest_root=$(realpath -m "$dest_root")
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die_no_stack_found "$install_dir"
@@ -5669,7 +5765,7 @@ cmd_reset_to_last_known_good_config() {
     # relative to the NEW cwd, silently doubling the path (e.g.
     # "a/b/a/b/.env"). Confirmed empirically while validating this command
     # against a real stack with a relative install-dir argument.
-    install_dir=$(realpath -m "$install_dir")
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")")
 
     # PowerDNS's zone/record snapshots are inherently per-zone (lan.,
     # local.lan., and 20 private reverse zones -- see zone_snapshots.rs's
@@ -6150,7 +6246,7 @@ reset_dns_to_last_known_good_config() {
 # own deploy/prod tree (#666).
 cmd_update_ip() {
     local install_dir="${1:-/opt/lancache-ng}"
-    install_dir=$(realpath -m "$install_dir")
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")")
 
     printf "\n"
     printf "${BOLD}╔═══════════════════════════════════════╗${RESET}\n"
@@ -6894,7 +6990,7 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
 
     ensure_stack_requirements_installed
 
-    if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
+    if [[ ! -f "$PROD_COMPOSE" ]]; then
         print_warn "No local repo found — cloning to /opt/lancache-ng..."
         if ! command -v git >/dev/null 2>&1; then
             install_git
@@ -6969,86 +7065,84 @@ while true; do
 done
 
 printf "\n"
-printf "  ${BOLD}SSL mode${RESET}: also caches HTTPS downloads (Epic, EA, Blizzard…)\n"
-printf "  Requires a second IP and a CA certificate on clients.\n\n"
-ask "Enable SSL mode? [y/N]" "N"
-SSL_ENABLED=0
-IP_SSL=""
-DNS_XFR_NOTIFY_TARGETS=""
-if [[ "${REPLY,,}" = "y" ]]; then
-    SSL_ENABLED=1
-    DNS_XFR_NOTIFY_TARGETS="dns-ssl:5300"
-    suggested_ssl="${IP_STANDARD%.*}.$((10#${IP_STANDARD##*.} + 1))"
-    while true; do
-        ask "SSL mode IP (second LAN IP)" "$suggested_ssl"
-        IP_SSL="$REPLY"
-        is_valid_ipv4 "$IP_SSL" && break
-        print_error "Invalid IPv4 address: $IP_SSL"
-    done
-    [[ "$IP_STANDARD" != "$IP_SSL" ]] \
-        || die "Standard IP and SSL IP must be different."
-    # What: captured into a variable first, not a live `ip ... | grep -q`
-    # pipe; `|| true` restores the original fail-soft behavior under
-    # `set -e`.
-    # Why: a host can have several interfaces/addresses. The original
-    # `ip -4 addr show | grep -q ...` sat directly in an `if` condition,
-    # where a failing command cannot abort the script -- only the if's own
-    # branch selection is affected; pulled out into a bare assignment, that
-    # exemption no longer applies unless restored explicitly.
-    # From: Issue #1377
-    ip_ssl_check_output="$(ip -4 addr show || true)"
-    if grep -q "inet ${IP_SSL}/" <<<"$ip_ssl_check_output"; then
-        print_ok "$IP_SSL already assigned"
-    else
-        print_warn "$IP_SSL not yet assigned to an interface"
-        ask "Add now? (ip addr add $IP_SSL/24 dev ${detected_iface:-eth0}) [y/N]" "N"
-        if [[ "${REPLY,,}" = "y" ]]; then
-            if [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
-                # Issue #1176: introspection mode never mutates real host
-                # network state, even if a supplied answers file says "y" here.
-                print_ok "$IP_SSL would be added (skipped: introspection mode)"
-            else
-                ip addr add "$IP_SSL/24" dev "${detected_iface:-eth0}" \
-                    && print_ok "$IP_SSL added (not persistent)" \
-                    || print_warn "Adding failed — please add manually"
-            fi
-        fi
-        printf "\n"
-        print_warn "For persistent configuration after reboot:"
-        printf "    netplan:    sudo nano /etc/netplan/01-netcfg.yaml\n"
-        printf "    interfaces: sudo nano /etc/network/interfaces\n"
-    fi
-    print_ok "SSL mode enabled ($IP_SSL)"
+printf "  ${BOLD}Second LAN IP${RESET}: the SSL DNS/proxy address, always required.\n\n"
+# What: the second LAN address is always asked and checked
+# Why: AG-SETUP-001; prod runs dns-ssl on IP_SSL always
+# From: Issue #1683 | PR #1858
+DNS_XFR_NOTIFY_TARGETS="dns-ssl:5300"
+suggested_ssl="${IP_STANDARD%.*}.$((10#${IP_STANDARD##*.} + 1))"
+while true; do
+    ask "Second LAN IP (SSL mode)" "$suggested_ssl"
+    IP_SSL="$REPLY"
+    is_valid_ipv4 "$IP_SSL" && break
+    print_error "Invalid IPv4 address: $IP_SSL"
+done
+[[ "$IP_STANDARD" != "$IP_SSL" ]] \
+    || die "Standard IP and SSL IP must be different."
+# What: ip output captured first, then searched
+# Why: a failing ip must not abort setup under set -e
+# From: Issue #1377
+ip_ssl_check_output="$(ip -4 addr show || true)"
+if grep -q "inet ${IP_SSL}/" <<<"$ip_ssl_check_output"; then
+    print_ok "$IP_SSL already assigned"
 else
-    print_ok "SSL mode skipped — standard mode only"
+    print_warn "$IP_SSL not yet assigned to an interface"
+    ask "Add now? (ip addr add $IP_SSL/24 dev ${detected_iface:-eth0}) [y/N]" "N"
+    if [[ "${REPLY,,}" = "y" ]]; then
+        if [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
+            # What: introspection never changes networking
+            # Why: list-prompts only walks the prompt logic
+            # From: Issue #1176
+            print_ok "$IP_SSL would be added (skipped: introspection mode)"
+        else
+            ip addr add "$IP_SSL/24" dev "${detected_iface:-eth0}" \
+                && print_ok "$IP_SSL added (not persistent)" \
+                || print_warn "Adding failed — please add manually"
+        fi
+    fi
+    printf "\n"
+    print_warn "For persistent configuration after reboot:"
+    printf "    netplan:    sudo nano /etc/netplan/01-netcfg.yaml\n"
+    printf "    interfaces: sudo nano /etc/network/interfaces\n"
 fi
 
-# ── 3. Installation directory ─────────────────────────────────────────────────
-print_step "Installation directory"
+printf "\n"
+printf "  ${BOLD}SSL mode${RESET}: also caches HTTPS downloads (Epic, EA, Blizzard…)\n"
+printf "  Requires a CA certificate on clients.\n\n"
+ask "Enable SSL mode? [y/N]" "N"
+SSL_ENABLED=0
+[[ "${REPLY,,}" = "y" ]] && SSL_ENABLED=1
+print_ok "SSL mode $([[ "$SSL_ENABLED" = 1 ]] && echo enabled || echo disabled) (second IP $IP_SSL)"
 
-ask "Directory" "/opt/lancache-ng"
-INSTALL_DIR="$(realpath -m "$REPLY")"
+# ── 3. Data directory ─────────────────────────────────────────────────────────
+print_step "Data directory"
 
-if [[ -f "$INSTALL_DIR/docker-compose.yml" ]]; then
-    print_warn "Existing directory found: $INSTALL_DIR"
+# What: the stack runs from this checkout's deploy/prod
+# Why: AG-KD-008: deploy/prod is the only deployment profile
+# From: Issue #1683 | PR #1858
+INSTALL_DIR="$SCRIPT_DIR/deploy/prod"
+ENV_LOCAL="$INSTALL_DIR/.env.local"
+ask "Data directory (cache, DNS, DHCP, NTP state)" "/opt/lancache-ng"
+LANCACHE_STATE_DIR="$(realpath -m "$REPLY")"
+
+if [[ -f "$ENV_LOCAL" ]]; then
+    print_warn "Existing configuration found: $ENV_LOCAL"
     ask "Overwrite? [y/N]" "N"
     [[ "${REPLY,,}" = "y" ]] || die "Cancelled."
 fi
 
 if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
-    mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/certs"
-    install_quickstart_compose_assets "$INSTALL_DIR"
-    print_ok "quickstart compose assets copied to $INSTALL_DIR"
+    mkdir -p "$LANCACHE_STATE_DIR" "$SCRIPT_DIR/certs"
 fi
 
 # ── 4. Cache configuration ───────────────────────────────────────────────────
 print_step "Cache configuration"
 
 while true; do
-    ask "Cache directory (absolute path)" "$INSTALL_DIR/cache"
+    ask "Cache directory (absolute path)" "$LANCACHE_STATE_DIR/cache"
     CACHE_DIR="$REPLY"
     is_absolute_path "$CACHE_DIR" && break
-    print_error "Please enter an absolute path (e.g. $INSTALL_DIR/cache)."
+    print_error "Please enter an absolute path (e.g. $LANCACHE_STATE_DIR/cache)."
 done
 
 while true; do
@@ -7225,10 +7319,10 @@ if [[ "$DHCP_MODE" = "kea" ]]; then
     DHCP_ENABLED=1
 
     while true; do
-        ask "Kea data directory (config + leases, absolute path)" "$INSTALL_DIR/kea"
+        ask "Kea data directory (config + leases, absolute path)" "$LANCACHE_STATE_DIR/kea"
         KEA_DATA_DIR="$REPLY"
         is_absolute_path "$KEA_DATA_DIR" && break
-        print_error "Please enter an absolute path (e.g. $INSTALL_DIR/kea)."
+        print_error "Please enter an absolute path (e.g. $LANCACHE_STATE_DIR/kea)."
     done
 
     while true; do
@@ -7479,7 +7573,7 @@ printf "  Default: disabled.\n\n"
 
 ask "Enable LanCache-NG-NTP? [y/N]" "N"
 NTP_ENABLED=0
-NTP_DATA_DIR="$INSTALL_DIR/ntp"
+NTP_DATA_DIR="$LANCACHE_STATE_DIR/ntp"
 if [[ "${REPLY,,}" = "y" ]]; then
     NTP_ENABLED=1
     print_ok "LanCache-NG-NTP enabled — configure upstream servers and the DHCP auto-populate toggle from the Admin UI's NTP page"
@@ -7540,10 +7634,10 @@ if [[ "${REPLY,,}" = "y" ]]; then
     ask "Username" "admin"
     UI_AUTH_USER="$REPLY"
 
-    if [[ -f "$INSTALL_DIR/.env" ]] \
-        && [[ "$(get_env_var UI_AUTH_USER "$INSTALL_DIR/.env")" = "$UI_AUTH_USER" ]] \
-        && env_key_has_usable_secret UI_AUTH_PASSWORD "$INSTALL_DIR/.env"; then
-        UI_AUTH_PASSWORD=$(get_env_var UI_AUTH_PASSWORD "$INSTALL_DIR/.env")
+    if [[ -f "$ENV_LOCAL" ]] \
+        && [[ "$(get_env_var UI_AUTH_USER "$ENV_LOCAL")" = "$UI_AUTH_USER" ]] \
+        && env_key_has_usable_secret UI_AUTH_PASSWORD "$ENV_LOCAL"; then
+        UI_AUTH_PASSWORD=$(get_env_var UI_AUTH_PASSWORD "$ENV_LOCAL")
         print_ok "Existing Admin-UI password preserved"
     elif [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
         # Issue #1176: introspection mode must not fabricate and print a real
@@ -7559,7 +7653,7 @@ if [[ "${REPLY,,}" = "y" ]]; then
         print_ok "Credentials:"
         printf "    User:     ${BOLD}%s${RESET}\n" "$UI_AUTH_USER"
         printf "    Password: ${BOLD}%s${RESET}\n" "$UI_AUTH_PASSWORD"
-        print_warn "Note the password now — it will also appear in $INSTALL_DIR/.env"
+        print_warn "Note the password now — it will also appear in $ENV_LOCAL"
         printf "\n"
     fi
 else
@@ -7576,10 +7670,10 @@ fi
 # ── 9. Writing .env ───────────────────────────────────────────────────────────
 print_step "Writing .env"
 
-env_file="$INSTALL_DIR/.env"
+env_file="$ENV_LOCAL"
 
 if [[ -f "$env_file" ]]; then
-    ask "Overwrite .env? [y/N]" "N"
+    ask "Overwrite .env.local? [y/N]" "N"
     [[ "${REPLY,,}" = "y" ]] || die "Cancelled."
 fi
 
@@ -7702,14 +7796,16 @@ validate_env_values_for_initial_write \
     "ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}" \
     "UI_BIND_IP=${IP_STANDARD}"
 
-write_env_file "$INSTALL_DIR/.env" <<EOF
+write_env_file "$ENV_LOCAL" <<EOF
 # ── LAN IPs ────────────────────────────────────────────────────────────────────
 # Standard mode (no CA certificate needed): HTTP cached, HTTPS passthrough
 IP_STANDARD=${IP_STANDARD}
 
-# SSL mode (install CA certificate on clients): HTTP + HTTPS cached
-# Empty = SSL mode disabled
+# Second LAN IP for the SSL DNS/proxy, always required (AG-SETUP-001)
 IP_SSL=${IP_SSL}
+
+# Root of all persistent state (cache, DNS, DHCP, NTP)
+LANCACHE_STATE_DIR=${LANCACHE_STATE_DIR}
 
 # ── SSL ────────────────────────────────────────────────────────────────────────
 SSL_ENABLED=${SSL_ENABLED}
@@ -7874,11 +7970,12 @@ UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}
 UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS}
 ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}
 
-# Bind address for Admin-UI. Default keeps quickstart reachable on the LAN.
+# Bind address for Admin-UI. Default keeps it reachable on the LAN.
 # Set to 127.0.0.1 to restrict access to this host.
 UI_BIND_IP=${IP_STANDARD}
 EOF
-print_ok ".env written: $INSTALL_DIR/.env"
+print_ok ".env.local written: $ENV_LOCAL"
+sync_config_prod_local_env "$INSTALL_DIR" "$ENV_LOCAL"
 
 # ── 10. Creating directories ───────────────────────────────────────────────────
 print_step "Creating directories"
@@ -7915,7 +8012,7 @@ if [[ "$LOGGING_ENABLED" = "1" ]]; then
     # own `${SYSLOG_NG_LOG_DIR:-...}` fallback does, so a customized path is
     # preserved rather than silently redirected to the computed default
     # (AG-OP-009).
-    syslog_ng_log_dir="${SYSLOG_NG_LOG_DIR:-$(production_state_root_default "$INSTALL_DIR")/syslog-ng}"
+    syslog_ng_log_dir="${SYSLOG_NG_LOG_DIR:-$LANCACHE_STATE_DIR/syslog-ng}"
     mkdir -p "$syslog_ng_log_dir"
     if chown 10001:10001 "$syslog_ng_log_dir" 2>/dev/null; then
         print_ok "Syslog-ng log root: $syslog_ng_log_dir (owned by uid 10001)"
@@ -7930,116 +8027,16 @@ if [[ "$LOGGING_ENABLED" = "1" ]]; then
 fi
 
 # ── 11. Installing systemd watchdog ───────────────────────────────────────────
-# The systemd service owns boot startup; the timer is a convergence guard that
-# re-applies compose state if containers drift. It is not an update mechanism.
+# What: boot start, drift convergence, optional daily update
+# Why: units are enabled only after the first pull succeeds
 print_step "Installing systemd watchdog"
 
 SYSTEMD_AVAILABLE=0
 if ! systemd_available; then
     print_warn "systemd not found — watchdog will not be installed"
-    print_warn "Start stack manually after reboot: cd $INSTALL_DIR && docker compose up -d"
+    print_warn "Start stack manually after reboot: cd $INSTALL_DIR && docker compose --env-file .env.local up -d"
 else
-    cat > /etc/systemd/system/lancache.service <<EOF
-[Unit]
-Description=LanCache-NG
-After=docker.service
-Requires=docker.service
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-WorkingDirectory=${INSTALL_DIR}
-ExecStart=docker compose up -d
-ExecStop=docker compose down
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    cat > /etc/systemd/system/lancache-converge.service <<EOF
-[Unit]
-Description=LanCache-NG Convergence Check
-After=docker.service
-
-[Service]
-Type=oneshot
-WorkingDirectory=${INSTALL_DIR}
-# Ordered ExecStart lines run in sequence (#819): the reconcile step folds
-# any Admin UI release-channel/scheduled-update override into .env and syncs
-# lancache-auto-update.timer's state to match, BEFORE the pre-existing
-# container-drift convergence below runs. systemd does not invoke ExecStart
-# through a shell, so a leading "-" (not shell "||") is systemd's own syntax
-# for "run this, but never let its exit code fail the unit" -- a non-zero
-# exit from the reconcile step must never take down the convergence tick it
-# normally still needs to run, even though cmd_converge_reconcile is already
-# internally defensive and should not normally fail at all.
-ExecStart=-${INSTALL_DIR}/setup.sh converge-reconcile ${INSTALL_DIR}
-ExecStart=docker compose up -d --remove-orphans
-EOF
-
-    cat > /etc/systemd/system/lancache-converge.timer <<EOF
-[Unit]
-Description=LanCache-NG Convergence Timer
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
-Unit=lancache-converge.service
-
-[Install]
-WantedBy=timers.target
-EOF
-
-    # Scheduled automatic updates (#819), replacing the removed Watchtower
-    # opt-in. Always written (harmless while disabled), only enabled/started
-    # later if AUTO_UPDATE_ENABLED=1 -- same "install now, activate after a
-    # successful first pull" pattern as lancache.service/lancache-converge.*
-    # above. Runs on the HOST via systemd, not as a container: no container
-    # gains expanded Docker-socket or filesystem access to perform an update,
-    # unlike the removed Watchtower helper (which needed read-write socket
-    # access in its own container -- see docs/threat-model.md).
-    #
-    # ExecStart runs whatever setup.sh is already on this install's disk at
-    # tick time -- it does NOT `git pull`/re-fetch itself first. Deliberate
-    # choice (#819, mirroring mailcow-dockerized's own update.sh, which
-    # self-updates but refuses to re-exec in the same process): rewriting a
-    # script file out from under the interpreter currently executing it risks
-    # corrupted/partial execution of the remaining lines. The accepted cost is
-    # that a bugfix to setup.sh's own update logic only takes effect on the
-    # NEXT scheduled tick, not immediately -- far safer than the alternative.
-    cat > /etc/systemd/system/lancache-auto-update.service <<EOF
-[Unit]
-Description=LanCache-NG Scheduled Automatic Update
-After=docker.service
-Requires=docker.service
-
-[Service]
-Type=oneshot
-WorkingDirectory=${INSTALL_DIR}
-ExecStart=${INSTALL_DIR}/setup.sh auto-update ${INSTALL_DIR}
-EOF
-
-    # RandomizedDelaySec spreads many installs' ticks across an hour instead
-    # of every one of them hitting GHCR at exactly 04:00; Persistent=true
-    # catches up a missed run (e.g. host was off) on next boot instead of
-    # silently skipping to the next scheduled day.
-    cat > /etc/systemd/system/lancache-auto-update.timer <<EOF
-[Unit]
-Description=LanCache-NG Scheduled Automatic Update Timer
-
-[Timer]
-OnCalendar=daily
-RandomizedDelaySec=1h
-Persistent=true
-Unit=lancache-auto-update.service
-
-[Install]
-WantedBy=timers.target
-EOF
-
-    systemctl daemon-reload
+    write_lancache_systemd_units "$INSTALL_DIR"
     SYSTEMD_AVAILABLE=1
     print_ok "systemd units installed; they will be enabled after image pull succeeds"
 fi
@@ -8057,7 +8054,8 @@ if [[ "$SSL_ENABLED" = "1" ]]; then
 else
     printf "  %-26s %s\n" "SSL mode:"                "disabled"
 fi
-printf "  %-26s %s\n"    "Install directory:"       "$INSTALL_DIR"
+printf "  %-26s %s\n"    "Stack directory:"         "$INSTALL_DIR"
+printf "  %-26s %s\n"    "Data directory:"          "$LANCACHE_STATE_DIR"
 printf "  %-26s %s\n"    "Cache:"                   "$CACHE_DIR"
 printf "  %-26s %s GiB\n" "Cache size:"              "$cache_gb"
 printf "  %-26s %s MB\n"  "Cache RAM:"               "$CACHE_MEM_MB"
@@ -8114,7 +8112,7 @@ ask "Start now? [Y/n]" "Y"
 # point) also guarantees introspection never reaches the real pull/systemctl/
 # docker-compose-up mutations below, regardless of what an answers file said.
 [[ "$WIZARD_INTROSPECT_MODE" != "1" && "${REPLY,,}" != "n" ]] \
-    || { printf "\n  Start later with: cd %s && docker compose up -d\n\n" "$INSTALL_DIR"; exit 0; }
+    || { printf "\n  Start later with: cd %s && docker compose --env-file .env.local up -d\n\n" "$INSTALL_DIR"; exit 0; }
 
 # ── 13. Starting stack ───────────────────────────────────────────────────────
 # Pull before starting so GHCR/auth/platform failures happen while systemd units
@@ -8122,10 +8120,10 @@ ask "Start now? [Y/n]" "Y"
 print_step "Pulling images"
 cd "$INSTALL_DIR"
 assert_prebuilt_image_platform_supported
-docker compose --env-file "$INSTALL_DIR/.env" pull \
+docker compose --env-file "$ENV_LOCAL" pull \
     || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh."
 
-run_kea_dhcp_activation_preflight "$INSTALL_DIR/.env"
+run_kea_dhcp_activation_preflight "$ENV_LOCAL"
 
 print_step "Starting stack"
 if [[ "$SYSTEMD_AVAILABLE" = "1" ]]; then
@@ -8141,7 +8139,7 @@ if [[ "$SYSTEMD_AVAILABLE" = "1" ]]; then
         print_ok "lancache-auto-update.timer enabled (scheduled automatic updates)"
     fi
 else
-    docker compose --env-file "$INSTALL_DIR/.env" up -d
+    docker compose --env-file "$ENV_LOCAL" up -d
 fi
 print_ok "Stack started"
 
@@ -8159,7 +8157,7 @@ fi
 printf "\n"
 if [[ "$SSL_ENABLED" = "1" ]]; then
     printf "  ${BOLD}CA certificate${RESET} (available after first start):\n"
-    printf "    %s/certs/ca.crt\n" "$INSTALL_DIR"
+    printf "    %s/certs/ca.crt\n" "$SCRIPT_DIR"
     printf "    → install on clients for SSL mode\n"
     printf "    → guide: https://github.com/wiki-mod/lancache-ng/wiki\n"
     printf "\n"

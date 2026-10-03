@@ -21,7 +21,7 @@
     "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1213 (full command transcript in the PR description and first comment); https://github.com/wiki-mod/lancache-ng/pull/1209 (ci-build-tools path-filter-coverage gap: before/after command output)"
   },
   "subsystem_validation": {
-    "_note": "path_prefixes mirror scripts/untracked/classify-image-impact.sh's real touches_prefix() rules (the same classifier build-push.yml's detect-changes job and the promote job's version-bump logic both already consume) so staleness can be computed the same way CI already reasons about relevance, instead of a second, drifting definition. A subsystem entry is stale the moment `git log <its last commit>..HEAD -- <its path_prefixes>` is non-empty, OR whenever AGENTS.md/.github/AGENTS.md changed (see 'full_invalidation_triggers' below), OR whenever the recorded commit itself predates last_stack_validation/last_ci_validation's own commit for that layer.",
+    "_note": "Staleness is computed by the AG-REL-011 gate `.github/scripts/ci.sh release-validation` (run by `ci.sh release` before promoting): a subsystem entry is stale the moment the content under its path_prefixes (git pathspec, globs allowed) differs between its recorded commit and the commit under test, OR whenever a governance path changed (see 'full_invalidation_triggers' below), OR whenever its recorded commit is null, not an ancestor, or not reconstructable.",
     "dhcp-kea": {
       "path_prefixes": ["services/dhcp/"],
       "layer": "stack",
@@ -48,7 +48,7 @@
     },
     "nats": {
       "path_prefixes": ["services/ui/src/nats_*.rs", "services/ui/src/nats_config.rs", "services/nats/", "setup.sh", "deploy/*/docker-compose.yml"],
-      "note": "NATS has no dedicated classify-image-impact.sh key -- its functional surface spans the ui, setup_runtime, and deploy classifier keys. Treat a change as NATS-relevant if it touches any prefix above, not only a single classifier boolean.",
+      "note": "NATS has no single service directory -- its functional surface spans the ui, setup and deploy paths. A change under any prefix above makes this entry stale.",
       "layer": "stack",
       "commit": "885e2f40682d908451ebab465f291601866b0d8c",
       "date": "2026-08-02",
@@ -97,7 +97,7 @@
       "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1213 (full transcript) and https://github.com/wiki-mod/lancache-ng/pull/1209 (the fix + before/after check-bats-path-filter-coverage.sh output) -- MIXED result, recorded honestly rather than rounded to a single pass/fail: check-bats-path-filter-coverage.sh FAILED against the unmodified v0.3.0/current_dev tree (2 real gaps, services/dhcp-proxy/dnsmasq-relay.conf.template missing from both path-filter lists) -- fixed in PR #1209, re-verified there (0 gaps after). shellcheck PASSED (0 findings, repo-wide). actionlint FAILED to complete as CI actually invokes it (default embedded-shellcheck invocation hangs indefinitely, reproduced 3/3 times; corroborated by an independently-stuck real CI job using the published ghcr.io image, not a local-build artifact); with the embedded shellcheck integration disabled (-shellcheck=, a deviation from CI's real invocation) it completes in 0.017s with 0 findings, so the workflow YAML content itself is not known to be wrong, but the check as CI runs it is not reliably completing right now. Confirmed systemic same-day: the maintainer found and cancelled 7 more runs stuck identically (some on already-merged/deleted branches), so this was leaking runner slots repo-wide, not an isolated fluke -- see PR #1213's comments. check-workflow-service-lists.sh was NOT run in this pass. bats/shellspec smoke-tests of the build-tools image itself: 714/715 and 3/3 respectively (see nats/dhcp-dnsmasq entries for the one real bats failure, which is this same path-filter gap). NOT re-run as of the 2026-08-02 Part B pass -- this is a Part A/CI-layer subsystem, out of that pass's scope by design."
     },
     "governance-sbom": {
-      "path_prefixes": ["scripts/untracked/generate-vex.sh", "scripts/tracked/check-vex-drift.sh", ".github/workflows/vex-regenerate.yml", ".trivyignore.yaml", "AGENTS.md", ".github/AGENTS.md"],
+      "path_prefixes": ["scripts/untracked/generate-vex.sh", "scripts/tracked/check-vex-drift.sh", ".trivyignore.yaml", "AGENTS.md", ".github/AGENTS.md"],
       "layer": "ci",
       "commit": "88ddbf6a230787dafbd55cf0b03822f23c9db266",
       "date": "2026-07-24",
@@ -116,7 +116,7 @@
   },
   "full_invalidation_triggers": [
     "AGENTS.md or .github/AGENTS.md changed since the recorded commit (governance change can redefine what 'correct' means for every subsystem, not just one)",
-    "The diff since the recorded commit could not be reconstructed (force-push discarding the old tip, an unreachable base, or any case classify-image-impact.sh itself would fall back to --all-changed for) -- treat as fully stale rather than guessing",
+    "The diff since the recorded commit could not be reconstructed (force-push discarding the old tip, an unreachable or unknown commit) -- treat as fully stale rather than guessing",
     "The recorded commit is not an ancestor of the commit under test (a rebase/history-rewrite happened) -- re-derive the diff from a real merge-base, do not assume the old record still applies"
   ]
 }

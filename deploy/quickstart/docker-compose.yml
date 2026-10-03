@@ -12,7 +12,7 @@ services:
 
   # ── Unified proxy (standard + SSL mode in one container) ─────────────────
   proxy:
-    container_name: lancache-proxy${LANCACHE_CONTAINER_SUFFIX:-}
+    container_name: lancache-proxy
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/proxy:${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - CACHE_MAX_SIZE=${CACHE_MAX_SIZE}
@@ -66,7 +66,7 @@ services:
       options: {max-size: "10m", max-file: "3"}
 
   nats:
-    container_name: lancache-nats${LANCACHE_CONTAINER_SUFFIX:-}
+    container_name: lancache-nats
     image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
     # What: idempotently regenerates only this container's own static nats.conf subset (jetstream, log_file, the four static roles) on every boot, then execs nats-server; auth_callout.conf is a separate fragment only the Admin UI writes, `include`d here.
     # Why: nats-server refuses to hot-reload AuthCallout, so the Admin UI's restart must re-run this script; regenerating only the static subset, never the UI's fragment, keeps that restart from clobbering the callout config -- the same per-file convergence discipline pdns/kea/nginx/dhcp-proxy already follow.
@@ -277,7 +277,7 @@ services:
   # ── Central logging: syslog + fluent-bit combined container ───────────────
 
   syslog-logs-permissions:
-    container_name: lancache-syslog-logs-permissions${LANCACHE_CONTAINER_SUFFIX:-}
+    container_name: lancache-syslog-logs-permissions
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
     profiles: [logging]
     user: "0:0"
@@ -294,7 +294,7 @@ services:
     restart: "no"
 
   syslog:
-    container_name: lancache-syslog${LANCACHE_CONTAINER_SUFFIX:-}
+    container_name: lancache-syslog
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
     profiles: [logging]
     # What: runs as fixed non-root uid 10001 with no added Linux capabilities.
@@ -344,7 +344,7 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   dns-standard:
-    container_name: lancache-dns-standard${LANCACHE_CONTAINER_SUFFIX:-}
+    container_name: lancache-dns-standard
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - PROXY_IP=${IP_STANDARD}
@@ -406,7 +406,7 @@ services:
       options: {max-size: "5m", max-file: "2"}
   dns-ssl:
     profiles: [ssl]
-    container_name: lancache-dns-ssl${LANCACHE_CONTAINER_SUFFIX:-}
+    container_name: lancache-dns-ssl
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - PROXY_IP=${IP_SSL}
@@ -457,16 +457,11 @@ services:
   # ── Watchdog (health monitoring, auto-restart, purge cron) ──────────────────
 
   docker-socket-proxy:
-    container_name: lancache-docker-socket-proxy${LANCACHE_CONTAINER_SUFFIX:-}
+    container_name: lancache-docker-socket-proxy
     image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
     entrypoint: ["/usr/local/bin/lancache-docker-socket-proxy.sh"]
     command: []
     stdin_open: true
-    environment:
-      # What: LANCACHE_CONTAINER_SUFFIX, passed through to the entrypoint.
-      # Why: narrows its generated HAProxy allowlist to the exact suffixed container names actually running, not only the fixed defaults.
-      # From: Issue #1415
-      - LANCACHE_CONTAINER_SUFFIX=${LANCACHE_CONTAINER_SUFFIX:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro
@@ -487,7 +482,7 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   watchdog:
-    container_name: lancache-watchdog${LANCACHE_CONTAINER_SUFFIX:-}
+    container_name: lancache-watchdog
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
 
     entrypoint: ["/bin/bash", "-c"]
@@ -507,11 +502,6 @@ services:
       - DISK_WARN_PCT=85
       - DISK_ALARM_PCT=95
       - CACHE_DIR=/var/cache/lancache
-      - CONTAINER_PROXY=lancache-proxy${LANCACHE_CONTAINER_SUFFIX:-}
-      - CONTAINER_DNS_STANDARD=lancache-dns-standard${LANCACHE_CONTAINER_SUFFIX:-}
-      - CONTAINER_DNS_SSL=lancache-dns-ssl${LANCACHE_CONTAINER_SUFFIX:-}
-      - CONTAINER_NATS=lancache-nats${LANCACHE_CONTAINER_SUFFIX:-}
-      - LANCACHE_CONTAINER_SUFFIX=${LANCACHE_CONTAINER_SUFFIX:-}
       - SSL_ENABLED=${SSL_ENABLED:-0}
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
@@ -551,7 +541,7 @@ services:
   # ── Retention (file-retention daemon) ─────────────────────────────────────
 
   retention:
-    container_name: lancache-retention${LANCACHE_CONTAINER_SUFFIX:-}
+    container_name: lancache-retention
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
     entrypoint: ["/retention-entrypoint.sh"]
     network_mode: none
@@ -591,7 +581,7 @@ services:
   # Full DHCP mode with Control Agent API. Active only with COMPOSE_PROFILES=dhcp-kea.
   dhcp:
     profiles: [dhcp-kea]
-    container_name: lancache-dhcp${LANCACHE_CONTAINER_SUFFIX:-}
+    container_name: lancache-dhcp
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp:${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - DHCP_DNS_PRIMARY=${IP_STANDARD}
@@ -648,7 +638,7 @@ services:
   # Proxy mode keeps an existing router DHCP server and serves proxy-DHCP/PXE clients.
   dhcp-proxy:
     profiles: [dhcp-proxy]
-    container_name: lancache-dhcp-proxy${LANCACHE_CONTAINER_SUFFIX:-}
+    container_name: lancache-dhcp-proxy
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp-proxy:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
       - ui-data:/data:ro
@@ -700,7 +690,7 @@ services:
 
   ntp:
     profiles: [ntp]
-    container_name: lancache-ntp${LANCACHE_CONTAINER_SUFFIX:-}
+    container_name: lancache-ntp
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ntp:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
       - ui-data:/data:ro
@@ -752,7 +742,7 @@ services:
 
   cachehamster:
     profiles: [cachehamster]
-    container_name: lancache-cachehamster${LANCACHE_CONTAINER_SUFFIX:-}
+    container_name: lancache-cachehamster
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/cachehamster:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
       - ${CACHEHAMSTER_DATA_DIR:-./cachehamster}:/data
@@ -769,7 +759,7 @@ services:
   # ── DHCP conflict probe ────────────────────────────────────────────────────
 
   dhcp-probe:
-    container_name: lancache-dhcp-probe${LANCACHE_CONTAINER_SUFFIX:-}
+    container_name: lancache-dhcp-probe
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
     entrypoint: ["/usr/local/bin/lancache-ui", "--dhcp-probe"]
     network_mode: host
@@ -778,7 +768,7 @@ services:
   # ── Admin UI ───────────────────────────────────────────────────────────────
 
   ui:
-    container_name: lancache-ui${LANCACHE_CONTAINER_SUFFIX:-}
+    container_name: lancache-ui
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
       # What: shared-secrets volume; the UI entrypoint (root, pre privilege-drop) resolves PDNS_API_KEY/KEA_CTRL_TOKEN from here.
@@ -811,11 +801,6 @@ services:
       - "${UI_BIND_IP:-${IP_STANDARD}}:8080:8080"
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
-      # What: LANCACHE_CONTAINER_SUFFIX, passed through to the ui container.
-      # Why: docker_client.rs's restart/start/stop calls need it to resolve the
-      #   same suffixed container names docker-socket-proxy.sh/the watchdog binary accept.
-      # From: Issue #1592
-      - LANCACHE_CONTAINER_SUFFIX=${LANCACHE_CONTAINER_SUFFIX:-}
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
       - PROXY_SERVICE=proxy
@@ -894,7 +879,7 @@ services:
 
   # ── Netdata (system metrics) ───────────────────────────────────────────────
   netdata:
-    container_name: lancache-netdata${LANCACHE_CONTAINER_SUFFIX:-}
+    container_name: lancache-netdata
     image: netdata/netdata:latest
     hostname: lancache-netdata
     # What: pid: host, required by netdata's own Docker documentation for apps.plugin to read other containers' /proc/<pid> entries.

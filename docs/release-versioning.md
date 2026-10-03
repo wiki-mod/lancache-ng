@@ -198,26 +198,12 @@ If one required image is missing, the channel must not be promoted.
 for the full corrected model (once-daily scheduled + on-demand, still gated
 on steps 1-3 passing).
 
-**PR validation's untouched-service backfill no longer depends on `nightly`
-(#1254/#1255).** A PR's full-setup validation back-fills any full-setup
-service the PR itself did not touch, so the suite still tests a complete,
-coherent stack.
-
-- **Before:** back-filled from the `nightly`/`latest` base-channel tag,
-  guarded by #808's "confirm the channel image was actually built at or
-  after this PR's base commit" ancestry check (a channel tag can lag).
-- **After:** since `nightly` is no longer continuously fresh, that channel
-  tag is no longer a reliable "at or after PR base" source. The backfill
-  instead sources directly from the PR base commit's own durable
-  `sha-<base_sha>` per-commit image -- exactly the right commit by
-  construction, since every non-PR push already publishes a fresh
-  per-commit tag for every service (see `build-push.yml`'s "Ensure PR
-  staging tags exist for full-setup services" step and
-  `scripts/untracked/ensure-pr-staging-images.sh`).
-- #808's bounded-wait/ancestry-check mechanism
-  (`scripts/lib/staging-image-freshness.sh`) is unchanged and still used: it
-  doubles as the poll for the base commit's own push-triggered build
-  finishing, and still guards against a corrupted or mislabeled image.
+**PR validation needs no backfill and no retag.** `ci.sh validate` assembles
+the PR's stack candidate from exact image digests: a service the PR changed
+uses the digest built for its new build identity, an unchanged service reuses
+the digest already accepted for its unchanged identity. No untouched service
+is copied, retagged, or re-pulled from a mutable channel to complete the stack
+(docs/ci-2.0-architecture.md sections 27, 28 and 48).
 
 ## Setup And Update Selection
 
@@ -267,36 +253,30 @@ editing every compose file.
 
 ## Automated Patch (Z) Tagging
 
-The `promote` job in `build-push.yml` computes and cuts patch releases
-automatically; it does not wait for a maintainer to push a `vX.Y.Z` tag by
-hand for ordinary image-affecting changes.
+`ci.sh cut-release-tag` computes and cuts patch releases automatically; it does
+not wait for a maintainer to push a `vX.Y.Z` tag by hand for ordinary
+image-affecting changes. `ci.yml` runs it on every push to the release-bearing
+branch (`master`), after that push's channel promotion succeeded. It:
 
-On every push to the release-bearing branch (`master`), after the existing
-channel-tag promotion and its `#777` debounce/coalesce check both succeed,
-`promote` additionally:
+1. resolves the current release (the newest plain `vX.Y.Z` tag);
+2. compares, for every published first-party image, the digest of this
+   commit's `sha-<commit>` image with the digest at that release tag -- content
+   identity, not a path heuristic;
+3. if any digest differs, computes the next patch version and pushes an
+   annotated `vX.Y.Z` tag using the `PROJECT_AUTOMATION_PAT` secret, unless
+   `master` has already moved past this commit or the tag already exists;
+4. otherwise cuts nothing (`cut-tag=noop`).
 
-1. resolves the current release with `git describe --tags --match
-   'v[0-9]*.[0-9]*.[0-9]*' --abbrev=0`;
-2. classifies every change since that tag's commit with
-   `scripts/untracked/classify-image-impact.sh` -- the same classifier `detect-changes`
-   uses, not a second copy;
-3. if that diff is image-affecting (`IMAGE_IMPACT=true`), computes the next
-   patch version with `scripts/untracked/compute-next-release-tag.sh` and pushes an
-   annotated `vX.Y.Z` tag using the `PROJECT_AUTOMATION_PAT` secret;
-4. otherwise cuts nothing and moves on.
-
-Diffing from the last release's own commit (not "the previous push") means a
-burst of several merges landing on `master` between two `promote` runs still
-produces exactly one patch bump reflecting the whole burst, matching the
-`#777` debounce this step runs after.
+Comparing against the last release's own images (not "the previous push")
+means a burst of several merges landing on `master` still produces exactly one
+patch bump reflecting the whole burst.
 
 The tag is pushed with `PROJECT_AUTOMATION_PAT`, not `GITHUB_TOKEN`, because
 GitHub does not re-trigger workflow runs for tags pushed by the default
 `GITHUB_TOKEN` (a documented anti-recursion behavior). Pushing with a PAT
-means the tag genuinely re-triggers `build-push.yml` on `refs/tags/v*`, so the
-existing tag-triggered `release` job (GitHub release, `latest` move) runs
-exactly as it does for a manually pushed tag -- this step never performs the
-release itself, only cuts and pushes the tag.
+means the tag genuinely triggers the `v*` tag workflows (`release.yml` for the
+GitHub release, its notes, SBOM and VEX), exactly as for a manually pushed tag
+-- this step never performs the release itself, only cuts and pushes the tag.
 
 Minor (`X`) and major (`Y`) bumps stay a deliberate, manual maintainer tag
 push; nothing in this mechanism ever chooses to bump past a patch on its own.

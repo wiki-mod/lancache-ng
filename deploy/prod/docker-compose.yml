@@ -13,8 +13,13 @@ services:
   proxy:
     container_name: lancache-proxy
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/proxy:${LANCACHE_IMAGE_TAG:-latest}
+    # What: tracked defaults, then untracked operator values
+    # Why: setup.sh writes *.local.env; git pulls stay clean
+    # From: Issue #1683 | PR #1858
     env_file:
       - ../../config/prod/proxy.env
+      - path: ../../config/prod/proxy.local.env
+        required: false
     environment:
       - IP_STANDARD=${IP_STANDARD}
       - IP_SSL=${IP_SSL}
@@ -49,6 +54,8 @@ services:
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}
     env_file:
       - ../../config/prod/dns-standard.env
+      - path: ../../config/prod/dns-standard.local.env
+        required: false
     environment:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - PDNS_API_KEY=${PDNS_API_KEY}
@@ -97,6 +104,8 @@ services:
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}
     env_file:
       - ../../config/prod/dns-ssl.env
+      - path: ../../config/prod/dns-ssl.local.env
+        required: false
     environment:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - PDNS_API_KEY=${PDNS_API_KEY}
@@ -187,6 +196,8 @@ services:
         exec /usr/local/bin/lancache-watchdog > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
     env_file:
       - ../../config/prod/watchdog.env
+      - path: ../../config/prod/watchdog.local.env
+        required: false
     environment:
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
@@ -240,6 +251,8 @@ services:
  
     env_file:
       - ../../config/prod/watchdog.env
+      - path: ../../config/prod/watchdog.local.env
+        required: false
 
     environment:
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
@@ -272,6 +285,8 @@ services:
       - dhcp-kea
     env_file:
       - ../../config/prod/dhcp.env
+      - path: ../../config/prod/dhcp.local.env
+        required: false
     environment:
       - DHCP_DNS_PRIMARY=${IP_STANDARD}
       - DHCP_DNS_SECONDARY=${IP_SSL}
@@ -331,6 +346,8 @@ services:
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp-proxy:${LANCACHE_IMAGE_TAG:-latest}
     env_file:
       - ../../config/prod/dhcp-proxy.env
+      - path: ../../config/prod/dhcp-proxy.local.env
+        required: false
     volumes:
       - ui-data:/data:ro
       # What: persistent, service-owned volume for known-good dnsmasq config snapshots.
@@ -375,6 +392,8 @@ services:
       - ntp
     env_file:
       - ../../config/prod/ntp.env
+      - path: ../../config/prod/ntp.local.env
+        required: false
     volumes:
       - ui-data:/data:ro
       - ${NTP_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/ntp}:/var/lib/chrony
@@ -421,6 +440,8 @@ services:
       - cachehamster
     env_file:
       - ../../config/prod/cachehamster.env
+      - path: ../../config/prod/cachehamster.local.env
+        required: false
     volumes:
       - ${CACHEHAMSTER_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/cachehamster}:/data
     restart: "no"
@@ -657,7 +678,7 @@ services:
   # ── Central logging: syslog + fluent-bit combined container ───────────────
 
   syslog-logs-permissions:
-    container_name: lancache-syslog-logs-permissions${LANCACHE_CONTAINER_SUFFIX:-}
+    container_name: lancache-syslog-logs-permissions
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
     profiles: [logging]
     user: "0:0"
@@ -733,7 +754,7 @@ services:
     container_name: lancache-ui
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
-      # What: shared-secrets volume; the UI entrypoint (root, pre privilege-drop) resolves PDNS_API_KEY/KEA_CTRL_TOKEN from here.
+      # What: shared-secrets volume the ui reads from.
       # Why: must match the server side's resolved value.
       # From: Issue #858
       - shared-secrets:/var/lib/lancache-secrets

@@ -1,124 +1,96 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Runtime for lancache-cachehamster, the Steam cache-warming prefill
-# daemon. Scaffold stage: builds and runs the credential-store and
-# stream-fetch primitives only -- see services/cachehamster/src/main.rs's
-# own module doc comment for what is deliberately not yet implemented.
 
-# Intentional ARG default (overridable at build time via --build-arg).
-# Actual digest pinning for release builds is tracked in issue #508 (same
-# convention every other Rust service Dockerfile in this repo follows).
-ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
-FROM ${BUILD_TOOLS_IMAGE} AS cachehamster-builder
-
-# What: verifies the build-tools contract (Rust toolchain and native musl
-#   target) is present before relying on any of it.
-# Why: fail closed rather than a confusing mid-build "command not found"
-#   if the pinned build-tools image ever regresses this contract.
+# What: cachehamster Steam cache-warming prefill (scaffold)
+# Why: cred-store/stream-fetch primitives; deferred features
 # From: Issue #871
-RUN set -eu; \
-    for tool in cargo rustc; do \
-      command -v "$tool" >/dev/null; \
-    done; \
-    command -v musl-gcc >/dev/null; \
-    case "$(uname -m)" in \
-      x86_64) echo "x86_64-alpine-linux-musl" > /tmp/musl-target; ;; \
-      aarch64) echo "aarch64-alpine-linux-musl" > /tmp/musl-target; ;; \
-      *) echo "Unsupported architecture for musl cross-compilation target: $(uname -m)" >&2; exit 1; ;; \
-    esac; \
-    rustc_host_line="$(rustc -vV)"; \
-    grep -qx "host: $(cat /tmp/musl-target)" <<<"${rustc_host_line}"
 
-ARG SCCACHE_REDIS_MODE=off
+# What: base image pin, supplied by ci.sh from the SOT.
+# Why: SOT base_images.alpine is the sole owner (AG-CI-006).
+# From: Issue #1683
+ARG ALPINE_IMAGE
+
+# What: builder image, supplied by ci.sh from the SOT.
+# Why: no mutable default; CI resolves the immutable ref.
+# From: Issue #1683
+ARG BUILD_TOOLS_IMAGE
+# What: scratch only when ci.sh passed no image arg.
+# Why: no baked image; a missing arg fails the build.
+# From: Issue #1683 | PR #1858
+FROM ${BUILD_TOOLS_IMAGE:-scratch} AS cachehamster-builder
+
+# What: musl cross-target, supplied by ci.sh per platform.
+# Why: ci.sh owns arch mapping; no uname -m in the image.
+# From: Issue #1683
+ARG MUSL_TARGET
+# What: workspace crate, supplied by ci.sh from the SOT.
+# Why: the SOT owns the crate; rust-build receives it.
+# From: Issue #1683 | PR #1858
+ARG RUST_CRATE
+
+# What: cargo tuning args, consumed by ci.sh rust-build.
+# Why: PROJECT_CARGO_*/CARGO_BUILD_JOBS own these.
+# From: Issue #1683
+ARG CARGO_BUILD_JOBS=
+ARG PROJECT_CARGO_LTO=
+ARG PROJECT_CARGO_CODEGENUNIT=
+# What: redeclare BUILD_TOOLS_IMAGE for the RUN stage.
+# Why: ci.sh rust-build folds it into the ccache key.
+# From: Issue #1683
+ARG BUILD_TOOLS_IMAGE
+
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-COPY src/ ./src/
-# What: exports CC/GCC/CXX/GXX explicitly before the build, matching
-#   services/dns/Dockerfile, services/ui/Dockerfile, and
-#   services/watchdog/Dockerfile's identical builder stages (every one of
-#   their code paths, accelerated or not, sets these -- see each file's own
-#   disable_distcc/disable_ccache fallback functions).
-# Why: this crate pulls in `ring` (a real C-dependency compile) via
-#   reqwest's rustls-tls feature, the same as those three crates' own
-#   documented reason. On this image `cc`/`gcc` already default to
-#   musl-targeting output (build-tools/Dockerfile's own comment: "musl is
-#   already this image's default rustc triple"), so this export is
-#   functionally a no-op today rather than a cross-compile requirement --
-#   kept explicit anyway, matching the other three services' convention of
-#   never relying on an implicit default for the C compiler a Rust build
-#   script will invoke.
-# From: Issue #871
-# What: trusts the LAN proxy CA for this build RUN only.
-# Why: cargo fetches crates.io via the intercepting proxy.
-# From: Issue #1671
-RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
+COPY services/cachehamster/Cargo.toml services/cachehamster/Cargo.toml
+COPY services/ui/Cargo.toml services/ui/Cargo.toml
+COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
+COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.toml
+COPY services/cachehamster/src services/cachehamster/src
+# What: ci.sh owns the rust build accel policy (one owner).
+# Why: AG-CI-005/022/023; bind-mounted, never baked in.
+# From: Issue #1683
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
-    --mount=type=secret,id=sccache_gha_config,required=false \
-    --mount=type=secret,id=sccache_gha_url,required=false \
-    --mount=type=secret,id=sccache_gha_token,required=false \
-    set -eu; \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then \
-      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig; \
-      cat /run/secrets/project_selfhosted_proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
-    fi; \
-    sccache_mode="${SCCACHE_REDIS_MODE:-required}"; \
-    case "$sccache_mode" in required|optional|off) ;; *) echo "ERROR: invalid SCCACHE_REDIS_MODE=$sccache_mode" >&2; exit 1 ;; esac; \
-    if { [ "$sccache_mode" != "off" ] && { [ -s /run/secrets/sccache_redis_url ] || [ -s /run/secrets/sccache_dist_config ]; }; } || [ -s /run/secrets/sccache_gha_config ]; then \
-      export RUSTC_WRAPPER=/usr/local/bin/sccache SCCACHE_REDIS_KEY_PREFIX=lancache-cachehamster; \
-      if [ -s /run/secrets/sccache_redis_url ]; then export SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)"; fi; \
-      if [ -s /run/secrets/sccache_dist_config ]; then export SCCACHE_CONF=/run/secrets/sccache_dist_config; sccache --dist-status; fi; \
-      if [ -s /run/secrets/sccache_gha_config ] && [ ! -s /run/secrets/sccache_dist_config ]; then export SCCACHE_CONF=/run/secrets/sccache_gha_config SCCACHE_GHA_ENABLED=on; fi; \
-      if [ -s /run/secrets/sccache_gha_url ] && [ -s /run/secrets/sccache_gha_token ]; then export ACTIONS_RESULTS_URL="$(cat /run/secrets/sccache_gha_url)" ACTIONS_RUNTIME_TOKEN="$(cat /run/secrets/sccache_gha_token)"; fi; \
-      echo "[INFO] sccache enabled for cachehamster (mode=$sccache_mode)." >&2; \
-    elif [ "$sccache_mode" = "required" ]; then \
-      echo "ERROR: required sccache configuration is unavailable for cachehamster." >&2; exit 1; \
-    else \
-      echo "::warning::sccache disabled for cachehamster; using local cargo compilation (mode=$sccache_mode)." >&2; \
-    fi; \
-    export CC=cc GCC=gcc CXX=c++ GXX=g++; \
-    musl_target="$(cat /tmp/musl-target)"; \
-    cargo build --release --locked --target "$musl_target"; \
-    cp "target/${musl_target}/release/lancache-cachehamster" /build/lancache-cachehamster-out; \
-    if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+    --mount=type=secret,id=distcc_potential_hosts \
+    --mount=type=secret,id=ccache_redis_url \
+    --mount=type=secret,id=project_selfhosted_proxy_ca \
+    bash /usr/local/bin/ci.sh rust-build cachehamster "${RUST_CRATE}"
 
-FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+# What: scratch only when ci.sh passed no image arg.
+# Why: no baked image; a missing arg fails the build.
+# From: Issue #1683 | PR #1858
+FROM ${ALPINE_IMAGE:-scratch}
 
 LABEL org.opencontainers.image.description="lancache-ng cachehamster: Steam cache-warming prefill daemon (scaffold, issue #871)."
 
-# `apk upgrade --no-cache` (before the package install, same layer)
-# upgrades packages already baked into the alpine:3.24 base layer itself
-# -- see services/dhcp-proxy/Dockerfile's identical comment/block for the
-# full rationale.
-# What: declares APT_CACHE_BUST right before the RUN it busts.
-# Why: without this, BuildKit's cache has no wall-clock expiry and can
-#   replay a stale apk upgrade forever; see tools/build-tools/Dockerfile's
-#   identical ARG for the full rationale.
-# From: Issue #871
-ARG APT_CACHE_BUST=""
+# What: build identity keys the cache of later layers.
+# Why: a new package set must not reuse a stale apk layer.
+# From: Issue #1683 | PR #1858
+ARG BUILD_IDENTITY
 
-# What: switches apk's own repositories to plain http.
-# Why: Squid caches http; signed indices keep integrity.
-# From: Issue #1095
-RUN sed -i 's|^https://|http://|' /etc/apk/repositories
+# What: the apk package list, supplied from the SOT.
+# Why: the SOT owns the list; this stage only consumes it.
+# From: Issue #1683
+ARG APK_PACKAGES
 
-RUN : "apt-cache-bust=${APT_CACHE_BUST}" && \
-    apk upgrade --no-cache && \
-    apk add --no-cache ca-certificates
-# ca-certificates: this crate's reqwest client uses plain rustls-tls
-# (public webpki roots layered on top of this image's OS trust store is
-# not needed the way services/watchdog's rustls-tls-native-roots choice
-# is -- see services/cachehamster/Cargo.toml's own comment on that
-# distinction), talking to Steam's public CDN over the public Internet CA
-# chain.
+# What: bootstrap bash for SHELL compatibility.
+# Why: AG-REL-001 forbids ash; ci.sh apk-setup needs bash.
+# From: Issue #1683
+RUN apk add --no-cache bash
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# What: shared package setup via ci.sh.
+# Why: ci.sh owns repos, proxy CA, update+upgrade, add.
+# From: Issue #1683 | PR #1858
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    --mount=type=secret,id=project_selfhosted_proxy_ca \
+    bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
 COPY --from=cachehamster-builder /build/lancache-cachehamster-out /usr/local/bin/lancache-cachehamster
 
-# Fixed uid/gid 10001, matching services/ui/Dockerfile's and
-# services/watchdog/Dockerfile's existing `lancache` account of the same
-# name/id -- this service never needs root (no privileged Docker/network
-# operations, unlike watchdog's own restart/health-check duties).
+# What: adduser lancache 10001; mount /data; set user
+# Why: unprivileged account, matches ui/watchdog lancache
 RUN addgroup -g 10001 lancache && \
     adduser -D -H -u 10001 -G lancache -s /sbin/nologin lancache && \
     mkdir -p /data && \

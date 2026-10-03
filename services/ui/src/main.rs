@@ -46,6 +46,9 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use subtle::ConstantTimeEq;
@@ -89,6 +92,12 @@ const CSRF_FORM_FIELD: &str = "csrf_token";
 const MAX_CSRF_BODY_BYTES: usize = 1024 * 1024;
 const MAX_UI_SESSION_TTL_SECONDS: u64 = 365 * 24 * 60 * 60;
 const SECONDARY_REGISTRATION_TOKEN_FILE: &str = "/data/lancache-secondary-registration.token";
+// What: effective ui log file (UI_LOG_FILE or the default).
+// Why: tracing and the root start must agree on one path.
+// From: Issue #633 | PR #1858
+fn ui_log_file() -> String {
+    std::env::var("UI_LOG_FILE").unwrap_or_else(|_| "/var/log/lancache-ui/ui.log".to_string())
+}
 
 // Pattern-matches every checked-in placeholder form for SECONDARY_REGISTRATION_TOKEN,
 // not just deploy/prod/.env's CHANGE_ME_SECONDARY_REGISTRATION_TOKEN default. An
@@ -240,6 +249,124 @@ fn load_or_create_secondary_registration_token(
             "failed to read secondary registration token file at {path}: {err}"
         )),
     }
+}
+
+// What: dirs the ui writes, derived from its own config.
+// Why: chown follows the configured paths, no second list.
+// From: Issue #1427 | PR #1858
+fn ui_written_dirs(cfg: &config::Config, log_file: &Path) -> Vec<std::path::PathBuf> {
+    let files = [
+        &cfg.cdn_domains_file,
+        &cfg.netdata_alarms_file,
+        &cfg.nats_xkey_seed_path,
+        &cfg.desired_state_file,
+        &cfg.nats_conf_path,
+    ];
+    let mut dirs: Vec<std::path::PathBuf> = files
+        .iter()
+        .filter_map(|f| Path::new(f.as_str()).parent().map(Path::to_path_buf))
+        .chain([
+            std::path::PathBuf::from(&cfg.dns_standard_state_dir),
+            std::path::PathBuf::from(&cfg.dns_ssl_state_dir),
+        ])
+        .chain(log_file.parent().map(Path::to_path_buf))
+        .filter(|d| !d.as_os_str().is_empty())
+        .collect();
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+// What: lchown a tree recursively, never following links.
+// Why: a symlink in a volume must not redirect root's chown.
+// From: Issue #1427
+fn chown_tree(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
+    std::os::unix::fs::lchown(path, Some(uid), Some(gid))?;
+    if fs::symlink_metadata(path)?.is_dir() {
+        for entry in fs::read_dir(path)? {
+            chown_tree(&entry?.path(), uid, gid)?;
+        }
+    }
+    Ok(())
+}
+
+// What: setgid log dir; existing log files get g+r.
+// Why: the shared log reader gid must keep read access.
+// From: Issue #1427 | PR #1670
+fn open_log_dir_to_group(dir: &Path) -> std::io::Result<()> {
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o2775))?;
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        let meta = fs::symlink_metadata(&path)?;
+        if meta.is_file() {
+            fs::set_permissions(&path, fs::Permissions::from_mode(meta.mode() | 0o040))?;
+        }
+    }
+    Ok(())
+}
+
+// What: print a FATAL start error and exit 1.
+// Why: the root start fails closed before the server runs.
+// From: Issue #858
+fn container_start_fatal(message: &str) -> ! {
+    eprintln!("[lancache-ui] FATAL: {message}");
+    std::process::exit(1);
+}
+
+// What: a required numeric id from the image environment.
+// Why: the Dockerfile owns the runtime uid/gid, not code.
+// From: Issue #1427 | PR #1858
+fn required_env_id(key: &str) -> u32 {
+    let raw =
+        std::env::var(key).unwrap_or_else(|_| container_start_fatal(&format!("{key} is not set")));
+    raw.parse()
+        .unwrap_or_else(|_| container_start_fatal(&format!("{key}={raw} is not an id")))
+}
+
+// What: started as root: secrets, ownership, then exec as user.
+// Why: the server must never run as root; volumes start root.
+// From: Issue #858 | PR #1858
+fn container_root_start() {
+    let euid = fs::metadata("/proc/self")
+        .unwrap_or_else(|e| container_start_fatal(&format!("cannot read /proc/self: {e}")))
+        .uid();
+    if euid != 0 {
+        return;
+    }
+    let uid = required_env_id("UI_RUNTIME_UID");
+    let gid = required_env_id("UI_RUNTIME_GID");
+    let cfg = config::Config::from_env().unwrap_or_else(|e| container_start_fatal(&e));
+    if let Err(e) = config::ensure_shared_secrets(&cfg.shared_secret_dir, gid) {
+        container_start_fatal(&format!(
+            "cannot resolve shared secret {e}. Mount the shared-secrets volume \
+             or set the variable to the value its backend uses."
+        ));
+    }
+    let log_file = std::path::PathBuf::from(ui_log_file());
+    for dir in ui_written_dirs(&cfg, &log_file) {
+        if fs::symlink_metadata(&dir).is_ok()
+            && let Err(e) = chown_tree(&dir, uid, gid)
+        {
+            container_start_fatal(&format!("cannot chown {}: {e}", dir.display()));
+        }
+    }
+    if let Some(log_dir) = log_file.parent()
+        && log_dir.exists()
+        && let Err(e) = open_log_dir_to_group(log_dir)
+    {
+        container_start_fatal(&format!("cannot set {} modes: {e}", log_dir.display()));
+    }
+    let exe = std::env::current_exe()
+        .unwrap_or_else(|e| container_start_fatal(&format!("cannot locate own binary: {e}")));
+    let mut args = std::env::args_os();
+    let argv0 = args.next().unwrap_or_else(|| exe.clone().into_os_string());
+    let err = std::process::Command::new(&exe)
+        .arg0(argv0)
+        .args(args)
+        .uid(uid)
+        .gid(gid)
+        .exec();
+    container_start_fatal(&format!("cannot exec as uid {uid}: {err}"));
 }
 
 // Additive-only migration for the `secondaries` table (issue #583): adds
@@ -846,8 +973,7 @@ fn init_tracing() {
         .unwrap_or_else(|_| "lancache_ui=info,warn".parse().unwrap());
     let stdout_layer = tracing_subscriber::fmt::layer();
 
-    let ui_log_file =
-        std::env::var("UI_LOG_FILE").unwrap_or_else(|_| "/var/log/lancache-ui/ui.log".to_string());
+    let ui_log_file = ui_log_file();
     let file_layer = open_ui_log_file(&ui_log_file).map(|file| {
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
@@ -861,8 +987,18 @@ fn init_tracing() {
         .init();
 }
 
+// What: root start before any thread; dhcp-probe skips it.
+// Why: exec needs one thread; the probe runs as root as-is.
+// From: Issue #1288 | PR #1858
+fn main() -> Result<()> {
+    if std::env::args().nth(1).as_deref() != Some("--dhcp-probe") {
+        container_root_start();
+    }
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
     // Alternate CLI mode (issue #1288): this same binary/image is also the
     // `dhcp-probe` container's entrypoint (see deploy/*/docker-compose.yml,
     // `["/usr/local/bin/lancache-ui", "--dhcp-probe"]`), replacing the
@@ -1291,6 +1427,109 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    // What: check one placeholder-fixture column against `rule`.
+    // Why: one reader; blank/# lines skip like the bash reader.
+    // From: Issue #967 | PR #1858
+    fn assert_parity_column(column: usize, rule: fn(&str) -> bool) {
+        let fixture_path = format!(
+            "{}/../../tests/fixtures/placeholder-detection-cases.txt",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let contents = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("could not read shared parity fixture {fixture_path}: {e}"));
+        let mut total = 0usize;
+        let mut mismatches: Vec<String> = Vec::new();
+        for line in contents.lines().map(str::trim_end) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let [value, ..] = fields.as_slice() else {
+                panic!("malformed shared parity fixture line: {line:?}");
+            };
+            let expect = fields
+                .get(column)
+                .unwrap_or_else(|| panic!("fixture line lacks column {column}: {line:?}"));
+            total += 1;
+            let actual = if rule(value) { "placeholder" } else { "real" };
+            if actual != *expect {
+                mismatches.push(format!("'{value}' expected={expect} actual={actual}"));
+            }
+        }
+        assert!(total > 0, "shared parity fixture had zero usable cases");
+        assert!(
+            mismatches.is_empty(),
+            "{} of {total} fixture case(s) disagreed (column {column}):\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
+    }
+
+    // What: a fresh, unique temp dir for one test.
+    // Why: parallel tests must not share secret files.
+    // From: PR #1858
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("lancache-ng-{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // What: written dirs are the config paths' dirs, deduped.
+    // Why: chown must follow configuration, not a fixed list.
+    // From: Issue #1427 | PR #1858
+    #[test]
+    fn ui_written_dirs_follow_the_configured_paths() {
+        let _guard = config::env_test_lock().lock().unwrap();
+        let mut cfg = config::Config::from_env().unwrap();
+        cfg.cdn_domains_file = "/w/data/a".to_string();
+        cfg.netdata_alarms_file = "/w/data/b".to_string();
+        cfg.nats_xkey_seed_path = "/w/data/c".to_string();
+        cfg.desired_state_file = "/w/data/d".to_string();
+        cfg.nats_conf_path = "/w/nats/nats.conf".to_string();
+        cfg.dns_standard_state_dir = "/w/dns".to_string();
+        cfg.dns_ssl_state_dir = "/w/dns".to_string();
+        let dirs = ui_written_dirs(&cfg, Path::new("/w/log/ui.log"));
+        let want: Vec<std::path::PathBuf> = ["/w/data", "/w/dns", "/w/log", "/w/nats"]
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+        assert_eq!(dirs, want);
+    }
+
+    // What: chown walks a tree but never follows a symlink.
+    // Why: a dangling link would fail a following chown.
+    // From: Issue #1427
+    #[test]
+    fn chown_tree_does_not_follow_symlinks() {
+        let dir = unique_temp_dir("chown-tree");
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::fs::write(dir.join("a/b/f"), "x").unwrap();
+        std::os::unix::fs::symlink("/nonexistent/lancache-ng-target", dir.join("a/link")).unwrap();
+        let meta = std::fs::metadata(&dir).unwrap();
+        chown_tree(&dir, meta.uid(), meta.gid()).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // What: log dir gets 2775, regular files gain g+r.
+    // Why: the shared log reader gid reads ui.log.
+    // From: Issue #1427 | PR #1670
+    #[test]
+    fn open_log_dir_to_group_sets_dir_and_file_modes() {
+        let dir = unique_temp_dir("log-dir");
+        let file = dir.join("ui.log");
+        std::fs::write(&file, "x").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        open_log_dir_to_group(&dir).unwrap();
+        assert_eq!(std::fs::metadata(&dir).unwrap().mode() & 0o7777, 0o2775);
+        assert_eq!(std::fs::metadata(&file).unwrap().mode() & 0o777, 0o640);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     // Proves migrate_secondaries_table_for_auth_callout actually adds
     // nats_user/nats_password_hash via ALTER TABLE when a table predates
     // the auth-callout columns, and that the new columns are immediately
@@ -1681,77 +1920,20 @@ mod tests {
         assert!(validate_secondary_registration_token(&min_chars_emoji).is_ok());
     }
 
-    // Cross-language parity coverage for secret/token placeholder detection
-    // (issue #967). This checks the "rust" column of the shared fixture
-    // against secondary_registration_token_is_placeholder(); the "shared" and
-    // "setup" columns are checked the same way, against the other two
-    // independent implementations, by
-    // tests/bats/placeholder_detection_parity.bats. Three implementations
-    // exist on purpose (maintainer decision: Option B in #967, not a merge),
-    // but every case they're known to agree OR legitimately disagree on is
-    // pinned here so a silent future drift fails a test instead of going
-    // unnoticed.
+    // What: the registration-token rule matches the "rust" column.
+    // Why: #967 keeps rules separate but pins every divergence.
+    // From: Issue #967
     #[test]
     fn secondary_registration_token_is_placeholder_matches_shared_parity_fixture() {
-        // Runtime fs::read_to_string via CARGO_MANIFEST_DIR (this crate's own
-        // established pattern, see the TEMPLATE_DIR test setup and
-        // domains.rs's is_valid_domain_matches_shared_parity_fixture test),
-        // not include_str!: the fixture lives outside this crate's source
-        // tree (tests/fixtures/ at the repo root, shared with the bash
-        // side), so a compile-time embed would bake an out-of-crate path
-        // into the build; a runtime read gives a clear "fixture missing"
-        // failure instead.
-        let fixture_path = format!(
-            "{}/../../tests/fixtures/placeholder-detection-cases.txt",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let contents = std::fs::read_to_string(&fixture_path)
-            .unwrap_or_else(|e| panic!("could not read shared parity fixture {fixture_path}: {e}"));
+        assert_parity_column(3, secondary_registration_token_is_placeholder);
+    }
 
-        let mut total = 0usize;
-        let mut mismatches: Vec<String> = Vec::new();
-
-        for line in contents.lines() {
-            let line = line.trim_end();
-            // Blank lines and comment lines are not cases -- must match the
-            // bash reader's `[[ -z "$line" || "$line" == \#* ]]` skip rule
-            // exactly, or the two readers would silently disagree on which
-            // lines even count as fixture cases.
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-
-            // Fields: <value> <shared> <setup> <rust>, whitespace-separated.
-            // Only the "rust" (4th) field is relevant here.
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            let [value, _shared, _setup, rust] = fields.as_slice() else {
-                panic!(
-                    "malformed shared parity fixture line (expected \"<value> <shared> <setup> <rust>\"): {line:?}"
-                );
-            };
-            let expect = *rust;
-            total += 1;
-
-            let actual = if secondary_registration_token_is_placeholder(value) {
-                "placeholder"
-            } else {
-                "real"
-            };
-            if actual != expect {
-                mismatches.push(format!("'{value}' expected={expect} actual={actual}"));
-            }
-        }
-
-        // Fail closed if the fixture itself is empty/unreadable-but-present
-        // (e.g. header-only) -- a vacuous loop would make this test pass
-        // without checking anything.
-        assert!(total > 0, "shared parity fixture had zero usable cases");
-        assert!(
-            mismatches.is_empty(),
-            "{} of {total} shared parity fixture case(s) disagreed with the Rust implementation:\n{}",
-            mismatches.len(),
-            mismatches.join("\n")
-        );
+    // What: the shared-secret rule matches the "shared" column.
+    // Why: ui and the dns/dhcp/nats readers must agree.
+    // From: Issue #967 | PR #1858
+    #[test]
+    fn shared_secret_is_placeholder_matches_shared_parity_fixture() {
+        assert_parity_column(1, config::shared_secret_is_placeholder);
     }
 
     // Covers the three states load_or_create_secondary_registration_token

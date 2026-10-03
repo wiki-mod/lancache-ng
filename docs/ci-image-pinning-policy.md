@@ -132,16 +132,25 @@ Operators or CI runners that require Docker Hub as the source should configure
 that at the Docker daemon or build infrastructure layer, not by adding
 undocumented per-Dockerfile fallback logic.
 
-- `services/proxy/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian 13-slim to Alpine, issue #815, staged Alpine migration)
-- `services/dns/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration; PowerDNS/recursor pinned to Alpine's `edge` branch specifically for a CVE fix, see `services/dns/Dockerfile`'s own comment)
-- `services/dhcp/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — Kea second)
-- `services/dhcp-proxy/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — dnsmasq-first)
-- `services/ntp/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration)
-- `services/ui/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine in a sibling PR, issue #815, staged Alpine migration)
-- `services/watchdog/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian 13-slim to Alpine, issue #815's watchdog carve-out, revisited/approved 2026-07-31 -- independent of #842's Rust rewrite, which now has a scaffold crate but is not yet built or used as this container's entrypoint)
-- `services/syslog/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (born on Alpine from its first commit, #1431/#1433 -- not part of issue #815's Debian-to-Alpine migration since it never ran on Debian; originally pinned directly to `alpine:3.20` rather than through `mirror.gcr.io`, an unintentional scaffold-commit inconsistency never a deliberate choice -- issue #1554 brought it onto the same `mirror.gcr.io/library/alpine:3.24` pin every other first-party service already uses; `syslog-ng` stayed available, and newer, on 3.24, see that file's own header comment for the full version rationale)
+Every entry below now resolves its base image through `ARG ALPINE_IMAGE`
+(no in-file default) plus `FROM ${ALPINE_IMAGE}`, consuming the one pinned
+digest owned by `build-manifest.yml`'s `base_images.alpine` and supplied at
+build time by `ci.sh`'s `_ci_service_build_args` (issue #1683). No service
+Dockerfile pins this digest itself any more; the digest value and its
+history stay in `build-manifest.yml`, not duplicated per file below.
 
-**Status**: ✅ All runtime base images are pinned.
+- `services/proxy/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian 13-slim to Alpine, issue #815, staged Alpine migration)
+- `services/dns/Dockerfile` (runtime stage): `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration; PowerDNS/recursor pinned to Alpine's `edge` branch specifically for a CVE fix, see `services/dns/Dockerfile`'s own comment)
+- `services/dhcp/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — Kea second)
+- `services/dhcp-proxy/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — dnsmasq-first)
+- `services/ntp/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration)
+- `services/ui/Dockerfile` (runtime stage): `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian trixie-slim to Alpine in a sibling PR, issue #815, staged Alpine migration)
+- `services/watchdog/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian 13-slim to Alpine, issue #815's watchdog carve-out, revisited/approved 2026-07-31 -- independent of #842's Rust rewrite, which now has a scaffold crate but is not yet built or used as this container's entrypoint)
+- `services/syslog/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (born on Alpine from its first commit, #1431/#1433 -- not part of issue #815's Debian-to-Alpine migration since it never ran on Debian; originally pinned directly to `alpine:3.20` rather than through `mirror.gcr.io`, an unintentional scaffold-commit inconsistency never a deliberate choice -- issue #1554 brought it onto the same Alpine 3.24 pin every other first-party service already uses; `syslog-ng` stayed available, and newer, on 3.24, see that file's own header comment for the full version rationale)
+- `services/cachehamster/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (Steam cache-warming prefill daemon scaffold, issue #871 -- born on Alpine from its first commit, not part of issue #815's Debian-to-Alpine migration since it never ran on Debian)
+- netdata: no first-party Dockerfile. The stack runs the upstream image `netdata/netdata:latest`, declared in the SOT `external_services` with `policy: tag-latest` (maintainer decision, PR #1858 decision record 2026-10-01); `ci.sh check stable-external-images` allows a digest-less tag only for such an explicit SOT entry.
+
+**Status**: ✅ All runtime base images are pinned (centrally, via `build-manifest.yml`'s `base_images.alpine`, issue #1683).
 
 ### Build-Time Images (Builder Stages)
 
@@ -260,10 +269,18 @@ And reinforces:
 
 > release-capable paths must not depend on mutable `build-tools:latest`
 
-## Note: reuse-scope coverage, and which triggers always do a full rebuild
+## Note: reuse is decided by build identity, for every trigger
 
-The "skip rebuild when nothing relevant changed, retag and scan the existing published image instead" reuse mechanism (`determine push reuse scope`, #1095 Steps 2/4, generalized to `pull_request` in #1683 Phase 2) evaluates on `push` and `pull_request` events, and on a plain `workflow_dispatch` run (`channel: none`) -- and even in the reuse case, the resolved channel image still gets a real security scan; nothing here skips scanning.
+CI 2.0 has one reuse decision for `push`, `pull_request`, `schedule` and
+`workflow_dispatch` alike (docs/ci-2.0-architecture.md sections 6, 27 and
+54): a target is rebuilt only when its build identity changed and no accepted
+digest exists for the new identity. No trigger shape forces a rebuild of
+unchanged targets, and an unchanged `nightly` produces zero builds.
 
-Two trigger shapes are deliberately excluded from reuse and always perform a full build for every service, regardless of whether anything in the repository changed: `schedule` (`build-push.yml`'s own daily `latest` refresh on `master`) and any `workflow_dispatch` run with `channel: nightly` (the shape `nightly-refresh.yml` dispatches, and the same input a maintainer would use to manually force-promote a branch to `nightly`). Both exist specifically to catch drift in inputs outside this repository's own content -- base image updates, OS package updates -- that a repository content diff can never see; letting them silently retag an unchanged-by-content image would defeat their entire purpose. A release-tag `push` is excluded from reuse for the same reason (see `determine-push-reuse-scope`'s own job comment).
-
-Do not use a `workflow_dispatch`/`schedule` run generically as evidence for or against the reuse path without checking which of the two shapes above it was -- a plain `channel: none` dispatch exercises the same reuse-eligible code path `push`/`pull_request` do, while a `channel: nightly` dispatch or a `schedule` run always takes the full-rebuild path by design.
+Drift in inputs outside the repository content is still detected, because
+those inputs are part of the build identity itself: the base image enters as
+its SOT-pinned digest (`base_digest`), and apk package versions are resolved
+live against the configured repositories whenever an identity is computed
+(`package_versions`). A changed base digest or a newer package version
+therefore changes the identity and requires a build; an unchanged one reuses
+the accepted digest.

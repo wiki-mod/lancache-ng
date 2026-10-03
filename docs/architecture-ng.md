@@ -293,7 +293,7 @@ Lightweight container with Docker socket access (restart permission).
 **Health checks:** every persistent-daemon service across `deploy/*/docker-compose.yml`
 has a Docker Compose `healthcheck:` block (#1169 closed the last gaps:
 `dhcp-proxy`, `ntp`, `netdata`, and `docker-socket-proxy` previously had none
-at all), enforced going forward by `scripts/tracked/check-compose-healthchecks.sh`
+at all), enforced going forward by `ci.sh check compose-healthchecks`
 (CI job `compose-healthchecks` in `build-push.yml`) so a newly added service
 can't silently regress this. Two deliberate exceptions: `dhcp-probe` (see its
 own row further down), a one-shot helper the Admin UI starts and stops on

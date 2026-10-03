@@ -555,8 +555,9 @@ watchdog entrypoint.
 
 ### Purpose
 
-`services/netdata` provides system and service metrics used by the Admin UI and
-for direct operational diagnostics.
+The `netdata` service (upstream image `netdata/netdata:latest`, no first-party
+build) provides system and service metrics used by the Admin UI and for direct
+operational diagnostics.
 
 ### Current capabilities
 

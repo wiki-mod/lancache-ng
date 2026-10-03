@@ -415,29 +415,16 @@ adapter) is:
 
 ---
 
-### Why the contract is one document but several files per adapter, not one shared file
+### One canonical file, sourced by every shell adapter
 
 `scripts/lib/known-good-snapshots.sh` is the canonical, tested reference
-implementation. It is not baked into the `proxy`, `dhcp-proxy`, or `dns`
-container images via a shared Docker build context, because each of those
-Dockerfiles builds from its own isolated service directory
-(`services/proxy/`, `services/dhcp-proxy/`, `services/dns/`) with no
-shared-file context wired up for any of them — unlike `cdn-domains.txt`,
-which already uses a named `dns-domains` additional build context for the
-`proxy` image only. Extending that pattern to a second shared context for
-every image would require `build-push.yml`'s image build matrix to support
-multiple `--build-context` values per image, which it does not today
-(`build_contexts` is treated as one `name=path` pair). Given the mechanism
-itself is genuinely small (roughly 150 lines of straightforward bash), each
-entrypoint embeds a byte-identical copy of the same functions instead,
-marked with `# BEGIN known-good-snapshot library` /
-`# END known-good-snapshot library` comments.
-`tests/bats/known_good_snapshots_sync.bats` fails if any embedded copy ever
-drifts from `scripts/lib/known-good-snapshots.sh`, so "generic" here means
-one documented, behaviorally-verified contract that happens to exist as
-four physically-identical copies (the canonical file plus one embedded copy
-each in proxy, dhcp-proxy, and dns), not literal single-file reuse at
-runtime.
+implementation. The `proxy`, `dhcp-proxy`, and `dns` entrypoints source it
+at runtime from `/usr/local/lib/known-good-snapshots.sh`; their Dockerfiles
+`COPY --from=known-good` it in from the `known-good` named build context. CI
+2.0 supplies each service its SOT-declared build contexts, so the shared
+library is one physical file with no per-service copy. The nats-subscriber
+Rust adapter (`services/dns/nats-subscriber/`) keeps its own reimplementation
+because a compiled binary cannot source a shell library.
 
 ## nginx / proxy
 
@@ -561,9 +548,8 @@ documented contract, in `services/ui/src/kea_snapshots.rs`:
   non-root user — the same pattern already used to keep the shared
   `nats.conf` writable by the Admin UI after a NATS restart (see
   `deploy/*/docker-compose.yml`'s `nats` service).
-- `tests/bats/known_good_snapshots_sync.bats` does not (and should not)
-  cover this adapter: there is no embedded shell copy to drift, since none
-  of this lives in a shell entrypoint. Coverage lives in
+- No shell-drift check covers this adapter: none of it lives in a shell
+  entrypoint, so there is no shell copy to drift. Coverage lives in
   `services/ui/src/kea_snapshots.rs`'s and `services/ui/src/routes/dhcp.rs`'s
   own `cargo test` suites instead.
 - **`kea-ctrl-agent.conf` and `kea-dhcp-ddns.conf` are outside this

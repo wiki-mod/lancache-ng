@@ -6,199 +6,10 @@
 # Why: Aligns DNS with Admin UI via single container
 set -euo pipefail
 
-# ── Shared-secret bootstrap (issue #858) ─────────────────────────────────────
-# What: Embedded shared-secret-bootstrap functions
-# Why: Image builds from dns/ alone, no shared build context
-# BEGIN shared-secret-bootstrap library (scripts/lib/shared-secret-bootstrap.sh)
-# What: lancache_shared_secret_dir — shared secret location
-# Why: Cross-container alignment via shared-secrets volume
-lancache_shared_secret_dir() {
-    printf '%s' "${LANCACHE_SHARED_SECRET_DIR:-/var/lib/lancache-secrets}"
-}
-
-# lancache_shared_secret_gid
-# The Admin UI process runs as this gid (services/ui/Dockerfile pins uid/gid
-# 10001); dns/dhcp/nats run as root. Shared secret files are created group-owned
-# by this gid and mode 0640 so the unprivileged UI can read a root-created file
-# without the secret becoming world-readable -- the same cross-uid model the
-# nats.conf bootstrap already uses. Overridable for tests.
-lancache_shared_secret_gid() {
-    printf '%s' "${LANCACHE_SHARED_SECRET_GID:-10001}"
-}
-
-# lancache_gen_hex32
-# 64 hex characters from 32 random bytes. Uses od + /dev/urandom rather than
-# `openssl rand -hex 32` because this runs unchanged in the Debian dns/dhcp/ui
-# images AND the BusyBox nats:2-alpine image, and nats:2-alpine ships no openssl.
-lancache_gen_hex32() {
-    od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
-}
-
-# lancache_gen_base64_32
-# base64 of 32 random bytes, for the DDNS TSIG key (PowerDNS/Kea expect a
-# base64-encoded HMAC key, matching setup.sh's `openssl rand -base64 32`).
-lancache_gen_base64_32() {
-    head -c 32 /dev/urandom | base64 | tr -d '\n'
-}
-
-# secret_is_placeholder <value>
-# True (returns 0) when the value is empty or one of the universal checked-in
-# placeholders that must never run live (CHANGE_ME*, changeme*, YOUR_*, *_HERE).
-# The split-brain invariant requires every consumer of a given secret to decide
-# placeholder-or-real identically; the NATS_*_PASSWORD values are read by three
-# separate services (the nats bootstrap, the dns entrypoint, the ui entrypoint),
-# so routing their placeholder decision through this one definition keeps them in
-# lockstep. Callers that also have secret-specific placeholders (e.g. the dhcp
-# dev tokens) match those in addition to this.
-#
-# Matching is case-insensitive and treats "-"/"_" as equivalent (issue #967:
-# e.g. "change-me", "CHANGE_ME", and "Change-Me" are all recognized) --
-# normalize first, then match against lowercase/underscore patterns. This is a
-# deliberate fail-safe widening: it can only make MORE values match as a
-# placeholder, never fewer, so a real randomly-generated hex/base64 secret is
-# not realistically affected.
-#
-# This is one of three independently-maintained placeholder detectors in this
-# repo (the others: setup.sh's secret_value_is_placeholder, and
-# services/ui/src/main.rs's secondary_registration_token_is_placeholder), kept
-# deliberately separate per the maintainer decision recorded in issue #967
-# (Option B: cross-validate, don't unify). Divergences from the other two,
-# confirmed via tests/fixtures/placeholder-detection-cases.txt and
-# tests/bats/placeholder_detection_parity.bats:
-#   - This function does NOT recognize the legacy "lancache-*-secret"
-#     template-default shape. This omission IS deliberate: the now-retired
-#     deploy/dev/docker-compose.yml and deploy/dev/.env (v0.3.0, #766)
-#     shipped real, working dev secrets in exactly that shape (e.g.
-#     lancache-nats-ui-dev-secret) that this read path had to accept as
-#     configured, not regenerate. Kept as a regression pin (see the test
-#     fixtures below) so that shape is never misclassified if an operator's
-#     own secret happens to match it.
-#   - This function does NOT recognize a bare "change-me"/"change_me" infix
-#     without a CHANGE_ME/changeme prefix, unlike setup.sh/Rust. Pre-existing,
-#     not reconciled here (#967 Option B keeps the three pattern sets
-#     separate rather than unifying them); no known rationale beyond that.
-#   - This function DOES recognize a bare YOUR_* prefix without a trailing
-#     _HERE suffix, and a generic *_HERE suffix on any value (not just
-#     YOUR_*_HERE) -- both wider than setup.sh/Rust. Also pre-existing and not
-#     reconciled here; no shipped placeholder in this repo actually needs
-#     either bare form, so the gap has not mattered in practice, but it is a
-#     real, confirmed divergence, not an intentional design choice.
-secret_is_placeholder() {
-    _sip_norm=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
-    case "$_sip_norm" in
-        "" | change_me* | changeme* | your_* | *_here) return 0 ;;
-    esac
-    return 1
-}
-
-# resolve_shared_secret <name> <current_value_or_empty> <gen_func> [require_persist]
-# What: 4th arg require_persist enforces a durable write.
-# Why: some secrets (ddns-tsig-key) have file-only readers.
-# From: PR #1775
-# Resolves a shared secret and prints it on stdout with no trailing newline.
-#   - If <current_value_or_empty> is non-empty, that real value seeds the shared
-#     volume when the file is absent, and refreshes it when a stale/different
-#     file already exists, so every consumer can read the same secret from disk
-#     as well as env. The caller is responsible for passing empty here when the
-#     configured value is a known placeholder for that specific secret.
-#   - Otherwise reads $dir/<name> if it already exists (some container generated
-#     it first), else atomically creates it with a freshly generated value.
-# Atomicity/race: empty-value first boot keeps the original first-writer-wins
-# hardlink claim (`ln` onto a fully-written temp file) so concurrent generators
-# still converge on one shared value with no partial-file window. The
-# non-empty-value refresh path only uses an overwrite rename when the caller has
-# already supplied the authoritative value and the on-disk file is stale or
-# missing. Returns non-zero (and prints nothing) only if a generated value could
-# not be persisted/read back, so the caller can fail closed rather than silently
-# diverge.
-resolve_shared_secret() {
-    _rss_name="$1"
-    _rss_cur="$2"
-    _rss_gen="$3"
-    _rss_require_persist="${4:-}"
-
-    _rss_dir="$(lancache_shared_secret_dir)"
-    _rss_file="${_rss_dir}/${_rss_name}"
-
-    # What: Re-check for conflicts at return point
-    # Why: Reduce TOCTOU race window with writers
-    # From: PR #1775
-    _rss_conflict_now() {
-        [ -n "$_rss_cur" ] || return 1
-        if [ -s "$_rss_file" ]; then
-            [ "$(tr -d '\n' < "$_rss_file")" != "$_rss_cur" ]
-        else
-            [ -e "$_rss_file" ]
-        fi
-    }
-
-    if [ -s "$_rss_file" ] && { [ -z "$_rss_cur" ] || [ "$(tr -d '\n' < "$_rss_file")" = "$_rss_cur" ]; }; then
-        tr -d '\n' < "$_rss_file"
-        return 0
-    fi
-
-    mkdir -p "$_rss_dir" 2>/dev/null || true
-
-    if [ -n "$_rss_cur" ]; then
-        _rss_val="$_rss_cur"
-    else
-        _rss_val="$($_rss_gen)"
-        if [ -z "$_rss_val" ]; then
-            return 1
-        fi
-    fi
-
-    # What: Return value unpersisted on write failure
-    # Why: No on-disk value can disagree at this point
-    # From: PR #1775
-    _rss_tmp="$(mktemp "${_rss_dir}/.secret.XXXXXX" 2>/dev/null)" || {
-        if [ -n "$_rss_cur" ] && [ -z "$_rss_require_persist" ] && ! _rss_conflict_now; then
-            printf '%s' "$_rss_cur"
-            return 0
-        fi
-        return 1
-    }
-    printf '%s' "$_rss_val" > "$_rss_tmp"
-    chmod 0640 "$_rss_tmp" 2>/dev/null || true
-    chgrp "$(lancache_shared_secret_gid)" "$_rss_tmp" 2>/dev/null || true
-
-    if [ -n "$_rss_cur" ]; then
-        if mv -f "$_rss_tmp" "$_rss_file" 2>/dev/null; then
-            printf '%s' "$_rss_val"
-            return 0
-        fi
-    elif ln "$_rss_tmp" "$_rss_file" 2>/dev/null; then
-        rm -f "$_rss_tmp"
-        printf '%s' "$_rss_val"
-        return 0
-    fi
-
-    rm -f "$_rss_tmp"
-    if [ -z "$_rss_cur" ] && [ -s "$_rss_file" ]; then
-        tr -d '\n' < "$_rss_file"
-        return 0
-    fi
-    if [ -n "$_rss_cur" ] && [ -z "$_rss_require_persist" ] && ! _rss_conflict_now; then
-        printf '%s' "$_rss_cur"
-        return 0
-    fi
-    return 1
-}
-# END shared-secret-bootstrap library
-
-# What: Helper for producer log dir readability
-# Why: Keep gid 10001 readable on persistent volumes
-#   root-only readability after reopen or recreation. dns/dhcp-only (not part
-#   of the shared-secret-bootstrap contract ui also embeds), so it lives after
-#   the sync-guarded block instead of inside it.
-# From: Issue #1427
-prepare_log_dir_for_shared_reader() {
-    local dir="$1"
-    mkdir -p "$dir"
-    chgrp "$(lancache_shared_secret_gid)" "$dir"
-    chmod 2750 "$dir"
-    find "$dir" -maxdepth 1 -type f -exec chgrp "$(lancache_shared_secret_gid)" {} + -exec chmod g+r {} +
-}
+# What: source the shared-secret bootstrap helper.
+# Why: one owner in scripts/lib, no embedded copy (AG-CODE-011).
+# From: Issue #858 | Issue #1683
+. /usr/local/lib/shared-secret-bootstrap.sh
 
 # ── Setup Variables ──────────────────────────────────────────────────────────
 PROXY_IP="${PROXY_IP:?PROXY_IP is required - set it to the host LAN IP}"
@@ -385,7 +196,7 @@ prepare_log_dir_for_shared_reader "$PDNS_LOG_DIR"
 # Why: Prevent getent crash-loops during startup
 # From: Issue #1164 | PR #1775
 dns_xfr_primary_endpoint() {
-    local endpoint="$1" var_name="${2:-DNS_XFR_PRIMARY}" host port resolved
+    local endpoint="$1" var_name="${2:-DNS_XFR_PRIMARY}" host port resolved hosts
 
     host="${endpoint%%:*}"
     port="${endpoint#*:}"
@@ -404,7 +215,12 @@ dns_xfr_primary_endpoint() {
 
     resolved=""
     for _ in $(seq 1 30); do
-        resolved="$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}')"
+        # What: capture getent first; a miss is a retry.
+        # Why: set -e ends the script on a failing getent.
+        # From: Issue #1683 | PR #1858
+        if hosts="$(getent ahostsv4 "$host" 2>/dev/null)"; then
+            resolved="$(awk '{print $1; exit}' <<< "$hosts")"
+        fi
         [ -n "$resolved" ] && break
         sleep 1
     done
@@ -537,10 +353,13 @@ fi
 # *is* a 172.x Docker bridge address -- the same exclusion here would
 # reject exactly the address needed.
 detect_pdns_local_address() {
-    local ip
-    ip=$(ip -4 route get 1.1.1.1 2>/dev/null \
-        | awk '{for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }}' \
-        || true)
+    local ip="" out
+    # What: capture ip output first; a failure is a miss.
+    # Why: a live pipe into awk exit may SIGPIPE.
+    # From: Issue #1683 | PR #1858
+    if out="$(ip -4 route get 1.1.1.1 2>/dev/null)"; then
+        ip="$(awk '{for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }}' <<< "$out")"
+    fi
     if [ -n "$ip" ]; then
         printf '%s\n' "$ip"
         return 0
@@ -549,9 +368,11 @@ detect_pdns_local_address() {
     # Fallback: first non-loopback IPv4 address on any interface, for the
     # rare case this container has no default route yet but is already
     # reachable on its own bridge address.
-    ip=$(ip -4 addr show \
-        | awk '/inet / && $2 !~ /^127\./ { sub(/\/.*/, "", $2); print $2; exit }' \
-        || true)
+    if out="$(ip -4 addr show 2>&1)"; then
+        ip="$(awk '/inet / && $2 !~ /^127\./ { sub(/\/.*/, "", $2); print $2; exit }' <<< "$out")"
+    else
+        echo "[lancache-dns] WARNING: ip -4 addr show failed: $out" >&2
+    fi
     if [ -n "$ip" ]; then
         printf '%s\n' "$ip"
         return 0
@@ -585,311 +406,15 @@ export KEEP_KNOWN_GOOD_CONFIGS DNS_CONFIG_SNAPSHOT_DIR DNS_ROLLBACK_LISTEN_ADDR
 # ────────────────────────────────────────────────────────────────────────────
 # Known-good configuration snapshot library (#415, #615)
 #
-# See docs/known-good-config-snapshots.md for the full contract. This block
-# is a byte-identical copy of scripts/lib/known-good-snapshots.sh's function
-# definitions (verified by tests/bats/known_good_snapshots_sync.bats) rather
-# than a sourced file, because this Dockerfile builds from services/dns/
-# alone with no shared-file build context wired up for it (same reasoning as
-# the proxy/dhcp-proxy adapters).
-# ────────────────────────────────────────────────────────────────────────────
-# BEGIN known-good-snapshot library (scripts/lib/known-good-snapshots.sh)
-# kgs_log <level> <label> <message...>
-# Emits one explicit, greppable log line for every snapshot lifecycle event
-# (create, prune, rollback-select, reject) per the issue's acceptance
-# criteria. level is a short tag: CREATE/PRUNE/SELECT/REJECT/FATAL.
-kgs_log() {
-    local level="$1" label="$2"
-    shift 2
-    echo "[known-good-snapshot][${label}][${level}] $*" >&2
-}
+# What: source the known-good-snapshot library.
+# Why: one owner in scripts/lib, no embedded copy (AG-CODE-011).
+# From: Issue #1683
+. /usr/local/lib/known-good-snapshots.sh
 
-# kgs_new_snapshot_id
-# Prints a new, sortable, practically collision-free snapshot id.
-kgs_new_snapshot_id() {
-    date -u +%Y%m%dT%H%M%S.%N
-}
-
-# kgs_list_snapshots <snapshot_root>
-# Prints existing snapshot ids, oldest first, one per line. Empty output
-# (no error) when <snapshot_root> does not exist yet or holds no snapshots.
-# Excludes .staging.* entries: kgs_snapshot_create assembles a new snapshot
-# in such a directory before the final atomic `mv` into its real <id> name,
-# so a container killed mid-copy can leave one behind. Without this
-# exclusion, a leftover .staging.* directory would be listed and treated as
-# a real (but only partially-written) snapshot by callers of this function.
-kgs_list_snapshots() {
-    local snapshot_root="$1"
-    [ -d "$snapshot_root" ] || return 0
-    find "$snapshot_root" -mindepth 1 -maxdepth 1 -type d -not -name '.staging.*' -printf '%f\n' 2>/dev/null | sort
-}
-
-# kgs_snapshot_create <snapshot_root> <keep_n> <label> <file...>
-# Copies <file...> into a new snapshot directory, then prunes anything
-# beyond the newest <keep_n>. Creation is atomic-enough: files are
-# assembled in a temporary sibling directory on the same filesystem and only
-# `mv`-ed into their final <id> name once complete, so a crash mid-copy
-# never leaves a partially-written snapshot directory visible to
-# kgs_list_snapshots/kgs_snapshot_apply.
-kgs_snapshot_create() {
-    local snapshot_root="$1" keep_n="$2" label="$3"
-    shift 3
-    local -a files=("$@")
-    local id staging f base
-
-    mkdir -p "$snapshot_root" || {
-        kgs_log FATAL "$label" "cannot create snapshot root $snapshot_root"
-        return 1
-    }
-
-    id="$(kgs_new_snapshot_id)"
-    staging="$(mktemp -d "${snapshot_root}/.staging.XXXXXX")" || {
-        kgs_log FATAL "$label" "cannot create staging directory under $snapshot_root"
-        return 1
-    }
-
-    for f in "${files[@]}"; do
-        if [ ! -f "$f" ]; then
-            kgs_log FATAL "$label" "candidate file missing, refusing snapshot: $f"
-            rm -rf "$staging"
-            return 1
-        fi
-        base="$(basename "$f")"
-        if ! cp -p "$f" "$staging/$base"; then
-            kgs_log FATAL "$label" "failed to copy $f into snapshot staging"
-            rm -rf "$staging"
-            return 1
-        fi
-    done
-
-    if ! mv "$staging" "${snapshot_root}/${id}"; then
-        kgs_log FATAL "$label" "failed to finalize snapshot $id"
-        rm -rf "$staging"
-        return 1
-    fi
-
-    kgs_log CREATE "$label" "created known-good snapshot $id (${files[*]})"
-    kgs_snapshot_prune "$snapshot_root" "$keep_n" "$label"
-}
-
-# kgs_snapshot_prune <snapshot_root> <keep_n> <label>
-# Deletes the oldest snapshots beyond <keep_n>. A missing/non-numeric/
-# non-positive keep_n is clamped to the documented default of 3 rather than
-# trusted as-is, so a misconfigured KEEP_KNOWN_GOOD_CONFIGS (e.g. "0" or
-# empty) can never silently disable retention or prune away every snapshot,
-# including the one just created by kgs_snapshot_create.
-kgs_snapshot_prune() {
-    local snapshot_root="$1" keep_n="$2" label="$3"
-    case "$keep_n" in
-        '' | *[!0-9]*) keep_n=3 ;;
-    esac
-    [ "$keep_n" -ge 1 ] || keep_n=3
-
-    local -a ids=()
-    while IFS= read -r id; do
-        [ -n "$id" ] && ids+=("$id")
-    done < <(kgs_list_snapshots "$snapshot_root")
-
-    local total=${#ids[@]}
-    local excess=$((total - keep_n))
-    [ "$excess" -gt 0 ] || return 0
-
-    local i id
-    for ((i = 0; i < excess; i++)); do
-        id="${ids[$i]}"
-        if rm -rf "${snapshot_root:?}/${id}"; then
-            kgs_log PRUNE "$label" "pruned known-good snapshot $id (retention=${keep_n})"
-        else
-            kgs_log FATAL "$label" "failed to prune snapshot $id"
-        fi
-    done
-}
-
-# kgs_snapshot_apply <snapshot_root> <label> <validator_cmd> <dest...>
-# Attempts to roll the live config at <dest...> back to the newest snapshot
-# that passes <validator_cmd> (a command string evaluated with no arguments
-# after the snapshot's files have been copied onto <dest...>; it must exit 0
-# for a valid config, e.g. "nginx -t" or "dnsmasq --test -C /etc/dnsmasq.conf").
-# Tries snapshots newest-to-oldest, logging a REJECT line for each one that
-# fails validation, and never applies one that doesn't pass. Prints the
-# selected snapshot id and returns 0 on success. If no snapshot validates (or
-# none exist), <dest...> is restored to exactly what was live before this
-# function was called, so a failed rollback attempt never leaves <dest...>
-# in a half-applied state, and returns 1.
-kgs_snapshot_apply() {
-    local snapshot_root="$1" label="$2" validator_cmd="$3"
-    shift 3
-    local -a dest=("$@")
-    local -a ids=()
-    while IFS= read -r id; do
-        [ -n "$id" ] && ids+=("$id")
-    done < <(kgs_list_snapshots "$snapshot_root")
-
-    if [ "${#ids[@]}" -eq 0 ]; then
-        kgs_log FATAL "$label" "no known-good snapshots available to roll back to"
-        return 1
-    fi
-
-    local backup_dir
-    backup_dir="$(mktemp -d)" || {
-        kgs_log FATAL "$label" "cannot create rollback backup directory"
-        return 1
-    }
-    local d base
-    for d in "${dest[@]}"; do
-        base="$(basename "$d")"
-        [ -f "$d" ] && cp -p "$d" "$backup_dir/$base"
-    done
-
-    local i id snap_dir
-    for ((i = ${#ids[@]} - 1; i >= 0; i--)); do
-        id="${ids[$i]}"
-        snap_dir="${snapshot_root}/${id}"
-
-        # Require every requested basename to be present in this snapshot
-        # before touching any live file. A finalized-but-incomplete
-        # snapshot (e.g. taken before a new generated file was added to the
-        # candidate list) would otherwise leave that one dest untouched --
-        # silently validating a mix of this snapshot's files and whatever
-        # happened to already be live, a combination that was never itself
-        # actually validated together.
-        local snapshot_complete=1
-        for d in "${dest[@]}"; do
-            base="$(basename "$d")"
-            if [ ! -f "${snap_dir}/${base}" ]; then
-                snapshot_complete=0
-                break
-            fi
-        done
-        if [ "$snapshot_complete" -ne 1 ]; then
-            kgs_log REJECT "$label" "rejected known-good snapshot $id: incomplete (missing at least one candidate file)"
-            continue
-        fi
-
-        for d in "${dest[@]}"; do
-            base="$(basename "$d")"
-            cp -p "${snap_dir}/${base}" "$d"
-        done
-
-        # Redirect the validator's own stdout to stderr: this function's
-        # stdout is the caller's return channel (the selected snapshot id
-        # via command substitution), and a validator like "nginx -t" or
-        # "dnsmasq --test" may print its own diagnostic text to stdout,
-        # which would otherwise silently corrupt that return value.
-        if eval "$validator_cmd" 1>&2; then
-            kgs_log SELECT "$label" "selected known-good snapshot $id for rollback"
-            rm -rf "$backup_dir"
-            printf '%s\n' "$id"
-            return 0
-        fi
-        kgs_log REJECT "$label" "rejected known-good snapshot $id: failed validation"
-    done
-
-    # Nothing validated: restore exactly what was live before this call so a
-    # failed rollback attempt never leaves dest in a half-applied state.
-    for d in "${dest[@]}"; do
-        base="$(basename "$d")"
-        if [ -f "$backup_dir/$base" ]; then
-            cp -p "$backup_dir/$base" "$d"
-        else
-            rm -f "$d"
-        fi
-    done
-    rm -rf "$backup_dir"
-    kgs_log FATAL "$label" "no known-good snapshot passed validation; refusing rollback"
-    return 1
-}
-# END known-good-snapshot library
-
-# ────────────────────────────────────────────────────────────────────────────
-# Domain validation library (scripts/lib/domain-validation.sh)
-#
-# Mirrors the label-strict rules from Admin UI (domains.rs) and
-# services/proxy/entrypoint.sh's own embedded copy, so a malformed or
-# overly-broad cdn-domains.txt entry (e.g. a bare TLD, a single label like
-# "localhost", or "*") is rejected here too, not just in the UI that writes
-# the file. Before this, section 7's RPZ zone generation below had zero
-# validation: a bad entry would generate an RPZ wildcard rule that could
-# redirect far more DNS traffic than intended. This block is a
-# byte-identical copy of scripts/lib/domain-validation.sh's function
-# definitions (verified by tests/bats/domain_validation_sync.bats) rather
-# than a sourced file, for the same reason as the libraries above: this
-# image builds from services/dns/ alone with no shared-file build context
-# wired up for it.
-# ────────────────────────────────────────────────────────────────────────────
-# BEGIN domain-validation library (scripts/lib/domain-validation.sh)
-_is_valid_domain_label() {
-    local label="$1"
-
-    # Label must not be empty
-    [ -n "$label" ] || return 1
-
-    # Label must be <= 63 chars
-    [ ${#label} -le 63 ] || return 1
-
-    # Label must not start or end with hyphen
-    [[ "$label" != -* ]] && [[ "$label" != *- ]] || return 1
-
-    # Label must only contain lowercase ASCII a-z, digits 0-9, or hyphen
-    [[ "$label" =~ ^[a-z0-9-]+$ ]] || return 1
-
-    return 0
-}
-
-# Prints the normalized form (trimmed, lowercased, leading dot stripped) of a
-# domain to stdout. Callers must capture this and use it instead of the raw
-# input for anything written to disk/config — _is_valid_domain() only reports
-# whether a value validates, it does not mutate the caller's variable.
-_normalize_domain() {
-    local domain="$1"
-    # Trim whitespace via pure parameter expansion, not xargs — xargs applies
-    # shell-style unquoting/escaping first, which would let malformed manual
-    # entries like a quoted "Example.COM" slip through as a clean example.com.
-    domain="${domain#"${domain%%[![:space:]]*}"}"
-    domain="${domain%"${domain##*[![:space:]]}"}"
-    domain="${domain,,}"
-    domain="${domain#.}"
-    printf '%s' "$domain"
-}
-
-_is_valid_domain() {
-    local domain
-    domain="$(_normalize_domain "$1")"
-
-    # Must not be empty after normalization
-    [ -n "$domain" ] || return 1
-
-    # Must be <= 253 chars total (RFC 1035 domain name length limit)
-    [ ${#domain} -le 253 ] || return 1
-
-    # Check for trailing dot (RFC 1035 allows it, but we reject it like the Rust validator does)
-    [[ "$domain" != *. ]] || return 1
-
-    # Validate each label using a loop to properly handle empty labels
-    # (bash word splitting would silently drop trailing empty labels,
-    # but we want to reject domains like "example.com." explicitly)
-    local label
-    local remaining="$domain"
-
-    while [ -n "$remaining" ]; do
-        # Extract label up to next dot
-        if [[ "$remaining" == *.* ]]; then
-            label="${remaining%%.*}"
-            remaining="${remaining#*.}"
-        else
-            label="$remaining"
-            remaining=""
-        fi
-
-        _is_valid_domain_label "$label" || return 1
-    done
-
-    # Must have at least 2 labels (so the loop must execute at least twice)
-    # We can check this by ensuring the domain contains at least one dot
-    [[ "$domain" == *.* ]] || return 1
-
-    return 0
-}
-# END domain-validation library
+# What: sources the domain-validation library.
+# Why: no more embedded byte-identical copy needed.
+# From: Issue #1683
+. /usr/local/lib/domain-validation.sh
 
 LAN_ZONES=(
     lan.
@@ -1047,13 +572,9 @@ render_template_atomic() {
 # container alive with `exec sleep infinity` so an operator can use
 # `docker exec` to investigate and fix the underlying cause. Does NOT start
 # any DNS daemons, satisfying the hard constraint that rescue mode must never
-# silently serve broken state to real clients. Deliberately defined outside
-# the "BEGIN/END known-good-snapshot library" block above: it is DNS-specific
-# (not shared with the proxy/dhcp-proxy adapters' embedded copies of that
-# generic contract), and living inside the block would make
-# tests/bats/known_good_snapshots_sync.bats fail by diverging this file's
-# embedded copy from the canonical scripts/lib/known-good-snapshots.sh and
-# the other two adapters' copies.
+# silently serve broken state to real clients. Defined here, not in the
+# shared known-good-snapshots.sh lib: it is DNS-specific rescue logic,
+# not part of the generic snapshot contract.
 _dns_enter_rescue_mode() {
     local component="$1"
     echo "[lancache-dns][rescue-mode] No known-good ${component} config available; refusing to start. Container will stay running for 'docker exec' access -- fix the underlying cause (cdn-domains.txt / env var / template) and restart. See docs/known-good-config-snapshots.md." >&2
@@ -1109,10 +630,8 @@ _dns_recursor_validate_snapshot_or_rollback() {
         # PDNS_API_KEY also changed. Detected here, not assumed: compare
         # what's actually on disk after the restore against the live env,
         # so this only fires when the two are genuinely out of sync.
-        # Captured via a here-string, not `sed -n ... | head -n1` (AG-VAL-032):
-        # under this script's own pipefail, a multi-match recursor.conf could
-        # let head exit after the first line while sed is still writing more,
-        # which pipefail would report as failure even though head succeeded.
+        # What: capture sed output, then head via here-string.
+        # Why: a live pipe could SIGPIPE under pipefail (AG-VAL-032).
         local sed_output restored_api_key
         sed_output=$(sed -n 's/^[[:space:]]*api_key:[[:space:]]*//p' "$recursor_conf")
         restored_api_key=$(head -n1 <<< "$sed_output")
@@ -1186,10 +705,8 @@ _dns_auth_validate_snapshot_or_rollback() {
         # env, so this only fires when the two are genuinely out of sync.
         # pdns.conf is flat `key=value` (no leading whitespace, no YAML
         # colon), unlike recursor.conf's indented `api_key: value`.
-        # Captured via a here-string, not `sed -n ... | head -n1` (AG-VAL-032):
-        # under this script's own pipefail, a multi-match pdns.conf could let
-        # head exit after the first line while sed is still writing more,
-        # which pipefail would report as failure even though head succeeded.
+        # What: capture sed output, then head via here-string.
+        # Why: a live pipe could SIGPIPE under pipefail (AG-VAL-032).
         local sed_output restored_api_key
         sed_output=$(sed -n 's/^api-key=//p' "$pdns_conf")
         restored_api_key=$(head -n1 <<< "$sed_output")
@@ -1371,11 +888,8 @@ _dns_ensure_zone_exists() {
     # empirically against the actual binary) -- "already exists" (the
     # reverse word order) never matches it, so this tolerance check would
     # silently never fire even with the errexit issue above fixed. Matched
-    # via a here-string (not `printf ... | grep -qi`, per AG-VAL-032): a
-    # multi-line create_output piped live into `grep -q` can let grep exit
-    # after an early match while printf is still writing, which under
-    # `pipefail` reports the whole pipeline as failed even though grep
-    # itself matched.
+    # via a here-string, pipefail-safe (AG-VAL-032): a live
+    # pipe could SIGPIPE before the producer finishes.
     if grep -qi "exists already" <<< "$create_output"; then
         return 0
     fi
