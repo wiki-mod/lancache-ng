@@ -145,8 +145,8 @@ of that upstream project's own release process, not this document.
 
 Accepted, deliberately-suppressed vulnerability findings live in the repo-root
 `.trivyignore.yaml` (each entry: the CVE id, the affected file paths, a
-`statement` explaining why it is accepted, and an `expired_at` date forcing
-periodic re-review). That file is Trivy-specific and not something a downstream
+`statement` explaining why it is accepted. No exception expiry field is required
+by Trivy, and the file is Trivy-specific rather than something a downstream
 consumer's non-Trivy tooling can parse.
 
 `scripts/untracked/generate-vex.sh` converts those entries into a standard
@@ -155,7 +155,7 @@ accepted-vulnerability entry becomes an OpenVEX statement: the vulnerable
 component is present and the finding is accepted or deferred (typically
 because no fixed upstream version exists to bump to yet), so the honest
 status is `affected` with an `action_statement` that carries the acceptance
-rationale and the mandatory re-review date -- not `not_affected`, which
+rationale -- not `not_affected`, which
 would assert a non-exploitability claim these entries do not make. If a
 future entry genuinely represents non-exploitability, its status mapping must
 be revisited in the generator rather than blanket-applied.
