@@ -2695,8 +2695,9 @@ tail" '{body:$b, isPrerelease:false}')" \
     export GITHUB_REPOSITORY=Own/Repo GITHUB_SERVER_URL=https://git.example.test CI_VEX_TIMESTAMP=2026-01-01T00:00:00Z
     while IFS='|' read -r case want code expr; do
         case "${case}" in
-            affected) printf 'vulnerabilities:\n  - id: CVE-1\n    paths:\n      - usr/bin/a\n    statement: >-\n      No fix yet.\n    expired_at: 2026-12-31\n' ;;
-            notaff) printf 'vulnerabilities:\n  - id: CVE-2\n    statement: >-\n      Code absent.\n    status: not_affected\n    expired_at: "2026-12-31"\n' ;;
+            affected) printf 'vulnerabilities:\n  - id: CVE-1\n    paths:\n      - usr/bin/a\n    statement: >-\n      No fix yet.\n' ;;
+            notaff) printf 'vulnerabilities:\n  - id: CVE-2\n    statement: >-\n      Code absent.\n    status: not_affected\n' ;;
+            expiry) printf 'vulnerabilities:\n  - id: CVE-15\n    statement: >-\n      x\n    expired_at: 2026-12-31\n' ;;
             override) printf 'vulnerabilities:\n  - id: CVE-3\n    statement: >-\n      x\n    status: not_affected\n    justification: vulnerable_code_cannot_be_controlled_by_adversary\n' ;;
             align) printf 'vulnerabilities:\n  - id: CVE-4\n    paths:\n      - usr/bin/first\n    statement: >-\n      a\n    status: not_affected\n  - id: CVE-5\n    paths:\n      - usr/bin/second\n    statement: >-\n      b\n' ;;
             folded) printf '# head\nvulnerabilities:\n  # note\n  - id: CVE-6\n    statement: >-\n      What: one\n      two.\n\n      # kept\n      Why: three\n\n' ;;
@@ -2719,8 +2720,9 @@ tail" '{body:$b, isPrerelease:false}')" \
         out="$(jq -r "${expr}" <<< "${output}")" || { echo "${case}: ${output}"; return 1; }
         [ "${out}" = true ] || { echo "${case}: ${expr} -> ${out}"; echo "${output}"; return 1; }
     done <<'CASES'
-affected|0|-|.statements[0] | .status == "affected" and (.action_statement | startswith("No fix yet. (Accepted") and contains("expires 2026-12-31")) and .products[0]["@id"] == "pkg:github/own/repo" and .products[0].subcomponents == [{"@id": "usr/bin/a"}] and .timestamp == "2026-01-01T00:00:00Z"
-notaff|0|-|.statements[0] | .status == "not_affected" and .justification == "vulnerable_code_not_present" and (.impact_statement | startswith("Code absent. (Non-exploitability") and contains("2026-12-31")) and has("action_statement") == false
+affected|0|-|.statements[0] | .status == "affected" and .action_statement == "No fix yet." and .products[0]["@id"] == "pkg:github/own/repo" and .products[0].subcomponents == [{"@id": "usr/bin/a"}] and .timestamp == "2026-01-01T00:00:00Z"
+notaff|0|-|.statements[0] | .status == "not_affected" and .justification == "vulnerable_code_not_present" and .impact_statement == "Code absent." and has("action_statement") == false
+expiry|2|0035|
 override|0|-|.statements[0] | .justification == "vulnerable_code_cannot_be_controlled_by_adversary" and .impact_statement == "x"
 align|0|-|(.statements | length) == 2 and .statements[0].status == "not_affected" and .statements[0].products[0].subcomponents[0]["@id"] == "usr/bin/first" and .statements[1].vulnerability.name == "CVE-5" and .statements[1].status == "affected" and .statements[1].action_statement == "b"
 folded|0|-|.statements[0].action_statement == "What: one two.\n# kept Why: three" and ."@context" == "https://openvex.dev/ns/v0.2.0" and ."@id" == "https://git.example.test/own/repo/vex/repo-2026-01-01T00:00:00Z" and .author == "repo release automation (https://git.example.test/own/repo)" and .version == 1

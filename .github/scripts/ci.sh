@@ -10760,11 +10760,11 @@ _ci_generate_vex() {
                       "inline_mitigations_already_exist")) | not
                  then error("\($e.id): justification \($j) is not an OpenVEX value") else . end
                | $p + {status: "not_affected", justification: $j,
-                   impact_statement: (if $e.expired_at then "\($s) (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before \($e.expired_at) in case the underlying module pin or upstream situation has changed.)" else $s end)})
+                   impact_statement: $s})
             elif ($e.status // "") == "" then
               (if $e.justification then error("\($e.id): justification needs status not_affected") else . end
                | $p + {status: "affected",
-                   action_statement: (if $e.expired_at then "\($s) (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires \($e.expired_at) and must be re-reviewed on or before that date.)" else $s end)})
+                   action_statement: $s})
             else error("\($e.id): status \($e.status) is not supported (not_affected or none)") end;
         [inputs | split("\t") | {n: (.[0] | tonumber), k: .[1], v: (.[2:] | join("\t") | gsub("\u001e"; "\n"))}]
         | group_by(.n)
@@ -10813,7 +10813,7 @@ _ci_trivyignore_fields() {
             k = rest; sub(/:.*/, "", k); v = rest; sub(/^[a-z_]+:[ \t]*/, "", v); mode = ""
             if (k == "paths" && v == "") { mode = "paths"; next }
             if (k == "statement" && v == ">-") { on = 1; st = ""; nl = 0; next }
-            if (k == "statement" || k == "status" || k == "justification" || k == "expired_at") { print n "\t" k "\t" scalar(v); next }
+            if (k == "statement" || k == "status" || k == "justification") { print n "\t" k "\t" scalar(v); next }
             fail("unsupported entry key")
         }
         ind == 6 && mode == "paths" && rest ~ /^- / { v = rest; sub(/^-[ \t]*/, "", v); print n "\tpath\t" scalar(v); next }
