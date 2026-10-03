@@ -8049,18 +8049,94 @@ _ci_check_bats_and_chain() {
     printf 'bats-and-chain=clean files=%s\n' "${#files[@]}"
 }
 
+# What: print one ref's shfmt --minify form of a file.
+# Why: comments drop, heredocs and strings stay (a parser).
+# From: Issue #1683 | PR #1858
+_ci_test_gate_norm() {
+    local lang="$1" ref="$2" path="$3" src out
+    if ! src="$(cd -- "${CI_REPO_ROOT}" && git show "${ref}:${path}" 2>&1)"; then
+        ci_error "[CI-INFO-TESTID-0002]" "ref=\"${ref}\" path=\"${path}\" reason=\"not readable at ref; no NOOP proof\"" "${src}"
+        return 1
+    fi
+    if ! out="$(shfmt -ln "${lang}" -mn <<< "${src}" 2>&1)"; then
+        ci_error "[CI-INFO-TESTID-0003]" "ref=\"${ref}\" path=\"${path}\" reason=\"shfmt failed; no NOOP proof\"" "${out}"
+        return 1
+    fi
+    printf '%s\n' "${out}"
+}
+
+# What: print run or skip for the ci.bats suite.
+# Why: comment-only edits are NOOP (arch doc Test B, C).
+# From: Issue #1683 | PR #1858
+_ci_test_identity_gate() {
+    local refs base head names n v md="" f lang a b
+    if [ "$#" -eq 0 ] || ! refs="$(_ci_diff_refs)"; then
+        ci_log "[CI-INFO-TESTID-0001]" "reason=\"no changed files or no diff refs; suite runs\""
+        printf 'run\n'
+        return 0
+    fi
+    read -r base head <<< "${refs}"
+    if [ -z "${base}" ]; then
+        ci_log "[CI-INFO-TESTID-0004]" "reason=\"no base ref; suite runs\""
+        printf 'run\n'
+        return 0
+    fi
+    # What: a .md is a test input when a SOT path names it.
+    # Why: ci.sh reads docs only via ci_variables paths.
+    # From: Issue #1683 | PR #1858
+    names="$(_ci_block_keys ci_variables all)" || return 2
+    while IFS= read -r n; do
+        [ -n "${n}" ] || continue
+        v="$(_ci_variable "${n}")" || return 2
+        case "${v}" in *.md) md="${md}${v}"$'\n' ;; esac
+    done <<< "${names}"
+    for f in "$@"; do
+        case "${f}" in
+            *.md)
+                if grep -qxF -- "${f}" <<< "${md}"; then
+                    ci_log "[CI-INFO-TESTID-0005]" "path=\"${f}\" reason=\"doc is a test input; suite runs\""
+                    printf 'run\n'
+                    return 0
+                fi
+                continue
+                ;;
+            *.bats) lang=bats ;;
+            *.sh) lang=bash ;;
+            *)
+                ci_log "[CI-INFO-TESTID-0006]" "path=\"${f}\" reason=\"no semantic normalizer; suite runs\""
+                printf 'run\n'
+                return 0
+                ;;
+        esac
+        if ! a="$(_ci_test_gate_norm "${lang}" "${base}" "${f}")" \
+            || ! b="$(_ci_test_gate_norm "${lang}" "${head}" "${f}")"; then
+            printf 'run\n'
+            return 0
+        fi
+        if [ "${a}" != "${b}" ]; then
+            ci_log "[CI-INFO-TESTID-0007]" "path=\"${f}\" reason=\"semantic change; suite runs\""
+            printf 'run\n'
+            return 0
+        fi
+    done
+    printf 'skip\n'
+}
+
 # What: run the ci.bats regression contract in CI.
 # Why: tests that never run in CI enforce nothing.
 # From: Issue #1683 | PR #1858
 _ci_check_ci_bats() {
-    local suite="${CI_SCRIPT_DIR}/ci.bats" jobs cpus rc=0
+    local suite="${CI_SCRIPT_DIR}/ci.bats" jobs cpus rc=0 gate
     if [ -n "${BATS_TEST_FILENAME:-}" ]; then
         printf 'ci-bats=NOT-RUN reason="already inside a bats run; no nested suite"\n'
         return 0
     fi
-    if [ "${CI_SCAN_SCOPE_FILTER:-0}" = 1 ] && [ "$#" -gt 0 ] && _ci_docs_only "$@"; then
-        printf 'ci-bats=NOT-RUN reason="docs-only change" changed=%s\n' "$#"
-        return 0
+    if [ "${CI_SCAN_SCOPE_FILTER:-0}" = 1 ] && [ "$#" -gt 0 ]; then
+        gate="$(_ci_test_identity_gate "$@")" || return 2
+        if [ "${gate}" = skip ]; then
+            printf 'ci-bats=NOT-RUN reason="no test-input change beyond comments" changed=%s\n' "$#"
+            return 0
+        fi
     fi
     # What: --jobs = max(16, cores); never below 16.
     # Why: the suite is sized for 16-way parallel runs.

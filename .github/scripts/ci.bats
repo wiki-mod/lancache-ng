@@ -6888,9 +6888,37 @@ EOF
     run _ci_check_ci_bats README.md
     [ "${status}" -eq 0 ]
     [ "${output}" = 'ci-bats=NOT-RUN reason="already inside a bats run; no nested suite"' ]
-    BATS_TEST_FILENAME="" CI_SCAN_SCOPE_FILTER=1 run _ci_check_ci_bats README.md docs/x.md
-    [ "${status}" -eq 0 ]
-    [ "${output}" = 'ci-bats=NOT-RUN reason="docs-only change" changed=2' ]
+    # What: the suite skips only on comment-only inputs.
+    # Why: arch doc Test B/C; anything unproven runs it.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/tg" base row path body want
+    git init -q "${r}"
+    printf '@test "t" {\n  # c1\n  true\n}\n' > "${r}/a.bats"
+    printf 'f() {\n  # c\n  echo 1\n}\ncat <<EOF\n# body\nEOF\n' > "${r}/lib.sh"
+    printf 'n\n' > "${r}/notes.md"
+    printf 'r\n' > "${r}/$(_ci_variable CI_README)"
+    git -C "${r}" add -A
+    git -C "${r}" -c user.email=a@b -c user.name=b commit -qm base
+    base="$(git -C "${r}" rev-parse HEAD)"
+    for row in 'a.bats|@test "t" {\n  # c2 changed\n  true\n}\n|skip' \
+        'lib.sh|f() {\n  # other\n\n  echo 1\n}\ncat <<EOF\n# body\nEOF\n|skip' \
+        'lib.sh|f() {\n  # c\n  echo 2\n}\ncat <<EOF\n# body\nEOF\n|run' \
+        'lib.sh|f() {\n  # c\n  echo 1\n}\ncat <<EOF\n# BODY\nEOF\n|run' \
+        'notes.md|changed\n|skip' "$(_ci_variable CI_README)|changed\n|run" \
+        'new.sh|echo new\n|run' 'x.yml|a: 1\n|run'; do
+        IFS='|' read -r path body want <<< "${row}"
+        git -C "${r}" checkout -q "${base}"
+        printf '%b' "${body}" > "${r}/${path}"
+        git -C "${r}" add -A
+        git -C "${r}" -c user.email=a@b -c user.name=b commit -qm head
+        CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push BEFORE_SHA="${base}" \
+            GITHUB_SHA="$(git -C "${r}" rev-parse HEAD)" run _ci_test_identity_gate "${path}"
+        [ "${status}" -eq 0 ] || { echo "${path}: ${output}"; return 1; }
+        [ "${lines[${#lines[@]}-1]}" = "${want}" ] || { echo "${path} want ${want}: ${output}"; return 1; }
+    done
+    CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push BEFORE_SHA='' run _ci_test_identity_gate a.bats
+    [ "${lines[${#lines[@]}-1]}" = run ]
+    [[ "${output}" == *"[CI-INFO-TESTID-0004]"* ]]
 }
 
 @test "check all runs PR-metadata checks when a PR number is present" {
