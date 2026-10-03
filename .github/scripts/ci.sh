@@ -2921,15 +2921,6 @@ _ci_trivy_db_ensure_fresh() {
     printf 'present=false\n'
 }
 
-# What: the trivy ignore file (SOT CI_TRIVY_IGNORE).
-# Why: scan, release VEX and vex-drift read one path.
-# From: Issue #1683 | PR #1858
-_ci_trivy_ignore_file() {
-    local root="${1:-${CI_REPO_ROOT:-.}}" rel
-    rel="$(_ci_variable CI_TRIVY_IGNORE)" || return 2
-    printf '%s/%s\n' "${root}" "${rel}"
-}
-
 # What: Scan an image digest with Trivy on the runner.
 # Why: A written report is a finding; only DB miss retries.
 # From: Issue #1683
@@ -2938,7 +2929,7 @@ _ci_trivy_scan() {
     local max="${CI_TRIVY_MAX:-4}"
     local scanners="${CI_TRIVY_SCANNERS:-vuln,secret}"
     local ignore cache_rec cache_dir fresh_rec skip_db=0
-    ignore="$(_ci_trivy_ignore_file)" || return 2
+    ignore="$(_ci_repo_path CI_TRIVY_IGNORE)" || return 2
     cache_rec="$(_ci_trivy_cache_dir)" || return 3
     cache_dir="$(_ci_record_field "${cache_rec}" dir)"
     fresh_rec="$(_ci_trivy_db_ensure_fresh "${cache_dir}")" || return 3
@@ -4468,7 +4459,7 @@ ci_cmd_release_vex() {
     local tag="${1:-}"
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0010]" "reason=\"tag arg required\""; return 2; }
     local root="${CI_REPO_ROOT:-.}" trivyignore dir out rc=0
-    trivyignore="$(_ci_trivy_ignore_file "${root}")" || return 2
+    trivyignore="$(_ci_repo_path CI_TRIVY_IGNORE "${root}")" || return 2
     [ -s "${trivyignore}" ] || { ci_log "[CI-ERROR-RELEASE-0011]" "path=\"${trivyignore}\" reason=\"trivyignore missing; cannot build release VEX\""; return 2; }
     dir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-vex.XXXXXX")" || return 2
     out="${dir}/vex.openvex.json"
@@ -8505,7 +8496,8 @@ _ci_check_pr_template() {
         body="${PR_BODY:-}"
     fi
     body="${body//$'\r'/}"
-    local template="${CI_REPO_ROOT}/.github/pull_request_template.md"
+    local template
+    template="$(_ci_repo_path CI_PR_TEMPLATE)" || return 2
     local -a sections=()
     if [ -f "${template}" ]; then
         local produced produced_rc=0
@@ -8593,7 +8585,8 @@ _ci_measure_run_blocks() {
 }
 
 _ci_check_workflow_line_limit() {
-    local dir="${1:-${CI_REPO_ROOT}/.github/workflows}"
+    local dir="${1:-}"
+    [ -n "${dir}" ] || dir="$(_ci_repo_path CI_WORKFLOW_DIR)" || return 2
     local max_lines="${MAX_WORKFLOW_LINES:-8999}"
     local max_bytes="${MAX_WORKFLOW_BYTES:-512000}"
     local max_block="${MAX_RUN_BLOCK_BYTES:-74000}"
@@ -8935,7 +8928,9 @@ _ci_action_ref_is_external() {
 # From: Issue #1683 | PR #1858
 _ci_check_action_node_versions() {
     local repo_root="${1:-${CI_REPO_ROOT:-.}}"
-    local wf_dir="${repo_root}/.github/workflows" act_dir="${repo_root}/.github/actions"
+    local wf_dir act_dir
+    wf_dir="$(_ci_repo_path CI_WORKFLOW_DIR "${repo_root}")" || return 2
+    act_dir="$(_ci_repo_path CI_ACTIONS_DIR "${repo_root}")" || return 2
     local -a wf_files=() act_files=() scan_files=()
     local f
     for f in "${wf_dir}"/*.yml "${wf_dir}"/*.yaml; do [ -f "${f}" ] && wf_files+=("${f}"); done
@@ -9804,7 +9799,8 @@ _ci_dockerfile_final_image() {
 # From: Issue #1683 | PR #1858
 _ci_check_dependabot_docker_base_consistency() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
-    local dependabot_file="${repo_root}/.github/dependabot.yml"
+    local dependabot_file
+    dependabot_file="$(_ci_repo_path CI_DEPENDABOT_FILE "${repo_root}")" || return 2
     if [ ! -f "${dependabot_file}" ]; then
         ci_log "[CI-ERROR-CHECK-0027]" "path=\"${dependabot_file}\" reason=\"dependabot.yml not found\""
         return 2
@@ -9988,17 +9984,35 @@ _ci_validation_env() {
 ' <<< "${fx}" | grep -v '^$'
 }
 
+# What: repo root joined with a SOT path variable.
+# Why: paths are SOT truths; ci.sh holds no path literal.
+# From: Issue #1683 | PR #1858
+_ci_repo_path() {
+    local name="$1" root="${2:-${CI_REPO_ROOT:-.}}" rel
+    rel="$(_ci_variable "${name}")" || return 2
+    printf '%s/%s\n' "${root}" "${rel}"
+}
+
+# What: repo root, SOT service context and a file in it.
+# Why: service paths derive from the SOT, not services/x.
+# From: Issue #1683 | PR #1858
+_ci_service_path() {
+    local svc="$1" rel="$2" root="${3:-${CI_REPO_ROOT:-.}}" ctx
+    ctx="$(_ci_required_field "${svc}" context)" || return 2
+    printf '%s/%s/%s\n' "${root}" "${ctx}" "${rel}"
+}
+
 # What: the installer's absolute path (SOT CI_INSTALLER).
 # Why: one owner for the path and its existence check.
 # From: Issue #1683 | PR #1858
 _ci_installer() {
-    local root="${1:-${CI_REPO_ROOT}}" rel
-    rel="$(_ci_variable CI_INSTALLER)" || return 2
-    if [ ! -f "${root}/${rel}" ]; then
-        ci_log "[CI-ERROR-CORE-0102]" "path=\"${root}/${rel}\" reason=\"installer not found\""
+    local p
+    p="$(_ci_repo_path CI_INSTALLER "${1:-}")" || return 2
+    if [ ! -f "${p}" ]; then
+        ci_log "[CI-ERROR-CORE-0102]" "path=\"${p}\" reason=\"installer not found\""
         return 2
     fi
-    printf '%s\n' "${root}/${rel}"
+    printf '%s\n' "${p}"
 }
 
 # What: compose file setup.sh installs, read from setup.sh.
@@ -10162,10 +10176,10 @@ _ci_check_nats_atomic_write() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
     local cf dep inst ep rs su
-    ep="$(ci_service_field dns context)/entrypoint.sh" || return 2
-    rs="$(ci_service_field ui context)/src/routes/secondaries.rs" || return 2
+    ep="$(_ci_service_path dns entrypoint.sh "${repo_root}")" || return 2
+    rs="$(_ci_service_path ui src/routes/secondaries.rs "${repo_root}")" || return 2
     su="$(_ci_installer "${repo_root}")" || return 2
-    su="${su#"${repo_root}/"}"
+    ep="${ep#"${repo_root}/"}" rs="${rs#"${repo_root}/"}" su="${su#"${repo_root}/"}"
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     inst="$(_ci_installer_compose "${repo_root}")" || return 2
     for cf in "${dep}" "${inst}"; do
@@ -10315,9 +10329,11 @@ _ci_check_netdata_isolation() {
 # Why: a bare return skips the ACL; ignored headers leak.
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_nginx_policy() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp first="" blocks=0 b h a d al r
+    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp first="" blocks=0 b h a d al r px
     local -a viol=()
-    for f in "${repo_root}"/services/proxy/conf.d/*.conf; do
+    px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
+    px="${px%/}"
+    for f in "${px}"/conf.d/*.conf; do
         out="$(_ci_capture 0 awk '
             /^[[:space:]]*location = \/healthz \{/ { inb = 1; n++; body = ""; a = 0; d = 0; al = 0; r = 0; next }
             inb && /^[[:space:]]*\}/ {
@@ -10338,8 +10354,8 @@ _ci_check_proxy_nginx_policy() {
             [ "${b}" = "${first}" ] || viol+=("${f#"${repo_root}/"}: /healthz differs from the first block")
         done <<<"${out}"
     done
-    [ "${blocks}" -gt 0 ] || viol+=("services/proxy/conf.d: no /healthz block found")
-    pp="${repo_root}/services/proxy/proxy-params.conf"
+    [ "${blocks}" -gt 0 ] || viol+=("${px#"${repo_root}/"}/conf.d: no /healthz block found")
+    pp="${px}/proxy-params.conf"
     out="$(_ci_capture 0 awk '
         $1 == "proxy_ignore_headers" { for (i = 2; i <= NF; i++) { h = $i; sub(/;$/, "", h); ign[h] = 1 } }
         $1 == "proxy_hide_header" { h = $2; sub(/;$/, "", h); hid[h] = 1 }
@@ -10349,7 +10365,7 @@ _ci_check_proxy_nginx_policy() {
             for (h in ign) if (!(h in hid)) print "ignored header " h " must also be hidden from clients"
         }' "${pp}")" || return 2
     while IFS= read -r h; do
-        [ -z "${h}" ] || viol+=("services/proxy/proxy-params.conf: ${h}")
+        [ -z "${h}" ] || viol+=("${pp#"${repo_root}/"}: ${h}")
     done <<<"${out}"
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0151]" "reason=\"proxy nginx policy violated\"" "$(printf '%s\n' "${viol[@]}")"
@@ -10365,7 +10381,7 @@ _ci_check_proxy_cert_volume() {
     local repo_root="${1:-${CI_REPO_ROOT}}" ep dir dep inst targets cf cfg out line
     local -a viol=()
     local -A seen=()
-    ep="${repo_root}/services/proxy/entrypoint.sh"
+    ep="$(_ci_service_path proxy entrypoint.sh "${repo_root}")" || return 2
     dir="$(_ci_capture 1 sed -nE 's/^CERT_DIR="([^"$]+)"$/\1/p' "${ep}")" || return 2
     if [[ -z "${dir}" || "${dir}" == *$'\n'* ]]; then
         ci_log "[CI-ERROR-CHECK-0150]" "path=\"${ep}\" reason=\"need exactly one literal CERT_DIR= line\""
@@ -10401,7 +10417,7 @@ _ci_check_proxy_cert_volume() {
 _ci_check_syslog_logs_volume() {
     local repo_root="${1:-${CI_REPO_ROOT}}" df cf dep inst cfg out line uid gid
     local -a viol=()
-    df="${repo_root}/services/syslog/Dockerfile"
+    df="$(_ci_service_path syslog Dockerfile "${repo_root}")" || return 2
     uid="$(_ci_capture 1 sed -nE 's/.*adduser .*-u ([0-9]+)( .*|$)/\1/p' "${df}")" || return 2
     gid="$(_ci_capture 1 sed -nE 's/.*addgroup .*-g ([0-9]+)( .*|$)/\1/p' "${df}")" || return 2
     if ! [[ "${uid}" =~ ^[0-9]+$ && "${gid}" =~ ^[0-9]+$ ]]; then
@@ -10669,7 +10685,7 @@ _ci_check_image_channel_resolution() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local su sec prod dep
     su="$(_ci_installer "${repo_root}")" || return 2
-    sec="${repo_root}/$(ci_service_field ui context)/src/routes/secondaries.rs" || return 2
+    sec="$(_ci_service_path ui src/routes/secondaries.rs "${repo_root}")" || return 2
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     prod="${repo_root}/${dep}"
     local -a viol=()
@@ -10823,7 +10839,7 @@ _ci_trivyignore_fields() {
 _ci_check_vex_drift() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local trivyignore
-    trivyignore="$(_ci_trivy_ignore_file "${repo_root}")" || return 2
+    trivyignore="$(_ci_repo_path CI_TRIVY_IGNORE "${repo_root}")" || return 2
     local out entry_count statement_count
     [ -f "${trivyignore}" ] || { ci_error "[CI-ERROR-CHECK-0050]" "path=\"${trivyignore}\" reason=\".trivyignore.yaml not found\"" "${trivyignore}"; return 2; }
     if ! out="$(_ci_generate_vex "${trivyignore}")"; then
@@ -11032,9 +11048,10 @@ _ci_check_logging_matrix() {
 # Why: ci.sh scan owns trivy + its retry (AG-CI-013/023).
 # From: Issue #1683 | PR #1858
 _ci_check_trivy_action_direct_usage() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" out d
+    local repo_root="${1:-${CI_REPO_ROOT}}" out d n
     local -a dirs=()
-    for d in .github/workflows .github/actions; do
+    for n in CI_WORKFLOW_DIR CI_ACTIONS_DIR; do
+        d="$(_ci_variable "${n}")" || return 2
         [ -d "${repo_root}/${d}" ] && dirs+=("${d}")
     done
     [ "${#dirs[@]}" -gt 0 ] || { printf 'trivy-action-direct-usage=clean dirs=0\n'; return 0; }
@@ -11341,7 +11358,9 @@ _ci_check_actionlint() {
     if [ -n "${CI_ACTIONLINT_CMD:-}" ]; then
         out="$("${CI_ACTIONLINT_CMD}" "${repo_root}" 2>&1)" || rc=$?
     else
-        out="$(actionlint "${repo_root}/.github/workflows/"*.yml 2>&1)" || rc=$?
+        local wf
+        wf="$(_ci_repo_path CI_WORKFLOW_DIR "${repo_root}")" || return 2
+        out="$(actionlint "${wf}"/*.yml 2>&1)" || rc=$?
     fi
     if [ "${rc}" -ne 0 ]; then
         ci_error "[CI-ERROR-CHECK-0057]" "reason=\"actionlint found issues\"" "${out}"

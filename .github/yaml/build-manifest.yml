@@ -701,6 +701,13 @@ ci_variables:
   # Why: one path owner for scan, release VEX, vex-drift.
   # From: Issue #1683 | PR #1858
   CI_TRIVY_IGNORE: .trivyignore.yaml
+  # What: repo paths the checks read; one owner each.
+  # Why: ci.sh joins them via _ci_repo_path, no literals.
+  # From: Issue #1683 | PR #1858
+  CI_WORKFLOW_DIR: .github/workflows
+  CI_ACTIONS_DIR: .github/actions
+  CI_DEPENDABOT_FILE: .github/dependabot.yml
+  CI_PR_TEMPLATE: .github/pull_request_template.md
 
 # What: CI variables each build type passes as build-args.
 # Why: builders read repo/org vars; no YAML or literal copy.

@@ -7494,6 +7494,15 @@ CASES
     CI_INSTALLER=other.sh run _ci_installer_compose "${r}"
     [ "${status}" -eq 0 ] && [ "${output}" = o/c.yml ] || { echo "override: ${output}"; return 1; }
     [ "$(_ci_variable CI_INSTALLER)" = setup.sh ]
+    run _ci_service_path proxy entrypoint.sh /r
+    [ "${status}" -eq 0 ] && [ "${output}" = "/r/$(_ci_block_entry_field services proxy context)/entrypoint.sh" ] || {
+        echo "service path: ${output}"; return 1; }
+    run _ci_service_path no-such-service entrypoint.sh /r
+    [ "${status}" -eq 2 ] && [[ "${output}" == *"CI-ERROR-CORE-0009"* ]] || { echo "unknown: ${output}"; return 1; }
+    CI_WORKFLOW_DIR=wf run _ci_repo_path CI_WORKFLOW_DIR /r
+    [ "${status}" -eq 0 ] && [ "${output}" = /r/wf ] || { echo "repo path: ${output}"; return 1; }
+    run _ci_repo_path CI_NO_SUCH_PATH /r
+    [ "${status}" -eq 2 ] && [[ "${output}" == *"CI-ERROR-VARIABLES-0001"* ]] || { echo "missing: ${output}"; return 1; }
 }
 
 # What: seed a minimal prebuilt-only prod/quickstart tree.
