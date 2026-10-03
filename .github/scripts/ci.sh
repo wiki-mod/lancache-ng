@@ -4311,8 +4311,9 @@ ci_cmd_release_notes() {
 # Why: release writes CHANGELOG; no PR edits it by hand.
 # From: Issue #894 | PR #1858
 ci_cmd_release_changelog() {
-    local tag="${1:-}" branch="${CI_DEFAULT_BRANCH:-}" changes file="CHANGELOG.md" head out
+    local tag="${1:-}" branch="${CI_DEFAULT_BRANCH:-}" changes file head out
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0032]" "reason=\"tag arg required\""; return 2; }
+    file="$(_ci_variable CI_CHANGELOG)" || return 2
     if [[ ! "${tag}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
         printf 'release-changelog=skip tag=%s reason="not a stable vX.Y.Z tag"\n' "${tag}"
         return 0
@@ -4338,12 +4339,12 @@ ci_cmd_release_changelog() {
         { print }
         END { if (!done) print "\n" h "\n\n" ENVIRON["CI_CHANGES"] }
     ' "${file}" 2>&1 > "${file}.new")" || ! out="$(mv "${file}.new" "${file}" 2>&1)"; then
-        ci_error "[CI-ERROR-RELEASE-0034]" "file=\"${file}\" reason=\"CHANGELOG.md not rewritten\"" "${out}"
+        ci_error "[CI-ERROR-RELEASE-0034]" "file=\"${file}\" reason=\"changelog not rewritten\"" "${out}"
         rm -f "${file}.new"
         return 2
     fi
     out="$(_ci_capture 0 git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-        commit -q -m "docs: update CHANGELOG.md for ${tag}" -- "${file}")" || return 2
+        commit -q -m "docs: update ${file} for ${tag}" -- "${file}")" || return 2
     out="$(_ci_retry git-push git push -q origin "HEAD:refs/heads/${branch}")" || return 2
     printf 'release-changelog=written tag=%s branch=%s\n' "${tag}" "${branch}"
 }
@@ -8564,7 +8565,7 @@ _ci_check_pr_template() {
         done <<<"${produced}"
     fi
     if [ "${#sections[@]}" -eq 0 ]; then
-        ci_log "[CI-ERROR-CHECK-0015]" "reason=\"no sections found in pull_request_template.md\""
+        ci_log "[CI-ERROR-CHECK-0015]" "path=\"${template}\" reason=\"no sections found in the PR template\""
         return 2
     fi
     local -a missing=()
@@ -9615,7 +9616,8 @@ _ci_check_compose_healthchecks() {
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_cache_env_doc_drift() {
     local proxy_env="${1:-}" dep raw
-    local arch_doc="${2:-${CI_REPO_ROOT}/docs/architecture-ng.md}"
+    local arch_doc="${2:-}"
+    if [ -z "${arch_doc}" ]; then arch_doc="$(_ci_repo_path CI_ARCH_DOC)" || return 2; fi
     if [ -z "${proxy_env}" ]; then
         # What: the env_file the deploy compose gives proxy.
         # Why: the compose owns the path; no ci.sh literal.
@@ -9732,9 +9734,10 @@ _ci_check_prebuilt_prod() {
     if [ -n "${hit}" ]; then
         viol+=("a stack compose declares build:; prod must run prebuilt images only" "${hit}")
     fi
-    local hit su
+    local hit su readme
     su="$(_ci_installer "${repo_root}")" || return 2
-    hit="$(_ci_capture 1 grep -RIn -- '--build' "${repo_root}/README.md" "${dep}" "${inst}" "${su}")" || return 2
+    readme="$(_ci_repo_path CI_README "${repo_root}")" || return 2
+    hit="$(_ci_capture 1 grep -RIn -- '--build' "${readme}" "${dep}" "${inst}" "${su}")" || return 2
     if [ -n "${hit}" ]; then
         viol+=("a user-facing install path instructs --build; prod must run from prebuilt images, not a local build" "${hit}")
     fi
@@ -9754,7 +9757,9 @@ _ci_check_prod_state_wiring() {
     local compose="${repo_root}/${dep}"
     local env_file
     env_file="${repo_root}/$(dirname "${dep}")/.env"
-    local doc="${repo_root}/docs/backup-restore.md"
+    local doc doc_rel
+    doc_rel="$(_ci_variable CI_BACKUP_RESTORE_DOC)" || return 2
+    doc="${repo_root}/${doc_rel}"
     local -a viol=()
     local key f
     for f in "${compose}" "${env_file}" "${doc}"; do
@@ -9766,7 +9771,7 @@ _ci_check_prod_state_wiring() {
         grep -Fq "${key}" "${env_file}" \
             || viol+=("$(dirname "${dep}")/.env does not document ${key} for manual upgrades")
         grep -Fq "${key}" "${doc}" \
-            || viol+=("docs/backup-restore.md does not mention ${key}")
+            || viol+=("${doc_rel} does not mention ${key}")
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0100]" "reason=\"prod state wiring not LANCACHE_STATE_DIR-derived or undocumented\"" "$(printf '%s\n' "${viol[@]}")"
@@ -10565,9 +10570,12 @@ _ci_check_image_channel_resolution() {
             grep -Fq "${f}" "${prod}" || viol+=("prod compose must pass ${f}")
         done
     fi
-    grep -Fq 'LANCACHE_IMAGE_CHANNEL=latest' "${repo_root}/README.md" \
+    local readme reldoc
+    readme="$(_ci_repo_path CI_README "${repo_root}")" || return 2
+    reldoc="$(_ci_repo_path CI_RELEASE_VERSIONING_DOC "${repo_root}")" || return 2
+    grep -Fq 'LANCACHE_IMAGE_CHANNEL=latest' "${readme}" \
         || viol+=("README must document latest as the install default")
-    grep -Fq 'fresh installs use `LANCACHE_IMAGE_CHANNEL=nightly` by default pre-1.0' "${repo_root}/docs/release-versioning.md" \
+    grep -Fq 'fresh installs use `LANCACHE_IMAGE_CHANNEL=nightly` by default pre-1.0' "${reldoc}" \
         || viol+=("release docs must document nightly as the pre-1.0 default")
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0105]" "reason=\"image channel/tag resolution contract violated\"" "$(printf '%s\n' "${viol[@]}")"
@@ -10693,9 +10701,10 @@ _ci_check_vex_drift() {
 # From: Issue #1683 | PR #1858
 _ci_check_changelog_direct_edit() {
     local -a changed=("$@")
-    local path edited=0
+    local path edited=0 file
+    file="$(_ci_variable CI_CHANGELOG)" || return 2
     for path in "${changed[@]}"; do
-        [ "${path}" = "CHANGELOG.md" ] && { edited=1; break; }
+        [ "${path}" = "${file}" ] && { edited=1; break; }
     done
     if [ "${edited}" -eq 0 ]; then
         printf 'changelog-direct-edit=clean\n'
@@ -10704,8 +10713,8 @@ _ci_check_changelog_direct_edit() {
     local label_rc=0 label_err
     label_err="$(jq -e 'index("release") != null' <<<"${PR_LABELS_JSON:-[]}" 2>&1 >/dev/null)" || label_rc=$?
     case "${label_rc}" in
-        0) ci_log "[CI-INFO-CHECK-0115]" "reason=\"CHANGELOG.md edited with release label; expected\"" ;;
-        1) ci_log "[CI-INFO-CHECK-0116]" "reason=\"CHANGELOG.md edited directly outside the release flow (issue #893); warn-only\"" ;;
+        0) ci_log "[CI-INFO-CHECK-0115]" "file=\"${file}\" reason=\"changelog edited with release label; expected\"" ;;
+        1) ci_log "[CI-INFO-CHECK-0116]" "file=\"${file}\" reason=\"changelog edited directly outside the release flow (issue #893); warn-only\"" ;;
         *)
             ci_error "[CI-ERROR-CHECK-0112]" "reason=\"PR_LABELS_JSON unreadable\"" "${label_err}"
             return 2
@@ -10782,8 +10791,8 @@ _ci_compose_profile_flags() {
 # Why: every service needs a declared row.
 # From: Issue #1683 | PR #1858
 _ci_check_logging_matrix() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
-    local doc="${repo_root}/docs/architecture-ng.md"
+    local repo_root="${1:-${CI_REPO_ROOT}}" doc
+    doc="$(_ci_repo_path CI_ARCH_DOC "${repo_root}")" || return 2
     if [ ! -f "${doc}" ]; then
         ci_log "[CI-ERROR-CHECK-0035]" "path=\"${doc}\" reason=\"architecture doc not found\""
         return 2
