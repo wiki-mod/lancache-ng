@@ -107,6 +107,7 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       test-services: ${{ steps.plan.outputs.test-services }}
       rust-validation: ${{ steps.plan.outputs.rust-validation }}
+      rust-audit: ${{ steps.plan.outputs.rust-audit }}
       docs-only: ${{ steps.plan.outputs.docs-only }}
     steps:
       # What: full-history checkout for diff computation
@@ -161,13 +162,13 @@ jobs:
       - name: Build, publish and verify the platform image
         run: bash .github/scripts/ci.sh ship "${{ matrix.service }}" "${{ matrix.platform }}"
 
-  # What: audit rust dependencies in build-tools image
-  # Why: cargo-audit is in toolchain; not on runner
-  # From: Issue #1683
+  # What: audit rust dependencies when Cargo.lock changed
+  # Why: lockfile is its input; nightly gets new advisories
+  # From: Issue #1683 | PR #1858
   cargo-audit:
     name: cargo-audit
     needs: [platform, plan]
-    if: needs.plan.outputs.test-services != ''
+    if: needs.plan.outputs.rust-audit == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container: *bt_platform

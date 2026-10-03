@@ -689,6 +689,10 @@ ci_variables:
   # Why: one deploy profile; a repo var may override.
   # From: Issue #1683 | PR #1858
   CI_COMPOSE_FILE: deploy/prod/docker-compose.yml
+  # What: the workspace lockfile cargo-audit reads.
+  # Why: plan audits only when this file changed.
+  # From: Issue #1683 | PR #1858
+  CI_CARGO_LOCK: Cargo.lock
 
 # What: CI variables each build type passes as build-args.
 # Why: builders read repo/org vars; no YAML or literal copy.

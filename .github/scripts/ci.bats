@@ -744,20 +744,27 @@ STUB
 }
 
 @test "plan-matrix emits test-services for a path-changed rust service" {
-    # What: Changed Rust source triggers test run.
-    # Why: tests run on source change, reuse or not (§60).
-    # From: Issue #1683
+    # What: Rust source -> tests; Cargo.lock -> audit.
+    # Why: each runs only when its own input changed.
+    # From: Issue #1683 | PR #1858
     local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
     GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
         run bash "${CI_SH}" plan-matrix services/watchdog/src/main.rs
     [ "${status}" -eq 0 ]
     grep -q '^test-services=watchdog$' "${gh}"
     grep -q '^rust-validation=false$' "${gh}"
+    grep -q '^rust-audit=false$' "${gh}"
     : > "${gh}"
     GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RUST_VALIDATION=true \
         CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
         run bash "${CI_SH}" plan-matrix services/watchdog/src/main.rs
     grep -q '^rust-validation=true$' "${gh}"
+    : > "${gh}"
+    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
+        CI_IMPACT_CMD="$(_stub impact 'echo NOOP')" \
+        run bash "${CI_SH}" plan-matrix "$(_ci_variable CI_CARGO_LOCK)"
+    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
+    grep -q '^rust-audit=true$' "${gh}"
 }
 
 @test "plan-matrix emits no test-services for a path-changed apk service" {
@@ -5818,7 +5825,7 @@ STUB
 
 @test "check mutable-refs requires a full SHA per external action ref" {
     # What: one uses: shape per row; external needs 40 hex.
-    # Why: tags, branches and short SHAs move (#1683 S15).
+    # Why: tags, branches and short SHAs move.
     # From: Issue #1683 | PR #1858
     local f="${BATS_TEST_TMPDIR}/w.yml" case use want sha
     sha="3d3c42e5aac5ba805825da76410c181273ba90b1"

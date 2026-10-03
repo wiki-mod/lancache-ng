@@ -767,6 +767,12 @@ ci_cmd_plan_matrix() {
     # Why: pins live in SOT; identity decides BUILD.
     # From: Issue #1683 | PR #1858
     for f in "${changed[@]}"; do [ "${f}" = "${CI_MANIFEST_REL}" ] && sot_changed=true; done
+    # What: audit only when the lockfile changed.
+    # Why: any other change leaves the audit result as is.
+    # From: Issue #1683 | PR #1858
+    local rust_audit=false lock
+    lock="$(_ci_variable CI_CARGO_LOCK)" || return 2
+    for f in "${changed[@]}"; do [ "${f}" = "${lock}" ] && rust_audit=true; done
     # What: build product services and the toolchain.
     # Why: build-tools generic pipeline, separate assembly.
     # From: Issue #1683
@@ -819,6 +825,7 @@ ci_cmd_plan_matrix() {
         printf 'matrix={"include":%s}\n' "${include}"
         printf 'test-services=%s\n' "${test_services# }"
         printf 'rust-validation=%s\n' "${rust_validation}"
+        printf 'rust-audit=%s\n' "${rust_audit}"
         printf 'docs-only=%s\n' "${docs_only}"
     } >> "${out}"
 }
@@ -7738,8 +7745,8 @@ _ci_check_mutable_refs() {
     for path in "${files[@]}"; do
         case "${path}" in
             *.yml|*.yaml)
-                # What: an external action ref is a full 40-hex SHA.
-                # Why: tags, branches and short SHAs move (S15, O).
+                # What: external ref needs a 40-hex SHA.
+                # Why: tags, branches, short SHAs move.
                 # From: Issue #1683 | PR #1858
                 out="$(_ci_capture 1 grep -nE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]*]' "${path}")" || return 2
                 while IFS= read -r line; do
@@ -11322,7 +11329,8 @@ _ci_check_actionlint() {
 # Why: cargo-audit policy owner; the workflow only runs it.
 # From: Issue #1683
 _ci_check_cargo_audit() {
-    local lock="${1:-Cargo.lock}" out rc=0
+    local lock="${1:-}" out rc=0
+    [ -n "${lock}" ] || lock="$(_ci_variable CI_CARGO_LOCK)" || return 2
     if [ -n "${CI_CARGO_AUDIT_CMD:-}" ]; then
         out="$("${CI_CARGO_AUDIT_CMD}" "${lock}" 2>&1)" || rc=$?
     else

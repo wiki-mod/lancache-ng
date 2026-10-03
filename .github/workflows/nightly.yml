@@ -87,6 +87,28 @@ jobs:
       - name: Validate the accepted stack candidate
         run: bash .github/scripts/ci.sh validate
 
+  # What: audit Cargo.lock against new advisories
+  # Why: advisory data moves daily; PRs audit lock changes
+  # From: Issue #1683 | PR #1858
+  cargo-audit:
+    name: cargo-audit
+    needs: platform
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: ${{ needs.platform.outputs.image }}
+      credentials: *ghcr_credentials
+    steps:
+      - *bootstrap
+      - name: Audit rust dependencies
+        id: audit
+        run: bash .github/scripts/ci.sh check cargo-audit
+      - name: Report the audit outcome
+        if: always()
+        env:
+          OUTCOME: ${{ steps.audit.outcome == 'success' && 'success' || 'failure' }}
+        run: bash .github/scripts/ci.sh nightly-status "${OUTCOME}" "nightly cargo-audit (current_dev)"
+
   # What: promote validated current_dev, report outcome
   # Why: nightly reuses; never rebuilds; always reports
   # From: Issue #1683
