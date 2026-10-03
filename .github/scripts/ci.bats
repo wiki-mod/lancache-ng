@@ -12421,6 +12421,58 @@ all|yml|file|NATS_BIND_IP='192.0.2.5'|-|-f D/docker-compose.yml -f D/docker-comp
 CASES
 }
 
+@test "setup bootstrap ref pins the checkout per ref kind" {
+    # What: tag, branch, commit, unknown ref, dirty tree.
+    # Why: an operator ref must pin exactly that revision.
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" dev tag master
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/setup.sh" resolve_setup_bootstrap_ref git_repo_is_clean git_default_branch_name \
+        sync_repo_to_ref sync_repo_to_default_branch
+    die() { printf '%s\n' "$*" >&2; exit 1; }
+    g() { git -c user.email=t@example.test -c user.name=t -c init.defaultBranch=master "$@"; }
+    g init -q --bare "${t}/origin.git"
+    g init -q "${t}/src"
+    g -C "${t}/src" commit -q --allow-empty -m c1
+    g -C "${t}/src" push -q "${t}/origin.git" HEAD:refs/heads/master
+    g -C "${t}/src" tag v0.2.0
+    g -C "${t}/src" push -q "${t}/origin.git" v0.2.0
+    g -C "${t}/src" commit -q --allow-empty -m c2
+    g -C "${t}/src" push -q "${t}/origin.git" HEAD:refs/heads/master
+    master="$(g -C "${t}/src" rev-parse HEAD)"
+    tag="$(g -C "${t}/src" rev-parse v0.2.0)"
+    g -C "${t}/src" checkout -q -b dev
+    g -C "${t}/src" commit -q --allow-empty -m d1
+    g -C "${t}/src" push -q "${t}/origin.git" HEAD:refs/heads/dev
+    dev="$(g -C "${t}/src" rev-parse HEAD)"
+    g clone -q "${t}/origin.git" "${t}/co" 2>/dev/null
+    [ "$(unset LANCACHE_SETUP_GIT_REF; resolve_setup_bootstrap_ref)" = "" ]
+    [ "$(LANCACHE_SETUP_GIT_REF=v0.2.0 resolve_setup_bootstrap_ref)" = v0.2.0 ]
+    sync_repo_to_ref "${t}/co" v0.2.0 2>/dev/null
+    [ "$(g -C "${t}/co" rev-parse HEAD)" = "${tag}" ]
+    sync_repo_to_ref "${t}/co" dev 2>/dev/null
+    [ "$(g -C "${t}/co" rev-parse HEAD)" = "${dev}" ]
+    sync_repo_to_ref "${t}/co" "${tag}" 2>/dev/null
+    [ "$(g -C "${t}/co" rev-parse HEAD)" = "${tag}" ]
+    run sync_repo_to_ref "${t}/co" no-such-ref
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"Failed to fetch ref 'no-such-ref'"* ]]
+    sync_repo_to_default_branch "${t}/co" 2>/dev/null
+    [ "$(g -C "${t}/co" rev-parse HEAD)" = "${master}" ]
+    g -C "${t}/co" remote set-head origin --delete
+    sync_repo_to_ref "${t}/co" dev 2>/dev/null
+    sync_repo_to_default_branch "${t}/co" 2>/dev/null
+    [ "$(g -C "${t}/co" rev-parse HEAD)" = "${master}" ] || { echo "fallback branch: $(g -C "${t}/co" branch --show-current)"; return 1; }
+    g init -q "${t}/noorigin"
+    [ "$(git_default_branch_name "${t}/noorigin")" = master ]
+    echo edit > "${t}/co/local.txt"
+    run sync_repo_to_ref "${t}/co" v0.2.0
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"has local changes"* ]]
+    [ -f "${t}/co/local.txt" ]
+    [ "$(g -C "${t}/co" rev-parse HEAD)" = "${master}" ]
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.
