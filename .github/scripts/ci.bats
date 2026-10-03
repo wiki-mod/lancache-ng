@@ -12745,6 +12745,48 @@ CASES
     [ "${output}" = after ]
 }
 
+@test "setup pxe wizard answers and boot filename per input" {
+    # What: server plus a filename; filename char rules.
+    # Why: a half answer or bad name breaks dnsmasq.conf.
+    # From: Issue #1683 | PR #1858
+    local root s b u want v
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/setup.sh" pxe_boot_pointer_answers_are_complete is_valid_dhcp_proxy_boot_filename
+    while IFS='|' read -r s b u want; do
+        if pxe_boot_pointer_answers_are_complete "${s}" "${b}" "${u}"; then [ "${want}" = ok ]; else [ "${want}" = bad ]; fi \
+            || { echo "answers '${s}' '${b}' '${u}' want ${want}"; return 1; }
+    done <<'CASES'
+10.0.0.5|pxelinux.0||ok
+10.0.0.5||bootx64.efi|ok
+10.0.0.5|pxelinux.0|bootx64.efi|ok
+10.0.0.5|||bad
+|pxelinux.0||bad
+|||bad
+CASES
+    while IFS='|' read -r want v; do
+        v="$(printf '%b' "${v}")"
+        [ "${v}" != L255 ] || v="$(printf 'a%.0s' {1..255})"
+        [ "${v}" != L256 ] || v="$(printf 'a%.0s' {1..256})"
+        if is_valid_dhcp_proxy_boot_filename "${v}"; then [ "${want}" = ok ]; else [ "${want}" = bad ]; fi \
+            || { echo "filename '${v:0:30}' want ${want}"; return 1; }
+    done <<'CASES'
+ok|pxelinux.0
+ok|images/bootx64.efi
+ok|L255
+bad|L256
+bad|
+bad|boot file.efi
+bad|boot,file.efi
+bad|images/boot#1.efi
+bad|boot$file.efi
+bad|boot`file.efi
+bad|boot"file.efi
+bad|boot'file.efi
+bad|boot\\file.efi
+bad|boot\nfile.efi
+CASES
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.
