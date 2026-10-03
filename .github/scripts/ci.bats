@@ -12787,6 +12787,56 @@ bad|boot\nfile.efi
 CASES
 }
 
+@test "setup dhcp mode, compose profiles and dnsmasq templates" {
+    # What: mode/subnet checks, profiles, dnsmasq templates.
+    # Why: one dhcp profile per mode; templates rendered.
+    # From: Issue #1683 | PR #1858
+    local root case ex ssl mode ntp log want v
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/setup.sh" is_valid_ipv4 is_valid_dhcp_mode is_dnsmasq_subnet_start \
+        compose_profiles_for_runtime
+    for v in disabled kea dnsmasq-proxy dnsmasq-relay; do is_valid_dhcp_mode "${v}"; done
+    for v in dnsmasq "" 1 KEA; do
+        if is_valid_dhcp_mode "${v}"; then echo "mode '${v}' accepted"; return 1; fi
+    done
+    for v in 10.0.0.0 192.168.1.0; do is_dnsmasq_subnet_start "${v}"; done
+    for v in 10.0.0.5 not-an-ip 256.0.0.0 10.0.0.10; do
+        if is_dnsmasq_subnet_start "${v}"; then echo "subnet '${v}' accepted"; return 1; fi
+    done
+    while IFS='|' read -r case ex ssl mode ntp log want; do
+        if [ "${log}" = - ]; then
+            v="$(compose_profiles_for_runtime "${ex}" "${ssl}" "${mode}" "${ntp}")"
+        else
+            v="$(compose_profiles_for_runtime "${ex}" "${ssl}" "${mode}" "${ntp}" "${log}")"
+        fi
+        [ "${v}" = "${want}" ] || { echo "${case}: '${v}'"; return 1; }
+    done <<'CASES'
+kea||0|kea|0|0|dhcp-kea
+proxy||0|dnsmasq-proxy|0|0|dhcp-proxy
+relay||0|dnsmasq-relay|0|0|dhcp-proxy
+disabled||0|disabled|0|0|
+switchkea|dhcp-kea,dhcp-proxy|0|kea|0|0|dhcp-kea
+switchproxy|dhcp-kea,dhcp-proxy|0|dnsmasq-proxy|0|0|dhcp-proxy
+switchoff|dhcp-kea,dhcp-proxy|0|disabled|0|0|
+keepssl|logging,dhcp-kea|1|dnsmasq-proxy|0|-|ssl,dhcp-proxy,logging
+logdefault||0|disabled|0|-|logging
+logoff|logging|0|disabled|0|0|
+logon|logging|0|disabled|0|1|logging
+custom| custom , cachehamster ,custom|0|disabled|1|0|custom,cachehamster,ntp
+all|x|1|kea|1|1|x,ssl,dhcp-kea,ntp,logging
+CASES
+    v="$(DHCP_SUBNET_START=10.0.0.0 DHCP_DNS_PRIMARY=10.0.0.10 DHCP_DNS_SECONDARY=10.0.0.11 \
+        UPSTREAM_DHCP_IP=10.0.0.1 envsubst < "${root}/services/dhcp-proxy/dnsmasq.conf.template" \
+        | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' | paste -sd'#')"
+    [ "${v}" = "port=0#no-resolv#no-poll#dhcp-range=10.0.0.0,proxy#dhcp-option-pxe=6,10.0.0.10,10.0.0.11#log-dhcp#no-daemon#log-facility=/var/log/lancache-dhcp-proxy/dnsmasq.log" ] \
+        || { echo "proxy template: ${v}"; return 1; }
+    v="$(DHCP_RELAY_LOCAL_ADDR=192.168.1.2 UPSTREAM_DHCP_IP=10.0.0.1 \
+        envsubst < "${root}/services/dhcp-proxy/dnsmasq-relay.conf.template" \
+        | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' | paste -sd'#')"
+    [ "${v}" = "port=0#no-resolv#no-poll#dhcp-relay=192.168.1.2,10.0.0.1#log-dhcp#no-daemon#log-facility=/var/log/lancache-dhcp-proxy/dnsmasq.log" ] \
+        || { echo "relay template: ${v}"; return 1; }
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.
