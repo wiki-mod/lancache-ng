@@ -1954,7 +1954,7 @@ mod tests {
     // >253-char total domain) are intentionally not in the shared fixture --
     // they can't be expressed as static fixture lines -- and stay covered
     // separately by accepts_domain_entries_with_optional_wildcard_marker
-    // above and the bash side's tests/bats/proxy_cert_generation.bats.
+    // above and the bash side's .github/scripts/ci.bats domain test.
     #[test]
     fn is_valid_domain_matches_shared_parity_fixture() {
         // Runtime fs::read_to_string via CARGO_MANIFEST_DIR (this crate's
