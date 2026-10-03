@@ -481,7 +481,7 @@ if [ "${SSL_ENABLED}" = "1" ]; then
     # _ensure_ca_cert: generates the CA on first boot only (idempotent --
     # does nothing once $CA_DIR/ca.crt and ca.key both already exist).
     # Factored into its own function (rather than inline top-level script
-    # code) specifically so tests/bats/proxy_cert_dir_permissions.bats can
+    # code) specifically so .github/scripts/ci.bats can
     # drive the real chmod hardening below through a real `openssl req`
     # call, without needing to run the rest of this entrypoint: ca.key's
     # and CERT_DIR's file modes are security-relevant

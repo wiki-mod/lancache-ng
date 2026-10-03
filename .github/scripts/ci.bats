@@ -11151,7 +11151,7 @@ STUB
     [ "${bad}" -eq 0 ]
 }
 
-# What: source named top-level functions of a script.
+# What: source named functions of a script, also nested.
 # Why: tests run product code without running the script.
 # From: Issue #1683 | PR #1858
 _load_functions() {
@@ -11160,8 +11160,10 @@ _load_functions() {
     out="${BATS_TEST_TMPDIR}/fns-${file##*/}"
     : > "${out}"
     for fn in "$@"; do
-        awk -v f="${fn}() {" '$0 == f { c = 1 } c { print } c && /^}$/ { exit }' "${file}" >> "${out}"
-        grep -qxF "${fn}() {" "${out}" || { echo "function ${fn} not found in ${file}"; return 1; }
+        awk -v f="${fn}() {" '!c && substr($0, length($0) - length(f) + 1) == f \
+            && substr($0, 1, length($0) - length(f)) ~ /^ *$/ { c = 1; ind = substr($0, 1, length($0) - length(f)) }
+            c { print } c && $0 == ind "}" { exit }' "${file}" >> "${out}"
+        grep -qE "^ *${fn}\(\) \{$" "${out}" || { echo "function ${fn} not found in ${file}"; return 1; }
     done
     # shellcheck source=/dev/null
     source "${out}"
@@ -12034,6 +12036,62 @@ CASES
         /^    if \(!errorShown\) \{$/ { e = e " guard" } /^      errorShown = true;$/ { e = e " set" }
         /^}$/ { exit } END { print e }' "${t}/stats.html"
     [ "${output}" = " decl reset catch guard set" ] || { echo "stats refresh: ${output}"; return 1; }
+}
+
+@test "proxy CA, cert dir and CA rotation behave per state" {
+    # What: CA key mode and subject, cert dir, leaf purge.
+    # Why: a rotated CA must never keep serving old leafs.
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" gen fp1 fp2 h1
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/services/proxy/entrypoint.sh" _ensure_ca_cert _harden_cert_dir \
+        _purge_stale_leaf_certs_on_ca_change
+    export CA_DIR="${t}/ca" CERT_DIR="${t}/certs"
+    run _ensure_ca_cert
+    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
+    [ "$(stat -c '%a' "${CA_DIR}/ca.key")" = 600 ]
+    mkdir -p "${t}/gen"
+    cp "${root}/certs/generate-ca.sh" "${t}/gen/"
+    bash "${t}/gen/generate-ca.sh" > /dev/null 2>&1
+    gen="$(openssl x509 -noout -subject -in "${t}/gen/ca.crt")"
+    [ "$(openssl x509 -noout -subject -in "${CA_DIR}/ca.crt")" = "${gen}" ] || {
+        echo "proxy CA $(openssl x509 -noout -subject -in "${CA_DIR}/ca.crt") vs generate-ca.sh ${gen}"; return 1; }
+    [[ "${gen}" == *"LanCache-NG"* ]]
+    h1="$(sha256sum < "${CA_DIR}/ca.key")"
+    _ensure_ca_cert
+    [ "$(sha256sum < "${CA_DIR}/ca.key")" = "${h1}" ]
+    rm -rf "${CA_DIR}"
+    run bash -c "$(declare -f _ensure_ca_cert)
+        openssl() { local p='' a k='' c=''; for a in \"\$@\"; do
+            case \"\${p}\" in -keyout) k=\"\${a}\" ;; -out) c=\"\${a}\" ;; esac; p=\"\${a}\"; done
+            echo key > \"\${k}\"; echo crt > \"\${c}\"; chmod 644 \"\${k}\"; }
+        _ensure_ca_cert >/dev/null; stat -c %a '${CA_DIR}/ca.key'"
+    [ "${output}" = 600 ] || { echo "insecure key kept: ${output}"; return 1; }
+    rm -rf "${CA_DIR}"
+    _ensure_ca_cert > /dev/null
+    for h1 in 1 2; do
+        _harden_cert_dir "$(id -g)"
+        [ "$(stat -c '%a %g' "${CERT_DIR}")" = "2750 $(id -g)" ] || { echo "pass ${h1}: $(stat -c '%a %g' "${CERT_DIR}")"; return 1; }
+        echo leaf > "${CERT_DIR}/kept-${h1}.crt"
+    done
+    [ -f "${CERT_DIR}/kept-1.crt" ]
+    printf 'x' | tee "${CERT_DIR}/a.crt" "${CERT_DIR}/a.key" "${CERT_DIR}/.marker" "${CERT_DIR}/notes.txt" > /dev/null
+    _purge_stale_leaf_certs_on_ca_change
+    [ "$(cd "${CERT_DIR}" && ls -A | sort | paste -sd' ')" = ".ca-fingerprint .marker notes.txt" ] || {
+        echo "first run: $(ls -A "${CERT_DIR}")"; return 1; }
+    fp1="$(cat "${CERT_DIR}/.ca-fingerprint")"
+    [[ "${fp1}" == *"Fingerprint="* ]]
+    echo leaf > "${CERT_DIR}/b.crt"
+    echo key > "${CERT_DIR}/b.key"
+    _purge_stale_leaf_certs_on_ca_change
+    [ -f "${CERT_DIR}/b.crt" ] && [ -f "${CERT_DIR}/b.key" ] || { echo "same CA purged leafs"; return 1; }
+    rm -f "${CA_DIR}/ca.crt" "${CA_DIR}/ca.key"
+    _ensure_ca_cert > /dev/null
+    _purge_stale_leaf_certs_on_ca_change
+    [ ! -e "${CERT_DIR}/b.crt" ] && [ ! -e "${CERT_DIR}/b.key" ] || { echo "rotated CA kept leafs"; return 1; }
+    fp2="$(cat "${CERT_DIR}/.ca-fingerprint")"
+    [ "${fp1}" != "${fp2}" ]
+    [ -f "${CERT_DIR}/.marker" ]
 }
 
 @test "dns config adapters snapshot, roll back and converge" {
