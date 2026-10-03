@@ -3563,11 +3563,24 @@ svc-x=sha256:n"
     # What: KEY=VALUE lines from the SOT; none -> rc 2.
     # Why: validate and config check share this one owner.
     # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/ve.yml"
-    printf 'validation:\n  compose_validation_env: A_KEY=1 B_KEY=two\n' > "${m}"
+    local m="${BATS_TEST_TMPDIR}/ve.yml" first
+    printf '%s\n' 'validation:' '  compose_validation_env: A_KEY=1 B_KEY=two' '  compose_validation_secrets:' \
+        '    hex32: [S_HEX]' '    base64_32: [S_B64]' > "${m}"
     CI_MANIFEST="${m}" run _ci_validation_env
     [ "${status}" -eq 0 ]
-    [ "${output}" = $'A_KEY=1\nB_KEY=two' ]
+    [ "${lines[0]}" = A_KEY=1 ]; [ "${lines[1]}" = B_KEY=two ]
+    [[ "${lines[2]}" =~ ^S_HEX=[0-9a-f]{64}$ ]]
+    [ "$(base64 -d <<< "${lines[3]#S_B64=}" | wc -c)" -eq 32 ]
+    # What: secrets are fresh per call, never a fixed value.
+    # Why: a fixed render secret is a hardcoded credential.
+    # From: Issue #1683 | PR #1858
+    first="${lines[2]}"
+    CI_MANIFEST="${m}" run _ci_validation_env
+    [ "${lines[2]}" != "${first}" ]
+    printf 'validation:\n  compose_validation_env: A_KEY=1\n' > "${m}"
+    CI_MANIFEST="${m}" run _ci_validation_env
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-VALIDATE-0101"* ]]
     printf 'validation:\n  other: x\n' > "${m}"
     CI_MANIFEST="${m}" run _ci_validation_env
     [ "${status}" -eq 2 ]
@@ -3589,6 +3602,15 @@ svc-x=sha256:n"
         [ -n "${v}" ] || { echo "${k}: missing from validation env"; return 1; }
         d="$(base64 -d <<<"${v}" 2>&1)" || { echo "${k}='${v}': ${d}"; return 1; }
         [ "${#d}" -eq 32 ] || { echo "${k}='${v}': ${#d} bytes"; return 1; }
+    done
+    # What: no setup.sh secret has a fixed value in the SOT.
+    # Why: render secrets are generated; a literal leaks.
+    # From: Issue #1683 | PR #1858
+    keys="$(sed -nE 's/^[[:space:]]*ensure_secret_env_key ([A-Z_]+) "\$env_file" [a-z0-9_]+$/\1/p' "${root}/setup.sh")"
+    [ -n "${keys}" ]
+    for k in ${keys}; do
+        ! grep -Eq "^  compose_validation_env:.*[[:space:]]${k}=" "${CI_MANIFEST_SOURCE}" \
+            || { echo "${k}: fixed value in the SOT"; return 1; }
     done
 }
 
@@ -7683,7 +7705,7 @@ esac
 SH
     printf '%s\n' 'ci_variables:' '  CI_COMPOSE_FILE: dep/c.yml' 'validation:' \
         '  compose_targets: oth/c.yml' '  compose_env_file_targets: oth/c.yml' \
-        '  compose_validation_env: LISTEN_IP=fx' > "${m}"
+        '  compose_validation_env: LISTEN_IP=fx' '  compose_validation_secrets:' '    hex32: [FX_TOKEN]' > "${m}"
     sed 's#  compose_targets: oth/c.yml#  compose_targets: oth/gone.yml#' "${m}" > "${m}.miss"
     grep -v '^  compose_targets:' "${m}" > "${m}.nosot"
     grep -v '^  CI_COMPOSE_FILE:' "${m}" > "${m}.novar"

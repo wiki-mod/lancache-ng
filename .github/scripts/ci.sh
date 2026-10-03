@@ -9896,11 +9896,11 @@ _ci_validate_host_tools() {
     fi
 }
 
-# What: SOT validation env, one KEY=VALUE per line.
+# What: SOT validation env plus fresh secrets, KEY=VALUE.
 # Why: config check and live validate share one owner.
-# From: Issue #1683
+# From: Issue #1683 | PR #1858
 _ci_validation_env() {
-    local fx
+    local fx kind keys k v n=0 flag
     fx="$(_ci_manifest_scalar '^  compose_validation_env:[[:space:]]')" || return 2
     if [ -z "${fx}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0054]" "reason=\"no SOT validation.compose_validation_env\""
@@ -9908,6 +9908,23 @@ _ci_validation_env() {
     fi
     tr ' ' '
 ' <<< "${fx}" | grep -v '^$'
+    # What: a fresh value per secret key, setup.sh format.
+    # Why: a fixed key in the SOT is a hardcoded credential.
+    # From: Issue #1683 | PR #1858
+    for kind in hex32 base64_32; do
+        case "${kind}" in hex32) flag=-hex ;; base64_32) flag=-base64 ;; esac
+        keys="$(_ci_block_entry_list validation compose_validation_secrets "${kind}")" || return 2
+        for k in ${keys}; do
+            v="$(_ci_run "[CI-ERROR-VALIDATE-0100]" "key=\"${k}\" kind=\"${kind}\" reason=\"secret not generated\"" \
+                openssl rand "${flag}" 32)" || return 2
+            printf '%s=%s\n' "${k}" "${v//$'\n'/}"
+            n=$((n + 1))
+        done
+    done
+    if [ "${n}" -eq 0 ]; then
+        ci_log "[CI-ERROR-VALIDATE-0101]" "reason=\"no SOT validation.compose_validation_secrets\""
+        return 2
+    fi
 }
 
 # What: repo root joined with a SOT path variable.
