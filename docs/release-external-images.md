@@ -145,21 +145,21 @@ of that upstream project's own release process, not this document.
 
 Accepted, deliberately-suppressed vulnerability findings live in the repo-root
 `.trivyignore.yaml` (each entry: the CVE id, the affected file paths, a
-`statement` explaining why it is accepted, and an `expired_at` date forcing
-periodic re-review). That file is Trivy-specific and not something a downstream
+`statement` explaining why it is accepted. No exception expiry field is required
+by Trivy, and the file is Trivy-specific rather than something a downstream
 consumer's non-Trivy tooling can parse.
 
 `ci.sh` (`_ci_generate_vex`) converts those entries into a standard
 [OpenVEX](https://openvex.dev) v0.2.0 JSON document, `vex.openvex.json`. Each
 entry becomes one OpenVEX statement. An entry without `status:` is an
 accepted, tracked risk: status `affected` with an `action_statement` that
-carries the acceptance rationale and the mandatory re-review date. An entry
-with `status: not_affected` asserts non-exploitability: status
-`not_affected` with a `justification` (default `vulnerable_code_not_present`,
-overridable per entry with one of the OpenVEX justification values) and an
-`impact_statement`. The reader accepts only the shape this file uses
-(`id`, `paths`, a `>-` folded `statement`, `status`, `justification`,
-`expired_at`); any other key, status or line shape fails closed.
+carries the acceptance rationale. An entry with `status: not_affected`
+asserts non-exploitability: status `not_affected` with a `justification`
+(default `vulnerable_code_not_present`, overridable per entry with one of
+the OpenVEX justification values) and an `impact_statement`. The reader
+accepts only the shape this file uses (`id`, `paths`, a `>-` folded
+`statement`, `status`, `justification`); any other key, status or line
+shape fails closed.
 
 **`vex.openvex.json` is not committed to `current_dev`** (changed by Issue
 #1095's F-22 finding; it was committed there through PR #1194, which produced

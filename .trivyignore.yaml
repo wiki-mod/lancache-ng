@@ -9,7 +9,8 @@
 # reference, mandatory).
 # `status: not_affected` marks vulnerable code confirmed absent or
 # unreachable; an omitted `status` marks an accepted, tracked risk.
-# `expired_at` is this entry's next mandatory re-review date.
+# Trivy accepts entries without an exception expiry date; this file uses no
+# expiry field.
 vulnerabilities:
   - id: CVE-2026-14456
     statement: >-
@@ -1070,7 +1071,6 @@ vulnerabilities:
       publishes the fixed package.
 
       From: Issue #1860 | PR #1872
-    expired_at: 2999-12-31
 
   - id: CVE-2026-19667
     statement: >-
@@ -1083,7 +1083,6 @@ vulnerabilities:
       publishes the fixed package.
 
       From: Issue #1860 | PR #1872
-    expired_at: 2999-12-31
 
   - id: CVE-2026-76163
     statement: >-
@@ -1096,7 +1095,6 @@ vulnerabilities:
       publishes the fixed package.
 
       From: Issue #1860 | PR #1872
-    expired_at: 2999-12-31
 
   - id: CVE-2026-77692
     statement: >-
@@ -1109,7 +1107,6 @@ vulnerabilities:
       publishes the fixed package.
 
       From: Issue #1860 | PR #1872
-    expired_at: 2999-12-31
 
   - id: CVE-2026-80274
     statement: >-
@@ -1122,7 +1119,6 @@ vulnerabilities:
       publishes the fixed package.
 
       From: Issue #1860 | PR #1872
-    expired_at: 2999-12-31
 
   - id: CVE-2026-81563
     statement: >-
@@ -1136,7 +1132,6 @@ vulnerabilities:
       publishes the fixed package.
 
       From: Issue #1860 | PR #1872
-    expired_at: 2999-12-31
 
   - id: CVE-2026-81736
     statement: >-
@@ -1149,11 +1144,48 @@ vulnerabilities:
       publishes the fixed package.
 
       From: Issue #1860 | PR #1872
-    expired_at: 2999-12-31
+
+  - id: CVE-2026-103111
+    statement: >-
+      What: Accepts CVE-2026-103111 (pcre2 out-of-bounds write via crafted
+      regular-expression input) as a tracked risk for the first-party images
+      while their shipped pcre2 package remains at 10.48-r0.
+
+      Why: The current amd64 and arm64 Trivy jobs report pcre2 10.48-r0 with
+      fixed version 10.49-r0. This is a package-level finding without a
+      Trivy `PkgPath`, so the same issue-linked entry covers every affected
+      image job.
+
+      From: Issues #1879-#1886, #1888-#1893
+
+  - id: CVE-2026-19553
+    statement: >-
+      What: Accepts CVE-2026-19553 (Python certificate-verification bypass
+      caused by missing hostname validation) as a tracked risk in
+      `tools/build-tools`.
+
+      Why: The build-tools arm64 Trivy job reports the finding in the Alpine
+      Python packages (`python3`, `python3-pyc`, and related bytecode
+      packages). The issue-linked entry records the finding until the image
+      ships the fixed package.
+
+      From: Issue #1883
+
+  - id: CVE-2026-82049
+    statement: >-
+      What: Accepts CVE-2026-82049 (Python `tarfile` file-modification and
+      content-spoofing issue) as a tracked risk in `tools/build-tools`.
+
+      Why: The build-tools arm64 Trivy job reports the finding in the Alpine
+      Python packages (`python3`, `python3-pyc`, and related bytecode
+      packages). The issue-linked entry records the finding until the image
+      ships a fixed package.
+
+      From: Issue #1883
 
   # CVE-2026-32316/CVE-2026-40164 (jq, utilities image) removed here per
   # their own accepting entries' explicit self-description ("remove once
   # PR #1783 lands and its rebuilds propagate", Issue #1802/#1803,
   # commit 6e3db411): PR #1783 has now removed services/utilities/Dockerfile
   # entirely, so there is no more `utilities` image for these two interim,
-  # event-based (no expired_at) exceptions to apply to.
+  # event-based exceptions to apply to.
