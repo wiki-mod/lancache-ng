@@ -46,7 +46,6 @@ COPY services/cachehamster/Cargo.toml services/cachehamster/Cargo.toml
 COPY services/ui/Cargo.toml services/ui/Cargo.toml
 COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
 COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.toml
-COPY tools/pxe-client-probe/Cargo.toml tools/pxe-client-probe/Cargo.toml
 COPY services/cachehamster/src services/cachehamster/src
 # What: ci.sh owns the rust build accel policy (one owner).
 # Why: AG-CI-005/022/023; bind-mounted, never baked in.
