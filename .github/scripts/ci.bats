@@ -1617,6 +1617,7 @@ STUB
         "${CI_MANIFEST}" > "${CI_MANIFEST}.new" && mv "${CI_MANIFEST}.new" "${CI_MANIFEST}"
     _tool_stub "${bin}" docker <<STUB
 echo "docker \$*" >> "${log}"
+cat >> "${log}"
 [ -z "\${LDD_FAIL:-}" ] || { echo "Error loading shared library libx.so" >&2; exit 127; }
 STUB
     CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" PATH="${bin}:${PATH}" \
@@ -1625,7 +1626,8 @@ STUB
     echo "log=$(cat "${log}")"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"service=svc-r smoke=ok checks=1"* ]]
-    [[ "$(cat "${log}")" == *"--entrypoint sh "*"svc-r@sha256:dead -c ldd /usr/local/bin/svc-r"* ]]
+    [[ "$(cat "${log}")" == *"--entrypoint timeout "*"svc-r@sha256:dead --kill-after="*" bash -c "* ]]
+    grep -qx 'ldd /usr/local/bin/svc-r' "${log}"
     LDD_FAIL=1 CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" PATH="${bin}:${PATH}" \
     GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=owner/fixture-repo \
         run bash "${CI_SH}" verify svc-r sha256:dead os/p1
@@ -1663,11 +1665,12 @@ STUB
     # Why: tools via args and runs via stdin both gate.
     # From: Issue #1683 | PR #1858
     local m="${BATS_TEST_TMPDIR}/m.yml" tool run
-    docker() { shift 4; "$@"; }
+    docker() { shift 6; timeout "$@"; }
     for tool in sh no-such-tool-x; do
         for run in true false; do
             printf 'build_toolchain:\n  build-tools:\n    smoke_tools:\n      - bash\n      - %s\n    smoke_runs:\n      - bash --version\n      - %s\n' \
                 "${tool}" "${run}" > "${m}"
+            _sot_ci_variables >> "${m}"
             CI_MANIFEST="${m}" CI_TOOLCHAIN_IMAGE=img run _ci_test_toolchain build-tools
             if [ "${tool}" = sh ] && [ "${run}" = true ]; then
                 [ "${status}" -eq 0 ]; [[ "${output}" == *"tested=ok"* ]]

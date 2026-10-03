@@ -90,7 +90,7 @@ services:
     # Why: prove apk binaries run, not just exist
     # From: Issue #1613
     smoke:
-      - "nginx -V 2>&1 | grep -q -- --with-stream_ssl_preread_module"
+      - 'v="$(nginx -V 2>&1)" && grep -q -- --with-stream_ssl_preread_module <<< "${v}"'
   dns:
     context: services/dns
     # What: named contexts for shared-secret and known-good
@@ -389,7 +389,7 @@ build_toolchain:
       - cargo fmt --version
       - cargo clippy --version
       - cargo audit --version
-      - rustc --print cfg | grep -qx target_env=.musl.
+      - 'c="$(rustc --print cfg)" && grep -qx target_env=.musl. <<< "${c}"'
       - sccache --version
       - ccache --version
       - actionlint --version
@@ -663,6 +663,11 @@ ci_variables:
   CI_VALIDATE_DETACH_TIMEOUT: 30
   CI_VALIDATE_HEALTH_TIMEOUT: 180
   CI_VALIDATE_STABLE_WINDOW: 20
+  # What: in-container limit of one image smoke and grace.
+  # Why: AG-CI-016 kill timeout; AG-CI-006 one owner.
+  # From: Issue #1683 | PR #1858
+  CI_SMOKE_TIMEOUT: 14m
+  CI_SMOKE_KILL_AFTER: 30s
   # What: workflow file and run-block size ceilings.
   # Why: AG-CI-006: the YAML-stays-thin limits, one owner.
   # From: Issue #1683 | PR #1858

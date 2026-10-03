@@ -3318,7 +3318,7 @@ _ci_test_rust() {
 # Why: SOT owns both lists; present is not runnable.
 # From: Issue #1683 | PR #1858
 _ci_test_toolchain() {
-    local service="$1" image tools runs t
+    local service="$1" image tools runs
     if [ -n "${CI_TOOLCHAIN_TEST_CMD:-}" ]; then
         "${CI_TOOLCHAIN_TEST_CMD}" "${service}"
         return "$?"
@@ -3330,18 +3330,7 @@ _ci_test_toolchain() {
     fi
     tools="$(_ci_build_tools_smoke smoke_tools)" || return 2
     runs="$(_ci_build_tools_smoke smoke_runs)" || return 2
-    local -a tl=()
-    while IFS= read -r t; do
-        [ -n "${t}" ] && tl+=("${t}")
-    done <<< "${tools}"
-    # What: tools go as args; runs on stdin, one a line.
-    # Why: a run holds spaces/pipes; stdin keeps it intact.
-    # From: Issue #1683 | PR #1858
-    docker run --rm -i "${image}" timeout --kill-after=30s --signal=TERM 14m \
-        sh -c 'for t in "$@"; do command -v "$t" >/dev/null || { echo "missing $t" >&2; exit 1; }; done
-               while IFS= read -r r; do sh -c "$r" >/dev/null || { echo "failed: $r" >&2; exit 1; }; done' \
-        _ "${tl[@]}" <<< "${runs}" \
-        || return 1
+    _ci_image_smoke "${image}" "${tools}" "${runs}" || return "$?"
     printf 'service=%s tested=ok\n' "${service}"
 }
 
@@ -3365,16 +3354,31 @@ _ci_smoke_service() {
         ci_log "[CI-ERROR-TEST-0007]" "service=\"${service}\" reason=\"CI_SERVICE_IMAGE required for the smoke\""
         return 2
     fi
-    local -a cl=()
-    while IFS= read -r c; do [ -n "${c}" ] && cl+=("${c}"); done <<< "${checks}"
-    local out
-    for c in "${cl[@]}"; do
-        if ! out="$(timeout --kill-after=30s --signal=TERM 5m docker run --rm --entrypoint sh "${image}" -c "${c}" 2>&1)"; then
-            ci_error "[CI-ERROR-TEST-0008]" "service=\"${service}\" check=\"${c}\" reason=\"execute-smoke failed; missing lib?\"" "${out}"
-            return 1
-        fi
-    done
-    printf 'service=%s smoke=ok checks=%s\n' "${service}" "${#cl[@]}"
+    _ci_image_smoke "${image}" "" "${checks}" || return "$?"
+    printf 'service=%s smoke=ok checks=%s\n' "${service}" "$(grep -c . <<< "${checks}")"
+}
+
+# What: run SOT smoke in an image: tools found, runs pass.
+# Why: one executor for product and toolchain smoke.
+# From: Issue #1683 | PR #1858
+_ci_image_smoke() {
+    local image="$1" tools="$2" runs="$3" limit grace out t
+    local -a tl=()
+    limit="$(_ci_variable CI_SMOKE_TIMEOUT)" || return 2
+    grace="$(_ci_variable CI_SMOKE_KILL_AFTER)" || return 2
+    while IFS= read -r t; do [ -n "${t}" ] && tl+=("${t}"); done <<< "${tools}"
+    # What: tools go as args; runs on stdin, one a line.
+    # Why: a run holds spaces/pipes; stdin keeps it intact.
+    # From: Issue #1683 | PR #1858
+    if ! out="$(docker run --rm -i --entrypoint timeout "${image}" --kill-after="${grace}" --signal=TERM "${limit}" \
+        bash -c 'for t in "$@"; do command -v "$t" >/dev/null || { echo "missing $t"; exit 1; }; done
+            while IFS= read -r r; do
+                [ -n "${r}" ] || continue
+                o="$(bash -o pipefail -c "${r}" 2>&1)" || { printf "failed: %s\n%s\n" "${r}" "${o}"; exit 1; }
+            done' _ "${tl[@]}" <<< "${runs}" 2>&1)"; then
+        ci_error "[CI-ERROR-TEST-0008]" "image=\"${image}\" reason=\"image smoke failed (missing tool, failing run or lib)\"" "${out}"
+        return 1
+    fi
 }
 
 # What: Dispatch a service's source test by its build type.
