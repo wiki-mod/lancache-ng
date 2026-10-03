@@ -10415,14 +10415,14 @@ _ci_compose_profiles() {
     _ci_compose_query "$1" "${2:-}" config --profiles
 }
 
-# What: env_file paths one compose service declares.
-# Why: the compose owns them; docker compose parses it.
+# What: required env_file paths of one compose service.
+# Why: optional entries are untracked operator overrides.
 # From: Issue #1683 | PR #1858
 _ci_compose_env_files() {
     local raw
     raw="$(_ci_compose_query "$1" "" config --no-env-resolution --format json)" || return 2
-    jq -r --arg s "$2" \
-        '.services[$s].env_file // [] | .[] | if type == "object" then .path else . end' <<< "${raw}"
+    jq -r --arg s "$2" '.services[$s].env_file // [] | .[]
+        | if type == "object" then select(.required != false) | .path else . end' <<< "${raw}"
 }
 
 # What: one compose file as JSON, every profile on.
