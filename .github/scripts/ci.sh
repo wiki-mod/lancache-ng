@@ -10273,6 +10273,43 @@ _ci_check_netdata_isolation() {
     printf 'netdata-isolation=clean\n'
 }
 
+# What: proxy CERT_DIR sits on a named volume.
+# Why: an anonymous volume loses leaf certs on recreate.
+# From: Issue #1683 | PR #1858
+_ci_check_proxy_cert_volume() {
+    local repo_root="${1:-${CI_REPO_ROOT}}" ep dir dep inst targets cf cfg out line
+    local -a viol=()
+    local -A seen=()
+    ep="${repo_root}/services/proxy/entrypoint.sh"
+    dir="$(_ci_capture 1 sed -nE 's/^CERT_DIR="([^"$]+)"$/\1/p' "${ep}")" || return 2
+    if [[ -z "${dir}" || "${dir}" == *$'\n'* ]]; then
+        ci_log "[CI-ERROR-CHECK-0150]" "path=\"${ep}\" reason=\"need exactly one literal CERT_DIR= line\""
+        return 2
+    fi
+    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    inst="$(_ci_installer_compose "${repo_root}")" || return 2
+    targets="$(_ci_manifest_scalar '^  compose_targets:[[:space:]]')"
+    for cf in "${dep}" "${inst}" ${targets}; do
+        [ -z "${seen[${cf}]:-}" ] || continue
+        seen["${cf}"]=1
+        cfg="$(_ci_compose_json "${repo_root}/${cf}")" || return 2
+        out="$(_ci_capture 0 jq -r --arg d "${dir}" '.services.proxy // empty
+            | [.volumes // [] | .[] | select(.target == $d)] as $m
+            | if ($m | length) != 1 then "proxy needs exactly one mount at \($d) (got \($m | length))"
+              elif $m[0].type != "volume" or ($m[0].source // "") == ""
+              then "proxy \($d) must be a named volume (got \($m[0].type) \($m[0].source // "anonymous"))"
+              else empty end' <<<"${cfg}")" || return 2
+        while IFS= read -r line; do
+            [ -z "${line}" ] || viol+=("${cf}: ${line}")
+        done <<<"${out}"
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0149]" "reason=\"proxy cert dir not on a named volume\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'proxy-cert-volume=clean cert_dir=%s files=%s\n' "${dir}" "${#seen[@]}"
+}
+
 # What: logs volume chowned to syslog's uid before start.
 # Why: syslog runs capability-free and cannot fix it.
 # From: Issue #1683 | PR #1858
@@ -11273,7 +11310,8 @@ ci_cmd_check_all() {
         proxy-cache-env-doc-drift \
         dependabot-docker-base-consistency \
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
-        docker-socket-proxy netdata-isolation syslog-logs-volume quickstart-required-env dhcp-proxy-env \
+        docker-socket-proxy netdata-isolation syslog-logs-volume proxy-cert-volume \
+        quickstart-required-env dhcp-proxy-env \
         setup-keys-kea setup-update-safety setup-docker-conflict setup-prompt-drift image-channel-resolution \
         vex-drift logging-matrix \
         trivy-action-direct-usage entrypoint-lib-wiring dockerfile-build-tools \
@@ -11340,6 +11378,7 @@ ci_cmd_check() {
         docker-socket-proxy) _ci_check_docker_socket_proxy "$@" ;;
         netdata-isolation) _ci_check_netdata_isolation "$@" ;;
         syslog-logs-volume) _ci_check_syslog_logs_volume "$@" ;;
+        proxy-cert-volume) _ci_check_proxy_cert_volume "$@" ;;
         quickstart-required-env) _ci_check_quickstart_required_env "$@" ;;
         dhcp-proxy-env) _ci_check_dhcp_proxy_env "$@" ;;
         setup-keys-kea) _ci_check_setup_keys_kea "$@" ;;

@@ -7894,6 +7894,46 @@ CASES
     [[ "${output}" == *"dep/c.yml: syslog must drop all capabilities and add none"* ]]
 }
 
+@test "check proxy-cert-volume per compose and entrypoint shape" {
+    # What: CERT_DIR mount kind per compose with a proxy.
+    # Why: an anonymous volume loses leaf certs on recreate.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/pcv" case file from to want rc
+    while IFS='|' read -r case file from to want rc; do
+        rm -rf "${r}"
+        _stack_fixture "${r}"
+        mkdir -p "${r}/services/proxy" "${r}/sec"
+        printf 'set -e\nCERT_DIR="/etc/nginx/ssl/certs"\n' > "${r}/services/proxy/entrypoint.sh"
+        sed 's#^  compose_targets: .*#  compose_targets: sec/c.yml inst/c.yml#' "${CI_MANIFEST}" > "${r}/sot.yml"
+        cat > "${r}/dep/c.yml" <<'YAML'
+services:
+  proxy:
+    image: x
+    volumes:
+      - proxy-certs:/etc/nginx/ssl/certs # certs
+      - ../ca:/etc/nginx/ssl/ca:ro
+volumes:
+  proxy-certs: {}
+YAML
+        cp "${r}/dep/c.yml" "${r}/inst/c.yml"
+        printf 'services:\n  dns:\n    image: x # dns\n' > "${r}/sec/c.yml"
+        awk -v f="${from}" -v t="${to}" 'f != "" && !d && $0 == f { $0 = t; d = 1 } { print }' \
+            "${r}/${file}" > "${r}/x.yml"
+        mv "${r}/x.yml" "${r}/${file}"
+        run env CI_MANIFEST="${r}/sot.yml" bash "${CI_SH}" check proxy-cert-volume "${r}"
+        [ "${status}" -eq "${rc}" ] || { echo "${case}: rc ${status} ${output}"; return 1; }
+        [[ "${output}" == *"${want}"* ]] || { echo "${case}: ${output}"; return 1; }
+    done <<'CASES'
+ok|inst/c.yml|||proxy-cert-volume=clean cert_dir=/etc/nginx/ssl/certs files=3|0
+anon|inst/c.yml|      - proxy-certs:/etc/nginx/ssl/certs # certs|      - /etc/nginx/ssl/certs|inst/c.yml: proxy /etc/nginx/ssl/certs must be a named volume (got volume anonymous)|1
+bind|inst/c.yml|      - proxy-certs:/etc/nginx/ssl/certs # certs|      - ../certs:/etc/nginx/ssl/certs|inst/c.yml: proxy /etc/nginx/ssl/certs must be a named volume (got bind|1
+moved|dep/c.yml|      - proxy-certs:/etc/nginx/ssl/certs # certs|      - proxy-certs:/data|dep/c.yml: proxy needs exactly one mount at /etc/nginx/ssl/certs (got 0)|1
+secproxy|sec/c.yml|  dns:|  proxy:|sec/c.yml: proxy needs exactly one mount at /etc/nginx/ssl/certs (got 0)|1
+certdir|services/proxy/entrypoint.sh|CERT_DIR="/etc/nginx/ssl/certs"|CERT_DIR="/srv/certs"|proxy needs exactly one mount at /srv/certs|1
+nodir|services/proxy/entrypoint.sh|CERT_DIR="/etc/nginx/ssl/certs"|CERT_DIR="${X}/certs"|CI-ERROR-CHECK-0150|2
+CASES
+}
+
 @test "check docker-socket-proxy fails a forbidden broad container rule" {
     # What: Broad rule re-enters allowlist.
     # Why: generic container APIs must stay denied.
