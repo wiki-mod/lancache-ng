@@ -112,19 +112,7 @@ jobs:
       rust-audit: ${{ steps.plan.outputs.rust-audit }}
       docs-only: ${{ steps.plan.outputs.docs-only }}
     steps:
-      # What: full-history checkout for diff computation
-      # Why: no SHA pin outside the SOT; diff needs history.
-      # From: Issue #1683
-      - &bootstrap_diff
-        name: Bootstrap the working tree
-        run: |
-          set -euo pipefail
-          git config --global --add safe.directory "${PWD}"
-          git init -q .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
-          git fetch -q --no-tags origin "${GITHUB_REF}" ${BASE_SHA:+"${BASE_SHA}"}
-          git checkout -q FETCH_HEAD
+      - *bootstrap
       # What: collect changed-file list via ci.sh
       # Why: ci.sh sole owner; reused by plan/lint/checks
       # From: Issue #1683
@@ -157,7 +145,7 @@ jobs:
       # What: fetch base for impact assessment
       # Why: build must prove semantic impact vs base
       # From: Issue #1683 | PR #1858
-      - *bootstrap_diff
+      - *bootstrap
       # What: build, then publish and verify result
       # Why: publish != build; readback verifies digest
       # From: Issue #1683 | PR #1858
@@ -207,7 +195,7 @@ jobs:
     timeout-minutes: 30
     container: *bt_platform
     steps:
-      - *bootstrap_diff
+      - *bootstrap
       - *collect_changed
       - name: shellcheck changed shell scripts
         env:
@@ -367,7 +355,7 @@ jobs:
       PR_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
       GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
     steps:
-      - *bootstrap_diff
+      - *bootstrap
       - *collect_changed
       - name: Run the PR/push check set
         env:

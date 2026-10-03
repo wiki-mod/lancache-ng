@@ -8721,7 +8721,11 @@ CASES
     CI_REPO_ROOT="${repo}" GITHUB_EVENT_NAME=pull_request BASE_SHA=0123456789abcdef0123456789abcdef01234567 \
         run _ci_diff_refs
     [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CORE-0106"* ]]
+    [[ "${output}" == *"CI-ERROR-CORE-0124"* ]]
+    CI_REPO_ROOT="${repo}" GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/heads/x \
+        BASE_SHA=0123456789abcdef0123456789abcdef01234567 run _ci_diff_refs
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"origin"* ]]
     CI_REPO_ROOT="${repo}" GITHUB_EVENT_NAME=pull_request BASE_SHA=0123456789abcdef0123456789abcdef01234567 \
         run ci_cmd_changed_files
     [ "${status}" -eq 2 ]
@@ -8729,6 +8733,23 @@ CASES
         GITHUB_SHA=HEAD run _ci_diff_refs
     [ "${status}" -eq 0 ]
     [ -z "${output}" ]
+    # What: a shallow checkout gets the diff history once.
+    # Why: workflows fetch one commit; ci.sh owns the diff.
+    # From: Issue #1683 | PR #1858
+    local up="${BATS_TEST_TMPDIR}/up" sh="${BATS_TEST_TMPDIR}/sh" b h br
+    git init -q "${up}"
+    git -C "${up}" -c user.email=a@b -c user.name=b commit -q --allow-empty -m one
+    b="$(git -C "${up}" rev-parse HEAD)"
+    git -C "${up}" -c user.email=a@b -c user.name=b commit -q --allow-empty -m two
+    h="$(git -C "${up}" rev-parse HEAD)"
+    br="$(git -C "${up}" symbolic-ref --short HEAD)"
+    git clone -q --depth=1 "file://${up}" "${sh}"
+    [ "$(git -C "${sh}" rev-parse --is-shallow-repository)" = true ]
+    CI_REPO_ROOT="${sh}" GITHUB_EVENT_NAME=push GITHUB_REF="refs/heads/${br}" BEFORE_SHA="${b}" \
+        GITHUB_SHA="${h}" run _ci_diff_refs
+    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
+    [ "${output}" = "${b} ${h}" ]
+    [ "$(git -C "${sh}" rev-parse --is-shallow-repository)" = false ]
 }
 
 @test "check changelog-direct-edit notices the release label exemption" {

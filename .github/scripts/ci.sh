@@ -1753,11 +1753,33 @@ ci_cmd_scan_stack() {
     done <<< "${pairs}"
 }
 
+# What: load the history a diff needs, once per checkout.
+# Why: workflows check out one commit; ci.sh owns the diff.
+# From: Issue #1683 | PR #1858
+_ci_diff_history() {
+    local shallow have=""
+    local -a deep=() need=()
+    shallow="$(cd -- "${CI_REPO_ROOT}" && _ci_capture 0 git rev-parse --is-shallow-repository)" || return 2
+    [ "${shallow}" = true ] && deep=(--unshallow)
+    if [ "${GITHUB_EVENT_NAME:-}" = pull_request ] && [ -n "${BASE_SHA:-}" ]; then
+        have="$(cd -- "${CI_REPO_ROOT}" && _ci_capture 1 git rev-parse -q --verify "${BASE_SHA}^{commit}")" || return 2
+        [ -n "${have}" ] || need=("${BASE_SHA}")
+    fi
+    [ "${#deep[@]}" -gt 0 ] || [ "${#need[@]}" -gt 0 ] || return 0
+    if [ -z "${GITHUB_REF:-}" ]; then
+        ci_log "[CI-ERROR-CORE-0124]" "shallow=\"${shallow}\" base=\"${BASE_SHA:-}\" reason=\"diff history missing and no GITHUB_REF to fetch\""
+        return 2
+    fi
+    (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch -q --no-tags "${deep[@]}" origin "${GITHUB_REF}" "${need[@]}") \
+        > /dev/null || return 2
+}
+
 # What: This run's base and head diff refs, or empty.
 # Why: one owner; changed-files and codeql share the refs.
 # From: Issue #1683
 _ci_diff_refs() {
     local mb before
+    _ci_diff_history || return 2
     if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
         mb="$(cd -- "${CI_REPO_ROOT}" && _ci_capture 0 git merge-base "${BASE_SHA:-}" FETCH_HEAD)" || return 2
         printf '%s %s\n' "${mb}" FETCH_HEAD

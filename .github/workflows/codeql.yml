@@ -58,9 +58,9 @@ jobs:
       matrix: ${{ steps.impact.outputs.codeql-matrix }}
       image: ${{ steps.impact.outputs.codeql-image }}
     steps:
-      # What: Native fail-closed checkout with diff history
-      # Why: No SHA pin outside SOT; ci.sh reads the diff
-      # From: Issue #1683
+      # What: shallow checkout with persistent auth
+      # Why: ci.sh loads the diff history it needs itself.
+      # From: Issue #1683 | PR #1858
       - &bootstrap
         name: Bootstrap the working tree
         run: |
@@ -69,7 +69,7 @@ jobs:
           git init -q .
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
-          git fetch -q --no-tags origin "${GITHUB_REF}" ${BASE_SHA:+"${BASE_SHA}"}
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
           git checkout -q FETCH_HEAD
       - name: Collect changed files
         id: changed
