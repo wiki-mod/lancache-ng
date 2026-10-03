@@ -22,6 +22,7 @@ export LANG=C LC_ALL=C
 # an explicit future opt-in path, not inside the default first-user flow.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 QUICKSTART_COMPOSE="$SCRIPT_DIR/deploy/quickstart/docker-compose.yml"
+PROD_COMPOSE="$SCRIPT_DIR/deploy/prod/docker-compose.yml"
 DOCKER_SOCKET_PROXY_SCRIPT="$SCRIPT_DIR/scripts/untracked/docker-socket-proxy.sh"
 # dhcp-probe.sh (formerly copied the same way as the two scripts below) was
 # retired by issue #1288 -- the dhcp-probe container now runs the ui
@@ -483,7 +484,7 @@ run_kea_dhcp_activation_preflight() {
     # services/ui) and flagged explicitly rather than silently left as
     # unfinished parity. `services/dhcp/Dockerfile` still installs nmap for
     # exactly this call site.
-    if ! output=$(docker compose --env-file "$env_file" -f "$QUICKSTART_COMPOSE" --profile dhcp-kea run --rm --no-deps dhcp \
+    if ! output=$(docker compose --env-file "$env_file" -f "$PROD_COMPOSE" --profile dhcp-kea run --rm --no-deps dhcp \
         nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5 2>&1); then
         print_warn "DHCP discovery preflight could not be executed inside the Kea image."
         print_warn "Kea activation will require an explicit confirmation because the safety check did not complete."
@@ -1671,6 +1672,89 @@ install_quickstart_compose_assets() {
     else
         chmod 0644 "$helper_target"
     fi
+}
+
+# What: writes the four lancache systemd units
+# Why: fresh install and migration share one unit definition
+# From: Issue #1683 | PR #1858
+write_lancache_systemd_units() {
+    local stack_dir="$1" setup_sh="$SCRIPT_DIR/setup.sh"
+    local compose="docker compose --env-file .env.local"
+    cat > /etc/systemd/system/lancache.service <<EOF || die "Failed to write lancache.service."
+[Unit]
+Description=LanCache-NG
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=${stack_dir}
+ExecStart=${compose} up -d
+ExecStop=${compose} down
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    # What: reconcile (exit ignored), then converge
+    # Why: a failed reconcile must not stop the drift repair
+    # From: Issue #819
+    cat > /etc/systemd/system/lancache-converge.service <<EOF || die "Failed to write lancache-converge.service."
+[Unit]
+Description=LanCache-NG Convergence Check
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=${stack_dir}
+ExecStart=-${setup_sh} converge-reconcile ${stack_dir}
+ExecStart=${compose} up -d --remove-orphans
+EOF
+    cat > /etc/systemd/system/lancache-converge.timer <<EOF || die "Failed to write lancache-converge.timer."
+[Unit]
+Description=LanCache-NG Convergence Timer
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=lancache-converge.service
+
+[Install]
+WantedBy=timers.target
+EOF
+    # What: daily host-side update runs the on-disk setup.sh
+    # Why: no container gets Docker socket write access
+    # From: Issue #819
+    cat > /etc/systemd/system/lancache-auto-update.service <<EOF || die "Failed to write lancache-auto-update.service."
+[Unit]
+Description=LanCache-NG Scheduled Automatic Update
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=${stack_dir}
+ExecStart=${setup_sh} auto-update ${stack_dir}
+EOF
+    # What: daily, spread over 1h, missed runs caught up
+    # Why: installs must not all hit GHCR at the same minute
+    # From: Issue #819
+    cat > /etc/systemd/system/lancache-auto-update.timer <<EOF || die "Failed to write lancache-auto-update.timer."
+[Unit]
+Description=LanCache-NG Scheduled Automatic Update Timer
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+Unit=lancache-auto-update.service
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload || die "systemctl daemon-reload failed."
 }
 
 # Determines origin's default branch (e.g. master) via the cheap local
@@ -6882,7 +6966,7 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
 
     ensure_stack_requirements_installed
 
-    if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
+    if [[ ! -f "$PROD_COMPOSE" ]]; then
         print_warn "No local repo found — cloning to /opt/lancache-ng..."
         if ! command -v git >/dev/null 2>&1; then
             install_git
@@ -6957,86 +7041,84 @@ while true; do
 done
 
 printf "\n"
-printf "  ${BOLD}SSL mode${RESET}: also caches HTTPS downloads (Epic, EA, Blizzard…)\n"
-printf "  Requires a second IP and a CA certificate on clients.\n\n"
-ask "Enable SSL mode? [y/N]" "N"
-SSL_ENABLED=0
-IP_SSL=""
-DNS_XFR_NOTIFY_TARGETS=""
-if [[ "${REPLY,,}" = "y" ]]; then
-    SSL_ENABLED=1
-    DNS_XFR_NOTIFY_TARGETS="dns-ssl:5300"
-    suggested_ssl="${IP_STANDARD%.*}.$((10#${IP_STANDARD##*.} + 1))"
-    while true; do
-        ask "SSL mode IP (second LAN IP)" "$suggested_ssl"
-        IP_SSL="$REPLY"
-        is_valid_ipv4 "$IP_SSL" && break
-        print_error "Invalid IPv4 address: $IP_SSL"
-    done
-    [[ "$IP_STANDARD" != "$IP_SSL" ]] \
-        || die "Standard IP and SSL IP must be different."
-    # What: captured into a variable first, not a live `ip ... | grep -q`
-    # pipe; `|| true` restores the original fail-soft behavior under
-    # `set -e`.
-    # Why: a host can have several interfaces/addresses. The original
-    # `ip -4 addr show | grep -q ...` sat directly in an `if` condition,
-    # where a failing command cannot abort the script -- only the if's own
-    # branch selection is affected; pulled out into a bare assignment, that
-    # exemption no longer applies unless restored explicitly.
-    # From: Issue #1377
-    ip_ssl_check_output="$(ip -4 addr show || true)"
-    if grep -q "inet ${IP_SSL}/" <<<"$ip_ssl_check_output"; then
-        print_ok "$IP_SSL already assigned"
-    else
-        print_warn "$IP_SSL not yet assigned to an interface"
-        ask "Add now? (ip addr add $IP_SSL/24 dev ${detected_iface:-eth0}) [y/N]" "N"
-        if [[ "${REPLY,,}" = "y" ]]; then
-            if [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
-                # Issue #1176: introspection mode never mutates real host
-                # network state, even if a supplied answers file says "y" here.
-                print_ok "$IP_SSL would be added (skipped: introspection mode)"
-            else
-                ip addr add "$IP_SSL/24" dev "${detected_iface:-eth0}" \
-                    && print_ok "$IP_SSL added (not persistent)" \
-                    || print_warn "Adding failed — please add manually"
-            fi
-        fi
-        printf "\n"
-        print_warn "For persistent configuration after reboot:"
-        printf "    netplan:    sudo nano /etc/netplan/01-netcfg.yaml\n"
-        printf "    interfaces: sudo nano /etc/network/interfaces\n"
-    fi
-    print_ok "SSL mode enabled ($IP_SSL)"
+printf "  ${BOLD}Second LAN IP${RESET}: the SSL DNS/proxy address, always required.\n\n"
+# What: the second LAN address is always asked and checked
+# Why: AG-SETUP-001; prod runs dns-ssl on IP_SSL always
+# From: Issue #1683 | PR #1858
+DNS_XFR_NOTIFY_TARGETS="dns-ssl:5300"
+suggested_ssl="${IP_STANDARD%.*}.$((10#${IP_STANDARD##*.} + 1))"
+while true; do
+    ask "Second LAN IP (SSL mode)" "$suggested_ssl"
+    IP_SSL="$REPLY"
+    is_valid_ipv4 "$IP_SSL" && break
+    print_error "Invalid IPv4 address: $IP_SSL"
+done
+[[ "$IP_STANDARD" != "$IP_SSL" ]] \
+    || die "Standard IP and SSL IP must be different."
+# What: ip output captured first, then searched
+# Why: a failing ip must not abort setup under set -e
+# From: Issue #1377
+ip_ssl_check_output="$(ip -4 addr show || true)"
+if grep -q "inet ${IP_SSL}/" <<<"$ip_ssl_check_output"; then
+    print_ok "$IP_SSL already assigned"
 else
-    print_ok "SSL mode skipped — standard mode only"
+    print_warn "$IP_SSL not yet assigned to an interface"
+    ask "Add now? (ip addr add $IP_SSL/24 dev ${detected_iface:-eth0}) [y/N]" "N"
+    if [[ "${REPLY,,}" = "y" ]]; then
+        if [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
+            # What: introspection never changes networking
+            # Why: list-prompts only walks the prompt logic
+            # From: Issue #1176
+            print_ok "$IP_SSL would be added (skipped: introspection mode)"
+        else
+            ip addr add "$IP_SSL/24" dev "${detected_iface:-eth0}" \
+                && print_ok "$IP_SSL added (not persistent)" \
+                || print_warn "Adding failed — please add manually"
+        fi
+    fi
+    printf "\n"
+    print_warn "For persistent configuration after reboot:"
+    printf "    netplan:    sudo nano /etc/netplan/01-netcfg.yaml\n"
+    printf "    interfaces: sudo nano /etc/network/interfaces\n"
 fi
 
-# ── 3. Installation directory ─────────────────────────────────────────────────
-print_step "Installation directory"
+printf "\n"
+printf "  ${BOLD}SSL mode${RESET}: also caches HTTPS downloads (Epic, EA, Blizzard…)\n"
+printf "  Requires a CA certificate on clients.\n\n"
+ask "Enable SSL mode? [y/N]" "N"
+SSL_ENABLED=0
+[[ "${REPLY,,}" = "y" ]] && SSL_ENABLED=1
+print_ok "SSL mode $([[ "$SSL_ENABLED" = 1 ]] && echo enabled || echo disabled) (second IP $IP_SSL)"
 
-ask "Directory" "/opt/lancache-ng"
-INSTALL_DIR="$(realpath -m "$REPLY")"
+# ── 3. Data directory ─────────────────────────────────────────────────────────
+print_step "Data directory"
 
-if [[ -f "$INSTALL_DIR/docker-compose.yml" ]]; then
-    print_warn "Existing directory found: $INSTALL_DIR"
+# What: the stack runs from this checkout's deploy/prod
+# Why: AG-KD-008: deploy/prod is the only deployment profile
+# From: Issue #1683 | PR #1858
+INSTALL_DIR="$SCRIPT_DIR/deploy/prod"
+ENV_LOCAL="$INSTALL_DIR/.env.local"
+ask "Data directory (cache, DNS, DHCP, NTP state)" "/opt/lancache-ng"
+LANCACHE_STATE_DIR="$(realpath -m "$REPLY")"
+
+if [[ -f "$ENV_LOCAL" ]]; then
+    print_warn "Existing configuration found: $ENV_LOCAL"
     ask "Overwrite? [y/N]" "N"
     [[ "${REPLY,,}" = "y" ]] || die "Cancelled."
 fi
 
 if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
-    mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/certs"
-    install_quickstart_compose_assets "$INSTALL_DIR"
-    print_ok "quickstart compose assets copied to $INSTALL_DIR"
+    mkdir -p "$LANCACHE_STATE_DIR" "$SCRIPT_DIR/certs"
 fi
 
 # ── 4. Cache configuration ───────────────────────────────────────────────────
 print_step "Cache configuration"
 
 while true; do
-    ask "Cache directory (absolute path)" "$INSTALL_DIR/cache"
+    ask "Cache directory (absolute path)" "$LANCACHE_STATE_DIR/cache"
     CACHE_DIR="$REPLY"
     is_absolute_path "$CACHE_DIR" && break
-    print_error "Please enter an absolute path (e.g. $INSTALL_DIR/cache)."
+    print_error "Please enter an absolute path (e.g. $LANCACHE_STATE_DIR/cache)."
 done
 
 while true; do
@@ -7213,10 +7295,10 @@ if [[ "$DHCP_MODE" = "kea" ]]; then
     DHCP_ENABLED=1
 
     while true; do
-        ask "Kea data directory (config + leases, absolute path)" "$INSTALL_DIR/kea"
+        ask "Kea data directory (config + leases, absolute path)" "$LANCACHE_STATE_DIR/kea"
         KEA_DATA_DIR="$REPLY"
         is_absolute_path "$KEA_DATA_DIR" && break
-        print_error "Please enter an absolute path (e.g. $INSTALL_DIR/kea)."
+        print_error "Please enter an absolute path (e.g. $LANCACHE_STATE_DIR/kea)."
     done
 
     while true; do
@@ -7467,7 +7549,7 @@ printf "  Default: disabled.\n\n"
 
 ask "Enable LanCache-NG-NTP? [y/N]" "N"
 NTP_ENABLED=0
-NTP_DATA_DIR="$INSTALL_DIR/ntp"
+NTP_DATA_DIR="$LANCACHE_STATE_DIR/ntp"
 if [[ "${REPLY,,}" = "y" ]]; then
     NTP_ENABLED=1
     print_ok "LanCache-NG-NTP enabled — configure upstream servers and the DHCP auto-populate toggle from the Admin UI's NTP page"
@@ -7528,10 +7610,10 @@ if [[ "${REPLY,,}" = "y" ]]; then
     ask "Username" "admin"
     UI_AUTH_USER="$REPLY"
 
-    if [[ -f "$INSTALL_DIR/.env" ]] \
-        && [[ "$(get_env_var UI_AUTH_USER "$INSTALL_DIR/.env")" = "$UI_AUTH_USER" ]] \
-        && env_key_has_usable_secret UI_AUTH_PASSWORD "$INSTALL_DIR/.env"; then
-        UI_AUTH_PASSWORD=$(get_env_var UI_AUTH_PASSWORD "$INSTALL_DIR/.env")
+    if [[ -f "$ENV_LOCAL" ]] \
+        && [[ "$(get_env_var UI_AUTH_USER "$ENV_LOCAL")" = "$UI_AUTH_USER" ]] \
+        && env_key_has_usable_secret UI_AUTH_PASSWORD "$ENV_LOCAL"; then
+        UI_AUTH_PASSWORD=$(get_env_var UI_AUTH_PASSWORD "$ENV_LOCAL")
         print_ok "Existing Admin-UI password preserved"
     elif [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
         # Issue #1176: introspection mode must not fabricate and print a real
@@ -7547,7 +7629,7 @@ if [[ "${REPLY,,}" = "y" ]]; then
         print_ok "Credentials:"
         printf "    User:     ${BOLD}%s${RESET}\n" "$UI_AUTH_USER"
         printf "    Password: ${BOLD}%s${RESET}\n" "$UI_AUTH_PASSWORD"
-        print_warn "Note the password now — it will also appear in $INSTALL_DIR/.env"
+        print_warn "Note the password now — it will also appear in $ENV_LOCAL"
         printf "\n"
     fi
 else
@@ -7564,10 +7646,10 @@ fi
 # ── 9. Writing .env ───────────────────────────────────────────────────────────
 print_step "Writing .env"
 
-env_file="$INSTALL_DIR/.env"
+env_file="$ENV_LOCAL"
 
 if [[ -f "$env_file" ]]; then
-    ask "Overwrite .env? [y/N]" "N"
+    ask "Overwrite .env.local? [y/N]" "N"
     [[ "${REPLY,,}" = "y" ]] || die "Cancelled."
 fi
 
@@ -7690,14 +7772,16 @@ validate_env_values_for_initial_write \
     "ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}" \
     "UI_BIND_IP=${IP_STANDARD}"
 
-write_env_file "$INSTALL_DIR/.env" <<EOF
+write_env_file "$ENV_LOCAL" <<EOF
 # ── LAN IPs ────────────────────────────────────────────────────────────────────
 # Standard mode (no CA certificate needed): HTTP cached, HTTPS passthrough
 IP_STANDARD=${IP_STANDARD}
 
-# SSL mode (install CA certificate on clients): HTTP + HTTPS cached
-# Empty = SSL mode disabled
+# Second LAN IP for the SSL DNS/proxy, always required (AG-SETUP-001)
 IP_SSL=${IP_SSL}
+
+# Root of all persistent state (cache, DNS, DHCP, NTP)
+LANCACHE_STATE_DIR=${LANCACHE_STATE_DIR}
 
 # ── SSL ────────────────────────────────────────────────────────────────────────
 SSL_ENABLED=${SSL_ENABLED}
@@ -7862,11 +7946,12 @@ UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}
 UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS}
 ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}
 
-# Bind address for Admin-UI. Default keeps quickstart reachable on the LAN.
+# Bind address for Admin-UI. Default keeps it reachable on the LAN.
 # Set to 127.0.0.1 to restrict access to this host.
 UI_BIND_IP=${IP_STANDARD}
 EOF
-print_ok ".env written: $INSTALL_DIR/.env"
+print_ok ".env.local written: $ENV_LOCAL"
+sync_config_prod_local_env "$INSTALL_DIR" "$ENV_LOCAL"
 
 # ── 10. Creating directories ───────────────────────────────────────────────────
 print_step "Creating directories"
@@ -7903,7 +7988,7 @@ if [[ "$LOGGING_ENABLED" = "1" ]]; then
     # own `${SYSLOG_NG_LOG_DIR:-...}` fallback does, so a customized path is
     # preserved rather than silently redirected to the computed default
     # (AG-OP-009).
-    syslog_ng_log_dir="${SYSLOG_NG_LOG_DIR:-$(production_state_root_default "$INSTALL_DIR")/syslog-ng}"
+    syslog_ng_log_dir="${SYSLOG_NG_LOG_DIR:-$LANCACHE_STATE_DIR/syslog-ng}"
     mkdir -p "$syslog_ng_log_dir"
     if chown 10001:10001 "$syslog_ng_log_dir" 2>/dev/null; then
         print_ok "Syslog-ng log root: $syslog_ng_log_dir (owned by uid 10001)"
@@ -7918,116 +8003,16 @@ if [[ "$LOGGING_ENABLED" = "1" ]]; then
 fi
 
 # ── 11. Installing systemd watchdog ───────────────────────────────────────────
-# The systemd service owns boot startup; the timer is a convergence guard that
-# re-applies compose state if containers drift. It is not an update mechanism.
+# What: boot start, drift convergence, optional daily update
+# Why: units are enabled only after the first pull succeeds
 print_step "Installing systemd watchdog"
 
 SYSTEMD_AVAILABLE=0
 if ! systemd_available; then
     print_warn "systemd not found — watchdog will not be installed"
-    print_warn "Start stack manually after reboot: cd $INSTALL_DIR && docker compose up -d"
+    print_warn "Start stack manually after reboot: cd $INSTALL_DIR && docker compose --env-file .env.local up -d"
 else
-    cat > /etc/systemd/system/lancache.service <<EOF
-[Unit]
-Description=LanCache-NG
-After=docker.service
-Requires=docker.service
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-WorkingDirectory=${INSTALL_DIR}
-ExecStart=docker compose up -d
-ExecStop=docker compose down
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    cat > /etc/systemd/system/lancache-converge.service <<EOF
-[Unit]
-Description=LanCache-NG Convergence Check
-After=docker.service
-
-[Service]
-Type=oneshot
-WorkingDirectory=${INSTALL_DIR}
-# Ordered ExecStart lines run in sequence (#819): the reconcile step folds
-# any Admin UI release-channel/scheduled-update override into .env and syncs
-# lancache-auto-update.timer's state to match, BEFORE the pre-existing
-# container-drift convergence below runs. systemd does not invoke ExecStart
-# through a shell, so a leading "-" (not shell "||") is systemd's own syntax
-# for "run this, but never let its exit code fail the unit" -- a non-zero
-# exit from the reconcile step must never take down the convergence tick it
-# normally still needs to run, even though cmd_converge_reconcile is already
-# internally defensive and should not normally fail at all.
-ExecStart=-${INSTALL_DIR}/setup.sh converge-reconcile ${INSTALL_DIR}
-ExecStart=docker compose up -d --remove-orphans
-EOF
-
-    cat > /etc/systemd/system/lancache-converge.timer <<EOF
-[Unit]
-Description=LanCache-NG Convergence Timer
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
-Unit=lancache-converge.service
-
-[Install]
-WantedBy=timers.target
-EOF
-
-    # Scheduled automatic updates (#819), replacing the removed Watchtower
-    # opt-in. Always written (harmless while disabled), only enabled/started
-    # later if AUTO_UPDATE_ENABLED=1 -- same "install now, activate after a
-    # successful first pull" pattern as lancache.service/lancache-converge.*
-    # above. Runs on the HOST via systemd, not as a container: no container
-    # gains expanded Docker-socket or filesystem access to perform an update,
-    # unlike the removed Watchtower helper (which needed read-write socket
-    # access in its own container -- see docs/threat-model.md).
-    #
-    # ExecStart runs whatever setup.sh is already on this install's disk at
-    # tick time -- it does NOT `git pull`/re-fetch itself first. Deliberate
-    # choice (#819, mirroring mailcow-dockerized's own update.sh, which
-    # self-updates but refuses to re-exec in the same process): rewriting a
-    # script file out from under the interpreter currently executing it risks
-    # corrupted/partial execution of the remaining lines. The accepted cost is
-    # that a bugfix to setup.sh's own update logic only takes effect on the
-    # NEXT scheduled tick, not immediately -- far safer than the alternative.
-    cat > /etc/systemd/system/lancache-auto-update.service <<EOF
-[Unit]
-Description=LanCache-NG Scheduled Automatic Update
-After=docker.service
-Requires=docker.service
-
-[Service]
-Type=oneshot
-WorkingDirectory=${INSTALL_DIR}
-ExecStart=${INSTALL_DIR}/setup.sh auto-update ${INSTALL_DIR}
-EOF
-
-    # RandomizedDelaySec spreads many installs' ticks across an hour instead
-    # of every one of them hitting GHCR at exactly 04:00; Persistent=true
-    # catches up a missed run (e.g. host was off) on next boot instead of
-    # silently skipping to the next scheduled day.
-    cat > /etc/systemd/system/lancache-auto-update.timer <<EOF
-[Unit]
-Description=LanCache-NG Scheduled Automatic Update Timer
-
-[Timer]
-OnCalendar=daily
-RandomizedDelaySec=1h
-Persistent=true
-Unit=lancache-auto-update.service
-
-[Install]
-WantedBy=timers.target
-EOF
-
-    systemctl daemon-reload
+    write_lancache_systemd_units "$INSTALL_DIR"
     SYSTEMD_AVAILABLE=1
     print_ok "systemd units installed; they will be enabled after image pull succeeds"
 fi
@@ -8045,7 +8030,8 @@ if [[ "$SSL_ENABLED" = "1" ]]; then
 else
     printf "  %-26s %s\n" "SSL mode:"                "disabled"
 fi
-printf "  %-26s %s\n"    "Install directory:"       "$INSTALL_DIR"
+printf "  %-26s %s\n"    "Stack directory:"         "$INSTALL_DIR"
+printf "  %-26s %s\n"    "Data directory:"          "$LANCACHE_STATE_DIR"
 printf "  %-26s %s\n"    "Cache:"                   "$CACHE_DIR"
 printf "  %-26s %s GiB\n" "Cache size:"              "$cache_gb"
 printf "  %-26s %s MB\n"  "Cache RAM:"               "$CACHE_MEM_MB"
@@ -8102,7 +8088,7 @@ ask "Start now? [Y/n]" "Y"
 # point) also guarantees introspection never reaches the real pull/systemctl/
 # docker-compose-up mutations below, regardless of what an answers file said.
 [[ "$WIZARD_INTROSPECT_MODE" != "1" && "${REPLY,,}" != "n" ]] \
-    || { printf "\n  Start later with: cd %s && docker compose up -d\n\n" "$INSTALL_DIR"; exit 0; }
+    || { printf "\n  Start later with: cd %s && docker compose --env-file .env.local up -d\n\n" "$INSTALL_DIR"; exit 0; }
 
 # ── 13. Starting stack ───────────────────────────────────────────────────────
 # Pull before starting so GHCR/auth/platform failures happen while systemd units
@@ -8110,10 +8096,10 @@ ask "Start now? [Y/n]" "Y"
 print_step "Pulling images"
 cd "$INSTALL_DIR"
 assert_prebuilt_image_platform_supported
-docker compose --env-file "$INSTALL_DIR/.env" pull \
+docker compose --env-file "$ENV_LOCAL" pull \
     || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh."
 
-run_kea_dhcp_activation_preflight "$INSTALL_DIR/.env"
+run_kea_dhcp_activation_preflight "$ENV_LOCAL"
 
 print_step "Starting stack"
 if [[ "$SYSTEMD_AVAILABLE" = "1" ]]; then
@@ -8129,7 +8115,7 @@ if [[ "$SYSTEMD_AVAILABLE" = "1" ]]; then
         print_ok "lancache-auto-update.timer enabled (scheduled automatic updates)"
     fi
 else
-    docker compose --env-file "$INSTALL_DIR/.env" up -d
+    docker compose --env-file "$ENV_LOCAL" up -d
 fi
 print_ok "Stack started"
 
@@ -8147,7 +8133,7 @@ fi
 printf "\n"
 if [[ "$SSL_ENABLED" = "1" ]]; then
     printf "  ${BOLD}CA certificate${RESET} (available after first start):\n"
-    printf "    %s/certs/ca.crt\n" "$INSTALL_DIR"
+    printf "    %s/certs/ca.crt\n" "$SCRIPT_DIR"
     printf "    → install on clients for SSL mode\n"
     printf "    → guide: https://github.com/wiki-mod/lancache-ng/wiki\n"
     printf "\n"
