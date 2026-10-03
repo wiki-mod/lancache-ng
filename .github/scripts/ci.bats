@@ -11631,6 +11631,167 @@ CASES
     [ "${output}" = order-ok ]
 }
 
+@test "dhcp kea ipv4 and ntp helpers per input" {
+    # What: ipv4 checks, ntp name lookup, kea ntp option.
+    # Why: kea needs ipv4 ntp data; a bad value must stop.
+    # From: Issue #1683 | PR #1858
+    local root bin="${BATS_TEST_TMPDIR}/bin" e
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/services/dhcp/entrypoint.sh" is_ipv4 is_ipv4_csv resolve_ntp_server \
+        resolve_ntp_csv build_ntp_option
+    for e in 192.168.1.1 8.8.8.8 0.0.0.0 255.255.255.255 010.1.1.1; do
+        is_ipv4 "${e}" || { echo "${e} rejected"; return 1; }
+    done
+    for e in 256.1.1.1 1.1.1 1.1.1.1.1 1..1.1 not-an-ip "" " 1.1.1.1" 1.1.1.-1; do
+        if is_ipv4 "${e}"; then echo "'${e}' accepted"; return 1; fi
+    done
+    for e in 192.168.1.1 8.8.8.8,1.1.1.1 1.1.1.1,,8.8.8.8; do
+        is_ipv4_csv "${e}" || { echo "csv ${e} rejected"; return 1; }
+    done
+    for e in "" , 1.1.1.1,not-an-ip 256.256.256.256; do
+        if is_ipv4_csv "${e}"; then echo "csv '${e}' accepted"; return 1; fi
+    done
+    _tool_stub "${bin}" getent <<'STUB'
+case "$1 $2" in
+    "ahostsv4 ntp.lan") printf '10.0.0.9 STREAM ntp.lan\n10.0.0.9 DGRAM\n' ;;
+    "hosts old.lan") printf '10.0.0.8 old.lan\n' ;;
+    "hosts v6.lan") printf 'fd00::1 v6.lan\n' ;;
+    *) exit 2 ;;
+esac
+STUB
+    export PATH="${bin}:${PATH}"
+    [ "$(resolve_ntp_server 8.8.8.8)" = 8.8.8.8 ]
+    [ "$(resolve_ntp_server ntp.lan)" = 10.0.0.9 ]
+    [ "$(resolve_ntp_server old.lan)" = 10.0.0.8 ]
+    for e in "" 256.256.256.256 v6.lan nowhere.lan; do
+        run resolve_ntp_server "${e}"
+        [ "${status}" -eq 1 ] || { echo "'${e}' resolved to ${output}"; return 1; }
+    done
+    [[ "${output}" == *"cannot be resolved: nowhere.lan"* ]]
+    [ "$(resolve_ntp_csv '8.8.8.8 ntp.lan,old.lan')" = 8.8.8.8,10.0.0.9,10.0.0.8 ]
+    [ -z "$(resolve_ntp_csv '')" ]
+    run resolve_ntp_csv '8.8.8.8 nowhere.lan'
+    [ "${status}" -eq 1 ]
+    DHCP_NTP_SERVERS="8.8.8.8 ntp.lan"
+    [ "$(build_ntp_option)" = "$(printf ',\n          {\n            "name": "ntp-servers",\n            "data": "8.8.8.8,10.0.0.9"\n          }')" ]
+    DHCP_NTP_SERVERS=""
+    [ -z "$(build_ntp_option)" ]
+    DHCP_NTP_SERVERS="nowhere.lan"
+    run build_ntp_option
+    [ "${status}" -eq 1 ]
+}
+
+@test "dhcp kea templates render complete valid json" {
+    # What: dhcp4, ctrl-agent, d2 from the real var list.
+    # Why: a missed var or bad port stops kea from starting.
+    # From: Issue #1683 | PR #1858
+    local root d="${BATS_TEST_TMPDIR}/kea" ep zones port want
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    ep="${root}/services/dhcp/entrypoint.sh"
+    _load_functions "${ep}" is_ipv4 is_ipv4_csv resolve_ntp_server resolve_ntp_csv build_ntp_option \
+        render_kea_config render_kea_dhcp4_config
+    eval "$(grep -m1 '^ENVSUBST_VARS=' "${ep}")"
+    [ -n "${ENVSUBST_VARS}" ]
+    export DHCP_SUBNET=10.0.0.0/24 DHCP_RANGE_START=10.0.0.128 DHCP_RANGE_END=10.0.0.254 \
+        DHCP_GATEWAY=10.0.0.1 DHCP_DOMAIN=example.com DHCP_LEASE_TIME=86400 DHCP_MAX_LEASE_TIME=172800 \
+        DHCP_NTP_SERVERS="8.8.8.8 1.1.1.1" DHCP_DNS_PRIMARY=10.0.0.2 DHCP_DNS_SECONDARY=10.0.0.3 \
+        DHCP_DNS_SERVER_IP=127.0.0.1 DHCP_DDNS_PORT=5300 KEA_CTRL_TOKEN=tok-123 KEA_CTRL_HOST=0.0.0.0 \
+        DDNS_TSIG_KEY=c2VjcmV0 KEA_LEASE_CMDS_HOOK_PATH=/usr/lib/kea/hooks/libdhcp_lease_cmds.so
+    mkdir -p "${d}"
+    for DHCP_DDNS_ENABLED in true false; do
+        export DHCP_DDNS_ENABLED
+        render_kea_dhcp4_config "${root}/services/dhcp/kea-dhcp4.conf" "${d}/dhcp4.json"
+        run jq -e --argjson on "${DHCP_DDNS_ENABLED}" '.Dhcp4 as $d | $d.subnet4[0] as $s
+            | $s.subnet == "10.0.0.0/24" and $s.pools[0].pool == "10.0.0.128 - 10.0.0.254"
+            and $s["valid-lifetime"] == 86400 and $s["max-valid-lifetime"] == 172800
+            and ([$s["option-data"][] | select(.name == "ntp-servers") | .data] == ["8.8.8.8,1.1.1.1"])
+            and $d["hooks-libraries"] == [{"library": "/usr/lib/kea/hooks/libdhcp_lease_cmds.so"}]
+            and $d["dhcp-ddns"]["enable-updates"] == $on and $d["ddns-qualifying-suffix"] == "example.com"' \
+            "${d}/dhcp4.json"
+        [ "${status}" -eq 0 ] || { echo "dhcp4 ddns=${DHCP_DDNS_ENABLED}: ${output}"; return 1; }
+    done
+    DHCP_NTP_SERVERS="" render_kea_dhcp4_config "${root}/services/dhcp/kea-dhcp4.conf" "${d}/dhcp4.json"
+    jq -e '[.Dhcp4.subnet4[0]["option-data"][] | select(.name == "ntp-servers")] == []' "${d}/dhcp4.json"
+    render_kea_config "${root}/services/dhcp/kea-ctrl-agent.conf" "${d}/ctrl.json"
+    jq -e '.["Control-agent"] | .["http-host"] == "0.0.0.0" and .authentication.type == "basic"
+        and .authentication.clients == [{"user": "admin", "password": "tok-123"}]' "${d}/ctrl.json"
+    render_kea_config "${root}/services/dhcp/kea-dhcp-ddns.conf" "${d}/d2.json"
+    run grep -n '\${' "${d}/dhcp4.json" "${d}/ctrl.json" "${d}/d2.json"
+    [ "${status}" -eq 1 ] || { echo "unrendered: ${output}"; return 1; }
+    zones="$(awk '/^PRIVATE_REVERSE_ZONES=\(/,/^\)/' "${root}/services/dns/entrypoint.sh" \
+        | grep -oE '[0-9a-z.]+\.in-addr\.arpa\.' | jq -Rsc 'split("\n") | map(select(. != "")) | sort')"
+    [ "$(jq length <<< "${zones}")" -gt 0 ]
+    run jq -e --argjson zones "${zones}" '.DhcpDdns as $d
+        | [$d["tsig-keys"][] | [.name, .algorithm, .secret]] == [["lancache-ddns-key", "HMAC-SHA256", "c2VjcmV0"]]
+        and $d.port == 53001 and $d["forward-ddns"]["ddns-domains"][0].name == "example.com."
+        and ([$d["reverse-ddns"]["ddns-domains"][].name] | sort) == $zones
+        and ([$d["forward-ddns", "reverse-ddns"]["ddns-domains"][] | .["key-name"]] | unique) == ["lancache-ddns-key"]
+        and ([$d["forward-ddns", "reverse-ddns"]["ddns-domains"][]["dns-servers"]
+            | length == 1 and .[0] == {"ip-address": "127.0.0.1", "port": 5300}] | all)' "${d}/d2.json"
+    [ "${status}" -eq 0 ] || { echo "d2: ${output}"; return 1; }
+    sed -n '/^: "\${DHCP_DDNS_PORT:=5300}"$/,/^fi$/p' "${ep}" > "${d}/port.sh"
+    [ "$(grep -c 'exit 1' "${d}/port.sh")" -eq 2 ]
+    while IFS='|' read -r port want; do
+        run env DHCP_DDNS_PORT="${port}" bash -c ". '${d}/port.sh' && echo \"ok \${DHCP_DDNS_PORT}\""
+        [[ "${output}" == *"${want}"* ]] || { echo "port '${port}': ${output}"; return 1; }
+    done <<'CASES'
+|ok 5300
+1|ok 1
+65535|ok 65535
+0|must be between 1 and 65535 (got: 0)
+65536|must be between 1 and 65535 (got: 65536)
+53a|must be a numeric TCP/UDP port (got: 53a)
+-1|must be a numeric TCP/UDP port (got: -1)
+CASES
+}
+
+@test "dhcp kea runtime config migration converges" {
+    # What: stale hook, old lease keys, ntp names migrated.
+    # Why: an old volume must load and converge on restart.
+    # From: Issue #1683 | PR #1858
+    local root r="${BATS_TEST_TMPDIR}/kea-dhcp4.conf" bin="${BATS_TEST_TMPDIR}/bin"
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/services/dhcp/entrypoint.sh" is_ipv4 is_ipv4_csv resolve_ntp_server \
+        resolve_ntp_csv build_ntp_migration_map migrate_dhcp4_config
+    _tool_stub "${bin}" getent <<'STUB'
+[ "$1 $2" = "ahostsv4 ntp.lan" ] || exit 2
+printf '10.0.0.9 STREAM ntp.lan\n'
+STUB
+    export PATH="${bin}:${PATH}" DHCP_DOMAIN=lan DHCP_LEASE_TIME=86400 DHCP_MAX_LEASE_TIME=172800 \
+        DHCP_DDNS_ENABLED=false KEA_LEASE_CMDS_HOOK_PATH=/usr/lib/kea/hooks/libdhcp_lease_cmds.so
+    cat > "${r}" <<'JSON'
+{"Dhcp4": {"control-socket": {"socket-type": "unix", "socket-name": "/old/kea4.sock"},
+  "hooks-libraries": [{"library": "/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_lease_cmds.so"},
+    {"library": "/usr/lib/kea/hooks/libother.so"}],
+  "subnet4": [{"id": 1, "subnet": "10.0.0.0/24", "default-lease-time": 600, "max-lease-time": 1200,
+    "option-data": [{"name": "ntp-servers", "data": "ntp.lan"},
+      {"name": "ntp-servers", "data": "0a000009", "csv-format": false}]}],
+  "loggers": []}}
+JSON
+    run migrate_dhcp4_config "${r}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == "Updated ${r}"* ]]
+    run jq -e '.Dhcp4 as $d | $d.subnet4[0] as $s
+        | $d["control-socket"]["socket-name"] == "/run/kea/kea4.sock"
+        and $d["hooks-libraries"] == [{"library": "/usr/lib/kea/hooks/libother.so"},
+            {"library": "/usr/lib/kea/hooks/libdhcp_lease_cmds.so"}]
+        and $s["valid-lifetime"] == 600 and $s["max-valid-lifetime"] == 1200
+        and ($s | has("default-lease-time") or has("max-lease-time") | not)
+        and [$s["option-data"][].data] == ["10.0.0.9", "0a000009"]
+        and $d["dhcp-ddns"]["enable-updates"] == false and $d["ddns-qualifying-suffix"] == "lan"
+        and [$d.loggers[] | select(.name == "kea-dhcp4.dhcp4") | .severity] == ["ERROR"]' "${r}"
+    [ "${status}" -eq 0 ] || { cat "${r}"; return 1; }
+    cp "${r}" "${r}.first"
+    run migrate_dhcp4_config "${r}"
+    [ "${status}" -eq 0 ]
+    [ -z "${output}" ] || { echo "second run changed: ${output}"; return 1; }
+    cmp "${r}" "${r}.first"
+    jq '.Dhcp4.subnet4[0]["option-data"][0].data = "nowhere.lan"' "${r}.first" > "${r}"
+    run migrate_dhcp4_config "${r}"
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"failed to resolve legacy NTP server values"* ]]
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.

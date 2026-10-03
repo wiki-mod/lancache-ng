@@ -514,8 +514,8 @@ fi
 # services/dhcp/kea-dhcp-ddns.conf's forward-ddns/reverse-ddns "name" fields
 # (issue #706) carry a literal trailing dot ("${DHCP_DOMAIN}.", each reverse
 # zone name below) that can't be documented inline in that file itself: it
-# is validated as plain JSON elsewhere (tests/bats/dhcp_kea_config_generation.bats
-# runs `jq empty` on the rendered output), and Kea's own config format,
+# is validated as plain JSON elsewhere (.github/scripts/ci.bats parses the
+# rendered output with jq), and Kea's own config format,
 # while it does tolerate `//`/`/* */` comments as an extension, would break
 # that strict-JSON check. Kea's D2 daemon matches an outgoing update's
 # target FQDN against each ddns-domains "name" by treating it as a DNS-name
@@ -547,8 +547,8 @@ fi
 # here -- this project's Kea config is Dhcp4-only, no DHCPv6, so D2 never
 # generates an IPv6 PTR update in the first place. If
 # services/dns/entrypoint.sh's PRIVATE_REVERSE_ZONES list ever changes, this
-# list must be updated to match (tests/bats/dhcp_kea_config_generation.bats
-# guards the two staying in sync).
+# list must be updated to match (.github/scripts/ci.bats guards the two
+# staying in sync).
 DDNS_TEMPLATE="/etc/kea/kea-dhcp-ddns.conf.template"
 DDNS_RUNTIME="/var/lib/kea/kea-dhcp-ddns.conf"
 DDNS_NEXT="$(mktemp)"
