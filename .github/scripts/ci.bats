@@ -12837,6 +12837,96 @@ CASES
         || { echo "relay template: ${v}"; return 1; }
 }
 
+@test "setup secondary registration end to end per primary answer" {
+    # What: cmd_secondary with stub curl/docker per answer.
+    # Why: token never in argv; failures stop before writes.
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" bin="${BATS_TEST_TMPDIR}/bin" dk sha body
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    dk="$(command -v docker)"
+    _load_functions "${root}/setup.sh" _compose_parse_env_value get_env_var is_valid_ipv4 require_value \
+        write_env_file write_generated_runtime_file validate_lancache_image_registry validate_lancache_image_prefix \
+        validate_lancache_image_channel validate_lancache_image_tag resolve_lancache_image_registry \
+        resolve_lancache_image_prefix lancache_stack_pointer_channel_for resolve_lancache_stack_channel_tag \
+        derive_release_archive_image_tag resolve_lancache_image_channel resolve_lancache_image_tag \
+        secondary_listen_ip_conflicts secondary_suggest_alternate_listen_ip secondary_choose_listen_ip \
+        detect_secondary_listen_ip cmd_secondary
+    die() { printf 'DIE: %s\n' "$*" >&2; exit 9; }
+    print_ok() { :; }
+    print_step() { :; }
+    print_warn() { printf 'WARN: %s\n' "$*" >&2; }
+    print_error() { printf 'ERR: %s\n' "$*" >&2; }
+    assert_prebuilt_image_platform_supported() { :; }
+    assert_resolved_image_tag_platform_supported() { :; }
+    _tool_stub "${bin}" ss <<<':'
+    _tool_stub "${bin}" curl <<'STUB'
+printf '%s\n' "$*" > "${T}/curl.argv"
+cat > "${T}/curl.body"
+[ "${MOCK_FAIL:-0}" = 0 ] || exit 7
+out=""
+while [ "$#" -gt 0 ]; do [ "$1" != -o ] || out="$2"; shift; done
+printf '%s' "${MOCK_BODY}" > "${out}"
+printf '%s' "${MOCK_STATUS:-200}"
+STUB
+    _tool_stub "${bin}" docker <<'STUB'
+printf '%s\n' "$*" >> "${T}/docker.log"
+STUB
+    export PATH="${bin}:${PATH}" T="${t}" SCRIPT_DIR="${t}/none"
+    sha="sha-0123456789abcdef0123456789abcdef01234567"
+    export LANCACHE_IMAGE_TAG="${sha}"
+    body='{"nats_url":"nats://primary.example:4222","nats_user":"sec-a","nats_password":"pw","consumer_name":"sec-a","pdns_api_key":"pk","ddns_tsig_key":"tk","dns_xfr_primary":"192.168.1.10:5300"}'
+    _sec() { local d="$1"; shift; mkdir -p "${d}"; cd "${d}" || return 1; cmd_secondary "$@"; }
+    local -a args=(--primary http://primary.example:8080 --token 'mal"icious\token' --name sec-a
+        --proxy-ip 192.168.1.10 --listen-ip 192.168.1.50)
+    run _sec "${t}/r0" --name sec-a
+    [ "${status}" -eq 9 ] && [[ "${output}" == *"DIE: Required argument(s) missing: --primary --token --proxy-ip"* ]] || {
+        echo "missing args: ${output}"; return 1; }
+    MOCK_FAIL=1 run _sec "${t}/r1" "${args[@]}"
+    [ "${status}" -eq 9 ] && [[ "${output}" == *"DIE: Failed to connect to primary server at http://primary.example:8080"* ]] || {
+        echo "connect: ${output}"; return 1; }
+    [ "$(cat "${t}/curl.body")" = '{"token":"mal\"icious\\token","name":"sec-a","address":"192.168.1.50"}' ]
+    jq -e '.token == "mal\"icious\\token"' "${t}/curl.body"
+    ! grep -q icious "${t}/curl.argv" || { echo "token in argv: $(cat "${t}/curl.argv")"; return 1; }
+    [ ! -e "${t}/r1/sec-a" ]
+    MOCK_STATUS=503 MOCK_BODY='{}' run _sec "${t}/r2" "${args[@]}"
+    [ "${status}" -eq 9 ]
+    [[ "${output}" == *"HTTP 503"*"NATS_BIND_IP"*"docker-compose.nats-secondary.yml"*"--env-file .env.local"* ]] || {
+        echo "503: ${output}"; return 1; }
+    MOCK_STATUS=401 MOCK_BODY='{}' run _sec "${t}/r3" "${args[@]}"
+    [[ "${output}" == *"DIE: Primary server rejected the registration request with HTTP 401."* ]]
+    MOCK_BODY='{"nats_url":"n"}' run _sec "${t}/r4" "${args[@]}"
+    [[ "${output}" == *"missing field(s): nats_user nats_password consumer_name pdns_api_key ddns_tsig_key dns_xfr_primary"* ]] || {
+        echo "fields: ${output}"; return 1; }
+    [ ! -e "${t}/r4/sec-a" ]
+    : > "${t}/docker.log"
+    MOCK_BODY="${body}" run _sec "${t}/r5" "${args[@]}"
+    [ "${status}" -eq 0 ] || { echo "register: ${output}"; return 1; }
+    [ "$(paste -sd'#' "${t}/r5/sec-a/.env")" = "PROXY_IP=192.168.1.10#LISTEN_IP=192.168.1.50#PDNS_API_KEY=pk#DDNS_TSIG_KEY=tk#DNS_XFR_PRIMARY=192.168.1.10:5300#NATS_URL=nats://primary.example:4222#NATS_USER=sec-a#NATS_PASSWORD=pw#NATS_CONSUMER=sec-a#KEEP_KNOWN_GOOD_CONFIGS=3#LANCACHE_IMAGE_REGISTRY=ghcr.io#LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng#LANCACHE_IMAGE_CHANNEL=latest#LANCACHE_IMAGE_TAG=${sha}" ] || {
+        echo "env: $(cat "${t}/r5/sec-a/.env")"; return 1; }
+    [ "$(paste -sd'#' "${t}/docker.log")" = "compose version#compose --env-file ${t}/r5/sec-a/.env up -d" ] || {
+        echo "docker: $(cat "${t}/docker.log")"; return 1; }
+    run "${dk}" compose --env-file "${t}/r5/sec-a/.env" -f "${t}/r5/sec-a/docker-compose.yml" config --format json
+    [ "${status}" -eq 0 ] || { echo "compose: ${output}"; return 1; }
+    jq -e --arg img "ghcr.io/wiki-mod/lancache-ng/dns:${sha}" '.services["dns-secondary"] as $s
+        | $s.image == $img and $s.restart == "always"
+        and $s.healthcheck.test == ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
+        and $s.healthcheck.interval == "30s" and $s.healthcheck.timeout == "5s"
+        and $s.healthcheck.retries == 3 and $s.healthcheck.start_period == "20s"
+        and $s.environment.DNS_REPLICATION_ROLE == "secondary" and $s.environment.NATS_RECORD_WRITES == "0"
+        and $s.environment.DNS_XFR_PRIMARY == "192.168.1.10:5300" and $s.environment.NATS_PASSWORD == "pw"
+        and ([$s.ports[] | .host_ip] | unique) == ["192.168.1.50"]' <<< "${output}"
+    cp "${t}/r5/sec-a/.env" "${t}/env.first"
+    cp "${t}/r5/sec-a/docker-compose.yml" "${t}/compose.first"
+    : > "${t}/curl.argv"
+    run _sec "${t}/r5" "${args[@]}"
+    [ "${status}" -eq 9 ] && [[ "${output}" == *"already exists; rerun with --rotate"* ]] && [ ! -s "${t}/curl.argv" ] || {
+        echo "existing: ${output}"; return 1; }
+    MOCK_BODY="${body}" run _sec "${t}/r5" "${args[@]}" --rotate
+    [ "${status}" -eq 0 ] || { echo "rotate: ${output}"; return 1; }
+    cmp "${t}/env.first" "${t}/r5/sec-a/.env"
+    cmp "${t}/compose.first" "${t}/r5/sec-a/docker-compose.yml"
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.
