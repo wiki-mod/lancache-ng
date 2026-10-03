@@ -11798,7 +11798,7 @@ CASES
     for e in 192.168.1.1 8.8.8.8,1.1.1.1 1.1.1.1,,8.8.8.8; do
         is_ipv4_csv "${e}" || { echo "csv ${e} rejected"; return 1; }
     done
-    for e in "" , 1.1.1.1,not-an-ip 256.256.256.256; do
+    for e in "" "," 1.1.1.1,not-an-ip 256.256.256.256; do
         if is_ipv4_csv "${e}"; then echo "csv '${e}' accepted"; return 1; fi
     done
     _tool_stub "${bin}" getent <<'STUB'
