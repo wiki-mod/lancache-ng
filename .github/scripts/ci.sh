@@ -9605,52 +9605,6 @@ _ci_check_proxy_cache_env_doc_drift() {
     printf 'proxy-cache-env-doc-drift=clean scanned=%s checked=%s\n' "${scanned}" "${checked}"
 }
 
-# What: Emit "block\tdir" or "block\t@BLOCK@" per group.
-# Why: dependabot.yml's own scalar/list forms, no yq dep.
-# From: Issue #1683 | PR #1858
-_ci_dependabot_docker_entries() {
-    local file="$1"
-    awk '
-        function scalar(line,    value) {
-            value = line
-            sub(/^[^:]*:[[:space:]]*/, "", value)
-            sub(/[[:space:]]*#.*$/, "", value)
-            gsub(/^[[:space:]"'"'"']+|[[:space:]"'"'"']+$/, "", value)
-            return value
-        }
-        /^  - package-ecosystem:/ {
-            ecosystem = tolower(scalar($0))
-            in_docker = (ecosystem == "docker")
-            if (in_docker) { block++; print block "\t@BLOCK@" }
-            next
-        }
-        in_docker && /^    directory:/ {
-            path = scalar($0)
-            if (path ~ /^\//) print block "\t" path
-            next
-        }
-        in_docker && /^    directories:[[:space:]]*\[/ {
-            paths = $0
-            sub(/^    directories:[[:space:]]*\[/, "", paths)
-            sub(/\][[:space:]]*(#.*)?$/, "", paths)
-            count = split(paths, entries, /,[[:space:]]*/)
-            for (i = 1; i <= count; i++) {
-                path = entries[i]
-                gsub(/^[[:space:]"'"'"']+|[[:space:]"'"'"']+$/, "", path)
-                if (path ~ /^\//) print block "\t" path
-            }
-            next
-        }
-        in_docker && /^      - / {
-            path = $0
-            sub(/^      - /, "", path)
-            sub(/[[:space:]]*#.*$/, "", path)
-            gsub(/^["'"'"']|["'"'"'][[:space:]]*$/, "", path)
-            if (path ~ /^\//) print block "\t" path
-        }
-    ' "${file}"
-}
-
 # What: Print Dockerfile logical lines (joined).
 # Why: AG-VAL-036: heredoc/escape= change what a line is.
 # From: Issue #1683 | PR #1858
@@ -9704,181 +9658,6 @@ _ci_dockerfile_logical_lines() {
         }
         END { if (logical != "") emit_logical() }
     ' "$1"
-}
-
-# What: Resolve <KEY>_IMAGE to SOT base_images.<key>.
-# Why: same rule external_image uses; no per-image list.
-# From: Issue #1683 | PR #1858
-_ci_sot_base_image_arg() {
-    local name="$1" val key
-    case "${name}" in *_IMAGE) ;; *) return 1 ;; esac
-    key="${name%_IMAGE}"
-    val="$(_ci_block_entry_field base_images "" "${key,,}")" || return 2
-    [ -n "${val}" ] || return 1
-    printf '%s' "${val}"
-}
-
-# What: Print a Dockerfile's final resolved FROM image.
-# Why: global ARG defaults + stage aliases change it.
-# From: Issue #1683 | PR #1858
-_ci_dockerfile_final_image() {
-    local dockerfile="$1" line instruction remainder image alias name value token
-    local seen_from=0 final_image=""
-    local -A global_args=() stage_images=()
-    local produced produced_rc=0
-    produced="$(_ci_dockerfile_logical_lines "${dockerfile}")" || produced_rc=$?
-    _ci_producer_ok "${produced_rc}" 0 || return 2
-    while IFS= read -r line || [ -n "${line}" ]; do
-        line="${line#"${line%%[![:space:]]*}"}"
-        instruction="${line%%[[:space:]]*}"
-        remainder="${line#"${instruction}"}"
-        remainder="${remainder#"${remainder%%[![:space:]]*}"}"
-        if [ "${seen_from}" -eq 0 ] && [[ "${instruction,,}" == "arg" ]]; then
-            name="${remainder%%=*}"
-            if [[ "${remainder}" == *=* ]]; then
-                value="${remainder#*=}"
-                value="${value%\"}"; value="${value#\"}"
-                value="${value%\'}"; value="${value#\'}"
-                global_args["${name}"]="${value}"
-            fi
-            continue
-        fi
-        [[ "${instruction,,}" == "from" ]] || continue
-        seen_from=1
-        remainder="${remainder#--platform=* }"
-        image="${remainder%%[[:space:]]*}"
-        while [[ "${image}" =~ (\$\{([A-Za-z_][A-Za-z0-9_]*)(:-[^}]*)?\}|\$([A-Za-z_][A-Za-z0-9_]*)) ]]; do
-            token="${BASH_REMATCH[1]}"
-            name="${BASH_REMATCH[2]:-${BASH_REMATCH[4]}}"
-            if [[ ! -v "global_args[${name}]" ]]; then
-                local sot_val
-                if sot_val="$(_ci_sot_base_image_arg "${name}")"; then
-                    global_args["${name}"]="${sot_val}"
-                else
-                    # What: leave non-base-image ARGs opaque
-                    # Why: builder-stage ARGs are not bases
-                    # From: Issue #1683
-                    break
-                fi
-            fi
-            image="${image/"${token}"/${global_args[${name}]}}"
-        done
-        if [[ -v "stage_images[${image,,}]" ]]; then
-            image="${stage_images[${image,,}]}"
-        fi
-        alias=""
-        if [[ "${remainder}" =~ [[:space:]][Aa][Ss][[:space:]]+([^[:space:]]+)[[:space:]]*$ ]]; then
-            alias="${BASH_REMATCH[1],,}"
-            stage_images["${alias}"]="${image}"
-        fi
-        final_image="${image}"
-    done <<<"${produced}"
-    if [ -z "${final_image}" ]; then
-        ci_log "[CI-ERROR-CHECK-0031]" "path=\"${dockerfile}\" reason=\"no FROM instruction found\""
-        return 2
-    fi
-    # What: resolve only final base image
-    # Why: builder-stage ARGs (BUILD_TOOLS_IMAGE) opaque
-    # From: Issue #1683
-    if [[ "${final_image}" == *'$'* ]]; then
-        ci_log "[CI-ERROR-CHECK-0099]" "path=\"${dockerfile}\" reason=\"unresolved ARG in final FROM: ${final_image}\""
-        return 2
-    fi
-    printf '%s\n' "${final_image}"
-}
-
-# What: Fail if one docker group's Dockerfiles diverge.
-# Why: the grouped-PR premise needs one shared base image.
-# From: Issue #1683 | PR #1858
-_ci_check_dependabot_docker_base_consistency() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
-    local dependabot_file
-    dependabot_file="$(_ci_repo_path CI_DEPENDABOT_FILE "${repo_root}")" || return 2
-    if [ ! -f "${dependabot_file}" ]; then
-        ci_log "[CI-ERROR-CHECK-0027]" "path=\"${dependabot_file}\" reason=\"dependabot.yml not found\""
-        return 2
-    fi
-    local -a entries=()
-    local line
-    local produced produced_rc=0
-    produced="$(_ci_dependabot_docker_entries "${dependabot_file}")" || produced_rc=$?
-    _ci_producer_ok "${produced_rc}" 0 || return 2
-    while IFS= read -r line; do
-        [ -n "${line}" ] && entries+=("${line}")
-    done <<<"${produced}"
-    if [ "${#entries[@]}" -eq 0 ]; then
-        ci_log "[CI-ERROR-CHECK-0028]" "path=\"${dependabot_file}\" reason=\"no docker-ecosystem directories found\""
-        return 2
-    fi
-    local -A base_image_of=()
-    # What: dirs_seen = declared; blocks_seen = resolved.
-    # Why: a declared but missing dir is a 2nd failure kind.
-    # From: Issue #1683 | PR #1858
-    local -a declared_blocks=() dirs_seen=() blocks_seen=() missing=()
-    local entry block dir dockerfile image
-    for entry in "${entries[@]}"; do
-        block="${entry%%$'\t'*}"
-        dir="${entry#*$'\t'}"
-        if [ "${dir}" = "@BLOCK@" ]; then
-            declared_blocks+=("${block}")
-            continue
-        fi
-        dirs_seen+=("${block}")
-        dockerfile="${repo_root}${dir}/Dockerfile"
-        if [ ! -f "${dockerfile}" ]; then
-            missing+=("${dockerfile}")
-            continue
-        fi
-        image="$(_ci_dockerfile_final_image "${dockerfile}")" || return 2
-        base_image_of["${block}"$'\t'"${dockerfile}"]="${image}"
-        blocks_seen+=("${block}")
-    done
-    local b
-    for b in "${declared_blocks[@]}"; do
-        case " ${dirs_seen[*]:-} " in
-            *" ${b} "*) ;;
-            *)
-                ci_log "[CI-ERROR-CHECK-0029]" "reason=\"docker-ecosystem block #${b} has no parseable directory entries\""
-                return 2
-                ;;
-        esac
-    done
-    if [ "${#missing[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0030]" "reason=\"no Dockerfile for a dependabot.yml docker directory\"" "$(printf '%s\n' "${missing[@]}")"
-        return 2
-    fi
-    local -a distinct_blocks=()
-    local produced produced_rc=0
-    produced="$(printf '%s\n' "${blocks_seen[@]}" | sort -un)" || produced_rc=$?
-    _ci_producer_ok "${produced_rc}" 0 || return 2
-    while IFS= read -r b; do [ -n "${b}" ] && distinct_blocks+=("${b}"); done <<<"${produced}"
-    local -a viol=()
-    local key key_block key_dockerfile
-    for b in "${distinct_blocks[@]}"; do
-        local -a block_images=()
-        for key in "${!base_image_of[@]}"; do
-            key_block="${key%%$'\t'*}"
-            [ "${key_block}" = "${b}" ] || continue
-            block_images+=("${base_image_of[${key}]}")
-        done
-        local distinct_count
-        distinct_count="$(printf '%s\n' "${block_images[@]}" | sort -u | awk 'NF {n++} END {print n+0}')"
-        if [ "${distinct_count}" -gt 1 ]; then
-            viol+=("block #${b} diverges:")
-            for key in "${!base_image_of[@]}"; do
-                key_block="${key%%$'\t'*}"
-                [ "${key_block}" = "${b}" ] || continue
-                key_dockerfile="${key#*$'\t'}"
-                viol+=("  ${key_dockerfile}: ${base_image_of[${key}]}")
-            done
-        fi
-    done
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0032]" "reason=\"dependabot docker group base-image drift\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'dependabot-docker-base-consistency=clean dockerfiles=%s blocks=%s\n' \
-        "${#base_image_of[@]}" "${#distinct_blocks[@]}"
 }
 
 # What: Fail unless prod install paths stay prebuilt-only.
@@ -11411,7 +11190,6 @@ ci_cmd_check_all() {
     local -a repo_wide=(file-headers action-node-versions naming-consistency \
         workflow-line-limit stable-external-images compose-healthchecks \
         proxy-cache-env-doc-drift \
-        dependabot-docker-base-consistency \
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
         docker-socket-proxy netdata-isolation syslog-logs-volume proxy-cert-volume proxy-nginx-policy \
         quickstart-required-env dhcp-proxy-env \
@@ -11473,7 +11251,6 @@ ci_cmd_check() {
         compose-healthchecks) _ci_check_compose_healthchecks "$@" ;;
         proxy-cache-env-doc-drift) _ci_check_proxy_cache_env_doc_drift "$@" ;;
         changelog-direct-edit) _ci_check_changelog_direct_edit "$@" ;;
-        dependabot-docker-base-consistency) _ci_check_dependabot_docker_base_consistency "$@" ;;
         prebuilt-prod) _ci_check_prebuilt_prod "$@" ;;
         prod-state-wiring) _ci_check_prod_state_wiring "$@" ;;
         compose-config) _ci_check_compose_config "$@" ;;

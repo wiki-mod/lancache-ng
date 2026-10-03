@@ -1579,15 +1579,12 @@ omitted):**
     recurring claim (that every Docker directory `.github/dependabot.yml`
     groups into one PR shares an identical final-stage base image) is
     concrete and mechanically checkable, unlike the general class this
-    exception covers -- `scripts/tracked/check-dependabot-docker-base-consistency.sh`
-    (wired into the `file-headers-check` composite action) now fails CI if
-    any listed Dockerfile's final `FROM` line ever diverges from the
-    others, with bats coverage
-    (`tests/bats/check_dependabot_docker_base_consistency.bats`, including a
-    real-repository self-check) proving both the passing and failing path --
-    see that file's own case count directly rather than a number restated
-    here, which has already drifted stale more than once as cases were
-    added.
+    exception covers. **Updated 2026-10-03 (CI 2.0)**: the check that
+    enforced it is removed. Every service Dockerfile now takes its base
+    image from the SOT (`base_images`, passed in as a build arg; `FROM
+    ${ALPINE_IMAGE:-scratch}`), so Dependabot can no longer bump a `FROM`
+    line and the grouped-PR premise is gone; the one base-image version has
+    a single owner, the SOT.
     The general exception below still stands for any *other* config-file
     comment's factual claim, which remains genuinely hard to check
     mechanically.
