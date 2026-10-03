@@ -2497,6 +2497,10 @@ EOF
     [ "${lines[0]}" = v1.2.3 ]; [ "${lines[1]}" = ch-a ]; [ "${#lines[@]}" -eq 2 ]
     GITHUB_REF=refs/tags/v1.2.3-rc.4 CI_PROMOTE_REQUESTED_CHANNEL='' run _ci_promote_targets_for_ref
     [ "${output}" = v1.2.3-rc.4 ]
+    GITHUB_REF=refs/tags/v1.2 CI_PROMOTE_REQUESTED_CHANNEL='' run _ci_promote_targets_for_ref
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-RELEASE-0002]"* ]]
+    GITHUB_REF=refs/tags/build-7 CI_PROMOTE_REQUESTED_CHANNEL='' run _ci_promote_targets_for_ref
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-RELEASE-0002]"* ]]
     GITHUB_REF=refs/heads/b-a CI_PROMOTE_REQUESTED_CHANNEL=ch-b run _ci_promote_targets_for_ref
     [ "${lines[0]}" = ch-a ]; [ "${lines[1]}" = ch-b ]; [ "${#lines[@]}" -eq 2 ]
     GITHUB_REF=refs/heads/b-a CI_PROMOTE_REQUESTED_CHANNEL=ch-a run _ci_promote_targets_for_ref

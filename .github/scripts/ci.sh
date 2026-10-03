@@ -3998,7 +3998,7 @@ _ci_promote_targets_for_ref() {
     {
         case "${ref}" in
             refs/heads/*) _ci_channels_where ref "${ref}" || return 2 ;;
-            refs/tags/v*)
+            refs/tags/*)
                 tag="${ref#refs/tags/}"
                 pre="$(_ci_release_prerelease "${tag}")" || return "$?"
                 printf '%s\n' "${tag}"
@@ -4501,13 +4501,19 @@ ci_cmd_release_vex() {
 # Why: ls-remote skips deep fetch; empty pre-1.0.
 # From: Issue #1683
 _ci_last_release_tag() {
-    local below="${1:-}" refs tags
-    refs="$(_ci_capture 0 git ls-remote --tags --refs origin 'refs/tags/v[0-9]*.[0-9]*.[0-9]*')" || return 2
-    tags="$(_ci_capture 1 grep -oE 'refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' <<<"${refs}")" || return 2
+    local below="${1:-}" refs tags="" t
+    refs="$(_ci_capture 0 git ls-remote --tags --refs origin)" || return 2
+    # What: keep plain release tags via the one tag grammar.
+    # Why: no second tag pattern beside the kind owner.
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r t; do
+        t="${t##*refs/tags/}"
+        if [ "$(_ci_release_tag_kind "${t}")" = false ]; then tags="${tags}${t}"$'\n'; fi
+    done <<<"${refs}"
+    tags="${tags%$'\n'}"
     if [ -z "${tags}" ]; then
         return 0
     fi
-    tags="$(sed 's#^refs/tags/##' <<<"${tags}")"
     if [ -z "${below}" ]; then
         sort -V <<<"${tags}" | tail -n 1
         return 0
@@ -4524,12 +4530,13 @@ _ci_last_release_tag() {
 # Why: automated patch releases bump Z only, never rc/minor.
 # From: Issue #1683
 _ci_next_patch_tag() {
-    local tag="$1"
-    if [[ ! "${tag}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    local tag="$1" kind=""
+    if kind="$(_ci_release_tag_kind "${tag}")"; then :; fi
+    if [ "${kind}" != false ]; then
         ci_log "[CI-ERROR-RELEASE-0015]" "tag=\"${tag}\" reason=\"not a plain vX.Y.Z tag; not auto-bumped\""
         return 2
     fi
-    printf 'v%s.%s.%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "$(( 10#${BASH_REMATCH[3]} + 1 ))"
+    printf '%s.%s\n' "${tag%.*}" "$(( 10#${tag##*.} + 1 ))"
 }
 
 # What: true if published image differs from base.
