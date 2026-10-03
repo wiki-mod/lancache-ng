@@ -12644,6 +12644,50 @@ CASES
     done
 }
 
+@test "setup ui override validators per value" {
+    # What: ui channel, cache size and dhcp mode overrides.
+    # Why: a ui-written value reaches .env only if valid.
+    # From: Issue #1683 | PR #1858
+    local root fn v want
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/setup.sh" lancache_ui_channel_override_is_valid \
+        lancache_ui_cache_max_gb_override_is_valid lancache_ui_dhcp_mode_override_is_valid
+    while IFS='|' read -r fn v want; do
+        if "lancache_ui_${fn}_override_is_valid" "${v}"; then [ "${want}" = ok ]; else [ "${want}" = bad ]; fi \
+            || { echo "${fn} '${v}' want ${want}"; return 1; }
+    done <<'CASES'
+channel|stable|ok
+channel|nightly|ok
+channel|latest|bad
+channel|pinned|bad
+channel|edge|bad
+channel|dev|bad
+channel||bad
+channel|STABLE|bad
+channel|stable; rm -rf /|bad
+cache_max_gb|1|ok
+cache_max_gb|50|ok
+cache_max_gb|2000|ok
+cache_max_gb|008|ok
+cache_max_gb|0|bad
+cache_max_gb|000|bad
+cache_max_gb|-5|bad
+cache_max_gb|50.5|bad
+cache_max_gb||bad
+cache_max_gb| 50 |bad
+cache_max_gb|50; rm -rf /|bad
+cache_max_gb|1+1|bad
+dhcp_mode|disabled|ok
+dhcp_mode|kea|ok
+dhcp_mode|dnsmasq-proxy|ok
+dhcp_mode|dnsmasq-relay|ok
+dhcp_mode|true|bad
+dhcp_mode|false|bad
+dhcp_mode||bad
+dhcp_mode|kea; rm -rf /|bad
+CASES
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.
