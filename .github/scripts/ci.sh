@@ -9629,7 +9629,7 @@ _ci_closing_refs() {
 # Why: GitHub auto-closes only on default-branch merges.
 # From: Issue #1137 | PR #1858
 ci_cmd_close_linked_issues() {
-    local dry=0 number="" repo raw rows pr body base url merge section count refs
+    local dry=0 number="" repo raw rows pr body base url merge heading section count refs
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --dry-run) dry=1; shift ;;
@@ -9684,15 +9684,16 @@ ci_cmd_close_linked_issues() {
     base="$(_ci_capture 0 jq -r '.[0].baseRefName' <<< "${rows}")" || return 2
     url="$(_ci_capture 0 jq -r '.[0].url' <<< "${rows}")" || return 2
     merge="$(_ci_capture 0 jq -r '.[0].mergeCommit.oid // ""' <<< "${rows}")" || return 2
-    section="$(_ci_pr_section "${body}" "Linked Issues")" || return 2
+    heading="$(_ci_block_entry_field pr_policy "" linked_section)" || return 2
+    section="$(_ci_pr_section "${body}" "${heading}")" || return 2
     count="${section%%$'\n'*}"
     if [ "${section}" = "${count}" ]; then section=""; else section="${section#*$'\n'}"; fi
     if [ "${count}" -eq 0 ]; then
-        printf 'close-linked-issues=clean pr=%s reason="no Linked Issues section"\n' "${pr}"
+        printf 'close-linked-issues=clean pr=%s reason="no %s section"\n' "${pr}" "${heading}"
         return 0
     fi
     if [ "${count}" -gt 1 ]; then
-        ci_log "[CI-ERROR-LINK-0007]" "pr=${pr} count=${count} reason=\"Linked Issues heading is ambiguous; nothing closed\""
+        ci_log "[CI-ERROR-LINK-0007]" "pr=${pr} count=${count} reason=\"${heading} heading is ambiguous; nothing closed\""
         return 1
     fi
     refs="$(_ci_closing_refs "${section}")" || return 2

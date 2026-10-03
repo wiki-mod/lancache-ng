@@ -6864,6 +6864,11 @@ _lk_setup() {
     [ "${status}" -eq 2 ]; [[ "${output}" == *"CI-ERROR-LINK-0012"*"closed=1 failed=1"*"#1: lookup failed"* ]]
     LK_BODY=$'## Linked Issues\nCloses #1\n## Linked Issues\nCloses #2' run bash "${CI_SH}" close-linked-issues
     [ "${status}" -eq 1 ]; [[ "${output}" == *"CI-ERROR-LINK-0007"* ]]
+    sed 's/^  linked_section: Linked Issues$/  linked_section: Fixes/' "${CI_MANIFEST_SOURCE}" > "${BATS_TEST_TMPDIR}/lk.yml"
+    : > "${LK_LOG}"
+    CI_MANIFEST="${BATS_TEST_TMPDIR}/lk.yml" run bash "${CI_SH}" close-linked-issues
+    [ "${status}" -eq 0 ]; [[ "${output}" == *'clean pr=9 reason="no Fixes section"'* ]]
+    [ ! -s "${LK_LOG}" ]
 }
 
 # What: fixture repo + a fake action-manifest resolver.
