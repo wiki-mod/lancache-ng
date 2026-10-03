@@ -751,6 +751,19 @@ ci_variables:
   PR_TITLE_LINT_MODE: warn
   CHRONOLOGY_WARN_ONLY: 0
 
+# What: files the header and prose checks skip, by path.
+# Why: vendored or generated content carries no header.
+# From: Issue #1683 | PR #1858
+file_headers:
+  exempt:
+    - services/dhcp/kea-dhcp4.conf
+    - services/dhcp/kea-ctrl-agent.conf
+    - services/dhcp/kea-dhcp-ddns.conf
+    - services/ui/src/static/chart.umd.min.js
+    - services/ui/src/static/admin.css
+    - services/proxy/public_suffix_list.dat
+    - services/dns/schema.sqlite3.sql
+
 # What: CI variables each build type passes as build-args.
 # Why: builders read repo/org vars; no YAML or literal copy.
 # From: Issue #1683 | PR #1858

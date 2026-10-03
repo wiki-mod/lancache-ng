@@ -7494,6 +7494,16 @@ _ci_check_line_endings() {
     printf 'line-endings=clean files=%s\n' "${#files[@]}"
 }
 
+# What: load the path exemptions from the SOT, once.
+# Why: a failed read must fail the check, never pass it.
+# From: Issue #1683 | PR #1858
+_ci_prose_exempt_load() {
+    local list state
+    list="$(_ci_block_entry_list file_headers "" exempt)" || return 2
+    state="$(_ci_block_entry_field release "" validation_state)" || return 2
+    _CI_PROSE_EXEMPT="${list}"$'\n'"${state}"
+}
+
 # What: True for a path exempt from prose-comment checks.
 # Why: One owner for header + review-chronology exclusions.
 # From: Issue #1683
@@ -7502,14 +7512,15 @@ _ci_prose_excluded() {
         *.md|VERSION|LICENSE|COPYING) return 0 ;;
         .env|.env.example|*/.env|*/.env.example) return 0 ;;
         Cargo.lock|*/Cargo.lock|.gitkeep|*/.gitkeep) return 0 ;;
-        services/dhcp/kea-dhcp4.conf|services/dhcp/kea-ctrl-agent.conf|services/dhcp/kea-dhcp-ddns.conf) return 0 ;;
-        docs/validation-state.json|*/docs/validation-state.json) return 0 ;;
-        services/ui/src/static/chart.umd.min.js|services/ui/src/static/admin.css) return 0 ;;
-        services/proxy/public_suffix_list.dat|services/dns/schema.sqlite3.sql) return 0 ;;
         */fuzz/corpus/*|fuzz/corpus/*) return 0 ;;
         *.png|*.jpg|*.jpeg|*.gif|*.ico|*.svg|*.woff|*.woff2|*.ttf|*.eot|*.crt|*.key|*.pem) return 0 ;;
-        *) return 1 ;;
     esac
+    local e
+    while IFS= read -r e; do
+        [ -n "${e}" ] || continue
+        [ "$1" = "${e}" ] || [[ "$1" == */"${e}" ]] && return 0
+    done <<<"${_CI_PROSE_EXEMPT:-}"
+    return 1
 }
 
 # What: Print the native project+SPDX header for a path.
@@ -7551,6 +7562,7 @@ _ci_header_line1_ok() {
 _ci_check_file_headers() {
     local -a _ci_override=("$@") files=()
     _ci_scan_files files _ci_override || return 2
+    _ci_prose_exempt_load || return 2
     local path exp p_line s_line legacy line pc sc scnt lc
     local -a fails=() scan=()
     for path in "${files[@]}"; do
@@ -7891,6 +7903,7 @@ _ci_check_review_chronology() {
     else
         _ci_scan_files files _ci_override || return 2
     fi
+    _ci_prose_exempt_load || return 2
     local path out ln joined fnums num from_lines
     local -a viol=() dup_viol=()
     for path in "${files[@]}"; do

@@ -5616,6 +5616,17 @@ CASES
     run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/bad.sh"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0003"* ]]
+    # What: a headerless file is exempt only if SOT-listed.
+    # Why: path exemptions are SOT data, not ci.sh literals.
+    # From: Issue #1683 | PR #1858
+    mkdir -p "${BATS_TEST_TMPDIR}/x/services/dns"
+    printf 'CREATE TABLE t (a int);\n' > "${BATS_TEST_TMPDIR}/x/services/dns/schema.sqlite3.sql"
+    run bash "${CI_SH}" check file-headers "${BATS_TEST_TMPDIR}/x/services/dns/schema.sqlite3.sql"
+    [ "${status}" -eq 0 ] || { echo "listed: ${output}"; return 1; }
+    grep -v 'schema.sqlite3.sql' "${CI_MANIFEST}" > "${BATS_TEST_TMPDIR}/hdr.yml"
+    CI_MANIFEST="${BATS_TEST_TMPDIR}/hdr.yml" run bash "${CI_SH}" check file-headers \
+        "${BATS_TEST_TMPDIR}/x/services/dns/schema.sqlite3.sql"
+    [ "${status}" -ne 0 ] || { echo "unlisted passed: ${output}"; return 1; }
 }
 
 @test "check file-headers fails an extension with no native syntax" {
