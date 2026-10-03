@@ -619,6 +619,26 @@ CASES
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"[CI-ERROR-FETCH-0002]"* ]]
     [ "$(grep -c missing "${log}")" -eq 1 ]
+    # What: apk-pin-install fills url, verifies, unpacks.
+    # Why: SOT pin owns url and sha; no Dockerfile logic.
+    # From: Issue #1683 | PR #1858
+    local pkg="${BATS_TEST_TMPDIR}/pkg" root="${BATS_TEST_TMPDIR}/root" apk="${BATS_TEST_TMPDIR}/t.apk" sha cp
+    mkdir -p "${pkg}/usr/sbin" "${root}"
+    printf 'x\n' > "${pkg}/usr/sbin/tool"; printf 'pkg\n' > "${pkg}/.PKGINFO"
+    tar -czf "${apk}" -C "${pkg}" .PKGINFO usr
+    sha="$(sha256sum "${apk}" | cut -d' ' -f1)"
+    cp="$(_stub cp 'echo "$1" >> "'"${log}"'"; cp "'"${apk}"'" "$2"')"
+    : > "${log}"
+    CI_HTTP_DOWNLOAD_CMD="${cp}" CI_APK_ROOT="${root}" run ci_cmd_apk_pin_install \
+        'http://r.test/@BRANCH@/main/@ARCH@/tool-@VERSION@.apk' 1.0-r0 v3.20 x86_64 "${sha}"
+    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
+    [ "$(cat "${log}")" = 'http://r.test/v3.20/main/x86_64/tool-1.0-r0.apk' ]
+    [ -f "${root}/usr/sbin/tool" ]; [ ! -e "${root}/.PKGINFO" ]
+    CI_HTTP_DOWNLOAD_CMD="${cp}" CI_APK_ROOT="${root}" run ci_cmd_apk_pin_install \
+        'http://r.test/@BRANCH@/@ARCH@/@VERSION@.apk' 1.0-r0 v3.20 x86_64 "$(printf '1%.0s' {1..64})"
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-FETCH-0003]"* ]]
+    run ci_cmd_apk_pin_install '' 1.0-r0 v3.20 x86_64 "${sha}"
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-APKSETUP-0006]"* ]]
 }
 
 @test "codeql-analyze fails closed without a SOT language or context" {
@@ -5254,7 +5274,7 @@ CASES
     local name main pump ca want code
     export RB_LOG="${BATS_TEST_TMPDIR}/rb.log"
     mkdir -p "${bin}"
-    _tool_stub "${bin}" distcc-pump <<'STUB'
+    _tool_stub "${bin}" pump <<'STUB'
 echo "pump $*" >> "${RB_LOG}"
 if [ -n "${PUMP_FAIL:-}" ]; then
     echo pump-boom >&2
@@ -10159,8 +10179,8 @@ _version_fixture_repo() {
     dep="$(_pin_dep)"; up="${dep^^}"; up="${up//-/_}"
     [[ "${output}" == *"key=${dep}.consumer.${up}_SHA256 shape=bare"* ]]
     [[ "${output}" == *"release-version=$(_ci_block_entry_field release "" version) consumers=clean"* ]]
-    # What: each release-version consumer drift has its code.
-    # Why: Cargo, members and VERSION follow release.version.
+    # What: each release-version drift has its own code.
+    # Why: Cargo, members, VERSION follow release.version.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/rv" m="${BATS_TEST_TMPDIR}/rv.yml"
     mkdir -p "${r}/a"

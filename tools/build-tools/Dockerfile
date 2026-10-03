@@ -16,6 +16,7 @@ ARG ALPINE_IMAGE
 # From: Issue #1683
 ARG DHCLIENT_VERSION
 ARG DHCLIENT_ALPINE_BRANCH
+ARG DHCLIENT_URL
 ARG DHCLIENT_ARCH
 ARG DHCLIENT_SHA256
 
@@ -31,6 +32,7 @@ LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and develope
 # From: Issue #1683
 ARG DHCLIENT_VERSION
 ARG DHCLIENT_ALPINE_BRANCH
+ARG DHCLIENT_URL
 ARG DHCLIENT_ARCH
 ARG DHCLIENT_SHA256
 
@@ -70,42 +72,12 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
-# What: distcc-pump name and compiler masquerade links.
-# Why: rust-build runs distcc-pump and the distcc dir.
-# From: Issue #1683
-RUN ln -sf /usr/bin/pump /usr/bin/distcc-pump \
-    && distcc_bin="$(command -v distcc)" \
-    && mkdir -p /usr/local/lib/distcc \
-    && for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done
-
-# What: verifies the apk-installed curl actually runs
-# Why: catches a missing shared-lib chain at build time
-# From: Issue #1781 | PR #1783
-RUN curl --version >/dev/null
-
-# What: switches SHELL to bash for every RUN step below.
-# Why: pipefail guards the dhclient checksum pipe.
-# From: Issue #1095
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-
-# What: reuse the SOT-pinned Alpine ISC dhclient apk.
-# Why: newer Alpine dropped it; musl build, real dhclient.
-# From: Issue #1683
-RUN set -euo pipefail; \
-    dh_tmp="$(mktemp -d -p /var/tmp)"; \
-    trap 'rm -rf "$dh_tmp"' EXIT; \
-    curl -fsSL \
-      "http://dl-cdn.alpinelinux.org/alpine/${DHCLIENT_ALPINE_BRANCH}/main/${DHCLIENT_ARCH}/dhclient-${DHCLIENT_VERSION}.apk" \
-      -o "$dh_tmp/dhclient.apk"; \
-    printf '%s  %s\n' "${DHCLIENT_SHA256}" "$dh_tmp/dhclient.apk" | sha256sum -c -; \
-    tar -xzf "$dh_tmp/dhclient.apk" -C /; \
-    rm -f /.PKGINFO /.SIGN.* /.pre-install /.post-install /.trigger; \
-    dhclient --version
-
-# What: symlink musl-gcc to gcc; gcc targets musl already
-# Why: required by dns/ui/watchdog; avoids duplicate binary
-# From: Issue #1095 | PR #1691
-RUN ln -sf /usr/bin/gcc /usr/local/bin/musl-gcc
+# What: install the SOT-pinned ISC dhclient apk via ci.sh.
+# Why: newer Alpine dropped it; ci.sh owns fetch + verify.
+# From: Issue #1683 | PR #1858
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    bash /usr/local/bin/ci.sh apk-pin-install "${DHCLIENT_URL}" "${DHCLIENT_VERSION}" \
+      "${DHCLIENT_ALPINE_BRANCH}" "${DHCLIENT_ARCH}" "${DHCLIENT_SHA256}"
 
 WORKDIR /workspace
 

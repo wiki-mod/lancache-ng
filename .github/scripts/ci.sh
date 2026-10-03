@@ -42,7 +42,7 @@ CI_TMPDIR="${CI_TMPDIR:-/var/tmp}"
 # From: Issue #1683
 declare -A CI_DISPATCH=(
     [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-config]=ci_cmd_codeql_config [codeql-analyze]=ci_cmd_codeql_analyze [identity]=ci_cmd_identity
-    [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup
+    [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [apk-pin-install]=ci_cmd_apk_pin_install
     [build-tools]=ci_cmd_build_tools [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship
     [test]=ci_cmd_test [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
     [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
@@ -2311,6 +2311,34 @@ ci_cmd_apk_setup() {
     [ -z "${bundle}" ] || rm -f "${bundle}"
 }
 
+# What: fetch, verify and unpack one SOT-pinned apk file.
+# Why: a package no current repo has; the SOT owns the pin.
+# From: Issue #1683 | PR #1858
+ci_cmd_apk_pin_install() {
+    local tpl="${1:-}" version="${2:-}" branch="${3:-}" arch="${4:-}" sha="${5:-}" root="${CI_APK_ROOT:-}" url dir out
+    if [ -z "${tpl}" ] || [ -z "${version}" ] || [ -z "${branch}" ] || [ -z "${arch}" ]; then
+        ci_log "[CI-ERROR-APKSETUP-0006]" "url=\"${tpl}\" version=\"${version}\" branch=\"${branch}\" arch=\"${arch}\" reason=\"url template, version, branch and arch required\""
+        return 2
+    fi
+    url="${tpl//@VERSION@/${version}}"; url="${url//@BRANCH@/${branch}}"; url="${url//@ARCH@/${arch}}"
+    dir="$(_ci_mktemp -d -p "${CI_TMPDIR}")" || return 2
+    _ci_fetch_verified "${url}" "${sha}" "${dir}/pkg.apk" || { rm -rf "${dir}"; return 2; }
+    if ! out="$(tar -xzf "${dir}/pkg.apk" -C "${root:-/}" 2>&1)"; then
+        ci_error "[CI-ERROR-APKSETUP-0007]" "url=\"${url}\" root=\"${root:-/}\" reason=\"apk not unpacked\"" "${out}"
+        rm -rf "${dir}"
+        return 2
+    fi
+    rm -rf "${dir}"
+    # What: drop apk metadata files the unpack left in root.
+    # Why: they are package-db input, not image content.
+    # From: Issue #1683 | PR #1858
+    if ! out="$(cd -- "${root:-/}" && rm -f .PKGINFO .SIGN.* .pre-install .post-install .trigger 2>&1)"; then
+        ci_error "[CI-ERROR-APKSETUP-0008]" "root=\"${root:-/}\" reason=\"apk metadata not removed\"" "${out}"
+        return 2
+    fi
+    printf 'apk-pin-install=ok url=%s\n' "${url}"
+}
+
 # What: one apk step, output shown, coded error with raw.
 # Why: every apk call in apk-setup fails the same way.
 # From: Issue #1683 | PR #1858
@@ -2338,7 +2366,7 @@ _ci_rust_stop_pump() {
     local out
     [ "${_CI_RB_DISTCC}" = 1 ] || return 0
     _CI_RB_DISTCC=0
-    out="$(distcc-pump --shutdown 2>&1)" && return 0
+    out="$(pump --shutdown 2>&1)" && return 0
     ci_error "[CI-ERROR-RUSTBUILD-0007]" "reason=\"distcc-pump shutdown failed\"" "${out}"
     return 1
 }
@@ -2654,7 +2682,7 @@ ci_cmd_rust_build() {
                 export DISTCC_POTENTIAL_HOSTS="${distcc_pump_hosts}"
                 unset DISTCC_HOSTS
                 local distcc_pump_env
-                if ! distcc_pump_env="$(distcc-pump --startup 2>"${distcc_probe_dir}/distcc-pump.log")"; then
+                if ! distcc_pump_env="$(pump --startup 2>"${distcc_probe_dir}/distcc-pump.log")"; then
                     ci_error "[CI-WARN-RUSTBUILD-0023]" "reason=\"distcc pump unavailable; local C compiler\"" "$(cat "${distcc_probe_dir}/distcc-pump.log")"
                     disable_distcc; rm -rf "${distcc_probe_dir}"; return 0
                 fi
