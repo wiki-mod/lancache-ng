@@ -11520,6 +11520,117 @@ CASES
     done
 }
 
+@test "ntp config renders and validates exactly per input" {
+    # What: server/pool/allow lines per input; validator.
+    # Why: chrony denies all clients without an allow line.
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}/chrony.conf.template" c="${BATS_TEST_TMPDIR}/chrony.conf"
+    local case up allow want vrc vmsg e
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/services/ntp/entrypoint.sh" is_ip_literal render_ntp_config validate_ntp_config
+    for e in 192.0.2.1 2606:4700:f1::1 ::1; do
+        is_ip_literal "${e}" || { echo "${e} not literal"; return 1; }
+    done
+    for e in 0.debian.pool.ntp.org time.cloudflare.com 1.2.3; do
+        if is_ip_literal "${e}"; then echo "${e} literal"; return 1; fi
+    done
+    printf 'driftfile /var/lib/chrony/chrony.drift\n' > "${t}"
+    while IFS='|' read -r case NTP_UPSTREAM_SERVERS NTP_ALLOWED_CLIENT_CIDRS up allow vrc vmsg; do
+        [ "${NTP_UPSTREAM_SERVERS}" != . ] || NTP_UPSTREAM_SERVERS=""
+        [ "${NTP_ALLOWED_CLIENT_CIDRS}" != . ] || NTP_ALLOWED_CLIENT_CIDRS=""
+        export NTP_UPSTREAM_SERVERS NTP_ALLOWED_CLIENT_CIDRS
+        echo stale > "${c}"
+        render_ntp_config "${c}" "${t}"
+        want="driftfile /var/lib/chrony/chrony.drift##"
+        want+="# Upstream servers (NTP_UPSTREAM_SERVERS) -- rendered at container start."
+        [ "${up}" = . ] || want+="#${up}"
+        want+="### LAN client access (NTP_ALLOWED_CLIENT_CIDRS) -- rendered at container start.#${allow}"
+        [ "$(paste -sd'#' "${c}")" = "${want}" ] || { echo "${case}:"; cat "${c}"; return 1; }
+        run validate_ntp_config "${c}"
+        [ "${status}" -eq "${vrc}" ] || { echo "${case}: validate rc ${status}"; return 1; }
+        [[ "${output}" == *"${vmsg}"* ]] || { echo "${case}: ${output}"; return 1; }
+    done <<'CASES'
+pool|0.debian.pool.ntp.org|.|pool 0.debian.pool.ntp.org iburst|allow 0.0.0.0/0#allow ::/0|0|
+literal|192.0.2.1 2606:4700:f1::1|.|server 192.0.2.1 iburst#server 2606:4700:f1::1 iburst|allow 0.0.0.0/0#allow ::/0|0|
+cidrs|192.0.2.1|192.168.0.0/16 10.0.0.0/8|server 192.0.2.1 iburst|allow 192.168.0.0/16#allow 10.0.0.0/8|0|
+noserver|.|10.0.0.0/8|.|allow 10.0.0.0/8|1|no pool/server directive
+CASES
+    printf 'server 192.0.2.1 iburst\n' > "${c}"
+    run validate_ntp_config "${c}"
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"no allow directive"* ]]
+}
+
+@test "ntp runtime helpers: pidfile, ownership, clock probe" {
+    # What: pidfile, chown, adjtimex probe, start flags.
+    # Why: a restart must start chronyd, degraded if needed.
+    # From: Issue #1683 | PR #1858
+    local root bin="${BATS_TEST_TMPDIR}/bin" d
+    local self case tick write msg
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/services/ntp/entrypoint.sh" _cleanup_stale_ntp_pidfile_core \
+        cleanup_stale_ntp_pidfile _fix_chrony_dir_ownership_core fix_chrony_dir_ownership clock_control_available
+    d="${BATS_TEST_TMPDIR}/run"
+    mkdir -p "${d}"
+    echo 1 > "${d}/chronyd.pid"
+    _cleanup_stale_ntp_pidfile_core "${d}/chronyd.pid"
+    [ ! -e "${d}/chronyd.pid" ]
+    run _cleanup_stale_ntp_pidfile_core "${d}/missing/chronyd.pid"
+    [ "${status}" -eq 0 ]
+    run type cleanup_stale_ntp_pidfile
+    [[ "${output}" == *"_cleanup_stale_ntp_pidfile_core /run/chrony/chronyd.pid"* ]]
+    run type fix_chrony_dir_ownership
+    [[ "${output}" == *"_fix_chrony_dir_ownership_core chrony:chrony /var/log/chrony /var/lib/chrony"* ]]
+    self="$(id -u):$(id -g)"
+    mkdir -p "${d}/log" "${d}/lib"
+    for case in 1 2; do
+        run _fix_chrony_dir_ownership_core "${self}" "${d}/log" "${d}/lib"
+        [ "${status}" -eq 0 ]
+        [ -z "${output}" ] || { echo "chown pass ${case}: ${output}"; return 1; }
+    done
+    [ "$(stat -c '%u:%g' "${d}/log" "${d}/lib" | sort -u)" = "${self}" ]
+    _tool_stub "${bin}" chown <<'STUB'
+echo "chown: changing ownership: Operation not permitted" >&2
+exit 1
+STUB
+    PATH="${bin}:${PATH}" run _fix_chrony_dir_ownership_core root:root "${d}/log" "${d}/lib"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"WARNING: could not chown ${d}/log"* ]]
+    rm -f "${bin}/chown"
+    while IFS='|' read -r case tick write msg; do
+        _tool_stub "${bin}" adjtimex <<STUB
+case " \$* " in
+    *" -t "*) [ "\$*" = "-q -t 10000" ] || exit 9; exit ${write} ;;
+    *) printf '%b' '${tick}' ;;
+esac
+STUB
+        PATH="${bin}:/usr/bin:/bin" run clock_control_available
+        if [ "${case}" = ok ]; then
+            [ "${status}" -eq 0 ] || { echo "${case}: rc ${status} ${output}"; return 1; }
+        else
+            [ "${status}" -ne 0 ] || { echo "${case}: probe passed"; return 1; }
+        fi
+        [[ "${output}" == *"${msg}"* ]] || { echo "${case}: ${output}"; return 1; }
+    done <<'CASES'
+ok|    -t  tick:         10000 us\n|0|
+denied|    -t  tick:         10000 us\n|1|
+noparse|garbage\n|0|ERROR: 'adjtimex' ran but its read-mode output did not contain a parseable tick value
+CASES
+    rm -f "${bin}/adjtimex"
+    mkdir -p "${d}/nobin"
+    run env PATH="${d}/nobin" "${BASH}" -c "$(declare -f clock_control_available); clock_control_available"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"is missing from this image"*"NOT the expected nested/LXC restriction"* ]]
+    grep -qx 'user chrony' "${root}/services/ntp/chrony.conf"
+    run awk '/^mkdir -p \/run\/chrony$/ { m = NR } /^NTP_CHRONYD_FLAGS=\(-F 2\)$/ { f = NR }
+        /^if clock_control_available; then$/ { i = NR } /^else$/ && i && !el { el = NR }
+        /^    NTP_CHRONYD_FLAGS\+=\(-x\)$/ { x = NR } /^fi$/ && el && !fi { fi = NR }
+        /^exec chronyd -n -f "\$NTP_RUNTIME_CONF" "\$\{NTP_CHRONYD_FLAGS\[@\]\}"$/ { ex = NR }
+        END { print (m && m < f && f < i && el < x && x < fi && fi < ex) ? "order-ok" : "m=" m " f=" f " i=" i " x=" x " ex=" ex }' \
+        "${root}/services/ntp/entrypoint.sh"
+    [ "${output}" = order-ok ]
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.
