@@ -6541,6 +6541,33 @@ Fixes the thing.
     printf 'pr_policy:\n  project_number: x\n' > "${m}"
     PR_LABELS_JSON='["bug"]' PR_MILESTONE_TITLE=v1 run bash "${CI_SH}" check pr-tracking-metadata
     [ "${status}" -eq 2 ]; [[ "${output}" == *"no numeric SOT pr_policy.project_number"* ]]
+    # What: SOT path labels per path; pr-labels adds them.
+    # Why: the labeler rules live on in the SOT and ci.sh.
+    # From: Issue #1683 | PR #1858
+    local row p want got lst="${BATS_TEST_TMPDIR}/changed" gh
+    export CI_MANIFEST="${CI_MANIFEST_SOURCE}"
+    while IFS='|' read -r p want; do
+        got="$(_ci_pr_labels_for "${p}" | paste -sd, -)"
+        [ "${got}" = "${want}" ] || { echo "${p}: got ${got} want ${want}"; return 1; }
+    done <<'ROWS'
+services/dns/nats-subscriber/src/main.rs|dns,pdns,rust
+README.md|documentation
+deploy/prod/docker-compose.yml|docker,setup
+tools/build-tools/Dockerfile|build-tools,docker
+.github/scripts/ci.sh|ci
+services/ntp/entrypoint.sh|ntp
+ROWS
+    printf 'README.md\n' > "${lst}"
+    gh="$(_stub gh 'printf "%s\n" "$*" >> "'"${BATS_TEST_TMPDIR}"'/gh.log"')"
+    GITHUB_EVENT_NAME=push run ci_cmd_pr_labels
+    [[ "${output}" == *'pr-labels=NOT-RUN reason="not a pull request"'* ]]
+    GITHUB_EVENT_NAME=pull_request PR_IS_FORK=true run ci_cmd_pr_labels
+    [[ "${output}" == *'pr-labels=NOT-RUN reason="fork PR'* ]]
+    GITHUB_EVENT_NAME=pull_request CHANGED_FILES="${lst}" PATH="${gh%/*}:${PATH}" run ci_cmd_pr_labels
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"pr-labels=added labels=documentation"* ]]
+    [ "$(cat "${BATS_TEST_TMPDIR}/gh.log")" = 'api -X POST repos/owner/fixture-repo/issues/12/labels -f labels[]=documentation' ]
+    GITHUB_EVENT_NAME=pull_request CHANGED_FILES="${BATS_TEST_TMPDIR}/none" run ci_cmd_pr_labels
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-PRLABELS-0001]"* ]]
 }
 
 @test "check pr-tracking-metadata board lookup: failed, hit, miss" {

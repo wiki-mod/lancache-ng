@@ -62,6 +62,7 @@ image_base:
 services:
   proxy:
     context: services/proxy
+    labels: [proxy, nginx]
     # What: named build contexts for COPY --from
     # Why: proxy consumes dns' cdn-domains file
     # From: Issue #1683
@@ -94,6 +95,7 @@ services:
       - 'v="$(nginx -V 2>&1)" && grep -q -- --with-stream_ssl_preread_module <<< "${v}"'
   dns:
     context: services/dns
+    labels: [dns, pdns]
     # What: named contexts for shared-secret and known-good
     # Why: entrypoint sources scripts/lib, not embedded.
     # From: Issue #858
@@ -124,6 +126,7 @@ services:
       - ldd /usr/local/bin/nats-subscriber
   watchdog:
     context: services/watchdog
+    labels: [watchdog]
     build_type: rust
     # What: the workspace crate (cargo -p) of this service.
     # Why: rust checks target crate not build context
@@ -138,6 +141,7 @@ services:
       - ldd /usr/local/bin/lancache-watchdog
   dhcp:
     context: services/dhcp
+    labels: [dhcp, kea]
     # What: named context for the shared-secret lib.
     # Why: entrypoint sources scripts/lib, not embedded.
     # From: Issue #858
@@ -165,6 +169,7 @@ services:
       - kea-dhcp4 -v
   dhcp-proxy:
     context: services/dhcp-proxy
+    labels: [dhcp-proxy, dnsmasq]
     # What: named context for the known-good lib.
     # Why: entrypoint sources scripts/lib, not embedded.
     # From: Issue #1683
@@ -185,6 +190,7 @@ services:
       - dnsmasq --version
   ntp:
     context: services/ntp
+    labels: [ntp]
     build_type: apk
     final_base: alpine
     runner: light
@@ -200,6 +206,7 @@ services:
       - chronyd -v
   syslog:
     context: services/syslog
+    labels: [syslog]
     # What: apk syslog-ng plus copied fluent-bit binary.
     # Why: No compile, prebuilt binary -> light runner.
     # From: Issue #1683
@@ -221,6 +228,7 @@ services:
       - syslog-ng --version
   ui:
     context: services/ui
+    labels: [admin-ui]
     build_type: rust
     # What: the workspace crate (cargo -p) of this service.
     # Why: rust checks target crate not build context
@@ -257,6 +265,7 @@ services:
 build_toolchain:
   build-tools:
     context: tools/build-tools
+    labels: [build-tools]
     build_type: toolchain
     final_base: alpine
     runner: light
@@ -586,6 +595,17 @@ release:
     protect_release_and_rollback_digests: true
     deletion_policy: manual-or-approved-automation-only
     unaggregated_grace_minutes: 1440
+
+# What: PR labels by changed path: area rules plus labels.
+# Why: service/toolchain labels apply under their context.
+# From: Issue #1683 | PR #1858
+pr_labels:
+  setup: [setup.sh, "deploy/**", "config/**"]
+  docker: ["deploy/**", "**/Dockerfile"]
+  rust: ["**/*.rs"]
+  ci: [".github/workflows/**", ".github/scripts/**", ".github/yaml/**"]
+  github_actions: [".github/workflows/**"]
+  documentation: ["docs/**", "**/*.md"]
 
 # What: Release notes: PR section, skip label, fallback.
 # Why: one owner for release-publish and CHANGELOG.md.

@@ -49,7 +49,7 @@ declare -A CI_DISPATCH=(
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-status]=ci_cmd_nightly_status
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [release]=ci_cmd_release [release-validation]=_ci_release_validation_valid
     [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog
-    [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues
+    [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels
     [version]=ci_cmd_version
 )
 
@@ -1825,6 +1825,96 @@ ci_cmd_changed_files() {
         return 2
     fi
     printf '%s\n' "${out}"
+}
+
+# What: translate a path glob to an anchored ERE.
+# Why: ** spans dirs and **/ may be empty; * and ? do not.
+# From: Issue #1683 | PR #1858
+_ci_glob_ere() {
+    local g="$1" out="" c i
+    for (( i = 0; i < ${#g}; i++ )); do
+        c="${g:i:1}"
+        if [ "${g:i:3}" = '**/' ]; then
+            out+='(.*/)?'; i=$((i + 2))
+        elif [ "${g:i:2}" = '**' ]; then
+            out+='.*'; i=$((i + 1))
+        else
+            case "${c}" in
+                '*') out+='[^/]*' ;;
+                '?') out+='[^/]' ;;
+                .|+|^|\$|\(|\)|\[|\]|\{|\}|\||\\) out+="\\${c}" ;;
+                *) out+="${c}" ;;
+            esac
+        fi
+    done
+    printf '^%s$\n' "${out}"
+}
+
+# What: print the PR labels for the changed paths given.
+# Why: SOT pr_labels rules plus each target's labels.
+# From: Issue #1683 | PR #1858
+_ci_pr_labels_for() {
+    local label globs g re f t ctx tl keys targets
+    local -A hit=()
+    local -a res=()
+    keys="$(_ci_block_keys pr_labels all)" || return 2
+    targets="$(ci_build_targets)" || return 2
+    for label in ${keys}; do
+        globs="$(_ci_block_entry_list pr_labels "" "${label}")" || return 2
+        res=()
+        while IFS= read -r g; do
+            [ -n "${g}" ] && res+=("$(_ci_glob_ere "${g}")")
+        done <<< "${globs}"
+        for f in "$@"; do
+            for re in "${res[@]}"; do
+                [[ "${f}" =~ ${re} ]] && hit["${label}"]=1
+            done
+        done
+    done
+    for t in ${targets}; do
+        ctx="$(_ci_required_field "${t}" context)" || return 2
+        tl="$(_ci_block_entry_list services "${t}" labels)" || return 2
+        [ -n "${tl}" ] || tl="$(_ci_block_entry_list build_toolchain "${t}" labels)" || return 2
+        for f in "$@"; do
+            [[ "${f}" == "${ctx}"/* ]] || continue
+            while IFS= read -r label; do
+                [ -n "${label}" ] && hit["${label}"]=1
+            done <<< "${tl}"
+        done
+    done
+    [ "${#hit[@]}" -eq 0 ] || printf '%s\n' "${!hit[@]}" | LC_ALL=C sort
+}
+
+# What: add the path labels to the current pull request.
+# Why: AG-GH-008 labels; SOT owns the path->label rules.
+# From: Issue #1683 | PR #1858
+ci_cmd_pr_labels() {
+    local list labels l repo
+    local -a files=() args=()
+    if [ "${GITHUB_EVENT_NAME:-}" != pull_request ] || [ -z "${PR_NUMBER:-}" ]; then
+        printf 'pr-labels=NOT-RUN reason="not a pull request"\n'
+        return 0
+    fi
+    if [ "${PR_IS_FORK:-false}" = true ]; then
+        printf 'pr-labels=NOT-RUN reason="fork PR: token cannot write labels; label by hand (AG-GH-008)"\n'
+        return 0
+    fi
+    list="${CHANGED_FILES:-}"
+    if [ -z "${list}" ] || [ ! -f "${list}" ]; then
+        ci_log "[CI-ERROR-PRLABELS-0001]" "file=\"${list}\" reason=\"CHANGED_FILES list missing\""
+        return 2
+    fi
+    mapfile -t files < "${list}"
+    labels="$(_ci_pr_labels_for "${files[@]}")" || return 2
+    if [ -z "${labels}" ]; then
+        printf 'pr-labels=none changed=%s\n' "${#files[@]}"
+        return 0
+    fi
+    while IFS= read -r l; do args+=(-f "labels[]=${l}"); done <<< "${labels}"
+    repo="$(_ci_repo)" || return 2
+    _ci_run "[CI-ERROR-PRLABELS-0002]" "pr=\"${PR_NUMBER}\" labels=\"${labels//$'\n'/ }\" reason=\"labels not added\"" \
+        gh api -X POST "repos/${repo}/issues/${PR_NUMBER}/labels" "${args[@]}" > /dev/null || return 2
+    printf 'pr-labels=added labels=%s\n' "${labels//$'\n'/,}"
 }
 
 # What: assemble product services from build matrix.

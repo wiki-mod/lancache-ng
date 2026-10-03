@@ -341,6 +341,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container: *bt_platform
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: write
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       PR_TITLE: ${{ github.event.pull_request.title }}
@@ -354,6 +358,14 @@ jobs:
     steps:
       - *bootstrap
       - *collect_changed
+      # What: add path labels; GITHUB_TOKEN starts no rerun.
+      # Why: a PAT-made label event would restart this run.
+      # From: Issue #1683 | PR #1858
+      - name: Label the PR by changed paths
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.file }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/ci.sh pr-labels
       - name: Run the PR/push check set
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
