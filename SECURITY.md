@@ -211,9 +211,10 @@ Static Application Security Testing (SAST) remediation policy.
 - **Threshold**: zero-tolerance by default. Any `cargo audit` finding, or any
   Trivy-reported vulnerability not already listed in `.trivyignore.yaml`, is
   treated as a blocking failure. A finding may only be accepted (not fixed) by
-  adding a dated, justified entry to `.trivyignore.yaml` with an explicit
-  `expired_at` date, forcing periodic re-review rather than a silent permanent
-  exception -- there is no equivalent suppression file for `cargo audit`
+  adding a justified entry to `.trivyignore.yaml`; Trivy accepts the entry
+  without an exception expiry date, so the entry remains an explicit,
+  documented disposition rather than an untracked suppression -- there is no
+  equivalent suppression file for `cargo audit`
   findings today, so a Rust dependency advisory must be fixed (upgrade,
   patch, or replace the dependency) rather than suppressed.
 - **License findings**: dependency license compliance is not currently
