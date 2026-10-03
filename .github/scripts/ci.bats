@@ -6568,6 +6568,20 @@ ROWS
     [ "$(cat "${BATS_TEST_TMPDIR}/gh.log")" = 'api -X POST repos/owner/fixture-repo/issues/12/labels -f labels[]=documentation' ]
     GITHUB_EVENT_NAME=pull_request CHANGED_FILES="${BATS_TEST_TMPDIR}/none" run ci_cmd_pr_labels
     [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-PRLABELS-0001]"* ]]
+    # What: pr-board adds the PR to the SOT board number.
+    # Why: board placement is CI; the URL is not in YAML.
+    # From: Issue #1683 | PR #1858
+    : > "${BATS_TEST_TMPDIR}/gh.log"
+    GITHUB_EVENT_NAME=push run ci_cmd_pr_board
+    [[ "${output}" == *'pr-board=NOT-RUN reason="not a pull request"'* ]]
+    GITHUB_EVENT_NAME=pull_request GH_TOKEN='' run ci_cmd_pr_board
+    [[ "${output}" == *'pr-board=NOT-RUN reason="no project token'* ]]
+    GITHUB_EVENT_NAME=pull_request GH_TOKEN=t PATH="${gh%/*}:${PATH}" run ci_cmd_pr_board
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"pr-board=added project=6 pr=12"* ]]
+    [ "$(cat "${BATS_TEST_TMPDIR}/gh.log")" = "project item-add 6 --owner owner --url ${GITHUB_SERVER_URL}/owner/fixture-repo/pull/12" ]
+    sed 's/^  project_number: 6$/  project_number: x/' "${CI_MANIFEST_SOURCE}" > "${BATS_TEST_TMPDIR}/pb.yml"
+    CI_MANIFEST="${BATS_TEST_TMPDIR}/pb.yml" GITHUB_EVENT_NAME=pull_request GH_TOKEN=t run ci_cmd_pr_board
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-PRBOARD-0001]"* ]]
 }
 
 @test "check pr-tracking-metadata board lookup: failed, hit, miss" {

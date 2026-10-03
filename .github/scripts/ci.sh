@@ -49,7 +49,7 @@ declare -A CI_DISPATCH=(
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-status]=ci_cmd_nightly_status
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [release]=ci_cmd_release [release-validation]=_ci_release_validation_valid
     [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog
-    [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels
+    [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [pr-board]=ci_cmd_pr_board
     [version]=ci_cmd_version
 )
 
@@ -1915,6 +1915,31 @@ ci_cmd_pr_labels() {
     _ci_run "[CI-ERROR-PRLABELS-0002]" "pr=\"${PR_NUMBER}\" labels=\"${labels//$'\n'/ }\" reason=\"labels not added\"" \
         gh api -X POST "repos/${repo}/issues/${PR_NUMBER}/labels" "${args[@]}" > /dev/null || return 2
     printf 'pr-labels=added labels=%s\n' "${labels//$'\n'/,}"
+}
+
+# What: put the current PR on the SOT project board.
+# Why: AG-GH-008 board placement; item-add is idempotent.
+# From: Issue #1683 | PR #1858
+ci_cmd_pr_board() {
+    local repo number url
+    if [ "${GITHUB_EVENT_NAME:-}" != pull_request ] || [ -z "${PR_NUMBER:-}" ]; then
+        printf 'pr-board=NOT-RUN reason="not a pull request"\n'
+        return 0
+    fi
+    if [ "${PR_IS_FORK:-false}" = true ] || [ -z "${GH_TOKEN:-}" ]; then
+        printf 'pr-board=NOT-RUN reason="no project token (fork or unset); add by hand (AG-GH-008)"\n'
+        return 0
+    fi
+    repo="$(_ci_repo)" || return 2
+    number="$(_ci_block_entry_field pr_policy "" project_number)" || return 2
+    if ! [[ "${number}" =~ ^[0-9]+$ ]]; then
+        ci_log "[CI-ERROR-PRBOARD-0001]" "got=\"${number}\" reason=\"no numeric SOT pr_policy.project_number\""
+        return 2
+    fi
+    url="${GITHUB_SERVER_URL:-https://github.com}/${repo}/pull/${PR_NUMBER}"
+    _ci_run "[CI-ERROR-PRBOARD-0002]" "project=\"${number}\" url=\"${url}\" reason=\"PR not added to the board\"" \
+        gh project item-add "${number}" --owner "${repo%%/*}" --url "${url}" > /dev/null || return 2
+    printf 'pr-board=added project=%s pr=%s\n' "${number}" "${PR_NUMBER}"
 }
 
 # What: assemble product services from build matrix.

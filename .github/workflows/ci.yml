@@ -366,6 +366,11 @@ jobs:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/scripts/ci.sh pr-labels
+      # What: add the PR to the SOT project board (job PAT).
+      # Why: GITHUB_TOKEN cannot write org Projects v2.
+      # From: Issue #1683 | PR #1858
+      - name: Add the PR to the project board
+        run: bash .github/scripts/ci.sh pr-board
       - name: Run the PR/push check set
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
