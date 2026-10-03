@@ -13063,39 +13063,42 @@ firstdeploy|1|latest|sha-new||0|proceed: channel latest moved  -> sha-new
 CASES
 }
 
-@test "setup dhcp-proxy config/prod sync only fills missing keys" {
+@test "setup config/prod sync only fills missing keys" {
     # What: only non-default values reach .local.env, once.
     # Why: a later update must not undo an operator value
     # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" c="${BATS_TEST_TMPDIR}/repo/config/prod/dhcp-proxy.env" want tpl
-    local l="${BATS_TEST_TMPDIR}/repo/config/prod/dhcp-proxy.local.env"
+    local root t="${BATS_TEST_TMPDIR}" c="${BATS_TEST_TMPDIR}/repo/config/prod/dhcp-proxy.env" tpl
+    local l="${BATS_TEST_TMPDIR}/repo/config/prod/dhcp-proxy.local.env" p="${BATS_TEST_TMPDIR}/repo/config/prod/proxy"
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_functions "${root}/setup.sh" is_deploy_prod_install_dir deploy_prod_repo_root env_key_exists \
-        validate_env_value write_env_file set_env_key get_env_var _compose_parse_env_value \
-        sync_dhcp_proxy_config_prod_env
+        write_env_file get_env_assignment_value_raw set_env_assignment sync_config_prod_local_env
     die() { printf '%s\n' "$*" >&2; exit 1; }
     print_ok() { :; }
     mkdir -p "${t}/repo/deploy/prod" "${t}/repo/config/prod" "${t}/qs"
     printf '%s\n' 'DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9' 'DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real.0' \
         'DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=' 'DHCP_PROXY_ROUTER=' > "${c}"
-    tpl="$(cat "${c}")"
-    sync_dhcp_proxy_config_prod_env "${t}/repo/deploy/prod" "${t}/src.env" 10.0.0.2 eth1 '' ntp1 lan \
-        boot.0 10.0.0.3 10.9.9.9 real.0 ''
-    want='DHCP_RELAY_LOCAL_ADDR=10.0.0.2#DHCP_PROXY_INTERFACE=eth1#DHCP_NTP_SERVERS=ntp1'
-    want+='#DHCP_PROXY_DOMAIN=lan#DHCP_PROXY_BOOT_FILENAME=boot.0#DHCP_PROXY_BOOT_SERVER=10.0.0.3'
-    [ "$(paste -sd'#' "${l}")" = "${want}" ] || { echo "first: $(paste -sd'#' "${l}")"; return 1; }
-    [ "$(cat "${c}")" = "${tpl}" ] || { echo "template changed"; return 1; }
-    sync_dhcp_proxy_config_prod_env "${t}/repo/deploy/prod" "${t}/src.env" x x '' x x x x 10.9.9.9 real.0 ''
-    [ "$(paste -sd'#' "${l}")" = "${want}" ] || { echo "second run changed it"; return 1; }
+    printf 'CACHE_MAX_SIZE=50g\n' > "${p}.env"
+    tpl="$(cat "${c}" "${p}.env")"
+    printf '%s\n' 'DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9' 'DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real.0' \
+        'DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=' 'DHCP_PROXY_ROUTER=10.0.0.1' 'CACHE_MAX_SIZE=200g' 'OTHER=1' > "${t}/src.env"
+    sync_config_prod_local_env "${t}/repo/deploy/prod" "${t}/src.env"
+    [ "$(cat "${l}")" = DHCP_PROXY_ROUTER=10.0.0.1 ] || { echo "dhcp-proxy: $(cat "${l}")"; return 1; }
+    [ "$(cat "${p}.local.env")" = CACHE_MAX_SIZE=200g ] || { echo "proxy: $(cat "${p}.local.env")"; return 1; }
+    [ "$(cat "${c}" "${p}.env")" = "${tpl}" ] || { echo "template changed"; return 1; }
+    printf '%s\n' 'DHCP_PROXY_ROUTER=10.0.0.9' 'CACHE_MAX_SIZE=300g' > "${t}/src.env"
+    sync_config_prod_local_env "${t}/repo/deploy/prod" "${t}/src.env"
+    [ "$(cat "${l}")" = DHCP_PROXY_ROUTER=10.0.0.1 ] && [ "$(cat "${p}.local.env")" = CACHE_MAX_SIZE=200g ] \
+        || { echo "second run changed a local value"; return 1; }
     mkdir -p "${t}/q/a/qs" "${t}/q/config/prod"
     printf 'X=1\n' > "${t}/q/config/prod/dhcp-proxy.env"
-    run sync_dhcp_proxy_config_prod_env "${t}/q/a/qs" "${t}/src.env" a b c d e f g h i j
-    [ "${status}" -eq 0 ] && [ "$(cat "${t}/q/config/prod/dhcp-proxy.env")" = X=1 ] || { echo "non-prod synced"; return 1; }
-    rm -f "${c}" "${l}"
-    run sync_dhcp_proxy_config_prod_env "${t}/repo/deploy/prod" "${t}/src.env" a b c d e f g h i j
-    [ "${status}" -eq 0 ] && [ ! -e "${c}" ] && [ ! -e "${l}" ] || { echo "missing file created"; return 1; }
+    printf 'X=2\n' > "${t}/q.env"
+    run sync_config_prod_local_env "${t}/q/a/qs" "${t}/q.env"
+    [ "${status}" -eq 0 ] && [ ! -e "${t}/q/config/prod/dhcp-proxy.local.env" ] || { echo "non-prod synced"; return 1; }
+    rm -f "${c}" "${l}" "${p}.env" "${p}.local.env"
+    run sync_config_prod_local_env "${t}/repo/deploy/prod" "${t}/src.env"
+    [ "${status}" -eq 0 ] && [ -z "$(ls "${t}/repo/config/prod")" ] || { echo "file created without template"; return 1; }
     run awk '/^migrate_env_for_update\(\) \{$/ { f = 1 } f && /^[[:space:]]*ensure_secret_env_key / { s = NR }
-        f && /^[[:space:]]*sync_dhcp_proxy_config_prod_env / && !y { y = NR } f && /^}$/ { exit }
+        f && /^[[:space:]]*sync_config_prod_local_env / && !y { y = NR } f && /^}$/ { exit }
         END { print (s && y > s) ? "after" : "s=" s " y=" y }' "${root}/setup.sh"
     [ "${output}" = after ]
 }

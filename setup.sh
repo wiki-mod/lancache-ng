@@ -1848,45 +1848,32 @@ adopt_config_prod_edits() {
     rm -f "$head_file"
 }
 
-# What: resolved dnsmasq-proxy keys into its .local.env
-# Why: dhcp-proxy reads env_file, never .env interpolation
+# What: env values differing from a config/prod default
+# Why: env_file services never see .env interpolation
 # From: Issue #1683 | PR #1858
-sync_dhcp_proxy_config_prod_env() {
+sync_config_prod_local_env() {
     local install_dir="$1" source_env_file="$2"
-    local dhcp_relay_local_addr="$3" dhcp_proxy_interface="$4" dhcp_proxy_router="$5"
-    local dhcp_ntp_servers="$6" dhcp_proxy_domain="$7" dhcp_proxy_boot_filename="$8"
-    local dhcp_proxy_boot_server="$9" dhcp_proxy_pxe_boot_server="${10}" dhcp_proxy_pxe_boot_filename_bios="${11}"
-    local dhcp_proxy_pxe_boot_filename_uefi="${12}"
-    local repo_root config_prod_env local_env key fallback kv
+    local repo_root template local_env key raw keys
 
     is_deploy_prod_install_dir "$install_dir" || return 0
     repo_root=$(deploy_prod_repo_root "$install_dir")
-    config_prod_env="$repo_root/config/prod/dhcp-proxy.env"
-    local_env="${config_prod_env%.env}.local.env"
-    [[ -f "$config_prod_env" ]] || return 0
-
-    # What: local key wins; only non-default values written
-    # Why: a copied default would hide newer defaults
-    # From: Issue #1683 | PR #1858
-    for kv in \
-        "DHCP_RELAY_LOCAL_ADDR:$dhcp_relay_local_addr" \
-        "DHCP_PROXY_INTERFACE:$dhcp_proxy_interface" \
-        "DHCP_PROXY_ROUTER:$dhcp_proxy_router" \
-        "DHCP_NTP_SERVERS:$dhcp_ntp_servers" \
-        "DHCP_PROXY_DOMAIN:$dhcp_proxy_domain" \
-        "DHCP_PROXY_BOOT_FILENAME:$dhcp_proxy_boot_filename" \
-        "DHCP_PROXY_BOOT_SERVER:$dhcp_proxy_boot_server" \
-        "DHCP_PROXY_PXE_BOOT_SERVER:$dhcp_proxy_pxe_boot_server" \
-        "DHCP_PROXY_PXE_BOOT_FILENAME_BIOS:$dhcp_proxy_pxe_boot_filename_bios" \
-        "DHCP_PROXY_PXE_BOOT_FILENAME_UEFI:$dhcp_proxy_pxe_boot_filename_uefi"
-    do
-        key="${kv%%:*}"
-        fallback="${kv#*:}"
-        env_key_exists "$key" "$local_env" && continue
-        [[ "$fallback" == "$(get_env_var "$key" "$config_prod_env")" ]] && continue
-        set_env_key "$key" "$fallback" "$local_env"
+    for template in "$repo_root"/config/prod/*.env; do
+        [[ -f "$template" && "$template" != *.local.env ]] || continue
+        local_env="${template%.env}.local.env"
+        keys=$(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ {print $1}' "$template") \
+            || die "Failed to read the keys of $template."
+        # What: local key wins; defaults are not copied
+        # Why: a copied default would hide newer defaults
+        # From: Issue #1683 | PR #1858
+        while IFS= read -r key; do
+            [[ -n "$key" ]] && env_key_exists "$key" "$source_env_file" || continue
+            env_key_exists "$key" "$local_env" && continue
+            raw=$(get_env_assignment_value_raw "$key" "$source_env_file")
+            [[ "$raw" == "$(get_env_assignment_value_raw "$key" "$template")" ]] && continue
+            set_env_assignment "$key" "$raw" "$local_env"
+        done <<< "$keys"
     done
-    print_ok "Converged dnsmasq-proxy/PXE keys from $source_env_file into $local_env; existing local values were preserved."
+    print_ok "Converged config/prod overrides from $source_env_file; existing local values were preserved."
 }
 
 # Full .env rewrites keep the original owner/mode because the file contains
@@ -3166,14 +3153,10 @@ migrate_env_for_update() {
     [[ -z "$ui_user" && -z "$ui_password" ]] && allow_insecure_ui=true
     append_env_key_if_missing ALLOW_INSECURE_UI "$allow_insecure_ui" "$env_file"
 
-    # What: writes dhcp-proxy keys after every possible die
+    # What: config/prod overrides are the last write
     # Why: an aborted update must not change live config
     # From: Issue #1683 | PR #1858
-    sync_dhcp_proxy_config_prod_env "$install_dir" "$env_file" \
-        "$dhcp_relay_local_addr" "$dhcp_proxy_interface" "$dhcp_proxy_router" \
-        "$dhcp_ntp_servers" "$dhcp_proxy_domain" "$dhcp_proxy_boot_filename" \
-        "$dhcp_proxy_boot_server" "$dhcp_proxy_pxe_boot_server" "$dhcp_proxy_pxe_boot_filename_bios" \
-        "$dhcp_proxy_pxe_boot_filename_uefi"
+    sync_config_prod_local_env "$install_dir" "$env_file"
 
     print_ok ".env is complete for the current quickstart template"
 }

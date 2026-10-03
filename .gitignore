@@ -12,6 +12,9 @@ data/
 /pdns-standard/
 /pdns-ssl/
 /pdns-filter-state/
+/ntp/
+/syslog-ng/
+/cachehamster/
 
 # Generated certificates (keep only the CA template, not issued certs)
 certs/*.crt
