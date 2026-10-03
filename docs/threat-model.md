@@ -259,8 +259,9 @@ LAN. The quickstart binds the UI to the LAN IP by default and documents
 `UI_BIND_IP=127.0.0.1` to restrict it further. Separately, `POST
 /api/netdata-alarms`'s token check is scoped to *this* endpoint only — it does
 not change finding #20's underlying fact that Netdata's own API (port 19999,
-reachable only from containers on the `netdata-net` bridge) has no
-authentication of its own.
+reachable from containers on the `netdata-net` bridge and from every service
+with `network_mode: host`, today `dhcp`, `dhcp-proxy` and `dhcp-probe`, which
+share the host's routing to the bridge) has no authentication of its own.
 
 ---
 
