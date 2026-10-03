@@ -104,6 +104,8 @@ jobs:
       credentials: *ghcr_credentials
     outputs:
       any-build: ${{ steps.plan.outputs.any-build }}
+      promote: ${{ steps.plan.outputs.promote }}
+      cut-tag: ${{ steps.plan.outputs.cut-tag }}
       matrix: ${{ steps.plan.outputs.matrix }}
       test-services: ${{ steps.plan.outputs.test-services }}
       rust-validation: ${{ steps.plan.outputs.rust-validation }}
@@ -303,7 +305,7 @@ jobs:
     needs: [platform, plan, validate]
     if: >-
       !cancelled() && needs.validate.result == 'success' &&
-      needs.plan.outputs.any-build == 'true' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')) && github.event_name == 'push'
+      needs.plan.outputs.any-build == 'true' && needs.plan.outputs.promote == 'true' && github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container: *bt_platform
@@ -317,7 +319,7 @@ jobs:
       - name: Promote the channels the ref maps to
         run: bash .github/scripts/ci.sh promote-ref
       - name: Cut the next patch tag on an image-affecting master push
-        if: github.ref == 'refs/heads/master'
+        if: needs.plan.outputs.cut-tag == 'true'
         env:
           PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: bash .github/scripts/ci.sh cut-release-tag

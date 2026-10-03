@@ -820,8 +820,18 @@ ci_cmd_plan_matrix() {
     local rust_validation=true
     rc=0; _ci_rust_validation_enabled || rc=$?
     case "${rc}" in 0) ;; 1) rust_validation=false ;; *) return 2 ;; esac
+    # What: promote and tag-cut decisions for this ref.
+    # Why: ref policy lives in the SOT, not in workflows.
+    # From: Issue #1683 | PR #1858
+    local promote=false cut_tag=false ptargets rel_ref
+    ptargets="$(_ci_promote_targets_for_ref)" || return 2
+    [ -n "${ptargets}" ] && promote=true
+    rel_ref="$(_ci_release_ref)" || return 2
+    [ "${GITHUB_REF:-}" = "${rel_ref}" ] && cut_tag=true
     {
         printf 'any-build=%s\n' "${any}"
+        printf 'promote=%s\n' "${promote}"
+        printf 'cut-tag=%s\n' "${cut_tag}"
         printf 'matrix={"include":%s}\n' "${include}"
         printf 'test-services=%s\n' "${test_services# }"
         printf 'rust-validation=%s\n' "${rust_validation}"
@@ -4567,6 +4577,11 @@ _ci_remote_tag_exists() {
 # From: Issue #1683
 ci_cmd_cut_release_tag() {
     local base_tag next_tag tip rel_ref
+    rel_ref="$(_ci_release_ref)" || return 2
+    if [ "${GITHUB_REF:-}" != "${rel_ref}" ]; then
+        printf 'cut-tag=noop reason=not-release-ref ref=%s\n' "${GITHUB_REF:-}"
+        return 0
+    fi
     base_tag="$("${CI_LAST_RELEASE_TAG_CMD:-_ci_last_release_tag}")" || return 2
     if [ -z "${base_tag}" ]; then
         printf 'cut-tag=noop reason=no-base-tag\n'
@@ -4583,7 +4598,6 @@ ci_cmd_cut_release_tag() {
             ;;
     esac
     next_tag="$(_ci_next_patch_tag "${base_tag}")" || return "$?"
-    rel_ref="$(_ci_release_ref)" || return 2
     if ! tip="$("${CI_PROMOTE_TIP_CMD:-_ci_ref_tip}" "${rel_ref}")"; then
         ci_log "[CI-ERROR-RELEASE-0016]" "ref=\"${rel_ref}\" reason=\"could not resolve release ref tip; not cutting blind\""
         return 2

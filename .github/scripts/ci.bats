@@ -751,6 +751,32 @@ STUB
     [ "${status}" -eq 0 ]
     grep -q '^docs-only=true$' "${gh}"
     grep -q '^any-build=false$' "${gh}"
+    # What: promote/cut-tag per ref class, from the SOT.
+    # Why: workflow gates read these, never a ref literal.
+    # From: Issue #1683 | PR #1858
+    local rel row ref pwant cwant
+    rel="$(_ci_release_ref)"
+    for row in "${rel}|true|true" "refs/heads/any-branch|false|false" "refs/pull/1/merge|false|false" \
+        "refs/tags/v1.2.3|true|false" "refs/tags/v1.2.3-rc.1|true|false"; do
+        IFS='|' read -r ref pwant cwant <<<"${row}"
+        : > "${gh}"
+        GITHUB_REF="${ref}" GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t \
+            CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
+            run bash "${CI_SH}" plan-matrix fixture-note.md
+        [ "${status}" -eq 0 ] || { echo "${ref}: ${output}"; return 1; }
+        grep -q "^promote=${pwant}$" "${gh}" || { echo "${ref} promote"; cat "${gh}"; return 1; }
+        grep -q "^cut-tag=${cwant}$" "${gh}" || { echo "${ref} cut-tag"; cat "${gh}"; return 1; }
+    done
+    # What: an unreadable release ref fails the plan.
+    # Why: never a silent promote=false or cut-tag=false.
+    # From: Issue #1683 | PR #1858
+    grep -v 'release_tags: true' "${CI_MANIFEST}" > "${BATS_TEST_TMPDIR}/norel.yml"
+    : > "${gh}"
+    CI_MANIFEST="${BATS_TEST_TMPDIR}/norel.yml" GITHUB_REF="${rel}" GITHUB_OUTPUT="${gh}" \
+        GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
+        run bash "${CI_SH}" plan-matrix fixture-note.md
+    [ "${status}" -eq 2 ] || { echo "norel: ${status} ${output}"; return 1; }
+    [[ "${output}" == *"[CI-ERROR-RELEASE-0018]"* ]]
 }
 
 @test "plan-matrix emits test-services for a path-changed rust service" {
@@ -2790,6 +2816,15 @@ CASES
     noexist="$(_stub noexist 'exit 1')"
     changed="$(_stub changed 'exit 0')"
     unchanged="$(_stub unchanged 'exit 1')"
+    # What: a non-release ref cuts nothing, even all-green.
+    # Why: the ref gate is ci.sh policy, not workflow YAML.
+    # From: Issue #1683 | PR #1858
+    : > "${calls}"
+    GITHUB_REF=refs/tags/v0.2.0 CI_LAST_RELEASE_TAG_CMD="${base}" CI_STACK_CHANGED_CMD="${changed}" \
+        GITHUB_SHA=mysha CI_PROMOTE_TIP_CMD="${tipok}" CI_TAG_EXISTS_CMD="${noexist}" \
+        CI_TAG_PUSH_CMD="${push}" run ci_cmd_cut_release_tag
+    [ "${status}" -eq 0 ]; [[ "${output}" == *"not-release-ref"* ]]; [ ! -s "${calls}" ]
+    GITHUB_REF="$(_ci_release_ref)"; export GITHUB_REF
     : > "${calls}"
     CI_LAST_RELEASE_TAG_CMD="$(_stub nobase 'true')" run ci_cmd_cut_release_tag
     [ "${status}" -eq 0 ]; [[ "${output}" == *"no-base-tag"* ]]; [ ! -s "${calls}" ]
