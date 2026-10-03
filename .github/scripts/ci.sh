@@ -10341,15 +10341,15 @@ _ci_installer() {
 # From: Issue #1683 | PR #1858
 _ci_installer_compose() {
     local root="${1:-${CI_REPO_ROOT}}" su line
-    local re='^QUICKSTART_COMPOSE="\$SCRIPT_DIR/([^"$]+)"$'
+    local re='^PROD_COMPOSE="\$SCRIPT_DIR/([^"$]+)"$'
     su="$(_ci_installer "${root}")" || return 2
-    line="$(_ci_capture 1 grep -E '^QUICKSTART_COMPOSE=' "${su}")" || return 2
+    line="$(_ci_capture 1 grep -E '^PROD_COMPOSE=' "${su}")" || return 2
     if [ -z "${line}" ] || [ "$(wc -l <<< "${line}")" -ne 1 ]; then
-        ci_error "[CI-ERROR-CORE-0104]" "path=\"${su}\" reason=\"QUICKSTART_COMPOSE missing or assigned twice\"" "${line}"
+        ci_error "[CI-ERROR-CORE-0104]" "path=\"${su}\" reason=\"PROD_COMPOSE missing or assigned twice\"" "${line}"
         return 2
     fi
     if [[ ! "${line}" =~ ${re} ]]; then
-        ci_error "[CI-ERROR-CORE-0105]" "path=\"${su}\" reason=\"QUICKSTART_COMPOSE is not SCRIPT_DIR-relative\"" "${line}"
+        ci_error "[CI-ERROR-CORE-0105]" "path=\"${su}\" reason=\"PROD_COMPOSE is not SCRIPT_DIR-relative\"" "${line}"
         return 2
     fi
     printf '%s\n' "${BASH_REMATCH[1]}"
@@ -10776,9 +10776,9 @@ _ci_check_syslog_logs_volume() {
 }
 
 # What: Fail unless .env defines every key.
-# Why: unset key breaks quickstart compose.
+# Why: an unset required key breaks compose interpolation.
 # From: Issue #1683 | PR #1858
-_ci_check_quickstart_required_env() {
+_ci_check_compose_required_env() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
     local key inst env compose
@@ -10798,10 +10798,10 @@ _ci_check_quickstart_required_env() {
             || viol+=("$(dirname "${inst}")/.env must define non-empty ${key} (compose marks it required)")
     done <<<"${produced}"
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0047]" "reason=\"quickstart required env not defined\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0047]" "reason=\"compose required env not defined\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
-    printf 'quickstart-required-env=clean\n'
+    printf 'compose-required-env=clean\n'
 }
 
 # What: True if dhcp-proxy service uses env_file only.
@@ -10853,29 +10853,17 @@ _ci_dhcp_proxy_env_file_ok() {
 _ci_check_dhcp_proxy_env() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
-    local ef key out f dep inst qc
+    local key out f dep
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    inst="$(_ci_installer_compose "${repo_root}")" || return 2
-    qc="${repo_root}/${inst}"
     local -a opt=(DHCP_PROXY_INTERFACE DHCP_PROXY_ROUTER DHCP_NTP_SERVERS DHCP_PROXY_DOMAIN DHCP_PROXY_BOOT_FILENAME DHCP_PROXY_BOOT_SERVER DHCP_PROXY_CUSTOM_OPTIONS)
     local -a pxe=(DHCP_PROXY_PXE_BOOT_SERVER DHCP_PROXY_PXE_BOOT_FILENAME_BIOS DHCP_PROXY_PXE_BOOT_FILENAME_UEFI)
-    for f in "${dep}" config/prod/dhcp-proxy.env "${inst%/*}/.env" \
-        "${inst}" services/dhcp-proxy/entrypoint.sh services/dhcp-proxy/dnsmasq.conf.template; do
+    for f in "${dep}" config/prod/dhcp-proxy.env services/dhcp-proxy/entrypoint.sh services/dhcp-proxy/dnsmasq.conf.template; do
         [ -f "${repo_root}/${f}" ] || { ci_error "[CI-ERROR-CHECK-0048]" "path=\"${f}\" reason=\"required dhcp-proxy input missing\"" "missing dhcp-proxy input: ${f}"; return 2; }
     done
     out="$(_ci_dhcp_proxy_env_file_ok "${repo_root}/${dep}" '../../config/prod/dhcp-proxy.env')" || viol+=("${out}")
-    for ef in config/prod/dhcp-proxy.env "${inst%/*}/.env"; do
-        for key in "${opt[@]}" "${pxe[@]}"; do
-            grep -Eq "^${key}=" "${repo_root}/${ef}" || viol+=("${ef}: must define ${key} (empty default)")
-        done
-    done
-    grep -Fq 'DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE:-}' "${qc}" \
-        || viol+=("quickstart compose must pass through DHCP_PROXY_INTERFACE")
-    grep -Fq 'DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}' "${qc}" \
-        || viol+=("quickstart compose must pass through DHCP_PROXY_CUSTOM_OPTIONS")
-    for key in "${pxe[@]}"; do
-        grep -Fq "${key}=\${${key}:-}" "${qc}" \
-            || viol+=("quickstart compose must pass through ${key}")
+    for key in "${opt[@]}" "${pxe[@]}"; do
+        grep -Eq "^${key}=" "${repo_root}/config/prod/dhcp-proxy.env" \
+            || viol+=("config/prod/dhcp-proxy.env: must define ${key} (empty default)")
     done
     grep -Fq '_dhcp_proxy_render_optional_directives()' "${repo_root}/services/dhcp-proxy/entrypoint.sh" \
         || viol+=("dhcp-proxy entrypoint must render optional dnsmasq directives (#450)")
@@ -10914,7 +10902,7 @@ _ci_check_setup_keys_kea() {
     done
     grep -Fq 'run_kea_dhcp_activation_preflight()' "${su}" \
         || viol+=("setup.sh must define a DHCP discovery preflight before Kea activation")
-    grep -Fq 'run_kea_dhcp_activation_preflight "$INSTALL_DIR/.env"' "${su}" \
+    grep -Fq 'run_kea_dhcp_activation_preflight "$ENV_LOCAL"' "${su}" \
         || viol+=("setup.sh must call the Kea discovery preflight before starting the stack")
     grep -Fq 'nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5' "${su}" \
         || viol+=("setup.sh must probe DHCP discovery with the Kea image before activation")
@@ -10956,7 +10944,7 @@ _ci_check_setup_update_safety() {
         /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/ { fn = $1; sub(/\(\).*/, "", fn); next }
         /^[[:space:]]*#/ { next }
         /pause_lancache_convergence_for_update/ { seen[fn] = 1; paused[fn] = 1; next }
-        !paused[fn] && /(sync_repo_to_default_branch|install_quickstart_compose_assets|cmd_backup|git -C|migrate_env_for_update|validate_compose_config|dc_update[[:space:]]+(pull|up)|docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+(pull|up))/ {
+        !paused[fn] && /(sync_repo_to_default_branch|adopt_config_prod_edits|cmd_backup|git -C|migrate_env_for_update|validate_compose_config|dc_update[[:space:]]+(pull|up)|docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+(pull|up))/ {
             pend[fn] = pend[fn] NR ": " $0 "\n"
         }
         END {
@@ -11307,10 +11295,9 @@ _ci_check_logging_matrix() {
         ci_log "[CI-ERROR-CHECK-0037]" "reason=\"parsed ${unique_row_count} unique of ${raw_row_count} rows; a row was dropped or collapsed\""
         return 2
     fi
-    local dep inst
+    local dep
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    inst="$(_ci_installer_compose "${repo_root}")" || return 2
-    local -a compose_files=("${repo_root}/${dep}" "${repo_root}/${inst}")
+    local -a compose_files=("${repo_root}/${dep}")
     local -a consumer=() viol=()
     local cf svc
     for cf in "${compose_files[@]}"; do
@@ -11341,30 +11328,16 @@ _ci_check_logging_matrix() {
             *) viol+=("${doc}: row '${n}' is not a real Compose service") ;;
         esac
     done
-    # What: quickstart's inline web_log job vs. real file.
-    # Why: no services/ dir there to bind-mount it from.
+    # What: netdata mounts the real web_log job file.
+    # Why: one web_log owner; no inline copy can drift.
     # From: Issue #1683 | PR #1858
     local web_log_conf="${repo_root}/services/syslog/netdata-web_log.conf"
-    local quickstart_compose="${repo_root}/${inst}"
     if [ ! -f "${web_log_conf}" ]; then
         viol+=("${web_log_conf}: not found")
-    elif [ ! -f "${quickstart_compose}" ]; then
-        viol+=("${quickstart_compose}: not found")
-    else
-        local real_jobs quick_jobs
-        real_jobs="$(awk '/^jobs:/{flag=1} flag{print}' "${web_log_conf}")"
-        quick_jobs="$(awk '
-            /cat > \/etc\/netdata\/go\.d\/web_log\.conf <<.CONF./ { capture = 1; next }
-            capture && /^        CONF$/ { capture = 0 }
-            capture { print }
-        ' "${quickstart_compose}" | sed 's/^        //')"
-        if [ -z "${real_jobs}" ]; then
-            viol+=("${web_log_conf}: no 'jobs:' section found")
-        elif [ -z "${quick_jobs}" ]; then
-            viol+=("${quickstart_compose}: no web_log.conf heredoc found")
-        elif [ "${real_jobs}" != "${quick_jobs}" ]; then
-            viol+=("quickstart's inline web_log job config has drifted from ${web_log_conf}")
-        fi
+    elif ! grep -q 'jobs:' "${web_log_conf}"; then
+        viol+=("${web_log_conf}: no 'jobs:' section found")
+    elif ! grep -Fq 'services/syslog/netdata-web_log.conf:/etc/netdata/go.d/web_log.conf' "${repo_root}/${dep}"; then
+        viol+=("${dep}: netdata must mount services/syslog/netdata-web_log.conf")
     fi
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0038]" "reason=\"logging-matrix drift (issue #633)\"" "$(printf '%s\n' "${viol[@]}")"
@@ -11745,7 +11718,7 @@ ci_cmd_check_all() {
         proxy-cache-env-doc-drift \
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
         docker-socket-proxy netdata-isolation syslog-logs-volume proxy-cert-volume proxy-nginx-policy \
-        quickstart-required-env dhcp-proxy-env \
+        compose-required-env dhcp-proxy-env \
         setup-keys-kea setup-update-safety setup-docker-conflict setup-prompt-drift image-channel-resolution \
         vex-drift logging-matrix \
         trivy-action-direct-usage entrypoint-lib-wiring dockerfile-build-tools \
@@ -11814,7 +11787,7 @@ ci_cmd_check() {
         syslog-logs-volume) _ci_check_syslog_logs_volume "$@" ;;
         proxy-cert-volume) _ci_check_proxy_cert_volume "$@" ;;
         proxy-nginx-policy) _ci_check_proxy_nginx_policy "$@" ;;
-        quickstart-required-env) _ci_check_quickstart_required_env "$@" ;;
+        compose-required-env) _ci_check_compose_required_env "$@" ;;
         dhcp-proxy-env) _ci_check_dhcp_proxy_env "$@" ;;
         setup-keys-kea) _ci_check_setup_keys_kea "$@" ;;
         setup-update-safety) _ci_check_setup_update_safety "$@" ;;

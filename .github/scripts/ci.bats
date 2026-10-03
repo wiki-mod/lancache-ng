@@ -7680,7 +7680,7 @@ CASES
 _stack_fixture() {
     export CI_COMPOSE_FILE=dep/c.yml
     mkdir -p "$1/dep" "$1/inst"
-    printf 'QUICKSTART_COMPOSE="$SCRIPT_DIR/%s"\n' inst/c.yml >> "$1/setup.sh"
+    printf 'PROD_COMPOSE="$SCRIPT_DIR/%s"\n' inst/c.yml >> "$1/setup.sh"
 }
 
 @test "installer compose is read from setup.sh, fail-closed" {
@@ -7696,16 +7696,16 @@ _stack_fixture() {
         [ "${status}" -eq "${rc}" ] || { echo "${name}: ${output}"; return 1; }
         [[ "${output}" == *"${want}"* ]] || { echo "${name}: ${output}"; return 1; }
     done <<'CASES'
-ok|x=1\nQUICKSTART_COMPOSE="$SCRIPT_DIR/d/q/c.yml"\n|d/q/c.yml|0
+ok|x=1\nPROD_COMPOSE="$SCRIPT_DIR/d/q/c.yml"\n|d/q/c.yml|0
 none|none|CI-ERROR-CORE-0102|2
 absent|x=1\n|CI-ERROR-CORE-0104|2
-twice|QUICKSTART_COMPOSE="$SCRIPT_DIR/a"\nQUICKSTART_COMPOSE="$SCRIPT_DIR/b"\n|CI-ERROR-CORE-0104|2
-form|QUICKSTART_COMPOSE=/abs/c.yml\n|CI-ERROR-CORE-0105|2
+twice|PROD_COMPOSE="$SCRIPT_DIR/a"\nPROD_COMPOSE="$SCRIPT_DIR/b"\n|CI-ERROR-CORE-0104|2
+form|PROD_COMPOSE=/abs/c.yml\n|CI-ERROR-CORE-0105|2
 CASES
     # What: the installer path comes from CI_INSTALLER.
     # Why: no installer literal in ci.sh; the SOT decides.
     # From: Issue #1683 | PR #1858
-    printf 'QUICKSTART_COMPOSE="$SCRIPT_DIR/o/c.yml"\n' > "${r}/other.sh"
+    printf 'PROD_COMPOSE="$SCRIPT_DIR/o/c.yml"\n' > "${r}/other.sh"
     CI_INSTALLER=other.sh run _ci_installer_compose "${r}"
     [ "${status}" -eq 0 ] && [ "${output}" = o/c.yml ] || { echo "override: ${output}"; return 1; }
     [ "$(_ci_variable CI_INSTALLER)" = setup.sh ]
@@ -8227,10 +8227,10 @@ CASES
     [[ "${output}" == *"forbidden broad rule"* ]]
 }
 
-# What: seed a quickstart tree with required env keys set.
-# Why: shared by the quickstart-required-env checks below.
+# What: seed an installer tree with required env keys set.
+# Why: shared by the compose-required-env checks below.
 # From: Issue #1683 | PR #1858
-_qs_required_env_fixture() {
+_required_env_fixture() {
     local root="$1"
     mkdir -p "${root}/inst"
     _stack_fixture "${root}"
@@ -8238,25 +8238,25 @@ _qs_required_env_fixture() {
     printf 'A=1\nB=2\n' > "${root}/inst/.env"
 }
 
-@test "check quickstart-required-env passes when all required keys are set" {
+@test "check compose-required-env passes when all required keys are set" {
     # What: Required ${VAR:?} keys non-empty.
     # Why: a required-but-unset key breaks compose at start.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/qre-ok"
-    _qs_required_env_fixture "${r}"
-    run bash "${CI_SH}" check quickstart-required-env "${r}"
+    _required_env_fixture "${r}"
+    run bash "${CI_SH}" check compose-required-env "${r}"
     [ "${status}" -eq 0 ]
-    [[ "${output}" == *"quickstart-required-env=clean"* ]]
+    [[ "${output}" == *"compose-required-env=clean"* ]]
 }
 
-@test "check quickstart-required-env fails when a required key is unset" {
+@test "check compose-required-env fails when a required key is unset" {
     # What: a required ${VAR:?} key is missing from .env.
-    # Why: quickstart would fail at compose interpolation.
+    # Why: compose would fail at interpolation.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/qre-bad"
-    _qs_required_env_fixture "${r}"
+    _required_env_fixture "${r}"
     printf 'A=1\n' > "${r}/inst/.env"
-    run bash "${CI_SH}" check quickstart-required-env "${r}"
+    run bash "${CI_SH}" check compose-required-env "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"define non-empty B"* ]]
 }
@@ -8389,7 +8389,7 @@ _setup_keys_kea_fixture() {
             printf '# %s\n' "${k}"
         done
         printf 'run_kea_dhcp_activation_preflight() { :; }\n'
-        printf 'run_kea_dhcp_activation_preflight "$INSTALL_DIR/.env"\n'
+        printf 'run_kea_dhcp_activation_preflight "$ENV_LOCAL"\n'
         printf 'nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5\n'
     } > "${root}/setup.sh"
     _stack_fixture "${root}"
@@ -8577,7 +8577,7 @@ _setup_keys_kea_fixture() {
     grep -qx 'BAR=3' "${ef}"
 }
 
-# What: builds a fixture doc + quickstart web_log copy.
+# What: builds a fixture doc + deploy web_log mount.
 # Why: shared by the logging-matrix tests below.
 # From: Issue #1683 | PR #1858
 _logging_matrix_fixture() {
@@ -8595,15 +8595,11 @@ _logging_matrix_fixture() {
         done
     } > "${root}/docs/architecture-ng.md"
     printf 'header\njobs:\n  - name: real\n    path: /x\n' > "${root}/services/syslog/netdata-web_log.conf"
-    cat > "${root}/inst/c.yml" <<'EOF'
+    cat > "${root}/dep/c.yml" <<'EOF'
 services:
   netdata:
-    command: |
-      cat > /etc/netdata/go.d/web_log.conf <<'CONF'
-        jobs:
-          - name: real
-            path: /x
-        CONF
+    volumes:
+      - ../services/syslog/netdata-web_log.conf:/etc/netdata/go.d/web_log.conf:ro
 EOF
 }
 
@@ -8708,31 +8704,22 @@ EOF
     [[ "${output}" == *"CI-ERROR-CHECK-0034"* ]]
 }
 
-@test "check logging-matrix fails a drifted quickstart web_log job" {
-    # What: quickstart's inline job no longer matches it.
-    # Why: Byte-identical promise.
+@test "check logging-matrix fails when netdata lacks the web_log mount" {
+    # What: deploy compose without the web_log file mount.
+    # Why: netdata must read the one real web_log job file.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/lm-weblog"
     _logging_matrix_fixture "${r}" "svc-a"
-    cat > "${r}/inst/c.yml" <<'EOF'
-services:
-  netdata:
-    command: |
-      cat > /etc/netdata/go.d/web_log.conf <<'CONF'
-        jobs:
-          - name: different
-            path: /y
-        CONF
-EOF
+    printf 'services:\n  netdata:\n    image: x\n' > "${r}/dep/c.yml"
     CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub svc 'printf "svc-a\n"')" \
         run bash "${CI_SH}" check logging-matrix "${r}"
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"quickstart's inline web_log job config has drifted"* ]]
+    [[ "${output}" == *"netdata must mount services/syslog/netdata-web_log.conf"* ]]
 }
 
-@test "check logging-matrix passes a matching quickstart web_log fixture" {
-    # What: Inline web_log passes parity.
-    # Why: Fixture-level match case.
+@test "check logging-matrix passes with the web_log file mounted" {
+    # What: deploy compose mounts the real web_log file.
+    # Why: the clean case of the same contract.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/lm-weblog-ok"
     _logging_matrix_fixture "${r}" "svc-a"
@@ -10851,6 +10838,7 @@ CASES
     DOCKER_SOCKET_PROXY_SCRIPT="${co}/scripts/untracked/docker-socket-proxy.sh"
     cmd_backup() { echo "backup $*" >> "${log}"; }
     systemd_available() { return 1; }
+    systemd_unit_exists() { return 1; }
     docker() {
         echo "docker $*" >> "${log}"
         case "$1 $2" in
@@ -10865,14 +10853,20 @@ CASES
     grep -qx IP_STANDARD=192.0.2.10 "${el}"; grep -qx "LANCACHE_STATE_DIR=${qs}" "${el}"
     grep -qx "KEA_DATA_DIR=${qs}/kea" "${el}"; grep -qx CACHE_DIR=/srv/cache "${el}"
     [ "$(cat "${co}/config/prod/proxy.local.env")" = CACHE_MAX_SIZE=200g ]
-    [ -e "${qs}/pdns-standard/copied" ] && [ ! -e "${qs}/nats" ] && [ "$(cat "${co}/certs/ca.crt")" = ca ]
-    [ ! -e "${qs}/docker-compose.yml" ] && [ ! -e "${qs}/.env" ] && [ ! -e "${qs}/scripts/shared-secret-bootstrap.sh" ]
-    [ ! -e "${qs}/scripts/untracked/docker-socket-proxy.sh" ] && [ -e "${DOCKER_SOCKET_PROXY_SCRIPT}" ]
+    [ -e "${qs}/pdns-standard/copied" ]
+    [ ! -e "${qs}/nats" ]
+    [ "$(cat "${co}/certs/ca.crt")" = ca ]
+    [ ! -e "${qs}/docker-compose.yml" ]
+    [ ! -e "${qs}/.env" ]
+    [ ! -e "${qs}/scripts/shared-secret-bootstrap.sh" ]
+    [ ! -e "${qs}/scripts/untracked/docker-socket-proxy.sh" ]
+    [ -e "${DOCKER_SOCKET_PROXY_SCRIPT}" ]
     grep -qx "backup --config ${qs}" "${log}"
     grep -qx "docker compose --env-file ${qs}/.env stop" "${log}"
     grep -qx "docker compose --env-file ${el} up -d" "${log}"
     ! is_quickstart_install "${qs}"
-    [ "$(resolve_stack_dir "${co}")" = "${co}/deploy/prod" ] && [ "$(resolve_stack_dir "${qs}")" = "${qs}" ]
+    [ "$(resolve_stack_dir "${co}")" = "${co}/deploy/prod" ]
+    [ "$(resolve_stack_dir "${qs}")" = "${qs}" ]
 }
 
 @test "deploy_prod_repo_input_paths snapshots repo-root runtime inputs for deploy/prod" {
@@ -13322,44 +13316,6 @@ STUB
     [ "${status}" -eq 0 ] || { echo "rotate: ${output}"; return 1; }
     cmp "${t}/env.first" "${t}/r5/sec-a/.env"
     cmp "${t}/compose.first" "${t}/r5/sec-a/docker-compose.yml"
-}
-
-@test "setup quickstart assets install per target state" {
-    # What: fresh, stale dirs, repeat, in place; modes.
-    # Why: a stale dir target must never nest the copy.
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" i="${BATS_TEST_TMPDIR}/install" SCRIPT_DIR p
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/setup.sh" install_quickstart_compose_assets
-    SCRIPT_DIR="${root}"
-    eval "$(grep -E '^(QUICKSTART_COMPOSE|DOCKER_SOCKET_PROXY_SCRIPT|SHARED_SECRET_BOOTSTRAP_SCRIPT)=' "${root}/setup.sh")"
-    _check() {
-        cmp "${QUICKSTART_COMPOSE}" "${1}/docker-compose.yml"
-        cmp "${DOCKER_SOCKET_PROXY_SCRIPT}" "${1}/scripts/untracked/docker-socket-proxy.sh"
-        cmp "${SHARED_SECRET_BOOTSTRAP_SCRIPT}" "${1}/scripts/shared-secret-bootstrap.sh"
-        [ "$(stat -c '%a' "${1}/docker-compose.yml" "${1}/scripts/untracked/docker-socket-proxy.sh" \
-            "${1}/scripts/shared-secret-bootstrap.sh" | paste -sd' ')" = "644 755 644" ]
-    }
-    install_quickstart_compose_assets "${i}"
-    _check "${i}"
-    install_quickstart_compose_assets "${i}"
-    _check "${i}"
-    rm -rf "${i}"
-    mkdir -p "${i}/scripts/untracked/docker-socket-proxy.sh" "${i}/scripts/shared-secret-bootstrap.sh"
-    install_quickstart_compose_assets "${i}"
-    _check "${i}"
-    mkdir -p "${t}/inplace/deploy/quickstart" "${t}/inplace/scripts/untracked" "${t}/inplace/scripts/lib"
-    for p in deploy/quickstart/docker-compose.yml scripts/untracked/docker-socket-proxy.sh; do
-        cp "${root}/${p}" "${t}/inplace/${p}"
-    done
-    cp "${root}/scripts/lib/shared-secret-bootstrap.sh" "${t}/inplace/scripts/shared-secret-bootstrap.sh"
-    chmod 600 "${t}/inplace/scripts/untracked/docker-socket-proxy.sh" "${t}/inplace/scripts/shared-secret-bootstrap.sh"
-    SCRIPT_DIR="${t}/inplace"
-    eval "$(grep -E '^(QUICKSTART_COMPOSE|DOCKER_SOCKET_PROXY_SCRIPT)=' "${root}/setup.sh")"
-    SHARED_SECRET_BOOTSTRAP_SCRIPT="${t}/inplace/scripts/shared-secret-bootstrap.sh"
-    install_quickstart_compose_assets "${t}/inplace"
-    [ "$(stat -c '%a' "${t}/inplace/scripts/untracked/docker-socket-proxy.sh" "${t}/inplace/scripts/shared-secret-bootstrap.sh" | paste -sd' ')" = "755 644" ]
-    cmp "${root}/scripts/untracked/docker-socket-proxy.sh" "${t}/inplace/scripts/untracked/docker-socket-proxy.sh"
 }
 
 @test "setup functional health gate and tool install per state" {

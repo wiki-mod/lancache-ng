@@ -21,18 +21,8 @@ export LANG=C LC_ALL=C
 # prebuilt images, and start the stack. Development-only behavior belongs behind
 # an explicit future opt-in path, not inside the default first-user flow.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
-QUICKSTART_COMPOSE="$SCRIPT_DIR/deploy/quickstart/docker-compose.yml"
 PROD_COMPOSE="$SCRIPT_DIR/deploy/prod/docker-compose.yml"
 DOCKER_SOCKET_PROXY_SCRIPT="$SCRIPT_DIR/scripts/untracked/docker-socket-proxy.sh"
-# dhcp-probe.sh (formerly copied the same way as the two scripts below) was
-# retired by issue #1288 -- the dhcp-probe container now runs the ui
-# image's own `lancache-ui --dhcp-probe` native CLI mode, so there is no
-# longer a separate script to track a source path for.
-# Shared-secret bootstrap helper (#858): the quickstart nats service sources this
-# to resolve the NATS_*_PASSWORD handshake secrets from the shared-secrets volume.
-# Copied flat into $install_dir/scripts/ like the two scripts above, so the
-# quickstart compose can bind-mount ./scripts/shared-secret-bootstrap.sh.
-SHARED_SECRET_BOOTSTRAP_SCRIPT="$SCRIPT_DIR/scripts/lib/shared-secret-bootstrap.sh"
 DEFAULT_UI_SESSION_TTL_SECONDS=86400
 MAX_UI_SESSION_TTL_SECONDS=31536000
 
@@ -1629,51 +1619,6 @@ compose_file_args_for_install_dir() {
     printf '%s\n' "${args[@]}"
 }
 
-# Copies the quickstart compose file and helper scripts into install_dir (used
-# on both first install and every update, so copied installs always run the
-# current container wiring). See the inline comment for the #538 workaround
-# that force-removes a stale auto-vivified directory before reinstalling
-# docker-socket-proxy.sh.
-#
-# dhcp-probe.sh is no longer one of these copied assets (issue #1288): the
-# dhcp-probe container now runs the same lancache-ui image's own
-# `--dhcp-probe` CLI mode (a native Rust DHCP probe, see
-# services/ui/src/dhcp_probe_native.rs) instead of a bind-mounted external
-# script, so there is nothing left to install/copy for it -- the compose
-# file's dhcp-probe service no longer declares a `volumes:` entry at all.
-install_quickstart_compose_assets() {
-    local install_dir="$1" socket_proxy_target helper_target
-
-    socket_proxy_target="$install_dir/scripts/untracked/docker-socket-proxy.sh"
-    helper_target="$install_dir/scripts/shared-secret-bootstrap.sh"
-    # docker-socket-proxy.sh's own source moved one directory level deeper
-    # (issue 1095, scripts/untracked/docker-socket-proxy.sh); the
-    # installed copy mirrors that same nesting, so the target directory
-    # needs both levels created, not just the flat "scripts" mkdir that
-    # sufficed before that move.
-    mkdir -p "$install_dir/scripts/untracked"
-    install -m 0644 "$QUICKSTART_COMPOSE" "$install_dir/docker-compose.yml"
-    if [[ -d "$socket_proxy_target" ]]; then
-        rm -rf "$socket_proxy_target"
-    fi
-    if [[ "$(realpath -m "$DOCKER_SOCKET_PROXY_SCRIPT")" != "$(realpath -m "$socket_proxy_target")" ]]; then
-        install -m 0755 "$DOCKER_SOCKET_PROXY_SCRIPT" "$socket_proxy_target"
-    else
-        chmod 0755 "$socket_proxy_target"
-    fi
-    # Shared-secret bootstrap helper (#858), same auto-vivified-directory guard
-    # as the two scripts above (#538): the nats service bind-mounts this to
-    # source resolve_shared_secret for the NATS_*_PASSWORD handshake secrets.
-    if [[ -d "$helper_target" ]]; then
-        rm -rf "$helper_target"
-    fi
-    if [[ "$(realpath -m "$SHARED_SECRET_BOOTSTRAP_SCRIPT")" != "$(realpath -m "$helper_target")" ]]; then
-        install -m 0644 "$SHARED_SECRET_BOOTSTRAP_SCRIPT" "$helper_target"
-    else
-        chmod 0644 "$helper_target"
-    fi
-}
-
 # What: copies a named volume into an empty directory
 # Why: prod keeps it in bind dirs, quickstart in volumes
 # From: Issue #1683 | PR #1858
@@ -1720,6 +1665,14 @@ migrate_quickstart_install() {
     [[ -f "$old_env" || -f "$env_local" ]] \
         || die "Cannot migrate $old_dir: neither $old_env nor $env_local exists."
     print_step "Migrating the quickstart install at $old_dir to $stack_dir"
+    # What: convergence paused for the whole migration
+    # Why: the timer must not run compose mid-migration
+    # From: Issue #1683 | PR #1858
+    UPDATE_CONVERGENCE_PAUSED=0
+    UPDATE_CONVERGENCE_COMPLETED=0
+    trap resume_lancache_convergence_after_failed_update EXIT
+    UPDATE_CONVERGENCE_PAUSED=1
+    pause_lancache_convergence_for_update
     ( cmd_backup --config "$old_dir" ) \
         || die "Pre-migration backup of $old_dir failed; nothing was changed."
     project=$(compose_project_name "$old_dir" "$old_env")
@@ -1763,6 +1716,9 @@ migrate_quickstart_install() {
     rm -f "$old_dir/docker-compose.yml" "$old_env" || die "Failed to remove the quickstart files in $old_dir."
     ( cd "$stack_dir" && docker compose --env-file "$env_local" up -d ) \
         || die "The migrated stack did not start from $stack_dir; restore with: setup.sh restore."
+    trap - EXIT
+    resume_lancache_convergence_after_update
+    UPDATE_CONVERGENCE_COMPLETED=1
     print_ok "Quickstart install migrated to $stack_dir"
 }
 
@@ -3334,7 +3290,7 @@ migrate_env_for_update() {
     # From: Issue #1683 | PR #1858
     sync_config_prod_local_env "$install_dir" "$env_file"
 
-    print_ok ".env is complete for the current quickstart template"
+    print_ok ".env is complete for the current deploy/prod template"
 }
 
 # The apt package that provides a binary sometimes has a different name than
@@ -4038,19 +3994,16 @@ cmd_restore() {
     restore_compose_volumes "$install_dir" "$backup_dir/docker-volumes"
     print_ok "Files restored from $archive"
 
-    # A quickstart install keeps its own copied docker-compose.yml/scripts
-    # bundle under install_dir rather than a Git checkout, so an archive
-    # taken before a compose/script change (e.g. the pre-single-CACHE_DIR
-    # layout) restores that stale bundle verbatim. Refresh it from this
-    # running setup.sh's own checkout before convergence -- exactly what
-    # cmd_update() already does -- so the migration below never validates or
-    # starts the stack against compose wiring the .env it just produced no
-    # longer matches. Skipped for a deploy/prod (Git-tracked) restore target:
-    # that compose file is managed by the checkout itself, not this bundle,
-    # and restore deliberately does not run a git sync (unlike update).
-    if ! is_deploy_prod_install_dir "$install_dir"; then
-        install_quickstart_compose_assets "$install_dir"
-        print_ok "quickstart compose assets refreshed"
+    # What: a restored quickstart archive migrates to deploy/prod
+    # Why: its old compose bundle no longer matches the checkout
+    # From: Issue #1683 | PR #1858
+    if is_quickstart_install "$install_dir"; then
+        if ! compose_stack_available "$install_dir"; then
+            stack_stopped=0
+            die "Restored a quickstart install, but Docker is not available to migrate it. Install Docker, then run: setup.sh update $install_dir"
+        fi
+        migrate_quickstart_install "$install_dir"
+        install_dir="${PROD_COMPOSE%/*}"
     fi
 
     # Run in a subshell so a die() inside either helper is caught here instead
@@ -4945,33 +4898,9 @@ perform_stack_update_flow() {
         print_ok "NATS_BIND_IP is set; keeping the remote-secondary NATS override active for this update"
     fi
 
-    # Must run here -- before sync_repo_to_default_branch,
-    # install_quickstart_compose_assets, or cmd_backup do anything -- not
-    # merely before apply_stack_update_ordered recreates a container, which
-    # is where an earlier version of this baseline capture lived. Real,
-    # live reproduction on issue #1391 (2026-08-05) found that placement too
-    # late: cmd_backup --config's own "stop the stack for a consistent
-    # backup, then restart it" cycle (a few steps below) already restarts
-    # every container using whatever compose/script content
-    # sync_repo_to_default_branch/install_quickstart_compose_assets just
-    # refreshed -- by design, per install_quickstart_compose_assets' own
-    # comment ("so even copied installs use the current container wiring
-    # during the whole update"). A compose-level regression (a changed
-    # healthcheck, env var, volume, etc.) therefore already gets baked into
-    # a real container recreate during THAT restart, before
-    # apply_stack_update_ordered or its old baseline-capture call point ever
-    # ran -- so that later capture point could only ever see the
-    # already-regressed state and would misclassify a real regression as
-    # "pre-existing," exactly the failure mode this whole mechanism exists
-    # to avoid. Capturing here, before any of those steps run, is the actual
-    # last point at which "the current containers" still means "the
-    # pre-update containers" for every mutation this flow performs, not just
-    # the container-recreate ones inside apply_stack_update_ordered.
-    # dc_update config --services is safe to call this early: it only reads
-    # whichever compose files already exist on disk right now (which is
-    # exactly the pre-update set this baseline needs), and does not depend
-    # on anything sync_repo_to_default_branch/install_quickstart_compose_assets
-    # might add or change later.
+    # What: health baseline before sync, backup, restart
+    # Why: a later restart bakes regressions into it
+    # From: Issue #1391
     print_step "Capturing pre-update health baseline"
     local -a _update_baseline_services
     mapfile -t _update_baseline_services < <(dc_update config --services)
@@ -4988,14 +4917,11 @@ perform_stack_update_flow() {
         sync_repo_to_default_branch "$install_dir"
     fi
 
-    # What: only non-checkout installs get a compose copy
-    # Why: deploy/prod's compose is git-tracked, not a copy
+    # What: deploy/prod template edits move into .local.env
+    # Why: a clean checkout keeps git pulls possible
     # From: Issue #1683 | PR #1858
     if is_deploy_prod_install_dir "$install_dir"; then
         adopt_config_prod_edits "$(deploy_prod_repo_root "$install_dir")"
-    else
-        install_quickstart_compose_assets "$install_dir"
-        print_ok "quickstart compose assets updated"
     fi
 
     print_step "Creating pre-update rollback backup"
