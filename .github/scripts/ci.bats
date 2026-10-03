@@ -11398,6 +11398,59 @@ SH
     [[ "${output}" == *"[dhcp-proxy][FATAL]"*"rollback protection is degraded"* ]]
 }
 
+@test "dhcp-proxy optional directives render exactly per input" {
+    # What: per env set: the full rendered lines + warnings.
+    # Why: a bad entry must warn, never reach dnsmasq.conf.
+    # From: Issue #1683 | PR #1858
+    local root c="${BATS_TEST_TMPDIR}/dnsmasq.conf" case i r n d bf bs co want warn w
+    local -a ws
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/services/dhcp-proxy/entrypoint.sh" _dhcp_proxy_reject_embedded_newline \
+        _dhcp_proxy_render_optional_directives _dhcp_proxy_render_custom_options
+    # What: "." is an empty field, \n a raw newline.
+    # Why: keeps every table row at ten visible fields.
+    # From: Issue #1683 | PR #1858
+    _v() { if [ "$1" = . ]; then printf ''; else printf '%b' "$1"; fi; }
+    while IFS='|' read -r case i r n d bf bs co want warn; do
+        DHCP_PROXY_INTERFACE="$(_v "${i}")"; DHCP_PROXY_ROUTER="$(_v "${r}")"
+        DHCP_NTP_SERVERS="$(_v "${n}")"; DHCP_PROXY_DOMAIN="$(_v "${d}")"
+        DHCP_PROXY_BOOT_FILENAME="$(_v "${bf}")"; DHCP_PROXY_BOOT_SERVER="$(_v "${bs}")"
+        DHCP_PROXY_CUSTOM_OPTIONS="$(_v "${co}")"
+        export DHCP_PROXY_INTERFACE DHCP_PROXY_ROUTER DHCP_NTP_SERVERS DHCP_PROXY_DOMAIN \
+            DHCP_PROXY_BOOT_FILENAME DHCP_PROXY_BOOT_SERVER DHCP_PROXY_CUSTOM_OPTIONS
+        [ "${want}" != . ] || want=""
+        : > "${c}"
+        run _dhcp_proxy_render_optional_directives "${c}"
+        [ "${status}" -eq 0 ] || { echo "${case}: rc ${status}"; return 1; }
+        [ "$(paste -sd'#' "${c}")" = "${want}" ] || { echo "${case}:"; cat "${c}"; return 1; }
+        if [ "${warn}" = - ]; then
+            [ -z "${output}" ] || { echo "${case}: unexpected ${output}"; return 1; }
+            continue
+        fi
+        IFS='^' read -r -a ws <<< "${warn}"
+        for w in "${ws[@]}"; do
+            [[ "${output}" == *"${w}"* ]] || { echo "${case}: no '${w}': ${output}"; return 1; }
+        done
+    done <<'CASES'
+none|.|.|.|.|.|.|.|.|-
+basic|eth0|10.0.0.1|ntp1|lan|.|.|.|interface=eth0#dhcp-option-pxe=3,10.0.0.1#dhcp-option-pxe=42,ntp1#dhcp-option-pxe=15,lan|-
+boot|.|.|.|.|pxe.efi|10.0.0.5|.|dhcp-boot=pxe.efi,,10.0.0.5|-
+bootempty|.|.|.|.|pxe.efi|.|.|dhcp-boot=pxe.efi,,|-
+bootsrvonly|.|.|.|.|.|10.0.0.5|.|.|without DHCP_PROXY_BOOT_FILENAME
+custom|.|.|.|.|.|.|66:tftp.lan;67:boot.efi|dhcp-option-pxe=66,tftp.lan#dhcp-option-pxe=67,boot.efi|-
+badcode|.|.|.|.|.|.|0:x;255:x;ab:x;66:ok|dhcp-option-pxe=66,ok|'0:x': option code 0 is outside^'255:x': option code 255 is outside^'ab:x': option code must be numeric
+nocolon|.|.|.|.|.|.|66tftp;67:b; :x|dhcp-option-pxe=67,b|'66tftp' (expected CODE:VALUE)^':x' (expected CODE:VALUE, both non-empty)
+code6|.|.|.|.|.|.|6:1.1.1.1|.|option code 6 (DNS servers) always collides
+collide|.|10.0.0.1|.|.|.|.|3:10.0.0.9;15:example.com;42:10.0.0.20|dhcp-option-pxe=3,10.0.0.1#dhcp-option-pxe=15,example.com#dhcp-option-pxe=42,10.0.0.20|option code 3 (router) collides with DHCP_PROXY_ROUTER
+collideall|.|r|n|d|.|.|3:a;15:b;42:c|dhcp-option-pxe=3,r#dhcp-option-pxe=42,n#dhcp-option-pxe=15,d|code 3 (router) collides^code 15 (domain name) collides^code 42 (NTP servers) collides
+nliface|eth\n0|.|.|.|.|.|.|.|DHCP_PROXY_INTERFACE contains an embedded newline
+nlfield|.|a\nb|ntp1|c\nd|.|.|.|dhcp-option-pxe=42,ntp1|DHCP_PROXY_ROUTER contains^DHCP_PROXY_DOMAIN contains
+nlboot|.|.|.|.|a\nb|10.0.0.5|.|.|DHCP_PROXY_BOOT_FILENAME/DHCP_PROXY_BOOT_SERVER contains
+nlcustom|.|.|.|.|.|.|60:PXEClient\ndhcp-option-pxe=99,evil|dhcp-option-pxe=60,PXEClient|-
+space|.|.|.|.|.|.|  60:PXE Client  ;93:0|dhcp-option-pxe=60,PXE Client#dhcp-option-pxe=93,0|-
+CASES
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.
