@@ -5325,23 +5325,23 @@ STUB
     # What: missing member targets get stubs; real stay.
     # Why: images copy manifests only; no rm -rf on src.
     # From: Issue #1683 | PR #1858
-    local ws="${BATS_TEST_TMPDIR}/ws"
-    mkdir -p "${ws}/a/src" "${ws}/b"
-    printf '[workspace]\nmembers = [\n    "a",\n    "b",\n]\n' > "${ws}/Cargo.toml"
-    printf '[lib]\npath = "src/lib.rs"\n\n[[bin]]\npath = "src/main.rs"\n' > "${ws}/a/Cargo.toml"
-    printf '[[bin]]\npath = "src/main.rs"\n' > "${ws}/b/Cargo.toml"
-    printf 'real\n' > "${ws}/a/src/main.rs"
-    _in_ws() { cd "${ws}" && _ci_rust_member_stubs; }
+    local wsdir="${BATS_TEST_TMPDIR}/ws"
+    mkdir -p "${wsdir}/a/src" "${wsdir}/b"
+    printf '[workspace]\nmembers = [\n    "a",\n    "b",\n]\n' > "${wsdir}/Cargo.toml"
+    printf '[lib]\npath = "src/lib.rs"\n\n[[bin]]\npath = "src/main.rs"\n' > "${wsdir}/a/Cargo.toml"
+    printf '[[bin]]\npath = "src/main.rs"\n' > "${wsdir}/b/Cargo.toml"
+    printf 'real\n' > "${wsdir}/a/src/main.rs"
+    _in_ws() { cd "${wsdir}" && _ci_rust_member_stubs; }
     run _in_ws
     [ "${status}" -eq 0 ]
     [ "${output}" = $'a/src/lib.rs\nb/src/main.rs' ]
-    [ "$(cat "${ws}/a/src/main.rs")" = real ]
-    [ ! -s "${ws}/a/src/lib.rs" ]
-    [ "$(cat "${ws}/b/src/main.rs")" = 'fn main() {}' ]
-    rm -r "${ws}/b"
+    [ "$(cat "${wsdir}/a/src/main.rs")" = real ]
+    [ ! -s "${wsdir}/a/src/lib.rs" ]
+    [ "$(cat "${wsdir}/b/src/main.rs")" = 'fn main() {}' ]
+    rm -r "${wsdir}/b"
     run _in_ws
     [ "${status}" -eq 2 ]; [[ "${output}" == *'[CI-ERROR-RUSTBUILD-0043] member="b"'* ]]
-    printf '[workspace]\n' > "${ws}/Cargo.toml"
+    printf '[workspace]\n' > "${wsdir}/Cargo.toml"
     run _in_ws
     [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-RUSTBUILD-0042]"* ]]
 }
