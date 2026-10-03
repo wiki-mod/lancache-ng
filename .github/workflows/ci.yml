@@ -1,6 +1,7 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
+
 # What: orchestrate plan, build, accept, promote flow
 # Why: ci.sh is sole owner; one canonical build manifest
 # From: Issue #1683

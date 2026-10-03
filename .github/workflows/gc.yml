@@ -1,6 +1,7 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
+
 # What: reap unreachable GHCR artifacts (reachability GC).
 # Why: GC is its own workflow; retention to roots only.
 # From: Issue #1683

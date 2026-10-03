@@ -1,7 +1,9 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Admin UI: Rust binary + Tera templates on Alpine.
+
+# What: Admin UI Rust binary plus Tera templates, Alpine.
+# Why: the binary reads its templates from /templates.
 
 # What: base image pin, supplied by ci.sh from the SOT.
 # Why: SOT base_images.alpine is the sole owner (AG-CI-006).

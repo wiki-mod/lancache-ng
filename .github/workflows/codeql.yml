@@ -1,6 +1,7 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
+
 # What: CodeQL security analysis; scope owned by SOT
 # Why: own workflow (§73); ci.sh admits, YAML only calls.
 # From: Issue #1683

@@ -1,7 +1,9 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# DNS service: PowerDNS (recursor + authoritative), nats-subscriber binary, Lua RPZ scripts.
+
+# What: PowerDNS, nats-subscriber and Lua RPZ on Alpine.
+# Why: record ingest ships in the same image as the DNS.
 
 # What: base image pin, supplied by ci.sh from the SOT.
 # Why: SOT base_images.alpine is the sole owner (AG-CI-006).

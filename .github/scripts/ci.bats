@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
+
 # What: Single authoritative CI 2.0 regression suite.
 # Why: One place proves every CI invariant and regression.
 # From: Issue #1683

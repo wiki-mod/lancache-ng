@@ -1,6 +1,7 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
+
 # What: promote accepted current_dev to nightly
 # Why: nightly reuses; never rebuilds current_dev
 # From: Issue #1683

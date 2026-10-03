@@ -1,6 +1,7 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
+
 # What: Single source of truth for CI 2.0 build inputs.
 # Why: One list ends the copied-in-many-places drift.
 # From: Issue #1683

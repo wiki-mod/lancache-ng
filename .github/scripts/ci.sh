@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: Single authoritative CI 2.0 engine (skeleton).
+
+# What: Single authoritative CI 2.0 engine.
 # Why: All CI decisions live here, YAML only orchestrates.
 # From: Issue #1683
 
