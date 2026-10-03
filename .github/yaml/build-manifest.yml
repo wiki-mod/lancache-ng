@@ -693,6 +693,14 @@ ci_variables:
   # Why: plan audits only when this file changed.
   # From: Issue #1683 | PR #1858
   CI_CARGO_LOCK: Cargo.lock
+  # What: the installer script the stack checks read.
+  # Why: one path owner; ci.sh holds no installer literal.
+  # From: Issue #1683 | PR #1858
+  CI_INSTALLER: setup.sh
+  # What: the trivy ignore list scans and VEX read.
+  # Why: one path owner for scan, release VEX, vex-drift.
+  # From: Issue #1683 | PR #1858
+  CI_TRIVY_IGNORE: .trivyignore.yaml
 
 # What: CI variables each build type passes as build-args.
 # Why: builders read repo/org vars; no YAML or literal copy.

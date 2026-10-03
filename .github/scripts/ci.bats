@@ -2682,6 +2682,9 @@ tail" '{body:$b, isPrerelease:false}')" \
     rm -f "${BATS_TEST_TMPDIR}/.trivyignore.yaml"
     CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_vex v1.2.3
     [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0011"* ]]
+    printf 'vulnerabilities:\n  - id: CVE-0\n    statement: >-\n      x\n' > "${BATS_TEST_TMPDIR}/alt.yaml"
+    CI_TRIVY_IGNORE=alt.yaml CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_vex v1.2.3
+    [ "${status}" -eq 0 ] || { echo "CI_TRIVY_IGNORE: ${output}"; return 1; }
 }
 
 @test "openvex generator maps each trivyignore shape" {
@@ -7484,6 +7487,13 @@ absent|x=1\n|CI-ERROR-CORE-0104|2
 twice|QUICKSTART_COMPOSE="$SCRIPT_DIR/a"\nQUICKSTART_COMPOSE="$SCRIPT_DIR/b"\n|CI-ERROR-CORE-0104|2
 form|QUICKSTART_COMPOSE=/abs/c.yml\n|CI-ERROR-CORE-0105|2
 CASES
+    # What: the installer path comes from CI_INSTALLER.
+    # Why: no installer literal in ci.sh; the SOT decides.
+    # From: Issue #1683 | PR #1858
+    printf 'QUICKSTART_COMPOSE="$SCRIPT_DIR/o/c.yml"\n' > "${r}/other.sh"
+    CI_INSTALLER=other.sh run _ci_installer_compose "${r}"
+    [ "${status}" -eq 0 ] && [ "${output}" = o/c.yml ] || { echo "override: ${output}"; return 1; }
+    [ "$(_ci_variable CI_INSTALLER)" = setup.sh ]
 }
 
 # What: seed a minimal prebuilt-only prod/quickstart tree.

@@ -2921,6 +2921,15 @@ _ci_trivy_db_ensure_fresh() {
     printf 'present=false\n'
 }
 
+# What: the trivy ignore file (SOT CI_TRIVY_IGNORE).
+# Why: scan, release VEX and vex-drift read one path.
+# From: Issue #1683 | PR #1858
+_ci_trivy_ignore_file() {
+    local root="${1:-${CI_REPO_ROOT:-.}}" rel
+    rel="$(_ci_variable CI_TRIVY_IGNORE)" || return 2
+    printf '%s/%s\n' "${root}" "${rel}"
+}
+
 # What: Scan an image digest with Trivy on the runner.
 # Why: A written report is a finding; only DB miss retries.
 # From: Issue #1683
@@ -2928,8 +2937,8 @@ _ci_trivy_scan() {
     local service="$1" digest="$2" ref report n=0 raw
     local max="${CI_TRIVY_MAX:-4}"
     local scanners="${CI_TRIVY_SCANNERS:-vuln,secret}"
-    local ignore="${CI_TRIVY_IGNOREFILE:-.trivyignore.yaml}"
-    local cache_rec cache_dir fresh_rec skip_db=0
+    local ignore cache_rec cache_dir fresh_rec skip_db=0
+    ignore="$(_ci_trivy_ignore_file)" || return 2
     cache_rec="$(_ci_trivy_cache_dir)" || return 3
     cache_dir="$(_ci_record_field "${cache_rec}" dir)"
     fresh_rec="$(_ci_trivy_db_ensure_fresh "${cache_dir}")" || return 3
@@ -4459,7 +4468,7 @@ ci_cmd_release_vex() {
     local tag="${1:-}"
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0010]" "reason=\"tag arg required\""; return 2; }
     local root="${CI_REPO_ROOT:-.}" trivyignore dir out rc=0
-    trivyignore="${root}/.trivyignore.yaml"
+    trivyignore="$(_ci_trivy_ignore_file "${root}")" || return 2
     [ -s "${trivyignore}" ] || { ci_log "[CI-ERROR-RELEASE-0011]" "path=\"${trivyignore}\" reason=\"trivyignore missing; cannot build release VEX\""; return 2; }
     dir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-vex.XXXXXX")" || return 2
     out="${dir}/vex.openvex.json"
@@ -5959,11 +5968,13 @@ _ci_validate_dns_rollback() {
     resp="$(_ci_capture 0 curl -sS -H "X-API-Key: ${key}" "http://${ip}:8083/snapshots")" || return 2
     last="$(_ci_capture 0 jq -r '.zones["lan."][0].id // empty' <<<"${resp}")" || return 2
     compose="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    local su
+    su="$(_ci_installer)" || return 2
     # What: setup.sh rollback, wrong host PDNS_API_KEY.
     # Why: the key must be resolved inside the container.
     # From: Issue #836
     resp="$(COMPOSE_PROJECT_NAME="${project}" PDNS_API_KEY=CHANGE_ME_host_side_key_never_used \
-        bash "${CI_REPO_ROOT}/setup.sh" reset-to-last-known-good-config dns "$(dirname "${compose}")" \
+        bash "${su}" reset-to-last-known-good-config dns "$(dirname "${compose}")" \
         lan. "${snap}" --yes 2>&1)" || rc=$?
     case "${rc}:${resp}" in
         *"cache-flush publishes failed"*) rc=1 ;;
@@ -6103,7 +6114,9 @@ _ci_validate_kea_round_trip() {
         rm -rf "${inst}"
         return 2
     fi
-    resp="$(bash "${CI_REPO_ROOT}/setup.sh" reset-to-last-known-good-config kea "${inst}" "${snap}" --yes 2>&1)" || rc=$?
+    local su
+    su="$(_ci_installer)" || { rm -rf "${inst}"; return 2; }
+    resp="$(bash "${su}" reset-to-last-known-good-config kea "${inst}" "${snap}" --yes 2>&1)" || rc=$?
     rm -rf "${inst}"
     case "${rc}:${resp}" in
         0:*"Kea rolled back to known-good snapshot ${snap} ("*) ;;
@@ -8214,11 +8227,8 @@ _ci_setup_wizard_rows() {
 }
 _ci_check_setup_prompt_drift() {
     local repo_root="${1:-${CI_REPO_ROOT:-.}}"
-    local setup="${repo_root}/setup.sh"
-    if [ ! -f "${setup}" ]; then
-        ci_log "[CI-ERROR-CHECK-0067]" "path=\"${setup}\" reason=\"setup.sh not found\""
-        return 2
-    fi
+    local setup
+    setup="$(_ci_installer "${repo_root}")" || return 2
     local anchor_count
     anchor_count="$(_ci_capture 1 grep -c '^case "${1:-install}" in$' "${setup}")" || return 2
     if [ "${anchor_count}" -ne 1 ]; then
@@ -9897,8 +9907,9 @@ _ci_check_prebuilt_prod() {
     if [ -n "${hit}" ]; then
         viol+=("a stack compose declares build:; prod must run prebuilt images only" "${hit}")
     fi
-    local hit
-    hit="$(_ci_capture 1 grep -RIn -- '--build' "${repo_root}/README.md" "${dep}" "${inst}" "${repo_root}/setup.sh")" || return 2
+    local hit su
+    su="$(_ci_installer "${repo_root}")" || return 2
+    hit="$(_ci_capture 1 grep -RIn -- '--build' "${repo_root}/README.md" "${dep}" "${inst}" "${su}")" || return 2
     if [ -n "${hit}" ]; then
         viol+=("a user-facing install path instructs --build; prod must run from prebuilt images, not a local build" "${hit}")
     fi
@@ -9977,17 +9988,26 @@ _ci_validation_env() {
 ' <<< "${fx}" | grep -v '^$'
 }
 
+# What: the installer's absolute path (SOT CI_INSTALLER).
+# Why: one owner for the path and its existence check.
+# From: Issue #1683 | PR #1858
+_ci_installer() {
+    local root="${1:-${CI_REPO_ROOT}}" rel
+    rel="$(_ci_variable CI_INSTALLER)" || return 2
+    if [ ! -f "${root}/${rel}" ]; then
+        ci_log "[CI-ERROR-CORE-0102]" "path=\"${root}/${rel}\" reason=\"installer not found\""
+        return 2
+    fi
+    printf '%s\n' "${root}/${rel}"
+}
+
 # What: compose file setup.sh installs, read from setup.sh.
 # Why: the installer owns its compose; CI only derives it.
 # From: Issue #1683 | PR #1858
 _ci_installer_compose() {
     local root="${1:-${CI_REPO_ROOT}}" su line
     local re='^QUICKSTART_COMPOSE="\$SCRIPT_DIR/([^"$]+)"$'
-    su="${root}/setup.sh"
-    if [ ! -f "${su}" ]; then
-        ci_log "[CI-ERROR-CORE-0102]" "path=\"${su}\" reason=\"installer setup.sh not found\""
-        return 2
-    fi
+    su="$(_ci_installer "${root}")" || return 2
     line="$(_ci_capture 1 grep -E '^QUICKSTART_COMPOSE=' "${su}")" || return 2
     if [ -z "${line}" ] || [ "$(wc -l <<< "${line}")" -ne 1 ]; then
         ci_error "[CI-ERROR-CORE-0104]" "path=\"${su}\" reason=\"QUICKSTART_COMPOSE missing or assigned twice\"" "${line}"
@@ -10141,7 +10161,11 @@ _ci_check_compose_config() {
 _ci_check_nats_atomic_write() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
-    local cf dep inst ep='services/dns/entrypoint.sh' rs='services/ui/src/routes/secondaries.rs' su='setup.sh'
+    local cf dep inst ep rs su
+    ep="$(ci_service_field dns context)/entrypoint.sh" || return 2
+    rs="$(ci_service_field ui context)/src/routes/secondaries.rs" || return 2
+    su="$(_ci_installer "${repo_root}")" || return 2
+    su="${su#"${repo_root}/"}"
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     inst="$(_ci_installer_compose "${repo_root}")" || return 2
     for cf in "${dep}" "${inst}"; do
@@ -10534,7 +10558,8 @@ _ci_check_dhcp_proxy_env() {
 _ci_check_setup_keys_kea() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
-    local key dep inst su="${repo_root}/setup.sh"
+    local key dep inst su
+    su="$(_ci_installer "${repo_root}")" || return 2
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     inst="$(_ci_installer_compose "${repo_root}")" || return 2
     local hit
@@ -10578,9 +10603,9 @@ _ci_check_setup_keys_kea() {
 # From: Issue #1683
 _ci_check_setup_update_safety() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
-    local su="${repo_root}/setup.sh" pause_out
+    local su pause_out
     local -a viol=()
-    [ -f "${su}" ] || { ci_error "[CI-ERROR-CHECK-0062]" "path=\"${su}\" reason=\"setup.sh not found\""; return 2; }
+    su="$(_ci_installer "${repo_root}")" || return 2
     awk '/This script must be run as root/{r=1} r&&/assert_prebuilt_image_platform_supported/{g=1} r&&!g&&/(install_docker|systemctl enable --now docker)/{f=1} END{exit f?0:1}' "${su}" \
         && viol+=("prebuilt platform guard must run before Docker install or daemon startup")
     # What: no flow mutates install state before its pause.
@@ -10618,9 +10643,9 @@ _ci_check_setup_update_safety() {
 # From: Issue #1683
 _ci_check_setup_docker_conflict() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
-    local su="${repo_root}/setup.sh"
+    local su
     local -a viol=()
-    [ -f "${su}" ] || { ci_error "[CI-ERROR-CHECK-0063]" "path=\"${su}\" reason=\"setup.sh not found\""; return 2; }
+    su="$(_ci_installer "${repo_root}")" || return 2
     grep -Fq 'rpm_legacy_docker_package_list()' "${su}" \
         || viol+=("setup.sh must keep a shared legacy Docker RPM conflict list")
     { grep -Fq 'docker-selinux' "${su}" && grep -Fq 'docker-engine-selinux' "${su}"; } \
@@ -10642,14 +10667,13 @@ _ci_check_setup_docker_conflict() {
 # From: Issue #1683
 _ci_check_image_channel_resolution() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
-    local su="${repo_root}/setup.sh"
-    local sec="${repo_root}/services/ui/src/routes/secondaries.rs"
-    local prod dep
+    local su sec prod dep
+    su="$(_ci_installer "${repo_root}")" || return 2
+    sec="${repo_root}/$(ci_service_field ui context)/src/routes/secondaries.rs" || return 2
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     prod="${repo_root}/${dep}"
     local -a viol=()
     local f
-    [ -f "${su}" ] || { ci_error "[CI-ERROR-CHECK-0064]" "path=\"${su}\" reason=\"setup.sh not found\""; return 2; }
     if awk '/^# .*Installing systemd watchdog/{i=1;p=0} /^# .*Post-start info/{i=0} i&&/docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+pull/{p=1} i&&!p&&/^[[:space:]]*(systemctl[[:space:]]+(enable|start)[[:space:]]+(lancache\.service|lancache-converge\.timer)|docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+up[[:space:]]+-d)/{v=1} END{exit v?0:1}' "${su}"; then
         viol+=("setup.sh must not start/enable lancache services before image pull")
     fi
@@ -10798,7 +10822,8 @@ _ci_trivyignore_fields() {
 # From: Issue #1683 | PR #1858
 _ci_check_vex_drift() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
-    local trivyignore="${repo_root}/.trivyignore.yaml"
+    local trivyignore
+    trivyignore="$(_ci_trivy_ignore_file "${repo_root}")" || return 2
     local out entry_count statement_count
     [ -f "${trivyignore}" ] || { ci_error "[CI-ERROR-CHECK-0050]" "path=\"${trivyignore}\" reason=\".trivyignore.yaml not found\"" "${trivyignore}"; return 2; }
     if ! out="$(_ci_generate_vex "${trivyignore}")"; then
