@@ -7496,7 +7496,7 @@ _ci_header_expected() {
         *.lua) printf -- '-- %s\n-- %s\n' "${h}" "${s}" ;;
         *.js) printf '// %s\n// %s\n' "${h}" "${s}" ;;
         *.css) printf '/* %s */\n/* %s */\n' "${h}" "${s}" ;;
-        *.sh|*.bats|*.yml|*.yaml|*.toml|*.conf|*.template|*.txt|*.env|*.service|*.timer|*.ps1|*.dockerignore|Dockerfile|*/Dockerfile|.gitattributes|.gitignore|*/.gitignore|.shellspec|*/.shellspec|CODEOWNERS|*/CODEOWNERS|.githooks/*|*/.githooks/*) printf '# %s\n# %s\n' "${h}" "${s}" ;;
+        *.sh|*.bats|*.yml|*.yaml|*.toml|*.conf|*.template|*.txt|*.env|*.service|*.timer|*.ps1|*.dockerignore|Dockerfile|*/Dockerfile|.gitattributes|.gitignore|*/.gitignore|CODEOWNERS|*/CODEOWNERS|.githooks/*|*/.githooks/*) printf '# %s\n# %s\n' "${h}" "${s}" ;;
         *) return 1 ;;
     esac
 }

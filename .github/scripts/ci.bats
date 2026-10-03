@@ -12609,6 +12609,41 @@ CASES
     [ "${status}" -eq 1 ]
 }
 
+@test "setup env value parsing and write safety per shape" {
+    # What: compose-style value parse; unsafe values fail.
+    # Why: setup reads .env like compose, never breaks it.
+    # From: Issue #1683 | PR #1858
+    local root e="${BATS_TEST_TMPDIR}/.env" case line want v
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/setup.sh" _compose_parse_env_value get_env_var validate_env_value
+    die() { printf '%s\n' "$*" >&2; exit 1; }
+    while IFS='|' read -r case line want; do
+        printf '%s\n' "${line}" 'OTHER=1' > "${e}"
+        [ "$(get_env_var KEY "${e}")" = "${want}" ] || { echo "${case}: '$(get_env_var KEY "${e}")'"; return 1; }
+    done <<'CASES'
+plain|KEY=value|value
+dquote|KEY="/opt/lancache cache" # fast disk|/opt/lancache cache
+squote|KEY='a # b' # c|a # b
+comment|KEY=x # c|x
+hashnospace|KEY=x#y|x#y
+spaces|KEY=  padded  |padded
+empty|KEY=|
+missing|NOTKEY=1|
+first|KEY=one|one
+CASES
+    printf 'KEY=one\nKEY=two\n' > "${e}"
+    [ "$(get_env_var KEY "${e}")" = one ]
+    [ -z "$(get_env_var KEY "${BATS_TEST_TMPDIR}/none.env")" ]
+    for v in '' /opt/lancache-ng 192.0.2.10 'a b'; do
+        validate_env_value KEY "${v}" || { echo "'${v}' refused"; return 1; }
+    done
+    for v in '/opt/lancache # broken' 'a$b' 'a`b' 'a"b' "a'b" 'a\b' $'a\nb'; do
+        run validate_env_value CACHE_DIR "${v}"
+        [ "${status}" -eq 1 ] && [[ "${output}" == *"CACHE_DIR contains unsafe characters for .env"* ]] || {
+            echo "'${v}' accepted: ${output}"; return 1; }
+    done
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.
