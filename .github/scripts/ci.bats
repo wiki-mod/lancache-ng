@@ -12928,7 +12928,7 @@ STUB
 }
 
 @test "setup quickstart assets install per target state" {
-    # What: fresh, stale dirs, repeat, in place; files, modes.
+    # What: fresh, stale dirs, repeat, in place; modes.
     # Why: a stale dir target must never nest the copy.
     # From: Issue #1683 | PR #1858
     local root t="${BATS_TEST_TMPDIR}" i="${BATS_TEST_TMPDIR}/install" SCRIPT_DIR p
@@ -12963,6 +12963,80 @@ STUB
     install_quickstart_compose_assets "${t}/inplace"
     [ "$(stat -c '%a' "${t}/inplace/scripts/untracked/docker-socket-proxy.sh" "${t}/inplace/scripts/shared-secret-bootstrap.sh" | paste -sd' ')" = "755 644" ]
     cmp "${root}/scripts/untracked/docker-socket-proxy.sh" "${t}/inplace/scripts/untracked/docker-socket-proxy.sh"
+}
+
+@test "setup functional health gate and tool install per state" {
+    # What: healthz/DNS probes, port binding, missing tools.
+    # Why: an update passes only on real traffic checks.
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" sb="${BATS_TEST_TMPDIR}/sb" awkp case std ssl on cu dg rc msg
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    awkp="$(command -v awk)"
+    _load_functions "${root}/setup.sh" _compose_parse_env_value get_env_var require_functional_check_tool \
+        _proxy_container_publishes_port _verify_healthz_endpoint verify_stack_functional_health \
+        apt_package_available package_name_for_tool install_missing_tools
+    die() { printf 'DIE: %s\n' "$*" >&2; exit 1; }
+    print_error() { printf 'ERR: %s\n' "$*" >&2; }
+    print_warn() { :; }
+    _tcp_port_reachable() { return "${TCP_RC}"; }
+    service_container_id() { printf '%s' "${CID}"; }
+    docker() {
+        case "$1" in
+            port) [ -n "${BIND}" ] || return 1; printf '%s\n' "${BIND}" ;;
+            exec) shift 2; "$@" ;;
+        esac
+    }
+    _sandbox() {
+        rm -rf "${sb}"; mkdir -p "${sb}"; ln -s "${awkp}" "${sb}/awk"
+        [ "$1" = - ] || printf 'exit %s\n' "$1" > "${sb}/curl"
+        [ "$2" = - ] || printf 'printf %%s %q\n' "${2/none/}" > "${sb}/dig"
+        chmod +x "${sb}"/* 2>/dev/null || true
+    }
+    export _UPDATE_ENV_FILE="${t}/env"
+    while IFS='|' read -r case std ssl on cu dg TCP_RC CID BIND rc msg; do
+        printf 'IP_STANDARD=%s\nIP_SSL=%s\nSSL_ENABLED=%s\n' "${std}" "${ssl}" "${on}" > "${_UPDATE_ENV_FILE}"
+        _sandbox "${cu}" "${dg}"
+        [ "${CID}" != . ] || CID=""
+        [ "${BIND}" != . ] || BIND=""
+        PATH="${sb}" run verify_stack_functional_health
+        [ "${status}" -eq "${rc}" ] && [[ "${output}" == *"${msg}"* ]] || { echo "${case}: rc ${status} ${output}"; return 1; }
+    done <<'CASES'
+ok|10.0.0.10||0|0|1.2.3.4|0|pid|10.0.0.10:80|0|
+bindall|10.0.0.10||0|0|1.2.3.4|0|pid|0.0.0.0:80|0|
+bindv6|10.0.0.10||0|0|1.2.3.4|0|pid|[::]:80|0|
+noip|||0|-|-|0|pid|10.0.0.10:80|0|
+nocurl|10.0.0.10||0|-|1.2.3.4|0|pid|10.0.0.10:80|1|requires 'curl', which is not installed
+nodig|10.0.0.10||0|0|-|0|pid|10.0.0.10:80|1|requires 'dig', which is not installed
+healthz|10.0.0.10||0|22|1.2.3.4|0|pid|10.0.0.10:80|1|http://127.0.0.1/healthz inside the proxy container
+nodns|10.0.0.10||0|0|none|0|pid|10.0.0.10:80|1|DNS did not resolve content1.steampowered.com via 10.0.0.10
+tcp|10.0.0.10||0|0|1.2.3.4|1|pid|10.0.0.10:80|1|TCP connect to 10.0.0.10:80
+nocid|10.0.0.10||0|0|1.2.3.4|0|.|10.0.0.10:80|1|no running 'proxy' container
+otherip|10.0.0.10||0|0|1.2.3.4|0|pid|10.0.0.99:80|1|does not include 10.0.0.10:80
+nobind|10.0.0.10||0|0|1.2.3.4|0|pid|.|1|does not include 10.0.0.10:80
+sslonly||10.0.0.11|1|-|-|0|pid|10.0.0.11:80|1|requires 'curl'
+ssloff||10.0.0.11|0|-|-|0|pid|10.0.0.11:80|0|
+CASES
+    _tool_stub "${t}/apt" apt-cache <<<'[ "$2" = bind9-dnsutils ]'
+    [ "$(PATH="${t}/apt:${PATH}" package_name_for_tool dig)" = bind9-dnsutils ]
+    _tool_stub "${t}/apt2" apt-cache <<<'exit 100'
+    [ "$(PATH="${t}/apt2:${PATH}" package_name_for_tool dig)" = dnsutils ]
+    [ "$(package_name_for_tool tar)" = tar ]
+    _sandbox 0 1.2.3.4
+    PATH="${sb}" run install_missing_tools curl dig
+    [ "${status}" -eq 0 ]
+    [ -z "${output}" ]
+    _sandbox - -
+    PATH="${sb}" run install_missing_tools curl
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"DIE: Cannot install missing tools automatically; install: curl"* ]]
+    printf 'exit 0\n' > "${sb}/apt-get"; chmod +x "${sb}/apt-get"
+    PATH="${sb}" run install_missing_tools curl
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"DIE: curl is still missing after installing package(s): curl"* ]]
+    printf '[ "$1" != install ]\n' > "${sb}/apt-get"
+    PATH="${sb}" run install_missing_tools curl
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"DIE: Failed to install required tool(s): curl"* ]]
 }
 
 @test "dns config adapters snapshot, roll back and converge" {
