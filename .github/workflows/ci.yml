@@ -15,14 +15,22 @@ on:
   push:
     branches: [current_dev, master]
     tags: ['v*']
+  # What: new issues only run the project-board job.
+  # Why: AG-GH-008 board placement; maintainer 2026-10-03.
+  # From: Issue #1683 | PR #1858
+  issues:
+    types: [opened]
   workflow_dispatch:
 permissions:
   contents: read
   packages: write
   id-token: write
   attestations: write
+# What: issue runs get their own group per issue.
+# Why: a default-branch group would drop a queued push run.
+# From: Issue #1683 | PR #1858
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.issue.number && format('issue-{0}', github.event.issue.number) || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 defaults:
   run:
@@ -96,6 +104,7 @@ jobs:
   plan:
     name: plan
     needs: platform
+    if: github.event_name != 'issues'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container: &bt_platform
@@ -332,12 +341,34 @@ jobs:
       - name: Close the issues the merged PR links
         run: bash .github/scripts/ci.sh close-linked-issues
 
+  # What: put a new issue on the SOT project board.
+  # Why: GITHUB_TOKEN cannot write org Projects v2.
+  # From: Issue #1683 | PR #1858
+  project-board:
+    name: project-board
+    needs: platform
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container: *bt_platform
+    permissions:
+      contents: read
+      packages: read
+    env:
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+    steps:
+      - *bootstrap
+      - name: Add the issue to the project board
+        run: bash .github/scripts/ci.sh board-add
+
   # What: run diff-scoped and repo-wide guards
   # Why: static checks; own failure domain
   # From: Issue #1683
   checks:
     name: checks
     needs: platform
+    if: github.event_name != 'issues'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container: *bt_platform
@@ -370,7 +401,7 @@ jobs:
       # Why: GITHUB_TOKEN cannot write org Projects v2.
       # From: Issue #1683 | PR #1858
       - name: Add the PR to the project board
-        run: bash .github/scripts/ci.sh pr-board
+        run: bash .github/scripts/ci.sh board-add
       - name: Run the PR/push check set
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
@@ -382,7 +413,7 @@ jobs:
   result:
     name: result
     needs: [platform, plan, build, test, cargo-audit, lint, scan, aggregate, assemble, validate, promote, checks]
-    if: always()
+    if: always() && github.event_name != 'issues'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
