@@ -5816,35 +5816,45 @@ STUB
     [[ "${output}" == *"language-policy=clean"* ]]
 }
 
-@test "check mutable-refs fails a floating action version via ci.sh" {
-    # What: ci.sh owns the pin invariant; bats calls it.
-    # Why: no :latest / @vN; SHA/digest-pinned only.
-    # From: Issue #1683
-    printf 'jobs:\n  x:\n    steps:\n      - uses: foo/bar@abc1234\n' > "${BATS_TEST_TMPDIR}/ok.yml"
-    run bash "${CI_SH}" check mutable-refs "${BATS_TEST_TMPDIR}/ok.yml"
-    [ "${status}" -eq 0 ]
-    printf 'jobs:\n  x:\n    steps:\n      - uses: foo/bar@v4\n' > "${BATS_TEST_TMPDIR}/bad.yml"
-    run bash "${CI_SH}" check mutable-refs "${BATS_TEST_TMPDIR}/bad.yml"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0008"* ]]
-}
-
-@test "check mutable-refs default scan includes composite-action action.yml" {
-    # What: Default glob covers .github/actions/action."
-    # Why: Composite action @vN refs must be guarded.
+@test "check mutable-refs requires a full SHA per external action ref" {
+    # What: one uses: shape per row; external needs 40 hex.
+    # Why: tags, branches and short SHAs move (#1683 S15).
     # From: Issue #1683 | PR #1858
+    local f="${BATS_TEST_TMPDIR}/w.yml" case use want sha
+    sha="3d3c42e5aac5ba805825da76410c181273ba90b1"
+    while IFS='|' read -r case use want; do
+        printf 'jobs:\n  x:\n    steps:\n      %s\n' "${use//@SHA/@${sha}}" > "${f}"
+        GITHUB_REPOSITORY=owner/repo run bash "${CI_SH}" check mutable-refs "${f}"
+        if [ "${want}" = clean ]; then
+            [ "${status}" -eq 0 ] && [[ "${output}" == *"mutable-refs=clean"* ]] || {
+                echo "${case}: ${output}"; return 1; }
+        else
+            [ "${status}" -eq 1 ] && [[ "${output}" == *"CI-ERROR-CHECK-0008"*"action-not-full-sha"* ]] || {
+                echo "${case}: ${output}"; return 1; }
+        fi
+    done <<'ROWS'
+full|- uses: foo/bar@SHA|clean
+fullcomment|- uses: foo/bar@SHA # v4|clean
+quoted|- uses: "foo/bar@SHA"|clean
+subpath|- uses: github/codeql-action/init@SHA|clean
+local|- uses: ./.github/actions/x|clean
+reusable|- uses: ./.github/workflows/r.yml|clean
+docker|- uses: docker://alpine@sha256:0123|clean
+ownrepo|- uses: owner/repo/.github/workflows/r.yml@current_dev|clean
+runtext|- run: echo "uses: foo/bar@v1"|clean
+tag|- uses: foo/bar@v4|fail
+branch|- uses: foo/bar@main|fail
+short|- uses: foo/bar@abc1234|fail
+long39|- uses: foo/bar@3d3c42e5aac5ba805825da76410c181273ba90b|fail
+anchor|- uses: &co foo/bar@master|fail
+quotedtag|- uses: 'foo/bar@v4'|fail
+ROWS
     local r="${BATS_TEST_TMPDIR}/mrepo"
     mkdir -p "${r}/.github/actions/x"
-    printf 'runs:\n  using: composite\n  steps:\n    - uses: foo/bar@v4\n' > "${r}/.github/actions/x/action.yml"
+    printf 'runs:\n  using: composite\n  steps:\n    - uses: foo/bar@abc1234def\n' > "${r}/.github/actions/x/action.yml"
     ( cd "${r}" && git init -q && git add -A )
     run bash -c "cd '${r}' && bash '${CI_SH}' check mutable-refs"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"action-@vN"* ]]
-    printf 'runs:\n  using: composite\n  steps:\n    - uses: foo/bar@abc1234def\n' > "${r}/.github/actions/x/action.yml"
-    ( cd "${r}" && git add -A )
-    run bash -c "cd '${r}' && bash '${CI_SH}' check mutable-refs"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"mutable-refs=clean"* ]]
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"action.yml action-not-full-sha"* ]] || { echo "${output}"; return 1; }
 }
 
 @test "check mutable-refs fails a floating BUILD_TOOLS_IMAGE default" {

@@ -7728,20 +7728,27 @@ _ci_check_language_policy() {
 }
 
 # What: Fail on a mutable image or action reference.
-# Why: SHA/digest-pinned only, no :latest or @vN.
+# Why: SHA/digest-pinned only, no :latest, tag or branch.
 # From: Issue #1683
 _ci_check_mutable_refs() {
     local -a _ci_override=("$@") files=()
     _ci_scan_files files _ci_override '.github/workflows/*.yml' '.github/actions/**/action.yml' '*/Dockerfile' 'Dockerfile' || return 2
-    local path out
+    local path out line v
     local -a viol=()
     for path in "${files[@]}"; do
         case "${path}" in
             *.yml|*.yaml)
-                out="$(_ci_capture 1 grep -nE 'uses:[^@]*@v[0-9]' "${path}")" || return 2
-                if [ -n "${out}" ]; then
-                    viol+=("${path} action-@vN: ${out}")
-                fi
+                # What: an external action ref is a full 40-hex SHA.
+                # Why: tags, branches and short SHAs move (S15, O).
+                # From: Issue #1683 | PR #1858
+                out="$(_ci_capture 1 grep -nE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]*]' "${path}")" || return 2
+                while IFS= read -r line; do
+                    [ -n "${line}" ] || continue
+                    v="$(sed -E 's/^[0-9]+:[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*(&[A-Za-z0-9_-]+[[:space:]]+)?//; s/[[:space:]]+#.*$//; s/[[:space:]]+$//' <<<"${line}")"
+                    v="${v#[\"\']}"; v="${v%[\"\']}"
+                    _ci_action_ref_is_external "${v}" || continue
+                    [[ "${v##*@}" =~ ^[0-9a-fA-F]{40}$ ]] || viol+=("${path} action-not-full-sha: ${line}")
+                done <<<"${out}"
                 # What: grep pattern in ARG not ref.
                 # Why: PROMOTE_TAGS greps ARG :latest.
                 # From: Issue #1683 | PR #1858
