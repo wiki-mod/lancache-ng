@@ -1167,8 +1167,9 @@ _ci_resolve_probe() {
 _ci_resolve_state() {
     local service="$1" identity="$2" platform="$3"
     [ -n "${platform}" ] || { printf 'UNKNOWN\n'; return 0; }
-    local lrec lrc=0 grc=0 gdig tag lstate ldig
-    lrec="$(_ci_ledger_read "$(_ci_ledger_remote)" "${identity}")" || lrc=$?
+    local lrec lrc=0 grc=0 gdig tag lstate ldig remote
+    remote="$(_ci_ledger_remote)" || { printf 'UNKNOWN\n'; return 0; }
+    lrec="$(_ci_ledger_read "${remote}" "${identity}")" || lrc=$?
     [ "${lrc}" -eq 2 ] && { printf 'UNKNOWN\n'; return 0; }
     tag="$(_ci_image_tag "${service}" "${platform}" "${identity}")"
     gdig="$(_ci_registry_probe "${tag}")" || grc=$?
@@ -1498,11 +1499,6 @@ _ci_lock_release() {
 # ACCEPTANCE LEDGER (policy truth; §26)
 # =========================================================
 
-# What: The git ref holding the acceptance ledger.
-# Why: One ledger; §26 policy truth, not GHCR.
-# From: Issue #1683
-CI_LEDGER_REF="${CI_LEDGER_REF:-refs/ci/acceptance/ledger}"
-
 # What: The ledger blob path inside its tree.
 # Why: One tracked file holding the whole record set.
 # From: Issue #1683
@@ -1512,24 +1508,25 @@ CI_LEDGER_FILE="records"
 # Why: One remote name; a test overrides it.
 # From: Issue #1683
 _ci_ledger_remote() {
-    printf '%s' "${CI_LEDGER_REMOTE:-origin}"
+    _ci_variable CI_LEDGER_REMOTE
 }
 
 # What: Print the ledger blob text; 1 empty, 2 unknown.
 # Why: A failed read is UNKNOWN, never "no records".
 # From: Issue #1683
 _ci_ledger_blob() {
-    local remote="$1" rc=0
-    _ci_cas_ref_sha "${remote}" "${CI_LEDGER_REF}" >/dev/null || rc=$?
+    local remote="$1" rc=0 ledger_ref
+    ledger_ref="$(_ci_variable CI_LEDGER_REF)" || return 2
+    _ci_cas_ref_sha "${remote}" "${ledger_ref}" >/dev/null || rc=$?
     [ "${rc}" -eq 1 ] && return 1
     [ "${rc}" -eq 0 ] || return 2
     # What: this fetch has no retry level.
     # Why: op=git uses shared transient-signature truth.
     # From: Issue #1683
-    _ci_retry git git fetch --quiet --depth=1 "${remote}" "${CI_LEDGER_REF}" >/dev/null || return 2
+    _ci_retry git git fetch --quiet --depth=1 "${remote}" "${ledger_ref}" >/dev/null || return 2
     local blob
     if ! blob="$(git cat-file -p "FETCH_HEAD:${CI_LEDGER_FILE}" 2>&1)"; then
-        ci_error "[CI-WARN-RESOLVE-0009]" "ref=\"${CI_LEDGER_REF}\" file=\"${CI_LEDGER_FILE}\" reason=\"ledger file unreadable; UNKNOWN\"" "${blob}"
+        ci_error "[CI-WARN-RESOLVE-0009]" "ref=\"${ledger_ref}\" file=\"${CI_LEDGER_FILE}\" reason=\"ledger file unreadable; UNKNOWN\"" "${blob}"
         return 2
     fi
     printf '%s\n' "${blob}"
@@ -1562,13 +1559,14 @@ _ci_ledger_commit() {
 # Why: §26.1 one atomic ledger write per workflow.
 # From: Issue #1683
 _ci_ledger_upsert() {
-    local remote="$1" new blob rc=0 parent="" ids kept merged blobsha treesha commitsha raw
+    local remote="$1" new blob rc=0 parent="" ids kept merged blobsha treesha commitsha raw ledger_ref
+    ledger_ref="$(_ci_variable CI_LEDGER_REF)" || return 3
     new="$(cat)"
     new="$(printf '%s\n' "${new}" | awk 'NF>0')"
     [ -n "${new}" ] || return 0
     blob="$(_ci_ledger_blob "${remote}")" || rc=$?
     if [ "${rc}" -eq 2 ]; then
-        ci_log "[CI-ERROR-LEDGER-0001]" "ref=\"${CI_LEDGER_REF}\" remote=\"${remote}\" reason=\"ledger read UNKNOWN (raw above); refusing to write\""
+        ci_log "[CI-ERROR-LEDGER-0001]" "ref=\"${ledger_ref}\" remote=\"${remote}\" reason=\"ledger read UNKNOWN (raw above); refusing to write\""
         return 3
     fi
     ids="$(printf '%s\n' "${new}" | awk -F'\t' '{print $1}')"
@@ -1584,25 +1582,25 @@ _ci_ledger_upsert() {
     # Why: same inputs -> same blob; §26.4 idempotency.
     merged="$(printf '%s\n%s\n' "${kept}" "${new}" | awk 'NF>0' | LC_ALL=C sort -u)"
     if ! blobsha="$(printf '%s\n' "${merged}" | git hash-object -w --stdin 2>&1)"; then
-        ci_error "[CI-ERROR-LEDGER-0002]" "ref=\"${CI_LEDGER_REF}\" records=$(wc -l <<< "${merged}") reason=\"ledger blob not written\"" "${blobsha}"
+        ci_error "[CI-ERROR-LEDGER-0002]" "ref=\"${ledger_ref}\" records=$(wc -l <<< "${merged}") reason=\"ledger blob not written\"" "${blobsha}"
         return 3
     fi
     if ! treesha="$(printf '100644 blob %s\t%s\n' "${blobsha}" "${CI_LEDGER_FILE}" | git mktree 2>&1)"; then
-        ci_error "[CI-ERROR-LEDGER-0003]" "ref=\"${CI_LEDGER_REF}\" blob=\"${blobsha}\" reason=\"ledger tree not written\"" "${treesha}"
+        ci_error "[CI-ERROR-LEDGER-0003]" "ref=\"${ledger_ref}\" blob=\"${blobsha}\" reason=\"ledger tree not written\"" "${treesha}"
         return 3
     fi
     commitsha="$(_ci_ledger_commit "${treesha}" "${parent}" "ledger aggregate")" || return 3
     rc=0
     if [ -n "${parent}" ]; then
-        raw="$(git push --force-with-lease="${CI_LEDGER_REF}:${parent}" "${remote}" "${commitsha}:${CI_LEDGER_REF}" 2>&1)" || rc=$?
+        raw="$(git push --force-with-lease="${ledger_ref}:${parent}" "${remote}" "${commitsha}:${ledger_ref}" 2>&1)" || rc=$?
     else
-        raw="$(git push "${remote}" "${commitsha}:${CI_LEDGER_REF}" 2>&1)" || rc=$?
+        raw="$(git push "${remote}" "${commitsha}:${ledger_ref}" 2>&1)" || rc=$?
     fi
     if [ "${rc}" -eq 0 ]; then
-        ci_log "[CI-INFO-LEDGER-0004]" "ref=\"${CI_LEDGER_REF}\" commit=\"${commitsha}\" parent=\"${parent:-none}\" records=$(wc -l <<< "${merged}") reason=\"ledger written\""
+        ci_log "[CI-INFO-LEDGER-0004]" "ref=\"${ledger_ref}\" commit=\"${commitsha}\" parent=\"${parent:-none}\" records=$(wc -l <<< "${merged}") reason=\"ledger written\""
         return 0
     fi
-    _ci_cas_push_failed ledger "${CI_LEDGER_REF}" "${rc}" "${raw}"
+    _ci_cas_push_failed ledger "${ledger_ref}" "${rc}" "${raw}"
 }
 
 # What: Upsert a single record via the batch writer.
@@ -1652,8 +1650,9 @@ ci_cmd_aggregate() {
         records="${records}${line}"$'\n'
     done
     [ -n "${records}" ] || { ci_log "[CI-ERROR-AGGREGATE-0003]" "reason=\"no result.json in dir\" dir=\"${dir}\""; return 2; }
-    local rc=0
-    printf '%s' "${records}" | _ci_ledger_upsert "$(_ci_ledger_remote)" || rc=$?
+    local rc=0 remote
+    remote="$(_ci_ledger_remote)" || return 2
+    printf '%s' "${records}" | _ci_ledger_upsert "${remote}" || rc=$?
     if [ "${rc}" -eq 0 ]; then
         printf 'aggregate result=written records=%s\n' "$(printf '%s' "${records}" | grep -c .)"
         return 0
@@ -3439,9 +3438,10 @@ _ci_accepted_digest() {
         "${CI_ACCEPTED_DIGEST_CMD}" "${service}" "${platform}"
         return "$?"
     fi
-    local identity rec rc=0
+    local identity rec rc=0 remote
     identity="$(_ci_identity_for "${service}" "${platform}")" || return 2
-    rec="$(_ci_ledger_read "$(_ci_ledger_remote)" "${identity}")" || rc=$?
+    remote="$(_ci_ledger_remote)" || return 2
+    rec="$(_ci_ledger_read "${remote}" "${identity}")" || rc=$?
     if [ "${rc}" -eq 1 ]; then
         ci_log "[CI-INFO-ASSEMBLE-0008]" "service=\"${service}\" platform=\"${platform}\" identity=\"${identity}\" reason=\"no ledger record\""
         return 1
@@ -3808,14 +3808,22 @@ _ci_promote_lock_ref() {
 # Why: the cross-host CAS mutex, reused for promotion.
 # From: Issue #1683
 _ci_default_promote_lock() {
-    _ci_lock_acquire "$(_ci_ledger_remote)" "$(_ci_promote_lock_ref "$1")" "promote $1 run=${GITHUB_RUN_ID:-local}" 30 10 900
+    local remote max backoff stale
+    remote="$(_ci_ledger_remote)" || return 2
+    max="$(_ci_variable CI_PROMOTE_LOCK_MAX)" || return 2
+    backoff="$(_ci_variable CI_PROMOTE_LOCK_BACKOFF)" || return 2
+    stale="$(_ci_variable CI_PROMOTE_LOCK_STALE)" || return 2
+    _ci_lock_acquire "${remote}" "$(_ci_promote_lock_ref "$1")" "promote $1 run=${GITHUB_RUN_ID:-local}" \
+        "${max}" "${backoff}" "${stale}"
 }
 
 # What: Default promote unlock: free the channel lock.
 # Why: the same holder note the acquire path used.
 # From: Issue #1683
 _ci_default_promote_unlock() {
-    _ci_lock_release "$(_ci_ledger_remote)" "$(_ci_promote_lock_ref "$1")" "promote $1 run=${GITHUB_RUN_ID:-local}"
+    local remote
+    remote="$(_ci_ledger_remote)" || return 2
+    _ci_lock_release "${remote}" "$(_ci_promote_lock_ref "$1")" "promote $1 run=${GITHUB_RUN_ID:-local}"
 }
 
 # What: Default channel move: point svc:channel at digest.
@@ -4613,8 +4621,9 @@ _ci_deletion_policy() {
 # Why: Ledger + channels + their index children (§101).
 # From: Issue #1683
 _ci_default_gc_roots() {
-    local remote repo registry blob rc=0 pairs="" out="" svc channel dig prc line s d raw
-    remote="$(_ci_ledger_remote)"
+    local remote repo registry blob rc=0 pairs="" out="" svc channel dig prc line s d raw ledger_ref
+    remote="$(_ci_ledger_remote)" || return 2
+    ledger_ref="$(_ci_variable CI_LEDGER_REF)" || return 2
     repo="$(_ci_repo)" || return 2
     registry="$(_ci_registry)" || return 2
     blob="$(_ci_ledger_blob "${remote}")" || rc=$?
@@ -4622,7 +4631,7 @@ _ci_default_gc_roots() {
     # Why: UNKNOWN roots would delete live artifacts.
     # From: Issue #1683
     if [ "${rc}" -eq 2 ]; then
-        ci_log "[CI-ERROR-GC-0012]" "remote=\"${remote}\" ref=\"${CI_LEDGER_REF}\" reason=\"ledger read UNKNOWN (raw above); refusing empty roots\""
+        ci_log "[CI-ERROR-GC-0012]" "remote=\"${remote}\" ref=\"${ledger_ref}\" reason=\"ledger read UNKNOWN (raw above); refusing empty roots\""
         return 2
     fi
     # What: Every ledger record is a root, all states.

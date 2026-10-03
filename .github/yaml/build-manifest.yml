@@ -734,6 +734,17 @@ ci_variables:
   MAX_WORKFLOW_LINES: 8999
   MAX_WORKFLOW_BYTES: 512000
   MAX_RUN_BLOCK_BYTES: 74000
+  # What: acceptance ledger ref and the remote holding it.
+  # Why: AG-CI-006: one owner for the ledger location.
+  # From: Issue #1683 | PR #1858
+  CI_LEDGER_REF: refs/ci/acceptance/ledger
+  CI_LEDGER_REMOTE: origin
+  # What: promote lock attempts, backoff and stale seconds.
+  # Why: AG-CI-006: lock timing has one owner.
+  # From: Issue #1683 | PR #1858
+  CI_PROMOTE_LOCK_MAX: 30
+  CI_PROMOTE_LOCK_BACKOFF: 10
+  CI_PROMOTE_LOCK_STALE: 900
   # What: PR title lint mode (warn|block), chronology mode.
   # Why: AG-CI-006: check modes are values with one owner.
   # From: Issue #1683 | PR #1858

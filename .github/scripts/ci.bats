@@ -9343,7 +9343,7 @@ _cas_setup() {
     # From: Issue #1683 | PR #1858
     _cas_setup
     cd "${CAS_A}"
-    git push --quiet origin "HEAD:${CI_LEDGER_REF}"
+    git push --quiet origin "HEAD:$(_ci_variable CI_LEDGER_REF)"
     run _ci_ledger_blob origin
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"[CI-WARN-RESOLVE-0009]"* ]]
@@ -9553,7 +9553,7 @@ EOF
     run _ci_ledger_read origin id-1
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"ACCEPTED"* ]]
-    git fetch --quiet origin refs/ci/acceptance/ledger
+    git fetch --quiet origin "$(_ci_variable CI_LEDGER_REF)"
     [ "$(git cat-file -p FETCH_HEAD:records | grep -c '^id-1')" -eq 1 ]
 }
 
@@ -9846,7 +9846,7 @@ SH
     [[ "${output}" == *"sha256:a"* ]]
     run _ci_ledger_read origin id-b
     [[ "${output}" == *"sha256:b"* ]]
-    git fetch --quiet origin refs/ci/acceptance/ledger
+    git fetch --quiet origin "$(_ci_variable CI_LEDGER_REF)"
     [ "$(git cat-file -p FETCH_HEAD:records | grep -c .)" -eq 2 ]
     [ "$(git rev-list --count FETCH_HEAD)" -eq 1 ]
 }
@@ -9877,10 +9877,10 @@ SH
     local rd="${BATS_TEST_TMPDIR}/results"; mkdir -p "${rd}"
     printf '{"service":"dns","platform":"os/p1","build_identity":"id-a","state":"ACCEPTED","digest":"sha256:a"}' > "${rd}/a.json"
     ci_cmd_aggregate "${rd}"
-    git fetch --quiet origin refs/ci/acceptance/ledger
+    git fetch --quiet origin "$(_ci_variable CI_LEDGER_REF)"
     local first; first="$(git cat-file -p FETCH_HEAD:records)"
     ci_cmd_aggregate "${rd}"
-    git fetch --quiet origin refs/ci/acceptance/ledger
+    git fetch --quiet origin "$(_ci_variable CI_LEDGER_REF)"
     local second; second="$(git cat-file -p FETCH_HEAD:records)"
     [ "${first}" = "${second}" ]
 }
