@@ -6556,6 +6556,21 @@ deploy/prod/docker-compose.yml|docker,setup
 tools/build-tools/Dockerfile|build-tools,docker
 .github/scripts/ci.sh|ci
 services/ntp/entrypoint.sh|ntp
+services/dhcp/entrypoint.sh|dhcp,kea
+services/dhcp-proxy/entrypoint.sh|dhcp-proxy,dnsmasq
+services/proxy/entrypoint.sh|nginx,proxy
+services/ui/src/templates/x.html|admin-ui
+services/ui/src/main.rs|admin-ui,rust
+services/watchdog/src/main.rs|rust,watchdog
+services/syslog/entrypoint.sh|syslog
+setup.sh|setup
+config/prod/proxy.env|setup
+services/ntp/Dockerfile|docker,ntp
+.github/workflows/ci.yml|ci,github_actions
+docs/release-versioning.md|documentation
+CHANGELOG.md|documentation
+services/nats/x|
+scripts/lib/x.sh|
 ROWS
     printf 'README.md\n' > "${lst}"
     gh="$(_stub gh 'printf "%s\n" "$*" >> "'"${BATS_TEST_TMPDIR}"'/gh.log"')"
