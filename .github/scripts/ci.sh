@@ -6145,19 +6145,6 @@ _ci_validate_kea_rollback() {
     return "${rc}"
 }
 
-# What: Prove ui.depends_on never gates on service_healthy.
-# Why: UI must start even while a dependency crash-loops.
-# From: Issue #1683
-_ci_validate_ui_depends_started() {
-    local bad cfg
-    cfg="$(_ci_validate_config_json)" || return 2
-    bad="$(_ci_capture 0 jq -r '.services.ui.depends_on // {} | to_entries[] | select(.value.condition == "service_healthy") | .key' <<<"${cfg}")" || return 2
-    if [ -n "${bad}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0044]" "deps=\"${bad}\" reason=\"ui depends_on gates on service_healthy; UI must start independently of dependency health (#763)\""
-        return 1
-    fi
-}
-
 # What: POST /api/secondary/register; print JSON on 200.
 # Why: token-gated, no session/CSRF; reused per name.
 # From: Issue #583
@@ -6241,7 +6228,6 @@ _ci_validate_probes() {
     [ "${rc}" -eq 0 ] && { _ci_validate_ui_nats_dns "${project}" || rc=$?; }
     [ "${rc}" -eq 0 ] && { _ci_validate_dns_rollback "${project}" || rc=$?; }
     [ "${rc}" -eq 0 ] && { _ci_validate_kea_rollback "${project}" "${net}" "${pin}" || rc=$?; }
-    [ "${rc}" -eq 0 ] && { _ci_validate_ui_depends_started || rc=$?; }
     [ "${rc}" -eq 0 ] && { _ci_validate_secondary_identity "${project}" || rc=$?; }
     return "${rc}"
 }
@@ -10197,6 +10183,23 @@ _ci_check_docker_socket_proxy() {
         if [ -n "${hit}" ]; then
             viol+=("${cf}: the dead x-docker-socket-proxy-command anchor must not be reintroduced")
         fi
+        # What: ui/watchdog start once their deps started.
+        # Why: a dep health flap must not stop them.
+        # From: Issue #763 | PR #1858
+        local cfg deps line
+        cfg="$(_ci_compose_query "${repo_root}/${cf}" "" config --no-env-resolution --format json)" || return 2
+        deps="$(_ci_capture 0 jq -r '.services as $s
+            | ($s["docker-socket-proxy"].healthcheck // {}) as $h
+            | (if ($h.test // null) == null or $h.disable == true
+                then "docker-socket-proxy defines no healthcheck" else empty end),
+              (("ui", "watchdog") as $n | ($s[$n].depends_on // {}) as $d
+                | (if ($d["docker-socket-proxy"].condition // "none") != "service_started"
+                    then "\($n) must depend on docker-socket-proxy with service_started" else empty end),
+                  ($d | to_entries[] | select(.value.condition == "service_healthy")
+                    | "\($n) waits for \(.key) to be healthy; use service_started"))' <<<"${cfg}")" || return 2
+        while IFS= read -r line; do
+            [ -z "${line}" ] || viol+=("${cf}: ${line}")
+        done <<<"${deps}"
     done
     local -a must=(
         'acl safe_service_restart'

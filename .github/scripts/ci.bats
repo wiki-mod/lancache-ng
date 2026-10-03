@@ -4120,7 +4120,7 @@ CASES
     # From: Issue #1683 | PR #1858
     local log="${BATS_TEST_TMPDIR}/probes" p fail=""
     local -a probes=(dns proxy proxy_stream_map ssl_mitm ssl_dispatch_map
-        ui_nats_dns dns_rollback kea_rollback ui_depends_started secondary_identity)
+        ui_nats_dns dns_rollback kea_rollback secondary_identity)
     for p in "${probes[@]}"; do
         eval "_ci_validate_${p}() {
             echo \"${p} \${NO_PROXY}|\${no_proxy} \$*\" >> '${log}'
@@ -4576,25 +4576,6 @@ noready|1|0090
 nosubnet|1|0091
 noenv|2|0089
 CASES
-}
-
-@test "validate ui-depends fails on a service_healthy gate" {
-    # What: service_healthy condition returns rc 1.
-    # Why: UI must start immediately.
-    # From: Issue #763
-    _ci_validate_config_json() { echo '{"services":{"ui":{"depends_on":{"proxy":{"condition":"service_healthy"}}}}}'; }
-    run _ci_validate_ui_depends_started
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0044"* ]]
-}
-
-@test "validate ui-depends passes when all deps are service_started" {
-    # What: service_started conditions ok.
-    # Why: UI starts immediately.
-    # From: Issue #763
-    _ci_validate_config_json() { echo '{"services":{"ui":{"depends_on":{"proxy":{"condition":"service_started"},"nats":{"condition":"service_started"}}}}}'; }
-    run _ci_validate_ui_depends_started
-    [ "${status}" -eq 0 ]
 }
 
 @test "validate secondary-identity maps each token and register case" {
@@ -7703,7 +7684,31 @@ _socket_proxy_fixture() {
     mkdir -p "${root}/dep" "${root}/inst" "${root}/scripts/untracked"
     _stack_fixture "${root}"
     for cf in dep/c.yml inst/c.yml; do
-        printf '      - scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro\n' > "${root}/${cf}"
+        cat > "${root}/${cf}" <<'YAML'
+services:
+  ui:
+    image: x
+    depends_on:
+      nats:
+        condition: service_started # ui-nats
+      docker-socket-proxy:
+        condition: service_started # ui-dsp
+  watchdog:
+    image: x
+    depends_on:
+      docker-socket-proxy:
+        condition: service_started # wd-dsp
+  nats:
+    image: x
+  docker-socket-proxy:
+    image: x
+    healthcheck:
+      test: ["CMD", "true"]
+    volumes:
+      - ../scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro
+    environment:
+        CONTAINERS: "0"
+YAML
     done
     cat > "${root}/scripts/untracked/docker-socket-proxy.sh" <<'EOF'
 acl safe_service_restart x
@@ -7742,6 +7747,38 @@ EOF
     run bash "${CI_SH}" check docker-socket-proxy "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"exec is banned"* ]]
+}
+
+@test "check docker-socket-proxy gates ui/watchdog on started" {
+    # What: healthcheck kept; deps never wait for healthy.
+    # Why: ui/watchdog must run while a dep flaps.
+    # From: Issue #763 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/dsp-deps" case from to want
+    while IFS='|' read -r case from to want; do
+        rm -rf "${r}"
+        _socket_proxy_fixture "${r}"
+        awk -v f="${from}" -v t="${to}" 'f != "" && !d && $0 == f { $0 = t; d = 1 } { print }' \
+            "${r}/inst/c.yml" > "${r}/inst/x.yml"
+        mv "${r}/inst/x.yml" "${r}/inst/c.yml"
+        run bash "${CI_SH}" check docker-socket-proxy "${r}"
+        if [ "${want}" = clean ]; then
+            [ "${status}" -eq 0 ] || { echo "${case}: ${output}"; return 1; }
+        else
+            [ "${status}" -eq 1 ] || { echo "${case}: rc ${status} ${output}"; return 1; }
+            [[ "${output}" == *"CI-ERROR-CHECK-0046"*"inst/c.yml: ${want}"* ]] || { echo "${case}: ${output}"; return 1; }
+        fi
+    done <<'CASES'
+ok|||clean
+hcdisabled|      test: ["CMD", "true"]|      test: ["CMD", "true"]\n      disable: true|docker-socket-proxy defines no healthcheck
+uihealthy|        condition: service_started # ui-nats|        condition: service_healthy|ui waits for nats to be healthy; use service_started
+uidsphealthy|        condition: service_started # ui-dsp|        condition: service_healthy|ui must depend on docker-socket-proxy with service_started
+wdcompleted|        condition: service_started # wd-dsp|        condition: service_completed_successfully|watchdog must depend on docker-socket-proxy with service_started
+wdmissing|  watchdog:|  watchdog-x:|watchdog must depend on docker-socket-proxy with service_started
+CASES
+    sed -i '/^    healthcheck:$/,/^      test:/d' "${r}/dep/c.yml"
+    run bash "${CI_SH}" check docker-socket-proxy "${r}"
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"dep/c.yml: docker-socket-proxy defines no healthcheck"* ]]
 }
 
 @test "check docker-socket-proxy fails a forbidden broad container rule" {
@@ -11790,6 +11827,41 @@ JSON
     run migrate_dhcp4_config "${r}"
     [ "${status}" -eq 1 ]
     [[ "${output}" == *"failed to resolve legacy NTP server values"* ]]
+}
+
+@test "watchdog healthcheck judges status file age per interval" {
+    # What: max age is 3x interval, at least 60s, decimal.
+    # Why: a stalled main loop must turn the container red.
+    # From: Issue #1683 | PR #1858
+    local hc s="${BATS_TEST_TMPDIR}/status.json" case iv age want now
+    hc="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)/services/watchdog/healthcheck.sh"
+    while IFS='|' read -r case iv age want; do
+        now="$(date +%s)"
+        printf '{}' > "${s}"
+        touch -d "@$((now - age))" "${s}"
+        if [ "${iv}" = unset ]; then
+            run env -u CHECK_INTERVAL STATUS_FILE="${s}" bash "${hc}"
+        else
+            run env CHECK_INTERVAL="${iv}" STATUS_FILE="${s}" bash "${hc}"
+        fi
+        [ "${status}" -eq "${want}" ] || { echo "${case}: rc ${status} ${output}"; return 1; }
+    done <<'CASES'
+default-fresh|unset|0|0
+default-edge|unset|85|0
+default-stale|unset|95|1
+stale-hour|30|3600|1
+octal-8-9|00563179|0|0
+decimal-050|050|130|0
+decimal-050-stale|050|160|1
+floor-60|5|55|0
+floor-60-stale|5|65|1
+letters|abc|80|0
+letters-stale|abc|100|1
+future|30|-600|0
+CASES
+    run env STATUS_FILE="${BATS_TEST_TMPDIR}/missing.json" bash "${hc}"
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"missing.json does not exist yet"* ]]
 }
 
 @test "dns config adapters snapshot, roll back and converge" {
