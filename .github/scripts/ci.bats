@@ -7830,6 +7830,70 @@ netdatadefault|      - netdata-net # netdata|      - netdata-net\n      - defaul
 CASES
 }
 
+@test "check syslog-logs-volume per compose and Dockerfile shape" {
+    # What: initializer, start order, caps, image owner.
+    # Why: syslog runs capability-free and cannot fix it.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/sl" case from to want rc
+    while IFS='|' read -r case from to want rc; do
+        rm -rf "${r}"
+        _stack_fixture "${r}"
+        mkdir -p "${r}/services/syslog"
+        printf 'RUN addgroup -g 10001 lancache \\\n    && adduser -D -H -u 10001 -G lancache lancache\n' \
+            > "${r}/services/syslog/Dockerfile"
+        cat > "${r}/dep/c.yml" <<'YAML'
+services:
+  syslog-logs-permissions:
+    image: x
+    profiles: [logging]
+    user: "0:0"
+    entrypoint: ["/bin/chown"]
+    command: ["-R", "10001:10001", "/var/log/lancache"]
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    read_only: true
+    restart: "no"
+  syslog:
+    image: x
+    profiles: [logging]
+    cap_drop: [ALL]
+    depends_on:
+      syslog-logs-permissions:
+        condition: service_completed_successfully
+YAML
+        cp "${r}/dep/c.yml" "${r}/inst/c.yml"
+        if [ "${case}" = dockerfile ]; then
+            sed -i 's/-u 10001/-u 10002/' "${r}/services/syslog/Dockerfile"
+        elif [ "${case}" = nouser ]; then
+            sed -i 's/adduser.*$/true/' "${r}/services/syslog/Dockerfile"
+        fi
+        awk -v f="${from}" -v t="${to}" 'f != "" && !d && $0 == f { $0 = t; d = 1 } { print }' \
+            "${r}/inst/c.yml" > "${r}/inst/x.yml"
+        mv "${r}/inst/x.yml" "${r}/inst/c.yml"
+        run bash "${CI_SH}" check syslog-logs-volume "${r}"
+        [ "${status}" -eq "${rc}" ] || { echo "${case}: rc ${status} ${output}"; return 1; }
+        [[ "${output}" == *"${want}"* ]] || { echo "${case}: ${output}"; return 1; }
+    done <<'CASES'
+ok|||syslog-logs-volume=clean owner=10001:10001|0
+user|    user: "0:0"|    user: "0"|inst/c.yml: syslog-logs-permissions user must be "0:0" (got "0")|1
+owner|    command: ["-R", "10001:10001", "/var/log/lancache"]|    command: ["-R", "0:0", "/var/log/lancache"]|syslog-logs-permissions command must be ["-R","10001:10001","/var/log/lancache"]|1
+network|    network_mode: none|    network_mode: bridge|syslog-logs-permissions network_mode must be "none" (got "bridge")|1
+caps|    cap_add: [CHOWN]|    cap_add: [CHOWN, FOWNER]|syslog-logs-permissions cap_add must be ["CHOWN"]|1
+rw|    read_only: true|    read_only: false|syslog-logs-permissions read_only must be true (got null)|1
+restart|    restart: "no"|    restart: on-failure|syslog-logs-permissions restart must be "no"|1
+order|        condition: service_completed_successfully|        condition: service_started|inst/c.yml: syslog must wait for syslog-logs-permissions to complete|1
+dropall|    cap_drop: [ALL]|    cap_drop: [NET_RAW]|syslog-logs-permissions cap_drop must be ["ALL"]|1
+dockerfile|||dep/c.yml: syslog-logs-permissions command must be ["-R","10002:10001","/var/log/lancache"]|1
+nouser|||CI-ERROR-CHECK-0148|2
+CASES
+    printf '    cap_add: [CHOWN]\n' >> "${r}/dep/c.yml"
+    printf 'RUN addgroup -g 10001 g && adduser -u 10001 u\n' > "${r}/services/syslog/Dockerfile"
+    run bash "${CI_SH}" check syslog-logs-volume "${r}"
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"dep/c.yml: syslog must drop all capabilities and add none"* ]]
+}
+
 @test "check docker-socket-proxy fails a forbidden broad container rule" {
     # What: Broad rule re-enters allowlist.
     # Why: generic container APIs must stay denied.

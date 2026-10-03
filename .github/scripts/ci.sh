@@ -10273,6 +10273,45 @@ _ci_check_netdata_isolation() {
     printf 'netdata-isolation=clean\n'
 }
 
+# What: logs volume chowned to syslog's uid before start.
+# Why: syslog runs capability-free and cannot fix it.
+# From: Issue #1683 | PR #1858
+_ci_check_syslog_logs_volume() {
+    local repo_root="${1:-${CI_REPO_ROOT}}" df cf dep inst cfg out line uid gid
+    local -a viol=()
+    df="${repo_root}/services/syslog/Dockerfile"
+    uid="$(_ci_capture 1 sed -nE 's/.*adduser .*-u ([0-9]+)( .*|$)/\1/p' "${df}")" || return 2
+    gid="$(_ci_capture 1 sed -nE 's/.*addgroup .*-g ([0-9]+)( .*|$)/\1/p' "${df}")" || return 2
+    if ! [[ "${uid}" =~ ^[0-9]+$ && "${gid}" =~ ^[0-9]+$ ]]; then
+        ci_log "[CI-ERROR-CHECK-0148]" "path=\"${df}\" uid=\"${uid//$'\n'/,}\" gid=\"${gid//$'\n'/,}\" reason=\"need exactly one adduser -u and addgroup -g\""
+        return 2
+    fi
+    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    inst="$(_ci_installer_compose "${repo_root}")" || return 2
+    for cf in "${dep}" "${inst}"; do
+        cfg="$(_ci_compose_json "${repo_root}/${cf}")" || return 2
+        out="$(_ci_capture 0 jq -r --arg owner "${uid}:${gid}" '
+            (.services["syslog-logs-permissions"] // {}) as $i | (.services.syslog // {}) as $y
+            | ([["user", "0:0"], ["entrypoint", ["/bin/chown"]],
+                ["command", ["-R", $owner, "/var/log/lancache"]], ["network_mode", "none"],
+                ["cap_drop", ["ALL"]], ["cap_add", ["CHOWN"]], ["read_only", true], ["restart", "no"]][]
+                | . as [$k, $v] | select($i[$k] != $v)
+                | "syslog-logs-permissions \($k) must be \($v | tojson) (got \($i[$k] | tojson))"),
+              (if ($y.depends_on["syslog-logs-permissions"].condition // "none") != "service_completed_successfully"
+                then "syslog must wait for syslog-logs-permissions to complete" else empty end),
+              (if $y.cap_drop != ["ALL"] or ($y | has("cap_add"))
+                then "syslog must drop all capabilities and add none" else empty end)' <<<"${cfg}")" || return 2
+        while IFS= read -r line; do
+            [ -z "${line}" ] || viol+=("${cf}: ${line}")
+        done <<<"${out}"
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0147]" "reason=\"syslog logs volume ownership violated\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'syslog-logs-volume=clean owner=%s:%s\n' "${uid}" "${gid}"
+}
+
 # What: Fail unless .env defines every key.
 # Why: unset key breaks quickstart compose.
 # From: Issue #1683 | PR #1858
@@ -11234,7 +11273,7 @@ ci_cmd_check_all() {
         proxy-cache-env-doc-drift \
         dependabot-docker-base-consistency \
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
-        docker-socket-proxy netdata-isolation quickstart-required-env dhcp-proxy-env \
+        docker-socket-proxy netdata-isolation syslog-logs-volume quickstart-required-env dhcp-proxy-env \
         setup-keys-kea setup-update-safety setup-docker-conflict setup-prompt-drift image-channel-resolution \
         vex-drift logging-matrix \
         trivy-action-direct-usage entrypoint-lib-wiring dockerfile-build-tools \
@@ -11300,6 +11339,7 @@ ci_cmd_check() {
         nats-atomic-write) _ci_check_nats_atomic_write "$@" ;;
         docker-socket-proxy) _ci_check_docker_socket_proxy "$@" ;;
         netdata-isolation) _ci_check_netdata_isolation "$@" ;;
+        syslog-logs-volume) _ci_check_syslog_logs_volume "$@" ;;
         quickstart-required-env) _ci_check_quickstart_required_env "$@" ;;
         dhcp-proxy-env) _ci_check_dhcp_proxy_env "$@" ;;
         setup-keys-kea) _ci_check_setup_keys_kea "$@" ;;
