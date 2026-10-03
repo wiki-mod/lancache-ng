@@ -11451,6 +11451,43 @@ space|.|.|.|.|.|.|  60:PXE Client  ;93:0|dhcp-option-pxe=60,PXE Client#dhcp-opti
 CASES
 }
 
+@test "dhcp-proxy pxe directives render exactly per input" {
+    # What: per BIOS/UEFI/server set: full lines + warnings.
+    # Why: PXE clients need one matching boot pointer.
+    # From: Issue #1683 | PR #1858
+    local root c="${BATS_TEST_TMPDIR}/dnsmasq.conf" case s b u want warn
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/services/dhcp-proxy/entrypoint.sh" _dhcp_proxy_reject_embedded_newline \
+        _dhcp_proxy_render_pxe_service_directives
+    while IFS='|' read -r case s b u want warn; do
+        [ "${s}" != . ] || s=""
+        [ "${b}" != . ] || b=""
+        [ "${u}" != . ] || u=""
+        [ "${want}" != . ] || want=""
+        DHCP_PROXY_PXE_BOOT_SERVER="$(printf '%b' "${s}")"
+        DHCP_PROXY_PXE_BOOT_FILENAME_BIOS="${b}"
+        DHCP_PROXY_PXE_BOOT_FILENAME_UEFI="${u}"
+        export DHCP_PROXY_PXE_BOOT_SERVER DHCP_PROXY_PXE_BOOT_FILENAME_BIOS DHCP_PROXY_PXE_BOOT_FILENAME_UEFI
+        : > "${c}"
+        run _dhcp_proxy_render_pxe_service_directives "${c}"
+        [ "${status}" -eq 0 ] || { echo "${case}: rc ${status}"; return 1; }
+        [ "$(paste -sd'#' "${c}")" = "${want}" ] || { echo "${case}:"; cat "${c}"; return 1; }
+        if [ "${warn}" = - ]; then
+            [ -z "${output}" ] || { echo "${case}: unexpected ${output}"; return 1; }
+        else
+            [[ "${output}" == *"${warn}"* ]] || { echo "${case}: ${output}"; return 1; }
+        fi
+    done <<'CASES'
+none|.|.|.|.|-
+serveronly|10.0.0.5|.|.|.|a boot server alone cannot produce a pxe-service directive
+fileonly|.|bios.0|.|.|a boot filename alone cannot produce a pxe-service directive
+bios|10.0.0.5|b.0|.|pxe-service=x86PC,"lancache-ng PXE boot (BIOS)",b.0,10.0.0.5#dhcp-match=set:lancache-pxe-bios,option:client-arch,0#dhcp-boot=tag:lancache-pxe-bios,b.0,,10.0.0.5|-
+uefi|10.0.0.5|.|u.efi|dhcp-match=set:lancache-pxe-uefi,option:client-arch,7#dhcp-match=set:lancache-pxe-uefi,option:client-arch,11#dhcp-boot=tag:lancache-pxe-uefi,u.efi,,10.0.0.5#pxe-service=IA64_EFI,"lancache-ng PXE proxy active",0|-
+both|10.0.0.5|b.0|u.efi|pxe-service=x86PC,"lancache-ng PXE boot (BIOS)",b.0,10.0.0.5#dhcp-match=set:lancache-pxe-bios,option:client-arch,0#dhcp-boot=tag:lancache-pxe-bios,b.0,,10.0.0.5#dhcp-match=set:lancache-pxe-uefi,option:client-arch,7#dhcp-match=set:lancache-pxe-uefi,option:client-arch,11#dhcp-boot=tag:lancache-pxe-uefi,u.efi,,10.0.0.5|-
+newline|10.0.0.5\ndhcp-boot=injected,,evil|bios.0|.|.|embedded newline
+CASES
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.
