@@ -11977,6 +11977,25 @@ CASES
     [[ "${output}" == *"missing.json does not exist yet"* ]]
 }
 
+@test "ui templates gate the log label and re-arm the outage banner" {
+    # What: label in syslog mode only; banner per outage.
+    # Why: no JS runtime or full dashboard context in tests.
+    # From: Issue #849 | PR #1858
+    local t
+    t="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)/services/ui/src/templates"
+    run awk '/Recent requests \(proxy\)<\/h2>/ { b = 1 } !b { next }
+        /\{% if syslog_enabled %\}/ { inif = 1 } /\{% endif %\}/ { inif = 0 }
+        /direct nginx log/ && /href="\/logs"/ { seen = inif ? "inside" : "outside" }
+        /\{% if recent_logs %\}/ { exit } END { print seen ? seen : "missing" }' "${t}/dashboard.html"
+    [ "${output}" = inside ] || { echo "dashboard label: ${output}"; return 1; }
+    run awk '/^let errorShown = false;$/ { e = e " decl" }
+        /^async function refresh\(\) \{$/ { f = 1 } !f { next }
+        /^    errorShown = false;$/ { e = e " reset" } /^  \} catch \(e\) \{$/ { e = e " catch" }
+        /^    if \(!errorShown\) \{$/ { e = e " guard" } /^      errorShown = true;$/ { e = e " set" }
+        /^}$/ { exit } END { print e }' "${t}/stats.html"
+    [ "${output}" = " decl reset catch guard set" ] || { echo "stats refresh: ${output}"; return 1; }
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.
