@@ -3573,7 +3573,8 @@ svc-x=sha256:n"
     [ "${status}" -eq 0 ]
     [ "${lines[0]}" = A_KEY=1 ]; [ "${lines[1]}" = B_KEY=two ]
     [[ "${lines[2]}" =~ ^S_HEX=[0-9a-f]{64}$ ]]
-    [ "$(base64 -d <<< "${lines[3]#S_B64=}" | wc -c)" -eq 32 ]
+    base64 -d <<< "${lines[3]#S_B64=}" > "${BATS_TEST_TMPDIR}/s.bin"
+    [ "$(wc -c < "${BATS_TEST_TMPDIR}/s.bin")" -eq 32 ]
     # What: secrets are fresh per call, never a fixed value.
     # Why: a fixed render secret is a hardcoded credential.
     # From: Issue #1683 | PR #1858
@@ -3603,8 +3604,12 @@ svc-x=sha256:n"
     for k in ${keys}; do
         v="$(sed -n "s/^${k}=//p" <<<"${env}")"
         [ -n "${v}" ] || { echo "${k}: missing from validation env"; return 1; }
-        d="$(base64 -d <<<"${v}" 2>&1)" || { echo "${k}='${v}': ${d}"; return 1; }
-        [ "${#d}" -eq 32 ] || { echo "${k}='${v}': ${#d} bytes"; return 1; }
+        # What: count decoded bytes in a file, not a variable.
+        # Why: bash drops NUL; a random key may hold one.
+        # From: Issue #1683 | PR #1858
+        d="$(base64 -d <<<"${v}" 2>&1 > "${BATS_TEST_TMPDIR}/key.bin")" || { echo "${k}='${v}': ${d}"; return 1; }
+        d="$(wc -c < "${BATS_TEST_TMPDIR}/key.bin")"
+        [ "${d}" -eq 32 ] || { echo "${k}='${v}': ${d} bytes"; return 1; }
     done
     # What: no setup.sh secret has a fixed value in the SOT.
     # Why: render secrets are generated; a literal leaks.
