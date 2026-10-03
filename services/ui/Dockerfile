@@ -44,32 +44,16 @@ COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
 COPY services/cachehamster/Cargo.toml services/cachehamster/Cargo.toml
 COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.toml
 COPY tools/pxe-client-probe/Cargo.toml tools/pxe-client-probe/Cargo.toml
-# What: stub targets for workspace members not built here.
-# Why: cargo loads every member manifest to resolve deps.
-# From: Issue #1095
-RUN mkdir -p services/watchdog/src services/cachehamster/src \
-      services/dns/nats-subscriber/src tools/pxe-client-probe/src \
-    && printf 'fn main() {}\n' > services/watchdog/src/main.rs \
-    && : > services/watchdog/src/lib.rs \
-    && printf 'fn main() {}\n' > services/cachehamster/src/main.rs \
-    && : > services/cachehamster/src/lib.rs \
-    && printf 'fn main() {}\n' > services/dns/nats-subscriber/src/main.rs \
-    && : > services/dns/nats-subscriber/src/lib.rs \
-    && printf 'fn main() {}\n' > tools/pxe-client-probe/src/main.rs
-# What: dep pre-cache: compile deps against a stub ui src.
+# What: dep pre-cache; ci.sh stubs and removes the srcs.
 # Why: layer-caches deps so only real src changes rebuild.
-# From: Issue #1533
+# From: Issue #1533 | PR #1858
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
-    mkdir -p services/ui/src \
-    && printf 'fn main() {}\n' > services/ui/src/main.rs \
-    && : > services/ui/src/lib.rs \
-    && bash /usr/local/bin/ci.sh rust-build ui "${RUST_CRATE}" deps \
-    && rm -rf services/ui/src
+    bash /usr/local/bin/ci.sh rust-build ui "${RUST_CRATE}" deps
 COPY services/ui/src ./services/ui/src
 # What: ci.sh owns the rust build accel policy (one owner).
 # Why: AG-CI-005/022/023; bind-mounted, never baked in.

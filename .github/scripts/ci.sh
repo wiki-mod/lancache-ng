@@ -2498,6 +2498,34 @@ _ci_rust_distcc_wrapper() {
       'exec "$distcc_real" "$real_compiler" "$@"'
 }
 
+# What: stub missing bin/lib targets of workspace members.
+# Why: cargo loads every member; images copy manifests only.
+# From: Issue #1683 | PR #1858
+_ci_rust_member_stubs() {
+    local members m sec p f targets
+    members="$(awk '/^members *= *\[/ { on = 1; next } on && /^\]/ { exit } on { gsub(/[",[:space:]]/, ""); if ($0 != "") print }' Cargo.toml)"
+    if [ -z "${members}" ]; then
+        ci_log "[CI-ERROR-RUSTBUILD-0042]" "dir=\"${PWD}\" reason=\"no workspace members in Cargo.toml\""
+        return 2
+    fi
+    while IFS= read -r m; do
+        if [ ! -f "${m}/Cargo.toml" ]; then
+            ci_log "[CI-ERROR-RUSTBUILD-0043]" "member=\"${m}\" reason=\"member manifest missing\""
+            return 2
+        fi
+        targets="$(awk '/^\[\[bin\]\]/ { s = "bin"; next } /^\[lib\]/ { s = "lib"; next } /^\[/ { s = ""; next }
+            s != "" && /^path *=/ { v = $0; sub(/^path *= *"/, "", v); sub(/".*$/, "", v); print s "\t" v }' "${m}/Cargo.toml")"
+        while IFS=$'\t' read -r sec p; do
+            [ -n "${p}" ] || continue
+            f="${m}/${p}"
+            [ -e "${f}" ] && continue
+            mkdir -p "${f%/*}" || return 2
+            if [ "${sec}" = bin ]; then printf 'fn main() {}\n' > "${f}"; else : > "${f}"; fi
+            printf '%s\n' "${f}"
+        done <<< "${targets}"
+    done <<< "${members}"
+}
+
 # What: In-image rust builder; sccache, opt-in distcc.
 # Why: one owner for dns/ui/watchdog builders (was 3x).
 # From: Issue #1683
@@ -2740,7 +2768,16 @@ ci_cmd_rust_build() {
     if [ "${mode}" = "build" ]; then
         cargo clean -p "${crate}" --release --target "${musl_target}"
     fi
+    local stubs s
+    stubs="$(_ci_rust_member_stubs)" || return 2
     _ci_rust_cargo_build "${crate}" "${musl_target}" "${cargo_jobs}"
+    # What: remove exactly the stub files this run created.
+    # Why: a stub left behind would ship in the real build.
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r s; do
+        [ -z "${s}" ] || _ci_run "[CI-ERROR-RUSTBUILD-0044]" "file=\"${s}\" reason=\"stub not removed\"" rm -f -- "${s}" \
+            > /dev/null || return 2
+    done <<< "${stubs}"
     # What: dump ccache stats; mid-build Redis error OK.
     # Why: binary correct; only cache reuse degraded.
     if [ "${ccache_enabled:-0}" = "1" ]; then
