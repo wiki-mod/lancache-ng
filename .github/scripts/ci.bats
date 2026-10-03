@@ -12559,6 +12559,56 @@ badtag|real dir|2:Invalid release tag from git checkout: release-7|release-7
 CASES
 }
 
+@test "setup image channel validation, resolution and pointer" {
+    # What: channels, retired hints, inference, pointer.
+    # Why: a retired channel stops setup with a clear hint.
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" case v want rc got
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/setup.sh" _compose_parse_env_value get_env_var derive_release_archive_image_tag \
+        validate_lancache_image_channel lancache_stack_pointer_channel_for resolve_lancache_image_channel
+    die() { printf '%s\n' "$*" >&2; exit 1; }
+    while IFS='|' read -r v rc want; do
+        run validate_lancache_image_channel "${v}"
+        [ "${status}" -eq "${rc}" ] && [[ "${output}" == *"${want}"* ]] || { echo "channel ${v}: rc ${status} ${output}"; return 1; }
+    done <<'CASES'
+stable|0|
+latest|0|
+nightly|0|
+pinned|0|
+edge|1|renamed to 'nightly'
+dev|1|LANCACHE_IMAGE_CHANNEL=nightly
+bogus|1|must be stable, latest, nightly, or pinned
+|1|must be stable, latest, nightly, or pinned
+CASES
+    for v in stable:latest latest:latest nightly:nightly pinned:pinned; do
+        [ "$(lancache_stack_pointer_channel_for "${v%%:*}")" = "${v#*:}" ] || { echo "pointer ${v}"; return 1; }
+    done
+    unset LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_TAG
+    export SCRIPT_DIR="${t}/plain"
+    mkdir -p "${SCRIPT_DIR}"
+    while IFS='|' read -r case v want; do
+        printf '%b' "${v}" > "${t}/.env"
+        case "${case}" in
+            env*) got="$(resolve_lancache_image_channel "${t}/.env")" ;;
+            shellchan) got="$(LANCACHE_IMAGE_CHANNEL=stable resolve_lancache_image_channel "${t}/.env")" ;;
+            shelltag) got="$(LANCACHE_IMAGE_TAG=stable resolve_lancache_image_channel "${t}/missing.env")" ;;
+            none) got="$(resolve_lancache_image_channel "${t}/missing.env")" ;;
+        esac
+        [ "${got}" = "${want}" ] || { echo "${case}: ${got}"; return 1; }
+    done <<'CASES'
+none||latest
+shellchan|LANCACHE_IMAGE_CHANNEL=nightly\n|stable
+shelltag||stable
+envchan|LANCACHE_IMAGE_CHANNEL=nightly\n|nightly
+envtagsha|LANCACHE_IMAGE_TAG=sha-0123456789abcdef0123456789abcdef01234567\n|pinned
+envtagv|LANCACHE_IMAGE_TAG=v0.3.1\n|pinned
+envtagnightly|LANCACHE_IMAGE_TAG=nightly\n|nightly
+CASES
+    LANCACHE_IMAGE_CHANNEL=edge run resolve_lancache_image_channel "${t}/missing.env"
+    [ "${status}" -eq 1 ]
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.
