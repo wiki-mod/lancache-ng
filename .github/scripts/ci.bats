@@ -12123,7 +12123,8 @@ CASES
     # From: Issue #1683 | PR #1858
     local root t="${BATS_TEST_TMPDIR}" log="${BATS_TEST_TMPDIR}/csr.log" s1 s2 p case at now san want
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/services/proxy/entrypoint.sh" _sign_cert _default_cert_needs_regen
+    _load_functions "${root}/services/proxy/entrypoint.sh" _sign_cert _default_cert_needs_regen \
+        _bounded_cert_name
     export CA_DIR="${t}/ca" CERT_DIR="${t}/certs" SERIAL_FILE="${t}/ca/ca.srl"
     mkdir -p "${CA_DIR}" "${CERT_DIR}"
     openssl req -new -newkey rsa:2048 -nodes -x509 -days 30 -subj "/CN=Test CA" \
@@ -12145,6 +12146,16 @@ CASES
     s2="$(openssl x509 -noout -serial -in "${CERT_DIR}/b.crt" | cut -d= -f2)"
     [ $((16#${s2})) -gt $((16#${s1})) ] || { echo "serial ${s2} not above ${s1}"; return 1; }
     grep -qxE '[0-9A-Fa-f]+' "${SERIAL_FILE}"
+    local long w x
+    long="$(printf 'a%.0s' {1..60})"
+    long="${long}.${long}.${long}.${long}"
+    _sign_cert "${long}" "${CERT_DIR}/l.key" "${CERT_DIR}/l.crt" "subjectAltName=DNS:*.${long}" 2>/dev/null
+    [ "$(openssl x509 -noout -ext subjectAltName -in "${CERT_DIR}/l.crt" | tail -n +2 | tr -d ' ')" = "DNS:*.${long}" ]
+    w="$(_bounded_cert_name "${long}" wildcard)"
+    x="$(_bounded_cert_name "${long}" exact)"
+    [[ "${w}" =~ ^[0-9a-f]{32}$ && "${x}" =~ ^[0-9a-f]{32}$ && "${w}" != "${x}" ]] || { echo "names ${w} ${x}"; return 1; }
+    [ "$(_bounded_cert_name "${long}" wildcard)" = "${w}" ]
+    [[ "$(_bounded_cert_name a.example.com exact)" =~ ^[0-9a-f]{32}$ ]]
     mkdir "${CERT_DIR}/kd" "${CERT_DIR}/y.crt"
     run _sign_cert x.example.com "${CERT_DIR}/kd" "${CERT_DIR}/x.crt" "subjectAltName=DNS:x.example.com"
     [ "${status}" -ne 0 ]
@@ -12156,7 +12167,7 @@ CASES
     CA_DIR="${t}/missing" run _sign_cert z.example.com "${CERT_DIR}/z.key" "${CERT_DIR}/z.crt"
     [ "${status}" -ne 0 ]
     [ ! -e "${CERT_DIR}/z.crt" ] && [ ! -e "${CERT_DIR}/z.key" ] || { echo "partial output kept"; return 1; }
-    [ "$(wc -l < "${log}")" -eq 5 ] || { echo "csr files: $(cat "${log}")"; return 1; }
+    [ "$(wc -l < "${log}")" -eq 6 ] || { echo "csr files: $(cat "${log}")"; return 1; }
     while IFS= read -r p; do
         [ ! -e "${p}" ] || { echo "csr left: ${p}"; return 1; }
     done < "${log}"
@@ -12183,6 +12194,41 @@ CASES
         /^if \[ "\$\{SSL_ENABLED\}" = "1" \]; then$/ && !s { s = NR }
         END { print (d && s && d < s) ? "before" : "d=" d " s=" s }' "${root}/services/proxy/entrypoint.sh"
     [ "${output}" = before ]
+}
+
+@test "proxy registrable domain per public suffix rule" {
+    # What: normal, compound, wildcard and exception rules.
+    # Why: a wrong root shares one cert across owners.
+    # From: Issue #1683 | PR #1858
+    local root case dom want
+    local -A _PSL_RULES=() _PSL_WILDCARDS=() _PSL_EXCEPTIONS=()
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/services/proxy/entrypoint.sh" _load_public_suffix_list _suffix_from_end \
+        _registrable_domain
+    PUBLIC_SUFFIX_LIST_FILE="${root}/services/proxy/public_suffix_list.dat" _load_public_suffix_list
+    [ "${#_PSL_RULES[@]}" -gt 1000 ] && [ "${#_PSL_EXCEPTIONS[@]}" -gt 0 ] || { echo "psl not loaded"; return 1; }
+    while IFS='|' read -r case dom want; do
+        run _registrable_domain "${dom}"
+        if [ "${want}" = - ]; then
+            [ "${status}" -ne 0 ] || { echo "${case}: got ${output}"; return 1; }
+        else
+            [ "${status}" -eq 0 ] && [ "${output}" = "${want}" ] || { echo "${case}: rc ${status} ${output}"; return 1; }
+        fi
+    done <<'CASES'
+plain|cdn.steamcontent.com|steamcontent.com
+plainroot|steamcontent.com|steamcontent.com
+compound|cdn.example.co.uk|example.co.uk
+compoundroot|example.co.uk|example.co.uk
+compoundbare|co.uk|-
+tld|com|-
+exception|city.kawasaki.jp|city.kawasaki.jp
+exceptionsub|cdn.city.kawasaki.jp|city.kawasaki.jp
+wildcardbare|example.kawasaki.jp|-
+wildcardmin|sub.example.kawasaki.jp|sub.example.kawasaki.jp
+wildcarddeep|cdn.sub.example.kawasaki.jp|sub.example.kawasaki.jp
+private|cdn.user.github.io|github.io
+unlisted|cdn.example.zzzq|example.zzzq
+CASES
 }
 
 @test "dns config adapters snapshot, roll back and converge" {
