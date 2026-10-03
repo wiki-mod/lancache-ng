@@ -11279,6 +11279,87 @@ never|dns-ssl:5300|99|1|did not resolve to an IPv4 address after 30s|30
 CASES
 }
 
+@test "proxy config adapter snapshots, rolls back, migrates ACL" {
+    # What: create, skip, roll back, incomplete, migrate.
+    # Why: nginx must never start on an invalid config.
+    # From: Issue #1683 | PR #1858
+    local root bin="${BATS_TEST_TMPDIR}/bin" l="${BATS_TEST_TMPDIR}/live" snap id mt
+    local n p a
+    local -a ids=()
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    # shellcheck source=scripts/lib/known-good-snapshots.sh
+    source "${root}/$(ci_context_path known-good)"
+    _load_functions "${root}/services/proxy/entrypoint.sh" \
+        _proxy_validate_snapshot_or_rollback _migrate_legacy_proxy_snapshots_for_stream_acl
+    _tool_stub "${bin}" nginx <<'SH'
+if grep -q BROKEN "${NGINX_TEST_CONFIG_FILE}"; then echo "nginx: test failed" >&2; exit 1; fi
+SH
+    mkdir -p "${l}"
+    n="${l}/nginx.conf" p="${l}/proxy-params.conf" a="${l}/00-stream-client-acl.conf"
+    snap="${BATS_TEST_TMPDIR}/snap"
+    export PATH="${bin}:${PATH}" NGINX_TEST_CONFIG_FILE="${n}" PROXY_CONFIG_SNAPSHOT_DIR="${snap}" \
+        KEEP_KNOWN_GOOD_CONFIGS=3 _DOMAIN_ROWS_SKIPPED=0
+    printf 'BROKEN\n' > "${n}"
+    run _proxy_validate_snapshot_or_rollback "${n}"
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"no known-good nginx config snapshot is available"* ]]
+    [ "$(cat "${n}")" = BROKEN ]
+    printf 'OK n1\n' > "${n}"; printf 'OK p1\n' > "${p}"
+    run _proxy_validate_snapshot_or_rollback "${n}" "${p}"
+    [[ "${output}" == *"[known-good-snapshot][proxy][CREATE]"* ]]
+    printf 'OK n2\n' > "${n}"
+    _DOMAIN_ROWS_SKIPPED=1 run _proxy_validate_snapshot_or_rollback "${n}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"rows were skipped; NOT snapshotting"* ]]
+    [ "$(kgs_list_snapshots "${snap}" | wc -l)" -eq 1 ]
+    run _proxy_validate_snapshot_or_rollback "${n}"
+    [ "$(kgs_list_snapshots "${snap}" | wc -l)" -eq 2 ]
+    printf 'BROKEN n3\n' > "${n}"; printf 'BROKEN p3\n' > "${p}"
+    run _proxy_validate_snapshot_or_rollback "${n}" "${p}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"incomplete (missing at least one candidate file)"*"[proxy][SELECT]"*"NOT the newly generated config"* ]]
+    [ "$(cat "${n}")|$(cat "${p}")" = "OK n1|OK p1" ]
+    rm -rf "${snap}"
+    printf 'OK n1\n' > "${n}"
+    _proxy_validate_snapshot_or_rollback "${n}" 2> /dev/null
+    printf 'BROKEN n2\n' > "${n}"
+    run _proxy_validate_snapshot_or_rollback "${n}" "${p}"
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"incomplete"*"no known-good nginx config snapshot is available"* ]]
+    rm -rf "${snap}"
+    export KEEP_KNOWN_GOOD_CONFIGS=2
+    for id in 1 2 3 4; do printf 'OK r%s\n' "${id}" > "${n}"; _proxy_validate_snapshot_or_rollback "${n}" 2> /dev/null; done
+    [ "$(kgs_list_snapshots "${snap}" | wc -l)" -eq 2 ]
+    # What: legacy snapshot gets an empty ACL; others stay.
+    # Why: never weaken a saved allowlist by guessing it.
+    # From: Issue #1683 | PR #1858
+    rm -rf "${snap}"
+    export KEEP_KNOWN_GOOD_CONFIGS=5
+    printf 'legacy n\n' > "${n}"; printf 'legacy p\n' > "${p}"
+    kgs_snapshot_create "${snap}" 5 proxy "${n}" "${p}" 2> /dev/null
+    printf 'allow 10.0.0.0/8;\n' > "${a}"
+    kgs_snapshot_create "${snap}" 5 proxy "${n}" "${p}" "${a}" 2> /dev/null
+    printf 'include /etc/nginx/stream.d/access.d/00-stream-client-acl.conf;\n' > "${n}"
+    kgs_snapshot_create "${snap}" 5 proxy "${n}" "${p}" "${a}" 2> /dev/null
+    mapfile -t ids < <(kgs_list_snapshots "${snap}")
+    rm "${snap}/${ids[2]}/00-stream-client-acl.conf"
+    mt="$(stat -c %Y "${snap}/${ids[1]}/00-stream-client-acl.conf")"
+    run _migrate_legacy_proxy_snapshots_for_stream_acl "${snap}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"[MIGRATE]"*"${ids[0]}"* ]]
+    [[ "${output}" == *"snapshot ${ids[2]} declares the stream ACL but is missing"* ]]
+    [ -f "${snap}/${ids[0]}/00-stream-client-acl.conf" ]
+    [ ! -s "${snap}/${ids[0]}/00-stream-client-acl.conf" ]
+    [ "$(cat "${snap}/${ids[1]}/00-stream-client-acl.conf")" = 'allow 10.0.0.0/8;' ]
+    [ "$(stat -c %Y "${snap}/${ids[1]}/00-stream-client-acl.conf")" = "${mt}" ]
+    [ ! -e "${snap}/${ids[2]}/00-stream-client-acl.conf" ]
+    printf 'BROKEN\n' > "${a}"
+    run kgs_snapshot_apply "${snap}" proxy true "${n}" "${p}" "${a}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" == *"snapshot ${ids[2]}: incomplete"*"[proxy][SELECT]"* ]]
+    [ "$(cat "${a}")" = 'allow 10.0.0.0/8;' ]
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.
