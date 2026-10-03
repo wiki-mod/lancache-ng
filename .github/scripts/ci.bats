@@ -12688,6 +12688,29 @@ dhcp_mode|kea; rm -rf /|bad
 CASES
 }
 
+@test "setup auto-update gate decides exactly per input" {
+    # What: enabled flag, pinned channel, moved tag, text.
+    # Why: auto-update never touches a pinned or idle stack.
+    # From: Issue #1683 | PR #1858
+    local root case en ch cur dep rc want
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/setup.sh" lancache_auto_update_should_proceed
+    while IFS='|' read -r case en ch cur dep rc want; do
+        run lancache_auto_update_should_proceed "${en}" "${ch}" "${cur}" "${dep}"
+        [ "${status}" -eq "${rc}" ] && [ "${output}" = "${want}" ] || { echo "${case}: rc ${status} ${output}"; return 1; }
+    done <<'CASES'
+off|0|nightly|sha-new|sha-old|1|skip: AUTO_UPDATE_ENABLED is not 1
+empty||nightly|sha-new|sha-old|1|skip: AUTO_UPDATE_ENABLED is not 1
+yes|yes|nightly|sha-new|sha-old|1|skip: AUTO_UPDATE_ENABLED is not 1
+offpinned|0|pinned|sha-new|sha-old|1|skip: AUTO_UPDATE_ENABLED is not 1
+pinned|1|pinned|sha-new|sha-old|1|skip: LANCACHE_IMAGE_CHANNEL=pinned tracks one fixed tag, not a moving channel; nothing to detect
+idle|1|nightly|sha-abc|sha-abc|1|skip: channel nightly is already at sha-abc
+moved|1|nightly|sha-new|sha-old|0|proceed: channel nightly moved sha-old -> sha-new
+stable|1|stable|sha-new|sha-old|0|proceed: channel stable moved sha-old -> sha-new
+firstdeploy|1|latest|sha-new||0|proceed: channel latest moved  -> sha-new
+CASES
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.
