@@ -12927,6 +12927,44 @@ STUB
     cmp "${t}/compose.first" "${t}/r5/sec-a/docker-compose.yml"
 }
 
+@test "setup quickstart assets install per target state" {
+    # What: fresh, stale dirs, repeat, in place; files, modes.
+    # Why: a stale dir target must never nest the copy.
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" i="${BATS_TEST_TMPDIR}/install" SCRIPT_DIR p
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_functions "${root}/setup.sh" install_quickstart_compose_assets
+    SCRIPT_DIR="${root}"
+    eval "$(grep -E '^(QUICKSTART_COMPOSE|DOCKER_SOCKET_PROXY_SCRIPT|SHARED_SECRET_BOOTSTRAP_SCRIPT)=' "${root}/setup.sh")"
+    _check() {
+        cmp "${QUICKSTART_COMPOSE}" "${1}/docker-compose.yml"
+        cmp "${DOCKER_SOCKET_PROXY_SCRIPT}" "${1}/scripts/untracked/docker-socket-proxy.sh"
+        cmp "${SHARED_SECRET_BOOTSTRAP_SCRIPT}" "${1}/scripts/shared-secret-bootstrap.sh"
+        [ "$(stat -c '%a' "${1}/docker-compose.yml" "${1}/scripts/untracked/docker-socket-proxy.sh" \
+            "${1}/scripts/shared-secret-bootstrap.sh" | paste -sd' ')" = "644 755 644" ]
+    }
+    install_quickstart_compose_assets "${i}"
+    _check "${i}"
+    install_quickstart_compose_assets "${i}"
+    _check "${i}"
+    rm -rf "${i}"
+    mkdir -p "${i}/scripts/untracked/docker-socket-proxy.sh" "${i}/scripts/shared-secret-bootstrap.sh"
+    install_quickstart_compose_assets "${i}"
+    _check "${i}"
+    mkdir -p "${t}/inplace/deploy/quickstart" "${t}/inplace/scripts/untracked" "${t}/inplace/scripts/lib"
+    for p in deploy/quickstart/docker-compose.yml scripts/untracked/docker-socket-proxy.sh; do
+        cp "${root}/${p}" "${t}/inplace/${p}"
+    done
+    cp "${root}/scripts/lib/shared-secret-bootstrap.sh" "${t}/inplace/scripts/shared-secret-bootstrap.sh"
+    chmod 600 "${t}/inplace/scripts/untracked/docker-socket-proxy.sh" "${t}/inplace/scripts/shared-secret-bootstrap.sh"
+    SCRIPT_DIR="${t}/inplace"
+    eval "$(grep -E '^(QUICKSTART_COMPOSE|DOCKER_SOCKET_PROXY_SCRIPT)=' "${root}/setup.sh")"
+    SHARED_SECRET_BOOTSTRAP_SCRIPT="${t}/inplace/scripts/shared-secret-bootstrap.sh"
+    install_quickstart_compose_assets "${t}/inplace"
+    [ "$(stat -c '%a' "${t}/inplace/scripts/untracked/docker-socket-proxy.sh" "${t}/inplace/scripts/shared-secret-bootstrap.sh" | paste -sd' ')" = "755 644" ]
+    cmp "${root}/scripts/untracked/docker-socket-proxy.sh" "${t}/inplace/scripts/untracked/docker-socket-proxy.sh"
+}
+
 @test "dns config adapters snapshot, roll back and converge" {
     # What: per role: create, rollback, none, keep, repeat.
     # Why: a broken config must never start or be stored.
