@@ -6573,7 +6573,12 @@ services/nats/x|
 scripts/lib/x.sh|
 ROWS
     printf 'README.md\n' > "${lst}"
-    gh="$(_stub gh 'printf "%s\n" "$*" >> "'"${BATS_TEST_TMPDIR}"'/gh.log"')"
+    gh="$(_stub gh 'printf "%s\n" "$*" >> "'"${BATS_TEST_TMPDIR}"'/gh.log"
+case "$*" in
+*query=query*) [ -n "${GH_NOPROJ:-}" ] && echo "{\"data\":{\"organization\":{\"projectV2\":null}}}" && exit 0
+    echo "{\"data\":{\"organization\":{\"projectV2\":{\"id\":\"PVT_1\"}},\"repository\":{\"issueOrPullRequest\":{\"id\":\"C1\"}}}}" ;;
+*query=mutation*) [ -z "${GH_ADDFAIL:-}" ] || { echo "GraphQL: denied" >&2; exit 1; } ;;
+esac')"
     GITHUB_EVENT_NAME=push run ci_cmd_pr_labels
     [[ "${output}" == *'pr-labels=NOT-RUN reason="not a pull request"'* ]]
     GITHUB_EVENT_NAME=pull_request PR_IS_FORK=true run ci_cmd_pr_labels
@@ -6595,8 +6600,13 @@ ROWS
     [ "${status}" -eq 0 ]; [[ "${output}" == *"board-add=added project=6 pull=12"* ]]
     GITHUB_EVENT_NAME=issues ISSUE_NUMBER=7 GH_TOKEN=t PATH="${gh%/*}:${PATH}" run ci_cmd_board_add
     [ "${status}" -eq 0 ]; [[ "${output}" == *"board-add=added project=6 issues=7"* ]]
-    [ "$(cat "${BATS_TEST_TMPDIR}/gh.log")" = "project item-add 6 --owner owner --url ${GITHUB_SERVER_URL}/owner/fixture-repo/pull/12
-project item-add 6 --owner owner --url ${GITHUB_SERVER_URL}/owner/fixture-repo/issues/7" ]
+    grep -qF -- '-f o=owner -f r=fixture-repo -F p=6 -F n=12 -f query=query' "${BATS_TEST_TMPDIR}/gh.log"
+    grep -qF -- '-F p=6 -F n=7 -f query=query' "${BATS_TEST_TMPDIR}/gh.log"
+    [ "$(grep -c -- '-f p=PVT_1 -f c=C1 -f query=mutation' "${BATS_TEST_TMPDIR}/gh.log")" -eq 2 ]
+    GH_NOPROJ=1 GITHUB_EVENT_NAME=issues ISSUE_NUMBER=7 GH_TOKEN=t PATH="${gh%/*}:${PATH}" run ci_cmd_board_add
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-BOARD-0003]"*'"projectV2":null'* ]]
+    GH_ADDFAIL=1 GITHUB_EVENT_NAME=issues ISSUE_NUMBER=7 GH_TOKEN=t PATH="${gh%/*}:${PATH}" run ci_cmd_board_add
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-BOARD-0004]"*"GraphQL: denied"* ]]
     sed 's/^  project_number: 6$/  project_number: x/' "${CI_MANIFEST_SOURCE}" > "${BATS_TEST_TMPDIR}/pb.yml"
     CI_MANIFEST="${BATS_TEST_TMPDIR}/pb.yml" GITHUB_EVENT_NAME=pull_request GH_TOKEN=t run ci_cmd_board_add
     [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-BOARD-0001]"* ]]

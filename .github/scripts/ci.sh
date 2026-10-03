@@ -1921,7 +1921,7 @@ ci_cmd_pr_labels() {
 # Why: AG-GH-008 board placement; item-add is idempotent.
 # From: Issue #1683 | PR #1858
 ci_cmd_board_add() {
-    local repo number url kind item
+    local repo number kind item resp ids
     case "${GITHUB_EVENT_NAME:-}" in
     pull_request) kind=pull item="${PR_NUMBER:-}" ;;
     issues) kind=issues item="${ISSUE_NUMBER:-}" ;;
@@ -1941,9 +1941,22 @@ ci_cmd_board_add() {
         ci_log "[CI-ERROR-BOARD-0001]" "got=\"${number}\" reason=\"no numeric SOT pr_policy.project_number\""
         return 2
     fi
-    url="${GITHUB_SERVER_URL:-https://github.com}/${repo}/${kind}/${item}"
-    _ci_run "[CI-ERROR-BOARD-0002]" "project=\"${number}\" url=\"${url}\" reason=\"item not added to the board\"" \
-        gh project item-add "${number}" --owner "${repo%%/*}" --url "${url}" > /dev/null || return 2
+    # What: org board id and item id in one graphql lookup.
+    # Why: gh project item-add needs a scope the PAT lacks.
+    # From: Issue #1683 | PR #1858
+    if ! resp="$(_ci_retry github-api gh api graphql -f o="${repo%%/*}" -f r="${repo#*/}" \
+        -F p="${number}" -F n="${item}" -f query='query($o: String!, $r: String!, $p: Int!, $n: Int!) { organization(login: $o) { projectV2(number: $p) { id } } repository(owner: $o, name: $r) { issueOrPullRequest(number: $n) { ... on Issue { id } ... on PullRequest { id } } } }')"; then
+        ci_error "[CI-ERROR-BOARD-0002]" "project=\"${number}\" ${kind}=\"${item}\" reason=\"board or item lookup failed\"" "${resp}"
+        return 2
+    fi
+    if ! ids="$(jq -er '[.data.organization.projectV2.id, .data.repository.issueOrPullRequest.id]
+        | select(all(type == "string")) | join(" ")' <<<"${resp}" 2>&1)"; then
+        ci_error "[CI-ERROR-BOARD-0003]" "project=\"${number}\" ${kind}=\"${item}\" reason=\"no board or item id in the lookup\"" "${resp}"
+        return 2
+    fi
+    _ci_run "[CI-ERROR-BOARD-0004]" "project=\"${number}\" ${kind}=\"${item}\" reason=\"item not added to the board\"" \
+        gh api graphql -f p="${ids% *}" -f c="${ids#* }" \
+        -f query='mutation($p: ID!, $c: ID!) { addProjectV2ItemById(input: {projectId: $p, contentId: $c}) { item { id } } }' > /dev/null || return 2
     printf 'board-add=added project=%s %s=%s\n' "${number}" "${kind}" "${item}"
 }
 
