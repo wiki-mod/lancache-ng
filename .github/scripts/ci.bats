@@ -12374,7 +12374,7 @@ CASES
     # What: env paths per layout; compose -f list per state.
     # Why: a wrong file list starts the wrong stack.
     # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" d case ovr nats envline shell want got
+    local root t="${BATS_TEST_TMPDIR}" d p case ovr nats envline shell want got
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_functions "${root}/setup.sh" is_deploy_prod_install_dir runtime_env_file_for_install_dir \
         deploy_prod_repo_root resolve_update_ip_config_paths _compose_parse_env_value get_env_var_nonempty \
@@ -12386,9 +12386,11 @@ CASES
     [ "$(resolve_update_ip_config_paths "${t}/repo/deploy/prod" | paste -sd'|')" \
         = "${t}/repo/deploy/prod/.env|${d}/config/prod/dns-standard.env|${d}/config/prod/dns-ssl.env" ]
     : > "${t}/repo/deploy/prod/.env.local"
-    [ "$(resolve_update_ip_config_paths "${t}/repo/deploy/prod" | head -1)" = "${t}/repo/deploy/prod/.env.local" ]
+    p="$(resolve_update_ip_config_paths "${t}/repo/deploy/prod")"
+    [ "${p%%$'\n'*}" = "${t}/repo/deploy/prod/.env.local" ]
     : > "${t}/qs/.env.local"
-    [ "$(resolve_update_ip_config_paths "${t}/qs" | head -1)" = "${t}/qs/.env" ]
+    p="$(resolve_update_ip_config_paths "${t}/qs")"
+    [ "${p%%$'\n'*}" = "${t}/qs/.env" ]
     while IFS='|' read -r case ovr nats envline shell want; do
         d="${t}/c-${case}"
         mkdir -p "${d}"
@@ -12841,7 +12843,7 @@ CASES
     # What: cmd_secondary with stub curl/docker per answer.
     # Why: token never in argv; failures stop before writes.
     # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" bin="${BATS_TEST_TMPDIR}/bin" dk sha body
+    local root t="${BATS_TEST_TMPDIR}" bin="${BATS_TEST_TMPDIR}/bin" dk sha body gen hc
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     dk="$(command -v docker)"
     _load_functions "${root}/setup.sh" _compose_parse_env_value get_env_var is_valid_ipv4 require_value \
@@ -12907,14 +12909,16 @@ STUB
         echo "docker: $(cat "${t}/docker.log")"; return 1; }
     run "${dk}" compose --env-file "${t}/r5/sec-a/.env" -f "${t}/r5/sec-a/docker-compose.yml" config --format json
     [ "${status}" -eq 0 ] || { echo "compose: ${output}"; return 1; }
-    jq -e --arg img "ghcr.io/wiki-mod/lancache-ng/dns:${sha}" '.services["dns-secondary"] as $s
-        | $s.image == $img and $s.restart == "always"
-        and $s.healthcheck.test == ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
-        and $s.healthcheck.interval == "30s" and $s.healthcheck.timeout == "5s"
-        and $s.healthcheck.retries == 3 and $s.healthcheck.start_period == "20s"
+    gen="${output}"
+    run "${dk}" compose --env-file "${t}/r5/sec-a/.env" -f "${root}/deploy/secondary/docker-compose.yml" \
+        config --format json
+    [ "${status}" -eq 0 ] || { echo "canonical compose: ${output}"; return 1; }
+    hc="$(jq -ce '.services["dns-secondary"].healthcheck | select(.test != null)' <<< "${output}")"
+    jq -e --arg img "ghcr.io/wiki-mod/lancache-ng/dns:${sha}" --argjson hc "${hc}" '.services["dns-secondary"] as $s
+        | $s.image == $img and $s.restart == "always" and $s.healthcheck == $hc
         and $s.environment.DNS_REPLICATION_ROLE == "secondary" and $s.environment.NATS_RECORD_WRITES == "0"
         and $s.environment.DNS_XFR_PRIMARY == "192.168.1.10:5300" and $s.environment.NATS_PASSWORD == "pw"
-        and ([$s.ports[] | .host_ip] | unique) == ["192.168.1.50"]' <<< "${output}"
+        and ([$s.ports[] | .host_ip] | unique) == ["192.168.1.50"]' <<< "${gen}"
     cp "${t}/r5/sec-a/.env" "${t}/env.first"
     cp "${t}/r5/sec-a/docker-compose.yml" "${t}/compose.first"
     : > "${t}/curl.argv"
