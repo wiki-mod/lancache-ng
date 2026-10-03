@@ -3604,7 +3604,7 @@ svc-x=sha256:n"
     for k in ${keys}; do
         v="$(sed -n "s/^${k}=//p" <<<"${env}")"
         [ -n "${v}" ] || { echo "${k}: missing from validation env"; return 1; }
-        # What: count decoded bytes in a file, not a variable.
+        # What: count decoded bytes in a file, not a var.
         # Why: bash drops NUL; a random key may hold one.
         # From: Issue #1683 | PR #1858
         d="$(base64 -d <<<"${v}" 2>&1 > "${BATS_TEST_TMPDIR}/key.bin")" || { echo "${k}='${v}': ${d}"; return 1; }
