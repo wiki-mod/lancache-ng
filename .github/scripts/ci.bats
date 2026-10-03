@@ -5627,6 +5627,18 @@ CASES
     CI_MANIFEST="${BATS_TEST_TMPDIR}/hdr.yml" run bash "${CI_SH}" check file-headers \
         "${BATS_TEST_TMPDIR}/x/services/dns/schema.sqlite3.sql"
     [ "${status}" -ne 0 ] || { echo "unlisted passed: ${output}"; return 1; }
+    # What: only the root .env is header-exempt.
+    # Why: AG-HDR-007 keeps nested .env files in scope.
+    # From: Issue #1683 | PR #1858
+    mkdir -p "${BATS_TEST_TMPDIR}/x/deploy/prod"
+    printf 'A=1\n' > "${BATS_TEST_TMPDIR}/x/.env"
+    printf 'A=1\n' > "${BATS_TEST_TMPDIR}/x/deploy/prod/.env"
+    cd "${BATS_TEST_TMPDIR}/x"
+    run bash "${CI_SH}" check file-headers .env
+    [ "${status}" -eq 0 ] || { echo "root .env: ${output}"; return 1; }
+    run bash "${CI_SH}" check file-headers deploy/prod/.env
+    [ "${status}" -ne 0 ] || { echo "nested .env passed: ${output}"; return 1; }
+    [[ "${output}" == *"CI-ERROR-CHECK-0003"* ]]
 }
 
 @test "check file-headers fails an extension with no native syntax" {
