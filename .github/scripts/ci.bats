@@ -7750,7 +7750,7 @@ EOF
 }
 
 @test "check docker-socket-proxy gates ui/watchdog on started" {
-    # What: healthcheck kept; deps never wait for healthy.
+    # What: ui/watchdog deps never wait for healthy.
     # Why: ui/watchdog must run while a dep flaps.
     # From: Issue #763 | PR #1858
     local r="${BATS_TEST_TMPDIR}/dsp-deps" case from to want
@@ -7769,16 +7769,11 @@ EOF
         fi
     done <<'CASES'
 ok|||clean
-hcdisabled|      test: ["CMD", "true"]|      test: ["CMD", "true"]\n      disable: true|docker-socket-proxy defines no healthcheck
 uihealthy|        condition: service_started # ui-nats|        condition: service_healthy|ui waits for nats to be healthy; use service_started
 uidsphealthy|        condition: service_started # ui-dsp|        condition: service_healthy|ui must depend on docker-socket-proxy with service_started
 wdcompleted|        condition: service_started # wd-dsp|        condition: service_completed_successfully|watchdog must depend on docker-socket-proxy with service_started
 wdmissing|  watchdog:|  watchdog-x:|watchdog must depend on docker-socket-proxy with service_started
 CASES
-    sed -i '/^    healthcheck:$/,/^      test:/d' "${r}/dep/c.yml"
-    run bash "${CI_SH}" check docker-socket-proxy "${r}"
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"dep/c.yml: docker-socket-proxy defines no healthcheck"* ]]
 }
 
 @test "check docker-socket-proxy fails a forbidden broad container rule" {

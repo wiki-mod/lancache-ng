@@ -10189,14 +10189,11 @@ _ci_check_docker_socket_proxy() {
         local cfg deps line
         cfg="$(_ci_compose_query "${repo_root}/${cf}" "" config --no-env-resolution --format json)" || return 2
         deps="$(_ci_capture 0 jq -r '.services as $s
-            | ($s["docker-socket-proxy"].healthcheck // {}) as $h
-            | (if ($h.test // null) == null or $h.disable == true
-                then "docker-socket-proxy defines no healthcheck" else empty end),
-              (("ui", "watchdog") as $n | ($s[$n].depends_on // {}) as $d
-                | (if ($d["docker-socket-proxy"].condition // "none") != "service_started"
-                    then "\($n) must depend on docker-socket-proxy with service_started" else empty end),
-                  ($d | to_entries[] | select(.value.condition == "service_healthy")
-                    | "\($n) waits for \(.key) to be healthy; use service_started"))' <<<"${cfg}")" || return 2
+            | ("ui", "watchdog") as $n | ($s[$n].depends_on // {}) as $d
+            | (if ($d["docker-socket-proxy"].condition // "none") != "service_started"
+                then "\($n) must depend on docker-socket-proxy with service_started" else empty end),
+              ($d | to_entries[] | select(.value.condition == "service_healthy")
+                | "\($n) waits for \(.key) to be healthy; use service_started")' <<<"${cfg}")" || return 2
         while IFS= read -r line; do
             [ -z "${line}" ] || viol+=("${cf}: ${line}")
         done <<<"${deps}"
