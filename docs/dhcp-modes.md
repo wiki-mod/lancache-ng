@@ -223,16 +223,16 @@ this section or the "Optional (issue #450)" one above changes.
 > wiring three new form fields through `services/ui/src/routes/dhcp.rs`,
 > which is a separate, larger piece of work than the setup.sh side. Until
 > that lands, changing these three values after initial setup means editing
-> `.env` and restarting for **quickstart** (`deploy/quickstart/docker-compose.yml`
-> wires each of these three keys as `environment: - KEY=${KEY:-}`, so the
-> running container reads whatever `.env` holds at `docker compose up` time).
-> **`deploy/prod` does not work this way**: its dhcp-proxy service reads
-> `config/prod/dhcp-proxy.env` via `env_file:`, never `.env`/`.env.local`
-> directly, so editing `.env` and restarting has no effect there. For
-> `deploy/prod`, edit `config/prod/dhcp-proxy.env` directly and restart.
-> That runtime file is the permanent authoritative source; `setup.sh update`
-> only initializes keys that are missing there and never replaces an existing
-> value (including an explicit empty value) from the duplicate in `.env`.
+> the runtime env `deploy/prod/.env.local` and restarting: the dhcp-proxy
+> service in `deploy/prod/docker-compose.yml` wires each of these keys as
+> `environment: - KEY=${KEY:-}`, so the running container reads the value the
+> runtime env holds at `docker compose up` time. `deploy/prod/.env` is the
+> committed template and keeps every key with an empty default. A value an
+> older install set in `config/prod/dhcp-proxy.local.env` moves into the
+> runtime env on the next `setup.sh update`: it is copied during the update and
+> removed from the local file only after the update succeeded. The
+> `ci.sh check dhcp-proxy-env` guard fails if a template key the dhcp-proxy
+> entrypoint reads is not passed to the service.
 > STATUS: as of 2026-08-06, `setup.sh` coverage is
 > done; Admin UI coverage is open (AG-FEAT-002 UI delivery debt).
 

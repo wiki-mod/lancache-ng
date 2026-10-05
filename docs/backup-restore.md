@@ -24,6 +24,10 @@ sudo /opt/lancache-ng/setup.sh backup [--config|--full] [install-dir] [--dest /b
 sudo /opt/lancache-ng/setup.sh restore <backup.tar.gz> [install-dir]
 ```
 
+Archives go to `/var/backups/lancache-ng` unless `--dest` is given. Set `LANCACHE_BACKUP_ROOT` to move that default for every command, including the automatic pre-update backup that `update` and `auto-update` roll back from.
+
+`update` also updates the repository checkout itself when it sits on its default branch with no local changes: it takes the pre-update backup first, pulls, and continues with the pulled `setup.sh`. A failed update returns the checkout to its previous revision along with the restored configuration. A checkout on a tag, commit or other branch, or with local changes, is left where it is and the update says so.
+
 The script verifies that required archive tools are present before running backup or restore. If `tar` or `rsync` is missing on an `apt-get` based system, the script installs the missing tool before it touches backup data. `restore` additionally requires `openssl`, since converging a legacy or incomplete `.env` (see "Restore also re-converges `.env`" below) can generate missing service secrets, which shells out to `openssl rand`.
 
 ## Why there are two backup modes

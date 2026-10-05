@@ -719,6 +719,10 @@ ci_variables:
   CI_PROMOTE_LOCK_MAX: 30
   CI_PROMOTE_LOCK_BACKOFF: 10
   CI_PROMOTE_LOCK_STALE: 900
+  # What: ref prefix of the per-channel promote lock.
+  # Why: promote and the installer read one lock location.
+  # From: Issue #1683 | PR #1858
+  CI_PROMOTE_LOCK_REF: refs/ci/promote-lock
   # What: PR title lint mode (warn|block), chronology mode.
   # Why: AG-CI-006: check modes are values with one owner.
   # From: Issue #1683 | PR #1858
@@ -798,7 +802,7 @@ validation:
   # What: compose files checked besides CI_COMPOSE_FILE.
   # Why: each renders clean in all of its own profiles.
   # From: Issue #1683 | PR #1858
-  compose_targets: deploy/secondary/docker-compose.yml deploy/quickstart/docker-compose.yml
+  compose_targets: deploy/secondary/docker-compose.yml
   # What: placeholder env for targets without .env
   # Why: operator keys are :?-required
   # From: Issue #1683 | PR #1858
@@ -810,9 +814,9 @@ validation:
     hex32: [KEA_CTRL_TOKEN, NATS_CALLOUT_PASSWORD, NATS_DNS_REPLICA_PASSWORD, NATS_DNS_WRITER_PASSWORD, NATS_PASSWORD, NATS_SYS_PASSWORD, NATS_TOKEN, NATS_UI_PASSWORD, PDNS_API_KEY, SECONDARY_REGISTRATION_TOKEN]
     base64_32: [DDNS_TSIG_KEY]
   # What: compose files also rendered with their .env.
-  # Why: quickstart's env must interpolate clean
+  # Why: AG-VAL-010: each renders with its own dir's .env
   # From: Issue #1683 | PR #1858
-  compose_env_file_targets: deploy/quickstart/docker-compose.yml
+  compose_env_file_targets: deploy/prod/docker-compose.yml
   # What: required keys setup.sh repairs
   # Why: empty required key breaks the stack
   # From: Issue #1683 | PR #1858

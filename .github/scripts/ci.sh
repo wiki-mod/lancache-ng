@@ -4064,19 +4064,22 @@ _ci_stack_validated() {
 # Why: serialize movers of one channel (§52).
 # From: Issue #1683
 _ci_promote_lock_ref() {
-    printf 'refs/ci/promote-lock/%s' "$1"
+    local prefix
+    prefix="$(_ci_variable CI_PROMOTE_LOCK_REF)" || return 2
+    printf '%s/%s' "${prefix}" "$1"
 }
 
 # What: Default promote lock: take the channel lock.
 # Why: the cross-host CAS mutex, reused for promotion.
 # From: Issue #1683
 _ci_default_promote_lock() {
-    local remote max backoff stale
+    local remote max backoff stale ref
     remote="$(_ci_ledger_remote)" || return 2
     max="$(_ci_variable CI_PROMOTE_LOCK_MAX)" || return 2
     backoff="$(_ci_variable CI_PROMOTE_LOCK_BACKOFF)" || return 2
     stale="$(_ci_variable CI_PROMOTE_LOCK_STALE)" || return 2
-    _ci_lock_acquire "${remote}" "$(_ci_promote_lock_ref "$1")" "promote $1 run=${GITHUB_RUN_ID:-local}" \
+    ref="$(_ci_promote_lock_ref "$1")" || return 2
+    _ci_lock_acquire "${remote}" "${ref}" "promote $1 run=${GITHUB_RUN_ID:-local}" \
         "${max}" "${backoff}" "${stale}"
 }
 
@@ -4084,9 +4087,10 @@ _ci_default_promote_lock() {
 # Why: the same holder note the acquire path used.
 # From: Issue #1683
 _ci_default_promote_unlock() {
-    local remote
+    local remote ref
     remote="$(_ci_ledger_remote)" || return 2
-    _ci_lock_release "${remote}" "$(_ci_promote_lock_ref "$1")" "promote $1 run=${GITHUB_RUN_ID:-local}"
+    ref="$(_ci_promote_lock_ref "$1")" || return 2
+    _ci_lock_release "${remote}" "${ref}" "promote $1 run=${GITHUB_RUN_ID:-local}"
 }
 
 # What: Default channel move: point svc:channel at digest.
@@ -8558,7 +8562,7 @@ _ci_check_exit_evidence() {
     for path in "${files[@]}"; do
         if ! out="$(awk '
             function strip(s) { gsub(/\047[^\047]*\047/, "", s); return s }
-            /^[a-z_][a-z0-9_]*\(\) \{/ { fn = $1; sub(/\(\).*/, "", fn) }
+            /^[a-z_][a-z0-9_]*\(\) [({]/ { fn = $1; sub(/\(\).*/, "", fn) }
             /^[[:space:]]*#/ { next }
             {
                 s = strip($0)
@@ -10533,10 +10537,10 @@ _ci_check_nats_atomic_write() {
     # What: the secondary's files go through atomic writers.
     # Why: a torn compose or .env breaks the secondary.
     # From: Issue #475
-    grep -Fq 'write_generated_runtime_file "${secondary_dir}/docker-compose.yml"' "${repo_root}/${su}" \
+    grep -Fq 'write_file_atomically "${secondary_dir}/docker-compose.yml"' "${repo_root}/${su}" \
         || viol+=("${su}: secondary setup must atomically write generated docker-compose.yml")
-    grep -Fq 'write_env_file "${secondary_dir}/.env"' "${repo_root}/${su}" \
-        || viol+=("${su}: secondary setup must use the safe env writer for generated .env")
+    grep -Fq 'write_file_atomically "${secondary_dir}/.env"' "${repo_root}/${su}" \
+        || viol+=("${su}: secondary setup must atomically write generated .env")
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0045]" "reason=\"shared config write is not atomic\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
@@ -10804,67 +10808,34 @@ _ci_check_compose_required_env() {
     printf 'compose-required-env=clean\n'
 }
 
-# What: True if dhcp-proxy service uses env_file only.
-# Why: env_file prod contract; reinterpolation loses keys.
-# From: Issue #1683 | PR #1858
-_ci_dhcp_proxy_env_file_ok() {
-    local compose_file="$1" expected="$2"
-    awk -v compose_file="${compose_file}" -v expected_env_file="${expected}" '
-        function trim(value) {
-            sub(/^[[:space:]]+/, "", value)
-            sub(/[[:space:]]+$/, "", value)
-            return value
-        }
-        function content_indent(value, prefix) {
-            match(value, /^[[:space:]]*/)
-            prefix = substr(value, 1, RLENGTH)
-            return length(prefix)
-        }
-        function strip_inline_comment(value) {
-            sub(/[[:space:]]+#.*/, "", value)
-            return value
-        }
-        /^  dhcp-proxy:/ { in_service=1; saw_service=1; in_env_file_block=0; next }
-        in_service && /^  [[:alnum:]_-]+:/ { in_service=0; in_env_file_block=0 }
-        in_service {
-            line=strip_inline_comment($0)
-            stripped=trim(line)
-            if (in_env_file_block && stripped != "" && content_indent(line) <= env_file_indent) { in_env_file_block=0 }
-            if (in_env_file_block && stripped ~ /^-/ && index(stripped, expected_env_file) > 0) { saw_env_file=1 }
-            if (line ~ /^[[:space:]]*env_file:[[:space:]]*$/) {
-                in_env_file_block=1; env_file_indent=content_indent(line)
-            } else if (line ~ /^[[:space:]]*env_file:[[:space:]]*/ && index(line, expected_env_file) > 0) {
-                saw_env_file=1
-            }
-            if (line ~ /^[[:space:]]*environment:[[:space:]]*/) { saw_environment=1 }
-            if (stripped ~ /^-[[:space:]]*(DHCP_SUBNET_START|DHCP_DNS_PRIMARY|DHCP_DNS_SECONDARY|UPSTREAM_DHCP_IP)=\$\{/ || stripped ~ /[{,][[:space:]]*(DHCP_SUBNET_START|DHCP_DNS_PRIMARY|DHCP_DNS_SECONDARY|UPSTREAM_DHCP_IP):[[:space:]]*"\$\{/) { saw_interpolated_dhcp_key=1 }
-        }
-        END {
-            if (!saw_service) { printf "%s: dhcp-proxy service is missing\n", compose_file; exit 1 }
-            if (!saw_env_file) { printf "%s: dhcp-proxy must keep env_file %s\n", compose_file, expected_env_file; exit 1 }
-            if (saw_environment || saw_interpolated_dhcp_key) { printf "%s: dhcp-proxy must not reintroduce Compose environment interpolation; env_file is the contract\n", compose_file; exit 1 }
-        }
-    ' "${compose_file}"
-}
-
-# What: Fail unless dhcp-proxy env/PXE surface intact.
-# Why: env_file contract + optional/PXE keys not drop.
+# What: dhcp-proxy must receive each template key it uses
+# Why: the template owns the keys; a dropped one is lost
 # From: Issue #1683 | PR #1858
 _ci_check_dhcp_proxy_env() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
-    local key out f dep
+    local -A in_env=() in_tpl=() seen=()
+    local dep tpl ep f json env used tkeys key
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    local -a opt=(DHCP_PROXY_INTERFACE DHCP_PROXY_ROUTER DHCP_NTP_SERVERS DHCP_PROXY_DOMAIN DHCP_PROXY_BOOT_FILENAME DHCP_PROXY_BOOT_SERVER DHCP_PROXY_CUSTOM_OPTIONS)
-    local -a pxe=(DHCP_PROXY_PXE_BOOT_SERVER DHCP_PROXY_PXE_BOOT_FILENAME_BIOS DHCP_PROXY_PXE_BOOT_FILENAME_UEFI)
-    for f in "${dep}" config/prod/dhcp-proxy.env services/dhcp-proxy/entrypoint.sh services/dhcp-proxy/dnsmasq.conf.template; do
+    tpl="$(dirname "${dep}")/.env"
+    ep=services/dhcp-proxy/entrypoint.sh
+    for f in "${dep}" "${tpl}" "${ep}" services/dhcp-proxy/dnsmasq.conf.template; do
         [ -f "${repo_root}/${f}" ] || { ci_error "[CI-ERROR-CHECK-0048]" "path=\"${f}\" reason=\"required dhcp-proxy input missing\"" "missing dhcp-proxy input: ${f}"; return 2; }
     done
-    out="$(_ci_dhcp_proxy_env_file_ok "${repo_root}/${dep}" '../../config/prod/dhcp-proxy.env')" || viol+=("${out}")
-    for key in "${opt[@]}" "${pxe[@]}"; do
-        grep -Eq "^${key}=" "${repo_root}/config/prod/dhcp-proxy.env" \
-            || viol+=("config/prod/dhcp-proxy.env: must define ${key} (empty default)")
-    done
+    json="$(_ci_compose_json "${repo_root}/${dep}")" || return 2
+    env="$(_ci_capture 0 jq -r '.services["dhcp-proxy"].environment // {} | keys[]' <<< "${json}")" || return 2
+    tkeys="$(_ci_capture 1 grep -oE '^[A-Z][A-Z0-9_]*=' "${repo_root}/${tpl}")" || return 2
+    used="$(_ci_capture 1 grep -oE '\$\{?[A-Z][A-Z0-9_]*' "${repo_root}/${ep}")" || return 2
+    while IFS= read -r key; do [ -z "${key}" ] || in_env["${key}"]=1; done <<< "${env}"
+    while IFS= read -r key; do [ -z "${key}" ] || in_tpl["${key%=}"]=1; done <<< "${tkeys}"
+    while IFS= read -r key; do
+        key="${key#\$}"
+        key="${key#\{}"
+        [ -n "${key}" ] && [ -z "${seen[${key}]:-}" ] && [ -n "${in_tpl[${key}]:-}" ] || continue
+        seen["${key}"]=1
+        [ -n "${in_env[${key}]:-}" ] \
+            || viol+=("${dep}: dhcp-proxy never receives ${key} (read by ${ep}, owned by ${tpl})")
+    done <<< "${used}"
     grep -Fq '_dhcp_proxy_render_optional_directives()' "${repo_root}/services/dhcp-proxy/entrypoint.sh" \
         || viol+=("dhcp-proxy entrypoint must render optional dnsmasq directives (#450)")
     grep -Fq '_dhcp_proxy_render_optional_directives /etc/dnsmasq.conf' "${repo_root}/services/dhcp-proxy/entrypoint.sh" \
@@ -10941,10 +10912,10 @@ _ci_check_setup_update_safety() {
     # Why: per function; the cmd_update window went stale.
     # From: Issue #1683 | PR #1858
     if ! pause_out="$(awk '
-        /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/ { fn = $1; sub(/\(\).*/, "", fn); next }
+        /^[A-Za-z_][A-Za-z0-9_]*\(\) [({]/ { fn = $1; sub(/\(\).*/, "", fn); next }
         /^[[:space:]]*#/ { next }
         /pause_lancache_convergence_for_update/ { seen[fn] = 1; paused[fn] = 1; next }
-        !paused[fn] && /(sync_repo_to_default_branch|adopt_config_prod_edits|cmd_backup|git -C|migrate_env_for_update|validate_compose_config|dc_update[[:space:]]+(pull|up)|docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+(pull|up))/ {
+        !paused[fn] && /(sync_repo_to_default_branch|update_repo_and_resume|adopt_config_prod_edits|cmd_backup|git -C|migrate_env_for_update|validate_compose_config|stack_compose[[:space:]].*[[:space:]](pull|up)([[:space:]]|$)|docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+(pull|up))/ {
             pend[fn] = pend[fn] NR ": " $0 "\n"
         }
         END {
@@ -10954,11 +10925,11 @@ _ci_check_setup_update_safety() {
         }' "${su}")"; then
         viol+=("update must pause the convergence timer before mutating install state"$'\n'"${pause_out}")
     fi
-    grep -Fq 'systemctl stop lancache-converge.service' "${su}" \
+    grep -Fq 'systemctl stop "$CONVERGE_SERVICE_UNIT"' "${su}" \
         || viol+=("update must stop the active convergence service before mutating install state")
     awk '/if ! \( cmd_backup --config "\$install_dir" \); then/{b=1;next} b&&/resume_lancache_convergence_after_update true/{r=1} b&&/die "Pre-update rollback backup failed/{d=1;b=0} END{exit r&&d?0:1}' "${su}" \
         || viol+=("update must restore the convergence timer when the rollback backup fails")
-    awk '/^cmd_update_ip\(\) \{/{u=1;g=0;next} /^# .*backup subcommand/{u=0} u&&/assert_prebuilt_image_platform_supported/{g=1} u&&!g&&/(sed -i|docker compose -f)/{f=1} END{exit f?0:1}' "${su}" \
+    awk '/^cmd_update_ip\(\) \{/{u=1;g=0;next} /^# .*backup subcommand/{u=0} u&&/assert_prebuilt_image_platform_supported/{g=1} u&&!g&&/(sed -i|docker compose -f|stack_compose[[:space:]])/{f=1} END{exit f?0:1}' "${su}" \
         && viol+=("update-ip must check prebuilt platform support before mutating config")
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0103]" "reason=\"setup.sh update-migration safety contract violated\"" "$(printf '%s\n' "${viol[@]}")"
@@ -11003,7 +10974,7 @@ _ci_check_image_channel_resolution() {
     prod="${repo_root}/${dep}"
     local -a viol=()
     local f
-    if awk '/^# .*Installing systemd watchdog/{i=1;p=0} /^# .*Post-start info/{i=0} i&&/docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+pull/{p=1} i&&!p&&/^[[:space:]]*(systemctl[[:space:]]+(enable|start)[[:space:]]+(lancache\.service|lancache-converge\.timer)|docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+up[[:space:]]+-d)/{v=1} END{exit v?0:1}' "${su}"; then
+    if awk '/^# ── [0-9]+\. Installing systemd watchdog/{i=1;p=0} /^# ── [0-9]+\. Post-start info/{i=0} i&&/(docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?|stack_compose[[:space:]].*)[[:space:]]pull([[:space:]]|$)/{p=1} i&&!p&&/^[[:space:]]*(systemctl[[:space:]]+(enable|start)[[:space:]]+("?\$\{?(STACK_UNIT|CONVERGE_TIMER_UNIT)|lancache\.service|lancache-converge\.timer)|(docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?|stack_compose[[:space:]].*)[[:space:]]up[[:space:]]+-d)/{v=1} END{exit v?0:1}' "${su}"; then
         viol+=("setup.sh must not start/enable lancache services before image pull")
     fi
     for f in \
@@ -11012,12 +10983,12 @@ _ci_check_image_channel_resolution() {
         'lancache_image_channel=$(resolve_lancache_image_channel "$env_file")' \
         'lancache_image_tag=$(resolve_lancache_image_tag "$env_file")' \
         'LANCACHE_IMAGE_CHANNEL=pinned requires LANCACHE_IMAGE_TAG to be set to an immutable sha-* or vX.Y.Z tag.' \
-        'resolve_lancache_stack_channel_tag()' \
-        'docker cp "${container_id}:/stack.env" -' \
-        'response_image_tag=$(echo "$response"' \
-        'response_image_registry=$(echo "$response"' \
-        'response_image_prefix=$(echo "$response"' \
-        'response_image_channel=$(echo "$response"' \
+        'lancache_channel_image_refs()' \
+        'if [[ "$first" == "$second" ]]; then' \
+        'response_image_tag=$(json_value .image_tag "$response")' \
+        'response_image_registry=$(json_value .image_registry "$response")' \
+        'response_image_prefix=$(json_value .image_prefix "$response")' \
+        'response_image_channel=$(json_value .image_channel "$response")' \
         'LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY}' \
         'LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX}' \
         'LANCACHE_IMAGE_CHANNEL=${lancache_image_channel}' \

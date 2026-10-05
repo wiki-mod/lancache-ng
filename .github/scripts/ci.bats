@@ -15,6 +15,10 @@ bats_require_minimum_version 1.5.0
 # Why: Test engine functions directly against the real SOT.
 # From: Issue #1683
 setup() {
+    # What: socket setup.sh tests get; it never exists
+    # Why: a missing stub must fail, not reach a daemon
+    # From: Issue #1683 | PR #1858
+    SETUP_SH_DOCKER_HOST="unix:///var/empty/no-docker.sock"
     CI_SH="${BATS_TEST_DIRNAME}/ci.sh"
     CI_MANIFEST_SOURCE="${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml"
     # shellcheck source=.github/scripts/ci.sh
@@ -207,6 +211,184 @@ _tool_stub() {
         cat
     } > "${bin}/${tool}"
     chmod +x "${bin}/${tool}"
+}
+
+# What: docker CLI stand-in; volumes are dirs under $DS.
+# Why: setup.sh runs its real container scripts on test dirs
+# From: Issue #1683 | PR #1858
+_setup_docker_stub() {
+    _tool_stub "$1" docker <<'STUB'
+: "${DS:?the docker stub needs DS, its state dir}"
+printf '%s\n' "$*" >> "${DS}/docker.log"
+[ ! -e "${DS}/fail-$1" ] || { echo "docker $1: ${FAULT:?a failure injection needs FAULT}" >&2; exit 1; }
+here="$(dirname "$(readlink -f "$0")")" || exit 1
+case "$1" in
+    --version) echo 'docker CLI (test stub)' ;;
+    compose)
+        all=("$@")
+        shift
+        while :; do case "${1:-}" in --env-file|-f|-p|--profile) shift 2 ;; *) break ;; esac; done
+        case "$1" in
+            config) exec "$(cat "${here}/docker-real")" "${all[@]}" ;;
+            ps) case "${2:-}" in
+                    --all) ;;
+                    -a) [ ! -e "${DS}/running" ] || [ -e "${DS}/gone-${!#}" ] || echo "${DS##*/}-${!#}" ;;
+                    -q) [ ! -e "${DS}/running" ] || echo "${DS##*/}" ;;
+                    *) echo "${DS##*/} ${STUB_SECRET:-}" ;;
+                esac ;;
+            stop) rm -f "${DS}/running" ;;
+            up) [ ! -e "${DS}/fail-apply" ] || case " $* " in
+                    *" --remove-orphans "*) echo "compose up: ${FAULT:?a failure injection needs FAULT}" >&2; exit 1 ;;
+                esac
+                printf '%s\n' "${all[@]:0:${#all[@]}-$#}" > "${DS}/running" ;;
+            pull) ;;
+            exec) shift; [ "$1" != -T ] || shift; shift
+                [ ! -e "${DS}/pdns-api-key" ] || PDNS_API_KEY="$(cat "${DS}/pdns-api-key")" exec "$@"
+                exec "$@" ;;
+            images) echo '[]' ;;
+            logs) echo "${!#} ${STUB_SECRET:-}" ;;
+            version) echo 'docker compose (test stub)' ;;
+            *) echo "unexpected docker compose call: $*" >&2; exit 97 ;;
+        esac ;;
+    volume)
+        case "$2" in
+            ls) ls -1 "${DS}/volumes" ;;
+            create) mkdir -p "${DS}/volumes/$3" ;;
+            *) echo "unexpected docker volume call: $*" >&2; exit 97 ;;
+        esac ;;
+    run)
+        shift
+        maps=("/tmp=$(mktemp -d "${DS}/run.XXXXXX")")
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --rm) shift ;;
+                -v) src="${2%%:*}" dst="${2#*:}"; dst="${dst%%:*}"
+                    case "${src}" in /*) ;; *) src="${DS}/volumes/${src}"; mkdir -p "${src}" ;; esac
+                    maps+=("${dst}=${src}"); shift 2 ;;
+                *) break ;;
+            esac
+        done
+        shift
+        args=()
+        for a in "$@"; do
+            for m in "${maps[@]}"; do a="${a//"${m%%=*}"/"${m#*=}"}"; done
+            args+=("${a}")
+        done
+        exec "${args[@]}" ;;
+    ps) [ ! -e "${DS}/foreign" ] || cut -d' ' -f1 "${DS}/foreign" ;;
+    inspect) svc="${!#}"; svc="${svc#"${DS##*/}"-}"
+        case "$3" in
+            *State.Health*)
+                if [ -e "${DS}/health-${svc}" ]; then
+                    h="$(head -n 1 "${DS}/health-${svc}")"
+                    [ "$(wc -l < "${DS}/health-${svc}")" -le 1 ] || sed -i 1d "${DS}/health-${svc}"
+                    [ "${h}" = none ] || echo "${h}"
+                elif [ -e "${DS}/running" ]; then echo healthy; fi ;;
+            *State.Status*)
+                if [ -e "${DS}/status-${svc}" ]; then cat "${DS}/status-${svc}"
+                elif [ -e "${DS}/running" ]; then echo running; else echo exited; fi ;;
+            *RestartPolicy*) if [ -e "${DS}/restart-${svc}" ]; then cat "${DS}/restart-${svc}"; else echo unless-stopped; fi ;;
+            *ExitCode*) if [ -e "${DS}/exitcode-${svc}" ]; then cat "${DS}/exitcode-${svc}"; else echo 0; fi ;;
+            *) [ ! -e "${DS}/foreign" ] || awk -v id="${!#}" '$1 == id { print $2 }' "${DS}/foreign" ;;
+        esac ;;
+    logs) echo "${!#} log ${STUB_SECRET:-}" ;;
+    port) svc="$2"; svc="${svc#"${DS##*/}"-}"
+        mapfile -t up < "${DS}/running"
+        json="$("$(cat "${here}/docker-real")" "${up[@]}" config --format json)" || exit 1
+        out="$(jq -r --arg s "${svc}" --arg t "${3%/*}" '.services[$s].ports[]? | select((.target | tostring) == $t)
+            | if (.host_ip // "") == "" then "0.0.0.0:\(.published)", "[::]:\(.published)"
+              elif (.host_ip | test(":")) then "[\(.host_ip)]:\(.published)"
+              else "\(.host_ip):\(.published)" end' <<< "${json}")" || exit 1
+        [ -n "${out}" ] || { echo "Error: No public port '$3' published for $2" >&2; exit 1; }
+        printf '%s\n' "${out}" ;;
+    exec) [ -e "${DS}/running" ] ;;
+    buildx)
+        case "$2" in
+            version) echo 'docker buildx (test stub)' ;;
+            imagetools)
+                [ ! -e "${DS}/inspect-fail" ] || { echo "ERROR: ${FAULT:?a failure injection needs FAULT}" >&2; exit 1; }
+                case "$*" in
+                    *"{{.Manifest.Digest}}"*)
+                        [ -e "${DS}/digest" ] || { echo "ERROR: $4: not found" >&2; exit 1; }
+                        n=1; [ ! -e "${DS}/inspect-calls" ] || n=$(( $(cat "${DS}/inspect-calls") + 1 ))
+                        echo "${n}" > "${DS}/inspect-calls"
+                        [ ! -e "${DS}/digest-flip" ] || [ "${n}" != "$(cut -d' ' -f1 "${DS}/digest-flip")" ] \
+                            || cut -d' ' -f2 "${DS}/digest-flip" > "${DS}/digest"
+                        cat "${DS}/digest" ;;
+                    *--format*) [ ! -e "${DS}/single-platform" ] || cat "${DS}/single-platform" ;;
+                    *) pf="${here}/docker-platforms"; [ ! -e "${DS}/published" ] || pf="${DS}/published"
+                        echo 'Manifests:'; awk '{ print "  Platform:    " $0 }' "${pf}" ;;
+                esac ;;
+            *) echo "unexpected docker buildx call: $*" >&2; exit 97 ;;
+        esac ;;
+    *) echo "unexpected docker call: $*" >&2; exit 97 ;;
+esac
+STUB
+    # What: the stub publishes the real SOT platforms
+    # Why: setup.sh checks the real host, not test arches
+    # From: Issue #1683 | PR #1858
+    CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_platforms dns > "$1/docker-platforms" \
+        || { echo "SOT platforms unreadable"; return 1; }
+    type -P docker > "$1/docker-real" && [ "$(cat "$1/docker-real")" != "$1/docker" ] \
+        || { echo "no real docker binary for compose config"; return 1; }
+    # What: the cache DNS answers CDN names with its own IP
+    # Why: the update health gate resolves one CDN name
+    # From: Issue #1683 | PR #1858
+    _tool_stub "$1" dig <<'STUB'
+[ ! -e "${DS}/no-answer" ] || exit 0
+for a in "$@"; do case "${a}" in @*) server="${a#@}" ;; esac; done
+echo "${server:?the dig stub needs @server}"
+STUB
+}
+
+# What: a PATH dir with every tool but the named ones
+# Why: proves the "tool missing" paths with real tools
+# From: Issue #1683 | PR #1858
+_path_without() {
+    local dir="$1" d x t skip
+    shift
+    mkdir -p "${dir}"
+    while IFS= read -r -d: d; do
+        for x in "${d}"/*; do
+            [ -x "${x}" ] && [ ! -e "${dir}/${x##*/}" ] || continue
+            skip=0
+            for t in "$@"; do [ "${x##*/}" != "${t}" ] || skip=1; done
+            [ "${skip}" -eq 1 ] || ln -s "${x}" "${dir}/${x##*/}"
+        done
+    done < <(printf '%s:' "${PATH}")
+}
+
+# What: docker compose on the real deploy/prod files
+# Why: tests take names, volumes, profiles from their owner
+# From: Issue #1683 | PR #1858
+_prod_compose() {
+    local root
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    docker compose --env-file "${root}/deploy/prod/.env" -f "${root}/deploy/prod/docker-compose.yml" "$@"
+}
+
+# What: a prod volume config backups carry, sorted first
+# Why: compose lists volumes in no fixed order
+# From: Issue #1683 | PR #1858
+_backup_volume() {
+    local root project cache
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    project="$(_prod_compose config --format json | jq -r .name)" || return 1
+    cache="$(compose_cache_volume_name "${root}/deploy/prod" "${root}/deploy/prod/.env")" || return 1
+    _prod_compose config --volumes | sort | grep -vxF -- "${cache#"${project}_"}" | awk 'NR == 1'
+}
+
+# What: a deploy/prod install from the real prod files
+# Why: setup.sh tests run on owner inputs, not hand copies
+# From: Issue #1683 | PR #1858
+_prod_install() {
+    local root dir="$1"
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    mkdir -p "${dir}" "${dir}/../../config" || return 1
+    cp "${root}/deploy/prod/docker-compose.yml" "${root}/deploy/prod/.env" "${dir}/" || return 1
+    cp -r "${root}/config/prod" "${dir}/../../config/" || return 1
+    set_env_key LANCACHE_STATE_DIR "${dir}/state" "${dir}/.env"
+    set_env_key LANCACHE_IMAGE_TAG "v$(cat "${root}/VERSION")" "${dir}/.env"
 }
 
 # What: a tool stub that fails one matching argument.
@@ -7720,7 +7902,7 @@ CASES
     [ "${status}" -eq 2 ] && [[ "${output}" == *"CI-ERROR-VARIABLES-0001"* ]] || { echo "missing: ${output}"; return 1; }
 }
 
-# What: seed a minimal prebuilt-only prod/quickstart tree.
+# What: seed a minimal prebuilt-only stack tree.
 # Why: shared by the prebuilt-prod checks below.
 # From: Issue #1683 | PR #1858
 _prebuilt_fixture() {
@@ -7893,8 +8075,8 @@ render_template_atomic
 mktemp "${target_dir}/.${target_name}.tmp.XXXXXX"
 EOF
     cat > "${root}/setup.sh" <<'EOF'
-write_generated_runtime_file "${secondary_dir}/docker-compose.yml"
-write_env_file "${secondary_dir}/.env"
+write_file_atomically "${secondary_dir}/docker-compose.yml"
+write_file_atomically "${secondary_dir}/.env"
 EOF
     _stack_fixture "${root}"
 }
@@ -7920,6 +8102,22 @@ EOF
     run bash "${CI_SH}" check nats-atomic-write "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"atomically replace nats.conf"* ]]
+}
+
+@test "check nats-atomic-write fails a secondary .env written in place" {
+    # What: setup writes the secondary .env in place.
+    # Why: a torn .env breaks the secondary's start.
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/naw-env"
+    _nats_atomic_fixture "${r}"
+    awk '$0 == "write_file_atomically \"${secondary_dir}/.env\"" { $0 = "cat > \"${secondary_dir}/.env\"" } 1' \
+        "${r}/setup.sh" > "${r}/setup.new" && mv "${r}/setup.new" "${r}/setup.sh"
+    ! grep -q 'write_file_atomically "${secondary_dir}/.env"' "${r}/setup.sh" || {
+        echo "writer line not replaced"; return 1; }
+    run bash "${CI_SH}" check nats-atomic-write "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"setup.sh: secondary setup must atomically write generated .env"* ]]
+    [[ "${output}" != *"generated docker-compose.yml"* ]]
 }
 
 # What: seed a deny-by-default docker-socket-proxy tree.
@@ -8261,95 +8459,72 @@ _required_env_fixture() {
     [[ "${output}" == *"define non-empty B"* ]]
 }
 
-# What: Seed DHCP tree for env/PXE.
+# What: Seed a dhcp-proxy tree with two template keys.
 # Why: shared by the dhcp-proxy-env checks below.
 # From: Issue #1683 | PR #1858
 _dhcp_proxy_env_fixture() {
     local root="$1" k
-    mkdir -p "${root}/dep" "${root}/inst" \
-        "${root}/config/prod" "${root}/services/dhcp-proxy"
+    mkdir -p "${root}/services/dhcp-proxy"
     _stack_fixture "${root}"
-    cat > "${root}/dep/c.yml" <<'EOF'
-services:
-  dhcp-proxy:
-    image: x
-    env_file:
-      - ../../config/prod/dhcp-proxy.env
-EOF
-    : > "${root}/config/prod/dhcp-proxy.env"
-    : > "${root}/inst/.env"
-    for k in DHCP_PROXY_INTERFACE DHCP_PROXY_ROUTER DHCP_NTP_SERVERS DHCP_PROXY_DOMAIN \
-        DHCP_PROXY_BOOT_FILENAME DHCP_PROXY_BOOT_SERVER DHCP_PROXY_CUSTOM_OPTIONS \
-        DHCP_PROXY_PXE_BOOT_SERVER DHCP_PROXY_PXE_BOOT_FILENAME_BIOS DHCP_PROXY_PXE_BOOT_FILENAME_UEFI; do
-        printf '%s=\n' "${k}" >> "${root}/config/prod/dhcp-proxy.env"
-        printf '%s=\n' "${k}" >> "${root}/inst/.env"
+    printf 'services:\n  dhcp-proxy:\n    image: x\n    environment:\n' > "${root}/dep/c.yml"
+    : > "${root}/dep/.env"
+    : > "${root}/services/dhcp-proxy/entrypoint.sh"
+    for k in "DPE_A_${BATS_TEST_NUMBER}" "DPE_B_${BATS_TEST_NUMBER}"; do
+        printf '      - %s=${%s:-}\n' "${k}" "${k}" >> "${root}/dep/c.yml"
+        printf '%s=\n' "${k}" >> "${root}/dep/.env"
+        printf 'printf "%%s" "${%s}"\n' "${k}" >> "${root}/services/dhcp-proxy/entrypoint.sh"
     done
-    cat > "${root}/inst/c.yml" <<'EOF'
-        - DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE:-}
-        - DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}
-        - DHCP_PROXY_PXE_BOOT_SERVER=${DHCP_PROXY_PXE_BOOT_SERVER:-}
-        - DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS:-}
-        - DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI:-}
-EOF
-    cat > "${root}/services/dhcp-proxy/entrypoint.sh" <<'EOF'
-_dhcp_proxy_render_optional_directives() { :; }
-_dhcp_proxy_render_optional_directives /etc/dnsmasq.conf
-EOF
+    printf '%s\n' '_dhcp_proxy_render_optional_directives() { :; }' \
+        '_dhcp_proxy_render_optional_directives /etc/dnsmasq.conf' >> "${root}/services/dhcp-proxy/entrypoint.sh"
     : > "${root}/services/dhcp-proxy/dnsmasq.conf.template"
 }
 
-@test "check dhcp-proxy-env passes a compliant env/PXE tree" {
-    # What: env_file + all PXE keys present.
-    # Why: the dnsmasq relay/proxy surface must stay intact.
+@test "check dhcp-proxy-env passes when every used template key arrives" {
+    # What: template, compose and entrypoint agree on keys
+    # Why: the operator surface of dnsmasq must stay intact.
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/dpe-ok"
     _dhcp_proxy_env_fixture "${r}"
     run bash "${CI_SH}" check dhcp-proxy-env "${r}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"dhcp-proxy-env=clean"* ]]
+    [ "${status}" -eq 0 ] && [[ "${output}" == *"dhcp-proxy-env=clean"* ]] || { echo "${output}"; return 1; }
 }
 
-@test "check dhcp-proxy-env fails a missing optional key" {
-    # What: Optional dnsmasq key absent.
-    # Why: the whole optional surface must be declared.
+@test "check dhcp-proxy-env fails a template key compose drops" {
+    # What: a key the entrypoint reads never reaches it.
+    # Why: a dropped key loses its operator setting
     # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/dpe-key"
+    local r="${BATS_TEST_TMPDIR}/dpe-drop" k="DPE_B_${BATS_TEST_NUMBER}"
     _dhcp_proxy_env_fixture "${r}"
-    grep -v 'DHCP_PROXY_ROUTER' "${r}/config/prod/dhcp-proxy.env" > "${r}/config/prod/dhcp-proxy.env.tmp"
-    mv "${r}/config/prod/dhcp-proxy.env.tmp" "${r}/config/prod/dhcp-proxy.env"
+    grep -v -- "- ${k}=" "${r}/dep/c.yml" > "${r}/dep/x.yml"
+    mv "${r}/dep/x.yml" "${r}/dep/c.yml"
     run bash "${CI_SH}" check dhcp-proxy-env "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"DHCP_PROXY_ROUTER"* ]]
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"CI-ERROR-CHECK-0102"*"never receives ${k}"* ]] \
+        && [[ "${output}" != *"DPE_A_${BATS_TEST_NUMBER}"* ]] || { echo "${output}"; return 1; }
 }
 
-@test "check dhcp-proxy-env fails compose environment interpolation" {
-    # What: Prod DHCP uses env, not file.
-    # Why: env_file contract; loses keys.
+@test "check dhcp-proxy-env ignores keys outside the template" {
+    # What: a key with no template entry is not required.
+    # Why: the template owns the surface, not the code
     # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/dpe-env"
+    local r="${BATS_TEST_TMPDIR}/dpe-extra"
     _dhcp_proxy_env_fixture "${r}"
-    cat > "${r}/dep/c.yml" <<'EOF'
-services:
-  dhcp-proxy:
-    image: x
-    environment:
-      - DHCP_SUBNET_START=${DHCP_SUBNET_START}
-EOF
+    printf 'printf "%%s" "${DPE_C_%s}"\n' "${BATS_TEST_NUMBER}" >> "${r}/services/dhcp-proxy/entrypoint.sh"
     run bash "${CI_SH}" check dhcp-proxy-env "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"dhcp-proxy"* ]]
+    [ "${status}" -eq 0 ] && [[ "${output}" == *"dhcp-proxy-env=clean"* ]] || { echo "${output}"; return 1; }
 }
 
 @test "check dhcp-proxy-env fails cleanly when an input file is missing" {
     # What: Missing compose/env/entrypoint.
     # Why: must not read as a dhcp-proxy contract violation.
     # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/dpe-miss"
-    _dhcp_proxy_env_fixture "${r}"
-    rm "${r}/services/dhcp-proxy/dnsmasq.conf.template"
-    run bash "${CI_SH}" check dhcp-proxy-env "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"input missing"* ]]
+    local r="${BATS_TEST_TMPDIR}/dpe-miss" f
+    for f in dep/.env services/dhcp-proxy/dnsmasq.conf.template; do
+        rm -rf "${r}"
+        _dhcp_proxy_env_fixture "${r}"
+        rm "${r}/${f}"
+        run bash "${CI_SH}" check dhcp-proxy-env "${r}"
+        [ "${status}" -eq 2 ] && [[ "${output}" == *"input missing"*"${f}"* ]] || { echo "${f}: ${output}"; return 1; }
+    done
 }
 
 @test "check vex-drift: one statement per entry, else a finding" {
@@ -8464,6 +8639,14 @@ _setup_keys_kea_fixture() {
     run bash "${CI_SH}" check setup-update-safety "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"flow mutates before its pause:"*"2:     git -C x pull"* ]]
+    printf 'flow() {\n    stack_compose "$d" "$e" up -d\n    pause_lancache_convergence_for_update\n}\n' > "${r}/setup.sh"
+    run bash "${CI_SH}" check setup-update-safety "${r}"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"flow mutates before its pause:"*"2:     stack_compose"* ]]
+    printf 'flow() {\n    update_repo_and_resume "$d"\n    pause_lancache_convergence_for_update\n}\n' > "${r}/setup.sh"
+    run bash "${CI_SH}" check setup-update-safety "${r}"
+    [ "${status}" -ne 0 ] && [[ "${output}" == *"flow mutates before its pause:"*"2:     update_repo_and_resume"* ]] \
+        || { echo "sync before pause: ${output}"; return 1; }
 }
 
 @test "check setup-docker-conflict enforces the real setup.sh Docker RPM guard" {
@@ -8482,7 +8665,7 @@ _setup_keys_kea_fixture() {
 
 @test "check image-channel-resolution enforces the real channel/tag contract" {
     # What: All share one image resolution.
-    # Why: Pinned fails; mutable via stack.
+    # Why: pinned fails closed; channels pin digests.
     # From: Issue #1683
     run bash "${CI_SH}" check image-channel-resolution "${BATS_TEST_DIRNAME}/../.."
     [ "${status}" -eq 0 ]
@@ -8492,44 +8675,84 @@ _setup_keys_kea_fixture() {
     run bash "${CI_SH}" check image-channel-resolution "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0105"* ]]
+    local root m="${BATS_TEST_TMPDIR}/icr-mut" inst x n
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    run --separate-stderr bash "${CI_SH}" variables get CI_INSTALLER
+    [ "${status}" -eq 0 ]
+    inst="${output}"
+    [[ "${inst}" != */* ]]
+    mkdir -p "${m}"
+    for x in "${root}"/* "${root}"/.[!.]*; do
+        [ "${x##*/}" = "${inst}" ] || ln -s "${x}" "${m}/${x##*/}"
+    done
+    [ "$(grep -cF 'if [[ "$first" == "$second" ]]; then' "${root}/${inst}")" -eq 1 ]
+    n="$(grep -nF 'if [[ "$first" == "$second" ]]; then' "${root}/${inst}" | cut -d: -f1)"
+    awk -v n="${n}" 'NR != n' "${root}/${inst}" > "${m}/${inst}"
+    run grep -cF 'if [[ "$first" == "$second" ]]; then' "${m}/${inst}"
+    [ "${output}" = 0 ]
+    [ "$(( $(wc -l < "${root}/${inst}") - $(wc -l < "${m}/${inst}") ))" -eq 1 ]
+    run bash "${CI_SH}" check image-channel-resolution "${m}"
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *'setup.sh must keep image-resolution: if [[ "$first" == "$second" ]]; then'* ]]
+    # What: the stack start moved above the image pull
+    # Why: starting before the pull must fail the check
+    # From: Issue #1683 | PR #1858
+    local pull start
+    pull="$(grep -nE '^stack_compose .* pull' "${root}/${inst}" | cut -d: -f1)"
+    start="$(grep -nE '^[[:space:]]+systemctl start "\$STACK_UNIT"' "${root}/${inst}" | cut -d: -f1)"
+    [ "$(wc -w <<< "${pull} ${start}")" -eq 2 ] && [ "${start}" -gt "${pull}" ] || { echo "anchors: ${pull} ${start}"; return 1; }
+    awk -v p="${pull}" -v s="${start}" 'FNR == NR { if (FNR == s) l = $0; next }
+        FNR == p { print l } FNR == s { next } { print }' "${root}/${inst}" "${root}/${inst}" > "${m}/${inst}"
+    ! cmp -s "${root}/${inst}" "${m}/${inst}" || { echo "mutant equals the original"; return 1; }
+    [ "$(sort "${root}/${inst}" | sha256sum)" = "$(sort "${m}/${inst}" | sha256sum)" ] \
+        || { echo "mutant changed lines, not only their order"; return 1; }
+    run bash "${CI_SH}" check image-channel-resolution "${m}"
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"must not start/enable lancache services before image pull"* ]] \
+        || { echo "start before pull: ${output}"; return 1; }
 }
 
 @test "migrate_env_for_update repairs every empty required key" {
-    # What: SOT repair keys non-empty.
-    # Why: Empty breaks stack (AG-OP-007).
+    # What: every SOT repair key is refilled when emptied
+    # Why: empty required keys break the stack (AG-OP-007)
     # From: Issue #1683 | PR #1858
-    local repo_root keys key d ef
-    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    keys="$(grep -E '^  setup_required_repairs:' "${repo_root}/.github/yaml/build-manifest.yml" | sed 's/^[^:]*:[[:space:]]*//')"
-    [ -n "${keys}" ]
-    _load_setup_update_helpers "${repo_root}"
+    local root keys key d
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    keys="$(grep -E '^  setup_required_repairs:' "${root}/.github/yaml/build-manifest.yml" | sed 's/^[^:]*:[[:space:]]*//' | tr -d '[],')"
+    [ -n "${keys}" ] || { echo "no repair keys in the SOT"; return 1; }
+    _load_setup_sh "${root}"
     for key in ${keys}; do
-        [ "${key}" = "LANCACHE_IMAGE_TAG" ] && continue  # tag derives from git/VERSION context, no static default
-        d="${BATS_TEST_TMPDIR}/req-${key}"
-        mkdir -p "${d}"
-        ef="${d}/.env"
-        _write_converged_env_fixture "${ef}"
-        awk -F= -v k="${key}" '$1==k{print k"=";next}{print}' "${ef}" > "${ef}.t"
-        mv "${ef}.t" "${ef}"
-        migrate_env_for_update "${d}" >/dev/null 2>&1 || { echo "migrate failed for ${key}"; return 1; }
-        grep -Eq "^${key}=..*" "${ef}" || { echo "required key ${key} not repaired"; return 1; }
+        d="${BATS_TEST_TMPDIR}/req-${key}/deploy/prod"
+        _converged_install "${d}" || return 1
+        set_env_key "${key}" "" "${d}/.env"
+        cp "${d}/.env" "${d}/.env.before"
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+        # What: a pin without a tag is refused, not guessed
+        # Why: only the operator picks an immutable tag
+        # From: Issue #1683 | PR #1858
+        if [ "${key}" = LANCACHE_IMAGE_TAG ] && [ "${status}" -ne 0 ]; then
+            [ "${status}" -eq 1 ] && [[ "${output}" == *"requires LANCACHE_IMAGE_TAG"* ]] && cmp -s "${d}/.env.before" "${d}/.env" \
+                || { echo "pinned without tag: ${output}"; return 1; }
+            continue
+        fi
+        [ "${status}" -eq 0 ] && [ -n "$(get_env_var "${key}" "${d}/.env")" ] || { echo "${key} not repaired: ${output}"; return 1; }
     done
 }
 
 @test "migrate_env_for_update derives CACHE_MAX_SIZE from CACHE_MAX_GB" {
-    # What: Empty MAX_SIZE rebuilt from MAX_GB.
-    # Why: Reuse operator size, not default.
+    # What: empty CACHE_MAX_SIZE comes from CACHE_MAX_GB
+    # Why: reuse the operator's size, not the default
     # From: Issue #1683 | PR #1858
-    local repo_root ef
-    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    ef="${BATS_TEST_TMPDIR}/cms/.env"
-    mkdir -p "${BATS_TEST_TMPDIR}/cms"
-    _load_setup_update_helpers "${repo_root}"
-    _write_converged_env_fixture "${ef}"
-    awk -F= '$1=="CACHE_MAX_GB"{print "CACHE_MAX_GB=77";next} $1=="CACHE_MAX_SIZE"{print "CACHE_MAX_SIZE=";next} {print}' "${ef}" > "${ef}.t"
-    mv "${ef}.t" "${ef}"
-    run migrate_env_for_update "$(dirname "${ef}")"; [ "${status}" -eq 0 ]
-    grep -Eq '^CACHE_MAX_SIZE=.*77' "${ef}"
+    local root d gb
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    d="${BATS_TEST_TMPDIR}/cms/deploy/prod"
+    _converged_install "${d}" || return 1
+    gb="$(( $(get_env_var CACHE_MAX_GB "${d}/.env") * 3 ))"
+    set_env_key CACHE_MAX_GB "${gb}" "${d}/.env"
+    set_env_key CACHE_MAX_SIZE "" "${d}/.env"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+    [ "${status}" -eq 0 ] && [[ "$(get_env_var CACHE_MAX_SIZE "${d}/.env")" == "${gb}"[!0-9]* ]] \
+        || { echo "size: $(get_env_var CACHE_MAX_SIZE "${d}/.env") ${output}"; return 1; }
 }
 
 @test "get_env_assignment_value_raw_nonempty preserves the raw assignment" {
@@ -8539,7 +8762,7 @@ _setup_keys_kea_fixture() {
     local repo_root ef
     repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     ef="${BATS_TEST_TMPDIR}/raw.env"
-    _load_setup_update_helpers "${repo_root}"
+    _load_setup_sh "${repo_root}"
     printf 'FOO=${BAR}/baz\n' > "${ef}"
     run get_env_assignment_value_raw_nonempty FOO "${ef}"
     [ "${status}" -eq 0 ]
@@ -8552,7 +8775,7 @@ _setup_keys_kea_fixture() {
     # From: Issue #1683 | PR #1858
     local repo_root
     repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_update_helpers "${repo_root}"
+    _load_setup_sh "${repo_root}"
     run validate_ui_session_ttl_seconds abc src
     [[ "${output}" == *"unsigned integer"* ]]
     run validate_ui_session_ttl_seconds 0 src
@@ -8569,7 +8792,7 @@ _setup_keys_kea_fixture() {
     local repo_root ef
     repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     ef="${BATS_TEST_TMPDIR}/dup.env"
-    _load_setup_update_helpers "${repo_root}"
+    _load_setup_sh "${repo_root}"
     printf 'FOO=1\nFOO=2\nBAR=3\n' > "${ef}"
     set_env_key FOO 9 "${ef}"
     [ "$(grep -c '^FOO=' "${ef}")" -eq 1 ]
@@ -10466,348 +10689,329 @@ _version_fixture_repo() {
 # HISTORICAL REGRESSIONS
 # =========================================================
 
-# What: Load setup.sh's real update-migration functions.
-# Why: Test without sourcing setup.sh.
-# From: Issue #1683 | PR #1546
-_load_setup_update_helpers() {
+# What: loads every setup.sh function, never runs setup.sh
+# Why: tests drive the product code with its real die
+# From: Issue #1683 | PR #1858
+_load_setup_sh() {
     local repo_root="$1"
-    local helper_file="${BATS_TEST_TMPDIR}/setup-update-helpers.sh"
+    local helper_file="${BATS_TEST_TMPDIR}/setup-sh.sh"
+    # What: setup.sh up to its dispatcher; nothing executes
+    # Why: declare -gA keeps top-level maps global in here
+    # From: Issue #1683 | PR #1858
     {
-        printf '%s\n' 'die() { printf "%s\n" "$*" >&2; return 1; }'
-        printf '%s\n' 'print_ok() { :; }'
-        printf '%s\n' 'print_step() { :; }'
-        printf '%s\n' 'print_warn() { :; }'
-        printf '%s\n' 'DEFAULT_UI_SESSION_TTL_SECONDS=86400'
-        printf '%s\n' 'MAX_UI_SESSION_TTL_SECONDS=31536000'
         printf 'SCRIPT_DIR=%q\n' "${repo_root}"
-        # What: the cut ends at a function, not a comment.
-        # Why: comment edits MUST NOT change test input.
-        # From: Issue #1683 | PR #1858
-        awk '
-            /^is_valid_ipv4\(\)/ { capture = 1 }
-            /^install_missing_tools\(\)/ { capture = 0 }
-            capture { print }
-        ' "${repo_root}/setup.sh"
+        awk 'NR == 1 || /^set -euo pipefail$/ || /^SCRIPT_DIR=/ { next }
+            /^case "\$\{1:-install\}" in$/ { exit }
+            { sub(/^declare -A /, "declare -gA "); print }' "${repo_root}/setup.sh"
     } > "${helper_file}"
+    grep -q '^cmd_backup() ($' "${helper_file}" || { echo "setup.sh cut is incomplete"; return 1; }
+    export DOCKER_HOST="${SETUP_SH_DOCKER_HOST}"
     # shellcheck source=/dev/null
     source "${helper_file}"
-    # What: host arch and registry are stubbed, never real.
-    # Why: the platform guard otherwise asks GHCR per test.
+    # What: every setup.sh test gets the one docker stand-in
+    # Why: no test may reach a daemon or retype data
     # From: Issue #1683 | PR #1858
-    uname() {
-        if [ "$1" = -m ]; then printf '%s\n' "${SETUP_FAKE_ARCH:-x86_64}"; else command uname "$@"; fi
-    }
-    docker() {
-        case "$*" in
-            "buildx version") [ "${SETUP_FAKE_NO_BUILDX:-0}" = 0 ] ;;
-            "buildx imagetools inspect "*)
-                [ "${SETUP_FAKE_INSPECT_FAIL:-0}" = 0 ] || { echo "fake registry unreachable" >&2; return 1; }
-                if [[ "$*" == *--format* ]]; then
-                    printf '%s\n' "${SETUP_FAKE_SINGLE:-linux/amd64}"
-                else
-                    printf 'Platform:  %s\n' ${SETUP_FAKE_MULTI//,/ }
-                fi
-                ;;
-            *) echo "unexpected docker call: $*" >&2; return 99 ;;
-        esac
-    }
+    export BIN="${BATS_TEST_TMPDIR}/bin" DS="${BATS_TEST_TMPDIR}/ds"
+    mkdir -p "${DS}/volumes" && _setup_docker_stub "${BIN}" && PATH="${BIN}:${PATH}"
+    # What: setup.sh's own seam for the raw TCP probe
+    # Why: no LAN address is reachable inside the test box
+    # From: Issue #1683 | PR #1858
+    export SETUP_SH_SEAMS='_tcp_port_reachable() { [ ! -e "${DS}/fail-tcp" ]; }'
 }
 
-# What: Converged .env, all keys filled.
-# Why: A missing key would fail the no-op test's first run.
-# From: Issue #1683 | PR #1546
-_write_converged_env_fixture() {
-    printf '%s\n' \
-        'IP_STANDARD=192.0.2.10' 'IP_SSL=192.0.2.11' 'SSL_ENABLED=1' \
-        'DNS_XFR_NOTIFY_TARGETS=dns-ssl:5300' 'UI_SESSION_TTL_SECONDS=86400' \
-        'LANCACHE_STATE_DIR=/opt/lancache-ng/state' 'CACHE_DIR=/opt/lancache-ng/cache' \
-        'CACHE_MAX_SIZE=50g' 'CACHE_MAX_GB=50' 'CACHE_MEM_MB=512' 'CACHE_SLICE_SIZE=8m' \
-        'CACHE_VALID_HIT=365d' 'CACHE_VALID_ANY=1m' 'CACHE_INACTIVE=365d' \
-        'PROXY_ALLOWED_CLIENT_CIDRS=' 'PROXY_SECURITY_MODE=lazy' \
-        'NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4' 'LANCACHE_IMAGE_REGISTRY=ghcr.io' \
-        'LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng' 'LANCACHE_IMAGE_CHANNEL=pinned' \
-        'LANCACHE_IMAGE_TAG=v0.2.0' 'UI_BIND_IP=192.0.2.10' 'DHCP_ENABLED=0' \
-        'DHCP_MODE=disabled' 'DHCP_SUBNET=' 'DHCP_GATEWAY=' 'DHCP_RANGE_START=' \
-        'DHCP_RANGE_END=' 'DHCP_SUBNET_START=' 'DHCP_DNS_PRIMARY=192.0.2.10' \
-        'DHCP_DNS_SECONDARY=192.0.2.11' 'UPSTREAM_DHCP_IP=' 'DHCP_RELAY_LOCAL_ADDR=' \
-        'DHCP_PROXY_INTERFACE=' 'DHCP_PROXY_ROUTER=' 'DHCP_NTP_SERVERS=' \
-        'DHCP_PROXY_DOMAIN=' 'DHCP_PROXY_BOOT_FILENAME=' 'DHCP_PROXY_BOOT_SERVER=' \
-        'DHCP_PROXY_CUSTOM_OPTIONS=' 'DHCP_PROXY_PXE_BOOT_SERVER=' \
-        'DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=' 'DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=' \
-        'KEA_CTRL_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
-        'DDNS_TSIG_KEY=YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ==' \
-        'PDNS_API_KEY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
-        'NETDATA_ALARM_TOKEN=jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj' \
-        'NATS_UI_USER=lancache-ui' \
-        'NATS_UI_PASSWORD=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' \
-        'NATS_DNS_WRITER_USER=lancache-dns-writer' \
-        'NATS_DNS_WRITER_PASSWORD=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd' \
-        'NATS_DNS_REPLICA_USER=lancache-dns-replica' \
-        'NATS_DNS_REPLICA_PASSWORD=gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg' \
-        'NATS_CALLOUT_USER=lancache-nats-callout' \
-        'NATS_CALLOUT_PASSWORD=hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh' \
-        'NATS_SYS_USER=lancache-nats-sys' \
-        'NATS_SYS_PASSWORD=iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii' \
-        'SECONDARY_REGISTRATION_TOKEN=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' \
-        'COMPOSE_PROFILES=ssl,logging' 'UI_AUTH_USER=admin' \
-        'UI_AUTH_PASSWORD=RealAdminPassword123' 'ALLOW_INSECURE_UI=false' \
-        'AUTO_UPDATE_ENABLED=0' 'NTP_ENABLED=0' 'LOGGING_ENABLED=1' \
-        > "$1"
+# What: a prod install whose .env setup.sh converged
+# Why: tests start from setup.sh's own output, not a copy
+# From: Issue #1683 | PR #1858
+_converged_install() {
+    _prod_install "$1" || return 1
+    export CONV="$1"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+    [ "${status}" -eq 0 ] || { echo "converge $1: ${output}"; return 1; }
 }
 
-# What: An old install .env: split cache keys, strict mode.
-# Why: Exercises the migration/converge path on first run.
-# From: Issue #1683 | PR #1546
-_write_legacy_env_fixture() {
-    local env_file="$1" ui_auth_user="${2:-}"
-    printf '%s\n' \
-        'IP_STANDARD=192.0.2.20' 'IP_SSL=' 'CACHE_DIR_STANDARD=/srv/lancache/cache' \
-        'CACHE_DIR_SSL=/srv/lancache/cache' 'PROXY_SECURITY_MODE=strict' \
-        'PROXY_ALLOWED_CLIENT_CIDRS=' 'LANCACHE_IMAGE_TAG=v0.2.0' \
-        "UI_AUTH_USER=${ui_auth_user}" 'UI_AUTH_PASSWORD=' \
-        > "$env_file"
+# What: an old-shape .env from the template's own values
+# Why: split cache keys, strict proxy, no state root
+# From: Issue #1683 | PR #1858
+_legacy_env() {
+    local file="$1" user="${2:-}" root tpl
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    tpl="${root}/deploy/prod/.env"
+    printf '%s\n' "IP_STANDARD=$(get_env_var IP_STANDARD "${tpl}")" "IP_SSL=$(get_env_var IP_SSL "${tpl}")" \
+        "CACHE_DIR_STANDARD=${file%/*}/cache" "CACHE_DIR_SSL=${file%/*}/cache" 'PROXY_SECURITY_MODE=strict' \
+        'PROXY_ALLOWED_CLIENT_CIDRS=' "LANCACHE_IMAGE_TAG=v$(tr -d '[:space:]' < "${root}/VERSION")" \
+        "UI_AUTH_USER=${user}" 'UI_AUTH_PASSWORD=' > "${file}"
 }
 
 @test "setup.sh image platform guards map host and manifest" {
-    # What: one row per host arch / buildx / manifest case.
-    # Why: a tag lacking this platform must fail closed.
-    # From: Issue #665 | PR #1858
-    local name fn arch nobx fail single multi rc want w
-    local -a ws
-    _load_setup_update_helpers "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    while IFS='|' read -r name fn arch nobx fail single multi rc want; do
-        export SETUP_FAKE_ARCH="${arch}" SETUP_FAKE_NO_BUILDX="${nobx}" \
-            SETUP_FAKE_INSPECT_FAIL="${fail}" SETUP_FAKE_SINGLE="${single}" \
-            SETUP_FAKE_MULTI="${multi}"
-        case "${fn}" in
-            host) run host_image_platform "${arch}" ;;
-            prebuilt) run assert_prebuilt_image_platform_supported ;;
-            resolved) run assert_resolved_image_tag_platform_supported \
-                registry.example.test owner/fixture-repo t1 ;;
-        esac
-        [ "${status}" -eq "${rc}" ] || { echo "${name}: rc ${status}: ${output}"; return 1; }
-        [ "${want}" = - ] && continue
-        IFS=';' read -r -a ws <<<"${want}"
-        for w in "${ws[@]}"; do
-            [[ "${output}" == *"${w}"* ]] || { echo "${name}: no '${w}': ${output}"; return 1; }
-        done
-    done <<'CASES'
-host-x86_64|host|x86_64|0|0|-|-|0|linux/amd64
-host-amd64|host|amd64|0|0|-|-|0|linux/amd64
-host-aarch64|host|aarch64|0|0|-|-|0|linux/arm64
-host-arm64|host|arm64|0|0|-|-|0|linux/arm64
-host-unknown|host|riscv64|0|0|-|-|1|-
-prebuilt-x86_64|prebuilt|x86_64|0|0|-|-|0|-
-prebuilt-aarch64|prebuilt|aarch64|0|0|-|-|0|-
-prebuilt-unknown|prebuilt|riscv64|0|0|-|-|1|linux/amd64 and linux/arm64;'riscv64'
-tag-lacks-platform|resolved|aarch64|0|0|linux/amd64|-|1|does not publish a linux/arm64 image;published: linux/amd64
-tag-single-match|resolved|x86_64|0|0|linux/amd64|-|0|-
-tag-index-fallback|resolved|aarch64|0|0|<no value>/<no value>|linux/amd64,linux/arm64|0|-
-tag-unknown-host|resolved|riscv64|0|0|-|-|1|linux/amd64 and linux/arm64
-tag-no-buildx|resolved|x86_64|1|0|-|-|1|docker buildx is required
-tag-unreachable|resolved|x86_64|0|1|-|-|1|Failed to inspect registry.example.test/owner/fixture-repo/dns:t1;fake registry unreachable
-CASES
-    # What: no docker on PATH fails closed, not silently.
-    # Why: the guard must never skip without its tool.
+    # What: one row per host arch / buildx / manifest case
+    # Why: a tag lacking this platform must fail closed
     # From: Issue #1683 | PR #1858
-    unset -f docker
-    export SETUP_FAKE_ARCH=x86_64
-    PATH="" run assert_resolved_image_tag_platform_supported registry.example.test owner/fixture-repo t1
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"docker is required"* ]]
+    local root plats p apk unk first second a1 a2 joined case arch state rc want w
+    local -a ws
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    plats="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_platforms dns)"
+    first="$(awk 'NR == 1' <<< "${plats}")" second="$(awk 'NR == 2' <<< "${plats}")"
+    a1="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_platform_apk_arch "${first}")"
+    a2="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_platform_apk_arch "${second}")"
+    joined="$(paste -sd'|' <<< "${plats}" | sed 's/|/ and /g')" unk="arch${BATS_TEST_NUMBER}"
+    [ -n "${second}" ] && [ -n "${a1}" ] && [ -n "${a2}" ] || { echo "inputs: ${plats} ${a1} ${a2}"; return 1; }
+    # What: uname and docker arch map to the SOT platform
+    # Why: setup.sh's host map must equal the SOT's arch map
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r p; do
+        apk="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_platform_apk_arch "${p}")"
+        [ "$(host_image_platform "${apk}")" = "${p}" ] && [ "$(host_image_platform "${p#*/}")" = "${p}" ] \
+            || { echo "host map for ${p}: ${apk}"; return 1; }
+    done <<< "${plats}"
+    ! host_image_platform "${unk}" || { echo "unknown arch mapped"; return 1; }
+    export HOST_ARCH UNAME_REAL TAG="v$(tr -d '[:space:]' < "${root}/VERSION")" FAULT="${BATS_TEST_NAME}"
+    export REG PRE
+    UNAME_REAL="$(type -P uname)"
+    REG="$(resolve_lancache_image_registry "${root}/deploy/prod/.env")" PRE="$(resolve_lancache_image_prefix "${root}/deploy/prod/.env")"
+    _tool_stub "${BIN}" uname <<'STUB'
+[ "${1:-}" != -m ] || { printf '%s\n' "${HOST_ARCH:?}"; exit 0; }
+exec "${UNAME_REAL:?}" "$@"
+STUB
+    # What: host arch and registry answer per row
+    # Why: every fail-closed path names its own cause
+    # From: Issue #1683 | PR #1858
+    while IFS='|' read -r case arch state rc want; do
+        rm -f "${DS}/single-platform" "${DS}/published" "${DS}/inspect-fail" "${DS}/fail-buildx"
+        case "${state}" in
+            -) ;;
+            fail-buildx|inspect-fail) : > "${DS}/${state}" ;;
+            *) printf '%s\n' "${state}" > "${DS}/single-platform" ;;
+        esac
+        HOST_ARCH="${arch}"
+        if [ "${case%%-*}" = prebuilt ]; then
+            _setup_sh_run 'PATH="${BIN}:${PATH}"; assert_prebuilt_image_platform_supported'
+        else
+            _setup_sh_run 'PATH="${BIN}:${PATH}"; assert_resolved_image_tag_platform_supported "${REG}" "${PRE}" "${TAG}"'
+        fi
+        [ "${status}" -eq "${rc}" ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
+        [ "${want}" != - ] || continue
+        IFS=';' read -r -a ws <<< "${want}"
+        for w in "${ws[@]}"; do [[ "${output}" == *"${w}"* ]] || { echo "${case}: no '${w}': ${output}"; return 1; }; done
+    done <<CASES
+prebuilt-first|${a1}|-|0|-
+prebuilt-second|${a2}|-|0|-
+prebuilt-unknown|${unk}|-|1|${joined};'${unk}'
+resolved-lacks|${a2}|${first}|1|does not publish a ${second} image;published: ${first}
+resolved-single|${a1}|${first}|0|-
+resolved-index|${a2}|<no value>/<no value>|0|-
+resolved-unknown|${unk}|-|1|${joined}
+resolved-nobuildx|${a1}|fail-buildx|1|docker buildx is required
+resolved-unreachable|${a1}|inspect-fail|1|Failed to inspect ${REG}/${PRE}/dns:${TAG};${FAULT}
+CASES
+    # What: no docker on PATH fails closed, not silently
+    # Why: the guard must never skip without its tool
+    # From: Issue #1683 | PR #1858
+    HOST_ARCH="${a1}"
+    _path_without "${BATS_TEST_TMPDIR}/nodocker" docker
+    _setup_sh_run 'PATH="${BATS_TEST_TMPDIR}/nodocker"; assert_resolved_image_tag_platform_supported "${REG}" "${PRE}" "${TAG}"'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"docker is required"* ]] || { echo "no docker: ${output}"; return 1; }
 }
 
 @test "migrate_env_for_update is a no-op on an already-converged .env" {
-    # What: .env stays byte-identical.
-    # Why: Idempotent, no rewrite.
-    # From: Issue #1683 | PR #1546
-    local repo_root env_file oh h1 h2
-    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    env_file="${BATS_TEST_TMPDIR}/.env"
-    _load_setup_update_helpers "${repo_root}"
-    _write_converged_env_fixture "${env_file}"
-    oh="$(sha256sum "${env_file}" | awk '{print $1}')"
-    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
-    h1="$(sha256sum "${env_file}" | awk '{print $1}')"; [ "${oh}" = "${h1}" ]
-    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
-    h2="$(sha256sum "${env_file}" | awk '{print $1}')"; [ "${h1}" = "${h2}" ]
-}
-
-@test "migrate_env_for_update runs cleanly under set -u" {
-    # What: A quickstart install must not trip nounset.
-    # Why: Unset prodsync guarded.
-    # From: Issue #1683 | PR #1546
-    local repo_root env_file
-    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    env_file="${BATS_TEST_TMPDIR}/.env"
-    _load_setup_update_helpers "${repo_root}"
-    set -u
-    _write_converged_env_fixture "${env_file}"
-    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
+    # What: a converged .env stays byte-identical
+    # Why: idempotent update, no rewrite (AG-OP-006)
+    # From: Issue #1683 | PR #1858
+    local root d h
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    d="${BATS_TEST_TMPDIR}/noop/deploy/prod"
+    _converged_install "${d}" || return 1
+    h="$(sha256sum < "${d}/.env")"
+    for _ in 1 2; do
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+        [ "${status}" -eq 0 ] && [ "$(sha256sum < "${d}/.env")" = "${h}" ] || { echo "rewrite: ${output}"; return 1; }
+    done
 }
 
 @test "migrate_env_for_update converges a legacy .env and is stable on rerun" {
-    # What: Legacy keys migrate once.
-    # Why: AG-OP-007 convergence; secrets must not rotate.
-    # From: Issue #1683 | PR #1546
-    local repo_root env_file a1 a2 s1 s2
-    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    env_file="${BATS_TEST_TMPDIR}/.env"
-    _load_setup_update_helpers "${repo_root}"
-    _write_legacy_env_fixture "${env_file}"
-    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
-    run ! grep -q '^CACHE_DIR_STANDARD=' "${env_file}"
-    run ! grep -q '^CACHE_DIR_SSL=' "${env_file}"
-    grep -qx 'CACHE_DIR=/srv/lancache/cache' "${env_file}"
-    grep -qx 'PROXY_SECURITY_MODE=lazy' "${env_file}"
-    a1="$(cat "${env_file}")"
-    s1="$(grep -E '^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NETDATA_ALARM_TOKEN|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|NATS_SYS_PASSWORD|SECONDARY_REGISTRATION_TOKEN)=' "${env_file}" | sort)"
-    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
-    a2="$(cat "${env_file}")"
-    s2="$(grep -E '^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NETDATA_ALARM_TOKEN|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|NATS_SYS_PASSWORD|SECONDARY_REGISTRATION_TOKEN)=' "${env_file}" | sort)"
-    [ "${a1}" = "${a2}" ]; [ "${s1}" = "${s2}" ]
+    # What: legacy keys migrate once; state root is written
+    # Why: AG-OP-007 convergence; secrets must not rotate
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}/legacy" before
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    mkdir -p "${t}" && _legacy_env "${t}/.env"
+    export CONV="${t}"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+    [ "${status}" -eq 0 ] && ! env_key_exists CACHE_DIR_STANDARD "${t}/.env" && ! env_key_exists CACHE_DIR_SSL "${t}/.env" \
+        && [ "$(get_env_var CACHE_DIR "${t}/.env")" = "${t}/cache" ] && [ "$(get_env_var PROXY_SECURITY_MODE "${t}/.env")" = lazy ] \
+        && [[ "$(get_env_var LANCACHE_STATE_DIR "${t}/.env")" == /* ]] || { echo "legacy: ${output}"; cat "${t}/.env"; return 1; }
+    before="$(cat "${t}/.env")"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+    [ "${status}" -eq 0 ] && [ "$(cat "${t}/.env")" = "${before}" ] || { echo "second run changed .env"; return 1; }
 }
 
 @test "migrate_env_for_update generates a UI password once, never rotates it" {
-    # What: UI-password branch runs once.
-    # Why: AG-OP-006 stable secrets on repeat execution.
-    # From: Issue #1683 | PR #1546
-    local repo_root env_file gp p2
-    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    env_file="${BATS_TEST_TMPDIR}/.env"
-    _load_setup_update_helpers "${repo_root}"
-    _write_legacy_env_fixture "${env_file}" admin
-    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
-    grep -qx 'UI_AUTH_USER=admin' "${env_file}"
-    gp="$(grep '^UI_AUTH_PASSWORD=' "${env_file}")"
-    [ -n "${gp}" ]; [ "${gp}" != "UI_AUTH_PASSWORD=" ]
-    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
-    p2="$(grep '^UI_AUTH_PASSWORD=' "${env_file}")"; [ "${gp}" = "${p2}" ]
+    # What: a UI user without password gets one, once
+    # Why: AG-OP-006 stable secrets on repeat execution
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}/ui" pw
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    mkdir -p "${t}" && _legacy_env "${t}/.env" "u${BATS_TEST_NUMBER}"
+    export CONV="${t}"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+    pw="$(get_env_var UI_AUTH_PASSWORD "${t}/.env")"
+    [ "${status}" -eq 0 ] && [ "$(get_env_var UI_AUTH_USER "${t}/.env")" = "u${BATS_TEST_NUMBER}" ] && [ -n "${pw}" ] \
+        || { echo "password: ${output}"; return 1; }
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+    [ "${status}" -eq 0 ] && [ "$(get_env_var UI_AUTH_PASSWORD "${t}/.env")" = "${pw}" ] || { echo "password rotated"; return 1; }
 }
 
 @test "migrate_env_for_update leaves no duplicate key assignments" {
-    # What: Two runs must not stack duplicate key lines.
-    # Why: set_env_key collapses duplicates (AG-OP-006).
-    # From: Issue #1683 | PR #1546
-    local repo_root env_file dup
-    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    env_file="${BATS_TEST_TMPDIR}/.env"
-    _load_setup_update_helpers "${repo_root}"
-    _write_legacy_env_fixture "${env_file}"
-    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
-    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
-    dup="$(awk -F= '{print $1}' "${env_file}" | sort | uniq -d)"; [ -z "${dup}" ]
+    # What: two runs must not stack duplicate key lines
+    # Why: set_env_key collapses duplicates (AG-OP-006)
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}/dup"
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    mkdir -p "${t}" && _legacy_env "${t}/.env"
+    export CONV="${t}"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}" && migrate_env_for_update "${CONV}"'
+    [ "${status}" -eq 0 ] && [ -z "$(awk -F= '/^[A-Za-z_]/ { print $1 }' "${t}/.env" | sort | uniq -d)" ] \
+        || { echo "duplicates: ${output}"; return 1; }
 }
 
 @test "migrate_env_for_update keeps config/prod values per row" {
-    # What: two rounds of template hand edits per row
+    # What: hand edits move to .env; bad ones change nothing
     # Why: AG-OP-009 edits survive; the checkout stays clean
     # From: Issue #1683 | PR #1858
-    local repo_root name extra cpe_init env_want edit cpe_want
-    local base pd cpe kv
+    local root ip srv srv2 net bios mode name extra init envw edit want kv msg base pd cpe
     local -a kvs
-    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_update_helpers "${repo_root}"
-    while IFS='|' read -r name extra cpe_init env_want edit cpe_want; do
-        base="${BATS_TEST_TMPDIR}/${name}"
-        pd="${base}/deploy/prod"; cpe="${base}/config/prod/dhcp-proxy.env"
-        mkdir -p "${pd}" "${base}/config/prod"
-        cp "${repo_root}/config/prod/dhcp-proxy.env" "${cpe}"
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    ip="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")" net="${ip%.*}"
+    srv="${net}.$(( (${ip##*.} + 1) % 255 ))" srv2="${net}.$(( (${ip##*.} + 2) % 255 ))" bios="b${BATS_TEST_NUMBER}.0"
+    mode="$(declare -f migrate_env_for_update)"
+    mode="$(awk '/^ *[a-z-]+\)$/ { a = $1 } /neither DHCP_PROXY_PXE_BOOT_FILENAME_BIOS/ && !m { sub(/\)$/, "", a); m = a } END { print m }' <<< "${mode}")"
+    [ -n "${ip}" ] && is_valid_dhcp_mode "${mode}" || { echo "inputs: ${ip} ${mode}"; return 1; }
+    _cp_install() {
+        base="${BATS_TEST_TMPDIR}/${1}" pd="${BATS_TEST_TMPDIR}/${1}/deploy/prod" cpe="${BATS_TEST_TMPDIR}/${1}/config/prod/dhcp-proxy.env"
+        _prod_install "${pd}" || return 1
         git -C "${base}" init -q && git -C "${base}" add config
         git -C "${base}" -c user.email=t@t -c user.name=t commit -qm template
-        _write_legacy_env_fixture "${pd}/.env"
-        [ "${extra}" = - ] || tr ';' '\n' <<<"${extra}" >> "${pd}/.env"
-        IFS=';' read -r -a kvs <<<"${cpe_init}"
+        _legacy_env "${pd}/.env"
+        export CONV="${pd}"
+    }
+    # What: a template edit moves to .env and stays
+    # Why: a later edit wins; the template stays at HEAD
+    # From: Issue #1683 | PR #1858
+    while IFS='|' read -r name init envw edit want; do
+        _cp_install "${name}" || return 1
+        IFS=';' read -r -a kvs <<< "${init}"
         for kv in "${kvs[@]}"; do set_env_key "${kv%%=*}" "${kv#*=}" "${cpe}"; done
-        adopt_config_prod_edits "${base}" >/dev/null
-        run migrate_env_for_update "${pd}"
-        [ "${status}" -eq 0 ] || { echo "${name}: run 1 rc ${status}: ${output}"; return 1; }
-        IFS=';' read -r -a kvs <<<"${env_want}"
-        for kv in "${kvs[@]}"; do
-            [ "${kv}" = - ] && continue
-            grep -qx -- "${kv}" "${pd}/.env" || {
-                echo "${name}: .env lacks ${kv}:"; cat "${pd}/.env"; return 1; }
-        done
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; adopt_config_prod_edits "${CONV%/deploy/prod}" >/dev/null && migrate_env_for_update "${CONV}"'
+        [ "${status}" -eq 0 ] || { echo "${name}: run 1: ${output}"; return 1; }
+        IFS=';' read -r -a kvs <<< "${envw}"
+        for kv in "${kvs[@]}"; do grep -qx -- "${kv}" "${pd}/.env" || { echo "${name}: .env lacks ${kv}"; return 1; }; done
         [ "${edit}" = - ] || set_env_key "${edit%%=*}" "${edit#*=}" "${cpe}"
-        adopt_config_prod_edits "${base}" >/dev/null
-        run migrate_env_for_update "${pd}"
-        [ "${status}" -eq 0 ] || { echo "${name}: run 2 rc ${status}: ${output}"; return 1; }
-        git -C "${base}" diff --quiet HEAD -- config || { echo "${name}: template dirty"; return 1; }
-        IFS=';' read -r -a kvs <<<"${cpe_want}"
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; adopt_config_prod_edits "${CONV%/deploy/prod}" >/dev/null && migrate_env_for_update "${CONV}"'
+        [ "${status}" -eq 0 ] && git -C "${base}" diff --quiet HEAD -- config || { echo "${name}: run 2: ${output}"; return 1; }
+        IFS=';' read -r -a kvs <<< "${want}"
         for kv in "${kvs[@]}"; do
-            run config_prod_value "${kv%%=*}" "${cpe}"
-            [ "${output}" = "${kv#*=}" ] || {
-                echo "${name}: ${kv%%=*}='${output}' want '${kv#*=}':"; cat "${cpe%.env}.local.env"; return 1; }
+            grep -qx -- "${kv}" "${pd}/.env" && ! grep -q "^${kv%%=*}=" "${cpe%.env}.local.env" \
+                || { echo "${name}: ${kv} not moved"; return 1; }
         done
-    done <<'CASES'
-repeated|-|DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9;DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0|DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9;DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0|-|DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9;DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0
-direct-edit|-|DHCP_PROXY_PXE_BOOT_SERVER=10.0.0.1;DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=pxelinux.0|DHCP_PROXY_PXE_BOOT_SERVER=10.0.0.1|DHCP_PROXY_PXE_BOOT_SERVER=10.0.0.2|DHCP_PROXY_PXE_BOOT_SERVER=10.0.0.2
-incomplete-pair|DHCP_MODE=dnsmasq-proxy;DHCP_SUBNET_START=192.0.2.0;DHCP_DNS_PRIMARY=192.0.2.20;UPSTREAM_DHCP_IP=192.0.2.1|DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9|-|-|DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9
-invalid-value|DHCP_MODE=dnsmasq-proxy;DHCP_SUBNET_START=192.0.2.0;DHCP_DNS_PRIMARY=192.0.2.20;UPSTREAM_DHCP_IP=192.0.2.1|DHCP_PROXY_ROUTER=not-an-ip-address|-|-|DHCP_PROXY_ROUTER=not-an-ip-address
+    done <<CASES
+repeated|DHCP_PROXY_PXE_BOOT_SERVER=${srv};DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=${bios}|DHCP_PROXY_PXE_BOOT_SERVER=${srv};DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=${bios}|-|DHCP_PROXY_PXE_BOOT_SERVER=${srv};DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=${bios}
+direct-edit|DHCP_PROXY_PXE_BOOT_SERVER=${srv};DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=${bios}|DHCP_PROXY_PXE_BOOT_SERVER=${srv}|DHCP_PROXY_PXE_BOOT_SERVER=${srv2}|DHCP_PROXY_PXE_BOOT_SERVER=${srv2}
+CASES
+    # What: an invalid edit restores .env and keeps the edit
+    # Why: a failed update must never leave half a migration
+    # From: Issue #1683 | PR #1858
+    while IFS='|' read -r name extra kv msg; do
+        _cp_install "${name}" || return 1
+        tr ';' '\n' <<< "${extra}" >> "${pd}/.env"
+        set_env_key "${kv%%=*}" "${kv#*=}" "${cpe}"
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; adopt_config_prod_edits "${CONV%/deploy/prod}" >/dev/null'
+        cp "${pd}/.env" "${base}/env.before"
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"; echo unreached'
+        [ "${status}" -eq 1 ] && [[ "${output}" == *"${msg}"* && "${output}" == *"Restored ${pd}/.env to its state before the update"* ]] \
+            && [[ "${output}" != *unreached* ]] && cmp -s "${base}/env.before" "${pd}/.env" && grep -qx -- "${kv}" "${cpe%.env}.local.env" \
+            || { echo "${name}: rc ${status}: ${output}"; return 1; }
+    done <<CASES
+incomplete-pair|DHCP_MODE=${mode};DHCP_SUBNET_START=${net}.0;DHCP_DNS_PRIMARY=${ip};UPSTREAM_DHCP_IP=${srv}|DHCP_PROXY_PXE_BOOT_SERVER=${srv}|neither DHCP_PROXY_PXE_BOOT_FILENAME_BIOS nor DHCP_PROXY_PXE_BOOT_FILENAME_UEFI is
+invalid-value|DHCP_MODE=${mode};DHCP_SUBNET_START=${net}.0;DHCP_DNS_PRIMARY=${ip};UPSTREAM_DHCP_IP=${srv}|DHCP_PROXY_ROUTER=x${BATS_TEST_NUMBER}|must be a valid IPv4 address or empty.
 CASES
 }
 
 @test "migrate_env_for_update preserves all custom per-service state dirs" {
-    # What: Custom per-service state dirs survive.
-    # Why: AG-OP-009 override preservation.
+    # What: an operator's own per-service state dir survives
+    # Why: AG-OP-009 override preservation
     # From: Issue #1683 | PR #1858
-    local repo_root env_file k
-    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    env_file="${BATS_TEST_TMPDIR}/.env"
-    _load_setup_update_helpers "${repo_root}"
-    _write_converged_env_fixture "${env_file}"
-    for k in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
-        printf '%s=/custom/%s\n' "${k}" "${k}" >> "${env_file}"
-    done
-    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
-    for k in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
-        grep -qx "${k}=/custom/${k}" "${env_file}"
-    done
-    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
-    for k in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
-        grep -qx "${k}=/custom/${k}" "${env_file}"
+    local root d keys k
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    d="${BATS_TEST_TMPDIR}/custom/deploy/prod"
+    _converged_install "${d}" || return 1
+    keys="$(prod_state_keys | grep -vx CACHE_DIR)"
+    while IFS= read -r k; do set_env_key "${k}" "${BATS_TEST_TMPDIR}/own/${k}" "${d}/.env"; done <<< "${keys}"
+    for _ in 1 2; do
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+        [ "${status}" -eq 0 ] || { echo "migrate: ${output}"; return 1; }
+        while IFS= read -r k; do
+            [ "$(get_env_var "${k}" "${d}/.env")" = "${BATS_TEST_TMPDIR}/own/${k}" ] || { echo "${k} lost"; return 1; }
+        done <<< "${keys}"
     done
 }
 
 @test "migrate_env_for_update drops a per-service state dir equal to the one-root default" {
-    # What: Default per-service dir is dropped.
-    # Why: One-root contract via LANCACHE_STATE_DIR.
+    # What: a per-service dir equal to default is dropped
+    # Why: one-root contract via LANCACHE_STATE_DIR
     # From: Issue #1683 | PR #1858
-    local repo_root env_file
-    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    env_file="${BATS_TEST_TMPDIR}/.env"
-    _load_setup_update_helpers "${repo_root}"
-    _write_converged_env_fixture "${env_file}"
-    printf 'NATS_CONF_DIR=/opt/lancache-ng/state/nats-conf\n' >> "${env_file}"
-    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
-    run ! grep -q '^NATS_CONF_DIR=' "${env_file}"
+    local root d k
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    d="${BATS_TEST_TMPDIR}/dflt/deploy/prod"
+    _converged_install "${d}" || return 1
+    while IFS= read -r k; do
+        set_env_key "${k}" "$(get_env_var LANCACHE_STATE_DIR "${d}/.env")/$(prod_state_subdir "${k}")" "${d}/.env"
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+        [ "${status}" -eq 0 ] && ! env_key_exists "${k}" "${d}/.env" || { echo "${k} kept: ${output}"; return 1; }
+    done <<< "$(prod_state_keys | grep -vx CACHE_DIR)"
 }
 
-@test "migrate_env_for_update writes LANCACHE_STATE_DIR on a legacy .env" {
-    # What: One-root key present after legacy migration.
-    # Why: LANCACHE_STATE_DIR single state-root contract.
+@test "migrate_env_for_update refuses an empty IP_SSL before any write" {
+    # What: empty IP_SSL stops the update; .env untouched
+    # Why: prod binds dns-ssl to IP_SSL (AG-SETUP-001)
     # From: Issue #1683 | PR #1858
-    local repo_root env_file
-    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    env_file="${BATS_TEST_TMPDIR}/.env"
-    _load_setup_update_helpers "${repo_root}"
-    _write_legacy_env_fixture "${env_file}"
-    run ! grep -q '^LANCACHE_STATE_DIR=' "${env_file}"
-    run migrate_env_for_update "$(dirname "${env_file}")"; [ "${status}" -eq 0 ]
-    grep -q '^LANCACHE_STATE_DIR=/' "${env_file}"
+    local root t="${BATS_TEST_TMPDIR}/nossl"
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    mkdir -p "${t}" && _legacy_env "${t}/.env"
+    set_env_key IP_SSL "" "${t}/.env"
+    cp "${t}/.env" "${t}/.env.before"
+    export CONV="${t}"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"IP_SSL is missing or empty in ${t}/.env"* && "${output}" != *unreached* ]] \
+        && cmp -s "${t}/.env.before" "${t}/.env" || { echo "empty IP_SSL: ${output}"; return 1; }
 }
 
 @test "production_state_root_default keeps deploy/prod state out of the checkout" {
     # What: Deploy/prod state defaults off checkout.
     # Why: Runtime state outside git checkout.
     # From: Issue #1683 | PR #1858
-    local repo_root root
+    local repo_root root co="${BATS_TEST_TMPDIR}/co" dp binds
     repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_update_helpers "${repo_root}"
-    root="$(production_state_root_default /srv/checkout/deploy/prod)"
-    [ -n "${root}" ]
-    [ "${root}" != "/srv/checkout/deploy/prod" ]
-    [ "$(production_state_root_default /var/lib/lancache)" = "/var/lib/lancache" ]
+    _load_setup_sh "${repo_root}"
+    dp="${co}/deploy/prod"
+    _prod_install "${dp}"
+    remove_env_key LANCACHE_STATE_DIR "${dp}/.env"
+    root="$(production_state_root_default "${dp}")"
+    [[ "${root}" == /* && "${root}/" != "${co}/"* ]] || { echo "root: ${root}"; return 1; }
+    # What: compose itself resolves state under that root
+    # Why: setup.sh and compose must share one default
+    # From: Issue #1683 | PR #1858
+    binds="$(docker compose --env-file "${dp}/.env" -f "${dp}/docker-compose.yml" config --format json)"
+    binds="$(jq -r '.services[].volumes[]? | select(.type == "bind") | .source' <<< "${binds}")"
+    grep -q "^${root}/" <<< "${binds}" || { echo "no state bind under ${root}: ${binds}"; return 1; }
+    [ "$(production_state_root_default "${BATS_TEST_TMPDIR}/legacy")" = "${BATS_TEST_TMPDIR}/legacy" ]
 }
 
 @test "runtime_env_file_for_install_dir prefers deploy/prod/.env.local when present" {
@@ -10816,83 +11020,775 @@ CASES
     # From: Issue #1683 | PR #1858
     local repo_root dp
     repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_update_helpers "${repo_root}"
+    _load_setup_sh "${repo_root}"
     dp="${BATS_TEST_TMPDIR}/deploy/prod"
     mkdir -p "${dp}"
     [ "$(runtime_env_file_for_install_dir "${dp}")" = "${dp}/.env" ]
     : > "${dp}/.env.local"
     [ "$(runtime_env_file_for_install_dir "${dp}")" = "${dp}/.env.local" ]
-    [ "$(runtime_env_file_for_install_dir /var/lib/lancache)" = "/var/lib/lancache/.env" ]
-    # What: a quickstart install migrates into deploy/prod.
-    # Why: AG-OP-007 convergence; no state or value lost
+    [ "$(runtime_env_file_for_install_dir "${BATS_TEST_TMPDIR}/legacy")" = "${BATS_TEST_TMPDIR}/legacy/.env" ]
+}
+
+@test "setup quickstart install moves into deploy/prod once" {
+    # What: state, settings and CA move to deploy/prod
+    # Why: AG-OP-007: a quickstart user loses nothing
     # From: Issue #1683 | PR #1858
-    local co="${BATS_TEST_TMPDIR}/co" qs="${BATS_TEST_TMPDIR}/qs" log="${BATS_TEST_TMPDIR}/docker.log"
-    _load_functions "${repo_root}/setup.sh" compose_project_name
-    mkdir -p "${co}/deploy/prod" "${co}/config/prod" "${co}/scripts/untracked" "${qs}/scripts/untracked" "${qs}/certs"
-    : > "${co}/deploy/prod/docker-compose.yml"; : > "${co}/scripts/untracked/docker-socket-proxy.sh"
-    printf 'CACHE_MAX_SIZE=50g\n' > "${co}/config/prod/proxy.env"
-    printf 'name: lancache-ng\n' > "${qs}/docker-compose.yml"; : > "${qs}/scripts/shared-secret-bootstrap.sh"
-    : > "${qs}/scripts/untracked/docker-socket-proxy.sh"; printf ca > "${qs}/certs/ca.crt"
-    printf '%s\n' IP_STANDARD=192.0.2.10 KEA_DATA_DIR=./kea CACHE_DIR=/srv/cache CACHE_MAX_SIZE=200g > "${qs}/.env"
-    SCRIPT_DIR="${co}" PROD_COMPOSE="${co}/deploy/prod/docker-compose.yml"
-    DOCKER_SOCKET_PROXY_SCRIPT="${co}/scripts/untracked/docker-socket-proxy.sh"
-    cmd_backup() { echo "backup $*" >> "${log}"; }
-    systemd_available() { return 1; }
-    systemd_unit_exists() { return 1; }
-    docker() {
-        echo "docker $*" >> "${log}"
-        case "$1 $2" in
-            "volume inspect") [[ "$3" == lancache-ng_pdns-data-standard ]] ;;
-            "run --rm") local a; for a in "$@"; do [[ "${a}" == *:/to ]] && touch "${a%:/to}/copied"; done; true ;;
-        esac
+    local root t="${BATS_TEST_TMPDIR}" project svc keys key want vol dir absent copies f el
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    export ROOT="${root}" CO="${t}/co" QS="${t}/qs" BK="${t}/bk"
+    _prod_install "${CO}/deploy/prod"
+    project="$(_prod_compose config --format json | jq -r .name)"
+    svc="$(_prod_compose config --services | awk 'NR == 1')"
+    # What: quickstart input from setup.sh's own lists
+    # Why: volume, path and bundle sets have one owner
+    # From: Issue #1683 | PR #1858
+    keys="$(declare -f migrate_quickstart_install | sed -n 's/^ *local path_keys="\([^"]*\)".*/\1/p')"
+    copies="$(declare -f migrate_quickstart_install | grep -o '"\$old_dir/scripts/[^"]*"' | sed 's|^"\$old_dir/||; s|"$||')"
+    [ -n "${keys}" ] && [ -n "${copies}" ] || { echo "migration lists: ${keys} | ${copies}"; return 1; }
+    mkdir -p "${QS}/certs" "$(dirname "${CO}/${DOCKER_SOCKET_PROXY_SCRIPT#"${root}/"}")"
+    printf '%s\n' "${CO}" > "${CO}/${DOCKER_SOCKET_PROXY_SCRIPT#"${root}/"}"
+    cp "${root}/deploy/prod/.env" "${QS}/.env"
+    remove_env_key LANCACHE_STATE_DIR "${QS}/.env"
+    for key in ${keys}; do set_env_key "${key}" "./${key,,}" "${QS}/.env"; done
+    want="$(get_env_var CACHE_MAX_SIZE "${QS}/.env")"
+    set_env_key CACHE_MAX_SIZE "$(( ${want%%[!0-9]*} * 2 ))${want##*[0-9]}" "${QS}/.env"
+    cp "${QS}/.env" "${t}/qs.env"
+    while IFS= read -r f; do
+        mkdir -p "$(dirname "${QS}/${f}")" && printf '%s\n' "${f}" > "${QS}/${f}"
+    done <<< "${copies}"
+    printf '%s\n' "${QS}" > "${QS}/certs/ca.crt"; printf '%s\n' "${t}" > "${QS}/certs/ca.key"
+    {
+        printf 'name: %s\nservices:\n  %s:\n    image: %s\n    volumes:\n' "${project}" "${svc}" "${LANCACHE_HELPER_IMAGE}"
+        quickstart_volume_keys | awk '{ printf "      - %s:/%s\n", $1, $1 }'
+        printf 'volumes:\n'
+        quickstart_volume_keys | awk '{ printf "  %s: {}\n", $1 }'
+    } > "${QS}/docker-compose.yml"
+    absent="$(quickstart_volume_keys | awk 'END { print $1 }')"
+    while read -r vol key; do
+        [ "${vol}" != "${absent}" ] || continue
+        mkdir -p "${DS}/volumes/${project}_${vol}"
+        printf '%s\n' "${vol}" > "${DS}/volumes/${project}_${vol}/${vol}"
+        printf '%s\n' "${key}" > "${DS}/volumes/${project}_${vol}/.${key}"
+    done <<< "$(quickstart_volume_keys)"
+    : > "${DS}/running"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; eval "${SETUP_SH_SEAMS}"; SCRIPT_DIR="${CO}" BACKUP_ROOT="${BK}"
+        PROD_COMPOSE="${CO}/${PROD_COMPOSE#"${ROOT}/"}"
+        DOCKER_SOCKET_PROXY_SCRIPT="${CO}/${DOCKER_SOCKET_PROXY_SCRIPT#"${ROOT}/"}"
+        is_quickstart_install "${QS}" && migrate_quickstart_install "${QS}"'
+    [ "${status}" -eq 0 ] || { echo "migrate: ${output}"; return 1; }
+    el="$(runtime_env_file_for_install_dir "${CO}/deploy/prod")"
+    [ "${el}" != "${CO}/deploy/prod/.env" ] && [ "$(stat -c %a "${el}")" = 600 ] || { echo "env: ${el}"; return 1; }
+    [ "$(get_env_var LANCACHE_STATE_DIR "${el}")" = "${QS}" ] || { echo "state root"; return 1; }
+    while IFS= read -r key; do
+        want="$(get_env_assignment_value_raw "${key}" "${t}/qs.env")"
+        [[ " ${keys} " != *" ${key} "* ]] || want="$(realpath -m "${QS}/${want}")"
+        [ "$(get_env_assignment_value_raw "${key}" "${el}")" = "${want}" ] || { echo "value of ${key}"; return 1; }
+    done <<< "$(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ { print $1 }' "${t}/qs.env")"
+    while read -r vol dir; do
+        if [ "${vol}" = "${absent}" ]; then
+            [ ! -e "${dir}" ] || { echo "absent ${vol} made ${dir}"; return 1; }
+        else
+            diff -r "${DS}/volumes/${project}_${vol}" "${dir}" || { echo "copy of ${vol}"; return 1; }
+        fi
+    done <<< "$(quickstart_volume_dirs "${el}")"
+    cmp "${QS}/certs/ca.crt" "${CO}/certs/ca.crt" && cmp "${QS}/certs/ca.key" "${CO}/certs/ca.key" || { echo "ca"; return 1; }
+    while IFS= read -r f; do [ ! -e "${QS}/${f}" ] || { echo "kept ${f}"; return 1; }; done <<< "${copies}"
+    [ ! -e "${QS}/docker-compose.yml" ] && [ ! -e "${QS}/.env" ] && [ "$(cat "${CO}/${DOCKER_SOCKET_PROXY_SCRIPT#"${root}/"}")" = "${CO}" ] \
+        || { echo "quickstart files"; return 1; }
+    grep -q '^completed|' "${QS}/.quickstart-migration" || { echo "record"; return 1; }
+    [ "$(find "${BK}" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ] || { echo "backups: $(ls -A "${BK}")"; return 1; }
+    # What: quickstart stops for good before prod starts
+    # Why: two stacks must never share the IPs at once
+    # From: Issue #1683 | PR #1858
+    awk -v q="compose --env-file ${QS}/.env " -v p="compose --env-file ${el} " '
+        index($0, q) == 1 && / stop$/ { st = NR }
+        index($0, q) == 1 && / up -d$/ { su = NR }
+        index($0, p) == 1 && / up -d / && !pu { pu = NR }
+        END { exit !(st > su && pu > st) }' "${DS}/docker.log" || { cat "${DS}/docker.log"; return 1; }
+    ! is_quickstart_install "${QS}" || { echo "still quickstart"; return 1; }
+    [ "$(resolve_stack_dir "${CO}")" = "${CO}/deploy/prod" ] && [ "$(resolve_stack_dir "${QS}")" = "${QS}" ] \
+        || { echo "stack dirs"; return 1; }
+    # What: the prod stack reads every migrated value
+    # Why: a copied but unread key is silent value loss
+    # From: Issue #1683 | PR #1858
+    local cfg prof
+    local -a profiles=()
+    prof="$(docker compose --env-file "${el}" -f "${CO}/deploy/prod/docker-compose.yml" config --profiles)"
+    while IFS= read -r f; do [ -z "${f}" ] || profiles+=(--profile "${f}"); done <<< "${prof}"
+    cfg="$(docker compose --env-file "${el}" -f "${CO}/deploy/prod/docker-compose.yml" "${profiles[@]}" config --format json)"
+    want="$(get_env_var CACHE_MAX_SIZE "${t}/qs.env")"
+    jq -e --arg v "${want}" '[.services[].environment.CACHE_MAX_SIZE?] | index($v) != null' <<< "${cfg}" >/dev/null \
+        || { echo "CACHE_MAX_SIZE ${want} not in the prod stack"; return 1; }
+    for key in ${keys}; do
+        want="$(get_env_var "${key}" "${el}")"
+        grep -qF "\"${want}\"" <<< "${cfg}" || { echo "${key}=${want} not in the prod stack"; return 1; }
+    done
+}
+
+@test "setup compose command runs compose on the stack's files" {
+    # What: setup.sh compose equals stack_compose
+    # Why: the systemd units start the stack through it
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" over want
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    export DP="${t}/co/deploy/prod"
+    _prod_install "${DP}"
+    over="$(declare -f compose_file_args_for_install_dir | grep -o 'docker-compose\.override\.y[a-z]*ml' | awk 'NR == 1')"
+    [ -n "${over}" ] || { echo "no override name in setup.sh"; return 1; }
+    printf 'services:\n  %s:\n    image: %s\n' "${over%%.*}" "${LANCACHE_HELPER_IMAGE}" > "${DP}/${over}"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; stack_compose "${DP}" "$(runtime_env_file_for_install_dir "${DP}")" config --services'
+    [ "${status}" -eq 0 ] && grep -qx "${over%%.*}" <<< "${output}" || { echo "stack_compose: ${output}"; return 1; }
+    want="$(sort <<< "${output}")"
+    run env DOCKER_HOST="${SETUP_SH_DOCKER_HOST}" PATH="${BIN}:${PATH}" bash "${root}/setup.sh" compose "${DP}" config --services
+    [ "${status}" -eq 0 ] && [ "$(sort <<< "${output}")" = "${want}" ] || { echo "setup.sh compose: ${output}"; return 1; }
+    run env DOCKER_HOST="${SETUP_SH_DOCKER_HOST}" PATH="${BIN}:${PATH}" bash "${root}/setup.sh" compose
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"Usage: setup.sh compose"* ]] || { echo "usage: ${output}"; return 1; }
+}
+
+@test "setup update pulls the checkout and continues on its setup.sh" {
+    # What: update pulls, runs the new setup.sh, rolls back
+    # Why: compose, templates, script move as one revision
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" main lo std ssl svc mark c2 c3 f p
+    local -a pids=()
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    main="$(declare -f git_default_branch_name | sed -n 's/.*default_branch:-\([A-Za-z0-9_-]*\)}.*/\1/p')"
+    lo="127.$(( BATS_TEST_NUMBER % 250 + 1 ))" svc="probe${BATS_TEST_NUMBER}" mark="rev${BATS_TEST_NUMBER}"
+    std="${lo}.0.1" ssl="${lo}.0.2"
+    g() { git -c user.email=t@example.test -c user.name=t -c init.defaultBranch="${main}" "$@"; }
+    # What: an origin holding the real checkout files
+    # Why: the update must run exactly what a clone carries
+    # From: Issue #1683 | PR #1858
+    g init -q --bare "${t}/origin.git"
+    mkdir -p "${t}/src"
+    for f in setup.sh VERSION .gitignore deploy/prod/docker-compose.yml deploy/prod/.env \
+        deploy/prod/docker-compose.nats-secondary.yml $(cd "${root}" && git ls-files config/prod); do
+        mkdir -p "$(dirname "${t}/src/${f}")" && cp "${root}/${f}" "${t}/src/${f}"
+    done
+    chmod +x "${t}/src/setup.sh"
+    g -C "${t}/src" init -q && g -C "${t}/src" add -A && g -C "${t}/src" commit -q -m c1
+    g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}"
+    g clone -q "${t}/origin.git" "${t}/co"
+    cp "${t}/co/deploy/prod/.env" "${t}/co/deploy/prod/.env.local"
+    set_env_key LANCACHE_STATE_DIR "${t}/state" "${t}/co/deploy/prod/.env.local"
+    set_env_key IP_STANDARD "${std}" "${t}/co/deploy/prod/.env.local"
+    set_env_key IP_SSL "${ssl}" "${t}/co/deploy/prod/.env.local"
+    set_env_key LANCACHE_IMAGE_TAG "v$(tr -d '[:space:]' < "${root}/VERSION")" "${t}/co/deploy/prod/.env.local"
+    [ -z "$(g -C "${t}/co" status --porcelain)" ] || { echo "fixture checkout is dirty"; return 1; }
+    # What: revision 2 adds a service and marks setup.sh
+    # Why: both must reach the run after the pull
+    # From: Issue #1683 | PR #1858
+    printf '  %s:\n    image: %s\n' "${svc}" "${LANCACHE_HELPER_IMAGE}" > "${t}/svc.yml"
+    awk -v add="${t}/svc.yml" '{ print } /^services:$/ { while ((getline l < add) > 0) print l }' \
+        "${t}/src/deploy/prod/docker-compose.yml" > "${t}/c.yml" && mv "${t}/c.yml" "${t}/src/deploy/prod/docker-compose.yml"
+    sed -i "s/print_ok \"Stack updated\"/print_ok \"Stack updated at ${mark}\"/" "${t}/src/setup.sh"
+    grep -qF "Stack updated at ${mark}" "${t}/src/setup.sh" || { echo "marker not placed"; return 1; }
+    g -C "${t}/src" commit -q -am c2 && g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}"
+    c2="$(g -C "${t}/src" rev-parse HEAD)"
+    for p in "${std}" "${ssl}"; do
+        timeout 600 busybox nc -lk -s "${p}" -p 80 -e true < /dev/null > /dev/null 2>&1 3>&- &
+        pids+=("$!")
+    done
+    export FAULT="${BATS_TEST_NAME}" CO="${t}/co"
+    _update() {
+        run env DOCKER_HOST="${SETUP_SH_DOCKER_HOST}" PATH="${BIN}:${PATH}" LANCACHE_BACKUP_ROOT="${t}/bk" \
+            bash "${CO}/setup.sh" update "${CO}/deploy/prod"
     }
-    is_quickstart_install "${qs}"
-    migrate_quickstart_install "${qs}" >/dev/null
-    local el="${co}/deploy/prod/.env.local"
-    [ "$(stat -c %a "${el}")" = 600 ]
-    grep -qx IP_STANDARD=192.0.2.10 "${el}"; grep -qx "LANCACHE_STATE_DIR=${qs}" "${el}"
-    grep -qx "KEA_DATA_DIR=${qs}/kea" "${el}"; grep -qx CACHE_DIR=/srv/cache "${el}"
-    [ "$(cat "${co}/config/prod/proxy.local.env")" = CACHE_MAX_SIZE=200g ]
-    [ -e "${qs}/pdns-standard/copied" ]
-    [ ! -e "${qs}/nats" ]
-    [ "$(cat "${co}/certs/ca.crt")" = ca ]
-    [ ! -e "${qs}/docker-compose.yml" ]
-    [ ! -e "${qs}/.env" ]
-    [ ! -e "${qs}/scripts/shared-secret-bootstrap.sh" ]
-    [ ! -e "${qs}/scripts/untracked/docker-socket-proxy.sh" ]
-    [ -e "${DOCKER_SOCKET_PROXY_SCRIPT}" ]
-    grep -qx "backup --config ${qs}" "${log}"
-    grep -qx "docker compose --env-file ${qs}/.env stop" "${log}"
-    grep -qx "docker compose --env-file ${el} up -d" "${log}"
-    ! is_quickstart_install "${qs}"
-    [ "$(resolve_stack_dir "${co}")" = "${co}/deploy/prod" ]
-    [ "$(resolve_stack_dir "${qs}")" = "${qs}" ]
+    _update
+    [ "${status}" -eq 0 ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${c2}" ] \
+        && [[ "${output}" == *"Stack updated at ${mark}"* ]] \
+        && [ "$(grep -c "Continuing the update with" <<< "${output}")" -eq 1 ] \
+        && grep -qE "^compose .* up -d --remove-orphans .*\b${svc}\b" "${DS}/docker.log" \
+        || { kill "${pids[@]}"; echo "update: ${output}"; return 1; }
+    # What: a failed apply returns checkout and config
+    # Why: no mix of old config and new compose may stay
+    # From: Issue #1683 | PR #1858
+    sed -i "s/Stack updated at ${mark}/Stack updated at ${mark}x/" "${t}/src/setup.sh"
+    g -C "${t}/src" commit -q -am c3 && g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}"
+    c3="$(g -C "${t}/src" rev-parse HEAD)"
+    cp "${t}/co/deploy/prod/.env.local" "${t}/env.before"
+    : > "${DS}/fail-apply"
+    _update
+    rm -f "${DS}/fail-apply"
+    [ "${status}" -eq 1 ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${c2}" ] \
+        && [[ "${output}" == *"Returned ${t}/co to ${c2}"* && "${output}" == *"rolled back"* ]] \
+        && cmp -s "${t}/env.before" "${t}/co/deploy/prod/.env.local" \
+        || { kill "${pids[@]}"; echo "rollback to ${c2} from ${c3}: ${output}"; return 1; }
+    # What: a detached checkout updates in place, unmoved
+    # Why: a pinned revision is the operator's choice
+    # From: Issue #1683 | PR #1858
+    g -C "${t}/co" checkout -q --detach
+    _update
+    kill "${pids[@]}"
+    [ "${status}" -eq 0 ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${c2}" ] && [[ "${output}" == *"pinned commit"* ]] \
+        && [[ "${output}" != *"Continuing the update with"* ]] || { echo "pinned: ${output}"; return 1; }
+}
+
+# What: curl stand-in for the Kea agent and the DNS listener
+# Why: real setup.sh talks to both; tests own no network
+# From: Issue #1683 | PR #1858
+_reset_curl_stub() {
+    _tool_stub "${BIN}" curl <<'STUB'
+fmt="" data="" cfg=0 url="${!#}"
+hdr=()
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in
+        -w) fmt="${args[$((i + 1))]}" ;;
+        -d) data="${args[$((i + 1))]}" ;;
+        -H) hdr+=("${args[$((i + 1))]}") ;;
+        -K) cfg=1 ;;
+    esac
+done
+printf '%s\n' "$*" >> "${DS}/curl.argv"
+[ ! -e "${DS}/fail-curl" ] || exit 7
+status=200
+case "${url}" in
+    *:8083/*)
+        path="${url#*:8083/}"
+        body="$(cat "${DS}/listener-${path}")"
+        [ ! -e "${DS}/listener-status" ] || status="$(cat "${DS}/listener-status")"
+        [ -z "${data}" ] || printf '%s\n' "${data}" >> "${DS}/listener.posts"
+        grep -qxF "X-API-Key: $(cat "${DS}/pdns-api-key")" <<< "$(printf '%s\n' "${hdr[@]}")" \
+            || { status=401 body='{"error":"missing or invalid X-API-Key"}'; } ;;
+    *)
+        [ "${cfg}" -eq 0 ] || cat > "${DS}/kea.cfg"
+        cmd="$(jq -r .command <<< "${data}")"
+        printf '%s\n' "${cmd}" >> "${DS}/kea.commands"
+        body='[{"result":0,"text":"ok"}]'
+        [ ! -e "${DS}/kea-${cmd}" ] || body="$(cat "${DS}/kea-${cmd}")"
+        [ ! -e "${DS}/kea-status" ] || status="$(cat "${DS}/kea-status")" ;;
+esac
+fmt="${fmt//\\n/$'\n'}"
+printf '%s%s' "${body}" "${fmt//"%{http_code}"/${status}}"
+STUB
+}
+
+@test "setup kea rollback applies a snapshot via the control agent" {
+    # What: test, set, write in order; a fault stops early
+    # Why: a half-applied Kea config breaks DHCP for the LAN
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" d kd old new case want rc v
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    d="${t}/repo/deploy/prod"
+    _prod_install "${d}"
+    export D="${d}" TOKEN FAULT="${BATS_TEST_NAME}"
+    TOKEN="$(generate_secret_value KEA_CTRL_TOKEN hex32)"
+    set_env_key KEA_CTRL_TOKEN "${TOKEN}" "${d}/.env"
+    kd="$(prod_state_dir_for_key KEA_DATA_DIR "${d}/.env")/config-snapshots"
+    old="$(( $(date +%s) - 60 ))000000000" new="$(date +%s)000000000"
+    for v in "${old}" "${new}"; do mkdir -p "${kd}/${v}" && jq -nc --arg v "${v}" '{Dhcp4: {"user-context": {id: $v}}}' > "${kd}/${v}/dhcp4.json"; done
+    mkdir -p "${kd}/${new}x" "${kd}/$(( new + 1 ))"
+    _reset_curl_stub
+    # What: only finalized numeric snapshots, oldest first
+    # Why: a half-written snapshot must never be applied
+    # From: Issue #1683 | PR #1858
+    _setup_sh_run 'list_kea_snapshot_ids "'"${kd}"'"'
+    [ "${status}" -eq 0 ] && [ "${output}" = "$(printf '%s\n%s' "${old}" "${new}")" ] || { echo "ids: ${output}"; return 1; }
+    _setup_sh_run 'list_kea_snapshot_ids "'"${t}/empty"'"; echo "[$?]"'
+    [ "${status}" -eq 0 ] && [ "${output}" = "[0]" ] || { echo "empty root: ${output}"; return 1; }
+    while IFS='|' read -r case want rc; do
+        rm -f "${DS}"/kea.* "${DS}"/kea-* "${DS}/fail-curl" "${DS}/curl.argv"
+        export SID=""
+        case "${case}" in
+            byid) SID="${old}" ;;
+            testfail) printf '[{"result":1,"text":"%s"}]' "${FAULT}" > "${DS}/kea-config-test" ;;
+            status) printf '503' > "${DS}/kea-status" ;;
+            garbage) printf 'x%s' "${BATS_TEST_NUMBER}" > "${DS}/kea-config-test" ;;
+            connect) : > "${DS}/fail-curl" ;;
+            absent) SID="${new}0" ;;
+        esac
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; reset_kea_to_last_known_good_config "${D}" "${SID}" 1'
+        [ "${status}" -eq "${rc}" ] && [[ "${output}" == *"${want}"* ]] || { echo "${case}: rc ${status}: ${output}"; return 1; }
+        [ ! -e "${DS}/curl.argv" ] || ! grep -qF -- "${TOKEN}" "${DS}/curl.argv" || { echo "${case}: token in argv"; return 1; }
+        case "${case}" in
+            byid|newest) [ "$(paste -sd, "${DS}/kea.commands")" = "config-test,config-set,config-write" ] \
+                    && grep -qF -- "${TOKEN}" "${DS}/kea.cfg" || { echo "${case}: $(cat "${DS}/kea.commands")"; return 1; } ;;
+            testfail) [ "$(cat "${DS}/kea.commands")" = config-test ] || { echo "config-set after a failed test"; return 1; } ;;
+        esac
+    done <<CASES
+byid|rolled back to known-good snapshot ${old}|0
+newest|defaulting to the newest: ${new}|0
+testfail|rejected the command (result=1): ${FAULT}|1
+status|rejected the request with HTTP 503|1
+garbage|Unrecognized response from Kea's Control Agent|1
+connect|Failed to connect to Kea's Control Agent|1
+absent|Snapshot '${new}0' not found|1
+CASES
+    # What: no stack, env, token; or a foreign snapshot dir
+    # Why: each stops before any request reaches Kea
+    # From: Issue #1683 | PR #1858
+    cp "${d}/.env" "${t}/env.ok"
+    while IFS='|' read -r case want; do
+        cp "${t}/env.ok" "${d}/.env"; mkdir -p "${t}/nostack"; export D="${d}"
+        case "${case}" in
+            nostack) D="${t}/nostack" ;;
+            noenv) rm -f "${d}/.env" ;;
+            notoken) set_env_key KEA_CTRL_TOKEN "" "${d}/.env" ;;
+            override) set_env_key KEA_CONFIG_SNAPSHOT_DIR "${t}/elsewhere" "${d}/.env" ;;
+        esac
+        rm -f "${DS}/kea.commands"
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; reset_kea_to_last_known_good_config "${D}" "" 1'
+        [ "${status}" -eq 1 ] && [[ "${output}" == *"${want}"* ]] && [ ! -e "${DS}/kea.commands" ] \
+            || { echo "${case}: rc ${status}: ${output}"; return 1; }
+    done <<CASES
+nostack|No stack found in ${t}/nostack
+noenv|No .env found for ${d}
+notoken|KEA_CTRL_TOKEN is empty or missing
+override|KEA_CONFIG_SNAPSHOT_DIR is overridden
+CASES
+    cp "${t}/env.ok" "${d}/.env"
+}
+
+@test "setup dns rollback applies a zone snapshot via the listener" {
+    # What: zones, snapshots, rollback per listener answer
+    # Why: a wrong zone or silent failure keeps bad records
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" d z1 z2 old new case want rc
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    d="${t}/repo/deploy/prod"
+    _prod_install "${d}"
+    z1="$(grep -oE '"[a-z0-9.-]+\."' "${root}/services/dns/nats-subscriber/src/zone_snapshots.rs" | awk 'NR == 1' | tr -d '"')"
+    z2="$(grep -oE '"[a-z0-9.-]+\."' "${root}/services/dns/nats-subscriber/src/zone_snapshots.rs" | awk 'NR == 2' | tr -d '"')"
+    [ -n "${z1}" ] && [ -n "${z2}" ] && [ "${z1}" != "${z2}" ] || { echo "zones: ${z1} ${z2}"; return 1; }
+    old="$(( $(date +%s) - 60 ))" new="$(date +%s)"
+    export D="${d}" Z1="${z1}" FAULT="${BATS_TEST_NAME}"
+    generate_secret_value PDNS_API_KEY hex32 > "${DS}/pdns-api-key"
+    _reset_curl_stub
+    _setup_sh_run 'canonical_dns_zone "${Z1%.}"; canonical_dns_zone "${Z1}"'
+    [ "${output}" = "$(printf '%s\n%s' "${z1}" "${z1}")" ] || { echo "canonical: ${output}"; return 1; }
+    _listener() {
+        jq -nc --arg a "${z1}" --arg b "${z2}" --arg o "${old}" --arg n "${new}" \
+            '{zones: {($a): [{id: $n, created_unix: ($n | tonumber)}, {id: $o, created_unix: ($o | tonumber)}], ($b): []}}' \
+            > "${DS}/listener-snapshots"
+        jq -nc '{applied: true, changed_names: ["a"], zone_check_passed: true, republished_to_nats: true, flush_ok: true, flush_failed_names: []}' \
+            > "${DS}/listener-rollback"
+        rm -f "${DS}/listener-status" "${DS}/listener.posts" "${DS}/fail-curl"
+    }
+    while IFS='|' read -r case want rc; do
+        _listener
+        export ZONE="${z1}" SID=""
+        case "${case}" in
+            nozone) ZONE="" ;;
+            emptyzone) ZONE="${z2}" ;;
+            byid) SID="${old}" ;;
+            absent) SID="${new}0" ;;
+            quote) SID="${old}\"x" ;;
+            flush) jq -c '.flush_ok = false | .flush_failed_names = ["f"]' "${DS}/listener-rollback" > "${DS}/r" && mv "${DS}/r" "${DS}/listener-rollback" ;;
+            notapplied) jq -c '.applied = false' "${DS}/listener-rollback" > "${DS}/r" && mv "${DS}/r" "${DS}/listener-rollback" ;;
+            status) printf '500' > "${DS}/listener-status" ;;
+            nokey) mv "${DS}/pdns-api-key" "${DS}/pdns-api-key.off" ;;
+            unreachable) : > "${DS}/fail-curl" ;;
+        esac
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; reset_dns_to_last_known_good_config dns-standard "${D}" "${ZONE}" "${SID}" 1'
+        [ ! -e "${DS}/pdns-api-key.off" ] || mv "${DS}/pdns-api-key.off" "${DS}/pdns-api-key"
+        [ "${status}" -eq "${rc}" ] && [[ "${output}" == *"${want}"* ]] || { echo "${case}: rc ${status}: ${output}"; return 1; }
+        case "${case}" in
+            byid|newest) jq -e --arg z "${z1}" --arg i "${SID:-${new}}" '.zone == $z and .snapshot_id == $i' "${DS}/listener.posts" > /dev/null \
+                    || { echo "${case}: request $(cat "${DS}/listener.posts")"; return 1; } ;;
+            nozone) [[ "${output}" == *"${z1}"* && "${output}" != *"${z2}"* ]] || { echo "zone list: ${output}"; return 1; } ;;
+        esac
+    done <<CASES
+nozone|A zone is required|1
+emptyzone|No known-good snapshots found for zone ${z2}|1
+byid|rolled back to known-good snapshot ${old}|0
+newest|defaulting to the newest: ${new}|0
+absent|Snapshot '${new}0' not found for zone ${z1}|1
+quote|Snapshot '${old}"x' not found for zone ${z1}|1
+flush|cache-flush publishes failed after rollback (f)|0
+notapplied|did not report applied=true|1
+status|rejected the request with HTTP 500|1
+nokey|PDNS_API_KEY could not be resolved inside the dns-standard container|1
+unreachable|Failed to reach the rollback listener inside dns-standard|1
+CASES
+    # What: no stack or no .env stops before any request
+    # Why: the command must name what is missing
+    # From: Issue #1683 | PR #1858
+    mkdir -p "${t}/nostack"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; reset_dns_to_last_known_good_config dns-standard "'"${t}/nostack"'" "${Z1}" "" 1'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"No stack found in ${t}/nostack"* ]] || { echo "nostack: ${output}"; return 1; }
+    mv "${d}/.env" "${d}/.env.off"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; reset_dns_to_last_known_good_config dns-standard "${D}" "${Z1}" "" 1'
+    mv "${d}/.env.off" "${d}/.env"
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"No .env found for ${d}"* ]] || { echo "noenv: ${output}"; return 1; }
+}
+
+@test "setup reset command routes each service and refuses bad input" {
+    # What: dns and kea reach their flows; others refused
+    # Why: a typo must never roll back the wrong service
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}"
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    export D="${t}/repo/deploy/prod"
+    _prod_install "${D}"
+    generate_secret_value PDNS_API_KEY hex32 > "${DS}/pdns-api-key"
+    printf '{"zones":{}}' > "${DS}/listener-snapshots"
+    _reset_curl_stub
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; cmd_reset_to_last_known_good_config dns "${D}"'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"A zone is required"* ]] || { echo "dns route: ${output}"; return 1; }
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; cmd_reset_to_last_known_good_config "x'"${BATS_TEST_NUMBER}"'" "${D}"'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"Unknown service 'x${BATS_TEST_NUMBER}'"* ]] || { echo "unknown: ${output}"; return 1; }
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; cmd_reset_to_last_known_good_config'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"Usage: ./setup.sh reset-to-last-known-good-config <service>"* ]] || { echo "usage: ${output}"; return 1; }
+}
+
+@test "setup health baseline and gate tell a regression from old damage" {
+    # What: baseline per container state; gate per baseline
+    # Why: only a regression this update caused may block it
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" q host s1 s2 samples day want rc case base svcs lg
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    q="$(printf '%s\n' "${!_REGRESSED_SERVICE_SYSLOG_HOST[@]}" | sort | awk 'NR == 1')"
+    host="${_REGRESSED_SERVICE_SYSLOG_HOST[${q}]}"
+    s1="$(_prod_compose config --services | sort | grep -vxF -f <(printf '%s\n' "${!_REGRESSED_SERVICE_SYSLOG_HOST[@]}") | awk 'NR == 1')"
+    s2="$(_prod_compose config --services | sort | grep -vxF -f <(printf '%s\n' "${!_REGRESSED_SERVICE_SYSLOG_HOST[@]}") | awk 'NR == 2')"
+    samples="${_UPDATE_HEALTH_BASELINE_SAMPLES}" day="$(date -u +%Y%m%d)"
+    [ -n "${q}" ] && [ -n "${host}" ] && [ -n "${s1}" ] && [ -n "${s2}" ] && [ "${samples}" -ge 2 ] \
+        || { echo "inputs: ${q} ${host} ${s1} ${s2} ${samples}"; return 1; }
+    export DP="${t}/repo/deploy/prod" GE="${t}/gate.env" S1="${s1}" Q="${q}" FAULT="${BATS_TEST_NAME}" BASE SVCS
+    _prod_install "${DP}"
+    _tool_stub "${BIN}" sleep <<<'printf "%s\n" "$1" >> "${DS}/sleeps"'
+    _state() {
+        rm -rf "${DS}"/health-* "${DS}"/status-* "${DS}"/restart-* "${DS}"/exitcode-* "${DS}"/gone-* \
+            "${DS}/sleeps" "${DS}/fail-logs" "${t}/syslog"
+        : > "${DS}/running"
+        printf '%s\n' "IP_STANDARD=" "IP_SSL=" "LOGGING_ENABLED=${1:-1}" "SYSLOG_NG_LOG_DIR=${t}/syslog" > "${GE}"
+    }
+    _gate() { _setup_sh_run 'PATH="${BIN}:${PATH}"; _UPDATE_ENV_FILE="${GE}" _UPDATE_STACK_DIR="${DP}"; '"$1"; }
+    # What: baseline is 1 only if every sample is healthy
+    # Why: one lucky sample must not hide a flapping service
+    # From: Issue #1683 | PR #1858
+    while IFS='|' read -r case want; do
+        _state
+        case "${case}" in
+            stable) printf 'healthy\n' > "${DS}/health-${s1}" ;;
+            crashloop) printf 'unhealthy\n' > "${DS}/health-${s1}" ;;
+            flapping) printf 'healthy\nunhealthy\nhealthy\n' > "${DS}/health-${s1}" ;;
+            new) : > "${DS}/gone-${s1}" ;;
+            oneshot) printf 'none\n' > "${DS}/health-${s1}"; printf 'exited\n' > "${DS}/status-${s1}"
+                printf 'no\n' > "${DS}/restart-${s1}"; printf '0\n' > "${DS}/exitcode-${s1}" ;;
+        esac
+        _gate 'capture_stack_health_baseline "${S1}"; printf "[%s]\n" "${_UPDATE_HEALTH_BASELINE[${S1}]-absent}"'
+        [ "${status}" -eq 0 ] && [ "${lines[-1]}" = "[${want}]" ] || { echo "${case}: ${output}"; return 1; }
+    done <<CASES
+stable|1
+crashloop|0
+flapping|0
+new|absent
+oneshot|1
+CASES
+    _state; printf 'healthy\n' > "${DS}/health-${s1}"
+    _gate 'capture_stack_health_baseline "${S1}"'
+    [ "$(wc -l < "${DS}/sleeps")" -eq $(( samples - 1 )) ] || { echo "sleeps: $(cat "${DS}/sleeps")"; return 1; }
+    # What: the gate fails on regressions, not old damage
+    # Why: an unrelated broken service must not roll back
+    # From: Issue #1683 | PR #1858
+    while IFS='|' read -r case rc want; do
+        lg=1; [ "${case}" != quietoff ] || lg=0
+        _state "${lg}"
+        base="[${s1}]=1" svcs="${s1}"
+        case "${case}" in
+            oldbroken) base="[${s1}]=0"; printf 'unhealthy\n' > "${DS}/health-${s1}" ;;
+            regressed|outside|fresh) printf 'unhealthy\n' > "${DS}/health-${s1}" ;;
+            logsfail) printf 'unhealthy\n' > "${DS}/health-${s1}"; : > "${DS}/fail-logs" ;;
+            quiet|quietoff|quietnofile) base="[${q}]=1" svcs="${q}"; printf 'unhealthy\n' > "${DS}/health-${q}" ;;
+            gone) printf 'unhealthy\n' > "${DS}/health-${s1}"; : > "${DS}/gone-${s1}" ;;
+            healthy) printf 'healthy\n' > "${DS}/health-${s1}" ;;
+            mix) base="[${s1}]=0 [${s2}]=1" svcs="${s1} ${s2}"
+                printf 'unhealthy\n' > "${DS}/health-${s1}"; printf 'unhealthy\n' > "${DS}/health-${s2}" ;;
+        esac
+        [ "${case}" != fresh ] || base=""
+        case "${case}" in
+            quiet|quietoff) mkdir -p "${t}/syslog/${host}" && printf 'tail-%s\n' "${host}" > "${t}/syslog/${host}/${day}.log" ;;
+        esac
+        BASE="${base}" SVCS="${svcs}"
+        _gate 'eval "_UPDATE_HEALTH_BASELINE=(${BASE})"; wait_for_stack_health 6 ${SVCS}'
+        [ "${status}" -eq "${rc}" ] && [[ "${output}" == *"${want}"* ]] || { echo "${case}: rc ${status}: ${output}"; return 1; }
+        case "${case}" in
+            quietoff|outside|regressed) [[ "${output}" != *"forwarded log lines"* ]] || { echo "${case}: syslog tail ran"; return 1; } ;;
+            mix) [[ "${output}" != *"unhealthy during this update: ${s1}"* ]] || { echo "mix blamed ${s1}"; return 1; } ;;
+        esac
+    done <<CASES
+oldbroken|0|so not blocking it): ${s1}
+regressed|1|Last 50 log lines for regressed service '${s1}'
+logsfail|1|Could not retrieve logs for '${s1}'
+outside|1|regressed from healthy to unhealthy during this update: ${s1}
+quiet|1|tail-${host}
+quietoff|1|regressed from healthy to unhealthy during this update: ${q}
+quietnofile|1|No forwarded syslog-ng log file found for '${q}' yet
+gone|1|No container found for regressed service '${s1}'
+fresh|1|regressed from healthy to unhealthy during this update: ${s1}
+healthy|0|
+mix|1|unhealthy during this update: ${s2}
+CASES
+}
+
+# What: iproute2 stand-in for host addresses and routes
+# Why: the wizard reads them; tests own no host network
+# From: Issue #1683 | PR #1858
+_ip_stub() {
+    _tool_stub "$1" ip <<'STUB'
+printf '%s\n' "$*" >> "${IPDS}/ip.log"
+case "$*" in
+    "-4 addr show")
+        [ ! -e "${IPDS}/fail-addr" ] || { echo "ip: cannot list addresses" >&2; exit 1; }
+        n=1
+        while read -r a p d; do
+            n=$((n + 1))
+            printf '%s: %s: <BROADCAST,UP,LOWER_UP> mtu 1500 state UP\n' "${n}" "${d}"
+            printf '    inet %s/%s scope global %s\n' "${a}" "${p}" "${d}"
+        done < "${IPDS}/addrs" ;;
+    "-4 route get "*)
+        [ -e "${IPDS}/src" ] || { echo "RTNETLINK answers: Network is unreachable" >&2; exit 2; }
+        read -r a d < "${IPDS}/src"
+        printf '%s dev %s src %s uid 0\n    cache\n' "$4" "${d}" "${a}" ;;
+esac
+STUB
+}
+
+@test "setup list-prompts walks the real wizard without side effects" {
+    # What: prompts, defaults, branches of the real wizard
+    # Why: CI prompt checks must see what operators see
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" tpl std dev pfx ssl k base pats preset modes m dhcp ddir add v d p q try
+    local -a ans=()
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    # What: a checkout copy whose template DHCP values shift
+    # Why: a default equal to an old literal proves no owner
+    # From: Issue #1683 | PR #1858
+    mkdir -p "${t}/repo/deploy"
+    for v in "${root}"/* "${root}"/.[!.]*; do
+        [ "${v##*/}" = setup.sh ] || [ "${v##*/}" = deploy ] || ln -s "${v}" "${t}/repo/${v##*/}"
+    done
+    for v in "${root}"/deploy/*; do [ "${v##*/}" = prod ] || ln -s "${v}" "${t}/repo/deploy/${v##*/}"; done
+    cp "${root}/setup.sh" "${t}/repo/setup.sh" && cp -r "${root}/deploy/prod" "${t}/repo/deploy/prod"
+    tpl="${t}/repo/deploy/prod/.env"
+    for v in DHCP_SUBNET DHCP_GATEWAY DHCP_RANGE_START DHCP_RANGE_END; do
+        d="$(get_env_var "${v}" "${tpl}")"
+        printf '%s\n' "${d}" "${d%/*}" >> "${t}/unshifted"
+        set_env_key "${v}" "$(awk -F. -v OFS=. '{ $3 = ($3 + 1) % 256; print }' <<< "${d}")" "${tpl}"
+        [ "$(get_env_var "${v}" "${tpl}")" != "${d}" ] || { echo "${v} not shifted"; return 1; }
+    done
+    std="$(get_env_var IP_STANDARD "${tpl}")"
+    dev="lan${BATS_TEST_NUMBER}" pfx=$(( BATS_TEST_NUMBER % 8 + 16 ))
+    export IPDS="${t}/ipds" SETUP="${t}/repo/setup.sh" ANS="${t}/answers" PRESET=""
+    mkdir -p "${IPDS}"
+    _ip_stub "${t}/ipbin"
+    _host() {
+        rm -f "${IPDS}/fail-addr"
+        printf '%s\n' "127.0.0.1 8 lo" "$@" > "${IPDS}/addrs"
+        printf '%s %s\n' "${std}" "${dev}" > "${IPDS}/src"
+    }
+    _lp() {
+        run timeout -k 5 120 env -u LANCACHE_IMAGE_CHANNEL DOCKER_HOST="${SETUP_SH_DOCKER_HOST}" \
+            PATH="${t}/ipbin:${PATH}" IPDS="${IPDS}" ${PRESET:+LANCACHE_IMAGE_CHANNEL="${PRESET}"} \
+            bash "${SETUP}" list-prompts "$@"
+    }
+    _prompts() { grep -P '^PROMPT\t' <<< "${output}" | cut -f2; }
+    _default() { grep -P '^PROMPT\t' <<< "${output}" | awk -F'\t' -v n="$1" 'NR == n { print $3 }'; }
+    _write_ans() {
+        local i last=-1
+        for i in "${!ans[@]}"; do last="${i}"; done
+        : > "${ANS}"
+        for ((i = 0; i <= last; i++)); do printf '%s\n' "${ans[${i}]-}" >> "${ANS}"; done
+    }
+    _host "${std} ${pfx} ${dev}"
+    _lp
+    [ "${status}" -eq 0 ] || { echo "defaults: ${output}"; return 1; }
+    base="$(_prompts)"
+    # What: each prompt matches an ask/confirm in setup.sh
+    # Why: the list comes from the wizard, never made up
+    # From: Issue #1683 | PR #1858
+    pats="${t}/prompt-patterns"
+    grep -oE '\b(ask|confirm) "[^"]*"' "${root}/setup.sh" | sed -E 's/^(ask|confirm) "//; s/"$//' \
+        | sed -E 's/\$\{[^}]*\}|\$\([^)]*\)|\$[A-Za-z_][A-Za-z0-9_]*/@@V@@/g; s/[][\\.^$*+?(){}|]/\\&/g; s/@@V@@/.*/g; s/.*/^&$/' \
+        | grep -vxF '^.*$' > "${pats}"
+    while IFS= read -r q; do
+        grep -qE -f "${pats}" <<< "${q}" || { echo "prompt not from setup.sh: ${q}"; return 1; }
+    done <<< "${base}"
+    # What: default is the detected IP; offer uses its link
+    # Why: AG-SEC-007; no guessed address, device or mask
+    # From: Issue #1683 | PR #1858
+    k="$(awk -F'\t' -v ip="${std}" '$1 == "PROMPT" { n++; if ($3 == ip) { print n; exit } }' <<< "${output}")"
+    ssl="$(_default $(( k + 1 )))"
+    [ -n "${k}" ] && [ -n "${ssl}" ] && [ "${ssl}" != "${std}" ] \
+        && [[ "${output}" == *"${std}/${pfx} dev ${dev}"* && "${output}" != *"127.0.0.1/8"* ]] \
+        && [[ "${base}" == *"${ssl}/${pfx} dev ${dev}"* ]] || { echo "detection: ${output}"; return 1; }
+    add="$(grep -nF -- "${ssl}/${pfx} dev ${dev}" <<< "${base}" | cut -d: -f1)"
+    # What: no address: no default, and a fail, not a loop
+    # Why: AG-OP-008; the operator must enter the address
+    # From: Issue #1683 | PR #1858
+    : > "${IPDS}/fail-addr"; rm -f "${IPDS}/src"
+    _lp
+    [ "${status}" -ne 0 ] && [ "${status}" -ne 124 ] && [ -z "$(_default "${k}")" ] \
+        && [[ "${output}" == *"rejected its answer"* ]] || { echo "no detection: rc ${status}: ${output}"; return 1; }
+    printf '%s' "${std}" > "${ANS}"
+    _lp "${ANS}"
+    [ "${status}" -eq 0 ] || { echo "unterminated last answer lost: ${output}"; return 1; }
+    # What: assigned IP_SSL: no offer; foreign IP: none
+    # Why: the add offer exists only for a known device
+    # From: Issue #1683 | PR #1858
+    _host "${std} ${pfx} ${dev}" "${ssl} ${pfx} ${dev}"
+    _lp
+    [ "${status}" -eq 0 ] && [[ "$(_prompts)" != *"${ssl}/"* && "${output}" == *"${ssl} already assigned"* ]] \
+        || { echo "assigned: ${output}"; return 1; }
+    _host "${std} ${pfx} ${dev}"
+    v="$(get_env_var IP_SSL "${tpl}")"
+    ans=(); ans[$(( k - 1 ))]="${v}"; _write_ans
+    _lp "${ANS}"
+    [ "${status}" -eq 0 ] && [[ "$(_prompts)" != *" dev "* && "${output}" == *"interface that carries ${v}"* ]] \
+        || { echo "foreign: ${output}"; return 1; }
+    # What: y to the add offer never runs ip addr add
+    # Why: list-prompts must not change host networking
+    # From: Issue #1683 | PR #1858
+    ans=(); ans[$(( add - 1 ))]=y; _write_ans
+    : > "${IPDS}/ip.log"
+    _lp "${ANS}"
+    [ "${status}" -eq 0 ] && [[ "${output}" == *"would be added"* ]] && ! grep -q '^addr add' "${IPDS}/ip.log" \
+        || { echo "ip addr add ran: $(cat "${IPDS}/ip.log")"; return 1; }
+    preset="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_field release "" default_channel)"
+    PRESET="${preset}" _lp
+    [ "${status}" -eq 0 ] && [ "$(_prompts | wc -l)" -eq $(( $(wc -l <<< "${base}") - 1 )) ] \
+        || { echo "channel preset: ${output}"; return 1; }
+    export PRESET="${preset}"
+    _lp; base="$(_prompts)"
+    modes="$(awk '/pub fn as_str/ { f = 1 } f && /^    }$/ { exit } f' "${root}/services/ui/src/config.rs" | sed -n 's/.*Self::[A-Za-z]* => "\([a-z-]*\)",/\1/p')"
+    dhcp="$(awk -v m="$(paste -sd'|' <<< "${modes}")" 'BEGIN { n = split(m, a, "|") } { ok = 1; for (i = 1; i <= n; i++) if (index($0, a[i]) == 0) ok = 0; if (ok) { print NR - 1; exit } }' <<< "${base}")"
+    ddir="$(awk -F'\t' -v d="$(production_state_root_default "${t}/repo/deploy/prod")" '$1 == "PROMPT" { n++; if ($3 == d) { print n - 1; exit } }' <<< "${output}")"
+    [ -n "${dhcp}" ] && [ -n "${ddir}" ] || { echo "prompts not found: dhcp=${dhcp} ddir=${ddir}"; return 1; }
+    # What: an answered path is never created by the walk
+    # Why: list-prompts must not touch the host at all
+    # From: Issue #1683 | PR #1858
+    ans=(); ans[ddir]="${t}/would-be-state"; _write_ans
+    _lp "${ANS}"
+    [ "${status}" -eq 0 ] && [ ! -e "${t}/would-be-state" ] || { echo "data dir created: ${output}"; return 1; }
+    # What: each DHCP mode walks its own branch to the end
+    # Why: a branch the walk skips is a prompt CI never sees
+    # From: Issue #1683 | PR #1858
+    m="$(_default $(( dhcp + 1 )))"
+    printf '%s\n' "${base}" > "${t}/base-prompts"
+    : > "${t}/extra-defaults"
+    while IFS= read -r v; do
+        ans=(); ans[dhcp]="${v}"
+        for ((try = 0; try < 8; try++)); do
+            _write_ans; _lp "${ANS}"
+            [ "${status}" -ne 0 ] || break
+            p="$(_prompts | wc -l)"
+            [ "$(_prompts | awk -v n=$((p - 1)) 'NR == n')" != "$(_prompts | awk -v n="${p}" 'NR == n')" ] || p=$((p - 1))
+            if [ "$(_default "${p}")" = N ]; then ans[p-1]=y; else ans[p-1]="${std}"; fi
+        done
+        d="$(awk -F'\t' 'NR == FNR { b[$0] = 1; next } $1 == "PROMPT" && !($2 in b) { print $3 }' "${t}/base-prompts" - <<< "${output}")"
+        p="$(awk -F'\t' 'NR == FNR { b[$0] = 1; next } $1 == "PROMPT" && !($2 in b)' "${t}/base-prompts" - <<< "${output}" | wc -l)"
+        if [ "${v}" = "${m}" ]; then [ "${p}" -eq 0 ]; else [ "${p}" -gt 0 ]; fi && [ "${status}" -eq 0 ] \
+            || { echo "mode ${v}: rc ${status}, ${p} own prompts: ${output}"; return 1; }
+        printf '%s\n' "${d}" >> "${t}/extra-defaults"
+    done <<< "${modes}"
+    for v in DHCP_SUBNET DHCP_GATEWAY DHCP_RANGE_START DHCP_RANGE_END; do
+        d="$(get_env_var "${v}" "${tpl}")"
+        grep -qxF -- "${d}" "${t}/extra-defaults" || { echo "${v} default not from the template"; return 1; }
+    done
+    d="$(get_env_var DHCP_SUBNET "${tpl}")"
+    grep -qxF -- "${d%/*}" "${t}/extra-defaults" || { echo "subnet start default not from the template"; return 1; }
+    v=0; grep -qxF -f "${t}/unshifted" "${t}/extra-defaults" || v=$?
+    [ "${v}" -eq 1 ] || { echo "a default ignores the template (grep rc ${v})"; return 1; }
+    # What: same input, same walk; help; missing file fails
+    # Why: AG-OP-006 repeat-run stable; fail closed on input
+    # From: Issue #1683 | PR #1858
+    ans=(); ans[dhcp]="$(awk 'NR == 2' <<< "${modes}")"; _write_ans
+    _lp "${ANS}"; base="${output}"
+    _lp "${ANS}"
+    [ "${status}" -eq 0 ] && [ "${output}" = "${base}" ] || { echo "walk not stable"; return 1; }
+    _lp --help
+    [ "${status}" -eq 0 ] && [[ "${output}" == *list-prompts* ]] || { echo "help: ${output}"; return 1; }
+    _lp "${t}/missing"
+    [ "${status}" -ne 0 ] || { echo "missing answers file accepted"; return 1; }
+}
+
+@test "setup secondary bind-IP suggestion skips busy IPs and fails loud" {
+    # What: free LAN IP first; listing error is rc 2, not 1
+    # Why: a swallowed ss or ip error offered a busy address
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" std alt dev pfx case rc want
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    std="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")"
+    alt="$(get_env_var IP_SSL "${root}/deploy/prod/.env")"
+    dev="lan${BATS_TEST_NUMBER}" pfx=$(( BATS_TEST_NUMBER % 8 + 16 ))
+    export IPDS="${t}/ipds" IPBIN="${t}/ipbin" STD="${std}"
+    mkdir -p "${IPDS}"
+    _ip_stub "${IPBIN}"
+    _tool_stub "${IPBIN}" fuser <<< 'exit 0'
+    _tool_stub "${IPBIN}" lsof <<< 'exit 0'
+    _tool_stub "${IPBIN}" ss <<'STUB'
+c=0 ok=0
+[ ! -e "${IPDS}/ss-calls" ] || read -r c < "${IPDS}/ss-calls"
+printf '%s\n' "$((c + 1))" > "${IPDS}/ss-calls"
+[ ! -e "${IPDS}/fail-ss" ] || read -r ok < "${IPDS}/fail-ss" || ok=0
+[ ! -e "${IPDS}/fail-ss" ] || [ "${c}" -lt "${ok:-0}" ] || { echo "ss: netlink error" >&2; exit 1; }
+cat "${IPDS}/ss"
+STUB
+    while IFS='|' read -r case rc want; do
+        rm -f "${IPDS}/fail-ss" "${IPDS}/fail-addr" "${IPDS}/ss-calls"
+        : > "${IPDS}/ss"
+        printf '%s\n' "${std} ${pfx} ${dev}" "${alt} ${pfx} ${dev}" > "${IPDS}/addrs"
+        case "${case}" in
+            busy) printf 'udp UNCONN 0 0 %s:53 0.0.0.0:*\n' "${alt}" > "${IPDS}/ss" ;;
+            ssfail) : > "${IPDS}/fail-ss" ;;
+            ipfail) : > "${IPDS}/fail-addr" ;;
+        esac
+        _setup_sh_run 'PATH="${IPBIN}:${PATH}"; secondary_suggest_alternate_listen_ip "${STD}"'
+        [ "${status}" -eq "${rc}" ] && [[ "${output}" == *"${want}"* ]] || { echo "${case}: rc ${status}: ${output}"; return 1; }
+        [ "${case}" != busy ] || { [ "${lines[-1]}" != "${alt}" ] && [ "${lines[-1]}" != "${std}" ] && is_valid_ipv4 "${lines[-1]}"; } \
+            || { echo "busy: picked ${output}"; return 1; }
+    done <<CASES
+free|0|${alt}
+busy|0|
+ssfail|2|Failed to list the port 53 listeners of this host
+ipfail|2|Failed to list the IPv4 addresses of this host
+CASES
+    # What: caller stops on a listing error, asks nothing
+    # Why: rc 2 must not become an empty suggestion prompt
+    # From: Issue #1683 | PR #1858
+    printf 'udp UNCONN 0 0 %s:53 0.0.0.0:*\n' "${std}" > "${IPDS}/ss"
+    printf '1\n' > "${IPDS}/fail-ss"
+    rm -f "${IPDS}/ss-calls" "${IPDS}/fail-addr"
+    printf '%s\n' 'set -euo pipefail' '. "$1"' 'PATH="${IPBIN}:${PATH}"' 'secondary_choose_listen_ip "${STD}"' > "${t}/tty-run.sh"
+    run script -qec "bash ${t}/tty-run.sh ${BATS_TEST_TMPDIR}/setup-sh.sh" /dev/null
+    [ "${status}" -eq 2 ] && [[ "${output}" != *"Use another Secondary bind IP"* ]] \
+        && [[ "${output}" == *"Failed to list the port 53 listeners"* ]] || { echo "tty caller: rc ${status}: ${output}"; return 1; }
 }
 
 @test "deploy_prod_repo_input_paths snapshots repo-root runtime inputs for deploy/prod" {
-    # What: Backup captures repo-root inputs.
-    # Why: Rollback restores prod config.
+    # What: lists each repo input compose mounts or reads
+    # Why: rollback restores the config that existed before
     # From: Issue #1683 | PR #1858
-    local repo_root rr dp
-    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_update_helpers "${repo_root}"
-    rr="${BATS_TEST_TMPDIR}/checkout"
-    dp="${rr}/deploy/prod"
-    mkdir -p "${dp}" "${rr}/certs" "${rr}/config/prod" "${rr}/services/dns" \
-        "${rr}/scripts/untracked" "${rr}/scripts/lib"
-    : > "${rr}/services/dns/cdn-domains.txt"
-    : > "${rr}/scripts/untracked/docker-socket-proxy.sh"
-    : > "${rr}/scripts/lib/shared-secret-bootstrap.sh"
-    run deploy_prod_repo_input_paths "${dp}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"/certs"* ]]
-    [[ "${output}" == *"/config/prod"* ]]
-    [[ "${output}" == *"cdn-domains.txt"* ]]
-    [[ "${output}" == *"docker-socket-proxy.sh"* ]]
-    [[ "${output}" == *"shared-secret-bootstrap.sh"* ]]
-    run deploy_prod_repo_input_paths /var/lib/lancache
-    [ "${status}" -eq 0 ]
-    [ -z "${output}" ]
+    local root dp paths json inputs i p ok
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    dp="${root}/deploy/prod"
+    paths="$(deploy_prod_repo_input_paths "${dp}")"
+    json="$(NATS_BIND_IP="$(get_env_var IP_STANDARD "${dp}/.env")" docker compose --env-file "${dp}/.env" \
+        -f "${dp}/docker-compose.yml" -f "${dp}/docker-compose.nats-secondary.yml" config --format json)"
+    inputs="$(jq -r --arg r "${root}/" '[.services[] | ((.volumes // [])[] | select(.type == "bind") | .source),
+        ((.env_file // [])[] | if type == "object" then .path else . end)] | unique[] | select(startswith($r))' <<< "${json}")"
+    [ -n "${inputs}" ] && [ -n "${paths}" ] || { echo "inputs: ${inputs} | paths: ${paths}"; return 1; }
+    while IFS= read -r i; do
+        [ -e "${i}" ] || continue
+        ok=0
+        while IFS= read -r p; do [ "${i}" != "${p}" ] && [[ "${i}" != "${p}/"* ]] || ok=1; done <<< "${paths}"
+        [ "${ok}" -eq 1 ] || { echo "compose input ${i} not in the backup list"; return 1; }
+    done <<< "${inputs}"
+    while IFS= read -r p; do [[ "${p}" == "${root}/"* && -e "${p}" ]] || { echo "listed ${p} is no repo path"; return 1; }; done <<< "${paths}"
+    mkdir -p "${BATS_TEST_TMPDIR}/legacy"
+    [ -z "$(deploy_prod_repo_input_paths "${BATS_TEST_TMPDIR}/legacy")" ] || { echo "non-prod install listed inputs"; return 1; }
 }
 
 @test "apk-setup maps each case: steps, tagged repos, keys, CA" {
@@ -11599,13 +12495,31 @@ _load_functions() {
     out="${BATS_TEST_TMPDIR}/fns-${file##*/}"
     : > "${out}"
     for fn in "$@"; do
-        awk -v f="${fn}() {" '!c && substr($0, length($0) - length(f) + 1) == f \
-            && substr($0, 1, length($0) - length(f)) ~ /^ *$/ { c = 1; ind = substr($0, 1, length($0) - length(f)) }
-            c { print } c && $0 == ind "}" { exit }' "${file}" >> "${out}"
-        grep -qE "^ *${fn}\(\) \{$" "${out}" || { echo "function ${fn} not found in ${file}"; return 1; }
+        awk -v fn="${fn}" '!c && match($0, "^ *" fn "\\(\\) [({]$") {
+                c = 1; ind = substr($0, 1, index($0, fn) - 1)
+                end = (substr($0, length($0)) == "{") ? "}" : ")"
+            }
+            c { print } c && $0 == ind end { exit }' "${file}" >> "${out}"
+        grep -qE "^ *${fn}\(\) [({]$" "${out}" || { echo "function ${fn} not found in ${file}"; return 1; }
     done
     # shellcheck source=/dev/null
     source "${out}"
+}
+
+# What: runs a snippet on loaded setup.sh fns, setup.sh opts
+# Why: failure paths are proven under set -euo pipefail
+# From: Issue #1683 | PR #1858
+_setup_sh_run() {
+    local root msg="${BATS_TEST_TMPDIR}/setup-msg.sh" full="${BATS_TEST_TMPDIR}/setup-sh.sh"
+    if [ -f "${full}" ]; then
+        run env DOCKER_HOST="${SETUP_SH_DOCKER_HOST}" bash -c 'set -euo pipefail; . "$1"; eval "$2"' _ "${full}" "$1"
+        return 0
+    fi
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    grep -E '^(print_step|print_ok|print_warn|print_error|die) *\(\) *\{.*\}$' "${root}/setup.sh" > "${msg}"
+    [ "$(wc -l < "${msg}")" -eq 5 ]
+    run env DOCKER_HOST="${SETUP_SH_DOCKER_HOST}" bash -c 'set -euo pipefail; YELLOW="" RED="" RESET="" BOLD="" CYAN="" GREEN=""
+        . "$1"; . "$2"; eval "$3"' _ "${msg}" "${BATS_TEST_TMPDIR}/fns-setup.sh" "$1"
 }
 
 # What: load the dns entrypoint zone functions + validator.
@@ -12711,685 +13625,1475 @@ CASES
         echo "acl cidrs: ${output}"; return 1; }
 }
 
-@test "setup restore: sed-safe paths and stale .env.local" {
-    # What: path filter per shape; stale override moved.
-    # Why: a stale .env.local overrides the restored .env.
+@test "setup restore: literal path rewrite and stale .env.local" {
+    # What: any printable char in a path rewrites exactly
+    # Why: a path is text; regex or sed syntax must not leak
     # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" p want moved
+    local root t="${BATS_TEST_TMPDIR}" line moved
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/setup.sh" restore_path_is_sed_safe restore_clear_stale_env_local_if_unarchived
-    print_warn() { printf 'WARN %s\n' "$*"; }
-    while IFS='|' read -r want p; do
-        p="$(printf '%b' "${p}")"
-        if restore_path_is_sed_safe "${p}"; then [ "${want}" = ok ]; else [ "${want}" = bad ]; fi \
-            || { echo "path '${p}' want ${want}"; return 1; }
-    done <<'CASES'
-ok|/opt/lancache-ng
-ok|/opt/lancache.ng-2
-ok|/srv/lan cache/ng
-bad|/opt/lancache#ng
-bad|/opt/lan&cache
-bad|/opt/lan\\cache
-bad|/opt/lan\ncache
-CASES
+    _load_setup_sh "${root}"
+    export T="${t}"
+    _setup_sh_run 'for code in $(seq 32 126); do
+            c="$(printf "\\$(printf "%03o" "$code")")"
+            old="${T}/o${c}*[l].d" new="${T}/n${c}&\\1#d"
+            printf "A=%s/x\nB=%s%s\n" "$old" "$old" "$old" > "${T}/f"
+            replace_literal_in_file "${T}/f" "$old" "$new"
+            [ "$(cat "${T}/f")" = "$(printf "A=%s/x\nB=%s%s" "$new" "$new" "$new")" ] || echo "BAD $code"
+        done'
+    [ "${status}" -eq 0 ] && [ -z "${output}" ] || { echo "rewrite: ${output}"; return 1; }
+    _setup_sh_run 'replace_literal_in_file "${T}/f" "" x; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"empty string"* && "${output}" != *unreached* ]] \
+        || { echo "empty: ${output}"; return 1; }
+    # What: a stale override moves aside once
+    # Why: a stale .env.local overrides the restored .env
+    # From: Issue #1683 | PR #1858
+    line="$(grep -m1 -E '^[A-Z_]+=' "${root}/deploy/prod/.env")"
     mkdir -p "${t}/arch" "${t}/inst"
-    run restore_clear_stale_env_local_if_unarchived "${t}/arch" "${t}/inst"
+    _setup_sh_run 'restore_clear_stale_env_local_if_unarchived "${T}/arch" "${T}/inst"'
     [ "${status}" -eq 0 ] && [ -z "${output}" ] && [ -z "$(ls -A "${t}/inst")" ] || { echo "noop: ${output}"; return 1; }
-    printf 'IP_STANDARD=192.0.2.10\n' > "${t}/inst/.env.local"
-    run restore_clear_stale_env_local_if_unarchived "${t}/arch" "${t}/inst"
-    [ "${status}" -eq 0 ]
+    printf '%s\n' "${line}" > "${t}/inst/.env.local"
+    _setup_sh_run 'restore_clear_stale_env_local_if_unarchived "${T}/arch" "${T}/inst"'
     moved="$(cd "${t}/inst" && ls -A)"
-    [[ "${moved}" =~ ^\.env\.local\.pre-restore-[0-9]{8}T[0-9]{6}Z$ ]] || { echo "moved: ${moved}"; return 1; }
-    [ "$(cat "${t}/inst/${moved}")" = IP_STANDARD=192.0.2.10 ]
-    [[ "${output}" == "WARN "*"${moved}"* ]]
-    run restore_clear_stale_env_local_if_unarchived "${t}/arch" "${t}/inst"
+    [ "${status}" -eq 0 ] && [[ "${moved}" =~ ^\.env\.local\.pre-restore-[0-9]{8}T[0-9]{6}Z$ ]] \
+        && [ "$(cat "${t}/inst/${moved}")" = "${line}" ] && [[ "${output}" == *"${moved}"* ]] || { echo "moved: ${moved} ${output}"; return 1; }
+    _setup_sh_run 'restore_clear_stale_env_local_if_unarchived "${T}/arch" "${T}/inst"'
     [ "${status}" -eq 0 ] && [ "$(cd "${t}/inst" && ls -A)" = "${moved}" ] || { echo "second run changed it"; return 1; }
-    printf 'IP_STANDARD=192.0.2.20\n' | tee "${t}/arch/.env.local" > "${t}/inst/.env.local"
-    run restore_clear_stale_env_local_if_unarchived "${t}/arch" "${t}/inst"
-    [ "${status}" -eq 0 ]
-    [ "$(cat "${t}/inst/.env.local")" = IP_STANDARD=192.0.2.20 ]
-    [ "$(cd "${t}/inst" && ls -A | wc -l)" -eq 2 ]
+    printf '%s\n' "${line}" | tee "${t}/arch/.env.local" > "${t}/inst/.env.local"
+    _setup_sh_run 'restore_clear_stale_env_local_if_unarchived "${T}/arch" "${T}/inst"'
+    [ "${status}" -eq 0 ] && [ "$(cat "${t}/inst/.env.local")" = "${line}" ] && [ "$(cd "${t}/inst" && ls -A | wc -l)" -eq 2 ] \
+        || { echo "archived override: $(ls -A "${t}/inst")"; return 1; }
 }
 
 @test "setup install dir: update env paths and compose args" {
-    # What: env paths per layout; compose -f list per state.
-    # Why: a wrong file list starts the wrong stack.
+    # What: env file per layout; compose files per state
+    # Why: a wrong file list starts the wrong stack
     # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" d p case ovr nats envline shell want got
+    local root t="${BATS_TEST_TMPDIR}" body nats ip case line shell got oracle err f want
+    local -a overs
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/setup.sh" is_deploy_prod_install_dir runtime_env_file_for_install_dir \
-        deploy_prod_repo_root resolve_update_ip_config_paths _compose_parse_env_value get_env_var_nonempty \
-        nats_secondary_override_active_for_install_dir compose_file_args_for_install_dir
-    mkdir -p "${t}/qs" "${t}/somewhere/prod" "${t}/repo/deploy/prod"
-    [ "$(resolve_update_ip_config_paths "${t}/qs" | paste -sd'|')" = "${t}/qs/.env||" ]
-    [ "$(resolve_update_ip_config_paths "${t}/somewhere/prod" | paste -sd'|')" = "${t}/somewhere/prod/.env||" ]
-    d="$(realpath -m "${t}/repo")"
-    [ "$(resolve_update_ip_config_paths "${t}/repo/deploy/prod" | paste -sd'|')" \
-        = "${t}/repo/deploy/prod/.env|${d}/config/prod/dns-standard.env|${d}/config/prod/dns-ssl.env" ]
-    : > "${t}/repo/deploy/prod/.env.local"
-    p="$(resolve_update_ip_config_paths "${t}/repo/deploy/prod")"
-    [ "${p%%$'\n'*}" = "${t}/repo/deploy/prod/.env.local" ]
-    : > "${t}/qs/.env.local"
-    p="$(resolve_update_ip_config_paths "${t}/qs")"
-    [ "${p%%$'\n'*}" = "${t}/qs/.env" ]
-    while IFS='|' read -r case ovr nats envline shell want; do
-        d="${t}/c-${case}"
-        mkdir -p "${d}"
-        case "${ovr}" in
-            yml) : > "${d}/docker-compose.override.yml" ;;
-            yaml) : > "${d}/docker-compose.override.yaml" ;;
-            both) : > "${d}/docker-compose.override.yml"; : > "${d}/docker-compose.override.yaml" ;;
-        esac
-        [ "${nats}" != file ] || : > "${d}/docker-compose.nats-secondary.yml"
-        printf '%s\n' "${envline}" > "${d}/.env"
-        if [ "${shell}" = - ]; then
-            got="$(unset NATS_BIND_IP; compose_file_args_for_install_dir "${d}" "${d}/.env" | paste -sd' ')"
-        else
-            got="$(NATS_BIND_IP="${shell}" compose_file_args_for_install_dir "${d}" "${d}/.env" | paste -sd' ')"
-        fi
-        [ "${got}" = "${want//D/${d}}" ] || { echo "${case}: ${got}"; return 1; }
-    done <<'CASES'
-base|none|none|IP_STANDARD=192.0.2.10|-|-f D/docker-compose.yml
-natsnofile|none|none|NATS_BIND_IP=192.0.2.5|-|-f D/docker-compose.yml
-natsunset|none|file|IP_STANDARD=192.0.2.10|-|-f D/docker-compose.yml
-natsempty|none|file|NATS_BIND_IP=|-|-f D/docker-compose.yml
-natsquotedempty|none|file|NATS_BIND_IP=""|-|-f D/docker-compose.yml
-natshashvalue|none|file|NATS_BIND_IP=  # like compose|-|-f D/docker-compose.yml -f D/docker-compose.nats-secondary.yml
-natsset|none|file|NATS_BIND_IP=192.0.2.5|-|-f D/docker-compose.yml -f D/docker-compose.nats-secondary.yml
-natsshell|none|file|IP_STANDARD=192.0.2.10|192.0.2.5|-f D/docker-compose.yml -f D/docker-compose.nats-secondary.yml
-yml|yml|none|IP_STANDARD=192.0.2.10|-|-f D/docker-compose.yml -f D/docker-compose.override.yml
-yaml|yaml|none|IP_STANDARD=192.0.2.10|-|-f D/docker-compose.yml -f D/docker-compose.override.yaml
-both|both|none|IP_STANDARD=192.0.2.10|-|-f D/docker-compose.yml -f D/docker-compose.override.yml
-all|yml|file|NATS_BIND_IP='192.0.2.5'|-|-f D/docker-compose.yml -f D/docker-compose.override.yml -f D/docker-compose.nats-secondary.yml
+    _load_setup_sh "${root}"
+    export DP="${t}/repo/deploy/prod" EF="${t}/repo/deploy/prod/.env" NB
+    _prod_install "${DP}"
+    body="$(declare -f compose_file_args_for_install_dir)"
+    nats="$(grep -oE 'docker-compose\.nats-[a-z-]+\.yml' <<< "${body}" | awk 'NR == 1')"
+    mapfile -t overs < <(grep -oE 'docker-compose\.override\.y[a-z]*ml' <<< "${body}" | awk '!seen[$0]++')
+    ip="$(get_env_var IP_STANDARD "${EF}")"
+    [ -n "${nats}" ] && [ -f "${root}/deploy/prod/${nats}" ] && [ "${#overs[@]}" -ge 2 ] && [ -n "${ip}" ] \
+        || { echo "inputs: ${nats} ${overs[*]} ${ip}"; return 1; }
+    cp "${root}/deploy/prod/${nats}" "${DP}/"
+    cp "${EF}" "${t}/env.base"
+    printf 'services:\n  p:\n    image: %s\n    environment:\n      V: "${NATS_BIND_IP:-}"\n' "${LANCACHE_HELPER_IMAGE}" > "${t}/probe.yml"
+    # What: NATS override in iff compose reads a value
+    # Why: compose's own .env parsing is the only truth
+    # From: Issue #1683 | PR #1858
+    while IFS='|' read -r case line shell; do
+        cp "${t}/env.base" "${EF}"
+        [ "${line}" = - ] || printf '%s\n' "${line}" >> "${EF}"
+        NB="${shell}"
+        _setup_sh_run 'if [ "${NB}" = - ]; then unset NATS_BIND_IP; else export NATS_BIND_IP="${NB}"; fi
+            compose_file_args_for_install_dir "${DP}" "${EF}"'
+        [ "${status}" -eq 0 ] || { echo "${case}: ${output}"; return 1; }
+        got=out; grep -qxF -- "${DP}/${nats}" <<< "${output}" && got=in
+        err="$(if [ "${shell}" = - ]; then unset NATS_BIND_IP; else export NATS_BIND_IP="${shell}"; fi
+            docker compose --env-file "${EF}" -f "${t}/probe.yml" config --format json 2>&1)" \
+            || { echo "${case}: probe: ${err}"; return 1; }
+        oracle=out; [ -z "$(jq -r '.services.p.environment.V' <<< "${err}")" ] || oracle=in
+        [ "${got}" = "${oracle}" ] || { echo "${case}: setup.sh ${got}, compose ${oracle}: ${err}"; return 1; }
+    done <<CASES
+unset|-|-
+empty|NATS_BIND_IP=|-
+quoted|NATS_BIND_IP=""|-
+hash|NATS_BIND_IP=  # ${BATS_TEST_NUMBER}|-
+set|NATS_BIND_IP=${ip}|-
+single|NATS_BIND_IP='${ip}'|-
+shell|-|${ip}
 CASES
+    cp "${t}/env.base" "${EF}"
+    printf 'NATS_BIND_IP=%s\n' "${ip}" >> "${EF}"
+    rm -f "${DP}/${nats}"
+    _setup_sh_run 'compose_file_args_for_install_dir "${DP}" "${EF}"'
+    [ "${status}" -eq 0 ] && [ "${output}" = "-f"$'\n'"${DP}/docker-compose.yml" ] || { echo "no override file: ${output}"; return 1; }
+    # What: explicit -f list equals compose's own auto-load
+    # Why: setup.sh must pass -f and still keep overrides
+    # From: Issue #1683 | PR #1858
+    for case in "${overs[0]}" "${overs[1]}" both; do
+        rm -f "${DP}"/docker-compose.override.*
+        for f in "${overs[@]}"; do
+            [ "${case}" = both ] || [ "${case}" = "${f}" ] || continue
+            printf 'services:\n  %s:\n    image: %s\n' "${f//./-}" "${LANCACHE_HELPER_IMAGE}" > "${DP}/${f}"
+        done
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; stack_compose "${DP}" "${EF}" config --services'
+        [ "${status}" -eq 0 ] || { echo "${case}: ${output}"; return 1; }
+        got="$(sort <<< "${output}")"
+        want="$(cd "${DP}" && docker compose --env-file "${EF}" config --services)"
+        [ "${got}" = "$(sort <<< "${want}")" ] || { echo "${case}: setup.sh ${got} | compose ${want}"; return 1; }
+    done
+    : > "${DP}/.env.local"
+    mkdir -p "${t}/legacy" && : > "${t}/legacy/.env.local"
+    [ "$(runtime_env_file_for_install_dir "${DP}")" = "${DP}/.env.local" ] \
+        && [ "$(runtime_env_file_for_install_dir "${t}/legacy")" = "${t}/legacy/.env" ] || { echo "env file per layout"; return 1; }
 }
 
 @test "setup bootstrap ref pins the checkout per ref kind" {
-    # What: tag, branch, commit, unknown ref, dirty tree.
-    # Why: an operator ref must pin exactly that revision.
+    # What: tag, branch, commit, unknown ref, dirty tree
+    # Why: an operator ref must pin exactly that revision
     # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" dev tag master
+    local root t="${BATS_TEST_TMPDIR}" main tagsha brsha mainsha ref want
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/setup.sh" resolve_setup_bootstrap_ref git_repo_is_clean git_default_branch_name \
-        sync_repo_to_ref sync_repo_to_default_branch
-    die() { printf '%s\n' "$*" >&2; exit 1; }
-    g() { git -c user.email=t@example.test -c user.name=t -c init.defaultBranch=master "$@"; }
+    _load_setup_sh "${root}"
+    export T="${t}" TAG="v$(cat "${root}/VERSION")" BR="b${BATS_TEST_NUMBER}" REF
+    main="$(declare -f git_default_branch_name | sed -n 's/.*default_branch:-\([A-Za-z0-9_-]*\)}.*/\1/p')"
+    [ -n "${main}" ] || { echo "no fallback branch in git_default_branch_name"; return 1; }
+    g() { git -c user.email=t@example.test -c user.name=t -c init.defaultBranch="${main}" "$@"; }
     g init -q --bare "${t}/origin.git"
     g init -q "${t}/src"
     g -C "${t}/src" commit -q --allow-empty -m c1
-    g -C "${t}/src" push -q "${t}/origin.git" HEAD:refs/heads/master
-    g -C "${t}/src" tag v0.2.0
-    g -C "${t}/src" push -q "${t}/origin.git" v0.2.0
+    g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}"
+    g -C "${t}/src" tag "${TAG}"
+    g -C "${t}/src" push -q "${t}/origin.git" "${TAG}"
     g -C "${t}/src" commit -q --allow-empty -m c2
-    g -C "${t}/src" push -q "${t}/origin.git" HEAD:refs/heads/master
-    master="$(g -C "${t}/src" rev-parse HEAD)"
-    tag="$(g -C "${t}/src" rev-parse v0.2.0)"
-    g -C "${t}/src" checkout -q -b dev
+    g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}"
+    mainsha="$(g -C "${t}/src" rev-parse HEAD)"
+    tagsha="$(g -C "${t}/src" rev-parse "${TAG}^{commit}")"
+    g -C "${t}/src" checkout -q -b "${BR}"
     g -C "${t}/src" commit -q --allow-empty -m d1
-    g -C "${t}/src" push -q "${t}/origin.git" HEAD:refs/heads/dev
-    dev="$(g -C "${t}/src" rev-parse HEAD)"
-    g clone -q "${t}/origin.git" "${t}/co" 2>/dev/null
-    [ "$(unset LANCACHE_SETUP_GIT_REF; resolve_setup_bootstrap_ref)" = "" ]
-    [ "$(LANCACHE_SETUP_GIT_REF=v0.2.0 resolve_setup_bootstrap_ref)" = v0.2.0 ]
-    sync_repo_to_ref "${t}/co" v0.2.0 2>/dev/null
-    [ "$(g -C "${t}/co" rev-parse HEAD)" = "${tag}" ]
-    sync_repo_to_ref "${t}/co" dev 2>/dev/null
-    [ "$(g -C "${t}/co" rev-parse HEAD)" = "${dev}" ]
-    sync_repo_to_ref "${t}/co" "${tag}" 2>/dev/null
-    [ "$(g -C "${t}/co" rev-parse HEAD)" = "${tag}" ]
-    run sync_repo_to_ref "${t}/co" no-such-ref
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"Failed to fetch ref 'no-such-ref'"* ]]
-    sync_repo_to_default_branch "${t}/co" 2>/dev/null
-    [ "$(g -C "${t}/co" rev-parse HEAD)" = "${master}" ]
+    g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${BR}"
+    brsha="$(g -C "${t}/src" rev-parse HEAD)"
+    g clone -q "${t}/origin.git" "${t}/co"
+    _setup_sh_run 'unset LANCACHE_SETUP_GIT_REF; resolve_setup_bootstrap_ref'
+    [ "${status}" -eq 0 ] && [ -z "${output}" ] || { echo "unset ref: ${output}"; return 1; }
+    _setup_sh_run 'LANCACHE_SETUP_GIT_REF="${TAG}" resolve_setup_bootstrap_ref'
+    [ "${status}" -eq 0 ] && [ "${output}" = "${TAG}" ] || { echo "set ref: ${output}"; return 1; }
+    # What: each ref kind lands on exactly its commit
+    # Why: tag, branch and commit pins must not drift
+    # From: Issue #1683 | PR #1858
+    while read -r ref want; do
+        REF="${ref}"
+        _setup_sh_run 'sync_repo_to_ref "${T}/co" "${REF}"'
+        [ "${status}" -eq 0 ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${want}" ] || { echo "${ref}: ${output}"; return 1; }
+    done <<CASES
+${TAG} ${tagsha}
+${BR} ${brsha}
+${tagsha} ${tagsha}
+CASES
+    REF="missing-${BR}"
+    _setup_sh_run 'sync_repo_to_ref "${T}/co" "${REF}"; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"Failed to fetch ref '${REF}'"* && "${output}" != *unreached* ]] \
+        || { echo "missing ref: ${output}"; return 1; }
+    _setup_sh_run 'sync_repo_to_default_branch "${T}/co"'
+    [ "${status}" -eq 0 ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${mainsha}" ] || { echo "default: ${output}"; return 1; }
     g -C "${t}/co" remote set-head origin --delete
-    sync_repo_to_ref "${t}/co" dev 2>/dev/null
-    sync_repo_to_default_branch "${t}/co" 2>/dev/null
-    [ "$(g -C "${t}/co" rev-parse HEAD)" = "${master}" ] || { echo "fallback branch: $(g -C "${t}/co" branch --show-current)"; return 1; }
+    REF="${BR}"
+    _setup_sh_run 'sync_repo_to_ref "${T}/co" "${REF}" && sync_repo_to_default_branch "${T}/co"'
+    [ "${status}" -eq 0 ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${mainsha}" ] || { echo "no origin/HEAD: ${output}"; return 1; }
     g init -q "${t}/noorigin"
-    [ "$(git_default_branch_name "${t}/noorigin")" = master ]
-    echo edit > "${t}/co/local.txt"
-    run sync_repo_to_ref "${t}/co" v0.2.0
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"has local changes"* ]]
-    [ -f "${t}/co/local.txt" ]
-    [ "$(g -C "${t}/co" rev-parse HEAD)" = "${master}" ]
+    _setup_sh_run 'git_default_branch_name "${T}/noorigin"; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"Failed to read the remote origin of ${t}/noorigin"* && "${output}" != *unreached* ]] \
+        || { echo "noorigin: ${output}"; return 1; }
+    g init -q --bare "${t}/nohead.git"
+    g init -q "${t}/unknown"
+    g -C "${t}/unknown" remote add origin "${t}/nohead.git"
+    _setup_sh_run 'git_default_branch_name "${T}/unknown"'
+    [ "${status}" -eq 0 ] && [ "${output}" = "${main}" ] || { echo "unknown head: ${output}"; return 1; }
+    printf '%s\n' "${BR}" > "${t}/co/${BR}.txt"
+    REF="${TAG}"
+    _setup_sh_run 'sync_repo_to_ref "${T}/co" "${REF}"; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"has local changes"* && "${output}" != *unreached* ]] \
+        && [ -f "${t}/co/${BR}.txt" ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${mainsha}" ] || { echo "dirty: ${output}"; return 1; }
 }
 
 @test "setup env migration and release image tag per input" {
-    # What: migrated keys, proxy mode, tag from git/VERSION.
-    # Why: an update keeps operator values and pins a tag.
+    # What: migrated keys, proxy mode, tag from git/VERSION
+    # Why: an update keeps operator values and pins a tag
     # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" e="${BATS_TEST_TMPDIR}/.env" case lines args want rc dir
-    local -a a
+    local root t="${BATS_TEST_TMPDIR}" ip v raw case lines want rc tags tag
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/setup.sh" _compose_parse_env_value get_env_var env_key_exists \
-        get_env_assignment_value_raw_nonempty validate_env_value write_env_file set_env_assignment set_env_key \
-        append_env_migrated_assignment_if_missing migrate_proxy_security_mode_for_update \
-        derive_release_archive_image_tag validate_lancache_image_channel validate_lancache_image_tag \
-        validate_lancache_image_prefix validate_lancache_image_registry resolve_lancache_image_prefix \
-        resolve_lancache_image_registry lancache_stack_pointer_channel_for resolve_lancache_stack_channel_tag \
-        resolve_lancache_image_channel resolve_lancache_image_tag
-    die() { printf '%s\n' "$*" >&2; exit 1; }
-    print_ok() { :; }
-    while IFS='|' read -r case lines args want; do
-        printf '%b' "${lines}" > "${e}"
-        read -r -a a <<< "${args}"
-        [ "${a[2]}" != - ] || a[2]=""
-        append_env_migrated_assignment_if_missing "${a[0]}" "${a[1]}" "${a[2]}" "${e}"
-        [ "$(paste -sd'#' "${e}")" = "${want}" ] || { echo "${case}: $(paste -sd'#' "${e}")"; return 1; }
-    done <<'CASES'
-emptytarget|IP_STANDARD=192.0.2.10\nUI_BIND_IP=\n|UI_BIND_IP IP_STANDARD 192.0.2.10|IP_STANDARD=192.0.2.10#UI_BIND_IP=
-copysyntax|CACHE_DIR="/opt/lancache cache" # fast disk\n|CACHE_DIR_STANDARD CACHE_DIR /opt/lancache-ng/cache|CACHE_DIR="/opt/lancache cache" # fast disk#CACHE_DIR_STANDARD="/opt/lancache cache" # fast disk
-keep|CACHE_DIR=/legacy/cache\nCACHE_DIR_STANDARD=/custom/cache\n|CACHE_DIR_STANDARD CACHE_DIR /opt/lancache-ng/cache|CACHE_DIR=/legacy/cache#CACHE_DIR_STANDARD=/custom/cache
-fallback|CACHE_DIR=\n|CACHE_DIR_STANDARD CACHE_DIR /opt/lancache-ng/cache|CACHE_DIR=#CACHE_DIR_STANDARD=/opt/lancache-ng/cache
-nothing|OTHER=1\n|NEW_KEY MISSING_KEY -|OTHER=1
-CASES
+    _load_setup_sh "${root}"
+    ip="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")"
+    v="$(tr -d '[:space:]' < "${root}/VERSION")"
+    raw="\"${t}/a b\" # ${BATS_TEST_NUMBER}"
+    [ -n "${ip}" ] && [ -n "${v}" ] || { echo "inputs: ${ip} ${v}"; return 1; }
+    export E="${t}/.env" IP="${ip}"
+    # What: UI_BIND_IP follows IP_STANDARD only when unset
+    # Why: an operator's own value or syntax must survive
+    # From: Issue #1683 | PR #1858
     while IFS='|' read -r case lines want; do
-        printf '%b' "${lines}" > "${e}"
-        migrate_proxy_security_mode_for_update "${e}"
-        [ "$(paste -sd'#' "${e}")" = "${want}" ] || { echo "${case}: $(paste -sd'#' "${e}")"; return 1; }
-    done <<'CASES'
+        printf '%b' "${lines}" > "${E}"
+        _setup_sh_run 'append_env_migrated_assignment_if_missing UI_BIND_IP IP_STANDARD "${IP}" "${E}"'
+        [ "${status}" -eq 0 ] && [ "$(paste -sd'#' "${E}")" = "${want}" ] || { echo "${case}: $(paste -sd'#' "${E}")"; return 1; }
+    done <<CASES
+emptytarget|IP_STANDARD=${ip}\nUI_BIND_IP=\n|IP_STANDARD=${ip}#UI_BIND_IP=
+copysyntax|IP_STANDARD=${raw}\n|IP_STANDARD=${raw}#UI_BIND_IP=${raw}
+keep|IP_STANDARD=${ip}\nUI_BIND_IP=${t}\n|IP_STANDARD=${ip}#UI_BIND_IP=${t}
+fallback|IP_STANDARD=\n|IP_STANDARD=#UI_BIND_IP=${ip}
+CASES
+    printf '%s\n' "IP_STANDARD=" > "${E}"
+    _setup_sh_run 'append_env_migrated_assignment_if_missing UI_BIND_IP IP_STANDARD "" "${E}"'
+    [ "${status}" -eq 0 ] && [ "$(cat "${E}")" = "IP_STANDARD=" ] || { echo "nothing: $(cat "${E}")"; return 1; }
+    # What: strict without CIDRs becomes lazy
+    # Why: strict with no allow-list blocks every client
+    # From: Issue #1683 | PR #1858
+    while IFS='|' read -r case lines want; do
+        printf '%b' "${lines}" > "${E}"
+        _setup_sh_run 'migrate_proxy_security_mode_for_update "${E}"'
+        [ "${status}" -eq 0 ] && [ "$(paste -sd'#' "${E}")" = "${want}" ] || { echo "${case}: $(paste -sd'#' "${E}")"; return 1; }
+    done <<CASES
 strictopen|PROXY_SECURITY_MODE=strict\nPROXY_ALLOWED_CLIENT_CIDRS=\n|PROXY_SECURITY_MODE=lazy#PROXY_ALLOWED_CLIENT_CIDRS=
-strictcidr|PROXY_SECURITY_MODE=strict\nPROXY_ALLOWED_CLIENT_CIDRS=192.168.1.0/24\n|PROXY_SECURITY_MODE=strict#PROXY_ALLOWED_CLIENT_CIDRS=192.168.1.0/24
+strictcidr|PROXY_SECURITY_MODE=strict\nPROXY_ALLOWED_CLIENT_CIDRS=${ip%.*}.0/24\n|PROXY_SECURITY_MODE=strict#PROXY_ALLOWED_CLIENT_CIDRS=${ip%.*}.0/24
 lazy|PROXY_SECURITY_MODE=lazy\n|PROXY_SECURITY_MODE=lazy
 CASES
-    unset LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_TAG
-    export SCRIPT_DIR="${t}/archive"
-    mkdir -p "${SCRIPT_DIR}"
+    # What: VERSION shapes map to a release tag or a refusal
+    # Why: a bad VERSION must never become an image tag
+    # From: Issue #1683 | PR #1858
+    export SD="${t}/archive"
+    mkdir -p "${SD}"
     while IFS='|' read -r case want rc; do
-        printf '%s\n' "${case}" > "${SCRIPT_DIR}/VERSION"
-        [ "${case}" != empty ] || : > "${SCRIPT_DIR}/VERSION"
-        run derive_release_archive_image_tag
+        printf '%s\n' "${case}" > "${SD}/VERSION"
+        [ "${case}" != - ] || : > "${SD}/VERSION"
+        _setup_sh_run 'unset LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_TAG; SCRIPT_DIR="${SD}"; derive_release_archive_image_tag'
         [ "${status}" -eq "${rc}" ] && [ "${output}" = "${want}" ] || { echo "VERSION ${case}: rc ${status} ${output}"; return 1; }
-    done <<'CASES'
-0.2.0|v0.2.0|0
-v1.2.3-rc.1|v1.2.3-rc.1|0
-1.2|Invalid release image tag derived from VERSION: v1.2|2
-empty|VERSION is empty; cannot derive a release image tag.|2
+    done <<CASES
+${v#v}|v${v#v}|0
+v${v#v}-rc.1|v${v#v}-rc.1|0
+${v%.*}|Invalid release image tag derived from VERSION: v${v%.*}|2
+-|VERSION is empty; cannot derive a release image tag.|2
 CASES
-    printf '0.2.0\n' > "${SCRIPT_DIR}/VERSION"
-    [ "$(resolve_lancache_image_channel "${t}/missing.env")" = pinned ]
-    [ "$(LANCACHE_IMAGE_CHANNEL=pinned resolve_lancache_image_tag "${t}/missing.env")" = v0.2.0 ]
-    git() {
-        local a ok=0
-        for a in "$@"; do [ "${a}" != "safe.directory=${STUB_TRUST}" ] || ok=1; done
-        if [ "${ok}" -eq 0 ]; then
-            printf "fatal: detected dubious ownership in repository at '%s'\nTo add an exception for this directory, call:\n\n\tgit config --global --add safe.directory '%s'\n" \
-                "${STUB_TRUST}" "${STUB_TRUST}" >&2
-            return 128
-        fi
-        case "$*" in
-            *"rev-parse --is-inside-work-tree"*) return 0 ;;
-            *"describe --tags --exact-match"*) [ -n "${STUB_TAG}" ] || return 128; printf '%s\n' "${STUB_TAG}" ;;
-            *) return 1 ;;
-        esac
-    }
-    mkdir -p "${t}/real dir"
-    ln -s "${t}/real dir" "${t}/link"
-    while IFS='|' read -r case dir want args; do
-        export SCRIPT_DIR="${t}/${dir}" STUB_TRUST="${t}/real dir" STUB_TAG="${args}"
-        : > "${SCRIPT_DIR}/.git"
-        printf '9.9.9\n' > "${SCRIPT_DIR}/VERSION"
-        run derive_release_archive_image_tag
-        [ "${status}" -eq "${want%%:*}" ] || { echo "${case}: rc ${status} ${output}"; return 1; }
-        [ "$(grep -v '^Note: ' <<< "${output}")" = "${want#*:}" ] || { echo "${case}: ${output}"; return 1; }
-    done <<'CASES'
-tagged|real dir|0:v2.0.0|v2.0.0
-untagged|real dir|1:|
-symlink|link|0:v3.2.1|v3.2.1
-badtag|real dir|2:Invalid release tag from git checkout: release-7|release-7
+    printf '%s\n' "${v}" > "${SD}/VERSION"
+    _setup_sh_run 'unset LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_TAG; SCRIPT_DIR="${SD}"
+        printf "%s|%s|%s|%s\n" "$(resolve_lancache_image_channel "${SD}/missing.env")" \
+            "$(LANCACHE_IMAGE_CHANNEL=pinned resolve_lancache_image_tag "${SD}/missing.env")" \
+            "$(LANCACHE_IMAGE_CHANNEL=nightly resolve_lancache_image_tag "${SD}/missing.env")" \
+            "$(LANCACHE_IMAGE_CHANNEL=stable resolve_lancache_image_tag "${SD}/missing.env")"'
+    [ "${status}" -eq 0 ] && [ "${output}" = "pinned|v${v#v}|nightly|latest" ] || { echo "channels: ${output}"; return 1; }
+    # What: a release tag at HEAD wins; real git
+    # Why: a checkout must deploy exactly its tagged images
+    # From: Issue #1683 | PR #1858
+    g() { git -c user.email=t@example.test -c user.name=t "$@"; }
+    export GD="${t}/real dir"
+    g init -q "${GD}" && g -C "${GD}" commit -q --allow-empty -m c1
+    printf '%s\n' "${v}" > "${GD}/VERSION"
+    ln -s "${GD}" "${t}/link"
+    while IFS='|' read -r case tags want rc; do
+        g -C "${GD}" tag -l | while IFS= read -r tag; do g -C "${GD}" tag -d "${tag}" > /dev/null; done
+        for tag in ${tags}; do g -C "${GD}" tag "${tag}"; done
+        export SDIR="${GD}"
+        [ "${case}" != symlink ] || SDIR="${t}/link"
+        _setup_sh_run 'SCRIPT_DIR="${SDIR}"; derive_release_archive_image_tag'
+        [ "${status}" -eq "${rc}" ] && [ "$(grep -v '^Note: ' <<< "${output}")" = "${want}" ] \
+            || { echo "${case}: rc ${status} ${output}"; return 1; }
+    done <<CASES
+tagged|v${v#v}|v${v#v}|0
+untagged|||1
+symlink|v${v#v}|v${v#v}|0
+badtag|release-${BATS_TEST_NUMBER}|Invalid release tag from git checkout: release-${BATS_TEST_NUMBER}|2
+multi|v${v#v} v${v#v}-rc.1|Several release tags point at HEAD: v${v#v} v${v#v}-rc.1|2
 CASES
+    g -C "${GD}" tag -l | while IFS= read -r tag; do g -C "${GD}" tag -d "${tag}" > /dev/null; done
+    g -C "${GD}" tag "v${v#v}"
+    chown -R "$(( $(id -u) + 1 ))" "${GD}" || { echo "chown needs root for the dubious-ownership case"; return 1; }
+    export SDIR="${GD}"
+    _setup_sh_run 'SCRIPT_DIR="${SDIR}"; derive_release_archive_image_tag'
+    [ "${status}" -eq 0 ] && [ "$(tail -n 1 <<< "${output}")" = "v${v#v}" ] && [[ "${output}" == "Note: ${GD} has different file ownership"* ]] \
+        || { echo "dubious: rc ${status} ${output}"; return 1; }
 }
 
 @test "setup image channel validation, resolution and pointer" {
-    # What: channels, retired hints, inference, pointer.
-    # Why: a retired channel stops setup with a clear hint.
+    # What: SOT channels valid; retired names give a hint
+    # Why: setup.sh and the SOT must name the same channels
     # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" case v want rc got
+    local root t="${BATS_TEST_TMPDIR}" mut rel arms accepted retired alias pin="" first second v sha case line want
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/setup.sh" _compose_parse_env_value get_env_var derive_release_archive_image_tag \
-        validate_lancache_image_channel lancache_stack_pointer_channel_for resolve_lancache_image_channel
-    die() { printf '%s\n' "$*" >&2; exit 1; }
-    while IFS='|' read -r v rc want; do
-        run validate_lancache_image_channel "${v}"
-        [ "${status}" -eq "${rc}" ] && [[ "${output}" == *"${want}"* ]] || { echo "channel ${v}: rc ${status} ${output}"; return 1; }
-    done <<'CASES'
-stable|0|
-latest|0|
-nightly|0|
-pinned|0|
-edge|1|renamed to 'nightly'
-dev|1|LANCACHE_IMAGE_CHANNEL=nightly
-bogus|1|must be stable, latest, nightly, or pinned
-|1|must be stable, latest, nightly, or pinned
-CASES
-    for v in stable:latest latest:latest nightly:nightly pinned:pinned; do
-        [ "$(lancache_stack_pointer_channel_for "${v%%:*}")" = "${v#*:}" ] || { echo "pointer ${v}"; return 1; }
+    _load_setup_sh "${root}"
+    mut="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_list release retention keep_mutable_channels)"
+    rel="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_channel_field release_tags | awk '$2 == "true" { print $1 }')"
+    arms="$(declare -f validate_lancache_image_channel | sed -n 's/^ *\([a-z| ]*\))$/\1/p' | tr -d ' ')"
+    accepted="$(awk 'NR == 1' <<< "${arms}" | tr '|' '\n')"
+    retired="$(awk 'NR > 1' <<< "${arms}" | tr '|' '\n')"
+    v="$(tr -d '[:space:]' < "${root}/VERSION")"
+    sha="sha-$(sha256sum "${root}/VERSION" | cut -c1-40)"
+    [ "$(wc -l <<< "${mut}")" -ge 2 ] && [ "$(wc -w <<< "${rel}")" -eq 1 ] && [ -n "${retired}" ] \
+        || { echo "inputs: ${mut} | ${rel} | ${arms}"; return 1; }
+    first="$(awk 'NR == 1' <<< "${mut}")" second="$(awk 'NR == 2' <<< "${mut}")"
+    export C SD="${t}/plain" E="${t}/.env" SHELLC SHELLT
+    mkdir -p "${SD}"
+    # What: each SOT channel is valid, points to itself
+    # Why: an alias points at the SOT release-tag channel
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r C; do
+        grep -qxF -- "${C}" <<< "${accepted}" || { echo "SOT channel ${C} not accepted by setup.sh"; return 1; }
+        _setup_sh_run 'validate_lancache_image_channel "${C}" && lancache_stack_pointer_channel_for "${C}"'
+        [ "${status}" -eq 0 ] && [ "${output}" = "${C}" ] || { echo "channel ${C}: ${output}"; return 1; }
+    done <<< "${mut}"
+    while IFS= read -r alias; do
+        grep -qxF -- "${alias}" <<< "${mut}" && continue
+        C="${alias}"
+        _setup_sh_run 'validate_lancache_image_channel "${C}" && lancache_stack_pointer_channel_for "${C}"'
+        [ "${output}" != "${alias}" ] || pin="${alias}"
+        [ "${status}" -eq 0 ] && { [ "${output}" = "${rel}" ] || [ "${output}" = "${alias}" ]; } \
+            || { echo "alias ${alias}: ${output}"; return 1; }
+    done <<< "${accepted}"
+    while IFS= read -r C; do
+        _setup_sh_run 'validate_lancache_image_channel "${C}"; echo unreached'
+        [ "${status}" -eq 1 ] && [[ "${output}" != *unreached* ]] && grep -qF -f <(sed 's/^/LANCACHE_IMAGE_CHANNEL=/' <<< "${mut}") <<< "${output}" \
+            || { echo "retired ${C}: ${output}"; return 1; }
+    done <<< "${retired}"
+    for C in "x${BATS_TEST_NUMBER}" ""; do
+        _setup_sh_run 'validate_lancache_image_channel "${C}"; echo unreached'
+        [ "${status}" -eq 1 ] && [[ "${output}" == *"must be"* && "${output}" != *unreached* ]] || { echo "unknown '${C}': ${output}"; return 1; }
     done
-    unset LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_TAG
-    export SCRIPT_DIR="${t}/plain"
-    mkdir -p "${SCRIPT_DIR}"
-    while IFS='|' read -r case v want; do
-        printf '%b' "${v}" > "${t}/.env"
-        case "${case}" in
-            env*) got="$(resolve_lancache_image_channel "${t}/.env")" ;;
-            shellchan) got="$(LANCACHE_IMAGE_CHANNEL=stable resolve_lancache_image_channel "${t}/.env")" ;;
-            shelltag) got="$(LANCACHE_IMAGE_TAG=stable resolve_lancache_image_channel "${t}/missing.env")" ;;
-            none) got="$(resolve_lancache_image_channel "${t}/missing.env")" ;;
-        esac
-        [ "${got}" = "${want}" ] || { echo "${case}: ${got}"; return 1; }
-    done <<'CASES'
-none||latest
-shellchan|LANCACHE_IMAGE_CHANNEL=nightly\n|stable
-shelltag||stable
-envchan|LANCACHE_IMAGE_CHANNEL=nightly\n|nightly
-envtagsha|LANCACHE_IMAGE_TAG=sha-0123456789abcdef0123456789abcdef01234567\n|pinned
-envtagv|LANCACHE_IMAGE_TAG=v0.3.1\n|pinned
-envtagnightly|LANCACHE_IMAGE_TAG=nightly\n|nightly
+    [ -n "${pin}" ] || { echo "no self-pointing alias in setup.sh"; return 1; }
+    # What: shell beats .env; a tag implies its channel
+    # Why: one resolution order for every caller
+    # From: Issue #1683 | PR #1858
+    while IFS='|' read -r case SHELLC SHELLT line want; do
+        printf '%b' "${line}" > "${E}"
+        _setup_sh_run 'SCRIPT_DIR="${SD}"; unset LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_TAG
+            [ -z "${SHELLC}" ] || export LANCACHE_IMAGE_CHANNEL="${SHELLC}"
+            [ -z "${SHELLT}" ] || export LANCACHE_IMAGE_TAG="${SHELLT}"
+            resolve_lancache_image_channel "${E}"'
+        [ "${status}" -eq 0 ] && [ "${output}" = "${want}" ] || { echo "${case}: ${output}"; return 1; }
+    done <<CASES
+none||||${rel}
+shellchan|${first}||LANCACHE_IMAGE_CHANNEL=${second}\n|${first}
+shelltag||${second}||${second}
+envchan|||LANCACHE_IMAGE_CHANNEL=${second}\n|${second}
+envtagsha|||LANCACHE_IMAGE_TAG=${sha}\n|${pin}
+envtagv|||LANCACHE_IMAGE_TAG=v${v#v}\n|${pin}
+envtagchannel|||LANCACHE_IMAGE_TAG=${first}\n|${first}
 CASES
-    LANCACHE_IMAGE_CHANNEL=edge run resolve_lancache_image_channel "${t}/missing.env"
-    [ "${status}" -eq 1 ]
+    C="$(awk 'NR == 1' <<< "${retired}")"
+    _setup_sh_run 'SCRIPT_DIR="${SD}"; LANCACHE_IMAGE_CHANNEL="${C}" resolve_lancache_image_channel "${E}"; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" != *unreached* ]] || { echo "retired in shell: ${output}"; return 1; }
 }
 
 @test "setup env value parsing and write safety per shape" {
-    # What: compose-style value parse; unsafe values fail.
-    # Why: setup reads .env like compose, never breaks it.
+    # What: setup.sh reads every .env shape as compose does
+    # Why: setup must act on the value the stack will use
     # From: Issue #1683 | PR #1858
-    local root e="${BATS_TEST_TMPDIR}/.env" case line want v
+    local root t="${BATS_TEST_TMPDIR}" n p ip case line want v code c
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/setup.sh" _compose_parse_env_value get_env_var validate_env_value
-    die() { printf '%s\n' "$*" >&2; exit 1; }
-    while IFS='|' read -r case line want; do
-        printf '%s\n' "${line}" 'OTHER=1' > "${e}"
-        [ "$(get_env_var KEY "${e}")" = "${want}" ] || { echo "${case}: '$(get_env_var KEY "${e}")'"; return 1; }
-    done <<'CASES'
-plain|KEY=value|value
-dquote|KEY="/opt/lancache cache" # fast disk|/opt/lancache cache
-squote|KEY='a # b' # c|a # b
-comment|KEY=x # c|x
-hashnospace|KEY=x#y|x#y
-spaces|KEY=  padded  |padded
-empty|KEY=|
-missing|NOTKEY=1|
-first|KEY=one|one
+    _load_setup_sh "${root}"
+    export E="${t}/.env" RAWV="${t}"$'\t'"&\\1"
+    n="${BATS_TEST_NUMBER}" p="${t}/a b" ip="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")"
+    printf 'services:\n  p:\n    image: %s\n    environment:\n      V: "${KEY:-}"\n' "${LANCACHE_HELPER_IMAGE}" > "${t}/probe.yml"
+    _compose_value() {
+        local json
+        json="$(docker compose --env-file "${E}" -f "${t}/probe.yml" config --format json)" || return 1
+        jq -r '.services.p.environment.V' <<< "${json}"
+    }
+    while IFS='|' read -r case line; do
+        printf '%b\nOTHER=1\n' "${line}" > "${E}"
+        want="$(_compose_value)" || { echo "${case}: compose cannot read ${line}"; return 1; }
+        _setup_sh_run 'get_env_var KEY "${E}"'
+        [ "${status}" -eq 0 ] && [ "${output}" = "${want}" ] || { echo "${case}: setup.sh '${output}', compose '${want}'"; return 1; }
+        _setup_sh_run 'get_env_var_nonempty KEY "${E}"'
+        [ "${status}" -eq 0 ] && { [ -z "${want}" ] || [ "${output}" = "${want}" ]; } \
+            || { echo "${case}: nonempty '${output}', compose '${want}'"; return 1; }
+    done <<CASES
+plain|KEY=${n}
+dquote|KEY="${p}" # ${n}
+squote|KEY='${p} # ${n}' # ${n}
+comment|KEY=${n} # ${n}
+hashnospace|KEY=${n}#${n}
+spaces|KEY=  ${n}\x20\x20
+empty|KEY=
+missing|NOTKEY=${n}
+duplicate|KEY=${n}\nKEY=${ip}
+laterempty|KEY=${n}\nKEY=
 CASES
-    printf 'KEY=one\nKEY=two\n' > "${e}"
-    [ "$(get_env_var KEY "${e}")" = one ]
-    [ -z "$(get_env_var KEY "${BATS_TEST_TMPDIR}/none.env")" ]
-    for v in '' /opt/lancache-ng 192.0.2.10 'a b'; do
-        validate_env_value KEY "${v}" || { echo "'${v}' refused"; return 1; }
+    _setup_sh_run 'printf "[%s]" "$(get_env_var KEY "${E}.none")"'
+    [ "${status}" -eq 0 ] && [ "${output}" = "[]" ] || { echo "missing file: ${output}"; return 1; }
+    # What: an accepted value always round-trips via compose
+    # Why: validate_env_value guards each written value
+    # From: Issue #1683 | PR #1858
+    for code in $(seq 32 126) 10; do
+        c="$(printf "\\$(printf '%03o' "${code}")")"
+        [ "${code}" -ne 10 ] || c=$'\n'
+        export V="a${c}b"
+        _setup_sh_run 'validate_env_value KEY "${V}"'
+        if [ "${status}" -eq 0 ]; then
+            printf 'KEY=%s\n' "${V}" > "${E}"
+            [ "$(_compose_value)" = "${V}" ] || { echo "accepted char ${code} does not round-trip"; return 1; }
+        else
+            [[ "${output}" == *"KEY contains unsafe characters for .env"* ]] || { echo "char ${code}: ${output}"; return 1; }
+        fi
     done
-    for v in '/opt/lancache # broken' 'a$b' 'a`b' 'a"b' "a'b" 'a\b' $'a\nb'; do
-        run validate_env_value CACHE_DIR "${v}"
-        [ "${status}" -eq 1 ] && [[ "${output}" == *"CACHE_DIR contains unsafe characters for .env"* ]] || {
-            echo "'${v}' accepted: ${output}"; return 1; }
+    for V in "" "${DEFAULT_INSTALL_DIR}" "${ip}" "${p}"; do
+        export V
+        _setup_sh_run 'validate_env_value KEY "${V}"'
+        [ "${status}" -eq 0 ] || { echo "'${V}' refused: ${output}"; return 1; }
     done
+    # What: a failed read or write stops, changes nothing
+    # Why: a half-read value must never drive a write
+    # From: Issue #1683 | PR #1858
+    _fail_stub "${t}/fb" awk
+    export FAIL_MATCH="${E}" FB="${t}/fb"
+    printf 'A=1\nB=2\nC=3\n' > "${E}"
+    cp "${E}" "${E}.before"
+    for v in 'remove_env_key C "${E}"' 'set_env_key B 9 "${E}"' 'set_env_assignment B 9 "${E}"'; do
+        _setup_sh_run 'PATH="${FB}:${PATH}"; '"${v}"'; echo unreached'
+        [ "${status}" -eq 1 ] && [[ "${output}" == *"Failed to rewrite "?" in ${E}"* && "${output}" != *unreached* ]] \
+            && cmp -s "${E}.before" "${E}" || { echo "${v}: rc ${status} ${output}"; return 1; }
+    done
+    for v in get_env_var get_env_var_nonempty get_env_assignment_value_raw get_env_assignment_value_raw_nonempty; do
+        _setup_sh_run 'PATH="${FB}:${PATH}"; r=$('"${v}"' B "${E}"); echo "unreached ${r}"'
+        [ "${status}" -eq 1 ] && [[ "${output}" == *"Failed to read B from ${E}"* && "${output}" != *unreached* ]] \
+            || { echo "${v}: rc ${status} ${output}"; return 1; }
+    done
+    mkdir -p "${E}.d"
+    _setup_sh_run 'env_key_exists C "${E}.d"; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"Failed to read ${E}.d while looking up C"* && "${output}" != *unreached* ]] \
+        || { echo "dir: ${output}"; return 1; }
+    printf 'K=%s\nK=%s\n' "${n}" "${ip}" > "${E}"
+    _setup_sh_run 'set_env_assignment K "${RAWV}" "${E}" && remove_env_key OTHER "${E}"'
+    [ "${status}" -eq 0 ] && [ "$(cat "${E}")" = "K=${RAWV}" ] || { echo "raw write: $(cat "${E}")"; return 1; }
+    _setup_sh_run 'remove_env_key K "${E}"'
+    [ "${status}" -eq 0 ] && [ ! -s "${E}" ] || { echo "remove: $(cat "${E}")"; return 1; }
 }
 
 @test "setup ui override validators per value" {
-    # What: ui channel, cache size and dhcp mode overrides.
-    # Why: a ui-written value reaches .env only if valid.
+    # What: setup accepts exactly what the UI can write
+    # Why: a UI value must never be dropped or misread
     # From: Issue #1683 | PR #1858
-    local root fn v want
+    local root ui chans modes other gb v
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/setup.sh" lancache_ui_channel_override_is_valid \
-        lancache_ui_cache_max_gb_override_is_valid lancache_ui_dhcp_mode_override_is_valid
-    while IFS='|' read -r fn v want; do
-        if "lancache_ui_${fn}_override_is_valid" "${v}"; then [ "${want}" = ok ]; else [ "${want}" = bad ]; fi \
-            || { echo "${fn} '${v}' want ${want}"; return 1; }
-    done <<'CASES'
-channel|stable|ok
-channel|nightly|ok
-channel|latest|bad
-channel|pinned|bad
-channel|edge|bad
-channel|dev|bad
-channel||bad
-channel|STABLE|bad
-channel|stable; rm -rf /|bad
-cache_max_gb|1|ok
-cache_max_gb|50|ok
-cache_max_gb|2000|ok
-cache_max_gb|008|ok
-cache_max_gb|0|bad
-cache_max_gb|000|bad
-cache_max_gb|-5|bad
-cache_max_gb|50.5|bad
-cache_max_gb||bad
-cache_max_gb| 50 |bad
-cache_max_gb|50; rm -rf /|bad
-cache_max_gb|1+1|bad
-dhcp_mode|disabled|ok
-dhcp_mode|kea|ok
-dhcp_mode|dnsmasq-proxy|ok
-dhcp_mode|dnsmasq-relay|ok
-dhcp_mode|true|bad
-dhcp_mode|false|bad
-dhcp_mode||bad
-dhcp_mode|kea; rm -rf /|bad
-CASES
+    _load_setup_sh "${root}"
+    ui="${root}/services/ui/src"
+    chans="$(awk '/^fn is_valid_ui_channel/ { f = 1 } f && /matches!/ { print; exit }' "${ui}/routes/setup.rs" | grep -oE '"[a-z]+"' | tr -d '"')"
+    modes="$(awk '/pub fn as_str/ { f = 1 } f && /^    }$/ { exit } f' "${ui}/config.rs" | sed -n 's/.*Self::[A-Za-z]* => "\([a-z-]*\)",/\1/p')"
+    other="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_list release retention keep_mutable_channels | grep -vxF -f <(printf '%s\n' "${chans}"))"
+    other+=$'\n'"$(declare -f validate_lancache_image_channel | sed -n 's/^ *\([a-z| ]*\))$/\1/p' | tr -d ' ' | tr '|' '\n' | grep -vxF -f <(printf '%s\n' "${chans}"))"
+    gb="$(cache_size_gb_from_env "$(get_env_var CACHE_MAX_SIZE "${root}/deploy/prod/.env")")"
+    [ "$(wc -l <<< "${chans}")" -ge 2 ] && [ "$(wc -l <<< "${modes}")" -ge 2 ] && [ -n "${other}" ] && [ -n "${gb}" ] \
+        || { echo "inputs: ${chans} | ${modes} | ${other} | ${gb}"; return 1; }
+    # What: one row per value: validator|value|ok or bad
+    # Why: every UI value, its near misses and shell junk
+    # From: Issue #1683 | PR #1858
+    local ch="lancache_ui_channel_override_is_valid" dm="is_valid_dhcp_mode" gbf="lancache_ui_cache_max_gb_override_is_valid"
+    {
+        while IFS= read -r v; do
+            printf '%s|%s|ok\n%s|%s|bad\n%s|%s; rm|bad\n' "${ch}" "${v}" "${ch}" "${v^^}" "${ch}" "${v}"
+        done <<< "${chans}"
+        while IFS= read -r v; do [ -z "${v}" ] || printf '%s|%s|bad\n' "${ch}" "${v}"; done <<< "${other}"
+        while IFS= read -r v; do
+            printf '%s|%s|ok\n%s|%s|bad\n%s|%s; rm|bad\n' "${dm}" "${v}" "${dm}" "${v^^}" "${dm}" "${v}"
+        done <<< "${modes}"
+        printf '%s||bad\n' "${ch}" "${dm}"
+        printf "${gbf}|%s|ok\n" 1 "${gb}" "00${gb}" "$(( gb * 40 ))"
+        printf "${gbf}|%s|bad\n" 0 000 "-${gb}" "${gb}.5" "" " ${gb} " "${gb}+1" "${gb}; rm"
+    } > "${BATS_TEST_TMPDIR}/rows"
+    export ROWS="${BATS_TEST_TMPDIR}/rows"
+    _setup_sh_run 'while IFS="|" read -r fn v want; do
+            got=bad; ! "${fn}" "$v" || got=ok
+            [ "$got" = "$want" ] || echo "${fn} [${v}] want ${want}"
+        done < "${ROWS}"'
+    [ "${status}" -eq 0 ] && [ -z "${output}" ] || { echo "${output}"; return 1; }
 }
 
 @test "setup auto-update gate decides exactly per input" {
-    # What: enabled flag, pinned channel, moved tag, text.
-    # Why: auto-update never touches a pinned or idle stack.
+    # What: enabled flag, pinned channel, moved tag, text
+    # Why: auto-update never touches a pinned or idle stack
     # From: Issue #1683 | PR #1858
-    local root case en ch cur dep rc want
+    local root mut first second pin new old
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/setup.sh" lancache_auto_update_should_proceed
-    while IFS='|' read -r case en ch cur dep rc want; do
-        run lancache_auto_update_should_proceed "${en}" "${ch}" "${cur}" "${dep}"
-        [ "${status}" -eq "${rc}" ] && [ "${output}" = "${want}" ] || { echo "${case}: rc ${status} ${output}"; return 1; }
-    done <<'CASES'
-off|0|nightly|sha-new|sha-old|1|skip: AUTO_UPDATE_ENABLED is not 1
-empty||nightly|sha-new|sha-old|1|skip: AUTO_UPDATE_ENABLED is not 1
-yes|yes|nightly|sha-new|sha-old|1|skip: AUTO_UPDATE_ENABLED is not 1
-offpinned|0|pinned|sha-new|sha-old|1|skip: AUTO_UPDATE_ENABLED is not 1
-pinned|1|pinned|sha-new|sha-old|1|skip: LANCACHE_IMAGE_CHANNEL=pinned tracks one fixed tag, not a moving channel; nothing to detect
-idle|1|nightly|sha-abc|sha-abc|1|skip: channel nightly is already at sha-abc
-moved|1|nightly|sha-new|sha-old|0|proceed: channel nightly moved sha-old -> sha-new
-stable|1|stable|sha-new|sha-old|0|proceed: channel stable moved sha-old -> sha-new
-firstdeploy|1|latest|sha-new||0|proceed: channel latest moved  -> sha-new
+    _load_setup_sh "${root}"
+    mut="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_list release retention keep_mutable_channels)"
+    first="$(awk 'NR == 1' <<< "${mut}")" second="$(awk 'NR == 2' <<< "${mut}")"
+    pin="$(declare -f validate_lancache_image_channel | sed -n 's/^ *\([a-z| ]*\))$/\1/p' | awk 'NR == 1' | tr -d ' ' | tr '|' '\n' \
+        | while IFS= read -r c; do [ "$(lancache_stack_pointer_channel_for "${c}")" != "${c}" ] || grep -qxF -- "${c}" <<< "${mut}" \
+            || printf '%s\n' "${c}"; done)"
+    new="sha-$(sha256sum <<< "new${BATS_TEST_NUMBER}" | cut -c1-40)"
+    old="sha-$(sha256sum <<< "old${BATS_TEST_NUMBER}" | cut -c1-40)"
+    [ -n "${first}" ] && [ -n "${second}" ] && [ "$(wc -l <<< "${pin}")" -eq 1 ] && [ -n "${pin}" ] \
+        || { echo "inputs: ${mut} | ${pin}"; return 1; }
+    # What: one decision per row, under setup.sh options
+    # Why: the gate output is the auto-update log line
+    # From: Issue #1683 | PR #1858
+    cat > "${BATS_TEST_TMPDIR}/rows" <<CASES
+off|0|${first}|${new}|${old}|1|skip: AUTO_UPDATE_ENABLED is not 1
+empty||${first}|${new}|${old}|1|skip: AUTO_UPDATE_ENABLED is not 1
+word|x${BATS_TEST_NUMBER}|${first}|${new}|${old}|1|skip: AUTO_UPDATE_ENABLED is not 1
+offpinned|0|${pin}|${new}|${old}|1|skip: AUTO_UPDATE_ENABLED is not 1
+pinned|1|${pin}|${new}|${old}|1|skip: LANCACHE_IMAGE_CHANNEL=${pin} tracks one fixed tag, not a moving channel; nothing to detect
+idle|1|${first}|${old}|${old}|1|skip: channel ${first} is already at ${old}
+moved|1|${first}|${new}|${old}|0|proceed: channel ${first} moved ${old} -> ${new}
+second|1|${second}|${new}|${old}|0|proceed: channel ${second} moved ${old} -> ${new}
+firstdeploy|1|${second}|${new}||0|proceed: channel ${second} moved  -> ${new}
 CASES
+    export ROWS="${BATS_TEST_TMPDIR}/rows"
+    _setup_sh_run 'while IFS="|" read -r case en ch cur dep rc want; do
+            out="$(lancache_auto_update_should_proceed "$en" "$ch" "$cur" "$dep")" && got=0 || got=$?
+            [ "$got" = "$rc" ] && [ "$out" = "$want" ] || echo "${case}: rc ${got} ${out}"
+        done < "${ROWS}"'
+    [ "${status}" -eq 0 ] && [ -z "${output}" ] || { echo "${output}"; return 1; }
 }
 
-@test "setup config/prod sync only fills missing keys" {
-    # What: only non-default values reach .local.env, once.
-    # Why: a later update must not undo an operator value
+@test "setup channel pins come from two equal lock-free reads" {
+    # What: lock, double read, retries, raw errors, pins
+    # Why: a promote between reads must not mix a stack
     # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" c="${BATS_TEST_TMPDIR}/repo/config/prod/dhcp-proxy.env" tpl
-    local l="${BATS_TEST_TMPDIR}/repo/config/prod/dhcp-proxy.local.env" p="${BATS_TEST_TMPDIR}/repo/config/prod/proxy"
+    local root t="${BATS_TEST_TMPDIR}" n a b lock max backoff ino mut rel ch reg pre warn err line
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/setup.sh" is_deploy_prod_install_dir deploy_prod_repo_root env_key_exists \
-        write_env_file get_env_assignment_value_raw set_env_assignment sync_config_prod_local_env
-    die() { printf '%s\n' "$*" >&2; exit 1; }
-    print_ok() { :; }
-    mkdir -p "${t}/repo/deploy/prod" "${t}/repo/config/prod" "${t}/qs"
-    printf '%s\n' 'DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9' 'DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real.0' \
-        'DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=' 'DHCP_PROXY_ROUTER=' > "${c}"
-    printf 'CACHE_MAX_SIZE=50g\n' > "${p}.env"
-    tpl="$(cat "${c}" "${p}.env")"
-    printf '%s\n' 'DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9' 'DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real.0' \
-        'DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=' 'DHCP_PROXY_ROUTER=10.0.0.1' 'CACHE_MAX_SIZE=200g' 'OTHER=1' > "${t}/src.env"
-    sync_config_prod_local_env "${t}/repo/deploy/prod" "${t}/src.env"
-    [ "$(cat "${l}")" = DHCP_PROXY_ROUTER=10.0.0.1 ] || { echo "dhcp-proxy: $(cat "${l}")"; return 1; }
-    [ "$(cat "${p}.local.env")" = CACHE_MAX_SIZE=200g ] || { echo "proxy: $(cat "${p}.local.env")"; return 1; }
-    [ "$(cat "${c}" "${p}.env")" = "${tpl}" ] || { echo "template changed"; return 1; }
-    printf '%s\n' 'DHCP_PROXY_ROUTER=10.0.0.9' 'CACHE_MAX_SIZE=300g' > "${t}/src.env"
-    sync_config_prod_local_env "${t}/repo/deploy/prod" "${t}/src.env"
-    [ "$(cat "${l}")" = DHCP_PROXY_ROUTER=10.0.0.1 ] && [ "$(cat "${p}.local.env")" = CACHE_MAX_SIZE=200g ] \
-        || { echo "second run changed a local value"; return 1; }
-    mkdir -p "${t}/q/a/qs" "${t}/q/config/prod"
-    printf 'X=1\n' > "${t}/q/config/prod/dhcp-proxy.env"
-    printf 'X=2\n' > "${t}/q.env"
-    run sync_config_prod_local_env "${t}/q/a/qs" "${t}/q.env"
-    [ "${status}" -eq 0 ] && [ ! -e "${t}/q/config/prod/dhcp-proxy.local.env" ] || { echo "non-prod synced"; return 1; }
-    rm -f "${c}" "${l}" "${p}.env" "${p}.local.env"
-    run sync_config_prod_local_env "${t}/repo/deploy/prod" "${t}/src.env"
-    [ "${status}" -eq 0 ] && [ -z "$(ls "${t}/repo/config/prod")" ] || { echo "file created without template"; return 1; }
-    run awk '/^migrate_env_for_update\(\) \{$/ { f = 1 } f && /^[[:space:]]*ensure_secret_env_key / { s = NR }
-        f && /^[[:space:]]*sync_config_prod_local_env / && !y { y = NR } f && /^}$/ { exit }
-        END { print (s && y > s) ? "after" : "s=" s " y=" y }' "${root}/setup.sh"
-    [ "${output}" = after ]
+    _load_setup_sh "${root}"
+    warn="$(print_warn '' 2>&1)" err="$(print_error '' 2>&1)"
+    mut="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_list release retention keep_mutable_channels)"
+    rel="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_channel_field release_tags | awk '$2 == "true" { print $1 }')"
+    ch="$(grep -vxF -- "${rel}" <<< "${mut}" | awk 'NR == 1')"
+    reg="$(resolve_lancache_image_registry "${root}/deploy/prod/.env")"
+    pre="$(resolve_lancache_image_prefix "${root}/deploy/prod/.env")"
+    line="$(grep -m1 -E '^[A-Z_]+=' "${root}/deploy/prod/.env")"
+    a="sha256:$(printf '%064d' 0 | tr 0 a)" b="sha256:$(printf '%064d' 0 | tr 0 b)"
+    [ -n "${ch}" ] && [ -n "${reg}" ] && [ -n "${pre}" ] || { echo "inputs: ${ch} ${reg} ${pre}"; return 1; }
+    export CH="${ch}" ENVF="${t}/pins.env" VER="v$(tr -d '[:space:]' < "${root}/VERSION")"
+    # What: origin lock refs and backoff sleeps as stubs
+    # Why: no remote and no real wait inside the test box
+    # From: Issue #1683 | PR #1858
+    export GIT_REAL
+    GIT_REAL="$(type -P git)"
+    _tool_stub "${BIN}" git <<'STUB'
+case "$*" in
+    *" ls-remote origin "*)
+        [ ! -e "${DS}/fail-git" ] || { echo "fatal: ${FAULT:?}" >&2; exit 128; }
+        [ ! -e "${DS}/remote-refs" ] || grep -F -- "${!#}" "${DS}/remote-refs" || [ "$?" -eq 1 ] ;;
+    *) exec "${GIT_REAL:?}" "$@" ;;
+esac
+STUB
+    _tool_stub "${BIN}" sleep <<<'printf "%s\n" "$1" >> "${DS}/sleeps"'
+    _reset() {
+        printf '%s' "$1" > "${DS}/digest"
+        rm -f "${DS}/inspect-calls" "${DS}/digest-flip" "${DS}/remote-refs" "${DS}/fail-git" "${DS}/fail-buildx"
+        : > "${DS}/sleeps"
+    }
+    _pin() { _setup_sh_run 'PATH="${BIN}:${PATH}"; refs=$(lancache_image_refs_for_tag "" "${CH}") || die "outer pin failed (exit $?)"; printf "%s\n" "${refs}"'; }
+    _setup_sh_run 'lancache_image_ref_vars'
+    [ "${status}" -eq 0 ] || { echo "ref vars: ${output}"; return 1; }
+    n="${#lines[@]}"
+    [ "$(cut -d' ' -f1 <<< "${output}" | sort -u | wc -l)" -eq "${n}" ] && [ "$(cut -d' ' -f2 <<< "${output}" | sort -u | wc -l)" -eq "${n}" ] \
+        && [ "$(grep -cE '^ *image: .*LANCACHE_IMAGE_TAG' "${root}/deploy/prod/docker-compose.yml")" \
+            -eq "$(grep -cE '^ *image: \$\{LANCACHE_IMAGE_REF_[A-Z_]+:-' "${root}/deploy/prod/docker-compose.yml")" ] \
+        || { echo "ref vars: one var and slug each, a pin per tagged image: ${output}"; return 1; }
+    _setup_sh_run 'lancache_sot_value CI_PROMOTE_LOCK_REF; lancache_sot_value CI_PROMOTE_LOCK_MAX; lancache_sot_value CI_PROMOTE_LOCK_BACKOFF'
+    [ "${status}" -eq 0 ] && [ "${#lines[@]}" -eq 3 ] || { echo "sot: ${output}"; return 1; }
+    lock="${lines[0]}/${ch}" max="${lines[1]}" backoff="${lines[2]}"
+    _reset "${a}"
+    _pin
+    [ "${status}" -eq 0 ] && [ "$(grep -c "^LANCACHE_IMAGE_REF_[A-Z_]*=${reg}/${pre}/[a-z0-9-]*@${a}$" <<< "${output}")" -eq "${n}" ] \
+        && [ "$(cat "${DS}/inspect-calls")" -eq $(( 2 * n )) ] && [ ! -s "${DS}/sleeps" ] || { echo "clean: ${output}"; return 1; }
+    export CH="${VER}"
+    _pin
+    [ "${status}" -eq 0 ] && [ -z "${output}" ] || { echo "pinned tag: ${output}"; return 1; }
+    export CH="${ch}"
+    # What: a promote between the reads forces one retry
+    # Why: two equal reads are the only accepted stack
+    # From: Issue #1683 | PR #1858
+    _reset "${a}"
+    printf '%s %s' "$(( n + 1 ))" "${b}" > "${DS}/digest-flip"
+    _pin
+    [ "${status}" -eq 0 ] && [ "$(grep -c "^LANCACHE_IMAGE_REF_.*@${b}$" <<< "${output}")" -eq "${n}" ] \
+        && [ "$(grep -cF "${warn}Channel ${ch}: digests changed between two reads: LANCACHE_IMAGE_REF_" <<< "${output}")" -eq 1 ] \
+        && [ "$(grep -F "digests changed" <<< "${output}" | grep -o "@${b}" | wc -l)" -eq "${n}" ] \
+        && [[ "${output}" == *"; retry in ${backoff}s (1/${max})."* ]] && [ "$(cat "${DS}/sleeps")" = "${backoff}" ] \
+        && [ "$(cat "${DS}/inspect-calls")" -eq $(( 4 * n )) ] || { echo "flip: ${output}"; return 1; }
+    _reset "${a}"
+    printf '%s\t%s\n' "${b#sha256:}" "${lock}" > "${DS}/remote-refs"
+    _pin
+    [ "${status}" -eq 1 ] && [ "$(grep -cF "${warn}Channel ${ch}: promote lock ${lock} is held; retry in ${backoff}s" <<< "${output}")" -eq "${max}" ] \
+        && [ "$(wc -l < "${DS}/sleeps")" -eq "${max}" ] && [ ! -e "${DS}/inspect-calls" ] \
+        && [[ "${output}" == *"${err}Channel ${ch}: promote lock ${lock} is held; no consistent stack after ${max} attempts."* ]] \
+        && [[ "${output}" == *"${err}outer pin failed (exit 1)"* ]] || { echo "lock held: ${output}"; return 1; }
+    _reset "x${BATS_TEST_NUMBER}"
+    _pin
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"${err}${reg}/${pre}/"*":${ch} returned an invalid digest: x${BATS_TEST_NUMBER}."* ]] \
+        && [[ "${output}" == *"${err}First read of channel ${ch} failed (exit 1)."* ]] || { echo "garbage: ${output}"; return 1; }
+    export FAULT="${BATS_TEST_NAME}"
+    _reset "${a}"; : > "${DS}/fail-git"
+    _pin
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"fatal: ${FAULT}"* && "${output}" == *"${err}Failed to read the promote lock ${lock} from origin (exit 128)."* ]] \
+        || { echo "ls-remote: ${output}"; return 1; }
+    _reset "${a}"; : > "${DS}/fail-buildx"
+    _pin
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"${err}docker buildx is required to resolve LANCACHE_IMAGE_CHANNEL=${ch} (exit 1: docker buildx: ${FAULT})."* ]] \
+        || { echo "buildx: ${output}"; return 1; }
+    # What: pins replace old ones; equal ones are no write
+    # Why: an unchanged .env must keep its inode and bytes
+    # From: Issue #1683 | PR #1858
+    printf 'LANCACHE_IMAGE_TAG=%s\nLANCACHE_IMAGE_REF_DNS=%s\n%s\n' "${ch}" "${t}" "${line}" > "${ENVF}"
+    _reset "${a}"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; refs=$(lancache_image_refs_for_tag "" "${CH}") || die "outer pin failed (exit $?)"
+        write_lancache_image_refs "${ENVF}" "${refs}"'
+    [ "${status}" -eq 0 ] && [ "$(grep -c '^LANCACHE_IMAGE_REF_' "${ENVF}")" -eq "${n}" ] \
+        && [ "$(sed -n 2p "${ENVF}")" = "LANCACHE_IMAGE_REF_DNS=${reg}/${pre}/dns@${a}" ] && [ "$(sed -n 3p "${ENVF}")" = "${line}" ] \
+        || { echo "write: $(cat "${ENVF}")"; return 1; }
+    cp "${ENVF}" "${t}/pins.before"
+    ino="$(stat -c %i "${ENVF}")"
+    _reset "${a}"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; refs=$(lancache_image_refs_for_tag "" "${CH}") || die "outer pin failed (exit $?)"
+        write_lancache_image_refs "${ENVF}" "${refs}"'
+    [ "${status}" -eq 0 ] && cmp -s "${t}/pins.before" "${ENVF}" && [ "$(stat -c %i "${ENVF}")" = "${ino}" ] \
+        || { echo "rewrite of equal pins: ${output}"; return 1; }
+    _setup_sh_run 'p=$(grep "^LANCACHE_IMAGE_REF_" "${ENVF}"); lancache_image_refs_fingerprint "${p}"
+        lancache_image_refs_fingerprint "$(sort -r <<< "${p}")"; lancache_image_refs_fingerprint "X=1"
+        lancache_image_refs_fingerprint "X=2"; lancache_image_refs_fingerprint ""; echo end'
+    [ "${status}" -eq 0 ] && [[ "${lines[0]}" =~ ^refs-[0-9a-f]{12}$ ]] && [ "${lines[0]}" = "${lines[1]}" ] \
+        && [ "${lines[2]}" != "${lines[3]}" ] && [ "${lines[4]}" = end ] || { echo "fingerprint: ${output}"; return 1; }
+    export BADREF="LANCACHE_IMAGE_REF_DNS=${t}#${BATS_TEST_NUMBER}" NOREF="LANCACHE_IMAGE_REF_X${BATS_TEST_NUMBER}=${t}"
+    _setup_sh_run 'write_lancache_image_refs "${ENVF}" "${BADREF}"; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"${err}LANCACHE_IMAGE_REF_DNS contains unsafe characters for .env."* ]] \
+        && cmp -s "${t}/pins.before" "${ENVF}" || { echo "unsafe: ${output}"; return 1; }
+    _setup_sh_run 'write_lancache_image_refs "${ENVF}" "${NOREF}"; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"${err}${NOREF%%=*} is no first-party image pin of ${PROD_COMPOSE}; ${ENVF} was not changed."* ]] \
+        && cmp -s "${t}/pins.before" "${ENVF}" || { echo "unknown pin: ${output}"; return 1; }
+    _setup_sh_run 'write_lancache_image_refs "${ENVF}" ""'
+    [ "${status}" -eq 0 ] && [ "$(cat "${ENVF}")" = "$(printf 'LANCACHE_IMAGE_TAG=%s\n%s' "${ch}" "${line}")" ] \
+        || { echo "clear: $(cat "${ENVF}")"; return 1; }
+}
+
+@test "setup moves config/prod overrides into the runtime env once" {
+    # What: moved keys go from <svc>.local.env to .env.local
+    # Why: compose maps them from there; the value must stay
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" rows trows prows svc key target v cp ip bad rest
+    local -a plain=()
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    export D="${t}/repo/deploy/prod" E="${t}/repo/deploy/prod/.env.local" Q="${t}/a/qs"
+    _prod_install "${D}"
+    cp="${t}/repo/config/prod"
+    rows="$(config_prod_moved_keys)"
+    trows="$(awk 'NF == 3' <<< "${rows}")"
+    prows="$(awk 'NF == 2 && !seen[$1]++' <<< "${rows}" | awk 'NR <= 2')"
+    [ "$(wc -l <<< "${trows}")" -ge 2 ] && [ "$(wc -l <<< "${prows}")" -eq 2 ] || { echo "rows: ${rows}"; return 1; }
+    cp "${D}/.env" "${E}"
+    rest="X${BATS_TEST_NUMBER}=${BATS_TEST_NUMBER}"
+    while read -r svc key target; do
+        v="$(get_env_assignment_value_raw "${target}" "${E}")"
+        [ -n "${v}" ] || { echo "template sets no ${target}"; return 1; }
+        printf '%s=%s\n' "${key}" "${v}" >> "${cp}/${svc}.local.env"
+    done <<< "${trows}"
+    while read -r svc key; do
+        plain+=("${key}=\"${t}/${key} x\"")
+        printf '%s\n' "${plain[-1]}" "${rest}" >> "${cp}/${svc}.local.env"
+    done <<< "${prows}"
+    # What: a differing target is refused before writes
+    # Why: two addresses for one role would split the stack
+    # From: Issue #1683 | PR #1858
+    read -r svc key target <<< "$(awk 'END { print }' <<< "${trows}")"
+    ip="$(get_env_var "${target}" "${E}")"
+    bad="${ip%.*}.$(( (${ip##*.} + 1) % 255 ))"
+    cp "${cp}/${svc}.local.env" "${t}/good.local.env"
+    set_env_key "${key}" "${bad}" "${cp}/${svc}.local.env"
+    cp -a "${t}/repo" "${t}/before"
+    _setup_sh_run 'adopt_moved_config_prod_keys "${D}" "${E}" copy; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"${key}=${bad} in ${cp}/${svc}.local.env differs from ${target}=${ip}"* ]] \
+        && [[ "${output}" != *unreached* ]] && diff -r "${t}/before" "${t}/repo" || { echo "mismatch: ${output}"; return 1; }
+    cp "${t}/good.local.env" "${cp}/${svc}.local.env"
+    rm -rf "${t}/before" && cp -a "${t}/repo" "${t}/before"
+    _setup_sh_run 'adopt_moved_config_prod_keys "${D}" "${E}" copy'
+    [ "${status}" -eq 0 ] && [[ "${output}" != *Moved* ]] && diff -r "${t}/before/config" "${t}/repo/config" \
+        || { echo "copy: ${output}"; return 1; }
+    for v in "${plain[@]}"; do
+        [ "$(get_env_assignment_value_raw "${v%%=*}" "${E}")" = "${v#*=}" ] || { echo "not copied raw: ${v}"; return 1; }
+    done
+    _setup_sh_run 'adopt_moved_config_prod_keys "${D}" "${E}" drop'
+    [ "${status}" -eq 0 ] && [[ "${output}" == *"Moved ${key} from ${svc}.local.env into ${E##*/} as ${target}"* ]] \
+        || { echo "drop: ${output}"; return 1; }
+    while read -r svc key target; do
+        ! env_key_exists "${key}" "${cp}/${svc}.local.env" || { echo "${key} kept in ${svc}.local.env"; return 1; }
+    done <<< "${rows}"
+    while read -r svc key; do
+        [ "$(cat "${cp}/${svc}.local.env")" = "${rest}" ] || { echo "${svc}.local.env lost other lines"; return 1; }
+        [ ! -e "${t}/before/config/prod/${svc}.env" ] || cmp -s "${t}/before/config/prod/${svc}.env" "${cp}/${svc}.env" \
+            || { echo "tracked ${svc}.env changed"; return 1; }
+    done <<< "${prows}"
+    rm -rf "${t}/before" && cp -a "${t}/repo" "${t}/before"
+    _setup_sh_run 'adopt_moved_config_prod_keys "${D}" "${E}" copy && adopt_moved_config_prod_keys "${D}" "${E}" drop'
+    [ "${status}" -eq 0 ] && [[ "${output}" != *Moved* ]] && diff -r "${t}/before" "${t}/repo" || { echo "second run: ${output}"; return 1; }
+    mkdir -p "${Q}" "${t}/config/prod"
+    read -r svc key <<< "$(awk 'NR == 1' <<< "${prows}")"
+    printf '%s\n' "${plain[0]}" > "${t}/config/prod/${svc}.local.env"
+    _setup_sh_run 'adopt_moved_config_prod_keys "${Q}" "${E}" copy && adopt_moved_config_prod_keys "${Q}" "${E}" drop'
+    [ "${status}" -eq 0 ] && [ "$(cat "${t}/config/prod/${svc}.local.env")" = "${plain[0]}" ] && diff -r "${t}/before" "${t}/repo" \
+        || { echo "non-prod moved: ${output}"; return 1; }
 }
 
 @test "setup pxe wizard answers and boot filename per input" {
-    # What: server plus a filename; filename char rules.
-    # Why: a half answer or bad name breaks dnsmasq.conf.
+    # What: server plus a filename; filename char rules
+    # Why: a half answer or bad name breaks dnsmasq.conf
     # From: Issue #1683 | PR #1858
-    local root s b u want v
+    local root t="${BATS_TEST_TMPDIR}" ip bios uefi max s b u want code c
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/setup.sh" pxe_boot_pointer_answers_are_complete is_valid_dhcp_proxy_boot_filename
-    while IFS='|' read -r s b u want; do
-        if pxe_boot_pointer_answers_are_complete "${s}" "${b}" "${u}"; then [ "${want}" = ok ]; else [ "${want}" = bad ]; fi \
-            || { echo "answers '${s}' '${b}' '${u}' want ${want}"; return 1; }
-    done <<'CASES'
-10.0.0.5|pxelinux.0||ok
-10.0.0.5||bootx64.efi|ok
-10.0.0.5|pxelinux.0|bootx64.efi|ok
-10.0.0.5|||bad
-|pxelinux.0||bad
+    _load_setup_sh "${root}"
+    ip="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")"
+    bios="b${BATS_TEST_NUMBER}.0" uefi="images/u${BATS_TEST_NUMBER}.efi"
+    max="$(declare -f is_valid_dhcp_proxy_boot_filename | grep -oE -- '-le [0-9]+' | awk '{ print $2 }')"
+    [ -n "${ip}" ] && [ -n "${max}" ] || { echo "inputs: ${ip} ${max}"; return 1; }
+    # What: a boot pointer needs the server and a filename
+    # Why: dnsmasq renders nothing useful from half of it
+    # From: Issue #1683 | PR #1858
+    cat > "${t}/answers" <<CASES
+${ip}|${bios}||ok
+${ip}||${uefi}|ok
+${ip}|${bios}|${uefi}|ok
+${ip}|||bad
+|${bios}||bad
 |||bad
 CASES
-    while IFS='|' read -r want v; do
-        v="$(printf '%b' "${v}")"
-        [ "${v}" != L255 ] || v="$(printf 'a%.0s' {1..255})"
-        [ "${v}" != L256 ] || v="$(printf 'a%.0s' {1..256})"
-        if is_valid_dhcp_proxy_boot_filename "${v}"; then [ "${want}" = ok ]; else [ "${want}" = bad ]; fi \
-            || { echo "filename '${v:0:30}' want ${want}"; return 1; }
-    done <<'CASES'
-ok|pxelinux.0
-ok|images/bootx64.efi
-ok|L255
-bad|L256
-bad|
-bad|boot file.efi
-bad|boot,file.efi
-bad|images/boot#1.efi
-bad|boot$file.efi
-bad|boot`file.efi
-bad|boot"file.efi
-bad|boot'file.efi
-bad|boot\\file.efi
-bad|boot\nfile.efi
-CASES
+    export ROWS="${t}/answers" E="${t}/.env" MAX="${max}"
+    _setup_sh_run 'while IFS="|" read -r s b u want; do
+            got=bad; ! pxe_boot_pointer_answers_are_complete "$s" "$b" "$u" || got=ok
+            [ "$got" = "$want" ] || echo "answers [$s] [$b] [$u] want $want"
+        done < "${ROWS}"'
+    [ "${status}" -eq 0 ] && [ -z "${output}" ] || { echo "${output}"; return 1; }
+    # What: an accepted name is .env-safe, one dnsmasq field
+    # Why: it goes into .env and into dhcp-boot=
+    # From: Issue #1683 | PR #1858
+    printf 'services:\n  p:\n    image: %s\n    environment:\n      V: "${KEY:-}"\n' "${LANCACHE_HELPER_IMAGE}" > "${t}/probe.yml"
+    for code in $(seq 32 126) 10; do
+        c="$(printf "\\$(printf '%03o' "${code}")")"
+        [ "${code}" -ne 10 ] || c=$'\n'
+        export V="a${c}b"
+        _setup_sh_run 'is_valid_dhcp_proxy_boot_filename "${V}" && validate_env_value KEY "${V}" && echo accepted'
+        case "${c}" in [A-Za-z0-9._/-]) [ "${output}" = accepted ] || { echo "plain char ${code} refused"; return 1; } ;; esac
+        [ "${output}" = accepted ] || continue
+        [[ "${V}" != *[[:space:],]* ]] || { echo "char ${code} accepted but splits a dnsmasq field"; return 1; }
+        printf 'KEY=%s\n' "${V}" > "${E}"
+        [ "$(jq -r '.services.p.environment.V' <<< "$(docker compose --env-file "${E}" -f "${t}/probe.yml" config --format json)")" = "${V}" ] \
+            || { echo "char ${code} accepted but changes in .env"; return 1; }
+    done
+    export V255 V256
+    V255="$(printf 'a%.0s' $(seq 1 "${max}"))" V256="${V255}a"
+    _setup_sh_run 'is_valid_dhcp_proxy_boot_filename "${V255}" && echo long-ok; is_valid_dhcp_proxy_boot_filename "${V256}" || echo too-long
+        is_valid_dhcp_proxy_boot_filename "" || echo empty'
+    [ "${status}" -eq 0 ] && [ "${output}" = "$(printf 'long-ok\ntoo-long\nempty')" ] || { echo "length: ${output}"; return 1; }
 }
 
 @test "setup dhcp mode, compose profiles and dnsmasq templates" {
-    # What: mode/subnet checks, profiles, dnsmasq templates.
-    # Why: one dhcp profile per mode; templates rendered.
+    # What: modes, subnet start, profiles, template vars
+    # Why: one dhcp profile per mode; templates fully render
     # From: Issue #1683 | PR #1858
-    local root case ex ssl mode ntp log want v
+    local root t="${BATS_TEST_TMPDIR}" modes off cprof ip net m p v dhcp="" ntp logp custom tpl vars exported out
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/setup.sh" is_valid_ipv4 is_valid_dhcp_mode is_dnsmasq_subnet_start \
-        compose_profiles_for_runtime
-    for v in disabled kea dnsmasq-proxy dnsmasq-relay; do is_valid_dhcp_mode "${v}"; done
-    for v in dnsmasq "" 1 KEA; do
-        if is_valid_dhcp_mode "${v}"; then echo "mode '${v}' accepted"; return 1; fi
+    _load_setup_sh "${root}"
+    modes="$(awk '/pub fn as_str/ { f = 1 } f && /^    }$/ { exit } f' "${root}/services/ui/src/config.rs" \
+        | sed -n 's/.*Self::[A-Za-z]* => "\([a-z-]*\)",/\1/p')"
+    off="$(awk 'NR == 1' <<< "${modes}")"
+    cprof="$(_prod_compose config --profiles)"
+    ip="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")" net="${ip%.*}.0"
+    [ "$(wc -l <<< "${modes}")" -ge 3 ] && [ -n "${cprof}" ] && [ -n "${ip}" ] || { echo "inputs: ${modes} | ${cprof}"; return 1; }
+    while IFS= read -r m; do
+        is_valid_dhcp_mode "${m}" && ! is_valid_dhcp_mode "${m^^}" && ! is_valid_dhcp_mode "${m}x" || { echo "mode ${m}"; return 1; }
+    done <<< "${modes}"
+    ! is_valid_dhcp_mode "" || { echo "empty mode accepted"; return 1; }
+    is_dnsmasq_subnet_start "${net}" || { echo "subnet ${net} refused"; return 1; }
+    for v in "${ip%.*}.$(( ${ip##*.} | 1 ))" "x${BATS_TEST_NUMBER}" "256.${net#*.}"; do
+        ! is_dnsmasq_subnet_start "${v}" || { echo "subnet ${v} accepted"; return 1; }
     done
-    for v in 10.0.0.0 192.168.1.0; do is_dnsmasq_subnet_start "${v}"; done
-    for v in 10.0.0.5 not-an-ip 256.0.0.0 10.0.0.10; do
-        if is_dnsmasq_subnet_start "${v}"; then echo "subnet '${v}' accepted"; return 1; fi
+    # What: each mode gives one compose profile, never two
+    # Why: one dhcp server per stack; profiles are compose's
+    # From: Issue #1683 | PR #1858
+    [ -z "$(compose_profiles_for_runtime "" "${off}" 0 0)" ] || { echo "${off} enables a profile"; return 1; }
+    while IFS= read -r m; do
+        [ "${m}" != "${off}" ] || continue
+        p="$(compose_profiles_for_runtime "" "${m}" 0 0)"
+        [ "$(tr ',' '\n' <<< "${p}" | wc -l)" -eq 1 ] && grep -qxF -- "${p}" <<< "${cprof}" || { echo "mode ${m}: ${p}"; return 1; }
+        dhcp+="${dhcp:+,}${p}"
+    done <<< "${modes}"
+    while IFS= read -r m; do
+        p="$(compose_profiles_for_runtime "${dhcp}" "${m}" 0 0)"
+        [ "${p}" = "$(compose_profiles_for_runtime "" "${m}" 0 0)" ] || { echo "switch to ${m}: ${p}"; return 1; }
+    done <<< "${modes}"
+    ntp="$(compose_profiles_for_runtime "" "${off}" 1 0)" logp="$(compose_profiles_for_runtime "" "${off}" 0 1)"
+    grep -qxF -- "${ntp}" <<< "${cprof}" && grep -qxF -- "${logp}" <<< "${cprof}" && [ "${ntp}" != "${logp}" ] \
+        && [ "$(compose_profiles_for_runtime "" "${off}" 0)" = "${logp}" ] \
+        && [ -z "$(compose_profiles_for_runtime "${ntp},${logp},ssl" "${off}" 0 0)" ] || { echo "ntp/logging: ${ntp} ${logp}"; return 1; }
+    custom="$(grep -vxF -e "${ntp}" -e "${logp}" -f <(tr ',' '\n' <<< "${dhcp}") <<< "${cprof}" | awk 'NR == 1')"
+    out="$(compose_profiles_for_runtime " x${BATS_TEST_NUMBER} , ${custom} ,x${BATS_TEST_NUMBER}" "${off}" 1 1)"
+    [ "${out}" = "x${BATS_TEST_NUMBER},${custom},${ntp},${logp}" ] || { echo "custom: ${out}"; return 1; }
+    # What: every template variable is set by the entrypoint
+    # Why: an unset one renders an empty dnsmasq field
+    # From: Issue #1683 | PR #1858
+    exported="$(grep -E '^export ' "${root}/services/dhcp-proxy/entrypoint.sh" | tr ' ' '\n' | grep -E '^[A-Z_]+$')"
+    for tpl in "${root}"/services/dhcp-proxy/*.conf.template; do
+        vars="$(grep -oE '\$\{[A-Z_]+\}' "${tpl}" | tr -d '${}' | sort -u)"
+        [ -n "${vars}" ] || continue
+        [ -z "$(grep -vxF -f <(printf '%s\n' "${exported}") <<< "${vars}")" ] || { echo "${tpl##*/}: unset vars"; return 1; }
+        out="$(env $(sed 's/.*/&=m-&/' <<< "${vars}") envsubst < "${tpl}")"
+        [[ "${out}" != *'${'* ]] || { echo "${tpl##*/}: placeholder left"; return 1; }
+        while IFS= read -r v; do grep -qF -- "m-${v}" <<< "${out}" || { echo "${tpl##*/}: ${v} not rendered"; return 1; }; done <<< "${vars}"
     done
-    while IFS='|' read -r case ex ssl mode ntp log want; do
-        if [ "${log}" = - ]; then
-            v="$(compose_profiles_for_runtime "${ex}" "${ssl}" "${mode}" "${ntp}")"
-        else
-            v="$(compose_profiles_for_runtime "${ex}" "${ssl}" "${mode}" "${ntp}" "${log}")"
-        fi
-        [ "${v}" = "${want}" ] || { echo "${case}: '${v}'"; return 1; }
-    done <<'CASES'
-kea||0|kea|0|0|dhcp-kea
-proxy||0|dnsmasq-proxy|0|0|dhcp-proxy
-relay||0|dnsmasq-relay|0|0|dhcp-proxy
-disabled||0|disabled|0|0|
-switchkea|dhcp-kea,dhcp-proxy|0|kea|0|0|dhcp-kea
-switchproxy|dhcp-kea,dhcp-proxy|0|dnsmasq-proxy|0|0|dhcp-proxy
-switchoff|dhcp-kea,dhcp-proxy|0|disabled|0|0|
-keepssl|logging,dhcp-kea|1|dnsmasq-proxy|0|-|ssl,dhcp-proxy,logging
-logdefault||0|disabled|0|-|logging
-logoff|logging|0|disabled|0|0|
-logon|logging|0|disabled|0|1|logging
-custom| custom , cachehamster ,custom|0|disabled|1|0|custom,cachehamster,ntp
-all|x|1|kea|1|1|x,ssl,dhcp-kea,ntp,logging
-CASES
-    v="$(DHCP_SUBNET_START=10.0.0.0 DHCP_DNS_PRIMARY=10.0.0.10 DHCP_DNS_SECONDARY=10.0.0.11 \
-        UPSTREAM_DHCP_IP=10.0.0.1 envsubst < "${root}/services/dhcp-proxy/dnsmasq.conf.template" \
-        | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' | paste -sd'#')"
-    [ "${v}" = "port=0#no-resolv#no-poll#dhcp-range=10.0.0.0,proxy#dhcp-option-pxe=6,10.0.0.10,10.0.0.11#log-dhcp#no-daemon#log-facility=/var/log/lancache-dhcp-proxy/dnsmasq.log" ] \
-        || { echo "proxy template: ${v}"; return 1; }
-    v="$(DHCP_RELAY_LOCAL_ADDR=192.168.1.2 UPSTREAM_DHCP_IP=10.0.0.1 \
-        envsubst < "${root}/services/dhcp-proxy/dnsmasq-relay.conf.template" \
-        | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' | paste -sd'#')"
-    [ "${v}" = "port=0#no-resolv#no-poll#dhcp-relay=192.168.1.2,10.0.0.1#log-dhcp#no-daemon#log-facility=/var/log/lancache-dhcp-proxy/dnsmasq.log" ] \
-        || { echo "relay template: ${v}"; return 1; }
 }
 
 @test "setup secondary registration end to end per primary answer" {
-    # What: cmd_secondary with stub curl/docker per answer.
-    # Why: token never in argv; failures stop before writes.
+    # What: cmd_secondary against a stub primary per answer
+    # Why: token never in argv; failures stop before writes
     # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" bin="${BATS_TEST_TMPDIR}/bin" dk sha body gen hc
+    local root t="${BATS_TEST_TMPDIR}" rs std lip ui name xfr fields reg pre tag token body f v case want dir
+    local env gen canon over required first rest
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    dk="$(command -v docker)"
-    _load_functions "${root}/setup.sh" _compose_parse_env_value get_env_var is_valid_ipv4 require_value \
-        write_env_file write_generated_runtime_file validate_lancache_image_registry validate_lancache_image_prefix \
-        validate_lancache_image_channel validate_lancache_image_tag resolve_lancache_image_registry \
-        resolve_lancache_image_prefix lancache_stack_pointer_channel_for resolve_lancache_stack_channel_tag \
-        derive_release_archive_image_tag resolve_lancache_image_channel resolve_lancache_image_tag \
-        secondary_listen_ip_conflicts secondary_suggest_alternate_listen_ip secondary_choose_listen_ip \
-        detect_secondary_listen_ip cmd_secondary
-    die() { printf 'DIE: %s\n' "$*" >&2; exit 9; }
-    print_ok() { :; }
-    print_step() { :; }
-    print_warn() { printf 'WARN: %s\n' "$*" >&2; }
-    print_error() { printf 'ERR: %s\n' "$*" >&2; }
-    assert_prebuilt_image_platform_supported() { :; }
-    assert_resolved_image_tag_platform_supported() { :; }
-    _tool_stub "${bin}" ss <<<':'
-    _tool_stub "${bin}" curl <<'STUB'
-printf '%s\n' "$*" > "${T}/curl.argv"
-cat > "${T}/curl.body"
-[ "${MOCK_FAIL:-0}" = 0 ] || exit 7
-out=""
-while [ "$#" -gt 0 ]; do [ "$1" != -o ] || out="$2"; shift; done
-printf '%s' "${MOCK_BODY}" > "${out}"
-printf '%s' "${MOCK_STATUS:-200}"
+    _load_setup_sh "${root}"
+    rs="${root}/services/ui/src/routes/secondaries.rs"
+    std="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")"
+    lip="$(get_env_var IP_SSL "${root}/deploy/prod/.env")"
+    ui="$(_prod_compose config --format json | jq -r '.services.ui.ports[0].published')"
+    name="$(_prod_compose config --format json | jq -r .name)"
+    xfr="$(grep -oE 'format!\("\{\}:[0-9]+", state\.config\.standard_ip\)' "${rs}" | grep -oE ':[0-9]+')"
+    fields="$(awk '/pub struct RegisterResponse/,/^}/' "${rs}" | sed -n 's/^ *pub \([a-z_]*\): String,$/\1/p')"
+    reg="$(resolve_lancache_image_registry "${root}/deploy/prod/.env")"
+    pre="$(resolve_lancache_image_prefix "${root}/deploy/prod/.env")"
+    tag="v$(cat "${root}/VERSION")"
+    token="$(generate_secret_value SECONDARY_REGISTRATION_TOKEN hex32)"
+    token="${token}\"${token}\\"
+    over="$(declare -f compose_file_args_for_install_dir | grep -oE 'docker-compose\.[a-z-]+\.yml' | grep -v override | awk 'NR == 1')"
+    required="$(declare -f cmd_secondary | sed -n 's/.*missing_fields+=("\([a-z_]*\)").*/\1/p')"
+    [ -n "${std}" ] && [ -n "${lip}" ] && [ -n "${ui}" ] && [ -n "${xfr}" ] && [ -n "${fields}" ] && [ -n "${over}" ] \
+        && [ -n "${required}" ] || { echo "inputs: ${std} ${lip} ${ui} ${xfr} ${over}"; return 1; }
+    # What: the primary's answer, one value per struct field
+    # Why: values are unique so each one is traced to .env
+    # From: Issue #1683 | PR #1858
+    body='{}'
+    while IFS= read -r f; do
+        case "${f}" in
+            proxy_ip) v="${std}" ;;
+            dns_xfr_primary) v="${std}${xfr}" ;;
+            image_registry) v="${reg}" ;;
+            image_prefix) v="${pre}" ;;
+            image_channel) v="" ;;
+            image_tag) v="${tag}" ;;
+            *) v="$(generate_secret_value "${f^^}" hex32)" ;;
+        esac
+        body="$(jq -c --arg k "${f}" --arg v "${v}" '.[$k] = $v' <<< "${body}")"
+    done <<< "${fields}"
+    first="$(awk 'NR == 1' <<< "${required}")"
+    rest="$(awk 'NR > 1' <<< "${required}" | paste -sd' ')"
+    export PRIMARY="http://${std}:${ui}" TOKEN="${token}" NAME="${name}" STD="${std}" LIP="${lip}"
+    export JQ_REAL
+    JQ_REAL="$(type -P jq)"
+    _tool_stub "${BIN}" ss <<<'[ ! -e "${DS}/listeners" ] || cat "${DS}/listeners"'
+    _tool_stub "${BIN}" jq <<<'printf "%s\n" "$*" >> "${DS}/jq.argv"; exec "${JQ_REAL:?}" "$@"'
+    _tool_stub "${BIN}" curl <<'STUB'
+printf '%s\n' "$*" >> "${DS}/curl.argv"
+cat > "${DS}/curl.body"
+[ ! -e "${DS}/fail-curl" ] || exit 7
+fmt=""
+while [ "$#" -gt 0 ]; do [ "$1" != -w ] || fmt="$2"; shift; done
+fmt="${fmt//\\n/$'\n'}"
+cat "${DS}/reply.body"
+printf '%s' "${fmt//"%{http_code}"/$(cat "${DS}/reply.status")}"
 STUB
-    _tool_stub "${bin}" docker <<'STUB'
-printf '%s\n' "$*" >> "${T}/docker.log"
-STUB
-    export PATH="${bin}:${PATH}" T="${t}" SCRIPT_DIR="${t}/none"
-    sha="sha-0123456789abcdef0123456789abcdef01234567"
-    export LANCACHE_IMAGE_TAG="${sha}"
-    body='{"nats_url":"nats://primary.example:4222","nats_user":"sec-a","nats_password":"pw","consumer_name":"sec-a","pdns_api_key":"pk","ddns_tsig_key":"tk","dns_xfr_primary":"192.168.1.10:5300"}'
-    _sec() { local d="$1"; shift; mkdir -p "${d}"; cd "${d}" || return 1; cmd_secondary "$@"; }
-    local -a args=(--primary http://primary.example:8080 --token 'mal"icious\token' --name sec-a
-        --proxy-ip 192.168.1.10 --listen-ip 192.168.1.50)
-    run _sec "${t}/r0" --name sec-a
-    [ "${status}" -eq 9 ] && [[ "${output}" == *"DIE: Required argument(s) missing: --primary --token --proxy-ip"* ]] || {
-        echo "missing args: ${output}"; return 1; }
-    MOCK_FAIL=1 run _sec "${t}/r1" "${args[@]}"
-    [ "${status}" -eq 9 ] && [[ "${output}" == *"DIE: Failed to connect to primary server at http://primary.example:8080"* ]] || {
-        echo "connect: ${output}"; return 1; }
-    [ "$(cat "${t}/curl.body")" = '{"token":"mal\"icious\\token","name":"sec-a","address":"192.168.1.50"}' ]
-    jq -e '.token == "mal\"icious\\token"' "${t}/curl.body"
-    ! grep -q icious "${t}/curl.argv" || { echo "token in argv: $(cat "${t}/curl.argv")"; return 1; }
-    [ ! -e "${t}/r1/sec-a" ]
-    MOCK_STATUS=503 MOCK_BODY='{}' run _sec "${t}/r2" "${args[@]}"
-    [ "${status}" -eq 9 ]
-    [[ "${output}" == *"HTTP 503"*"NATS_BIND_IP"*"docker-compose.nats-secondary.yml"*"--env-file .env.local"* ]] || {
-        echo "503: ${output}"; return 1; }
-    MOCK_STATUS=401 MOCK_BODY='{}' run _sec "${t}/r3" "${args[@]}"
-    [[ "${output}" == *"DIE: Primary server rejected the registration request with HTTP 401."* ]]
-    MOCK_BODY='{"nats_url":"n"}' run _sec "${t}/r4" "${args[@]}"
-    [[ "${output}" == *"missing field(s): nats_user nats_password consumer_name pdns_api_key ddns_tsig_key dns_xfr_primary"* ]] || {
-        echo "fields: ${output}"; return 1; }
-    [ ! -e "${t}/r4/sec-a" ]
-    : > "${t}/docker.log"
-    MOCK_BODY="${body}" run _sec "${t}/r5" "${args[@]}"
+    _sec() {
+        export SD="$1"
+        shift
+        mkdir -p "${SD}" && printf '%s\0' "$@" > "${DS}/args"
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; mapfile -d "" -t a < "${DS}/args"; cd "${SD}" && cmd_secondary "${a[@]}"'
+    }
+    # What: each failing answer stops before any file exists
+    # Why: a half-written secondary must never start
+    # From: Issue #1683 | PR #1858
+    while IFS='|' read -r case want; do
+        rm -f "${DS}/fail-curl" "${DS}/listeners" "${DS}/jq.argv" "${DS}/curl.argv"
+        printf '200' > "${DS}/reply.status"; printf '%s' "${body}" > "${DS}/reply.body"
+        case "${case}" in
+            connect) : > "${DS}/fail-curl" ;;
+            http503) printf '503' > "${DS}/reply.status"; printf '{}' > "${DS}/reply.body" ;;
+            http401) printf '401' > "${DS}/reply.status"; printf '{}' > "${DS}/reply.body" ;;
+            status) printf 'x' > "${DS}/reply.status" ;;
+            json) printf '{' > "${DS}/reply.body" ;;
+            fields) jq -c --arg k "${first}" '{($k): .[$k]}' <<< "${body}" > "${DS}/reply.body" ;;
+            port) printf 'udp UNCONN 0 0 %s:53 0.0.0.0:*\n' "${lip}" > "${DS}/listeners" ;;
+        esac
+        rm -f "${DS}/jq.argv"
+        _sec "${t}/${case}" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --proxy-ip "${STD}" --listen-ip "${LIP}"
+        [ "${status}" -eq 1 ] && [[ "${output}" == *"${want}"* ]] && [ ! -e "${t}/${case}/${name}" ] \
+            && ! grep -qF -- "$(jq -r .nats_password <<< "${body}")" <<< "${output}" \
+            || { echo "${case}: rc ${status}: ${output}"; return 1; }
+        touch "${DS}/jq.argv" "${DS}/curl.argv"
+        ! grep -qF -- "${token}" "${DS}/jq.argv" "${DS}/curl.argv" || { echo "${case}: token in argv"; return 1; }
+    done <<CASES
+connect|Failed to connect to primary server at ${PRIMARY}
+http503|HTTP 503
+http401|rejected the registration request with HTTP 401
+status|Unrecognized response from primary server at ${PRIMARY}
+json|Unrecognized response from primary server at ${PRIMARY}
+fields|missing field(s): ${rest}
+port|No usable secondary bind IP on port 53
+CASES
+    _sec "${t}/args" --name "${NAME}"
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"Required argument(s) missing: --primary --token --proxy-ip"* ]] \
+        || { echo "missing args: ${output}"; return 1; }
+    rm -f "${DS}/listeners" "${DS}/curl.argv"
+    printf '200' > "${DS}/reply.status"; printf '%s' "${body}" > "${DS}/reply.body"
+    rm -f "${DS}/jq.argv"
+    _sec "${t}/ok" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --proxy-ip "${STD}" --listen-ip "${LIP}"
     [ "${status}" -eq 0 ] || { echo "register: ${output}"; return 1; }
-    [ "$(paste -sd'#' "${t}/r5/sec-a/.env")" = "PROXY_IP=192.168.1.10#LISTEN_IP=192.168.1.50#PDNS_API_KEY=pk#DDNS_TSIG_KEY=tk#DNS_XFR_PRIMARY=192.168.1.10:5300#NATS_URL=nats://primary.example:4222#NATS_USER=sec-a#NATS_PASSWORD=pw#NATS_CONSUMER=sec-a#KEEP_KNOWN_GOOD_CONFIGS=3#LANCACHE_IMAGE_REGISTRY=ghcr.io#LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng#LANCACHE_IMAGE_CHANNEL=latest#LANCACHE_IMAGE_TAG=${sha}" ] || {
-        echo "env: $(cat "${t}/r5/sec-a/.env")"; return 1; }
-    [ "$(paste -sd'#' "${t}/docker.log")" = "compose version#compose --env-file ${t}/r5/sec-a/.env up -d" ] || {
-        echo "docker: $(cat "${t}/docker.log")"; return 1; }
-    run "${dk}" compose --env-file "${t}/r5/sec-a/.env" -f "${t}/r5/sec-a/docker-compose.yml" config --format json
-    [ "${status}" -eq 0 ] || { echo "compose: ${output}"; return 1; }
-    gen="${output}"
-    run "${dk}" compose --env-file "${t}/r5/sec-a/.env" -f "${root}/deploy/secondary/docker-compose.yml" \
-        config --format json
-    [ "${status}" -eq 0 ] || { echo "canonical compose: ${output}"; return 1; }
-    hc="$(jq -ce '.services["dns-secondary"].healthcheck | select(.test != null)' <<< "${output}")"
-    jq -e --arg img "ghcr.io/wiki-mod/lancache-ng/dns:${sha}" --argjson hc "${hc}" '.services["dns-secondary"] as $s
-        | $s.image == $img and $s.restart == "always" and $s.healthcheck == $hc
-        and $s.environment.DNS_REPLICATION_ROLE == "secondary" and $s.environment.NATS_RECORD_WRITES == "0"
-        and $s.environment.DNS_XFR_PRIMARY == "192.168.1.10:5300" and $s.environment.NATS_PASSWORD == "pw"
-        and ([$s.ports[] | .host_ip] | unique) == ["192.168.1.50"]' <<< "${gen}"
-    cp "${t}/r5/sec-a/.env" "${t}/env.first"
-    cp "${t}/r5/sec-a/docker-compose.yml" "${t}/compose.first"
-    : > "${t}/curl.argv"
-    run _sec "${t}/r5" "${args[@]}"
-    [ "${status}" -eq 9 ] && [[ "${output}" == *"already exists; rerun with --rotate"* ]] && [ ! -s "${t}/curl.argv" ] || {
-        echo "existing: ${output}"; return 1; }
-    MOCK_BODY="${body}" run _sec "${t}/r5" "${args[@]}" --rotate
-    [ "${status}" -eq 0 ] || { echo "rotate: ${output}"; return 1; }
-    cmp "${t}/env.first" "${t}/r5/sec-a/.env"
-    cmp "${t}/compose.first" "${t}/r5/sec-a/docker-compose.yml"
+    ! grep -qF -- "${token}" "${DS}/jq.argv" "${DS}/curl.argv" || { echo "token in argv"; return 1; }
+    jq -e --arg tok "${token}" --arg n "${name}" --arg a "${lip}" '. == {token: $tok, name: $n, address: $a}' "${DS}/curl.body" \
+        || { echo "request: $(cat "${DS}/curl.body")"; return 1; }
+    dir="${t}/ok/${name}" env="${t}/ok/${name}/.env"
+    # What: every answer value lands in .env, IPs as passed
+    # Why: the secondary runs on what the primary handed out
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r f; do
+        case "${f}" in proxy_ip|image_*) continue ;; esac
+        v="$(jq -r --arg k "${f}" '.[$k]' <<< "${body}")"
+        awk -v v="${v}" 'substr($0, index($0, "=") + 1) == v { f = 1 } END { exit !f }' "${env}" \
+            || { echo "${f} not in .env"; return 1; }
+    done <<< "${fields}"
+    [ "$(get_env_var PROXY_IP "${env}")" = "${std}" ] && [ "$(get_env_var LISTEN_IP "${env}")" = "${lip}" ] \
+        || { echo "ips: $(cat "${env}")"; return 1; }
+    want="compose --env-file ${env} $(compose_file_args_for_install_dir "${dir}" "${env}" | paste -sd' ') up -d"
+    grep -qxF -- "${want}" "${DS}/docker.log" || { echo "start: $(cat "${DS}/docker.log")"; return 1; }
+    # What: the written compose equals deploy/secondary
+    # Why: two copies may exist; they must never drift
+    # From: Issue #1683 | PR #1858
+    gen="$(docker compose -p "${name}" --env-file "${env}" -f "${dir}/docker-compose.yml" config --format json)"
+    canon="$(docker compose -p "${name}" --env-file "${env}" -f "${root}/deploy/secondary/docker-compose.yml" config --format json)"
+    [ "$(jq -S . <<< "${gen}")" = "$(jq -S . <<< "${canon}")" ] \
+        && jq -e --arg img "${reg}/${pre}/" --arg tag ":${tag}" '[.services[].image] | all(startswith($img) and endswith($tag))' <<< "${gen}" \
+        || { echo "compose drift or image: ${gen}"; return 1; }
+    cp "${env}" "${t}/env.first"; cp "${dir}/docker-compose.yml" "${t}/compose.first"
+    rm -f "${DS}/curl.argv"
+    _sec "${t}/ok" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --proxy-ip "${STD}" --listen-ip "${LIP}"
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"already exists; rerun with --rotate"* ]] && [ ! -e "${DS}/curl.argv" ] \
+        || { echo "existing: ${output}"; return 1; }
+    _sec "${t}/ok" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --proxy-ip "${STD}" --listen-ip "${LIP}" --rotate
+    [ "${status}" -eq 0 ] && cmp "${t}/env.first" "${env}" && cmp "${t}/compose.first" "${dir}/docker-compose.yml" \
+        || { echo "rotate: ${output}"; return 1; }
 }
 
 @test "setup functional health gate and tool install per state" {
-    # What: healthz/DNS probes, port binding, missing tools.
-    # Why: an update passes only on real traffic checks.
+    # What: healthz, DNS, port and tool probes per state
+    # Why: an update passes only on real traffic checks
     # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" sb="${BATS_TEST_TMPDIR}/sb" awkp case std ssl on cu dg rc msg
+    local root t="${BATS_TEST_TMPDIR}" std hp case compose env world path rc want kv pref fall
+    local -a kvs
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    awkp="$(command -v awk)"
-    _load_functions "${root}/setup.sh" _compose_parse_env_value get_env_var require_functional_check_tool \
-        _proxy_container_publishes_port _verify_healthz_endpoint verify_stack_functional_health \
-        apt_package_available package_name_for_tool install_missing_tools
-    die() { printf 'DIE: %s\n' "$*" >&2; exit 1; }
-    print_error() { printf 'ERR: %s\n' "$*" >&2; }
-    print_warn() { :; }
-    _tcp_port_reachable() { return "${TCP_RC}"; }
-    service_container_id() { printf '%s' "${CID}"; }
-    docker() {
-        case "$1" in
-            port) [ -n "${BIND}" ] || return 1; printf '%s\n' "${BIND}" ;;
-            exec) shift 2; "$@" ;;
-        esac
-    }
-    _sandbox() {
-        rm -rf "${sb}"; mkdir -p "${sb}"; ln -s "${awkp}" "${sb}/awk"
-        [ "$1" = - ] || printf 'exit %s\n' "$1" > "${sb}/curl"
-        [ "$2" = - ] || printf 'printf %%s %q\n' "${2/none/}" > "${sb}/dig"
-        chmod +x "${sb}"/* 2>/dev/null || true
-    }
-    export _UPDATE_ENV_FILE="${t}/env"
-    while IFS='|' read -r case std ssl on cu dg TCP_RC CID BIND rc msg; do
-        printf 'IP_STANDARD=%s\nIP_SSL=%s\nSSL_ENABLED=%s\n' "${std}" "${ssl}" "${on}" > "${_UPDATE_ENV_FILE}"
-        _sandbox "${cu}" "${dg}"
-        [ "${CID}" != . ] || CID=""
-        [ "${BIND}" != . ] || BIND=""
-        PATH="${sb}" run verify_stack_functional_health
-        [ "${status}" -eq "${rc}" ] && [[ "${output}" == *"${msg}"* ]] || { echo "${case}: rc ${status} ${output}"; return 1; }
-    done <<'CASES'
-ok|10.0.0.10||0|0|1.2.3.4|0|pid|10.0.0.10:80|0|
-bindall|10.0.0.10||0|0|1.2.3.4|0|pid|0.0.0.0:80|0|
-bindv6|10.0.0.10||0|0|1.2.3.4|0|pid|[::]:80|0|
-noip|||0|-|-|0|pid|10.0.0.10:80|0|
-nocurl|10.0.0.10||0|-|1.2.3.4|0|pid|10.0.0.10:80|1|requires 'curl', which is not installed
-nodig|10.0.0.10||0|0|-|0|pid|10.0.0.10:80|1|requires 'dig', which is not installed
-healthz|10.0.0.10||0|22|1.2.3.4|0|pid|10.0.0.10:80|1|http://127.0.0.1/healthz inside the proxy container
-nodns|10.0.0.10||0|0|none|0|pid|10.0.0.10:80|1|DNS did not resolve content1.steampowered.com via 10.0.0.10
-tcp|10.0.0.10||0|0|1.2.3.4|1|pid|10.0.0.10:80|1|TCP connect to 10.0.0.10:80
-nocid|10.0.0.10||0|0|1.2.3.4|0|.|10.0.0.10:80|1|no running 'proxy' container
-otherip|10.0.0.10||0|0|1.2.3.4|0|pid|10.0.0.99:80|1|does not include 10.0.0.10:80
-nobind|10.0.0.10||0|0|1.2.3.4|0|pid|.|1|does not include 10.0.0.10:80
-sslonly||10.0.0.11|1|-|-|0|pid|10.0.0.11:80|1|requires 'curl'
-ssloff||10.0.0.11|0|-|-|0|pid|10.0.0.11:80|0|
+    _load_setup_sh "${root}"
+    export DP="${t}/co/deploy/prod" GE="${t}/gate.env" FAULT="${BATS_TEST_NAME}" CASE_PATH
+    _prod_install "${DP}"
+    cp "${DP}/docker-compose.yml" "${t}/compose.orig"
+    std="$(get_env_var IP_STANDARD "${DP}/.env")"
+    hp="$(declare -f _verify_healthz_endpoint | grep -oE '_tcp_port_reachable "\$ip" [0-9]+' | awk '{ print $NF }')"
+    [ -n "${std}" ] && [ -n "${hp}" ] || { echo "inputs: ${std} ${hp}"; return 1; }
+    _path_without "${t}/nocurl" curl
+    _path_without "${t}/nodig" dig
+    # What: one stack state per row, then the real gate
+    # Why: each probe must fail for its own cause only
+    # From: Issue #1683 | PR #1858
+    while IFS='|' read -r case compose env world path rc want; do
+        cp "${t}/compose.orig" "${DP}/docker-compose.yml"
+        [ "${compose}" = - ] || sed -i "${compose}" "${DP}/docker-compose.yml"
+        rm -f "${DS}"/fail-* "${DS}/no-answer" "${DS}/running"
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; stack_compose "${DP}" "${DP}/.env" up -d'
+        [ "${status}" -eq 0 ] || { echo "${case}: up: ${output}"; return 1; }
+        cp "${DP}/.env" "${GE}"
+        IFS=';' read -r -a kvs <<< "${env}"
+        for kv in "${kvs[@]}"; do [ "${kv}" = - ] || set_env_key "${kv%%=*}" "${kv#*=}" "${GE}"; done
+        case "${world}" in -) ;; down) rm -f "${DS}/running" ;; *) : > "${DS}/${world}" ;; esac
+        CASE_PATH="${BIN}:${PATH}"
+        [ "${path}" = full ] || CASE_PATH="${t}/${path}"
+        _setup_sh_run 'PATH="${CASE_PATH}"; eval "${SETUP_SH_SEAMS}"
+            _UPDATE_ENV_FILE="${GE}" _UPDATE_STACK_DIR="${DP}"; verify_stack_functional_health'
+        [ "${status}" -eq "${rc}" ] && [[ "${output}" == *"${want}"* ]] && { [ -n "${want}" ] || [ -z "${output}" ]; } \
+            || { echo "${case}: rc ${status}: ${output}"; return 1; }
+    done <<CASES
+ok|-|-|-|full|0|
+bindall|s/"\${IP_STANDARD}:${hp}:/"${hp}:/|-|-|full|0|
+bindv6|s/"\${IP_STANDARD}:${hp}:/"[::]:${hp}:/|-|-|full|0|
+otherip|/"\${IP_STANDARD}:${hp}:/d|-|-|full|1|does not include ${std}:${hp}
+nobind|/"\${IP_[A-Z]*}:${hp}:/d|-|-|full|1|does not include ${std}:${hp}
+noip|-|IP_STANDARD=;IP_SSL=|-|nocurl|0|
+nocurl|-|-|-|nocurl|1|requires 'curl', which is not installed
+nodig|-|-|-|nodig|1|requires 'dig', which is not installed
+healthz|-|-|fail-exec|full|1|inside the proxy container
+nodns|-|-|no-answer|full|1|did not resolve
+tcp|-|-|fail-tcp|full|1|TCP connect to ${std}:${hp}
+nocid|-|-|down|full|1|no running 'proxy' container
+sslonly|-|IP_STANDARD=;SSL_ENABLED=1|-|nocurl|1|requires 'curl'
+sslok|-|IP_STANDARD=;SSL_ENABLED=1|-|full|0|
+ssloff|-|IP_STANDARD=;SSL_ENABLED=0|-|nocurl|0|
 CASES
-    _tool_stub "${t}/apt" apt-cache <<<'[ "$2" = bind9-dnsutils ]'
-    [ "$(PATH="${t}/apt:${PATH}" package_name_for_tool dig)" = bind9-dnsutils ]
-    _tool_stub "${t}/apt2" apt-cache <<<'exit 100'
-    [ "$(PATH="${t}/apt2:${PATH}" package_name_for_tool dig)" = dnsutils ]
-    [ "$(package_name_for_tool tar)" = tar ]
-    _sandbox 0 1.2.3.4
-    PATH="${sb}" run install_missing_tools curl dig
-    [ "${status}" -eq 0 ]
-    [ -z "${output}" ]
-    _sandbox - -
-    PATH="${sb}" run install_missing_tools curl
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"DIE: Cannot install missing tools automatically; install: curl"* ]]
-    printf 'exit 0\n' > "${sb}/apt-get"; chmod +x "${sb}/apt-get"
-    PATH="${sb}" run install_missing_tools curl
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"DIE: curl is still missing after installing package(s): curl"* ]]
-    printf '[ "$1" != install ]\n' > "${sb}/apt-get"
-    PATH="${sb}" run install_missing_tools curl
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"DIE: Failed to install required tool(s): curl"* ]]
+    # What: package choice and install outcome per apt state
+    # Why: a failed lookup must stop, never install ""
+    # From: Issue #1683 | PR #1858
+    pref="$(declare -f package_name_for_tool | grep -oE "printf '%s.n' [a-z0-9.+-]+" | awk 'NR == 1 { print $NF }')"
+    fall="$(declare -f package_name_for_tool | grep -oE "printf '%s.n' [a-z0-9.+-]+" | awk 'NR == 2 { print $NF }')"
+    [ -n "${pref}" ] && [ -n "${fall}" ] && [ "${pref}" != "${fall}" ] || { echo "packages: ${pref} ${fall}"; return 1; }
+    export APT="${t}/apt" CODE="${#pref}" PREF="${pref}"
+    _tool_stub "${APT}" apt-cache <<'STUB'
+case "$(cat "${0%/*}/mode")" in
+    candidate) printf '  Installed: (none)\n  Candidate: %s\n' "$(cat "${0%/*}/version")" ;;
+    none) printf '  Installed: (none)\n  Candidate: (none)\n' ;;
+    *) exit "$(cat "${0%/*}/mode")" ;;
+esac
+STUB
+    _tool_stub "${APT}" apt-get <<<'exit "$(cat "${0%/*}/$1-rc")"'
+    cat "${root}/VERSION" > "${APT}/version"
+    _path_without "${t}/noapt" curl dig apt-get apt-cache
+    while IFS='|' read -r case mode env path rc want; do
+        printf '%s\n' "${mode}" > "${APT}/mode"
+        printf '%s\n' "${env%%,*}" > "${APT}/update-rc"; printf '%s\n' "${env#*,}" > "${APT}/install-rc"
+        CASE_PATH="${BIN}:${PATH}"
+        [ "${path}" = full ] || CASE_PATH="${APT}:${t}/noapt"
+        [ "${path}" != noapt ] || CASE_PATH="${t}/noapt"
+        _setup_sh_run 'PATH="${CASE_PATH}"; '"${case}"
+        [ "${status}" -eq "${rc}" ] && [[ "${output}" == *"${want}"* ]] && { [ -n "${want}" ] || [ -z "${output}" ]; } \
+            || { echo "${case}: rc ${status}: ${output}"; return 1; }
+    done <<CASES
+package_name_for_tool dig|candidate|0,0|apt|0|${pref}
+package_name_for_tool dig|none|0,0|apt|0|${fall}
+package_name_for_tool dig|${CODE}|0,0|apt|1|apt-cache policy ${pref} failed (exit ${CODE})
+package_name_for_tool curl|${CODE}|0,0|apt|0|curl
+install_missing_tools curl dig|${CODE}|0,0|full|0|
+install_missing_tools curl|${CODE}|0,0|noapt|1|Cannot install missing tools automatically; install: curl
+install_missing_tools curl|${CODE}|0,0|apt|1|curl is still missing after installing package(s): curl
+install_missing_tools curl|${CODE}|0,${CODE}|apt|1|Failed to install required tool(s): curl
+install_missing_tools curl|${CODE}|${CODE},0|apt|1|apt-get update failed (exit ${CODE})
+install_missing_tools dig|${CODE}|0,0|apt|1|Cannot resolve the package of dig
+CASES
+}
+
+@test "setup backup volumes, project name and stack state per docker answer" {
+    # What: name, cache volume per mode, state, errors
+    # Why: config backups never carry the cache volume
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" name vols cache other mark listing
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    name="$(_prod_compose config --format json | jq -r .name)"
+    vols="$(_prod_compose config --volumes)"
+    mark="$(print_error '' 2>&1)"
+    export DS="${t}/ds" BIN="${t}/bin" T="${t}" D="${t}/repo/deploy/prod" ONAME="${name}-${BATS_TEST_NUMBER}" \
+        FAULT="${BATS_TEST_NAME}"
+    _prod_install "${D}"
+    cache="$(compose_cache_volume_name "${D}" "${D}/.env")"
+    [ "${cache%%_*}" = "${name}" ] && grep -qx -- "${cache#"${name}_"}" <<< "${vols}" \
+        || { echo "cache volume ${cache} is not a prod compose volume"; return 1; }
+    other="${name}_$(awk -v c="${cache#"${name}_"}" '$0 != c { print; exit }' <<< "${vols}")"
+    mkdir -p "${DS}/volumes/${cache}" "${DS}/volumes/${other}"
+    printf '%s\n' "${cache}" > "${DS}/volumes/${cache}/.${cache}"
+    printf '%s\n' "${other}" > "${DS}/volumes/${other}/.${other}"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"
+        echo "name=$(compose_project_name "${D}" "${D}/.env")"
+        echo "override=$(COMPOSE_PROJECT_NAME="${ONAME}" compose_project_name "${D}" "${D}/.env")"
+        backup_compose_volumes "${D}" "${T}/config" config
+        backup_compose_volumes "${D}" "${T}/full" full
+        compose_stack_running "${D}" && echo state=running || echo state=stopped
+        : > "${DS}/running"
+        compose_stack_running "${D}" && echo state=running || echo state=stopped'
+    [ "${status}" -eq 0 ] && [[ "${output}" == *"name=${name}"*"override=${ONAME}"*"state=stopped"*"state=running"* ]] \
+        || { echo "run: ${output}"; return 1; }
+    [ ! -e "${t}/config/${cache}.tar" ] && [ -f "${t}/full/${cache}.tar" ] && [ -f "${t}/config/${other}.tar" ] \
+        || { echo "cache volume per mode"; ls -R "${t}/config" "${t}/full"; return 1; }
+    listing="$(tar -tf "${t}/config/${other}.tar")"
+    grep -qx -- "./.${other}" <<< "${listing}" || { echo "dotfile not archived: ${listing}"; return 1; }
+    : > "${DS}/fail-volume"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; compose_volume_names "${D}"; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"${FAULT}"*"${mark}"*"${name}"* && "${output}" != *unreached* ]] \
+        || { echo "volume ls failure: ${output}"; return 1; }
+}
+
+@test "setup restore guard refuses volumes another install owns" {
+    # What: foreign, unlabeled, labeled volumes, no docker
+    # Why: one project name shares volumes across installs
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" case owner arch vols rc want mark vol
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    mark="$(print_error '' 2>&1)"
+    export BIN="${t}/bin" T="${t}" D="${t}/inst" O="${t}/other" P
+    P="$(_prod_compose config --format json | jq -r .name)"
+    vol="${P}_$(_backup_volume)"
+    mkdir -p "${D}" "${O}" "${t}/empty"
+    while IFS='|' read -r case owner arch vols rc want; do
+        export DS="${t}/ds-${case}" A="${!arch}"
+        mkdir -p "${DS}/volumes"
+        [ "${owner}" = - ] || printf '%s %s\n' "${case}" "${owner:+${!owner}}" > "${DS}/foreign"
+        [ "${vols}" = 0 ] || mkdir -p "${DS}/volumes/${vol}"
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; guard_restore_shared_project_volumes "${D}" "${A}" "${P}"; echo "passed=${DS}"'
+        if [ "${rc}" -eq 0 ]; then
+            [ "${status}" -eq 0 ] && [[ "${output}" == *"passed=${DS}"* ]] || { echo "${case}: ${output}"; return 1; }
+        else
+            [ "${status}" -eq 1 ] && [[ "${output}" == *"${mark}"*"${!want}"* && "${output}" != *passed=* ]] \
+                || { echo "${case}: rc ${status} ${output}"; return 1; }
+        fi
+    done <<'CASES'
+foreign|O|D|0|1|O
+own|D|O|0|0|-
+nolabel||D|0|1|case
+crossdir|-|O|1|1|O
+samedir|-|D|1|0|-
+CASES
+    export DS="${t}/ds-nodocker"
+    _setup_sh_run 'PATH="${T}/empty"; guard_restore_shared_project_volumes "${D}" "${O}" "${P}"; echo "passed=${DS}"'
+    [ "${status}" -eq 0 ] && [ "${output}" = "passed=${DS}" ] || { echo "no docker: ${output}"; return 1; }
+}
+
+@test "setup restore replaces volume content, dotfiles included" {
+    # What: restore empties a volume, then unpacks
+    # Why: no stale file survives; a bad archive keeps data
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" vol v mark n
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    mark="$(print_error '' 2>&1)"
+    vol="$(_prod_compose config --format json | jq -r .name)_$(_backup_volume)"
+    export DS="${t}/ds" BIN="${t}/bin" T="${t}" D="${t}/repo/deploy/prod"
+    _prod_install "${D}"
+    v="${DS}/volumes/${vol}"
+    mkdir -p "${t}/src/${vol}" "${t}/src/.${vol}.d" "${t}/vr" "${t}/bad" "${v}"
+    for n in "${vol}" ".${vol}" "${vol}/.${vol}"; do printf '%s\n' "${n}" > "${t}/src/${n}.f"; done
+    tar -C "${t}/src" -cpf "${t}/vr/${vol}.tar" .
+    for n in "${DS##*/}" ".${DS##*/}" "..${DS##*/}"; do printf '%s\n' "${n}" > "${v}/${n}"; done
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; restore_compose_volumes "${D}" "${T}/vr"'
+    [ "${status}" -eq 0 ] || { echo "restore: ${output}"; return 1; }
+    diff -r "${t}/src" "${v}" || { echo "volume differs from the archive"; return 1; }
+    cp "${t}/vr/${vol}.tar" "${t}/bad/${vol}.tar"
+    truncate -s 1 "${t}/bad/${vol}.tar"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; restore_compose_volumes "${D}" "${T}/bad"; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"${mark}"*"${vol}"* && "${output}" != *unreached* ]] \
+        || { echo "bad archive: ${output}"; return 1; }
+    diff -r "${t}/src" "${v}" || { echo "a bad archive changed the volume"; return 1; }
+}
+
+@test "setup backup and restore round-trip per target and host" {
+    # What: rollback in place twice; restore on a new host
+    # Why: a restore must reproduce files, paths and volumes
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" archive round vol v keys excl key e
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    vol="$(_prod_compose config --format json | jq -r .name)_$(_backup_volume)"
+    export DS="${t}/ds" BIN="${t}/bin" T="${t}" S="${t}/a/deploy/prod" D="${t}/b/deploy/prod"
+    v="${DS}/volumes/${vol}"
+    _prod_install "${S}"
+    mkdir -p "${S}/certs" "${v}"
+    printf '%s\n' "${S}" > "${S}/certs/${vol}"
+    printf '%s\n' "${vol}" > "${v}/${vol}"; printf '%s\n' "${DS}" > "${v}/.${vol}"
+    # What: one file in every state dir the compose mounts
+    # Why: backups carry each but the excluded cache/logs
+    # From: Issue #1683 | PR #1858
+    keys="$(prod_state_keys)"
+    excl="$(awk '/^backup_manifest\(\) \{/ { f = 1 } f && /^}/ { exit } f' "${root}/setup.sh" \
+        | sed -n 's/.*case "\$key" in \([A-Z_|]*\)).*/\1/p' | tr '|' '\n')"
+    [ -n "${keys}" ] && [ -n "${excl}" ] || { echo "state keys: ${keys} | ${excl}"; return 1; }
+    while IFS= read -r key; do
+        mkdir -p "${S}/state/$(prod_state_subdir "${key}")"
+        printf '%s\n' "${key}" > "${S}/state/$(prod_state_subdir "${key}")/${key}"
+    done <<< "${keys}"
+    _state_matches() {
+        local dest="$1" key sub
+        while IFS= read -r key; do
+            sub="$(prod_state_subdir "${key}")"
+            if grep -qx -- "${key}" <<< "${excl}"; then
+                ! cmp -s "${t}/S.first/state/${sub}/${key}" "${dest}/state/${sub}/${key}" \
+                    || { echo "${key} came from a config backup"; return 1; }
+            else
+                diff -r "${t}/S.first/state/${sub}" "${dest}/state/${sub}" || { echo "${key} not restored"; return 1; }
+            fi
+        done <<< "${keys}"
+    }
+    : > "${DS}/running"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${S}" 1 && cmd_backup --config --dest "${T}/bk" "${S}"'
+    [ "${status}" -eq 0 ] && [ -e "${DS}/running" ] || { echo "converge and backup: ${output}"; return 1; }
+    archive="$(find "${t}/bk" -mindepth 1 -maxdepth 1)"
+    [ "$(wc -l <<< "${archive}")" -eq 1 ] && [ -f "${archive}" ] || { echo "backup root: ${archive}"; return 1; }
+    export AR="${archive}"
+    cp -a "${S}" "${t}/S.first"; cp -a "${v}" "${t}/v.first"
+    printf '%s\n' "${t}" > "${v}/${vol}"; printf '%s\n' "${t}" > "${S}/certs/${vol}"
+    while IFS= read -r key; do printf '%s\n' "${t}" > "${S}/state/$(prod_state_subdir "${key}")/${key}"; done <<< "${keys}"
+    for round in first second; do
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; cmd_restore "${AR}" "${S}"'
+        [ "${status}" -eq 0 ] && [ -e "${DS}/running" ] || { echo "restore ${round}: ${output}"; return 1; }
+        for e in "${t}/S.first"/* "${t}/S.first"/.[!.]*; do
+            [ ! -e "${e}" ] || [ "${e##*/}" = state ] || diff -r "${e}" "${S}/${e##*/}" || { echo "restore ${round}: ${e##*/}"; return 1; }
+        done
+        _state_matches "${S}" && diff -r "${t}/v.first" "${v}" || { echo "restore ${round} state"; return 1; }
+    done
+    rm -rf "${DS}/volumes" && mkdir "${DS}/volumes"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; cmd_restore "${AR}" "${D}"'
+    [ "${status}" -eq 0 ] || { echo "fresh host: ${output}"; return 1; }
+    [ "$(get_env_var LANCACHE_STATE_DIR "${D}/.env")" = "${D}/state" ] && ! grep -qF -- "${S}" "${D}/.env" \
+        && _state_matches "${D}" && diff -r "${t}/v.first" "${v}" || { echo "fresh host state"; return 1; }
+}
+
+@test "setup backup failure restarts the stack and leaves nothing" {
+    # What: volume or tar fails: stack back up, no files
+    # Why: a failed backup must not stop the cache
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" real vol mark
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    mark="$(print_error '' 2>&1)"
+    vol="$(_prod_compose config --format json | jq -r .name)_$(_backup_volume)"
+    export DS="${t}/ds" BIN="${t}/bin" T="${t}" S="${t}/a/deploy/prod" FAULT="${BATS_TEST_NAME}"
+    _prod_install "${S}"
+    mkdir -p "${DS}/volumes/${vol}" "${t}/tarbin"
+    : > "${DS}/running"; : > "${DS}/fail-run"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; cmd_backup --config --dest "${T}/bk" "${S}"; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"${mark}"*"${vol}"* && "${output}" != *unreached* ]] \
+        && [[ "${output}" != *"unbound variable"* ]] || { echo "run: ${output}"; return 1; }
+    [ -e "${DS}/running" ] && [ -z "$(ls -A "${t}/bk")" ] || { echo "after run failure: $(ls -A "${t}/bk")"; return 1; }
+    rm -f "${DS}/fail-run"; rm -rf "${DS}/volumes/${vol}"
+    real="$(command -v tar)"
+    printf '#!/usr/bin/env bash\ncase "$*" in "-C %s "*) echo "${FAULT}" >&2; exit 2 ;; esac\nexec %q "$@"\n' "${t}/bk" "${real}" \
+        > "${t}/tarbin/tar"
+    chmod +x "${t}/tarbin/tar"
+    _setup_sh_run 'PATH="${T}/tarbin:${BIN}:${PATH}"; cmd_backup --config --dest "${T}/bk" "${S}"; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"${FAULT}"*"${mark}"*"${t}/bk/"* && "${output}" != *unreached* ]] \
+        || { echo "tar: ${output}"; return 1; }
+    [ -e "${DS}/running" ] && [ -z "$(ls -A "${t}/bk")" ] || { echo "after tar failure: $(ls -A "${t}/bk")"; return 1; }
+}
+
+@test "setup convergence pause records units and resume restores them" {
+    # What: pause stops/disables; resume restores only that.
+    # Why: an update must not drop or invent a timer state
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" ta te sa u
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    export BIN="${t}/bin"
+    _tool_stub "${BIN}" systemctl <<'STUB'
+cmd="$1"; shift
+[ "${1:-}" != --quiet ] || shift
+[ "${1:-}" != --no-legend ] || shift
+s="${SD}/$1"
+if [ ! -e "${s}.seen" ]; then
+    : > "${s}.seen"
+    case "$1" in
+        *.timer) [ "${TA}" = 0 ] || : > "${s}.active"; [ "${TE}" = 0 ] || : > "${s}.enabled" ;;
+        *.service) [ "${SA}" = 0 ] || : > "${s}.active" ;;
+    esac
+fi
+case "${cmd}" in
+    list-unit-files) echo "$1" ;;
+    is-active) [ -e "${s}.active" ] ;;
+    is-enabled) [ -e "${s}.enabled" ] ;;
+    stop) rm -f "${s}.active" ;;
+    disable) rm -f "${s}.enabled" ;;
+    start) : > "${s}.active" ;;
+    enable) : > "${s}.enabled" ;;
+    *) echo "unexpected systemctl call: ${cmd} $*" >&2; exit 97 ;;
+esac
+STUB
+    for ta in 0 1; do for te in 0 1; do for sa in 0 1; do
+        export SD="${t}/sd-${ta}${te}${sa}" TA="${ta}" TE="${te}" SA="${sa}"
+        mkdir -p "${SD}"
+        # What: systemd_available, the one replaced probe
+        # Why: it tests /run/systemd, absent in containers
+        # From: Issue #1683 | PR #1858
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; systemd_available() { return 0; }
+            pause_lancache_convergence_for_update
+            echo "rec=${CONVERGENCE_TIMER_WAS_ACTIVE}${CONVERGENCE_TIMER_WAS_ENABLED}${CONVERGENCE_SERVICE_WAS_ACTIVE}"
+            echo "left=$(find "${SD}" -name "*.active" -o -name "*.enabled" | wc -l)"
+            resume_lancache_convergence_after_update true'
+        [ "${status}" -eq 0 ] && [[ "${output}" == *"rec=${ta}${te}${sa}"*"left=0"* ]] || { echo "${SD}: ${output}"; return 1; }
+        [ -n "$(find "${SD}" -name '*.timer.seen')" ] && [ -n "$(find "${SD}" -name '*.service.seen')" ] \
+            || { echo "${SD}: no timer and service seen"; return 1; }
+        for u in "${SD}"/*.timer.seen; do
+            u="${u%.seen}"
+            [ "$([ -e "${u}.active" ] && echo 1 || echo 0)$([ -e "${u}.enabled" ] && echo 1 || echo 0)" = "${ta}${te}" ] \
+                || { echo "${u}: timer state not restored"; return 1; }
+        done
+        for u in "${SD}"/*.service.seen; do
+            u="${u%.seen}"
+            [ "$([ -e "${u}.active" ] && echo 1 || echo 0)" = "${sa}" ] || { echo "${u}: service state not restored"; return 1; }
+        done
+    done; done; done
+}
+
+@test "setup log bundle finds every managed secret and redacts it" {
+    # What: secret keys, values, mid-line, .env redaction
+    # Why: a missed secret in a bundle is a credential leak
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" keys list plain k long short custom ph marker
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    keys="$(grep -oE '(ensure_secret_env_key|generate_secret_value) [A-Z_]+' "${root}/setup.sh" | awk '{ print $2 }' | sort -u)"
+    list="$(logbundle_secret_env_keys)"
+    [ -n "${keys}" ] && [ -n "${list}" ] || { echo "no managed secrets found"; return 1; }
+    while IFS= read -r k; do
+        grep -qx -- "${k}" <<< "${list}" || logbundle_key_looks_like_secret "${k}" || { echo "unredacted ${k}"; return 1; }
+    done <<< "${keys}"
+    plain="$(awk -F= '/^[A-Z_][A-Z0-9_]*=/ { print $1 }' "${root}/deploy/prod/.env" | grep -vxF -f <(printf '%s\n' "${keys}"))"
+    while IFS= read -r k; do
+        ! logbundle_key_looks_like_secret "${k}" || { echo "plain prod key ${k} flagged as secret"; return 1; }
+    done <<< "${plain}"
+    k="$(awk 'NR == 1' <<< "${list}")"
+    long="$(generate_secret_value "${k}" hex32)"; short="$(generate_secret_value "${k}" alnum20)"
+    custom="BATS${BATS_TEST_NUMBER}_${k##*_}"; ph="CHANGE_ME_${k}"
+    ! grep -qx -- "${custom}" <<< "${list}" && logbundle_key_looks_like_secret "${custom}" && secret_value_is_placeholder "${ph}" \
+        || { echo "probe inputs invalid: ${custom} ${ph}"; return 1; }
+    { printf '%s=%s\n' "${k}" "${short}" "${custom}" "${long}" "$(awk 'NR == 2' <<< "${list}")" "${ph}"
+      awk -F= -v k="$(awk 'NR == 1' <<< "${plain}")" '$1 == k' "${root}/deploy/prod/.env"; } > "${t}/src.env"
+    logbundle_collect_secret_values "${t}/src.env" > "${t}/secrets"
+    [ "$(paste -sd, "${t}/secrets")" = "${long},${short}" ] || { echo "values: $(paste -sd, "${t}/secrets")"; return 1; }
+    marker="$(logbundle_redact_stream "${t}/secrets" <<< "${long}")"
+    [ -n "${marker}" ] && [ "${marker}" != "${long}" ] || { echo "no redaction marker"; return 1; }
+    [ "$(logbundle_redact_stream "${t}/secrets" <<< "${t}:${short}@${k}")" = "${t}:${marker}@${k}" ] \
+        && [ "$(: > "${t}/none"; logbundle_redact_stream "${t}/none" <<< "${t}:${short}")" = "${t}:${short}" ] \
+        || { echo "stream redaction"; return 1; }
+    logbundle_redact_env_file "${t}/src.env" "${t}/dst.env"
+    ! grep -qF -e "${long}" -e "${short}" "${t}/dst.env" && grep -qxF -- "${k}=${marker}" "${t}/dst.env" \
+        && grep -qxF -- "$(tail -n 1 "${t}/src.env")" "${t}/dst.env" || { echo "env: $(paste -sd'#' "${t}/dst.env")"; return 1; }
+}
+
+@test "setup log bundle picks the compressor by availability" {
+    # What: zstd, else bzip2, else gzip, by what is on PATH
+    # Why: smallest bundle the host can actually write
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" body case avail tool ext real
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    body="$(declare -f write_compressed_tar)"
+    # What: the picked suffix has an arm using that tool
+    # Why: selector and archiver must agree on every suffix
+    # From: Issue #1683 | PR #1858
+    while IFS='|' read -r case avail; do
+        mkdir -p "${t}/${case}"
+        for tool in ${avail//,/ }; do _tool_stub "${t}/${case}" "${tool}" <<<'exit 0'; done
+        ext="$(PATH="${t}/${case}" logbundle_select_compressor)"
+        tool="$(awk -v e="${ext})" '$1 == e { getline; sub(/^[^(]*\(/, ""); print $1; exit }' <<< "${body}")"
+        [ -n "${tool}" ] && { [ -z "${avail}" ] || [ "${tool}" = "${avail%%,*}" ]; } \
+            || { echo "${case}: picked .${ext}, archiver packs it with '${tool}'"; return 1; }
+        real="$(type -P "${tool}")" || continue
+        # What: the tool's own suffix; a readable archive
+        # Why: the archive is whole when the writer returns
+        # From: Issue #1683 | PR #1858
+        mkdir -p "${t}/z-${case}" && printf '%s\n' "${case}" > "${t}/z-${case}/f"
+        "${real}" "${t}/z-${case}/f" && [ -e "${t}/z-${case}/f.${ext}" ] \
+            || { echo "${case}: ${real} does not write .${ext}: $(ls "${t}/z-${case}")"; return 1; }
+        export ZE="${ext}" ZA="${t}/${case}.tar.${ext}" ZP="${t}" ZN="z-${case}"
+        _setup_sh_run 'write_compressed_tar "${ZE}" "${ZA}" "${ZP}" "${ZN}"'
+        [ "${status}" -eq 0 ] && [ "$("${real}" -dc < "${t}/${case}.tar.${ext}" | tar -tf - | grep -c "f\.${ext}$")" -eq 1 ] \
+            || { echo "${case}: archive: ${output}"; return 1; }
+    done <<'CASES'
+both|zstd,bzip2
+bzip2|bzip2
+none|
+CASES
+}
+
+@test "setup log bundle lists snapshot volumes per volume state" {
+    # What: missing, failing lookup, volume, no docker
+    # Why: the bundle must say why a listing is empty
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" base vol n
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    base="$(_backup_volume)"
+    vol="$(_prod_compose config --format json | jq -r .name)_${base}"
+    export DS="${t}/ds" BIN="${t}/bin" T="${t}" I="${t}/repo/deploy/prod" B="${base}" SUB="${BATS_TEST_NUMBER}" \
+        FAULT="${BATS_TEST_NAME}"
+    _prod_install "${I}"
+    mkdir -p "${DS}/volumes" "${t}/empty"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; logbundle_named_volume_listing "${I}" "${I}/.env" "${B}" "${SUB}" "${T}/1"
+        : > "${DS}/fail-volume"
+        logbundle_named_volume_listing "${I}" "${I}/.env" "${B}" "${SUB}" "${T}/3"
+        PATH="${T}/empty" logbundle_named_volume_listing "${I}" "${I}/.env" "${B}" "${SUB}" "${T}/4"'
+    [ "${status}" -eq 0 ] || { echo "run: ${output}"; return 1; }
+    rm -f "${DS}/fail-volume"
+    mkdir -p "${DS}/volumes/${vol}/${BATS_TEST_NUMBER}"
+    : > "${DS}/volumes/${vol}/${BATS_TEST_NUMBER}/${vol}"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; logbundle_named_volume_listing "${I}" "${I}/.env" "${B}" "${SUB}" "${T}/5"'
+    [ "${status}" -eq 0 ] || { echo "listing: ${output}"; return 1; }
+    for n in 1 3 4 5; do [ -s "${t}/${n}" ] || { echo "listing ${n} is empty"; return 1; }; done
+    grep -qF -- "${vol}" "${t}/1" && ! grep -qF -- "${vol}" "${t}/4" && grep -qF -- "${FAULT}" "${t}/3" \
+        && grep -qF -- "${vol}" "${t}/5" && ! cmp -s "${t}/1" "${t}/4" || { head -n 3 "${t}/1" "${t}/3" "${t}/4" "${t}/5"; return 1; }
+}
+
+@test "setup log bundle archive holds no secret and no leftovers" {
+    # What: one redacted archive; on failure: nothing
+    # Why: the bundle is attached to a public issue
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" key secret archive marker mark
+    local -a unpack=()
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    mark="$(print_error '' 2>&1)"
+    key="$(logbundle_secret_env_keys | awk 'NR == 1')"
+    secret="$(generate_secret_value "${key}" hex32)"
+    printf '%s\n' "${secret}" > "${t}/s"
+    marker="$(logbundle_redact_stream "${t}/s" <<< "${secret}")"
+    export DS="${t}/ds" BIN="${t}/bin" T="${t}" I="${t}/repo/deploy/prod" STUB_SECRET="${secret}" FAULT="${BATS_TEST_NAME}"
+    _prod_install "${I}"
+    set_env_key "${key}" "${secret}" "${I}/.env"
+    mkdir -p "${DS}/volumes" "${t}/x" "${t}/tarbin" "${t}/tmpd"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; cmd_create_logs_for_issue "${I}" --dest "${T}/out"'
+    [ "${status}" -eq 0 ] || { echo "bundle: ${output}"; return 1; }
+    archive="$(find "${t}/out" -mindepth 1 -maxdepth 1)"
+    [ "$(wc -l <<< "${archive}")" -eq 1 ] && [ -f "${archive}" ] || { echo "out: ${archive}"; return 1; }
+    # What: failed extract: raw evidence, archive vs reader
+    # Why: tells a corrupt archive from a failing reader
+    # From: Issue #1683 | PR #1858
+    if ! tar -C "${t}/x" -xf "${archive}"; then
+        echo "extract failed: $(ls -l "${archive}"); tar: $(tar --help 2>&1 | awk 'NR == 1')"
+        case "${archive##*.}" in bz2) unpack=(bzip2 -dc) ;; zst) unpack=(zstd -qdc) ;; gz) unpack=(gzip -dc) ;; esac
+        "${unpack[@]}" "${archive}" > "${t}/raw.tar"
+        echo "decompress rc $?, $(wc -c < "${t}/raw.tar") bytes"
+        tar -tvf "${t}/raw.tar"
+        echo "raw list rc $?"
+        return 1
+    fi
+    ! grep -rqF -- "${secret}" "${t}/x" || { echo "secret in bundle: $(grep -rlF -- "${secret}" "${t}/x")"; return 1; }
+    grep -rqxF -- "${key}=${marker}" "${t}/x" && [ "$(grep -rlF -- "${marker}" "${t}/x" | wc -l)" -gt 1 ] \
+        || { echo "redaction: $(grep -rlF -- "${marker}" "${t}/x")"; return 1; }
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; cmd_create_logs_for_issue "${T}/none" --dest "${T}/out2"; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"${mark}"*"${t}/none"* && "${output}" != *unreached* ]] \
+        || { echo "no stack: ${output}"; return 1; }
+    printf '#!/usr/bin/env bash\necho "${FAULT}" >&2\nexit 2\n' > "${t}/tarbin/tar"
+    chmod +x "${t}/tarbin/tar"
+    _setup_sh_run 'PATH="${T}/tarbin:${BIN}:${PATH}" TMPDIR="${T}/tmpd"; cmd_create_logs_for_issue "${I}" --dest "${T}/out3"; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"${FAULT}"*"${mark}"*"${t}/out3/"* && "${output}" != *unreached* ]] \
+        || { echo "tar failure: ${output}"; return 1; }
+    [ -z "$(ls -A "${t}/out3")" ] && [ -z "$(ls -A "${t}/tmpd")" ] || {
+        echo "leftovers: $(ls -A "${t}/out3" "${t}/tmpd")"; return 1; }
+}
+
+@test "setup debug stays read-only and converge folds UI settings once" {
+    # What: debug only reads; converge folds once, stable
+    # Why: support commands must not change an install
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" body vsuffix sfile vols channel mode size gb unit profiles kv p known
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    _tool_stub "${t}/bin" curl <<<'exit 7'
+    export DS="${t}/ds" BIN="${t}/bin" T="${t}" I="${t}/repo/deploy/prod"
+    _prod_install "${I}"
+    mkdir -p "${DS}/volumes" "$(get_env_var LANCACHE_STATE_DIR "${I}/.env")"
+    cp "${I}/.env" "${t}/env.before"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; cmd_debug "${I}"; cmd_debug "${I}"'
+    [ "${status}" -eq 0 ] && cmp "${t}/env.before" "${I}/.env" || { echo "debug: ${output}"; return 1; }
+    ! grep -Eq '^compose .* (up|pull|down|stop|rm|restart|create|start|kill)( |$)' "${DS}/docker.log" \
+        && grep -Eq '^compose .* ps( |$)' "${DS}/docker.log" || { echo "debug calls: $(paste -sd'#' "${DS}/docker.log")"; return 1; }
+    body="$(declare -f lancache_read_ui_settings_override)"
+    vsuffix="$(sed -n 's/.*volume="\${project}_\([^"]*\)".*/\1/p' <<< "${body}")"
+    sfile="$(grep -oE '/volume/[A-Za-z0-9._-]+' <<< "${body}" | awk 'NR == 1 { sub(/^\/volume\//, ""); print }')"
+    vols="$(_prod_compose config --volumes)"
+    grep -qx -- "${vsuffix}" <<< "${vols}" && [ -n "${sfile}" ] || { echo "ui volume ${vsuffix}/${sfile}"; return 1; }
+    channel="$(_ci_block_entry_field release "" default_channel)"
+    lancache_ui_channel_override_is_valid "${channel}" || { echo "SOT channel ${channel} not UI-valid"; return 1; }
+    mode=""
+    while IFS= read -r p; do
+        is_valid_dhcp_mode "${p#dhcp-}" && [ "${p#dhcp-}" != "${p}" ] && { mode="${p#dhcp-}"; break; }
+    done < <(_prod_compose config --profiles)
+    size="$(get_env_var CACHE_MAX_SIZE "${root}/deploy/prod/.env")"; unit="${size//[0-9]/}"; gb=$(( ${size%"${unit}"} * 2 ))
+    [ -n "${mode}" ] && lancache_ui_cache_max_gb_override_is_valid "${gb}" || { echo "no UI inputs: ${mode} ${gb}"; return 1; }
+    vsuffix="$(_prod_compose config --format json | jq -r .name)_${vsuffix}"
+    mkdir -p "${DS}/volumes/${vsuffix}"
+    printf '%s\n' "LANCACHE_IMAGE_CHANNEL=${channel}" AUTO_UPDATE_ENABLED=1 "DHCP_MODE=${mode}" LOGGING_ENABLED=1 "CACHE_MAX_GB=${gb}" \
+        > "${DS}/volumes/${vsuffix}/${sfile}"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; cmd_converge_reconcile "${I}"; cp "${I}/.env" "${T}/env.first"; cmd_converge_reconcile "${I}"'
+    [ "${status}" -eq 0 ] && cmp "${t}/env.first" "${I}/.env" || { echo "converge: ${output}"; return 1; }
+    while IFS= read -r kv; do
+        grep -qxF -- "${kv}" "${I}/.env" || { echo "missing ${kv}: $(paste -sd'#' "${I}/.env")"; return 1; }
+    done < "${DS}/volumes/${vsuffix}/${sfile}"
+    [ "$(get_env_var CACHE_MAX_SIZE "${I}/.env")" = "${gb}${unit}" ] || { echo "cache size not derived from ${gb}"; return 1; }
+    profiles="$(compose_profiles_for_runtime "" "${mode}" "$(get_env_var NTP_ENABLED "${I}/.env")" 1)"
+    [ "$(get_env_var COMPOSE_PROFILES "${I}/.env")" = "${profiles}" ] || { echo "profiles: $(get_env_var COMPOSE_PROFILES "${I}/.env")"; return 1; }
+    known="$(_prod_compose config --profiles)"
+    while IFS= read -r p; do
+        grep -qx -- "${p}" <<< "${known}" || { echo "profile ${p} unknown to prod"; return 1; }
+    done < <(tr ',' '\n' <<< "${profiles}" | awk 'NF')
 }
 
 @test "dns config adapters snapshot, roll back and converge" {

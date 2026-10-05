@@ -12,9 +12,9 @@ services:
   # Port 443 (SSL): HTTPS caching via TLS interception (CA cert required)
   proxy:
     container_name: lancache-proxy
-    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/proxy:${LANCACHE_IMAGE_TAG:-latest}
-    # What: tracked defaults, then untracked operator values
-    # Why: setup.sh writes *.local.env; git pulls stay clean
+    image: ${LANCACHE_IMAGE_REF_PROXY:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/proxy:${LANCACHE_IMAGE_TAG:-latest}}
+    # What: tracked defaults, then untracked overrides
+    # Why: overrides in *.local.env keep git pulls clean
     # From: Issue #1683 | PR #1858
     env_file:
       - ../../config/prod/proxy.env
@@ -24,6 +24,18 @@ services:
       - IP_STANDARD=${IP_STANDARD}
       - IP_SSL=${IP_SSL}
       - SSL_ENABLED=${SSL_ENABLED:-1}
+      # What: per-install values from the operator .env
+      # Why: one owner; config/prod holds service defaults
+      # From: Issue #1683 | PR #1858
+      - CACHE_MAX_SIZE=${CACHE_MAX_SIZE:?CACHE_MAX_SIZE is required}
+      - CACHE_MEM_MB=${CACHE_MEM_MB:?CACHE_MEM_MB is required}
+      - CACHE_SLICE_SIZE=${CACHE_SLICE_SIZE:?CACHE_SLICE_SIZE is required}
+      - CACHE_VALID_HIT=${CACHE_VALID_HIT:?CACHE_VALID_HIT is required}
+      - CACHE_VALID_ANY=${CACHE_VALID_ANY:?CACHE_VALID_ANY is required}
+      - CACHE_INACTIVE=${CACHE_INACTIVE:?CACHE_INACTIVE is required}
+      - NGINX_UPSTREAM_RESOLVER=${NGINX_UPSTREAM_RESOLVER:?NGINX_UPSTREAM_RESOLVER is required}
+      - PROXY_SECURITY_MODE=${PROXY_SECURITY_MODE:?PROXY_SECURITY_MODE is required}
+      - PROXY_ALLOWED_CLIENT_CIDRS=${PROXY_ALLOWED_CLIENT_CIDRS:-}
     volumes:
       - ../../certs:/etc/nginx/ssl/ca
       - ../../services/dns/cdn-domains.txt:/etc/nginx/cdn-domains.txt
@@ -51,14 +63,21 @@ services:
 
   dns-standard:
     container_name: lancache-dns-standard
-    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REF_DNS:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}}
     env_file:
       - ../../config/prod/dns-standard.env
       - path: ../../config/prod/dns-standard.local.env
         required: false
     environment:
+      # What: CDN names resolve to the address this mode binds
+      # Why: one owner with the port mapping (AG-SETUP-001)
+      # From: Issue #1683 | PR #1858
+      - PROXY_IP=${IP_STANDARD:?IP_STANDARD is required}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - PDNS_API_KEY=${PDNS_API_KEY}
+      # What: Kea's DDNS updates come from the host LAN IPs
+      # Why: defense in depth; TSIG is the real auth gate
+      # From: Issue #706
       - DDNS_ALLOW_FROM=${IP_STANDARD},${IP_SSL}
       - NATS_URL=nats://nats:4222
       - NATS_USER=${NATS_DNS_WRITER_USER:?NATS_DNS_WRITER_USER is required}
@@ -101,12 +120,16 @@ services:
 
   dns-ssl:
     container_name: lancache-dns-ssl
-    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REF_DNS:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}}
     env_file:
       - ../../config/prod/dns-ssl.env
       - path: ../../config/prod/dns-ssl.local.env
         required: false
     environment:
+      # What: CDN names resolve to the address this mode binds
+      # Why: one owner with the port mapping (AG-SETUP-001)
+      # From: Issue #1683 | PR #1858
+      - PROXY_IP=${IP_SSL:?IP_SSL is required}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - PDNS_API_KEY=${PDNS_API_KEY}
       - DDNS_ALLOW_FROM=127.0.0.1
@@ -183,7 +206,7 @@ services:
 
   watchdog:
     container_name: lancache-watchdog
-    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REF_WATCHDOG:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}}
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
@@ -199,6 +222,7 @@ services:
       - path: ../../config/prod/watchdog.local.env
         required: false
     environment:
+      - SSL_ENABLED=${SSL_ENABLED:-1}
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - LOGGING_ENABLED=${LOGGING_ENABLED:-0}
@@ -234,7 +258,7 @@ services:
 
   retention:
     container_name: lancache-retention
-    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REF_WATCHDOG:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}}
     entrypoint: ["/retention-entrypoint.sh"]
     network_mode: none
     cap_drop:
@@ -280,7 +304,7 @@ services:
   # network_mode: host allows DHCP broadcast (port 67/udp)
   dhcp:
     container_name: lancache-dhcp
-    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REF_DHCP:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp:${LANCACHE_IMAGE_TAG:-latest}}
     profiles:
       - dhcp-kea
     env_file:
@@ -294,6 +318,13 @@ services:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
       - DHCP_MODE=${DHCP_MODE:-disabled}
+      # What: Kea pool from the operator .env
+      # Why: :? would fail even with this profile off
+      # From: Issue #1683 | PR #1858
+      - DHCP_SUBNET=${DHCP_SUBNET:-}
+      - DHCP_RANGE_START=${DHCP_RANGE_START:-}
+      - DHCP_RANGE_END=${DHCP_RANGE_END:-}
+      - DHCP_GATEWAY=${DHCP_GATEWAY:-}
     volumes:
       # What: shared-secrets volume, first-writer-wins for KEA_CTRL_TOKEN/DDNS_TSIG_KEY.
       # Why: every consumer of these secrets must agree on the same value.
@@ -343,11 +374,31 @@ services:
 
   dhcp-proxy:
     container_name: lancache-dhcp-proxy
-    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp-proxy:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REF_DHCP_PROXY:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp-proxy:${LANCACHE_IMAGE_TAG:-latest}}
     env_file:
       - ../../config/prod/dhcp-proxy.env
       - path: ../../config/prod/dhcp-proxy.local.env
         required: false
+    environment:
+      # What: start values; saved Admin UI settings win
+      # Why: entrypoint sources /data settings after env
+      # From: Issue #1683 | PR #1858
+      - DHCP_MODE=${DHCP_MODE:-disabled}
+      - DHCP_SUBNET_START=${DHCP_SUBNET_START:-}
+      - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-}
+      - DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-}
+      - UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP:-}
+      - DHCP_RELAY_LOCAL_ADDR=${DHCP_RELAY_LOCAL_ADDR:-}
+      - DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE:-}
+      - DHCP_PROXY_ROUTER=${DHCP_PROXY_ROUTER:-}
+      - DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS:-}
+      - DHCP_PROXY_DOMAIN=${DHCP_PROXY_DOMAIN:-}
+      - DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME:-}
+      - DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER:-}
+      - DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}
+      - DHCP_PROXY_PXE_BOOT_SERVER=${DHCP_PROXY_PXE_BOOT_SERVER:-}
+      - DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS:-}
+      - DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI:-}
     volumes:
       - ui-data:/data:ro
       # What: persistent, service-owned volume for known-good dnsmasq config snapshots.
@@ -387,7 +438,7 @@ services:
 
   ntp:
     container_name: lancache-ntp
-    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ntp:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REF_NTP:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ntp:${LANCACHE_IMAGE_TAG:-latest}}
     profiles:
       - ntp
     env_file:
@@ -435,7 +486,7 @@ services:
 
   cachehamster:
     container_name: lancache-cachehamster
-    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/cachehamster:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REF_CACHEHAMSTER:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/cachehamster:${LANCACHE_IMAGE_TAG:-latest}}
     profiles:
       - cachehamster
     env_file:
@@ -455,7 +506,7 @@ services:
 
   dhcp-probe:
     container_name: lancache-dhcp-probe
-    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REF_UI:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}}
     entrypoint: ["/usr/local/bin/lancache-ui", "--dhcp-probe"]
     network_mode: host
     restart: "no"
@@ -679,7 +730,7 @@ services:
 
   syslog-logs-permissions:
     container_name: lancache-syslog-logs-permissions
-    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REF_SYSLOG:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}}
     profiles: [logging]
     user: "0:0"
     entrypoint: ["/bin/chown"]
@@ -699,7 +750,7 @@ services:
     # Why: watchdog's Rust rewrite needs a stable, predictable Docker API path to add this service to its alert-only monitored set -- Compose's auto-generated name would depend on the project name/dir.
     # From: Issue #1428 | PR #1431
     container_name: lancache-syslog
-    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REF_SYSLOG:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}}
     profiles: [logging]
     # What: runs as fixed non-root uid 10001 with no added Linux capabilities.
     # Why: every first-party producer log this collector tails is now created group-readable for gid 10001, so plain Unix permissions are sufficient.
@@ -752,7 +803,7 @@ services:
   # ── Admin UI ──────────────────────────────────────────────────────────────
   ui:
     container_name: lancache-ui
-    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
+    image: ${LANCACHE_IMAGE_REF_UI:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}}
     volumes:
       # What: shared-secrets volume the ui reads from.
       # Why: must match the server side's resolved value.

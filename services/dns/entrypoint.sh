@@ -344,7 +344,7 @@ fi
 # happens to get a static compose-assigned IP, but prod's container gets a
 # dynamically-assigned Docker bridge-network IP on every start -- the same
 # runtime self-detection below runs in both, with no per-environment
-# special-casing. First tier mirrors setup.sh's detect_secondary_listen_ip
+# special-casing. First tier mirrors setup.sh's detect_lan_ip
 # (same "src" parsing of `ip route get`, the address the kernel would
 # actually use to reach the internet, i.e. this container's real bridge
 # address). Deliberately does NOT reuse that function's second-tier
