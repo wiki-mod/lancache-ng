@@ -7942,21 +7942,38 @@ _ci_prose_excluded() {
     return 1
 }
 
+# What: print the comment grammar of a path, else rc 1.
+# Why: header, length and chronology checks share one map.
+# From: Issue #1683 | PR #1858
+_ci_comment_style() {
+    case "$1" in
+        services/ui/src/templates/*.html|*/services/ui/src/templates/*.html) printf 'tera\n' ;;
+        *.html) printf 'html\n' ;;
+        *.rs) printf 'rust\n' ;;
+        *.lua) printf 'lua\n' ;;
+        *.js) printf 'js\n' ;;
+        *.css) printf 'css\n' ;;
+        *.yml|*.yaml) printf 'yaml\n' ;;
+        *.sh|*.bats|*.toml|*.conf|*.template|*.txt|*.env|*.service|*.timer|*.ps1|*.dockerignore|Dockerfile|*/Dockerfile|.gitattributes|.gitignore|*/.gitignore|CODEOWNERS|*/CODEOWNERS|.githooks/*|*/.githooks/*) printf 'hash\n' ;;
+        *) return 1 ;;
+    esac
+}
+
 # What: Print the native project+SPDX header for a path.
 # Why: Header uses the file format's own comment syntax.
 # From: Issue #1683
 _ci_header_expected() {
     local h='LanCache-NG (https://github.com/wiki-mod/lancache-ng)'
-    local s='SPDX-License-Identifier: AGPL-3.0-or-later'
-    case "$1" in
-        services/ui/src/templates/*.html|*/services/ui/src/templates/*.html) printf '{# %s #}\n{# %s #}\n' "${h}" "${s}" ;;
-        *.html) printf '<!-- %s -->\n<!-- %s -->\n' "${h}" "${s}" ;;
-        *.rs) printf '//! %s\n//! %s\n' "${h}" "${s}" ;;
-        *.lua) printf -- '-- %s\n-- %s\n' "${h}" "${s}" ;;
-        *.js) printf '// %s\n// %s\n' "${h}" "${s}" ;;
-        *.css) printf '/* %s */\n/* %s */\n' "${h}" "${s}" ;;
-        *.sh|*.bats|*.yml|*.yaml|*.toml|*.conf|*.template|*.txt|*.env|*.service|*.timer|*.ps1|*.dockerignore|Dockerfile|*/Dockerfile|.gitattributes|.gitignore|*/.gitignore|CODEOWNERS|*/CODEOWNERS|.githooks/*|*/.githooks/*) printf '# %s\n# %s\n' "${h}" "${s}" ;;
-        *) return 1 ;;
+    local s='SPDX-License-Identifier: AGPL-3.0-or-later' style
+    style="$(_ci_comment_style "$1")" || return 1
+    case "${style}" in
+        tera) printf '{# %s #}\n{# %s #}\n' "${h}" "${s}" ;;
+        html) printf '<!-- %s -->\n<!-- %s -->\n' "${h}" "${s}" ;;
+        rust) printf '//! %s\n//! %s\n' "${h}" "${s}" ;;
+        lua) printf -- '-- %s\n-- %s\n' "${h}" "${s}" ;;
+        js) printf '// %s\n// %s\n' "${h}" "${s}" ;;
+        css) printf '/* %s */\n/* %s */\n' "${h}" "${s}" ;;
+        hash|yaml) printf '# %s\n# %s\n' "${h}" "${s}" ;;
     esac
 }
 
@@ -7965,7 +7982,7 @@ _ci_header_expected() {
 # From: Issue #1683
 _ci_header_line1_ok() {
     local path="$1" l1="$2"
-    case "${path}" in *.rs) [ "${l1}" = "//!" ]; return "$?" ;; esac
+    if [ "$(_ci_comment_style "${path}")" = rust ]; then [ "${l1}" = "//!" ]; return "$?"; fi
     [ -z "${l1}" ] && return 0
     case "${l1}" in '#!'*) return 0 ;; esac
     case "${path}" in
@@ -8017,106 +8034,372 @@ _ci_check_file_headers() {
     printf 'file-headers=clean files=%s\n' "${sc}"
 }
 
+# What: awk lexer: F/C/D/T per line of L[1..n] for a style.
+# Why: one comment grammar owner for every comment check.
+# From: Issue #1683 | PR #1858
+_CI_AWK_COMMENT_LEX='
+    BEGIN {
+        sq = sprintf("%c", 39); qc = "[" sq "\"]"
+        hd_open = "<<-?[[:space:]]*" qc "?[A-Za-z_][A-Za-z0-9_]*" qc "?"
+        hd_lead = "^<<-?[[:space:]]*" qc "?"; hd_trail = qc "?$"
+        mb = (length("é") == 1); lead_re = "^[\300-\367]$"; cont_re = "^[\200-\277]$"
+    }
+    { L[FNR] = $0; sub(/\r$/, "", L[FNR]) }
+    # What: hash/yaml lines; heredoc=0 tracks YAML blocks.
+    # Why: heredoc/block-scalar bodies are data, not runs.
+    # From: Issue #1683 | PR #1858
+    function cl_hash(heredoc,  i, line, chk, tmp, seg, d, inh, dl, dash, iny, ind) {
+        for (i = 1; i <= n; i++) {
+            line = L[i]
+            if (line ~ /^[[:space:]]*#/) { F[i] = 1; T[i] = line; sub(/^[[:space:]]*#[[:space:]]*/, "", T[i]) }
+            if (i <= hdr) continue
+            if (heredoc && inh) {
+                chk = line; if (dash) sub(/^\t+/, "", chk)
+                if (chk == dl) inh = 0
+                continue
+            }
+            if (!heredoc && iny) {
+                if (line ~ /^[[:space:]]*$/) continue
+                match(line, /[^ ]/); if (RSTART - 1 > ind) continue
+                iny = 0
+            }
+            if (line ~ /^[[:space:]]*#/) { C[i] = 1; continue }
+            if (heredoc) {
+                tmp = line
+                while (match(tmp, hd_open)) {
+                    seg = substr(tmp, RSTART, RLENGTH); dash = (seg ~ /^<<-/)
+                    d = seg; sub(hd_lead, "", d); sub(hd_trail, "", d); dl = d; inh = 1
+                    tmp = substr(tmp, RSTART + RLENGTH)
+                }
+            } else if (line ~ /^[[:space:]]*(-[[:space:]]+)?[A-Za-z0-9_.-]+:[[:space:]]*[|>][+-]?[0-9]?[[:space:]]*$/) {
+                match(line, /[^ ]/); ind = RSTART - 1; iny = 1
+            }
+        }
+    }
+    # What: end of a Rust quote: char literal or lifetime.
+    # Why: a " in a char literal must not open a string.
+    # From: Issue #1683 | PR #1858
+    function cl_quote(s, p, len,  c, q, k) {
+        c = substr(s, p + 1, 1)
+        if (c == "\\") {
+            q = p + 3
+            while (q <= len && substr(s, q, 1) != sq) q++
+            return (q <= len) ? q + 1 : p + 1
+        }
+        if (c != "" && c != sq && substr(s, p + 2, 1) == sq) return p + 3
+        if (!mb && c ~ lead_re) {
+            k = 2
+            while (k <= 4 && substr(s, p + k, 1) ~ cont_re) k++
+            if (substr(s, p + k, 1) == sq) return p + k + 1
+        }
+        return p + 1
+    }
+    # What: comment text of a line: markers and closer cut.
+    # Why: field rules read What/Why/From after the marker.
+    # From: Issue #1683 | PR #1858
+    function cl_text(s, kind, inblk,  t, op, cl) {
+        t = s; sub(/^[[:space:]]+/, "", t)
+        if (kind == "line") sub(/^\/\/+!?/, "", t)
+        else if (kind == "lua") sub(/^--+/, "", t)
+        else {
+            if (kind == "c") { op = "^/[*][*!]?"; cl = "[[:space:]]*[*]/[[:space:]]*$" }
+            else if (kind == "html") { op = "^<!--"; cl = "[[:space:]]*--!?>[[:space:]]*$" }
+            else if (kind == "tera") { op = "^[{]#-?"; cl = "[[:space:]]*-?#[}][[:space:]]*$" }
+            else { op = "^--[[]=*[[]"; cl = "[[:space:]]*[]]=*[]][[:space:]]*$" }
+            sub(cl, "", t)
+            if (!inblk) sub(op, "", t)
+            else if (kind == "c") sub(/^[*]+/, "", t)
+        }
+        sub(/^[[:space:]]+/, "", t)
+        return t
+    }
+    # What: note a comment on this line; first kind wins.
+    # Why: T is cut with the delimiters of that kind.
+    # From: Issue #1683 | PR #1858
+    function cl_mark(k) { lm = 1; if (lk == "") lk = k }
+    function cl_rep(c, k,  r) { r = ""; while (k-- > 0) r = r c; return r }
+    # What: Lua 5.4 lexer: short and long strings, --.
+    # Why: -- inside any string is no comment.
+    # From: Issue #1683 | PR #1858
+    function cl_lua(  i, s, len, p, c, o, st, q, z, iscm, lcl) {
+        st = "code"
+        for (i = 1; i <= n; i++) {
+            s = L[i]; len = length(s); p = 1; lc = 0; lm = 0; lk = ""; bs = 0
+            if (st == "long" && iscm) { lm = 1; lk = "lualong"; IB[i] = 1 }
+            else if (st != "code") lc = 1
+            while (p <= len) {
+                c = substr(s, p, 1)
+                if (st == "str") {
+                    if (z && c ~ /[[:space:]]/) { p++; continue }
+                    z = 0
+                    if (c == "\\") { if (substr(s, p + 1, 1) == "z") z = 1; else bs = (p + 1 > len); p += 2 }
+                    else { if (c == q) st = "code"; p++ }
+                } else if (st == "long") {
+                    o = index(substr(s, p), lcl)
+                    if (o) { p += o - 1 + length(lcl); st = "code" } else p = len + 1
+                } else if (substr(s, p, 2) == "--") {
+                    if (match(substr(s, p + 2), /^[[]=*[[]/)) {
+                        lcl = "]" cl_rep("=", RLENGTH - 2) "]"; iscm = 1; st = "long"
+                        cl_mark("lualong"); p += 2 + RLENGTH
+                    } else { cl_mark("lua"); break }
+                } else if (c ~ /[[:space:]]/) p++
+                else {
+                    lc = 1
+                    if (c == "\"" || c == sq) { q = c; st = "str"; z = 0; p++ }
+                    else if (match(substr(s, p), /^[[]=*[[]/)) {
+                        lcl = "]" cl_rep("=", RLENGTH - 2) "]"; iscm = 0; st = "long"; p += RLENGTH
+                    } else p++
+                }
+            }
+            if (st == "str" && !z && !bs) st = "code"
+            if (lm && !lc) { F[i] = C[i] = 1; K[i] = lk }
+        }
+    }
+    # What: CSS step: strings, url(), /* */ blocks.
+    # Why: /* in a string or url() opens no comment.
+    # From: Issue #1683 | PR #1858
+    function cl_css(s, p, len, c, c2) {
+        if (ss == "blk") { cl_mark("c"); if (c2 == "*/") { ss = "code"; return p + 2 } return p + 1 }
+        if (ss != "code") lc = 1
+        if (ss == "sq" || ss == "dq") {
+            if (c == "\\") { bs = (p + 1 > len); return p + 2 }
+            if (c == (ss == "sq" ? sq : "\"")) ss = "code"
+            return p + 1
+        }
+        if (ss == "url") { if (c == ")") ss = "code"; return p + 1 }
+        if (c2 == "/*") { ss = "blk"; cl_mark("c"); return p + 2 }
+        if (c ~ /[[:space:]]/) return p + 1
+        lc = 1
+        if (c == "\"" || c == sq) { ss = (c == sq) ? "sq" : "dq"; bs = 0; return p + 1 }
+        if (tolower(substr(s, p, 4)) == "url(" && substr(s, p - 1, 1) !~ /[-A-Za-z0-9_]/ && substr(s, p + 4) !~ /^[[:space:]]*["\047]/) { ss = "url"; return p + 4 }
+        return p + 1
+    }
+    # What: JS step: strings, templates, regex, comments.
+    # Why: a regex or string may hold // or /* text.
+    # From: Issue #1683 | PR #1858
+    function cl_js(s, p, len, c, c2,  w) {
+        if (ss == "blk") { cl_mark("c"); if (c2 == "*/") { ss = "code"; return p + 2 } return p + 1 }
+        if (ss == "lc") { cl_mark("line"); return p + 1 }
+        if (ss != "code") lc = 1
+        if (ss == "sq" || ss == "dq") {
+            if (c == "\\") { bs = (p + 1 > len); return p + 2 }
+            if (c == (ss == "sq" ? sq : "\"")) ss = "code"
+            return p + 1
+        }
+        if (ss == "tpl") {
+            if (c == "\\") return p + 2
+            if (c == "`") { ss = "code"; rxok = 0 }
+            else if (c2 == "${") { tstk[++tdep] = bdep; ss = "code"; rxok = 1; return p + 2 }
+            return p + 1
+        }
+        if (ss == "rx") {
+            if (c == "\\") return p + 2
+            if (c == "[") ss = "rxc"
+            else if (c == "/") { ss = "code"; rxok = 0; if (match(substr(s, p + 1), /^[A-Za-z0-9_$]+/)) return p + 1 + RLENGTH }
+            return p + 1
+        }
+        if (ss == "rxc") { if (c == "\\") return p + 2; if (c == "]") ss = "rx"; return p + 1 }
+        if (c2 == "//") { ss = "lc"; cl_mark("line"); return p + 2 }
+        if (c2 == "/*") { ss = "blk"; cl_mark("c"); return p + 2 }
+        if (c ~ /[[:space:]]/) return p + 1
+        lc = 1
+        if (c == "\"" || c == sq) { ss = (c == sq) ? "sq" : "dq"; bs = 0; rxok = 0; return p + 1 }
+        if (c == "`") { ss = "tpl"; return p + 1 }
+        if (c == "/") { if (rxok) ss = "rx"; else rxok = 1; return p + 1 }
+        if (c == "{") { bdep++; rxok = 1; return p + 1 }
+        if (c == "}") {
+            if (tdep && bdep == tstk[tdep]) { tdep--; ss = "tpl" } else { bdep--; rxok = 1 }
+            return p + 1
+        }
+        if (c == ")" || c == "]") { rxok = 0; return p + 1 }
+        if (match(substr(s, p), /^[A-Za-z0-9_$]+/)) {
+            w = substr(s, p, RLENGTH)
+            rxok = (w ~ /^(return|typeof|case|do|else|in|instanceof|new|delete|void|throw|yield|await|of)$/)
+            return p + RLENGTH
+        }
+        rxok = 1
+        return p + 1
+    }
+    # What: one line of html/tera; state carries over.
+    # Why: Tera tags apply first, then html, css, js.
+    # From: Issue #1683 | PR #1858
+    function cl_webline(s, tera,  len, p, c, c2, o, w) {
+        len = length(s); p = 1
+        while (p <= len) {
+            c = substr(s, p, 1); c2 = substr(s, p, 2)
+            if (tera && tm == "cmt") {
+                cl_mark("tera"); o = index(substr(s, p), "#}")
+                if (o) { p += o + 1; tm = "" } else p = len + 1
+            } else if (tera && tm == "expr") {
+                lc = 1
+                if (tq2 != "") { if (c == tq2) tq2 = ""; p++ }
+                else if (c == "\"" || c == sq || c == "`") { tq2 = c; p++ }
+                else if (c2 == tclose) { tm = ""; p += 2 }
+                else p++
+            } else if (tera && tm == "raw" && match(substr(s, p), /^[{]%-?[[:space:]]*endraw[[:space:]]*-?%[}]/)) {
+                tm = ""; lc = 1; p += RLENGTH
+            } else if (tera && tm == "" && c2 == "{#") { tm = "cmt"; cl_mark("tera"); p += 2 }
+            else if (tera && tm == "" && c2 == "{{") { tm = "expr"; tclose = "}}"; tq2 = ""; lc = 1; p += 2 }
+            else if (tera && tm == "" && c2 == "{%") {
+                lc = 1
+                if (match(substr(s, p), /^[{]%-?[[:space:]]*raw[[:space:]]*-?%[}]/)) { tm = "raw"; p += RLENGTH }
+                else { tm = "expr"; tclose = "%}"; tq2 = ""; p += 2 }
+            } else if (m == "html") {
+                if (substr(s, p, 4) == "<!--") { m = "hcmt"; cl_mark("html"); p += 4 }
+                else if (match(substr(s, p), /^<\/?[A-Za-z][A-Za-z0-9]*/)) {
+                    w = substr(s, p, RLENGTH); tend = (substr(w, 2, 1) == "/"); sub(/^<\/?/, "", w)
+                    tname = tolower(w); m = "tag"; tq = ""; lc = 1; p += RLENGTH
+                } else { if (c !~ /[[:space:]]/) lc = 1; p++ }
+            } else if (m == "hcmt") {
+                cl_mark("html"); o = index(substr(s, p), "-->"); w = index(substr(s, p), "--!>")
+                if (w && (!o || w < o)) { p += w + 3; m = "html" }
+                else if (o) { p += o + 2; m = "html" }
+                else p = len + 1
+            } else if (m == "tag") {
+                lc = 1
+                if (tq != "") { if (c == tq) tq = ""; p++ }
+                else if (c == "\"" || c == sq) { tq = c; p++ }
+                else if (c == ">") {
+                    m = (!tend && tname == "script") ? "js" : (!tend && tname == "style") ? "css" : "html"
+                    ss = "code"; rxok = 1; bdep = 0; tdep = 0; p++
+                } else p++
+            } else if (emb && c2 == "</" && tolower(substr(s, p + 2, length(tname))) == tname \
+                && substr(s, p + 2 + length(tname), 1) ~ /^([[:space:]]|>|\/)?$/) {
+                m = "tag"; tend = 1; tq = ""; ss = "code"; lc = 1; p += 2 + length(tname)
+            } else if (m == "css") p = cl_css(s, p, len, c, c2)
+            else p = cl_js(s, p, len, c, c2)
+        }
+        if (ss == "lc" || ss == "rx" || ss == "rxc") ss = "code"
+        if ((ss == "sq" || ss == "dq") && !bs) ss = "code"
+    }
+    # What: html/tera/css/js driver; marks comment lines.
+    # Why: script/style content uses its own grammar.
+    # From: Issue #1683 | PR #1858
+    function cl_web(start, tera,  i) {
+        m = start; ss = "code"; tm = ""; tq = ""; emb = (start == "html"); rxok = 1; bdep = 0; tdep = 0
+        for (i = 1; i <= n; i++) {
+            lc = 0; lm = 0; lk = ""; bs = 0
+            if (tera && tm == "cmt") { lm = 1; lk = "tera"; IB[i] = 1 }
+            else if (m == "hcmt") { lm = 1; lk = "html"; IB[i] = 1 }
+            else if ((m == "js" || m == "css") && ss == "blk") { lm = 1; lk = "c"; IB[i] = 1 }
+            else if ((tera && tm == "expr") || m == "tag" || ss ~ /^(sq|dq|tpl|url)$/) lc = 1
+            cl_webline(L[i], tera)
+            if (lm && !lc) { F[i] = C[i] = 1; K[i] = lk }
+        }
+    }
+    # What: Rust per Reference lexer: strings, raw, blocks.
+    # Why: // in a string is no comment; # never is one.
+    # From: Issue #1683 | PR #1858
+    function cl_rust(  i, s, len, p, c, c2, st, st0, dep, code, cmt, o, rclose) {
+        st = "code"
+        for (i = 1; i <= n; i++) {
+            s = L[i]; len = length(s); p = 1; st0 = st
+            code = (st0 == "str" || st0 == "raw"); cmt = (st0 == "blk")
+            while (p <= len) {
+                c2 = substr(s, p, 2); c = substr(s, p, 1)
+                if (st == "blk") {
+                    if (c2 == "/*") { dep++; p += 2 }
+                    else if (c2 == "*/") { p += 2; if (--dep == 0) st = "code" }
+                    else p++
+                } else if (st == "str") {
+                    if (c == "\\") p += 2
+                    else { if (c == "\"") st = "code"; p++ }
+                } else if (st == "raw") {
+                    o = index(substr(s, p), rclose)
+                    if (o) { p += o - 1 + length(rclose); st = "code" } else p = len + 1
+                } else if (c2 == "//") { cmt = 1; break }
+                else if (c2 == "/*") { cmt = 1; st = "blk"; dep = 1; p += 2 }
+                else if (c ~ /[[:space:]]/) p++
+                else {
+                    code = 1
+                    if (c == "\"") { st = "str"; p++ }
+                    else if (c ~ /[rbc]/ && substr(s, p - 1, 1) !~ /[A-Za-z0-9_]/ && match(substr(s, p), /^(r|br|cr)#*"/)) {
+                        rclose = substr(s, p, RLENGTH); sub(/^[bc]?r/, "", rclose); sub(/"$/, "", rclose)
+                        rclose = "\"" rclose; st = "raw"; p += RLENGTH
+                    } else if (c == sq) p = cl_quote(s, p, len)
+                    else p++
+                }
+            }
+            if (cmt && !code) {
+                F[i] = C[i] = 1; IB[i] = (st0 == "blk")
+                K[i] = (!IB[i] && s ~ /^[[:space:]]*\/\//) ? "line" : "c"
+            }
+        }
+    }
+    # What: run the style lexer; cut header; mark dividers.
+    # Why: a style without a lexer must fail, never pass.
+    # From: Issue #1683 | PR #1858
+    function cl_lex(  i, t) {
+        n = FNR; hdr = (n >= 3 && L[2] == h2 && L[3] == h3) ? 3 : 0
+        if (style == "hash") cl_hash(1)
+        else if (style == "yaml") cl_hash(0)
+        else if (style == "rust") cl_rust()
+        else if (style == "lua") cl_lua()
+        else if (style == "css" || style == "js") cl_web(style, 0)
+        else if (style == "html" || style == "tera") cl_web("html", style == "tera")
+        else { print "no comment lexer for style " style > "/dev/stderr"; exit 2 }
+        for (i = 1; i <= hdr; i++) C[i] = 0
+        for (i = 1; i <= n; i++) if (C[i]) {
+            if (K[i] != "") T[i] = cl_text(L[i], K[i], IB[i])
+            t = T[i]; sub(/[[:space:]]+$/, "", t)
+            D[i] = (t ~ /^[-=~_*]{4,}$/) || (t ~ /^(─|━|═|┄|┈|╌|╍)/)
+        }
+    }
+'
+
 # What: Enforce AG-CODE-012 comment size, block, ref rules.
 # Why: 1-1-1-60, story-run size, and refs go in From only.
 # From: Issue #1683
 _ci_check_comment_length() {
     local -a _ci_override=("$@") files=()
-    local file heredoc_on yaml_on arc=0
-    local -a bad_files=()
+    local file style exp arc=0
+    local -a bad_files=() no_lexer=()
     _ci_scan_files files _ci_override || return 2
+    _ci_prose_exempt_load || return 2
     for file in "${files[@]}"; do
-        awk '
-            function flush() {
-                if (blocklen > 3) { printf "%s:%d: block %d lines (max 3)\n", FILENAME, blockstart, blocklen; viol++ }
-                blocklen = 0
+        _ci_prose_excluded "${file}" && continue
+        if ! style="$(_ci_comment_style "${file}")"; then
+            no_lexer+=("${file}"); continue
+        fi
+        exp="$(_ci_header_expected "${file}")" || return 2
+        awk -v style="${style}" -v h2="${exp%%$'\n'*}" -v h3="${exp#*$'\n'}" "${_CI_AWK_COMMENT_LEX}"'
+            function flush1() {
+                if (bl > 3) { printf "%s:%d: block %d lines (max 3)\n", FILENAME, bs, bl; viol++ }
+                bl = 0
             }
-            {
-                line = $0; sub(/\r$/, "", line)
-                if (line ~ /^[[:space:]]*#[[:space:]]*(What|Why|From):/) {
-                    if (blocklen == 0) blockstart = FNR
-                    blocklen++
-                    if (length(line) > 60) { printf "%s:%d: %d chars (max 60): %s\n", FILENAME, FNR, length(line), line; viol++ }
-                    if (line ~ /^[[:space:]]*#[[:space:]]*(What|Why):/ && line ~ /#[0-9]/) { printf "%s:%d: issue/PR ref in What/Why (use From:): %s\n", FILENAME, FNR, line; viol++ }
-                    if (line ~ /^[[:space:]]*#[[:space:]]*From:/ && line !~ /From: (Issue #[0-9]+|PR #[0-9]+|Issue #[0-9]+ \| PR #[0-9]+)$/) { printf "%s:%d: From: allows one Issue and one PR only: %s\n", FILENAME, FNR, line; viol++ }
-                } else if (blocklen > 0) flush()
-            }
-            END { if (blocklen > 0) flush(); if (viol > 0) exit 1 }
-        ' "${file}" || arc=$?
-        _ci_comment_length_rc "${file}" || return 2
-        case "${file}" in
-            *.yml|*.yaml) heredoc_on=0; yaml_on=1 ;;
-            *) heredoc_on=1; yaml_on=0 ;;
-        esac
-        awk -v heredoc_on="${heredoc_on}" -v yaml_on="${yaml_on}" '
-            BEGIN {
-                sq = sprintf("%c", 39)
-                qclass = "[" sq "\"]"
-                heredoc_open_re = "<<-?[[:space:]]*" qclass "?[A-Za-z_][A-Za-z0-9_]*" qclass "?"
-                strip_lead_re = "^<<-?[[:space:]]*" qclass "?"
-                strip_trail_re = qclass "?$"
-            }
-            { lines[FNR] = $0 }
-            function flush_run() {
-                if (real_len > 3) { printf "%s:%d: story-telling block (%d lines)\n", FILENAME, block_start, real_len; viol++ }
-                block_start = 0; real_len = 0
+            function flush2() {
+                if (rl > 3) { printf "%s:%d: story-telling block (%d lines)\n", FILENAME, rs, rl; viol++ }
+                rs = 0; rl = 0
             }
             END {
-                n = FNR; header_end = 0
-                if (n >= 3 \
-                    && lines[2] ~ /^#[[:space:]]*LanCache-NG \(https:\/\/github\.com\/wiki-mod\/lancache-ng\)[[:space:]]*$/ \
-                    && lines[3] ~ /^#[[:space:]]*SPDX-License-Identifier: AGPL-3\.0-or-later[[:space:]]*$/) header_end = 3
-                in_heredoc = 0; heredoc_delim = ""; heredoc_dash = 0
-                in_yaml = 0; yaml_indent = -1; block_start = 0; real_len = 0
+                cl_lex()
                 for (i = 1; i <= n; i++) {
-                    line = lines[i]; sub(/\r$/, "", line)
-                    if (i <= header_end) { flush_run(); continue }
-                    if (heredoc_on && in_heredoc) {
-                        check_line = line
-                        if (heredoc_dash) sub(/^\t+/, "", check_line)
-                        if (check_line == heredoc_delim) in_heredoc = 0
-                        flush_run(); continue
-                    }
-                    if (yaml_on && in_yaml) {
-                        if (line ~ /^[[:space:]]*$/) { flush_run(); continue }
-                        match(line, /[^ ]/)
-                        if ((RSTART - 1) > yaml_indent) { flush_run(); continue }
-                        in_yaml = 0
-                    }
-                    if (line ~ /^[[:space:]]*#/) {
-                        stripped = line
-                        sub(/^[[:space:]]*#[[:space:]]*/, "", stripped); sub(/[[:space:]]+$/, "", stripped)
-                        is_divider = (stripped ~ /^[-=~_*]{4,}$/) || (stripped ~ /^(─|━|═|┄|┈|╌|╍)/)
-                        if (block_start == 0) block_start = i
-                        if (!is_divider) real_len++
-                        continue
-                    }
-                    flush_run()
-                    if (heredoc_on) {
-                        tmp = line
-                        while (match(tmp, heredoc_open_re)) {
-                            seg = substr(tmp, RSTART, RLENGTH)
-                            heredoc_dash = (seg ~ /^<<-/)
-                            d = seg; sub(strip_lead_re, "", d); sub(strip_trail_re, "", d)
-                            heredoc_delim = d; in_heredoc = 1
-                            tmp = substr(tmp, RSTART + RLENGTH)
-                        }
-                    }
-                    if (yaml_on && !in_heredoc) {
-                        if (match(line, /^[[:space:]]*(-[[:space:]]+)?[A-Za-z0-9_.-]+:[[:space:]]*[|>][+-]?[0-9]?[[:space:]]*$/)) {
-                            match(line, /[^ ]/); yaml_indent = RSTART - 1; in_yaml = 1
-                        }
-                    }
+                    if (F[i] && T[i] ~ /^(What|Why|From):/) {
+                        if (bl == 0) bs = i
+                        bl++
+                        if (length(L[i]) > 60) { printf "%s:%d: %d chars (max 60): %s\n", FILENAME, i, length(L[i]), L[i]; viol++ }
+                        if (T[i] ~ /^(What|Why):/ && T[i] ~ /#[0-9]/) { printf "%s:%d: issue/PR ref in What/Why (use From:): %s\n", FILENAME, i, L[i]; viol++ }
+                        if (T[i] ~ /^From:/ && T[i] !~ /^From: (Issue #[0-9]+|PR #[0-9]+|Issue #[0-9]+ \| PR #[0-9]+)$/) { printf "%s:%d: From: allows one Issue and one PR only: %s\n", FILENAME, i, L[i]; viol++ }
+                    } else if (bl > 0) flush1()
                 }
-                flush_run(); if (viol > 0) exit 1
+                if (bl > 0) flush1()
+                for (i = 1; i <= n; i++) if (C[i]) { if (!rs) rs = i; if (!D[i]) rl++ } else flush2()
+                flush2()
+                if (viol > 0) exit 1
             }
         ' "${file}" || arc=$?
         _ci_comment_length_rc "${file}" || return 2
     done
+    # What: a type with no comment grammar fails the check.
+    # Why: an unread file must never be reported as clean.
+    # From: Issue #1683 | PR #1858
+    if [ "${#no_lexer[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0153]" "files=${#no_lexer[@]} reason=\"no comment grammar for this file type\"" "$(printf '%s\n' "${no_lexer[@]}")"
+    fi
     if [ "${#bad_files[@]}" -gt 0 ]; then
         ci_log "[CI-ERROR-CHECK-0128]" "files=${#bad_files[@]} scanned=${#files[@]} reason=\"comment contract violations (list above)\""
-        return 1
     fi
+    [ "${#no_lexer[@]}" -eq 0 ] && [ "${#bad_files[@]}" -eq 0 ] || return 1
     printf 'comment-length=clean files=%s\n' "${#files[@]}"
 }
 
@@ -8335,13 +8618,17 @@ _ci_check_review_chronology() {
         if [ -n "${out}" ]; then
             viol+=("${out}")
         fi
-        local produced produced_rc=0
-        produced="$(awk '
-            function isc(l) { return l ~ /^[[:space:]]*(#|\/\/|--|\/\*|\*|<!--|\{#)/ }
-            function pl(l,  p) { p=l; sub(/^[[:space:]]*(#|\/\/|--|\/\*|\*|<!--|\{#)[[:space:]]*/, "", p); return p }
-            { c=isc($0); cur=(c?pl($0):""); if (pc && c) printf "%d\t%s %s\n", NR-1, pp, cur; pc=c; pp=cur }
-        ' "${path}")" || produced_rc=$?
-        _ci_producer_ok "${produced_rc}" 0 || return 2
+        local produced="" produced_rc=0 style exp
+        # What: join adjacent comment lines per file grammar.
+        # Why: narration split over two lines must match.
+        # From: Issue #1683 | PR #1858
+        if style="$(_ci_comment_style "${path}")"; then
+            exp="$(_ci_header_expected "${path}")" || return 2
+            produced="$(awk -v style="${style}" -v h2="${exp%%$'\n'*}" -v h3="${exp#*$'\n'}" "${_CI_AWK_COMMENT_LEX}"'
+                END { cl_lex(); for (i = 2; i <= n; i++) if (F[i - 1] && F[i]) printf "%d\t%s %s\n", i - 1, T[i - 1], T[i] }
+            ' "${path}")" || produced_rc=$?
+            _ci_producer_ok "${produced_rc}" 0 || return 2
+        fi
         while IFS=$'\t' read -r ln joined; do
             [ -n "${ln}" ] || continue
             shopt -s nocasematch

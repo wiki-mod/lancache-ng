@@ -6031,8 +6031,13 @@ CASES
     # Why: a read error is no comment violation.
     # From: Issue #1683 | PR #1858
     local bin="${BATS_TEST_TMPDIR}/abin"; mkdir -p "${bin}"
+    AWK_REAL="$(type -P awk)"; export AWK_REAL
+    # What: the stub fails the comment scan only.
+    # Why: the exempt list is read with awk before the scan.
+    # From: Issue #1683 | PR #1858
     _tool_stub "${bin}" awk <<'STUB'
-echo "awk: fatal: cannot open file for reading" >&2; exit 2
+case " $* " in *" style="*) echo "awk: fatal: cannot open file for reading" >&2; exit 2 ;; esac
+exec "${AWK_REAL:?}" "$@"
 STUB
     PATH="${bin}:${PATH}" run bash "${CI_SH}" check comment-length a.sh
     [ "${status}" -eq 2 ]
@@ -6070,6 +6075,67 @@ STUB
         [ "${status}" -ne 0 ]
         [[ "${output}" == *"one Issue and one PR only"* ]]
     done
+}
+
+@test "check comment-length reads each file type's own grammar" {
+    # What: per row: file type, content, rc, output part.
+    # Why: a comment counts only under its own grammar.
+    # From: Issue #1683 | PR #1858
+    local t="${BATS_TEST_TMPDIR}" case ext body rc want h x70 f
+    h='//!\n//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)\n//! SPDX-License-Identifier: AGPL-3.0-or-later\n'
+    x70="$(printf 'x%.0s' $(seq 1 70))"
+    mkdir -p "${t}/services/ui/src/templates"
+    while IFS='|' read -r case ext body rc want; do
+        body="${body//HDR/${h}}"; body="${body//X70/${x70}}"; body="${body//PIPE/|}"
+        f="${t}/${case}.${ext}"
+        [ "${ext}" != tpl ] || f="${t}/services/ui/src/templates/${case}.html"
+        printf '%b' "${body}" > "${f}"
+        run bash "${CI_SH}" check comment-length "${f}"
+        [ "${status}" -eq "${rc}" ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
+        [ "${want}" = - ] || [[ "${output}" == *"${want}"* ]] || { echo "${case}: ${output}"; return 1; }
+    done <<'CASES'
+rs-header|rs|HDR//! What: a\n//! Why: b\nfn main() {}\n|0|-
+rs-header-gap|rs|HDR//!\n//! What: a\n//! Why: b\n//! From: Issue #1\nfn main() {}\n|1|story-telling block (4 lines)
+rs-attrs|rs|#[derive(Debug)]\n#[allow(dead_code)]\n#[cfg(test)]\n#[inline]\nfn f() {}\n|0|-
+rs-line-run|rs|// a\n// b\n// c\n// d\nfn f() {}\n|1|story-telling block (4 lines)
+rs-doc-run|rs|/// a\n/// b\n/// c\n/// d\nfn f() {}\n|1|story-telling block (4 lines)
+rs-long|rs|// What: X70\nfn f() {}\n|1|chars (max 60)
+rs-raw|rs|const S: &str = r#"\n// What: X70\n// a\n// b\n// c\n"#;\n|0|-
+rs-byte-raw|rs|const S: &[u8] = br##"\n// a\n// b\n// c\n// d\n"##;\n|0|-
+rs-string|rs|const S: &str = "\n// a\n// b\n// c\n// d\n";\n|0|-
+rs-char|rs|const Q: char = '"'; // tail\n// a\n// b\n// c\n// d\n|1|story-telling block (4 lines)
+rs-lifetime|rs|fn f<'a>(x: &'a str) -> &'a str { x }\n// a\n// b\n// c\n// d\n|1|story-telling block (4 lines)
+rs-raw-ident|rs|let r#type = 1; // x\n// a\n// b\n// c\n// d\n|1|story-telling block (4 lines)
+rs-nested|rs|/* a /* b */ c\n d\n e\n f */\nfn f() {}\n|1|story-telling block (4 lines)
+rs-block-fields|rs|/* What: a */\n/* Why: b */\nfn f() {}\n|0|-
+rs-block-long|rs|/*\n * What: X70\n */\nfn f() {}\n|1|chars (max 60)
+lua-header|lua|\n-- LanCache-NG (https://github.com/wiki-mod/lancache-ng)\n-- SPDX-License-Identifier: AGPL-3.0-or-later\n-- What: a\n-- Why: b\nreturn 1\n|0|-
+lua-run|lua|-- a\n-- b\n-- c\n-- d\nreturn 1\n|1|story-telling block (4 lines)
+lua-quote|lua|local q = '"' -- tail\n-- a\n-- b\n-- c\n-- d\n|1|story-telling block (4 lines)
+lua-long-str|lua|local s = [==[\n-- a\n-- b\n-- c\n-- d\n]==]\n|0|-
+lua-long-cmt|lua|--[==[\n a\n b\n c\n]==]\nreturn 1\n|1|story-telling block (5 lines)
+lua-long|lua|-- What: X70\nreturn 1\n|1|chars (max 60)
+css-fields|css|/* What: a */\n/* Why: b */\nbody {}\n|0|-
+css-run|css|/*\n a\n b\n c\n*/\nbody {}\n|1|story-telling block (5 lines)
+css-string|css|a { content: "/*"; }\nb {}\nc {}\nd {}\ne {}\n|0|-
+css-url|css|a { background: url(x/*y); }\nb {}\nc {}\nd {}\ne {}\n|0|-
+js-run|js|// a\n// b\n// c\n// d\nvar x;\n|1|story-telling block (4 lines)
+js-string|js|var s = "/*";\nvar a;\nvar b;\nvar c;\nvar d;\n|0|-
+js-regex|js|var r = /\/\*/;\nvar a;\nvar b;\nvar c;\nvar d;\n|0|-
+js-template|js|var t = `\n// a\n// b\n// c\n// d\n`;\n|0|-
+html-run|html|<!--\n a\n b\n c\n-->\n<p>x</p>\n|1|story-telling block (5 lines)
+html-attr|html|<a title="<!--">x</a>\n<p>a</p>\n<p>b</p>\n<p>c</p>\n<p>d</p>\n|0|-
+html-script|html|<script>\nvar s = "</p>";\n// a\n// b\n// c\n// d\n</script>\n|1|story-telling block (4 lines)
+html-style|html|<style>\n/* What: X70 */\n</style>\n|1|chars (max 60)
+tera-run|tpl|{#\n a\n b\n c\n#}\n<p>x</p>\n|1|story-telling block (5 lines)
+tera-fields|tpl|{# What: a #}\n{# Why: b #}\n<p>x</p>\n|0|-
+tera-raw|tpl|{% raw %}\n{# a\n b\n c\n d #}\n{% endraw %}\n|0|-
+tera-html|tpl|<p title="{{ x }}">y</p>\n<!-- What: X70 -->\n|1|chars (max 60)
+yaml-block|yml|run: PIPE\n  # a\n  # b\n  # c\n  # d\n|0|-
+sh-heredoc|sh|cat <<'EOF'\n# a\n# b\n# c\n# d\nEOF\n|0|-
+md-heading|md|# a\n# b\n# c\n# d\n|0|-
+unknown|xyz|# a\n# b\n# c\n# d\n|1|[CI-ERROR-CHECK-0153] files=1
+CASES
 }
 
 @test "diff-scoped checks skip a deleted path visibly, check the rest" {
@@ -6310,6 +6376,12 @@ CASES
     printf '# noted a %s\n# finding in the code\n' "${r}" > "${d}/bad.sh"
     run bash "${CI_SH}" check review-chronology "${d}/bad.sh"
     [ "${status}" -ne 0 ]
+    # What: code lines like --opt or *) are no comments.
+    # Why: only the file's own grammar marks a comment.
+    # From: Issue #1683 | PR #1858
+    printf 'f() {\n    --opt noted a %s\n    *finding) ;;\n}\n' "${r}" > "${d}/code.sh"
+    run bash "${CI_SH}" check review-chronology "${d}/code.sh"
+    [ "${status}" -eq 0 ] || { echo "code lines joined: ${output}"; false; }
     for p in "a normal current-state comment" "see the manual review section" \
              "runs after this PR merges" "remembered during review to add this" \
              "each line of the config is parsed here"; do
