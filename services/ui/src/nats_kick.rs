@@ -33,15 +33,15 @@
 //! default global account `$G` does not publish advisories" / system events
 //! require "a user belonging to the designated system account") and
 //! empirically, against a real `nats-server:2.14.3` container (the exact
-//! version this project pins via `nats:2-alpine@sha256:c11af9...` in every
-//! `deploy/*/docker-compose.yml`) on a throwaway test rig: a `$G` client
+//! version this project pins via `nats:2-alpine@sha256:c11af9...` in
+//! `deploy/prod/docker-compose.yml`) on a throwaway test rig: a `$G` client
 //! could not reach `$SYS.REQ.SERVER.PING.CONNZ`/`KICK` at all, while a client
 //! authenticated into a newly added, minimal `accounts { SYS: {...} }
 //! system_account: SYS` block could -- and that addition coexists with the
 //! existing flat `authorization {}` block with no observed effect on where
 //! the four static roles/secondaries live (still `$G`) or on JetStream's
 //! `LANCACHE_DNS` stream (still owned by `$G`, unaffected). `NATS_SYS_USER`/
-//! `NATS_SYS_PASSWORD` (`Config`, `services/nats/nats.conf`) is the sole
+//! `NATS_SYS_PASSWORD` (`Config`, `nats_config::render_nats_conf`) is the sole
 //! member of that `SYS` account; it carries no application subject
 //! permissions and is used by nothing except this module.
 //!
@@ -63,9 +63,7 @@
 //! field (and the `{"auth": true, "user": "<name>"}` CONNZ filter this module
 //! sends) reports and matches exactly that CONNECT-frame username for a
 //! callout-authenticated connection, not some JWT subject/NKey. Confirmed
-//! against the real nats-server source for the pinned 2.14.3 version, and
-//! exercised end-to-end (not just read from source) by
-//! `scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh`.
+//! against the real nats-server source for the pinned 2.14.3 version.
 //!
 //! ## Ordering is load-bearing: revoke in the DB first, kick second
 //! `KICK` alone does not revoke anything -- a kicked client with still-valid
@@ -256,12 +254,8 @@ pub async fn disconnect_secondary(state: &AppState, nats_user: &str) -> Result<u
 mod tests {
     use super::*;
 
-    // These two structs are the shapes disconnect_secondary parses off the
-    // wire; exercising them directly (without a real nats-server, which the
-    // real end-to-end proof is scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh's
-    // job) catches a field-name/shape regression -- e.g. an accidental rename
-    // of `cid`/`user_id`/`server`/`data` -- at unit-test speed.
-
+    // What: wire shapes disconnect_secondary parses.
+    // Why: a renamed field must fail at unit-test speed.
     #[test]
     fn connz_envelope_parses_a_real_shaped_success_response() {
         let raw = json!({

@@ -76,15 +76,8 @@ pub async fn dashboard(
 ) -> impl IntoResponse {
     let cfg = &state.config;
 
-    // PROXY_STANDARD_URL and PROXY_SSL_URL default to the same value and
-    // only diverge when an operator explicitly runs standard-mode and
-    // ssl-mode as two separate proxy services with different stub_status
-    // endpoints (see AGENTS.md's "Two-Mode / Two-IP Architecture" section --
-    // corrected 2026-08-05, issue #1391 doc-sweep audit: this used to cite
-    // CLAUDE.md, which moved this section to AGENTS.md on 2026-07-31). When
-    // they're equal, the second HTTP call would just re-fetch identical
-    // stats from the same nginx, so it's skipped and the first result is
-    // reused instead.
+    // What: fetch ssl stats only when the ssl URL differs.
+    // Why: an equal URL would re-read the same nginx stats.
     let standard_status_future =
         nginx_client::get_stub_status(&state.http_client, &cfg.proxy_standard_url);
     let ssl_status_future = async {
@@ -156,27 +149,17 @@ pub async fn dashboard(
         }
     });
 
-    // Issue #870: per-service health/disk-usage "traffic light" data,
-    // read from watchdog.sh's status.json. Same spawn_blocking shape as the
-    // collectors above -- fs::metadata/fs::read_to_string are blocking calls.
-    // Unconditional (no syslog_enabled-style gate): unlike the syslog store,
-    // the watchdog-status volume mount is always present in
-    // deploy/*/docker-compose.yml, and a missing/stale file is itself a
-    // meaningful, always-worth-showing state (see watchdog_status.rs), not
-    // an opt-in feature with its own disabled-by-default toggle.
+    // What: watchdog health/disk data from status.json.
+    // Why: always read; missing or stale is worth showing.
+    // From: Issue #870
     let watchdog_status_task = tokio::task::spawn_blocking({
         let path = cfg.watchdog_status_file.clone();
         move || watchdog_status::read_status(&path)
     });
 
-    // Bug hunt #849, observability.md finding #3: Netdata's health.d alarms
-    // forwarded by the netdata container's custom_sender() integration
-    // (routes/netdata_alarms.rs's POST handler is the write side). Same
-    // spawn_blocking shape as watchdog_status_task above -- fs::read_to_string
-    // is a blocking call -- and unconditional for the same reason: the
-    // ui-data volume this file lives on is always present, and "no alarms
-    // yet" is itself a meaningful, always-worth-showing state, not an
-    // opt-in feature.
+    // What: stored netdata alarms, always read.
+    // Why: "no alarms yet" is itself worth showing.
+    // From: Issue #849
     let netdata_alarms_task = tokio::task::spawn_blocking({
         let path = cfg.netdata_alarms_file.clone();
         move || netdata_alarms::read_alarms(&path)

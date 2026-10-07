@@ -58,7 +58,7 @@ dashboard's resize control, issue #1069 part 3):**
 | Variable | Default | Description |
 |---|---|---|
 | `CACHE_MAX_SIZE` | `50g` | Max cache size — the Admin UI dashboard's resize control re-validates a requested size against real free disk space at `CACHE_DIR` (same buffer-scaled safety check as the setup-time prompt, issue #1069) before persisting it for the host convergence tick to apply |
-| `CACHE_MEM_MB` | `512` | keys_zone size (1MB ≈ 8,000 keys, nginx's own documented rule of thumb — see "Cache tuning review" below for the sizing math; previously documented here as `200`, which never matched the real shipped default in `config/prod/proxy.env`/`deploy/quickstart/.env`/`setup.sh`, all `512` since this variable was introduced 2026-06-18/19) |
+| `CACHE_MEM_MB` | `512` | keys_zone size (1MB ≈ 8,000 keys, nginx's own documented rule of thumb — see "Cache tuning review" below for the sizing math; previously documented here as `200`, which never matched the real shipped default `512` in `deploy/prod/.env`) |
 | `CACHE_MIN_FREE` | `1g` | Free-disk-space floor (bug-hunt #849 item 11) — the cache manager evicts LRU entries once free space at `CACHE_DIR`'s filesystem drops below this, independent of and in addition to `CACHE_MAX_SIZE` |
 | `CACHE_SLICE_SIZE` | `8m` | Slice size: `4m/8m/16m/32m/64m/128m/256m/512m` |
 | `CACHE_VALID_HIT` | `365d` | Validity duration for 200/206/301/302 |
@@ -132,9 +132,8 @@ real host:
   ```
   (`$CACHE_DIR` is the host path bind-mounted to `/var/cache/nginx/lancache`
   via the `proxy-cache` named volume's `driver_opts.device` — see
-  `deploy/prod/docker-compose.yml`'s top-level `volumes:` block, or
-  `deploy/quickstart/docker-compose.yml`'s direct `${CACHE_DIR}:...` bind
-  mount, for the exact wiring in use on a given deployment profile.) The same
+  `deploy/prod/docker-compose.yml`'s top-level `volumes:` block for the
+  exact wiring.) The same
   `manager_files`/`manager_threshold`/`manager_sleep` throttle governs the
   cache **manager** (LRU/`min_free` eviction during normal operation, not
   just at startup) — a deployment with a very large `N` and a cache that
@@ -171,7 +170,7 @@ real host:
 |---|---|---|
 | `ROOT_ZONE_MIRROR` | `1` (enabled) in `services/dns/entrypoint.sh`'s own fallback; this repo's shipped `config/prod/dns-*.env` explicitly set `1` | Root zone mirror (AXFR from root servers). Was previously documented here as `ENABLE_ROOT_MIRROR` — that name does not exist in code; `docs/dns-admin-ui-scope.md` already used the correct name. |
 | Global AAAA-response filter | off by default | Suppresses all AAAA answers for every client, regardless of address family. Not an env var/restart-time setting: toggled live via the Admin UI (`POST /domains/aaaa-filter`), which writes/removes a marker file on the shared `powerdns-state` volume, read live by `filter-aaaa.lua`'s recursor `preresolve` hook. (Previously documented here as two separate env vars, `FILTER_AAAA_V4`/`FILTER_AAAA_V6` — neither name appears anywhere in `services/dns/` or `services/ui/src`; see `docs/dns-admin-ui-scope.md` §1b for the real, shipped mechanism.) **Planned change, not yet implemented**: starting with v0.3.0, this filter is intended to default to **on** instead of off (maintainer decision recorded in issue #1068; no dedicated tracking issue exists yet for the code change itself). Current shipped behavior as of this writing is still off-by-default — do not treat this bullet as already-shipped. |
-| `DNS_REPLICATION_ROLE` | `native` | Selects whether a DNS container owns local zones normally (`native`), acts as the transfer primary (`primary`), or creates the fixed LAN/reverse zones as PowerDNS secondaries (`secondary`). Shipped production/quickstart/full-setup topology sets `dns-standard` to `primary` and `dns-ssl` to `secondary`. |
+| `DNS_REPLICATION_ROLE` | `native` | Selects whether a DNS container owns local zones normally (`native`), acts as the transfer primary (`primary`), or creates the fixed LAN/reverse zones as PowerDNS secondaries (`secondary`). Shipped production and full-setup topology sets `dns-standard` to `primary` and `dns-ssl` to `secondary`. |
 | `DNS_XFR_PRIMARY` | — | Required when `DNS_REPLICATION_ROLE=secondary`; host:port endpoint of the PowerDNS primary used for native AXFR/refresh polling. Remote secondaries receive this from the Admin UI registration response. |
 | `DNS_XFR_NOTIFY_TARGETS` | — | Comma/space-separated NOTIFY targets for a primary. Shipped local topology notifies `dns-ssl:5300`; remote secondaries can still converge through PowerDNS's refresh polling when they are not listed here. |
 | `PDNS_SOA_REFRESH` | `30` | Primary SOA `refresh` (seconds), seeded into `default-soa-content` and rewritten onto every zone by `run_soa_maintainer`. Short by design (issue #1095): it is the only convergence guarantee for a secondary that missed a single-shot UDP NOTIFY, replacing the old `10800`s (3h) drift window. |
@@ -469,7 +468,7 @@ against an expected mount-root prefix (`CACHE_DIR_ALLOWED_PREFIX`/
 defaulting to `/var/cache`/`/var/log`/`/var/lib`) before any `find`/`rm` runs
 against it, fail-closed (loud rejection, no deletion, no stamp write) on any
 value resolving outside that prefix.
-- Remove cache entries older than `CACHE_VALID_DAYS` (`config/prod/watchdog.env`, `find -mtime`) — not `CACHE_VALID_HIT`, which is the unrelated nginx/proxy cache-validity variable in `config/prod/proxy.env` (both happen to default to `365`, which previously masked this doc citing the wrong one)
+- Remove cache entries older than `CACHE_VALID_DAYS` (`config/prod/watchdog.env`, `find -mtime`) — not `CACHE_VALID_HIT`, which is the unrelated nginx/proxy cache-validity variable in `deploy/prod/.env` (both happen to default to `365`, which previously masked this doc citing the wrong one)
 - Complements nginx `inactive` (which works by access time)
 - Syslog retention (opt-in, `SYSLOG_ENABLED=true`): storage-budget pruning under `SYSLOG_LOG_ROOT` — see the syslog-ng section below for the exact age-then-size ordering
 
@@ -573,7 +572,7 @@ to their actual source -- collected here rather than left as unexplained
 
 ## syslog-ng
 
-Central log receiver for the stack (#453), opt-in via `docker compose --profile logging up -d` in `prod` and `quickstart` alike. **Also set `LOGGING_ENABLED=1` in the deployment's `.env`** when activating this way directly (rather than through `setup.sh`, which sets both together): `LOGGING_ENABLED` is the flag `services/watchdog/watchdog.sh` reads to decide whether the syslog+fluent-bit container is part of this stack for alert-only health monitoring at all -- starting the `logging` profile without it still runs the container correctly, but watchdog silently omits it from monitoring and the Admin UI dashboard's service list, since a `LOGGING_ENABLED`-unset stack is indistinguishable from one that never opted into logging at all. Since the syslog+fluent-bit consolidation PR (2026-08), `syslog-ng` and `fluent-bit` (the `syslog` service) run as two supervised processes inside ONE container (`services/syslog/`) instead of two separate ones -- a deliberate maintainer decision to accept crash-coupling and a single Docker HEALTHCHECK slot (mitigated by the real dual-process check described below) in exchange for one image to build/scan/patch instead of two. `fluent-bit` tails every wired service's log file(s) (see the matrix below) and forwards each one to `syslog-ng` over `127.0.0.1:6601` (RFC 5424, plain LF framing, `network()` source with `flags(syslog-protocol)`) -- a loopback connection within the shared container network namespace, not a Compose service-to-service hop anymore; the proxy/nginx access log additionally gets a second, local plain-text copy (used by Netdata's `web_log` job). `syslog-ng` writes received logs per-source, per-day under `/var/log/lancache-syslog-ng/<host>/<YYYYMMDD>.log`. Port 6601 (not the original 601) is deliberate: 601 is a privileged port (confirmed live -- `/proc/sys/net/ipv4/ip_unprivileged_port_start` defaults to 1024 on a real runner) and this container's `syslog-ng` runs as a non-root uid with no `CAP_NET_BIND_SERVICE` grant; 601 was never published to the host or documented as an external contract, so the renumbering has no external impact.
+Central log receiver for the stack (#453), opt-in via `docker compose --profile logging up -d` in `deploy/prod`. **Also set `LOGGING_ENABLED=1` in the deployment's `.env`** when activating this way directly (rather than through `setup.sh`, which sets both together): `LOGGING_ENABLED` is the flag `services/watchdog/watchdog.sh` reads to decide whether the syslog+fluent-bit container is part of this stack for alert-only health monitoring at all -- starting the `logging` profile without it still runs the container correctly, but watchdog silently omits it from monitoring and the Admin UI dashboard's service list, since a `LOGGING_ENABLED`-unset stack is indistinguishable from one that never opted into logging at all. Since the syslog+fluent-bit consolidation PR (2026-08), `syslog-ng` and `fluent-bit` (the `syslog` service) run as two supervised processes inside ONE container (`services/syslog/`) instead of two separate ones -- a deliberate maintainer decision to accept crash-coupling and a single Docker HEALTHCHECK slot (mitigated by the real dual-process check described below) in exchange for one image to build/scan/patch instead of two. `fluent-bit` tails every wired service's log file(s) (see the matrix below) and forwards each one to `syslog-ng` over `127.0.0.1:6601` (RFC 5424, plain LF framing, `network()` source with `flags(syslog-protocol)`) -- a loopback connection within the shared container network namespace, not a Compose service-to-service hop anymore; the proxy/nginx access log additionally gets a second, local plain-text copy (used by Netdata's `web_log` job). `syslog-ng` writes received logs per-source, per-day under `/var/log/lancache-syslog-ng/<host>/<YYYYMMDD>.log`. Port 6601 (not the original 601) is deliberate: 601 is a privileged port (confirmed live -- `/proc/sys/net/ipv4/ip_unprivileged_port_start` defaults to 1024 on a real runner) and this container's `syslog-ng` runs as a non-root uid with no `CAP_NET_BIND_SERVICE` grant; 601 was never published to the host or documented as an external contract, so the renumbering has no external impact.
 
 **Currently implemented:**
 - Size-bounded rotation: an active log file is rotated once it exceeds `SYSLOG_MAX_FILE_MB` (default 100), then `syslog-ng` is signaled (`SIGHUP`, same-uid so no added capability is needed) to reopen the (recreated) destination file. The rotation loop compares real file byte sizes via `stat -c%s`, not `find -size +100M` (GNU-only syntax that silently never matches on Alpine's `find`, confirmed live -- a real portability bug the consolidation PR's own POC caught and fixed).
@@ -584,7 +583,7 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 - Storage-budget retention: `services/watchdog/retention.sh`'s `maybe_prune_syslog()` (since #842; opt-in via `SYSLOG_ENABLED=true`, `--profile logging`) enforces an overall storage budget on top of syslog-ng's own fixed-threshold rotation above. Age-based deletion runs first (`SYSLOG_RETENTION_DAYS`, default 30); if the tree under `SYSLOG_LOG_ROOT` is still over `SYSLOG_MAX_GB` (default 10) afterward, the oldest remaining files are deleted next — regardless of age — until back under budget. Size budget takes priority over the retention-days floor. Rate-limited via its own stamp file (once per day), same pattern as the cache purge above; `SYSLOG_LOG_ROOT` is validated (`realpath -m` + expected-prefix check) before any scan, same as `CACHE_DIR`.
 - Fluent-bit self-log rotation (#1236): `services/watchdog/retention.sh`'s `maybe_rotate_fluent_bit_selflog()` (since #842) bounds `/data/fluent-bit.log` (the combined container's own `fluent-bit` operational log, see the logging matrix row below) on the `syslog-data` volume, which neither of the two mechanisms above touches.
 - **Least-privilege capability posture**: the combined container runs entirely as fixed non-root uid 10001 (not root, unlike the previous two separate images), with **no added Linux capabilities**. Every first-party producer log it tails is now created under a setgid log directory whose group is the same fixed gid 10001, and startup repairs existing files on upgraded volumes the same way, so plain Unix permissions are enough even after reopen/recreation of the log file.
-- **Existing `logs` volume ownership migration**: Docker copies an image path's uid/gid only when it initializes a new named volume; it does not update an already-populated volume after an image upgrade. The `syslog-logs-permissions` one-shot Compose service therefore runs before `syslog` in both production and quickstart, recursively assigns the shared `/var/log/lancache` tree to uid/gid 10001, and must complete successfully before the non-root collector starts. The initializer has no network, a read-only root filesystem, and only `CAP_CHOWN`; repeated starts are intentionally idempotent. This keeps existing proxy-log copies writable without widening the long-running syslog container's capability set.
+- **Existing `logs` volume ownership migration**: Docker copies an image path's uid/gid only when it initializes a new named volume; it does not update an already-populated volume after an image upgrade. The `syslog-logs-permissions` one-shot Compose service therefore runs before `syslog` in `deploy/prod`, recursively assigns the shared `/var/log/lancache` tree to uid/gid 10001, and must complete successfully before the non-root collector starts. The initializer has no network, a read-only root filesystem, and only `CAP_CHOWN`; repeated starts are intentionally idempotent. This keeps existing proxy-log copies writable without widening the long-running syslog container's capability set.
 - **Silent-data-loss detection** (new in the consolidation PR): a periodic detector compares syslog-ng's own "processed" stats counter (`syslog-ng-ctl stats`) against real bytes landing on disk under `SYSLOG_NG_LOG_ROOT`, alerting (and surfacing via a structured healthcheck status field) if syslog-ng believes it delivered messages that never actually reached disk -- e.g. a bind-mounted log-root directory left root-owned instead of chowned to uid 10001. `setup.sh` pre-creates and chowns this directory on fresh install specifically to avoid the condition; this detector is the defense-in-depth backstop for an installation that predates that fix or has its permissions changed later.
 - **Real dual-process healthcheck**: `services/syslog/healthcheck.sh` checks fluent-bit AND syslog-ng independently (not just "is the container running") and only reports healthy when both are, writing a structured per-process status file (including the data-loss alert flag above) for a future Admin UI/watchdog integration -- the granularity fix for the two-container era's single "one process, one Docker HEALTHCHECK slot" limitation.
 - `scripts/tracked/check-logging-matrix.sh`, run in CI's `validate-compose` job, fails if a Compose service has no row in the logging matrix table below, or if a row names a service that no longer exists.
@@ -642,7 +641,7 @@ deliberately deferred (see `services/cachehamster/src/main.rs`'s own module doc 
 **Infra integration (issue #871): CI-built/published, opt-in Compose profile, functionally
 still inert.** As of this integration pass, `services/cachehamster` is built, Trivy-scanned,
 and published multi-arch (amd64+arm64) by CI like every other service, and
-`deploy/{prod,quickstart}/docker-compose.yml` gate its container behind an opt-in
+`deploy/prod/docker-compose.yml` gates its container behind an opt-in
 `cachehamster` Compose profile (default off — the operator must set `COMPOSE_PROFILES` to
 include it and supply Steam credentials). It is intentionally excluded from full-stack CI
 deep-validation (AG-VAL-027) for the same reason it was excluded from Compose before: an
@@ -725,9 +724,9 @@ free disk space at `CACHE_DIR` with the same buffer-scaled safety check as
 `available_free_space_at(CACHE_DIR) - buffer(cache_gb) >= cache_gb`; on
 rejection, the largest currently-passing value is suggested). A validated
 request does not take effect synchronously: `CACHE_MAX_SIZE` reaches the
-proxy container via the real deployment `.env`
-(`deploy/quickstart/docker-compose.yml`'s
-`environment: - CACHE_MAX_SIZE=${CACHE_MAX_SIZE}`), which this container has
+proxy container via the runtime env
+(`deploy/prod/docker-compose.yml`'s
+`environment: - CACHE_MAX_SIZE=${CACHE_MAX_SIZE:?...}`), which this container has
 no filesystem access to, and the Admin UI's Docker access deliberately has no
 exec capability to send nginx a reload signal even if it did (see
 `services/ui/src/docker_client.rs`'s header comment). The request is instead
@@ -747,22 +746,11 @@ processes with that new config on `SIGHUP`); it is this project's own
 `services/proxy/entrypoint.sh` (renders `nginx.conf` from its template once,
 before `exec nginx`, with no signal handler to re-render and reload) that
 makes a full recreate the only mechanism available today, not a limitation of
-nginx itself. Scope boundary: this convergence path writes the
-`setup.sh`-managed runtime `.env` unconditionally (it does not check which
-compose style is in use), which only `deploy/quickstart/docker-compose.yml`
-(what `setup.sh` actually installs at `/opt/lancache-ng`) reads
-`CACHE_MAX_SIZE` from directly — a manual `deploy/prod` checkout's proxy
-service instead reads `config/prod/proxy.env` via `env_file:`, a file this
-convergence tick never touches. This makes an Admin UI resize on a
-`deploy/prod` install worse than an inert no-op: `.env`'s `CACHE_MAX_GB` still
-gets updated, so the dashboard's own "pending" banner clears and its usage bar
-starts showing the new target size once `docker compose up -d` recreates the
-`ui` container — while the real `proxy` container keeps enforcing the
-untouched old `CACHE_MAX_SIZE` from `config/prod/proxy.env`. The dashboard
-would misleadingly display a resize that never actually reached nginx on that
-deployment style. Not fixed as part of this capability (would require also
-writing `config/prod/proxy.env` from the same convergence tick, a separate,
-`deploy/prod`-specific change).
+nginx itself. The convergence writes the setup.sh-managed runtime env
+(`deploy/prod/.env.local`), from which `deploy/prod/docker-compose.yml`
+interpolates both `CACHE_MAX_SIZE` for the `proxy` service and
+`CACHE_MAX_GB` for the `ui` service, so the dashboard's displayed target and
+the limit nginx enforces change in the same recreate.
 
 **Not yet implemented:** a manual "clear cache now" / purge-by-age / purge-
 by-access / pin-app-ID surface. `services/watchdog/watchdog.sh`'s

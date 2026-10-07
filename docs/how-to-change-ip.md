@@ -103,8 +103,6 @@ sudo systemctl restart networking
 
 ```bash
 nano deploy/prod/.env.local
-# or for quickstart:
-nano deploy/quickstart/.env
 ```
 
 Change the IP lines:

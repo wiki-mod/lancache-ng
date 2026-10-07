@@ -545,25 +545,10 @@ After the first start, the certificate is available here:
 
 Depending on your installation path, the file may be inside your selected install directory.
 
-### Install on Windows
+### Install on clients
 
-Use PowerShell as Administrator:
-
-```powershell
-scripts\untracked\install-ca-cert.ps1
-```
-
-### Install on Linux
-
-Use:
-
-```bash
-sudo scripts/untracked/install-ca-cert.sh
-```
-
-### Manual instructions
-
-See:
+Follow the per-platform steps (Windows, Linux, macOS, Firefox, Steam Deck,
+consoles) and keep the CA backed up:
 
 ```text
 docs/install-ca-cert.md
@@ -740,7 +725,7 @@ LANCACHE_IMAGE_CHANNEL=stable
 LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
 ```
 
-`NGINX_UPSTREAM_RESOLVER` is what nginx uses to resolve the *real* CDN hostnames it proxies to. It is **not** read from `deploy/prod/.env.local` — `deploy/prod/docker-compose.yml`'s `proxy` service only loads it via `env_file: ../../config/prod/proxy.env`, with no `${NGINX_UPSTREAM_RESOLVER}` interpolation in that service's `environment:` list, so an override placed in `.env.local` has no effect on this variable. Edit `config/prod/proxy.env` directly, then recreate the `proxy` container (`docker compose --env-file deploy/prod/.env.local -f deploy/prod/docker-compose.yml up -d proxy`) to pick up the change. Because `config/prod/proxy.env` is a tracked file (unlike `.env.local`), a manual edit to it can conflict with the repository pull during the upgrade flow described below if a future release also touches that file — the pre-pull config backup in that flow covers this file too, so follow those steps (don't edit and pull outside of them) and reapply your resolver override afterward if it was reset. The default there — `8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]` (Google Public DNS, both IPv4 and IPv6; IPv6 entries are bracketed because nginx's `resolver` directive requires that) — is a convenience default, not a requirement. Set it to whatever real upstream DNS servers you prefer: your ISP's resolvers, a corporate DNS server, 1.1.1.1, or anything else. The actual requirement is that the chosen resolver returns the CDN's *real* origin address for these hostnames — not merely that its own server IP differs from the LanCache DNS/proxy IP. Setup rejects the obvious case (setting this directly to `IP_STANDARD`/`IP_SSL`) automatically, but it cannot detect an indirect loop: for example, a split-DNS or conditional-forwarding resolver that itself forwards the CDN's zone back to the LanCache DNS server would still hand nginx the LanCache proxy IP, at which point nginx loops even though the configured resolver's own IP isn't the cache's. If you use split-DNS or conditional forwarding upstream of this resolver, make sure CDN zones aren't among the forwarded ones.
+`NGINX_UPSTREAM_RESOLVER` is what nginx uses to resolve the *real* CDN hostnames it proxies to. Its default lives in `deploy/prod/.env`; put your own value in `deploy/prod/.env.local`, which `deploy/prod/docker-compose.yml` passes to the `proxy` service, then recreate that container from the repository root (`sudo ./setup.sh compose deploy/prod up -d proxy`). The default — `8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]` (Google Public DNS, both IPv4 and IPv6; IPv6 entries are bracketed because nginx's `resolver` directive requires that) — is a convenience default, not a requirement. Set it to whatever real upstream DNS servers you prefer: your ISP's resolvers, a corporate DNS server, 1.1.1.1, or anything else. The actual requirement is that the chosen resolver returns the CDN's *real* origin address for these hostnames — not merely that its own server IP differs from the LanCache DNS/proxy IP. Setup rejects the obvious case (setting this directly to `IP_STANDARD`/`IP_SSL`) automatically, but it cannot detect an indirect loop: for example, a split-DNS or conditional-forwarding resolver that itself forwards the CDN's zone back to the LanCache DNS server would still hand nginx the LanCache proxy IP, at which point nginx loops even though the configured resolver's own IP isn't the cache's. If you use split-DNS or conditional forwarding upstream of this resolver, make sure CDN zones aren't among the forwarded ones.
 
 `PROXY_SECURITY_MODE` controls how defensive the proxy is at request time:
 
@@ -910,8 +895,7 @@ Do not expose them directly to the internet.
 Important paths:
 
 ```text
-deploy/quickstart/       Quickstart compose used by setup.sh
-deploy/prod/             Production compose files
+deploy/prod/             Production compose used by setup.sh
 deploy/secondary/        Secondary DNS compose files
 docs/                    Documentation
 scripts/                 Helper scripts
@@ -990,7 +974,7 @@ Common causes:
 - blocked port `8080`
 - UI container not running
 - firewall blocks access
-- manual production setup binds UI differently than quickstart setup
+- `UI_BIND_IP` binds the UI to another address than `IP_STANDARD`
 
 ### Cache hit rate is low
 

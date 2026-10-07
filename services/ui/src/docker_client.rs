@@ -75,7 +75,7 @@ pub async fn stop_service_if_present(docker: &Docker, service_name: &str) -> Res
 // config), which always act on an EXISTING container. In this project that
 // only happens for a profile-gated Compose service (see docker-compose.yml's
 // `dhcp`/`dhcp-proxy` `profiles:`) whose profile was never included in
-// COMPOSE_PROFILES at `docker compose up` time -- reconcile_dhcp_mode in
+// COMPOSE_PROFILES at `docker compose up` time -- reconcile_dhcp_mode_start in
 // routes/dhcp.rs hits exactly this the first time an operator switches to a
 // DHCP mode that was never active before, since the docker-socket-proxy
 // allowlist this module talks through deliberately has no container-create
@@ -108,12 +108,9 @@ pub fn container_name_for_service(service_name: &str) -> Result<String> {
         "dhcp-probe" | "lancache-dhcp-probe" => "lancache-dhcp-probe",
         "nats" | "lancache-nats" => "lancache-nats",
         "ntp" | "lancache-ntp" => "lancache-ntp",
-        // Issue #1486: restart-only (never start/stop, see
-        // docker-socket-proxy.sh's safe_ui_restart) so this container can
-        // never be left in a stopped/disabled state via the Admin UI.
-        // watchdog/syslog are deliberately absent from this match on
-        // purpose (fall through to the error below) -- see this issue's own
-        // "must stay un-disableable" requirement.
+        // What: ui restart-only; no watchdog or syslog.
+        // Why: the Admin UI must never stop itself or them.
+        // From: Issue #1486
         "ui" | "lancache-ui" => "lancache-ui",
         _ => anyhow::bail!(
             "Docker service '{}' is not in the lancache-ng socket-proxy allowlist",
@@ -127,12 +124,9 @@ pub fn container_name_for_service(service_name: &str) -> Result<String> {
 mod tests {
     use super::*;
 
-    // Live-reproduced on a real deploy/dev stack (issue #1068 item 6, before
-    // that stack was retired in v0.3.0, #766): starting a
-    // profile-gated container that was never created returns exactly this
-    // 404 shape from the docker-socket-proxy. Confirms is_container_not_created
-    // recognizes it so callers can turn it into actionable guidance instead
-    // of an opaque "Failed to start 'x'".
+    // What: a 404 in the chain means never created.
+    // Why: a profile-gated start returns this shape.
+    // From: Issue #1068
     #[test]
     fn is_container_not_created_recognizes_a_404_anywhere_in_the_error_chain() {
         let bollard_err = BollardError::DockerResponseServerError {

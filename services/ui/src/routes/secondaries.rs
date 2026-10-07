@@ -2,13 +2,9 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
-//! Admin UI secondary-node routes: lists registered secondaries, issues each
-//! one its own unique NATS auth-callout credential on registration (issue
-//! #583), rotates or revokes that one secondary's credential without
-//! touching any other secondary, and generates the static `nats.conf` (UI/
-//! DNS-writer/DNS-replica/callout-bypass roles plus the `auth_callout {}`
-//! stanza) at process startup only -- see `nats_auth_callout.rs` for why
-//! register/rotate/remove no longer need to rewrite that file or restart NATS.
+//! What: secondary routes and the auth_callout fragment.
+//! Why: each secondary has its own revocable NATS login.
+//! From: Issue #583
 
 use crate::{AppState, docker_client, nats_auth_callout, nats_config, nats_kick};
 use axum::extract::{Path, State};
@@ -17,7 +13,6 @@ use axum::response::{Json, Response};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path as FsPath;
-use std::process;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
@@ -223,18 +218,9 @@ pub async fn register_secondary(
     let ddns_tsig_key = read_ddns_tsig_key_from_shared_secret_dir(&state.config.shared_secret_dir)?;
     let dns_xfr_primary = format!("{}:5300", state.config.standard_ip);
 
-    // Issue #583: each secondary gets its own NATS identity now, not the old
-    // shared DNS-reader credential. `name` doubles as the NATS username --
-    // it already passed the same alphanumeric+dash charset check NATS
-    // usernames require (see nats_config::validate_nats_username), and it's
-    // already the table's primary key, so this application-level tying of
-    // nats_user to name is enough to keep two rows from colliding today.
-    // Finding #5 (docs/bug-hunt/ui-core.md, issue #849) added an independent
-    // UNIQUE index on the nats_user column itself in
-    // main.rs::migrate_secondaries_table_for_auth_callout, as a
-    // defense-in-depth backstop in case a future change ever decouples this
-    // assignment from `name`. Only the password's hash is ever persisted;
-    // the plaintext is returned exactly once, here, and never stored.
+    // What: name is the NATS user; only the hash is stored.
+    // Why: the plaintext is returned once and never kept.
+    // From: Issue #583
     let nats_user = form.name.clone();
     let nats_password = generate_nats_password();
     let nats_password_hash = nats_auth_callout::hash_nats_password(&nats_password)
@@ -429,9 +415,8 @@ pub async fn check_secondary_health(
         })));
     };
 
-    // Secondaries serve DNS on the standard port 53 -- the now-retired
-    // deploy/dev stack's 5300 offset (v0.3.0, #766) was a local-Windows-conflict
-    // workaround that never applied to secondaries in the first place.
+    // What: probe the secondary's DNS on standard port 53.
+    // Why: 5300 is only the primary's AXFR listener.
     let result = crate::dns_probe::probe_secondary_soa(addr, 53).await;
 
     // Only a genuinely healthy authoritative answer advances last_seen.
@@ -537,27 +522,10 @@ pub async fn rotate_token(
 }
 
 // ─── Helper Functions ───
-// The NATS auth-callout config is static for the lifetime of the process
-// (issue #583): the Admin UI writes it once at startup (see main.rs), then
-// never touches it again. Registering, rotating, or removing a secondary only
-// ever writes to the `secondaries` table -- the auth-callout responder
-// (nats_auth_callout.rs) reads that table live on every connection attempt, so
-// nothing in the config needs to change per secondary.
-//
-// Since issue #811 the Admin UI writes ONLY the `auth_callout {}` fragment (to
-// config.nats_auth_callout_path, i.e. /etc/nats/auth_callout.conf), NOT the
-// whole nats.conf. The nats container's own entrypoint owns nats.conf (the
-// static roles, jetstream, log_file) and `include`s our fragment inside its
-// authorization {} block. This is the fix's core: the entrypoint can now keep
-// regenerating its static config idempotently on every restart (the same
-// convergence discipline pdns/kea/nginx/dhcp-proxy follow) without clobbering
-// the fragment the way it used to when the UI wrote the whole file. The
-// restart in reload_nats_conf below is still required to apply the fragment,
-// because nats-server explicitly refuses to hot-reload auth_callout ("config
-// reload not supported for AuthCallout", verified against nats-server 2.14.3),
-// but it is now safe -- the restart re-runs the entrypoint, which regenerates
-// nats.conf and leaves auth_callout.conf untouched.
 
+// What: rewrite the fragment; restart NATS on a change.
+// Why: nats-server cannot hot-reload auth_callout.
+// From: Issue #811
 pub async fn reload_nats_conf(
     state: &AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -595,37 +563,17 @@ pub async fn update_nats_conf(
         &state.nats_callout_xkey_public_key,
     );
 
-    if !nats_conf_fragment_changed(&state.config.nats_auth_callout_path, &fragment) {
-        return Ok(false);
-    }
-
-    write_nats_conf_atomically(&state.config.nats_auth_callout_path, &fragment)?;
-    Ok(true)
+    Ok(crate::write_file_if_changed(
+        FsPath::new(&state.config.nats_auth_callout_path),
+        &fragment,
+        0o644,
+        None,
+    )?)
 }
 
-// What: true only when `rendered` differs from what is on disk.
-// Why: pure function makes skip-vs-write decision unit-testable.
-// From: PR #1610
-fn nats_conf_fragment_changed(path: &str, rendered: &str) -> bool {
-    fs::read_to_string(path).ok().as_deref() != Some(rendered)
-}
-
-// Pulled out of update_nats_conf as a pure, I/O-free function (#640, follow-
-// up to #583's per-secondary identity decision) so the repeat-run/idempotence
-// property #640 requires -- that starting up twice with an unchanged Config
-// renders byte-identical config content -- is directly unit-testable.
-// update_nats_conf's own AppState carries a live Docker client, NATS
-// connection, and SQLite handle, none of which a unit test can construct
-// without a running stack, so this function takes only the plain string values
-// it actually needs instead of the whole AppState.
-//
-// Since issue #811 this renders ONLY the `auth_callout {}` fragment that the
-// nats entrypoint `include`s inside its authorization {} block -- hence only
-// the static usernames (for auth_users) and the issuer public key are needed,
-// not passwords or log_file, which the entrypoint owns. auth_users must list
-// every static user by name so nats-server keeps authenticating them against
-// its own static `users` list; only names absent from both are routed through
-// the callout (verified against nats-server 2.14.3; see nats_auth_callout.rs).
+// What: the auth_callout stanza nats.conf includes, pure.
+// Why: only the ui knows the issuer and xkey public keys.
+// From: Issue #811 | PR #1858
 fn render_nats_auth_callout(
     ui_user: &str,
     writer_user: &str,
@@ -635,81 +583,14 @@ fn render_nats_auth_callout(
     issuer_public_key: &str,
     xkey_public_key: &str,
 ) -> String {
-    // This is the fragment `include`d by the nats container's own nats.conf
-    // INSIDE its authorization {} block (issue #811). It must therefore be the
-    // bare `auth_callout {}` stanza only -- no jetstream, log_file, users, or
-    // wrapping authorization {} (those are the entrypoint's, in nats.conf).
     format!(
-        r#"# lancache-ng auth_callout fragment -- DO NOT edit by hand.
-# Written solely by the Admin UI (services/ui/src/routes/secondaries.rs::
-# update_nats_conf) and `include`d by the nats container's nats.conf inside its
-# authorization {{}} block. It is split out from nats.conf on purpose so the
-# nats entrypoint can idempotently regenerate its own static config on every
-# restart without ever clobbering this file (issue #811). Only the Admin UI
-# knows the issuer public key below, which is why this cannot live in the
-# entrypoint-generated nats.conf.
-auth_callout {{
+        r#"auth_callout {{
   issuer: "{issuer_public_key}"
-  # Public half of the responder's own static X25519 encryption keypair
-  # (issue #682). Setting this makes nats-server seal the auth-callout
-  # request to this key and expect the response sealed back to a fresh
-  # per-connection ephemeral key it supplies -- see nats_auth_callout.rs's
-  # xkey module docs for the full request/response mechanism. The matching
-  # private seed is held only by the callout responder task, never written
-  # to this config file.
   xkey: "{xkey_public_key}"
-  # Every static user in nats.conf's `users` list must be listed here, not just
-  # the callout responder itself: nats-server only checks a connecting user's
-  # password against that static list for names in auth_users. Any username
-  # *not* listed here -- including one that happens to match a static entry --
-  # is routed through the callout instead (verified against a real nats-server
-  # 2.14.3; see nats_auth_callout.rs's module docs). Only external secondaries,
-  # deliberately absent from both this list and nats.conf's static `users`
-  # list, are meant to go through the callout.
-  #
-  # Issue #681: auth_callout's interception is server-wide, not scoped to the
-  # $G account the four roles above live in -- an unrecognized username is
-  # routed to the callout regardless of which account (accounts {{}} block)
-  # its own static `users` entry lives under. Confirmed the hard way against a
-  # real nats-server 2.14.3: omitting the new NATS_SYS_USER (services/nats/
-  # nats.conf's separate `SYS` account) from this list made every system-
-  # account connection attempt fall through to the callout instead, which
-  # correctly denies it (it is not a row in `secondaries`) -- silently
-  # breaking nats_kick.rs's CONNZ/KICK calls with "authorization violation"
-  # instead of ever reaching the SYS account's own static credential check.
   auth_users: ["{ui_user}", "{writer_user}", "{replica_user}", "{callout_user}", "{sys_user}"]
 }}
 "#
     )
-}
-
-fn write_nats_conf_atomically(
-    path: &str,
-    content: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let target = FsPath::new(path);
-    let parent = target
-        .parent()
-        .ok_or_else(|| format!("nats.conf path has no parent directory: {path}"))?;
-    let file_name = target
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("nats.conf");
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| format!("System clock is before UNIX_EPOCH: {e}"))?
-        .as_nanos();
-    let tmp_path = parent.join(format!(".{file_name}.tmp-{}-{stamp}", process::id()));
-
-    fs::write(&tmp_path, content)
-        .map_err(|e| format!("Failed to write temporary nats.conf: {e}"))?;
-
-    if let Err(err) = fs::rename(&tmp_path, target) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(format!("Failed to atomically replace nats.conf: {err}").into());
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -722,7 +603,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("lancache-ng-{name}-{}-{stamp}", process::id()))
+        std::env::temp_dir().join(format!("lancache-ng-{name}-{}-{stamp}", std::process::id()))
     }
 
     // Generated NATS passwords must be exactly 64 hex characters (32 bytes) and never repeat, proving CSPRNG is working and entropy is sufficient.
@@ -766,47 +647,9 @@ mod tests {
         assert_eq!(value["image_tag"], "v1.2.3");
     }
 
-    // Atomic file writes must replace the target file entirely with new content and clean up all temporary files, preventing partial writes and leftover temp files.
-    #[test]
-    fn nats_conf_write_replaces_file_atomically() {
-        let dir = temp_dir("nats-conf-atomic");
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("nats.conf");
-        fs::write(&path, "old").unwrap();
-        let old_inode = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&path).unwrap());
-
-        write_nats_conf_atomically(path.to_str().unwrap(), "new").unwrap();
-
-        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
-        // What: a rename swaps the inode; an in-place write keeps it.
-        // Why: readers must never see a half-written nats.conf.
-        // From: Issue #1683 | PR #1858
-        let new_inode = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&path).unwrap());
-        assert_ne!(
-            old_inode, new_inode,
-            "nats.conf was rewritten in place, not replaced"
-        );
-        let leftovers = fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
-            .count();
-        assert_eq!(leftovers, 0);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    // #640: closes the one real gap the #456 convergence/idempotence audit
-    // flagged for NATS -- render_nats_auth_callout/write_nats_conf_atomically
-    // are the write path #583's per-secondary-identity decision settled on (a
-    // static config written once at startup; see this module's own header
-    // comment and secondaries.rs's `update_nats_conf` doc comment), but nothing
-    // previously proved that path is actually a stable fixed point across
-    // repeated container starts with an unchanged Config. A prior version of
-    // this code path (the now-removed shared DNS-reader role, #380/#426/#473)
-    // *was* a documented no-op, so this repeat-run test intentionally targets
-    // real, non-trivial content (the interpolated issuer + auth_users) rather
-    // than assuming that history still applies today. (Since #811 this
-    // writer emits the auth_callout.conf fragment rather than the whole file.)
+    // What: equal inputs render a byte-identical fragment.
+    // Why: a changed byte would restart NATS each start.
+    // From: Issue #640
     #[test]
     fn nats_conf_auth_callout_fragment_render_is_byte_identical_across_repeated_calls() {
         let render = || {
@@ -848,36 +691,25 @@ mod tests {
             );
         }
 
-        // The fragment is `include`d INSIDE the entrypoint's authorization {}
-        // block (issue #811), so it must carry ONLY the auth_callout stanza --
-        // no static `users = [` list, no passwords, no log_file, no jetstream
-        // (all of those are the nats entrypoint's, in nats.conf). Guard against
-        // a regression that reintroduces the whole-file render here. (We match
-        // directive-shaped substrings, not the bare word "authorization", so
-        // this doc-comment's own mention of the authorization {} block above
-        // doesn't trip it.)
+        // What: the fragment holds only auth_callout.
+        // Why: users, log_file, jetstream are nats.conf's.
         for forbidden in ["users = [", "password:", "log_file", "jetstream"] {
             assert!(
                 !first.contains(forbidden),
-                "auth_callout fragment must not contain {forbidden:?} -- that belongs in the entrypoint-owned nats.conf, not the UI fragment"
+                "auth_callout fragment must not contain {forbidden:?} -- that belongs in nats.conf, not the UI fragment"
             );
         }
     }
 
-    // End-to-end version of the test above: drives the real
-    // render_nats_auth_callout -> write_nats_conf_atomically pipeline twice in
-    // a row (simulating two container starts with an unchanged Config, the same
-    // shape setup_update_idempotence.bats and dns_config_snapshot_idempotence.bats
-    // already prove for setup.sh and PowerDNS respectively) and asserts the
-    // on-disk fragment converges to byte-identical content with no leftover
-    // `.tmp-*` file from either write.
+    // What: two unchanged starts write once, then nothing.
+    // Why: an unchanged fragment must not restart NATS.
+    // From: PR #1610
     #[test]
     fn nats_conf_auth_callout_fragment_write_converges_across_repeated_writes_of_unchanged_config()
     {
         let dir = temp_dir("nats-conf-repeat-run");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("auth_callout.conf");
-        let path_str = path.to_str().unwrap();
 
         let rendered_first = render_nats_auth_callout(
             "lancache-ui",
@@ -888,13 +720,9 @@ mod tests {
             "issuer-public-key-abc123",
             "xkey-public-key-def456",
         );
-        write_nats_conf_atomically(path_str, &rendered_first).unwrap();
+        assert!(crate::write_file_if_changed(&path, &rendered_first, 0o644, None).unwrap());
         let first_write = fs::read_to_string(&path).unwrap();
 
-        // Second "startup": same inputs, freshly re-rendered (not the cached
-        // `rendered_first` string) so this also exercises render_nats_auth_callout
-        // a second time, not just write_nats_conf_atomically writing the same
-        // string object twice.
         let rendered_second = render_nats_auth_callout(
             "lancache-ui",
             "lancache-dns-writer",
@@ -904,7 +732,7 @@ mod tests {
             "issuer-public-key-abc123",
             "xkey-public-key-def456",
         );
-        write_nats_conf_atomically(path_str, &rendered_second).unwrap();
+        assert!(!crate::write_file_if_changed(&path, &rendered_second, 0o644, None).unwrap());
         let second_write = fs::read_to_string(&path).unwrap();
 
         assert_eq!(
@@ -918,31 +746,6 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
             .count();
         assert_eq!(leftovers, 0, "no .tmp-* file may survive either write");
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn nats_conf_fragment_changed_is_false_only_when_content_matches_what_is_on_disk() {
-        let dir = temp_dir("nats-conf-fragment-changed");
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("auth_callout.conf");
-        let path_str = path.to_str().unwrap();
-
-        assert!(
-            nats_conf_fragment_changed(path_str, "fragment-v1"),
-            "a missing file must count as changed"
-        );
-
-        write_nats_conf_atomically(path_str, "fragment-v1").unwrap();
-        assert!(
-            !nats_conf_fragment_changed(path_str, "fragment-v1"),
-            "identical on-disk content must not count as changed"
-        );
-        assert!(
-            nats_conf_fragment_changed(path_str, "fragment-v2"),
-            "different content must count as changed"
-        );
-
         fs::remove_dir_all(dir).unwrap();
     }
 }

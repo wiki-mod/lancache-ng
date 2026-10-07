@@ -18,42 +18,171 @@ setup() {
     # What: socket setup.sh tests get; it never exists
     # Why: a missing stub must fail, not reach a daemon
     # From: Issue #1683 | PR #1858
-    SETUP_SH_DOCKER_HOST="unix:///var/empty/no-docker.sock"
+    SETUP_SH_DOCKER_HOST="unix://${BATS_TEST_TMPDIR}/$(_val name)"
     CI_SH="${BATS_TEST_DIRNAME}/ci.sh"
-    CI_MANIFEST_SOURCE="${BATS_TEST_DIRNAME}/../yaml/build-manifest.yml"
+    unset CI_MANIFEST
     # shellcheck source=.github/scripts/ci.sh
     source "${CI_SH}"
+    CI_MANIFEST_SOURCE="${CI_MANIFEST}"
     # What: default apk resolver, rust ids docker-free.
     # Why: rust identity now keys the build-tools signature.
     # From: Issue #1683
-    CI_APK_RESOLVE_CMD="$(_stub apkres 'printf "pkg-1.0\n"')"; export CI_APK_RESOLVE_CMD
+    CI_APK_RESOLVE_CMD="$(_stub "printf '%s\n' '$(_val name)'")"; export CI_APK_RESOLVE_CMD
     # What: GHCR login stub (no-op, docker absent).
     # Why: ci.sh policy uses docker login; tests stub it.
     # From: Issue #1683
-    CI_GHCR_LOGIN_CMD="$(_stub ghcrlogin 'exit 0')"; export CI_GHCR_LOGIN_CMD
-    # What: neutral server URL every Actions run provides.
+    CI_GHCR_LOGIN_CMD="$(_stub 'exit 0')"; export CI_GHCR_LOGIN_CMD
+    # What: server URL every Actions run provides, fresh.
     # Why: label provenance needs it; no real host in tests.
     # From: Issue #1683 | PR #1858
-    export GITHUB_SERVER_URL=https://git.example.test
-    # What: SOT copy with neutral registry and platforms.
-    # Why: tests must not mirror the real host or arch set.
+    GITHUB_SERVER_URL="$(_val url)"; export GITHUB_SERVER_URL
+    # What: SOT copy; fresh registry, platforms, runners.
+    # Why: tests read them back; no real or fixed value.
     # From: Issue #1683 | PR #1858
+    local -a ed=(-e "s|^  registry: .*|  registry: $(_val host)|")
+    local plats p k f v
+    plats="$(_ci_build_matrix_platforms)" || return 1
+    for p in ${plats}; do
+        v="$(_val platform)"
+        ed+=(-e "s|${p//./\\.}|${v}|g" -e "s|^  ${p##*/}:\$|  ${v##*/}:|")
+    done
+    for k in $(_ci_block_keys platform_arch); do
+        for f in rust_target apk runner; do
+            v="$(_ci_block_entry_field platform_arch "${k}" "${f}")" || return 1
+            [ -z "${v}" ] || ed+=(-e "s|${v//./\\.}|$(_val name)|g")
+        done
+    done
     CI_MANIFEST="${BATS_TEST_TMPDIR}/sot.yml"
-    sed -e 's|^  registry: .*|  registry: registry.example.test|' \
-        -e 's|linux/amd64|os/p1|g; s|linux/arm64|os/p2|g' \
-        -e 's|^  amd64:$|  p1:|; s|^  arm64:$|  p2:|' \
-        -e 's|x86_64|arch-a|g; s|aarch64|arch-b|g' \
-        "${CI_MANIFEST_SOURCE}" > "${CI_MANIFEST}"
+    sed "${ed[@]}" "${CI_MANIFEST_SOURCE}" > "${CI_MANIFEST}" || return 1
     export CI_MANIFEST
 }
 
-# What: the real SOT's ci_variables block, for fixtures.
+# What: one top-level block of the real SOT, for fixtures.
 # Why: fixture SOTs need the policy values ci.sh reads.
 # From: Issue #1683 | PR #1858
-_sot_ci_variables() {
-    awk '/^ci_variables:/ { on = 1; print; next }
+_sot_block() {
+    awk -v b="$1" '$0 ~ ("^" b ":") { on = 1; print; next }
         on && /^[^ #]/ { exit }
         on { print }' "${CI_MANIFEST_SOURCE}"
+}
+
+# What: drop runner cache inputs, then run the args.
+# Why: one list keeps tests off the real runner caches.
+# From: Issue #1683 | PR #1858
+_cache_env_clean() {
+    unset RUNNER_ENVIRONMENT SCCACHE_REDIS_URL SCCACHE_DIR ACTIONS_RESULTS_URL ACTIONS_RUNTIME_TOKEN
+    [ "$#" -eq 0 ] || "$@"
+}
+
+# What: Write an executable stub that prints/exits fixed.
+# Why: Inject build/CAS/probe backends without real infra.
+# From: Issue #1683
+_stub() {
+    local path
+    path="$(_val path)"
+    _tool_stub "${path%/*}" "${path##*/}" <<<"$1"
+    printf '%s\n' "${path}"
+}
+
+# What: A stub probe that returns a fixed state.
+# Why: Test the resolver logic without a live GHCR.
+# From: Issue #1683
+_probe_stub() {
+    _stub "printf '%s\\n' \"${STUB_STATE}\""
+}
+
+# What: loads every setup.sh function, never runs setup.sh
+# Why: tests drive the product code with its real die
+# From: Issue #1683 | PR #1858
+_load_setup_sh() {
+    local repo_root="$1"
+    local helper_file="${BATS_TEST_TMPDIR}/setup-sh.sh"
+    # What: setup.sh up to its dispatcher; nothing executes
+    # Why: declare -gA keeps top-level maps global in here
+    # From: Issue #1683 | PR #1858
+    {
+        printf 'SCRIPT_DIR=%q\n' "${repo_root}"
+        awk 'NR == 1 || /^set -euo pipefail$/ || /^SCRIPT_DIR=/ { next }
+            /^case "\$\{1:-install\}" in$/ { exit }
+            { sub(/^declare -A /, "declare -gA "); print }' "${repo_root}/setup.sh"
+    } > "${helper_file}"
+    grep -q '^cmd_backup() ($' "${helper_file}" || { echo "setup.sh cut is incomplete"; return 1; }
+    export DOCKER_HOST="${SETUP_SH_DOCKER_HOST}"
+    # shellcheck source=setup.sh
+    source "${helper_file}"
+    # What: every setup.sh test gets the one docker stand-in
+    # Why: no test may reach a daemon or retype data
+    # From: Issue #1683 | PR #1858
+    export BIN="${BATS_TEST_TMPDIR}/bin" DS="${BATS_TEST_TMPDIR}/ds"
+    mkdir -p "${DS}/volumes" && _docker_stub "${BIN}" && PATH="${BIN}:${PATH}"
+    # What: setup.sh's own seam for the raw TCP probe
+    # Why: no LAN address is reachable inside the test box
+    # From: Issue #1683 | PR #1858
+    export SETUP_SH_SEAMS='_tcp_port_reachable() { [ ! -e "${DS}/fail-tcp" ]; }'
+}
+
+# What: runs a snippet on loaded setup.sh fns, setup.sh opts
+# Why: failure paths are proven under set -euo pipefail
+# From: Issue #1683 | PR #1858
+_setup_sh_run() {
+    local root msg="${BATS_TEST_TMPDIR}/setup-msg.sh" full="${BATS_TEST_TMPDIR}/setup-sh.sh"
+    if [ -f "${full}" ]; then
+        run env DOCKER_HOST="${SETUP_SH_DOCKER_HOST}" bash -c 'set -euo pipefail; . "$1"; eval "$2"' _ "${full}" "$1"
+        return 0
+    fi
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    grep -E '^(print_step|print_ok|print_warn|print_error|die) *\(\) *\{.*\}$' "${root}/setup.sh" > "${msg}"
+    [ "$(wc -l < "${msg}")" -eq 5 ]
+    run env DOCKER_HOST="${SETUP_SH_DOCKER_HOST}" bash -c 'set -euo pipefail; YELLOW="" RED="" RESET="" BOLD="" CYAN="" GREEN=""
+        . "$1"; . "$2"; eval "$3"' _ "${msg}" "${BATS_TEST_TMPDIR}/fns-setup.sh" "$1"
+}
+
+# What: check rc and the ;-list of output parts in order.
+# Why: one row check for every table-driven test.
+# From: Issue #1683 | PR #1858
+_expect() {
+    local case="$1" rc="$2" want="$3" rest="${output}" w
+    local -a ws
+    [ "${status}" -eq "${rc}" ] || { echo "${case}: rc ${status} want ${rc}: ${output}"; return 1; }
+    case "${want}" in
+        -) return 0 ;;
+        =*) [ "${output}" = "${want#=}" ] || { echo "${case}: '${output}' want '${want#=}'"; return 1; }; return 0 ;;
+    esac
+    IFS=';' read -r -a ws <<< "${want}"
+    for w in "${ws[@]}"; do
+        [[ "${rest}" == *"${w}"* ]] || { echo "${case}: no '${w}' (in order): ${output}"; return 1; }
+        rest="${rest#*"${w}"}"
+    done
+}
+
+# What: print one fresh value of a kind per call.
+# Why: no fixed host, port, token or name in a test.
+# From: Issue #1683 | PR #1858
+_val() {
+    case "$1" in
+        name) printf 'v%s' "${SRANDOM}" ;;
+        path) printf '%s/v%s' "${BATS_TEST_TMPDIR}" "${SRANDOM}" ;;
+        var) printf 'CI_V%s' "${SRANDOM}" ;;
+        host) printf 'h%s' "${SRANDOM}" ;;
+        port) printf '%s' "$(( SRANDOM % 64511 + 1024 ))" ;;
+        int) printf '%s' "$(( SRANDOM % ($3 - $2 + 1) + $2 ))" ;;
+        url) printf 'http://h%s:%s' "${SRANDOM}" "$(( SRANDOM % 64511 + 1024 ))" ;;
+        platform) printf 'o%s/p%s' "${SRANDOM}" "${SRANDOM}" ;;
+        sha) printf '%08x%08x%08x%08x%08x' "${SRANDOM}" "${SRANDOM}" "${SRANDOM}" "${SRANDOM}" "${SRANDOM}" ;;
+        semver) printf '%s.%s.%s' "$(( SRANDOM % 90 + 1 ))" "$(( SRANDOM % 100 ))" "$(( SRANDOM % 100 ))" ;;
+        digest) printf 'sha256:%08x%08x%08x%08x%08x%08x%08x%08x' "${SRANDOM}" "${SRANDOM}" "${SRANDOM}" \
+            "${SRANDOM}" "${SRANDOM}" "${SRANDOM}" "${SRANDOM}" "${SRANDOM}" ;;
+        *) echo "_val: unknown kind \"$1\"" >&2; return 2 ;;
+    esac
+}
+
+# What: replace each @KEY@ in a row from the caller's V map.
+# Why: one fill for every table built on _val values.
+# From: Issue #1683 | PR #1858
+_fill() {
+    local s="$1" k
+    for k in "${!V[@]}"; do s="${s//"${k}"/"${V[${k}]}"}"; done
+    printf '%s' "${s}"
 }
 
 # What: Removes dirs listed in a manifest file.
@@ -86,84 +215,150 @@ teardown() {
 # CORE INVARIANTS
 # =========================================================
 
-@test "result-gate accepts an all-success and a NOOP-skipped pipeline" {
-    # What: required check greens on success and on skips.
-    # Why: non-plan/checks phases skip on NOOP/PR (§62).
+@test "result-gate maps each phase-result set to its verdict" {
+    # What: per row: phase results -> rc and verdict line.
+    # Why: only success or a NOOP skip may green the gate.
     # From: Issue #1683 | PR #1858
-    CI_PHASE_RESULTS="plan:success build:success checks:success" run ci_cmd_result_gate
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *SUCCESS* ]]
-    CI_PHASE_RESULTS="plan:success build:skipped validate:skipped checks:success" run ci_cmd_result_gate
-    [ "${status}" -eq 0 ]
+    local case phases rc want
+    local -A V=([@O1@]="$(_val name)" [@O2@]="$(_val name)")
+    while IFS='|' read -r case phases rc want; do
+        if [ "${phases}" = - ]; then
+            run env -u CI_PHASE_RESULTS bash "${CI_SH}" result-gate
+        else
+            CI_PHASE_RESULTS="$(_fill "${phases}")" run bash "${CI_SH}" result-gate
+        fi
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+    done <<'CASES'
+all-success|plan:success @O1@:success checks:success|0|-> SUCCESS
+noop-skips|plan:success @O1@:skipped @O2@:skipped checks:success|0|-> SUCCESS
+plan-failed|plan:failure checks:success|1|[CI-ERROR-CORE-0100] phase="plan" result="failure"
+checks-failed|plan:success checks:failure|1|[CI-ERROR-CORE-0100] phase="checks" result="failure"
+platform-skipped|platform:skipped plan:success checks:success|1|[CI-ERROR-CORE-0100] phase="platform" result="skipped"
+phase-failed|plan:success @O1@:failure checks:success|1|[CI-ERROR-CORE-0116] phase="@O1@" result="failure"
+empty|-|2|[CI-ERROR-CORE-0101]
+CASES
 }
 
-@test "result-gate fails closed on plan, checks, phase failure, or empty" {
-    # What: plan/checks ok; others ok or skip.
-    # Why: real phase failure must block promotion.
+@test "SOT inventory readers map a fixture SOT" {
+    # What: per row: one reader call on a fixture SOT.
+    # Why: one SOT owns inventory; toolchain is no service.
     # From: Issue #1683 | PR #1858
-    CI_PHASE_RESULTS="plan:failure checks:success" run ci_cmd_result_gate
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *CI-ERROR-CORE-0100* ]]
-    CI_PHASE_RESULTS="plan:success checks:failure" run ci_cmd_result_gate
-    [ "${status}" -eq 1 ]
-    CI_PHASE_RESULTS="plan:success build:failure checks:success" run ci_cmd_result_gate
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *'[CI-ERROR-CORE-0116] phase="build" result="failure"'* ]]
-    CI_PHASE_RESULTS="platform:skipped plan:success checks:success" run ci_cmd_result_gate
-    [ "${status}" -eq 1 ]
-    run ci_cmd_result_gate
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *CI-ERROR-CORE-0101* ]]
+    local m case call rc want
+    m="$(_val path)"
+    local -a av
+    local -A V=(
+        [@A@]="$(_val name)" [@B@]="$(_val name)" [@T@]="$(_val name)" [@Z@]="$(_val name)"
+        [@CA@]="$(_val name)" [@CB@]="$(_val name)" [@CT@]="$(_val name)" [@TA@]="$(_val name)"
+        [@TT@]="$(_val name)" [@R@]="$(_val name)" [@X1@]="$(_val name)" [@X2@]="$(_val name)"
+        [@F@]="$(_val name)" [@ROOT@]="/$(_val name)" [@WF@]="$(_val name)" [@VAR@]="$(_val var)"
+        [@ID@]="[CI-ERROR-$(_val name | tr a-z A-Z)-0001]" [@CTX@]="$(_val name)=$(_val name)"
+    )
+    V[@M@]="${m}"
+    {
+        _fill "$(printf '%s\n' 'services:' '  @A@:' '    context: @CA@' '    build_type: @TA@' '    runner: @R@' \
+            '  @B@:' '    context: @CB@' 'build_toolchain:' '  @T@:' '    context: @CT@' '    build_type: @TT@' \
+            'dependency_graph:' '  @A@:' '    contexts: [@X1@, @X2@]')"
+        printf '\n'
+        _sot_block ci_variables
+    } > "${m}"
+    while IFS='|' read -r case call rc want; do
+        read -r -a av <<< "$(_fill "${call}")"
+        CI_MANIFEST="${m}" CI_WORKFLOW_DIR="${V[@WF@]}" run "${av[@]}"
+        _expect "${case}" "${rc}" "$(printf '%b' "$(_fill "${want}")")" || return 1
+    done <<'CASES'
+services|ci_services|0|=@A@\n@B@
+targets|ci_build_targets|0|=@A@\n@B@\n@T@
+field|ci_service_field @A@ build_type|0|=@TA@
+field-runner|ci_service_field @A@ runner|0|=@R@
+field-toolchain|ci_service_field @T@ build_type|0|=@TT@
+contexts|ci_service_contexts @A@|0|=@X1@\n@X2@
+required-missing|_ci_required_field @B@ runner|2|[CI-ERROR-CORE-0009]
+service-path|_ci_service_path @A@ @F@ @ROOT@|0|=@ROOT@/@CA@/@F@
+service-path-unknown|_ci_service_path @Z@ @F@ @ROOT@|2|[CI-ERROR-CORE-0009]
+repo-path|_ci_repo_path CI_WORKFLOW_DIR @ROOT@|0|=@ROOT@/@WF@
+repo-path-missing|_ci_repo_path @VAR@ @ROOT@|2|[CI-ERROR-VARIABLES-0001]
+env-present|_ci_env_required CI_MANIFEST|0|=@M@
+env-missing|_ci_env_required @VAR@|2|[CI-ERROR-CORE-0128] name="@VAR@"
+env-caller-id|_ci_env_required @VAR@ @ID@ @CTX@|2|=@ID@ @CTX@
+CASES
 }
 
-@test "services are the SOT services block; targets add the toolchain" {
-    # What: services = services keys; targets = + toolchain.
-    # Why: one list owner; the toolchain is never a service.
+@test "every command fails closed on missing input with its own id" {
+    # What: per row: bad or missing input -> rc 2 + its id.
+    # Why: input errors stop with our id before a backend.
     # From: Issue #1683 | PR #1858
-    local m
-    m="${BATS_TEST_TMPDIR}/inv.yml"
-    printf 'services:\n  svc-a:\n    context: a\n  svc-b:\n    context: b\nbuild_toolchain:\n  tc-x:\n    context: t\n' > "${m}"
-    CI_MANIFEST="${m}" run ci_services
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "$(printf 'svc-a\nsvc-b')" ]
-    CI_MANIFEST="${m}" run ci_build_targets
-    [ "${output}" = "$(printf 'svc-a\nsvc-b\ntc-x')" ]
+    local calls case envs args id dk got
+    calls="$(_val path)"
+    local -a ev av
+    local -A V=(
+        [@SVC@]="$(ci_services | awk 'NR == 1')" [@TOOL@]="$(_ci_block_keys build_toolchain | awk 'NR == 1')"
+        [@CHAN@]="$(_ci_block_entry_field release "" default_channel)"
+        [@REC@]="$(_stub 'printf "%s\n" "$*" >> "'"${calls}"'"')"
+        [@FULL@]="$(_promote_full_candidate "$(_val digest)")" [@CAND@]="$(_stub 'true')"
+        [@PROBE@]="$(STUB_STATE=PRESENT_ACCEPTED _probe_stub)" [@DIG@]="$(_asm_digest_stub)"
+        [@NOIDX@]="$(_stub 'exit 1')" [@BAD@]="$(_val name)" [@FOREIGN@]="$(_val platform)"
+        [@DIGEST@]="$(_val digest)" [@IMG@]="$(_val name)@$(_val digest)" [@USER@]="$(_val name)" [@TOKEN@]="$(_val name)"
+    )
+    V[@PLAT@]="$(_ci_platforms "${V[@SVC@]}" | awk 'NR == 1')"
+    [ -n "${V[@SVC@]}" ] && [ -n "${V[@TOOL@]}" ] && [ -n "${V[@CHAN@]}" ] && [ -n "${V[@PLAT@]}" ] \
+        || { echo "inputs: ${V[*]}"; return 1; }
+    export DS="${BATS_TEST_TMPDIR}/ds"
+    _docker_stub "${DS}/bin" || return 1
+    while IFS='|' read -r case envs args id dk; do
+        ev=() av=()
+        envs="$(_fill "${envs}")" args="$(_fill "${args}")"
+        [ "${envs}" = - ] || read -r -a ev <<< "${envs}"
+        read -r -a av <<< "${args}"
+        rm -f "${calls}" "${DS}/docker.log"
+        run env -u GHCR_USERNAME -u GHCR_TOKEN PATH="${DS}/bin:${PATH}" "${ev[@]}" bash "${CI_SH}" "${av[@]}"
+        _expect "${case}" 2 "[${id}]" || return 1
+        [ ! -e "${calls}" ] || { echo "${case}: backend ran: $(cat "${calls}")"; return 1; }
+        got=""
+        [ "${dk}" != - ] || dk=""
+        [ ! -e "${DS}/docker.log" ] || got="$(cat "${DS}/docker.log")"
+        [ "${got}" = "${dk}" ] || { echo "${case}: docker calls '${got}' want '${dk}'"; return 1; }
+    done <<'CASES'
+unknown-command|-|@BAD@|CI-ERROR-CORE-0002|-
+identity|-|identity|CI-ERROR-IDENTITY-0001|-
+impact|-|impact|CI-ERROR-IMPACT-0001|-
+resolve|-|resolve|CI-ERROR-RESOLVE-0001|-
+resolve-platform|-|resolve @SVC@ @FOREIGN@|CI-ERROR-RESOLVE-0004|-
+build-platform|-|build @SVC@ @FOREIGN@|CI-ERROR-BUILD-0006|-
+test|-|test|CI-ERROR-TEST-0001|-
+test-toolchain|-|test @TOOL@|CI-ERROR-TEST-0006|-
+assemble|-|assemble|CI-ERROR-ASSEMBLE-0001|-
+promote|-|promote|CI-ERROR-PROMOTE-0001|-
+promote-channel|-|promote @BAD@|CI-ERROR-PROMOTE-0002|-
+validate|CI_STACK_CANDIDATE_CMD=@NOIDX@|validate|CI-ERROR-VALIDATE-0001|compose version
+validate-empty|CI_STACK_CANDIDATE_CMD=@CAND@|validate|CI-ERROR-VALIDATE-0002|compose version
+variables-get|-|variables get|CI-ERROR-VARIABLES-0003|-
+variables-verb|-|variables @BAD@|CI-ERROR-VARIABLES-0002|-
+bake-image|GHCR_USERNAME=@USER@ GHCR_TOKEN=@TOKEN@|variables bake-check|CI-ERROR-VARIABLES-0008|-
+build-args|-|build-args|CI-ERROR-BUILDARGS-0001|-
+build-args-target|-|build-args @BAD@|CI-ERROR-BUILDARGS-0002|-
+build-args-format|-|build-args @SVC@ --@BAD@|CI-ERROR-BUILDARGS-0005|-
+build-tools-verb|-|build-tools @BAD@|CI-ERROR-BUILDTOOLS-0003|-
+version-verb|-|version @BAD@|CI-ERROR-VERSION-0014|-
+release-tag|CI_RELEASE_GH_CMD=@REC@|release-publish|CI-ERROR-RELEASE-0003|-
+scan-auth|CI_SCAN_CMD=@REC@|scan @SVC@ @DIGEST@|CI-ERROR-BUILD-0002|-
+publish-auth|CI_PUBLISH_CMD=@REC@|publish @SVC@|CI-ERROR-BUILD-0002|-
+assemble-auth|CI_RESOLVE_PROBE_CMD=@PROBE@ CI_ACCEPTED_DIGEST_CMD=@DIG@ CI_INDEX_LOOKUP_CMD=@NOIDX@ CI_ASSEMBLE_CMD=@REC@|assemble @SVC@|CI-ERROR-BUILD-0002|-
+promote-auth|CI_STACK_CANDIDATE_CMD=@FULL@ CI_STACK_VALIDATED=SUCCESS CI_PROMOTE_MOVE_CMD=@REC@|promote @CHAN@|CI-ERROR-BUILD-0002|-
+validate-auth|CI_STACK_CANDIDATE_CMD=@FULL@ CI_VALIDATE_CMD=@REC@|validate|CI-ERROR-BUILD-0002|compose version
+bake-auth|CI_BAKE_INSPECT_CMD=@REC@|variables bake-check @IMG@|CI-ERROR-BUILD-0002|-
+verify|-|verify|CI-ERROR-VERIFY-0001|-
+verify-digest|-|verify @SVC@|CI-ERROR-VERIFY-0002|-
+verify-platform|-|verify @SVC@ @DIGEST@|CI-ERROR-VERIFY-0004|-
+verify-auth|-|verify @SVC@ @DIGEST@ @PLAT@|CI-ERROR-BUILD-0002|-
+CASES
 }
 
-@test "every rust service in the SOT smoke-runs ldd on its binary" {
-    # What: every rust service smoke-runs ldd on a binary.
-    # Why: a missing .so must fail verify, not validate.
-    # From: Issue #1683 | PR #1858
-    local s missing="" rust=0
-    for s in $(CI_MANIFEST="${CI_MANIFEST_SOURCE}" ci_services); do
-        [ "$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" ci_service_field "${s}" build_type)" = rust ] || continue
-        rust=$((rust + 1))
-        grep -Eq '^ldd /usr/local/bin/[^ ]+$' \
-            <<<"$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_list services "${s}" smoke)" \
-            || missing="${missing} ${s}"
-    done
-    echo "rust=${rust} missing=${missing:-none}"
-    [ "${rust}" -gt 0 ]
-    [ -z "${missing}" ]
-}
-
-@test "unknown subcommand fails closed with a stable id" {
-    # What: An unknown command must never succeed.
-    # Why: Fail-closed dispatch (AG-VAL-002).
-    # From: Issue #1683
-    run bash "${CI_SH}" bogus-command
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CORE-0002"* ]]
-}
-
-@test "exit-evidence is clean on ci.sh and flags each rule" {
-    # What: real ci.sh clean; one fixture per rule fails.
+@test "exit-evidence flags each rule and passes a valid fixture" {
+    # What: one fixture per rule fails; a valid one passes.
     # Why: the guard owns the class; prove both directions.
     # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check exit-evidence "${CI_SH}"
-    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
-    [[ "${output}" == *"exit-evidence=clean files=1"* ]]
-    local fx="${BATS_TEST_TMPDIR}/fx.sh" name body
+    local fx name body
+    fx="$(_val path)"
     while IFS='|' read -r name body; do
         printf 'f() {\n    %s\n}\n' "${body}" > "${fx}"
         run bash "${CI_SH}" check exit-evidence "${fx}"
@@ -173,6 +368,7 @@ teardown() {
     done <<'CASES'
 raw-mktemp|t="$(mktemp -d)" || return 2
 for-in-substitution|for s in $(ci_services); do :; done
+process-substitution-loop|while read -r l; do :; done < <(ci_services)
 reader-in-test|[ "$(ci_service_field svc build_type)" = rust ] && :
 uncoded-external-return|v="$(jq -r .a f.json)" || return 2
 duplicate-code|ci_log "[CI-ERROR-X-0001]" "a"; ci_log "[CI-INFO-X-0001]" "b"
@@ -213,10 +409,10 @@ _tool_stub() {
     chmod +x "${bin}/${tool}"
 }
 
-# What: docker CLI stand-in; volumes are dirs under $DS.
-# Why: setup.sh runs its real container scripts on test dirs
+# What: docker CLI stand-in; state and faults under $DS.
+# Why: one stub; setup.sh and ci.sh run their real paths.
 # From: Issue #1683 | PR #1858
-_setup_docker_stub() {
+_docker_stub() {
     _tool_stub "$1" docker <<'STUB'
 : "${DS:?the docker stub needs DS, its state dir}"
 printf '%s\n' "$*" >> "${DS}/docker.log"
@@ -224,12 +420,16 @@ printf '%s\n' "$*" >> "${DS}/docker.log"
 here="$(dirname "$(readlink -f "$0")")" || exit 1
 case "$1" in
     --version) echo 'docker CLI (test stub)' ;;
+    info) echo 'Server Version: test stub' ;;
     compose)
         all=("$@")
         shift
         while :; do case "${1:-}" in --env-file|-f|-p|--profile) shift 2 ;; *) break ;; esac; done
         case "$1" in
-            config) exec "$(cat "${here}/docker-real")" "${all[@]}" ;;
+            config) [ ! -e "${DS}/fail-config" ] || { echo "compose config: ${FAULT:?a failure injection needs FAULT}" >&2; exit 1; }
+                [ ! -e "${DS}/fail-config-after-up" ] || [ ! -e "${DS}/running" ] \
+                    || { echo "compose config: ${FAULT:?a failure injection needs FAULT}" >&2; exit 1; }
+                exec "$(cat "${here}/docker-real")" "${all[@]}" ;;
             ps) case "${2:-}" in
                     --all) ;;
                     -a) [ ! -e "${DS}/running" ] || [ -e "${DS}/gone-${!#}" ] || echo "${DS##*/}-${!#}" ;;
@@ -256,25 +456,28 @@ case "$1" in
             create) mkdir -p "${DS}/volumes/$3" ;;
             *) echo "unexpected docker volume call: $*" >&2; exit 97 ;;
         esac ;;
+    login) cat > /dev/null ;;
     run)
         shift
-        maps=("/tmp=$(mktemp -d "${DS}/run.XXXXXX")")
+        maps=("/tmp=$(mktemp -d "${DS}/run.XXXXXX")") ep=()
         while [ "$#" -gt 0 ]; do
             case "$1" in
-                --rm) shift ;;
+                --rm|-i) shift ;;
+                --entrypoint) ep=("$2"); shift 2 ;;
                 -v) src="${2%%:*}" dst="${2#*:}"; dst="${dst%%:*}"
                     case "${src}" in /*) ;; *) src="${DS}/volumes/${src}"; mkdir -p "${src}" ;; esac
                     maps+=("${dst}=${src}"); shift 2 ;;
                 *) break ;;
             esac
         done
+        printf '%s\n' "$1" >> "${DS}/run-images"
         shift
         args=()
         for a in "$@"; do
             for m in "${maps[@]}"; do a="${a//"${m%%=*}"/"${m#*=}"}"; done
             args+=("${a}")
         done
-        exec "${args[@]}" ;;
+        exec "${ep[@]}" "${args[@]}" ;;
     ps) [ ! -e "${DS}/foreign" ] || cut -d' ' -f1 "${DS}/foreign" ;;
     inspect) svc="${!#}"; svc="${svc#"${DS##*/}"-}"
         case "$3" in
@@ -384,55 +587,81 @@ _backup_volume() {
 _prod_install() {
     local root dir="$1"
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    mkdir -p "${dir}" "${dir}/../../config" || return 1
+    mkdir -p "${dir}" "${dir}/../../config" "${dir}/../../.github/yaml" "${dir}/../../.github/scripts" || return 1
     cp "${root}/deploy/prod/docker-compose.yml" "${root}/deploy/prod/.env" "${dir}/" || return 1
     cp -r "${root}/config/prod" "${dir}/../../config/" || return 1
+    cp "${root}/.github/yaml/build-manifest.yml" "${dir}/../../.github/yaml/" || return 1
+    cp "${root}/.github/scripts/ci.sh" "${dir}/../../.github/scripts/" || return 1
     set_env_key LANCACHE_STATE_DIR "${dir}/state" "${dir}/.env"
     set_env_key LANCACHE_IMAGE_TAG "v$(cat "${root}/VERSION")" "${dir}/.env"
 }
 
-# What: a tool stub that fails one matching argument.
-# Why: proves a tool error is never a clean result.
+# What: tracked tree copy for a setup.sh run of its own
+# Why: setup.sh writes into its checkout; root stays clean
+# From: Issue #1683 | PR #1858
+_checkout_copy() {
+    local root="$1" dir="$2" list="${BATS_TEST_TMPDIR}/tracked-files" tree="${BATS_TEST_TMPDIR}/tree.tar"
+    git -C "${root}" -c core.quotePath=false ls-files > "${list}" || return 1
+    tar -C "${root}" -T "${list}" -cf "${tree}" || return 1
+    mkdir -p "${dir}" && tar -C "${dir}" -xf "${tree}"
+}
+
+# What: fails calls whose arg matches; FAIL_TIMES caps it.
+# Why: proves tool errors and retries without an outage.
 # From: Issue #1683 | PR #1858
 _fail_stub() {
     local bin="$1" tool="$2"
     _tool_stub "${bin}" "${tool}" <<'STUB'
 tool="$(basename "$0")"
 for arg in "$@"; do
-    if [ -n "${FAIL_MATCH:-}" ] && [[ "${arg}" == *"${FAIL_MATCH}" ]]; then
-        echo "${tool}: read error" >&2
-        exit 2
+    [ -n "${FAIL_MATCH:-}" ] && [[ "${arg}" == *"${FAIL_MATCH}" ]] || continue
+    n=0
+    if [ -n "${FAIL_COUNT:-}" ]; then
+        n="$(( $(<"${FAIL_COUNT}") + 1 ))"
+        printf '%s' "${n}" > "${FAIL_COUNT}"
     fi
+    [ -z "${FAIL_TIMES:-}" ] || [ "${n}" -le "${FAIL_TIMES}" ] || break
+    echo "${FAIL_TEXT:-${tool}: read error}" >&2
+    exit "${FAIL_RC:-2}"
 done
 PATH="${PATH#*:}"
 exec "${tool}" "$@"
 STUB
 }
 
-# What: sccache probe stub: 0 up, 1 down, redis-only.
-# Why: the probe must never start a real sccache server.
+# What: sccache stub failing per level; logs the env seen.
+# Why: no real server; the cache chain env is observable.
 # From: Issue #1683 | PR #1858
 _stub_sccache() {
-    local bin="$1" mode="$2"
-    case "${mode}" in
-        0) _tool_stub "${bin}" sccache <<<'exit 0' ;;
-        1) _tool_stub "${bin}" sccache <<<'echo raw-server-down >&2; exit 2' ;;
-        redis-only)
-            _tool_stub "${bin}" sccache <<<'[ -z "${SCCACHE_REDIS:-}" ] || { echo raw-redis-down >&2; exit 2; }'
-            ;;
-    esac
+    local bin="$1" fail="$2" raw="${3:-}" log="${4:-/dev/null}"
+    _tool_stub "${bin}" sccache <<STUB
+printf 'r=%s g=%s c=%s w=%s\n' "\${SCCACHE_REDIS:-}" "\${SCCACHE_GHA_ENABLED:-}" \
+    "\${SCCACHE_MULTILEVEL_CHAIN:-}" "\${SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY:-}" >> '${log}'
+case '${fail}' in
+    always) echo '${raw}' >&2; exit 2 ;;
+    redis) [ -z "\${SCCACHE_REDIS:-}" ] || { echo '${raw}' >&2; exit 2; } ;;
+    gha) [ -z "\${SCCACHE_GHA_ENABLED:-}" ] || { echo '${raw}' >&2; exit 2; } ;;
+esac
+exit 0
+STUB
 }
 
-@test "a grep read error fails every check that reads the file" {
-    # What: grep rc 2 on a file a check reads fails it.
+@test "a grep or compose read error fails every check that reads the file" {
+    # What: grep or compose rc 2 on a read file fails it.
     # Why: a read error must never look like a clean file.
     # From: Issue #1683 | PR #1858
     local bin="${BATS_TEST_TMPDIR}/gbin"
-    local name check arg fail
+    local name check arg fail compose
     _fail_stub "${bin}" grep
+    _fail_stub "${bin}" docker
     printf 'echo hi\n' > "${BATS_TEST_TMPDIR}/probe.sh"
     printf 'on: push\n' > "${BATS_TEST_TMPDIR}/probe.yml"
+    compose="$(_ci_variable CI_COMPOSE_FILE)"
     while IFS='|' read -r name check arg fail; do
+        # What: @compose is the SOT deploy compose file name
+        # Why: CI_COMPOSE_FILE in the SOT owns that path
+        # From: Issue #1683 | PR #1858
+        [ "${fail}" != @compose ] || fail="/${compose##*/}"
         local -a files=()
         if [ -n "${arg}" ]; then
             files=("${BATS_TEST_TMPDIR}/${arg}")
@@ -455,8 +684,8 @@ chrono|review-chronology|probe.sh|/probe.sh
 pipefail|pipefail-early-exit|probe.sh|/probe.sh
 prebuilt|prebuilt-prod||/README.md
 nats|nats-atomic-write||/services/dns/entrypoint.sh
-socket|docker-socket-proxy||/scripts/untracked/docker-socket-proxy.sh
-naming|naming-consistency||/scripts/untracked/docker-socket-proxy.sh
+socket|docker-socket-proxy||@compose
+naming|naming-consistency||@compose
 naming-dc|naming-consistency||/docker_client.rs
 naming-wd|naming-consistency||/watchdog/src/config.rs
 naming-ui|naming-consistency||/ui/src/config.rs
@@ -476,40 +705,45 @@ CASES
     local bin="${BATS_TEST_TMPDIR}/gcbin"
     _fail_stub "${bin}" grep
     PATH="${bin}:${PATH}" FAIL_MATCH="-xF" \
-    CI_GC_ROOTS_CMD="$(_stub roots 'printf "sha256:aaa\n"')" \
-    CI_GC_CANDIDATES_CMD="$(_stub cands 'printf "sha256:aaa\t7\t2020-01-01T00:00:00Z\n"')" \
+    CI_GC_ROOTS_CMD="$(_stub 'printf "sha256:aaa\n"')" \
+    CI_GC_CANDIDATES_CMD="$(_stub 'printf "sha256:aaa\t7\t2020-01-01T00:00:00Z\n"')" \
         run bash "${CI_SH}" gc
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CORE-0106"*"read error"* ]]
     [[ "${output}" != *"action=DELETE"* ]]
 }
 
-@test "_ci_repo lowercases a mixed-case GITHUB_REPOSITORY" {
-    # What: a mixed-case owner/repo comes out lowercased.
-    # Why: GHCR image refs must be lowercase.
-    # From: Issue #1683 | PR #1858
-    GITHUB_REPOSITORY='Owner/Fixture-Repo' run _ci_repo
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "owner/fixture-repo" ]
-}
-
+# What: per row: registry/repo ref owners on a fixture SOT.
+# Why: scan, sbom, assemble, verify must share one ref.
+# From: Issue #1683 | PR #1858
 @test "image-ref builds the one registry service@digest form" {
-    # What: Builds <registry>/<repo>/<service>@<digest> ref.
-    # Why: scan, sbom, assemble, verify must share the ref.
-    # From: Issue #1683
-    GITHUB_REPOSITORY=owner/fixture-repo run _ci_image_ref build-tools sha256:beef
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "registry.example.test/owner/fixture-repo/build-tools@sha256:beef" ]
-}
-
-@test "image-ref fails closed and prints no ref without a repo owner" {
-    # What: A missing repo owner yields nonzero and no ref.
-    # Why: AG-VAL-002: missing required env fails.
-    # From: Issue #1683
-    unset GITHUB_REPOSITORY
-    run _ci_image_ref build-tools sha256:beef
-    [ "${status}" -ne 0 ]
-    [[ "${output}" != *"//"* ]]
+    local m nr case envs call rc want
+    local -a ev av
+    m="$(_val path)" nr="$(_val path)"
+    local -A V=(
+        [@REG@]="$(_val host).$(_val name)" [@OWN@]="$(_val name)" [@REPO@]="$(_val name)" [@S@]="$(_val name)"
+        [@T@]="$(_val name)" [@DIG@]="$(_val digest)" [@OS@]="$(_val name)" [@PA@]="$(_val name)" [@ID@]="$(_val sha)"
+    )
+    V[@MIX@]="$(tr a-z A-Z <<< "${V[@OWN@]:0:2}")${V[@OWN@]:2}/$(tr a-z A-Z <<< "${V[@REPO@]}")"
+    V[@P@]="${V[@OS@]}/${V[@PA@]}" V[@M@]="${m}" V[@NR@]="${nr}"
+    _fill "$(printf '%s\n' 'release:' '  registry: @REG@' 'build_toolchain:' '  @T@:' '    build_type: toolchain' \
+        'services:' '  @S@:' '    context: @S@' '    build_type: apk')" > "${m}"
+    grep -v '^  registry:' "${m}" > "${nr}"
+    while IFS='|' read -r case envs call rc want; do
+        read -r -a ev <<< "$(_fill "${envs}")"
+        read -r -a av <<< "$(_fill "${call}")"
+        run env -u GITHUB_REPOSITORY CI_MANIFEST="${m}" "${ev[@]}" bash -c 'source "$1"; shift; "$@"' _ "${CI_SH}" "${av[@]}"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+        [ "${rc}" -eq 0 ] || [[ "${output}" != *"/${V[@S@]}"* ]] || { echo "${case}: ref printed: ${output}"; return 1; }
+    done <<'CASES'
+repo-lower|GITHUB_REPOSITORY=@MIX@|_ci_repo|0|=@OWN@/@REPO@
+registry|GITHUB_REPOSITORY=@MIX@|_ci_registry|0|=@REG@
+image-ref|GITHUB_REPOSITORY=@MIX@|_ci_image_ref @S@ @DIG@|0|=@REG@/@OWN@/@REPO@/@S@@@DIG@
+image-tag|GITHUB_REPOSITORY=@MIX@|_ci_image_tag @S@ @P@ @ID@|0|=@REG@/@OWN@/@REPO@/@S@:sha-@ID@-@PA@
+toolchain-ref|GITHUB_REPOSITORY=@MIX@|_ci_build_tools_image|0|=@REG@/@OWN@/@REPO@/@T@
+no-owner|CI_MANIFEST=@M@|_ci_image_ref @S@ @DIG@|2|[CI-ERROR-CORE-0128] name="GITHUB_REPOSITORY"
+no-registry|CI_MANIFEST=@NR@ GITHUB_REPOSITORY=@MIX@|_ci_image_ref @S@ @DIG@|2|[CI-ERROR-CORE-0005] key="release.registry"
+CASES
 }
 
 # =========================================================
@@ -520,143 +754,134 @@ CASES
     # What: own context and named contexts pick candidates.
     # Why: no unrelated target and no prefix-only match.
     # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/m.yml" path want row
-    printf '%s\n' 'services:' '  svc-a:' '    context: dir/a' \
-        '  svc-b:' '    context: dir/b' \
-        'build_toolchain:' '  tool-t:' '    context: dir/t' \
-        'named_contexts:' '  ctx-1:' '    path: shared/one.sh' \
-        '  ctx-2:' '    path: shared/two.txt' \
-        'dependency_graph:' '  svc-a:' '    contexts: [ctx-1, ctx-2]' \
-        '  svc-b:' '    contexts: [ctx-1]' > "${m}"
-    while IFS='|' read -r path want; do
-        CI_MANIFEST="${m}" run bash "${CI_SH}" plan "${path}"
-        [ "${status}" -eq 0 ]
+    local m e case sot path rc want row
+    m="$(_val path)" e="$(_val path)"
+    local -A V=(
+        [@A@]="$(_val name)" [@B@]="$(_val name)" [@T@]="$(_val name)" [@D@]="$(_val name)" [@CA@]="$(_val name)"
+        [@CB@]="$(_val name)" [@CT@]="$(_val name)" [@X1@]="$(_val name)" [@X2@]="$(_val name)" [@S@]="$(_val name)"
+        [@N1@]="$(_val name)" [@N2@]="$(_val name)" [@F@]="$(_val name)"
+    )
+    _fill "$(printf '%s\n' 'services:' '  @A@:' '    context: @D@/@CA@' '  @B@:' '    context: @D@/@CB@' \
+        'build_toolchain:' '  @T@:' '    context: @D@/@CT@' \
+        'named_contexts:' '  @X1@:' '    path: @S@/@N1@' '  @X2@:' '    path: @S@/@N2@' \
+        'dependency_graph:' '  @A@:' '    contexts: [@X1@, @X2@]' '  @B@:' '    contexts: [@X1@]')" > "${m}"
+    _fill "$(printf '%s\n' 'services:' '  @A@:' '    build_type: @F@')" > "${e}"
+    while IFS='|' read -r case sot path rc want; do
+        [ "${sot}" = m ] && sot="${m}" || sot="${e}"
+        CI_MANIFEST="${sot}" run bash "${CI_SH}" plan "$(_fill "${path}")"
+        if [ "${rc}" -ne 0 ]; then
+            _expect "${case}" "${rc}" "${want}" || return 1
+            [[ "${output}" != *"=false"* && "${output}" != *"=true"* ]] || { echo "${case}: guessed: ${output}"; return 1; }
+            continue
+        fi
         row="$(grep -v 'CI-INFO' <<< "${output}" | paste -sd' ' -)"
-        [ "${row}" = "${want}" ] || { echo "${path}: ${row}"; return 1; }
-        [[ "${output}" == *"candidates only; identity/CAS decides build"* ]]
-    done <<'EOF'
-dir/a/f|svc-a=true svc-b=false tool-t=false
-shared/two.txt|svc-a=true svc-b=false tool-t=false
-shared/one.sh|svc-a=true svc-b=true tool-t=false
-dir/t/Dockerfile|svc-a=false svc-b=false tool-t=true
-dir/ab/f|svc-a=false svc-b=false tool-t=false
-EOF
+        [ "${status}" -eq 0 ] && [ "${row}" = "$(_fill "${want}")" ] || { echo "${case}: rc ${status}: ${row}"; return 1; }
+        [[ "${output}" == *"candidates only; identity/CAS decides build"* ]] || { echo "${case}: ${output}"; return 1; }
+    done <<'CASES'
+own-context|m|@D@/@CA@/@F@|0|@A@=true @B@=false @T@=false
+named-one-user|m|@S@/@N2@|0|@A@=true @B@=false @T@=false
+named-two-users|m|@S@/@N1@|0|@A@=true @B@=true @T@=false
+toolchain|m|@D@/@CT@/@F@|0|@A@=false @B@=false @T@=true
+no-prefix-match|m|@D@/@CA@@F@/@F@|0|@A@=false @B@=false @T@=false
+no-context|e|@D@/@CA@/@F@|2|[CI-ERROR-CORE-0009]
+CASES
 }
 
-@test "plan fails closed on a target without a SOT context" {
-    # What: a missing context is CORE-0009, not a default.
-    # Why: a guessed path would hide a broken SOT entry.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/m.yml"
-    printf '%s\n' 'services:' '  svc-a:' '    build_type: apk' > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" plan dir/a/f
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-CORE-0009]"* ]]
-    [[ "${output}" != *"svc-a=false"* ]]
-}
-@test "codeql-impact admits exactly the languages a path touches" {
-    # What: SOT language paths pick the matrix, else empty.
-    # Why: no runner for unrelated or SOT-only changes.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/m.yml" path want
-    printf '%s\n' 'codeql_languages:' '  lang-a:' '    paths: [src-a]' \
-        '  lang-b:' '    paths: [wf]' 'base_images:' \
-        "  codeql_runtime: registry.example.test/rt@sha256:$(printf '0%.0s' {1..64})" > "${m}"
-    while IFS='|' read -r path want; do
-        CI_MANIFEST="${m}" run bash "${CI_SH}" codeql-impact "${path}"
-        [ "${status}" -eq 0 ]
-        [[ "${output}" == *"codeql-matrix={\"include\":${want}}"* ]] \
-            || { echo "${path}: ${output}"; return 1; }
-    done <<EOF
-src-a/main.rs|[{"language":"lang-a"}]
-wf/ci.yml|[{"language":"lang-b"}]
-src-ab/x|[]
-${CI_MANIFEST_REL}|[]
-EOF
-}
 @test "codeql-coverage fails on tracked source outside SOT paths" {
     # What: files globs must all lie under the lang paths.
     # Why: a new source dir must not escape CodeQL silently.
     # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/repo" m="${BATS_TEST_TMPDIR}/m.yml"
-    mkdir -p "${r}/src-a" "${r}/src-b"
-    : > "${r}/src-a/x.ext"
+    local r m
+    local -A V=(
+        [@LA@]="$(_val name)" [@LB@]="$(_val name)" [@PA@]="$(_val name)" [@PB@]="$(_val name)"
+        [@EXT@]="$(_val name)" [@X@]="$(_val name)" [@Y@]="$(_val name)"
+    )
+    r="$(_val path)" m="$(_val path)"
+    mkdir -p "${r}/${V[@PA@]}" "${r}/${V[@PB@]}"
+    : > "${r}/${V[@PA@]}/${V[@X@]}.${V[@EXT@]}"
     git -C "${r}" init -q && git -C "${r}" add -A
-    printf '%s\n' 'codeql_languages:' '  lang-a:' '    files: ["*.ext"]' \
-        '    paths: [src-a]' '  lang-b:' '    paths: [src-b]' > "${m}"
+    _fill "$(printf '%s\n' 'codeql_languages:' '  @LA@:' '    files: ["*.@EXT@"]' \
+        '    paths: [@PA@]' '  @LB@:' '    paths: [@PB@]')" > "${m}"
     CI_MANIFEST="${m}" run _ci_check_codeql_coverage "${r}"
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "codeql-coverage=clean" ]
-    : > "${r}/src-b/y.ext"
+    _expect clean 0 "=codeql-coverage=clean" || return 1
+    : > "${r}/${V[@PB@]}/${V[@Y@]}.${V[@EXT@]}"
     git -C "${r}" add -A
     CI_MANIFEST="${m}" run _ci_check_codeql_coverage "${r}"
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"[CI-ERROR-CHECK-0072]"* ]]
-    [[ "${output}" == *"lang-a: src-b/y.ext"* ]]
-    CI_MANIFEST="${m}" run _ci_check_codeql_coverage "${BATS_TEST_TMPDIR}/none"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-CHECK-0071]"* ]]
+    _expect outside 1 "$(_fill '[CI-ERROR-CHECK-0072];@LA@: @PB@/@Y@.@EXT@')" || return 1
+    CI_MANIFEST="${m}" run _ci_check_codeql_coverage "$(_val path)"
+    _expect no-repo 2 "[CI-ERROR-CHECK-0071]" || return 1
 }
+
 @test "codeql-config renders name, queries, paths and ignore from SOT" {
     # What: config is derived from the SOT and the repo.
     # Why: one SOT owner; no project name in the engine.
     # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/m.yml"
-    printf '%s\n' 'codeql:' '  queries: [q1]' '  paths_ignore: ["x/**"]' \
-        'codeql_languages:' '  lang-a:' '    paths: [src-a]' > "${m}"
-    CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo \
+    local m nojq
+    m="$(_val path)" nojq="$(_val path)"
+    local -A V=(
+        [@Q@]="$(_val name)" [@IGN@]="$(_val name)" [@LANG@]="$(_val name)" [@SRC@]="$(_val name)"
+        [@OWNER@]="$(_val name)" [@REPO@]="$(_val name)" [@QA@]="$(_val name)" [@QB@]="$(_val name)"
+    )
+    _fill "$(printf '%s\n' 'codeql:' '  queries: [@Q@]' '  paths_ignore: ["@IGN@/**"]' \
+        'codeql_languages:' '  @LANG@:' '    paths: [@SRC@]')" > "${m}"
+    CI_MANIFEST="${m}" GITHUB_REPOSITORY="${V[@OWNER@]}/${V[@REPO@]}" \
         run --separate-stderr bash "${CI_SH}" codeql-config
-    [ "${status}" -eq 0 ]
+    [ "${status}" -eq 0 ] || { echo "${output} ${stderr}"; return 1; }
     [[ "${stderr}" == *"[CI-INFO-CORE-0113] proxy=off"* ]]
-    [ "${output}" = "$(printf '%s\n' 'name: fixture-repo-codeql' 'queries:' \
-        '  - uses: "q1"' 'paths:' '  - "src-a"' 'paths-ignore:' '  - "x/**"')" ]
+    [ "${output}" = "$(_fill "$(printf '%s\n' 'name: @REPO@-codeql' 'queries:' \
+        '  - uses: "@Q@"' 'paths:' '  - "@SRC@"' 'paths-ignore:' '  - "@IGN@/**"')")" ] \
+        || { echo "config: ${output}"; return 1; }
     CI_MANIFEST="${m}" GITHUB_REPOSITORY='' run bash "${CI_SH}" codeql-config
-    [ "${status}" -ne 0 ]
+    _expect no-repo 2 "[CI-ERROR-CORE-0128]" || return 1
     # What: same output with no jq on PATH; quotes escaped.
     # Why: the CodeQL runtime image has no jq (real job).
     # From: Issue #1683 | PR #1858
-    local nojq="${BATS_TEST_TMPDIR}/nojq"; mkdir -p "${nojq}"
     _tool_stub "${nojq}" jq <<'STUB'
 echo "jq: command not found" >&2; exit 127
 STUB
-    printf '%s\n' 'codeql:' '  queries: [q1]' '  paths_ignore: ["x/**", "a\"b"]' \
-        'codeql_languages:' '  lang-a:' '    paths: [src-a]' > "${m}"
-    PATH="${nojq}:${PATH}" CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo \
+    _fill "$(printf '%s\n' 'codeql:' '  queries: [@Q@]' '  paths_ignore: ["@IGN@/**", "@QA@\"@QB@"]' \
+        'codeql_languages:' '  @LANG@:' '    paths: [@SRC@]')" > "${m}"
+    PATH="${nojq}:${PATH}" CI_MANIFEST="${m}" GITHUB_REPOSITORY="${V[@OWNER@]}/${V[@REPO@]}" \
         run --separate-stderr bash "${CI_SH}" codeql-config
     [ "${status}" -eq 0 ] || { echo "${output} ${stderr}"; return 1; }
-    [[ "${output}" == *'  - "x/**"'* ]]
-    [[ "${output}" == *'  - "a\"b"'* ]]
+    [[ "${output}" == *"  - \"${V[@IGN@]}/**\""* ]] || { echo "nojq: ${output}"; return 1; }
+    [[ "${output}" == *"  - \"${V[@QA@]}\\\"${V[@QB@]}\""* ]] || { echo "nojq escape: ${output}"; return 1; }
 }
+
 @test "an unreadable SOT fails every reader caller with raw" {
     # What: each caller row: rc 2 plus the raw reader error.
     # Why: a reader error must never read as an empty value.
     # From: Issue #1683 | PR #1858
     local call row
+    local -A V=(
+        [@SVC@]="$(_val name)" [@P@]="$(_val platform)" [@PATH@]="$(_val name)/$(_val name)"
+        [@VAR@]="$(_val var)" [@DIR@]="${BATS_TEST_TMPDIR}" [@NOSOT@]="$(_val path)" [@ID@]="$(_val name)"
+    )
     while IFS= read -r row; do
         [ -n "${row}" ] || continue
-        read -r -a call <<< "${row}"
-        CI_MANIFEST="${BATS_TEST_TMPDIR}/missing.yml" GITHUB_REPOSITORY=o/r CI_COMPOSE_FILE=deploy/prod/docker-compose.yml \
-            run "${call[@]}"
+        read -r -a call <<< "$(_fill "${row}")"
+        CI_MANIFEST="${V[@NOSOT@]}" GITHUB_REPOSITORY="$(_val name)/$(_val name)" \
+            CI_COMPOSE_FILE="$(_val name)" run "${call[@]}"
         [ "${status}" -eq 2 ] && [[ "${output}" == *"No such file"* ]] \
-            && [[ "${output}" =~ \[CI-ERROR-CORE-010[789]\]\ block=.*manifest=\".*missing\.yml\" ]] \
+            && [[ "${output}" =~ \[CI-ERROR-CORE-010[789]\]\ block= ]] && [[ "${output}" == *"manifest=\"${V[@NOSOT@]}\""* ]] \
             || { echo "${row}: rc ${status}: ${output}"; return 1; }
     done <<'CASES'
-ci_service_field svc build_type
-_ci_required_field svc context
-_ci_platforms svc
-_ci_platform_field linux/amd64 apk
+ci_service_field @SVC@ build_type
+_ci_required_field @SVC@ context
+_ci_platforms @SVC@
+_ci_platform_field @P@ apk @ID@
 ci_build_targets
 _ci_alpine_build_arg --build-arg
-_ci_service_packages svc
-_ci_apk_repositories svc
-_ci_apk_keys svc
+_ci_service_packages @SVC@
+_ci_apk_repositories @SVC@
+_ci_apk_keys @SVC@
 _ci_build_tools_smoke smoke_tools
-_ci_variable_value CI_UNSET_PROBE_NAME
-_ci_plan_candidate svc a/file
-_ci_identity_for svc linux/amd64
+_ci_variable_value @VAR@
+_ci_plan_candidate @SVC@ @PATH@
+_ci_identity_for @SVC@ @P@
 ci_cmd_codeql_config
-_ci_check_stable_external_images /var/tmp
-_ci_check_dockerfile_build_tools /var/tmp
+_ci_check_stable_external_images @DIR@
+_ci_check_dockerfile_build_tools @DIR@
 CASES
 }
 
@@ -664,42 +889,77 @@ CASES
     # What: real failing input per helper: rc 2, code, raw.
     # Why: a CI log must show where, with what and why.
     # From: Issue #1683 | PR #1858
-    local f="${BATS_TEST_TMPDIR}/afile"
+    local f site
+    f="$(_val path)"
+    site="$(_val name)"
     : > "${f}"
-    run _ci_mktemp -d "${f}/sub.XXXXXX"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-CORE-0110] args=\"-d ${f}/sub.XXXXXX\""* ]]
-    [[ "${output}" == *"Not a directory"* ]]
-    [[ "${f}" == /var/tmp/* ]] || { echo "BATS_TEST_TMPDIR not under /var/tmp: ${f}"; return 1; }
-    CI_TMPDIR="${f}/x" run _ci_tmp_init
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-CORE-0111] dir=\"${f}/x\""* ]]
-    [[ "${output}" == *"Not a directory"* ]]
-    run bash -c 'source "$1"; RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=http://p:3128 PROJECT_SELFHOSTED_PROXY_CA=X CI_SYSTEM_CA_BUNDLE=/nonexistent/ca.pem CI_TMPDIR="$2" _ci_proxy_init' _ "${CI_SH}" "${BATS_TEST_TMPDIR}"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *'[CI-ERROR-CORE-0112] system_bundle="/nonexistent/ca.pem"'* ]]
-    [[ "${output}" == *"No such file"* ]]
-    run bash -c 'source "$1"; RUNNER_ENVIRONMENT=github-hosted _ci_proxy_init' _ "${CI_SH}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *'[CI-INFO-CORE-0113] proxy=off runner="github-hosted" http_set=no'* ]]
-    run _ci_ls_files probe-site "${BATS_TEST_TMPDIR}/nogit-root" '*.sh'
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *'[CI-ERROR-CHECK-0071] site="probe-site"'* ]]
-    [[ "${output}" == *"cannot change to"* || "${output}" == *"No such file"* ]]
+    run _ci_mktemp -d "${f}/$(_val name).XXXXXX"
+    _expect mktemp 2 "[CI-ERROR-CORE-0110] args=\"-d ${f}/;Not a directory" || return 1
+    run _ci_ls_files "${site}" "${BATS_TEST_TMPDIR}/$(_val name)" "*.$(_val name)"
+    _expect ls-files 2 "[CI-ERROR-CHECK-0071] site=\"${site}\"" || return 1
+    [[ "${output}" == *"cannot change to"* || "${output}" == *"No such file"* ]] || { echo "ls-files raw: ${output}"; return 1; }
 }
 
 @test "identity fails, never hashes, when a part fails" {
     # What: a failing content-id part ends with rc 2, no id.
     # Why: a part lost in the hash pipe minted a wrong id.
     # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/id.yml"
-    printf 'services:\n  svc:\n    context: c\n    build_type: apk\n' > "${m}"
-    _ci_identity_pins() { echo pins; }
-    _ci_tracked_content_ids() { echo "git: fatal: bad object" >&2; return 2; }
-    CI_MANIFEST="${m}" run _ci_identity_for svc linux/amd64
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"git: fatal: bad object"* ]]
-    [[ ! "${output}" =~ [0-9a-f]{64} ]]
+    local m case pre call rc want
+    local -A V=(
+        [@S@]="$(_val name)" [@NI@]="$(_val name)" [@NC@]="$(_val name)" [@C@]="$(_val name)"
+        [@BT@]="$(_val name)" [@BT2@]="$(_val name)" [@P@]="$(_val platform)" [@RAW@]="$(_val name)"
+    )
+    m="$(_val path)"
+    _fill "$(printf '%s\n' 'build_matrix:' '  platforms: [@P@]' 'build_identity:' '  @BT@:' '    inputs: [source_sha]' \
+        'services:' '  @S@:' '    context: @C@' '    build_type: @BT@' '  @NI@:' '    context: @C@' '    build_type: @BT2@' \
+        '  @NC@:' '    build_type: @BT@')" > "${m}"
+    while IFS='|' read -r case pre call rc want; do
+        [ "${pre}" != - ] || pre=:
+        run env CI_MANIFEST="${m}" bash -c 'source "$1" && eval "$2" && eval "$3"' _ "${CI_SH}" \
+            "$(_fill "${pre}")" "$(_fill "${call}")"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+        [[ ! "${output}" =~ [0-9a-f]{64} && "${output}" != *"identity="* ]] || { echo "${case}: id leaked: ${output}"; return 1; }
+    done <<'CASES'
+content-part-fails|_ci_tracked_content_ids() { echo @RAW@ >&2; return 2; }|_ci_identity_for @S@ @P@|2|@RAW@
+pins-fail|_ci_identity_pins() { echo @RAW@ >&2; return 2; }|ci_cmd_identity @S@ @P@|2|@RAW@
+no-identity-inputs|-|ci_cmd_identity @NI@ @P@|2|[CI-ERROR-IDENTITY-0004] build_type="@BT2@"
+no-context|-|ci_cmd_identity @NC@ @P@|2|[CI-ERROR-CORE-0009]
+CASES
+}
+
+# What: a set build variable moves only its type's id.
+# Why: contract: build arguments are identity inputs.
+# From: Issue #1683 | PR #1858
+@test "identity includes the build type's set build variables" {
+    local m off on1 on2 o_off o_on
+    local -A V=(
+        [@S@]="$(_val name)" [@O@]="$(_val name)" [@C@]="$(_val name)" [@BT@]="$(_val name)"
+        [@BT2@]="$(_val name)" [@P@]="$(_val platform)" [@VAR@]="$(_val var)" [@BT3@]="$(_val name)"
+        [@N@]="$(_val name)"
+    )
+    m="$(_val path)"
+    _fill "$(printf '%s\n' 'build_matrix:' '  platforms: [@P@]' 'build_identity:' '  @BT@:' \
+        '    inputs: [build_variables, source_sha]' '  @BT2@:' '    inputs: [source_sha]' '  @BT3@:' '    inputs: [source_sha]' \
+        'build_variables:' '  @BT@: [@VAR@]' '  @BT3@: [@VAR@]' 'services:' \
+        '  @S@:' '    context: @C@' '    build_type: @BT@' '  @O@:' '    context: @C@' '    build_type: @BT2@' \
+        '  @N@:' '    context: @C@' '    build_type: @BT3@')" > "${m}"
+    _id() { ( [ -z "$2" ] || export "${V[@VAR@]}=$2"; CI_MANIFEST="${m}" _ci_identity_for "$1" "${V[@P@]}" ); }
+    off="$(_id "${V[@S@]}" "")" on1="$(_id "${V[@S@]}" "$(_val name)")" on2="$(_id "${V[@S@]}" "$(_val name)")"
+    [[ "${off}" =~ ^[0-9a-f]{64}$ && "${on1}" =~ ^[0-9a-f]{64}$ && "${on2}" =~ ^[0-9a-f]{64}$ ]] \
+        || { echo "ids: '${off}' '${on1}' '${on2}'"; return 1; }
+    [ "${off}" != "${on1}" ] && [ "${on1}" != "${on2}" ] || { echo "variable did not move the id"; return 1; }
+    o_off="$(_id "${V[@O@]}" "")" o_on="$(_id "${V[@O@]}" "$(_val name)")"
+    [ -n "${o_off}" ] && [ "${o_off}" = "${o_on}" ] || { echo "other type moved: '${o_off}' '${o_on}'"; return 1; }
+    CI_VARIABLES='[' CI_MANIFEST="${m}" run _ci_identity_for "${V[@S@]}" "${V[@P@]}"
+    _expect bad-vars 2 '[CI-ERROR-VARIABLES-0015]' || return 1
+    [[ ! "${output}" =~ [0-9a-f]{64} ]] || { echo "bad-vars: id leaked: ${output}"; return 1; }
+    off="$(_id "${V[@N@]}" "")" on1="$(_id "${V[@N@]}" "$(_val name)")"
+    [[ "${off}" =~ ^[0-9a-f]{64}$ && "${off}" = "${on1}" ]] || { echo "base-style sot: '${off}' '${on1}'"; return 1; }
+    CI_MANIFEST="${m}" run _ci_check_sot_identity_inputs
+    _expect uncoupled 1 "[CI-ERROR-CHECK-0157] types=2;raw:;build_identity.${V[@BT3@]}.inputs lacks build_variables" || return 1
+    sed -i "/^  ${V[@BT3@]}: \[/d" "${m}"
+    CI_MANIFEST="${m}" run _ci_check_sot_identity_inputs
+    _expect coupled 0 '=sot-identity-inputs=clean types=1' || return 1
 }
 
 @test "SOT readers unquote YAML scalars; odd quoting fails" {
@@ -741,532 +1001,445 @@ CASES
     [ "${status}" -eq 0 ]
     [ "${output}" = 'nginx -V 2>&1 | tr -d x' ]
 }
-@test "codeql-impact gates on content; only real work needs the image" {
-    # What: NOOP needs no image; work needs the SOT one.
-    # Why: content gates the matrix; no image fails.
+
+@test "codeql-impact admits languages by path and content" {
+    # What: per row: path + refs -> language matrix or fail.
+    # Why: no runner for unrelated, SOT-only or comments.
     # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/cqrepo" m img
-    img="registry.example.test/runtime@sha256:$(printf '0%.0s' {1..64})"
-    mkdir -p "${r}/svc"
-    git -C "${r}" init -q
-    git -C "${r}" config user.email t@t
-    git -C "${r}" config user.name t
-    printf 'fn main() {}\n' > "${r}/svc/a.rs"
-    git -C "${r}" add -A && git -C "${r}" commit -qm base
-    local base; base="$(git -C "${r}" rev-parse HEAD)"
-    printf '// note\nfn main() {}\n' > "${r}/svc/a.rs"
-    git -C "${r}" add -A && git -C "${r}" commit -qm cmt
-    local cmt; cmt="$(git -C "${r}" rev-parse HEAD)"
-    m="${r}/manifest.yml"
-    printf 'codeql_languages:\n  rust:\n    paths: [svc]\n' > "${m}"
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push \
-      BEFORE_SHA="${base}" GITHUB_SHA="${cmt}" \
-        run bash "${CI_SH}" codeql-impact svc/a.rs
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *'codeql-matrix={"include":[]}'* ]]
-    printf 'fn main() { let x = 1; }\n' > "${r}/svc/a.rs"
-    git -C "${r}" add -A && git -C "${r}" commit -qm real
-    local real; real="$(git -C "${r}" rev-parse HEAD)"
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push \
-      BEFORE_SHA="${base}" GITHUB_SHA="${real}" \
-        run bash "${CI_SH}" codeql-impact svc/a.rs
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-CODEQL-0012]"* ]]
-    printf 'base_images:\n  codeql_runtime: "%s"\n' "${img}" >> "${m}"
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push \
-      BEFORE_SHA="${base}" GITHUB_SHA="${real}" \
-        run bash "${CI_SH}" codeql-impact svc/a.rs
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *'{"language":"rust"}'* ]]
-    [[ "${output}" == *"codeql-image=${img}"* ]]
+    local r case sot envs path rc want
+    r="$(_val path)"
+    local -a ev
+    local -A V=(
+        [@LA@]="$(_val name)" [@LB@]="$(_val name)" [@PA@]="$(_val name)" [@PB@]="$(_val name)"
+        [@F@]="$(_val name).rs" [@G@]="$(_val name)" [@U@]="$(_val name)" [@H@]="$(_val host)"
+        [@IMG@]="$(_val host)/$(_val name)@$(_val digest)" [@SOT@]="${CI_MANIFEST_REL}"
+    )
+    local -A S=([m0]="$(_val path)" [m1]="$(_val path)")
+    _fill "$(printf '%s\n' 'codeql_languages:' '  @LA@:' '    paths: [@PA@]' '  @LB@:' '    paths: [@PB@]')" > "${S[m0]}"
+    { cat "${S[m0]}"; _fill "$(printf '\n%s\n' 'base_images:' '  codeql_runtime: "@IMG@"')"; } > "${S[m1]}"
+    _c() { git -C "${r}" add -A && git -C "${r}" -c user.name="${V[@U@]}" -c user.email="${V[@U@]}@${V[@H@]}" \
+        commit -qm "$1" && git -C "${r}" rev-parse HEAD; }
+    mkdir -p "${r}/${V[@PA@]}" && git -C "${r}" init -q
+    printf 'fn main() {}\n' > "${r}/${V[@PA@]}/${V[@F@]}"; V[@BASE@]="$(_c base)"
+    printf '// %s\nfn main() {}\n' "${V[@G@]}" > "${r}/${V[@PA@]}/${V[@F@]}"; V[@CMT@]="$(_c cmt)"
+    printf 'fn main() { let %s = 1; }\n' "${V[@G@]}" > "${r}/${V[@PA@]}/${V[@F@]}"; V[@REAL@]="$(_c real)"
+    while IFS='|' read -r case sot envs path rc want; do
+        ev=(); [ "${envs}" = - ] || read -r -a ev <<< "$(_fill "${envs}")"
+        run env -u GITHUB_EVENT_NAME -u BEFORE_SHA -u BASE_SHA -u GITHUB_SHA "${ev[@]}" CI_MANIFEST="${S[${sot}]}" \
+            CI_REPO_ROOT="${r}" bash "${CI_SH}" codeql-impact "$(_fill "${path}")"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+    done <<'CASES'
+path-a|m1|-|@PA@/@F@|0|codeql-matrix={"include":[{"language":"@LA@"}]};codeql-image=@IMG@
+path-b|m1|-|@PB@/@G@|0|codeql-matrix={"include":[{"language":"@LB@"}]}
+no-prefix-match|m1|-|@PA@@G@/@F@|0|codeql-matrix={"include":[]}
+sot-only|m1|-|@SOT@|0|codeql-matrix={"include":[]}
+comment-only-no-image|m0|GITHUB_EVENT_NAME=push BEFORE_SHA=@BASE@ GITHUB_SHA=@CMT@|@PA@/@F@|0|codeql-matrix={"include":[]}
+real-change-no-image|m0|GITHUB_EVENT_NAME=push BEFORE_SHA=@BASE@ GITHUB_SHA=@REAL@|@PA@/@F@|2|[CI-ERROR-CODEQL-0012]
+real-change|m1|GITHUB_EVENT_NAME=push BEFORE_SHA=@BASE@ GITHUB_SHA=@REAL@|@PA@/@F@|0|codeql-matrix={"include":[{"language":"@LA@"}]};codeql-image=@IMG@
+CASES
 }
 
-@test "fetch-verified: pinned asset passes; bad pin or 404 fails closed" {
-    # What: sha256 must match the pin; 404 never retries.
-    # Why: one owner for pinned downloads (AG-CI-006/013).
+@test "fetch-verified and apk-pin-install map each pin case" {
+    # What: per row: url + pin -> verified file or a fail.
+    # Why: one pinned-download owner; no unverified file.
     # From: Issue #1683 | PR #1858
-    local dl good log="${BATS_TEST_TMPDIR}/dl.log"
-    dl="$(_stub dl 'echo "$1" >> "'"${log}"'"; case "$1" in *missing*) echo "curl: (22) The requested URL returned error: 404" >&2; exit 22 ;; *) printf payload > "$2" ;; esac')"
-    good="$(printf payload | sha256sum | cut -d' ' -f1)"
-    CI_HTTP_DOWNLOAD_CMD="${dl}" run _ci_fetch_verified https://x.test/ok "${good}" "${BATS_TEST_TMPDIR}/a"
-    [ "${status}" -eq 0 ]
-    CI_HTTP_DOWNLOAD_CMD="${dl}" run _ci_fetch_verified https://x.test/ok "$(printf '1%.0s' {1..64})" "${BATS_TEST_TMPDIR}/b"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-FETCH-0003]"* ]]
-    CI_HTTP_DOWNLOAD_CMD="${dl}" run _ci_fetch_verified https://x.test/ok not-a-sha "${BATS_TEST_TMPDIR}/c"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-FETCH-0001]"* ]]
-    : > "${log}"
-    CI_HTTP_DOWNLOAD_CMD="${dl}" CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_fetch_verified https://x.test/missing "${good}" "${BATS_TEST_TMPDIR}/d"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-FETCH-0002]"* ]]
-    [ "$(grep -c missing "${log}")" -eq 1 ]
-    # What: apk-pin-install fills url, verifies, unpacks.
-    # Why: SOT pin owns url and sha; no Dockerfile logic.
+    local log pkg apk
+    log="$(_val path)" pkg="$(_val path)" apk="$(_val path)"
+    local dl case call args rc want urls got
+    local -a av
+    local -A V=(
+        [@URL@]="$(_val url)" [@GONE@]="$(_val name)" [@BODY@]="$(_val name)" [@F@]="$(_val name)"
+        [@VERV@]="$(_val name)" [@BRV@]="$(_val name)" [@ARV@]="$(_val name)" [@MAL@]="$(_val name)"
+        [@BAD@]="$(_val digest | cut -d: -f2)" [@DEST@]="${BATS_TEST_TMPDIR}/$(_val name)"
+        [@ROOT@]="$(_val path)" [@PD@]="$(_val name)/$(_val name)" [@AX@]="$(_val name)"
+    )
+    V[@GOOD@]="$(printf '%s' "${V[@BODY@]}" | sha256sum | cut -d' ' -f1)"
+    mkdir -p "${pkg}/${V[@PD@]}" "${V[@ROOT@]}"
+    printf '%s\n' "${V[@BODY@]}" > "${pkg}/${V[@PD@]}/${V[@F@]}"; printf '%s\n' "${V[@BODY@]}" > "${pkg}/.PKGINFO"
+    tar -czf "${apk}" -C "${pkg}" .PKGINFO "${V[@PD@]%%/*}"
+    V[@APKSHA@]="$(sha256sum "${apk}" | cut -d' ' -f1)"
+    dl="$(_stub 'echo "$1" >> "'"${log}"'"
+case "$1" in
+    *"'"${V[@GONE@]}"'"*) echo "curl: (22) The requested URL returned error: 404" >&2; exit 22 ;;
+    *"'"${V[@AX@]}"'") cp "'"${apk}"'" "$2" ;;
+    *) printf "%s" "'"${V[@BODY@]}"'" > "$2" ;;
+esac')"
+    while IFS='|' read -r case call args rc want urls; do
+        IFS=';' read -r -a av <<< "$(_fill "${args}")"
+        rm -f "${log}" "${V[@DEST@]}"
+        case "${call}" in
+            fetch) CI_HTTP_DOWNLOAD_CMD="${dl}" CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_fetch_verified "${av[@]}" ;;
+            apk) CI_HTTP_DOWNLOAD_CMD="${dl}" CI_RETRY_BACKOFF_BASE_SECONDS=0 CI_APK_ROOT="${V[@ROOT@]}" \
+                CI_TMPDIR="${BATS_TEST_TMPDIR}" run ci_cmd_apk_pin_install "${av[@]}" ;;
+        esac
+        _expect "${case}" "${rc}" "${want}" || return 1
+        got=""; [ ! -e "${log}" ] || got="$(paste -sd' ' "${log}")"
+        [ "${urls}" != - ] || urls=""
+        [ "${got}" = "$(_fill "${urls}")" ] || { echo "${case}: downloads '${got}'"; return 1; }
+        [ "${call}" = fetch ] || continue
+        if [ "${rc}" -eq 0 ]; then
+            [ "$(cat "${V[@DEST@]}")" = "${V[@BODY@]}" ] || { echo "${case}: dest content"; return 1; }
+        else
+            [ ! -e "${V[@DEST@]}" ] || { echo "${case}: unverified file kept"; return 1; }
+        fi
+    done <<'CASES'
+ok|fetch|@URL@/@F@;@GOOD@;@DEST@|0|-|@URL@/@F@
+bad-pin|fetch|@URL@/@F@;@BAD@;@DEST@|2|[CI-ERROR-FETCH-0003]|@URL@/@F@
+malformed-pin|fetch|@URL@/@F@;@MAL@;@DEST@|2|[CI-ERROR-FETCH-0001]|-
+not-found|fetch|@URL@/@GONE@;@GOOD@;@DEST@|2|[CI-ERROR-FETCH-0002]|@URL@/@GONE@
+apk-template|apk|@URL@/@BRANCH@/@F@/@ARCH@/@F@-@VERSION@@AX@;@VERV@;@BRV@;@ARV@;@APKSHA@|0|apk-pin-install=ok|@URL@/@BRV@/@F@/@ARV@/@F@-@VERV@@AX@
+apk-bad-pin|apk|@URL@/@BRANCH@/@ARCH@/@VERSION@@AX@;@VERV@;@BRV@;@ARV@;@BAD@|2|[CI-ERROR-FETCH-0003]|@URL@/@BRV@/@ARV@/@VERV@@AX@
+apk-no-url|apk|;@VERV@;@BRV@;@ARV@;@APKSHA@|2|[CI-ERROR-APKSETUP-0006]|-
+CASES
+    [ -f "${V[@ROOT@]}/${V[@PD@]}/${V[@F@]}" ] && [ ! -e "${V[@ROOT@]}/.PKGINFO" ] || { ls -la "${V[@ROOT@]}"; return 1; }
+    # What: a dest rm cannot drop: both coded, rc 2.
+    # Why: an unverified leftover must never stay silent.
     # From: Issue #1683 | PR #1858
-    local pkg="${BATS_TEST_TMPDIR}/pkg" root="${BATS_TEST_TMPDIR}/root" apk="${BATS_TEST_TMPDIR}/t.apk" sha cp
-    mkdir -p "${pkg}/usr/sbin" "${root}"
-    printf 'x\n' > "${pkg}/usr/sbin/tool"; printf 'pkg\n' > "${pkg}/.PKGINFO"
-    tar -czf "${apk}" -C "${pkg}" .PKGINFO usr
-    sha="$(sha256sum "${apk}" | cut -d' ' -f1)"
-    cp="$(_stub cp 'echo "$1" >> "'"${log}"'"; cp "'"${apk}"'" "$2"')"
-    : > "${log}"
-    CI_HTTP_DOWNLOAD_CMD="${cp}" CI_APK_ROOT="${root}" run ci_cmd_apk_pin_install \
-        'http://r.test/@BRANCH@/main/@ARCH@/tool-@VERSION@.apk' 1.0-r0 v3.20 x86_64 "${sha}"
-    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
-    [ "$(cat "${log}")" = 'http://r.test/v3.20/main/x86_64/tool-1.0-r0.apk' ]
-    [ -f "${root}/usr/sbin/tool" ]; [ ! -e "${root}/.PKGINFO" ]
-    CI_HTTP_DOWNLOAD_CMD="${cp}" CI_APK_ROOT="${root}" run ci_cmd_apk_pin_install \
-        'http://r.test/@BRANCH@/@ARCH@/@VERSION@.apk' 1.0-r0 v3.20 x86_64 "$(printf '1%.0s' {1..64})"
-    [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-FETCH-0003]"* ]]
-    run ci_cmd_apk_pin_install '' 1.0-r0 v3.20 x86_64 "${sha}"
-    [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-APKSETUP-0006]"* ]]
+    mkdir -p "${V[@DEST@]}"
+    CI_HTTP_DOWNLOAD_CMD="${dl}" CI_RETRY_BACKOFF_BASE_SECONDS=0 \
+        run _ci_fetch_verified "${V[@URL@]}/${V[@GONE@]}" "${V[@GOOD@]}" "${V[@DEST@]}"
+    _expect dest-not-removable 2 "[CI-ERROR-FETCH-0002];[CI-ERROR-FETCH-0004] dest=\"${V[@DEST@]}\"" || return 1
 }
 
-@test "codeql-analyze fails closed without a SOT language or context" {
-    # What: no arg, unknown language or no upload env fails.
-    # Why: never analyze or upload on partial input.
+@test "codeql-analyze maps each input case and runs the pinned bundle" {
+    # What: per row: bad input fails; good runs 3 steps.
+    # Why: no fetch or upload on bad input; no action pin.
     # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/m.yml"
-    printf 'codeql_languages:\n  lang-a:\n    paths: [src]\n' > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" codeql-analyze
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-CODEQL-0002]"* ]]
-    CI_MANIFEST="${m}" run bash "${CI_SH}" codeql-analyze lang-b
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-CODEQL-0003]"* ]]
-    CI_MANIFEST="${m}" GITHUB_REPOSITORY='' GITHUB_REF='' GITHUB_SHA='' GITHUB_TOKEN='' \
-        run bash "${CI_SH}" codeql-analyze lang-a
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-CODEQL-0004]"* ]]
-}
-
-@test "codeql-analyze runs create, analyze, upload from the pinned bundle" {
-    # What: fetch+verify the bundle, then the 3 steps.
-    # Why: no action pin; per-language category; cleanup.
-    # From: Issue #1683 | PR #1858
-    local b="${BATS_TEST_TMPDIR}/bundle" m="${BATS_TEST_TMPDIR}/m.yml" log="${BATS_TEST_TMPDIR}/cq.log"
-    local t="${BATS_TEST_TMPDIR}/tmp" sha dl
+    local b m log
+    b="$(_val path)" m="$(_val path)" log="$(_val path)"
+    local t tgz calls
+    t="$(_val path)" tgz="$(_val path)" calls="$(_val path)"
+    local dl case envs args rc want
+    local -a ev av
+    local -A V=(
+        [@LANG@]="$(_val name)" [@BAD@]="$(_val name)" [@PATH@]="$(_val name)" [@Q@]="$(_val name)"
+        [@TOOLREPO@]="$(_val name)/$(_val name)" [@TAG@]="$(_val name)" [@ASSET@]="$(_val name)"
+        [@REPO@]="$(_val name)/$(_val name)" [@REF@]="refs/heads/$(_val name)" [@SHA@]="$(_val sha)"
+        [@TOKEN@]="$(_val name)"
+    )
     mkdir -p "${b}/codeql" "${t}"
     _tool_stub "${b}/codeql" codeql <<STUB
 echo "\$*" >> "${log}"
 STUB
-    tar -czf "${BATS_TEST_TMPDIR}/bundle.tgz" -C "${b}" codeql
-    sha="$(sha256sum "${BATS_TEST_TMPDIR}/bundle.tgz" | cut -d' ' -f1)"
-    printf 'codeql:\n  queries: [q1]\ncodeql_languages:\n  lang-a:\n    paths: [src]\nexternal_versions:\n  codeql:\n    repository: owner/tool\n    release_tag: t1\n    asset: bundle.tgz\n    sha256: %s\n' "${sha}" > "${m}"
-    _sot_ci_variables >> "${m}"
-    dl="$(_stub dl 'cp "'"${BATS_TEST_TMPDIR}"'/bundle.tgz" "$2"')"
-    CI_MANIFEST="${m}" CI_HTTP_DOWNLOAD_CMD="${dl}" TMPDIR="${t}" \
-      GITHUB_REPOSITORY=owner/fixture GITHUB_REF=refs/heads/x \
-      GITHUB_SHA="$(printf 'a%.0s' {1..40})" GITHUB_TOKEN=t \
-        run bash "${CI_SH}" codeql-analyze lang-a
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"[CI-INFO-CODEQL-0011]"* ]]
-    grep -q -- 'database create .*--language=lang-a --build-mode=none' "${log}"
-    grep -q -- 'database analyze .*--sarif-category=/language:lang-a' "${log}"
-    grep -q -- 'github upload-results --repository=owner/fixture --ref=refs/heads/x' "${log}"
-    [ -z "$(ls -A "${t}")" ]
+    tar -czf "${tgz}" -C "${b}" codeql
+    {
+        _fill "$(printf '%s\n' 'codeql:' '  queries: [@Q@]' 'codeql_languages:' '  @LANG@:' '    paths: [@PATH@]' \
+            'external_versions:' '  codeql:' '    repository: @TOOLREPO@' '    release_tag: @TAG@' '    asset: @ASSET@')"
+        printf '\n    sha256: %s\n' "$(sha256sum "${tgz}" | cut -d' ' -f1)"
+        _sot_block ci_variables
+    } > "${m}"
+    dl="$(_stub 'printf "%s\n" "$*" >> "'"${calls}"'"; cp "'"${tgz}"'" "$2"')"
+    while IFS='|' read -r case envs args rc want; do
+        read -r -a ev <<< "$(_fill "${envs}")"
+        av=(); [ "${args}" = - ] || av=("$(_fill "${args}")")
+        rm -f "${calls}" "${log}"
+        run env "${ev[@]}" CI_MANIFEST="${m}" CI_HTTP_DOWNLOAD_CMD="${dl}" CI_TMPDIR="${t}" \
+            bash "${CI_SH}" codeql-analyze "${av[@]}"
+        _expect "${case}" "${rc}" "${want}" || return 1
+        [ "${rc}" -eq 0 ] || [ ! -e "${calls}" ] || { echo "${case}: bundle fetched: $(cat "${calls}")"; return 1; }
+    done <<'CASES'
+no-arg|GITHUB_REPOSITORY=@REPO@ GITHUB_REF=@REF@ GITHUB_SHA=@SHA@ GITHUB_TOKEN=@TOKEN@|-|2|[CI-ERROR-CODEQL-0002]
+unknown-language|GITHUB_REPOSITORY=@REPO@ GITHUB_REF=@REF@ GITHUB_SHA=@SHA@ GITHUB_TOKEN=@TOKEN@|@BAD@|2|[CI-ERROR-CODEQL-0003]
+no-upload-env|GITHUB_REPOSITORY= GITHUB_REF= GITHUB_SHA= GITHUB_TOKEN=|@LANG@|2|[CI-ERROR-CODEQL-0004]
+runs|GITHUB_REPOSITORY=@REPO@ GITHUB_REF=@REF@ GITHUB_SHA=@SHA@ GITHUB_TOKEN=@TOKEN@|@LANG@|0|[CI-INFO-CODEQL-0011]
+CASES
+    grep -q -- "${V[@TOOLREPO@]}.*${V[@TAG@]}.*${V[@ASSET@]}" "${calls}" || { echo "pin not fetched: $(cat "${calls}")"; return 1; }
+    grep -q -- "database create .*--language=${V[@LANG@]} --build-mode=none" "${log}" || { cat "${log}"; return 1; }
+    grep -q -- "database analyze .*--sarif-category=/language:${V[@LANG@]}" "${log}" || { cat "${log}"; return 1; }
+    grep -q -- "github upload-results --repository=${V[@REPO@]} --ref=${V[@REF@]}" "${log}" || { cat "${log}"; return 1; }
+    [ -z "$(ls -A "${t}")" ] || { echo "temp left: $(ls -A "${t}")"; return 1; }
 }
 
-@test "platform-field reads apk arch and runner from the SOT, fail-closed" {
-    # What: platform->field from platform_arch SOT.
-    # Why: one owner; no per-arch duplication.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/m.yml"
-    printf 'platform_arch:\n  p1:\n    apk: TESTARCH\n    runner: TESTRUN\n' > "${m}"
-    CI_MANIFEST="${m}" run _ci_platform_apk_arch os/p1
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "TESTARCH" ]
-    CI_MANIFEST="${m}" run _ci_platform_runner os/p1
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "TESTRUN" ]
-    CI_MANIFEST="${m}" run _ci_platform_runner linux/riscv64
-    [ "${status}" -ne 0 ]
-}
-
-@test "matrix-append builds one include object from key=value pairs" {
-    # What: One JSON builder from any key=value field set.
-    # Why: Base-CI needs a service field too.
-    # From: Issue #1683
-    run _ci_matrix_append '[]' service=ui arch=arch-a runner=r1 platform=os/p1
-    [ "${status}" -eq 0 ]
-    [ "$(printf '%s' "${output}" | jq -r '.[0].service')" = "ui" ]
-    [ "$(printf '%s' "${output}" | jq -r '.[0].platform')" = "os/p1" ]
-}
-
-@test "plan-matrix emits only resolve-build targets, one row per platform" {
-    # What: Matrix carries only what resolve says to build.
-    # Why: identity filters, not path-sledgehammer.
-    # From: Issue #1683
-    local gh="${BATS_TEST_TMPDIR}/out.txt" svc ctx want m; : > "${gh}"
-    svc="$(ci_services)"
-    svc="${svc%%$'\n'*}"
-    ctx="$(_ci_block_entry_field services "${svc}" context)"
-    want="$(_ci_platforms "${svc}" | sort | paste -sd, -)"
-    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
-    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
-        run bash "${CI_SH}" plan-matrix "${ctx}/Dockerfile"
-    [ "${status}" -eq 0 ]
-    grep -q '^any-build=true$' "${gh}"
-    m="$(grep '^matrix=' "${gh}" | sed 's/^matrix=//')"
-    [ "$(printf '%s' "${m}" | jq -r '[.include[].service]|unique|join(",")')" = "${svc}" ]
-    [ "$(printf '%s' "${m}" | jq -r '[.include[].platform]|sort|join(",")')" = "${want}" ]
-}
-
-@test "plan-matrix treats a SOT-only change as identity candidates" {
-    # What: SOT change -> all targets checked, no tests.
-    # Why: pins live in the SOT; identity decides BUILD.
+@test "platform facts: one owner; each consumer logs its own id" {
+    # What: SOT platform fields; unset -> the consumer's id.
+    # Why: a missing fact names the consumer that needs it.
     # From: Issue #1683 | PR #1858
-    local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
-    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
-    CI_IMPACT_CMD="$(_stub impact '[ "$1" = proxy ] && echo BUILD || echo NOOP')" \
-        run bash "${CI_SH}" plan-matrix "${CI_MANIFEST_REL}"
-    [ "${status}" -eq 0 ]
-    [ "$(sed -n 's/^matrix=//p' "${gh}" | jq -r '[.include[].service]|unique|join(",")')" = proxy ]
-    grep -q '^test-services=$' "${gh}"
-    : > "${gh}"
-    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
-    CI_IMPACT_CMD="$(_stub impact 'echo NOOP')" \
-        run bash "${CI_SH}" plan-matrix "${CI_MANIFEST_REL}"
-    [ "${status}" -eq 0 ]
-    grep -q '^any-build=false$' "${gh}"
-}
-
-@test "plan-matrix drops a missing target without proven impact" {
-    # What: MISSING_CONFIRMED+impact NOOP stays out.
-    # Why: MISSING_CONFIRMED alone MUST NOT build.
+    local case sot call rc want f v n
+    local -a av
+    local -A V=(
+        [@P@]="$(_val platform)" [@X@]="$(_val platform)" [@APK@]="$(_val name)" [@RUN@]="$(_val name)"
+        [@RT@]="$(_val name)" [@ID@]="[CI-ERROR-$(_val name)-0001]" [@CTX@]="$(_val name)=$(_val name)"
+        [@REL@]="${CI_MANIFEST_REL}"
+    )
+    local -A S=([m]="$(_val path)" [n]="$(_val path)" [s]="${CI_MANIFEST}" [apk]="$(_val path)" [runner]="$(_val path)")
+    V[@K@]="${V[@P@]##*/}"
+    V[@DEP@]="$(_pin_dep)"
+    V[@PC@]="$(_pin_consumer)"
+    _fill "$(printf '%s\n' 'platform_arch:' '  @K@:' '    apk: @APK@' '    runner: @RUN@' '    rust_target: @RT@')" > "${S[m]}"
+    # What: SOT copies, each without one field of P1.
+    # Why: consumers must reach the gap on their real path.
     # From: Issue #1683 | PR #1858
-    local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
-    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
-    CI_IMPACT_CMD="$(_stub impact 'echo NOOP')" \
-        run bash "${CI_SH}" plan-matrix services/proxy/Dockerfile
-    [ "${status}" -eq 0 ]
-    grep -q '^any-build=false$' "${gh}"
-}
-
-@test "plan-matrix emits docs-only=true for a docs-only change" {
-    # What: Docs-only change: no container jobs (§63).
-    # Why: container jobs gate on docs-only != true.
-    # From: Issue #1683
-    local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
-    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
-        run bash "${CI_SH}" plan-matrix fixture-note.md
-    [ "${status}" -eq 0 ]
-    grep -q '^docs-only=true$' "${gh}"
-    grep -q '^any-build=false$' "${gh}"
-    # What: promote/cut-tag per ref class, from the SOT.
-    # Why: workflow gates read these, never a ref literal.
-    # From: Issue #1683 | PR #1858
-    local rel row ref pwant cwant
-    rel="$(_ci_release_ref)"
-    for row in "${rel}|true|true" "refs/heads/any-branch|false|false" "refs/pull/1/merge|false|false" \
-        "refs/tags/v1.2.3|true|false" "refs/tags/v1.2.3-rc.1|true|false"; do
-        IFS='|' read -r ref pwant cwant <<<"${row}"
-        : > "${gh}"
-        GITHUB_REF="${ref}" GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t \
-            CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
-            run bash "${CI_SH}" plan-matrix fixture-note.md
-        [ "${status}" -eq 0 ] || { echo "${ref}: ${output}"; return 1; }
-        grep -q "^promote=${pwant}$" "${gh}" || { echo "${ref} promote"; cat "${gh}"; return 1; }
-        grep -q "^cut-tag=${cwant}$" "${gh}" || { echo "${ref} cut-tag"; cat "${gh}"; return 1; }
+    V[@P1@]="$(_ci_build_matrix_platforms)"
+    V[@P1@]="${V[@P1@]%%$'\n'*}"
+    for f in apk runner; do
+        v="$(_ci_platform_field "${V[@P1@]}" "${f}" "${V[@ID@]}")"
+        n="$(grep -cxF "    ${f}: ${v}" "${CI_MANIFEST}")"
+        [ "${n}" -eq 1 ] || { echo "SOT ${f} of ${V[@P1@]}: ${n} lines"; return 1; }
+        grep -vxF "    ${f}: ${v}" "${CI_MANIFEST}" > "${S[${f}]}"
     done
-    # What: an unreadable release ref fails the plan.
-    # Why: never a silent promote=false or cut-tag=false.
-    # From: Issue #1683 | PR #1858
-    grep -v 'release_tags: true' "${CI_MANIFEST}" > "${BATS_TEST_TMPDIR}/norel.yml"
-    : > "${gh}"
-    CI_MANIFEST="${BATS_TEST_TMPDIR}/norel.yml" GITHUB_REF="${rel}" GITHUB_OUTPUT="${gh}" \
-        GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
-        run bash "${CI_SH}" plan-matrix fixture-note.md
-    [ "${status}" -eq 2 ] || { echo "norel: ${status} ${output}"; return 1; }
-    [[ "${output}" == *"[CI-ERROR-RELEASE-0018]"* ]]
+    V[@SVC_RUST@]="$(_svcs_of_type rust)"
+    V[@SVC_RUST@]="${V[@SVC_RUST@]%%$'\n'*}"
+    V[@SVC_APK@]="$(_svcs_of_type apk)"
+    V[@SVC_APK@]="${V[@SVC_APK@]%%$'\n'*}"
+    [ -n "${V[@SVC_RUST@]}" ] && [ -n "${V[@SVC_APK@]}" ] || { echo "no rust or apk service in the SOT"; return 1; }
+    GITHUB_OUTPUT="$(_val path)"
+    GHCR_USERNAME="$(_val name)"
+    GHCR_TOKEN="$(_val name)"
+    CI_RESOLVE_PROBE_CMD="$(_stub 'echo MISSING_CONFIRMED')"
+    CI_IMPACT_CMD="$(_stub 'echo BUILD')"
+    CI_BUILD_TOOLS_IMAGE_CMD="$(_stub "echo $(_val host)/$(_val name)@$(_val digest)")"
+    export GITHUB_OUTPUT GHCR_USERNAME GHCR_TOKEN CI_RESOLVE_PROBE_CMD CI_IMPACT_CMD CI_BUILD_TOOLS_IMAGE_CMD
+    while IFS='|' read -r case sot call rc want; do
+        read -r -a av <<< "$(_fill "${call}")"
+        CI_MANIFEST="${S[${sot}]}" run "${av[@]}"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+    done <<'CASES'
+apk|m|_ci_platform_field @P@ apk @ID@|0|=@APK@
+runner|m|_ci_platform_field @P@ runner @ID@|0|=@RUN@
+rust-target|m|_ci_platform_field @P@ rust_target @ID@|0|=@RT@
+unset|m|_ci_platform_field @X@ apk @ID@ @CTX@|2|=@ID@ platform="@X@" field="apk" @CTX@
+unreadable|n|_ci_platform_field @P@ apk @ID@|2|[CI-ERROR-CORE-0107]
+plan|runner|ci_cmd_plan_matrix @REL@|2|[CI-ERROR-PLAN-0002] platform="@P1@" field="runner" service=
+identity|apk|_ci_identity_pins @SVC_APK@ apk @P1@|2|[CI-ERROR-IDENTITY-0005] platform="@P1@" field="apk" service="@SVC_APK@"
+toolchain-arches|apk|_ci_build_tools_arches|2|[CI-ERROR-BUILDTOOLS-0007] platform="@P1@" field="apk"
+pin-platform|s|ci_cmd_build_args @PC@ --bare @X@|2|[CI-ERROR-BUILDARGS-0006] platform="@X@" field="apk" dep="@DEP@"
+pin-matrix|apk|ci_cmd_build_args @PC@|2|[CI-ERROR-BUILDARGS-0018] platform="@P1@" field="apk" dep="@DEP@"
+rust-triple|s|ci_cmd_build_args @SVC_RUST@ --bare @X@|2|[CI-ERROR-BUILDARGS-0010] platform="@X@" field="rust_target" service="@SVC_RUST@"
+CASES
 }
 
-@test "plan-matrix emits test-services for a path-changed rust service" {
-    # What: Rust source -> tests; Cargo.lock -> audit.
-    # Why: each runs only when its own input changed.
-    # From: Issue #1683 | PR #1858
-    local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
-    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
-        run bash "${CI_SH}" plan-matrix services/watchdog/src/main.rs
-    [ "${status}" -eq 0 ]
-    grep -q '^test-services=watchdog$' "${gh}"
-    grep -q '^rust-validation=false$' "${gh}"
-    grep -q '^rust-audit=false$' "${gh}"
-    : > "${gh}"
-    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RUST_VALIDATION=true \
-        CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
-        run bash "${CI_SH}" plan-matrix services/watchdog/src/main.rs
-    grep -q '^rust-validation=true$' "${gh}"
-    : > "${gh}"
-    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
-        CI_IMPACT_CMD="$(_stub impact 'echo NOOP')" \
-        run bash "${CI_SH}" plan-matrix "$(_ci_variable CI_CARGO_LOCK)"
-    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
-    grep -q '^rust-audit=true$' "${gh}"
-}
-
-@test "plan-matrix emits no test-services for a path-changed apk service" {
-    # What: APK service has no unit tests.
-    # Why: ci.sh test skips APK services.
-    # From: Issue #1683
-    local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
-    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo MISSING_CONFIRMED')" \
-        run bash "${CI_SH}" plan-matrix services/ntp/Dockerfile
-    [ "${status}" -eq 0 ]
-    grep -q '^test-services=$' "${gh}"
-}
-
-@test "plan-matrix omits an accepted target (NOOP), any-build=false" {
-    # What: An accepted identity is not rebuilt.
-    # Why: NOOP/reuse precedes build; a skip stays out.
-    # From: Issue #1683
-    local gh="${BATS_TEST_TMPDIR}/out.txt"; : > "${gh}"
-    GITHUB_OUTPUT="${gh}" GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_stub p 'echo PRESENT_ACCEPTED')" \
-        run bash "${CI_SH}" plan-matrix services/proxy/Dockerfile
-    [ "${status}" -eq 0 ]
-    grep -q '^any-build=false$' "${gh}"
-    local m; m="$(grep '^matrix=' "${gh}" | sed 's/^matrix=//')"
-    [ "$(printf '%s' "${m}" | jq '.include | length')" -eq 0 ]
+# What: per change/impact/probe/ref row: plan outputs.
+# Why: build only on impact BUILD and MISSING_CONFIRMED.
+# From: Issue #1683 | PR #1858
+@test "plan-matrix maps each change, impact, probe and ref to its outputs" {
+    local case changed probe impact env rc want svc m got plats w norel
+    local -a ev ws
+    local -A V=(
+        [@DOC@]="$(_val name).md" [@RSRC@]="$(_val name).rs" [@BR@]="refs/heads/$(_val name)"
+        [@PR@]="refs/pull/$(_val int 1 9000)/merge" [@TAG@]="refs/tags/v$(_val semver)"
+        [@RC@]="refs/tags/v$(_val semver)-rc.$(_val int 1 9)" [@SOT@]="${CI_MANIFEST_REL}"
+    )
+    V[@LOCK@]="$(_ci_variable CI_CARGO_LOCK)"
+    V[@REL@]="$(_ci_release_ref)"
+    V[@S_RUST@]="$(_svcs_of_type rust)"
+    V[@S_RUST@]="${V[@S_RUST@]%%$'\n'*}"
+    V[@S_APK@]="$(_svcs_of_type apk)"
+    V[@S_APK@]="${V[@S_APK@]%%$'\n'*}"
+    [ -n "${V[@S_RUST@]}" ] && [ -n "${V[@S_APK@]}" ] || { echo "no rust or apk service in the SOT"; return 1; }
+    V[@C_RUST@]="$(_ci_required_field "${V[@S_RUST@]}" context)"
+    V[@C_APK@]="$(_ci_required_field "${V[@S_APK@]}" context)"
+    norel="$(_val path)"
+    V[@NOREL@]="${norel}"
+    grep -v 'release_tags: true' "${CI_MANIFEST}" > "${norel}"
+    ! cmp -s "${CI_MANIFEST}" "${norel}" || { echo "no release_tags key in the SOT"; return 1; }
+    GITHUB_OUTPUT="$(_val path)"
+    GHCR_USERNAME="$(_val name)"
+    GHCR_TOKEN="$(_val name)"
+    export GITHUB_OUTPUT GHCR_USERNAME GHCR_TOKEN
+    while IFS='|' read -r case changed probe impact env rc want svc; do
+        : > "${GITHUB_OUTPUT}"
+        ev=()
+        [ "${env}" = - ] || IFS=';' read -r -a ev <<< "$(_fill "${env}")"
+        case "${impact}" in
+            ONLY_APK) impact="$(_stub "[ \"\$1\" = '${V[@S_APK@]}' ] && echo BUILD || echo NOOP")" ;;
+            *) impact="$(_stub "echo ${impact}")" ;;
+        esac
+        run env "${ev[@]}" CI_RESOLVE_PROBE_CMD="$(_stub "echo ${probe}")" CI_IMPACT_CMD="${impact}" \
+            bash "${CI_SH}" plan-matrix "$(_fill "${changed}")"
+        if [ "${rc}" -ne 0 ]; then
+            _expect "${case}" "${rc}" "${want}" || return 1
+            continue
+        fi
+        _expect "${case}" 0 - || return 1
+        IFS=';' read -r -a ws <<< "$(_fill "${want}")"
+        for w in "${ws[@]}"; do
+            grep -qxF -- "${w}" "${GITHUB_OUTPUT}" || { echo "${case}: no '${w}' in: $(cat "${GITHUB_OUTPUT}")"; return 1; }
+        done
+        [ "${svc}" != - ] || continue
+        m="$(sed -n 's/^matrix=//p' "${GITHUB_OUTPUT}")"
+        got="$(jq -r '[.include[] | .service + "@" + .platform] | sort | join(",")' <<< "${m}")"
+        want=""
+        if [ "${svc}" != none ]; then
+            svc="$(_fill "${svc}")"
+            plats="$(_ci_platforms "${svc}")"
+            want="$(sed "s|^|${svc}@|" <<< "${plats}" | LC_ALL=C sort | paste -sd, -)"
+        fi
+        [ "${got}" = "${want}" ] || { echo "${case}: matrix '${got}' want '${want}'"; return 1; }
+    done <<'CASES'
+build|@C_APK@/Dockerfile|MISSING_CONFIRMED|BUILD|-|0|any-build=true;docs-only=false;test-services=|@S_APK@
+sot-one-target|@SOT@|MISSING_CONFIRMED|ONLY_APK|-|0|any-build=true;test-services=|@S_APK@
+sot-no-impact|@SOT@|MISSING_CONFIRMED|NOOP|-|0|any-build=false|none
+missing-no-impact|@C_APK@/Dockerfile|MISSING_CONFIRMED|NOOP|-|0|any-build=false|none
+accepted|@C_APK@/Dockerfile|PRESENT_ACCEPTED|BUILD|-|0|any-build=false|none
+docs-only|@DOC@|MISSING_CONFIRMED|BUILD|-|0|docs-only=true;any-build=false|none
+rust-source|@C_RUST@/@RSRC@|MISSING_CONFIRMED|NOOP|-|0|test-services=@S_RUST@;rust-validation=false;rust-audit=false|-
+rust-validation|@C_RUST@/@RSRC@|MISSING_CONFIRMED|NOOP|CI_RUST_VALIDATION=true|0|rust-validation=true|-
+cargo-lock|@LOCK@|MISSING_CONFIRMED|NOOP|-|0|rust-audit=true|-
+ref-release|@DOC@|MISSING_CONFIRMED|BUILD|GITHUB_REF=@REL@|0|promote=true;cut-tag=true|-
+ref-branch|@DOC@|MISSING_CONFIRMED|BUILD|GITHUB_REF=@BR@|0|promote=false;cut-tag=false|-
+ref-pull|@DOC@|MISSING_CONFIRMED|BUILD|GITHUB_REF=@PR@|0|promote=false;cut-tag=false|-
+ref-tag|@DOC@|MISSING_CONFIRMED|BUILD|GITHUB_REF=@TAG@|0|promote=true;cut-tag=false|-
+ref-rc|@DOC@|MISSING_CONFIRMED|BUILD|GITHUB_REF=@RC@|0|promote=true;cut-tag=false|-
+no-release-ref|@DOC@|MISSING_CONFIRMED|BUILD|GITHUB_REF=@REL@;CI_MANIFEST=@NOREL@|2|[CI-ERROR-RELEASE-0018]|-
+CASES
 }
 
 # =========================================================
 # SERVICE DEPENDENCIES
 # =========================================================
 
-@test "service field and contexts come from the SOT blocks" {
-    # What: services then build_toolchain; contexts by edge.
-    # Why: one SOT reader; no per-file copy of these values.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/m.yml"
-    printf '%s\n' 'services:' '  svc-a:' '    build_type: type-a' '    runner: r1' \
-        'build_toolchain:' '  tool-t:' '    build_type: type-t' \
-        'dependency_graph:' '  svc-a:' '    contexts: [ctx-1, ctx-2]' > "${m}"
-    CI_MANIFEST="${m}" run ci_service_field svc-a build_type
-    [ "${output}" = "type-a" ]
-    CI_MANIFEST="${m}" run ci_service_field svc-a runner
-    [ "${output}" = "r1" ]
-    CI_MANIFEST="${m}" run ci_service_field tool-t build_type
-    [ "${output}" = "type-t" ]
-    CI_MANIFEST="${m}" run ci_service_contexts svc-a
-    [ "${output}" = "$(printf '%s\n' ctx-1 ctx-2)" ]
-    CI_MANIFEST="${m}" run _ci_required_field svc-a context
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-CORE-0009]"* ]]
-}
-
 # =========================================================
 # BUILD IDENTITIES
 # =========================================================
 
-# What: neutral git repo and SOT for identity tests.
-# Why: ids must be tested on the engine, not the inventory.
-# From: Issue #1683
-_identity_fixture() {
-    local r="${BATS_TEST_TMPDIR}/idrepo" h0
-    h0="$(printf '0%.0s' {1..64})"
-    mkdir -p "${r}/dir/a" "${r}/dir/b"
-    printf 'a\n' > "${r}/dir/a/f"; printf 'b\n' > "${r}/dir/b/f"
-    git -C "${r}" init -q && git -C "${r}" add -A
-    printf '%s\n' 'services:' \
-        '  svc-a:' '    context: dir/a' '    build_type: type-s' \
-        '  svc-b:' '    context: dir/b' '    build_type: type-s' \
-        '  svc-p:' '    context: dir/b' '    build_type: type-p' '    packages: [pkg]' \
-        'build_identity:' '  type-s:' '    inputs: [source_sha]' \
-        '  type-p:' '    inputs: [source_sha, package_versions]' \
-        'base_images:' "  alpine: registry.example.test/base@sha256:${h0}" \
-        'build_matrix:' '  platforms: [os/p1, os/p2]' \
-        'platform_arch:' '  p1:' '    apk: arch-a' '  p2:' '    apk: arch-b' > "${r}/m.yml"
-    export CI_MANIFEST="${r}/m.yml" CI_REPO_ROOT="${r}"
-}
-
-@test "identity is keyed, deterministic and per target" {
-    # What: same input, same id; other target/arch differs.
+@test "identity is keyed, deterministic, per target and platform" {
+    # What: 64-hex per SOT platform; moves on own content.
     # Why: NOOP/reuse needs stable ids that never collide.
-    # From: Issue #1683
-    _identity_fixture
-    run --separate-stderr bash "${CI_SH}" identity svc-a os/p1
-    [ "${status}" -eq 0 ]
-    [[ "${output}" =~ ^platform=os/p1\ identity=[0-9a-f]{64}$ ]]
-    local a1="${output}"
-    run --separate-stderr bash "${CI_SH}" identity svc-a os/p1
-    [ "${output}" = "${a1}" ]
-    run --separate-stderr bash "${CI_SH}" identity svc-b os/p1
-    [ "${status}" -eq 0 ]; [[ "${output}" =~ ^platform=os/p1\ identity=[0-9a-f]{64}$ ]]; [ "${output}" != "${a1}" ]
-    run --separate-stderr bash "${CI_SH}" identity svc-a os/p2
-    [ "${status}" -eq 0 ]; [[ "${output}" =~ ^platform=os/p2\ identity=[0-9a-f]{64}$ ]]
-    [ "${output#*identity=}" != "${a1#*identity=}" ]
-    run --separate-stderr bash "${CI_SH}" identity svc-p os/p1
-    [ "${status}" -eq 0 ]
-    [[ "${output}" =~ ^platform=os/p1\ identity=[0-9a-f]{64}$ ]]
-}
-
-@test "identity fails closed with a stable id when no service is given" {
-    # What: Missing arg must not crash on set -u.
-    # Why: Fail-closed with our own message, not a trace.
-    # From: Issue #1683
-    run bash "${CI_SH}" identity
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-IDENTITY-0001"* ]]
+    # From: Issue #1683 | PR #1858
+    local r a1 a1b b1 a2 b0
+    local -A V=(
+        [@A@]="$(_val name)" [@B@]="$(_val name)" [@PK@]="$(_val name)" [@CA@]="$(_val name)" [@CB@]="$(_val name)"
+        [@TS@]="$(_val name)" [@TP@]="$(_val name)" [@PKG@]="$(_val name)" [@P1@]="$(_val platform)"
+        [@P2@]="$(_val platform)" [@X@]="$(_val platform)" [@AA@]="$(_val name)" [@AB@]="$(_val name)"
+        [@F@]="$(_val name)" [@IMG@]="$(_val host)/$(_val name)@$(_val digest)"
+    )
+    V[@K1@]="${V[@P1@]##*/}" V[@K2@]="${V[@P2@]##*/}"
+    r="$(_val path)"
+    mkdir -p "${r}/${V[@CA@]}" "${r}/${V[@CB@]}"
+    _val name > "${r}/${V[@CA@]}/${V[@F@]}"; _val name > "${r}/${V[@CB@]}/${V[@F@]}"
+    git -C "${r}" init -q && git -C "${r}" add -A
+    _fill "$(printf '%s\n' 'services:' '  @A@:' '    context: @CA@' '    build_type: @TS@' \
+        '  @B@:' '    context: @CB@' '    build_type: @TS@' \
+        '  @PK@:' '    context: @CB@' '    build_type: @TP@' '    packages: [@PKG@]' \
+        'build_identity:' '  @TS@:' '    inputs: [source_sha]' '  @TP@:' '    inputs: [source_sha, package_versions]' \
+        'base_images:' '  alpine: @IMG@' 'build_matrix:' '  platforms: [@P1@, @P2@]' \
+        'platform_arch:' '  @K1@:' '    apk: @AA@' '  @K2@:' '    apk: @AB@')" > "${r}/m.yml"
+    export CI_MANIFEST="${r}/m.yml" CI_REPO_ROOT="${r}"
+    _id() { run --separate-stderr bash "${CI_SH}" identity "$@"; [ "${status}" -eq 0 ] || { echo "identity $*: rc ${status} ${stderr}"; return 1; }; }
+    _id "${V[@A@]}" "${V[@P1@]}" && a1="${output}"
+    [[ "${a1}" =~ ^platform=${V[@P1@]}\ identity=[0-9a-f]{64}$ ]] || { echo "shape: ${a1}"; return 1; }
+    _id "${V[@A@]}" "${V[@P1@]}" && [ "${output}" = "${a1}" ] || { echo "not deterministic: ${output}"; return 1; }
+    _id "${V[@B@]}" "${V[@P1@]}" && b1="${output}" && [ "${b1#*identity=}" != "${a1#*identity=}" ] || { echo "per target"; return 1; }
+    _id "${V[@A@]}" "${V[@P2@]}" && a2="${output}" && [ "${a2#*identity=}" != "${a1#*identity=}" ] || { echo "per platform"; return 1; }
+    _id "${V[@PK@]}" "${V[@P1@]}" && [[ "${output}" =~ ^platform=${V[@P1@]}\ identity=[0-9a-f]{64}$ ]] || { echo "pkgs: ${output}"; return 1; }
+    _id "${V[@A@]}" && [ "${#lines[@]}" -eq 2 ] && [ "${lines[0]}" = "${a1}" ] && [ "${lines[1]}" = "${a2}" ] \
+        || { echo "fan-out: ${output}"; return 1; }
+    run bash "${CI_SH}" identity "${V[@A@]}" "${V[@X@]}"
+    _expect foreign-platform 2 "[CI-ERROR-IDENTITY-0002] service=\"${V[@A@]}\"" || return 1
+    # What: an edit in A's context moves A only, never B.
+    # Why: impact is content identity, never a path guess.
+    # From: Issue #1683 | PR #1858
+    _id "${V[@B@]}" "${V[@P1@]}" && b0="${output}"
+    _val name > "${r}/${V[@CA@]}/${V[@F@]}" && git -C "${r}" add -A
+    _id "${V[@A@]}" "${V[@P1@]}" && a1b="${output}" && [ "${a1b}" != "${a1}" ] || { echo "A did not move"; return 1; }
+    _id "${V[@B@]}" "${V[@P1@]}" && [ "${output}" = "${b0}" ] || { echo "B moved: ${output} vs ${b0}"; return 1; }
+    sed -i '/^  platforms: \[/d' "${CI_MANIFEST}"
+    run bash "${CI_SH}" identity "${V[@A@]}"
+    _expect no-platforms 2 "[CI-ERROR-IDENTITY-0003]" || return 1
+    [[ "${output}" != *"identity="* ]] || { echo "identity line leaked: ${output}"; return 1; }
 }
 
 # =========================================================
 # PLATFORMS
 # =========================================================
 
-@test "identity fans out per platform and rejects foreign ones" {
-    # What: one keyed line per SOT platform; unknown fails.
-    # Why: default is all; unknown input never fans out.
-    # From: Issue #1683
-    _identity_fixture
-    run --separate-stderr bash "${CI_SH}" identity svc-a
-    [ "${status}" -eq 0 ]
-    [ "${#lines[@]}" -eq 2 ]
-    [[ "${lines[0]}" == "platform=os/p1 identity="* ]]
-    [[ "${lines[1]}" == "platform=os/p2 identity="* ]]
-    run bash "${CI_SH}" identity svc-a os/p9
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-IDENTITY-0002"* ]]
-    sed -i '/^  platforms: \[/d' "${CI_MANIFEST}"
-    run bash "${CI_SH}" identity svc-a
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-IDENTITY-0003"* ]]
-    [[ "${output}" != *"identity="* ]]
+@test "v1 normalization keeps an id only for semantic no-ops" {
+    # What: per row: before/after file -> same or other id.
+    # Why: A§12 Test B/C; strings, heredocs, directives.
+    # From: Issue #1683 | PR #1858
+    local r case file before after want a b
+    r="$(_val path)"
+    git init -q "${r}"
+    _ids() {
+        mkdir -p "$(dirname "${r}/$1")" && printf '%b' "$2" > "${r}/$1" && git -C "${r}" add -A \
+            && CI_REPO_ROOT="${r}" _ci_tracked_content_ids "$1"
+    }
+    while IFS='|' read -r case file before after want; do
+        file="$(_val name)${file}"
+        a="$(_ids "${file}" "${before}")" && b="$(_ids "${file}" "${after}")" || { echo "${case}: ids failed"; return 1; }
+        [ -n "${a}" ] || { echo "${case}: no id"; return 1; }
+        case "${want}" in
+            same) [ "${a}" = "${b}" ] ;;
+            other) [ "${a}" != "${b}" ] ;;
+        esac || { echo "${case}: want ${want}: ${a} | ${b}"; return 1; }
+    done <<'CASES'
+rs-comment|.rs|fn main() {}\n|// note\nfn main() {}\n\n|same
+rs-crlf|.rs|fn main() {}\n|fn main() {}\r\n|same
+rs-string-slashes|.rs|let u = "//x";\n|let u = "//y";\n|other
+rs-raw-string|.rs|let j = r#"\n// alpha\n"#;\n|let j = r#"\n// beta\n"#;\n|other
+sh-comment|.sh|echo a\n|# note\necho a\n\n|same
+sh-crlf|.sh|echo a\n|echo a\r\n|same
+sh-shebang|.sh|#!/bin/bash\necho a\n|#!/bin/sh\necho a\n|other
+sh-shellcheck|.sh|# shellcheck disable=SC2086\necho a\n|# shellcheck disable=SC2034\necho a\n|other
+sh-quote-in-string|.sh|echo "it's"\n# a\necho b\n|echo "it's"\n# b\necho b\n|same
+sh-single-multiline|.sh|x='a\n# k\nb'\n|x='a\n# l\nb'\n|other
+sh-double-multiline|.sh|x="a\n# k\nb"\n|x="a\n# l\nb"\n|other
+sh-heredoc|.sh|cat <<EOF\n# k\nEOF\n|cat <<EOF\n# l\nEOF\n|other
+sh-heredoc-dash|.sh|cat <<-EOF\n\t# k\n\tEOF\necho z\n# c1\n|cat <<-EOF\n\t# k\n\tEOF\necho z\n# c2\n|same
+sh-herestring|.sh|grep x <<< "$v"\n# k\n|grep x <<< "$v"\n# l\n|same
+sh-inline-comment|.sh|echo a # k\n|echo a # l\n|other
+sh-backtick|.sh|x=`date`\n# k\n|x=`date`\n# l\n|same
+sh-backtick-in-string|.sh|x="a `date`\n# k\nb"\n|x="a `date`\n# l\nb"\n|other
+sh-multiline-subst|.sh|x="$(echo "a\n# k\nb")"\n|x="$(echo "a\n# l\nb")"\n|other
+sh-single-subst-text|.sh|x='$(a\n# k\n`b'\n|x='$(a\n# l\n`b'\n|other
+sh-continued-subst|.sh|c=$(curl -s \\\n  -o x)\n# k\n|c=$(curl -s \\\n  -o x)\n# l\n|same
+sh-backtick-escaped-quote|.sh|x=`echo \\"a\n# k\nb\\"`\n|x=`echo \\"a\n# l\nb\\"`\n|other
+bats-comment|.bats|@test "t" {\n  run true\n}\n|# c\n@test "t" {\n  run true\n}\n|same
+docker-comment|/Dockerfile|FROM x\nRUN a\n|FROM x\n# k\nRUN a\n|same
+docker-directive|/Dockerfile|# syntax=docker/dockerfile:1\nFROM x\n|# syntax=docker/dockerfile:1.7\nFROM x\n|other
+docker-late-directive|/Dockerfile|FROM x\n# syntax=a\n|FROM x\n# syntax=b\n|same
+docker-heredoc|/Dockerfile|FROM x\nRUN <<EOF\n# k\nEOF\n|FROM x\nRUN <<EOF\n# l\nEOF\n|other
+payload|.conf|# k\na=1\n|# l\na=1\n|other
+CASES
+    run _ci_norm_content "$(_val name)" "$(_val name)"
+    _expect unknown-grammar 2 "[CI-ERROR-IDENTITY-0008]" || return 1
 }
 
-@test "source identity moves on a tracked content change only" {
-    # What: an edit in the context moves its id, not others.
-    # Why: impact is content identity, never a path guess.
-    # From: Issue #1683
-    _identity_fixture
-    local a0 b0
-    a0="$(bash "${CI_SH}" identity svc-a os/p1)"; b0="$(bash "${CI_SH}" identity svc-b os/p1)"
-    printf 'changed\n' > "${CI_REPO_ROOT}/dir/a/f"
-    git -C "${CI_REPO_ROOT}" add -A
-    [ "$(bash "${CI_SH}" identity svc-a os/p1)" != "${a0}" ]
-    [ "$(bash "${CI_SH}" identity svc-b os/p1)" = "${b0}" ]
+@test "impact on a fixture repo: NOOP, own BUILD, UNKNOWN" {
+    # What: per row: base/head refs -> impact per target.
+    # Why: only real content builds, and only its target.
+    # From: Issue #1683 | PR #1858
+    local r m case base head rc want
+    local -A V=(
+        [@A@]="$(_val name)" [@B@]="$(_val name)" [@CA@]="$(_val name)" [@CB@]="$(_val name)"
+        [@BT@]="$(_val name)" [@P@]="$(_val platform)" [@F@]="$(_val name).rs" [@G@]="$(_val name)"
+        [@U@]="$(_val name)" [@H@]="$(_val host)"
+    )
+    r="$(_val path)"
+    m="${r}/${CI_MANIFEST_REL}"
+    _c() { git -C "${r}" add -A && git -C "${r}" -c user.name="${V[@U@]}" -c user.email="${V[@U@]}@${V[@H@]}" \
+        commit -qm "$1" && git -C "${r}" rev-parse HEAD; }
+    mkdir -p "${r}/${V[@CA@]}" "${r}/${V[@CB@]}" "${m%/*}" && git -C "${r}" init -q
+    printf 'fn main() {}\n' > "${r}/${V[@CA@]}/${V[@F@]}"
+    printf 'fn main() {}\n' > "${r}/${V[@CB@]}/${V[@F@]}"
+    V[@NOSOT@]="$(_c nosot)"
+    _fill "$(printf '%s\n' 'build_matrix:' '  platforms: [@P@]' 'build_identity:' '  @BT@:' '    inputs: [source_sha]' \
+        'services:' '  @A@:' '    build_type: @BT@' '    context: @CA@' '  @B@:' '    build_type: @BT@' '    context: @CB@')" > "${m}"
+    V[@BASE@]="$(_c sot)"
+    printf '// %s\nfn main() {}\n' "${V[@G@]}" > "${r}/${V[@CA@]}/${V[@F@]}"; V[@CMT@]="$(_c cmt)"
+    printf 'fn main() { let %s = 1; }\n' "${V[@G@]}" > "${r}/${V[@CA@]}/${V[@F@]}"; V[@REAL@]="$(_c real)"
+    printf 'fn main() { let %s = 2; }\n' "${V[@G@]}" > "${r}/${V[@CB@]}/${V[@F@]}"
+    while IFS='|' read -r case base head rc want; do
+        CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run bash "${CI_SH}" impact "$(_fill "${base}")" "$(_fill "${head}")"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+    done <<'CASES'
+same-ref|@REAL@|@REAL@|0|target=@A@ platform=@P@ impact=NOOP;target=@B@ platform=@P@ impact=NOOP;build=0 noop=2
+comment-only|@BASE@|@CMT@|0|target=@A@ platform=@P@ impact=NOOP;target=@B@ platform=@P@ impact=NOOP;build=0 noop=2
+code-change|@BASE@|@REAL@|0|target=@A@ platform=@P@ impact=BUILD;target=@B@ platform=@P@ impact=NOOP;build=1 noop=1
+base-without-sot|@NOSOT@|@REAL@|3|[CI-INFO-IMPACT-0002];target=@A@ platform=@P@ impact=UNKNOWN;build=0 noop=0 unknown=2
+CASES
 }
 
-@test "rust identity ignores comment-only and blank edits" {
-    # What: A comment-only .rs edit keeps the same id.
-    # Why: Comment churn must resolve to NOOP, not build.
-    # From: Issue #1683
-    local a b
-    a="$(printf 'fn main() {}\n' | _ci_rust_content_hash)"
-    b="$(printf '// note\nfn main() {}\n\n' | _ci_rust_content_hash)"
-    [ -n "${a}" ]
-    [ "${a}" = "${b}" ]
-}
-
-@test "rust identity keeps a // inside a string literal" {
-    # What: Only line-start // is a comment, not in code.
-    # Why: A naive strip would fuse distinct sources.
-    # From: Issue #1683
-    local a b
-    a="$(printf 'let u = "//x";\n' | _ci_rust_content_hash)"
-    b="$(printf 'let u = "//y";\n' | _ci_rust_content_hash)"
-    [ "${a}" != "${b}" ]
-}
-
-@test "only compiled sources are identity-normalized" {
-    # What: .rs normalizes; copied files stay raw-hashed.
-    # Why: A hash in a .conf is payload; strip misreuses.
-    # From: Issue #1683
-    local p want
-    while read -r p want; do
-        run _ci_source_is_normalizable "${p}"
-        [ "${status}" -eq "${want}" ] || { echo "${p}: ${status}"; return 1; }
-    done <<'EOF'
-dir/src/a.rs 0
-dir/a.conf 1
-dir/a.sh 1
-dir/Dockerfile 1
-EOF
-}
-
-@test "rust strip-safety rejects raw and multiline strings" {
-    # What: Strip is safe without string-spanning lines.
-    # Why: A raw or multiline string can carry a //-line.
-    # From: Issue #1683
-    run _ci_rust_strip_is_safe <<< $'fn main() {\n    let x = 1;\n}'
-    [ "${status}" -eq 0 ]
-    run _ci_rust_strip_is_safe <<< 'let j = r#"x"#;'
-    [ "${status}" -ne 0 ]
-    run _ci_rust_strip_is_safe <<< $'let s = "opens\nand runs on";'
-    [ "${status}" -ne 0 ]
-}
-
-@test "raw-string // line is protected from wrong reuse" {
-    # What: A // inside a raw string must not be stripped.
-    # Why: Normalizing it would reuse a wrong image.
-    # From: Issue #1683
-    local a b
-    a=$'let j = r#"\n// alpha\n"#;'
-    b=$'let j = r#"\n// beta\n"#;'
-    [ "$(printf '%s' "${a}" | _ci_rust_content_hash)" = "$(printf '%s' "${b}" | _ci_rust_content_hash)" ]
-    run _ci_rust_strip_is_safe <<< "${a}"
-    [ "${status}" -ne 0 ]
-    run _ci_rust_strip_is_safe <<< "${b}"
-    [ "${status}" -ne 0 ]
-}
-
-@test "impact fails closed without a base ref" {
-    # What: impact needs an explicit base ref.
-    # Why: No base means no comparison; never guess.
-    # From: Issue #1683
-    run bash "${CI_SH}" impact
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-IMPACT-0001"* ]]
-}
-
-@test "impact of a ref against itself is all NOOP" {
-    # What: Identical refs rebuild nothing (real git SOT).
-    # Why: No diff means no build; no rebuild.
-    # From: Issue #1683
-    CI_MANIFEST="${CI_MANIFEST_SOURCE}" run bash "${CI_SH}" impact HEAD HEAD
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"impact=NOOP"* ]]
-    [[ "${output}" != *"impact=BUILD"* ]]
-    [[ "${output}" == *"build=0"* ]]
-}
-
-@test "content ids read a given ref and stay comment-invariant" {
-    # What: A ref reads that commit; comments do not count.
-    # Why: impact diffs base vs head by ref, not index.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/refrepo"
-    mkdir -p "${r}/svc"
-    git -C "${r}" init -q
-    git -C "${r}" config user.email t@t
-    git -C "${r}" config user.name t
-    printf 'fn main() {}\n' > "${r}/svc/a.rs"
-    git -C "${r}" add -A && git -C "${r}" commit -qm base
-    local base; base="$(git -C "${r}" rev-parse HEAD)"
-    printf 'fn main() { let x = 1; }\n' > "${r}/svc/a.rs"
-    git -C "${r}" add -A && git -C "${r}" commit -qm head
-    local head; head="$(git -C "${r}" rev-parse HEAD)"
-    printf '// note\nfn main() {}\n' > "${r}/svc/a.rs"
-    git -C "${r}" add -A && git -C "${r}" commit -qm cmt
-    local cmt; cmt="$(git -C "${r}" rev-parse HEAD)"
-    local b h c
-    b="$(CI_REPO_ROOT="${r}" _ci_tracked_content_ids svc "${base}")"
-    h="$(CI_REPO_ROOT="${r}" _ci_tracked_content_ids svc "${head}")"
-    c="$(CI_REPO_ROOT="${r}" _ci_tracked_content_ids svc "${cmt}")"
-    [ -n "${b}" ]
-    [ "${b}" != "${h}" ]
-    [ "${b}" = "${c}" ]
-}
-
-@test "impact fails closed to UNKNOWN (escalate) when base has no SOT" {
-    # What: A base without the SOT is UNKNOWN, not BUILD.
-    # Why: No base truth MUST NOT authorize BUILD; escalate.
-    # From: Issue #1683
-    run bash "${CI_SH}" impact 4b825dc642cb6eb9a060e54bf8d69288fbee4904
-    [ "${status}" -eq 3 ]
-    [[ "${output}" == *"no SOT at base"* ]]
-    [[ "${output}" == *"impact=UNKNOWN"* ]]
-    [[ "${output}" != *"impact=BUILD"* ]]
-    [[ "${output}" != *"impact=NOOP"* ]]
+# What: SOT product services of one build type, in order.
+# Why: tests derive examples from the SOT, never by name.
+# From: Issue #1683 | PR #1858
+_svcs_of_type() {
+    local svcs s t
+    svcs="$(ci_services)" || return 1
+    for s in ${svcs}; do
+        t="$(ci_service_field "${s}" build_type)" || return 1
+        [ "${t}" != "$1" ] || printf '%s\n' "${s}"
+    done
 }
 
 # What: The first SOT external pin with a consumer.
@@ -1287,125 +1460,88 @@ _pin_consumer() {
     _ci_block_entry_field external_versions "$(_pin_dep)" consumer
 }
 
-@test "identity pins are ref-relative via CI_MANIFEST" {
-    # What: A pin-only change shifts the id at a fixed ref.
-    # Why: impact base pins must reflect base, not head.
-    # From: Issue #1683
-    local m1="${BATS_TEST_TMPDIR}/m1.yml" m2="${BATS_TEST_TMPDIR}/m2.yml"
+@test "a pin change moves its consumer's identity only" {
+    # What: one pin edit: its consumer id moves, rest stay.
+    # Why: VERSION CHANGE != BUILD ALL; ids read given SOT.
+    # From: Issue #1683 | PR #1858
+    local m1 m2 p dep tgt key val t ins other a b
+    m1="$(_val path)" m2="$(_val path)"
+    p="$(_ci_build_matrix_platforms | awk 'NR == 1')" dep="$(_pin_dep)" tgt="$(_pin_consumer)"
+    key="sha256_$(_ci_platform_field "${p}" apk "$(_val name)")"
+    val="$(_ci_block_entry_field external_versions "${dep}" "${key}")"
+    [ -n "${val}" ] && [ -n "${tgt}" ] || { echo "no pin ${dep}.${key} or consumer"; return 1; }
     cp "${CI_MANIFEST}" "${m1}"
-    cp "${m1}" "${m2}"
-    sed -i 's/sha256_arch-a: [0-9a-f]\{64\}/sha256_arch-a: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' "${m2}"
-    local a b tgt
-    tgt="$(_pin_consumer)"
-    a="$(CI_MANIFEST="${m1}" _ci_identity_for "${tgt}" os/p1 HEAD)"
-    b="$(CI_MANIFEST="${m2}" _ci_identity_for "${tgt}" os/p1 HEAD)"
-    [ -n "${a}" ]
-    [ "${a}" != "${b}" ]
-}
-
-@test "registry derives from the SOT and drives refs" {
-    # What: A changed release.registry moves the built ref.
-    # Why: Proves host is SOT-driven, not hardcoded.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/reg.yml" host tag
-    sed 's/^  registry: .*/  registry: example.io/' "${CI_MANIFEST}" > "${m}"
-    host="$(CI_MANIFEST="${m}" _ci_registry)"
-    [ "${host}" = "example.io" ]
-    tag="$(CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo _ci_image_tag proxy os/p1 abcd)"
-    [[ "${tag}" == example.io/* ]]
-}
-
-@test "registry fails closed when release.registry is absent" {
-    # What: A SOT without registry yields no empty host.
-    # Why: An empty host builds a malformed ref, silently.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/noreg.yml"
-    grep -v '^  registry:' "${CI_MANIFEST}" > "${m}"
-    run bash -c "source '${CI_SH}'; CI_MANIFEST='${m}' _ci_registry 2>&1"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CORE-0005"* ]]
-}
-
-@test "resolve rejects a platform not in the target set" {
-    # What: A selected unknown platform fails closed.
-    # Why: Fail-closed dispatch (AG-VAL-002).
-    # From: Issue #1683
-    run bash "${CI_SH}" resolve ui linux/riscv64
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-RESOLVE-0004"* ]]
-}
-
-@test "build rejects a platform not in the target set" {
-    # What: A selected unknown platform fails closed.
-    # Why: Fail-closed dispatch (AG-VAL-002).
-    # From: Issue #1683
-    run bash "${CI_SH}" build ui linux/riscv64
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILD-0006"* ]]
-}
-
-@test "build tags its result line with the selected platform" {
-    # What: A selected build emits one platform-keyed line.
-    # Why: Downstream assembly keys per-platform digests.
-    # From: Issue #1683
-    local p
-    p="$(_ci_platforms ui)"
-    p="${p##*$'\n'}"
-    STUB_STATE=PRESENT_ACCEPTED
-    GHCR_USERNAME=u GHCR_TOKEN=t CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run --separate-stderr bash "${CI_SH}" build ui "${p}"
-    [ "${status}" -eq 0 ]
-    [ "${#lines[@]}" -eq 1 ]
-    [[ "${output}" == *"platform=${p}"* ]]
-    [[ "${output}" == *"result=reuse-accepted"* ]]
-}
-
-@test "per-service platform override is a strict subset of build_matrix" {
-    # What: An override must be a proper subset.
-    # Why: The global list bounds all; equal = drift.
-    # From: Issue #1683
-    local global svc ov p
-    global="$(_ci_build_matrix_platforms | sort | tr '\n' ' ')"
-    for svc in $(ci_build_targets); do
-        ov="$(_ci_service_platforms_override "${svc}")"
-        [ -n "${ov}" ] || continue
-        while IFS= read -r p; do
-            [ -z "${p}" ] && continue
-            grep -qx -- "${p}" <<< "${global// /$'\n'}"
-        done <<< "${ov}"
-        [ "$(printf '%s\n' ${ov} | sort | tr '\n' ' ')" != "${global}" ]
+    sed "s/^    ${key}: ${val}\$/    ${key}: $(_val digest | cut -d: -f2)/" "${m1}" > "${m2}"
+    ! cmp -s "${m1}" "${m2}" || { echo "pin ${dep}.${key} not changed"; return 1; }
+    for t in $(ci_build_targets); do
+        [ "${t}" != "${tgt}" ] || continue
+        ins="$(_ci_block_entry_list build_identity "$(ci_service_field "${t}" build_type)" inputs)"
+        [[ " ${ins//$'\n'/ } " == *" toolchain_"* ]] || { other="${t}"; break; }
     done
+    [ -n "${other}" ] || { echo "no target independent of the toolchain"; return 1; }
+    a="$(CI_MANIFEST="${m1}" _ci_identity_for "${tgt}" "${p}" HEAD)"
+    b="$(CI_MANIFEST="${m2}" _ci_identity_for "${tgt}" "${p}" HEAD)"
+    [ -n "${a}" ] && [ "${a}" != "${b}" ] || { echo "consumer ${tgt}: '${a}' '${b}'"; return 1; }
+    a="$(CI_MANIFEST="${m1}" _ci_identity_for "${other}" "${p}" HEAD)"
+    b="$(CI_MANIFEST="${m2}" _ci_identity_for "${other}" "${p}" HEAD)"
+    [ -n "${a}" ] && [ "${a}" = "${b}" ] || { echo "independent ${other}: '${a}' '${b}'"; return 1; }
+}
+
+@test "platform override must be a strict subset of build_matrix" {
+    # What: per row: target -> its platforms or a fail.
+    # Why: AG-CI-006: build_matrix owns the platform list.
+    # From: Issue #1683 | PR #1858
+    local case sot svc rc want
+    local -A S=([m]="$(_val path)" [e]="$(_val path)")
+    local -A V=(
+        [@P1@]="$(_val platform)" [@P2@]="$(_val platform)" [@P3@]="$(_val platform)" [@PX@]="$(_val platform)"
+        [@A@]="$(_val name)" [@B@]="$(_val name)" [@C@]="$(_val name)" [@D@]="$(_val name)" [@T@]="$(_val name)"
+    )
+    _fill "$(printf '%s\n' 'build_matrix:' '  platforms: [@P1@, @P2@, @P3@]' 'services:' \
+        '  @A@:' '    context: @A@' '  @B@:' '    platforms: [@P1@]' '  @C@:' '    platforms: [@P1@, @PX@]' \
+        '  @D@:' '    platforms: [@P3@, @P1@, @P2@]' 'build_toolchain:' '  @T@:' '    platforms: [@P2@]')" > "${S[m]}"
+    _fill "$(printf '%s\n' 'services:' '  @A@:' '    context: @A@')" > "${S[e]}"
+    while IFS='|' read -r case sot svc rc want; do
+        CI_MANIFEST="${S[${sot}]}" run _ci_platforms "$(_fill "${svc}")"
+        _expect "${case}" "${rc}" "$(printf '%b' "$(_fill "${want}")")" || return 1
+    done <<'CASES'
+matrix|m|@A@|0|=@P1@\n@P2@\n@P3@
+subset|m|@B@|0|=@P1@
+toolchain|m|@T@|0|=@P2@
+foreign|m|@C@|2|[CI-ERROR-CORE-0126] service="@C@" platform="@PX@"
+equal|m|@D@|2|[CI-ERROR-CORE-0127] service="@D@"
+no-platforms|e|@A@|2|[CI-ERROR-IDENTITY-0003] service="@A@"
+CASES
 }
 
 # =========================================================
 # RESOLVER STATES
 # =========================================================
 
-# What: A stub probe that returns a fixed state.
-# Why: Test the resolver logic without a live GHCR.
-# From: Issue #1683
-_probe_stub() {
-    _stub probe.sh "printf '%s\\n' \"${STUB_STATE}\""
-}
-
+# What: each probe outcome -> one state and action.
+# Why: only MISSING_CONFIRMED may build; UNKNOWN never.
+# From: Issue #1683 | PR #1858
 @test "resolve maps every probe outcome to exactly one action" {
-    # What: each probe outcome -> one state and action.
-    # Why: only MISSING_CONFIRMED may build; UNKNOWN never.
-    # From: Issue #1683 | PR #1858
-    local -a svcs pe
-    local name probe state action id
-    mapfile -t svcs <<<"$(ci_services)"
+    local -a pe ws
+    local name probe state action id svc w
+    local -A V=([@BOGUS@]="$(_val name)" [@RAW@]="$(_val name)" [@RC@]="$(_val int 1 120)")
+    svc="$(ci_services)"
+    svc="${svc%%$'\n'*}"
     while IFS='|' read -r name probe state action id; do
         pe=(-u CI_RESOLVE_PROBE_CMD)
         case "${probe}" in
             none) ;;
-            fail) pe+=(CI_RESOLVE_PROBE_CMD="$(_stub probe 'echo MISSING_CONFIRMED; exit 7')") ;;
-            *) pe+=(CI_RESOLVE_PROBE_CMD="$(_stub probe "echo ${probe}")") ;;
+            fail) pe+=(CI_RESOLVE_PROBE_CMD="$(_stub "echo MISSING_CONFIRMED ${V[@RAW@]}; exit ${V[@RC@]}")") ;;
+            *) pe+=(CI_RESOLVE_PROBE_CMD="$(_stub "echo $(_fill "${probe}")")") ;;
         esac
-        run env "${pe[@]}" bash "${CI_SH}" resolve "${svcs[0]}"
+        run env "${pe[@]}" bash "${CI_SH}" resolve "${svc}"
         [ "${status}" -eq 0 ] || { echo "${name}: rc ${status}: ${output}"; return 1; }
         [[ "${output}" == *"state=${state} action=${action} "* ]] || { echo "${name}: ${output}"; return 1; }
         [ "${action}" = build ] || [[ "${output}" != *"action=build"* ]] || { echo "${name}: build: ${output}"; return 1; }
-        [ "${id}" = - ] || [[ "${output}" == *"${id}"* ]] || { echo "${name}: no ${id}: ${output}"; return 1; }
+        IFS=';' read -r -a ws <<< "$(_fill "${id}")"
+        for w in "${ws[@]}"; do
+            [ "${w}" = - ] || [[ "${output}" == *"${w}"* ]] || { echo "${name}: no ${w}: ${output}"; return 1; }
+        done
     done <<'CASES'
 accepted|PRESENT_ACCEPTED|PRESENT_ACCEPTED|noop|-
 missing|MISSING_CONFIRMED|MISSING_CONFIRMED|build|-
@@ -1413,642 +1549,578 @@ mismatch|MISMATCH|MISMATCH|fail|-
 unverified|PRODUCED_UNVERIFIED|PRODUCED_UNVERIFIED|verify|-
 in-progress|BUILD_IN_PROGRESS|BUILD_IN_PROGRESS|wait|-
 unknown|UNKNOWN|UNKNOWN|escalate|CI-INFO-RESOLVE-0003
-garbage|BOGUS|UNKNOWN|escalate|CI-ERROR-RESOLVE-0002
-probe-fail|fail|UNKNOWN|escalate|CI-INFO-RESOLVE-0005
+garbage|@BOGUS@|UNKNOWN|escalate|CI-ERROR-RESOLVE-0002;got="@BOGUS@"
+probe-fail|fail|UNKNOWN|escalate|CI-INFO-RESOLVE-0005;rc=@RC@;MISSING_CONFIRMED @RAW@
 no-probe|none|UNKNOWN|escalate|CI-INFO-RESOLVE-0003
 CASES
-}
-
-@test "resolve fails closed when no service is given" {
-    # What: Missing arg must fail with a stable id.
-    # Why: Fail-closed dispatch (AG-VAL-002).
-    # From: Issue #1683
-    run bash "${CI_SH}" resolve
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-RESOLVE-0001"* ]]
 }
 
 # =========================================================
 # RETRY CLASSIFICATION
 # =========================================================
 
-@test "retry classifier: rate-limit / 5xx / network are transient" {
-    # What: These recover on retry with backoff.
-    # Why: One rule replaces every wrapper's own split.
-    # From: Issue #1683
-    [ "$(_ci_classify_failure 'toomanyrequests: HTTP 429')" = "transient" ]
-    [ "$(_ci_classify_failure 'received HTTP 503 from registry')" = "transient" ]
-    [ "$(_ci_classify_failure 'dial tcp: i/o timeout')" = "transient" ]
-    [ "$(_ci_classify_failure 'connection refused')" = "transient" ]
-    [ "$(_ci_classify_failure 'curl: (22) The requested URL returned error: 503')" = "transient" ]
-    [ "$(_ci_classify_failure 'curl: (22) The requested URL returned error: 403')" = "transient" ]
-}
-
-@test "retry classifier: auth / malformed / compile are permanent" {
-    # What: Retrying these only burns the budget.
-    # Why: A fixed outcome must fail fast, not loop.
-    # From: Issue #1683
-    [ "$(_ci_classify_failure 'HTTP 401 unauthorized')" = "permanent" ]
-    [ "$(_ci_classify_failure 'error: could not compile lancache-ui')" = "permanent" ]
-    [ "$(_ci_classify_failure 'pull access denied for registry.example.test/x')" = "permanent" ]
-    [ "$(_ci_classify_failure 'curl: (22) The requested URL returned error: 404')" = "permanent" ]
-    [ "$(_ci_classify_failure 'ERROR: unable to select packages: x (no such package)')" = "permanent" ]
-    [ "$(_ci_classify_failure 'ERROR: Not committing changes due to missing repository tags.')" = "permanent" ]
-    [ "$(_ci_classify_failure 'An image does not exist locally with the tag: registry.example.test/o/r/svc')" = "permanent" ]
-    [ "$(_ci_classify_failure 'Error response from daemon: No such image: registry.example.test/o/r/svc:t')" = "permanent" ]
-}
-
-@test "retry classifier: a missing manifest is not_found, auth is not" {
-    # What: not_found is separate; auth stays permanent.
-    # Why: only not_found may build; auth must never build.
-    # From: Issue #1683
-    [ "$(_ci_classify_failure 'manifest unknown')" = "not_found" ]
-    [ "$(_ci_classify_failure 'registry.example.test/x: not found: manifest')" = "not_found" ]
-    [ "$(_ci_classify_failure 'denied: requested access to the resource')" = "permanent" ]
-}
-
-@test "retry classifier: an unclassified failure defaults to transient" {
-    # What: Unknown error -> retry, not give up.
-    # Why: A missed transient is worse than a few retries.
-    # From: Issue #1683
-    [ "$(_ci_classify_failure 'some novel error text')" = "transient" ]
-}
-
-@test "retry classifier: matching is case-insensitive (curl/git casing)" {
-    # What: Case-insensitive match for transient errors.
-    # Why: Go/curl/git have different error text casing.
-    # From: Issue #1683
-    [ "$(_ci_classify_failure 'Connection reset by peer')" = "transient" ]
-    [ "$(_ci_classify_failure 'HTTP 401 Unauthorized')" = "permanent" ]
-}
-
-@test "retry classifier: op=github-api 404 is permanent, never not_found" {
-    # What: GitHub API 404 maps to permanent, not not_found.
-    # Why: Registry 404 can recover; API 404 never can.
-    # From: Issue #1683
-    [ "$(_ci_classify_failure 'gh: Not Found (HTTP 404)' github-api)" = "permanent" ]
-    [ "$(_ci_classify_failure 'gh: Not Found (HTTP 404)' github-api)" != "not_found" ]
-    # What: gh without a token is permanent, not retried.
-    # Why: AG-CI-013: an auth failure must fail at once.
-    # From: Issue #1683 | PR #1858
-    local nologin
-    nologin=$'To get started with GitHub CLI, please run:  gh auth login\nAlternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.'
-    [ "$(_ci_classify_failure "${nologin}" github-api)" = "permanent" ]
-}
-
-@test "retry classifier: op=registry (default) still returns not_found on 404-shaped text" {
-    # What: Default op returns not_found for 404 text.
-    # Why: Preserves legacy registry-probe behavior.
-    # From: Issue #1683
-    [ "$(_ci_classify_failure 'registry.example.test/x: not found: manifest')" = "not_found" ]
-    [ "$(_ci_classify_failure 'registry.example.test/x: not found: manifest' registry)" = "not_found" ]
-}
-
-@test "retry classifier: op=buildx retries the layer-lock and go-panic signatures" {
-    # What: layer-lock and panic are transient.
-    # Why: buildx layer-lock signature evidence.
-    # From: Issue #1222
-    [ "$(_ci_classify_failure '(*service).Write failed: rpc error: code = Unavailable desc = ref layer-sha256:abc locked for 900ms (since t): unavailable' buildx)" = "transient" ]
-    [ "$(_ci_classify_failure 'panic: methodref has no signature' buildx)" = "transient" ]
-}
-
-@test "retry classifier: buildx signatures never leak into a real compile failure" {
-    # What: Unrelated buildx ops stay permanent.
-    # Why: op-gating prevents matching widening.
-    # From: Issue #1683
-    [ "$(_ci_classify_failure 'error: could not compile lancache-ui' buildx)" = "permanent" ]
-}
-
-@test "retry classifier: a failed buildx RUN is permanent unless network" {
-    # What: RUN exit: permanent; I/O cause: transient.
-    # Why: a missing build variable must not be retried.
-    # From: Issue #1683 | PR #1858
-    local run='process "/bin/sh -c x" did not complete successfully: exit code: 1'
-    [ "$(_ci_classify_failure "x is required (no default)"$'\n'"${run}" buildx)" = "permanent" ]
-    [ "$(_ci_classify_failure "connection reset by peer"$'\n'"${run}" buildx)" = "transient" ]
-    [ "$(_ci_classify_failure "x is required"$'\n'"${run}" registry)" = "transient" ]
-}
-
-@test "retry classifier: git-fetch transient signatures are covered" {
-    # What: DNS/RPC/disconnect transient signatures.
-    # Why: Classifier owns the git-fetch transient cases.
-    # From: Issue #1683
-    [ "$(_ci_classify_failure 'unexpected disconnect while reading sideband packet')" = "transient" ]
-    [ "$(_ci_classify_failure 'The remote end hung up unexpectedly')" = "transient" ]
-    [ "$(_ci_classify_failure 'Could not resolve host: github.com')" = "transient" ]
-    [ "$(_ci_classify_failure 'RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly')" = "transient" ]
-    [ "$(_ci_classify_failure 'GnuTLS recv error (-9): A TLS packet with unexpected length was received.')" = "transient" ]
-}
-
-@test "retry classifier: a missing git ref is permanent, never retried" {
-    # What: Missing git ref maps to permanent.
-    # Why: Absent refs cannot be fixed by retrying.
-    # From: Issue #1683
-    [ "$(_ci_classify_failure "fatal: couldn't find remote ref refs/x")" = "permanent" ]
-}
-
-@test "retry classifier: op=accel is transient only on an accelerator outage" {
-    # What: real distcc/sccache/ccache outage lines vs bugs.
-    # Why: a real compile error must fail, never degrade.
-    # From: Issue #1683 | PR #1858
-    local name raw want got
-    while IFS='|' read -r name raw want; do
-        got="$(_ci_classify_failure "${raw}" accel)"
+# What: per row: op and raw failure text -> class.
+# Why: one classifier decides retry, fail fast or build.
+# From: Issue #1683 | PR #1858
+@test "retry classifier maps each failure text per op" {
+    local name op text want got
+    local -A V=(
+        [@REF@]="$(_val host)/$(_val name)/$(_val name):$(_val name)" [@CRATE@]="$(_val name)" [@HOST@]="$(_val host)"
+        [@GREF@]="refs/$(_val name)" [@PKG@]="$(_val name)" [@FILE@]="$(_val name).c" [@SYM@]="$(_val name)"
+        [@MS@]="$(_val int 1 900)ms" [@PID@]="$(_val int 1 9000)" [@URL@]="$(_val url)/$(_val name).json"
+        [@TAG@]="$(_val name)" [@TXT@]="$(_val name) $(_val name)"
+    )
+    while IFS='|' read -r name op text want; do
+        got="$(_ci_classify_failure "$(printf '%b' "$(_fill "${text}")")" ${op:+"${op}"})"
         [ "${got}" = "${want}" ] || { echo "${name}: got ${got}, want ${want}"; return 1; }
     done <<'CASES'
-distcc|distcc[13] (dcc_build_somewhere) ERROR: failed to distribute and fallbacks are disabled|transient
-sccache|sccache: error: Timed out waiting for server startup. Maybe the remote service is unreachable?|transient
-ccache|ccache: error: No such file or directory|transient
-c-error|e.c:1:23: error: 'x' undeclared (first use in this function)|permanent
-rust-error|error: could not compile `lancache-ui` (bin "lancache-ui") due to 2 previous errors|permanent
-fetch|error: failed to download from `https://index.crates.io/config.json`|permanent
+rate-429||toomanyrequests: HTTP 429|transient
+http-503||received HTTP 503 from @HOST@|transient
+io-timeout||dial tcp: i/o timeout|transient
+refused||connection refused|transient
+curl-503||curl: (22) The requested URL returned error: 503|transient
+curl-403||curl: (22) The requested URL returned error: 403|transient
+auth-401||HTTP 401 unauthorized|permanent
+compile||error: could not compile @CRATE@|permanent
+pull-denied||pull access denied for @REF@|permanent
+curl-404||curl: (22) The requested URL returned error: 404|permanent
+apk-missing||ERROR: unable to select packages: @PKG@ (no such package)|permanent
+apk-tags||ERROR: Not committing changes due to missing repository tags.|permanent
+no-local-image||An image does not exist locally with the tag: @REF@|permanent
+no-such-image||Error response from daemon: No such image: @REF@|permanent
+manifest-unknown||manifest unknown|not_found
+not-found-default||@REF@: not found: manifest|not_found
+not-found-registry|registry|@REF@: not found: manifest|not_found
+denied||denied: requested access to the resource|permanent
+novel||@TXT@|transient
+reset-caps||Connection reset by peer|transient
+auth-caps||HTTP 401 Unauthorized|permanent
+gh-404|github-api|gh: Not Found (HTTP 404)|permanent
+gh-no-login|github-api|To get started with GitHub CLI, please run:  gh auth login\nAlternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.|permanent
+layer-lock|buildx|(*service).Write failed: rpc error: code = Unavailable desc = ref layer-sha256:@TAG@ locked for @MS@ (since @TAG@): unavailable\nprocess "/bin/sh -c @SYM@" did not complete successfully: exit code: 1|transient
+go-panic|buildx|panic: methodref has no signature\nprocess "/bin/sh -c @SYM@" did not complete successfully: exit code: 1|transient
+buildx-compile|buildx|error: could not compile @CRATE@|permanent
+run-missing-var|buildx|@SYM@ is required (no default)\nprocess "/bin/sh -c @SYM@" did not complete successfully: exit code: 1|permanent
+run-network|buildx|connection reset by peer\nprocess "/bin/sh -c @SYM@" did not complete successfully: exit code: 1|transient
+run-registry|registry|@SYM@ is required\nprocess "/bin/sh -c @SYM@" did not complete successfully: exit code: 1|transient
+git-sideband||unexpected disconnect while reading sideband packet|transient
+git-hung-up||The remote end hung up unexpectedly|transient
+git-no-host||Could not resolve host: @HOST@|transient
+git-rpc||RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly|transient
+git-gnutls||GnuTLS recv error (-9): A TLS packet with unexpected length was received.|transient
+git-no-ref||fatal: couldn't find remote ref @GREF@|permanent
+distcc|accel|distcc[@PID@] (dcc_build_somewhere) ERROR: failed to distribute and fallbacks are disabled|transient
+sccache|accel|sccache: error: Timed out waiting for server startup. Maybe the remote service is unreachable?|transient
+ccache|accel|ccache: error: No such file or directory|transient
+c-error|accel|@FILE@:1:23: error: '@SYM@' undeclared (first use in this function)|permanent
+rust-error|accel|error: could not compile `@CRATE@` (bin "@CRATE@") due to 2 previous errors|permanent
+fetch|accel|error: failed to download from `@URL@`|permanent
+trivy-db|trivy|FATAL failed to download vulnerability DB: @TXT@|transient
+trivy-init|trivy|database is not initialized|transient
+trivy-other|trivy|@REF@: manifest unknown|permanent
 CASES
-}
-
-@test "reuse order is cheapest-first and ends in compile" {
-    # What: noop..accepted..CAS..caches..compile order.
-    # Why: NOOP/reuse always precede build (§7).
-    # From: Issue #1683
-    local order; order="$(ci_reuse_order)"
-    [ "${order%% *}" = "noop" ]
-    [ "${order##* }" = "compile" ]
 }
 
 # =========================================================
 # BUILD ADMISSION
 # =========================================================
 
-# What: Write an executable stub that prints/exits fixed.
-# Why: Inject build/CAS/probe backends without real infra.
-# From: Issue #1683
-_stub() {
-    local name="$1" body="$2"
-    _tool_stub "${BATS_TEST_TMPDIR}" "${name}" <<<"${body}"
-    printf '%s\n' "${BATS_TEST_TMPDIR}/${name}"
-}
-
+# What: every resolver/impact/CAS/auth combination.
+# Why: one build path; all other states reuse or stop.
+# From: Issue #1683 | PR #1858
 @test "build admission: only impact + MISSING_CONFIRMED + auth build" {
-    # What: every resolver/impact/CAS/auth combination.
-    # Why: one build path; all other states reuse or stop.
-    # From: Issue #1683
-    local case state impact cas auth rc want probe w
-    local -a adm_env
-    while IFS='|' read -r case state impact cas auth rc want; do
+    local case type state impact cas auth plat rc want probe w svc p marker failrc all casmark casrc wantcas
+    local -a adm_env args
+    local -A svcs
+    for type in rust apk; do
+        svc="$(_svcs_of_type "${type}")"
+        svcs[${type}]="${svc%%$'\n'*}"
+        [ -n "${svcs[${type}]}" ] || { echo "no ${type} service in the SOT"; return 1; }
+    done
+    p="$(_ci_platforms "${svcs[rust]}")"
+    p="${p##*$'\n'}"
+    marker="$(_val name)"
+    casmark="$(_val name)"
+    failrc="$(_val int 1 120)"
+    casrc="$(_val int 2 120)"
+    while IFS='|' read -r case type state impact cas auth plat rc want; do
         STUB_STATE="${state}"
         probe="$(_probe_stub)"
-        [ "${case}" != probe-fail ] || probe="$(_stub probe 'echo MISSING_CONFIRMED; exit 7')"
-        adm_env=(-u GITHUB_EVENT_NAME -u BEFORE_SHA -u GHCR_USERNAME -u GHCR_TOKEN
-            CI_RESOLVE_PROBE_CMD="${probe}"
-            CI_BUILD_CMD="$(_stub build 'echo BUILD_BACKEND_INVOKED')")
-        [ "${impact}" = - ] || adm_env+=(CI_IMPACT_CMD="$(_stub impact "echo ${impact}")")
-        [ "${cas}" = - ] || adm_env+=(CI_CAS_LOOKUP_CMD="$(_stub cas "exit ${cas}")")
-        [ "${auth}" = no ] || adm_env+=(GHCR_USERNAME=u GHCR_TOKEN=t)
-        run env "${adm_env[@]}" bash "${CI_SH}" build ui
-        [ "${status}" -eq "${rc}" ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
-        for w in ${want}; do
-            [[ "${output}" == *"${w}"* ]] || { echo "${case}: no ${w}: ${output}"; return 1; }
+        [ "${case}" != probe-fail ] || probe="$(_stub "echo MISSING_CONFIRMED; exit ${failrc}")"
+        adm_env=(-u GITHUB_EVENT_NAME -u BEFORE_SHA -u GHCR_USERNAME -u GHCR_TOKEN -u CI_CAS_LOOKUP_CMD
+            CI_RESOLVE_PROBE_CMD="${probe}" CI_BUILD_CMD="$(_stub "echo ${marker}")")
+        [ "${impact}" = - ] || adm_env+=(CI_IMPACT_CMD="$(_stub "echo ${impact}")")
+        cas="${cas//@R@/${casrc}}"
+        [ "${cas}" = - ] || adm_env+=(CI_CAS_LOOKUP_CMD="$(_stub "echo ${casmark} >&2; exit ${cas}")")
+        [ "${auth}" = no ] || adm_env+=(GHCR_USERNAME="$(_val name)" GHCR_TOKEN="$(_val name)")
+        args=(build "${svcs[${type}]}")
+        [ "${plat}" = - ] || args+=("${p}")
+        run --separate-stderr env "${adm_env[@]}" bash "${CI_SH}" "${args[@]}"
+        all="${output}"$'\n'"${stderr}"
+        [ "${status}" -eq "${rc}" ] || { echo "${case}: rc ${status}: ${all}"; return 1; }
+        wantcas=0
+        [[ "${want}" != *@C@* ]] || wantcas=1
+        want="${want//@P@/${p}}"
+        want="${want//@R@/${casrc}}"
+        want="${want//@C@/${casmark}}"
+        for w in ${want//@M@/${marker}}; do
+            [[ "${all}" == *"${w}"* ]] || { echo "${case}: no ${w}: ${all}"; return 1; }
         done
-        [ "${case}" = built ] && continue
-        [[ "${output}" != *"BUILD_BACKEND_INVOKED"* ]] || { echo "${case}: backend ran"; return 1; }
-        [[ "${output}" != *"result=built"* ]] || { echo "${case}: built"; return 1; }
+        [ "${wantcas}" -eq 1 ] || [[ "${all}" != *"${casmark}"* ]] || { echo "${case}: CAS consulted"; return 1; }
+        [ "${plat}" = - ] || [ "${#lines[@]}" -eq 1 ] || { echo "${case}: result lines: ${output}"; return 1; }
+        [[ "${want}" != *@M@* ]] || continue
+        [[ "${all}" != *"${marker}"* ]] || { echo "${case}: backend ran"; return 1; }
+        [[ "${all}" != *"result=built"* ]] || { echo "${case}: built"; return 1; }
     done <<'CASES'
-accepted|PRESENT_ACCEPTED|-|-|yes|0|result=reuse-accepted
-unknown|UNKNOWN|-|-|yes|2|result=escalate
-cas-hit|MISSING_CONFIRMED|BUILD|0|yes|0|result=reuse-binary-cas
-no-auth|MISSING_CONFIRMED|BUILD|1|no|2|CI-ERROR-BUILD-0002
-built|MISSING_CONFIRMED|BUILD|1|yes|0|state=BUILD_ACK result=built
-mismatch|MISMATCH|BUILD|1|yes|2|result=fail-mismatch CI-ERROR-BUILD-0010
-probe-fail|-|BUILD|1|yes|2|result=escalate
-no-impact|MISSING_CONFIRMED|NOOP|1|yes|0|result=no-build-no-impact
-no-base|MISSING_CONFIRMED|-|1|yes|2|result=escalate
+accepted|rust|PRESENT_ACCEPTED|-|-|yes|-|0|result=reuse-accepted
+selected-platform|rust|PRESENT_ACCEPTED|-|-|yes|p|0|platform=@P@ result=reuse-accepted
+unknown|rust|UNKNOWN|-|-|yes|-|2|result=escalate
+cas-hit|rust|MISSING_CONFIRMED|BUILD|0|yes|-|0|@C@ result=reuse-binary-cas
+cas-unwired|rust|MISSING_CONFIRMED|BUILD|-|yes|-|0|@M@ cas_cmd="none" result=built
+cas-crash|rust|MISSING_CONFIRMED|BUILD|@R@|yes|-|0|@C@ cas_rc=@R@ @M@ result=built
+apk-no-cas|apk|MISSING_CONFIRMED|BUILD|0|yes|-|0|@M@ result=built
+no-auth|rust|MISSING_CONFIRMED|BUILD|1|no|-|2|CI-ERROR-BUILD-0002
+built|rust|MISSING_CONFIRMED|BUILD|1|yes|-|0|@C@ @M@ state=BUILD_ACK result=built
+mismatch|rust|MISMATCH|BUILD|1|yes|-|2|result=fail-mismatch CI-ERROR-BUILD-0010
+probe-fail|rust|-|BUILD|1|yes|-|2|result=escalate
+no-impact|rust|MISSING_CONFIRMED|NOOP|1|yes|-|0|result=no-build-no-impact
+no-base|rust|MISSING_CONFIRMED|-|1|yes|-|2|result=escalate
 CASES
 }
 
 @test "semantic impact compares the head id with the base id" {
-    # What: equal=NOOP, diff=BUILD, no base=UNKNOWN.
-    # Why: BUILD needs proven impact; compare refs.
+    # What: per row: refs, base SOT, ids, cmd -> verdict.
+    # Why: BUILD needs proven impact; any doubt is UNKNOWN.
     # From: Issue #1683 | PR #1858
-    _ci_diff_refs() { printf 'B H\n'; }
-    _ci_manifest_at() { printf 'x\n' > "$2"; }
-    _ci_identity_for() { [ "$3" = B ] && echo base-id; }
-    run _ci_semantic_impact svc-a os/p1 base-id
-    [ "${lines[-1]}" = NOOP ]
-    run _ci_semantic_impact svc-a os/p1 head-id
-    [ "${lines[-1]}" = BUILD ]
-    [[ "${output}" == *"[CI-INFO-IMPACT-0004]"* ]]
-    _ci_identity_for() { return 2; }
-    run _ci_semantic_impact svc-a os/p1 head-id
-    [ "${lines[-1]}" = UNKNOWN ]
-    _ci_diff_refs() { :; }
-    run _ci_semantic_impact svc-a os/p1 head-id
-    [ "${lines[-1]}" = UNKNOWN ]
-    [[ "${output}" == *"[CI-INFO-IMPACT-0003]"* ]]
+    local case dr ma idf cmd head verdict id
+    local -A V=(
+        [@S@]="$(_val name)" [@P@]="$(_val platform)" [@B@]="$(_val sha)" [@H@]="$(_val sha)"
+        [@ID@]="$(_val digest)" [@OTHER@]="$(_val digest)"
+    )
+    local -A C=([-]='' [build]="$(_stub 'echo BUILD')" [fail]="$(_stub 'exit 1')" [junk]="$(_stub "echo $(_val name)")")
+    _ci_diff_refs() { case "${dr}" in fail) return 2 ;; none) printf '\n' ;; *) printf '%s %s\n' "${V[@B@]}" "${V[@H@]}" ;; esac; }
+    _ci_manifest_at() { [ "${ma}" = ok ] && printf '%s\n' "${V[@S@]}" > "$2"; }
+    _ci_identity_for() { [ "${idf}" = ok ] && [ "$3" = "${V[@B@]}" ] && echo "${V[@ID@]}"; }
+    while IFS='|' read -r case dr ma idf cmd head verdict id; do
+        CI_IMPACT_CMD="${C[${cmd}]}" run _ci_semantic_impact "${V[@S@]}" "${V[@P@]}" "$(_fill "${head}")"
+        [ "${lines[-1]}" = "${verdict}" ] || { echo "${case}: '${lines[-1]}' want ${verdict}: ${output}"; return 1; }
+        _expect "${case}" 0 "${id}" || return 1
+    done <<'CASES'
+equal|ok|ok|ok|-|@ID@|NOOP|[CI-INFO-IMPACT-0004]
+differ|ok|ok|ok|-|@OTHER@|BUILD|[CI-INFO-IMPACT-0004]
+base-id-fails|ok|ok|fail|-|@ID@|UNKNOWN|[CI-INFO-IMPACT-0010]
+no-base-ref|none|ok|ok|-|@ID@|UNKNOWN|[CI-INFO-IMPACT-0003]
+refs-fail|fail|ok|ok|-|@ID@|UNKNOWN|[CI-INFO-IMPACT-0005]
+no-base-sot|ok|fail|ok|-|@ID@|UNKNOWN|[CI-INFO-IMPACT-0006]
+cmd-verdict|ok|ok|ok|build|@ID@|BUILD|-
+cmd-fails|ok|ok|ok|fail|@ID@|UNKNOWN|[CI-WARN-IMPACT-0007]
+cmd-junk|ok|ok|ok|junk|@ID@|UNKNOWN|[CI-WARN-IMPACT-0008]
+CASES
 }
 
 # =========================================================
 # TEST / SCAN
 # =========================================================
 
-@test "test fails closed and shows raw output when tests fail" {
-    # What: A failed test run is a failed run (AG-VAL-002).
-    # Why: Never skip or swallow a real test failure.
-    # From: Issue #1683
-    CI_TEST_CMD="$(_stub t 'echo boom; exit 1')" run bash "${CI_SH}" test ui
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-TEST-0003"* ]]
-    [[ "${output}" == *"boom"* ]]
-}
-
-@test "test passes when the backend succeeds" {
-    # What: Green backend -> tested=ok.
-    # Why: The one success path.
-    # From: Issue #1683
-    CI_TEST_CMD="$(_stub t 'echo "service=ui tested=ok"; exit 0')" run bash "${CI_SH}" test ui
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"tested=ok"* ]]
-}
-
-@test "rust test is off by default and never runs cargo check" {
-    # What: default SKIP; on runs fmt/clippy/test, no check.
-    # Why: AG-VAL-008: no cargo check in CI; the rest gated.
-    # From: Issue #1683
-    local bin="${BATS_TEST_TMPDIR}/bin" log="${BATS_TEST_TMPDIR}/cargo.log"
-    mkdir -p "${bin}"
+@test "rust test: off by default; on runs fmt, clippy, test via sccache" {
+    # What: per row: SOT + env -> SKIP, ok, or a coded fail.
+    # Why: AG-VAL-008: no cargo check; temp error stops.
+    # From: Issue #1683 | PR #1858
+    local bin log m
+    bin="$(_val path)" log="$(_val path)" m="$(_val path)"
+    local case envs svc rc want cargo
+    local -a ev
+    local -A V=(
+        [@R@]="$(_val name)" [@NC@]="$(_val name)" [@C@]="$(_val name)"
+        [@TMP@]="${BATS_TEST_TMPDIR}/$(_val name)" [@GONE@]="${BATS_TEST_TMPDIR}/$(_val name)"
+    )
+    mkdir -p "${V[@TMP@]}"
     _tool_stub "${bin}" cargo <<STUB
-echo "\$1" >> "${log}"
+echo "\$1 wrapper=\${RUSTC_WRAPPER:-none} dir=\${SCCACHE_DIR:-none} args=\$*" >> "${log}"
 STUB
-    _stub_sccache "${bin}" 0
-    printf '%s\n' 'services:' '  svc-r:' '    build_type: rust' '    crate: crate-r' \
-        'ci_variables:' '  CI_RUST_VALIDATION: "false"' > "${BATS_TEST_TMPDIR}/m.yml"
-    export CI_MANIFEST="${BATS_TEST_TMPDIR}/m.yml" PATH="${bin}:${PATH}"
-    run bash "${CI_SH}" test svc-r
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"tested=SKIP"*"AG-VAL-008"* ]]
-    [ ! -e "${log}" ]
-    CI_RUST_VALIDATION=true run bash "${CI_SH}" test svc-r
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"tested=ok"* ]]
-    [ "$(paste -sd' ' "${log}")" = "fmt clippy test" ]
+    _stub_sccache "${bin}" never
+    {
+        _fill "$(printf '%s\n' 'services:' '  @R@:' '    build_type: rust' '    crate: @C@' '  @NC@:' '    build_type: rust')"
+        printf '\n'
+        _sot_block ci_variables
+    } > "${m}"
+    while IFS='|' read -r case envs svc rc want cargo; do
+        ev=(); [ "${envs}" = - ] || read -r -a ev <<< "$(_fill "${envs}")"
+        rm -f "${log}"
+        run _cache_env_clean env -u CI_RUST_VALIDATION SCCACHE_REDIS_MODE=optional "${ev[@]}" CI_MANIFEST="${m}" \
+            CI_REPO_ROOT="${BATS_TEST_TMPDIR}" PATH="${bin}:${PATH}" \
+            bash -c 'source "$1"; _ci_test_rust "$2"' _ "${CI_SH}" "$(_fill "${svc}")"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+        if [ "${cargo}" = - ]; then
+            [ ! -e "${log}" ] || { echo "${case}: cargo ran: $(cat "${log}")"; return 1; }
+            continue
+        fi
+        [ "$(cut -d' ' -f1 "${log}" | paste -sd' ')" = "${cargo}" ] || { echo "${case}: $(cat "${log}")"; return 1; }
+        [ "$(grep -c -F -- "wrapper=sccache dir=${V[@TMP@]}/sccache " "${log}")" -eq 3 ] \
+            && [ "$(grep -c -F -- "-p ${V[@C@]}" "${log}")" -eq 3 ] || { echo "${case}: $(cat "${log}")"; return 1; }
+    done <<'CASES'
+off-by-sot|-|@R@|0|tested=SKIP;AG-VAL-008|-
+on|CI_RUST_VALIDATION=true CI_TMPDIR=@TMP@|@R@|0|[CI-INFO-CACHE-0002];tested=ok|fmt clippy test
+no-crate|CI_RUST_VALIDATION=true CI_TMPDIR=@TMP@|@NC@|2|[CI-ERROR-TEST-0005] service="@NC@"|-
+temp-error|CI_RUST_VALIDATION=true CI_TMPDIR=@GONE@|@R@|2|[CI-ERROR-CORE-0110];[CI-ERROR-TEST-0009]|-
+CASES
 }
 
-@test "rust test runs every cargo call through sccache" {
-    # What: cargo sees RUSTC_WRAPPER=sccache, local dir.
-    # Why: rust without sccache violates AG-CI (no Redis).
-    # From: Issue #1683 | PR #1858
-    local root="${BATS_TEST_TMPDIR}/root" bin="${BATS_TEST_TMPDIR}/bin"
-    mkdir -p "${root}" "${bin}"
-    _tool_stub "${bin}" cargo <<'STUB'
-echo "cargo $1 wrapper=${RUSTC_WRAPPER:-none} dir=${SCCACHE_DIR:-none} args=$*"
-STUB
-    _stub_sccache "${bin}" 0
-    unset SCCACHE_REDIS_URL
-    CI_RUST_VALIDATION=true CI_REPO_ROOT="${root}" PATH="${bin}:${PATH}" run _ci_test_rust dns
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"[CI-INFO-CACHE-0002]"* ]]
-    [ "$(grep -c 'wrapper=sccache dir=/var/tmp/sccache' <<<"${output}")" -eq 3 ]
-    [ "$(grep -c -- "-p $(ci_service_field dns crate)" <<<"${output}")" -eq 3 ]
-    CI_TMPDIR="${BATS_TEST_TMPDIR}/missing" SCCACHE_DIR=/var/tmp/sccache CI_RUST_VALIDATION=true \
-        CI_REPO_ROOT="${root}" PATH="${bin}:${PATH}" run _ci_test_rust dns
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"mktemp"* ]]
-    [[ "${output}" != *"cargo fmt"* ]]
-}
-
-@test "sccache env selects Redis when a URL is provided" {
-    # What: a Redis URL switches the backend to redis.
-    # Why: shared cache on self-hosted; local otherwise.
-    # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/bin"
-    _stub_sccache "${bin}" 0
-    SCCACHE_REDIS_URL=redis://cache.invalid:6379 PATH="${bin}:${PATH}" run bash -c \
-        'source "$1"; _ci_sccache_env p; echo "r=${SCCACHE_REDIS}"; _ci_sccache_stop' _ "${CI_SH}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"[CI-INFO-CACHE-0001]"* ]]
-    [[ "${output}" == *"r=redis://cache.invalid:6379"* ]]
-}
-
-@test "sccache outage degrades to local cache, then direct rustc" {
-    # What: redis down -> local; local down -> direct rustc.
-    # Why: §42: cache outage costs speed, never the build.
-    # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/bin" probe='source "$1"; _ci_sccache_env p
-        echo "rc=$? w=${RUSTC_WRAPPER:-none} r=${SCCACHE_REDIS:-none}"
-        d="${SCCACHE_SERVER_UDS%/*}"; [ -d "${d}" ] && echo "sock-dir=yes"
-        _ci_sccache_stop; [ -e "${d}" ] && echo leftover; :'
-    _stub_sccache "${bin}" redis-only
-    SCCACHE_REDIS_URL=redis://cache.invalid:6379 PATH="${bin}:${PATH}" \
-        run bash -c "${probe}" _ "${CI_SH}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"CI-WARN-CACHE-0003"*"raw-redis-down"* ]]
-    [[ "${output}" == *"rc=0 w=sccache r=none"* ]]
-    [[ "${output}" != *"CI-WARN-CACHE-0004"* ]]
-    [[ "${output}" == *"sock-dir=yes"* ]]
-    [[ "${output}" != *"leftover"* ]]
-    _stub_sccache "${bin}" 1
-    SCCACHE_REDIS_URL=redis://cache.invalid:6379 PATH="${bin}:${PATH}" \
-        run bash -c "${probe}" _ "${CI_SH}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"CI-WARN-CACHE-0003"* ]]
-    [[ "${output}" == *"CI-WARN-CACHE-0004"*"raw-server-down"* ]]
-    [[ "${output}" == *"rc=0 w=none r=none"* ]]
-    [[ "${output}" != *"leftover"* ]]
-}
-
-@test "sccache reap kills only servers under this run's socket dir" {
-    # What: no real server; a renamed shell plays one.
-    # Why: reap must kill only this run's socket dir.
-    # From: Issue #1683 | PR #1858
-    local fake="${BATS_TEST_TMPDIR}/fake/sccache" mine other
-    mkdir -p "${fake%/*}" "${BATS_TEST_TMPDIR}/mine" "${BATS_TEST_TMPDIR}/other"
-    cp "$(command -v bash)" "${fake}"
-    SCCACHE_SERVER_UDS="${BATS_TEST_TMPDIR}/mine/s.sock" "${fake}" -c 'while :; do sleep 1; done' 3>&- &
-    mine=$!
-    SCCACHE_SERVER_UDS="${BATS_TEST_TMPDIR}/other/s.sock" "${fake}" -c 'while :; do sleep 1; done' 3>&- &
-    other=$!
-    sleep 1
-    run _ci_sccache_reap "${BATS_TEST_TMPDIR}/mine"
-    sleep 1
-    local mine_alive=no other_alive=no
-    kill -0 "${mine}" 2>/dev/null && mine_alive=yes
-    kill -0 "${other}" 2>/dev/null && other_alive=yes
-    kill "${other}"
-    echo "status=${status} mine_alive=${mine_alive} other_alive=${other_alive} out=${output}"
-    [ "${status}" -eq 0 ]
-    [ "${mine_alive}" = no ]
-    [ "${other_alive}" = yes ]
-}
-
-@test "test reports SKIP for an apk service; smoke is at the digest" {
-    # What: apk has no test -> explicit SKIP+reason.
-    # Why: legit skip; smoke runs in verify.
-    # From: Issue #1613
-    CI_SMOKE_CMD="$(_stub sm 'echo SMOKE-CALLED')" \
-        run bash "${CI_SH}" test proxy
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"tested=SKIP"* ]]
-    [[ "${output}" != *"SMOKE-CALLED"* ]]
-}
-
-@test "verify smoke-tests a product image at its digest" {
-    # What: matching readback -> SOT smoke at the digest.
-    # Why: §25 SERVICE_TESTED; a smoke failure fails verify.
-    # From: Issue #1613
-    _build_fixture
-    CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" \
-    CI_SMOKE_CMD="$(_stub sm 'echo "service=$1 smoke=ok image=${CI_SERVICE_IMAGE}"')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=owner/fixture-repo \
-        run bash "${CI_SH}" verify svc-a sha256:dead os/p1
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"smoke=ok image="*"svc-a@sha256:dead"* ]]
-    CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" \
-    CI_SMOKE_CMD="$(_stub sm 'exit 1')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=owner/fixture-repo \
-        run bash "${CI_SH}" verify svc-a sha256:dead os/p1
-    [ "${status}" -ne 0 ]
-}
-
-@test "verify of a rust service runs its ldd smoke in the image" {
-    # What: verify of a rust service reaches the ldd smoke.
-    # Why: the SOT ldd item must run, not only exist.
-    # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/bin" log="${BATS_TEST_TMPDIR}/docker.log"
-    _build_fixture
-    printf '%s\n' '  svc-r:' '    context: svc' '    build_type: rust' '    final_base: base-x' \
-        '    smoke:' '      - ldd /usr/local/bin/svc-r' > "${BATS_TEST_TMPDIR}/svc-r.yml"
-    awk -v add="${BATS_TEST_TMPDIR}/svc-r.yml" \
-        '/^build_toolchain:/ { while ((getline l < add) > 0) print l } { print }' \
-        "${CI_MANIFEST}" > "${CI_MANIFEST}.new" && mv "${CI_MANIFEST}.new" "${CI_MANIFEST}"
-    _tool_stub "${bin}" docker <<STUB
-echo "docker \$*" >> "${log}"
-runs="\$(cat)"
-printf '%s\n' "\${runs}" >> "${log}"
-[ -z "\${LDD_FAIL:-}" ] || { printf 'failed: %s\n' "\${runs%%\$'\n'*}"; echo "Error loading shared library libx.so"; exit 127; }
-STUB
-    CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" PATH="${bin}:${PATH}" \
-    GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=owner/fixture-repo \
-        run bash "${CI_SH}" verify svc-r sha256:dead os/p1
-    echo "log=$(cat "${log}")"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"service=svc-r smoke=ok checks=1"* ]]
-    [[ "$(cat "${log}")" == *"--entrypoint timeout "*"svc-r@sha256:dead --kill-after="*" bash -c "* ]]
-    grep -qx 'ldd /usr/local/bin/svc-r' "${log}"
-    LDD_FAIL=1 CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" PATH="${bin}:${PATH}" \
-    GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=owner/fixture-repo \
-        run bash "${CI_SH}" verify svc-r sha256:dead os/p1
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-TEST-0008"*"libx.so"* ]]
-    [[ "${output}" == *'service="svc-r" check="ldd /usr/local/bin/svc-r" reason="execute-smoke failed; missing lib?"'* ]]
-}
-
-@test "test build-tools fails closed without a toolchain image" {
-    # What: The smoke needs the candidate image ref.
-    # Why: No image means nothing to smoke; fail closed.
-    # From: Issue #1683
-    run bash "${CI_SH}" test build-tools
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-TEST-0006"* ]]
-}
-
-@test "build-tools smoke lists come from the SOT; empty fails closed" {
-    # What: smoke_tools/smoke_runs read verbatim from SOT.
-    # Why: one smoke owner (AG-VAL-017); blank never passes.
-    # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/m.yml"
-    printf 'build_toolchain:\n  build-tools:\n    smoke_tools:\n      - t1\n    smoke_runs:\n      - t1 --v | x\n' > "${m}"
-    CI_MANIFEST="${m}" run _ci_build_tools_smoke smoke_tools
-    [ "${output}" = t1 ]
-    CI_MANIFEST="${m}" run _ci_build_tools_smoke smoke_runs
-    [ "${output}" = "t1 --v | x" ]
-    printf 'build_toolchain:\n  build-tools:\n    smoke_tools:\n      - t1\n' > "${m}"
-    CI_MANIFEST="${m}" run _ci_build_tools_smoke smoke_runs
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0013"* ]]
-}
-
-@test "toolchain smoke fails on a missing tool or a failing run" {
-    # What: the real smoke script runs via a docker shim.
-    # Why: tools via args and runs via stdin both gate.
-    # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/m.yml" tool run
-    docker() { shift 6; timeout "$@"; }
-    for tool in sh no-such-tool-x; do
-        for run in true false; do
-            printf 'build_toolchain:\n  build-tools:\n    smoke_tools:\n      - bash\n      - %s\n    smoke_runs:\n      - bash --version\n      - %s\n' \
-                "${tool}" "${run}" > "${m}"
-            _sot_ci_variables >> "${m}"
-            CI_MANIFEST="${m}" CI_TOOLCHAIN_IMAGE=img run _ci_test_toolchain build-tools
-            if [ "${tool}" = sh ] && [ "${run}" = true ]; then
-                [ "${status}" -eq 0 ]; [[ "${output}" == *"tested=ok"* ]]
-            else
-                [ "${status}" -eq 1 ]
-                [[ "${output}" == *"[CI-ERROR-TEST-0011]"* ]]
-                [[ "${output}" == *'check="missing no-such-tool-x"'* || "${output}" == *'check="false"'* ]]
-            fi
-        done
-    done
-}
-
-@test "test build-tools reports ok via the wired smoke backend" {
-    # What: A green smoke yields tested=ok for build-tools.
-    # Why: The wired toolchain smoke is the real test.
-    # From: Issue #1683
-    CI_TOOLCHAIN_TEST_CMD="$(_stub tc 'echo "service=build-tools tested=ok"')" \
-        run bash "${CI_SH}" test build-tools
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"tested=ok"* ]]
-}
-
-@test "verify smoke-tests a toolchain image after a matching readback" {
-    # What: A toolchain verify runs the SOT tool smoke.
-    # Why: §25 requires accelerator tools at digest.
-    # From: Issue #1683
-    _build_fixture
-    CI_READBACK_CMD="$(_stub rb 'echo sha256:dead')" \
-    CI_TOOLCHAIN_TEST_CMD="$(_stub tc 'echo "service=$1 tested=ok"')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t GITHUB_REPOSITORY=owner/fixture-repo \
-        run bash "${CI_SH}" verify tool-t sha256:dead os/p1
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"verified=sha256:dead"* ]]
-}
-
-@test "test runs the real cargo pipeline for a rust fixture (no injection)" {
-    # What: Default rust path runs real cargo pipeline.
-    # Why: AG-VAL-008 must run for real, not via injection.
-    # From: Issue #1683
-    local root="${BATS_TEST_TMPDIR}/repo-ok"
-    mkdir -p "${root}/crate/src"
-    cat > "${root}/crate/Cargo.toml" <<'TOML'
-[package]
-name = "ci-fixture-ok"
-version = "0.1.0"
-edition = "2021"
-TOML
-    cat > "${root}/crate/src/main.rs" <<'RS'
-fn main() {
-    println!("ci fixture ok");
-}
-
-#[test]
-fn real_cargo_test_runs() {
-    // What: Sanity check the real path executes cargo test.
-    // Why: Proves _ci_test_rust runs real cargo, not a stub.
-    assert_eq!(1 + 1, 2);
-}
-RS
-    printf '[workspace]\nmembers = ["crate"]\nresolver = "2"\n' > "${root}/Cargo.toml"
-    ( cd "${root}" && cargo generate-lockfile --offline -q )
-    local m="${BATS_TEST_TMPDIR}/manifest-ok.yml"
-    printf 'services:\n  fixture-ok:\n    context: crate\n    crate: ci-fixture-ok\n    build_type: rust\n' > "${m}"
-    CI_RUST_VALIDATION=true CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" run bash "${CI_SH}" test fixture-ok
-    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
-    [[ "${output}" == *"tested=ok"* ]]
-}
-
-@test "test propagates a real cargo clippy failure without injection" {
-    # What: Real clippy violations fail, unmocked.
-    # Why: AG-INT-002: real failures must never hide.
-    # From: Issue #1683
-    local root="${BATS_TEST_TMPDIR}/repo-fail"
-    mkdir -p "${root}/crate/src"
-    cat > "${root}/crate/Cargo.toml" <<'TOML'
-[package]
-name = "ci-fixture-fail"
-version = "0.1.0"
-edition = "2021"
-TOML
-    cat > "${root}/crate/src/main.rs" <<'RS'
-fn main() {
-    let flag = true;
-    if flag == true {
-        println!("{flag}");
+# What: sccache chain per runner and mode; level outages.
+# Why: AG-CI-009 Redis L1, GHA L2; required fails closed.
+# From: Issue #1683 | PR #1858
+@test "sccache env: chain per runner and mode, outage degrades or fails closed" {
+    local case runner url tok mode fail rc want bin log sock
+    local -A V=(
+        [@U@]="$(_val url)" [@RU@]="$(_val url)" [@T@]="$(_val name)" [@X@]="$(_val name)"
+        [@BAD@]="$(_val name)" [@TMP@]="$(_val path)"
+    )
+    bin="$(_val path)"; log="$(_val path)"; sock="$(_val path)"
+    mkdir -p "${V[@TMP@]}"
+    _sccache_probe() {
+        local rc=0 n
+        _cache_env_clean
+        unset RUSTC_WRAPPER SCCACHE_SERVER_UDS
+        [ "$1" = - ] || export RUNNER_ENVIRONMENT="$1"
+        [ "$2" = - ] || export SCCACHE_REDIS_URL="$2"
+        [ "$3" = no ] || export ACTIONS_RESULTS_URL="${V[@RU@]}" ACTIONS_RUNTIME_TOKEN="${V[@T@]}"
+        export SCCACHE_REDIS_MODE="$4" CI_TMPDIR="${V[@TMP@]}"
+        _ci_sccache_env "$(_val name)" || rc=$?
+        n="$(wc -l < "${log}")"
+        echo "rc=${rc} w=${RUSTC_WRAPPER:-none} starts=$(head -n "${n}" "${log}" | tr '\n' '/')#end"
+        n="${SCCACHE_SERVER_UDS:-}"
+        printf '%s\n' "${n%/*}" > "${sock}"
+        _ci_sccache_stop
     }
-}
-RS
-    printf '[workspace]\nmembers = ["crate"]\nresolver = "2"\n' > "${root}/Cargo.toml"
-    ( cd "${root}" && cargo generate-lockfile --offline -q )
-    local m="${BATS_TEST_TMPDIR}/manifest-fail.yml"
-    printf 'services:\n  fixture-fail:\n    context: crate\n    crate: ci-fixture-fail\n    build_type: rust\n' > "${m}"
-    CI_RUST_VALIDATION=true CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" run bash "${CI_SH}" test fixture-fail
-    [ "${status}" -eq 2 ] || { echo "${output}"; return 1; }
-    [[ "${output}" == *"CI-ERROR-TEST-0003"* ]]
-    [[ "${output}" == *"equality checks against true"* ]] || { echo "${output}"; return 1; }
+    while IFS='|' read -r case runner url tok mode fail rc want; do
+        : > "${log}"; : > "${sock}"
+        _stub_sccache "${bin}" "${fail}" "${V[@X@]}" "${log}"
+        PATH="${bin}:${PATH}" run _sccache_probe "${runner}" "$(_fill "${url}")" "${tok}" "$(_fill "${mode}")"
+        _expect "${case}" 0 "$(_fill "${want}")" || return 1
+        [[ "${output}" == *"rc=${rc} "* ]] || { echo "${case}: want rc=${rc}: ${output}"; return 1; }
+        [ ! -s "${sock}" ] || [ ! -e "$(<"${sock}")" ] || { echo "${case}: socket dir left"; return 1; }
+    done <<'CASES'
+self-full|self-hosted|@U@|yes|required|never|0|[CI-INFO-CACHE-0001];mode=required chain="redis,gha";w=sccache starts=r=@U@ g=on c=redis,gha w=/#end
+hosted-gha|github-hosted|@U@|yes|required|never|0|[CI-INFO-CACHE-0001];chain="gha";w=sccache starts=r= g=on c= w=/#end
+self-redis-only|self-hosted|@U@|no|required|never|0|chain="redis";w=sccache starts=r=@U@ g= c= w=/#end
+hosted-no-tokens|github-hosted|@U@|no|required|never|2|[CI-ERROR-CACHE-0007];w=none starts=#end
+self-no-url|self-hosted|-|yes|required|never|2|[CI-ERROR-VARIABLES-0012];w=none starts=#end
+bad-mode|github-hosted|-|yes|@BAD@|never|2|[CI-ERROR-VARIABLES-0010];w=none starts=#end
+required-down|github-hosted|-|yes|required|always|2|[CI-ERROR-CACHE-0008];raw:;@X@;w=sccache starts=r= g=on c= w=/#end
+optional-all-down|self-hosted|@U@|yes|optional|always|0|[CI-WARN-CACHE-0003];next="gha";@X@;[CI-WARN-CACHE-0003];next="local";[CI-WARN-CACHE-0004];@X@;w=none starts=r=@U@ g=on c=redis,gha w=ignore/r= g=on c= w=/r= g= c= w=/#end
+optional-redis-down|self-hosted|@U@|yes|optional|redis|0|[CI-WARN-CACHE-0003];next="gha";w=sccache starts=r=@U@ g=on c=redis,gha w=ignore/r= g=on c= w=/#end
+optional-local|github-hosted|-|no|optional|never|0|[CI-INFO-CACHE-0002];mode=optional;w=sccache starts=r= g= c= w=/#end
+off|self-hosted|@U@|yes|off|never|0|[CI-INFO-CACHE-0002];mode=off;w=sccache starts=r= g= c= w=/#end
+CASES
 }
 
-@test "ci.sh rejects a /tmp (tmpfs) temp root for any command" {
-    # What: tmpfs /tmp risks OOM; one guard for all.
-    # Why: All CI staging is /var/tmp (maintainer rule).
+# What: export step args: SOT kill timeout, cache pair only.
+# Why: only the GHA cache runtime may reach later steps.
+# From: Issue #1683 | PR #1858
+@test "gha-runtime-args: kill-bounded step exports only the GHA cache runtime pair" {
+    local t out envf other args got
+    local -a argv
+    t="$(_val int 5 120)"; out="$(_val path)"; envf="$(_val path)"; other="ACTIONS_$(_val name)"
+    : > "${out}"
+    CI_GHA_RUNTIME_EXPORT_TIMEOUT="${t}" GITHUB_OUTPUT="${out}" run ci_cmd_gha_runtime_args
+    _expect args 0 "-s KILL ${t} /bin/sh -c " || return 1
+    args="${lines[${#lines[@]}-1]}"
+    [ "$(<"${out}")" = "args=${args}" ] || { echo "step output: $(<"${out}")"; return 1; }
+    mapfile -t argv < <(printf '%s' "${args}" | xargs -n1 printf '%s\n')
+    : > "${envf}"
+    local ru tok
+    ru="$(_val url)"; tok="$(_val name)"
+    run env -i PATH="${PATH}" GITHUB_ENV="${envf}" ACTIONS_RESULTS_URL="${ru}" ACTIONS_RUNTIME_TOKEN="${tok}" \
+        "${other}=$(_val name)" timeout "${argv[@]}"
+    _expect export 0 - || return 1
+    got="$(sort "${envf}" | paste -sd' ')"
+    [ "${got}" = "ACTIONS_RESULTS_URL=${ru} ACTIONS_RUNTIME_TOKEN=${tok}" ] || { echo "exported: ${got}"; return 1; }
+    CI_GHA_RUNTIME_EXPORT_TIMEOUT="$(_val name)" run ci_cmd_gha_runtime_args
+    _expect bad-timeout 2 "[CI-ERROR-CACHE-0009]" || return 1
+    CI_GHA_RUNTIME_EXPORT_TIMEOUT="${t}" GITHUB_OUTPUT="$(_val path)/$(_val name)/$(_val name)" run ci_cmd_gha_runtime_args
+    _expect output-unwritable 2 "[CI-ERROR-CACHE-0010];raw:" || return 1
+}
+
+# What: reap kills this run's sccache servers only.
+# Why: parallel runs share a host; foreign servers live.
+# From: Issue #1683 | PR #1858
+@test "sccache reap kills only servers under this run's socket dir" {
+    local fake mine_dir other_dir mine other n wrc=0 orc=0
+    fake="$(_val path)/sccache"; mine_dir="$(_val path)"; other_dir="$(_val path)"
+    mkdir -p "${fake%/*}" "${mine_dir}" "${other_dir}"
+    cp "$(command -v bash)" "${fake}"
+    SCCACHE_SERVER_UDS="${mine_dir}/$(_val name)" "${fake}" -c 'while :; do sleep 1; done' 3>&- &
+    mine=$!
+    SCCACHE_SERVER_UDS="${other_dir}/$(_val name)" "${fake}" -c 'while :; do sleep 1; done' 3>&- &
+    other=$!
+    for n in $(seq 1 100); do
+        [ "$(cat "/proc/${mine}/comm" 2>&1)" != sccache ] || [ "$(cat "/proc/${other}/comm" 2>&1)" != sccache ] || break
+        sleep 0.05
+    done
+    run _ci_sccache_reap "${mine_dir}"
+    _expect reap 0 - || { kill "${mine}" "${other}"; return 1; }
+    for n in $(seq 1 100); do
+        kill -0 "${mine}" 2>&1 || break
+        sleep 0.05
+    done
+    if kill -0 "${mine}" 2>&1; then
+        kill "${mine}" "${other}"
+        echo "own server not reaped"
+        return 1
+    fi
+    kill -0 "${other}" || { echo "foreign server killed"; return 1; }
+    kill "${other}"
+    wait "${other}" || orc=$?
+    [ "${orc}" -eq 143 ] || { echo "foreign server rc ${orc} after the test's kill"; return 1; }
+    wait "${mine}" || wrc=$?
+    [ "${wrc}" -eq 143 ] || { echo "own server rc ${wrc}, not ended by SIGTERM"; return 1; }
+}
+
+# What: per row: build type -> SKIP, smoke at image or fail.
+# Why: apk has no source tests; a smoke failure fails test.
+# From: Issue #1683 | PR #1858
+@test "test dispatches per build type and fails closed" {
+    local m case fault svc rc want ran
+    m="$(_val path)"
+    export DS="${BATS_TEST_TMPDIR}/ds"
+    _docker_stub "${DS}/bin" || return 1
+    local -A V=(
+        [@APK@]="$(_val name)" [@TOOL@]="$(_val name)" [@ODD@]="$(_val name)" [@BT@]="$(_val name)"
+        [@RUN@]="$(_val name)" [@CV@]="$(_val var)" [@IMG@]="$(_val name)@$(_val digest)" [@FAULT@]="$(_val name)"
+    )
+    _tool_stub "${DS}/bin" "${V[@RUN@]}" <<< '[ ! -e "${DS}/smoke-fail" ] || { echo "${FAULT}"; exit 1; }'
+    {
+        _fill "$(printf '%s\n' 'services:' '  @APK@:' '    build_type: apk' '  @ODD@:' '    build_type: @BT@' \
+            'build_toolchain:' '  @TOOL@:' '    build_type: toolchain' '    smoke_tools: [@RUN@]' '    smoke_runs: [@RUN@]')"
+        printf '\n'
+        _sot_block ci_variables
+    } > "${m}"
+    while IFS='|' read -r case fault svc rc want ran; do
+        rm -f "${DS}/smoke-fail" "${DS}/run-images"
+        [ "${fault}" = - ] || : > "${DS}/${fault}"
+        run env CI_MANIFEST="${m}" PATH="${DS}/bin:${PATH}" CI_TOOLCHAIN_IMAGE="${V[@IMG@]}" FAULT="${V[@FAULT@]}" \
+            CI_TOOLCHAIN_COMPILERS="${V[@CV@]}=${V[@RUN@]}" bash "${CI_SH}" test "$(_fill "${svc}")"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+        if [ "${ran}" = - ]; then
+            [ ! -e "${DS}/run-images" ] || { echo "${case}: smoke ran: $(cat "${DS}/run-images")"; return 1; }
+        else
+            [ "$(cat "${DS}/run-images")" = "$(_fill "${ran}")" ] || { echo "${case}: ran $(cat "${DS}/run-images")"; return 1; }
+        fi
+    done <<'CASES'
+apk-skip|-|@APK@|0|service=@APK@ tested=SKIP reason=|-
+toolchain-ok|-|@TOOL@|0|service=@TOOL@ tested=ok|@IMG@
+toolchain-fail|smoke-fail|@TOOL@|2|[CI-ERROR-TEST-0003] service="@TOOL@";[CI-ERROR-TEST-0011] service="@TOOL@";@FAULT@|@IMG@
+unknown-type|-|@ODD@|2|[CI-ERROR-TEST-0003];[CI-ERROR-TEST-0004] service="@ODD@" build_type="@BT@"|-
+CASES
+}
+
+# What: per row: readback vs digest -> smoke or coded fail.
+# Why: BUILT != ACCEPTED; only a matched digest is smoked.
+# From: Issue #1683 | PR #1858
+@test "verify reads the digest back and smokes only a match" {
+    local m rule case svc plat digest fault rc want ran
+    m="$(_val path)"
+    export DS="${BATS_TEST_TMPDIR}/ds"
+    _docker_stub "${DS}/bin" || return 1
+    local -A V=(
+        [@REG@]="$(_val host).$(_val name)" [@OWN@]="$(_val name)" [@REPO@]="$(_val name)" [@R@]="$(_val name)"
+        [@N@]="$(_val name)" [@Q@]="$(_val name)" [@T@]="$(_val name)" [@BT@]="$(_val name)" [@CTX@]="$(_val name)"
+        [@CRATE@]="$(_val name)" [@RUN@]="$(_val name)" [@CV@]="$(_val var)" [@EXP@]="$(_val digest)"
+        [@OTHER@]="$(_val digest)" [@PLAT@]="$(_val platform)" [@FOREIGN@]="$(_val platform)"
+        [@USER@]="$(_val name)" [@TOKEN@]="$(_val name)" [@FAULT@]="$(_val name)"
+    )
+    V[@REF@]="${V[@REG@]}/${V[@OWN@]}/${V[@REPO@]}"
+    rule="$(_sot_block build_runtime | sed -n 's/^ *- \(.*@CRATE@.*\)$/\1/p')"
+    [ -n "${rule}" ] || { echo "no @CRATE@ smoke rule in the SOT build_runtime"; return 1; }
+    V[@RULE@]="${rule//@CRATE@/${V[@CRATE@]}}"
+    _tool_stub "${DS}/bin" "${V[@RUN@]}" <<< '[ ! -e "${DS}/smoke-fail" ] || { echo "${FAULT}"; exit 1; }'
+    _tool_stub "${DS}/bin" "${rule%% *}" <<< '[ ! -e "${DS}/smoke-fail" ] || { echo "${FAULT}"; exit 127; }'
+    {
+        _fill "$(printf '%s\n' 'build_matrix:' '  platforms: [@PLAT@]' 'build_identity:' '  rust:' '    inputs: [source_sha]' \
+            '  @BT@:' '    inputs: [source_sha]' '  toolchain:' '    inputs: [source_sha]' 'services:' \
+            '  @R@:' '    context: @CTX@' '    build_type: rust' '    crate: @CRATE@' \
+            '  @N@:' '    context: @CTX@' '    build_type: rust' '  @Q@:' '    context: @CTX@' '    build_type: @BT@' \
+            'build_toolchain:' '  @T@:' '    context: @CTX@' '    build_type: toolchain' \
+            '    smoke_tools: [@RUN@]' '    smoke_runs: [@RUN@]' 'release:' '  registry: @REG@')"
+        printf '\n'
+        _sot_block build_runtime
+        _sot_block ci_variables
+    } > "${m}"
+    while IFS='|' read -r case svc plat digest fault rc want ran; do
+        rm -f "${DS}/digest" "${DS}/smoke-fail" "${DS}/inspect-fail" "${DS}/run-images" "${DS}/docker.log"
+        [ "${digest}" = - ] || _fill "${digest}" > "${DS}/digest"
+        [ "${fault}" = - ] || : > "${DS}/${fault}"
+        run env -u DOCKERHUB_USERNAME -u DOCKERHUB_TOKEN CI_MANIFEST="${m}" PATH="${DS}/bin:${PATH}" \
+            GITHUB_REPOSITORY="${V[@OWN@]}/${V[@REPO@]}" GHCR_USERNAME="${V[@USER@]}" GHCR_TOKEN="${V[@TOKEN@]}" \
+            CI_TOOLCHAIN_COMPILERS="${V[@CV@]}=${V[@RUN@]}" FAULT="${V[@FAULT@]}" \
+            bash "${CI_SH}" verify "$(_fill "${svc}")" "${V[@EXP@]}" "$(_fill "${plat}")"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+        case "${ran}" in
+            none) [ ! -e "${DS}/docker.log" ] || { echo "${case}: docker ran: $(cat "${DS}/docker.log")"; return 1; } ;;
+            -) [ ! -e "${DS}/run-images" ] || { echo "${case}: smoke ran: $(cat "${DS}/run-images")"; return 1; } ;;
+            *) ran="$(_fill "${ran}")"
+                [ "$(cat "${DS}/run-images")" = "${ran}" ] || { echo "${case}: ran $(cat "${DS}/run-images")"; return 1; }
+                grep -qF -- "--entrypoint timeout ${ran} --kill-after=" "${DS}/docker.log" \
+                    || { echo "${case}: no timeout executor: $(cat "${DS}/docker.log")"; return 1; } ;;
+        esac
+    done <<'CASES'
+rust-match|@R@|@PLAT@|@EXP@|-|0|service=@R@ smoke=ok checks=1;service=@R@ verified=@EXP@|@REF@/@R@@@EXP@
+rust-missing-lib|@R@|@PLAT@|@EXP@|smoke-fail|1|[CI-ERROR-TEST-0008] service="@R@" check="@RULE@" reason="execute-smoke failed; missing lib?";@FAULT@|@REF@/@R@@@EXP@
+rust-no-crate|@N@|@PLAT@|@EXP@|-|2|[CI-ERROR-CORE-0009]|-
+no-smoke|@Q@|@PLAT@|@EXP@|-|0|service=@Q@ smoke=SKIP reason=no SOT smoke;service=@Q@ verified=@EXP@|-
+tool-match|@T@|@PLAT@|@EXP@|-|0|service=@T@ tested=ok;service=@T@ verified=@EXP@|@REF@/@T@@@EXP@
+tool-smoke-fail|@T@|@PLAT@|@EXP@|smoke-fail|1|[CI-ERROR-TEST-0011] service="@T@";@FAULT@|@REF@/@T@@@EXP@
+mismatch|@R@|@PLAT@|@OTHER@|-|2|[CI-ERROR-VERIFY-0005] service="@R@";expected="@EXP@";readback=@OTHER@|-
+readback-missing|@R@|@PLAT@|-|-|2|[CI-ERROR-RESOLVE-0011];: not found;[CI-ERROR-VERIFY-0006] service="@R@" tag="@REF@/@R@:sha-|-
+readback-fail|@R@|@PLAT@|@EXP@|inspect-fail|2|[CI-ERROR-RESOLVE-0011];@FAULT@;[CI-ERROR-VERIFY-0006] service="@R@"|-
+foreign-platform|@R@|@FOREIGN@|@EXP@|-|2|[CI-ERROR-VERIFY-0007] service="@R@";got="@FOREIGN@"|none
+CASES
+}
+
+@test "toolchain smoke reads SOT lists and gates each tool and run" {
+    # What: per row: SOT smoke lists -> ok or a coded fail.
+    # Why: AG-VAL-017: present is not runnable; blank fails.
     # From: Issue #1683 | PR #1858
-    CI_TMPDIR=/tmp CI_SCAN_CMD="$(_stub s 'exit 0')" GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" scan ui sha256:x
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CORE-0006"* ]]
+    local m case call tools runs comp cv rc want
+    m="$(_val path)"
+    local -A V=(
+        [@TOOL@]="$(_val name)" [@IMG@]="$(_val name)" [@MISS@]="$(_val name)"
+        [@A@]="$(_val name)" [@B@]="$(_val name)" [@C@]="$(_val name)" [@CV@]="$(_val var)" [@PIPE@]='|'
+    )
+    export DS="${BATS_TEST_TMPDIR}/ds"
+    _docker_stub "${DS}/bin" || return 1
+    while IFS='|' read -r case call tools runs comp rc want; do
+        {
+            printf 'build_toolchain:\n  %s:\n    build_type: toolchain\n    smoke_tools:\n' "${V[@TOOL@]}"
+            { _fill "${tools}"; echo; } | tr ';' '\n' | sed 's/^/      - /'
+            if [ "${runs}" != - ]; then
+                printf '    smoke_runs:\n'
+                { _fill "${runs}"; echo; } | tr ';' '\n' | sed 's/^/      - /'
+            fi
+            _sot_block ci_variables
+        } > "${m}"
+        cv=""; [ "${comp}" = - ] || cv="$(_fill "${comp}" | tr ';' ' ')"
+        case "${call}" in
+            toolchain) PATH="${DS}/bin:${PATH}" CI_TOOLCHAIN_COMPILERS="${cv}" CI_MANIFEST="${m}" \
+                CI_TOOLCHAIN_IMAGE="${V[@IMG@]}" run _ci_test_toolchain "${V[@TOOL@]}" ;;
+            runs) CI_TOOLCHAIN_COMPILERS="${cv}" CI_MANIFEST="${m}" run _ci_build_tools_smoke smoke_runs ;;
+            tools) CI_TOOLCHAIN_COMPILERS="${cv}" CI_MANIFEST="${m}" run _ci_build_tools_smoke smoke_tools ;;
+        esac
+        _expect "${case}" "${rc}" "$(printf '%b' "$(_fill "${want}")")" || return 1
+    done <<'CASES'
+pass|toolchain|bash;sh|bash --version;true|@CV@=bash|0|service=@TOOL@ tested=ok
+missing-tool|toolchain|bash;@MISS@|true|@CV@=bash|1|[CI-ERROR-TEST-0011];check="missing @MISS@"
+missing-driver|toolchain|bash|true|@CV@=@MISS@|1|[CI-ERROR-TEST-0011];check="missing @MISS@"
+failing-run|toolchain|bash|bash --version;false|@CV@=bash|1|[CI-ERROR-TEST-0011];check="false"
+tools-verbatim|tools|@A@;@B@|true|@CV@=@C@|0|=@A@\n@B@\n@C@
+runs-verbatim|runs|bash|@A@ --@B@ @PIPE@ @A@|-|0|=@A@ --@B@ @PIPE@ @A@
+runs-empty|runs|bash|-|-|2|[CI-ERROR-BUILDTOOLS-0013]
+driver-no-var|tools|bash|true|@C@|2|[CI-ERROR-BUILDTOOLS-0025];raw:;@C@
+CASES
+}
+
+@test "test runs real cargo: a clean crate passes, a lint fails raw" {
+    # What: per row: real crate -> tested=ok or raw lint.
+    # Why: AG-VAL-008 for real; a real failure never hides.
+    # From: Issue #1683 | PR #1858
+    local m ed case src rc want root crate svc dir
+    m="$(_val path)"
+    local -A SRC=(
+        [ok]=$'fn main() {\n    println!("ok");\n}\n\n#[test]\nfn runs() {\n    // What: a real cargo test runs.\n    // Why: proves the real path, not a stub.\n    assert_eq!(1 + 1, 2);\n}\n'
+        [lint]=$'fn main() {\n    let flag = true;\n    if flag == true {\n        println!("{flag}");\n    }\n}\n'
+    )
+    ed="$(_ci_cargo_ws_value "${CI_REPO_ROOT}/Cargo.toml" edition)"
+    [ -n "${ed}" ] || { echo "no workspace edition in ${CI_REPO_ROOT}/Cargo.toml"; return 1; }
+    while IFS='|' read -r case src rc want; do
+        root="${BATS_TEST_TMPDIR}/$(_val name)" crate="$(_val name)" svc="$(_val name)" dir="$(_val name)"
+        mkdir -p "${root}/${dir}/src"
+        printf '[package]\nname = "%s"\nversion = "0.0.%s"\nedition = "%s"\n' "${crate}" "$(_val int 0 999)" "${ed}" \
+            > "${root}/${dir}/Cargo.toml"
+        printf '%s' "${SRC[${src}]}" > "${root}/${dir}/src/main.rs"
+        printf '[workspace]\nmembers = ["%s"]\nresolver = "2"\n' "${dir}" > "${root}/Cargo.toml"
+        ( cd "${root}" && cargo generate-lockfile --offline -q ) || return 1
+        { printf 'services:\n  %s:\n    context: %s\n    crate: %s\n    build_type: rust\n' "${svc}" "${dir}" "${crate}"
+            _sot_block ci_variables; } > "${m}"
+        run _cache_env_clean env SCCACHE_REDIS_MODE=optional CI_RUST_VALIDATION=true CI_MANIFEST="${m}" \
+            CI_REPO_ROOT="${root}" bash "${CI_SH}" test "${svc}"
+        _expect "${case}" "${rc}" "${want//@SVC@/${svc}}" || return 1
+    done <<'CASES'
+clean|ok|0|service=@SVC@ tested=ok
+lint|lint|2|[CI-ERROR-TEST-0003] service="@SVC@";equality checks against true;[CI-ERROR-TEST-0010]
+CASES
+}
+
+@test "temp root: tmpfs refused, /var/tmp made, failure coded" {
+    # What: /tmp refused; subdir made; bad root fails rc 2.
+    # Why: bare mktemp in tools must land on disk, not RAM.
+    # From: Issue #1683 | PR #1858
+    local base f d made
+    base="/var/tmp/$(_val name)" f="$(_val path)"
+    d="${base}/$(_val name)"
+    : > "${f}"
+    CI_TMPDIR=/tmp CI_SCAN_CMD="$(_stub 'exit 0')" GHCR_USERNAME="$(_val name)" GHCR_TOKEN="$(_val name)" \
+        run bash "${CI_SH}" scan "$(ci_services | awk 'NR == 1')" "$(_val digest)"
+    _expect tmpfs-command 2 "[CI-ERROR-CORE-0006]" || return 1
     CI_TMPDIR=/tmp run bash "${CI_SH}" check comment-length
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CORE-0006"* ]]
-}
-
-@test "proxy is exported on self-hosted only and passed through" {
-    # What: self-hosted+var -> env + passthrough names.
-    # Why: AG-CI-009; hosted runners have no LAN route.
-    # From: Issue #1683 | PR #1858
-    run bash -c 'source "$1"; RUNNER_ENVIRONMENT=github-hosted PROJECT_SELFHOSTED_PROXY_HTTP=http://p:3128 _ci_proxy_init; _ci_proxy_names | wc -l' _ "${CI_SH}"
-    [ "${lines[-1]}" -eq 0 ]
-    run bash -c 'source "$1"; unset HTTP_PROXY http_proxy HTTPS_PROXY https_proxy NO_PROXY no_proxy; RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=http://p:3128 PROJECT_SELFHOSTED_PROXY_EXCLUSION=registry.example.test _ci_proxy_init; echo "h=${https_proxy} n=${NO_PROXY}"; _ci_proxy_names | tr "\n" " "' _ "${CI_SH}"
-    [[ "${output}" == *"[CI-INFO-CORE-0007]"* ]]
-    [[ "${output}" == *"h=http://p:3128 n=registry.example.test"* ]]
-    [[ "${output}" == *"HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy"* ]]
-}
-
-@test "proxy CA becomes a job-local bundle with the system CAs" {
-    # What: bundle = system CAs + proxy CA, for cargo/curl.
-    # Why: TLS proxy on self-hosted; system trust stays.
-    # From: Issue #1683 | PR #1858
-    local sys="${BATS_TEST_TMPDIR}/sys.pem"
-    printf 'SYSTEM-CA\n' > "${sys}"
-    run bash -c 'source "$1"; RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=http://p:3128 PROJECT_SELFHOSTED_PROXY_CA=PROXY-CA CI_SYSTEM_CA_BUNDLE="$2" _ci_proxy_init; cat "${CARGO_HTTP_CAINFO}"; [ "${CURL_CA_BUNDLE}" = "${CARGO_HTTP_CAINFO}" ] && echo same; stat -c %a "${CARGO_HTTP_CAINFO}"; rm -f "${CARGO_HTTP_CAINFO}"' _ "${CI_SH}" "${sys}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"SYSTEM-CA"*"PROXY-CA"* ]]
-    [[ "${output}" == *"same"* ]]
-    [[ "${output}" == *"600"* ]]
-}
-
-@test "ci.sh creates the /var/tmp temp root and exports TMPDIR" {
-    # What: a missing /var/tmp subdir is made (mkdir -p).
-    # Why: bare mktemp in tools must land on disk.
-    # From: Issue #1683 | PR #1858
-    local d="/var/tmp/ci-bats-root.$$/nested"
+    _expect tmpfs-check 2 "[CI-ERROR-CORE-0006]" || return 1
     CI_TMPDIR="${d}" run bash -c 'source "$1"; _ci_tmp_init; echo "t=${TMPDIR}"' _ "${CI_SH}"
-    [ "${status}" -eq 0 ]
-    [ -d "${d}" ]
-    [[ "${output}" == *"t=${d}"* ]]
-    rm -rf "/var/tmp/ci-bats-root.$$"
+    made=no; [ ! -d "${d}" ] || made=yes
+    rm -rf "${base}"
+    _expect created 0 "t=${d}" || return 1
+    [ "${made}" = yes ] || { echo "not created: ${d}"; return 1; }
+    CI_TMPDIR="${f}/x" run _ci_tmp_init
+    _expect uncreatable 2 "[CI-ERROR-CORE-0111] dir=\"${f}/x\";Not a directory" || return 1
+}
+
+@test "proxy init maps each runner and CA case" {
+    # What: per row: runner env -> proxy env, names, CA.
+    # Why: AG-CI-009: self-hosted proxy only, CA job-local.
+    # From: Issue #1683 | PR #1858
+    local sys case envs probe rc want
+    sys="$(_val path)"
+    local -a ev
+    local -A P=(
+        [names]='echo "names=$(_ci_proxy_names | wc -l)"'
+        [env]='echo "h=${https_proxy} n=${NO_PROXY}"; _ci_proxy_names | tr "\n" " "'
+        [bundle]='cat "${CARGO_HTTP_CAINFO}"; [ "${CURL_CA_BUNDLE}" = "${CARGO_HTTP_CAINFO}" ] && echo same; stat -c %a "${CARGO_HTTP_CAINFO}"'
+        [none]=':'
+    )
+    local -A V=(
+        [@PROXY@]="$(_val url)" [@EXCL@]="$(_val host)" [@SYSCA@]="$(_val name)" [@CA@]="$(_val name)"
+        [@SYS@]="${sys}" [@NOFILE@]="${BATS_TEST_TMPDIR}/$(_val name)/$(_val name)"
+    )
+    printf '%s\n' "${V[@SYSCA@]}" > "${sys}"
+    while IFS='|' read -r case envs probe rc want; do
+        envs="$(_fill "${envs}")" want="$(_fill "${want}")"
+        read -r -a ev <<< "${envs}"
+        run env -u HTTP_PROXY -u http_proxy -u HTTPS_PROXY -u https_proxy -u NO_PROXY -u no_proxy \
+            "${ev[@]}" CI_TMPDIR="${BATS_TEST_TMPDIR}" \
+            bash -c 'source "$1"; _ci_proxy_init || exit; eval "$2"' _ "${CI_SH}" "${P[${probe}]}"
+        _expect "${case}" "${rc}" "${want}" || return 1
+    done <<'CASES'
+hosted-off|RUNNER_ENVIRONMENT=github-hosted PROJECT_SELFHOSTED_PROXY_HTTP=@PROXY@|names|0|[CI-INFO-CORE-0113] proxy=off runner="github-hosted" http_set=yes;names=0
+self-hosted|RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=@PROXY@ PROJECT_SELFHOSTED_PROXY_EXCLUSION=@EXCL@|env|0|[CI-INFO-CORE-0007];h=@PROXY@ n=@EXCL@;HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
+ca-bundle|RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=@PROXY@ PROJECT_SELFHOSTED_PROXY_CA=@CA@ CI_SYSTEM_CA_BUNDLE=@SYS@|bundle|0|@SYSCA@;@CA@;same;600
+no-system-bundle|RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=@PROXY@ PROJECT_SELFHOSTED_PROXY_CA=@CA@ CI_SYSTEM_CA_BUNDLE=@NOFILE@|none|2|[CI-ERROR-CORE-0112] system_bundle="@NOFILE@";No such file
+CASES
 }
 
 @test "scan is clean on /var/tmp with auth and a passing backend" {
     # What: authed + /var/tmp + green scan -> clean.
     # Why: The one success path for scan.
     # From: Issue #1683
-    CI_SCAN_CMD="$(_stub s 'exit 0')" GHCR_USERNAME=u GHCR_TOKEN=t \
+    CI_SCAN_CMD="$(_stub 'exit 0')" GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" scan ui sha256:x
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"scanned=clean"* ]]
     [[ "${output}" == *"tmpdir=/var/tmp"* ]]
 }
 
-@test "scan fails closed without GHCR auth" {
-    # What: Scan pulls the image -> authenticated.
-    # Why: Never anonymous (rate-limit).
-    # From: Issue #1683
-    CI_SCAN_CMD="$(_stub s 'exit 0')" run bash "${CI_SH}" scan ui sha256:x
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
-}
-
 @test "scan fails on a finding backend" {
     # What: A backend exit 1 is a genuine finding.
     # Why: HIGH/CRITICAL findings fail the scan.
     # From: Issue #1683
-    CI_SCAN_CMD="$(_stub s 'exit 1')" GHCR_USERNAME=u GHCR_TOKEN=t \
+    CI_SCAN_CMD="$(_stub 'exit 1')" GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" scan ui sha256:x
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-SCAN-0005"* ]]
@@ -2058,7 +2130,7 @@ RS
     # What: A backend exit 3 is a DB outage, not a finding.
     # Why: An outage must escalate, never reject the image.
     # From: Issue #1683
-    CI_SCAN_CMD="$(_stub s 'exit 3')" GHCR_USERNAME=u GHCR_TOKEN=t \
+    CI_SCAN_CMD="$(_stub 'exit 3')" GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" scan ui sha256:x
     [ "${status}" -eq 3 ]
     [[ "${output}" == *"CI-ERROR-SCAN-0006"* ]]
@@ -2067,70 +2139,6 @@ RS
 # =========================================================
 # CACHE FALLBACK
 # =========================================================
-
-@test "cache fallback: an unwired CAS lookup always misses, never a false hit" {
-    # What: Unwired CAS lookup misses, not false hit.
-    # Why: Fallback defaults to miss, not silent hit.
-    # From: Issue #1683
-    run _ci_cas_lookup "deadbeef"
-    [ "${status}" -ne 0 ]
-}
-
-@test "cache fallback: a CAS hit skips the build backend entirely" {
-    # What: A CAS hit must never invoke the build backend.
-    # Why: Reuse means the compile step is truly skipped.
-    # From: Issue #1683
-    STUB_STATE=MISSING_CONFIRMED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
-    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
-    CI_CAS_LOOKUP_CMD="$(_stub cas 'exit 0')" \
-    CI_BUILD_CMD="$(_stub build 'echo BUILD_BACKEND_INVOKED; exit 1')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" build ui
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"result=reuse-binary-cas"* ]]
-    [[ "${output}" != *"BUILD_BACKEND_INVOKED"* ]]
-}
-
-@test "cache fallback: a crashing CAS backend still falls back to a real build" {
-    # What: Any nonzero CAS exit falls back to build.
-    # Why: Broken CAS backend must not block pipeline.
-    # From: Issue #1683
-    local marker="${BATS_TEST_TMPDIR}/cas-invoked-crash"
-    STUB_STATE=MISSING_CONFIRMED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
-    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
-    CI_CAS_LOOKUP_CMD="$(_stub cas "touch '${marker}'; echo cas-backend-noise >&2; exit 137")" \
-    CI_BUILD_CMD="$(_stub build 'exit 0')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" build ui
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"result=built"* ]]
-    # What: Marker proves CAS backend ran.
-    # Why: Skipped stub makes fallback claim empty.
-    # From: Issue #1683
-    [ -f "${marker}" ]
-}
-
-@test "cache fallback: an apk (non-rust) service never consults the CAS" {
-    # What: build_type=apk must not call CAS.
-    # Why: CAS is rust-binary reuse (§7); apk has none.
-    # From: Issue #1683
-    local marker="${BATS_TEST_TMPDIR}/cas-invoked-apk"
-    STUB_STATE=MISSING_CONFIRMED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
-    CI_IMPACT_CMD="$(_stub impact 'echo BUILD')" \
-    CI_CAS_LOOKUP_CMD="$(_stub cas "touch '${marker}'; exit 0")" \
-    CI_BUILD_CMD="$(_stub build 'exit 0')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" build proxy
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"result=built"* ]]
-    # What: Absent marker proves CAS never invoked.
-    # Why: No-op stub passes with no skip proof.
-    # From: Issue #1683
-    [ ! -f "${marker}" ]
-}
 
 # =========================================================
 # REGISTRY / PUBLISH / READBACK
@@ -2152,8 +2160,8 @@ RS
         : > "${log}"
         unset CI_GHCR_LOGIN_CMD
         case "${cmd}" in
-            ok) CI_GHCR_LOGIN_CMD="$(_stub loginok 'exit 0')" ;;
-            fail) CI_GHCR_LOGIN_CMD="$(_stub loginbad 'echo denied by stub; exit 1')" ;;
+            ok) CI_GHCR_LOGIN_CMD="$(_stub 'exit 0')" ;;
+            fail) CI_GHCR_LOGIN_CMD="$(_stub 'echo denied by stub; exit 1')" ;;
         esac
         export CI_GHCR_LOGIN_CMD GHCR_USERNAME="${user}" GHCR_TOKEN="${tok}"
         [ "${cmd}" != - ] || unset CI_GHCR_LOGIN_CMD
@@ -2217,20 +2225,11 @@ CASES
     [ "$(grep -c '^argv:' "${log}")" -eq 1 ]
 }
 
-@test "publish fails closed without GHCR credentials" {
-    # What: Publish is an authenticated GHCR action.
-    # Why: Never push anonymously (rate-limit).
-    # From: Issue #1683
-    CI_PUBLISH_CMD="$(_stub pub 'echo sha256:abc')" run bash "${CI_SH}" publish ui
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
-}
-
 @test "publish returns the backend digest when authed" {
     # What: A successful push reports its digest.
     # Why: The digest is the ref the next phase verifies.
     # From: Issue #1683
-    CI_PUBLISH_CMD="$(_stub pub 'echo sha256:deadbeef')" GHCR_USERNAME=u GHCR_TOKEN=t \
+    CI_PUBLISH_CMD="$(_stub 'echo sha256:deadbeef')" GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" publish ui
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"published=sha256:deadbeef"* ]]
@@ -2276,29 +2275,6 @@ CASES
     [[ "${output}" == *"CI-ERROR-SHIP-0002"* ]]
 }
 
-@test "verify passes when the readback digest matches" {
-    # What: readback == expected -> verified.
-    # Why: Confirms the accepted artifact is the real one.
-    # From: Issue #1683
-    CI_READBACK_CMD="$(_stub rb 'echo sha256:match')" GHCR_USERNAME=u GHCR_TOKEN=t \
-    CI_SMOKE_CMD="$(_stub sm 'echo "service=$1 smoke=ok"')" GITHUB_REPOSITORY=owner/fixture-repo \
-        run bash "${CI_SH}" verify ui sha256:match
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"verified=sha256:match"* ]]
-}
-
-@test "verify fails with MISMATCH and shows raw readback (BUILT != ACCEPTED)" {
-    # What: readback != expected -> hard fail + raw.
-    # Why: A mismatch must never be accepted (§7).
-    # From: Issue #1683
-    CI_READBACK_CMD="$(_stub rb 'echo sha256:other')" GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" verify ui sha256:expected
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERIFY-0005"* ]]
-    [[ "${output}" == *"MISMATCH"* ]]
-    [[ "${output}" == *"readback=sha256:other"* ]]
-}
-
 # =========================================================
 # ASSEMBLY
 # =========================================================
@@ -2318,7 +2294,7 @@ _asm_a() { _test_digest a; }
 _asm_b() { _test_digest b; }
 _asm_idx() { _test_digest d; }
 _asm_digest_stub() {
-    _stub dg "echo $(_asm_a)"
+    _stub "echo $(_asm_a)"
 }
 # What: index stub listing every SOT platform of svc.
 # Why: platform set comes from the SOT, never the test.
@@ -2328,7 +2304,7 @@ _asm_index_stub() {
     line="$(_asm_idx)"
     for p in $(_ci_platforms "$1"); do line="${line} ${p}=$(_asm_a)"; done
     [ "${2:-}" = divergent ] && line="${line% *} ${p}=$(_asm_b)"
-    _stub idx "echo \"${line}\""
+    _stub "echo \"${line}\""
 }
 
 @test "assemble refuses a non-ACCEPTED platform and does not rebuild" {
@@ -2359,8 +2335,8 @@ _asm_index_stub() {
     STUB_STATE=PRESENT_ACCEPTED
     CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
     CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
-    CI_INDEX_LOOKUP_CMD="$(_stub noidx 'exit 1')" \
-    CI_ASSEMBLE_CMD="$(_stub asm "echo $(_asm_idx)")" \
+    CI_INDEX_LOOKUP_CMD="$(_stub 'exit 1')" \
+    CI_ASSEMBLE_CMD="$(_stub "echo $(_asm_idx)")" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" assemble ui
     [ "${status}" -eq 0 ]
@@ -2397,20 +2373,6 @@ _asm_index_stub() {
     [[ "${output}" == *"CI-ERROR-ASSEMBLE-0004"* ]]
 }
 
-@test "assemble fails closed without GHCR auth before creating" {
-    # What: Creating an index is authenticated.
-    # Why: Never anonymous (rate-limit).
-    # From: Issue #1683
-    STUB_STATE=PRESENT_ACCEPTED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
-    CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
-    CI_INDEX_LOOKUP_CMD="$(_stub noidx 'exit 1')" \
-    CI_ASSEMBLE_CMD="$(_stub asm "echo $(_asm_idx)")" \
-        run bash "${CI_SH}" assemble ui
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
-}
-
 @test "assemble fails when an ACCEPTED platform has no digest" {
     # What: ACCEPTED but no digest is an inconsistency.
     # Why: Fail closed, never assemble a partial index.
@@ -2420,15 +2382,6 @@ _asm_index_stub() {
         run bash "${CI_SH}" assemble ui
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-ASSEMBLE-0003"* ]]
-}
-
-@test "assemble fails closed when no service is given" {
-    # What: Missing arg must fail with a stable id.
-    # Why: Fail-closed dispatch (AG-VAL-002).
-    # From: Issue #1683
-    run bash "${CI_SH}" assemble
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-ASSEMBLE-0001"* ]]
 }
 
 # =========================================================
@@ -2441,35 +2394,17 @@ _asm_index_stub() {
 _promote_full_candidate() {
     local svcs
     svcs="$(ci_services | tr '\n' ' ')"
-    _stub cand "for s in ${svcs}; do echo \"\$s=$1\"; done"
+    _stub "for s in ${svcs}; do echo \"\$s=$1\"; done"
 }
-_promote_lock() { _stub lock 'echo "LOCK $1" >> "${BATS_TEST_TMPDIR}/lock.log"'; }
-_promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.log"'; }
-
-@test "promote fails closed when no channel is given" {
-    # What: Missing arg must fail with a stable id.
-    # Why: Fail-closed dispatch (AG-VAL-002).
-    # From: Issue #1683
-    run bash "${CI_SH}" promote
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-PROMOTE-0001"* ]]
-}
-
-@test "promote rejects a channel not in the mutable SOT set" {
-    # What: Only known mutable channels may be moved.
-    # Why: promote moves refs only; no invented list.
-    # From: Issue #1683
-    run bash "${CI_SH}" promote bogus
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-PROMOTE-0002"* ]]
-}
+_promote_lock() { _stub 'echo "LOCK $1" >> "${BATS_TEST_TMPDIR}/lock.log"'; }
+_promote_unlock() { _stub 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.log"'; }
 
 @test "promote refuses an incomplete stack (no promote at 8/9)" {
     # What: A missing service blocks the promotion.
     # Why: Promotion is stack-atomic (docs section 50).
     # From: Issue #1683
     local dig; dig="$(_test_digest a)"
-    CI_STACK_CANDIDATE_CMD="$(_stub cand "echo proxy=${dig}")" GHCR_USERNAME=u GHCR_TOKEN=t \
+    CI_STACK_CANDIDATE_CMD="$(_stub "echo proxy=${dig}")" GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" promote nightly
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-PROMOTE-0004"* ]]
@@ -2486,17 +2421,6 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     [[ "${output}" == *"CI-ERROR-PROMOTE-0005"* ]]
 }
 
-@test "promote fails closed without GHCR auth" {
-    # What: Moving refs is an authenticated action.
-    # Why: Never anonymous (rate-limit).
-    # From: Issue #1683
-    local dig; dig="$(_test_digest a)"
-    CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
-        run bash "${CI_SH}" promote nightly
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
-}
-
 @test "promote moves refs, confirms readback, releases lock" {
     # What: Fresh promote: lock, move, readback, unlock.
     # Why: The one success path (docs section 51/53).
@@ -2504,8 +2428,8 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     local dig; dig="$(_test_digest a)"
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
     CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
-    CI_PROMOTE_MOVE_CMD="$(_stub mv 'touch "${BATS_TEST_TMPDIR}/moved.$1"')" \
-    CI_CHANNEL_READBACK_CMD="$(_stub rb "[ -f \"\${BATS_TEST_TMPDIR}/moved.\$1\" ] && echo ${dig} || true")" \
+    CI_PROMOTE_MOVE_CMD="$(_stub 'touch "${BATS_TEST_TMPDIR}/moved.$1"')" \
+    CI_CHANNEL_READBACK_CMD="$(_stub "[ -f \"\${BATS_TEST_TMPDIR}/moved.\$1\" ] && echo ${dig} || true")" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" promote nightly
     [ "${status}" -eq 0 ]
@@ -2520,8 +2444,8 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     local dig; dig="$(_test_digest a)"
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
     CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
-    CI_PROMOTE_MOVE_CMD="$(_stub mv 'true')" \
-    CI_CHANNEL_READBACK_CMD="$(_stub rb "echo ${dig}")" \
+    CI_PROMOTE_MOVE_CMD="$(_stub 'true')" \
+    CI_CHANNEL_READBACK_CMD="$(_stub "echo ${dig}")" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" promote nightly
     [ "${status}" -eq 0 ]
@@ -2537,8 +2461,8 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     local other; other="$(_test_digest b)"
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
     CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
-    CI_PROMOTE_MOVE_CMD="$(_stub mv 'true')" \
-    CI_CHANNEL_READBACK_CMD="$(_stub rb "echo ${other}")" \
+    CI_PROMOTE_MOVE_CMD="$(_stub 'true')" \
+    CI_CHANNEL_READBACK_CMD="$(_stub "echo ${other}")" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" promote nightly
     [ "${status}" -eq 2 ]
@@ -2554,7 +2478,7 @@ _promote_unlock() { _stub unlock 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.
     # What: A stale/failed verdict blocks the release.
     # Why: AG-REL-011 requires still-valid validation.
     # From: Issue #1683
-    CI_RELEASE_VALIDATION_CMD="$(_stub val 'exit 1')" \
+    CI_RELEASE_VALIDATION_CMD="$(_stub 'exit 1')" \
         run bash "${CI_SH}" release
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-RELEASE-0001"* ]]
@@ -2615,11 +2539,11 @@ EOF
     # Why: latest promote is the release success path.
     # From: Issue #1683
     local dig; dig="$(_test_digest a)"
-    CI_RELEASE_VALIDATION_CMD="$(_stub val 'exit 0')" \
+    CI_RELEASE_VALIDATION_CMD="$(_stub 'exit 0')" \
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
     CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
-    CI_PROMOTE_MOVE_CMD="$(_stub mv 'touch "${BATS_TEST_TMPDIR}/moved.$1"')" \
-    CI_CHANNEL_READBACK_CMD="$(_stub rb "[ -f \"\${BATS_TEST_TMPDIR}/moved.\$1\" ] && echo ${dig} || true")" \
+    CI_PROMOTE_MOVE_CMD="$(_stub 'touch "${BATS_TEST_TMPDIR}/moved.$1"')" \
+    CI_CHANNEL_READBACK_CMD="$(_stub "[ -f \"\${BATS_TEST_TMPDIR}/moved.\$1\" ] && echo ${dig} || true")" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" release
     [ "${status}" -eq 0 ]
@@ -2633,11 +2557,11 @@ EOF
     # Why: Same end state on retry (docs section 26.4).
     # From: Issue #1683
     local dig; dig="$(_test_digest a)"
-    CI_RELEASE_VALIDATION_CMD="$(_stub val 'exit 0')" \
+    CI_RELEASE_VALIDATION_CMD="$(_stub 'exit 0')" \
     CI_STACK_CANDIDATE_CMD="$(_promote_full_candidate "${dig}")" CI_STACK_VALIDATED=SUCCESS \
     CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)" \
-    CI_PROMOTE_MOVE_CMD="$(_stub mv 'true')" \
-    CI_CHANNEL_READBACK_CMD="$(_stub rb "echo ${dig}")" \
+    CI_PROMOTE_MOVE_CMD="$(_stub 'true')" \
+    CI_CHANNEL_READBACK_CMD="$(_stub "echo ${dig}")" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" release
     [ "${status}" -eq 0 ]
@@ -2650,8 +2574,8 @@ EOF
     # Why: One acceptance model; promote gates apply.
     # From: Issue #1683
     local dig; dig="$(_test_digest a)"
-    CI_RELEASE_VALIDATION_CMD="$(_stub val 'exit 0')" \
-    CI_STACK_CANDIDATE_CMD="$(_stub cand "echo proxy=${dig}")" GHCR_USERNAME=u GHCR_TOKEN=t \
+    CI_RELEASE_VALIDATION_CMD="$(_stub 'exit 0')" \
+    CI_STACK_CANDIDATE_CMD="$(_stub "echo proxy=${dig}")" GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" release
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-PROMOTE-0004"* ]]
@@ -2728,7 +2652,7 @@ EOF
     # From: Issue #1683
     local calls="${BATS_TEST_TMPDIR}/promote-calls"
     export PROMOTE_CALLS="${calls}"
-    local prom rel ch; prom="$(_stub prom 'echo "PROMOTE $1" >> "${PROMOTE_CALLS}"')"
+    local prom rel ch; prom="$(_stub 'echo "PROMOTE $1" >> "${PROMOTE_CALLS}"')"
     rel="$(_ci_release_ref)"
     ch="$(_ci_channels_where release_tags true)"
     : > "${calls}"
@@ -2737,11 +2661,11 @@ EOF
     [ "$(cat "${calls}")" = "PROMOTE v1.2.3
 PROMOTE ${ch}" ]
     : > "${calls}"
-    local tipstub; tipstub="$(_stub tip 'echo othersha')"
+    local tipstub; tipstub="$(_stub 'echo othersha')"
     CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF="${rel}" GITHUB_SHA=mysha CI_PROMOTE_REQUESTED_CHANNEL='' CI_PROMOTE_TIP_CMD="${tipstub}" run ci_cmd_promote_ref
     [ "${status}" -eq 0 ]; [[ "${output}" == *"superseded"* ]]; [ ! -s "${calls}" ]
     : > "${calls}"
-    local tipok; tipok="$(_stub tipok 'echo mysha')"
+    local tipok; tipok="$(_stub 'echo mysha')"
     CI_PROMOTE_ONE_CMD="${prom}" GITHUB_REF="${rel}" GITHUB_SHA=mysha CI_PROMOTE_REQUESTED_CHANNEL='' CI_PROMOTE_TIP_CMD="${tipok}" run ci_cmd_promote_ref
     [ "${status}" -eq 0 ]; [ "$(cat "${calls}")" = "PROMOTE ${ch}" ]
     : > "${calls}"
@@ -2852,14 +2776,6 @@ tail" '{body:$b, isPrerelease:false}')" \
     [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0005"* ]]
 }
 
-@test "release-publish requires a tag argument" {
-    # What: No tag is a hard fail before any gh call.
-    # Why: fail-closed; never publish an unnamed release.
-    # From: Issue #1683
-    run ci_cmd_release_publish
-    [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-RELEASE-0003"* ]]
-}
-
 @test "release-asset-put uploads with clobber and rejects an empty file" {
     # What: One asset writer; --clobber replaces prior.
     # Why: SBOM and VEX share it; empty file is a hard fail.
@@ -2883,7 +2799,7 @@ tail" '{body:$b, isPrerelease:false}')" \
     export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r CI_TMPDIR="${BATS_TEST_TMPDIR}"
     _ci_require_ghcr_auth() { return 0; }
     _ci_registry_digest() { echo "sha256:aaa"; }
-    local sbom; sbom="$(_stub sbom 'printf "{}" > "$3"')"
+    local sbom; sbom="$(_stub 'printf "{}" > "$3"')"
     : > "${calls}"
     CI_SBOM_CMD="${sbom}" CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_sbom proxy v1.2.3
     [ "${status}" -eq 0 ]
@@ -2903,7 +2819,7 @@ tail" '{body:$b, isPrerelease:false}')" \
     _ci_require_ghcr_auth() { return 0; }
     _ci_registry_digest() { echo "sha256:aaa"; }
     ci_build_targets() { printf 'proxy\ndns\n'; }
-    local sbom; sbom="$(_stub sbom 'printf "{}" > "$3"')"
+    local sbom; sbom="$(_stub 'printf "{}" > "$3"')"
     : > "${calls}"
     CI_SBOM_CMD="${sbom}" CI_RELEASE_GH_CMD="${gh}" run ci_cmd_release_sbom_stack v1.2.3
     [ "${status}" -eq 0 ]
@@ -3022,13 +2938,13 @@ CASES
     # From: Issue #1683
     local calls="${BATS_TEST_TMPDIR}/cut-calls"; export CUT_CALLS="${calls}"
     local push base tipok noexist changed unchanged tipmoved
-    push="$(_stub push 'echo "PUSH $1 $2" >> "${CUT_CALLS}"')"
-    base="$(_stub base 'echo v0.2.0')"
-    tipok="$(_stub tipok 'echo mysha')"
-    tipmoved="$(_stub tipmoved 'echo othersha')"
-    noexist="$(_stub noexist 'exit 1')"
-    changed="$(_stub changed 'exit 0')"
-    unchanged="$(_stub unchanged 'exit 1')"
+    push="$(_stub 'echo "PUSH $1 $2" >> "${CUT_CALLS}"')"
+    base="$(_stub 'echo v0.2.0')"
+    tipok="$(_stub 'echo mysha')"
+    tipmoved="$(_stub 'echo othersha')"
+    noexist="$(_stub 'exit 1')"
+    changed="$(_stub 'exit 0')"
+    unchanged="$(_stub 'exit 1')"
     # What: a non-release ref cuts nothing, even all-green.
     # Why: the ref gate is ci.sh policy, not workflow YAML.
     # From: Issue #1683 | PR #1858
@@ -3039,7 +2955,7 @@ CASES
     [ "${status}" -eq 0 ]; [[ "${output}" == *"not-release-ref"* ]]; [ ! -s "${calls}" ]
     GITHUB_REF="$(_ci_release_ref)"; export GITHUB_REF
     : > "${calls}"
-    CI_LAST_RELEASE_TAG_CMD="$(_stub nobase 'true')" run ci_cmd_cut_release_tag
+    CI_LAST_RELEASE_TAG_CMD="$(_stub 'true')" run ci_cmd_cut_release_tag
     [ "${status}" -eq 0 ]; [[ "${output}" == *"no-base-tag"* ]]; [ ! -s "${calls}" ]
     : > "${calls}"
     CI_LAST_RELEASE_TAG_CMD="${base}" CI_STACK_CHANGED_CMD="${unchanged}" run ci_cmd_cut_release_tag
@@ -3048,7 +2964,7 @@ CASES
     CI_LAST_RELEASE_TAG_CMD="${base}" CI_STACK_CHANGED_CMD="${changed}" GITHUB_SHA=mysha CI_PROMOTE_TIP_CMD="${tipmoved}" run ci_cmd_cut_release_tag
     [ "${status}" -eq 0 ]; [[ "${output}" == *"superseded"* ]]; [ ! -s "${calls}" ]
     : > "${calls}"
-    CI_LAST_RELEASE_TAG_CMD="${base}" CI_STACK_CHANGED_CMD="${changed}" GITHUB_SHA=mysha CI_PROMOTE_TIP_CMD="${tipok}" CI_TAG_EXISTS_CMD="$(_stub exists 'exit 0')" run ci_cmd_cut_release_tag
+    CI_LAST_RELEASE_TAG_CMD="${base}" CI_STACK_CHANGED_CMD="${changed}" GITHUB_SHA=mysha CI_PROMOTE_TIP_CMD="${tipok}" CI_TAG_EXISTS_CMD="$(_stub 'exit 0')" run ci_cmd_cut_release_tag
     [ "${status}" -eq 0 ]; [[ "${output}" == *"exists"* ]]; [ ! -s "${calls}" ]
     : > "${calls}"
     CI_LAST_RELEASE_TAG_CMD="${base}" CI_STACK_CHANGED_CMD="${changed}" GITHUB_SHA=mysha CI_PROMOTE_TIP_CMD="${tipok}" CI_TAG_EXISTS_CMD="${noexist}" CI_TAG_PUSH_CMD="${push}" run ci_cmd_cut_release_tag
@@ -3058,12 +2974,12 @@ CASES
     # Why: UNKNOWN is never "no release" nor "tag absent".
     # From: Issue #1683 | PR #1858
     : > "${calls}"
-    CI_LAST_RELEASE_TAG_CMD="$(_stub basefail 'exit 2')" run ci_cmd_cut_release_tag
+    CI_LAST_RELEASE_TAG_CMD="$(_stub 'exit 2')" run ci_cmd_cut_release_tag
     [ "${status}" -eq 2 ]
     [ ! -s "${calls}" ]
     : > "${calls}"
     CI_LAST_RELEASE_TAG_CMD="${base}" CI_STACK_CHANGED_CMD="${changed}" GITHUB_SHA=mysha \
-        CI_PROMOTE_TIP_CMD="${tipok}" CI_TAG_EXISTS_CMD="$(_stub unknown 'exit 2')" \
+        CI_PROMOTE_TIP_CMD="${tipok}" CI_TAG_EXISTS_CMD="$(_stub 'exit 2')" \
         CI_TAG_PUSH_CMD="${push}" run ci_cmd_cut_release_tag
     [ "${status}" -eq 2 ]
     [[ "${output}" == *'[CI-ERROR-RELEASE-0021] tag="v0.2.1" rc=2'* ]]
@@ -3072,7 +2988,7 @@ CASES
     # Why: a registry error never skips a release silently.
     # From: Issue #1683 | PR #1858
     : > "${calls}"
-    CI_LAST_RELEASE_TAG_CMD="${base}" CI_STACK_CHANGED_CMD="$(_stub stackunknown 'exit 2')" \
+    CI_LAST_RELEASE_TAG_CMD="${base}" CI_STACK_CHANGED_CMD="$(_stub 'exit 2')" \
         CI_TAG_PUSH_CMD="${push}" run ci_cmd_cut_release_tag
     [ "${status}" -eq 2 ]
     [[ "${output}" == *'[CI-ERROR-RELEASE-0024] base="v0.2.0" rc=2'* ]]
@@ -3135,7 +3051,7 @@ _rn_setup() {
     local work="${BATS_TEST_TMPDIR}/rn" origin="${BATS_TEST_TMPDIR}/rn-origin.git" s
     printf '%s\n' 'release_notes:' '  pr_section: Changelog' '  skip_label: skip-changelog' '  other_title: Other' \
         'release_notes_categories:' '  bug:' '    title: Fixed' '  ci:' '    title: CI' > "${BATS_TEST_TMPDIR}/rn.yml"
-    _sot_ci_variables >> "${BATS_TEST_TMPDIR}/rn.yml"
+    _sot_block ci_variables >> "${BATS_TEST_TMPDIR}/rn.yml"
     export CI_MANIFEST="${BATS_TEST_TMPDIR}/rn.yml" GITHUB_REPOSITORY=owner/fixture-repo CI_RETRY_BACKOFF_BASE_SECONDS=0
     git init -q --bare "${origin}"
     git init -q "${work}"
@@ -3201,7 +3117,7 @@ _rn_setup() {
 # GC
 # =========================================================
 
-_gc_roots() { _stub roots 'printf "sha256:aaa\nsha256:bbb\n"'; }
+_gc_roots() { _stub 'printf "sha256:aaa\nsha256:bbb\n"'; }
 
 @test "default gc roots unions ledger, channel, and index-child digests" {
     # What: Roots = ledger records + channels + children.
@@ -3374,8 +3290,10 @@ CASES
     # From: Issue #1683
     CI_GC_ROOTS_FILE="${BATS_TEST_TMPDIR}/roots"
     printf 'sha256:root\n' > "${CI_GC_ROOTS_FILE}"
-    _ci_manifest_scalar() { printf ''; }
-    run _ci_default_gc_reachable "$(printf 'sha256:x\t9\t2020-01-01T00:00:00Z')"
+    local m
+    m="$(_val path)"
+    grep -v 'unaggregated_grace_minutes:' "${CI_MANIFEST}" > "${m}"
+    CI_MANIFEST="${m}" run _ci_default_gc_reachable "$(printf 'sha256:x\t9\t2020-01-01T00:00:00Z')"
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-GC-0015"* ]]
 }
@@ -3384,7 +3302,7 @@ CASES
     # What: An empty roots set must stop the pass.
     # Why: Empty roots would mark all artifacts unreachable.
     # From: Issue #1683
-    CI_GC_ROOTS_CMD="$(_stub roots 'true')" \
+    CI_GC_ROOTS_CMD="$(_stub 'true')" \
         run bash "${CI_SH}" gc
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-GC-0007"* ]]
@@ -3429,9 +3347,9 @@ CASES
     while IFS='|' read -r name cands reach args auth policy rc want deleted; do
         log="${BATS_TEST_TMPDIR}/${name}.deleted"
         ge=(-u GHCR_USERNAME -u GHCR_TOKEN CI_GC_ROOTS_CMD="$(_gc_roots)"
-            CI_GC_CANDIDATES_CMD="$(_stub "cands-${name}" "${cands}")"
-            CI_GC_DELETE_CMD="$(_stub "del-${name}" "echo \"\$1\" >> '${log}'")")
-        [ "${reach}" = - ] || ge+=(CI_GC_REACHABLE_CMD="$(_stub "reach-${name}" "${reach}")")
+            CI_GC_CANDIDATES_CMD="$(_stub "${cands}")"
+            CI_GC_DELETE_CMD="$(_stub "echo \"\$1\" >> '${log}'")")
+        [ "${reach}" = - ] || ge+=(CI_GC_REACHABLE_CMD="$(_stub "${reach}")")
         [ "${auth}" = no ] || ge+=(GHCR_USERNAME=u GHCR_TOKEN=t)
         if [ "${policy}" != - ]; then
             m="${BATS_TEST_TMPDIR}/${name}.yml"
@@ -3487,44 +3405,42 @@ CASES
     [[ "${output}" == *"CI-ERROR-GC-0019"* ]]
 }
 
-@test "gh_versions retries a transient GH-API failure, then succeeds" {
-    # What: Transient GH-API failures retry then succeed.
-    # Why: _ci_retry github-api retries a transient GH-API.
-    # From: Issue #1683
-    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
+# What: GHCR listing retries transient API errors; 404 skips.
+# Why: AG-CI-013 per caller: wired to the github-api op.
+# From: Issue #1683 | PR #1858
+@test "gh versions: a transient API error retries, a 404 skips the package" {
+    local own pkg line
+    own="$(_val name)"
+    pkg="$(_val name)%2F$(_val name)"
+    line="$(printf '%s\t%s\t%s\t' "$(_val name)" "$(_val int 0 4294967295)" "$(_val name)")"
+    GH_N="$(_val path)"
+    GH_LINE="${line}"
+    export GH_N GH_LINE
     gh() {
-        local n; n="$(($(cat "${cnt}") + 1))"; printf '%s' "${n}" > "${cnt}"
-        if [ "${n}" -lt 3 ]; then echo "HTTP 503 Service Unavailable" >&2; return 1; fi
-        printf 'v1\t111\t2020-01-01T00:00:00Z\t\n'
+        local n
+        n="$(( $(head -n 1 "${GH_N}") + 1 ))"
+        { printf '%s\n' "${n}"; tail -n +2 "${GH_N}"; printf '%s\n' "$*"; } > "${GH_N}.next"
+        mv "${GH_N}.next" "${GH_N}"
+        if [ "${n}" -le "${GH_FAILS}" ]; then printf '%s\n' "${GH_TEXT}" >&2; return 1; fi
+        printf '%s\n' "${GH_LINE}"
     }
-    export -f gh
-    CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_gh_versions owner "fixture-repo%2Fsvc-a"
-    [ "${status}" -eq 0 ]
-    [ "$(cat "${cnt}")" -eq 3 ]
-    [[ "${output}" == *"v1"* ]]
-}
-
-@test "gh_versions fails immediately (no retry) on a 404, package skipped" {
-    # What: 404 does not consume retry budget.
-    # Why: a GH-API 404 is permanent, never retried.
-    # From: Issue #1683
-    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
-    gh() {
-        printf '%s' "$(($(cat "${cnt}") + 1))" > "${cnt}"
-        echo "gh: Not Found (HTTP 404)" >&2; return 1
-    }
-    export -f gh
-    CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_gh_versions owner "fixture-repo%2Fsvc-b"
-    [ "${status}" -eq 1 ]
-    [ "$(cat "${cnt}")" -eq 1 ]
+    printf '0\n' > "${GH_N}"
+    GH_FAILS=2 GH_TEXT='HTTP 503 Service Unavailable' CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_gh_versions "${own}" "${pkg}"
+    _expect transient-then-ok 0 "${line}" || return 1
+    [ "$(head -n 1 "${GH_N}")" -eq 3 ] || { echo "transient: $(cat "${GH_N}")"; return 1; }
+    grep -qF -- "/orgs/${own}/packages/container/${pkg}/versions" "${GH_N}" || { echo "api path: $(cat "${GH_N}")"; return 1; }
+    printf '0\n' > "${GH_N}"
+    GH_FAILS=99 GH_TEXT='gh: Not Found (HTTP 404)' CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_gh_versions "${own}" "${pkg}"
+    _expect not-found 1 - || return 1
+    [ "$(head -n 1 "${GH_N}")" -eq 1 ] || { echo "404 retried: $(cat "${GH_N}")"; return 1; }
 }
 
 @test "gc keeps a candidate the default probe finds in the roots file" {
     # What: Framework makes roots; default probe reads.
     # Why: End-to-end membership KEEP via the roots file.
     # From: Issue #1683
-    CI_GC_ROOTS_CMD="$(_stub roots 'printf "sha256:aaa\n"')" \
-    CI_GC_CANDIDATES_CMD="$(_stub cands 'printf "sha256:aaa\t7\t2020-01-01T00:00:00Z\n"')" \
+    CI_GC_ROOTS_CMD="$(_stub 'printf "sha256:aaa\n"')" \
+    CI_GC_CANDIDATES_CMD="$(_stub 'printf "sha256:aaa\t7\t2020-01-01T00:00:00Z\n"')" \
         run bash "${CI_SH}" gc
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"action=KEEP"* ]]
@@ -3535,8 +3451,8 @@ CASES
     # Why: In-flight artifacts survive GC (advisor case).
     # From: Issue #1683
     local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    CI_GC_ROOTS_CMD="$(_stub roots 'printf "sha256:root\n"')" \
-    CI_GC_CANDIDATES_CMD="$(_stub cands "printf 'sha256:fresh\t7\t${now}\n'")" \
+    CI_GC_ROOTS_CMD="$(_stub 'printf "sha256:root\n"')" \
+    CI_GC_CANDIDATES_CMD="$(_stub "printf 'sha256:fresh\t7\t${now}\n'")" \
         run bash "${CI_SH}" gc
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"action=KEEP"* ]]
@@ -3545,25 +3461,6 @@ CASES
 # =========================================================
 # VALIDATION
 # =========================================================
-
-@test "validate fails closed with no stack candidate" {
-    # What: No candidate source means nothing to validate.
-    # Why: Fail closed, never validate a phantom stack.
-    # From: Issue #1683
-    run bash "${CI_SH}" validate
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0001"* ]]
-}
-
-@test "validate fails closed on an empty stack candidate" {
-    # What: An empty candidate cannot be validated.
-    # Why: Fail closed, never accept an empty stack.
-    # From: Issue #1683
-    CI_STACK_CANDIDATE_CMD="$(_stub cand 'true')" \
-        run bash "${CI_SH}" validate
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0002"* ]]
-}
 
 @test "stack candidate admits only service=sha256:<64 hex> lines" {
     # What: candidate intake per line shape, one table.
@@ -3575,8 +3472,8 @@ CASES
         f="${BATS_TEST_TMPDIR}/${name}.cand"
         lines="${lines//@A/${a}}"; lines="${lines//@B/${b}}"
         case "${lines}" in
-            FAIL3) CI_STACK_CANDIDATE_CMD="$(_stub "c-${name}" 'exit 3')" ;;
-            *) printf '%s\n' "${lines//;/$'\n'}" > "${f}"; CI_STACK_CANDIDATE_CMD="$(_stub "c-${name}" "cat '${f}'")" ;;
+            FAIL3) CI_STACK_CANDIDATE_CMD="$(_stub 'exit 3')" ;;
+            *) printf '%s\n' "${lines//;/$'\n'}" > "${f}"; CI_STACK_CANDIDATE_CMD="$(_stub "cat '${f}'")" ;;
         esac
         export CI_STACK_CANDIDATE_CMD
         run _ci_stack_candidate
@@ -3599,16 +3496,6 @@ error-text|proxy=@A;dns=An image does not exist locally with the tag: x|bad
 CASES
 }
 
-@test "validate fails closed without GHCR auth" {
-    # What: Deploying the stack pulls images; needs auth.
-    # Why: Never anonymous against GHCR (rate-limit).
-    # From: Issue #1683
-    CI_STACK_CANDIDATE_CMD="$(_stub cand "echo proxy=$(_test_digest a)")" \
-        run bash "${CI_SH}" validate
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
-}
-
 @test "validate default backend fails closed when compose is unreadable" {
     # What: The wired default refuses without compose data.
     # Why: real backend past a free slot, still fail-closed.
@@ -3618,9 +3505,9 @@ CASES
     _tool_stub "${bin}" docker <<'STUB'
 case "$1 $2" in "network ls"|"compose version") exit 0 ;; *) exit 1 ;; esac
 STUB
-    PATH="${bin}:${PATH}" CI_STACK_CANDIDATE_CMD="$(_stub cand "echo proxy=$(_test_digest a)")" \
+    PATH="${bin}:${PATH}" CI_STACK_CANDIDATE_CMD="$(_stub "echo proxy=$(_test_digest a)")" \
     GITHUB_REPOSITORY=owner/fixture-repo \
-    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'exit 3')" \
+    CI_COMPOSE_IMAGES_CMD="$(_stub 'exit 3')" \
     TMPDIR="${BATS_TEST_TMPDIR}" GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" validate
     [ "${status}" -ne 0 ]
@@ -3631,8 +3518,8 @@ STUB
     # What: A failed validation run surfaces its raw output.
     # Why: Raw failure evidence is mandatory (AG-INT-002).
     # From: Issue #1683
-    CI_STACK_CANDIDATE_CMD="$(_stub cand "echo proxy=$(_test_digest a)")" \
-    CI_VALIDATE_CMD="$(_stub val 'echo STACK-UNHEALTHY; exit 1')" \
+    CI_STACK_CANDIDATE_CMD="$(_stub "echo proxy=$(_test_digest a)")" \
+    CI_VALIDATE_CMD="$(_stub 'echo STACK-UNHEALTHY; exit 1')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" validate
     [ "${status}" -ne 0 ]
@@ -3644,8 +3531,8 @@ STUB
     # What: A passing run yields STACK_ACCEPTED.
     # Why: The one success path feeding promote (§49/§50).
     # From: Issue #1683
-    CI_STACK_CANDIDATE_CMD="$(_stub cand "echo proxy=$(_test_digest a)")" \
-    CI_VALIDATE_CMD="$(_stub val 'exit 0')" \
+    CI_STACK_CANDIDATE_CMD="$(_stub "echo proxy=$(_test_digest a)")" \
+    CI_VALIDATE_CMD="$(_stub 'exit 0')" \
     GHCR_USERNAME=u GHCR_TOKEN=t \
         run bash "${CI_SH}" validate
     [ "${status}" -eq 0 ]
@@ -3695,7 +3582,7 @@ STUB
     # Why: Pin by image, not key (1 service, 2 containers).
     # From: Issue #1683 | PR #1858
     GITHUB_REPOSITORY=owner/fixture-repo \
-    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "dns-standard\tcompose.example.test/owner/fixture-repo/dns:latest\ndns-ssl\tcompose.example.test/owner/fixture-repo/dns:latest\n"')" \
+    CI_COMPOSE_IMAGES_CMD="$(_stub 'printf "dns-standard\tcompose.example.test/owner/fixture-repo/dns:latest\ndns-ssl\tcompose.example.test/owner/fixture-repo/dns:latest\n"')" \
         run _ci_validate_pin_override "dns=sha256:aaa"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"dns-standard:"* ]]
@@ -3709,7 +3596,7 @@ STUB
     # Why: No first-party digest exists for external images.
     # From: Issue #1683 | PR #1858
     GITHUB_REPOSITORY=owner/fixture-repo \
-    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "nats\tnats:2-alpine@sha256:c11\nproxy\tregistry.example.test/owner/fixture-repo/proxy:latest\n"')" \
+    CI_COMPOSE_IMAGES_CMD="$(_stub 'printf "nats\tnats:2-alpine@sha256:c11\nproxy\tregistry.example.test/owner/fixture-repo/proxy:latest\n"')" \
         run _ci_validate_pin_override "proxy=sha256:p"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"proxy@sha256:p"* ]]
@@ -3721,7 +3608,7 @@ STUB
     # Why: Else :latest validates green (silent drift).
     # From: Issue #1683 | PR #1858
     GITHUB_REPOSITORY=owner/fixture-repo \
-    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "proxy\tregistry.example.test/owner/fixture-repo/proxy:latest\n"')" \
+    CI_COMPOSE_IMAGES_CMD="$(_stub 'printf "proxy\tregistry.example.test/owner/fixture-repo/proxy:latest\n"')" \
         run _ci_validate_pin_override "watchdog=sha256:w"
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0007"* ]]
@@ -3732,7 +3619,7 @@ STUB
     # Why: drift stays visible as a warning, no hard fail.
     # From: Issue #1683 | PR #1858
     GITHUB_REPOSITORY=owner/fixture-repo \
-    CI_COMPOSE_IMAGES_CMD="$(_stub imgs 'printf "svc-x\tupstream.example.test/x@sha256:a13\nproxy\tregistry.example.test/owner/fixture-repo/proxy:latest\n"')" \
+    CI_COMPOSE_IMAGES_CMD="$(_stub 'printf "svc-x\tupstream.example.test/x@sha256:a13\nproxy\tregistry.example.test/owner/fixture-repo/proxy:latest\n"')" \
         run _ci_validate_pin_override "proxy=sha256:p
 svc-x=sha256:n"
     [ "${status}" -eq 0 ]
@@ -3864,10 +3751,13 @@ svc-x=sha256:n"
     }
     _ci_compose_profile_flags() { printf -- '--profile\np1\n'; }
     docker() { echo "DOCKER $*"; }
+    ci_cmd_socket_proxy_config() { echo "RENDER $*"; }
+    local file
+    file="$(_ci_variable CI_COMPOSE_FILE)"
     run _ci_validate_up proj net.yml pin.yml
     [ "${status}" -eq 0 ]
     [[ "${output}" == *'CI-INFO-VALIDATE-0055'*'service="svc-h"'* ]]
-    [[ "${output}" == *"--profile p1 up -d svc-a svc-p"* ]]
+    [[ "${output}" == *"RENDER ${file}"*"--profile p1 up -d svc-a svc-p"* ]]
     [[ "${output}" != *"up -d svc-h"* ]]
 }
 
@@ -3887,20 +3777,27 @@ case "$*" in
   run*) a="$*"; d="${a#*-v }"; d="${d%%:/s *}"; find "${d}" -mindepth 1 -delete ;;
 esac
 SH
-    local nofile="${BATS_TEST_TMPDIR}/no-compose.yml" m
+    local nofile="${BATS_TEST_TMPDIR}/no-compose.yml" nobase m
+    nobase="$(_val path)"
     grep -v '^  CI_COMPOSE_FILE:' "${CI_MANIFEST}" > "${nofile}"
-    for mode in ok fail nofile; do
+    grep -v '^  alpine:' "${CI_MANIFEST}" > "${nobase}"
+    for mode in ok fail nofile nobase; do
         : > "${log}"
         m="${CI_MANIFEST}"
         [ "${mode}" = nofile ] && m="${nofile}"
+        [ "${mode}" = nobase ] && m="${nobase}"
         export LANCACHE_STATE_DIR="${BATS_TEST_TMPDIR}/state-${mode}"
         mkdir -p "${LANCACHE_STATE_DIR}/cache"
         CI_MANIFEST="${m}" PATH="${bin}:${PATH}" DOCKER_LOG="${log}" \
             DOWN_MODE="${mode}" run _ci_validate_teardown "" proj
         grep -qx 'container rm -f c1' "${log}"
         grep -qx 'volume rm -f v1' "${log}"
-        grep -q "^run --rm --network none -v ${LANCACHE_STATE_DIR}:/s " "${log}"
-        [ ! -e "${LANCACHE_STATE_DIR}" ]
+        if [ "${mode}" = nobase ]; then
+            ! grep -q '^run ' "${log}" && [ -d "${LANCACHE_STATE_DIR}" ] || { echo "nobase cleared: $(cat "${log}")"; return 1; }
+        else
+            grep -q "^run --rm --network none -v ${LANCACHE_STATE_DIR}:/s " "${log}"
+            [ ! -e "${LANCACHE_STATE_DIR}" ]
+        fi
         case "${mode}" in
             ok) [ "${status}" -eq 0 ] || { echo "${output}"; return 1; } ;;
             fail)
@@ -3911,6 +3808,10 @@ SH
                 [ "${status}" -eq 2 ]
                 [[ "${output}" == *"CI-ERROR-VARIABLES-0001"*"CI_COMPOSE_FILE"* ]]
                 if grep -q '^compose' "${log}"; then return 1; fi
+                ;;
+            nobase)
+                [ "${status}" -eq 2 ]
+                [[ "${output}" == *'[CI-ERROR-VALIDATE-0102] key="base_images.alpine"'* ]]
                 ;;
         esac
     done
@@ -4023,7 +3924,7 @@ STUB
     # What: no-health list is disjoint from health list.
     # Why: Each service polled by exactly one wait strategy.
     # From: Issue #1683
-    CI_COMPOSE_CONFIG_CMD="$(_stub cfg 'printf "%s" "{\"services\":{\"proxy\":{\"healthcheck\":{}},\"dhcp\":{\"network_mode\":\"host\"},\"cachehamster\":{}}}"')" \
+    CI_COMPOSE_CONFIG_CMD="$(_stub 'printf "%s" "{\"services\":{\"proxy\":{\"healthcheck\":{}},\"dhcp\":{\"network_mode\":\"host\"},\"cachehamster\":{}}}"')" \
         run _ci_validate_no_health_services
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"cachehamster"* ]]
@@ -4193,7 +4094,7 @@ STUB
     # What: host-mode services are never started.
     # Why: Host-port bindings cannot be isolated.
     # From: Issue #1683
-    CI_COMPOSE_CONFIG_CMD="$(_stub cfg 'printf "%s" "{\"services\":{\"proxy\":{},\"dhcp\":{\"network_mode\":\"host\"},\"dns-standard\":{}}}"')" \
+    CI_COMPOSE_CONFIG_CMD="$(_stub 'printf "%s" "{\"services\":{\"proxy\":{},\"dhcp\":{\"network_mode\":\"host\"},\"dns-standard\":{}}}"')" \
         run _ci_validate_startable
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"proxy"* ]]
@@ -4205,7 +4106,7 @@ STUB
     # What: Health list is started AND healthchecked.
     # Why: Polling an unstarted service hangs out.
     # From: Issue #1683
-    CI_COMPOSE_CONFIG_CMD="$(_stub cfg 'printf "%s" "{\"services\":{\"proxy\":{\"healthcheck\":{}},\"dhcp\":{\"network_mode\":\"host\",\"healthcheck\":{}},\"cachehamster\":{}}}"')" \
+    CI_COMPOSE_CONFIG_CMD="$(_stub 'printf "%s" "{\"services\":{\"proxy\":{\"healthcheck\":{}},\"dhcp\":{\"network_mode\":\"host\",\"healthcheck\":{}},\"cachehamster\":{}}}"')" \
         run _ci_validate_health_services
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"proxy"* ]]
@@ -4220,7 +4121,7 @@ STUB
     local name nets want w
     local -a ws
     while IFS='|' read -r name nets want; do
-        CI_COMPOSE_CONFIG_CMD="$(_stub "cfg-${name}" "printf '%s' '{\"services\":{\"proxy\":{},\"dhcp\":{\"network_mode\":\"host\"}},\"networks\":{${nets}}}'")" \
+        CI_COMPOSE_CONFIG_CMD="$(_stub "printf '%s' '{\"services\":{\"proxy\":{},\"dhcp\":{\"network_mode\":\"host\"}},\"networks\":{${nets}}}'")" \
             run _ci_validate_net_override 172.16.1.32/27
         IFS=';' read -r -a ws <<<"${want}"
         for w in "${ws[@]}"; do
@@ -4238,7 +4139,7 @@ CASES
     # What: only host-mode services get network_mode reset.
     # Why: a probe may run one in the /27; up never does.
     # From: Issue #763 | PR #1858
-    CI_COMPOSE_CONFIG_CMD="$(_stub cfg-host "printf '%s' '{\"services\":{\"proxy\":{},\"dhcp\":{\"network_mode\":\"host\"}},\"networks\":{\"default\":{}}}'")" \
+    CI_COMPOSE_CONFIG_CMD="$(_stub "printf '%s' '{\"services\":{\"proxy\":{},\"dhcp\":{\"network_mode\":\"host\"}},\"networks\":{\"default\":{}}}'")" \
         run _ci_validate_net_override 172.16.1.32/27
     [ "${status}" -eq 0 ]
     [[ "${output}" == *$'  dhcp:\n    network_mode: !reset null'* ]]
@@ -4246,25 +4147,23 @@ CASES
     [[ "${output}" != *$'  dhcp:\n    container_name'* ]]
 }
 
-@test "validate container ip refuses a non-ipv4 result" {
-    # What: A non-IPv4 inspect result is refused.
-    # Why: Else a check digs a bogus resolver.
-    # From: Issue #1683
-    docker() {
-        case "$1" in
-            compose) echo "abc123" ;;
-            inspect) echo "<no value>" ;;
-        esac
-    }
-    run _ci_validate_container_ip proj proxy
-    [ "${status}" -ne 0 ]
-    # What: a docker error is rc 2 with its raw output.
-    # Why: "no container" must not hide a daemon error.
+@test "validate container ip maps each inspect answer" {
+    # What: per row: inspect answer -> rc and output.
+    # Why: only a real IPv4 may become a probe target.
     # From: Issue #1683 | PR #1858
-    docker() { echo "permission denied on docker.sock" >&2; return 1; }
-    run _ci_validate_container_ip proj proxy
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CORE-0106"*"permission denied on docker.sock"* ]]
+    local case answer rc want
+    docker() {
+        [ "${answer}" != daemon-error ] || { echo "permission denied on docker.sock" >&2; return 1; }
+        case "$1" in compose) echo "abc123" ;; inspect) echo "${answer}" ;; esac
+    }
+    while IFS='|' read -r case answer rc want; do
+        run _ci_validate_container_ip proj proxy
+        _expect "${case}" "${rc}" "${want}" || return 1
+    done <<'CASES'
+ipv4|172.16.1.35|0|=172.16.1.35
+no-value|<no value>|1|-
+daemon|daemon-error|2|CI-ERROR-CORE-0106;permission denied on docker.sock
+CASES
 }
 
 @test "validate network inspect: only not-found means gone" {
@@ -4308,65 +4207,23 @@ CASES
     [[ "${output}" == *"CI-ERROR-CORE-0106"*"inspect boom"* ]]
 }
 
-@test "validate container ip returns the container ipv4" {
-    # What: A real IPv4 from inspect is returned.
-    # Why: Checks target the runtime /27 IP.
-    # From: Issue #1683
-    docker() {
-        case "$1" in
-            compose) echo "abc123" ;;
-            inspect) echo "172.16.1.35" ;;
-        esac
-    }
-    run _ci_validate_container_ip proj proxy
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "172.16.1.35" ]
-}
-
-@test "validate dns fails when a resolver IP is missing" {
-    # What: Missing dns container IP returns rc 2.
-    # Why: Cannot dig without a resolver target.
-    # From: Issue #1683
-    _ci_validate_container_ip() { :; }
+@test "validate dns maps each resolver answer pair" {
+    # What: per row: std/ssl IPs and answers -> rc, output.
+    # Why: split routing needs two distinct answering modes.
+    # From: Issue #668 | PR #1858
+    local case ipstd ipssl ansstd ansssl rc want
     _ci_validation_dns_domain() { echo a.example.test; }
-    run _ci_validate_dns proj
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0010"* ]]
-}
-
-@test "validate dns fails when a mode returns no answer" {
-    # What: An empty dig answer returns rc 1.
-    # Why: A resolver mode must actually answer.
-    # From: Issue #668
-    _ci_validate_container_ip() { case "$2" in dns-standard) echo 1.1.1.1 ;; dns-ssl) echo 2.2.2.2 ;; esac; }
-    _ci_validation_dns_domain() { echo a.example.test; }
-    dig() { case "$2" in @1.1.1.1) echo 10.0.0.1 ;; *) : ;; esac; }
-    run _ci_validate_dns proj
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0011"* ]]
-}
-
-@test "validate dns fails when standard and ssl share an answer" {
-    # What: identical std/ssl answers return rc 1.
-    # Why: split routing needs distinct IPs.
-    # From: Issue #668
-    _ci_validate_container_ip() { case "$2" in dns-standard) echo 1.1.1.1 ;; dns-ssl) echo 2.2.2.2 ;; esac; }
-    _ci_validation_dns_domain() { echo a.example.test; }
-    dig() { echo 10.0.0.9; }
-    run _ci_validate_dns proj
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0021"* ]]
-}
-
-@test "validate dns passes on distinct split-routed answers" {
-    # What: distinct std/ssl answers return rc 0.
-    # Why: split routing holds.
-    # From: Issue #668
-    _ci_validate_container_ip() { case "$2" in dns-standard) echo 1.1.1.1 ;; dns-ssl) echo 2.2.2.2 ;; esac; }
-    _ci_validation_dns_domain() { echo a.example.test; }
-    dig() { case "$2" in @1.1.1.1) echo 10.0.0.1 ;; @2.2.2.2) echo 10.0.0.2 ;; esac; }
-    run _ci_validate_dns proj
-    [ "${status}" -eq 0 ]
+    _ci_validate_container_ip() { case "$2" in dns-standard) echo "${ipstd}" ;; dns-ssl) echo "${ipssl}" ;; esac; }
+    dig() { case "$2" in "@${ipstd}") echo "${ansstd}" ;; "@${ipssl}") echo "${ansssl}" ;; esac; }
+    while IFS='|' read -r case ipstd ipssl ansstd ansssl rc want; do
+        run _ci_validate_dns proj
+        _expect "${case}" "${rc}" "${want}" || return 1
+    done <<'CASES'
+no-ip|||||2|CI-ERROR-VALIDATE-0010
+one-mode|1.1.1.1|2.2.2.2|10.0.0.1||1|CI-ERROR-VALIDATE-0011
+same|1.1.1.1|2.2.2.2|10.0.0.9|10.0.0.9|1|CI-ERROR-VALIDATE-0021
+split|1.1.1.1|2.2.2.2|10.0.0.1|10.0.0.2|0|-
+CASES
 }
 
 @test "validate proxy maps each request outcome, raw on failure" {
@@ -4416,13 +4273,13 @@ CASES
     # What: all probes in order, NO_PROXY=*, stop on fail.
     # Why: a host http_proxy answered the cache probe.
     # From: Issue #1683 | PR #1858
-    local log="${BATS_TEST_TMPDIR}/probes" p fail=""
+    local log="${BATS_TEST_TMPDIR}/probes" p
     local -a probes=(dns proxy proxy_stream_map ssl_mitm ssl_dispatch_map
         ui_nats_dns dns_rollback kea_rollback secondary_identity)
     for p in "${probes[@]}"; do
         eval "_ci_validate_${p}() {
             echo \"${p} \${NO_PROXY}|\${no_proxy} \$*\" >> '${log}'
-            [ '${p}' != \"\${fail}\" ]
+            [ '${p}' != \"\${FAIL_PROBE:-}\" ]
         }"
     done
     export NO_PROXY=keep no_proxy=keep
@@ -4434,72 +4291,41 @@ CASES
         echo "proxy:"; cat "${log}"; return 1; }
     [ "${NO_PROXY}|${no_proxy}" = 'keep|keep' ]
     grep -qx 'kea_rollback \*|\* proj net.yml pin.yml' "${log}"
-    fail=ssl_mitm; : > "${log}"
+    export FAIL_PROBE=ssl_mitm; : > "${log}"
     run _ci_validate_probes proj net.yml pin.yml
     [ "${status}" -eq 1 ]
     [ "$(cut -d' ' -f1 "${log}" | paste -sd' ')" = "dns proxy proxy_stream_map ssl_mitm" ] || {
         echo "early:"; cat "${log}"; return 1; }
 }
 
-@test "validate ssl-mitm fails when proxy IP is missing" {
-    # What: Missing proxy container/IP returns rc 2.
-    # Why: Cannot TLS-probe without a target.
-    # From: Issue #668
-    _ci_validate_container_ip() { :; }
-    _ci_validation_dns_domain() { echo a.example.test; }
-    docker() { case "$1" in compose) echo cid1 ;; esac; }
-    run _ci_validate_ssl_mitm proj
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0023"* ]]
-}
-
-@test "validate ssl-mitm fails when the proxy CA is unreadable" {
-    # What: A failed CA copy returns rc 2.
-    # Why: Cannot compare issuer without our CA.
-    # From: Issue #668
-    _ci_validate_container_ip() { echo 172.16.1.9; }
-    _ci_validation_dns_domain() { echo a.example.test; }
-    docker() { case "$1" in compose) echo cid1 ;; cp) return 1 ;; esac; }
-    run _ci_validate_ssl_mitm proj
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0024"* ]]
-}
-
-@test "validate ssl-mitm fails when :443 cert is not our LAN CA" {
-    # What: A foreign issuer returns rc 1.
-    # Why: Foreign issuer means passthrough, not MITM.
-    # From: Issue #668
-    _ci_validate_container_ip() { echo 172.16.1.9; }
-    _ci_validation_dns_domain() { echo a.example.test; }
-    docker() { case "$1" in compose) echo cid1 ;; cp) return 0 ;; esac; }
-    openssl() { case "$*" in *s_client*) echo PEM ;; *-subject*) echo "subject=CN=LanCache Root CA" ;; *-issuer*) echo "issuer=CN=DigiCert" ;; esac; }
-    run _ci_validate_ssl_mitm proj
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0026"* ]]
-    # What: a failed handshake shows s_client's own error.
-    # Why: "no issuer" alone does not say why.
+@test "validate ssl-mitm maps each proxy, CA and handshake case" {
+    # What: per row: proxy IP, CA copy, handshake, issuer.
+    # Why: only our LAN CA as :443 issuer proves the MITM.
+    # From: Issue #668 | PR #1858
+    local case stub_ip stub_cp stub_hs stub_issuer rc want
+    # What: stubs read row values as stub_* only.
+    # Why: dynamic scope shows the callee's own local ip.
     # From: Issue #1683 | PR #1858
+    _ci_validation_dns_domain() { echo a.example.test; }
+    _ci_validate_container_ip() { echo "${stub_ip}"; }
+    docker() { case "$1" in compose) echo cid1 ;; cp) return "${stub_cp}" ;; esac; }
     openssl() {
         case "$*" in
-            *s_client*) echo "connect:errno=111" >&2; return 1 ;;
+            *s_client*) [ "${stub_hs}" = ok ] || { echo "connect:errno=111" >&2; return 1; }; echo PEM ;;
             *-subject*) echo "subject=CN=LanCache Root CA" ;;
+            *-issuer*) echo "issuer=CN=${stub_issuer}" ;;
         esac
     }
-    run _ci_validate_ssl_mitm proj
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0025"*"connect:errno=111"* ]]
-}
-
-@test "validate ssl-mitm passes when :443 cert is our LAN CA" {
-    # What: Our CA as issuer returns rc 0.
-    # Why: genuine MITM interception.
-    # From: Issue #597
-    _ci_validate_container_ip() { echo 172.16.1.9; }
-    _ci_validation_dns_domain() { echo a.example.test; }
-    docker() { case "$1" in compose) echo cid1 ;; cp) return 0 ;; esac; }
-    openssl() { case "$*" in *s_client*) echo PEM ;; *-subject*) echo "subject=CN=LanCache Root CA" ;; *-issuer*) echo "issuer=CN=LanCache Root CA" ;; esac; }
-    run _ci_validate_ssl_mitm proj
-    [ "${status}" -eq 0 ]
+    while IFS='|' read -r case stub_ip stub_cp stub_hs stub_issuer rc want; do
+        run _ci_validate_ssl_mitm proj
+        _expect "${case}" "${rc}" "${want}" || return 1
+    done <<'CASES'
+no-ip||0|ok|LanCache Root CA|2|CI-ERROR-VALIDATE-0023
+no-ca|172.16.1.9|1|ok|LanCache Root CA|2|CI-ERROR-VALIDATE-0024
+foreign|172.16.1.9|0|ok|DigiCert|1|CI-ERROR-VALIDATE-0026
+handshake|172.16.1.9|0|fail|LanCache Root CA|1|CI-ERROR-VALIDATE-0025;connect:errno=111
+ours|172.16.1.9|0|ok|LanCache Root CA|0|-
+CASES
 }
 
 @test "validate ssl-dispatch fails when no proxy container" {
@@ -4551,107 +4377,71 @@ CASES
     [ "${status}" -eq 0 ]
 }
 
-@test "validate ui-session fails when no ui IP" {
-    # What: Missing ui IP returns rc 2.
-    # Why: Cannot open a session without a target.
-    # From: Issue #1164
-    _ci_validate_container_ip() { :; }
-    run _ci_validate_ui_session proj "${BATS_TEST_TMPDIR}/ci-test-jar"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0030"* ]]
-    # What: a ui that never answers shows curl's last error.
-    # Why: the timeout alone does not say why.
-    # From: Issue #1683 | PR #1858
-    _ci_validate_container_ip() { echo 172.16.1.9; }
-    curl() { echo "curl: (7) Failed to connect" >&2; return 7; }
+@test "validate ui-session maps target, answer and cookie" {
+    # What: per row: ui IP and curl answer -> rc, output.
+    # Why: the CSRF token comes from the session cookie.
+    # From: Issue #1164 | PR #1858
+    local case stub_ip stub_mode rc want jar="${BATS_TEST_TMPDIR}/ci-test-jar"
+    _ci_validate_container_ip() { echo "${stub_ip}"; }
     sleep() { :; }
-    run _ci_validate_ui_session proj "${BATS_TEST_TMPDIR}/ci-test-jar"
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0031"*"Failed to connect"* ]]
-}
-
-@test "validate ui-session extracts the CSRF token" {
-    # What: A session cookie yields its CSRF segment.
-    # Why: One owner for cookiejar + CSRF extraction.
-    # From: Issue #628
-    _ci_validate_container_ip() { echo 172.16.1.9; }
     curl() {
-        local jar="" a
-        for a in "$@"; do [ "$a" = "-w" ] && { echo 303; return 0; }; done
-        while [ $# -gt 0 ]; do case "$1" in -c) jar="$2"; shift 2;; *) shift;; esac; done
-        [ -n "$jar" ] && printf 'd\tF\t/\tF\t0\tlancache_ui_session\thdr.body.TOK123\n' > "$jar"
-        return 0
+        local cj="" a
+        [ "${stub_mode}" != refused ] || { echo "curl: (7) Failed to connect" >&2; return 7; }
+        for a in "$@"; do [ "${a}" = "-w" ] && { echo 303; return 0; }; done
+        while [ $# -gt 0 ]; do case "$1" in -c) cj="$2"; shift 2 ;; *) shift ;; esac; done
+        [ -z "${cj}" ] || printf 'd\tF\t/\tF\t0\tlancache_ui_session\thdr.body.TOK123\n' > "${cj}"
     }
-    run _ci_validate_ui_session proj "${BATS_TEST_TMPDIR}/ci-test-jar"
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "TOK123" ]
-    rm -f "${BATS_TEST_TMPDIR}/ci-test-jar"
+    while IFS='|' read -r case stub_ip stub_mode rc want; do
+        rm -f "${jar}"
+        run _ci_validate_ui_session proj "${jar}"
+        _expect "${case}" "${rc}" "${want}" || return 1
+    done <<'CASES'
+no-ip||ok|2|CI-ERROR-VALIDATE-0030
+refused|172.16.1.9|refused|1|CI-ERROR-VALIDATE-0031;Failed to connect
+token|172.16.1.9|ok|0|=TOK123
+CASES
 }
 
-@test "validate ui-add-record fails on non-303" {
-    # What: A non-303 add returns rc 1.
-    # Why: UI must accept the write (303 redirect).
-    # From: Issue #1164
+@test "validate ui-add-record accepts only the 303 redirect" {
+    # What: per row: HTTP status of the add -> rc, output.
+    # Why: the UI signals a stored record with 303 only.
+    # From: Issue #1164 | PR #1858
+    local case stub_code rc want
     _ci_validate_container_ip() { echo 172.16.1.9; }
-    curl() { echo 500; }
-    run _ci_validate_ui_add_record proj "${BATS_TEST_TMPDIR}/jar" tok ci-probe 203.0.113.60
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0034"* ]]
+    curl() { echo "${stub_code}"; }
+    while IFS='|' read -r case stub_code rc want; do
+        run _ci_validate_ui_add_record proj "${BATS_TEST_TMPDIR}/jar" tok ci-probe 203.0.113.60
+        _expect "${case}" "${rc}" "${want}" || return 1
+    done <<'CASES'
+error|500|1|CI-ERROR-VALIDATE-0034
+redirect|303|0|-
+CASES
 }
 
-@test "validate ui-add-record passes on 303" {
-    # What: A 303 add returns rc 0.
-    # Why: 303 is the UI's success redirect.
-    # From: Issue #1164
-    _ci_validate_container_ip() { echo 172.16.1.9; }
-    curl() { echo 303; }
-    run _ci_validate_ui_add_record proj "${BATS_TEST_TMPDIR}/jar" tok ci-probe 203.0.113.60
-    [ "${status}" -eq 0 ]
-}
-
-@test "validate dns-resolves fails when no dns IP" {
-    # What: Missing dns IP returns rc 2.
-    # Why: Cannot dig without a resolver.
-    # From: Issue #1164
-    _ci_validate_container_ip() { :; }
-    run _ci_validate_dns_resolves proj dns-standard x.lan. 203.0.113.60 2
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0035"* ]]
-}
-
-@test "validate dns-resolves fails when record never matches" {
-    # What: A never-matching record returns rc 1.
-    # Why: The written record must actually resolve.
-    # From: Issue #1164
-    _ci_validate_container_ip() { echo 172.16.1.3; }
-    dig() { echo "10.9.9.9 $*"; }
+@test "validate dns-resolves maps target and answers" {
+    # What: per row: dns IP and dig answer -> rc, output.
+    # Why: the record must resolve; stderr is no answer.
+    # From: Issue #1164 | PR #1858
+    local case stub_ip stub_mode rc want
+    _ci_validate_container_ip() { echo "${stub_ip}"; }
     sleep() { :; }
     _ci_validate_service_evidence() { echo "evidence $1 $2"; }
-    run _ci_validate_dns_resolves proj dns-standard x.lan. 203.0.113.60 2
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0036"* ]]
-    # What: failure ships full dig, zone SOA, service logs.
-    # Why: an empty +short answer alone proves no cause.
-    # From: Issue #1683 | PR #1858
-    [[ "${output}" == *"full answer:"*"@172.16.1.3 A x.lan."* ]]
-    [[ "${output}" == *"zone SOA:"*"@172.16.1.3 SOA lan."* ]]
-    [[ "${output}" == *"service:"*"evidence proj dns-standard"* ]]
-    # What: a dig warning plus the right answer matches.
-    # Why: stderr is evidence, never part of the answer.
-    # From: Issue #1683 | PR #1858
-    dig() { echo ";; Warning: EDNS mismatch" >&2; echo 203.0.113.60; }
-    run _ci_validate_dns_resolves proj dns-standard x.lan. 203.0.113.60 2
-    [ "${status}" -eq 0 ]
-}
-
-@test "validate dns-resolves passes when record matches" {
-    # What: A matching answer returns rc 0.
-    # Why: Proves the record reached this dns mode.
-    # From: Issue #1164
-    _ci_validate_container_ip() { echo 172.16.1.3; }
-    dig() { echo 203.0.113.60; }
-    run _ci_validate_dns_resolves proj dns-standard x.lan. 203.0.113.60 2
-    [ "${status}" -eq 0 ]
+    dig() {
+        case "${stub_mode}" in
+            never) echo "10.9.9.9 $*" ;;
+            warn) echo ";; Warning: EDNS mismatch" >&2; echo 203.0.113.60 ;;
+            *) echo 203.0.113.60 ;;
+        esac
+    }
+    while IFS='|' read -r case stub_ip stub_mode rc want; do
+        run _ci_validate_dns_resolves proj dns-standard x.lan. 203.0.113.60 2
+        _expect "${case}" "${rc}" "${want}" || return 1
+    done <<'CASES'
+no-ip||match|2|CI-ERROR-VALIDATE-0035
+never|172.16.1.3|never|1|CI-ERROR-VALIDATE-0036;full answer:;@172.16.1.3 A x.lan.;zone SOA:;@172.16.1.3 SOA lan.;service:;evidence proj dns-standard
+warn|172.16.1.3|warn|0|-
+match|172.16.1.3|match|0|-
+CASES
 }
 
 @test "validate ui-nats-dns passes end to end" {
@@ -4671,38 +4461,22 @@ CASES
     [ "${status}" -eq 0 ]
 }
 
-@test "validate dns-rollback fails when no dns container" {
-    # What: Missing dns-standard container returns rc 2.
-    # Why: No target for the rollback round-trip.
-    # From: Issue #628
-    _ci_validate_container_ip() { :; }
-    docker() { :; }
-    run _ci_validate_dns_rollback proj
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0037"* ]]
-}
-
-@test "validate dns-rollback fails when the API key is unreadable" {
-    # What: An empty shared-secret key returns rc 2.
-    # Why: Cannot authenticate to the listener without it.
-    # From: Issue #628
-    _ci_validate_container_ip() { echo 172.16.1.3; }
-    docker() { case "$1" in compose) echo cid1 ;; exec) : ;; esac; }
-    run _ci_validate_dns_rollback proj
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0038"* ]]
-}
-
-@test "validate dns-rollback fails when /snapshots is not 401 without a key" {
-    # What: non-401 unauth response returns rc 1.
-    # Why: listener MUST require authentication.
-    # From: Issue #628
-    _ci_validate_container_ip() { echo 172.16.1.3; }
-    docker() { case "$1" in compose) echo cid1 ;; exec) echo KEY123 ;; esac; }
-    curl() { case "$*" in *-w*) echo 200 ;; *) return 0 ;; esac; }
-    run _ci_validate_dns_rollback proj
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0040"* ]]
+@test "validate dns-rollback fails closed before the round-trip" {
+    # What: per row: target, API key, unauth status -> rc.
+    # Why: no target, no key or an open listener must stop.
+    # From: Issue #628 | PR #1858
+    local case stub_ip stub_key stub_unauth rc want
+    _ci_validate_container_ip() { echo "${stub_ip}"; }
+    docker() { case "$1" in compose) [ -z "${stub_ip}" ] || echo cid1 ;; exec) [ -z "${stub_key}" ] || echo "${stub_key}" ;; esac; }
+    curl() { case "$*" in *-w*) echo "${stub_unauth}" ;; *) return 0 ;; esac; }
+    while IFS='|' read -r case stub_ip stub_key stub_unauth rc want; do
+        run _ci_validate_dns_rollback proj
+        _expect "${case}" "${rc}" "${want}" || return 1
+    done <<'CASES'
+no-container||||2|CI-ERROR-VALIDATE-0037
+no-key|172.16.1.3|||2|CI-ERROR-VALIDATE-0038
+open|172.16.1.3|KEY123|200|1|CI-ERROR-VALIDATE-0040
+CASES
 }
 
 @test "validate dns-rollback drives the rollback through setup.sh" {
@@ -4934,953 +4708,707 @@ CASES
 # VARIABLES
 # =========================================================
 
-@test "variables get reads a value from the SOT fallback" {
-    # What: With no env override, the SOT default is used.
-    # Why: AG-CI-006 fallback, like CARGO_BUILD_JOBS.
-    # From: Issue #1683
-    run --separate-stderr bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "30" ]
-}
-
-@test "variables get lets an env value override the SOT default" {
-    # What: A set env value wins over the SOT fallback.
-    # Why: AG-CI-006: use the variable when set.
-    # From: Issue #1683
-    REPOSITORY_CI_LEDGER_RETENTION_DAYS=45 \
-        run --separate-stderr bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "45" ]
-}
-
-@test "variables get reads CI_VARIABLES json; env still wins" {
-    # What: vars json beats SOT; a set env beats the json.
+@test "variables get: env beats CI_VARIABLES json beats SOT" {
+    # What: per row: env/json/SOT sources -> value or fail.
     # Why: GitHub vars arrive once as json (AG-CI-006).
     # From: Issue #1683 | PR #1858
-    CI_VARIABLES='{"REPOSITORY_CI_LEDGER_RETENTION_DAYS":"7"}' \
-        run --separate-stderr bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
-    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
-    [ "${output}" = "7" ]
-    REPOSITORY_CI_LEDGER_RETENTION_DAYS=9 CI_VARIABLES='{"REPOSITORY_CI_LEDGER_RETENTION_DAYS":"7"}' \
-        run --separate-stderr bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
-    [ "${output}" = "9" ]
-    CI_VARIABLES='not json' run bash "${CI_SH}" variables get REPOSITORY_CI_LEDGER_RETENTION_DAYS
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VARIABLES-0015"* ]]
+    local m case envs name rc want
+    m="$(_val path)"
+    local -a ev
+    local -A V=(
+        [@VAR@]="$(_val var)" [@NOVAR@]="$(_val var)" [@SOTV@]="$(_val name)" [@ENVV@]="$(_val name)"
+        [@JSONV@]="$(_val name)" [@BAD@]="$(_val name)"
+    )
+    _fill "$(printf '%s\n' 'ci_variables:' '  @VAR@: @SOTV@')" > "${m}"
+    while IFS='|' read -r case envs name rc want; do
+        ev=(); [ "${envs}" = - ] || read -r -a ev <<< "$(_fill "${envs}")"
+        if [ "${rc}" -eq 0 ]; then
+            run --separate-stderr env "${ev[@]}" CI_MANIFEST="${m}" bash "${CI_SH}" variables get "$(_fill "${name}")"
+        else
+            run env "${ev[@]}" CI_MANIFEST="${m}" bash "${CI_SH}" variables get "$(_fill "${name}")"
+        fi
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+    done <<'CASES'
+sot-default|-|@VAR@|0|=@SOTV@
+env-over-sot|@VAR@=@ENVV@|@VAR@|0|=@ENVV@
+json-over-sot|CI_VARIABLES={"@VAR@":"@JSONV@"}|@VAR@|0|=@JSONV@
+env-over-json|@VAR@=@ENVV@ CI_VARIABLES={"@VAR@":"@JSONV@"}|@VAR@|0|=@ENVV@
+bad-json|CI_VARIABLES=@BAD@|@VAR@|2|[CI-ERROR-VARIABLES-0015] name="@VAR@"
+no-value|-|@NOVAR@|2|[CI-ERROR-VARIABLES-0001] name="@NOVAR@"
+CASES
 }
 
-@test "variables get fails closed with no env and no SOT default" {
-    # What: An unknown variable has no value anywhere.
-    # Why: Fail closed, never emit an empty value.
-    # From: Issue #1683
-    run bash "${CI_SH}" variables get NONEXISTENT_VAR_XYZ
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VARIABLES-0001"* ]]
-}
-
-@test "variables get fails closed with no variable name" {
-    # What: A missing name must fail, not read blank.
-    # Why: Fail-closed dispatch (AG-VAL-002).
-    # From: Issue #1683
-    run bash "${CI_SH}" variables get
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VARIABLES-0003"* ]]
-}
-
-@test "variables rejects an unknown subcommand" {
-    # What: Only known subcommands are routed.
-    # Why: Fail-closed dispatch (AG-VAL-002).
-    # From: Issue #1683
-    run bash "${CI_SH}" variables bogus
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VARIABLES-0002"* ]]
-}
-
-@test "bake-check fails closed without an image ref" {
-    # What: bake-check needs an explicit image ref.
-    # Why: No target means no proof; never pass blind.
-    # From: Issue #1683
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" variables bake-check
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VARIABLES-0008"* ]]
-}
-
-@test "bake-check fails closed without GHCR auth" {
-    # What: Image inspect must be authenticated.
-    # Why: GHCR is never accessed anonymously.
-    # From: Issue #1683
-    run bash "${CI_SH}" variables bake-check img@sha256:d
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILD-0002"* ]]
-}
-
-@test "bake-check default backend reads env and counts the proxy CA" {
-    # What: docker-stub image per case: rc and codes.
-    # Why: the guard must inspect the real built image.
-    # From: Issue #1781 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/bkbin" name ca bundle irc want w
-    local -a ws
-    mkdir -p "${bin}"
+# What: bake-check per image shape; values never logged.
+# Why: build-only vars and the proxy CA stay out of images.
+# From: Issue #1683 | PR #1858
+@test "bake-check: forbidden env keys and an extra CA fail, values hidden" {
+    local case backend envs ca bundle irc rc want bin hook k
+    local -A V=(
+        [@URL@]="$(_val url)" [@V@]="$(_val name)" [@K@]="$(_val name)" [@M@]="$(_val name)"
+        [@B@]="$(_val name)" [@E@]="$(_val name)" [@RAW@]="$(_val name)" [@IMG@]="$(_val host)/$(_val name)@$(_val digest)"
+    )
+    bin="$(_val path)"
     _tool_stub "${bin}" docker <<'STUB'
 case "$1" in
-    image) [ "${BK_IRC}" = 0 ] || { echo "inspect-boom"; exit 1; }; printf 'PATH=/usr/bin\n%s\n' "${BK_ENV}" ;;
+    image) [ "${BK_IRC}" = 0 ] || { echo "${BK_RAW}"; exit 1; }; printf '%b' "${BK_ENV}" ;;
     run) printf '%b' "${BK_BUNDLE}" ;;
 esac
 STUB
-    while IFS='|' read -r name ca bundle irc want; do
-        PATH="${bin}:${PATH}" PROJECT_SELFHOSTED_PROXY_CA="${ca//;/$'\n'}" BK_BUNDLE="${bundle}" \
-        BK_IRC="${irc}" BK_ENV="LANG=C" GHCR_USERNAME=u GHCR_TOKEN=t \
-            run bash "${CI_SH}" variables bake-check img@sha256:d
-        IFS=',' read -r -a ws <<<"${want}"
-        for w in "${ws[@]}"; do
-            [[ "${output}" == *"${w}"* ]] || { echo "${name}: no '${w}': ${output}"; return 1; }
+    while IFS='|' read -r case backend envs ca bundle irc rc want; do
+        hook=""
+        [ "${backend}" = default ] || hook="$(_stub "printf '%b' '${backend}'")"
+        [ "${ca}" != - ] || ca=""
+        PATH="${bin}:${PATH}" CI_BAKE_INSPECT_CMD="${hook}" PROJECT_SELFHOSTED_PROXY_CA="$(_fill "${ca//;/$'\n'}")" \
+            BK_BUNDLE="$(_fill "${bundle}")" BK_IRC="${irc}" BK_RAW="${V[@RAW@]}" BK_ENV="$(_fill "${envs}")" \
+            GHCR_USERNAME="$(_val name)" GHCR_TOKEN="$(_val name)" run _ci_bake_check "${V[@IMG@]}"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+        for k in @URL@ @V@ @M@ @B@ @E@; do
+            [[ "${output}" != *"${V[${k}]}"* ]] || { echo "${case}: value of ${k} logged"; return 1; }
         done
-        [[ "${output}" != *"MARKERLINE"* ]] || { echo "${name}: CA bytes leaked"; return 1; }
     done <<'CASES'
-no-ca-secret|||0|result=clean
-ca-not-baked|BEGIN;MARKERLINE;END|OTHER\nCERT\n|0|result=clean
-ca-baked|BEGIN;MARKERLINE;END|x\nMARKERLINE\ny\nMARKERLINE\n|0|CI-ERROR-VARIABLES-0016,extra_ca="2"
-inspect-fails|||1|CI-ERROR-VARIABLES-0005,inspect-boom
+clean|default|PATH=/usr/bin\nLANG=C\n|-|-|0|0|bake-check result=clean
+http-proxy|default|HTTP_PROXY=@URL@\n|-|-|0|2|[CI-ERROR-VARIABLES-0006];key="HTTP_PROXY"
+https-proxy-lower|default|https_proxy=@URL@\n|-|-|0|2|[CI-ERROR-VARIABLES-0006];key="https_proxy"
+goproxy|default|GOPROXY=@URL@\n|-|-|0|2|[CI-ERROR-VARIABLES-0006];key="GOPROXY"
+sccache|default|SCCACHE_@K@=@V@\n|-|-|0|2|[CI-ERROR-VARIABLES-0006];key="SCCACHE_@K@"
+ccache|default|CCACHE_@K@=@V@\n|-|-|0|2|[CI-ERROR-VARIABLES-0006];key="CCACHE_@K@"
+distcc|default|DISTCC_@K@=@V@\n|-|-|0|2|[CI-ERROR-VARIABLES-0006];key="DISTCC_@K@"
+actions|default|ACTIONS_@K@=@V@\n|-|-|0|2|[CI-ERROR-VARIABLES-0006];key="ACTIONS_@K@"
+ca-baked|default|PATH=/usr/bin\n|@B@;@M@;@E@|@B@\n@M@\n@E@\n@M@\n|0|2|[CI-ERROR-VARIABLES-0016];extra_ca="2"
+ca-not-baked|default|PATH=/usr/bin\n|@B@;@M@;@E@|@B@\n@E@\n|0|0|bake-check result=clean
+inspect-fails|default|-|-|-|1|2|[CI-ERROR-VARIABLES-0005];raw:;@RAW@
+unknown-line|env PATH=/x\nmystery 1\nextra_ca 0\n|-|-|-|0|2|[CI-ERROR-VARIABLES-0009]
+malformed-ca|env PATH=/x\nextra_ca x\n|-|-|-|0|2|[CI-ERROR-VARIABLES-0007]
 CASES
 }
 
-@test "bake-check passes on a clean image" {
-    # What: No forbidden var and no extra CA is clean.
-    # Why: A clean image must not be blocked.
-    # From: Issue #1683
-    CI_BAKE_INSPECT_CMD="$(_stub insp 'echo "env PATH=/usr/bin"; echo "env LANG=C"; echo "extra_ca 0"')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" variables bake-check img@sha256:d
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"result=clean"* ]]
+# What: guard flags a missing file or a non-central id.
+# Why: set-runtime provides only the listed mount ids.
+# From: Issue #1683 | PR #1858
+@test "dockerfile-secret-ids flags a missing file or a foreign id" {
+    local df case body rc want
+    _build_fixture
+    df="${PWD}/svc/Dockerfile"
+    local -A V=([@OK@]="$(_ci_runtime_secret_ids | awk 'NR == 1')" [@BAD@]="$(_val name)"
+        [@VAR@]="$(_val var)" [@DIR@]="/$(_val name)")
+    [ -n "${V[@OK@]}" ] || return 1
+    while IFS='|' read -r case body rc want; do
+        rm -f "${df}"
+        [ "${body}" = - ] || printf '%b' "$(_fill "${body}")" > "${df}"
+        run ci_cmd_check dockerfile-secret-ids "${PWD}"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+    done <<'CASES'
+listed|FROM x\n# RUN --mount=type=secret,id=@BAD@ true\nRUN --mount=type=secret,id=@OK@ --mount=id=@OK@,type=secret \\\n    # --mount=type=secret,id=@BAD@\n    --mount=type=secret,target=@DIR@/@OK@ --mount=type=cache,id=@BAD@ true\n|0|=dockerfile-secret-ids=clean targets=3
+foreign|FROM x\nRUN --mount=type=secret,id=@BAD@ true\n|1|[CI-ERROR-CHECK-0156];targets=3;svc-a: svc/Dockerfile: mount id '@BAD@'
+foreign-dst|FROM x\nRUN --mount=dst=@DIR@/@BAD@,type=secret true\n|1|[CI-ERROR-CHECK-0156];svc-a: svc/Dockerfile: mount id '@BAD@'
+no-id|FROM x\nRUN --mount=type=secret,env=@VAR@ true\n|1|[CI-ERROR-CHECK-0156];svc-a: svc/Dockerfile: '--mount=type=secret,env=@VAR@' has no id or target
+missing|-|1|[CI-ERROR-CHECK-0156];svc-a: no Dockerfile at svc/Dockerfile
+CASES
 }
 
-@test "bake-check fails on a baked proxy and hides the value" {
-    # What: A baked HTTP_PROXY fails; log the key only.
-    # Why: AG-SEC-007: never emit the secret value.
-    # From: Issue #1683
-    CI_BAKE_INSPECT_CMD="$(_stub insp 'echo "env HTTP_PROXY=http://10.0.0.9:3128"; echo "extra_ca 0"')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" variables bake-check img@sha256:d
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VARIABLES-0006"* ]]
-    [[ "${output}" == *'key="HTTP_PROXY"'* ]]
-    [[ "${output}" != *"10.0.0.9"* ]]
-}
-
-@test "bake-check fails on a baked accel var by prefix" {
-    # What: An SCCACHE_/CCACHE_/DISTCC_ var is forbidden.
-    # Why: Accel endpoints are LAN-only, must not bake.
-    # From: Issue #1683
-    CI_BAKE_INSPECT_CMD="$(_stub insp 'echo "env SCCACHE_REDIS=redis://h:6379"; echo "extra_ca 0"')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" variables bake-check img@sha256:d
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VARIABLES-0006"* ]]
-    [[ "${output}" == *'key="SCCACHE_REDIS"'* ]]
-}
-
-@test "bake-check fails on a baked CA and shows only a count" {
-    # What: An extra CA in the store fails the guard.
-    # Why: Log the count, never the certificate bytes.
-    # From: Issue #1683
-    CI_BAKE_INSPECT_CMD="$(_stub insp 'echo "env PATH=/usr/bin"; echo "extra_ca 1"')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" variables bake-check img@sha256:d
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VARIABLES-0016"* ]]
-    [[ "${output}" == *'extra_ca="1"'* ]]
-    [[ "${output}" != *"BEGIN CERTIFICATE"* ]]
-}
-
-@test "bake-check fails closed on an unknown inspect line" {
-    # What: An unrecognized inspect line is not ignored.
-    # Why: Silent skip could hide a real leak (fail-closed).
-    # From: Issue #1683
-    CI_BAKE_INSPECT_CMD="$(_stub insp 'echo "env PATH=/usr/bin"; echo "mystery 1"; echo "extra_ca 0"')" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" variables bake-check img@sha256:d
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VARIABLES-0009"* ]]
-}
-
-@test "no Dockerfile mounts the legacy proxy_ca secret id" {
-    # What: Every CA mount uses the canonical secret id.
-    # Why: A stray proxy_ca = a silently CA-less build.
-    # From: Issue #1683
-    local root="${BATS_TEST_DIRNAME}/../.."
-    run git -C "${root}" grep -nE '(^|[^_])proxy_ca([^a-z_]|$)' -- services tools
-    [ "${status}" -ne 0 ]
-}
-
-@test "every Dockerfile secret mount id is in the central list" {
-    # What: Mounted secret ids come from the one list.
-    # Why: No drift; one source drives provisioning.
-    # From: Issue #1683
-    local root="${BATS_TEST_DIRNAME}/../.." allow ids id
-    allow="$(_ci_runtime_secret_ids)"
-    ids="$(git -C "${root}" grep -hoE 'mount=type=secret,id=[a-z0-9_]+' -- services tools | sed 's/.*id=//' | sort -u)"
-    [ -n "${ids}" ]
-    while IFS= read -r id; do
-        [ -n "${id}" ] || continue
-        grep -qx -- "${id}" <<< "${allow}"
-    done <<< "${ids}"
-}
-
-@test "set-runtime rejects an invalid redis mode" {
-    # What: SCCACHE_REDIS_MODE is a closed enum.
-    # Why: An unknown mode is an error, not a guess.
-    # From: Issue #1683
-    CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt" SCCACHE_REDIS_MODE=bogus \
-        run bash "${CI_SH}" variables set-runtime
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VARIABLES-0010"* ]]
-}
-
-@test "set-runtime errors on scheduler without auth token" {
-    # What: dist scheduler and token are both-or-neither.
-    # Why: A half config would build misauthenticated.
-    # From: Issue #1683
-    CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt" SCCACHE_REDIS_URL='redis://h' \
-    SCCACHE_DIST_SCHEDULER_URL='https://s' \
-        run bash "${CI_SH}" variables set-runtime
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VARIABLES-0011"* ]]
-}
-
-@test "set-runtime errors on auth token without scheduler" {
-    # What: the symmetric half of the both-or-neither pair.
-    # Why: only the scheduler-without-token side had a test.
-    # From: Issue #1683 | PR #1858
-    CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt2" \
-    SCCACHE_DIST_AUTH_TOKEN='tok' \
-        run bash "${CI_SH}" variables set-runtime
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VARIABLES-0017"* ]]
-    [[ "${output}" == *"auth token set without scheduler"* ]]
-}
-
-@test "set-runtime errors when required redis url is missing" {
-    # What: mode=required needs SCCACHE_REDIS_URL.
-    # Why: A trusted Rust build must have the cache.
-    # From: Issue #1683
-    CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt" SCCACHE_REDIS_MODE=required \
-        run bash "${CI_SH}" variables set-runtime
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VARIABLES-0012"* ]]
-}
-
-@test "set-runtime optional mode skips redis when url is empty" {
-    # What: mode=optional tolerates a missing redis url.
-    # Why: The cache is an optimization, not required.
-    # From: Issue #1683
-    CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt" SCCACHE_REDIS_MODE=optional \
-        run bash "${CI_SH}" variables set-runtime
-    [ "${status}" -eq 0 ]
-    [[ "${output}" != *"sccache_redis_url"* ]]
-}
-
-@test "set-runtime off mode emits no acceleration secrets" {
-    # What: mode=off disables sccache and its redis.
-    # Why: A build without the cache must still work.
-    # From: Issue #1683
-    CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt" SCCACHE_REDIS_MODE=off \
-    SCCACHE_REDIS_URL='redis://h' \
-        run bash "${CI_SH}" variables set-runtime
-    [ "${status}" -eq 0 ]
-    [[ "${output}" != *"sccache_redis_url"* ]]
-    [[ "${output}" != *"sccache_dist_config"* ]]
-}
-
+# What: each wrapper shape picks its compiler and hosts.
+# Why: a wrong dispatch runs the wrong compiler.
+# From: Issue #1533 | PR #1858
 @test "distcc wrapper dispatches each invocation shape" {
-    # What: masquerade, CCACHE_PREFIX, aws-lc bypass, loop.
-    # Why: a wrong dispatch runs the wrong compiler.
-    # From: Issue #1533 | PR #1858
-    local d="${BATS_TEST_TMPDIR}/dw" case want argv code w
-    local bin="${d}/bin" masq="${d}/masq"
-    mkdir -p "${bin}" "${masq}"
-    _ci_rust_distcc_wrapper "${bin}/distcc-real" "${bin}/wrapper" "${masq}" > "${bin}/wrapper"
-    chmod +x "${bin}/wrapper"
-    printf '%s\n' '#!/bin/sh' 'printf "REAL hosts=%s argv:" "${DISTCC_HOSTS:-}"' \
-        'for a in "$@"; do printf " [%s]" "$a"; done; printf "\n"' > "${bin}/distcc-real"
-    printf '#!/bin/sh\nexit 0\n' > "${bin}/realcc"
-    chmod +x "${bin}/distcc-real" "${bin}/realcc"
-    for w in cc gcc c++ g++; do ln -sf "${bin}/wrapper" "${masq}/${w}"; done
-    ln -sf "${bin}/wrapper" "${bin}/weird"
-    local gen="-I${d}/target/x/build/aws-lc-sys-1/out/include"
-    while IFS='|' read -r case want argv code; do
-        case "${case}" in
-            masq) run env DISTCC_HOSTS=pump "${masq}/gcc" -c a.c ;;
-            prefix) run env DISTCC_HOSTS=pump "${bin}/wrapper" "${bin}/realcc" -c a.c ;;
-            unknown) run env DISTCC_HOSTS=pump "${bin}/weird" -c a.c ;;
-            awsmasq) run env DISTCC_HOSTS=pump DISTCC_HOSTS_NO_PUMP=plain "${masq}/cc" "${gen}" -c a.c ;;
-            awsprefix) run env DISTCC_HOSTS=pump DISTCC_HOSTS_NO_PUMP=plain "${bin}/wrapper" "${bin}/realcc" "${gen}" ;;
-            loop) run env DISTCC_HOSTS=pump "${bin}/wrapper" "${masq}/cc" -c a.c ;;
-        esac
-        [ "${status}" -eq "${want}" ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
-        argv="${argv//@D@/${d}}"
-        [ "${argv}" = - ] || [[ "${output}" == *"${argv}"* ]] || { echo "${case}: want '${argv}': ${output}"; return 1; }
-        [ "${code}" = - ] || [[ "${output}" == *"${code}"* ]] || { echo "${case}: no ${code}: ${output}"; return 1; }
-    done <<'CASES'
-masq|0|REAL hosts=pump argv: [gcc] [-c] [a.c]|-
-prefix|0|REAL hosts=pump argv: [@D@/bin/realcc] [-c] [a.c]|-
-unknown|0|REAL hosts=pump argv: [cc] [-c] [a.c]|CI-WARN-RUSTBUILD-0017
-awsmasq|0|REAL hosts=plain argv: [cc] [-I@D@/target/x/build/aws-lc-sys-1/out/include] [-c] [a.c]|CI-INFO-RUSTBUILD-0018
-awsprefix|0|REAL hosts=plain argv: [@D@/bin/realcc] [-I@D@/target/x/build/aws-lc-sys-1/out/include]|CI-INFO-RUSTBUILD-0018
-loop|1|-|CI-ERROR-RUSTBUILD-0016
+    local d="${BATS_TEST_TMPDIR}/dw" case envs cmd rc want p stub pairs rows
+    local -a ev av drivers=()
+    local -A V=(
+        [@BIN@]="${d}/bin" [@MASQ@]="${d}/masq" [@REAL@]="$(_val name)" [@LCC@]="$(_val name)"
+        [@WRAP@]="$(_val name)" [@UNK@]="$(_val name)" [@COPY@]="$(_val name)" [@SRC@]="$(_val name).c"
+        [@H1@]="$(_val host)" [@H2@]="$(_val host)" [@PORT@]="$(_val port)" [@N@]="$(_val name)"
+        [@N2@]="$(_val name)" [@T@]="$(_val name)" [@VER@]="$(_val int 1 999)"
+        [@AWS@]=aws-lc-sys [@AWSU@]=aws_lc_sys
+    )
+    V[@PUMP@]="DISTCC_HOSTS=${V[@H1@]} INCLUDE_SERVER_PORT=${V[@PORT@]}"
+    V[@NOPUMP@]="${V[@PUMP@]} DISTCC_HOSTS_NO_PUMP=${V[@H2@]}"
+    V[@ARGS@]="-c ${V[@SRC@]}" V[@ARGV@]="[-c] [${V[@SRC@]}]"
+    pairs="$(_ci_build_tools_compilers)" && [ -n "${pairs}" ] || return 1
+    V[@D1@]="${pairs%%$'\n'*}"; V[@D1@]="${V[@D1@]#*=}"
+    mkdir -p "${V[@BIN@]}" "${V[@MASQ@]}"
+    while IFS= read -r p; do drivers+=("${p#*=}=${V[@BIN@]}/${V[@LCC@]}"); done <<< "${pairs}"
+    run _ci_rust_distcc_wrapper "${V[@BIN@]}/${V[@REAL@]}" "${V[@BIN@]}/${V[@WRAP@]}" "${V[@MASQ@]}"
+    _expect no-driver 2 "[CI-ERROR-RUSTBUILD-0045];raw:;${V[@MASQ@]}" || return 1
+    _ci_rust_distcc_wrapper "${V[@BIN@]}/${V[@REAL@]}" "${V[@BIN@]}/${V[@WRAP@]}" "${V[@MASQ@]}" \
+        "${drivers[@]}" > "${V[@BIN@]}/${V[@WRAP@]}" || return 1
+    stub='#!/bin/sh
+printf "%s hosts=%s isp=%s argv:" "${0##*/}" "${DISTCC_HOSTS:-}" "${INCLUDE_SERVER_PORT:-}"
+for a in "$@"; do printf " [%s]" "$a"; done; printf "\n"'
+    printf '%s\n' "${stub}" > "${V[@BIN@]}/${V[@REAL@]}"
+    printf '%s\n' "${stub}" > "${V[@BIN@]}/${V[@LCC@]}"
+    chmod +x "${V[@BIN@]}/${V[@WRAP@]}" "${V[@BIN@]}/${V[@REAL@]}" "${V[@BIN@]}/${V[@LCC@]}"
+    for p in "${drivers[@]}"; do ln -sf "${V[@BIN@]}/${V[@WRAP@]}" "${V[@MASQ@]}/${p%%=*}"; done
+    ln -sf "${V[@BIN@]}/${V[@WRAP@]}" "${V[@BIN@]}/${V[@UNK@]}"
+    cp "${V[@BIN@]}/${V[@WRAP@]}" "${V[@MASQ@]}/${V[@COPY@]}"
+    rows="$(for p in "${drivers[@]}"; do
+        printf 'masq-%s|@PUMP@|@MASQ@/%s @ARGS@|0|=@REAL@ hosts=@H1@ isp=@PORT@ argv: [%s] @ARGV@\n' \
+            "${p%%=*}" "${p%%=*}" "${p%%=*}"
+    done; cat <<'CASES'
+prefix|@PUMP@|@BIN@/@WRAP@ @BIN@/@LCC@ @ARGS@|0|=@REAL@ hosts=@H1@ isp=@PORT@ argv: [@BIN@/@LCC@] @ARGV@
+unknown|@PUMP@|@BIN@/@UNK@ @ARGS@|0|[CI-WARN-RUSTBUILD-0017];@REAL@ hosts=@H1@ isp=@PORT@ argv: [@D1@] @ARGV@
+loop-link|@PUMP@|@BIN@/@WRAP@ @MASQ@/@D1@ @ARGS@|1|[CI-ERROR-RUSTBUILD-0016]
+loop-copy|@PUMP@|@BIN@/@WRAP@ @MASQ@/@COPY@ @ARGS@|1|[CI-ERROR-RUSTBUILD-0016]
+loop-self|@PUMP@|@BIN@/@WRAP@ @BIN@/@WRAP@ @ARGS@|1|[CI-ERROR-RUSTBUILD-0016]
+aws-out|@NOPUMP@|@MASQ@/@D1@ -I@N@/@AWS@-@VER@/out/@N2@ @ARGS@|0|[CI-INFO-RUSTBUILD-0018] input=@N@/@AWS@-@VER@/out/@N2@;@REAL@ hosts=@H2@ isp= argv: [@D1@] [-I@N@/@AWS@-@VER@/out/@N2@] @ARGV@
+aws-generated|@NOPUMP@|@BIN@/@WRAP@ @BIN@/@LCC@ -isystem@N@/@AWSU@/generated @ARGS@|0|[CI-INFO-RUSTBUILD-0018] input=@N@/@AWSU@/generated;@REAL@ hosts=@H2@ isp= argv: [@BIN@/@LCC@] [-isystem@N@/@AWSU@/generated] @ARGV@
+aws-build|@NOPUMP@|@MASQ@/@D1@ -I@N@/target/@T@/build/@AWS@-@VER@/@N2@ @ARGS@|0|[CI-INFO-RUSTBUILD-0018];@REAL@ hosts=@H2@ isp= argv: [@D1@]
+aws-local-prefix|@PUMP@|@BIN@/@WRAP@ @BIN@/@LCC@ -I@N@/@AWS@-@VER@/out @ARGS@|0|[CI-INFO-RUSTBUILD-0018];[CI-INFO-RUSTBUILD-0019];@LCC@ hosts= isp= argv: [-I@N@/@AWS@-@VER@/out] @ARGV@
+aws-local-masq|@PUMP@|@MASQ@/@D1@ -I@N@/@AWS@-@VER@/out @ARGS@|0|[CI-INFO-RUSTBUILD-0018];[CI-INFO-RUSTBUILD-0019];@LCC@ hosts= isp= argv: [-I@N@/@AWS@-@VER@/out] @ARGV@
+aws-no-match|@NOPUMP@|@MASQ@/@D1@ -I@N@/@AWS@-@VER@/@N2@ @ARGS@|0|=@REAL@ hosts=@H1@ isp=@PORT@ argv: [@D1@] [-I@N@/@AWS@-@VER@/@N2@] @ARGV@
 CASES
+)"
+    while IFS='|' read -r case envs cmd rc want; do
+        read -r -a ev <<< "$(_fill "${envs}")"
+        read -r -a av <<< "$(_fill "${cmd}")"
+        run env -u DISTCC_HOSTS -u DISTCC_HOSTS_NO_PUMP -u INCLUDE_SERVER_PORT "${ev[@]}" "${av[@]}"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+    done <<< "${rows}"
 }
 
-@test "set-runtime rejects distcc hosts without a pump host" {
-    # What: DISTCC_POTENTIAL_HOSTS needs a ,cpp host.
-    # Why: Pump mode needs a cpp-capable host present.
-    # From: Issue #1683
-    CI_RUNTIME_SECRET_DIR="${BATS_TEST_TMPDIR}/rt" SCCACHE_REDIS_MODE=off \
-    DISTCC_POTENTIAL_HOSTS='h1 h2' \
-        run bash "${CI_SH}" variables set-runtime
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VARIABLES-0013"* ]]
-}
-
-@test "set-runtime writes 0600 files and hides secret values" {
-    # What: Each secret is a 0600 file + a --secret arg.
-    # Why: AG-SEC-007: values never reach stdout or args.
-    # From: Issue #1683
-    local d="${BATS_TEST_TMPDIR}/rt"
-    CI_RUNTIME_SECRET_DIR="${d}" SCCACHE_REDIS_MODE=required \
-    SCCACHE_REDIS_URL='redis://h:6379' PROJECT_SELFHOSTED_PROXY_CA='CADATA' \
-        run bash "${CI_SH}" variables set-runtime
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--secret id=sccache_redis_url,src=${d}/sccache_redis_url"* ]]
-    [[ "${output}" == *"--secret id=ccache_redis_url,src=${d}/ccache_redis_url"* ]]
-    [[ "${output}" == *"--secret id=project_selfhosted_proxy_ca,src=${d}/project_selfhosted_proxy_ca"* ]]
-    [[ "${output}" != *"redis://h:6379"* ]]
-    [[ "${output}" != *"CADATA"* ]]
-    [ "$(stat -c '%a' "${d}/project_selfhosted_proxy_ca")" = "600" ]
-    [ "$(cat "${d}/sccache_redis_url")" = "redis://h:6379" ]
-}
-
-@test "set-runtime assembles the sccache dist config toml" {
-    # What: The dist config carries scheduler and token.
-    # Why: sccache dist needs both to reach the scheduler.
-    # From: Issue #1683
-    local d="${BATS_TEST_TMPDIR}/rt"
-    CI_RUNTIME_SECRET_DIR="${d}" SCCACHE_REDIS_MODE=required \
-    SCCACHE_REDIS_URL='redis://h' SCCACHE_DIST_SCHEDULER_URL='https://sched' \
-    SCCACHE_DIST_AUTH_TOKEN='tok123' \
-        run bash "${CI_SH}" variables set-runtime
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--secret id=sccache_dist_config,src=${d}/sccache_dist_config"* ]]
-    grep -q 'scheduler_url = "https://sched"' "${d}/sccache_dist_config"
-    grep -q 'token = "tok123"' "${d}/sccache_dist_config"
-    [ "$(stat -c '%a' "${d}/sccache_dist_config")" = "600" ]
-}
-
-@test "clear-runtime removes the runtime secret dir" {
-    # What: clear-runtime deletes every secret file.
-    # Why: Secrets must not linger after the build.
-    # From: Issue #1683
-    local d="${BATS_TEST_TMPDIR}/rt"
-    mkdir -p "${d}"; printf 'x' > "${d}/project_selfhosted_proxy_ca"
-    CI_RUNTIME_SECRET_DIR="${d}" run bash "${CI_SH}" variables clear-runtime
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"result=cleared"* ]]
-    [ ! -e "${d}/project_selfhosted_proxy_ca" ]
+# What: set-runtime secrets per config; clear removes them.
+# Why: build-only secrets as 0600 mounts; values hidden.
+# From: Issue #1683 | PR #1858
+@test "set-runtime writes each config's secrets 0600 with values hidden; clear-runtime removes them" {
+    local case mode runner url tok sched stoken hosts ca rc want present pol dir id k got
+    local -A V=(
+        [@U@]="$(_val url)" [@RU@]="$(_val url)" [@T@]="$(_val name)" [@CA@]="$(_val name)"
+        [@S@]="$(_val url)" [@ST@]="$(_val name)" [@H1@]="$(_val host)" [@H2@]="$(_val host)" [@BAD@]="$(_val name)"
+        [@TCS@]="$(_val int 1 4000000000)"
+    )
+    _rt_probe() {
+        _cache_env_clean
+        unset SCCACHE_DIST_SCHEDULER_URL SCCACHE_DIST_AUTH_TOKEN DISTCC_POTENTIAL_HOSTS PROJECT_SELFHOSTED_PROXY_CA CI_VARIABLES
+        [ -z "${RT_CIV:-}" ] || export CI_VARIABLES="${RT_CIV}"
+        export CI_RUNTIME_SECRET_DIR="$1" SCCACHE_REDIS_MODE="$2"
+        export CI_SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE="${RT_TCS:-${V[@TCS@]}}"
+        [ "$3" = - ] || export RUNNER_ENVIRONMENT="$3"
+        [ "$4" = - ] || export SCCACHE_REDIS_URL="$4"
+        [ "$5" = no ] || export ACTIONS_RESULTS_URL="${V[@RU@]}" ACTIONS_RUNTIME_TOKEN="${V[@T@]}"
+        [ "$6" = - ] || export SCCACHE_DIST_SCHEDULER_URL="$6"
+        [ "$7" = - ] || export SCCACHE_DIST_AUTH_TOKEN="$7"
+        [ "$8" = - ] || export DISTCC_POTENTIAL_HOSTS="$8"
+        [ "$9" = - ] || export PROJECT_SELFHOSTED_PROXY_CA="$9"
+        _ci_set_runtime
+    }
+    while IFS='|' read -r case mode runner url tok sched stoken hosts ca rc want present pol; do
+        dir="$(_val path)"
+        run _rt_probe "${dir}" "$(_fill "${mode}")" "${runner}" "$(_fill "${url}")" "${tok}" "$(_fill "${sched}")" \
+            "$(_fill "${stoken}")" "$(_fill "${hosts}")" "$(_fill "${ca}")"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+        for k in "${!V[@]}"; do
+            [ "${k}" = @BAD@ ] || [ "${k}" = @TCS@ ] || [[ "${output}" != *"${V[${k}]}"* ]] || { echo "${case}: value of ${k} on stdout"; return 1; }
+        done
+        got=""
+        [ ! -d "${dir}" ] || got="$(ls -A "${dir}" | sort | paste -sd' ')"
+        [ "${got}" = "${present#-}" ] || { echo "${case}: files '${got}' want '${present}'"; return 1; }
+        for id in ${got}; do
+            [ "$(stat -c '%a' "${dir}/${id}")" = 600 ] || { echo "${case}: ${id} not 0600"; return 1; }
+            [[ "${output}" == *"--secret id=${id},src=${dir}/${id}"* ]] || { echo "${case}: no --secret for ${id}"; return 1; }
+        done
+        [ -z "${got}" ] || [ "$(<"${dir}/sccache_policy")" = "$(_fill "${pol}")" ] || { echo "${case}: policy"; return 1; }
+        [ ! -e "${dir}/sccache_redis_url" ] || [ "$(<"${dir}/sccache_redis_url")" = "${V[@U@]}" ] || { echo "${case}: redis url"; return 1; }
+        [ ! -e "${dir}/ccache_redis_url" ] || [ "$(<"${dir}/ccache_redis_url")" = "${V[@U@]}" ] || { echo "${case}: ccache url"; return 1; }
+        [ ! -e "${dir}/sccache_gha" ] || [ "$(<"${dir}/sccache_gha")" = "ACTIONS_RESULTS_URL=${V[@RU@]}"$'\n'"ACTIONS_RUNTIME_TOKEN=${V[@T@]}" ] \
+            || { echo "${case}: gha tokens"; return 1; }
+        [ ! -e "${dir}/project_selfhosted_proxy_ca" ] || [ "$(<"${dir}/project_selfhosted_proxy_ca")" = "${V[@CA@]}" ] || { echo "${case}: CA"; return 1; }
+        [ ! -e "${dir}/distcc_potential_hosts" ] || [ "$(<"${dir}/distcc_potential_hosts")" = "$(_fill "${hosts}")" ] || { echo "${case}: hosts"; return 1; }
+        [ ! -e "${dir}/sccache_dist_config" ] || grep -qF "\"${V[@S@]}\"" "${dir}/sccache_dist_config" || { echo "${case}: scheduler"; return 1; }
+        [ ! -e "${dir}/sccache_dist_config" ] || grep -qF "\"${V[@ST@]}\"" "${dir}/sccache_dist_config" || { echo "${case}: dist token"; return 1; }
+        [ ! -e "${dir}/sccache_dist_config" ] || grep -qxF "toolchain_cache_size = ${V[@TCS@]}" "${dir}/sccache_dist_config" \
+            || { echo "${case}: toolchain cache size"; return 1; }
+    done <<'CASES'
+bad-mode|@BAD@|github-hosted|-|yes|-|-|-|-|2|[CI-ERROR-VARIABLES-0010]|-|-
+sched-no-token|optional|github-hosted|-|no|@S@|-|-|-|2|[CI-ERROR-VARIABLES-0011]|-|-
+token-no-sched|optional|github-hosted|-|no|-|@ST@|-|-|2|[CI-ERROR-VARIABLES-0017]|-|-
+self-required-no-url|required|self-hosted|-|yes|-|-|-|-|2|[CI-ERROR-VARIABLES-0012]|-|-
+hosted-required-no-tokens|required|github-hosted|@U@|no|-|-|-|-|2|[CI-ERROR-CACHE-0007]|-|-
+no-pump-host|off|github-hosted|-|no|-|-|@H1@ @H2@|-|2|[CI-ERROR-VARIABLES-0013]|-|-
+self-full|required|self-hosted|@U@|yes|@S@|@ST@|@H1@,cpp @H2@|@CA@|0|-|ccache_redis_url distcc_potential_hosts project_selfhosted_proxy_ca sccache_dist_config sccache_gha sccache_policy sccache_redis_url|required redis,gha
+hosted-gha|required|github-hosted|@U@|yes|-|-|-|-|0|-|sccache_gha sccache_policy|required gha
+optional-local|optional|github-hosted|-|no|-|-|-|-|0|-|sccache_policy|optional -
+off|off|self-hosted|@U@|yes|@S@|@ST@|-|@CA@|0|-|project_selfhosted_proxy_ca sccache_policy|off -
+CASES
+    dir="$(_val path)"
+    : > "${dir}"
+    run _rt_probe "${dir}/$(_val name)" optional github-hosted - no - - - -
+    _expect mkdir-fails 2 "[CI-ERROR-VARIABLES-0019];raw:" || return 1
+    dir="$(_val path)"
+    mkdir -p "${dir}/sccache_dist_config"
+    run _rt_probe "${dir}" optional github-hosted - no "${V[@S@]}" "${V[@ST@]}" - -
+    _expect dist-write-fails 2 "[CI-ERROR-VARIABLES-0020];raw:" || return 1
+    run _ci_emit_secret_ref "${dir}" "$(_val name)"
+    _expect unknown-id 2 "[CI-ERROR-VARIABLES-0014]" || return 1
+    dir="$(_val path)"
+    RT_TCS="$(_val name)" run _rt_probe "${dir}" optional github-hosted - no "${V[@S@]}" "${V[@ST@]}" - -
+    _expect bad-size 2 "[CI-ERROR-VARIABLES-0021]" || return 1
+    [ ! -e "${dir}" ] || { echo "bad-size: ${dir} written"; return 1; }
+    dir="$(_val path)"
+    RT_CIV="$(printf '{"SCCACHE_DIST_SCHEDULER_URL":"%s","DISTCC_POTENTIAL_HOSTS":"%s,cpp"}' "${V[@S@]}" "${V[@H1@]}")" \
+        run _rt_probe "${dir}" optional github-hosted - no - "${V[@ST@]}" - -
+    _expect ci-variables 0 - || return 1
+    grep -qF "\"${V[@S@]}\"" "${dir}/sccache_dist_config" || { echo "ci-variables: scheduler"; return 1; }
+    [ "$(<"${dir}/distcc_potential_hosts")" = "${V[@H1@]},cpp" ] || { echo "ci-variables: hosts"; return 1; }
+    dir="$(_val path)"
+    run _rt_probe "${dir}" optional github-hosted - no - - - -
+    CI_RUNTIME_SECRET_DIR="${dir}" run bash "${CI_SH}" variables clear-runtime
+    _expect clear 0 "clear-runtime result=cleared" || return 1
+    [ ! -e "${dir}" ] || { echo "clear: ${dir} left"; return 1; }
 }
 
 # =========================================================
 # BUILD-ARGS EMISSION (SOT -> --build-arg)
 # =========================================================
 
-@test "build-args emits the SOT base image and apk repos" {
-    # What: ALPINE_IMAGE and APK_TAGGED_REPOS equal the SOT.
-    # Why: build-tools is a factory, not a version lock.
-    # From: Issue #1683
-    local alpine repos
-    alpine="$(_ci_block_entry_field base_images "" alpine)"
-    repos="$(_ci_block_entry_list build_toolchain build-tools apk_repositories | tr '\n' ' ')"
-    [ -n "${alpine}" ]
-    [ -n "${repos}" ]
-    run bash "${CI_SH}" build-args build-tools
-    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
-    [[ "${output}" == *"--build-arg ALPINE_IMAGE=${alpine}"* ]]
-    [[ "${output}" == *"--build-arg APK_TAGGED_REPOS=${repos% }"* ]]
-    [[ "${output}" != *"DOCKER_CLI_VERSION"* ]]
-    [[ "${output}" != *"SCCACHE_VERSION"* ]]
-}
-
-@test "build-args fails closed on a missing central base image" {
-    # What: A missing base pin must never build unpinned.
-    # Why: Empty value = FAIL CLOSED, no partial emit.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/no-rust-alpine.yml"
-    grep -v '^  alpine:' "${CI_MANIFEST}" > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args build-tools
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILDARGS-0003"* ]]
-}
-
-@test "build-args --bare emits NAME=VALUE without the flag prefix" {
-    # What: bare form feeds docker/build-push-action.
-    # Why: that action wants NAME=VALUE, not --build-arg.
-    # From: Issue #1683
-    local alpine
-    alpine="$(_ci_block_entry_field base_images "" alpine)"
-    run bash "${CI_SH}" build-args build-tools --bare
-    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
-    [[ "${output}" == *"ALPINE_IMAGE=${alpine}"* ]]
-    [[ "${output}" != *"--build-arg"* ]]
-}
-
-@test "build-args rejects an unknown format (fail closed)" {
-    # What: only empty or --bare are valid formats.
-    # Why: an unknown flag must not emit a silent default.
-    # From: Issue #1683
-    run bash "${CI_SH}" build-args build-tools --bogus
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILDARGS-0005"* ]]
-}
-
-@test "build-args needs a service argument (fail closed)" {
-    # What: No service arg must not emit a silent success.
-    # Why: Fail-closed dispatch (AG-VAL-002).
-    # From: Issue #1683
-    run bash "${CI_SH}" build-args
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILDARGS-0001"* ]]
-}
-
-@test "build-args fails closed for an unrecognized target" {
-    # What: a non-SOT target name is BUILDARGS-0002.
-    # Why: empty args with rc 0 would build without pins.
-    # From: Issue #1683
-    run bash "${CI_SH}" build-args not-a-real-service
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-BUILDARGS-0002]"* ]]
-}
-
-@test "build-args: base image per service, <KEY>_IMAGE from external_image" {
-    # What: alpine for all; external_image x -> X_IMAGE arg.
-    # Why: one base-image owner, one naming rule, no list.
+@test "build-args map each target, format and platform" {
+    # What: row: target, format, platform -> args or id.
+    # Why: SOT owns every value; build-args only maps it.
     # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/m.yml"
-    printf 'base_images:\n  alpine: "img-a"\n  ext_x: "img-x"\nservices:\n  svc-a:\n    context: a\n    build_type: apk\n  svc-b:\n    context: b\n    build_type: apk\n    external_image: ext_x\n  svc-c:\n    context: c\n    build_type: apk\n    external_image: ext_missing\n' > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-a
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--build-arg ALPINE_IMAGE=img-a"* ]]
-    [[ "${output}" != *"EXT_X_IMAGE"* ]]
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-b --bare
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"ALPINE_IMAGE=img-a"*"EXT_X_IMAGE=img-x"* ]]
-    [[ "${output}" != *"--build-arg"* ]]
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-c
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILDARGS-0007"*"base_images.ext_missing"* ]]
-    sed -i '/alpine:/d' "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-a
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILDARGS-0003"* ]]
-}
-
-@test "build-args emits BUILD_TOOLS_IMAGE for a rust service, not apk" {
-    # What: rust build-args add build-tools ref.
-    # Why: no Dockerfile default; ci.sh owns it.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/bt-manifest.yml"
-    printf 'base_images:\n  alpine: "a"\nservices:\n  svc-rust:\n    context: c\n    crate: c1\n    build_type: rust\n  svc-apk:\n    context: c\n    build_type: apk\n' > "${m}"
-    export CI_BUILD_TOOLS_IMAGE_CMD='echo bt-stub@sha256:test'
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"BUILD_TOOLS_IMAGE=bt-stub@sha256:test"* ]]
-    [[ "${output}" == *"RUST_CRATE=c1"* ]]
-    sed -i '/crate: c1/d' "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILDARGS-0014"* ]]
-    printf 'base_images:\n  alpine: "a"\nservices:\n  svc-apk:\n    context: c\n    build_type: apk\n' > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-apk
-    [ "${status}" -eq 0 ]
-    [[ "${output}" != *"BUILD_TOOLS_IMAGE"* ]]
-}
-
-@test "image and identity add the build type's runtime packages" {
-    # What: base, then own, then the type's runtime list.
-    # Why: one base list; libgcc_s only for rust; no dupes.
+    local case sot target args rc want absent w bti dep verify
+    local -a av ws
+    local -A V=(
+        [@SA@]="$(_val name)" [@SX@]="$(_val name)" [@SM@]="$(_val name)" [@SR@]="$(_val name)" [@SN@]="$(_val name)"
+        [@T@]="$(_val name)" [@C@]="$(_val name)" [@CR@]="$(_val name)" [@EXT@]="$(_val name)" [@NOEXT@]="$(_val name)"
+        [@IMG@]="$(_val host)/$(_val name)" [@TAG@]="$(_val int 1 9).$(_val int 0 39)"
+        [@HEX@]="$(_val digest | cut -d: -f2)" [@XIMG@]="$(_val host)/$(_val name)@$(_val digest)" [@BP@]="$(_val name)"
+        [@PA@]="$(_val name)" [@R1@]="$(_val name)" [@R2@]="$(_val name)" [@P1@]="$(_val platform)" [@P2@]="$(_val platform)"
+        [@A1@]="$(_val name)" [@A2@]="$(_val name)" [@RT1@]="$(_val name)" [@RT2@]="$(_val name)" [@TR@]="$(_val name)"
+        [@H@]="$(_val host)" [@M@]="$(_val name)" [@H2@]="$(_val host)" [@KF@]="$(_val name)" [@KS@]="$(_val name)"
+        [@TP@]="$(_val name)" [@BTI@]="$(_val host)/$(_val name)@$(_val digest)"
+    )
+    V[@K1@]="${V[@P1@]##*/}" V[@K2@]="${V[@P2@]##*/}" V[@EXTU@]="${V[@EXT@]^^}"
+    local -A S=([f]="$(_val path)" [g]="$(_val path)" [m]="$(_val path)" [k]="$(_val path)" [s]="${CI_MANIFEST}")
+    _fill "$(printf '%s\n' 'image_base:' '  packages: [@BP@, @PA@]' 'base_images:' '  alpine: "@IMG@:@TAG@@sha256:@HEX@"' \
+        '  @EXT@: "@XIMG@"' 'platform_arch:' '  @K1@:' '    apk: @A1@' '    rust_target: @RT1@' '  @K2@:' '    apk: @A2@' \
+        '    rust_target: @RT2@' 'build_runtime:' '  rust:' '    packages: [@R1@, @R2@]' 'build_identity:' '  rust:' \
+        '    inputs: [package_versions]' 'services:' '  @SA@:' '    context: @C@' '    build_type: apk' '    packages: [@PA@]' \
+        '    apk_repositories:' '      - @TR@=http://@H@/@ALPINE_BRANCH@/@M@' '    apk_keys:' '      - https://@H2@/@KF@=@KS@' \
+        '  @SX@:' '    context: @C@' '    build_type: apk' '    external_image: @EXT@' \
+        '  @SM@:' '    context: @C@' '    build_type: apk' '    external_image: @NOEXT@' \
+        '  @SR@:' '    context: @C@' '    build_type: rust' '    crate: @CR@' '    packages: [@PA@, @R1@]' \
+        '  @SN@:' '    context: @C@' '    build_type: rust' \
+        'build_toolchain:' '  @T@:' '    context: @C@' '    build_type: toolchain' '    packages: [@TP@]' \
+        '    apk_repositories:' '      - @TR@=http://@H@/@ALPINE_BRANCH@/@M@')" > "${S[f]}"
+    grep -v '^  alpine:' "${S[f]}" > "${S[g]}"
+    sed "s#^  alpine: .*#  alpine: \"${V[@IMG@]}:$(_val name)@sha256:${V[@HEX@]}\"#" "${S[f]}" > "${S[m]}"
+    sed "s#^      - https://${V[@H2@]}/.*#      - \"https://${V[@H2@]}/${V[@KF@]}=${V[@KS@]}#" "${S[f]}" > "${S[k]}"
+    # What: pin rows: SOT copy; ARG names from verify.
+    # Why: the test must not rebuild the pin naming rule.
     # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/rt-manifest.yml"
-    printf '%s\n' 'image_base:' '  packages: [base-b, pkg-a]' 'base_images:' '  alpine: "a"' 'services:' \
-        '  svc-rust:' '    context: c' '    crate: c1' '    build_type: rust' '    packages: [pkg-a, rt-x]' \
-        '  svc-apk:' '    context: c' '    build_type: apk' '    packages: [pkg-a]' \
-        'build_identity:' '  rust:' '    inputs: [package_versions]' \
-        'build_runtime:' '  rust:' '    packages: [rt-x, rt-y]' > "${m}"
-    export CI_BUILD_TOOLS_IMAGE_CMD='echo bt-stub@sha256:test'
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"APK_PACKAGES=base-b pkg-a rt-x rt-y"* ]]
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-apk
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"APK_PACKAGES=base-b pkg-a"* ]]
-    [[ "${output}" != *"rt-"* ]]
-    _ci_platform_apk_arch() { echo arch-a; }
-    CI_MANIFEST="${m}" CI_APK_RESOLVE_CMD="$(_stub resolve 'echo "pkgs=$3"')" \
-        run _ci_identity_pins svc-rust rust os/p1
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"pkgs=base-b pkg-a rt-x rt-y"* ]]
+    dep="$(_pin_dep)"
+    V[@PC@]="$(_pin_consumer)"
+    V[@PV@]="$(_ci_block_entry_field external_versions "${dep}" version)"
+    V[@SP@]="$(_ci_build_matrix_platforms)"
+    V[@SP@]="${V[@SP@]%%$'\n'*}"
+    V[@SPA@]="$(_ci_platform_field "${V[@SP@]}" apk "$(_val name)")"
+    V[@SPS@]="$(_ci_block_entry_field external_versions "${dep}" "sha256_${V[@SPA@]}")"
+    run --separate-stderr bash "${CI_SH}" version verify
+    [ "${status}" -eq 0 ] || { echo "version verify rc ${status}: ${output} ${stderr}"; return 1; }
+    verify="${output}"
+    for w in VERSION ARCH SHA256; do
+        V[@${w}@]="$(sed -n "s/^key=${dep}\.consumer\.\([A-Z0-9_]*_${w}\) shape=bare\$/\1/p" <<< "${verify}")"
+        V[@${w}@]="${V[@${w}@]%%$'\n'*}"
+        [ -n "${V[@${w}@]}" ] || { echo "no ${w} ARG of ${dep} in: ${verify}"; return 1; }
+    done
+    bti="$(_stub "echo ${V[@BTI@]}")"
+    while IFS='|' read -r case sot target args rc want absent; do
+        av=(); [ "${args}" = - ] || IFS=';' read -r -a av <<< "$(_fill "${args}")"
+        run env CI_MANIFEST="${S[${sot}]}" CI_BUILD_TOOLS_IMAGE_CMD="${bti}" bash "${CI_SH}" build-args "$(_fill "${target}")" "${av[@]}"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+        [ "${absent}" != - ] || continue
+        IFS=';' read -r -a ws <<< "$(_fill "${absent}")"
+        for w in "${ws[@]}"; do [[ "${output}" != *"${w}"* ]] || { echo "${case}: has '${w}': ${output}"; return 1; }; done
+    done <<'CASES'
+apk-flags|f|@SA@|-|0|--build-arg ALPINE_IMAGE=@IMG@:@TAG@@sha256:@HEX@;--build-arg APK_PACKAGES=@BP@ @PA@;--build-arg APK_TAGGED_REPOS=@TR@=http://@H@/v@TAG@/@M@;--build-arg APK_KEYS=https://@H2@/@KF@=@KS@|BUILD_TOOLS_IMAGE;RUST_CRATE;MUSL_TARGET;=@XIMG@
+apk-bare|f|@SA@|--bare|0|ALPINE_IMAGE=@IMG@:@TAG@@sha256:@HEX@|--build-arg
+external|f|@SX@|--bare|0|ALPINE_IMAGE=;@EXTU@_IMAGE=@XIMG@|-
+external-missing|f|@SM@|-|2|[CI-ERROR-BUILDARGS-0007];base_images.@NOEXT@|-
+rust|f|@SR@|--bare|0|BUILD_TOOLS_IMAGE=@BTI@;RUST_CRATE=@CR@;APK_PACKAGES=@BP@ @PA@ @R1@ @R2@|MUSL_TARGET
+rust-platform-1|f|@SR@|--bare;@P1@|0|MUSL_TARGET=@RT1@|-
+rust-platform-2|f|@SR@|--bare;@P2@|0|MUSL_TARGET=@RT2@|-
+rust-no-crate|f|@SN@|-|2|[CI-ERROR-BUILDARGS-0014]|RUST_CRATE=
+toolchain|f|@T@|-|0|--build-arg ALPINE_IMAGE=@IMG@:@TAG@@sha256:@HEX@;--build-arg APK_PACKAGES=@BP@ @PA@ @TP@;--build-arg APK_TAGGED_REPOS=@TR@=http://@H@/v@TAG@/@M@|BUILD_TOOLS_IMAGE;_VERSION=
+no-alpine|g|@SA@|-|2|[CI-ERROR-BUILDARGS-0003]|-
+mutable-alpine-tag|m|@SA@|--bare|2|[CI-ERROR-BUILDARGS-0016]|APK_TAGGED_REPOS=
+keys-unreadable|k|@SA@|--bare|2|[CI-ERROR-CORE-0108]|APK_KEYS=
+pin-no-platform|s|@PC@|-|0|--build-arg @VERSION@=@PV@;_SHA256_|@ARCH@=
+pin-platform|s|@PC@|;@SP@|0|--build-arg @ARCH@=@SPA@;--build-arg @SHA256@=@SPS@|@SHA256@_
+CASES
+    # What: identity sees the image's package list.
+    # Why: a package only one of them sees breaks reuse.
+    # From: Issue #1683 | PR #1858
+    CI_MANIFEST="${S[f]}" CI_APK_RESOLVE_CMD="$(_stub 'echo "pkgs=$3"')" run _ci_identity_pins "${V[@SR@]}" rust "${V[@P1@]}"
+    _expect identity-packages 0 "$(_fill 'pkgs=@BP@ @PA@ @R1@ @R2@')" || return 1
+    CI_MANIFEST="${S[g]}" run _ci_identity_pins "${V[@SR@]}" rust "${V[@P1@]}"
+    _expect identity-no-alpine 2 "$(_fill '[CI-ERROR-IDENTITY-0009] service="@SR@" key="base_images.alpine"')" || return 1
+    CI_MANIFEST="${S[g]}" run _ci_apk_repositories "${V[@SA@]}"
+    _expect repos-no-alpine 2 "$(_fill '[CI-ERROR-BUILDARGS-0019] target="@SA@" key="base_images.alpine"')" || return 1
 }
 
-@test "build-args emits MUSL_TARGET per platform for a rust service" {
-    # What: rust build-args add the platform's musl target.
-    # Why: ci.sh owns arch mapping; no Dockerfile.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/mt-manifest.yml"
-    printf 'base_images:\n  alpine: "a"\nplatform_arch:\n  p1:\n    apk: arch-a\n  p2:\n    apk: arch-b\nservices:\n  svc-rust:\n    context: c\n    crate: c1\n    build_type: rust\n' > "${m}"
-    export CI_BUILD_TOOLS_IMAGE_CMD='echo bt-stub@sha256:test'
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust --bare os/p1
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"MUSL_TARGET=arch-a-alpine-linux-musl"* ]]
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust --bare os/p2
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"MUSL_TARGET=arch-b-alpine-linux-musl"* ]]
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc-rust
-    [ "${status}" -eq 0 ]
-    [[ "${output}" != *"MUSL_TARGET"* ]]
-}
-
+# What: trap cleans up; a failed step fails, rc is kept.
+# Why: cleanup state must survive until the EXIT trap.
+# From: Issue #1683 | PR #1858
 @test "rust-build EXIT trap stops the pump, drops the CA, keeps rc" {
-    # What: trap cleans up; a failed step fails, rc is kept.
-    # Why: cleanup state must survive until the EXIT trap.
-    # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/rbbin"
-    local driver="${BATS_TEST_TMPDIR}/trap-driver.sh"
-    local name main pump ca want code
-    export RB_LOG="${BATS_TEST_TMPDIR}/rb.log"
+    local bin log driver ca case main pump cafail rc want
+    bin="$(_val path)" log="$(_val path)" driver="$(_val path)" ca="$(_val path)"
+    local -A V=([@PB@]="$(_val name)" [@CB@]="$(_val name)" [@RC@]="$(_val int 3 99)")
     mkdir -p "${bin}"
     _tool_stub "${bin}" pump <<'STUB'
-echo "pump $*" >> "${RB_LOG}"
-if [ -n "${PUMP_FAIL:-}" ]; then
-    echo pump-boom >&2
-    exit 1
-fi
+printf '%s\n' "${0##*/}${*:+ $*}" >> "${RB_LOG}"
+[ -z "${PUMP_FAIL:-}" ] || { echo "${PUMP_FAIL}" >&2; exit 1; }
 STUB
     _tool_stub "${bin}" update-ca-certificates <<'STUB'
-echo "update-ca" >> "${RB_LOG}"
-if [ -n "${CA_FAIL:-}" ]; then
-    echo ca-boom >&2
-    exit 1
-fi
+printf '%s\n' "${0##*/}${*:+ $*}" >> "${RB_LOG}"
+[ -z "${CA_FAIL:-}" ] || { echo "${CA_FAIL}" >&2; exit 1; }
 STUB
-    cat > "${driver}" <<'DRIVER'
-source "${CI_SH}"
-_CI_RB_CA_FILE="${CA_FILE}"
-trap _ci_rust_build_cleanup EXIT
-_CI_RB_DISTCC=1
-_CI_RB_CA=1
-exit "${MAIN_RC}"
-DRIVER
-    while IFS='|' read -r name main pump ca want code; do
-        : > "${RB_LOG}"
-        : > "${BATS_TEST_TMPDIR}/ca.crt"
-        run env PATH="${bin}:${PATH}" PUMP_FAIL="${pump}" CA_FAIL="${ca}" \
-            CI_SH="${CI_SH}" CA_FILE="${BATS_TEST_TMPDIR}/ca.crt" MAIN_RC="${main}" \
+    printf '%s\n' 'source "${CI_SH}"' '_CI_RB_CA_FILE="${CA_FILE}"' 'trap _ci_rust_build_cleanup EXIT' \
+        '_CI_RB_DISTCC=1' '_CI_RB_CA=1' 'exit "${MAIN_RC}"' > "${driver}"
+    while IFS='|' read -r case main pump cafail rc want; do
+        : > "${log}"; : > "${ca}"
+        run env PATH="${bin}:${PATH}" RB_LOG="${log}" PUMP_FAIL="$(_fill "${pump}")" \
+            CA_FAIL="$(_fill "${cafail}")" CI_SH="${CI_SH}" CA_FILE="${ca}" MAIN_RC="$(_fill "${main}")" \
             bash "${driver}"
-        if [ "${status}" -ne "${want}" ]; then
-            echo "${name}: rc ${status}: ${output}"
-            return 1
-        fi
-        if [[ "${output}" != *"${code}"* ]]; then
-            echo "${name}: ${output}"
-            return 1
-        fi
-        if ! grep -qx 'pump --shutdown' "${RB_LOG}"; then
-            echo "${name}: pump not stopped"
-            return 1
-        fi
-        if ! grep -qx 'update-ca' "${RB_LOG}"; then
-            echo "${name}: trust store not updated"
-            return 1
-        fi
-        if [ -e "${BATS_TEST_TMPDIR}/ca.crt" ]; then
-            echo "${name}: CA file kept"
-            return 1
-        fi
+        _expect "${case}" "$(_fill "${rc}")" "$(_fill "${want}")" || return 1
+        grep -qx 'pump --shutdown' "${log}" || { echo "${case}: pump not stopped"; return 1; }
+        grep -qx 'update-ca-certificates' "${log}" || { echo "${case}: trust store not updated"; return 1; }
+        [ ! -e "${ca}" ] || { echo "${case}: CA file kept"; return 1; }
     done <<'CASES'
-ok|0|||0|
-ca-fail|0||1|1|CI-ERROR-RUSTBUILD-0008
-ca-fail-keeps-rc|3||1|3|ca-boom
-pump-fail|0|1||1|CI-ERROR-RUSTBUILD-0007
+ok|0|||0|-
+ca-fail|0||@CB@|1|[CI-ERROR-RUSTBUILD-0008];@CB@
+ca-fail-keeps-rc|@RC@||@CB@|@RC@|@CB@
+pump-fail|0|@PB@||1|[CI-ERROR-RUSTBUILD-0007];@PB@
 CASES
 }
 
+# What: wrong rustc host stops; stubs fill only gaps.
+# Why: apk Rust has one host std; real sources stay.
+# From: Issue #1683 | PR #1858
 @test "rust-build fails closed unless MUSL_TARGET is the rustc host" {
-    # What: a target other than the rustc host stops early.
-    # Why: apk Rust has only its host std; no rustup exists.
-    # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/bin"
+    local bin ws m
+    bin="$(_val path)" ws="$(_val path)"
+    local -A V=(
+        [@HA@]="$(_val name)" [@HB@]="$(_val name)" [@SVC@]="$(_val name)" [@CR@]="$(_val name)"
+        [@MA@]="$(_val name)" [@MB@]="$(_val name)" [@LIB@]="$(_val name)/$(_val name).rs"
+        [@BIN@]="$(_val name)/$(_val name).rs" [@KEEP@]="$(_val name)"
+    )
     mkdir -p "${bin}"
     _tool_stub "${bin}" rustc <<'STUB'
-printf "rustc 1.0\nhost: arch-a-alpine-linux-musl\n"
+printf 'host: %s\n' "${RB_HOST}"
 STUB
-    PATH="${bin}:${PATH}" MUSL_TARGET=arch-b-alpine-linux-musl run bash "${CI_SH}" rust-build svc c1
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-RUSTBUILD-0006"*"host: arch-a-alpine-linux-musl"* ]]
-    # What: missing member targets get stubs; real stay.
-    # Why: images copy manifests only; no rm -rf on src.
-    # From: Issue #1683 | PR #1858
-    local wsdir="${BATS_TEST_TMPDIR}/ws"
-    mkdir -p "${wsdir}/a/src" "${wsdir}/b"
-    printf '[workspace]\nmembers = [\n    "a",\n    "b",\n]\n' > "${wsdir}/Cargo.toml"
-    printf '[lib]\npath = "src/lib.rs"\n\n[[bin]]\npath = "src/main.rs"\n' > "${wsdir}/a/Cargo.toml"
-    printf '[[bin]]\npath = "src/main.rs"\n' > "${wsdir}/b/Cargo.toml"
-    printf 'real\n' > "${wsdir}/a/src/main.rs"
-    _in_ws() { cd "${wsdir}" && _ci_rust_member_stubs; }
+    PATH="${bin}:${PATH}" RB_HOST="${V[@HA@]}" MUSL_TARGET="${V[@HB@]}" \
+        run bash "${CI_SH}" rust-build "${V[@SVC@]}" "${V[@CR@]}"
+    _expect host-mismatch 2 "$(_fill '[CI-ERROR-RUSTBUILD-0006] target="@HB@";host: @HA@')" || return 1
+    m="$(_val path)"
+    CI_MANIFEST="${m}" CI_TOOLCHAIN_COMPILERS="$(_val var)=${V[@CR@]}" PATH="${bin}:${PATH}" \
+        RB_HOST="${V[@HA@]}" MUSL_TARGET="${V[@HA@]}" run bash "${CI_SH}" rust-build "${V[@SVC@]}" "${V[@CR@]}"
+    _expect driver-missing 2 "$(_fill '[CI-ERROR-RUSTBUILD-0046] driver="@CR@";raw:;PATH=')" || return 1
+    mkdir -p "${ws}/${V[@MA@]}/${V[@BIN@]%/*}" "${ws}/${V[@MB@]}"
+    printf '[workspace]\nmembers = [\n    "%s",\n    "%s",\n]\n' "${V[@MA@]}" "${V[@MB@]}" > "${ws}/Cargo.toml"
+    printf '[lib]\npath = "%s"\n\n[[bin]]\npath = "%s"\n' "${V[@LIB@]}" "${V[@BIN@]}" > "${ws}/${V[@MA@]}/Cargo.toml"
+    printf '[[bin]]\npath = "%s"\n' "${V[@BIN@]}" > "${ws}/${V[@MB@]}/Cargo.toml"
+    printf '%s\n' "${V[@KEEP@]}" > "${ws}/${V[@MA@]}/${V[@BIN@]}"
+    _in_ws() { cd "${ws}" && _ci_rust_member_stubs; }
     run _in_ws
-    [ "${status}" -eq 0 ]
-    [ "${output}" = $'a/src/lib.rs\nb/src/main.rs' ]
-    [ "$(cat "${wsdir}/a/src/main.rs")" = real ]
-    [ ! -s "${wsdir}/a/src/lib.rs" ]
-    [ "$(cat "${wsdir}/b/src/main.rs")" = 'fn main() {}' ]
-    rm -r "${wsdir}/b"
+    _expect stubs 0 "$(_fill '=@MA@/@LIB@
+@MB@/@BIN@')" || return 1
+    [ "$(cat "${ws}/${V[@MA@]}/${V[@BIN@]}")" = "${V[@KEEP@]}" ] || { echo "real source changed"; return 1; }
+    [ -e "${ws}/${V[@MA@]}/${V[@LIB@]}" ] && [ ! -s "${ws}/${V[@MA@]}/${V[@LIB@]}" ] || { echo "lib stub not empty"; return 1; }
+    [ "$(cat "${ws}/${V[@MB@]}/${V[@BIN@]}")" = 'fn main() {}' ] || { echo "bin stub wrong"; return 1; }
+    rm -r "${ws:?}/${V[@MB@]}"
     run _in_ws
-    [ "${status}" -eq 2 ]; [[ "${output}" == *'[CI-ERROR-RUSTBUILD-0043] member="b"'* ]]
-    printf '[workspace]\n' > "${wsdir}/Cargo.toml"
+    _expect member-missing 2 "$(_fill '[CI-ERROR-RUSTBUILD-0043] member="@MB@"')" || return 1
+    printf '[workspace]\n' > "${ws}/Cargo.toml"
     run _in_ws
-    [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-RUSTBUILD-0042]"* ]]
+    _expect no-members 2 '[CI-ERROR-RUSTBUILD-0042]' || return 1
 }
 
+# What: cargo stub replays rc|output per call.
+# Why: a real error ends at call 1 with its rc kept.
+# From: Issue #1683 | PR #1858
 @test "rust cargo build degrades only on an accelerator outage" {
-    # What: cargo stub replays rc|output per call.
-    # Why: a real error ends at call 1 with its rc kept.
-    # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/cbin" name cc dc wrap steps want calls codes w
+    local bin case cc dc wrap steps rc calls want not w
     local -a ws
+    bin="$(_val path)" RB_N="$(_val path)" RB_STEPS="$(_val path)" RB_ARGS="$(_val path)"
+    export RB_N RB_STEPS RB_ARGS CI_TMPDIR="${BATS_TEST_TMPDIR}"
+    local -A V=(
+        [@CR@]="$(_val name)" [@TGT@]="$(_val name)" [@J@]="$(_val int 1 64)" [@W@]="$(_val name)"
+        [@OK@]="$(_val name)" [@ERR@]="$(_val name)" [@X@]="$(_val name)" [@OFFC@]="$(_val name)"
+        [@OFFD@]="$(_val name)" [@RC@]="$(_val int 3 99)"
+        [@SCC@]='sccache: error' [@CCE@]='ccache: error' [@DIST@]='failed to distribute'
+    )
     mkdir -p "${bin}"
     _tool_stub "${bin}" cargo <<'STUB'
+printf '%s\n' "$*" >> "${RB_ARGS}"
 n=$(( $(cat "${RB_N}") + 1 )); echo "${n}" > "${RB_N}"
 line="$(sed -n "${n}p" "${RB_STEPS}")"
 printf '%s\n' "${line#*|}"
 exit "${line%%|*}"
 STUB
-    disable_ccache() { echo "off ccache"; }
-    disable_distcc() { echo "off distcc"; }
-    export RB_N="${BATS_TEST_TMPDIR}/n" RB_STEPS="${BATS_TEST_TMPDIR}/steps" CI_TMPDIR="${BATS_TEST_TMPDIR}"
-    while IFS='|' read -r name cc dc wrap steps want calls codes; do
-        echo 0 > "${RB_N}"
-        tr ';' '\n' <<<"${steps}" | sed 's/~/|/' > "${RB_STEPS}"
-        ccache_enabled="${cc}" _CI_RB_DISTCC="${dc}" RUSTC_WRAPPER="${wrap}" PATH="${bin}:${PATH}" \
-            run _ci_rust_cargo_build c1 arch-a-alpine-linux-musl 2
-        [ "${status}" -eq "${want}" ] && [ "$(cat "${RB_N}")" -eq "${calls}" ] \
-            || { echo "${name}: rc ${status} calls $(cat "${RB_N}"): ${output}"; return 1; }
-        IFS=',' read -r -a ws <<<"${codes}"
+    disable_ccache() { echo "${V[@OFFC@]}"; }
+    disable_distcc() { echo "${V[@OFFD@]}"; }
+    while IFS='|' read -r case cc dc wrap steps rc calls want not; do
+        echo 0 > "${RB_N}"; : > "${RB_ARGS}"
+        _fill "${steps}" | tr ';' '\n' | sed 's/~/|/' > "${RB_STEPS}"
+        ccache_enabled="${cc}" _CI_RB_DISTCC="${dc}" RUSTC_WRAPPER="$(_fill "${wrap}")" PATH="${bin}:${PATH}" \
+            run _ci_rust_cargo_build "${V[@CR@]}" "${V[@TGT@]}" "${V[@J@]}"
+        _expect "${case}" "$(_fill "${rc}")" "$(_fill "${want}")" || return 1
+        [ "$(cat "${RB_N}")" -eq "${calls}" ] || { echo "${case}: calls $(cat "${RB_N}")"; return 1; }
+        [ "$(sed -n 1p "${RB_ARGS}")" = "$(_fill 'build -j @J@ --release --locked --target @TGT@ -p @CR@')" ] \
+            || { echo "${case}: argv $(cat "${RB_ARGS}")"; return 1; }
+        IFS=',' read -r -a ws <<< "$(_fill "${not}")"
         for w in "${ws[@]}"; do
-            case "${w}" in
-                !*) [[ "${output}" != *"${w#!}"* ]] ;;
-                *) [[ "${output}" == *"${w}"* ]] ;;
-            esac || { echo "${name}: code ${w}: ${output}"; return 1; }
+            [ "${w}" = - ] || [[ "${output}" != *"${w}"* ]] || { echo "${case}: unexpected ${w}: ${output}"; return 1; }
         done
     done <<'CASES'
-real-error-all-on|1|1|w|101~error: could not compile `c1`|101|1|RUSTBUILD-0010,!RUSTBUILD-0011,!off ccache,could not compile
-ok-first|1|1|w|0~done|0|1|!RUSTBUILD-0009
-ccache-outage|1|1|w|1~ccache: error: x;0~done|0|2|RUSTBUILD-0011,off ccache,!off distcc,RUSTBUILD-0009
-distcc-outage|1|1|w|116~failed to distribute;116~failed to distribute;0~done|0|3|off ccache,RUSTBUILD-0011,off distcc,RUSTBUILD-0012,RUSTBUILD-0009
-sccache-outage|0|0|w|101~sccache: error: Timed out;0~done|0|2|RUSTBUILD-0013,RUSTBUILD-0009
-outage-then-error|0|0|w|101~sccache: error: x;101~error: could not compile `c1`|101|2|RUSTBUILD-0013,RUSTBUILD-0010
-nothing-left|0|0||101~sccache: error: x|101|1|RUSTBUILD-0014
+real-error-all-on|1|1|@W@|@RC@~@ERR@|@RC@|1|@ERR@;[CI-ERROR-RUSTBUILD-0010] rc=@RC@|RUSTBUILD-0011,@OFFC@
+ok-first|1|1|@W@|0~@OK@|0|1|=@OK@|-
+ccache-outage|1|1|@W@|@RC@~@CCE@ @X@;0~@OK@|0|2|@OFFC@;[CI-WARN-RUSTBUILD-0011];@OK@;[CI-INFO-RUSTBUILD-0009]|@OFFD@
+distcc-outage|1|1|@W@|@RC@~@DIST@ @X@;@RC@~@DIST@ @X@;0~@OK@|0|3|@OFFC@;[CI-WARN-RUSTBUILD-0011];@OFFD@;[CI-WARN-RUSTBUILD-0012];@OK@;[CI-INFO-RUSTBUILD-0009]|-
+sccache-outage|0|0|@W@|@RC@~@SCC@ @X@;0~@OK@|0|2|[CI-WARN-RUSTBUILD-0013];@OK@;[CI-INFO-RUSTBUILD-0009]|@OFFC@,@OFFD@
+outage-then-error|0|0|@W@|@RC@~@SCC@ @X@;@RC@~@ERR@|@RC@|2|[CI-WARN-RUSTBUILD-0013];@ERR@;[CI-ERROR-RUSTBUILD-0010]|-
+nothing-left|0|0||@RC@~@SCC@ @X@|@RC@|1|[CI-ERROR-RUSTBUILD-0014] rc=@RC@|-
 CASES
 }
 
-@test "build-args emit a SOT pin; its digest needs a platform" {
-    # What: no platform=version+per-arch shas only.
-    # Why: one pin owner; ARCH/SHA256 need platform.
+@test "toolchain packages: image base plus the one toolchain" {
+    # What: base first, toolchain own, deduped; else the id.
+    # Why: one list rule; no service list leaks into it.
     # From: Issue #1683 | PR #1858
-    local dep up ver
-    dep="$(_pin_dep)"; up="${dep^^}"; up="${up//-/_}"
-    ver="$(_ci_block_entry_field external_versions "${dep}" version)"
-    run bash "${CI_SH}" build-args "$(_pin_consumer)"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--build-arg ${up}_VERSION=${ver}"* ]]
-    [[ "${output}" == *"${up}_SHA256_"* ]]
-    [[ "${output}" != *"${up}_ARCH"* ]]
+    local case sot rc want base tool
+    local -A V=(
+        [@T@]="$(_val name)" [@U@]="$(_val name)" [@S@]="$(_val name)"
+        [@B@]="$(_val name)" [@TP@]="$(_val name)" [@SP@]="$(_val name)"
+    )
+    local -A S=([one]="$(_val path)" [two]="$(_val path)" [none]="$(_val path)" [empty]="$(_val path)")
+    base="$(printf '%s\n' 'image_base:' '  packages: [@B@]' 'services:' '  @S@:' '    build_type: apk' '    packages: [@SP@]')"
+    tool="$(printf '%s\n' 'build_toolchain:' '  @T@:' '    build_type: toolchain' '    packages: [@TP@, @B@]')"
+    _fill "${base}"$'\n'"${tool}" > "${S[one]}"
+    _fill "${base}"$'\n'"${tool}"$'\n'"$(printf '%s\n' '  @U@:' '    build_type: toolchain' '    packages: [@TP@]')" > "${S[two]}"
+    _fill "${base}" > "${S[none]}"
+    _fill "$(printf '%s\n' 'build_toolchain:' '  @T@:' '    build_type: toolchain')" > "${S[empty]}"
+    CI_MANIFEST="${S[one]}" run _ci_build_tools_packages
+    _expect list 0 "=$(printf '%s\n%s' "${V[@B@]}" "${V[@TP@]}")" || return 1
+    while IFS='|' read -r case sot rc want; do
+        CI_MANIFEST="${S[${sot}]}" run _ci_build_tools_packages
+        _expect "${case}" "${rc}" "${want}" || return 1
+    done <<'CASES'
+two-toolchains|two|2|[CI-ERROR-CORE-0011]
+no-toolchain|none|2|[CI-ERROR-CORE-0011]
+empty|empty|2|[CI-ERROR-BUILDTOOLS-0006]
+CASES
 }
 
-@test "build-args with a platform emit the per-arch pin digest" {
-    # What: a platform selects arch + digest from the SOT.
-    # Why: a pinned asset is per-platform.
-    # From: Issue #1683
-    local dep up arch sha
-    dep="$(_pin_dep)"; up="${dep^^}"; up="${up//-/_}"
-    arch="$(_ci_platform_apk_arch os/p1)"
-    sha="$(_ci_block_entry_field external_versions "${dep}" "sha256_${arch}")"
-    run bash "${CI_SH}" build-args "$(_pin_consumer)" "" os/p1
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"--build-arg ${up}_ARCH=${arch}"* ]]
-    [[ "${output}" == *"--build-arg ${up}_SHA256=${sha}"* ]]
-    [[ "${output}" != *"${up}_SHA256_"* ]]
-}
-
-@test "toolchain packages read the one SOT toolchain target" {
-    # What: service lists ignored; two toolchains fail.
-    # Why: the engine names no toolchain; the SOT holds one.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/other.yml"
-    printf 'services:\n  svc-a:\n    packages:\n      - WRONG_SVC\n' > "${m}"
-    printf 'build_toolchain:\n  tool-t:\n    packages:\n      - right-one\n' >> "${m}"
-    CI_MANIFEST="${m}" run --separate-stderr bash "${CI_SH}" build-tools packages
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "right-one" ]
-    printf '  tool-u:\n    packages:\n      - other\n' >> "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-tools packages
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-CORE-0011]"* ]]
-}
-
-@test "build-tools packages fails closed on an empty SOT list" {
-    # What: no packages in the SOT must not pass.
-    # Why: an empty list would blind the input check.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/nopkgs.yml"
-    printf 'build_toolchain:\n  build-tools:\n    context: tools/build-tools\n' > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-tools packages
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0006"* ]]
-}
-
-@test "build-tools signature: same canonical apk state gives same sig" {
-    # What: same inputs -> same signature; a bump moves it.
-    # Why: weekly check rebuilds only on a real change.
-    # From: Issue #1683
-    local a b c
-    a="$(bash "${CI_SH}" build-tools signature "sccache-0.15.0-r0")"
-    b="$(bash "${CI_SH}" build-tools signature "sccache-0.15.0-r0")"
-    c="$(bash "${CI_SH}" build-tools signature "sccache-0.16.0-r0")"
-    [ -n "${a}" ]
-    [ "${a}" = "${b}" ]
-    [ "${a}" != "${c}" ]
-}
-
-@test "build-tools signature fails closed on empty apk state" {
-    # What: a blank apk version state must not sign.
-    # Why: a blank scan must never mint a stable signature.
-    # From: Issue #1683
-    run bash "${CI_SH}" build-tools signature ""
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0004"* ]]
-    run bash "${CI_SH}" build-tools signature "   "
-    [ "${status}" -eq 2 ]
-}
-
-@test "build-tools signature moves on a dhclient value change" {
-    # What: a dhclient version/checksum bump moves the sig.
-    # Why: all emitted build-args must feed the signature.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/dh.yml" base changed
-    base="$(bash "${CI_SH}" build-tools signature "sccache-0.15.0-r0")"
-    local key sha
-    key="$(_ci_build_matrix_platforms)"; key="sha256_$(_ci_platform_apk_arch "${key%%$'\n'*}")"
-    sha="$(_ci_block_entry_field external_versions dhclient "${key}")"
-    sed "s/${key}: ${sha}/${key}: $(printf 'd%.0s' {1..64})/" "${CI_MANIFEST}" > "${m}"
-    changed="$(CI_MANIFEST="${m}" bash "${CI_SH}" build-tools signature "sccache-0.15.0-r0")"
-    [ -n "${base}" ]
-    [ -n "${changed}" ]
-    [ "${base}" != "${changed}" ]
-}
-
-@test "build-tools arches lists every build_matrix apk arch" {
-    # What: the signature must cover every supported arch.
-    # Why: an arm64-only change must be representable.
-    # From: Issue #1683
-    local p want=""
-    while IFS= read -r p; do
-        [ -n "${p}" ] && want="${want}$(_ci_platform_apk_arch "${p}")"$'\n'
-    done <<< "$(_ci_build_matrix_platforms)"
-    run --separate-stderr bash "${CI_SH}" build-tools arches
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "$(LC_ALL=C sort -u <<< "${want%$'\n'}")" ]
-}
-
-@test "build-tools consumes the channel the promote owner maps" {
-    # What: SOT ref -> its channel; else default_channel.
-    # Why: one ref->channel owner (promote), no second map.
+@test "build-tools signature: per-arch apk state over SOT args" {
+    # What: per-arch apk state + SOT -> signature or its id.
+    # Why: only a real toolchain input change moves the id.
     # From: Issue #1683 | PR #1858
-    local rel ch dflt
-    rel="$(_ci_release_ref)"; ch="$(_ci_channels_where ref "${rel}")"
-    dflt="$(_ci_block_entry_field release "" default_channel)"
-    export GITHUB_REPOSITORY=o/r GHCR_USERNAME=u GHCR_TOKEN=t
-    _ci_registry_digest() { echo "sha256:${1##*:}"; }
-    GITHUB_BASE_REF="${rel#refs/heads/}" run _ci_build_tools_resolve_image
-    [[ "${output}" == *"@sha256:${ch}"* ]]
-    GITHUB_BASE_REF=no-channel-ref run _ci_build_tools_resolve_image
-    [[ "${output}" == *"@sha256:${dflt}"* ]]
-    GITHUB_BASE_REF='' GITHUB_REF_NAME=feature/x run _ci_build_tools_resolve_image
-    [[ "${output}" == *"@sha256:${dflt}"* ]]
-}
-
-@test "build-tools resolve-image reuses the published channel digest" {
-    # What: NOOP -> channel digest, no apk resolve at all.
-    # Why: normal runs reuse build-tools (AG-CI-010).
+    local case sot all last rc check arch arches plats p dep key v base want sig
+    local -A sigs=()
+    local -A V=([@V1@]="$(_val name)-$(_val semver)-r0" [@V2@]="$(_val name)-$(_val semver)-r0" [@SP@]="   " [@E@]="")
+    local -A S=([s]="${CI_MANIFEST}" [p]="$(_val path)" [n]="$(_val path)")
+    STUB_DIR="$(_val path)"
+    STUB_CALLS="$(_val path)"
+    mkdir -p "${STUB_DIR}"
+    CI_APK_RESOLVE_CMD="$(_stub 'printf "%s %s\n" "$1" "$2" >> "${STUB_CALLS}"; cat "${STUB_DIR}/$2"')"
+    export STUB_DIR STUB_CALLS CI_APK_RESOLVE_CMD
+    # What: SOT copies with a moved pin and without alpine.
+    # Why: a pin change must move it; no base must stop it.
     # From: Issue #1683 | PR #1858
-    export GITHUB_REPOSITORY=o/r GHCR_USERNAME=u GHCR_TOKEN=t
-    _ci_registry_digest() { echo sha256:chan; }
-    CI_APK_RESOLVE_CMD="$(_stub apk 'echo APK_CALLED; exit 9')"
-    run _ci_build_tools_resolve_image
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"build-tools@sha256:chan"* ]]
-    [[ "${output}" != *"APK_CALLED"* ]]
-    # What: under GitHub the ref is also the step output.
-    # Why: workflows only call ci.sh; no echo in the YAML.
+    dep="$(_pin_dep)"
+    plats="$(_ci_build_matrix_platforms)"
+    key="sha256_$(_ci_platform_field "${plats%%$'\n'*}" apk "$(_val name)")"
+    v="$(_ci_block_entry_field external_versions "${dep}" "${key}")"
+    p="$(_val digest)"
+    sed "/^    ${key}:/s/${v}/${p#sha256:}/" "${CI_MANIFEST}" > "${S[p]}"
+    ! cmp -s "${CI_MANIFEST}" "${S[p]}" || { echo "pin ${dep}.${key} not moved"; return 1; }
+    grep -v '^  alpine:' "${CI_MANIFEST}" > "${S[n]}"
+    base="$(_ci_block_entry_field base_images "" alpine)"
+    want=""
+    for p in ${plats}; do want="${want}${base} $(_ci_platform_field "${p}" apk "$(_val name)")"$'\n'; done
+    want="$(LC_ALL=C sort -u <<< "${want%$'\n'}")"
+    [ "$(wc -l <<< "${want}")" -ge 2 ] || { echo "need two arches: ${want}"; return 1; }
+    arches="$(_ci_build_tools_arches)"
+    while IFS='|' read -r case sot all last rc check; do
+        : > "${STUB_CALLS}"
+        for arch in ${arches}; do printf '%s' "$(_fill "${all}")" > "${STUB_DIR}/${arch}"; done
+        printf '%s' "$(_fill "${last}")" > "${STUB_DIR}/${arch}"
+        CI_MANIFEST="${S[${sot}]}" run _ci_build_tools_resolve_signature
+        if [ "${rc}" -ne 0 ]; then
+            _expect "${case}" "${rc}" "${check}" || return 1
+            [ "${sot}" != n ] || [ ! -s "${STUB_CALLS}" ] || { echo "${case}: resolver ran: $(cat "${STUB_CALLS}")"; return 1; }
+            continue
+        fi
+        _expect "${case}" 0 - || return 1
+        sig="${output##*$'\n'}"
+        [[ "${sig}" =~ ^[0-9a-f]{64}$ ]] || { echo "${case}: no signature: ${output}"; return 1; }
+        [ "$(LC_ALL=C sort "${STUB_CALLS}")" = "${want}" ] || { echo "${case}: resolver calls: $(cat "${STUB_CALLS}")"; return 1; }
+        sigs[${case}]="${sig}"
+        case "${check}" in
+            =*) [ "${sig}" = "${sigs[${check#=}]}" ] || { echo "${case}: differs from ${check#=}"; return 1; } ;;
+            !*) [ "${sig}" != "${sigs[${check#!}]}" ] || { echo "${case}: equals ${check#!}"; return 1; } ;;
+        esac
+    done <<'CASES'
+base|s|@V1@|@V1@|0|-
+same|s|@V1@|@V1@|0|=base
+bump|s|@V2@|@V2@|0|!base
+one-arch|s|@V1@|@V2@|0|!base
+pin|p|@V1@|@V1@|0|!base
+blank|s|@V1@|@SP@|2|[CI-ERROR-BUILDTOOLS-0011]
+empty|s|@V1@|@E@|2|[CI-ERROR-BUILDTOOLS-0011]
+no-base|n|@V1@|@V1@|2|[CI-ERROR-BUILDTOOLS-0009]
+CASES
+    for v in "${V[@E@]}" "${V[@SP@]}"; do
+        run _ci_build_tools_signature "${v}"
+        _expect "state '${v}'" 2 "[CI-ERROR-BUILDTOOLS-0004]" || return 1
+    done
+}
+
+# What: ref -> channel -> published build-tools digest.
+# Why: jobs pin the toolchain by digest (AG-CI-010).
+# From: Issue #1683 | PR #1858
+@test "build-tools resolve-image: channel per ref, published digest, step output" {
+    local case base refname repo out rc want apk
+    local -A V=(
+        [@OTHER@]="$(_val name)" [@FEAT@]="$(_val name)/$(_val name)" [@OUT@]="$(_val path)"
+        [@BADOUT@]="$(_val path)/$(_val name)/$(_val name)" [@REPO@]="$(_val name)/$(_val name)"
+    )
+    V[@REL@]="$(_ci_release_ref)"
+    V[@RELB@]="${V[@REL@]#refs/heads/}"
+    V[@CH@]="$(_ci_channels_where ref "${V[@REL@]}")"
+    V[@CH@]="${V[@CH@]%%$'\n'*}"
+    V[@DFLT@]="$(_ci_block_entry_field release "" default_channel)"
+    [ -n "${V[@CH@]}" ] && [ -n "${V[@DFLT@]}" ] || { echo "SOT channel '${V[@CH@]}' default '${V[@DFLT@]}'"; return 1; }
+    GHCR_USERNAME="$(_val name)"
+    GHCR_TOKEN="$(_val name)"
+    export GHCR_USERNAME GHCR_TOKEN
+    V[@IMG@]="$(GITHUB_REPOSITORY="${V[@REPO@]}" _ci_build_tools_image)"
+    apk="$(_val path)"
+    CI_APK_RESOLVE_CMD="$(_stub "touch '${apk}'; exit 1")"
+    export CI_APK_RESOLVE_CMD
+    _ci_registry_digest() { printf 'sha256:%s\n' "${1##*:}"; }
+    while IFS='|' read -r case base refname repo out rc want; do
+        [ "${base}" != - ] || base=''
+        [ "${refname}" != - ] || refname=''
+        [ "${repo}" != - ] || repo=''
+        [ "${out}" != - ] || out=''
+        [ -z "${out}" ] || [ "${out}" = @BADOUT@ ] || : > "$(_fill "${out}")"
+        GITHUB_BASE_REF="$(_fill "${base}")" GITHUB_REF_NAME="$(_fill "${refname}")" GITHUB_REPOSITORY="$(_fill "${repo}")" \
+            GITHUB_OUTPUT="$(_fill "${out}")" run _ci_build_tools_resolve_image
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+        [ ! -e "${apk}" ] || { echo "${case}: apk resolver ran"; return 1; }
+        [ "${out}" != @OUT@ ] || grep -qxF -- "$(_fill 'image=@IMG@@sha256:@CH@')" "${V[@OUT@]}" \
+            || { echo "${case}: step output: $(cat "${V[@OUT@]}")"; return 1; }
+    done <<'CASES'
+release-ref|@RELB@|-|@REPO@|-|0|@IMG@@sha256:@CH@
+other-ref|@OTHER@|-|@REPO@|-|0|@IMG@@sha256:@DFLT@
+no-base-ref|-|@FEAT@|@REPO@|-|0|@IMG@@sha256:@DFLT@
+step-output|@RELB@|-|@REPO@|@OUT@|0|@IMG@@sha256:@CH@
+output-unwritable|@RELB@|-|@REPO@|@BADOUT@|2|[CI-ERROR-BUILDTOOLS-0023] file="@BADOUT@"
+repo-unset|@RELB@|-|-|-|2|[CI-ERROR-CORE-0128]
+CASES
+}
+
+@test "apk resolver: per-arch root with SOT repos, keys and proxy names" {
+    # What: arch, packages, repos, keys, proxy names reach apk.
+    # Why: a foreign arch resolves only with its own db and keys.
     # From: Issue #1683 | PR #1858
-    local gho="${BATS_TEST_TMPDIR}/gho"
-    : > "${gho}"
-    GITHUB_OUTPUT="${gho}" run _ci_build_tools_resolve_image
-    [ "${status}" -eq 0 ]
-    grep -qx 'image=.*build-tools@sha256:chan' "${gho}"
-    GITHUB_OUTPUT="${BATS_TEST_TMPDIR}/no/such/dir/out" run _ci_build_tools_resolve_image
-    [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-BUILDTOOLS-0023]"* ]]
-}
-
-@test "build-tools signature moves on an arm64-only apk change" {
-    # What: an aarch64-only change moves the sig.
-    # Why: an arm64-only package bump must not be a NOOP.
-    # From: Issue #1683
-    local a b
-    a="$(bash "${CI_SH}" build-tools signature "arch-a:sccache-0.15.0-r0 arch-b:sccache-0.15.0-r0")"
-    b="$(bash "${CI_SH}" build-tools signature "arch-a:sccache-0.15.0-r0 arch-b:sccache-0.16.0-r0")"
-    [ -n "${a}" ]
-    [ "${a}" != "${b}" ]
-}
-
-@test "build-tools resolve-signature uses the injected resolver" {
-    # What: the apk resolver is injectable for tests.
-    # Why: signature logic is proven without a container.
-    # From: Issue #1683
-    local mock; mock="$(_stub apk.sh 'echo "sccache-0.15.0-r0 fake-$2-1.0-r0"')"
-    run env CI_APK_RESOLVE_CMD="${mock}" bash "${CI_SH}" build-tools resolve-signature
-    [ "${status}" -eq 0 ]
-    [ -n "${output}" ]
-}
-
-@test "apk resolver uses a clean per-arch root with the SOT repos" {
-    # What: own root, arch keys, SOT repos; raw on failure.
-    # Why: a foreign arch needs its own db, keys and tags.
+    local bin argv n v p1 p2 v1 v2 key sha b64 bad
+    local -a px=(HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy)
+    local -A V=(
+        [@IMG@]="$(_val host)/$(_val name):$(_val semver)" [@ARCH@]="$(_val name)"
+        [@REPOS@]="$(_val name)=$(_val url)/$(_val name)" [@KURL@]="$(_val url)/$(_val name).pub"
+    )
+    bin="$(_val path)"
+    p1="a$(_val name)"
+    p2="b$(_val name)"
+    v1="$(_val semver)-r0"
+    v2="$(_val semver)-r1"
+    key="$(_val path)"
+    DOCKER_LOG="$(_val path)"
+    STUB_OUT="$(printf '(1/2) Installing %s (%s)\n(2/2) Installing %s (%s)' "${p2}" "${v2}" "${p1}" "${v1}")"
+    CI_APK_RESOLVE_CMD=''
+    CI_RETRY_BACKOFF_BASE_SECONDS=0
+    export DOCKER_LOG STUB_OUT CI_APK_RESOLVE_CMD CI_RETRY_BACKOFF_BASE_SECONDS
+    _tool_stub "${bin}" docker <<'SH'
+printf '%s\n' "${*//$'\n'/ }" >> "${DOCKER_LOG}"
+if [ -n "${STUB_FAIL:-}" ]; then printf 'ERROR: unable to select packages:\n  %s (no such package)\n' "${STUB_FAIL}"; exit 1; fi
+printf '%s\n' "${STUB_OUT}"
+SH
+    unset "${px[@]}"
+    : > "${DOCKER_LOG}"
+    PATH="${bin}:${PATH}" run _ci_apk_resolve "${V[@IMG@]}" "${V[@ARCH@]}" "${p1} ${p2}" "${V[@REPOS@]}"
+    _expect resolve 0 "=${p1}-${v1} ${p2}-${v2} " || return 1
+    argv="$(cat "${DOCKER_LOG}")"
+    for v in "-e ARCH=${V[@ARCH@]} " "-e PKGS=${p1} ${p2} " "-e REPOS=${V[@REPOS@]} " " ${V[@IMG@]} sh -c " --initdb --root --keys-dir; do
+        [[ "${argv}" == *"${v}"* ]] || { echo "resolve: no '${v}' in: ${argv}"; return 1; }
+    done
+    for n in "${px[@]}"; do [[ "${argv}" != *"-e ${n} "* ]] || { echo "unset ${n} passed: ${argv}"; return 1; }; done
+    # What: each set proxy name passes; its value stays off argv.
+    # Why: a proxy URL may carry credentials.
     # From: Issue #1683 | PR #1858
-    local log="${BATS_TEST_TMPDIR}/docker.log" repos="tag-a=http://repo.example.test/a"
-    _stub docker 'echo "$*" >> "'"${log}"'"; if [ "${FAIL:-}" = 1 ]; then echo "ERROR: unable to select packages: zz"; exit 1; fi; echo "(1/1) Installing zz (9.9-r0)"' >/dev/null
-    CI_APK_RESOLVE_CMD='' PATH="${BATS_TEST_TMPDIR}:${PATH}" run _ci_apk_resolve img/base arch-b zz "${repos}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"zz-9.9-r0"* ]]
-    grep -q -- "-e ARCH=arch-b" "${log}"
-    grep -qF -- "-e REPOS=${repos}" "${log}"
-    grep -q -- "--keys-dir" "${log}"
-    grep -q -- "--initdb" "${log}"
-    [ "$(grep -c -- "-e HTTP_PROXY" "${log}")" -eq 0 ]
-    : > "${log}"
-    HTTP_PROXY=http://p:3128 CI_APK_RESOLVE_CMD='' PATH="${BATS_TEST_TMPDIR}:${PATH}" \
-        run _ci_apk_resolve img/base arch-b zz
-    [ "${status}" -eq 0 ]
-    grep -q -- "-e HTTP_PROXY -e ARCH=arch-b" "${log}"
-    : > "${log}"
-    FAIL=1 CI_APK_RESOLVE_CMD='' CI_RETRY_BACKOFF_BASE_SECONDS=0 PATH="${BATS_TEST_TMPDIR}:${PATH}" \
-        run _ci_apk_resolve img/base arch-b zz
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-BUILDTOOLS-0020]"* ]]
-    [[ "${output}" == *"unable to select packages"* ]]
-    [ "$(grep -c -- "-e ARCH=arch-b" "${log}")" -eq 1 ]
-    # What: SOT keys reach apk as base64; a bad pin fails.
+    for n in "${px[@]}"; do v="$(_val url)"; export "${n}=${v}"; done
+    : > "${DOCKER_LOG}"
+    PATH="${bin}:${PATH}" run _ci_apk_resolve "${V[@IMG@]}" "${V[@ARCH@]}" "${p1}"
+    _expect proxy 0 - || return 1
+    argv="$(cat "${DOCKER_LOG}")"
+    for n in "${px[@]}"; do
+        [[ "${argv}" == *"-e ${n} "* && "${argv}" != *"${!n}"* ]] || { echo "proxy ${n}: ${argv}"; return 1; }
+    done
+    unset "${px[@]}"
+    : > "${DOCKER_LOG}"
+    STUB_FAIL="${p1}" PATH="${bin}:${PATH}" run _ci_apk_resolve "${V[@IMG@]}" "${V[@ARCH@]}" "${p1}"
+    _expect permanent-failure 2 "[CI-ERROR-BUILDTOOLS-0020] arch=\"${V[@ARCH@]}\";unable to select packages;${p1}" || return 1
+    [ "$(wc -l < "${DOCKER_LOG}")" -eq 1 ] || { echo "a permanent failure was retried: $(cat "${DOCKER_LOG}")"; return 1; }
+    # What: SOT keys reach apk as base64; a bad pin stops first.
     # Why: a tagged repo resolves only with its pinned key.
     # From: Issue #1683 | PR #1858
-    local key="${BATS_TEST_TMPDIR}/sig.pub" sha b64
-    printf 'KEYDATA\n' > "${key}"; sha="$(sha256sum "${key}")"; sha="${sha%% *}"; b64="$(base64 -w0 "${key}")"
-    : > "${log}"
-    CI_HTTP_DOWNLOAD_CMD="$(_stub dl "cp '${key}' \"\$2\"")" CI_APK_RESOLVE_CMD='' PATH="${BATS_TEST_TMPDIR}:${PATH}" \
-        run _ci_apk_resolve img/base arch-b zz "${repos}" "http://k.example/sig.pub=${sha}"
-    [ "${status}" -eq 0 ]
-    grep -qF -- "-e KEYS=sig.pub=${b64}" "${log}"
-    : > "${log}"
-    CI_HTTP_DOWNLOAD_CMD="$(_stub dl "cp '${key}' \"\$2\"")" CI_APK_RESOLVE_CMD='' PATH="${BATS_TEST_TMPDIR}:${PATH}" \
-        run _ci_apk_resolve img/base arch-b zz "${repos}" "http://k.example/sig.pub=$(_test_digest a | cut -d: -f2)"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-FETCH-0003"* ]]
-    [ ! -s "${log}" ]
+    _val name > "${key}"
+    sha="$(sha256sum "${key}")"
+    sha="${sha%% *}"
+    b64="$(base64 -w0 "${key}")"
+    bad="$(_val digest)"
+    CI_HTTP_DOWNLOAD_CMD="$(_stub "cp '${key}' \"\$2\"")"
+    export CI_HTTP_DOWNLOAD_CMD
+    : > "${DOCKER_LOG}"
+    PATH="${bin}:${PATH}" run _ci_apk_resolve "${V[@IMG@]}" "${V[@ARCH@]}" "${p1}" "${V[@REPOS@]}" "${V[@KURL@]}=${sha}"
+    _expect key 0 - || return 1
+    grep -qF -- "-e KEYS=${V[@KURL@]##*/}=${b64} " "${DOCKER_LOG}" || { echo "key: $(cat "${DOCKER_LOG}")"; return 1; }
+    : > "${DOCKER_LOG}"
+    PATH="${bin}:${PATH}" run _ci_apk_resolve "${V[@IMG@]}" "${V[@ARCH@]}" "${p1}" "${V[@REPOS@]}" "${V[@KURL@]}=${bad#sha256:}"
+    _expect bad-key-pin 2 "[CI-ERROR-FETCH-0003]" || return 1
+    [ ! -s "${DOCKER_LOG}" ] || { echo "docker ran on a bad key pin: $(cat "${DOCKER_LOG}")"; return 1; }
 }
 
-@test "service build-args carry SOT tagged repos and repo keys" {
-    # What: branch from the alpine pin tag; keys verbatim.
-    # Why: the SOT pin owns the version the repo follows.
+@test "oci labels: provenance from the SOT and the run env" {
+    # What: OCI labels from SOT pins, repo and commit env.
+    # Why: provenance is set once, not per Dockerfile.
     # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/rk.yml" name tag want
-    while IFS='|' read -r name tag want; do
-        printf 'base_images:\n  alpine: "img:%s@sha256:%s"\nservices:\n  svc:\n    context: c\n    build_type: apk\n    apk_repositories:\n      - x=http://h.example/@ALPINE_BRANCH@/main\n    apk_keys:\n      - https://k.example/s.pub=abc\n' \
-            "${tag}" "$(_test_digest a | cut -d: -f2)" > "${m}"
-        CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc --bare
-        case "${want}" in
-            ok) [ "${status}" -eq 0 ] && [[ "${output}" == *"APK_TAGGED_REPOS=x=http://h.example/v${tag}/main"* ]] \
-                && [[ "${output}" == *"APK_KEYS=https://k.example/s.pub=abc"* ]] ;;
-            *) [ "${status}" -ne 0 ] && [[ "${output}" == *"${want}"* ]] ;;
-        esac || { echo "${name}: rc ${status}: ${output}"; return 1; }
-    done <<'CASES'
-release-tag|3.24|ok
-mutable-tag|latest|CI-ERROR-BUILDARGS-0016
-CASES
-    # What: an unreadable key list fails build-args.
-    # Why: a reader error must not pass as "no keys".
-    # From: Issue #1683 | PR #1858
-    printf 'base_images:\n  alpine: "img:3.24@sha256:%s"\nservices:\n  svc:\n    context: c\n    build_type: apk\n    apk_keys:\n      - "https://k.example/s.pub=abc\n' \
-        "$(_test_digest a | cut -d: -f2)" > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-args svc --bare
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"[CI-ERROR-CORE-0108]"* ]]
-    [[ "${output}" != *"APK_KEYS="* ]]
-}
-
-@test "build-tools resolve-signature fails closed on a missing central base image" {
-    # What: missing base image must fail closed here.
-    # Why: errexit must not swallow the fail-closed path.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/no-resolve-alpine.yml"
-    grep -v '^  alpine:' "${CI_MANIFEST}" > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" build-tools resolve-signature
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *'[CI-ERROR-BUILDARGS-0003] arg="ALPINE_IMAGE" key="base_images.alpine"'* ]]
-}
-
-@test "build-tools rejects an unknown subcommand (fail closed)" {
-    # What: An unknown sub must not silently succeed.
-    # Why: Fail-closed dispatch (AG-VAL-002).
-    # From: Issue #1683
-    run bash "${CI_SH}" build-tools bogus
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-BUILDTOOLS-0003"* ]]
-}
-
-@test "build-tools image is the base ref from the SOT registry" {
-    # What: The base build-tools ref from the SOT.
-    # Why: One registry-host owner, no env fallback.
-    # From: Issue #1683
-    GITHUB_REPOSITORY=owner/fixture-repo run --separate-stderr bash "${CI_SH}" build-tools image
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "registry.example.test/owner/fixture-repo/build-tools" ]
-}
-
-@test "oci labels emit provenance from the SOT and env" {
-    # What: revision/source/licenses/base from SOT+env.
-    # Why: Provenance labels have one owner (Plan §7).
-    # From: Issue #1683
-    _build_fixture
-    GITHUB_SHA=abc123 GITHUB_SERVER_URL=https://git.example.test GITHUB_REPOSITORY=Owner/Fixture-Repo \
-        run _ci_oci_labels tool-t
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"image.revision=abc123"* ]]
-    [[ "${output}" == *"image.version=abc123"* ]]
-    [[ "${output}" == *"image.source=https://git.example.test/owner/fixture-repo"* ]]
-    [[ "${output}" == *"image.licenses=L-fixture"* ]]
-    [[ "${output}" == *"image.title=tool-t"* ]]
-    [[ "${output}" == *"image.description=fixture-repo tool-t image"* ]]
-    [[ "${output}" == *"image.base.name=registry.example.test/base-x"* ]]
-    [[ "${output}" == *"image.base.digest=sha256:$(printf '2%.0s' {1..64})"* ]]
-    sed -i 's/^  base-x: .*//' "${CI_MANIFEST}"
-    run _ci_oci_labels svc-a
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-BUILD-0014]"* ]]
+    local m nobase want got
+    local -A V=(
+        [@S@]="$(_val name)" [@FB@]="$(_val name)" [@LIC@]="$(_val name)" [@BDIG@]="$(_val digest)"
+        [@BIMG@]="$(_val host)/$(_val name):$(_val semver)" [@OWN@]="$(_val name)" [@REPO@]="$(_val name)"
+        [@SRV@]="$(_val url)" [@SHA@]="$(_val sha)"
+    )
+    m="$(_val path)"
+    nobase="$(_val path)"
+    _fill "$(printf '%s\n' 'release:' '  license: @LIC@' 'base_images:' '  @FB@: "@BIMG@@@BDIG@"' \
+        'services:' '  @S@:' '    final_base: @FB@')" > "${m}"
+    grep -v "^  ${V[@FB@]}:" "${m}" > "${nobase}"
+    want="$(_fill "$(printf 'org.opencontainers.image.%s\n' 'revision=@SHA@' 'version=@SHA@' \
+        'source=@SRV@/@OWN@/@REPO@' 'url=@SRV@/@OWN@/@REPO@' 'documentation=@SRV@/@OWN@/@REPO@' 'licenses=@LIC@' \
+        'vendor=@OWN@' 'title=@S@' 'description=@REPO@ @S@ image' 'base.name=@BIMG@' 'base.digest=@BDIG@')")"
+    CI_MANIFEST="${m}" GITHUB_SHA="${V[@SHA@]}" GITHUB_SERVER_URL="${V[@SRV@]}" GITHUB_REPOSITORY="${V[@OWN@]}/${V[@REPO@]}" \
+        run _ci_oci_labels "${V[@S@]}"
+    _expect labels 0 - || return 1
+    [[ "${output%%$'\n'*}" =~ ^org\.opencontainers\.image\.created=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+        || { echo "created: ${output}"; return 1; }
+    got="${output#*$'\n'}"
+    [ "${got}" = "${want}" ] || { echo "labels: ${got}"; echo "want: ${want}"; return 1; }
+    CI_MANIFEST="${m}" GITHUB_SHA='' GITHUB_SERVER_URL="${V[@SRV@]}" GITHUB_REPOSITORY="${V[@OWN@]}/${V[@REPO@]}" \
+        run _ci_oci_labels "${V[@S@]}"
+    _expect no-sha 0 - || return 1
+    [[ "${output}" != *"image.revision="* && "${output}" != *"image.version="* ]] || { echo "no-sha: ${output}"; return 1; }
+    CI_MANIFEST="${nobase}" GITHUB_SHA="${V[@SHA@]}" GITHUB_SERVER_URL="${V[@SRV@]}" GITHUB_REPOSITORY="${V[@OWN@]}/${V[@REPO@]}" \
+        run _ci_oci_labels "${V[@S@]}"
+    _expect no-base 2 "$(_fill '[CI-ERROR-BUILD-0014] service="@S@" key="base_images.@FB@"')" || return 1
 }
 
 @test "repo-scanning checks fail closed outside a git repo" {
@@ -6133,6 +5661,10 @@ tera-raw|tpl|{% raw %}\n{# a\n b\n c\n d #}\n{% endraw %}\n|0|-
 tera-html|tpl|<p title="{{ x }}">y</p>\n<!-- What: X70 -->\n|1|chars (max 60)
 yaml-block|yml|run: PIPE\n  # a\n  # b\n  # c\n  # d\n|0|-
 sh-heredoc|sh|cat <<'EOF'\n# a\n# b\n# c\n# d\nEOF\n|0|-
+sh-herestring|sh|grep -x a <<< "EOF"\n# a\n# b\n# c\n# d\n|1|story-telling block (4 lines)
+sh-quoted|sh|echo "cat <<EOF"\n# a\n# b\n# c\n# d\n|1|story-telling block (4 lines)
+sh-shift|sh|x=$(( 1 << y ))\n# a\n# b\n# c\n# d\n|1|story-telling block (4 lines)
+sh-bs-delim|sh|cat <<\\EOF\n# a\n# b\n# c\n# d\nEOF\n|0|-
 md-heading|md|# a\n# b\n# c\n# d\n|0|-
 unknown|xyz|# a\n# b\n# c\n# d\n|1|[CI-ERROR-CHECK-0153] files=1
 CASES
@@ -6630,7 +6162,7 @@ STUBEOF
     # From: Issue #1683 | PR #1858
     local m="${BATS_TEST_TMPDIR}/m.yml" t
     printf 'services:\n  svc-a:\n    context: a\nbuild_toolchain:\n  tc-x:\n    context: t\nexternal_services:\n  ext-y:\n    image: i\npr_policy:\n  title_types: [feat, fix, security]\n  title_scopes_extra: [area-z]\n' > "${m}"
-    _sot_ci_variables >> "${m}"
+    _sot_block ci_variables >> "${m}"
     for t in "feat(svc-a): x" "fix(tc-x)!: y" "feat(ext-y): x" "feat(area-z): x" \
              "security: z" "feat!: x" $'feat(svc-a): crlf\r'; do
         CI_MANIFEST="${m}" run bash "${CI_SH}" check pr-title "${t}"
@@ -6767,13 +6299,37 @@ Fixes the thing.
     [[ "${output}" == *"CI-ERROR-CHECK-0090"* ]]
 }
 
+# What: a workflow calling ci.sh must pass CI_VARIABLES.
+# Why: else ci.sh misses repo/org vars; ids diverge.
+# From: Issue #1683 | PR #1858
+@test "workflow-ci-variables flags a ci.sh caller without CI_VARIABLES" {
+    local r
+    r="$(_val path)"
+    local -A V=(
+        [@W@]="$(_val name)" [@A@]="$(_val name)" [@B@]="$(_val name)" [@C@]="$(_val name)"
+        [@J@]="$(_val name)" [@S@]="$(_val name)" [@O@]="$(_val var)"
+    )
+    mkdir -p "${r}/${V[@W@]}"
+    _fill "$(printf '%s\n' 'env:' '  CI_VARIABLES: ${{ toJSON(vars) }}' 'jobs:' '  @J@:' '    steps:' \
+        '      - run: bash .github/scripts/ci.sh @S@')" > "${r}/${V[@W@]}/${V[@A@]}.yml"
+    _fill "$(printf '%s\n' 'env:' '  @O@: @S@' 'jobs:' '  @J@:' '    steps:' \
+        '      - run: bash .github/scripts/ci.sh @S@')" > "${r}/${V[@W@]}/${V[@B@]}.yml"
+    _fill "$(printf '%s\n' 'jobs:' '  @J@:' '    steps:' '      - run: @S@')" > "${r}/${V[@W@]}/${V[@C@]}.yml"
+    CI_WORKFLOW_DIR="${V[@W@]}" run _ci_check_workflow_ci_variables "${r}"
+    _expect missing 1 "$(_fill '[CI-ERROR-CHECK-0158] workflows=2;raw:;@W@/@B@.yml: calls ci.sh without')" || return 1
+    [[ "${output}" != *"${V[@A@]}.yml"* ]] || { echo "wired workflow flagged: ${output}"; return 1; }
+    rm "${r}/${V[@W@]}/${V[@B@]}.yml"
+    CI_WORKFLOW_DIR="${V[@W@]}" run _ci_check_workflow_ci_variables "${r}"
+    _expect wired 0 '=workflow-ci-variables=clean workflows=1' || return 1
+}
+
 @test "check pr-tracking-metadata: context, labels, milestone, fork, draft" {
     # What: AG-GH-008 gaps fail; fork/draft warn; SOT board.
     # Why: never report metadata the PR has; wiring != gap.
     # From: Issue #1683 | PR #1858
     local m="${BATS_TEST_TMPDIR}/m.yml"
     printf 'pr_policy:\n  project_number: 7\n' > "${m}"
-    _sot_ci_variables >> "${m}"
+    _sot_block ci_variables >> "${m}"
     export CI_MANIFEST="${m}" PR_NUMBER=12 GITHUB_REPOSITORY=owner/fixture-repo
     PR_NUMBER='' run bash "${CI_SH}" check pr-tracking-metadata
     [ "${status}" -eq 2 ]
@@ -6798,7 +6354,7 @@ Fixes the thing.
     # What: SOT path labels per path; pr-labels adds them.
     # Why: the labeler rules live on in the SOT and ci.sh.
     # From: Issue #1683 | PR #1858
-    local row p want got lst="${BATS_TEST_TMPDIR}/changed" gh
+    local p want got lst="${BATS_TEST_TMPDIR}/changed" gh
     export CI_MANIFEST="${CI_MANIFEST_SOURCE}"
     while IFS='|' read -r p want; do
         got="$(_ci_pr_labels_for "${p}" | paste -sd, -)"
@@ -6827,12 +6383,13 @@ services/nats/x|
 scripts/lib/x.sh|
 ROWS
     printf 'README.md\n' > "${lst}"
-    gh="$(_stub gh 'printf "%s\n" "$*" >> "'"${BATS_TEST_TMPDIR}"'/gh.log"
+    gh="$(_val path)/gh"
+    _tool_stub "${gh%/*}" gh <<<'printf "%s\n" "$*" >> "'"${BATS_TEST_TMPDIR}"'/gh.log"
 case "$*" in
 *query=query*) [ -n "${GH_NOPROJ:-}" ] && echo "{\"data\":{\"organization\":{\"projectV2\":null}}}" && exit 0
     echo "{\"data\":{\"organization\":{\"projectV2\":{\"id\":\"PVT_1\"}},\"repository\":{\"issueOrPullRequest\":{\"id\":\"C1\"}}}}" ;;
 *query=mutation*) [ -z "${GH_ADDFAIL:-}" ] || { echo "GraphQL: denied" >&2; exit 1; } ;;
-esac')"
+esac'
     GITHUB_EVENT_NAME=push run ci_cmd_pr_labels
     [[ "${output}" == *'pr-labels=NOT-RUN reason="not a pull request"'* ]]
     GITHUB_EVENT_NAME=pull_request PR_IS_FORK=true run ci_cmd_pr_labels
@@ -6873,7 +6430,7 @@ esac')"
     local bin="${BATS_TEST_TMPDIR}/bin" m="${BATS_TEST_TMPDIR}/m.yml" mode
     mkdir -p "${bin}"
     printf 'pr_policy:\n  project_number: 7\n' > "${m}"
-    _sot_ci_variables >> "${m}"
+    _sot_block ci_variables >> "${m}"
     _tool_stub "${bin}" gh <<'EOF'
 case "${MODE}" in
     failed) echo "gh: HTTP 500" >&2; exit 1 ;;
@@ -6904,7 +6461,7 @@ _ob_setup() {
     printf '%s\n' 'release:' '  channels:' '    stable:' '      ref: refs/heads/trunk' \
         'branch_policy:' '  orphan_min_age_seconds: 3600' '  long_lived: [dev]' \
         '  long_lived_regex:' '    - "^rel-"' > "${m}"
-    _sot_ci_variables >> "${m}"
+    _sot_block ci_variables >> "${m}"
     export CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo GH_TOKEN=t
     export CI_RETRY_BACKOFF_BASE_SECONDS=0 OB_CALLS="${BATS_TEST_TMPDIR}/gh.calls"
     export OB_REFS='' OB_ISSUES='' OB_MORE='' OB_FAIL=''
@@ -7117,6 +6674,8 @@ _lk_setup() {
     [ "${status}" -eq 0 ]; [[ "${output}" == *'skip reason="GitHub closes on the default branch"'* ]]
     CI_DEFAULT_BRANCH='' run bash "${CI_SH}" close-linked-issues
     [ "${status}" -eq 2 ]; [[ "${output}" == *"CI-ERROR-LINK-0005"* ]]
+    GITHUB_SHA='' run bash "${CI_SH}" close-linked-issues
+    [ "${status}" -eq 2 ]; [[ "${output}" == *"CI-ERROR-LINK-0015"* ]]
     GITHUB_SHA=other run bash "${CI_SH}" close-linked-issues
     [ "${status}" -eq 0 ]; [[ "${output}" == *'clean reason="no merged PR for this push"'* ]]
     run bash "${CI_SH}" close-linked-issues --pr 9
@@ -7292,47 +6851,67 @@ EOF
     grep -qx 'action-node-versions|' "${log}"
     grep -qx 'ci-bats|services/dns/Dockerfile' "${log}"
     grep -qx 'exit-evidence|services/dns/Dockerfile' "${log}"
+    grep -qx 'dockerfile-secret-ids|' "${log}"
+    grep -qx 'sot-identity-inputs|' "${log}"
+    grep -qx 'workflow-ci-variables|' "${log}"
     ! grep -q '^pr-title|' "${log}"
 }
 
-@test "ci-bats check skips docs-only and nested runs with a reason" {
-    # What: docs-only and nested bats are NOT-RUN, not PASS.
-    # Why: a skip names why; no suite runs inside itself.
-    # From: Issue #1683 | PR #1858
-    run _ci_check_ci_bats README.md
-    [ "${status}" -eq 0 ]
-    [ "${output}" = 'ci-bats=NOT-RUN reason="already inside a bats run; no nested suite"' ]
-    # What: the suite skips only on comment-only inputs.
-    # Why: arch doc Test B/C; anything unproven runs it.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/tg" base row path body want
+# What: changed file -> skip only for a shell comment.
+# Why: arch doc Test B/C/D; unproven changes run it.
+# From: Issue #1683 | PR #1858
+@test "ci-bats gate: only a shell comment change skips the suite" {
+    local r base head case path body want id
+    local -A V=(
+        [@B@]="$(_val name).bats" [@L@]="$(_val name).sh" [@N@]="$(_val name).md" [@NEW@]="$(_val name).sh"
+        [@Y@]="$(_val name).yml" [@RS@]="$(_val name).rs" [@C1@]="$(_val name)" [@C2@]="$(_val name)"
+        [@FN@]="$(_val name)" [@E1@]="$(_val name)" [@E2@]="$(_val name)" [@D@]="$(_val name)"
+        [@H1@]="$(_val name)" [@H2@]="$(_val name)" [@MAIL@]="$(_val name)@$(_val host)" [@WHO@]="$(_val name)"
+        [@U@]="$(_val name).sh"
+    )
+    V[@README@]="$(_ci_variable CI_README)"
+    run _ci_check_ci_bats "${V[@N@]}"
+    _expect nested 0 '=ci-bats=NOT-RUN reason="already inside a bats run; no nested suite"' || return 1
+    r="$(_val path)"
     git init -q "${r}"
-    printf '@test "t" {\n  # c1\n  true\n}\n' > "${r}/a.bats"
-    printf 'f() {\n  # c\n  echo 1\n}\ncat <<EOF\n# body\nEOF\n' > "${r}/lib.sh"
-    printf 'n\n' > "${r}/notes.md"
-    printf 'r\n' > "${r}/$(_ci_variable CI_README)"
+    mkdir -p "$(dirname "${r}/${V[@README@]}")"
+    _fill "$(printf '%s\n' '@test "@C1@" {' '  # @C1@' '  true' '}')" > "${r}/${V[@B@]}"
+    _fill "$(printf '%s\n' '@FN@() {' '  # @C1@' '  echo @E1@' '}' 'cat <<@D@' '# @H1@' '@D@')" > "${r}/${V[@L@]}"
+    _fill "$(printf '%s\n' '// @C1@' 'fn main() {}')" > "${r}/${V[@RS@]}"
+    _fill "$(printf '%s\n' 'echo "@E1@' '# @C1@')" > "${r}/${V[@U@]}"
+    printf '%s\n' "${V[@C1@]}" > "${r}/${V[@N@]}"
+    printf '%s\n' "${V[@C1@]}" > "${r}/${V[@README@]}"
     git -C "${r}" add -A
-    git -C "${r}" -c user.email=a@b -c user.name=b commit -qm base
+    git -C "${r}" -c user.email="${V[@MAIL@]}" -c user.name="${V[@WHO@]}" commit -qm base
     base="$(git -C "${r}" rev-parse HEAD)"
-    for row in 'a.bats|@test "t" {\n  # c2 changed\n  true\n}\n|skip' \
-        'lib.sh|f() {\n  # other\n\n  echo 1\n}\ncat <<EOF\n# body\nEOF\n|skip' \
-        'lib.sh|f() {\n  # c\n  echo 2\n}\ncat <<EOF\n# body\nEOF\n|run' \
-        'lib.sh|f() {\n  # c\n  echo 1\n}\ncat <<EOF\n# BODY\nEOF\n|run' \
-        'notes.md|changed\n|skip' "$(_ci_variable CI_README)|changed\n|run" \
-        'new.sh|echo new\n|run' 'x.yml|a: 1\n|run'; do
-        IFS='|' read -r path body want <<< "${row}"
+    while IFS='|' read -r case path body want id; do
         git -C "${r}" checkout -q "${base}"
-        printf '%b' "${body}" > "${r}/${path}"
+        printf '%b' "$(_fill "${body}")" > "${r}/$(_fill "${path}")"
         git -C "${r}" add -A
-        git -C "${r}" -c user.email=a@b -c user.name=b commit -qm head
-        CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push BEFORE_SHA="${base}" \
-            GITHUB_SHA="$(git -C "${r}" rev-parse HEAD)" run _ci_test_identity_gate "${path}"
-        [ "${status}" -eq 0 ] || { echo "${path}: ${output}"; return 1; }
-        [ "${lines[${#lines[@]}-1]}" = "${want}" ] || { echo "${path} want ${want}: ${output}"; return 1; }
-    done
-    CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push BEFORE_SHA='' run _ci_test_identity_gate a.bats
-    [ "${lines[${#lines[@]}-1]}" = run ]
-    [[ "${output}" == *"[CI-INFO-TESTID-0004]"* ]]
+        git -C "${r}" -c user.email="${V[@MAIL@]}" -c user.name="${V[@WHO@]}" commit -qm "${case}"
+        head="$(git -C "${r}" rev-parse HEAD)"
+        CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push BEFORE_SHA="${base}" GITHUB_SHA="${head}" \
+            run _ci_test_identity_gate "$(_fill "${path}")"
+        _expect "${case}" 0 "${id}" || return 1
+        [ "${lines[${#lines[@]}-1]}" = "${want}" ] || { echo "${case} want ${want}: ${output}"; return 1; }
+    done <<'CASES'
+bats-comment|@B@|@test "@C1@" {\n  # @C2@\n  true\n}\n|skip|-
+sh-comment|@L@|@FN@() {\n  # @C2@\n\n  echo @E1@\n}\ncat <<@D@\n# @H1@\n@D@\n|skip|-
+sh-code|@L@|@FN@() {\n  # @C1@\n  echo @E2@\n}\ncat <<@D@\n# @H1@\n@D@\n|run|[CI-INFO-TESTID-0007]
+heredoc-body|@L@|@FN@() {\n  # @C1@\n  echo @E1@\n}\ncat <<@D@\n# @H2@\n@D@\n|run|[CI-INFO-TESTID-0007]
+unsafe-both|@U@|echo "@E1@\n# @C2@\n|run|[CI-INFO-TESTID-0003]
+plain-doc|@N@|@C2@\n|skip|-
+sot-named-doc|@README@|@C2@\n|run|[CI-INFO-TESTID-0005]
+new-file|@NEW@|echo @E1@\n|run|[CI-INFO-TESTID-0002]
+other-file|@Y@|@C1@: @E1@\n|run|[CI-INFO-TESTID-0006]
+rust-comment|@RS@|// @C2@\nfn main() {}\n|run|[CI-INFO-TESTID-0006]
+CASES
+    CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push BEFORE_SHA='' GITHUB_SHA="${head}" run _ci_test_identity_gate "${V[@B@]}"
+    _expect no-base 0 '[CI-INFO-TESTID-0004]' || return 1
+    [ "${lines[${#lines[@]}-1]}" = run ] || { echo "no-base: ${output}"; return 1; }
+    run _ci_test_identity_gate
+    _expect no-files 0 '[CI-INFO-TESTID-0001]' || return 1
+    [ "${lines[${#lines[@]}-1]}" = run ] || { echo "no-files: ${output}"; return 1; }
 }
 
 @test "check all runs PR-metadata checks when a PR number is present" {
@@ -7347,13 +6926,73 @@ EOF
     grep -qx 'pr-tracking-metadata' "${log}"
 }
 
-@test "docs-only is true only when every changed path is docs" {
-    # What: a docs-only change is a NOOP (§63).
-    # Why: container jobs must not run on docs-only.
-    # From: Issue #1683
-    _ci_docs_only fixture-note.md docs/fixture-asset
-    run ! _ci_docs_only fixture-note.md fixture-src/code.rs
-    run ! _ci_docs_only
+@test "docs-only holds only for docs no SOT key names" {
+    # What: per row: changed paths -> docs-only rc, reason.
+    # Why: docs are NOOP (§63) unless the SOT reads them.
+    # From: Issue #1683 | PR #1858
+    local m case sot paths rc want
+    local -a av
+    local -A V=(
+        [@VAR@]="$(_val var)" [@D@]="$(_val name)" [@NAMED@]="$(_val name)" [@STATE@]="$(_val name)"
+        [@GOV@]="$(_val name)" [@X@]="$(_val name)" [@Y@]="$(_val name)" [@C@]="$(_val name)"
+    )
+    m="$(_val path)"
+    _fill "$(printf '%s\n' 'ci_variables:' '  @VAR@: @D@/@NAMED@.md' '  CI_DOCS_DIR: @D@' 'release:' \
+        '  validation_state: @D@/@STATE@' '  governance_paths: [@GOV@.md]')" > "${m}"
+    while IFS='|' read -r case sot paths rc want; do
+        av=(); [ "${paths}" = - ] || read -r -a av <<< "$(_fill "${paths}")"
+        [ "${sot}" = m ] && sot="${m}" || sot="$(_val path)"
+        CI_MANIFEST="${sot}" run _ci_docs_only "${av[@]}"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+    done <<'CASES'
+markdown|m|@X@.md|0|-
+docs-dir|m|@D@/@Y@ @X@.md|0|-
+mixed|m|@X@.md @C@/@Y@|1|-
+no-paths|m|-|1|-
+dir-prefix-only|m|@D@@Y@/@X@|1|-
+sot-named-doc|m|@X@.md @D@/@NAMED@.md|1|[CI-INFO-PLAN-0007] path="@D@/@NAMED@.md"
+validation-state|m|@D@/@STATE@|1|[CI-INFO-PLAN-0007] path="@D@/@STATE@"
+governance|m|@GOV@.md|1|[CI-INFO-PLAN-0007] path="@GOV@.md"
+no-sot|x|@X@.md|2|[CI-ERROR-CORE-010
+CASES
+    # What: plan-matrix stops rc 2 when docs-only fails.
+    # Why: an unread SOT must never pass as "not docs-only".
+    # From: Issue #1683 | PR #1858
+    local gho
+    gho="$(_val path)" m="$(_val path)"
+    : > "${gho}"
+    grep -v '^  CI_DOCS_DIR:' "${CI_MANIFEST}" > "${m}"
+    GITHUB_OUTPUT="${gho}" CI_MANIFEST="${m}" run bash "${CI_SH}" plan-matrix "$(_val name).md"
+    _expect plan-matrix-undecided 2 '[CI-ERROR-VARIABLES-0001] name="CI_DOCS_DIR"' || return 1
+    [ ! -s "${gho}" ] || { echo "plan-matrix wrote output: $(cat "${gho}")"; return 1; }
+}
+
+@test "every git transport fails closed without the SOT remote" {
+    # What: per caller: no CI_GIT_REMOTE -> rc 2 + coded id.
+    # Why: a missing remote key stops before any git call.
+    # From: Issue #1683 | PR #1858
+    local m r case pre call
+    local -A V=(
+        [@N@]="$(_val name)" [@SHA@]="$(_val sha)" [@TAG@]="v$(_val semver)" [@PREV@]="v$(_val semver)"
+    )
+    m="$(_val path)" r="$(_val path)"
+    grep -v '^  CI_GIT_REMOTE:' "${CI_MANIFEST}" > "${m}"
+    git init -q "${r}"
+    git -C "${r}" -c user.name="$(_val name)" -c user.email="$(_val name)@$(_val host)" commit -q --allow-empty -m "$(_val name)"
+    while IFS='|' read -r case pre call; do
+        [ "${pre}" != - ] || pre=:
+        run env -u CI_GIT_REMOTE CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" GITHUB_REPOSITORY="$(_val name)/$(_val name)" \
+            bash -c 'cd "$2" && source "$1" && eval "$3" && eval "$4"' _ "${CI_SH}" "${r}" "$(_fill "${pre}")" "$(_fill "${call}")"
+        _expect "${case}" 2 '[CI-ERROR-VARIABLES-0001] name="CI_GIT_REMOTE"' || return 1
+    done <<'CASES'
+ref-tip|-|_ci_ref_tip refs/heads/@N@
+last-release-tag|-|_ci_last_release_tag
+remote-tag-exists|-|_ci_remote_tag_exists @TAG@
+diff-history|-|GITHUB_EVENT_NAME=pull_request BASE_SHA=@SHA@ GITHUB_REF=refs/heads/@N@ _ci_diff_history
+release-changes|_ci_last_release_tag() { echo @PREV@; }|_ci_release_changes @TAG@
+release-changelog|_ci_release_changes() { echo @N@; }|CI_DEFAULT_BRANCH=@N@ ci_cmd_release_changelog @TAG@
+chronology-diff|-|CHRONOLOGY_DIFF_BASE_REF=@N@ GITHUB_SHA=@SHA@ _ci_review_chronology_diff_files
+CASES
 }
 
 @test "check shellcheck noops without shell files and fails on findings" {
@@ -7368,7 +7007,7 @@ EOF
     [[ "${output}" == *"shellcheck=noop"* ]]
     local sh="${BATS_TEST_TMPDIR}/fixture.sh"; : > "${sh}"
     printf '%s\n' "${sh}" > "${cf}"
-    CI_SHELLCHECK_CMD="$(_stub sc 'exit 1')" CHANGED_FILES="${cf}" run bash "${CI_SH}" check shellcheck
+    CI_SHELLCHECK_CMD="$(_stub 'exit 1')" CHANGED_FILES="${cf}" run bash "${CI_SH}" check shellcheck
     [ "${status}" -eq 1 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0056"* ]]
 }
@@ -7381,12 +7020,12 @@ EOF
     local a="${BATS_TEST_TMPDIR}/a.sh" b="${BATS_TEST_TMPDIR}/b.bats"
     : > "${a}"; : > "${b}"
     printf '%s\n' "${a}" "${b}" > "${cf}"
-    CI_SHELLCHECK_CMD="$(_stub sc "echo \"\$#:\$1\" >> '${log}'")" CHANGED_FILES="${cf}" \
+    CI_SHELLCHECK_CMD="$(_stub "echo \"\$#:\$1\" >> '${log}'")" CHANGED_FILES="${cf}" \
         run bash "${CI_SH}" check shellcheck
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"shellcheck=clean files=2"* ]]
     [ "$(cat "${log}")" = "$(printf '1:%s\n1:%s' "${a}" "${b}")" ]
-    CI_SHELLCHECK_CMD="$(_stub sc2 'echo raw-oom >&2; exit 137')" CHANGED_FILES="${cf}" \
+    CI_SHELLCHECK_CMD="$(_stub 'echo raw-oom >&2; exit 137')" CHANGED_FILES="${cf}" \
         run bash "${CI_SH}" check shellcheck
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0113"*"rc=137"* ]]
@@ -7394,14 +7033,41 @@ EOF
     [[ "${output}" != *"CI-ERROR-CHECK-0056"* ]]
 }
 
+@test "check shellcheck lints a .bats file one @test per run" {
+    # What: own-test hits, all-run top-level hits, no leaks.
+    # Why: one run per @test is how bats runs each test.
+    # From: Issue #1683 | PR #1858
+    local d="${BATS_TEST_TMPDIR}" f cf
+    f="${d}/fx.bats" cf="${d}/sc.cf"
+    printf '%s\n' '#!/usr/bin/env bats' 'export TOPV="$(printf x)"' 'topu=1' \
+        '@test "one" {' '    grep -x a <<< "a" >/dev/null' '    export M1="$(printf x)"' '}' \
+        '@test "two" {' "    cat <<'EOF'" '}' '@test "fake" {' 'EOF' '    echo $(printf b) >/dev/null' \
+        '    echo "${topu}"' '}' '@test "three" {' '    xs=(a b); echo "${xs[@]}"' '}' \
+        '@test "four" {' '    xs="s"; echo "${xs}"' '}' > "${f}"
+    printf '%s\n' "${f}" > "${cf}"
+    CHANGED_FILES="${cf}" run bash "${CI_SH}" check shellcheck
+    [ "${status}" -eq 1 ] || { echo "${output}"; return 1; }
+    [[ "${output}" == *"[CI-INFO-CHECK-0155] file=\"${f}\" tests=4 "* ]] || { echo "${output}"; return 1; }
+    [ "$(grep -c "^${f}:2:[0-9]*: .*\[SC2155\]" <<< "${output}")" -eq 1 ] || { echo "${output}"; return 1; }
+    grep -q "^${f}:6:[0-9]*: .*\[SC2155\]" <<< "${output}" || { echo "${output}"; return 1; }
+    grep -q "^${f}:13:[0-9]*: .*\[SC2046\]" <<< "${output}" || { echo "${output}"; return 1; }
+    ! grep -qE '\[SC(2178|2034)\]' <<< "${output}" || { echo "cross-test leak: ${output}"; return 1; }
+    # What: an @test without its closing } stops the check.
+    # Why: a guessed range could hide a finding.
+    # From: Issue #1683 | PR #1858
+    printf '%s\n' '#!/usr/bin/env bats' '@test "open" {' '    true' > "${f}"
+    CHANGED_FILES="${cf}" run bash "${CI_SH}" check shellcheck
+    [ "${status}" -eq 2 ] && [[ "${output}" == *"[CI-ERROR-CHECK-0154]"*"no closing }"* ]] || { echo "${output}"; return 1; }
+}
+
 @test "check actionlint passes clean and fails on findings" {
     # What: injected actionlint; prove pass/fail.
     # Why: Real actionlint needs toolchain; hook it.
     # From: Issue #1683
-    CI_ACTIONLINT_CMD="$(_stub al 'exit 0')" run bash "${CI_SH}" check actionlint
+    CI_ACTIONLINT_CMD="$(_stub 'exit 0')" run bash "${CI_SH}" check actionlint
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"actionlint=clean"* ]]
-    CI_ACTIONLINT_CMD="$(_stub al2 'exit 1')" run bash "${CI_SH}" check actionlint
+    CI_ACTIONLINT_CMD="$(_stub 'exit 1')" run bash "${CI_SH}" check actionlint
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0057"* ]]
 }
@@ -7410,13 +7076,13 @@ EOF
     # What: Injected auditor; prove pass/fail.
     # Why: Real cargo audit needs toolchain; hook it.
     # From: Issue #1683
-    CI_CARGO_AUDIT_CMD="$(_stub aud 'exit 0')" run bash "${CI_SH}" check cargo-audit
+    CI_CARGO_AUDIT_CMD="$(_stub 'exit 0')" run bash "${CI_SH}" check cargo-audit
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"cargo-audit=clean"* ]]
-    CI_CARGO_AUDIT_CMD="$(_stub aud2 'echo "error: vulnerability RUSTSEC-x"; exit 1')" run bash "${CI_SH}" check cargo-audit
+    CI_CARGO_AUDIT_CMD="$(_stub 'echo "error: vulnerability RUSTSEC-x"; exit 1')" run bash "${CI_SH}" check cargo-audit
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0055"* ]]
-    CI_CARGO_AUDIT_CMD="$(_stub aud3 'echo "warning: yanked crate"; exit 0')" run bash "${CI_SH}" check cargo-audit
+    CI_CARGO_AUDIT_CMD="$(_stub 'echo "warning: yanked crate"; exit 0')" run bash "${CI_SH}" check cargo-audit
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0055"* ]]
 }
@@ -7428,9 +7094,10 @@ EOF
     run bash "${CI_SH}" check dockerfile-build-tools
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"dockerfile-build-tools=clean"* ]]
-    local r="${BATS_TEST_TMPDIR}/dfrepo" s ctx n=0
+    local r="${BATS_TEST_TMPDIR}/dfrepo" s ctx n=0 rust
+    rust="$(_svcs_of_type rust)"
     while IFS= read -r s; do
-        [ "$(ci_service_field "$s" build_type)" = rust ] || continue
+        [ -n "${s}" ] || continue
         ctx="$(ci_service_field "$s" context)"
         mkdir -p "${r}/${ctx}"
         case "${n}" in
@@ -7439,11 +7106,30 @@ EOF
             *) printf 'ARG BUILD_TOOLS_IMAGE\nFROM ${BUILD_TOOLS_IMAGE}\nARG PROJECT_CARGO_LTO=\n' > "${r}/${ctx}/Dockerfile" ;;
         esac
         n=$((n + 1))
-    done < <(ci_services)
+    done <<< "${rust}"
     run bash "${CI_SH}" check dockerfile-build-tools "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0058"* ]]
     [[ "${output}" == *"CI-ERROR-CHECK-0060"* ]]
+    local bvars bv first
+    bvars="$(_ci_block_entry_list build_variables "" rust)" first="${bvars%%$'\n'*}"
+    s="$(awk 'NR == 1' <<< "${rust}")" ctx="$(ci_service_field "${s}" context)"
+    { printf 'ARG BUILD_TOOLS_IMAGE\nFROM ${BUILD_TOOLS_IMAGE}\n'; awk 'NR > 1 { print "ARG " $0 }' <<< "${bvars}"
+        printf 'RUN bash /usr/local/bin/ci.sh rust-build %s %s\n' "${s}" "$(_val name)"; } > "${r}/${ctx}/Dockerfile"
+    run bash "${CI_SH}" check dockerfile-build-tools "${r}"
+    [[ "${output}" == *"${s}: Dockerfile stage 1 runs ci.sh rust-build without ARG ${first} (SOT"* ]] \
+        || { echo "missing ${first}: ${output}"; return 1; }
+    for bv in $(awk 'NR > 1' <<< "${bvars}"); do
+        [[ "${output}" != *"${s}: Dockerfile stage 1 runs ci.sh rust-build without ARG ${bv} (SOT"* ]] \
+            || { echo "declared ${bv} flagged"; return 1; }
+    done
+    { printf 'ARG BUILD_TOOLS_IMAGE\n'; awk '{ print "ARG " $0 }' <<< "${bvars}"
+        printf 'FROM ${BUILD_TOOLS_IMAGE}\nRUN bash /usr/local/bin/ci.sh rust-build %s %s\n' "${s}" "$(_val name)"; } > "${r}/${ctx}/Dockerfile"
+    run bash "${CI_SH}" check dockerfile-build-tools "${r}"
+    for bv in ${bvars}; do
+        [[ "${output}" == *"${s}: Dockerfile stage 1 runs ci.sh rust-build without ARG ${bv} (SOT"* ]] \
+            || { echo "pre-FROM ARG ${bv} not flagged: ${output}"; return 1; }
+    done
 }
 
 @test "check dockerfile-build-tools flags a mutable BUILD_TOOLS_IMAGE default" {
@@ -7644,44 +7330,26 @@ CASES
     [ "${status}" -eq 2 ]
 }
 
-@test "ci.sh feeds no loop from a process substitution" {
-    # What: no '< <(' producer outside comments in ci.sh.
-    # Why: wait on its pid races bash's reaping (rc 127).
-    # From: Issue #1683 | PR #1858
-    run awk '!/^[[:space:]]*#/ && /< <\(/ { print FILENAME ":" FNR ": " $0 }' "${CI_SH}"
-    [ "${status}" -eq 0 ]
-    [ -z "${output}" ]
-}
-
-@test "version consumers derive from SOT consumer and build_args" {
-    # What: dep, Dockerfile and keys come from the SOT.
-    # Why: no engine-side consumer list; missing keys fail.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/m.yml"
-    printf '%s\n' 'services:' '  svc-a:' '    context: dir/a' \
-        'external_versions:' '  dep-a:' '    consumer: svc-a' '    build_args: [version, k2]' \
-        '  dep-b:' '    version: x' > "${m}"
+# What: SOT pin consumers -> dep|Dockerfile|keys, or the id.
+# Why: the SOT consumer field owns it; no engine-side list.
+# From: Issue #1683 | PR #1858
+@test "version consumers come from the SOT consumer and build_args" {
+    local m nokeys
+    local -A V=(
+        [@S@]="$(_val name)" [@T@]="$(_val name)" [@CS@]="$(_val name)/$(_val name)" [@CT@]="$(_val name)/$(_val name)"
+        [@D1@]="$(_val name)" [@D2@]="$(_val name)" [@D3@]="$(_val name)" [@K1@]="$(_val name)" [@K2@]="$(_val name)"
+        [@K3@]="$(_val name)" [@V@]="$(_val semver)"
+    )
+    m="$(_val path)"
+    nokeys="$(_val path)"
+    _fill "$(printf '%s\n' 'services:' '  @S@:' '    context: @CS@' 'build_toolchain:' '  @T@:' '    context: @CT@' \
+        'external_versions:' '  @D1@:' '    consumer: @S@' '    build_args: [@K1@, @K2@]' \
+        '  @D2@:' '    version: @V@' '  @D3@:' '    consumer: @T@' '    build_args: [@K3@]')" > "${m}"
+    _fill "$(printf '%s\n' 'services:' '  @S@:' '    context: @CS@' 'external_versions:' '  @D1@:' '    consumer: @S@')" > "${nokeys}"
     CI_MANIFEST="${m}" run _ci_version_consumers
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "dep-a|dir/a/Dockerfile|version k2" ]
-    printf '%s\n' 'services:' '  svc-a:' '    context: dir/a' \
-        'external_versions:' '  dep-a:' '    consumer: svc-a' > "${m}"
-    CI_MANIFEST="${m}" run _ci_version_consumers
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-VERSION-0010]"* ]]
-}
-
-@test "identity prints no line when the id computation fails" {
-    # What: a failed id is rc 2 and no identity= line.
-    # Why: an empty identity must never look like a result.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/m.yml"
-    printf '%s\n' 'services:' '  svc-a:' '    context: dir/a' '    build_type: type-x' \
-        'build_matrix:' '  platforms: [os/p1]' > "${m}"
-    CI_MANIFEST="${m}" run bash "${CI_SH}" identity svc-a os/p1
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-IDENTITY-0004]"* ]]
-    [[ "${output}" != *"identity="* ]]
+    _expect consumers 0 "=$(_fill '@D1@|@CS@/Dockerfile|@K1@ @K2@')"$'\n'"$(_fill '@D3@|@CT@/Dockerfile|@K3@')" || return 1
+    CI_MANIFEST="${nokeys}" run _ci_version_consumers
+    _expect no-build-args 2 "$(_fill '[CI-ERROR-VERSION-0010] dep="@D1@"')" || return 1
 }
 
 @test "nightly-status opens, updates, and closes the standing tracking issue" {
@@ -7767,51 +7435,46 @@ STUB
     [[ "${output}" == *"@/tmp"* ]]
 }
 
-@test "check naming-consistency requires every allowlist name as a real container_name" {
-    # What: ci.sh owns cross-file name-consistency gate.
-    # Why: socket-proxy denies unknown container names.
-    # From: Issue #1683
-    local r="${BATS_TEST_TMPDIR}/repo"
-    mkdir -p "${r}/dep" "${r}/inst" "${r}/scripts/untracked"
+@test "check naming-consistency requires rust container names in compose" {
+    # What: ui and watchdog names must be compose container names
+    # Why: a Docker call by a name compose never creates fails
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/repo" cfg name project
+    cfg="$(_real_deploy_json)"
+    project="$(jq -r '.name' <<< "${cfg}")"
+    [ -n "${project}" ] || { echo "no project name in the real compose"; return 1; }
     _stack_fixture "${r}"
-    printf 'name: lancache-ng\nservices:\n  proxy:\n    container_name: lancache-proxy\n' \
-        > "${r}/dep/c.yml"
-    printf 'name: lancache-ng\nservices:\n  proxy:\n    container_name: lancache-proxy\n' \
-        > "${r}/inst/c.yml"
-    printf 'acl lancache_container path,url_dec -m reg ^/containers/(lancache-proxy)(/|$)\nacl lancache_lifecycle path,url_dec -m reg ^/containers/lancache-proxy/(start|stop|restart|wait)$\n' \
-        > "${r}/scripts/untracked/docker-socket-proxy.sh"
+    _dsp_compose "${project}" "${r}/dep" > "${r}/dep/c.yml"
+    _dsp_compose "${project}" "${r}/inst" > "${r}/inst/c.yml"
+    name="$(_ci_compose_json "${r}/dep/c.yml" | jq -r '[.services[].container_name // empty] | first // empty')"
+    [ -n "${name}" ] || { echo "no fixture container name"; return 1; }
+    mkdir -p "${r}/services/watchdog/src" "${r}/services/ui/src"
+    printf 'const DEFAULT_PROXY: &str = "%s";\n' "${name}" > "${r}/services/watchdog/src/config.rs"
+    printf '"x" => "%s",\n' "${name}" > "${r}/services/ui/src/docker_client.rs"
     run _ci_check_naming_consistency "${r}"
-    [ "${status}" -eq 0 ]
-    mkdir -p "${r}/services/watchdog/src"
-    printf 'const DEFAULT_PROXY: &str = "lancache-other";\n' \
-        > "${r}/services/watchdog/src/config.rs"
+    [ "${status}" -eq 0 ] || { echo "clean: ${output}"; return 1; }
+    printf 'const DEFAULT_PROXY: &str = "%s-other";\n' "${name}" > "${r}/services/watchdog/src/config.rs"
     run _ci_check_naming_consistency "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"names 'lancache-other' not in allowlist"* ]]
-    printf 'const DEFAULT_PROXY: &str = "lancache-proxy";\n' \
-        > "${r}/services/watchdog/src/config.rs"
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"CI-ERROR-CHECK-0096"*"'${name}-other' is no container_name in"* ]] \
+        || { echo "watchdog: ${output}"; return 1; }
+    printf 'const DEFAULT_PROXY: &str = "%s";\n' "${name}" > "${r}/services/watchdog/src/config.rs"
+    printf '"x" => "%s-x",\n' "${name}" > "${r}/services/ui/src/docker_client.rs"
     run _ci_check_naming_consistency "${r}"
-    [ "${status}" -eq 0 ]
-    printf 'name: lancache-ng\nservices:\n  proxy:\n    container_name: lancache-wrong\n' \
-        > "${r}/dep/c.yml"
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"docker_client.rs: '${name}-x' is no container_name in"* ]] \
+        || { echo "ui: ${output}"; return 1; }
+    printf '"x" => "%s",\n' "${name}" > "${r}/services/ui/src/docker_client.rs"
+    _dsp_compose "${project}-other" "${r}/dep" > "${r}/dep/c.yml"
     run _ci_check_naming_consistency "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0096"* ]]
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"compose project name '${project}-other' is not ${project}"* ]] \
+        || { echo "project: ${output}"; return 1; }
     # What: no match is a named violation via the CLI.
     # Why: errexit must not end the check without a code.
     # From: Issue #1683 | PR #1858
-    printf 'name: lancache-ng\nservices:\n  proxy:\n    container_name: lancache-proxy\n' \
-        > "${r}/dep/c.yml"
+    _dsp_compose "${project}" "${r}/dep" > "${r}/dep/c.yml"
     printf 'fn main() {}\n' > "${r}/services/watchdog/src/config.rs"
     run bash "${CI_SH}" check naming-consistency "${r}"
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0096"* ]]
-    [[ "${output}" == *"no const lancache-* container names found"* ]]
-    printf 'acl lancache_container path,url_dec -m reg ^/containers/x\n' \
-        > "${r}/scripts/untracked/docker-socket-proxy.sh"
-    run bash "${CI_SH}" check naming-consistency "${r}"
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"could not parse lancache-* allowlist names"* ]]
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"CI-ERROR-CHECK-0096"*"no lancache-* container names found"* ]] \
+        || { echo "cli: ${output}"; return 1; }
 }
 
 @test "check compose-healthchecks passes clean on the real repo" {
@@ -7858,16 +7521,20 @@ STUB
 }
 
 @test "check proxy-cache-env-doc-drift passes clean on the real repo" {
-    # What: migrated from check-proxy-cache-env-doc-drift.
-    # Why: rewritten in ci.sh; real config/docs must agree.
+    # What: every documented CACHE_* row is checked, clean
+    # Why: a guard that checks no row passes blindly
     # From: Issue #1683 | PR #1858
+    local root doc rows
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    doc="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_repo_path CI_ARCH_DOC "${root}")"
+    rows="$(grep -cE '^\| `CACHE_[A-Z_]+` \|' "${doc}")"
     run bash "${CI_SH}" check proxy-cache-env-doc-drift
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"proxy-cache-env-doc-drift=clean"* ]]
+    [ "${status}" -eq 0 ] && [ "${rows}" -gt 0 ] && [[ "${output}" == *"proxy-cache-env-doc-drift=clean"*"checked=${rows}"* ]] \
+        || { echo "rows ${rows}: ${output}"; return 1; }
 }
 
 @test "check proxy-cache-env-doc-drift fails a real default mismatch" {
-    # What: proxy.env's value disagrees with its doc row.
+    # What: a default disagrees with its doc row
     # Why: Copied default can go stale.
     # From: Issue #1683 | PR #1858
     local env="${BATS_TEST_TMPDIR}/proxy.env" doc="${BATS_TEST_TMPDIR}/arch.md"
@@ -7876,7 +7543,7 @@ STUB
     run bash "${CI_SH}" check proxy-cache-env-doc-drift "${env}" "${doc}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0023"* ]]
-    [[ "${output}" == *"proxy.env=999 vs doc=512"* ]]
+    [[ "${output}" == *"default=999 vs doc=512"* ]]
 }
 
 @test "check proxy-cache-env-doc-drift ignores an undocumented CACHE_* var" {
@@ -7891,36 +7558,32 @@ STUB
     [[ "${output}" == *"scanned=1 checked=0"* ]]
 }
 
-@test "proxy-cache-env-doc-drift reads proxy env_file from the deploy compose" {
-    # What: env_file from compose; 0/2 files, bad doc fail.
-    # Why: the compose owns the path; ci.sh keeps no copy.
+@test "proxy-cache-env-doc-drift reads what compose gives proxy" {
+    # What: env_file and environment, rendered with .env
+    # Why: both feed proxy; one file read missed moved keys
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/pce"
     local bin="${BATS_TEST_TMPDIR}/pcebin"
-    local name ef want
-    mkdir -p "${r}/dep" "${r}/docs"
+    local name ef want doc
+    doc="${r}/$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_variable CI_ARCH_DOC)"
+    mkdir -p "${r}/dep" "${doc%/*}"
     printf 'CACHE_X=1\n' > "${r}/dep/p.env"
-    printf 'CACHE_X=1\n' > "${r}/dep/q.env"
-    printf '| `CACHE_X` | `2` | x |\n' > "${r}/docs/architecture-ng.md"
+    printf 'CACHE_Y=3\n' > "${r}/dep/.env"
+    printf '| `CACHE_X` | `1` | x |\n| `CACHE_Y` | `4` | y |\n' > "${doc}"
     export CI_REPO_ROOT="${r}" CI_COMPOSE_FILE=dep/c.yml
     while IFS='|' read -r name ef want; do
         printf 'services:\n  proxy:\n    image: x\n%b' "${ef}" > "${r}/dep/c.yml"
         run bash "${CI_SH}" check proxy-cache-env-doc-drift
-        if [ "${status}" -eq 0 ]; then
-            echo "${name}: passed"
-            return 1
-        fi
-        if [[ "${output}" != *"${want}"* ]]; then
-            echo "${name}: ${output}"
-            return 1
-        fi
+        [ "${status}" -ne 0 ] && [[ "${output}" == *"${want}"* ]] || { echo "${name}: rc ${status}: ${output}"; return 1; }
     done <<'CASES'
-one|    env_file: [./p.env]\n|CACHE_X: proxy.env=1 vs doc=2
-two|    env_file: [./p.env, ./q.env]\n|CI-ERROR-CHECK-0111
-none||CI-ERROR-CHECK-0111
+both|    env_file: [./p.env]\n    environment:\n      - CACHE_Y=${CACHE_Y:?}\n|CACHE_Y: default=3 vs doc=4
+none|    environment:\n      - OTHER=1\n|CI-ERROR-CHECK-0152
 bad|  bogus: [\n|CI-ERROR-CHECK-0110
 CASES
-    printf 'services:\n  proxy:\n    image: x\n    env_file: [./p.env]\n' > "${r}/dep/c.yml"
+    printf 'CACHE_Y=4\n' > "${r}/dep/.env"
+    printf 'services:\n  proxy:\n    image: x\n    env_file: [./p.env]\n    environment:\n      - CACHE_Y=${CACHE_Y:?}\n' > "${r}/dep/c.yml"
+    run bash "${CI_SH}" check proxy-cache-env-doc-drift
+    [ "${status}" -eq 0 ] && [[ "${output}" == *"scanned=2 checked=2"* ]] || { echo "clean: rc ${status}: ${output}"; return 1; }
     _fail_stub "${bin}" grep
     PATH="${bin}:${PATH}" FAIL_MATCH="/docs/architecture-ng.md" \
         run bash "${CI_SH}" check proxy-cache-env-doc-drift
@@ -7941,37 +7604,29 @@ _stack_fixture() {
     # What: one SCRIPT_DIR form reads; other forms fail.
     # Why: setup.sh owns the installer compose; CI derives.
     # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/inst" name body want rc
-    mkdir -p "${r}"
-    while IFS='|' read -r name body want rc; do
-        rm -f "${r}/setup.sh"
-        [ "${body}" = none ] || printf '%b' "${body}" > "${r}/setup.sh"
+    local r inst case body rc want
+    local -A V=([@A@]="$(_val name)" [@B@]="$(_val name)" [@C@]="$(_val name)" [@X@]="$(_val name)")
+    inst="$(_ci_variable CI_INSTALLER)" || return 1
+    while IFS='|' read -r case body rc want; do
+        r="${BATS_TEST_TMPDIR}/$(_val name)"
+        mkdir -p "${r}"
+        [ "${body}" = none ] || printf '%b' "$(_fill "${body}")" > "${r}/${inst}"
         run _ci_installer_compose "${r}"
-        [ "${status}" -eq "${rc}" ] || { echo "${name}: ${output}"; return 1; }
-        [[ "${output}" == *"${want}"* ]] || { echo "${name}: ${output}"; return 1; }
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
     done <<'CASES'
-ok|x=1\nPROD_COMPOSE="$SCRIPT_DIR/d/q/c.yml"\n|d/q/c.yml|0
-none|none|CI-ERROR-CORE-0102|2
-absent|x=1\n|CI-ERROR-CORE-0104|2
-twice|PROD_COMPOSE="$SCRIPT_DIR/a"\nPROD_COMPOSE="$SCRIPT_DIR/b"\n|CI-ERROR-CORE-0104|2
-form|PROD_COMPOSE=/abs/c.yml\n|CI-ERROR-CORE-0105|2
+ok|@X@=1\nPROD_COMPOSE="$SCRIPT_DIR/@A@/@B@/@C@"\n|0|=@A@/@B@/@C@
+none|none|2|[CI-ERROR-CORE-0102]
+absent|@X@=1\n|2|[CI-ERROR-CORE-0104]
+twice|PROD_COMPOSE="$SCRIPT_DIR/@A@"\nPROD_COMPOSE="$SCRIPT_DIR/@B@"\n|2|[CI-ERROR-CORE-0104]
+form|PROD_COMPOSE=/@A@/@C@\n|2|[CI-ERROR-CORE-0105]
 CASES
     # What: the installer path comes from CI_INSTALLER.
     # Why: no installer literal in ci.sh; the SOT decides.
     # From: Issue #1683 | PR #1858
-    printf 'PROD_COMPOSE="$SCRIPT_DIR/o/c.yml"\n' > "${r}/other.sh"
-    CI_INSTALLER=other.sh run _ci_installer_compose "${r}"
-    [ "${status}" -eq 0 ] && [ "${output}" = o/c.yml ] || { echo "override: ${output}"; return 1; }
-    [ "$(_ci_variable CI_INSTALLER)" = setup.sh ]
-    run _ci_service_path proxy entrypoint.sh /r
-    [ "${status}" -eq 0 ] && [ "${output}" = "/r/$(_ci_block_entry_field services proxy context)/entrypoint.sh" ] || {
-        echo "service path: ${output}"; return 1; }
-    run _ci_service_path no-such-service entrypoint.sh /r
-    [ "${status}" -eq 2 ] && [[ "${output}" == *"CI-ERROR-CORE-0009"* ]] || { echo "unknown: ${output}"; return 1; }
-    CI_WORKFLOW_DIR=wf run _ci_repo_path CI_WORKFLOW_DIR /r
-    [ "${status}" -eq 0 ] && [ "${output}" = /r/wf ] || { echo "repo path: ${output}"; return 1; }
-    run _ci_repo_path CI_NO_SUCH_PATH /r
-    [ "${status}" -eq 2 ] && [[ "${output}" == *"CI-ERROR-VARIABLES-0001"* ]] || { echo "missing: ${output}"; return 1; }
+    inst="$(_val name)"
+    printf 'PROD_COMPOSE="$SCRIPT_DIR/%s/%s"\n' "${V[@A@]}" "${V[@C@]}" > "${r}/${inst}"
+    CI_INSTALLER="${inst}" run _ci_installer_compose "${r}"
+    _expect override 0 "=${V[@A@]}/${V[@C@]}" || return 1
 }
 
 # What: seed a minimal prebuilt-only stack tree.
@@ -8192,18 +7847,30 @@ EOF
     [[ "${output}" != *"generated docker-compose.yml"* ]]
 }
 
-# What: seed a deny-by-default docker-socket-proxy tree.
-# Why: shared by the docker-socket-proxy checks below.
+# What: rendered compose JSON of the real deploy file
+# Why: fixture services and names derive from that file
 # From: Issue #1683 | PR #1858
-_socket_proxy_fixture() {
-    local root="$1" cf
-    mkdir -p "${root}/dep" "${root}/inst" "${root}/scripts/untracked"
-    _stack_fixture "${root}"
-    for cf in dep/c.yml inst/c.yml; do
-        cat > "${root}/${cf}" <<'YAML'
-services:
-  ui:
-    image: x
+_real_deploy_json() {
+    local dep
+    dep="$(unset CI_COMPOSE_FILE; _ci_variable CI_COMPOSE_FILE)" || return 2
+    _ci_compose_json "${CI_REPO_ROOT}/${dep}"
+}
+
+# What: compose with every real service and the proxy wiring
+# Why: socket-proxy names and mounts derive from compose
+# From: Issue #1683 | PR #1858
+_dsp_compose() {
+    local project="$1" dir="$2" real keys svc
+    real="$(_real_deploy_json)" || return 1
+    keys="$(jq -r '.services | keys[]' <<< "${real}")" || return 1
+    printf 'name: %s\nservices:\n' "${project}"
+    while IFS= read -r svc; do
+        case "${svc}" in ui|watchdog|docker-socket-proxy) continue ;; esac
+        printf '  %s:\n    image: x\n    container_name: %s-%s\n' "${svc}" "${project}" "${svc}"
+    done <<< "${keys}"
+    printf '  ui:\n    image: x\n    container_name: %s-ui\n    environment:\n' "${project}"
+    printf '      DOCKER_PROXY_URL: http://docker-socket-proxy:%s # ui-url\n' "$(( BATS_TEST_NUMBER + 40000 ))"
+    cat <<'YAML'
     depends_on:
       nats:
         condition: service_started # ui-nats
@@ -8214,55 +7881,92 @@ services:
     depends_on:
       docker-socket-proxy:
         condition: service_started # wd-dsp
-  nats:
-    image: x
   docker-socket-proxy:
     image: x
+    entrypoint: ["haproxy", "-f", "/etc/hx/haproxy.cfg"]
     healthcheck:
       test: ["CMD", "true"]
     volumes:
-      - ../scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro
-    environment:
-        CONTAINERS: "0"
 YAML
-    done
-    cat > "${root}/scripts/untracked/docker-socket-proxy.sh" <<'EOF'
-acl safe_service_restart x
-acl safe_dhcp_action x
-acl safe_probe_action x
-acl safe_netdata_restart x
-lancache-netdata/restart
-acl lancache_container x
-lancache-dns-standard|lancache-dns-ssl
-lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-nats)/restart
-lancache-dhcp|lancache-dhcp-proxy)/(start|stop)
-lancache-dhcp-probe/(start|stop|wait)
-http-request deny if docker_container_path !lancache_container
-http-request deny
-EOF
+    printf '      - %s/docker.sock:/run/docker.sock:ro # dsp-sock\n' "${dir}"
+    printf '      - %s/cfg:/etc/hx:ro # dsp-cfg\n' "${dir}"
 }
 
-@test "check docker-socket-proxy passes a deny-by-default allowlist" {
-    # What: Required rules present, no broad.
-    # Why: the socket proxy must stay deny-by-default.
+# What: seed a docker-socket-proxy tree for the dsp checks
+# Why: deploy and installer compose come from one writer
+# From: Issue #1683 | PR #1858
+_socket_proxy_fixture() {
+    local root="$1" cf
+    _stack_fixture "${root}"
+    for cf in dep inst; do
+        _dsp_compose fixture "${root}/${cf}" > "${root}/${cf}/c.yml" || return 1
+    done
+}
+
+@test "socket-proxy-config renders exactly the SOT grants on compose names" {
+    # What: each SOT operation holds its services' names only
+    # Why: haproxy grants the SOT policy and nothing else
+    # From: Issue #1683 | PR #1858
+    local r="${BATS_TEST_TMPDIR}/dsp-render" f cfg ops op list svc want got names="" c port sock t
+    _socket_proxy_fixture "${r}"
+    f="${r}/dep/cfg/haproxy.cfg"
+    run bash "${CI_SH}" socket-proxy-config "${r}/dep/c.yml"
+    [ "${status}" -eq 0 ] && [[ "${output}" == *"socket-proxy-config=written path=${f}"* ]] \
+        || { echo "render: ${output}"; return 1; }
+    cfg="$(_ci_compose_json "${r}/dep/c.yml")"
+    ops="$(_ci_socket_proxy_api | jq -r '.[][0]')"
+    while IFS= read -r op; do
+        list="$(_ci_block_entry_list external_services docker-socket-proxy "${op}")"
+        want=""
+        while IFS= read -r svc; do
+            [ -n "${svc}" ] || continue
+            want+="$(jq -r --arg s "${svc}" '.services[$s].container_name' <<< "${cfg}")"$'\n'
+        done <<< "${list}"
+        want="$(sed '/^$/d' <<< "${want}" | sort)"
+        got="$(sed -nE "s#^ +acl ${op} .*/containers/\\(([^)]*)\\)/.*#\\1#p" "${f}" | tr '|' '\n' | sort)"
+        [ "${got}" = "${want}" ] || { echo "${op}: got [${got}] want [${want}]"; return 1; }
+        if [ -n "${want}" ]; then
+            grep -qE "^ +http-request allow if (get|post) ${op}\$" "${f}" || { echo "${op}: no allow rule"; return 1; }
+        fi
+        names+="${want}"$'\n'
+    done <<< "${ops}"
+    want="$(_ci_block_entry_list external_services docker-socket-proxy endpoints | sort)"
+    got="$(sed -nE 's#^ +acl endpoints .*/\(([^)]*)\)\$$#\1#p' "${f}" | tr '|' '\n' | sort)"
+    [ "${got}" = "${want}" ] || { echo "endpoints: got [${got}] want [${want}]"; return 1; }
+    while IFS= read -r t; do
+        grep -qxF "    timeout ${t}" "${f}" || { echo "timeout ${t} missing"; return 1; }
+    done <<< "$(_ci_block_entry_list external_services docker-socket-proxy timeouts)"
+    port="$(jq -r '.services.ui.environment.DOCKER_PROXY_URL' <<< "${cfg}")"
+    sock="$(jq -r '.services["docker-socket-proxy"].volumes[] | select(.target | endswith(".sock")) | .target' <<< "${cfg}")"
+    grep -qxF "    bind [::]:${port##*:} v4v6" "${f}" && grep -qxF "    server dockersocket ${sock}" "${f}" \
+        || { echo "port/sock: $(cat "${f}")"; return 1; }
+    [ "$(grep -E '^ +http-request ' "${f}" | tail -n 1)" = "    http-request deny" ] || { echo "last rule: $(cat "${f}")"; return 1; }
+    while IFS= read -r c; do
+        [ -n "${c}" ] || continue
+        if ! grep -qxF -- "${c}" <<< "${names}" && grep -qE "[(|]${c}[|)]" "${f}"; then
+            echo "${c} granted without a SOT entry"
+            return 1
+        fi
+    done <<< "$(jq -r '.services[].container_name // empty' <<< "${cfg}")"
+    run bash "${CI_SH}" socket-proxy-config "${r}/dep/c.yml"
+    [ "${status}" -eq 0 ] && [[ "${output}" == *"socket-proxy-config=unchanged path=${f}"* ]] \
+        || { echo "rerun: ${output}"; return 1; }
+}
+
+@test "check docker-socket-proxy passes the fixture and the real repo" {
+    # What: haproxy wiring and SOT render pass, wrong entry fails
+    # Why: the socket proxy must start on the rendered policy
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/dsp-ok"
+    run bash "${CI_SH}" check docker-socket-proxy
+    [ "${status}" -eq 0 ] && [[ "${output}" == *"docker-socket-proxy=clean"* ]] || { echo "repo: ${output}"; return 1; }
     _socket_proxy_fixture "${r}"
     run bash "${CI_SH}" check docker-socket-proxy "${r}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"docker-socket-proxy=clean"* ]]
-}
-
-@test "check docker-socket-proxy fails when Docker exec is enabled" {
-    # What: a compose re-enables the banned EXEC endpoint.
-    # Why: exec re-exposes arbitrary command execution.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/dsp-exec"
-    _socket_proxy_fixture "${r}"
-    printf '        EXEC: "1"\n' >> "${r}/dep/c.yml"
+    [ "${status}" -eq 0 ] && [[ "${output}" == *"docker-socket-proxy=clean"* ]] || { echo "fixture: ${output}"; return 1; }
+    sed -i 's/\["haproxy", /["sh", /' "${r}/dep/c.yml"
     run bash "${CI_SH}" check docker-socket-proxy "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"exec is banned"* ]]
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"dep/c.yml: docker-socket-proxy entrypoint is 'sh', not haproxy"* ]] \
+        || { echo "entry: ${output}"; return 1; }
 }
 
 @test "check docker-socket-proxy gates ui/watchdog on started" {
@@ -8485,16 +8189,37 @@ none|services/proxy/conf.d/http.conf|    location = /healthz {|    location = /s
 CASES
 }
 
-@test "check docker-socket-proxy fails a forbidden broad container rule" {
-    # What: Broad rule re-enters allowlist.
-    # Why: generic container APIs must stay denied.
+@test "socket-proxy-config fails closed on a broken policy or wiring" {
+    # What: each broken input stops the render with its reason
+    # Why: haproxy must never start on a guessed allowlist
     # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/dsp-broad"
-    _socket_proxy_fixture "${r}"
-    printf '/containers/json\n' >> "${r}/scripts/untracked/docker-socket-proxy.sh"
-    run bash "${CI_SH}" check docker-socket-proxy "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"forbidden broad rule"* ]]
+    local r="${BATS_TEST_TMPDIR}/dsp-fail" case prog want svc="" list s
+    list="$(_ci_block_entry_list external_services docker-socket-proxy restart)"
+    while IFS= read -r s; do
+        case "${s}" in ui|nats|"") ;; *) svc="${s}"; break ;; esac
+    done <<< "${list}"
+    [ -n "${svc}" ] || { echo "no SOT restart service without dependents: ${list}"; return 1; }
+    while IFS='|' read -r case prog want; do
+        want="${want//@svc/${svc}}"
+        rm -rf "${r}"
+        _socket_proxy_fixture "${r}"
+        awk -v s="${svc}" "${prog}" "${r}/dep/c.yml" > "${r}/dep/x.yml"
+        mv "${r}/dep/x.yml" "${r}/dep/c.yml"
+        run bash "${CI_SH}" socket-proxy-config "${r}/dep/c.yml"
+        [ "${status}" -eq 2 ] || { echo "${case}: rc ${status} ${output}"; return 1; }
+        [[ "${output}" == *"socket-proxy: ${want}"* ]] || { echo "${case}: ${output}"; return 1; }
+        [ ! -e "${r}/dep/cfg/haproxy.cfg" ] || { echo "${case}: a config was written"; return 1; }
+        run bash "${CI_SH}" check docker-socket-proxy "${r}"
+        [ "${status}" -eq 1 ] || { echo "${case} check: rc ${status} ${output}"; return 1; }
+        [[ "${output}" == *"CI-ERROR-CHECK-0046"*"dep/c.yml: "*"socket-proxy: ${want}"* ]] \
+            || { echo "${case} check: ${output}"; return 1; }
+    done <<'CASES'
+nosvc|$0 == "  " s ":" { skip = 1; next } skip && /^    / { next } { skip = 0; print }|SOT service @svc has no compose container_name
+nourl|{ sub(/DOCKER_PROXY_URL/, "OTHER_URL") } { print }|ui has no DOCKER_PROXY_URL
+twosock|{ print } /# dsp-sock$/ { gsub(/docker\.sock/, "other.sock"); print }|need one .sock bind, found 2
+noflag|{ sub(/"-f", /, "") } { print }|entrypoint needs one haproxy -f path
+nomount|{ sub(/:\/etc\/hx:ro/, ":/etc/other:ro") } { print }|no single bind mount holds /etc/hx/haproxy.cfg
+CASES
 }
 
 # What: seed an installer tree with required env keys set.
@@ -8810,6 +8535,49 @@ _setup_keys_kea_fixture() {
     done
 }
 
+@test "migrate_env_for_update stops on a read error even under if" {
+    # What: each key read failing stops the migration
+    # Why: if/|| turn set -e off; lost reads rewrite config
+    # From: Issue #1683 | PR #1858
+    local root d keys key fired=0
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    keys="$(declare -f migrate_env_for_update | grep -oE 'get_env_(var|var_nonempty|assignment_value_raw|assignment_value_raw_nonempty) [A-Z][A-Z0-9_]+' | awk '{ print $2 }' | sort -u)"
+    [ -n "${keys}" ] || { echo "no key reads found"; return 1; }
+    export AWK_REAL STUBS="${BATS_TEST_TMPDIR}/stubs" FAILKEY
+    AWK_REAL="$(type -P awk)"
+    _tool_stub "${STUBS}" awk <<'STUB'
+case " $* " in
+    *" key=${FAILKEY:?} "*) : > "${STUBS}/fired"; echo "awk: injected read failure" >&2; exit 2 ;;
+esac
+exec "${AWK_REAL:?}" "$@"
+STUB
+    for key in ${keys}; do
+        d="${BATS_TEST_TMPDIR}/rf-${key}/deploy/prod"
+        _converged_install "${d}" || return 1
+        FAILKEY="${key}"
+        rm -f "${STUBS}/fired"
+        _setup_sh_run 'PATH="${STUBS}:${BIN}:${PATH}"
+            if migrate_env_for_update "${CONV}"; then echo migrate-continued; else echo "migrate-stopped $?"; fi'
+        [ -e "${STUBS}/fired" ] || continue
+        fired=$((fired + 1))
+        [[ "${output}" == *"migrate-stopped "[1-9]* && "${output}" != *migrate-continued* ]] \
+            || { echo "${key}: read failure did not stop the migration: ${output}"; return 1; }
+    done
+    [ "${fired}" -gt 0 ] || { echo "no injected read was reached"; return 1; }
+    # What: a failed env write also stops the run under ||
+    # Why: rewrite_env_key must not leave only a lost status
+    # From: Issue #1683 | PR #1858
+    d="${BATS_TEST_TMPDIR}/wf/deploy/prod"
+    _converged_install "${d}" || return 1
+    export WKEY WFILE="${d}/.env"
+    WKEY="$(awk -F= '/^[A-Z][A-Z0-9_]*=/ { print $1; exit }' "${WFILE}")" FAILKEY="unused${BATS_TEST_NUMBER}"
+    _tool_stub "${STUBS}" mktemp <<< 'echo "mktemp: injected write failure" >&2; exit 1'
+    _setup_sh_run 'PATH="${STUBS}:${BIN}:${PATH}"; set_env_key "${WKEY}" "w${BATS_TEST_NUMBER}" "${WFILE}" || echo write-continued'
+    [ "${status}" -ne 0 ] && [[ "${output}" == *"injected write failure"* && "${output}" != *write-continued* ]] \
+        || { echo "write failure did not stop the run: ${output}"; return 1; }
+}
+
 @test "migrate_env_for_update derives CACHE_MAX_SIZE from CACHE_MAX_GB" {
     # What: empty CACHE_MAX_SIZE comes from CACHE_MAX_GB
     # Why: reuse the operator's size, not the default
@@ -8934,7 +8702,7 @@ EOF
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/lm-extra"
     _logging_matrix_fixture "${r}" "svc-a"
-    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub svc 'printf "svc-a\nsvc-b\n"')" \
+    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub 'printf "svc-a\nsvc-b\n"')" \
         run bash "${CI_SH}" check logging-matrix "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0038"* ]]
@@ -8947,7 +8715,7 @@ EOF
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/lm-stale"
     _logging_matrix_fixture "${r}" "svc-a svc-gone"
-    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub svc 'printf "svc-a\n"')" \
+    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub 'printf "svc-a\n"')" \
         run bash "${CI_SH}" check logging-matrix "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"row 'svc-gone' is not a real Compose service"* ]]
@@ -8993,7 +8761,7 @@ EOF
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/lm-cmderr"
     _logging_matrix_fixture "${r}" "svc-a"
-    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub svcfail 'exit 3')" \
+    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub 'exit 3')" \
         run bash "${CI_SH}" check logging-matrix "${r}"
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0034"* ]]
@@ -9006,7 +8774,7 @@ EOF
     local r="${BATS_TEST_TMPDIR}/lm-weblog"
     _logging_matrix_fixture "${r}" "svc-a"
     printf 'services:\n  netdata:\n    image: x\n' > "${r}/dep/c.yml"
-    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub svc 'printf "svc-a\n"')" \
+    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub 'printf "svc-a\n"')" \
         run bash "${CI_SH}" check logging-matrix "${r}"
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"netdata must mount services/syslog/netdata-web_log.conf"* ]]
@@ -9018,7 +8786,7 @@ EOF
     # From: Issue #1683 | PR #1858
     local r="${BATS_TEST_TMPDIR}/lm-weblog-ok"
     _logging_matrix_fixture "${r}" "svc-a"
-    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub svc 'printf "svc-a\n"')" \
+    CI_LOGGING_MATRIX_SERVICES_CMD="$(_stub 'printf "svc-a\n"')" \
         run bash "${CI_SH}" check logging-matrix "${r}"
     [ "${status}" -eq 0 ]
     [[ "${output}" == *"logging-matrix=clean"* ]]
@@ -9127,54 +8895,44 @@ CASES
     # What: failed merge-base is rc 2; absent before = none.
     # Why: empty refs means "all changed"; UNKNOWN != BUILD.
     # From: Issue #1683 | PR #1858
-    local repo="${BATS_TEST_TMPDIR}/dr"
-    git init -q "${repo}"
-    git -C "${repo}" -c user.email=a@b -c user.name=b commit -q --allow-empty -m x
-    CI_REPO_ROOT="${repo}" GITHUB_EVENT_NAME=pull_request BASE_SHA=0123456789abcdef0123456789abcdef01234567 \
+    local repo up sh rt gho fake remote b h br out
+    repo="$(_val path)" up="$(_val path)" sh="$(_val path)" rt="$(_val path)" gho="$(_val path)"
+    fake="$(_val sha)" remote="$(_ci_git_remote)"
+    _g() { git -C "$1" -c user.name="$(_val name)" -c user.email="$(_val name)@$(_val host)" \
+        commit -q --allow-empty -m "$(_val name)"; }
+    git init -q "${repo}" && _g "${repo}"
+    CI_REPO_ROOT="${repo}" GITHUB_EVENT_NAME=pull_request BASE_SHA="${fake}" run _ci_diff_refs
+    _expect pr-no-history 2 "[CI-ERROR-CORE-0124]" || return 1
+    CI_REPO_ROOT="${repo}" GITHUB_EVENT_NAME=pull_request GITHUB_REF="refs/heads/$(_val name)" BASE_SHA="${fake}" \
         run _ci_diff_refs
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CORE-0124"* ]]
-    CI_REPO_ROOT="${repo}" GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/heads/x \
-        BASE_SHA=0123456789abcdef0123456789abcdef01234567 run _ci_diff_refs
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"origin"* ]]
-    CI_REPO_ROOT="${repo}" GITHUB_EVENT_NAME=pull_request BASE_SHA=0123456789abcdef0123456789abcdef01234567 \
-        run ci_cmd_changed_files
-    [ "${status}" -eq 2 ]
-    CI_REPO_ROOT="${repo}" GITHUB_EVENT_NAME=push BEFORE_SHA=0123456789abcdef0123456789abcdef01234567 \
-        GITHUB_SHA=HEAD run _ci_diff_refs
-    [ "${status}" -eq 0 ]
-    [ -z "${output}" ]
+    _expect pr-no-remote 2 "${remote}" || return 1
+    CI_REPO_ROOT="${repo}" GITHUB_EVENT_NAME=pull_request BASE_SHA="${fake}" run ci_cmd_changed_files
+    _expect changed-files-no-history 2 "[CI-ERROR-CORE-0124]" || return 1
+    CI_REPO_ROOT="${repo}" GITHUB_EVENT_NAME=push BEFORE_SHA="${fake}" GITHUB_SHA=HEAD run _ci_diff_refs
+    _expect push-before-absent 0 "=" || return 1
     # What: a shallow checkout gets the diff history once.
     # Why: workflows fetch one commit; ci.sh owns the diff.
     # From: Issue #1683 | PR #1858
-    local up="${BATS_TEST_TMPDIR}/up" sh="${BATS_TEST_TMPDIR}/sh" b h br
-    git init -q "${up}"
-    git -C "${up}" -c user.email=a@b -c user.name=b commit -q --allow-empty -m one
-    b="$(git -C "${up}" rev-parse HEAD)"
-    git -C "${up}" -c user.email=a@b -c user.name=b commit -q --allow-empty -m two
-    h="$(git -C "${up}" rev-parse HEAD)"
-    br="$(git -C "${up}" symbolic-ref --short HEAD)"
-    git clone -q --depth=1 "file://${up}" "${sh}"
-    [ "$(git -C "${sh}" rev-parse --is-shallow-repository)" = true ]
+    git init -q "${up}" && _g "${up}" && b="$(git -C "${up}" rev-parse HEAD)"
+    _g "${up}" && h="$(git -C "${up}" rev-parse HEAD)" && br="$(git -C "${up}" symbolic-ref --short HEAD)"
+    git clone -q --depth=1 --origin "${remote}" "file://${up}" "${sh}"
+    [ "$(git -C "${sh}" rev-parse --is-shallow-repository)" = true ] || { echo "clone not shallow"; return 1; }
     CI_REPO_ROOT="${sh}" GITHUB_EVENT_NAME=push GITHUB_REF="refs/heads/${br}" BEFORE_SHA="${b}" \
         GITHUB_SHA="${h}" run _ci_diff_refs
-    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
-    [ "${output}" = "${b} ${h}" ]
-    [ "$(git -C "${sh}" rev-parse --is-shallow-repository)" = false ]
+    _expect shallow-deepened 0 "=${b} ${h}" || return 1
+    [ "$(git -C "${sh}" rev-parse --is-shallow-repository)" = false ] || { echo "still shallow"; return 1; }
     # What: under GitHub the list path is also step output.
     # Why: workflows only call ci.sh; no echo in the YAML.
     # From: Issue #1683 | PR #1858
-    local gho="${BATS_TEST_TMPDIR}/gho"
-    : > "${gho}"
+    mkdir -p "${rt}" && : > "${gho}"
     CI_REPO_ROOT="${sh}" GITHUB_EVENT_NAME=push GITHUB_REF="refs/heads/${br}" BEFORE_SHA="${b}" \
-        GITHUB_SHA="${h}" RUNNER_TEMP="${BATS_TEST_TMPDIR}" GITHUB_OUTPUT="${gho}" run ci_cmd_changed_files
-    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
-    grep -qx "file=${BATS_TEST_TMPDIR}/changed-files.txt" "${gho}"
+        GITHUB_SHA="${h}" RUNNER_TEMP="${rt}" GITHUB_OUTPUT="${gho}" run --separate-stderr ci_cmd_changed_files
+    out="$(sed -n 's/^file=//p' "${gho}")"
+    _expect step-output 0 "=${out}" || return 1
+    [ "${out#"${rt}"/}" != "${out}" ] && [ -f "${out}" ] || { echo "step output '${out}' not a file in ${rt}"; return 1; }
     CI_REPO_ROOT="${sh}" GITHUB_EVENT_NAME=push GITHUB_REF="refs/heads/${br}" BEFORE_SHA="${b}" \
-        GITHUB_SHA="${h}" RUNNER_TEMP="${BATS_TEST_TMPDIR}" GITHUB_OUTPUT="${BATS_TEST_TMPDIR}/no/dir/o" \
-        run ci_cmd_changed_files
-    [ "${status}" -eq 2 ]; [[ "${output}" == *"[CI-ERROR-CORE-0125]"* ]]
+        GITHUB_SHA="${h}" RUNNER_TEMP="${rt}" GITHUB_OUTPUT="$(_val path)/$(_val name)" run ci_cmd_changed_files
+    _expect output-unwritable 2 "[CI-ERROR-CORE-0125]" || return 1
 }
 
 @test "check changelog-direct-edit notices the release label exemption" {
@@ -9202,7 +8960,7 @@ _build_fixture() {
         "  alpine: registry.example.test/base@sha256:$(printf '0%.0s' {1..64})" \
         "  base-x: registry.example.test/base-x@sha256:$(printf '2%.0s' {1..64})" \
         'release:' '  registry: registry.example.test' '  license: L-fixture' > "${r}/m.yml"
-    _sot_ci_variables >> "${r}/m.yml"
+    _sot_block ci_variables >> "${r}/m.yml"
     cd "${r}" || return 1
     export CI_MANIFEST="${r}/m.yml" GITHUB_REPOSITORY=owner/fixture-repo
 }
@@ -9282,7 +9040,7 @@ CASES
     [[ "${output}" != *"buildx build"* ]]
     printf 'FROM x\nARG BUILD_IDENTITY\n' > svc/Dockerfile
     sed -i '0,/build_type: apk/s//build_type: rust/' "${CI_MANIFEST}"
-    CI_BUILD_TOOLS_IMAGE_CMD='echo bt@sha256:x' run _ci_docker_build svc-a id1 os/p1
+    CI_BUILD_TOOLS_IMAGE_CMD="$(_stub 'echo bt@sha256:x')" run _ci_docker_build svc-a id1 os/p1
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-BUILDARGS-"* ]]
     [[ "${output}" != *"buildx build"* ]]
@@ -9332,69 +9090,43 @@ STUB
 # RETRY ENGINE (_ci_retry) + BUILD != PUBLISH INVARIANT
 # =========================================================
 
-@test "_ci_retry retries a transient failure and returns on success" {
-    # What: 2 transient failures then success (3 tries).
-    # Why: Engine owns every wrapper's retry loop.
-    # From: Issue #1683
-    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
-    _flaky() {
-        local n; n="$(($(cat "${cnt}") + 1))"; printf '%s' "${n}" > "${cnt}"
-        if [ "${n}" -lt 3 ]; then echo "connection reset by peer" >&2; return 1; fi
-        echo ok
-    }
-    export -f _flaky
-    CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_retry registry _flaky
-    [ "${status}" -eq 0 ]
-    [ "${lines[-1]}" = "ok" ]
-    [ "$(cat "${cnt}")" -eq 3 ]
-    # What: each failed try shows with its raw; then INFO.
-    # Why: AG-INT-002: a late success is no 1st-try pass.
-    # From: Issue #1683 | PR #1858
-    [ "$(grep -c '\[CI-WARN-BUILD-0016\] op=registry cmd="_flaky"' <<< "${output}")" -eq 2 ]
-    [ "$(grep -c '^connection reset by peer$' <<< "${output}")" -eq 2 ]
-    [[ "${output}" == *'[CI-INFO-BUILD-0017] op=registry cmd="_flaky" attempt=3/4'* ]]
-}
-
-@test "_ci_retry fails on the first attempt for a permanent classification" {
-    # What: 401 failure doesn't consume retry budget.
-    # Why: Retrying fixed outcome wastes wall-clock time.
-    # From: Issue #1683
-    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
-    _denied() {
-        printf '%s' "$(($(cat "${cnt}") + 1))" > "${cnt}"
-        echo "HTTP 401 unauthorized" >&2; return 1
-    }
-    export -f _denied
-    CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_retry registry _denied
-    [ "${status}" -eq 2 ]
-    [ "$(cat "${cnt}")" -eq 1 ]
-    [[ "${output}" == *'[CI-ERROR-BUILD-0011] op=registry cmd="_denied" cls=permanent attempt=1/4'* ]]
-    [[ "${output}" == *"HTTP 401 unauthorized"* ]]
-    [[ "${output}" != *"CI-WARN-BUILD-0016"* ]]
-}
-
-@test "_ci_retry exhausts after CI_RETRY_MAX_ATTEMPTS on a persistent transient failure" {
-    # What: An always-transient failure still stops at max.
-    # Why: A retry loop must be bounded, never infinite.
-    # From: Issue #1683
-    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
-    _alwaysflaky() {
-        printf '%s' "$(($(cat "${cnt}") + 1))" > "${cnt}"
-        echo "connection refused" >&2; return 1
-    }
-    export -f _alwaysflaky
-    CI_RETRY_BACKOFF_BASE_SECONDS=0 CI_RETRY_MAX_ATTEMPTS=3 run _ci_retry registry _alwaysflaky
-    [ "${status}" -eq 2 ]
-    [ "$(cat "${cnt}")" -eq 3 ]
+# What: transient retried and logged; permanent fails once.
+# Why: every failed try stays visible; bound from the SOT.
+# From: Issue #1683 | PR #1858
+@test "retry engine: transient retried with evidence, permanent once, bounded" {
+    local stub max bound out sot
+    out="$(_val name)"
+    sot="$(_val path)"
+    STUB_N="$(_val path)"
+    export STUB_N
+    stub="$(_stub 'n="$(cat "${STUB_N}")"; n=$((n + 1)); printf "%s" "${n}" > "${STUB_N}"; if [ "${n}" -le "${STUB_FAILS}" ]; then printf "%s\n" "${STUB_TEXT}" >&2; exit 1; fi; printf "%s\n" "${STUB_OK}"')"
+    max="$(_ci_variable CI_RETRY_MAX_ATTEMPTS)"
+    [ "${max}" -ge 3 ] || { echo "SOT retry bound ${max} is below 3"; return 1; }
+    bound="$(_val int 2 4)"
+    [ "${bound}" -ne "${max}" ] || bound="$(( bound + 1 ))"
+    printf '0' > "${STUB_N}"
+    STUB_FAILS=2 STUB_TEXT='connection reset by peer' STUB_OK="${out}" CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_retry registry "${stub}"
+    _expect transient-then-ok 0 "[CI-WARN-BUILD-0016] op=registry cmd=\"${stub}\" cls=transient attempt=1/${max};connection reset by peer;[CI-WARN-BUILD-0016] op=registry cmd=\"${stub}\" cls=transient attempt=2/${max};connection reset by peer;[CI-INFO-BUILD-0017] op=registry cmd=\"${stub}\" attempt=3/${max};${out}" || return 1
+    [ "$(cat "${STUB_N}")" -eq 3 ] || { echo "transient-then-ok: $(cat "${STUB_N}") calls"; return 1; }
+    printf '0' > "${STUB_N}"
+    STUB_FAILS=99 STUB_TEXT='HTTP 401 unauthorized' CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_retry registry "${stub}"
+    _expect permanent 2 "[CI-ERROR-BUILD-0011] op=registry cmd=\"${stub}\" cls=permanent attempt=1/${max};HTTP 401 unauthorized" || return 1
+    [ "$(cat "${STUB_N}")" -eq 1 ] || { echo "permanent: $(cat "${STUB_N}") calls"; return 1; }
+    printf '0' > "${STUB_N}"
+    STUB_FAILS=99 STUB_TEXT='connection refused' CI_RETRY_BACKOFF_BASE_SECONDS=0 CI_RETRY_MAX_ATTEMPTS="${bound}" run _ci_retry registry "${stub}"
+    _expect env-bound 2 "[CI-ERROR-BUILD-0011] op=registry cmd=\"${stub}\" cls=transient attempt=${bound}/${bound};connection refused" || return 1
+    [ "$(cat "${STUB_N}")" -eq "${bound}" ] || { echo "env-bound: $(cat "${STUB_N}") calls"; return 1; }
     # What: without env the attempt count is the SOT value.
     # Why: the bound has one owner; ci.sh holds no literal.
     # From: Issue #1683 | PR #1858
-    printf '0' > "${cnt}"
-    sed -e 's/^  CI_RETRY_MAX_ATTEMPTS: .*/  CI_RETRY_MAX_ATTEMPTS: 2/' \
-        -e 's/^  CI_RETRY_BACKOFF_BASE_SECONDS: .*/  CI_RETRY_BACKOFF_BASE_SECONDS: 0/' \
-        "${CI_MANIFEST}" > "${BATS_TEST_TMPDIR}/retry.yml"
-    CI_MANIFEST="${BATS_TEST_TMPDIR}/retry.yml" run _ci_retry registry _alwaysflaky
-    [ "${status}" -eq 2 ] && [ "$(cat "${cnt}")" -eq 2 ] || { echo "sot bound: $(cat "${cnt}") ${output}"; return 1; }
+    sed -e "s/^  CI_RETRY_MAX_ATTEMPTS: .*/  CI_RETRY_MAX_ATTEMPTS: ${bound}/" \
+        -e 's/^  CI_RETRY_BACKOFF_BASE_SECONDS: .*/  CI_RETRY_BACKOFF_BASE_SECONDS: 0/' "${CI_MANIFEST}" > "${sot}"
+    ! cmp -s "${CI_MANIFEST}" "${sot}" || { echo "SOT copy unchanged"; return 1; }
+    unset CI_RETRY_MAX_ATTEMPTS CI_RETRY_BACKOFF_BASE_SECONDS
+    printf '0' > "${STUB_N}"
+    STUB_FAILS=99 STUB_TEXT='connection refused' CI_MANIFEST="${sot}" run _ci_retry registry "${stub}"
+    _expect sot-bound 2 "attempt=${bound}/${bound}" || return 1
+    [ "$(cat "${STUB_N}")" -eq "${bound}" ] || { echo "sot-bound: $(cat "${STUB_N}") calls"; return 1; }
 }
 
 @test "publish retry-exhaustion never invokes build (RETRY OPERATION != REBUILD)" {
@@ -9508,16 +9240,6 @@ STUB
     printf '%s' "${bin}"
 }
 
-@test "trivy error kind classifies a DB miss versus other errors" {
-    # What: DB-download text is retryable; others are not.
-    # Why: Only a DB miss should trigger a retry.
-    # From: Issue #1683
-    run _ci_trivy_error_kind "failed to download vulnerability DB: timeout"
-    [ "${output}" = "db-missing" ]
-    run _ci_trivy_error_kind "manifest unknown: pull denied"
-    [ "${output}" = "pre-report-error" ]
-}
-
 @test "scan default is clean when trivy exits zero" {
     # What: A zero exit is a clean image, no retry.
     # Why: The success path returns clean directly.
@@ -9551,8 +9273,8 @@ STUB
     PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo \
     CI_TRIVY_SHARED_DIR="${vt}/no-shared" \
     CI_TRIVY_FALLBACK_DIR="${vt}/trivy-cache" \
-        CI_TRIVY_MAX=2 CI_TRIVY_BACKOFF=0 run _ci_trivy_scan proxy sha256:abc
-    [ "${status}" -eq 3 ]
+        CI_RETRY_MAX_ATTEMPTS=2 CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_trivy_scan proxy sha256:abc
+    _expect db-miss-escalates 3 '[CI-ERROR-BUILD-0011] op=trivy cmd="_ci_trivy_scan_once" cls=transient attempt=2/2' || return 1
 }
 
 @test "scan runs trivy with the vuln+secret scanners" {
@@ -9776,7 +9498,7 @@ STUB
     printf 'x' > "${BATS_TEST_TMPDIR}/fresh/db/trivy.db"
     printf '{"NextUpdate":"%s"}' "$(date -u -d '+1 day' '+%Y-%m-%dT%H:%M:%SZ')" \
         > "${BATS_TEST_TMPDIR}/fresh/db/metadata.json"
-    CI_TRIVY_DB_DOWNLOAD_CMD="$(_stub dl 'echo SHOULD-NOT-RUN; exit 1')" \
+    CI_TRIVY_DB_DOWNLOAD_CMD="$(_stub 'echo SHOULD-NOT-RUN; exit 1')" \
         run _ci_trivy_db_ensure_fresh "${BATS_TEST_TMPDIR}/fresh"
     [ "${status}" -eq 0 ]
     [[ "${output}" == "present=true" ]]
@@ -9806,7 +9528,7 @@ EOF
     # Why: Permissive; trivy's own retry can still run.
     # From: Issue #1683
     mkdir -p "${BATS_TEST_TMPDIR}/stillstale"
-    CI_TRIVY_DB_DOWNLOAD_CMD="$(_stub dl 'exit 1')" \
+    CI_TRIVY_DB_DOWNLOAD_CMD="$(_stub 'exit 1')" \
     CI_TRIVY_LOCK_TIMEOUT=5 CI_TRIVY_LOCK_STALE=60 CI_TRIVY_LOCK_POLL=1 \
         run _ci_trivy_db_ensure_fresh "${BATS_TEST_TMPDIR}/stillstale"
     [ "${status}" -eq 0 ]
@@ -9823,20 +9545,6 @@ EOF
         run _ci_trivy_db_ensure_fresh "${cache}"
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-SCAN-0012"* ]]
-}
-
-@test "verify default reads back the registry digest via imagetools" {
-    # What: default readback reads the registry digest.
-    # Why: expected == registry digest continues (§23).
-    # From: Issue #1683
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    _tool_stub "${bin}" docker <<'STUB'
-echo sha256:match
-STUB
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" verify ui sha256:match os/p1
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"verified=sha256:match"* ]]
 }
 
 @test "assemble default merges digests into one sha index" {
@@ -9863,414 +9571,239 @@ STUB
 
 # What: bare repo + two host clones for real CAS tests.
 # Why: real git CAS proof, no live remote (AG-VAL-030).
+# From: Issue #1683 | PR #1858
 _cas_setup() {
-    CAS_BARE="${BATS_TEST_TMPDIR}/bare.git"
-    CAS_A="${BATS_TEST_TMPDIR}/host-a"
-    CAS_B="${BATS_TEST_TMPDIR}/host-b"
+    local head
+    CAS_BARE="$(_val path).git"
+    CAS_A="$(_val path)"
+    CAS_B="$(_val path)"
     git init --quiet --bare "${CAS_BARE}"
+    head="$(git -C "${CAS_BARE}" symbolic-ref HEAD)"
     git clone --quiet "${CAS_BARE}" "${CAS_A}"
-    (
-        cd "${CAS_A}" || exit 1
-        git config user.email cas-bats@example.invalid
-        git config user.name cas-bats
-        git commit --quiet --allow-empty -m init
-        git push --quiet origin HEAD:refs/heads/master
-    )
+    git -C "${CAS_A}" config user.email "$(_val name)@$(_val host)"
+    git -C "${CAS_A}" config user.name "$(_val name)"
+    git -C "${CAS_A}" commit --quiet --allow-empty -m "$(_val name)"
+    git -C "${CAS_A}" push --quiet origin "HEAD:${head}"
     git clone --quiet "${CAS_BARE}" "${CAS_B}"
 }
 
-@test "cas ref_sha reports an absent ref as free" {
-    # What: ls-remote miss maps to absent, not error.
-    # Why: a free lock must read as free, code 1.
-    # From: Issue #1683
+# What: CAS lock life cycle on two real git hosts.
+# Why: each lock state change is atomic and owned.
+# From: Issue #1683 | PR #1858
+@test "cas lock: create, refuse, take over, release, hand off" {
+    local ref a b other bad age hi lo held bin cnt ft pfx ch run_id note
+    ref="refs/$(_val name)/$(_val name)"
+    a="$(_val name)"; b="$(_val name)"; other="$(_val name)"
+    bad="$(_val path)"; bin="$(_val path)"; cnt="$(_val path)"; ft="$(_val name)"
+    age="$(_val int 60 86459)"; hi=$(( age * 2 )); lo=$(( age / 2 ))
     _cas_setup
-    cd "${CAS_A}"
-    run _ci_cas_ref_sha origin refs/ci/lock/t
-    [ "${status}" -eq 1 ]
-    [ -z "${output}" ]
-}
-
-@test "cas ref_sha shows raw evidence on a query failure" {
-    # What: an unreachable remote is UNKNOWN with raw.
-    # Why: UNKNOWN without its cause is not diagnosable.
-    # From: Issue #1683 | PR #1858
-    _cas_setup
-    cd "${CAS_A}"
-    run _ci_cas_ref_sha "${BATS_TEST_TMPDIR}/no-such-remote" refs/ci/lock/t
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-WARN-RESOLVE-0008]"* ]]
-    [[ "${output}" == *"raw:"* ]]
-    [[ "${output}" == *"no-such-remote"* ]]
-}
-
-@test "ledger_blob shows raw evidence for a missing file" {
-    # What: ref present, ledger file absent -> UNKNOWN.
-    # Why: the cat-file cause must stay visible (raw).
-    # From: Issue #1683 | PR #1858
-    _cas_setup
-    cd "${CAS_A}"
-    git push --quiet origin "HEAD:$(_ci_variable CI_LEDGER_REF)"
-    run _ci_ledger_blob origin
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-WARN-RESOLVE-0009]"* ]]
-    [[ "${output}" == *"raw:"* ]]
-}
-
-@test "cas lock_try creates the ref on a free lock" {
-    # What: a free lock is created atomically.
-    # Why: create-against-zero is the acquire path.
-    # From: Issue #1683
-    _cas_setup
-    cd "${CAS_A}"
-    run _ci_lock_try origin refs/ci/lock/t holder-a 600
-    [ "${status}" -eq 0 ]
-    run _ci_cas_ref_sha origin refs/ci/lock/t
-    [ "${status}" -eq 0 ]
-    [ -n "${output}" ]
-}
-
-@test "cas lock_try refuses a fresh lock held elsewhere" {
-    # What: a held, non-stale lock refuses a second host.
-    # Why: mutual exclusion across hosts (code 1).
-    # From: Issue #1683
-    _cas_setup
-    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
-    cd "${CAS_B}"
-    run _ci_lock_try origin refs/ci/lock/t holder-b 600
-    [ "${status}" -eq 1 ]
-}
-
-@test "cas release lets another host acquire" {
-    # What: release frees the ref for the next host.
-    # Why: normal hand-off between two runs.
-    # From: Issue #1683
-    _cas_setup
-    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
-    run _ci_lock_release origin refs/ci/lock/t holder-a
-    [ "${status}" -eq 0 ]
-    cd "${CAS_B}"
-    run _ci_lock_try origin refs/ci/lock/t holder-b 600
-    [ "${status}" -eq 0 ]
-}
-
-@test "cas release never deletes another holder's lock" {
-    # What: release checks ownership before deleting.
-    # Why: a takeover must not lose the new holder.
-    # From: Issue #1683
-    _cas_setup
-    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
-    cd "${CAS_B}"
-    run _ci_lock_release origin refs/ci/lock/t not-holder
-    [ "${status}" -eq 0 ]
-    run _ci_cas_ref_sha origin refs/ci/lock/t
-    [ "${status}" -eq 0 ]; [ -n "${output}" ]
-}
-
-@test "lock_release retries a transient git-fetch failure, then succeeds" {
-    # What: Transient fail then success; retry works.
-    # Why: Fetch lacked retry until op=git was added.
-    # From: Issue #1683
-    _cas_setup
-    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
-    local realgit; realgit="$(command -v git)"
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
-    _tool_stub "${bin}" git <<EOF
-case "\$*" in
-    *"fetch --quiet"*)
-        n="\$(( \$(cat "${cnt}") + 1 ))"; printf '%s' "\$n" > "${cnt}"
-        if [ "\$n" -lt 2 ]; then echo "unexpected disconnect while reading sideband packet" >&2; exit 1; fi
-        ;;
-esac
-exec "${realgit}" "\$@"
-EOF
-    PATH="${bin}:${PATH}" CI_RETRY_BACKOFF_BASE_SECONDS=0 \
-        run _ci_lock_release origin refs/ci/lock/t holder-a
-    [ "${status}" -eq 0 ]
-    [ "$(cat "${cnt}")" -eq 2 ]
-}
-
-@test "lock_release fails fast (no retry) on a not_found-shaped git-fetch error" {
-    # What: Missing ref must not consume retry budget.
-    # Why: Permanent cascade; retrying won't fix it.
-    # From: Issue #1683
-    _cas_setup
-    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
-    local realgit; realgit="$(command -v git)"
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
-    _tool_stub "${bin}" git <<EOF
-case "\$*" in
-    *"fetch --quiet"*)
-        printf '%s' "\$(( \$(cat "${cnt}") + 1 ))" > "${cnt}"
-        echo "fatal: couldn't find remote ref refs/ci/lock/t" >&2; exit 1 ;;
-esac
-exec "${realgit}" "\$@"
-EOF
-    PATH="${bin}:${PATH}" CI_RETRY_BACKOFF_BASE_SECONDS=0 \
-        run _ci_lock_release origin refs/ci/lock/t holder-a
-    [ "${status}" -eq 1 ]
-    [ "$(cat "${cnt}")" -eq 1 ]
-}
-
-@test "lock_release exhausts after CI_RETRY_MAX_ATTEMPTS on a persistent transient fetch failure" {
-    # What: Transient fail respects retry max limit.
-    # Why: Bounded retry is a hard requirement.
-    # From: Issue #1683
-    _cas_setup
-    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
-    local realgit; realgit="$(command -v git)"
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    local cnt="${BATS_TEST_TMPDIR}/n"; printf '0' > "${cnt}"
-    _tool_stub "${bin}" git <<EOF
-case "\$*" in
-    *"fetch --quiet"*)
-        printf '%s' "\$(( \$(cat "${cnt}") + 1 ))" > "${cnt}"
-        echo "connection refused" >&2; exit 1 ;;
-esac
-exec "${realgit}" "\$@"
-EOF
-    PATH="${bin}:${PATH}" CI_RETRY_BACKOFF_BASE_SECONDS=0 CI_RETRY_MAX_ATTEMPTS=3 \
-        run _ci_lock_release origin refs/ci/lock/t holder-a
-    [ "${status}" -eq 1 ]
-    [ "$(cat "${cnt}")" -eq 3 ]
-}
-
-@test "cas lock_try takes over a stale lock" {
-    # What: an aged lock is taken over via lease swap.
-    # Why: a crashed holder must not block forever.
-    # From: Issue #1683
-    _cas_setup
-    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
-    sleep 2
-    cd "${CAS_B}"
-    # What: an unreadable lock age stops the takeover.
-    # Why: a failed read must not look like an old lock.
-    # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/gitbin"
     _fail_stub "${bin}" git
-    PATH="${bin}:${PATH}" FAIL_MATCH=%ct run _ci_lock_try origin refs/ci/lock/t holder-b 1
-    [ "${status}" -eq 3 ]
-    [[ "${output}" == *"CI-ERROR-CORE-0106"* ]]
-    git fetch --quiet origin refs/ci/lock/t
-    [ "$(git log -1 --format=%s FETCH_HEAD)" = holder-a ]
-    run _ci_lock_try origin refs/ci/lock/t holder-b 1
-    [ "${status}" -eq 0 ]
-    git fetch --quiet origin refs/ci/lock/t
-    [ "$(git log -1 --format=%s FETCH_HEAD)" = holder-b ]
-}
-
-@test "cas acquire fails closed after exhausting attempts" {
-    # What: an unbeatable lock exhausts retries and fails.
-    # Why: proceeding unlocked would race the section.
-    # From: Issue #1683
-    _cas_setup
-    cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t holder-a 600
+    cd "${CAS_A}"
+    run _ci_cas_ref_sha origin "${ref}"
+    _expect free 1 "=" || return 1
+    run _ci_cas_ref_sha "${bad}" "${ref}"
+    _expect unknown 2 "[CI-WARN-RESOLVE-0008];raw:;${bad}" || return 1
+    run _ci_lock_release "${bad}" "${ref}" "${a}"
+    _expect release-unknown 1 "[CI-WARN-RESOLVE-0008]" || return 1
+    GIT_COMMITTER_DATE="$(( $(date +%s) - age )) +0000" run _ci_lock_try origin "${ref}" "${a}" "${hi}"
+    _expect create 0 - || return 1
+    held="$(git ls-remote --exit-code origin "${ref}")" || { echo "create: no ref"; return 1; }
     cd "${CAS_B}"
-    run _ci_lock_acquire origin refs/ci/lock/t holder-b 3 1 600
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-CAS-0002"* ]]
+    run _ci_lock_try origin "${ref}" "${b}" "${hi}"
+    _expect refuse 1 "[CI-INFO-CAS-0006];holder=\"${a}\"" || return 1
+    run _ci_lock_release origin "${ref}" "${other}"
+    _expect foreign-release 0 "[CI-INFO-CAS-0007];holder=\"${a}\"" || return 1
+    run _ci_lock_acquire origin "${ref}" "${b}" 2 0 "${hi}"
+    _expect exhaust 1 "[CI-ERROR-CAS-0002]" || return 1
+    PATH="${bin}:${PATH}" FAIL_MATCH=%ct run _ci_lock_try origin "${ref}" "${b}" "${lo}"
+    _expect unreadable-age 3 "[CI-ERROR-CORE-0106]" || return 1
+    [ "$(git ls-remote origin "${ref}")" = "${held}" ] || { echo "lock moved before takeover"; return 1; }
+    run _ci_lock_try origin "${ref}" "${b}" "${lo}"
+    _expect takeover 0 "[CI-INFO-CAS-0001];prev=\"${a}\"" || return 1
+    git fetch --quiet origin "${ref}"
+    [ "$(git log -1 --format=%s FETCH_HEAD)" = "${b}" ] || { echo "takeover: holder not ${b}"; return 1; }
+    held="$(git ls-remote origin "${ref}")"
+    printf '0' > "${cnt}"
+    PATH="${bin}:${PATH}" FAIL_MATCH=fetch FAIL_COUNT="${cnt}" FAIL_RC=128 \
+        FAIL_TEXT="fatal: couldn't find remote ref ${ref}" run _ci_lock_release origin "${ref}" "${b}"
+    _expect release-permanent 1 "couldn't find remote ref" || return 1
+    [ "$(<"${cnt}")" -eq 1 ] || { echo "release-permanent: $(<"${cnt}") fetch calls"; return 1; }
+    PATH="${bin}:${PATH}" FAIL_MATCH=":${ref}" FAIL_RC=1 FAIL_TEXT="${ft}" \
+        run _ci_lock_release origin "${ref}" "${b}"
+    _expect delete-push-fails 1 "${ft}" || return 1
+    [ "$(git ls-remote origin "${ref}")" = "${held}" ] || { echo "failed release moved the lock"; return 1; }
+    printf '0' > "${cnt}"
+    PATH="${bin}:${PATH}" FAIL_MATCH=fetch FAIL_TIMES=1 FAIL_COUNT="${cnt}" FAIL_RC=1 \
+        FAIL_TEXT="unexpected disconnect while reading sideband packet" \
+        CI_RETRY_BACKOFF_BASE_SECONDS=0 run _ci_lock_release origin "${ref}" "${b}"
+    _expect retried-release 0 - || return 1
+    [ "$(<"${cnt}")" -eq 2 ] || { echo "retried-release: $(<"${cnt}") fetch calls"; return 1; }
+    run git ls-remote --exit-code origin "${ref}"
+    [ "${status}" -eq 2 ] || { echo "released: ref still present"; return 1; }
+    cd "${CAS_A}"
+    run _ci_lock_try origin "${ref}" "${a}" "${hi}"
+    _expect hand-off 0 - || return 1
+    pfx="refs/$(_val name)"; ch="$(_val name)"; run_id="$(_val name)"
+    CI_GIT_REMOTE=origin CI_PROMOTE_LOCK_REF="${pfx}" CI_PROMOTE_LOCK_MAX=1 CI_PROMOTE_LOCK_BACKOFF=0 \
+        CI_PROMOTE_LOCK_STALE="${hi}" GITHUB_RUN_ID="${run_id}" run _ci_default_promote_lock "${ch}"
+    _expect promote-lock 0 - || return 1
+    git fetch --quiet origin "${pfx}/${ch}"
+    note="$(git log -1 --format=%s FETCH_HEAD)"
+    [[ "${note}" == *"${ch}"* && "${note}" == *"${run_id}"* ]] || { echo "promote-lock note: ${note}"; return 1; }
+    CI_GIT_REMOTE=origin CI_PROMOTE_LOCK_REF="${pfx}" GITHUB_RUN_ID="${run_id}" \
+        run _ci_default_promote_unlock "${ch}"
+    _expect promote-unlock 0 - || return 1
+    run git ls-remote --exit-code origin "${pfx}/${ch}"
+    [ "${status}" -eq 2 ] || { echo "promote-unlock: ref still present"; return 1; }
 }
 
+# What: two simultaneous creators; exactly one wins.
+# Why: git ref create is compare-against-zero.
+# From: Issue #1683 | PR #1858
 @test "cas concurrent create has exactly one winner" {
-    # What: two simultaneous creators; one wins atomically.
-    # Why: git ref create is compare-against-zero.
-    # From: Issue #1683
+    local ref a b ra rb stale sa sb win
+    ref="refs/$(_val name)/$(_val name)"; a="$(_val name)"; b="$(_val name)"
+    ra="$(_val path)"; rb="$(_val path)"; stale="$(_val int 60 86459)"
     _cas_setup
-    local ra="${BATS_TEST_TMPDIR}/ra" rb="${BATS_TEST_TMPDIR}/rb"
-    ( set +e; cd "${CAS_A}"; _ci_lock_try origin refs/ci/lock/t race-a 600; echo "$?" > "${ra}" ) &
-    ( set +e; cd "${CAS_B}"; _ci_lock_try origin refs/ci/lock/t race-b 600; echo "$?" > "${rb}" ) &
-    wait || true
-    local sa sb; sa="$(cat "${ra}")"; sb="$(cat "${rb}")"
-    if [ "${sa}" = 0 ]; then [[ "${sb}" == 1 || "${sb}" == 2 ]]; else [[ "${sa}" == 1 || "${sa}" == 2 ]]; fi
+    ( set +e; cd "${CAS_A}"; _ci_lock_try origin "${ref}" "${a}" "${stale}"; echo "$?" > "${ra}" ) &
+    ( set +e; cd "${CAS_B}"; _ci_lock_try origin "${ref}" "${b}" "${stale}"; echo "$?" > "${rb}" ) &
+    wait
+    sa="$(<"${ra}")"; sb="$(<"${rb}")"
+    case "${sa}:${sb}" in
+        0:1|0:2) win="${a}" ;;
+        1:0|2:0) win="${b}" ;;
+        *) echo "rc a=${sa} b=${sb}: not exactly one winner"; return 1 ;;
+    esac
+    git -C "${CAS_A}" fetch --quiet origin "${ref}"
+    [ "$(git -C "${CAS_A}" log -1 --format=%s FETCH_HEAD)" = "${win}" ] || { echo "holder is not ${win}"; return 1; }
 }
 
-@test "ledger read on an empty ledger reports the record absent" {
-    # What: no ledger ref yet means a record is absent.
-    # Why: empty ledger is absent (1), not UNKNOWN (2).
-    # From: Issue #1683
-    _cas_setup
-    cd "${CAS_A}"
-    run _ci_ledger_read origin some-identity
-    [ "${status}" -eq 1 ]
-}
-
-@test "ledger append then read returns state and digest" {
-    # What: a written record round-trips through the ref.
-    # Why: proves the write/read format agree.
-    # From: Issue #1683
-    _cas_setup
-    cd "${CAS_A}"
-    _ci_ledger_append origin id-1 dns os/p1 ACCEPTED sha256:aaa
-    run _ci_ledger_read origin id-1
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"ACCEPTED"* ]]
-    [[ "${output}" == *"sha256:aaa"* ]]
-}
-
-@test "ledger append upserts an identity to its latest record" {
-    # What: a second write replaces the same identity.
-    # Why: one current record per identity, no duplicates.
-    # From: Issue #1683
+# What: acceptance ledger life cycle on one bare repo.
+# Why: reuse and GC trust only what the ledger states.
+# From: Issue #1683 | PR #1858
+@test "ledger: absent, upsert, keep, batch, UNKNOWN, accepted digest" {
+    local i1 i2 i3 i4 s1 s2 p1 p2 d1 d2 d3 d4 ref bad file t before
+    i1="$(_val sha)"; i2="$(_val sha)"; i3="$(_val sha)"; i4="$(_val sha)"
+    s1="$(_val name)"; s2="$(_val name)"; p1="$(_val platform)"; p2="$(_val platform)"
+    d1="$(_val digest)"; d2="$(_val digest)"; d3="$(_val digest)"; d4="$(_val digest)"
+    ref="refs/$(_val name)/$(_val name)"; bad="refs/$(_val name)/$(_val name)"; file="$(_val name)"; t=$'\t'
+    CI_GIT_REMOTE=origin; CI_LEDGER_REF="${ref}"; CI_LEDGER_FILE="${file}"
+    export CI_GIT_REMOTE CI_LEDGER_REF CI_LEDGER_FILE
+    _ci_identity_for() {
+        case "$1|$2" in "${s1}|${p1}") echo "${i1}" ;; "${s2}|${p2}") echo "${i2}" ;; *) echo "${i3}" ;; esac
+    }
     _cas_setup
     cd "${CAS_A}"
-    _ci_ledger_append origin id-1 dns os/p1 PRODUCED_UNVERIFIED sha256:aaa
-    _ci_ledger_append origin id-1 dns os/p1 ACCEPTED sha256:aaa
-    run _ci_ledger_read origin id-1
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"ACCEPTED"* ]]
-    git fetch --quiet origin "$(_ci_variable CI_LEDGER_REF)"
-    [ "$(git cat-file -p FETCH_HEAD:records | grep -c '^id-1')" -eq 1 ]
+    run _ci_ledger_read origin "${i1}"
+    _expect empty-absent 1 "=" || return 1
+    run _ci_ledger_append origin "${i1}" "${s1}" "${p1}" PRODUCED_UNVERIFIED "${d1}"
+    _expect append 0 "[CI-INFO-LEDGER-0004]" || return 1
+    run _ci_ledger_read origin "${i1}"
+    _expect read-unverified 0 "=PRODUCED_UNVERIFIED${t}${d1}" || return 1
+    run _ci_accepted_digest "${s1}" "${p1}"
+    _expect digest-unverified 1 "[CI-INFO-ASSEMBLE-0009]" || return 1
+    run _ci_ledger_append origin "${i1}" "${s1}" "${p1}" ACCEPTED "${d1}"
+    _expect upsert 0 "[CI-INFO-LEDGER-0004]" || return 1
+    run _ci_ledger_read origin "${i1}"
+    _expect read-accepted 0 "=ACCEPTED${t}${d1}" || return 1
+    git fetch --quiet origin "${ref}"
+    [ "$(git cat-file -p "FETCH_HEAD:${file}" | grep -c "^${i1}${t}")" -eq 1 ] || { echo "upsert: not one ${i1} line"; return 1; }
+    run _ci_accepted_digest "${s1}" "${p1}"
+    _expect digest-accepted 0 "=${d1}" || return 1
+    run _ci_ledger_append origin "${i2}" "${s2}" "${p2}" PRODUCED_UNVERIFIED "${d2}"
+    _expect append-other 0 "[CI-INFO-LEDGER-0004]" || return 1
+    run _ci_ledger_read origin "${i1}"
+    _expect kept 0 "=ACCEPTED${t}${d1}" || return 1
+    run _ci_ledger_read origin "${i2}"
+    _expect other 0 "=PRODUCED_UNVERIFIED${t}${d2}" || return 1
+    run _ci_ledger_read origin "${i3}"
+    _expect unlisted-absent 1 "=" || return 1
+    run _ci_accepted_digest "$(_val name)" "$(_val platform)"
+    _expect digest-no-record 1 "[CI-INFO-ASSEMBLE-0008]" || return 1
+    git fetch --quiet origin "${ref}"
+    before="$(git rev-list --count FETCH_HEAD)"
+    run _ci_ledger_upsert origin <<< "${i3}${t}${s1}${t}${p2}${t}ACCEPTED${t}${d3}"$'\n'"${i4}${t}${s2}${t}${p1}${t}ACCEPTED${t}${d4}"
+    _expect batch 0 "[CI-INFO-LEDGER-0004]" || return 1
+    git fetch --quiet origin "${ref}"
+    [ "$(git rev-list --count FETCH_HEAD)" -eq $(( before + 1 )) ] || { echo "batch: not one commit"; return 1; }
+    [ "$(git cat-file -p "FETCH_HEAD:${file}" | grep -c .)" -eq 4 ] || { echo "batch: not 4 records"; return 1; }
+    run _ci_ledger_read origin "${i4}"
+    _expect batch-read 0 "=ACCEPTED${t}${d4}" || return 1
+    git push --quiet origin "HEAD:${bad}"
+    CI_LEDGER_REF="${bad}" run _ci_ledger_blob origin
+    _expect unknown 2 "[CI-WARN-RESOLVE-0009];file=\"${file}\";raw:" || return 1
+    CI_LEDGER_REF="${bad}" run _ci_ledger_read origin "${i1}"
+    _expect unknown-read 2 "[CI-WARN-RESOLVE-0009]" || return 1
+    CI_LEDGER_REF="${bad}" run _ci_accepted_digest "${s1}" "${p1}"
+    _expect unknown-digest 2 "[CI-WARN-RESOLVE-0009]" || return 1
+    CI_LEDGER_REF="${bad}" run _ci_ledger_append origin "${i1}" "${s1}" "${p1}" ACCEPTED "${d1}"
+    _expect unknown-write 3 "[CI-WARN-RESOLVE-0009];[CI-ERROR-LEDGER-0001]" || return 1
 }
 
-@test "ledger keeps distinct identities independently" {
-    # What: two identities coexist in one ledger.
-    # Why: an append must not drop other records.
-    # From: Issue #1683
-    _cas_setup
-    cd "${CAS_A}"
-    _ci_ledger_append origin id-a dns os/p1 ACCEPTED sha256:aaa
-    _ci_ledger_append origin id-b dns os/p2 PRODUCED_UNVERIFIED sha256:bbb
-    run _ci_ledger_read origin id-a
-    [[ "${output}" == *"ACCEPTED"* ]]; [[ "${output}" == *"sha256:aaa"* ]]
-    run _ci_ledger_read origin id-b
-    [[ "${output}" == *"PRODUCED_UNVERIFIED"* ]]; [[ "${output}" == *"sha256:bbb"* ]]
-}
-
-@test "ledger read of an unknown identity is absent in a non-empty ledger" {
-    # What: an unlisted identity reads as absent.
-    # Why: absent (1) must not be confused with UNKNOWN.
-    # From: Issue #1683
-    _cas_setup
-    cd "${CAS_A}"
-    _ci_ledger_append origin id-a dns os/p1 ACCEPTED sha256:aaa
-    run _ci_ledger_read origin id-missing
-    [ "${status}" -eq 1 ]
-}
-
-@test "accepted_digest default returns the digest only when ACCEPTED" {
-    # What: default reads the ledger via the identity.
-    # Why: only an ACCEPTED record yields a digest.
-    # From: Issue #1683
-    _ci_identity_for() { echo fixed-id; }
-    _ci_ledger_read() { printf 'ACCEPTED\tsha256:xyz\n'; }
-    run _ci_accepted_digest ui os/p1
-    [ "${status}" -eq 0 ]
-    [ "${output}" = sha256:xyz ]
-}
-
-@test "accepted_digest default yields nothing for a non-ACCEPTED record" {
-    # What: an unverified record is not a reusable digest.
-    # Why: fail-safe; only ACCEPTED is reusable.
-    # From: Issue #1683
-    _ci_identity_for() { echo fixed-id; }
-    _ci_ledger_read() { printf 'PRODUCED_UNVERIFIED\tsha256:xyz\n'; }
-    run _ci_accepted_digest ui os/p1
-    [ "${status}" -eq 1 ]
-}
-
-@test "accepted_digest default propagates a ledger UNKNOWN read" {
-    # What: an unknown ledger read is not a missing digest.
-    # Why: UNKNOWN != absent; the caller must not reuse.
-    # From: Issue #1683
-    _ci_identity_for() { echo fixed-id; }
-    _ci_ledger_read() { return 2; }
-    run _ci_accepted_digest ui os/p1
-    [ "${status}" -eq 2 ]
-}
-
-@test "registry_probe maps a missing manifest to not-found" {
-    # What: a genuine miss returns 1 (may build).
-    # Why: not-found is the only build-eligible miss.
-    # From: Issue #1683
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
+# What: registry answer -> digest, miss (rc 1) or UNKNOWN.
+# Why: only a real miss may build; auth stays UNKNOWN.
+# From: Issue #1683 | PR #1858
+@test "registry probe maps each registry answer to digest, miss or unknown" {
+    local bin case out rc want
+    local -A V=([@REF@]="$(_val host)/$(_val name)/$(_val name):$(_val name)" [@DIG@]="$(_val digest)")
+    bin="$(_val path)"
+    STUB_ARGV="$(_val path)"
+    export STUB_ARGV
     _tool_stub "${bin}" docker <<'STUB'
-echo "registry.example.test/x: not found: manifest unknown" >&2
-exit 1
+printf '%s\n' "$*" >> "${STUB_ARGV}"
+printf '%s\n' "${STUB_OUT}"
+exit "${STUB_RC}"
 STUB
-    PATH="${bin}:${PATH}" run _ci_registry_probe registry.example.test/x/y:z
-    [ "${status}" -eq 1 ]
-}
-
-@test "registry_probe maps the imagetools miss to not-found" {
-    # What: buildx "ERROR: <ref>: not found" returns 1.
-    # Why: real CI shape; it drove every target UNKNOWN.
-    # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    _tool_stub "${bin}" docker <<'STUB'
-echo "ERROR: registry.example.test/x/y:z: not found" >&2
-exit 1
-STUB
-    PATH="${bin}:${PATH}" run _ci_registry_probe registry.example.test/x/y:z
-    [ "${status}" -eq 1 ]
-}
-
-@test "registry_probe maps an auth failure to unknown, not not-found" {
-    # What: an auth failure returns 2 (never build).
-    # Why: a credential problem is not a missing artifact.
-    # From: Issue #1683
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    _tool_stub "${bin}" docker <<'STUB'
-echo "denied: requested access to the resource" >&2
-exit 1
-STUB
-    PATH="${bin}:${PATH}" run _ci_registry_probe registry.example.test/x/y:z
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-WARN-RESOLVE-0007]"* ]]
-    [[ "${output}" == *"denied: requested access"* ]]
-}
-
-@test "registry_probe returns the digest on success" {
-    # What: a present tag yields its digest, code 0.
-    # Why: the happy path feeds the resolver.
-    # From: Issue #1683
-    local bin="${BATS_TEST_TMPDIR}/bin"; mkdir -p "${bin}"
-    _tool_stub "${bin}" docker <<'STUB'
-echo sha256:ok
-STUB
-    PATH="${bin}:${PATH}" run _ci_registry_probe registry.example.test/x/y:z
-    [ "${status}" -eq 0 ]
-    [ "${output}" = sha256:ok ]
-}
-
-@test "resolve state maps every ledger x registry combination" {
-    # What: ledger + registry evidence -> resolver state.
-    # Why: only MISSING_CONFIRMED builds; UNKNOWN never.
-    # From: Issue #1683
-    local led reg want
-    _ci_image_tag() { echo tag; }
-    while IFS='|' read -r led reg want; do
-        case "${led}" in
-            fail) _ci_ledger_read() { return 2; } ;;
-            none) _ci_ledger_read() { return 1; } ;;
-            *) eval "_ci_ledger_read() { printf '%s\tsha256:g\n' '${led}'; }" ;;
-        esac
-        case "${reg}" in
-            fail) _ci_registry_probe() { return 2; } ;;
-            none) _ci_registry_probe() { return 1; } ;;
-            *) eval "_ci_registry_probe() { echo 'sha256:${reg}'; }" ;;
-        esac
-        run _ci_resolve_state ui id-x os/p1
-        [ "${output##*$'\n'}" = "${want}" ] || { echo "${led}/${reg}: ${output}"; return 1; }
-        [ "${led}/${reg}" != ACCEPTED/none ] || [[ "${output}" == *RESOLVE-0006* ]]
+    while IFS='|' read -r case out rc want; do
+        : > "${STUB_ARGV}"
+        STUB_OUT="$(_fill "${out}")" STUB_RC="${rc%%:*}" PATH="${bin}:${PATH}" run _ci_registry_probe "${V[@REF@]}"
+        _expect "${case}" "${rc##*:}" "$(_fill "${want}")" || return 1
+        grep -qF -- "imagetools inspect ${V[@REF@]} " "${STUB_ARGV}" || { echo "${case}: argv $(cat "${STUB_ARGV}")"; return 1; }
     done <<'CASES'
-fail|g|UNKNOWN
-none|fail|UNKNOWN
-none|none|MISSING_CONFIRMED
-none|g|PRODUCED_UNVERIFIED
-ACCEPTED|g|PRESENT_ACCEPTED
-ACCEPTED|other|MISMATCH
-ACCEPTED|none|MISMATCH
-PRODUCED_UNVERIFIED|g|PRODUCED_UNVERIFIED
+present|@DIG@|0:0|=@DIG@
+manifest-unknown|@REF@: not found: manifest unknown|1:1|=
+buildx-not-found|ERROR: @REF@: not found|1:1|=
+denied|denied: requested access to the resource is denied|1:2|[CI-WARN-RESOLVE-0007] tag="@REF@" rc=1;denied: requested access
 CASES
 }
 
-@test "resolve state: a missing platform is UNKNOWN" {
-    # What: no platform means no registry probe.
-    # Why: fail closed rather than guess an artifact.
-    # From: Issue #1683
-    run _ci_resolve_state ui id-x ""
-    [ "${output}" = UNKNOWN ]
+# What: ledger x registry evidence -> one resolver state.
+# Why: only MISSING_CONFIRMED builds; UNKNOWN never.
+# From: Issue #1683 | PR #1858
+@test "resolve state maps every ledger x registry combination" {
+    local case led reg tagfail plat want id probe
+    local -A V=(
+        [@S@]="$(_val name)" [@ID@]="$(_val sha)" [@P@]="$(_val platform)" [@TAG@]="$(_val name)"
+        [@G@]="$(_val digest)" [@O@]="$(_val digest)"
+    )
+    PROBED="$(_val path)"
+    _ci_image_tag() { [ "${TAGFAIL}" != 1 ] || return 2; printf '%s' "${V[@TAG@]}"; }
+    _ci_ledger_read() { case "${LED}" in fail) return 2 ;; none) return 1 ;; *) printf '%s\t%s\n' "${LED}" "${V[@G@]}" ;; esac; }
+    _ci_registry_probe() {
+        printf '%s\n' "$1" >> "${PROBED}"
+        case "${REG}" in fail) return 2 ;; none) return 1 ;; *) printf '%s\n' "${V[${REG}]}" ;; esac
+    }
+    while IFS='|' read -r case led reg tagfail plat want id probe; do
+        : > "${PROBED}"
+        LED="${led}" REG="${reg}" TAGFAIL="${tagfail}" run _ci_resolve_state "${V[@S@]}" "${V[@ID@]}" "$(_fill "${plat}")"
+        [ "${output##*$'\n'}" = "${want}" ] || { echo "${case}: ${output}"; return 1; }
+        [ "${id}" = - ] || [[ "${output}" == *"${id}"* ]] || { echo "${case}: no ${id}: ${output}"; return 1; }
+        case "${probe}" in
+            y) grep -qxF -- "${V[@TAG@]}" "${PROBED}" || { echo "${case}: probe: $(cat "${PROBED}")"; return 1; } ;;
+            n) [ ! -s "${PROBED}" ] || { echo "${case}: probed: $(cat "${PROBED}")"; return 1; } ;;
+        esac
+    done <<'CASES'
+ledger-unreadable|fail|@G@|0|@P@|UNKNOWN|-|n
+registry-unknown|none|fail|0|@P@|UNKNOWN|-|y
+missing|none|none|0|@P@|MISSING_CONFIRMED|-|y
+produced|none|@G@|0|@P@|PRODUCED_UNVERIFIED|-|y
+accepted|ACCEPTED|@G@|0|@P@|PRESENT_ACCEPTED|-|y
+accepted-other|ACCEPTED|@O@|0|@P@|MISMATCH|-|y
+accepted-missing|ACCEPTED|none|0|@P@|MISMATCH|[CI-ERROR-RESOLVE-0006]|y
+ledger-produced|PRODUCED_UNVERIFIED|@G@|0|@P@|PRODUCED_UNVERIFIED|-|y
+tag-unreadable|none|@G@|1|@P@|UNKNOWN|-|n
+no-platform|none|none|0||UNKNOWN|-|n
+CASES
 }
 
 @test "index_lookup default reads the multi-arch index and drops attestations" {
@@ -10400,80 +9933,45 @@ SH
     [[ "${output}" == *"CI-ERROR-CANDIDATE-0005"* ]]
 }
 
-@test "ledger upsert writes many records in one commit" {
-    # What: a batch of records lands in one CAS commit.
-    # Why: §26.1 one write per workflow, not per record.
-    # From: Issue #1683
+# What: result files become one ledger write; reruns converge.
+# Why: one aggregator write per run (§26.1, §26.4).
+# From: Issue #1683 | PR #1858
+@test "aggregate: one write, rerun converges, partial and empty write nothing" {
+    local ref file t ok bad empty before recs i1 i2 s1 s2 p1 p2 d1 d2 bs
+    ref="refs/$(_val name)/$(_val name)"; file="$(_val name)"; t=$'\t'; bs="$(_val name)"
+    i1="$(_val sha)"; i2="$(_val sha)"; s1="$(_val name)"; s2="$(_val name)"
+    p1="$(_val platform)"; p2="$(_val platform)"; d1="$(_val digest)"; d2="$(_val digest)"
+    ok="$(_val path)"; bad="$(_val path)"; empty="$(_val path)"
+    mkdir -p "${ok}" "${bad}" "${empty}"
+    CI_GIT_REMOTE=origin; CI_LEDGER_REF="${ref}"; CI_LEDGER_FILE="${file}"
+    export CI_GIT_REMOTE CI_LEDGER_REF CI_LEDGER_FILE
+    printf '{"service":"%s","platform":"%s","build_identity":"%s","state":"ACCEPTED","digest":"%s"}' \
+        "${s1}" "${p1}" "${i1}" "${d1}" > "${ok}/$(_val name).json"
+    printf '{"service":"%s","platform":"%s","build_identity":"%s","state":"ACCEPTED","digest":"%s"}' \
+        "${s2}" "${p2}" "${i2}" "${d2}" > "${ok}/$(_val name).json"
+    cp "${ok}"/*.json "${bad}/"
+    printf '{"service":"%s","platform":"%s"}' "${bs}" "$(_val platform)" > "${bad}/$(_val name).json"
     _cas_setup
     cd "${CAS_A}"
-    printf 'id-a\tdns\tos/p1\tACCEPTED\tsha256:a\nid-b\tui\tos/p2\tACCEPTED\tsha256:b\n' \
-        | _ci_ledger_upsert origin
-    run _ci_ledger_read origin id-a
-    [[ "${output}" == *"sha256:a"* ]]
-    run _ci_ledger_read origin id-b
-    [[ "${output}" == *"sha256:b"* ]]
-    git fetch --quiet origin "$(_ci_variable CI_LEDGER_REF)"
-    [ "$(git cat-file -p FETCH_HEAD:records | grep -c .)" -eq 2 ]
-    [ "$(git rev-list --count FETCH_HEAD)" -eq 1 ]
-}
-
-@test "aggregate writes result.json files as one ledger write" {
-    # What: many result.json -> one aggregated ledger write.
-    # Why: §26.1 single aggregator, not per-job writes.
-    # From: Issue #1683
-    _cas_setup
-    cd "${CAS_A}"
-    local rd="${BATS_TEST_TMPDIR}/results"; mkdir -p "${rd}"
-    printf '{"service":"dns","platform":"os/p1","build_identity":"id-a","state":"ACCEPTED","digest":"sha256:a"}' > "${rd}/a.json"
-    printf '{"service":"ui","platform":"os/p2","build_identity":"id-b","state":"ACCEPTED","digest":"sha256:b"}' > "${rd}/b.json"
-    run ci_cmd_aggregate "${rd}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"result=written"* ]]
-    [[ "${output}" == *"records=2"* ]]
-    run _ci_ledger_read origin id-a
-    [[ "${output}" == *"ACCEPTED"* ]]
-}
-
-@test "aggregate re-run over the same results converges (idempotent)" {
-    # What: re-aggregating the same set is a no-op content.
-    # Why: §26.4 idempotency; same inputs -> same blob.
-    # From: Issue #1683
-    _cas_setup
-    cd "${CAS_A}"
-    local rd="${BATS_TEST_TMPDIR}/results"; mkdir -p "${rd}"
-    printf '{"service":"dns","platform":"os/p1","build_identity":"id-a","state":"ACCEPTED","digest":"sha256:a"}' > "${rd}/a.json"
-    ci_cmd_aggregate "${rd}"
-    git fetch --quiet origin "$(_ci_variable CI_LEDGER_REF)"
-    local first; first="$(git cat-file -p FETCH_HEAD:records)"
-    ci_cmd_aggregate "${rd}"
-    git fetch --quiet origin "$(_ci_variable CI_LEDGER_REF)"
-    local second; second="$(git cat-file -p FETCH_HEAD:records)"
-    [ "${first}" = "${second}" ]
-}
-
-@test "aggregate fails closed on a malformed result.json" {
-    # What: a partial result.json aborts the aggregation.
-    # Why: never record an incomplete acceptance.
-    # From: Issue #1683
-    _cas_setup
-    cd "${CAS_A}"
-    local rd="${BATS_TEST_TMPDIR}/results"; mkdir -p "${rd}"
-    printf '{"service":"dns","platform":"os/p1"}' > "${rd}/bad.json"
-    run ci_cmd_aggregate "${rd}"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-AGGREGATE-0004"* ]]
-}
-
-@test "aggregate fails closed when the results dir is empty" {
-    # What: no result.json means nothing to write.
-    # Why: an empty run must not silently succeed.
-    # From: Issue #1683
-    _cas_setup
-    cd "${CAS_A}"
-    local rd="${BATS_TEST_TMPDIR}/results"; mkdir -p "${rd}"
-    run ci_cmd_aggregate "${rd}"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-AGGREGATE-0003"* ]]
+    run ci_cmd_aggregate "${empty}"
+    _expect empty 2 "[CI-ERROR-AGGREGATE-0003]" || return 1
+    run ci_cmd_aggregate "${bad}"
+    _expect partial 2 "[CI-ERROR-AGGREGATE-0004];raw:;${bs}" || return 1
+    run git ls-remote --exit-code origin "${ref}"
+    [ "${status}" -eq 2 ] || { echo "a failed run wrote the ledger"; return 1; }
+    run ci_cmd_aggregate "${ok}"
+    _expect write 0 "[CI-INFO-LEDGER-0004];aggregate records=2" || return 1
+    git fetch --quiet origin "${ref}"
+    before="$(git rev-list --count FETCH_HEAD)"
+    recs="$(git cat-file -p "FETCH_HEAD:${file}")"
+    [ "$(grep -c . <<< "${recs}")" -eq 2 ] || { echo "records: ${recs}"; return 1; }
+    grep -qxF "${i1}${t}${s1}${t}${p1}${t}ACCEPTED${t}${d1}" <<< "${recs}" || { echo "no ${i1}: ${recs}"; return 1; }
+    grep -qxF "${i2}${t}${s2}${t}${p2}${t}ACCEPTED${t}${d2}" <<< "${recs}" || { echo "no ${i2}: ${recs}"; return 1; }
+    run ci_cmd_aggregate "${ok}"
+    _expect rerun 0 "[CI-INFO-LEDGER-0005];aggregate records=2" || return 1
+    git fetch --quiet origin "${ref}"
+    [ "$(git rev-list --count FETCH_HEAD)" -eq "${before}" ] || { echo "rerun added a commit"; return 1; }
+    [ "$(git cat-file -p "FETCH_HEAD:${file}")" = "${recs}" ] || { echo "rerun changed the records"; return 1; }
 }
 
 @test "default channel move points the channel tag at the digest" {
@@ -10519,19 +10017,6 @@ EOF
     [[ "${output}" == *"[CI-ERROR-PROMOTE-0015]"* ]]
 }
 
-@test "default promote lock acquires the per-channel ref" {
-    # What: default promote lock takes refs/ci/promote-lock.
-    # Why: reuses the CAS mutex, scoped per channel.
-    # From: Issue #1683
-    _cas_setup
-    cd "${CAS_A}"
-    run _ci_default_promote_lock latest
-    [ "${status}" -eq 0 ]
-    run _ci_cas_ref_sha origin refs/ci/promote-lock/latest
-    [ "${status}" -eq 0 ]
-    [ -n "${output}" ]
-}
-
 # =========================================================
 # VERSION MANAGEMENT
 # =========================================================
@@ -10540,256 +10025,171 @@ EOF
 # Why: sync tests must never touch the real repo files.
 # From: Issue #1683 | PR #1858
 _version_fixture_repo() {
-    local root="${BATS_TEST_DIRNAME}/../.." dir="${BATS_TEST_TMPDIR}/vrepo" dep df rest
-    while IFS='|' read -r dep df rest; do
-        mkdir -p "${dir}/$(dirname "${df}")"
-        cp "${root}/${df}" "${dir}/${df}"
-    done <<< "$(_ci_version_consumers)"
-    for df in Cargo.toml Cargo.lock VERSION $(_ci_cargo_members "${root}/Cargo.toml" | sed 's#$#/Cargo.toml#'); do
-        mkdir -p "${dir}/$(dirname "${df}")"
-        cp "${root}/${df}" "${dir}/${df}"
+    local root="${CI_REPO_ROOT}" dir lock vf ws f consumers members
+    dir="$(_val path)"
+    lock="$(_ci_repo_path CI_CARGO_LOCK "${root}")" && vf="$(_ci_repo_path CI_VERSION_FILE "${root}")" || return 1
+    ws="${lock%/*}/Cargo.toml"
+    consumers="$(_ci_version_consumers | cut -d'|' -f2)" && members="$(_ci_cargo_members "${ws}")" || return 1
+    for f in ${consumers} "${ws#"${root}/"}" "${lock#"${root}/"}" "${vf#"${root}/"}" $(sed 's#$#/Cargo.toml#' <<< "${members}"); do
+        mkdir -p "${dir}/$(dirname "${f}")" && cp "${root}/${f}" "${dir}/${f}" || return 1
     done
-    root="${dir}"
-    printf '%s' "${root}"
+    printf '%s' "${dir}"
 }
 
-@test "version verify (default) passes clean on the real repo" {
-    # What: default subcommand is verify, read-only.
-    # Why: every SOT pin stays SOT-driven, ARGs bare.
+@test "release version copies follow the SOT; sync writes once" {
+    # What: per row: one drifted copy -> its own id.
+    # Why: Cargo, members, lock, VERSION follow the SOT.
     # From: Issue #1683 | PR #1858
-    local dep up
-    run bash "${CI_SH}" version
-    [ "${status}" -eq 0 ]
-    dep="$(_pin_dep)"; up="${dep^^}"; up="${up//-/_}"
-    [[ "${output}" == *"key=${dep}.consumer.${up}_SHA256 shape=bare"* ]]
-    [[ "${output}" == *"release-version=$(_ci_block_entry_field release "" version) consumers=clean"* ]]
-    # What: each release-version drift has its own code.
-    # Why: Cargo, members, VERSION follow release.version.
+    local m lk vf r k case drift rc want before
+    m="$(_val path)"
+    local -A V=(
+        [@W@]="$(_val semver)" [@X@]="$(_val semver)" [@L@]="$(_val name)" [@MEM@]="$(_val name)"
+        [@PKG@]="$(_val name)" [@DEP@]="$(_val name)" [@DV@]="$(_val semver)"
+    )
+    { _fill "$(printf '%s\n' 'release:' '  version: @W@' '  license: @L@')"; printf '\n'; _sot_block ci_variables; } > "${m}"
+    lk="$(CI_MANIFEST="${m}" _ci_variable CI_CARGO_LOCK)" && vf="$(CI_MANIFEST="${m}" _ci_variable CI_VERSION_FILE)" || return 1
+    _w() { { _fill "$(printf '%s\n' "${@:2}")"; echo; } > "$1"; }
+    _rv() {
+        r="${BATS_TEST_TMPDIR}/$(_val name)"
+        mkdir -p "${r}/${V[@MEM@]}"
+        _w "${r}/Cargo.toml" '[workspace]' 'members = [' '    "@MEM@",' ']' '' '[workspace.package]' 'version = "@W@"' 'license = "@L@"'
+        _w "${r}/${V[@MEM@]}/Cargo.toml" '[package]' 'name = "@PKG@"' 'version.workspace = true' \
+            'edition.workspace = true' 'license.workspace = true'
+        _w "${r}/${lk}" '[[package]]' 'name = "@PKG@"' 'version = "@W@"' '' '[[package]]' 'name = "@DEP@"' 'version = "@DV@"'
+        _w "${r}/${vf}" '@W@'
+    }
+    while IFS='|' read -r case drift rc want; do
+        _rv
+        case "${drift}" in
+            none) ;;
+            ws-version) sed -i "s/^version = \"${V[@W@]}\"\$/version = \"${V[@X@]}\"/" "${r}/Cargo.toml" ;;
+            ws-license) sed -i "s/^license = \"${V[@L@]}\"\$/license = \"${V[@X@]}\"/" "${r}/Cargo.toml" ;;
+            member-*) k="${drift#member-}"; sed -i "s/^${k}\.workspace = true\$/${k} = \"${V[@X@]}\"/" "${r}/${V[@MEM@]}/Cargo.toml" ;;
+            lock) sed -i "s/^version = \"${V[@W@]}\"\$/version = \"${V[@X@]}\"/" "${r}/${lk}" ;;
+            vfile) _w "${r}/${vf}" '@X@' ;;
+            vfile-gone) mv "${r}/${vf}" "${r}/${vf}.gone" ;;
+        esac
+        CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+    done <<'CASES'
+clean|none|0|release-version=@W@ consumers=clean
+ws-version|ws-version|1|[CI-ERROR-VERSION-0021];got="@X@" want="@W@"
+ws-license|ws-license|1|[CI-ERROR-VERSION-0028];got="@X@" want="@L@"
+member-version|member-version|1|[CI-ERROR-VERSION-0022] member="@MEM@" key="version"
+member-edition|member-edition|1|[CI-ERROR-VERSION-0022] member="@MEM@" key="edition"
+member-license|member-license|1|[CI-ERROR-VERSION-0022] member="@MEM@" key="license"
+lock|lock|1|[CI-ERROR-VERSION-0025];package="@PKG@" got="@X@" want="@W@"
+version-file|vfile|1|[CI-ERROR-VERSION-0024];got="@X@" want="@W@"
+version-file-gone|vfile-gone|2|[CI-ERROR-VERSION-0023];raw:
+CASES
+    # What: sync writes the 3 copies once; rerun is no-op.
+    # Why: copies follow the SOT; other lock rows untouched.
     # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/rv" m="${BATS_TEST_TMPDIR}/rv.yml"
-    mkdir -p "${r}/a"
-    local ws='version.workspace = true\nedition.workspace = true\nlicense.workspace = true\n'
-    printf 'release:\n  version: 1.2.3\n  license: L-1\n' > "${m}"
-    _sot_ci_variables >> "${m}"
-    printf '[workspace]\nmembers = [\n    "a",\n]\n\n[workspace.package]\nversion = "1.2.3"\nlicense = "L-1"\n' > "${r}/Cargo.toml"
-    printf "[package]\nname = \"a\"\n${ws}" > "${r}/a/Cargo.toml"
-    printf '1.2.3\n' > "${r}/VERSION"
-    printf '[[package]]\nname = "a"\nversion = "1.2.3"\n\n[[package]]\nname = "dep"\nversion = "9.9.9"\n' > "${r}/Cargo.lock"
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release
-    [ "${status}" -eq 0 ]; [[ "${output}" == *"release-version=1.2.3 consumers=clean"* ]]
-    printf '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2024"\nlicense.workspace = true\n' > "${r}/a/Cargo.toml"
-    printf '1.2.2\n' > "${r}/VERSION"
-    sed -i 's/^version = "1.2.3"$/version = "1.2.0"/; s/^license = "L-1"$/license = "L-0"/' "${r}/Cargo.toml"
-    sed -i 's/^version = "1.2.3"$/version = "1.2.1"/' "${r}/Cargo.lock"
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *'[CI-ERROR-VERSION-0021]'*'got="1.2.0" want="1.2.3"'* ]]
-    [[ "${output}" == *'[CI-ERROR-VERSION-0022] member="a" key="version"'* ]]
-    [[ "${output}" == *'[CI-ERROR-VERSION-0022] member="a" key="edition"'* ]]
-    [[ "${output}" != *'key="license"'* ]]
-    [[ "${output}" == *'[CI-ERROR-VERSION-0028]'*'got="L-0" want="L-1"'* ]]
-    [[ "${output}" == *'[CI-ERROR-VERSION-0025]'*'package="a" got="1.2.1" want="1.2.3"'* ]]
-    [[ "${output}" == *'[CI-ERROR-VERSION-0024]'*'got="1.2.2" want="1.2.3"'* ]]
-    # What: sync writes the three copies; reruns are no-ops.
-    # Why: copies follow the SOT; member rule is not a copy.
-    # From: Issue #1683 | PR #1858
+    _rv
+    sed -i "s/^version = \"${V[@W@]}\"\$/version = \"${V[@X@]}\"/; s/^license = \"${V[@L@]}\"\$/license = \"${V[@X@]}\"/" \
+        "${r}/Cargo.toml"
+    sed -i "s/^version = \"${V[@W@]}\"\$/version = \"${V[@X@]}\"/" "${r}/${lk}"
+    _w "${r}/${vf}" '@X@'
     CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release_sync
-    [ "${status}" -eq 0 ]; [ "${output}" = "sync=release-version version=1.2.3 changed=3" ]
-    grep -qx 'version = "1.2.3"' "${r}/Cargo.toml"; grep -qx 'license = "L-1"' "${r}/Cargo.toml"
-    [ "$(cat "${r}/VERSION")" = 1.2.3 ]
-    [ "$(grep -c '^version = "1.2.3"$' "${r}/Cargo.lock")" -eq 1 ]; grep -qx 'version = "9.9.9"' "${r}/Cargo.lock"
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release_sync
-    [ "${output}" = "sync=release-version version=1.2.3 changed=0" ]
-    printf "[package]\nname = \"a\"\n${ws}" > "${r}/a/Cargo.toml"
+    _expect sync-drifted 0 "=sync=release-version version=${V[@W@]} changed=3" || return 1
     CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release
-    [ "${status}" -eq 0 ]
-    sed -i 's#^\(  CI_VERSION_FILE:\).*#\1 nodir/VERSION#' "${m}"
+    _expect sync-then-verify 0 "release-version=${V[@W@]} consumers=clean" || return 1
+    grep -qx "version = \"${V[@DV@]}\"" "${r}/${lk}" || { echo "other lock entry changed"; return 1; }
+    before="$(cd "${r}" && find . -type f -exec sha256sum {} + | LC_ALL=C sort)"
     CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release_sync
-    [ "${status}" -eq 2 ]; [[ "${output}" == *'[CI-ERROR-VERSION-0027]'*'nodir/VERSION'*'raw:'*'nodir'* ]]
+    _expect sync-converged 0 "=sync=release-version version=${V[@W@]} changed=0" || return 1
+    [ "$(cd "${r}" && find . -type f -exec sha256sum {} + | LC_ALL=C sort)" = "${before}" ] || { echo "rerun wrote"; return 1; }
+    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" CI_VERSION_FILE="$(_val name)/$(_val name)" run _ci_version_release_sync
+    _expect sync-unwritable 2 "[CI-ERROR-VERSION-0027];raw:" || return 1
 }
 
-@test "version verify explicit subcommand matches the default" {
-    # What: 'version verify' behaves like bare 'version'.
-    # Why: the default-arg wiring must not silently diverge.
+@test "version verify fails closed per SOT consumer pin and ARG" {
+    # What: per consumer: pin or ARG damage -> its own id.
+    # Why: a missing pin or a second owner never passes.
     # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" version verify
-    [ "${status}" -eq 0 ]
-}
-
-@test "version verify fails closed on a missing or malformed SOT pin" {
-    # What: sha missing=0004; garbled=0015.
-    # Why: a missing/truncated pin must never pass silently.
-    # From: Issue #1683 | PR #1858
-    local dep df keys key val m
+    local dep df keys key val arg root m damage want
+    key="$(_ci_build_matrix_platforms)"
+    key="sha256_$(_ci_platform_field "${key%%$'\n'*}" apk "$(_val name)")"
     while IFS='|' read -r dep df keys; do
-        key="$(_ci_build_matrix_platforms)"; key="sha256_$(_ci_platform_apk_arch "${key%%$'\n'*}")"
+        root="$(_version_fixture_repo)" || return 1
+        CI_REPO_ROOT="${root}" run --separate-stderr bash "${CI_SH}" version verify
+        arg="$(sed -n "s/^key=${dep}\.consumer\.\([A-Za-z0-9_]*\) shape=bare\$/\1/p" <<< "${output}" | awk 'NR == 1')"
         val="$(_ci_block_entry_field external_versions "${dep}" "${key}")"
-        m="${BATS_TEST_TMPDIR}/${dep}-missing.yml"
-        grep -v "^    ${key}: ${val}\$" "${CI_MANIFEST}" > "${m}"
-        CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
-        [ "${status}" -eq 2 ]
-        [[ "${output}" == *"CI-ERROR-BUILDARGS-0004"*"${dep}.${key}"*"missing"* ]]
-        m="${BATS_TEST_TMPDIR}/${dep}-badsha.yml"
-        sed "s/^    ${key}: ${val}\$/    ${key}: not-a-real-hash/" "${CI_MANIFEST}" > "${m}"
-        CI_MANIFEST="${m}" run bash "${CI_SH}" version verify
-        [ "${status}" -eq 2 ]
-        [[ "${output}" == *"CI-ERROR-BUILDARGS-0015"*"${dep}.${key}"*"not 64 hex"* ]]
+        [ -n "${arg}" ] && [ -n "${val}" ] || { echo "${dep}: arg='${arg}' ${key}='${val}': ${output}"; return 1; }
+        for damage in pin-missing pin-malformed arg-gone arg-baked; do
+            root="$(_version_fixture_repo)" m="${BATS_TEST_TMPDIR}/$(_val name).yml"
+            cp "${CI_MANIFEST}" "${m}"
+            case "${damage}" in
+                pin-missing) grep -v "^    ${key}: ${val}\$" "${CI_MANIFEST}" > "${m}"; want="[CI-ERROR-BUILDARGS-0004];${dep}.${key}" ;;
+                pin-malformed) sed "s/^    ${key}: ${val}\$/    ${key}: $(_val name)/" "${CI_MANIFEST}" > "${m}"
+                    want="[CI-ERROR-BUILDARGS-0015];${dep}.${key}" ;;
+                arg-gone) sed -i "/^ARG ${arg}\$/d" "${root}/${df}"; want="[CI-ERROR-VERSION-0008];name=\"${arg}\"" ;;
+                arg-baked) sed -i "s/^ARG ${arg}\$/ARG ${arg}=$(_val name)/" "${root}/${df}"; want="[CI-ERROR-VERSION-0009];name=\"${arg}\"" ;;
+            esac
+            CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" run bash "${CI_SH}" version verify
+            _expect "${dep}/${damage}" 2 "${want}" || return 1
+        done
     done <<< "$(_ci_version_consumers)"
 }
 
-@test "version verify fails closed on a missing or baked consumer ARG" {
-    # What: ARG gone=0008; default=0009.
-    # Why: the SOT is the only owner; no second pin, no gap.
-    # From: Issue #1683 | PR #1858
-    local dep df keys arg root
-    while IFS='|' read -r dep df keys; do
-        arg="${dep^^}_VERSION"
-        root="$(_version_fixture_repo)"
-        sed -i "/^ARG ${arg}\$/d" "${root}/${df}"
-        CI_REPO_ROOT="${root}" run bash "${CI_SH}" version verify
-        [ "${status}" -eq 2 ]
-        [[ "${output}" == *"CI-ERROR-VERSION-0008"*"${arg}"* ]]
-        root="$(_version_fixture_repo)"
-        sed -i "s/^ARG ${arg}\$/ARG ${arg}=baked/" "${root}/${df}"
-        CI_REPO_ROOT="${root}" run bash "${CI_SH}" version verify
-        [ "${status}" -eq 2 ]
-        [[ "${output}" == *"CI-ERROR-VERSION-0009"*"${arg}"* ]]
-    done <<< "$(_ci_version_consumers)"
-}
-
-@test "version audit is the verify owner under its contract name" {
-    # What: audit and verify give the same output and rc.
+@test "version, verify and audit give one output and rc" {
+    # What: per state: the 3 names agree on output and rc.
     # Why: one pin-drift owner; no second walk of the SOT.
     # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" version verify
-    local want_status="${status}" want="${output}"
-    run bash "${CI_SH}" version audit
-    [ "${status}" -eq "${want_status}" ]
-    [ "${output}" = "${want}" ]
+    local root vf state sub want_status want
+    for state in clean drifted; do
+        root="$(_version_fixture_repo)" || return 1
+        if [ "${state}" = drifted ]; then
+            vf="$(_ci_repo_path CI_VERSION_FILE "${root}")" && printf '%s\n' "$(_val semver)" > "${vf}"
+        fi
+        CI_REPO_ROOT="${root}" run bash "${CI_SH}" version
+        want_status="${status}" want="${output}"
+        case "${state}" in
+            clean) [ "${want_status}" -eq 0 ] ;;
+            drifted) [ "${want_status}" -eq 1 ] && [[ "${want}" == *"[CI-ERROR-VERSION-0024]"* ]] ;;
+        esac || { echo "${state}: rc ${want_status}: ${want}"; return 1; }
+        for sub in verify audit; do
+            CI_REPO_ROOT="${root}" run bash "${CI_SH}" version "${sub}"
+            [ "${status}" -eq "${want_status}" ] && [ "${output}" = "${want}" ] \
+                || { echo "${state}/${sub}: rc ${status}: ${output}"; return 1; }
+        done
+    done
 }
 
-@test "version sync is a contract-only no-op for both consumers" {
-    # What: every consumer is BARE; sync writes nothing.
-    # Why: pins derive live from the SOT.
+@test "Dockerfile ARG grammar maps each shape to a state or id" {
+    # What: per row: ARG lines -> ABSENT/BARE/FOUND or id.
+    # Why: AG-VAL-036: read the real grammar or fail loud.
     # From: Issue #1683 | PR #1858
-    local root before after dep
-    root="$(_version_fixture_repo)"
-    before="$(cd "${root}" && find . -type f -exec sha256sum {} + | LC_ALL=C sort)"
-    CI_REPO_ROOT="${root}" run bash "${CI_SH}" version sync
-    [ "${status}" -eq 0 ]
-    dep="$(_pin_dep)"
-    [[ "${output}" == *"sync=${dep} changed=0 reason=nothing-to-write"* ]]
-    [[ "${output}" == *"sync=release-version version=$(_ci_release_value version) changed=0"* ]]
-    after="$(cd "${root}" && find . -type f -exec sha256sum {} + | LC_ALL=C sort)"
-    [ "${before}" = "${after}" ]
-}
-
-@test "unknown version subcommand fails closed" {
-    # What: an unrecognized 'version' verb must not succeed.
-    # Why: fail-closed dispatch, like every other command.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" version bogus
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0014"* ]]
-}
-
-@test "_ci_dockerfile_arg_default reports ABSENT and BARE" {
-    # What: a missing name vs. a defaultless declaration.
-    # Why: the two must stay distinct, never conflated.
-    # From: Issue #1683 | PR #1858
-    local f="${BATS_TEST_TMPDIR}/Dockerfile.shapes"
-    printf 'FROM alpine\nARG BARE_ONE\n' > "${f}"
-    run _ci_dockerfile_arg_default "${f}" NOT_THERE
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "ABSENT" ]
-    run _ci_dockerfile_arg_default "${f}" BARE_ONE
-    [ "${status}" -eq 0 ]
-    [ "${output}" = "BARE" ]
-}
-
-@test "_ci_dockerfile_arg_default reads quoted and bare values" {
-    # What: unquoted, double- and single-quoted defaults.
-    # Why: AG-VAL-036: the real ARG grammar has all three.
-    # From: Issue #1683 | PR #1858
-    local f="${BATS_TEST_TMPDIR}/Dockerfile.quotes"
-    printf 'FROM alpine\nARG A=1.2.3\nARG B="x y"\nARG C='"'"'q v'"'"'\n' > "${f}"
-    run _ci_dockerfile_arg_default "${f}" A
-    [ "${output}" = "FOUND:1.2.3" ]
-    run _ci_dockerfile_arg_default "${f}" B
-    [ "${output}" = "FOUND:x y" ]
-    run _ci_dockerfile_arg_default "${f}" C
-    [ "${output}" = "FOUND:q v" ]
-}
-
-@test "_ci_dockerfile_arg_default accepts identical bare re-declares" {
-    # What: one bare ARG before and after FROM is BARE.
-    # Why: identical bare pre/post-FROM lines are valid.
-    # From: Issue #1683 | PR #1858
-    local f="${BATS_TEST_TMPDIR}/Dockerfile.redeclare"
-    printf 'ARG X\nFROM a\nARG X\n' > "${f}"
-    run _ci_dockerfile_arg_default "${f}" X
-    [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
-    [ "${output}" = "BARE" ]
-}
-
-@test "_ci_dockerfile_arg_default refuses conflicting re-declares" {
-    # What: two ARG lines, one name, different defaults.
-    # Why: AG-VAL-036: refuse to guess, escalate instead.
-    # From: Issue #1683 | PR #1858
-    local f="${BATS_TEST_TMPDIR}/Dockerfile.conflict"
-    printf 'FROM alpine\nARG X=1\nARG X=2\n' > "${f}"
-    run _ci_dockerfile_arg_default "${f}" X
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0002"* ]]
-}
-
-@test "_ci_dockerfile_arg_default refuses unsupported shapes" {
-    # What: a line-continuation and an unquoted space value.
-    # Why: an unreadable shape must fail loud, never skip.
-    # From: Issue #1683 | PR #1858
-    local f="${BATS_TEST_TMPDIR}/Dockerfile.unsupported"
-    printf 'FROM alpine\nARG A=abc\\\nARG B=has space\n' > "${f}"
-    run _ci_dockerfile_arg_default "${f}" A
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0003"* ]]
-    run _ci_dockerfile_arg_default "${f}" B
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VERSION-0005"* ]]
+    local f case lines name rc want
+    local -A V=(
+        [@A@]="$(_val var)" [@B@]="$(_val var)" [@V@]="$(_val name)" [@W@]="$(_val name)" [@IMG@]="$(_val name)"
+    )
+    while IFS='|' read -r case lines name rc want; do
+        f="${BATS_TEST_TMPDIR}/$(_val name)"
+        [ "${lines}" = - ] || { _fill "${lines}"; echo; } | tr ';' '\n' > "${f}"
+        run _ci_dockerfile_arg_default "${f}" "$(_fill "${name}")"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+    done <<'CASES'
+absent|FROM @IMG@;ARG @A@|@B@|0|=ABSENT
+bare|FROM @IMG@;ARG @A@|@A@|0|=BARE
+unquoted|FROM @IMG@;ARG @A@=@V@|@A@|0|=FOUND:@V@
+double-quoted|FROM @IMG@;ARG @A@="@V@ @W@"|@A@|0|=FOUND:@V@ @W@
+single-quoted|FROM @IMG@;ARG @A@='@V@ @W@'|@A@|0|=FOUND:@V@ @W@
+lowercase-indented|FROM @IMG@;  arg @A@=@V@|@A@|0|=FOUND:@V@
+redeclare-bare|ARG @A@;FROM @IMG@;ARG @A@|@A@|0|=BARE
+redeclare-conflict|FROM @IMG@;ARG @A@=@V@;ARG @A@=@W@|@A@|2|[CI-ERROR-VERSION-0002]
+continuation|FROM @IMG@;ARG @A@=@V@\|@A@|2|[CI-ERROR-VERSION-0003]
+embedded-double|FROM @IMG@;ARG @A@="@V@"@W@"|@A@|2|[CI-ERROR-VERSION-0004]
+embedded-single|FROM @IMG@;ARG @A@='@V@'@W@'|@A@|2|[CI-ERROR-VERSION-0015]
+unquoted-space|FROM @IMG@;ARG @A@=@V@ @W@|@A@|2|[CI-ERROR-VERSION-0005]
+bad-token|FROM @IMG@;ARG @A@ @V@|@A@|2|[CI-ERROR-VERSION-0006]
+no-file|-|@A@|2|[CI-ERROR-VERSION-0001]
+CASES
 }
 
 # =========================================================
 # HISTORICAL REGRESSIONS
 # =========================================================
-
-# What: loads every setup.sh function, never runs setup.sh
-# Why: tests drive the product code with its real die
-# From: Issue #1683 | PR #1858
-_load_setup_sh() {
-    local repo_root="$1"
-    local helper_file="${BATS_TEST_TMPDIR}/setup-sh.sh"
-    # What: setup.sh up to its dispatcher; nothing executes
-    # Why: declare -gA keeps top-level maps global in here
-    # From: Issue #1683 | PR #1858
-    {
-        printf 'SCRIPT_DIR=%q\n' "${repo_root}"
-        awk 'NR == 1 || /^set -euo pipefail$/ || /^SCRIPT_DIR=/ { next }
-            /^case "\$\{1:-install\}" in$/ { exit }
-            { sub(/^declare -A /, "declare -gA "); print }' "${repo_root}/setup.sh"
-    } > "${helper_file}"
-    grep -q '^cmd_backup() ($' "${helper_file}" || { echo "setup.sh cut is incomplete"; return 1; }
-    export DOCKER_HOST="${SETUP_SH_DOCKER_HOST}"
-    # shellcheck source=/dev/null
-    source "${helper_file}"
-    # What: every setup.sh test gets the one docker stand-in
-    # Why: no test may reach a daemon or retype data
-    # From: Issue #1683 | PR #1858
-    export BIN="${BATS_TEST_TMPDIR}/bin" DS="${BATS_TEST_TMPDIR}/ds"
-    mkdir -p "${DS}/volumes" && _setup_docker_stub "${BIN}" && PATH="${BIN}:${PATH}"
-    # What: setup.sh's own seam for the raw TCP probe
-    # Why: no LAN address is reachable inside the test box
-    # From: Issue #1683 | PR #1858
-    export SETUP_SH_SEAMS='_tcp_port_reachable() { [ ! -e "${DS}/fail-tcp" ]; }'
-}
 
 # What: a prod install whose .env setup.sh converged
 # Why: tests start from setup.sh's own output, not a copy
@@ -10818,26 +10218,27 @@ _legacy_env() {
     # What: one row per host arch / buildx / manifest case
     # Why: a tag lacking this platform must fail closed
     # From: Issue #1683 | PR #1858
-    local root plats p apk unk first second a1 a2 joined case arch state rc want w
+    local root plats p apk unk first second a1 a2 case arch state rc want w
     local -a ws
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
     plats="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_platforms dns)"
     first="$(awk 'NR == 1' <<< "${plats}")" second="$(awk 'NR == 2' <<< "${plats}")"
-    a1="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_platform_apk_arch "${first}")"
-    a2="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_platform_apk_arch "${second}")"
-    joined="$(paste -sd'|' <<< "${plats}" | sed 's/|/ and /g')" unk="arch${BATS_TEST_NUMBER}"
+    a1="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_platform_field "${first}" apk "$(_val name)")"
+    a2="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_platform_field "${second}" apk "$(_val name)")"
+    unk="arch${BATS_TEST_NUMBER}"
     [ -n "${second}" ] && [ -n "${a1}" ] && [ -n "${a2}" ] || { echo "inputs: ${plats} ${a1} ${a2}"; return 1; }
     # What: uname and docker arch map to the SOT platform
     # Why: setup.sh's host map must equal the SOT's arch map
     # From: Issue #1683 | PR #1858
     while IFS= read -r p; do
-        apk="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_platform_apk_arch "${p}")"
+        apk="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_platform_field "${p}" apk "$(_val name)")"
         [ "$(host_image_platform "${apk}")" = "${p}" ] && [ "$(host_image_platform "${p#*/}")" = "${p}" ] \
             || { echo "host map for ${p}: ${apk}"; return 1; }
     done <<< "${plats}"
     ! host_image_platform "${unk}" || { echo "unknown arch mapped"; return 1; }
-    export HOST_ARCH UNAME_REAL TAG="v$(tr -d '[:space:]' < "${root}/VERSION")" FAULT="${BATS_TEST_NAME}"
+    TAG="v$(tr -d '[:space:]' < "${root}/VERSION")"
+    export HOST_ARCH UNAME_REAL TAG FAULT="${BATS_TEST_NAME}"
     export REG PRE
     UNAME_REAL="$(type -P uname)"
     REG="$(resolve_lancache_image_registry "${root}/deploy/prod/.env")" PRE="$(resolve_lancache_image_prefix "${root}/deploy/prod/.env")"
@@ -10868,11 +10269,11 @@ STUB
     done <<CASES
 prebuilt-first|${a1}|-|0|-
 prebuilt-second|${a2}|-|0|-
-prebuilt-unknown|${unk}|-|1|${joined};'${unk}'
+prebuilt-unknown|${unk}|-|1|'${unk}' has no container image platform
 resolved-lacks|${a2}|${first}|1|does not publish a ${second} image;published: ${first}
 resolved-single|${a1}|${first}|0|-
 resolved-index|${a2}|<no value>/<no value>|0|-
-resolved-unknown|${unk}|-|1|${joined}
+resolved-unknown|${unk}|-|1|'${unk}' has no container image platform
 resolved-nobuildx|${a1}|fail-buildx|1|docker buildx is required
 resolved-unreachable|${a1}|inspect-fail|1|Failed to inspect ${REG}/${PRE}/dns:${TAG};${FAULT}
 CASES
@@ -11108,6 +10509,7 @@ CASES
     local root t="${BATS_TEST_TMPDIR}" project svc keys key want vol dir absent copies f el
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
+    require_helper_image
     export ROOT="${root}" CO="${t}/co" QS="${t}/qs" BK="${t}/bk"
     _prod_install "${CO}/deploy/prod"
     project="$(_prod_compose config --format json | jq -r .name)"
@@ -11118,8 +10520,7 @@ CASES
     keys="$(declare -f migrate_quickstart_install | sed -n 's/^ *local path_keys="\([^"]*\)".*/\1/p')"
     copies="$(declare -f migrate_quickstart_install | grep -o '"\$old_dir/scripts/[^"]*"' | sed 's|^"\$old_dir/||; s|"$||')"
     [ -n "${keys}" ] && [ -n "${copies}" ] || { echo "migration lists: ${keys} | ${copies}"; return 1; }
-    mkdir -p "${QS}/certs" "$(dirname "${CO}/${DOCKER_SOCKET_PROXY_SCRIPT#"${root}/"}")"
-    printf '%s\n' "${CO}" > "${CO}/${DOCKER_SOCKET_PROXY_SCRIPT#"${root}/"}"
+    mkdir -p "${QS}/certs"
     cp "${root}/deploy/prod/.env" "${QS}/.env"
     remove_env_key LANCACHE_STATE_DIR "${QS}/.env"
     for key in ${keys}; do set_env_key "${key}" "./${key,,}" "${QS}/.env"; done
@@ -11146,7 +10547,6 @@ CASES
     : > "${DS}/running"
     _setup_sh_run 'PATH="${BIN}:${PATH}"; eval "${SETUP_SH_SEAMS}"; SCRIPT_DIR="${CO}" BACKUP_ROOT="${BK}"
         PROD_COMPOSE="${CO}/${PROD_COMPOSE#"${ROOT}/"}"
-        DOCKER_SOCKET_PROXY_SCRIPT="${CO}/${DOCKER_SOCKET_PROXY_SCRIPT#"${ROOT}/"}"
         is_quickstart_install "${QS}" && migrate_quickstart_install "${QS}"'
     [ "${status}" -eq 0 ] || { echo "migrate: ${output}"; return 1; }
     el="$(runtime_env_file_for_install_dir "${CO}/deploy/prod")"
@@ -11166,8 +10566,7 @@ CASES
     done <<< "$(quickstart_volume_dirs "${el}")"
     cmp "${QS}/certs/ca.crt" "${CO}/certs/ca.crt" && cmp "${QS}/certs/ca.key" "${CO}/certs/ca.key" || { echo "ca"; return 1; }
     while IFS= read -r f; do [ ! -e "${QS}/${f}" ] || { echo "kept ${f}"; return 1; }; done <<< "${copies}"
-    [ ! -e "${QS}/docker-compose.yml" ] && [ ! -e "${QS}/.env" ] && [ "$(cat "${CO}/${DOCKER_SOCKET_PROXY_SCRIPT#"${root}/"}")" = "${CO}" ] \
-        || { echo "quickstart files"; return 1; }
+    [ ! -e "${QS}/docker-compose.yml" ] && [ ! -e "${QS}/.env" ] || { echo "quickstart files"; return 1; }
     grep -q '^completed|' "${QS}/.quickstart-migration" || { echo "record"; return 1; }
     [ "$(find "${BK}" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ] || { echo "backups: $(ls -A "${BK}")"; return 1; }
     # What: quickstart stops for good before prod starts
@@ -11205,6 +10604,7 @@ CASES
     local root t="${BATS_TEST_TMPDIR}" over want
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
+    require_helper_image
     export DP="${t}/co/deploy/prod"
     _prod_install "${DP}"
     over="$(declare -f compose_file_args_for_install_dir | grep -o 'docker-compose\.override\.y[a-z]*ml' | awk 'NR == 1')"
@@ -11227,6 +10627,7 @@ CASES
     local -a pids=()
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
+    require_helper_image
     main="$(declare -f git_default_branch_name | sed -n 's/.*default_branch:-\([A-Za-z0-9_-]*\)}.*/\1/p')"
     lo="127.$(( BATS_TEST_NUMBER % 250 + 1 ))" svc="probe${BATS_TEST_NUMBER}" mark="rev${BATS_TEST_NUMBER}"
     std="${lo}.0.1" ssl="${lo}.0.2"
@@ -11237,7 +10638,8 @@ CASES
     g init -q --bare "${t}/origin.git"
     mkdir -p "${t}/src"
     for f in setup.sh VERSION .gitignore deploy/prod/docker-compose.yml deploy/prod/.env \
-        deploy/prod/docker-compose.nats-secondary.yml $(cd "${root}" && git ls-files config/prod); do
+        deploy/prod/docker-compose.nats-secondary.yml .github/yaml/build-manifest.yml .github/scripts/ci.sh \
+        $(cd "${root}" && git ls-files config/prod); do
         mkdir -p "$(dirname "${t}/src/${f}")" && cp "${root}/${f}" "${t}/src/${f}"
     done
     chmod +x "${t}/src/setup.sh"
@@ -11328,6 +10730,7 @@ case "${url}" in
             || { status=401 body='{"error":"missing or invalid X-API-Key"}'; } ;;
     *)
         [ "${cfg}" -eq 0 ] || cat > "${DS}/kea.cfg"
+        printf '%s\n' "${url}" >> "${DS}/kea.urls"
         cmd="$(jq -r .command <<< "${data}")"
         printf '%s\n' "${cmd}" >> "${DS}/kea.commands"
         body='[{"result":0,"text":"ok"}]'
@@ -11343,15 +10746,22 @@ STUB
     # What: test, set, write in order; a fault stops early
     # Why: a half-applied Kea config breaks DHCP for the LAN
     # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" d kd old new case want rc v
+    local root t="${BATS_TEST_TMPDIR}" d kd kd2 old new case want rc v port
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
     d="${t}/repo/deploy/prod"
     _prod_install "${d}"
+    # What: checkout Kea agent conf with a shifted port
+    # Why: setup.sh must dial the conf's port, not a copy
+    # From: Issue #1683 | PR #1858
+    mkdir -p "${t}/repo/services/dhcp"
+    port="$(( $(jq -er '.["Control-agent"]["http-port"]' "${root}/services/dhcp/kea-ctrl-agent.conf") + BATS_TEST_NUMBER + 1 ))"
+    jq --argjson p "${port}" '.["Control-agent"]["http-port"] = $p' "${root}/services/dhcp/kea-ctrl-agent.conf" \
+        > "${t}/repo/services/dhcp/kea-ctrl-agent.conf"
     export D="${d}" TOKEN FAULT="${BATS_TEST_NAME}"
     TOKEN="$(generate_secret_value KEA_CTRL_TOKEN hex32)"
     set_env_key KEA_CTRL_TOKEN "${TOKEN}" "${d}/.env"
-    kd="$(prod_state_dir_for_key KEA_DATA_DIR "${d}/.env")/config-snapshots"
+    kd="$(kea_snapshot_host_dir "${d}" "${d}/.env" "$(prod_state_dir_for_key KEA_DATA_DIR "${d}/.env")")"
     old="$(( $(date +%s) - 60 ))000000000" new="$(date +%s)000000000"
     for v in "${old}" "${new}"; do mkdir -p "${kd}/${v}" && jq -nc --arg v "${v}" '{Dhcp4: {"user-context": {id: $v}}}' > "${kd}/${v}/dhcp4.json"; done
     mkdir -p "${kd}/${new}x" "${kd}/$(( new + 1 ))"
@@ -11379,7 +10789,8 @@ STUB
         [ ! -e "${DS}/curl.argv" ] || ! grep -qF -- "${TOKEN}" "${DS}/curl.argv" || { echo "${case}: token in argv"; return 1; }
         case "${case}" in
             byid|newest) [ "$(paste -sd, "${DS}/kea.commands")" = "config-test,config-set,config-write" ] \
-                    && grep -qF -- "${TOKEN}" "${DS}/kea.cfg" || { echo "${case}: $(cat "${DS}/kea.commands")"; return 1; } ;;
+                    && grep -qF -- "${TOKEN}" "${DS}/kea.cfg" && [[ "$(sort -u "${DS}/kea.urls")" == *":${port}/" ]] \
+                    || { echo "${case}: $(cat "${DS}/kea.commands") $(cat "${DS}/kea.urls")"; return 1; } ;;
             testfail) [ "$(cat "${DS}/kea.commands")" = config-test ] || { echo "config-set after a failed test"; return 1; } ;;
         esac
     done <<CASES
@@ -11401,7 +10812,7 @@ CASES
             nostack) D="${t}/nostack" ;;
             noenv) rm -f "${d}/.env" ;;
             notoken) set_env_key KEA_CTRL_TOKEN "" "${d}/.env" ;;
-            override) set_env_key KEA_CONFIG_SNAPSHOT_DIR "${t}/elsewhere" "${d}/.env" ;;
+            outside) set_env_key KEA_CONFIG_SNAPSHOT_DIR "${t}/elsewhere" "${d}/.env" ;;
         esac
         rm -f "${DS}/kea.commands"
         _setup_sh_run 'PATH="${BIN}:${PATH}"; reset_kea_to_last_known_good_config "${D}" "" 1'
@@ -11411,8 +10822,21 @@ CASES
 nostack|No stack found in ${t}/nostack
 noenv|No .env found for ${d}
 notoken|KEA_CTRL_TOKEN is empty or missing
-override|KEA_CONFIG_SNAPSHOT_DIR is overridden
+outside|is not under the Kea data mount
 CASES
+    # What: a moved snapshot dir inside the mount works
+    # Why: UI, dhcp and setup.sh read one configured path
+    # From: Issue #1683 | PR #1858
+    cp "${t}/env.ok" "${d}/.env"
+    v="$(dirname "$(get_env_var KEA_CONFIG_SNAPSHOT_DIR "${d}/.env")")/snaps${BATS_TEST_NUMBER}"
+    set_env_key KEA_CONFIG_SNAPSHOT_DIR "${v}" "${d}/.env"
+    kd2="$(prod_state_dir_for_key KEA_DATA_DIR "${d}/.env")/snaps${BATS_TEST_NUMBER}"
+    mkdir -p "${kd2}/${old}" && cp "${kd}/${old}/dhcp4.json" "${kd2}/${old}/"
+    rm -f "${DS}/kea.commands"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; reset_kea_to_last_known_good_config "${D}" "" 1'
+    [ "${status}" -eq 0 ] && [[ "${output}" == *"defaulting to the newest: ${old}"* ]] \
+        && [ "$(paste -sd, "${DS}/kea.commands")" = "config-test,config-set,config-write" ] \
+        || { echo "moved snapshot dir: rc ${status}: ${output}"; return 1; }
     cp "${t}/env.ok" "${d}/.env"
 }
 
@@ -11602,6 +11026,31 @@ mix|1|unhealthy during this update: ${s2}
 CASES
 }
 
+@test "setup update step that dies still reaches the rollback" {
+    # What: a die inside an update step runs the rollback
+    # Why: an aborted step must never leave a half update
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}"
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    export DP="${t}/repo/deploy/prod" FAULT="${BATS_TEST_NAME}" AWK_REAL STUBS="${t}/stubs" FAILKEY
+    _prod_install "${DP}"
+    FAILKEY="$(declare -f verify_stack_functional_health | grep -oE 'get_env_var [A-Z][A-Z0-9_]+' | awk 'NR == 1 { print $2 }')"
+    [ -n "${FAILKEY}" ] || { echo "no key read in verify_stack_functional_health"; return 1; }
+    AWK_REAL="$(type -P awk)"
+    _tool_stub "${STUBS}" awk <<'STUB'
+case " $* " in
+    *" key=${FAILKEY:?} "*) echo "awk: injected read failure" >&2; exit 2 ;;
+esac
+exec "${AWK_REAL:?}" "$@"
+STUB
+    _tool_stub "${BIN}" sleep <<< ':'
+    _setup_sh_run 'PATH="${STUBS}:${BIN}:${PATH}"; _UPDATE_ENV_FILE="${DP}/.env" _UPDATE_STACK_DIR="${DP}"
+        roll() { echo rollback-ran; }; apply_stack_update_ordered "${DP}" roll || echo apply-failed'
+    [[ "${output}" == *"injected read failure"* && "${output}" == *rollback-ran* && "${output}" == *apply-failed* ]] \
+        || { echo "rc ${status}: ${output}"; return 1; }
+}
+
 # What: iproute2 stand-in for host addresses and routes
 # Why: the wizard reads them; tests own no host network
 # From: Issue #1683 | PR #1858
@@ -11636,12 +11085,7 @@ STUB
     # What: a checkout copy whose template DHCP values shift
     # Why: a default equal to an old literal proves no owner
     # From: Issue #1683 | PR #1858
-    mkdir -p "${t}/repo/deploy"
-    for v in "${root}"/* "${root}"/.[!.]*; do
-        [ "${v##*/}" = setup.sh ] || [ "${v##*/}" = deploy ] || ln -s "${v}" "${t}/repo/${v##*/}"
-    done
-    for v in "${root}"/deploy/*; do [ "${v##*/}" = prod ] || ln -s "${v}" "${t}/repo/deploy/${v##*/}"; done
-    cp "${root}/setup.sh" "${t}/repo/setup.sh" && cp -r "${root}/deploy/prod" "${t}/repo/deploy/prod"
+    _checkout_copy "${root}" "${t}/repo" || { echo "checkout copy failed"; return 1; }
     tpl="${t}/repo/deploy/prod/.env"
     for v in DHCP_SUBNET DHCP_GATEWAY DHCP_RANGE_START DHCP_RANGE_END; do
         d="$(get_env_var "${v}" "${tpl}")"
@@ -11784,6 +11228,97 @@ STUB
     [ "${status}" -ne 0 ] || { echo "missing answers file accepted"; return 1; }
 }
 
+@test "setup fresh install writes a config the prod compose takes" {
+    # What: the real wizard installs a checkout copy
+    # Why: no other test runs the .env.local write
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" repo env tpl cfg port std dev pfx keys k v n ddir np i calls after
+    # What: refuses to run on a host with a live systemd
+    # Why: install would write units outside the test dir
+    # From: Issue #1683 | PR #1858
+    [ ! -d /run/systemd/system ] || { echo "systemd host: a real install would write /etc units"; return 1; }
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    repo="${t}/repo" env="${t}/repo/deploy/prod/.env.local" tpl="${t}/repo/deploy/prod/.env"
+    _checkout_copy "${root}" "${repo}" || { echo "checkout copy failed"; return 1; }
+    # What: the copy shifts ui port and size/age defaults
+    # Why: a literal port or value copy would miss the shift
+    # From: Issue #1683 | PR #1858
+    cfg="$(docker compose --env-file "${tpl}" -f "${repo}/deploy/prod/docker-compose.yml" config --format json)"
+    port="$(jq -r '.services.ui.ports[0].published' <<< "${cfg}")"
+    sed -i "s/}:${port}:/}:$((port + 1)):/" "${repo}/deploy/prod/docker-compose.yml"
+    [ "$(grep -c "}:$((port + 1)):" "${repo}/deploy/prod/docker-compose.yml")" -eq 1 ] || { echo "port ${port} not shifted"; return 1; }
+    keys="$(declare -f set_template_owned_env_defaults)"
+    keys="$(grep -oE '\b[A-Z][A-Z0-9_]{2,}\b' <<< "${keys}" | sort -u)"
+    n=0
+    for k in ${keys}; do
+        v="$(get_env_var "${k}" "${tpl}")"
+        [[ "${v}" =~ ^([0-9]+)([a-z])$ ]] || continue
+        set_env_key "${k}" "$((BASH_REMATCH[1] + 1))${BASH_REMATCH[2]}" "${tpl}"
+        n=$((n + 1))
+    done
+    [ "${n}" -gt 0 ] || { echo "no template default shifted: ${keys}"; return 1; }
+    std="$(get_env_var IP_STANDARD "${tpl}")" dev="lan${BATS_TEST_NUMBER}" pfx=$(( BATS_TEST_NUMBER % 8 + 16 ))
+    export IPDS="${t}/ipds" REPO="${repo}" ENVL="${env}" ID_REAL
+    ID_REAL="$(type -P id)"
+    mkdir -p "${IPDS}" && _ip_stub "${BIN}"
+    printf '%s\n' "127.0.0.1 8 lo" "${std} ${pfx} ${dev}" > "${IPDS}/addrs"
+    printf '%s %s\n' "${std}" "${dev}" > "${IPDS}/src"
+    # What: id -u reports root; the rest is the real host
+    # Why: setup.sh requires root; the test box may not be
+    # From: Issue #1683 | PR #1858
+    _tool_stub "${BIN}" id <<<'[ "$*" != -u ] || { echo 0; exit 0; }; exec "${ID_REAL:?}" "$@"'
+    printf 'sha256:%s' "$(printf '%064d' 0 | tr 0 a)" > "${DS}/digest"
+    LANCACHE_IMAGE_TAG="v$(tr -d '[:space:]' < "${root}/VERSION")"
+    export LANCACHE_IMAGE_CHANNEL=pinned LANCACHE_IMAGE_TAG
+    # What: one answer per wizard prompt, all defaults
+    # Why: only the state dir moves under the test dir
+    # From: Issue #1683 | PR #1858
+    run timeout -k 5 120 bash "${repo}/setup.sh" list-prompts
+    [ "${status}" -eq 0 ] || { echo "prompts: ${output}"; return 1; }
+    ddir="$(awk -F'\t' -v d="$(production_state_root_default "${repo}/deploy/prod")" '$1 == "PROMPT" { n++; if ($3 == d) { print n; exit } }' <<< "${output}")"
+    np="$(grep -cP '^PROMPT\t' <<< "${output}")"
+    [ -n "${ddir}" ] && [ "${np}" -gt 0 ] || { echo "no state dir prompt: ${output}"; return 1; }
+    for ((i = 1; i <= np; i++)); do
+        if [ "${i}" -eq "${ddir}" ]; then printf '%s\n' "${t}/state"; else printf '\n'; fi
+    done > "${t}/answers"
+    # What: no command prints the help and writes nothing
+    # Why: only the explicit install command installs
+    # From: Issue #1683 | PR #1858
+    calls=0
+    [ ! -e "${DS}/docker.log" ] || calls="$(wc -l < "${DS}/docker.log")"
+    run timeout -k 5 60 bash "${repo}/setup.sh"
+    after=0
+    [ ! -e "${DS}/docker.log" ] || after="$(wc -l < "${DS}/docker.log")"
+    [ "${status}" -eq 0 ] && [[ "${output}" == *"Usage:"* ]] && [ ! -e "${env}" ] && [ "${after}" -eq "${calls}" ] \
+        || { echo "no command: rc ${status} docker calls ${calls}->${after}: ${output}"; return 1; }
+    run timeout -k 5 300 script -qec "bash ${repo}/setup.sh install" /dev/null < "${t}/answers"
+    [ "${status}" -eq 0 ] && [[ "${output}" == *"Stack started"* ]] || { echo "install: rc ${status}: ${output}"; return 1; }
+    [[ "${output}" == *"http://${std}:$((port + 1))"* ]] || { echo "ui url: ${output}"; return 1; }
+    [ "$(awk -v e="compose --env-file ${env} " 'index($0, e) == 1 && ($NF == "pull" || / up -d$/) { n++ } END { print n + 0 }' "${DS}/docker.log")" -eq 2 ] \
+        || { echo "pull/up: $(cat "${DS}/docker.log")"; return 1; }
+    # What: prod compose renders with the written config
+    # Why: compose fails closed on a missing required key
+    # From: Issue #1683 | PR #1858
+    _setup_sh_run 'stack_compose "${REPO}/deploy/prod" "${ENVL}" config --quiet'
+    [ "${status}" -eq 0 ] || { echo "compose config: ${output}"; return 1; }
+    for k in ${keys}; do
+        [ "$(get_env_var "${k}" "${env}")" = "$(get_env_var "${k}" "${tpl}")" ] || { echo "${k}: $(cat "${env}")"; return 1; }
+    done
+    [ "$(get_env_var IP_STANDARD "${env}")" = "${std}" ] && [ "$(get_env_var LOGGING_ENABLED "${env}")" = 1 ] \
+        && [[ ",$(get_env_var COMPOSE_PROFILES "${env}")," == *,logging,* ]] || { echo "values: $(cat "${env}")"; return 1; }
+    # What: a failed URL render warns; the install ends 0
+    # Why: a print after the start must never abort setup
+    # From: Issue #1683 | PR #1858
+    _checkout_copy "${root}" "${t}/repo2" || { echo "second copy failed"; return 1; }
+    rm -f "${DS}/running"
+    : > "${DS}/fail-config-after-up"
+    FAULT="render refused" run timeout -k 5 300 script -qec "bash ${t}/repo2/setup.sh install" /dev/null < "${t}/answers"
+    rm -f "${DS}/fail-config-after-up"
+    [ "${status}" -eq 0 ] && [[ "${output}" == *"Stack started"* && "${output}" == *"Cannot derive the Admin-UI URL"* ]] \
+        && [[ "${output}" == *"render refused"* ]] || { echo "url failure: rc ${status}: ${output}"; return 1; }
+}
+
 @test "setup secondary bind-IP suggestion skips busy IPs and fails loud" {
     # What: free LAN IP first; listing error is rc 2, not 1
     # Why: a swallowed ss or ip error offered a busy address
@@ -11838,6 +11373,39 @@ CASES
         && [[ "${output}" == *"Failed to list the port 53 listeners"* ]] || { echo "tty caller: rc ${status}: ${output}"; return 1; }
 }
 
+@test "setup helper image is the SOT's digest-pinned alpine" {
+    # What: helper containers run only the SOT-pinned alpine
+    # Why: a mutable alpine tag changes under a customer
+    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" want sot case rc msg
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    want="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_field base_images "" alpine)"
+    [[ "${want}" == *@sha256:* ]] || { echo "SOT alpine: ${want}"; return 1; }
+    export VOL="v${BATS_TEST_NUMBER}" FX="${t}/fx"
+    mkdir -p "${DS}/volumes/${VOL}" "${FX}/.github/yaml"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; path_manifest "${VOL}" > /dev/null; printf "[%s]\n" "${LANCACHE_HELPER_IMAGE}"'
+    [ "${status}" -eq 0 ] && [ "${lines[-1]}" = "[${want}]" ] && [ "$(sort -u "${DS}/run-images")" = "${want}" ] \
+        || { echo "run image: ${output} / $(cat "${DS}/run-images")"; return 1; }
+    # What: unpinned, shadowed or missing SOT entries
+    # Why: only the base_images pin may reach a docker run
+    # From: Issue #1683 | PR #1858
+    sot="${root}/.github/yaml/build-manifest.yml"
+    while IFS='|' read -r case rc msg; do
+        case "${case}" in
+            unpinned) sed 's/^\(  alpine: "[^@"]*\)@sha256:[0-9a-f]*"/\1"/' "${sot}" ;;
+            shadowed) awk '{ print } /^image_base:$/ { print "  alpine: \"decoy\"" }' "${sot}" ;;
+            missing) grep -v '^  alpine: ' "${sot}" ;;
+        esac > "${FX}/.github/yaml/build-manifest.yml"
+        _setup_sh_run 'SCRIPT_DIR="${FX}"; require_helper_image; printf "[%s]\n" "${LANCACHE_HELPER_IMAGE}"'
+        [ "${status}" -eq "${rc}" ] && [[ "${output}" == *"${msg}"* ]] || { echo "${case}: rc ${status}: ${output}"; return 1; }
+    done <<CASES
+unpinned|1|is not digest-pinned
+shadowed|0|[${want}]
+missing|1|defines no base_images.alpine
+CASES
+}
+
 @test "deploy_prod_repo_input_paths snapshots repo-root runtime inputs for deploy/prod" {
     # What: lists each repo input compose mounts or reads
     # Why: rollback restores the config that existed before
@@ -11867,46 +11435,50 @@ CASES
     # What: fixture root + apk stub per row: calls, codes.
     # Why: one owner sets repos, keys, CA and apk steps.
     # From: Issue #1683 | PR #1858
-    local name pkgs repos keys ca fail want r bin w key sha
+    local name pkgs repos keys ca fail want r bin w keyf
     local -a ws p
-    bin="${BATS_TEST_TMPDIR}/apkbin"; mkdir -p "${bin}"
+    local -A V=(
+        [@H1@]="$(_val host)" [@H2@]="$(_val host)" [@H3@]="$(_val host)" [@P1@]="$(_val name)" [@P2@]="$(_val name)"
+        [@TAG@]="$(_val name)" [@KF@]="$(_val name)" [@A@]="$(_val name)" [@B@]="$(_val name)"
+        [@KEYDATA@]="$(_val name)" [@SYSCA@]="$(_val name)" [@CA@]="$(_val name)" [@BAD@]="$(_val digest | cut -d: -f2)"
+    )
+    bin="$(_val path)"; mkdir -p "${bin}"
     _tool_stub "${bin}" apk <<'STUB'
 echo "APK $* cert=${SSL_CERT_FILE:-none}"
-if [ -n "${SSL_CERT_FILE:-}" ] && grep -q PROXYCA "${SSL_CERT_FILE}"; then echo "CA-IN-BUNDLE"; fi
+if [ -n "${SSL_CERT_FILE:-}" ] && grep -qF -- "${CA_MARK}" "${SSL_CERT_FILE}"; then echo "CA-IN-BUNDLE"; fi
 [ "$1" != "${APK_FAIL:-}" ] || { echo "apk-boom"; exit 3; }
 STUB
-    key="${BATS_TEST_TMPDIR}/key.pub"; printf 'KEYDATA\n' > "${key}"
-    sha="$(sha256sum "${key}")"; sha="${sha%% *}"
+    keyf="${BATS_TEST_TMPDIR}/$(_val name)"; printf '%s\n' "${V[@KEYDATA@]}" > "${keyf}"
+    V[@SHA@]="$(sha256sum "${keyf}" | cut -d' ' -f1)"
     while IFS='|' read -r name pkgs repos keys ca fail want; do
-        r="${BATS_TEST_TMPDIR}/root-${name}"
+        r="$(_val path)"
         mkdir -p "${r}/etc/apk/keys" "${r}/etc/ssl/certs" "${r}/run/secrets"
-        printf 'https://dl.example/main\n' > "${r}/etc/apk/repositories"
-        printf 'SYSCA\n' > "${r}/etc/ssl/certs/ca-certificates.crt"
-        [ -z "${ca}" ] || printf 'PROXYCA\n' > "${r}/run/secrets/project_selfhosted_proxy_ca"
-        keys="${keys//@SHA@/${sha}}"
-        read -r -a p <<<"${pkgs}"
-        PATH="${bin}:${PATH}" CI_APK_ROOT="${r}" APK_TAGGED_REPOS="${repos}" APK_KEYS="${keys}" APK_FAIL="${fail}" \
-        CI_HTTP_DOWNLOAD_CMD="$(_stub "dl-${name}" "cp '${key}' \"\$2\"")" \
+        printf 'https://%s/%s\n' "${V[@H1@]}" "${V[@P1@]}" > "${r}/etc/apk/repositories"
+        printf '%s\n' "${V[@SYSCA@]}" > "${r}/etc/ssl/certs/ca-certificates.crt"
+        [ -z "${ca}" ] || printf '%s\n' "${V[@CA@]}" > "${r}/run/secrets/project_selfhosted_proxy_ca"
+        read -r -a p <<< "$(_fill "${pkgs}")"
+        PATH="${bin}:${PATH}" CA_MARK="${V[@CA@]}" CI_APK_ROOT="${r}" APK_TAGGED_REPOS="$(_fill "${repos}")" \
+        APK_KEYS="$(_fill "${keys}")" APK_FAIL="${fail}" CI_HTTP_DOWNLOAD_CMD="$(_stub "cp '${keyf}' \"\$2\"")" \
             run bash "${CI_SH}" apk-setup "${p[@]}"
-        IFS=';' read -r -a ws <<<"${want}"
+        IFS=';' read -r -a ws <<< "$(_fill "${want}")"
         for w in "${ws[@]}"; do
             case "${w}" in
                 rc=*) [ "${status}" -eq "${w#rc=}" ] ;;
                 file:*) grep -qF -- "${w#file:}" "${r}/etc/apk/repositories" ;;
-                key) [ "$(cat "${r}/etc/apk/keys/key.pub")" = KEYDATA ] ;;
-                nokey) [ ! -e "${r}/etc/apk/keys/key.pub" ] ;;
-                sysca) [ "$(cat "${r}/etc/ssl/certs/ca-certificates.crt")" = SYSCA ] ;;
+                key:*) [ "$(cat "${r}/etc/apk/keys/${w#key:}")" = "${V[@KEYDATA@]}" ] ;;
+                nokey:*) [ ! -e "${r}/etc/apk/keys/${w#nokey:}" ] ;;
+                sysca) [ "$(cat "${r}/etc/ssl/certs/ca-certificates.crt")" = "${V[@SYSCA@]}" ] ;;
                 !*) [[ "${output}" != *"${w#!}"* ]] ;;
                 *) [[ "${output}" == *"${w}"* ]] ;;
             esac || { echo "${name}: '${w}': rc ${status}: ${output}"; return 1; }
         done
     done <<'CASES'
-plain|a b|||||rc=0;file:http://dl.example/main;APK update --no-cache;APK upgrade --no-cache;APK add --no-cache a b;!CA-IN-BUNDLE
+plain|@A@ @B@|||||rc=0;file:http://@H1@/@P1@;APK update --no-cache;APK upgrade --no-cache;APK add --no-cache @A@ @B@;!CA-IN-BUNDLE
 no-pkgs||||||rc=0;APK upgrade --no-cache;!APK add
-tagged|curl n@ng|ng=http://ng.example/v3.24/main|http://k.example/key.pub=@SHA@|||rc=0;APK add --no-cache curl;APK add --no-cache n@ng;file:@ng http://ng.example/v3.24/main;key
-key-mismatch|curl n@ng|ng=http://ng.example/main|http://k.example/key.pub=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|||rc=2;CI-ERROR-FETCH-0003;!APK add --no-cache n@ng
-upgrade-fails|a||||upgrade|rc=2;CI-ERROR-APKSETUP-0005;apk-boom;!APK add
-proxy-ca|a|||y||rc=0;CA-IN-BUNDLE;sysca
+tagged|@A@ @B@@@TAG@|@TAG@=http://@H2@/@P2@|http://@H3@/@KF@=@SHA@|||rc=0;APK add --no-cache @A@;APK add --no-cache @B@@@TAG@;file:@@TAG@ http://@H2@/@P2@;key:@KF@
+key-mismatch|@A@ @B@@@TAG@|@TAG@=http://@H2@/@P2@|http://@H3@/@KF@=@BAD@|||rc=2;CI-ERROR-FETCH-0003;!APK add --no-cache @B@@@TAG@;nokey:@KF@
+upgrade-fails|@A@||||upgrade|rc=2;CI-ERROR-APKSETUP-0005;apk-boom;!APK add
+proxy-ca|@A@|||y||rc=0;CA-IN-BUNDLE;sysca
 CASES
 }
 
@@ -12009,7 +11581,7 @@ _load_retention_functions() {
     local f="${BATS_TEST_TMPDIR}/retention-functions.sh"
     awk '/^log\(\) \{/ { c = 1 } /^log "Retention daemon started\./ { c = 0 } c { print }' \
         "${BATS_TEST_DIRNAME}/../../services/watchdog/retention.sh" > "${f}"
-    # shellcheck source=/dev/null
+    # shellcheck source=services/watchdog/retention.sh
     source "${f}"
 }
 
@@ -12344,7 +11916,7 @@ CASES
     # What: a real TERM during the interval sleep ends it.
     # Why: PID 1 bash ignored TERM; docker stop had to kill.
     # From: Issue #1683 | PR #1858
-    local t="${BATS_TEST_TMPDIR}/ret" pid kid="" c i rc=0
+    local t="${BATS_TEST_TMPDIR}/ret" pid kid="" c rc=0
     mkdir -p "${t}/cache/lancache" "${t}/state" "${t}/log/syslog" "${t}/lib/fb"
     CACHE_DIR="${t}/cache/lancache" CACHE_DIR_ALLOWED_PREFIX="${t}/cache" \
         PURGE_STAMP="${t}/state/purge.stamp" SYSLOG_ENABLED=false \
@@ -12353,7 +11925,7 @@ CASES
         FLUENT_BIT_SELFLOG_DIR_ALLOWED_PREFIX="${t}/lib" RETENTION_INTERVAL=60 \
         bash "${BATS_TEST_DIRNAME}/../../services/watchdog/retention.sh" > "${t}/out.log" 2>&1 &
     pid=$!
-    for i in $(seq 1 100); do
+    for _ in $(seq 1 100); do
         for c in $(cat "/proc/${pid}/task/${pid}/children" 2>&1); do
             [ "$(cat "/proc/${c}/comm" 2>&1)" = sleep ] && kid="${c}"
         done
@@ -12362,7 +11934,7 @@ CASES
     done
     [ -n "${kid}" ] || { echo "never reached the sleep:"; cat "${t}/out.log"; kill "${pid}"; return 1; }
     kill -TERM "${pid}"
-    for i in $(seq 1 50); do [ -d "/proc/${pid}" ] || break; sleep 0.1; done
+    for _ in $(seq 1 50); do [ -d "/proc/${pid}" ] || break; sleep 0.1; done
     [ ! -d "/proc/${pid}" ] || { echo "still running 5 s after TERM:"; cat "${t}/out.log"; kill -9 "${pid}"; return 1; }
     wait "${pid}" || rc=$?
     echo "rc=${rc}"; cat "${t}/out.log"
@@ -12380,21 +11952,21 @@ CASES
     # What: lib nats, dns, dhcp and ui resolve secrets with.
     # Why: AG-OP-006; reruns must not rotate stable secrets.
     # From: Issue #1683
-    local lib v1 v i
+    local lib v1 v
     lib="$(ci_context_path shared-secret)"
     # shellcheck source=scripts/lib/shared-secret-bootstrap.sh
     source "${BATS_TEST_DIRNAME}/../../${lib}"
     export LANCACHE_SHARED_SECRET_DIR="${BATS_TEST_TMPDIR}/secrets"
     LANCACHE_SHARED_SECRET_GID="$(id -g)"; export LANCACHE_SHARED_SECRET_GID
-    _gen() { printf 'g\n' >> "${BATS_TEST_TMPDIR}/gen.log"; printf 'v-%s' "${RANDOM}"; }
+    _gen() { printf 'g\n' >> "${BATS_TEST_TMPDIR}/gen.log"; printf '%s' "$(_val name)"; }
     v1="$(resolve_shared_secret s1 "" _gen)"
     [ -n "${v1}" ]
-    for i in 1 2 3; do
+    for _ in 1 2 3; do
         v="$(resolve_shared_secret s1 "" _gen)"
         [ "${v}" = "${v1}" ]
     done
     [ "$(wc -l < "${BATS_TEST_TMPDIR}/gen.log")" -eq 1 ]
-    for i in 1 2; do
+    for _ in 1 2; do
         v="$(resolve_shared_secret s1 real-value _gen)"
         [ "${v}" = real-value ]
         [ "$(cat "${LANCACHE_SHARED_SECRET_DIR}/s1")" = real-value ]
@@ -12558,13 +12130,13 @@ CASES
     [ "$(_normalize_domain '  .Example.COM ')" = example.com ]
 }
 
-# What: source named functions of a script, also nested.
-# Why: tests run product code without running the script.
+# What: print a file with named functions of a script.
+# Why: the caller sources it under its real source name.
 # From: Issue #1683 | PR #1858
-_load_functions() {
+_extract_functions() {
     local file="$1" out fn
     shift
-    out="${BATS_TEST_TMPDIR}/fns-${file##*/}"
+    out="$(_val path)"
     : > "${out}"
     for fn in "$@"; do
         awk -v fn="${fn}" '!c && match($0, "^ *" fn "\\(\\) [({]$") {
@@ -12572,26 +12144,9 @@ _load_functions() {
                 end = (substr($0, length($0)) == "{") ? "}" : ")"
             }
             c { print } c && $0 == ind end { exit }' "${file}" >> "${out}"
-        grep -qE "^ *${fn}\(\) [({]$" "${out}" || { echo "function ${fn} not found in ${file}"; return 1; }
+        grep -qE "^ *${fn}\(\) [({]$" "${out}" || { echo "function ${fn} not found in ${file}" >&2; return 1; }
     done
-    # shellcheck source=/dev/null
-    source "${out}"
-}
-
-# What: runs a snippet on loaded setup.sh fns, setup.sh opts
-# Why: failure paths are proven under set -euo pipefail
-# From: Issue #1683 | PR #1858
-_setup_sh_run() {
-    local root msg="${BATS_TEST_TMPDIR}/setup-msg.sh" full="${BATS_TEST_TMPDIR}/setup-sh.sh"
-    if [ -f "${full}" ]; then
-        run env DOCKER_HOST="${SETUP_SH_DOCKER_HOST}" bash -c 'set -euo pipefail; . "$1"; eval "$2"' _ "${full}" "$1"
-        return 0
-    fi
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    grep -E '^(print_step|print_ok|print_warn|print_error|die) *\(\) *\{.*\}$' "${root}/setup.sh" > "${msg}"
-    [ "$(wc -l < "${msg}")" -eq 5 ]
-    run env DOCKER_HOST="${SETUP_SH_DOCKER_HOST}" bash -c 'set -euo pipefail; YELLOW="" RED="" RESET="" BOLD="" CYAN="" GREEN=""
-        . "$1"; . "$2"; eval "$3"' _ "${msg}" "${BATS_TEST_TMPDIR}/fns-setup.sh" "$1"
+    printf '%s\n' "${out}"
 }
 
 # What: load the dns entrypoint zone functions + validator.
@@ -12602,7 +12157,8 @@ _load_dns_zone_functions() {
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     # shellcheck source=services/dns/domain-validation.sh
     source "${root}/services/dns/domain-validation.sh"
-    _load_functions "${root}/services/dns/entrypoint.sh" _dns_generate_rpz_zone _dns_soa_maintain_zone
+    # shellcheck source=services/dns/entrypoint.sh
+    source "$(_extract_functions "${root}/services/dns/entrypoint.sh" _dns_generate_rpz_zone _dns_soa_maintain_zone)"
 }
 
 @test "dns rpz zone maps each domain list shape" {
@@ -12699,7 +12255,8 @@ CASES
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     # shellcheck source=services/dns/domain-validation.sh
     source "${root}/services/dns/domain-validation.sh"
-    _load_functions "${root}/services/proxy/entrypoint.sh" _proxy_is_one_label_past _collect_domain_rows
+    # shellcheck source=services/proxy/entrypoint.sh
+    source "$(_extract_functions "${root}/services/proxy/entrypoint.sh" _proxy_is_one_label_past _collect_domain_rows)"
     # What: stub root = last two labels; bad-root.com fails.
     # Why: the real one needs the public suffix list loaded.
     # From: Issue #1073 | PR #1858
@@ -12748,13 +12305,14 @@ CASES
     # What: each create-zone outcome under set -eu pipefail.
     # Why: a swallowed backend error leaves a zone missing.
     # From: Issue #1683 | PR #1858
-    local root s="${BATS_TEST_TMPDIR}/zone.sh" case prc msg want out
+    local root s fe case prc msg want out
+    s="$(_val path)"
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/services/dns/entrypoint.sh" _dns_ensure_zone_exists
+    fe="$(_extract_functions "${root}/services/dns/entrypoint.sh" _dns_ensure_zone_exists)" || return 1
     while IFS='|' read -r case prc msg want out; do
         printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
             'pdnsutil() { echo "CALL $*"; [ -z "${MSG}" ] || echo "${MSG}" >&2; return "${PRC}"; }' \
-            "source '${BATS_TEST_TMPDIR}/fns-entrypoint.sh'" \
+            "source '${fe}'" \
             '_dns_ensure_zone_exists lan' 'echo CANARY' > "${s}"
         PRC="${prc}" MSG="${msg}" run bash "${s}"
         [ "${status}" -eq "${want}" ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
@@ -12775,11 +12333,11 @@ CASES
 # Why: the entrypoint runs them under exactly these options.
 # From: Issue #1683 | PR #1858
 _dns_tsig_script() {
-    local root="$1" s="$2" tsig_call="$3"
-    _load_functions "${root}/scripts/lib/shared-secret-bootstrap.sh" secret_is_placeholder
-    _load_functions "${root}/services/dns/entrypoint.sh" configure_ddns_tsig import_ddns_tsig_key \
+    local root="$1" s="$2" tsig_call="$3" fs fe
+    fs="$(_extract_functions "${root}/scripts/lib/shared-secret-bootstrap.sh" secret_is_placeholder)" || return 1
+    fe="$(_extract_functions "${root}/services/dns/entrypoint.sh" configure_ddns_tsig import_ddns_tsig_key \
         _dns_set_zone_metadata dns_xfr_primary_endpoint _dns_configure_primary_zone_replication \
-        _dns_ensure_secondary_zone
+        _dns_ensure_secondary_zone)" || return 1
     printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
         'pdnsutil() {' '    echo "$*" >> "${CALLS}"' \
         '    case "${PMODE}:$*" in' \
@@ -12789,8 +12347,8 @@ _dns_tsig_script() {
         '    esac' '}' \
         'getent() { echo x >> "${GETENT}"; [ "$(wc -l < "${GETENT}")" -ge "${RESOLVE_AT}" ] || return 2; echo "10.0.0.5 STREAM $2"; }' \
         'sleep() { :; }' \
-        "source '${BATS_TEST_TMPDIR}/fns-shared-secret-bootstrap.sh'" \
-        "source '${BATS_TEST_TMPDIR}/fns-entrypoint.sh'" \
+        "source '${fs}'" \
+        "source '${fe}'" \
         'DDNS_TSIG_NAME=lancache-ddns-key DDNS_TSIG_ALGORITHM=hmac-sha256' \
         'DDNS_UPDATE_ZONES=(lan 1.168.192.in-addr.arpa)' \
         "${tsig_call}" 'echo CANARY' > "${s}"
@@ -12838,8 +12396,10 @@ CASES
     local -a composes=()
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     fx="${root}/tests/fixtures/placeholder-detection-cases.txt"
-    _load_functions "${root}/scripts/lib/shared-secret-bootstrap.sh" secret_is_placeholder
-    _load_functions "${root}/setup.sh" secret_value_is_placeholder
+    # shellcheck source=scripts/lib/shared-secret-bootstrap.sh
+    source "$(_extract_functions "${root}/scripts/lib/shared-secret-bootstrap.sh" secret_is_placeholder)"
+    # shellcheck source=setup.sh
+    source "$(_extract_functions "${root}/setup.sh" secret_value_is_placeholder)"
     mapfile -t composes < <(grep -l 'kea-ctrl-token 2>/dev/null' "${root}"/deploy/*/docker-compose.yml)
     [ "${#composes[@]}" -ge 1 ]
     # What: the dhcp healthcheck token block, $$ unescaped.
@@ -12906,8 +12466,9 @@ CASES
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     # shellcheck source=scripts/lib/known-good-snapshots.sh
     source "${root}/$(ci_context_path known-good)"
-    _load_functions "${root}/services/proxy/entrypoint.sh" \
-        _proxy_validate_snapshot_or_rollback _migrate_legacy_proxy_snapshots_for_stream_acl
+    # shellcheck source=services/proxy/entrypoint.sh
+    source "$(_extract_functions "${root}/services/proxy/entrypoint.sh" \
+        _proxy_validate_snapshot_or_rollback _migrate_legacy_proxy_snapshots_for_stream_acl)"
     _tool_stub "${bin}" nginx <<'SH'
 if grep -q BROKEN "${NGINX_TEST_CONFIG_FILE}"; then echo "nginx: test failed" >&2; exit 1; fi
 SH
@@ -12985,7 +12546,8 @@ SH
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     # shellcheck source=scripts/lib/known-good-snapshots.sh
     source "${root}/$(ci_context_path known-good)"
-    _load_functions "${root}/services/dhcp-proxy/entrypoint.sh" _dhcp_proxy_validate_snapshot_or_rollback
+    # shellcheck source=services/dhcp-proxy/entrypoint.sh
+    source "$(_extract_functions "${root}/services/dhcp-proxy/entrypoint.sh" _dhcp_proxy_validate_snapshot_or_rollback)"
     _tool_stub "${bin}" dnsmasq <<'SH'
 f=""; while [ $# -gt 0 ]; do case "$1" in -C) f="$2"; shift 2 ;; *) shift ;; esac; done
 if grep -q BROKEN "${f}"; then echo "dnsmasq: syntax check failed" >&2; exit 1; fi
@@ -13022,8 +12584,9 @@ SH
     local root c="${BATS_TEST_TMPDIR}/dnsmasq.conf" case i r n d bf bs co want warn w
     local -a ws
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/services/dhcp-proxy/entrypoint.sh" _dhcp_proxy_reject_embedded_newline \
-        _dhcp_proxy_render_optional_directives _dhcp_proxy_render_custom_options
+    # shellcheck source=services/dhcp-proxy/entrypoint.sh
+    source "$(_extract_functions "${root}/services/dhcp-proxy/entrypoint.sh" _dhcp_proxy_reject_embedded_newline \
+        _dhcp_proxy_render_optional_directives _dhcp_proxy_render_custom_options)"
     # What: "." is an empty field, \n a raw newline.
     # Why: keeps every table row at ten visible fields.
     # From: Issue #1683 | PR #1858
@@ -13074,8 +12637,9 @@ CASES
     # From: Issue #1683 | PR #1858
     local root c="${BATS_TEST_TMPDIR}/dnsmasq.conf" case s b u want warn
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/services/dhcp-proxy/entrypoint.sh" _dhcp_proxy_reject_embedded_newline \
-        _dhcp_proxy_render_pxe_service_directives
+    # shellcheck source=services/dhcp-proxy/entrypoint.sh
+    source "$(_extract_functions "${root}/services/dhcp-proxy/entrypoint.sh" _dhcp_proxy_reject_embedded_newline \
+        _dhcp_proxy_render_pxe_service_directives)"
     while IFS='|' read -r case s b u want warn; do
         [ "${s}" != . ] || s=""
         [ "${b}" != . ] || b=""
@@ -13111,8 +12675,10 @@ CASES
     # From: Issue #1683 | PR #1858
     local root f="${BATS_TEST_TMPDIR}/ui-settings.env" fn own other
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/services/dhcp-proxy/entrypoint.sh" _dhcp_proxy_source_ui_settings
-    _load_functions "${root}/services/ntp/entrypoint.sh" _ntp_source_ui_settings
+    # shellcheck source=services/dhcp-proxy/entrypoint.sh
+    source "$(_extract_functions "${root}/services/dhcp-proxy/entrypoint.sh" _dhcp_proxy_source_ui_settings)"
+    # shellcheck source=services/ntp/entrypoint.sh
+    source "$(_extract_functions "${root}/services/ntp/entrypoint.sh" _ntp_source_ui_settings)"
     for fn in _dhcp_proxy_source_ui_settings:DHCP_MODE:NTP_UPSTREAM_SERVERS _ntp_source_ui_settings:NTP_UPSTREAM_SERVERS:DHCP_MODE; do
         IFS=: read -r fn own other <<< "${fn}"
         unset "${own}" "${other}"
@@ -13144,7 +12710,8 @@ CASES
     local root t="${BATS_TEST_TMPDIR}/chrony.conf.template" c="${BATS_TEST_TMPDIR}/chrony.conf"
     local case up allow want vrc vmsg e
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/services/ntp/entrypoint.sh" is_ip_literal render_ntp_config validate_ntp_config
+    # shellcheck source=services/ntp/entrypoint.sh
+    source "$(_extract_functions "${root}/services/ntp/entrypoint.sh" is_ip_literal render_ntp_config validate_ntp_config)"
     for e in 192.0.2.1 2606:4700:f1::1 ::1; do
         is_ip_literal "${e}" || { echo "${e} not literal"; return 1; }
     done
@@ -13185,8 +12752,9 @@ CASES
     local root bin="${BATS_TEST_TMPDIR}/bin" d
     local self case tick write msg
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/services/ntp/entrypoint.sh" _cleanup_stale_ntp_pidfile_core \
-        cleanup_stale_ntp_pidfile _fix_chrony_dir_ownership_core fix_chrony_dir_ownership clock_control_available
+    # shellcheck source=services/ntp/entrypoint.sh
+    source "$(_extract_functions "${root}/services/ntp/entrypoint.sh" _cleanup_stale_ntp_pidfile_core \
+        cleanup_stale_ntp_pidfile _fix_chrony_dir_ownership_core fix_chrony_dir_ownership clock_control_available)"
     d="${BATS_TEST_TMPDIR}/run"
     mkdir -p "${d}"
     echo 1 > "${d}/chronyd.pid"
@@ -13254,8 +12822,9 @@ CASES
     # From: Issue #1683 | PR #1858
     local root bin="${BATS_TEST_TMPDIR}/bin" e
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/services/dhcp/entrypoint.sh" is_ipv4 is_ipv4_csv resolve_ntp_server \
-        resolve_ntp_csv build_ntp_option
+    # shellcheck source=services/dhcp/entrypoint.sh
+    source "$(_extract_functions "${root}/services/dhcp/entrypoint.sh" is_ipv4 is_ipv4_csv resolve_ntp_server \
+        resolve_ntp_csv build_ntp_option)"
     for e in 192.168.1.1 8.8.8.8 0.0.0.0 255.255.255.255 010.1.1.1; do
         is_ipv4 "${e}" || { echo "${e} rejected"; return 1; }
     done
@@ -13289,12 +12858,9 @@ STUB
     [ -z "$(resolve_ntp_csv '')" ]
     run resolve_ntp_csv '8.8.8.8 nowhere.lan'
     [ "${status}" -eq 1 ]
-    DHCP_NTP_SERVERS="8.8.8.8 ntp.lan"
-    [ "$(build_ntp_option)" = "$(printf ',\n          {\n            "name": "ntp-servers",\n            "data": "8.8.8.8,10.0.0.9"\n          }')" ]
-    DHCP_NTP_SERVERS=""
-    [ -z "$(build_ntp_option)" ]
-    DHCP_NTP_SERVERS="nowhere.lan"
-    run build_ntp_option
+    [ "$(DHCP_NTP_SERVERS="8.8.8.8 ntp.lan" build_ntp_option)" = "$(printf ',\n          {\n            "name": "ntp-servers",\n            "data": "8.8.8.8,10.0.0.9"\n          }')" ]
+    [ -z "$(DHCP_NTP_SERVERS="" build_ntp_option)" ]
+    DHCP_NTP_SERVERS="nowhere.lan" run build_ntp_option
     [ "${status}" -eq 1 ]
 }
 
@@ -13305,8 +12871,9 @@ STUB
     local root d="${BATS_TEST_TMPDIR}/kea" ep zones port want
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     ep="${root}/services/dhcp/entrypoint.sh"
-    _load_functions "${ep}" is_ipv4 is_ipv4_csv resolve_ntp_server resolve_ntp_csv build_ntp_option \
-        render_kea_config render_kea_dhcp4_config
+    # shellcheck source=services/dhcp/entrypoint.sh
+    source "$(_extract_functions "${ep}" is_ipv4 is_ipv4_csv resolve_ntp_server resolve_ntp_csv build_ntp_option \
+        render_kea_config render_kea_dhcp4_config)"
     eval "$(grep -m1 '^ENVSUBST_VARS=' "${ep}")"
     [ -n "${ENVSUBST_VARS}" ]
     export DHCP_SUBNET=10.0.0.0/24 DHCP_RANGE_START=10.0.0.128 DHCP_RANGE_END=10.0.0.254 \
@@ -13368,8 +12935,9 @@ CASES
     # From: Issue #1683 | PR #1858
     local root r="${BATS_TEST_TMPDIR}/kea-dhcp4.conf" bin="${BATS_TEST_TMPDIR}/bin"
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/services/dhcp/entrypoint.sh" is_ipv4 is_ipv4_csv resolve_ntp_server \
-        resolve_ntp_csv build_ntp_migration_map migrate_dhcp4_config
+    # shellcheck source=services/dhcp/entrypoint.sh
+    source "$(_extract_functions "${root}/services/dhcp/entrypoint.sh" is_ipv4 is_ipv4_csv resolve_ntp_server \
+        resolve_ntp_csv build_ntp_migration_map migrate_dhcp4_config)"
     _tool_stub "${bin}" getent <<'STUB'
 [ "$1 $2" = "ahostsv4 ntp.lan" ] || exit 2
 printf '10.0.0.9 STREAM ntp.lan\n'
@@ -13469,8 +13037,9 @@ CASES
     # From: Issue #1683 | PR #1858
     local root t="${BATS_TEST_TMPDIR}" gen fp1 fp2 h1
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/services/proxy/entrypoint.sh" _ensure_ca_cert _harden_cert_dir \
-        _purge_stale_leaf_certs_on_ca_change
+    # shellcheck source=services/proxy/entrypoint.sh
+    source "$(_extract_functions "${root}/services/proxy/entrypoint.sh" _ensure_ca_cert _harden_cert_dir \
+        _purge_stale_leaf_certs_on_ca_change)"
     export CA_DIR="${t}/ca" CERT_DIR="${t}/certs"
     run _ensure_ca_cert
     [ "${status}" -eq 0 ] || { echo "${output}"; return 1; }
@@ -13525,8 +13094,9 @@ CASES
     # From: Issue #1683 | PR #1858
     local root t="${BATS_TEST_TMPDIR}" log="${BATS_TEST_TMPDIR}/csr.log" s1 s2 p case at now san want
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/services/proxy/entrypoint.sh" _sign_cert _default_cert_needs_regen \
-        _bounded_cert_name
+    # shellcheck source=services/proxy/entrypoint.sh
+    source "$(_extract_functions "${root}/services/proxy/entrypoint.sh" _sign_cert _default_cert_needs_regen \
+        _bounded_cert_name)"
     export CA_DIR="${t}/ca" CERT_DIR="${t}/certs" SERIAL_FILE="${t}/ca/ca.srl"
     mkdir -p "${CA_DIR}" "${CERT_DIR}"
     openssl req -new -newkey rsa:2048 -nodes -x509 -days 30 -subj "/CN=Test CA" \
@@ -13605,8 +13175,9 @@ CASES
     local root case dom want
     local -A _PSL_RULES=() _PSL_WILDCARDS=() _PSL_EXCEPTIONS=()
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/services/proxy/entrypoint.sh" _load_public_suffix_list _suffix_from_end \
-        _registrable_domain
+    # shellcheck source=services/proxy/entrypoint.sh
+    source "$(_extract_functions "${root}/services/proxy/entrypoint.sh" _load_public_suffix_list _suffix_from_end \
+        _registrable_domain)"
     PUBLIC_SUFFIX_LIST_FILE="${root}/services/proxy/public_suffix_list.dat" _load_public_suffix_list
     [ "${#_PSL_RULES[@]}" -gt 1000 ] && [ "${#_PSL_EXCEPTIONS[@]}" -gt 0 ] || { echo "psl not loaded"; return 1; }
     while IFS='|' read -r case dom want; do
@@ -13641,7 +13212,8 @@ CASES
     local -a _UNIQUE_DOMAINS=() _EXTRA_WILDCARD_BASES=() _EXTRA_EXACT_HOSTS=()
     local -A _DOMAIN_IS_ROOT=()
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/services/proxy/entrypoint.sh" _bounded_cert_name _render_ssl_map
+    # shellcheck source=services/proxy/entrypoint.sh
+    source "$(_extract_functions "${root}/services/proxy/entrypoint.sh" _bounded_cert_name _render_ssl_map)"
     _r() { set -euo pipefail; _render_ssl_map | tr -s ' ' | paste -sd'#'; }
     PROXY_SECURITY_MODE=lazy PROXY_ALLOWED_CLIENT_CIDRS="" run _r
     [ "${status}" -eq 0 ]
@@ -13675,7 +13247,8 @@ CASES
     local -a _UNIQUE_DOMAINS=() _EXTRA_WILDCARD_BASES=() _EXTRA_EXACT_HOSTS=()
     local -A _DOMAIN_IS_ROOT=()
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_functions "${root}/services/proxy/entrypoint.sh" _render_stream_backend_map _render_stream_client_acl
+    # shellcheck source=services/proxy/entrypoint.sh
+    source "$(_extract_functions "${root}/services/proxy/entrypoint.sh" _render_stream_backend_map _render_stream_client_acl)"
     eval "$(grep -m1 '^STREAM_EMPTY_SNI_BACKEND=' "${root}/services/proxy/entrypoint.sh")"
     fb="${STREAM_EMPTY_SNI_BACKEND}"
     [[ "${fb}" =~ ^127\.0\.0\.1:[0-9]+$ ]]
@@ -13744,6 +13317,7 @@ CASES
     local -a overs
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
+    require_helper_image
     export DP="${t}/repo/deploy/prod" EF="${t}/repo/deploy/prod/.env" NB
     _prod_install "${DP}"
     body="$(declare -f compose_file_args_for_install_dir)"
@@ -13813,7 +13387,8 @@ CASES
     local root t="${BATS_TEST_TMPDIR}" main tagsha brsha mainsha ref want
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
-    export T="${t}" TAG="v$(cat "${root}/VERSION")" BR="b${BATS_TEST_NUMBER}" REF
+    TAG="v$(cat "${root}/VERSION")"
+    export T="${t}" TAG BR="b${BATS_TEST_NUMBER}" REF
     main="$(declare -f git_default_branch_name | sed -n 's/.*default_branch:-\([A-Za-z0-9_-]*\)}.*/\1/p')"
     [ -n "${main}" ] || { echo "no fallback branch in git_default_branch_name"; return 1; }
     g() { git -c user.email=t@example.test -c user.name=t -c init.defaultBranch="${main}" "$@"; }
@@ -14045,6 +13620,7 @@ CASES
     local root t="${BATS_TEST_TMPDIR}" n p ip case line want v code c
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
+    require_helper_image
     export E="${t}/.env" RAWV="${t}"$'\t'"&\\1"
     n="${BATS_TEST_NUMBER}" p="${t}/a b" ip="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")"
     printf 'services:\n  p:\n    image: %s\n    environment:\n      V: "${KEY:-}"\n' "${LANCACHE_HELPER_IMAGE}" > "${t}/probe.yml"
@@ -14216,7 +13792,8 @@ CASES
     line="$(grep -m1 -E '^[A-Z_]+=' "${root}/deploy/prod/.env")"
     a="sha256:$(printf '%064d' 0 | tr 0 a)" b="sha256:$(printf '%064d' 0 | tr 0 b)"
     [ -n "${ch}" ] && [ -n "${reg}" ] && [ -n "${pre}" ] || { echo "inputs: ${ch} ${reg} ${pre}"; return 1; }
-    export CH="${ch}" ENVF="${t}/pins.env" VER="v$(tr -d '[:space:]' < "${root}/VERSION")"
+    VER="v$(tr -d '[:space:]' < "${root}/VERSION")"
+    export CH="${ch}" ENVF="${t}/pins.env" VER
     # What: origin lock refs and backoff sleeps as stubs
     # Why: no remote and no real wait inside the test box
     # From: Issue #1683 | PR #1858
@@ -14392,9 +13969,10 @@ STUB
     # What: server plus a filename; filename char rules
     # Why: a half answer or bad name breaks dnsmasq.conf
     # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" ip bios uefi max s b u want code c
+    local root t="${BATS_TEST_TMPDIR}" ip bios uefi max code c
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
+    require_helper_image
     ip="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")"
     bios="b${BATS_TEST_NUMBER}.0" uefi="images/u${BATS_TEST_NUMBER}.efi"
     max="$(declare -f is_valid_dhcp_proxy_boot_filename | grep -oE -- '-le [0-9]+' | awk '{ print $2 }')"
@@ -14444,6 +14022,7 @@ CASES
     # Why: one dhcp profile per mode; templates fully render
     # From: Issue #1683 | PR #1858
     local root t="${BATS_TEST_TMPDIR}" modes off cprof ip net m p v dhcp="" ntp logp custom tpl vars exported out
+    local -a assigns=()
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
     modes="$(awk '/pub fn as_str/ { f = 1 } f && /^    }$/ { exit } f' "${root}/services/ui/src/config.rs" \
@@ -14489,7 +14068,8 @@ CASES
         vars="$(grep -oE '\$\{[A-Z_]+\}' "${tpl}" | tr -d '${}' | sort -u)"
         [ -n "${vars}" ] || continue
         [ -z "$(grep -vxF -f <(printf '%s\n' "${exported}") <<< "${vars}")" ] || { echo "${tpl##*/}: unset vars"; return 1; }
-        out="$(env $(sed 's/.*/&=m-&/' <<< "${vars}") envsubst < "${tpl}")"
+        mapfile -t assigns < <(sed 's/.*/&=m-&/' <<< "${vars}")
+        out="$(env "${assigns[@]}" envsubst < "${tpl}")"
         [[ "${out}" != *'${'* ]] || { echo "${tpl##*/}: placeholder left"; return 1; }
         while IFS= read -r v; do grep -qF -- "m-${v}" <<< "${out}" || { echo "${tpl##*/}: ${v} not rendered"; return 1; }; done <<< "${vars}"
     done
@@ -14544,6 +14124,9 @@ CASES
     _tool_stub "${BIN}" jq <<<'printf "%s\n" "$*" >> "${DS}/jq.argv"; exec "${JQ_REAL:?}" "$@"'
     _tool_stub "${BIN}" curl <<'STUB'
 printf '%s\n' "$*" >> "${DS}/curl.argv"
+case "${!#}" in
+    */deploy/secondary/docker-compose.yml) [ ! -e "${DS}/fail-raw" ] || exit 22; cat "${DS}/raw.compose"; exit 0 ;;
+esac
 cat > "${DS}/curl.body"
 [ ! -e "${DS}/fail-curl" ] || exit 7
 fmt=""
@@ -14556,7 +14139,8 @@ STUB
         export SD="$1"
         shift
         mkdir -p "${SD}" && printf '%s\0' "$@" > "${DS}/args"
-        _setup_sh_run 'PATH="${BIN}:${PATH}"; mapfile -d "" -t a < "${DS}/args"; cd "${SD}" && cmd_secondary "${a[@]}"'
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; [ -z "${SEC_SCRIPT_DIR:-}" ] || SCRIPT_DIR="${SEC_SCRIPT_DIR}"
+            mapfile -d "" -t a < "${DS}/args"; cd "${SD}" && cmd_secondary "${a[@]}"'
     }
     # What: each failing answer stops before any file exists
     # Why: a half-written secondary must never start
@@ -14615,7 +14199,7 @@ CASES
     want="compose --env-file ${env} $(compose_file_args_for_install_dir "${dir}" "${env}" | paste -sd' ') up -d"
     grep -qxF -- "${want}" "${DS}/docker.log" || { echo "start: $(cat "${DS}/docker.log")"; return 1; }
     # What: the written compose equals deploy/secondary
-    # Why: two copies may exist; they must never drift
+    # Why: deploy/secondary is the one owner of this file
     # From: Issue #1683 | PR #1858
     gen="$(docker compose -p "${name}" --env-file "${env}" -f "${dir}/docker-compose.yml" config --format json)"
     canon="$(docker compose -p "${name}" --env-file "${env}" -f "${root}/deploy/secondary/docker-compose.yml" config --format json)"
@@ -14630,6 +14214,23 @@ CASES
     _sec "${t}/ok" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --proxy-ip "${STD}" --listen-ip "${LIP}" --rotate
     [ "${status}" -eq 0 ] && cmp "${t}/env.first" "${env}" && cmp "${t}/compose.first" "${dir}/docker-compose.yml" \
         || { echo "rotate: ${output}"; return 1; }
+    # What: without a checkout the owner file is downloaded
+    # Why: a curl|bash secondary uses the same single owner
+    # From: Issue #1683 | PR #1858
+    cp "${root}/deploy/secondary/docker-compose.yml" "${DS}/raw.compose"
+    export SEC_SCRIPT_DIR="${t}/nocheckout"
+    mkdir -p "${SEC_SCRIPT_DIR}"
+    rm -f "${DS}/curl.argv"
+    _sec "${t}/raw" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --proxy-ip "${STD}" --listen-ip "${LIP}"
+    [ "${status}" -eq 0 ] && cmp "${root}/deploy/secondary/docker-compose.yml" "${t}/raw/${NAME}/docker-compose.yml" \
+        && grep -q '/HEAD/deploy/secondary/docker-compose\.yml$' "${DS}/curl.argv" || { echo "download: ${output}"; return 1; }
+    : > "${DS}/fail-raw"
+    rm -f "${DS}/curl.argv"
+    _sec "${t}/rawfail" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --proxy-ip "${STD}" --listen-ip "${LIP}"
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"Failed to download the secondary compose file"* ]] \
+        && [ "$(wc -l < "${DS}/curl.argv")" -eq 1 ] && [ ! -e "${t}/rawfail/${NAME}" ] \
+        || { echo "download failure: ${output}"; return 1; }
+    unset SEC_SCRIPT_DIR
 }
 
 @test "setup functional health gate and tool install per state" {
@@ -15177,8 +14778,9 @@ CASES
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     # shellcheck source=scripts/lib/known-good-snapshots.sh
     source "${root}/$(ci_context_path known-good)"
-    _load_functions "${root}/services/dns/entrypoint.sh" \
-        _dns_recursor_validate_snapshot_or_rollback _dns_auth_validate_snapshot_or_rollback
+    # shellcheck source=services/dns/entrypoint.sh
+    source "$(_extract_functions "${root}/services/dns/entrypoint.sh" \
+        _dns_recursor_validate_snapshot_or_rollback _dns_auth_validate_snapshot_or_rollback)"
     for t in pdns_recursor:recursor.conf pdns_server:pdns.conf; do
         _tool_stub "${bin}" "${t%%:*}" <<SH
 d=""; for a in "\$@"; do case "\$a" in --config-dir=*) d="\${a#--config-dir=}" ;; esac; done

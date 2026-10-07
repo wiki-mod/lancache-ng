@@ -48,8 +48,8 @@ esac
 # this. Re-asserted on every start, the same pattern the `nats` service uses
 # to keep its shared /etc/nats/nats.conf writable by the Admin UI user after
 # a NATS restart (see deploy/*/docker-compose.yml).
-mkdir -p /var/lib/kea/config-snapshots
-chown -R 10001:10001 /var/lib/kea/config-snapshots
+mkdir -p "${KEA_CONFIG_SNAPSHOT_DIR:?KEA_CONFIG_SNAPSHOT_DIR is required}"
+chown -R 10001:10001 "$KEA_CONFIG_SNAPSHOT_DIR"
 
 # Defaults
 : "${DHCP_SUBNET:=10.0.0.0/24}"
@@ -656,7 +656,7 @@ else
     # Look for known-good snapshots, newest-first. mapfile (not unquoted
     # command substitution) matches setup.sh's own list_kea_snapshot_ids
     # caller and avoids shellcheck SC2207's word-splitting warning.
-    SNAPSHOT_ROOT="/var/lib/kea/config-snapshots"
+    SNAPSHOT_ROOT="$KEA_CONFIG_SNAPSHOT_DIR"
     SNAPSHOT_IDS=()
     while IFS= read -r _id; do
         [ -n "$_id" ] && SNAPSHOT_IDS+=("$_id")

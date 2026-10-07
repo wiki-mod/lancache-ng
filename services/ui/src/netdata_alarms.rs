@@ -2,19 +2,9 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
-//! Storage for Netdata alarm-notify events forwarded by the `netdata`
-//! container's `custom_sender()` integration (bug hunt #849,
-//! `docs/bug-hunt/observability.md` finding #3: Netdata's own health.d
-//! alarms had no notification integration or Admin UI surface of their
-//! own -- see `deploy/*/docker-compose.yml`'s `netdata:` service command
-//! block for the Netdata-side half of this wiring). Unlike
-//! `watchdog_status.rs` (a pure, read-only consumer of a file only
-//! `watchdog.sh` ever writes), this module is the sole WRITER of its own
-//! state file: `routes/netdata_alarms.rs`'s POST handler calls
-//! [`append_alarm`] for every incoming alarm event. That makes the
-//! AG-OP-006..013 idempotence/convergence obligations apply in full here --
-//! see [`append_alarm`]'s own doc comment for the two concrete properties
-//! (mutual exclusion and duplicate-delivery idempotence) it must hold.
+//! What: stored netdata alarms, sole writer of their file.
+//! Why: the dashboard shows netdata's health alarms.
+//! From: Issue #849
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -22,21 +12,14 @@ use std::io;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-// Netdata's alarm-notify.sh can fire many alarms in a short burst (e.g. a
-// host reboot re-arms every health.d check at once). Capping the stored
-// history bounds both the JSON file's size and the dashboard card's render
-// cost. 50 is generous enough to show a real recent-alarm timeline without
-// becoming an unbounded log -- the same "recent, not exhaustive" intent
-// `dashboard.rs`'s `parse_log_tail(..., 10)` already applies to the nginx
-// access-log tail shown on the same page.
+// What: stored alarm history cap, newest kept.
+// Why: a burst of alarms must not grow the file unbounded.
 pub const MAX_ALARMS: usize = 50;
 
-// One Netdata alarm-notify.sh event, field-for-field matching the variables
-// alarm-notify.sh's own custom_sender() integration point receives (see the
-// compose command block's health_alarm_notify.conf override) -- deliberately
-// not reduced to a smaller subset, since dashboard.html renders most of
-// these directly and a future card revision may want the rest.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+// What: one alarm; field names equal custom_sender's vars.
+// Why: the sender is rendered from these fields, no copy.
+// From: Issue #849 | PR #1858
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct NetdataAlarmEvent {
     pub unique_id: i64,
     pub alarm_id: i64,
@@ -73,30 +56,9 @@ pub fn read_alarms(path: &str) -> Vec<NetdataAlarmEvent> {
     serde_json::from_str(&content).unwrap_or_default()
 }
 
-// Appends one alarm event to the history stored at `path`, keeping only the
-// newest MAX_ALARMS entries (newest first). Two properties this function
-// must hold, both required by AG-OP-006..013 because -- unlike
-// `watchdog.sh`'s single-writer status loop -- this is a genuine concurrent
-// write path (multiple POSTs to /api/netdata-alarms can race):
-//
-//   1. Read-modify-write atomicity: the CALLER must hold a process-wide lock
-//      (`AppState::netdata_alarms_lock`) around this call. Without one, two
-//      concurrent requests could both read the same starting list, both
-//      append their own event, and both rename -- the second rename wins
-//      and the first request's event is silently lost. The write-to-temp-
-//      then-rename below only protects READERS from ever observing a
-//      half-written file mid-write; it does nothing by itself to prevent
-//      this lost-update race, which is a different failure mode needing a
-//      different fix (mutual exclusion, not write atomicity).
-//   2. Idempotence on duplicate delivery: Netdata's built-in `alarm-notify.sh
-//      ... test` mode can be re-run, and a real delivery could plausibly be
-//      retried (a flaky network hop, an operator re-firing the same test)
-//      against the same endpoint for the same event. Deduping on
-//      `unique_id` -- Netdata's own claimed-unique identifier for this
-//      alarm event -- makes re-appending an already-stored event a no-op
-//      instead of a duplicate dashboard entry: the concrete convergence
-//      property AG-OP-006 requires of a write path that can be repeated
-//      with the same input.
+// What: prepend one alarm unless its unique_id is stored.
+// Why: caller locks the RMW; a resent alarm is a no-op.
+// From: Issue #849
 pub fn append_alarm(path: &str, event: NetdataAlarmEvent) -> io::Result<()> {
     let mut events = read_alarms(path);
 
@@ -109,15 +71,9 @@ pub fn append_alarm(path: &str, event: NetdataAlarmEvent) -> io::Result<()> {
 
     let json = serde_json::to_string_pretty(&events)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-    // Atomic write-then-rename, same pattern watchdog.sh's write_status()
-    // uses for status.json: a reader can never observe a partially-written
-    // file, since `rename` on the same filesystem is atomic and only ever
-    // exposes the old or the new complete content.
-    let tmp_path = format!("{path}.tmp");
-    fs::write(&tmp_path, json)?;
-    fs::rename(&tmp_path, path)?;
-    Ok(())
+    crate::write_file_if_changed(std::path::Path::new(path), &json, 0o644, None)
+        .map(|_| ())
+        .map_err(io::Error::other)
 }
 
 // Display-only view of a stored alarm event, adding a human-readable UTC
@@ -159,13 +115,8 @@ pub fn alarm_views(events: &[NetdataAlarmEvent]) -> Vec<NetdataAlarmView> {
         .collect()
 }
 
-// Formats a Netdata alarm's Unix timestamp as an RFC 3339 UTC string (e.g.
-// "2026-08-06T05:30:00Z"). Falls back to the raw numeric value on any
-// conversion failure (an out-of-range timestamp, which should not happen
-// for a real Netdata-supplied `when` but must not be trusted blindly given
-// this is client-controlled input, per this module's own ingest-robustness
-// contract) rather than erroring the whole dashboard render over one
-// display field.
+// What: unix time as RFC 3339 UTC, else the raw number.
+// Why: client input; one bad field must not fail the page.
 fn format_alarm_time(unix_ts: i64) -> String {
     OffsetDateTime::from_unix_timestamp(unix_ts)
         .ok()
@@ -218,9 +169,8 @@ mod tests {
         assert!(events.is_empty());
     }
 
-    // A corrupted file (should not happen given the atomic rename below, but
-    // a reader must not trust its own past writes blindly either) must also
-    // fail closed to an empty list rather than panicking the request.
+    // What: a corrupted file reads as an empty list.
+    // Why: a bad file must not fail the dashboard request.
     #[test]
     fn malformed_json_reads_as_empty() {
         let path = temp_path("malformed");
@@ -273,9 +223,8 @@ mod tests {
         fs::remove_file(&path).ok();
     }
 
-    // A burst beyond MAX_ALARMS must be truncated to the newest MAX_ALARMS
-    // entries, not grow the file unbounded -- proves the bounded-cap
-    // behavior the module doc comment promises.
+    // What: a burst past MAX_ALARMS keeps only the newest.
+    // Why: the history file must never grow unbounded.
     #[test]
     fn append_truncates_history_to_max_alarms() {
         let path = temp_path("bounded");

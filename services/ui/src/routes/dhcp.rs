@@ -2235,7 +2235,7 @@ pub async fn add_reservation(
         // Kea's compiled-in default, which does include "hw-address"), so the
         // gap only bites a manually-edited config -- but "silently accepted,
         // never actually works" is exactly the failure class this project
-        // refuses to ship (see AG-OP-005: do not silently invert defaults).
+        // refuses to ship.
         // Fail loudly instead of writing a reservation Kea will never honor.
         if !global_reservation_identifiers_include_hw_address(config) {
             return Err(
@@ -3165,12 +3165,9 @@ const DHCP_PROBE_SERVICE: &str = "dhcp-probe";
 // to eat into it more than expected.
 const DHCP_PROBE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
-// Trailing byte budget for the log tail captured at timeout time (see
-// ProbeError::TimedOut / wait_for_probe_container below) -- long enough to
-// show real diagnostic content (an operator/future reader can tell "it was
-// silent the whole time" apart from "it was actively retrying right up to
-// the deadline") without letting a noisy hung nmap/dhclient invocation blow
-// up the surfaced Unavailable reason string without bound.
+// What: byte cap of the log tail kept on a probe timeout.
+// Why: enough to diagnose, never an unbounded reason text.
+// From: Issue #1136
 const DHCP_PROBE_TIMEOUT_LOG_TAIL_BYTES: usize = 2000;
 
 // Distinguishes a bounded-timeout hang (DHCP_PROBE_WAIT_TIMEOUT elapsed with
@@ -5151,15 +5148,9 @@ mod tests {
         assert!(matches!(result, Ok(0)));
     }
 
-    // The core #1136 acceptance criterion: a fixture that simulates a
-    // wait_container call that never resolves -- the exact "genuinely hung,
-    // zero progress" class confirmed live for #1132 -- and asserts the
-    // timeout path actually fires and produces a diagnostic-rich status,
-    // not just reasoning about it. `std::future::pending` never completes,
-    // standing in for a wait_container stream item that simply never
-    // arrives; the real timeout (DHCP_PROBE_WAIT_TIMEOUT) is 100s, but this
-    // test injects a 20ms bound so it proves the same logic without
-    // actually waiting on it.
+    // What: a hung wait times out and keeps diagnostics.
+    // Why: a hung probe must not block the check forever.
+    // From: Issue #1136
     #[tokio::test]
     async fn wait_for_probe_container_times_out_and_captures_diagnostics() {
         let never_resolves = std::future::pending::<Option<Result<u32, bollard::errors::Error>>>();
@@ -5892,28 +5883,9 @@ mod tests {
         );
     }
 
-    // Repeat-run idempotence proof for the Kea snapshot adapter, mirroring
-    // `tests/bats/setup_update_idempotence.bats`'s pattern (drive the real
-    // writer twice against a realistic fixture, including a deliberately
-    // broken candidate, and assert the on-disk store is unaffected) --
-    // translated to Rust since Kea's snapshot adapter is Rust-native, not a
-    // shell entrypoint function like the nginx/dnsmasq/PowerDNS adapters
-    // (see `kea_snapshots.rs`'s module doc comment). Unlike this module's
-    // existing `..._does_not_invoke_snapshot_sink_on_rollback` test
-    // (single run, no-op sink, no on-disk store), this drives the REAL
-    // `kea_snapshots::create_snapshot`/`list_snapshot_ids` against a real
-    // temp directory, twice in a row, to prove the invariant holds on repeat
-    // runs and not just once.
-    //
-    // A candidate that fails `config-test` must never reach the
-    // `on_write_success` snapshot sink at all (the function returns via `?`
-    // before Step 6's config-write/sink call), so the snapshot store must
-    // stay completely empty -- not just "no new entries", but genuinely
-    // untouched (no root directory even created) -- across repeated attempts
-    // to persist the same broken candidate. This is the load-bearing
-    // invariant `list_snapshot_ids`' "newest snapshot" contract depends on:
-    // if a rejected candidate ever got snapshotted, the newest entry could
-    // no longer be assumed valid.
+    // What: a config-test reject twice never snapshots.
+    // Why: the newest snapshot must stay a valid config.
+    // From: Issue #614
     #[tokio::test]
     async fn kea_config_modify_repeat_broken_candidate_never_snapshots_and_store_stays_empty() {
         let root = temp_snapshot_root("broken-candidate");

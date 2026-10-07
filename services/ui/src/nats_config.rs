@@ -1,14 +1,13 @@
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! NATS configuration validation helpers.
 //!
-//! Runtime NATS config generation interpolates credentials into double-quoted
-//! NATS config strings. Validate those values before writing config or trying
-//! to connect so bad environment overrides fail closed instead of leaving the
-//! UI stuck retrying against a NATS instance that cannot parse its config.
+//! What: checks NATS credentials and renders nats.conf.
+//! Why: bad values must fail before nats.conf is written.
+//! From: Issue #1683 | PR #1858
 
 use crate::config::Config;
+use std::path::Path;
 
 /// Validates a NATS username against a restricted character set.
 ///
@@ -83,22 +82,25 @@ pub fn validate_nats_username(username: &str) -> Result<(), String> {
 /// assert!(validate_nats_password("pass\nword").is_err());
 /// ```
 pub fn validate_nats_password(password: &str) -> Result<(), String> {
-    if password.is_empty() {
-        return Err("NATS password cannot be empty".to_string());
-    }
+    validate_nats_string("NATS password", password)
+}
 
-    if password.chars().any(|c| (c as u32) < 32 || c as u32 == 127) {
-        return Err("NATS password contains control characters".to_string());
+// What: a value safe inside a double-quoted NATS string.
+// Why: a quote, backslash or control char breaks nats.conf.
+// From: Issue #1683 | PR #1858
+fn validate_nats_string(label: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{label} cannot be empty"));
     }
-
-    if password.contains('"') {
-        return Err("NATS password contains double quotes".to_string());
+    if value.chars().any(|c| (c as u32) < 32 || c as u32 == 127) {
+        return Err(format!("{label} contains control characters"));
     }
-
-    if password.contains('\\') {
-        return Err("NATS password contains backslashes".to_string());
+    if value.contains('"') {
+        return Err(format!("{label} contains double quotes"));
     }
-
+    if value.contains('\\') {
+        return Err(format!("{label} contains backslashes"));
+    }
     Ok(())
 }
 
@@ -136,6 +138,8 @@ fn validate_optional_nats_credentials(
         .map_err(|e| format!("Invalid {label} credentials: {e}"))
 }
 
+// What: every static NATS role has valid credentials.
+// Why: nats.conf and the ui connect fail closed on bad env.
 pub fn validate_runtime_nats_credentials(config: &Config) -> Result<(), String> {
     validate_optional_nats_credentials(
         "NATS UI",
@@ -164,6 +168,135 @@ pub fn validate_runtime_nats_credentials(config: &Config) -> Result<(), String> 
     )?;
 
     Ok(())
+}
+
+// What: publish rights of every reader of the DNS stream.
+// Why: static DNS roles and secondaries must grant alike.
+// From: Issue #1683 | PR #1858
+pub(crate) const DNS_READER_PUBLISH: [&str; 6] = [
+    "$JS.API.STREAM.INFO.LANCACHE_DNS",
+    "$JS.API.CONSUMER.INFO.LANCACHE_DNS.>",
+    "$JS.API.CONSUMER.CREATE.LANCACHE_DNS.>",
+    "$JS.API.CONSUMER.DURABLE.CREATE.LANCACHE_DNS.>",
+    "$JS.API.CONSUMER.MSG.NEXT.LANCACHE_DNS.>",
+    "$JS.ACK.LANCACHE_DNS.>",
+];
+
+// What: subjects every reader of the DNS stream receives.
+// Why: static DNS roles and secondaries must grant alike.
+// From: Issue #1683 | PR #1858
+pub(crate) const DNS_SUBSCRIBE: [&str; 2] = ["lancache.dns.>", "_INBOX.>"];
+
+// What: record and flush, sent by the DNS writer roles.
+// Why: the ui and both dns roles publish record changes.
+// From: Issue #1683 | PR #1858
+const DNS_WRITER_PUBLISH: [&str; 2] = ["lancache.dns.record", "lancache.dns.flush"];
+
+// What: a NATS list of double-quoted strings.
+// Why: every subject list in nats.conf uses one syntax.
+// From: Issue #1683 | PR #1858
+fn nats_list(items: &[&str]) -> String {
+    let quoted: Vec<String> = items.iter().map(|s| format!("\"{s}\"")).collect();
+    format!("[{}]", quoted.join(", "))
+}
+
+// What: one static user block, rights only when given.
+// Why: the callout user must have no subject rights.
+// From: Issue #1683 | PR #1858
+fn nats_role(user: &str, password: &str, publish: &[&str], subscribe: &[&str]) -> String {
+    let mut block = format!("    {{\n      user: \"{user}\"\n      password: \"{password}\"\n");
+    if !publish.is_empty() {
+        block.push_str("      permissions = {\n");
+        block.push_str(&format!("        publish = {}\n", nats_list(publish)));
+        if !subscribe.is_empty() {
+            block.push_str(&format!("        subscribe = {}\n", nats_list(subscribe)));
+        }
+        block.push_str("      }\n");
+    }
+    block.push_str("    }\n");
+    block
+}
+
+// What: the static nats.conf of the stack's fixed roles.
+// Why: one owner of NATS users, rights and the include.
+// From: Issue #1683 | PR #1858
+pub fn render_nats_conf(config: &Config) -> Result<String, String> {
+    validate_runtime_nats_credentials(config)?;
+    let store_dir = config
+        .nats_store_dir
+        .as_deref()
+        .ok_or("NATS_STORE_DIR is not set")?;
+    let raw_port = config
+        .nats_monitor_port
+        .as_deref()
+        .ok_or("NATS_MONITOR_PORT is not set")?;
+    let log_file = &config.nats_log_file;
+    validate_nats_string("NATS store dir", store_dir)?;
+    validate_nats_string("NATS log file", log_file)?;
+    let monitor_port: u16 = raw_port
+        .parse()
+        .map_err(|_| format!("NATS_MONITOR_PORT={raw_port} is not a TCP port"))?;
+    let fragment = Path::new(&config.nats_auth_callout_path);
+    if fragment.parent() != Path::new(&config.nats_conf_path).parent() {
+        return Err(format!(
+            "{} must sit next to {}",
+            config.nats_auth_callout_path, config.nats_conf_path
+        ));
+    }
+    let include = fragment
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("{} has no file name", config.nats_auth_callout_path))?;
+    validate_nats_string("NATS fragment name", include)?;
+    let password = |label: &str, value: &Option<String>| {
+        value
+            .clone()
+            .ok_or_else(|| format!("{label} password is missing"))
+    };
+    let dns_publish: Vec<&str> = DNS_WRITER_PUBLISH
+        .iter()
+        .chain(["$JS.API.STREAM.CREATE.LANCACHE_DNS"].iter())
+        .chain(DNS_READER_PUBLISH.iter())
+        .copied()
+        .collect();
+    let users = [
+        nats_role(
+            &config.nats_ui_user,
+            &password("NATS UI", &config.nats_ui_password)?,
+            &DNS_WRITER_PUBLISH,
+            &[],
+        ),
+        nats_role(
+            &config.nats_dns_writer_user,
+            &password("NATS DNS writer", &config.nats_dns_writer_password)?,
+            &dns_publish,
+            &DNS_SUBSCRIBE,
+        ),
+        nats_role(
+            &config.nats_dns_replica_user,
+            &password("NATS DNS replica", &config.nats_dns_replica_password)?,
+            &dns_publish,
+            &DNS_SUBSCRIBE,
+        ),
+        nats_role(
+            &config.nats_callout_user,
+            &password("NATS auth-callout", &config.nats_callout_password)?,
+            &[],
+            &[],
+        ),
+    ]
+    .concat();
+    let sys_user = &config.nats_sys_user;
+    let sys_password = password("NATS system account", &config.nats_sys_password)?;
+    Ok(format!(
+        "jetstream {{\n  store_dir: \"{store_dir}\"\n}}\n\
+         http_port: {monitor_port}\n\
+         log_file: \"{log_file}\"\n\
+         authorization {{\n  users = [\n{users}  ]\n  include \"{include}\"\n}}\n\
+         accounts {{\n  SYS: {{\n    users: [\n      \
+         {{ user: \"{sys_user}\", password: \"{sys_password}\" }}\n    ]\n  }}\n}}\n\
+         system_account: SYS\n"
+    ))
 }
 
 #[cfg(test)]
@@ -370,10 +503,71 @@ mod tests {
         assert!(validate_nats_password("pass\tword").is_err());
     }
 
+    // What: rerun equal; roles, rights and include present.
+    // Why: nats-server reads this; bad input must fail.
+    // From: Issue #1683 | PR #1858
+    #[test]
+    fn render_nats_conf_is_deterministic_complete_and_strict() {
+        let _guard = crate::config::env_test_lock().lock().unwrap();
+        let mut cfg = Config::from_env().unwrap();
+        for (user, password, name) in [
+            (&mut cfg.nats_ui_user, &mut cfg.nats_ui_password, "ui"),
+            (
+                &mut cfg.nats_dns_writer_user,
+                &mut cfg.nats_dns_writer_password,
+                "w",
+            ),
+            (
+                &mut cfg.nats_dns_replica_user,
+                &mut cfg.nats_dns_replica_password,
+                "r",
+            ),
+            (
+                &mut cfg.nats_callout_user,
+                &mut cfg.nats_callout_password,
+                "c",
+            ),
+            (&mut cfg.nats_sys_user, &mut cfg.nats_sys_password, "s"),
+        ] {
+            *user = format!("user-{name}");
+            *password = Some(test_secret(name));
+        }
+        cfg.nats_store_dir = Some("/store".to_string());
+        cfg.nats_monitor_port = Some("1234".to_string());
+        cfg.nats_log_file = "/logs/nats.log".to_string();
+        cfg.nats_conf_path = "/etc/n/nats.conf".to_string();
+        cfg.nats_auth_callout_path = "/etc/n/frag.conf".to_string();
+        let first = render_nats_conf(&cfg).unwrap();
+        assert_eq!(render_nats_conf(&cfg).unwrap(), first);
+        for needle in [
+            "store_dir: \"/store\"",
+            "http_port: 1234",
+            "log_file: \"/logs/nats.log\"",
+            "include \"frag.conf\"",
+            "system_account: SYS",
+            "$JS.API.STREAM.CREATE.LANCACHE_DNS",
+            "user: \"user-s\", password:",
+        ] {
+            assert!(first.contains(needle), "missing {needle:?}");
+        }
+        let ui_block = first.split("user: \"user-w\"").next().unwrap();
+        assert!(!ui_block.contains("subscribe"));
+        cfg.nats_monitor_port = Some("x".to_string());
+        assert!(render_nats_conf(&cfg).is_err());
+        cfg.nats_monitor_port = Some("1234".to_string());
+        cfg.nats_auth_callout_path = "/elsewhere/frag.conf".to_string();
+        assert!(render_nats_conf(&cfg).is_err());
+        cfg.nats_auth_callout_path = "/etc/n/frag.conf".to_string();
+        cfg.nats_store_dir = None;
+        assert!(render_nats_conf(&cfg).is_err());
+    }
+
     fn test_secret(suffix: &str) -> String {
         format!("fixture-{suffix}-value")
     }
 
+    // What: a password-shaped value holding a double quote.
+    // Why: built from chars, no literal secret in source.
     fn invalid_secret_with_double_quote() -> String {
         [
             'i', 'n', 'v', 'a', 'l', 'i', 'd', '"', 'v', 'a', 'l', 'u', 'e',

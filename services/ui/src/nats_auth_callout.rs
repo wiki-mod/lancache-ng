@@ -8,7 +8,7 @@
 //! DNS-reader credential all secondaries used to present.
 //!
 //! Mechanism: the existing flat `authorization { users = [...] }` block (see
-//! `secondaries::update_nats_conf`) gains one more static user -- this
+//! `nats_config::render_nats_conf`) gains one more static user -- this
 //! process's own callout bypass identity -- plus an `auth_callout {...}`
 //! sub-block. Counterintuitively, `auth_callout.auth_users` must list *every*
 //! static username in the `users` list above, not just the callout
@@ -18,16 +18,16 @@
 //! is routed through the callout instead (confirmed against a real
 //! nats-server 2.14.3; this is *not* documented as clearly as the rest of
 //! the auth-callout spec, and getting it wrong locks out the UI/DNS-writer/
-//! DNS-replica roles too, not just secondaries). No `accounts {}` block is
-//! introduced: the UI, DNS-writer, DNS-replica, and every
+//! DNS-replica roles too, not just secondaries). Only the SYS account
+//! (nats_kick) is declared: the UI, DNS-writer, DNS-replica, and every
 //! callout-authenticated secondary all continue to live in NATS's implicit
 //! default account (`$G`), exactly as they did under the old flat-users
 //! model, so nothing about JetStream stream visibility changes. When a
 //! client with a username absent from `auth_users` connects, nats-server
 //! publishes a request to `$SYS.REQ.USER.AUTH`; this module answers it by
 //! checking the presented username/password against the `secondaries` table
-//! (the same table #380/#426/#473's rotate_token / update_nats_conf
-//! machinery already touches) and either signs a per-secondary user JWT
+//! (written by the register/rotate/remove handlers) and either signs a
+//! per-secondary user JWT
 //! granting the same subject-level permissions the old shared DNS-reader
 //! role had, or returns an error so the connection is rejected -- which is
 //! also what happens if the UI/DNS-writer/DNS-replica usernames were ever
@@ -52,9 +52,8 @@
 //! Ed25519 (via the `nkeys` crate, the same official-lineage NKey library
 //! `nsc`/nats-server use) over `base64url(header) + "." + base64url(payload)`.
 //! This exact combination was manually verified against a real `nats-server`
-//! 2.14.3 instance (no `accounts{}` block -- everyone, including
-//! callout-authenticated secondaries, lives in the implicit default account
-//! `$G`, same as the UI/DNS-writer roles do today): valid per-secondary
+//! 2.14.3 instance (callout-authenticated secondaries live in the implicit
+//! default account `$G`, same as the UI/DNS-writer roles): valid per-secondary
 //! credentials connect and receive exactly the issued `secondary_permissions()`
 //! (verified by watching nats-server deny a live connection's publish to
 //! `lancache.dns.record`, a subject deliberately excluded from that
@@ -73,9 +72,7 @@
 //! reconnect fails while a different, still-registered secondary is
 //! unaffected) follows directly from `authorize_secondary` re-querying the
 //! `secondaries` table on every single connection attempt -- there is no
-//! cache to invalidate -- and is exercised end-to-end by
-//! `scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh` against the real
-//! Admin UI binary and a real nats-server container.
+//! cache to invalidate.
 //!
 //! ## xkey request/response encryption (issue #682)
 //! Implemented: this responder holds its own static X25519 (curve) NKey
@@ -149,13 +146,8 @@ const REQUEST_AUTH_SUBJECT: &str = "$SYS.REQ.USER.AUTH";
 /// itself uses (`NatsServerXKeyHeader` in the Go implementation); this is not
 /// a name we invented.
 const NATS_SERVER_XKEY_HEADER: &str = "Nats-Server-Xkey";
-/// NATS's implicit default account. No `accounts {}` block is configured
-/// (see module docs), so this is the only account that exists, and every
-/// issued user JWT's `aud` claim must name it exactly -- nats-server rejects
-/// an omitted or mismatched `aud` with "No valid account ... account
-/// missing" even though the response envelope itself verifies fine, which is
-/// exactly the failure mode this constant (instead of a free-text parameter)
-/// exists to prevent.
+// What: account every issued user JWT names in aud.
+// Why: a missing or wrong aud makes nats-server reject it.
 const TARGET_ACCOUNT: &str = "$G";
 /// How long an issued user JWT remains valid for. auth_callout re-runs on
 /// every reconnect (NATS does not cache authorization decisions across
@@ -170,17 +162,9 @@ fn b64url(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-// Finding #4 (docs/bug-hunt/ui-core.md, issue #849): the previous
-// `.unwrap_or_default()` silently turned a broken system clock (any
-// `SystemTime::now()` reading before the Unix epoch) into `0`, which would
-// have issued an auth-callout JWT with `iat`/`exp` timestamps in 1970 --
-// wrong in a way that is security-relevant (a JWT's validity window is a
-// real access-control boundary here, not a display value) and, worse,
-// completely silent: nothing in the resulting JWT distinguishes "clock is
-// fine, this really is timestamp 0" from "clock read failed". Failing
-// closed instead means a broken clock surfaces as an auth-callout error
-// response (see build_response's own `Result` propagation below) rather
-// than a JWT with a nonsensical, unflagged validity window.
+// What: unix seconds, or an error before the epoch.
+// Why: a broken clock must not issue 1970 JWT windows.
+// From: Issue #849
 fn now_unix() -> Result<i64, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -329,22 +313,13 @@ pub fn hash_nats_password(password: &str) -> Result<String, String> {
         .map_err(|e| format!("failed to hash secondary password with Argon2id: {e}"))
 }
 
-/// Subject-level permissions granted to every secondary: identical to the
-/// v0.1.0 shared DNS-reader role's scope (see `secondaries::update_nats_conf`
-/// for the equivalent block on the UI/DNS-writer's own static permissions),
-/// just issued per-connection now instead of baked into a shared static
-/// config entry.
+// What: DNS reader rights each callout user JWT grants.
+// Why: shares nats_config's lists with the static roles.
+// From: Issue #583
 fn secondary_permissions() -> Value {
     json!({
-        "pub": {"allow": [
-            "$JS.API.STREAM.INFO.LANCACHE_DNS",
-            "$JS.API.CONSUMER.INFO.LANCACHE_DNS.>",
-            "$JS.API.CONSUMER.CREATE.LANCACHE_DNS.>",
-            "$JS.API.CONSUMER.DURABLE.CREATE.LANCACHE_DNS.>",
-            "$JS.API.CONSUMER.MSG.NEXT.LANCACHE_DNS.>",
-            "$JS.ACK.LANCACHE_DNS.>"
-        ]},
-        "sub": {"allow": ["lancache.dns.>", "_INBOX.>"]},
+        "pub": {"allow": crate::nats_config::DNS_READER_PUBLISH},
+        "sub": {"allow": crate::nats_config::DNS_SUBSCRIBE},
         "subs": -1,
         "data": -1,
         "payload": -1,
@@ -493,18 +468,9 @@ fn seal_response_if_needed(
     }
 }
 
-// Doubles `delay` up to `max_delay`, shared by both the connect-failure and
-// subscribe-failure retry branches in `run_auth_callout` below (Rule-Ref:
-// AG-WF-011: the same backoff-growth step, so both branches stay correct
-// together rather than one silently drifting back to a flat retry
-// interval the way the subscribe branch once did -- see Finding #3,
-// docs/bug-hunt/ui-core.md, issue #849). Pulled out as a pure function so
-// the arithmetic itself has a unit test independent of a live NATS
-// connection, which the surrounding loop cannot practically be tested
-// against in this codebase. `pub(crate)`, not private: `main.rs`'s initial
-// nats.conf reload retry loop reuses this same growth step (AG-CODE-011)
-// rather than re-implementing it a third time alongside `connect_nats_with_retry`'s
-// own inline doubling.
+// What: double delay, capped at max_delay.
+// Why: one backoff step for every NATS retry loop.
+// From: Issue #849
 pub(crate) fn grow_backoff(
     delay: std::time::Duration,
     max_delay: std::time::Duration,
@@ -564,16 +530,8 @@ pub async fn run_auth_callout(state: Arc<AppState>, issuer: Arc<KeyPair>, xkey: 
                     "auth-callout: failed to subscribe to {REQUEST_AUTH_SUBJECT}: {err}"
                 );
                 tokio::time::sleep(delay).await;
-                // Finding #3 (docs/bug-hunt/ui-core.md, issue #849): unlike
-                // the connect-failure branch above, this used to leave
-                // `delay` unchanged before retrying. Since a successful
-                // connect resets `delay` back to 1s, a persistent
-                // subscribe-only failure (e.g. a permissions problem that
-                // lets the connection succeed but denies this subscription)
-                // would loop reconnect-then-fail-subscribe at a flat 1s
-                // interval forever instead of backing off -- the same
-                // failure-class fix as the connect branch's own backoff
-                // (Rule-Ref: AG-WF-011), applied here too.
+                // What: back off on subscribe failure too.
+                // Why: else it loops at a flat 1s forever.
                 delay = grow_backoff(delay, max_delay);
                 continue;
             }
@@ -650,10 +608,8 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
 
-    // Mirrors the real schema from main.rs (base CREATE TABLE plus the
-    // additive #583 migration), so these tests exercise the exact same
-    // columns/constraints `authorize_secondary_with_conn` and the
-    // register/rotate/remove handlers run against in production.
+    // What: the secondaries columns auth-callout reads.
+    // Why: tests need no live AppState or full schema.
     fn test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -970,11 +926,9 @@ mod tests {
         assert!(payload["nats"].get("jwt").is_none());
     }
 
-    // Finding #3 (docs/bug-hunt/ui-core.md, issue #849): locks the shared
-    // backoff-growth step both the connect-failure and subscribe-failure
-    // retry branches in run_auth_callout now use, so a future edit to one
-    // branch cannot silently drift back to a flat, non-backing-off retry
-    // interval the way the subscribe branch once did.
+    // What: backoff doubles, then caps at max_delay.
+    // Why: both retry branches share this one step.
+    // From: Issue #849
     #[test]
     fn grow_backoff_doubles_then_caps_at_max_delay() {
         use std::time::Duration;
@@ -993,15 +947,9 @@ mod tests {
         );
     }
 
-    // Finding #4 (docs/bug-hunt/ui-core.md, issue #849): now_unix() must
-    // return a real, current-looking timestamp on the normal (working
-    // clock) path -- this is the smoke-test half of the fail-closed fix.
-    // The actual clock-error branch (SystemTime::now() before UNIX_EPOCH)
-    // cannot be exercised portably in a unit test without mocking the
-    // system clock itself, which this codebase does not do anywhere else
-    // either; build_response_success_contains_signed_user_jwt above already
-    // proves the `?`-propagation compiles and the success path still
-    // produces valid `iat`/`exp` claims end to end.
+    // What: now_unix gives a current time on a real clock.
+    // Why: a regression to a silent 0 must fail loudly.
+    // From: Issue #849
     #[test]
     fn now_unix_returns_a_current_looking_timestamp_on_a_working_clock() {
         let now = now_unix().expect("system clock must be readable in test environments");
@@ -1078,16 +1026,9 @@ mod tests {
         );
     }
 
-    // Full round trip simulating nats-server's real xkey behavior end to end
-    // without a live server: a "server" ephemeral keypair seals a request to
-    // our static public key and advertises its own public half via the exact
-    // header name/mechanism nats-server uses; decrypt_request_if_sealed must
-    // recover the original plaintext and hand back a sender key usable for
-    // the reply. This is the property a live nats-server 2.14.3 additionally
-    // proves by actually accepting our sealed response (see
-    // scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh) -- this unit test
-    // only proves our own seal/open pairing is internally consistent, not
-    // real-server interop.
+    // What: a request sealed to our key opens via header.
+    // Why: proves our seal/open pair, not server interop.
+    // From: Issue #682
     #[test]
     fn decrypt_request_if_sealed_opens_a_real_sealed_request_via_the_header() {
         let our_xkey = XKey::new();

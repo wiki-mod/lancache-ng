@@ -2,15 +2,15 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
-//! Binary entry point for the Rust rewrite of watchdog.sh's health-check/
-//! restart loop. See `lib.rs`'s module doc comment for the current scope
-//! (health checks + restart + status.json + the docker-socket-proxy alert
-//! probe; NOT yet the three filesystem-retention passes) and why
-//! `services/watchdog/Dockerfile`'s `ENTRYPOINT` still points at the bash
-//! script rather than this binary.
+//! What: watchdog health loop, restarts and status.json.
+//! Why: one daemon keeps core services up, reports health.
 
 use std::collections::HashMap;
+use std::io::Write as _;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use lancache_watchdog::config::{self, ContainerNames, MonitoredService};
@@ -18,33 +18,9 @@ use lancache_watchdog::docker_client::DockerProxyClient;
 use lancache_watchdog::health::{Action, AlertAction, AlertCounter, FailureCounter, HealthReading};
 use lancache_watchdog::status::{self, DiskInfo, ServiceHealth, WatchdogStatus};
 
-/// Alert-only services are never restarted. Their container list is built once
-/// at startup because deployment gates do not change during the lifetime of
-/// this process.
-///
-/// `netdata` is deliberately NOT in this set (issue #842's 2026-08-07
-/// restart-capability decision): it is real restart-capable now, wired
-/// directly into `monitored`/`failure_counters` in `main()` below, with its
-/// own dedicated `safe_netdata_restart` docker-socket-proxy allowlist grant.
-/// `ui`/`dhcp`/`dhcp-proxy`/`syslog`/`ntp` stay alert-only in THIS list --
-/// `ui` is tracked separately (PR #1610, Refs #1486), and `syslog`/
-/// `watchdog` itself must never be user-disableable (#1486's cross-reference
-/// on #842). `dhcp`/`dhcp-proxy`/`ntp` are still never *restarted* here
-/// (Kea/dnsmasq known-good-config rollback semantics a blind watchdog
-/// restart could race), but this crate's main loop is now the sole actor
-/// that starts/stops them, reconciling against an operator's
-/// EXPLICIT desired-state override only -- an absent entry is "no opinion",
-/// never treated as "should run" (see `status::DesiredState`'s own doc
-/// comment for why: it would otherwise fight a settings-reconcile that just
-/// deliberately stopped one of these containers mid mode-switch). See
-/// `desired_state_targets`/`reconcile_desired_state` below, which run
-/// independently of this function's own alert-only health reporting for the
-/// same two services.
-///
-/// Central logging runs fluent-bit and syslog-ng in one `services/syslog/`
-/// container named by `CONTAINER_SYSLOG`. Its own dual-process healthcheck
-/// proves both processes are alive, while this layer consumes the resulting
-/// per-container Docker health state.
+// What: containers watchdog only alerts on, never restarts.
+// Why: dhcp/ntp restarts could race their config rollback.
+// From: Issue #842
 fn resolve_alert_only_targets(
     dhcp_mode: &str,
     logging_enabled: bool,
@@ -145,11 +121,8 @@ async fn reconcile_desired_state(client: &DockerProxyClient, settings: &Settings
     }
 }
 
-// Matches watchdog.sh's log()/log_err(): "[watchdog] HH:MM:SS msg". Kept as
-// this exact shape (rather than switching to a structured `tracing`
-// format) so operators grepping existing `docker logs lancache-watchdog`
-// output/dashboards built around this line shape see no discontinuity the
-// day this binary eventually replaces the bash entrypoint.
+// What: HH:MM:SS of the "[watchdog] HH:MM:SS msg" lines.
+// Why: operators grep the docker logs for this exact shape.
 fn timestamp_hms() -> String {
     const FORMAT: &[time::format_description::FormatItem] =
         time::macros::format_description!("[hour]:[minute]:[second]");
@@ -158,18 +131,71 @@ fn timestamp_hms() -> String {
         .expect("fixed UTC format description must always succeed")
 }
 
+// What: WATCHDOG_LOG_FILE opened once for append, or none.
+// Why: fluent-bit tails the file; compose runs no tee.
+// From: Issue #1683 | PR #1858
+fn log_file() -> Option<&'static Mutex<std::fs::File>> {
+    static FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+    FILE.get_or_init(|| {
+        let path = std::env::var("WATCHDOG_LOG_FILE")
+            .ok()
+            .filter(|p| !p.is_empty())?;
+        let opened = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o640)
+            .open(&path);
+        match opened {
+            Ok(file) => Some(Mutex::new(file)),
+            Err(e) => {
+                eprintln!(
+                    "[watchdog] {} WARNING: cannot open {path}: {e}",
+                    timestamp_hms()
+                );
+                None
+            }
+        }
+    })
+    .as_ref()
+}
+
+// What: a line to its stream and to the log file, if any.
+// Why: a failed file write is shown once, never silent.
+// From: Issue #1683 | PR #1858
+fn emit(line: &str, to_stderr: bool) {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if to_stderr {
+        eprintln!("{line}");
+    } else {
+        println!("{line}");
+    }
+    let Some(file) = log_file() else {
+        return;
+    };
+    let written = match file.lock() {
+        Ok(mut f) => writeln!(f, "{line}").map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    if let Err(e) = written
+        && !WARNED.swap(true, Ordering::Relaxed)
+    {
+        eprintln!(
+            "[watchdog] {} WARNING: cannot write the log file: {e}",
+            timestamp_hms()
+        );
+    }
+}
+
 fn log(msg: &str) {
-    println!("[watchdog] {} {msg}", timestamp_hms());
+    emit(&format!("[watchdog] {} {msg}", timestamp_hms()), false);
 }
 
 fn log_err(msg: &str) {
-    eprintln!("[watchdog] {} {msg}", timestamp_hms());
+    emit(&format!("[watchdog] {} {msg}", timestamp_hms()), true);
 }
 
-// Startup env parsing, mirrored from watchdog.sh's top-of-file section.
-// Kept in main.rs (not lib.rs) because it reads real process environment
-// variables -- everything it calls into (config::*) is itself pure and
-// unit-tested independently.
+// What: startup settings, read once from the environment.
+// Why: env reads stay here; config::* stays pure, tested.
 struct Settings {
     docker_proxy_url: String,
     check_interval: Duration,
@@ -251,8 +277,8 @@ fn load_settings() -> Settings {
         log(&w);
     }
 
-    // SSL_ENABLED defaults truthy, matching watchdog.sh's `is_truthy
-    // "${SSL_ENABLED:-1}"`.
+    // What: SSL_ENABLED defaults to true.
+    // Why: same default as the ui's SSL_ENABLED.
     let ssl_enabled = config::resolve_bool(env("SSL_ENABLED").as_deref(), true);
 
     let container_names = match config::resolve_container_names(
@@ -280,14 +306,8 @@ fn load_settings() -> Settings {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/data/desired-state.json"));
 
-    // Mirrors watchdog.sh's resolve_cache_dir(): CACHE_DIR wins outright,
-    // but an older installation may still only have the pre-CACHE_DIR
-    // split CACHE_DIR_STANDARD/CACHE_DIR_SSL pair set -- reading only
-    // CACHE_DIR here would silently fall back to the default and report
-    // disk usage for the wrong filesystem on such an install. Conflicting
-    // legacy values with no CACHE_DIR to arbitrate is fatal, matching the
-    // bash's own exit 1, via the same log_err-then-exit(1) pattern
-    // resolve_container_names's fail-closed mismatch uses above.
+    // What: CACHE_DIR, else the legacy split pair.
+    // Why: old installs may set only the CACHE_DIR_* pair.
     let cache_dir = match config::resolve_cache_dir(
         env("CACHE_DIR").as_deref(),
         env("CACHE_DIR_STANDARD").as_deref(),
@@ -480,10 +500,8 @@ async fn main() {
                 "UNHEALTHY {docker_proxy_name} ({count} consecutive failures) -- alert only, watchdog cannot restart its own Docker API channel"
             )),
         }
-        // watchdog.sh's probe_docker_socket_proxy() stores the literal
-        // string "healthy"/"unhealthy" into H_DOCKER_PROXY. Using
-        // HealthReading::Unhealthy here renders a red management-plane alarm
-        // without passing through restart-capable FailureCounter logic.
+        // What: proxy reachability as a health reading.
+        // Why: red status without the restart counter.
         let docker_proxy_reading = if reachable {
             HealthReading::Healthy
         } else {
@@ -525,16 +543,8 @@ async fn main() {
             services: services_status,
             disk: DiskInfo { cache: disk_cache },
         };
-        // A failed status write is treated as fatal, matching the bash
-        // implementation's behavior under `set -e`: a failing `mkdir`/
-        // tmp-file write/`mv` there exits the whole script. That distinction
-        // matters operationally, not just for parity's own sake -- the
-        // Compose `watchdog` service (deploy/*/docker-compose.yml) sets
-        // `restart: always`, so an exited process actually gets the
-        // orchestrator to restart it. `healthcheck.sh`'s own mtime-freshness
-        // check would correctly start reporting the container `unhealthy`
-        // once status.json goes stale even without this exit, but Docker does
-        // not restart a still-running process merely because health is red.
+        // What: a failed status write exits the process.
+        // Why: compose restarts on exit, not on red health.
         if let Err(e) = status::write_status(&settings.status_file, &watchdog_status) {
             log_err(&format!(
                 "ERROR: failed to write {}: {e}",

@@ -596,30 +596,15 @@ fn ddns_allow_unsigned_marker_paths(state: &AppState) -> [PathBuf; 2] {
     ]
 }
 
-// True only when a real (non-empty) DDNS_TSIG_KEY has actually been
-// persisted to the shared-secrets volume by entrypoint.sh's
-// shared-secret-bootstrap library (file "ddns-tsig-key"). Reading the
-// file's own presence/content, not an env var, because the UI process never
-// receives DDNS_TSIG_KEY itself (it isn't one of this container's own
-// secrets) -- the shared-secrets volume is the only place both the DNS
-// containers (writers/generators) and this UI (reader) agree on the current
-// real value's existence without the UI needing the plaintext secret at
-// all. Deliberately does not attempt full placeholder-string detection
-// (Rule-Ref: secret_is_placeholder's three independently-maintained
-// copies, persist): resolve_shared_secret only ever persists a real,
-// generated-or-operator-supplied value to this file, never a checked-in
-// placeholder literal, so a non-empty file here is already a strong enough
-// signal for this specific gate.
+// What: true when the ddns-tsig-key file is non-empty.
+// Why: the ui lacks DDNS_TSIG_KEY; the dns side writes it.
+// From: Issue #858
 fn real_ddns_tsig_key_configured(state: &AppState) -> bool {
     ddns_tsig_key_file_is_real(&Path::new(&state.config.shared_secret_dir).join("ddns-tsig-key"))
 }
 
-// Split out from real_ddns_tsig_key_configured so the three cases that
-// matter for this fail-closed gate (file absent, file present but empty --
-// resolve_shared_secret never writes an empty file itself, but a hand-crafted
-// or truncated volume could still produce one -- and file present with real
-// content) are each directly unit-testable without needing a full AppState
-// (Docker/NATS connections, Tera instance) just to check a metadata() call.
+// What: a key file counts only when present and non-empty.
+// Why: a truncated or hand-made empty file must not count.
 fn ddns_tsig_key_file_is_real(path: &Path) -> bool {
     fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false)
 }
@@ -1926,23 +1911,9 @@ mod tests {
         );
     }
 
-    // Cross-language parity guard (issue #822 pattern audit): this
-    // validator's bash counterpart (_is_valid_domain in
-    // scripts/lib/domain-validation.sh, embedded byte-identically into
-    // services/proxy/entrypoint.sh and services/dns/entrypoint.sh) is a
-    // fully independent implementation, with nothing enforcing the two
-    // agree. Both this test and
-    // tests/bats/domain_validation_parity.bats's "bash _is_valid_domain
-    // agrees with the shared parity fixture on every case" iterate the same
-    // shared fixture file, so a change to either validator that silently
-    // starts disagreeing with the other fails one of the two test suites
-    // instead of shipping unnoticed.
-    //
-    // Dynamically generated length-boundary cases (a 64-char label, a
-    // >253-char total domain) are intentionally not in the shared fixture --
-    // they can't be expressed as static fixture lines -- and stay covered
-    // separately by accepts_domain_entries_with_optional_wildcard_marker
-    // above and the bash side's .github/scripts/ci.bats domain test.
+    // What: the Rust validator matches the shared fixture.
+    // Why: ci.bats runs bash _is_valid_domain on it too.
+    // From: Issue #822
     #[test]
     fn is_valid_domain_matches_shared_parity_fixture() {
         // Runtime fs::read_to_string via CARGO_MANIFEST_DIR (this crate's
@@ -2035,17 +2006,8 @@ mod tests {
         assert!(set_aaaa_filter_marker(&marker, true).is_err());
     }
 
-    // Covers the three cases that matter for the dnsupdate-require-tsig
-    // fail-closed gate (issue DDNS follow-up, real-tested via a live
-    // container in the accompanying PR): no file at all (the common case --
-    // shared-secrets volume freshly created), a present-but-empty file (not
-    // something resolve_shared_secret itself ever writes, but a defensive
-    // case worth locking in since an empty file must NOT be mistaken for a
-    // configured key), and a real non-empty file. Real-container testing
-    // separately confirmed entrypoint.sh's independent shell-side copy of
-    // this same check (secret_is_placeholder / a genuinely unwritable
-    // shared-secrets mount) also fails closed; this test locks in the Rust
-    // side of the same defense-in-depth pair.
+    // What: missing or empty key fails; a real one passes.
+    // Why: an empty file is never a configured key.
     #[test]
     fn ddns_tsig_key_file_is_real_covers_absent_empty_and_real() {
         let dir = temp_dir("ddns-tsig-key-real-check");

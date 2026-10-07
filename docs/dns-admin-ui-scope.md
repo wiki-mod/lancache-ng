@@ -186,8 +186,8 @@ and reverse zone state through native PowerDNS AXFR/NOTIFY.
 ### 3a. PowerDNS-native secondary/AXFR
 
 **Current state (implemented for the fixed project zones):** `dns-standard`
-is the only writer for LAN/reverse zone data in the shipped production,
-quickstart, and validation topologies. `services/dns/entrypoint.sh` turns
+is the only writer for LAN/reverse zone data in the shipped production and
+validation topologies. `services/dns/entrypoint.sh` turns
 those zones into PowerDNS primary zones, enables SOA serial edits for
 DDNS/API writes, activates the shared TSIG key for transfer authorization,
 and configures `ALSO-NOTIFY` for configured local targets. `dns-ssl` and

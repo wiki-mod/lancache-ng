@@ -2,29 +2,8 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
-//! Runtime state file I/O for this crate's main loop, in both directions:
-//!
-//! - `status.json` production: watchdog.sh's `write_status()`/`disk_info()`,
-//!   reshaped as typed structs that deliberately mirror
-//!   `services/ui/src/watchdog_status.rs`'s own `WatchdogStatus`/
-//!   `ServiceHealth`/`DiskInfo`/`DiskHealth` field-for-field (that module is
-//!   the sole reader of this file, so its expected shape is the contract,
-//!   not this crate's own preference). The two definitions are intentionally
-//!   duplicated rather than shared via a common crate: this project has no
-//!   existing shared-library pattern between `services/ui` and any other
-//!   service, and introducing one for a handful of struct fields would be a
-//!   disproportionate coupling for the benefit gained.
-//! - `desired-state.json` consumption (issue #1437): the reverse direction
-//!   of the same runtime-state-exchange concern -- `services/ui` is the sole
-//!   writer, this crate's main loop is the sole reader, read fresh on every
-//!   iteration (see `main.rs`'s `reconcile_desired_state`). Same tolerant-
-//!   reader philosophy as `read_status`-equivalent code elsewhere in this
-//!   project: a missing or malformed file must never stall or crash the
-//!   main loop, and collapses to "no entries", which `reconcile_one`
-//!   treats as "no opinion, take no action" -- not "should run". An install
-//!   with no such file yet (or one that predates this feature) therefore
-//!   behaves exactly as before: watchdog never starts or stops dhcp/ntp on
-//!   its own initiative, only when the dock has explicitly said so.
+//! What: status.json writer and desired-state.json reader.
+//! Why: a bad desired-state file is no action, no crash.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -37,9 +16,8 @@ use crate::health::HealthReading;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceHealth {
-    /// `health_color()`'s output ("green"/"yellow"/"red") -- watchdog is
-    /// the single source of truth for what each color means; the Admin UI
-    /// passes this through verbatim rather than re-deriving it.
+    /// What: color() value: green/yellow/red/amber.
+    /// Why: the ui passes it through, never re-derives it.
     pub status: String,
     /// Raw health string ("healthy"/"unhealthy"/"starting"/"none"/
     /// "unreachable") shown as a tooltip/detail.
@@ -71,11 +49,8 @@ pub struct DiskInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchdogStatus {
     pub updated: String,
-    // HashMap, not a fixed struct with named proxy/dns_standard/dns_ssl
-    // fields -- watchdog.sh omits the dns-ssl entry entirely when
-    // SSL_ENABLED=0 (see write_status()'s `ssl_services` construction), so
-    // the *set* of keys present is itself meaningful, exactly matching
-    // services/ui/src/watchdog_status.rs's own reader-side HashMap.
+    // What: map, not fixed fields; dns-ssl may be absent.
+    // Why: the key set itself tells the ui SSL mode is off.
     pub services: HashMap<String, ServiceHealth>,
     pub disk: DiskInfo,
 }
@@ -139,10 +114,8 @@ pub fn read_desired_state(path: &Path) -> DesiredState {
     serde_json::from_str(&content).unwrap_or_default()
 }
 
-/// Renders the current UTC time as watchdog.sh's `date -u
-/// +%Y-%m-%dT%H:%M:%SZ` would -- no fractional seconds, no timezone offset
-/// beyond the literal `Z`, matching the exact format `status.json`'s
-/// `updated` field has always had.
+/// What: UTC time as YYYY-MM-DDTHH:MM:SSZ, no fractions.
+/// Why: status.json's `updated` format is a fixed contract.
 pub fn format_updated_timestamp(now: time::OffsetDateTime) -> String {
     const FORMAT: &[time::format_description::FormatItem] =
         time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
@@ -155,25 +128,8 @@ pub fn format_updated_timestamp(now: time::OffsetDateTime) -> String {
         .expect("fixed UTC format description must always succeed")
 }
 
-/// watchdog.sh's `disk_info()`: percentage-full and traffic-light status
-/// for the filesystem backing `dir`. Missing directory -> `{pct: 0, status:
-/// "unknown"}`, matching the bash's own early-return for that case
-/// (distinct from a `df` command failure with the directory present,
-/// which falls through to `pct: 0` with the normal green/yellow/red
-/// classification applied to that 0 -- same as the bash's `|| pct=0`
-/// fallback keeping the rest of the function's logic running).
-///
-/// Shells out to the real `df -P` binary rather than reimplementing
-/// filesystem-usage math (e.g. via `statvfs`) in Rust: this keeps the
-/// exact same rounding/derivation `df` itself uses, so a future dashboard
-/// reader can never observe a threshold crossing differently than an
-/// operator running `df` by hand would -- reimplementing the percentage
-/// calculation independently risked a subtle off-by-one against `df`'s own
-/// rounding rules for no real benefit. `-P` forces POSIX output format (one
-/// line per filesystem): without it, a long device name (common for
-/// overlay/mapper devices) can wrap onto its own line, which would break
-/// the fixed line/field parsing below exactly the way it would break the
-/// bash's `awk 'NR==2'`.
+/// What: df -P use% of dir as green/yellow/red, or unknown.
+/// Why: same rounding as df; -P keeps one line per mount.
 pub fn disk_info(dir: &Path, warn_pct: u32, alarm_pct: u32) -> DiskHealth {
     if !dir.is_dir() {
         return DiskHealth {
@@ -198,12 +154,8 @@ pub fn disk_info(dir: &Path, warn_pct: u32, alarm_pct: u32) -> DiskHealth {
     }
 }
 
-// Runs `df -P <dir>` and parses the second line's fifth whitespace-
-// separated field (the "Use%" column), stripping the trailing '%' --
-// exactly `awk 'NR==2 {gsub(/%/,"",$5); print $5}'`. Returns None on any
-// failure (command not found, nonzero exit, unexpected output shape,
-// unparseable percentage) so the caller can apply disk_info()'s own
-// "treat as 0" fallback uniformly, matching the bash's `|| pct=0`.
+// What: Use% field of `df -P <dir>`, or None on failure.
+// Why: disk_info treats every failure uniformly as 0.
 fn df_percent_full(dir: &Path) -> Option<u32> {
     let output = Command::new("df").arg("-P").arg(dir).output().ok()?;
     if !output.status.success() {
@@ -215,10 +167,8 @@ fn df_percent_full(dir: &Path) -> Option<u32> {
     use_pct_field.trim_end_matches('%').parse::<u32>().ok()
 }
 
-/// Writes `status.json` atomically: same file written to `<path>.tmp` then
-/// `rename`d into place, matching watchdog.sh's `write_status()` exactly --
-/// a concurrent reader (the Admin UI's `watchdog_status.rs`) must never
-/// observe a half-written file.
+/// What: write status.json via <path>.tmp and rename.
+/// Why: the ui must never read a half-written file.
 pub fn write_status(path: &Path, status: &WatchdogStatus) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -255,11 +205,8 @@ mod tests {
 
     #[test]
     fn disk_info_reports_unknown_for_missing_directory() {
-        // A directory name virtually guaranteed not to exist -- built from
-        // the current unique test-run timestamp, matching this project's
-        // own convention (see AGENTS.md's syslog-forwarding-simulation.sh
-        // reference) of deriving disposable unique paths from a real clock
-        // read rather than a hardcoded literal that could collide.
+        // What: a unique, never-created path.
+        // Why: a fixed name could hit a real dir.
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

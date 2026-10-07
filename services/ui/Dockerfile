@@ -38,6 +38,10 @@ ARG PROJECT_CARGO_CODEGENUNIT=
 # Why: ci.sh rust-build folds it into the ccache key.
 # From: Issue #1683
 ARG BUILD_TOOLS_IMAGE
+# What: compiler VAR=driver pairs, supplied by ci.sh.
+# Why: the builder has no SOT; rust-build reads the env.
+# From: Issue #1683 | PR #1858
+ARG CI_TOOLCHAIN_COMPILERS
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -50,6 +54,8 @@ COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.
 # From: Issue #1533 | PR #1858
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=sccache_redis_url \
+    --mount=type=secret,id=sccache_policy \
+    --mount=type=secret,id=sccache_gha \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
@@ -61,6 +67,8 @@ COPY services/ui/src ./services/ui/src
 # From: Issue #1683
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=sccache_redis_url \
+    --mount=type=secret,id=sccache_policy \
+    --mount=type=secret,id=sccache_gha \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \

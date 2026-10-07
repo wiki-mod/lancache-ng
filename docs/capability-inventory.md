@@ -727,8 +727,8 @@ The script handles:
 
 ### Deployment layouts
 
-The current repository uses the production, quickstart, full-setup and
-secondary deployment layouts where appropriate.
+The current repository uses the production, full-setup and secondary
+deployment layouts where appropriate.
 
 The former permanent `deploy/dev` environment has been retired. Development no
 longer depends on maintaining a second parallel copy of the complete runtime

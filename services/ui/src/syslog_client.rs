@@ -1,21 +1,10 @@
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! Reader for the central syslog-ng log store (#633 PR4). Sibling to
-//! nginx_client.rs, not a patch to it: the two log formats are unrelated
-//! (nginx's custom access-log format vs. syslog-ng's own
-//! `$ISODATE $HOST $PROGRAM: $MSGONLY` destination template -- see
-//! deploy/*/docker-compose.yml's inline-generated `d_lancache` destination).
 //!
-//! Layout under SYSLOG_LOG_ROOT (written by the `syslog-ng` service, PR2/#756
-//! extended which services feed it, PR3/#757 added storage-budget pruning):
-//!   <root>/<host>/<YYYYMMDD>.log                          -- active file
-//!   <root>/<host>/<YYYYMMDD>.log.<rotated-ts>              -- just rotated
-//!   <root>/<host>/<YYYYMMDD>.log.<rotated-ts>.zst|.gz      -- compressed
-//! `<rotated-ts>` is `date -u +%Y%m%dT%H%M%SZ`. Compression is zstd by
-//! default, falling back to gzip only if zstd could not be installed at
-//! container start (no network egress) -- every reader here must therefore
-//! transparently handle plain/.zst/.gz, never assume one or the other.
+//! What: reader of the syslog-ng store: tail, stats, size.
+//! Why: rotated files may be plain, .zst or .gz; read all.
+//! From: Issue #633
 
 use regex::Regex;
 use serde::Serialize;
@@ -42,32 +31,12 @@ pub struct SyslogHostStats {
     pub host: String,
     pub files: u64,
     pub size_bytes: u64,
-    // Distinct count of YYYYMMDD file-name prefixes seen for this host, i.e.
-    // "aggregate by host/day" collapsed to a count rather than a full
-    // per-day breakdown table -- the size/file totals above are already
-    // per-host, and a full per-day matrix would need line-level timestamp
-    // parsing on every compressed file for a dashboard stat nobody asked to
-    // drill into, which isn't worth the extra decompression cost.
-    //
-    // No line count here (deliberately removed, see #758 review): counting
-    // non-empty lines requires decompressing every .zst/.gz file, and
-    // get_syslog_stats runs on every /dashboard render (no cache, no
-    // upper bound while the PR3/#757 storage-budget pruning is out of this
-    // branch's scope) -- on an install with GBs of retained history that
-    // turned each dashboard load into a full decompress-everything scan.
-    // files/size_bytes/days above are metadata/filename-only and stay cheap
-    // regardless of retained volume.
+    // What: distinct YYYYMMDD days seen for this host.
+    // Why: filename-only; no line count, no decompression.
     pub days: u64,
-    // #849 bug-hunt finding observability.md#13: this whole struct was
-    // already computed by get_syslog_stats() on every dashboard render, but
-    // dashboard.html only ever rendered the aggregate hosts.len()/
-    // total_files -- the per-host breakdown was discarded despite already
-    // being available, a textbook instance of this project's own Feature
-    // Completeness rule (backend capability exists, UI doesn't expose it).
-    // Human-readable size, reusing nginx_client's own format_bytes() rather
-    // than duplicating a second byte-formatting implementation that could
-    // drift from it -- computed once here so the template does not need
-    // Tera-side arithmetic on a raw byte count.
+    // What: size_bytes via nginx_client::format_bytes.
+    // Why: one byte formatter; no Tera-side arithmetic.
+    // From: Issue #849
     pub size_human: String,
 }
 
@@ -281,15 +250,8 @@ fn select_fair_window(collected: Vec<SyslogEntry>, limit: usize) -> Vec<SyslogEn
     kept
 }
 
-// Aggregates file count / on-disk size per host, plus a distinct-day count
-// per host, across every file under `log_root`. Metadata/filename-only
-// (fs::read_dir + Metadata::len(), no file content is read), unlike
-// nginx_client::get_log_stats's whole-file aggregate read -- content-level
-// stats (e.g. line counts) would require decompressing every .zst/.gz file
-// on every call, which isn't bounded by anything in this branch (the
-// PR3/#757 storage-budget pruning that would cap retained volume is out of
-// scope here), so this deliberately stays metadata-only. Not a bounded tail
-// read like parse_syslog_tail above either -- this always visits every file.
+// What: per-host file count, size and days, metadata only.
+// Why: decompressing every file per render costs too much.
 pub fn get_syslog_stats(log_root: &str) -> SyslogStats {
     let mut stats = SyslogStats::default();
 
@@ -345,14 +307,8 @@ pub fn get_syslog_stats(log_root: &str) -> SyslogStats {
     stats
 }
 
-// Mirrors nginx_client::get_cache_size_gb's allowlist-then-`du` shape, but
-// deliberately does NOT extend that function's cache-directory-scoped
-// allowlist: the syslog store's container-side mount path is fixed at
-// /var/log/lancache-syslog-ng across dev/prod/quickstart (every
-// deploy/*/docker-compose.yml mounts logs-syslog-ng or the prod bind source
-// at that exact path), unlike CACHE_DIR which legitimately varies by
-// deployment mode -- a single-entry allowlist is the correct match for that
-// contract, not an oversight.
+// What: du size of the syslog store, allowlisted path only.
+// Why: only the fixed syslog mount may be passed to du.
 pub fn get_syslog_size_gb(path: &str) -> f64 {
     let path_obj = Path::new(path);
     if !path_obj.is_absolute() {
@@ -973,11 +929,8 @@ mod tests {
             .expect("hostA present");
         assert_eq!(host_a.files, 2);
         assert_eq!(host_a.days, 2);
-        // #849 observability.md#13: size_human must be a non-empty, real
-        // formatted string (not the Default-derived empty String a struct
-        // literal without this field would silently produce), proving the
-        // new field is actually populated by get_syslog_stats, not just
-        // present in the struct definition.
+        // What: size_human is filled by get_syslog_stats.
+        // Why: a Default empty string must not pass.
         assert!(!host_a.size_human.is_empty());
         assert_eq!(
             host_a.size_human,
@@ -1076,10 +1029,9 @@ mod tests {
         );
     }
 
-    // Finding #6 (docs/bug-hunt/ui-core.md, issue #849): same path-boundary
-    // gap as nginx_client's is_allowed_cache_path -- a bare `starts_with`
-    // would also accept a sibling directory that merely shares the prefix
-    // string, not the actual path component.
+    // What: a sibling path sharing the prefix is rejected.
+    // Why: the allowlist must match a whole path component.
+    // From: Issue #849
     #[test]
     fn get_syslog_size_gb_rejects_prefix_string_collision_without_path_boundary() {
         assert_eq!(get_syslog_size_gb("/var/log/lancache-syslog-ng-evil"), 0.0);

@@ -2,30 +2,9 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
-//! `POST /api/netdata-alarms`: ingest endpoint for the `netdata` container's
-//! `custom_sender()` alarm-notify integration (bug hunt #849,
-//! `docs/bug-hunt/observability.md` finding #3: Netdata's own health.d
-//! alarms had no notification integration or Admin UI surface of their
-//! own). Registered in `main.rs`'s `public_routes` group -- not because it
-//! is unauthenticated, but because it is a machine webhook call from a peer
-//! container rather than a browser session: it carries no session cookie
-//! and cannot present the CSRF token `protected_routes`'s `basic_auth`
-//! middleware requires for mutating requests.
-//!
-//! It is still not an open endpoint. Every request must present a matching
-//! `X-Netdata-Alarm-Token` header, checked in constant time against the
-//! shared `NETDATA_ALARM_TOKEN` value (see `config.rs` and
-//! `deploy/*/docker-compose.yml`'s `netdata:` service command block for how
-//! both sides resolve the exact same value via the shared-secrets volume,
-//! issue #858). This fails closed the same way
-//! `routes/secondaries.rs::register_secondary` already does for
-//! `SECONDARY_REGISTRATION_TOKEN`: an empty/unconfigured token on this side
-//! is rejected outright, never silently treated as "auth disabled" -- bug
-//! hunt finding #20 already established that every container on the
-//! `lancache` Docker network can reach Netdata's own unauthenticated REST
-//! API directly, so an unauthenticated *write* endpoint into the Admin UI
-//! would be a NEW attack surface (any compromised/malicious container could
-//! inject fabricated alarms into the dashboard), not a pre-existing one.
+//! What: netdata alarm webhook and its alarm sender.
+//! Why: one owner of header, path and alarm fields.
+//! From: Issue #858 | PR #1858
 
 use crate::AppState;
 use axum::body::Bytes;
@@ -34,7 +13,59 @@ use axum::http::{HeaderMap, StatusCode};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
-const ALARM_TOKEN_HEADER: &str = "X-Netdata-Alarm-Token";
+pub(crate) const ALARM_TOKEN_HEADER: &str = "X-Netdata-Alarm-Token";
+pub(crate) const INGEST_PATH: &str = "/api/netdata-alarms";
+
+// What: netdata custom_sender that POSTs alarms to the ui.
+// Why: fields come from NetdataAlarmEvent; no second list.
+// From: Issue #858 | PR #1858
+pub(crate) fn render_alarm_notify_conf(
+    ui_url: &str,
+    token_file: &str,
+    max_time: &str,
+    recipient: &str,
+) -> Result<String, String> {
+    for value in [ui_url, token_file, max_time, recipient] {
+        let plain = |c: char| c.is_ascii_alphanumeric() || "-._:/".contains(c);
+        if value.is_empty() || !value.chars().all(plain) {
+            return Err(format!("{value:?} is no plain URL or path"));
+        }
+    }
+    let sample = serde_json::to_value(crate::netdata_alarms::NetdataAlarmEvent::default())
+        .map_err(|e| format!("cannot list alarm fields: {e}"))?;
+    let fields = sample.as_object().ok_or("alarm event is no JSON object")?;
+    let json: Vec<String> = fields
+        .iter()
+        .map(|(key, value)| {
+            if value.is_string() {
+                format!("\\\"{key}\\\":\\\"$(_lancache_json_escape \"${{{key}}}\")\\\"")
+            } else {
+                format!("\\\"{key}\\\":${{{key}}}")
+            }
+        })
+        .collect();
+    let json = json.join(",");
+    let ok = StatusCode::OK.as_u16();
+    Ok(format!(
+        r#"SEND_CUSTOM="YES"
+DEFAULT_RECIPIENT_CUSTOM="{recipient}"
+_lancache_json_escape() {{
+  printf '%s' "$1" | tr -d '\n' | sed 's/\\/\\\\/g; s/"/\\"/g'
+}}
+custom_sender() {{
+  local token httpcode
+  token="$(cat "{token_file}")" || return 1
+  httpcode="$(docurl --max-time {max_time} -X POST -H "Content-Type: application/json" -H "{ALARM_TOKEN_HEADER}: ${{token}}" -d "{{{json}}}" "{ui_url}{INGEST_PATH}")" || {{
+    error "lancache-ui alarm POST failed: HTTP ${{httpcode}}"
+    return 1
+  }}
+  [ "${{httpcode}}" = "{ok}" ] && return 0
+  error "lancache-ui alarm POST returned HTTP ${{httpcode}}"
+  return 1
+}}
+"#
+    ))
+}
 
 // Constant-time, fail-closed token check -- same idiom and rationale as
 // `routes/secondaries.rs::register_secondary`'s `SECONDARY_REGISTRATION_TOKEN`
@@ -46,11 +77,8 @@ const ALARM_TOKEN_HEADER: &str = "X-Netdata-Alarm-Token";
 // to a length check, not a byte-by-byte guess -- acceptable, since the
 // token's fixed generated length is not itself a secret worth hiding.
 fn alarm_token_is_valid(headers: &HeaderMap, configured: &str) -> bool {
-    // An empty/placeholder-cleared configured token must never be treated as
-    // "no auth required" -- see this module's doc comment for why a silent
-    // open endpoint here would be worse than simply refusing every request
-    // until an operator (or the shared-secret bootstrap) actually resolves
-    // a real value.
+    // What: an empty configured token rejects everything.
+    // Why: an unset token must never mean an open endpoint.
     if configured.is_empty() {
         return false;
     }
@@ -131,16 +159,41 @@ mod tests {
         headers
     }
 
-    // The core fail-closed contract: an unconfigured (empty) token must
-    // never be treated as "auth disabled", even if the caller happens to
-    // present an empty header too -- see this module's doc comment (bug
-    // hunt finding #20) for why an open endpoint here would be a real new
-    // attack surface, not a harmless default.
+    // What: an empty token rejects, even an empty header.
+    // Why: unconfigured must never mean auth disabled.
+    // From: Issue #858
     #[test]
     fn empty_configured_token_always_rejects() {
         assert!(!alarm_token_is_valid(&HeaderMap::new(), ""));
         assert!(!alarm_token_is_valid(&headers_with_token(""), ""));
         assert!(!alarm_token_is_valid(&headers_with_token("anything"), ""));
+    }
+
+    // What: sender uses header, path, token, all fields.
+    // Why: a mismatch with the route loses alarms silently.
+    // From: Issue #858 | PR #1858
+    #[test]
+    fn alarm_sender_matches_route_and_fields_and_rejects_shell_text() {
+        let conf = render_alarm_notify_conf("http://peer.test:1", "/cfg/tok", "7", "rcpt").unwrap();
+        for needle in [
+            ALARM_TOKEN_HEADER,
+            INGEST_PATH,
+            "\"/cfg/tok\"",
+            "--max-time 7",
+            "\"rcpt\"",
+            "docurl",
+        ] {
+            assert!(conf.contains(needle), "missing {needle:?}");
+        }
+        let sample =
+            serde_json::to_value(crate::netdata_alarms::NetdataAlarmEvent::default()).unwrap();
+        for field in sample.as_object().unwrap().keys() {
+            assert!(conf.contains(&format!("${{{field}}}")), "missing {field}");
+        }
+        assert!(!conf.contains("/dev/null"));
+        assert!(render_alarm_notify_conf("http://peer.test:1$(id)", "/t", "7", "r").is_err());
+        assert!(render_alarm_notify_conf("http://peer.test:1", "/t f", "7", "r").is_err());
+        assert!(render_alarm_notify_conf("http://peer.test:1", "/t", "7;x", "r").is_err());
     }
 
     // Baseline correctness: the exact right token is accepted; a wrong or

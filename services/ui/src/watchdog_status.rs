@@ -2,50 +2,23 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
-//! Reader for `services/watchdog/watchdog.sh`'s `status.json` (issue #870,
-//! bug-hunt findings #2/#3 in `docs/bug-hunt/observability.md`). Watchdog
-//! already computes per-service health color and cache-disk usage color
-//! into this file every `CHECK_INTERVAL` (default 30s), but nothing in the
-//! Admin UI read it before this module -- `docs/architecture-ng.md` and
-//! `docs/threat-model.md`'s T9 both documented the resulting dashboard
-//! "traffic light bar" as if it existed. This module is a pure, read-only
-//! consumer: it never writes `status.json` (watchdog remains the sole
-//! writer) and never restarts or mutates anything, so it carries none of
-//! the AG-OP-006..013 idempotence/convergence obligations that apply to
-//! stateful write paths.
-//!
-//! Deliberately tolerant of every failure mode: a missing file (an install
-//! that doesn't run watchdog, or the `ui` container started before
-//! watchdog's first 30s write), a malformed/partial file (caught mid-write
-//! without the atomic rename -- shouldn't happen given watchdog's
-//! write-to-`.tmp`-then-`rename` pattern, but a reader must not assume a
-//! writer it doesn't control never races), and a stale file (watchdog
-//! crashed or was stopped, leaving old content behind) all resolve to
-//! `None`/`Stale` rather than a panic or a misleadingly "healthy" render.
+//! What: read-only reader of watchdog's status.json.
+//! Why: any read failure is Unavailable, never healthy.
+//! From: Issue #870
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::time::{Duration, SystemTime};
 
-// If status.json's mtime is older than this, treat it as stale rather than
-// trusting its content. Watchdog's default CHECK_INTERVAL is 30s and it
-// writes status.json twice per loop iteration (see watchdog.sh's main loop),
-// so a healthy watchdog never leaves this file older than ~30s. 90s (3x the
-// default interval) tolerates a slow cycle (e.g. a `maybe_purge()` scan
-// running long) without false-flagging a live watchdog as stale, while still
-// catching a genuinely stopped/crashed watchdog well before an operator would
-// otherwise notice. Using the file's mtime (not the JSON `updated` field)
-// means a stale read never depends on successfully parsing the file first.
+// What: status.json older than this reads as Stale.
+// Why: 3x the 30s CHECK_INTERVAL; mtime needs no parse.
 const STALE_AFTER: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ServiceHealth {
-    // health_color()'s output in watchdog.sh: "green"/"yellow"/"red". Passed
-    // through verbatim rather than re-derived here -- watchdog is the single
-    // source of truth for what each color means (see its own health_color()
-    // doc comment), and duplicating that mapping in Rust would risk the two
-    // drifting the same way SYSLOG_ENABLED's parsing once did (#877).
+    // What: watchdog's color: green, yellow or red.
+    // Why: watchdog owns the mapping; no second copy here.
     pub status: String,
     // Raw Docker health string ("healthy"/"unhealthy"/"starting"/"none"/
     // "unreachable") -- shown as a tooltip/detail, not the color itself.
@@ -67,11 +40,8 @@ pub struct DiskInfo {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WatchdogStatus {
     pub updated: String,
-    // HashMap, not a fixed struct with named proxy/dns_standard/dns_ssl
-    // fields: watchdog.sh omits the dns-ssl entry entirely when
-    // SSL_ENABLED=0 (see write_status()'s `ssl_services` construction), so
-    // the *set* of keys present is itself meaningful and must be rendered
-    // as-is rather than assumed to always be exactly three fixed names.
+    // What: map, not fixed fields; the key set varies.
+    // Why: watchdog omits dns-ssl when SSL mode is off.
     pub services: HashMap<String, ServiceHealth>,
     pub disk: DiskInfo,
 }
@@ -92,14 +62,8 @@ pub enum WatchdogStatusReadResult {
     Unavailable,
 }
 
-// Reads and parses `path` (STATUS_FILE, see config.rs's
-// `watchdog_status_file`), classifying the result as Fresh/Stale/
-// Unavailable. Never panics: every failure mode (missing file, permission
-// error, malformed JSON, a metadata() call that itself fails) folds into
-// `Unavailable` rather than propagating an error the dashboard route would
-// have to handle specially. This mirrors how `dashboard.rs`'s other
-// collectors (get_cache_size_gb, get_log_stats) already treat their own
-// blocking I/O -- see AppState callers wrapping this in spawn_blocking.
+// What: read STATUS_FILE as Fresh, Stale or Unavailable.
+// Why: never panics; every failure folds into Unavailable.
 pub fn read_status(path: &str) -> WatchdogStatusReadResult {
     let metadata = match fs::metadata(path) {
         Ok(m) => m,
@@ -278,12 +242,8 @@ mod tests {
         fs::remove_file(&path).ok();
     }
 
-    // A file older than STALE_AFTER must be reported as Stale (with its
-    // parsed content still attached for a grayed-out "last known" render),
-    // not silently treated as current -- this is the exact gap (a crashed
-    // watchdog leaving a stale-but-present status.json reading as healthy
-    // forever) that motivated using mtime rather than trusting the file's
-    // own "updated" field blindly.
+    // What: a file older than STALE_AFTER reads as Stale.
+    // Why: a dead watchdog must not show healthy forever.
     #[test]
     fn stale_file_is_reported_as_stale_not_fresh() {
         let path = temp_path("stale");
@@ -292,28 +252,13 @@ mod tests {
             r#"{"updated":"2020-01-01T00:00:00Z","services":{},"disk":{"cache":{"pct":0,"status":"green"}}}"#,
         )
         .unwrap();
-
-        // Backdate the file's mtime well past STALE_AFTER. filetime isn't a
-        // dependency of this crate, so this shells out to `touch -d`, which
-        // is only available in the CI/build-tools Linux environment this
-        // test runs in (never on a developer's Windows host per this
-        // project's "no local Windows testing" convention) -- acceptable
-        // here because the test is skipped (not failed) if `touch` itself is
-        // unavailable, rather than asserting a false pass.
-        let touch_ok = std::process::Command::new("touch")
-            .arg("-d")
-            .arg("2020-01-01T00:00:00")
-            .arg(&path)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !touch_ok {
-            fs::remove_file(&path).ok();
-            eprintln!(
-                "skipping stale_file_is_reported_as_stale_not_fresh: `touch -d` unavailable on this host"
-            );
-            return;
-        }
+        let backdated = UNIX_EPOCH + Duration::from_secs(1_577_836_800);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(backdated)
+            .unwrap();
 
         let result = read_status(path.to_str().unwrap());
         match result {

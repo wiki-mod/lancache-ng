@@ -119,11 +119,6 @@ services:
       - bind-tools
       - sqlite
       - iproute2
-    smoke:
-      # What: loader resolves every lib; main never runs.
-      # Why: a missing .so (exit 127) slipped to validate.
-      # From: Issue #1683 | PR #1858
-      - ldd /usr/local/bin/nats-subscriber
   watchdog:
     context: services/watchdog
     labels: [watchdog]
@@ -134,11 +129,6 @@ services:
     crate: lancache-watchdog
     final_base: alpine
     runner: heavy
-    smoke:
-      # What: loader resolves every lib; main never runs.
-      # Why: a missing .so (exit 127) slipped to validate.
-      # From: Issue #1683 | PR #1858
-      - ldd /usr/local/bin/lancache-watchdog
   dhcp:
     context: services/dhcp
     labels: [dhcp, kea]
@@ -236,11 +226,6 @@ services:
     crate: lancache-ui
     final_base: alpine
     runner: heavy
-    smoke:
-      # What: loader resolves every lib; main never runs.
-      # Why: a missing .so (exit 127) slipped to validate.
-      # From: Issue #1683 | PR #1858
-      - ldd /usr/local/bin/lancache-ui
   cachehamster:
     context: services/cachehamster
     # What: Rust compile via BUILD_TOOLS_IMAGE stage.
@@ -253,11 +238,6 @@ services:
     crate: lancache-cachehamster
     final_base: alpine
     runner: heavy
-    smoke:
-      # What: loader resolves every lib; main never runs.
-      # Why: a missing .so (exit 127) slipped to validate.
-      # From: Issue #1683 | PR #1858
-      - ldd /usr/local/bin/lancache-cachehamster
 
 # What: The toolchain image that builds the product stack.
 # Why: built by generic pipeline; not in stack
@@ -305,7 +285,6 @@ build_toolchain:
       - rustfmt
       - sccache
       - shellcheck
-      - shfmt
       - sqlite
       - tcpdump
       # What: trivy version-pinned 0.74.0-r0
@@ -330,11 +309,9 @@ build_toolchain:
       - basename
       - bash
       - bats
-      - c++
       - cargo
       - cargo-audit
       - cat
-      - cc
       - ccache
       - chgrp
       - chmod
@@ -353,8 +330,6 @@ build_toolchain:
       - expect
       - find
       - flock
-      - g++
-      - gcc
       - getent
       - gh
       - git
@@ -382,7 +357,6 @@ build_toolchain:
       - sed
       - sha256sum
       - shellcheck
-      - shfmt
       - sort
       - tar
       - tcpdump
@@ -405,7 +379,6 @@ build_toolchain:
       - actionlint --version
       - bats --version
       - shellcheck --version
-      - shfmt --version
       - docker compose version
       - docker buildx version
       - dhclient --version
@@ -422,6 +395,24 @@ external_services:
   docker-socket-proxy:
     image: "tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476"
     role: runtime
+    # What: Docker API calls of ui and watchdog per service
+    # Why: haproxy denies every call not granted here
+    # From: Issue #1683 | PR #1858
+    inspect: [proxy, dns-standard, dns-ssl, nats, netdata, ui, dhcp, dhcp-proxy, ntp, syslog]
+    restart: [proxy, dns-standard, dns-ssl, nats, netdata, ui]
+    start: [dhcp, dhcp-proxy, ntp, dhcp-probe]
+    stop: [dhcp, dhcp-proxy, ntp, dhcp-probe]
+    wait: [dhcp-probe]
+    logs: [dhcp-probe]
+    endpoints: [_ping]
+    # What: haproxy timeouts for the Docker API frontend
+    # Why: client/server outlast the ui's 120 s call limit
+    # From: Issue #1683 | PR #1858
+    timeouts:
+      - "http-request 10s"
+      - "connect 10s"
+      - "client 10m"
+      - "server 10m"
   # What: upstream netdata, deliberately on its mutable tag.
   # Why: maintainer decision; no first-party netdata build.
   # From: Issue #1683 | PR #1858
@@ -471,16 +462,18 @@ external_versions:
 build_matrix:
   platforms: [linux/amd64, linux/arm64]
 
-# What: Per-arch apk arch name and GitHub runner label.
+# What: Per-arch apk arch, rust target and runner label.
 # Why: one SOT owner; no platform case dup in ci.sh.
 # From: Issue #1683
 platform_arch:
   amd64:
     apk: x86_64
     runner: ubuntu-latest
+    rust_target: x86_64-alpine-linux-musl
   arm64:
     apk: aarch64
     runner: ubuntu-24.04-arm
+    rust_target: aarch64-alpine-linux-musl
 
 # What: Named build contexts services COPY from at build.
 # Why: A change here rebuilds every consumer, not just self.
@@ -498,7 +491,7 @@ named_contexts:
 # From: Issue #1683
 build_identity:
   rust:
-    inputs: [source_sha, toolchain_digest, base_digest, package_versions]
+    inputs: [source_sha, toolchain_digest, base_digest, package_versions, build_variables]
   apk:
     inputs: [source_sha, package_versions, base_digest]
   toolchain:
@@ -510,6 +503,11 @@ build_identity:
 build_runtime:
   rust:
     packages: [libgcc]
+    # What: ldd the crate binary; the binary never runs.
+    # Why: a missing .so must fail verify, not validate.
+    # From: Issue #1683 | PR #1858
+    smoke:
+      - ldd /usr/local/bin/@CRATE@
 
 # What: Per-service rebuild edges beyond its own context.
 # Why: plan picks candidates, identity decides the build.
@@ -645,6 +643,22 @@ ci_variables:
   # Why: AG-VAL-008: a variable, disabled by default.
   # From: Issue #1683
   CI_RUST_VALIDATION: "false"
+  # What: sccache cache mode: required, optional or off.
+  # Why: AG-CI-004 mode; required fails closed (AG-CI-011).
+  # From: Issue #1683 | PR #1858
+  SCCACHE_REDIS_MODE: required
+  # What: sccache dist toolchain cache size in bytes.
+  # Why: AG-CI-006: no size literal in the dist config.
+  # From: Issue #1683 | PR #1858
+  CI_SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE: 5368709120
+  # What: compiler VAR=driver pairs; the first is default.
+  # Why: distcc, ccache and smoke read one compiler list.
+  # From: Issue #1683 | PR #1858
+  CI_TOOLCHAIN_COMPILERS: CC=cc GCC=gcc CXX=c++ GXX=g++
+  # What: kill timeout (s) of the GHA runtime export step.
+  # Why: AG-CI-016: every container command is bounded.
+  # From: Issue #1683 | PR #1858
+  CI_GHA_RUNTIME_EXPORT_TIMEOUT: 30
   # What: compose file validate starts (AG-KD-008).
   # Why: one deploy profile; a repo var may override.
   # From: Issue #1683 | PR #1858
@@ -676,15 +690,15 @@ ci_variables:
   CI_ARCH_DOC: docs/architecture-ng.md
   CI_BACKUP_RESTORE_DOC: docs/backup-restore.md
   CI_RELEASE_VERSIONING_DOC: docs/release-versioning.md
+  CI_DOCS_DIR: docs
   # What: attempts and backoff base of the retry owner.
   # Why: AG-CI-006: a retry/timeout value has one owner.
   # From: Issue #1683 | PR #1858
   CI_RETRY_MAX_ATTEMPTS: 4
   CI_RETRY_BACKOFF_BASE_SECONDS: 1
-  # What: trivy scan attempts, scanners and DB lock timing.
+  # What: trivy scanners, DB dir and DB lock timing.
   # Why: AG-CI-006: scan policy values have one owner.
   # From: Issue #1683 | PR #1858
-  CI_TRIVY_MAX: 4
   CI_TRIVY_SCANNERS: vuln,secret
   CI_TRIVY_SHARED_DIR: /mnt/trivy-db
   CI_TRIVY_LOCK_POLL: 5
@@ -708,11 +722,12 @@ ci_variables:
   MAX_WORKFLOW_LINES: 8999
   MAX_WORKFLOW_BYTES: 512000
   MAX_RUN_BLOCK_BYTES: 74000
-  # What: acceptance ledger ref and the remote holding it.
-  # Why: AG-CI-006: one owner for the ledger location.
+  # What: ledger ref + file; the remote git ops use.
+  # Why: AG-CI-006: one owner for ledger ref, file, remote.
   # From: Issue #1683 | PR #1858
   CI_LEDGER_REF: refs/ci/acceptance/ledger
-  CI_LEDGER_REMOTE: origin
+  CI_LEDGER_FILE: records
+  CI_GIT_REMOTE: origin
   # What: promote lock attempts, backoff and stale seconds.
   # Why: AG-CI-006: lock timing has one owner.
   # From: Issue #1683 | PR #1858
@@ -746,7 +761,7 @@ file_headers:
 # Why: builders read repo/org vars; no YAML or literal copy.
 # From: Issue #1683 | PR #1858
 build_variables:
-  rust: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT]
+  rust: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT, CI_TOOLCHAIN_COMPILERS]
 
 # What: PR title taxonomy and project board for PR checks.
 # Why: AG-GH-018/008 name one CI policy owner for them.
@@ -820,4 +835,4 @@ validation:
   # What: required keys setup.sh repairs
   # Why: empty required key breaks the stack
   # From: Issue #1683 | PR #1858
-  setup_required_repairs: CACHE_INACTIVE CACHE_MAX_GB CACHE_MAX_SIZE CACHE_MEM_MB CACHE_SLICE_SIZE CACHE_VALID_ANY CACHE_VALID_HIT DDNS_TSIG_KEY KEA_CTRL_TOKEN LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_PREFIX LANCACHE_IMAGE_REGISTRY LANCACHE_IMAGE_TAG NATS_DNS_REPLICA_PASSWORD NATS_DNS_REPLICA_USER NATS_DNS_WRITER_PASSWORD NATS_DNS_WRITER_USER NATS_CALLOUT_PASSWORD NATS_CALLOUT_USER NATS_SYS_PASSWORD NATS_SYS_USER NATS_UI_PASSWORD NATS_UI_USER NGINX_UPSTREAM_RESOLVER PDNS_API_KEY PROXY_SECURITY_MODE SSL_ENABLED SECONDARY_REGISTRATION_TOKEN
+  setup_required_repairs: CACHE_INACTIVE CACHE_MAX_GB CACHE_MAX_SIZE CACHE_MEM_MB CACHE_SLICE_SIZE CACHE_VALID_ANY CACHE_VALID_HIT DDNS_TSIG_KEY KEA_CONFIG_SNAPSHOT_DIR KEA_CTRL_TOKEN LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_PREFIX LANCACHE_IMAGE_REGISTRY LANCACHE_IMAGE_TAG NATS_DNS_REPLICA_PASSWORD NATS_DNS_REPLICA_USER NATS_DNS_WRITER_PASSWORD NATS_DNS_WRITER_USER NATS_CALLOUT_PASSWORD NATS_CALLOUT_USER NATS_SYS_PASSWORD NATS_SYS_USER NATS_UI_PASSWORD NATS_UI_USER NGINX_UPSTREAM_RESOLVER PDNS_API_KEY PROXY_SECURITY_MODE SSL_ENABLED SECONDARY_REGISTRATION_TOKEN

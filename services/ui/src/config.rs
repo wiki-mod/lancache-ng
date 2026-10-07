@@ -2,10 +2,8 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
-//! Runtime configuration for the Admin UI service: loads and validates
-//! settings from the process environment (auth, DHCP mode, HSTS mode,
-//! session TTL, and related toggles) plus the UI's persisted `/data`
-//! overrides into a typed `Config`.
+//! What: typed Config from env, secret files and /data.
+//! Why: one owner for every ui and prepare-mode setting.
 
 use std::env;
 use std::fmt;
@@ -14,12 +12,9 @@ use std::fs;
 const DEFAULT_UI_SESSION_TTL_SECONDS: u64 = 24 * 60 * 60;
 const DEFAULT_UI_SETTINGS_FILE: &str = "/data/lancache-ui-settings.env";
 
-// Upper bound for SYSLOG_MAX_GB, matching watchdog.sh's maybe_prune_syslog()
-// magnitude guard (`[ "$max_gb" -gt 1048576 ]`). Without a matching ceiling
-// here, an operator-set SYSLOG_MAX_GB above this value would display as its
-// literal (unclamped) size in the Admin UI while watchdog silently enforced
-// only this much lower budget -- the dashboard would show a far larger
-// number than what retention actually allows.
+// What: SYSLOG_MAX_GB ceiling, as in retention.sh's guard.
+// Why: the ui must show the budget retention enforces.
+// From: PR #757
 const SYSLOG_MAX_GB_CEILING: u32 = 1_048_576;
 
 // Controls whether the Admin UI sends `Strict-Transport-Security` on a
@@ -104,14 +99,9 @@ pub struct Config {
     pub cache_dir: String,
     pub dns_standard_state_dir: String,
     pub dns_ssl_state_dir: String,
-    // dnsupdate-require-tsig Admin UI toggle (issue #815 follow-up): the
-    // shared-secrets volume (mounted read-only-in-practice into this
-    // container too, per deploy/prod/docker-compose.yml) is where
-    // entrypoint.sh's shared-secret-bootstrap library persists the
-    // first-writer-wins DDNS_TSIG_KEY (file name "ddns-tsig-key"). The UI
-    // checks this file's presence/non-emptiness before allowing the toggle
-    // on, so enabling it can never lock DNS UPDATE out entirely with no key
-    // configured to validate signatures against.
+    // What: secrets dir; also holds the dns ddns-tsig-key.
+    // Why: the TSIG toggle needs a key or UPDATE locks out.
+    // From: Issue #858
     pub shared_secret_dir: String,
     pub proxy_standard_url: String,
     pub proxy_ssl_url: String,
@@ -158,12 +148,9 @@ pub struct Config {
     // comment for why dns-ssl isn't wired up here yet.
     pub dns_rollback_url: String,
     pub pdns_api_key: String,
-    // Shared secret (issue #858) gating POST /api/netdata-alarms (bug hunt
-    // #849, observability.md finding #3) -- see
-    // routes/netdata_alarms.rs::alarm_token_is_valid for the constant-time
-    // comparison and fail-closed-on-empty behavior this value feeds, and
-    // deploy/*/docker-compose.yml's netdata service for how the netdata
-    // container resolves the identical value.
+    // What: shared token gating the netdata alarm webhook.
+    // Why: prepare netdata hands the same value to netdata.
+    // From: Issue #858
     pub netdata_alarm_token: String,
     // Where netdata_alarms::append_alarm/read_alarms persist the received
     // alarm history. Defaults into the ui service's existing `ui-data`
@@ -229,14 +216,9 @@ pub struct Config {
     // authorization requests for secondaries and needs no other permissions.
     pub nats_callout_user: String,
     pub nats_callout_password: Option<String>,
-    // Issue #681: the sole member of a new NATS `SYS` account (see
-    // services/nats/nats.conf's `accounts {}` block) -- used ONLY by
-    // nats_kick.rs to look up (CONNZ) and force-disconnect
-    // ($SYS.REQ.SERVER.*.KICK) a removed/rotated secondary's live connection.
-    // Every other NATS role in this struct lives in the implicit default
-    // account ($G), which nats-server does not permit to reach the
-    // $SYS.REQ.SERVER.* system-services API at all -- confirmed against a
-    // real nats-server 2.14.3 (see nats_kick.rs's module docs).
+    // What: sole member of the SYS account in nats.conf.
+    // Why: only SYS may CONNZ/KICK a removed secondary.
+    // From: Issue #681
     pub nats_sys_user: String,
     pub nats_sys_password: Option<String>,
     // Where the auth-callout issuer NKey seed is persisted (generated on
@@ -245,12 +227,8 @@ pub struct Config {
     // issues; see nats_auth_callout.rs's module docs for the full mechanism.
     // Ignored if nats_issuer_seed is set.
     pub nats_issuer_seed_path: String,
-    // Optional literal seed value, taking precedence over
-    // nats_issuer_seed_path when set. Exists for ephemeral/deterministic
-    // deployments (e.g. deploy/full-setup's validation harness) that need a
-    // fixed, pre-known issuer keypair baked into nats.conf ahead of time and
-    // have no persistent /data volume to read a generated one back from --
-    // not intended for dev/prod, which use the file-based path instead.
+    // What: literal issuer seed; wins over the seed path.
+    // Why: setups without /data need a fixed issuer key.
     pub nats_issuer_seed: Option<String>,
     // Where the auth-callout responder's static X25519 (curve) NKey seed is
     // persisted (issue #682). Distinct keypair from nats_issuer_seed_path's
@@ -281,34 +259,32 @@ pub struct Config {
     pub auto_update_enabled: bool,
     pub lancache_image_tag: String,
     pub nats_conf_path: String,
-    // Path to the auth_callout fragment the Admin UI is the SOLE writer of
-    // (issue #811). It is `include`d by the nats container's own nats.conf and
-    // holds only the `auth_callout {}` stanza (issuer + auth_users). Splitting
-    // it out of nats.conf is what lets the nats entrypoint keep idempotently
-    // regenerating its static config on every restart without clobbering the
-    // callout -- see routes/secondaries.rs::update_nats_conf and the nats
-    // service's entrypoint comment in deploy/*/docker-compose.yml. Defaults to
-    // the include target that entrypoint resolves relative to /etc/nats.
+    // What: the auth_callout fragment nats.conf includes.
+    // Why: the ui fills it; prepare nats only stubs it.
+    // From: Issue #811
     pub nats_auth_callout_path: String,
     pub nats_service: String,
-    // Central logging pipeline (#633): written into nats.conf's top-level
-    // `log_file:` directive by the nats service's own entrypoint (since #811
-    // the Admin UI no longer writes nats.conf, only the auth_callout fragment;
-    // this field is retained for the connection/preflight code paths that
-    // still surface the configured log path) so
-    // fluent-bit can tail it. nats-server logs to exactly one destination at
-    // a time -- setting `log_file` means `docker logs` on this container
-    // stops showing nats-server's own output while the `logging` compose
-    // profile is active (same accepted, documented trade-off as dhcp-proxy's
-    // dnsmasq `log-facility=`; there is no dual-output config for either).
+    // What: nats-server log_file set by render_nats_conf.
+    // Why: fluent-bit tails this file, not the docker logs.
+    // From: Issue #633
     pub nats_log_file: String,
+    // What: values only the prepare modes read.
+    // Why: compose owns these mount paths; no Rust default.
+    // From: Issue #1683 | PR #1858
+    pub nats_store_dir: Option<String>,
+    pub nats_monitor_port: Option<String>,
+    pub netdata_conf_file: Option<String>,
+    pub netdata_notify_file: Option<String>,
+    pub netdata_token_file: Option<String>,
+    pub netdata_daemon_log: Option<String>,
+    pub netdata_health_log: Option<String>,
+    pub netdata_alarm_ui_url: Option<String>,
+    pub netdata_alarm_max_time: Option<String>,
+    pub netdata_alarm_recipient: Option<String>,
     pub dev_mode: bool,
-    // Central syslog-ng reader (#633 PR4, depends on PR3's watchdog.sh
-    // retention-engine contract for the exact env var names/semantics these
-    // mirror). Fail-closed default: syslog_enabled=false means
-    // routes/logs.rs and routes/dashboard.rs never touch syslog_log_root at
-    // all, so installs that never opt into `docker compose --profile
-    // logging` see byte-identical behavior to before this PR.
+    // What: syslog reader keys, same env as retention.sh.
+    // Why: off means the ui never touches syslog_log_root.
+    // From: Issue #633
     pub syslog_enabled: bool,
     pub syslog_log_root: String,
     pub syslog_max_gb: u32,
@@ -325,13 +301,9 @@ pub struct Config {
     pub ntp_enabled: bool,
     pub ntp_upstream_servers: String,
     pub ntp_auto_dhcp: bool,
-    // Issue #870: path to watchdog.sh's STATUS_FILE, shared read-only via the
-    // `watchdog-status` named volume (see deploy/*/docker-compose.yml's `ui:`
-    // service). Defaults to the same path watchdog.sh itself defaults
-    // STATUS_FILE to, so a dev/prod/quickstart install that never overrides
-    // either variable still lines up without extra configuration. Read-only
-    // by design: the Admin UI is never a writer of this file, only watchdog
-    // is (see watchdog_status.rs's module doc comment).
+    // What: watchdog's status.json, read-only volume.
+    // Why: only watchdog writes it; the ui only reads it.
+    // From: Issue #870
     pub watchdog_status_file: String,
     // What: reverse of watchdog_status_file (ui writes)
     // Why: dock start/stop needs a signal watchdog polls
@@ -457,6 +429,16 @@ impl fmt::Debug for Config {
             .field("nats_auth_callout_path", &self.nats_auth_callout_path)
             .field("nats_service", &self.nats_service)
             .field("nats_log_file", &self.nats_log_file)
+            .field("nats_store_dir", &self.nats_store_dir)
+            .field("nats_monitor_port", &self.nats_monitor_port)
+            .field("netdata_conf_file", &self.netdata_conf_file)
+            .field("netdata_notify_file", &self.netdata_notify_file)
+            .field("netdata_token_file", &self.netdata_token_file)
+            .field("netdata_daemon_log", &self.netdata_daemon_log)
+            .field("netdata_health_log", &self.netdata_health_log)
+            .field("netdata_alarm_ui_url", &self.netdata_alarm_ui_url)
+            .field("netdata_alarm_max_time", &self.netdata_alarm_max_time)
+            .field("netdata_alarm_recipient", &self.netdata_alarm_recipient)
             .field("dev_mode", &self.dev_mode)
             .field("syslog_enabled", &self.syslog_enabled)
             .field("syslog_log_root", &self.syslog_log_root)
@@ -908,14 +890,9 @@ impl Config {
             nats_bind_ip: env_str("NATS_BIND_IP", ""),
             nats_advertise_url: env_str("NATS_ADVERTISE_URL", ""),
             nats_ui_user: env_str("NATS_UI_USER", ""),
-            // env_opt, not env_str with a "" default: the real value always
-            // comes from setup.sh's `get_or_generate_secret ... hex32` (a
-            // genuine per-deployment random secret, persisted to .env on
-            // first run) or generate_nats_password()'s CSPRNG for
-            // per-secondary credentials. There is no placeholder/vendor
-            // value here on purpose -- an unset var must fail startup via
-            // validate_runtime_nats_credentials, never silently run with an
-            // empty password.
+            // What: env or shared-secret file; no default.
+            // Why: unset must fail credential validation.
+            // From: Issue #858
             nats_ui_password: secret_opt("NATS_UI_PASSWORD")?,
             nats_dns_writer_user: env_str("NATS_DNS_WRITER_USER", ""),
             nats_dns_writer_password: secret_opt("NATS_DNS_WRITER_PASSWORD")?,
@@ -942,29 +919,28 @@ impl Config {
             auto_update_enabled,
             lancache_image_tag,
             nats_conf_path: env_str("NATS_CONF_PATH", "/etc/nats/nats.conf"),
-            // Must match the `include "auth_callout.conf"` target the nats
-            // entrypoint writes into nats.conf (resolved relative to /etc/nats).
+            // What: default fragment next to nats.conf.
+            // Why: nats.conf includes it by file name.
             nats_auth_callout_path: env_str(
                 "NATS_AUTH_CALLOUT_PATH",
                 "/etc/nats/auth_callout.conf",
             ),
             nats_service: env_str("NATS_SERVICE", "nats"),
             nats_log_file: env_str("NATS_LOG_FILE", "/var/log/lancache-nats/nats.log"),
+            nats_store_dir: env_opt("NATS_STORE_DIR"),
+            nats_monitor_port: env_opt("NATS_MONITOR_PORT"),
+            netdata_conf_file: env_opt("NETDATA_CONF_FILE"),
+            netdata_notify_file: env_opt("NETDATA_NOTIFY_FILE"),
+            netdata_token_file: env_opt("NETDATA_TOKEN_FILE"),
+            netdata_daemon_log: env_opt("NETDATA_DAEMON_LOG"),
+            netdata_health_log: env_opt("NETDATA_HEALTH_LOG"),
+            netdata_alarm_ui_url: env_opt("NETDATA_ALARM_UI_URL"),
+            netdata_alarm_max_time: env_opt("NETDATA_ALARM_MAX_TIME"),
+            netdata_alarm_recipient: env_opt("NETDATA_ALARM_RECIPIENT"),
             dev_mode: env_bool("LANCACHE_DEV_MODE", false),
-            // Mirrors watchdog.sh's maybe_prune_syslog() contract (PR3/#757)
-            // exactly: same 4 env var names, same defaults (10 GB / 30
-            // days). env_u32_clamped's `n >= 1` floor used to be a documented
-            // divergence from watchdog.sh's bash clamp, which let a literal
-            // "0" through unchanged (it is all-digits) -- that was worse than
-            // a harmless display-only mismatch: a real SYSLOG_MAX_GB=0 made
-            // watchdog's size pass treat every file as over budget and delete
-            // everything it could. watchdog.sh now applies the same `n >= 1`
-            // floor (falling back to the default of 10 GB, exactly like this
-            // field does), and env_u32_clamped_with_max's ceiling below
-            // matches watchdog.sh's own upper magnitude guard, so the two
-            // are aligned in both directions. SYSLOG_ENABLED parsing is
-            // likewise shared in spirit with watchdog.sh's is_truthy()
-            // helper -- see env_bool()'s doc comment below.
+            // What: SYSLOG_* defaults equal retention.sh's.
+            // Why: the ui shows what retention enforces.
+            // From: Issue #633
             syslog_enabled: env_bool("SYSLOG_ENABLED", false),
             syslog_log_root: env_str("SYSLOG_LOG_ROOT", "/var/log/lancache-syslog-ng"),
             syslog_max_gb: env_u32_clamped_with_max("SYSLOG_MAX_GB", 10, SYSLOG_MAX_GB_CEILING),
@@ -978,8 +954,8 @@ impl Config {
                 "0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com",
             ),
             ntp_auto_dhcp: env_bool("NTP_AUTO_DHCP", false),
-            // Matches services/watchdog/watchdog.sh's own STATUS_FILE default
-            // exactly (see its `STATUS_FILE="${STATUS_FILE:-/var/run/watchdog/status.json}"`).
+            // What: watchdog's own STATUS_FILE default.
+            // Why: both sides agree without compose config.
             watchdog_status_file: env_str("WATCHDOG_STATUS_FILE", "/var/run/watchdog/status.json"),
             desired_state_file: env_str("DESIRED_STATE_FILE", "/data/desired-state.json"),
         })
@@ -1157,11 +1133,11 @@ fn resolve_shared_secret(
     Err(format!("cannot place {}", file.display()))
 }
 
-// What: read-or-create every ui secret file before the drop.
-// Why: the ui may start before its backend; no split-brain.
+// What: read-or-create the secret files named by a prefix.
+// Why: each starter makes only its own; "" means all.
 // From: Issue #858 | PR #1858
-pub(crate) fn ensure_shared_secrets(dir: &str, gid: u32) -> Result<(), String> {
-    for var in SHARED_SECRET_VARS {
+pub(crate) fn ensure_shared_secrets(dir: &str, gid: u32, prefix: &str) -> Result<(), String> {
+    for var in SHARED_SECRET_VARS.iter().filter(|v| v.starts_with(prefix)) {
         let configured = env::var(var).unwrap_or_default();
         let current = if shared_secret_is_placeholder(&configured) {
             ""
@@ -1281,21 +1257,8 @@ fn env_u32_clamped(key: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
-// Same floor semantics as `env_u32_clamped` (a missing/non-numeric/zero
-// value falls back to `default`), plus an explicit ceiling. Used only for
-// SYSLOG_MAX_GB, which watchdog.sh's maybe_prune_syslog() also caps at
-// SYSLOG_MAX_GB_CEILING -- `env_u32_clamped` alone has no ceiling, so a
-// value that fits in a u32 but exceeds watchdog's own magnitude guard (e.g.
-// 2_000_000) previously passed through here unclamped while watchdog capped
-// its own budget at the ceiling, making the Admin UI display a budget far
-// larger than what was actually enforced. Parsing as u64 first (instead of
-// u32) matters too: a value large enough to overflow u32 (>= 4_294_967_296)
-// used to fail `parse::<u32>()` outright and fall back to `default` here,
-// while watchdog.sh's bash arithmetic (64-bit, so nowhere near overflowing
-// on any plausible operator input) clamped the same value to its ceiling --
-// parsing as u64 lets both an in-range-but-over-ceiling value and a
-// u32-overflowing value converge on the same ceiling result watchdog.sh
-// produces, instead of silently falling back to `default` only on this side.
+// What: env_u32_clamped plus a ceiling, parsed as u64.
+// Why: retention.sh clamps at the ceiling, even past u32.
 fn env_u32_clamped_with_max(key: &str, default: u32, max: u32) -> u32 {
     env::var(key)
         .ok()
@@ -1325,17 +1288,8 @@ fn env_usize_clamped(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-// Canonical truthy-parsing contract for boolean-style env vars in this
-// project. `SYSLOG_ENABLED` is also read by services/watchdog/watchdog.sh's
-// maybe_prune_syslog(), which implements the identical 1/true/yes/on
-// (case-insensitive, trimmed) rule via its own `is_truthy()` shell function
-// -- the two cannot literally share one function body across the Rust/Bash
-// boundary, but must not drift again the way they did before this file's
-// truthy parsing was unified with watchdog.sh's (watchdog used to only
-// accept the literal string "true"). See
-// `syslog_enabled_truthy_parsing_matches_watchdog_contract` below and
-// tests/bats/watchdog_truthy_parsing.bats for parity tests run against the
-// exact same input tables on both sides.
+// What: 1/true/yes/on or 0/false/no/off, trimmed, any case.
+// Why: retention.sh's is_truthy uses the same set.
 fn env_bool(key: &str, default: bool) -> bool {
     env::var(key)
         .ok()
@@ -1406,14 +1360,8 @@ fn env_hsts_mode(key: &str, default: HstsMode) -> HstsMode {
         .unwrap_or(default)
 }
 
-// Shared across the crate's test suites (this module's own tests plus
-// main.rs's tests that call `Config::from_env()`). `cargo test` runs tests in
-// parallel threads by default, and `std::env::set_var`/`env::var` are
-// process-global, so any test that reads or writes CACHE_DIR/CACHE_MAX_GB (or
-// their legacy split-key fallbacks) must hold this lock for its whole
-// env-mutation-and-assert window, or it can observe another thread's
-// in-flight legacy values and hit `resolve_cache_dir`/`resolve_cache_max_gb`'s
-// fail-closed panic spuriously.
+// What: one lock for every test that touches process env.
+// Why: env is process-global and tests run in parallel.
 #[cfg(test)]
 pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -1526,8 +1474,8 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    // What: a cold start creates every file; a rerun keeps them.
-    // Why: the ui may start first and must not split the brain.
+    // What: a prefix creates only its own secret files.
+    // Why: no starter may pin another consumer's secret.
     // From: Issue #858 | PR #1858
     #[test]
     fn ensure_shared_secrets_creates_all_once_then_reader_sees_them() {
@@ -1540,13 +1488,20 @@ mod tests {
             unsafe {
                 env::set_var("NATS_UI_PASSWORD", "CHANGE_ME_NATS_UI_PASSWORD");
             }
-            ensure_shared_secrets(d, gid).unwrap();
+            ensure_shared_secrets(d, gid, "NATS_").unwrap();
+            for v in SHARED_SECRET_VARS {
+                let file = dir.join(shared_secret_file_name(v));
+                assert_eq!(file.exists(), v.starts_with("NATS_"), "{v}");
+            }
+            let nats = shared_secret(d, "NATS_UI_PASSWORD").unwrap();
+            ensure_shared_secrets(d, gid, "").unwrap();
+            assert_eq!(shared_secret(d, "NATS_UI_PASSWORD").unwrap(), nats);
             let first: Vec<String> = SHARED_SECRET_VARS
                 .iter()
                 .map(|v| fs::read_to_string(dir.join(shared_secret_file_name(v))).unwrap())
                 .collect();
             assert!(first.iter().all(|v| v.len() == 64));
-            ensure_shared_secrets(d, gid).unwrap();
+            ensure_shared_secrets(d, gid, "").unwrap();
             for (v, want) in SHARED_SECRET_VARS.iter().zip(&first) {
                 assert_eq!(&shared_secret(d, v).unwrap(), want);
             }
@@ -1757,11 +1712,8 @@ mod tests {
         assert!(Config::from_env().unwrap().ssl_enabled);
     }
 
-    // The canonical CACHE_MAX_GB must short-circuit the legacy split-value
-    // reconciliation entirely -- even mismatched STANDARD_CACHE_MAX_GB/
-    // SSL_CACHE_MAX_GB values (which would otherwise panic, see
-    // mismatched_legacy_cache_limits_fail_closed below) must not block
-    // startup once the canonical key is present.
+    // What: CACHE_MAX_GB wins over mismatched legacy keys.
+    // Why: legacy keys must never block the canonical one.
     #[test]
     fn cache_max_gb_wins_over_legacy_values() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1914,11 +1866,9 @@ mod tests {
         assert!(err.contains("STANDARD_CACHE_MAX_GB") && err.contains("SSL_CACHE_MAX_GB"));
     }
 
-    // Finding #1 (docs/bug-hunt/ui-core.md, issue #849): a malformed
-    // CACHE_MAX_GB must fail startup instead of being silently treated as
-    // "unset" and falling through to the legacy keys or the 50.0 default --
-    // an operator's real (if typo'd) cache-size setting must never be
-    // discarded without any signal that anything went wrong.
+    // What: a malformed CACHE_MAX_GB fails startup.
+    // Why: a typo must not silently become the default.
+    // From: Issue #849
     #[test]
     fn malformed_cache_max_gb_fails_closed_instead_of_silently_defaulting() {
         let _guard = env_test_lock().lock().unwrap();
@@ -2263,16 +2213,11 @@ mod tests {
         }
     }
 
-    // Confirms both the default values and env overrides for all four syslog
-    // settings, since a drift between this Rust side and watchdog.sh's own
-    // reading of the same four env vars would make the Admin UI display a
-    // retention/enabled state that does not match what watchdog actually
-    // enforces.
+    // What: SYSLOG_* load defaults and env overrides.
+    // Why: defaults must equal retention.sh's own.
+    // From: Issue #633
     #[test]
     fn syslog_settings_load_from_env_with_documented_defaults_matching_watchdog_contract() {
-        // Defaults here must match watchdog.sh's maybe_prune_syslog() (PR3/#757)
-        // exactly, since both read the same 4 env vars against the same
-        // `docker compose --profile logging` deployment.
         let _guard = env_test_lock().lock().unwrap();
 
         for key in [
@@ -2364,15 +2309,8 @@ mod tests {
         }
     }
 
-    // Proves env_bool()'s SYSLOG_ENABLED parsing agrees with watchdog.sh's
-    // is_truthy() (services/watchdog/watchdog.sh) on the exact same input
-    // tables that tests/bats/watchdog_truthy_parsing.bats and
-    // tests/bats/watchdog_syslog_prune.bats exercise against the shell side.
-    // watchdog.sh previously only accepted the literal string "true" here,
-    // so "1"/"yes"/"on" showed as enabled in the Admin UI while watchdog's
-    // maybe_prune_syslog() silently never ran. If either side's accepted-value
-    // set is ever edited without updating the other, this test and its bats
-    // counterparts stop agreeing on at least one of these inputs.
+    // What: env_bool matches retention.sh's truthy set.
+    // Why: ci.bats checks the same table on the shell side.
     #[test]
     fn syslog_enabled_truthy_parsing_matches_watchdog_contract() {
         let _guard = env_test_lock().lock().unwrap();
@@ -2455,20 +2393,13 @@ mod tests {
         }
     }
 
-    // Parity test for SYSLOG_MAX_GB's ceiling against watchdog.sh's own
-    // magnitude guard (`[ "$max_gb" -gt 1048576 ]` in maybe_prune_syslog()).
-    // tests/bats/watchdog_syslog_prune.bats exercises the same SYSLOG_MAX_GB
-    // values against the real shell function and asserts the same clamped
-    // budget appears in its log output, so both sides agree this value, not
-    // just "does not crash", is what each component actually enforces.
+    // What: over-ceiling or u32-overflow clamps to max.
+    // Why: retention.sh's 64-bit math clamps both the same.
     #[test]
     fn syslog_max_gb_oversized_value_clamps_to_watchdog_ceiling() {
         let _guard = env_test_lock().lock().unwrap();
         let key = "LANCACHE_TEST_UI_SYSLOG_MAX_GB_CEILING";
 
-        // In-range for u32 but above watchdog.sh's ceiling: env_u32_clamped
-        // alone (no max) would have returned this value unclamped, while
-        // watchdog.sh's own guard already capped its budget at the ceiling.
         unsafe {
             env::set_var(key, "2000000");
         }
@@ -2477,11 +2408,6 @@ mod tests {
             SYSLOG_MAX_GB_CEILING
         );
 
-        // Overflows u32 (>= 4_294_967_296): plain `parse::<u32>()` fails
-        // outright here, but watchdog.sh's 64-bit bash arithmetic does not
-        // overflow at this magnitude and clamps to the same ceiling instead
-        // of falling back to its own default -- this must match, not fall
-        // back to `default` the way env_u32_clamped alone would.
         unsafe {
             env::set_var(key, "9999999999");
         }
@@ -2806,12 +2732,9 @@ mod tests {
         assert_eq!(derive_lancache_image_channel("main"), "latest");
     }
 
-    // Finding #2 (docs/bug-hunt/ui-core.md, issue #849): a bare
-    // `tag.starts_with('v')` check used to classify any tag starting with
-    // the letter "v" as a pinned release, even one with no version number
-    // at all -- misreporting a custom mutable tag as immutable in the
-    // Admin UI. A real vX.Y.Z tag always has a digit immediately after the
-    // "v"; this locks that narrower, correct boundary.
+    // What: "v" marks a release only with a digit after it.
+    // Why: a custom tag like "vnext" is no immutable pin.
+    // From: Issue #849
     #[test]
     fn derive_lancache_image_channel_v_prefix_requires_a_following_digit() {
         assert_eq!(derive_lancache_image_channel("very-custom-tag"), "latest");

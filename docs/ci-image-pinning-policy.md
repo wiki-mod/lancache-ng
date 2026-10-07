@@ -241,13 +241,12 @@ not an open task against those two ARG defaults:
 
 ## Local Mutable Channels (Documented Exception)
 
-This project defines several mutable channels in `release/stack-images.yml` for development and release purposes:
+This project defines its mutable channels in `.github/yaml/build-manifest.yml` (`release.channels`):
 
-- `dev`: development/test channel (mutable)
-- `nightly`: pre-stable integration channel from master (mutable; formerly `edge`)
-- `latest`: stable releases only (mutable, must not be moved by non-release workflows)
+- `nightly`: pre-stable integration channel built from `current_dev` (mutable; formerly `edge`)
+- `latest`: stable releases only, built from `master` (mutable, must not be moved by non-release workflows)
 
-These channels are documented in `release/stack-images.yml` and are intended to be mutable. References to these channels are exempt from the pinning requirement, provided they are explicitly documented as intentional. See `docs/release-versioning.md` for details on the channel model.
+These channels are owned by `.github/yaml/build-manifest.yml` and are intended to be mutable. References to these channels are exempt from the pinning requirement, provided they are explicitly documented as intentional. See `docs/release-versioning.md` for details on the channel model.
 
 ## Verification
 

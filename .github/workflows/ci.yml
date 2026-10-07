@@ -147,11 +147,33 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     container: *bt_platform
+    # What: cache secrets the build's set-runtime needs.
+    # Why: secrets never reach ci.sh through CI_VARIABLES.
+    # From: Issue #1683 | PR #1858
+    env: &cache_secrets
+      SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
+      SCCACHE_DIST_AUTH_TOKEN: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
     steps:
       # What: fetch base for impact assessment
       # Why: build must prove semantic impact vs base
       # From: Issue #1683 | PR #1858
       - *bootstrap
+      # What: export args for the GHA cache runtime step.
+      # Why: ci.sh owns the kill timeout and the var list.
+      # From: Issue #1683 | PR #1858
+      - &gha_args
+        name: Prepare the GHA cache runtime export
+        id: gha-runtime
+        run: bash .github/scripts/ci.sh gha-runtime-args
+      # What: hand the GHA cache runtime to later steps.
+      # Why: only action steps receive ACTIONS_RUNTIME_TOKEN.
+      # From: Issue #1683 | PR #1858
+      - &gha_export
+        name: Export the GHA cache runtime
+        uses: docker://mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+        with:
+          entrypoint: timeout
+          args: ${{ steps.gha-runtime.outputs.args }}
       # What: build, then publish and verify result
       # Why: publish != build; readback verifies digest
       # From: Issue #1683 | PR #1858
@@ -183,8 +205,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container: *bt_platform
+    env: *cache_secrets
     steps:
       - *bootstrap
+      - *gha_args
+      - *gha_export
       - name: Test the changed rust services
         env:
           TEST_SERVICES: ${{ needs.plan.outputs.test-services }}

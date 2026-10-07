@@ -538,12 +538,16 @@ documented contract, in `services/ui/src/kea_snapshots.rs`:
   `kea_config_modify()` chain, which also verifies persisted state through
   its existing `config-write` confirmation and records a fresh snapshot of
   the restored config).
-- `KEA_CONFIG_SNAPSHOT_DIR` (default `/var/lib/kea/config-snapshots`) and
+- `KEA_CONFIG_SNAPSHOT_DIR` is owned by `deploy/prod/.env`
+  (`/var/lib/kea/config-snapshots`, inside the Kea data mount) and passed to
+  both the `ui` and the `dhcp` service: the Admin UI writes snapshots there,
+  the `dhcp` entrypoint creates it and reads it in rescue mode, and
+  `setup.sh reset-to-last-known-good-config kea` maps it to the host path
+  through the Kea data mount (a value outside that mount is refused).
   `KEEP_KNOWN_GOOD_CONFIGS` (default 3, same variable name as the shell
-  adapters) configure this adapter; both are read by the Admin UI process,
-  not a shell entrypoint.
+  adapters) is read by the Admin UI process.
 - The `dhcp` (Kea) container's `services/dhcp/entrypoint.sh` chowns
-  `config-snapshots/` to the Admin UI's fixed UID/GID (10001) on every
+  that directory to the Admin UI's fixed UID/GID (10001) on every
   start, since that container runs as root and the Admin UI runs as a fixed
   non-root user — the same pattern already used to keep the shared
   `nats.conf` writable by the Admin UI after a NATS restart (see
@@ -962,9 +966,9 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
     `lancache.dns.flush` JetStream publish sent under whichever
     container's own identity runs `rollback_handler` (`NATS_DNS_WRITER_USER`
     on `dns-standard`, `NATS_DNS_REPLICA_USER` on `dns-ssl`) -- it only
-    works if that identity's `publish` allow-list in `nats.conf` (and the
-    byte-identical generators in `deploy/prod` and
-    `deploy/quickstart/docker-compose.yml`) actually includes that subject.
+    works if that identity's `publish` allow-list in `nats.conf` (and its
+    generator in `deploy/prod/docker-compose.yml`) actually includes that
+    subject.
     It shipped without it: every rollback correctly patched PowerDNS but
     the flush was silently denied server-side, and the `POST /rollback`
     response had no field reflecting that. Both identities now carry the

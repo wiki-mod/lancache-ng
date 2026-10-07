@@ -2,62 +2,15 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
-//! HTTP client for the narrow subset of the Docker API
-//! `scripts/untracked/docker-socket-proxy.sh`'s HAProxy allowlist actually permits:
-//! reading a container's health/running-state JSON, restarting/starting/
-//! stopping a container, and pinging docker-socket-proxy itself. Mirrors
-//! watchdog.sh's `get_health()`/`restart_container()`/
-//! `probe_docker_socket_proxy()` curl invocations, plus `start()`/`stop()`/
-//! `is_running()` -- this crate's main loop is now the sole actor
-//! reconciling `dhcp`/`ntp` against an operator-written desired-state
-//! file, so it needs the start/stop verbs the allowlist already granted
-//! this same `DOCKER_PROXY_URL` endpoint for those two services -- see
-//! `main.rs`'s `reconcile_desired_state`).
-//!
-//! Deliberately plain `reqwest`, not `bollard` (the Docker SDK
-//! `services/ui/src/docker_client.rs` uses): bollard's own client can issue
-//! any Docker Engine API call, but this daemon must only ever hit the
-//! narrow, explicitly allowlisted set of paths below -- a hand-rolled
-//! client whose every method maps to one allowlisted path/verb pair makes
-//! "watchdog cannot accidentally call an unallowlisted Docker endpoint"
-//! true by construction (there is no method that would let it), rather
-//! than true only by convention. That same "only these allowlisted paths"
-//! guarantee is why the client below disables HTTP redirects entirely: a
-//! misconfigured or compromised `docker-socket-proxy` (or an
-//! operator-supplied `DOCKER_PROXY_URL`) returning a 3xx would otherwise
-//! send reqwest's default client on to whatever arbitrary `Location` it
-//! names, which would defeat exactly the "only these endpoints, never
-//! anything else" property this module exists to guarantee. The bash
-//! implementation never had this exposure: plain `curl` without `-L` never
-//! follows redirects either. With redirects disabled, a 3xx response is
-//! not an error to reqwest -- it is returned as an ordinary response whose
-//! status is not `2xx`, so the existing `is_success()` checks below already
-//! treat it the same as any other
-//! failed/unreachable response.
+//! What: reqwest client for the allowlisted Docker calls.
+//! Why: one method per granted path; no redirects followed.
 
 use std::time::Duration;
 
 use crate::health::HealthReading;
 
-/// Runs `fut` under `timeout` when one is set. `None` means "no bound at
-/// all" -- see [`crate::config::parse_curl_timeout`]'s own doc comment for
-/// why a `CURL_MAX_TIME`/`CURL_MAX_TIME_RESTART` of `0` must resolve to
-/// "unbounded" here, never to `Duration::ZERO` passed through this
-/// function (a zero-duration `tokio::time::timeout` does not reliably mean
-/// "never times out"; it means "times out almost immediately").
-///
-/// This wrapper exists because reqwest's own per-request `.timeout()`
-/// covers the `send()` call, which resolves as soon as response headers
-/// arrive -- the response body is a separate stream the caller must
-/// explicitly read, and nothing automatically re-applies that same budget
-/// to the read. curl's `--max-time` (what every one of watchdog.sh's `curl`
-/// calls uses) bounds the WHOLE transfer, connect through the last body
-/// byte. Wrapping the entire fetch (send + body read) in one outer
-/// `tokio::time::timeout` removes any dependency on exactly how far
-/// reqwest's per-request timeout extends into body consumption, and
-/// matches curl's semantics precisely: a gateway that answers headers and
-/// then stalls before finishing the body is bounded the same way a gateway
-/// that never answers at all is.
+/// What: run fut under timeout; None means no bound.
+/// Why: reqwest's timeout may end at headers, not body.
 async fn bounded<T>(
     timeout: Option<Duration>,
     fut: impl std::future::Future<Output = T>,
@@ -83,16 +36,8 @@ fn apply_timeout(
     }
 }
 
-/// A thin wrapper around a `reqwest::Client` pointed at `DOCKER_PROXY_URL`.
-/// One shared client (connection pooling is reqwest's default and costs
-/// nothing extra here), with the timeout supplied per call -- matching
-/// watchdog.sh's two distinct budgets (`CURL_MAX_TIME` for health/ping
-/// reads, `CURL_MAX_TIME_RESTART` for the restart POST, since a restart
-/// includes both Docker's stop grace period and the container's own
-/// startup time; see watchdog.sh's `restart_container()` comment for why
-/// these two timeouts must not share one value). Every method takes
-/// `Option<Duration>` rather than a bare `Duration`: `None` represents
-/// curl's own "0 means no timeout" semantics for these two knobs.
+/// What: shared client; the timeout is passed per call.
+/// Why: restart needs a longer budget than health reads.
 pub struct DockerProxyClient {
     client: reqwest::Client,
     base_url: String,
@@ -101,10 +46,8 @@ pub struct DockerProxyClient {
 impl DockerProxyClient {
     pub fn new(base_url: impl Into<String>) -> reqwest::Result<Self> {
         Ok(Self {
-            // No-redirect policy: see this module's own doc comment above
-            // for why silently following a 3xx would defeat the "only
-            // these allowlisted paths" guarantee this client exists to
-            // provide.
+            // What: never follow a redirect.
+            // Why: a 3xx could reach an ungranted path.
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
@@ -112,24 +55,9 @@ impl DockerProxyClient {
         })
     }
 
-    /// watchdog.sh's `get_health()`: reads `/containers/<name>/json` and
-    /// extracts `.State.Health.Status`, falling back to the literal
-    /// `"none"` when Docker reports no health status at all (jq's `//
-    /// "none"`). Every failure mode -- connection refused, the timeout this
-    /// function itself enforces, a non-2xx response, or a body that isn't
-    /// valid JSON -- collapses to [`HealthReading::Unreachable`], matching
-    /// `curl -sf`'s own `-f` (fail on HTTP error) semantics plus the bash's
-    /// explicit `|| { echo "unreachable"; return; }`/`|| echo
-    /// "unreachable"` fallbacks on both the curl call and the jq parse.
-    ///
-    /// Issue #1296: when the real Status is "healthy", also checks the SAME
-    /// already-fetched response body for a [`HealthReading::Degraded`]
-    /// marker (see [`degraded_reason_from_health_log`]) before returning --
-    /// no second request, no new docker-socket-proxy allowlist entry, since
-    /// `.State.Health.Log` is already part of this exact JSON body. Only
-    /// checked on a genuinely "healthy" Status: a stale marker left over in
-    /// an old log entry must never override a real unhealthy/starting
-    /// reading (see this function's own tests for that ordering).
+    /// What: container health; Degraded only if healthy.
+    /// Why: any request or parse failure reads Unreachable.
+    /// From: Issue #1296
     pub async fn get_health(
         &self,
         container_name: &str,
@@ -164,28 +92,8 @@ impl DockerProxyClient {
         HealthReading::from_docker_status(raw_status)
     }
 
-    /// watchdog.sh's `restart_container()`: `POST
-    /// /containers/<name>/restart?t=2` (`t=2` tells Docker to wait 2s for
-    /// SIGTERM before SIGKILL, coordinated with `timeout` the same way the
-    /// bash's `CURL_MAX_TIME_RESTART` is). Returns whether the call
-    /// succeeded; the bash only logs a warning on failure and never feeds
-    /// that failure back into the failure counter, so this deliberately
-    /// returns a plain `bool` rather than a `Result` the caller might be
-    /// tempted to propagate.
-    ///
-    /// Unlike `get_health`/`ping`, this method never reads a response body
-    /// (`.send()` plus a status check is the whole exchange), so the
-    /// specific "body can stall after headers arrive" race `bounded()` was
-    /// built for does not apply here -- `apply_timeout()`'s own
-    /// per-`send()` reqwest timeout already bounds this call on its own.
-    /// The outer `bounded()` wrapper is kept anyway, purely for a uniform
-    /// call shape across all three client methods; it applies the exact
-    /// same `timeout` duration as `apply_timeout()`, starting at
-    /// essentially the same instant, so it can only ever fire together
-    /// with (not meaningfully before) reqwest's own timeout -- it does not
-    /// shrink the 2s-stop-grace-period-plus-startup budget
-    /// `CURL_MAX_TIME_RESTART` was sized for, and reintroduce the false
-    /// "restart failed" positive that budget exists to avoid.
+    /// What: POST restart?t=2; true on a 2xx answer.
+    /// Why: a failed restart is only logged, never counted.
     pub async fn restart(&self, container_name: &str, timeout: Option<Duration>) -> bool {
         let url = format!("{}/containers/{container_name}/restart?t=2", self.base_url);
         let success = bounded(timeout, async {
@@ -201,15 +109,6 @@ impl DockerProxyClient {
     /// What: starts a container via the socket-proxy allowlist
     /// Why: reconcile_desired_state acts on operator overrides
     /// From: Issue #1437
-    ///
-    /// `POST /containers/<name>/start`, already permitted by
-    /// `scripts/untracked/docker-socket-proxy.sh`'s `safe_dhcp_action`/
-    /// `safe_ntp_action` ACLs for exactly the two services this crate calls
-    /// this on (`services/ui/src/docker_client.rs::start_service` already
-    /// uses the identical endpoint for the same two services' settings-save
-    /// path) -- no allowlist change needed. Same shape as `restart()`
-    /// above: no response body read, so `bounded()` is kept only for a
-    /// uniform call shape, not because the body-stall race applies here.
     pub async fn start(&self, container_name: &str, timeout: Option<Duration>) -> bool {
         let url = format!("{}/containers/{container_name}/start", self.base_url);
         let success = bounded(timeout, async {
@@ -225,10 +124,6 @@ impl DockerProxyClient {
     /// What: stops a container via the socket-proxy allowlist
     /// Why: reconcile_desired_state acts on operator overrides
     /// From: Issue #1437
-    ///
-    /// `POST /containers/<name>/stop`, same allowlist coverage as
-    /// `start()` above (`safe_dhcp_action`/`safe_ntp_action` permit both
-    /// verbs on the same two container names).
     pub async fn stop(&self, container_name: &str, timeout: Option<Duration>) -> bool {
         let url = format!("{}/containers/{container_name}/stop", self.base_url);
         let success = bounded(timeout, async {
@@ -244,18 +139,6 @@ impl DockerProxyClient {
     /// What: reads whether a container is actually running now
     /// Why: reconcile_desired_state must not act on stale info
     /// From: Issue #1437
-    ///
-    /// `GET /containers/<name>/json`, the identical allowlisted endpoint
-    /// `get_health()` already uses (`safe_container_inspect`) -- extracts
-    /// `.State.Running` instead of `.State.Health.Status`. A container can
-    /// be running with no health check configured at all (`get_health()`
-    /// would report `None` for it), so `Running` is the only field that
-    /// reliably answers "should I call start or stop" regardless of
-    /// whether the container has a `HEALTHCHECK`. Returns `None` (not
-    /// `Some(false)`) on any failure to reach/parse this endpoint --
-    /// `reconcile_desired_state` must skip acting this tick rather than
-    /// risk calling `start()` on a container that is actually already
-    /// running but merely unreachable through a flaky proxy right now.
     pub async fn is_running(
         &self,
         container_name: &str,
@@ -278,22 +161,8 @@ impl DockerProxyClient {
         body.and_then(|b| b.pointer("/State/Running").and_then(|v| v.as_bool()))
     }
 
-    /// watchdog.sh's `probe_docker_socket_proxy()`: `GET /_ping`. Already
-    /// permitted by the allowlist's `safe_ping` ACL (the same one
-    /// `get_health()` relies on), needs no new privilege.
-    ///
-    /// Consumes the full response body under the same timeout, then checks
-    /// it names the expected `OK` payload (Docker's real `/_ping` returns
-    /// that literal string with no JSON wrapper) -- not just the HTTP
-    /// status. A gateway that accepts the connection and sends a 200
-    /// status line but then stalls before delivering the body would
-    /// otherwise be reported healthy: `send()` resolves as soon as headers
-    /// arrive, and if nothing ever reads the body, the stall is invisible.
-    /// Detecting exactly that "alive but unresponsive" case is this
-    /// alert-only probe's whole reason to exist, so silently dropping an
-    /// unread response stream would defeat its own purpose. `.trim()`
-    /// tolerates a trailing newline some HTTP stacks add without
-    /// over-fitting to Docker's exact byte-for-byte framing.
+    /// What: GET /_ping; true only for the body "OK".
+    /// Why: a 200 stalling before the body must fail.
     pub async fn ping(&self, timeout: Option<Duration>) -> bool {
         let url = format!("{}/_ping", self.base_url);
         let body: Option<String> = bounded(timeout, async {
@@ -348,20 +217,8 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    // Hand-rolled one-shot HTTP server: accepts exactly one connection,
-    // discards the request, and writes back `response_bytes` verbatim.
-    // Deliberately not a mocking crate dependency (this repository has none
-    // today, see this module's own doc comment on why a hand-rolled client
-    // was preferred over bollard for a similar minimalism reason) -- the
-    // request shapes this client makes are simple enough that a raw TCP
-    // responder is less machinery than pulling in wiremock/mockito for a
-    // handful of tests.
-    //
-    // Takes an owned `impl Into<String>` rather than `&'static str` so a
-    // caller can build the response body at runtime (e.g. embedding a
-    // second ephemeral server's address in a `Location` header for the
-    // redirect test below) -- a plain string literal still works at every
-    // existing call site via `Into`.
+    // What: one-shot raw TCP responder for client tests.
+    // Why: simple requests need no mocking crate.
     async fn serve_one_response(response_bytes: impl Into<String>) -> String {
         let response_bytes = response_bytes.into();
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -465,8 +322,8 @@ mod tests {
     }
 
     #[tokio::test]
-    // A container with no configured HEALTHCHECK omits .State.Health
-    // entirely -- jq's `// "none"` fallback, mirrored here.
+    // What: no .State.Health reads as None.
+    // Why: no HEALTHCHECK is not an unreachable proxy.
     async fn get_health_falls_back_to_none_when_health_is_absent() {
         let base_url = serve_one_response(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"State\":{}}",
@@ -480,9 +337,8 @@ mod tests {
     }
 
     #[tokio::test]
-    // A non-2xx response (e.g. the allowlist rejecting an unknown
-    // container name, or docker-socket-proxy itself erroring) must map to
-    // Unreachable, matching curl -sf's own fail-on-HTTP-error behavior.
+    // What: a non-2xx answer reads as Unreachable.
+    // Why: a failed inspect is not a health state.
     async fn get_health_treats_non_2xx_as_unreachable() {
         let base_url =
             serve_one_response("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n").await;
@@ -527,9 +383,8 @@ mod tests {
     }
 
     #[tokio::test]
-    // Verifies a 2xx restart response is reported as success -- the only
-    // outcome check_and_maybe_restart's Action::Restart branch relies on
-    // to decide whether to log a "restart call failed" warning.
+    // What: a 2xx restart answer is reported as success.
+    // Why: main.rs logs a warning only when this is false.
     async fn restart_reports_success_from_2xx_response() {
         let base_url =
             serve_one_response("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n").await;

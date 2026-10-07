@@ -37,10 +37,10 @@ the top is a signal that its threats need re-checking.
 | TLS interception + local CA | `services/proxy/entrypoint.sh`, `services/proxy/conf.d/https.conf` | v0.2.0 | T7, T8, T10 |
 | Proxy request policy (client CIDR + host allowlists) | `services/proxy/entrypoint.sh`, `services/proxy/conf.d/http.conf` | v0.2.0 | T2, T9 |
 | Admin UI authentication | `services/ui/src/main.rs`, `services/ui/src/config.rs` | v0.2.0 | T3 |
-| Docker access mediation (socket-proxy) | `deploy/quickstart/docker-compose.yml` | v0.2.0 | T6 |
+| Docker access mediation (socket-proxy) | `deploy/prod/docker-compose.yml` | v0.2.0 | T6 |
 | DHCP — Kea mode | `services/dhcp/entrypoint.sh`, `docs/dhcp-modes.md` | v0.2.0 | T12 |
 | DHCP — dnsmasq-proxy mode | `services/dhcp-proxy/entrypoint.sh`, `docs/dhcp-modes.md` | v0.2.0 | T12, T13 |
-| NATS event bus + role-scoped credentials | `deploy/quickstart/docker-compose.yml` (nats), `services/dns/nats-subscriber/` | v0.2.0 | T5 |
+| NATS event bus + role-scoped credentials | `deploy/prod/docker-compose.yml` (nats), `services/dns/nats-subscriber/` | v0.2.0 | T5 |
 | Secondary-node registration / remote NATS | `deploy/prod/docker-compose.nats-secondary.yml`, `services/ui/src/main.rs` | v0.2.0 | T5, T14 |
 | Console exclusion-by-omission | `services/dns/cdn-domains.txt`, `docs/install-ca-cert.md` | v0.2.0 | T4, T10 |
 | Zone/record known-good snapshot + rollback listener | `services/dns/nats-subscriber/src/rollback_listener.rs`, `docs/known-good-config-snapshots.md` | v0.3.0 | T4 |
@@ -255,8 +255,8 @@ untrusted network · **Impact**: High
 
 **Residual risk**: Low, and entirely operator-controlled: it exists only if the
 operator sets `ALLOW_INSECURE_UI=true` *and* exposes the UI beyond the trusted
-LAN. The quickstart binds the UI to the LAN IP by default and documents
-`UI_BIND_IP=127.0.0.1` to restrict it further. Separately, `POST
+LAN. `deploy/prod` binds the UI to `UI_BIND_IP`, which defaults to
+`IP_STANDARD`; `UI_BIND_IP=127.0.0.1` restricts it further. Separately, `POST
 /api/netdata-alarms`'s token check is scoped to *this* endpoint only — it does
 not change finding #20's underlying fact that Netdata's own API (port 19999,
 reachable from containers on the `netdata-net` bridge and from every service
@@ -316,7 +316,7 @@ record changes, or subscribes to read cache/DNS metadata.
 **Likelihood**: High *if the port is exposed*; otherwise Low · **Impact**: High
 (forged DNS records reprogram what the appliance spoofs)
 
-**Mitigations** (verified in `deploy/quickstart/docker-compose.yml`):
+**Mitigations** (verified in `deploy/prod/docker-compose.yml`):
 - NATS is **not published on the host** in the default deployment; it is only
   reachable on the internal Docker network. The internal HTTP monitor endpoint
   (`http_port: 8222`) exists for the Docker healthcheck and is not consumed by
@@ -468,7 +468,7 @@ creates privileged containers or `exec`s into others, escaping to the host.
 sensitive) · **Impact**: Critical (full host compromise)
 
 **Mitigations / actual exposure** (verified in
-`deploy/quickstart/docker-compose.yml`):
+`deploy/prod/docker-compose.yml`):
 - The **Admin UI and watchdog do not mount the Docker socket directly.** They
   reach Docker only through `docker-socket-proxy`, a HAProxy instance on an
   `internal` `docker-api` network with a **deny-by-default allowlist**. It permits
@@ -815,7 +815,7 @@ tagging each release, then update the top marker and the
      `docs/dhcp-modes.md`
    - `services/dns/nats-subscriber/`, and the `nats` service block +
      `deploy/prod/docker-compose.nats-secondary.yml`
-   - `deploy/quickstart/docker-compose.yml` and `deploy/prod/docker-compose.yml`
+   - `deploy/prod/docker-compose.yml`
      — especially every service that mounts `/var/run/docker.sock` and the
      `docker-socket-proxy` HAProxy ACLs.
 2. **For each component, confirm the mitigations still match the code** —

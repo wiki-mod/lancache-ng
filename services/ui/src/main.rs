@@ -2,16 +2,9 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
-//! Admin UI service entry point. Wires up the axum HTTP server, shared
-//! `AppState` (Docker client, NATS connection, SQLite handle, Tera templates),
-//! and the full route table: dashboard, DHCP subnet/reservation management,
-//! DNS/SSL/LAN domain records, stats, logs, the first-run setup wizard, a
-//! Netdata metrics proxy, and secondary-node management. Also implements this
-//! service's own per-session CSRF protection, HTTP Basic auth, and security-header
-//! middleware rather than pulling in an external auth/CSRF crate.
-//!
-//! See `routes/` for the individual page/API handlers this file wires
-//! together, and `config.rs` for how runtime settings are loaded.
+//! What: ui entry; root start, --prepare one-shots, HTTP.
+//! Why: one binary owns the ui and its init steps.
+//! From: Issue #1683 | PR #1858
 #![deny(warnings)]
 
 mod config;
@@ -73,17 +66,13 @@ pub struct AppState {
     pub db: Mutex<Connection>,
     pub ui_session_secret: [u8; 32],
     pub ui_session_ttl: Duration,
-    // The auth-callout issuer account's public NKey, rendered into nats.conf's
-    // `auth_callout { issuer: ... }` field (see nats_auth_callout.rs). The
-    // matching private seed never leaves the loaded `KeyPair` the callout
-    // responder task holds.
+    // What: issuer public NKey for the callout fragment.
+    // Why: the private seed stays in the responder KeyPair.
+    // From: Issue #583
     pub nats_issuer_public_key: String,
-    // The auth-callout responder's own static X25519 (curve) public NKey,
-    // rendered into nats.conf's `auth_callout { xkey: ... }` field (issue
-    // #682: see nats_auth_callout.rs's xkey module docs). The matching
-    // private seed never leaves the loaded `XKey` the callout responder task
-    // holds -- a deliberately separate keypair from nats_issuer_public_key's
-    // Ed25519 signing identity above.
+    // What: callout xkey public key for the fragment.
+    // Why: separate X25519 key; its seed stays in the task.
+    // From: Issue #682
     pub nats_callout_xkey_public_key: String,
 }
 
@@ -99,44 +88,9 @@ fn ui_log_file() -> String {
     std::env::var("UI_LOG_FILE").unwrap_or_else(|_| "/var/log/lancache-ui/ui.log".to_string())
 }
 
-// Pattern-matches every checked-in placeholder form for SECONDARY_REGISTRATION_TOKEN,
-// not just deploy/prod/.env's CHANGE_ME_SECONDARY_REGISTRATION_TOKEN default. An
-// exact-literal list previously missed deploy/quickstart/.env's distinct
-// YOUR_SECONDARY_REGISTRATION_TOKEN_HERE default, which manual quickstart deploys
-// that skip setup.sh ship untouched -- letting anyone who reads this public
-// repo register a secondary against it. The first
-// five checks mirror setup.sh's own secret_value_is_placeholder pattern set
-// case-for-case so both checks stay in sync; the trailing `<...>` check is an
-// addition beyond that set, added because README.md's own
-// `SECONDARY_REGISTRATION_TOKEN=<generate-a-secret>` code-block example (which
-// setup.sh's detector does NOT actually recognize, despite README prose
-// claiming otherwise -- a pre-existing doc/script inconsistency out of scope
-// here) is itself pasteable verbatim by a manual deployer. A real hex/base64
-// secret can never match any of these patterns by chance.
-//
-// Matching is case-insensitive and treats "-"/"_" as equivalent (issue #967:
-// e.g. "change-me", "CHANGE_ME", and "Change-Me" are all recognized) --
-// normalize first, then match against lowercase/underscore patterns. This is
-// a deliberate fail-safe widening: it can only make MORE values match as a
-// placeholder, never fewer, so a real randomly-generated hex/base64 secret is
-// not realistically affected. The `<...>` bracket check is applied to the raw
-// (non-normalized) token since it only inspects punctuation, not casing.
-//
-// This is one of three independently-maintained placeholder detectors in this
-// repo (the others: scripts/lib/shared-secret-bootstrap.sh's
-// secret_is_placeholder, embedded into the dns/dhcp/ui entrypoints, and
-// setup.sh's secret_value_is_placeholder), kept deliberately separate per the
-// maintainer decision recorded in issue #967 (Option B: cross-validate, don't
-// unify). Divergence from the shared entrypoint library, confirmed via
-// tests/fixtures/placeholder-detection-cases.txt and this module's own
-// secondary_registration_token_is_placeholder_matches_shared_parity_fixture
-// test: this function requires the full YOUR_*_HERE suffix (matching
-// setup.sh) and has no generic *_HERE-on-any-value rule, where the shared
-// entrypoint library accepts a bare YOUR_* prefix and any *_HERE suffix.
-// Pre-existing, not reconciled here (#967 Option B keeps the pattern sets
-// separate); no shipped SECONDARY_REGISTRATION_TOKEN placeholder actually
-// needs either bare form, so the gap has not mattered in practice, but it is
-// a real, confirmed divergence, not an intentional design choice.
+// What: true for empty or a checked-in token placeholder.
+// Why: a public placeholder would let anyone register.
+// From: Issue #967
 fn secondary_registration_token_is_placeholder(token: &str) -> bool {
     if token.is_empty() {
         return true;
@@ -187,22 +141,8 @@ fn load_or_create_session_secret() -> Result<[u8; 32]> {
     }
 }
 
-// Resolves the effective SECONDARY_REGISTRATION_TOKEN, generating and persisting
-// a strong random one when the configured value is missing or a checked-in
-// placeholder. setup.sh always generates a real hex32 token
-// (`get_or_generate_secret ... hex32`), but the compose header's documented
-// manual path ("Or manually: Edit .env ... docker compose up -d") ships either
-// an empty default (deploy/quickstart compose's `${SECONDARY_REGISTRATION_TOKEN:-}`)
-// or a public placeholder (deploy/quickstart/.env's YOUR_..._HERE,
-// deploy/prod/.env's CHANGE_ME_*, or the now-retired deploy/dev compose's
-// lancache-reg-dev-secret, v0.3.0 #766).
-// Those all previously boot-looped the UI. Generating the same kind of secret
-// setup.sh would -- persisted next to the other /data secrets so it never
-// rotates across restarts (a rotating token would break an already-registered
-// secondary) -- keeps the security invariant intact (registration still needs
-// an unguessable secret) while removing both the crash and the guessable public
-// default. An operator-supplied real value always wins and is preserved. `path`
-// is a parameter so the create branch is unit-testable.
+// What: a real token as is, else a persisted random one.
+// Why: placeholders crash-looped the ui; must not rotate.
 fn load_or_create_secondary_registration_token(
     configured: &str,
     path: &str,
@@ -290,15 +230,17 @@ fn chown_tree(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-// What: setgid log dir; existing log files get g+r.
+// What: log dir and files in gid; setgid dir, files g+r.
 // Why: the shared log reader gid must keep read access.
 // From: Issue #1427 | PR #1670
-fn open_log_dir_to_group(dir: &Path) -> std::io::Result<()> {
+fn open_log_dir_to_group(dir: &Path, gid: u32) -> std::io::Result<()> {
+    std::os::unix::fs::lchown(dir, None, Some(gid))?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o2775))?;
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
         let meta = fs::symlink_metadata(&path)?;
         if meta.is_file() {
+            std::os::unix::fs::lchown(&path, None, Some(gid))?;
             fs::set_permissions(&path, fs::Permissions::from_mode(meta.mode() | 0o040))?;
         }
     }
@@ -336,7 +278,7 @@ fn container_root_start() {
     let uid = required_env_id("UI_RUNTIME_UID");
     let gid = required_env_id("UI_RUNTIME_GID");
     let cfg = config::Config::from_env().unwrap_or_else(|e| container_start_fatal(&e));
-    if let Err(e) = config::ensure_shared_secrets(&cfg.shared_secret_dir, gid) {
+    if let Err(e) = config::ensure_shared_secrets(&cfg.shared_secret_dir, gid, "") {
         container_start_fatal(&format!(
             "cannot resolve shared secret {e}. Mount the shared-secrets volume \
              or set the variable to the value its backend uses."
@@ -352,7 +294,7 @@ fn container_root_start() {
     }
     if let Some(log_dir) = log_file.parent()
         && log_dir.exists()
-        && let Err(e) = open_log_dir_to_group(log_dir)
+        && let Err(e) = open_log_dir_to_group(log_dir, gid)
     {
         container_start_fatal(&format!("cannot set {} modes: {e}", log_dir.display()));
     }
@@ -402,18 +344,9 @@ fn migrate_secondaries_table_for_auth_callout(conn: &Connection) -> rusqlite::Re
     if !existing_columns.iter().any(|c| c == "address") {
         conn.execute("ALTER TABLE secondaries ADD COLUMN address TEXT", [])?;
     }
-    // Finding #5 (docs/bug-hunt/ui-core.md, issue #849) defense-in-depth:
-    // routes/secondaries.rs::register_secondary always sets nats_user equal
-    // to `name`, this table's own PRIMARY KEY, so two rows cannot collide
-    // today as long as every write path keeps that invariant -- but nothing
-    // in the schema itself enforced it independently of that application
-    // logic. A UNIQUE index closes that gap at the database level: a future
-    // write path that ever decouples nats_user from name (or a bug in this
-    // one) now fails the write instead of silently letting two secondaries
-    // authenticate to NATS as the same identity. SQLite treats every NULL as
-    // distinct from every other NULL under a UNIQUE index, so pre-#583
-    // legacy rows (nats_user still NULL until re-registration) are
-    // unaffected by this.
+    // What: a UNIQUE index on nats_user.
+    // Why: two rows must never share one NATS identity.
+    // From: Issue #849
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_secondaries_nats_user ON secondaries(nats_user)",
         [],
@@ -851,51 +784,8 @@ fn validate_ui_session_ttl_seconds(seconds: u64) -> Result<(), String> {
     Ok(())
 }
 
-// SECONDARY_REGISTRATION_TOKEN gates the one route
-// (`POST /api/secondary/register`) that lets a new secondary DNS node join
-// this primary -- see routes/secondaries.rs's own empty-token and
-// constant-time comparison checks, which enforce the same invariant again on
-// every request as defense in depth. The invariant this guards:
-// - an empty token was the original vulnerability (flagged on PR #195):
-//   an unset configured token compared equal to an unset/empty request
-//   token, so any client could register.
-// - a known placeholder is the same problem restated: its value is public,
-//   readable straight out of this repository's checked-in deploy/prod/.env
-//   and deploy/quickstart/.env defaults.
-//
-// setup.sh already generates a real SECONDARY_REGISTRATION_TOKEN
-// unconditionally for every install (`get_or_generate_secret ... hex32`, same
-// ensure_secret_env_key pipeline as PDNS_API_KEY/DDNS_TSIG_KEY). The documented
-// manual compose path does not run setup.sh, so main() resolves the token
-// through load_or_create_secondary_registration_token first: an operator's real
-// value is kept, otherwise a persistent random one is generated -- meaning the
-// token reaching this function is already guaranteed real on every path. This
-// check therefore stays as a defense-in-depth assertion on the *resolved* value
-// (a resolution bug that ever yielded an empty/placeholder token must still fail
-// closed rather than start in a silently insecure state, issue #659), not as
-// the primary boot gate it once was.
-// This token gates `POST /api/secondary/register` (the only route that
-// lets a new secondary join this primary) with a plain equality check
-// (routes/secondaries.rs's constant-time comparison), which by itself
-// rejects only an empty or known-placeholder value. Without a length
-// floor, a short, easily-guessable value that is neither of those (e.g.
-// an operator hand-typing "changeme123" or "secret" instead of running
-// the generator this rule's own error message recommends) would still be
-// accepted. setup.sh's real default is a 64-character hex string (32
-// CSPRNG bytes via `ensure_secret_env_key ... hex32`); this floor is
-// deliberately much lower than that (32 characters, half the real
-// default) so a genuinely hand-chosen operator secret with reasonable
-// entropy is not rejected, while a trivially short/guessable value is.
-// This is a length floor only -- rate-limiting the registration endpoint
-// itself against online brute-forcing is a separate, larger undertaking
-// (shared per-route state, a rate-limiting strategy decision) requiring
-// its own maintainer decision.
-//
-// The minimum is a character count, not a byte count: token.chars().count()
-// below, not token.len(). A byte-length check would let a short string of
-// multi-byte UTF-8 characters (e.g. 8 four-byte emoji, 32 bytes total) pass
-// this floor despite being only 8 characters -- far below the intended
-// entropy floor for a value that gates remote secondary registration.
+// What: minimum token length, counted in characters.
+// Why: a short or multi-byte value is easy to brute-force.
 const MIN_SECONDARY_REGISTRATION_TOKEN_LEN: usize = 32;
 
 fn validate_secondary_registration_token(token: &str) -> Result<(), String> {
@@ -931,30 +821,9 @@ fn preflight_startup_config(cfg: &config::Config) -> Result<Duration, String> {
     Ok(Duration::from_secs(cfg.ui_session_ttl_seconds))
 }
 
-// Central logging pipeline (#633): mirrors the existing stdout tracing layer
-// with a second layer that appends plain-text events to UI_LOG_FILE, so
-// fluent-bit can tail it the same way it already tails nginx's access.log
-// (see docs/architecture-ng.md's logging matrix). Runs before config::Config
-// is loaded (tracing must exist first, since Config::from_env() failures are
-// themselves reported via tracing::error!), so the log path is read directly
-// from the environment here rather than through Config. Opening the file is
-// best-effort: installs that never mount the shared log volume (i.e. never
-// opt into the `logging` compose profile) must still start and log to
-// stdout only -- a missing/unwritable log path is never a hard failure.
-// Finding #10 (docs/bug-hunt/ui-core.md, issue #849): staying best-effort
-// here is intentional -- an install that never mounts the shared log volume
-// must still start on stdout-only logging (see init_tracing's own doc
-// comment). But the previous inline `.ok()` swallowed every open failure
-// identically, including ones that have nothing to do with "the volume
-// isn't mounted" (permission denied, disk full, the path already existing
-// as a directory), with zero signal anywhere. `eprintln!`, not
-// `tracing::warn!`, because tracing isn't initialized yet at the point
-// init_tracing calls this -- that is the exact reason init_tracing reads
-// UI_LOG_FILE directly from the environment instead of through Config.
-// Pulled out of init_tracing as its own function so the open-vs-log
-// decision has a unit test independent of `tracing_subscriber::registry()
-// ::init()`, which panics if called more than once per process and so
-// cannot be exercised directly in a test.
+// What: open UI_LOG_FILE to append; on error warn, go on.
+// Why: tracing is not up yet; stdout-only must still start.
+// From: Issue #849
 fn open_ui_log_file(path: &str) -> Option<std::fs::File> {
     match OpenOptions::new().create(true).append(true).open(path) {
         Ok(file) => Some(file),
@@ -987,14 +856,184 @@ fn init_tracing() {
         .init();
 }
 
-// What: root start before any thread; dhcp-probe skips it.
-// Why: exec needs one thread; the probe runs as root as-is.
+// What: root start, unless a one-shot mode runs instead.
+// Why: exec needs one thread; one-shots run as root as-is.
 // From: Issue #1288 | PR #1858
 fn main() -> Result<()> {
-    if std::env::args().nth(1).as_deref() != Some("--dhcp-probe") {
-        container_root_start();
+    match std::env::args().nth(1).as_deref() {
+        Some("--prepare") => prepare_runtime(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some("--dhcp-probe") => {}
+        _ => container_root_start(),
     }
     run()
+}
+
+// What: one-shot root prep for an image we do not build.
+// Why: compose holds no logic; the files are written here.
+// From: Issue #1683 | PR #1858
+fn prepare_runtime(args: &[String]) -> ! {
+    let gid = required_env_id("UI_RUNTIME_GID");
+    let done = match args {
+        [target] if target == "nats" => prepare_nats(gid),
+        [target] if target == "netdata" => prepare_netdata(gid),
+        [target, dirs @ ..] if target == "logs" && !dirs.is_empty() => {
+            dirs.iter().try_for_each(|d| {
+                open_log_dir_to_group(Path::new(d), gid).map_err(|e| format!("{d}: {e}"))
+            })
+        }
+        _ => Err("usage: --prepare nats | netdata | logs <dir>...".to_string()),
+    };
+    match done {
+        Ok(()) => std::process::exit(0),
+        Err(e) => container_start_fatal(&e),
+    }
+}
+
+// What: resolve one prefix's secrets, then load Config.
+// Why: Config reads a secret file only once it exists.
+// From: Issue #1683 | PR #1858
+fn prepared_config(gid: u32, prefix: &str) -> std::result::Result<config::Config, String> {
+    let cfg = config::Config::from_env()?;
+    config::ensure_shared_secrets(&cfg.shared_secret_dir, gid, prefix)?;
+    config::Config::from_env()
+}
+
+// What: nats.conf, the fragment stub and the nats log dir.
+// Why: nats-server reads all of them at its first start.
+// From: Issue #1683 | PR #1858
+fn prepare_nats(gid: u32) -> std::result::Result<(), String> {
+    let uid = required_env_id("UI_RUNTIME_UID");
+    let cfg = prepared_config(gid, "NATS_")?;
+    let conf = nats_config::render_nats_conf(&cfg)?;
+    write_file_if_changed(
+        Path::new(&cfg.nats_conf_path),
+        &conf,
+        0o600,
+        Some((uid, gid)),
+    )?;
+    create_if_absent(
+        Path::new(&cfg.nats_auth_callout_path),
+        0o644,
+        Some((uid, gid)),
+    )?;
+    let dir = Path::new(&cfg.nats_log_file)
+        .parent()
+        .ok_or_else(|| format!("NATS_LOG_FILE={} has no directory", cfg.nats_log_file))?;
+    open_log_dir_to_group(dir, gid).map_err(|e| format!("{}: {e}", dir.display()))
+}
+
+// What: alarm token, sender, log config and log dir.
+// Why: the upstream netdata image has no hook of ours.
+// From: Issue #1683 | PR #1858
+fn prepare_netdata(gid: u32) -> std::result::Result<(), String> {
+    let cfg = prepared_config(gid, "NETDATA_")?;
+    if cfg.netdata_alarm_token.is_empty() {
+        return Err("NETDATA_ALARM_TOKEN resolved to an empty value".to_string());
+    }
+    let need = |value: &Option<String>, key: &str| {
+        value.clone().ok_or_else(|| format!("{key} is not set"))
+    };
+    let token = need(&cfg.netdata_token_file, "NETDATA_TOKEN_FILE")?;
+    let notify = need(&cfg.netdata_notify_file, "NETDATA_NOTIFY_FILE")?;
+    let conf = need(&cfg.netdata_conf_file, "NETDATA_CONF_FILE")?;
+    let daemon_log = need(&cfg.netdata_daemon_log, "NETDATA_DAEMON_LOG")?;
+    let health_log = need(&cfg.netdata_health_log, "NETDATA_HEALTH_LOG")?;
+    let sender = routes::netdata_alarms::render_alarm_notify_conf(
+        &need(&cfg.netdata_alarm_ui_url, "NETDATA_ALARM_UI_URL")?,
+        &token,
+        &need(&cfg.netdata_alarm_max_time, "NETDATA_ALARM_MAX_TIME")?,
+        &need(&cfg.netdata_alarm_recipient, "NETDATA_ALARM_RECIPIENT")?,
+    )?;
+    if [&daemon_log, &health_log]
+        .iter()
+        .any(|p| p.contains(['\n', '\r']))
+    {
+        return Err("a netdata log path holds a line break".to_string());
+    }
+    let mut log_dirs: Vec<&Path> = [&daemon_log, &health_log]
+        .iter()
+        .map(|p| Path::new(p.as_str()).parent())
+        .collect::<Option<_>>()
+        .ok_or("a netdata log path has no directory")?;
+    log_dirs.dedup();
+    let logs = format!("[logs]\ndaemon = {daemon_log}\nhealth = {health_log}\n");
+    write_file_if_changed(Path::new(&token), &cfg.netdata_alarm_token, 0o600, None)?;
+    write_file_if_changed(Path::new(&notify), &sender, 0o644, None)?;
+    write_file_if_changed(Path::new(&conf), &logs, 0o644, None)?;
+    log_dirs.iter().try_for_each(|dir| {
+        open_log_dir_to_group(dir, gid).map_err(|e| format!("{}: {e}", dir.display()))
+    })
+}
+
+// What: an empty file only when none exists yet.
+// Why: the ui owns the fragment; a rerun never clobbers it.
+// From: Issue #811 | PR #1858
+fn create_if_absent(
+    path: &Path,
+    mode: u32,
+    owner: Option<(u32, u32)>,
+) -> std::result::Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            write_file_if_changed(path, "", mode, owner).map(|_| ())
+        }
+        Err(e) => Err(format!("cannot stat {}: {e}", path.display())),
+    }
+}
+
+// What: atomic replace of a file whose content differs.
+// Why: readers never see a torn file; reruns write nothing.
+// From: Issue #1683 | PR #1858
+fn write_file_if_changed(
+    path: &Path,
+    content: &str,
+    mode: u32,
+    owner: Option<(u32, u32)>,
+) -> std::result::Result<bool, String> {
+    let changed = fs::read(path).ok().as_deref() != Some(content.as_bytes());
+    if changed {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("{} has no file name", path.display()))?;
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let tmp = path.with_file_name(format!(".{name}.tmp-{}-{stamp}", std::process::id()));
+        let written = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&tmp)
+            .and_then(|mut f| {
+                f.write_all(content.as_bytes())?;
+                f.sync_all()?;
+                match owner {
+                    Some((uid, gid)) => std::os::unix::fs::fchown(&f, Some(uid), Some(gid)),
+                    None => Ok(()),
+                }
+            })
+            .and_then(|()| fs::rename(&tmp, path));
+        if let Err(e) = written {
+            let cleanup = match fs::remove_file(&tmp) {
+                Err(c) if c.kind() != std::io::ErrorKind::NotFound => format!("; {c}"),
+                _ => String::new(),
+            };
+            return Err(format!("cannot replace {}: {e}{cleanup}", path.display()));
+        }
+    }
+    // What: mode and owner converge when unchanged too.
+    // Why: an old install may carry other rights.
+    // From: Issue #1683 | PR #1858
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|e| format!("cannot chmod {}: {e}", path.display()))?;
+    if let Some((uid, gid)) = owner {
+        std::os::unix::fs::lchown(path, Some(uid), Some(gid))
+            .map_err(|e| format!("cannot chown {}: {e}", path.display()))?;
+    }
+    Ok(changed)
 }
 
 #[tokio::main]
@@ -1091,12 +1130,9 @@ async fn run() -> Result<()> {
     let nats = connect_nats_with_retry(&cfg).await;
     let ui_session_secret = load_or_create_session_secret()?;
 
-    // Loaded before the DB/state so its public key can be baked into the
-    // initial nats.conf write below, and its private seed handed to the
-    // auth-callout responder task once state exists (see nats_auth_callout.rs).
-    // NATS_ISSUER_SEED (a literal seed value) takes precedence over the
-    // file-based path when set -- see config.rs's nats_issuer_seed docs for
-    // why (deterministic validation harnesses with no persistent /data).
+    // What: issuer key from NATS_ISSUER_SEED or its file.
+    // Why: the fragment write below needs its public key.
+    // From: Issue #583
     let issuer_keypair = match &cfg.nats_issuer_seed {
         Some(seed) => match nkeys::KeyPair::from_seed(seed) {
             Ok(kp) => kp,
@@ -1176,54 +1212,9 @@ async fn run() -> Result<()> {
         nats_callout_xkey_public_key,
     });
 
-    // Write initial nats.conf with auth tokens and restart NATS so it picks up
-    // the shared config without requiring Docker exec.
-    //
-    // Bug-hunt finding E (docs/bug-hunt/nats.md, re-verified 2026-08-06):
-    // this used to be a single attempt with a `tracing::warn!` and no
-    // retry -- a transient failure here (the Docker socket briefly
-    // unavailable during stack startup, a slow NATS container not yet
-    // ready to accept a restart) permanently left NATS running with
-    // whatever config was baked into the image/volume at container build
-    // time, silently missing this run's actual secondary auth tokens,
-    // with zero operator-visible signal beyond one log line easy to miss
-    // among normal startup noise. Retries a bounded number of times with a
-    // growing backoff before giving up -- long enough to ride out the
-    // transient startup-ordering failures this is actually meant to catch,
-    // bounded so as not to block this process's own startup indefinitely if
-    // NATS is genuinely unreachable for a real reason. Not escalated to a
-    // fatal exit: NATS itself continuing to run with a stale-but-still-
-    // functional config is a real (if degraded) outcome, not the same class
-    // of "must not silently limp on" failure the DNS container's
-    // supervised-process exit (services/dns/entrypoint.sh) guards -- but the
-    // final failure is now logged at `error`, not `warn`, since exhausting
-    // every retry is a genuine operator-actionable event.
-    //
-    // This restart call goes through docker-socket-proxy (see
-    // docker_client::connect_from_env's DOCKER_PROXY_URL preference), whose
-    // own Compose healthcheck (interval 30s, start_period 15s) means it can
-    // take several real seconds after container start before it is actually
-    // ready to serve a restart request -- and this process starts issuing
-    // reload attempts as soon as it itself boots, with no dependency on that
-    // readiness (the Admin UI deliberately keeps `depends_on: docker-socket-
-    // proxy: condition: service_started`, not `service_healthy`, in every
-    // real deploy/*/docker-compose.yml, so its own dashboard and recovery
-    // surface stay reachable even when Docker access is degraded -- watchdog
-    // uses the identical dependency and reasoning, see
-    // deploy/prod/docker-compose.yml's own watchdog `depends_on:` comment).
-    // A flat
-    // 3-attempt/2s-interval budget (~6s total) was provably too short for
-    // this: a real CI run (2026-08-12) showed the UI container starting at
-    // 11:13:06.10, its first reload attempt firing at 11:13:06.17, its third
-    // and final attempt exhausting at 11:13:10.18, and docker-socket-proxy
-    // only reaching Healthy at 11:13:11.27 -- missing by 1.1s. Growing the
-    // backoff (shared
-    // `grow_backoff` helper, Rule-Ref: AG-CODE-011) instead of a flat
-    // interval, over more attempts, gives a total budget on the order of the
-    // real startup delay actually observed plus a real margin for CI-load
-    // variance, while still giving up (and logging loudly) if
-    // docker-socket-proxy is genuinely never becoming healthy, rather than
-    // retrying forever.
+    // What: write the fragment; restart NATS on change.
+    // Why: the docker proxy may not be ready at ui start.
+    // From: Issue #811 | PR #1610
     const NATS_CONF_RELOAD_MAX_ATTEMPTS: u32 = 8;
     let nats_conf_reload_max_delay = std::time::Duration::from_secs(8);
     let mut nats_conf_reload_delay = std::time::Duration::from_secs(1);
@@ -1236,7 +1227,7 @@ async fn run() -> Result<()> {
             }
             Err(e) => {
                 tracing::warn!(
-                    "Could not reload initial nats.conf (attempt {}/{}): {}. Retrying in {:?}",
+                    "Could not apply the auth_callout fragment (attempt {}/{}): {}. Retrying in {:?}",
                     attempt,
                     NATS_CONF_RELOAD_MAX_ATTEMPTS,
                     e,
@@ -1255,7 +1246,7 @@ async fn run() -> Result<()> {
     }
     if let Some(e) = last_err {
         tracing::error!(
-            "Failed to reload initial nats.conf after {} attempts -- NATS is running with whatever config it already had, which may not include this run's secondary auth tokens: {}",
+            "Failed to apply the auth_callout fragment after {} attempts -- NATS keeps its previous fragment and may reject this run's callout responses: {}",
             NATS_CONF_RELOAD_MAX_ATTEMPTS,
             e
         );
@@ -1280,14 +1271,11 @@ async fn run() -> Result<()> {
             "/api/secondary/register",
             post(routes::secondaries::register_secondary),
         )
-        // Machine webhook from the netdata container's custom_sender()
-        // integration (bug hunt #849, observability.md finding #3) -- no
-        // browser session, so no CSRF token is available. Gated by its own
-        // X-Netdata-Alarm-Token header check instead (see
-        // routes/netdata_alarms.rs's module doc comment), the same
-        // token-gated-public-route shape as /api/secondary/register above.
+        // What: netdata alarm webhook, token-header gated.
+        // Why: no browser session, so no CSRF token exists.
+        // From: Issue #858
         .route(
-            "/api/netdata-alarms",
+            routes::netdata_alarms::INGEST_PATH,
             post(routes::netdata_alarms::ingest_alarm),
         )
         // Not behind basic_auth on purpose: these are non-sensitive brand
@@ -1524,9 +1512,59 @@ mod tests {
         let file = dir.join("ui.log");
         std::fs::write(&file, "x").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
-        open_log_dir_to_group(&dir).unwrap();
+        let gid = std::fs::metadata(&dir).unwrap().gid();
+        open_log_dir_to_group(&dir, gid).unwrap();
         assert_eq!(std::fs::metadata(&dir).unwrap().mode() & 0o7777, 0o2775);
         assert_eq!(std::fs::metadata(&file).unwrap().mode() & 0o777, 0o640);
+        assert_eq!(std::fs::metadata(&dir).unwrap().gid(), gid);
+        assert_eq!(std::fs::metadata(&file).unwrap().gid(), gid);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // What: write once, rerun skips, change renames.
+    // Why: no torn file; an equal rerun writes nothing.
+    // From: Issue #1683 | PR #1858
+    #[test]
+    fn write_file_if_changed_replaces_atomically_and_only_on_change() {
+        let dir = unique_temp_dir("write-if-changed");
+        let path = dir.join("nats.conf");
+        let meta = std::fs::metadata(&dir).unwrap();
+        let owner = Some((meta.uid(), meta.gid()));
+        assert!(write_file_if_changed(&path, "v1", 0o600, owner).unwrap());
+        let first = std::fs::metadata(&path).unwrap();
+        assert_eq!(first.mode() & 0o777, 0o600);
+        assert!(!write_file_if_changed(&path, "v1", 0o600, owner).unwrap());
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), first.ino());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!write_file_if_changed(&path, "v1", 0o600, owner).unwrap());
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+        assert!(write_file_if_changed(&path, "v2", 0o600, owner).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v2");
+        assert_ne!(std::fs::metadata(&path).unwrap().ino(), first.ino());
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(leftovers, 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // What: create empty; an existing file stays as is.
+    // Why: the ui's auth_callout fragment must survive.
+    // From: Issue #811 | PR #1858
+    #[test]
+    fn create_if_absent_never_clobbers_an_existing_file() {
+        let dir = unique_temp_dir("create-if-absent");
+        let path = dir.join("auth_callout.conf");
+        create_if_absent(&path, 0o644, None).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        std::fs::write(&path, "auth_callout { issuer: \"x\" }").unwrap();
+        create_if_absent(&path, 0o644, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "auth_callout { issuer: \"x\" }"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1645,13 +1683,9 @@ mod tests {
         assert_eq!(stored.as_deref(), Some("192.168.1.20"));
     }
 
-    // Finding #5 (docs/bug-hunt/ui-core.md, issue #849): the migration adds a
-    // UNIQUE index on nats_user as an independent, database-level backstop.
-    // routes/secondaries.rs::register_secondary always sets nats_user equal
-    // to `name` (already the PRIMARY KEY), so this cannot fire through that
-    // normal write path today -- this test proves the index itself is real
-    // and would actually reject a duplicate nats_user if a future write path
-    // ever let two different `name` rows end up with the same nats_user.
+    // What: the UNIQUE index rejects a duplicate nats_user.
+    // Why: a future write path must not share one identity.
+    // From: Issue #849
     #[test]
     fn migration_adds_unique_index_rejecting_duplicate_nats_user() {
         let conn = Connection::open_in_memory().unwrap();
@@ -1720,15 +1754,9 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    // Finding #10 (docs/bug-hunt/ui-core.md, issue #849): the actual bug fix
-    // this test locks in -- opening a path that cannot possibly be a
-    // writable log file (a directory, not a file) must still return `None`
-    // (never panic, never crash startup) exactly as the old `.ok()` did.
-    // This test cannot observe the new eprintln! diagnostic directly
-    // (capturing stderr from within the test process is not portable), but
-    // it does prove open_ui_log_file's own fail-open contract survived the
-    // refactor: a real reviewer can additionally run the binary with
-    // UI_LOG_FILE pointed at a directory and see the warning on stderr.
+    // What: an unopenable log path returns None, no panic.
+    // Why: a bad UI_LOG_FILE must not stop the ui start.
+    // From: Issue #849
     #[test]
     fn open_ui_log_file_fails_open_for_an_unwritable_path() {
         let dir = std::env::temp_dir().join(format!(
@@ -1848,20 +1876,14 @@ mod tests {
         assert!(resolve_admin_ui_auth_mode(None, Some("secret"), true).is_err());
     }
 
-    // Every placeholder string actually checked into this repo's deploy
-    // templates and README (not just deploy/prod/.env's literal) must be
-    // rejected -- a manual deployer who copies one of these public,
-    // guessable values verbatim would otherwise let anyone register a
-    // secondary DNS node against their primary. A real generated secret
-    // must still pass.
+    // What: empty and placeholder tokens are rejected.
+    // Why: a public placeholder lets anyone register.
     #[test]
     fn secondary_registration_token_rejects_empty_and_known_placeholders() {
         assert!(validate_secondary_registration_token("").is_err());
-        // Every placeholder form actually checked into the repo's deploy/*/.env
-        // templates must be rejected, not just deploy/prod/.env's literal.
         for placeholder in [
             "CHANGE_ME_SECONDARY_REGISTRATION_TOKEN", // deploy/prod/.env
-            "YOUR_SECONDARY_REGISTRATION_TOKEN_HERE", // deploy/quickstart/.env
+            "YOUR_SECONDARY_REGISTRATION_TOKEN_HERE",
             "changeme",
             "please-change-me-now",
             "lancache-default-secret",

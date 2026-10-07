@@ -236,8 +236,8 @@ former `deploy/dev/` stack was retired in v0.3.0, #766 — see `AGENTS.md`'s `AG
 [`deploy/quickstart/`, `deploy/full-setup/`] as siblings in the very next sentence, and
 pointed at `CLAUDE.md`'s "No Separate Dev Environment" section, which no longer exists there
 — that content moved into `AGENTS.md`'s `## Architecture` section on 2026-07-31, per
-`CLAUDE.md`'s own current text). All three real profiles that exist today
-(`deploy/prod/`, `deploy/quickstart/`, `deploy/full-setup/`) reference every service by
+`CLAUDE.md`'s own current text). The profiles `deploy/prod/` and `deploy/full-setup/`
+reference every service by
 `image:` rather than `build:`, so there is no compose-level `--build` shortcut to rebuild every
 service from source in one command. This matches how CI itself builds first
 -party images: `docker buildx build` directly against each
@@ -350,7 +350,6 @@ docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS
 For Compose changes, you can validate locally (this does not depend on build-tools):
 
 ```bash
-docker compose -f deploy/quickstart/docker-compose.yml config
 docker compose -f deploy/prod/docker-compose.yml config
 ```
 

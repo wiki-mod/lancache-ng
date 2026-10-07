@@ -39,6 +39,10 @@ env:
   PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
   PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
   PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
+  # What: all repo/org variables once, as json, for ci.sh.
+  # Why: ci.sh reads vars by name; YAML lists none of them.
+  # From: Issue #1683 | PR #1858
+  CI_VARIABLES: ${{ toJSON(vars) }}
 jobs:
   # What: Emit CodeQL language matrix from ci.sh
   # Why: Book runners only for real analysis (§70)

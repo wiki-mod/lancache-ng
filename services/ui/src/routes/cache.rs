@@ -12,8 +12,8 @@
 //! Unlike routes/domains.rs's AAAA-filter toggle or CDN domain add/remove,
 //! this container cannot make the change take effect itself: `CACHE_MAX_SIZE`
 //! reaches the proxy container via the real deployment `.env`
-//! (`deploy/quickstart/docker-compose.yml`'s
-//! `environment: - CACHE_MAX_SIZE=${CACHE_MAX_SIZE}`), a file this container
+//! (`deploy/prod/docker-compose.yml`'s proxy
+//! `environment: - CACHE_MAX_SIZE=...`), a file this container
 //! has no filesystem access to, and `docker_client` deliberately has no exec
 //! capability to send nginx a reload signal even if it did. This instead
 //! follows the same host-bridged model routes/setup.rs's release-channel
