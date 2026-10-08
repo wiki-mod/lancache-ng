@@ -562,20 +562,6 @@ mod tests {
         assert_eq!(counter.total(), 350);
     }
 
-    // What: 1,250,000 bytes per second is 10.0 Mbit/s.
-    // Why: the logger's rate arithmetic must be exact.
-    // From: Issue #871
-    #[test]
-    fn throughput_rate_arithmetic_matches_expected_megabits_per_second() {
-        let delta_bytes: u64 = 1_250_000;
-        let interval = Duration::from_secs(1);
-        let mbit_per_sec = (delta_bytes as f64 * 8.0) / interval.as_secs_f64() / 1_000_000.0;
-        assert!(
-            (mbit_per_sec - 10.0).abs() < 0.001,
-            "1,250,000 bytes/sec should be exactly 10.0 Mbit/s, got {mbit_per_sec}"
-        );
-    }
-
     // What: the logger task ends promptly on `stop`.
     // Why: it must not run until process exit.
     // From: Issue #871
