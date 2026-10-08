@@ -1290,28 +1290,6 @@ ci_cmd_impact() {
 # ARTIFACT RESOLVER
 # =========================================================
 
-# What: Probe the acceptance/registry state, fail-closed.
-# Why: A failed probe is UNKNOWN, never a trusted state.
-# From: Issue #1683
-_ci_resolve_probe() {
-    local service="$1" identity="$2" platform="${3:-}"
-    if [ -n "${CI_RESOLVE_PROBE_CMD:-}" ]; then
-        # What: Capture probe output; keep its exit code.
-        # Why: errexit must not skip rc check (AG-VAL-030).
-        # From: Issue #1683
-        local out rc=0
-        out="$("${CI_RESOLVE_PROBE_CMD}" "${service}" "${identity}")" || rc=$?
-        if [ "${rc}" -ne 0 ]; then
-            ci_error "[CI-INFO-RESOLVE-0005]" "service=\"${service}\" reason=\"probe backend failed; treating as UNKNOWN\" rc=${rc}" "${out}"
-            printf 'UNKNOWN\n'
-            return 0
-        fi
-        printf '%s\n' "${out}"
-        return 0
-    fi
-    _ci_resolve_state "${service}" "${identity}" "${platform}"
-}
-
 # What: Combine ledger policy + registry artifact truth.
 # Why: §26 three-truths; UNKNOWN on any unreadable truth.
 # From: Issue #1683
@@ -1375,7 +1353,7 @@ _ci_resolve_one() {
     local service="$1" platform="$2"
     local identity state action
     identity="$(_ci_identity_for "${service}" "${platform}")" || return "$?"
-    state="$(_ci_resolve_probe "${service}" "${identity}" "${platform}")"
+    state="$(_ci_resolve_state "${service}" "${identity}" "${platform}")"
     case "${state}" in
         PRESENT_ACCEPTED|MISSING_CONFIRMED|MISMATCH|PRODUCED_UNVERIFIED|BUILD_IN_PROGRESS|UNKNOWN) ;;
         *)
@@ -4037,14 +4015,10 @@ ci_cmd_scan() {
 # =========================================================
 
 # What: Look up an ACCEPTED per-platform digest.
-# Why: The digest source is the ledger; a mock swaps it.
+# Why: the ledger record is the only digest source
 # From: Issue #1683
 _ci_accepted_digest() {
     local service="$1" platform="$2"
-    if [ -n "${CI_ACCEPTED_DIGEST_CMD:-}" ]; then
-        "${CI_ACCEPTED_DIGEST_CMD}" "${service}" "${platform}"
-        return "$?"
-    fi
     local identity rec rc=0 remote
     identity="$(_ci_identity_for "${service}" "${platform}")" || return 2
     remote="$(_ci_git_remote)" || return 2
@@ -4076,15 +4050,11 @@ _ci_normalize_platform_digests() {
     printf '%s\n' "${input}" | tr ' ' '\n' | awk 'NF' | LC_ALL=C sort | tr '\n' ' '
 }
 
-# What: Look up an existing multi-arch index (injectable).
+# What: Look up an existing multi-arch index.
 # Why: Idempotency: reuse an identical index.
 # From: Issue #1683
 _ci_index_lookup() {
     local service="$1"
-    if [ -n "${CI_INDEX_LOOKUP_CMD:-}" ]; then
-        "${CI_INDEX_LOOKUP_CMD}" "${service}"
-        return "$?"
-    fi
     local repo registry sha tag idx grc=0 raw plats
     repo="$(_ci_repo)" || return 2
     registry="$(_ci_registry)" || return 2
@@ -4183,9 +4153,8 @@ ci_cmd_assemble() {
         return 0
     fi
     _ci_require_ghcr_auth || return "$?"
-    local asm_cmd="${CI_ASSEMBLE_CMD:-_ci_docker_assemble}"
-    if ! index="$("${asm_cmd}" "${service}" ${inputs})"; then
-        ci_log "[CI-ERROR-ASSEMBLE-0005]" "service=\"${service}\" backend=\"${asm_cmd}\" inputs=\"${inputs}\" reason=\"assemble backend failed (raw above)\""
+    if ! index="$(_ci_docker_assemble "${service}" ${inputs})"; then
+        ci_log "[CI-ERROR-ASSEMBLE-0005]" "service=\"${service}\" inputs=\"${inputs}\" reason=\"assemble backend failed (raw above)\""
         return 2
     fi
     printf 'service=%s result=assembled assembled=%s platforms=%s\n' "${service}" "${index}" "${count}"

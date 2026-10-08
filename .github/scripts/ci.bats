@@ -1445,8 +1445,8 @@ CASES
         : > "${GITHUB_OUTPUT}"
         rm -f "${DS}/answers" "${DS}"/answer-used-*
         _ledger_fresh
-        # What: the probe column seeds the real resolver path
-        # Why: ledger and registry answer; nothing is injected
+        # What: the probe column seeds the resolver path
+        # Why: ledger and registry answer; no injection
         # From: Issue #1683 | PR #1858
         if [ "${probe}" = PRESENT_ACCEPTED ]; then
             for p in $(_ci_platforms "${V[@S_APK@]}"); do
@@ -1737,41 +1737,66 @@ CASES
 # RESOLVER STATES
 # =========================================================
 
-# What: each probe outcome -> one state and action.
-# Why: only MISSING_CONFIRMED may build; UNKNOWN never.
+# What: ci.sh resolve per ledger x registry row; one action
+# Why: only MISSING_CONFIRMED builds; UNKNOWN never does
 # From: Issue #1683 | PR #1858
-@test "resolve maps every probe outcome to exactly one action" {
-    local -a pe ws
-    local name probe state action id svc w
-    local -A V=([@BOGUS@]="$(_val name)" [@RAW@]="$(_val name)" [@RC@]="$(_val int 1 120)")
-    svc="$(ci_services)"
-    svc="${svc%%$'\n'*}"
-    while IFS='|' read -r name probe state action id; do
-        pe=(-u CI_RESOLVE_PROBE_CMD)
-        case "${probe}" in
-            none) ;;
-            fail) pe+=(CI_RESOLVE_PROBE_CMD="$(_stub "echo MISSING_CONFIRMED ${V[@RAW@]}; exit ${V[@RC@]}")") ;;
-            *) pe+=(CI_RESOLVE_PROBE_CMD="$(_stub "echo $(_fill "${probe}")")") ;;
-        esac
-        run env "${pe[@]}" bash "${CI_SH}" resolve "${svc}"
-        [ "${status}" -eq 0 ] || { echo "${name}: rc ${status}: ${output}"; return 1; }
-        [[ "${output}" == *"state=${state} action=${action} "* ]] || { echo "${name}: ${output}"; return 1; }
-        [ "${action}" = build ] || [[ "${output}" != *"action=build"* ]] || { echo "${name}: build: ${output}"; return 1; }
-        IFS=';' read -r -a ws <<< "$(_fill "${id}")"
-        for w in "${ws[@]}"; do
-            [ "${w}" = - ] || [[ "${output}" == *"${w}"* ]] || { echo "${name}: no ${w}: ${output}"; return 1; }
+@test "resolve maps every ledger x registry combination to one action" {
+    local case ledger reg env state action extra svc p id tag dig calls
+    local -a plats
+    svc="$(_ci_block_keys services | head -n 1)" && mapfile -t plats < <(_ci_platforms "${svc}") || return 1
+    _cas_setup
+    cd "${CAS_A}" || return 1
+    GITHUB_REPOSITORY="$(_val name)/$(_val name)" CI_RETRY_BACKOFF_BASE_SECONDS=0
+    export GITHUB_REPOSITORY CI_RETRY_BACKOFF_BASE_SECONDS
+    while IFS='|' read -r case ledger reg env state action extra; do
+        rm -f "${DS}/answers" "${DS}"/answer-used-*
+        : > "${DS}/docker.log"
+        _ledger_fresh
+        for p in "${plats[@]}"; do
+            dig="$(_val digest)"
+            id="$(_ci_identity_for "${svc}" "${p}")" && tag="$(_ci_image_tag "${svc}" "${p}" "${id}")" || return 1
+            [ "${ledger}" = none ] || _ci_ledger_append origin "${id}" "${svc}" "${p}" "${ledger}" "${dig}" > /dev/null || return 1
+            case "${reg}" in
+                same) _docker_answer " buildx imagetools inspect ${tag} --format *" 0 "${dig}" ;;
+                other) _docker_answer " buildx imagetools inspect ${tag} --format *" 0 "$(_val digest)" ;;
+                miss) _docker_answer " buildx imagetools inspect ${tag} --format *" 1 '' "ERROR: ${tag}: not found" ;;
+                denied) _docker_answer " buildx imagetools inspect ${tag} --format *" 1 '' "denied: $(_val name)" ;;
+            esac
         done
+        case "${env}" in
+            ledger-gone) CI_GIT_REMOTE="$(_val name)" run bash "${CI_SH}" resolve "${svc}" ;;
+            no-repo) GITHUB_REPOSITORY="" run bash "${CI_SH}" resolve "${svc}" ;;
+            *) run bash "${CI_SH}" resolve "${svc}" ;;
+        esac
+        [ "${status}" -eq 0 ] && [ "$(grep -c "state=${state} action=${action} " <<< "${output}")" -eq "${#plats[@]}" ] \
+            || { echo "${case}: rc ${status}: ${output}"; return 1; }
+        [ "${extra}" = - ] || [[ "${output}" == *"${extra}"* ]] || { echo "${case}: no ${extra}: ${output}"; return 1; }
+        # What: a ledger or tag failure skips the registry
+        # Why: UNKNOWN must not cost a registry read
+        # From: Issue #1683 | PR #1858
+        calls="$(awk '/^buildx imagetools inspect / { n++ } END { print n + 0 }' "${DS}/docker.log")"
+        case "${env}" in
+            -) [ "${calls}" -eq "${#plats[@]}" ] ;;
+            *) [ "${calls}" -eq 0 ] ;;
+        esac || { echo "${case}: ${calls} registry reads"; return 1; }
     done <<'CASES'
-accepted|PRESENT_ACCEPTED|PRESENT_ACCEPTED|noop|-
-missing|MISSING_CONFIRMED|MISSING_CONFIRMED|build|-
-mismatch|MISMATCH|MISMATCH|fail|-
-unverified|PRODUCED_UNVERIFIED|PRODUCED_UNVERIFIED|verify|-
-in-progress|BUILD_IN_PROGRESS|BUILD_IN_PROGRESS|wait|-
-unknown|UNKNOWN|UNKNOWN|escalate|CI-INFO-RESOLVE-0003
-garbage|@BOGUS@|UNKNOWN|escalate|CI-ERROR-RESOLVE-0002;got="@BOGUS@"
-probe-fail|fail|UNKNOWN|escalate|CI-INFO-RESOLVE-0005;rc=@RC@;MISSING_CONFIRMED @RAW@
-no-probe|none|UNKNOWN|escalate|CI-INFO-RESOLVE-0003
+accepted|ACCEPTED|same|-|PRESENT_ACCEPTED|noop|-
+missing|none|miss|-|MISSING_CONFIRMED|build|-
+produced|none|same|-|PRODUCED_UNVERIFIED|verify|-
+ledger-produced|PRODUCED_UNVERIFIED|same|-|PRODUCED_UNVERIFIED|verify|-
+accepted-other|ACCEPTED|other|-|MISMATCH|fail|-
+accepted-missing|ACCEPTED|miss|-|MISMATCH|fail|[CI-ERROR-RESOLVE-0006]
+registry-unknown|none|denied|-|UNKNOWN|escalate|[CI-INFO-RESOLVE-0003]
+ledger-unreadable|none|same|ledger-gone|UNKNOWN|escalate|[CI-INFO-RESOLVE-0003]
+tag-unreadable|none|same|no-repo|UNKNOWN|escalate|[CI-INFO-RESOLVE-0003]
 CASES
+    # What: no platform resolves to UNKNOWN without any read
+    # Why: an identity without a platform names no artifact
+    # From: Issue #1683 | PR #1858
+    : > "${DS}/docker.log"
+    run _ci_resolve_state "${svc}" "$(_val sha)" ""
+    _expect no-platform 0 "=UNKNOWN" || return 1
+    [ ! -s "${DS}/docker.log" ] || { echo "no-platform: $(cat "${DS}/docker.log")"; return 1; }
 }
 
 # =========================================================
@@ -1881,8 +1906,8 @@ CASES
     while IFS='|' read -r case type state impact cas auth plat rc want; do
         rm -f "${DS}/answers" "${DS}"/answer-used-*
         _ledger_fresh
-        # What: the state column seeds the real resolver path
-        # Why: ledger and registry answer; nothing is injected
+        # What: the state column seeds the resolver path
+        # Why: ledger and registry answer; no injection
         # From: Issue #1683 | PR #1858
         for q in $(_ci_platforms "${svcs[${type}]}"); do
             _artifact "${state}" "${svcs[${type}]}" "${q}" "$(_val digest)" || return 1
@@ -9918,45 +9943,6 @@ raw-absent|_ci_index_raw|miss:not found: manifest unknown|1|1|=
 raw-transient|_ci_index_raw|net|2|@MAX@|[CI-WARN-RESOLVE-0010] ref="@REF@" cls=transient;@NET@
 digest-present|_ci_registry_digest|ok:@DIG@|0|1|=@DIG@
 digest-absent-fails|_ci_registry_digest|miss:not found: manifest unknown|2|1|[CI-ERROR-RESOLVE-0011] ref="@REF@" cls=not_found
-CASES
-}
-
-# What: ledger x registry evidence -> one resolver state.
-# Why: only MISSING_CONFIRMED builds; UNKNOWN never.
-# From: Issue #1683 | PR #1858
-@test "resolve state maps every ledger x registry combination" {
-    local case led reg tagfail plat want id probe
-    local -A V=(
-        [@S@]="$(_val name)" [@ID@]="$(_val sha)" [@P@]="$(_val platform)" [@TAG@]="$(_val name)"
-        [@G@]="$(_val digest)" [@O@]="$(_val digest)"
-    )
-    PROBED="$(_val path)"
-    _ci_image_tag() { [ "${TAGFAIL}" != 1 ] || return 2; printf '%s' "${V[@TAG@]}"; }
-    _ci_ledger_read() { case "${LED}" in fail) return 2 ;; none) return 1 ;; *) printf '%s\t%s\n' "${LED}" "${V[@G@]}" ;; esac; }
-    _ci_registry_probe() {
-        printf '%s\n' "$1" >> "${PROBED}"
-        case "${REG}" in fail) return 2 ;; none) return 1 ;; *) printf '%s\n' "${V[${REG}]}" ;; esac
-    }
-    while IFS='|' read -r case led reg tagfail plat want id probe; do
-        : > "${PROBED}"
-        LED="${led}" REG="${reg}" TAGFAIL="${tagfail}" run _ci_resolve_state "${V[@S@]}" "${V[@ID@]}" "$(_fill "${plat}")"
-        [ "${output##*$'\n'}" = "${want}" ] || { echo "${case}: ${output}"; return 1; }
-        [ "${id}" = - ] || [[ "${output}" == *"${id}"* ]] || { echo "${case}: no ${id}: ${output}"; return 1; }
-        case "${probe}" in
-            y) grep -qxF -- "${V[@TAG@]}" "${PROBED}" || { echo "${case}: probe: $(cat "${PROBED}")"; return 1; } ;;
-            n) [ ! -s "${PROBED}" ] || { echo "${case}: probed: $(cat "${PROBED}")"; return 1; } ;;
-        esac
-    done <<'CASES'
-ledger-unreadable|fail|@G@|0|@P@|UNKNOWN|-|n
-registry-unknown|none|fail|0|@P@|UNKNOWN|-|y
-missing|none|none|0|@P@|MISSING_CONFIRMED|-|y
-produced|none|@G@|0|@P@|PRODUCED_UNVERIFIED|-|y
-accepted|ACCEPTED|@G@|0|@P@|PRESENT_ACCEPTED|-|y
-accepted-other|ACCEPTED|@O@|0|@P@|MISMATCH|-|y
-accepted-missing|ACCEPTED|none|0|@P@|MISMATCH|[CI-ERROR-RESOLVE-0006]|y
-ledger-produced|PRODUCED_UNVERIFIED|@G@|0|@P@|PRODUCED_UNVERIFIED|-|y
-tag-unreadable|none|@G@|1|@P@|UNKNOWN|-|n
-no-platform|none|none|0||UNKNOWN|-|n
 CASES
 }
 
