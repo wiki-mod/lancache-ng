@@ -17,7 +17,7 @@ retention:
   # What: Raises accepted_ordinary_roots_per_package from 10 to 30.
   # Why: Avoids evicting recent builds during active review waves.
   # From: Issue #1095 | PR #1501
-  accepted_ordinary_roots_per_package: 30
+  accepted_ordinary_roots_per_package: 10
   # What: Per-package safety-buffer for unrecognized tag versions.
   # Why: Preserves recent/in-flight unrecognized tags until stale.
   # From: Issue #1585
