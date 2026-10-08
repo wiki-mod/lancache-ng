@@ -6490,72 +6490,139 @@ _ci_validate_poll() {
     return 1
 }
 
-# What: Open a UI session into <jar>, print its CSRF token.
-# Why: One owner for the cookiejar + CSRF extraction.
-# From: Issue #1683
+# What: http://<ip>:<port> of one ui container in the /27
+# Why: the image exposes one port; resolved once per probe
+# From: Issue #1683 | PR #1858
+_ci_validate_ui_base() {
+    local project="$1" cid="$2" ip ports p
+    local -a tcp=()
+    if [ -z "${cid}" ] || ! ip="$(_ci_validate_cid_ip "${project}" "${cid}")"; then
+        ci_log "[CI-ERROR-VALIDATE-0103]" "container=\"${cid}\" reason=\"no /27 IP for the ui container\""
+        return 2
+    fi
+    ports="$(_ci_capture 0 docker inspect -f '{{range $p, $v := .Config.ExposedPorts}}{{println $p}}{{end}}' "${cid}")" || return 2
+    while IFS= read -r p; do
+        if [[ "${p}" =~ ^([0-9]+)/tcp$ ]]; then
+            tcp+=("${BASH_REMATCH[1]}")
+        fi
+    done <<< "${ports}"
+    if [ "${#tcp[@]}" -ne 1 ]; then
+        ci_error "[CI-ERROR-VALIDATE-0104]" "container=\"${cid}\" reason=\"need exactly one exposed TCP port\"" "${ports}"
+        return 2
+    fi
+    printf 'http://%s:%s' "${ip}" "${tcp[0]}"
+}
+
+# What: open a ui session in <jar>; print the page CSRF token
+# Why: posts send the token a browser reads from the form
+# From: Issue #1683 | PR #1858
 _ci_validate_ui_session() {
-    local project="$1" jar="$2" ip="${3:-}" cookie csrf last
-    [ -n "${ip}" ] || ip="$(_ci_validate_container_ip "${project}" ui)"
-    if [ -z "${ip}" ]; then
+    local jar="$1" base="$2" attempts pause page csrf last
+    if [ -z "${base}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0030]" "reason=\"no ui container IP for session check\""
         return 2
     fi
+    attempts="$(_ci_variable CI_VALIDATE_UI_POLL_ATTEMPTS)" || return 2
+    pause="$(_ci_variable CI_VALIDATE_UI_POLL_PAUSE)" || return 2
     # What: ui has no compose healthcheck; poll /domains.
     # Why: wait_healthy misses ui; prove it answers first.
     # From: Issue #1683
-    if ! last="$(_ci_validate_poll 30 2 curl -fsS -c "${jar}" -o /dev/null "http://${ip}:8080/domains")"; then
+    if ! last="$(_ci_validate_poll "${attempts}" "${pause}" curl -fsS -c "${jar}" -o /dev/null "${base}/domains")"; then
         ci_error "[CI-ERROR-VALIDATE-0031]" "reason=\"ui /domains never answered\"" "${last}"
         return 1
     fi
-    cookie="$(_ci_capture 0 awk -F'\t' '$6 == "lancache_ui_session" {print $7}' "${jar}")" || return 2
-    csrf="$(printf '%s' "${cookie}" | cut -d. -f3)"
+    page="$(_ci_capture 0 curl -fsS -b "${jar}" -c "${jar}" "${base}/domains")" || return 2
+    csrf="$(sed -n 's/.*name="csrf_token" value="\([^"]*\)".*/\1/p' <<< "${page}")"
+    csrf="${csrf%%$'\n'*}"
     if [ -z "${csrf}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0032]" "reason=\"no CSRF token in ui session cookie\""
+        ci_error "[CI-ERROR-VALIDATE-0032]" "url=\"${base}/domains\" reason=\"no csrf_token field on the ui page\"" "${page}"
         return 1
     fi
     printf '%s' "${csrf}"
 }
 
-# What: POST a LAN A record through the UI (303 on ok).
-# Why: Drives the real UI->NATS->PowerDNS write path.
-# From: Issue #1683
+# What: POST one LAN A record through the ui (303 on ok)
+# Why: drives the real UI->NATS->PowerDNS write path
+# From: Issue #1683 | PR #1858
 _ci_validate_ui_add_record() {
-    local project="$1" jar="$2" csrf="$3" name="$4" content="$5" ip
-    ip="$(_ci_validate_container_ip "${project}" ui)"
-    if [ -z "${ip}" ]; then
+    local base="$1" jar="$2" csrf="$3" zone="$4" name="$5" content="$6" ttl
+    if [ -z "${base}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0033]" "reason=\"no ui container IP for add-record\""
         return 2
     fi
-    _ci_validate_ui_post "${ip}" "${jar}" /domains/lan/add "csrf_token=${csrf}" \
-        "name=${name}" record_type=A "content=${content}" ttl=60
+    ttl="$(_ci_variable CI_VALIDATE_PROBE_TTL)" || return 2
+    _ci_validate_ui_post "${base}" "${jar}" "/domains/${zone%.}/add" "csrf_token=${csrf}" \
+        "name=${name}" record_type=A "content=${content}" "ttl=${ttl}"
 }
 
 # What: POST a UI form; rc 0 on 303, 1 other, 2 on error.
 # Why: one owner for the CSRF form post and its 303 check.
 # From: Issue #1683 | PR #1858
 _ci_validate_ui_post() {
-    local ip="$1" jar="$2" path="$3" field code
+    local base="$1" jar="$2" path="$3" field code
     shift 3
     local -a data=()
     for field in "$@"; do
         data+=(--data-urlencode "${field}")
     done
     code="$(_ci_capture 0 curl -sS -b "${jar}" -o /dev/null -w '%{http_code}' \
-        "${data[@]}" "http://${ip}:8080${path}")" || {
-        ci_log "[CI-ERROR-VALIDATE-0082]" "url=\"http://${ip}:8080${path}\" reason=\"ui form post failed (raw above)\""
+        "${data[@]}" "${base}${path}")" || {
+        ci_log "[CI-ERROR-VALIDATE-0082]" "url=\"${base}${path}\" reason=\"ui form post failed (raw above)\""
         return 2
     }
     if [ "${code}" != "303" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0034]" "url=\"http://${ip}:8080${path}\" code=\"${code}\" reason=\"ui form post did not return 303\""
+        ci_log "[CI-ERROR-VALIDATE-0034]" "url=\"${base}${path}\" code=\"${code}\" reason=\"ui form post did not return 303\""
         return 1
     fi
+}
+
+# What: the first LAN zone the dns entrypoint creates
+# Why: probes write where dns serves; dns owns the zones
+# From: Issue #1683 | PR #1858
+_ci_validate_lan_zone() {
+    local ep zones
+    ep="$(_ci_service_path dns entrypoint.sh)" || return 2
+    zones="$(_ci_shell_array "${ep}" LAN_ZONES)" || return 2
+    if [ -z "${zones}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0106]" "path=\"${ep}\" reason=\"no LAN_ZONES entry in the dns entrypoint\""
+        return 2
+    fi
+    printf '%s\n' "${zones%%$'\n'*}"
+}
+
+# What: host <n> of the SOT probe net (RFC 5737 TEST-NET)
+# Why: a probe answer must never be a real LAN address
+# From: Issue #1683 | PR #1858
+_ci_validate_probe_ip() {
+    local n="$1" net base
+    net="$(_ci_variable CI_VALIDATE_PROBE_NET)" || return 2
+    if [[ ! "${net}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/([0-9]+)$ ]] \
+        || [ "${n}" -lt 1 ] || [ "${n}" -ge $(( (1 << (32 - BASH_REMATCH[1])) - 1 )) ]; then
+        ci_log "[CI-ERROR-VALIDATE-0105]" "net=\"${net}\" host=\"${n}\" reason=\"probe host outside the SOT probe net\""
+        return 2
+    fi
+    base="$(_ci_ipv4_to_int "${net%/*}")"
+    _ci_int_to_ipv4 $(( base + n ))
+}
+
+# What: probe MAC <n>: the SOT probe MAC, last octet n
+# Why: a locally administered MAC never hits a real NIC
+# From: Issue #763 | PR #1858
+_ci_validate_probe_mac() {
+    local n="$1" mac
+    mac="$(_ci_variable CI_VALIDATE_PROBE_MAC)" || return 2
+    if [[ ! "${mac}" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] || [ "${n}" -lt 1 ] || [ "${n}" -gt 255 ]; then
+        ci_log "[CI-ERROR-VALIDATE-0111]" "mac=\"${mac}\" host=\"${n}\" reason=\"probe MAC outside the SOT probe MAC\""
+        return 2
+    fi
+    printf '%s:%02x' "${mac%:*}" "${n}"
 }
 
 # What: Poll dig until <fqdn> resolves to <expected>.
 # Why: NATS->PowerDNS (AXFR to ssl) async; prove it.
 # From: Issue #1683
 _ci_validate_dns_resolves() {
-    local project="$1" svc="$2" fqdn="$3" expected="$4" attempts="${5:-15}" ip got i
+    local project="$1" svc="$2" fqdn="$3" expected="$4" attempts="$5" ip got i
     ip="$(_ci_validate_container_ip "${project}" "${svc}")"
     if [ -z "${ip}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0035]" "svc=\"${svc}\" reason=\"no dns IP for resolve check\""
@@ -6596,14 +6663,59 @@ $(_ci_validate_service_evidence "${project}" "${svc}")"
 # Why: Real end-to-end NATS ingest + AXFR, not mock.
 # From: Issue #1683
 _ci_validate_ui_nats_dns() {
-    local project="$1" jar csrf rc=0
+    local project="$1" jar csrf cid base zone label ip dns_wait axfr_wait rc=0
+    cid="$(_ci_validate_cid "${project}" ui)" || return 2
+    base="$(_ci_validate_ui_base "${project}" "${cid}")" || return $?
+    zone="$(_ci_validate_lan_zone)" || return 2
+    label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
+    ip="$(_ci_validate_probe_ip 1)" || return 2
+    dns_wait="$(_ci_variable CI_VALIDATE_DNS_WAIT)" || return 2
+    axfr_wait="$(_ci_variable CI_VALIDATE_AXFR_WAIT)" || return 2
     jar="$(_ci_mktemp "${CI_TMPDIR}/ci-ui-jar.XXXXXX")" || return 2
-    csrf="$(_ci_validate_ui_session "${project}" "${jar}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
-    _ci_validate_ui_add_record "${project}" "${jar}" "${csrf}" ci-uinats-probe 203.0.113.60 || rc=$?
+    csrf="$(_ci_validate_ui_session "${jar}" "${base}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
+    _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${zone}" "${label}" "${ip}" || rc=$?
     rm -f "${jar}"
     [ "${rc}" -eq 0 ] || return "${rc}"
-    _ci_validate_dns_resolves "${project}" dns-standard ci-uinats-probe.lan. 203.0.113.60 15 || return $?
-    _ci_validate_dns_resolves "${project}" dns-ssl ci-uinats-probe.lan. 203.0.113.60 60 || return $?
+    _ci_validate_dns_resolves "${project}" dns-standard "${label}.${zone}" "${ip}" "${dns_wait}" || return $?
+    _ci_validate_dns_resolves "${project}" dns-ssl "${label}.${zone}" "${ip}" "${axfr_wait}" || return $?
+}
+
+# What: curl with one header, user or data line from stdin
+# Why: a secret on argv shows in every process list
+# From: Issue #1683 | PR #1858
+_ci_curl_secret() {
+    local opt="$1" value="$2"
+    shift 2
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '%s = "%s"\n' "${opt}" "${value}" | curl -K - "$@"
+}
+
+# What: one shared secret read inside a running container
+# Why: its dir is the shared-secrets mount, not a default
+# From: Issue #858 | PR #1858
+_ci_validate_shared_secret() {
+    local project="$1" cid="$2" name="$3" dir
+    dir="$(_ci_capture 0 docker inspect -f "{{range .Mounts}}{{if eq .Name \"${project}_shared-secrets\"}}{{.Destination}}{{end}}{{end}}" "${cid}")" || return 2
+    if [ -z "${dir}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0107]" "container=\"${cid}\" reason=\"no shared-secrets volume mount\""
+        return 2
+    fi
+    _ci_capture 0 docker exec "${cid}" cat "${dir}/${name}"
+}
+
+# What: http://<dns ip>:<port> of the rollback listener
+# Why: the port comes from the ui's DNS_ROLLBACK_URL env
+# From: Issue #628 | PR #1858
+_ci_validate_rollback_base() {
+    local ip="$1" ucid="$2" env url
+    env="$(_ci_capture 0 docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${ucid}")" || return 2
+    url="$(sed -n 's/^DNS_ROLLBACK_URL=//p' <<< "${env}")"
+    if [[ ! "${url}" =~ ^https?://[^/:]+:([0-9]+)/?$ ]]; then
+        ci_error "[CI-ERROR-VALIDATE-0108]" "container=\"${ucid}\" reason=\"no DNS_ROLLBACK_URL with a port in the ui env\"" "${url}"
+        return 2
+    fi
+    printf 'http://%s:%s' "${ip}" "${BASH_REMATCH[1]}"
 }
 
 # What: DNS known-good snapshot/rollback round-trip.
@@ -6611,69 +6723,78 @@ _ci_validate_ui_nats_dns() {
 # From: Issue #1683
 _ci_validate_dns_rollback() {
     local project="$1" ip cid key jar csrf snap resp code rc=0 compose last
+    local zone label old new dns_wait ucid base lbase tries pause su
     ip="$(_ci_validate_container_ip "${project}" dns-standard)"
     cid="$(_ci_validate_cid "${project}" dns-standard)" || return 2
     if [ -z "${ip}" ] || [ -z "${cid}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0037]" "reason=\"no dns-standard container/IP for rollback check\""
         return 2
     fi
-    # What: read PDNS_API_KEY from shared-secrets file.
+    # What: read PDNS_API_KEY from the shared-secrets mount.
     # Why: entrypoint resolves it at runtime, not env.
     # From: Issue #858
-    key="$(_ci_capture 0 docker exec "${cid}" cat /var/lib/lancache-secrets/pdns-api-key)" || return 2
+    key="$(_ci_validate_shared_secret "${project}" "${cid}" pdns-api-key)" || return 2
     key="${key//$'\n'/}"
     if [ -z "${key}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0038]" "reason=\"could not read PDNS_API_KEY from shared-secrets\""
         return 2
     fi
-    # What: poll until the rollback listener :8083 accepts.
+    ucid="$(_ci_validate_cid "${project}" ui)" || return 2
+    lbase="$(_ci_validate_rollback_base "${ip}" "${ucid}")" || return 2
+    tries="$(_ci_variable CI_VALIDATE_LISTENER_POLL_ATTEMPTS)" || return 2
+    pause="$(_ci_variable CI_VALIDATE_LISTENER_POLL_PAUSE)" || return 2
+    # What: poll until the rollback listener accepts.
     # Why: healthy != bound; nats-subscriber binds late.
     # From: Issue #628
-    if ! last="$(_ci_validate_poll 30 1 curl -fsS -o /dev/null -H "X-API-Key: ${key}" "http://${ip}:8083/snapshots")"; then
-        ci_error "[CI-ERROR-VALIDATE-0039]" "reason=\"rollback listener :8083 never accepted a connection\"" "${last}"
+    if ! last="$(_ci_validate_poll "${tries}" "${pause}" _ci_curl_secret header "X-API-Key: ${key}" -fsS -o /dev/null "${lbase}/snapshots")"; then
+        ci_error "[CI-ERROR-VALIDATE-0039]" "url=\"${lbase}\" reason=\"rollback listener never accepted a connection\"" "${last}"
         return 1
     fi
-    code="$(_ci_capture 0 curl -sS -o /dev/null -w '%{http_code}' "http://${ip}:8083/snapshots")" || return 2
+    code="$(_ci_capture 0 curl -sS -o /dev/null -w '%{http_code}' "${lbase}/snapshots")" || return 2
     if [ "${code}" != "401" ]; then
         ci_log "[CI-ERROR-VALIDATE-0040]" "code=\"${code}\" reason=\"/snapshots without X-API-Key not 401\""
         return 1
     fi
-    code="$(_ci_capture 0 curl -sS -o /dev/null -w '%{http_code}' -H 'X-API-Key: wrong' "http://${ip}:8083/snapshots")" || return 2
+    code="$(_ci_capture 0 _ci_curl_secret header "X-API-Key: ${key}x" -sS -o /dev/null -w '%{http_code}' "${lbase}/snapshots")" || return 2
     if [ "${code}" != "401" ]; then
         ci_log "[CI-ERROR-VALIDATE-0041]" "code=\"${code}\" reason=\"/snapshots with wrong X-API-Key not 401\""
         return 1
     fi
+    zone="$(_ci_validate_lan_zone)" || return 2
+    label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
+    old="$(_ci_validate_probe_ip 2)" && new="$(_ci_validate_probe_ip 3)" || return 2
+    dns_wait="$(_ci_variable CI_VALIDATE_DNS_WAIT)" || return 2
+    base="$(_ci_validate_ui_base "${project}" "${ucid}")" || return $?
     jar="$(_ci_mktemp "${CI_TMPDIR}/ci-rb-jar.XXXXXX")" || return 2
-    csrf="$(_ci_validate_ui_session "${project}" "${jar}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
-    _ci_validate_ui_add_record "${project}" "${jar}" "${csrf}" ci-rollback-probe 203.0.113.70 || { rm -f "${jar}"; return 1; }
-    _ci_validate_dns_resolves "${project}" dns-standard ci-rollback-probe.lan. 203.0.113.70 15 || { rm -f "${jar}"; return 1; }
-    # What: capture newest lan. snapshot (pre-change state).
+    csrf="$(_ci_validate_ui_session "${jar}" "${base}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
+    _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${zone}" "${label}" "${old}" || { rm -f "${jar}"; return 1; }
+    _ci_validate_dns_resolves "${project}" dns-standard "${label}.${zone}" "${old}" "${dns_wait}" || { rm -f "${jar}"; return 1; }
+    # What: capture the zone's newest snapshot (pre-change).
     # Why: target this test rolls back to after 2nd write.
     # From: Issue #628
-    resp="$(_ci_capture 0 curl -sS -H "X-API-Key: ${key}" "http://${ip}:8083/snapshots")" || { rm -f "${jar}"; return 2; }
-    snap="$(_ci_capture 0 jq -r '.zones["lan."][0].id // empty' <<<"${resp}")" || { rm -f "${jar}"; return 2; }
+    resp="$(_ci_capture 0 _ci_curl_secret header "X-API-Key: ${key}" -sS "${lbase}/snapshots")" || { rm -f "${jar}"; return 2; }
+    snap="$(_ci_capture 0 jq -r --arg z "${zone}" '.zones[$z][0].id // empty' <<<"${resp}")" || { rm -f "${jar}"; return 2; }
     if [ -z "${snap}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0042]" "reason=\"no lan. known-good snapshot after first write\""
+        ci_log "[CI-ERROR-VALIDATE-0042]" "zone=\"${zone}\" reason=\"no known-good snapshot after first write\""
         rm -f "${jar}"
         return 1
     fi
-    _ci_validate_ui_add_record "${project}" "${jar}" "${csrf}" ci-rollback-probe 203.0.113.71 || { rm -f "${jar}"; return 1; }
-    _ci_validate_dns_resolves "${project}" dns-standard ci-rollback-probe.lan. 203.0.113.71 15 || { rm -f "${jar}"; return 1; }
+    _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${zone}" "${label}" "${new}" || { rm -f "${jar}"; return 1; }
+    _ci_validate_dns_resolves "${project}" dns-standard "${label}.${zone}" "${new}" "${dns_wait}" || { rm -f "${jar}"; return 1; }
     rm -f "${jar}"
-    resp="$(_ci_capture 0 curl -sS -H "X-API-Key: ${key}" "http://${ip}:8083/snapshots")" || return 2
-    last="$(_ci_capture 0 jq -r '.zones["lan."][0].id // empty' <<<"${resp}")" || return 2
+    resp="$(_ci_capture 0 _ci_curl_secret header "X-API-Key: ${key}" -sS "${lbase}/snapshots")" || return 2
+    last="$(_ci_capture 0 jq -r --arg z "${zone}" '.zones[$z][0].id // empty' <<<"${resp}")" || return 2
     compose="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    local su
     su="$(_ci_installer)" || return 2
     # What: setup.sh rollback, wrong host PDNS_API_KEY.
     # Why: the key must be resolved inside the container.
     # From: Issue #836
     resp="$(COMPOSE_PROJECT_NAME="${project}" PDNS_API_KEY=CHANGE_ME_host_side_key_never_used \
         bash "${su}" reset-to-last-known-good-config dns "$(dirname "${compose}")" \
-        lan. "${snap}" --yes 2>&1)" || rc=$?
+        "${zone}" "${snap}" --yes 2>&1)" || rc=$?
     case "${rc}:${resp}" in
         *"cache-flush publishes failed"*) rc=1 ;;
-        0:*"rolled back to known-good snapshot ${snap}"*"ci-rollback-probe.lan."*) ;;
+        0:*"rolled back to known-good snapshot ${snap}"*"${label}.${zone}"*) ;;
         *) rc=1 ;;
     esac
     if [ "${rc}" -ne 0 ]; then
@@ -6683,43 +6804,62 @@ _ci_validate_dns_rollback() {
     # What: post-rollback dig must return the OLD content.
     # Why: proves recursor cache flush reached it.
     # From: Issue #628
-    _ci_validate_dns_resolves "${project}" dns-standard ci-rollback-probe.lan. 203.0.113.70 15 || return $?
-    if ! resp="$(_ci_validate_poll 15 1 _ci_validate_new_snapshot "${ip}" "${key}" "${last}")"; then
-        ci_error "[CI-ERROR-VALIDATE-0087]" "previous=\"${last}\" reason=\"no new lan. snapshot after the rollback\"" "${resp}"
+    _ci_validate_dns_resolves "${project}" dns-standard "${label}.${zone}" "${old}" "${dns_wait}" || return $?
+    tries="$(_ci_variable CI_VALIDATE_SNAPSHOT_POLL_ATTEMPTS)" || return 2
+    pause="$(_ci_variable CI_VALIDATE_SNAPSHOT_POLL_PAUSE)" || return 2
+    if ! resp="$(_ci_validate_poll "${tries}" "${pause}" _ci_validate_new_snapshot "${lbase}" "${key}" "${last}" "${zone}")"; then
+        ci_error "[CI-ERROR-VALIDATE-0087]" "previous=\"${last}\" zone=\"${zone}\" reason=\"no new snapshot after the rollback\"" "${resp}"
         return 1
     fi
 }
 
-# What: True if lan.'s newest snapshot id is not $3.
+# What: true if zone $4's newest snapshot id is not $3
 # Why: a restore must record the restored state too.
 # From: Issue #836
 _ci_validate_new_snapshot() {
-    curl -fsS -H "X-API-Key: $2" "http://$1:8083/snapshots" \
-        | jq -e --arg p "$3" '(.zones["lan."][0].id // "") as $i | $i != "" and $i != $p' >/dev/null
+    _ci_curl_secret header "X-API-Key: $2" -fsS "$1/snapshots" \
+        | jq -e --arg p "$3" --arg z "$4" '(.zones[$z][0].id // "") as $i | $i != "" and $i != $p' >/dev/null
+}
+
+# What: http-port or user of the Kea control agent config
+# Why: the agent config owns where and as whom it answers
+# From: Issue #763 | PR #1858
+_ci_validate_kea_agent() {
+    local field="$1" conf expr out
+    conf="$(_ci_service_path dhcp kea-ctrl-agent.conf)" || return 2
+    case "${field}" in
+        http-port) expr='s/^[[:space:]]*"http-port":[[:space:]]*([0-9]+),?[[:space:]]*$/\1/p' ;;
+        user) expr='s/^[[:space:]]*"user":[[:space:]]*"([^"$]+)",?[[:space:]]*$/\1/p' ;;
+        *) ci_log "[CI-ERROR-VALIDATE-0109]" "field=\"${field}\" reason=\"unknown Kea agent field\""; return 2 ;;
+    esac
+    out="$(_ci_file_value "${conf}" "${expr}")" || {
+        [ "$?" -eq 2 ] || ci_error "[CI-ERROR-VALIDATE-0110]" "file=\"${conf}\" field=\"${field}\" reason=\"need exactly one literal value\"" "${out}"
+        return 2
+    }
+    printf '%s\n' "${out}"
 }
 
 # What: One Kea Control Agent command; prints the reply.
 # Why: ready poll, subnet read and rollback check share it.
 # From: Issue #763 | PR #1858
 _ci_validate_kea_cmd() {
-    curl -fsS -u "admin:$2" -H 'Content-Type: application/json' \
-        -d "$3" "http://$1:8000/"
+    _ci_curl_secret user "$2:$3" -fsS -H 'Content-Type: application/json' -d "$4" "$1/"
 }
 
 # What: True once Kea answers config-get with result 0.
 # Why: run -d returns before kea-dhcp4 and the agent bind.
 # From: Issue #763 | PR #1858
 _ci_validate_kea_ready() {
-    _ci_validate_kea_cmd "$1" "$2" '{"command":"config-get","service":["dhcp4"]}' \
+    _ci_validate_kea_cmd "$1" "$2" "$3" '{"command":"config-get","service":["dhcp4"]}' \
         | jq -e '.[0].result == 0' >/dev/null
 }
 
-# What: Kea snapshot ids under <kea dir>, oldest first.
+# What: Kea snapshot ids under <snapshot dir>, oldest first.
 # Why: the rollback target is the id a ui write added.
 # From: Issue #763 | PR #1858
 _ci_validate_kea_snapshots() {
     local found p id
-    found="$(_ci_capture 0 find "$1/config-snapshots" -mindepth 2 -maxdepth 2 -name dhcp4.json)" || return 2
+    found="$(_ci_capture 0 find "$1" -mindepth 2 -maxdepth 2 -name dhcp4.json)" || return 2
     while IFS= read -r p; do
         id="${p%/dhcp4.json}"
         id="${id##*/}"
@@ -6734,8 +6874,8 @@ _ci_validate_kea_snapshots() {
 # From: Issue #763 | PR #1858
 _ci_validate_kea_has() {
     local cfg
-    cfg="$(_ci_capture 0 _ci_validate_kea_cmd "$1" "$2" '{"command":"config-get","service":["dhcp4"]}')" || return 2
-    _ci_capture 0 jq -r --arg m "$3" \
+    cfg="$(_ci_capture 0 _ci_validate_kea_cmd "$1" "$2" "$3" '{"command":"config-get","service":["dhcp4"]}')" || return 2
+    _ci_capture 0 jq -r --arg m "$4" \
         '[.[0].arguments.Dhcp4.subnet4[].reservations[]? | select((."hw-address" | ascii_downcase) == ($m | ascii_downcase))] | length' \
         <<< "${cfg}"
 }
@@ -6744,10 +6884,10 @@ _ci_validate_kea_has() {
 # Why: every ui write must record exactly one new snapshot.
 # From: Issue #763 | PR #1858
 _ci_validate_kea_add() {
-    local uip="$1" jar="$2" csrf="$3" sid="$4" mac="$5" ip="$6" host="$7" dir="$8"
+    local base="$1" jar="$2" csrf="$3" sid="$4" mac="$5" ip="$6" host="$7" dir="$8"
     local before after new
     before="$(_ci_validate_kea_snapshots "${dir}")" || return 2
-    _ci_validate_ui_post "${uip}" "${jar}" /dhcp/static/add "csrf_token=${csrf}" \
+    _ci_validate_ui_post "${base}" "${jar}" /dhcp/static/add "csrf_token=${csrf}" \
         "subnet_id=${sid}" "mac=${mac}" "ip=${ip}" "hostname=${host}" || return $?
     after="$(_ci_validate_kea_snapshots "${dir}")" || return 2
     new="$(tail -n 1 <<< "${after}")"
@@ -6762,54 +6902,66 @@ _ci_validate_kea_add() {
 # Why: the CLI fallback must revert Kea's running config.
 # From: Issue #763 | PR #1858
 _ci_validate_kea_round_trip() {
-    local project="$1" kip="$2" uname="$3" cfg token dir subnet resp sid uip
-    local jar csrf base snap inst out n_a n_b rc=0
-    local mac_a=02:00:00:00:07:01 mac_b=02:00:00:00:07:02
+    local project="$1" kip="$2" kport="$3" uname="$4" cfg token dir subnet resp sid ubase
+    local jar csrf base snap inst out n_a n_b rc=0 kbase kuser label mac_a mac_b tries pause su snapdir mount snaps
+    kbase="http://${kip}:${kport}"
+    kuser="$(_ci_validate_kea_agent user)" || return 2
+    label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
+    mac_a="$(_ci_validate_probe_mac 1)" && mac_b="$(_ci_validate_probe_mac 2)" || return 2
+    tries="$(_ci_variable CI_VALIDATE_KEA_POLL_ATTEMPTS)" || return 2
+    pause="$(_ci_variable CI_VALIDATE_KEA_POLL_PAUSE)" || return 2
     cfg="$(_ci_validate_config_json)" || return 2
     token="$(_ci_capture 0 jq -r '.services.dhcp.environment.KEA_CTRL_TOKEN // empty' <<< "${cfg}")" || return 2
-    dir="$(_ci_capture 0 jq -r '.services.dhcp.volumes[]? | select(.target == "/var/lib/kea") | .source' <<< "${cfg}")" || return 2
+    snapdir="$(_ci_capture 0 jq -r '.services.dhcp.environment.KEA_CONFIG_SNAPSHOT_DIR // empty' <<< "${cfg}")" || return 2
+    # What: the dhcp mount holding KEA_CONFIG_SNAPSHOT_DIR
+    # Why: its source is the Kea data dir on the host
+    # From: Issue #763 | PR #1858
+    mount="$(_ci_capture 0 jq -r --arg s "${snapdir}" '.services.dhcp.volumes[]? | .target as $t
+        | select($t != "" and ($s | startswith($t + "/"))) | "\(.source)\t\($s | ltrimstr($t))"' <<< "${cfg}")" || return 2
     subnet="$(_ci_capture 0 jq -r '.services.dhcp.environment.DHCP_SUBNET // empty' <<< "${cfg}")" || return 2
-    if [ -z "${token}" ] || [ -z "${dir}" ] || [ -z "${subnet}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0089]" "reason=\"dhcp compose config lacks KEA_CTRL_TOKEN, the /var/lib/kea mount or DHCP_SUBNET\""
+    if [ -z "${token}" ] || [ -z "${snapdir}" ] || [ -z "${mount}" ] || [[ "${mount}" == *$'\n'* ]] || [ -z "${subnet}" ]; then
+        ci_error "[CI-ERROR-VALIDATE-0089]" "reason=\"dhcp compose config lacks KEA_CTRL_TOKEN, one mount holding KEA_CONFIG_SNAPSHOT_DIR, or DHCP_SUBNET\"" "${mount}"
         return 2
     fi
-    if ! out="$(_ci_validate_poll 30 2 _ci_validate_kea_ready "${kip}" "${token}")"; then
+    dir="${mount%%$'\t'*}"
+    snaps="${dir}${mount#*$'\t'}"
+    if ! out="$(_ci_validate_poll "${tries}" "${pause}" _ci_validate_kea_ready "${kbase}" "${kuser}" "${token}")"; then
         ci_error "[CI-ERROR-VALIDATE-0090]" "ip=\"${kip}\" reason=\"Kea control agent never answered config-get\"" "${out}"
         return 1
     fi
-    resp="$(_ci_capture 0 _ci_validate_kea_cmd "${kip}" "${token}" '{"command":"config-get","service":["dhcp4"]}')" || return 2
+    resp="$(_ci_capture 0 _ci_validate_kea_cmd "${kbase}" "${kuser}" "${token}" '{"command":"config-get","service":["dhcp4"]}')" || return 2
     sid="$(_ci_capture 0 jq -r --arg s "${subnet}" '.[0].arguments.Dhcp4.subnet4[]? | select(.subnet == $s) | .id' <<< "${resp}")" || return 2
     if [ -z "${sid}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0091]" "subnet=\"${subnet}\" reason=\"no Kea subnet4 entry for DHCP_SUBNET\""
         return 1
     fi
-    uip="$(_ci_validate_cid_ip "${project}" "${uname}")" || {
+    ubase="$(_ci_validate_ui_base "${project}" "${uname}")" || {
         rc=$?
         ci_log "[CI-ERROR-VALIDATE-0092]" "container=\"${uname}\" reason=\"no /27 IP for the Kea ui run container\""
         return "${rc}"
     }
     jar="$(_ci_mktemp "${CI_TMPDIR}/ci-kea-jar.XXXXXX")" || return 2
-    csrf="$(_ci_validate_ui_session "${project}" "${jar}" "${uip}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
+    csrf="$(_ci_validate_ui_session "${jar}" "${ubase}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     # What: reservation IPs base+2/+3 of DHCP_SUBNET.
     # Why: Kea rejects a reservation outside its subnet.
     # From: Issue #763 | PR #1858
     base="$(_ci_ipv4_to_int "${subnet%/*}")"
-    snap="$(_ci_validate_kea_add "${uip}" "${jar}" "${csrf}" "${sid}" "${mac_a}" \
-        "$(_ci_int_to_ipv4 $(( base + 2 )))" ci-kea-a "${dir}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
-    _ci_validate_kea_add "${uip}" "${jar}" "${csrf}" "${sid}" "${mac_b}" \
-        "$(_ci_int_to_ipv4 $(( base + 3 )))" ci-kea-b "${dir}" >/dev/null || { rc=$?; rm -f "${jar}"; return "${rc}"; }
+    snap="$(_ci_validate_kea_add "${ubase}" "${jar}" "${csrf}" "${sid}" "${mac_a}" \
+        "$(_ci_int_to_ipv4 $(( base + 2 )))" "${label}-1" "${snaps}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
+    _ci_validate_kea_add "${ubase}" "${jar}" "${csrf}" "${sid}" "${mac_b}" \
+        "$(_ci_int_to_ipv4 $(( base + 3 )))" "${label}-2" "${snaps}" >/dev/null || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     rm -f "${jar}"
     inst="$(_ci_mktemp -d "${CI_TMPDIR}/ci-kea-install.XXXXXX")" || return 2
     # What: install-dir stub: compose marker and Kea .env.
     # Why: setup.sh reads KEA_* only from <install>/.env.
     # From: Issue #763 | PR #1858
     if ! out="$( { : > "${inst}/docker-compose.yml" \
-        && printf 'KEA_CTRL_TOKEN=%s\nKEA_CTRL_HOST=%s\nKEA_DATA_DIR=%s\n' "${token}" "${kip}" "${dir}" > "${inst}/.env"; } 2>&1)"; then
+        && printf 'KEA_CTRL_TOKEN=%s\nKEA_CTRL_HOST=%s\nKEA_DATA_DIR=%s\nKEA_CONFIG_SNAPSHOT_DIR=%s\n' \
+            "${token}" "${kip}" "${dir}" "${snapdir}" > "${inst}/.env"; } 2>&1)"; then
         ci_error "[CI-ERROR-VALIDATE-0093]" "dir=\"${inst}\" reason=\"setup.sh install-dir stub not written\"" "${out}"
         rm -rf "${inst}"
         return 2
     fi
-    local su
     su="$(_ci_installer)" || { rm -rf "${inst}"; return 2; }
     resp="$(bash "${su}" reset-to-last-known-good-config kea "${inst}" "${snap}" --yes 2>&1)" || rc=$?
     rm -rf "${inst}"
@@ -6820,8 +6972,8 @@ _ci_validate_kea_round_trip() {
             return 1
             ;;
     esac
-    n_a="$(_ci_validate_kea_has "${kip}" "${token}" "${mac_a}")" || return 2
-    n_b="$(_ci_validate_kea_has "${kip}" "${token}" "${mac_b}")" || return 2
+    n_a="$(_ci_validate_kea_has "${kbase}" "${kuser}" "${token}" "${mac_a}")" || return 2
+    n_b="$(_ci_validate_kea_has "${kbase}" "${kuser}" "${token}" "${mac_b}")" || return 2
     if [ "${n_a}" != 1 ] || [ "${n_b}" != 0 ]; then
         ci_log "[CI-ERROR-VALIDATE-0095]" "snapshot=\"${snap}\" a=\"${n_a}\" b=\"${n_b}\" reason=\"live Kea config is not the snapshot state (want a=1 b=0)\""
         return 1
@@ -6840,9 +6992,10 @@ _ci_validate_rm_run() {
 # Why: dhcp is host-mode, so up never starts a Kea.
 # From: Issue #763 | PR #1858
 _ci_validate_kea_rollback() {
-    local project="$1" net="$2" pin="$3" kname uname kip rc=0
+    local project="$1" net="$2" pin="$3" kname uname kip kport rc=0
     kname="${project}-kea"
     uname="${project}-kea-ui"
+    kport="$(_ci_validate_kea_agent http-port)" || return 2
     _ci_run "[CI-ERROR-VALIDATE-0096]" "project=\"${project}\" service=\"dhcp\" reason=\"Kea run container not started\"" \
         _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${kname}" dhcp >/dev/null || return $?
     if ! kip="$(_ci_validate_cid_ip "${project}" "${kname}")"; then
@@ -6850,8 +7003,8 @@ _ci_validate_kea_rollback() {
         rc=2
     elif _ci_run "[CI-ERROR-VALIDATE-0098]" "project=\"${project}\" service=\"ui\" reason=\"Kea ui run container not started\"" \
         _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${uname}" \
-        -e DHCP_MODE=kea -e "DHCP_API_URL=http://${kip}:8000" ui >/dev/null; then
-        _ci_validate_kea_round_trip "${project}" "${kip}" "${uname}" || rc=$?
+        -e DHCP_MODE=kea -e "DHCP_API_URL=http://${kip}:${kport}" ui >/dev/null; then
+        _ci_validate_kea_round_trip "${project}" "${kip}" "${kport}" "${uname}" || rc=$?
         _ci_validate_rm_run "${uname}" || { [ "${rc}" -ne 0 ] || rc=2; }
     else
         rc=2
@@ -6864,11 +7017,11 @@ _ci_validate_kea_rollback() {
 # Why: token-gated, no session/CSRF; reused per name.
 # From: Issue #583
 _ci_register_secondary() {
-    local ip="$1" token="$2" name="$3" out code
-    out="$(_ci_capture 0 curl -sS -w '\n%{http_code}' -H 'Content-Type: application/json' \
-        -d "{\"token\":\"${token}\",\"name\":\"${name}\"}" \
-        "http://${ip}:8080/api/secondary/register")" || {
-        ci_log "[CI-ERROR-VALIDATE-0083]" "url=\"http://${ip}:8080/api/secondary/register\" name=\"${name}\" reason=\"secondary register request failed (raw above)\""
+    local base="$1" token="$2" name="$3" out code
+    out="$(_ci_capture 0 _ci_curl_secret data "{\"token\":\"${token}\",\"name\":\"${name}\"}" \
+        -sS -w '\n%{http_code}' -H 'Content-Type: application/json' \
+        "${base}/api/secondary/register")" || {
+        ci_log "[CI-ERROR-VALIDATE-0083]" "url=\"${base}/api/secondary/register\" name=\"${name}\" reason=\"secondary register request failed (raw above)\""
         return 2
     }
     code="${out##*$'\n'}"
@@ -6879,15 +7032,28 @@ _ci_register_secondary() {
     printf '%s' "${out%$'\n'*}"
 }
 
+# What: path of the ui's secondary registration token file
+# Why: the ui source const owns it; CI reads, never copies
+# From: Issue #583 | PR #1858
+_ci_validate_ui_token_file() {
+    local main tf
+    main="$(_ci_service_path ui src/main.rs)" || return 2
+    if ! tf="$(_ci_file_value "${main}" 's/^const SECONDARY_REGISTRATION_TOKEN_FILE: &str = "([^"]+)";$/\1/p')"; then
+        ci_error "[CI-ERROR-VALIDATE-0112]" "file=\"${main}\" reason=\"need exactly one SECONDARY_REGISTRATION_TOKEN_FILE const\"" "${tf}"
+        return 2
+    fi
+    printf '%s\n' "${tf}"
+}
+
 # What: Prove each secondary gets unique identity.
 # Why: per-secondary NATS auth-callout, not shared token.
 # From: Issue #1683
 _ci_validate_secondary_identity() {
-    local project="$1" ip cid token a b au bu ap bp trc=0
-    local tf=/data/lancache-secondary-registration.token
-    ip="$(_ci_validate_container_ip "${project}" ui)"
+    local project="$1" base cid token a b au bu ap bp trc=0 tf label
+    tf="$(_ci_validate_ui_token_file)" || return 2
+    label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
     cid="$(_ci_validate_cid "${project}" ui)" || return 2
-    if [ -z "${ip}" ] || [ -z "${cid}" ]; then
+    if [ -z "${cid}" ] || ! base="$(_ci_validate_ui_base "${project}" "${cid}")"; then
         ci_log "[CI-ERROR-VALIDATE-0045]" "reason=\"no ui container/IP for secondary-identity check\""
         return 2
     fi
@@ -6910,8 +7076,8 @@ _ci_validate_secondary_identity() {
         ci_log "[CI-ERROR-VALIDATE-0046]" "reason=\"could not read SECONDARY_REGISTRATION_TOKEN from ui\""
         return 2
     fi
-    if ! a="$(_ci_register_secondary "${ip}" "${token}" ci-secondary-a)" \
-        || ! b="$(_ci_register_secondary "${ip}" "${token}" ci-secondary-b)"; then
+    if ! a="$(_ci_register_secondary "${base}" "${token}" "${label}-1")" \
+        || ! b="$(_ci_register_secondary "${base}" "${token}" "${label}-2")"; then
         ci_log "[CI-ERROR-VALIDATE-0047]" "reason=\"a secondary register did not return 200\""
         return 1
     fi
@@ -11149,14 +11315,26 @@ _ci_installer() {
     printf '%s\n' "${p}"
 }
 
-# What: RHS of the one NAME= line; rc 1 if none or several
-# Why: product scripts own their values; CI reads them
+# What: the one sed -n match in a file; rc 1 if none or several
+# Why: one reader for values a product file owns
 # From: Issue #1683 | PR #1858
-_ci_shell_assignment() {
-    local file="$1" name="$2" out
-    out="$(_ci_capture 0 sed -nE "s/^${name}=//p" "${file}")" || return 2
+_ci_file_value() {
+    local file="$1" expr="$2" out
+    out="$(_ci_capture 0 sed -nE "${expr}" "${file}")" || return 2
     printf '%s\n' "${out}"
     [[ -n "${out}" && "${out}" != *$'\n'* ]]
+}
+
+# What: elements of the one NAME=( ... ) array in a file
+# Why: product scripts own their lists; CI reads them
+# From: Issue #1683 | PR #1858
+_ci_shell_array() {
+    local file="$1" name="$2"
+    _ci_capture 0 awk -v n="${name}" '
+        $0 == n "=(" { on = 1; c++; next }
+        on && $0 == ")" { on = 0; next }
+        on { gsub(/^[[:space:]]+|[[:space:]]+$/, ""); if ($0 != "") print }
+        END { if (c != 1) exit 3 }' "${file}"
 }
 
 # What: literal NAME= value from the proxy entrypoint
@@ -11165,7 +11343,7 @@ _ci_shell_assignment() {
 _ci_proxy_constant() {
     local name="$1" ep="${2:-}" raw re='^"?([^"$[:space:]]+)"?$'
     [ -n "${ep}" ] || ep="$(_ci_service_path proxy entrypoint.sh)" || return 2
-    raw="$(_ci_shell_assignment "${ep}" "${name}")" || [ "$?" -eq 1 ] || return 2
+    raw="$(_ci_file_value "${ep}" "s/^${name}=//p")" || [ "$?" -eq 1 ] || return 2
     if [[ ! "${raw}" =~ ${re} ]]; then
         ci_error "[CI-ERROR-CORE-0129]" "path=\"${ep}\" name=\"${name}\" reason=\"need exactly one literal assignment\"" "${raw}"
         return 2
@@ -11194,7 +11372,7 @@ _ci_installer_compose() {
     local root="${1:-${CI_REPO_ROOT}}" su line
     local re='^"\$SCRIPT_DIR/([^"$]+)"$'
     su="$(_ci_installer "${root}")" || return 2
-    line="$(_ci_shell_assignment "${su}" PROD_COMPOSE)" || {
+    line="$(_ci_file_value "${su}" 's/^PROD_COMPOSE=//p')" || {
         [ "$?" -eq 1 ] || return 2
         ci_error "[CI-ERROR-CORE-0104]" "path=\"${su}\" reason=\"PROD_COMPOSE missing or assigned twice\"" "${line}"
         return 2

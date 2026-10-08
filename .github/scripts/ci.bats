@@ -566,6 +566,31 @@ echo "${server:?the dig stub needs @server}"
 STUB
 }
 
+# What: <n> distinct /27 slot addresses from the slot owner
+# Why: probe targets live in validation slots, never fixed
+# From: Issue #1683 | PR #1858
+_slot_ips() {
+    local ip
+    local -A seen=()
+    while [ "${#seen[@]}" -lt "$1" ]; do
+        ip="$(_ci_validate_subnet "$(_val name)")" || return 1
+        seen["${ip%/*}"]=1
+    done
+    printf '%s\n' "${!seen[@]}"
+}
+
+# What: stand-in answers for one compose service container
+# Why: ci.sh finds a container by ps, then reads inspect
+# From: Issue #1683 | PR #1858
+_container() {
+    local svc="$1" cid="$2" ip="$3" ports="${4:-}" env="${5:-}" mount="${6:-}"
+    _docker_answer " compose -p * ps -q ${svc} " 0 "${cid}"
+    _docker_answer " inspect -f *NetworkSettings* ${cid} " 0 "${ip}"
+    [ -z "${ports}" ] || _docker_answer " inspect -f *ExposedPorts* ${cid} " 0 "${ports}"
+    [ -z "${env}" ] || _docker_answer " inspect -f *Config.Env* ${cid} " 0 "${env}"
+    [ -z "${mount}" ] || _docker_answer " inspect -f *Mounts* ${cid} " 0 "${mount}"
+}
+
 # What: script one docker answer: glob, rc, out, err, times
 # Why: the one stand-in answers any call; first match wins
 # From: Issue #1683 | PR #1858
@@ -10564,44 +10589,128 @@ CASES
         && [[ "${output}" != *"Continuing the update with"* ]] || { echo "pinned: ${output}"; return 1; }
 }
 
-# What: curl stand-in for the Kea agent and the DNS listener
-# Why: real setup.sh talks to both; tests own no network
+# What: curl stand-in: Kea agent, DNS listener, ui pages
+# Why: real setup.sh and ci.sh talk to them; no network
 # From: Issue #1683 | PR #1858
-_reset_curl_stub() {
+_curl_stub() {
     _tool_stub "${BIN}" curl <<'STUB'
-fmt="" data="" cfg=0 url="${!#}"
-hdr=()
+fmt="" data="" cfg="" out="" fail=0 url="${!#}" user=""
+hdr=() form=()
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
     case "${args[$i]}" in
         -w) fmt="${args[$((i + 1))]}" ;;
         -d) data="${args[$((i + 1))]}" ;;
         -H) hdr+=("${args[$((i + 1))]}") ;;
-        -K) cfg=1 ;;
+        -o) out="${args[$((i + 1))]}" ;;
+        --data-urlencode) form+=("${args[$((i + 1))]}") ;;
+        -K) cfg="$(cat)" ;;
+        --*) ;;
+        -*f*) fail=1 ;;
     esac
 done
+while IFS= read -r line; do
+    [[ "${line}" =~ ^([a-z]+)\ =\ \"(.*)\"$ ]] || continue
+    v="${BASH_REMATCH[2]//\\\"/\"}"
+    v="${v//\\\\/\\}"
+    case "${BASH_REMATCH[1]}" in header) hdr+=("${v}") ;; data) data="${v}" ;; user) user="${v}" ;; esac
+done <<< "${cfg}"
 printf '%s\n' "$*" >> "${DS}/curl.argv"
-[ ! -e "${DS}/fail-curl" ] || exit 7
-status=200
-case "${url}" in
-    *:8083/*)
-        path="${url#*:8083/}"
-        body="$(cat "${DS}/listener-${path}")"
-        [ ! -e "${DS}/listener-status" ] || status="$(cat "${DS}/listener-status")"
-        [ -z "${data}" ] || printf '%s\n' "${data}" >> "${DS}/listener.posts"
-        grep -qxF "X-API-Key: $(cat "${DS}/pdns-api-key")" <<< "$(printf '%s\n' "${hdr[@]}")" \
-            || { status=401 body='{"error":"missing or invalid X-API-Key"}'; } ;;
-    *)
-        [ "${cfg}" -eq 0 ] || cat > "${DS}/kea.cfg"
+[ -z "${cfg}" ] || printf '%s\n' "${cfg}" >> "${DS}/curl.cfg"
+[ ! -e "${DS}/fail-curl" ] || { echo "curl: (7) Failed to connect to ${url}" >&2; exit 7; }
+field() { local f; for f in "${form[@]}"; do [ "${f%%=*}" != "$1" ] || printf '%s' "${f#*=}"; done; }
+# What: one listener snapshot of a zone's current records
+# Why: the listener records a snapshot after every write
+# From: Issue #628 | PR #1858
+snap() {
+    local n=0
+    [ -e "${DS}/listener-snapshots" ] && [ -e "${DS}/dns-records" ] && [ ! -e "${DS}/listener-nosnap" ] || return 0
+    [ ! -e "${DS}/snap-n" ] || n="$(cat "${DS}/snap-n")"
+    n=$(( n + 1 ))
+    echo "${n}" > "${DS}/snap-n"
+    cp "${DS}/dns-records" "${DS}/snap-${n}"
+    jq -c --arg z "$1" --arg i "${n}" '.zones[$z] = ([{id: $i}] + (.zones[$z] // []))' \
+        "${DS}/listener-snapshots" > "${DS}/ls.new" && mv "${DS}/ls.new" "${DS}/listener-snapshots"
+}
+status=200 body=""
+rest="${url#*://}" path=""
+[ "${rest}" = "${rest#*/}" ] || path="${rest#*/}"
+case "${path}" in
+    domains)
+        [ ! -e "${DS}/ui-page" ] || body="$(cat "${DS}/ui-page")"
+        [ ! -e "${DS}/ui-status" ] || status="$(cat "${DS}/ui-status")" ;;
+    domains/*/add)
+        printf '%s %s\n' "${path}" "${form[*]}" >> "${DS}/ui.posts"
+        status=303
+        [ ! -e "${DS}/ui-post-status" ] || status="$(cat "${DS}/ui-post-status")"
+        if [ "${status}" = 303 ] && [ -e "${DS}/dns-records" ]; then
+            z="${path#domains/}" z="${z%/add}." fq="$(field name).${z}"
+            { grep -v "^${fq} " "${DS}/dns-records"; printf '%s %s\n' "${fq}" "$(field content)"; } > "${DS}/dr.new"
+            mv "${DS}/dr.new" "${DS}/dns-records"
+            snap "${z}"
+        fi ;;
+    dhcp/static/add)
+        printf '%s %s\n' "${path}" "${form[*]}" >> "${DS}/ui.posts"
+        status=303
+        [ ! -e "${DS}/ui-post-status" ] || status="$(cat "${DS}/ui-post-status")"
+        if [ "${status}" = 303 ] && [ -e "${DS}/kea-live" ]; then
+            jq -c --arg s "$(field subnet_id)" --arg m "$(field mac)" --arg ip "$(field ip)" --arg h "$(field hostname)" \
+                '.Dhcp4.subnet4 |= map(if (.id | tostring) == $s then .reservations += [{"hw-address": $m, "ip-address": $ip, hostname: $h}] else . end)' \
+                "${DS}/kea-live" > "${DS}/kl.new" && mv "${DS}/kl.new" "${DS}/kea-live"
+            if [ ! -e "${DS}/kea-no-snapshot" ]; then
+                k=0
+                [ ! -e "${DS}/kea-n" ] || k="$(cat "${DS}/kea-n")"
+                k=$(( k + 1 ))
+                echo "${k}" > "${DS}/kea-n"
+                mkdir -p "$(cat "${DS}/kea-snapdir")/${k}" && cp "${DS}/kea-live" "$(cat "${DS}/kea-snapdir")/${k}/dhcp4.json"
+            fi
+        fi ;;
+    api/secondary/register)
+        printf '%s\n' "${data}" >> "${DS}/register.posts"
+        body="$(jq -c '{nats_user: ("u-" + .name), nats_password: ("p-" + .name)}' <<< "${data}")"
+        [ ! -e "${DS}/register-body" ] || body="$(cat "${DS}/register-body")"
+        [ ! -e "${DS}/register-status" ] || status="$(cat "${DS}/register-status")" ;;
+    "")
+        [ -z "${cfg}" ] || printf '%s\n' "${cfg}" > "${DS}/kea.cfg"
+        [ ! -e "${DS}/fail-kea" ] || exit 7
         printf '%s\n' "${url}" >> "${DS}/kea.urls"
         cmd="$(jq -r .command <<< "${data}")"
         printf '%s\n' "${cmd}" >> "${DS}/kea.commands"
         body='[{"result":0,"text":"ok"}]'
-        [ ! -e "${DS}/kea-${cmd}" ] || body="$(cat "${DS}/kea-${cmd}")"
+        if [ -e "${DS}/kea-${cmd}" ]; then
+            body="$(cat "${DS}/kea-${cmd}")"
+        elif [ -e "${DS}/kea-live" ]; then
+            case "${cmd}" in
+                config-get) body="$(jq -c '[{result: 0, arguments: .}]' "${DS}/kea-live")" ;;
+                config-set) [ -e "${DS}/kea-norevert" ] || jq -c .arguments <<< "${data}" > "${DS}/kea-live" ;;
+            esac
+        fi
         [ ! -e "${DS}/kea-status" ] || status="$(cat "${DS}/kea-status")" ;;
+    *)
+        body="$(cat "${DS}/listener-${path}")"
+        [ ! -e "${DS}/listener-status" ] || status="$(cat "${DS}/listener-status")"
+        [ -z "${data}" ] || printf '%s\n' "${data}" >> "${DS}/listener.posts"
+        auth="$(printf '%s\n' "${hdr[@]}" | grep -c '^X-API-Key: ')" mode=""
+        [ ! -e "${DS}/listener-auth" ] || mode="$(cat "${DS}/listener-auth")"
+        case "${mode}" in
+            open) ;;
+            anykey) [ "${auth}" -gt 0 ] || { status=401 body='{"error":"missing X-API-Key"}'; } ;;
+            *) grep -qxF "X-API-Key: $(cat "${DS}/pdns-api-key")" <<< "$(printf '%s\n' "${hdr[@]}")" \
+                   || { status=401 body='{"error":"missing or invalid X-API-Key"}'; } ;;
+        esac
+        if [ "${path}" = rollback ] && [ "${status}" = 200 ] && [ -e "${DS}/dns-records" ]; then
+            id="$(jq -r .snapshot_id <<< "${data}")"
+            [ ! -e "${DS}/snap-${id}" ] || cp "${DS}/snap-${id}" "${DS}/dns-records"
+            [ -e "${DS}/listener-norecord" ] || snap "$(jq -r .zone <<< "${data}")"
+        fi ;;
 esac
+if [ "${fail}" -eq 1 ] && [ "${status}" -ge 400 ]; then
+    echo "curl: (22) The requested URL returned error: ${status}" >&2
+    exit 22
+fi
 fmt="${fmt//\\n/$'\n'}"
-printf '%s%s' "${body}" "${fmt//"%{http_code}"/${status}}"
+if [ -n "${out}" ]; then printf '%s' "${body}" > "${out}"; else printf '%s' "${body}"; fi
+printf '%s' "${fmt//"%{http_code}"/${status}}"
 STUB
 }
 
@@ -10628,7 +10737,7 @@ STUB
     old="$(( $(date +%s) - 60 ))000000000" new="$(date +%s)000000000"
     for v in "${old}" "${new}"; do mkdir -p "${kd}/${v}" && jq -nc --arg v "${v}" '{Dhcp4: {"user-context": {id: $v}}}' > "${kd}/${v}/dhcp4.json"; done
     mkdir -p "${kd}/${new}x" "${kd}/$(( new + 1 ))"
-    _reset_curl_stub
+    _curl_stub
     # What: only finalized numeric snapshots, oldest first
     # Why: a half-written snapshot must never be applied
     # From: Issue #1683 | PR #1858
@@ -10718,7 +10827,7 @@ CASES
     old="$(( $(date +%s) - 60 ))" new="$(date +%s)"
     export D="${d}" Z1="${z1}" FAULT="${BATS_TEST_NAME}"
     generate_secret_value PDNS_API_KEY hex32 > "${DS}/pdns-api-key"
-    _reset_curl_stub
+    _curl_stub
     _setup_sh_run 'canonical_dns_zone "${Z1%.}"; canonical_dns_zone "${Z1}"'
     [ "${output}" = "$(printf '%s\n%s' "${z1}" "${z1}")" ] || { echo "canonical: ${output}"; return 1; }
     _listener() {
@@ -10788,7 +10897,7 @@ CASES
     _prod_install "${D}"
     generate_secret_value PDNS_API_KEY hex32 > "${DS}/pdns-api-key"
     printf '{"zones":{}}' > "${DS}/listener-snapshots"
-    _reset_curl_stub
+    _curl_stub
     _setup_sh_run 'PATH="${BIN}:${PATH}"; cmd_reset_to_last_known_good_config dns "${D}"'
     [ "${status}" -eq 1 ] && [[ "${output}" == *"A zone is required"* ]] || { echo "dns route: ${output}"; return 1; }
     _setup_sh_run 'PATH="${BIN}:${PATH}"; cmd_reset_to_last_known_good_config "x'"${BATS_TEST_NUMBER}"'" "${D}"'
