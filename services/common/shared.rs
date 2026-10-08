@@ -7,10 +7,48 @@
 
 pub mod config;
 
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+
+// What: health of one service in watchdog's status.json.
+// Why: watchdog writes it and the ui reads it; one schema.
+// From: Issue #870
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceHealth {
+    // What: color: green, yellow, amber or red.
+    // Why: the ui passes it through, never re-derives it.
+    pub status: String,
+    // What: raw health string shown as detail.
+    // Why: shown as detail next to the color.
+    pub health: String,
+    pub failures: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskHealth {
+    pub pct: u32,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskInfo {
+    pub cache: DiskHealth,
+}
+
+// What: the whole status.json document.
+// Why: a map; its keys show whether SSL mode is off.
+// From: Issue #870
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchdogStatus {
+    pub updated: String,
+    pub services: HashMap<String, ServiceHealth>,
+    pub disk: DiskInfo,
+}
 
 // What: true for empty or a checked-in secret placeholder.
 // Why: a public example value must never act as a secret.
@@ -60,6 +98,19 @@ pub fn load_or_create_hex_secret<const N: usize>(path: &str) -> anyhow::Result<[
         }
         Err(err) => Err(err.into()),
     }
+}
+
+// What: write via <path>.tmp, then rename into place.
+// Why: a reader must never see a half-written file.
+pub fn write_file_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    fs::write(&tmp, contents)?;
+    fs::rename(&tmp, path)
 }
 
 #[cfg(test)]

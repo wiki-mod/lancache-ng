@@ -613,7 +613,7 @@ fn require_kea_mode(state: &AppState) -> Result<(), DhcpError> {
 // URL configured yet (e.g. right after switching modes, before the operator
 // has filled in dhcp_api_url), and that half-configured state must still be
 // treated as "Kea not available" everywhere in this file.
-fn kea_api_available(mode: crate::config::DhcpMode, api_url: &str) -> bool {
+fn kea_api_available(mode: lancache_common::config::DhcpMode, api_url: &str) -> bool {
     mode.is_kea() && !api_url.is_empty()
 }
 
@@ -622,12 +622,12 @@ fn kea_api_available(mode: crate::config::DhcpMode, api_url: &str) -> bool {
 // defaulting to one of the three modes, so update_dhcp_mode can reject a bad
 // submission with a clear error instead of silently switching to an
 // unintended mode.
-fn parse_dhcp_mode_input(value: &str) -> Option<crate::config::DhcpMode> {
+fn parse_dhcp_mode_input(value: &str) -> Option<lancache_common::config::DhcpMode> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "disabled" => Some(crate::config::DhcpMode::Disabled),
-        "kea" => Some(crate::config::DhcpMode::Kea),
-        "dnsmasq-proxy" => Some(crate::config::DhcpMode::DnsmasqProxy),
-        "dnsmasq-relay" => Some(crate::config::DhcpMode::DnsmasqRelay),
+        "disabled" => Some(lancache_common::config::DhcpMode::Disabled),
+        "kea" => Some(lancache_common::config::DhcpMode::Kea),
+        "dnsmasq-proxy" => Some(lancache_common::config::DhcpMode::DnsmasqProxy),
+        "dnsmasq-relay" => Some(lancache_common::config::DhcpMode::DnsmasqRelay),
         _ => None,
     }
 }
@@ -670,11 +670,11 @@ fn start_service_error(err: anyhow::Error, service_name: &str, profile: &str) ->
 // From: Issue #1486
 async fn reconcile_dhcp_mode_stop(
     state: &AppState,
-    mode: crate::config::DhcpMode,
-    previous_mode: crate::config::DhcpMode,
+    mode: lancache_common::config::DhcpMode,
+    previous_mode: lancache_common::config::DhcpMode,
 ) -> Result<(), DhcpError> {
     match mode {
-        crate::config::DhcpMode::Disabled => {
+        lancache_common::config::DhcpMode::Disabled => {
             docker_client::stop_service_if_present(&state.docker, "dhcp")
                 .await
                 .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
@@ -682,12 +682,13 @@ async fn reconcile_dhcp_mode_stop(
                 .await
                 .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
         }
-        crate::config::DhcpMode::Kea => {
+        lancache_common::config::DhcpMode::Kea => {
             docker_client::stop_service_if_present(&state.docker, "dhcp-proxy")
                 .await
                 .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
         }
-        crate::config::DhcpMode::DnsmasqProxy | crate::config::DhcpMode::DnsmasqRelay => {
+        lancache_common::config::DhcpMode::DnsmasqProxy
+        | lancache_common::config::DhcpMode::DnsmasqRelay => {
             docker_client::stop_service_if_present(&state.docker, "dhcp")
                 .await
                 .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
@@ -718,16 +719,17 @@ async fn reconcile_dhcp_mode_stop(
 // From: Issue #1486
 async fn reconcile_dhcp_mode_start(
     state: &AppState,
-    mode: crate::config::DhcpMode,
+    mode: lancache_common::config::DhcpMode,
 ) -> Result<(), DhcpError> {
     match mode {
-        crate::config::DhcpMode::Disabled => {}
-        crate::config::DhcpMode::Kea => {
+        lancache_common::config::DhcpMode::Disabled => {}
+        lancache_common::config::DhcpMode::Kea => {
             docker_client::start_service(&state.docker, "dhcp")
                 .await
                 .map_err(|err| start_service_error(err, "dhcp", "dhcp-kea"))?;
         }
-        crate::config::DhcpMode::DnsmasqProxy | crate::config::DhcpMode::DnsmasqRelay => {
+        lancache_common::config::DhcpMode::DnsmasqProxy
+        | lancache_common::config::DhcpMode::DnsmasqRelay => {
             docker_client::start_service(&state.docker, "dhcp-proxy")
                 .await
                 .map_err(|err| start_service_error(err, "dhcp-proxy", "dhcp-proxy"))?;
@@ -5240,16 +5242,19 @@ mod tests {
     #[test]
     fn kea_mutation_guard_requires_kea_mode_and_api_url() {
         assert!(kea_api_available(
-            crate::config::DhcpMode::Kea,
-            "http://dhcp:8000"
-        ));
-        assert!(!kea_api_available(crate::config::DhcpMode::Kea, ""));
-        assert!(!kea_api_available(
-            crate::config::DhcpMode::Disabled,
+            lancache_common::config::DhcpMode::Kea,
             "http://dhcp:8000"
         ));
         assert!(!kea_api_available(
-            crate::config::DhcpMode::DnsmasqProxy,
+            lancache_common::config::DhcpMode::Kea,
+            ""
+        ));
+        assert!(!kea_api_available(
+            lancache_common::config::DhcpMode::Disabled,
+            "http://dhcp:8000"
+        ));
+        assert!(!kea_api_available(
+            lancache_common::config::DhcpMode::DnsmasqProxy,
             "http://dhcp:8000"
         ));
     }
@@ -5260,7 +5265,7 @@ mod tests {
     // coerced to a default mode the operator never chose.
     #[test]
     fn parse_dhcp_mode_input_round_trips_supported_modes() {
-        use crate::config::DhcpMode;
+        use lancache_common::config::DhcpMode;
         // The mode-switch form is the only writer of DHCP_MODE from the UI, so
         // every supported value must parse back to its enum, and unknown input
         // must be rejected rather than silently coerced to a default.
@@ -5294,7 +5299,7 @@ mod tests {
     // the wrong container.
     #[test]
     fn dhcp_mode_relay_classification_helpers() {
-        use crate::config::DhcpMode;
+        use lancache_common::config::DhcpMode;
         assert!(DhcpMode::DnsmasqRelay.is_dnsmasq());
         assert!(DhcpMode::DnsmasqProxy.is_dnsmasq());
         assert!(!DhcpMode::Kea.is_dnsmasq());

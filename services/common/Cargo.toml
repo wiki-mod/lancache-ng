@@ -22,3 +22,4 @@ path = "shared.rs"
 anyhow = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
+serde = { workspace = true }

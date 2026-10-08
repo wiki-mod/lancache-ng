@@ -6,45 +6,14 @@
 //! Why: any read failure is Unavailable, never healthy.
 //! From: Issue #870
 
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use lancache_common::WatchdogStatus;
+use serde::Serialize;
 use std::fs;
 use std::time::{Duration, SystemTime};
 
 // What: status.json older than this reads as Stale.
 // Why: 3x the 30s CHECK_INTERVAL; mtime needs no parse.
 const STALE_AFTER: Duration = Duration::from_secs(90);
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct ServiceHealth {
-    // What: watchdog's color: green, yellow or red.
-    // Why: watchdog owns the mapping; no second copy here.
-    pub status: String,
-    // Raw Docker health string ("healthy"/"unhealthy"/"starting"/"none"/
-    // "unreachable") -- shown as a tooltip/detail, not the color itself.
-    pub health: String,
-    pub failures: u32,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct DiskHealth {
-    pub pct: u32,
-    pub status: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct DiskInfo {
-    pub cache: DiskHealth,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct WatchdogStatus {
-    pub updated: String,
-    // What: map, not fixed fields; the key set varies.
-    // Why: watchdog omits dns-ssl when SSL mode is off.
-    pub services: HashMap<String, ServiceHealth>,
-    pub disk: DiskInfo,
-}
 
 // Three-way outcome the dashboard renders distinctly (see templates/
 // dashboard.html): a missing/unparseable file is a different situation from

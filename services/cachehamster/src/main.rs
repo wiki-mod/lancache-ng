@@ -190,7 +190,7 @@ fn resolve_steam_credential(
             let master_secret =
                 load_or_create_hex_secret::<MASTER_SECRET_LEN>(&master_secret_path)?;
 
-            // What: an env credential replaces the stored one.
+            // What: env credential replaces the stored one.
             // Why: an operator-set real value wins.
             // From: Issue #871
             if let Some(plaintext) = env_credential {

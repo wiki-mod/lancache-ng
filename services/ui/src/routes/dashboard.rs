@@ -3,12 +3,11 @@
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //! Main dashboard route displaying cache statistics and connection metrics.
 
-use crate::{
-    AppState, config::DhcpMode, netdata_alarms, nginx_client, syslog_client, watchdog_status,
-};
+use crate::{AppState, netdata_alarms, nginx_client, syslog_client, watchdog_status};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Json};
+use lancache_common::config::DhcpMode;
 use serde_json::json;
 use std::sync::Arc;
 use tera::Context;
@@ -367,21 +366,21 @@ mod tests {
         assert_eq!(hosts, vec!["middle", "newest"]);
     }
 
-    fn sample_status() -> watchdog_status::WatchdogStatus {
+    fn sample_status() -> lancache_common::WatchdogStatus {
         let mut services = HashMap::new();
         services.insert(
             "lancache-proxy".to_string(),
-            watchdog_status::ServiceHealth {
+            lancache_common::ServiceHealth {
                 status: "green".to_string(),
                 health: "healthy".to_string(),
                 failures: 0,
             },
         );
-        watchdog_status::WatchdogStatus {
+        lancache_common::WatchdogStatus {
             updated: "2026-07-22T00:00:00Z".to_string(),
             services,
-            disk: watchdog_status::DiskInfo {
-                cache: watchdog_status::DiskHealth {
+            disk: lancache_common::DiskInfo {
+                cache: lancache_common::DiskHealth {
                     pct: 10,
                     status: "green".to_string(),
                 },

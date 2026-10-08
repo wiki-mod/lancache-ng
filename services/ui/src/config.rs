@@ -5,7 +5,7 @@
 //! What: typed Config from env, secret files and /data.
 //! Why: one owner for every ui and prepare-mode setting.
 
-use lancache_common::config::env_opt;
+use lancache_common::config::{DhcpMode, env_opt, parse_bool};
 use std::env;
 use std::fmt;
 use std::fs;
@@ -29,57 +29,6 @@ pub enum HstsMode {
     Auto,
     Always,
     Never,
-}
-
-// Which DHCP service, if any, this deployment runs -- all mutually exclusive
-// since Kea, DnsmasqProxy, and DnsmasqRelay each bind DHCP port 67/udp (a
-// relay listens on 67 to receive client broadcasts). `Disabled`: no DHCP
-// here, the existing LAN router/DHCP server is untouched. `Kea`: full DHCP
-// server (isc-kea), this deployment owns leases/reservations for the LAN.
-// `DnsmasqProxy`: a proxy-DHCP helper that runs *alongside* an existing DHCP
-// server and only answers PXE/network-boot clients -- it does not lease
-// addresses or reliably replace DNS options for ordinary clients.
-// `DnsmasqRelay` (issue #844): a real DHCP relay that forwards every client's
-// DHCP request to an upstream DHCP server (which owns the whole lease) --
-// distinct from DnsmasqProxy and never combined with it. Both dnsmasq modes
-// run in the same `dhcp-proxy` container, which renders one config or the
-// other from DHCP_MODE (see services/dhcp-proxy/entrypoint.sh and
-// docs/dhcp-modes.md).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DhcpMode {
-    Disabled,
-    Kea,
-    DnsmasqProxy,
-    DnsmasqRelay,
-}
-
-impl DhcpMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Disabled => "disabled",
-            Self::Kea => "kea",
-            Self::DnsmasqProxy => "dnsmasq-proxy",
-            Self::DnsmasqRelay => "dnsmasq-relay",
-        }
-    }
-
-    pub fn is_kea(self) -> bool {
-        matches!(self, Self::Kea)
-    }
-
-    // True for either dnsmasq-backed mode (proxy or relay). Both run in the
-    // same `dhcp-proxy` container and share its config/UI surface, so callers
-    // that gate "is the dnsmasq DHCP container this deployment's DHCP" use
-    // this rather than testing the two variants separately.
-    pub fn is_dnsmasq(self) -> bool {
-        matches!(self, Self::DnsmasqProxy | Self::DnsmasqRelay)
-    }
-
-    // True only for the relay sub-mode (issue #844) -- used to render the
-    // relay-specific Admin UI panel and settings.
-    pub fn is_dnsmasq_relay(self) -> bool {
-        matches!(self, Self::DnsmasqRelay)
-    }
 }
 
 impl HstsMode {
@@ -1279,44 +1228,26 @@ fn env_usize_clamped(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-// What: 1/true/yes/on or 0/false/no/off, trimmed, any case.
-// Why: retention.sh's is_truthy uses the same set.
+// What: a boolean env var; junk or unset gives the default.
+// Why: the grammar is shared with watchdog (parse_bool).
 fn env_bool(key: &str, default: bool) -> bool {
     env::var(key)
         .ok()
-        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => Some(true),
-            "0" | "false" | "no" | "off" => Some(false),
-            _ => None,
-        })
+        .and_then(|value| parse_bool(&value))
         .unwrap_or(default)
 }
 
-// DHCP_MODE (kea/dnsmasq-proxy/disabled) is the current setting. DHCP_ENABLED
-// is the older boolean flag from before Kea and dnsmasq-proxy were separate
-// choices; `legacy_enabled` is only honored when DHCP_MODE is unset (empty),
-// so an explicit DHCP_MODE always wins and old installs that never set
-// DHCP_MODE keep working (DHCP_ENABLED=true implied Kea, the only mode that
-// existed at the time). `read_dhcp_mode_override` (the persisted Admin-UI
-// value) never had a legacy boolean, so it always passes `false` here.
-fn parse_dhcp_mode(raw: &str, legacy_enabled: bool) -> DhcpMode {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "kea" => DhcpMode::Kea,
-        "dnsmasq-proxy" => DhcpMode::DnsmasqProxy,
-        "dnsmasq-relay" => DhcpMode::DnsmasqRelay,
-        "disabled" => DhcpMode::Disabled,
-        "" if legacy_enabled => DhcpMode::Kea,
-        _ => DhcpMode::Disabled,
-    }
-}
-
+// What: DHCP_MODE; empty falls back to the legacy DHCP_ENABLED.
+// Why: an explicit DHCP_MODE always wins; old installs keep Kea.
+// From: Issue #844
 fn env_dhcp_mode(key: &str, legacy_enabled: bool) -> DhcpMode {
-    let raw = env::var(key).unwrap_or_default();
-    parse_dhcp_mode(&raw, legacy_enabled)
+    DhcpMode::parse(&env::var(key).unwrap_or_default(), legacy_enabled)
 }
 
+// What: the DHCP_MODE the Admin UI persisted, if any.
+// Why: it has no legacy flag, so the fallback is always off.
 fn read_dhcp_mode_override(path: &str) -> Option<DhcpMode> {
-    read_ui_override(path, "DHCP_MODE").map(|value| parse_dhcp_mode(&value, false))
+    read_ui_override(path, "DHCP_MODE").map(|value| DhcpMode::parse(&value, false))
 }
 
 // Reads a single `KEY=value` line from the Admin UI's persisted settings

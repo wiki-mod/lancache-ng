@@ -3,24 +3,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 # What: manifest of the lancache-watchdog health daemon.
-# Why: health state machine, status.json and disk probe.
+# Why: single binary crate; src/main.rs is the only source.
 # From: Issue #1683 | PR #1858
 [package]
 name = "lancache-watchdog"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-
-# What: lib target exposing the pure modules to unit tests.
-# Why: removed when the watchdog source becomes one main.rs.
-# From: Issue #1683 | PR #1858
-[lib]
-name = "lancache_watchdog"
-path = "src/lib.rs"
-
-[[bin]]
-name = "lancache-watchdog"
-path = "src/main.rs"
 
 [dependencies]
 lancache-common = { path = "../common" }
