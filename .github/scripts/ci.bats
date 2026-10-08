@@ -4085,37 +4085,56 @@ CASES
     [[ "${output}" == *"CI-ERROR-VALIDATE-0050"* ]]
 }
 
+# What: _ci_validate_net_override per compose network set
+# Why: the /27 splits without overlap; ports, names reset
+# From: Issue #1683 | PR #1858
 @test "validate net override isolates and resets services" {
-    # What: Override splits the /27, resets ports and names.
-    # Why: No auto /16 pool, no port or name collisions.
+    local case nets rc want count slot lo hi sub a b i j
+    local -a subs starts ends ns
+    local -A V=([@S@]="$(_val name)" [@H@]="$(_val name)")
+    # What: three network names in jq's key order
+    # Why: the override lists networks by sorted key
     # From: Issue #1683 | PR #1858
-    local name nets want w
-    local -a ws
-    while IFS='|' read -r name nets want; do
-        CI_COMPOSE_CONFIG_CMD="$(_stub "printf '%s' '{\"services\":{\"proxy\":{},\"dhcp\":{\"network_mode\":\"host\"}},\"networks\":{${nets}}}'")" \
-            run _ci_validate_net_override 172.16.1.32/27
-        IFS=';' read -r -a ws <<<"${want}"
-        for w in "${ws[@]}"; do
-            case "${w}" in
-                rc=*) [ "${status}" -eq "${w#rc=}" ] ;;
-                !*) [[ "${output}" != *"${w#!}"* ]] ;;
-                *) [[ "${output}" == *"${w}"* ]] ;;
-            esac || { echo "${name}: '${w}': rc ${status}: ${output}"; return 1; }
+    mapfile -t ns < <(printf '%s\n' "$(_val name)" "$(_val name)" "$(_val name)" | LC_ALL=C sort)
+    V[@N1@]="${ns[0]}" V[@N2@]="${ns[1]}" V[@N3@]="${ns[2]}"
+    slot="$(_ci_validate_subnet "$(_val name)")" || return 1
+    lo="$(_ci_ipv4_to_int "${slot%/*}")" hi=$(( $(_ci_ipv4_to_int "${slot%/*}") + (1 << (32 - ${slot#*/})) ))
+    while IFS='|' read -r case nets rc want count; do
+        rm -f "${DS}/answers" "${DS}"/answer-used-*
+        _docker_answer ' compose * config --profiles *' 0
+        _docker_answer ' compose -f * config --format json ' 0 \
+            "$(_fill "{\"services\":{\"@S@\":{},\"@H@\":{\"network_mode\":\"host\"}},\"networks\":{${nets}}}")"
+        run _ci_validate_net_override "${slot}"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+        [ "${rc}" -eq 0 ] || continue
+        # What: /28 then /29s, all in the slot, disjoint
+        # Why: range checks, not a copy of the split math
+        # From: Issue #1683 | PR #1858
+        mapfile -t subs < <(sed -n 's/^ *- subnet: //p' <<< "${output}")
+        starts=() ends=()
+        [ "${#subs[@]}" -eq "${count}" ] || { echo "${case}: subnets ${subs[*]}"; return 1; }
+        for (( i = 0; i < ${#subs[@]}; i++ )); do
+            sub="${subs[i]}"
+            [ "${sub#*/}" -eq "$([ "${i}" -eq 0 ] && echo 28 || echo 29)" ] || { echo "${case}: prefix ${sub}"; return 1; }
+            a="$(_ci_ipv4_to_int "${sub%/*}")" b=$(( $(_ci_ipv4_to_int "${sub%/*}") + (1 << (32 - ${sub#*/})) ))
+            (( a >= lo && b <= hi )) || { echo "${case}: ${sub} outside ${slot}"; return 1; }
+            for (( j = 0; j < ${#starts[@]}; j++ )); do
+                (( b <= starts[j] || a >= ends[j] )) || { echo "${case}: ${sub} overlaps ${subs[j]}"; return 1; }
+            done
+            starts+=("${a}") ends+=("${b}")
         done
+        # What: network_mode reset for host-mode only
+        # Why: a probe may run it in the /27; up never does
+        # From: Issue #763 | PR #1858
+        [[ "${output}" == *$'  '"${V[@H@]}"$':\n    network_mode: !reset null'* ]] \
+            && [ "$(grep -c 'network_mode' <<< "${output}")" -eq 1 ] \
+            && [[ "${output}" != *$'  '"${V[@H@]}"$':\n    container_name'* ]] \
+            || { echo "${case}: host-mode reset: ${output}"; return 1; }
     done <<'CASES'
-default-only|"default":{}|rc=0;default:;subnet: 172.16.1.32/28;proxy:;container_name: !reset null;ports: !reset [];!/29
-two-extra|"default":{},"a":{},"b":{"internal":true}|rc=0;subnet: 172.16.1.32/28;a:;subnet: 172.16.1.48/29;b:;subnet: 172.16.1.56/29
-three-extra|"a":{},"b":{},"c":{}|rc=2;CI-ERROR-VALIDATE-0068;network="c"
+default-only|"default":{}|0|networks:;default:;services:;@S@:;container_name: !reset null;ports: !reset []|1
+two-extra|"default":{},"@N1@":{},"@N2@":{"internal":true}|0|default:;@N1@:;@N2@:;services:|3
+three-extra|"@N1@":{},"@N2@":{},"@N3@":{}|2|[CI-ERROR-VALIDATE-0068] network="|0
 CASES
-    # What: only host-mode services get network_mode reset.
-    # Why: a probe may run one in the /27; up never does.
-    # From: Issue #763 | PR #1858
-    CI_COMPOSE_CONFIG_CMD="$(_stub "printf '%s' '{\"services\":{\"proxy\":{},\"dhcp\":{\"network_mode\":\"host\"}},\"networks\":{\"default\":{}}}'")" \
-        run _ci_validate_net_override 172.16.1.32/27
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *$'  dhcp:\n    network_mode: !reset null'* ]]
-    [ "$(grep -c 'network_mode' <<< "${output}")" -eq 1 ]
-    [[ "${output}" != *$'  dhcp:\n    container_name'* ]]
 }
 
 # What: per row: inspect answer -> rc and output
@@ -9706,6 +9725,32 @@ _cas_setup() {
     git -C "${CAS_A}" commit --quiet --allow-empty -m "$(_val name)"
     git -C "${CAS_A}" push --quiet origin "HEAD:${head}"
     git clone --quiet "${CAS_BARE}" "${CAS_B}"
+}
+
+# What: a fresh empty ledger ref on the CAS bare repo
+# Why: each row starts from no record; nothing carries over
+# From: Issue #1683 | PR #1858
+_ledger_fresh() {
+    CI_GIT_REMOTE=origin CI_LEDGER_REF="refs/$(_val name)/$(_val name)" CI_LEDGER_FILE="$(_val name)"
+    export CI_GIT_REMOTE CI_LEDGER_REF CI_LEDGER_FILE
+}
+
+# What: one artifact state as ledger record + registry answer
+# Why: the real resolver reads both; no state is injected
+# From: Issue #1683 | PR #1858
+_artifact() {
+    local state="$1" svc="$2" plat="$3" dig="$4" id tag
+    id="$(_ci_identity_for "${svc}" "${plat}")" && tag="$(_ci_image_tag "${svc}" "${plat}" "${id}")" || return 1
+    case "${state}" in
+        PRESENT_ACCEPTED|MISMATCH) _ci_ledger_append origin "${id}" "${svc}" "${plat}" ACCEPTED "${dig}" > /dev/null || return 1 ;;
+    esac
+    case "${state}" in
+        PRESENT_ACCEPTED|PRODUCED_UNVERIFIED) _docker_answer " buildx imagetools inspect ${tag} --format *" 0 "${dig}" ;;
+        MISMATCH) _docker_answer " buildx imagetools inspect ${tag} --format *" 0 "$(_val digest)" ;;
+        MISSING_CONFIRMED) _docker_answer " buildx imagetools inspect ${tag} --format *" 1 '' "ERROR: ${tag}: not found" ;;
+        UNKNOWN) _docker_answer " buildx imagetools inspect ${tag} --format *" 1 '' "denied: $(_val name)" ;;
+        *) echo "_artifact: unknown state ${state}" >&2; return 1 ;;
+    esac
 }
 
 # What: CAS lock life cycle on two real git hosts.
