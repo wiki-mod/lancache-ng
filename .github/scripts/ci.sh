@@ -5903,10 +5903,6 @@ _ci_validate_project() {
 # Why: One source; every service list derives from it.
 # From: Issue #1683
 _ci_validate_config_json() {
-    if [ -n "${CI_COMPOSE_CONFIG_CMD:-}" ]; then
-        "${CI_COMPOSE_CONFIG_CMD}"
-        return "$?"
-    fi
     local file flags
     file="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     local -a pf=()
