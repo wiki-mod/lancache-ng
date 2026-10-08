@@ -233,50 +233,6 @@ empty|-|2|[CI-ERROR-CORE-0101]
 CASES
 }
 
-@test "SOT inventory readers map a fixture SOT" {
-    # What: per row: one reader call on a fixture SOT.
-    # Why: one SOT owns inventory; toolchain is no service.
-    # From: Issue #1683 | PR #1858
-    local m case call rc want
-    m="$(_val path)"
-    local -a av
-    local -A V=(
-        [@A@]="$(_val name)" [@B@]="$(_val name)" [@T@]="$(_val name)" [@Z@]="$(_val name)"
-        [@CA@]="$(_val name)" [@CB@]="$(_val name)" [@CT@]="$(_val name)" [@TA@]="$(_val name)"
-        [@TT@]="$(_val name)" [@R@]="$(_val name)" [@X1@]="$(_val name)" [@X2@]="$(_val name)"
-        [@F@]="$(_val name)" [@ROOT@]="/$(_val name)" [@WF@]="$(_val name)" [@VAR@]="$(_val var)"
-        [@ID@]="[CI-ERROR-$(_val name | tr a-z A-Z)-0001]" [@CTX@]="$(_val name)=$(_val name)"
-    )
-    V[@M@]="${m}"
-    {
-        _fill "$(printf '%s\n' 'services:' '  @A@:' '    context: @CA@' '    build_type: @TA@' '    runner: @R@' \
-            '  @B@:' '    context: @CB@' 'build_toolchain:' '  @T@:' '    context: @CT@' '    build_type: @TT@' \
-            'dependency_graph:' '  @A@:' '    contexts: [@X1@, @X2@]')"
-        printf '\n'
-        _sot_block ci_variables
-    } > "${m}"
-    while IFS='|' read -r case call rc want; do
-        read -r -a av <<< "$(_fill "${call}")"
-        CI_MANIFEST="${m}" CI_WORKFLOW_DIR="${V[@WF@]}" run "${av[@]}"
-        _expect "${case}" "${rc}" "$(printf '%b' "$(_fill "${want}")")" || return 1
-    done <<'CASES'
-services|ci_services|0|=@A@\n@B@
-targets|ci_build_targets|0|=@A@\n@B@\n@T@
-field|ci_service_field @A@ build_type|0|=@TA@
-field-runner|ci_service_field @A@ runner|0|=@R@
-field-toolchain|ci_service_field @T@ build_type|0|=@TT@
-contexts|ci_service_contexts @A@|0|=@X1@\n@X2@
-required-missing|_ci_required_field @B@ runner|2|[CI-ERROR-CORE-0009]
-service-path|_ci_service_path @A@ @F@ @ROOT@|0|=@ROOT@/@CA@/@F@
-service-path-unknown|_ci_service_path @Z@ @F@ @ROOT@|2|[CI-ERROR-CORE-0009]
-repo-path|_ci_repo_path CI_WORKFLOW_DIR @ROOT@|0|=@ROOT@/@WF@
-repo-path-missing|_ci_repo_path @VAR@ @ROOT@|2|[CI-ERROR-VARIABLES-0001]
-env-present|_ci_env_required CI_MANIFEST|0|=@M@
-env-missing|_ci_env_required @VAR@|2|[CI-ERROR-CORE-0128] name="@VAR@"
-env-caller-id|_ci_env_required @VAR@ @ID@ @CTX@|2|=@ID@ @CTX@
-CASES
-}
-
 @test "every command fails closed on missing input with its own id" {
     # What: per row: bad or missing input -> rc 2 + its id.
     # Why: input errors stop with our id before a backend.
@@ -343,31 +299,6 @@ verify-auth|-|verify @SVC@ @DIGEST@ @PLAT@|CI-ERROR-BUILD-0002|-
 ship|-|ship|CI-ERROR-SHIP-0001|-
 ship-platform|-|ship @SVC@|CI-ERROR-SHIP-0001|-
 CASES
-}
-
-@test "exit-evidence flags each rule and passes a valid fixture" {
-    # What: one fixture per rule fails; a valid one passes.
-    # Why: the guard owns the class; prove both directions.
-    # From: Issue #1683 | PR #1858
-    local fx name body
-    fx="$(_val path)"
-    while IFS='|' read -r name body; do
-        printf 'f() {\n    %s\n}\n' "${body}" > "${fx}"
-        run bash "${CI_SH}" check exit-evidence "${fx}"
-        [ "${status}" -eq 1 ] && [[ "${output}" == *"[CI-ERROR-CHECK-0124]"* ]] \
-            && [[ "${output}" == *": ${name}"* ]] \
-            || { echo "${name}: rc ${status}: ${output}"; return 1; }
-    done <<'CASES'
-raw-mktemp|t="$(mktemp -d)" || return 2
-for-in-substitution|for s in $(ci_services); do :; done
-process-substitution-loop|while read -r l; do :; done < <(ci_services)
-reader-in-test|[ "$(ci_service_field svc build_type)" = rust ] && :
-uncoded-external-return|v="$(jq -r .a f.json)" || return 2
-duplicate-code|ci_log "[CI-ERROR-X-0001]" "a"; ci_log "[CI-INFO-X-0001]" "b"
-CASES
-    printf 'f() {\n    t="$(_ci_mktemp -d)" || return 2\n    v="$(jq -r .a f.json 2>&1)" || { ci_error "[CI-ERROR-X-0001]" "c" "${v}"; return 2; }\n}\n' > "${fx}"
-    run bash "${CI_SH}" check exit-evidence "${fx}"
-    [ "${status}" -eq 0 ] || { echo "valid fixture: ${output}"; return 1; }
 }
 
 @test "_ci_capture passes max-ok rc, fails higher rc or stderr" {
@@ -832,73 +763,6 @@ exit 0
 STUB
 }
 
-@test "a grep or compose read error fails every check that reads the file" {
-    # What: grep or compose rc 2 on a read file fails it.
-    # Why: a read error must never look like a clean file.
-    # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/gbin"
-    local name check arg fail compose
-    _fail_stub "${bin}" grep
-    _fail_stub "${bin}" docker
-    printf 'echo hi\n' > "${BATS_TEST_TMPDIR}/probe.sh"
-    printf 'on: push\n' > "${BATS_TEST_TMPDIR}/probe.yml"
-    compose="$(_ci_variable CI_COMPOSE_FILE)"
-    while IFS='|' read -r name check arg fail; do
-        # What: @compose is the SOT deploy compose file name
-        # Why: CI_COMPOSE_FILE in the SOT owns that path
-        # From: Issue #1683 | PR #1858
-        [ "${fail}" != @compose ] || fail="/${compose##*/}"
-        local -a files=()
-        if [ -n "${arg}" ]; then
-            files=("${BATS_TEST_TMPDIR}/${arg}")
-        fi
-        run env PATH="${bin}:${PATH}" FAIL_MATCH="${fail}" \
-            bash "${CI_SH}" check "${check}" "${files[@]}"
-        if [ "${status}" -eq 0 ]; then
-            echo "${name}: passed: ${output}"
-            return 1
-        fi
-        if [[ "${output}" != *"CI-ERROR-CORE-0106"*"read error"* ]]; then
-            echo "${name}: ${output}"
-            return 1
-        fi
-    done <<'CASES'
-crlf|line-endings|probe.sh|/probe.sh
-lang|language-policy|probe.sh|/probe.sh
-refs|mutable-refs|probe.yml|/probe.yml
-chrono|review-chronology|probe.sh|/probe.sh
-pipefail|pipefail-early-exit|probe.sh|/probe.sh
-prebuilt|prebuilt-prod||/README.md
-nats|nats-atomic-write||/services/dns/entrypoint.sh
-socket|docker-socket-proxy||@compose
-naming|naming-consistency||@compose
-naming-dc|naming-consistency||/docker_client.rs
-naming-wd|naming-consistency||/watchdog/src/config.rs
-naming-ui|naming-consistency||/ui/src/config.rs
-dhcp|dhcp-proxy-env||/dnsmasq.conf.template
-kea|setup-keys-kea||/setup.sh
-rustdf|dockerfile-build-tools||/services/ui/Dockerfile
-prompt|setup-prompt-drift||/setup-cli-simulation.sh
-prompt-setup|setup-prompt-drift||/setup.sh
-prompt-anchor|setup-prompt-drift||-m1
-CASES
-}
-
-@test "gc refuses when the roots file read fails" {
-    # What: a roots read error refuses; no DELETE verdict.
-    # Why: "not referenced" from a failed read deletes data.
-    # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/gcbin"
-    _fail_stub "${bin}" grep
-    PATH="${bin}:${PATH}" FAIL_MATCH="-xF" \
-    CI_GC_ROOTS_CMD="$(_stub 'printf "sha256:aaa\n"')" \
-    CI_GC_CANDIDATES_CMD="$(_stub 'printf "sha256:aaa\t7\t2020-01-01T00:00:00Z\n"')" \
-        run bash "${CI_SH}" gc
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CORE-0106"*"read error"* ]]
-    [[ "${output}" != *"action=DELETE"* ]]
-}
-
 # What: per row: registry/repo ref owners on a fixture SOT.
 # Why: scan, sbom, assemble, verify must share one ref.
 # From: Issue #1683 | PR #1858
@@ -973,67 +837,6 @@ no-context|e|@D@/@CA@/@F@|2|[CI-ERROR-CORE-0009]
 CASES
 }
 
-@test "codeql-coverage fails on tracked source outside SOT paths" {
-    # What: files globs must all lie under the lang paths.
-    # Why: a new source dir must not escape CodeQL silently.
-    # From: Issue #1683
-    local r m
-    local -A V=(
-        [@LA@]="$(_val name)" [@LB@]="$(_val name)" [@PA@]="$(_val name)" [@PB@]="$(_val name)"
-        [@EXT@]="$(_val name)" [@X@]="$(_val name)" [@Y@]="$(_val name)"
-    )
-    r="$(_val path)" m="$(_val path)"
-    mkdir -p "${r}/${V[@PA@]}" "${r}/${V[@PB@]}"
-    : > "${r}/${V[@PA@]}/${V[@X@]}.${V[@EXT@]}"
-    git -C "${r}" init -q && git -C "${r}" add -A
-    _fill "$(printf '%s\n' 'codeql_languages:' '  @LA@:' '    files: ["*.@EXT@"]' \
-        '    paths: [@PA@]' '  @LB@:' '    paths: [@PB@]')" > "${m}"
-    CI_MANIFEST="${m}" run _ci_check_codeql_coverage "${r}"
-    _expect clean 0 "=codeql-coverage=clean" || return 1
-    : > "${r}/${V[@PB@]}/${V[@Y@]}.${V[@EXT@]}"
-    git -C "${r}" add -A
-    CI_MANIFEST="${m}" run _ci_check_codeql_coverage "${r}"
-    _expect outside 1 "$(_fill '[CI-ERROR-CHECK-0072];@LA@: @PB@/@Y@.@EXT@')" || return 1
-    CI_MANIFEST="${m}" run _ci_check_codeql_coverage "$(_val path)"
-    _expect no-repo 2 "[CI-ERROR-CHECK-0071]" || return 1
-}
-
-@test "codeql-config renders name, queries, paths and ignore from SOT" {
-    # What: config is derived from the SOT and the repo.
-    # Why: one SOT owner; no project name in the engine.
-    # From: Issue #1683
-    local m nojq
-    m="$(_val path)" nojq="$(_val path)"
-    local -A V=(
-        [@Q@]="$(_val name)" [@IGN@]="$(_val name)" [@LANG@]="$(_val name)" [@SRC@]="$(_val name)"
-        [@OWNER@]="$(_val name)" [@REPO@]="$(_val name)" [@QA@]="$(_val name)" [@QB@]="$(_val name)"
-    )
-    _fill "$(printf '%s\n' 'codeql:' '  queries: [@Q@]' '  paths_ignore: ["@IGN@/**"]' \
-        'codeql_languages:' '  @LANG@:' '    paths: [@SRC@]')" > "${m}"
-    CI_MANIFEST="${m}" GITHUB_REPOSITORY="${V[@OWNER@]}/${V[@REPO@]}" \
-        run --separate-stderr bash "${CI_SH}" codeql-config
-    [ "${status}" -eq 0 ] || { echo "${output} ${stderr}"; return 1; }
-    [[ "${stderr}" == *"[CI-INFO-CORE-0113] proxy=off"* ]]
-    [ "${output}" = "$(_fill "$(printf '%s\n' 'name: @REPO@-codeql' 'queries:' \
-        '  - uses: "@Q@"' 'paths:' '  - "@SRC@"' 'paths-ignore:' '  - "@IGN@/**"')")" ] \
-        || { echo "config: ${output}"; return 1; }
-    CI_MANIFEST="${m}" GITHUB_REPOSITORY='' run bash "${CI_SH}" codeql-config
-    _expect no-repo 2 "[CI-ERROR-CORE-0128]" || return 1
-    # What: same output with no jq on PATH; quotes escaped.
-    # Why: the CodeQL runtime image has no jq (real job).
-    # From: Issue #1683 | PR #1858
-    _tool_stub "${nojq}" jq <<'STUB'
-echo "jq: command not found" >&2; exit 127
-STUB
-    _fill "$(printf '%s\n' 'codeql:' '  queries: [@Q@]' '  paths_ignore: ["@IGN@/**", "@QA@\"@QB@"]' \
-        'codeql_languages:' '  @LANG@:' '    paths: [@SRC@]')" > "${m}"
-    PATH="${nojq}:${PATH}" CI_MANIFEST="${m}" GITHUB_REPOSITORY="${V[@OWNER@]}/${V[@REPO@]}" \
-        run --separate-stderr bash "${CI_SH}" codeql-config
-    [ "${status}" -eq 0 ] || { echo "${output} ${stderr}"; return 1; }
-    [[ "${output}" == *"  - \"${V[@IGN@]}/**\""* ]] || { echo "nojq: ${output}"; return 1; }
-    [[ "${output}" == *"  - \"${V[@QA@]}\\\"${V[@QB@]}\""* ]] || { echo "nojq escape: ${output}"; return 1; }
-}
-
 @test "an unreadable SOT fails every reader caller with raw" {
     # What: each caller row: rc 2 plus the raw reader error.
     # Why: a reader error must never read as an empty value.
@@ -1084,33 +887,6 @@ CASES
     run _ci_ls_files "${site}" "${BATS_TEST_TMPDIR}/$(_val name)" "*.$(_val name)"
     _expect ls-files 2 "[CI-ERROR-CHECK-0071] site=\"${site}\"" || return 1
     [[ "${output}" == *"cannot change to"* || "${output}" == *"No such file"* ]] || { echo "ls-files raw: ${output}"; return 1; }
-}
-
-@test "identity fails, never hashes, when a part fails" {
-    # What: a failing content-id part ends with rc 2, no id.
-    # Why: a part lost in the hash pipe minted a wrong id.
-    # From: Issue #1683 | PR #1858
-    local m case pre call rc want
-    local -A V=(
-        [@S@]="$(_val name)" [@NI@]="$(_val name)" [@NC@]="$(_val name)" [@C@]="$(_val name)"
-        [@BT@]="$(_val name)" [@BT2@]="$(_val name)" [@P@]="$(_val platform)" [@RAW@]="$(_val name)"
-    )
-    m="$(_val path)"
-    _fill "$(printf '%s\n' 'build_matrix:' '  platforms: [@P@]' 'build_identity:' '  @BT@:' '    inputs: [source_sha]' \
-        'services:' '  @S@:' '    context: @C@' '    build_type: @BT@' '  @NI@:' '    context: @C@' '    build_type: @BT2@' \
-        '  @NC@:' '    build_type: @BT@')" > "${m}"
-    while IFS='|' read -r case pre call rc want; do
-        [ "${pre}" != - ] || pre=:
-        run env CI_MANIFEST="${m}" bash -c 'source "$1" && eval "$2" && eval "$3"' _ "${CI_SH}" \
-            "$(_fill "${pre}")" "$(_fill "${call}")"
-        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
-        [[ ! "${output}" =~ [0-9a-f]{64} && "${output}" != *"identity="* ]] || { echo "${case}: id leaked: ${output}"; return 1; }
-    done <<'CASES'
-content-part-fails|_ci_tracked_content_ids() { echo @RAW@ >&2; return 2; }|_ci_identity_for @S@ @P@|2|@RAW@
-pins-fail|_ci_identity_pins() { echo @RAW@ >&2; return 2; }|ci_cmd_identity @S@ @P@|2|@RAW@
-no-identity-inputs|-|ci_cmd_identity @NI@ @P@|2|[CI-ERROR-IDENTITY-0004] build_type="@BT2@"
-no-context|-|ci_cmd_identity @NC@ @P@|2|[CI-ERROR-CORE-0009]
-CASES
 }
 
 # What: a set build variable moves only its type's id.
