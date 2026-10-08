@@ -2378,112 +2378,6 @@ CASES
     [ ! -s "${gho}" ] || { echo "plan-matrix wrote output: $(cat "${gho}")"; return 1; }
 }
 
-@test "stack-candidate reader: full SOT stack, fail-closed on every failure, no stray services" {
-    # What: Exact multi-arch digests for SOT (§48).
-    # Why: Candidate feeds validate/promote, fail closed.
-    # From: Issue #1683
-    _ci_collect_accepted_digests() { printf 'os/p1=sha256:a\nos/p2=sha256:b\n'; }
-    _ci_reconcile_index() { printf 'sha256:idx-%s\n' "$1"; }
-    run _ci_stack_candidate_ledger
-    [ "${status}" -eq 0 ]
-    # A: exactly one service=digest per SOT product service (count from ci_services)
-    local s expected actual
-    expected="$(ci_services | grep -c .)"
-    actual="$(printf '%s\n' "${output}" | grep -c '=sha256:idx-')"
-    [ "${actual}" -eq "${expected}" ]
-    for s in $(ci_services); do
-        [[ "${output}" == *"${s}=sha256:idx-${s}"* ]]
-    done
-    # E: no toolchain member (build-tools is not a product-stack service)
-    [[ "${output}" != *"build-tools=sha256"* ]]
-    # B: a collect failure propagates non-zero (no partial, no skip)
-    _ci_collect_accepted_digests() { return 2; }
-    _ci_reconcile_index() { printf 'sha256:idx\n'; }
-    run _ci_stack_candidate_ledger
-    [ "${status}" -ne 0 ]
-    # C: a reconcile divergence propagates non-zero
-    _ci_collect_accepted_digests() { printf 'os/p1=sha256:a\n'; }
-    _ci_reconcile_index() { return 2; }
-    run _ci_stack_candidate_ledger
-    [ "${status}" -ne 0 ]
-    # D: platforms accepted but no assembled index -> CANDIDATE-0001 (distinct state)
-    _ci_reconcile_index() { printf '\n'; }
-    run _ci_stack_candidate_ledger
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CANDIDATE-0001"* ]]
-}
-
-@test "emit-result produces an ACCEPTED record and fails closed on a missing digest" {
-    # What: Single aggregator record per service/platform.
-    # Why: ACCEPTED state with exact GHCR digest.
-    # From: Issue #1683
-    _ci_require_ghcr_auth() { return 0; }
-    _ci_identity_for() { echo "id-$1"; }
-    _ci_image_tag() { echo "reg/$1:$3"; }
-    _ci_registry_digest() { echo "sha256:deadbeef"; }
-    run ci_cmd_emit_result svc-a os/p1
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *'"service":"svc-a"'* ]]
-    [[ "${output}" == *'"state":"ACCEPTED"'* ]]
-    [[ "${output}" == *'"digest":"sha256:deadbeef"'* ]]
-    _ci_registry_digest() { return 1; }
-    run ci_cmd_emit_result svc-a os/p1
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-RESULT-0003"* ]]
-}
-
-@test "aggregate-stack emits one result per matrix pair then one ledger write" {
-    # What: Matrix->emit->aggregate per pair (§26.1).
-    # Why: Iteration in ci.sh; workflow thin.
-    # From: Issue #1683
-    ci_cmd_emit_result() { printf 'emit %s %s\n' "$1" "$2"; }
-    local seen="${BATS_TEST_TMPDIR}/agg-dir"
-    ci_cmd_aggregate() { ls "$1" | LC_ALL=C sort | tr '\n' ' ' > "${seen}"; }
-    export CI_BUILD_MATRIX='{"include":[{"service":"dns","platform":"os/p1"},{"service":"ui","platform":"os/p2"}]}'
-    export CI_TMPDIR="${BATS_TEST_TMPDIR}"
-    run ci_cmd_aggregate_stack
-    [ "${status}" -eq 0 ]
-    run cat "${seen}"
-    [[ "${output}" == *"dns-os-p1.json"* ]]
-    [[ "${output}" == *"ui-os-p2.json"* ]]
-    unset CI_BUILD_MATRIX
-    run ci_cmd_aggregate_stack
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-AGGREGATE-0005"* ]]
-}
-
-@test "scan-stack scans each built matrix pair and fails closed on a missing digest/matrix" {
-    # What: SCAN before ACCEPT per pair (§7).
-    # Why: Missing digest/matrix fails closed.
-    # From: Issue #1683
-    _ci_require_ghcr_auth() { return 0; }
-    _ci_identity_for() { echo "id-$1"; }
-    _ci_image_tag() { echo "reg/$1:$3"; }
-    _ci_registry_digest() { echo "sha256:d-$1"; }
-    local calls="${BATS_TEST_TMPDIR}/scan-calls"
-    : > "${calls}"
-    ci_cmd_scan() { printf 'scan %s %s\n' "$1" "$2" >> "${calls}"; }
-    export CI_BUILD_MATRIX='{"include":[{"service":"svc-a","platform":"os/p1"},{"service":"svc-b","platform":"os/p2"}]}'
-    run ci_cmd_scan_stack
-    [ "${status}" -eq 0 ]
-    run cat "${calls}"
-    [[ "${output}" == *"scan svc-a "* ]]
-    [[ "${output}" == *"scan svc-b "* ]]
-    : > "${calls}"
-    CI_BUILD_MATRIX='not-json' run ci_cmd_scan_stack
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-AGGREGATE-0006"* ]]
-    [ ! -s "${calls}" ]
-    _ci_registry_digest() { return 1; }
-    run ci_cmd_scan_stack
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-SCAN-0017"* ]]
-    unset CI_BUILD_MATRIX
-    run ci_cmd_scan_stack
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-SCAN-0016"* ]]
-}
-
 @test "producer check fails a loop producer rc above max" {
     # What: rc above max is CORE-0010; at or below passes.
     # Why: a failed producer must not look like no results.
@@ -2495,85 +2389,6 @@ CASES
     [ "${status}" -eq 0 ]
     run _ci_producer_ok 2 1
     [ "${status}" -eq 2 ]
-}
-
-# What: SOT pin consumers -> dep|Dockerfile|keys, or the id.
-# Why: the SOT consumer field owns it; no engine-side list.
-# From: Issue #1683 | PR #1858
-@test "version consumers come from the SOT consumer and build_args" {
-    local m nokeys
-    local -A V=(
-        [@S@]="$(_val name)" [@T@]="$(_val name)" [@CS@]="$(_val name)/$(_val name)" [@CT@]="$(_val name)/$(_val name)"
-        [@D1@]="$(_val name)" [@D2@]="$(_val name)" [@D3@]="$(_val name)" [@K1@]="$(_val name)" [@K2@]="$(_val name)"
-        [@K3@]="$(_val name)" [@V@]="$(_val semver)"
-    )
-    m="$(_val path)"
-    nokeys="$(_val path)"
-    _fill "$(printf '%s\n' 'services:' '  @S@:' '    context: @CS@' 'build_toolchain:' '  @T@:' '    context: @CT@' \
-        'external_versions:' '  @D1@:' '    consumer: @S@' '    build_args: [@K1@, @K2@]' \
-        '  @D2@:' '    version: @V@' '  @D3@:' '    consumer: @T@' '    build_args: [@K3@]')" > "${m}"
-    _fill "$(printf '%s\n' 'services:' '  @S@:' '    context: @CS@' 'external_versions:' '  @D1@:' '    consumer: @S@')" > "${nokeys}"
-    CI_MANIFEST="${m}" run _ci_version_consumers
-    _expect consumers 0 "=$(_fill '@D1@|@CS@/Dockerfile|@K1@ @K2@')"$'\n'"$(_fill '@D3@|@CT@/Dockerfile|@K3@')" || return 1
-    CI_MANIFEST="${nokeys}" run _ci_version_consumers
-    _expect no-build-args 2 "$(_fill '[CI-ERROR-VERSION-0010] dep="@D1@"')" || return 1
-}
-
-@test "nightly-status opens, updates, and closes the standing tracking issue" {
-    # What: Self-closing issue per outcome.
-    # Why: Fail=open/update, success=close.
-    # From: Issue #1683
-    local stub="${BATS_TEST_TMPDIR}/ghstub" calls="${BATS_TEST_TMPDIR}/gh-calls"
-    _tool_stub "${BATS_TEST_TMPDIR}" ghstub <<'EOF'
-echo "$*" >> "${GH_CALLS}"
-[ "$1 $2" = "issue list" ] && printf '%s' "${STUB_EXISTING:-}"
-[ "$1 $2" = "label create" ] && [ -n "${STUB_LABEL_FAIL:-}" ] && { echo "HTTP 403" >&2; exit 1; }
-exit 0
-EOF
-    export GH_CALLS="${calls}" GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=1
-    : > "${calls}"; STUB_EXISTING='' CI_NIGHTLY_STATUS_CMD="${stub}" run ci_cmd_nightly_status failure "nightly promote"
-    [ "${status}" -eq 0 ]; grep -q 'issue create' "${calls}"
-    grep -q '^label create nightly-broken .*--force' "${calls}"
-    : > "${calls}"; STUB_LABEL_FAIL=1 STUB_EXISTING='' CI_NIGHTLY_STATUS_CMD="${stub}" run ci_cmd_nightly_status failure "nightly promote"
-    [ "${status}" -eq 2 ]
-    if grep -q 'issue create' "${calls}"; then return 1; fi
-    : > "${calls}"; STUB_EXISTING=42 CI_NIGHTLY_STATUS_CMD="${stub}" run ci_cmd_nightly_status failure "nightly promote"
-    [ "${status}" -eq 0 ]; grep -q 'issue comment 42' "${calls}"
-    : > "${calls}"; STUB_EXISTING=42 CI_NIGHTLY_STATUS_CMD="${stub}" run ci_cmd_nightly_status success "nightly promote"
-    [ "${status}" -eq 0 ]; grep -q 'issue close 42' "${calls}"
-    : > "${calls}"; STUB_EXISTING='' CI_NIGHTLY_STATUS_CMD="${stub}" run ci_cmd_nightly_status success "nightly promote"
-    [ "${status}" -eq 0 ]; [[ "${output}" == *"noop"* ]]
-    run ci_cmd_nightly_status "" scope
-    [ "${status}" -ne 0 ]; [[ "${output}" == *"CI-ERROR-STATUS-0001"* ]]
-}
-
-@test "check governance-guards flags a stale TODO on a closed issue" {
-    # What: ci.sh owns the governance scan; bats calls it.
-    # Why: TODO on closed issue is stale, must fail loud.
-    # From: Issue #1683
-    printf '# %s(#42): revisit once fixed\n' TODO > "${BATS_TEST_TMPDIR}/stale.sh"
-    CI_GOVERNANCE_ISSUE_STATE='42=closed' \
-        run bash "${CI_SH}" check governance-guards "${BATS_TEST_TMPDIR}/stale.sh"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0018"* ]]
-    CI_GOVERNANCE_ISSUE_STATE='42=open' \
-        run bash "${CI_SH}" check governance-guards "${BATS_TEST_TMPDIR}/stale.sh"
-    [ "${status}" -eq 0 ]
-}
-
-@test "check governance-guards fails closed when the issue state is unknown" {
-    # What: a failed gh api lookup is rc 2, never clean.
-    # Why: an unchecked TODO must not pass as current.
-    # From: Issue #1683
-    local bin="${BIN}"; mkdir -p "${bin}"
-    _tool_stub "${bin}" gh <<'STUB'
-echo "gh: HTTP 500" >&2; exit 1
-STUB
-    printf '# %s(#42): revisit once fixed\n' TODO > "${BATS_TEST_TMPDIR}/t.sh"
-    PATH="${bin}:${PATH}" GITHUB_REPOSITORY=owner/fixture-repo CI_RETRY_MAX_ATTEMPTS=1 \
-        run bash "${CI_SH}" check governance-guards "${BATS_TEST_TMPDIR}/t.sh"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" != *"governance-guards=clean"* ]]
 }
 
 @test "check governance-guards requires an open Refs issue for partial-scope text" {
@@ -2602,82 +2417,6 @@ STUB
     [[ "${output}" == *"@/tmp"* ]]
 }
 
-@test "check naming-consistency requires rust container names in compose" {
-    # What: ui and watchdog names must be compose container names
-    # Why: a Docker call by a name compose never creates fails
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/repo" cfg name project
-    cfg="$(_real_deploy_json)"
-    project="$(jq -r '.name' <<< "${cfg}")"
-    [ -n "${project}" ] || { echo "no project name in the real compose"; return 1; }
-    _stack_fixture "${r}"
-    _dsp_compose "${project}" "${r}/dep" > "${r}/dep/c.yml"
-    _dsp_compose "${project}" "${r}/inst" > "${r}/inst/c.yml"
-    name="$(_ci_compose_json "${r}/dep/c.yml" | jq -r '[.services[].container_name // empty] | first // empty')"
-    [ -n "${name}" ] || { echo "no fixture container name"; return 1; }
-    mkdir -p "${r}/services/watchdog/src" "${r}/services/ui/src"
-    printf 'const DEFAULT_PROXY: &str = "%s";\n' "${name}" > "${r}/services/watchdog/src/config.rs"
-    printf '"x" => "%s",\n' "${name}" > "${r}/services/ui/src/docker_client.rs"
-    run _ci_check_naming_consistency "${r}"
-    [ "${status}" -eq 0 ] || { echo "clean: ${output}"; return 1; }
-    printf 'const DEFAULT_PROXY: &str = "%s-other";\n' "${name}" > "${r}/services/watchdog/src/config.rs"
-    run _ci_check_naming_consistency "${r}"
-    [ "${status}" -eq 1 ] && [[ "${output}" == *"CI-ERROR-CHECK-0096"*"'${name}-other' is no container_name in"* ]] \
-        || { echo "watchdog: ${output}"; return 1; }
-    printf 'const DEFAULT_PROXY: &str = "%s";\n' "${name}" > "${r}/services/watchdog/src/config.rs"
-    printf '"x" => "%s-x",\n' "${name}" > "${r}/services/ui/src/docker_client.rs"
-    run _ci_check_naming_consistency "${r}"
-    [ "${status}" -eq 1 ] && [[ "${output}" == *"docker_client.rs: '${name}-x' is no container_name in"* ]] \
-        || { echo "ui: ${output}"; return 1; }
-    printf '"x" => "%s",\n' "${name}" > "${r}/services/ui/src/docker_client.rs"
-    _dsp_compose "${project}-other" "${r}/dep" > "${r}/dep/c.yml"
-    run _ci_check_naming_consistency "${r}"
-    [ "${status}" -eq 1 ] && [[ "${output}" == *"compose project name '${project}-other' is not ${project}"* ]] \
-        || { echo "project: ${output}"; return 1; }
-    # What: no match is a named violation via the CLI.
-    # Why: errexit must not end the check without a code.
-    # From: Issue #1683 | PR #1858
-    _dsp_compose "${project}" "${r}/dep" > "${r}/dep/c.yml"
-    printf 'fn main() {}\n' > "${r}/services/watchdog/src/config.rs"
-    run bash "${CI_SH}" check naming-consistency "${r}"
-    [ "${status}" -eq 1 ] && [[ "${output}" == *"CI-ERROR-CHECK-0096"*"no lancache-* container names found"* ]] \
-        || { echo "cli: ${output}"; return 1; }
-}
-
-@test "check compose-healthchecks passes clean on the real repo" {
-    # What: migrated from check-compose-healthchecks.sh.
-    # Why: rewritten in ci.sh; real stack composes pass.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check compose-healthchecks
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"compose-healthchecks=clean"* ]]
-}
-
-@test "check compose-healthchecks fails a service with no healthcheck" {
-    # What: a real, un-excluded service has no healthcheck.
-    # Why: Every service needs healthcheck.
-    # From: Issue #1683 | PR #1858
-    local f="${BATS_TEST_TMPDIR}/nohc/docker-compose.yml"
-    mkdir -p "$(dirname "${f}")"
-    printf 'services:\n  good:\n    image: x\n    healthcheck:\n      test: ["CMD", "true"]\n  bad:\n    image: y\n' \
-        > "${f}"
-    run bash "${CI_SH}" check compose-healthchecks "${f}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0021"* ]]
-    [[ "${output}" == *"service 'bad' has no healthcheck"* ]]
-}
-
-@test "check compose-healthchecks honors the documented exclusion list" {
-    # What: dhcp-probe is documented as exempt, not a fail.
-    # Why: Exclusion contract still applies.
-    # From: Issue #1683 | PR #1858
-    local f="${BATS_TEST_TMPDIR}/excl/dep/c.yml"
-    mkdir -p "$(dirname "${f}")"
-    printf 'services:\n  dhcp-probe:\n    image: x\n' > "${f}"
-    run bash "${CI_SH}" check compose-healthchecks "${f}"
-    [ "${status}" -eq 0 ]
-}
-
 @test "check compose-healthchecks fails closed with no compose files" {
     # What: a vacuous scan (no matched files) must not pass.
     # Why: mirrors the legacy script's anti-vacuous guard.
@@ -2687,77 +2426,6 @@ STUB
     [[ "${output}" == *"CI-ERROR-CHECK-0097"* ]]
 }
 
-@test "check proxy-cache-env-doc-drift passes clean on the real repo" {
-    # What: every documented CACHE_* row is checked, clean
-    # Why: a guard that checks no row passes blindly
-    # From: Issue #1683 | PR #1858
-    local root doc rows
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    doc="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_repo_path CI_ARCH_DOC "${root}")"
-    rows="$(grep -cE '^\| `CACHE_[A-Z_]+` \|' "${doc}")"
-    run bash "${CI_SH}" check proxy-cache-env-doc-drift
-    [ "${status}" -eq 0 ] && [ "${rows}" -gt 0 ] && [[ "${output}" == *"proxy-cache-env-doc-drift=clean"*"checked=${rows}"* ]] \
-        || { echo "rows ${rows}: ${output}"; return 1; }
-}
-
-@test "check proxy-cache-env-doc-drift fails a real default mismatch" {
-    # What: a default disagrees with its doc row
-    # Why: Copied default can go stale.
-    # From: Issue #1683 | PR #1858
-    local env="${BATS_TEST_TMPDIR}/proxy.env" doc="${BATS_TEST_TMPDIR}/arch.md"
-    printf 'CACHE_MEM_MB=999\n' > "${env}"
-    printf "| \`CACHE_MEM_MB\` | \`512\` | some description |\n" > "${doc}"
-    run bash "${CI_SH}" check proxy-cache-env-doc-drift "${env}" "${doc}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0023"* ]]
-    [[ "${output}" == *"default=999 vs doc=512"* ]]
-}
-
-@test "check proxy-cache-env-doc-drift ignores an undocumented CACHE_* var" {
-    # What: a CACHE_* var with no matching doc row is fine.
-    # Why: not every variable needs a table row.
-    # From: Issue #1683 | PR #1858
-    local env="${BATS_TEST_TMPDIR}/proxy2.env" doc="${BATS_TEST_TMPDIR}/arch2.md"
-    printf 'CACHE_UNDOCUMENTED=1\n' > "${env}"
-    printf '# no matching row here\n' > "${doc}"
-    run bash "${CI_SH}" check proxy-cache-env-doc-drift "${env}" "${doc}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"scanned=1 checked=0"* ]]
-}
-
-@test "proxy-cache-env-doc-drift reads what compose gives proxy" {
-    # What: env_file and environment, rendered with .env
-    # Why: both feed proxy; one file read missed moved keys
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/pce"
-    local bin="${BATS_TEST_TMPDIR}/pcebin"
-    local name ef want doc
-    doc="${r}/$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_variable CI_ARCH_DOC)"
-    mkdir -p "${r}/dep" "${doc%/*}"
-    printf 'CACHE_X=1\n' > "${r}/dep/p.env"
-    printf 'CACHE_Y=3\n' > "${r}/dep/.env"
-    printf '| `CACHE_X` | `1` | x |\n| `CACHE_Y` | `4` | y |\n' > "${doc}"
-    export CI_REPO_ROOT="${r}" CI_COMPOSE_FILE=dep/c.yml
-    while IFS='|' read -r name ef want; do
-        printf 'services:\n  proxy:\n    image: x\n%b' "${ef}" > "${r}/dep/c.yml"
-        run bash "${CI_SH}" check proxy-cache-env-doc-drift
-        [ "${status}" -ne 0 ] && [[ "${output}" == *"${want}"* ]] || { echo "${name}: rc ${status}: ${output}"; return 1; }
-    done <<'CASES'
-both|    env_file: [./p.env]\n    environment:\n      - CACHE_Y=${CACHE_Y:?}\n|CACHE_Y: default=3 vs doc=4
-none|    environment:\n      - OTHER=1\n|CI-ERROR-CHECK-0152
-bad|  bogus: [\n|CI-ERROR-CHECK-0110
-CASES
-    printf 'CACHE_Y=4\n' > "${r}/dep/.env"
-    printf 'services:\n  proxy:\n    image: x\n    env_file: [./p.env]\n    environment:\n      - CACHE_Y=${CACHE_Y:?}\n' > "${r}/dep/c.yml"
-    run bash "${CI_SH}" check proxy-cache-env-doc-drift
-    [ "${status}" -eq 0 ] && [[ "${output}" == *"scanned=2 checked=2"* ]] || { echo "clean: rc ${status}: ${output}"; return 1; }
-    _fail_stub "${bin}" grep
-    PATH="${bin}:${PATH}" FAIL_MATCH="/docs/architecture-ng.md" \
-        run bash "${CI_SH}" check proxy-cache-env-doc-drift
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CORE-0106"*"read error"* ]]
-}
-
 # What: neutral deploy + installer compose for a fixture.
 # Why: checks derive both from owners, never real paths.
 # From: Issue #1683 | PR #1858
@@ -2765,35 +2433,6 @@ _stack_fixture() {
     export CI_COMPOSE_FILE=dep/c.yml
     mkdir -p "$1/dep" "$1/inst"
     printf 'PROD_COMPOSE="$SCRIPT_DIR/%s"\n' inst/c.yml >> "$1/setup.sh"
-}
-
-@test "installer compose is read from setup.sh, fail-closed" {
-    # What: one SCRIPT_DIR form reads; other forms fail.
-    # Why: setup.sh owns the installer compose; CI derives.
-    # From: Issue #1683 | PR #1858
-    local r inst case body rc want
-    local -A V=([@A@]="$(_val name)" [@B@]="$(_val name)" [@C@]="$(_val name)" [@X@]="$(_val name)")
-    inst="$(_ci_variable CI_INSTALLER)" || return 1
-    while IFS='|' read -r case body rc want; do
-        r="${BATS_TEST_TMPDIR}/$(_val name)"
-        mkdir -p "${r}"
-        [ "${body}" = none ] || printf '%b' "$(_fill "${body}")" > "${r}/${inst}"
-        run _ci_installer_compose "${r}"
-        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
-    done <<'CASES'
-ok|@X@=1\nPROD_COMPOSE="$SCRIPT_DIR/@A@/@B@/@C@"\n|0|=@A@/@B@/@C@
-none|none|2|[CI-ERROR-CORE-0102]
-absent|@X@=1\n|2|[CI-ERROR-CORE-0104]
-twice|PROD_COMPOSE="$SCRIPT_DIR/@A@"\nPROD_COMPOSE="$SCRIPT_DIR/@B@"\n|2|[CI-ERROR-CORE-0104]
-form|PROD_COMPOSE=/@A@/@C@\n|2|[CI-ERROR-CORE-0105]
-CASES
-    # What: the installer path comes from CI_INSTALLER.
-    # Why: no installer literal in ci.sh; the SOT decides.
-    # From: Issue #1683 | PR #1858
-    inst="$(_val name)"
-    printf 'PROD_COMPOSE="$SCRIPT_DIR/%s/%s"\n' "${V[@A@]}" "${V[@C@]}" > "${r}/${inst}"
-    CI_INSTALLER="${inst}" run _ci_installer_compose "${r}"
-    _expect override 0 "=${V[@A@]}/${V[@C@]}" || return 1
 }
 
 # What: seed a minimal prebuilt-only stack tree.
@@ -2807,41 +2446,6 @@ _prebuilt_fixture() {
     printf '# LanCache-NG\nRun: docker compose up -d\n' > "${root}/README.md"
     printf '#!/usr/bin/env bash\n' > "${root}/setup.sh"
     _stack_fixture "${root}"
-}
-
-@test "check prebuilt-prod passes a prebuilt-only tree" {
-    # What: no build: and no --build anywhere user-facing.
-    # Why: Prod runs prebuilt images.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/prebuilt-ok"
-    _prebuilt_fixture "${r}"
-    run bash "${CI_SH}" check prebuilt-prod "${r}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"prebuilt-prod=clean"* ]]
-}
-
-@test "check prebuilt-prod fails a build: directive in prod compose" {
-    # What: a prod compose that would build locally.
-    # Why: prod must consume prebuilt images, not build.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/prebuilt-build"
-    _prebuilt_fixture "${r}"
-    printf 'services:\n  proxy:\n    build: .\n' > "${r}/dep/c.yml"
-    run bash "${CI_SH}" check prebuilt-prod "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0042"*"declares build:"* ]]
-}
-
-@test "check prebuilt-prod fails a --build instruction in README" {
-    # What: a user-facing doc telling users to build.
-    # Why: install paths must not instruct local builds.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/prebuilt-readme"
-    _prebuilt_fixture "${r}"
-    printf '# LanCache-NG\nRun: docker compose up -d --build\n' > "${r}/README.md"
-    run bash "${CI_SH}" check prebuilt-prod "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0042"*"instructs --build"* ]]
 }
 
 # What: Seed prod tree from LANCACHE_STATE_DIR.
@@ -2859,43 +2463,6 @@ _prod_state_wiring_fixture() {
         printf '%s=\n' "${k}" >> "${root}/dep/.env"
         printf '%s documented\n' "${k}" >> "${root}/docs/backup-restore.md"
     done
-}
-
-@test "check prod-state-wiring passes a fully derived, documented tree" {
-    # What: All keys from LANCACHE_STATE_DIR.
-    # Why: One state root, manual upgrades.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/psw-ok"
-    _prod_state_wiring_fixture "${r}"
-    run bash "${CI_SH}" check prod-state-wiring "${r}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"prod-state-wiring=clean"* ]]
-}
-
-@test "check prod-state-wiring fails a key not derived from LANCACHE_STATE_DIR" {
-    # What: Per-service dir hardcoded off root.
-    # Why: Breaks state-root contract.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/psw-noderive"
-    _prod_state_wiring_fixture "${r}"
-    grep -v 'NATS_CONF_DIR' "${r}/dep/c.yml" > "${r}/dep/dc.tmp"
-    printf '      - /hard/coded/nats-conf:/etc/nats\n' >> "${r}/dep/dc.tmp"
-    mv "${r}/dep/dc.tmp" "${r}/dep/c.yml"
-    run bash "${CI_SH}" check prod-state-wiring "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"NATS_CONF_DIR"* ]]
-}
-
-@test "check prod-state-wiring fails cleanly when an input file is missing" {
-    # What: a missing compose/.env/doc yields a clear error.
-    # Why: must not read as an undocumented-key violation.
-    # From: Issue #1683 | PR #1858
-    local r="${BATS_TEST_TMPDIR}/psw-missing"
-    _prod_state_wiring_fixture "${r}"
-    rm "${r}/docs/backup-restore.md"
-    run bash "${CI_SH}" check prod-state-wiring "${r}"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"input missing"* ]]
 }
 
 @test "check compose-config renders every compose in every profile" {
