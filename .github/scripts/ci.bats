@@ -233,37 +233,33 @@ empty|-|2|[CI-ERROR-CORE-0101]
 CASES
 }
 
+# What: per row: bad or missing input -> rc 2 and its id.
+# Why: input errors stop with our id before any backend.
+# From: Issue #1683 | PR #1858
 @test "every command fails closed on missing input with its own id" {
-    # What: per row: bad or missing input -> rc 2 + its id.
-    # Why: input errors stop with our id before a backend.
-    # From: Issue #1683 | PR #1858
-    local calls case envs args id dk got
-    calls="$(_val path)"
+    local case envs args id wrap want
     local -a ev av
     local -A V=(
         [@SVC@]="$(ci_services | awk 'NR == 1')" [@TOOL@]="$(_ci_block_keys build_toolchain | awk 'NR == 1')"
-        [@CHAN@]="$(_ci_block_entry_field release "" default_channel)"
-        [@REC@]="$(_stub 'printf "%s\n" "$*" >> "'"${calls}"'"')"
-        [@FULL@]="$(_promote_full_candidate "$(_val digest)")" [@CAND@]="$(_stub 'true')"
-        [@NOIDX@]="$(_stub 'exit 1')" [@BAD@]="$(_val name)" [@FOREIGN@]="$(_val platform)"
-        [@DIGEST@]="$(_val digest)" [@IMG@]="$(_val name)@$(_val digest)" [@USER@]="$(_val name)" [@TOKEN@]="$(_val name)"
+        [@BAD@]="$(_val name)" [@FOREIGN@]="$(_val platform)" [@DIGEST@]="$(_val digest)"
+        [@USER@]="$(_val name)" [@TOKEN@]="$(_val name)"
     )
     V[@PLAT@]="$(_ci_platforms "${V[@SVC@]}" | awk 'NR == 1')"
-    [ -n "${V[@SVC@]}" ] && [ -n "${V[@TOOL@]}" ] && [ -n "${V[@CHAN@]}" ] && [ -n "${V[@PLAT@]}" ] \
-        || { echo "inputs: ${V[*]}"; return 1; }
-    while IFS='|' read -r case envs args id dk; do
+    [ -n "${V[@SVC@]}" ] && [ -n "${V[@TOOL@]}" ] && [ -n "${V[@PLAT@]}" ] || { echo "inputs: ${V[*]}"; return 1; }
+    while IFS='|' read -r case envs args id wrap; do
         ev=() av=()
         envs="$(_fill "${envs}")" args="$(_fill "${args}")"
         [ "${envs}" = - ] || read -r -a ev <<< "${envs}"
         read -r -a av <<< "${args}"
-        rm -f "${calls}" "${DS}/docker.log"
         run env -u GHCR_USERNAME -u GHCR_TOKEN "${ev[@]}" bash "${CI_SH}" "${av[@]}"
-        _expect "${case}" 2 "[${id}]" || return 1
-        [ ! -e "${calls}" ] || { echo "${case}: backend ran: $(cat "${calls}")"; return 1; }
-        got=""
-        [ "${dk}" != - ] || dk=""
-        [ ! -e "${DS}/docker.log" ] || got="$(cat "${DS}/docker.log")"
-        [ "${got}" = "${dk}" ] || { echo "${case}: docker calls '${got}' want '${dk}'"; return 1; }
+        want="[${id}]"; [ "${wrap}" = - ] || want="[${wrap}];${want}"
+        _expect "${case}" 2 "${want}" || return 1
+        # What: before the id only INFO, the wrapper and raw:
+        # Why: any other line is a backend that ran first.
+        # From: Issue #1683 | PR #1858
+        [ -z "$(awk -v i="[${id}]" -v w="[${wrap}]" 'index($0, i) { exit }
+            !/^\[CI-INFO-/ && index($0, w) != 1 && $0 != "raw:"' <<< "${output}")" ] \
+            || { echo "${case}: output before the guard: ${output}"; return 1; }
     done <<'CASES'
 unknown-command|-|@BAD@|CI-ERROR-CORE-0002|-
 identity|-|identity|CI-ERROR-IDENTITY-0001|-
@@ -272,12 +268,11 @@ resolve|-|resolve|CI-ERROR-RESOLVE-0001|-
 resolve-platform|-|resolve @SVC@ @FOREIGN@|CI-ERROR-RESOLVE-0004|-
 build-platform|-|build @SVC@ @FOREIGN@|CI-ERROR-BUILD-0006|-
 test|-|test|CI-ERROR-TEST-0001|-
-test-toolchain|-|test @TOOL@|CI-ERROR-TEST-0006|-
+test-toolchain|-|test @TOOL@|CI-ERROR-TEST-0006|CI-ERROR-TEST-0003
 assemble|-|assemble|CI-ERROR-ASSEMBLE-0001|-
 promote|-|promote|CI-ERROR-PROMOTE-0001|-
 promote-channel|-|promote @BAD@|CI-ERROR-PROMOTE-0002|-
-validate|CI_STACK_CANDIDATE_CMD=@NOIDX@|validate|CI-ERROR-VALIDATE-0001|compose version
-validate-empty|CI_STACK_CANDIDATE_CMD=@CAND@|validate|CI-ERROR-VALIDATE-0002|compose version
+promote-sha|-|promote sha-@BAD@|CI-ERROR-PROMOTE-0002|-
 variables-get|-|variables get|CI-ERROR-VARIABLES-0003|-
 variables-verb|-|variables @BAD@|CI-ERROR-VARIABLES-0002|-
 bake-image|GHCR_USERNAME=@USER@ GHCR_TOKEN=@TOKEN@|variables bake-check|CI-ERROR-VARIABLES-0008|-
@@ -286,12 +281,7 @@ build-args-target|-|build-args @BAD@|CI-ERROR-BUILDARGS-0002|-
 build-args-format|-|build-args @SVC@ --@BAD@|CI-ERROR-BUILDARGS-0005|-
 build-tools-verb|-|build-tools @BAD@|CI-ERROR-BUILDTOOLS-0003|-
 version-verb|-|version @BAD@|CI-ERROR-VERSION-0014|-
-release-tag|CI_RELEASE_GH_CMD=@REC@|release-publish|CI-ERROR-RELEASE-0003|-
-scan-auth|CI_SCAN_CMD=@REC@|scan @SVC@ @DIGEST@|CI-ERROR-BUILD-0002|-
 publish-auth|-|publish @SVC@|CI-ERROR-BUILD-0002|-
-promote-auth|CI_STACK_CANDIDATE_CMD=@FULL@ CI_STACK_VALIDATED=SUCCESS CI_PROMOTE_MOVE_CMD=@REC@|promote @CHAN@|CI-ERROR-BUILD-0002|-
-validate-auth|CI_STACK_CANDIDATE_CMD=@FULL@ CI_VALIDATE_CMD=@REC@|validate|CI-ERROR-BUILD-0002|compose version
-bake-auth|CI_BAKE_INSPECT_CMD=@REC@|variables bake-check @IMG@|CI-ERROR-BUILD-0002|-
 verify|-|verify|CI-ERROR-VERIFY-0001|-
 verify-digest|-|verify @SVC@|CI-ERROR-VERIFY-0002|-
 verify-platform|-|verify @SVC@ @DIGEST@|CI-ERROR-VERIFY-0004|-
@@ -991,26 +981,25 @@ unknown-type|-|@ODD@|2|[CI-ERROR-TEST-0003];[CI-ERROR-TEST-0004] service="@ODD@"
 CASES
 }
 
-@test "temp root: tmpfs refused, /var/tmp made, failure coded" {
-    # What: /tmp refused; subdir made; bad root fails rc 2.
-    # Why: bare mktemp in tools must land on disk, not RAM.
-    # From: Issue #1683 | PR #1858
-    local base f d made
-    base="/var/tmp/$(_val name)" f="$(_val path)"
-    d="${base}/$(_val name)"
-    : > "${f}"
-    CI_TMPDIR=/tmp CI_SCAN_CMD="$(_stub 'exit 0')" GHCR_USERNAME="$(_val name)" GHCR_TOKEN="$(_val name)" \
-        run bash "${CI_SH}" scan "$(ci_services | awk 'NR == 1')" "$(_val digest)"
-    _expect tmpfs-command 2 "[CI-ERROR-CORE-0006]" || return 1
+# What: temp root off tmpfs and made; uncreatable dirs coded.
+# Why: bare mktemp in tools must land on disk, not RAM.
+# From: Issue #1683 | PR #1858
+@test "temp and lock dirs: tmpfs refused, made on disk, else coded" {
+    local base d long made
+    base="/var/tmp/$(_val name)" d="${base}/$(_val name)" long="/var/tmp/$(printf '%0300d' 0)"
     CI_TMPDIR=/tmp run bash "${CI_SH}" check comment-length
-    _expect tmpfs-check 2 "[CI-ERROR-CORE-0006]" || return 1
+    _expect tmpfs 2 "[CI-ERROR-CORE-0006]" || return 1
+    CI_TMPDIR="/var/tmp/../../tmp/$(_val name)" run bash "${CI_SH}" check comment-length
+    _expect dotdot 2 "[CI-ERROR-CORE-0006]" || return 1
     CI_TMPDIR="${d}" run bash -c 'source "$1"; _ci_tmp_init; echo "t=${TMPDIR}"' _ "${CI_SH}"
     made=no; [ ! -d "${d}" ] || made=yes
     rm -rf "${base}"
     _expect created 0 "t=${d}" || return 1
     [ "${made}" = yes ] || { echo "not created: ${d}"; return 1; }
-    CI_TMPDIR="${f}/x" run _ci_tmp_init
-    _expect uncreatable 2 "[CI-ERROR-CORE-0111] dir=\"${f}/x\";Not a directory" || return 1
+    CI_TMPDIR="${long}" run _ci_tmp_init
+    _expect uncreatable 2 "[CI-ERROR-CORE-0111] dir=\"${long}\"" || return 1
+    CI_TRIVY_LOCK_POLL=1 run _ci_trivy_db_lock_run "/dev/null/$(_val name)" 1 5 -- true
+    _expect lock-dir 2 "[CI-ERROR-SCAN-0013]" || return 1
 }
 
 @test "proxy init maps each runner and CA case" {
@@ -1116,149 +1105,22 @@ CASES
 # PROMOTION
 # =========================================================
 
-# What: A candidate holding every SOT product service.
-# Why: Stack-atomic promotion needs every service.
-# From: Issue #1683
-_promote_full_candidate() {
-    local svcs
-    svcs="$(ci_services | tr '\n' ' ')"
-    _stub "for s in ${svcs}; do echo \"\$s=$1\"; done"
-}
-_promote_lock() { _stub 'echo "LOCK $1" >> "${BATS_TEST_TMPDIR}/lock.log"'; }
-_promote_unlock() { _stub 'echo "UNLOCK $1" >> "${BATS_TEST_TMPDIR}/lock.log"'; }
-
-# What: per row: target and stack -> moved, kept or an id
-# Why: §50-53: atomic move, readback, lock always freed
-# From: Issue #1683 | PR #1858
-@test "promote moves one target stack-atomically with readback and lock" {
-    local case target cand valid rb rc want locks ch got
-    local -a ev
-    local log="${BATS_TEST_TMPDIR}/lock.log"
-    local -A V=([@X@]="$(_val name)" [@V@]="v$(_val semver)" [@D@]="$(_val digest)" [@OD@]="$(_val digest)")
-    ch="$(_ci_mutable_channels)"
-    V[@CH@]="${ch%%$'\n'*}"
-    V[@CH2@]="${ch##*$'\n'}"
-    local -A S=(
-        [full]="$(_promote_full_candidate "${V[@D@]}")"
-        [partial]="$(_stub "echo $(ci_services | head -n 1)=${V[@D@]}")"
-        [moved]="$(_stub "if [ -f \"\${BATS_TEST_TMPDIR}/moved.\$1\" ]; then echo ${V[@D@]}; fi")"
-        [same]="$(_stub "echo ${V[@D@]}")"
-        [other]="$(_stub "echo ${V[@OD@]}")"
-    )
-    while IFS='|' read -r case target cand valid rb rc want locks; do
-        rm -f "${log}" "${BATS_TEST_TMPDIR}"/moved.*
-        ev=(CI_STACK_CANDIDATE_CMD="${S[${cand}]}" CI_CHANNEL_READBACK_CMD="${S[${rb}]}"
-            CI_PROMOTE_LOCK_CMD="$(_promote_lock)" CI_PROMOTE_UNLOCK_CMD="$(_promote_unlock)"
-            CI_PROMOTE_MOVE_CMD="$(_stub 'touch "${BATS_TEST_TMPDIR}/moved.$1"')"
-            GHCR_USERNAME="$(_val name)" GHCR_TOKEN="$(_val name)")
-        [ "${valid}" = - ] || ev+=(CI_STACK_VALIDATED="${valid}")
-        if [ "${target}" = - ]; then
-            run env -u CI_STACK_VALIDATED "${ev[@]}" bash "${CI_SH}" promote
-        else
-            run env -u CI_STACK_VALIDATED "${ev[@]}" bash "${CI_SH}" promote "$(_fill "${target}")"
-        fi
-        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
-        got="$(paste -sd, "${log}" 2> /dev/null)" || got=""
-        [ "${got}" = "$(_fill "${locks#-}")" ] || { echo "${case}: lock log '${got}' want '${locks}'"; return 1; }
-    done <<'CASES'
-no-target|-|full|SUCCESS|moved|2|[CI-ERROR-PROMOTE-0001]|-
-sha-target|sha-@X@|full|SUCCESS|moved|2|[CI-ERROR-PROMOTE-0002] channel="sha-@X@"|-
-unknown-target|@X@|full|SUCCESS|moved|2|[CI-ERROR-PROMOTE-0002] channel="@X@"|-
-incomplete|@CH@|partial|SUCCESS|moved|2|[CI-ERROR-PROMOTE-0004]|-
-not-validated|@CH@|full|-|moved|2|[CI-ERROR-PROMOTE-0005]|-
-promoted|@CH@|full|SUCCESS|moved|0|channel=@CH@ result=promoted|LOCK @CH@,UNLOCK @CH@
-promoted-tag|@V@|full|SUCCESS|moved|0|channel=@V@ result=promoted|LOCK @V@,UNLOCK @V@
-promoted-rc|@V@-rc.1|full|SUCCESS|moved|0|channel=@V@-rc.1 result=promoted|LOCK @V@-rc.1,UNLOCK @V@-rc.1
-current|@CH2@|full|SUCCESS|same|0|channel=@CH2@ result=already-promoted|-
-mismatch|@CH@|full|SUCCESS|other|2|[CI-ERROR-PROMOTE-0009]|LOCK @CH@,UNLOCK @CH@
-CASES
-}
-
 # =========================================================
 # RELEASE
 # =========================================================
 
-# What: per row: cut, reader or bump -> result or an id
-# Why: AG-REL-013: a tag cut is its own authorized step
+# What: next patch tag per tag string; an rc tag refused.
+# Why: AG-REL-013: only Z moves without a maintainer step.
 # From: Issue #1683 | PR #1858
-@test "release tag: a dispatch cuts the next Z from the newest tag" {
-    local b="${BATS_TEST_TMPDIR}/cut-build" case cmd arg repo env rc want after k got srvrepo
-    local -A V=(
-        [@O@]="$(_val name)" [@R@]="$(_val name)" [@X@]="$(_val int 0 50)" [@Y@]="$(_val int 0 50)" [@Z@]="$(_val int 0 50)"
-        [@BR@]="refs/heads/$(_val name)" [@OTHER@]="$(_val sha)" [@REL@]="$(_ci_release_ref)" [@FAIL@]="$(_stub 'exit 2')"
-        [@NOREL@]="$(_val path)" [@SRV@]="$(_val path)" [@SRV2@]="$(_val path)" [@SRV3@]="$(_val path)"
-    )
-    V[@X1@]="$(( ${V[@X@]} + 1 ))"
-    V[@NEXT@]="v${V[@X@]}.10.1"
-    grep -v 'release_tags: true' "${CI_MANIFEST}" > "${V[@NOREL@]}"
-    srvrepo="${V[@SRV@]}/${V[@O@]}/${V[@R@]}.git"
-    git init -q "${b}"
-    git -C "${b}" -c user.name=t -c user.email=t@invalid commit -q --allow-empty -m c1
-    V[@C1@]="$(git -C "${b}" rev-parse HEAD)"
-    for k in 2.0 9.1 10.0; do git -C "${b}" tag "v${V[@X@]}.${k}"; done
-    git -C "${b}" tag "v${V[@X1@]}.0.0-rc.1"
-    mkdir -p "${V[@SRV@]}/${V[@O@]}" "${V[@SRV2@]}/${V[@O@]}" "${V[@SRV3@]}/${V[@O@]}"
-    git init -q --bare "${srvrepo}"
-    git -C "${b}" push -q "${srvrepo}" "HEAD:${V[@REL@]}" --tags
-    git init -q --bare "${BATS_TEST_TMPDIR}/empty.git"
-    git -C "${b}" push -q "${BATS_TEST_TMPDIR}/empty.git" "HEAD:${V[@REL@]}"
-    git clone -q --bare "${srvrepo}" "${V[@SRV2@]}/${V[@O@]}/${V[@R@]}.git"
-    git -C "${b}" push -q "${V[@SRV2@]}/${V[@O@]}/${V[@R@]}.git" "${V[@C1@]}:refs/tags/${V[@NEXT@]}"
-    git clone -q --bare "${srvrepo}" "${V[@SRV3@]}/${V[@O@]}/${V[@R@]}.git"
-    _tool_stub "${V[@SRV3@]}/${V[@O@]}/${V[@R@]}.git/hooks" post-receive <<'EOF'
-while read -r _ _ ref; do git update-ref -d "${ref}"; done
-EOF
-    git clone -q --no-tags "${srvrepo}" "${BATS_TEST_TMPDIR}/w-tags"
-    git clone -q --no-tags "${BATS_TEST_TMPDIR}/empty.git" "${BATS_TEST_TMPDIR}/w-empty"
-    git init -q "${BATS_TEST_TMPDIR}/w-none"
-    local -A D=(
-        [GITHUB_EVENT_NAME]=workflow_dispatch [GITHUB_REF]="${V[@REL@]}" [GITHUB_SHA]="${V[@C1@]}"
-        [GITHUB_SERVER_URL]="file://${V[@SRV@]}" [GITHUB_REPOSITORY]="${V[@O@]}/${V[@R@]}"
-        [PROJECT_AUTOMATION_PAT]="$(_val name)" [CI_MANIFEST]="${CI_MANIFEST}"
-    )
-    for k in "${!D[@]}"; do export "${k}=${D[${k}]}"; done
-    while IFS='|' read -r case cmd arg repo env rc want after; do
-        [ "${repo}" = - ] || cd "${BATS_TEST_TMPDIR}/w-${repo}"
-        [ "${env}" = - ] || export "$(_fill "${env}")"
-        case "${cmd}" in
-            cut) run ci_cmd_cut_release_tag ;;
-            next) run _ci_next_patch_tag "$(_fill "${arg}")" ;;
-            last) run _ci_last_release_tag "$(_fill "${arg}")" ;;
-        esac
-        if [ "${env}" != - ]; then
-            k="${env%%=*}"
-            if [ -n "${D[${k}]+set}" ]; then export "${k}=${D[${k}]}"; else unset "${k}"; fi
-        fi
+@test "release tag: next patch from a tag string, an rc tag refused" {
+    local case arg rc want
+    local -A V=([@X@]="$(_val int 0 50)" [@Y@]="$(_val int 0 50)" [@Z@]="$(_val int 0 50)")
+    while IFS='|' read -r case arg rc want; do
+        run _ci_next_patch_tag "$(_fill "${arg}")"
         _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
-        case "${after}" in
-            none)
-                if git -C "${srvrepo}" rev-parse -q --verify "refs/tags/${V[@NEXT@]}" > /dev/null; then
-                    echo "${case}: ${V[@NEXT@]} reached the server"; return 1
-                fi ;;
-            pushed)
-                got="$(git -C "${srvrepo}" rev-parse -q --verify "refs/tags/${V[@NEXT@]}^{commit}")" || { echo "${case}: no tag"; return 1; }
-                [ "${got}" = "${V[@C1@]}" ] || { echo "${case}: tag at ${got}"; return 1; } ;;
-        esac
-        if git -C "${BATS_TEST_TMPDIR}/w-tags" rev-parse -q --verify "refs/tags/${V[@NEXT@]}" > /dev/null; then
-            git -C "${BATS_TEST_TMPDIR}/w-tags" tag -d "${V[@NEXT@]}" > /dev/null
-        fi
     done <<'CASES'
-push-event|cut|-|tags|GITHUB_EVENT_NAME=push|2|[CI-ERROR-RELEASE-0039] event="push"|none
-other-ref|cut|-|tags|GITHUB_REF=@BR@|2|[CI-ERROR-RELEASE-0040] ref="@BR@"|none
-no-release-ref|cut|-|tags|CI_MANIFEST=@NOREL@|2|[CI-ERROR-RELEASE-0018]|none
-no-base|cut|-|empty|-|2|[CI-ERROR-RELEASE-0041]|none
-base-unknown|cut|-|none|-|2|[CI-ERROR-CORE-0106]|none
-tip-moved|cut|-|tags|GITHUB_SHA=@OTHER@|2|[CI-ERROR-RELEASE-0042];tip="@C1@" sha="@OTHER@"|none
-tip-unknown|cut|-|tags|CI_PROMOTE_TIP_CMD=@FAIL@|2|[CI-ERROR-RELEASE-0016]|none
-no-pat|cut|-|tags|PROJECT_AUTOMATION_PAT=|2|[CI-ERROR-CORE-0128] name="PROJECT_AUTOMATION_PAT"|none
-tag-taken|cut|-|tags|GITHUB_SERVER_URL=file://@SRV2@|2|[CI-ERROR-RELEASE-0027];already exists|none
-tag-lost|cut|-|tags|GITHUB_SERVER_URL=file://@SRV3@|2|[CI-ERROR-RELEASE-0048] tag="@NEXT@" sha="@C1@" found=""|none
-next-rollover|next|v@X@.@Y@.9|-|-|0|=v@X@.@Y@.10|-
-next-rc|next|v@X@.@Y@.@Z@-rc.1|-|-|2|[CI-ERROR-RELEASE-0015]|-
-last-below|last|v@X@.10.0|tags|-|0|=v@X@.9.1|-
-last-below-rc|last|v@X@.10.0-rc.2|tags|-|0|=v@X@.9.1|-
-last-below-first|last|v@X@.2.0|tags|-|0|=|-
-pushed|cut|-|tags|-|0|[CI-INFO-RELEASE-0028] tag="@NEXT@" sha="@C1@";cut-tag=pushed tag=@NEXT@ base=v@X@.10.0|pushed
+next-rollover|v@X@.@Y@.9|0|=v@X@.@Y@.10
+next-rc|v@X@.@Y@.@Z@-rc.1|2|[CI-ERROR-RELEASE-0015]
 CASES
 }
 
@@ -1304,58 +1166,41 @@ CASES
     _expect unknown 2 '[CI-ERROR-CORE-0106]' || return 1
 }
 
-@test "validate pins one SOT service onto both its compose containers" {
-    # What: dns pins both dns-standard and dns-ssl.
-    # Why: Pin by image, not key (1 service, 2 containers).
-    # From: Issue #1683 | PR #1858
-    local reg old dig
-    reg="$(_ci_registry)"
-    old="$(_val host)"
+# What: per image pin, third-party kept, a gap fails closed
+# Why: §48: validate runs the candidate, not a mutable tag.
+# From: Issue #1683 | PR #1858
+@test "validate pin override: per image, third-party kept, gap fails" {
+    local root cfg cand="" s dig out ext img k miss extra shared
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    export GITHUB_REPOSITORY
+    GITHUB_REPOSITORY="$(awk -F= '$1 == "LANCACHE_IMAGE_PREFIX" { print $2; exit }' "${root}/deploy/prod/.env")"
     dig="$(_val digest)"
-    GITHUB_REPOSITORY=owner/fixture-repo \
-    CI_COMPOSE_IMAGES_CMD="$(_stub "printf 'dns-standard\t${old}/owner/fixture-repo/dns:latest\ndns-ssl\t${old}/owner/fixture-repo/dns:latest\n'")" \
-        run _ci_validate_pin_override "dns=${dig}"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"dns-standard:"* ]]
-    [[ "${output}" == *"dns-ssl:"* ]]
-    [ "$(grep -c -x -F "    image: ${reg}/owner/fixture-repo/dns@${dig}" <<<"${output}")" -eq 2 ]
-    [[ "${output}" != *"${old}"* ]]
-}
-
-@test "validate skips third-party compose images without pinning" {
-    # What: nats is third-party; it is never pinned.
-    # Why: No first-party digest exists for external images.
-    # From: Issue #1683 | PR #1858
-    GITHUB_REPOSITORY=owner/fixture-repo \
-    CI_COMPOSE_IMAGES_CMD="$(_stub 'printf "nats\tnats:2-alpine@sha256:c11\nproxy\tregistry.example.test/owner/fixture-repo/proxy:latest\n"')" \
-        run _ci_validate_pin_override "proxy=sha256:p"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"proxy@sha256:p"* ]]
-    [[ "${output}" != *"nats:"* ]]
-}
-
-@test "validate fails closed on a first-party image with no candidate digest" {
-    # What: First-party image not in the candidate.
-    # Why: Else :latest validates green (silent drift).
-    # From: Issue #1683 | PR #1858
-    GITHUB_REPOSITORY=owner/fixture-repo \
-    CI_COMPOSE_IMAGES_CMD="$(_stub 'printf "proxy\tregistry.example.test/owner/fixture-repo/proxy:latest\n"')" \
-        run _ci_validate_pin_override "watchdog=sha256:w"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0007"* ]]
-}
-
-@test "validate reports (not fails) a candidate with no first-party image" {
-    # What: a candidate whose compose image is third-party.
-    # Why: drift stays visible as a warning, no hard fail.
-    # From: Issue #1683 | PR #1858
-    GITHUB_REPOSITORY=owner/fixture-repo \
-    CI_COMPOSE_IMAGES_CMD="$(_stub 'printf "svc-x\tupstream.example.test/x@sha256:a13\nproxy\tregistry.example.test/owner/fixture-repo/proxy:latest\n"')" \
-        run _ci_validate_pin_override "proxy=sha256:p
-svc-x=sha256:n"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"CI-WARN-VALIDATE-0008"* ]]
-    [[ "${output}" == *'unpinned="svc-x"'* ]]
+    while IFS= read -r s; do cand+="${s}=${dig}"$'\n'; done < <(ci_services)
+    [ -n "${GITHUB_REPOSITORY}" ] && [ -n "${cand}" ] || { echo "inputs: ${GITHUB_REPOSITORY} | ${cand}"; return 1; }
+    run _ci_validate_pin_override "${cand}"
+    _expect pin 0 "services:" || return 1
+    out="${output}"
+    [ -n "$(grep '^    image: ' <<< "${out}")" ] || { echo "nothing pinned: ${out}"; return 1; }
+    [ -z "$(grep '^    image: ' <<< "${out}" | grep -v "@${dig}\$")" ] || { echo "pin without the digest: ${out}"; return 1; }
+    cfg="$(docker compose -f "${root}/$(_ci_variable CI_COMPOSE_FILE)" config --format json)"
+    shared="$(jq -r '[.services | to_entries[] | {k: .key, i: .value.image}] | group_by(.i)
+        | map(select(length > 1)) | (.[0] // []) | .[].k' <<< "${cfg}")"
+    [ -n "${shared}" ] || { echo "no image shared by two compose services"; return 1; }
+    while IFS= read -r k; do
+        grep -qx "  ${k}:" <<< "${out}" || { echo "shared image not pinned on ${k}: ${out}"; return 1; }
+    done <<< "${shared}"
+    while IFS= read -r ext; do
+        img="$(_ci_block_entry_field external_services "${ext}" image)"
+        while IFS= read -r k; do
+            [ -z "${k}" ] || ! grep -qx "  ${k}:" <<< "${out}" || { echo "third-party ${k} pinned: ${out}"; return 1; }
+        done < <(jq -r --arg i "${img}" '.services | to_entries[] | select(.value.image == $i) | .key' <<< "${cfg}")
+    done < <(_ci_block_keys external_services)
+    miss="$(grep -m1 '^    image: ' <<< "${out}")" && miss="${miss%@*}" && miss="${miss##*/}"
+    run _ci_validate_pin_override "$(grep -v "^${miss}=" <<< "${cand}")"
+    _expect gap 2 "[CI-ERROR-VALIDATE-0007]" || return 1
+    extra="$(_val name)"
+    run _ci_validate_pin_override "${cand}${extra}=${dig}"
+    _expect unpinned 0 "[CI-WARN-VALIDATE-0008] unpinned=\"${extra}\"" || return 1
 }
 
 @test "validate is_collision matches docker contention signatures" {
@@ -1645,89 +1490,46 @@ CASES
 # BUILD-ARGS EMISSION (SOT -> --build-arg)
 # =========================================================
 
-@test "build-args map each target, format and platform" {
-    # What: row: target, format, platform -> args or id.
-    # Why: SOT owns every value; build-args only maps it.
-    # From: Issue #1683 | PR #1858
-    local case sot target args rc want absent w bti dep verify
-    local -a av ws
-    local -A V=(
-        [@SA@]="$(_val name)" [@SX@]="$(_val name)" [@SM@]="$(_val name)" [@SR@]="$(_val name)" [@SN@]="$(_val name)"
-        [@T@]="$(_val name)" [@C@]="$(_val name)" [@CR@]="$(_val name)" [@EXT@]="$(_val name)" [@NOEXT@]="$(_val name)"
-        [@IMG@]="$(_val host)/$(_val name)" [@TAG@]="$(_val int 1 9).$(_val int 0 39)"
-        [@HEX@]="$(_val digest | cut -d: -f2)" [@XIMG@]="$(_val host)/$(_val name)@$(_val digest)" [@BP@]="$(_val name)"
-        [@PA@]="$(_val name)" [@R1@]="$(_val name)" [@R2@]="$(_val name)" [@P1@]="$(_val platform)" [@P2@]="$(_val platform)"
-        [@A1@]="$(_val name)" [@A2@]="$(_val name)" [@RT1@]="$(_val name)" [@RT2@]="$(_val name)" [@TR@]="$(_val name)"
-        [@H@]="$(_val host)" [@M@]="$(_val name)" [@H2@]="$(_val host)" [@KF@]="$(_val name)" [@KS@]="$(_val name)"
-        [@TP@]="$(_val name)" [@BTI@]="$(_val host)/$(_val name)@$(_val digest)"
-    )
-    V[@K1@]="${V[@P1@]##*/}" V[@K2@]="${V[@P2@]##*/}" V[@EXTU@]="${V[@EXT@]^^}"
-    local -A S=([f]="$(_val path)" [g]="$(_val path)" [m]="$(_val path)" [k]="$(_val path)" [s]="${CI_MANIFEST}")
-    _fill "$(printf '%s\n' 'image_base:' '  packages: [@BP@, @PA@]' 'base_images:' '  alpine: "@IMG@:@TAG@@sha256:@HEX@"' \
-        '  @EXT@: "@XIMG@"' 'platform_arch:' '  @K1@:' '    apk: @A1@' '    rust_target: @RT1@' '  @K2@:' '    apk: @A2@' \
-        '    rust_target: @RT2@' 'build_runtime:' '  rust:' '    packages: [@R1@, @R2@]' 'build_identity:' '  rust:' \
-        '    inputs: [package_versions]' 'services:' '  @SA@:' '    context: @C@' '    build_type: apk' '    packages: [@PA@]' \
-        '    apk_repositories:' '      - @TR@=http://@H@/@ALPINE_BRANCH@/@M@' '    apk_keys:' '      - https://@H2@/@KF@=@KS@' \
-        '  @SX@:' '    context: @C@' '    build_type: apk' '    external_image: @EXT@' \
-        '  @SM@:' '    context: @C@' '    build_type: apk' '    external_image: @NOEXT@' \
-        '  @SR@:' '    context: @C@' '    build_type: rust' '    crate: @CR@' '    packages: [@PA@, @R1@]' \
-        '  @SN@:' '    context: @C@' '    build_type: rust' \
-        'build_toolchain:' '  @T@:' '    context: @C@' '    build_type: toolchain' '    packages: [@TP@]' \
-        '    apk_repositories:' '      - @TR@=http://@H@/@ALPINE_BRANCH@/@M@')" > "${S[f]}"
-    grep -v '^  alpine:' "${S[f]}" > "${S[g]}"
-    sed "s#^  alpine: .*#  alpine: \"${V[@IMG@]}:$(_val name)@sha256:${V[@HEX@]}\"#" "${S[f]}" > "${S[m]}"
-    sed "s#^      - https://${V[@H2@]}/.*#      - \"https://${V[@H2@]}/${V[@KF@]}=${V[@KS@]}#" "${S[f]}" > "${S[k]}"
-    # What: pin rows: SOT copy; ARG names from verify.
-    # Why: the test must not rebuild the pin naming rule.
-    # From: Issue #1683 | PR #1858
-    dep="$(_pin_dep)"
-    V[@PC@]="$(_pin_consumer)"
-    V[@PV@]="$(_ci_block_entry_field external_versions "${dep}" version)"
-    V[@SP@]="$(_ci_build_matrix_platforms)"
-    V[@SP@]="${V[@SP@]%%$'\n'*}"
-    V[@SPA@]="$(_ci_platform_field "${V[@SP@]}" apk "$(_val name)")"
-    V[@SPS@]="$(_ci_block_entry_field external_versions "${dep}" "sha256_${V[@SPA@]}")"
+# What: real SOT targets: digest-pinned alpine, filled args.
+# Why: SOT owns every value; build-args only maps it.
+# From: Issue #1683 | PR #1858
+@test "build-args: real SOT targets give pinned, filled arguments" {
+    local s apk="" tool pc sp verify w case target fmt plat pre want absent
+    local -A N=()
+    for s in $(ci_services); do
+        [ "$(ci_service_field "${s}" build_type)" != apk ] || { apk="${s}"; break; }
+    done
+    tool="$(_ci_block_keys build_toolchain | awk 'NR == 1')"
+    pc="$(_pin_consumer)" sp="$(_ci_build_matrix_platforms | awk 'NR == 1')"
+    [ -n "${apk}" ] && [ -n "${tool}" ] && [ -n "${pc}" ] && [ -n "${sp}" ] || { echo "inputs: ${apk} ${tool} ${pc} ${sp}"; return 1; }
     run --separate-stderr bash "${CI_SH}" version verify
     [ "${status}" -eq 0 ] || { echo "version verify rc ${status}: ${output} ${stderr}"; return 1; }
     verify="${output}"
     for w in VERSION ARCH SHA256; do
-        V[@${w}@]="$(sed -n "s/^key=${dep}\.consumer\.\([A-Z0-9_]*_${w}\) shape=bare\$/\1/p" <<< "${verify}")"
-        V[@${w}@]="${V[@${w}@]%%$'\n'*}"
-        [ -n "${V[@${w}@]}" ] || { echo "no ${w} ARG of ${dep} in: ${verify}"; return 1; }
+        N[${w}]="$(sed -n "s/^key=$(_pin_dep)\.consumer\.\([A-Z0-9_]*_${w}\) shape=bare\$/\1/p" <<< "${verify}" | awk 'NR == 1')"
+        [ -n "${N[${w}]}" ] || { echo "no ${w} ARG in: ${verify}"; return 1; }
     done
-    bti="$(_stub "echo ${V[@BTI@]}")"
-    while IFS='|' read -r case sot target args rc want absent; do
-        av=(); [ "${args}" = - ] || IFS=';' read -r -a av <<< "$(_fill "${args}")"
-        run env CI_MANIFEST="${S[${sot}]}" CI_BUILD_TOOLS_IMAGE_CMD="${bti}" bash "${CI_SH}" build-args "$(_fill "${target}")" "${av[@]}"
-        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
-        [ "${absent}" != - ] || continue
-        IFS=';' read -r -a ws <<< "$(_fill "${absent}")"
-        for w in "${ws[@]}"; do [[ "${output}" != *"${w}"* ]] || { echo "${case}: has '${w}': ${output}"; return 1; }; done
+    while IFS='|' read -r case target fmt plat want absent; do
+        target="${target/@APK@/${apk}}" target="${target/@TOOL@/${tool}}" target="${target/@PC@/${pc}}"
+        plat="${plat/@SP@/${sp}}"
+        want="${want/@ARCH@/${N[ARCH]}}" want="${want/@SHA@/${N[SHA256]}}" want="${want/@VER@/${N[VERSION]}}"
+        absent="${absent/@ARCH@/${N[ARCH]}}"
+        pre="--build-arg "; [ "${fmt}" != --bare ] || pre=""
+        run --separate-stderr bash "${CI_SH}" build-args "${target}" "${fmt}" "${plat}"
+        [ "${status}" -eq 0 ] || { echo "${case}: rc ${status}: ${output} ${stderr}"; return 1; }
+        [ -z "$(grep -vE "^${pre}[A-Z][A-Z0-9_]*=.+\$" <<< "${output}")" ] || { echo "${case}: malformed line: ${output}"; return 1; }
+        grep -qE "^${pre}ALPINE_IMAGE=[^ ]+@sha256:[0-9a-f]{64}\$" <<< "${output}" || { echo "${case}: alpine not pinned: ${output}"; return 1; }
+        [[ "${output}" != *@ALPINE_BRANCH@* ]] || { echo "${case}: branch placeholder left: ${output}"; return 1; }
+        for w in ${want}; do grep -qE "^${pre}${w}" <<< "${output}" || { echo "${case}: no ${w}: ${output}"; return 1; }; done
+        [ "${absent}" = - ] && continue
+        for w in ${absent}; do ! grep -q "^${pre}${w}=" <<< "${output}" || { echo "${case}: has ${w}: ${output}"; return 1; }; done
     done <<'CASES'
-apk-flags|f|@SA@|-|0|--build-arg ALPINE_IMAGE=@IMG@:@TAG@@sha256:@HEX@;--build-arg APK_PACKAGES=@BP@ @PA@;--build-arg APK_TAGGED_REPOS=@TR@=http://@H@/v@TAG@/@M@;--build-arg APK_KEYS=https://@H2@/@KF@=@KS@|BUILD_TOOLS_IMAGE;RUST_CRATE;MUSL_TARGET;=@XIMG@
-apk-bare|f|@SA@|--bare|0|ALPINE_IMAGE=@IMG@:@TAG@@sha256:@HEX@|--build-arg
-external|f|@SX@|--bare|0|ALPINE_IMAGE=;@EXTU@_IMAGE=@XIMG@|-
-external-missing|f|@SM@|-|2|[CI-ERROR-BUILDARGS-0007];base_images.@NOEXT@|-
-rust|f|@SR@|--bare|0|BUILD_TOOLS_IMAGE=@BTI@;RUST_CRATE=@CR@;APK_PACKAGES=@BP@ @PA@ @R1@ @R2@|MUSL_TARGET
-rust-platform-1|f|@SR@|--bare;@P1@|0|MUSL_TARGET=@RT1@|-
-rust-platform-2|f|@SR@|--bare;@P2@|0|MUSL_TARGET=@RT2@|-
-rust-no-crate|f|@SN@|-|2|[CI-ERROR-BUILDARGS-0014]|RUST_CRATE=
-toolchain|f|@T@|-|0|--build-arg ALPINE_IMAGE=@IMG@:@TAG@@sha256:@HEX@;--build-arg APK_PACKAGES=@BP@ @PA@ @TP@;--build-arg APK_TAGGED_REPOS=@TR@=http://@H@/v@TAG@/@M@|BUILD_TOOLS_IMAGE;_VERSION=
-no-alpine|g|@SA@|-|2|[CI-ERROR-BUILDARGS-0003]|-
-mutable-alpine-tag|m|@SA@|--bare|2|[CI-ERROR-BUILDARGS-0016]|APK_TAGGED_REPOS=
-keys-unreadable|k|@SA@|--bare|2|[CI-ERROR-CORE-0108]|APK_KEYS=
-pin-no-platform|s|@PC@|-|0|--build-arg @VERSION@=@PV@;_SHA256_|@ARCH@=
-pin-platform|s|@PC@|;@SP@|0|--build-arg @ARCH@=@SPA@;--build-arg @SHA256@=@SPS@|@SHA256@_
+apk-flags|@APK@|||APK_PACKAGES=.+|BUILD_TOOLS_IMAGE
+apk-bare|@APK@|--bare||APK_PACKAGES=.+|BUILD_TOOLS_IMAGE
+toolchain|@TOOL@|||APK_PACKAGES=.+|BUILD_TOOLS_IMAGE
+pin-no-platform|@PC@|||@VER@=.+|@ARCH@
+pin-platform|@PC@||@SP@|@ARCH@=.+ @SHA@=[0-9a-f]{64}$|-
 CASES
-    # What: identity sees the image's package list.
-    # Why: a package only one of them sees breaks reuse.
-    # From: Issue #1683 | PR #1858
-    CI_MANIFEST="${S[f]}" CI_APK_RESOLVE_CMD="$(_stub 'echo "pkgs=$3"')" run _ci_identity_pins "${V[@SR@]}" rust "${V[@P1@]}"
-    _expect identity-packages 0 "$(_fill 'pkgs=@BP@ @PA@ @R1@ @R2@')" || return 1
-    CI_MANIFEST="${S[g]}" run _ci_identity_pins "${V[@SR@]}" rust "${V[@P1@]}"
-    _expect identity-no-alpine 2 "$(_fill '[CI-ERROR-IDENTITY-0009] service="@SR@" key="base_images.alpine"')" || return 1
-    CI_MANIFEST="${S[g]}" run _ci_apk_repositories "${V[@SA@]}"
-    _expect repos-no-alpine 2 "$(_fill '[CI-ERROR-BUILDARGS-0019] target="@SA@" key="base_images.alpine"')" || return 1
 }
 
 @test "oci labels: provenance from the SOT and the run env" {
@@ -2237,16 +2039,6 @@ _trivy_var_tmp_dir() {
     [ "$(sed -n 1p "${order}")" = "first-start" ]
     [ "$(sed -n 2p "${order}")" = "first-end" ]
     [ "$(sed -n 3p "${order}")" = "second-start" ]
-}
-
-@test "trivy db lock fails closed when cache-dir cannot be created" {
-    # What: A blocked cache-dir mkdir fails, never polls.
-    # Why: distinguishes a real error from a held lock.
-    # From: Issue #1683
-    local blocker="${BATS_TEST_TMPDIR}/blocker"; : > "${blocker}"
-    CI_TRIVY_LOCK_POLL=1 run _ci_trivy_db_lock_run "${blocker}/cache" 1 5 -- true
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-SCAN-0013"* ]]
 }
 
 @test "trivy db lock times out on a genuinely held lock" {

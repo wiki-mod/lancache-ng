@@ -131,16 +131,24 @@ _ci_mktemp() {
 # Why: bare mktemp and tools then use disk, not tmpfs.
 # From: Issue #1683 | PR #1858
 _ci_tmp_init() {
-    case "${CI_TMPDIR}" in
-        /var/tmp|/var/tmp/*) ;;
-        *) ci_log "[CI-ERROR-CORE-0006]" "reason=\"CI temp root must be under /var/tmp, not tmpfs /tmp\" got=\"${CI_TMPDIR}\""; return 2 ;;
-    esac
-    local out
-    if ! out="$(mkdir -p "${CI_TMPDIR}" 2>&1)"; then
-        ci_error "[CI-ERROR-CORE-0111]" "dir=\"${CI_TMPDIR}\" reason=\"CI temp root not created\"" "${out}"
+    local real out
+    # What: judge the resolved path, not the given text.
+    # Why: a .. or a symlink must not lead to tmpfs /tmp.
+    # From: Issue #1683 | PR #1858
+    if ! real="$(realpath -m -- "${CI_TMPDIR}" 2>&1)"; then
+        ci_error "[CI-ERROR-CORE-0131]" "dir=\"${CI_TMPDIR}\" reason=\"CI temp root not resolvable\"" "${real}"
         return 2
     fi
-    export TMPDIR="${CI_TMPDIR}"
+    case "${real}" in
+        /var/tmp|/var/tmp/*) ;;
+        *) ci_log "[CI-ERROR-CORE-0006]" "reason=\"CI temp root must be under /var/tmp, not tmpfs /tmp\" got=\"${CI_TMPDIR}\" real=\"${real}\""; return 2 ;;
+    esac
+    if ! out="$(mkdir -p "${real}" 2>&1)"; then
+        ci_error "[CI-ERROR-CORE-0111]" "dir=\"${real}\" reason=\"CI temp root not created\"" "${out}"
+        return 2
+    fi
+    CI_TMPDIR="${real}"
+    export TMPDIR="${real}"
 }
 
 # What: true on a self-hosted runner (RUNNER_ENVIRONMENT).
@@ -2256,7 +2264,7 @@ _ci_sccache_env() {
     # Why: a shared port lets parallel runs collide.
     # From: Issue #1683 | PR #1858
     local probe prc=0 sock_dir step=1 next
-    sock_dir="$(_ci_mktemp -d "${CI_TMPDIR:-/var/tmp}/sccache-srv.XXXXXX")" || return 2
+    sock_dir="$(_ci_mktemp -d "${CI_TMPDIR}/sccache-srv.XXXXXX")" || return 2
     export SCCACHE_SERVER_UDS="${sock_dir}/s${step}.sock"
     probe="$(sccache --start-server 2>&1)" || prc=$?
     [ "${prc}" -eq 0 ] && return 0
@@ -3972,9 +3980,8 @@ ci_cmd_scan() {
     [ -n "${service}" ] || { ci_log "[CI-ERROR-SCAN-0001]" "reason=\"service arg required\""; return 2; }
     [ -n "${digest}" ] || { ci_log "[CI-ERROR-SCAN-0002]" "reason=\"digest arg required\""; return 2; }
     _ci_require_ghcr_auth || return "$?"
-    local scan_cmd="${CI_SCAN_CMD:-_ci_trivy_scan}"
     local raw status
-    if raw="$(TMPDIR="${CI_TMPDIR}" "${scan_cmd}" "${service}" "${digest}" 2>&1)"; then status=0; else status=$?; fi
+    if raw="$(TMPDIR="${CI_TMPDIR}" _ci_trivy_scan "${service}" "${digest}" 2>&1)"; then status=0; else status=$?; fi
     # What: DB-unavailable is not a finding; escalate it.
     # Why: A DB outage must not read as a finding.
     # From: Issue #1683
@@ -4318,14 +4325,10 @@ _ci_stack_candidate() {
     [ -z "${out}" ] || printf '%s\n' "${out}"
 }
 
-# What: read accepted stack candidate (injectable).
-# Why: exact-digest candidate (§48); tests/prod differ.
+# What: read the accepted stack candidate for this event.
+# Why: exact-digest candidate (§48); a PR reads its own.
 # From: Issue #1683
 _ci_stack_candidate_source() {
-    if [ -n "${CI_STACK_CANDIDATE_CMD:-}" ]; then
-        "${CI_STACK_CANDIDATE_CMD}" "$@"
-        return "$?"
-    fi
     if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
         _ci_stack_candidate_pr
         return "$?"
@@ -4357,7 +4360,7 @@ _ci_promote_lock_ref() {
 # What: Default promote lock: take the channel lock.
 # Why: the cross-host CAS mutex, reused for promotion.
 # From: Issue #1683
-_ci_default_promote_lock() {
+_ci_promote_lock() {
     local remote max backoff stale ref
     remote="$(_ci_git_remote)" || return 2
     max="$(_ci_variable CI_PROMOTE_LOCK_MAX)" || return 2
@@ -4371,7 +4374,7 @@ _ci_default_promote_lock() {
 # What: Default promote unlock: free the channel lock.
 # Why: the same holder note the acquire path used.
 # From: Issue #1683
-_ci_default_promote_unlock() {
+_ci_promote_unlock() {
     local remote ref
     remote="$(_ci_git_remote)" || return 2
     ref="$(_ci_promote_lock_ref "$1")" || return 2
@@ -4381,7 +4384,7 @@ _ci_default_promote_unlock() {
 # What: Default channel move: point svc:channel at digest.
 # Why: shares the one index writer; moves, never builds.
 # From: Issue #1683
-_ci_default_channel_move() {
+_ci_promote_move() {
     local svc="$1" channel="$2" digest="$3" repo registry
     repo="$(_ci_repo)" || return 2
     registry="$(_ci_registry)" || return 2
@@ -4391,7 +4394,7 @@ _ci_default_channel_move() {
 # What: Default channel readback: the channel's digest.
 # Why: one digest reader; empty output means unknown.
 # From: Issue #1683
-_ci_default_channel_readback() {
+_ci_channel_readback() {
     local svc="$1" channel="$2" repo registry digest
     repo="$(_ci_repo)" || return 2
     registry="$(_ci_registry)" || return 2
@@ -4426,20 +4429,6 @@ _ci_index_complete() {
             return 2
         fi
     done <<< "${children}"
-}
-
-# What: Resolve the move backend, mock or default.
-# Why: one dispatch point for the channel move.
-# From: Issue #1683
-_ci_promote_move() {
-    "${CI_PROMOTE_MOVE_CMD:-_ci_default_channel_move}" "$@"
-}
-
-# What: Resolve the readback backend, mock or default.
-# Why: one dispatch point for the channel readback.
-# From: Issue #1683
-_ci_channel_readback() {
-    "${CI_CHANNEL_READBACK_CMD:-_ci_default_channel_readback}" "$@"
 }
 
 # What: Move every candidate ref and read each back.
@@ -4519,7 +4508,7 @@ ci_cmd_promote() {
         printf 'channel=%s result=already-promoted services=%s\n' "${channel}" "$(printf '%s\n' "${cand}" | grep -c '=')"
         return 0
     fi
-    if ! "${CI_PROMOTE_LOCK_CMD:-_ci_default_promote_lock}" "${channel}"; then
+    if ! _ci_promote_lock "${channel}"; then
         ci_log "[CI-ERROR-PROMOTE-0010]" "channel=\"${channel}\" reason=\"could not acquire promotion lock\""
         return 2
     fi
@@ -4527,7 +4516,7 @@ ci_cmd_promote() {
     # Why: a failed move must never leak the promotion lock.
     local rc
     if _ci_promote_move_all "${channel}" "${cand}"; then rc=0; else rc=$?; fi
-    "${CI_PROMOTE_UNLOCK_CMD:-_ci_default_promote_unlock}" "${channel}" || ci_log "[CI-WARN-PROMOTE-0011]" "channel=\"${channel}\" reason=\"lock release failed\""
+    _ci_promote_unlock "${channel}" || ci_log "[CI-WARN-PROMOTE-0011]" "channel=\"${channel}\" reason=\"lock release failed\""
     [ "${rc}" -eq 0 ] || return "${rc}"
     printf 'channel=%s result=promoted services=%s\n' "${channel}" "$(printf '%s\n' "${cand}" | grep -c '=')"
 }
@@ -4554,7 +4543,7 @@ _ci_promote_targets_for_ref() {
 }
 
 # What: Resolve a git ref's current remote tip SHA.
-# Why: one ls-remote reader; injectable for tests.
+# Why: one ls-remote reader for every ref tip.
 # From: Issue #1683
 _ci_ref_tip() {
     local out remote
@@ -4583,7 +4572,7 @@ ci_cmd_promote_ref() {
     # What: moved branch tip means newer run supersedes.
     # Why: determinism (§4); never promote stale blind.
     if [[ "${ref}" == refs/heads/* ]]; then
-        if ! tip="$("${CI_PROMOTE_TIP_CMD:-_ci_ref_tip}" "${ref}")"; then
+        if ! tip="$(_ci_ref_tip "${ref}")"; then
             ci_log "[CI-ERROR-PROMOTE-0013]" "ref=\"${ref}\" reason=\"could not resolve ref tip; refusing blind promote\""
             return 2
         fi
@@ -4917,9 +4906,9 @@ _ci_release_notes_block() {
 # Why: a repeat reuses or compares, it never re-uploads
 # From: Issue #1683 | PR #1858
 _ci_release_asset_get() {
-    local tag="$1" name="$2" dir="$3" gh="${CI_RELEASE_GH_CMD:-gh}" repo out rc=0
+    local tag="$1" name="$2" dir="$3" repo out rc=0
     repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
-    out="$(_ci_retry github-read "${gh}" release download "${tag}" --repo "${repo}" --pattern "${name}" --dir "${dir}")" || rc=$?
+    out="$(_ci_retry github-read gh release download "${tag}" --repo "${repo}" --pattern "${name}" --dir "${dir}")" || rc=$?
     [ "${rc}" -ne 1 ] || return 1
     if [ "${rc}" -ne 0 ] || [ ! -s "${dir}/${name}" ]; then
         ci_error "[CI-ERROR-RELEASE-0044]" "tag=\"${tag}\" asset=\"${name}\" rc=${rc} reason=\"release asset read failed\"" "${out}"
@@ -4931,10 +4920,10 @@ _ci_release_asset_get() {
 # Why: AG-REL-014 never replace; AG-WF-031 read back
 # From: Issue #1683 | PR #1858
 _ci_release_asset_put() {
-    local tag="$1" file="$2" gh="${CI_RELEASE_GH_CMD:-gh}" repo dir rc=0
+    local tag="$1" file="$2" repo dir rc=0
     repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
     [ -s "${file}" ] || { ci_log "[CI-ERROR-RELEASE-0004]" "file=\"${file}\" reason=\"asset file missing or empty\""; return 2; }
-    _ci_retry github-api "${gh}" release upload "${tag}" "${file}" --repo "${repo}" > /dev/null || return 2
+    _ci_retry github-api gh release upload "${tag}" "${file}" --repo "${repo}" > /dev/null || return 2
     dir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-asset.XXXXXX")" || return 2
     _ci_release_asset_get "${tag}" "${file##*/}" "${dir}" || rc=$?
     if [ "${rc}" -ne 0 ] || ! cmp -s "${file}" "${dir}/${file##*/}"; then
@@ -4949,9 +4938,9 @@ _ci_release_asset_put() {
 # Why: the repeat check and the create read back agree
 # From: Issue #1683 | PR #1858
 _ci_release_state() {
-    local gh="$1" repo="$2" tag="$3" out err rc=0
+    local repo="$1" tag="$2" out err rc=0
     err="$(_ci_mktemp "${CI_TMPDIR}/ci-release-view.XXXXXX")" || return 2
-    out="$("${gh}" release view "${tag}" --repo "${repo}" --json body,isPrerelease 2>"${err}")" || rc=$?
+    out="$(gh release view "${tag}" --repo "${repo}" --json body,isPrerelease 2>"${err}")" || rc=$?
     # What: only gh's "release not found" means absent.
     # Why: auth/network errors are UNKNOWN, not "absent".
     # From: Issue #1683 | PR #1858
@@ -4971,14 +4960,14 @@ _ci_release_state() {
 ci_cmd_release_publish() {
     local tag="${1:-}"
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0003]" "reason=\"tag arg required\""; return 2; }
-    local gh="${CI_RELEASE_GH_CMD:-gh}" repo sha pre want state found body_file err mode=unchanged rc=0
+    local repo sha pre want state found body_file err mode=unchanged rc=0
     local -a create=()
     repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
     sha="$(_ci_env_required GITHUB_SHA)" || return 2
     pre="$(_ci_release_prerelease "${tag}")" || return "$?"
     _ci_require_ghcr_auth || return "$?"
     want="$(_ci_release_notes_block "${tag}")" || return "$?"
-    state="$(_ci_release_state "${gh}" "${repo}" "${tag}")" || rc=$?
+    state="$(_ci_release_state "${repo}" "${tag}")" || rc=$?
     [ "${rc}" -le 1 ] || return 2
     if [ "${rc}" -eq 1 ]; then
         mode=published
@@ -4988,7 +4977,7 @@ ci_cmd_release_publish() {
             rm -f "${body_file}"
             return 2
         fi
-        create=("${gh}" release create "${tag}" --repo "${repo}" --title "${tag}" --notes-file "${body_file}" --target "${sha}")
+        create=(gh release create "${tag}" --repo "${repo}" --title "${tag}" --notes-file "${body_file}" --target "${sha}")
         [ "${pre}" != true ] || create+=(--prerelease)
         rc=0; _ci_retry github-api "${create[@]}" > /dev/null || rc=$?
         rm -f "${body_file}"
@@ -4999,7 +4988,7 @@ ci_cmd_release_publish() {
         # What: read the new release back before it counts.
         # Why: AG-WF-031: every GitHub write is read back
         # From: Issue #1683 | PR #1858
-        if ! state="$(_ci_release_state "${gh}" "${repo}" "${tag}")"; then
+        if ! state="$(_ci_release_state "${repo}" "${tag}")"; then
             ci_log "[CI-ERROR-RELEASE-0037]" "tag=\"${tag}\" reason=\"created release not readable\""
             return 2
         fi
@@ -5198,7 +5187,7 @@ ci_cmd_cut_release_tag() {
         return 2
     fi
     next_tag="$(_ci_next_patch_tag "${base_tag}")" || return "$?"
-    if ! tip="$("${CI_PROMOTE_TIP_CMD:-_ci_ref_tip}" "${rel_ref}")"; then
+    if ! tip="$(_ci_ref_tip "${rel_ref}")"; then
         ci_log "[CI-ERROR-RELEASE-0016]" "ref=\"${rel_ref}\" reason=\"could not resolve release ref tip; not cutting blind\""
         return 2
     fi
@@ -5585,13 +5574,9 @@ _ci_validation_proxy_probe_url() {
 }
 
 # What: Emit "service<TAB>image" for each compose service.
-# Why: Injectable so pin/drift needs no daemon in tests.
+# Why: pin and drift checks read one compose render.
 # From: Issue #1683 | PR #1858
 _ci_validate_compose_images() {
-    if [ -n "${CI_COMPOSE_IMAGES_CMD:-}" ]; then
-        "${CI_COMPOSE_IMAGES_CMD}"
-        return "$?"
-    fi
     local raw
     raw="$(_ci_validate_config_json)" || return 2
     jq -r '.services | to_entries[] | [.key, .value.image] | @tsv' <<< "${raw}"
@@ -7039,7 +7024,7 @@ _ci_validate_probes() {
 # What: Validate the candidate on one live prod stack.
 # Why: One up, all checks, one teardown (AG-VAL-027).
 # From: Issue #1683 | PR #1858
-_ci_default_validate() {
+_ci_validate_stack() {
     local candidate="$1" reservation subnet holder project rc=0 up_out
     local net_ovr pin_ovr
     reservation="$(_ci_validate_reserve)" || rc=$?
@@ -7093,12 +7078,12 @@ _ci_default_validate() {
     return "${rc}"
 }
 
-# What: Run stack validation via the wired backend.
-# Why: Default runs the real stack; tests inject a stub.
+# What: run the stack validation, print the verdict.
+# Why: promote reads STACK_ACCEPTED; a failure keeps rc.
 # From: Issue #1683 | PR #1858
 _ci_validate_run() {
     local cand="$1" rc=0
-    "${CI_VALIDATE_CMD:-_ci_default_validate}" "${cand}" || rc=$?
+    _ci_validate_stack "${cand}" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         ci_log "[CI-ERROR-VALIDATE-0004]" "reason=\"stack validation failed\""
         return "${rc}"
@@ -7113,7 +7098,7 @@ ci_cmd_validate() {
     local cand
     _ci_validate_host_tools || return 2
     if ! cand="$(_ci_stack_candidate)"; then
-        ci_log "[CI-ERROR-VALIDATE-0001]" "reason=\"no stack candidate (CI_STACK_CANDIDATE_CMD unset/failed)\""
+        ci_log "[CI-ERROR-VALIDATE-0001]" "reason=\"no stack candidate (candidate read failed)\""
         return 2
     fi
     if [ -z "${cand}" ]; then
@@ -7225,7 +7210,7 @@ _ci_bake_env_patterns() {
 # What: env lines + count of the proxy CA in the bundle.
 # Why: the bake guard inspects the real built image.
 # From: Issue #1781 | PR #1858
-_ci_default_bake_inspect() {
+_ci_bake_inspect() {
     local image="$1" envs bundle marker line n=0
     envs="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${image}" 2>&1)" || { printf '%s\n' "${envs}"; return 2; }
     while IFS= read -r line; do
@@ -7249,7 +7234,7 @@ _ci_bake_check() {
         return 2
     fi
     _ci_require_ghcr_auth || return 2
-    if raw="$("${CI_BAKE_INSPECT_CMD:-_ci_default_bake_inspect}" "${image}" 2>&1)"; then status=0; else status=$?; fi
+    if raw="$(_ci_bake_inspect "${image}" 2>&1)"; then status=0; else status=$?; fi
     if [ "${status}" -ne 0 ]; then
         ci_error "[CI-ERROR-VARIABLES-0005]" "image=\"${image}\" reason=\"image inspect failed\"" "${raw}"
         return 2
@@ -7525,7 +7510,7 @@ _ci_service_build_args() {
         # Why: toolchain_digest keys it; no network in id.
         # From: Issue #1683 | PR #1858
         if [ "${with_toolchain}" = yes ]; then
-            val="$("${CI_BUILD_TOOLS_IMAGE_CMD:-_ci_build_tools_resolve_image}")" || return 2
+            val="$(_ci_build_tools_resolve_image)" || return 2
             [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0009]" "arg=\"BUILD_TOOLS_IMAGE\" service=\"${service}\" reason=\"empty resolved build-tools image; FAIL CLOSED\""; return 2; }
             out="${out}${prefix}BUILD_TOOLS_IMAGE=${val}"$'\n'
         fi
