@@ -42,10 +42,15 @@ jobs:
   # From: Issue #1683 | PR #1858
   platform:
     name: platform
+    # What: the one literal runner/timeout; emits the rest.
+    # Why: ci.sh can only pick a runner once one runs it.
+    # From: Issue #1683 | PR #1858
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
       image: ${{ steps.resolve.outputs.image }}
+      runner: ${{ steps.jobs.outputs.runner }}
+      timeouts: ${{ steps.jobs.outputs.timeouts }}
     # What: one mutable entry: the current_dev channel.
     # Why: ci.sh cannot run before a container exists.
     # From: Issue #1683 | PR #1858
@@ -68,6 +73,9 @@ jobs:
       - name: Resolve the build-tools image
         id: resolve
         run: bash .github/scripts/ci.sh build-tools resolve-image
+      - name: Resolve the job settings
+        id: jobs
+        run: bash .github/scripts/ci.sh job-settings
 
   # What: reap unreachable artifacts vs protected roots.
   # Why: reachability decides, not age (§78).
@@ -75,8 +83,8 @@ jobs:
   gc:
     name: gc
     needs: platform
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['gc'] }}
     container:
       image: ${{ needs.platform.outputs.image }}
       credentials: *ghcr_credentials
@@ -96,8 +104,8 @@ jobs:
   orphaned-branches:
     name: orphaned-branches
     needs: platform
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['orphaned-branches'] }}
     permissions:
       contents: read
       packages: read

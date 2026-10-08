@@ -23,7 +23,14 @@ jobs:
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+    # What: runner and timeout equal the SOT root-job values
+    # Why: a root job cannot read job-settings outputs
+    # From: Issue #1683 | PR #1858
     runs-on: ubuntu-latest
+    timeout-minutes: 360
+    # What: read scopes; actions read gives Claude CI logs
+    # Why: the action swaps an OIDC token for its app token
+    # From: PR #1805
     permissions:
       contents: read
       pull-requests: read

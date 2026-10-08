@@ -71,7 +71,6 @@ services:
       - known-good=scripts/lib
     build_type: apk
     final_base: alpine
-    runner: light
     # What: final-image apk packages; nginx from nginx.org.
     # Why: AG-KD-007: stream module only in nginx.org build.
     # From: Issue #1683 | PR #1858
@@ -108,7 +107,6 @@ services:
     # From: Issue #1683 | PR #1858
     crate: nats-subscriber
     final_base: alpine
-    runner: heavy
     # What: final-image apk packages; the SOT owns the list.
     # Why: consumers derive; no hardcoding (AG-CI-006)
     # From: Issue #1683
@@ -128,7 +126,6 @@ services:
     # From: Issue #1683 | PR #1858
     crate: lancache-watchdog
     final_base: alpine
-    runner: heavy
   dhcp:
     context: services/dhcp
     labels: [dhcp, kea]
@@ -139,7 +136,6 @@ services:
       - shared-secret=scripts/lib
     build_type: apk
     final_base: alpine
-    runner: light
     # What: final-image apk packages; the SOT owns the list.
     # Why: consumers derive; no hardcoding (AG-CI-006)
     # From: Issue #1683
@@ -167,7 +163,6 @@ services:
       - known-good=scripts/lib
     build_type: apk
     final_base: alpine
-    runner: light
     # What: final-image apk packages; the SOT owns the list.
     # Why: consumers derive; no hardcoding (AG-CI-006)
     # From: Issue #1683
@@ -183,7 +178,6 @@ services:
     labels: [ntp]
     build_type: apk
     final_base: alpine
-    runner: light
     # What: final-image apk packages; the SOT owns the list.
     # Why: consumers derive; no hardcoding (AG-CI-006)
     # From: Issue #1683
@@ -203,7 +197,6 @@ services:
     build_type: apk
     external_image: fluent_bit
     final_base: alpine
-    runner: light
     # What: final-image apk packages; the SOT owns the list.
     # Why: consumers derive; no hardcoding (AG-CI-006)
     # From: Issue #1683
@@ -225,7 +218,6 @@ services:
     # From: Issue #1683 | PR #1858
     crate: lancache-ui
     final_base: alpine
-    runner: heavy
   cachehamster:
     context: services/cachehamster
     # What: Rust compile via BUILD_TOOLS_IMAGE stage.
@@ -237,7 +229,6 @@ services:
     # From: Issue #1683 | PR #1858
     crate: lancache-cachehamster
     final_base: alpine
-    runner: heavy
 
 # What: The toolchain image that builds the product stack.
 # Why: built by generic pipeline; not in stack
@@ -248,7 +239,6 @@ build_toolchain:
     labels: [build-tools]
     build_type: toolchain
     final_base: alpine
-    runner: light
     # What: apk packages installed into the toolchain image.
     # Why: SOT owns the one list; consumers read it.
     # From: Issue #1683
@@ -267,10 +257,12 @@ build_toolchain:
       - docker-cli-buildx
       - docker-cli-compose
       - gawk
+      - gcompat
       - iproute2
       - lld22
       - make
       - musl-dev
+      - openjdk21-jre-headless
       - openssl
       - openssl-dev
       - openssl-libs-static
@@ -287,15 +279,12 @@ build_toolchain:
       - shellcheck
       - sqlite
       - tcpdump
-      # What: trivy version-pinned 0.74.0-r0
-      # Why: only in edge/testing; @testing scopes it
-      # From: Issue #1683
       - trivy@testing=0.74.0-r0
       - tzdata
       - zlib-dev
       - zlib-static
-    # What: tagged apk repos (tag=url) the packages use.
-    # Why: one owner; build and resolver add the same.
+    # What: apk repos (tag=url) added by build and resolver
+    # Why: trivy is only in edge/testing; @testing scopes it
     # From: Issue #1683 | PR #1858
     apk_repositories:
       - testing=http://dl-cdn.alpinelinux.org/alpine/edge/testing
@@ -338,6 +327,7 @@ build_toolchain:
       - gzip
       - install
       - ip
+      - java
       - jq
       - ld.lld
       - make
@@ -384,6 +374,7 @@ build_toolchain:
       - dhclient --version
       - 'm="$(gcc -dumpmachine)" && [[ "${m}" == *-musl ]]'
       - trivy --version
+      - java -version
 
 # What: Runtime services not built by this project.
 # Why: Explicit out-of-build entry, no silent omission.
@@ -425,12 +416,8 @@ external_services:
 # Why: Single owner of the alpine pin, no per-file copies.
 # From: Issue #1683
 base_images:
-  alpine: "mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
+  alpine: "mirror.gcr.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6"
   fluent_bit: "cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562"
-  # What: glibc job container the CodeQL CLI runs in.
-  # Why: CodeQL's JVM needs glibc; gcompat lacks symbols.
-  # From: Issue #1683 | PR #1858
-  codeql_runtime: "mirror.gcr.io/library/buildpack-deps:noble-scm@sha256:6a78b404fc653922fe9b7717e1dc382d200517d4be146303f87d2928999192d6"
 
 # What: Pinned external tool/asset versions and checksums.
 # Why: Central version owner; consumers never re-pin.
@@ -474,6 +461,37 @@ platform_arch:
     apk: aarch64
     runner: ubuntu-24.04-arm
     rust_target: aarch64-alpine-linux-musl
+
+# What: timeout minutes per workflow job id; one owner
+# Why: root jobs keep a literal the guard holds equal
+# From: Issue #1683 | PR #1858
+ci_job_timeouts:
+  aggregate: 30
+  analyze: 120
+  assemble: 30
+  build: 90
+  cargo-audit: 30
+  checks: 30
+  claude: 360
+  close-linked-issues: 15
+  cut-release-tag: 15
+  gc: 60
+  impact: 15
+  lint: 30
+  nightly: 30
+  orphaned-branches: 15
+  plan: 30
+  platform: 15
+  project-board: 15
+  promote: 30
+  release: 30
+  release-sbom: 60
+  resolve-build-tools: 15
+  result: 15
+  scan: 60
+  test: 45
+  validate: 60
+  welcome: 15
 
 # What: Named build contexts services COPY from at build.
 # Why: A change here rebuilds every consumer, not just self.
@@ -549,11 +567,10 @@ codeql_languages:
     files: ["*.rs"]
     paths: [services/cachehamster/src, services/dns/nats-subscriber/src, services/dns/nats-subscriber/fuzz, services/ui/src, services/ui/fuzz, services/watchdog/src]
 
-# What: Release channel and retention inventory.
-# Why: Consolidates release/stack-images.yml into the SOT.
-# From: Issue #1683
+# What: release version, channels, validation and GC inputs
+# Why: AG-REL-010: one release and artifact inventory
+# From: Issue #1683 | PR #1858
 release:
-  schema: stack-images/v1
   registry: ghcr.io
   # What: current release version of the whole project.
   # Why: one owner; Cargo, lock, VERSION are synced from it.
@@ -569,9 +586,6 @@ release:
   validation_state: docs/validation-state.json
   governance_paths: [AGENTS.md, .github/AGENTS.md]
   channels:
-    sha:
-      tag: sha-<commit>
-      mutable: false
     nightly:
       mutable: true
     latest:
@@ -588,13 +602,10 @@ release:
   # Why: AG-REL-009 pre-stable default; no ci.sh literal.
   # From: Issue #1683
   default_channel: nightly
+  # What: GC grace window and the delete policy gate
+  # Why: §76: unreachable versions go only after the grace
+  # From: Issue #1683 | PR #1858
   retention:
-    minimum_stable_releases: 3
-    accepted_ordinary_roots_per_package: 10
-    channel_buffer_versions: 5
-    keep_mutable_channels: [latest, nightly]
-    keep_sha_tags_for_supported_releases: true
-    protect_release_and_rollback_digests: true
     deletion_policy: manual-or-approved-automation-only
     unaggregated_grace_minutes: 1440
 
@@ -616,6 +627,10 @@ release_notes:
   pr_section: Changelog
   skip_label: skip-changelog
   other_title: Other
+  # What: PR label that marks a deliberate CHANGELOG.md edit
+  # Why: the release flow owns the file; a label opts in
+  # From: Issue #1683 | PR #1858
+  changelog_edit_label: release
 
 # What: Release-notes groups: PR label -> heading.
 # Why: grouping is data; the first matching label wins.
@@ -777,6 +792,42 @@ pr_policy:
   # Why: the template heading is a contract, not a literal.
   # From: Issue #1683 | PR #1858
   linked_section: Linked Issues
+  # What: PR-template heading that needs a marked checkbox
+  # Why: the template heading is a contract, not a literal
+  # From: Issue #1683 | PR #1858
+  checkbox_section: Type of change
+  # What: PR authors the title and template checks skip
+  # Why: bot PRs carry generated titles and bodies
+  # From: Issue #1683 | PR #1858
+  check_exempt_authors:
+    - dependabot[bot]
+  # What: welcome text for a first issue, one line per item
+  # Why: ci.sh welcome posts it; the text is data, not code
+  # From: Issue #1683 | PR #1858
+  welcome_issue:
+    - Thanks for opening your first issue in lancache-ng.
+    - ""
+    - "Please make sure the issue includes:"
+    - "- expected behavior"
+    - "- actual behavior"
+    - "- logs or reproduction steps"
+    - "- relevant configuration without secrets"
+    - ""
+    - Do not post private keys, tokens, passwords, personal data, or private infrastructure details.
+    - Security-sensitive reports should use the project's private security reporting channel.
+  # What: welcome text for a first PR, one line per item
+  # Why: ci.sh welcome posts it; the text is data, not code
+  # From: Issue #1683 | PR #1858
+  welcome_pr:
+    - Thanks for opening your first pull request in lancache-ng.
+    - ""
+    - "Please make sure the pull request:"
+    - "- links the related issue"
+    - "- explains the user-visible behavior change"
+    - "- lists the validation that was run"
+    - "- does not include private keys, tokens, passwords, personal data, or private infrastructure details"
+    - ""
+    - Security-sensitive reports should use the project's private security reporting channel.
 
 # What: Orphan-branch sweep inputs (AG-GH-017).
 # Why: age gate and long-lived refs are data, not code.
@@ -805,7 +856,7 @@ validation:
   # What: compose services exempt from the healthcheck rule.
   # Why: some services genuinely have none of their own.
   # From: Issue #1683 | PR #1858
-  healthcheck_exempt: [dhcp-probe, syslog-logs-permissions, retention, cachehamster]
+  healthcheck_exempt: [dhcp-probe, syslog-logs-permissions, watchdog-prepare, retention, cachehamster]
   # What: CDN domains that resolve from validation hosts.
   # Why: Real dig targets; some Steam domains fail.
   # From: Issue #1683 | PR #1858

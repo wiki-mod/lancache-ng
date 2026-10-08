@@ -68,10 +68,15 @@ jobs:
   # From: Issue #1683 | PR #1858
   platform:
     name: platform
+    # What: the one literal runner/timeout; emits the rest.
+    # Why: ci.sh can only pick a runner once one runs it.
+    # From: Issue #1683 | PR #1858
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
       image: ${{ steps.resolve.outputs.image }}
+      runner: ${{ steps.jobs.outputs.runner }}
+      timeouts: ${{ steps.jobs.outputs.timeouts }}
     # What: one mutable entry: the current_dev channel.
     # Why: ci.sh needs a container before any steps run
     # From: Issue #1683 | PR #1858
@@ -97,6 +102,9 @@ jobs:
       - name: Resolve the build-tools image
         id: resolve
         run: bash .github/scripts/ci.sh build-tools resolve-image
+      - name: Resolve the job settings
+        id: jobs
+        run: bash .github/scripts/ci.sh job-settings
 
   # What: emit identity-filtered build matrices
   # Why: path picks candidates; ci.sh resolves build
@@ -105,15 +113,15 @@ jobs:
     name: plan
     needs: platform
     if: github.event_name != 'issues'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['plan'] }}
     container: &bt_platform
       image: ${{ needs.platform.outputs.image }}
       credentials: *ghcr_credentials
     outputs:
       any-build: ${{ steps.plan.outputs.any-build }}
       promote: ${{ steps.plan.outputs.promote }}
-      cut-tag: ${{ steps.plan.outputs.cut-tag }}
+      validate: ${{ steps.plan.outputs.validate }}
       matrix: ${{ steps.plan.outputs.matrix }}
       test-services: ${{ steps.plan.outputs.test-services }}
       rust-validation: ${{ steps.plan.outputs.rust-validation }}
@@ -141,11 +149,14 @@ jobs:
     name: build ${{ matrix.service }} ${{ matrix.arch }}
     needs: [platform, plan]
     if: needs.plan.outputs.any-build == 'true'
+    # What: each target and platform builds to its end
+    # Why: one red build must not cancel the other targets
+    # From: Issue #1683 | PR #1858
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['build'] }}
     container: *bt_platform
     # What: cache secrets the build's set-runtime needs.
     # Why: secrets never reach ci.sh through CI_VARIABLES.
@@ -166,11 +177,11 @@ jobs:
         id: gha-runtime
         run: bash .github/scripts/ci.sh gha-runtime-args
       # What: hand the GHA cache runtime to later steps.
-      # Why: only action steps receive ACTIONS_RUNTIME_TOKEN.
+      # Why: only action steps get ACTIONS_RUNTIME_TOKEN
       # From: Issue #1683 | PR #1858
       - &gha_export
         name: Export the GHA cache runtime
-        uses: docker://mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+        uses: docker://mirror.gcr.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
         with:
           entrypoint: timeout
           args: ${{ steps.gha-runtime.outputs.args }}
@@ -187,8 +198,8 @@ jobs:
     name: cargo-audit
     needs: [platform, plan]
     if: needs.plan.outputs.rust-audit == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['cargo-audit'] }}
     container: *bt_platform
     steps:
       - *bootstrap
@@ -202,8 +213,8 @@ jobs:
     name: test
     needs: [platform, plan]
     if: needs.plan.outputs.test-services != '' && needs.plan.outputs.rust-validation == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['test'] }}
     container: *bt_platform
     env: *cache_secrets
     steps:
@@ -222,8 +233,8 @@ jobs:
     name: lint
     needs: [platform, plan]
     if: needs.plan.outputs.docs-only != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['lint'] }}
     container: *bt_platform
     steps:
       - *bootstrap
@@ -242,8 +253,8 @@ jobs:
     name: scan
     needs: [platform, plan, build]
     if: needs.plan.outputs.any-build == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['scan'] }}
     container: *bt_platform
     steps:
       - *bootstrap
@@ -261,8 +272,8 @@ jobs:
     if: >-
       !cancelled() && needs.scan.result == 'success' &&
       needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['aggregate'] }}
     container: *bt_platform
     permissions:
       contents: write
@@ -283,8 +294,8 @@ jobs:
     if: >-
       !cancelled() && needs.aggregate.result == 'success' &&
       needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['assemble'] }}
     container: *bt_platform
     steps:
       - *bootstrap
@@ -300,14 +311,15 @@ jobs:
     name: validate
     needs: [platform, plan, build, aggregate, assemble]
     if: >-
-      !cancelled() && needs.plan.outputs.any-build == 'true' &&
+      !cancelled() && needs.plan.outputs.validate == 'true' &&
       contains(fromJSON('["success","skipped"]'), needs.build.result) &&
-      (github.event_name == 'pull_request' || needs.assemble.result == 'success')
+      (github.event_name == 'pull_request' || needs.plan.outputs.any-build == 'false' ||
+      needs.assemble.result == 'success')
     # What: runs on the runner host, not in a job container.
     # Why: compose binds need host paths and the /27 net.
     # From: Issue #1683
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['validate'] }}
     permissions:
       contents: read
       packages: read
@@ -324,9 +336,9 @@ jobs:
     needs: [platform, plan, validate]
     if: >-
       !cancelled() && needs.validate.result == 'success' &&
-      needs.plan.outputs.any-build == 'true' && needs.plan.outputs.promote == 'true' && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+      needs.plan.outputs.promote == 'true' && github.event_name == 'push'
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['promote'] }}
     container: *bt_platform
     permissions:
       contents: write
@@ -337,11 +349,6 @@ jobs:
       - *bootstrap
       - name: Promote the channels the ref maps to
         run: bash .github/scripts/ci.sh promote-ref
-      - name: Cut the next patch tag on an image-affecting master push
-        if: needs.plan.outputs.cut-tag == 'true'
-        env:
-          PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-        run: bash .github/scripts/ci.sh cut-release-tag
 
   # What: close issues a merged PR lists as Linked Issues.
   # Why: GitHub auto-closes on default-branch merges only.
@@ -350,8 +357,8 @@ jobs:
     name: close-linked-issues
     needs: platform
     if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['close-linked-issues'] }}
     container: *bt_platform
     permissions:
       contents: read
@@ -373,8 +380,8 @@ jobs:
     name: project-board
     needs: platform
     if: github.event_name == 'issues'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['project-board'] }}
     container: *bt_platform
     permissions:
       contents: read
@@ -394,8 +401,8 @@ jobs:
     name: checks
     needs: platform
     if: github.event_name != 'issues'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['checks'] }}
     container: *bt_platform
     permissions:
       contents: read
@@ -439,8 +446,11 @@ jobs:
     name: result
     needs: [platform, plan, build, test, cargo-audit, lint, scan, aggregate, assemble, validate, promote, checks]
     if: always() && github.event_name != 'issues'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # What: platform's runner/timeout or the bootstrap pair.
+    # Why: the required check must run when platform failed.
+    # From: Issue #1683 | PR #1858
+    runs-on: ${{ needs.platform.outputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: ${{ needs.platform.outputs.timeouts && fromJSON(needs.platform.outputs.timeouts)['result'] || 15 }}
     container:
       image: ${{ needs.platform.outputs.image || format('ghcr.io/{0}/build-tools:nightly', github.repository) }}
       credentials: *ghcr_credentials

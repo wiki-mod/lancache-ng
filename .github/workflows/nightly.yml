@@ -48,10 +48,15 @@ jobs:
   # From: Issue #1683 | PR #1858
   platform:
     name: platform
+    # What: the one literal runner/timeout; emits the rest.
+    # Why: ci.sh can only pick a runner once one runs it.
+    # From: Issue #1683 | PR #1858
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
       image: ${{ steps.resolve.outputs.image }}
+      runner: ${{ steps.jobs.outputs.runner }}
+      timeouts: ${{ steps.jobs.outputs.timeouts }}
     # What: one mutable entry: the current_dev channel.
     # Why: ci.sh needs a container before steps run
     # From: Issue #1683 | PR #1858
@@ -77,14 +82,18 @@ jobs:
       - name: Resolve the build-tools image
         id: resolve
         run: bash .github/scripts/ci.sh build-tools resolve-image
+      - name: Resolve the job settings
+        id: jobs
+        run: bash .github/scripts/ci.sh job-settings
 
   # What: validate full stack of accepted candidate
   # Why: runner host: compose binds need host paths.
   # From: Issue #1683
   validate:
     name: validate
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    needs: platform
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['validate'] }}
     steps:
       - *bootstrap
       - name: Validate the accepted stack candidate
@@ -96,8 +105,8 @@ jobs:
   cargo-audit:
     name: cargo-audit
     needs: platform
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['cargo-audit'] }}
     container:
       image: ${{ needs.platform.outputs.image }}
       credentials: *ghcr_credentials
@@ -119,8 +128,8 @@ jobs:
     name: nightly
     needs: [platform, validate]
     if: ${{ !cancelled() && needs.platform.result == 'success' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['nightly'] }}
     container:
       image: ${{ needs.platform.outputs.image }}
       credentials: *ghcr_credentials

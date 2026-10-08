@@ -1,285 +1,101 @@
 # CI Image Pinning Policy
 
-This document describes the image pinning policy for lancache-ng's CI/release infrastructure, how to compute immutable digests for Docker images and GitHub Actions, and the current inventory of pinned versus mutable references across the build system.
+This policy covers immutable references for CI- and release-sensitive images and
+GitHub Actions: why they are pinned, where each pin is owned, the documented
+exception, how to compute a pin, and how CI checks it. It keeps no copy of the
+pinned values; each value has one owner (AG-CI-006).
 
-## Why Image Pinning Matters
+Source: issue #489 (pin CI/runtime images by immutable SHA; a short policy doc
+and a helper check), PR #497 (first version), issue #508 (Dockerfile build-arg
+defaults, decided as AGENTS.md AG-CI-008).
 
-- **Reproducibility**: A pinned image digest ensures that repeated CI builds use the exact same base images, binaries, and tooling, producing byte-for-byte identical outputs and simplifying debugging of intermittent failures.
-- **Supply chain security**: A mutable tag (like `:latest`) can be updated by a registry administrator or compromised maintainer at any time. A released product pinned to a mutable upstream tag can acquire new vulnerabilities or breaking changes on re-release, without any source code change on this project's side.
-- **Release integrity**: For stable releases (tagged `vX.Y.Z` in this repo), the release pipeline must produce reproducible artifacts. Mutable base image references can violate this contract.
+## Why pins
 
-## Scope
+- **Reproducibility**: the same pin gives the same base image, binaries and
+  tools on every build.
+- **Supply chain**: a mutable tag such as `:latest` can change at any time, so
+  a re-release could pick up new vulnerabilities or breaking changes without a
+  change in this repository.
+- **Release integrity**: a `vX.Y.Z` release must be reproducible; a mutable base
+  reference breaks that.
 
-This policy applies to:
+## Rules and owners
 
-- **GitHub Actions references** in `.github/workflows/*.yml` — each `uses:` directive must use an explicit SHA-256 digest (`uses: owner/action@sha256:...`) or a pinned release tag with a comment showing the resolved digest.
-- **Docker base images** in `Dockerfile` `FROM` lines — every `FROM` directive outside of builder/intermediate stages must reference an image by a digest or an explicitly stable tag, never a floating tag like `:latest` (with documented exceptions for this project's own mutable channels, see below).
-- **Build-time image references** in CI workflows and build scripts that download container images — must use pinned references.
+- **GitHub Actions** (AGENTS.md AG-CI-001, CONTRIBUTING.md): every `uses:` pins
+  the full 40-character commit SHA with a version comment
+  (`uses: owner/action@<sha> # vX.Y.Z`). The workflows under
+  `.github/workflows/` are the inventory. A `docker://` step is accepted only
+  when its image equals a SOT `base_images` pin.
+- **Base images** (AG-CI-008): every first-party Dockerfile declares its image
+  build arguments without a default (`ARG ALPINE_IMAGE`, and
+  `ARG BUILD_TOOLS_IMAGE` in the Rust builder stages) and uses
+  `FROM ${ALPINE_IMAGE:-scratch}` / `FROM ${BUILD_TOOLS_IMAGE:-scratch}`. A build
+  without the argument fails on `scratch` instead of pulling a mutable tag.
+  `ci.sh` passes the digest-pinned SOT `base_images` entries from
+  `.github/yaml/build-manifest.yml` and the build-tools image as a digest from
+  `ci.sh build-tools resolve-image`.
+- **External images run by the stack**: SOT `external_services`. A digest-less
+  tag is allowed only for an explicit `policy: tag-latest` entry (netdata,
+  maintainer decision recorded on PR #1858, 2026-10-01).
+- **Pinned tool downloads**: SOT `external_versions` with their checksums.
 
-## Computing a Digest
+Docker Hub bases are pulled through `mirror.gcr.io/library/*`. The digest is the
+supply-chain control; the mirror is only the pull source. If the mirror evicts a
+cached digest and a build cannot pull it, the build fails closed and the SOT pin
+is refreshed in a reviewed PR. Dockerfiles carry no second fallback `FROM`
+path: Dockerfile syntax cannot express a trusted registry-fallback chain
+without changing the provenance of the built image. Operators or runners that
+need Docker Hub as the source configure it at the Docker daemon or build
+infrastructure layer.
 
-### For a Docker Image
+## Exception: the project's own channels
 
-To resolve the immutable digest of a Docker image, use one of:
+The channels in SOT `release.channels` (`nightly`, `latest`) are mutable by
+design and exempt from the pinning rule; `docs/release-versioning.md` owns their
+semantics. Release-capable paths do not depend on a mutable `build-tools`
+channel tag (CONTRIBUTING.md).
 
-1. **`docker pull` + inspect (requires local Docker daemon)**:
-   ```bash
-   docker pull nginx:1.27.2
-   docker inspect --format '{{index .RepoDigests 0}}' nginx:1.27.2
-   # Output: docker.io/library/nginx@sha256:...
-   ```
+## Computing a pin
 
-2. **`crane digest` (Google's container tool, installed via `go install github.com/google/go-containerregistry/cmd/crane@latest`)**:
-   ```bash
-   crane digest docker.io/library/nginx:1.27.2
-   # Output: sha256:...
-   ```
-
-3. **`docker manifest inspect` (Docker 20.10+)**:
-   ```bash
-   docker manifest inspect docker.io/library/nginx:1.27.2 | jq -r '.manifests[0].digest'
-   # Output: sha256:...
-   ```
-
-4. **GitHub Container Registry (`ghcr.io`)**:
-   ```bash
-   docker pull ghcr.io/owner/repo/image:tag
-   docker inspect --format '{{index .RepoDigests 0}}' ghcr.io/owner/repo/image:tag
-   ```
-
-The resulting digest string (format: `sha256:abcdef...`) is globally immutable — it uniquely identifies that exact image content forever.
-
-### For a GitHub Action
-
-GitHub Actions are stored as container images in GitHub's container registry. To pin an action:
-
-1. **Find the commit SHA** of the release tag you wish to pin:
-   ```bash
-   git ls-remote https://github.com/owner/action.git refs/tags/v1.2.3
-   # Output: <sha-hash>  refs/tags/v1.2.3
-   ```
-
-2. **Use the commit SHA in the workflow**:
-   ```yaml
-   - uses: owner/action@<sha-hash>
-   ```
-
-3. **Add a comment with the version for clarity**:
-   ```yaml
-   - uses: owner/action@<sha-hash> # v1.2.3
-   ```
-
-Alternatively, some projects publish digest-based references; check the action's repository for a `@v1.2.3` tag's commit history to see if digest pinning is documented.
-
-## Current Inventory
-
-### GitHub Actions (Workflows)
-
-All GitHub Actions in the current set of workflows are already pinned to SHA digests with version comments. Examples:
-
-- `.github/workflows/build-push.yml`:
-  - `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1` ✅ Pinned by commit SHA
-  - `dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable` ✅ Pinned by commit SHA
-  - `docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0` ✅ Pinned by commit SHA
-
-- `.github/workflows/build-tools.yml`:
-  - `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1` ✅ Pinned by commit SHA
-  - `docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0` ✅ Pinned by commit SHA
-
-- `.github/workflows/codeql.yml`:
-  - `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1` ✅ Pinned by commit SHA
-  - `github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3` ✅ Pinned by commit SHA
-
-- `.github/workflows/first-interaction.yml`:
-  - `actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0` ✅ Pinned by commit SHA
-  - `actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0` ✅ Pinned by commit SHA
-
-**Status**: ✅ All GitHub Actions are already pinned.
-
-### Docker Base Images in Dockerfiles
-
-Every first-party Dockerfile's own **runtime** base image is pinned to an explicit SHA-256 digest (see the inventory below). One category of **build-time-only, intermediate** stage is a deliberate, documented exception to that: the `BUILD_TOOLS_IMAGE`-based builder stage (`services/dns`, `services/ui`, `services/watchdog`) -- see "Build-Time Images (Builder Stages)" below. A second such exception, the `UTILITIES_IMAGE`-based `utilities-tools` stage AG-KD-010 used to document, no longer exists: issue #1781 removed the shared `utilities` image entirely, so every former consumer now apk-installs its own copy of what it used to `COPY --from=` instead.
-
-The first-party runtime Dockerfiles intentionally use `mirror.gcr.io/library/*`
-as the pull source for their runtime bases. Base OS is mixed, not uniformly
-Debian, as issue #815's staged Alpine migration has progressed: `services/dhcp`,
-`services/dhcp-proxy`, `services/watchdog`, `services/ntp`, `services/dns`,
-`services/proxy`, and `services/ui` have all moved to the same pinned Alpine base
-(`services/watchdog`'s own carve-out, revisited and approved 2026-07-31, is
-independent of #842's Rust rewrite -- a scaffold now exists for that rewrite, see
-`services/watchdog/Cargo.toml`, but it is not yet built or used as this
-container's entrypoint, so this base-image decision stays unaffected either
-way). `services/ui` landed its own migration in a sibling PR while this
-document's `services/proxy` update was still in flight -- confirmed live
-against `services/ui/Dockerfile`'s current `FROM` line rather than assumed.
-`services/syslog` (the combined fluent-bit + syslog-ng central logging
-service, #1431/#1433) is on Alpine too, but was never part of #815's
-migration set above -- it was born on Alpine from its first commit, so it
-gets its own inventory row below rather than being folded into the
-staged-migration list. Every first-party runtime image is now on Alpine
-except `tools/build-tools`
-(Rule-Ref: AG-KD-009 in `AGENTS.md`, a deliberate, separately-decided
-exception, not an oversight). This is a
-project-wide cache decision, not a one-off oversight in the Admin UI image:
-the immutable digest is the supply-chain control, while `mirror.gcr.io` is the
-configured pull source for these public Docker Hub bases, whichever
-distribution a given service's base image happens to be. If Google evicts a
-cached digest and a build can no longer pull it, the build must fail closed and
-the base reference must be refreshed in a reviewed PR; Dockerfiles must not
-carry a second fallback `FROM` path because Dockerfile syntax cannot express a
-trusted registry-fallback chain without changing the built image provenance.
-Operators or CI runners that require Docker Hub as the source should configure
-that at the Docker daemon or build infrastructure layer, not by adding
-undocumented per-Dockerfile fallback logic.
-
-Every entry below now resolves its base image through `ARG ALPINE_IMAGE`
-(no in-file default) plus `FROM ${ALPINE_IMAGE}`, consuming the one pinned
-digest owned by `build-manifest.yml`'s `base_images.alpine` and supplied at
-build time by `ci.sh`'s `_ci_service_build_args` (issue #1683). No service
-Dockerfile pins this digest itself any more; the digest value and its
-history stay in `build-manifest.yml`, not duplicated per file below.
-
-- `services/proxy/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian 13-slim to Alpine, issue #815, staged Alpine migration)
-- `services/dns/Dockerfile` (runtime stage): `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration; PowerDNS/recursor pinned to Alpine's `edge` branch specifically for a CVE fix, see `services/dns/Dockerfile`'s own comment)
-- `services/dhcp/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — Kea second)
-- `services/dhcp-proxy/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — dnsmasq-first)
-- `services/ntp/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration)
-- `services/ui/Dockerfile` (runtime stage): `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian trixie-slim to Alpine in a sibling PR, issue #815, staged Alpine migration)
-- `services/watchdog/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (migrated from Debian 13-slim to Alpine, issue #815's watchdog carve-out, revisited/approved 2026-07-31 -- independent of #842's Rust rewrite, which now has a scaffold crate but is not yet built or used as this container's entrypoint)
-- `services/syslog/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (born on Alpine from its first commit, #1431/#1433 -- not part of issue #815's Debian-to-Alpine migration since it never ran on Debian; originally pinned directly to `alpine:3.20` rather than through `mirror.gcr.io`, an unintentional scaffold-commit inconsistency never a deliberate choice -- issue #1554 brought it onto the same Alpine 3.24 pin every other first-party service already uses; `syslog-ng` stayed available, and newer, on 3.24, see that file's own header comment for the full version rationale)
-- `services/cachehamster/Dockerfile`: `ARG ALPINE_IMAGE` / `FROM ${ALPINE_IMAGE}` ✅ (Steam cache-warming prefill daemon scaffold, issue #871 -- born on Alpine from its first commit, not part of issue #815's Debian-to-Alpine migration since it never ran on Debian)
-- netdata: no first-party Dockerfile. The stack runs the upstream image `netdata/netdata:latest`, declared in the SOT `external_services` with `policy: tag-latest` (maintainer decision, PR #1858 decision record 2026-10-01); `ci.sh check stable-external-images` allows a digest-less tag only for such an explicit SOT entry.
-
-**Status**: ✅ All runtime base images are pinned (centrally, via `build-manifest.yml`'s `base_images.alpine`, issue #1683).
-
-### Build-Time Images (Builder Stages)
-
-- `services/dns/Dockerfile` (builder stage): `FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder`
-  - ARG default (line 6): `ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
-  - **Status**: ⚠️ ARG default is mutable (`:latest`) — intentional fallback, permanently
-  - **Rationale**: This is a documented, overridable ARG default that only matters for a manual `docker build` invocation without `--build-arg`. Every real CI build (workflow jobs, release jobs) always passes `--build-arg BUILD_TOOLS_IMAGE=<pinned-digest>` explicitly and never falls back to this default. Issue #508 proposed actually pinning this default to a resolved digest and was closed as already-resolved-by-design: pinning/updating the default for "consistency" would introduce a permanently-stale, manually-maintained digest without fixing anything a real build path depends on. See `AGENTS.md`'s Rule-Ref: AG-CI-008 for the codified rule.
-
-- `services/ui/Dockerfile` (builder stage): `FROM ${BUILD_TOOLS_IMAGE} AS builder`
-  - ARG default (line 12): `ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
-  - **Status**: ⚠️ ARG default is mutable (`:latest`) — intentional fallback, permanently
-  - **Rationale**: Same as `services/dns/Dockerfile` above — issue #508 closed as already-resolved-by-design; see `AGENTS.md`'s Rule-Ref: AG-CI-008.
-
-- `services/watchdog/Dockerfile` (builder stage): `FROM ${BUILD_TOOLS_IMAGE} AS watchdog-builder`
-  - ARG default: `ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
-  - **Status**: ⚠️ ARG default is mutable (`:latest`) — intentional fallback, permanently
-  - **Rationale**: Same as `services/dns/Dockerfile` above — issue #508 closed as already-resolved-by-design; see `AGENTS.md`'s Rule-Ref: AG-CI-008.
-
-### Workflow Build-Tools References
-
-- `.github/workflows/build-push.yml`:
-  - There is no standalone `BUILD_TOOLS_IMAGE=...:latest` fallback assignment in this file — that mechanism was replaced by the selector script entirely. Every consumer resolves the image by calling `scripts/untracked/select-build-tools-image.sh` and writing its stdout to `$GITHUB_ENV` (see lines 300/314/316 for the two call sites, and line 1719 for a third).
-  - **Status**: ✅ No mutable tag is assigned directly in this workflow; resolution always goes through the selector script.
-  - **Rationale**: The selector script (`scripts/untracked/select-build-tools-image.sh`) resolves all `:latest` tags to immutable digest-qualified references before returning them to the workflow. This is the authoritative policy for the active CI path.
-
-- `.github/actions/rust-acceleration-preflight/action.yml`:
-  - Input default (line 29): `default: ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
-  - **Status**: ⚠️ Input default uses mutable tag — intentional fallback for local use
-  - **Rationale**: This action is a validation-only preflight that runs against whatever image the caller specifies. Primary workflows (`build-push.yml`) pass an explicit pinned digest selected via `scripts/untracked/select-build-tools-image.sh`. The `:latest` default is provided for developers and other tools that call this action directly without overriding the input.
-
-## Known Mutable References and Decision Summary
-
-### Resolved: Issue #508 (closed as already-resolved-by-design, not "pending")
-
-Issue #508 asked to actually pin `BUILD_TOOLS_IMAGE` ARG defaults in
-`services/dns/Dockerfile` and `services/ui/Dockerfile` to a real digest. It
-was closed **without** implementing that pinning: the ARG default only
-matters for a manual `docker build` invocation without `--build-arg`; every
-real CI build always passes `--build-arg BUILD_TOOLS_IMAGE=<pinned-digest>`
-explicitly and never falls back to it, so pinning the default would only add
-a manually-maintained value that goes stale with no real build path
-depending on it. This decision is codified as `AGENTS.md`'s Rule-Ref: AG-CI-008.
-
-### Intentional Mutable Fallbacks (Documented)
-
-The following references use mutable tags and are intentionally kept as fallbacks:
-
-1. **`.github/actions/rust-acceleration-preflight/action.yml` input default** (line 29):
-   - **Decision**: Keep as `:latest` fallback for local developer use.
-   - **Why**: Primary workflows always override this with a pinned digest from `scripts/untracked/select-build-tools-image.sh`. The action is validation-only, not build-time critical.
-
-2. **`scripts/untracked/select-build-tools-image.sh` internal `published_image` variable** (line 16):
-   - **Decision**: Keep as `:latest` because the script immediately resolves it to a pinned digest (line 98: `printf '%s@%s\n' "${image%:*}" "$digest"`).
-   - **Why**: Callers of this script receive a digest-qualified reference, never the mutable tag.
-
-## Remediation Steps (general reference)
-
-The `BUILD_TOOLS_IMAGE` ARG defaults above are intentionally **not** pinned
-(see "Resolved: Issue #508" above) — the steps below are kept as general
-guidance for pinning a `build-tools` image reference elsewhere (e.g. a real
-CI consumption point resolved through `scripts/untracked/select-build-tools-image.sh`),
-not an open task against those two ARG defaults:
-
-1. **Determine the target build-tools version**:
-   - Identify the stable release tag (e.g., `v0.2.0`) or sha-* tag you wish to use.
-   - Example: `ghcr.io/wiki-mod/lancache-ng/build-tools:v0.2.0`
-
-2. **Resolve the digest**:
-   ```bash
-   docker pull ghcr.io/wiki-mod/lancache-ng/build-tools:v0.2.0
-   docker inspect --format '{{index .RepoDigests 0}}' ghcr.io/wiki-mod/lancache-ng/build-tools:v0.2.0
-   # Or use crane: crane digest ghcr.io/wiki-mod/lancache-ng/build-tools:v0.2.0
-   ```
-
-3. **Update ARG defaults** in the Dockerfiles to use the resolved digest:
-   ```dockerfile
-   ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools@sha256:...
-   ```
-
-4. **Update workflow fallback** to use the pinned tag or digest:
-   ```bash
-   printf 'BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools@sha256:...\n' >> "$GITHUB_ENV"
-   ```
-
-5. **Validate**:
-   - Run `bash scripts/tracked/check-mutable-refs.sh` to confirm all references are pinned.
-   - Run the full CI workflow to ensure the pinned image is still compatible.
-
-## Local Mutable Channels (Documented Exception)
-
-This project defines its mutable channels in `.github/yaml/build-manifest.yml` (`release.channels`):
-
-- `nightly`: pre-stable integration channel built from `current_dev` (mutable; formerly `edge`)
-- `latest`: stable releases only, built from `master` (mutable, must not be moved by non-release workflows)
-
-These channels are owned by `.github/yaml/build-manifest.yml` and are intended to be mutable. References to these channels are exempt from the pinning requirement, provided they are explicitly documented as intentional. See `docs/release-versioning.md` for details on the channel model.
-
-## Verification
-
-To verify that all CI-sensitive images are pinned, run:
+Docker image (multi-arch: pin the index digest, not one platform's manifest):
 
 ```bash
-bash scripts/tracked/check-mutable-refs.sh
+docker buildx imagetools inspect docker.io/library/alpine:3.24 --format '{{.Manifest.Digest}}'
+# or, with the go-containerregistry CLI (released binary):
+crane digest docker.io/library/alpine:3.24
 ```
 
-This script checks for floating-tag patterns in workflows and Dockerfiles and reports violations.
+`docker pull` followed by `docker inspect --format '{{index .RepoDigests 0}}'`
+prints the same index digest as part of the repository digest.
 
-## CONTRIBUTING.md Alignment
+GitHub Action:
 
-This policy formalizes the requirement stated in `CONTRIBUTING.md` section "Quality and release process expectations":
+```bash
+git ls-remote https://github.com/owner/action.git refs/tags/v1.2.3
+# <sha>  refs/tags/v1.2.3   ->   uses: owner/action@<sha> # v1.2.3
+```
 
-> Keep workflow action references pinned to full commit SHAs with a version comment; floating tags such as `@v4` are forbidden in project PRs, because Dependabot and similar tooling report them as a security finding.
+To change a pin, change its SOT entry (or the `uses:` line for an action). The
+build identity of every consumer changes with a base pin; see the last section.
 
-And reinforces:
+## Checks
 
-> release-capable paths must not depend on mutable `build-tools:latest`
+CI runs these in `ci.sh check all` (job `checks` in `ci.yml`); locally they run
+inside the `build-tools` container (AG-VAL-016):
 
-## Note: reuse is decided by build identity, for every trigger
+```bash
+bash .github/scripts/ci.sh check mutable-refs            # tags, branches, short SHAs, unpinned images
+bash .github/scripts/ci.sh check action-node-versions    # pinned actions: runtime and reference shape
+bash .github/scripts/ci.sh check stable-external-images  # digest-less external images
+bash .github/scripts/ci.sh version verify                # external_versions consumers
+```
 
-CI 2.0 has one reuse decision for `push`, `pull_request`, `schedule` and
-`workflow_dispatch` alike (docs/ci-2.0-architecture.md sections 6, 27 and
-54): a target is rebuilt only when its build identity changed and no accepted
-digest exists for the new identity. No trigger shape forces a rebuild of
-unchanged targets, and an unchanged `nightly` produces zero builds.
+## Drift is part of the build identity
 
-Drift in inputs outside the repository content is still detected, because
-those inputs are part of the build identity itself: the base image enters as
-its SOT-pinned digest (`base_digest`), and apk package versions are resolved
-live against the configured repositories whenever an identity is computed
-(`package_versions`). A changed base digest or a newer package version
-therefore changes the identity and requires a build; an unchanged one reuses
-the accepted digest.
+CI 2.0 decides reuse the same way for every trigger
+(docs/ci-2.0-architecture.md sections 6, 27 and 54): a target is rebuilt only
+when its build identity changed and no accepted digest exists for it. The base
+image enters the identity as its SOT-pinned digest (`base_digest`) and apk
+package versions are resolved live whenever an identity is computed
+(`package_versions`), so a new pin or a newer package changes the identity and
+requires a build; an unchanged one reuses the accepted digest.

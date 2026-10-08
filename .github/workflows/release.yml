@@ -9,11 +9,19 @@ name: CI 2.0 Release
 on:
   push:
     tags: ['v*']
+  # What: publish a tag, or cut the next patch tag.
+  # Why: AG-REL-013: a tag cut is its own dispatch.
+  # From: Issue #1683 | PR #1858
   workflow_dispatch:
     inputs:
+      action:
+        description: publish a release tag, or cut the next patch tag from the previous release
+        type: choice
+        options: [publish, cut-patch]
+        default: publish
       tag:
-        description: Release tag to (re)publish (vX.Y.Z or vX.Y.Z-rc.N).
-        required: true
+        description: Release tag to (re)publish (vX.Y.Z or vX.Y.Z-rc.N); empty for cut-patch.
+        required: false
 permissions:
   contents: read
 concurrency:
@@ -46,6 +54,9 @@ jobs:
   # From: Issue #1683
   resolve-build-tools:
     name: resolve build-tools
+    # What: the one literal runner/timeout; emits the rest.
+    # Why: ci.sh can only pick a runner once one runs it.
+    # From: Issue #1683 | PR #1858
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # What: one mutable entry: the current_dev channel.
@@ -58,6 +69,8 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     outputs:
       image: ${{ steps.resolve.outputs.image }}
+      runner: ${{ steps.jobs.outputs.runner }}
+      timeouts: ${{ steps.jobs.outputs.timeouts }}
     steps:
       - &bootstrap
         name: Bootstrap the working tree
@@ -72,6 +85,9 @@ jobs:
       - name: Resolve the build-tools image
         id: resolve
         run: bash .github/scripts/ci.sh build-tools resolve-image
+      - name: Resolve the job settings
+        id: jobs
+        run: bash .github/scripts/ci.sh job-settings
 
   # What: publish the GitHub release notes and OpenVEX.
   # Why: §6.3 release artifacts; ci.sh is idempotent.
@@ -79,12 +95,16 @@ jobs:
   release:
     name: release
     needs: resolve-build-tools
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    if: inputs.action != 'cut-patch'
+    runs-on: ${{ needs.resolve-build-tools.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.resolve-build-tools.outputs.timeouts)['release'] }}
     container: &bt_container
       image: ${{ needs.resolve-build-tools.outputs.image }}
       credentials: *ghcr_credentials
-    permissions:
+    # What: token may write releases and assets, read GHCR
+    # Why: the workflow default token is read-only
+    # From: Issue #1683 | PR #1858
+    permissions: &release_write
       contents: write
       packages: read
     env:
@@ -106,12 +126,30 @@ jobs:
   release-sbom:
     name: release-sbom
     needs: [resolve-build-tools, release]
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    runs-on: ${{ needs.resolve-build-tools.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.resolve-build-tools.outputs.timeouts)['release-sbom'] }}
     container: *bt_container
+    permissions: *release_write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - *bootstrap
       - name: Attach a CycloneDX SBOM per published image
         run: bash .github/scripts/ci.sh release-sbom-stack "${RELEASE_TAG}"
+
+  # What: cut the next patch tag on an explicit dispatch.
+  # Why: the PAT tag push then starts the tag publish.
+  # From: Issue #1683 | PR #1858
+  cut-release-tag:
+    name: cut-release-tag
+    needs: resolve-build-tools
+    if: inputs.action == 'cut-patch'
+    runs-on: ${{ needs.resolve-build-tools.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.resolve-build-tools.outputs.timeouts)['cut-release-tag'] }}
+    container: *bt_container
+    env:
+      PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+    steps:
+      - *bootstrap
+      - name: Cut and push the next patch tag
+        run: bash .github/scripts/ci.sh cut-release-tag

@@ -49,6 +49,9 @@ jobs:
   # From: Issue #1683
   impact:
     name: codeql-impact
+    # What: the one literal runner/timeout; emits the rest.
+    # Why: ci.sh can only pick a runner once one runs it.
+    # From: Issue #1683 | PR #1858
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # What: Admission runs in build-tools nightly channel
@@ -56,12 +59,14 @@ jobs:
     # From: Issue #1683 | PR #1858
     container:
       image: ghcr.io/${{ github.repository }}/build-tools:nightly
-      credentials:
+      credentials: &ghcr_credentials
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     outputs:
       matrix: ${{ steps.impact.outputs.codeql-matrix }}
-      image: ${{ steps.impact.outputs.codeql-image }}
+      image: ${{ steps.resolve.outputs.image }}
+      runner: ${{ steps.jobs.outputs.runner }}
+      timeouts: ${{ steps.jobs.outputs.timeouts }}
     steps:
       # What: shallow checkout with persistent auth
       # Why: ci.sh loads the diff history it needs itself.
@@ -84,9 +89,15 @@ jobs:
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
         run: bash .github/scripts/ci.sh codeql-impact >> "$GITHUB_OUTPUT"
+      - name: Resolve the build-tools image
+        id: resolve
+        run: bash .github/scripts/ci.sh build-tools resolve-image
+      - name: Resolve the job settings
+        id: jobs
+        run: bash .github/scripts/ci.sh job-settings
 
-  # What: Analyze each admitted language in SOT image
-  # Why: CodeQL needs glibc; pin lives in SOT only
+  # What: Analyze each admitted language in build-tools
+  # Why: one CI image; the CodeQL bundle is a SOT pin
   # From: Issue #1683 | PR #1858
   analyze:
     name: CodeQL ${{ matrix.language }}
@@ -95,10 +106,14 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.impact.outputs.runner }}
     container:
       image: ${{ needs.impact.outputs.image }}
-    timeout-minutes: 120
+      credentials: *ghcr_credentials
+    timeout-minutes: ${{ fromJSON(needs.impact.outputs.timeouts)['analyze'] }}
+    # What: each admitted language runs to its end
+    # Why: one language failing must not cancel the rest
+    # From: Issue #1683 | PR #1858
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.impact.outputs.matrix) }}
