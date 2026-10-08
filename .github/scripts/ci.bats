@@ -3448,22 +3448,33 @@ svc-x=sha256:n"
     [ "${status}" -ne 0 ]
 }
 
+# What: _ci_validate_host_tools: list, missing tool, compose
+# Why: each gap returns 2 with its own error code
+# From: Issue #1683 | PR #1858
 @test "validate host tools fail closed on a missing tool or list" {
-    # What: absent SOT list or tool -> VALIDATE-0056, rc 2.
-    # Why: the runner host must be proven, never assumed.
-    # From: Issue #1683
-    local m="${BATS_TEST_TMPDIR}/ht.yml"
-    docker() { echo "Docker Compose version vX"; }
-    printf 'validation:\n  host_tools: [bash, no-such-tool-x]\n' > "${m}"
-    CI_MANIFEST="${m}" run _ci_validate_host_tools
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0062"*'missing="no-such-tool-x"'* ]]
-    printf 'validation:\n  other: x\n' > "${m}"
-    CI_MANIFEST="${m}" run _ci_validate_host_tools
-    [ "${status}" -eq 2 ]
-    printf 'validation:\n  host_tools: [bash]\n' > "${m}"
-    CI_MANIFEST="${m}" run _ci_validate_host_tools
-    [ "${status}" -eq 0 ]
+    local case rc want base
+    local -A V=([@T@]="$(_val name)" [@ERR@]="$(_val name)" [@SH@]="$(basename "${BASH}")")
+    grep -q '^  host_tools: \[' "${CI_MANIFEST}" || { echo "SOT has no validation.host_tools list"; return 1; }
+    base="$(_val path)"
+    cp "${CI_MANIFEST}" "${base}"
+    while IFS='|' read -r case rc want; do
+        cp "${base}" "${CI_MANIFEST}"
+        rm -f "${DS}/answers" "${DS}"/answer-used-*
+        case "${case}" in
+            present) sed -i "s|^  host_tools: \[.*|  host_tools: [${V[@SH@]}]|" "${CI_MANIFEST}" ;;
+            missing) sed -i "s|^  host_tools: \[|  host_tools: [${V[@T@]}, |" "${CI_MANIFEST}" ;;
+            no-list) sed -i '/^  host_tools: \[/d' "${CI_MANIFEST}" ;;
+            compose-broken) sed -i "s|^  host_tools: \[.*|  host_tools: [${V[@SH@]}]|" "${CI_MANIFEST}"
+                _docker_answer ' compose version *' 1 '' "${V[@ERR@]}" ;;
+        esac
+        run _ci_validate_host_tools
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+    done <<'CASES'
+present|0|-
+missing|2|[CI-ERROR-VALIDATE-0062] missing="@T@"
+no-list|2|[CI-ERROR-VALIDATE-0056]
+compose-broken|2|[CI-ERROR-VALIDATE-0063];@ERR@
+CASES
 }
 
 @test "validation env lists the SOT pairs, fails closed when absent" {
@@ -3536,40 +3547,66 @@ svc-x=sha256:n"
     grep -Eq '^NATS_ADVERTISE_URL=[a-z]+://[^[:space:]]+$' <<<"${env}"
 }
 
+# What: _ci_compose_profile_flags per compose profile answer
+# Why: compose up skips a profiled service without its flag
+# From: Issue #1683 | PR #1858
 @test "compose profile flags cover every profile and fail closed" {
-    # What: one --profile pair per profile; read error -> 2.
-    # Why: a profiled service must never be skipped.
-    # From: Issue #1683
-    docker() { printf 'logging\nntp\n'; }
-    run _ci_compose_profile_flags f.yml
-    [ "${status}" -eq 0 ]
-    [ "${output}" = $'--profile\nlogging\n--profile\nntp' ]
-    docker() { :; }
-    run _ci_compose_profile_flags f.yml
-    [ "${status}" -eq 0 ]; [ -z "${output}" ]
-    docker() { echo "config broken" >&2; return 1; }
-    run _ci_compose_profile_flags f.yml
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"config broken"* ]]
+    local case rc want f
+    local -A V=([@P1@]="$(_val name)" [@P2@]="$(_val name)" [@ERR@]="$(_val name)")
+    f="$(_val path)"
+    while IFS='|' read -r case rc want; do
+        : > "${DS}/docker.log"
+        rm -f "${DS}/answers" "${DS}"/answer-used-*
+        case "${case}" in
+            two) _docker_answer ' compose * config --profiles *' 0 "${V[@P1@]}\n${V[@P2@]}" ;;
+            none) _docker_answer ' compose * config --profiles *' 0 ;;
+            broken) _docker_answer ' compose * config --profiles *' 1 '' "${V[@ERR@]}" ;;
+        esac
+        run _ci_compose_profile_flags "${f}"
+        _expect "${case}" "${rc}" "$(printf '%b' "$(_fill "${want}")")" || return 1
+        grep -q -F -- " -f ${f} config --profiles" "${DS}/docker.log" || { echo "${case}: argv $(cat "${DS}/docker.log")"; return 1; }
+    done <<'CASES'
+two|0|=--profile\n@P1@\n--profile\n@P2@
+none|0|=
+broken|2|[CI-ERROR-CORE-0106];@ERR@
+CASES
 }
 
+# What: _ci_validate_up argv, host-mode log, empty start set
+# Why: AG-VAL-027: every service starts or is named excluded
+# From: Issue #1683 | PR #1858
 @test "validate up starts every profile and names host-mode exclusions" {
-    # What: profiles reach up; host-mode is logged, not run.
-    # Why: AG-VAL-027 coverage with stated exclusions.
-    # From: Issue #1683
-    _ci_validate_service_list() {
-        case "$1" in *'== "host"'*) echo svc-h ;; *) printf 'svc-a\nsvc-p\n' ;; esac
-    }
-    _ci_compose_profile_flags() { printf -- '--profile\np1\n'; }
-    docker() { echo "DOCKER $*"; }
+    local case answer rc want deny d
+    local -a ds
+    local -A V=(
+        [@P@]="$(_val name)" [@H@]="$(_val name)" [@N@]="$(_val name)" [@X@]="$(_val name)" [@PR@]="$(_val name)"
+        [@F@]="$(_val path)" [@NET@]="$(_val path)" [@PIN@]="$(_val path)"
+    )
+    # What: stub records the socket proxy render call
+    # Why: up renders the proxy policy before compose up
+    # From: Issue #1683 | PR #1858
     ci_cmd_socket_proxy_config() { echo "RENDER $*"; }
-    local file
-    file="$(_ci_variable CI_COMPOSE_FILE)"
-    run _ci_validate_up proj net.yml pin.yml
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *'CI-INFO-VALIDATE-0055'*'service="svc-h"'* ]]
-    [[ "${output}" == *"RENDER ${file}"*"--profile p1 up -d svc-a svc-p"* ]]
-    [[ "${output}" != *"up -d svc-h"* ]]
+    while IFS='|' read -r case answer rc want deny; do
+        : > "${DS}/docker.log"
+        rm -f "${DS}/answers" "${DS}"/answer-used-*
+        _docker_answer ' compose * config --profiles *' 0 "${V[@PR@]}"
+        case "${answer}" in
+            mixed) _docker_answer ' compose * config --format json *' 0 \
+                "{\"services\":{\"${V[@H@]}\":{\"healthcheck\":{}},\"${V[@N@]}\":{},\"${V[@X@]}\":{\"network_mode\":\"host\"}}}" ;;
+            host-only) _docker_answer ' compose * config --format json *' 0 \
+                "{\"services\":{\"${V[@X@]}\":{\"network_mode\":\"host\"}}}" ;;
+        esac
+        CI_COMPOSE_FILE="${V[@F@]}" run _ci_validate_up "${V[@P@]}" "${V[@NET@]}" "${V[@PIN@]}"
+        output+=$'\n'"--- docker.log"$'\n'"$(cat "${DS}/docker.log")"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+        IFS=';' read -r -a ds <<< "$(_fill "${deny}")"
+        for d in "${ds[@]}"; do
+            [[ "${output}" != *"${d}"* ]] || { echo "${case}: has '${d}': ${output}"; return 1; }
+        done
+    done <<'CASES'
+start|mixed|0|[CI-INFO-VALIDATE-0055] service="@X@";RENDER @F@;--- docker.log;compose -p @P@ -f @F@ -f @NET@ -f @PIN@ --profile @PR@ up -d @H@ @N@|up -d @X@;@N@ @X@
+none-startable|host-only|2|[CI-ERROR-VALIDATE-0018]|RENDER;up -d
+CASES
 }
 
 # What: down, leftover sweep, state root; raw errors
@@ -3725,16 +3762,31 @@ none|0|container=<none>;@L1@;@L2@
 CASES
 }
 
-@test "validate health list excludes no-healthcheck services" {
-    # What: no-health list is disjoint from health list.
-    # Why: Each service polled by exactly one wait strategy.
-    # From: Issue #1683
-    CI_COMPOSE_CONFIG_CMD="$(_stub 'printf "%s" "{\"services\":{\"proxy\":{\"healthcheck\":{}},\"dhcp\":{\"network_mode\":\"host\"},\"cachehamster\":{}}}"')" \
-        run _ci_validate_no_health_services
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"cachehamster"* ]]
-    [[ "${output}" != *"proxy"* ]]
-    [[ "${output}" != *"dhcp"* ]]
+# What: health, no-health, startable lists from compose json
+# Why: up uses startable; the wait splits on healthcheck
+# From: Issue #1683 | PR #1858
+@test "validate service lists split compose services per filter" {
+    local case fn answer rc want json
+    local -A V=([@H@]="$(_val name)" [@N@]="$(_val name)" [@X@]="$(_val name)" [@Y@]="$(_val name)" [@ERR@]="$(_val name)")
+    json="{\"services\":{\"${V[@H@]}\":{\"healthcheck\":{}},\"${V[@N@]}\":{},"
+    json+="\"${V[@X@]}\":{\"network_mode\":\"host\",\"healthcheck\":{}},\"${V[@Y@]}\":{\"network_mode\":\"host\"}}}"
+    while IFS='|' read -r case fn answer rc want; do
+        rm -f "${DS}/answers" "${DS}"/answer-used-*
+        _docker_answer ' compose * config --profiles *' 0
+        case "${answer}" in
+            json) _docker_answer ' compose * config --format json *' 0 "${json}" ;;
+            fail) _docker_answer ' compose * config --format json *' 1 '' "${V[@ERR@]}" ;;
+            text) _docker_answer ' compose * config --format json *' 0 "${V[@ERR@]}" ;;
+        esac
+        run "${fn}"
+        _expect "${case}" "${rc}" "$(printf '%b' "$(_fill "${want}")")" || return 1
+    done <<'CASES'
+health|_ci_validate_health_services|json|0|=@H@
+no-health|_ci_validate_no_health_services|json|0|=@N@
+startable|_ci_validate_startable|json|0|=@H@\n@N@
+unreadable|_ci_validate_startable|fail|2|[CI-ERROR-VALIDATE-0086];@ERR@;[CI-ERROR-VALIDATE-0069]
+not-json|_ci_validate_startable|text|2|[CI-ERROR-VALIDATE-0057]
+CASES
 }
 
 # What: wait for health or stability per container answer
@@ -3863,30 +3915,6 @@ CASES
     run _ci_validate_reserve
     [ "${status}" -eq 2 ]
     [[ "${output}" == *"CI-ERROR-VALIDATE-0050"* ]]
-}
-
-@test "validate startable excludes host-mode services" {
-    # What: host-mode services are never started.
-    # Why: Host-port bindings cannot be isolated.
-    # From: Issue #1683
-    CI_COMPOSE_CONFIG_CMD="$(_stub 'printf "%s" "{\"services\":{\"proxy\":{},\"dhcp\":{\"network_mode\":\"host\"},\"dns-standard\":{}}}"')" \
-        run _ci_validate_startable
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"proxy"* ]]
-    [[ "${output}" == *"dns-standard"* ]]
-    [[ "${output}" != *"dhcp"* ]]
-}
-
-@test "validate health list is started and healthchecked" {
-    # What: Health list is started AND healthchecked.
-    # Why: Polling an unstarted service hangs out.
-    # From: Issue #1683
-    CI_COMPOSE_CONFIG_CMD="$(_stub 'printf "%s" "{\"services\":{\"proxy\":{\"healthcheck\":{}},\"dhcp\":{\"network_mode\":\"host\",\"healthcheck\":{}},\"cachehamster\":{}}}"')" \
-        run _ci_validate_health_services
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"proxy"* ]]
-    [[ "${output}" != *"dhcp"* ]]
-    [[ "${output}" != *"cachehamster"* ]]
 }
 
 @test "validate net override isolates and resets services" {
