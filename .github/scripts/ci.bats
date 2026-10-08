@@ -86,13 +86,6 @@ _stub() {
     printf '%s\n' "${path}"
 }
 
-# What: A stub probe that returns a fixed state.
-# Why: Test the resolver logic without a live GHCR.
-# From: Issue #1683
-_probe_stub() {
-    _stub "printf '%s\\n' \"${STUB_STATE}\""
-}
-
 # What: loads every setup.sh function, never runs setup.sh
 # Why: tests drive the product code with its real die
 # From: Issue #1683 | PR #1858
@@ -296,7 +289,6 @@ CASES
         [@CHAN@]="$(_ci_block_entry_field release "" default_channel)"
         [@REC@]="$(_stub 'printf "%s\n" "$*" >> "'"${calls}"'"')"
         [@FULL@]="$(_promote_full_candidate "$(_val digest)")" [@CAND@]="$(_stub 'true')"
-        [@PROBE@]="$(STUB_STATE=PRESENT_ACCEPTED _probe_stub)" [@DIG@]="$(_asm_digest_stub)"
         [@NOIDX@]="$(_stub 'exit 1')" [@BAD@]="$(_val name)" [@FOREIGN@]="$(_val platform)"
         [@DIGEST@]="$(_val digest)" [@IMG@]="$(_val name)@$(_val digest)" [@USER@]="$(_val name)" [@TOKEN@]="$(_val name)"
     )
@@ -341,7 +333,6 @@ version-verb|-|version @BAD@|CI-ERROR-VERSION-0014|-
 release-tag|CI_RELEASE_GH_CMD=@REC@|release-publish|CI-ERROR-RELEASE-0003|-
 scan-auth|CI_SCAN_CMD=@REC@|scan @SVC@ @DIGEST@|CI-ERROR-BUILD-0002|-
 publish-auth|-|publish @SVC@|CI-ERROR-BUILD-0002|-
-assemble-auth|CI_RESOLVE_PROBE_CMD=@PROBE@ CI_ACCEPTED_DIGEST_CMD=@DIG@ CI_INDEX_LOOKUP_CMD=@NOIDX@ CI_ASSEMBLE_CMD=@REC@|assemble @SVC@|CI-ERROR-BUILD-0002|-
 promote-auth|CI_STACK_CANDIDATE_CMD=@FULL@ CI_STACK_VALIDATED=SUCCESS CI_PROMOTE_MOVE_CMD=@REC@|promote @CHAN@|CI-ERROR-BUILD-0002|-
 validate-auth|CI_STACK_CANDIDATE_CMD=@FULL@ CI_VALIDATE_CMD=@REC@|validate|CI-ERROR-BUILD-0002|compose version
 bake-auth|CI_BAKE_INSPECT_CMD=@REC@|variables bake-check @IMG@|CI-ERROR-BUILD-0002|-
@@ -1388,10 +1379,17 @@ CASES
     GITHUB_OUTPUT="$(_val path)"
     GHCR_USERNAME="$(_val name)"
     GHCR_TOKEN="$(_val name)"
-    CI_RESOLVE_PROBE_CMD="$(_stub 'echo MISSING_CONFIRMED')"
+    GITHUB_REPOSITORY="$(_val name)/$(_val name)"
     CI_IMPACT_CMD="$(_stub 'echo BUILD')"
     CI_BUILD_TOOLS_IMAGE_CMD="$(_stub "echo $(_val host)/$(_val name)@$(_val digest)")"
-    export GITHUB_OUTPUT GHCR_USERNAME GHCR_TOKEN CI_RESOLVE_PROBE_CMD CI_IMPACT_CMD CI_BUILD_TOOLS_IMAGE_CMD
+    export GITHUB_OUTPUT GHCR_USERNAME GHCR_TOKEN GITHUB_REPOSITORY CI_IMPACT_CMD CI_BUILD_TOOLS_IMAGE_CMD
+    # What: empty ledger, every registry read not found
+    # Why: the real resolver answers MISSING_CONFIRMED
+    # From: Issue #1683 | PR #1858
+    _cas_setup
+    cd "${CAS_A}" || return 1
+    _ledger_fresh
+    _docker_answer ' buildx imagetools inspect *' 1 '' "ERROR: $(_val name): not found"
     while IFS='|' read -r case sot call rc want; do
         read -r -a av <<< "$(_fill "${call}")"
         CI_MANIFEST="${S[${sot}]}" run "${av[@]}"
@@ -1415,7 +1413,7 @@ CASES
 # Why: build only on impact BUILD and MISSING_CONFIRMED.
 # From: Issue #1683 | PR #1858
 @test "plan-matrix maps each change, impact, probe and ref to its outputs" {
-    local case changed probe impact env rc want svc m got plats w
+    local case changed probe impact env rc want svc m got plats w p
     local -a ev ws
     local -A V=(
         [@DOC@]="$(_val name).md" [@RSRC@]="$(_val name).rs" [@BR@]="refs/heads/$(_val name)"
@@ -1439,17 +1437,31 @@ CASES
     GITHUB_OUTPUT="$(_val path)"
     GHCR_USERNAME="$(_val name)"
     GHCR_TOKEN="$(_val name)"
-    export GITHUB_OUTPUT GHCR_USERNAME GHCR_TOKEN
+    GITHUB_REPOSITORY="$(_val name)/$(_val name)"
+    export GITHUB_OUTPUT GHCR_USERNAME GHCR_TOKEN GITHUB_REPOSITORY
+    _cas_setup
+    cd "${CAS_A}" || return 1
     while IFS='|' read -r case changed probe impact env rc want svc; do
         : > "${GITHUB_OUTPUT}"
+        rm -f "${DS}/answers" "${DS}"/answer-used-*
+        _ledger_fresh
+        # What: the probe column seeds the real resolver path
+        # Why: ledger and registry answer; nothing is injected
+        # From: Issue #1683 | PR #1858
+        if [ "${probe}" = PRESENT_ACCEPTED ]; then
+            for p in $(_ci_platforms "${V[@S_APK@]}"); do
+                _artifact PRESENT_ACCEPTED "${V[@S_APK@]}" "${p}" "$(_val digest)" || return 1
+            done
+        else
+            _docker_answer ' buildx imagetools inspect *' 1 '' "ERROR: $(_val name): not found"
+        fi
         ev=()
         [ "${env}" = - ] || IFS=';' read -r -a ev <<< "$(_fill "${env}")"
         case "${impact}" in
             ONLY_APK) impact="$(_stub "[ \"\$1\" = '${V[@S_APK@]}' ] && echo BUILD || echo NOOP")" ;;
             *) impact="$(_stub "echo ${impact}")" ;;
         esac
-        run env "${ev[@]}" CI_RESOLVE_PROBE_CMD="$(_stub "echo ${probe}")" CI_IMPACT_CMD="${impact}" \
-            bash "${CI_SH}" plan-matrix "$(_fill "${changed}")"
+        run env "${ev[@]}" CI_IMPACT_CMD="${impact}" bash "${CI_SH}" plan-matrix "$(_fill "${changed}")"
         if [ "${rc}" -ne 0 ]; then
             _expect "${case}" "${rc}" "${want}" || return 1
             continue
@@ -1849,7 +1861,7 @@ CASES
 # Why: one build path; all other states reuse or stop.
 # From: Issue #1683 | PR #1858
 @test "build admission: only impact + MISSING_CONFIRMED + auth build" {
-    local case type state impact cas auth plat rc want probe w svc p marker failrc all casmark casrc wantcas
+    local case type state impact cas auth plat rc want w svc p q marker all casmark casrc wantcas
     local -a adm_env args
     local -A svcs
     for type in rust apk; do
@@ -1861,14 +1873,22 @@ CASES
     p="${p##*$'\n'}"
     marker="$(_val name)"
     casmark="$(_val name)"
-    failrc="$(_val int 1 120)"
     casrc="$(_val int 2 120)"
+    GITHUB_REPOSITORY="$(_val name)/$(_val name)"
+    export GITHUB_REPOSITORY
+    _cas_setup
+    cd "${CAS_A}" || return 1
     while IFS='|' read -r case type state impact cas auth plat rc want; do
-        STUB_STATE="${state}"
-        probe="$(_probe_stub)"
-        [ "${case}" != probe-fail ] || probe="$(_stub "echo MISSING_CONFIRMED; exit ${failrc}")"
+        rm -f "${DS}/answers" "${DS}"/answer-used-*
+        _ledger_fresh
+        # What: the state column seeds the real resolver path
+        # Why: ledger and registry answer; nothing is injected
+        # From: Issue #1683 | PR #1858
+        for q in $(_ci_platforms "${svcs[${type}]}"); do
+            _artifact "${state}" "${svcs[${type}]}" "${q}" "$(_val digest)" || return 1
+        done
         adm_env=(-u GITHUB_EVENT_NAME -u BEFORE_SHA -u GHCR_USERNAME -u GHCR_TOKEN -u CI_CAS_LOOKUP_CMD
-            CI_RESOLVE_PROBE_CMD="${probe}" CI_BUILD_CMD="$(_stub "echo ${marker}")")
+            CI_BUILD_CMD="$(_stub "echo ${marker}")")
         [ "${impact}" = - ] || adm_env+=(CI_IMPACT_CMD="$(_stub "echo ${impact}")")
         cas="${cas//@R@/${casrc}}"
         [ "${cas}" = - ] || adm_env+=(CI_CAS_LOOKUP_CMD="$(_stub "echo ${casmark} >&2; exit ${cas}")")
@@ -1902,7 +1922,6 @@ apk-no-cas|apk|MISSING_CONFIRMED|BUILD|0|yes|-|0|@M@ result=built
 no-auth|rust|MISSING_CONFIRMED|BUILD|1|no|-|2|CI-ERROR-BUILD-0002
 built|rust|MISSING_CONFIRMED|BUILD|1|yes|-|0|@C@ @M@ state=BUILD_ACK result=built
 mismatch|rust|MISMATCH|BUILD|1|yes|-|2|result=fail-mismatch CI-ERROR-BUILD-0010
-probe-fail|rust|-|BUILD|1|yes|-|2|result=escalate
 no-impact|rust|MISSING_CONFIRMED|NOOP|1|yes|-|0|result=no-build-no-impact
 no-base|rust|MISSING_CONFIRMED|-|1|yes|-|2|result=escalate
 CASES
@@ -2462,12 +2481,6 @@ _test_digest() {
     local c="$1" out=""
     while [ "${#out}" -lt 64 ]; do out="${out}${c}"; done
     printf 'sha256:%s' "${out}"
-}
-# What: a digest stub for the accepted-digest seam
-# Why: the fail-closed command table still sets that seam
-# From: Issue #1683
-_asm_digest_stub() {
-    _stub "echo $(_test_digest a)"
 }
 
 # What: ci.sh assemble per platform, index and backend row
