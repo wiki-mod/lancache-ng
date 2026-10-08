@@ -6903,7 +6903,7 @@ _ci_validate_kea_add() {
 # From: Issue #763 | PR #1858
 _ci_validate_kea_round_trip() {
     local project="$1" kip="$2" kport="$3" uname="$4" cfg token dir subnet resp sid ubase
-    local jar csrf base snap inst out n_a n_b rc=0 kbase kuser label mac_a mac_b tries pause su snapdir mount snaps
+    local jar csrf base snap inst out n_a n_b rc=0 kbase kuser label mac_a mac_b tries pause su snapdir mount snaps compose
     kbase="http://${kip}:${kport}"
     kuser="$(_ci_validate_kea_agent user)" || return 2
     label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
@@ -6951,20 +6951,25 @@ _ci_validate_kea_round_trip() {
     _ci_validate_kea_add "${ubase}" "${jar}" "${csrf}" "${sid}" "${mac_b}" \
         "$(_ci_int_to_ipv4 $(( base + 3 )))" "${label}-2" "${snaps}" >/dev/null || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     rm -f "${jar}"
-    inst="$(_ci_mktemp -d "${CI_TMPDIR}/ci-kea-install.XXXXXX")" || return 2
-    # What: install-dir stub: compose marker and Kea .env.
-    # Why: setup.sh reads KEA_* only from <install>/.env.
-    # From: Issue #763 | PR #1858
-    if ! out="$( { : > "${inst}/docker-compose.yml" \
-        && printf 'KEA_CTRL_TOKEN=%s\nKEA_CTRL_HOST=%s\nKEA_DATA_DIR=%s\nKEA_CONFIG_SNAPSHOT_DIR=%s\n' \
-            "${token}" "${kip}" "${dir}" "${snapdir}" > "${inst}/.env"; } 2>&1)"; then
-        ci_error "[CI-ERROR-VALIDATE-0093]" "dir=\"${inst}\" reason=\"setup.sh install-dir stub not written\"" "${out}"
-        rm -rf "${inst}"
+    compose="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    su="$(_ci_installer)" || return 2
+    inst="$(dirname "${compose}")"
+    if [ -e "${inst}/.env.local" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0113]" "path=\"${inst}/.env.local\" reason=\"an .env.local exists; validate never overwrites it\""
         return 2
     fi
-    su="$(_ci_installer)" || { rm -rf "${inst}"; return 2; }
+    # What: .env.local: the deploy .env with this run's KEA_*
+    # Why: setup.sh reads a deploy/prod install's .env.local
+    # From: Issue #763 | PR #1858
+    if ! out="$(grep -v -E '^(KEA_CTRL_TOKEN|KEA_CTRL_HOST|KEA_DATA_DIR)=' "${inst}/.env" 2>&1)" \
+        || ! (umask 077 && printf '%s\nKEA_CTRL_TOKEN=%s\nKEA_CTRL_HOST=%s\nKEA_DATA_DIR=%s\n' \
+            "${out}" "${token}" "${kip}" "${dir}" > "${inst}/.env.local"); then
+        ci_error "[CI-ERROR-VALIDATE-0093]" "dir=\"${inst}\" reason=\"setup.sh .env.local not written\"" "${out}"
+        rm -f "${inst}/.env.local"
+        return 2
+    fi
     resp="$(bash "${su}" reset-to-last-known-good-config kea "${inst}" "${snap}" --yes 2>&1)" || rc=$?
-    rm -rf "${inst}"
+    rm -f "${inst}/.env.local"
     case "${rc}:${resp}" in
         0:*"Kea rolled back to known-good snapshot ${snap} ("*) ;;
         *)

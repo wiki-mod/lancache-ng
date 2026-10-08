@@ -571,24 +571,23 @@ STUB
 # From: Issue #1683 | PR #1858
 _slot_ips() {
     local ip
-    local -A seen=()
-    while [ "${#seen[@]}" -lt "$1" ]; do
+    local -A slots=()
+    while [ "${#slots[@]}" -lt "$1" ]; do
         ip="$(_ci_validate_subnet "$(_val name)")" || return 1
-        seen["${ip%/*}"]=1
+        slots["${ip%/*}"]=1
     done
-    printf '%s\n' "${!seen[@]}"
+    printf '%s\n' "${!slots[@]}"
 }
 
 # What: stand-in answers for one compose service container
 # Why: ci.sh finds a container by ps, then reads inspect
 # From: Issue #1683 | PR #1858
 _container() {
-    local svc="$1" cid="$2" ip="$3" ports="${4:-}" env="${5:-}" mount="${6:-}"
+    local svc="$1" cid="$2" ip="$3" ports="${4:-}" env="${5:-}"
     _docker_answer " compose -p * ps -q ${svc} " 0 "${cid}"
     _docker_answer " inspect -f *NetworkSettings* ${cid} " 0 "${ip}"
     [ -z "${ports}" ] || _docker_answer " inspect -f *ExposedPorts* ${cid} " 0 "${ports}"
     [ -z "${env}" ] || _docker_answer " inspect -f *Config.Env* ${cid} " 0 "${env}"
-    [ -z "${mount}" ] || _docker_answer " inspect -f *Mounts* ${cid} " 0 "${mount}"
 }
 
 # What: script one docker answer: glob, rc, out, err, times
@@ -596,6 +595,132 @@ _container() {
 # From: Issue #1683 | PR #1858
 _docker_answer() {
     printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$1" "$2" "${3:-}" "${4:-}" "${5:-}" >> "${DS}/answers"
+}
+
+# What: curl stand-in: Kea agent, DNS listener, ui pages
+# Why: real setup.sh and ci.sh talk to them; no network
+# From: Issue #1683 | PR #1858
+_curl_stub() {
+    _tool_stub "${BIN}" curl <<'STUB'
+fmt="" data="" cfg="" out="" fail=0 url="${!#}" user=""
+hdr=() form=()
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in
+        -w) fmt="${args[$((i + 1))]}" ;;
+        -d) data="${args[$((i + 1))]}" ;;
+        -H) hdr+=("${args[$((i + 1))]}") ;;
+        -o) out="${args[$((i + 1))]}" ;;
+        --data-urlencode) form+=("${args[$((i + 1))]}") ;;
+        -K) cfg="$(cat)" ;;
+        --*) ;;
+        -*f*) fail=1 ;;
+    esac
+done
+while IFS= read -r line; do
+    [[ "${line}" =~ ^([a-z]+)\ =\ \"(.*)\"$ ]] || continue
+    v="${BASH_REMATCH[2]//\\\"/\"}"
+    v="${v//\\\\/\\}"
+    case "${BASH_REMATCH[1]}" in header) hdr+=("${v}") ;; data) data="${v}" ;; user) user="${v}" ;; esac
+done <<< "${cfg}"
+printf '%s\n' "$*" >> "${DS}/curl.argv"
+[ -z "${cfg}" ] || printf '%s\n' "${cfg}" >> "${DS}/curl.cfg"
+[ ! -e "${DS}/fail-curl" ] || { echo "curl: (7) Failed to connect to ${url}" >&2; exit 7; }
+field() { local f; for f in "${form[@]}"; do [ "${f%%=*}" != "$1" ] || printf '%s' "${f#*=}"; done; }
+# What: one listener snapshot of a zone's current records
+# Why: the listener records a snapshot after every write
+# From: Issue #628 | PR #1858
+snap() {
+    local n=0
+    [ -e "${DS}/listener-snapshots" ] && [ -e "${DS}/dns-records" ] && [ ! -e "${DS}/listener-nosnap" ] || return 0
+    [ ! -e "${DS}/snap-n" ] || n="$(cat "${DS}/snap-n")"
+    n=$(( n + 1 ))
+    echo "${n}" > "${DS}/snap-n"
+    cp "${DS}/dns-records" "${DS}/snap-${n}"
+    jq -c --arg z "$1" --arg i "${n}" '.zones[$z] = ([{id: $i}] + (.zones[$z] // []))' \
+        "${DS}/listener-snapshots" > "${DS}/ls.new" && mv "${DS}/ls.new" "${DS}/listener-snapshots"
+}
+status=200 body=""
+rest="${url#*://}" path=""
+[ "${rest}" = "${rest#*/}" ] || path="${rest#*/}"
+case "${path}" in
+    domains)
+        [ ! -e "${DS}/ui-page" ] || body="$(cat "${DS}/ui-page")"
+        [ ! -e "${DS}/ui-status" ] || status="$(cat "${DS}/ui-status")" ;;
+    domains/*/add)
+        printf '%s %s\n' "${path}" "${form[*]}" >> "${DS}/ui.posts"
+        status=303
+        [ ! -e "${DS}/ui-post-status" ] || status="$(cat "${DS}/ui-post-status")"
+        if [ "${status}" = 303 ] && [ -e "${DS}/dns-records" ]; then
+            z="${path#domains/}" z="${z%/add}." fq="$(field name).${z}"
+            { grep -v "^${fq} " "${DS}/dns-records"; printf '%s %s\n' "${fq}" "$(field content)"; } > "${DS}/dr.new"
+            mv "${DS}/dr.new" "${DS}/dns-records"
+            snap "${z}"
+        fi ;;
+    dhcp/static/add)
+        printf '%s %s\n' "${path}" "${form[*]}" >> "${DS}/ui.posts"
+        status=303
+        [ ! -e "${DS}/ui-post-status" ] || status="$(cat "${DS}/ui-post-status")"
+        if [ "${status}" = 303 ] && [ -e "${DS}/kea-live" ]; then
+            jq -c --arg s "$(field subnet_id)" --arg m "$(field mac)" --arg ip "$(field ip)" --arg h "$(field hostname)" \
+                '.Dhcp4.subnet4 |= map(if (.id | tostring) == $s then .reservations += [{"hw-address": $m, "ip-address": $ip, hostname: $h}] else . end)' \
+                "${DS}/kea-live" > "${DS}/kl.new" && mv "${DS}/kl.new" "${DS}/kea-live"
+            if [ ! -e "${DS}/kea-no-snapshot" ]; then
+                k=0
+                [ ! -e "${DS}/kea-n" ] || k="$(cat "${DS}/kea-n")"
+                k=$(( k + 1 ))
+                echo "${k}" > "${DS}/kea-n"
+                mkdir -p "$(cat "${DS}/kea-snapdir")/${k}" && cp "${DS}/kea-live" "$(cat "${DS}/kea-snapdir")/${k}/dhcp4.json"
+            fi
+        fi ;;
+    api/secondary/register)
+        printf '%s\n' "${data}" >> "${DS}/register.posts"
+        body="$(jq -c '{nats_user: ("u-" + .name), nats_password: ("p-" + .name)}' <<< "${data}")"
+        [ ! -e "${DS}/register-body" ] || body="$(cat "${DS}/register-body")"
+        [ ! -e "${DS}/register-status" ] || status="$(cat "${DS}/register-status")" ;;
+    "")
+        [ -z "${cfg}" ] || printf '%s\n' "${cfg}" > "${DS}/kea.cfg"
+        [ ! -e "${DS}/fail-kea" ] || exit 7
+        printf '%s\n' "${url}" >> "${DS}/kea.urls"
+        [ -z "${user}" ] || printf '%s\n' "${user%%:*}" >> "${DS}/kea.users"
+        cmd="$(jq -r .command <<< "${data}")"
+        printf '%s\n' "${cmd}" >> "${DS}/kea.commands"
+        body='[{"result":0,"text":"ok"}]'
+        if [ -e "${DS}/kea-${cmd}" ]; then
+            body="$(cat "${DS}/kea-${cmd}")"
+        elif [ -e "${DS}/kea-live" ]; then
+            case "${cmd}" in
+                config-get) body="$(jq -c '[{result: 0, arguments: .}]' "${DS}/kea-live")" ;;
+                config-set) [ -e "${DS}/kea-norevert" ] || jq -c .arguments <<< "${data}" > "${DS}/kea-live" ;;
+            esac
+        fi
+        [ ! -e "${DS}/kea-status" ] || status="$(cat "${DS}/kea-status")" ;;
+    *)
+        body="$(cat "${DS}/listener-${path}")"
+        [ ! -e "${DS}/listener-status" ] || status="$(cat "${DS}/listener-status")"
+        [ -z "${data}" ] || printf '%s\n' "${data}" >> "${DS}/listener.posts"
+        auth="$(printf '%s\n' "${hdr[@]}" | grep -c '^X-API-Key: ')" mode=""
+        [ ! -e "${DS}/listener-auth" ] || mode="$(cat "${DS}/listener-auth")"
+        case "${mode}" in
+            open) ;;
+            anykey) [ "${auth}" -gt 0 ] || { status=401 body='{"error":"missing X-API-Key"}'; } ;;
+            *) grep -qxF "X-API-Key: $(cat "${DS}/pdns-api-key")" <<< "$(printf '%s\n' "${hdr[@]}")" \
+                   || { status=401 body='{"error":"missing or invalid X-API-Key"}'; } ;;
+        esac
+        if [ "${path}" = rollback ] && [ "${status}" = 200 ] && [ -e "${DS}/dns-records" ]; then
+            id="$(jq -r .snapshot_id <<< "${data}")"
+            [ ! -e "${DS}/snap-${id}" ] || cp "${DS}/snap-${id}" "${DS}/dns-records"
+            [ -e "${DS}/listener-norecord" ] || snap "$(jq -r .zone <<< "${data}")"
+        fi ;;
+esac
+if [ "${fail}" -eq 1 ] && [ "${status}" -ge 400 ]; then
+    echo "curl: (22) The requested URL returned error: ${status}" >&2
+    exit 22
+fi
+fmt="${fmt//\\n/$'\n'}"
+if [ -n "${out}" ]; then printf '%s' "${body}" > "${out}"; else printf '%s' "${body}"; fi
+printf '%s' "${fmt//"%{http_code}"/${status}}"
+STUB
 }
 
 # What: sleep only advances the shell clock SECONDS
@@ -655,8 +780,10 @@ _backup_volume() {
 _prod_install() {
     local root dir="$1"
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    mkdir -p "${dir}" "${dir}/../../config" "${dir}/../../.github/yaml" "${dir}/../../.github/scripts" || return 1
+    mkdir -p "${dir}" "${dir}/../../config" "${dir}/../../.github/yaml" "${dir}/../../.github/scripts" \
+        "${dir}/../../services/dhcp" || return 1
     cp "${root}/deploy/prod/docker-compose.yml" "${root}/deploy/prod/.env" "${dir}/" || return 1
+    cp "${root}/services/dhcp/kea-ctrl-agent.conf" "${dir}/../../services/dhcp/" || return 1
     cp -r "${root}/config/prod" "${dir}/../../config/" || return 1
     cp "${root}/.github/yaml/build-manifest.yml" "${dir}/../../.github/yaml/" || return 1
     cp "${root}/.github/scripts/ci.sh" "${dir}/../../.github/scripts/" || return 1
@@ -4000,8 +4127,7 @@ CASES
     # What: the probe IP is a validation slot address
     # Why: probe targets live in slots from the slot owner
     # From: Issue #1683 | PR #1858
-    V[@IP@]="$(_ci_validate_subnet "$(_val name)")"
-    V[@IP@]="${V[@IP@]%/*}"
+    V[@IP@]="$(_slot_ips 1)" || return 1
     while IFS='|' read -r case rc want; do
         rm -f "${DS}/answers" "${DS}"/answer-used-*
         case "${case}" in
@@ -4091,8 +4217,8 @@ CASES
     local case inspect row_mode rc want row_n row_args
     local -A V=([@P@]="$(_val name)" [@C@]="$(_val name)" [@ERR@]="$(_val name)")
     row_n="$(_val path)" row_args="$(_val path)"
-    V[@IP@]="$(_ci_validate_subnet "$(_val name)")" && V[@IP@]="${V[@IP@]%/*}" \
-        && V[@HTTP@]="$(_ci_service_port http)" && V[@URL@]="$(_ci_validation_proxy_probe_url)" || return 1
+    V[@IP@]="$(_slot_ips 1)" && V[@HTTP@]="$(_ci_service_port http)" && V[@URL@]="$(_ci_validation_proxy_probe_url)" \
+        || return 1
     # What: curl double: cache answer per call; argv logged
     # Why: no live proxy; the call count picks MISS or HIT
     # From: Issue #1683 | PR #1858
@@ -4110,8 +4236,7 @@ CASES
     while IFS='|' read -r case inspect row_mode rc want; do
         rm -f "${DS}/answers" "${DS}"/answer-used-*
         echo 0 > "${row_n}"; : > "${row_args}"
-        _docker_answer ' compose -p * ps -q *' 0 "${V[@C@]}"
-        _docker_answer " inspect -f * ${V[@C@]} " 0 "$(_fill "${inspect}")"
+        _container proxy "${V[@C@]}" "$(_fill "${inspect}")"
         run _ci_validate_proxy "${V[@P@]}"
         _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
     done <<'CASES'
@@ -4161,8 +4286,7 @@ CASES
     local case inspect cp row_hs row_issuer rc want row_log
     local -A V=([@P@]="$(_val name)" [@C@]="$(_val name)" [@CA@]="$(_val name)" [@F@]="$(_val name)" [@ERR@]="$(_val name)")
     row_log="$(_val path)"
-    V[@IP@]="$(_ci_validate_subnet "$(_val name)")" && V[@IP@]="${V[@IP@]%/*}" \
-        && V[@CADIR@]="$(_ci_proxy_constant CA_DIR)" && V[@TLS@]="$(_ci_service_port https)" \
+    V[@IP@]="$(_slot_ips 1)" && V[@CADIR@]="$(_ci_proxy_constant CA_DIR)" && V[@TLS@]="$(_ci_service_port https)" \
         && V[@DOM@]="$(_ci_validation_dns_domain)" || return 1
     # What: openssl double: TLS answer per row; argv logged
     # Why: no live proxy; row_* names avoid callee locals
@@ -4179,8 +4303,7 @@ CASES
         rm -f "${DS}/answers" "${DS}"/answer-used-*
         : > "${row_log}"
         row_issuer="$(_fill "${row_issuer}")"
-        _docker_answer ' compose -p * ps -q *' 0 "${V[@C@]}"
-        _docker_answer " inspect -f * ${V[@C@]} " 0 "$(_fill "${inspect}")"
+        _container proxy "${V[@C@]}" "$(_fill "${inspect}")"
         if [ "${cp}" -eq 0 ]; then
             _docker_answer " cp ${V[@C@]}:${V[@CADIR@]}/* *" 0
         else
@@ -4236,331 +4359,385 @@ dispatch-unreadable|_ci_validate_ssl_dispatch_map|@DF@|yes|fail|2|[CI-ERROR-CORE
 CASES
 }
 
-@test "validate ui-session maps target, answer and cookie" {
-    # What: per row: ui IP and curl answer -> rc, output.
-    # Why: the CSRF token comes from the session cookie.
-    # From: Issue #1164 | PR #1858
-    local case stub_ip stub_mode rc want jar="${BATS_TEST_TMPDIR}/ci-test-jar"
-    _ci_validate_container_ip() { echo "${stub_ip}"; }
+# What: ui base, session and add-record per stand-in row
+# Why: the probe reaches the ui only via owner-read values
+# From: Issue #1164 | PR #1858
+@test "validate ui base, session and add-record per stand-in row" {
+    local case rc want base ttl
+    local -A V=(
+        [@P@]="$(_val name)" [@S@]="$(_val name)" [@C@]="$(_val name)" [@TOK@]="$(_val name)"
+        [@N@]="$(_val name)" [@Z@]="$(_val name)." [@PORT@]="$(_val port)" [@Q@]="$(_val port)"
+    )
+    V[@ZN@]="${V[@Z@]%.}"
+    V[@IP@]="$(_slot_ips 1)" && ttl="$(_ci_variable CI_VALIDATE_PROBE_TTL)" || return 1
     _virtual_clock
-    curl() {
-        local cj="" a
-        [ "${stub_mode}" != refused ] || { echo "curl: (7) Failed to connect" >&2; return 7; }
-        for a in "$@"; do [ "${a}" = "-w" ] && { echo 303; return 0; }; done
-        while [ $# -gt 0 ]; do case "$1" in -c) cj="$2"; shift 2 ;; *) shift ;; esac; done
-        [ -z "${cj}" ] || printf 'd\tF\t/\tF\t0\tlancache_ui_session\thdr.body.TOK123\n' > "${cj}"
-    }
-    while IFS='|' read -r case stub_ip stub_mode rc want; do
-        rm -f "${jar}"
-        run _ci_validate_ui_session proj "${jar}"
-        _expect "${case}" "${rc}" "${want}" || return 1
+    _curl_stub
+    while IFS='|' read -r case rc want; do
+        rm -f "${DS}/answers" "${DS}"/answer-used-* "${DS}"/ui-* "${DS}/ui.posts" "${DS}/fail-curl"
+        base="http://${V[@IP@]}:${V[@PORT@]}"
+        printf '<input type="hidden" name="csrf_token" value="%s">\n' "${V[@TOK@]}" > "${DS}/ui-page"
+        case "${case}" in
+            base) _container "${V[@S@]}" "${V[@C@]}" "${V[@IP@]}" "${V[@PORT@]}/tcp" ;;
+            base-noip) _container "${V[@S@]}" "${V[@C@]}" '<no value>' "${V[@PORT@]}/tcp" ;;
+            base-ports) _container "${V[@S@]}" "${V[@C@]}" "${V[@IP@]}" "${V[@PORT@]}/tcp\n${V[@Q@]}/tcp" ;;
+            session-down) : > "${DS}/fail-curl" ;;
+            session-nofield) : > "${DS}/ui-page" ;;
+            add-other) echo 500 > "${DS}/ui-post-status" ;;
+            *-nobase) base="" ;;
+        esac
+        case "${case}" in
+            base*) run _ci_validate_ui_base "${V[@P@]}" "${V[@C@]}" ;;
+            session*) run _ci_validate_ui_session "$(_val path)" "${base}" ;;
+            add*) run _ci_validate_ui_add_record "${base}" "$(_val path)" "${V[@TOK@]}" "${V[@Z@]}" "${V[@N@]}" "${V[@IP@]}" ;;
+        esac
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+        [ "${case}" != add ] \
+            || grep -qxF "domains/${V[@ZN@]}/add csrf_token=${V[@TOK@]} name=${V[@N@]} record_type=A content=${V[@IP@]} ttl=${ttl}" "${DS}/ui.posts" \
+            || { echo "posts:"; cat "${DS}/ui.posts"; return 1; }
     done <<'CASES'
-no-ip||ok|2|CI-ERROR-VALIDATE-0030
-refused|172.16.1.9|refused|1|CI-ERROR-VALIDATE-0031;Failed to connect
-token|172.16.1.9|ok|0|=TOK123
+base|0|=http://@IP@:@PORT@
+base-noip|2|[CI-ERROR-VALIDATE-0103]
+base-ports|2|[CI-ERROR-VALIDATE-0104];@PORT@/tcp;@Q@/tcp
+session|0|=@TOK@
+session-down|1|[CI-ERROR-VALIDATE-0031];curl: (7)
+session-nofield|1|[CI-ERROR-VALIDATE-0032]
+session-nobase|2|[CI-ERROR-VALIDATE-0030]
+add|0|-
+add-other|1|[CI-ERROR-VALIDATE-0034] url="http://@IP@:@PORT@/domains/@ZN@/add" code="500"
+add-nobase|2|[CI-ERROR-VALIDATE-0033]
 CASES
 }
 
-@test "validate ui-add-record accepts only the 303 redirect" {
-    # What: per row: HTTP status of the add -> rc, output.
-    # Why: the UI signals a stored record with 303 only.
-    # From: Issue #1164 | PR #1858
-    local case stub_code rc want
-    _ci_validate_container_ip() { echo 172.16.1.9; }
-    curl() { echo "${stub_code}"; }
-    while IFS='|' read -r case stub_code rc want; do
-        run _ci_validate_ui_add_record proj "${BATS_TEST_TMPDIR}/jar" tok ci-probe 203.0.113.60
-        _expect "${case}" "${rc}" "${want}" || return 1
-    done <<'CASES'
-error|500|1|CI-ERROR-VALIDATE-0034
-redirect|303|0|-
-CASES
-}
-
+# What: _ci_validate_dns_resolves per dig answer row
+# Why: only the expected answer passes; a miss shows why
+# From: Issue #1164 | PR #1858
 @test "validate dns-resolves maps target and answers" {
-    # What: per row: dns IP and dig answer -> rc, output.
-    # Why: the record must resolve; stderr is no answer.
+    local case ip row_mode rc want budget row_log
+    local -A V=(
+        [@P@]="$(_val name)" [@S@]="$(_val name)" [@C@]="$(_val name)" [@N@]="$(_val name)"
+        [@Z@]="$(_val name)." [@W@]="$(_val name)"
+    )
+    V[@F@]="${V[@N@]}.${V[@Z@]}"
+    V[@IP@]="$(_slot_ips 1)" && V[@A@]="$(_ci_validate_probe_ip 1)" && V[@B@]="$(_ci_validate_probe_ip 2)" \
+        && budget="$(_ci_variable CI_VALIDATE_DNS_WAIT)" || return 1
+    _virtual_clock
+    row_log="$(_val path)"
+    # What: dig double: one answer per row, echoing its argv
+    # Why: no live resolver; row_mode picks the answer
     # From: Issue #1164 | PR #1858
-    local case stub_ip stub_mode rc want
-    _ci_validate_container_ip() { echo "${stub_ip}"; }
-    _virtual_clock
-    _ci_validate_service_evidence() { echo "evidence $1 $2"; }
     dig() {
-        case "${stub_mode}" in
-            never) echo "10.9.9.9 $*" ;;
-            warn) echo ";; Warning: EDNS mismatch" >&2; echo 203.0.113.60 ;;
-            *) echo 203.0.113.60 ;;
+        printf '%s\n' "$*" >> "${row_log}"
+        case "${row_mode}" in
+            never) echo "${V[@B@]} $*" ;;
+            warn) echo "${V[@W@]}" >&2; echo "${V[@A@]}" ;;
+            *) echo "${V[@A@]}" ;;
         esac
     }
-    while IFS='|' read -r case stub_ip stub_mode rc want; do
-        run _ci_validate_dns_resolves proj dns-standard x.lan. 203.0.113.60 2
-        _expect "${case}" "${rc}" "${want}" || return 1
+    while IFS='|' read -r case ip row_mode rc want; do
+        rm -f "${DS}/answers" "${DS}"/answer-used-*
+        : > "${row_log}"
+        _container "${V[@S@]}" "${V[@C@]}" "$(_fill "${ip}")"
+        run _ci_validate_dns_resolves "${V[@P@]}" "${V[@S@]}" "${V[@F@]}" "${V[@A@]}" "${budget}"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+        [ "${case}" != never ] || [ "$(grep -cF -- "+short @${V[@IP@]} A ${V[@F@]}" "${row_log}")" -eq "${budget}" ] \
+            || { echo "never: $(grep -c . "${row_log}") dig calls for budget ${budget}"; return 1; }
     done <<'CASES'
-no-ip||match|2|CI-ERROR-VALIDATE-0035
-never|172.16.1.3|never|1|CI-ERROR-VALIDATE-0036;full answer:;@172.16.1.3 A x.lan.;zone SOA:;@172.16.1.3 SOA lan.;service:;evidence proj dns-standard
-warn|172.16.1.3|warn|0|-
-match|172.16.1.3|match|0|-
+no-ip|<no value>|match|2|[CI-ERROR-VALIDATE-0035]
+never|@IP@|never|1|[CI-ERROR-VALIDATE-0036];full answer:;@@IP@ A @F@;zone SOA:;@@IP@ SOA @Z@;service:
+warn|@IP@|warn|0|-
+match|@IP@|match|0|-
 CASES
 }
 
-@test "validate ui-nats-dns passes end to end" {
-    # What: session+add+resolve(std,ssl) returns rc 0.
-    # Why: Proves the UI->NATS->PowerDNS+AXFR path.
-    # From: Issue #1164
-    _ci_validate_container_ip() { echo 172.16.1.9; }
-    curl() {
-        local jar="" a
-        for a in "$@"; do [ "$a" = "-w" ] && { echo 303; return 0; }; done
-        while [ $# -gt 0 ]; do case "$1" in -c) jar="$2"; shift 2;; *) shift;; esac; done
-        [ -n "$jar" ] && printf 'd\tF\t/\tF\t0\tlancache_ui_session\th.b.TOK\n' > "$jar"
-        return 0
+# What: _ci_validate_ui_nats_dns per ui and dns answer row
+# Why: one ui write must reach both dns modes via NATS
+# From: Issue #1164 | PR #1858
+@test "validate ui-nats-dns writes once and resolves on both dns" {
+    local case post row_seen rc want zone label ip row_log dns_wait axfr_wait
+    local -a ips
+    local -A V=([@P@]="$(_val name)" [@U@]="$(_val name)" [@D1@]="$(_val name)" [@D2@]="$(_val name)" [@TOK@]="$(_val name)" [@PORT@]="$(_val port)")
+    mapfile -t ips < <(_slot_ips 3)
+    [ "${#ips[@]}" -eq 3 ] && zone="$(_ci_validate_lan_zone)" && label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" \
+        && ip="$(_ci_validate_probe_ip 1)" && dns_wait="$(_ci_variable CI_VALIDATE_DNS_WAIT)" \
+        && axfr_wait="$(_ci_variable CI_VALIDATE_AXFR_WAIT)" || return 1
+    V[@IP1@]="${ips[1]}" V[@IP2@]="${ips[2]}"
+    row_log="$(_val path)"
+    _virtual_clock
+    _curl_stub
+    # What: dig double: a dns answers from the record model
+    # Why: row_seen names the dns IPs the write reached
+    # From: Issue #1164 | PR #1858
+    dig() {
+        printf '%s\n' "$*" >> "${row_log}"
+        local a s=""
+        for a in "$@"; do case "${a}" in @*) s="${a#@}" ;; esac; done
+        [[ " ${row_seen} " == *" ${s} "* ]] || return 0
+        awk -v f="${!#}" '$1 == f { print $2 }' "${DS}/dns-records"
     }
-    dig() { echo 203.0.113.60; }
-    run _ci_validate_ui_nats_dns proj
-    [ "${status}" -eq 0 ]
-}
-
-@test "validate dns-rollback fails closed before the round-trip" {
-    # What: per row: target, API key, unauth status -> rc.
-    # Why: no target, no key or an open listener must stop.
-    # From: Issue #628 | PR #1858
-    local case stub_ip stub_key stub_unauth rc want
-    _ci_validate_container_ip() { echo "${stub_ip}"; }
-    docker() { case "$1" in compose) [ -z "${stub_ip}" ] || echo cid1 ;; exec) [ -z "${stub_key}" ] || echo "${stub_key}" ;; esac; }
-    curl() { case "$*" in *-w*) echo "${stub_unauth}" ;; *) return 0 ;; esac; }
-    while IFS='|' read -r case stub_ip stub_key stub_unauth rc want; do
-        run _ci_validate_dns_rollback proj
-        _expect "${case}" "${rc}" "${want}" || return 1
+    while IFS='|' read -r case post row_seen rc want; do
+        rm -f "${DS}/answers" "${DS}"/answer-used-* "${DS}"/ui-* "${DS}/ui.posts"
+        : > "${DS}/dns-records"
+        : > "${row_log}"
+        row_seen="$(_fill "${row_seen}")"
+        printf '<input type="hidden" name="csrf_token" value="%s">\n' "${V[@TOK@]}" > "${DS}/ui-page"
+        echo "${post}" > "${DS}/ui-post-status"
+        _container ui "${V[@U@]}" "${ips[0]}" "${V[@PORT@]}/tcp"
+        _container dns-standard "${V[@D1@]}" "${V[@IP1@]}"
+        _container dns-ssl "${V[@D2@]}" "${V[@IP2@]}"
+        run _ci_validate_ui_nats_dns "${V[@P@]}"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+        [ "${case}" != ok ] || [ "$(cat "${DS}/dns-records")" = "${label}.${zone} ${ip}" ] \
+            || { echo "records:"; cat "${DS}/dns-records"; return 1; }
+        case "${case}" in
+            std-miss) [ "$(grep -cF -- "+short @${V[@IP1@]} A ${label}.${zone}" "${row_log}")" -eq "${dns_wait}" ] ;;
+            ssl-miss) [ "$(grep -cF -- "+short @${V[@IP2@]} A ${label}.${zone}" "${row_log}")" -eq "${axfr_wait}" ] ;;
+        esac || { echo "${case}: dig calls:"; cat "${row_log}"; return 1; }
     done <<'CASES'
-no-container||||2|CI-ERROR-VALIDATE-0037
-no-key|172.16.1.3|||2|CI-ERROR-VALIDATE-0038
-open|172.16.1.3|KEY123|200|1|CI-ERROR-VALIDATE-0040
+ok|303|@IP1@ @IP2@|0|-
+add-fails|500|@IP1@ @IP2@|1|[CI-ERROR-VALIDATE-0034]
+std-miss|303|@IP2@|1|[CI-ERROR-VALIDATE-0036] svc="dns-standard"
+ssl-miss|303|@IP1@|1|[CI-ERROR-VALIDATE-0036] svc="dns-ssl"
 CASES
 }
 
+# What: _ci_validate_dns_rollback per key, listener, ui row
+# Why: real setup.sh rollback must restore the old record
+# From: Issue #628 | PR #1858
 @test "validate dns-rollback drives the rollback through setup.sh" {
-    # What: setup.sh CLI outcome decides pass or fail.
-    # Why: §49 client path; flush or probe miss is a fail.
-    # From: Issue #836
-    local case want out
-    _ci_validate_container_ip() { echo 172.16.1.3; }
-    docker() { case "$1" in compose) echo cid1 ;; exec) echo KEY123 ;; esac; }
-    _ci_validate_ui_session() { echo TOK; }
-    _ci_validate_ui_add_record() { return 0; }
-    _ci_validate_dns_resolves() { return 0; }
+    local case rc want root d dir key zone label old
+    local -a ips
+    local -A V=(
+        [@P@]="$(_val name)" [@CD@]="$(_val name)" [@CU@]="$(_val name)" [@TOK@]="$(_val name)"
+        [@PORT@]="$(_val port)" [@LP@]="$(_val port)" [@H@]="$(_val host)"
+    )
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    d="$(_val path)/deploy/prod"
+    _prod_install "${d}" || return 1
+    export CI_COMPOSE_FILE="${d}/docker-compose.yml"
+    mapfile -t ips < <(_slot_ips 2)
+    [ "${#ips[@]}" -eq 2 ] && zone="$(_ci_validate_lan_zone)" && label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" \
+        && old="$(_ci_validate_probe_ip 2)" || return 1
     _virtual_clock
-    export CI_REPO_ROOT="${BATS_TEST_TMPDIR}/repo" CI_COMPOSE_FILE=dep/c.yml
-    mkdir -p "${CI_REPO_ROOT}"
-    # What: each snapshot read returns the next id (snapN).
-    # Why: the check needs a new id after the rollback.
-    # From: Issue #836
-    curl() {
-        local n
-        case "$*" in
-            *-w*) echo 401 ;;
-            *-o\ /dev/null*) return 0 ;;
-            *)
-                n="$(cat "${CI_REPO_ROOT}/n")"
-                if [ ! -e "${CI_REPO_ROOT}/static" ] || [ "${n}" -lt 2 ]; then n=$((n + 1)); fi
-                echo "${n}" > "${CI_REPO_ROOT}/n"
-                echo "{\"zones\":{\"lan.\":[{\"id\":\"snap${n}\"}]}}" ;;
+    _curl_stub
+    # What: dig double: dns answers from the record model
+    # Why: ui writes and listener rollbacks change the model
+    # From: Issue #628 | PR #1858
+    dig() { awk -v f="${!#}" '$1 == f { print $2 }' "${DS}/dns-records"; }
+    while IFS='|' read -r case rc want; do
+        rm -f "${DS}/answers" "${DS}"/answer-used-* "${DS}"/listener-* "${DS}"/snap-* "${DS}"/ui-* "${DS}/ui.posts" \
+            "${DS}/listener.posts" "${DS}/fail-curl"
+        key="$(_val name)" dir="$(_val path)"
+        printf '%s' "${key}" > "${DS}/pdns-api-key"
+        : > "${DS}/dns-records"
+        printf '{"zones":{}}' > "${DS}/listener-snapshots"
+        jq -nc --arg n "${label}.${zone}" '{applied: true, changed_names: [$n], zone_check_passed: true,
+            republished_to_nats: true, flush_ok: true, flush_failed_names: []}' > "${DS}/listener-rollback"
+        printf '<input type="hidden" name="csrf_token" value="%s">\n' "${V[@TOK@]}" > "${DS}/ui-page"
+        case "${case}" in
+            no-dns) _container dns-standard "" "" ;;
+            no-mount) _container dns-standard "${V[@CD@]}" "${ips[0]}" ;;
+            *) _docker_answer " inspect -f *${V[@P@]}_shared-secrets*Destination* ${V[@CD@]} " 0 "${dir}"
+                _container dns-standard "${V[@CD@]}" "${ips[0]}" ;;
         esac
-    }
-    printf '%s\n' '#!/usr/bin/env bash' \
-        'printf "%s %s %s\n" "${COMPOSE_PROJECT_NAME}" "${PDNS_API_KEY}" "$*" > "${CI_REPO_ROOT}/args"' \
-        'cat "${CI_REPO_ROOT}/out"; exit "$(cat "${CI_REPO_ROOT}/rc")"' \
-        > "${CI_REPO_ROOT}/setup.sh"
-    while IFS='|' read -r case want code out; do
-        printf '%s\n' "${out}" > "${CI_REPO_ROOT}/out"
-        echo 0 > "${CI_REPO_ROOT}/n"
-        rm -f "${CI_REPO_ROOT}/static"
-        [ "${case}" != nosnap ] || : > "${CI_REPO_ROOT}/static"
-        case "${case}" in fails) echo 1 ;; *) echo 0 ;; esac > "${CI_REPO_ROOT}/rc"
-        run _ci_validate_dns_rollback proj
-        [ "${status}" -eq "${want}" ] || { echo "${case}: ${output}"; return 1; }
-        [ "${want}" -eq 0 ] || [[ "${output}" == *"CI-ERROR-VALIDATE-${code}"* ]]
-        [ "$(cat "${CI_REPO_ROOT}/args")" = \
-            "proj CHANGE_ME_host_side_key_never_used reset-to-last-known-good-config dns dep lan. snap1 --yes" ]
-    done <<'CASES'
-ok|0|-|rolled back to known-good snapshot snap1. Changed rrsets: ["ci-rollback-probe.lan."]
-fails|1|0043|rollback listener rejected the request with HTTP 500
-flush|1|0043|rolled back to known-good snapshot snap1. ci-rollback-probe.lan. cache-flush publishes failed
-other-snap|1|0043|rolled back to known-good snapshot snap0. Changed rrsets: ["ci-rollback-probe.lan."]
-no-probe|1|0043|rolled back to known-good snapshot snap1. Changed rrsets: []
-nosnap|1|0087|rolled back to known-good snapshot snap1. Changed rrsets: ["ci-rollback-probe.lan."]
-CASES
-}
-
-@test "validate kea-rollback removes its run containers on every path" {
-    # What: each failure point maps to its code and cleanup.
-    # Why: a leftover run container eats a /27 address.
-    # From: Issue #763 | PR #1858
-    local log="${BATS_TEST_TMPDIR}/kea-run.log" case want code rms
-    _ci_validate_compose() {
-        shift 3
-        echo "compose $*" >> "${log}"
-        case "${case}:$*" in
-            krun:*" dhcp") echo "kea boom" >&2; return 1 ;;
-            urun:*" ui") echo "ui boom" >&2; return 1 ;;
+        if [ "${case}" = no-key ]; then
+            _docker_answer " exec ${V[@CD@]} cat ${dir}/* " 0
+        else
+            _docker_answer " exec ${V[@CD@]} cat ${dir}/* " 0 "${key}"
+        fi
+        if [ "${case}" = no-url ]; then
+            _container ui "${V[@CU@]}" "${ips[1]}" "${V[@PORT@]}/tcp" "$(_val var)=$(_val url)"
+        else
+            _container ui "${V[@CU@]}" "${ips[1]}" "${V[@PORT@]}/tcp" "DNS_ROLLBACK_URL=http://${V[@H@]}:${V[@LP@]}"
+        fi
+        case "${case}" in
+            down) : > "${DS}/fail-curl" ;;
+            open|anykey) echo "${case}" > "${DS}/listener-auth" ;;
+            nosnap) : > "${DS}/listener-nosnap" ;;
+            norecord) : > "${DS}/listener-norecord" ;;
+            rejected) jq -c '.applied = false' "${DS}/listener-rollback" > "${DS}/r" && mv "${DS}/r" "${DS}/listener-rollback" ;;
+            flush) jq -c '.flush_ok = false | .flush_failed_names = ["f"]' "${DS}/listener-rollback" > "${DS}/r" \
+                && mv "${DS}/r" "${DS}/listener-rollback" ;;
         esac
-    }
-    _ci_validate_cid_ip() { [ "${case}" != noip ] && echo 172.16.1.40; }
-    _ci_validate_kea_round_trip() { echo "trip $*" >> "${log}"; [ "${case}" != trip ]; }
-    docker() {
-        echo "docker $*" >> "${log}"
-        [ "${case}" != rm ] || { echo "rm boom" >&2; return 1; }
-    }
-    while IFS='|' read -r case want code rms; do
-        : > "${log}"
-        run _ci_validate_kea_rollback proj net.yml pin.yml
-        [ "${status}" -eq "${want}" ] || { echo "${case}: ${output}"; cat "${log}"; return 1; }
-        [ "${code}" = - ] || [[ "${output}" == *"CI-ERROR-VALIDATE-${code}"* ]] || {
-            echo "${case}: ${output}"; return 1; }
-        [ "$(sed -n 's/^docker rm -f //p' "${log}" | paste -sd' ')" = "${rms}" ] || {
-            echo "${case} rm:"; cat "${log}"; return 1; }
-    done <<'CASES'
-ok|0|-|proj-kea-ui proj-kea
-krun|2|0096|
-noip|2|0097|proj-kea
-urun|2|0098|proj-kea
-trip|1|-|proj-kea-ui proj-kea
-rm|2|0099|proj-kea-ui proj-kea
-CASES
-    case=ok
-    : > "${log}"
-    run _ci_validate_kea_rollback proj net.yml pin.yml
-    grep -qx 'compose run -d --no-deps --name proj-kea dhcp' "${log}"
-    grep -qx 'compose run -d --no-deps --name proj-kea-ui -e DHCP_MODE=kea -e DHCP_API_URL=http://172.16.1.40:8000 ui' "${log}"
-    grep -qx 'trip proj 172.16.1.40 proj-kea-ui' "${log}"
-}
-
-@test "validate kea-rollback round trip proves the live rollback" {
-    # What: ui writes, setup.sh rollback, live config-get.
-    # Why: only Kea's live config proves the CLI rollback.
-    # From: Issue #763 | PR #1858
-    local case want code
-    export CI_REPO_ROOT="${BATS_TEST_TMPDIR}/repo"
-    local kea="${CI_REPO_ROOT}/kea"
-    export CI_COMPOSE_CONFIG_CMD="${CI_REPO_ROOT}/cfg"
-    _virtual_clock
-    _ci_validate_cid_ip() { echo 172.16.1.41; }
-    _ci_validate_ui_session() { echo "$3" > "${CI_REPO_ROOT}/uip"; echo TOK; }
-    # What: a ui post adds the MAC and records a snapshot.
-    # Why: mirrors the ui write path the rollback restores.
-    # From: Issue #763 | PR #1858
-    _ci_validate_ui_post() {
-        local f id
-        echo "post $*" >> "${CI_REPO_ROOT}/posts"
-        for f in "$@"; do
-            case "${f}" in mac=*) echo "${f#mac=}" >> "${CI_REPO_ROOT}/res" ;; esac
-        done
-        [ "${case}" != nosnap ] || return 0
-        id=$(( 100 + $(wc -l < "${CI_REPO_ROOT}/posts") ))
-        mkdir -p "${kea}/config-snapshots/${id}"
-        cp "${CI_REPO_ROOT}/res" "${kea}/config-snapshots/${id}/dhcp4.json"
-    }
-    curl() {
-        [ "${case}" != noready ] || { echo "connection refused" >&2; return 7; }
-        local r=""
-        [ ! -s "${CI_REPO_ROOT}/res" ] || r="$(sed 's/.*/{"hw-address":"&"}/' "${CI_REPO_ROOT}/res" | paste -sd,)"
-        printf '[{"result":0,"arguments":{"Dhcp4":{"subnet4":[{"id":7,"subnet":"%s","reservations":[%s]}]}}}]\n' \
-            "$(cat "${CI_REPO_ROOT}/subnet")" "${r}"
-    }
-    mkdir -p "${CI_REPO_ROOT}"
-    printf '%s\n' '#!/usr/bin/env bash' \
-        'printf "%s\n" "$*" > "${CI_REPO_ROOT}/args"; cp "$3/.env" "${CI_REPO_ROOT}/env"' \
-        'm="$(cat "${CI_REPO_ROOT}/mode")"' \
-        '[ "${m}" != fails ] || { echo "Kea rejected"; exit 1; }' \
-        '[ "${m}" = norevert ] || cp "${KEA_DIR}/config-snapshots/$4/dhcp4.json" "${CI_REPO_ROOT}/res"' \
-        's="$4"; [ "${m}" != other ] || s=999' \
-        'echo "Kea rolled back to known-good snapshot ${s} (validated, applied, and persisted)."' \
-        > "${CI_REPO_ROOT}/setup.sh"
-    export KEA_DIR="${kea}"
-    while IFS='|' read -r case want code; do
-        rm -rf "${kea}" "${CI_REPO_ROOT}/posts" "${CI_REPO_ROOT}/res" "${CI_REPO_ROOT}/args"
-        mkdir -p "${kea}/config-snapshots"
-        echo "${case}" > "${CI_REPO_ROOT}/mode"
-        echo 10.0.0.0/24 > "${CI_REPO_ROOT}/subnet"
-        [ "${case}" != nosubnet ] || echo 10.9.0.0/24 > "${CI_REPO_ROOT}/subnet"
-        printf '%s\n' '#!/usr/bin/env bash' \
-            "printf '%s' '{\"services\":{\"dhcp\":{\"environment\":{$([ "${case}" = noenv ] || echo '"KEA_CTRL_TOKEN":"tok",')\"DHCP_SUBNET\":\"10.0.0.0/24\"},\"volumes\":[{\"source\":\"${kea}\",\"target\":\"/var/lib/kea\"}]}}}'" \
-            > "${CI_REPO_ROOT}/cfg"
-        chmod +x "${CI_REPO_ROOT}/cfg"
-        run _ci_validate_kea_round_trip proj 172.16.1.40 proj-kea-ui
-        [ "${status}" -eq "${want}" ] || { echo "${case}: ${output}"; return 1; }
-        [ "${code}" = - ] || [[ "${output}" == *"CI-ERROR-VALIDATE-${code}"* ]] || {
-            echo "${case}: ${output}"; return 1; }
-        case "${case}" in ok|norevert|other|fails) ;; *) continue ;; esac
-        grep -q 'mac=02:00:00:00:07:01 ip=10.0.0.2 hostname=ci-kea-a' "${CI_REPO_ROOT}/posts"
-        grep -q 'subnet_id=7 mac=02:00:00:00:07:02 ip=10.0.0.3 hostname=ci-kea-b' "${CI_REPO_ROOT}/posts"
-        [ "$(cat "${CI_REPO_ROOT}/uip")" = 172.16.1.41 ]
-        [[ "$(cat "${CI_REPO_ROOT}/args")" == "reset-to-last-known-good-config kea "*"/ci-kea-install."*" 101 --yes" ]]
-        [ "$(cat "${CI_REPO_ROOT}/env")" = \
-            "$(printf 'KEA_CTRL_TOKEN=tok\nKEA_CTRL_HOST=172.16.1.40\nKEA_DATA_DIR=%s' "${kea}")" ]
+        run _ci_validate_dns_rollback "${V[@P@]}"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+        [ "${case}" != ok ] || { [ "$(cat "${DS}/dns-records")" = "${label}.${zone} ${old}" ] \
+            && jq -e --arg z "${zone}" '.zone == $z and .snapshot_id == "1"' <<< "$(tail -n 1 "${DS}/listener.posts")" > /dev/null; } \
+            || { echo "records: $(cat "${DS}/dns-records") posts: $(cat "${DS}/listener.posts")"; return 1; }
     done <<'CASES'
 ok|0|-
-fails|1|0094
-other|1|0094
-norevert|1|0095
-nosnap|1|0088
-noready|1|0090
-nosubnet|1|0091
-noenv|2|0089
+no-dns|2|[CI-ERROR-VALIDATE-0037]
+no-mount|2|[CI-ERROR-VALIDATE-0107]
+no-key|2|[CI-ERROR-VALIDATE-0038]
+no-url|2|[CI-ERROR-VALIDATE-0108]
+down|1|[CI-ERROR-VALIDATE-0039];curl: (7)
+open|1|[CI-ERROR-VALIDATE-0040]
+anykey|1|[CI-ERROR-VALIDATE-0041]
+nosnap|1|[CI-ERROR-VALIDATE-0042]
+rejected|1|[CI-ERROR-VALIDATE-0043];did not report applied=true
+flush|1|[CI-ERROR-VALIDATE-0043];cache-flush publishes failed
+norecord|1|[CI-ERROR-VALIDATE-0087]
 CASES
+    # What: ci.sh listener calls never carry the key on argv
+    # Why: a secret on argv shows in every process list
+    # From: Issue #1683 | PR #1858
+    grep -qF -- "${ips[0]}:${V[@LP@]}" "${DS}/curl.argv" \
+        && ! grep -F -- "${ips[0]}:${V[@LP@]}" "${DS}/curl.argv" | grep -qF -- "${key}" \
+        || { echo "no listener call, or the key on argv"; return 1; }
 }
 
-@test "validate secondary-identity maps each token and register case" {
-    # What: token source, register and identity per row.
-    # Why: the ui keeps a real env token; no file is made.
-    # From: Issue #583 | PR #1858
-    local args="${BATS_TEST_TMPDIR}/reg" name row_ip ex cu rc want tok w
-    local -a ws
-    _ci_validate_container_ip() { echo "${row_ip}"; }
-    _ci_validate_cid() { echo cid1; }
-    docker() {
-        case "$*" in
-            "exec cid1 test -f "*)
-                case "${ex}" in
-                    file|empty) return 0 ;;
-                    env) return 1 ;;
-                    broken) echo "Error: container cid1 is not running" >&2; return 126 ;;
-                esac
-                ;;
-            "exec cid1 cat "*) [ "${ex}" = empty ] || echo TOKF ;;
-            "exec cid1 printenv SECONDARY_REGISTRATION_TOKEN") echo TOKE ;;
-            *) echo "unexpected docker call: $*" >&2; return 99 ;;
+# What: _ci_validate_kea_rollback per run, Kea, setup row
+# Why: the real setup.sh rollback must revert live Kea
+# From: Issue #763 | PR #1858
+@test "validate kea-rollback proves the setup.sh rollback on live Kea" {
+    local case rc want rms root d kd sub snaps runs rmd mac_a mac_b kport kuser localenv
+    local -a ips
+    local -A V=(
+        [@P@]="$(_val name)" [@TOK@]="$(_val name)" [@PORT@]="$(_val port)" [@KT@]="$(_val name)"
+        [@ERR@]="$(_val name)" [@NET@]="$(_val path)" [@PIN@]="$(_val path)" [@SID@]="$(_val int 1 4000)"
+    )
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    d="$(_val path)/deploy/prod" kd="$(_val path)"
+    _prod_install "${d}" || return 1
+    mapfile -t ips < <(_slot_ips 3)
+    [ "${#ips[@]}" -eq 3 ] && sub="$(_ci_validate_subnet "$(_val name)")" \
+        && mac_a="$(_ci_validate_probe_mac 1)" && mac_b="$(_ci_validate_probe_mac 2)" \
+        && kport="$(jq -er '.["Control-agent"]["http-port"]' "${root}/services/dhcp/kea-ctrl-agent.conf")" \
+        && kuser="$(jq -er '.["Control-agent"].authentication.clients[0].user' "${root}/services/dhcp/kea-ctrl-agent.conf")" \
+        || return 1
+    export CI_COMPOSE_FILE="${d}/docker-compose.yml" KEA_CTRL_TOKEN="${V[@KT@]}" DHCP_SUBNET="${sub}" \
+        KEA_DATA_DIR="${kd}" D="${d}" KD="${kd}"
+    # What: the snapshot dir as setup.sh itself maps it
+    # Why: ci.sh and setup.sh must agree on where ui writes
+    # From: Issue #763 | PR #1858
+    _setup_sh_run 'kea_snapshot_host_dir "${D}" "${D}/.env" "${KD}"'
+    [ "${status}" -eq 0 ] && [ -n "${output}" ] || { echo "snapshot dir: ${output}"; return 1; }
+    snaps="${output}"
+    _virtual_clock
+    _curl_stub
+    while IFS='|' read -r case rc want rms; do
+        rm -rf "${DS}/answers" "${DS}"/answer-used-* "${DS}"/kea-* "${DS}"/kea.* "${DS}"/ui-* "${DS}/ui.posts" "${DS}/fail-kea" "${snaps}"
+        : > "${DS}/docker.log"
+        mkdir -p "${snaps}" && printf '%s' "${snaps}" > "${DS}/kea-snapdir"
+        jq -nc --arg s "${sub}" --argjson id "${V[@SID@]}" '{Dhcp4: {subnet4: [{id: $id, subnet: $s, reservations: []}]}}' \
+            > "${DS}/kea-live"
+        printf '<input type="hidden" name="csrf_token" value="%s">\n' "${V[@TOK@]}" > "${DS}/ui-page"
+        _docker_answer " compose -p * run -d --no-deps --name * dhcp " "$([ "${case}" = krun ] && echo 1 || echo 0)"
+        _docker_answer " compose -p * run -d --no-deps --name * ui " "$([ "${case}" = urun ] && echo 1 || echo 0)"
+        _docker_answer " inspect -f *NetworkSettings* * " 0 "$([ "${case}" = noip ] && echo '<no value>' || echo "${ips[0]}")" '' 1
+        _docker_answer " inspect -f *NetworkSettings* * " 0 "${ips[1]}"
+        _docker_answer " inspect -f *ExposedPorts* * " 0 "${V[@PORT@]}/tcp"
+        if [ "${case}" = rm ]; then
+            _docker_answer " rm -f * " 1 '' "${V[@ERR@]}"
+        else
+            _docker_answer " rm -f * " 0
+        fi
+        case "${case}" in
+            noenv) export KEA_CTRL_TOKEN="" ;;
+            noready) : > "${DS}/fail-kea" ;;
+            nosubnet) jq -c --arg s "${ips[2]}/27" '.Dhcp4.subnet4[0].subnet = $s' "${DS}/kea-live" > "${DS}/k" && mv "${DS}/k" "${DS}/kea-live" ;;
+            nosnap) : > "${DS}/kea-no-snapshot" ;;
+            norevert) : > "${DS}/kea-norevert" ;;
+            fails) printf '[{"result":1,"text":"%s"}]' "${V[@ERR@]}" > "${DS}/kea-config-test" ;;
+            localenv) localenv="$(_val name)"; printf '%s\n' "${localenv}" > "${d}/.env.local" ;;
         esac
-    }
-    curl() {
-        echo "$*" >> "${args}"
-        case "${cu}:$*" in
-            500:*) printf 'denied\n500' ;;
-            same:*) printf '{"nats_user":"same","nats_password":"same"}\n200' ;;
-            distinct:*ci-secondary-a*) printf '{"nats_user":"ua","nats_password":"pa"}\n200' ;;
-            distinct:*) printf '{"nats_user":"ub","nats_password":"pb"}\n200' ;;
-        esac
-    }
-    while IFS='|' read -r name row_ip ex cu rc want tok; do
-        : > "${args}"
-        run _ci_validate_secondary_identity proj
-        [ "${status}" -eq "${rc}" ] || { echo "${name}: rc ${status}: ${output}"; return 1; }
-        IFS=';' read -r -a ws <<<"${want}"
-        for w in "${ws[@]}"; do
-            [ "${w}" = - ] && continue
-            [[ "${output}" == *"${w}"* ]] || { echo "${name}: no '${w}': ${output}"; return 1; }
-        done
-        [ "${tok}" = - ] && continue
-        [ "$(grep -c "\"token\":\"${tok}\"" "${args}")" -eq 2 ] || {
-            echo "${name}: register not sent with ${tok}:"; cat "${args}"; return 1; }
+        run _ci_validate_kea_rollback "${V[@P@]}" "${V[@NET@]}" "${V[@PIN@]}"
+        export KEA_CTRL_TOKEN="${V[@KT@]}"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+        # What: .env.local gone after, existing one kept
+        # Why: overlay holds a token; operator file wins
+        # From: Issue #763 | PR #1858
+        if [ "${case}" = localenv ]; then
+            [ "$(cat "${d}/.env.local")" = "${localenv}" ] && rm -f "${d}/.env.local"
+        else
+            [ ! -e "${d}/.env.local" ]
+        fi || { echo "${case}: .env.local left or changed"; return 1; }
+        [ "${case}" != ok ] || { [ "$(sort -u "${DS}/kea.urls")" = "http://${ips[0]}:${kport}/" ] \
+            && [ "$(sort -u "${DS}/kea.users")" = "${kuser}" ]; } \
+            || { echo "ok: urls $(sort -u "${DS}/kea.urls") users $(sort -u "${DS}/kea.users")"; return 1; }
+        runs="$(sed -n 's/.* run -d --no-deps --name \([^ ]*\) .*/\1/p' "${DS}/docker.log" | tac | paste -sd' ')"
+        rmd="$(sed -n 's/^rm -f //p' "${DS}/docker.log" | paste -sd' ')"
+        case "${rms}" in
+            both) [ "${rmd}" = "${runs}" ] ;;
+            kea) [ "${rmd}" = "${runs##* }" ] ;;
+            none) [ -z "${rmd}" ] ;;
+        esac || { echo "${case}: runs '${runs}' removed '${rmd}'"; return 1; }
+        [ "${case}" != ok ] || jq -e --arg a "${mac_a}" --arg b "${mac_b}" \
+            '[.Dhcp4.subnet4[].reservations[]."hw-address"] | (index($a) != null) and (index($b) == null)' "${DS}/kea-live" > /dev/null \
+            || { echo "live Kea: $(cat "${DS}/kea-live")"; return 1; }
     done <<'CASES'
-no-ui||file|distinct|2|CI-ERROR-VALIDATE-0045|-
-empty-token|172.16.1.9|empty|distinct|2|CI-ERROR-VALIDATE-0046|-
-file-check-broken|172.16.1.9|broken|distinct|2|CI-ERROR-VALIDATE-0066;rc=126;cid1 is not running|-
-register-500|172.16.1.9|file|500|1|CI-ERROR-VALIDATE-0047;register ci-secondary-a: http 500;denied|-
-shared-identity|172.16.1.9|file|same|1|CI-ERROR-VALIDATE-0049|TOKF
-file-token|172.16.1.9|file|distinct|0|-|TOKF
-env-token|172.16.1.9|env|distinct|0|-|TOKE
+ok|0|-|both
+krun|2|[CI-ERROR-VALIDATE-0096]|none
+noip|2|[CI-ERROR-VALIDATE-0097]|kea
+urun|2|[CI-ERROR-VALIDATE-0098]|kea
+rm|2|[CI-ERROR-VALIDATE-0099];@ERR@|both
+noenv|2|[CI-ERROR-VALIDATE-0089]|both
+noready|1|[CI-ERROR-VALIDATE-0090]|both
+nosubnet|1|[CI-ERROR-VALIDATE-0091]|both
+nosnap|1|[CI-ERROR-VALIDATE-0088]|both
+fails|1|[CI-ERROR-VALIDATE-0094];@ERR@|both
+norevert|1|[CI-ERROR-VALIDATE-0095]|both
+localenv|2|[CI-ERROR-VALIDATE-0113]|both
 CASES
+    # What: no Kea token value ever reaches a curl argv
+    # Why: a secret on argv shows in every process list
+    # From: Issue #763 | PR #1858
+    ! grep -qF -- "${V[@KT@]}" "${DS}/curl.argv" || { echo "token on argv"; return 1; }
+}
+
+# What: _ci_validate_secondary_identity token/register rows
+# Why: two secondaries must get distinct NATS identities
+# From: Issue #583 | PR #1858
+@test "validate secondary-identity maps each token and register case" {
+    local case ex reg rc want tok tf label
+    local -A V=(
+        [@P@]="$(_val name)" [@C@]="$(_val name)" [@TF@]="$(_val name)" [@TE@]="$(_val name)"
+        [@PORT@]="$(_val port)" [@ERR@]="$(_val name)" [@U@]="$(_val name)"
+    )
+    V[@IP@]="$(_slot_ips 1)" && tf="$(_ci_validate_ui_token_file)" && label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 1
+    V[@L1@]="${label}-1"
+    _curl_stub
+    while IFS='|' read -r case ex reg rc want tok; do
+        rm -f "${DS}/answers" "${DS}"/answer-used-* "${DS}"/register-* "${DS}/register.posts"
+        if [ "${ex}" = noui ]; then
+            _container ui "" ""
+        else
+            _container ui "${V[@C@]}" "${V[@IP@]}" "${V[@PORT@]}/tcp"
+        fi
+        case "${ex}" in
+            file|empty) _docker_answer " exec ${V[@C@]} test -f ${tf} " 0 ;;
+            env) _docker_answer " exec ${V[@C@]} test -f ${tf} " 1 ;;
+            broken) _docker_answer " exec ${V[@C@]} test -f ${tf} " 126 '' "${V[@ERR@]}" ;;
+        esac
+        case "${ex}" in
+            file) _docker_answer " exec ${V[@C@]} cat ${tf} " 0 "${V[@TF@]}" ;;
+            empty) _docker_answer " exec ${V[@C@]} cat ${tf} " 0 ;;
+        esac
+        _docker_answer " exec ${V[@C@]} printenv * " 0 "${V[@TE@]}"
+        case "${reg}" in
+            500) echo 500 > "${DS}/register-status"; echo "${V[@ERR@]}" > "${DS}/register-body" ;;
+            same) jq -nc --arg u "${V[@U@]}" '{nats_user: $u, nats_password: $u}' > "${DS}/register-body" ;;
+            nofields) echo '{}' > "${DS}/register-body" ;;
+        esac
+        run _ci_validate_secondary_identity "${V[@P@]}"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+        [ "${tok}" = - ] || [ "$(grep -c "\"token\":\"$(_fill "${tok}")\"" "${DS}/register.posts")" -eq 2 ] \
+            || { echo "${case}: register posts:"; cat "${DS}/register.posts"; return 1; }
+    done <<'CASES'
+no-ui|noui|distinct|2|[CI-ERROR-VALIDATE-0045]|-
+empty-token|empty|distinct|2|[CI-ERROR-VALIDATE-0046]|-
+file-check-broken|broken|distinct|2|@ERR@;[CI-ERROR-VALIDATE-0066];rc=126|-
+register-500|file|500|1|register @L1@: http 500;@ERR@;[CI-ERROR-VALIDATE-0047]|-
+no-fields|file|nofields|1|[CI-ERROR-VALIDATE-0048]|-
+shared-identity|file|same|1|[CI-ERROR-VALIDATE-0049]|@TF@
+file-token|file|distinct|0|-|@TF@
+env-token|env|distinct|0|-|@TE@
+CASES
+    # What: the registration token never reaches curl argv
+    # Why: a secret on argv shows in every process list
+    # From: Issue #583 | PR #1858
+    ! grep -qF -- "${V[@TE@]}" "${DS}/curl.argv" || { echo "token on argv"; return 1; }
 }
 
 # =========================================================
@@ -10587,131 +10764,6 @@ CASES
     kill "${pids[@]}"
     [ "${status}" -eq 0 ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${c2}" ] && [[ "${output}" == *"pinned commit"* ]] \
         && [[ "${output}" != *"Continuing the update with"* ]] || { echo "pinned: ${output}"; return 1; }
-}
-
-# What: curl stand-in: Kea agent, DNS listener, ui pages
-# Why: real setup.sh and ci.sh talk to them; no network
-# From: Issue #1683 | PR #1858
-_curl_stub() {
-    _tool_stub "${BIN}" curl <<'STUB'
-fmt="" data="" cfg="" out="" fail=0 url="${!#}" user=""
-hdr=() form=()
-args=("$@")
-for ((i = 0; i < ${#args[@]}; i++)); do
-    case "${args[$i]}" in
-        -w) fmt="${args[$((i + 1))]}" ;;
-        -d) data="${args[$((i + 1))]}" ;;
-        -H) hdr+=("${args[$((i + 1))]}") ;;
-        -o) out="${args[$((i + 1))]}" ;;
-        --data-urlencode) form+=("${args[$((i + 1))]}") ;;
-        -K) cfg="$(cat)" ;;
-        --*) ;;
-        -*f*) fail=1 ;;
-    esac
-done
-while IFS= read -r line; do
-    [[ "${line}" =~ ^([a-z]+)\ =\ \"(.*)\"$ ]] || continue
-    v="${BASH_REMATCH[2]//\\\"/\"}"
-    v="${v//\\\\/\\}"
-    case "${BASH_REMATCH[1]}" in header) hdr+=("${v}") ;; data) data="${v}" ;; user) user="${v}" ;; esac
-done <<< "${cfg}"
-printf '%s\n' "$*" >> "${DS}/curl.argv"
-[ -z "${cfg}" ] || printf '%s\n' "${cfg}" >> "${DS}/curl.cfg"
-[ ! -e "${DS}/fail-curl" ] || { echo "curl: (7) Failed to connect to ${url}" >&2; exit 7; }
-field() { local f; for f in "${form[@]}"; do [ "${f%%=*}" != "$1" ] || printf '%s' "${f#*=}"; done; }
-# What: one listener snapshot of a zone's current records
-# Why: the listener records a snapshot after every write
-# From: Issue #628 | PR #1858
-snap() {
-    local n=0
-    [ -e "${DS}/listener-snapshots" ] && [ -e "${DS}/dns-records" ] && [ ! -e "${DS}/listener-nosnap" ] || return 0
-    [ ! -e "${DS}/snap-n" ] || n="$(cat "${DS}/snap-n")"
-    n=$(( n + 1 ))
-    echo "${n}" > "${DS}/snap-n"
-    cp "${DS}/dns-records" "${DS}/snap-${n}"
-    jq -c --arg z "$1" --arg i "${n}" '.zones[$z] = ([{id: $i}] + (.zones[$z] // []))' \
-        "${DS}/listener-snapshots" > "${DS}/ls.new" && mv "${DS}/ls.new" "${DS}/listener-snapshots"
-}
-status=200 body=""
-rest="${url#*://}" path=""
-[ "${rest}" = "${rest#*/}" ] || path="${rest#*/}"
-case "${path}" in
-    domains)
-        [ ! -e "${DS}/ui-page" ] || body="$(cat "${DS}/ui-page")"
-        [ ! -e "${DS}/ui-status" ] || status="$(cat "${DS}/ui-status")" ;;
-    domains/*/add)
-        printf '%s %s\n' "${path}" "${form[*]}" >> "${DS}/ui.posts"
-        status=303
-        [ ! -e "${DS}/ui-post-status" ] || status="$(cat "${DS}/ui-post-status")"
-        if [ "${status}" = 303 ] && [ -e "${DS}/dns-records" ]; then
-            z="${path#domains/}" z="${z%/add}." fq="$(field name).${z}"
-            { grep -v "^${fq} " "${DS}/dns-records"; printf '%s %s\n' "${fq}" "$(field content)"; } > "${DS}/dr.new"
-            mv "${DS}/dr.new" "${DS}/dns-records"
-            snap "${z}"
-        fi ;;
-    dhcp/static/add)
-        printf '%s %s\n' "${path}" "${form[*]}" >> "${DS}/ui.posts"
-        status=303
-        [ ! -e "${DS}/ui-post-status" ] || status="$(cat "${DS}/ui-post-status")"
-        if [ "${status}" = 303 ] && [ -e "${DS}/kea-live" ]; then
-            jq -c --arg s "$(field subnet_id)" --arg m "$(field mac)" --arg ip "$(field ip)" --arg h "$(field hostname)" \
-                '.Dhcp4.subnet4 |= map(if (.id | tostring) == $s then .reservations += [{"hw-address": $m, "ip-address": $ip, hostname: $h}] else . end)' \
-                "${DS}/kea-live" > "${DS}/kl.new" && mv "${DS}/kl.new" "${DS}/kea-live"
-            if [ ! -e "${DS}/kea-no-snapshot" ]; then
-                k=0
-                [ ! -e "${DS}/kea-n" ] || k="$(cat "${DS}/kea-n")"
-                k=$(( k + 1 ))
-                echo "${k}" > "${DS}/kea-n"
-                mkdir -p "$(cat "${DS}/kea-snapdir")/${k}" && cp "${DS}/kea-live" "$(cat "${DS}/kea-snapdir")/${k}/dhcp4.json"
-            fi
-        fi ;;
-    api/secondary/register)
-        printf '%s\n' "${data}" >> "${DS}/register.posts"
-        body="$(jq -c '{nats_user: ("u-" + .name), nats_password: ("p-" + .name)}' <<< "${data}")"
-        [ ! -e "${DS}/register-body" ] || body="$(cat "${DS}/register-body")"
-        [ ! -e "${DS}/register-status" ] || status="$(cat "${DS}/register-status")" ;;
-    "")
-        [ -z "${cfg}" ] || printf '%s\n' "${cfg}" > "${DS}/kea.cfg"
-        [ ! -e "${DS}/fail-kea" ] || exit 7
-        printf '%s\n' "${url}" >> "${DS}/kea.urls"
-        cmd="$(jq -r .command <<< "${data}")"
-        printf '%s\n' "${cmd}" >> "${DS}/kea.commands"
-        body='[{"result":0,"text":"ok"}]'
-        if [ -e "${DS}/kea-${cmd}" ]; then
-            body="$(cat "${DS}/kea-${cmd}")"
-        elif [ -e "${DS}/kea-live" ]; then
-            case "${cmd}" in
-                config-get) body="$(jq -c '[{result: 0, arguments: .}]' "${DS}/kea-live")" ;;
-                config-set) [ -e "${DS}/kea-norevert" ] || jq -c .arguments <<< "${data}" > "${DS}/kea-live" ;;
-            esac
-        fi
-        [ ! -e "${DS}/kea-status" ] || status="$(cat "${DS}/kea-status")" ;;
-    *)
-        body="$(cat "${DS}/listener-${path}")"
-        [ ! -e "${DS}/listener-status" ] || status="$(cat "${DS}/listener-status")"
-        [ -z "${data}" ] || printf '%s\n' "${data}" >> "${DS}/listener.posts"
-        auth="$(printf '%s\n' "${hdr[@]}" | grep -c '^X-API-Key: ')" mode=""
-        [ ! -e "${DS}/listener-auth" ] || mode="$(cat "${DS}/listener-auth")"
-        case "${mode}" in
-            open) ;;
-            anykey) [ "${auth}" -gt 0 ] || { status=401 body='{"error":"missing X-API-Key"}'; } ;;
-            *) grep -qxF "X-API-Key: $(cat "${DS}/pdns-api-key")" <<< "$(printf '%s\n' "${hdr[@]}")" \
-                   || { status=401 body='{"error":"missing or invalid X-API-Key"}'; } ;;
-        esac
-        if [ "${path}" = rollback ] && [ "${status}" = 200 ] && [ -e "${DS}/dns-records" ]; then
-            id="$(jq -r .snapshot_id <<< "${data}")"
-            [ ! -e "${DS}/snap-${id}" ] || cp "${DS}/snap-${id}" "${DS}/dns-records"
-            [ -e "${DS}/listener-norecord" ] || snap "$(jq -r .zone <<< "${data}")"
-        fi ;;
-esac
-if [ "${fail}" -eq 1 ] && [ "${status}" -ge 400 ]; then
-    echo "curl: (22) The requested URL returned error: ${status}" >&2
-    exit 22
-fi
-fmt="${fmt//\\n/$'\n'}"
-if [ -n "${out}" ]; then printf '%s' "${body}" > "${out}"; else printf '%s' "${body}"; fi
-printf '%s' "${fmt//"%{http_code}"/${status}}"
-STUB
 }
 
 @test "setup kea rollback applies a snapshot via the control agent" {
