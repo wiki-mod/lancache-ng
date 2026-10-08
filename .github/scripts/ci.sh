@@ -6336,7 +6336,8 @@ _ci_validate_dns() {
 # Why: Real cache behavior, not a port probe (AG-VAL-014).
 # From: Issue #1683 | PR #1858
 _ci_validate_proxy() {
-    local project="$1" url ip_std host h1 h2
+    local project="$1" url ip_std host h1 h2 port
+    port="$(_ci_service_port http)" || return 2
     url="$(_ci_validation_proxy_probe_url)"
     ip_std="$(_ci_validate_container_ip "${project}" proxy)"
     host="${url#http://}"; host="${host%%/*}"
@@ -6344,12 +6345,12 @@ _ci_validate_proxy() {
         ci_log "[CI-ERROR-VALIDATE-0012]" "reason=\"missing proxy probe url or proxy container IP\""
         return 2
     fi
-    if ! h1="$(curl -fsS --resolve "${host}:80:${ip_std}" -D - -o /dev/null "${url}" 2>&1)"; then
+    if ! h1="$(curl -fsS --resolve "${host}:${port}:${ip_std}" -D - -o /dev/null "${url}" 2>&1)"; then
         ci_log "[CI-ERROR-VALIDATE-0013]" "url=\"${url}\" reason=\"proxy MISS request failed\""
         printf 'raw:\n%s\n' "${h1}"
         return 1
     fi
-    if ! h2="$(curl -fsS --resolve "${host}:80:${ip_std}" -D - -o /dev/null "${url}" 2>&1)"; then
+    if ! h2="$(curl -fsS --resolve "${host}:${port}:${ip_std}" -D - -o /dev/null "${url}" 2>&1)"; then
         ci_log "[CI-ERROR-VALIDATE-0065]" "url=\"${url}\" reason=\"proxy repeat request failed\""
         printf 'raw:\n%s\n' "${h2}"
         return 1
@@ -6361,35 +6362,39 @@ _ci_validate_proxy() {
     fi
 }
 
-# What: print stream-target wildcard hardcode lines.
-# Why: *.domain must forward to SNI, not literal.
-# From: Issue #1683
+# What: print *.domain stream targets not sent to the SNI
+# Why: a root literal sends every subdomain to one origin
+# From: Issue #1297 | PR #1858
 _ci_stream_map_violations() {
-    awk '/^[[:space:]]*\*\./ && $2 != "$ssl_preread_server_name:443;" { print }'
+    local port="$1"
+    awk -v want="\$ssl_preread_server_name:${port};" '/^[[:space:]]*\*\./ && $2 != want { print }'
 }
 
-# What: print depth>=2 dispatch entries not routed to :9446.
-# Why: deeper SNI has no wildcard cert; must passthrough.
-# From: Issue #1683
+# What: print depth>=2 dispatch entries off the relay port
+# Why: deeper SNI has no wildcard cert; it must passthrough
+# From: Issue #1322 | PR #1858
 _ci_ssl_dispatch_violations() {
-    awk 'index($0, "~^.+\\.") > 0 && $NF != "127.0.0.1:9446;" { print }'
+    local port="$1"
+    awk -v want=":${port};" 'index($0, "~^.+\\.") > 0 && substr($NF, length($NF) - length(want) + 1) != want { print }'
 }
 
 # What: prove proxy routes wildcards by SNI.
 # Why: root literal misroutes subdomains.
 # From: Issue #1683
 _ci_validate_proxy_stream_map() {
-    local project="$1" cid map bad
+    local project="$1" cid map bad file port
+    file="$(_ci_proxy_constant STREAM_TARGET_FILE)" || return 2
+    port="$(_ci_service_port https)" || return 2
     cid="$(_ci_validate_cid "${project}" proxy)" || return 2
     if [ -z "${cid}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0022]" "reason=\"no proxy container for stream-map check\""
         return 2
     fi
-    if ! map="$(_ci_capture 0 docker exec "${cid}" cat /etc/nginx/stream.d/00-stream-targets.conf)"; then
+    if ! map="$(_ci_capture 0 docker exec "${cid}" cat "${file}")"; then
         ci_log "[CI-ERROR-VALIDATE-0019]" "reason=\"could not read proxy stream-target map\""
         return 2
     fi
-    bad="$(printf '%s\n' "${map}" | _ci_stream_map_violations)"
+    bad="$(printf '%s\n' "${map}" | _ci_stream_map_violations "${port}")"
     if [ -n "${bad}" ]; then
         ci_error "[CI-ERROR-VALIDATE-0020]" "reason=\"stream-target wildcard forwards to a hardcoded root, not the requested SNI (#1297)\"" "${bad}"
         return 1
@@ -6397,10 +6402,12 @@ _ci_validate_proxy_stream_map() {
 }
 
 # What: Prove ssl mode intercepts (MITM) with our LAN CA.
-# Why: proxy :443 must present a cert we signed.
+# Why: the proxy https port must show a cert we signed
 # From: Issue #1683
 _ci_validate_ssl_mitm() {
-    local project="$1" ip cid domain ca_subj issuer tmp out cert tls_err
+    local project="$1" ip cid domain ca_subj issuer tmp out cert tls_err ca port
+    ca="$(_ci_proxy_constant CA_DIR)" || return 2
+    port="$(_ci_service_port https)" || return 2
     ip="$(_ci_validate_container_ip "${project}" proxy)"
     cid="$(_ci_validate_cid "${project}" proxy)" || return 2
     domain="$(_ci_validation_dns_domain)"
@@ -6409,7 +6416,7 @@ _ci_validate_ssl_mitm() {
         return 2
     fi
     tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-proxy-ca.XXXXXX")" || return 2
-    if ! out="$(docker cp "${cid}:/etc/nginx/ssl/ca/ca.crt" "${tmp}" 2>&1)"; then
+    if ! out="$(docker cp "${cid}:${ca}/ca.crt" "${tmp}" 2>&1)"; then
         ci_error "[CI-ERROR-VALIDATE-0024]" "reason=\"could not read proxy LAN CA for ssl-mitm check\"" "${out}"
         rm -f "${tmp}"
         return 2
@@ -6421,7 +6428,7 @@ _ci_validate_ssl_mitm() {
     # Why: raw evidence when the issuer read fails.
     # From: Issue #1683 | PR #1858
     tls_err="$(_ci_mktemp "${CI_TMPDIR}/ci-tls-err.XXXXXX")" || { rm -f "${tmp}"; return 2; }
-    cert="$(openssl s_client -connect "${ip}:443" -servername "${domain}" </dev/null 2>"${tls_err}")"
+    cert="$(openssl s_client -connect "${ip}:${port}" -servername "${domain}" </dev/null 2>"${tls_err}")"
     issuer=""
     if [ -n "${cert}" ]; then
         issuer="$(openssl x509 -noout -issuer 2>>"${tls_err}" <<<"${cert}")"
@@ -6433,32 +6440,34 @@ _ci_validate_ssl_mitm() {
         return 1
     fi
     rm -f "${tls_err}"
-    # What: the :443 cert issuer MUST equal our own LAN CA.
+    # What: the https cert issuer MUST equal our own LAN CA.
     # Why: proves interception, not passthrough.
     # From: Issue #668
     if [ "${issuer}" != "${ca_subj}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0026]" "issuer=\"${issuer}\" ca=\"${ca_subj}\" reason=\"ssl mode :443 cert not issued by our LAN CA (not intercepting, #668)\""
+        ci_log "[CI-ERROR-VALIDATE-0026]" "issuer=\"${issuer}\" ca=\"${ca_subj}\" reason=\"ssl mode :${port} cert not issued by our LAN CA (not intercepting, #668)\""
         return 1
     fi
 }
 
 # What: ssl-mode depth-dispatch routes deeper SNI right.
-# Why: depth>=2 SNI passthrough (:9446), not MITM.
+# Why: depth>=2 SNI takes the passthrough relay, not MITM
 # From: Issue #1683
 _ci_validate_ssl_dispatch_map() {
-    local project="$1" cid map bad
+    local project="$1" cid map bad file relay
+    file="$(_ci_proxy_constant SSL_DISPATCH_MAP_FILE)" || return 2
+    relay="$(_ci_proxy_constant SSL_DISPATCH_PASSTHROUGH_RELAY_PORT)" || return 2
     cid="$(_ci_validate_cid "${project}" proxy)" || return 2
     if [ -z "${cid}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0027]" "reason=\"no proxy container for ssl-dispatch-map check\""
         return 2
     fi
-    if ! map="$(_ci_capture 0 docker exec "${cid}" cat /etc/nginx/stream.d/01-ssl-dispatch.conf)"; then
+    if ! map="$(_ci_capture 0 docker exec "${cid}" cat "${file}")"; then
         ci_log "[CI-ERROR-VALIDATE-0028]" "reason=\"could not read proxy ssl-dispatch map (SSL_ENABLED=0?)\""
         return 2
     fi
-    bad="$(printf '%s\n' "${map}" | _ci_ssl_dispatch_violations)"
+    bad="$(printf '%s\n' "${map}" | _ci_ssl_dispatch_violations "${relay}")"
     if [ -n "${bad}" ]; then
-        ci_error "[CI-ERROR-VALIDATE-0029]" "reason=\"depth>=2 SNI dispatch entry routes to MITM, not passthrough relay :9446 (#1276/#1322)\"" "${bad}"
+        ci_error "[CI-ERROR-VALIDATE-0029]" "reason=\"depth>=2 SNI dispatch entry routes to MITM, not passthrough relay :${relay} (#1276/#1322)\"" "${bad}"
         return 1
     fi
 }
@@ -11140,18 +11149,56 @@ _ci_installer() {
     printf '%s\n' "${p}"
 }
 
+# What: RHS of the one NAME= line; rc 1 if none or several
+# Why: product scripts own their values; CI reads them
+# From: Issue #1683 | PR #1858
+_ci_shell_assignment() {
+    local file="$1" name="$2" out
+    out="$(_ci_capture 0 sed -nE "s/^${name}=//p" "${file}")" || return 2
+    printf '%s\n' "${out}"
+    [[ -n "${out}" && "${out}" != *$'\n'* ]]
+}
+
+# What: literal NAME= value from the proxy entrypoint
+# Why: the entrypoint owns proxy paths and relay ports
+# From: Issue #1683 | PR #1858
+_ci_proxy_constant() {
+    local name="$1" ep="${2:-}" raw re='^"?([^"$[:space:]]+)"?$'
+    [ -n "${ep}" ] || ep="$(_ci_service_path proxy entrypoint.sh)" || return 2
+    raw="$(_ci_shell_assignment "${ep}" "${name}")" || [ "$?" -eq 1 ] || return 2
+    if [[ ! "${raw}" =~ ${re} ]]; then
+        ci_error "[CI-ERROR-CORE-0129]" "path=\"${ep}\" name=\"${name}\" reason=\"need exactly one literal assignment\"" "${raw}"
+        return 2
+    fi
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+# What: TCP port of a service name from the services db
+# Why: http/https ports belong to the OS, not to CI
+# From: Issue #1683 | PR #1858
+_ci_service_port() {
+    local name="$1" out port
+    out="$(_ci_capture 0 getent services "${name}/tcp")" || return 2
+    read -r _ port _ <<< "${out}"
+    if [[ ! "${port}" =~ ^([0-9]+)/tcp$ ]]; then
+        ci_error "[CI-ERROR-CORE-0130]" "service=\"${name}\" reason=\"no TCP port in the services db\"" "${out}"
+        return 2
+    fi
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
 # What: compose file setup.sh installs, read from setup.sh.
 # Why: the installer owns its compose; CI only derives it.
 # From: Issue #1683 | PR #1858
 _ci_installer_compose() {
     local root="${1:-${CI_REPO_ROOT}}" su line
-    local re='^PROD_COMPOSE="\$SCRIPT_DIR/([^"$]+)"$'
+    local re='^"\$SCRIPT_DIR/([^"$]+)"$'
     su="$(_ci_installer "${root}")" || return 2
-    line="$(_ci_capture 1 grep -E '^PROD_COMPOSE=' "${su}")" || return 2
-    if [ -z "${line}" ] || [ "$(wc -l <<< "${line}")" -ne 1 ]; then
+    line="$(_ci_shell_assignment "${su}" PROD_COMPOSE)" || {
+        [ "$?" -eq 1 ] || return 2
         ci_error "[CI-ERROR-CORE-0104]" "path=\"${su}\" reason=\"PROD_COMPOSE missing or assigned twice\"" "${line}"
         return 2
-    fi
+    }
     if [[ ! "${line}" =~ ${re} ]]; then
         ci_error "[CI-ERROR-CORE-0105]" "path=\"${su}\" reason=\"PROD_COMPOSE is not SCRIPT_DIR-relative\"" "${line}"
         return 2
@@ -11580,11 +11627,10 @@ _ci_check_proxy_cert_volume() {
     local -a viol=()
     local -A seen=()
     ep="$(_ci_service_path proxy entrypoint.sh "${repo_root}")" || return 2
-    dir="$(_ci_capture 1 sed -nE 's/^CERT_DIR="([^"$]+)"$/\1/p' "${ep}")" || return 2
-    if [[ -z "${dir}" || "${dir}" == *$'\n'* ]]; then
+    dir="$(_ci_proxy_constant CERT_DIR "${ep}")" || {
         ci_log "[CI-ERROR-CHECK-0150]" "path=\"${ep}\" reason=\"need exactly one literal CERT_DIR= line\""
         return 2
-    fi
+    }
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     inst="$(_ci_installer_compose "${repo_root}")" || return 2
     targets="$(_ci_block_entry_field validation "" compose_targets)" || return 2

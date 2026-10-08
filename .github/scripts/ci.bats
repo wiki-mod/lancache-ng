@@ -3452,29 +3452,38 @@ svc-x=sha256:n"
 # Why: each gap returns 2 with its own error code
 # From: Issue #1683 | PR #1858
 @test "validate host tools fail closed on a missing tool or list" {
-    local case rc want base
-    local -A V=([@T@]="$(_val name)" [@ERR@]="$(_val name)" [@SH@]="$(basename "${BASH}")")
-    grep -q '^  host_tools: \[' "${CI_MANIFEST}" || { echo "SOT has no validation.host_tools list"; return 1; }
-    base="$(_val path)"
-    cp "${CI_MANIFEST}" "${base}"
-    while IFS='|' read -r case rc want; do
-        cp "${base}" "${CI_MANIFEST}"
-        rm -f "${DS}/answers" "${DS}"/answer-used-*
-        case "${case}" in
-            present) sed -i "s|^  host_tools: \[.*|  host_tools: [${V[@SH@]}]|" "${CI_MANIFEST}" ;;
-            missing) sed -i "s|^  host_tools: \[|  host_tools: [${V[@T@]}, |" "${CI_MANIFEST}" ;;
-            no-list) sed -i '/^  host_tools: \[/d' "${CI_MANIFEST}" ;;
-            compose-broken) sed -i "s|^  host_tools: \[.*|  host_tools: [${V[@SH@]}]|" "${CI_MANIFEST}"
-                _docker_answer ' compose version *' 1 '' "${V[@ERR@]}" ;;
-        esac
-        run _ci_validate_host_tools
-        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
-    done <<'CASES'
-present|0|-
-missing|2|[CI-ERROR-VALIDATE-0062] missing="@T@"
-no-list|2|[CI-ERROR-VALIDATE-0056]
-compose-broken|2|[CI-ERROR-VALIDATE-0063];@ERR@
-CASES
+    local h d t tools i err
+    local -a dirs
+    err="$(_val name)" h="$(_val path)"
+    mkdir -p "${h}" || return 1
+    # What: host model: PATH entries as links, BIN first
+    # Why: command -v finds a tool only through PATH entries
+    # From: Issue #1683 | PR #1858
+    IFS=: read -r -a dirs <<< "${PATH}"
+    for (( i = ${#dirs[@]} - 1; i >= 0; i-- )); do
+        d="${dirs[i]}"
+        compgen -G "${d}/*" > /dev/null || continue
+        ln -sf "${d}"/* "${h}/" || return 1
+    done
+    _docker_answer ' compose version *' 0
+    PATH="${h}" run _ci_validate_host_tools
+    _expect present 0 - || return 1
+    tools="$(_ci_block_entry_list validation "" host_tools)" || return 1
+    [ -n "${tools}" ] || { echo "SOT has no validation.host_tools"; return 1; }
+    while IFS= read -r t; do
+        mv "${h}/${t}" "${h}/.${t}" || return 1
+        PATH="${h}" run _ci_validate_host_tools
+        mv "${h}/.${t}" "${h}/${t}" || return 1
+        [ "${status}" -eq 2 ] || { echo "${t}: rc ${status}: ${output}"; return 1; }
+        [[ "${output}" == *"missing=\"${t}\""* || "${output}" == *"[CI-ERROR-CORE-0108]"*"${t}"* ]] \
+            || { echo "${t}: not named: ${output}"; return 1; }
+    done <<< "${tools}"
+    CI_MANIFEST=<(grep -v '^  host_tools:' "${CI_MANIFEST}") run _ci_validate_host_tools
+    _expect no-list 2 '[CI-ERROR-VALIDATE-0056]' || return 1
+    rm -f "${DS}/answers" "${DS}"/answer-used-*
+    _docker_answer ' compose version *' 1 '' "${err}"
+    run _ci_validate_host_tools
+    _expect compose-broken 2 "[CI-ERROR-VALIDATE-0063];${err}" || return 1
 }
 
 @test "validation env lists the SOT pairs, fails closed when absent" {
