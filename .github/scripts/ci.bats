@@ -488,30 +488,6 @@ echo "${server:?the dig stub needs @server}"
 STUB
 }
 
-# What: <n> distinct /27 slot addresses from the slot owner
-# Why: probe targets live in validation slots, never fixed
-# From: Issue #1683 | PR #1858
-_slot_ips() {
-    local ip
-    local -A slots=()
-    while [ "${#slots[@]}" -lt "$1" ]; do
-        ip="$(_ci_validate_subnet "$(_val name)")" || return 1
-        slots["${ip%/*}"]=1
-    done
-    printf '%s\n' "${!slots[@]}"
-}
-
-# What: stand-in answers for one compose service container
-# Why: ci.sh finds a container by ps, then reads inspect
-# From: Issue #1683 | PR #1858
-_container() {
-    local svc="$1" cid="$2" ip="$3" ports="${4:-}" env="${5:-}"
-    _docker_answer " compose -p * ps -q ${svc} " 0 "${cid}"
-    _docker_answer " inspect -f *NetworkSettings* ${cid} " 0 "${ip}"
-    [ -z "${ports}" ] || _docker_answer " inspect -f *ExposedPorts* ${cid} " 0 "${ports}"
-    [ -z "${env}" ] || _docker_answer " inspect -f *Config.Env* ${cid} " 0 "${env}"
-}
-
 # What: script one docker answer: glob, rc, out, err, times
 # Why: the one stand-in answers any call; first match wins
 # From: Issue #1683 | PR #1858
@@ -948,18 +924,6 @@ CASES
 # PLATFORMS
 # =========================================================
 
-# What: SOT product services of one build type, in order.
-# Why: tests derive examples from the SOT, never by name.
-# From: Issue #1683 | PR #1858
-_svcs_of_type() {
-    local svcs s t
-    svcs="$(ci_services)" || return 1
-    for s in ${svcs}; do
-        t="$(ci_service_field "${s}" build_type)" || return 1
-        [ "${t}" != "$1" ] || printf '%s\n' "${s}"
-    done
-}
-
 # What: The first SOT external pin with a consumer.
 # Why: pin tests derive their example, never name one.
 # From: Issue #1683
@@ -1297,15 +1261,6 @@ CASES
 # ASSEMBLY
 # =========================================================
 
-# What: A valid 64-hex test digest from one char.
-# Why: One primitive; assembly/promote/release share it.
-# From: Issue #1683
-_test_digest() {
-    local c="$1" out=""
-    while [ "${#out}" -lt 64 ]; do out="${out}${c}"; done
-    printf 'sha256:%s' "${out}"
-}
-
 # =========================================================
 # PROMOTION
 # =========================================================
@@ -1371,65 +1326,6 @@ CASES
 # =========================================================
 # RELEASE
 # =========================================================
-
-# What: gh stub logging calls; mocks release and assets
-# Why: publish/sbom/vex assert gh calls without a network.
-# From: Issue #1683
-_release_gh_stub() {
-    _tool_stub "${BATS_TEST_TMPDIR}" relgh <<'EOF'
-echo "$*" >> "${GH_CALLS}"
-if [ "$1 $2" = "release create" ]; then
-    [ -z "${STUB_CREATE_FAIL:-}" ] || { echo "${STUB_CREATE_FAIL}" >&2; exit 1; }
-    if [ -n "${STUB_STATE:-}" ]; then
-        nf="" p=false prev=""
-        for a in "$@"; do
-            [ "${prev}" != --notes-file ] || nf="${a}"
-            [ "${a}" != --prerelease ] || p=true
-            prev="${a}"
-        done
-        b="$(cat "${nf}")"
-        [ -z "${STUB_STORE_BODY:-}" ] || b="${STUB_STORE_BODY}"
-        jq -nc --arg b "${b}" --argjson p "${p}" '{body: $b, isPrerelease: $p}' > "${STUB_STATE}"
-    fi
-    exit 0
-fi
-if [ "$1 $2" = "release upload" ]; then
-    [ -z "${STUB_UPLOAD_FAIL:-}" ] || { echo "${STUB_UPLOAD_FAIL}" >&2; exit 1; }
-    if [ -n "${STUB_ASSETS:-}" ]; then
-        mkdir -p "${STUB_ASSETS}"
-        if [ -n "${STUB_UPLOAD_CORRUPT:-}" ]; then echo "${STUB_UPLOAD_CORRUPT}" > "${STUB_ASSETS}/${4##*/}"
-        else cp "$4" "${STUB_ASSETS}/"; fi
-    fi
-    exit 0
-fi
-if [ "$1 $2" = "release download" ]; then
-    [ -z "${STUB_DL_ERR:-}" ] || { echo "${STUB_DL_ERR}" >&2; exit 1; }
-    name="" dir="" prev=""
-    for a in "$@"; do
-        [ "${prev}" != --pattern ] || name="${a}"
-        [ "${prev}" != --dir ] || dir="${a}"
-        prev="${a}"
-    done
-    if [ -n "${STUB_ASSETS:-}" ] && [ -f "${STUB_ASSETS}/${name}" ]; then cp "${STUB_ASSETS}/${name}" "${dir}/"; exit 0; fi
-    echo "no assets match the file pattern" >&2
-    exit 1
-fi
-if [ "$1 $2" = "release view" ]; then
-    if [ -n "${STUB_VIEW_ERR:-}" ]; then
-        echo "${STUB_VIEW_ERR}" >&2
-        exit 1
-    fi
-    if [ -n "${STUB_STATE:-}" ] && [ -s "${STUB_STATE}" ]; then
-        cat "${STUB_STATE}"
-        exit 0
-    fi
-    echo "release not found" >&2
-    exit 1
-fi
-exit 0
-EOF
-    printf '%s' "${BATS_TEST_TMPDIR}/relgh"
-}
 
 # What: per row: cut, reader or bump -> result or an id
 # Why: AG-REL-013: a tag cut is its own authorized step
@@ -1515,40 +1411,9 @@ pushed|cut|-|tags|-|0|[CI-INFO-RELEASE-0028] tag="@NEXT@" sha="@C1@";cut-tag=pus
 CASES
 }
 
-# What: neutral notes SOT, tagged origin and gh PR mock.
-# Why: real git range and section parse; no network.
-# From: Issue #894 | PR #1858
-_rn_setup() {
-    local work="${BATS_TEST_TMPDIR}/rn" origin="${BATS_TEST_TMPDIR}/rn-origin.git" s
-    printf '%s\n' 'release_notes:' '  pr_section: Changelog' '  skip_label: skip-changelog' '  other_title: Other' \
-        'release_notes_categories:' '  bug:' '    title: Fixed' '  ci:' '    title: CI' > "${BATS_TEST_TMPDIR}/rn.yml"
-    _sot_block ci_variables >> "${BATS_TEST_TMPDIR}/rn.yml"
-    export CI_MANIFEST="${BATS_TEST_TMPDIR}/rn.yml" GITHUB_REPOSITORY=owner/fixture-repo CI_RETRY_BACKOFF_BASE_SECONDS=0
-    git init -q --bare --initial-branch=main "${origin}"
-    git init -q "${work}"
-    for s in "base" "Merge pull request #5 from x/five" "Nine change (#9)" "Merge pull request #8 from x/eight" "Issue ref (#7)" "plain commit"; do
-        git -C "${work}" -c user.email=a@b -c user.name=b commit -q --allow-empty -m "${s}"
-        [ "${s}" != base ] || git -C "${work}" tag v0.1.0
-    done
-    git -C "${work}" tag v0.2.0
-    git -C "${work}" push -q "${origin}" HEAD:refs/heads/main --tags
-    git clone -q "${origin}" "${BATS_TEST_TMPDIR}/rn-clone"
-    gh() {
-        jq -cn '{data: {repository: {
-            p5: {__typename: "PullRequest", number: 5, title: "Five", url: "u5", labels: {nodes: [{name: "bug"}]},
-                 body: "## Summary\nx\n## Changelog\nFixed X.\n<!-- hint -->\n\n## Other\nno"},
-            p7: {__typename: "Issue"},
-            p8: {__typename: "PullRequest", number: 8, title: "Eight", url: "u8", labels: {nodes: [{name: "skip-changelog"}]}, body: ""},
-            p9: {__typename: "PullRequest", number: 9, title: "Nine", url: "u9", labels: {nodes: []}, body: "no section"}}}}'
-    }
-    export -f gh
-}
-
 # =========================================================
 # GC
 # =========================================================
-
-_gc_roots() { _stub 'printf "sha256:aaa\nsha256:bbb\n"'; }
 
 # =========================================================
 # VALIDATION
@@ -2144,53 +2009,6 @@ no-template|CI_REPO_ROOT=@NONE@|## @A@\nx|2|[CI-ERROR-CHECK-0015]
 CASES
 }
 
-# What: neutral SOT, gh mock and call log for the sweep.
-# Why: PRs and issues are fixtures; no SOT mirror.
-# From: Issue #1683 | PR #1858
-_ob_setup() {
-    local m="${BATS_TEST_TMPDIR}/ob.yml"
-    printf '%s\n' 'release:' '  channels:' '    stable:' '      ref: refs/heads/trunk' \
-        'branch_policy:' '  orphan_min_age_seconds: 3600' '  long_lived: [dev]' \
-        '  long_lived_regex:' '    - "^rel-"' > "${m}"
-    _sot_block ci_variables >> "${m}"
-    export CI_MANIFEST="${m}" GITHUB_REPOSITORY=owner/fixture-repo GH_TOKEN=t
-    export CI_RETRY_BACKOFF_BASE_SECONDS=0 OB_CALLS="${BATS_TEST_TMPDIR}/gh.calls"
-    export OB_REFS='' OB_ISSUES='' OB_MORE='' OB_FAIL=''
-    OB_OLD="2020-01-01T00:00:00Z"
-    OB_NEW="$(date -u -d "@$(($(date -u +%s) - 60))" +%Y-%m-%dT%H:%M:%SZ)"
-    : > "${OB_CALLS}"
-    gh() {
-        echo "$*" >> "${OB_CALLS}"
-        case "$*" in
-            *"${OB_FAIL:-<none>}"*) echo "gh: Not Found (HTTP 404)" >&2; return 1 ;;
-            *"refs(refPrefix"*) printf '%s' "${OB_REFS}" ;;
-            *"issue(number"*) printf '%s' "${OB_MORE}" ;;
-            *"issues(first"*) printf '%s' "${OB_ISSUES}" ;;
-            *) echo "unexpected gh $*" >&2; return 1 ;;
-        esac
-    }
-    export -f gh
-}
-
-# What: one refs page from "name|date|prs|author" rows.
-# Why: tests state branches, not GraphQL JSON shape.
-# From: Issue #1683 | PR #1858
-_ob_page() {
-    jq -cn --arg rows "$1" '{data: {repository: {refs: {nodes: ($rows | split("\n")
-        | map(select(. != "") | split("|") | {name: .[0], target: {committedDate: .[1],
-        author: {name: .[3]}}, associatedPullRequests: {totalCount: (.[2] | tonumber)}}))}}}}'
-}
-
-# What: one issues page; issue 7 has more than 100 comments.
-# Why: drives the per-issue comment paging path.
-# From: Issue #1683 | PR #1858
-_ob_issues() {
-    printf '%s' '{"data":{"repository":{"issues":{"nodes":[
-        {"number":1,"body":"see inbody and prefix-long","comments":{"nodes":[{"body":"pushed `incomment`; see dotted."}],"pageInfo":{"hasNextPage":false}}},
-        {"number":4,"body":"branch inclosed done","comments":{"nodes":[],"pageInfo":{"hasNextPage":false}}},
-        {"number":7,"body":null,"comments":{"nodes":[{"body":"x"}],"pageInfo":{"hasNextPage":true}}}]}}}}'
-}
-
 # What: per row: PR markdown -> stripped text or the section
 # Why: notes, template and close checks parse PR text alike
 # From: Issue #1496 | PR #1858
@@ -2208,59 +2026,6 @@ section-exact|section|## Summary\nx\n## Linked Issues  \r\nCloses #1\n```bash\n#
 section-twice|section|## Linked Issues\na\n## Linked Issues\nb|Linked Issues|2\na
 section-level-3|section|### Linked Issues\na|Linked Issues|0
 CASES
-}
-
-# What: gh mock for close-linked-issues; writes are logged.
-# Why: PR lookup, issue meta and writes need no network.
-# From: Issue #1137 | PR #1858
-_lk_setup() {
-    export GITHUB_REPOSITORY=owner/fixture-repo GH_TOKEN=t CI_RETRY_BACKOFF_BASE_SECONDS=0
-    export GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/dev GITHUB_SHA=abc CI_DEFAULT_BRANCH=main
-    export LK_LOG="${BATS_TEST_TMPDIR}/lk.log" LK_FAIL='' LK_BODY
-    LK_BODY=$'## Summary\nx\n## Linked Issues\nCloses #1, fixes owner/fixture-repo#2, resolves other/repo#3\nThis does not close #4.\nCloses #5\nCloses #6\n### Notes\ncloses #7\n'
-    : > "${LK_LOG}"
-    gh() {
-        local a="$*" f
-        case "${a}" in *"${LK_FAIL:-<none>}"*) echo "gh: Not Found (HTTP 404)" >&2; return 1 ;; esac
-        case "${a}" in
-            *"object(oid"*) jq -cn --arg b "${LK_BODY}" '{data: {repository: {object: {associatedPullRequests: {nodes: [
-                {number: 9, merged: true, baseRefName: "dev", url: "u9", body: $b, mergeCommit: {oid: "abc"}},
-                {number: 8, merged: false, baseRefName: "dev", url: "u8", body: "", mergeCommit: null}]}}}}}' ;;
-            *"pullRequest(number"*) jq -cn --arg b "${LK_BODY}" '{data: {repository: {pullRequest:
-                {number: 9, merged: true, baseRefName: "dev", url: "u9", body: $b, mergeCommit: {oid: "abc"}}}}}' ;;
-            *"-X POST"*) f="${a##*body=@}"; { echo "COMMENT ${a}"; cat "${f}"; } >> "${LK_LOG}"
-                if [ -n "${LK_ECHO:-}" ]; then echo "${LK_ECHO}"; else cat "${f}"; fi ;;
-            *"-X PATCH"*) echo "CLOSE ${a}" >> "${LK_LOG}"; echo "${LK_STATE:-closed}" ;;
-            *"issues/5 "*) printf 'pr\topen\n' ;;
-            *"issues/6 "*) printf 'issue\tclosed\n' ;;
-            *"issues/"*) printf 'issue\topen\n' ;;
-            *) echo "unexpected gh ${a}" >&2; return 1 ;;
-        esac
-    }
-    export -f gh
-}
-
-# What: fixture repo + a fake action-manifest resolver.
-# Why: one owner for the harness; asserts contract not curl.
-# From: Issue #1683 | PR #1858
-_anv_setup() {
-    local r="$1"
-    mkdir -p "${r}/.github/workflows" "${r}/.github/actions"
-    _tool_stub "${r}" resolver <<'RS'
-case "$4" in
-  *deprecated*) printf 'OK\nname: x\nruns:\n  using: node16\n' ;;
-  *notfound*)   printf 'NOTFOUND\n' ;;
-  *infra*)      printf 'INFRA:403\n' ;;
-  *)            printf 'OK\nname: x\nruns:\n  using: node24\n' ;;
-esac
-RS
-}
-
-# What: Run owner against fixture via fake resolver.
-# Why: One call site for shared invocation (AG-CODE-011).
-# From: Issue #1683 | PR #1858
-_anv_run() {
-    CI_ACTION_MANIFEST_CMD="$1/resolver" run bash "${CI_SH}" check action-node-versions "$1"
 }
 
 @test "action ref is external unless local, docker, or this repo" {
@@ -2426,180 +2191,6 @@ CASES
     [[ "${output}" == *"CI-ERROR-CHECK-0097"* ]]
 }
 
-# What: neutral deploy + installer compose for a fixture.
-# Why: checks derive both from owners, never real paths.
-# From: Issue #1683 | PR #1858
-_stack_fixture() {
-    export CI_COMPOSE_FILE=dep/c.yml
-    mkdir -p "$1/dep" "$1/inst"
-    printf 'PROD_COMPOSE="$SCRIPT_DIR/%s"\n' inst/c.yml >> "$1/setup.sh"
-}
-
-# What: seed a minimal prebuilt-only stack tree.
-# Why: shared by the prebuilt-prod checks below.
-# From: Issue #1683 | PR #1858
-_prebuilt_fixture() {
-    local root="$1"
-    mkdir -p "${root}/dep" "${root}/inst"
-    printf 'services:\n  proxy:\n    image: registry.example.test/example/proxy:sha-abc\n' > "${root}/dep/c.yml"
-    printf 'services:\n  proxy:\n    image: registry.example.test/example/proxy:sha-abc\n' > "${root}/inst/c.yml"
-    printf '# LanCache-NG\nRun: docker compose up -d\n' > "${root}/README.md"
-    printf '#!/usr/bin/env bash\n' > "${root}/setup.sh"
-    _stack_fixture "${root}"
-}
-
-# What: Seed prod tree from LANCACHE_STATE_DIR.
-# Why: shared by the prod-state-wiring checks below.
-# From: Issue #1683 | PR #1858
-_prod_state_wiring_fixture() {
-    local root="$1" k
-    _stack_fixture "${root}"
-    mkdir -p "${root}/docs"
-    : > "${root}/dep/c.yml"
-    : > "${root}/dep/.env"
-    : > "${root}/docs/backup-restore.md"
-    for k in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
-        printf '      - ${%s:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/x}:/y\n' "${k}" >> "${root}/dep/c.yml"
-        printf '%s=\n' "${k}" >> "${root}/dep/.env"
-        printf '%s documented\n' "${k}" >> "${root}/docs/backup-restore.md"
-    done
-}
-
-# What: seed a tree whose shared configs write atomically.
-# Why: shared by the nats-atomic-write checks below.
-# From: Issue #1683 | PR #1858
-_nats_atomic_fixture() {
-    local root="$1" cf
-    mkdir -p "${root}/dep" "${root}/inst" "${root}/services/dns"
-    for cf in dep/c.yml inst/c.yml; do
-        cat > "${root}/${cf}" <<'EOF'
-        tmp_nats_conf="$(mktemp /etc/nats/.nats.conf.XXXXXX)"
-        chown 10001:10001 "$$tmp_nats_conf"
-        mv "$$tmp_nats_conf" /etc/nats/nats.conf
-EOF
-    done
-    cat > "${root}/services/dns/entrypoint.sh" <<'EOF'
-render_template_atomic
-mktemp "${target_dir}/.${target_name}.tmp.XXXXXX"
-EOF
-    cat > "${root}/setup.sh" <<'EOF'
-write_file_atomically "${secondary_dir}/docker-compose.yml"
-write_file_atomically "${secondary_dir}/.env"
-EOF
-    _stack_fixture "${root}"
-}
-
-# What: rendered compose JSON of the real deploy file
-# Why: fixture services and names derive from that file
-# From: Issue #1683 | PR #1858
-_real_deploy_json() {
-    local dep
-    dep="$(unset CI_COMPOSE_FILE; _ci_variable CI_COMPOSE_FILE)" || return 2
-    _ci_compose_json "${CI_REPO_ROOT}/${dep}"
-}
-
-# What: compose with every real service and the proxy wiring
-# Why: socket-proxy names and mounts derive from compose
-# From: Issue #1683 | PR #1858
-_dsp_compose() {
-    local project="$1" dir="$2" real keys svc
-    real="$(_real_deploy_json)" || return 1
-    keys="$(jq -r '.services | keys[]' <<< "${real}")" || return 1
-    printf 'name: %s\nservices:\n' "${project}"
-    while IFS= read -r svc; do
-        case "${svc}" in ui|watchdog|docker-socket-proxy) continue ;; esac
-        printf '  %s:\n    image: x\n    container_name: %s-%s\n' "${svc}" "${project}" "${svc}"
-    done <<< "${keys}"
-    printf '  ui:\n    image: x\n    container_name: %s-ui\n    environment:\n' "${project}"
-    printf '      DOCKER_PROXY_URL: http://docker-socket-proxy:%s # ui-url\n' "$(( BATS_TEST_NUMBER + 40000 ))"
-    cat <<'YAML'
-    depends_on:
-      nats:
-        condition: service_started # ui-nats
-      docker-socket-proxy:
-        condition: service_started # ui-dsp
-  watchdog:
-    image: x
-    depends_on:
-      docker-socket-proxy:
-        condition: service_started # wd-dsp
-  docker-socket-proxy:
-    image: x
-    entrypoint: ["haproxy", "-f", "/etc/hx/haproxy.cfg"]
-    healthcheck:
-      test: ["CMD", "true"]
-    volumes:
-YAML
-    printf '      - %s/docker.sock:/run/docker.sock:ro # dsp-sock\n' "${dir}"
-    printf '      - %s/cfg:/etc/hx:ro # dsp-cfg\n' "${dir}"
-}
-
-# What: seed a docker-socket-proxy tree for the dsp checks
-# Why: deploy and installer compose come from one writer
-# From: Issue #1683 | PR #1858
-_socket_proxy_fixture() {
-    local root="$1" cf
-    _stack_fixture "${root}"
-    for cf in dep inst; do
-        _dsp_compose fixture "${root}/${cf}" > "${root}/${cf}/c.yml" || return 1
-    done
-}
-
-# What: seed an installer tree with required env keys set.
-# Why: shared by the compose-required-env checks below.
-# From: Issue #1683 | PR #1858
-_required_env_fixture() {
-    local root="$1"
-    mkdir -p "${root}/inst"
-    _stack_fixture "${root}"
-    printf 'services:\n  x:\n    environment:\n      A: ${A:?set A}\n      B: ${B:?set B}\n' > "${root}/inst/c.yml"
-    printf 'A=1\nB=2\n' > "${root}/inst/.env"
-}
-
-# What: Seed a dhcp-proxy tree with two template keys.
-# Why: shared by the dhcp-proxy-env checks below.
-# From: Issue #1683 | PR #1858
-_dhcp_proxy_env_fixture() {
-    local root="$1" k
-    mkdir -p "${root}/services/dhcp-proxy"
-    _stack_fixture "${root}"
-    printf 'services:\n  dhcp-proxy:\n    image: x\n    environment:\n' > "${root}/dep/c.yml"
-    : > "${root}/dep/.env"
-    : > "${root}/services/dhcp-proxy/entrypoint.sh"
-    for k in "DPE_A_${BATS_TEST_NUMBER}" "DPE_B_${BATS_TEST_NUMBER}"; do
-        printf '      - %s=${%s:-}\n' "${k}" "${k}" >> "${root}/dep/c.yml"
-        printf '%s=\n' "${k}" >> "${root}/dep/.env"
-        printf 'printf "%%s" "${%s}"\n' "${k}" >> "${root}/services/dhcp-proxy/entrypoint.sh"
-    done
-    printf '%s\n' '_dhcp_proxy_render_optional_directives() { :; }' \
-        '_dhcp_proxy_render_optional_directives /etc/dnsmasq.conf' >> "${root}/services/dhcp-proxy/entrypoint.sh"
-    : > "${root}/services/dhcp-proxy/dnsmasq.conf.template"
-}
-
-# What: Seed setup.sh/dhcp for Kea.
-# Why: shared by the setup-keys-kea checks below.
-# From: Issue #1683 | PR #1858
-_setup_keys_kea_fixture() {
-    local root="$1" k
-    mkdir -p "${root}/inst" "${root}/dep" "${root}/services/dhcp"
-    : > "${root}/inst/.env"
-    : > "${root}/dep/.env"
-    {
-        for k in DDNS_TSIG_KEY KEA_CTRL_TOKEN LANCACHE_IMAGE_TAG NATS_DNS_REPLICA_PASSWORD \
-            NATS_DNS_REPLICA_USER NATS_DNS_WRITER_PASSWORD NATS_DNS_WRITER_USER \
-            NATS_CALLOUT_PASSWORD NATS_CALLOUT_USER NATS_SYS_PASSWORD NATS_SYS_USER \
-            NATS_UI_PASSWORD NATS_UI_USER PDNS_API_KEY SECONDARY_REGISTRATION_TOKEN; do
-            printf '# %s\n' "${k}"
-        done
-        printf 'run_kea_dhcp_activation_preflight() { :; }\n'
-        printf 'run_kea_dhcp_activation_preflight "$ENV_LOCAL"\n'
-        printf 'nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5\n'
-    } > "${root}/setup.sh"
-    _stack_fixture "${root}"
-    printf 'RUN apk add nmap\n' > "${root}/services/dhcp/Dockerfile"
-    printf 'nmap|/usr/bin/nmap|/bin/nmap)\n' > "${root}/services/dhcp/entrypoint.sh"
-}
-
 @test "migrate_env_for_update repairs every empty required key" {
     # What: every SOT repair key is refilled when emptied
     # Why: empty required keys break the stack (AG-OP-007)
@@ -2661,32 +2252,6 @@ _setup_keys_kea_fixture() {
     [ -z "${output}" ]
 }
 
-# What: builds a fixture doc + deploy web_log mount.
-# Why: shared by the logging-matrix tests below.
-# From: Issue #1683 | PR #1858
-_logging_matrix_fixture() {
-    local root="$1" n
-    local -a rows
-    read -ra rows <<< "${2:-svc-a}"
-    mkdir -p "${root}/docs" "${root}/services/syslog" "${root}/inst"
-    _stack_fixture "${root}"
-    {
-        printf '**Logging matrix** (test):\n\n'
-        printf '| Service | Logging path | Notes |\n'
-        printf '| --- | --- | --- |\n'
-        for n in "${rows[@]}"; do
-            printf '| %s | Via x | note |\n' "${n}"
-        done
-    } > "${root}/docs/architecture-ng.md"
-    printf 'header\njobs:\n  - name: real\n    path: /x\n' > "${root}/services/syslog/netdata-web_log.conf"
-    cat > "${root}/dep/c.yml" <<'EOF'
-services:
-  netdata:
-    volumes:
-      - ../services/syslog/netdata-web_log.conf:/etc/netdata/go.d/web_log.conf:ro
-EOF
-}
-
 @test "check logging-matrix fails closed on a missing architecture doc" {
     # What: a repo root with no docs/architecture-ng.md.
     # Why: a missing input must never silently pass.
@@ -2741,27 +2306,6 @@ _trivy_var_tmp_dir() {
     d="$(mktemp -d "/var/tmp/ci-bats-trivy.XXXXXX")" || return 1
     printf '%s\n' "${d}" >> "${BATS_TEST_TMPDIR}/.trivy-var-tmp-dirs"
     printf '%s\n' "${d}"
-}
-
-# What: PATH-shim trivy for a clean/finding/db outcome.
-# Why: One trivy mock; the scan tests share it.
-# From: Issue #1683
-_trivy_stub() {
-    local mode="$1" bin="${BIN}"
-    mkdir -p "${bin}"
-    {
-        printf 'mode=%s\n' "${mode}"
-        cat <<'STUB'
-out=""
-while [ $# -gt 0 ]; do [ "$1" = --output ] && out="$2"; shift; done
-case "${mode}" in
-    clean) [ -n "$out" ] && : > "$out"; exit 0 ;;
-    finding) [ -n "$out" ] && echo "HIGH vuln" > "$out"; exit 1 ;;
-    db) echo "failed to download vulnerability DB" >&2; exit 1 ;;
-esac
-STUB
-    } | _tool_stub "${bin}" trivy
-    printf '%s' "${bin}"
 }
 
 @test "trivy dir writable proves a real file+subdir round-trip" {
@@ -2877,32 +2421,6 @@ STUB
     [[ "${output}" == *"CI-ERROR-SCAN-0012"* ]]
 }
 
-# What: bare repo + two host clones for real CAS tests.
-# Why: real git CAS proof, no live remote (AG-VAL-030).
-# From: Issue #1683 | PR #1858
-_cas_setup() {
-    local head
-    CAS_BARE="$(_val path).git"
-    CAS_A="$(_val path)"
-    CAS_B="$(_val path)"
-    git init --quiet --bare "${CAS_BARE}"
-    head="$(git -C "${CAS_BARE}" symbolic-ref HEAD)"
-    git clone --quiet "${CAS_BARE}" "${CAS_A}"
-    git -C "${CAS_A}" config user.email "$(_val name)@$(_val host)"
-    git -C "${CAS_A}" config user.name "$(_val name)"
-    git -C "${CAS_A}" commit --quiet --allow-empty -m "$(_val name)"
-    git -C "${CAS_A}" push --quiet origin "HEAD:${head}"
-    git clone --quiet "${CAS_BARE}" "${CAS_B}"
-}
-
-# What: a fresh empty ledger ref on the CAS bare repo
-# Why: each row starts from no record; nothing carries over
-# From: Issue #1683 | PR #1858
-_ledger_fresh() {
-    CI_GIT_REMOTE=origin CI_LEDGER_REF="refs/$(_val name)/$(_val name)" CI_LEDGER_FILE="$(_val name)"
-    export CI_GIT_REMOTE CI_LEDGER_REF CI_LEDGER_FILE
-}
-
 # What: one artifact state: ledger record + registry answer
 # Why: the real resolver reads both; no state is injected
 # From: Issue #1683 | PR #1858
@@ -2919,188 +2437,6 @@ _artifact() {
         UNKNOWN) _docker_answer " buildx imagetools inspect ${tag} --format *" 1 '' "denied: $(_val name)" ;;
         *) echo "_artifact: unknown state ${state}" >&2; return 1 ;;
     esac
-}
-
-# What: one registry reader: digest, raw, miss or unknown
-# Why: only a real miss may build; auth stays UNKNOWN
-# From: Issue #1683 | PR #1858
-@test "registry read maps each answer per wrapper" {
-    local case fn answer rc calls want how
-    CI_RETRY_MAX_ATTEMPTS="$(_val int 2 6)"
-    export CI_RETRY_MAX_ATTEMPTS CI_RETRY_BACKOFF_BASE_SECONDS=0
-    local -A V=(
-        [@REF@]="$(_val host)/$(_val name)/$(_val name):$(_val name)" [@DIG@]="$(_val digest)" [@NET@]="$(_val name)"
-        [@TXT@]="$(_val name)" [@MAX@]="${CI_RETRY_MAX_ATTEMPTS}"
-    )
-    V[@RAW@]="{\"manifests\":[{\"digest\":\"${V[@DIG@]}\"}]}"
-    while IFS='|' read -r case fn answer rc calls want; do
-        : > "${DS}/docker.log"
-        rm -f "${DS}/answers" "${DS}"/answer-used-*
-        case "${answer}" in
-            ok:*) _docker_answer ' buildx imagetools inspect *' 0 "$(_fill "${answer#ok:}")" ;;
-            miss:*) _docker_answer ' buildx imagetools inspect *' 1 '' "$(_fill "${answer#miss:}")" ;;
-            net) _docker_answer ' buildx imagetools inspect *' 1 '' "${V[@NET@]}" ;;
-            net-once) _docker_answer ' buildx imagetools inspect *' 1 '' "${V[@NET@]}" 1
-                _docker_answer ' buildx imagetools inspect *' 0 "${V[@DIG@]}" ;;
-        esac
-        run "${fn}" "${V[@REF@]}"
-        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
-        how='--format {{.Manifest.Digest}}'
-        [ "${fn}" != _ci_index_raw ] || how=--raw
-        grep -qxF -- "buildx imagetools inspect ${V[@REF@]} ${how}" "${DS}/docker.log" \
-            || { echo "${case}: argv $(cat "${DS}/docker.log")"; return 1; }
-        [ "$(grep -c '^buildx imagetools inspect ' "${DS}/docker.log")" -eq "$(_fill "${calls}")" ] \
-            || { echo "${case}: calls $(cat "${DS}/docker.log")"; return 1; }
-    done <<'CASES'
-present|_ci_registry_probe|ok:@DIG@|0|1|=@DIG@
-manifest-unknown|_ci_registry_probe|miss:@REF@: not found: manifest unknown|1|1|=
-buildx-not-found|_ci_registry_probe|miss:ERROR: @REF@: not found|1|1|=
-no-digest|_ci_registry_probe|ok:@TXT@|2|1|[CI-WARN-RESOLVE-0007] ref="@REF@" reason="registry read gave no digest";@TXT@
-denied|_ci_registry_probe|miss:denied: requested access to the resource is denied|2|1|[CI-WARN-RESOLVE-0007] ref="@REF@" cls=permanent;denied: requested access
-transient-then-ok|_ci_registry_probe|net-once|0|2|[CI-WARN-BUILD-0016] op=registry-read;@NET@;[CI-INFO-BUILD-0017];@DIG@
-transient-exhausted|_ci_registry_probe|net|2|@MAX@|[CI-WARN-BUILD-0016] op=registry-read;[CI-WARN-RESOLVE-0007] ref="@REF@" cls=transient;@NET@
-raw-present|_ci_index_raw|ok:@RAW@|0|1|=@RAW@
-raw-absent|_ci_index_raw|miss:not found: manifest unknown|1|1|=
-raw-transient|_ci_index_raw|net|2|@MAX@|[CI-WARN-RESOLVE-0010] ref="@REF@" cls=transient;@NET@
-digest-present|_ci_registry_digest|ok:@DIG@|0|1|=@DIG@
-digest-absent-fails|_ci_registry_digest|miss:not found: manifest unknown|2|1|[CI-ERROR-RESOLVE-0011] ref="@REF@" cls=not_found
-CASES
-}
-
-# What: index lookup per row; reconcile stops on UNKNOWN
-# Why: never assemble over an unchecked existing index
-# From: Issue #1683 | PR #1858
-@test "index lookup reads the index, drops attestations, stops on unknown" {
-    local case answer rc want rrc rwant
-    local -A V=(
-        [@REG@]="$(_val host)" [@REPO@]="$(_val name)/$(_val name)" [@SVC@]="$(_val name)" [@SHA@]="$(_val sha)"
-        [@IDX@]="$(_val digest)" [@DA@]="$(_val digest)" [@DB@]="$(_val digest)" [@DT@]="$(_val digest)"
-        [@PA@]="$(_val platform)" [@PB@]="$(_val platform)" [@NET@]="$(_val name)" [@TXT@]="$(_val name)"
-    )
-    V[@TAG@]="${V[@REG@]}/${V[@REPO@]}/${V[@SVC@]}:sha-${V[@SHA@]}"
-    V[@RAW@]="{\"manifests\":[{\"platform\":{\"os\":\"${V[@PA@]%/*}\",\"architecture\":\"${V[@PA@]#*/}\"},\"digest\":\"${V[@DA@]}\"},{\"platform\":{\"os\":\"${V[@PB@]%/*}\",\"architecture\":\"${V[@PB@]#*/}\"},\"digest\":\"${V[@DB@]}\"},{\"platform\":{\"os\":\"unknown\",\"architecture\":\"unknown\"},\"digest\":\"${V[@DT@]}\"}]}"
-    _ci_registry() { printf '%s\n' "${V[@REG@]}"; }
-    export CI_RETRY_BACKOFF_BASE_SECONDS=0 GITHUB_REPOSITORY="${V[@REPO@]}" GITHUB_SHA="${V[@SHA@]}"
-    while IFS='|' read -r case answer rc want rrc rwant; do
-        rm -f "${DS}/answers" "${DS}"/answer-used-*
-        case "${answer}" in
-            present) _docker_answer ' buildx imagetools inspect * --raw *' 0 "${V[@RAW@]}"
-                _docker_answer ' buildx imagetools inspect *' 0 "${V[@IDX@]}" ;;
-            broken) _docker_answer ' buildx imagetools inspect * --raw *' 0 "${V[@TXT@]}"
-                _docker_answer ' buildx imagetools inspect *' 0 "${V[@IDX@]}" ;;
-            absent) _docker_answer ' buildx imagetools inspect *' 1 '' 'not found: manifest unknown' ;;
-            net) _docker_answer ' buildx imagetools inspect *' 1 '' "dial tcp ${V[@NET@]}: i/o timeout" ;;
-        esac
-        run _ci_index_lookup "${V[@SVC@]}"
-        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
-        [ "${rrc}" != - ] || continue
-        run _ci_reconcile_index "${V[@SVC@]}" "${V[@PA@]}=${V[@DA@]}"
-        _expect "${case}-reconcile" "${rrc}" "$(_fill "${rwant}")" || return 1
-        [[ "${output}" != *"${V[@IDX@]}"* ]] || { echo "${case}: reconcile reused an unchecked index"; return 1; }
-    done <<'CASES'
-present|present|0|=@IDX@ @PA@=@DA@ @PB@=@DB@|-|-
-broken|broken|2|[CI-ERROR-ASSEMBLE-0010] service="@SVC@" tag="@TAG@"|-|-
-absent|absent|1|=|0|=
-unreachable|net|2|[CI-WARN-RESOLVE-0007] ref="@TAG@" cls=transient;i/o timeout|2|[CI-ERROR-ASSEMBLE-0007] service="@SVC@" rc=2
-CASES
-}
-
-@test "assemble-stack walks the matrix; a bad matrix stops with raw" {
-    # What: one assemble per service; bad JSON -> 0011.
-    # Why: a jq error must not walk zero services silently.
-    # From: Issue #1683 | PR #1858
-    local calls="${BATS_TEST_TMPDIR}/asm-calls"
-    : > "${calls}"
-    ci_cmd_assemble() { printf '%s\n' "$1" >> "${calls}"; }
-    CI_BUILD_MATRIX='{"include":[{"service":"ui"},{"service":"dns"},{"service":"ui"}]}' run ci_cmd_assemble_stack
-    [ "${status}" -eq 0 ]
-    [ "$(cat "${calls}")" = "$(printf 'dns\nui')" ]
-    : > "${calls}"
-    CI_BUILD_MATRIX='{"include":[ broken' run ci_cmd_assemble_stack
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"[CI-ERROR-ASSEMBLE-0011]"* ]]
-    [[ "${output}" == *"jq: parse error"* ]]
-    [ ! -s "${calls}" ]
-}
-
-# What: PR candidate per row: host platform, per-service pin
-# Why: no PR ledger; a missing image or host must fail
-# From: Issue #1683 | PR #1858
-@test "pr candidate pins each service to the daemon platform's digest" {
-    local case answer rc want
-    local -A V=(
-        [@SA@]="$(_val name)" [@SB@]="$(_val name)" [@DA@]="$(_val digest)" [@DB@]="$(_val digest)"
-        [@PLAT@]="$(_val platform)" [@REG@]="$(_val host)" [@REPO@]="$(_val name)/$(_val name)"
-        [@ID@]="$(_val sha)" [@NET@]="$(_val name)"
-    )
-    # What: services, identity and registry from the row
-    # Why: the PR candidate owns only platform and lookup
-    # From: Issue #1683 | PR #1858
-    ci_services() { printf '%s\n%s\n' "${V[@SA@]}" "${V[@SB@]}"; }
-    _ci_identity_for() { printf '%s\n' "${V[@ID@]}"; }
-    _ci_registry() { printf '%s\n' "${V[@REG@]}"; }
-    export CI_RETRY_BACKOFF_BASE_SECONDS=0 GITHUB_REPOSITORY="${V[@REPO@]}"
-    while IFS='|' read -r case answer rc want; do
-        rm -f "${DS}/answers" "${DS}"/answer-used-*
-        case "${answer}" in
-            ok) _docker_answer ' version *' 0 "${V[@PLAT@]}"
-                _docker_answer " buildx imagetools inspect */${V[@SA@]}:sha-${V[@ID@]}-${V[@PLAT@]##*/} *" 0 "${V[@DA@]}"
-                _docker_answer " buildx imagetools inspect */${V[@SB@]}:sha-${V[@ID@]}-${V[@PLAT@]##*/} *" 0 "${V[@DB@]}" ;;
-            missing) _docker_answer ' version *' 0 "${V[@PLAT@]}"
-                _docker_answer ' buildx imagetools inspect *' 1 '' 'not found: manifest unknown' ;;
-            reset) _docker_answer ' version *' 0 "${V[@PLAT@]}"
-                _docker_answer ' buildx imagetools inspect *' 1 '' "${V[@NET@]}" ;;
-            nohost) _docker_answer ' version *' 1 '' "${V[@NET@]}" ;;
-        esac
-        run _ci_stack_candidate_pr
-        _expect "${case}" "${rc}" "$(printf '%b' "$(_fill "${want}")")" || return 1
-    done <<'CASES'
-ok|ok|0|=@SA@=@DA@\n@SB@=@DB@
-missing|missing|2|[CI-ERROR-RESOLVE-0011];cls=not_found;[CI-ERROR-CANDIDATE-0002] service="@SA@"
-reset|reset|2|[CI-ERROR-RESOLVE-0011];cls=transient;@NET@;[CI-ERROR-CANDIDATE-0002] service="@SA@"
-nohost|nohost|2|[CI-ERROR-CANDIDATE-0005]
-CASES
-}
-
-# What: result files become one ledger write; reruns converge.
-# Why: one aggregator write per run (§26.1, §26.4).
-# From: Issue #1683 | PR #1858
-@test "aggregate: one write, rerun converges, partial and empty write nothing" {
-    local ref file t ok bad empty before recs i1 i2 s1 s2 p1 p2 d1 d2 bs
-    ref="refs/$(_val name)/$(_val name)"; file="$(_val name)"; t=$'\t'; bs="$(_val name)"
-    i1="$(_val sha)"; i2="$(_val sha)"; s1="$(_val name)"; s2="$(_val name)"
-    p1="$(_val platform)"; p2="$(_val platform)"; d1="$(_val digest)"; d2="$(_val digest)"
-    ok="$(_val path)"; bad="$(_val path)"; empty="$(_val path)"
-    mkdir -p "${ok}" "${bad}" "${empty}"
-    CI_GIT_REMOTE=origin; CI_LEDGER_REF="${ref}"; CI_LEDGER_FILE="${file}"
-    export CI_GIT_REMOTE CI_LEDGER_REF CI_LEDGER_FILE
-    printf '{"service":"%s","platform":"%s","build_identity":"%s","state":"ACCEPTED","digest":"%s"}' \
-        "${s1}" "${p1}" "${i1}" "${d1}" > "${ok}/$(_val name).json"
-    printf '{"service":"%s","platform":"%s","build_identity":"%s","state":"ACCEPTED","digest":"%s"}' \
-        "${s2}" "${p2}" "${i2}" "${d2}" > "${ok}/$(_val name).json"
-    cp "${ok}"/*.json "${bad}/"
-    printf '{"service":"%s","platform":"%s"}' "${bs}" "$(_val platform)" > "${bad}/$(_val name).json"
-    _cas_setup
-    cd "${CAS_A}"
-    run ci_cmd_aggregate "${empty}"
-    _expect empty 2 "[CI-ERROR-AGGREGATE-0003]" || return 1
-    run ci_cmd_aggregate "${bad}"
-    _expect partial 2 "[CI-ERROR-AGGREGATE-0004];raw:;${bs}" || return 1
-    run git ls-remote --exit-code origin "${ref}"
-    [ "${status}" -eq 2 ] || { echo "a failed run wrote the ledger"; return 1; }
-    run ci_cmd_aggregate "${ok}"
-    _expect write 0 "[CI-INFO-LEDGER-0004];aggregate records=2" || return 1
-    git fetch --quiet origin "${ref}"
-    before="$(git rev-list --count FETCH_HEAD)"
-    recs="$(git cat-file -p "FETCH_HEAD:${file}")"
-    [ "$(grep -c . <<< "${recs}")" -eq 2 ] || { echo "records: ${recs}"; return 1; }
-    grep -qxF "${i1}${t}${s1}${t}${p1}${t}ACCEPTED${t}${d1}" <<< "${recs}" || { echo "no ${i1}: ${recs}"; return 1; }
-    grep -qxF "${i2}${t}${s2}${t}${p2}${t}ACCEPTED${t}${d2}" <<< "${recs}" || { echo "no ${i2}: ${recs}"; return 1; }
-    run ci_cmd_aggregate "${ok}"
-    _expect rerun 0 "[CI-INFO-LEDGER-0005];aggregate records=2" || return 1
-    git fetch --quiet origin "${ref}"
-    [ "$(git rev-list --count FETCH_HEAD)" -eq "${before}" ] || { echo "rerun added a commit"; return 1; }
-    [ "$(git cat-file -p "FETCH_HEAD:${file}")" = "${recs}" ] || { echo "rerun changed the records"; return 1; }
 }
 
 # =========================================================
@@ -3120,102 +2456,6 @@ _version_fixture_repo() {
         mkdir -p "${dir}/$(dirname "${f}")" && cp "${root}/${f}" "${dir}/${f}" || return 1
     done
     printf '%s' "${dir}"
-}
-
-@test "release version copies follow the SOT; sync writes once" {
-    # What: per row: one drifted copy -> its own id.
-    # Why: Cargo, members, lock, VERSION follow the SOT.
-    # From: Issue #1683 | PR #1858
-    local m lk vf r k case drift rc want before
-    m="$(_val path)"
-    local -A V=(
-        [@W@]="$(_val semver)" [@X@]="$(_val semver)" [@L@]="$(_val name)" [@MEM@]="$(_val name)"
-        [@PKG@]="$(_val name)" [@DEP@]="$(_val name)" [@DV@]="$(_val semver)"
-    )
-    { _fill "$(printf '%s\n' 'release:' '  version: @W@' '  license: @L@')"; printf '\n'; _sot_block ci_variables; } > "${m}"
-    lk="$(CI_MANIFEST="${m}" _ci_variable CI_CARGO_LOCK)" && vf="$(CI_MANIFEST="${m}" _ci_variable CI_VERSION_FILE)" || return 1
-    _w() { { _fill "$(printf '%s\n' "${@:2}")"; echo; } > "$1"; }
-    _rv() {
-        r="${BATS_TEST_TMPDIR}/$(_val name)"
-        mkdir -p "${r}/${V[@MEM@]}"
-        _w "${r}/Cargo.toml" '[workspace]' 'members = [' '    "@MEM@",' ']' '' '[workspace.package]' 'version = "@W@"' 'license = "@L@"'
-        _w "${r}/${V[@MEM@]}/Cargo.toml" '[package]' 'name = "@PKG@"' 'version.workspace = true' \
-            'edition.workspace = true' 'license.workspace = true'
-        _w "${r}/${lk}" '[[package]]' 'name = "@PKG@"' 'version = "@W@"' '' '[[package]]' 'name = "@DEP@"' 'version = "@DV@"'
-        _w "${r}/${vf}" '@W@'
-    }
-    while IFS='|' read -r case drift rc want; do
-        _rv
-        case "${drift}" in
-            none) ;;
-            ws-version) sed -i "s/^version = \"${V[@W@]}\"\$/version = \"${V[@X@]}\"/" "${r}/Cargo.toml" ;;
-            ws-license) sed -i "s/^license = \"${V[@L@]}\"\$/license = \"${V[@X@]}\"/" "${r}/Cargo.toml" ;;
-            member-*) k="${drift#member-}"; sed -i "s/^${k}\.workspace = true\$/${k} = \"${V[@X@]}\"/" "${r}/${V[@MEM@]}/Cargo.toml" ;;
-            lock) sed -i "s/^version = \"${V[@W@]}\"\$/version = \"${V[@X@]}\"/" "${r}/${lk}" ;;
-            vfile) _w "${r}/${vf}" '@X@' ;;
-            vfile-gone) mv "${r}/${vf}" "${r}/${vf}.gone" ;;
-        esac
-        CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release
-        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
-    done <<'CASES'
-clean|none|0|release-version=@W@ consumers=clean
-ws-version|ws-version|1|[CI-ERROR-VERSION-0021];got="@X@" want="@W@"
-ws-license|ws-license|1|[CI-ERROR-VERSION-0028];got="@X@" want="@L@"
-member-version|member-version|1|[CI-ERROR-VERSION-0022] member="@MEM@" key="version"
-member-edition|member-edition|1|[CI-ERROR-VERSION-0022] member="@MEM@" key="edition"
-member-license|member-license|1|[CI-ERROR-VERSION-0022] member="@MEM@" key="license"
-lock|lock|1|[CI-ERROR-VERSION-0025];package="@PKG@" got="@X@" want="@W@"
-version-file|vfile|1|[CI-ERROR-VERSION-0024];got="@X@" want="@W@"
-version-file-gone|vfile-gone|2|[CI-ERROR-VERSION-0023];raw:
-CASES
-    # What: sync writes the 3 copies once; rerun is no-op.
-    # Why: copies follow the SOT; other lock rows untouched.
-    # From: Issue #1683 | PR #1858
-    _rv
-    sed -i "s/^version = \"${V[@W@]}\"\$/version = \"${V[@X@]}\"/; s/^license = \"${V[@L@]}\"\$/license = \"${V[@X@]}\"/" \
-        "${r}/Cargo.toml"
-    sed -i "s/^version = \"${V[@W@]}\"\$/version = \"${V[@X@]}\"/" "${r}/${lk}"
-    _w "${r}/${vf}" '@X@'
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release_sync
-    _expect sync-drifted 0 "=sync=release-version version=${V[@W@]} changed=3" || return 1
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release
-    _expect sync-then-verify 0 "release-version=${V[@W@]} consumers=clean" || return 1
-    grep -qx "version = \"${V[@DV@]}\"" "${r}/${lk}" || { echo "other lock entry changed"; return 1; }
-    before="$(cd "${r}" && find . -type f -exec sha256sum {} + | LC_ALL=C sort)"
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" run _ci_version_release_sync
-    _expect sync-converged 0 "=sync=release-version version=${V[@W@]} changed=0" || return 1
-    [ "$(cd "${r}" && find . -type f -exec sha256sum {} + | LC_ALL=C sort)" = "${before}" ] || { echo "rerun wrote"; return 1; }
-    CI_MANIFEST="${m}" CI_REPO_ROOT="${r}" CI_VERSION_FILE="$(_val name)/$(_val name)" run _ci_version_release_sync
-    _expect sync-unwritable 2 "[CI-ERROR-VERSION-0027];raw:" || return 1
-}
-
-@test "version verify fails closed per SOT consumer pin and ARG" {
-    # What: per consumer: pin or ARG damage -> its own id.
-    # Why: a missing pin or a second owner never passes.
-    # From: Issue #1683 | PR #1858
-    local dep df keys key val arg root m damage want
-    key="$(_ci_build_matrix_platforms)"
-    key="sha256_$(_ci_platform_field "${key%%$'\n'*}" apk "$(_val name)")"
-    while IFS='|' read -r dep df keys; do
-        root="$(_version_fixture_repo)" || return 1
-        CI_REPO_ROOT="${root}" run --separate-stderr bash "${CI_SH}" version verify
-        arg="$(sed -n "s/^key=${dep}\.consumer\.\([A-Za-z0-9_]*\) shape=bare\$/\1/p" <<< "${output}" | awk 'NR == 1')"
-        val="$(_ci_block_entry_field external_versions "${dep}" "${key}")"
-        [ -n "${arg}" ] && [ -n "${val}" ] || { echo "${dep}: arg='${arg}' ${key}='${val}': ${output}"; return 1; }
-        for damage in pin-missing pin-malformed arg-gone arg-baked; do
-            root="$(_version_fixture_repo)" m="${BATS_TEST_TMPDIR}/$(_val name).yml"
-            cp "${CI_MANIFEST}" "${m}"
-            case "${damage}" in
-                pin-missing) grep -v "^    ${key}: ${val}\$" "${CI_MANIFEST}" > "${m}"; want="[CI-ERROR-BUILDARGS-0004];${dep}.${key}" ;;
-                pin-malformed) sed "s/^    ${key}: ${val}\$/    ${key}: $(_val name)/" "${CI_MANIFEST}" > "${m}"
-                    want="[CI-ERROR-BUILDARGS-0015];${dep}.${key}" ;;
-                arg-gone) sed -i "/^ARG ${arg}\$/d" "${root}/${df}"; want="[CI-ERROR-VERSION-0008];name=\"${arg}\"" ;;
-                arg-baked) sed -i "s/^ARG ${arg}\$/ARG ${arg}=$(_val name)/" "${root}/${df}"; want="[CI-ERROR-VERSION-0009];name=\"${arg}\"" ;;
-            esac
-            CI_MANIFEST="${m}" CI_REPO_ROOT="${root}" run bash "${CI_SH}" version verify
-            _expect "${dep}/${damage}" 2 "${want}" || return 1
-        done
-    done <<< "$(_ci_version_consumers)"
 }
 
 @test "version, verify and audit give one output and rc" {
@@ -3240,37 +2480,6 @@ CASES
                 || { echo "${state}/${sub}: rc ${status}: ${output}"; return 1; }
         done
     done
-}
-
-@test "Dockerfile ARG grammar maps each shape to a state or id" {
-    # What: per row: ARG lines -> ABSENT/BARE/FOUND or id.
-    # Why: AG-VAL-036: read the real grammar or fail loud.
-    # From: Issue #1683 | PR #1858
-    local f case lines name rc want
-    local -A V=(
-        [@A@]="$(_val var)" [@B@]="$(_val var)" [@V@]="$(_val name)" [@W@]="$(_val name)" [@IMG@]="$(_val name)"
-    )
-    while IFS='|' read -r case lines name rc want; do
-        f="${BATS_TEST_TMPDIR}/$(_val name)"
-        [ "${lines}" = - ] || { _fill "${lines}"; echo; } | tr ';' '\n' > "${f}"
-        run _ci_dockerfile_arg_default "${f}" "$(_fill "${name}")"
-        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
-    done <<'CASES'
-absent|FROM @IMG@;ARG @A@|@B@|0|=ABSENT
-bare|FROM @IMG@;ARG @A@|@A@|0|=BARE
-unquoted|FROM @IMG@;ARG @A@=@V@|@A@|0|=FOUND:@V@
-double-quoted|FROM @IMG@;ARG @A@="@V@ @W@"|@A@|0|=FOUND:@V@ @W@
-single-quoted|FROM @IMG@;ARG @A@='@V@ @W@'|@A@|0|=FOUND:@V@ @W@
-lowercase-indented|FROM @IMG@;  arg @A@=@V@|@A@|0|=FOUND:@V@
-redeclare-bare|ARG @A@;FROM @IMG@;ARG @A@|@A@|0|=BARE
-redeclare-conflict|FROM @IMG@;ARG @A@=@V@;ARG @A@=@W@|@A@|2|[CI-ERROR-VERSION-0002]
-continuation|FROM @IMG@;ARG @A@=@V@\|@A@|2|[CI-ERROR-VERSION-0003]
-embedded-double|FROM @IMG@;ARG @A@="@V@"@W@"|@A@|2|[CI-ERROR-VERSION-0004]
-embedded-single|FROM @IMG@;ARG @A@='@V@'@W@'|@A@|2|[CI-ERROR-VERSION-0015]
-unquoted-space|FROM @IMG@;ARG @A@=@V@ @W@|@A@|2|[CI-ERROR-VERSION-0005]
-bad-token|FROM @IMG@;ARG @A@ @V@|@A@|2|[CI-ERROR-VERSION-0006]
-no-file|-|@A@|2|[CI-ERROR-VERSION-0001]
-CASES
 }
 
 # =========================================================
@@ -3298,78 +2507,6 @@ _legacy_env() {
         "CACHE_DIR_STANDARD=${file%/*}/cache" "CACHE_DIR_SSL=${file%/*}/cache" 'PROXY_SECURITY_MODE=strict' \
         'PROXY_ALLOWED_CLIENT_CIDRS=' "LANCACHE_IMAGE_TAG=v$(tr -d '[:space:]' < "${root}/VERSION")" \
         "UI_AUTH_USER=${user}" 'UI_AUTH_PASSWORD=' > "${file}"
-}
-
-@test "setup.sh image platform guards map host and manifest" {
-    # What: one row per host arch / buildx / manifest case
-    # Why: a tag lacking this platform must fail closed
-    # From: Issue #1683 | PR #1858
-    local root plats p apk unk first second a1 a2 case arch state rc want w
-    local -a ws
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    plats="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_platforms dns)"
-    first="$(awk 'NR == 1' <<< "${plats}")" second="$(awk 'NR == 2' <<< "${plats}")"
-    a1="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_platform_field "${first}" apk "$(_val name)")"
-    a2="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_platform_field "${second}" apk "$(_val name)")"
-    unk="arch${BATS_TEST_NUMBER}"
-    [ -n "${second}" ] && [ -n "${a1}" ] && [ -n "${a2}" ] || { echo "inputs: ${plats} ${a1} ${a2}"; return 1; }
-    # What: uname and docker arch map to the SOT platform
-    # Why: setup.sh's host map must equal the SOT's arch map
-    # From: Issue #1683 | PR #1858
-    while IFS= read -r p; do
-        apk="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_platform_field "${p}" apk "$(_val name)")"
-        [ "$(host_image_platform "${apk}")" = "${p}" ] && [ "$(host_image_platform "${p#*/}")" = "${p}" ] \
-            || { echo "host map for ${p}: ${apk}"; return 1; }
-    done <<< "${plats}"
-    ! host_image_platform "${unk}" || { echo "unknown arch mapped"; return 1; }
-    TAG="v$(tr -d '[:space:]' < "${root}/VERSION")"
-    export HOST_ARCH UNAME_REAL TAG FAULT="${BATS_TEST_NAME}"
-    export REG PRE
-    UNAME_REAL="$(type -P uname)"
-    REG="$(resolve_lancache_image_registry "${root}/deploy/prod/.env")" PRE="$(resolve_lancache_image_prefix "${root}/deploy/prod/.env")"
-    _tool_stub "${BIN}" uname <<'STUB'
-[ "${1:-}" != -m ] || { printf '%s\n' "${HOST_ARCH:?}"; exit 0; }
-exec "${UNAME_REAL:?}" "$@"
-STUB
-    # What: host arch and registry answer per row
-    # Why: every fail-closed path names its own cause
-    # From: Issue #1683 | PR #1858
-    while IFS='|' read -r case arch state rc want; do
-        rm -f "${DS}/single-platform" "${DS}/published" "${DS}/inspect-fail" "${DS}/fail-buildx"
-        case "${state}" in
-            -) ;;
-            fail-buildx|inspect-fail) : > "${DS}/${state}" ;;
-            *) printf '%s\n' "${state}" > "${DS}/single-platform" ;;
-        esac
-        HOST_ARCH="${arch}"
-        if [ "${case%%-*}" = prebuilt ]; then
-            _setup_sh_run 'PATH="${BIN}:${PATH}"; assert_prebuilt_image_platform_supported'
-        else
-            _setup_sh_run 'PATH="${BIN}:${PATH}"; assert_resolved_image_tag_platform_supported "${REG}" "${PRE}" "${TAG}"'
-        fi
-        [ "${status}" -eq "${rc}" ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
-        [ "${want}" != - ] || continue
-        IFS=';' read -r -a ws <<< "${want}"
-        for w in "${ws[@]}"; do [[ "${output}" == *"${w}"* ]] || { echo "${case}: no '${w}': ${output}"; return 1; }; done
-    done <<CASES
-prebuilt-first|${a1}|-|0|-
-prebuilt-second|${a2}|-|0|-
-prebuilt-unknown|${unk}|-|1|'${unk}' has no container image platform
-resolved-lacks|${a2}|${first}|1|does not publish a ${second} image;published: ${first}
-resolved-single|${a1}|${first}|0|-
-resolved-index|${a2}|<no value>/<no value>|0|-
-resolved-unknown|${unk}|-|1|'${unk}' has no container image platform
-resolved-nobuildx|${a1}|fail-buildx|1|docker buildx is required
-resolved-unreachable|${a1}|inspect-fail|1|Failed to inspect ${REG}/${PRE}/dns:${TAG};${FAULT}
-CASES
-    # What: no docker on PATH fails closed, not silently
-    # Why: the guard must never skip without its tool
-    # From: Issue #1683 | PR #1858
-    HOST_ARCH="${a1}"
-    _path_without "${BATS_TEST_TMPDIR}/nodocker" docker
-    _setup_sh_run 'PATH="${BATS_TEST_TMPDIR}/nodocker"; assert_resolved_image_tag_platform_supported "${REG}" "${PRE}" "${TAG}"'
-    [ "${status}" -eq 1 ] && [[ "${output}" == *"docker is required"* ]] || { echo "no docker: ${output}"; return 1; }
 }
 
 @test "migrate_env_for_update is a no-op on an already-converged .env" {
