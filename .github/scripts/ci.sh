@@ -623,7 +623,7 @@ ci_cmd_codeql_config() {
 }
 
 # What: Download one URL to a file (curl -f).
-# Why: injectable seam; _ci_retry classifies the error.
+# Why: one curl call that _ci_retry can classify.
 # From: Issue #1683 | PR #1858
 _ci_http_download() {
     curl -fsSL -o "$2" "$1"
@@ -638,7 +638,7 @@ _ci_fetch_verified() {
         ci_log "[CI-ERROR-FETCH-0001]" "url=\"${url}\" reason=\"pinned sha256 missing or malformed; FAIL CLOSED\""
         return 2
     fi
-    if ! _ci_retry download "${CI_HTTP_DOWNLOAD_CMD:-_ci_http_download}" "${url}" "${dest}" >/dev/null; then
+    if ! _ci_retry download _ci_http_download "${url}" "${dest}" >/dev/null; then
         ci_log "[CI-ERROR-FETCH-0002]" "url=\"${url}\" reason=\"download failed\""
         _ci_fetch_drop "${dest}"
         return 2
@@ -2136,33 +2136,33 @@ ci_cmd_nightly_status() {
     local outcome="${1:-}" scope="${2:-}" label="${3:-nightly-broken}" failed="${CI_FAILED_JOBS:-}"
     [ -n "${outcome}" ] || { ci_log "[CI-ERROR-STATUS-0001]" "reason=\"outcome arg required (success|failure)\""; return 2; }
     [ -n "${scope}" ] || { ci_log "[CI-ERROR-STATUS-0002]" "reason=\"scope arg required\""; return 2; }
-    local repo srv gh="${CI_NIGHTLY_STATUS_CMD:-gh}"
+    local repo srv
     repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
     srv="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
     local run_url="${srv}/${repo}/actions/runs/${GITHUB_RUN_ID:-0}" existing
     local ctx="repo=\"${repo}\" label=\"${label}\" scope=\"${scope}\" outcome=${outcome}"
-    existing="$(_ci_run "[CI-ERROR-STATUS-0003]" "${ctx} step=list" "${gh}" issue list --repo "${repo}" --label "${label}" --state open \
+    existing="$(_ci_run "[CI-ERROR-STATUS-0003]" "${ctx} step=list" gh issue list --repo "${repo}" --label "${label}" --state open \
         --json number --jq 'sort_by(.number) | .[0].number // empty')" || return 2
     if [ "${outcome}" = success ]; then
         [ -n "${existing}" ] || { printf 'nightly-status=noop label=%s\n' "${label}"; return 0; }
-        _ci_run "[CI-ERROR-STATUS-0004]" "${ctx} step=comment issue=${existing}" "${gh}" issue comment "${existing}" --repo "${repo}" \
+        _ci_run "[CI-ERROR-STATUS-0004]" "${ctx} step=comment issue=${existing}" gh issue comment "${existing}" --repo "${repo}" \
             --body "Recovered: ${scope} succeeded in ${run_url}. Closing this standing issue; it re-opens if the check fails again." >/dev/null || return 2
-        _ci_run "[CI-ERROR-STATUS-0005]" "${ctx} step=close issue=${existing}" "${gh}" issue close "${existing}" --repo "${repo}" >/dev/null || return 2
+        _ci_run "[CI-ERROR-STATUS-0005]" "${ctx} step=close issue=${existing}" gh issue close "${existing}" --repo "${repo}" >/dev/null || return 2
         printf 'nightly-status=closed issue=%s\n' "${existing}"
         return 0
     fi
     local detail="${scope} failed in ${run_url}"
     [ -n "${failed}" ] && detail="${detail} (failed: ${failed})"
     if [ -n "${existing}" ]; then
-        _ci_run "[CI-ERROR-STATUS-0006]" "${ctx} step=comment issue=${existing}" "${gh}" issue comment "${existing}" --repo "${repo}" --body "Still failing: ${detail}." >/dev/null || return 2
+        _ci_run "[CI-ERROR-STATUS-0006]" "${ctx} step=comment issue=${existing}" gh issue comment "${existing}" --repo "${repo}" --body "Still failing: ${detail}." >/dev/null || return 2
         printf 'nightly-status=updated issue=%s\n' "${existing}"
     else
         # What: label create-or-update, then the issue.
         # Why: --force makes an existing label no error.
         # From: Issue #1683 | PR #1858
-        _ci_run "[CI-ERROR-STATUS-0007]" "${ctx} step=label" "${gh}" label create "${label}" --repo "${repo}" --color b60205 --force \
+        _ci_run "[CI-ERROR-STATUS-0007]" "${ctx} step=label" gh label create "${label}" --repo "${repo}" --color b60205 --force \
             --description "Recurring self-closing tracking issue: ${scope}" >/dev/null || return 2
-        _ci_run "[CI-ERROR-STATUS-0008]" "${ctx} step=create" "${gh}" issue create --repo "${repo}" --label "${label}" --title "[${label}] ${scope}" \
+        _ci_run "[CI-ERROR-STATUS-0008]" "${ctx} step=create" gh issue create --repo "${repo}" --label "${label}" --title "[${label}] ${scope}" \
             --body "Standing issue, reused across failures and auto-closed on the next success. ${detail}." >/dev/null || return 2
         printf 'nightly-status=opened label=%s\n' "${label}"
     fi
@@ -2375,15 +2375,10 @@ _ci_registry_login_once() {
     printf '%s' "${!token_var}" | docker login ${registry:+"${registry}"} -u "${!user_var}" --password-stdin
 }
 
-# What: Look up a prebuilt binary in the compiled CAS.
-# Why: Reuse an identical binary before compiling (§7).
+# What: compiled-binary CAS lookup; no store, always a miss.
+# Why: a miss only costs a compile, never a false reuse.
 # From: Issue #1683
 _ci_cas_lookup() {
-    local identity="$1"
-    if [ -n "${CI_CAS_LOOKUP_CMD:-}" ]; then
-        "${CI_CAS_LOOKUP_CMD}" "${identity}"
-        return "$?"
-    fi
     return 1
 }
 
@@ -3400,10 +3395,6 @@ _ci_trivy_dir_writable() {
 # Why: NFS-shared or real local disk, never tmpfs/tmp.
 # From: Issue #1683
 _ci_trivy_cache_dir() {
-    if [ -n "${CI_TRIVY_CACHE_DIR_CMD:-}" ]; then
-        "${CI_TRIVY_CACHE_DIR_CMD}"
-        return "$?"
-    fi
     local shared
     shared="$(_ci_variable CI_TRIVY_SHARED_DIR)" || return 2
     local fallback="${CI_TRIVY_FALLBACK_DIR:-${CI_TMPDIR}/trivy-cache-fallback}"
@@ -3521,7 +3512,7 @@ _ci_trivy_db_ensure_fresh() {
         return 0
     fi
     _ci_trivy_db_lock_run "${cache_dir}" "${lock_timeout}" "${stale_after}" -- \
-        "${CI_TRIVY_DB_DOWNLOAD_CMD:-trivy}" image --download-db-only --cache-dir "${cache_dir}" || rc=$?
+        trivy image --download-db-only --cache-dir "${cache_dir}" || rc=$?
     if [ "${rc}" -eq 2 ]; then
         ci_log "[CI-ERROR-SCAN-0012]" "reason=\"locked DB refresh failed; refusing an unlocked concurrent write\""
         return 2
@@ -3566,18 +3557,6 @@ _ci_trivy_scan() {
         return 1
     fi
     rm -f "${report}"
-}
-
-# What: Run the real (or injected) image build+push.
-# Why: injected for tests; docker buildx is the default.
-# From: Issue #1683
-_ci_do_build() {
-    local service="$1" identity="$2" platform="$3"
-    if [ -n "${CI_BUILD_CMD:-}" ]; then
-        "${CI_BUILD_CMD}" "${service}" "${identity}" "${platform}"
-        return "$?"
-    fi
-    _ci_docker_build "${service}" "${identity}" "${platform}"
 }
 
 # What: Read the semantic build-impact verdict, fail-closed.
@@ -3716,11 +3695,11 @@ _ci_build_one() {
             printf 'service=%s platform=%s result=reuse-binary-cas identity=%s\n' "${service}" "${platform}" "${identity}"
             return 0
         fi
-        ci_log "[CI-INFO-BUILD-0018]" "service=\"${service}\" platform=\"${platform}\" identity=\"${identity}\" cas_rc=${crc} cas_cmd=\"${CI_CAS_LOOKUP_CMD:-none}\" reason=\"no CAS binary; compiling\""
+        ci_log "[CI-INFO-BUILD-0018]" "service=\"${service}\" platform=\"${platform}\" identity=\"${identity}\" cas_rc=${crc} reason=\"no CAS binary; compiling\""
     fi
 
     _ci_require_ghcr_auth || return "$?"
-    _ci_do_build "${service}" "${identity}" "${platform}" || return "$?"
+    _ci_docker_build "${service}" "${identity}" "${platform}" || return "$?"
     printf 'service=%s platform=%s result=built identity=%s\n' "${service}" "${platform}" "${identity}"
 }
 
@@ -4615,7 +4594,7 @@ ci_cmd_promote_ref() {
     fi
     while IFS= read -r t; do
         [ -n "${t}" ] || continue
-        "${CI_PROMOTE_ONE_CMD:-ci_cmd_promote}" "${t}" || return "$?"
+        ci_cmd_promote "${t}" || return "$?"
     done <<< "${targets}"
 }
 
@@ -4667,10 +4646,6 @@ _ci_release_record_stale() {
 # Why: a stale or invalidated record must never ship.
 # From: Issue #1683
 _ci_release_validation_valid() {
-    if [ -n "${CI_RELEASE_VALIDATION_CMD:-}" ]; then
-        "${CI_RELEASE_VALIDATION_CMD}"
-        return "$?"
-    fi
     local rel gov state target layer sub commit paths rows stale="" out
     rel="$(_ci_block_entry_field release "" validation_state)" || return 2
     gov="$(_ci_block_entry_list release "" governance_paths)" || return 2
@@ -5072,7 +5047,7 @@ ci_cmd_release_sbom() {
     fi
     [ "${rc}" -eq 1 ] || { rm -rf "${dir}"; return 2; }
     rc=0
-    "${CI_SBOM_CMD:-_ci_trivy_sbom}" "${service}" "${digest}" "${out}" || rc=$?
+    _ci_trivy_sbom "${service}" "${digest}" "${out}" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         rm -rf "${dir}"
         ci_log "[CI-ERROR-RELEASE-0009]" "service=\"${service}\" reason=\"SBOM generation failed\""
@@ -5249,7 +5224,7 @@ _ci_deletion_policy() {
 # What: Emit the transitive protected-root digest set.
 # Why: Ledger + channels + their index children (§101).
 # From: Issue #1683
-_ci_default_gc_roots() {
+_ci_gc_roots() {
     local remote repo registry blob rc=0 pairs="" out="" svc channel dig prc line s d raw ledger_ref
     remote="$(_ci_git_remote)" || return 2
     ledger_ref="$(_ci_variable CI_LEDGER_REF)" || return 2
@@ -5314,13 +5289,6 @@ _ci_default_gc_roots() {
     printf '%s\n' "${out}" | awk 'NF>0' | LC_ALL=C sort -u
 }
 
-# What: List protected GC roots (injectable backend).
-# Why: Empty roots must fail, not mark all unreachable.
-# From: Issue #1683
-_ci_gc_roots() {
-    "${CI_GC_ROOTS_CMD:-_ci_default_gc_roots}"
-}
-
 # What: List a package's versions; 1 not-found, 2 unknown.
 # Why: One discriminating GHCR reader; 404 is not transient.
 # From: Issue #1683
@@ -5341,7 +5309,7 @@ _ci_gh_versions() {
 # What: Enumerate GHCR versions of every built package.
 # Why: SOT-scoped candidates; org-wide would delete others.
 # From: Issue #1683
-_ci_default_gc_candidates() {
+_ci_gc_candidates() {
     local prefix owner pkgbase svc vers grc found=0
     prefix="$(_ci_repo)" || { ci_log "[CI-ERROR-GC-0017]" "reason=\"GITHUB_REPOSITORY missing; no package namespace\""; return 2; }
     owner="${prefix%%/*}"
@@ -5373,7 +5341,7 @@ _ci_default_gc_candidates() {
 # What: Delete one GHCR version by id (destructive).
 # Why: The one delete surface; package-scoped by service.
 # From: Issue #1683
-_ci_default_gc_delete() {
+_ci_gc_delete() {
     local candidate="$1" id svc prefix owner pkgbase path out rc
     id="$(printf '%s' "${candidate}" | awk -F'\t' '{print $2}')"
     svc="$(printf '%s' "${candidate}" | awk -F'\t' '{print $5}')"
@@ -5405,17 +5373,10 @@ _ci_default_gc_delete() {
     return 2
 }
 
-# What: List GC candidate artifacts (injectable backend).
-# Why: GHCR enumeration is the candidate truth (§97).
-# From: Issue #1683
-_ci_gc_candidates() {
-    "${CI_GC_CANDIDATES_CMD:-_ci_default_gc_candidates}"
-}
-
 # What: Classify a candidate against the root digest set.
 # Why: Membership or recency floor decides; else garbage.
 # From: Issue #1683
-_ci_default_gc_reachable() {
+_ci_gc_reachable() {
     local candidate="$1" digest created window created_epoch now floor
     digest="$(printf '%s' "${candidate}" | awk -F'\t' '{print $1}')"
     created="$(printf '%s' "${candidate}" | awk -F'\t' '{print $3}')"
@@ -5482,14 +5443,6 @@ _ci_default_gc_reachable() {
     printf 'unreachable\n'
 }
 
-# What: Probe one candidate against the OCI ref graph.
-# Why: Registry truth, not SQLite, decides reachability.
-# From: Issue #1683
-_ci_gc_reachable() {
-    local candidate="$1"
-    "${CI_GC_REACHABLE_CMD:-_ci_default_gc_reachable}" "${candidate}"
-}
-
 # What: Classify one candidate KEEP / DELETE / fail.
 # Why: UNKNOWN never deletes and never silently keeps.
 # From: Issue #1683
@@ -5524,7 +5477,7 @@ ci_cmd_gc() {
         esac
     done
     if ! roots="$(_ci_gc_roots)"; then
-        ci_log "[CI-ERROR-GC-0028]" "mode=${mode} source=\"${CI_GC_ROOTS_CMD:-_ci_default_gc_roots}\" reason=\"protected roots not derivable (raw above); no gc\""
+        ci_log "[CI-ERROR-GC-0028]" "mode=${mode} source=\"_ci_gc_roots\" reason=\"protected roots not derivable (raw above); no gc\""
         return 2
     fi
     if [ -z "${roots}" ]; then
@@ -5556,7 +5509,7 @@ _ci_gc_run() {
     local mode="$1" cands line action policy
     local del=0 keep=0 deleted=0 to_delete=""
     if ! cands="$(_ci_gc_candidates)"; then
-        ci_log "[CI-ERROR-GC-0031]" "mode=${mode} source=\"${CI_GC_CANDIDATES_CMD:-_ci_default_gc_candidates}\" reason=\"candidate list not derivable (raw above); no gc\""
+        ci_log "[CI-ERROR-GC-0031]" "mode=${mode} source=\"_ci_gc_candidates\" reason=\"candidate list not derivable (raw above); no gc\""
         return 2
     fi
     if [ -z "${cands}" ]; then
@@ -5600,7 +5553,7 @@ _ci_gc_run() {
                 ci_log "[CI-INFO-GC-0011]" "candidate=\"${line}\" reason=\"referenced at delete time; skipped\""
                 continue
             fi
-            if ! "${CI_GC_DELETE_CMD:-_ci_default_gc_delete}" "${line}"; then
+            if ! _ci_gc_delete "${line}"; then
                 ci_log "[CI-ERROR-GC-0009]" "candidate=\"${line}\" reason=\"delete backend failed\""
                 return 2
             fi
@@ -10320,13 +10273,6 @@ _ci_action_runs_using() {
 # From: Issue #1683 | PR #1858
 _ci_fetch_action_manifest() {
     local owner="$1" repo="$2" subpath="$3" ref="$4"
-    # What: caller resolver overrides API path.
-    # Why: tests assert OK/NOTFOUND/INFRA, not the API.
-    # From: Issue #1683 | PR #1858
-    if [ -n "${CI_ACTION_MANIFEST_CMD:-}" ]; then
-        "${CI_ACTION_MANIFEST_CMD}" "${owner}" "${repo}" "${subpath}" "${ref}"
-        return
-    fi
     local dir="repos/${owner}/${repo}/contents${subpath:+/${subpath}}" names out file rc=0
     # What: list the dir once, then fetch the manifest name.
     # Why: a 404 on the dir is a broken pin, not infra.
@@ -12275,10 +12221,6 @@ _ci_logging_matrix_canonical() {
 # From: Issue #1683 | PR #1858
 _ci_compose_service_names() {
     local file="$1"
-    if [ -n "${CI_LOGGING_MATRIX_SERVICES_CMD:-}" ]; then
-        "${CI_LOGGING_MATRIX_SERVICES_CMD}" "${file}"
-        return "$?"
-    fi
     local flags
     local -a profile_flags=()
     flags="$(_ci_compose_profile_flags "${file}")" || return 2
@@ -12844,7 +12786,7 @@ _ci_bats_test_ranges() {
 # Why: one run links every @test into one dataflow graph.
 # From: Issue #1683 | PR #1858
 _ci_shellcheck_bats_tests() {
-    local f="$1" ranges="$2" dir jobs cpus n k rc brk=0 sc="${CI_SHELLCHECK_CMD:-shellcheck}"
+    local f="$1" ranges="$2" dir jobs cpus n k rc brk=0
     local -a outs=()
     dir="$(_ci_mktemp -d -p "${CI_TMPDIR}")" || return 2
     jobs="$(_ci_parallel_jobs)" || { rm -rf "${dir}"; return 2; }
@@ -12860,9 +12802,9 @@ _ci_shellcheck_bats_tests() {
     seq 1 "${n}" | xargs -P "${jobs}" -I{} bash -c '
         awk -v k="$1" -v m="$2/$1.lines" "NR == FNR { t[FNR] = \$1; next }
             t[FNR] == 0 || t[FNR] == k { print; print FNR > m }" "$2/map" "$3" > "$2/$1.bats" || exit 255
-        "$4" -f gcc --severity=warning "$2/$1.bats" > "$2/$1.out" 2>&1
+        shellcheck -f gcc --severity=warning "$2/$1.bats" > "$2/$1.out" 2>&1
         echo "$?" > "$2/$1.rc"
-        rm -f "$2/$1.bats"' _ {} "${dir}" "${f}" "${sc}" || brk=1
+        rm -f "$2/$1.bats"' _ {} "${dir}" "${f}" || brk=1
     for ((k = 1; k <= n; k++)); do
         outs+=("${dir}/${k}.lines" "${dir}/${k}.out")
         rc="$(cat "${dir}/${k}.rc" 2>&1)" || rc="none"
@@ -12919,8 +12861,6 @@ _ci_check_shellcheck() {
         fi
         if [ -n "${tests}" ]; then
             sc_one="$(_ci_shellcheck_bats_tests "${f}" "${tests}")" || sc_rc=$?
-        elif [ -n "${CI_SHELLCHECK_CMD:-}" ]; then
-            sc_one="$("${CI_SHELLCHECK_CMD}" "${f}" 2>&1)" || sc_rc=$?
         else
             sc_one="$(shellcheck --severity=warning "${f}" 2>&1)" || sc_rc=$?
         fi
@@ -12949,15 +12889,11 @@ _ci_check_shellcheck() {
 # From: Issue #1683
 _ci_check_actionlint() {
     local repo_root="${1:-${CI_REPO_ROOT:-.}}" out rc=0
-    if [ -n "${CI_ACTIONLINT_CMD:-}" ]; then
-        out="$("${CI_ACTIONLINT_CMD}" "${repo_root}" 2>&1)" || rc=$?
-    else
-        local wf
-        local -a wfs=()
-        wf="$(_ci_repo_path CI_WORKFLOW_DIR "${repo_root}")" || return 2
-        _ci_workflow_files wfs "${wf}" || return 2
-        out="$(actionlint "${wfs[@]}" 2>&1)" || rc=$?
-    fi
+    local wf
+    local -a wfs=()
+    wf="$(_ci_repo_path CI_WORKFLOW_DIR "${repo_root}")" || return 2
+    _ci_workflow_files wfs "${wf}" || return 2
+    out="$(actionlint "${wfs[@]}" 2>&1)" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         ci_error "[CI-ERROR-CHECK-0057]" "reason=\"actionlint found issues\"" "${out}"
         return 1
@@ -12971,11 +12907,7 @@ _ci_check_actionlint() {
 _ci_check_cargo_audit() {
     local lock="${1:-}" out rc=0
     [ -n "${lock}" ] || lock="$(_ci_variable CI_CARGO_LOCK)" || return 2
-    if [ -n "${CI_CARGO_AUDIT_CMD:-}" ]; then
-        out="$("${CI_CARGO_AUDIT_CMD}" "${lock}" 2>&1)" || rc=$?
-    else
-        out="$(cargo audit --deny warnings --file "${lock}" 2>&1)" || rc=$?
-    fi
+    out="$(cargo audit --deny warnings --file "${lock}" 2>&1)" || rc=$?
     # What: advisories/warnings fail (belt+braces).
     # Why: --deny warnings catches; never pass.
     # From: Issue #1683
