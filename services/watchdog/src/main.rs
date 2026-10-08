@@ -234,10 +234,7 @@ fn load_settings() -> Settings {
     // call sites specifically, which is fine: those functions still need
     // their own guard so they stay correct for any other caller, not just
     // this one.
-    let env = |name: &str| {
-        let value = std::env::var(name).ok();
-        config::non_empty(value.as_deref()).map(str::to_string)
-    };
+    let env = lancache_common::config::env_opt;
 
     let docker_proxy_url =
         env("DOCKER_PROXY_URL").unwrap_or_else(|| "http://docker-socket-proxy:2375".to_string());

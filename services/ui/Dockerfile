@@ -49,6 +49,10 @@ COPY services/ui/Cargo.toml services/ui/Cargo.toml
 COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
 COPY services/cachehamster/Cargo.toml services/cachehamster/Cargo.toml
 COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.toml
+# What: shared crate manifest and sources, copied whole.
+# Why: real sources before any build; no stale stub rlib.
+# From: Issue #1683 | PR #1858
+COPY services/common services/common
 # What: dep pre-cache; ci.sh stubs and removes the srcs.
 # Why: layer-caches deps so only real src changes rebuild.
 # From: Issue #1533 | PR #1858

@@ -1,152 +1,207 @@
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! lancache-cachehamster entry point: wires the credential-store and
-//! stream-fetch primitives (see lib.rs) together into a runnable binary. This is a scaffold, not the finished CacheHamster: it does not
-//! yet log into Steam, resolve an app ID to depots, or parse a manifest.
-//! What it does prove end-to-end: an operator-supplied credential can be
-//! encrypted at rest (or held only in memory, operator's choice) and
-//! never leaves the process in plaintext; and a list of URLs can be
-//! streamed through and discarded with live throughput logging, the same
-//! mechanism the eventual real depot-chunk fetch will reuse unchanged.
-//!
-//! Deliberately NOT implemented in this PR (see this crate's own tracking
-//! issue for the full scope note): the steam-vent login flow, steamroom depot/
-//! manifest parsing, and therefore any real Steam CDN URL resolution --
-//! integrating those needs a real Steam account to test safely against,
-//! which this session could not do. `CACHEHAMSTER_URLS` below is this
-//! scaffold's stand-in for "the list of chunk URLs a real depot-manifest
-//! resolution step would produce."
+//! What: cachehamster Steam prefill, scaffold, URL list.
+//! Why: no Steam login yet; URLs come from the env.
+//! From: Issue #871
 
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use lancache_cachehamster::credential_store::{
-    self, CredentialPersistence, load_or_create_master_secret,
-};
-use lancache_cachehamster::stream_fetch::{
-    ByteCounter, fetch_many_and_discard, spawn_throughput_logger,
-};
+use argon2::Argon2;
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use futures_util::StreamExt;
+use lancache_common::config::env_opt;
+use lancache_common::{is_placeholder, load_or_create_hex_secret};
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
-/// What: default location for this service's own persisted secrets.
-/// Why: matches the `/data` volume convention services/ui/src/main.rs's
-///   load_or_create_session_secret already uses for the same purpose.
-/// From: Issue #871
+// What: default location of this service's own secrets.
+// Why: the /data volume convention the other services use.
+// From: Issue #871
 const DEFAULT_DATA_DIR: &str = "/data";
+// What: byte length of the persisted master secret.
+// Why: 32 bytes, like the ui session secret.
+// From: Issue #871
+const MASTER_SECRET_LEN: usize = 32;
+// What: byte length of the per-credential Argon2id salt.
+// Why: 16 bytes is Argon2's documented minimum salt size.
+// From: Issue #871
+const SALT_LEN: usize = 16;
+// What: byte length of the XChaCha20-Poly1305 nonce.
+// Why: 192-bit random nonces stay unique on rotation.
+// From: Issue #871
+const NONCE_LEN: usize = 24;
+// What: byte length of the derived symmetric key.
+// Why: the key size XChaCha20-Poly1305 requires.
+// From: Issue #871
+const KEY_LEN: usize = 32;
 
-/// Recognizes the project-wide placeholder shapes issue #967 established
-/// (CHANGE_ME_*, YOUR_*_HERE, a bare <...> token, lancache_*_secret) so a
-/// checked-in example value is rejected rather than silently used as a
-/// real Steam credential (AG-SEC-002). Mirrors
-/// services/ui/src/main.rs's secondary_registration_token_is_placeholder
-/// byte-for-byte -- duplicated rather than shared because no crate
-/// boundary currently exists between services/ui and services/cachehamster;
-/// worth extracting to a shared crate if a third consumer ever needs the
-/// same check.
-fn credential_is_placeholder(value: &str) -> bool {
-    if value.is_empty() {
-        return true;
-    }
-    let normalized = value.to_lowercase().replace('-', "_");
-    normalized.starts_with("change_me_")
-        || (normalized.starts_with("your_") && normalized.ends_with("_here"))
-        || normalized.starts_with("changeme")
-        || normalized.contains("change_me")
-        || (normalized.starts_with("lancache_") && normalized.ends_with("_secret"))
-        || (value.starts_with('<') && value.ends_with('>'))
+// What: encrypted-at-rest Steam credential, no Debug.
+// Why: only decrypt may recover the plaintext bytes.
+// From: Issue #871
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct EncryptedCredential {
+    salt: Vec<u8>,
+    nonce: Vec<u8>,
+    ciphertext: Vec<u8>,
 }
 
-/// Resolves the operator's chosen credential-persistence mode from
-/// `CACHEHAMSTER_CREDENTIAL_PERSISTENCE`. Fails closed on an unrecognized value
-/// rather than silently defaulting either way -- persistence is the
-/// operator's own decision (maintainer directive), not something this
-/// binary should guess.
-fn resolve_credential_persistence() -> anyhow::Result<CredentialPersistence> {
-    parse_credential_persistence(env_value("CACHEHAMSTER_CREDENTIAL_PERSISTENCE").as_deref())
+// What: the operator's credential persistence choice.
+// Why: None keeps the credential in memory only.
+// From: Issue #871
+#[derive(Debug, Clone, Copy)]
+enum CredentialPersistence {
+    None,
+    Persistent,
 }
 
 // What: persistence mode from an already-read value.
-// Why: pure, so tests need no process-wide env change.
+// Why: an unknown value fails closed; tests need no env.
 // From: Issue #871 | PR #1858
 fn parse_credential_persistence(value: Option<&str>) -> anyhow::Result<CredentialPersistence> {
     match value {
         Some("none") | None => Ok(CredentialPersistence::None),
         Some("persistent") => Ok(CredentialPersistence::Persistent),
         Some(other) => anyhow::bail!(
-            "CACHEHAMSTER_CREDENTIAL_PERSISTENCE must be \"none\" or \"persistent\" (or unset, defaulting \
-             to \"none\"); got {other:?}"
+            "CACHEHAMSTER_CREDENTIAL_PERSISTENCE must be \"none\" or \"persistent\" (or unset, \
+             defaulting to \"none\"); got {other:?}"
         ),
     }
 }
 
-// What: env value; an empty value counts as unset.
-// Why: config/prod env files ship KEY= to mean unset.
-// From: Issue #871 | PR #1858
-fn env_value(name: &str) -> Option<String> {
-    non_empty(std::env::var(name).ok())
-}
-
-fn non_empty(value: Option<String>) -> Option<String> {
-    value.filter(|v| !v.is_empty())
-}
-
-/// Rejects an explicitly-set placeholder outright rather than silently
-/// treating it as "unset" -- mirrors services/ui/src/main.rs's own
-/// secondary_registration_token handling: a checked-in example value left
-/// in place by mistake must fail closed with a clear error, not be dropped
-/// quietly and leave the operator wondering why no credential was
-/// configured. `None` (the variable was never set at all) passes through
-/// unchanged -- only a *present-but-placeholder* value is an error.
+// What: a set placeholder credential is an error.
+// Why: a checked-in example must fail closed (AG-SEC-002).
+// From: Issue #967
 fn reject_placeholder_credential(value: Option<String>) -> anyhow::Result<Option<String>> {
     if let Some(inner) = value.as_deref()
-        && credential_is_placeholder(inner)
+        && is_placeholder(inner)
     {
         anyhow::bail!(
-            "CACHEHAMSTER_STEAM_CREDENTIAL is set to a default placeholder value -- refusing to start. \
-             Set it to a real Steam credential, or unset it entirely to run without one."
+            "CACHEHAMSTER_STEAM_CREDENTIAL is set to a default placeholder value -- refusing to \
+             start. Set it to a real Steam credential, or unset it entirely to run without one."
         );
     }
     Ok(value)
 }
 
-/// Resolves the Steam credential to hold for this run, honoring the
-/// operator's persistence choice:
-/// - `None`: the plaintext from `CACHEHAMSTER_STEAM_CREDENTIAL` (if any) is
-///   used for this process only and never touches disk.
-/// - `Persistent`: an env-supplied credential is encrypted and saved on
-///   first use; on a later run with no env value set, the previously
-///   saved one is decrypted and reused instead.
-///
-/// Returns `Ok(None)` when no credential is configured at all (the
-/// scaffold's URL-list mode below does not require one).
+// What: Argon2id as a raw KDF over master secret and salt.
+// Why: the one-way PHC form cannot yield a usable key.
+// From: Issue #871
+fn derive_key(
+    master_secret: &[u8; MASTER_SECRET_LEN],
+    salt: &[u8],
+) -> anyhow::Result<[u8; KEY_LEN]> {
+    let mut key = [0u8; KEY_LEN];
+    Argon2::default()
+        .hash_password_into(master_secret, salt, &mut key)
+        .map_err(|e| anyhow::anyhow!("Argon2id key derivation failed: {e}"))?;
+    Ok(key)
+}
+
+// What: seal plaintext with a fresh salt and nonce.
+// Why: the credential must never rest on disk in clear.
+// From: Issue #871
+fn encrypt(
+    master_secret: &[u8; MASTER_SECRET_LEN],
+    plaintext: &[u8],
+) -> anyhow::Result<EncryptedCredential> {
+    let salt: [u8; SALT_LEN] = rand::random();
+    let key = derive_key(master_secret, &salt)?;
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    let nonce_bytes: [u8; NONCE_LEN] = rand::random();
+    let ciphertext = cipher
+        .encrypt(XNonce::from_slice(&nonce_bytes), plaintext)
+        .map_err(|e| anyhow::anyhow!("credential encryption failed: {e}"))?;
+    Ok(EncryptedCredential {
+        salt: salt.to_vec(),
+        nonce: nonce_bytes.to_vec(),
+        ciphertext,
+    })
+}
+
+// What: open a sealed credential, in memory only.
+// Why: AEAD fails on a wrong secret or tampered data.
+// From: Issue #871
+fn decrypt(
+    master_secret: &[u8; MASTER_SECRET_LEN],
+    stored: &EncryptedCredential,
+) -> anyhow::Result<Vec<u8>> {
+    let key = derive_key(master_secret, &stored.salt)?;
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    cipher
+        .decrypt(
+            XNonce::from_slice(&stored.nonce),
+            stored.ciphertext.as_ref(),
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "credential decryption failed (wrong master secret, or data corrupted): {e}"
+            )
+        })
+}
+
+// What: write the sealed credential, replacing any old one.
+// Why: rotation overwrites, so no create_new; 0600.
+// From: Issue #871
+fn save_encrypted_credential(path: &str, credential: &EncryptedCredential) -> anyhow::Result<()> {
+    let json = serde_json::to_string(credential)?;
+    let mut open_options = OpenOptions::new();
+    open_options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    open_options.mode(0o600);
+    let mut file = open_options.open(path)?;
+    file.write_all(json.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
+}
+
+// What: read the sealed credential; a missing file is None.
+// Why: no stored credential is the normal first-run state.
+// From: Issue #871
+fn load_encrypted_credential(path: &str) -> anyhow::Result<Option<EncryptedCredential>> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(Some(serde_json::from_str(&contents)?)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+// What: the credential held for this run, per persistence.
+// Why: None never uses disk; Persistent seals, reuses.
+// From: Issue #871
 fn resolve_steam_credential(
     persistence: CredentialPersistence,
     data_dir: &str,
 ) -> anyhow::Result<Option<String>> {
-    let env_value = reject_placeholder_credential(env_value("CACHEHAMSTER_STEAM_CREDENTIAL"))?;
+    let env_credential = reject_placeholder_credential(env_opt("CACHEHAMSTER_STEAM_CREDENTIAL"))?;
 
     match persistence {
-        CredentialPersistence::None => Ok(env_value),
+        CredentialPersistence::None => Ok(env_credential),
         CredentialPersistence::Persistent => {
             let master_secret_path = format!("{data_dir}/lancache-cachehamster-master.secret");
             let credential_path = format!("{data_dir}/lancache-cachehamster-credential.json");
-            let master_secret = load_or_create_master_secret(&master_secret_path)?;
+            let master_secret =
+                load_or_create_hex_secret::<MASTER_SECRET_LEN>(&master_secret_path)?;
 
-            if let Some(plaintext) = env_value {
-                // What: a fresh env-supplied credential overwrites any
-                //   previously persisted one.
-                // Why: an operator-supplied real value always wins, same
-                //   convention services/ui/src/main.rs's own
-                //   load_or_create_secondary_registration_token documents.
-                // From: Issue #871
-                let encrypted = credential_store::encrypt(&master_secret, plaintext.as_bytes())?;
-                credential_store::save_encrypted_credential(&credential_path, &encrypted)?;
+            // What: an env credential replaces the stored one.
+            // Why: an operator-set real value wins.
+            // From: Issue #871
+            if let Some(plaintext) = env_credential {
+                let encrypted = encrypt(&master_secret, plaintext.as_bytes())?;
+                save_encrypted_credential(&credential_path, &encrypted)?;
                 return Ok(Some(plaintext));
             }
 
-            match credential_store::load_encrypted_credential(&credential_path)? {
+            match load_encrypted_credential(&credential_path)? {
                 Some(encrypted) => {
-                    let decrypted = credential_store::decrypt(&master_secret, &encrypted)?;
+                    let decrypted = decrypt(&master_secret, &encrypted)?;
                     let plaintext = String::from_utf8(decrypted)
                         .map_err(|_| anyhow::anyhow!("persisted credential is not valid UTF-8"))?;
                     Ok(Some(plaintext))
@@ -157,9 +212,9 @@ fn resolve_steam_credential(
     }
 }
 
-/// Parses `CACHEHAMSTER_URLS` (comma-separated) into the fetch list. Stand-in
-/// for a real depot-manifest resolution step -- see this file's own
-/// module doc comment.
+// What: fetch list from comma-separated CACHEHAMSTER_URLS.
+// Why: stand-in until depot manifests are resolved.
+// From: Issue #871
 fn resolve_urls() -> Vec<String> {
     std::env::var("CACHEHAMSTER_URLS")
         .unwrap_or_default()
@@ -170,16 +225,124 @@ fn resolve_urls() -> Vec<String> {
         .collect()
 }
 
-/// Parses `CACHEHAMSTER_CONCURRENCY`, defaulting to 4 in-flight fetches when
-/// unset or invalid rather than failing closed -- unlike the credential
-/// checks above, an out-of-range concurrency value has no security
-/// consequence, only a performance one.
+// What: in-flight fetch cap, default 4 when unset/invalid.
+// Why: a bad value costs speed only, so it does not fail.
+// From: Issue #871
 fn resolve_concurrency() -> usize {
     std::env::var("CACHEHAMSTER_CONCURRENCY")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(4)
+}
+
+// What: running total of streamed bytes, lock-free.
+// Why: fetch tasks add while the logger reads; no lock.
+// From: Issue #871
+#[derive(Default)]
+struct ByteCounter {
+    total: AtomicU64,
+}
+
+impl ByteCounter {
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    fn add(&self, n: u64) {
+        self.total.fetch_add(n, Ordering::Relaxed);
+    }
+
+    fn total(&self) -> u64 {
+        self.total.load(Ordering::Relaxed)
+    }
+}
+
+// What: stream a body and drop each chunk as it arrives.
+// Why: the proxy caches the bytes; nothing is kept here.
+// From: Issue #816
+async fn fetch_and_discard(
+    client: &reqwest::Client,
+    url: &str,
+    counter: &ByteCounter,
+) -> anyhow::Result<u64> {
+    let response = client.get(url).send().await?.error_for_status()?;
+    let mut stream = response.bytes_stream();
+    let mut fetched: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk_len = chunk?.len() as u64;
+        fetched += chunk_len;
+        counter.add(chunk_len);
+    }
+    Ok(fetched)
+}
+
+// What: fetch all URLs, at most `concurrency` in flight.
+// Why: unbounded spawning opens one connection per URL.
+// From: Issue #871
+async fn fetch_many_and_discard(
+    client: reqwest::Client,
+    urls: Vec<String>,
+    concurrency: usize,
+    counter: Arc<ByteCounter>,
+) -> Vec<anyhow::Result<u64>> {
+    let semaphore = Arc::new(Semaphore::new(concurrency.max(1)));
+    let mut tasks = JoinSet::new();
+
+    for url in urls {
+        let client = client.clone();
+        let counter = Arc::clone(&counter);
+        let semaphore = Arc::clone(&semaphore);
+        tasks.spawn(async move {
+            let _permit = semaphore
+                .acquire()
+                .await
+                .expect("semaphore is never closed while tasks are running");
+            fetch_and_discard(&client, &url, &counter).await
+        });
+    }
+
+    let mut results = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok(result) => results.push(result),
+            Err(join_error) => results.push(Err(anyhow::anyhow!(
+                "fetch task panicked or was cancelled: {join_error}"
+            ))),
+        }
+    }
+    results
+}
+
+// What: log throughput every interval until `stop` fires.
+// Why: a stop signal can be awaited; an Arc count cannot.
+// From: Issue #871
+fn spawn_throughput_logger(
+    counter: Arc<ByteCounter>,
+    interval: Duration,
+    mut stop: tokio::sync::oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut last_total = counter.total();
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    let current_total = counter.total();
+                    let delta = current_total.saturating_sub(last_total);
+                    let mbit_per_sec = (delta as f64 * 8.0) / interval.as_secs_f64() / 1_000_000.0;
+                    tracing::info!(
+                        bytes_total = current_total,
+                        bytes_since_last = delta,
+                        mbit_per_sec = format!("{mbit_per_sec:.1}"),
+                        "prefill throughput"
+                    );
+                    last_total = current_total;
+                }
+                _ = &mut stop => break,
+            }
+        }
+    })
 }
 
 #[tokio::main]
@@ -196,7 +359,8 @@ async fn main() -> anyhow::Result<()> {
 
     let data_dir =
         std::env::var("CACHEHAMSTER_DATA_DIR").unwrap_or_else(|_| DEFAULT_DATA_DIR.to_string());
-    let persistence = resolve_credential_persistence()?;
+    let persistence =
+        parse_credential_persistence(env_opt("CACHEHAMSTER_CREDENTIAL_PERSISTENCE").as_deref())?;
     let credential = resolve_steam_credential(persistence, &data_dir)?;
 
     tracing::info!(
@@ -226,13 +390,8 @@ async fn main() -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let results = fetch_many_and_discard(client, urls, concurrency, Arc::clone(&counter)).await;
 
-    // What: signals the logger to stop, then waits for it to actually
-    //   have stopped before reading counter's final total below.
-    // Why: an explicit, awaited shutdown -- not a guess based on Arc
-    //   ownership -- is what makes "the logger will not log again after
-    //   this point" true (see spawn_throughput_logger's own doc comment
-    //   for the strong-count approach this replaced and why it never
-    //   actually terminated).
+    // What: stop and await the logger before the total.
+    // Why: the logger must not log again after this point.
     // From: Issue #871
     let _ = stop_logger_tx.send(());
     let _ = logger_handle.await;
@@ -263,35 +422,11 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    // credential_is_placeholder's own cases (mirrors
-    // services/ui/src/main.rs's identical parity test for the function
-    // this one is duplicated from -- see this function's own doc comment
-    // for why it is a duplicate rather than a shared crate).
-    #[test]
-    fn credential_is_placeholder_matches_known_shapes() {
-        assert!(credential_is_placeholder(""));
-        assert!(credential_is_placeholder("CHANGE_ME_now"));
-        assert!(credential_is_placeholder("YOUR_STEAM_PASSWORD_HERE"));
-        assert!(credential_is_placeholder("<steam-password>"));
-        assert!(!credential_is_placeholder("a-real-looking-secret-value"));
-    }
-
-    // The fail-closed behavior this round added: an unset variable passes
-    // through as None (nothing configured, not an error), but a
-    // *present-and-placeholder* value must be rejected outright rather
-    // than silently downgraded to None -- see reject_placeholder_credential's
-    // own doc comment for the AG-SEC-002/AG-OP-008 rationale.
-    // What: KEY= from an env_file is unset, not a value.
-    // Why: shipped config must start the scaffold cleanly.
+    // What: persistence values parse; unknown fails closed.
+    // Why: persistence is the operator's call, not guessed.
     // From: Issue #871 | PR #1858
     #[test]
-    fn empty_env_value_counts_as_unset() {
-        assert_eq!(non_empty(Some(String::new())), None);
-        assert_eq!(non_empty(None), None);
-        assert_eq!(
-            non_empty(Some("persistent".into())),
-            Some("persistent".into())
-        );
+    fn credential_persistence_parses_and_fails_closed() {
         assert!(matches!(
             parse_credential_persistence(None),
             Ok(CredentialPersistence::None)
@@ -301,23 +436,28 @@ mod tests {
             Ok(CredentialPersistence::Persistent)
         ));
         assert!(parse_credential_persistence(Some("bogus")).is_err());
-        assert_eq!(
-            reject_placeholder_credential(non_empty(Some(String::new()))).unwrap(),
-            None
-        );
     }
 
+    // What: an unset credential passes through as None.
+    // Why: nothing configured is not an error.
+    // From: Issue #871
     #[test]
     fn reject_placeholder_credential_passes_through_none() {
         assert_eq!(reject_placeholder_credential(None).unwrap(), None);
     }
 
+    // What: a real credential passes through unchanged.
+    // Why: only placeholder values are rejected.
+    // From: Issue #871
     #[test]
     fn reject_placeholder_credential_passes_through_real_value() {
         let real = Some("a-real-looking-secret-value".to_string());
         assert_eq!(reject_placeholder_credential(real.clone()).unwrap(), real);
     }
 
+    // What: a set placeholder credential is rejected.
+    // Why: dropping it would hide the operator's mistake.
+    // From: Issue #871
     #[test]
     fn reject_placeholder_credential_fails_closed_on_placeholder() {
         let result = reject_placeholder_credential(Some("CHANGE_ME_now".to_string()));
@@ -327,60 +467,131 @@ mod tests {
         );
     }
 
-    // credential_is_placeholder is a deliberate byte-for-byte duplicate of
-    // services/ui/src/main.rs's secondary_registration_token_is_placeholder
-    // (see this function's own doc comment for why it is duplicated rather
-    // than shared). Checked against the same shared fixture's "rust" column
-    // that function is checked against -- see
-    // tests/fixtures/placeholder-detection-cases.txt's own header for why
-    // this is drift protection between two copies of the same pattern set,
-    // not the #967 Option B legitimate-divergence case the fixture's other
-    // columns cover.
+    // What: encrypt then decrypt returns the plaintext.
+    // Why: the credential must be usable for Steam login.
+    // From: Issue #871
     #[test]
-    fn credential_is_placeholder_matches_shared_parity_fixture() {
-        let fixture_path = format!(
-            "{}/../../tests/fixtures/placeholder-detection-cases.txt",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let contents = std::fs::read_to_string(&fixture_path)
-            .unwrap_or_else(|e| panic!("could not read shared parity fixture {fixture_path}: {e}"));
+    fn encrypt_then_decrypt_round_trips() {
+        let master_secret: [u8; MASTER_SECRET_LEN] = rand::random();
+        let plaintext = b"a-steam-password-or-refresh-token";
+        let encrypted = encrypt(&master_secret, plaintext).expect("encryption should succeed");
+        let decrypted = decrypt(&master_secret, &encrypted).expect("decryption should succeed");
+        assert_eq!(decrypted, plaintext);
+    }
 
-        let mut total = 0usize;
-        let mut mismatches: Vec<String> = Vec::new();
-
-        for line in contents.lines() {
-            let line = line.trim_end();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            let [value, _shared, _setup, rust] = fields.as_slice() else {
-                panic!(
-                    "malformed shared parity fixture line (expected \"<value> <shared> <setup> <rust>\"): {line:?}"
-                );
-            };
-            let expect = *rust;
-            total += 1;
-
-            let actual = if credential_is_placeholder(value) {
-                "placeholder"
-            } else {
-                "real"
-            };
-            if actual != expect {
-                mismatches.push(format!("'{value}' expected={expect} actual={actual}"));
-            }
-        }
-
-        assert!(total > 0, "shared parity fixture had zero usable cases");
+    // What: a wrong master secret fails to decrypt.
+    // Why: the AEAD tag must reject, never return garbage.
+    // From: Issue #871
+    #[test]
+    fn decrypt_fails_with_wrong_master_secret() {
+        let master_secret: [u8; MASTER_SECRET_LEN] = rand::random();
+        let wrong_secret: [u8; MASTER_SECRET_LEN] = rand::random();
+        let encrypted =
+            encrypt(&master_secret, b"another-secret").expect("encryption should succeed");
         assert!(
-            mismatches.is_empty(),
-            "{} of {total} shared parity fixture case(s) disagreed with credential_is_placeholder \
-             (it is meant to be a byte-for-byte copy of services/ui's implementation -- see this \
-             test's own doc comment):\n{}",
-            mismatches.len(),
-            mismatches.join("\n")
+            decrypt(&wrong_secret, &encrypted).is_err(),
+            "decryption with the wrong master secret must fail, not silently succeed"
         );
+    }
+
+    // What: equal plaintexts seal to different bytes.
+    // Why: stored credentials must not reveal equality.
+    // From: Issue #871
+    #[test]
+    fn two_encryptions_of_the_same_plaintext_produce_different_ciphertext() {
+        let master_secret: [u8; MASTER_SECRET_LEN] = rand::random();
+        let plaintext = b"same-password-both-times";
+        let first = encrypt(&master_secret, plaintext).expect("first encryption should succeed");
+        let second = encrypt(&master_secret, plaintext).expect("second encryption should succeed");
+        assert_ne!(first.ciphertext, second.ciphertext);
+        assert_ne!(first.nonce, second.nonce);
+        assert_ne!(first.salt, second.salt);
+    }
+
+    // What: save, reload and decrypt returns the plaintext.
+    // Why: the on-disk persistence path must round-trip.
+    // From: Issue #871
+    #[test]
+    fn save_and_load_encrypted_credential_round_trips() {
+        let dir = std::env::temp_dir().join(format!(
+            "lancache-cachehamster-credential-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir should be creatable");
+        let path = dir.join("credential.json");
+        let path_str = path.to_str().expect("temp path should be valid UTF-8");
+
+        let master_secret: [u8; MASTER_SECRET_LEN] = rand::random();
+        let encrypted =
+            encrypt(&master_secret, b"round-trip-me").expect("encryption should succeed");
+        save_encrypted_credential(path_str, &encrypted).expect("save should succeed");
+        let loaded = load_encrypted_credential(path_str)
+            .expect("load should succeed")
+            .expect("credential should exist after saving");
+        let decrypted = decrypt(&master_secret, &loaded)
+            .expect("decryption of the reloaded credential should succeed");
+        assert_eq!(decrypted, b"round-trip-me");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // What: a missing credential file loads as None.
+    // Why: normal state before the operator sets one.
+    // From: Issue #871
+    #[test]
+    fn load_encrypted_credential_returns_none_when_absent() {
+        let path = std::env::temp_dir().join(format!(
+            "lancache-cachehamster-absent-credential-{}.json",
+            std::process::id()
+        ));
+        let result =
+            load_encrypted_credential(path.to_str().expect("temp path should be valid UTF-8"))
+                .expect("a missing file is not an error");
+        assert!(result.is_none());
+    }
+
+    // What: the byte counter starts at 0 and accumulates.
+    // Why: the fetch loop relies on correct accumulation.
+    // From: Issue #871
+    #[test]
+    fn byte_counter_starts_at_zero_and_accumulates() {
+        let counter = ByteCounter::new();
+        assert_eq!(counter.total(), 0);
+        counter.add(100);
+        counter.add(250);
+        assert_eq!(counter.total(), 350);
+    }
+
+    // What: 1,250,000 bytes per second is 10.0 Mbit/s.
+    // Why: the logger's rate arithmetic must be exact.
+    // From: Issue #871
+    #[test]
+    fn throughput_rate_arithmetic_matches_expected_megabits_per_second() {
+        let delta_bytes: u64 = 1_250_000;
+        let interval = Duration::from_secs(1);
+        let mbit_per_sec = (delta_bytes as f64 * 8.0) / interval.as_secs_f64() / 1_000_000.0;
+        assert!(
+            (mbit_per_sec - 10.0).abs() < 0.001,
+            "1,250,000 bytes/sec should be exactly 10.0 Mbit/s, got {mbit_per_sec}"
+        );
+    }
+
+    // What: the logger task ends promptly on `stop`.
+    // Why: it must not run until process exit.
+    // From: Issue #871
+    #[tokio::test]
+    async fn spawn_throughput_logger_stops_promptly_when_signaled() {
+        let counter = ByteCounter::new();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let handle =
+            spawn_throughput_logger(Arc::clone(&counter), Duration::from_secs(3600), stop_rx);
+
+        stop_tx
+            .send(())
+            .expect("logger task must still be listening");
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("logger task should stop promptly after `stop` fires")
+            .expect("logger task should not panic");
     }
 }

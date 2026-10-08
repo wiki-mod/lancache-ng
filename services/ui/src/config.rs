@@ -5,6 +5,7 @@
 //! What: typed Config from env, secret files and /data.
 //! Why: one owner for every ui and prepare-mode setting.
 
+use lancache_common::config::env_opt;
 use std::env;
 use std::fmt;
 use std::fs;
@@ -1005,17 +1006,7 @@ fn env_str(key: &str, default: &str) -> String {
 // (e.g. PROXY_SSL_URL defaulting to PROXY_STANDARD_URL) when left blank in
 // deployment .env files rather than omitted outright.
 fn env_or(key: &str, default: String) -> String {
-    env::var(key)
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or(default)
-}
-
-// Same empty-string-means-unset treatment as `env_or`, for optional values with
-// no sensible string default (e.g. UI_AUTH_USER, where "unset" must stay
-// distinguishable from "set to an empty string").
-fn env_opt(key: &str) -> Option<String> {
-    env::var(key).ok().filter(|v| !v.is_empty())
+    env_opt(key).unwrap_or(default)
 }
 
 // What: true for empty or a known shared-secret placeholder.

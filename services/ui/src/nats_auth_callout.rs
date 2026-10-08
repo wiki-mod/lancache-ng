@@ -128,10 +128,6 @@ use base64::Engine as _;
 use nkeys::{KeyPair, XKey};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha512_256};
-use std::fs::OpenOptions;
-use std::io::Write;
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -232,17 +228,8 @@ pub fn load_or_create_issuer_keypair(path: &str) -> Result<KeyPair, String> {
             let seed = kp
                 .seed()
                 .map_err(|e| format!("failed to encode newly generated issuer seed: {e}"))?;
-            let mut open_options = OpenOptions::new();
-            open_options.create_new(true).write(true);
-            #[cfg(unix)]
-            open_options.mode(0o600);
-            let mut file = open_options
-                .open(path)
-                .map_err(|e| format!("failed to create issuer seed file at {path}: {e}"))?;
-            file.write_all(seed.as_bytes())
+            lancache_common::create_secret_file(path, &seed)
                 .map_err(|e| format!("failed to write issuer seed file at {path}: {e}"))?;
-            file.sync_all()
-                .map_err(|e| format!("failed to sync issuer seed file at {path}: {e}"))?;
             Ok(kp)
         }
         Err(err) => Err(format!("failed to read issuer seed file at {path}: {err}")),
@@ -270,17 +257,8 @@ pub fn load_or_create_xkey(path: &str) -> Result<XKey, String> {
             let seed = kp
                 .seed()
                 .map_err(|e| format!("failed to encode newly generated xkey seed: {e}"))?;
-            let mut open_options = OpenOptions::new();
-            open_options.create_new(true).write(true);
-            #[cfg(unix)]
-            open_options.mode(0o600);
-            let mut file = open_options
-                .open(path)
-                .map_err(|e| format!("failed to create xkey seed file at {path}: {e}"))?;
-            file.write_all(seed.as_bytes())
+            lancache_common::create_secret_file(path, &seed)
                 .map_err(|e| format!("failed to write xkey seed file at {path}: {e}"))?;
-            file.sync_all()
-                .map_err(|e| format!("failed to sync xkey seed file at {path}: {e}"))?;
             Ok(kp)
         }
         Err(err) => Err(format!("failed to read xkey seed file at {path}: {err}")),

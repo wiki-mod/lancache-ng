@@ -1211,7 +1211,7 @@ dependencies = [
  "argon2",
  "chacha20poly1305",
  "futures-util",
- "hex",
+ "lancache-common",
  "rand 0.10.2",
  "reqwest",
  "serde",
@@ -1219,6 +1219,15 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "lancache-common"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "rand 0.10.2",
 ]
 
 [[package]]
@@ -1237,6 +1246,7 @@ dependencies = [
  "form_urlencoded",
  "futures-util",
  "hex",
+ "lancache-common",
  "nkeys",
  "rand 0.10.2",
  "regex",
@@ -1259,6 +1269,7 @@ dependencies = [
 name = "lancache-watchdog"
 version = "0.3.0"
 dependencies = [
+ "lancache-common",
  "reqwest",
  "serde",
  "serde_json",

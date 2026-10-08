@@ -88,72 +88,19 @@ fn ui_log_file() -> String {
     std::env::var("UI_LOG_FILE").unwrap_or_else(|_| "/var/log/lancache-ui/ui.log".to_string())
 }
 
-// What: true for empty or a checked-in token placeholder.
-// Why: a public placeholder would let anyone register.
-// From: Issue #967
-fn secondary_registration_token_is_placeholder(token: &str) -> bool {
-    if token.is_empty() {
-        return true;
-    }
-    let normalized = token.to_lowercase().replace('-', "_");
-    normalized.starts_with("change_me_")
-        || (normalized.starts_with("your_") && normalized.ends_with("_here"))
-        || normalized.starts_with("changeme")
-        || normalized.contains("change_me")
-        || (normalized.starts_with("lancache_") && normalized.ends_with("_secret"))
-        || (token.starts_with('<') && token.ends_with('>'))
-}
-
-// Persists the CSRF/session-signing secret across restarts so existing
-// sessions don't get invalidated on every container recreate. `create_new`
-// makes the write atomic and exclusive (no lost-update race if two processes
-// start concurrently), and 0o600 keeps the raw key readable only by the
-// container's own user.
-fn load_or_create_session_secret() -> Result<[u8; 32]> {
-    const SESSION_SECRET_FILE: &str = "/data/lancache-ui-session.secret";
-
-    match fs::read_to_string(SESSION_SECRET_FILE) {
-        Ok(contents) => {
-            let secret = hex::decode(contents.trim())?;
-            if secret.len() != 32 {
-                anyhow::bail!(
-                    "Session secret at {} must contain exactly 32 bytes encoded as hex",
-                    SESSION_SECRET_FILE
-                );
-            }
-            let mut bytes = [0u8; 32];
-            bytes.copy_from_slice(&secret);
-            Ok(bytes)
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let secret: [u8; 32] = rand::random();
-            let encoded = hex::encode(secret);
-            let mut open_options = OpenOptions::new();
-            open_options.create_new(true).write(true);
-            #[cfg(unix)]
-            open_options.mode(0o600);
-            let mut file = open_options.open(SESSION_SECRET_FILE)?;
-            file.write_all(encoded.as_bytes())?;
-            file.sync_all()?;
-            Ok(secret)
-        }
-        Err(err) => Err(err.into()),
-    }
-}
-
 // What: a real token as is, else a persisted random one.
 // Why: placeholders crash-looped the ui; must not rotate.
 fn load_or_create_secondary_registration_token(
     configured: &str,
     path: &str,
 ) -> Result<String, String> {
-    if !secondary_registration_token_is_placeholder(configured) {
+    if !lancache_common::is_placeholder(configured) {
         return Ok(configured.to_string());
     }
     match fs::read_to_string(path) {
         Ok(contents) => {
             let existing = contents.trim();
-            if secondary_registration_token_is_placeholder(existing) {
+            if lancache_common::is_placeholder(existing) {
                 return Err(format!(
                     "persisted secondary registration token at {path} is empty or a \
                      placeholder — refusing to start. Delete the file to regenerate it, \
@@ -164,18 +111,8 @@ fn load_or_create_secondary_registration_token(
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             let token = hex::encode(rand::random::<[u8; 32]>());
-            let mut open_options = OpenOptions::new();
-            open_options.create_new(true).write(true);
-            #[cfg(unix)]
-            open_options.mode(0o600);
-            let mut file = open_options.open(path).map_err(|e| {
-                format!("failed to create secondary registration token file at {path}: {e}")
-            })?;
-            file.write_all(token.as_bytes()).map_err(|e| {
+            lancache_common::create_secret_file(path, &token).map_err(|e| {
                 format!("failed to write secondary registration token file at {path}: {e}")
-            })?;
-            file.sync_all().map_err(|e| {
-                format!("failed to sync secondary registration token file at {path}: {e}")
             })?;
             tracing::warn!(
                 "SECONDARY_REGISTRATION_TOKEN was unset or a placeholder; generated a \
@@ -796,7 +733,7 @@ fn validate_secondary_registration_token(token: &str) -> Result<(), String> {
                 .to_string(),
         );
     }
-    if secondary_registration_token_is_placeholder(token) {
+    if lancache_common::is_placeholder(token) {
         return Err(format!(
             "SECONDARY_REGISTRATION_TOKEN is still set to a default placeholder \
              ('{token}') — refusing to start. Generate a real secret with: \
@@ -1128,7 +1065,11 @@ async fn run() -> Result<()> {
     cfg.secondary_registration_token = secondary_registration_token;
 
     let nats = connect_nats_with_retry(&cfg).await;
-    let ui_session_secret = load_or_create_session_secret()?;
+    // What: the CSRF/session-signing secret, kept across restarts.
+    // Why: a recreate must not invalidate every open session.
+    // From: Issue #1683 | PR #1858
+    let ui_session_secret =
+        lancache_common::load_or_create_hex_secret::<32>("/data/lancache-ui-session.secret")?;
 
     // What: issuer key from NATS_ISSUER_SEED or its file.
     // Why: the fragment write below needs its public key.
@@ -1942,14 +1883,6 @@ mod tests {
         assert!(validate_secondary_registration_token(&min_chars_emoji).is_ok());
     }
 
-    // What: the registration-token rule matches the "rust" column.
-    // Why: #967 keeps rules separate but pins every divergence.
-    // From: Issue #967
-    #[test]
-    fn secondary_registration_token_is_placeholder_matches_shared_parity_fixture() {
-        assert_parity_column(3, secondary_registration_token_is_placeholder);
-    }
-
     // What: the shared-secret rule matches the "shared" column.
     // Why: ui and the dns/dhcp/nats readers must agree.
     // From: Issue #967 | PR #1858
@@ -1995,7 +1928,7 @@ mod tests {
         // An empty configured value generates a real hex32 token and persists it.
         let generated = load_or_create_secondary_registration_token("", path_str).unwrap();
         assert_eq!(generated.len(), 64, "expected a 32-byte hex token");
-        assert!(!secondary_registration_token_is_placeholder(&generated));
+        assert!(!lancache_common::is_placeholder(&generated));
 
         // Idempotent: a later start with a placeholder value reuses the persisted
         // token (must never rotate), whichever placeholder form triggered it.

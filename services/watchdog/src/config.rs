@@ -7,11 +7,7 @@
 
 use std::time::Duration;
 
-/// What: empty and unset env values are treated the same.
-/// Why: a blank knob must fall back, not count as a value.
-pub fn non_empty(raw: Option<&str>) -> Option<&str> {
-    raw.filter(|v| !v.is_empty())
-}
+use lancache_common::config::non_empty;
 
 /// What: 1/true/yes/on, trimmed, any case, is truthy.
 /// Why: same set as the ui's env_bool and retention.sh.

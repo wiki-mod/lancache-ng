@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# What: root Cargo workspace for 4 first-party crates.
+# What: root Cargo workspace for 5 first-party crates.
 # Why: unifies lockfiles; ends cross-service version drift.
 # From: Issue #1095
 
@@ -13,6 +13,7 @@ members = [
     "services/ui",
     "services/cachehamster",
     "services/watchdog",
+    "services/common",
 ]
 
 # What: crate version, equal to SOT release.version.
