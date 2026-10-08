@@ -3366,22 +3366,29 @@ CASES
     [[ "${output}" == http://* ]]
 }
 
-@test "stream-map check accepts a wildcard that forwards to the requested SNI" {
-    # What: *.domain->SNI route is correct.
-    # Why: Wildcards route by SNI, not root.
-    # From: Issue #1297
-    run bash -c "source '${CI_SH}'; printf '%s\n' '    *.example.com   \$ssl_preread_server_name:443;' | _ci_stream_map_violations"
-    [ "${status}" -eq 0 ]
-    [ -z "${output}" ]
-}
-
-@test "stream-map check flags a wildcard hardcoded to a root literal (#1297)" {
-    # What: *.domain -> <root>:443 is bug.
-    # Why: Subdomain must reach own origin.
-    # From: Issue #1297
-    run bash -c "source '${CI_SH}'; printf '%s\n' '    *.example.com   example.com:443;' | _ci_stream_map_violations"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"*.example.com"* ]]
+# What: _ci_proxy_constant and _ci_service_port per input
+# Why: one literal line or a services db port, else rc 2
+# From: Issue #1683 | PR #1858
+@test "proxy constants and service ports come from their owners" {
+    local case body rc want p
+    local -A V=([@N@]="$(_val name)" [@A@]="$(_val name)" [@B@]="$(_val name)" [@Y@]="$(_val name)")
+    while IFS='|' read -r case body rc want; do
+        run _ci_proxy_constant "${V[@N@]}" <(printf '%b' "$(_fill "${body}")")
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+    done <<'CASES'
+quoted|@N@="/@A@/@B@"\n|0|=/@A@/@B@
+bare|@Y@=1\n@N@=@A@\n|0|=@A@
+absent|@Y@=1\n|2|[CI-ERROR-CORE-0129]
+twice|@N@=@A@\n@N@=@B@\n|2|[CI-ERROR-CORE-0129];@A@;@B@
+expanded|@N@="$@Y@/@A@"\n|2|[CI-ERROR-CORE-0129]
+CASES
+    for p in http https; do
+        run _ci_service_port "${p}"
+        [ "${status}" -eq 0 ] && [[ "$(getent services "${p}/tcp")" =~ [[:space:]]${output}/tcp ]] \
+            || { echo "${p}: rc ${status}: ${output}"; return 1; }
+    done
+    run _ci_service_port "${V[@A@]}"
+    _expect unknown 2 '[CI-ERROR-CORE-0106]' || return 1
 }
 
 @test "validate pins one SOT service onto both its compose containers" {
@@ -4052,47 +4059,45 @@ split|1.1.1.1|2.2.2.2|10.0.0.1|10.0.0.2|0|-
 CASES
 }
 
+# What: _ci_validate_proxy MISS, HIT and failures per row
+# Why: a HIT through the proxy IP proves the cache path
+# From: Issue #1683 | PR #1858
 @test "validate proxy maps each request outcome, raw on failure" {
-    # What: MISS then HIT; each failure shows raw headers.
-    # Why: a bare "not a HIT" hides why the cache missed.
+    local case inspect row_mode rc want row_n row_args
+    local -A V=([@P@]="$(_val name)" [@C@]="$(_val name)" [@ERR@]="$(_val name)")
+    row_n="$(_val path)" row_args="$(_val path)"
+    V[@IP@]="$(_ci_validate_subnet "$(_val name)")" && V[@IP@]="${V[@IP@]%/*}" \
+        && V[@HTTP@]="$(_ci_service_port http)" && V[@URL@]="$(_ci_validation_proxy_probe_url)" || return 1
+    # What: curl double: cache answer per call; argv logged
+    # Why: no live proxy; the call count picks MISS or HIT
     # From: Issue #1683 | PR #1858
-    local cnt="${BATS_TEST_TMPDIR}/n" args="${BATS_TEST_TMPDIR}/args"
-    local name m ip rc want w
-    local -a ws
-    _ci_validation_proxy_probe_url() { echo http://a.example.test/f; }
-    _ci_validate_container_ip() { echo "${ip}"; }
     curl() {
         local n
-        n=$(( $(cat "${cnt}") + 1 )); echo "${n}" > "${cnt}"
-        echo "$*" >> "${args}"
-        case "${m}:${n}" in
-            miss-fail:1|repeat-fail:2) echo "curl: (7) refused" >&2; return 7 ;;
+        n=$(( $(cat "${row_n}") + 1 )); echo "${n}" > "${row_n}"
+        printf '%s\n' "$*" >> "${row_args}"
+        case "${row_mode}:${n}" in
+            miss-fail:1|repeat-fail:2) echo "${V[@ERR@]}" >&2; return 7 ;;
             *:1) echo "X-Cache-Status: MISS" ;;
             no-hit:2) echo "X-Cache-Status: EXPIRED" ;;
             *) echo "X-Cache-Status: HIT" ;;
         esac
     }
-    while IFS='|' read -r name m ip rc want; do
-        echo 0 > "${cnt}"; : > "${args}"
-        run _ci_validate_proxy proj
-        [ "${status}" -eq "${rc}" ] || { echo "${name}: rc ${status}: ${output}"; return 1; }
-        [ "${want}" = - ] && continue
-        IFS=';' read -r -a ws <<<"${want}"
-        for w in "${ws[@]}"; do
-            [[ "${output}" == *"${w}"* ]] || { echo "${name}: no '${w}': ${output}"; return 1; }
-        done
+    while IFS='|' read -r case inspect row_mode rc want; do
+        rm -f "${DS}/answers" "${DS}"/answer-used-*
+        echo 0 > "${row_n}"; : > "${row_args}"
+        _docker_answer ' compose -p * ps -q *' 0 "${V[@C@]}"
+        _docker_answer " inspect -f * ${V[@C@]} " 0 "$(_fill "${inspect}")"
+        run _ci_validate_proxy "${V[@P@]}"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
     done <<'CASES'
-no-ip|hit||2|CI-ERROR-VALIDATE-0012
-miss-fail|miss-fail|172.16.1.9|1|CI-ERROR-VALIDATE-0013;curl: (7) refused
-repeat-fail|repeat-fail|172.16.1.9|1|CI-ERROR-VALIDATE-0065;curl: (7) refused
-no-hit|no-hit|172.16.1.9|1|CI-ERROR-VALIDATE-0014;X-Cache-Status: MISS;X-Cache-Status: EXPIRED
-hit|hit|172.16.1.9|0|-
+no-ip|<no value>|hit|2|[CI-ERROR-VALIDATE-0012]
+miss-fail|@IP@|miss-fail|1|[CI-ERROR-VALIDATE-0013];@ERR@
+repeat-fail|@IP@|repeat-fail|1|[CI-ERROR-VALIDATE-0065];@ERR@
+no-hit|@IP@|no-hit|1|[CI-ERROR-VALIDATE-0014];X-Cache-Status: MISS;X-Cache-Status: EXPIRED
+hit|@IP@|hit|0|-
 CASES
-    # What: both requests target the proxy IP, not DNS.
-    # Why: a direct origin fetch would never show a HIT.
-    # From: Issue #1683 | PR #1858
-    [ "$(grep -c -- '--resolve a.example.test:80:172.16.1.9' "${args}")" -eq 2 ] || {
-        echo "args:"; cat "${args}"; return 1; }
+    [ "$(grep -c -F -- ":${V[@HTTP@]}:${V[@IP@]} -D - -o /dev/null ${V[@URL@]}" "${row_args}")" -eq 2 ] \
+        || { echo "curl argv:"; cat "${row_args}"; return 1; }
 }
 
 @test "validate probes run in order without a proxy, stop early" {
@@ -4124,83 +4129,86 @@ CASES
         echo "early:"; cat "${log}"; return 1; }
 }
 
+# What: _ci_validate_ssl_mitm per proxy, CA and TLS answer
+# Why: only our LAN CA as https issuer proves the MITM
+# From: Issue #668 | PR #1858
 @test "validate ssl-mitm maps each proxy, CA and handshake case" {
-    # What: per row: proxy IP, CA copy, handshake, issuer.
-    # Why: only our LAN CA as :443 issuer proves the MITM.
-    # From: Issue #668 | PR #1858
-    local case stub_ip stub_cp stub_hs stub_issuer rc want
-    # What: stubs read row values as stub_* only.
-    # Why: dynamic scope shows the callee's own local ip.
+    local case inspect cp row_hs row_issuer rc want row_log
+    local -A V=([@P@]="$(_val name)" [@C@]="$(_val name)" [@CA@]="$(_val name)" [@F@]="$(_val name)" [@ERR@]="$(_val name)")
+    row_log="$(_val path)"
+    V[@IP@]="$(_ci_validate_subnet "$(_val name)")" && V[@IP@]="${V[@IP@]%/*}" \
+        && V[@CADIR@]="$(_ci_proxy_constant CA_DIR)" && V[@TLS@]="$(_ci_service_port https)" \
+        && V[@DOM@]="$(_ci_validation_dns_domain)" || return 1
+    # What: openssl double: TLS answer per row; argv logged
+    # Why: no live proxy; row_* names avoid callee locals
     # From: Issue #1683 | PR #1858
-    _ci_validation_dns_domain() { echo a.example.test; }
-    _ci_validate_container_ip() { echo "${stub_ip}"; }
-    docker() { case "$1" in compose) echo cid1 ;; cp) return "${stub_cp}" ;; esac; }
     openssl() {
+        printf '%s\n' "$*" >> "${row_log}"
         case "$*" in
-            *s_client*) [ "${stub_hs}" = ok ] || { echo "connect:errno=111" >&2; return 1; }; echo PEM ;;
-            *-subject*) echo "subject=CN=LanCache Root CA" ;;
-            *-issuer*) echo "issuer=CN=${stub_issuer}" ;;
+            *s_client*) [ "${row_hs}" = ok ] || { echo "${V[@ERR@]}" >&2; return 1; }; echo "${V[@C@]}" ;;
+            *-subject*) echo "subject=${V[@CA@]}" ;;
+            *-issuer*) echo "issuer=${row_issuer}" ;;
         esac
     }
-    while IFS='|' read -r case stub_ip stub_cp stub_hs stub_issuer rc want; do
-        run _ci_validate_ssl_mitm proj
-        _expect "${case}" "${rc}" "${want}" || return 1
+    while IFS='|' read -r case inspect cp row_hs row_issuer rc want; do
+        rm -f "${DS}/answers" "${DS}"/answer-used-*
+        : > "${row_log}"
+        row_issuer="$(_fill "${row_issuer}")"
+        _docker_answer ' compose -p * ps -q *' 0 "${V[@C@]}"
+        _docker_answer " inspect -f * ${V[@C@]} " 0 "$(_fill "${inspect}")"
+        if [ "${cp}" -eq 0 ]; then
+            _docker_answer " cp ${V[@C@]}:${V[@CADIR@]}/* *" 0
+        else
+            _docker_answer " cp ${V[@C@]}:${V[@CADIR@]}/* *" "${cp}" '' "${V[@ERR@]}"
+        fi
+        run _ci_validate_ssl_mitm "${V[@P@]}"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
     done <<'CASES'
-no-ip||0|ok|LanCache Root CA|2|CI-ERROR-VALIDATE-0023
-no-ca|172.16.1.9|1|ok|LanCache Root CA|2|CI-ERROR-VALIDATE-0024
-foreign|172.16.1.9|0|ok|DigiCert|1|CI-ERROR-VALIDATE-0026
-handshake|172.16.1.9|0|fail|LanCache Root CA|1|CI-ERROR-VALIDATE-0025;connect:errno=111
-ours|172.16.1.9|0|ok|LanCache Root CA|0|-
+no-ip|<no value>|0|ok|@CA@|2|[CI-ERROR-VALIDATE-0023]
+no-ca|@IP@|1|ok|@CA@|2|[CI-ERROR-VALIDATE-0024];@ERR@
+handshake|@IP@|0|fail|@CA@|1|[CI-ERROR-VALIDATE-0025];@ERR@
+foreign|@IP@|0|ok|@F@|1|[CI-ERROR-VALIDATE-0026] issuer="@F@" ca="@CA@"
+ours|@IP@|0|ok|@CA@|0|-
 CASES
+    grep -q -F -- "s_client -connect ${V[@IP@]}:${V[@TLS@]} -servername ${V[@DOM@]}" "${row_log}" \
+        || { echo "s_client argv:"; cat "${row_log}"; return 1; }
 }
 
-@test "validate ssl-dispatch fails when no proxy container" {
-    # What: Missing proxy container returns rc 2.
-    # Why: Cannot read the dispatch map without it.
-    # From: Issue #1276
-    docker() { case "$1" in compose) : ;; esac; }
-    run _ci_validate_ssl_dispatch_map proj
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0027"* ]]
-}
-
-@test "validate ssl-dispatch fails when map is unreadable" {
-    # What: An unreadable dispatch map returns rc 2.
-    # Why: SSL_ENABLED=0 or missing file, not a defect.
-    # From: Issue #1276
-    docker() { case "$1" in compose) echo cid1 ;; exec) return 1 ;; esac; }
-    run _ci_validate_ssl_dispatch_map proj
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0028"* ]]
-}
-
-@test "validate ssl-dispatch fails when deeper SNI routes to MITM" {
-    # What: depth>=2 to :9445 returns rc 1.
-    # Why: deeper SNI has no wildcard cert.
-    # From: Issue #1322
-    docker() {
-        case "$1" in
-            compose) echo cid1 ;;
-            exec) printf '%s\n' '    "~^[^.]+\.example\.net$"   127.0.0.1:9445;' '    "~^.+\.example\.net$"      127.0.0.1:9445;' ;;
+# What: stream and ssl-dispatch map checks per stand-in row
+# Why: wildcards follow the SNI; depth>=2 takes the relay
+# From: Issue #1322 | PR #1858
+@test "validate proxy maps route by SNI and depth per row" {
+    local case fn file cid map rc want
+    local -A V=([@P@]="$(_val name)" [@C@]="$(_val name)" [@D@]="$(_val name)" [@H@]="$(_val name)" [@ERR@]="$(_val name)")
+    V[@SF@]="$(_ci_proxy_constant STREAM_TARGET_FILE)" && V[@DF@]="$(_ci_proxy_constant SSL_DISPATCH_MAP_FILE)" \
+        && V[@PASS@]="$(_ci_proxy_constant SSL_DISPATCH_PASSTHROUGH_RELAY_PORT)" \
+        && V[@MITM@]="$(_ci_proxy_constant SSL_DISPATCH_MITM_RELAY_PORT)" && V[@TLS@]="$(_ci_service_port https)" \
+        || return 1
+    while IFS='|' read -r case fn file cid map rc want; do
+        rm -f "${DS}/answers" "${DS}"/answer-used-*
+        if [ "${cid}" = yes ]; then
+            _docker_answer ' compose -p * ps -q *' 0 "${V[@C@]}"
+        else
+            _docker_answer ' compose -p * ps -q *' 0
+        fi
+        file="$(_fill "${file}")"
+        case "${map}" in
+            -) ;;
+            fail) _docker_answer " exec ${V[@C@]} cat ${file} " 1 '' "${V[@ERR@]}" ;;
+            *) _docker_answer " exec ${V[@C@]} cat ${file} " 0 "$(_fill "${map}")" ;;
         esac
-    }
-    run _ci_validate_ssl_dispatch_map proj
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"CI-ERROR-VALIDATE-0029"* ]]
-}
-
-@test "validate ssl-dispatch passes on correct depth split" {
-    # What: deeper=:9446, one-level=:9445 ok.
-    # Why: depth dispatch is correct.
-    # From: Issue #1276
-    docker() {
-        case "$1" in
-            compose) echo cid1 ;;
-            exec) printf '%s\n' '    "~^[^.]+\.example\.net$"   127.0.0.1:9445;' '    "~^.+\.example\.net$"      127.0.0.1:9446;' ;;
-        esac
-    }
-    run _ci_validate_ssl_dispatch_map proj
-    [ "${status}" -eq 0 ]
+        run "${fn}" "${V[@P@]}"
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+    done <<'CASES'
+stream-sni|_ci_validate_proxy_stream_map|@SF@|yes|    *.@D@   $ssl_preread_server_name:@TLS@;|0|-
+stream-root|_ci_validate_proxy_stream_map|@SF@|yes|    *.@D@   @D@:@TLS@;|1|[CI-ERROR-VALIDATE-0020];*.@D@   @D@:@TLS@
+stream-no-proxy|_ci_validate_proxy_stream_map|@SF@|no|-|2|[CI-ERROR-VALIDATE-0022]
+stream-unreadable|_ci_validate_proxy_stream_map|@SF@|yes|fail|2|[CI-ERROR-CORE-0106];@ERR@;[CI-ERROR-VALIDATE-0019]
+dispatch-split|_ci_validate_ssl_dispatch_map|@DF@|yes|    "~^[^.]+\\.@D@$"   @H@:@MITM@;\n    "~^.+\\.@D@$"   @H@:@PASS@;|0|-
+dispatch-mitm|_ci_validate_ssl_dispatch_map|@DF@|yes|    "~^[^.]+\\.@D@$"   @H@:@MITM@;\n    "~^.+\\.@D@$"   @H@:@MITM@;|1|[CI-ERROR-VALIDATE-0029];relay :@PASS@ ;"~^.+\.@D@$"
+dispatch-no-proxy|_ci_validate_ssl_dispatch_map|@DF@|no|-|2|[CI-ERROR-VALIDATE-0027]
+dispatch-unreadable|_ci_validate_ssl_dispatch_map|@DF@|yes|fail|2|[CI-ERROR-CORE-0106];@ERR@;[CI-ERROR-VALIDATE-0028]
+CASES
 }
 
 @test "validate ui-session maps target, answer and cookie" {
