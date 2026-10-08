@@ -2463,101 +2463,78 @@ _test_digest() {
     while [ "${#out}" -lt 64 ]; do out="${out}${c}"; done
     printf 'sha256:%s' "${out}"
 }
-# What: Named digest constants built on _test_digest.
-# Why: Idempotency compares assembled vs existing.
+# What: a digest stub for the accepted-digest seam
+# Why: the fail-closed command table still sets that seam
 # From: Issue #1683
-_asm_a() { _test_digest a; }
-_asm_b() { _test_digest b; }
-_asm_idx() { _test_digest d; }
 _asm_digest_stub() {
-    _stub "echo $(_asm_a)"
-}
-# What: index stub listing every SOT platform of svc.
-# Why: platform set comes from the SOT, never the test.
-# From: Issue #1683
-_asm_index_stub() {
-    local p line
-    line="$(_asm_idx)"
-    for p in $(_ci_platforms "$1"); do line="${line} ${p}=$(_asm_a)"; done
-    [ "${2:-}" = divergent ] && line="${line% *} ${p}=$(_asm_b)"
-    _stub "echo \"${line}\""
+    _stub "echo $(_test_digest a)"
 }
 
-@test "assemble refuses a non-ACCEPTED platform and does not rebuild" {
-    # What: UNKNOWN blocks assembly, never rebuilds success.
-    # Why: A missing platform must not rebuild (docs §45).
-    # From: Issue #1683
-    STUB_STATE=UNKNOWN
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" assemble ui
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-ASSEMBLE-0002"* ]]
-    [[ "${output}" != *"result=assembled"* ]]
-}
-
-@test "assemble refuses PRODUCED_UNVERIFIED (fail-safe stays DISACK)" {
-    # What: Unverified is not ACCEPTED, so no assembly.
-    # Why: Fail-safe: unaccepted stays a GC candidate.
-    # From: Issue #1683
-    STUB_STATE=PRODUCED_UNVERIFIED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" run bash "${CI_SH}" assemble ui
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-ASSEMBLE-0002"* ]]
-}
-
-@test "assemble creates an index when every platform is ACCEPTED" {
-    # What: All ACCEPTED + digests + authed -> one index.
-    # Why: The index is the accepted platform set.
-    # From: Issue #1683
-    STUB_STATE=PRESENT_ACCEPTED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
-    CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
-    CI_INDEX_LOOKUP_CMD="$(_stub 'exit 1')" \
-    CI_ASSEMBLE_CMD="$(_stub "echo $(_asm_idx)")" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" assemble ui
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"result=assembled"* ]]
-    [[ "${output}" == *"assembled=$(_asm_idx)"* ]]
-    [[ "${output}" == *"platforms=$(_ci_platforms ui | grep -c .)"* ]]
-}
-
-@test "assemble reuses an identical existing index (idempotent)" {
-    # What: A retry reuses the same index.
-    # Why: Same end state on retry; no backend.
-    # From: Issue #1683
-    STUB_STATE=PRESENT_ACCEPTED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
-    CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
-    CI_INDEX_LOOKUP_CMD="$(_asm_index_stub ui)" \
-        run bash "${CI_SH}" assemble ui
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"result=reuse-index"* ]]
-    [[ "${output}" == *"assembled=$(_asm_idx)"* ]]
-}
-
-@test "assemble refuses to overwrite a divergent existing index" {
-    # What: An index with different digests fails closed.
-    # Why: Never silently overwrite an accepted artifact.
-    # From: Issue #1683
-    STUB_STATE=PRESENT_ACCEPTED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" \
-    CI_ACCEPTED_DIGEST_CMD="$(_asm_digest_stub)" \
-    CI_INDEX_LOOKUP_CMD="$(_asm_index_stub ui divergent)" \
-    GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" assemble ui
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-ASSEMBLE-0004"* ]]
-}
-
-@test "assemble fails when an ACCEPTED platform has no digest" {
-    # What: ACCEPTED but no digest is an inconsistency.
-    # Why: Fail closed, never assemble a partial index.
-    # From: Issue #1683
-    STUB_STATE=PRESENT_ACCEPTED
-    CI_RESOLVE_PROBE_CMD="$(_probe_stub)" GHCR_USERNAME=u GHCR_TOKEN=t \
-        run bash "${CI_SH}" assemble ui
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-ASSEMBLE-0003"* ]]
+# What: ci.sh assemble per platform, index and backend row
+# Why: an index only from ACCEPTED digests; never overwrite
+# From: Issue #1683 | PR #1858
+@test "assemble merges only ACCEPTED digests and never overwrites" {
+    local case first index auth create rc want svc img itag raw p i d
+    local -a plats digs
+    svc="$(_ci_block_keys services | head -n 1)" && mapfile -t plats < <(_ci_platforms "${svc}") || return 1
+    _cas_setup
+    cd "${CAS_A}" || return 1
+    GITHUB_REPOSITORY="$(_val name)/$(_val name)" GITHUB_SHA="$(_val sha)"
+    export GITHUB_REPOSITORY GITHUB_SHA
+    img="$(_ci_registry)/$(_ci_repo)/${svc}" && itag="${img}:sha-${GITHUB_SHA}" || return 1
+    local -A V=([@IDX@]="$(_val digest)" [@N@]="${#plats[@]}" [@ERR@]="$(_val name)")
+    while IFS='|' read -r case first index auth create rc want; do
+        rm -f "${DS}/answers" "${DS}"/answer-used-*
+        : > "${DS}/docker.log"
+        _ledger_fresh
+        digs=()
+        for (( i = 0; i < ${#plats[@]}; i++ )); do
+            digs+=("$(_val digest)")
+            p=PRESENT_ACCEPTED
+            [ "${i}" -ne 0 ] || p="${first}"
+            _artifact "${p}" "${svc}" "${plats[i]}" "${digs[i]}" || return 1
+        done
+        raw="$(for (( i = 0; i < ${#plats[@]}; i++ )); do
+            d="${digs[i]}"
+            [ "${index}" != divergent ] || [ "${i}" -ne 0 ] || d="$(_val digest)"
+            printf '%s %s\n' "${plats[i]}" "${d}"
+        done | jq -Rnc '{manifests: [inputs | split(" ") | {digest: .[1],
+            platform: {os: (.[0] | split("/")[0]), architecture: (.[0] | split("/")[1])}}]}')"
+        case "${index}" in
+            none) _docker_answer " buildx imagetools inspect ${itag} --format *" 1 '' "ERROR: ${itag}: not found" 1
+                _docker_answer " buildx imagetools inspect ${itag} --format *" 0 "${V[@IDX@]}" ;;
+            same|divergent) _docker_answer " buildx imagetools inspect ${itag} --format *" 0 "${V[@IDX@]}"
+                _docker_answer " buildx imagetools inspect ${itag} --raw " 0 "${raw}" ;;
+            unknown) _docker_answer " buildx imagetools inspect ${itag} --format *" 1 '' "denied: ${V[@ERR@]}" ;;
+        esac
+        if [ "${create}" = ok ]; then
+            _docker_answer " buildx imagetools create --tag ${itag} *" 0
+        else
+            _docker_answer " buildx imagetools create --tag ${itag} *" 1 '' "${V[@ERR@]}"
+        fi
+        if [ "${auth}" = yes ]; then
+            GHCR_USERNAME="$(_val name)" GHCR_TOKEN="$(_val name)" run bash "${CI_SH}" assemble "${svc}"
+        else
+            GHCR_USERNAME="" GHCR_TOKEN="" run bash "${CI_SH}" assemble "${svc}"
+        fi
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+        case "${case}" in
+            assembled) grep -qxF -- "buildx imagetools create --tag ${itag}$(for d in "${digs[@]}"; do printf ' %s@%s' "${img}" "${d}"; done)" "${DS}/docker.log" ;;
+            backend-fail) grep -q '^buildx imagetools create ' "${DS}/docker.log" ;;
+            *) [ "$(grep -c '^buildx imagetools create ' "${DS}/docker.log")" -eq 0 ] ;;
+        esac || { echo "${case}: create calls: $(grep 'imagetools create' "${DS}/docker.log")"; return 1; }
+    done <<'CASES'
+unknown|UNKNOWN|none|yes|ok|2|[CI-ERROR-ASSEMBLE-0002];state="UNKNOWN"
+unverified|PRODUCED_UNVERIFIED|none|yes|ok|2|[CI-ERROR-ASSEMBLE-0002];state="PRODUCED_UNVERIFIED"
+missing|MISSING_CONFIRMED|none|yes|ok|2|[CI-ERROR-ASSEMBLE-0002];state="MISSING_CONFIRMED"
+mismatch|MISMATCH|none|yes|ok|2|[CI-ERROR-ASSEMBLE-0002];state="MISMATCH"
+assembled|PRESENT_ACCEPTED|none|yes|ok|0|result=assembled assembled=@IDX@ platforms=@N@
+reuse|PRESENT_ACCEPTED|same|yes|ok|0|result=reuse-index assembled=@IDX@ platforms=@N@
+divergent|PRESENT_ACCEPTED|divergent|yes|ok|2|[CI-ERROR-ASSEMBLE-0004]
+index-unknown|PRESENT_ACCEPTED|unknown|yes|ok|2|[CI-ERROR-ASSEMBLE-0007]
+noauth|PRESENT_ACCEPTED|none|no|ok|2|[CI-ERROR-BUILD-0002]
+backend-fail|PRESENT_ACCEPTED|none|yes|fail|2|[CI-ERROR-ASSEMBLE-0005]
+CASES
 }
 
 # =========================================================
@@ -9688,27 +9665,6 @@ EOF
     [[ "${output}" == *"CI-ERROR-SCAN-0012"* ]]
 }
 
-# What: default assemble writes one index, reads it back
-# Why: shared writer; the digest comes from the registry
-# From: Issue #1683 | PR #1858
-@test "assemble default merges digests into one sha index" {
-    local -A V=(
-        [@REG@]="$(_val host)" [@REPO@]="$(_val name)/$(_val name)" [@SVC@]="$(_val name)" [@SHA@]="$(_val sha)"
-        [@DA@]="$(_val digest)" [@DB@]="$(_val digest)" [@IDX@]="$(_val digest)" [@PA@]="$(_val platform)" [@PB@]="$(_val platform)"
-    )
-    local img="${V[@REG@]}/${V[@REPO@]}/${V[@SVC@]}"
-    _ci_registry() { printf '%s\n' "${V[@REG@]}"; }
-    _docker_answer ' buildx imagetools create *' 0
-    _docker_answer ' buildx imagetools inspect *' 0 "${V[@IDX@]}"
-    GITHUB_REPOSITORY="${V[@REPO@]}" GITHUB_SHA="${V[@SHA@]}" \
-        run _ci_docker_assemble "${V[@SVC@]}" "${V[@PA@]}=${V[@DA@]}" "${V[@PB@]}=${V[@DB@]}"
-    _expect assemble 0 "=${V[@IDX@]}" || return 1
-    grep -qF -- "buildx imagetools create --tag ${img}:sha-${V[@SHA@]} ${img}@${V[@DA@]} ${img}@${V[@DB@]}" "${DS}/docker.log" \
-        || { echo "create argv: $(cat "${DS}/docker.log")"; return 1; }
-    grep -qF -- "buildx imagetools inspect ${img}:sha-${V[@SHA@]} " "${DS}/docker.log" \
-        || { echo "no readback: $(cat "${DS}/docker.log")"; return 1; }
-}
-
 # What: bare repo + two host clones for real CAS tests.
 # Why: real git CAS proof, no live remote (AG-VAL-030).
 # From: Issue #1683 | PR #1858
@@ -9735,7 +9691,7 @@ _ledger_fresh() {
     export CI_GIT_REMOTE CI_LEDGER_REF CI_LEDGER_FILE
 }
 
-# What: one artifact state as ledger record + registry answer
+# What: one artifact state: ledger record + registry answer
 # Why: the real resolver reads both; no state is injected
 # From: Issue #1683 | PR #1858
 _artifact() {
