@@ -582,15 +582,14 @@ exit 0
 STUB
 }
 
-# What: real SOT targets: the name prod pulls, ref and tag.
-# Why: §15: CI must publish exactly what deploy/prod pulls.
+# What: SOT registry and run repo -> name, ref and tags
+# Why: §15: one name owner; prod pulls that registry too
 # From: Issue #1683 | PR #1858
 @test "image-ref builds the one registry service@digest form" {
-    local root reg pfx name svc tool plats keys p s dig id
+    local root reg envreg own repo name svc tool plats keys p s dig id
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    reg="$(awk -F= '$1 == "LANCACHE_IMAGE_REGISTRY" { print $2; exit }' "${root}/deploy/prod/.env")"
-    pfx="$(awk -F= '$1 == "LANCACHE_IMAGE_PREFIX" { print $2; exit }' "${root}/deploy/prod/.env")"
-    [ -n "${reg}" ] && [ -n "${pfx}" ] || { echo "deploy/prod/.env: registry '${reg}' prefix '${pfx}'"; return 1; }
+    reg="$(_ci_block_entry_field release "" registry)" || { echo "registry: ${reg}"; return 1; }
+    [ -n "${reg}" ] || { echo "no SOT release.registry"; return 1; }
     svc="$(_ci_block_keys services all)" || { echo "services: ${svc}"; return 1; }
     svc="${svc%%$'\n'*}"
     tool="$(_ci_block_keys build_toolchain all)" || { echo "build_toolchain: ${tool}"; return 1; }
@@ -598,8 +597,9 @@ STUB
     plats="$(_ci_block_entry_list build_matrix "" platforms)" || { echo "platforms: ${plats}"; return 1; }
     keys="$(_ci_block_keys platform_arch all)" || { echo "platform_arch: ${keys}"; return 1; }
     keys=" ${keys//$'\n'/ } "
-    name="${reg}/${pfx,,}" dig="$(_val digest)" id="$(_val sha)"
-    export GITHUB_REPOSITORY="${pfx^^}"
+    own="$(_val name)" repo="$(_val name)"
+    name="${reg}/${own}/${repo}" dig="$(_val digest)" id="$(_val sha)"
+    export GITHUB_REPOSITORY="${own^^}/${repo^}"
     run _ci_image_ref
     _expect prefix 0 "=${name}" || return 1
     run _ci_image_ref "${svc}"
@@ -619,6 +619,8 @@ STUB
     _norepo() { unset GITHUB_REPOSITORY; _ci_image_ref "$@"; }
     run _norepo "${svc}" "${dig}"
     _expect no-owner 2 '[CI-ERROR-CORE-0128] name="GITHUB_REPOSITORY"' || return 1
+    envreg="$(awk -F= '$1 == "LANCACHE_IMAGE_REGISTRY" { print $2; exit }' "${root}/deploy/prod/.env")"
+    [ "${envreg}" = "${reg}" ] || { echo "deploy/prod/.env registry '${envreg}' is not the SOT registry '${reg}'"; return 1; }
 }
 
 # =========================================================
