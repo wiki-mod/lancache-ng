@@ -275,7 +275,7 @@ teardown() {
     local -A V=(
         ["@SVC@"]="$(ci_services | awk 'NR == 1')" ["@TOOL@"]="$(_ci_block_keys build_toolchain | awk 'NR == 1')"
         ["@BAD@"]="$(_val name)" ["@FOREIGN@"]="$(_val platform)" ["@DIGEST@"]="$(_val digest)"
-        ["@USER@"]="$(_val name)" ["@TOKEN@"]="$(_val name)"
+        ["@USER@"]="$(_val name)" ["@TOKEN@"]="$(_val name)" ["@MISSING@"]="$(_val path)"
     )
     V["@PLAT@"]="$(_ci_platforms "${V["@SVC@"]}" | awk 'NR == 1')"
     [ -n "${V["@SVC@"]}" ] && [ -n "${V["@TOOL@"]}" ] && [ -n "${V["@PLAT@"]}" ] || { echo "inputs: ${V[*]}"; return 1; }
@@ -322,6 +322,8 @@ verify-platform|-|verify @SVC@ @DIGEST@|CI-ERROR-VERIFY-0004|-
 verify-auth|-|verify @SVC@ @DIGEST@ @PLAT@|CI-ERROR-BUILD-0002|-
 ship|-|ship|CI-ERROR-SHIP-0001|-
 ship-platform|-|ship @SVC@|CI-ERROR-SHIP-0001|-
+pr-title-missing|PR_TITLE= PR_AUTHOR=|check pr-title|CI-ERROR-CHECK-0012|-
+logging-matrix-root|-|check logging-matrix @MISSING@|CI-ERROR-CHECK-0035|-
 CASES
 }
 
@@ -1760,15 +1762,6 @@ CASES
     run validate_ui_session_ttl_seconds 86400 src
     [ "${status}" -eq 0 ]
     [ -z "${output}" ]
-}
-
-@test "check logging-matrix fails closed on a missing architecture doc" {
-    # What: a repo root with no docs/architecture-ng.md.
-    # Why: a missing input must never silently pass.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check logging-matrix "${BATS_TEST_TMPDIR}/nope"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0035"* ]]
 }
 
 @test "check entrypoint-lib-wiring passes clean and meaningfully on the real repo" {
