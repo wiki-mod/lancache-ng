@@ -233,6 +233,16 @@ pub fn canonical_zone(zone: &str) -> String {
     }
 }
 
+// What: the path of PowerDNS's API below a server address.
+// Why: ui and dns/entrypoint.sh append the same fixed path.
+pub const PDNS_API_PATH: &str = "/api/v1/servers/localhost";
+
+// What: URL of one zone below a PowerDNS API root.
+// Why: a trailing dot in the path is a silent 404.
+pub fn zone_url(api_root: &str, zone: &str) -> String {
+    format!("{api_root}/zones/{}", zone_api_id(zone))
+}
+
 // What: zone name as PowerDNS's HTTP API path spells it.
 // Why: the API id has no trailing root dot.
 pub fn zone_api_id(zone: &str) -> &str {
@@ -364,5 +374,19 @@ mod tests {
         assert!(need(&get, "EMPTY").is_err() && need(&get, "ABSENT").is_err());
         assert_eq!(need_flag(&get, "ON"), Ok(true));
         assert!(need_flag(&get, "JUNK").is_err() && need_flag(&get, "ABSENT").is_err());
+    }
+
+    // What: zone_url drops the trailing dot of the zone.
+    // Why: a dotted zone in the API path is a silent 404.
+    #[test]
+    fn zone_url_uses_the_undotted_id() {
+        assert_eq!(
+            zone_url("http://pdns/api", "lan."),
+            "http://pdns/api/zones/lan"
+        );
+        assert_eq!(
+            zone_url("http://pdns/api", "lan"),
+            "http://pdns/api/zones/lan"
+        );
     }
 }

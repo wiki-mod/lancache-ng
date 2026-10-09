@@ -496,6 +496,66 @@ fn log_text(mut bytes: &[u8]) -> String {
     text
 }
 
+// What: client of PowerDNS's HTTP API, carrying the API key.
+// Why: ui and nats-subscriber call the API the same way.
+pub struct PowerDns {
+    http: reqwest::Client,
+    api_key: String,
+}
+
+impl PowerDns {
+    // What: a client over an HTTP client and the API key.
+    // Why: the key is read once by the owner of the service.
+    pub fn new(http: reqwest::Client, api_key: String) -> Self {
+        Self { http, api_key }
+    }
+
+    // What: the API key, for the callers that check it.
+    // Why: the same key guards the rollback listener.
+    pub fn api_key(&self) -> &str {
+        &self.api_key
+    }
+
+    // What: one API call carrying the key and a JSON body.
+    // Why: every call site shares the auth and JSON headers.
+    pub async fn call(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        body: Option<String>,
+    ) -> Result<reqwest::Response, String> {
+        let mut request = self
+            .http
+            .request(method, url)
+            .header("X-API-Key", &self.api_key);
+        if let Some(body) = body {
+            request = request
+                .header("Content-Type", "application/json")
+                .body(body);
+        }
+        request.send().await.map_err(|e| e.to_string())
+    }
+
+    // What: the rrsets of one zone, or the reason there are none.
+    // Why: an error body must not read as an empty zone.
+    pub async fn zone_rrsets(&self, api_root: &str, zone: &str) -> Result<Vec<Value>, String> {
+        let url = config::zone_url(api_root, zone);
+        let response = self.call(reqwest::Method::GET, &url, None).await?;
+        if !response.status().is_success() {
+            return Err(format!("PowerDNS returned {}", response.status()));
+        }
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| format!("cannot decode the zone export: {e}"))?;
+        Ok(body
+            .get("rrsets")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+}
+
 // What: client of the allowlisted Docker calls of the proxy.
 // Why: ui and watchdog drive containers; one client owns it.
 // From: Issue #1683 | PR #1858

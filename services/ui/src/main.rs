@@ -23,15 +23,15 @@ use futures_util::StreamExt as _;
 use lancache_ng::config::{
     self, CONTAINER_DHCP, CONTAINER_DHCP_PROBE, CONTAINER_DHCP_PROXY, CONTAINER_DNS_SSL,
     CONTAINER_DNS_STANDARD, CONTAINER_NATS, CONTAINER_NETDATA, CONTAINER_NTP, CONTAINER_PROXY,
-    CONTAINER_SYSLOG, CONTAINER_UI, DhcpMode, NATS_STREAM_DNS, NATS_SUBJECT_DNS,
-    NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, OutOfRange, Uint, canonical_zone, parse_bool,
-    rollback_zones, zone_api_id,
+    CONTAINER_SYSLOG, CONTAINER_UI, DhcpMode, LAN_ZONE, NATS_STREAM_DNS, NATS_SUBJECT_DNS,
+    NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, OutOfRange, PDNS_API_PATH, Uint, canonical_zone,
+    parse_bool, rollback_zones, zone_url,
 };
 use lancache_ng::{
     DesiredRunState, DesiredState, DnsRecord, DockerError, DockerProxy, FlushRequest, Place,
-    SnapshotStore, WatchdogStatus, ct_eq, df, die, http_client, is_placeholder, load_or_create,
-    load_or_create_hex, snapshot_created_unix, unix_secs, write_file, write_file_as,
-    write_if_changed,
+    PowerDns, SnapshotStore, WatchdogStatus, ct_eq, df, die, http_client, is_placeholder,
+    load_or_create, load_or_create_hex, snapshot_created_unix, unix_secs, write_file,
+    write_file_as, write_if_changed,
 };
 use nkeys::{KeyPair, XKey};
 use regex::Regex;
@@ -156,8 +156,8 @@ struct Config {
     security_headers_enabled: bool,
     hsts_mode: HstsMode,
     ui_logs_max_entries: usize,
-    pdns_auth_url: String,
-    pdns_rec_url: String,
+    pdns_auth_api: String,
+    pdns_rec_api: String,
     dns_rollback_url: String,
     pdns_api_key: String,
     netdata_alarm_token: String,
@@ -367,8 +367,8 @@ impl Config {
             },
             ui_logs_max_entries: knob("UI_LOGS_MAX_ENTRIES", u64::MAX, OutOfRange::Reject)?
                 as usize,
-            pdns_auth_url: need("PDNS_AUTH_URL")?,
-            pdns_rec_url: need("PDNS_REC_URL")?,
+            pdns_auth_api: format!("{}{PDNS_API_PATH}", need("PDNS_AUTH_URL")?),
+            pdns_rec_api: format!("{}{PDNS_API_PATH}", need("PDNS_REC_URL")?),
             dns_rollback_url: need("DNS_ROLLBACK_URL")?,
             pdns_api_key: secret("PDNS_API_KEY")?,
             netdata_alarm_token: secret("NETDATA_ALARM_TOKEN")?,
@@ -714,6 +714,7 @@ struct AppState {
     config: Config,
     docker: DockerProxy,
     http_client: reqwest::Client,
+    pdns: PowerDns,
     file_lock: Mutex<()>,
     netdata_alarms_lock: Mutex<()>,
     kea_config_lock: tokio::sync::Mutex<()>,
@@ -5574,18 +5575,10 @@ async fn flush_recursor_cache(state: &AppState, request: FlushRequest) {
     let query = form_urlencoded::Serializer::new(String::new())
         .append_pair("domain", &domain)
         .finish();
-    let url = format!(
-        "{}/api/v1/servers/localhost/cache/flush?{query}",
-        state.config.pdns_rec_url
-    );
+    let url = format!("{}/cache/flush?{query}", state.config.pdns_rec_api);
     // What: ignore a failed flush; entries expire anyway.
     // Why: the record change itself already happened.
-    let _ = state
-        .http_client
-        .put(&url)
-        .header("X-API-Key", &state.config.pdns_api_key)
-        .send()
-        .await;
+    let _ = state.pdns.call(reqwest::Method::PUT, &url, None).await;
     let request = FlushRequest { domain, ..request };
     if let Ok(payload) = serde_json::to_vec(&request) {
         let _ = state.nats.publish(NATS_SUBJECT_FLUSH, payload.into()).await;
@@ -5612,65 +5605,24 @@ async fn restart_ssl(state: &AppState) {
     }
 }
 
-// What: call PowerDNS's zone API on the primary.
-// Why: zones are addressed by name without the trailing dot.
-async fn pdns_zone(
-    state: &AppState,
-    method: reqwest::Method,
-    zone: &str,
-    body: Option<String>,
-) -> reqwest::Result<reqwest::Response> {
-    let url = format!(
-        "{}/api/v1/servers/localhost/zones/{}",
-        state.config.pdns_auth_url,
-        zone_api_id(zone)
-    );
-    let mut request = state
-        .http_client
-        .request(method, url)
-        .header("X-API-Key", &state.config.pdns_api_key);
-    if let Some(body) = body {
-        request = request
-            .header("Content-Type", "application/json")
-            .body(body);
-    }
-    request.send().await
-}
-
-// What: the rrsets of one zone, or the reason there are none.
-// Why: an error body must not read as an empty zone.
-async fn zone_rrsets(state: &AppState, zone: &str) -> Result<Vec<Value>, String> {
-    let response = pdns_zone(state, reqwest::Method::GET, zone, None)
-        .await
-        .map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("PowerDNS returned {}", response.status()));
-    }
-    let data: Value = response.json().await.map_err(|e| e.to_string())?;
-    Ok(data
-        .get("rrsets")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default())
-}
-
 // What: a LAN record name as a dotted FQDN in zone lan.
 // Why: the bare name "lan" is the zone root, not lan.lan.
 fn normalize_lan_name(name: &str) -> String {
     let name = name.trim().to_lowercase();
     if name.ends_with('.') {
         name
-    } else if name == "lan" || name.ends_with(".lan") {
+    } else if name == LAN_ZONE || name.ends_with(&format!(".{LAN_ZONE}")) {
         format!("{name}.")
     } else {
-        format!("{name}.lan.")
+        format!("{name}.{LAN_ZONE}.")
     }
 }
 
 // What: true for an FQDN inside the lan zone.
 // Why: the ui may only touch records of its own zone.
 fn is_lan_name(name: &str, underscore: bool) -> bool {
-    is_fqdn(name, underscore, true) && (name == "lan." || name.ends_with(".lan."))
+    let zone = canonical_zone(LAN_ZONE);
+    is_fqdn(name, underscore, true) && (name == zone || name.ends_with(&format!(".{zone}")))
 }
 
 // What: type and content of a valid LAN record, or None.
@@ -5752,7 +5704,12 @@ fn normalize_ptr_target(hostname: &str) -> Option<String> {
 // Why: manual PTRs go straight to the primary's PowerDNS.
 // From: Issue #1077
 async fn patch_reverse_zone(state: &AppState, zone: &str, body: Value) -> bool {
-    match pdns_zone(state, reqwest::Method::PATCH, zone, Some(body.to_string())).await {
+    let url = zone_url(&state.config.pdns_auth_api, zone);
+    match state
+        .pdns
+        .call(reqwest::Method::PATCH, &url, Some(body.to_string()))
+        .await
+    {
         Ok(response) => response.status().is_success(),
         Err(e) => {
             tracing::error!("PTR PATCH to reverse zone {zone} failed: {e}");
@@ -5801,11 +5758,14 @@ async fn fetch_ptr_records(state: &AppState) -> Vec<PtrRow> {
     let zones = rollback_zones()
         .into_iter()
         .filter(|zone| zone.ends_with(".in-addr.arpa."));
-    let per_zone =
-        futures_util::future::join_all(zones.map(|zone| async move {
-            ptr_rows(&zone_rrsets(state, &zone).await.unwrap_or_default())
-        }))
-        .await;
+    let per_zone = futures_util::future::join_all(zones.map(|zone| async move {
+        let rrsets = state
+            .pdns
+            .zone_rrsets(&state.config.pdns_auth_api, &zone)
+            .await;
+        ptr_rows(&rrsets.unwrap_or_default())
+    }))
+    .await;
     let mut rows: Vec<PtrRow> = per_zone.into_iter().flatten().collect();
     rows.sort_by(|a, b| {
         a.sort_key
@@ -5924,7 +5884,9 @@ async fn domains_page(
     let rows = domain_rows(&fs::read_to_string(&cfg.cdn_domains_file).unwrap_or_default());
     let (lan, ptr, groups) = tokio::join!(
         async {
-            zone_rrsets(&state, "lan")
+            state
+                .pdns
+                .zone_rrsets(&state.config.pdns_auth_api, LAN_ZONE)
                 .await
                 .map(|sets| {
                     sets.into_iter()
@@ -6049,7 +6011,7 @@ async fn add_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect
     };
     let record = DnsRecord {
         action: "replace".into(),
-        zone: "lan".into(),
+        zone: LAN_ZONE.into(),
         name: name.clone(),
         record_type: kind.into(),
         ttl: Some(ttl as i32),
@@ -6062,7 +6024,7 @@ async fn add_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect
         tracing::error!("NATS publish failed: {e}");
     }
     let request = FlushRequest {
-        zone: Some("lan".into()),
+        zone: Some(LAN_ZONE.into()),
         record_type: Some(kind.into()),
         expected_content: Some(vec![content]),
         expected_ttl: Some(ttl as i32),
@@ -6085,7 +6047,7 @@ async fn remove_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redir
     };
     let record = DnsRecord {
         action: "delete".into(),
-        zone: "lan".into(),
+        zone: LAN_ZONE.into(),
         name: name.clone(),
         record_type: kind.clone(),
         ttl: None,
@@ -6095,7 +6057,7 @@ async fn remove_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redir
         tracing::error!("NATS publish failed: {e}");
     }
     let request = FlushRequest {
-        zone: Some("lan".into()),
+        zone: Some(LAN_ZONE.into()),
         record_type: Some(kind),
         ..flush_name(&name)
     };
@@ -7250,10 +7212,12 @@ async fn run() -> anyhow::Result<()> {
     let issuer = issuer_keypair(&cfg).unwrap_or_else(|e| container_start_fatal(&e));
     let xkey = callout_xkey(&cfg).unwrap_or_else(|e| container_start_fatal(&e));
     let nats = connect_nats_with_retry(&cfg).await;
+    let http = http_client()?;
     let state = Arc::new(AppState {
         templates: load_templates(&cfg),
         docker: DockerProxy::new(&cfg.docker_proxy_url),
-        http_client: http_client()?,
+        http_client: http.clone(),
+        pdns: PowerDns::new(http, cfg.pdns_api_key.clone()),
         file_lock: Mutex::new(()),
         netdata_alarms_lock: Mutex::new(()),
         kea_config_lock: tokio::sync::Mutex::new(()),

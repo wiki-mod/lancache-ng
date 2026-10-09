@@ -22,11 +22,11 @@ use futures::future::join_all;
 use lancache_ng::config::{
     LAN_ZONE, NATS_STREAM_DNS, NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD,
     OutOfRange, Uint, canonical_zone, env_opt, is_rollback_zone, need, parse_bool, process_env,
-    rollback_zones, zone_api_id,
+    rollback_zones, zone_url,
 };
 use lancache_ng::{
-    DnsRecord, FlushRequest, SnapshotStore, ct_eq, die, http_client, snapshot_created_unix,
-    unix_nanos,
+    DnsRecord, FlushRequest, PowerDns, SnapshotStore, ct_eq, die, http_client,
+    snapshot_created_unix, unix_nanos,
 };
 use reqwest::Method;
 use serde::Deserialize;
@@ -50,8 +50,7 @@ const CONFIRM_MAX_DELIVERIES: i64 = 100;
 // What: state shared by the consumer and the helper tasks.
 // Why: one lock orders zone writes, snapshots and rollbacks.
 struct Ctx {
-    http: reqwest::Client,
-    api_key: String,
+    pdns: PowerDns,
     // What: authoritative and recursor API roots, auth config dir.
     // Why: dns/entrypoint.sh owns the layout and exports it.
     pdns_auth_url: String,
@@ -71,44 +70,11 @@ impl Ctx {
         SnapshotStore::new(root, "zone.json", "dns")
     }
 
-    // What: PowerDNS API URL of a zone, dotted or not.
-    // Why: a trailing dot in the path is a silent 404.
-    fn zone_url(&self, zone: &str) -> String {
-        format!("{}/zones/{}", self.pdns_auth_url, zone_api_id(zone))
-    }
-
-    // What: one PowerDNS API call carrying the API key.
-    // Why: every call site shares the auth and JSON headers.
-    async fn pdns(
-        &self,
-        method: Method,
-        url: &str,
-        body: Option<String>,
-    ) -> Result<reqwest::Response, String> {
-        let mut request = self
-            .http
-            .request(method, url)
-            .header("X-API-Key", &self.api_key);
-        if let Some(body) = body {
-            request = request
-                .header("Content-Type", "application/json")
-                .body(body);
-        }
-        request.send().await.map_err(|e| e.to_string())
-    }
-
-    // What: the rrsets array of one zone, as PowerDNS exports.
+    // What: the rrsets array of one zone, as a JSON array.
     // Why: snapshots, rollback and the reconciler read it.
     async fn zone_rrsets(&self, zone: &str) -> Result<Value, String> {
-        let response = self.pdns(Method::GET, &self.zone_url(zone), None).await?;
-        if !response.status().is_success() {
-            return Err(format!("PowerDNS returned {}", response.status()));
-        }
-        let body: Value = response
-            .json()
-            .await
-            .map_err(|e| format!("cannot decode the zone export: {e}"))?;
-        Ok(body.get("rrsets").cloned().unwrap_or_else(|| json!([])))
+        let rrsets = self.pdns.zone_rrsets(&self.pdns_auth_url, zone).await;
+        rrsets.map(Value::Array)
     }
 }
 
@@ -410,12 +376,13 @@ async fn apply_record(
     // Why: a rollback must not diff data this write replaces.
     let sent = {
         let _guard = ctx.lock.lock().await;
-        ctx.pdns(
-            Method::PATCH,
-            &ctx.zone_url(&record.zone),
-            Some(body.to_string()),
-        )
-        .await
+        ctx.pdns
+            .call(
+                Method::PATCH,
+                &zone_url(&ctx.pdns_auth_url, &record.zone),
+                Some(body.to_string()),
+            )
+            .await
     };
     let (zone, name, kind) = (&record.zone, &record.name, &record.record_type);
     let status = match sent {
@@ -444,7 +411,12 @@ async fn apply_record(
     // What: tell secondaries to pull the zone.
     // Why: AXFR consumers would stay stale until a later check.
     let notify = ctx
-        .pdns(Method::PUT, &format!("{}/notify", ctx.zone_url(zone)), None)
+        .pdns
+        .call(
+            Method::PUT,
+            &format!("{}/notify", zone_url(&ctx.pdns_auth_url, zone)),
+            None,
+        )
         .await;
     if !notify.is_ok_and(|response| response.status().is_success()) {
         eprintln!("PDNS notify failed (will retry) for zone={zone}");
@@ -542,7 +514,7 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
         }
     }
     let url = format!("{}/cache/flush?domain={domain}", ctx.pdns_rec_url);
-    match ctx.pdns(Method::PUT, &url, None).await {
+    match ctx.pdns.call(Method::PUT, &url, None).await {
         Ok(response) if response.status().is_success() => {
             println!("Flushed PDNS cache");
             Outcome::Ack
@@ -599,7 +571,7 @@ fn failure(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<
 // What: GET /snapshots: ids and times per managed zone.
 // Why: the ui lists them newest first for the operator.
 async fn list_snapshots(State(ctx): State<Arc<Ctx>>, headers: HeaderMap) -> Response {
-    if !authorized(&headers, &ctx.api_key) {
+    if !authorized(&headers, ctx.pdns.api_key()) {
         return failure(StatusCode::UNAUTHORIZED, "missing or invalid X-API-Key").into_response();
     }
     let mut zones = HashMap::new();
@@ -721,7 +693,12 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
     let patch_len = patch["rrsets"].as_array().map_or(0, Vec::len);
     if patch_len > 0 {
         let sent = ctx
-            .pdns(Method::PATCH, &ctx.zone_url(&zone), Some(patch.to_string()))
+            .pdns
+            .call(
+                Method::PATCH,
+                &zone_url(&ctx.pdns_auth_url, &zone),
+                Some(patch.to_string()),
+            )
             .await;
         let rejected = match sent {
             Ok(response) if response.status().is_success() => None,
@@ -809,7 +786,7 @@ async fn rollback_handler(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if !authorized(&headers, &ctx.api_key) {
+    if !authorized(&headers, ctx.pdns.api_key()) {
         return failure(StatusCode::UNAUTHORIZED, "missing or invalid X-API-Key").into_response();
     }
     let request: RollbackRequest = match serde_json::from_slice(&body) {
@@ -931,8 +908,7 @@ async fn main() {
     let http =
         http_client().unwrap_or_else(|e| die(TAG, &format!("cannot build HTTP client: {e}")));
     let ctx = Arc::new(Ctx {
-        http,
-        api_key,
+        pdns: PowerDns::new(http, api_key),
         pdns_auth_url: required("PDNS_AUTH_API_URL"),
         pdns_rec_url: required("PDNS_REC_API_URL"),
         pdns_auth_config_dir: required("PDNS_AUTH_CONFIG_DIR"),
