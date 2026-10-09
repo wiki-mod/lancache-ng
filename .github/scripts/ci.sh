@@ -5087,7 +5087,7 @@ ci_cmd_release_vex() {
             printf 'release=vex-unchanged tag=%s\n' "${tag}"
             return 0
         fi
-        ci_error "[CI-ERROR-RELEASE-0047]" "tag=\"${tag}\" reason=\"attached VEX differs from the derived one; CI never replaces it\"" "$(diff -u "${adir}/${out##*/}" "${out}" 2>&1 | head -40)"
+        ci_error "[CI-ERROR-RELEASE-0047]" "tag=\"${tag}\" reason=\"attached VEX differs from the derived one; CI never replaces it\"" "$(diff -u "${adir}/${out##*/}" "${out}" 2>&1)"
         rm -rf "${dir}"
         return 2
     fi
