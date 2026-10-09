@@ -2151,25 +2151,46 @@ CASES
         || { echo "no-git: rc ${status}: ${output}"; return 1; }
 }
 
+# What: own state dirs stay; defaults drop; broken ones heal
+# Why: AG-OP-009 keeps overrides; AG-OP-007 converges once
+# From: Issue #1683 | PR #1858
 @test "migrate_env_for_update preserves all custom per-service state dirs" {
     _stand_ins || return 1
-    # What: an operator's own per-service state dir survives
-    # Why: AG-OP-009 override preservation
-    # From: Issue #1683 | PR #1858
-    local root d keys k
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    d="${BATS_TEST_TMPDIR}/custom/deploy/prod"
-    _converged_install "${d}" || return 1
-    keys="$(prod_state_keys | grep -vx CACHE_DIR)"
-    while IFS= read -r k; do set_env_key "${k}" "${BATS_TEST_TMPDIR}/own/${k}" "${d}/.env"; done <<< "${keys}"
-    for _ in 1 2; do
+    local d keys k first tv
+    local -A own
+    _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
+    _state_row() { d="${BATS_TEST_TMPDIR}/$1/deploy/prod"; _converged_install "${d}"; }
+    _state_run() {
         _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
-        [ "${status}" -eq 0 ] || { echo "migrate: ${output}"; return 1; }
+        [ "${status}" -eq 0 ] || { echo "$1: rc ${status}: ${output}"; return 1; }
+    }
+    _state_row own || return 1
+    keys="$(prod_state_keys | grep -vx CACHE_DIR)" first="${keys%%$'\n'*}"
+    [ -n "${first}" ] || { echo "no state keys"; return 1; }
+    while IFS= read -r k; do own["${k}"]="$(_val path)"; set_env_key "${k}" "${own[${k}]}" "${d}/.env"; done <<< "${keys}"
+    for _ in 1 2; do
+        _state_run own || return 1
         while IFS= read -r k; do
-            [ "$(get_env_var "${k}" "${d}/.env")" = "${BATS_TEST_TMPDIR}/own/${k}" ] || { echo "${k} lost"; return 1; }
+            [ "$(get_env_var "${k}" "${d}/.env")" = "${own[${k}]}" ] || { echo "own: ${k} lost"; return 1; }
         done <<< "${keys}"
     done
+    _state_row templated || return 1
+    tv="\${LANCACHE_STATE_DIR}/$(_val name)"
+    set_env_assignment "${first}" "${tv}" "${d}/.env"
+    _state_run templated || return 1
+    [ "$(get_env_assignment_value_raw "${first}" "${d}/.env")" = "${tv}" ] \
+        || { echo "templated: ${first}=$(get_env_assignment_value_raw "${first}" "${d}/.env")"; return 1; }
+    _state_row default || return 1
+    set_env_key "${first}" "$(get_env_var LANCACHE_STATE_DIR "${d}/.env")/$(prod_state_subdir "${first}")" "${d}/.env"
+    _state_run default || return 1
+    ! env_key_exists "${first}" "${d}/.env" || { echo "default: ${first} kept"; return 1; }
+    _state_row broken || return 1
+    set_env_key "${first}" "$(_val int 1 99)" "${d}/.env"
+    _state_run broken || return 1
+    ! env_key_exists "${first}" "${d}/.env" || { echo "broken: ${first}=$(get_env_var "${first}" "${d}/.env")"; return 1; }
+    cp "${d}/.env" "${d}/env.run1"
+    _state_run broken-rerun || return 1
+    cmp -s "${d}/env.run1" "${d}/.env" || { echo "broken: run 2 changed .env"; return 1; }
 }
 
 @test "migrate_env_for_update drops a per-service state dir equal to the one-root default" {
