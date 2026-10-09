@@ -1481,9 +1481,9 @@ ci_cmd_resolve() {
 # RETRY CLASSIFIER
 # =========================================================
 
-# What: Classify a failure: transient, permanent, not_found.
-# Why: not_found enables build; other types stay final.
-# From: Issue #1683
+# What: Classify a failure per op into its retry class.
+# Why: one classifier decides retry, re-read, build or fail.
+# From: Issue #1683 | PR #1858
 _ci_classify_failure() {
     local raw="$1" op="${2:-registry}" low
     # What: lowercased match surface for the whole function.
@@ -1520,6 +1520,24 @@ _ci_classify_failure() {
             *) printf 'permanent\n' ;;
         esac
         return 0
+    fi
+    # What: op=validate-net: pool/address contention only.
+    # Why: a slot collision is no image or config failure.
+    # From: Issue #1683 | PR #1858
+    if [ "${op}" = validate-net ]; then
+        case "${low}" in
+            *"pool overlaps"*|*"already in use"*) printf 'collision\n' ;;
+            *) printf 'permanent\n' ;;
+        esac
+        return 0
+    fi
+    # What: op=cas-push: a moved ref is a race to re-read.
+    # Why: a lost ref race heals by a re-read, not a retry.
+    # From: Issue #1683 | PR #1858
+    if [ "${op}" = cas-push ]; then
+        case "${low}" in
+            *non-fast-forward*|*"failed to push some refs"*|*"cannot lock ref"*|*"stale info"*|*"fetch first"*|*rejected*) printf 'race\n'; return 0 ;;
+        esac
     fi
     # What: a genuinely missing registry artifact.
     # Why: only not_found may drive a build; auth may not.
@@ -1641,16 +1659,6 @@ _ci_cas_note_commit() {
     _ci_capture 0 _ci_git_as_bot commit-tree "${CI_CAS_EMPTY_TREE}" -m "$1"
 }
 
-# What: Classify a failed CAS push: race vs real fail.
-# Why: A moved ref means re-read, not a plain retry.
-# From: Issue #1683
-_ci_cas_push_class() {
-    case "$1" in
-        *non-fast-forward*|*"failed to push some refs"*|*"cannot lock ref"*|*"stale info"*|*"fetch first"*|*rejected*) printf 'race\n' ;;
-        *) _ci_classify_failure "$1" ;;
-    esac
-}
-
 # What: One non-blocking lock acquisition attempt.
 # Why: Create or stale-takeover, both atomic server-side.
 # From: Issue #1683
@@ -1698,7 +1706,7 @@ _ci_lock_try() {
 # From: Issue #1683 | PR #1858
 _ci_cas_push_failed() {
     local kind="$1" ref="$2" rc="$3" raw="$4"
-    if [ "$(_ci_cas_push_class "${raw}")" = race ]; then
+    if [ "$(_ci_classify_failure "${raw}" cas-push)" = race ]; then
         ci_error "[CI-INFO-CAS-0005]" "kind=${kind} ref=\"${ref}\" rc=${rc} reason=\"ref moved; re-read\"" "${raw}"
         return 2
     fi
@@ -6049,16 +6057,6 @@ _ci_validate_network_gone() {
     return 2
 }
 
-# What: True for a retryable subnet collision.
-# Why: Distinct from a real image/config fail.
-# From: Issue #1683 | PR #1858
-_ci_validate_is_collision() {
-    case "$1" in
-        *"Pool overlaps"*|*"already in use"*) return 0 ;;
-    esac
-    return 1
-}
-
 # What: Tear the stack down and free the slot.
 # Why: One cleanup point; runs on the fail path.
 # From: Issue #1683 | PR #1858
@@ -7152,7 +7150,7 @@ _ci_validate_stack() {
         if up_out="$(_ci_validate_up "${project}" "${net_ovr}" "${pin_ovr}" 2>&1)"; then
             _ci_validate_wait_healthy "${project}" || rc=$?
             [ "${rc}" -eq 0 ] && { _ci_validate_probes "${project}" "${net_ovr}" "${pin_ovr}" || rc=$?; }
-        elif _ci_validate_is_collision "${up_out}"; then
+        elif [ "$(_ci_classify_failure "${up_out}" validate-net)" = collision ]; then
             ci_error "[CI-ERROR-VALIDATE-0016]" "reason=\"subnet/port collision after slot reservation\"" "${up_out}"
             rc=1
         else
