@@ -1049,7 +1049,7 @@ mod tests {
     // Why: an unknown action must not reach PowerDNS.
     #[test]
     fn patch_body_covers_replace_delete_and_unknown() {
-        let content = HashMap::from([("content".to_string(), json!("10.0.0.5"))]);
+        let content = HashMap::from([("content".to_string(), json!("192.0.2.5"))]);
         let replace = patch_body(&message("replace", Some(3600), Some(vec![content]))).unwrap();
         let first = &replace["rrsets"][0];
         assert_eq!(first["changetype"], "REPLACE");
@@ -1058,7 +1058,7 @@ mod tests {
                 first["ttl"].as_i64(),
                 first["records"][0]["content"].as_str()
             ),
-            (Some(3600), Some("10.0.0.5"))
+            (Some(3600), Some("192.0.2.5"))
         );
         let defaulted = patch_body(&message("replace", None, Some(vec![]))).unwrap();
         assert_eq!(defaulted["rrsets"][0]["ttl"], 300);
@@ -1101,8 +1101,8 @@ mod tests {
     // From: Issue #1095
     #[test]
     fn expected_content_confirmation_rules() {
-        let found = rrset("host.lan.", "A", 60, &["10.0.0.6", "10.0.0.5"]);
-        let both = ["10.0.0.5".to_string(), "10.0.0.6".to_string()];
+        let found = rrset("host.lan.", "A", 60, &["192.0.2.6", "192.0.2.5"]);
+        let both = ["192.0.2.5".to_string(), "192.0.2.6".to_string()];
         assert!(rrset_matches_expected(None, None, "A", None));
         assert!(!rrset_matches_expected(Some(&found), None, "A", None));
         assert!(!rrset_matches_expected(None, Some(&both), "A", None));

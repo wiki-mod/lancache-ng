@@ -238,8 +238,10 @@ impl Config {
         let proxy_service = or("PROXY_SERVICE", "proxy");
         let standard_log = or("STANDARD_LOG", "/var/log/nginx/access.log");
         let proxy_standard_url = or("PROXY_STANDARD_URL", &format!("http://{proxy_service}"));
-        let standard_ip = text("STANDARD_IP", "192.168.234.10");
-        let ssl_ip = text("SSL_IP", "192.168.234.11");
+        // What: both proxy addresses must come from the operator.
+        // Why: no LAN address may be hardcoded (AG-SEC-007).
+        let standard_ip = set("STANDARD_IP").ok_or("STANDARD_IP must be set")?;
+        let ssl_ip = set("SSL_IP").ok_or("SSL_IP must be set")?;
         let tag = text("LANCACHE_IMAGE_TAG", "latest");
         let channel = set("LANCACHE_IMAGE_CHANNEL")
             .filter(|v| !v.trim().is_empty())
@@ -3690,7 +3692,7 @@ fn is_valid_boot_filename(raw: &str) -> bool {
 // Why: pool, gateway and subnet depend on each other.
 fn validate_subnet(f: &Fields) -> Result<(u32, (u32, u32)), &'static str> {
     let cidr = parse_cidr(f.get("subnet"))
-        .ok_or("Invalid subnet: use a network such as 192.168.1.0/24 with host bits zero.")?;
+        .ok_or("Invalid subnet: use a network such as 198.51.100.0/24 with host bits zero.")?;
     let address = |key: &str, message: &'static str| ipv4(f.get(key)).ok_or(message);
     let start = address("pool_start", "Invalid pool start address.")?;
     let end = address("pool_end", "Invalid pool end address.")?;

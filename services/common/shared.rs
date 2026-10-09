@@ -672,10 +672,10 @@ mod tests {
         assert!(wire.get("ttl").is_none() && wire.get("records").is_none());
         let old: FlushRequest = serde_json::from_str(r#"{"domain":"host.lan."}"#).unwrap();
         assert_eq!((old.zone, old.expected_content), (None, None));
-        let full = r#"{"domain":"h.lan.","zone":"lan","record_type":"A","expected_content":["10.0.0.5"],"expected_ttl":60}"#;
+        let full = r#"{"domain":"h.lan.","zone":"lan","record_type":"A","expected_content":["192.0.2.5"],"expected_ttl":60}"#;
         let req: FlushRequest = serde_json::from_str(full).unwrap();
         assert_eq!(req.expected_ttl, Some(60));
-        assert_eq!(req.expected_content, Some(vec!["10.0.0.5".to_string()]));
+        assert_eq!(req.expected_content, Some(vec!["192.0.2.5".to_string()]));
     }
 
     // What: an id yields its second; non-numbers yield none.
