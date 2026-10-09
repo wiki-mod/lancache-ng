@@ -2071,25 +2071,24 @@ _legacy_env() {
         || { echo "collapse: $(grep '^PROXY_SECURITY_MODE=' "${t}/.env")"; return 1; }
 }
 
+# What: hand edits move to .env; bad ones change nothing
+# Why: AG-OP-009 edits survive; the checkout stays clean
+# From: Issue #1683 | PR #1858
 @test "migrate_env_for_update keeps config/prod values per row" {
     _stand_ins || return 1
-    # What: hand edits move to .env; bad ones change nothing
-    # Why: AG-OP-009 edits survive; the checkout stays clean
-    # From: Issue #1683 | PR #1858
-    local root ip srv srv2 net bios mode name extra init envw edit want kv msg base pd cpe
+    local root ip srv srv2 net bios bad mode=dnsmasq-proxy name extra init envw edit want kv msg base pd cpe
     local -a kvs
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
+    _load_setup_sh "${root}" || return 1
     ip="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")" net="${ip%.*}"
-    srv="${net}.$(( (${ip##*.} + 1) % 255 ))" srv2="${net}.$(( (${ip##*.} + 2) % 255 ))" bios="b${BATS_TEST_NUMBER}.0"
-    mode="$(declare -f migrate_env_for_update)"
-    mode="$(awk '/^ *[a-z-]+\)$/ { a = $1 } /neither DHCP_PROXY_PXE_BOOT_FILENAME_BIOS/ && !m { sub(/\)$/, "", a); m = a } END { print m }' <<< "${mode}")"
-    [ -n "${ip}" ] && is_valid_dhcp_mode "${mode}" || { echo "inputs: ${ip} ${mode}"; return 1; }
+    srv="${net}.$(( (${ip##*.} + 1) % 255 ))" srv2="${net}.$(( (${ip##*.} + 2) % 255 ))"
+    bios="$(_val name).0" bad="$(_val host)"
+    [ -n "${ip}" ] && is_valid_dhcp_mode "${mode}" || { echo "inputs: ip '${ip}', mode ${mode}"; return 1; }
     _cp_install() {
         base="${BATS_TEST_TMPDIR}/${1}" pd="${BATS_TEST_TMPDIR}/${1}/deploy/prod" cpe="${BATS_TEST_TMPDIR}/${1}/config/prod/dhcp-proxy.env"
         _prod_install "${pd}" || return 1
-        git -C "${base}" init -q && git -C "${base}" add config
-        git -C "${base}" -c user.email=t@t -c user.name=t commit -qm template
+        [ "${2:-}" = nogit ] || { git -C "${base}" init -q && git -C "${base}" add config \
+            && git -C "${base}" -c user.email=t@t -c user.name=t commit -qm template; } || return 1
         _legacy_env "${pd}/.env"
         export CONV="${pd}"
     }
@@ -2131,8 +2130,25 @@ CASES
             || { echo "${name}: rc ${status}: ${output}"; return 1; }
     done <<CASES
 incomplete-pair|DHCP_MODE=${mode};DHCP_SUBNET_START=${net}.0;DHCP_DNS_PRIMARY=${ip};UPSTREAM_DHCP_IP=${srv}|DHCP_PROXY_PXE_BOOT_SERVER=${srv}|neither DHCP_PROXY_PXE_BOOT_FILENAME_BIOS nor DHCP_PROXY_PXE_BOOT_FILENAME_UEFI is
-invalid-value|DHCP_MODE=${mode};DHCP_SUBNET_START=${net}.0;DHCP_DNS_PRIMARY=${ip};UPSTREAM_DHCP_IP=${srv}|DHCP_PROXY_ROUTER=x${BATS_TEST_NUMBER}|must be a valid IPv4 address or empty.
+invalid-value|DHCP_MODE=${mode};DHCP_SUBNET_START=${net}.0;DHCP_DNS_PRIMARY=${ip};UPSTREAM_DHCP_IP=${srv}|DHCP_PROXY_ROUTER=${bad}|must be a valid IPv4 address or empty.
 CASES
+    _cp_install only-changed || return 1
+    [ "$(awk -F= '/^[A-Za-z_]/ { n++ } END { print n + 0 }' "${cpe}")" -ge 1 ] || { echo "only-changed: template has no key"; return 1; }
+    set_env_key DHCP_PROXY_PXE_BOOT_SERVER "${srv}" "${cpe}"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; adopt_config_prod_edits "${CONV%/deploy/prod}" >/dev/null'
+    [ "${status}" -eq 0 ] && git -C "${base}" diff --quiet HEAD -- config \
+        && [ "$(awk -F= '/^[A-Za-z_]/ { print $1 }' "${cpe%.env}.local.env")" = DHCP_PROXY_PXE_BOOT_SERVER ] \
+        || { echo "only-changed: rc ${status}: $(awk -F= '/^[A-Za-z_]/ { print $1 }' "${cpe%.env}.local.env" | tr '\n' ' ')"; return 1; }
+    _cp_install deleted || return 1
+    rm "${cpe}"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; adopt_config_prod_edits "${CONV%/deploy/prod}" >/dev/null'
+    [ "${status}" -eq 0 ] && git -C "${base}" diff --quiet HEAD -- config && [ ! -e "${cpe%.env}.local.env" ] \
+        || { echo "deleted: rc ${status}: ${output}"; return 1; }
+    _cp_install no-git nogit || return 1
+    set_env_key DHCP_PROXY_PXE_BOOT_SERVER "${srv}" "${cpe}"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; adopt_config_prod_edits "${CONV%/deploy/prod}"'
+    [ "${status}" -eq 0 ] && [ "$(get_env_var DHCP_PROXY_PXE_BOOT_SERVER "${cpe}")" = "${srv}" ] && [ ! -e "${cpe%.env}.local.env" ] \
+        || { echo "no-git: rc ${status}: ${output}"; return 1; }
 }
 
 @test "migrate_env_for_update preserves all custom per-service state dirs" {
