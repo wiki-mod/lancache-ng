@@ -28,8 +28,8 @@ pub struct ServiceHealth {
     // What: color: green, yellow, amber or red.
     // Why: the ui passes it through, never re-derives it.
     pub status: String,
-    // What: raw health string shown as detail.
-    // Why: shown as detail next to the color.
+    // What: raw health string of the container.
+    // Why: the color alone does not say what is wrong.
     pub health: String,
     pub failures: u32,
 }
@@ -105,7 +105,12 @@ pub fn df(path: &Path) -> Option<Df> {
     if !output.status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
+    parse_df(&String::from_utf8_lossy(&output.stdout))
+}
+
+// What: figures from the text of `df -Pk`; None if odd.
+// Why: the parse is pure, so a test can feed it any text.
+fn parse_df(text: &str) -> Option<Df> {
     let fields: Vec<&str> = text.lines().nth(1)?.split_whitespace().collect();
     Some(Df {
         avail_kib: fields.get(3)?.parse().ok()?,
@@ -146,13 +151,21 @@ pub fn die(tag: &str, message: &str) -> ! {
 // Why: a stuck peer must not hold a request forever.
 pub const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
+// What: how long an idle pooled connection is kept.
+// Why: a dead peer's connection is not reused for long.
+const HTTP_POOL_IDLE: Duration = Duration::from_secs(90);
+
+// What: the interval of TCP keepalive probes.
+// Why: a silently dropped peer is noticed on a pooled link.
+const HTTP_KEEPALIVE: Duration = Duration::from_secs(60);
+
 // What: the general HTTP client of ui and nats-subscriber.
 // Why: one timeout and pool setting for both callers.
 pub fn http_client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
-        .pool_idle_timeout(Duration::from_secs(90))
-        .tcp_keepalive(Duration::from_secs(60))
+        .pool_idle_timeout(HTTP_POOL_IDLE)
+        .tcp_keepalive(HTTP_KEEPALIVE)
         .build()
 }
 
@@ -347,6 +360,8 @@ pub fn write_file_as(
     place: Place,
     owner: Option<Owner>,
 ) -> io::Result<()> {
+    // What: create the missing parent directories.
+    // Why: a first start finds no state directory yet.
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
@@ -372,6 +387,8 @@ pub fn write_file_as(
             file.sync_all()
         })
         .and_then(|()| match place {
+            // What: link the temp file to the final name.
+            // Why: a link fails if the name exists; no gap.
             Place::Exclusive => fs::hard_link(&tmp, path),
             // What: a busy target is rewritten in place.
             // Why: a file bind mount refuses a rename.
@@ -764,6 +781,150 @@ mod tests {
         let req: FlushRequest = serde_json::from_str(full).unwrap();
         assert_eq!(req.expected_ttl, Some(60));
         assert_eq!(req.expected_content, Some(vec!["192.0.2.5".to_string()]));
+    }
+
+    // What: df output parses; odd output gives None.
+    // Why: a wrong field would show a wrong disk percent.
+    #[test]
+    fn df_output_is_parsed_or_refused() {
+        let ok = "Filesystem 1024-blocks Used Available Capacity Mounted on\n\
+                  /dev/sda1 1000 400 600 40% /cache\n";
+        let parsed = parse_df(ok).expect("well-formed df output");
+        assert_eq!((parsed.avail_kib, parsed.used_pct), (600, 40));
+        assert!(parse_df("").is_none());
+        assert!(parse_df("header only\n").is_none());
+        assert!(parse_df("h\n/dev/sda1 1000 400 x 40% /\n").is_none());
+        assert!(parse_df("h\n/dev/sda1 1000 400 600 full /\n").is_none());
+    }
+
+    // What: a fresh scratch directory under the temp dir.
+    // Why: file tests need a real path and must not clash.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lancache-ng-test-{tag}-{}-{}",
+            std::process::id(),
+            unix_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("scratch directory");
+        dir
+    }
+
+    // What: snapshots list oldest first; prune to keep_n.
+    // Why: a wrong prune loses the last known-good state.
+    // From: Issue #628
+    #[test]
+    fn snapshot_store_creates_lists_reads_and_prunes() {
+        let root = scratch("snap");
+        let store = SnapshotStore::new(root.join("store"), "data.json", "test");
+        assert_eq!(store.ids().unwrap(), Vec::<String>::new());
+        let mut made = Vec::new();
+        for n in 0..5 {
+            made.push(store.create(&serde_json::json!({ "n": n }), 3).unwrap());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let kept = store.ids().unwrap();
+        assert_eq!(kept, made[2..].to_vec());
+        assert_eq!(store.read(&kept[0]).unwrap(), serde_json::json!({ "n": 2 }));
+        fs::create_dir_all(root.join("store/.staging.1")).unwrap();
+        fs::create_dir_all(root.join("store/00000000000000000009")).unwrap();
+        assert_eq!(store.ids().unwrap(), kept);
+        for bad in ["", "../x", "12a", "1/2"] {
+            assert!(store.read(bad).is_err(), "id {bad:?} must be refused");
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // What: keep_n 0 keeps three, never none.
+    // Why: a bad retention value must not erase snapshots.
+    #[test]
+    fn snapshot_store_zero_retention_keeps_three() {
+        let root = scratch("keep");
+        let store = SnapshotStore::new(root.join("store"), "data.json", "test");
+        for _ in 0..5 {
+            store.create(&serde_json::json!({}), 0).unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(store.ids().unwrap().len(), 3);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // What: Exclusive keeps the first file; Replace swaps.
+    // Why: secrets are created once; settings are replaced.
+    #[test]
+    fn write_file_exclusive_keeps_first_and_replace_swaps() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("write");
+        let file = root.join("sub/secret");
+        write_file(&file, b"first", 0o600, Place::Exclusive).unwrap();
+        let again = write_file(&file, b"second", 0o600, Place::Exclusive);
+        assert_eq!(again.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&file).unwrap(), b"first");
+        write_file(&file, b"third", 0o600, Place::Replace).unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"third");
+        let mode = fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(fs::read_dir(root.join("sub")).unwrap().count(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // What: write_if_changed writes once, then fixes mode.
+    // Why: reruns write nothing; rights still converge.
+    #[test]
+    fn write_if_changed_writes_once_and_converges_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("changed");
+        let file = root.join("conf");
+        assert!(write_if_changed(&file, b"a", 0o644, None).unwrap());
+        assert!(!write_if_changed(&file, b"a", 0o644, None).unwrap());
+        assert!(write_if_changed(&file, b"b", 0o644, None).unwrap());
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(!write_if_changed(&file, b"b", 0o600, None).unwrap());
+        let mode = fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // What: a secret persists; a bad file is an error.
+    // Why: restarts must not rotate it or accept junk.
+    #[test]
+    fn load_or_create_persists_and_rejects_bad_files() {
+        let root = scratch("secret");
+        let file = root.join("key");
+        let first = load_or_create_hex::<4>(&file).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap().len(), 8);
+        assert_eq!(load_or_create_hex::<4>(&file).unwrap(), first);
+        fs::write(&file, "zz").unwrap();
+        assert!(load_or_create_hex::<4>(&file).is_err());
+        fs::write(&file, "0011").unwrap();
+        assert!(load_or_create_hex::<4>(&file).is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // What: desired state reads, or no opinion on failure.
+    // Why: a read glitch must never stop a caller's loop.
+    // From: Issue #1437
+    #[test]
+    fn desired_state_reads_or_gives_no_opinion() {
+        let root = scratch("desired");
+        let file = root.join("desired.json");
+        assert_eq!(DesiredState::read(&file), DesiredState::default());
+        fs::write(&file, "not json").unwrap();
+        assert_eq!(DesiredState::read(&file), DesiredState::default());
+        fs::write(&file, r#"{"ntp":"stopped"}"#).unwrap();
+        let read = DesiredState::read(&file);
+        assert_eq!(
+            (read.dhcp, read.ntp),
+            (None, Some(DesiredRunState::Stopped))
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // What: the proxy client builds and trims its base URL.
+    // Why: new() unwraps the builder; this shows it builds.
+    #[test]
+    fn docker_proxy_builds_and_trims_the_base_url() {
+        let proxy = DockerProxy::new(" http://proxy:2375/ ");
+        assert_eq!(proxy.base_url, "http://proxy:2375");
     }
 
     // What: an id yields its second; non-numbers none.
