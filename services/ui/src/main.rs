@@ -528,14 +528,16 @@ fn cache_max_gb_from(env: &dyn Fn(&str) -> Option<String>) -> Result<f64, String
     if let Some(value) = parse("CACHE_MAX_GB")? {
         return Ok(value);
     }
-    match (parse("STANDARD_CACHE_MAX_GB")?, parse("SSL_CACHE_MAX_GB")?) {
-        (Some(standard), Some(ssl)) if (standard - ssl).abs() > f64::EPSILON => Err(format!(
+    let (standard, ssl) = (parse("STANDARD_CACHE_MAX_GB")?, parse("SSL_CACHE_MAX_GB")?);
+    if let (Some(standard), Some(ssl)) = (standard, ssl)
+        && (standard - ssl).abs() > f64::EPSILON
+    {
+        return Err(format!(
             "STANDARD_CACHE_MAX_GB ({standard}) and SSL_CACHE_MAX_GB ({ssl}) differ \
              without CACHE_MAX_GB; set CACHE_MAX_GB to one shared cache size."
-        )),
-        (Some(value), _) | (None, Some(value)) => Ok(value),
-        (None, None) => Ok(50.0),
+        ));
     }
+    Ok(standard.or(ssl).unwrap_or(50.0))
 }
 
 // What: the NATS URL a remote secondary can dial, or None.
@@ -3014,7 +3016,7 @@ async fn set_secondary_address(
     let changed = with_db(&state, |db| {
         db.execute(
             "UPDATE secondaries SET address = ? WHERE name = ?",
-            rusqlite::params![addr.to_string(), name],
+            [addr.to_string(), name.clone()],
         )
     })?;
     if changed == 0 {
