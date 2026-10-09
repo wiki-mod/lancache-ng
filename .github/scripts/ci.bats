@@ -721,6 +721,9 @@ CASES
     _expect channel 2 "[CI-ERROR-CORE-0139] file=\"${nosot}\";no such file or directory;[CI-ERROR-CORE-0123] field=\"${name}\";manifest=\"${nosot}\"" || return 1
     run _ci_sot_load "${nosot}"
     _expect load 2 "[CI-ERROR-CORE-0139] file=\"${nosot}\";no such file or directory;[CI-ERROR-CORE-0136] manifest=\"${nosot}\"" || return 1
+    run _ci_manifest_at "$(_val name)" "${nosot}"
+    _expect at-ref 2 '[CI-ERROR-CORE-0106];cmd="git"' || return 1
+    [ ! -e "${nosot}" ] || { echo "at-ref wrote ${nosot}"; return 1; }
     CI_MANIFEST="${nosot}" run bash "${CI_SH}" plan "${name}"
     _expect cli 2 "[CI-ERROR-CORE-0003] manifest=\"${nosot}\"" || return 1
     run _ci_block_keys "${blk}" all
