@@ -1974,11 +1974,11 @@ _legacy_env() {
         "UI_AUTH_USER=${user}" 'UI_AUTH_PASSWORD=' > "${file}"
 }
 
+# What: a converged .env stays byte-identical
+# Why: idempotent update, no rewrite (AG-OP-006)
+# From: Issue #1683 | PR #1858
 @test "migrate_env_for_update is a no-op on an already-converged .env" {
     _stand_ins || return 1
-    # What: a converged .env stays byte-identical
-    # Why: idempotent update, no rewrite (AG-OP-006)
-    # From: Issue #1683 | PR #1858
     local root d h
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
