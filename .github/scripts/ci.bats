@@ -2955,14 +2955,14 @@ _extract_functions() {
     # What: per env set: the full rendered lines + warnings.
     # Why: a bad entry must warn, never reach dnsmasq.conf.
     # From: Issue #1683 | PR #1858
-    local root c="${BATS_TEST_TMPDIR}/dnsmasq.conf" row case i r n d bf bs co s b u want warn w
+    local root c row case i r n d bf bs co s b u want warn w
     local -a ws
     local -A V=(
         ["@IF@"]="$(_val name)" ["@R@"]="$(_val host)" ["@N@"]="$(_val host)" ["@D@"]="$(_val name)"
         ["@BF@"]="$(_val name)" ["@BS@"]="$(_val host)" ["@V1@"]="$(_val name)" ["@V2@"]="$(_val name)"
         ["@V3@"]="$(_val name)" ["@V4@"]="$(_val name)"
     )
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" c="$(_val path)"
     # shellcheck source=services/dhcp-proxy/entrypoint.sh
     source "$(_extract_functions "${root}/services/dhcp-proxy/entrypoint.sh" _dhcp_proxy_reject_embedded_newline \
         _dhcp_proxy_render_optional_directives _dhcp_proxy_render_custom_options \
@@ -3047,7 +3047,7 @@ CASES
     # What: server/pool/allow lines per input; validator.
     # Why: chrony denies all clients without an allow line.
     # From: Issue #1683 | PR #1858
-    local root t c="${BATS_TEST_TMPDIR}/chrony.conf" row case up allow want vrc vmsg
+    local root t c row case up allow want vrc vmsg
     local -A V=(
         ["@H1@"]="$(_val host)" ["@H2@"]="$(_val host)" ["@I4A@"]="$(_val ipv4)" ["@I4B@"]="$(_val ipv4)"
         ["@I6@"]="$(_val ipv6)" ["@C1@"]="$(_val cidr)" ["@C2@"]="$(_val cidr)"
@@ -3055,7 +3055,7 @@ CASES
         ["@T@"]="$(_val int 0 255).$(_val int 0 255).$(_val int 0 255)"
     )
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    t="${root}/services/ntp/chrony.conf"
+    t="${root}/services/ntp/chrony.conf" c="$(_val path)"
     # shellcheck source=services/ntp/entrypoint.sh
     source "$(_extract_functions "${root}/services/ntp/entrypoint.sh" is_ip_literal render_ntp_config validate_ntp_config)"
     while IFS= read -r row; do
@@ -3135,8 +3135,9 @@ STUB
     # What: dhcp4, ctrl-agent, d2 from the real var list.
     # Why: a missed var or bad port stops kea from starting.
     # From: Issue #1683 | PR #1858
-    local root d="${BATS_TEST_TMPDIR}/kea" ep dns zones key alg n1 n2 row port rc want
+    local root ep dns zones key alg n1 n2 row port rc want j4 jc jd ps
     local -A V=(["@P@"]="$(_val port)")
+    j4="$(_val path)" jc="$(_val path)" jd="$(_val path)" ps="$(_val path)"
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     ep="${root}/services/dhcp/entrypoint.sh"
     dns="${root}/services/dns/entrypoint.sh"
@@ -3158,7 +3159,7 @@ STUB
     mkdir -p "${d}"
     for DHCP_DDNS_ENABLED in true false; do
         export DHCP_DDNS_ENABLED
-        render_kea_dhcp4_config "${root}/services/dhcp/kea-dhcp4.conf" "${d}/dhcp4.json"
+        render_kea_dhcp4_config "${root}/services/dhcp/kea-dhcp4.conf" "${j4}"
         run jq -e --argjson on "${DHCP_DDNS_ENABLED}" --arg sub "${DHCP_SUBNET}" \
             --arg pool "${DHCP_RANGE_START} - ${DHCP_RANGE_END}" --argjson lt "${DHCP_LEASE_TIME}" \
             --argjson mlt "${DHCP_MAX_LEASE_TIME}" --arg ntp "${n1},${n2}" --arg hook "${KEA_LEASE_CMDS_HOOK_PATH}" \
@@ -3168,17 +3169,17 @@ STUB
             and ([$s["option-data"][] | select(.name == "ntp-servers") | .data] == [$ntp])
             and $d["hooks-libraries"] == [{"library": $hook}]
             and $d["dhcp-ddns"]["enable-updates"] == $on and $d["ddns-qualifying-suffix"] == $dom' \
-            "${d}/dhcp4.json"
+            "${j4}"
         [ "${status}" -eq 0 ] || { echo "dhcp4 ddns=${DHCP_DDNS_ENABLED}: ${output}"; return 1; }
     done
-    DHCP_NTP_SERVERS="" render_kea_dhcp4_config "${root}/services/dhcp/kea-dhcp4.conf" "${d}/dhcp4.json"
-    jq -e '[.Dhcp4.subnet4[0]["option-data"][] | select(.name == "ntp-servers")] == []' "${d}/dhcp4.json"
-    render_kea_config "${root}/services/dhcp/kea-ctrl-agent.conf" "${d}/ctrl.json"
+    DHCP_NTP_SERVERS="" render_kea_dhcp4_config "${root}/services/dhcp/kea-dhcp4.conf" "${j4}"
+    jq -e '[.Dhcp4.subnet4[0]["option-data"][] | select(.name == "ntp-servers")] == []' "${j4}"
+    render_kea_config "${root}/services/dhcp/kea-ctrl-agent.conf" "${jc}"
     jq -e --arg host "${KEA_CTRL_HOST}" --arg tok "${KEA_CTRL_TOKEN}" '.["Control-agent"]
         | .["http-host"] == $host and .authentication.type == "basic"
-        and [.authentication.clients[].password] == [$tok]' "${d}/ctrl.json"
+        and [.authentication.clients[].password] == [$tok]' "${jc}"
     render_kea_config "${root}/services/dhcp/kea-dhcp-ddns.conf" "${d}/d2.json"
-    run grep -n '\${' "${d}/dhcp4.json" "${d}/ctrl.json" "${d}/d2.json"
+    run grep -n '\${' "${j4}" "${jc}" "${d}/d2.json"
     [ "${status}" -eq 1 ] || { echo "unrendered: ${output}"; return 1; }
     zones="$(awk '/^PRIVATE_REVERSE_ZONES=\(/,/^\)/' "${dns}" \
         | grep -oE '[0-9a-z.]+\.in-addr\.arpa\.' | jq -Rsc 'split("\n") | map(select(. != "")) | sort')"
@@ -3187,7 +3188,7 @@ STUB
     alg="$(sed -n 's/^DDNS_TSIG_ALGORITHM="\${DDNS_TSIG_ALGORITHM:-\([^}]*\)}"$/\1/p' "${dns}")"
     [ -n "${key}" ] || { echo "no DDNS_TSIG_NAME default in ${dns}"; return 1; }
     [ -n "${alg}" ] || { echo "no DDNS_TSIG_ALGORITHM default in ${dns}"; return 1; }
-    run jq -e --slurpfile d4 "${d}/dhcp4.json" --argjson zones "${zones}" --arg key "${key}" --arg alg "${alg}" \
+    run jq -e --slurpfile d4 "${j4}" --argjson zones "${zones}" --arg key "${key}" --arg alg "${alg}" \
         --arg tsig "${DDNS_TSIG_KEY}" --arg dom "${DHCP_DOMAIN}." --arg ip "${DHCP_DNS_SERVER_IP}" \
         --argjson port "${DHCP_DDNS_PORT}" '.DhcpDdns as $d | $d4[0].Dhcp4["dhcp-ddns"] as $s
         | [$d["tsig-keys"][] | [.name, (.algorithm | ascii_downcase), .secret]] == [[$key, ($alg | ascii_downcase), $tsig]]
@@ -3327,66 +3328,67 @@ JSON
     # What: _sign_cert output and cleanup; regen decision.
     # Why: a bad leaf or a stale default cert breaks TLS.
     # From: Issue #1683 | PR #1858
-    local root ep t="${BATS_TEST_TMPDIR}" s1 s2 p case at now san want row long w x base o
+    local root ep s1 s2 p case at now san want row long w x base o d a dn hx hy hz srl miss
+    local k1 c1 k2 c2 k3 c3 kd c4 k5 c5 k6 c6
     local -a pre post
-    local -A V=(
-        ["@D@"]="$(_val host).$(_val host)" ["@A@"]="$(_val host).$(_val host)" ["@DN@"]="$(_val host)"
-        ["@X@"]="$(_val host).$(_val host)" ["@Y@"]="$(_val host).$(_val host)" ["@Z@"]="$(_val host).$(_val host)"
-        ["@PC@"]="$(_val ipv4)"
-    )
+    d="$(_val host).$(_val host)" a="$(_val host).$(_val host)" dn="$(_val host)"
+    hx="$(_val host).$(_val host)" hy="$(_val host).$(_val host)" hz="$(_val host).$(_val host)"
     base="$(_val int 0 255).$(_val int 0 255).$(_val int 0 255)" o="$(_val int 1 25)"
-    V["@PA@"]="${base}.${o}" V["@PB@"]="${base}.${o}1"
+    local -A V=(["@DN@"]="${dn}" ["@PA@"]="${base}.${o}" ["@PB@"]="${base}.${o}1" ["@PC@"]="$(_val ipv4)")
+    srl="$(_val path)" miss="$(_val path)"
+    k1="$(_val path)" c1="$(_val path)" k2="$(_val path)" c2="$(_val path)" k3="$(_val path)" c3="$(_val path)"
+    kd="$(_val path)" c4="$(_val path)" k5="$(_val path)" c5="$(_val path)" k6="$(_val path)" c6="$(_val path)"
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     ep="${root}/services/proxy/entrypoint.sh"
     # shellcheck source=services/proxy/entrypoint.sh
     source "$(_extract_functions "${ep}" _ensure_ca_cert _sign_cert _default_cert_needs_regen _bounded_cert_name)"
-    export CA_DIR="${t}/ca" CERT_DIR="${t}/certs"
+    CA_DIR="$(_val path)" CERT_DIR="$(_val path)"
+    export CA_DIR CERT_DIR
     mkdir -p "${CERT_DIR}"
     run _ensure_ca_cert
     [ "${status}" -eq 0 ] || { echo "ca: ${output}"; return 1; }
-    sed -n '/^    SERIAL_FILE="\$CA_DIR\/ca\.srl"$/,/^    fi$/p' "${ep}" > "${t}/serial.sh"
-    [ -s "${t}/serial.sh" ]
+    sed -n '/^    SERIAL_FILE="\$CA_DIR\/ca\.srl"$/,/^    fi$/p' "${ep}" > "${srl}"
+    [ -s "${srl}" ]
     # shellcheck source=services/proxy/entrypoint.sh
-    source "${t}/serial.sh"
+    source "${srl}"
     shopt -s nullglob
     pre=(/var/tmp/lancache-cert.*)
-    _sign_cert "${V[@D@]}" "${CERT_DIR}/a.key" "${CERT_DIR}/a.crt" "subjectAltName=DNS:${V[@D@]},DNS:*.${V[@D@]}"
-    openssl verify -CAfile "${CA_DIR}/ca.crt" "${CERT_DIR}/a.crt"
-    [ "$(openssl x509 -noout -subject -nameopt RFC2253 -in "${CERT_DIR}/a.crt")" = "subject=CN=lancache-ng" ]
-    [ "$(openssl x509 -noout -ext subjectAltName -in "${CERT_DIR}/a.crt" | tail -n +2 | tr -d ' ')" \
-        = "DNS:${V[@D@]},DNS:*.${V[@D@]}" ]
-    s1="$(openssl x509 -noout -serial -in "${CERT_DIR}/a.crt" | cut -d= -f2)"
-    _sign_cert "$(printf 'a%.0s' {1..300})" "${CERT_DIR}/b.key" "${CERT_DIR}/b.crt"
-    [ "$(openssl x509 -noout -subject -nameopt RFC2253 -in "${CERT_DIR}/b.crt")" = "subject=CN=lancache-ng" ]
-    [ -z "$(openssl x509 -noout -ext subjectAltName -in "${CERT_DIR}/b.crt" 2>/dev/null)" ]
-    s2="$(openssl x509 -noout -serial -in "${CERT_DIR}/b.crt" | cut -d= -f2)"
+    _sign_cert "${d}" "${k1}" "${c1}" "subjectAltName=DNS:${d},DNS:*.${d}"
+    openssl verify -CAfile "${CA_DIR}/ca.crt" "${c1}"
+    [ "$(openssl x509 -noout -subject -nameopt RFC2253 -in "${c1}")" = "subject=CN=lancache-ng" ]
+    [ "$(openssl x509 -noout -ext subjectAltName -in "${c1}" | tail -n +2 | tr -d ' ')" = "DNS:${d},DNS:*.${d}" ]
+    s1="$(openssl x509 -noout -serial -in "${c1}" | cut -d= -f2)"
+    _sign_cert "$(printf 'a%.0s' {1..300})" "${k2}" "${c2}"
+    [ "$(openssl x509 -noout -subject -nameopt RFC2253 -in "${c2}")" = "subject=CN=lancache-ng" ]
+    [ -z "$(openssl x509 -noout -ext subjectAltName -in "${c2}" 2>/dev/null)" ]
+    s2="$(openssl x509 -noout -serial -in "${c2}" | cut -d= -f2)"
     [ $((16#${s2})) -gt $((16#${s1})) ] || { echo "serial ${s2} not above ${s1}"; return 1; }
     grep -qxE '[0-9A-Fa-f]+' "${SERIAL_FILE}"
     long="$(printf 'a%.0s' {1..60})"
     long="${long}.${long}.${long}.${long}"
-    _sign_cert "${long}" "${CERT_DIR}/l.key" "${CERT_DIR}/l.crt" "subjectAltName=DNS:*.${long}"
-    [ "$(openssl x509 -noout -ext subjectAltName -in "${CERT_DIR}/l.crt" | tail -n +2 | tr -d ' ')" = "DNS:*.${long}" ]
+    _sign_cert "${long}" "${k3}" "${c3}" "subjectAltName=DNS:*.${long}"
+    [ "$(openssl x509 -noout -ext subjectAltName -in "${c3}" | tail -n +2 | tr -d ' ')" = "DNS:*.${long}" ]
     w="$(_bounded_cert_name "${long}" wildcard)"
     x="$(_bounded_cert_name "${long}" exact)"
     [[ "${w}" =~ ^[0-9a-f]{32}$ && "${x}" =~ ^[0-9a-f]{32}$ && "${w}" != "${x}" ]] || { echo "names ${w} ${x}"; return 1; }
     [ "$(_bounded_cert_name "${long}" wildcard)" = "${w}" ]
-    [[ "$(_bounded_cert_name "${V[@A@]}" exact)" =~ ^[0-9a-f]{32}$ ]]
-    mkdir "${CERT_DIR}/kd" "${CERT_DIR}/y.crt"
-    run _sign_cert "${V[@X@]}" "${CERT_DIR}/kd" "${CERT_DIR}/x.crt" "subjectAltName=DNS:${V[@X@]}"
+    [[ "$(_bounded_cert_name "${a}" exact)" =~ ^[0-9a-f]{32}$ ]]
+    mkdir "${kd}" "${c5}"
+    run _sign_cert "${hx}" "${kd}" "${c4}" "subjectAltName=DNS:${hx}"
     [ "${status}" -ne 0 ]
-    [ ! -e "${CERT_DIR}/x.crt" ]
-    run _sign_cert "${V[@Y@]}" "${CERT_DIR}/y.key" "${CERT_DIR}/y.crt" "subjectAltName=DNS:${V[@Y@]}"
+    [ ! -e "${c4}" ]
+    run _sign_cert "${hy}" "${k5}" "${c5}" "subjectAltName=DNS:${hy}"
     [ "${status}" -ne 0 ]
-    [ ! -e "${CERT_DIR}/y.key" ] || { echo "orphaned key after a sign failure"; return 1; }
-    echo partial > "${CERT_DIR}/z.crt"
-    CA_DIR="${t}/missing" run _sign_cert "${V[@Z@]}" "${CERT_DIR}/z.key" "${CERT_DIR}/z.crt"
+    [ ! -e "${k5}" ] || { echo "orphaned key after a sign failure"; return 1; }
+    echo partial > "${c6}"
+    CA_DIR="${miss}" run _sign_cert "${hz}" "${k6}" "${c6}"
     [ "${status}" -ne 0 ]
-    [ ! -e "${CERT_DIR}/z.crt" ] && [ ! -e "${CERT_DIR}/z.key" ] || { echo "partial output kept"; return 1; }
+    [ ! -e "${c6}" ] && [ ! -e "${k6}" ] || { echo "partial output kept"; return 1; }
     while IFS= read -r row; do
         IFS='|' read -r case at now san want <<< "$(_fill "${row}")"
         rm -f "${CERT_DIR}/default.crt" "${CERT_DIR}/default.key"
         if [ "${san}" != none ]; then
-            IP_SSL="${at}" _sign_cert "${V[@DN@]}" "${CERT_DIR}/default.key" "${CERT_DIR}/default.crt" \
+            IP_SSL="${at}" _sign_cert "${dn}" "${CERT_DIR}/default.key" "${CERT_DIR}/default.crt" \
                 "${san:+subjectAltName=${san}}"
         fi
         [ "${case}" != nokey ] || rm -f "${CERT_DIR}/default.key"
