@@ -12232,7 +12232,7 @@ _ci_check_vex_drift() {
 
 # What: Warn (never fail) on editing CHANGELOG.md directly.
 # Why: usually unintended; risks a merge-conflict cascade.
-# From: Issue #1683 | PR #1858
+# From: Issue #893 | PR #1858
 _ci_check_changelog_direct_edit() {
     local -a changed=("$@")
     local path edited=0 file

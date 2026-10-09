@@ -1775,7 +1775,7 @@ CASES
 
 # What: per row: changed files, labels -> clean, note, warn
 # Why: CHANGELOG.md is written by the release flow only
-# From: Issue #1683 | PR #1858
+# From: Issue #893 | PR #1858
 @test "check changelog-direct-edit warns on a direct edit unless labelled" {
     local case files labels rc want
     local -a argv
