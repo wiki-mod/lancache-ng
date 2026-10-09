@@ -1,10 +1,12 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# CI and developer validation toolchain with Rust, sccache, ccache, distcc, and build utilities.
+# What: CI and developer validation toolchain image.
+# Why: CI and developers validate in one pinned environment.
+# From: PR #1544
 
-# What: declares shared download and tool version inputs before stages.
-# Why: every Alpine stage derives the same immutable tool identities.
+# What: declares shared tool version and checksum inputs.
+# Why: every stage derives the same immutable tool identity.
 # From: PR #1706
 ARG DOCKER_CLI_VERSION=29.8.0
 ARG DOCKER_COMPOSE_VERSION=5.5.1
@@ -56,9 +58,9 @@ INSTALL_CA_CERT_EOF
 # From: Issue #1860 | PR #1872
 FROM alpine:3.24 AS binary-downloader
 
-# What: explicit proxy build-args, no default value set
-# Why: routes self-hosted downloads via the LAN proxy
-# From: Issue #1781 | PR #1783
+# What: imports the Docker tool versions and checksums.
+# Why: the download step verifies each binary against them.
+# From: Issue #1671 | PR #1823
 ARG DOCKER_CLI_VERSION
 ARG DOCKER_COMPOSE_VERSION
 ARG DOCKER_BUILDX_VERSION
@@ -69,13 +71,16 @@ ARG DOCKER_COMPOSE_SHA256_ARM64
 ARG DOCKER_BUILDX_SHA256_AMD64
 ARG DOCKER_BUILDX_SHA256_ARM64
 
-# What: Go cache-mount + GOPROXY targets from self-hosted vars.
-# Why: single source of truth; ready when a Go build returns.
-# From: Issue #1671
+# What: Go cache and GOPROXY targets from self-hosted vars.
+# Why: one owner for the self-hosted Go cache wiring.
+# From: Issue #1671 | PR #1823
 ARG PROJECT_SELFHOSTED_GOMODCACHE=/go/pkg/mod
 ARG PROJECT_SELFHOSTED_GOCACHE=/root/.cache/go-build
 ARG PROJECT_SELFHOSTED_GOPROXY=
 
+# What: copies the CA-install script into this stage.
+# Why: downloads trust the LAN proxy CA when it is provided.
+# From: Issue #1095 | PR #1752
 COPY --from=go-tools-script /install-ca-cert.sh /install-ca-cert.sh
 
 # What: switches apk's own repositories to plain http.
@@ -84,8 +89,8 @@ COPY --from=go-tools-script /install-ca-cert.sh /install-ca-cert.sh
 RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 
 # What: downloads+verifies the three prebuilt docker tools.
-# Why: official static binaries replace the from-source build.
-# From: Issue #1671
+# Why: official static binaries, verified by pinned sha256.
+# From: Issue #1671 | PR #1823
 RUN --mount=type=cache,target=${PROJECT_SELFHOSTED_GOMODCACHE},sharing=locked \
     --mount=type=cache,target=${PROJECT_SELFHOSTED_GOCACHE},sharing=locked \
     --mount=type=secret,id=project_selfhosted_proxy_ca set -eu; \
@@ -129,18 +134,15 @@ RUN --mount=type=cache,target=${PROJECT_SELFHOSTED_GOMODCACHE},sharing=locked \
 # From: Issue #1095
 FROM alpine:3.24
 
+# What: describes the image for registry consumers.
+# Why: registries show this OCI description to consumers.
+# From: Issue #1860 | PR #1872
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image."
 
-# What: explicit proxy build-args, no default value set
-# Why: routes self-hosted apk/cargo pulls via the LAN proxy
-# From: Issue #1781 | PR #1783
-# What: inherits the shared sccache version pin.
-# Why: avoids re-declaring the same literal per stage.
+# What: imports the hoisted tool versions and checksums.
+# Why: the install steps below consume these pinned values.
 # From: Issue #1671 | PR #1750
 ARG SCCACHE_VERSION
-# What: pins actionlint prebuilt binary and checksums
-# Why: stale pin skips verification; recomputed per version
-# From: Issue #1095 | PR #1743
 ARG ACTIONLINT_VERSION
 ARG ACTIONLINT_SHA256_AMD64
 ARG ACTIONLINT_SHA256_ARM64
@@ -152,14 +154,20 @@ ARG SHELLSPEC_SHA256
 # From: Issue #1095
 SHELL ["/bin/sh", "-c"]
 
+# What: sets PATH, Cargo install root and Rust backtraces.
+# Why: /usr/local tools win; Rust panics print backtraces.
+# From: Issue #1860 | PR #1872
 ENV PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin" \
     CARGO_INSTALL_ROOT="/usr/local" \
     RUST_BACKTRACE=1
 
 # What: consumes the canonical package-cache rotation input.
-# Why: rebuilds must refresh Alpine packages when the shared cache epoch changes.
+# Why: a new cache epoch refreshes the Alpine package layer.
 # From: Issue #1095
 ARG APT_CACHE_BUST=""
+# What: manual epoch for the acceleration package layer.
+# Why: changing it forces a fresh package-install layer.
+# From: Issue #1860 | PR #1872
 ARG BUILD_TOOLS_ACCELERATION_CACHE_BUST=clang-offload-packager-v1
 
 # What: switches apk's own repositories to plain http.
@@ -167,8 +175,8 @@ ARG BUILD_TOOLS_ACCELERATION_CACHE_BUST=clang-offload-packager-v1
 # From: Issue #1095
 RUN sed -i 's|^https://|http://|' /etc/apk/repositories
 
-# What: installs bash, coreutils, github-cli, sqlite, etc
-# Why: GNU coreutils differ from BusyBox (AG-VAL-034)
+# What: installs Alpine packages and distcc/clang links.
+# Why: native packages first; GNU tools per [AG-VAL-034].
 # From: Issue #1095
 RUN set -euo pipefail; \
     : "package-cache-bust=${APT_CACHE_BUST}"; \
@@ -226,6 +234,7 @@ RUN set -euo pipefail; \
       tzdata \
       util-linux \
       xz \
+      yq-go \
       zlib-dev \
       zlib-static; \
     ln -sf /usr/bin/pump /usr/bin/distcc-pump; \
@@ -257,10 +266,13 @@ RUN docker --version; \
     docker compose version; \
     docker buildx version
 
+# What: copies the CA-install script into the final stage.
+# Why: the sccache build trusts the LAN proxy CA through it.
+# From: Issue #1095 | PR #1752
 COPY --from=go-tools-script /install-ca-cert.sh /install-ca-cert.sh
 
 # What: builds sccache and removes the temporary proxy CA
-# Why: keeps the image self-contained without persisting the CA
+# Why: the proxy CA file is removed when the step ends.
 # From: Issue #1095 | PR #1752
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
     trap 'rm -f /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt; update-ca-certificates >/dev/null 2>&1 || true' EXIT; \
@@ -268,7 +280,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
     cargo install sccache --version "${SCCACHE_VERSION}" --no-default-features --features gha,redis,dist-client --root /usr/local; \
     rm -rf /root/.cargo/registry /root/.cargo/git
 
-# What: fetches actionlint using /var/tmp and a temporary CA.
+# What: fetches actionlint via /var/tmp and a temporary CA.
 # Why: prevents tmpfs OOM and CA persistence in layers.
 # From: Issue #1860 | PR #1872
 RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
@@ -313,10 +325,9 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca set -euo pipefail; \
 # Why: udhcpc ships in busybox base, nothing to install
 # From: Issue #1095
 
-# What: expose Alpine's native musl compiler under stable and target-native names.
-# Why: every consumer must receive the same Alpine-musl compiler from this image;
-#      no runner-local compiler or distro package is part of the contract.
-# From: Issue #1095 | PR #1691
+# What: exposes gcc as musl-gcc and <triplet>-gcc.
+# Why: every consumer gets the same Alpine-musl compiler.
+# From: Issue #1860 | PR #1872
 RUN set -eu; \
     target_triplet="$(gcc -dumpmachine)"; \
     case "$target_triplet" in \
@@ -325,9 +336,9 @@ RUN set -eu; \
     ln -sf /usr/bin/gcc /usr/local/bin/musl-gcc; \
     ln -sf /usr/bin/gcc "/usr/local/bin/${target_triplet}-gcc"
 
-# What: verifies Alpine's native musl Rust target.
-# Why: service builders must compile for the installed Rust standard library.
-# From: Issue #1095
+# What: checks required tools, PATH and musl Rust target.
+# Why: a missing or broken tool fails the image build early.
+# From: Issue #1095 | PR #1691
 RUN set -euo pipefail; \
     musl_target_compiler="$(gcc -dumpmachine)-gcc"; \
     required_tools=( \
@@ -397,6 +408,7 @@ RUN set -euo pipefail; \
       timeout \
       xargs \
       xz \
+      yq \
       cc \
       g++ \
     ); \
@@ -439,6 +451,7 @@ RUN set -euo pipefail; \
     run_contract_check 'docker compose version' docker compose version; \
     run_contract_check 'docker buildx version' docker buildx version; \
     run_contract_check 'expect -v' expect -v; \
+    run_contract_check 'yq --version' yq --version; \
     printf 'PATH=%s\n' "$PATH"; \
     case ":$PATH:" in \
       *:/usr/local/bin:*) ;; \
@@ -466,11 +479,13 @@ RUN set -euo pipefail; \
 
 # What: fail build if CI proxy CA leaked into image
 # Why: CA must never persist in published build-tools
-# From: PR #1752 regression | Issue #1095
+# From: PR #1804
 RUN if [ -e /usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt ]; then \
       echo "SECURITY: CI proxy CA persisted in final image" >&2; exit 1; \
     fi
 
+# What: sets /workspace as workdir and bash as the command.
+# Why: helper scripts mount the checkout at /workspace.
+# From: Issue #1095 | PR #1691
 WORKDIR /workspace
-
 CMD ["bash"]
