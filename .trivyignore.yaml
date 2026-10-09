@@ -1183,6 +1183,18 @@ vulnerabilities:
 
       From: Issue #1883
 
+  - id: CVE-2026-77214
+    statement: >-
+      What: Accepts CVE-2026-77214 (expat heap buffer information
+      disclosure) as a tracked risk for `libexpat` in `tools/build-tools`.
+
+      Why: Alpine 3.24 stable ships `expat` 2.8.5-r0; the fixed 2.9.0-r0
+      exists only in Alpine edge. The finding applies to every Alpine
+      3.24 image, not to a package this project adds. The image is a
+      CI toolchain and runs no untrusted XML input.
+
+      From: Issue #1683 | PR #1906
+
   # CVE-2026-32316/CVE-2026-40164 (jq, utilities image) removed here per
   # their own accepting entries' explicit self-description ("remove once
   # PR #1783 lands and its rebuilds propagate", Issue #1802/#1803,
