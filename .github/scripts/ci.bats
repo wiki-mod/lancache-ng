@@ -848,6 +848,24 @@ fetch|accel|error: failed to download from `@URL@`|permanent
 trivy-db|trivy|FATAL failed to download vulnerability DB: @TXT@|transient
 trivy-init|trivy|database is not initialized|transient
 trivy-other|trivy|@REF@: manifest unknown|permanent
+trivy-javadb|trivy|FATAL failed to download artifact from @REF@: @TXT@|transient
+cas-nff|cas-push|! [rejected] HEAD -> @GREF@ (non-fast-forward)|race
+cas-lock|cas-push|error: cannot lock ref '@GREF@': is at @TAG@ but expected @TAG@|race
+net-overlap|validate-net|Error response from daemon: Pool overlaps with other one on this address space|collision
+net-in-use|validate-net|Error response from daemon: failed to allocate gateway: Address already in use|collision
+net-other|validate-net|@TXT@|permanent
+oci-manifest-code|registry-read|{"errors":[{"code":"MANIFEST_UNKNOWN","message":"@TXT@"}]}|not_found
+oci-name-code|registry-read|{"errors":[{"code":"NAME_UNKNOWN","message":"@TXT@"}]}|not_found
+ref-not-found|registry-read|Error: @REF@: not found|not_found
+gh-422|github-api|gh: Validation Failed (HTTP 422)|permanent
+gh-400|github-api|gh: Problems parsing JSON (HTTP 400)|permanent
+bad-ref||docker: invalid reference format.|permanent
+df-parse|buildx|Dockerfile parse error line 3: unknown instruction: @SYM@|permanent
+solve-parse|buildx|ERROR: failed to solve: failed to parse platform @SYM@|permanent
+git-repo-gone||fatal: repository '@URL@/' not found|permanent
+curl-429||curl: (22) The requested URL returned error: 429|transient
+run-rate|buildx|toomanyrequests: rate limit exceeded\nprocess "/bin/sh -c @SYM@" did not complete successfully: exit code: 1|transient
+run-timeout|buildx|dial tcp: lookup @HOST@: i/o timeout\nprocess "/bin/sh -c @SYM@" did not complete successfully: exit code: 1|transient
 CASES
 }
 
