@@ -268,12 +268,12 @@ teardown() {
     local case envs args id wrap want
     local -a ev av
     local -A V=(
-        [@SVC@]="$(ci_services | awk 'NR == 1')" [@TOOL@]="$(_ci_block_keys build_toolchain | awk 'NR == 1')"
-        [@BAD@]="$(_val name)" [@FOREIGN@]="$(_val platform)" [@DIGEST@]="$(_val digest)"
-        [@USER@]="$(_val name)" [@TOKEN@]="$(_val name)"
+        ["@SVC@"]="$(ci_services | awk 'NR == 1')" ["@TOOL@"]="$(_ci_block_keys build_toolchain | awk 'NR == 1')"
+        ["@BAD@"]="$(_val name)" ["@FOREIGN@"]="$(_val platform)" ["@DIGEST@"]="$(_val digest)"
+        ["@USER@"]="$(_val name)" ["@TOKEN@"]="$(_val name)"
     )
-    V[@PLAT@]="$(_ci_platforms "${V[@SVC@]}" | awk 'NR == 1')"
-    [ -n "${V[@SVC@]}" ] && [ -n "${V[@TOOL@]}" ] && [ -n "${V[@PLAT@]}" ] || { echo "inputs: ${V[*]}"; return 1; }
+    V["@PLAT@"]="$(_ci_platforms "${V["@SVC@"]}" | awk 'NR == 1')"
+    [ -n "${V["@SVC@"]}" ] && [ -n "${V["@TOOL@"]}" ] && [ -n "${V["@PLAT@"]}" ] || { echo "inputs: ${V[*]}"; return 1; }
     while IFS='|' read -r case envs args id wrap; do
         ev=() av=()
         envs="$(_fill "${envs}")" args="$(_fill "${args}")"
@@ -739,43 +739,43 @@ CASES
     # From: Issue #1683 | PR #1858
     local r a1 a1b b1 a2 b0
     local -A V=(
-        [@A@]="$(_val name)" [@B@]="$(_val name)" [@PK@]="$(_val name)" [@CA@]="$(_val name)" [@CB@]="$(_val name)"
-        [@TS@]="$(_val name)" [@TP@]="$(_val name)" [@PKG@]="$(_val name)" [@P1@]="$(_val platform)"
-        [@P2@]="$(_val platform)" [@X@]="$(_val platform)" [@AA@]="$(_val name)" [@AB@]="$(_val name)"
-        [@F@]="$(_val name)" [@IMG@]="$(_val host)/$(_val name)@$(_val digest)"
+        ["@A@"]="$(_val name)" ["@B@"]="$(_val name)" ["@PK@"]="$(_val name)" ["@CA@"]="$(_val name)" ["@CB@"]="$(_val name)"
+        ["@TS@"]="$(_val name)" ["@TP@"]="$(_val name)" ["@PKG@"]="$(_val name)" ["@P1@"]="$(_val platform)"
+        ["@P2@"]="$(_val platform)" ["@X@"]="$(_val platform)" ["@AA@"]="$(_val name)" ["@AB@"]="$(_val name)"
+        ["@F@"]="$(_val name)" ["@IMG@"]="$(_val host)/$(_val name)@$(_val digest)"
     )
-    V[@K1@]="${V[@P1@]##*/}" V[@K2@]="${V[@P2@]##*/}"
+    V["@K1@"]="${V["@P1@"]##*/}" V["@K2@"]="${V["@P2@"]##*/}"
     r="$(_val path)"
-    mkdir -p "${r}/${V[@CA@]}" "${r}/${V[@CB@]}"
-    _val name > "${r}/${V[@CA@]}/${V[@F@]}"; _val name > "${r}/${V[@CB@]}/${V[@F@]}"
+    mkdir -p "${r}/${V["@CA@"]}" "${r}/${V["@CB@"]}"
+    _val name > "${r}/${V["@CA@"]}/${V["@F@"]}"; _val name > "${r}/${V["@CB@"]}/${V["@F@"]}"
     git -C "${r}" init -q && git -C "${r}" add -A
     _fill "$(printf '%s\n' 'services:' '  @A@:' '    context: @CA@' '    build_type: @TS@' \
         '  @B@:' '    context: @CB@' '    build_type: @TS@' \
-        '  @PK@:' '    context: @CB@' '    build_type: @TP@' '    packages: [@PKG@]' \
+        '  @PK@:' '    context: @CB@' '    build_type: @TP@' '    packages: ["@PKG@"]' \
         'build_identity:' '  @TS@:' '    inputs: [source_sha]' '  @TP@:' '    inputs: [source_sha, package_versions]' \
         'base_images:' '  alpine: @IMG@' 'build_matrix:' '  platforms: [@P1@, @P2@]' \
         'platform_arch:' '  @K1@:' '    apk: @AA@' '  @K2@:' '    apk: @AB@')" > "${r}/m.yml"
     export CI_MANIFEST="${r}/m.yml" CI_REPO_ROOT="${r}"
     _id() { run --separate-stderr bash "${CI_SH}" identity "$@"; [ "${status}" -eq 0 ] || { echo "identity $*: rc ${status} ${stderr}"; return 1; }; }
-    _id "${V[@A@]}" "${V[@P1@]}" && a1="${output}"
-    [[ "${a1}" =~ ^platform=${V[@P1@]}\ identity=[0-9a-f]{64}$ ]] || { echo "shape: ${a1}"; return 1; }
-    _id "${V[@A@]}" "${V[@P1@]}" && [ "${output}" = "${a1}" ] || { echo "not deterministic: ${output}"; return 1; }
-    _id "${V[@B@]}" "${V[@P1@]}" && b1="${output}" && [ "${b1#*identity=}" != "${a1#*identity=}" ] || { echo "per target"; return 1; }
-    _id "${V[@A@]}" "${V[@P2@]}" && a2="${output}" && [ "${a2#*identity=}" != "${a1#*identity=}" ] || { echo "per platform"; return 1; }
-    _id "${V[@PK@]}" "${V[@P1@]}" && [[ "${output}" =~ ^platform=${V[@P1@]}\ identity=[0-9a-f]{64}$ ]] || { echo "pkgs: ${output}"; return 1; }
-    _id "${V[@A@]}" && [ "${#lines[@]}" -eq 2 ] && [ "${lines[0]}" = "${a1}" ] && [ "${lines[1]}" = "${a2}" ] \
+    _id "${V["@A@"]}" "${V["@P1@"]}" && a1="${output}"
+    [[ "${a1}" =~ ^platform=${V["@P1@"]}\ identity=[0-9a-f]{64}$ ]] || { echo "shape: ${a1}"; return 1; }
+    _id "${V["@A@"]}" "${V["@P1@"]}" && [ "${output}" = "${a1}" ] || { echo "not deterministic: ${output}"; return 1; }
+    _id "${V["@B@"]}" "${V["@P1@"]}" && b1="${output}" && [ "${b1#*identity=}" != "${a1#*identity=}" ] || { echo "per target"; return 1; }
+    _id "${V["@A@"]}" "${V["@P2@"]}" && a2="${output}" && [ "${a2#*identity=}" != "${a1#*identity=}" ] || { echo "per platform"; return 1; }
+    _id "${V["@PK@"]}" "${V["@P1@"]}" && [[ "${output}" =~ ^platform=${V["@P1@"]}\ identity=[0-9a-f]{64}$ ]] || { echo "pkgs: ${output}"; return 1; }
+    _id "${V["@A@"]}" && [ "${#lines[@]}" -eq 2 ] && [ "${lines[0]}" = "${a1}" ] && [ "${lines[1]}" = "${a2}" ] \
         || { echo "fan-out: ${output}"; return 1; }
-    run bash "${CI_SH}" identity "${V[@A@]}" "${V[@X@]}"
-    _expect foreign-platform 2 "[CI-ERROR-IDENTITY-0002] service=\"${V[@A@]}\"" || return 1
+    run bash "${CI_SH}" identity "${V["@A@"]}" "${V["@X@"]}"
+    _expect foreign-platform 2 "[CI-ERROR-IDENTITY-0002] service=\"${V["@A@"]}\"" || return 1
     # What: an edit in A's context moves A only, never B.
     # Why: impact is content identity, never a path guess.
     # From: Issue #1683 | PR #1858
-    _id "${V[@B@]}" "${V[@P1@]}" && b0="${output}"
-    _val name > "${r}/${V[@CA@]}/${V[@F@]}" && git -C "${r}" add -A
-    _id "${V[@A@]}" "${V[@P1@]}" && a1b="${output}" && [ "${a1b}" != "${a1}" ] || { echo "A did not move"; return 1; }
-    _id "${V[@B@]}" "${V[@P1@]}" && [ "${output}" = "${b0}" ] || { echo "B moved: ${output} vs ${b0}"; return 1; }
+    _id "${V["@B@"]}" "${V["@P1@"]}" && b0="${output}"
+    _val name > "${r}/${V["@CA@"]}/${V["@F@"]}" && git -C "${r}" add -A
+    _id "${V["@A@"]}" "${V["@P1@"]}" && a1b="${output}" && [ "${a1b}" != "${a1}" ] || { echo "A did not move"; return 1; }
+    _id "${V["@B@"]}" "${V["@P1@"]}" && [ "${output}" = "${b0}" ] || { echo "B moved: ${output} vs ${b0}"; return 1; }
     sed -i '/^  platforms: \[/d' "${CI_MANIFEST}"
-    run bash "${CI_SH}" identity "${V[@A@]}"
+    run bash "${CI_SH}" identity "${V["@A@"]}"
     _expect no-platforms 2 "[CI-ERROR-IDENTITY-0003]" || return 1
     [[ "${output}" != *"identity="* ]] || { echo "identity line leaked: ${output}"; return 1; }
 }
@@ -816,10 +816,10 @@ _pin_consumer() {
 @test "retry classifier maps each failure text per op" {
     local name op text want got
     local -A V=(
-        [@REF@]="$(_val host)/$(_val name)/$(_val name):$(_val name)" [@CRATE@]="$(_val name)" [@HOST@]="$(_val host)"
-        [@GREF@]="refs/$(_val name)" [@PKG@]="$(_val name)" [@FILE@]="$(_val name).c" [@SYM@]="$(_val name)"
-        [@MS@]="$(_val int 1 900)ms" [@PID@]="$(_val int 1 9000)" [@URL@]="$(_val url)/$(_val name).json"
-        [@TAG@]="$(_val name)" [@TXT@]="$(_val name) $(_val name)"
+        ["@REF@"]="$(_val host)/$(_val name)/$(_val name):$(_val name)" ["@CRATE@"]="$(_val name)" ["@HOST@"]="$(_val host)"
+        ["@GREF@"]="refs/$(_val name)" ["@PKG@"]="$(_val name)" ["@FILE@"]="$(_val name).c" ["@SYM@"]="$(_val name)"
+        ["@MS@"]="$(_val int 1 900)ms" ["@PID@"]="$(_val int 1 9000)" ["@URL@"]="$(_val url)/$(_val name).json"
+        ["@TAG@"]="$(_val name)" ["@TXT@"]="$(_val name) $(_val name)"
     )
     while IFS='|' read -r name op text want; do
         got="$(_ci_classify_failure "$(printf '%b' "$(_fill "${text}")")" ${op:+"${op}"})"
@@ -873,7 +873,7 @@ git-no-host||Could not resolve host: @HOST@|transient
 git-rpc||RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly|transient
 git-gnutls||GnuTLS recv error (-9): A TLS packet with unexpected length was received.|transient
 git-no-ref||fatal: couldn't find remote ref @GREF@|permanent
-distcc|accel|distcc[@PID@] (dcc_build_somewhere) ERROR: failed to distribute and fallbacks are disabled|transient
+distcc|accel|distcc["@PID@"] (dcc_build_somewhere) ERROR: failed to distribute and fallbacks are disabled|transient
 sccache|accel|sccache: error: Timed out waiting for server startup. Maybe the remote service is unreachable?|transient
 ccache|accel|ccache: error: No such file or directory|transient
 c-error|accel|@FILE@:1:23: error: '@SYM@' undeclared (first use in this function)|permanent
@@ -983,7 +983,7 @@ CASES
         [env]='echo "h=${https_proxy} n=${NO_PROXY}"; _ci_proxy_names | tr "\n" " "'
         [bundle]='[ "$(grep -c "BEGIN CERTIFICATE" "${CARGO_HTTP_CAINFO}")" -gt 0 ] && echo system-certs; tail -n 1 "${CARGO_HTTP_CAINFO}"; [ "${CURL_CA_BUNDLE}" = "${CARGO_HTTP_CAINFO}" ] && echo same; stat -c %a "${CARGO_HTTP_CAINFO}"'
     )
-    local -A V=([@PROXY@]="$(_val url)" [@EXCL@]="$(_val host)" [@CA@]="$(_val name)")
+    local -A V=(["@PROXY@"]="$(_val url)" ["@EXCL@"]="$(_val host)" ["@CA@"]="$(_val name)")
     while IFS='|' read -r case envs probe rc want; do
         envs="$(_fill "${envs}")" want="$(_fill "${want}")"
         read -r -a ev <<< "${envs}"
@@ -1045,7 +1045,7 @@ CASES
 # From: Issue #1683 | PR #1858
 @test "release tag: next patch from a tag string, an rc tag refused" {
     local case arg rc want
-    local -A V=([@X@]="$(_val int 0 50)" [@Y@]="$(_val int 0 50)" [@Z@]="$(_val int 0 50)")
+    local -A V=(["@X@"]="$(_val int 0 50)" ["@Y@"]="$(_val int 0 50)" ["@Z@"]="$(_val int 0 50)")
     while IFS='|' read -r case arg rc want; do
         run _ci_next_patch_tag "$(_fill "${arg}")"
         _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
@@ -1221,12 +1221,12 @@ STUB
     _stand_ins || return 1
     local case nets rc want count slot lo hi sub a b i j
     local -a subs starts ends ns
-    local -A V=([@S@]="$(_val name)" [@H@]="$(_val name)")
+    local -A V=(["@S@"]="$(_val name)" ["@H@"]="$(_val name)")
     # What: three network names in jq's key order
     # Why: the override lists networks by sorted key
     # From: Issue #1683 | PR #1858
     mapfile -t ns < <(printf '%s\n' "$(_val name)" "$(_val name)" "$(_val name)" | LC_ALL=C sort)
-    V[@N1@]="${ns[0]}" V[@N2@]="${ns[1]}" V[@N3@]="${ns[2]}"
+    V["@N1@"]="${ns[0]}" V["@N2@"]="${ns[1]}" V["@N3@"]="${ns[2]}"
     slot="$(_ci_validate_subnet "$(_val name)")" || return 1
     lo="$(_ci_ipv4_to_int "${slot%/*}")" hi=$(( $(_ci_ipv4_to_int "${slot%/*}") + (1 << (32 - ${slot#*/})) ))
     while IFS='|' read -r case nets rc want count; do
@@ -1256,9 +1256,9 @@ STUB
         # What: network_mode reset for host-mode only
         # Why: a probe may run it in the /27; up never does
         # From: Issue #763 | PR #1858
-        [[ "${output}" == *$'  '"${V[@H@]}"$':\n    network_mode: !reset null'* ]] \
+        [[ "${output}" == *$'  '"${V["@H@"]}"$':\n    network_mode: !reset null'* ]] \
             && [ "$(grep -c 'network_mode' <<< "${output}")" -eq 1 ] \
-            && [[ "${output}" != *$'  '"${V[@H@]}"$':\n    container_name'* ]] \
+            && [[ "${output}" != *$'  '"${V["@H@"]}"$':\n    container_name'* ]] \
             || { echo "${case}: host-mode reset: ${output}"; return 1; }
     done <<'CASES'
 default-only|"default":{}|0|networks:;default:;services:;@S@:;container_name: !reset null;ports: !reset []|1
@@ -1292,10 +1292,10 @@ CASES
     m="$(_val path)"
     local -a ev
     local -A V=(
-        [@VAR@]="$(_val var)" [@NOVAR@]="$(_val var)" [@SOTV@]="$(_val name)" [@ENVV@]="$(_val name)"
-        [@JSONV@]="$(_val name)" [@BAD@]="$(_val name)" [@NOJQ@]="$(_val path)"
+        ["@VAR@"]="$(_val var)" ["@NOVAR@"]="$(_val var)" ["@SOTV@"]="$(_val name)" ["@ENVV@"]="$(_val name)"
+        ["@JSONV@"]="$(_val name)" ["@BAD@"]="$(_val name)" ["@NOJQ@"]="$(_val path)"
     )
-    _path_without "${V[@NOJQ@]}" jq
+    _path_without "${V["@NOJQ@"]}" jq
     _fill "$(printf '%s\n' 'ci_variables:' '  @VAR@: @SOTV@')" > "${m}"
     while IFS='|' read -r case envs name rc want; do
         ev=(); [ "${envs}" = - ] || read -r -a ev <<< "$(_fill "${envs}")"
@@ -1322,19 +1322,19 @@ CASES
 @test "set-runtime writes each config's secrets 0600 with values hidden; clear-runtime removes them" {
     local case mode runner url tok sched stoken hosts ca rc want present pol dir id k got
     local -A V=(
-        [@U@]="$(_val url)" [@RU@]="$(_val url)" [@T@]="$(_val name)" [@CA@]="$(_val name)"
-        [@S@]="$(_val url)" [@ST@]="$(_val name)" [@H1@]="$(_val host)" [@H2@]="$(_val host)" [@BAD@]="$(_val name)"
-        [@TCS@]="$(_val int 1 4000000000)"
+        ["@U@"]="$(_val url)" ["@RU@"]="$(_val url)" ["@T@"]="$(_val name)" ["@CA@"]="$(_val name)"
+        ["@S@"]="$(_val url)" ["@ST@"]="$(_val name)" ["@H1@"]="$(_val host)" ["@H2@"]="$(_val host)" ["@BAD@"]="$(_val name)"
+        ["@TCS@"]="$(_val int 1 4000000000)"
     )
     _rt_probe() {
         _cache_env_clean
         unset SCCACHE_DIST_SCHEDULER_URL SCCACHE_DIST_AUTH_TOKEN DISTCC_POTENTIAL_HOSTS PROJECT_SELFHOSTED_PROXY_CA CI_VARIABLES
         [ -z "${RT_CIV:-}" ] || export CI_VARIABLES="${RT_CIV}"
         export CI_RUNTIME_SECRET_DIR="$1" SCCACHE_REDIS_MODE="$2"
-        export CI_SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE="${RT_TCS:-${V[@TCS@]}}"
+        export CI_SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE="${RT_TCS:-${V["@TCS@"]}}"
         [ "$3" = - ] || export RUNNER_ENVIRONMENT="$3"
         [ "$4" = - ] || export SCCACHE_REDIS_URL="$4"
-        [ "$5" = no ] || export ACTIONS_RESULTS_URL="${V[@RU@]}" ACTIONS_RUNTIME_TOKEN="${V[@T@]}"
+        [ "$5" = no ] || export ACTIONS_RESULTS_URL="${V["@RU@"]}" ACTIONS_RUNTIME_TOKEN="${V["@T@"]}"
         [ "$6" = - ] || export SCCACHE_DIST_SCHEDULER_URL="$6"
         [ "$7" = - ] || export SCCACHE_DIST_AUTH_TOKEN="$7"
         [ "$8" = - ] || export DISTCC_POTENTIAL_HOSTS="$8"
@@ -1357,15 +1357,15 @@ CASES
             [[ "${output}" == *"--secret id=${id},src=${dir}/${id}"* ]] || { echo "${case}: no --secret for ${id}"; return 1; }
         done
         [ -z "${got}" ] || [ "$(<"${dir}/sccache_policy")" = "$(_fill "${pol}")" ] || { echo "${case}: policy"; return 1; }
-        [ ! -e "${dir}/sccache_redis_url" ] || [ "$(<"${dir}/sccache_redis_url")" = "${V[@U@]}" ] || { echo "${case}: redis url"; return 1; }
-        [ ! -e "${dir}/ccache_redis_url" ] || [ "$(<"${dir}/ccache_redis_url")" = "${V[@U@]}" ] || { echo "${case}: ccache url"; return 1; }
-        [ ! -e "${dir}/sccache_gha" ] || [ "$(<"${dir}/sccache_gha")" = "ACTIONS_RESULTS_URL=${V[@RU@]}"$'\n'"ACTIONS_RUNTIME_TOKEN=${V[@T@]}" ] \
+        [ ! -e "${dir}/sccache_redis_url" ] || [ "$(<"${dir}/sccache_redis_url")" = "${V["@U@"]}" ] || { echo "${case}: redis url"; return 1; }
+        [ ! -e "${dir}/ccache_redis_url" ] || [ "$(<"${dir}/ccache_redis_url")" = "${V["@U@"]}" ] || { echo "${case}: ccache url"; return 1; }
+        [ ! -e "${dir}/sccache_gha" ] || [ "$(<"${dir}/sccache_gha")" = "ACTIONS_RESULTS_URL=${V["@RU@"]}"$'\n'"ACTIONS_RUNTIME_TOKEN=${V["@T@"]}" ] \
             || { echo "${case}: gha tokens"; return 1; }
-        [ ! -e "${dir}/project_selfhosted_proxy_ca" ] || [ "$(<"${dir}/project_selfhosted_proxy_ca")" = "${V[@CA@]}" ] || { echo "${case}: CA"; return 1; }
+        [ ! -e "${dir}/project_selfhosted_proxy_ca" ] || [ "$(<"${dir}/project_selfhosted_proxy_ca")" = "${V["@CA@"]}" ] || { echo "${case}: CA"; return 1; }
         [ ! -e "${dir}/distcc_potential_hosts" ] || [ "$(<"${dir}/distcc_potential_hosts")" = "$(_fill "${hosts}")" ] || { echo "${case}: hosts"; return 1; }
-        [ ! -e "${dir}/sccache_dist_config" ] || grep -qF "\"${V[@S@]}\"" "${dir}/sccache_dist_config" || { echo "${case}: scheduler"; return 1; }
-        [ ! -e "${dir}/sccache_dist_config" ] || grep -qF "\"${V[@ST@]}\"" "${dir}/sccache_dist_config" || { echo "${case}: dist token"; return 1; }
-        [ ! -e "${dir}/sccache_dist_config" ] || grep -qxF "toolchain_cache_size = ${V[@TCS@]}" "${dir}/sccache_dist_config" \
+        [ ! -e "${dir}/sccache_dist_config" ] || grep -qF "\"${V["@S@"]}\"" "${dir}/sccache_dist_config" || { echo "${case}: scheduler"; return 1; }
+        [ ! -e "${dir}/sccache_dist_config" ] || grep -qF "\"${V["@ST@"]}\"" "${dir}/sccache_dist_config" || { echo "${case}: dist token"; return 1; }
+        [ ! -e "${dir}/sccache_dist_config" ] || grep -qxF "toolchain_cache_size = ${V["@TCS@"]}" "${dir}/sccache_dist_config" \
             || { echo "${case}: toolchain cache size"; return 1; }
     done <<'CASES'
 bad-mode|@BAD@|github-hosted|-|yes|-|-|-|-|2|[CI-ERROR-VARIABLES-0010]|-|-
@@ -1385,20 +1385,20 @@ CASES
     _expect mkdir-fails 2 "[CI-ERROR-VARIABLES-0019];raw:" || return 1
     dir="$(_val path)"
     mkdir -p "${dir}/sccache_dist_config"
-    run _rt_probe "${dir}" optional github-hosted - no "${V[@S@]}" "${V[@ST@]}" - -
+    run _rt_probe "${dir}" optional github-hosted - no "${V["@S@"]}" "${V["@ST@"]}" - -
     _expect dist-write-fails 2 "[CI-ERROR-VARIABLES-0020];raw:" || return 1
     run _ci_emit_secret_ref "${dir}" "$(_val name)"
     _expect unknown-id 2 "[CI-ERROR-VARIABLES-0014]" || return 1
     dir="$(_val path)"
-    RT_TCS="$(_val name)" run _rt_probe "${dir}" optional github-hosted - no "${V[@S@]}" "${V[@ST@]}" - -
+    RT_TCS="$(_val name)" run _rt_probe "${dir}" optional github-hosted - no "${V["@S@"]}" "${V["@ST@"]}" - -
     _expect bad-size 2 "[CI-ERROR-VARIABLES-0021]" || return 1
     [ ! -e "${dir}" ] || { echo "bad-size: ${dir} written"; return 1; }
     dir="$(_val path)"
-    RT_CIV="$(printf '{"SCCACHE_DIST_SCHEDULER_URL":"%s","DISTCC_POTENTIAL_HOSTS":"%s,cpp"}' "${V[@S@]}" "${V[@H1@]}")" \
-        run _rt_probe "${dir}" optional github-hosted - no - "${V[@ST@]}" - -
+    RT_CIV="$(printf '{"SCCACHE_DIST_SCHEDULER_URL":"%s","DISTCC_POTENTIAL_HOSTS":"%s,cpp"}' "${V["@S@"]}" "${V["@H1@"]}")" \
+        run _rt_probe "${dir}" optional github-hosted - no - "${V["@ST@"]}" - -
     _expect ci-variables 0 - || return 1
-    grep -qF "\"${V[@S@]}\"" "${dir}/sccache_dist_config" || { echo "ci-variables: scheduler"; return 1; }
-    [ "$(<"${dir}/distcc_potential_hosts")" = "${V[@H1@]},cpp" ] || { echo "ci-variables: hosts"; return 1; }
+    grep -qF "\"${V["@S@"]}\"" "${dir}/sccache_dist_config" || { echo "ci-variables: scheduler"; return 1; }
+    [ "$(<"${dir}/distcc_potential_hosts")" = "${V["@H1@"]},cpp" ] || { echo "ci-variables: hosts"; return 1; }
     dir="$(_val path)"
     run _rt_probe "${dir}" optional github-hosted - no - - - -
     CI_RUNTIME_SECRET_DIR="${dir}" run bash "${CI_SH}" variables clear-runtime
@@ -1458,31 +1458,31 @@ CASES
     # From: Issue #1683 | PR #1858
     local m nobase want got
     local -A V=(
-        [@S@]="$(_val name)" [@FB@]="$(_val name)" [@LIC@]="$(_val name)" [@BDIG@]="$(_val digest)"
-        [@BIMG@]="$(_val host)/$(_val name):$(_val semver)" [@OWN@]="$(_val name)" [@REPO@]="$(_val name)"
-        [@SRV@]="$(_val url)" [@SHA@]="$(_val sha)"
+        ["@S@"]="$(_val name)" ["@FB@"]="$(_val name)" ["@LIC@"]="$(_val name)" ["@BDIG@"]="$(_val digest)"
+        ["@BIMG@"]="$(_val host)/$(_val name):$(_val semver)" ["@OWN@"]="$(_val name)" ["@REPO@"]="$(_val name)"
+        ["@SRV@"]="$(_val url)" ["@SHA@"]="$(_val sha)"
     )
     m="$(_val path)"
     nobase="$(_val path)"
     _fill "$(printf '%s\n' 'release:' '  license: @LIC@' 'base_images:' '  @FB@: "@BIMG@@@BDIG@"' \
         'services:' '  @S@:' '    final_base: @FB@')" > "${m}"
-    grep -v "^  ${V[@FB@]}:" "${m}" > "${nobase}"
+    grep -v "^  ${V["@FB@"]}:" "${m}" > "${nobase}"
     want="$(_fill "$(printf 'org.opencontainers.image.%s\n' 'revision=@SHA@' 'version=@SHA@' \
         'source=@SRV@/@OWN@/@REPO@' 'url=@SRV@/@OWN@/@REPO@' 'documentation=@SRV@/@OWN@/@REPO@' 'licenses=@LIC@' \
         'vendor=@OWN@' 'title=@S@' 'description=@REPO@ @S@ image' 'base.name=@BIMG@' 'base.digest=@BDIG@')")"
-    CI_MANIFEST="${m}" GITHUB_SHA="${V[@SHA@]}" GITHUB_SERVER_URL="${V[@SRV@]}" GITHUB_REPOSITORY="${V[@OWN@]}/${V[@REPO@]}" \
-        run _ci_oci_labels "${V[@S@]}"
+    CI_MANIFEST="${m}" GITHUB_SHA="${V["@SHA@"]}" GITHUB_SERVER_URL="${V["@SRV@"]}" GITHUB_REPOSITORY="${V["@OWN@"]}/${V["@REPO@"]}" \
+        run _ci_oci_labels "${V["@S@"]}"
     _expect labels 0 - || return 1
     [[ "${output%%$'\n'*}" =~ ^org\.opencontainers\.image\.created=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
         || { echo "created: ${output}"; return 1; }
     got="${output#*$'\n'}"
     [ "${got}" = "${want}" ] || { echo "labels: ${got}"; echo "want: ${want}"; return 1; }
-    CI_MANIFEST="${m}" GITHUB_SHA='' GITHUB_SERVER_URL="${V[@SRV@]}" GITHUB_REPOSITORY="${V[@OWN@]}/${V[@REPO@]}" \
-        run _ci_oci_labels "${V[@S@]}"
+    CI_MANIFEST="${m}" GITHUB_SHA='' GITHUB_SERVER_URL="${V["@SRV@"]}" GITHUB_REPOSITORY="${V["@OWN@"]}/${V["@REPO@"]}" \
+        run _ci_oci_labels "${V["@S@"]}"
     _expect no-sha 0 - || return 1
     [[ "${output}" != *"image.revision="* && "${output}" != *"image.version="* ]] || { echo "no-sha: ${output}"; return 1; }
-    CI_MANIFEST="${nobase}" GITHUB_SHA="${V[@SHA@]}" GITHUB_SERVER_URL="${V[@SRV@]}" GITHUB_REPOSITORY="${V[@OWN@]}/${V[@REPO@]}" \
-        run _ci_oci_labels "${V[@S@]}"
+    CI_MANIFEST="${nobase}" GITHUB_SHA="${V["@SHA@"]}" GITHUB_SERVER_URL="${V["@SRV@"]}" GITHUB_REPOSITORY="${V["@OWN@"]}/${V["@REPO@"]}" \
+        run _ci_oci_labels "${V["@S@"]}"
     _expect no-base 2 "$(_fill '[CI-ERROR-BUILD-0014] service="@S@" key="base_images.@FB@"')" || return 1
 }
 
@@ -1554,14 +1554,14 @@ CASES
 @test "check pr-template: every template section filled, one box marked" {
     _stand_ins || return 1
     local root="${BATS_TEST_TMPDIR}/prt" none="${BATS_TEST_TMPDIR}/prt-none" case env body rc want ex
-    local -A V=([@A@]="$(_val name)" [@B@]="$(_val name)")
-    V[@CB@]="$(_ci_block_entry_field pr_policy "" checkbox_section)"
+    local -A V=(["@A@"]="$(_val name)" ["@B@"]="$(_val name)")
+    V["@CB@"]="$(_ci_block_entry_field pr_policy "" checkbox_section)"
     ex="$(_ci_block_entry_list pr_policy "" check_exempt_authors)"
-    V[@EX@]="${ex%%$'\n'*}"
-    V[@NONE@]="${none}"
-    [ -n "${V[@CB@]}" ] && [ -n "${V[@EX@]}" ] || { echo "SOT pr_policy inputs missing"; return 1; }
+    V["@EX@"]="${ex%%$'\n'*}"
+    V["@NONE@"]="${none}"
+    [ -n "${V["@CB@"]}" ] && [ -n "${V["@EX@"]}" ] || { echo "SOT pr_policy inputs missing"; return 1; }
     mkdir -p "${root}/$(dirname "$(_ci_variable CI_PR_TEMPLATE)")" "${none}"
-    printf '## %s\n\n## %s\n\n## %s\n' "${V[@A@]}" "${V[@B@]}" "${V[@CB@]}" > "$(_ci_repo_path CI_PR_TEMPLATE "${root}")"
+    printf '## %s\n\n## %s\n\n## %s\n' "${V["@A@"]}" "${V["@B@"]}" "${V["@CB@"]}" > "$(_ci_repo_path CI_PR_TEMPLATE "${root}")"
     unset PR_AUTHOR PR_DRAFT
     export CI_REPO_ROOT="${root}"
     while IFS='|' read -r case env body rc want; do
@@ -1625,32 +1625,32 @@ CASES
 @test "ci-bats gate: only a shell comment change skips the suite" {
     local r base head case path body want id
     local -A V=(
-        [@B@]="$(_val name).bats" [@L@]="$(_val name).sh" [@N@]="$(_val name).md" [@NEW@]="$(_val name).sh"
-        [@Y@]="$(_val name).yml" [@RS@]="$(_val name).rs" [@C1@]="$(_val name)" [@C2@]="$(_val name)"
-        [@FN@]="$(_val name)" [@E1@]="$(_val name)" [@E2@]="$(_val name)" [@D@]="$(_val name)"
-        [@H1@]="$(_val name)" [@H2@]="$(_val name)" [@MAIL@]="$(_val name)@$(_val host)" [@WHO@]="$(_val name)"
-        [@U@]="$(_val name).sh"
+        ["@B@"]="$(_val name).bats" ["@L@"]="$(_val name).sh" ["@N@"]="$(_val name).md" ["@NEW@"]="$(_val name).sh"
+        ["@Y@"]="$(_val name).yml" ["@RS@"]="$(_val name).rs" ["@C1@"]="$(_val name)" ["@C2@"]="$(_val name)"
+        ["@FN@"]="$(_val name)" ["@E1@"]="$(_val name)" ["@E2@"]="$(_val name)" ["@D@"]="$(_val name)"
+        ["@H1@"]="$(_val name)" ["@H2@"]="$(_val name)" ["@MAIL@"]="$(_val name)@$(_val host)" ["@WHO@"]="$(_val name)"
+        ["@U@"]="$(_val name).sh"
     )
-    V[@README@]="$(_ci_variable CI_README)"
-    run _ci_check_ci_bats "${V[@N@]}"
+    V["@README@"]="$(_ci_variable CI_README)"
+    run _ci_check_ci_bats "${V["@N@"]}"
     _expect nested 0 '=ci-bats=NOT-RUN reason="already inside a bats run; no nested suite"' || return 1
     r="$(_val path)"
     git init -q "${r}"
-    mkdir -p "$(dirname "${r}/${V[@README@]}")"
-    _fill "$(printf '%s\n' '@test "@C1@" {' '  # @C1@' '  true' '}')" > "${r}/${V[@B@]}"
-    _fill "$(printf '%s\n' '@FN@() {' '  # @C1@' '  echo @E1@' '}' 'cat <<@D@' '# @H1@' '@D@')" > "${r}/${V[@L@]}"
-    _fill "$(printf '%s\n' '// @C1@' 'fn main() {}')" > "${r}/${V[@RS@]}"
-    _fill "$(printf '%s\n' 'echo "@E1@' '# @C1@')" > "${r}/${V[@U@]}"
-    printf '%s\n' "${V[@C1@]}" > "${r}/${V[@N@]}"
-    printf '%s\n' "${V[@C1@]}" > "${r}/${V[@README@]}"
+    mkdir -p "$(dirname "${r}/${V["@README@"]}")"
+    _fill "$(printf '%s\n' '@test "@C1@" {' '  # @C1@' '  true' '}')" > "${r}/${V["@B@"]}"
+    _fill "$(printf '%s\n' '@FN@() {' '  # @C1@' '  echo @E1@' '}' 'cat <<@D@' '# @H1@' '@D@')" > "${r}/${V["@L@"]}"
+    _fill "$(printf '%s\n' '// @C1@' 'fn main() {}')" > "${r}/${V["@RS@"]}"
+    _fill "$(printf '%s\n' 'echo "@E1@' '# @C1@')" > "${r}/${V["@U@"]}"
+    printf '%s\n' "${V["@C1@"]}" > "${r}/${V["@N@"]}"
+    printf '%s\n' "${V["@C1@"]}" > "${r}/${V["@README@"]}"
     git -C "${r}" add -A
-    git -C "${r}" -c user.email="${V[@MAIL@]}" -c user.name="${V[@WHO@]}" commit -qm base
+    git -C "${r}" -c user.email="${V["@MAIL@"]}" -c user.name="${V["@WHO@"]}" commit -qm base
     base="$(git -C "${r}" rev-parse HEAD)"
     while IFS='|' read -r case path body want id; do
         git -C "${r}" checkout -q "${base}"
         printf '%b' "$(_fill "${body}")" > "${r}/$(_fill "${path}")"
         git -C "${r}" add -A
-        git -C "${r}" -c user.email="${V[@MAIL@]}" -c user.name="${V[@WHO@]}" commit -qm "${case}"
+        git -C "${r}" -c user.email="${V["@MAIL@"]}" -c user.name="${V["@WHO@"]}" commit -qm "${case}"
         head="$(git -C "${r}" rev-parse HEAD)"
         CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push BEFORE_SHA="${base}" GITHUB_SHA="${head}" \
             run _ci_test_identity_gate "$(_fill "${path}")"
@@ -1668,7 +1668,7 @@ new-file|@NEW@|echo @E1@\n|run|[CI-INFO-TESTID-0002]
 other-file|@Y@|@C1@: @E1@\n|run|[CI-INFO-TESTID-0006]
 rust-comment|@RS@|// @C2@\nfn main() {}\n|run|[CI-INFO-TESTID-0006]
 CASES
-    CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push BEFORE_SHA='' GITHUB_SHA="${head}" run _ci_test_identity_gate "${V[@B@]}"
+    CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push BEFORE_SHA='' GITHUB_SHA="${head}" run _ci_test_identity_gate "${V["@B@"]}"
     _expect no-base 0 '[CI-INFO-TESTID-0004]' || return 1
     [ "${lines[${#lines[@]}-1]}" = run ] || { echo "no-base: ${output}"; return 1; }
     run _ci_test_identity_gate
@@ -1683,8 +1683,8 @@ CASES
     local m case sot paths rc want
     local -a av
     local -A V=(
-        [@VAR@]="$(_val var)" [@D@]="$(_val name)" [@NAMED@]="$(_val name)" [@STATE@]="$(_val name)"
-        [@GOV@]="$(_val name)" [@X@]="$(_val name)" [@Y@]="$(_val name)" [@C@]="$(_val name)"
+        ["@VAR@"]="$(_val var)" ["@D@"]="$(_val name)" ["@NAMED@"]="$(_val name)" ["@STATE@"]="$(_val name)"
+        ["@GOV@"]="$(_val name)" ["@X@"]="$(_val name)" ["@Y@"]="$(_val name)" ["@C@"]="$(_val name)"
     )
     m="$(_val path)"
     _fill "$(printf '%s\n' 'ci_variables:' '  @VAR@: @D@/@NAMED@.md' '  CI_DOCS_DIR: @D@' 'release:' \
@@ -1855,9 +1855,9 @@ CASES
 @test "check changelog-direct-edit warns on a direct edit unless labelled" {
     local case files labels rc want
     local -a argv
-    local -A V=([@F@]="$(_ci_variable CI_CHANGELOG)" [@O@]="$(_val name)")
-    V[@L@]="$(_ci_block_entry_field release_notes "" changelog_edit_label)"
-    [ -n "${V[@L@]}" ] || { echo "no SOT release_notes.changelog_edit_label"; return 1; }
+    local -A V=(["@F@"]="$(_ci_variable CI_CHANGELOG)" ["@O@"]="$(_val name)")
+    V["@L@"]="$(_ci_block_entry_field release_notes "" changelog_edit_label)"
+    [ -n "${V["@L@"]}" ] || { echo "no SOT release_notes.changelog_edit_label"; return 1; }
     while IFS='|' read -r case files labels rc want; do
         read -r -a argv <<< "$(_fill "${files}")"
         PR_LABELS_JSON="$(_fill "${labels}")" run bash "${CI_SH}" check changelog-direct-edit "${argv[@]}"

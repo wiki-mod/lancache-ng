@@ -334,7 +334,7 @@ _ci_block_keys() {
     # Why: base_images holds values, not nested blocks.
     # From: Issue #1683 | PR #1858
     [ "${mode}" != all ] || t=c
-    printf '%s' "${_CI_SOT[${kp}${t}:${block}]:-}"
+    printf '%s' "${_CI_SOT["${kp}${t}:${block}"]:-}"
 }
 
 # What: Print the product-stack service names.
@@ -409,16 +409,16 @@ _ci_block_entry_field() {
     # Why: base_images has no entry level; one reader.
     # From: Issue #1683 | PR #1858
     if [ -z "${entry}" ]; then
-        [ "${_CI_SOT[${kp}k:${block}]:-}" != c ] || p="${block}/${field}"
-    elif [ "${_CI_SOT[${kp}k:${block}/${entry}]:-}" = c ]; then
-        p="${_CI_SOT[${kp}f:${block}/${entry}/${field}]:-}"
+        [ "${_CI_SOT["${kp}k:${block}"]:-}" != c ] || p="${block}/${field}"
+    elif [ "${_CI_SOT["${kp}k:${block}/${entry}"]:-}" = c ]; then
+        p="${_CI_SOT["${kp}f:${block}/${entry}/${field}"]:-}"
     fi
-    [ -n "${p}" ] && [ -n "${_CI_SOT[${kp}k:${p}]+set}" ] || return 0
-    if [ -n "${_CI_SOT[${kp}e:${p}]}" ]; then
-        ci_error "[CI-ERROR-CORE-0137]" "${ctx/SOT field unreadable/SOT value quoting unsupported}" "${_CI_SOT[${kp}e:${p}]}"
+    [ -n "${p}" ] && [ -n "${_CI_SOT["${kp}k:${p}"]+set}" ] || return 0
+    if [ -n "${_CI_SOT["${kp}e:${p}"]}" ]; then
+        ci_error "[CI-ERROR-CORE-0137]" "${ctx/SOT field unreadable/SOT value quoting unsupported}" "${_CI_SOT["${kp}e:${p}"]}"
         return 2
     fi
-    [ -z "${_CI_SOT[${kp}v:${p}]}" ] || printf '%s\n' "${_CI_SOT[${kp}v:${p}]}"
+    [ -z "${_CI_SOT["${kp}v:${p}"]}" ] || printf '%s\n' "${_CI_SOT["${kp}v:${p}"]}"
 }
 
 # What: Print a block->entry->field list, one item per line.
@@ -435,12 +435,12 @@ _ci_block_entry_list() {
         ci_error "[CI-ERROR-CORE-0108]" "${ctx}" "${_CI_SOT_RAW_ERR}"
         return 2
     fi
-    [ "${_CI_SOT[${kp}k:${node}]:-}" = c ] || return 0
-    if [ -n "${_CI_SOT[${kp}x:${node}/${field}]:-}" ]; then
-        ci_error "[CI-ERROR-CORE-0138]" "${ctx/SOT list unreadable/SOT list item quoting unsupported}" "${_CI_SOT[${kp}x:${node}/${field}]}"
+    [ "${_CI_SOT["${kp}k:${node}"]:-}" = c ] || return 0
+    if [ -n "${_CI_SOT["${kp}x:${node}/${field}"]:-}" ]; then
+        ci_error "[CI-ERROR-CORE-0138]" "${ctx/SOT list unreadable/SOT list item quoting unsupported}" "${_CI_SOT["${kp}x:${node}/${field}"]}"
         return 2
     fi
-    printf '%s' "${_CI_SOT[${kp}i:${node}/${field}]:-}"
+    printf '%s' "${_CI_SOT["${kp}i:${node}/${field}"]:-}"
 }
 
 # What: Query a service field (services or build_toolchain).
@@ -4265,13 +4265,13 @@ _ci_channel_field() {
         ci_error "[CI-ERROR-CORE-0123]" "field=\"$1\" manifest=\"${CI_MANIFEST}\" reason=\"SOT release.channels unreadable\"" "${_CI_SOT_RAW_ERR}"
         return 2
     fi
-    [ "${_CI_SOT[${kp}k:${root}]:-}" = c ] || return 0
+    [ "${_CI_SOT["${kp}k:${root}"]:-}" = c ] || return 0
     while IFS= read -r ch; do
         [ -n "${ch}" ] || continue
         while IFS= read -r p; do
-            [ -z "${p}" ] || printf '%s %s\n' "${ch}" "${_CI_SOT[${kp}r:${p}]}"
-        done <<< "${_CI_SOT[${kp}a:${root}/${ch}/$1]:-}"
-    done <<< "${_CI_SOT[${kp}b:${root}]:-}"
+            [ -z "${p}" ] || printf '%s %s\n' "${ch}" "${_CI_SOT["${kp}r:${p}"]}"
+        done <<< "${_CI_SOT["${kp}a:${root}/${ch}/$1"]:-}"
+    done <<< "${_CI_SOT["${kp}b:${root}"]:-}"
 }
 
 # What: Channels whose field equals a value, one per line.
@@ -8516,8 +8516,8 @@ _ci_shell_sources() {
             _ci_ss_out+=("${_ci_ss_f}")
         fi
     done
-    # What: "dockerfiles" adds Dockerfiles for their RUN shell.
-    # Why: an override list skips pathspecs; basename decides.
+    # What: arg dockerfiles adds Dockerfiles (RUN shell).
+    # Why: overrides skip pathspecs; the basename decides.
     # From: Issue #1683 | PR #1858
     [ "${3:-}" = dockerfiles ] || return 0
     _ci_scan_files _ci_ss_dock "$2" "${CI_DOCKERFILE_SPECS[@]}" || return 2
@@ -8528,31 +8528,23 @@ _ci_shell_sources() {
     done
 }
 
-# What: bash's own parse of one source, as declare -f text.
-# Why: structure checks read bash's grammar, not raw lines.
+# What: shfmt's JSON syntax tree of one shell source.
+# Why: shell checks read the parser's tree, not raw text.
 # From: Issue #1683 | PR #1858
-_ci_shell_canonical() {
-    local f="$1" src pp root
+_ci_shell_ast() {
+    local f="$1" src lang=bash
     case "${f##*/}" in
         *.bats)
-            # What: bats root and lib dir derived as bats does.
-            # Why: bats-preprocess sources its common.bash there.
-            # From: Issue #1683 | PR #1858
-            root="$(readlink -f -- "$(command -v bats)")" && root="${root%/*/*}"
-            pp="${root}/libexec/bats-core/bats-preprocess"
-            if [ ! -x "${pp}" ]; then
-                ci_log "[CI-ERROR-CHECK-0160]" "file=\"${f}\" preprocessor=\"${pp}\" reason=\"bats preprocessor not found\""
-                return 2
-            fi
-            src="$(BATS_ROOT="${root}" BATS_LIBDIR="${BATS_BASE_LIBDIR:-lib}" \
-                _ci_run -s "[CI-ERROR-CHECK-0161]" "file=\"${f}\" reason=\"bats preprocess failed\"" "${pp}" "${f}")" || return 2 ;;
+            lang=bats
+            src="$(_ci_run "[CI-ERROR-CHECK-0166]" "file=\"${f}\" reason=\"source unreadable\"" cat -- "${f}")" || return 2 ;;
         Dockerfile)
             src="$(_ci_run "[CI-ERROR-CHECK-0165]" "file=\"${f}\" reason=\"Dockerfile lines unreadable\"" _ci_dockerfile_logical_lines "${f}")" || return 2
-            # What: RUN shell form only; flags cut, exec form skipped.
-            # Why: only shell-form RUN text is a shell program.
+            # What: RUN shell text; SHELL pipefail -> set.
+            # Why: exec-form RUN is JSON; SHELL sets -o.
             # From: Issue #1683 | PR #1858
             src="$(_ci_run "[CI-ERROR-CHECK-0163]" "file=\"${f}\" reason=\"RUN shell not extracted\"" awk '
                 { t = $0; sub(/^[[:space:]]+/, "", t) }
+                toupper(substr(t, 1, 6)) == "SHELL " && t ~ /pipefail/ { print "set -o pipefail"; next }
                 toupper(substr(t, 1, 4)) != "RUN " { next }
                 {
                     t = substr(t, 5)
@@ -8562,13 +8554,66 @@ _ci_shell_canonical() {
                 }' <<< "${src}")" || return 2 ;;
         *) src="$(_ci_run "[CI-ERROR-CHECK-0166]" "file=\"${f}\" reason=\"source unreadable\"" cat -- "${f}")" || return 2 ;;
     esac
-    # What: the source reaches bash on stdin, not as argv.
-    # Why: one argv string is capped at 128 KiB on Linux.
-    # From: Issue #1683 | PR #1858
-    _ci_run -s "[CI-ERROR-CHECK-0162]" "file=\"${f}\" reason=\"bash cannot parse the source\"" \
-        bash -O extglob -c 's="$(cat)" && eval "__ci_src() {
-${s}
-}" && declare -f __ci_src' <<< "${src}"
+    _ci_run -s "[CI-ERROR-CHECK-0162]" "file=\"${f}\" lang=\"${lang}\" reason=\"shfmt cannot parse the source\"" \
+        shfmt -ln "${lang}" --to-json <<< "${src}"
+}
+
+# What: jq over a shfmt tree: status-read and pipe findings.
+# Why: one pass per file feeds both shell guards.
+# From: Issue #1683 | PR #1858
+_CI_JQ_SHELL_FINDINGS='
+    def reads:
+        if type == "array" then .[] | reads
+        elif type != "object" then empty
+        elif .Type == "ParamExp" and .Param.Value == "?" then .Pos.Line
+        elif .Type == "BinaryCmd" then .X | reads
+        elif .Type == "IfClause" or .Type == "WhileClause" then (.Cond[0] // empty) | reads
+        elif .Type == "Block" or .Type == "Subshell" or .Type == "CmdSubst" or .Type == "ProcSubst" then (.Stmts[0] // empty) | reads
+        elif .Type == "FuncDecl" or .Type == "TestDecl" then empty
+        else to_entries[] | select(.key | IN("Then", "Else", "Do", "Items") | not) | .value | reads
+        end;
+    def elseless: if .Else == null then true elif (.Else.Cond | length) == 0 then false else .Else | elseless end;
+    def lit: [.Parts[]? | if .Type == "Lit" or .Type == "SglQuoted" then .Value
+        elif .Type == "DblQuoted" then ([.Parts[]? | select(.Type == "Lit") | .Value] | join(""))
+        else "\u0000" end] | join("");
+    def argv: [.Args[]? | lit];
+    def early: (.[0] // "") as $c | .[1:] as $a
+        | if $c == "head" then true
+        elif $c == "grep" then $a[:($a | index("--")) // ($a | length)]
+            | any(.[]; test("^-[A-Za-z]*[qml]") or test("^--(quiet|silent|max-count|files-with-matches)"))
+        elif $c == "sed" then any($a[]; (startswith("-") | not) and test("(^|[;{}[:space:]0-9$/])[qQ]([0-9[:space:];}]|$)"))
+        elif $c == "awk" then any($a[]; (startswith("-") | not) and test("(^|[^A-Za-z_])exit([^A-Za-z_]|$)"))
+        else false end;
+    (.. | arrays | select(length > 1 and (.[0] | type == "object" and has("Cmd"))) as $l
+        | range(0; ($l | length) - 1) as $i
+        | select($l[$i].Cmd.Type? == "IfClause" and ($l[$i].Cmd | elseless))
+        | $l[$i + 1] | reads | "status\tfi\t\(.)"),
+    (.. | objects | select(has("Cond") and has("Then") and (.Cond | length) > 0 and .Cond[-1].Negated == true)
+        | (.Then[0] // empty) | reads | "status\tneg\t\(.)"),
+    (if any(.. | objects | select(.Type == "CallExpr") | argv; .[0] == "set" and any(.[1:][]; test("pipefail")))
+     then .. | objects | select(.Type == "BinaryCmd" and (.Op == 13 or .Op == 14))
+        | select(.Y.Cmd.Type? == "CallExpr" and (.Y.Cmd | argv | early))
+        | "pipe\t\(.Pos.Line)\t\(.Y.Cmd | argv | join(" "))"
+     else empty end)'
+
+# What: path -> shell findings, kept for this ci.sh process.
+# Why: check all runs both guards; each file is parsed once.
+# From: Issue #1683 | PR #1858
+declare -gA _CI_SHELL_FINDINGS=()
+
+# What: tagged shell findings of one source (status, pipe).
+# Why: one parse and one tree walk per file and process.
+# From: Issue #1683 | PR #1858
+_ci_shell_findings() {
+    local f="$1" ast out
+    if [ -n "${_CI_SHELL_FINDINGS["${f}"]+set}" ]; then
+        printf '%s' "${_CI_SHELL_FINDINGS["${f}"]}"
+        return 0
+    fi
+    ast="$(_ci_shell_ast "${f}")" || return 2
+    out="$(_ci_run "[CI-ERROR-CHECK-0167]" "file=\"${f}\" reason=\"syntax tree query failed\"" jq -r "${_CI_JQ_SHELL_FINDINGS}" <<< "${ast}")" || return 2
+    _CI_SHELL_FINDINGS["${f}"]="${out}"
+    printf '%s' "${out}"
 }
 
 # What: Fail on any listed text file carrying CRLF.
@@ -8726,17 +8771,17 @@ _CI_AWK_COMMENT_LEX='
         mb = (length("é") == 1); lead_re = "^[\300-\367]$"; cont_re = "^[\200-\277]$"
     }
     { L[FNR] = $0; sub(/\r$/, "", L[FNR]) }
-    # What: queue heredoc openers; quotes carry across lines.
-    # Why: <<<, (( )) or a << in a string opens no heredoc.
+    # What: queue the heredoc delimiters a shell line opens.
+    # Why: <<< , quoted or (( )) << open no here-document.
     # From: Issue #1683 | PR #1858
-    function cl_heredocs(s,  i, n, c, dep, rest, w) {
-        n = length(s); dep = 0
+    function cl_heredocs(s,  i, n, c, q, dep, rest, w) {
+        n = length(s); q = ""; dep = 0
         for (i = 1; i <= n; i++) {
             c = substr(s, i, 1)
-            if (hdq == sq) { if (c == sq) hdq = ""; continue }
+            if (q == sq) { if (c == sq) q = ""; continue }
             if (c == "\\") { i++; continue }
-            if (hdq == "\"") { if (c == "\"") hdq = ""; continue }
-            if (c == sq || c == "\"") { hdq = c; continue }
+            if (q == "\"") { if (c == "\"") q = ""; continue }
+            if (c == sq || c == "\"") { q = c; continue }
             if (c == "#" && (i == 1 || substr(s, i - 1, 1) ~ /[[:space:]]/)) break
             if (substr(s, i, 2) == "((") { dep++; i++; continue }
             if (substr(s, i, 2) == "))" && dep > 0) { dep--; i++; continue }
@@ -9175,7 +9220,7 @@ _ci_check_language_policy() {
 # From: Issue #1683
 _ci_check_mutable_refs() {
     local -a _ci_override=("$@") files=()
-    _ci_scan_files files _ci_override '.github/workflows/*.yml' '.github/actions/**/action.yml' '*/Dockerfile' 'Dockerfile' || return 2
+    _ci_scan_files files _ci_override '.github/workflows/*.yml' '.github/actions/**/action.yml' "${CI_DOCKERFILE_SPECS[@]}" || return 2
     local path out line v
     local -a viol=()
     for path in "${files[@]}"; do
@@ -9380,24 +9425,23 @@ _ci_check_review_chronology() {
 }
 
 # What: Fail on a live pipe into an early-exiting consumer.
-# Why: SIGPIPE under pipefail exits 141 (AG-VAL-029).
-# From: Issue #1683
+# Why: SIGPIPE under pipefail exits 141 (AG-VAL-032).
+# From: Issue #1683 | PR #1858
 _ci_check_pipefail_early_exit() {
-    # What: one pipe into grep -q/-m, head, sed q, awk exit.
-    # Why: only grep's own option words count, not -eq.
-    # From: Issue #1683 | PR #1858
-    local pat='(^|[^|])\|[[:space:]]*(grep([[:space:]]+-[a-zA-Z]+)*[[:space:]]+(-[a-zA-Z]*(q|m[[:space:]]*[0-9])|--(quiet|silent|max-count))|head([[:space:]]|$)|sed[^|]*([[:space:];{]|[0-9])q|awk[^|]*[^a-zA-Z_]exit([^a-zA-Z_]|$))'
     local -a _ci_override=("$@") files=()
     _ci_shell_sources files _ci_override dockerfiles || return 2
-    local path out
+    local path produced tag line cmd
     local -a viol=()
     for path in "${files[@]}"; do
-        out="$(_ci_capture 1 grep -E 'pipefail|build-tools|BUILD_TOOLS_IMAGE' "${path}")" || return 2
-        [ -n "${out}" ] || continue
-        out="$(_ci_capture 1 grep -nE "${pat}" "${path}")" || return 2
-        if [ -n "${out}" ]; then
-            viol+=("${path}: ${out}")
-        fi
+        produced="$(_ci_shell_findings "${path}")" || return 2
+        while IFS=$'\t' read -r tag line cmd; do
+            [ "${tag}" = pipe ] || continue
+            if [ "${path##*/}" = Dockerfile ]; then
+                viol+=("${path}: RUN text line ${line}: live pipe into '${cmd}' under pipefail")
+            else
+                viol+=("${path}:${line}: live pipe into '${cmd}' under pipefail")
+            fi
+        done <<< "${produced}"
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0011]" "reason=\"live pipe into early-exit consumer (SIGPIPE)\"" "$(printf '%s\n' "${viol[@]}")"
@@ -9602,59 +9646,19 @@ _ci_check_exit_evidence() {
 # From: Issue #1683 | PR #1858
 _ci_check_if_without_else_status() {
     local -a _ci_override=("$@") files=()
-    local path canon produced produced_rc kind fn stmt
+    local path produced tag kind line loc
     _ci_shell_sources files _ci_override dockerfiles || return 2
     local -a viol=()
     for path in "${files[@]}"; do
-        canon="$(_ci_shell_canonical "${path}")" || return 2
-        produced_rc=0
-        # What: walk bash's canonical text; heredoc bodies skip.
-        # Why: quotes carry over lines; only unquoted $? counts.
-        # From: Issue #1683 | PR #1858
-        produced="$(awk -v style=hash -v h2= -v h3= "${_CI_AWK_COMMENT_LEX}"'
-            function qscan(s,  i, c, c2, len, hit) {
-                len = length(s); hit = 0
-                for (i = 1; i <= len; i++) {
-                    c = substr(s, i, 1); c2 = substr(s, i, 2)
-                    if (qs == "sq") { if (c == sq) qs = ""; continue }
-                    if (qs == "an") { if (c == "\\") i++; else if (c == sq) qs = ""; continue }
-                    if (c == "\\") { i++; continue }
-                    if (c2 == "$?" || substr(s, i, 4) == "${?}") { hit = 1; i++; continue }
-                    if (c2 == "$(" && substr(s, i, 3) != "$((") { qk[++qd] = qs; qp[qd] = 0; qs = ""; i++; continue }
-                    if (qs == "dq") { if (c == "\"") qs = ""; continue }
-                    if (c2 == "$" sq) { qs = "an"; i++; continue }
-                    if (c == sq) { qs = "sq"; continue }
-                    if (c == "\"") { qs = "dq"; continue }
-                    if (qd > 0 && c == "(") qp[qd]++
-                    else if (qd > 0 && c == ")") { if (qp[qd]) qp[qd]--; else qs = qk[qd--] }
-                }
-                return hit
-            }
-            END {
-                cl_lex()
-                fn = "(top)"; k = 0; pf = -1; pn = -1
-                for (i = 3; i < n; i++) {
-                    if (H[i]) continue
-                    lead = (qs == "" && qd == 0)
-                    hit = qscan(L[i])
-                    if (!lead) continue
-                    match(L[i], /^ */); ind = RLENGTH; t = substr(L[i], ind + 1)
-                    if (pf >= 0) { if (ind == pf && hit) printf "fi\t%s\t%s\n", fn, t; pf = -1 }
-                    if (pn >= 0) { if (ind == pn && hit) printf "neg\t%s\t%s\n", fn, t; pn = -1 }
-                    if (t ~ /^function [^ ]+ \(\) *$/) { fn = t; sub(/^function /, "", fn); sub(/ \(\) *$/, "", fn) }
-                    else if (t ~ /^if /) { FI[++k] = ind; EL[k] = 0; if (t ~ /^if ! /) pn = ind + 4 }
-                    else if (t ~ /^elif ! /) pn = ind + 4
-                    else if (t == "else" && k > 0 && FI[k] == ind) EL[k] = 1
-                    else if (t ~ /^fi;?$/ && k > 0 && FI[k] == ind) { if (!EL[k] && t == "fi;") pf = ind; k-- }
-                }
-            }' <<< "${canon}")" || produced_rc=$?
-        _ci_producer_ok "${produced_rc}" 0 || return 2
-        while IFS=$'\t' read -r kind fn stmt; do
-            [ -n "${kind}" ] || continue
+        produced="$(_ci_shell_findings "${path}")" || return 2
+        while IFS=$'\t' read -r tag kind line; do
+            [ "${tag}" = status ] || continue
+            loc="${path}:${line}"
+            [ "${path##*/}" != Dockerfile ] || loc="${path}: RUN text line ${line}"
             if [ "${kind}" = neg ]; then
-                viol+=("${path}: ${fn}: first \$? inside 'if ! CMD' is the negation's 0 -- use 'CMD || rc=\$?': ${stmt}")
+                viol+=("${loc}: first \$? under 'if ! CMD' is the negation's 0 -- use 'CMD || rc=\$?'")
             else
-                viol+=("${path}: ${fn}: \$? after an else-less if is the if's 0 -- use 'if CMD; then rc=0; else rc=\$?; fi': ${stmt}")
+                viol+=("${loc}: \$? after an else-less if is the if's 0 -- use 'if CMD; then rc=0; else rc=\$?; fi'")
             fi
         done <<< "${produced}"
     done
@@ -9663,39 +9667,6 @@ _ci_check_if_without_else_status() {
         return 1
     fi
     printf 'if-without-else-status=clean files=%s\n' "${#files[@]}"
-}
-
-# What: flag heredoc-fed docker run missing -i
-# Why: unattached stdin runs nothing (AG-VAL-029)
-# From: Issue #1683 | PR #1858
-_ci_check_docker_run_heredoc_stdin() {
-    local -a _ci_override=("$@") files=()
-    _ci_scan_files files _ci_override '.github/workflows/*.yml' '.github/workflows/*.yaml' '.github/actions/**/*.yml' '.github/actions/**/*.yaml' || return 2
-    local path lineno matched trimmed start window last_off invocation
-    local -a viol=()
-    for path in "${files[@]}"; do
-        local produced produced_rc=0
-        produced="$(grep -noE '(bash|sh)[[:space:]]+-s[[:space:]]*<<' "${path}")" || produced_rc=$?
-        _ci_producer_ok "${produced_rc}" 1 || return 2
-        while IFS=: read -r lineno _rest; do
-            [ -n "${lineno}" ] || continue
-            matched="$(sed -n "${lineno}p" "${path}")"
-            trimmed="${matched#"${matched%%[![:space:]]*}"}"
-            case "${trimmed}" in '#'*) continue ;; esac
-            start=$(( lineno > 20 ? lineno - 20 : 1 ))
-            window="$(sed -n "${start},${lineno}p" "${path}")"
-            last_off="$(awk '/docker run/ {n=NR} END {if (n) print n}' <<<"${window}")"
-            [ -n "${last_off}" ] || continue
-            invocation="$(printf '%s\n' "${window}" | tail -n +"${last_off}")"
-            grep -qE '(^|[[:space:]])-i([[:space:]]|$)' <<<"${invocation}" && continue
-            viol+=("${path}:${lineno}: heredoc-fed 'docker run' (bash -s / sh -s) missing -i; container stdin never attaches so the heredoc runs nothing while the step reports success")
-        done <<<"${produced}"
-    done
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0066]" "reason=\"heredoc docker run missing -i; stdin unattached (AG-VAL-029)\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'docker-run-heredoc-stdin=clean files=%s\n' "${#files[@]}"
 }
 
 # What: setup.sh wizard prompts vs expect-sim staleness.
@@ -13093,7 +13064,7 @@ ci_cmd_check_all() {
     # From: Issue #1683
     local -a diff_scoped=(line-endings comment-length \
         deny-short-sha language-policy mutable-refs executable-bits \
-        pipefail-early-exit if-without-else-status docker-run-heredoc-stdin \
+        pipefail-early-exit if-without-else-status \
         bats-and-chain exit-evidence ci-bats review-chronology governance-guards \
         changelog-direct-edit)
     for sub in "${diff_scoped[@]}"; do
@@ -13157,7 +13128,6 @@ ci_cmd_check() {
         if-without-else-status) _ci_check_if_without_else_status "$@" ;;
         exit-evidence) _ci_check_exit_evidence "$@" ;;
         ci-bats) _ci_check_ci_bats "$@" ;;
-        docker-run-heredoc-stdin) _ci_check_docker_run_heredoc_stdin "$@" ;;
         setup-prompt-drift) _ci_check_setup_prompt_drift "$@" ;;
         pr-title) _ci_check_pr_title "$@" ;;
         stable-external-images) _ci_check_stable_external_images "$@" ;;

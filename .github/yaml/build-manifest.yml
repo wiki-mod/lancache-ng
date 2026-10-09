@@ -277,6 +277,7 @@ build_toolchain:
       - rustfmt
       - sccache
       - shellcheck
+      - shfmt
       - sqlite
       - tcpdump
       - trivy@testing=0.74.0-r0
@@ -347,6 +348,7 @@ build_toolchain:
       - sed
       - sha256sum
       - shellcheck
+      - shfmt
       - sort
       - tar
       - tcpdump
@@ -369,6 +371,7 @@ build_toolchain:
       - actionlint --version
       - bats --version
       - shellcheck --version
+      - shfmt --version
       - docker compose version
       - docker buildx version
       - dhclient --version

@@ -4964,9 +4964,10 @@ require_functional_check_tool() {
 # Why: the one network seam tests replace (SETUP_SH_SEAMS)
 # From: Issue #1683 | PR #1858
 _tcp_port_reachable() {
-    local ip="$1" port="$2" err
-    if ! err=$(timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$ip" "$port" 2>&1); then
-        printf 'TCP connect to %s:%s failed (exit %s): %s\n' "$ip" "$port" "$?" "$err" >&2
+    local ip="$1" port="$2" err rc=0
+    err=$(timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$ip" "$port" 2>&1) || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        printf 'TCP connect to %s:%s failed (exit %s): %s\n' "$ip" "$port" "$rc" "$err" >&2
         return 1
     fi
 }
@@ -6155,9 +6156,10 @@ logbundle_named_volume_listing() {
         printf 'docker not available; skipped\n' > "$out"
         return 0
     fi
-    local project volume err rc=0
-    if ! project=$(compose_project_name "$install_dir" "$env_file"); then
-        printf 'compose project lookup failed (exit %s); see the setup.sh output\n' "$?" > "$out"
+    local project volume err rc=0 prc=0
+    project=$(compose_project_name "$install_dir" "$env_file") || prc=$?
+    if [[ "$prc" -ne 0 ]]; then
+        printf 'compose project lookup failed (exit %s); see the setup.sh output\n' "$prc" > "$out"
         return 0
     fi
     volume="${project}_${base_name}"
@@ -6280,9 +6282,10 @@ cmd_create_logs_for_issue() (
 
     print_step "Collecting service logs"
     local -a services=()
-    local services_list
-    if ! services_list=$(stack_compose "$install_dir" "$env_file" config --services 2>&1); then
-        printf 'service list failed (exit %s): %s\n' "$?" "$services_list" \
+    local services_list slrc=0
+    services_list=$(stack_compose "$install_dir" "$env_file" config --services 2>&1) || slrc=$?
+    if [[ "$slrc" -ne 0 ]]; then
+        printf 'service list failed (exit %s): %s\n' "$slrc" "$services_list" \
             | logbundle_redact_stream "$secrets_file" > "$dest/logs/_service-list-error.log"
         print_warn "Could not list the compose services; see logs/_service-list-error.log in the bundle."
         services_list=""
