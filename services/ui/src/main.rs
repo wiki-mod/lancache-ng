@@ -1652,7 +1652,10 @@ fn syslog_host_dirs(root: &str) -> Vec<PathBuf> {
                 .filter(|p| p.is_dir())
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_else(|e| {
+            tracing::warn!("syslog store {root} not listed: {e}");
+            Vec::new()
+        });
     dirs.sort();
     dirs
 }
@@ -1872,10 +1875,18 @@ struct NetdataAlarm {
 // What: stored alarms, newest first; any failure is empty.
 // Why: the dashboard must render even with a broken file.
 fn read_alarms(path: &str) -> Vec<NetdataAlarm> {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default()
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            tracing::warn!("alarm file {path} not read: {e}");
+            return Vec::new();
+        }
+    };
+    serde_json::from_str(&content).unwrap_or_else(|e| {
+        tracing::warn!("alarm file {path} is not valid JSON: {e}");
+        Vec::new()
+    })
 }
 
 // What: store one alarm unless its unique_id is known.
@@ -2864,7 +2875,10 @@ async fn secondaries_page(
         })?
         .collect::<Result<Vec<_>, _>>()
     })
-    .unwrap_or_default();
+    .unwrap_or_else(|e| {
+        tracing::error!("secondaries not read: {e}");
+        Vec::new()
+    });
     let mut ctx = page_ctx(&headers, "secondaries");
     ctx.insert("secondaries", &secondaries);
     ctx.insert(
@@ -3612,14 +3626,20 @@ async fn dhcp_page(State(state): Shared, headers: HeaderMap) -> Response {
         // What: read config and leases at the same time.
         // Why: a Kea with many leases loads slowly.
         let (config, found) = tokio::join!(kea_config(&state), kea_leases(&state));
-        if let Ok(config) = config {
-            subnets = subnets_in(&config).iter().map(read_subnet).collect();
-            ddns = config["Dhcp4"]["dhcp-ddns"]["enable-updates"]
-                .as_bool()
-                .unwrap_or(false);
-            reservations = read_reservations(&config);
+        match config {
+            Ok(config) => {
+                subnets = subnets_in(&config).iter().map(read_subnet).collect();
+                ddns = config["Dhcp4"]["dhcp-ddns"]["enable-updates"]
+                    .as_bool()
+                    .unwrap_or(false);
+                reservations = read_reservations(&config);
+            }
+            Err(e) => tracing::warn!("Kea config not read for the DHCP page: {e}"),
         }
-        leases = found.unwrap_or_default();
+        leases = found.unwrap_or_else(|e| {
+            tracing::warn!("Kea leases not read for the DHCP page: {e}");
+            Vec::new()
+        });
     }
     ctx.insert("subnets", &subnets);
     ctx.insert("dhcp_ddns_enabled", &ddns);
@@ -3630,7 +3650,10 @@ async fn dhcp_page(State(state): Shared, headers: HeaderMap) -> Response {
     // Why: operators pick a rollback target, newest first.
     let snapshots: Vec<SnapshotSummary> = kea_store(cfg)
         .ids()
-        .unwrap_or_default()
+        .unwrap_or_else(|e| {
+            tracing::warn!("Kea snapshots not listed: {e}");
+            Vec::new()
+        })
         .into_iter()
         .rev()
         .map(|id| SnapshotSummary {
@@ -4366,7 +4389,10 @@ async fn sync_subnet_ntp(state: &AppState, auto: bool) -> Result<(), String> {
     } else {
         resolve_ntp_servers(&state.config.setting("DHCP_NTP_SERVERS"))
             .await
-            .unwrap_or_default()
+            .unwrap_or_else(|e| {
+                tracing::warn!("DHCP_NTP_SERVERS not resolved, none set: {e}");
+                String::new()
+            })
     };
     kea_apply(state, move |config| {
         for subnet in subnets_mut(config)?.iter_mut() {
@@ -5758,7 +5784,13 @@ async fn fetch_ptr_records(state: &AppState) -> Vec<PtrRow> {
             .pdns
             .zone_rrsets(&state.config.pdns_auth_api, &zone)
             .await;
-        ptr_rows(&rrsets.unwrap_or_default())
+        match rrsets {
+            Ok(rrsets) => ptr_rows(&rrsets),
+            Err(e) => {
+                tracing::warn!("PTR records of {zone} not read: {e}");
+                Vec::new()
+            }
+        }
     }))
     .await;
     let mut rows: Vec<PtrRow> = per_zone.into_iter().flatten().collect();
@@ -5779,13 +5811,22 @@ async fn fetch_zone_groups(state: &AppState) -> Vec<ZoneSnapshotGroup> {
         .header("X-API-Key", &state.config.pdns_api_key)
         .send()
         .await;
-    let Ok(response) = response.and_then(reqwest::Response::error_for_status) else {
-        return Vec::new();
+    let response = match response.and_then(reqwest::Response::error_for_status) {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::warn!("zone snapshots not read: {e}");
+            return Vec::new();
+        }
     };
-    let Ok(body) = response.json::<Value>().await else {
-        return Vec::new();
+    let body = match response.json::<Value>().await {
+        Ok(body) => body,
+        Err(e) => {
+            tracing::warn!("zone snapshot list not decoded: {e}");
+            return Vec::new();
+        }
     };
     let Some(zones) = body.get("zones").and_then(Value::as_object) else {
+        tracing::warn!("zone snapshot list has no zones object");
         return Vec::new();
     };
     let mut groups: Vec<ZoneSnapshotGroup> = zones
@@ -5876,7 +5917,11 @@ async fn domains_page(
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let cfg = &state.config;
-    let rows = domain_rows(&fs::read_to_string(&cfg.cdn_domains_file).unwrap_or_default());
+    let list = fs::read_to_string(&cfg.cdn_domains_file).unwrap_or_else(|e| {
+        tracing::error!("CDN domain list {} not read: {e}", cfg.cdn_domains_file);
+        String::new()
+    });
+    let rows = domain_rows(&list);
     let (lan, ptr, groups) = tokio::join!(
         async {
             state
@@ -6190,9 +6235,13 @@ async fn blocking<T: Default + Send + 'static>(
     job: impl FnOnce(&AppState) -> T + Send + 'static,
 ) -> T {
     let state = state.clone();
-    tokio::task::spawn_blocking(move || job(&state))
-        .await
-        .unwrap_or_default()
+    match tokio::task::spawn_blocking(move || job(&state)).await {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::error!("blocking job failed: {e}");
+            T::default()
+        }
+    }
 }
 
 // What: nginx counters of the standard and ssl proxy.
@@ -6267,6 +6316,8 @@ async fn dashboard(State(state): Shared, headers: HeaderMap) -> Response {
     ctx.insert("cache_used_gb", &format!("{cache_used_gb:.1}"));
     ctx.insert("cache_max_gb", &cfg.cache_max_gb);
     ctx.insert("cache_pct", &percent);
+    // What: pending at a difference of 1 GB or more.
+    // Why: a fraction of a GB is not shown as a resize.
     ctx.insert(
         "cache_resize_pending",
         &((requested_gb - cfg.cache_max_gb).abs() >= 1.0),
@@ -6644,8 +6695,7 @@ const MIN_REGISTRATION_TOKEN_LEN: usize = 32;
 // Why: tracing and the root start must agree on one path.
 // From: Issue #633 | PR #1858
 fn ui_log_file() -> String {
-    config::env_opt("UI_LOG_FILE")
-        .unwrap_or_else(|| container_start_fatal("UI_LOG_FILE is not set"))
+    config::need(&config::process_env, "UI_LOG_FILE").unwrap_or_else(|e| container_start_fatal(&e))
 }
 
 // What: a real token as is, else a persisted random one.
@@ -6753,11 +6803,18 @@ fn container_start_fatal(message: &str) -> ! {
 // What: a required numeric id from the image environment.
 // Why: the Dockerfile owns the runtime uid/gid, not code.
 // From: Issue #1427 | PR #1858
-fn required_env_id(key: &str) -> u32 {
-    let raw =
-        config::env_opt(key).unwrap_or_else(|| container_start_fatal(&format!("{key} is not set")));
-    raw.parse()
-        .unwrap_or_else(|_| container_start_fatal(&format!("{key}={raw} is not an id")))
+fn required_env_id(key: &'static str) -> u32 {
+    let id = Uint {
+        name: key,
+        min: 0,
+        max: u32::MAX.into(),
+        below: OutOfRange::Reject,
+        above: OutOfRange::Reject,
+    };
+    match id.parse(config::env_opt(key).as_deref()) {
+        Ok((value, _)) => value as u32,
+        Err(e) => container_start_fatal(&e),
+    }
 }
 
 // What: dirs the ui writes, derived from its own config.
@@ -7075,6 +7132,8 @@ fn callout_xkey(cfg: &Config) -> Result<XKey, String> {
 // Why: the docker proxy may not be ready at ui start.
 // From: Issue #811 | PR #1610
 async fn apply_callout_fragment(state: &AppState) {
+    // What: 8 tries; delay starts at 1 s and caps at 8 s.
+    // Why: the Docker proxy may start after the ui.
     const ATTEMPTS: u32 = 8;
     let mut delay = Duration::from_secs(1);
     for attempt in 1..=ATTEMPTS {
