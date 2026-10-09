@@ -100,12 +100,12 @@ fn open(master: &[u8; MASTER_LEN], sealed: &Sealed) -> Result<Vec<u8>> {
 // What: whether the credential may rest on disk.
 // Why: the operator decides; an unknown value fails closed.
 fn persistence_from(value: Option<&str>) -> Result<bool> {
-    match value {
-        // What: unset means memory only, like "none".
-        // Why: the env file leaves the choice to the user.
-        None | Some("none") => Ok(false),
-        Some("persistent") => Ok(true),
-        Some(other) => bail!(
+    // What: unset means memory only, like "none".
+    // Why: the env file leaves the choice to the user.
+    match value.unwrap_or("none") {
+        "none" => Ok(false),
+        "persistent" => Ok(true),
+        other => bail!(
             "CACHEHAMSTER_CREDENTIAL_PERSISTENCE must be \"none\" or \"persistent\" (or unset, defaulting to \"none\"); got {other:?}"
         ),
     }

@@ -122,19 +122,21 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
         }
     }
 
-    let cache_dir = match (
-        get("CACHE_DIR"),
-        get("CACHE_DIR_STANDARD"),
-        get("CACHE_DIR_SSL"),
-    ) {
-        (Some(dir), _, _) => dir,
-        (None, Some(std), Some(ssl)) if std != ssl => {
-            return Err(format!(
-                "FATAL: CACHE_DIR_STANDARD={std} and CACHE_DIR_SSL={ssl} point to different paths without CACHE_DIR. Set CACHE_DIR to one shared cache directory."
-            ));
+    let (standard, ssl) = (get("CACHE_DIR_STANDARD"), get("CACHE_DIR_SSL"));
+    let cache_dir = match get("CACHE_DIR") {
+        Some(dir) => dir,
+        None => {
+            if let (Some(std), Some(ssl)) = (&standard, &ssl)
+                && std != ssl
+            {
+                return Err(format!(
+                    "FATAL: CACHE_DIR_STANDARD={std} and CACHE_DIR_SSL={ssl} point to different paths without CACHE_DIR. Set CACHE_DIR to one shared cache directory."
+                ));
+            }
+            standard
+                .or(ssl)
+                .ok_or_else(|| format!("FATAL: {}.", config::not_set("CACHE_DIR")))?
         }
-        (None, Some(dir), _) | (None, None, Some(dir)) => dir,
-        (None, None, None) => return Err(format!("FATAL: {}.", config::not_set("CACHE_DIR"))),
     };
 
     // What: the Docker API address must come from the env.
