@@ -603,37 +603,43 @@ exit 0
 STUB
 }
 
-# What: per row: registry/repo ref owners on a fixture SOT.
-# Why: scan, sbom, assemble, verify must share one ref.
+# What: real SOT targets: the name prod pulls, ref and tag.
+# Why: §15: CI must publish exactly what deploy/prod pulls.
 # From: Issue #1683 | PR #1858
 @test "image-ref builds the one registry service@digest form" {
-    local m nr case envs call rc want
-    local -a ev av
-    m="$(_val path)" nr="$(_val path)"
-    local -A V=(
-        [@REG@]="$(_val host).$(_val name)" [@OWN@]="$(_val name)" [@REPO@]="$(_val name)" [@S@]="$(_val name)"
-        [@T@]="$(_val name)" [@DIG@]="$(_val digest)" [@OS@]="$(_val name)" [@PA@]="$(_val name)" [@ID@]="$(_val sha)"
-    )
-    V[@MIX@]="$(tr a-z A-Z <<< "${V[@OWN@]:0:2}")${V[@OWN@]:2}/$(tr a-z A-Z <<< "${V[@REPO@]}")"
-    V[@P@]="${V[@OS@]}/${V[@PA@]}" V[@M@]="${m}" V[@NR@]="${nr}"
-    _fill "$(printf '%s\n' 'release:' '  registry: @REG@' 'build_toolchain:' '  @T@:' '    build_type: toolchain' \
-        'services:' '  @S@:' '    context: @S@' '    build_type: apk')" > "${m}"
-    grep -v '^  registry:' "${m}" > "${nr}"
-    while IFS='|' read -r case envs call rc want; do
-        read -r -a ev <<< "$(_fill "${envs}")"
-        read -r -a av <<< "$(_fill "${call}")"
-        run env -u GITHUB_REPOSITORY CI_MANIFEST="${m}" "${ev[@]}" bash -c 'source "$1"; shift; "$@"' _ "${CI_SH}" "${av[@]}"
-        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
-        [ "${rc}" -eq 0 ] || [[ "${output}" != *"/${V[@S@]}"* ]] || { echo "${case}: ref printed: ${output}"; return 1; }
-    done <<'CASES'
-repo-lower|GITHUB_REPOSITORY=@MIX@|_ci_repo|0|=@OWN@/@REPO@
-registry|GITHUB_REPOSITORY=@MIX@|_ci_registry|0|=@REG@
-image-ref|GITHUB_REPOSITORY=@MIX@|_ci_image_ref @S@ @DIG@|0|=@REG@/@OWN@/@REPO@/@S@@@DIG@
-image-tag|GITHUB_REPOSITORY=@MIX@|_ci_image_tag @S@ @P@ @ID@|0|=@REG@/@OWN@/@REPO@/@S@:sha-@ID@-@PA@
-toolchain-ref|GITHUB_REPOSITORY=@MIX@|_ci_build_tools_image|0|=@REG@/@OWN@/@REPO@/@T@
-no-owner|CI_MANIFEST=@M@|_ci_image_ref @S@ @DIG@|2|[CI-ERROR-CORE-0128] name="GITHUB_REPOSITORY"
-no-registry|CI_MANIFEST=@NR@ GITHUB_REPOSITORY=@MIX@|_ci_image_ref @S@ @DIG@|2|[CI-ERROR-CORE-0005] key="release.registry"
-CASES
+    local root reg pfx name svc tool plats keys p s dig id
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    reg="$(awk -F= '$1 == "LANCACHE_IMAGE_REGISTRY" { print $2; exit }' "${root}/deploy/prod/.env")"
+    pfx="$(awk -F= '$1 == "LANCACHE_IMAGE_PREFIX" { print $2; exit }' "${root}/deploy/prod/.env")"
+    [ -n "${reg}" ] && [ -n "${pfx}" ] || { echo "deploy/prod/.env: registry '${reg}' prefix '${pfx}'"; return 1; }
+    svc="$(_ci_block_keys services all)" || { echo "services: ${svc}"; return 1; }
+    svc="${svc%%$'\n'*}"
+    tool="$(_ci_block_keys build_toolchain all)" || { echo "build_toolchain: ${tool}"; return 1; }
+    tool="${tool%%$'\n'*}"
+    plats="$(_ci_block_entry_list build_matrix "" platforms)" || { echo "platforms: ${plats}"; return 1; }
+    keys="$(_ci_block_keys platform_arch all)" || { echo "platform_arch: ${keys}"; return 1; }
+    keys=" ${keys//$'\n'/ } "
+    name="${reg}/${pfx,,}" dig="$(_val digest)" id="$(_val sha)"
+    export GITHUB_REPOSITORY="${pfx^^}"
+    run _ci_image_ref
+    _expect prefix 0 "=${name}" || return 1
+    run _ci_image_ref "${svc}"
+    _expect name 0 "=${name}/${svc}" || return 1
+    run _ci_image_ref "${svc}" "${dig}"
+    _expect ref 0 "=${name}/${svc}@${dig}" || return 1
+    run _ci_build_tools_image
+    _expect toolchain 0 "=${name}/${tool}" || return 1
+    while IFS= read -r p; do
+        run _ci_image_tag "${svc}" "${p}" "${id}"
+        _expect "tag ${p}" 0 "${name}/${svc}:sha-${id}-" || return 1
+        s="${output#"${name}/${svc}:sha-${id}-"}"
+        [[ "${p}" == *"/${s}" && "${keys}" == *" ${s} "* ]] || { echo "tag ${p}: arch '${s}' not the platform arch: ${output}"; return 1; }
+    done <<< "${plats}"
+    run _ci_image_ref "${svc}" ""
+    _expect empty-digest 2 "[CI-ERROR-CORE-0135] target=\"${svc}\"" || return 1
+    _norepo() { unset GITHUB_REPOSITORY; _ci_image_ref "$@"; }
+    run _norepo "${svc}" "${dig}"
+    _expect no-owner 2 '[CI-ERROR-CORE-0128] name="GITHUB_REPOSITORY"' || return 1
 }
 
 # =========================================================

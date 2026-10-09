@@ -2525,31 +2525,32 @@ _ci_retry() {
 # Why: One tag owner; build/publish/verify must agree.
 # From: Issue #1683
 _ci_image_tag() {
-    local registry repo
-    registry="$(_ci_registry)" || return 2
-    repo="$(_ci_repo)" || return 2
-    printf '%s/%s/%s:sha-%s-%s' "${registry}" "${repo}" "$1" "$3" "${2##*/}"
+    local name
+    name="$(_ci_image_ref "$1")" || return 2
+    printf '%s:sha-%s-%s' "${name}" "$3" "${2##*/}"
 }
 
-# What: The registry ref for a service at a digest.
-# Why: One owner of the image@digest form used by many.
-# From: Issue #1683
+# What: registry/repo, then /target, then @digest if given.
+# Why: the one owner of image names; callers add only tags.
+# From: Issue #1683 | PR #1858
 _ci_image_ref() {
     local reg repo
+    if [ "$#" -ge 2 ] && [ -z "$2" ]; then
+        ci_log "[CI-ERROR-CORE-0135]" "target=\"$1\" reason=\"empty digest; a tagless name would pull latest\""
+        return 2
+    fi
     reg="$(_ci_registry)" || return 2
     repo="$(_ci_repo)" || return 2
-    printf '%s/%s/%s@%s' "${reg}" "${repo}" "$1" "$2"
+    printf '%s/%s%s%s' "${reg}" "${repo}" "${1:+/$1}" "${2:+@$2}"
 }
 
 # What: The base build-tools image ref, no tag.
-# Why: One owner for the registry host, from the SOT.
-# From: Issue #1683
+# Why: the toolchain image is named like every target.
+# From: Issue #1683 | PR #1858
 _ci_build_tools_image() {
-    local reg repo tool
-    reg="$(_ci_registry)" || return 2
-    repo="$(_ci_repo)" || return 2
+    local tool
     tool="$(_ci_toolchain_target)" || return 2
-    printf '%s/%s/%s' "${reg}" "${repo}" "${tool}"
+    _ci_image_ref "${tool}"
 }
 
 # What: OCI image labels from the SOT and env.
@@ -3544,7 +3545,7 @@ _ci_trivy_scan() {
     cache_dir="$(_ci_record_field "${cache_rec}" dir)"
     fresh_rec="$(_ci_trivy_db_ensure_fresh "${cache_dir}")" || return 3
     [ "$(_ci_record_field "${fresh_rec}" present)" = "true" ] && skip_db=1
-    ref="$(_ci_image_ref "${service}" "${digest}")"
+    ref="$(_ci_image_ref "${service}" "${digest}")" || return 2
     report="$(_ci_mktemp "${CI_TMPDIR}/ci-trivy.XXXXXX")" || return 2
     local -a targs=(trivy image --severity "HIGH,CRITICAL" --exit-code 1
         --ignore-unfixed --scanners "${scanners}" --cache-dir "${cache_dir}")
@@ -4041,11 +4042,10 @@ _ci_normalize_platform_digests() {
 # From: Issue #1683
 _ci_index_lookup() {
     local service="$1"
-    local repo registry sha tag idx grc=0 raw plats
-    repo="$(_ci_repo)" || return 2
-    registry="$(_ci_registry)" || return 2
+    local name sha tag idx grc=0 raw plats
+    name="$(_ci_image_ref "${service}")" || return 2
     sha="$(_ci_env_required GITHUB_SHA)" || return 2
-    tag="${registry}/${repo}/${service}:sha-${sha}"
+    tag="${name}:sha-${sha}"
     idx="$(_ci_registry_probe "${tag}")" || grc=$?
     [ "${grc}" -eq 0 ] || return "${grc}"
     raw="$(_ci_index_raw "${tag}")" || return "$?"
@@ -4108,14 +4108,13 @@ _ci_reconcile_index() {
 # From: Issue #1683
 _ci_docker_assemble() {
     local service="$1"; shift
-    local repo registry sha target kv
-    repo="$(_ci_repo)" || return 2
-    registry="$(_ci_registry)" || return 2
+    local name sha target kv
+    name="$(_ci_image_ref "${service}")" || return 2
     sha="$(_ci_env_required GITHUB_SHA)" || return 2
-    target="${registry}/${repo}/${service}:sha-${sha}"
+    target="${name}:sha-${sha}"
     local -a srcs=()
     for kv; do
-        srcs+=("$(_ci_image_ref "${service}" "${kv#*=}")")
+        srcs+=("${name}@${kv#*=}")
     done
     _ci_imagetools_create "${target}" "${srcs[@]}" >/dev/null || return "$?"
     _ci_registry_digest "${target}"
@@ -4385,24 +4384,22 @@ _ci_promote_unlock() {
 # Why: shares the one index writer; moves, never builds.
 # From: Issue #1683
 _ci_promote_move() {
-    local svc="$1" channel="$2" digest="$3" repo registry
-    repo="$(_ci_repo)" || return 2
-    registry="$(_ci_registry)" || return 2
-    _ci_imagetools_create "${registry}/${repo}/${svc}:${channel}" "${registry}/${repo}/${svc}@${digest}" >/dev/null
+    local svc="$1" channel="$2" digest="$3" name
+    name="$(_ci_image_ref "${svc}")" || return 2
+    _ci_imagetools_create "${name}:${channel}" "${name}@${digest}" >/dev/null
 }
 
 # What: Default channel readback: the channel's digest.
 # Why: one digest reader; empty output means unknown.
 # From: Issue #1683
 _ci_channel_readback() {
-    local svc="$1" channel="$2" repo registry digest
-    repo="$(_ci_repo)" || return 2
-    registry="$(_ci_registry)" || return 2
-    digest="$(_ci_registry_digest "${registry}/${repo}/${svc}:${channel}")" || return 2
+    local svc="$1" channel="$2" name digest
+    name="$(_ci_image_ref "${svc}")" || return 2
+    digest="$(_ci_registry_digest "${name}:${channel}")" || return 2
     # What: a channel counts only if every child resolves.
     # Why: a present index with lost children is unpullable.
     # From: Issue #1683 | PR #1858
-    _ci_index_complete "${registry}/${repo}/${svc}" "${digest}" || return 2
+    _ci_index_complete "${name}" "${digest}" || return 2
     printf '%s\n' "${digest}"
 }
 
@@ -4882,9 +4879,8 @@ ci_cmd_release_changelog() {
 # Why: Records every shipped digest; SOT list, no hardcode.
 # From: Issue #1683
 _ci_release_notes_block() {
-    local tag="$1" registry repo target img dig
-    registry="$(_ci_registry)" || return "$?"
-    repo="$(_ci_repo)" || return 2
+    local tag="$1" base target img dig
+    base="$(_ci_image_ref)" || return 2
     _ci_release_marker start || return 2
     printf '## Changes\n\n'
     _ci_release_changes "${tag}" || return 2
@@ -4893,7 +4889,7 @@ _ci_release_notes_block() {
     local targets
     targets="$(ci_build_targets)" || return 2
     for target in ${targets} stack; do
-        img="${registry}/${repo}/${target}:${tag}"
+        img="${base}/${target}:${tag}"
         dig="$(_ci_registry_digest "${img}")" || return "$?"
         printf -- '- %s -> %s\n' "${img}" "${dig}"
     done
@@ -5014,10 +5010,9 @@ ci_cmd_release_sbom() {
     [ -n "${service}" ] || { ci_log "[CI-ERROR-RELEASE-0007]" "reason=\"service arg required\""; return 2; }
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0008]" "reason=\"tag arg required\""; return 2; }
     _ci_require_ghcr_auth || return "$?"
-    local registry repo digest dir out rc=0
-    registry="$(_ci_registry)" || return "$?"
-    repo="$(_ci_repo)" || return 2
-    digest="$(_ci_registry_digest "${registry}/${repo}/${service}:${tag}")" || return "$?"
+    local name digest dir out rc=0
+    name="$(_ci_image_ref "${service}")" || return 2
+    digest="$(_ci_registry_digest "${name}:${tag}")" || return "$?"
     dir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-sbom.XXXXXX")" || return 2
     out="${dir}/${service}.cdx.json"
     # What: an attached SBOM for this digest is reused
@@ -5214,11 +5209,10 @@ _ci_deletion_policy() {
 # Why: Ledger + channels + their index children (§101).
 # From: Issue #1683
 _ci_gc_roots() {
-    local remote repo registry blob rc=0 pairs="" out="" svc channel dig prc line s d raw ledger_ref
+    local remote base blob rc=0 pairs="" out="" svc channel dig prc line s d raw ledger_ref
     remote="$(_ci_git_remote)" || return 2
     ledger_ref="$(_ci_variable CI_LEDGER_REF)" || return 2
-    repo="$(_ci_repo)" || return 2
-    registry="$(_ci_registry)" || return 2
+    base="$(_ci_image_ref)" || return 2
     blob="$(_ci_ledger_blob "${remote}")" || rc=$?
     # What: A failed ledger read refuses, never empties.
     # Why: UNKNOWN roots would delete live artifacts.
@@ -5245,7 +5239,7 @@ _ci_gc_roots() {
         while IFS= read -r channel; do
             [ -n "${channel}" ] || continue
             prc=0
-            dig="$(_ci_registry_probe "${registry}/${repo}/${svc}:${channel}")" || prc=$?
+            dig="$(_ci_registry_probe "${base}/${svc}:${channel}")" || prc=$?
             # What: A transient probe refuses the run.
             # Why: A flaky miss must not drop a channel.
             # From: Issue #1683
@@ -5258,7 +5252,7 @@ _ci_gc_roots() {
         [ -n "${d}" ] || continue
         out="${out}${d}"$'\n'
         rc=0
-        raw="$(_ci_index_raw "${registry}/${repo}/${s}@${d}")" || rc=$?
+        raw="$(_ci_index_raw "${base}/${s}@${d}")" || rc=$?
         # What: A transient child read refuses the run.
         # Why: Dropping children orphan-deletes arches.
         # From: Issue #1683
