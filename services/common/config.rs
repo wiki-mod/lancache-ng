@@ -12,11 +12,42 @@ pub fn non_empty(raw: Option<&str>) -> Option<&str> {
     raw.filter(|v| !v.is_empty())
 }
 
+// What: a variable from any reader; empty counts as unset.
+// Why: ui, watchdog and tests read through one rule.
+pub fn opt(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<String> {
+    non_empty(get(name).as_deref()).map(str::to_string)
+}
+
+// What: one variable of the process environment.
+// Why: the only live reader; tests pass their own instead.
+pub fn process_env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
 // What: env var as a String; empty counts as unset.
 // Why: the live-env reader of the non_empty rule.
 // From: Issue #871 | PR #1858
 pub fn env_opt(name: &str) -> Option<String> {
-    non_empty(std::env::var(name).ok().as_deref()).map(str::to_string)
+    opt(&process_env, name)
+}
+
+// What: the error text of a variable nobody set.
+// Why: one wording for need, Uint and the ui's field checks.
+pub fn not_set(name: &str) -> String {
+    format!("{name} is not set")
+}
+
+// What: a variable its owner must set; unset is an error.
+// Why: owners hold every value; no service keeps a default.
+pub fn need(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Result<String, String> {
+    opt(get, name).ok_or_else(|| not_set(name))
+}
+
+// What: a boolean its owner must set; junk is an error.
+// Why: a typo must not flip a gate to either side.
+pub fn need_flag(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Result<bool, String> {
+    let raw = need(get, name)?;
+    parse_bool(&raw).ok_or_else(|| format!("{name} must be a boolean, got {raw:?}"))
 }
 
 // What: 1/true/yes/on or 0/false/no/off, trimmed, any case.
@@ -53,7 +84,7 @@ impl Uint {
     // Why: unset, junk or rejected values stop the start.
     pub fn parse(&self, raw: Option<&str>) -> Result<(u64, Option<String>), String> {
         let name = self.name;
-        let raw = non_empty(raw.map(str::trim)).ok_or_else(|| format!("{name} is not set"))?;
+        let raw = non_empty(raw.map(str::trim)).ok_or_else(|| not_set(name))?;
         if !raw.bytes().all(|b| b.is_ascii_digit()) {
             return Err(format!("{name}={raw} is not an unsigned decimal number"));
         }
@@ -164,19 +195,24 @@ pub const NATS_SUBJECT_DNS: &str = "lancache.dns.>";
 pub const NATS_SUBJECT_RECORD: &str = "lancache.dns.record";
 pub const NATS_SUBJECT_FLUSH: &str = "lancache.dns.flush";
 
+// What: the local zone, as publishers spell it.
+// Why: nats-subscriber and the zone list share one spelling.
+pub const LAN_ZONE: &str = "lan";
+
 // What: zones that get snapshots and rollbacks, dotted form.
 // Why: equals DDNS_UPDATE_ZONES in dns/entrypoint.sh.
 pub fn rollback_zones() -> Vec<String> {
+    let lan = canonical_zone(LAN_ZONE);
     let fixed = [
-        "lan.",
-        "local.lan.",
-        "10.in-addr.arpa.",
-        "168.192.in-addr.arpa.",
+        format!("local.{lan}"),
+        "10.in-addr.arpa.".to_string(),
+        "168.192.in-addr.arpa.".to_string(),
     ];
     let rfc1918 = (16..=31).map(|n| format!("{n}.172.in-addr.arpa."));
     let ipv6 = ["c.f.ip6.arpa.", "d.f.ip6.arpa."];
-    let all = fixed.iter().map(|z| z.to_string());
-    all.chain(rfc1918)
+    std::iter::once(lan)
+        .chain(fixed)
+        .chain(rfc1918)
         .chain(ipv6.iter().map(|z| z.to_string()))
         .collect()
 }
@@ -311,5 +347,22 @@ mod tests {
             .collect();
         assert_eq!(rollback_zones(), in_script);
         assert!(!rollback_zones().contains(&"rpz.".to_string()));
+    }
+
+    // What: need and need_flag reject unset, empty and junk.
+    // Why: no service may run on a value its owner never set.
+    #[test]
+    fn need_rejects_unset_empty_and_junk() {
+        let get = |key: &str| match key {
+            "SET" => Some("x".to_string()),
+            "EMPTY" => Some(String::new()),
+            "ON" => Some("on".to_string()),
+            "JUNK" => Some("maybe".to_string()),
+            _ => None,
+        };
+        assert_eq!(need(&get, "SET"), Ok("x".to_string()));
+        assert!(need(&get, "EMPTY").is_err() && need(&get, "ABSENT").is_err());
+        assert_eq!(need_flag(&get, "ON"), Ok(true));
+        assert!(need_flag(&get, "JUNK").is_err() && need_flag(&get, "ABSENT").is_err());
     }
 }

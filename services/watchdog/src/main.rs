@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use lancache_ng::config::{self, DhcpMode, OutOfRange, Uint, env_opt, parse_bool};
+use lancache_ng::config::{self, DhcpMode, OutOfRange, Uint, env_opt};
 use lancache_ng::{
     DesiredRunState, DesiredState, DiskHealth, DiskInfo, DockerProxy, Place, ServiceHealth,
     WatchdogStatus, df, write_file,
@@ -48,7 +48,7 @@ struct Settings {
 // What: curl-style seconds; 0 means no timeout (None).
 // Why: fractions stay valid; 0 must not time out at once.
 fn curl_timeout(raw: Option<&str>, name: &str) -> Result<Option<Duration>, String> {
-    let raw = raw.ok_or_else(|| format!("FATAL: {name} is not set."))?;
+    let raw = raw.ok_or_else(|| format!("FATAL: {}.", config::not_set(name)))?;
     let invalid = |why: &str| format!("FATAL: invalid {name}={raw}{why}.");
     match raw.parse::<f64>() {
         Ok(0.0) => Ok(None),
@@ -63,7 +63,7 @@ fn curl_timeout(raw: Option<&str>, name: &str) -> Result<Option<Duration>, Strin
 // Why: Err is fatal; a reader argument keeps tests env-free.
 // From: Issue #849 | PR #1858
 fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<String>), String> {
-    let get = |name: &str| env(name).filter(|v| !v.is_empty());
+    let get = |name: &str| config::opt(&env, name);
     let mut warnings = Vec::new();
     let mut knob = |name: &'static str, min: u64, max: u64| -> Result<u64, String> {
         let spec = Uint {
@@ -91,14 +91,10 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
 
     // What: a value the env must supply; unset is fatal.
     // Why: watchdog.env and compose own it; no default here.
-    let need = |name: &str| get(name).ok_or_else(|| format!("FATAL: {name} is not set."));
+    let need = |name: &str| config::need(&env, name).map_err(|e| format!("FATAL: {e}."));
     // What: a bool the env must supply; junk is fatal.
     // Why: same owner as need; a typo must not flip a gate.
-    let need_flag = |name: &str| {
-        need(name).and_then(|v| {
-            parse_bool(&v).ok_or_else(|| format!("FATAL: {name} must be a boolean, got {v:?}."))
-        })
-    };
+    let need_flag = |name: &str| config::need_flag(&env, name).map_err(|e| format!("FATAL: {e}."));
     let ssl_enabled = need_flag("SSL_ENABLED")?;
 
     let fixed_names = [
@@ -464,7 +460,7 @@ fn disk_info(dir: &Path, warn_pct: u32, alarm_pct: u32) -> DiskHealth {
 // Why: a bad setting must stop the service before it acts.
 #[tokio::main]
 async fn main() {
-    let (s, warnings) = load_settings(|name| std::env::var(name).ok()).unwrap_or_else(|msg| {
+    let (s, warnings) = load_settings(config::process_env).unwrap_or_else(|msg| {
         log_err(&msg);
         std::process::exit(1);
     });

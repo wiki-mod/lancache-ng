@@ -120,6 +120,42 @@ pub fn ct_eq(a: &str, b: &str) -> bool {
     a.ct_eq(&b).into()
 }
 
+// What: nanoseconds since the epoch; 0 for a broken clock.
+// Why: ids and temp names need unique, ordered stamps.
+pub fn unix_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+
+// What: seconds since the epoch; 0 for a broken clock.
+// Why: callers refuse to issue anything from 1970.
+pub fn unix_secs() -> u64 {
+    (unix_nanos() / 1_000_000_000) as u64
+}
+
+// What: print a FATAL start error with its tag, exit 1.
+// Why: every service fails closed at start the same way.
+pub fn die(tag: &str, message: &str) -> ! {
+    eprintln!("[{tag}] FATAL: {message}");
+    std::process::exit(1);
+}
+
+// What: how long a plain HTTP call may take.
+// Why: a stuck peer must not hold a request forever.
+pub const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+
+// What: the general HTTP client of ui and nats-subscriber.
+// Why: one timeout and pool setting for both callers.
+pub fn http_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(60))
+        .build()
+}
+
 // What: one lancache.dns.record message on NATS.
 // Why: ui and subscriber publish it; the subscriber reads it.
 // From: Issue #1252
@@ -222,11 +258,7 @@ impl SnapshotStore {
     // What: write `data` as a new snapshot, then prune.
     // Why: staging plus rename; a crash leaves no partial one.
     pub fn create(&self, data: &Value, keep_n: u32) -> anyhow::Result<String> {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let id = format!("{nanos:020}");
+        let id = format!("{:020}", unix_nanos());
         let staging = self.root.join(format!("{STAGING}{id}"));
         fs::create_dir_all(&staging)
             .with_context(|| format!("cannot create staging directory {}", staging.display()))?;
@@ -322,10 +354,7 @@ pub fn write_file_as(
     let name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
+    let stamp = unix_nanos();
     let tmp = path.with_file_name(format!(
         ".{}.tmp-{}-{stamp}",
         name.to_string_lossy(),

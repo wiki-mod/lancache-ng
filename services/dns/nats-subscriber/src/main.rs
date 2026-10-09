@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use async_nats::jetstream;
 use axum::extract::State;
@@ -20,14 +20,21 @@ use axum::{Json, Router};
 use futures::StreamExt;
 use futures::future::join_all;
 use lancache_ng::config::{
-    NATS_STREAM_DNS, NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, OutOfRange, Uint,
-    canonical_zone, env_opt, is_rollback_zone, parse_bool, rollback_zones, zone_api_id,
+    LAN_ZONE, NATS_STREAM_DNS, NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD,
+    OutOfRange, Uint, canonical_zone, env_opt, is_rollback_zone, need, parse_bool, process_env,
+    rollback_zones, zone_api_id,
 };
-use lancache_ng::{DnsRecord, FlushRequest, SnapshotStore, ct_eq, snapshot_created_unix};
+use lancache_ng::{
+    DnsRecord, FlushRequest, SnapshotStore, ct_eq, die, http_client, snapshot_created_unix,
+    unix_nanos,
+};
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+// What: log tag of start errors.
+// Why: the log shows which service refused to start.
+const TAG: &str = "nats-subscriber";
 // What: TTL given to a replace message without one.
 // Why: PowerDNS rejects a REPLACE patch without a TTL.
 const DEFAULT_REPLACE_TTL: i32 = 300;
@@ -299,7 +306,7 @@ async fn reconciler(ctx: Arc<Ctx>) {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
     loop {
         interval.tick().await;
-        let rrsets = match ctx.zone_rrsets("lan").await {
+        let rrsets = match ctx.zone_rrsets(LAN_ZONE).await {
             Ok(rrsets) => data_rrsets(&rrsets),
             Err(e) => {
                 eprintln!("Reconciler: cannot read the lan zone: {e}");
@@ -310,7 +317,7 @@ async fn reconciler(ctx: Arc<Ctx>) {
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|rrset| rrset_record("replace", "lan", rrset))
+            .filter_map(|rrset| rrset_record("replace", LAN_ZONE, rrset))
             .collect();
         for record in &records {
             let name = record.name.trim_end_matches('.');
@@ -648,14 +655,11 @@ async fn check_zone(ctx: &Ctx, store: &SnapshotStore, zone: &str) -> bool {
 // What: republish a rollback patch for the lan zone.
 // Why: other nodes converge now, not at the next tick.
 async fn publish_patch(js: &jetstream::Context, patch: &Value) {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+    let stamp = unix_nanos();
     for rrset in patch["rrsets"].as_array().into_iter().flatten() {
         let delete = rrset.get("changetype").and_then(Value::as_str) == Some("DELETE");
         let action = if delete { "delete" } else { "replace" };
-        if let Some(record) = rrset_record(action, "lan", rrset) {
+        if let Some(record) = rrset_record(action, LAN_ZONE, rrset) {
             let name = record.name.trim_end_matches('.');
             // What: a fresh message id per republish.
             // Why: the dedup window would absorb a repeated id.
@@ -855,10 +859,7 @@ fn grow(backoff: u64) -> u64 {
 // What: a required env value, or exit with a message.
 // Why: an empty key or consumer name would start unsafely.
 fn required(name: &str) -> String {
-    env_opt(name).unwrap_or_else(|| {
-        eprintln!("{name} environment variable is required");
-        std::process::exit(1);
-    })
+    need(&process_env, name).unwrap_or_else(|e| die(TAG, &e))
 }
 
 // What: connect to NATS, start helpers, apply records.
@@ -881,10 +882,7 @@ async fn main() {
     };
     let (keep_n, warning) = keep
         .parse(env_opt("KEEP_KNOWN_GOOD_CONFIGS").as_deref())
-        .unwrap_or_else(|error| {
-            eprintln!("{error}");
-            std::process::exit(1);
-        });
+        .unwrap_or_else(|error| die(TAG, &error));
     if let Some(warning) = warning {
         eprintln!("{warning}");
     }
@@ -899,10 +897,10 @@ async fn main() {
     } else if let Some(token) = env_opt("NATS_TOKEN") {
         options = options.token(token);
     }
-    let client = options.connect(&nats_url).await.unwrap_or_else(|e| {
-        eprintln!("Failed to connect to NATS: {e}");
-        std::process::exit(1);
-    });
+    let client = options
+        .connect(&nats_url)
+        .await
+        .unwrap_or_else(|e| die(TAG, &format!("failed to connect to NATS: {e}")));
     println!("Connected to NATS at {nats_url}");
     let js = jetstream::new(client);
 
@@ -917,10 +915,7 @@ async fn main() {
     let stream = js
         .get_or_create_stream(stream_config)
         .await
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to create stream: {e}");
-            std::process::exit(1);
-        });
+        .unwrap_or_else(|e| die(TAG, &format!("failed to create stream: {e}")));
     println!("Stream {NATS_STREAM_DNS} ready");
     let consumer_config = jetstream::consumer::pull::Config {
         durable_name: Some(consumer_name.clone()),
@@ -930,18 +925,11 @@ async fn main() {
     let consumer = stream
         .get_or_create_consumer(&consumer_name, consumer_config)
         .await
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to create consumer: {e}");
-            std::process::exit(1);
-        });
+        .unwrap_or_else(|e| die(TAG, &format!("failed to create consumer: {e}")));
     println!("Created durable subscriber: {consumer_name}");
 
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .pool_idle_timeout(Duration::from_secs(90))
-        .tcp_keepalive(Duration::from_secs(60))
-        .build()
-        .expect("failed to build shared HTTP client");
+    let http =
+        http_client().unwrap_or_else(|e| die(TAG, &format!("cannot build HTTP client: {e}")));
     let ctx = Arc::new(Ctx {
         http,
         api_key,

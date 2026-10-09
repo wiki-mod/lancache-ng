@@ -21,7 +21,7 @@ use dhcproto::v4::{DhcpOption, Flags, Message, MessageType, OptionCode};
 use dhcproto::{Decodable, Decoder, Encodable, Encoder};
 use futures_util::StreamExt as _;
 use lancache_ng::config::{
-    CONTAINER_DHCP, CONTAINER_DHCP_PROBE, CONTAINER_DHCP_PROXY, CONTAINER_DNS_SSL,
+    self, CONTAINER_DHCP, CONTAINER_DHCP_PROBE, CONTAINER_DHCP_PROXY, CONTAINER_DNS_SSL,
     CONTAINER_DNS_STANDARD, CONTAINER_NATS, CONTAINER_NETDATA, CONTAINER_NTP, CONTAINER_PROXY,
     CONTAINER_SYSLOG, CONTAINER_UI, DhcpMode, NATS_STREAM_DNS, NATS_SUBJECT_DNS,
     NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, OutOfRange, Uint, canonical_zone, parse_bool,
@@ -29,8 +29,9 @@ use lancache_ng::config::{
 };
 use lancache_ng::{
     DesiredRunState, DesiredState, DnsRecord, DockerError, DockerProxy, FlushRequest, Place,
-    SnapshotStore, WatchdogStatus, ct_eq, df, is_placeholder, load_or_create, load_or_create_hex,
-    snapshot_created_unix, write_file, write_file_as, write_if_changed,
+    SnapshotStore, WatchdogStatus, ct_eq, df, die, http_client, is_placeholder, load_or_create,
+    load_or_create_hex, snapshot_created_unix, unix_secs, write_file, write_file_as,
+    write_if_changed,
 };
 use nkeys::{KeyPair, XKey};
 use regex::Regex;
@@ -48,7 +49,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 use tera::{Context, Tera};
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
@@ -216,22 +217,20 @@ impl Config {
     // What: the config from the process environment.
     // Why: tests pass their own reader to load instead.
     fn from_env() -> Result<Self, String> {
-        Self::load(&|key| std::env::var(key).ok())
+        Self::load(&config::process_env)
     }
 
     // What: build the config from any variable reader.
     // Why: a reader closure makes every default observable.
     fn load(env: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
         let text = |key: &str, default: &str| env(key).unwrap_or_else(|| default.to_string());
-        let set = |key: &str| env(key).filter(|v| !v.is_empty());
+        let set = |key: &str| config::opt(env, key);
         // What: a value compose must supply; unset stops startup.
         // Why: compose owns it; Rust keeps no second default.
-        let need = |key: &str| set(key).ok_or_else(|| format!("{key} must be set"));
+        let need = |key: &str| config::need(env, key);
         // What: a bool compose must supply; junk stops startup.
         // Why: same owner as need; a typo must not flip a gate.
-        let need_flag = |key: &str| {
-            need(key).and_then(|v| parse_bool(&v).ok_or_else(|| format!("{key} must be a boolean")))
-        };
+        let need_flag = |key: &str| config::need_flag(env, key);
         let flag =
             |key: &str, default: bool| env(key).and_then(|v| parse_bool(&v)).unwrap_or(default);
         let knob = |name: &'static str, max: u64, above: OutOfRange| -> Result<u64, String> {
@@ -667,7 +666,7 @@ fn resolve_shared_secret(
 // From: Issue #858
 fn ensure_shared_secrets(dir: &str, gid: u32, prefix: &str) -> Result<(), String> {
     for var in SHARED_SECRET_VARS.iter().filter(|v| v.starts_with(prefix)) {
-        let configured = std::env::var(var).unwrap_or_default();
+        let configured = config::env_opt(var).unwrap_or_default();
         let current = if shared_secret_is_placeholder(&configured) {
             ""
         } else {
@@ -791,10 +790,7 @@ fn cookie_signature(secret: &[u8; 32], expires: u64, csrf_token: &str) -> String
 // Why: every first request gets its own random CSRF token.
 fn issue_session(secret: &[u8; 32], ttl: Duration) -> Session {
     let csrf_token = hex::encode(rand::random::<[u8; 32]>());
-    let expires = (SystemTime::now() + ttl)
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let expires = unix_secs() + ttl.as_secs();
     let signature = cookie_signature(secret, expires, &csrf_token);
     Session {
         cookie_value: format!("v1.{expires}.{csrf_token}.{signature}"),
@@ -810,8 +806,9 @@ fn validate_session(cookie_value: &str, secret: &[u8; 32]) -> Option<Session> {
         return None;
     };
     let expires: u64 = expires.parse().ok()?;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    let now = unix_secs();
     let valid = *version == "v1"
+        && now != 0
         && now < expires
         && ct_eq(signature, &cookie_signature(secret, expires, csrf_token));
     valid.then(|| Session {
@@ -2227,15 +2224,6 @@ const TARGET_ACCOUNT: &str = "$G";
 // Why: revocation is the per-connect DB check, not the expiry.
 const USER_JWT_TTL_SECS: i64 = 90 * 24 * 60 * 60;
 
-// What: seconds since the epoch; 0 only for a broken clock.
-// Why: callers refuse to issue JWT windows from 1970.
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 // What: sleep, then double the delay up to a cap.
 // Why: one backoff step for every NATS retry loop.
 // From: Issue #849
@@ -2571,7 +2559,7 @@ fn auth_callout_response(
     user_nkey: &str,
     authorized: Option<&str>,
 ) -> Result<String, String> {
-    let now = unix_now() as i64;
+    let now = unix_secs() as i64;
     if now == 0 {
         return Err("system clock is set before the Unix epoch".to_string());
     }
@@ -2939,7 +2927,7 @@ async fn register_secondary(
              (name, consumer_name, nats_token, nats_user, nats_password_hash, registered_at, last_seen, address) \
              VALUES (?1, ?1, '', ?1, ?2, ?3, NULL, \
              COALESCE(?4, (SELECT address FROM secondaries WHERE name = ?1)))",
-            rusqlite::params![form.name, hash, unix_now() as i64, reported],
+            rusqlite::params![form.name, hash, unix_secs() as i64, reported],
         )
     })?;
     Ok(Json(RegisterResponse {
@@ -3032,7 +3020,7 @@ async fn check_secondary_health(
         let _ = with_db(&state, |db| {
             db.execute(
                 "UPDATE secondaries SET last_seen = ? WHERE name = ?",
-                rusqlite::params![unix_now() as i64, name],
+                rusqlite::params![unix_secs() as i64, name],
             )
         });
     }
@@ -5152,9 +5140,7 @@ async fn run_dhcp_probe(docker: &DockerProxy) -> Result<String, String> {
         .map_err(failed)?;
     // What: remember the start second for the log filter.
     // Why: the logs call must not read the previous run.
-    let since = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+    let since = unix_secs();
     docker_start(docker, "dhcp-probe").await.map_err(failed)?;
 
     let begun = Instant::now();
@@ -6707,9 +6693,7 @@ const MIN_REGISTRATION_TOKEN_LEN: usize = 32;
 // Why: tracing and the root start must agree on one path.
 // From: Issue #633 | PR #1858
 fn ui_log_file() -> String {
-    std::env::var("UI_LOG_FILE")
-        .ok()
-        .filter(|v| !v.is_empty())
+    config::env_opt("UI_LOG_FILE")
         .unwrap_or_else(|| container_start_fatal("UI_LOG_FILE is not set"))
 }
 
@@ -6818,8 +6802,7 @@ fn init_tracing() {
 // Why: the start fails closed before the server runs.
 // From: Issue #858
 fn container_start_fatal(message: &str) -> ! {
-    eprintln!("[lancache-ui] FATAL: {message}");
-    std::process::exit(1);
+    die("lancache-ui", message)
 }
 
 // What: a required numeric id from the image environment.
@@ -6827,7 +6810,7 @@ fn container_start_fatal(message: &str) -> ! {
 // From: Issue #1427 | PR #1858
 fn required_env_id(key: &str) -> u32 {
     let raw =
-        std::env::var(key).unwrap_or_else(|_| container_start_fatal(&format!("{key} is not set")));
+        config::env_opt(key).unwrap_or_else(|| container_start_fatal(&format!("{key} is not set")));
     raw.parse()
         .unwrap_or_else(|_| container_start_fatal(&format!("{key}={raw} is not an id")))
 }
@@ -6991,9 +6974,8 @@ fn prepare_netdata(gid: u32) -> Result<(), String> {
     if cfg.netdata_alarm_token.is_empty() {
         return Err("NETDATA_ALARM_TOKEN resolved to an empty value".to_string());
     }
-    let need = |value: &Option<String>, key: &str| {
-        value.clone().ok_or_else(|| format!("{key} is not set"))
-    };
+    let need =
+        |value: &Option<String>, key: &str| value.clone().ok_or_else(|| config::not_set(key));
     let token = need(&cfg.netdata_token_file, "NETDATA_TOKEN_FILE")?;
     let notify = need(&cfg.netdata_notify_file, "NETDATA_NOTIFY_FILE")?;
     let conf = need(&cfg.netdata_conf_file, "NETDATA_CONF_FILE")?;
@@ -7271,9 +7253,7 @@ async fn run() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         templates: load_templates(&cfg),
         docker: DockerProxy::new(&cfg.docker_proxy_url),
-        http_client: reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()?,
+        http_client: http_client()?,
         file_lock: Mutex::new(()),
         netdata_alarms_lock: Mutex::new(()),
         kea_config_lock: tokio::sync::Mutex::new(()),
