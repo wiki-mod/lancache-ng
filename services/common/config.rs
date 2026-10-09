@@ -222,6 +222,10 @@ pub const NATS_SUBJECT_DNS: &str = "lancache.dns.>";
 pub const NATS_SUBJECT_RECORD: &str = "lancache.dns.record";
 pub const NATS_SUBJECT_FLUSH: &str = "lancache.dns.flush";
 
+// What: TTL of a record written without one, in seconds.
+// Why: ui forms and the subscriber must default alike.
+pub const DEFAULT_RECORD_TTL: i32 = 300;
+
 // What: the local zone, as publishers spell it.
 // Why: subscriber and the zone list share one spelling.
 pub const LAN_ZONE: &str = "lan";

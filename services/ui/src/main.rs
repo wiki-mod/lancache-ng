@@ -23,9 +23,9 @@ use futures_util::StreamExt as _;
 use lancache_ng::config::{
     self, CONTAINER_DHCP, CONTAINER_DHCP_PROBE, CONTAINER_DHCP_PROXY, CONTAINER_DNS_SSL,
     CONTAINER_DNS_STANDARD, CONTAINER_NATS, CONTAINER_NETDATA, CONTAINER_NTP, CONTAINER_PROXY,
-    CONTAINER_SYSLOG, CONTAINER_UI, DhcpMode, LAN_ZONE, NATS_STREAM_DNS, NATS_SUBJECT_DNS,
-    NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, OutOfRange, PDNS_API_PATH, Uint, canonical_zone,
-    is_container, is_dns_name, parse_bool, rollback_zones, zone_url,
+    CONTAINER_SYSLOG, CONTAINER_UI, DEFAULT_RECORD_TTL, DhcpMode, LAN_ZONE, NATS_STREAM_DNS,
+    NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, OutOfRange, PDNS_API_PATH, Uint,
+    canonical_zone, is_container, is_dns_name, parse_bool, rollback_zones, zone_url,
 };
 use lancache_ng::{
     DesiredRunState, DesiredState, DnsRecord, DockerError, DockerProxy, FlushRequest, Place,
@@ -5992,7 +5992,7 @@ async fn toggle_default_domain(
 // Why: the subscriber writes it on every DNS node.
 async fn add_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect {
     let name = normalize_lan_name(f.get("name"));
-    let ttl = f.number::<u32>("ttl").unwrap_or(300);
+    let ttl = f.number::<u32>("ttl").unwrap_or(DEFAULT_RECORD_TTL as u32);
     let Some((kind, content)) =
         validate_lan_record(&name, f.get("record_type"), f.get("content"), ttl)
     else {
@@ -6125,7 +6125,7 @@ async fn toggle_ddns_allow_unsigned_updates(
 // What: set a manual PTR record in the reverse zone.
 // Why: the flush follows only an accepted write.
 async fn add_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect {
-    let ttl = f.number::<u32>("ttl").unwrap_or(300);
+    let ttl = f.number::<u32>("ttl").unwrap_or(DEFAULT_RECORD_TTL as u32);
     let (Some((zone, name)), Some(target), true) = (
         ptr_location(f.get("ip")),
         normalize_ptr_target(f.get("hostname")),

@@ -20,9 +20,9 @@ use axum::{Json, Router};
 use futures::StreamExt;
 use futures::future::join_all;
 use lancache_ng::config::{
-    LAN_ZONE, NATS_STREAM_DNS, NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD,
-    OutOfRange, Uint, canonical_zone, env_opt, is_dns_name, is_rollback_zone, need, parse_bool,
-    process_env, rollback_zones, zone_url,
+    DEFAULT_RECORD_TTL, LAN_ZONE, NATS_STREAM_DNS, NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH,
+    NATS_SUBJECT_RECORD, OutOfRange, Uint, canonical_zone, env_opt, is_dns_name, is_rollback_zone,
+    need, parse_bool, process_env, rollback_zones, zone_url,
 };
 use lancache_ng::{
     DnsRecord, FlushRequest, PowerDns, SnapshotStore, ct_eq, die, http_client,
@@ -35,9 +35,22 @@ use serde_json::{Value, json};
 // What: log tag of start errors.
 // Why: the log shows which service refused to start.
 const TAG: &str = "nats-subscriber";
-// What: TTL given to a replace message without one.
-// Why: PowerDNS rejects a REPLACE patch without a TTL.
-const DEFAULT_REPLACE_TTL: i32 = 300;
+// What: wait between NATS reconnect attempts.
+// Why: a restarting server is retried without a busy loop.
+const RECONNECT_DELAY: Duration = Duration::from_secs(3);
+// What: delay before a Nak'd message is redelivered.
+// Why: a retry must not spin at full speed.
+const NAK_DELAY: Duration = Duration::from_millis(100);
+// What: pause between two confirmation reads of a zone.
+// Why: AXFR needs a moment to land on this node.
+const CONFIRM_PAUSE: Duration = Duration::from_millis(100);
+// What: messages per fetch, and how long a fetch waits.
+// Why: bounds a batch; an idle fetch ends after the wait.
+const FETCH_BATCH: usize = 10;
+const FETCH_WAIT: Duration = Duration::from_secs(5);
+// What: period of the snapshot watcher and the reconciler.
+// Why: a missed message converges within a minute.
+const TICK: Duration = Duration::from_secs(60);
 // What: in-process confirmation tries before a Nak.
 // Why: a longer sleep holds the message past ack_wait.
 // From: Issue #1095
@@ -104,7 +117,13 @@ async fn publish(
 // What: publish one record message, logging a failure.
 // Why: replication is best-effort; the next tick retries.
 async fn publish_record(js: &jetstream::Context, msg_id: &str, record: &DnsRecord) {
-    let payload = serde_json::to_vec(record).unwrap_or_default();
+    let payload = match serde_json::to_vec(record) {
+        Ok(payload) => payload,
+        Err(e) => {
+            eprintln!("encoding of {msg_id} failed, not published: {e}");
+            return;
+        }
+    };
     if let Err(e) = publish(js, NATS_SUBJECT_RECORD, Some(msg_id), payload).await {
         eprintln!("publish of {msg_id} failed: {e}");
     }
@@ -136,7 +155,7 @@ fn patch_body(record: &DnsRecord) -> Result<Value, String> {
         "delete" => rrset["changetype"] = json!("DELETE"),
         "replace" => {
             rrset["changetype"] = json!("REPLACE");
-            rrset["ttl"] = json!(record.ttl.unwrap_or(DEFAULT_REPLACE_TTL));
+            rrset["ttl"] = json!(record.ttl.unwrap_or(DEFAULT_RECORD_TTL));
             if let Some(records) = &record.records {
                 rrset["records"] = json!(records);
             }
@@ -257,7 +276,7 @@ async fn snapshot_zone(ctx: &Ctx, zone: &str) {
 // What: every minute, snapshot all managed zones.
 // Why: runs on every node, unlike the NATS reconciler.
 async fn snapshot_watcher(ctx: Arc<Ctx>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    let mut interval = tokio::time::interval(TICK);
     loop {
         interval.tick().await;
         for zone in rollback_zones() {
@@ -269,7 +288,7 @@ async fn snapshot_watcher(ctx: Arc<Ctx>) {
 // What: every minute, republish the lan zone to NATS.
 // Why: a node that missed messages converges again.
 async fn reconciler(ctx: Arc<Ctx>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    let mut interval = tokio::time::interval(TICK);
     loop {
         interval.tick().await;
         let rrsets = match ctx.zone_rrsets(LAN_ZONE).await {
@@ -344,6 +363,13 @@ enum Outcome {
 // Why: the zone comes from a NATS message, not a file.
 fn zone_is_safe(zone: &str) -> bool {
     is_dns_name(zone.trim_end_matches('.'), false, false)
+}
+
+// What: the recursor flush URL for one domain.
+// Why: the domain is message text; & or # would split it.
+fn flush_url(rec_url: &str, domain: &str) -> Result<reqwest::Url, String> {
+    reqwest::Url::parse_with_params(&format!("{rec_url}/cache/flush"), [("domain", domain)])
+        .map_err(|e| e.to_string())
 }
 
 // What: apply one record message to PowerDNS.
@@ -512,7 +538,7 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
             if confirmed {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(CONFIRM_PAUSE).await;
         }
         if !confirmed {
             let delivered = msg.info().map_or(0, |info| info.delivered);
@@ -527,8 +553,14 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
             );
         }
     }
-    let url = format!("{}/cache/flush?domain={domain}", ctx.pdns_rec_url);
-    match ctx.pdns.call(Method::PUT, &url, None).await {
+    let url = match flush_url(&ctx.pdns_rec_url, domain) {
+        Ok(url) => url,
+        Err(e) => {
+            eprintln!("Acking recursor flush, bad PDNS_REC_API_URL: {e}");
+            return Outcome::Ack;
+        }
+    };
+    match ctx.pdns.call(Method::PUT, url.as_str(), None).await {
         Ok(response) if response.status().is_success() => {
             println!("Flushed PDNS cache");
             Outcome::Ack
@@ -743,7 +775,7 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
 
     // What: records go out before any flush.
     // Why: else a flushed cache refills from stale data.
-    let republished = zone == "lan." && patch_len > 0;
+    let republished = zone == canonical_zone(LAN_ZONE) && patch_len > 0;
     if republished {
         publish_patch(&ctx.js, &patch).await;
     }
@@ -882,7 +914,7 @@ async fn main() {
 
     let mut options = async_nats::ConnectOptions::new()
         .max_reconnects(None)
-        .reconnect_delay_callback(|_| Duration::from_secs(3));
+        .reconnect_delay_callback(|_| RECONNECT_DELAY);
     if let (Some(user), Some(password)) = (env_opt("NATS_USER"), env_opt("NATS_PASSWORD")) {
         options = options.user_and_password(user, password);
     } else if let Some(token) = env_opt("NATS_TOKEN") {
@@ -895,6 +927,8 @@ async fn main() {
     println!("Connected to NATS at {nats_url}");
     let js = jetstream::new(client);
 
+    // What: a file-backed stream keeping messages 7 days.
+    // Why: messages survive a restart; the oldest go first.
     let stream_config = jetstream::stream::Config {
         name: NATS_STREAM_DNS.to_string(),
         subjects: vec![NATS_SUBJECT_DNS.to_string()],
@@ -944,8 +978,8 @@ async fn main() {
     loop {
         let fetched = consumer
             .fetch()
-            .max_messages(10)
-            .expires(Duration::from_secs(5))
+            .max_messages(FETCH_BATCH)
+            .expires(FETCH_WAIT)
             .messages()
             .await;
         let mut messages = match fetched {
@@ -970,10 +1004,7 @@ async fn main() {
             let outcome = handle(&ctx, &msg, &mut applied, record_writes).await;
             let settled = match outcome {
                 Outcome::Ack => msg.ack().await,
-                _ => {
-                    msg.ack_with(jetstream::AckKind::Nak(Some(Duration::from_millis(100))))
-                        .await
-                }
+                _ => msg.ack_with(jetstream::AckKind::Nak(Some(NAK_DELAY))).await,
             };
             if let Err(e) = settled {
                 eprintln!("Error settling message: {e}");
@@ -1007,6 +1038,32 @@ mod tests {
             .map(|c| json!({"content": c, "disabled": false}))
             .collect();
         json!({"name": name, "type": kind, "ttl": ttl, "records": records})
+    }
+
+    // What: the flush domain is encoded into the query.
+    // Why: a message must not add or cut query parameters.
+    #[test]
+    fn flush_url_encodes_the_domain() {
+        let url = flush_url("http://rec:8082/api/v1/servers/localhost", "a.lan.").unwrap();
+        assert_eq!(url.query(), Some("domain=a.lan."));
+        let url = flush_url("http://rec:8082/x", "a&b=1#c d").unwrap();
+        assert_eq!(url.query(), Some("domain=a%26b%3D1%23c+d"));
+        assert!(flush_url("not a url", "a.lan.").is_err());
+    }
+
+    // What: only the exact API key passes the header check.
+    // Why: the key is the only gate of zone changes.
+    #[test]
+    fn authorized_requires_the_exact_key() {
+        let with = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("X-API-Key", value.parse().unwrap());
+            headers
+        };
+        assert!(authorized(&with("k1"), "k1"));
+        assert!(!authorized(&with("k2"), "k1"));
+        assert!(!authorized(&with(""), "k1"));
+        assert!(!authorized(&HeaderMap::new(), "k1"));
     }
 
     // What: only plain zone names reach an API URL path.
