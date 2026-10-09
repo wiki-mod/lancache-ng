@@ -6,7 +6,7 @@
 # Why: one owner for behavior several services share.
 # From: Issue #1683 | PR #1858
 [package]
-name = "lancache-common"
+name = "LanCache-NG"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,7 +15,7 @@ license.workspace = true
 # Why: the decision allows exactly these two shared sources.
 # From: Issue #1683 | PR #1858
 [lib]
-name = "lancache_common"
+name = "lancache_ng"
 path = "shared.rs"
 
 [dependencies]

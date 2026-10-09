@@ -20,14 +20,14 @@ use base64::Engine as _;
 use dhcproto::v4::{DhcpOption, Flags, Message, MessageType, OptionCode};
 use dhcproto::{Decodable, Decoder, Encodable, Encoder};
 use futures_util::StreamExt as _;
-use lancache_common::config::{
+use lancache_ng::config::{
     CONTAINER_DHCP, CONTAINER_DHCP_PROBE, CONTAINER_DHCP_PROXY, CONTAINER_DNS_SSL,
     CONTAINER_DNS_STANDARD, CONTAINER_NATS, CONTAINER_NETDATA, CONTAINER_NTP, CONTAINER_PROXY,
     CONTAINER_SYSLOG, CONTAINER_UI, DOCKER_PROXY_DEFAULT_URL, DhcpMode, NATS_STREAM_DNS,
     NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, OutOfRange, Uint, canonical_zone,
     parse_bool, rollback_zones, zone_api_id,
 };
-use lancache_common::{
+use lancache_ng::{
     DesiredRunState, DesiredState, DnsRecord, DockerError, DockerProxy, FlushRequest, Place,
     SnapshotStore, WatchdogStatus, ct_eq, df, is_placeholder, load_or_create, load_or_create_hex,
     snapshot_created_unix, write_file, write_file_as, write_if_changed,

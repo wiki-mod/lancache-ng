@@ -3,6 +3,20 @@
 version = 4
 
 [[package]]
+name = "LanCache-NG"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "rand 0.10.2",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "subtle",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1135,11 +1149,11 @@ dependencies = [
 name = "lancache-cachehamster"
 version = "0.3.0"
 dependencies = [
+ "LanCache-NG",
  "anyhow",
  "argon2",
  "chacha20poly1305",
  "futures-util",
- "lancache-common",
  "rand 0.10.2",
  "reqwest",
  "serde",
@@ -1150,23 +1164,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "lancache-common"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "hex",
- "rand 0.10.2",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "subtle",
-]
-
-[[package]]
 name = "lancache-ui"
 version = "0.3.0"
 dependencies = [
+ "LanCache-NG",
  "anyhow",
  "argon2",
  "async-nats",
@@ -1178,7 +1179,6 @@ dependencies = [
  "form_urlencoded",
  "futures-util",
  "hex",
- "lancache-common",
  "nkeys",
  "rand 0.10.2",
  "regex",
@@ -1199,7 +1199,7 @@ dependencies = [
 name = "lancache-watchdog"
 version = "0.3.0"
 dependencies = [
- "lancache-common",
+ "LanCache-NG",
  "serde_json",
  "time",
  "tokio",
@@ -1307,10 +1307,10 @@ dependencies = [
 name = "nats-subscriber"
 version = "0.3.0"
 dependencies = [
+ "LanCache-NG",
  "async-nats",
  "axum",
  "futures",
- "lancache-common",
  "reqwest",
  "serde",
  "serde_json",

@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use lancache_common::config::{self, DhcpMode, OutOfRange, Uint, env_opt, parse_bool};
-use lancache_common::{
+use lancache_ng::config::{self, DhcpMode, OutOfRange, Uint, env_opt, parse_bool};
+use lancache_ng::{
     DesiredRunState, DesiredState, DiskHealth, DiskInfo, DockerProxy, Place, ServiceHealth,
     WatchdogStatus, df, write_file,
 };

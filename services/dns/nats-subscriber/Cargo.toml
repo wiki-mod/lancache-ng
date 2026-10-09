@@ -15,7 +15,7 @@ name = "nats-subscriber"
 path = "src/main.rs"
 
 [dependencies]
-lancache-common = { path = "../../common" }
+LanCache-NG = { path = "../../common" }
 async-nats = { workspace = true }
 axum = { workspace = true }
 futures = { workspace = true }

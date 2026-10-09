@@ -19,11 +19,11 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::StreamExt;
 use futures::future::join_all;
-use lancache_common::config::{
+use lancache_ng::config::{
     NATS_STREAM_DNS, NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, OutOfRange, Uint,
     canonical_zone, env_opt, is_rollback_zone, parse_bool, rollback_zones, zone_api_id,
 };
-use lancache_common::{DnsRecord, FlushRequest, SnapshotStore, ct_eq, snapshot_created_unix};
+use lancache_ng::{DnsRecord, FlushRequest, SnapshotStore, ct_eq, snapshot_created_unix};
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{Value, json};

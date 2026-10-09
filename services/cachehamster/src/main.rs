@@ -15,8 +15,8 @@ use argon2::Argon2;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use futures_util::{StreamExt, stream};
-use lancache_common::config::{OutOfRange, Uint, env_opt};
-use lancache_common::{Place, is_placeholder, load_or_create_hex, write_file};
+use lancache_ng::config::{OutOfRange, Uint, env_opt};
+use lancache_ng::{Place, is_placeholder, load_or_create_hex, write_file};
 use serde::{Deserialize, Serialize};
 
 // What: sizes of master secret, salt and nonce in bytes.
