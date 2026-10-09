@@ -911,21 +911,20 @@ CASES
     _expect output-unwritable 2 "[CI-ERROR-CACHE-0010];raw:" || return 1
 }
 
-# What: temp root off tmpfs, made; uncreatable dirs coded.
-# Why: bare mktemp in tools must land on disk, not RAM.
+# What: temp root off tmpfs, made; uncreatable dirs coded
+# Why: bare mktemp in tools must land on disk, not RAM
 # From: Issue #1683 | PR #1858
 @test "temp dirs: tmpfs refused, made on disk, else coded" {
-    local base d long made
-    base="/var/tmp/$(_val name)" d="${base}/$(_val name)" long="/var/tmp/$(printf '%0300d' 0)"
-    CI_TMPDIR=/tmp run bash "${CI_SH}" check comment-length
+    local d long
+    d="${BATS_TEST_TMPDIR}/$(_val name)/$(_val name)" long="${BATS_TEST_TMPDIR}/$(printf '%0300d' 0)"
+    [[ "$(realpath -m -- "${BATS_TEST_TMPDIR}")" == /var/tmp/* ]] || { echo "bats temp dir not under /var/tmp: ${BATS_TEST_TMPDIR}"; return 1; }
+    CI_TMPDIR=/tmp run _ci_tmp_init
     _expect tmpfs 2 "[CI-ERROR-CORE-0006]" || return 1
-    CI_TMPDIR="/var/tmp/../../tmp/$(_val name)" run bash "${CI_SH}" check comment-length
+    CI_TMPDIR="/var/tmp/../../tmp/$(_val name)" run _ci_tmp_init
     _expect dotdot 2 "[CI-ERROR-CORE-0006]" || return 1
-    CI_TMPDIR="${d}" run bash -c 'source "$1"; _ci_tmp_init; echo "t=${TMPDIR}"' _ "${CI_SH}"
-    made=no; [ ! -d "${d}" ] || made=yes
-    rm -rf "${base}"
+    CI_TMPDIR="${d}" run eval '_ci_tmp_init && echo "t=${TMPDIR}"'
     _expect created 0 "t=${d}" || return 1
-    [ "${made}" = yes ] || { echo "not created: ${d}"; return 1; }
+    [ -d "${d}" ] || { echo "not created: ${d}"; return 1; }
     CI_TMPDIR="${long}" run _ci_tmp_init
     _expect uncreatable 2 "[CI-ERROR-CORE-0111] dir=\"${long}\"" || return 1
 }
