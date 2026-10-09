@@ -297,6 +297,7 @@ resolve-platform|-|resolve @SVC@ @FOREIGN@|CI-ERROR-RESOLVE-0004|-
 build-platform|-|build @SVC@ @FOREIGN@|CI-ERROR-BUILD-0006|-
 test|-|test|CI-ERROR-TEST-0001|-
 test-toolchain|-|test @TOOL@|CI-ERROR-TEST-0006|CI-ERROR-TEST-0003
+test-stack|-|test-stack|CI-ERROR-TEST-0012|-
 assemble|-|assemble|CI-ERROR-ASSEMBLE-0001|-
 promote|-|promote|CI-ERROR-PROMOTE-0001|-
 promote-channel|-|promote @BAD@|CI-ERROR-PROMOTE-0002|-
@@ -892,48 +893,30 @@ CASES
 # TEST / SCAN
 # =========================================================
 
-@test "rust test: off by default; on runs fmt, clippy, test via sccache" {
-    # What: per row: SOT + env -> SKIP, ok, or a coded fail.
-    # Why: AG-VAL-008: no cargo check; temp error stops.
-    # From: Issue #1683 | PR #1858
-    local bin log m
-    bin="$(_val path)" log="$(_val path)" m="$(_val path)"
-    local case envs svc rc want cargo
-    local -a ev
-    local -A V=(
-        [@R@]="$(_val name)" [@NC@]="$(_val name)" [@C@]="$(_val name)"
-        [@TMP@]="${BATS_TEST_TMPDIR}/$(_val name)" [@GONE@]="${BATS_TEST_TMPDIR}/$(_val name)"
-    )
-    mkdir -p "${V[@TMP@]}"
-    _tool_stub "${bin}" cargo <<STUB
-echo "\$1 wrapper=\${RUSTC_WRAPPER:-none} dir=\${SCCACHE_DIR:-none} args=\$*" >> "${log}"
-STUB
-    _stub_sccache "${bin}" never
-    {
-        _fill "$(printf '%s\n' 'services:' '  @R@:' '    build_type: rust' '    crate: @C@' '  @NC@:' '    build_type: rust')"
-        printf '\n'
-        _sot_block ci_variables
-    } > "${m}"
-    while IFS='|' read -r case envs svc rc want cargo; do
-        ev=(); [ "${envs}" = - ] || read -r -a ev <<< "$(_fill "${envs}")"
-        rm -f "${log}"
-        run _cache_env_clean env -u CI_RUST_VALIDATION SCCACHE_REDIS_MODE=optional "${ev[@]}" CI_MANIFEST="${m}" \
-            CI_REPO_ROOT="${BATS_TEST_TMPDIR}" PATH="${bin}:${PATH}" \
-            bash -c 'source "$1"; _ci_test_rust "$2"' _ "${CI_SH}" "$(_fill "${svc}")"
-        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
-        if [ "${cargo}" = - ]; then
-            [ ! -e "${log}" ] || { echo "${case}: cargo ran: $(cat "${log}")"; return 1; }
-            continue
-        fi
-        [ "$(cut -d' ' -f1 "${log}" | paste -sd' ')" = "${cargo}" ] || { echo "${case}: $(cat "${log}")"; return 1; }
-        [ "$(grep -c -F -- "wrapper=sccache dir=${V[@TMP@]}/sccache " "${log}")" -eq 3 ] \
-            && [ "$(grep -c -F -- "-p ${V[@C@]}" "${log}")" -eq 3 ] || { echo "${case}: $(cat "${log}")"; return 1; }
-    done <<'CASES'
-off-by-sot|-|@R@|0|tested=SKIP;AG-VAL-008|-
-on|CI_RUST_VALIDATION=true CI_TMPDIR=@TMP@|@R@|0|[CI-INFO-CACHE-0002];tested=ok|fmt clippy test
-no-crate|CI_RUST_VALIDATION=true CI_TMPDIR=@TMP@|@NC@|2|[CI-ERROR-TEST-0005] service="@NC@"|-
-temp-error|CI_RUST_VALIDATION=true CI_TMPDIR=@GONE@|@R@|2|[CI-ERROR-CORE-0110];[CI-ERROR-TEST-0009]|-
-CASES
+# What: test-stack per real SOT target: SKIP or coded stop.
+# Why: AG-VAL-008 off by default; §72 cache error no FAIL.
+# From: Issue #1683 | PR #1858
+@test "test-stack: rust off by default, apk skips, cache errors coded" {
+    local s bt rust="" apk=""
+    for s in $(_ci_block_keys services); do
+        bt="$(_ci_block_entry_field services "${s}" build_type)" || { echo "build_type ${s}: ${bt}"; return 1; }
+        [ "${bt}" != rust ] || rust="${rust:-${s}}"
+        [ "${bt}" != apk ] || apk="${apk:-${s}}"
+    done
+    [ -n "${rust}" ] && [ -n "${apk}" ] || { echo "no rust '${rust}' or apk '${apk}' service in the SOT"; return 1; }
+    _ts() { run _cache_env_clean env "$@" bash "${CI_SH}" test-stack; }
+    _ts -u CI_RUST_VALIDATION TEST_SERVICES="${rust}"
+    _expect rust-default 0 "service=${rust} tested=SKIP;AG-VAL-008" || return 1
+    _ts CI_RUST_VALIDATION=false TEST_SERVICES="${rust}"
+    _expect rust-false 0 "service=${rust} tested=SKIP;AG-VAL-008" || return 1
+    _ts CI_RUST_VALIDATION=true SCCACHE_REDIS_MODE=required RUNNER_ENVIRONMENT=self-hosted TEST_SERVICES="${rust}"
+    _expect self-hosted-no-redis 2 "[CI-ERROR-TEST-0003] service=\"${rust}\";[CI-ERROR-VARIABLES-0012];[CI-ERROR-TEST-0009] service=\"${rust}\"" || return 1
+    [[ "${output}" != *"tested="* ]] || { echo "self-hosted-no-redis read as a result: ${output}"; return 1; }
+    _ts CI_RUST_VALIDATION=true SCCACHE_REDIS_MODE=required RUNNER_ENVIRONMENT=github-hosted TEST_SERVICES="${rust}"
+    _expect hosted-no-cache 2 "[CI-ERROR-TEST-0003] service=\"${rust}\";[CI-ERROR-CACHE-0007];[CI-ERROR-TEST-0009] service=\"${rust}\"" || return 1
+    [[ "${output}" != *"tested="* ]] || { echo "hosted-no-cache read as a result: ${output}"; return 1; }
+    _ts TEST_SERVICES="${apk}"
+    _expect apk-skip 0 "service=${apk} tested=SKIP reason=\"no source tests" || return 1
 }
 
 # What: export step args: SOT kill timeout, cache pair only.
@@ -961,43 +944,6 @@ CASES
     _expect bad-timeout 2 "[CI-ERROR-CACHE-0009]" || return 1
     CI_GHA_RUNTIME_EXPORT_TIMEOUT="${t}" GITHUB_OUTPUT="$(_val path)/$(_val name)/$(_val name)" run ci_cmd_gha_runtime_args
     _expect output-unwritable 2 "[CI-ERROR-CACHE-0010];raw:" || return 1
-}
-
-# What: per row: build type -> SKIP, smoke at image or fail.
-# Why: apk has no source tests; a smoke failure fails test.
-# From: Issue #1683 | PR #1858
-@test "test dispatches per build type and fails closed" {
-    _stand_ins || return 1
-    local m case fault svc rc want ran
-    m="$(_val path)"
-    local -A V=(
-        [@APK@]="$(_val name)" [@TOOL@]="$(_val name)" [@ODD@]="$(_val name)" [@BT@]="$(_val name)"
-        [@RUN@]="$(_val name)" [@CV@]="$(_val var)" [@IMG@]="$(_val name)@$(_val digest)" [@FAULT@]="$(_val name)"
-    )
-    _tool_stub "${BIN}" "${V[@RUN@]}" <<< '[ ! -e "${DS}/smoke-fail" ] || { echo "${FAULT}"; exit 1; }'
-    {
-        _fill "$(printf '%s\n' 'services:' '  @APK@:' '    build_type: apk' '  @ODD@:' '    build_type: @BT@' \
-            'build_toolchain:' '  @TOOL@:' '    build_type: toolchain' '    smoke_tools: [@RUN@]' '    smoke_runs: [@RUN@]')"
-        printf '\n'
-        _sot_block ci_variables
-    } > "${m}"
-    while IFS='|' read -r case fault svc rc want ran; do
-        rm -f "${DS}/smoke-fail" "${DS}/run-images"
-        [ "${fault}" = - ] || : > "${DS}/${fault}"
-        run env CI_MANIFEST="${m}" CI_TOOLCHAIN_IMAGE="${V[@IMG@]}" FAULT="${V[@FAULT@]}" \
-            CI_TOOLCHAIN_COMPILERS="${V[@CV@]}=${V[@RUN@]}" bash "${CI_SH}" test "$(_fill "${svc}")"
-        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
-        if [ "${ran}" = - ]; then
-            [ ! -e "${DS}/run-images" ] || { echo "${case}: smoke ran: $(cat "${DS}/run-images")"; return 1; }
-        else
-            [ "$(cat "${DS}/run-images")" = "$(_fill "${ran}")" ] || { echo "${case}: ran $(cat "${DS}/run-images")"; return 1; }
-        fi
-    done <<'CASES'
-apk-skip|-|@APK@|0|service=@APK@ tested=SKIP reason=|-
-toolchain-ok|-|@TOOL@|0|service=@TOOL@ tested=ok|@IMG@
-toolchain-fail|smoke-fail|@TOOL@|2|[CI-ERROR-TEST-0003] service="@TOOL@";[CI-ERROR-TEST-0011] service="@TOOL@";@FAULT@|@IMG@
-unknown-type|-|@ODD@|2|[CI-ERROR-TEST-0003];[CI-ERROR-TEST-0004] service="@ODD@" build_type="@BT@"|-
-CASES
 }
 
 # What: temp root off tmpfs, made; uncreatable dirs coded.

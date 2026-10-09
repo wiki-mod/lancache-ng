@@ -2211,8 +2211,15 @@ ci_cmd_assemble_stack() {
 # Why: one TEST_SERVICES walk for the test stack.
 # From: Issue #1683
 _ci_for_test_services() {
-    local fn="$1" svc
-    for svc in ${TEST_SERVICES:-}; do
+    local fn="$1" list="${TEST_SERVICES:-}" svc
+    # What: an empty TEST_SERVICES fails instead of passing.
+    # Why: a run that tested nothing must not read as green.
+    # From: Issue #1683 | PR #1858
+    if [ -z "${list// /}" ]; then
+        ci_log "[CI-ERROR-TEST-0012]" "fn=\"${fn}\" reason=\"TEST_SERVICES empty; nothing would run\""
+        return 2
+    fi
+    for svc in ${list}; do
         "${fn}" "${svc}" || return "$?"
     done
 }
