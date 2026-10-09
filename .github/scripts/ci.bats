@@ -1074,6 +1074,7 @@ CASES
     done <<'CASES'
 next-rollover|v@X@.@Y@.9|0|=v@X@.@Y@.10
 next-rc|v@X@.@Y@.@Z@-rc.1|2|[CI-ERROR-RELEASE-0015]
+next-unsupported|v@X@.@Y@|2|[CI-ERROR-RELEASE-0015] tag="v@X@.@Y@"
 CASES
 }
 
