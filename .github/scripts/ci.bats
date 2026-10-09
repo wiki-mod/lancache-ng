@@ -720,50 +720,51 @@ CASES
 # BUILD IDENTITIES
 # =========================================================
 
+# What: real SOT ids per target and platform; edits move
+# Why: NOOP needs stable ids; an edit moves only its owner
+# From: Issue #1683 | PR #1858
 @test "identity is keyed, deterministic, per target and platform" {
-    _stand_ins || return 1
-    # What: 64-hex per SOT platform; moves on own content.
-    # Why: NOOP/reuse needs stable ids that never collide.
-    # From: Issue #1683 | PR #1858
-    local r a1 a1b b1 a2 b0
-    local -A V=(
-        ["@A@"]="$(_val name)" ["@B@"]="$(_val name)" ["@PK@"]="$(_val name)" ["@CA@"]="$(_val name)" ["@CB@"]="$(_val name)"
-        ["@TS@"]="$(_val name)" ["@TP@"]="$(_val name)" ["@PKG@"]="$(_val name)" ["@P1@"]="$(_val platform)"
-        ["@P2@"]="$(_val platform)" ["@X@"]="$(_val platform)" ["@AA@"]="$(_val name)" ["@AB@"]="$(_val name)"
-        ["@F@"]="$(_val name)" ["@IMG@"]="$(_val host)/$(_val name)@$(_val digest)"
-    )
-    V["@K1@"]="${V["@P1@"]##*/}" V["@K2@"]="${V["@P2@"]##*/}"
-    r="$(_val path)"
-    mkdir -p "${r}/${V["@CA@"]}" "${r}/${V["@CB@"]}"
-    _val name > "${r}/${V["@CA@"]}/${V["@F@"]}"; _val name > "${r}/${V["@CB@"]}/${V["@F@"]}"
-    git -C "${r}" init -q && git -C "${r}" add -A
-    _fill "$(printf '%s\n' 'services:' '  @A@:' '    context: @CA@' '    build_type: @TS@' \
-        '  @B@:' '    context: @CB@' '    build_type: @TS@' \
-        '  @PK@:' '    context: @CB@' '    build_type: @TP@' '    packages: ["@PKG@"]' \
-        'build_identity:' '  @TS@:' '    inputs: [source_sha]' '  @TP@:' '    inputs: [source_sha, package_versions]' \
-        'base_images:' '  alpine: @IMG@' 'build_matrix:' '  platforms: [@P1@, @P2@]' \
-        'platform_arch:' '  @K1@:' '    apk: @AA@' '  @K2@:' '    apk: @AB@')" > "${r}/m.yml"
-    export CI_MANIFEST="${r}/m.yml" CI_REPO_ROOT="${r}"
+    local root svcs plats p1 p2 s bt a="" b="" ctx f idx a1 a2 b1 sot rc
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    svcs="$(ci_services)" && plats="$(_ci_build_matrix_platforms)" || { echo "SOT readers failed"; return 1; }
+    p1="${plats%%$'\n'*}" p2="${plats#*$'\n'}" p2="${p2%%$'\n'*}"
+    [ -n "${p1}" ] && [ "${p2}" != "${p1}" ] || { echo "the SOT build matrix needs two platforms: ${plats}"; return 1; }
+    for s in ${svcs}; do
+        bt="$(ci_service_field "${s}" build_type)" || { echo "build_type ${s}: ${bt}"; return 1; }
+        [ "${bt}" = apk ] && { a="${s}"; break; }
+    done
+    ctx="$(_ci_required_field "${a}" context)" && f="$(git -C "${root}" ls-files -- "${ctx}")" \
+        || { echo "${a}: no context files"; return 1; }
+    f="${f%%$'\n'*}"
+    for s in ${svcs}; do
+        [ "${s}" != "${a}" ] || continue
+        rc=0; _ci_plan_candidate "${s}" "${f}" || rc=$?
+        case "${rc}" in
+            0) ;;
+            1) b="${s}"; break ;;
+            *) echo "${s}: plan candidate rc ${rc}"; return 1 ;;
+        esac
+    done
+    [ -n "${a}" ] && [ -n "${f}" ] && [ -n "${b}" ] || { echo "inputs: a=${a} f=${f} b=${b}"; return 1; }
     _id() { run --separate-stderr bash "${CI_SH}" identity "$@"; [ "${status}" -eq 0 ] || { echo "identity $*: rc ${status} ${stderr}"; return 1; }; }
-    _id "${V["@A@"]}" "${V["@P1@"]}" && a1="${output}"
-    [[ "${a1}" =~ ^platform=${V["@P1@"]}\ identity=[0-9a-f]{64}$ ]] || { echo "shape: ${a1}"; return 1; }
-    _id "${V["@A@"]}" "${V["@P1@"]}" && [ "${output}" = "${a1}" ] || { echo "not deterministic: ${output}"; return 1; }
-    _id "${V["@B@"]}" "${V["@P1@"]}" && b1="${output}" && [ "${b1#*identity=}" != "${a1#*identity=}" ] || { echo "per target"; return 1; }
-    _id "${V["@A@"]}" "${V["@P2@"]}" && a2="${output}" && [ "${a2#*identity=}" != "${a1#*identity=}" ] || { echo "per platform"; return 1; }
-    _id "${V["@PK@"]}" "${V["@P1@"]}" && [[ "${output}" =~ ^platform=${V["@P1@"]}\ identity=[0-9a-f]{64}$ ]] || { echo "pkgs: ${output}"; return 1; }
-    _id "${V["@A@"]}" && [ "${#lines[@]}" -eq 2 ] && [ "${lines[0]}" = "${a1}" ] && [ "${lines[1]}" = "${a2}" ] \
+    _id "${a}" "${p1}" && a1="${output}"
+    [[ "${a1}" =~ ^platform=${p1}\ identity=[0-9a-f]{64}$ ]] || { echo "shape: ${a1}"; return 1; }
+    _id "${a}" "${p1}" && [ "${output}" = "${a1}" ] || { echo "not deterministic: ${output}"; return 1; }
+    _id "${b}" "${p1}" && b1="${output}" && [ "${b1#*identity=}" != "${a1#*identity=}" ] || { echo "per target"; return 1; }
+    _id "${a}" "${p2}" && a2="${output}" && [ "${a2#*identity=}" != "${a1#*identity=}" ] || { echo "per platform"; return 1; }
+    _id "${a}" && [ "${#lines[@]}" -eq "$(grep -c . <<< "${plats}")" ] && [ "${lines[0]}" = "${a1}" ] && [ "${lines[1]}" = "${a2}" ] \
         || { echo "fan-out: ${output}"; return 1; }
-    run bash "${CI_SH}" identity "${V["@A@"]}" "${V["@X@"]}"
-    _expect foreign-platform 2 "[CI-ERROR-IDENTITY-0002] service=\"${V["@A@"]}\"" || return 1
-    # What: an edit in A's context moves A only, never B.
-    # Why: impact is content identity, never a path guess.
-    # From: Issue #1683 | PR #1858
-    _id "${V["@B@"]}" "${V["@P1@"]}" && b0="${output}"
-    _val name > "${r}/${V["@CA@"]}/${V["@F@"]}" && git -C "${r}" add -A
-    _id "${V["@A@"]}" "${V["@P1@"]}" && a1b="${output}" && [ "${a1b}" != "${a1}" ] || { echo "A did not move"; return 1; }
-    _id "${V["@B@"]}" "${V["@P1@"]}" && [ "${output}" = "${b0}" ] || { echo "B moved: ${output} vs ${b0}"; return 1; }
-    sed -i '/^  platforms: \[/d' "${CI_MANIFEST}"
-    run bash "${CI_SH}" identity "${V["@A@"]}"
+    run bash "${CI_SH}" identity "${a}" "$(_val platform)"
+    _expect foreign-platform 2 "[CI-ERROR-IDENTITY-0002] service=\"${a}\"" || return 1
+    idx="$(_val path)"
+    cp "$(git -C "${root}" rev-parse --path-format=absolute --git-path index)" "${idx}" \
+        && GIT_INDEX_FILE="${idx}" git -C "${root}" update-index --force-remove -- "${f}" || { echo "index copy failed"; return 1; }
+    GIT_INDEX_FILE="${idx}" _id "${a}" "${p1}" && [ "${output}" != "${a1}" ] || { echo "${a} did not move without ${f}"; return 1; }
+    GIT_INDEX_FILE="${idx}" _id "${b}" "${p1}" && [ "${output}" = "${b1}" ] || { echo "${b} moved: ${output} vs ${b1}"; return 1; }
+    sot="$(_val path)"
+    sed '/^build_matrix:/,/^[a-z]/ { /^  platforms: \[/d }' "${CI_MANIFEST_SOURCE}" > "${sot}" \
+        && ! cmp -s "${sot}" "${CI_MANIFEST_SOURCE}" || { echo "no build_matrix platforms line removed"; return 1; }
+    CI_MANIFEST="${sot}" run bash "${CI_SH}" identity "${a}"
     _expect no-platforms 2 "[CI-ERROR-IDENTITY-0003]" || return 1
     [[ "${output}" != *"identity="* ]] || { echo "identity line leaked: ${output}"; return 1; }
 }
