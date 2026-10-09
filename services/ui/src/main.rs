@@ -644,6 +644,8 @@ fn ensure_shared_secrets(dir: &str, gid: u32, prefix: &str) -> Result<(), String
     }
     Ok(())
 }
+// What: names and limits of CSRF, session and token file.
+// Why: one spelling for the middleware and its callers.
 const CSRF_HEADER_NAME: &str = "X-CSRF-Token";
 const CSRF_FORM_FIELD: &str = "csrf_token";
 const MAX_CSRF_BODY_BYTES: usize = 1024 * 1024;
@@ -692,6 +694,8 @@ struct AppState {
     nats_callout_xkey_public_key: String,
 }
 
+// What: handler state extractor over the shared AppState.
+// Why: every handler takes the same Arc-wrapped state.
 type Shared = State<Arc<AppState>>;
 
 // What: a submitted form as text values by field name.
@@ -982,6 +986,8 @@ struct ErrorArea {
     back: &'static str,
 }
 
+// What: the error-page areas of HtmlError.
+// Why: each area names its title and back link.
 const CACHE_AREA: ErrorArea = ErrorArea {
     title: "Cache Resize Error",
     href: "/",
@@ -1012,6 +1018,8 @@ struct HtmlError {
 }
 
 impl HtmlError {
+    // What: build an HtmlError for one area.
+    // Why: callers pass status, area and message only.
     fn new(status: StatusCode, area: &'static ErrorArea, message: impl Into<String>) -> Self {
         Self {
             status,
@@ -1022,6 +1030,8 @@ impl HtmlError {
 }
 
 impl IntoResponse for HtmlError {
+    // What: render an HtmlError as a small HTML page.
+    // Why: a failed form post shows a reason and a way back.
     fn into_response(self) -> Response {
         let ErrorArea { title, href, back } = self.area;
         let body = format!(
@@ -1045,10 +1055,14 @@ fn asset(content_type: &'static str, cached: bool, body: &'static [u8]) -> Respo
     (headers, body).into_response()
 }
 
+// What: liveness answer, always ok.
+// Why: a constant answer shows only that the process serves.
 async fn health() -> &'static str {
     "ok"
 }
 
+// What: serve the compiled-in admin stylesheet.
+// Why: assets ship in the binary; no file read at runtime.
 async fn admin_css() -> Response {
     asset(
         "text/css; charset=utf-8",
@@ -1057,6 +1071,8 @@ async fn admin_css() -> Response {
     )
 }
 
+// What: serve the compiled-in chart script.
+// Why: assets ship in the binary; no file read at runtime.
 async fn chart_js() -> Response {
     asset(
         "application/javascript; charset=utf-8",
@@ -1065,10 +1081,14 @@ async fn chart_js() -> Response {
     )
 }
 
+// What: serve the compiled-in favicon.
+// Why: assets ship in the binary; no file read at runtime.
 async fn favicon_ico() -> Response {
     asset("image/x-icon", true, include_bytes!("static/favicon.ico"))
 }
 
+// What: serve the compiled-in logo image.
+// Why: assets ship in the binary; no file read at runtime.
 async fn logo_icon() -> Response {
     asset("image/png", true, include_bytes!("static/logo-icon.png"))
 }
@@ -1345,6 +1365,8 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+// What: nginx stub_status counters for the dashboard.
+// Why: the dashboard JSON needs a typed, defaulted shape.
 #[derive(Debug, Serialize, Default, Clone)]
 struct NginxStatus {
     active: u64,
@@ -1394,6 +1416,8 @@ async fn nginx_status(client: &reqwest::Client, base_url: &str) -> Option<NginxS
     Some(status)
 }
 
+// What: one parsed nginx access-log line.
+// Why: the logs page renders fields, not raw text.
 #[derive(Debug, Serialize, Clone)]
 struct LogEntry {
     ip: String,
@@ -1407,6 +1431,8 @@ struct LogEntry {
     source: String,
 }
 
+// What: totals over the parsed access-log lines.
+// Why: the stats page shows one aggregate per request.
 #[derive(Debug, Serialize, Default, Clone)]
 struct LogStats {
     hits: u64,
@@ -1550,6 +1576,8 @@ fn log_stats(standard: &str, ssl: &str) -> LogStats {
     stats
 }
 
+// What: one syslog line with its timestamp.
+// Why: the logs page lists central syslog entries.
 #[derive(Debug, Serialize, Clone)]
 struct SyslogEntry {
     timestamp: String,
@@ -1558,6 +1586,8 @@ struct SyslogEntry {
     message: String,
 }
 
+// What: file, size and day counts of one syslog host.
+// Why: the stats page shows storage per host.
 #[derive(Debug, Serialize, Default, Clone)]
 struct SyslogHostStats {
     host: String,
@@ -1567,6 +1597,8 @@ struct SyslogHostStats {
     size_human: String,
 }
 
+// What: syslog storage totals per host.
+// Why: one typed value feeds the syslog page.
 #[derive(Debug, Serialize, Default, Clone)]
 struct SyslogStats {
     hosts: Vec<SyslogHostStats>,
@@ -1778,6 +1810,8 @@ fn syslog_stats(root: &str) -> SyslogStats {
     stats
 }
 
+// What: header and path of the netdata alarm webhook.
+// Why: netdata and the ui must spell both the same way.
 const ALARM_TOKEN_HEADER: &str = "X-Netdata-Alarm-Token";
 const ALARM_INGEST_PATH: &str = "/api/netdata-alarms";
 
@@ -2037,6 +2071,8 @@ fn parse_private_ipv4(text: &str) -> Option<Ipv4Addr> {
         .filter(Ipv4Addr::is_private)
 }
 
+// What: outcome of one secondary SOA probe.
+// Why: the page shows a status, never a raw error string.
 #[derive(Serialize, Debug, PartialEq, Eq)]
 struct ProbeResult {
     status: &'static str,
@@ -2439,6 +2475,8 @@ async fn reload_nats_conf(state: &AppState) -> Result<(), String> {
         .map_err(|e| format!("Failed to restart NATS service: {e:#}"))
 }
 
+// What: base64url without padding.
+// Why: the auth callout JWT uses exactly this alphabet.
 fn b64url(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
@@ -2722,6 +2760,8 @@ fn kick_in_background(state: &Arc<AppState>, name: &str, action: &'static str) {
     });
 }
 
+// What: form fields of a secondary registration.
+// Why: the token proves the operator issued the request.
 #[derive(Deserialize)]
 struct RegisterForm {
     token: String,
@@ -2730,6 +2770,8 @@ struct RegisterForm {
     address: Option<String>,
 }
 
+// What: what a secondary receives after registering.
+// Why: it needs the NATS endpoint and its own credentials.
 #[derive(Serialize)]
 struct RegisterResponse {
     nats_url: String,
@@ -2746,6 +2788,8 @@ struct RegisterResponse {
     image_tag: String,
 }
 
+// What: one registered secondary for the page.
+// Why: the template needs name, address and probe state.
 #[derive(Serialize, Clone)]
 struct Secondary {
     name: String,
@@ -2781,6 +2825,8 @@ fn new_nats_password() -> String {
     hex::encode(rand::random::<[u8; 32]>())
 }
 
+// What: render the secondaries page.
+// Why: operators see registrations and probe status here.
 async fn secondaries_page(
     State(state): Shared,
     headers: HeaderMap,
@@ -2888,6 +2934,8 @@ async fn register_secondary(
     }))
 }
 
+// What: delete a secondary and kick its connection.
+// Why: a removed secondary must lose its live session.
 async fn remove_secondary(
     State(state): Shared,
     AxPath(name): AxPath<String>,
@@ -2902,6 +2950,8 @@ async fn remove_secondary(
     Ok(Json(json!({"ok": true})))
 }
 
+// What: form field of a secondary address change.
+// Why: the probe address is set by hand when none was found.
 #[derive(Deserialize)]
 struct SetAddressForm {
     address: String,
@@ -2969,6 +3019,8 @@ async fn check_secondary_health(
     })))
 }
 
+// What: form field of a secondary token rotation.
+// Why: the registration token authorizes the rotation.
 #[derive(Deserialize)]
 struct RotateForm {
     token: String,

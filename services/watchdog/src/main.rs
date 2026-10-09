@@ -389,10 +389,14 @@ fn emit(msg: &str, to_stderr: bool) {
     }
 }
 
+// What: write one info line.
+// Why: callers need no stream choice for normal output.
 fn log(msg: &str) {
     emit(msg, false);
 }
 
+// What: write one error line to stderr.
+// Why: errors stay visible apart from normal output.
 fn log_err(msg: &str) {
     emit(msg, true);
 }
@@ -463,6 +467,8 @@ fn disk_info(dir: &Path, warn_pct: u32, alarm_pct: u32) -> DiskHealth {
     }
 }
 
+// What: load settings, then run the watch loop.
+// Why: a bad setting must stop the service before it acts.
 #[tokio::main]
 async fn main() {
     let (s, warnings) = load_settings(|name| std::env::var(name).ok()).unwrap_or_else(|msg| {

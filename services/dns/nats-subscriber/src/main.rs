@@ -863,6 +863,8 @@ fn required(name: &str) -> String {
     })
 }
 
+// What: connect to NATS, start helpers, apply records.
+// Why: one process owns apply, reconcile and rollback.
 #[tokio::main]
 async fn main() {
     let nats_url = env_opt("NATS_URL").unwrap_or_else(|| "nats://nats:4222".to_string());

@@ -439,6 +439,8 @@ pub enum DockerError {
 }
 
 impl std::fmt::Display for DockerError {
+    // What: render a DockerError as one line.
+    // Why: logs and watchdog output show a short reason.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Status(code) => write!(f, "Docker answered HTTP {code}"),
@@ -474,6 +476,8 @@ pub struct DockerProxy {
 }
 
 impl DockerProxy {
+    // What: build a client for one proxy base URL.
+    // Why: redirects and timeouts must stay under our control.
     pub fn new(base_url: &str) -> Self {
         let client = reqwest::Client::builder()
             // What: never follow a redirect.
