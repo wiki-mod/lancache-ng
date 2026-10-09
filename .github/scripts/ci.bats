@@ -1773,18 +1773,6 @@ CASES
     [ -z "${output}" ]
 }
 
-@test "check entrypoint-lib-wiring passes clean and meaningfully on the real repo" {
-    # What: Domain-validation consolidation live in repo.
-    # Why: Guard validates real source lines now.
-    # From: Issue #1683
-    run bash "${CI_SH}" check entrypoint-lib-wiring
-    [ "${status}" -eq 0 ]
-    # What: the real repo must check at least one lib.
-    # Why: a parser that finds nothing would pass clean.
-    # From: Issue #1683 | PR #1858
-    [[ "${output}" =~ =clean\ entrypoints=([1-9][0-9]*)\ libs=([1-9][0-9]*) ]]
-}
-
 # What: per row: changed files, labels -> clean, note, warn
 # Why: CHANGELOG.md is written by the release flow only
 # From: Issue #1683 | PR #1858

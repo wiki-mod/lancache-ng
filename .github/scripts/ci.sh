@@ -12493,6 +12493,13 @@ _ci_check_entrypoint_lib_wiring() {
             done < "${ep}"
         done
     done
+    # What: no entrypoint found at all fails closed
+    # Why: a guard that checks nothing must not pass
+    # From: Issue #1683 | PR #1858
+    if [ "${n_ep}" -eq 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0168]" "reason=\"no service entrypoint found; nothing was checked\"" "${svcs}"
+        return 2
+    fi
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0041]" "reason=\"entrypoint sources a lib its Dockerfile never COPYs\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
