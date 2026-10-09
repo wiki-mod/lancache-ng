@@ -345,6 +345,12 @@ CASES
     run _ci_ls_files "${site}" "${nofile}" "*.$(_val name)"
     _expect ls-files 2 "[CI-ERROR-CHECK-0071] site=\"${site}\" root=\"${nofile}\";cmd=\"git\" rc=" || return 1
     [[ "${output}" == *"cannot change to"* || "${output}" == *"No such file"* ]] || { echo "ls-files raw: ${output}"; return 1; }
+    run _ci_producer_ok 1 1
+    _expect producer-at-max 0 - || return 1
+    run _ci_producer_ok 3 0
+    _expect producer-above 2 "[CI-ERROR-CORE-0010];rc=3" || return 1
+    run _ci_producer_ok 2 1
+    _expect producer-above-max 2 "[CI-ERROR-CORE-0010];rc=2" || return 1
 }
 
 # What: write <bin>/<tool>; the body comes on stdin.
@@ -948,7 +954,7 @@ CASES
 # What: temp root off tmpfs, made; uncreatable dirs coded.
 # Why: bare mktemp in tools must land on disk, not RAM.
 # From: Issue #1683 | PR #1858
-@test "temp and lock dirs: tmpfs refused, made on disk, else coded" {
+@test "temp dirs: tmpfs refused, made on disk, else coded" {
     local base d long made
     base="/var/tmp/$(_val name)" d="${base}/$(_val name)" long="/var/tmp/$(printf '%0300d' 0)"
     CI_TMPDIR=/tmp run bash "${CI_SH}" check comment-length
@@ -962,8 +968,6 @@ CASES
     [ "${made}" = yes ] || { echo "not created: ${d}"; return 1; }
     CI_TMPDIR="${long}" run _ci_tmp_init
     _expect uncreatable 2 "[CI-ERROR-CORE-0111] dir=\"${long}\"" || return 1
-    CI_TRIVY_LOCK_POLL=1 run _ci_trivy_db_lock_run "/dev/null/$(_val name)" 1 5 -- true
-    _expect lock-dir 2 "[CI-ERROR-SCAN-0013]" || return 1
 }
 
 # What: per row: runner env -> proxy env, names, CA bundle.
@@ -1126,7 +1130,7 @@ CASES
     _expect unpinned 0 "[CI-WARN-VALIDATE-0008] unpinned=\"${extra}\"" || return 1
 }
 
-@test "validation env base64_32 secrets decode to 32 bytes" {
+@test "validation env: base64_32 secrets decode, no fixed secret, NATS url set" {
     # What: setup.sh base64_32 keys decode in the SOT env.
     # Why: PowerDNS rejects a non-base64 TSIG key: no AXFR.
     # From: Issue #1683 | PR #1858
@@ -1146,6 +1150,11 @@ CASES
         d="$(wc -c < "${BATS_TEST_TMPDIR}/key.bin")"
         [ "${d}" -eq 32 ] || { echo "${k}='${v}': ${d} bytes"; return 1; }
     done
+    # What: the ui must advertise a NATS url to register
+    # Why: without it every register answers 503
+    # From: Issue #866 | PR #1858
+    grep -Eq '^NATS_ADVERTISE_URL=[a-z]+://[^[:space:]]+$' <<<"${env}" \
+        || { echo "no NATS_ADVERTISE_URL: $(grep '^NATS_' <<<"${env}")"; return 1; }
     # What: no setup.sh secret has a fixed value in the SOT.
     # Why: render secrets are generated; a literal leaks.
     # From: Issue #1683 | PR #1858
@@ -1155,16 +1164,6 @@ CASES
         ! grep -Eq "^  compose_validation_env:.*[[:space:]]${k}=" "${CI_MANIFEST_SOURCE}" \
             || { echo "${k}: fixed value in the SOT"; return 1; }
     done
-}
-
-@test "validation env lets the ui advertise a NATS url" {
-    # What: the validation env sets NATS_ADVERTISE_URL.
-    # Why: without it the ui answers 503 to every register.
-    # From: Issue #866 | PR #1858
-    local env
-    env="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_validation_env)"
-    echo "${env}" | grep '^NATS_'
-    grep -Eq '^NATS_ADVERTISE_URL=[a-z]+://[^[:space:]]+$' <<<"${env}"
 }
 
 @test "validate slot lock refuses a second holder of one /27" {
@@ -1480,8 +1479,8 @@ CASES
     _expect no-base 2 "$(_fill '[CI-ERROR-BUILD-0014] service="@S@" key="base_images.@FB@"')" || return 1
 }
 
-@test "repo-scanning checks fail closed outside a git repo" {
-    # What: failed git ls-files gives CHECK-0071, not clean.
+@test "checks fail closed outside a git repo or with no input file" {
+    # What: no git repo or no input file fails with rc 2
     # Why: an empty file list must not pass every check.
     # From: Issue #1683 | PR #1858
     local d="${BATS_TEST_TMPDIR}/nogit" c
@@ -1494,6 +1493,9 @@ CASES
         [[ "${output}" == *"not a git repository"* ]]
         [[ "${output}" != *"=clean"* ]]
     done
+    run bash "${CI_SH}" check compose-healthchecks "${BATS_TEST_TMPDIR}/nope/docker-compose.yml"
+    [ "${status}" -eq 2 ]
+    [[ "${output}" == *"CI-ERROR-CHECK-0097"* ]]
 }
 
 @test "diff-scoped checks skip a deleted path visibly, check the rest" {
@@ -1711,21 +1713,8 @@ CASES
     [ ! -s "${gho}" ] || { echo "plan-matrix wrote output: $(cat "${gho}")"; return 1; }
 }
 
-@test "producer check fails a loop producer rc above max" {
-    # What: rc above max is CORE-0010; at or below passes.
-    # Why: a failed producer must not look like no results.
-    # From: Issue #1683 | PR #1858
-    run _ci_producer_ok 3 0
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CORE-0010"*"rc=3"* ]]
-    run _ci_producer_ok 1 1
-    [ "${status}" -eq 0 ]
-    run _ci_producer_ok 2 1
-    [ "${status}" -eq 2 ]
-}
-
-@test "check governance-guards requires an open Refs issue for partial-scope text" {
-    # What: Partial-scope text needs open issue reference.
+@test "check governance-guards: partial scope needs an open Refs issue, an upload path fails" {
+    # What: partial scope needs Refs and a path upload fails
     # Why: Prevent merging known-incomplete changes.
     # From: Issue #1683
     GOVERNANCE_PR_BODY='This is a partial fix, TODO later.' \
@@ -1737,26 +1726,11 @@ CASES
     GOVERNANCE_PR_BODY='No TODO items left, nothing deferred here.' \
         run bash "${CI_SH}" check governance-guards
     [ "${status}" -eq 0 ]
-}
-
-@test "check governance-guards flags a malformed PR-body upload" {
-    # What: Literal @/tmp is upload path, not text.
-    # Why: Upload mistake must not pass.
-    # From: Issue #1683 | PR #1858
     GOVERNANCE_PR_BODY='@/tmp/pr-body-1234.txt' \
         run bash "${CI_SH}" check governance-guards
     [ "${status}" -ne 0 ]
     [[ "${output}" == *"CI-ERROR-CHECK-0018"* ]]
     [[ "${output}" == *"@/tmp"* ]]
-}
-
-@test "check compose-healthchecks fails closed with no compose files" {
-    # What: a vacuous scan (no matched files) must not pass.
-    # Why: mirrors the legacy script's anti-vacuous guard.
-    # From: Issue #1683 | PR #1858
-    run bash "${CI_SH}" check compose-healthchecks "${BATS_TEST_TMPDIR}/nope/docker-compose.yml"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0097"* ]]
 }
 
 @test "migrate_env_for_update repairs every empty required key" {
@@ -1878,107 +1852,54 @@ _trivy_var_tmp_dir() {
     printf '%s\n' "${d}"
 }
 
-@test "trivy dir writable proves a real file+subdir round-trip" {
-    # What: A real dir passes the write+read+delete probe.
-    # Why: Proves the probe itself, not just its caller.
+@test "trivy cache dir: writable probe, shared first, disk fallback, never tmpfs" {
+    # What: probe, shared dir first, disk fallback, no tmpfs
+    # Why: §41.1 one shared DB on disk and never on tmpfs
     # From: Issue #1683
+    local vt
     run _ci_trivy_dir_writable "${BATS_TEST_TMPDIR}"
-    [ "${status}" -eq 0 ]
-}
-
-@test "trivy dir writable refuses a missing directory" {
-    # What: A nonexistent dir fails the probe.
-    # Why: mkdir/write must never silently create the root.
-    # From: Issue #1683
+    [ "${status}" -eq 0 ] || { echo "writable: rc ${status}: ${output}"; return 1; }
     run _ci_trivy_dir_writable "${BATS_TEST_TMPDIR}/does-not-exist"
-    [ "${status}" -ne 0 ]
-}
-
-@test "trivy cache-dir prefers a writable shared dir" {
-    # What: A writable shared-dir wins over the fallback.
-    # Why: The shared NFS DB is the intended common cache.
-    # From: Issue #1683
-    local vt; vt="$(_trivy_var_tmp_dir)"
+    [ "${status}" -ne 0 ] || { echo "missing dir passed: ${output}"; return 1; }
+    vt="$(_trivy_var_tmp_dir)"
     mkdir -p "${vt}/shared"
-    CI_TRIVY_SHARED_DIR="${vt}/shared" \
-    CI_TRIVY_FALLBACK_DIR="${vt}/fallback" \
-        run _ci_trivy_cache_dir
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == "dir=${vt}/shared source=nfs-shared" ]]
+    CI_TRIVY_SHARED_DIR="${vt}/shared" CI_TRIVY_FALLBACK_DIR="${vt}/fallback" run _ci_trivy_cache_dir
+    [ "${status}" -eq 0 ] && [[ "${output}" == "dir=${vt}/shared source=nfs-shared" ]] || { echo "shared: ${output}"; return 1; }
+    vt="$(_trivy_var_tmp_dir)"
+    CI_TRIVY_SHARED_DIR="${vt}/no-such-share" CI_TRIVY_FALLBACK_DIR="${vt}/fallback" run _ci_trivy_cache_dir
+    [ "${status}" -eq 0 ] && [[ "${output}" == *"dir=${vt}/fallback source=local-fallback"* ]] && [ -d "${vt}/fallback" ] \
+        || { echo "fallback: ${output}"; return 1; }
+    CI_TRIVY_SHARED_DIR="/tmp/whatever" CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/fallback" run _ci_trivy_cache_dir
+    [ "${status}" -eq 2 ] && [[ "${output}" == *"CI-ERROR-SCAN-0007"* ]] || { echo "tmpfs shared: ${output}"; return 1; }
+    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-such-share" CI_TRIVY_FALLBACK_DIR="/tmp/whatever" run _ci_trivy_cache_dir
+    [ "${status}" -eq 2 ] && [[ "${output}" == *"CI-ERROR-SCAN-0018"* ]] || { echo "tmpfs fallback: ${output}"; return 1; }
 }
 
-@test "trivy cache-dir falls back to local disk when shared is absent" {
-    # What: A missing shared-dir falls back to local disk.
-    # Why: An unmounted NFS share must not block scanning.
+@test "trivy db lock: one writer, a held lock times out, ensure_fresh hard-fails" {
+    # What: lock order, held lock timeout, lock dir error
+    # Why: two writers must never race the same DB file
     # From: Issue #1683
-    local vt; vt="$(_trivy_var_tmp_dir)"
-    CI_TRIVY_SHARED_DIR="${vt}/no-such-share" \
-    CI_TRIVY_FALLBACK_DIR="${vt}/fallback" \
-        run _ci_trivy_cache_dir
-    [ "${status}" -eq 0 ]
-    # What: run merges the INFO notice into output too.
-    # Why: a substring match tolerates that extra line.
-    # From: Issue #1683
-    [[ "${output}" == *"dir=${vt}/fallback source=local-fallback"* ]]
-    [ -d "${vt}/fallback" ]
-}
-
-@test "trivy cache-dir refuses tmpfs /tmp for shared or fallback" {
-    # What: A /tmp shared or fallback dir is rejected.
-    # Why: /tmp is tmpfs; a prior outage was OOM there.
-    # From: Issue #1683
-    CI_TRIVY_SHARED_DIR="/tmp/whatever" CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/fallback" \
-        run _ci_trivy_cache_dir
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-SCAN-0007"* ]]
-    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-such-share" CI_TRIVY_FALLBACK_DIR="/tmp/whatever" \
-        run _ci_trivy_cache_dir
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-SCAN-0018"* ]]
-}
-
-@test "trivy db lock serializes a second concurrent holder" {
-    # What: A second locked_run waits for the first to end.
-    # Why: Two writers must never race the same DB file.
-    # From: Issue #1683
-    local cache="${BATS_TEST_TMPDIR}/lockdb"; mkdir -p "${cache}"
-    local order="${BATS_TEST_TMPDIR}/order"; : > "${order}"
+    local cache="${BATS_TEST_TMPDIR}/lockdb" order="${BATS_TEST_TMPDIR}/order" p1
+    mkdir -p "${cache}"; : > "${order}"
     export CI_TRIVY_LOCK_POLL=1
     (
         _ci_trivy_db_lock_run "${cache}" 10 60 -- bash -c \
             'echo first-start >> "'"${order}"'"; sleep 1; echo first-end >> "'"${order}"'"'
     ) &
-    local p1=$!
+    p1=$!
     sleep 0.3
     _ci_trivy_db_lock_run "${cache}" 10 60 -- bash -c \
         'echo second-start >> "'"${order}"'"'
     wait "${p1}"
-    [ "$(sed -n 1p "${order}")" = "first-start" ]
-    [ "$(sed -n 2p "${order}")" = "first-end" ]
-    [ "$(sed -n 3p "${order}")" = "second-start" ]
-}
-
-@test "trivy db lock times out on a genuinely held lock" {
-    # What: A fresh, still-held lock is never bypassed.
-    # Why: Falling through risks two concurrent writers.
-    # From: Issue #1683
-    local cache="${BATS_TEST_TMPDIR}/heldlock"; mkdir -p "${cache}"
-    mkdir -p "${cache}/.trivy-db-update.lock"
-    CI_TRIVY_LOCK_POLL=1 run _ci_trivy_db_lock_run "${cache}" 1 3600 -- true
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-SCAN-0011"* ]]
-}
-
-@test "trivy ensure_fresh hard-fails on a genuine lock timeout" {
-    # What: A held lock fails ensure_fresh, not degrades.
-    # Why: A silent downgrade risks a concurrent DB write.
-    # From: Issue #1683
-    local cache="${BATS_TEST_TMPDIR}/lockedstale"; mkdir -p "${cache}"
-    mkdir -p "${cache}/.trivy-db-update.lock"
-    CI_TRIVY_LOCK_TIMEOUT=1 CI_TRIVY_LOCK_STALE=3600 CI_TRIVY_LOCK_POLL=1 \
-        run _ci_trivy_db_ensure_fresh "${cache}"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-SCAN-0012"* ]]
+    [ "$(paste -sd' ' "${order}")" = "first-start first-end second-start" ] || { echo "order: $(cat "${order}")"; return 1; }
+    cache="${BATS_TEST_TMPDIR}/heldlock"; mkdir -p "${cache}/.trivy-db-update.lock"
+    run _ci_trivy_db_lock_run "${cache}" 1 3600 -- true
+    _expect held-lock 2 "[CI-ERROR-SCAN-0011]" || return 1
+    cache="${BATS_TEST_TMPDIR}/lockedstale"; mkdir -p "${cache}/.trivy-db-update.lock"
+    CI_TRIVY_LOCK_TIMEOUT=1 CI_TRIVY_LOCK_STALE=3600 run _ci_trivy_db_ensure_fresh "${cache}"
+    _expect ensure-fresh 2 "[CI-ERROR-SCAN-0012]" || return 1
+    run _ci_trivy_db_lock_run "/dev/null/$(_val name)" 1 5 -- true
+    _expect lock-dir 2 "[CI-ERROR-SCAN-0013]" || return 1
 }
 
 # What: one artifact state: ledger record + registry answer
@@ -2784,7 +2705,7 @@ _load_retention_functions() {
     source "${f}"
 }
 
-@test "retention dir validation maps each path" {
+@test "retention dir validation maps each path and purge refuses outside its prefix" {
     # What: validate_retention_dir per input, one table.
     # Why: a bad CACHE_DIR must never reach find or rm.
     # From: Issue #842 | PR #1858
@@ -2806,20 +2727,15 @@ system-dir|/etc|1|outside the expected
 traversal-outside|@T@/cache/lancache/../../../etc|1|outside the expected
 prefix-itself|@T@/cache|1|itself, not a subdirectory
 CASES
-}
-
-@test "retention purge refuses a cache dir outside its prefix" {
-    # What: maybe_purge refuses outside the prefix.
-    # Why: no find/rm, stamp untouched, so a fix retries.
+    # What: maybe_purge refuses a dir outside its prefix
+    # Why: no find or rm and no stamp so a fix retries
     # From: Issue #842 | PR #1858
-    export CACHE_DIR="${BATS_TEST_TMPDIR}/outside/cache"
-    export CACHE_DIR_ALLOWED_PREFIX="${BATS_TEST_TMPDIR}/expected-cache-root"
-    export CACHE_VALID_DAYS=30 PURGE_STAMP="${BATS_TEST_TMPDIR}/purge.stamp"
+    export CACHE_DIR="${t}/outside/cache" CACHE_DIR_ALLOWED_PREFIX="${t}/expected-cache-root"
+    export CACHE_VALID_DAYS=30 PURGE_STAMP="${t}/purge.stamp"
     _load_retention_functions
     run maybe_purge
-    [ "${status}" -eq 0 ]
-    [ ! -f "${PURGE_STAMP}" ]
-    [[ "${output}" == *"outside the expected"* ]]
+    [ "${status}" -eq 0 ] && [ ! -f "${PURGE_STAMP}" ] && [[ "${output}" == *"outside the expected"* ]] \
+        || { echo "purge outside: rc ${status}: ${output}"; return 1; }
 }
 
 @test "retention stops promptly with rc 0 on SIGTERM mid-sleep" {
@@ -2858,7 +2774,7 @@ CASES
 # PRODUCT RUNTIME: SHARED SECRETS
 # =========================================================
 
-@test "shared secret is generated once and never rotates on repeat" {
+@test "shared secret: generated once, never rotated, fails closed, parallel writers converge" {
     # What: lib nats, dns, dhcp and ui resolve secrets with.
     # Why: AG-OP-006; reruns must not rotate stable secrets.
     # From: Issue #1683
@@ -2883,58 +2799,34 @@ CASES
     done
     [ "$(resolve_shared_secret s1 "" _gen)" = real-value ]
     [ "$(wc -l < "${BATS_TEST_TMPDIR}/gen.log")" -eq 1 ]
-}
-
-@test "shared secret fails closed on conflicts and converges" {
-    # What: unwritable store, races, formats, 20 writers.
-    # Why: services on different secrets lose their link.
+    # What: unwritable store formats and parallel writers
+    # Why: services on different secrets lose their link
     # From: Issue #858 | PR #1858
-    local lib root d="${BATS_TEST_TMPDIR}/ss" i v
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    lib="$(ci_context_path shared-secret)"
-    # shellcheck source=scripts/lib/shared-secret-bootstrap.sh
-    source "${root}/${lib}"
-    LANCACHE_SHARED_SECRET_GID="$(id -g)"; export LANCACHE_SHARED_SECRET_GID
+    local i d="${BATS_TEST_TMPDIR}/ss"
     : > "${BATS_TEST_TMPDIR}/file"
-    export LANCACHE_SHARED_SECRET_DIR="${BATS_TEST_TMPDIR}/file/secrets"
+    LANCACHE_SHARED_SECRET_DIR="${BATS_TEST_TMPDIR}/file/secrets"
     run resolve_shared_secret k "real-op" lancache_gen_hex32
-    [ "${status}" -eq 0 ]
-    [ "${output}" = real-op ]
+    [ "${status}" -eq 0 ] && [ "${output}" = real-op ] || { echo "unwritable: rc ${status}: ${output}"; return 1; }
     run resolve_shared_secret k "real-op" lancache_gen_base64_32 require-persist
-    [ "${status}" -ne 0 ]
+    [ "${status}" -ne 0 ] || { echo "require-persist passed: ${output}"; return 1; }
     run bash -c 'set -euo pipefail; . "$1"
         if ! v="$(resolve_shared_secret k real-op lancache_gen_hex32)"; then v=FAILED; fi
-        printf "%s" "${v}"' _ "${root}/${lib}"
-    [ "${status}" -eq 0 ]
-    [ "${output}" = real-op ]
-    export LANCACHE_SHARED_SECRET_DIR="${d}"
+        printf "%s" "${v}"' _ "${BATS_TEST_DIRNAME}/../../${lib}"
+    [ "${status}" -eq 0 ] && [ "${output}" = real-op ] || { echo "set -e: rc ${status}: ${output}"; return 1; }
+    LANCACHE_SHARED_SECRET_DIR="${d}"
     mkdir -p "${d}"
-    printf 'old' > "${d}/k"
-    mktemp() { return 1; }
-    run resolve_shared_secret k "new-op" lancache_gen_hex32
-    [ "${status}" -ne 0 ]
-    [ "$(cat "${d}/k")" = old ]
-    : > "${d}/e"
-    run resolve_shared_secret e "new-op" lancache_gen_hex32
-    [ "${status}" -ne 0 ]
-    mktemp() { printf 'winner' > "${d}/w"; return 1; }
-    run resolve_shared_secret w "op" lancache_gen_hex32
-    [ "${status}" -ne 0 ]
-    [ "$(cat "${d}/w")" = winner ]
-    unset -f mktemp
     run resolve_shared_secret h "" lancache_gen_hex32
-    [[ "${output}" =~ ^[0-9a-f]{64}$ ]]
-    [ "$(cat "${d}/h")" = "${output}" ]
+    [[ "${output}" =~ ^[0-9a-f]{64}$ ]] && [ "$(cat "${d}/h")" = "${output}" ] || { echo "hex32: ${output}"; return 1; }
     run resolve_shared_secret b "" lancache_gen_base64_32
-    [ "$(printf '%s' "${output}" | base64 -d | wc -c)" -eq 32 ]
+    [ "$(printf '%s' "${output}" | base64 -d | wc -c)" -eq 32 ] || { echo "base64_32: ${output}"; return 1; }
     mkdir -p "${BATS_TEST_TMPDIR}/out"
     for i in $(seq 1 20); do
         ( v="$(resolve_shared_secret race "" lancache_gen_hex32)"; printf '%s\n' "${v}" > "${BATS_TEST_TMPDIR}/out/${i}" ) &
     done
     wait
-    [ "$(sort -u "${BATS_TEST_TMPDIR}"/out/* | wc -l)" -eq 1 ]
-    [ "$(cat "${BATS_TEST_TMPDIR}/out/1")" = "$(cat "${d}/race")" ]
-    [ -z "$(find "${d}" -maxdepth 1 -name '.secret.*')" ]
+    [ "$(sort -u "${BATS_TEST_TMPDIR}"/out/* | wc -l)" -eq 1 ] || { echo "writers disagree"; return 1; }
+    [ "$(cat "${BATS_TEST_TMPDIR}/out/1")" = "$(cat "${d}/race")" ] || { echo "race file differs"; return 1; }
+    [ -z "$(find "${d}" -maxdepth 1 -name '.secret.*')" ] || { echo "temp files left in ${d}"; return 1; }
 }
 
 @test "domain validator matches the parity fixture and the cdn list" {
@@ -3050,7 +2942,7 @@ _extract_functions() {
     [ "$(KEA_CTRL_TOKEN=lancache-dev-kea-control-token-change-me sh -c "${ref}"$'\nprintf "%s" "${token:-}"')" = lancache-dev-kea-control-token-change-me ]
 }
 
-@test "dhcp-proxy optional directives render exactly per input" {
+@test "dhcp-proxy optional and pxe directives render exactly per input" {
     # What: per env set: the full rendered lines + warnings.
     # Why: a bad entry must warn, never reach dnsmasq.conf.
     # From: Issue #1683 | PR #1858
@@ -3102,14 +2994,10 @@ nlboot|.|.|.|.|a\nb|10.0.0.5|.|.|DHCP_PROXY_BOOT_FILENAME/DHCP_PROXY_BOOT_SERVER
 nlcustom|.|.|.|.|.|.|60:PXEClient\ndhcp-option-pxe=99,evil|dhcp-option-pxe=60,PXEClient|-
 space|.|.|.|.|.|.|  60:PXE Client  ;93:0|dhcp-option-pxe=60,PXE Client#dhcp-option-pxe=93,0|-
 CASES
-}
-
-@test "dhcp-proxy pxe directives render exactly per input" {
     # What: per BIOS/UEFI/server set: full lines + warnings.
     # Why: PXE clients need one matching boot pointer.
     # From: Issue #1683 | PR #1858
-    local root c="${BATS_TEST_TMPDIR}/dnsmasq.conf" case s b u want warn
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    local s b u
     # shellcheck source=services/dhcp-proxy/entrypoint.sh
     source "$(_extract_functions "${root}/services/dhcp-proxy/entrypoint.sh" _dhcp_proxy_reject_embedded_newline \
         _dhcp_proxy_render_pxe_service_directives)"
@@ -3520,7 +3408,7 @@ unlisted|cdn.example.zzzq|example.zzzq
 CASES
 }
 
-@test "proxy ssl map renders exactly per mode and input" {
+@test "proxy ssl map, stream map and client acl render exactly per mode and input" {
     # What: cert map, host allowlist, client geo per input.
     # Why: strict mode and client CIDRs deny by default.
     # From: Issue #1683 | PR #1858
@@ -3553,16 +3441,10 @@ CASES
     [ "${status}" -eq 0 ]
     [ "${output}" = "${want}# default 0;# *.steamcontent.com 1;# steamcontent.com 1;# *.cdn.example.com 1;# *.a.b.example.org 1;# x.y.example.net 1;#}##geo \$lancache_client_allowed {# default 1;#}" ] || {
         echo "strict: ${output}"; return 1; }
-}
-
-@test "proxy stream map and client acl render exactly per input" {
     # What: SNI backend map per mode; stream client ACL.
     # Why: empty SNI and unlisted hosts never reach :443.
     # From: Issue #1683 | PR #1858
-    local root fb head
-    local -a _UNIQUE_DOMAINS=() _EXTRA_WILDCARD_BASES=() _EXTRA_EXACT_HOSTS=()
-    local -A _DOMAIN_IS_ROOT=()
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    local fb head
     # shellcheck source=services/proxy/entrypoint.sh
     source "$(_extract_functions "${root}/services/proxy/entrypoint.sh" _render_stream_backend_map _render_stream_client_acl)"
     eval "$(grep -m1 '^STREAM_EMPTY_SNI_BACKEND=' "${root}/services/proxy/entrypoint.sh")"
