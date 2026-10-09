@@ -112,7 +112,7 @@ ENV VISUAL=$EDITOR
 COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
 COPY services/ui/src/templates /templates
 
-# What: the ui's own file layout, handed to it as environment.
+# What: the ui's file layout, handed over as environment.
 # Why: this image creates these paths; Rust keeps no copy.
 # From: Issue #1683
 ENV TEMPLATE_DIR=/templates \

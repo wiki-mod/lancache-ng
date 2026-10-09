@@ -2,7 +2,7 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //! What: NATS consumer, zone snapshots, rollback listener.
-//! Why: one process applies DNS updates and rolls zones back.
+//! Why: one process applies updates and rolls zones back.
 //! From: Issue #628 | PR #1858
 
 use std::collections::{HashMap, HashSet};
@@ -48,11 +48,11 @@ const CONFIRM_TRIES: u32 = 3;
 const CONFIRM_MAX_DELIVERIES: i64 = 100;
 
 // What: state shared by the consumer and the helper tasks.
-// Why: one lock orders zone writes, snapshots and rollbacks.
+// Why: one lock orders zone writes, snapshots, rollbacks.
 struct Ctx {
     pdns: PowerDns,
-    // What: authoritative and recursor API roots, auth config dir.
-    // Why: dns/entrypoint.sh owns the layout and exports it.
+    // What: auth and recursor API roots, auth config dir.
+    // Why: dns/entrypoint.sh owns the layout, exports it.
     pdns_auth_url: String,
     pdns_rec_url: String,
     pdns_auth_config_dir: String,
@@ -102,7 +102,7 @@ async fn publish(
 }
 
 // What: publish one record message, logging a failure.
-// Why: replication is best-effort; the next tick repeats it.
+// Why: replication is best-effort; the next tick retries.
 async fn publish_record(js: &jetstream::Context, msg_id: &str, record: &DnsRecord) {
     let payload = serde_json::to_vec(record).unwrap_or_default();
     if let Err(e) = publish(js, NATS_SUBJECT_RECORD, Some(msg_id), payload).await {
@@ -166,7 +166,7 @@ fn rrset_key(rrset: &Value) -> (String, String) {
 }
 
 // What: rrsets sorted by key, records sorted by content.
-// Why: equal zones compare equal whatever order PowerDNS used.
+// Why: equal zones compare equal in any PowerDNS order.
 fn canonicalize(rrsets: &Value) -> Vec<Value> {
     let mut list = rrsets.as_array().cloned().unwrap_or_default();
     list.sort_by_key(rrset_key);
@@ -306,7 +306,7 @@ fn record_key(record: &DnsRecord) -> (String, String, String) {
 }
 
 // What: highest applied stream sequence per record key.
-// Why: a redelivered older message must not undo a newer one.
+// Why: a redelivered old message must not undo a newer one.
 // From: Issue #772
 #[derive(Default)]
 struct AppliedSequences(HashMap<(String, String, String), u64>);
@@ -327,7 +327,7 @@ impl AppliedSequences {
 }
 
 // What: how one message is settled.
-// Why: record failures stop the batch, flush failures do not.
+// Why: record failures stop the batch; flush ones do not.
 // From: Issue #653
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
@@ -336,12 +336,12 @@ enum Outcome {
     // Why: a flush has no ordering hazard.
     Retry,
     // What: Nak with delay, stop the batch.
-    // Why: a later same-key update must not overtake this one.
+    // Why: a later same-key update must not overtake it.
     RetryStop,
 }
 
 // What: apply one record message to PowerDNS.
-// Why: 4xx and malformed messages ack; 5xx and network retry.
+// Why: 4xx and malformed ack; 5xx and network errors retry.
 async fn apply_record(
     ctx: &Ctx,
     msg: &jetstream::Message,
@@ -373,7 +373,7 @@ async fn apply_record(
         return Outcome::Ack;
     }
     // What: the lock covers the PATCH itself.
-    // Why: a rollback must not diff data this write replaces.
+    // Why: rollback must not diff data this write replaces.
     let sent = {
         let _guard = ctx.lock.lock().await;
         ctx.pdns
@@ -409,7 +409,7 @@ async fn apply_record(
         record.action
     );
     // What: tell secondaries to pull the zone.
-    // Why: AXFR consumers would stay stale until a later check.
+    // Why: AXFR consumers would stay stale until a recheck.
     let notify = ctx
         .pdns
         .call(
@@ -424,7 +424,7 @@ async fn apply_record(
     }
     snapshot_zone(ctx, &canonical_zone(zone)).await;
     // What: mark applied only after PowerDNS confirmed.
-    // Why: a failed write must not make its retry look stale.
+    // Why: a failed write must not make a retry look stale.
     if let Some(seq) = seq {
         applied.record(key, seq);
     }
@@ -443,8 +443,8 @@ fn rrset_matches_expected(
     let (Some(rrset), Some(expected)) = (found, expected) else {
         return found.is_none() && expected.is_none();
     };
-    // What: a TTL-only replace keeps content, changes the TTL.
-    // Why: content alone would confirm before AXFR lands it.
+    // What: a TTL-only replace keeps content, changes TTL.
+    // Why: content alone confirms before AXFR lands it.
     if let Some(ttl) = expected_ttl
         && rrset.get("ttl").and_then(Value::as_i64) != Some(i64::from(ttl))
     {
@@ -474,7 +474,7 @@ fn rrset_matches_expected(
 }
 
 // What: flush the local recursor cache for one domain.
-// Why: confirm the zone first, else a stale answer re-caches.
+// Why: confirm the zone first, else a stale answer caches.
 // From: Issue #1095
 async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
     let request = serde_json::from_slice::<FlushRequest>(&msg.payload).ok();
@@ -484,8 +484,8 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
     {
         let mut confirmed = false;
         for _ in 0..CONFIRM_TRIES {
-            // What: a failed zone read counts as unconfirmed.
-            // Why: "absent" must not be guessed from an error.
+            // What: a failed zone read counts unconfirmed.
+            // Why: "absent" must not come from an error.
             let rrsets = ctx.zone_rrsets(zone).await.ok();
             let expected = request.expected_content.as_deref();
             let key = (domain.to_string(), kind.clone());
@@ -634,7 +634,7 @@ async fn publish_patch(js: &jetstream::Context, patch: &Value) {
         if let Some(record) = rrset_record(action, LAN_ZONE, rrset) {
             let name = record.name.trim_end_matches('.');
             // What: a fresh message id per republish.
-            // Why: the dedup window would absorb a repeated id.
+            // Why: the dedup window absorbs a repeated id.
             let msg_id = format!("rollback-{stamp}-{name}-{}", record.record_type);
             publish_record(js, &msg_id, &record).await;
         }
@@ -642,7 +642,7 @@ async fn publish_patch(js: &jetstream::Context, patch: &Value) {
 }
 
 // What: roll one zone back to a stored snapshot.
-// Why: operator-selected, never automatic; see the design doc.
+// Why: operator-selected, never automatic; see design doc.
 // From: Issue #628
 async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusCode, Json<Value>)> {
     let zone = canonical_zone(&request.zone);
@@ -680,7 +680,7 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
     })?;
     let snapshot = data_rrsets(&snapshot);
 
-    // What: the lock is taken before the current state is read.
+    // What: the lock is taken before the state is read.
     // Why: else a live write lands between diff and apply.
     let _guard = ctx.lock.lock().await;
     let current = ctx.zone_rrsets(&zone).await.map_err(|e| {
@@ -728,14 +728,14 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
     let changed = changed_names(&patch);
 
     // What: records go out before any flush.
-    // Why: else a flushed cache refills from the stale answer.
+    // Why: else a flushed cache refills from stale data.
     let republished = zone == "lan." && patch_len > 0;
     if republished {
         publish_patch(&ctx.js, &patch).await;
     }
 
     // What: all flushes run at once, 3 s each.
-    // Why: serial acks would exceed the ui's 10 s client timeout.
+    // Why: serial acks would exceed the ui's 10 s timeout.
     let logger = &store;
     let flushes = changed.iter().map(|name| async move {
         let payload = json!({"domain": name}).to_string().into_bytes();
@@ -780,7 +780,7 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
 }
 
 // What: POST /rollback: auth first, then the body.
-// Why: an unauthenticated caller must not reach a parse error.
+// Why: unauthenticated callers must not reach parse errors.
 async fn rollback_handler(
     State(ctx): State<Arc<Ctx>>,
     headers: HeaderMap,
@@ -806,7 +806,7 @@ async fn rollback_handler(
 }
 
 // What: the rollback listener on DNS_ROLLBACK_LISTEN_ADDR.
-// Why: 0.0.0.0, since the ui is in another network namespace.
+// Why: 0.0.0.0, as the ui is in another network namespace.
 async fn serve_rollback(ctx: Arc<Ctx>, addr: String) {
     let router = Router::new()
         .route("/snapshots", get(list_snapshots))
@@ -847,7 +847,7 @@ async fn main() {
     let consumer_name = required("NATS_CONSUMER");
     let api_key = required("PDNS_API_KEY");
     // What: only a clear "off" disables record writes.
-    // Why: an unknown spelling must keep replication running.
+    // Why: an unknown spelling must keep replication on.
     let record_writes = env_opt("NATS_RECORD_WRITES").is_none_or(|v| parse_bool(&v) != Some(false));
     let reconcile = env_opt("NATS_RECONCILER").is_some_and(|v| parse_bool(&v) == Some(true));
     let keep = Uint {
@@ -995,7 +995,7 @@ mod tests {
         json!({"name": name, "type": kind, "ttl": ttl, "records": records})
     }
 
-    // What: a replace message with the given TTL and records.
+    // What: a replace message with the TTL and records.
     // Why: patch_body tests share the same record literal.
     fn message(
         action: &str,
@@ -1039,7 +1039,7 @@ mod tests {
     }
 
     // What: keys fold case and dots; marks never go down.
-    // Why: one record from different publishers must collide.
+    // Why: one record from different publishers collides.
     // From: Issue #772
     #[test]
     fn applied_sequences_guard_stale_redeliveries_per_key() {
@@ -1063,7 +1063,7 @@ mod tests {
         assert!(!applied.is_stale(&other, 1));
     }
 
-    // What: flush confirmation compares content, order-free.
+    // What: flush confirmation compares content order-free.
     // Why: a stale or early zone must not allow the flush.
     // From: Issue #1095
     #[test]
@@ -1098,7 +1098,7 @@ mod tests {
     }
 
     // What: SOA/NS drop out; reordered zones compare equal.
-    // Why: rollback must never touch SOA/NS or see false drift.
+    // Why: rollback must not touch SOA/NS or see drift.
     #[test]
     fn data_rrsets_and_canonical_order() {
         let all = json!([
@@ -1121,7 +1121,7 @@ mod tests {
     }
 
     // What: rollback replaces changed, deletes extras only.
-    // Why: unchanged rrsets stay out; flush names stay precise.
+    // Why: unchanged rrsets stay out; flush names precise.
     #[test]
     fn rollback_patch_replaces_deletes_and_omits_unchanged() {
         let snapshot = json!([
@@ -1157,7 +1157,7 @@ mod tests {
         assert!(changed_names(&json!({})).is_empty());
     }
 
-    // What: an rrset becomes a record message, if it has a key.
+    // What: an rrset becomes a record message when keyed.
     // Why: reconciler and rollback republish through this.
     #[test]
     fn rrset_record_requires_name_and_type() {
@@ -1177,7 +1177,7 @@ mod tests {
     }
 
     // What: the retry delay doubles up to 30 seconds.
-    // Why: bounded backoff keeps a dead stream from spinning.
+    // Why: bounded backoff stops a dead stream spinning.
     #[test]
     fn backoff_doubles_and_caps() {
         assert_eq!(grow(1), 2);

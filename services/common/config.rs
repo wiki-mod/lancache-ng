@@ -1,7 +1,7 @@
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! What: env, bool, DHCP rules, container names, NATS, zones.
+//! What: env, bool, DHCP, container, NATS and zone rules.
 //! Why: one rule per value that several services read.
 //! From: Issue #1683 | PR #1858
 
@@ -32,7 +32,7 @@ pub fn env_opt(name: &str) -> Option<String> {
 }
 
 // What: the error text of a variable nobody set.
-// Why: one wording for need, Uint and the ui's field checks.
+// Why: one wording for need, Uint and the ui field checks.
 pub fn not_set(name: &str) -> String {
     format!("{name} is not set")
 }
@@ -69,7 +69,7 @@ pub enum OutOfRange {
 }
 
 // What: one unsigned decimal knob and its limits.
-// Why: the owner file sets the number; Rust holds only limits.
+// Why: the owner sets the number; Rust holds only limits.
 #[derive(Clone, Copy, Debug)]
 pub struct Uint {
     pub name: &'static str,
@@ -199,17 +199,17 @@ pub const CONTAINER_NTP: &str = "lancache-ntp";
 pub const CONTAINER_DOCKER_SOCKET_PROXY: &str = "lancache-docker-socket-proxy";
 
 // What: the DNS stream and its subjects on NATS.
-// Why: ui publishes, nats-subscriber consumes; one spelling.
+// Why: ui publishes, subscriber consumes; one spelling.
 pub const NATS_STREAM_DNS: &str = "LANCACHE_DNS";
 pub const NATS_SUBJECT_DNS: &str = "lancache.dns.>";
 pub const NATS_SUBJECT_RECORD: &str = "lancache.dns.record";
 pub const NATS_SUBJECT_FLUSH: &str = "lancache.dns.flush";
 
 // What: the local zone, as publishers spell it.
-// Why: nats-subscriber and the zone list share one spelling.
+// Why: subscriber and the zone list share one spelling.
 pub const LAN_ZONE: &str = "lan";
 
-// What: zones that get snapshots and rollbacks, dotted form.
+// What: zones with snapshots and rollbacks, dotted form.
 // Why: equals DDNS_UPDATE_ZONES in dns/entrypoint.sh.
 pub fn rollback_zones() -> Vec<String> {
     let lan = canonical_zone(LAN_ZONE);
@@ -234,7 +234,7 @@ pub fn is_rollback_zone(zone: &str) -> bool {
 }
 
 // What: zone name in dotted form, as snapshot paths use it.
-// Why: publishers send "lan", pdnsutil and the arrays "lan.".
+// Why: publishers send "lan", pdnsutil and arrays "lan.".
 pub fn canonical_zone(zone: &str) -> String {
     if zone.ends_with('.') {
         zone.to_string()
@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(DhcpMode::parse("", false), DhcpMode::Disabled);
     }
 
-    // What: zone forms convert both ways without doubling dots.
+    // What: zone forms convert both ways, no doubled dots.
     // Why: a doubled or missing dot misses the API path.
     #[test]
     fn zone_names_convert_between_dotted_and_api_form() {
@@ -350,8 +350,8 @@ mod tests {
         assert!(!is_rollback_zone("lan") && !is_rollback_zone("15.172.in-addr.arpa."));
     }
 
-    // What: the zone list equals the entrypoint.sh zone arrays.
-    // Why: no automated check ties the shell list to this one.
+    // What: the zone list equals the entrypoint.sh arrays.
+    // Why: no check ties the shell list to this one.
     #[test]
     fn rollback_zones_match_the_entrypoint_arrays() {
         let path = format!("{}/../dns/entrypoint.sh", env!("CARGO_MANIFEST_DIR"));
@@ -369,8 +369,8 @@ mod tests {
         assert!(!rollback_zones().contains(&"rpz.".to_string()));
     }
 
-    // What: need and need_flag reject unset, empty and junk.
-    // Why: no service may run on a value its owner never set.
+    // What: need and need_flag reject unset, empty, junk.
+    // Why: no service runs on a value its owner never set.
     #[test]
     fn need_rejects_unset_empty_and_junk() {
         let get = |key: &str| match key {
@@ -400,8 +400,8 @@ mod tests {
         );
     }
 
-    // What: is_container accepts the short and the full name.
-    // Why: compose service names and container names both arrive.
+    // What: is_container accepts the short and full name.
+    // Why: service names and container names both arrive.
     #[test]
     fn is_container_accepts_short_and_full_names() {
         assert!(is_container(CONTAINER_NATS, "nats"));

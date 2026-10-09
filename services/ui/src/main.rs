@@ -1,8 +1,8 @@
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! What: the Admin UI server, its one-shot modes and clients.
-//! Why: one binary serves pages and drives Docker, NATS, Kea.
+//! What: the Admin UI server, one-shot modes and clients.
+//! Why: one binary serves pages and drives Docker/NATS/Kea.
 //! From: Issue #1683 | PR #1858
 
 #![deny(warnings)]
@@ -55,7 +55,7 @@ use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
 // What: UI-settings keys, in the order the file lists them.
-// Why: every save rewrites the whole file; setup.sh reads it.
+// Why: every save rewrites the file; setup.sh reads it.
 // From: Issue #819
 const SETTING_KEYS: [&str; 19] = [
     "DHCP_MODE",
@@ -94,7 +94,7 @@ const SHARED_SECRET_VARS: [&str; 8] = [
 ];
 
 // What: when the ui sends Strict-Transport-Security.
-// Why: plain-HTTP installs must never receive an HSTS header.
+// Why: plain-HTTP installs must never get an HSTS header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HstsMode {
     Auto,
@@ -104,7 +104,7 @@ enum HstsMode {
 
 impl HstsMode {
     // What: send HSTS for this request or not.
-    // Why: Auto follows the request scheme, the rest force it.
+    // Why: Auto follows the request scheme; others force.
     fn should_send(self, is_https: bool) -> bool {
         match self {
             Self::Auto => is_https,
@@ -122,7 +122,7 @@ struct NatsLogin {
 }
 
 // What: every startup value of the ui, read once.
-// Why: no Debug impl, so a log line can never print a secret.
+// Why: no Debug impl, so no log line can print a secret.
 struct Config {
     template_dir: String,
     cdn_domains_file: String,
@@ -183,17 +183,17 @@ struct Config {
     nats_service: String,
     nats_log_file: String,
     // What: where the session secret persists.
-    // Why: a recreate must not invalidate every open session.
+    // Why: a recreate must not invalidate open sessions.
     // From: Issue #1683 | PR #1858
     session_secret_file: String,
     // What: the SQLite file of the secondary nodes.
-    // Why: runtime state stays in PowerDNS, Kea, NATS and Docker.
+    // Why: runtime state stays in the backing services.
     database_file: String,
     // What: where a generated registration token persists.
-    // Why: a restart must not rotate the token secondaries hold.
+    // Why: a restart must not rotate secondaries' token.
     registration_token_file: String,
     // What: TCP port the server binds inside the container.
-    // Why: the Dockerfile owns it; the primary URL reuses it.
+    // Why: Dockerfile owns it; the primary URL reuses it.
     listen_port: u16,
     nats_store_dir: Option<String>,
     nats_monitor_port: Option<String>,
@@ -225,11 +225,11 @@ impl Config {
     fn load(env: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
         let text = |key: &str, default: &str| env(key).unwrap_or_else(|| default.to_string());
         let set = |key: &str| config::opt(env, key);
-        // What: a value compose must supply; unset stops startup.
-        // Why: compose owns it; Rust keeps no second default.
+        // What: a compose value; unset stops startup.
+        // Why: compose owns it; Rust keeps no default.
         let need = |key: &str| config::need(env, key);
-        // What: a bool compose must supply; junk stops startup.
-        // Why: same owner as need; a typo must not flip a gate.
+        // What: a compose bool; junk stops startup.
+        // Why: as for need; a typo must not flip a gate.
         let need_flag = |key: &str| config::need_flag(env, key);
         let flag =
             |key: &str, default: bool| env(key).and_then(|v| parse_bool(&v)).unwrap_or(default);
@@ -250,12 +250,12 @@ impl Config {
 
         let standard_log = need("STANDARD_LOG")?;
         let proxy_standard_url = need("PROXY_STANDARD_URL")?;
-        // What: both proxy addresses must come from the operator.
-        // Why: no LAN address may be hardcoded (AG-SEC-007).
+        // What: both proxy addresses come from compose.
+        // Why: no LAN address is hardcoded (AG-SEC-007).
         let standard_ip = set("STANDARD_IP").ok_or("STANDARD_IP must be set")?;
         let ssl_ip = set("SSL_IP").ok_or("SSL_IP must be set")?;
-        // What: the Docker API entry point must come from compose.
-        // Why: compose owns the value; no second default here.
+        // What: the Docker API URL comes from compose.
+        // Why: compose owns the value; no second default.
         let nats_url = need("NATS_URL")?;
         let docker_proxy_url = set("DOCKER_PROXY_URL").ok_or("DOCKER_PROXY_URL must be set")?;
         let tag = need("LANCACHE_IMAGE_TAG")?;
@@ -263,8 +263,8 @@ impl Config {
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| derive_image_channel(&tag));
         let cache_max_gb = cache_max_gb_from(env)?;
-        // What: DHCP_ENABLED is an optional legacy switch, off.
-        // Why: no owner sets it; unset must never enable DHCP.
+        // What: DHCP_ENABLED is an optional legacy switch.
+        // Why: no owner sets it; unset never enables DHCP.
         let dhcp_mode = DhcpMode::parse(
             &env("DHCP_MODE").unwrap_or_default(),
             flag("DHCP_ENABLED", false),
@@ -308,7 +308,7 @@ impl Config {
             ),
             ("LANCACHE_IMAGE_CHANNEL", channel.clone()),
             // What: optional switches, off when unset.
-            // Why: no owner sets them; the ui settings file does.
+            // Why: no owner sets them; the saved file does.
             (
                 "AUTO_UPDATE_ENABLED",
                 bool_text(flag("AUTO_UPDATE_ENABLED", false)),
@@ -353,8 +353,8 @@ impl Config {
             auth_password: set("UI_AUTH_PASSWORD"),
             allow_insecure_ui: need_flag("ALLOW_INSECURE_UI")?,
             ui_session_ttl_seconds: ttl,
-            // What: security headers are on unless switched off.
-            // Why: no owner sets it; the safe state is the default.
+            // What: security headers are on unless off.
+            // Why: no owner sets it; safe is the default.
             security_headers_enabled: flag("UI_SECURITY_HEADERS", true),
             hsts_mode: match text("UI_HSTS_MODE", "")
                 .trim()
@@ -415,7 +415,7 @@ impl Config {
             netdata_alarm_max_time: set("NETDATA_ALARM_MAX_TIME"),
             netdata_alarm_recipient: set("NETDATA_ALARM_RECIPIENT"),
             // What: dev mode is an optional switch, off.
-            // Why: no owner sets it; production must not enable it.
+            // Why: no owner sets it; prod must not enable.
             dev_mode: flag("LANCACHE_DEV_MODE", false),
             syslog_enabled: need_flag("SYSLOG_ENABLED")?,
             syslog_log_root: need("SYSLOG_LOG_ROOT")?,
@@ -425,8 +425,8 @@ impl Config {
         })
     }
 
-    // What: a setting; the saved value wins over the startup one.
-    // Why: operators change settings live, without a restart.
+    // What: a setting; the saved value beats startup's.
+    // Why: operators change settings live, no restart.
     fn setting(&self, key: &str) -> String {
         fs::read_to_string(&self.ui_settings_file)
             .ok()
@@ -447,13 +447,13 @@ impl Config {
     }
 
     // What: the DHCP mode in effect now.
-    // Why: the saved mode has no legacy flag to fall back on.
+    // Why: the saved mode has no legacy flag fallback.
     fn dhcp_mode(&self) -> DhcpMode {
         DhcpMode::parse(&self.setting("DHCP_MODE"), false)
     }
 
     // What: the cache size an operator requested, in GB.
-    // Why: differs from cache_max_gb until the proxy is recreated.
+    // Why: differs from cache_max_gb until proxy recreate.
     fn requested_cache_gb(&self) -> f64 {
         self.setting("CACHE_MAX_GB")
             .trim()
@@ -461,8 +461,8 @@ impl Config {
             .unwrap_or(self.cache_max_gb)
     }
 
-    // What: save the settings file with some values changed.
-    // Why: one whole-file writer keeps every other key intact.
+    // What: save the settings file with changed values.
+    // Why: one whole-file writer keeps other keys intact.
     fn save_settings(&self, changes: &[(&str, String)]) -> io::Result<()> {
         let mut content = String::new();
         for key in SETTING_KEYS {
@@ -506,7 +506,7 @@ fn derive_image_channel(tag: &str) -> String {
 }
 
 // What: CACHE_MAX_GB, or the matching legacy pair, or 50.
-// Why: a malformed value must fail, never fall back silently.
+// Why: a malformed value must fail, not fall back.
 fn cache_max_gb_from(env: &dyn Fn(&str) -> Option<String>) -> Result<f64, String> {
     let parse = |key: &str| -> Result<Option<f64>, String> {
         env(key)
@@ -531,7 +531,7 @@ fn cache_max_gb_from(env: &dyn Fn(&str) -> Option<String>) -> Result<f64, String
 }
 
 // What: the NATS URL a remote secondary can dial, or None.
-// Why: an unreachable internal URL must never be handed out.
+// Why: an unreachable internal URL must not be handed out.
 // From: Issue #866
 fn advertised_nats_url(explicit: &str, bind_ip: &str, nats_url: &str) -> Option<String> {
     let explicit = explicit.trim();
@@ -596,8 +596,8 @@ fn shared_secret(
     }
 }
 
-// What: first-writer-wins read-or-create of one secret file.
-// Why: independent starters must never split-brain a secret.
+// What: first-writer-wins read-or-create of a secret file.
+// Why: independent starters must not split-brain a secret.
 // From: Issue #858
 fn resolve_shared_secret(
     dir: &Path,
@@ -638,7 +638,7 @@ fn resolve_shared_secret(
         Place::Replace
     };
     // What: try with the reader group, then without it.
-    // Why: some volumes refuse chgrp; 0640 stays either way.
+    // Why: some volumes refuse chgrp; 0640 stays anyway.
     let written = write_file_as(
         &file,
         value.as_bytes(),
@@ -732,13 +732,13 @@ struct AppState {
 type Shared = State<Arc<AppState>>;
 
 // What: a submitted form as text values by field name.
-// Why: every form handler reads text and numbers the same way.
+// Why: every form handler reads text and numbers alike.
 #[derive(Deserialize)]
 #[serde(transparent)]
 struct Fields(HashMap<String, String>);
 
 impl Fields {
-    // What: one field trimmed; an absent field reads as empty.
+    // What: one field trimmed; an absent one reads empty.
     // Why: handlers validate emptiness, never absence.
     fn get(&self, key: &str) -> &str {
         self.0.get(key).map_or("", |value| value.trim())
@@ -752,7 +752,7 @@ impl Fields {
 }
 
 // What: one browser session's CSRF token and cookie value.
-// Why: the cookie never authenticates; it binds a CSRF token.
+// Why: the cookie only binds a CSRF token, never logs in.
 struct Session {
     csrf_token: String,
     cookie_value: String,
@@ -800,7 +800,7 @@ fn issue_session(secret: &[u8; 32], ttl: Duration) -> Session {
 }
 
 // What: the session a cookie value proves, if any.
-// Why: expired, edited or foreign cookies get a new session.
+// Why: expired, edited or foreign cookies get a new one.
 fn validate_session(cookie_value: &str, secret: &[u8; 32]) -> Option<Session> {
     let parts: Vec<&str> = cookie_value.split('.').collect();
     let [version, expires, csrf_token, signature] = parts.as_slice() else {
@@ -848,7 +848,7 @@ fn attach_session_cookie(response: &mut Response, session: &Session, ttl: Durati
 }
 
 // What: true when the request came in over HTTPS.
-// Why: only a TLS-terminating proxy in front sets this header.
+// Why: only a TLS-terminating proxy in front sets it.
 fn forwarded_proto_is_https(headers: &HeaderMap) -> bool {
     headers
         .get("x-forwarded-proto")
@@ -858,7 +858,7 @@ fn forwarded_proto_is_https(headers: &HeaderMap) -> bool {
 }
 
 // What: security headers on every response.
-// Why: the policy is on by default and optional for debugging.
+// Why: the policy is default-on and optional for debugging.
 async fn security_headers(State(state): Shared, req: Request, next: Next) -> Response {
     let is_https = forwarded_proto_is_https(req.headers());
     let mut response = next.run(req).await;
@@ -960,8 +960,8 @@ async fn basic_auth(State(state): Shared, mut req: Request, next: Next) -> Respo
     response
 }
 
-// What: a template context with the page name and CSRF token.
-// Why: every page's forms need the token of the live session.
+// What: a template context with page name and CSRF token.
+// Why: every page's forms need the live session's token.
 fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
     let token = headers
         .get(INTERNAL_CSRF_HEADER)
@@ -1062,7 +1062,7 @@ impl HtmlError {
 
 impl IntoResponse for HtmlError {
     // What: render an HtmlError as a small HTML page.
-    // Why: a failed form post shows a reason and a way back.
+    // Why: a failed post shows a reason and a way back.
     fn into_response(self) -> Response {
         let ErrorArea { title, href, back } = self.area;
         let body = format!(
@@ -1076,7 +1076,7 @@ impl IntoResponse for HtmlError {
 }
 
 // What: a static file response; cached ones are public.
-// Why: brand assets are long-cacheable, the stylesheet is not.
+// Why: brand assets cache for long, the stylesheet doesn't.
 fn asset(content_type: &'static str, cached: bool, body: &'static [u8]) -> Response {
     let headers = [(header::CONTENT_TYPE, content_type)];
     if cached {
@@ -1087,7 +1087,7 @@ fn asset(content_type: &'static str, cached: bool, body: &'static [u8]) -> Respo
 }
 
 // What: liveness answer, always ok.
-// Why: a constant answer shows only that the process serves.
+// Why: a constant answer shows only that the process runs.
 async fn health() -> &'static str {
     "ok"
 }
@@ -1124,13 +1124,13 @@ async fn logo_icon() -> Response {
     asset("image/png", true, include_bytes!("static/logo-icon.png"))
 }
 
-// What: load every template and the image template functions.
+// What: load every template and the image functions.
 // Why: a broken template is a deploy defect; fail early.
 fn load_templates(cfg: &Config) -> Tera {
     let mut tera = Tera::default();
     tera.autoescape_on(vec!["html"]);
     // What: register functions before adding templates.
-    // Why: Tera checks function calls when it parses a template.
+    // Why: Tera checks function calls at parse time.
     for (name, value) in [
         ("lancache_image_registry", &cfg.lancache_image_registry),
         ("lancache_image_prefix", &cfg.lancache_image_prefix),
@@ -1335,7 +1335,7 @@ fn du_gb(path: &str) -> f64 {
 }
 
 // What: free MiB on the cache filesystem; None if unknown.
-// Why: callers must fail closed, never assume unlimited space.
+// Why: callers must fail closed, not assume unlimited.
 fn cache_free_mib(path: &str) -> Option<u64> {
     path_allowed(path)
         .then(|| df(Path::new(path)))
@@ -1473,7 +1473,7 @@ fn log_regex() -> &'static Regex {
 }
 
 // What: the last `limit` lines of a file, oldest first.
-// Why: reading backwards keeps a multi-GB log cheap to tail.
+// Why: reading backwards keeps multi-GB logs cheap to tail.
 fn tail_lines(path: &str, limit: usize) -> Vec<String> {
     const CHUNK: u64 = 64 * 1024;
     let Ok(mut file) = File::open(path) else {
@@ -1484,8 +1484,8 @@ fn tail_lines(path: &str, limit: usize) -> Vec<String> {
     };
     let mut buffer: Vec<u8> = Vec::new();
     let mut newlines = 0;
-    // What: stop only once more than `limit` newlines were read.
-    // Why: the first segment may be cut and is dropped below.
+    // What: stop once more than `limit` newlines were read.
+    // Why: the first segment may be cut and is dropped.
     while pos > 0 && newlines <= limit {
         let len = CHUNK.min(pos);
         pos -= len;
@@ -1571,7 +1571,7 @@ fn log_stats(standard: &str, ssl: &str) -> LogStats {
     for path in paths {
         let Ok(file) = File::open(path) else { continue };
         // What: read raw lines, decode each lossily.
-        // Why: one non-UTF-8 byte must not hide later requests.
+        // Why: a non-UTF-8 byte must not hide later lines.
         for raw in BufReader::new(file).split(b'\n').map_while(Result::ok) {
             let line = String::from_utf8_lossy(&raw);
             let Some(caps) = log_regex().captures(&line) else {
@@ -1676,7 +1676,7 @@ fn read_syslog_file(path: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-// What: one syslog line as an entry; odd lines are kept raw.
+// What: one syslog line as an entry; odd lines stay raw.
 // Why: a stack-trace line must not vanish from the view.
 fn parse_syslog_line(host: &str, line: &str) -> Option<SyslogEntry> {
     static SYSLOG_LINE: OnceLock<Regex> = OnceLock::new();
@@ -1702,13 +1702,13 @@ fn parse_syslog_line(host: &str, line: &str) -> Option<SyslogEntry> {
 }
 
 // What: up to `limit` entries from the newest files.
-// Why: every host with data must show before the early stop.
+// Why: every host with data shows before the early stop.
 fn syslog_tail(root: &str, host: Option<&str>, limit: usize) -> Vec<SyslogEntry> {
     if limit == 0 {
         return vec![];
     }
     // What: a host must be one bare directory name.
-    // Why: the value comes from the URL and must not escape root.
+    // Why: the URL gives the value; it must not escape.
     let dirs = match host {
         Some(h) if !h.is_empty() && h != "." && h != ".." && !h.contains(['/', '\\', '\0']) => {
             vec![Path::new(root).join(h)]
@@ -1752,8 +1752,8 @@ fn syslog_tail(root: &str, host: Option<&str>, limit: usize) -> Vec<SyslogEntry>
     fair_window(collected, limit)
 }
 
-// What: merge hosts into `limit` lines, quiet hosts included.
-// Why: a plain sort-and-cut drops a quiet host's only error.
+// What: merge hosts into `limit` lines, quiet ones too.
+// Why: sort-and-cut would drop a quiet host's only error.
 // From: Issue #859
 fn fair_window(collected: Vec<SyslogEntry>, limit: usize) -> Vec<SyslogEntry> {
     let mut by_host: BTreeMap<String, Vec<SyslogEntry>> = BTreeMap::new();
@@ -1792,7 +1792,7 @@ fn fair_window(collected: Vec<SyslogEntry>, limit: usize) -> Vec<SyslogEntry> {
 }
 
 // What: per-host file count, size and distinct days.
-// Why: metadata only; decompressing every file costs too much.
+// Why: metadata only; decompressing every file is costly.
 fn syslog_stats(root: &str) -> SyslogStats {
     let mut stats = SyslogStats::default();
     for dir in syslog_host_dirs(root) {
@@ -1811,8 +1811,8 @@ fn syslog_stats(root: &str) -> SyslogStats {
             }
             host.files += 1;
             host.size_bytes += meta.len();
-            // What: the leading YYYYMMDD of <day>.log[...] names.
-            // Why: the number of days is the retention in view.
+            // What: the YYYYMMDD start of <day>.log names.
+            // Why: the day count is the retention in view.
             let name = entry.file_name().to_string_lossy().into_owned();
             let day = name.split('.').next().unwrap_or_default().to_string();
             if day.len() == 8 && day.bytes().all(|b| b.is_ascii_digit()) {
@@ -1902,7 +1902,7 @@ fn alarm_views(alarms: &[NetdataAlarm]) -> Vec<Value> {
 }
 
 // What: netdata custom_sender that POSTs alarms to the ui.
-// Why: fields come from NetdataAlarm; there is no second list.
+// Why: fields come from NetdataAlarm; no second list.
 // From: Issue #858
 fn render_alarm_notify_conf(
     ui_url: &str,
@@ -1952,7 +1952,7 @@ custom_sender() {{
 }
 
 // What: store an alarm sent by netdata's custom_sender.
-// Why: the token header gates it; an unset token rejects all.
+// Why: the token header gates it; no token rejects all.
 // From: Issue #858
 async fn ingest_alarm(State(state): Shared, headers: HeaderMap, body: Bytes) -> StatusCode {
     let token = &state.config.netdata_alarm_token;
@@ -2044,7 +2044,7 @@ async fn netdata_proxy(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-// What: the reverse zone (dotted) that owns an IPv4 address.
+// What: the dotted reverse zone that owns an IPv4 address.
 // Why: only zones the stack provisions may hold a PTR.
 fn reverse_zone_for_ipv4(ip: Ipv4Addr) -> Option<String> {
     let [a, b, _, _] = ip.octets();
@@ -2081,7 +2081,7 @@ fn ipv4_from_ptr_name(name: &str) -> Option<Ipv4Addr> {
 }
 
 // What: a private IPv4 address, or None.
-// Why: stored probe targets must never become an SSRF lever.
+// Why: stored probe targets must not become an SSRF lever.
 fn parse_private_ipv4(text: &str) -> Option<Ipv4Addr> {
     text.trim()
         .parse::<Ipv4Addr>()
@@ -2187,7 +2187,7 @@ async fn probe_secondary_soa(addr: Ipv4Addr, port: u16) -> ProbeResult {
     const TIMEOUT: Duration = Duration::from_secs(4);
     let id: u16 = rand::random();
     // What: a one-question query for lan. SOA, no flags.
-    // Why: any answer with a serial proves the zone is served.
+    // Why: any answer with a serial proves the zone serves.
     let mut query = id.to_be_bytes().to_vec();
     query.extend_from_slice(&[
         0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 3, b'l', b'a', b'n', 0, 0, 6, 0, 1,
@@ -2221,7 +2221,7 @@ async fn probe_secondary_soa(addr: Ipv4Addr, port: u16) -> ProbeResult {
 const TARGET_ACCOUNT: &str = "$G";
 
 // What: lifetime of an issued user JWT.
-// Why: revocation is the per-connect DB check, not the expiry.
+// Why: revocation is the per-connect DB check, not expiry.
 const USER_JWT_TTL_SECS: i64 = 90 * 24 * 60 * 60;
 
 // What: sleep, then double the delay up to a cap.
@@ -2233,7 +2233,7 @@ async fn backoff(delay: &mut Duration, max: Duration) {
 }
 
 // What: connect to NATS as one static role.
-// Why: every ui connection authenticates by user and password.
+// Why: every ui connection authenticates by user/password.
 async fn nats_connect(url: &str, login: &NatsLogin) -> Result<async_nats::Client, String> {
     async_nats::ConnectOptions::with_user_and_password(
         login.user.clone(),
@@ -2302,7 +2302,7 @@ fn validate_nats_login(label: &str, login: &NatsLogin) -> Result<(), String> {
 }
 
 // What: the five static roles with their display labels.
-// Why: nats.conf, validation and callout users share one list.
+// Why: nats.conf, validation and callout share one list.
 fn nats_roles(cfg: &Config) -> [(&'static str, &NatsLogin); 5] {
     [
         ("NATS UI", &cfg.nats_ui),
@@ -2314,7 +2314,7 @@ fn nats_roles(cfg: &Config) -> [(&'static str, &NatsLogin); 5] {
 }
 
 // What: every static role has valid credentials.
-// Why: nats.conf and the ui connection fail closed on bad env.
+// Why: nats.conf and the ui connection fail closed on env.
 fn validate_nats_credentials(cfg: &Config) -> Result<(), String> {
     nats_roles(cfg)
         .iter()
@@ -2460,7 +2460,7 @@ fn render_auth_callout_fragment(cfg: &Config, issuer: &str, xkey: &str) -> Strin
 }
 
 // What: write the fragment; restart NATS only on a change.
-// Why: nats-server cannot hot-reload; restart drops clients.
+// Why: nats-server has no hot reload; a restart kicks all.
 // From: Issue #811
 async fn reload_nats_conf(state: &AppState) -> Result<(), String> {
     validate_nats_credentials(&state.config)?;
@@ -2523,7 +2523,7 @@ fn decode_jwt_payload(token: &str) -> Result<Value, String> {
 }
 
 // What: Argon2id PHC hash of a secondary's NATS password.
-// Why: only the hash is stored; the plaintext is shown once.
+// Why: only the hash is stored; plaintext is shown once.
 fn hash_nats_password(password: &str) -> Result<String, String> {
     Argon2::default()
         .hash_password(password.as_bytes())
@@ -2611,8 +2611,8 @@ async fn answer_auth_callout(
     msg: async_nats::Message,
 ) -> Result<(), String> {
     let reply = msg.reply.clone().ok_or("request with no reply subject")?;
-    // What: a request is sealed when nats-server sends its xkey.
-    // Why: no local switch; an unsealed request still works.
+    // What: sealed when nats-server sends its xkey.
+    // Why: no local switch; an unsealed request works.
     // From: Issue #682
     let sender = match msg.headers.as_ref().and_then(|h| h.get("Nats-Server-Xkey")) {
         Some(key) => Some(
@@ -2654,7 +2654,7 @@ async fn answer_auth_callout(
         .map_err(|e| format!("failed to publish response: {e}"))
 }
 
-// What: serve $SYS.REQ.USER.AUTH for the life of the process.
+// What: serve $SYS.REQ.USER.AUTH for the process life.
 // Why: the row is checked per connect; removal is instant.
 // From: Issue #583
 async fn run_auth_callout(state: Arc<AppState>, issuer: KeyPair, xkey: XKey) {
@@ -2754,7 +2754,7 @@ async fn kick_secondary(state: &AppState, nats_user: &str) -> Result<usize, Stri
     Ok(kicked)
 }
 
-// What: kick in the background after the DB change committed.
+// What: kick in the background once the DB change commits.
 // Why: the DB write revokes; NATS must not delay the reply.
 fn kick_in_background(state: &Arc<AppState>, name: &str, action: &'static str) {
     let (state, name) = (Arc::clone(state), name.to_string());
@@ -2829,7 +2829,7 @@ fn registration_token_ok(state: &AppState, presented: &str) -> bool {
 }
 
 // What: a fresh 32-byte hex NATS password.
-// Why: the plaintext is shown once; only its hash is stored.
+// Why: plaintext is shown once; only its hash is stored.
 fn new_nats_password() -> String {
     hex::encode(rand::random::<[u8; 32]>())
 }
@@ -2893,7 +2893,7 @@ async fn register_secondary(
         return Err(StatusCode::BAD_REQUEST);
     }
     // What: fail before any side effect without a NATS URL.
-    // Why: the internal URL is unreachable for a remote node.
+    // Why: the internal URL is unreachable remotely.
     // From: Issue #866
     let Some(nats_url) = state.config.advertised_nats_url.clone() else {
         tracing::error!(
@@ -2919,7 +2919,7 @@ async fn register_secondary(
         .and_then(parse_private_ipv4)
         .map(|ip| ip.to_string());
     // What: keep a stored address when none is reported.
-    // Why: a re-registration must not wipe a manual override.
+    // Why: re-registration must not wipe a manual override.
     // From: Issue #1084
     with_db(&state, |db| {
         db.execute(
@@ -2963,14 +2963,14 @@ async fn remove_secondary(
 }
 
 // What: form field of a secondary address change.
-// Why: the probe address is set by hand when none was found.
+// Why: the probe address is set by hand if none was found.
 #[derive(Deserialize)]
 struct SetAddressForm {
     address: String,
 }
 
 // What: set a secondary's probe address by hand.
-// Why: the fallback when detection found none; private only.
+// Why: the fallback if detection found none; private only.
 // From: Issue #1084
 async fn set_secondary_address(
     State(state): Shared,
@@ -3039,7 +3039,7 @@ struct RotateForm {
 }
 
 // What: give one secondary a new NATS password.
-// Why: the old hash is overwritten, so it stops working now.
+// Why: the old hash is overwritten, so it stops working.
 // From: Issue #583
 async fn rotate_token(
     State(state): Shared,
@@ -3095,7 +3095,7 @@ const PAGE_SETTINGS: [(&str, &str); 11] = [
 ];
 
 // What: one subnet as the /dhcp page shows it.
-// Why: the page needs plain fields, not Kea's option arrays.
+// Why: the page needs plain fields, not Kea option arrays.
 #[derive(Serialize)]
 struct Subnet {
     id: u32,
@@ -3141,7 +3141,7 @@ struct Reservation {
 }
 
 // What: id and creation time of one Kea snapshot.
-// Why: the page never gets the config itself, only a handle.
+// Why: the page never gets the config, only a handle.
 #[derive(Serialize)]
 struct SnapshotSummary {
     id: String,
@@ -3184,8 +3184,8 @@ fn require_kea(state: &AppState) -> Result<(), HtmlError> {
     ))
 }
 
-// What: write DHCP settings; a failure is a DHCP error page.
-// Why: save_settings keeps every other key of the file intact.
+// What: write DHCP settings; a failure shows a DHCP error.
+// Why: save_settings keeps every other key intact.
 fn save_dhcp_settings(state: &AppState, changes: &[(&str, String)]) -> Result<(), HtmlError> {
     state.config.save_settings(changes).map_err(|e| {
         fail(format!(
@@ -3254,7 +3254,7 @@ async fn kea_run(
 }
 
 // What: Kea's running config without the hash key.
-// Why: Kea refuses its own hash key on config-test and -set.
+// Why: Kea refuses its own hash key on config-test/-set.
 async fn kea_config(state: &AppState) -> Result<Value, String> {
     let reply = kea_run(state, "config-get", None).await?;
     let mut config = reply
@@ -3279,7 +3279,7 @@ fn kea_store(config: &Config) -> SnapshotStore {
 }
 
 // What: the three outcomes of Kea's config-write.
-// Why: a lost request is not a refusal; it may have applied.
+// Why: a lost request is no refusal; it may have applied.
 enum Written {
     Done,
     Refused(String),
@@ -3331,8 +3331,8 @@ async fn kea_apply(
     kea_run(state, "config-test", Some(&config)).await?;
     kea_run(state, "config-set", Some(&config)).await?;
 
-    // What: record the applied config as a known-good snapshot.
-    // Why: a failed snapshot weakens rollback, not the edit.
+    // What: save the applied config as a good snapshot.
+    // Why: a failed snapshot weakens rollback, not the edit
     let record = || {
         let keep = state.config.kea_keep_known_good_configs;
         if let Err(e) = kea_store(&state.config).create(&config, keep) {
@@ -3348,8 +3348,8 @@ async fn kea_apply(
             tracing::warn!(error = %e, "DHCP config-write failed; rolling back");
             kea_rollback(state, &old, &e).await
         }
-        // What: one retry when the write outcome is unknown.
-        // Why: rolling back blindly could undo a write that landed.
+        // What: one retry if the write outcome is unknown.
+        // Why: blind rollback could undo a landed write.
         Written::Unknown(first) => match kea_write(state).await {
             Written::Done => {
                 record();
@@ -3395,7 +3395,7 @@ fn subnets_in(config: &Value) -> &[Value] {
 }
 
 // What: the editable subnet4 array of a config.
-// Why: each missing level gets its own message for debugging.
+// Why: each missing level gets its own debug message.
 fn subnets_mut(config: &mut Value) -> Result<&mut Vec<Value>, &'static str> {
     config
         .get_mut("Dhcp4")
@@ -3565,15 +3565,15 @@ async fn kea_leases(state: &AppState) -> Result<Vec<Lease>, String> {
                 mac: text_of(lease, "hw-address", "?").to_string(),
                 hostname: text_of(lease, "hostname", "").to_string(),
                 // What: last renewal plus lease length.
-                // Why: the page shows an absolute expiry time.
+                // Why: the page shows an absolute expiry.
                 expires: (seconds("cltt") + seconds("valid-lft")).to_string(),
             }
         })
         .collect())
 }
 
-// What: the settings page with live Kea data when reachable.
-// Why: an unreachable Kea renders empty tables, not an error.
+// What: the settings page with live Kea data if reachable.
+// Why: an unreachable Kea renders empty tables, no error.
 async fn dhcp_page(State(state): Shared, headers: HeaderMap) -> Response {
     let cfg = &state.config;
     let mut ctx = page_ctx(&headers, "dhcp");
@@ -3602,7 +3602,7 @@ async fn dhcp_page(State(state): Shared, headers: HeaderMap) -> Response {
     let mut leases = Vec::new();
     if kea_available(&state) {
         // What: read config and leases at the same time.
-        // Why: a Kea with many leases would load the page slowly.
+        // Why: a Kea with many leases loads slowly.
         let (config, found) = tokio::join!(kea_config(&state), kea_leases(&state));
         if let Ok(config) = config {
             subnets = subnets_in(&config).iter().map(read_subnet).collect();
@@ -3619,7 +3619,7 @@ async fn dhcp_page(State(state): Shared, headers: HeaderMap) -> Response {
     ctx.insert("reservations", &reservations);
 
     // What: snapshots newest first, with creation times.
-    // Why: operators pick a rollback target from the newest.
+    // Why: operators pick a rollback target, newest first.
     let snapshots: Vec<SnapshotSummary> = kea_store(cfg)
         .ids()
         .unwrap_or_default()
@@ -3641,7 +3641,7 @@ fn ipv4(text: &str) -> Option<Ipv4Addr> {
     text.trim().parse().ok()
 }
 
-// What: a MAC with 12 hex digits, colons or hyphens allowed.
+// What: a MAC of 12 hex digits, colons or hyphens allowed.
 // Why: both spellings are common copy-paste sources.
 fn is_valid_mac(mac: &str) -> bool {
     let digits: Vec<char> = mac.chars().filter(|c| !matches!(c, ':' | '-')).collect();
@@ -3677,7 +3677,7 @@ fn parse_cidr(text: &str) -> Option<(u32, u32)> {
 }
 
 // What: a short interface name such as eth0 or br-lan.100.
-// Why: the value lands unquoted in dnsmasq's interface line.
+// Why: the value lands unquoted in dnsmasq's interface line
 fn is_valid_interface_name(raw: &str) -> bool {
     let name = raw.trim();
     !name.is_empty()
@@ -3687,8 +3687,8 @@ fn is_valid_interface_name(raw: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
-// What: a PXE boot file name without separators or controls.
-// Why: a comma would shift fields in dhcp-boot=file,,server.
+// What: a PXE boot file name without separators/controls.
+// Why: a comma would shift fields in dhcp-boot=file,,server
 fn is_valid_boot_filename(raw: &str) -> bool {
     let name = raw.trim();
     !name.is_empty()
@@ -3733,15 +3733,15 @@ fn validate_subnet(f: &Fields) -> Result<(u32, (u32, u32)), &'static str> {
 }
 
 // What: NTP entries as one list of IPv4 literals.
-// Why: Kea option 42 takes addresses; names are resolved here.
+// Why: Kea option 42 takes addresses; names resolve here.
 // From: Issue #670
 async fn resolve_ntp_servers(raw: &str) -> Result<String, String> {
     let mut resolved = Vec::new();
     for entry in split_list(raw) {
         let address = match entry.parse::<Ipv4Addr>() {
             Ok(address) => address,
-            // What: reject digits-and-dots that are no address.
-            // Why: a typo like 1.2.3 must fail, not reach DNS.
+            // What: reject non-address dotted digits.
+            // Why: a typo like 1.2.3 must not reach DNS.
             Err(_) if entry.chars().all(|c| c.is_ascii_digit() || c == '.') => {
                 return Err(format!("NTP server '{entry}' is not a valid IPv4 address"));
             }
@@ -3771,7 +3771,7 @@ fn apply_subnet(
     ntp: &str,
     cidr: (u32, u32),
 ) -> Result<(), &'static str> {
-    // What: cap the maximum lifetime at the seven-day limit.
+    // What: cap the maximum lifetime at seven days.
     // Why: doubling a seven-day lease would exceed the cap.
     let max_lifetime = lease
         .checked_mul(2)
@@ -3800,8 +3800,8 @@ fn apply_subnet(
     if !ntp.is_empty() {
         options.push(json!({"name": "ntp-servers", "data": ntp}));
     }
-    // What: keep reservations that still fit the new subnet.
-    // Why: Kea rejects a subnet holding foreign reservations.
+    // What: keep reservations that fit the new subnet.
+    // Why: Kea rejects a subnet with foreign reservations.
     let reservations = entry
         .get("reservations")
         .and_then(Value::as_array)
@@ -3828,8 +3828,8 @@ fn apply_subnet(
     object.insert("max-valid-lifetime".into(), json!(max_lifetime));
     object.remove("default-lease-time");
     object.remove("max-lease-time");
-    // What: drop a subnet-level reservation identifier list.
-    // Why: Kea accepts that key only globally and rejects it here.
+    // What: drop a subnet-level reservation id list.
+    // Why: Kea accepts that key only globally, not here.
     object.remove("host-reservation-identifiers");
     if let Some(reservations) = reservations {
         object.insert("reservations".into(), Value::Array(reservations));
@@ -3846,7 +3846,7 @@ enum CustomOptionKey {
 }
 
 // What: parse the code field of a custom option form.
-// Why: the five managed codes must use their own fields only.
+// Why: the five managed codes use their own fields only.
 fn custom_option_key(raw: &str) -> Result<CustomOptionKey, &'static str> {
     let raw = raw.trim();
     if let Some(field) = PXE_FIELDS.into_iter().find(|field| *field == raw) {
@@ -3865,7 +3865,7 @@ fn custom_option_key(raw: &str) -> Result<CustomOptionKey, &'static str> {
 }
 
 // What: one-line option data within the length limit.
-// Why: values are stored as opaque strings; only shape counts.
+// Why: values are opaque strings; only the shape counts.
 fn option_data(raw: &str) -> Result<String, &'static str> {
     let data = raw.trim();
     if data.is_empty() {
@@ -3881,7 +3881,7 @@ fn option_data(raw: &str) -> Result<String, &'static str> {
 }
 
 // What: option data checked against what the key accepts.
-// Why: next-server needs an IPv4; BOOTP fields have size caps.
+// Why: next-server needs an IPv4; BOOTP fields are capped.
 fn custom_option_data(key: CustomOptionKey, raw: &str) -> Result<String, &'static str> {
     match key {
         CustomOptionKey::Pxe("next-server") => ipv4(raw)
@@ -3900,7 +3900,7 @@ fn custom_option_data(key: CustomOptionKey, raw: &str) -> Result<String, &'stati
 }
 
 // What: add or remove one custom option on a subnet.
-// Why: add and remove share the option and PXE key handling.
+// Why: add and remove share option and PXE key handling.
 fn edit_custom_option(
     subnet: &mut Value,
     key: CustomOptionKey,
@@ -3914,8 +3914,8 @@ fn edit_custom_option(
             match (add, current == Some(data)) {
                 (true, true) => return Err("custom option already exists"),
                 (true, false) => object.insert(field.to_string(), json!(data)),
-                // What: clear only a field still holding the value.
-                // Why: a stale page must not remove a changed value.
+                // What: clear a field only if unchanged.
+                // Why: stale pages must not undo edits.
                 (false, true) => object.remove(field),
                 (false, false) => return Err("custom option not found"),
             };
@@ -3933,7 +3933,7 @@ fn edit_custom_option(
             };
             if add {
                 // What: refuse an identical option twice.
-                // Why: a double submit would otherwise apply both.
+                // Why: a double submit would apply both.
                 if options.iter().any(same) {
                     return Err("custom option already exists");
                 }
@@ -3951,7 +3951,7 @@ fn edit_custom_option(
 }
 
 // What: set the ntp-servers option of one subnet.
-// Why: the NTP sync must not rebuild gateway, DNS or domain.
+// Why: the NTP sync must not rebuild gateway/DNS/domain.
 fn set_subnet_ntp(subnet: &mut Value, servers: &str) -> Result<(), &'static str> {
     let options = subnet
         .get_mut("option-data")
@@ -3968,7 +3968,7 @@ fn set_subnet_ntp(subnet: &mut Value, servers: &str) -> Result<(), &'static str>
     Ok(())
 }
 
-// What: true unless a global identifier list lacks hw-address.
+// What: true unless a global id list lacks hw-address.
 // Why: such a reservation would be saved but never matched.
 fn identifiers_include_hw_address(config: &Value) -> bool {
     match config["Dhcp4"].get("host-reservation-identifiers") {
@@ -3980,7 +3980,7 @@ fn identifiers_include_hw_address(config: &Value) -> bool {
 }
 
 // What: add a reservation or update the one for that MAC.
-// Why: a repeated submit edits the device, never duplicates.
+// Why: a repeated submit edits the device, no duplicate.
 fn upsert_reservation(
     subnet: &mut Value,
     mac: &str,
@@ -4024,12 +4024,12 @@ fn upsert_reservation(
 }
 
 // What: create a subnet with the next free id.
-// Why: ids only need to be unique; max plus one never clashes.
+// Why: ids need only be unique; max plus one never clashes.
 async fn add_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Redirect, HtmlError> {
     require_kea(&state)?;
     let (lease, cidr) = validate_subnet(&f).map_err(invalid)?;
     // What: resolve NTP names before the synchronous edit.
-    // Why: the edit closure cannot await; a bad name is a 400.
+    // Why: the edit closure cannot await; bad name = 400.
     let ntp = resolve_ntp_servers(f.get("ntp_servers"))
         .await
         .map_err(invalid)?;
@@ -4082,8 +4082,8 @@ async fn remove_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
     Ok(Redirect::to("/dhcp"))
 }
 
-// What: add or remove a custom option, matched by code+data.
-// Why: both need the same parsing so the values compare equal.
+// What: add or remove a custom option, matched by code+data
+// Why: both need the same parsing so values compare equal
 async fn change_subnet_option(
     state: &AppState,
     f: Fields,
@@ -4133,7 +4133,7 @@ async fn add_reservation(
         return Err(invalid("Invalid MAC or IPv4 address."));
     }
     // What: validate a hostname only when one is given.
-    // Why: a blank hostname is a supported reservation state.
+    // Why: a blank hostname is a supported reservation.
     if !hostname.is_empty() && !is_valid_domain_name(hostname) {
         return Err(invalid(
             "Invalid hostname: use a plain DNS domain name (letters, digits, '-', '.').",
@@ -4144,8 +4144,8 @@ async fn add_reservation(
         .ok_or_else(|| invalid("Missing subnet id."))?;
     let (mac, ip, hostname) = (normalize_mac(mac), ip.to_string(), hostname.to_string());
     kea_modify(&state, move |config| {
-        // What: refuse when Kea ignores hw-address reservations.
-        // Why: a hand-edited global list would make this dead.
+        // What: refuse if Kea ignores hw-address entries.
+        // Why: a hand-edited global list defeats this.
         if !identifiers_include_hw_address(config) {
             return Err(
                 "cannot add a hw-address reservation: this Kea config's global \
@@ -4159,8 +4159,8 @@ async fn add_reservation(
     Ok(Redirect::to("/dhcp"))
 }
 
-// What: remove a static reservation by MAC; none is no error.
-// Why: the end state, no reservation, is the same either way.
+// What: remove a static reservation by MAC; none is fine.
+// Why: the end state, no reservation, is the same.
 async fn remove_reservation(
     State(state): Shared,
     Form(f): Form<Fields>,
@@ -4216,7 +4216,7 @@ async fn update_dhcp_ddns(
 }
 
 // What: roll Kea back to a chosen known-good snapshot.
-// Why: only ids found on disk are accepted, never raw input.
+// Why: only ids found on disk are accepted, no raw input.
 async fn rollback_kea_snapshot(
     State(state): Shared,
     Form(f): Form<Fields>,
@@ -4262,7 +4262,7 @@ async fn rollback_kea_snapshot(
 }
 
 // What: send a record delete event over NATS.
-// Why: PowerDNS applies deletes from the same subject as adds.
+// Why: PowerDNS applies deletes from the subject of adds.
 async fn publish_delete(state: &AppState, zone: &str, name: &str, kind: &str) {
     let record = DnsRecord {
         action: "delete".into(),
@@ -4286,15 +4286,15 @@ async fn publish_delete(state: &AppState, zone: &str, name: &str, kind: &str) {
 // Why: Kea's lease4-del sends no DDNS removal on its own.
 // From: Issue #1083
 async fn cleanup_lease_records(state: &AppState, ip: Ipv4Addr, hostname: Option<&str>) {
-    // What: the forward record only for a hostname with a zone.
-    // Why: a bare host name has no parent zone to delete from.
+    // What: the forward record only for a host with a zone.
+    // Why: a bare host name has no parent zone.
     if let Some(host) = hostname {
         let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
         if let Some((_, zone)) = host.split_once('.').filter(|(_, zone)| !zone.is_empty()) {
             publish_delete(state, zone, &format!("{host}."), "A").await;
         }
     }
-    // What: the reverse record only inside a provisioned zone.
+    // What: the reverse record only in a provisioned zone.
     // Why: no PowerDNS zone exists for other addresses.
     if let Some(zone) = reverse_zone_for_ipv4(ip) {
         publish_delete(state, &zone, &ptr_name_for_ipv4(ip), "PTR").await;
@@ -4309,7 +4309,7 @@ async fn release_lease(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
     let address = ipv4(ip).ok_or_else(|| invalid("Lease release requires a valid IPv4 address"))?;
     let arguments = json!({"ip-address": ip});
     // What: read the lease's hostname before deleting it.
-    // Why: lease4-del removes the record the name comes from.
+    // Why: lease4-del removes the record the name came from
     let hostname = kea_post(&state, "lease4-get", Some(&arguments))
         .await
         .ok()
@@ -4327,8 +4327,8 @@ async fn release_lease(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
         .map_err(fail)?;
     match kea_code(&reply) {
         0 => {
-            // What: clean DNS records after a successful release.
-            // Why: best effort; the address is already freed.
+            // What: clean DNS records after a release.
+            // Why: best effort; the address is freed.
             cleanup_lease_records(&state, address, hostname.as_deref()).await;
             Ok(Redirect::to("/dhcp"))
         }
@@ -4351,8 +4351,8 @@ async fn sync_subnet_ntp(state: &AppState, auto: bool) -> Result<(), String> {
     if !kea_available(state) {
         return Ok(());
     }
-    // What: the LAN address when auto, else the DHCP default.
-    // Why: turning auto off hands the option back to one value.
+    // What: the LAN address if auto, else the default.
+    // Why: auto off hands the option back to one value.
     let servers = if auto {
         state.config.standard_ip.clone()
     } else {
@@ -4381,8 +4381,8 @@ async fn stop_for_mode(
         .into_iter()
         .filter(|container| Some(*container) != mode.container())
         .collect();
-    // What: stop dhcp-proxy for a proxy/relay sub-mode change.
-    // Why: one container serves both; it must reread its mode.
+    // What: stop dhcp-proxy on a proxy/relay mode change.
+    // Why: one container serves both; it must reread mode.
     if mode.is_dnsmasq() && previous.is_dnsmasq() && previous != mode {
         stops.push(CONTAINER_DHCP_PROXY);
     }
@@ -4407,7 +4407,7 @@ async fn start_for_mode(state: &AppState, mode: DhcpMode) -> Result<(), HtmlErro
     };
     docker_start(&state.docker, service).await.map_err(|e| {
         // What: explain a container that was never created.
-        // Why: the ui may start containers but never create them.
+        // Why: the ui starts containers; it never creates.
         if container_never_created(&e) {
             fail(format!(
                 "The '{service}' container has not been created yet: this Compose stack was \
@@ -4423,7 +4423,7 @@ async fn start_for_mode(state: &AppState, mode: DhcpMode) -> Result<(), HtmlErro
             fail(format!("{e:#}"))
         }
     })?;
-    // What: push the NTP address into Kea right after the switch.
+    // What: push the NTP address to Kea after the switch.
     // Why: best effort; Kea may still be starting up.
     if mode.is_kea()
         && state.config.flag("NTP_ENABLED")
@@ -4452,7 +4452,7 @@ async fn update_dhcp_mode(
     let previous = state.config.dhcp_mode();
 
     // What: test the settings directory before any stop.
-    // Why: a full or read-only volume must fail before any stop.
+    // Why: a full or read-only volume must fail pre-stop.
     let check = Path::new(&state.config.ui_settings_file).with_file_name(".dhcp-mode-write-check");
     write_file(&check, b"", 0o600, Place::Replace).map_err(|e| {
         fail(format!(
@@ -4464,8 +4464,8 @@ async fn update_dhcp_mode(
 
     stop_for_mode(&state, mode, previous).await?;
     if let Err(saved) = save_dhcp_settings(&state, &[("DHCP_MODE", mode.as_str().to_string())]) {
-        // What: restart the previous mode after a failed save.
-        // Why: the file still says previous; its start rereads it.
+        // What: restart the old mode after a failed save.
+        // Why: the file still names the old mode.
         if mode != previous
             && let Err(restarted) = start_for_mode(&state, previous).await
         {
@@ -4487,7 +4487,7 @@ async fn update_dhcp_mode(
 }
 
 // What: parse "CODE:VALUE" lines into the stored form.
-// Why: the file keeps one line; entries join with semicolons.
+// Why: the file keeps one line; entries join by semicolon.
 fn parse_custom_options(raw: &str) -> Result<String, String> {
     let mut entries = Vec::new();
     for (index, line) in raw.lines().enumerate() {
@@ -4499,8 +4499,8 @@ fn parse_custom_options(raw: &str) -> Result<String, String> {
         let (code, data) = line
             .split_once(':')
             .ok_or_else(|| at("expected CODE:VALUE"))?;
-        // What: refuse the four codes dnsmasq-proxy fields own.
-        // Why: dnsmasq renders router, DNS, domain and NTP itself.
+        // What: refuse the four codes dnsmasq-proxy owns.
+        // Why: dnsmasq renders router, DNS, domain, NTP.
         let code = code
             .trim()
             .parse::<u16>()
@@ -4533,8 +4533,8 @@ async fn update_dhcp_proxy(
     State(state): Shared,
     Form(f): Form<Fields>,
 ) -> Result<Redirect, HtmlError> {
-    // What: an IPv4 address check and a list-of-addresses check.
-    // Why: the optional-field table below takes plain functions.
+    // What: an IPv4 check and a list-of-addresses check.
+    // Why: the optional-field table below takes functions.
     fn address(value: &str) -> bool {
         ipv4(value).is_some()
     }
@@ -4565,8 +4565,8 @@ async fn update_dhcp_proxy(
             return Err(invalid(message));
         }
     }
-    // What: check optional fields only when they are filled.
-    // Why: blank means no directive in dnsmasq.conf, no error.
+    // What: check optional fields only when filled.
+    // Why: blank means no dnsmasq.conf directive.
     let optional: [(&str, &str, Check); 7] = [
         (
             "dhcp_dns_secondary",
@@ -4668,12 +4668,12 @@ async fn update_dhcp_relay(
     Ok(Redirect::to("/dhcp"))
 }
 // What: DHCP client and server UDP ports (RFC 2131).
-// Why: the probe binds the client port and talks to servers.
+// Why: the probe binds the client port and talks to servers
 const DHCP_CLIENT_PORT: u16 = 68;
 const DHCP_SERVER_PORT: u16 = 67;
 
 // What: how long offers are collected after a DISCOVER.
-// Why: every offering server counts, so the window runs out.
+// Why: every offering server counts, so the window runs out
 const DISCOVER_WINDOW: Duration = Duration::from_secs(5);
 
 // What: how long the REQUEST waits for an ACK or NAK.
@@ -4693,7 +4693,7 @@ const PROBE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const PROBE_LOG_TAIL_BYTES: usize = 2000;
 
 // What: marker lines of the probe's output.
-// Why: the parent drops older runs and finds the result line.
+// Why: the parent drops older runs and finds the result.
 const PROBE_START_MARKER: &str = "__LANCACHE_DHCP_PROBE_START__";
 const PROBE_RESULT_MARKER: &str = "__LANCACHE_DHCP_PROBE_RESULT_JSON__";
 
@@ -4716,7 +4716,7 @@ const OFFER_FIELDS: [(&str, Option<OptionCode>); 10] = [
 ];
 
 // What: one label and value row of an offer or ACK.
-// Why: servers differ in fields; the page lists what exists.
+// Why: servers differ in fields; the page lists what exists
 #[derive(Clone, Deserialize, Serialize)]
 struct Detail {
     label: String,
@@ -4765,7 +4765,7 @@ struct ProbeReport {
 
 impl ProbeReport {
     // What: a report where neither check could run.
-    // Why: both checks share the one reason they did not run.
+    // Why: both checks share the reason they did not run.
     fn unavailable(reason: String) -> Self {
         Self {
             conflict: ConflictCheck::Unavailable {
@@ -4790,7 +4790,7 @@ impl ProbeReport {
 }
 
 // What: what the probe keeps of one OFFER or ACK.
-// Why: REQUEST needs address and server; the page needs rows.
+// Why: REQUEST needs address and server; page needs rows.
 struct Offer {
     address: Option<Ipv4Addr>,
     server: Option<Ipv4Addr>,
@@ -4851,7 +4851,7 @@ fn is_kind(msg: &Message, kind: MessageType) -> bool {
 }
 
 // What: build a DHCP message of one type.
-// Why: DISCOVER, REQUEST and RELEASE differ only in options.
+// Why: DISCOVER, REQUEST and RELEASE differ only in options
 fn dhcp_message(
     xid: u32,
     chaddr: &[u8; 6],
@@ -4862,7 +4862,7 @@ fn dhcp_message(
     let none = Ipv4Addr::UNSPECIFIED;
     let mut msg = Message::new_with_id(xid, ciaddr, none, none, none, chaddr);
     // What: set the broadcast flag on all but the RELEASE.
-    // Why: the client holds no address, so replies must broadcast.
+    // Why: no client address, so replies must broadcast.
     if !matches!(kind, MessageType::Release) {
         msg.set_flags(Flags::default().set_broadcast());
     }
@@ -4911,7 +4911,7 @@ fn listen(
         socket.set_read_timeout(Some(left))?;
         match socket.recv_from(&mut buffer) {
             // What: skip datagrams that are not ours.
-            // Why: other clients share the broadcast domain.
+            // Why: others share the broadcast domain.
             Ok((n, _)) => {
                 if let Ok(msg) = Message::decode(&mut Decoder::new(&buffer[..n]))
                     && msg.xid() == xid
@@ -4934,7 +4934,7 @@ fn listen(
 }
 
 // What: REQUEST the first offer, wait for the ACK, release.
-// Why: proves a client can get a lease; the lease is returned.
+// Why: proves a client can get a lease; it is returned.
 fn dry_run(
     socket: &UdpSocket,
     xid: u32,
@@ -5019,7 +5019,7 @@ fn dry_run(
 }
 
 // What: one broadcast round answering both checks.
-// Why: offers expose rogue servers; the first drives a dry run
+// Why: offers expose rogue servers; first one dry-runs.
 fn run_probe() -> ProbeReport {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, DHCP_CLIENT_PORT)).and_then(|socket| {
         socket.set_broadcast(true)?;
@@ -5035,7 +5035,7 @@ fn run_probe() -> ProbeReport {
     };
     let destination = SocketAddrV4::new(Ipv4Addr::BROADCAST, DHCP_SERVER_PORT);
     // What: one transaction id for DISCOVER and REQUEST.
-    // Why: a server only honours a REQUEST for its own offer.
+    // Why: a server honours a REQUEST only for its offer.
     let xid: u32 = rand::random();
     // What: a random locally administered unicast MAC.
     // Why: the probe must not look like a real device.
@@ -5061,13 +5061,13 @@ fn run_probe() -> ProbeReport {
         } else {
             slice.min(end)
         };
-        // What: a failed read ends this slice, not the probe.
+        // What: a failed read ends the slice only.
         // Why: later retransmits may still collect offers.
         let _ = listen(&socket, xid, until, |msg| {
             if is_kind(msg, MessageType::Offer) {
                 let offer = read_offer(msg);
-                // What: count a server once across retransmits.
-                // Why: answering twice is no second rogue server.
+                // What: count each server once.
+                // Why: answering twice is no second rogue.
                 let seen = offers
                     .iter()
                     .any(|o| o.server.is_some() && o.server == offer.server);
@@ -5107,13 +5107,13 @@ fn print_probe_report() {
     let report = run_probe();
     println!("{PROBE_START_MARKER}");
     // What: an empty line if serializing ever failed.
-    // Why: the ui then reports a malformed result, not a hang.
+    // Why: the ui then reports a bad result, not a hang.
     let json = serde_json::to_string(&report).unwrap_or_default();
     println!("{PROBE_RESULT_MARKER} {json}");
 }
 
 // What: the last bytes of a text, cut at a char boundary.
-// Why: a byte slice mid-character would panic the diagnosis.
+// Why: a byte slice mid-character would panic the diagnosis
 fn tail_bytes(text: &str, max: usize) -> String {
     let text = text.trim();
     if text.len() <= max {
@@ -5126,7 +5126,7 @@ fn tail_bytes(text: &str, max: usize) -> String {
 }
 
 // What: the output of the newest run in a log text.
-// Why: Docker's since filter is coarse; old runs can leak in.
+// Why: Docker's since filter is coarse; old runs leak in
 fn current_run(logs: &str) -> &str {
     logs.rsplit_once(PROBE_START_MARKER)
         .map_or(logs, |(_, current)| current)
@@ -5150,8 +5150,8 @@ async fn run_dhcp_probe(docker: &DockerProxy) -> Result<String, String> {
     let begun = Instant::now();
     let exit_code = match docker.wait(container, Some(PROBE_WAIT_TIMEOUT)).await {
         Ok(code) => code,
-        // What: keep the output and stop a container that hangs.
-        // Why: a bare timeout must say what the probe was doing.
+        // What: keep output and stop a hanging container.
+        // Why: a bare timeout must say what the probe did.
         Err(DockerError::Timeout) => {
             let tail = match docker.logs(container, since, Some(DOCKER_TIMEOUT)).await {
                 Ok(logs) => match tail_bytes(current_run(&logs), PROBE_LOG_TAIL_BYTES) {
@@ -5196,7 +5196,7 @@ async fn run_dhcp_probe(docker: &DockerProxy) -> Result<String, String> {
 // Why: the last result line wins over any stale one.
 async fn check_dhcp_probe(state: &AppState) -> ProbeReport {
     // What: serialize probe runs on the one container.
-    // Why: concurrent runs would restart it under each other.
+    // Why: concurrent runs would restart each other.
     let _guard = state.dhcp_probe_lock.lock().await;
     let output = match run_dhcp_probe(&state.docker).await {
         Ok(output) => output,
@@ -5214,7 +5214,7 @@ async fn check_dhcp_probe(state: &AppState) -> ProbeReport {
 }
 
 // What: run the DHCP conflict check; POST because it acts.
-// Why: starting a container is no safe GET; CSRF covers POST.
+// Why: starting a container is no safe GET; POST has CSRF.
 // From: Issue #947
 async fn check_dhcp_conflict(State(state): Shared) -> Json<Value> {
     let report = check_dhcp_probe(&state).await;
@@ -5233,13 +5233,13 @@ const MAX_TTL: u32 = 2_147_483_647;
 const MAX_TXT_BYTES: usize = 64_986;
 
 // What: the line that splits shipped from added entries.
-// Why: shipped defaults can toggle; added entries can remove.
+// Why: shipped defaults toggle; added entries can remove.
 // From: Issue #1073
 const CUSTOM_DOMAINS_MARKER: &str =
     "# ==== lancache-ng: entries added via the Admin UI are appended below this exact line ====";
 
 // What: one CDN list entry; wildcard_only drops the root.
-// Why: root and wildcard-only lines are independent entries.
+// Why: root and wildcard-only lines are independent entries
 #[derive(Clone, PartialEq, Eq)]
 struct CdnDomain {
     wildcard_only: bool,
@@ -5304,7 +5304,7 @@ struct ZoneSnapshotGroup {
 }
 
 // What: a fixed banner text for an error code, or None.
-// Why: a URL parameter must never become arbitrary page text.
+// Why: a URL parameter must never become page text.
 fn domain_error_message(code: &str) -> Option<&'static str> {
     match code {
         "invalid_domain" => Some(
@@ -5334,7 +5334,7 @@ fn domain_error_message(code: &str) -> Option<&'static str> {
 }
 
 // What: DNS name syntax without a trailing dot.
-// Why: one rule for CDN, DHCP and LAN names; flags widen it.
+// Why: one rule for CDN, DHCP and LAN names; flags widen it
 fn is_dns_name(name: &str, underscore: bool, wildcard: bool) -> bool {
     !name.is_empty()
         && name.len() <= 253
@@ -5366,7 +5366,7 @@ fn is_fqdn(name: &str, underscore: bool, wildcard: bool) -> bool {
 }
 
 // What: a CDN entry from text, or None.
-// Why: two labels at least; a leading dot means wildcard-only.
+// Why: two labels at least; a leading dot is wildcard-only
 fn parse_cdn_domain(text: &str) -> Option<CdnDomain> {
     let lower = text.trim().to_lowercase();
     let (wildcard_only, domain) = match lower.strip_prefix('.') {
@@ -5391,7 +5391,7 @@ fn stored_line(line: &str) -> Option<(CdnDomain, bool)> {
 }
 
 // What: the on-disk text of an entry.
-// Why: the inverse of stored_line; the proxy reads this file.
+// Why: the inverse of stored_line; the proxy reads the file
 fn stored_text(domain: &CdnDomain, enabled: bool) -> String {
     format!(
         "{}{}{}",
@@ -5418,8 +5418,8 @@ fn split_terminated(content: &str) -> Vec<(&str, &str)> {
         .collect()
 }
 
-// What: the list rows of a file, defaults before the marker.
-// Why: no marker means an old file; all entries are defaults.
+// What: the list rows of a file, defaults before the marker
+// Why: no marker means an old file; entries are defaults.
 fn domain_rows(content: &str) -> Vec<DomainRow> {
     let mut is_default = true;
     content
@@ -5453,7 +5453,7 @@ fn domain_rows(content: &str) -> Vec<DomainRow> {
         .collect()
 }
 
-// What: the text with one entry switched; None if unchanged.
+// What: the text with one entry switched; None if unchanged
 // Why: a repeated click must not rewrite the file.
 fn with_enabled(content: &str, target: &CdnDomain, enable: bool) -> Option<String> {
     let mut changed = false;
@@ -5486,8 +5486,8 @@ fn with_added(content: &str, entry: &CdnDomain) -> Option<String> {
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
     }
-    // What: add the marker once before the first added entry.
-    // Why: old files get split into defaults and added entries.
+    // What: add the marker once before the first addition.
+    // Why: old files split into defaults and additions.
     if !text.contains(CUSTOM_DOMAINS_MARKER) {
         if !text.is_empty() {
             text.push('\n');
@@ -5501,7 +5501,7 @@ fn with_added(content: &str, entry: &CdnDomain) -> Option<String> {
 }
 
 // What: the target of a removal request, or None.
-// Why: additions are strict; removal also cleans legacy lines.
+// Why: additions are strict; removal also cleans legacy.
 fn delete_target(text: &str) -> Option<DeleteTarget> {
     let text = text.trim();
     if let Some(domain) = parse_cdn_domain(text) {
@@ -5511,7 +5511,7 @@ fn delete_target(text: &str) -> Option<DeleteTarget> {
         .then(|| DeleteTarget::Raw(text.to_string()))
 }
 
-// What: the text without matching lines; None if none match.
+// What: the text without matching lines; None if none match
 // Why: only a real removal rewrites the file.
 fn without_domain(content: &str, target: &DeleteTarget) -> Option<String> {
     let mut removed = false;
@@ -5549,7 +5549,7 @@ fn edit_domains(
     };
     if let Some(text) = change(&content) {
         // What: keep the file's current permissions.
-        // Why: the proxy and dns containers read it as other users.
+        // Why: proxy and dns containers read it as others.
         let mode = fs::metadata(path).map_or(0o644, |m| m.permissions().mode() & 0o7777);
         write_file(path, text.as_bytes(), mode, Place::Replace)?;
     }
@@ -5568,7 +5568,7 @@ async fn publish_record(state: &AppState, record: &DnsRecord) -> Result<(), Stri
 }
 
 // What: flush a name from the local and every recursor.
-// Why: zone, type and content let a node confirm AXFR first.
+// Why: zone, type, content let a node confirm AXFR first.
 // From: Issue #1095
 async fn flush_recursor_cache(state: &AppState, request: FlushRequest) {
     // What: the name in its dotted form.
@@ -5674,7 +5674,7 @@ fn validate_lan_record(
 }
 
 // What: a record type name for a delete, or None.
-// Why: any type may be removed, so only its shape is checked.
+// Why: any type may be removed, so only shape is checked.
 fn delete_record_type(record_type: &str) -> Option<String> {
     let kind = record_type.trim().to_ascii_uppercase();
     if let Some(code) = kind.strip_prefix("TYPE") {
@@ -5779,7 +5779,7 @@ async fn fetch_ptr_records(state: &AppState) -> Vec<PtrRow> {
 }
 
 // What: every managed zone's snapshots from the listener.
-// Why: an unreachable listener shows none, not a broken page.
+// Why: an unreachable listener shows none, not a bad page.
 async fn fetch_zone_groups(state: &AppState) -> Vec<ZoneSnapshotGroup> {
     let response = state
         .http_client
@@ -5801,7 +5801,7 @@ async fn fetch_zone_groups(state: &AppState) -> Vec<ZoneSnapshotGroup> {
         .map(|(zone, list)| ZoneSnapshotGroup {
             zone: zone.clone(),
             // What: skip entries without an id.
-            // Why: an older listener degrades to fewer rows.
+            // Why: an old listener degrades to fewer rows.
             snapshots: list
                 .as_array()
                 .into_iter()
@@ -5836,8 +5836,8 @@ async fn rollback_zone_snapshot(State(state): Shared, Form(f): Form<Fields>) -> 
         .await;
     let target = match result {
         Ok(response) if response.status().is_success() => {
-            // What: log a degraded rollback; the page still succeeds.
-            // Why: no inline channel exists for a partial failure.
+            // What: log a degraded rollback; page is ok.
+            // Why: no inline channel for partial failures.
             match response.json::<Value>().await {
                 Ok(body) => {
                     if body.get("flush_ok").and_then(Value::as_bool) == Some(false) {
@@ -5863,7 +5863,7 @@ async fn rollback_zone_snapshot(State(state): Shared, Form(f): Form<Fields>) -> 
             "/domains"
         }
         // What: a refusal is known; a lost request is not.
-        // Why: an unknown outcome must not invite a blind retry.
+        // Why: an unknown outcome must not invite a retry.
         Ok(response) => {
             tracing::error!(status = %response.status(), zone, snapshot_id, "zone rollback rejected by nats-subscriber");
             "/domains?error=zone_rollback_failed"
@@ -5931,7 +5931,7 @@ async fn domains_page(
 }
 
 // What: true when a real DDNS TSIG key file exists.
-// Why: the dns side writes it; an empty file does not count.
+// Why: the dns side writes it; an empty file is void.
 // From: Issue #858
 fn tsig_key_configured(config: &Config) -> bool {
     fs::metadata(Path::new(&config.shared_secret_dir).join("ddns-tsig-key"))
@@ -5939,14 +5939,14 @@ fn tsig_key_configured(config: &Config) -> bool {
 }
 
 // What: write a failed list edit to the log as a 500.
-// Why: the file write is the mutation; failure is no success.
+// Why: the write is the mutation; failure is no success.
 fn write_failed(action: &str, e: anyhow::Error) -> StatusCode {
     tracing::error!("Failed to {action} dns domain: {e:#}");
     StatusCode::INTERNAL_SERVER_ERROR
 }
 
 // What: flush DNS and restart the SSL proxy after a change.
-// Why: the proxy derives certificates from the list at start.
+// Why: the proxy derives certs from the list at start.
 async fn after_domain_change(state: &AppState, domain: &str) {
     flush_recursor_cache(state, flush_name(domain)).await;
     if state.config.ssl_enabled {
@@ -5985,7 +5985,7 @@ async fn remove_dns(State(state): Shared, Form(f): Form<Fields>) -> Result<Redir
 }
 
 // What: switch a shipped default entry on or off.
-// Why: it flips the ! marker only; it never adds or deletes.
+// Why: it flips the ! marker only; no add or delete.
 async fn toggle_default_domain(
     State(state): Shared,
     Form(f): Form<Fields>,
@@ -6038,7 +6038,7 @@ async fn add_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect
 }
 
 // What: delete a LAN record set through NATS.
-// Why: any type may be deleted; the name must be in zone lan.
+// Why: any type may be deleted; the name must be in lan.
 async fn remove_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect {
     let name = normalize_lan_name(f.get("name"));
     let (Some(kind), true) = (
@@ -6090,8 +6090,8 @@ fn set_markers(state: &AppState, file: &str, enabled: bool) -> Result<(), Status
             failed = true;
         }
     }
-    // What: report failure if either DNS instance lacks the state.
-    // Why: the page must not claim a state one node cannot see.
+    // What: fail if either DNS instance lacks the state.
+    // Why: the page must not claim what one node can't see.
     if failed {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -6120,7 +6120,7 @@ async fn toggle_ddns_allow_unsigned_updates(
         return Ok(Redirect::to("/domains?error=ddns_allow_unsigned_no_key"));
     }
     set_markers(&state, "ddns-allow-unsigned-updates", enable)?;
-    // What: restart both DNS services after a marker change.
+    // What: restart both DNS services on a marker change.
     // Why: without it the click waits for the next restart.
     for service in [
         &state.config.dns_standard_service,
@@ -6227,7 +6227,7 @@ async fn proxy_statuses(state: &AppState) -> (Option<NginxStatus>, Option<NginxS
 }
 
 // What: the dashboard page.
-// Why: all collectors start at once; latency is the slowest.
+// Why: all collectors start at once; latency is the max.
 async fn dashboard(State(state): Shared, headers: HeaderMap) -> Response {
     let cfg = &state.config;
     let (proxy, cache_used_gb, stats, recent, syslog_gb, syslog, alarms) = tokio::join!(
@@ -6257,7 +6257,7 @@ async fn dashboard(State(state): Shared, headers: HeaderMap) -> Response {
         blocking(&state, |s| read_alarms(&s.config.netdata_alarms_file)),
     );
     // What: the cache bar follows the running size.
-    // Why: a pending resize must not look like an applied one.
+    // Why: a pending resize must not look applied.
     let requested_gb = cfg.requested_cache_gb();
     let percent = if cfg.cache_max_gb > 0.0 {
         (cache_used_gb / cfg.cache_max_gb * 100.0).min(100.0) as u64
@@ -6292,7 +6292,7 @@ async fn dashboard(State(state): Shared, headers: HeaderMap) -> Response {
 }
 
 // What: the connection counters alone, as JSON.
-// Why: the dashboard polls this without the costly collectors.
+// Why: the dashboard polls this without costly collectors.
 async fn metrics_api(State(state): Shared) -> Json<Value> {
     let (standard, ssl) = proxy_statuses(&state).await;
     Json(json!({
@@ -6316,7 +6316,7 @@ async fn stats_page(State(state): Shared, headers: HeaderMap) -> Response {
 }
 
 // What: the log page, from syslog-ng or the nginx logs.
-// Why: syslog-ng, once enabled, holds the more complete view.
+// Why: once enabled, syslog-ng holds the fuller view.
 // From: Issue #633
 async fn logs_page(
     State(state): Shared,
@@ -6330,8 +6330,8 @@ async fn logs_page(
         let (mut entries, hosts, selected) = blocking(&state, move |s| {
             let root = &s.config.syslog_log_root;
             let hosts = syslog_hosts(root);
-            // What: honour only a host that really has a directory.
-            // Why: the query value is caller-controlled input.
+            // What: accept only a host with a directory.
+            // Why: the query value is caller input.
             let selected = Some(requested).filter(|h| hosts.contains(h));
             let entries = syslog_tail(root, selected.as_deref(), max);
             (entries, hosts, selected)
@@ -6360,7 +6360,7 @@ async fn logs_page(
     render(&state, "logs.html", &ctx)
 }
 
-// What: the refusal text for a cache size that does not fit.
+// What: the refusal text for a cache size that won't fit.
 // Why: it names the largest size that would pass.
 fn resize_rejection(cache_dir: &str, cache_gb: u64, avail_mib: u64) -> String {
     let avail_gb = avail_mib / 1024;
@@ -6377,7 +6377,7 @@ fn resize_rejection(cache_dir: &str, cache_gb: u64, avail_mib: u64) -> String {
 }
 
 // What: check a cache size against free space and save it.
-// Why: only the host's converge run can apply it to the proxy.
+// Why: only the host's converge run applies it to proxy.
 // From: Issue #1069
 async fn resize_cache(State(state): Shared, Form(f): Form<Fields>) -> Result<Redirect, HtmlError> {
     let area = |status, message: String| HtmlError::new(status, &CACHE_AREA, message);
@@ -6423,7 +6423,7 @@ async fn ntp_page(State(state): Shared, headers: HeaderMap) -> Response {
     render(&state, "ntp.html", &ctx)
 }
 
-// What: normalize the upstream NTP list to space separators.
+// What: normalize the upstream NTP list to spaces.
 // Why: entrypoint.sh must get at least one valid server.
 fn ntp_upstream_servers(raw: &str) -> Result<String, String> {
     let entries: Vec<&str> = raw
@@ -6439,7 +6439,7 @@ fn ntp_upstream_servers(raw: &str) -> Result<String, String> {
         );
     }
     // What: accept IPv6 literals by their colon.
-    // Why: chrony takes them although the Kea side is IPv4 only.
+    // Why: chrony takes them though Kea is IPv4 only.
     if let Some(bad) = entries
         .iter()
         .find(|e| !(e.contains(':') || ipv4(e).is_some() || is_valid_domain_name(e)))
@@ -6468,8 +6468,8 @@ async fn update_ntp_settings(
     let was_enabled = cfg.flag("NTP_ENABLED");
     let was_auto = was_enabled && cfg.flag("NTP_AUTO_DHCP");
 
-    // What: stop NTP before the save when it is or was running.
-    // Why: a restart before the save would reread the old list.
+    // What: stop NTP before saving if it was running.
+    // Why: a restart before saving rereads the old list.
     if !enabled || was_enabled {
         docker_stop_if_present(&state.docker, CONTAINER_NTP)
             .await
@@ -6481,8 +6481,8 @@ async fn update_ntp_settings(
         ("NTP_AUTO_DHCP", bool_text(auto)),
     ]);
     if let Err(save_err) = saved {
-        // What: restart NTP if it was running before the failure.
-        // Why: a failed save must not leave NTP stopped silently.
+        // What: restart NTP if it ran before the failure.
+        // Why: a failed save must not leave NTP stopped.
         // From: PR #1610
         if was_enabled && let Err(start_err) = docker_start(&state.docker, CONTAINER_NTP).await {
             return Err(fail(format!(
@@ -6497,8 +6497,8 @@ async fn update_ntp_settings(
             .await
             .map_err(|e| fail(format!("{e:#}")))?;
     }
-    // What: touch Kea's NTP option only when auto changes state.
-    // Why: a save that leaves auto alone keeps per-subnet edits.
+    // What: touch Kea's NTP option only when auto changes.
+    // Why: a save leaving auto alone keeps subnet edits.
     if enabled && auto {
         sync_subnet_ntp(&state, true).await.map_err(fail)?;
     } else if was_auto {
@@ -6507,7 +6507,7 @@ async fn update_ntp_settings(
     Ok(Redirect::to("/ntp"))
 }
 
-// What: the setup page with network hints and update settings.
+// What: the setup page with network hints and updates.
 // Why: operators copy the client settings from here.
 async fn setup_page(State(state): Shared, headers: HeaderMap) -> Response {
     let cfg = &state.config;
@@ -6523,14 +6523,14 @@ async fn setup_page(State(state): Shared, headers: HeaderMap) -> Response {
 }
 
 // What: true for a channel an operator may pick.
-// Why: pinned tags and the retired edge name are not choices.
+// Why: pinned tags and the retired edge name are no choice.
 // From: Issue #819
 fn is_valid_ui_channel(value: &str) -> bool {
     matches!(value, "stable" | "nightly")
 }
 
 // What: save the release channel and the auto-update flag.
-// Why: the host's converge run applies both; no Docker needed.
+// Why: the host's converge run applies both; no Docker.
 // From: Issue #819
 async fn update_stack_settings(
     State(state): Shared,
@@ -6562,7 +6562,7 @@ async fn update_stack_settings(
 }
 
 // What: the page shown while the ui restarts itself.
-// Why: a redirect cannot work; this process is about to end.
+// Why: a redirect cannot work; this process is ending.
 const RESTART_UI_PAGE: &str = r##"<!DOCTYPE html>
 <html lang="de"><head><meta charset="utf-8"><title>Admin-UI wird neu gestartet</title>
 <style>body{background:#0f172a;color:#e2e8f0;font-family:system-ui,sans-serif;display:flex;
@@ -6588,7 +6588,7 @@ setTimeout(pollHealth, 1500);
 "##;
 
 // What: answer with the wait page, then restart the ui.
-// Why: the restart ends this process, so it runs out of line.
+// Why: the restart ends this process; it runs out of line.
 // From: Issue #1486
 async fn restart_ui_service(State(state): Shared) -> Html<&'static str> {
     tokio::spawn(async move {
@@ -6625,7 +6625,7 @@ async fn set_service_desired_state(
     };
     let path = Path::new(&state.config.desired_state_file);
     // What: hold the lock over the read-modify-write.
-    // Why: two toggles at once must not drop each other's key.
+    // Why: two toggles at once must not drop each other.
     let _guard = state.file_lock.lock().unwrap_or_else(|e| e.into_inner());
     let mut desired = DesiredState::read(path);
     if service == "dhcp" {
@@ -6657,7 +6657,7 @@ fn ui_log_file() -> String {
 }
 
 // What: a real token as is, else a persisted random one.
-// Why: placeholders crash-looped the ui; it must not rotate.
+// Why: placeholders crash-looped the ui; no rotation.
 fn registration_token(configured: &str, token_file: &str) -> Result<String, String> {
     let token = if is_placeholder(configured) {
         let path = Path::new(token_file);
@@ -6665,7 +6665,7 @@ fn registration_token(configured: &str, token_file: &str) -> Result<String, Stri
             path,
             || {
                 // What: log that a token was generated.
-                // Why: operators must know where to read it.
+                // Why: operators must know where it is.
                 tracing::warn!(
                     "SECONDARY_REGISTRATION_TOKEN was unset or a placeholder; generated a \
                      persistent random token at {}",
@@ -6699,7 +6699,7 @@ fn registration_token(configured: &str, token_file: &str) -> Result<String, Stri
 }
 
 // What: the session lifetime, after all start-up checks.
-// Why: bad env must fail closed before NATS or durable state.
+// Why: bad env must fail closed before NATS or state.
 fn preflight(cfg: &Config) -> Result<Duration, String> {
     let ttl = cfg.ui_session_ttl_seconds;
     if ttl == 0 || ttl > MAX_UI_SESSION_TTL_SECONDS {
@@ -6708,8 +6708,8 @@ fn preflight(cfg: &Config) -> Result<Duration, String> {
         ));
     }
     validate_nats_credentials(cfg)?;
-    // What: auth must be fully set, or insecure mode chosen.
-    // Why: a half-set pair would silently run without a login.
+    // What: auth must be fully set, or insecure chosen.
+    // Why: a half-set pair would run without a login.
     match (&cfg.auth_user, &cfg.auth_password) {
         (Some(_), Some(_)) => {}
         (None, None) if cfg.allow_insecure_ui => {
@@ -6733,7 +6733,7 @@ fn preflight(cfg: &Config) -> Result<Duration, String> {
 }
 
 // What: send logs to stdout and to UI_LOG_FILE if openable.
-// Why: a missing log dir must not stop the ui from starting.
+// Why: a missing log dir must not stop the ui starting.
 // From: Issue #849
 fn init_tracing() {
     let path = ui_log_file();
@@ -6801,7 +6801,7 @@ fn ui_written_dirs(cfg: &Config, log_file: &Path) -> Vec<PathBuf> {
 }
 
 // What: lchown a tree recursively, never following links.
-// Why: a symlink in a volume must not redirect root's chown.
+// Why: a symlink in a volume must not redirect the chown.
 // From: Issue #1427
 fn chown_tree(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
     std::os::unix::fs::lchown(path, Some(uid), Some(gid))?;
@@ -6831,7 +6831,7 @@ fn open_log_dir_to_group(dir: &Path, gid: u32) -> io::Result<()> {
 }
 
 // What: as root: secrets, ownership, then exec as user.
-// Why: the server must never run as root; volumes start root.
+// Why: the server must not run as root; volumes start root.
 // From: Issue #858 | PR #1858
 fn container_root_start() {
     let euid = fs::metadata("/proc/self")
@@ -6994,7 +6994,7 @@ fn prepare_runtime(args: &[String]) -> ! {
     }
 }
 
-// What: open the secondaries database and bring it up to date.
+// What: open the secondaries DB and bring it up to date.
 // Why: old installs lack columns; additive changes only.
 // From: Issue #583
 fn open_database(path: &str) -> rusqlite::Result<Connection> {
@@ -7059,7 +7059,7 @@ fn issuer_keypair(cfg: &Config) -> Result<KeyPair, String> {
     .map_err(|e| format!("{e:#}"))
 }
 
-// What: the callout encryption key, from its env seed or file.
+// What: the callout encryption key, from env seed or file.
 // Why: a separate X25519 key; its rotation is its own.
 // From: Issue #682
 fn callout_xkey(cfg: &Config) -> Result<XKey, String> {
@@ -7112,7 +7112,7 @@ async fn apply_callout_fragment(state: &AppState) {
 // What: every route of the ui, public and protected.
 // Why: the protected layer owns auth and CSRF.
 fn router(state: Arc<AppState>) -> Router {
-    // What: routes outside the login, each gated on its own.
+    // What: routes outside the login, each gated itself.
     // Why: no session cookie may ride on cacheable assets.
     let public: Vec<(&str, MethodRouter<Arc<AppState>>)> = vec![
         ("/health", get(health)),
@@ -7195,7 +7195,7 @@ fn router(state: Arc<AppState>) -> Router {
 }
 
 // What: the whole Admin UI server.
-// Why: it serves nothing until NATS is up; retry beats exit.
+// Why: it serves nothing until NATS is up; retry, not exit.
 #[tokio::main]
 async fn run() -> anyhow::Result<()> {
     init_tracing();
@@ -7228,7 +7228,7 @@ async fn run() -> anyhow::Result<()> {
         config: cfg,
     });
     apply_callout_fragment(&state).await;
-    // What: answer auth-callout requests for the process life.
+    // What: answer auth-callout requests while running.
     // Why: secondaries are checked per connect; no reload.
     tokio::spawn(run_auth_callout(state.clone(), issuer, xkey));
     let port = state.config.listen_port;
@@ -7239,7 +7239,7 @@ async fn run() -> anyhow::Result<()> {
 }
 
 // What: pick root prep, the DHCP probe, or the server.
-// Why: the one-shots run as root as is; the server drops root.
+// Why: one-shots run as root as is; the server drops root.
 // From: Issue #1288 | PR #1858
 fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
@@ -7253,7 +7253,7 @@ fn main() -> anyhow::Result<()> {
     run()
 }
 
-// What: unit tests of pure rules; no files, sockets or mocks.
+// What: unit tests of pure rules; no files, sockets, mocks.
 // Why: these rules guard data and security, not wiring.
 #[cfg(test)]
 mod tests {
@@ -7285,8 +7285,8 @@ mod tests {
         assert!(cases > 0, "the fixture holds no cases");
     }
 
-    // What: list edits keep CRLF, markers and disabled lines.
-    // Why: a wrong rewrite would silently change the proxy's list.
+    // What: list edits keep CRLF, markers, disabled lines.
+    // Why: a wrong rewrite would change the proxy's list.
     #[test]
     fn domain_list_edits_keep_line_endings_and_markers() {
         let steam = parse_cdn_domain("steam.com").expect("valid entry");
@@ -7317,7 +7317,7 @@ mod tests {
     }
 
     // What: a session cookie holds only for its own secret.
-    // Why: an edited or foreign cookie must not grant a token.
+    // Why: an edited or foreign cookie grants no token.
     #[test]
     fn session_cookie_rejects_edits_and_other_secrets() {
         let secret = [7u8; 32];
@@ -7330,7 +7330,7 @@ mod tests {
     }
 
     // What: the cache size check keeps its safety buffer.
-    // Why: a full cache disk stalls the proxy and the watchdog.
+    // Why: a full cache disk stalls proxy and watchdog.
     // From: Issue #1069
     #[test]
     fn cache_size_check_keeps_the_buffer() {
@@ -7341,7 +7341,7 @@ mod tests {
     }
 
     // What: the upstream NTP list is cleaned or refused.
-    // Why: entrypoint.sh must get at least one valid server.
+    // Why: entrypoint.sh needs at least one valid server.
     #[test]
     fn ntp_upstream_list_is_cleaned_or_refused() {
         assert_eq!(
@@ -7353,8 +7353,8 @@ mod tests {
         assert!(ntp_upstream_servers("2606:4700:f1::1").is_ok());
     }
 
-    // What: malformed DNS answers are refused, never indexed.
-    // Why: the probe reads bytes from an untrusted LAN host.
+    // What: malformed DNS answers are refused, not indexed.
+    // Why: the probe reads bytes from an untrusted host.
     #[test]
     fn short_or_foreign_dns_answers_are_errors() {
         assert!(classify_soa(&[], 1).is_err());

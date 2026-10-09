@@ -170,8 +170,8 @@ services:
   # Watchdog for health monitoring
   watchdog:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}"
-    # What: every value the watchdog needs, as config/prod sets it.
-    # Why: the watchdog has no defaults and refuses to start without.
+    # What: every watchdog value, as config/prod sets it.
+    # Why: the watchdog has no defaults and will not start.
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - CHECK_INTERVAL=30
@@ -362,13 +362,13 @@ services:
       - "127.0.0.1:${VALIDATION_UI_PORT:-9090}:8080"
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
-      # What: every value the ui needs, as deploy/prod sets it.
-      # Why: the ui keeps no defaults; absent services stay unused.
+      # What: every ui value, as deploy/prod sets it.
+      # Why: the ui has no defaults; absent services unused.
       - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
       - WATCHDOG_STATUS_FILE=/var/run/watchdog/status.json
       - DESIRED_STATE_FILE=/data/desired-state.json
-      # What: file paths under the /data and /etc/nats mounts.
-      # Why: the image ENV lint rejects these names; compose owns them.
+      # What: paths below the /data and /etc/nats mounts.
+      # Why: the image ENV lint rejects these names.
       # From: Issue #1683
       - NATS_AUTH_CALLOUT_PATH=/etc/nats/auth_callout.conf
       - UI_SESSION_SECRET_FILE=/data/lancache-ui-session.secret

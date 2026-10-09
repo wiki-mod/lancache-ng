@@ -60,7 +60,7 @@ fn curl_timeout(raw: Option<&str>, name: &str) -> Result<Option<Duration>, Strin
 }
 
 // What: settings from an env reader, plus startup warnings.
-// Why: Err is fatal; a reader argument keeps tests env-free.
+// Why: Err is fatal; a reader arg keeps tests env-free.
 // From: Issue #849 | PR #1858
 fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<String>), String> {
     let get = |name: &str| config::opt(&env, name);
@@ -90,7 +90,7 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
     )?;
 
     // What: a value the env must supply; unset is fatal.
-    // Why: watchdog.env and compose own it; no default here.
+    // Why: watchdog.env and compose own it; no default.
     let need = |name: &str| config::need(&env, name).map_err(|e| format!("FATAL: {e}."));
     // What: a bool the env must supply; junk is fatal.
     // Why: same owner as need; a typo must not flip a gate.
@@ -133,8 +133,8 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
         (None, None, None) => return Err("FATAL: CACHE_DIR is not set.".to_string()),
     };
 
-    // What: the Docker API entry point must come from the env.
-    // Why: watchdog.env and compose own it; no default here.
+    // What: the Docker API address must come from the env.
+    // Why: watchdog.env and compose own it; no default.
     let docker_proxy_url =
         get("DOCKER_PROXY_URL").ok_or_else(|| "FATAL: DOCKER_PROXY_URL is not set.".to_string())?;
 
@@ -150,8 +150,8 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
         desired_state_file: PathBuf::from(need("DESIRED_STATE_FILE")?),
         cache_dir: PathBuf::from(cache_dir),
         ssl_enabled,
-        // What: DHCP_MODE must be set; "disabled" is a value.
-        // Why: compose passes it; unknown text fails closed.
+        // What: DHCP_MODE must be set; "disabled" is valid.
+        // Why: compose sets it; unknown text fails closed.
         dhcp_mode: DhcpMode::parse(&need("DHCP_MODE")?, false),
         // What: LOGGING_ENABLED gates the syslog container.
         // Why: SYSLOG_ENABLED gates retention only.
@@ -192,7 +192,7 @@ impl Reading {
             .and_then(|v| v.as_str())
             .unwrap_or("none");
         // What: only the newest check-log entry counts.
-        // Why: an old DEGRADED line must expire with its entry.
+        // Why: an old DEGRADED line must expire with it.
         let degraded = body
             .pointer("/State/Health/Log")
             .and_then(|log| log.as_array())
@@ -211,7 +211,7 @@ impl Reading {
     }
 
     // What: the status.json health string and card color.
-    // Why: the ui shows both verbatim; dashboard.html matches.
+    // Why: the ui shows both verbatim; dashboard matches.
     // From: Issue #1296
     fn describe(&self) -> (&str, &'static str) {
         match self {
@@ -253,8 +253,8 @@ enum Event {
 struct Counter(u32);
 
 impl Counter {
-    // What: reset to zero; Recovered if a streak was running.
-    // Why: RECOVERED is logged once per outage, not per cycle.
+    // What: reset to zero; Recovered if a streak ran.
+    // Why: RECOVERED is logged once per outage, not cycle.
     fn clear(&mut self) -> Event {
         if std::mem::take(&mut self.0) > 0 {
             Event::Recovered
@@ -264,7 +264,7 @@ impl Counter {
     }
 
     // What: count one reading of a restart-capable service.
-    // Why: inert readings keep the counter; never restart them.
+    // Why: inert readings keep the counter; no restart.
     fn observe(&mut self, reading: &Reading, restart_after: u32) -> Event {
         match reading {
             Reading::Unhealthy => {
@@ -282,7 +282,7 @@ impl Counter {
     }
 
     // What: count one reading of an alert-only service.
-    // Why: watchdog must not restart these; it only reports.
+    // Why: watchdog must not restart these; only reports.
     fn observe_alert(&mut self, ok: bool) -> Event {
         if ok {
             return self.clear();
@@ -292,7 +292,7 @@ impl Counter {
     }
 }
 
-// What: monitored containers in probe order, may-restart flag.
+// What: monitored containers in probe order, restart flag.
 // Why: dns-ssl, dhcp, syslog, ntp exist only when enabled.
 // From: Issue #842
 fn targets(s: &Settings) -> Vec<(&'static str, bool)> {
@@ -391,7 +391,7 @@ fn log_err(msg: &str) {
 }
 
 // What: start or stop dhcp/ntp to the desired state.
-// Why: watchdog is the sole actor; no opinion means no action.
+// Why: watchdog is the sole actor; no opinion, no action.
 // From: Issue #1437
 async fn reconcile(client: &DockerProxy, s: &Settings) {
     let desired = DesiredState::read(&s.desired_state_file);
@@ -407,7 +407,7 @@ async fn reconcile(client: &DockerProxy, s: &Settings) {
             continue;
         };
         // What: an unknown running state skips this cycle.
-        // Why: acting on a guessed state could fight a rollback.
+        // Why: acting on a guess could fight a rollback.
         let running = client
             .inspect(name, s.curl_max_time)
             .await
@@ -501,7 +501,7 @@ async fn main() {
         let mut services: HashMap<String, ServiceHealth> = HashMap::new();
         for &(name, restart) in &list {
             // What: the socket proxy is probed with /_ping.
-            // Why: it is the Docker channel itself; no inspect.
+            // Why: it is the Docker channel; no inspect.
             let reading = if name == config::CONTAINER_DOCKER_SOCKET_PROXY {
                 if client.ping(s.curl_max_time).await {
                     Reading::Healthy
@@ -580,8 +580,8 @@ async fn main() {
 mod tests {
     use super::*;
 
-    // What: the values watchdog.env and compose would supply.
-    // Why: Rust keeps no defaults, so every load needs them.
+    // What: values watchdog.env and compose would supply.
+    // Why: Rust keeps no defaults; every load needs them.
     const BASE: [(&str, &str); 14] = [
         ("DOCKER_PROXY_URL", "http://proxy.test:1"),
         ("CHECK_INTERVAL", "30"),
@@ -600,7 +600,7 @@ mod tests {
     ];
 
     // What: settings from BASE, overridden by env pairs.
-    // Why: tests set no process env; "" blanks a base value.
+    // Why: tests set no process env; "" blanks a value.
     fn load(pairs: &[(&str, &str)]) -> Result<(Settings, Vec<String>), String> {
         load_settings(|name| {
             pairs
@@ -612,7 +612,7 @@ mod tests {
     }
 
     // What: knobs take the owner's value, floor, or fail.
-    // Why: a bad knob must not busy-loop or restart every reading.
+    // Why: a bad knob must not busy-loop or restart.
     #[test]
     fn knobs_floor_and_reject() {
         let (s, warnings) = load(&[]).unwrap();
@@ -672,8 +672,8 @@ mod tests {
         }
     }
 
-    // What: renamed containers and split cache dirs are fatal.
-    // Why: the proxy allowlist knows fixed names; no cache guess.
+    // What: renamed containers and split cache dirs fail.
+    // Why: the proxy allowlist has fixed names; no guess.
     // From: Issue #849
     #[test]
     fn renames_and_conflicting_cache_dirs_are_fatal() {
@@ -702,7 +702,7 @@ mod tests {
     }
 
     // What: inspect bodies map to readings and colors.
-    // Why: only the newest check-log entry may mark Degraded.
+    // Why: only the newest check-log entry marks Degraded.
     // From: Issue #1296
     #[test]
     fn inspect_bodies_map_to_readings_and_colors() {
@@ -735,7 +735,7 @@ mod tests {
         assert!(!Reading::Other("huh".into()).is_alert_ok());
     }
 
-    // What: restart at the threshold; inert readings never count.
+    // What: restart at threshold; inert reads never count.
     // Why: restarting an unreachable service is unsafe.
     #[test]
     fn counters_restart_at_threshold_and_recover_once() {
@@ -765,7 +765,7 @@ mod tests {
         assert_eq!(counter.observe_alert(true), Event::None);
     }
 
-    // What: targets follow the SSL, DHCP, logging, NTP gates.
+    // What: targets follow the SSL, DHCP, log, NTP gates.
     // Why: a gated service that is off must raise no alarm.
     // From: Issue #842
     #[test]

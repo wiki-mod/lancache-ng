@@ -157,7 +157,7 @@ pub fn http_client() -> reqwest::Result<reqwest::Client> {
 }
 
 // What: one lancache.dns.record message on NATS.
-// Why: ui and subscriber publish it; the subscriber reads it.
+// Why: ui and subscriber publish it; subscriber reads it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsRecord {
     pub action: String,
@@ -215,12 +215,12 @@ impl SnapshotStore {
     }
 
     // What: one greppable lifecycle line on stderr.
-    // Why: operators search the logs for this exact vocabulary.
+    // Why: operators search the logs for this vocabulary.
     pub fn log(&self, level: &str, message: &str) {
         eprintln!("[known-good-snapshot][{}][{level}] {message}", self.service);
     }
 
-    // What: snapshot ids, oldest first; none if no root yet.
+    // What: snapshot ids, oldest first; none without root.
     // Why: fixed-width ids make name order chronological.
     pub fn ids(&self) -> io::Result<Vec<String>> {
         if !self.root.is_dir() {
@@ -242,7 +242,7 @@ impl SnapshotStore {
     }
 
     // What: payload of snapshot `id`; only digit ids pass.
-    // Why: the id is joined onto a path, so it must be safe.
+    // Why: the id joins onto a path, so it must be safe.
     pub fn read(&self, id: &str) -> anyhow::Result<Value> {
         anyhow::ensure!(
             !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()),
@@ -255,7 +255,7 @@ impl SnapshotStore {
     }
 
     // What: write `data` as a new snapshot, then prune.
-    // Why: staging plus rename; a crash leaves no partial one.
+    // Why: staging plus rename; a crash leaves no partial.
     pub fn create(&self, data: &Value, keep_n: u32) -> anyhow::Result<String> {
         let id = format!("{:020}", unix_nanos());
         let staging = self.root.join(format!("{STAGING}{id}"));
@@ -280,7 +280,7 @@ impl SnapshotStore {
     }
 
     // What: delete the oldest snapshots beyond keep_n.
-    // Why: a failed removal is logged, never fails the write.
+    // Why: a failed removal is logged, not a write failure.
     pub fn prune(&self, keep_n: u32) -> io::Result<()> {
         let keep_n = if keep_n == 0 { DEFAULT_KEEP } else { keep_n };
         let ids = self.ids()?;
@@ -299,7 +299,7 @@ impl SnapshotStore {
 }
 
 // What: creation time (Unix seconds) encoded in an id.
-// Why: the ui shows it; ids are nanoseconds since the epoch.
+// Why: the ui shows it; ids are epoch nanoseconds.
 pub fn snapshot_created_unix(id: &str) -> Option<u64> {
     Some((id.parse::<u128>().ok()? / 1_000_000_000) as u64)
 }
@@ -402,7 +402,7 @@ pub fn write_if_changed(
     if changed {
         write_file_as(path, contents, mode, Place::Replace, owner)?;
     }
-    // What: converge mode and owner on an unchanged file too.
+    // What: converge mode and owner on unchanged files too.
     // Why: an old install may carry other rights.
     fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode))?;
     if let Some((uid, gid)) = owner {
@@ -458,7 +458,7 @@ pub fn load_or_create_hex<const N: usize>(path: &Path) -> anyhow::Result<[u8; N]
 }
 
 // What: why a Docker call failed.
-// Why: callers act on 404 and timeouts, not on message text.
+// Why: callers act on 404 and timeouts, not message text.
 #[derive(Debug)]
 pub enum DockerError {
     Status(u16),
@@ -480,7 +480,7 @@ impl std::fmt::Display for DockerError {
 
 impl std::error::Error for DockerError {}
 
-// What: the text of a Docker log stream without frame headers.
+// What: Docker log stream text without frame headers.
 // Why: a container without a tty multiplexes its streams.
 fn log_text(mut bytes: &[u8]) -> String {
     let mut text = String::new();
@@ -495,7 +495,7 @@ fn log_text(mut bytes: &[u8]) -> String {
     text
 }
 
-// What: client of PowerDNS's HTTP API, carrying the API key.
+// What: client of PowerDNS's HTTP API with the API key.
 // Why: ui and nats-subscriber call the API the same way.
 pub struct PowerDns {
     http: reqwest::Client,
@@ -504,7 +504,7 @@ pub struct PowerDns {
 
 impl PowerDns {
     // What: a client over an HTTP client and the API key.
-    // Why: the key is read once by the owner of the service.
+    // Why: the key is read once by the service's owner.
     pub fn new(http: reqwest::Client, api_key: String) -> Self {
         Self { http, api_key }
     }
@@ -516,7 +516,7 @@ impl PowerDns {
     }
 
     // What: one API call carrying the key and a JSON body.
-    // Why: every call site shares the auth and JSON headers.
+    // Why: every call site shares auth and JSON headers.
     pub async fn call(
         &self,
         method: reqwest::Method,
@@ -535,7 +535,7 @@ impl PowerDns {
         request.send().await.map_err(|e| e.to_string())
     }
 
-    // What: the rrsets of one zone, or the reason there are none.
+    // What: the rrsets of one zone, or why there are none.
     // Why: an error body must not read as an empty zone.
     pub async fn zone_rrsets(&self, api_root: &str, zone: &str) -> Result<Vec<Value>, String> {
         let url = config::zone_url(api_root, zone);
@@ -555,8 +555,8 @@ impl PowerDns {
     }
 }
 
-// What: client of the allowlisted Docker calls of the proxy.
-// Why: ui and watchdog drive containers; one client owns it.
+// What: client of the proxy's allowlisted Docker calls.
+// Why: ui and watchdog drive containers; one owner.
 // From: Issue #1683 | PR #1858
 pub struct DockerProxy {
     client: reqwest::Client,
@@ -565,7 +565,7 @@ pub struct DockerProxy {
 
 impl DockerProxy {
     // What: build a client for one proxy base URL.
-    // Why: redirects and timeouts must stay under our control.
+    // Why: redirects and timeouts must stay under control.
     pub fn new(base_url: &str) -> Self {
         let client = reqwest::Client::builder()
             // What: never follow a redirect.
@@ -580,7 +580,7 @@ impl DockerProxy {
     }
 
     // What: one call; the body of a 2xx or 304 answer.
-    // Why: 304 means the container already is in that state.
+    // Why: 304 means the container already has that state.
     async fn call(
         &self,
         method: reqwest::Method,
@@ -615,7 +615,7 @@ impl DockerProxy {
         serde_json::from_slice(&body).ok()
     }
 
-    // What: POST one container action such as start or stop.
+    // What: POST one container action like start or stop.
     // Why: one call shape for every state change.
     pub async fn act(
         &self,
@@ -649,7 +649,7 @@ impl DockerProxy {
             .ok_or_else(|| DockerError::Transport("the wait answer has no StatusCode".into()))
     }
 
-    // What: container output since a unix time, both streams.
+    // What: container output since unix time, both streams.
     // Why: the probe result is a line in its output.
     pub async fn logs(
         &self,
@@ -667,8 +667,8 @@ impl DockerProxy {
 mod tests {
     use super::*;
 
-    // What: log frames join; foreign streams and cut tails drop.
-    // Why: the probe result line must survive the frame headers.
+    // What: log frames join; other streams, cut tails drop.
+    // Why: the probe result line must survive the headers.
     #[test]
     fn log_text_joins_stdout_and_stderr_frames() {
         let frames = [
@@ -746,8 +746,8 @@ mod tests {
         assert!(!ct_eq("short", "muchlongerkey") && !ct_eq("", "x"));
     }
 
-    // What: record and flush messages keep their wire shape.
-    // Why: publishers omit unset fields; consumers default them.
+    // What: record and flush messages keep the wire shape.
+    // Why: publishers omit unset fields; consumers default.
     // From: Issue #1095
     #[test]
     fn dns_messages_round_trip_the_wire_shape() {
@@ -766,7 +766,7 @@ mod tests {
         assert_eq!(req.expected_content, Some(vec!["192.0.2.5".to_string()]));
     }
 
-    // What: an id yields its second; non-numbers yield none.
+    // What: an id yields its second; non-numbers none.
     // Why: the ui lists snapshots by this time.
     #[test]
     fn snapshot_ids_decode_to_unix_seconds() {

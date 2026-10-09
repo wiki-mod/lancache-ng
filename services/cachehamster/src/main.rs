@@ -199,8 +199,8 @@ async fn main() -> Result<()> {
     }
     let total = Arc::new(AtomicU64::new(0));
     let client = reqwest::Client::new();
-    // What: spawned fetches, capped, plus a throughput tick.
-    // Why: own tasks use many threads; no stop signal needed.
+    // What: capped spawned fetches plus a throughput tick.
+    // Why: own tasks use many threads, no stop signal.
     // From: Issue #871
     let fetch = stream::iter(urls)
         .map(|url| {

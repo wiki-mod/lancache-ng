@@ -150,7 +150,7 @@ DNS_ROLLBACK_LISTEN_ADDR="${DNS_ROLLBACK_LISTEN_ADDR:-0.0.0.0:8083}"
 RECURSOR_CONF_FILE="/etc/pdns/recursor.conf"
 PDNS_AUTH_CONF_FILE="/etc/pdns/auth/pdns.conf"
 # What: auth config dir and the local PowerDNS API roots.
-# Why: one owner for this script and nats-subscriber, which gets them exported.
+# Why: one owner for this script and nats-subscriber.
 # From: Issue #1683
 PDNS_AUTH_CONFIG_DIR="$(dirname "$PDNS_AUTH_CONF_FILE")"
 PDNS_AUTH_API_URL="http://127.0.0.1:8081/api/v1/servers/localhost"
