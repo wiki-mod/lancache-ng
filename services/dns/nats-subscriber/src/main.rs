@@ -28,12 +28,6 @@ use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-// What: PowerDNS authoritative API root on this node.
-// Why: nats-subscriber shares the container with PowerDNS.
-const PDNS_AUTH: &str = "http://127.0.0.1:8081/api/v1/servers/localhost";
-// What: PowerDNS recursor API root on this node.
-// Why: cache flushes go to the local recursor only.
-const PDNS_REC: &str = "http://127.0.0.1:8082/api/v1/servers/localhost";
 // What: TTL given to a replace message without one.
 // Why: PowerDNS rejects a REPLACE patch without a TTL.
 const DEFAULT_REPLACE_TTL: i32 = 300;
@@ -51,6 +45,11 @@ const CONFIRM_MAX_DELIVERIES: i64 = 100;
 struct Ctx {
     http: reqwest::Client,
     api_key: String,
+    // What: authoritative and recursor API roots, auth config dir.
+    // Why: dns/entrypoint.sh owns the layout and exports it.
+    pdns_auth_url: String,
+    pdns_rec_url: String,
+    pdns_auth_config_dir: String,
     snapshot_dir: PathBuf,
     keep_n: u32,
     lock: tokio::sync::Mutex<()>,
@@ -63,6 +62,12 @@ impl Ctx {
     fn store(&self, zone: &str) -> SnapshotStore {
         let root = self.snapshot_dir.join("zones").join(zone);
         SnapshotStore::new(root, "zone.json", "dns")
+    }
+
+    // What: PowerDNS API URL of a zone, dotted or not.
+    // Why: a trailing dot in the path is a silent 404.
+    fn zone_url(&self, zone: &str) -> String {
+        format!("{}/zones/{}", self.pdns_auth_url, zone_api_id(zone))
     }
 
     // What: one PowerDNS API call carrying the API key.
@@ -88,7 +93,7 @@ impl Ctx {
     // What: the rrsets array of one zone, as PowerDNS exports.
     // Why: snapshots, rollback and the reconciler read it.
     async fn zone_rrsets(&self, zone: &str) -> Result<Value, String> {
-        let response = self.pdns(Method::GET, &zone_url(zone), None).await?;
+        let response = self.pdns(Method::GET, &self.zone_url(zone), None).await?;
         if !response.status().is_success() {
             return Err(format!("PowerDNS returned {}", response.status()));
         }
@@ -98,12 +103,6 @@ impl Ctx {
             .map_err(|e| format!("cannot decode the zone export: {e}"))?;
         Ok(body.get("rrsets").cloned().unwrap_or_else(|| json!([])))
     }
-}
-
-// What: PowerDNS API URL of a zone, dotted or not.
-// Why: a trailing dot in the path is a silent 404.
-fn zone_url(zone: &str) -> String {
-    format!("{PDNS_AUTH}/zones/{}", zone_api_id(zone))
 }
 
 // What: publish to JetStream and await the stream ack.
@@ -406,7 +405,7 @@ async fn apply_record(
         let _guard = ctx.lock.lock().await;
         ctx.pdns(
             Method::PATCH,
-            &zone_url(&record.zone),
+            &ctx.zone_url(&record.zone),
             Some(body.to_string()),
         )
         .await
@@ -438,7 +437,7 @@ async fn apply_record(
     // What: tell secondaries to pull the zone.
     // Why: AXFR consumers would stay stale until a later check.
     let notify = ctx
-        .pdns(Method::PUT, &format!("{}/notify", zone_url(zone)), None)
+        .pdns(Method::PUT, &format!("{}/notify", ctx.zone_url(zone)), None)
         .await;
     if !notify.is_ok_and(|response| response.status().is_success()) {
         eprintln!("PDNS notify failed (will retry) for zone={zone}");
@@ -535,7 +534,7 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
             );
         }
     }
-    let url = format!("{PDNS_REC}/cache/flush?domain={domain}");
+    let url = format!("{}/cache/flush?domain={domain}", ctx.pdns_rec_url);
     match ctx.pdns(Method::PUT, &url, None).await {
         Ok(response) if response.status().is_success() => {
             println!("Flushed PDNS cache");
@@ -553,7 +552,7 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
 }
 
 // What: route one message by subject.
-// Why: heartbeats and unknown subjects are acked and ignored.
+// Why: unknown subjects are logged, acked and ignored.
 async fn handle(
     ctx: &Ctx,
     msg: &jetstream::Message,
@@ -573,9 +572,7 @@ async fn handle(
     if subject == NATS_SUBJECT_FLUSH {
         return apply_flush(ctx, msg).await;
     }
-    if !subject.starts_with("lancache.dns.heartbeat") {
-        println!("Unknown subject: {subject}");
-    }
+    println!("Unknown subject: {subject}");
     Outcome::Ack
 }
 
@@ -621,9 +618,10 @@ struct RollbackRequest {
 
 // What: pdnsutil check-zone with a 10 second limit.
 // Why: a wedged auth database must not hang the rollback.
-async fn check_zone(store: &SnapshotStore, zone: &str) -> bool {
+async fn check_zone(ctx: &Ctx, store: &SnapshotStore, zone: &str) -> bool {
     let status = tokio::process::Command::new("pdnsutil")
-        .args(["--config-dir=/etc/pdns/auth", "check-zone", zone])
+        .arg(format!("--config-dir={}", ctx.pdns_auth_config_dir))
+        .args(["check-zone", zone])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true)
@@ -719,7 +717,7 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
     let patch_len = patch["rrsets"].as_array().map_or(0, Vec::len);
     if patch_len > 0 {
         let sent = ctx
-            .pdns(Method::PATCH, &zone_url(&zone), Some(patch.to_string()))
+            .pdns(Method::PATCH, &ctx.zone_url(&zone), Some(patch.to_string()))
             .await;
         let rejected = match sent {
             Ok(response) if response.status().is_success() => None,
@@ -742,7 +740,7 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
     }
     store.log("SELECT", &format!("selected known-good snapshot {} for rollback of zone {zone} ({patch_len} rrset(s) changed)", request.snapshot_id));
 
-    let zone_check_passed = check_zone(&store, &zone).await;
+    let zone_check_passed = check_zone(ctx, &store, &zone).await;
     if !zone_check_passed {
         store.log("REJECT", &format!("post-rollback pdnsutil check-zone failed for zone {zone}; the PATCH is applied and NOT reverted, inspect the zone by hand"));
     }
@@ -947,6 +945,9 @@ async fn main() {
     let ctx = Arc::new(Ctx {
         http,
         api_key,
+        pdns_auth_url: required("PDNS_AUTH_API_URL"),
+        pdns_rec_url: required("PDNS_REC_API_URL"),
+        pdns_auth_config_dir: required("PDNS_AUTH_CONFIG_DIR"),
         snapshot_dir: PathBuf::from(snapshot_dir),
         keep_n: keep_n as u32,
         lock: tokio::sync::Mutex::new(()),
