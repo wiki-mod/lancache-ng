@@ -3105,13 +3105,13 @@ STUB
     [ "${status}" -eq 1 ]
 }
 
+# What: dhcp4, ctrl-agent, d2 from the real var list.
+# Why: a missed var or bad port stops kea from starting.
+# From: Issue #1683 | PR #1858
 @test "dhcp kea templates render complete valid json" {
-    # What: dhcp4, ctrl-agent, d2 from the real var list.
-    # Why: a missed var or bad port stops kea from starting.
-    # From: Issue #1683 | PR #1858
-    local root ep dns zones key alg n1 n2 row port rc want j4 jc jd ps
+    local root ep dns zones key alg n1 n2 row port rc want j4 jc jd portcode
     local -A V=(["@P@"]="$(_val port)")
-    j4="$(_val path)" jc="$(_val path)" jd="$(_val path)" ps="$(_val path)"
+    j4="$(_val path)" jc="$(_val path)" jd="$(_val path)"
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     ep="${root}/services/dhcp/entrypoint.sh"
     dns="${root}/services/dns/entrypoint.sh"
@@ -3130,7 +3130,6 @@ STUB
     export DHCP_SUBNET DHCP_RANGE_START DHCP_RANGE_END DHCP_GATEWAY DHCP_DOMAIN DHCP_LEASE_TIME \
         DHCP_MAX_LEASE_TIME DHCP_NTP_SERVERS DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY DHCP_DNS_SERVER_IP \
         DHCP_DDNS_PORT KEA_CTRL_TOKEN KEA_CTRL_HOST DDNS_TSIG_KEY KEA_LEASE_CMDS_HOOK_PATH
-    mkdir -p "${d}"
     for DHCP_DDNS_ENABLED in true false; do
         export DHCP_DDNS_ENABLED
         render_kea_dhcp4_config "${root}/services/dhcp/kea-dhcp4.conf" "${j4}"
@@ -3152,8 +3151,8 @@ STUB
     jq -e --arg host "${KEA_CTRL_HOST}" --arg tok "${KEA_CTRL_TOKEN}" '.["Control-agent"]
         | .["http-host"] == $host and .authentication.type == "basic"
         and [.authentication.clients[].password] == [$tok]' "${jc}"
-    render_kea_config "${root}/services/dhcp/kea-dhcp-ddns.conf" "${d}/d2.json"
-    run grep -n '\${' "${j4}" "${jc}" "${d}/d2.json"
+    render_kea_config "${root}/services/dhcp/kea-dhcp-ddns.conf" "${jd}"
+    run grep -n '\${' "${j4}" "${jc}" "${jd}"
     [ "${status}" -eq 1 ] || { echo "unrendered: ${output}"; return 1; }
     zones="$(awk '/^PRIVATE_REVERSE_ZONES=\(/,/^\)/' "${dns}" \
         | grep -oE '[0-9a-z.]+\.in-addr\.arpa\.' | jq -Rsc 'split("\n") | map(select(. != "")) | sort')"
@@ -3171,13 +3170,13 @@ STUB
         and ([$d["reverse-ddns"]["ddns-domains"][].name] | sort) == $zones
         and ([$d["forward-ddns", "reverse-ddns"]["ddns-domains"][] | .["key-name"]] | unique) == [$key]
         and ([$d["forward-ddns", "reverse-ddns"]["ddns-domains"][]["dns-servers"]
-            | length == 1 and .[0] == {"ip-address": $ip, "port": $port}] | all)' "${d}/d2.json"
+            | length == 1 and .[0] == {"ip-address": $ip, "port": $port}] | all)' "${jd}"
     [ "${status}" -eq 0 ] || { echo "d2: ${output}"; return 1; }
-    sed -n '/^: "\${DHCP_DDNS_PORT:=/,/^fi$/p' "${ep}" > "${d}/port.sh"
-    [ -s "${d}/port.sh" ]
+    portcode="$(sed -n '/^: "\${DHCP_DDNS_PORT:=/,/^fi$/p' "${ep}")"
+    [ -n "${portcode}" ] || { echo "no DHCP_DDNS_PORT check in ${ep}"; return 1; }
     while IFS= read -r row; do
         IFS='|' read -r port rc want <<< "$(_fill "${row}")"
-        run env DHCP_DDNS_PORT="${port}" bash -c ". '${d}/port.sh' && echo \"ok \${DHCP_DDNS_PORT}\""
+        run env DHCP_DDNS_PORT="${port}" bash -c "${portcode}"$'\n''echo "ok ${DHCP_DDNS_PORT}"'
         [ "${status}" -eq "${rc}" ] || { echo "port '${port}': rc ${status}: ${output}"; return 1; }
         [[ "${output}" == *"${want}"* ]] || { echo "port '${port}': ${output}"; return 1; }
     done <<'CASES'
