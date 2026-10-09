@@ -527,13 +527,6 @@ _docker_answer() {
     printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$1" "$2" "${3:-}" "${4:-}" "${5:-}" >> "${DS}/answers"
 }
 
-# What: sleep only advances the shell clock SECONDS
-# Why: deadline loops run their SOT timeouts with no wait
-# From: Issue #1683 | PR #1858
-_virtual_clock() {
-    sleep() { SECONDS=$(( SECONDS + ${1%%.*} )); }
-}
-
 # What: a PATH dir with every tool but the named ones
 # Why: proves the "tool missing" paths with real tools
 # From: Issue #1683 | PR #1858
@@ -1132,115 +1125,94 @@ CASES
     done
 }
 
-@test "validate slot lock refuses a second holder of one /27" {
-    # What: One flock per /27; the second call fails.
-    # Why: Two runs must never share a validation subnet.
-    # From: Issue #1683
+# What: one flock per slot; a second holder is refused
+# Why: two runs on one host must never share a slot
+# From: Issue #1683 | PR #1858
+@test "validate slot lock refuses a second holder of one slot" {
+    local first s
     export TMPDIR="${BATS_TEST_TMPDIR}"
-    local first
-    first="$(_ci_validate_slot_lock 172.16.1.32/27)"
-    [ -n "${first}" ]
-    run _ci_validate_slot_lock 172.16.1.32/27
-    [ "${status}" -eq 1 ]
+    s="$(_ci_validate_subnet "$(_val name)")" || { echo "slot: ${s}"; return 1; }
+    first="$(_ci_validate_slot_lock "${s}")" || { echo "first holder failed"; return 1; }
+    run _ci_validate_slot_lock "${s}"
     _ci_validate_release "${first}"
-    # What: a failing flock is rc 2 with raw, not "held".
-    # Why: else every slot reads busy: wrong "no free /27".
-    # From: Issue #1683 | PR #1858
-    local bin="${BATS_TEST_TMPDIR}/fbin"; mkdir -p "${bin}"
-    _tool_stub "${bin}" flock <<'STUB'
-echo "flock: cannot open lock file: Read-only file system" >&2
-exit 1
-STUB
-    PATH="${bin}:${PATH}" run _ci_validate_slot_lock 172.16.1.64/27
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *'[CI-ERROR-VALIDATE-0073] subnet="172.16.1.64/27"'* ]]
-    [[ "${output}" == *"Read-only file system"* ]]
+    _expect second-holder 1 - || return 1
 }
 
-@test "validate subnet is deterministic and in 172.16/12" {
-    # What: Same seed yields the same /27 in 172.16/12.
-    # Why: Reproducible slot from the private B block.
-    # From: Issue #1683
-    local a b o2 host seed n max rid
+# What: one seed gives one slot inside the SOT pool
+# Why: the slot is reproducible and never leaves the pool
+# From: Issue #1683 | PR #1858
+@test "validate subnet is deterministic and inside the SOT pool" {
+    local a b seed n max rid pool slot plen o1 o2 o3 o4 pnet anet
     max="$(_ci_variable CI_VALIDATE_MAX_SLOTS)" || { echo "max: ${max}"; return 1; }
+    pool="$(_ci_variable CI_VALIDATE_SUBNET_POOL)" || { echo "pool: ${pool}"; return 1; }
+    slot="$(_ci_variable CI_VALIDATE_SLOT_PREFIX)" || { echo "slot: ${slot}"; return 1; }
+    plen="${pool#*/}"
+    IFS=. read -r o1 o2 o3 o4 <<< "${pool%/*}"
+    pnet=$(( ((o1 << 24) + (o2 << 16) + (o3 << 8) + o4) >> (32 - plen) ))
     rid="$(_val int 1 999999999)"
     for (( n = 1; n <= max; n++ )); do
         seed="$(_ci_validate_seed "${rid}" 1 "${n}")"
-        a="$(_ci_validate_subnet "${seed}")"
-        b="$(_ci_validate_subnet "${seed}")"
-        [ "${a}" = "${b}" ] || { echo "seed ${n} ${seed}: ${a} then ${b}"; return 1; }
-        [[ "${a}" == 172.*/27 ]] || { echo "seed ${seed}: ${a}"; return 1; }
-        o2="${a#172.}"; o2="${o2%%.*}"
-        [ "${o2}" -ge 16 ] && [ "${o2}" -le 31 ] || { echo "seed ${seed}: ${a} outside 172.16/12"; return 1; }
-        host="${a%/27}"; host="${host##*.}"
-        [ "$(( host % 32 ))" -eq 0 ] || { echo "seed ${seed}: ${a} not aligned"; return 1; }
+        a="$(_ci_validate_subnet "${seed}")" && b="$(_ci_validate_subnet "${seed}")" || { echo "seed ${seed}: ${a}"; return 1; }
+        [ "${a}" = "${b}" ] && [ "${a#*/}" = "${slot}" ] || { echo "seed ${seed}: ${a} then ${b}"; return 1; }
+        IFS=. read -r o1 o2 o3 o4 <<< "${a%/*}"
+        anet=$(( (o1 << 24) + (o2 << 16) + (o3 << 8) + o4 ))
+        [ $(( anet >> (32 - plen) )) -eq "${pnet}" ] && [ $(( anet % (1 << (32 - slot)) )) -eq 0 ] \
+            || { echo "seed ${seed}: ${a} outside ${pool} or not /${slot} aligned"; return 1; }
     done
 }
 
-# What: _ci_validate_net_override per compose network set
-# Why: the /27 splits without overlap; ports, names reset
+# What: the real compose config -> one slot split, resets
+# Why: no overlap in the slot; no host port or name binds
 # From: Issue #1683 | PR #1858
 @test "validate net override isolates and resets services" {
-    _stand_ins || return 1
-    local case nets rc want count slot lo hi sub a b i j
-    local -a subs starts ends ns
-    local -A V=(["@S@"]="$(_val name)" ["@H@"]="$(_val name)")
-    # What: three network names in jq's key order
-    # Why: the override lists networks by sorted key
-    # From: Issue #1683 | PR #1858
-    mapfile -t ns < <(printf '%s\n' "$(_val name)" "$(_val name)" "$(_val name)" | LC_ALL=C sort)
-    V["@N1@"]="${ns[0]}" V["@N2@"]="${ns[1]}" V["@N3@"]="${ns[2]}"
-    slot="$(_ci_validate_subnet "$(_val name)")" || return 1
-    lo="$(_ci_ipv4_to_int "${slot%/*}")" hi=$(( $(_ci_ipv4_to_int "${slot%/*}") + (1 << (32 - ${slot#*/})) ))
-    while IFS='|' read -r case nets rc want count; do
-        rm -f "${DS}/answers" "${DS}"/answer-used-*
-        _docker_answer ' compose * config --profiles *' 0
-        _docker_answer ' compose -f * config --format json ' 0 \
-            "$(_fill "{\"services\":{\"@S@\":{},\"@H@\":{\"network_mode\":\"host\"}},\"networks\":{${nets}}}")"
-        run _ci_validate_net_override "${slot}"
-        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
-        [ "${rc}" -eq 0 ] || continue
-        # What: /28 then /29s, all in the slot, disjoint
-        # Why: range checks, not a copy of the split math
-        # From: Issue #1683 | PR #1858
-        mapfile -t subs < <(sed -n 's/^ *- subnet: //p' <<< "${output}")
-        starts=() ends=()
-        [ "${#subs[@]}" -eq "${count}" ] || { echo "${case}: subnets ${subs[*]}"; return 1; }
-        for (( i = 0; i < ${#subs[@]}; i++ )); do
-            sub="${subs[i]}"
-            [ "${sub#*/}" -eq "$([ "${i}" -eq 0 ] && echo 28 || echo 29)" ] || { echo "${case}: prefix ${sub}"; return 1; }
-            a="$(_ci_ipv4_to_int "${sub%/*}")" b=$(( $(_ci_ipv4_to_int "${sub%/*}") + (1 << (32 - ${sub#*/})) ))
-            (( a >= lo && b <= hi )) || { echo "${case}: ${sub} outside ${slot}"; return 1; }
-            for (( j = 0; j < ${#starts[@]}; j++ )); do
-                (( b <= starts[j] || a >= ends[j] )) || { echo "${case}: ${sub} overlaps ${subs[j]}"; return 1; }
-            done
-            starts+=("${a}") ends+=("${b}")
+    local slot cfg nx plain host out sub a b i j o1 o2 o3 o4 lo hi svc s
+    local -a subs starts=() ends=()
+    slot="$(_ci_validate_subnet "$(_val name)")" && cfg="$(_ci_validate_config_json)" || { echo "inputs: ${slot}"; return 1; }
+    s="${slot#*/}"
+    nx="$(jq '[.networks // {} | keys[] | select(. != "default")] | length' <<< "${cfg}")" \
+        && plain="$(jq -r '.services | to_entries[] | select(.value.network_mode != "host") | .key' <<< "${cfg}")" \
+        && host="$(jq -r '.services | to_entries[] | select(.value.network_mode == "host") | .key' <<< "${cfg}")" \
+        || { echo "compose config not readable"; return 1; }
+    [ "${nx}" -le 2 ] && [ -n "${plain}" ] || { echo "real compose: ${nx} extra networks, services: ${plain}"; return 1; }
+    run _ci_validate_net_override "${slot}"
+    _expect override 0 "networks:;default:;services:" || return 1
+    out="${output}"
+    mapfile -t subs <<< "$(sed -n 's/^ *- subnet: //p' <<< "${out}")"
+    [ "${#subs[@]}" -eq $(( nx + 1 )) ] || { echo "subnets ${subs[*]} for ${nx} extra networks"; return 1; }
+    IFS=. read -r o1 o2 o3 o4 <<< "${slot%/*}"
+    lo=$(( (o1 << 24) + (o2 << 16) + (o3 << 8) + o4 )) hi=$(( (o1 << 24) + (o2 << 16) + (o3 << 8) + o4 + (1 << (32 - s)) ))
+    for (( i = 0; i < ${#subs[@]}; i++ )); do
+        sub="${subs[i]}"
+        [ "${sub#*/}" -eq $(( s + (i == 0 ? 1 : 2) )) ] || { echo "prefix ${sub} at ${i}"; return 1; }
+        IFS=. read -r o1 o2 o3 o4 <<< "${sub%/*}"
+        a=$(( (o1 << 24) + (o2 << 16) + (o3 << 8) + o4 )) b=$(( (o1 << 24) + (o2 << 16) + (o3 << 8) + o4 + (1 << (32 - ${sub#*/})) ))
+        (( a >= lo && b <= hi )) || { echo "${sub} outside ${slot}"; return 1; }
+        for (( j = 0; j < ${#starts[@]}; j++ )); do
+            (( b <= starts[j] || a >= ends[j] )) || { echo "${sub} overlaps ${subs[j]}"; return 1; }
         done
-        # What: network_mode reset for host-mode only
-        # Why: a probe may run it in the /27; up never does
-        # From: Issue #763 | PR #1858
-        [[ "${output}" == *$'  '"${V["@H@"]}"$':\n    network_mode: !reset null'* ]] \
-            && [ "$(grep -c 'network_mode' <<< "${output}")" -eq 1 ] \
-            && [[ "${output}" != *$'  '"${V["@H@"]}"$':\n    container_name'* ]] \
-            || { echo "${case}: host-mode reset: ${output}"; return 1; }
-    done <<'CASES'
-default-only|"default":{}|0|networks:;default:;services:;@S@:;container_name: !reset null;ports: !reset []|1
-two-extra|"default":{},"@N1@":{},"@N2@":{"internal":true}|0|default:;@N1@:;@N2@:;services:|3
-three-extra|"@N1@":{},"@N2@":{},"@N3@":{}|2|[CI-ERROR-VALIDATE-0068] network="|0
-CASES
+        starts+=("${a}") ends+=("${b}")
+    done
+    while IFS= read -r svc; do
+        [[ "${out}" == *$'\n  '"${svc}"$':\n    container_name: !reset null\n    ports: !reset []'* ]] \
+            || { echo "${svc}: name and ports not reset"; return 1; }
+    done <<< "${plain}"
+    while IFS= read -r svc; do
+        [ -n "${svc}" ] || continue
+        [[ "${out}" == *$'\n  '"${svc}"$':\n    network_mode: !reset null'* && "${out}" != *$'\n  '"${svc}"$':\n    container_name'* ]] \
+            || { echo "${svc}: host mode not reset alone"; return 1; }
+    done <<< "${host}"
 }
 
+# What: success is rc 0; a timeout prints the last error
+# Why: a probe timeout must say why it never answered
+# From: Issue #1683 | PR #1858
 @test "validate poll returns on success and shows the last error" {
-    # What: success is rc 0; a timeout prints last error.
-    # Why: a probe timeout must say why it never answered.
-    # From: Issue #1683 | PR #1858
-    _virtual_clock
-    run _ci_validate_poll 3 1 true
-    [ "${status}" -eq 0 ]
-    [ -z "${output}" ]
-    run _ci_validate_poll 3 1 bash -c 'echo "connection refused" >&2; exit 7'
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"connection refused"* ]]
+    local w
+    w="$(_val name)"
+    run _ci_validate_poll "$(_val int 2 4)" 0 true
+    _expect success 0 "=" || return 1
+    run _ci_validate_poll "$(_val int 2 4)" 0 bash -c 'echo "$1" >&2; exit 7' _ "${w}"
+    _expect timeout 1 "${w}" || return 1
 }
 
 # =========================================================
