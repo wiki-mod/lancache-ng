@@ -1230,6 +1230,8 @@ dependencies = [
  "rand 0.10.2",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "subtle",
 ]
 
 [[package]]
@@ -1273,7 +1275,6 @@ version = "0.3.0"
 dependencies = [
  "lancache-common",
  "reqwest",
- "serde",
  "serde_json",
  "time",
  "tokio",
@@ -1384,6 +1385,7 @@ dependencies = [
  "async-nats",
  "axum",
  "futures",
+ "lancache-common",
  "reqwest",
  "serde",
  "serde_json",

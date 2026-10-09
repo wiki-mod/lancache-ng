@@ -445,8 +445,8 @@
                   </td>
                   <td class="py-2">
                     {# group.zone only ever comes from the fixed ROLLBACK_ZONES
-                       whitelist (services/dns/nats-subscriber/src/
-                       zone_snapshots.rs) -- letters/digits/dots/hyphens only,
+                       whitelist (rollback_zones in
+                       services/common/config.rs) -- letters/digits/dots/hyphens only,
                        so direct interpolation into this JS string literal is
                        safe (no quote/escaping concerns, unlike arbitrary
                        operator input). #}

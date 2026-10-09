@@ -1,7 +1,0 @@
-
-# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
-# SPDX-License-Identifier: AGPL-3.0-or-later
-# Ignores this cargo-fuzz harness crate's build output and crash artifacts;
-# corpus/ (seed inputs) stays tracked.
-/target
-/artifacts

@@ -1,1132 +1,1013 @@
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! NATS JetStream subscriber: consumes DNS record updates and applies them to PowerDNS API.
+//! What: NATS consumer, zone snapshots, rollback listener.
+//! Why: one process applies DNS updates and rolls zones back.
+//! From: Issue #628 | PR #1858
 
-mod nats_publish;
-mod rollback_listener;
-mod zone_snapshots;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_nats::jetstream;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use futures::StreamExt;
-// DNSRecord/RRset/ZoneUpdate/ZoneInfo/dns_record_to_zone_update now live in
-// lib.rs (see its module doc comment) so fuzz/ can link them without faking a
-// NATS/PowerDNS connection -- this binary uses the exact same types/function,
-// not a redefinition of them.
-use nats_subscriber::{DNSRecord, ZoneInfo, dns_record_to_zone_update};
-use reqwest::Client;
+use futures::future::join_all;
+use lancache_common::config::{
+    NATS_STREAM_DNS, NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, OutOfRange, Uint,
+    canonical_zone, env_opt, is_rollback_zone, parse_bool, rollback_zones, zone_api_id,
+};
+use lancache_common::{DnsRecord, FlushRequest, SnapshotStore, ct_eq, snapshot_created_unix};
+use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
-use std::env;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::Mutex as AsyncMutex;
 
-/// Shared configuration + coordination for the zone/record known-good
-/// snapshot adapter (#628). `lock` is held for the whole
-/// read-modify-snapshot sequence by every caller (the post-PATCH trigger in
-/// `handle_dns_record`, the periodic `zone_snapshot_watcher`, and
-/// `rollback_listener.rs`'s rollback handler) so a snapshot-creation tick
-/// and an in-progress rollback for the same zone never interleave -- see
-/// `zone_snapshots.rs`'s module doc comment for why that matters
-/// (concurrent `create_snapshot` calls would otherwise race retention
-/// pruning and could emit spurious FATAL log lines).
-#[derive(Clone)]
-struct SnapshotContext {
-    base_dir: PathBuf,
+// What: PowerDNS authoritative API root on this node.
+// Why: nats-subscriber shares the container with PowerDNS.
+const PDNS_AUTH: &str = "http://127.0.0.1:8081/api/v1/servers/localhost";
+// What: PowerDNS recursor API root on this node.
+// Why: cache flushes go to the local recursor only.
+const PDNS_REC: &str = "http://127.0.0.1:8082/api/v1/servers/localhost";
+// What: TTL given to a replace message without one.
+// Why: PowerDNS rejects a REPLACE patch without a TTL.
+const DEFAULT_REPLACE_TTL: i32 = 300;
+// What: in-process confirmation tries before a Nak.
+// Why: a longer sleep holds the message past ack_wait.
+// From: Issue #1095
+const CONFIRM_TRIES: u32 = 3;
+// What: deliveries after which a flush no longer waits.
+// Why: bounds a retry loop that has no max_deliver.
+// From: Issue #1095
+const CONFIRM_MAX_DELIVERIES: i64 = 100;
+
+// What: state shared by the consumer and the helper tasks.
+// Why: one lock orders zone writes, snapshots and rollbacks.
+struct Ctx {
+    http: reqwest::Client,
+    api_key: String,
+    snapshot_dir: PathBuf,
     keep_n: u32,
-    lock: Arc<AsyncMutex<()>>,
+    lock: tokio::sync::Mutex<()>,
+    js: jetstream::Context,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RecordWriteMode {
-    Enabled,
-    Disabled,
-}
-
-impl RecordWriteMode {
-    fn from_env() -> Self {
-        Self::from_env_value(&env::var("NATS_RECORD_WRITES").unwrap_or_else(|_| "1".to_string()))
+impl Ctx {
+    // What: the snapshot store of one dotted zone.
+    // Why: every zone has its own directory under zones/.
+    fn store(&self, zone: &str) -> SnapshotStore {
+        let root = self.snapshot_dir.join("zones").join(zone);
+        SnapshotStore::new(root, "zone.json", "dns")
     }
 
-    fn from_env_value(value: &str) -> Self {
-        match value.to_ascii_lowercase().as_str() {
-            "0" | "false" | "no" | "off" => Self::Disabled,
-            _ => Self::Enabled,
+    // What: one PowerDNS API call carrying the API key.
+    // Why: every call site shares the auth and JSON headers.
+    async fn pdns(
+        &self,
+        method: Method,
+        url: &str,
+        body: Option<String>,
+    ) -> Result<reqwest::Response, String> {
+        let mut request = self
+            .http
+            .request(method, url)
+            .header("X-API-Key", &self.api_key);
+        if let Some(body) = body {
+            request = request
+                .header("Content-Type", "application/json")
+                .body(body);
+        }
+        request.send().await.map_err(|e| e.to_string())
+    }
+
+    // What: the rrsets array of one zone, as PowerDNS exports.
+    // Why: snapshots, rollback and the reconciler read it.
+    async fn zone_rrsets(&self, zone: &str) -> Result<Value, String> {
+        let response = self.pdns(Method::GET, &zone_url(zone), None).await?;
+        if !response.status().is_success() {
+            return Err(format!("PowerDNS returned {}", response.status()));
+        }
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| format!("cannot decode the zone export: {e}"))?;
+        Ok(body.get("rrsets").cloned().unwrap_or_else(|| json!([])))
+    }
+}
+
+// What: PowerDNS API URL of a zone, dotted or not.
+// Why: a trailing dot in the path is a silent 404.
+fn zone_url(zone: &str) -> String {
+    format!("{PDNS_AUTH}/zones/{}", zone_api_id(zone))
+}
+
+// What: publish to JetStream and await the stream ack.
+// Why: a permission denial only shows as a missing ack.
+async fn publish(
+    js: &jetstream::Context,
+    subject: &str,
+    msg_id: Option<&str>,
+    payload: Vec<u8>,
+) -> Result<(), String> {
+    let ack = match msg_id {
+        Some(id) => {
+            let mut headers = async_nats::HeaderMap::new();
+            headers.insert(async_nats::header::NATS_MESSAGE_ID, id);
+            js.publish_with_headers(subject.to_string(), headers, payload.into())
+                .await
+        }
+        None => js.publish(subject.to_string(), payload.into()).await,
+    };
+    ack.map_err(|e| e.to_string())?
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+// What: publish one record message, logging a failure.
+// Why: replication is best-effort; the next tick repeats it.
+async fn publish_record(js: &jetstream::Context, msg_id: &str, record: &DnsRecord) {
+    let payload = serde_json::to_vec(record).unwrap_or_default();
+    if let Err(e) = publish(js, NATS_SUBJECT_RECORD, Some(msg_id), payload).await {
+        eprintln!("publish of {msg_id} failed: {e}");
+    }
+}
+
+// What: a record message from one PowerDNS rrset.
+// Why: reconciler and rollback share the message shape.
+fn rrset_record(action: &str, zone: &str, rrset: &Value) -> Option<DnsRecord> {
+    Some(DnsRecord {
+        action: action.to_string(),
+        zone: zone.to_string(),
+        name: rrset.get("name")?.as_str()?.to_string(),
+        record_type: rrset.get("type")?.as_str()?.to_string(),
+        ttl: rrset
+            .get("ttl")
+            .and_then(Value::as_i64)
+            .and_then(|ttl| i32::try_from(ttl).ok()),
+        records: rrset
+            .get("records")
+            .and_then(|records| serde_json::from_value(records.clone()).ok()),
+    })
+}
+
+// What: PowerDNS PATCH body for one record message.
+// Why: unknown actions fail before anything is sent.
+fn patch_body(record: &DnsRecord) -> Result<Value, String> {
+    let mut rrset = json!({"name": record.name, "type": record.record_type});
+    match record.action.as_str() {
+        "delete" => rrset["changetype"] = json!("DELETE"),
+        "replace" => {
+            rrset["changetype"] = json!("REPLACE");
+            rrset["ttl"] = json!(record.ttl.unwrap_or(DEFAULT_REPLACE_TTL));
+            if let Some(records) = &record.records {
+                rrset["records"] = json!(records);
+            }
+        }
+        other => return Err(format!("unknown action: {other}")),
+    }
+    Ok(json!({"rrsets": [rrset]}))
+}
+
+// What: rrsets without SOA and NS.
+// Why: a rollback must never rewrite the SOA serial or NS.
+fn data_rrsets(rrsets: &Value) -> Value {
+    let kept = rrsets.as_array().into_iter().flatten().filter(|rrset| {
+        !matches!(
+            rrset.get("type").and_then(Value::as_str),
+            Some("SOA" | "NS")
+        )
+    });
+    Value::Array(kept.cloned().collect())
+}
+
+// What: (name, type) of an rrset, empty if missing.
+// Why: the identity PowerDNS uses for one rrset.
+fn rrset_key(rrset: &Value) -> (String, String) {
+    let text = |field: &str| rrset.get(field).and_then(Value::as_str).unwrap_or("");
+    (text("name").to_string(), text("type").to_string())
+}
+
+// What: rrsets sorted by key, records sorted by content.
+// Why: equal zones compare equal whatever order PowerDNS used.
+fn canonicalize(rrsets: &Value) -> Vec<Value> {
+    let mut list = rrsets.as_array().cloned().unwrap_or_default();
+    list.sort_by_key(rrset_key);
+    for rrset in &mut list {
+        if let Some(records) = rrset.get_mut("records").and_then(Value::as_array_mut) {
+            records.sort_by_key(|r| r.get("content").and_then(Value::as_str).map(str::to_string));
         }
     }
+    list
+}
 
-    fn allows_writes(self) -> bool {
-        matches!(self, Self::Enabled)
+// What: true if candidate equals the newest snapshot.
+// Why: the 60 s watcher must not evict history with copies.
+fn matches_latest(store: &SnapshotStore, candidate: &Value) -> bool {
+    let Ok(ids) = store.ids() else {
+        return false;
+    };
+    let Some(latest) = ids.last() else {
+        return canonicalize(candidate).is_empty();
+    };
+    store
+        .read(latest)
+        .is_ok_and(|snapshot| canonicalize(&snapshot) == canonicalize(candidate))
+}
+
+// What: PATCH body that rolls current back to a snapshot.
+// Why: unchanged rrsets stay out, so flushes stay precise.
+fn rollback_patch(snapshot: &Value, current: &Value) -> Value {
+    let (snapshot, current) = (canonicalize(snapshot), canonicalize(current));
+    let current_by_key: HashMap<_, _> = current.iter().map(|r| (rrset_key(r), r)).collect();
+    let snapshot_keys: HashSet<_> = snapshot.iter().map(rrset_key).collect();
+    let mut out = Vec::new();
+    for rrset in &snapshot {
+        if current_by_key.get(&rrset_key(rrset)) != Some(&rrset) {
+            let mut replace = rrset.clone();
+            replace["changetype"] = json!("REPLACE");
+            out.push(replace);
+        }
     }
+    for rrset in &current {
+        let (name, record_type) = rrset_key(rrset);
+        if !snapshot_keys.contains(&(name.clone(), record_type.clone())) {
+            out.push(json!({"name": name, "type": record_type, "changetype": "DELETE"}));
+        }
+    }
+    json!({"rrsets": out})
 }
 
-// Missing/non-numeric/non-positive KEEP_KNOWN_GOOD_CONFIGS falls back to
-// `default` here at the env-parsing boundary; `zone_snapshots::
-// prune_snapshots`'s own `clamp_keep_n` re-clamps a raw 0 as a second,
-// belt-and-suspenders guard for any future caller that constructs a
-// SnapshotContext without going through this function.
-fn env_u32_clamped(key: &str, default: u32) -> u32 {
-    env::var(key)
-        .ok()
-        .and_then(|value| value.trim().parse::<u32>().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or(default)
+// What: names a patch touches, first occurrence only.
+// Why: each name is flushed from the recursor caches once.
+fn changed_names(patch: &Value) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let names = patch["rrsets"].as_array().into_iter().flatten();
+    let names = names.filter_map(|rrset| rrset.get("name")?.as_str());
+    names
+        .filter(|name| seen.insert(*name))
+        .map(str::to_string)
+        .collect()
 }
 
-/// Exports the current data rrsets (SOA/NS excluded, see
-/// `zone_snapshots::filter_data_rrsets`) for `zone` (canonical, dotted form)
-/// from PowerDNS's own API and records a fresh known-good snapshot if the
-/// content differs from the most recently stored one. Used by both
-/// snapshot triggers the design requires: the post-PATCH hook in
-/// `handle_dns_record` (the NATS-applied path) and `zone_snapshot_watcher`
-/// (the periodic export-and-diff trigger covering Kea's direct-to-PowerDNS
-/// DDNS updates, which bypass NATS/this consumer entirely). Every failure
-/// path here is logged via `zone_snapshots::kgs_log` and otherwise swallowed
-/// -- non-fatal by design (docs/known-good-config-snapshots.md): a snapshot
-/// failure must never turn an already-applied, already-confirmed PowerDNS
-/// write into a NATS redelivery loop.
-async fn maybe_snapshot_zone(
-    zone: &str,
-    http_client: &Client,
-    pdns_api_key: &str,
-    ctx: &SnapshotContext,
-) {
-    if !zone_snapshots::is_rollback_zone(zone) {
+// What: snapshot a zone if its data changed.
+// Why: also covers Kea DDNS writes that bypass NATS.
+// From: Issue #628
+async fn snapshot_zone(ctx: &Ctx, zone: &str) {
+    if !is_rollback_zone(zone) {
         return;
     }
-
-    let url = format!(
-        "http://127.0.0.1:8081/api/v1/servers/localhost/zones/{}",
-        zone_snapshots::zone_api_id(zone)
-    );
-    let resp = match http_client
-        .get(&url)
-        .header("X-API-Key", pdns_api_key)
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => r,
-        Ok(r) => {
-            zone_snapshots::kgs_log(
-                "FATAL",
-                &format!(
-                    "failed to export zone {zone} for snapshotting: PowerDNS returned {}",
-                    r.status()
-                ),
-            );
-            return;
-        }
+    let store = ctx.store(zone);
+    let rrsets = match ctx.zone_rrsets(zone).await {
+        Ok(rrsets) => rrsets,
         Err(e) => {
-            zone_snapshots::kgs_log(
+            store.log(
                 "FATAL",
                 &format!("failed to export zone {zone} for snapshotting: {e}"),
             );
             return;
         }
     };
+    let data = data_rrsets(&rrsets);
+    let _guard = ctx.lock.lock().await;
+    if !matches_latest(&store, &data)
+        && let Err(e) = store.create(&data, ctx.keep_n)
+    {
+        store.log("FATAL", &format!("failed to snapshot zone {zone}: {e}"));
+    }
+}
 
-    let body: Value = match resp.json().await {
-        Ok(v) => v,
+// What: every minute, snapshot all managed zones.
+// Why: runs on every node, unlike the NATS reconciler.
+async fn snapshot_watcher(ctx: Arc<Ctx>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+        for zone in rollback_zones() {
+            snapshot_zone(&ctx, &zone).await;
+        }
+    }
+}
+
+// What: every minute, republish the lan zone to NATS.
+// Why: a node that missed messages converges again.
+async fn reconciler(ctx: Arc<Ctx>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+        let rrsets = match ctx.zone_rrsets("lan").await {
+            Ok(rrsets) => data_rrsets(&rrsets),
+            Err(e) => {
+                eprintln!("Reconciler: cannot read the lan zone: {e}");
+                continue;
+            }
+        };
+        let records: Vec<DnsRecord> = rrsets
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|rrset| rrset_record("replace", "lan", rrset))
+            .collect();
+        for record in &records {
+            let name = record.name.trim_end_matches('.');
+            let msg_id = format!("reconcile-lan-{name}-{}", record.record_type);
+            publish_record(&ctx.js, &msg_id, record).await;
+        }
+        println!("Reconciler: published {} records", records.len());
+    }
+}
+
+// What: record key: zone, name and type, normalized.
+// Why: publishers differ in dots and case for one record.
+// From: Issue #772
+fn record_key(record: &DnsRecord) -> (String, String, String) {
+    (
+        record.zone.trim_end_matches('.').to_ascii_lowercase(),
+        record.name.trim_end_matches('.').to_ascii_lowercase(),
+        record.record_type.to_ascii_uppercase(),
+    )
+}
+
+// What: highest applied stream sequence per record key.
+// Why: a redelivered older message must not undo a newer one.
+// From: Issue #772
+#[derive(Default)]
+struct AppliedSequences(HashMap<(String, String, String), u64>);
+
+impl AppliedSequences {
+    // What: true if seq is not newer than the applied one.
+    // Why: an exact redelivery is skipped, not re-patched.
+    fn is_stale(&self, key: &(String, String, String), seq: u64) -> bool {
+        self.0.get(key).is_some_and(|applied| seq <= *applied)
+    }
+
+    // What: remember seq as applied; never lowers a mark.
+    // Why: out-of-order applies within a batch stay safe.
+    fn record(&mut self, key: (String, String, String), seq: u64) {
+        let entry = self.0.entry(key).or_insert(0);
+        *entry = (*entry).max(seq);
+    }
+}
+
+// What: how one message is settled.
+// Why: record failures stop the batch, flush failures do not.
+// From: Issue #653
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Ack,
+    // What: Nak with delay, keep consuming the batch.
+    // Why: a flush has no ordering hazard.
+    Retry,
+    // What: Nak with delay, stop the batch.
+    // Why: a later same-key update must not overtake this one.
+    RetryStop,
+}
+
+// What: apply one record message to PowerDNS.
+// Why: 4xx and malformed messages ack; 5xx and network retry.
+async fn apply_record(
+    ctx: &Ctx,
+    msg: &jetstream::Message,
+    applied: &mut AppliedSequences,
+) -> Outcome {
+    let record: DnsRecord = match serde_json::from_slice(&msg.payload) {
+        Ok(record) => record,
         Err(e) => {
-            zone_snapshots::kgs_log(
-                "FATAL",
-                &format!("failed to decode zone {zone} export for snapshotting: {e}"),
+            eprintln!("Acking unrecoverable DNS record parse failure (malformed message): {e}");
+            return Outcome::Ack;
+        }
+    };
+    let body = match patch_body(&record) {
+        Ok(body) => body,
+        Err(e) => {
+            eprintln!("Acking unrecoverable DNS record parse failure ({e})");
+            return Outcome::Ack;
+        }
+    };
+    let key = record_key(&record);
+    let seq = msg.info().ok().map(|info| info.stream_sequence);
+    if let Some(seq) = seq
+        && applied.is_stale(&key, seq)
+    {
+        println!(
+            "Skipping stale DNS record redelivery: zone={} name={} type={} seq={seq}",
+            record.zone, record.name, record.record_type
+        );
+        return Outcome::Ack;
+    }
+    // What: the lock covers the PATCH itself.
+    // Why: a rollback must not diff data this write replaces.
+    let sent = {
+        let _guard = ctx.lock.lock().await;
+        ctx.pdns(
+            Method::PATCH,
+            &zone_url(&record.zone),
+            Some(body.to_string()),
+        )
+        .await
+    };
+    let (zone, name, kind) = (&record.zone, &record.name, &record.record_type);
+    let status = match sent {
+        Ok(response) => response.status(),
+        Err(e) => {
+            eprintln!("Error sending PATCH request (will retry): {e}");
+            return Outcome::RetryStop;
+        }
+    };
+    if status.is_client_error() {
+        eprintln!(
+            "PDNS client error (acking, won't retry): {status} for zone={zone} name={name} type={kind}"
+        );
+        return Outcome::Ack;
+    }
+    if !status.is_success() {
+        eprintln!(
+            "PDNS server error (will retry): {status} for zone={zone} name={name} type={kind}"
+        );
+        return Outcome::RetryStop;
+    }
+    println!(
+        "Updated DNS record: zone={zone} name={name} type={kind} action={}",
+        record.action
+    );
+    // What: tell secondaries to pull the zone.
+    // Why: AXFR consumers would stay stale until a later check.
+    let notify = ctx
+        .pdns(Method::PUT, &format!("{}/notify", zone_url(zone)), None)
+        .await;
+    if !notify.is_ok_and(|response| response.status().is_success()) {
+        eprintln!("PDNS notify failed (will retry) for zone={zone}");
+        return Outcome::RetryStop;
+    }
+    snapshot_zone(ctx, &canonical_zone(zone)).await;
+    // What: mark applied only after PowerDNS confirmed.
+    // Why: a failed write must not make its retry look stale.
+    if let Some(seq) = seq {
+        applied.record(key, seq);
+    }
+    Outcome::Ack
+}
+
+// What: true if the rrset equals the expected content.
+// Why: proves AXFR landed here before a flush is trusted.
+// From: Issue #1095
+fn rrset_matches_expected(
+    found: Option<&Value>,
+    expected: Option<&[String]>,
+    record_type: &str,
+    expected_ttl: Option<i32>,
+) -> bool {
+    let (Some(rrset), Some(expected)) = (found, expected) else {
+        return found.is_none() && expected.is_none();
+    };
+    // What: a TTL-only replace keeps content, changes the TTL.
+    // Why: content alone would confirm before AXFR lands it.
+    if let Some(ttl) = expected_ttl
+        && rrset.get("ttl").and_then(Value::as_i64) != Some(i64::from(ttl))
+    {
+        return false;
+    }
+    // What: A and AAAA text is parsed and printed again.
+    // Why: AXFR rebuilds canonical RDATA, the ui may not.
+    let canon = |content: &str| {
+        match record_type {
+            "AAAA" => content.parse::<std::net::Ipv6Addr>().map(|a| a.to_string()),
+            "A" => content.parse::<std::net::Ipv4Addr>().map(|a| a.to_string()),
+            _ => Ok(content.to_string()),
+        }
+        .unwrap_or_else(|_| content.to_string())
+    };
+    let contents = rrset.get("records").and_then(Value::as_array);
+    let mut actual: Vec<String> = contents
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.get("content")?.as_str())
+        .map(canon)
+        .collect();
+    let mut wanted: Vec<String> = expected.iter().map(|s| canon(s)).collect();
+    actual.sort();
+    wanted.sort();
+    actual == wanted
+}
+
+// What: flush the local recursor cache for one domain.
+// Why: confirm the zone first, else a stale answer re-caches.
+// From: Issue #1095
+async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
+    let request = serde_json::from_slice::<FlushRequest>(&msg.payload).ok();
+    let domain = request.as_ref().map_or(".", |r| r.domain.as_str());
+    if let Some(request) = &request
+        && let (Some(zone), Some(kind)) = (&request.zone, &request.record_type)
+    {
+        let mut confirmed = false;
+        for _ in 0..CONFIRM_TRIES {
+            // What: a failed zone read counts as unconfirmed.
+            // Why: "absent" must not be guessed from an error.
+            let rrsets = ctx.zone_rrsets(zone).await.ok();
+            let expected = request.expected_content.as_deref();
+            let key = (domain.to_string(), kind.clone());
+            confirmed = rrsets.is_some_and(|rrsets| {
+                let found = rrsets
+                    .as_array()
+                    .and_then(|l| l.iter().find(|r| rrset_key(r) == key));
+                rrset_matches_expected(found, expected, kind, request.expected_ttl)
+            });
+            if confirmed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if !confirmed {
+            let delivered = msg.info().map_or(0, |info| info.delivered);
+            if delivered < CONFIRM_MAX_DELIVERIES {
+                println!(
+                    "Deferring recursor flush for {domain} ({kind}): zone not yet confirmed (delivery {delivered})"
+                );
+                return Outcome::Retry;
+            }
+            eprintln!(
+                "Recursor flush for {domain} ({kind}): still unconfirmed after {delivered} deliveries; flushing anyway"
+            );
+        }
+    }
+    let url = format!("{PDNS_REC}/cache/flush?domain={domain}");
+    match ctx.pdns(Method::PUT, &url, None).await {
+        Ok(response) if response.status().is_success() => {
+            println!("Flushed PDNS cache");
+            Outcome::Ack
+        }
+        Ok(response) => {
+            eprintln!("PDNS flush error: {}", response.status());
+            Outcome::Retry
+        }
+        Err(e) => {
+            eprintln!("Error sending flush request: {e}");
+            Outcome::Retry
+        }
+    }
+}
+
+// What: route one message by subject.
+// Why: heartbeats and unknown subjects are acked and ignored.
+async fn handle(
+    ctx: &Ctx,
+    msg: &jetstream::Message,
+    applied: &mut AppliedSequences,
+    record_writes: bool,
+) -> Outcome {
+    let subject = msg.subject.as_str();
+    if subject == NATS_SUBJECT_RECORD {
+        if !record_writes {
+            println!(
+                "Acking DNS record message without a local PowerDNS write: NATS_RECORD_WRITES is off"
+            );
+            return Outcome::Ack;
+        }
+        return apply_record(ctx, msg, applied).await;
+    }
+    if subject == NATS_SUBJECT_FLUSH {
+        return apply_flush(ctx, msg).await;
+    }
+    if !subject.starts_with("lancache.dns.heartbeat") {
+        println!("Unknown subject: {subject}");
+    }
+    Outcome::Ack
+}
+
+// What: constant-time check of the X-API-Key header.
+// Why: the listener changes zone data; network is no trust.
+fn authorized(headers: &HeaderMap, key: &str) -> bool {
+    let sent = headers.get("X-API-Key").and_then(|v| v.to_str().ok());
+    sent.is_some_and(|sent| ct_eq(sent, key))
+}
+
+// What: a JSON error reply.
+// Why: the ui reads the error field of every failure.
+fn failure(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<Value>) {
+    (status, Json(json!({"error": message.into()})))
+}
+
+// What: GET /snapshots: ids and times per managed zone.
+// Why: the ui lists them newest first for the operator.
+async fn list_snapshots(State(ctx): State<Arc<Ctx>>, headers: HeaderMap) -> Response {
+    if !authorized(&headers, &ctx.api_key) {
+        return failure(StatusCode::UNAUTHORIZED, "missing or invalid X-API-Key").into_response();
+    }
+    let mut zones = HashMap::new();
+    for zone in rollback_zones() {
+        let ids = ctx.store(&zone).ids().unwrap_or_default();
+        let list: Vec<Value> = ids
+            .into_iter()
+            .rev()
+            .map(|id| json!({"created_unix": snapshot_created_unix(&id).unwrap_or(0), "id": id}))
+            .collect();
+        zones.insert(zone, list);
+    }
+    Json(json!({"zones": zones})).into_response()
+}
+
+// What: body of POST /rollback.
+// Why: the ui sends the zone and the chosen snapshot id.
+#[derive(Deserialize)]
+struct RollbackRequest {
+    zone: String,
+    snapshot_id: String,
+}
+
+// What: pdnsutil check-zone with a 10 second limit.
+// Why: a wedged auth database must not hang the rollback.
+async fn check_zone(store: &SnapshotStore, zone: &str) -> bool {
+    let status = tokio::process::Command::new("pdnsutil")
+        .args(["--config-dir=/etc/pdns/auth", "check-zone", zone])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .status();
+    match tokio::time::timeout(Duration::from_secs(10), status).await {
+        Ok(Ok(status)) => status.success(),
+        Ok(Err(e)) => {
+            store.log(
+                "WARNING",
+                &format!("failed to run pdnsutil check-zone for {zone}: {e}"),
+            );
+            false
+        }
+        Err(_) => {
+            store.log(
+                "WARNING",
+                &format!("pdnsutil check-zone for {zone} timed out, killed"),
+            );
+            false
+        }
+    }
+}
+
+// What: republish a rollback patch for the lan zone.
+// Why: other nodes converge now, not at the next tick.
+async fn publish_patch(js: &jetstream::Context, patch: &Value) {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    for rrset in patch["rrsets"].as_array().into_iter().flatten() {
+        let delete = rrset.get("changetype").and_then(Value::as_str) == Some("DELETE");
+        let action = if delete { "delete" } else { "replace" };
+        if let Some(record) = rrset_record(action, "lan", rrset) {
+            let name = record.name.trim_end_matches('.');
+            // What: a fresh message id per republish.
+            // Why: the dedup window would absorb a repeated id.
+            let msg_id = format!("rollback-{stamp}-{name}-{}", record.record_type);
+            publish_record(js, &msg_id, &record).await;
+        }
+    }
+}
+
+// What: roll one zone back to a stored snapshot.
+// Why: operator-selected, never automatic; see the design doc.
+// From: Issue #628
+async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusCode, Json<Value>)> {
+    let zone = canonical_zone(&request.zone);
+    if !is_rollback_zone(&zone) {
+        let message = format!("zone {zone} is not managed by this rollback mechanism");
+        return Err(failure(StatusCode::BAD_REQUEST, message));
+    }
+    let store = ctx.store(&zone);
+    let ids = store.ids().map_err(|e| {
+        failure(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to list known-good snapshots: {e}"),
+        )
+    })?;
+    // What: only listed ids are read.
+    // Why: the id list is the path-traversal guard.
+    if !ids.contains(&request.snapshot_id) {
+        return Err(failure(
+            StatusCode::NOT_FOUND,
+            "unknown or no-longer-available snapshot",
+        ));
+    }
+    let snapshot = store.read(&request.snapshot_id).map_err(|e| {
+        store.log(
+            "REJECT",
+            &format!(
+                "rejected known-good snapshot {} for zone {zone}: unreadable ({e})",
+                request.snapshot_id
+            ),
+        );
+        failure(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("stored snapshot could not be read: {e}"),
+        )
+    })?;
+    let snapshot = data_rrsets(&snapshot);
+
+    // What: the lock is taken before the current state is read.
+    // Why: else a live write lands between diff and apply.
+    let _guard = ctx.lock.lock().await;
+    let current = ctx.zone_rrsets(&zone).await.map_err(|e| {
+        failure(
+            StatusCode::BAD_GATEWAY,
+            format!("failed to fetch current zone state: {e}"),
+        )
+    })?;
+    let patch = rollback_patch(&snapshot, &data_rrsets(&current));
+    let patch_len = patch["rrsets"].as_array().map_or(0, Vec::len);
+    if patch_len > 0 {
+        let sent = ctx
+            .pdns(Method::PATCH, &zone_url(&zone), Some(patch.to_string()))
+            .await;
+        let rejected = match sent {
+            Ok(response) if response.status().is_success() => None,
+            Ok(response) => Some(format!(
+                "PowerDNS rejected rollback PATCH: {}",
+                response.status()
+            )),
+            Err(e) => Some(format!("failed to apply rollback PATCH: {e}")),
+        };
+        if let Some(message) = rejected {
+            store.log(
+                "REJECT",
+                &format!(
+                    "rollback PATCH for zone {zone} snapshot {} failed: {message}",
+                    request.snapshot_id
+                ),
+            );
+            return Err(failure(StatusCode::BAD_GATEWAY, message));
+        }
+    }
+    store.log("SELECT", &format!("selected known-good snapshot {} for rollback of zone {zone} ({patch_len} rrset(s) changed)", request.snapshot_id));
+
+    let zone_check_passed = check_zone(&store, &zone).await;
+    if !zone_check_passed {
+        store.log("REJECT", &format!("post-rollback pdnsutil check-zone failed for zone {zone}; the PATCH is applied and NOT reverted, inspect the zone by hand"));
+    }
+    let changed = changed_names(&patch);
+
+    // What: records go out before any flush.
+    // Why: else a flushed cache refills from the stale answer.
+    let republished = zone == "lan." && patch_len > 0;
+    if republished {
+        publish_patch(&ctx.js, &patch).await;
+    }
+
+    // What: all flushes run at once, 3 s each.
+    // Why: serial acks would exceed the ui's 10 s client timeout.
+    let logger = &store;
+    let flushes = changed.iter().map(|name| async move {
+        let payload = json!({"domain": name}).to_string().into_bytes();
+        let sent = publish(&ctx.js, NATS_SUBJECT_FLUSH, None, payload);
+        match tokio::time::timeout(Duration::from_secs(3), sent).await {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => {
+                logger.log(
+                    "WARNING",
+                    &format!("cache-flush for {name} was not acknowledged by JetStream: {e}"),
+                );
+                Some(name.clone())
+            }
+            Err(_) => {
+                logger.log(
+                    "WARNING",
+                    &format!("cache-flush for {name} did not complete within 3s"),
+                );
+                Some(name.clone())
+            }
+        }
+    });
+    let flush_failed_names: Vec<String> = join_all(flushes).await.into_iter().flatten().collect();
+
+    if patch_len > 0
+        && !matches_latest(&store, &snapshot)
+        && let Err(e) = store.create(&snapshot, ctx.keep_n)
+    {
+        store.log(
+            "FATAL",
+            &format!("failed to record post-rollback known-good snapshot for zone {zone}: {e}"),
+        );
+    }
+    Ok(json!({
+        "applied": true,
+        "changed_names": changed,
+        "zone_check_passed": zone_check_passed,
+        "republished_to_nats": republished,
+        "flush_ok": flush_failed_names.is_empty(),
+        "flush_failed_names": flush_failed_names,
+    }))
+}
+
+// What: POST /rollback: auth first, then the body.
+// Why: an unauthenticated caller must not reach a parse error.
+async fn rollback_handler(
+    State(ctx): State<Arc<Ctx>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if !authorized(&headers, &ctx.api_key) {
+        return failure(StatusCode::UNAUTHORIZED, "missing or invalid X-API-Key").into_response();
+    }
+    let request: RollbackRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(e) => {
+            return failure(
+                StatusCode::BAD_REQUEST,
+                format!("invalid request body: {e}"),
+            )
+            .into_response();
+        }
+    };
+    match rollback(&ctx, request).await {
+        Ok(body) => Json(body).into_response(),
+        Err(reply) => reply.into_response(),
+    }
+}
+
+// What: the rollback listener on DNS_ROLLBACK_LISTEN_ADDR.
+// Why: 0.0.0.0, since the ui is in another network namespace.
+async fn serve_rollback(ctx: Arc<Ctx>, addr: String) {
+    let router = Router::new()
+        .route("/snapshots", get(list_snapshots))
+        .route("/rollback", post(rollback_handler))
+        .with_state(ctx);
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!(
+                "[known-good-snapshot][dns][FATAL] zone-rollback listener failed to bind {addr}: {e}"
             );
             return;
         }
     };
-    let rrsets = body
-        .get("rrsets")
-        .cloned()
-        .unwrap_or_else(|| Value::Array(Vec::new()));
-    let data_rrsets = zone_snapshots::filter_data_rrsets(&rrsets);
-
-    let _guard = ctx.lock.lock().await;
-    let root = zone_snapshots::zone_snapshot_root(&ctx.base_dir, zone);
-    if zone_snapshots::matches_latest_snapshot(&root, &data_rrsets) {
-        return;
-    }
-    if let Err(e) = zone_snapshots::create_snapshot(&root, ctx.keep_n, &data_rrsets) {
-        zone_snapshots::kgs_log("FATAL", &format!("failed to snapshot zone {zone}: {e}"));
+    println!("Zone-rollback listener ready on {addr}");
+    if let Err(e) = axum::serve(listener, router).await {
+        eprintln!("[known-good-snapshot][dns][FATAL] zone-rollback listener stopped: {e}");
     }
 }
 
-/// Periodic export-and-diff trigger (docs/known-good-config-snapshots.md's
-/// "Trigger point"): Kea's DDNS updates (`services/dhcp/kea-dhcp-ddns.conf`)
-/// go straight to PowerDNS over TSIG-authenticated DNS UPDATE, bypassing
-/// NATS and this process's own consumer loop entirely, for every zone in
-/// `zone_snapshots::ROLLBACK_ZONES` (not just `local.lan.`/the reverse
-/// zones -- `lan.` also receives direct DDNS writes for DHCP lease
-/// hostnames, alongside its separate NATS-applied path for Admin-UI-driven
-/// writes). Runs unconditionally on every node (unlike the existing
-/// `reconciler()`, which only runs when `NATS_RECONCILER=1`): this watcher
-/// is not about NATS record replication, it is about noticing PowerDNS
-/// state that changed without ever going through this process at all, which
-/// is true on every node identically. Mirrors the existing `reconciler`'s
-/// 60-second interval shape (main.rs:442-541 in the pre-#628 layout).
-async fn zone_snapshot_watcher(
-    http_client: Arc<Client>,
-    pdns_api_key: String,
-    ctx: SnapshotContext,
-) {
-    let mut interval = tokio::time::interval(Duration::from_secs(60));
-    loop {
-        interval.tick().await;
-        for &zone in zone_snapshots::ROLLBACK_ZONES {
-            maybe_snapshot_zone(zone, &http_client, &pdns_api_key, &ctx).await;
-        }
-    }
+// What: next retry delay, doubled, at most 30 seconds.
+// Why: a failing fetch must neither spin nor wait forever.
+fn grow(backoff: u64) -> u64 {
+    (backoff * 2).min(30)
+}
+
+// What: a required env value, or exit with a message.
+// Why: an empty key or consumer name would start unsafely.
+fn required(name: &str) -> String {
+    env_opt(name).unwrap_or_else(|| {
+        eprintln!("{name} environment variable is required");
+        std::process::exit(1);
+    })
 }
 
 #[tokio::main]
 async fn main() {
-    let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://nats:4222".to_string());
-    let nats_user = env::var("NATS_USER").ok().filter(|user| !user.is_empty());
-    let nats_password = env::var("NATS_PASSWORD")
-        .ok()
-        .filter(|password| !password.is_empty());
-    let nats_token = env::var("NATS_TOKEN")
-        .ok()
-        .filter(|token| !token.is_empty());
-    let nats_consumer = match env::var("NATS_CONSUMER") {
-        Ok(val) => val,
-        Err(_) => {
-            eprintln!("NATS_CONSUMER environment variable is required");
-            std::process::exit(1);
-        }
+    let nats_url = env_opt("NATS_URL").unwrap_or_else(|| "nats://nats:4222".to_string());
+    let consumer_name = required("NATS_CONSUMER");
+    let api_key = required("PDNS_API_KEY");
+    // What: only a clear "off" disables record writes.
+    // Why: an unknown spelling must keep replication running.
+    let record_writes = env_opt("NATS_RECORD_WRITES").is_none_or(|v| parse_bool(&v) != Some(false));
+    let reconcile = env_opt("NATS_RECONCILER").is_some_and(|v| parse_bool(&v) == Some(true));
+    let keep = Uint {
+        name: "KEEP_KNOWN_GOOD_CONFIGS",
+        default: 3,
+        min: 1,
+        max: u32::MAX.into(),
+        below: OutOfRange::Default,
+        above: OutOfRange::Default,
     };
+    let (keep_n, warning) = keep.parse(env_opt("KEEP_KNOWN_GOOD_CONFIGS").as_deref());
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
+    let snapshot_dir = env_opt("DNS_CONFIG_SNAPSHOT_DIR")
+        .unwrap_or_else(|| "/var/lib/lancache-dns/config-snapshots".to_string());
+    let rollback_addr =
+        env_opt("DNS_ROLLBACK_LISTEN_ADDR").unwrap_or_else(|| "0.0.0.0:8083".to_string());
 
-    let pdns_api_key = match env::var("PDNS_API_KEY") {
-        Ok(val) => val,
-        Err(_) => {
-            eprintln!("PDNS_API_KEY environment variable is required");
-            std::process::exit(1);
-        }
-    };
-    let record_write_mode = RecordWriteMode::from_env();
-
-    let nats_reconciler = env::var("NATS_RECONCILER").ok();
-
-    // Connect to NATS with reconnect settings
-    let mut opts = async_nats::ConnectOptions::new()
+    let mut options = async_nats::ConnectOptions::new()
         .max_reconnects(None)
         .reconnect_delay_callback(|_| Duration::from_secs(3));
-
-    if let (Some(user), Some(password)) = (nats_user, nats_password) {
-        opts = opts.user_and_password(user, password);
-    } else if let Some(token) = nats_token {
-        opts = opts.token(token);
+    if let (Some(user), Some(password)) = (env_opt("NATS_USER"), env_opt("NATS_PASSWORD")) {
+        options = options.user_and_password(user, password);
+    } else if let Some(token) = env_opt("NATS_TOKEN") {
+        options = options.token(token);
     }
+    let client = options.connect(&nats_url).await.unwrap_or_else(|e| {
+        eprintln!("Failed to connect to NATS: {e}");
+        std::process::exit(1);
+    });
+    println!("Connected to NATS at {nats_url}");
+    let js = jetstream::new(client);
 
-    let client = match opts.connect(&nats_url).await {
-        Ok(conn) => conn,
-        Err(e) => {
-            eprintln!("Failed to connect to NATS: {}", e);
-            std::process::exit(1);
-        }
+    let stream_config = jetstream::stream::Config {
+        name: NATS_STREAM_DNS.to_string(),
+        subjects: vec![NATS_SUBJECT_DNS.to_string()],
+        storage: jetstream::stream::StorageType::File,
+        max_age: Duration::from_secs(7 * 24 * 60 * 60),
+        discard: jetstream::stream::DiscardPolicy::Old,
+        ..Default::default()
     };
-
-    println!("Connected to NATS at {}", nats_url);
-
-    // Get JetStream context
-    let js = async_nats::jetstream::new(client);
-
-    // Create or update stream LANCACHE_DNS
-    let _stream = match js.get_stream("LANCACHE_DNS").await {
-        Ok(s) => s,
-        Err(_) => {
-            match js
-                .create_stream(jetstream::stream::Config {
-                    name: "LANCACHE_DNS".to_string(),
-                    subjects: vec!["lancache.dns.>".to_string()],
-                    storage: jetstream::stream::StorageType::File,
-                    max_age: Duration::from_secs(7 * 24 * 60 * 60),
-                    discard: jetstream::stream::DiscardPolicy::Old,
-                    ..Default::default()
-                })
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("Failed to create stream: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        }
-    };
-
-    println!("Stream LANCACHE_DNS ready");
-
-    // Create or get durable pull consumer
-    let consumer: async_nats::jetstream::consumer::Consumer<
-        async_nats::jetstream::consumer::pull::Config,
-    > = match _stream
-        .get_or_create_consumer(
-            &nats_consumer,
-            async_nats::jetstream::consumer::pull::Config {
-                durable_name: Some(nats_consumer.clone()),
-                filter_subject: "lancache.dns.>".to_string(),
-                ..Default::default()
-            },
-        )
+    let stream = js
+        .get_or_create_stream(stream_config)
         .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to create consumer: {}", e);
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to create stream: {e}");
             std::process::exit(1);
-        }
+        });
+    println!("Stream {NATS_STREAM_DNS} ready");
+    let consumer_config = jetstream::consumer::pull::Config {
+        durable_name: Some(consumer_name.clone()),
+        filter_subject: NATS_SUBJECT_DNS.to_string(),
+        ..Default::default()
     };
-
-    println!("Created durable subscriber: {}", nats_consumer);
-
-    // Create shared HTTP client (#68 fix)
-    let http_client = Arc::new(
-        Client::builder()
-            .timeout(Duration::from_secs(10))
-            .pool_idle_timeout(Duration::from_secs(90))
-            .tcp_keepalive(Duration::from_secs(60))
-            .build()
-            .expect("failed to build shared HTTP client"),
-    );
-
-    // Start reconciler if enabled
-    if nats_reconciler.as_deref() == Some("1") {
-        let js_clone = js.clone();
-        let pdns_api_key_clone = pdns_api_key.clone();
-        let client_clone = http_client.clone();
-        tokio::spawn(async move {
-            reconciler(js_clone, &pdns_api_key_clone, client_clone).await;
+    let consumer = stream
+        .get_or_create_consumer(&consumer_name, consumer_config)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to create consumer: {e}");
+            std::process::exit(1);
         });
+    println!("Created durable subscriber: {consumer_name}");
+
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(60))
+        .build()
+        .expect("failed to build shared HTTP client");
+    let ctx = Arc::new(Ctx {
+        http,
+        api_key,
+        snapshot_dir: PathBuf::from(snapshot_dir),
+        keep_n: keep_n as u32,
+        lock: tokio::sync::Mutex::new(()),
+        js,
+    });
+    if reconcile {
+        tokio::spawn(reconciler(ctx.clone()));
     }
+    tokio::spawn(snapshot_watcher(ctx.clone()));
+    tokio::spawn(serve_rollback(ctx.clone(), rollback_addr));
 
-    // ── Zone/record known-good snapshots (#628) ─────────────────────────
-    // DNS_CONFIG_SNAPSHOT_DIR/KEEP_KNOWN_GOOD_CONFIGS are the same env vars
-    // entrypoint.sh already uses for the recursor.conf/pdns.conf static-file
-    // adapter (#615); this adapter nests its own snapshots under a `zones/`
-    // subdirectory of the same base dir (see zone_snapshots::zone_snapshot_root)
-    // so both live in the same persistent volume without colliding.
-    let dns_config_snapshot_dir = env::var("DNS_CONFIG_SNAPSHOT_DIR")
-        .unwrap_or_else(|_| "/var/lib/lancache-dns/config-snapshots".to_string());
-    let keep_known_good_configs = env_u32_clamped("KEEP_KNOWN_GOOD_CONFIGS", 3);
-    let snapshot_ctx = SnapshotContext {
-        base_dir: PathBuf::from(dns_config_snapshot_dir),
-        keep_n: keep_known_good_configs,
-        lock: Arc::new(AsyncMutex::new(())),
-    };
-
-    // Periodic export-and-diff trigger: runs on every node unconditionally
-    // (not gated by NATS_RECONCILER, see zone_snapshot_watcher's doc
-    // comment -- it is not about NATS replication, it is about noticing
-    // Kea's direct-to-PowerDNS DDNS writes, which happen on every node).
-    {
-        let client_clone = http_client.clone();
-        let pdns_api_key_clone = pdns_api_key.clone();
-        let ctx_clone = snapshot_ctx.clone();
-        tokio::spawn(async move {
-            zone_snapshot_watcher(client_clone, pdns_api_key_clone, ctx_clone).await;
-        });
-    }
-
-    // Local rollback listener: a new port (default 0.0.0.0:8083, see
-    // rollback_listener.rs's module doc comment for why 0.0.0.0 and not
-    // 127.0.0.1) the Admin UI calls to list zone snapshots and trigger an
-    // operator-selected rollback.
-    {
-        let rollback_listen_addr =
-            env::var("DNS_ROLLBACK_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8083".to_string());
-        let rollback_state = Arc::new(rollback_listener::RollbackState {
-            http_client: http_client.clone(),
-            pdns_api_key: pdns_api_key.clone(),
-            snapshot_base_dir: snapshot_ctx.base_dir.clone(),
-            keep_n: snapshot_ctx.keep_n,
-            snapshot_lock: snapshot_ctx.lock.clone(),
-            js: js.clone(),
-        });
-        tokio::spawn(async move {
-            rollback_listener::serve(&rollback_listen_addr, rollback_state).await;
-        });
-    }
-
-    // Main fetch loop with exponential backoff (#87 fix)
-    let mut backoff_secs = 1u64;
-    const MAX_BACKOFF_SECS: u64 = 30;
-
-    // Per-key applied-sequence watermarks for the cross-batch stale-write guard
-    // (issue #772; see `AppliedSequences`). Owned solely by this fetch loop,
-    // which is a single task processing messages sequentially with `.await`, so
-    // no locking is needed -- the snapshot watcher, reconciler, and rollback
-    // listener only ever publish records, they never apply them here.
-    let mut applied_seqs = AppliedSequences::default();
-
+    // What: this loop alone applies records.
+    // Why: so `applied` needs no lock.
+    let mut applied = AppliedSequences::default();
+    let mut backoff = 1u64;
     loop {
-        let fetch_result = consumer
+        let fetched = consumer
             .fetch()
             .max_messages(10)
             .expires(Duration::from_secs(5))
             .messages()
             .await;
-
-        match fetch_result {
-            Ok(mut messages) => {
-                let mut had_stream_error = false;
-                // What: fetch() no_wait returns immediately.
-                // Why: must use explicit backoff to avoid busy-spin.
-                // From: PR #738
-                let mut had_retryable_batch_stop = false;
-
-                while let Some(msg_result) = messages.next().await {
-                    match msg_result {
-                        Ok(msg) => {
-                            let result = handle_message(
-                                &msg,
-                                &pdns_api_key,
-                                &http_client,
-                                &snapshot_ctx,
-                                &mut applied_seqs,
-                                record_write_mode,
-                            )
-                            .await;
-                            // #653 fix: what to do with THIS message is decided by the pure
-                            // `decide_msg` (unit-tested below via `simulate_batch_processing`)
-                            // so the ack/nak decision itself -- not just this call site -- is
-                            // covered by tests without a real NATS connection.
-                            match decide_msg(result) {
-                                MsgDecision::AckAndContinue => {
-                                    if let Err(e) = msg.ack().await {
-                                        eprintln!("Error acknowledging message: {}", e);
-                                    }
-                                }
-                                MsgDecision::NakAndContinue => {
-                                    // What: flush failures continue batch.
-                                    // Why: flush has no ordering hazard.
-                                    // From: PR #738
-                                    if let Err(e) = msg
-                                        .ack_with(jetstream::AckKind::Nak(Some(
-                                            Duration::from_millis(100),
-                                        )))
-                                        .await
-                                    {
-                                        eprintln!("Error naking message: {}", e);
-                                    }
-                                }
-                                MsgDecision::NakAndStopBatch => {
-                                    // What: NAK and stop batch on failure.
-                                    // Why: prevent stale-write batch race.
-                                    // From: PR #738 | Issue #653
-                                    if let Err(e) = msg
-                                        .ack_with(jetstream::AckKind::Nak(Some(
-                                            Duration::from_millis(100),
-                                        )))
-                                        .await
-                                    {
-                                        eprintln!("Error naking message: {}", e);
-                                    }
-                                    had_retryable_batch_stop = true;
-                                    break;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Message error: {}", e);
-                            had_stream_error = true;
-                            // Break out of the inner loop so the outer backoff fires.
-                            // Continuing to call messages.next() on a broken stream
-                            // would busy-spin inside the Ok(messages) arm.
-                            break;
-                        }
-                    }
-                }
-
-                // What: apply backoff on stream/batch errors.
-                // Why: prevents busy-spin in fetch() no_wait.
-                // From: PR #738
-                if had_stream_error {
-                    eprintln!(
-                        "Stream error(s); backing off for {} second(s)",
-                        backoff_secs
-                    );
-                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-                    backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
-                } else if had_retryable_batch_stop {
-                    eprintln!(
-                        "Retryable PDNS failure stopped batch processing; backing off for {} second(s)",
-                        backoff_secs
-                    );
-                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-                    backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
-                } else {
-                    backoff_secs = 1;
-                }
-            }
-            // #87 fix: exponential backoff on fetch error to prevent busy-spin loop
+        let mut messages = match fetched {
+            Ok(messages) => messages,
             Err(e) => {
-                eprintln!(
-                    "Fetch error: {} (backing off for {} second(s))",
-                    e, backoff_secs
-                );
-                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-
-                // Double backoff for next iteration, capped at MAX_BACKOFF_SECS
-                backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
+                eprintln!("Fetch error: {e} (backing off for {backoff} second(s))");
+                tokio::time::sleep(Duration::from_secs(backoff)).await;
+                backoff = grow(backoff);
+                continue;
             }
-        }
-    }
-}
-
-/// What: retryable outcomes (ordering hazard vs. none).
-/// Why: flush safe to continue; records need batch stop.
-/// From: PR #738 | Issue #653
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HandleOutcome {
-    /// Succeeded (or was an unrecoverable/malformed message already logged
-    /// and intentionally not retried): ack it.
-    Ack,
-    /// Retryable failure with no batch-ordering hazard (currently: flush):
-    /// nak with delay, but keep consuming the rest of the batch.
-    RetryContinueBatch,
-    /// Retryable failure that COULD create a stale-record-clobber race if
-    /// later same-batch messages were allowed to proceed (currently: record
-    /// updates): nak with delay and stop consuming the rest of the batch.
-    RetryStopBatch,
-}
-
-/// What to do with a single fetched message, given its `HandleOutcome`. This
-/// is the actual decision `main`'s batch loop acts on (see the
-/// `match decide_msg(result)` call site) -- pulled out as a pure function so
-/// the #653 fix ("on a retryable record-update failure, nak this message AND
-/// stop consuming the rest of the batch") is unit-testable without a real
-/// NATS connection, and so a test exercising it is exercising the same logic
-/// the production loop runs, not a reimplementation of it.
-#[derive(Debug, PartialEq, Eq)]
-enum MsgDecision {
-    /// `handle_message` succeeded: ack this message, keep consuming the batch.
-    AckAndContinue,
-    /// `handle_message` returned a retryable failure with no ordering
-    /// hazard (e.g. a flush failure): nak this message (with delay) but
-    /// keep consuming the rest of the batch.
-    NakAndContinue,
-    /// `handle_message` returned a retryable (5xx/network) record-update
-    /// failure: nak this message (with delay) and stop consuming the rest
-    /// of the batch, so no later same-batch message (e.g. a newer update
-    /// for the same zone/name/type) can get acked ahead of this pending
-    /// retry.
-    NakAndStopBatch,
-}
-
-fn decide_msg(outcome: HandleOutcome) -> MsgDecision {
-    match outcome {
-        HandleOutcome::Ack => MsgDecision::AckAndContinue,
-        HandleOutcome::RetryContinueBatch => MsgDecision::NakAndContinue,
-        HandleOutcome::RetryStopBatch => MsgDecision::NakAndStopBatch,
-    }
-}
-
-/// Identifies one DNS record for stale-write detection: normalized
-/// `(zone, name, type)`. Normalization is deliberate: the different publishers
-/// of the same logical record -- the Admin UI routes
-/// (`services/ui/src/routes/domains.rs`, which sends `zone: "lan"` and a name
-/// like `host.lan.`), this binary's own `reconciler`, and `rollback_listener`'s
-/// post-rollback re-publish -- do not all emit byte-identical `zone`/`name`
-/// strings (e.g. `host.lan.` vs `host.lan`, differing case). A non-normalized
-/// key would silently treat those as different records and fail to guard the
-/// very clobber this exists to prevent (issue #772). DNS names are
-/// case-insensitive and a trailing dot is not a semantic distinction, so
-/// stripping the trailing dot and lowercasing can never merge two genuinely
-/// different records.
-type RecordKey = (String, String, String);
-
-fn record_key(zone: &str, name: &str, record_type: &str) -> RecordKey {
-    (
-        zone.trim_end_matches('.').to_ascii_lowercase(),
-        name.trim_end_matches('.').to_ascii_lowercase(),
-        record_type.to_ascii_uppercase(),
-    )
-}
-
-/// What: per-key highest applied JetStream sequence.
-/// Why: prevent stale reapplication across batches.
-/// From: Issue #772
-#[derive(Default)]
-struct AppliedSequences {
-    last_applied: HashMap<RecordKey, u64>,
-}
-
-impl AppliedSequences {
-    /// Returns true if applying `seq` for `key` would be a stale write -- a
-    /// sequence `>=` it has already been applied for the same key. `>=` (not
-    /// `>`) so an exact redelivery of the already-applied message is skipped
-    /// idempotently instead of needlessly re-PATCHed.
-    fn is_stale(&self, key: &RecordKey, seq: u64) -> bool {
-        matches!(self.last_applied.get(key), Some(&applied) if seq <= applied)
-    }
-
-    /// Records that `seq` was successfully applied for `key`. `max` guards
-    /// against ever lowering an existing watermark (e.g. if two messages for
-    /// the same key were applied out of publish order within one batch).
-    fn record_applied(&mut self, key: RecordKey, seq: u64) {
-        let entry = self.last_applied.entry(key).or_insert(0);
-        *entry = (*entry).max(seq);
-    }
-}
-
-async fn handle_message(
-    msg: &async_nats::jetstream::Message,
-    pdns_api_key: &str,
-    http_client: &Arc<Client>,
-    snapshot_ctx: &SnapshotContext,
-    applied_seqs: &mut AppliedSequences,
-    record_write_mode: RecordWriteMode,
-) -> HandleOutcome {
-    let subject = msg.subject.as_ref();
-
-    if subject.starts_with("lancache.dns.heartbeat") {
-        // Ignore heartbeat messages
-        return HandleOutcome::Ack;
-    }
-
-    if subject == "lancache.dns.record" {
-        if !record_write_mode.allows_writes() {
-            println!(
-                "Acking DNS record message without local PowerDNS write because NATS_RECORD_WRITES is disabled on this node"
-            );
-            return HandleOutcome::Ack;
-        }
-        return if handle_dns_record(msg, pdns_api_key, http_client, snapshot_ctx, applied_seqs)
-            .await
-        {
-            HandleOutcome::Ack
-        } else {
-            // Record updates carry the stale-clobber ordering hazard -- stop
-            // the batch (see `HandleOutcome::RetryStopBatch` doc comment).
-            HandleOutcome::RetryStopBatch
         };
-    }
-
-    if subject == "lancache.dns.flush" {
-        return if handle_dns_flush(msg, pdns_api_key, http_client).await {
-            HandleOutcome::Ack
-        } else {
-            // Flush has no ordering hazard -- retry without blocking the
-            // rest of the batch (see `HandleOutcome::RetryContinueBatch`).
-            HandleOutcome::RetryContinueBatch
-        };
-    }
-
-    println!("Unknown subject: {}", subject);
-    HandleOutcome::Ack
-}
-
-// What: construct PowerDNS API URL stripping trailing zone dot.
-// Why: prevents silent 404 when zone sent with trailing dot.
-fn dns_record_patch_url(zone: &str) -> String {
-    format!(
-        "http://127.0.0.1:8081/api/v1/servers/localhost/zones/{}",
-        zone_snapshots::zone_api_id(zone)
-    )
-}
-
-// dns_zone_notify_url <zone>
-// PowerDNS exposes zone notification as a separate HTTP endpoint from the
-// RRset PATCH itself. Keeping the URL construction alongside
-// dns_record_patch_url() makes the primary-side "write then notify
-// secondaries" contract explicit and unit-testable under the same
-// zone-id-normalization rules.
-fn dns_zone_notify_url(zone: &str) -> String {
-    format!(
-        "http://127.0.0.1:8081/api/v1/servers/localhost/zones/{}/notify",
-        zone_snapshots::zone_api_id(zone)
-    )
-}
-
-async fn notify_zone_secondaries(
-    zone: &str,
-    pdns_api_key: &str,
-    http_client: &Arc<Client>,
-) -> bool {
-    let url = dns_zone_notify_url(zone);
-    match http_client
-        .put(&url)
-        .header("X-API-Key", pdns_api_key)
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => true,
-        Ok(resp) => {
-            eprintln!(
-                "PDNS notify error (will retry): {} {} for zone={}",
-                resp.status(),
-                resp.status().canonical_reason().unwrap_or(""),
-                zone
-            );
-            false
-        }
-        Err(e) => {
-            eprintln!(
-                "Error sending PDNS notify request (will retry) for zone={}: {}",
-                zone, e
-            );
-            false
-        }
-    }
-}
-
-async fn handle_dns_record(
-    msg: &async_nats::jetstream::Message,
-    pdns_api_key: &str,
-    http_client: &Arc<Client>,
-    snapshot_ctx: &SnapshotContext,
-    applied_seqs: &mut AppliedSequences,
-) -> bool {
-    let record: DNSRecord = match serde_json::from_slice(&msg.payload) {
-        Ok(r) => r,
-        Err(e) => {
-            // P2 fix: Ack unrecoverable parse failures (e.g., malformed delete events missing ttl/records).
-            // Nacking would cause infinite retry of malformed messages.
-            eprintln!(
-                "Acking unrecoverable DNS record parse failure (malformed message): {}",
-                e
-            );
-            return true;
-        }
-    };
-
-    let update = match dns_record_to_zone_update(&record) {
-        Ok(u) => u,
-        Err(e) => {
-            // P2 fix: Ack unrecoverable parse failures (unknown action).
-            // Nacking would cause infinite retry of malformed messages.
-            eprintln!("Acking unrecoverable DNS record parse failure ({})", e);
-            return true;
-        }
-    };
-
-    let payload = match serde_json::to_string(&update) {
-        Ok(p) => p,
-        Err(e) => {
-            // P2 fix: Ack unrecoverable serialization failures.
-            // Nacking would cause infinite retry of malformed messages.
-            eprintln!(
-                "Acking unrecoverable DNS record serialization failure (malformed message): {}",
-                e
-            );
-            return true;
-        }
-    };
-
-    // Cross-batch stale-write guard (issue #772; see `AppliedSequences`). A
-    // redelivered older-sequence update for a key whose newer sequence was
-    // already applied must be dropped, not replayed over the newer state.
-    let key = record_key(&record.zone, &record.name, &record.record_type);
-    let stream_seq = match msg.info() {
-        Ok(info) => Some(info.stream_sequence),
-        Err(e) => {
-            // A consumer-fetched JetStream message always carries a $JS.ACK
-            // reply subject, so info() should never fail on this path. If it
-            // somehow does we cannot order this write, so apply it unguarded
-            // (no worse than the pre-#772 behavior) rather than silently
-            // dropping what may be a real update.
-            eprintln!(
-                "Could not read JetStream message info for stale-write guard (applying unguarded): {e}"
-            );
-            None
-        }
-    };
-    if let Some(seq) = stream_seq
-        && applied_seqs.is_stale(&key, seq)
-    {
-        // Ack (return true): the message has been superseded by a newer
-        // sequence for the same key, so there is nothing left to apply and
-        // JetStream must stop redelivering it.
-        println!(
-            "Skipping stale DNS record redelivery: zone={} name={} type={} seq={} (a newer sequence for this key was already applied)",
-            record.zone, record.name, record.record_type, seq
-        );
-        return true;
-    }
-
-    let url = dns_record_patch_url(&record.zone);
-
-    // What: hold snapshot lock across PATCH to prevent TOCTOU.
-    // Why: rollback TOCTOU: computed from stale, applies over live write.
-    let result = {
-        let _snapshot_guard = snapshot_ctx.lock.lock().await;
-
-        // #68 fix: use shared client instead of creating new one
-        http_client
-            .patch(&url)
-            .header("X-API-Key", pdns_api_key)
-            .header("Content-Type", "application/json")
-            .body(payload)
-            .send()
-            .await
-    };
-
-    match result {
-        Ok(resp) => {
-            if resp.status().is_success() {
-                println!(
-                    "Updated DNS record: zone={} name={} type={} action={}",
-                    record.zone, record.name, record.record_type, record.action
-                );
-                // Local primary writes are not enough on their own for the
-                // dns-ssl/remote-secondary topology: AXFR consumers need a
-                // real zone notify so they pull the new state promptly
-                // instead of staying stale until some later periodic check.
-                if !notify_zone_secondaries(&record.zone, pdns_api_key, http_client).await {
-                    return false;
+        let mut failed = false;
+        while let Some(next) = messages.next().await {
+            let msg = match next {
+                Ok(msg) => msg,
+                Err(e) => {
+                    eprintln!("Message error: {e}");
+                    failed = true;
+                    break;
                 }
-                // Post-PATCH known-good snapshot trigger (#628). Validated
-                // by construction: this only runs after PowerDNS's own
-                // PATCH already returned 2xx, so there is no separate
-                // pre-snapshot check to run (docs/known-good-config-
-                // snapshots.md's "Validation" point). Best-effort/non-fatal
-                // by design -- `maybe_snapshot_zone` only ever logs on
-                // failure, never changes this function's return value, so a
-                // snapshot-volume outage can never turn an already-applied
-                // write into a NATS redelivery loop.
-                maybe_snapshot_zone(
-                    &zone_snapshots::canonical_zone(&record.zone),
-                    http_client,
-                    pdns_api_key,
-                    snapshot_ctx,
-                )
-                .await;
-                // Record the applied watermark only after PowerDNS confirmed
-                // the write (2xx). A failed/retried write must not advance the
-                // watermark, or a later legitimate retry of this same message
-                // would be wrongly skipped as stale (issue #772).
-                if let Some(seq) = stream_seq {
-                    applied_seqs.record_applied(key, seq);
+            };
+            let outcome = handle(&ctx, &msg, &mut applied, record_writes).await;
+            let settled = match outcome {
+                Outcome::Ack => msg.ack().await,
+                _ => {
+                    msg.ack_with(jetstream::AckKind::Nak(Some(Duration::from_millis(100))))
+                        .await
                 }
-                true
-            } else if resp.status().is_client_error() {
-                // P2 fix: Ack on 4xx client errors (invalid data, permanent failure).
-                // Retrying won't help; the record data itself is malformed.
-                eprintln!(
-                    "PDNS client error (acking, won't retry): {} {} for zone={} name={} type={}",
-                    resp.status(),
-                    resp.status().canonical_reason().unwrap_or(""),
-                    record.zone,
-                    record.name,
-                    record.record_type
-                );
-                true
-            } else {
-                // 5xx or other server errors: retry by returning false
-                eprintln!(
-                    "PDNS server error (will retry): {} {} for zone={} name={} type={}",
-                    resp.status(),
-                    resp.status().canonical_reason().unwrap_or(""),
-                    record.zone,
-                    record.name,
-                    record.record_type
-                );
-                false
+            };
+            if let Err(e) = settled {
+                eprintln!("Error settling message: {e}");
             }
-        }
-        Err(e) => {
-            // P2 fix: Network errors are retriable (transient), return false to retry
-            eprintln!("Error sending PATCH request (will retry): {}", e);
-            false
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct FlushRequest {
-    domain: String,
-    #[serde(default)]
-    zone: Option<String>,
-    #[serde(default)]
-    record_type: Option<String>,
-    #[serde(default)]
-    expected_content: Option<Vec<String>>,
-    #[serde(default)]
-    expected_ttl: Option<i32>,
-}
-
-// What: bounds in-process wait before Nak-redelivery.
-// Why: a longer sleep holds the message, risks ack_wait.
-// From: Issue #1095
-const FLUSH_CONFIRM_FAST_PATH_ATTEMPTS: u32 = 3;
-const FLUSH_CONFIRM_FAST_PATH_DELAY: Duration = Duration::from_millis(100);
-// What: caps delivery attempts before flushing unconfirmed.
-// Why: bounds an unlimited max_deliver retry loop.
-// From: Issue #1095
-const FLUSH_CONFIRM_MAX_DELIVERIES: i64 = 100;
-
-// What: pure comparison, no network -- unit-testable in isolation.
-// Why: separates the HTTP fetch from the state-matching logic.
-// From: Issue #1095
-fn rrset_matches_expected(
-    found: Option<&nats_subscriber::RRset>,
-    expected_content: Option<&[String]>,
-    record_type: &str,
-    expected_ttl: Option<i32>,
-) -> bool {
-    match (found, expected_content) {
-        (None, None) => true,
-        (Some(_), None) | (None, Some(_)) => false,
-        (Some(rrset), Some(expected)) => {
-            // A TTL-only replace keeps identical content but a new TTL; the
-            // content check alone would confirm before AXFR propagates it.
-            if let Some(exp_ttl) = expected_ttl
-                && rrset.ttl != Some(exp_ttl)
-            {
-                return false;
-            }
-            let mut actual: Vec<String> = rrset
-                .records
-                .as_ref()
-                .map(|recs| {
-                    recs.iter()
-                        .filter_map(|r| r.get("content").and_then(|c| c.as_str()))
-                        .map(|s| canonicalize_record_content(s, record_type))
-                        .collect()
-                })
-                .unwrap_or_default();
-            actual.sort();
-            let mut expected_sorted: Vec<String> = expected
-                .iter()
-                .map(|s| canonicalize_record_content(s, record_type))
-                .collect();
-            expected_sorted.sort();
-            actual == expected_sorted
-        }
-    }
-}
-
-// What: canonicalizes record content for presentation-insensitive compare.
-// Why: AXFR rebuilds canonical RDATA; the UI may publish noncanonical text.
-// From: Issue #1095
-fn canonicalize_record_content(content: &str, record_type: &str) -> String {
-    match record_type {
-        "AAAA" => content
-            .parse::<std::net::Ipv6Addr>()
-            .map(|addr| addr.to_string())
-            .unwrap_or_else(|_| content.to_string()),
-        "A" => content
-            .parse::<std::net::Ipv4Addr>()
-            .map(|addr| addr.to_string())
-            .unwrap_or_else(|_| content.to_string()),
-        _ => content.to_string(),
-    }
-}
-
-// What: checks if the local zone matches the expected state.
-// Why: proves AXFR landed here before trusting a flush.
-// From: Issue #1095
-async fn local_rrset_matches_expected(
-    zone: &str,
-    name: &str,
-    record_type: &str,
-    expected_content: Option<&[String]>,
-    expected_ttl: Option<i32>,
-    pdns_api_key: &str,
-    http_client: &Client,
-) -> bool {
-    let url = dns_record_patch_url(zone);
-    let resp = match http_client
-        .get(&url)
-        .header("X-API-Key", pdns_api_key)
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => r,
-        _ => return false,
-    };
-    let zone_info: ZoneInfo = match resp.json().await {
-        Ok(zi) => zi,
-        Err(_) => return false,
-    };
-    let found = zone_info
-        .rrsets
-        .iter()
-        .find(|rr| rr.name == name && rr.record_type == record_type);
-    rrset_matches_expected(found, expected_content, record_type, expected_ttl)
-}
-
-async fn handle_dns_flush(
-    msg: &async_nats::jetstream::Message,
-    pdns_api_key: &str,
-    http_client: &Arc<Client>,
-) -> bool {
-    // PowerDNS Recursor's cache/flush endpoint requires a `domain` query
-    // parameter and only flushes an exact name match, not a subtree --
-    // confirmed live while building issue #400's integration test:
-    // `?type=packet` (the previous call) always returned 422 Unprocessable
-    // Entity, and even `?domain=.` (root) leaves a just-changed leaf record
-    // resolving from cache until its TTL naturally expires. The publisher
-    // (services/ui/src/routes/domains.rs's flush_recursor_cache) now sends
-    // the exact domain that changed; fall back to "." only for messages
-    // published by a publisher version that predates the `domain` field, or
-    // from any other future publisher that doesn't include one.
-    let req = serde_json::from_slice::<FlushRequest>(&msg.payload).ok();
-    let domain = req
-        .as_ref()
-        .map(|r| r.domain.clone())
-        .unwrap_or_else(|| ".".to_string());
-
-    // What: confirms the local zone before flushing, when known.
-    // Why: else a lost AXFR race re-caches the stale answer at TTL.
-    // From: Issue #1095
-    if let Some(req) = req.as_ref()
-        && let (Some(zone), Some(record_type)) = (req.zone.as_deref(), req.record_type.as_deref())
-    {
-        let mut confirmed = false;
-        for _ in 0..FLUSH_CONFIRM_FAST_PATH_ATTEMPTS {
-            if local_rrset_matches_expected(
-                zone,
-                &domain,
-                record_type,
-                req.expected_content.as_deref(),
-                req.expected_ttl,
-                pdns_api_key,
-                http_client,
-            )
-            .await
-            {
-                confirmed = true;
+            if outcome == Outcome::RetryStop {
+                failed = true;
                 break;
             }
-            tokio::time::sleep(FLUSH_CONFIRM_FAST_PATH_DELAY).await;
         }
-
-        if !confirmed {
-            let delivered = msg.info().map(|info| info.delivered).unwrap_or(0);
-            if delivered < FLUSH_CONFIRM_MAX_DELIVERIES {
-                println!(
-                    "Deferring recursor flush for {domain} ({record_type}): local zone not yet confirmed (delivery {delivered}); retrying via redelivery"
-                );
-                return false;
-            }
+        if failed {
             eprintln!(
-                "Recursor flush for {domain} ({record_type}): local zone still unconfirmed after {delivered} deliveries; flushing anyway"
+                "Stream error or retryable PDNS failure; backing off for {backoff} second(s)"
             );
-        }
-    }
-
-    let url = format!("http://127.0.0.1:8082/api/v1/servers/localhost/cache/flush?domain={domain}");
-
-    // #68 fix: use shared client instead of creating new one
-    let result = http_client
-        .put(&url)
-        .header("X-API-Key", pdns_api_key)
-        .send()
-        .await;
-
-    match result {
-        Ok(resp) => {
-            if resp.status().is_success() {
-                println!("Flushed PDNS cache");
-                true
-            } else {
-                eprintln!(
-                    "PDNS flush error: {} {}",
-                    resp.status(),
-                    resp.status().canonical_reason().unwrap_or("")
-                );
-                false
-            }
-        }
-        Err(e) => {
-            eprintln!("Error sending flush request: {}", e);
-            false
-        }
-    }
-}
-
-async fn reconciler(
-    js: async_nats::jetstream::Context,
-    pdns_api_key: &str,
-    http_client: Arc<Client>,
-) {
-    let mut interval = tokio::time::interval(Duration::from_secs(60));
-
-    loop {
-        interval.tick().await;
-
-        let url = "http://127.0.0.1:8081/api/v1/servers/localhost/zones/lan";
-
-        // #68 fix: use shared client instead of creating new one
-        let result = http_client
-            .get(url)
-            .header("X-API-Key", pdns_api_key)
-            .send()
-            .await;
-
-        match result {
-            Ok(resp) => {
-                if !resp.status().is_success() {
-                    eprintln!(
-                        "Reconciler: PDNS error: {} {}",
-                        resp.status(),
-                        resp.status().canonical_reason().unwrap_or("")
-                    );
-                    continue;
-                }
-
-                let zone_info: ZoneInfo = match resp.json().await {
-                    Ok(zi) => zi,
-                    Err(e) => {
-                        eprintln!("Reconciler: error decoding zone info: {}", e);
-                        continue;
-                    }
-                };
-
-                for rrset in &zone_info.rrsets {
-                    if rrset.record_type == "SOA" || rrset.record_type == "NS" {
-                        continue;
-                    }
-
-                    let msg_id = format!(
-                        "reconcile-lan-{}-{}",
-                        rrset.name.trim_end_matches('.'),
-                        rrset.record_type
-                    );
-
-                    // #628: factored into nats_publish::publish_dns_record
-                    // so this reconciler and rollback_listener.rs's
-                    // post-rollback re-publish (the design doc's answer for
-                    // how a lan. rollback interacts with existing NATS
-                    // replication) write the exact same message shape.
-                    let ttl = rrset.ttl.map(|t| json!(t)).unwrap_or(Value::Null);
-                    let records = rrset
-                        .records
-                        .clone()
-                        .map(|r| json!(r))
-                        .unwrap_or(Value::Null);
-                    nats_publish::publish_dns_record(
-                        &js,
-                        &msg_id,
-                        nats_publish::DnsRecordMessage {
-                            action: "replace",
-                            zone: "lan",
-                            name: &rrset.name,
-                            record_type: &rrset.record_type,
-                            ttl,
-                            records,
-                        },
-                    )
-                    .await;
-                }
-
-                println!(
-                    "Reconciler: published {} records",
-                    zone_info
-                        .rrsets
-                        .iter()
-                        .filter(|r| r.record_type != "SOA" && r.record_type != "NS")
-                        .count()
-                );
-            }
-            Err(e) => {
-                eprintln!("Reconciler: error fetching zone: {}", e);
-            }
+            tokio::time::sleep(Duration::from_secs(backoff)).await;
+            backoff = grow(backoff);
+        } else {
+            backoff = 1;
         }
     }
 }
@@ -1134,648 +1015,204 @@ async fn reconciler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    // RRset is only constructed/inspected directly in these tests --
-    // production code in this file only names DNSRecord/ZoneInfo/
-    // dns_record_to_zone_update directly (see the crate-level import above),
-    // so it needs its own explicit import here to avoid an unused-import
-    // warning on the non-test build. ZoneUpdate itself is only ever used via
-    // type inference in these tests (never named directly), so it does not
-    // need the same treatment.
-    use nats_subscriber::RRset;
 
-    // What: old publishers omit the new fields entirely.
-    // Why: proves the flush still fires unconditionally then.
-    // From: Issue #1095
-    #[test]
-    fn flush_request_deserializes_without_the_new_optional_fields() {
-        let req: FlushRequest = serde_json::from_str(r#"{"domain": "host.lan."}"#).unwrap();
-        assert_eq!(req.domain, "host.lan.");
-        assert_eq!(req.zone, None);
-        assert_eq!(req.record_type, None);
-        assert_eq!(req.expected_content, None);
+    // What: build one rrset with a single record content.
+    // Why: most tests need a small literal rrset.
+    fn rrset(name: &str, kind: &str, ttl: i64, contents: &[&str]) -> Value {
+        let records: Vec<Value> = contents
+            .iter()
+            .map(|c| json!({"content": c, "disabled": false}))
+            .collect();
+        json!({"name": name, "type": kind, "ttl": ttl, "records": records})
     }
 
-    // What: FlushRequest deserializes the new optional fields.
-    // Why: zone/record_type/expected_content drive confirmation.
-    // From: Issue #1095
-    #[test]
-    fn flush_request_deserializes_with_the_new_optional_fields() {
-        let req: FlushRequest = serde_json::from_str(
-            r#"{"domain": "host.lan.", "zone": "lan", "record_type": "A", "expected_content": ["10.0.0.5"]}"#,
-        )
-        .unwrap();
-        assert_eq!(req.zone, Some("lan".to_string()));
-        assert_eq!(req.record_type, Some("A".to_string()));
-        assert_eq!(req.expected_content, Some(vec!["10.0.0.5".to_string()]));
-    }
-
-    fn rrset_with_content(content: &str) -> RRset {
-        let mut record = HashMap::new();
-        record.insert("content".to_string(), json!(content));
-        RRset {
+    // What: a replace message with the given TTL and records.
+    // Why: patch_body tests share the same record literal.
+    fn message(
+        action: &str,
+        ttl: Option<i32>,
+        records: Option<Vec<HashMap<String, Value>>>,
+    ) -> DnsRecord {
+        DnsRecord {
+            action: action.to_string(),
+            zone: "lan".to_string(),
             name: "host.lan.".to_string(),
             record_type: "A".to_string(),
-            ttl: Some(60),
-            changetype: None,
-            records: Some(vec![record]),
+            ttl,
+            records,
         }
     }
 
-    // What: absent name/type and "expect absent" is a match.
-    // Why: the delete case -- AXFR already caught up locally.
+    // What: actions map to PATCH bodies; unknown ones fail.
+    // Why: an unknown action must not reach PowerDNS.
+    #[test]
+    fn patch_body_covers_replace_delete_and_unknown() {
+        let content = HashMap::from([("content".to_string(), json!("10.0.0.5"))]);
+        let replace = patch_body(&message("replace", Some(3600), Some(vec![content]))).unwrap();
+        let first = &replace["rrsets"][0];
+        assert_eq!(first["changetype"], "REPLACE");
+        assert_eq!(
+            (
+                first["ttl"].as_i64(),
+                first["records"][0]["content"].as_str()
+            ),
+            (Some(3600), Some("10.0.0.5"))
+        );
+        let defaulted = patch_body(&message("replace", None, Some(vec![]))).unwrap();
+        assert_eq!(defaulted["rrsets"][0]["ttl"], 300);
+        assert_eq!(defaulted["rrsets"][0]["records"], json!([]));
+        let bare = patch_body(&message("replace", Some(60), None)).unwrap();
+        assert!(bare["rrsets"][0].get("records").is_none());
+        let delete = patch_body(&message("delete", None, None)).unwrap();
+        assert_eq!(delete["rrsets"][0]["changetype"], "DELETE");
+        assert!(delete["rrsets"][0].get("ttl").is_none());
+        assert!(patch_body(&message("bogus", None, None)).is_err());
+    }
+
+    // What: keys fold case and dots; marks never go down.
+    // Why: one record from different publishers must collide.
+    // From: Issue #772
+    #[test]
+    fn applied_sequences_guard_stale_redeliveries_per_key() {
+        let mut upper = message("replace", None, None);
+        upper.zone = "LAN.".to_string();
+        upper.name = "Host.LAN".to_string();
+        upper.record_type = "a".to_string();
+        let key = record_key(&upper);
+        assert_eq!(
+            key,
+            ("lan".to_string(), "host.lan".to_string(), "A".to_string())
+        );
+        assert_eq!(key, record_key(&message("replace", None, None)));
+        let mut applied = AppliedSequences::default();
+        assert!(!applied.is_stale(&key, 5));
+        applied.record(key.clone(), 10);
+        applied.record(key.clone(), 7);
+        assert!(applied.is_stale(&key, 7) && applied.is_stale(&key, 10));
+        assert!(!applied.is_stale(&key, 11));
+        let other = ("lan".to_string(), "other.lan".to_string(), "A".to_string());
+        assert!(!applied.is_stale(&other, 1));
+    }
+
+    // What: flush confirmation compares content, order-free.
+    // Why: a stale or early zone must not allow the flush.
     // From: Issue #1095
     #[test]
-    fn rrset_matches_expected_when_absent_and_absence_expected() {
+    fn expected_content_confirmation_rules() {
+        let found = rrset("host.lan.", "A", 60, &["10.0.0.6", "10.0.0.5"]);
+        let both = ["10.0.0.5".to_string(), "10.0.0.6".to_string()];
         assert!(rrset_matches_expected(None, None, "A", None));
-    }
-
-    // What: a still-present RRset fails an expected-absent check.
-    // Why: delete not yet propagated -- must not flush early.
-    // From: Issue #1095
-    #[test]
-    fn rrset_matches_expected_rejects_still_present_when_absence_expected() {
-        let rrset = rrset_with_content("10.0.0.5");
-        assert!(!rrset_matches_expected(Some(&rrset), None, "A", None));
-    }
-
-    // What: an absent RRset fails an expected-content check.
-    // Why: add not yet propagated -- must not flush early.
-    // From: Issue #1095
-    #[test]
-    fn rrset_matches_expected_rejects_still_absent_when_content_expected() {
-        let expected = vec!["10.0.0.5".to_string()];
-        assert!(!rrset_matches_expected(None, Some(&expected), "A", None));
-    }
-
-    // What: matching content passes regardless of record order.
-    // Why: AXFR may reorder records; order must not matter.
-    // From: Issue #1095
-    #[test]
-    fn rrset_matches_expected_accepts_matching_content_regardless_of_order() {
-        let mut record_a = HashMap::new();
-        record_a.insert("content".to_string(), json!("10.0.0.5"));
-        let mut record_b = HashMap::new();
-        record_b.insert("content".to_string(), json!("10.0.0.6"));
-        let rrset = RRset {
-            name: "host.lan.".to_string(),
-            record_type: "A".to_string(),
-            ttl: Some(60),
-            changetype: None,
-            records: Some(vec![record_b, record_a]),
-        };
-        let expected = vec!["10.0.0.5".to_string(), "10.0.0.6".to_string()];
-        assert!(rrset_matches_expected(
-            Some(&rrset),
-            Some(&expected),
-            "A",
-            None
-        ));
-    }
-
-    // What: stale content fails an expected-content check.
-    // Why: an old RRset must not satisfy new-content confirmation.
-    // From: Issue #1095
-    #[test]
-    fn rrset_matches_expected_rejects_stale_content() {
-        let rrset = rrset_with_content("10.0.0.5");
-        let expected = vec!["10.0.0.9".to_string()];
+        assert!(!rrset_matches_expected(Some(&found), None, "A", None));
+        assert!(!rrset_matches_expected(None, Some(&both), "A", None));
+        assert!(rrset_matches_expected(Some(&found), Some(&both), "A", None));
         assert!(!rrset_matches_expected(
-            Some(&rrset),
-            Some(&expected),
+            Some(&found),
+            Some(&both[..1]),
             "A",
             None
         ));
-    }
-
-    // What: a noncanonical AAAA matches PowerDNS's canonical AXFR form.
-    // Why: expanded/uppercase IPv6 must not fail flush confirmation.
-    // From: Issue #1095
-    #[test]
-    fn rrset_matches_expected_canonicalizes_noncanonical_aaaa() {
-        let mut record = HashMap::new();
-        record.insert("content".to_string(), json!("2001:db8::1"));
-        let rrset = RRset {
-            name: "host.lan.".to_string(),
-            record_type: "AAAA".to_string(),
-            ttl: Some(60),
-            changetype: None,
-            records: Some(vec![record]),
-        };
-        let expected = vec!["2001:0DB8:0000:0000:0000:0000:0000:0001".to_string()];
         assert!(rrset_matches_expected(
-            Some(&rrset),
-            Some(&expected),
-            "AAAA",
-            None
-        ));
-    }
-
-    // What: identical content with a different TTL fails confirmation.
-    // Why: a TTL-only replace must wait for AXFR, not flush early.
-    // From: Issue #1095
-    #[test]
-    fn rrset_matches_expected_rejects_ttl_only_change() {
-        let rrset = rrset_with_content("10.0.0.5");
-        let expected = vec!["10.0.0.5".to_string()];
-        assert!(!rrset_matches_expected(
-            Some(&rrset),
-            Some(&expected),
-            "A",
-            Some(300)
-        ));
-        assert!(rrset_matches_expected(
-            Some(&rrset),
-            Some(&expected),
+            Some(&found),
+            Some(&both),
             "A",
             Some(60)
         ));
+        assert!(!rrset_matches_expected(
+            Some(&found),
+            Some(&both),
+            "A",
+            Some(300)
+        ));
+        let v6 = rrset("host.lan.", "AAAA", 60, &["2001:db8::1"]);
+        let long = ["2001:0DB8:0000:0000:0000:0000:0000:0001".to_string()];
+        assert!(rrset_matches_expected(Some(&v6), Some(&long), "AAAA", None));
     }
 
-    // What: PATCH URL always strips zone trailing dot.
-    // Why: prevents silent 404 when zone sent with trailing dot.
+    // What: SOA/NS drop out; reordered zones compare equal.
+    // Why: rollback must never touch SOA/NS or see false drift.
     #[test]
-    fn dns_record_patch_url_strips_trailing_dot_regardless_of_input_form() {
+    fn data_rrsets_and_canonical_order() {
+        let all = json!([
+            rrset("lan.", "SOA", 3600, &["x"]),
+            rrset("lan.", "NS", 3600, &["ns."]),
+            rrset("b.lan.", "A", 60, &["2", "1"]),
+            rrset("a.lan.", "A", 60, &["1"]),
+        ]);
+        let data = data_rrsets(&all);
+        assert_eq!(data.as_array().map(Vec::len), Some(2));
+        let reordered = json!([
+            rrset("a.lan.", "A", 60, &["1"]),
+            rrset("b.lan.", "A", 60, &["1", "2"])
+        ]);
+        assert_eq!(canonicalize(&data), canonicalize(&reordered));
+        assert_ne!(
+            canonicalize(&data),
+            canonicalize(&json!([rrset("a.lan.", "A", 60, &["9"])]))
+        );
+    }
+
+    // What: rollback replaces changed, deletes extras only.
+    // Why: unchanged rrsets stay out; flush names stay precise.
+    #[test]
+    fn rollback_patch_replaces_deletes_and_omits_unchanged() {
+        let snapshot = json!([
+            rrset("same.lan.", "A", 60, &["1"]),
+            rrset("old.lan.", "A", 60, &["1"]),
+            rrset("gone.lan.", "A", 60, &["3"])
+        ]);
+        let current = json!([
+            rrset("same.lan.", "A", 60, &["1"]),
+            rrset("old.lan.", "A", 60, &["2"]),
+            rrset("new.lan.", "A", 60, &["4"])
+        ]);
+        let patch = rollback_patch(&snapshot, &current);
+        let list = patch["rrsets"].as_array().unwrap();
+        let find = |name: &str| list.iter().find(|r| r["name"] == name);
+        assert_eq!(list.len(), 3);
+        assert!(find("same.lan.").is_none());
+        assert_eq!(find("old.lan.").unwrap()["changetype"], "REPLACE");
+        assert_eq!(find("gone.lan.").unwrap()["changetype"], "REPLACE");
+        assert_eq!(find("new.lan.").unwrap()["changetype"], "DELETE");
+        assert!(find("new.lan.").unwrap().get("records").is_none());
+        let restore = rollback_patch(&snapshot, &json!([]));
+        assert_eq!(restore["rrsets"].as_array().map(Vec::len), Some(3));
+    }
+
+    // What: changed names are unique, in first-seen order.
+    // Why: each name is flushed from the caches once.
+    #[test]
+    fn changed_names_deduplicates_in_order() {
+        let patch = json!({"rrsets": [
+            {"name": "a.lan.", "type": "A"}, {"name": "b.lan.", "type": "A"}, {"name": "a.lan.", "type": "AAAA"}]});
+        assert_eq!(changed_names(&patch), ["a.lan.", "b.lan."]);
+        assert!(changed_names(&json!({})).is_empty());
+    }
+
+    // What: an rrset becomes a record message, if it has a key.
+    // Why: reconciler and rollback republish through this.
+    #[test]
+    fn rrset_record_requires_name_and_type() {
+        let record = rrset_record("replace", "lan", &rrset("h.lan.", "A", 60, &["1"])).unwrap();
         assert_eq!(
-            dns_record_patch_url("lan"),
-            "http://127.0.0.1:8081/api/v1/servers/localhost/zones/lan"
+            (record.ttl, record.records.map(|r| r.len())),
+            (Some(60), Some(1))
         );
-        assert_eq!(
-            dns_record_patch_url("lan."),
-            "http://127.0.0.1:8081/api/v1/servers/localhost/zones/lan"
-        );
-        assert_eq!(
-            dns_record_patch_url("1.168.192.in-addr.arpa."),
-            "http://127.0.0.1:8081/api/v1/servers/localhost/zones/1.168.192.in-addr.arpa"
-        );
+        let delete = rrset_record(
+            "delete",
+            "lan",
+            &json!({"name": "h.lan.", "type": "A", "changetype": "DELETE"}),
+        )
+        .unwrap();
+        assert!(delete.ttl.is_none() && delete.records.is_none());
+        assert!(rrset_record("replace", "lan", &json!({"name": "h.lan."})).is_none());
     }
 
+    // What: the retry delay doubles up to 30 seconds.
+    // Why: bounded backoff keeps a dead stream from spinning.
     #[test]
-    fn dns_zone_notify_url_strips_trailing_dot_regardless_of_input_form() {
-        assert_eq!(
-            dns_zone_notify_url("lan"),
-            "http://127.0.0.1:8081/api/v1/servers/localhost/zones/lan/notify"
-        );
-        assert_eq!(
-            dns_zone_notify_url("lan."),
-            "http://127.0.0.1:8081/api/v1/servers/localhost/zones/lan/notify"
-        );
-        assert_eq!(
-            dns_zone_notify_url("1.168.192.in-addr.arpa."),
-            "http://127.0.0.1:8081/api/v1/servers/localhost/zones/1.168.192.in-addr.arpa/notify"
-        );
-    }
-
-    // PDNS GET /zones/{zone} responses do NOT include changetype.
-    // This test guards against regressions where changetype becomes
-    // a required field again, which would break the reconciler.
-    #[test]
-    fn zone_info_deserializes_without_changetype() {
-        let json = r#"{
-            "rrsets": [
-                {"name": "test.lan.", "type": "A", "ttl": 300, "records": [{"content": "192.168.1.1", "disabled": false}]},
-                {"name": "test.lan.", "type": "SOA", "ttl": 3600, "records": [{"content": "ns1.lan. admin.lan. 1 3600 900 604800 60", "disabled": false}]}
-            ]
-        }"#;
-        let info: ZoneInfo =
-            serde_json::from_str(json).expect("ZoneInfo must deserialize without changetype");
-        assert_eq!(info.rrsets.len(), 2);
-        assert!(info.rrsets[0].changetype.is_none());
-    }
-
-    // PDNS PATCH requests require changetype to be present and serialized.
-    #[test]
-    fn rrset_serializes_with_changetype_for_patch() {
-        let rrset = RRset {
-            name: "host.lan.".to_string(),
-            record_type: "A".to_string(),
-            ttl: Some(300),
-            changetype: Some("REPLACE".to_string()),
-            records: Some(vec![]),
-        };
-        let json = serde_json::to_string(&rrset).expect("RRset must serialize");
-        assert!(json.contains("changetype"));
-        assert!(json.contains("REPLACE"));
-    }
-
-    // skip_serializing_if must suppress changetype when None (GET context).
-    #[test]
-    fn rrset_omits_changetype_when_none() {
-        let rrset = RRset {
-            name: "host.lan.".to_string(),
-            record_type: "A".to_string(),
-            ttl: Some(300),
-            changetype: None,
-            records: None,
-        };
-        let json = serde_json::to_string(&rrset).expect("RRset must serialize");
-        assert!(!json.contains("changetype"));
-    }
-
-    // DNSRecord must parse the exact message format published by NATS subscribers,
-    // ensuring the serialization contract with record-publishing callers remains stable.
-    #[test]
-    fn dns_record_deserializes_from_nats_message() {
-        let json = r#"{
-            "action": "replace",
-            "zone": "lan",
-            "name": "myhost.lan.",
-            "type": "A",
-            "ttl": 60,
-            "records": [{"content": "10.0.0.5", "disabled": false}]
-        }"#;
-        let record: DNSRecord = serde_json::from_str(json).expect("DNSRecord must deserialize");
-        assert_eq!(record.action, "replace");
-        assert_eq!(record.zone, "lan");
-    }
-
-    // What: covers the secondary-node NATS record-write gate.
-    // Why: AXFR is authoritative for secondaries; gate controls writes
-    #[test]
-    fn record_write_mode_disables_common_false_spellings() {
-        for value in ["0", "false", "no", "off"] {
-            assert_eq!(
-                RecordWriteMode::from_env_value(value),
-                RecordWriteMode::Disabled
-            );
-        }
-        assert_eq!(
-            RecordWriteMode::from_env_value("1"),
-            RecordWriteMode::Enabled
-        );
-        assert_eq!(
-            RecordWriteMode::from_env_value("unexpected"),
-            RecordWriteMode::Enabled
-        );
-    }
-
-    // REPLACE action must produce a zone update with all required fields (ttl, records)
-    // to ensure PowerDNS can apply the record update correctly.
-    #[test]
-    fn dns_record_to_zone_update_replace_action() {
-        let record = DNSRecord {
-            action: "replace".to_string(),
-            zone: "lan".to_string(),
-            name: "test.lan.".to_string(),
-            record_type: "A".to_string(),
-            ttl: Some(300),
-            records: Some(vec![{
-                let mut m = HashMap::new();
-                m.insert("content".to_string(), json!("10.0.0.1"));
-                m.insert("disabled".to_string(), json!(false));
-                m
-            }]),
-        };
-
-        let update = dns_record_to_zone_update(&record).expect("must succeed");
-        assert_eq!(update.rrsets.len(), 1);
-        let rrset = &update.rrsets[0];
-        assert_eq!(rrset.name, "test.lan.");
-        assert_eq!(rrset.record_type, "A");
-        assert_eq!(rrset.changetype, Some("REPLACE".to_string()));
-        assert_eq!(rrset.ttl, Some(300));
-        assert!(rrset.records.is_some());
-    }
-
-    // DELETE action must clear ttl and records fields as required by PowerDNS API;
-    // sending them would violate the API contract and potentially cause silent failures.
-    #[test]
-    fn dns_record_to_zone_update_delete_action() {
-        let record = DNSRecord {
-            action: "delete".to_string(),
-            zone: "lan".to_string(),
-            name: "old.lan.".to_string(),
-            record_type: "CNAME".to_string(),
-            ttl: Some(600),
-            records: Some(vec![]),
-        };
-
-        let update = dns_record_to_zone_update(&record).expect("must succeed");
-        assert_eq!(update.rrsets.len(), 1);
-        let rrset = &update.rrsets[0];
-        assert_eq!(rrset.name, "old.lan.");
-        assert_eq!(rrset.record_type, "CNAME");
-        assert_eq!(rrset.changetype, Some("DELETE".to_string()));
-        // For DELETE, ttl and records must be None
-        assert!(rrset.ttl.is_none());
-        assert!(rrset.records.is_none());
-    }
-
-    // Unknown action strings must be rejected immediately with a clear error,
-    // preventing silent acceptance of typos that would corrupt DNS state.
-    #[test]
-    fn dns_record_to_zone_update_invalid_action() {
-        let record = DNSRecord {
-            action: "invalid".to_string(),
-            zone: "lan".to_string(),
-            name: "test.lan.".to_string(),
-            record_type: "A".to_string(),
-            ttl: None,
-            records: None,
-        };
-
-        let result = dns_record_to_zone_update(&record);
-        assert!(result.is_err());
-        assert!(result.err().unwrap().contains("unknown action"));
-    }
-
-    // What: REPLACE with no TTL must default, not omit field.
-    // Why: PowerDNS requires TTL for REPLACE, unlike DELETE.
-    #[test]
-    fn dns_record_to_zone_update_replace_without_ttl_defaults_instead_of_omitting() {
-        let record = DNSRecord {
-            action: "replace".to_string(),
-            zone: "lan".to_string(),
-            name: "nottl.lan.".to_string(),
-            record_type: "TXT".to_string(),
-            ttl: None,
-            records: Some(vec![{
-                let mut m = HashMap::new();
-                m.insert("content".to_string(), json!("v=spf1 -all"));
-                m
-            }]),
-        };
-
-        let update = dns_record_to_zone_update(&record).expect("must succeed");
-        let rrset = &update.rrsets[0];
-        assert_eq!(rrset.changetype, Some("REPLACE".to_string()));
-        assert_eq!(
-            rrset.ttl,
-            Some(300),
-            "a REPLACE rrset must always carry a real TTL -- PowerDNS documents it as a required field, not optional-for-REPLACE"
-        );
-        assert!(rrset.records.is_some());
-    }
-
-    // Empty records lists must be preserved in the zone update (not converted to None),
-    // ensuring PowerDNS receives the correct "delete all records of this type" semantics.
-    #[test]
-    fn dns_record_to_zone_update_replace_empty_records() {
-        let record = DNSRecord {
-            action: "replace".to_string(),
-            zone: "lan".to_string(),
-            name: "empty.lan.".to_string(),
-            record_type: "MX".to_string(),
-            ttl: Some(3600),
-            records: Some(vec![]),
-        };
-
-        let update = dns_record_to_zone_update(&record).expect("must succeed");
-        let rrset = &update.rrsets[0];
-        assert_eq!(rrset.changetype, Some("REPLACE".to_string()));
-        assert_eq!(rrset.ttl, Some(3600));
-        // Empty records list should still be present
-        assert!(rrset.records.is_some());
-        assert_eq!(rrset.records.as_ref().unwrap().len(), 0);
-    }
-
-    // Per-message outcome of replaying a batch through the SAME `decide_msg`
-    // the production loop calls (see the `match decide_msg(result)` in
-    // `main`). This is a thin test harness around real production logic,
-    // not a reimplementation of it: `SkippedDueToEarlierFailure` models
-    // "never handed to handle_message this cycle because an earlier message
-    // in the batch already returned NakAndStopBatch", i.e. the `break` in
-    // `main`'s loop, which `decide_msg` itself cannot express (it only
-    // decides one message at a time).
-    #[derive(Debug, PartialEq, Eq)]
-    enum BatchOutcome {
-        Acked,
-        NakedAndContinued,
-        NakedAndBatchStopped,
-        SkippedDueToEarlierFailure,
-    }
-
-    // Replays `decide_msg` -- the exact function the production batch loop
-    // calls -- over a synthetic ordered sequence of `handle_message`
-    // outcomes, and additionally models the loop's `break` on
-    // `NakAndStopBatch` (a real NATS `Messages` stream can't be driven from
-    // a plain unit test, so this is the closest test double for "the rest of
-    // the batch is left unconsumed").
-    fn simulate_batch_processing(handle_results: &[HandleOutcome]) -> Vec<BatchOutcome> {
-        let mut outcomes = Vec::with_capacity(handle_results.len());
-        let mut stopped = false;
-
-        for &outcome in handle_results {
-            if stopped {
-                outcomes.push(BatchOutcome::SkippedDueToEarlierFailure);
-                continue;
-            }
-
-            match decide_msg(outcome) {
-                MsgDecision::AckAndContinue => outcomes.push(BatchOutcome::Acked),
-                MsgDecision::NakAndContinue => outcomes.push(BatchOutcome::NakedAndContinued),
-                MsgDecision::NakAndStopBatch => {
-                    outcomes.push(BatchOutcome::NakedAndBatchStopped);
-                    stopped = true;
-                }
-            }
-        }
-
-        outcomes
-    }
-
-    // Record-update failures must stop batch processing immediately (see #653) to prevent
-    // later messages for the same zone/name/type from reaching handlers and getting acked
-    // while earlier stale retries are still pending redelivery.
-    #[test]
-    fn decide_msg_acks_on_success_and_naks_and_stops_on_record_failure() {
-        assert_eq!(decide_msg(HandleOutcome::Ack), MsgDecision::AckAndContinue);
-        assert_eq!(
-            decide_msg(HandleOutcome::RetryStopBatch),
-            MsgDecision::NakAndStopBatch
-        );
-    }
-
-    // What: flush failures NAK but keep batch going.
-    // Why: flush has no ordering hazard unlike record updates.
-    // From: PR #738
-    #[test]
-    fn decide_msg_naks_and_continues_on_no_hazard_failure() {
-        assert_eq!(
-            decide_msg(HandleOutcome::RetryContinueBatch),
-            MsgDecision::NakAndContinue
-        );
-    }
-
-    // Proves the #653 fix: a retryable record-update failure for an earlier
-    // message in a batch (e.g. message A, an older update for
-    // zone/name/type X) must stop the rest of that batch from being
-    // consumed -- otherwise a later message for the same key (message B, a
-    // newer update for X) could reach handle_message, succeed, and get
-    // acked while A is still pending redelivery. A's later redelivery would
-    // then reapply stale data over B's newer state. This test uses a
-    // synthetic handle_message result sequence (no real NATS connection) to
-    // check that nothing after the first `RetryStopBatch` is ever processed
-    // ("Acked") within the same batch.
-    #[test]
-    fn batch_processing_stops_after_first_retryable_record_failure() {
-        // Index 0: unrelated message succeeds.
-        // Index 1: message A fails transiently (simulated 5xx).
-        // Index 2: message B, a newer update for the same key as A, is
-        //          later in this same batch and must NOT be acked now.
-        // Index 3: any further message in the batch must also be skipped.
-        let handle_results = vec![
-            HandleOutcome::Ack,
-            HandleOutcome::RetryStopBatch,
-            HandleOutcome::Ack,
-            HandleOutcome::Ack,
-        ];
-
-        let outcomes = simulate_batch_processing(&handle_results);
-
-        assert_eq!(
-            outcomes,
-            vec![
-                BatchOutcome::Acked,
-                BatchOutcome::NakedAndBatchStopped,
-                BatchOutcome::SkippedDueToEarlierFailure,
-                BatchOutcome::SkippedDueToEarlierFailure,
-            ]
-        );
-    }
-
-    // Baseline: when nothing in the batch fails, every message is acked and
-    // consumption never stops early. Guards against a fix that over-eagerly
-    // halts batches even without a failure.
-    #[test]
-    fn batch_processing_continues_when_all_succeed() {
-        let handle_results = vec![HandleOutcome::Ack, HandleOutcome::Ack, HandleOutcome::Ack];
-
-        let outcomes = simulate_batch_processing(&handle_results);
-
-        assert_eq!(
-            outcomes,
-            vec![
-                BatchOutcome::Acked,
-                BatchOutcome::Acked,
-                BatchOutcome::Acked,
-            ]
-        );
-    }
-
-    // A record-update failure as the very first message in the batch must
-    // stop immediately -- nothing at all gets acked this cycle.
-    #[test]
-    fn batch_processing_stops_immediately_on_first_record_failure() {
-        let handle_results = vec![
-            HandleOutcome::RetryStopBatch,
-            HandleOutcome::Ack,
-            HandleOutcome::Ack,
-        ];
-
-        let outcomes = simulate_batch_processing(&handle_results);
-
-        assert_eq!(
-            outcomes,
-            vec![
-                BatchOutcome::NakedAndBatchStopped,
-                BatchOutcome::SkippedDueToEarlierFailure,
-                BatchOutcome::SkippedDueToEarlierFailure,
-            ]
-        );
-    }
-
-    // What: flush failure continues batch, record failure stops it.
-    // Why: only record updates have ordering hazard.
-    // From: PR #738
-    #[test]
-    fn batch_processing_continues_past_flush_failure_but_stops_on_record_failure() {
-        // Index 0: flush fails transiently (e.g. recursor 5xx) -- has no
-        //          ordering hazard, so processing must continue.
-        // Index 1: unrelated record update succeeds right after it.
-        // Index 2: a record update fails transiently -- THIS must stop the
-        //          batch, unlike the flush failure at index 0.
-        // Index 3: must be skipped, since it's after the record failure.
-        let handle_results = vec![
-            HandleOutcome::RetryContinueBatch,
-            HandleOutcome::Ack,
-            HandleOutcome::RetryStopBatch,
-            HandleOutcome::Ack,
-        ];
-
-        let outcomes = simulate_batch_processing(&handle_results);
-
-        assert_eq!(
-            outcomes,
-            vec![
-                BatchOutcome::NakedAndContinued,
-                BatchOutcome::Acked,
-                BatchOutcome::NakedAndBatchStopped,
-                BatchOutcome::SkippedDueToEarlierFailure,
-            ]
-        );
-    }
-
-    // Issue #772: the applied-sequence watermark must treat any sequence <= the
-    // highest already applied for a key as stale, so a redelivered older
-    // message -- or an exact re-delivery of the same one -- is skipped instead
-    // of clobbering newer state. This is the core invariant the cross-batch
-    // guard in handle_dns_record relies on.
-    #[test]
-    fn applied_sequences_marks_older_and_equal_as_stale() {
-        let mut seqs = AppliedSequences::default();
-        let key = record_key("lan", "host.lan.", "A");
-        assert!(
-            !seqs.is_stale(&key, 100),
-            "the first sight of a key can never be stale"
-        );
-        seqs.record_applied(key.clone(), 100);
-        assert!(
-            seqs.is_stale(&key, 100),
-            "an exact redelivery (equal seq) must be treated as stale"
-        );
-        assert!(seqs.is_stale(&key, 99), "an older seq must be stale");
-        assert!(!seqs.is_stale(&key, 101), "a newer seq must not be stale");
-    }
-
-    // Issue #772 core scenario, modeled without a live NATS connection: message
-    // B (newer, seq 105) for key X is applied first -- as happens when it
-    // arrives in the fetch batch right after message A's failure stopped the
-    // previous batch -- and then message A (older, seq 100) for the SAME key
-    // redelivers after its NAK. The guard must classify A as stale so it is
-    // dropped rather than reapplying its old state over B.
-    #[test]
-    fn applied_sequences_closes_cross_batch_clobber_scenario() {
-        let mut seqs = AppliedSequences::default();
-        let key = record_key("lan", "host.lan.", "A");
-        assert!(!seqs.is_stale(&key, 105));
-        seqs.record_applied(key.clone(), 105);
-        assert!(
-            seqs.is_stale(&key, 100),
-            "A's post-NAK redelivery at the older seq must be recognized as stale"
-        );
-    }
-
-    // Guards against an overly-coarse key: applying a newer seq for one record
-    // must never make an unrelated record (different name, or same name but a
-    // different record type) look stale and get its legitimate update dropped.
-    #[test]
-    fn applied_sequences_are_per_key_independent() {
-        let mut seqs = AppliedSequences::default();
-        let a_v4 = record_key("lan", "a.lan.", "A");
-        let a_v6 = record_key("lan", "a.lan.", "AAAA");
-        let b_v4 = record_key("lan", "b.lan.", "A");
-        seqs.record_applied(a_v4.clone(), 200);
-        assert!(
-            !seqs.is_stale(&a_v6, 1),
-            "same name, different type is an independent key"
-        );
-        assert!(
-            !seqs.is_stale(&b_v4, 1),
-            "a different name is an independent key"
-        );
-        assert!(seqs.is_stale(&a_v4, 200));
-    }
-
-    // Issue #772: the key must be normalized so the same logical record
-    // published with a trailing dot or different case (as the reconciler and
-    // the Admin UI routes can each do) maps to ONE watermark. If these produced
-    // different keys, a stale redelivery under one spelling could clobber newer
-    // state written under the other, defeating the guard entirely.
-    #[test]
-    fn record_key_normalizes_trailing_dot_and_case() {
-        assert_eq!(
-            record_key("lan", "Host.LAN.", "a"),
-            record_key("lan.", "host.lan", "A")
-        );
+    fn backoff_doubles_and_caps() {
+        assert_eq!(grow(1), 2);
+        assert_eq!(grow(16), 30);
+        assert_eq!(grow(30), 30);
     }
 }

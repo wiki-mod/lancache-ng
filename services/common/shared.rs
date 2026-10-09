@@ -7,14 +7,18 @@
 
 pub mod config;
 
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+use subtle::ConstantTimeEq;
 
 // What: health of one service in watchdog's status.json.
 // Why: watchdog writes it and the ui reads it; one schema.
@@ -107,6 +111,166 @@ pub fn df(path: &Path) -> Option<Df> {
         avail_kib: fields.get(3)?.parse().ok()?,
         used_pct: fields.get(4)?.trim_end_matches('%').parse().ok()?,
     })
+}
+
+// What: constant-time equality of two secrets.
+// Why: digests first, so a length difference leaks nothing.
+pub fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (Sha256::digest(a.as_bytes()), Sha256::digest(b.as_bytes()));
+    a.ct_eq(&b).into()
+}
+
+// What: one lancache.dns.record message on NATS.
+// Why: ui and subscriber publish it; the subscriber reads it.
+// From: Issue #1252
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsRecord {
+    pub action: String,
+    pub zone: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub record_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records: Option<Vec<HashMap<String, Value>>>,
+}
+
+// What: one lancache.dns.flush message on NATS.
+// Why: only domain is required; the rest asks to confirm.
+// From: Issue #1095
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlushRequest {
+    pub domain: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_content: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_ttl: Option<i32>,
+}
+
+// What: known-good snapshots of one JSON document type.
+// Why: Kea config and DNS zones share one store and format.
+// From: Issue #628
+pub struct SnapshotStore {
+    pub root: PathBuf,
+    file: &'static str,
+    service: &'static str,
+}
+
+// What: snapshots kept when the setting is 0.
+// Why: a bad setting must never disable retention.
+const DEFAULT_KEEP: u32 = 3;
+// What: marker prefix of a snapshot still being written.
+// Why: listing must never show a half-written snapshot.
+const STAGING: &str = ".staging.";
+
+impl SnapshotStore {
+    // What: a store of `file` payloads under `root`.
+    // Why: `service` names the log line vocabulary.
+    pub fn new(root: PathBuf, file: &'static str, service: &'static str) -> Self {
+        Self {
+            root,
+            file,
+            service,
+        }
+    }
+
+    // What: one greppable lifecycle line on stderr.
+    // Why: operators search the logs for this exact vocabulary.
+    pub fn log(&self, level: &str, message: &str) {
+        eprintln!("[known-good-snapshot][{}][{level}] {message}", self.service);
+    }
+
+    // What: snapshot ids, oldest first; none if no root yet.
+    // Why: fixed-width ids make name order chronological.
+    pub fn ids(&self) -> io::Result<Vec<String>> {
+        if !self.root.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut ids = Vec::new();
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let complete = entry.file_type()?.is_dir()
+                && !name.starts_with(STAGING)
+                && entry.path().join(self.file).is_file();
+            if complete {
+                ids.push(name);
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
+    // What: payload of snapshot `id`; only digit ids pass.
+    // Why: the id is joined onto a path, so it must be safe.
+    pub fn read(&self, id: &str) -> anyhow::Result<Value> {
+        anyhow::ensure!(
+            !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()),
+            "rejected known-good snapshot id {id:?}: must be a purely numeric snapshot id"
+        );
+        let raw = fs::read_to_string(self.root.join(id).join(self.file))
+            .with_context(|| format!("cannot read known-good snapshot {id}"))?;
+        serde_json::from_str(&raw)
+            .with_context(|| format!("known-good snapshot {id} is not valid JSON"))
+    }
+
+    // What: write `data` as a new snapshot, then prune.
+    // Why: staging plus rename; a crash leaves no partial one.
+    pub fn create(&self, data: &Value, keep_n: u32) -> anyhow::Result<String> {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let id = format!("{nanos:020}");
+        let staging = self.root.join(format!("{STAGING}{id}"));
+        fs::create_dir_all(&staging)
+            .with_context(|| format!("cannot create staging directory {}", staging.display()))?;
+        let finish = || -> anyhow::Result<()> {
+            fs::write(staging.join(self.file), serde_json::to_vec_pretty(data)?)?;
+            Ok(fs::rename(&staging, self.root.join(&id))?)
+        };
+        if let Err(e) = finish() {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(e.context(format!("failed to write known-good snapshot {id}")));
+        }
+        self.log("CREATE", &format!("created known-good snapshot {id}"));
+        if let Err(e) = self.prune(keep_n) {
+            self.log(
+                "FATAL",
+                &format!("prune after creating snapshot {id} failed: {e}"),
+            );
+        }
+        Ok(id)
+    }
+
+    // What: delete the oldest snapshots beyond keep_n.
+    // Why: a failed removal is logged, never fails the write.
+    pub fn prune(&self, keep_n: u32) -> io::Result<()> {
+        let keep_n = if keep_n == 0 { DEFAULT_KEEP } else { keep_n };
+        let ids = self.ids()?;
+        let excess = ids.len().saturating_sub(keep_n as usize);
+        for id in ids.into_iter().take(excess) {
+            match fs::remove_dir_all(self.root.join(&id)) {
+                Ok(()) => self.log(
+                    "PRUNE",
+                    &format!("pruned known-good snapshot {id} (retention={keep_n})"),
+                ),
+                Err(e) => self.log("FATAL", &format!("failed to prune snapshot {id}: {e}")),
+            }
+        }
+        Ok(())
+    }
+}
+
+// What: creation time (Unix seconds) encoded in an id.
+// Why: the ui shows it; ids are nanoseconds since the epoch.
+pub fn snapshot_created_unix(id: &str) -> Option<u64> {
+    Some((id.parse::<u128>().ok()? / 1_000_000_000) as u64)
 }
 
 // What: true for empty or a checked-in secret placeholder.
@@ -279,5 +443,45 @@ mod tests {
             mismatches.len(),
             mismatches.join("\n")
         );
+    }
+
+    // What: equal secrets match, any difference does not.
+    // Why: callers trust this for API keys and tokens.
+    #[test]
+    fn ct_eq_matches_only_equal_strings() {
+        assert!(ct_eq("secret-key", "secret-key") && ct_eq("", ""));
+        assert!(!ct_eq("secret-key", "different-key"));
+        assert!(!ct_eq("short", "muchlongerkey") && !ct_eq("", "x"));
+    }
+
+    // What: record and flush messages keep their wire shape.
+    // Why: publishers omit unset fields; consumers default them.
+    // From: Issue #1095
+    #[test]
+    fn dns_messages_round_trip_the_wire_shape() {
+        let delete: DnsRecord =
+            serde_json::from_str(r#"{"action":"delete","zone":"lan","name":"h.lan.","type":"A"}"#)
+                .unwrap();
+        assert_eq!((delete.ttl, delete.records.is_none()), (None, true));
+        let wire = serde_json::to_value(&delete).unwrap();
+        assert_eq!(wire.get("type").and_then(Value::as_str), Some("A"));
+        assert!(wire.get("ttl").is_none() && wire.get("records").is_none());
+        let old: FlushRequest = serde_json::from_str(r#"{"domain":"host.lan."}"#).unwrap();
+        assert_eq!((old.zone, old.expected_content), (None, None));
+        let full = r#"{"domain":"h.lan.","zone":"lan","record_type":"A","expected_content":["10.0.0.5"],"expected_ttl":60}"#;
+        let req: FlushRequest = serde_json::from_str(full).unwrap();
+        assert_eq!(req.expected_ttl, Some(60));
+        assert_eq!(req.expected_content, Some(vec!["10.0.0.5".to_string()]));
+    }
+
+    // What: an id yields its second; non-numbers yield none.
+    // Why: the ui lists snapshots by this time.
+    #[test]
+    fn snapshot_ids_decode_to_unix_seconds() {
+        assert_eq!(
+            snapshot_created_unix("00000000001700000000000000"),
+            Some(1_700_000)
+        );
+        assert_eq!(snapshot_created_unix("../etc"), None);
     }
 }

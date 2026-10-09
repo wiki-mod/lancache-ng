@@ -705,8 +705,8 @@ completely different implications than rolling back a static config file —
 it can silently undo legitimate client DHCP leases, DDNS-driven hostname
 records, or secondary-node reconciliation state that changed after the
 snapshot was taken. Issue #628 implemented this design; everything below
-describes running behavior (`services/dns/nats-subscriber/src/
-zone_snapshots.rs`, `rollback_listener.rs`, `services/ui/src/routes/
+describes running behavior (`services/dns/nats-subscriber/src/main.rs`,
+`services/common/shared.rs`, `services/ui/src/routes/
 dns_snapshots.rs`), not a proposal for a future implementation PR.
 
 **Scope decision.** Looking at what `services/dns/entrypoint.sh` actually
@@ -835,9 +835,9 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
   1. `handle_dns_record`'s post-`PATCH` hook (`main.rs`'s `maybe_snapshot_
      zone`, called right after a successful PATCH) covers the NATS-applied
      path.
-  2. `zone_snapshot_watcher` (`main.rs`) is the periodic export-and-diff
+  2. `snapshot_watcher` (`main.rs`) is the periodic export-and-diff
      trigger for DDNS-originated changes: it polls every zone in
-     `zone_snapshots::ROLLBACK_ZONES` every 60 seconds (the same interval
+     `rollback_zones()` (`services/common/config.rs`) every 60 seconds (the same interval
      shape as the existing `reconciler`) and runs unconditionally on every
      node, since it is not gated on NATS reconciliation being enabled — the
      alternative considered (a PowerDNS primary-notify-style hook) would
@@ -859,7 +859,7 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
     republishes burn through the default retention of 3 snapshots within
     minutes, pushing out genuinely different history. Both triggers compare
     the freshly exported zone against the most recently stored snapshot
-    before creating a new one (`zone_snapshots::matches_latest_snapshot`):
+    before creating a new one (`matches_latest` in `main.rs`):
     rather than hashing serialized bytes (order-sensitive), both sides are
     canonicalized -- the rrsets array sorted by (name, type), each rrset's
     own `records` array sorted by content -- and compared with plain `==`,
@@ -936,7 +936,7 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
   Compose network — not just the Admin UI — list and roll back zone
   snapshots, silently bypassing whatever authentication the Admin UI itself
   enforces on the operator. This listener (`services/dns/nats-subscriber/
-  src/rollback_listener.rs`) gates every request the same way this project
+  src/main.rs`) gates every request the same way this project
   already gates every comparable internal surface: a constant-time
   comparison of the `X-API-Key` header against `PDNS_API_KEY`, checked
   before the request body is even parsed. It binds `0.0.0.0:8083`, not
@@ -992,10 +992,10 @@ things follow from that:
 - For `lan.`, a rollback re-publishes the restored state onto the NATS
   stream so secondaries converge, rather than leaving the primary and its
   secondaries silently holding different data for the rolled-back zone.
-  `rollback_listener.rs`'s `publish_rollback_records` (called only when
+  `main.rs`'s `publish_patch` (called only when
   `zone == "lan."`) re-publishes every REPLACE/DELETE entry from the
   applied rollback patch onto `lancache.dns.record`, reusing the same
-  message shape `nats_publish::publish_dns_record` already provides to the
+  message shape `publish_record` already provides to the
   existing `reconciler`. Each entry gets a fresh, rollback-specific message
   id (`rollback-<batch timestamp>-<name>-<type>`) rather than reusing the
   reconciler's stable `reconcile-lan-<name>-<type>` id, so JetStream's

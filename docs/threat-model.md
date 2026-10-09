@@ -43,7 +43,7 @@ the top is a signal that its threats need re-checking.
 | NATS event bus + role-scoped credentials | `deploy/prod/docker-compose.yml` (nats), `services/dns/nats-subscriber/` | v0.2.0 | T5 |
 | Secondary-node registration / remote NATS | `deploy/prod/docker-compose.nats-secondary.yml`, `services/ui/src/main.rs` | v0.2.0 | T5, T14 |
 | Console exclusion-by-omission | `services/dns/cdn-domains.txt`, `docs/install-ca-cert.md` | v0.2.0 | T4, T10 |
-| Zone/record known-good snapshot + rollback listener | `services/dns/nats-subscriber/src/rollback_listener.rs`, `docs/known-good-config-snapshots.md` | v0.3.0 | T4 |
+| Zone/record known-good snapshot + rollback listener | `services/dns/nats-subscriber/src/main.rs`, `docs/known-good-config-snapshots.md` | v0.3.0 | T4 |
 
 ---
 
@@ -281,7 +281,7 @@ appliance spoofs.
   over the authenticated NATS event bus and the PowerDNS API (see T5), not from
   arbitrary clients.
 - **Zone/record rollback listener (issue #628, added since v0.2.0)**:
-  `services/dns/nats-subscriber/src/rollback_listener.rs` exposes a local HTTP
+  `services/dns/nats-subscriber/src/main.rs` exposes a local HTTP
   API (`DNS_ROLLBACK_LISTEN_ADDR`, default `0.0.0.0:8083`) the Admin UI calls to
   list known-good zone/record snapshots and trigger an operator-selected
   rollback — another path, besides NATS and the PowerDNS API, that can mutate
@@ -340,7 +340,7 @@ record changes, or subscribes to read cache/DNS metadata.
     own `nats-subscriber` can signal a post-rollback recursor cache-flush;
     (issue #906, a deliberate widening beyond the original least-
     privilege scope) `publish` on `lancache.dns.record`, so the same
-    `rollback_listener.rs`'s `publish_rollback_records` can republish
+    `main.rs`'s `publish_patch` can republish
     restored `lan.` records if `DNS_ROLLBACK_URL` is ever pointed at
     dns-ssl instead of its default `dns-standard:8083` (not the case in any
     shipped deployment today, but the identity's permissions must hold

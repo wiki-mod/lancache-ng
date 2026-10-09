@@ -267,7 +267,7 @@ snapshots the data rrsets (SOA/NS excluded) of `lan.`, `local.lan.`, and the
 private reverse zones after every NATS-applied write and on a 60-second
 periodic watcher (covering Kea's direct-to-PowerDNS DDNS writes, which bypass
 NATS entirely); a new `X-API-Key`-authenticated HTTP listener
-(`rollback_listener.rs`, `DNS_ROLLBACK_LISTEN_ADDR`, default
+(`serve_rollback` in `main.rs`, `DNS_ROLLBACK_LISTEN_ADDR`, default
 `0.0.0.0:8083`) exposes `GET /snapshots` and `POST /rollback`;
 `services/ui/src/routes/dns_snapshots.rs` is a thin HTTP forwarder to that
 listener; and `/domains`' "Zone-Snapshots & Rollback" tab
@@ -310,7 +310,7 @@ UI-visible PowerDNS zone rollback" should eventually look like.
 | NATS-based secondary registration/rotate/remove | Admin UI, implemented; registration now also returns AXFR endpoint and shared TSIG material for native zone transfer | `services/ui/src/routes/secondaries.rs`, `/secondaries` |
 | NATS secondary replication-health indicator | Not built | Planned, v0.3.0 candidate |
 | Static config snapshot/rollback status indicator | Not built (log-only today) | Planned, v0.3.0 candidate, not DNS-specific |
-| Zone/record snapshot/rollback (#628) | Admin UI, implemented (PR #788) | `services/ui/src/routes/dns_snapshots.rs`, `services/dns/nats-subscriber/src/{zone_snapshots,rollback_listener}.rs`, `/domains` "Zone-Snapshots & Rollback" tab |
+| Zone/record snapshot/rollback (#628) | Admin UI, implemented (PR #788) | `services/ui/src/routes/dns_snapshots.rs`, `services/dns/nats-subscriber/src/main.rs`, `services/common/shared.rs`, `/domains` "Zone-Snapshots & Rollback" tab |
 
 ## How to use this document
 

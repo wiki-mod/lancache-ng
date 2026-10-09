@@ -611,7 +611,7 @@ services:
                   "lancache.dns.record",
                   # What: publish permission on lancache.dns.flush for the dns-standard identity's zone-rollback listener.
                   # Why: needed for its post-rollback cache-flush publish.
-                  # From: services/dns/nats-subscriber/src/rollback_listener.rs
+                  # From: services/dns/nats-subscriber/src/main.rs
                   "lancache.dns.flush",
                   "$$JS.API.STREAM.INFO.LANCACHE_DNS",
                   "$$JS.API.STREAM.CREATE.LANCACHE_DNS",
