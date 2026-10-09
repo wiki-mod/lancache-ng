@@ -967,8 +967,20 @@ CASES
 # Why: bare mktemp in tools must land on disk, not RAM
 # From: Issue #1683 | PR #1858
 @test "temp dirs: tmpfs refused, made on disk, else coded" {
-    local d long
+    local d long lnk rel bb bbd
     d="${BATS_TEST_TMPDIR}/$(_val name)/$(_val name)" long="${BATS_TEST_TMPDIR}/$(printf '%0300d' 0)"
+    lnk="${BATS_TEST_TMPDIR}/$(_val name)" rel="$(_val name)/$(_val name)" bb="${BATS_TEST_TMPDIR}/$(_val name)"
+    bbd="${BATS_TEST_TMPDIR}/$(_val name)/$(_val name)"
+    ln -s /tmp "${lnk}" || return 1
+    CI_TMPDIR="${lnk}/$(_val name)" run _ci_tmp_init
+    _expect symlink 2 "[CI-ERROR-CORE-0006]" || return 1
+    CI_TMPDIR="${BATS_TEST_TMPDIR}/$(_val name)$(printf '/..%.0s' {1..40})/tmp/$(_val name)" run _ci_tmp_init
+    _expect escape 2 "[CI-ERROR-CORE-0142]" || return 1
+    CI_TMPDIR="${rel}" run eval 'cd "${BATS_TEST_TMPDIR}" && _ci_tmp_init && echo "t=${TMPDIR}"'
+    _expect relative 0 "t=$(cd "${BATS_TEST_TMPDIR}" && pwd -P)/${rel}" || return 1
+    mkdir -p "${bb}" && ln -s "$(command -v busybox)" "${bb}/realpath" || { echo "busybox: no busybox"; return 1; }
+    CI_TMPDIR="${bbd}" PATH="${bb}:${PATH}" run eval '_ci_tmp_init && echo "t=${TMPDIR}"'
+    _expect busybox 0 "t=${bbd}" || return 1
     [[ "$(realpath -m -- "${BATS_TEST_TMPDIR}")" == /var/tmp/* ]] || { echo "bats temp dir not under /var/tmp: ${BATS_TEST_TMPDIR}"; return 1; }
     CI_TMPDIR=/tmp run _ci_tmp_init
     _expect tmpfs 2 "[CI-ERROR-CORE-0006]" || return 1

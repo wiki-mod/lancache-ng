@@ -139,14 +139,27 @@ _ci_mktemp() {
 # Why: bare mktemp and tools then use disk, not tmpfs.
 # From: Issue #1683 | PR #1858
 _ci_tmp_init() {
-    local real out
-    # What: judge the resolved path, not the given text.
-    # Why: a .. or a symlink must not lead to tmpfs /tmp.
+    local real out base tail="" part
+    # What: resolve existing part, append the missing rest
+    # Why: busybox has no realpath -m; no .. or link to /tmp
     # From: Issue #1683 | PR #1858
-    if ! real="$(realpath -m -- "${CI_TMPDIR}" 2>&1)"; then
+    base="${CI_TMPDIR}"
+    [[ "${base}" == /* ]] || base="${PWD}/${base}"
+    while [[ ! -e "${base}" ]]; do
+        part="${base##*/}" base="${base%/*}"
+        base="${base:-/}"
+        case "${part}" in
+            ''|.) ;;
+            ..) ci_log "[CI-ERROR-CORE-0142]" "dir=\"${CI_TMPDIR}\" reason=\"a missing part of the CI temp root is ..\""; return 2 ;;
+            *) tail="/${part}${tail}" ;;
+        esac
+    done
+    if ! real="$(realpath "${base}" 2>&1)"; then
         ci_error "[CI-ERROR-CORE-0131]" "dir=\"${CI_TMPDIR}\" reason=\"CI temp root not resolvable\"" "${real}"
         return 2
     fi
+    real="${real%/}${tail}"
+    real="${real:-/}"
     case "${real}" in
         /var/tmp|/var/tmp/*) ;;
         *) ci_log "[CI-ERROR-CORE-0006]" "reason=\"CI temp root must be under /var/tmp, not tmpfs /tmp\" got=\"${CI_TMPDIR}\" real=\"${real}\""; return 2 ;;
