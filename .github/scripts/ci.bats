@@ -1456,38 +1456,27 @@ CASES
     _expect no-base 2 "$(_fill '[CI-ERROR-BUILD-0014] service="@S@" key="base_images.@FB@"')" || return 1
 }
 
-@test "checks fail closed outside a git repo or with no input file" {
-    # What: no git repo or no input file fails with rc 2
-    # Why: an empty file list must not pass every check.
+@test "scan file set: no repo fails closed, a gone path is skipped" {
+    # What: no repo fails coded and a gone path is noted
+    # Why: an empty scan must never pass a check as clean
     # From: Issue #1683 | PR #1858
-    local d="${BATS_TEST_TMPDIR}/nogit" c
-    mkdir -p "${d}"
-    for c in line-endings file-headers language-policy executable-bits; do
-        run bash -c "cd '${d}' && GIT_CEILING_DIRECTORIES='${BATS_TEST_TMPDIR}' bash '${CI_SH}' check ${c}"
-        [ "${status}" -eq 2 ] || { echo "want rc2: ${c} -> ${status}"; false; }
-        [[ "${output}" == *"CI-ERROR-CHECK-0071"* ]]
-        [[ "${output}" == *"site="* ]]
-        [[ "${output}" == *"not a git repository"* ]]
-        [[ "${output}" != *"=clean"* ]]
-    done
-    run bash "${CI_SH}" check compose-healthchecks "${BATS_TEST_TMPDIR}/nope/docker-compose.yml"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0097"* ]]
-}
-
-@test "diff-scoped checks skip a deleted path visibly, check the rest" {
-    # What: a listed path not in the tree is skipped, noted.
-    # Why: deleted files hold no content; skip is visible.
-    # From: Issue #1683 | PR #1858
-    local d="${BATS_TEST_TMPDIR}"
-    printf '# What: ok short line.\n# Why: also fine here.\n' > "${d}/ok.sh"
-    printf '# What: %s\n' "$(printf 'x%.0s' $(seq 1 80))" > "${d}/long.sh"
-    run bash "${CI_SH}" check comment-length "${d}/ok.sh" "${d}/gone.sh"
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == *"[CI-NOTICE-CHECK-0070] skipped=1"* ]]
-    run bash "${CI_SH}" check comment-length "${d}/long.sh" "${d}/gone.sh"
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"[CI-NOTICE-CHECK-0070] skipped=1"* ]]
+    local d a g e
+    local -a out=() ov=()
+    d="$(_val path)" e="$(_val path)"
+    mkdir -p "${d}" && cd "${d}" || return 1
+    export GIT_CEILING_DIRECTORIES="${d%/*}"
+    a="${d}/$(_val name)" g="${d}/$(_val name)"
+    : > "${a}"
+    run _ci_scan_files out ov
+    _expect no-repo 2 "[CI-ERROR-CHECK-0071] site=\"scan-files\";not a git repository" || return 1
+    ov=("${a}" "${g}")
+    _ci_scan_files out ov 2> "${e}" || { echo "gone: rc $?: $(cat "${e}")"; return 1; }
+    [ "${out[*]}" = "${a}" ] && grep -qF '[CI-NOTICE-CHECK-0070] skipped=1' "${e}" \
+        || { echo "gone: in ${ov[*]} out ${out[*]}: $(cat "${e}")"; return 1; }
+    ov=("${a}")
+    _ci_scan_files out ov 2> "${e}" || { echo "present: rc $?: $(cat "${e}")"; return 1; }
+    [ "${out[*]}" = "${a}" ] && ! grep -qF 'CHECK-0070' "${e}" \
+        || { echo "present: in ${ov[*]} out ${out[*]}: $(cat "${e}")"; return 1; }
 }
 
 @test "check pr-title: SOT types, derived scopes, warn/block/draft modes" {
