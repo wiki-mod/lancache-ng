@@ -1055,40 +1055,38 @@ CASES
     _expect unpinned 0 "[CI-WARN-VALIDATE-0008] unpinned=\"${extra}\"" || return 1
 }
 
-@test "validation env: base64_32 secrets decode, no fixed secret, NATS url set" {
-    # What: setup.sh base64_32 keys decode in the SOT env.
-    # Why: PowerDNS rejects a non-base64 TSIG key: no AXFR.
-    # From: Issue #1683 | PR #1858
-    local root keys env k v d LC_ALL=C
+# What: per SOT kind a fresh secret; setup.sh kinds agree
+# Why: PowerDNS rejects a non-base64 TSIG key: no AXFR
+# From: Issue #1683 | PR #1858
+@test "validation env: secrets generated per SOT kind, setup.sh kinds agree, NATS url set" {
+    local root env fx kind kinds b64 k v n setup LC_ALL=C
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    keys="$(sed -nE 's/^[[:space:]]*ensure_secret_env_key ([A-Z_]+) "\$env_file" base64_32$/\1/p' "${root}/setup.sh")"
-    echo "base64_32 keys: ${keys:-<none>}"
-    [ -n "${keys}" ]
-    env="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_validation_env)"
-    for k in ${keys}; do
-        v="$(sed -n "s/^${k}=//p" <<<"${env}")"
-        [ -n "${v}" ] || { echo "${k}: missing from validation env"; return 1; }
-        # What: count decoded bytes in a file, not a var.
-        # Why: bash drops NUL; a random key may hold one.
-        # From: Issue #1683 | PR #1858
-        d="$(base64 -d <<<"${v}" 2>&1 > "${BATS_TEST_TMPDIR}/key.bin")" || { echo "${k}='${v}': ${d}"; return 1; }
-        d="$(wc -c < "${BATS_TEST_TMPDIR}/key.bin")"
-        [ "${d}" -eq 32 ] || { echo "${k}='${v}': ${d} bytes"; return 1; }
+    env="$(_ci_validation_env)" && fx="$(_ci_block_entry_field validation "" compose_validation_env)" \
+        && b64="$(_ci_block_entry_list validation compose_validation_secrets base64_32)" || { echo "validation env: ${env}"; return 1; }
+    for kind in hex32 base64_32; do
+        kinds="$(_ci_block_entry_list validation compose_validation_secrets "${kind}")" || { echo "${kind}: ${kinds}"; return 1; }
+        [ -n "${kinds}" ] || { echo "no SOT ${kind} secret"; return 1; }
+        for k in ${kinds}; do
+            [[ " ${fx} " != *" ${k}="* ]] || { echo "${k}: fixed value in the SOT validation env"; return 1; }
+            v="$(sed -n "s/^${k}=//p" <<< "${env}")"
+            case "${kind}" in
+                hex32) [[ "${v}" =~ ^[0-9a-f]{64}$ ]] || { echo "${k}: ${#v} chars, not 64 hex"; return 1; } ;;
+                base64_32)
+                    n="$(set -o pipefail; base64 -d <<< "${v}" | wc -c)" && [ "${n}" -eq 32 ] \
+                        || { echo "${k}: ${#v} chars decode to ${n:-an error}"; return 1; }
+                    ;;
+            esac
+        done
     done
-    # What: the ui must advertise a NATS url to register
-    # Why: without it every register answers 503
-    # From: Issue #866 | PR #1858
-    grep -Eq '^NATS_ADVERTISE_URL=[a-z]+://[^[:space:]]+$' <<<"${env}" \
-        || { echo "no NATS_ADVERTISE_URL: $(grep '^NATS_' <<<"${env}")"; return 1; }
-    # What: no setup.sh secret has a fixed value in the SOT.
-    # Why: render secrets are generated; a literal leaks.
-    # From: Issue #1683 | PR #1858
-    keys="$(sed -nE 's/^[[:space:]]*ensure_secret_env_key ([A-Z_]+) "\$env_file" [a-z0-9_]+$/\1/p' "${root}/setup.sh")"
-    [ -n "${keys}" ]
-    for k in ${keys}; do
-        ! grep -Eq "^  compose_validation_env:.*[[:space:]]${k}=" "${CI_MANIFEST_SOURCE}" \
-            || { echo "${k}: fixed value in the SOT"; return 1; }
-    done
+    setup="$(sed -nE 's/^[[:space:]]*ensure_secret_env_key ([A-Z_]+) "\$env_file" ([a-z0-9_]+)$/\1 \2/p' "${root}/setup.sh")"
+    [ -n "${setup}" ] || { echo "no ensure_secret_env_key in setup.sh"; return 1; }
+    while read -r k kind; do
+        [[ " ${fx} " != *" ${k}="* ]] || { echo "${k}: setup.sh secret has a fixed SOT value"; return 1; }
+        [ "${kind}" != base64_32 ] || grep -qxF -- "${k}" <<< "${b64}" \
+            || { echo "${k}: base64_32 in setup.sh, not in the SOT base64_32 list"; return 1; }
+    done <<< "${setup}"
+    grep -Eq '^NATS_ADVERTISE_URL=[a-z]+://[^[:space:]]+$' <<< "${env}" \
+        || { echo "no NATS_ADVERTISE_URL: $(grep '^NATS_' <<< "${env}")"; return 1; }
 }
 
 # What: one flock per slot; a second holder is refused
