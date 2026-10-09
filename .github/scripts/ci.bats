@@ -251,16 +251,19 @@ teardown() {
 # What: per row: bad or missing input -> rc 2 and its id.
 # Why: input errors stop with our id before any backend.
 # From: Issue #1683 | PR #1858
-@test "every command fails closed on missing input with its own id" {
-    local case envs args id wrap want
+@test "each command's input guard stops first with its own id" {
+    local case envs args id wrap want svc tool plat
     local -a ev av
+    svc="$(ci_services)" && tool="$(_ci_block_keys build_toolchain)" || { echo "SOT readers failed"; return 1; }
+    svc="${svc%%$'\n'*}" tool="${tool%%$'\n'*}"
+    plat="$(_ci_platforms "${svc}")" || { echo "${svc}: no platforms"; return 1; }
+    plat="${plat%%$'\n'*}"
+    [ -n "${svc}" ] && [ -n "${tool}" ] && [ -n "${plat}" ] || { echo "inputs: ${svc}|${tool}|${plat}"; return 1; }
     local -A V=(
-        ["@SVC@"]="$(ci_services | awk 'NR == 1')" ["@TOOL@"]="$(_ci_block_keys build_toolchain | awk 'NR == 1')"
+        ["@SVC@"]="${svc}" ["@TOOL@"]="${tool}" ["@PLAT@"]="${plat}"
         ["@BAD@"]="$(_val name)" ["@FOREIGN@"]="$(_val platform)" ["@DIGEST@"]="$(_val digest)"
         ["@USER@"]="$(_val name)" ["@TOKEN@"]="$(_val name)" ["@MISSING@"]="$(_val path)"
     )
-    V["@PLAT@"]="$(_ci_platforms "${V["@SVC@"]}" | awk 'NR == 1')"
-    [ -n "${V["@SVC@"]}" ] && [ -n "${V["@TOOL@"]}" ] && [ -n "${V["@PLAT@"]}" ] || { echo "inputs: ${V[*]}"; return 1; }
     while IFS='|' read -r case envs args id wrap; do
         ev=() av=()
         envs="$(_fill "${envs}")" args="$(_fill "${args}")"
@@ -306,6 +309,37 @@ ship|-|ship|CI-ERROR-SHIP-0001|-
 ship-platform|-|ship @SVC@|CI-ERROR-SHIP-0001|-
 pr-title-missing|PR_TITLE= PR_AUTHOR=|check pr-title|CI-ERROR-CHECK-0012|-
 logging-matrix-root|-|check logging-matrix @MISSING@|CI-ERROR-CHECK-0035|-
+codeql-analyze|-|codeql-analyze|CI-ERROR-CODEQL-0002|-
+codeql-language|-|codeql-analyze @BAD@|CI-ERROR-CODEQL-0003|-
+build|-|build|CI-ERROR-BUILD-0001|-
+rust-build|-|rust-build|CI-ERROR-RUSTBUILD-0001|-
+rust-build-crate|-|rust-build @SVC@|CI-ERROR-RUSTBUILD-0002|-
+rust-build-mode|-|rust-build @SVC@ @BAD@ @BAD@|CI-ERROR-RUSTBUILD-0005|-
+rust-build-target|-|rust-build @SVC@ @BAD@|CI-ERROR-RUSTBUILD-0003|-
+apk-pin-install|-|apk-pin-install|CI-ERROR-APKSETUP-0006|-
+publish|-|publish|CI-ERROR-PUBLISH-0001|-
+scan|-|scan|CI-ERROR-SCAN-0001|-
+scan-digest|-|scan @SVC@|CI-ERROR-SCAN-0002|-
+aggregate|-|aggregate|CI-ERROR-AGGREGATE-0001|-
+aggregate-dir|-|aggregate @MISSING@|CI-ERROR-AGGREGATE-0002|-
+emit-result|-|emit-result|CI-ERROR-RESULT-0001|-
+emit-result-platform|-|emit-result @SVC@|CI-ERROR-RESULT-0002|-
+assemble-stack|CI_BUILD_MATRIX=|assemble-stack|CI-ERROR-ASSEMBLE-0006|-
+aggregate-stack|CI_BUILD_MATRIX=|aggregate-stack|CI-ERROR-AGGREGATE-0005|-
+scan-stack|CI_BUILD_MATRIX=|scan-stack|CI-ERROR-SCAN-0016|-
+nightly-status|-|nightly-status|CI-ERROR-STATUS-0001|-
+nightly-status-scope|-|nightly-status @BAD@|CI-ERROR-STATUS-0002|-
+release-publish|-|release-publish|CI-ERROR-RELEASE-0003|-
+release-sbom|-|release-sbom|CI-ERROR-RELEASE-0007|-
+release-sbom-tag|-|release-sbom @SVC@|CI-ERROR-RELEASE-0008|-
+release-sbom-stack|-|release-sbom-stack|CI-ERROR-RELEASE-0013|-
+release-vex|-|release-vex|CI-ERROR-RELEASE-0010|-
+release-notes|-|release-notes|CI-ERROR-RELEASE-0031|-
+release-changelog|-|release-changelog|CI-ERROR-RELEASE-0032|-
+socket-proxy-config|-|socket-proxy-config|CI-ERROR-SOCKETPROXY-0001|-
+close-linked-pr|-|close-linked-issues --pr|CI-ERROR-LINK-0002|-
+close-linked-arg|-|close-linked-issues @BAD@|CI-ERROR-LINK-0013|-
+gc-arg|-|gc --@BAD@|CI-ERROR-GC-0006|-
 CASES
 }
 
