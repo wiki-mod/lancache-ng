@@ -30,7 +30,7 @@ pub fn parse_bool(raw: &str) -> Option<bool> {
 }
 
 // What: how a value outside [min, max] is resolved.
-// Why: floors and ceilings differ per knob, parsing does not.
+// Why: limits differ per knob, parsing does not.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutOfRange {
     Clamp,
@@ -51,7 +51,7 @@ pub struct Uint {
 
 impl Uint {
     // What: value of the knob, plus a warning if rejected.
-    // Why: unset or blank is no warning; junk never crashes.
+    // Why: blank is no warning; junk never crashes.
     pub fn parse(&self, raw: Option<&str>) -> (u64, Option<String>) {
         let Some(raw) = non_empty(raw.map(str::trim)) else {
             return (self.default, None);
@@ -116,6 +116,8 @@ impl DhcpMode {
         }
     }
 
+    // What: the mode's text form, as DHCP_MODE spells it.
+    // Why: the settings file and the ui use this text.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
@@ -125,6 +127,8 @@ impl DhcpMode {
         }
     }
 
+    // What: true only for the Kea backend.
+    // Why: Kea alone has a control API to manage.
     pub fn is_kea(self) -> bool {
         matches!(self, Self::Kea)
     }
@@ -135,6 +139,8 @@ impl DhcpMode {
         matches!(self, Self::DnsmasqProxy | Self::DnsmasqRelay)
     }
 
+    // What: true only for the relay variant of dnsmasq.
+    // Why: relay has its own two settings, proxy has more.
     pub fn is_dnsmasq_relay(self) -> bool {
         matches!(self, Self::DnsmasqRelay)
     }

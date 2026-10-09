@@ -29,12 +29,16 @@ pub struct ServiceHealth {
     pub failures: u32,
 }
 
+// What: cache disk use in percent and its color.
+// Why: the ui renders the color watchdog decided.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskHealth {
     pub pct: u32,
     pub status: String,
 }
 
+// What: disk section of status.json; only the cache today.
+// Why: a struct keeps room for more volumes later.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskInfo {
     pub cache: DiskHealth,
@@ -104,7 +108,7 @@ pub fn write_file(path: &Path, contents: &[u8], mode: u32, place: Place) -> io::
         .and_then(|()| match place {
             Place::Exclusive => fs::hard_link(&tmp, path),
             // What: a busy target is rewritten in place.
-            // Why: a single-file bind mount refuses a rename.
+            // Why: a file bind mount refuses a rename.
             Place::Replace => match fs::rename(&tmp, path) {
                 Err(e) if e.kind() == io::ErrorKind::ResourceBusy => {
                     let mut file = OpenOptions::new().write(true).truncate(true).open(path)?;
@@ -115,7 +119,7 @@ pub fn write_file(path: &Path, contents: &[u8], mode: u32, place: Place) -> io::
             },
         });
     // What: drop the temp name; absent after a rename.
-    // Why: the result above is the outcome, not the cleanup.
+    // Why: the write result stays the outcome.
     let _ = fs::remove_file(&tmp);
     placed
 }
@@ -134,8 +138,8 @@ pub fn load_or_create<T>(
             let (text, value) = create();
             match write_file(path, text.as_bytes(), 0o600, Place::Exclusive) {
                 Ok(()) => Ok(value),
-                // What: a concurrent start created it first.
-                // Why: the first writer's secret is the one.
+                // What: another start created it first.
+                // Why: the first writer's secret wins.
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                     parse(fs::read_to_string(path)?.trim())
                 }

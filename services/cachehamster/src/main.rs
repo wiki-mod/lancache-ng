@@ -1,7 +1,7 @@
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! What: cachehamster Steam prefill, scaffold, URL list only.
+//! What: cachehamster prefill scaffold, URL list only.
 //! Why: no Steam login yet; URLs come from the env.
 //! From: Issue #871
 
@@ -80,8 +80,15 @@ fn open(master: &[u8; MASTER_LEN], sealed: &Sealed) -> Result<Vec<u8>> {
         bail!("persisted credential has a malformed nonce");
     }
     cipher_for(master, &sealed.salt)?
-        .decrypt(XNonce::from_slice(&sealed.nonce), sealed.ciphertext.as_ref())
-        .map_err(|e| anyhow::anyhow!("credential decryption failed (wrong master secret, or data corrupted): {e}"))
+        .decrypt(
+            XNonce::from_slice(&sealed.nonce),
+            sealed.ciphertext.as_ref(),
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "credential decryption failed (wrong master secret, or data corrupted): {e}"
+            )
+        })
 }
 
 // What: whether the credential may rest on disk.
@@ -115,7 +122,8 @@ fn credential(persist: bool, dir: &Path) -> Result<Option<String>> {
     if !persist {
         return Ok(from_env);
     }
-    let master = load_or_create_hex::<MASTER_LEN>(&dir.join("lancache-cachehamster-master.secret"))?;
+    let master =
+        load_or_create_hex::<MASTER_LEN>(&dir.join("lancache-cachehamster-master.secret"))?;
     let path = dir.join("lancache-cachehamster-credential.json");
     if let Some(plain) = from_env {
         let json = serde_json::to_vec(&seal(&master, plain.as_bytes())?)?;
@@ -138,7 +146,12 @@ fn credential(persist: bool, dir: &Path) -> Result<Option<String>> {
 // Why: the proxy caches the bytes; none are kept here.
 // From: Issue #816
 async fn drain(client: &reqwest::Client, url: &str, total: &AtomicU64) -> Result<u64> {
-    let mut body = client.get(url).send().await?.error_for_status()?.bytes_stream();
+    let mut body = client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes_stream();
     let mut bytes = 0u64;
     while let Some(chunk) = body.next().await {
         let len = chunk?.len() as u64;
@@ -148,6 +161,8 @@ async fn drain(client: &reqwest::Client, url: &str, total: &AtomicU64) -> Result
     Ok(bytes)
 }
 
+// What: resolve the credential, then drain every URL.
+// Why: the proxy caches the bytes; none are kept.
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -186,7 +201,7 @@ async fn main() -> Result<()> {
     }
     let total = AtomicU64::new(0);
     let client = reqwest::Client::new();
-    // What: bounded fetch fan-out beside a throughput ticker.
+    // What: bounded fetch fan-out with a throughput tick.
     // Why: one task owns both, so no stop signal is needed.
     // From: Issue #871
     let fetch = stream::iter(&urls)
@@ -249,8 +264,8 @@ mod tests {
         assert!(real_credential(Some("CHANGE_ME_now".into())).is_err());
     }
 
-    // What: seal then open returns the plaintext; sealing varies.
-    // Why: recoverable for login, yet equal inputs stay unlinkable.
+    // What: seal then open gives the plaintext.
+    // Why: recoverable, yet equal inputs stay unlinkable.
     // From: Issue #871
     #[test]
     fn seal_round_trips_and_never_repeats() {
