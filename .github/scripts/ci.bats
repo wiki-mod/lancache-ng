@@ -1703,16 +1703,15 @@ json-double|"## @W@\\\\n@W@"|1|[CI-ERROR-CHECK-0018];JSON-quoted Markdown
 CASES
 }
 
+# What: each SOT repair key is refilled when emptied
+# Why: AG-OP-007: an incomplete install must converge
+# From: Issue #1683 | PR #1858
 @test "migrate_env_for_update repairs every empty required key" {
     _stand_ins || return 1
-    # What: every SOT repair key is refilled when emptied
-    # Why: empty required keys break the stack (AG-OP-007)
-    # From: Issue #1683 | PR #1858
-    local root keys key d
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    keys="$(grep -E '^  setup_required_repairs:' "${root}/.github/yaml/build-manifest.yml" | sed 's/^[^:]*:[[:space:]]*//' | tr -d '[],')"
-    [ -n "${keys}" ] || { echo "no repair keys in the SOT"; return 1; }
-    _load_setup_sh "${root}"
+    local keys key d
+    keys="$(_ci_block_entry_field validation "" setup_required_repairs)" && [ -n "${keys}" ] \
+        || { echo "no SOT validation.setup_required_repairs: ${keys}"; return 1; }
+    _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
     for key in ${keys}; do
         d="${BATS_TEST_TMPDIR}/req-${key}/deploy/prod"
         _converged_install "${d}" || return 1
@@ -1722,9 +1721,9 @@ CASES
         # What: a pin without a tag is refused, not guessed
         # Why: only the operator picks an immutable tag
         # From: Issue #1683 | PR #1858
-        if [ "${key}" = LANCACHE_IMAGE_TAG ] && [ "${status}" -ne 0 ]; then
-            [ "${status}" -eq 1 ] && [[ "${output}" == *"requires LANCACHE_IMAGE_TAG"* ]] && cmp -s "${d}/.env.before" "${d}/.env" \
-                || { echo "pinned without tag: ${output}"; return 1; }
+        if [ "${key}" = LANCACHE_IMAGE_TAG ]; then
+            _expect "${key}" 1 "requires LANCACHE_IMAGE_TAG" || return 1
+            cmp -s "${d}/.env.before" "${d}/.env" || { echo "${key}: refused but the .env changed"; return 1; }
             continue
         fi
         [ "${status}" -eq 0 ] && [ -n "$(get_env_var "${key}" "${d}/.env")" ] \
