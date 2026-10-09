@@ -92,11 +92,6 @@ const SHARED_SECRET_VARS: [&str; 8] = [
     "NATS_SYS_PASSWORD",
 ];
 
-// What: NTP servers a fresh install starts with.
-// Why: equals services/ntp/entrypoint.sh's own default.
-const DEFAULT_NTP_SERVERS: &str = "0.debian.pool.ntp.org 1.debian.pool.ntp.org \
-     2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com";
-
 // What: when the ui sends Strict-Transport-Security.
 // Why: plain-HTTP installs must never receive an HSTS header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -256,11 +251,13 @@ impl Config {
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| derive_image_channel(&tag));
         let cache_max_gb = cache_max_gb_from(env)?;
+        // What: DHCP_ENABLED is an optional legacy switch, off.
+        // Why: no owner sets it; unset must never enable DHCP.
         let dhcp_mode = DhcpMode::parse(
             &env("DHCP_MODE").unwrap_or_default(),
             flag("DHCP_ENABLED", false),
         );
-        let secret_dir = text("LANCACHE_SHARED_SECRET_DIR", "/var/lib/lancache-secrets");
+        let secret_dir = need("LANCACHE_SHARED_SECRET_DIR")?;
         let secret = |var: &str| shared_secret(&secret_dir, var, env);
         let login = |user_key: &str, password_key: &str| -> Result<NatsLogin, String> {
             Ok(NatsLogin {
@@ -272,12 +269,11 @@ impl Config {
             Some(v) if !shared_secret_is_placeholder(&v) => v,
             _ => secret("KEA_CTRL_TOKEN")?,
         };
-        let ttl = match env("UI_SESSION_TTL_SECONDS") {
-            Some(v) => v.trim().parse::<u64>().map_err(|_| {
+        let ttl = need("UI_SESSION_TTL_SECONDS").and_then(|v| {
+            v.trim().parse::<u64>().map_err(|_| {
                 format!("UI_SESSION_TTL_SECONDS must be an unsigned integer of seconds, got {v:?}")
-            })?,
-            None => 24 * 60 * 60,
-        };
+            })
+        })?;
         let startup_settings = HashMap::from([
             ("DHCP_MODE", dhcp_mode.as_str().to_string()),
             ("DHCP_SUBNET_START", text("DHCP_SUBNET_START", "")),
@@ -299,31 +295,30 @@ impl Config {
                 text("DHCP_PROXY_CUSTOM_OPTIONS", ""),
             ),
             ("LANCACHE_IMAGE_CHANNEL", channel.clone()),
+            // What: optional switches, off when unset.
+            // Why: no owner sets them; the ui settings file does.
             (
                 "AUTO_UPDATE_ENABLED",
                 bool_text(flag("AUTO_UPDATE_ENABLED", false)),
             ),
             ("NTP_ENABLED", bool_text(flag("NTP_ENABLED", false))),
-            (
-                "NTP_UPSTREAM_SERVERS",
-                text("NTP_UPSTREAM_SERVERS", DEFAULT_NTP_SERVERS),
-            ),
+            ("NTP_UPSTREAM_SERVERS", need("NTP_UPSTREAM_SERVERS")?),
             ("NTP_AUTO_DHCP", bool_text(flag("NTP_AUTO_DHCP", false))),
             ("CACHE_MAX_GB", cache_max_gb.to_string()),
         ]);
 
         Ok(Self {
-            template_dir: text("TEMPLATE_DIR", "/templates"),
+            template_dir: need("TEMPLATE_DIR")?,
             shared_secret_dir: secret_dir.clone(),
-            cdn_domains_file: text("CDN_DOMAINS_FILE", "/data/cdn-domains.txt"),
+            cdn_domains_file: need("CDN_DOMAINS_FILE")?,
             ssl_log: need("SSL_LOG")?,
             standard_log,
             cache_dir: need("CACHE_DIR")?,
-            dns_standard_state_dir: text("DNS_STANDARD_STATE_DIR", "/var/lib/powerdns-state"),
-            dns_ssl_state_dir: text("DNS_SSL_STATE_DIR", "/var/lib/powerdns-state"),
+            dns_standard_state_dir: need("DNS_STANDARD_STATE_DIR")?,
+            dns_ssl_state_dir: need("DNS_SSL_STATE_DIR")?,
             proxy_ssl_url: need("PROXY_SSL_URL")?,
             proxy_standard_url,
-            netdata_url: text("NETDATA_URL", "http://netdata:19999"),
+            netdata_url: need("NETDATA_URL")?,
             dns_standard_service: need("DNS_STANDARD_SERVICE")?,
             dns_ssl_service: need("DNS_SSL_SERVICE")?,
             proxy_ssl_service: need("PROXY_SSL_SERVICE")?,
@@ -332,14 +327,11 @@ impl Config {
             cache_max_gb,
             standard_ip,
             ssl_ip,
-            dhcp_api_url: text("DHCP_API_URL", "http://localhost:8000"),
+            dhcp_api_url: need("DHCP_API_URL")?,
             dhcp_api_token,
-            ui_settings_file: text("UI_SETTINGS_FILE", "/data/lancache-ui-settings.env"),
+            ui_settings_file: need("UI_SETTINGS_FILE")?,
             startup_settings,
-            kea_config_snapshot_dir: text(
-                "KEA_CONFIG_SNAPSHOT_DIR",
-                "/var/lib/kea/config-snapshots",
-            ),
+            kea_config_snapshot_dir: need("KEA_CONFIG_SNAPSHOT_DIR")?,
             kea_keep_known_good_configs: knob(
                 "KEEP_KNOWN_GOOD_CONFIGS",
                 3,
@@ -350,6 +342,8 @@ impl Config {
             auth_password: set("UI_AUTH_PASSWORD"),
             allow_insecure_ui: need_flag("ALLOW_INSECURE_UI")?,
             ui_session_ttl_seconds: ttl,
+            // What: security headers are on unless switched off.
+            // Why: no owner sets it; the safe state is the default.
             security_headers_enabled: flag("UI_SECURITY_HEADERS", true),
             hsts_mode: match text("UI_HSTS_MODE", "")
                 .trim()
@@ -364,10 +358,10 @@ impl Config {
                 as usize,
             pdns_auth_url: need("PDNS_AUTH_URL")?,
             pdns_rec_url: need("PDNS_REC_URL")?,
-            dns_rollback_url: text("DNS_ROLLBACK_URL", "http://dns-standard:8083"),
+            dns_rollback_url: need("DNS_ROLLBACK_URL")?,
             pdns_api_key: secret("PDNS_API_KEY")?,
             netdata_alarm_token: secret("NETDATA_ALARM_TOKEN")?,
-            netdata_alarms_file: text("NETDATA_ALARMS_FILE", "/data/netdata-alarms.json"),
+            netdata_alarms_file: need("NETDATA_ALARMS_FILE")?,
             nats_url: need("NATS_URL")?,
             advertised_nats_url: advertised_nats_url(
                 &text("NATS_ADVERTISE_URL", ""),
@@ -378,19 +372,19 @@ impl Config {
             nats_dns_replica: login("NATS_DNS_REPLICA_USER", "NATS_DNS_REPLICA_PASSWORD")?,
             nats_callout: login("NATS_CALLOUT_USER", "NATS_CALLOUT_PASSWORD")?,
             nats_sys: login("NATS_SYS_USER", "NATS_SYS_PASSWORD")?,
-            nats_issuer_seed_path: text("NATS_ISSUER_SEED_PATH", "/data/lancache-nats-issuer.seed"),
+            nats_issuer_seed_path: need("NATS_ISSUER_SEED_PATH")?,
             nats_issuer_seed: set("NATS_ISSUER_SEED"),
-            nats_xkey_seed_path: text("NATS_XKEY_SEED_PATH", "/data/lancache-nats-xkey.seed"),
+            nats_xkey_seed_path: need("NATS_XKEY_SEED_PATH")?,
             nats_xkey_seed: set("NATS_XKEY_SEED"),
             secondary_registration_token: text("SECONDARY_REGISTRATION_TOKEN", ""),
             lancache_image_registry: need("LANCACHE_IMAGE_REGISTRY")?,
             lancache_image_prefix: need("LANCACHE_IMAGE_PREFIX")?,
             lancache_image_channel: channel,
             lancache_image_tag: tag,
-            nats_conf_path: text("NATS_CONF_PATH", "/etc/nats/nats.conf"),
-            nats_auth_callout_path: text("NATS_AUTH_CALLOUT_PATH", "/etc/nats/auth_callout.conf"),
-            nats_service: text("NATS_SERVICE", "nats"),
-            nats_log_file: text("NATS_LOG_FILE", "/var/log/lancache-nats/nats.log"),
+            nats_conf_path: need("NATS_CONF_PATH")?,
+            nats_auth_callout_path: need("NATS_AUTH_CALLOUT_PATH")?,
+            nats_service: need("NATS_SERVICE")?,
+            nats_log_file: need("NATS_LOG_FILE")?,
             nats_store_dir: set("NATS_STORE_DIR"),
             nats_monitor_port: set("NATS_MONITOR_PORT"),
             netdata_conf_file: set("NETDATA_CONF_FILE"),
@@ -401,12 +395,14 @@ impl Config {
             netdata_alarm_ui_url: set("NETDATA_ALARM_UI_URL"),
             netdata_alarm_max_time: set("NETDATA_ALARM_MAX_TIME"),
             netdata_alarm_recipient: set("NETDATA_ALARM_RECIPIENT"),
+            // What: dev mode is an optional switch, off.
+            // Why: no owner sets it; production must not enable it.
             dev_mode: flag("LANCACHE_DEV_MODE", false),
-            syslog_enabled: flag("SYSLOG_ENABLED", false),
-            syslog_log_root: text("SYSLOG_LOG_ROOT", "/var/log/lancache-syslog-ng"),
+            syslog_enabled: need_flag("SYSLOG_ENABLED")?,
+            syslog_log_root: need("SYSLOG_LOG_ROOT")?,
             syslog_max_gb: knob("SYSLOG_MAX_GB", 10, 1_048_576, OutOfRange::Clamp) as u32,
-            watchdog_status_file: text("WATCHDOG_STATUS_FILE", "/var/run/watchdog/status.json"),
-            desired_state_file: text("DESIRED_STATE_FILE", "/data/desired-state.json"),
+            watchdog_status_file: need("WATCHDOG_STATUS_FILE")?,
+            desired_state_file: need("DESIRED_STATE_FILE")?,
         })
     }
 

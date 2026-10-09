@@ -849,8 +849,21 @@ services:
       - watchdog-status:/var/run/watchdog:ro
     ports:
       - "${UI_BIND_IP:-${IP_STANDARD}}:8080:8080"
+    # What: the ntp service's env files, for NTP_UPSTREAM_SERVERS.
+    # Why: config/prod/ntp.env owns that list; the ui keeps no copy.
+    env_file:
+      - ../../config/prod/ntp.env
+      - path: ../../config/prod/ntp.local.env
+        required: false
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
+      # What: paths of the mounts above, as the ui must read them.
+      # Why: compose owns the mount targets; the ui keeps no copy.
+      - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
+      - WATCHDOG_STATUS_FILE=/var/run/watchdog/status.json
+      - DESIRED_STATE_FILE=/data/desired-state.json
+      - NATS_SERVICE=nats
+      - NATS_LOG_FILE=/var/log/lancache-nats/nats.log
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
       - KEA_CONFIG_SNAPSHOT_DIR=${KEA_CONFIG_SNAPSHOT_DIR:?KEA_CONFIG_SNAPSHOT_DIR is required}

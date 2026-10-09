@@ -349,6 +349,23 @@ services:
       - "127.0.0.1:${VALIDATION_UI_PORT:-9090}:8080"
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
+      # What: every value the ui needs, as deploy/prod sets it.
+      # Why: the ui keeps no defaults; absent services stay unused.
+      - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
+      - WATCHDOG_STATUS_FILE=/var/run/watchdog/status.json
+      - DESIRED_STATE_FILE=/data/desired-state.json
+      - NATS_SERVICE=nats
+      - NATS_LOG_FILE=/var/log/lancache-nats/nats.log
+      - DNS_STANDARD_STATE_DIR=/var/lib/powerdns-state
+      - DNS_SSL_STATE_DIR=/var/lib/powerdns-state
+      - DNS_ROLLBACK_URL=http://dns-standard:8083
+      - NETDATA_URL=http://netdata:19999
+      - DHCP_API_URL=http://localhost:8000
+      - KEA_CONFIG_SNAPSHOT_DIR=/var/lib/kea/config-snapshots
+      - SYSLOG_ENABLED=false
+      - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
+      - UI_SESSION_TTL_SECONDS=86400
+      - NTP_UPSTREAM_SERVERS=0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
       - SSL_ENABLED=1

@@ -112,6 +112,18 @@ ENV VISUAL=$EDITOR
 COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
 COPY services/ui/src/templates /templates
 
+# What: the ui's own file layout, handed to it as environment.
+# Why: this image creates these paths; Rust keeps no copy.
+# From: Issue #1683
+ENV TEMPLATE_DIR=/templates \
+    CDN_DOMAINS_FILE=/data/cdn-domains.txt \
+    UI_SETTINGS_FILE=/data/lancache-ui-settings.env \
+    NETDATA_ALARMS_FILE=/data/netdata-alarms.json \
+    NATS_ISSUER_SEED_PATH=/data/lancache-nats-issuer.seed \
+    NATS_XKEY_SEED_PATH=/data/lancache-nats-xkey.seed \
+    NATS_CONF_PATH=/etc/nats/nats.conf \
+    NATS_AUTH_CALLOUT_PATH=/etc/nats/auth_callout.conf
+
 # What: one ui runtime uid/gid for user and binary.
 # Why: nginx logs share it; the root start drops to it.
 # From: Issue #1427 | PR #1858
