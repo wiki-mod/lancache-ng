@@ -923,16 +923,15 @@ CASES
 # Why: only the GHA cache runtime may reach later steps.
 # From: Issue #1683 | PR #1858
 @test "gha-runtime-args: kill-bounded step exports only the GHA cache runtime pair" {
-    local t out envf other args got
+    local t out envf other args got split
     local -a argv
     t="$(_val int 5 120)"; out="$(_val path)"; envf="$(_val path)"; other="ACTIONS_$(_val name)"
-    : > "${out}"
     CI_GHA_RUNTIME_EXPORT_TIMEOUT="${t}" GITHUB_OUTPUT="${out}" run ci_cmd_gha_runtime_args
     _expect args 0 "-s KILL ${t} /bin/sh -c " || return 1
     args="${lines[${#lines[@]}-1]}"
     [ "$(<"${out}")" = "args=${args}" ] || { echo "step output: $(<"${out}")"; return 1; }
-    mapfile -t argv < <(printf '%s' "${args}" | xargs -n1 printf '%s\n')
-    : > "${envf}"
+    split="$(printf '%s' "${args}" | xargs -n1 printf '%s\n')" || { echo "args not splittable: ${args}"; return 1; }
+    mapfile -t argv <<< "${split}"
     local ru tok
     ru="$(_val url)"; tok="$(_val name)"
     run env -i PATH="${PATH}" GITHUB_ENV="${envf}" ACTIONS_RESULTS_URL="${ru}" ACTIONS_RUNTIME_TOKEN="${tok}" \
