@@ -166,6 +166,7 @@ pub const CONTAINER_UI: &str = "lancache-ui";
 pub const CONTAINER_NETDATA: &str = "lancache-netdata";
 pub const CONTAINER_DHCP: &str = "lancache-dhcp";
 pub const CONTAINER_DHCP_PROXY: &str = "lancache-dhcp-proxy";
+pub const CONTAINER_DHCP_PROBE: &str = "lancache-dhcp-probe";
 pub const CONTAINER_SYSLOG: &str = "lancache-syslog";
 pub const CONTAINER_NTP: &str = "lancache-ntp";
 pub const CONTAINER_DOCKER_SOCKET_PROXY: &str = "lancache-docker-socket-proxy";
