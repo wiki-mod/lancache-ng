@@ -17,7 +17,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 
 // What: health of one service in watchdog's status.json.
@@ -429,9 +429,169 @@ pub fn load_or_create_hex<const N: usize>(path: &Path) -> anyhow::Result<[u8; N]
     )
 }
 
+// What: why a Docker call failed.
+// Why: callers act on 404 and timeouts, not on message text.
+#[derive(Debug)]
+pub enum DockerError {
+    Status(u16),
+    Timeout,
+    Transport(String),
+}
+
+impl std::fmt::Display for DockerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Status(code) => write!(f, "Docker answered HTTP {code}"),
+            Self::Timeout => write!(f, "Docker call timed out"),
+            Self::Transport(message) => write!(f, "Docker call failed: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for DockerError {}
+
+// What: the text of a Docker log stream without frame headers.
+// Why: a container without a tty multiplexes its streams.
+fn log_text(mut bytes: &[u8]) -> String {
+    let mut text = String::new();
+    while bytes.len() >= 8 {
+        let size = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        let end = bytes.len().min(8usize.saturating_add(size));
+        if matches!(bytes[0], 1 | 2) {
+            text.push_str(&String::from_utf8_lossy(&bytes[8..end]));
+        }
+        bytes = &bytes[end..];
+    }
+    text
+}
+
+// What: client of the allowlisted Docker calls of the proxy.
+// Why: ui and watchdog drive containers; one client owns it.
+// From: Issue #1683 | PR #1858
+pub struct DockerProxy {
+    client: reqwest::Client,
+    base_url: String,
+}
+
+impl DockerProxy {
+    pub fn new(base_url: &str) -> Self {
+        let client = reqwest::Client::builder()
+            // What: never follow a redirect.
+            // Why: a 3xx could reach an ungranted path.
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("a client without custom TLS settings always builds");
+        Self {
+            client,
+            base_url: base_url.trim().trim_end_matches('/').to_string(),
+        }
+    }
+
+    // What: one call; the body of a 2xx or 304 answer.
+    // Why: 304 means the container already is in that state.
+    async fn call(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<u8>, DockerError> {
+        let failed = |e: reqwest::Error| match e.is_timeout() {
+            true => DockerError::Timeout,
+            false => DockerError::Transport(e.to_string()),
+        };
+        let mut request = self
+            .client
+            .request(method, format!("{}{path}", self.base_url));
+        // What: bound connect, headers and body together.
+        // Why: a stalled body must not hang the caller.
+        if let Some(limit) = timeout {
+            request = request.timeout(limit);
+        }
+        let response = request.send().await.map_err(failed)?;
+        let status = response.status();
+        if !status.is_success() && status != reqwest::StatusCode::NOT_MODIFIED {
+            return Err(DockerError::Status(status.as_u16()));
+        }
+        response.bytes().await.map(|b| b.to_vec()).map_err(failed)
+    }
+
+    // What: container inspect JSON, None on any failure.
+    // Why: one read feeds health and running state.
+    pub async fn inspect(&self, name: &str, timeout: Option<Duration>) -> Option<Value> {
+        let path = format!("/containers/{name}/json");
+        let body = self.call(reqwest::Method::GET, &path, timeout).await.ok()?;
+        serde_json::from_slice(&body).ok()
+    }
+
+    // What: POST one container action such as start or stop.
+    // Why: one call shape for every state change.
+    pub async fn act(
+        &self,
+        name: &str,
+        action: &str,
+        timeout: Option<Duration>,
+    ) -> Result<(), DockerError> {
+        let path = format!("/containers/{name}/{action}");
+        self.call(reqwest::Method::POST, &path, timeout)
+            .await
+            .map(|_| ())
+    }
+
+    // What: GET /_ping; true only for the body "OK".
+    // Why: a 200 stalling before the body must fail.
+    pub async fn ping(&self, timeout: Option<Duration>) -> bool {
+        matches!(
+            self.call(reqwest::Method::GET, "/_ping", timeout).await,
+            Ok(body) if body.trim_ascii() == b"OK"
+        )
+    }
+
+    // What: block until the container stops; its exit code.
+    // Why: the DHCP probe is a one-shot container.
+    pub async fn wait(&self, name: &str, timeout: Option<Duration>) -> Result<i64, DockerError> {
+        let path = format!("/containers/{name}/wait?condition=not-running");
+        let body = self.call(reqwest::Method::POST, &path, timeout).await?;
+        serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|answer| answer.get("StatusCode")?.as_i64())
+            .ok_or_else(|| DockerError::Transport("the wait answer has no StatusCode".into()))
+    }
+
+    // What: container output since a unix time, both streams.
+    // Why: the probe result is a line in its output.
+    pub async fn logs(
+        &self,
+        name: &str,
+        since: u64,
+        timeout: Option<Duration>,
+    ) -> Result<String, DockerError> {
+        let path = format!("/containers/{name}/logs?stdout=1&stderr=1&since={since}");
+        let body = self.call(reqwest::Method::GET, &path, timeout).await?;
+        Ok(log_text(&body))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // What: log frames join; foreign streams and cut tails drop.
+    // Why: the probe result line must survive the frame headers.
+    #[test]
+    fn log_text_joins_stdout_and_stderr_frames() {
+        let frames = [
+            &[1, 0, 0, 0, 0, 0, 0, 3][..],
+            b"abc",
+            &[2, 0, 0, 0, 0, 0, 0, 2][..],
+            b"de",
+            &[0, 0, 0, 0, 0, 0, 0, 1][..],
+            b"x",
+            &[1, 0, 0, 0, 0, 0, 0, 9][..],
+            b"cut",
+        ]
+        .concat();
+        assert_eq!(log_text(&frames), "abcdecut");
+    }
 
     // What: each known placeholder shape is detected.
     // Why: a shipped example must never pass as a secret.

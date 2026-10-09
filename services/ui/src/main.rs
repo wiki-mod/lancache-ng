@@ -17,27 +17,20 @@ use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Json, Redirect, Response};
 use axum::routing::{MethodRouter, delete, get, post};
 use base64::Engine as _;
-use bollard::Docker;
-use bollard::container::LogOutput;
-use bollard::errors::Error as BollardError;
-use bollard::query_parameters::{
-    LogsOptionsBuilder, RestartContainerOptionsBuilder, StopContainerOptionsBuilder,
-    WaitContainerOptionsBuilder,
-};
 use dhcproto::v4::{DhcpOption, Flags, Message, MessageType, OptionCode};
 use dhcproto::{Decodable, Decoder, Encodable, Encoder};
 use futures_util::StreamExt as _;
 use lancache_common::config::{
     CONTAINER_DHCP, CONTAINER_DHCP_PROBE, CONTAINER_DHCP_PROXY, CONTAINER_DNS_SSL,
     CONTAINER_DNS_STANDARD, CONTAINER_NATS, CONTAINER_NETDATA, CONTAINER_NTP, CONTAINER_PROXY,
-    CONTAINER_SYSLOG, CONTAINER_UI, DhcpMode, NATS_STREAM_DNS, NATS_SUBJECT_DNS,
-    NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, OutOfRange, Uint, canonical_zone, parse_bool,
-    rollback_zones, zone_api_id,
+    CONTAINER_SYSLOG, CONTAINER_UI, DOCKER_PROXY_DEFAULT_URL, DhcpMode, NATS_STREAM_DNS,
+    NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, OutOfRange, Uint, canonical_zone,
+    parse_bool, rollback_zones, zone_api_id,
 };
 use lancache_common::{
-    DesiredRunState, DesiredState, DnsRecord, FlushRequest, Place, SnapshotStore, WatchdogStatus,
-    ct_eq, df, is_placeholder, load_or_create, load_or_create_hex, snapshot_created_unix,
-    write_file, write_file_as, write_if_changed,
+    DesiredRunState, DesiredState, DnsRecord, DockerError, DockerProxy, FlushRequest, Place,
+    SnapshotStore, WatchdogStatus, ct_eq, df, is_placeholder, load_or_create, load_or_create_hex,
+    snapshot_created_unix, write_file, write_file_as, write_if_changed,
 };
 use nkeys::{KeyPair, XKey};
 use regex::Regex;
@@ -149,6 +142,7 @@ struct Config {
     dns_standard_service: String,
     dns_ssl_service: String,
     proxy_ssl_service: String,
+    docker_proxy_url: String,
     ssl_enabled: bool,
     cache_max_gb: f64,
     standard_ip: String,
@@ -322,6 +316,7 @@ impl Config {
             dns_standard_service: text("DNS_STANDARD_SERVICE", "dns-standard"),
             dns_ssl_service: text("DNS_SSL_SERVICE", "dns-ssl"),
             proxy_ssl_service: or("PROXY_SSL_SERVICE", &proxy_service),
+            docker_proxy_url: or("DOCKER_PROXY_URL", DOCKER_PROXY_DEFAULT_URL),
             ssl_enabled: flag("SSL_ENABLED", true),
             cache_max_gb,
             standard_ip,
@@ -683,7 +678,7 @@ const ADMIN_UI_CSP: &str = "default-src 'self'; base-uri 'self'; object-src 'non
 struct AppState {
     templates: Tera,
     config: Config,
-    docker: Docker,
+    docker: DockerProxy,
     http_client: reqwest::Client,
     file_lock: Mutex<()>,
     netdata_alarms_lock: Mutex<()>,
@@ -1120,23 +1115,9 @@ const DOCKER_SERVICES: [(&str, &str); 9] = [
     ("ui", CONTAINER_UI),
 ];
 
-// What: connect to Docker via proxy URL, tcp host or socket.
-// Why: the production stack reaches Docker only via the proxy.
-fn connect_docker() -> anyhow::Result<Docker> {
-    let tcp = |url: &str, what: &str| {
-        Docker::connect_with_http(url, 120, bollard::API_DEFAULT_VERSION)
-            .with_context(|| format!("Failed to connect to Docker {what}"))
-    };
-    let proxy = std::env::var("DOCKER_PROXY_URL").unwrap_or_default();
-    if !proxy.trim().is_empty() {
-        return tcp(proxy.trim(), "proxy");
-    }
-    let host = std::env::var("DOCKER_HOST").unwrap_or_default();
-    if let Some(url) = host.trim().strip_prefix("tcp://").filter(|u| !u.is_empty()) {
-        return tcp(url, "host");
-    }
-    Docker::connect_with_socket_defaults().context("Failed to connect to Docker socket")
-}
+// What: time bound of one Docker call from the ui.
+// Why: a stuck proxy must not hang a page request.
+const DOCKER_TIMEOUT: Duration = Duration::from_secs(120);
 
 // What: the container name of an allowlisted service.
 // Why: any other name is refused before Docker sees it.
@@ -1155,10 +1136,13 @@ fn container_name(service: &str) -> anyhow::Result<&'static str> {
 
 // What: restart a service container after a 5 s grace.
 // Why: nginx-style daemons need a moment to drain.
-async fn docker_restart(docker: &Docker, service: &str) -> anyhow::Result<()> {
-    let options = RestartContainerOptionsBuilder::default().t(5).build();
+async fn docker_restart(docker: &DockerProxy, service: &str) -> anyhow::Result<()> {
     docker
-        .restart_container(container_name(service)?, Some(options))
+        .act(
+            container_name(service)?,
+            "restart?t=5",
+            Some(DOCKER_TIMEOUT),
+        )
         .await
         .with_context(|| format!("Failed to restart '{service}'"))?;
     tracing::info!("Restarted service '{service}'");
@@ -1167,31 +1151,27 @@ async fn docker_restart(docker: &Docker, service: &str) -> anyhow::Result<()> {
 
 // What: start a service container.
 // Why: the stop/start pairs of the mode switches need it.
-async fn docker_start(docker: &Docker, service: &str) -> anyhow::Result<()> {
+async fn docker_start(docker: &DockerProxy, service: &str) -> anyhow::Result<()> {
     docker
-        .start_container(container_name(service)?, None)
+        .act(container_name(service)?, "start", Some(DOCKER_TIMEOUT))
         .await
         .with_context(|| format!("Failed to start '{service}'"))?;
     tracing::info!("Started service '{service}'");
     Ok(())
 }
 
-// What: stop a service; already stopped or absent is fine.
-// Why: 304 and 404 mean the wanted state already holds.
-async fn docker_stop_if_present(docker: &Docker, service: &str) -> anyhow::Result<()> {
-    let options = StopContainerOptionsBuilder::default().t(10).build();
+// What: stop a service; an absent container is fine.
+// Why: a 404 means the wanted state already holds.
+async fn docker_stop_if_present(docker: &DockerProxy, service: &str) -> anyhow::Result<()> {
     match docker
-        .stop_container(container_name(service)?, Some(options))
+        .act(container_name(service)?, "stop?t=10", Some(DOCKER_TIMEOUT))
         .await
     {
         Ok(()) => {
             tracing::info!("Stopped service '{service}'");
             Ok(())
         }
-        Err(BollardError::DockerResponseServerError {
-            status_code: 304 | 404,
-            ..
-        }) => Ok(()),
+        Err(DockerError::Status(404)) => Ok(()),
         Err(err) => Err(err).with_context(|| format!("Failed to stop '{service}'")),
     }
 }
@@ -1201,11 +1181,8 @@ async fn docker_stop_if_present(docker: &Docker, service: &str) -> anyhow::Resul
 fn container_never_created(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         matches!(
-            cause.downcast_ref::<BollardError>(),
-            Some(BollardError::DockerResponseServerError {
-                status_code: 404,
-                ..
-            })
+            cause.downcast_ref::<DockerError>(),
+            Some(DockerError::Status(404))
         )
     })
 }
@@ -5082,26 +5059,6 @@ fn tail_bytes(text: &str, max: usize) -> String {
     format!("...(truncated)... {}", text[start..].trim())
 }
 
-// What: container output since a time, both streams.
-// Why: Docker delivers chunks, so everything is joined first.
-async fn probe_logs(docker: &Docker, container: &str, since: i32) -> anyhow::Result<String> {
-    let options = LogsOptionsBuilder::default()
-        .stdout(true)
-        .stderr(true)
-        .since(since)
-        .build();
-    let mut logs = docker.logs(container, Some(options));
-    let mut text = String::new();
-    while let Some(chunk) = logs.next().await {
-        if let LogOutput::StdOut { message } | LogOutput::StdErr { message } =
-            chunk.context("read container log chunk")?
-        {
-            text.push_str(&String::from_utf8_lossy(&message));
-        }
-    }
-    Ok(text)
-}
-
 // What: the output of the newest run in a log text.
 // Why: Docker's since filter is coarse; old runs can leak in.
 fn current_run(logs: &str) -> &str {
@@ -5111,7 +5068,7 @@ fn current_run(logs: &str) -> &str {
 
 // What: run the probe container once; return its output.
 // Why: the proxy only allows start, wait and logs.
-async fn run_dhcp_probe(docker: &Docker) -> Result<String, String> {
+async fn run_dhcp_probe(docker: &DockerProxy) -> Result<String, String> {
     let failed = |e: anyhow::Error| format!("Failed to execute DHCP check: {e:#}");
     let container = container_name("dhcp-probe").map_err(failed)?;
     docker_stop_if_present(docker, "dhcp-probe")
@@ -5121,39 +5078,23 @@ async fn run_dhcp_probe(docker: &Docker) -> Result<String, String> {
     // Why: the logs call must not read the previous run.
     let since = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs().min(i32::MAX as u64) as i32);
+        .map_or(0, |d| d.as_secs());
     docker_start(docker, "dhcp-probe").await.map_err(failed)?;
 
-    let options = WaitContainerOptionsBuilder::default()
-        .condition("not-running")
-        .build();
-    let mut wait = docker.wait_container(container, Some(options));
     let begun = Instant::now();
-    let finished = match tokio::time::timeout(PROBE_WAIT_TIMEOUT, wait.next()).await {
-        Ok(Some(Ok(done))) => done,
-        Ok(Some(Err(e))) => {
-            return Err(format!(
-                "Failed to execute DHCP check: read DHCP probe wait response: {e}"
-            ));
-        }
-        Ok(None) => {
-            return Err(
-                "Failed to execute DHCP check: DHCP probe container wait stream ended \
-                        without a result"
-                    .into(),
-            );
-        }
+    let exit_code = match docker.wait(container, Some(PROBE_WAIT_TIMEOUT)).await {
+        Ok(code) => code,
         // What: keep the output and stop a container that hangs.
         // Why: a bare timeout must say what the probe was doing.
-        Err(_) => {
-            let tail = match probe_logs(docker, container, since).await {
+        Err(DockerError::Timeout) => {
+            let tail = match docker.logs(container, since, Some(DOCKER_TIMEOUT)).await {
                 Ok(logs) => match tail_bytes(current_run(&logs), PROBE_LOG_TAIL_BYTES) {
                     tail if tail.is_empty() => {
                         "(none -- the container produced no output before the timeout)".to_string()
                     }
                     tail => tail,
                 },
-                Err(e) => format!("(failed to capture probe container logs: {e:#})"),
+                Err(e) => format!("(failed to capture probe container logs: {e})"),
             };
             let stopped = match docker_stop_if_present(docker, "dhcp-probe").await {
                 Ok(()) => "the presumed-stuck container was stopped".to_string(),
@@ -5165,15 +5106,20 @@ async fn run_dhcp_probe(docker: &Docker) -> Result<String, String> {
                 begun.elapsed().as_secs_f64()
             ));
         }
+        Err(e) => {
+            return Err(format!(
+                "Failed to execute DHCP check: read DHCP probe wait response: {e}"
+            ));
+        }
     };
-    let logs = probe_logs(docker, container, since)
+    let logs = docker
+        .logs(container, since, Some(DOCKER_TIMEOUT))
         .await
-        .map_err(|e| failed(e.context("read DHCP probe logs")))?;
+        .map_err(|e| format!("Failed to execute DHCP check: read DHCP probe logs: {e}"))?;
     let output = current_run(&logs).to_string();
-    if finished.status_code != 0 {
+    if exit_code != 0 {
         return Err(format!(
-            "DHCP probe container exited with code {}: {}",
-            finished.status_code,
+            "DHCP probe container exited with code {exit_code}: {}",
             output.trim()
         ));
     }
@@ -7254,7 +7200,7 @@ async fn run() -> anyhow::Result<()> {
     let nats = connect_nats_with_retry(&cfg).await;
     let state = Arc::new(AppState {
         templates: load_templates(&cfg),
-        docker: connect_docker()?,
+        docker: DockerProxy::new(&cfg.docker_proxy_url),
         http_client: reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()?,

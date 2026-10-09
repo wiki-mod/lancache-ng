@@ -14,10 +14,6 @@ license.workspace = true
 [dependencies]
 lancache-common = { path = "../common" }
 serde_json = { workspace = true }
-# What: reqwest client for docker-socket-proxy, on rustls.
-# Why: AG-REL-003 forbids openssl-sys.
-# From: Issue #1683 | PR #1858
-reqwest = { workspace = true }
 tokio = { workspace = true }
 # What: time with the macros feature.
 # Why: status.json timestamps use format_description!.

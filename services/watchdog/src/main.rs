@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use lancache_common::config::{self, DhcpMode, OutOfRange, Uint, env_opt, parse_bool};
 use lancache_common::{
-    DesiredRunState, DesiredState, DiskHealth, DiskInfo, Place, ServiceHealth, WatchdogStatus, df,
-    write_file,
+    DesiredRunState, DesiredState, DiskHealth, DiskInfo, DockerProxy, Place, ServiceHealth,
+    WatchdogStatus, df, write_file,
 };
 use time::OffsetDateTime;
 
@@ -28,7 +28,7 @@ struct Settings {
     check_interval: Duration,
     restart_after: u32,
     // What: None means no timeout, like curl --max-time 0.
-    // Why: ZERO would mean "instant" to bounded().
+    // Why: ZERO would mean "instant" to the proxy client.
     curl_max_time: Option<Duration>,
     curl_max_time_restart: Option<Duration>,
     disk_warn_pct: u32,
@@ -146,7 +146,7 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
 
     let settings = Settings {
         docker_proxy_url: get("DOCKER_PROXY_URL")
-            .unwrap_or_else(|| "http://docker-socket-proxy:2375".to_string()),
+            .unwrap_or_else(|| config::DOCKER_PROXY_DEFAULT_URL.to_string()),
         check_interval: Duration::from_secs(check_interval),
         restart_after: restart_after as u32,
         curl_max_time,
@@ -330,75 +330,6 @@ fn targets(s: &Settings) -> Vec<(&'static str, bool)> {
     list
 }
 
-// What: run fut under timeout; None means no bound.
-// Why: the bound must cover headers and body together.
-async fn bounded<T>(
-    timeout: Option<Duration>,
-    fut: impl std::future::Future<Output = T>,
-) -> Option<T> {
-    match timeout {
-        Some(t) => tokio::time::timeout(t, fut).await.ok(),
-        None => Some(fut.await),
-    }
-}
-
-// What: client for the allowlisted Docker calls.
-// Why: restart needs a longer budget than health reads.
-struct DockerProxyClient {
-    client: reqwest::Client,
-    base_url: String,
-}
-
-impl DockerProxyClient {
-    // What: send a request; Some only for a 2xx answer.
-    // Why: every failure collapses to None for the callers.
-    async fn request(&self, method: reqwest::Method, path: &str) -> Option<reqwest::Response> {
-        let url = format!("{}{path}", self.base_url);
-        let response = self.client.request(method, url).send().await.ok()?;
-        response.status().is_success().then_some(response)
-    }
-
-    // What: container inspect JSON, None on any failure.
-    // Why: one read feeds health and running state.
-    async fn inspect(&self, name: &str, timeout: Option<Duration>) -> Option<serde_json::Value> {
-        bounded(timeout, async {
-            self.request(reqwest::Method::GET, &format!("/containers/{name}/json"))
-                .await?
-                .json()
-                .await
-                .ok()
-        })
-        .await
-        .flatten()
-    }
-
-    // What: POST one container action; true on 2xx.
-    // Why: a failed action is only logged, never counted.
-    async fn act(&self, name: &str, action: &str, timeout: Option<Duration>) -> bool {
-        bounded(timeout, async {
-            let path = format!("/containers/{name}/{action}");
-            self.request(reqwest::Method::POST, &path).await.is_some()
-        })
-        .await
-        .unwrap_or(false)
-    }
-
-    // What: GET /_ping; true only for the body "OK".
-    // Why: a 200 stalling before the body must fail.
-    async fn ping(&self, timeout: Option<Duration>) -> bool {
-        let body = bounded(timeout, async {
-            self.request(reqwest::Method::GET, "/_ping")
-                .await?
-                .text()
-                .await
-                .ok()
-        })
-        .await
-        .flatten();
-        matches!(body.as_deref().map(str::trim), Some("OK"))
-    }
-}
-
 // What: UTC time as YYYY-MM-DDTHH:MM:SSZ, no fractions.
 // Why: status.json's `updated` format is a fixed contract.
 fn stamp(at: OffsetDateTime) -> String {
@@ -469,7 +400,7 @@ fn log_err(msg: &str) {
 // What: start or stop dhcp/ntp to the desired state.
 // Why: watchdog is the sole actor; no opinion means no action.
 // From: Issue #1437
-async fn reconcile(client: &DockerProxyClient, s: &Settings) {
+async fn reconcile(client: &DockerProxy, s: &Settings) {
     let desired = DesiredState::read(&s.desired_state_file);
     let mut services = Vec::new();
     if let Some(name) = s.dhcp_mode.container() {
@@ -499,7 +430,11 @@ async fn reconcile(client: &DockerProxyClient, s: &Settings) {
         log(&format!(
             "{verb} {name} ({label}: desired state is {state})"
         ));
-        if !client.act(name, action, s.curl_max_time_restart).await {
+        if client
+            .act(name, action, s.curl_max_time_restart)
+            .await
+            .is_err()
+        {
             log_err(&format!("WARNING: {action} call failed for {name}"));
         }
     }
@@ -535,15 +470,7 @@ async fn main() {
         std::process::exit(1);
     });
     warnings.iter().for_each(|w| log(w));
-    let client = DockerProxyClient {
-        client: reqwest::Client::builder()
-            // What: never follow a redirect.
-            // Why: a 3xx could reach an ungranted path.
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("building the reqwest client must not fail (no invalid static config)"),
-        base_url: s.docker_proxy_url.clone(),
-    };
+    let client = DockerProxy::new(&s.docker_proxy_url);
 
     let list = targets(&s);
     let names = |restart: bool| {
@@ -611,9 +538,10 @@ async fn main() {
                     let n = s.restart_after;
                     log(&format!("UNHEALTHY {name} ({n}/{n})"));
                     log(&format!("RESTARTING {name}"));
-                    if !client
+                    if client
                         .act(name, "restart?t=2", s.curl_max_time_restart)
                         .await
+                        .is_err()
                     {
                         log(&format!("WARNING: restart call failed for {name}"));
                     }
