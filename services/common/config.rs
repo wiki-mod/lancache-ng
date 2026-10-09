@@ -156,10 +156,6 @@ impl DhcpMode {
     }
 }
 
-// What: where the docker-socket-proxy listens by default.
-// Why: ui and watchdog reach Docker only through it.
-pub const DOCKER_PROXY_DEFAULT_URL: &str = "http://docker-socket-proxy:2375";
-
 // What: fixed container names of the stack.
 // Why: compose, the socket-proxy policy and services agree.
 pub const CONTAINER_PROXY: &str = "lancache-proxy";

@@ -144,9 +144,13 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
         (None, None, None) => "/var/cache/lancache".to_string(),
     };
 
+    // What: the Docker API entry point must come from the env.
+    // Why: watchdog.env and compose own it; no default here.
+    let docker_proxy_url =
+        get("DOCKER_PROXY_URL").ok_or_else(|| "FATAL: DOCKER_PROXY_URL is not set.".to_string())?;
+
     let settings = Settings {
-        docker_proxy_url: get("DOCKER_PROXY_URL")
-            .unwrap_or_else(|| config::DOCKER_PROXY_DEFAULT_URL.to_string()),
+        docker_proxy_url,
         check_interval: Duration::from_secs(check_interval),
         restart_after: restart_after as u32,
         curl_max_time,
@@ -591,14 +595,15 @@ async fn main() {
 mod tests {
     use super::*;
 
-    // What: settings from a fixed list of env pairs.
-    // Why: tests read literal values and set no process env.
+    // What: settings from env pairs plus a test proxy URL.
+    // Why: the URL is required; tests set no process env.
     fn load(pairs: &[(&str, &str)]) -> Result<(Settings, Vec<String>), String> {
         load_settings(|name| {
             pairs
                 .iter()
                 .find(|(key, _)| *key == name)
                 .map(|(_, value)| value.to_string())
+                .or_else(|| (name == "DOCKER_PROXY_URL").then(|| "http://proxy.test:1".to_string()))
         })
     }
 

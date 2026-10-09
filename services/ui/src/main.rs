@@ -23,9 +23,9 @@ use futures_util::StreamExt as _;
 use lancache_ng::config::{
     CONTAINER_DHCP, CONTAINER_DHCP_PROBE, CONTAINER_DHCP_PROXY, CONTAINER_DNS_SSL,
     CONTAINER_DNS_STANDARD, CONTAINER_NATS, CONTAINER_NETDATA, CONTAINER_NTP, CONTAINER_PROXY,
-    CONTAINER_SYSLOG, CONTAINER_UI, DOCKER_PROXY_DEFAULT_URL, DhcpMode, NATS_STREAM_DNS,
-    NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, OutOfRange, Uint, canonical_zone,
-    parse_bool, rollback_zones, zone_api_id,
+    CONTAINER_SYSLOG, CONTAINER_UI, DhcpMode, NATS_STREAM_DNS, NATS_SUBJECT_DNS,
+    NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, OutOfRange, Uint, canonical_zone, parse_bool,
+    rollback_zones, zone_api_id,
 };
 use lancache_ng::{
     DesiredRunState, DesiredState, DnsRecord, DockerError, DockerProxy, FlushRequest, Place,
@@ -242,6 +242,9 @@ impl Config {
         // Why: no LAN address may be hardcoded (AG-SEC-007).
         let standard_ip = set("STANDARD_IP").ok_or("STANDARD_IP must be set")?;
         let ssl_ip = set("SSL_IP").ok_or("SSL_IP must be set")?;
+        // What: the Docker API entry point must come from compose.
+        // Why: compose owns the value; no second default here.
+        let docker_proxy_url = set("DOCKER_PROXY_URL").ok_or("DOCKER_PROXY_URL must be set")?;
         let tag = text("LANCACHE_IMAGE_TAG", "latest");
         let channel = set("LANCACHE_IMAGE_CHANNEL")
             .filter(|v| !v.trim().is_empty())
@@ -318,7 +321,7 @@ impl Config {
             dns_standard_service: text("DNS_STANDARD_SERVICE", "dns-standard"),
             dns_ssl_service: text("DNS_SSL_SERVICE", "dns-ssl"),
             proxy_ssl_service: or("PROXY_SSL_SERVICE", &proxy_service),
-            docker_proxy_url: or("DOCKER_PROXY_URL", DOCKER_PROXY_DEFAULT_URL),
+            docker_proxy_url,
             ssl_enabled: flag("SSL_ENABLED", true),
             cache_max_gb,
             standard_ip,

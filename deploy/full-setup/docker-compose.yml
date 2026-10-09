@@ -170,6 +170,10 @@ services:
   # Watchdog for health monitoring
   watchdog:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}"
+    # What: the Docker API entry point, as in config/prod/watchdog.env.
+    # Why: the watchdog has no default and refuses to start without it.
+    environment:
+      - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
     volumes:
       # What: cache mount is read-only (purge moved to retention).
       # Why: watchdog only reads; see deploy/prod's identical mount.
