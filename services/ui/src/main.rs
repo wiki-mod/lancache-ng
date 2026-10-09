@@ -6464,13 +6464,7 @@ async fn update_ntp_settings(
         .map_err(|m| HtmlError::new(StatusCode::BAD_REQUEST, &NTP_AREA, m))?;
     let cfg = &state.config;
     let enabled = !f.get("ntp_enabled").is_empty();
-    // What: keep the saved auto flag outside Kea mode.
-    // Why: the browser never submits the disabled checkbox.
-    let auto = if cfg.dhcp_mode().is_kea() {
-        !f.get("ntp_auto_dhcp").is_empty()
-    } else {
-        cfg.flag("NTP_AUTO_DHCP")
-    };
+    let auto = !f.get("ntp_auto_dhcp").is_empty();
     let was_enabled = cfg.flag("NTP_ENABLED");
     let was_auto = was_enabled && cfg.flag("NTP_AUTO_DHCP");
 
