@@ -134,6 +134,8 @@ RUN set -euo pipefail; \
       xz \
       yq-go \
       nano \
+      nodejs \
+      npm \
       zstd \
       shfmt \
       trivy@testing \
@@ -286,6 +288,8 @@ RUN set -euo pipefail; \
       xz \
       yq \
       nano \
+      node \
+      npm \
       zstd \
       shfmt \
       trivy \
