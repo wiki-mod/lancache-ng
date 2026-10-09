@@ -196,7 +196,7 @@ struct Config {
     // Why: Dockerfile owns it; the primary URL reuses it.
     listen_port: u16,
     nats_store_dir: Option<String>,
-    nats_monitor_port: Option<String>,
+    nats_monitor_port: Option<u16>,
     netdata_conf_file: Option<String>,
     netdata_notify_file: Option<String>,
     netdata_token_file: Option<String>,
@@ -223,8 +223,8 @@ impl Config {
     // What: build the config from any variable reader.
     // Why: a reader closure makes every default observable.
     fn load(env: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
-        let text = |key: &str, default: &str| env(key).unwrap_or_else(|| default.to_string());
         let set = |key: &str| config::opt(env, key);
+        let text = |key: &str, default: &str| set(key).unwrap_or_else(|| default.to_string());
         // What: a compose value; unset stops startup.
         // Why: compose owns it; Rust keeps no default.
         let need = |key: &str| config::need(env, key);
@@ -252,19 +252,19 @@ impl Config {
         let proxy_standard_url = need("PROXY_STANDARD_URL")?;
         // What: both proxy addresses come from compose.
         // Why: no LAN address is hardcoded (AG-SEC-007).
-        let standard_ip = set("STANDARD_IP").ok_or("STANDARD_IP must be set")?;
-        let ssl_ip = set("SSL_IP").ok_or("SSL_IP must be set")?;
+        let standard_ip = need("STANDARD_IP")?;
+        let ssl_ip = need("SSL_IP")?;
         // What: the Docker API URL comes from compose.
         // Why: compose owns the value; no second default.
         let nats_url = need("NATS_URL")?;
-        let docker_proxy_url = set("DOCKER_PROXY_URL").ok_or("DOCKER_PROXY_URL must be set")?;
+        let docker_proxy_url = need("DOCKER_PROXY_URL")?;
         let tag = need("LANCACHE_IMAGE_TAG")?;
         let channel = set("LANCACHE_IMAGE_CHANNEL")
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| derive_image_channel(&tag));
         let cache_max_gb = cache_max_gb_from(env)?;
         // What: DHCP_ENABLED is an optional legacy switch.
-        // Why: no owner sets it; unset never enables DHCP.
+        // Why: the ui gets none; unset keeps DHCP off.
         let dhcp_mode = DhcpMode::parse(
             &env("DHCP_MODE").unwrap_or_default(),
             flag("DHCP_ENABLED", false),
@@ -281,11 +281,11 @@ impl Config {
             Some(v) if !shared_secret_is_placeholder(&v) => v,
             _ => secret("KEA_CTRL_TOKEN")?,
         };
-        let ttl = need("UI_SESSION_TTL_SECONDS").and_then(|v| {
-            v.trim().parse::<u64>().map_err(|_| {
-                format!("UI_SESSION_TTL_SECONDS must be an unsigned integer of seconds, got {v:?}")
-            })
-        })?;
+        let ttl = knob(
+            "UI_SESSION_TTL_SECONDS",
+            MAX_UI_SESSION_TTL_SECONDS,
+            OutOfRange::Reject,
+        )?;
         let startup_settings = HashMap::from([
             ("DHCP_MODE", dhcp_mode.as_str().to_string()),
             ("DHCP_SUBNET_START", text("DHCP_SUBNET_START", "")),
@@ -308,7 +308,7 @@ impl Config {
             ),
             ("LANCACHE_IMAGE_CHANNEL", channel.clone()),
             // What: optional switches, off when unset.
-            // Why: no owner sets them; the saved file does.
+            // Why: the ui gets none; the saved file sets.
             (
                 "AUTO_UPDATE_ENABLED",
                 bool_text(flag("AUTO_UPDATE_ENABLED", false)),
@@ -354,17 +354,9 @@ impl Config {
             allow_insecure_ui: need_flag("ALLOW_INSECURE_UI")?,
             ui_session_ttl_seconds: ttl,
             // What: security headers are on unless off.
-            // Why: no owner sets it; safe is the default.
+            // Why: the ui gets none; safe is the default.
             security_headers_enabled: flag("UI_SECURITY_HEADERS", true),
-            hsts_mode: match text("UI_HSTS_MODE", "")
-                .trim()
-                .to_ascii_lowercase()
-                .as_str()
-            {
-                "always" | "true" | "1" | "on" => HstsMode::Always,
-                "never" | "false" | "0" | "off" => HstsMode::Never,
-                _ => HstsMode::Auto,
-            },
+            hsts_mode: hsts_mode_from(&text("UI_HSTS_MODE", "")),
             ui_logs_max_entries: knob("UI_LOGS_MAX_ENTRIES", u64::MAX, OutOfRange::Reject)?
                 as usize,
             pdns_auth_api: format!("{}{PDNS_API_PATH}", need("PDNS_AUTH_URL")?),
@@ -400,12 +392,12 @@ impl Config {
             session_secret_file: need("UI_SESSION_SECRET_FILE")?,
             database_file: need("UI_DATABASE_FILE")?,
             registration_token_file: need("SECONDARY_REGISTRATION_TOKEN_FILE")?,
-            listen_port: need("UI_LISTEN_PORT").and_then(|v| {
-                v.parse::<u16>()
-                    .map_err(|_| format!("UI_LISTEN_PORT must be a port number, got {v:?}"))
-            })?,
+            listen_port: knob("UI_LISTEN_PORT", u16::MAX.into(), OutOfRange::Reject)? as u16,
             nats_store_dir: set("NATS_STORE_DIR"),
-            nats_monitor_port: set("NATS_MONITOR_PORT"),
+            nats_monitor_port: set("NATS_MONITOR_PORT")
+                .map(|_| knob("NATS_MONITOR_PORT", u16::MAX.into(), OutOfRange::Reject))
+                .transpose()?
+                .map(|port| port as u16),
             netdata_conf_file: set("NETDATA_CONF_FILE"),
             netdata_notify_file: set("NETDATA_NOTIFY_FILE"),
             netdata_token_file: set("NETDATA_TOKEN_FILE"),
@@ -415,7 +407,7 @@ impl Config {
             netdata_alarm_max_time: set("NETDATA_ALARM_MAX_TIME"),
             netdata_alarm_recipient: set("NETDATA_ALARM_RECIPIENT"),
             // What: dev mode is an optional switch, off.
-            // Why: no owner sets it; prod must not enable.
+            // Why: the ui gets none; prod stays off.
             dev_mode: flag("LANCACHE_DEV_MODE", false),
             syslog_enabled: need_flag("SYSLOG_ENABLED")?,
             syslog_log_root: need("SYSLOG_LOG_ROOT")?,
@@ -505,15 +497,31 @@ fn derive_image_channel(tag: &str) -> String {
     }
 }
 
+// What: HSTS mode from text; always, never, or a boolean.
+// Why: booleans parse as config::parse_bool; else auto.
+fn hsts_mode_from(raw: &str) -> HstsMode {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "always" => HstsMode::Always,
+        "never" => HstsMode::Never,
+        other => match parse_bool(other) {
+            Some(true) => HstsMode::Always,
+            Some(false) => HstsMode::Never,
+            None => HstsMode::Auto,
+        },
+    }
+}
+
 // What: CACHE_MAX_GB, or the matching legacy pair, or 50.
 // Why: a malformed value must fail, not fall back.
 fn cache_max_gb_from(env: &dyn Fn(&str) -> Option<String>) -> Result<f64, String> {
     let parse = |key: &str| -> Result<Option<f64>, String> {
-        env(key)
+        config::opt(env, key)
             .map(|raw| {
                 raw.trim()
                     .parse::<f64>()
-                    .map_err(|_| format!("{key} must be a number of gigabytes, got {raw:?}"))
+                    .ok()
+                    .filter(|gb| gb.is_finite() && *gb >= 0.0)
+                    .ok_or_else(|| format!("{key} must be a number of gigabytes, got {raw:?}"))
             })
             .transpose()
     };
@@ -677,7 +685,8 @@ fn ensure_shared_secrets(dir: &str, gid: u32, prefix: &str) -> Result<(), String
     }
     Ok(())
 }
-// What: names and limits of CSRF, session and token file.
+
+// What: names and limits of CSRF and the session cookie.
 // Why: one spelling for the middleware and its callers.
 const CSRF_HEADER_NAME: &str = "X-CSRF-Token";
 const CSRF_FORM_FIELD: &str = "csrf_token";
@@ -2388,13 +2397,9 @@ fn render_nats_conf(cfg: &Config) -> Result<String, String> {
         .nats_store_dir
         .as_deref()
         .ok_or("NATS_STORE_DIR is not set")?;
-    let raw_port = cfg
+    let monitor_port = cfg
         .nats_monitor_port
-        .as_deref()
-        .ok_or("NATS_MONITOR_PORT is not set")?;
-    let monitor_port: u16 = raw_port
-        .parse()
-        .map_err(|_| format!("NATS_MONITOR_PORT={raw_port} is not a TCP port"))?;
+        .ok_or_else(|| config::not_set("NATS_MONITOR_PORT"))?;
     let fragment = Path::new(&cfg.nats_auth_callout_path);
     if fragment.parent() != Path::new(&cfg.nats_conf_path).parent() {
         return Err(format!(
@@ -6688,12 +6693,6 @@ fn registration_token(configured: &str, token_file: &str) -> Result<String, Stri
 // What: the session lifetime, after all start-up checks.
 // Why: bad env must fail closed before NATS or state.
 fn preflight(cfg: &Config) -> Result<Duration, String> {
-    let ttl = cfg.ui_session_ttl_seconds;
-    if ttl == 0 || ttl > MAX_UI_SESSION_TTL_SECONDS {
-        return Err(format!(
-            "UI_SESSION_TTL_SECONDS ({ttl}) must be between 1 and {MAX_UI_SESSION_TTL_SECONDS} seconds"
-        ));
-    }
     validate_nats_credentials(cfg)?;
     // What: auth must be fully set, or insecure chosen.
     // Why: a half-set pair would run without a login.
@@ -6716,7 +6715,7 @@ fn preflight(cfg: &Config) -> Result<Duration, String> {
             );
         }
     }
-    Ok(Duration::from_secs(ttl))
+    Ok(Duration::from_secs(cfg.ui_session_ttl_seconds))
 }
 
 // What: send logs to stdout and to UI_LOG_FILE if openable.
@@ -7338,6 +7337,73 @@ mod tests {
         assert!(ntp_upstream_servers(",, ,").is_err());
         assert!(ntp_upstream_servers("not a valid host!!").is_err());
         assert!(ntp_upstream_servers("2606:4700:f1::1").is_ok());
+    }
+
+    // What: HSTS text maps to a mode; unknown text is auto.
+    // Why: plain HTTP must never get an HSTS header.
+    #[test]
+    fn hsts_text_maps_to_modes() {
+        for on in ["always", "ALWAYS", " true ", "1", "on"] {
+            assert_eq!(hsts_mode_from(on), HstsMode::Always, "{on:?}");
+        }
+        for off in ["never", "false", "0", "OFF"] {
+            assert_eq!(hsts_mode_from(off), HstsMode::Never, "{off:?}");
+        }
+        for auto in ["", "auto", "maybe"] {
+            assert_eq!(hsts_mode_from(auto), HstsMode::Auto, "{auto:?}");
+        }
+    }
+
+    // What: cache size from the new key or the legacy pair.
+    // Why: a bad value must fail; NaN would break the bar.
+    // From: Issue #1069
+    #[test]
+    fn cache_size_reads_new_and_legacy_keys() {
+        fn from(pairs: &[(&str, &str)]) -> Result<f64, String> {
+            cache_max_gb_from(&|key: &str| {
+                pairs
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| value.to_string())
+            })
+        }
+        assert_eq!(from(&[]), Ok(50.0));
+        assert_eq!(from(&[("CACHE_MAX_GB", "120")]), Ok(120.0));
+        let legacy = [("CACHE_MAX_GB", ""), ("SSL_CACHE_MAX_GB", "80")];
+        assert_eq!(from(&legacy), Ok(80.0));
+        let same = [("STANDARD_CACHE_MAX_GB", "70"), ("SSL_CACHE_MAX_GB", "70")];
+        assert_eq!(from(&same), Ok(70.0));
+        let split = [("STANDARD_CACHE_MAX_GB", "70"), ("SSL_CACHE_MAX_GB", "60")];
+        assert!(from(&split).is_err());
+        for bad in ["NaN", "inf", "-1", "abc"] {
+            assert!(from(&[("CACHE_MAX_GB", bad)]).is_err(), "{bad:?} must fail");
+        }
+    }
+
+    // What: the ui secret check equals the shared column.
+    // Why: it mirrors the shell check; the fixture pins it.
+    // From: Issue #967
+    #[test]
+    fn shared_secret_check_matches_the_fixture_column() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/placeholder-detection-cases.txt"
+        );
+        let fixture = fs::read_to_string(path).expect("shared fixture is readable");
+        let mut cases = 0;
+        for line in fixture.lines().map(str::trim_end) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let [value, shared, _setup, _rust] = fields.as_slice() else {
+                panic!("malformed fixture line: {line:?}");
+            };
+            let want = *shared == "placeholder";
+            assert_eq!(shared_secret_is_placeholder(value), want, "case: {line}");
+            cases += 1;
+        }
+        assert!(cases > 0, "the fixture holds no cases");
     }
 
     // What: malformed DNS answers are refused, not indexed.
