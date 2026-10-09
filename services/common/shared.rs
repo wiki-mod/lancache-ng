@@ -140,6 +140,18 @@ pub fn unix_secs() -> u64 {
     (unix_nanos() / 1_000_000_000) as u64
 }
 
+// What: a new empty directory under the temp dir.
+// Why: tests of several crates need one scratch path.
+pub fn unique_temp_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "lancache-ng-test-{tag}-{}-{}",
+        std::process::id(),
+        unix_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("scratch directory");
+    dir
+}
+
 // What: print a FATAL start error with its tag, exit 1.
 // Why: every service fails closed at start the same way.
 pub fn die(tag: &str, message: &str) -> ! {
@@ -797,24 +809,12 @@ mod tests {
         assert!(parse_df("h\n/dev/sda1 1000 400 600 full /\n").is_none());
     }
 
-    // What: a fresh scratch directory under the temp dir.
-    // Why: file tests need a real path and must not clash.
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "lancache-ng-test-{tag}-{}-{}",
-            std::process::id(),
-            unix_nanos()
-        ));
-        fs::create_dir_all(&dir).expect("scratch directory");
-        dir
-    }
-
     // What: snapshots list oldest first; prune to keep_n.
     // Why: a wrong prune loses the last known-good state.
     // From: Issue #628
     #[test]
     fn snapshot_store_creates_lists_reads_and_prunes() {
-        let root = scratch("snap");
+        let root = unique_temp_dir("snap");
         let store = SnapshotStore::new(root.join("store"), "data.json", "test");
         assert_eq!(store.ids().unwrap(), Vec::<String>::new());
         let mut made = Vec::new();
@@ -838,7 +838,7 @@ mod tests {
     // Why: a bad retention value must not erase snapshots.
     #[test]
     fn snapshot_store_zero_retention_keeps_three() {
-        let root = scratch("keep");
+        let root = unique_temp_dir("keep");
         let store = SnapshotStore::new(root.join("store"), "data.json", "test");
         for _ in 0..5 {
             store.create(&serde_json::json!({}), 0).unwrap();
@@ -853,7 +853,7 @@ mod tests {
     #[test]
     fn write_file_exclusive_keeps_first_and_replace_swaps() {
         use std::os::unix::fs::PermissionsExt;
-        let root = scratch("write");
+        let root = unique_temp_dir("write");
         let file = root.join("sub/secret");
         write_file(&file, b"first", 0o600, Place::Exclusive).unwrap();
         let again = write_file(&file, b"second", 0o600, Place::Exclusive);
@@ -872,7 +872,7 @@ mod tests {
     #[test]
     fn write_if_changed_writes_once_and_converges_mode() {
         use std::os::unix::fs::PermissionsExt;
-        let root = scratch("changed");
+        let root = unique_temp_dir("changed");
         let file = root.join("conf");
         assert!(write_if_changed(&file, b"a", 0o644, None).unwrap());
         assert!(!write_if_changed(&file, b"a", 0o644, None).unwrap());
@@ -888,7 +888,7 @@ mod tests {
     // Why: restarts must not rotate it or accept junk.
     #[test]
     fn load_or_create_persists_and_rejects_bad_files() {
-        let root = scratch("secret");
+        let root = unique_temp_dir("secret");
         let file = root.join("key");
         let first = load_or_create_hex::<4>(&file).unwrap();
         assert_eq!(fs::read_to_string(&file).unwrap().len(), 8);
@@ -905,7 +905,7 @@ mod tests {
     // From: Issue #1437
     #[test]
     fn desired_state_reads_or_gives_no_opinion() {
-        let root = scratch("desired");
+        let root = unique_temp_dir("desired");
         let file = root.join("desired.json");
         assert_eq!(DesiredState::read(&file), DesiredState::default());
         fs::write(&file, "not json").unwrap();

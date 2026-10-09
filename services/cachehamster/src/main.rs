@@ -5,6 +5,7 @@
 //! Why: no Steam login yet; URLs come from the env.
 //! From: Issue #871
 
+use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,7 +16,7 @@ use argon2::Argon2;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use futures_util::{StreamExt, stream};
-use lancache_ng::config::{OutOfRange, Uint, env_opt};
+use lancache_ng::config::{OutOfRange, Uint, env_opt, need, process_env};
 use lancache_ng::{Place, is_placeholder, load_or_create_hex, write_file};
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +25,11 @@ use serde::{Deserialize, Serialize};
 const MASTER_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
+
+// What: file names below the data dir, master and sealed.
+// Why: persisted files must be found again after a restart.
+const MASTER_FILE: &str = "lancache-cachehamster-master.secret";
+const CREDENTIAL_FILE: &str = "lancache-cachehamster-credential.json";
 
 // What: throughput log period, 10 s; a justified literal.
 // Why: no config owner exists; it only paces a readout.
@@ -95,6 +101,8 @@ fn open(master: &[u8; MASTER_LEN], sealed: &Sealed) -> Result<Vec<u8>> {
 // Why: the operator decides; an unknown value fails closed.
 fn persistence_from(value: Option<&str>) -> Result<bool> {
     match value {
+        // What: unset means memory only, like "none".
+        // Why: the env file leaves the choice to the user.
         None | Some("none") => Ok(false),
         Some("persistent") => Ok(true),
         Some(other) => bail!(
@@ -117,20 +125,18 @@ fn real_credential(value: Option<String>) -> Result<Option<String>> {
 
 // What: the credential for this run, or none configured.
 // Why: an env value wins and is sealed when persisting.
-fn credential(persist: bool, dir: &Path) -> Result<Option<String>> {
-    let from_env = real_credential(env_opt("CACHEHAMSTER_STEAM_CREDENTIAL"))?;
+fn credential(from_env: Option<String>, persist: bool, dir: &Path) -> Result<Option<String>> {
     if !persist {
         return Ok(from_env);
     }
-    let master =
-        load_or_create_hex::<MASTER_LEN>(&dir.join("lancache-cachehamster-master.secret"))?;
-    let path = dir.join("lancache-cachehamster-credential.json");
+    let master = load_or_create_hex::<MASTER_LEN>(&dir.join(MASTER_FILE))?;
+    let path = dir.join(CREDENTIAL_FILE);
     if let Some(plain) = from_env {
         let json = serde_json::to_vec(&seal(&master, plain.as_bytes())?)?;
         write_file(&path, &json, 0o600, Place::Replace)?;
         return Ok(Some(plain));
     }
-    match std::fs::read(&path) {
+    match fs::read(&path) {
         Ok(json) => {
             let plain = open(&master, &serde_json::from_slice(&json)?)?;
             Ok(Some(
@@ -170,9 +176,10 @@ async fn main() -> Result<()> {
         .init();
     tracing::warn!("no Steam app ID resolution; only CACHEHAMSTER_URLS is fetched");
 
-    let data_dir = env_opt("CACHEHAMSTER_DATA_DIR").context("CACHEHAMSTER_DATA_DIR is not set")?;
+    let data_dir = need(&process_env, "CACHEHAMSTER_DATA_DIR").map_err(anyhow::Error::msg)?;
     let persist = persistence_from(env_opt("CACHEHAMSTER_CREDENTIAL_PERSISTENCE").as_deref())?;
-    let configured = credential(persist, Path::new(&data_dir))?.is_some();
+    let from_env = real_credential(env_opt("CACHEHAMSTER_STEAM_CREDENTIAL"))?;
+    let configured = credential(from_env, persist, Path::new(&data_dir))?.is_some();
     tracing::info!(
         credential_persistent = persist,
         credential_configured = configured,
@@ -198,9 +205,11 @@ async fn main() -> Result<()> {
         tracing::warn!("{warning}");
     }
     let total = Arc::new(AtomicU64::new(0));
+    // What: a client without a total request timeout.
+    // Why: a large body streams longer than a 10 s limit.
     let client = reqwest::Client::new();
-    // What: capped spawned fetches plus a throughput tick.
-    // Why: own tasks use many threads, no stop signal.
+    // What: run the capped fetches; log throughput.
+    // Why: spawned tasks spread over all worker threads.
     // From: Issue #871
     let fetch = stream::iter(urls)
         .map(|url| {
@@ -251,6 +260,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lancache_ng::unique_temp_dir;
 
     // What: persistence values parse; unknown fails closed.
     // Why: persistence is the operator's call, not guessed.
@@ -272,6 +282,32 @@ mod tests {
         let real = Some("a-real-looking-secret-value".to_string());
         assert_eq!(real_credential(real.clone()).unwrap(), real);
         assert!(real_credential(Some("CHANGE_ME_now".into())).is_err());
+    }
+
+    // What: a credential persists sealed and is recovered.
+    // Why: plaintext on disk or a lost secret both fail.
+    // From: Issue #871
+    #[test]
+    fn credential_persists_sealed_and_recovers() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = unique_temp_dir("hamster");
+        let file = dir.join("lancache-cachehamster-credential.json");
+        let word = || Some("steam-pass-9".to_string());
+        assert_eq!(credential(None, false, &dir).unwrap(), None);
+        assert_eq!(credential(word(), false, &dir).unwrap(), word());
+        assert!(!file.exists(), "no file without persistence");
+        assert_eq!(credential(None, true, &dir).unwrap(), None);
+        assert_eq!(credential(word(), true, &dir).unwrap(), word());
+        assert!(!fs::read_to_string(&file).unwrap().contains("steam-pass-9"));
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(dir.join("lancache-cachehamster-master.secret").is_file());
+        assert_eq!(credential(None, true, &dir).unwrap(), word());
+        fs::write(&file, "not json").unwrap();
+        assert!(credential(None, true, &dir).is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // What: seal then open gives the plaintext.
