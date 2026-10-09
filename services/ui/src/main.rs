@@ -1326,6 +1326,12 @@ fn path_allowed(path: &str) -> bool {
     Path::new(path).is_absolute() && !path.contains("..")
 }
 
+// What: bytes in a KiB, MiB and GiB.
+// Why: one spelling for every size conversion.
+const KIB: u64 = 1_024;
+const MIB: u64 = 1_048_576;
+const GIB: u64 = 1_073_741_824;
+
 // What: size of an allowed directory in GiB, 0 if refused.
 // Why: du beats a Rust walk over hundreds of GB of files.
 fn du_gb(path: &str) -> f64 {
@@ -1343,7 +1349,7 @@ fn du_gb(path: &str) -> f64 {
                 .and_then(|n| n.parse().ok())
         })
         .unwrap_or(0);
-    bytes as f64 / 1_073_741_824.0
+    bytes as f64 / GIB as f64
 }
 
 // What: free MiB on the cache filesystem; None if unknown.
@@ -1384,13 +1390,10 @@ fn largest_cache_gb(avail_mib: u64) -> Option<u64> {
 // What: bytes as a short human string.
 // Why: logs and stats show sizes in one spelling.
 fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1_024;
-    const MB: u64 = 1_048_576;
-    const GB: u64 = 1_073_741_824;
     match bytes {
-        GB.. => format!("{:.1} GB", bytes as f64 / GB as f64),
-        MB.. => format!("{:.1} MB", bytes as f64 / MB as f64),
-        KB.. => format!("{:.1} KB", bytes as f64 / KB as f64),
+        GIB.. => format!("{:.1} GB", bytes as f64 / GIB as f64),
+        MIB.. => format!("{:.1} MB", bytes as f64 / MIB as f64),
+        KIB.. => format!("{:.1} KB", bytes as f64 / KIB as f64),
         _ => format!("{bytes} B"),
     }
 }
@@ -1599,7 +1602,7 @@ fn log_stats(standard: &str, ssl: &str) -> LogStats {
             }
         }
     }
-    stats.total_bytes_gb = total_bytes as f64 / 1_073_741_824.0;
+    stats.total_bytes_gb = total_bytes as f64 / GIB as f64;
     if stats.total_requests > 0 {
         stats.hit_pct = stats.hits as f64 / stats.total_requests as f64 * 100.0;
     }
@@ -2204,17 +2207,25 @@ fn classify_soa(buf: &[u8], expected_id: u16) -> Result<ProbeResult, String> {
     })
 }
 
+// What: a one-question DNS query for a zone's SOA.
+// Why: any answer with a serial proves the zone serves.
+fn soa_query(id: u16, zone: &str) -> Vec<u8> {
+    let mut query = id.to_be_bytes().to_vec();
+    query.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+    for label in zone.trim_end_matches('.').split('.') {
+        query.push(label.len() as u8);
+        query.extend_from_slice(label.as_bytes());
+    }
+    query.extend_from_slice(&[0, 0, 6, 0, 1]);
+    query
+}
+
 // What: ask addr:port for the lan. SOA over UDP.
 // Why: a silent host is a status, not an error.
 async fn probe_secondary_soa(addr: Ipv4Addr, port: u16) -> ProbeResult {
     const TIMEOUT: Duration = Duration::from_secs(4);
     let id: u16 = rand::random();
-    // What: a one-question query for lan. SOA, no flags.
-    // Why: any answer with a serial proves the zone serves.
-    let mut query = id.to_be_bytes().to_vec();
-    query.extend_from_slice(&[
-        0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 3, b'l', b'a', b'n', 0, 0, 6, 0, 1,
-    ]);
+    let query = soa_query(id, LAN_ZONE);
     let exchange = async {
         let socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0))
             .await
@@ -2960,7 +2971,7 @@ async fn register_secondary(
         proxy_ip: state.config.standard_ip.clone(),
         pdns_api_key: state.config.pdns_api_key.clone(),
         ddns_tsig_key,
-        dns_xfr_primary: format!("{}:5300", state.config.standard_ip),
+        dns_xfr_primary: format!("{}:{PDNS_AUTH_PORT}", state.config.standard_ip),
         image_registry: state.config.lancache_image_registry.clone(),
         image_prefix: state.config.lancache_image_prefix.clone(),
         image_channel: state.config.lancache_image_channel.clone(),
@@ -3087,10 +3098,53 @@ async fn rotate_token(
         json!({"nats_user": name, "nats_password": nats_password}),
     ))
 }
+// What: the port of the primary's authoritative PowerDNS.
+// Why: pdns.conf.template sets local-port; AXFR uses it.
+const PDNS_AUTH_PORT: u16 = 5300;
+
 // What: lease time limits in seconds.
 // Why: Kea needs a floor; seven days is the documented cap.
 const MIN_LEASE_TIME: u32 = 60;
 const MAX_LEASE_TIME: u32 = 604_800;
+
+// What: lease time shown when a subnet sets none, seconds.
+// Why: equals the dhcp image default of DHCP_LEASE_TIME.
+const DEFAULT_LEASE_TIME: u32 = 86_400;
+
+// What: the user of the Kea control agent API.
+// Why: kea-ctrl-agent.conf names it; the ui must match.
+const KEA_API_USER: &str = "admin";
+
+// What: Kea error texts that mean "not found".
+// Why: kea_modify maps exactly these to a 404.
+const KEA_SUBNET_MISSING: &str = "subnet not found";
+const KEA_OPTION_MISSING: &str = "custom option not found";
+
+// What: option codes the dedicated subnet fields own.
+// Why: routers 3, DNS 6, domain 15, NTP 42, search 119.
+const KEA_MANAGED_CODES: [u16; 5] = [3, 6, 15, 42, 119];
+
+// What: option codes dnsmasq-proxy renders itself.
+// Why: router, DNS, domain and NTP; search stays custom.
+const DNSMASQ_MANAGED_CODES: [u16; 4] = [3, 6, 15, 42];
+
+// What: lowest and highest code an operator may add.
+// Why: 0 is padding and 255 is the end marker.
+const OPTION_CODE_MIN: u16 = 1;
+const OPTION_CODE_MAX: u16 = 254;
+
+// What: an option code from form text, range checked.
+// Why: Kea and dnsmasq forms share one number rule.
+fn option_code(raw: &str) -> Result<u16, &'static str> {
+    let code = raw
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| "option code must be a number")?;
+    if !(OPTION_CODE_MIN..=OPTION_CODE_MAX).contains(&code) {
+        return Err("option code must be between 1 and 254");
+    }
+    Ok(code)
+}
 
 // What: longest custom option value in bytes.
 // Why: one form must not write unbounded data into Kea.
@@ -3231,7 +3285,7 @@ async fn kea_post(
     state
         .http_client
         .post(format!("{}/", state.config.dhcp_api_url))
-        .basic_auth("admin", Some(&state.config.dhcp_api_token))
+        .basic_auth(KEA_API_USER, Some(&state.config.dhcp_api_token))
         .json(&body)
         .send()
         .await
@@ -3399,7 +3453,7 @@ async fn kea_modify(
 ) -> Result<(), HtmlError> {
     kea_apply(state, change).await.map_err(|message| {
         let status = match message.as_str() {
-            "subnet not found" | "custom option not found" => StatusCode::NOT_FOUND,
+            KEA_SUBNET_MISSING | KEA_OPTION_MISSING => StatusCode::NOT_FOUND,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         dhcp_error(status, message)
@@ -3429,12 +3483,12 @@ fn subnets_mut(config: &mut Value) -> Result<&mut Vec<Value>, &'static str> {
 }
 
 // What: one editable subnet by id.
-// Why: "subnet not found" maps to a 404 in kea_modify.
+// Why: a missing subnet maps to a 404 in kea_modify.
 fn find_subnet_mut(config: &mut Value, id: u32) -> Result<&mut Value, &'static str> {
     subnets_mut(config)?
         .iter_mut()
         .find(|s| s["id"].as_u64() == Some(u64::from(id)))
-        .ok_or("subnet not found")
+        .ok_or(KEA_SUBNET_MISSING)
 }
 
 // What: a text field of a JSON object, or a default.
@@ -3459,10 +3513,10 @@ fn is_managed_option(option: &Value) -> bool {
         text_of(option, "name", ""),
         "routers" | "domain-name" | "domain-search" | "domain-name-servers" | "ntp-servers"
     );
-    let by_code = matches!(
-        option.get("code").and_then(Value::as_u64),
-        Some(3 | 6 | 15 | 42 | 119)
-    );
+    let by_code = option
+        .get("code")
+        .and_then(Value::as_u64)
+        .is_some_and(|code| KEA_MANAGED_CODES.iter().any(|m| u64::from(*m) == code));
     is_dhcp4_option(option) && (by_name || by_code)
 }
 
@@ -3474,7 +3528,9 @@ fn is_custom_option(option: &Value) -> bool {
         && option
             .get("code")
             .and_then(Value::as_u64)
-            .is_some_and(|code| (1..=254).contains(&code))
+            .is_some_and(|code| {
+                (u64::from(OPTION_CODE_MIN)..=u64::from(OPTION_CODE_MAX)).contains(&code)
+            })
         && option.get("data").is_some_and(Value::is_string)
 }
 
@@ -3532,12 +3588,12 @@ fn read_subnet(subnet: &Value) -> Subnet {
         dns_primary: dns.first().cloned().unwrap_or_default(),
         dns_secondary: dns.get(1).cloned().unwrap_or_default(),
         ntp_servers: option("ntp-servers", 42),
-        // What: 86400 s when the subnet sets no lifetime.
-        // Why: equals Kea's own default valid-lifetime.
+        // What: the default if the subnet sets no lifetime.
+        // Why: the page shows the dhcp image default.
         lease_time: subnet
             .get("valid-lifetime")
             .and_then(Value::as_u64)
-            .unwrap_or(86_400) as u32,
+            .unwrap_or(DEFAULT_LEASE_TIME.into()) as u32,
         domain: option("domain-name", 15),
         custom_options,
     }
@@ -3883,13 +3939,8 @@ fn custom_option_key(raw: &str) -> Result<CustomOptionKey, &'static str> {
     if let Some(field) = PXE_FIELDS.into_iter().find(|field| *field == raw) {
         return Ok(CustomOptionKey::Pxe(field));
     }
-    let code = raw
-        .parse::<u16>()
-        .map_err(|_| "option code must be a number")?;
-    if code == 0 || code > 254 {
-        return Err("option code must be between 1 and 254");
-    }
-    if matches!(code, 3 | 6 | 15 | 42 | 119) {
+    let code = option_code(raw)?;
+    if KEA_MANAGED_CODES.contains(&code) {
         return Err("option code is managed by dedicated subnet fields");
     }
     Ok(CustomOptionKey::Numeric(code))
@@ -3948,7 +3999,7 @@ fn edit_custom_option(
                 // What: clear a field only if unchanged.
                 // Why: stale pages must not undo edits.
                 (false, true) => object.remove(field),
-                (false, false) => return Err("custom option not found"),
+                (false, false) => return Err(KEA_OPTION_MISSING),
             };
         }
         CustomOptionKey::Numeric(code) => {
@@ -3973,7 +4024,7 @@ fn edit_custom_option(
                 let before = options.len();
                 options.retain(|o| !same(o));
                 if options.len() == before {
-                    return Err("custom option not found");
+                    return Err(KEA_OPTION_MISSING);
                 }
             }
         }
@@ -4536,14 +4587,8 @@ fn parse_custom_options(raw: &str) -> Result<String, String> {
             .ok_or_else(|| at("expected CODE:VALUE"))?;
         // What: refuse the four codes dnsmasq-proxy owns.
         // Why: dnsmasq renders router, DNS, domain, NTP.
-        let code = code
-            .trim()
-            .parse::<u16>()
-            .map_err(|_| at("option code must be a number"))?;
-        if code == 0 || code > 254 {
-            return Err(at("option code must be between 1 and 254"));
-        }
-        if matches!(code, 3 | 6 | 15 | 42) {
+        let code = option_code(code).map_err(at)?;
+        if DNSMASQ_MANAGED_CODES.contains(&code) {
             return Err(at(
                 "option code is managed by dedicated dnsmasq-proxy fields",
             ));
@@ -5950,10 +5995,10 @@ async fn domains_page(
     ctx.insert("dns_domains", &rows);
     ctx.insert("lan_records", &lan);
     ctx.insert("ptr_records", &ptr);
-    ctx.insert("aaaa_filter_enabled", &marker_set("aaaa-filter-enabled"));
+    ctx.insert("aaaa_filter_enabled", &marker_set(AAAA_FILTER_MARKER));
     ctx.insert(
         "ddns_unsigned_updates_allowed",
-        &marker_set("ddns-allow-unsigned-updates"),
+        &marker_set(DDNS_UNSIGNED_MARKER),
     );
     ctx.insert("ddns_tsig_key_configured", &tsig_key_configured(cfg));
     ctx.insert("zone_snapshot_groups", &groups);
@@ -6105,6 +6150,11 @@ async fn remove_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redir
     Redirect::to("/domains")
 }
 
+// What: marker file names the dns containers read.
+// Why: the ui writes them; dns reads only their existence.
+const AAAA_FILTER_MARKER: &str = "aaaa-filter-enabled";
+const DDNS_UNSIGNED_MARKER: &str = "ddns-allow-unsigned-updates";
+
 // What: set or clear a marker file in both DNS state dirs.
 // Why: the dns containers read the marker's existence.
 fn set_markers(state: &AppState, file: &str, enabled: bool) -> Result<(), StatusCode> {
@@ -6141,7 +6191,7 @@ async fn toggle_aaaa_filter(
     State(state): Shared,
     Form(f): Form<Fields>,
 ) -> Result<Redirect, StatusCode> {
-    set_markers(&state, "aaaa-filter-enabled", f.get("enabled") == "1")?;
+    set_markers(&state, AAAA_FILTER_MARKER, f.get("enabled") == "1")?;
     Ok(Redirect::to("/domains"))
 }
 
@@ -6156,7 +6206,7 @@ async fn toggle_ddns_allow_unsigned_updates(
     if enable && !tsig_key_configured(&state.config) {
         return Ok(Redirect::to("/domains?error=ddns_allow_unsigned_no_key"));
     }
-    set_markers(&state, "ddns-allow-unsigned-updates", enable)?;
+    set_markers(&state, DDNS_UNSIGNED_MARKER, enable)?;
     // What: restart both DNS services on a marker change.
     // Why: without it the click waits for the next restart.
     for service in [
@@ -7463,6 +7513,53 @@ mod tests {
             cases += 1;
         }
         assert!(cases > 0, "the fixture holds no cases");
+    }
+
+    // What: the SOA query is the exact wire bytes.
+    // Why: a wrong byte makes every secondary look silent.
+    #[test]
+    fn soa_query_has_the_wire_shape() {
+        let want = [
+            0x12, 0x34, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 3, b'l', b'a', b'n', 0, 0, 6, 0, 1,
+        ];
+        assert_eq!(soa_query(0x1234, "lan"), want);
+        assert_eq!(soa_query(0x1234, "lan."), want);
+        let two = soa_query(0, "a.lan");
+        assert_eq!(&two[12..], &[1, b'a', 3, b'l', b'a', b'n', 0, 0, 6, 0, 1]);
+    }
+
+    // What: these constants equal their owner files.
+    // Why: a drift would show or send a wrong value to Kea.
+    #[test]
+    fn constants_match_their_owner_files() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../dhcp");
+        let entry = fs::read_to_string(format!("{dir}/entrypoint.sh")).unwrap();
+        assert!(entry.contains(": \"${DHCP_LEASE_TIME:=86400}\""));
+        assert_eq!(DEFAULT_LEASE_TIME, 86_400);
+        let agent = fs::read_to_string(format!("{dir}/kea-ctrl-agent.conf")).unwrap();
+        assert!(agent.contains("\"user\": \"admin\""));
+        assert_eq!(KEA_API_USER, "admin");
+        let pdns = fs::read_to_string(format!("{dir}/../dns/pdns.conf.template")).unwrap();
+        assert!(pdns.lines().any(|line| line == "local-port=5300"));
+        assert_eq!(PDNS_AUTH_PORT, 5300);
+    }
+
+    // What: option codes parse in 1..=254, nothing else.
+    // Why: both forms share this rule and its messages.
+    #[test]
+    fn option_codes_follow_one_range_rule() {
+        assert_eq!(option_code(" 66 "), Ok(66));
+        assert_eq!(option_code("1"), Ok(1));
+        assert_eq!(option_code("254"), Ok(254));
+        for bad in ["0", "255", "-1", "x", "", "65536"] {
+            assert!(option_code(bad).is_err(), "{bad:?} must fail");
+        }
+        assert!(option_code("0").unwrap_err().contains("1 and 254"));
+        let managed = custom_option_key("6").err();
+        assert_eq!(
+            managed,
+            Some("option code is managed by dedicated subnet fields")
+        );
     }
 
     // What: malformed DNS answers are refused, not indexed.
