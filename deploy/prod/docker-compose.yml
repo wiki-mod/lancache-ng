@@ -853,7 +853,6 @@ services:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
-      - PROXY_SERVICE=proxy
       - KEA_CONFIG_SNAPSHOT_DIR=${KEA_CONFIG_SNAPSHOT_DIR:?KEA_CONFIG_SNAPSHOT_DIR is required}
       - SSL_ENABLED=${SSL_ENABLED:-1}
       - PROXY_STANDARD_URL=http://proxy

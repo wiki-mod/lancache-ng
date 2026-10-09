@@ -226,8 +226,7 @@ document the mapping explicitly rather than leaving it implicit:
 
 | Variable | Default | Namespace | Used for |
 |---|---|---|---|
-| `PROXY_SERVICE` | `proxy` | Compose service name | Building `PROXY_STANDARD_URL`/`PROXY_SSL_URL` defaults (`http://proxy`) |
-| `PROXY_SSL_SERVICE` | `proxy` (inherits `PROXY_SERVICE`'s resolved value, not an independent literal) | Compose service name, also fed into `container_name_for_service()` | Restarting the proxy for a domain-list reload (`services/ui/src/main.rs`) |
+| `PROXY_SSL_SERVICE` | `proxy` (set in compose) | Compose service name, also fed into `container_name_for_service()` | Restarting the proxy for a domain-list reload (`services/ui/src/main.rs`) |
 | `DNS_STANDARD_SERVICE` | `dns-standard` | Compose service name | UI-internal service identification, dashboard labels |
 | `DNS_SSL_SERVICE` | `dns-ssl` | Compose service name | Same as above |
 | `NATS_SERVICE` | `nats` | Compose service name, also fed into `container_name_for_service()` | Restarting NATS after a secondary registration rewrites `nats.conf` (`services/ui/src/main.rs`) |

@@ -351,7 +351,6 @@ services:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
-      - PROXY_SERVICE=proxy
       - SSL_ENABLED=1
       - PROXY_STANDARD_URL=http://proxy
       - PROXY_SSL_URL=http://proxy

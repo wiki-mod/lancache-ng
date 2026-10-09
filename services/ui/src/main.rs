@@ -216,7 +216,14 @@ impl Config {
     fn load(env: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
         let text = |key: &str, default: &str| env(key).unwrap_or_else(|| default.to_string());
         let set = |key: &str| env(key).filter(|v| !v.is_empty());
-        let or = |key: &str, default: &str| set(key).unwrap_or_else(|| default.to_string());
+        // What: a value compose must supply; unset stops startup.
+        // Why: compose owns it; Rust keeps no second default.
+        let need = |key: &str| set(key).ok_or_else(|| format!("{key} must be set"));
+        // What: a bool compose must supply; junk stops startup.
+        // Why: same owner as need; a typo must not flip a gate.
+        let need_flag = |key: &str| {
+            need(key).and_then(|v| parse_bool(&v).ok_or_else(|| format!("{key} must be a boolean")))
+        };
         let flag =
             |key: &str, default: bool| env(key).and_then(|v| parse_bool(&v)).unwrap_or(default);
         let knob = |name: &'static str, default: u64, max: u64, above: OutOfRange| {
@@ -235,9 +242,8 @@ impl Config {
             value
         };
 
-        let proxy_service = or("PROXY_SERVICE", "proxy");
-        let standard_log = or("STANDARD_LOG", "/var/log/nginx/access.log");
-        let proxy_standard_url = or("PROXY_STANDARD_URL", &format!("http://{proxy_service}"));
+        let standard_log = need("STANDARD_LOG")?;
+        let proxy_standard_url = need("PROXY_STANDARD_URL")?;
         // What: both proxy addresses must come from the operator.
         // Why: no LAN address may be hardcoded (AG-SEC-007).
         let standard_ip = set("STANDARD_IP").ok_or("STANDARD_IP must be set")?;
@@ -245,7 +251,7 @@ impl Config {
         // What: the Docker API entry point must come from compose.
         // Why: compose owns the value; no second default here.
         let docker_proxy_url = set("DOCKER_PROXY_URL").ok_or("DOCKER_PROXY_URL must be set")?;
-        let tag = text("LANCACHE_IMAGE_TAG", "latest");
+        let tag = need("LANCACHE_IMAGE_TAG")?;
         let channel = set("LANCACHE_IMAGE_CHANNEL")
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| derive_image_channel(&tag));
@@ -310,19 +316,19 @@ impl Config {
             template_dir: text("TEMPLATE_DIR", "/templates"),
             shared_secret_dir: secret_dir.clone(),
             cdn_domains_file: text("CDN_DOMAINS_FILE", "/data/cdn-domains.txt"),
-            ssl_log: or("SSL_LOG", &standard_log),
+            ssl_log: need("SSL_LOG")?,
             standard_log,
-            cache_dir: or("CACHE_DIR", "/var/cache/proxy"),
+            cache_dir: need("CACHE_DIR")?,
             dns_standard_state_dir: text("DNS_STANDARD_STATE_DIR", "/var/lib/powerdns-state"),
             dns_ssl_state_dir: text("DNS_SSL_STATE_DIR", "/var/lib/powerdns-state"),
-            proxy_ssl_url: or("PROXY_SSL_URL", &proxy_standard_url),
+            proxy_ssl_url: need("PROXY_SSL_URL")?,
             proxy_standard_url,
             netdata_url: text("NETDATA_URL", "http://netdata:19999"),
-            dns_standard_service: text("DNS_STANDARD_SERVICE", "dns-standard"),
-            dns_ssl_service: text("DNS_SSL_SERVICE", "dns-ssl"),
-            proxy_ssl_service: or("PROXY_SSL_SERVICE", &proxy_service),
+            dns_standard_service: need("DNS_STANDARD_SERVICE")?,
+            dns_ssl_service: need("DNS_SSL_SERVICE")?,
+            proxy_ssl_service: need("PROXY_SSL_SERVICE")?,
             docker_proxy_url,
-            ssl_enabled: flag("SSL_ENABLED", true),
+            ssl_enabled: need_flag("SSL_ENABLED")?,
             cache_max_gb,
             standard_ip,
             ssl_ip,
@@ -342,7 +348,7 @@ impl Config {
             ) as u32,
             auth_user: set("UI_AUTH_USER"),
             auth_password: set("UI_AUTH_PASSWORD"),
-            allow_insecure_ui: flag("ALLOW_INSECURE_UI", false),
+            allow_insecure_ui: need_flag("ALLOW_INSECURE_UI")?,
             ui_session_ttl_seconds: ttl,
             security_headers_enabled: flag("UI_SECURITY_HEADERS", true),
             hsts_mode: match text("UI_HSTS_MODE", "")
@@ -356,13 +362,13 @@ impl Config {
             },
             ui_logs_max_entries: knob("UI_LOGS_MAX_ENTRIES", 200, u64::MAX, OutOfRange::Default)
                 as usize,
-            pdns_auth_url: text("PDNS_AUTH_URL", "http://dns-standard:8081"),
-            pdns_rec_url: text("PDNS_REC_URL", "http://dns-standard:8082"),
+            pdns_auth_url: need("PDNS_AUTH_URL")?,
+            pdns_rec_url: need("PDNS_REC_URL")?,
             dns_rollback_url: text("DNS_ROLLBACK_URL", "http://dns-standard:8083"),
             pdns_api_key: secret("PDNS_API_KEY")?,
             netdata_alarm_token: secret("NETDATA_ALARM_TOKEN")?,
             netdata_alarms_file: text("NETDATA_ALARMS_FILE", "/data/netdata-alarms.json"),
-            nats_url: text("NATS_URL", "nats://nats:4222"),
+            nats_url: need("NATS_URL")?,
             advertised_nats_url: advertised_nats_url(
                 &text("NATS_ADVERTISE_URL", ""),
                 &text("NATS_BIND_IP", ""),
@@ -377,8 +383,8 @@ impl Config {
             nats_xkey_seed_path: text("NATS_XKEY_SEED_PATH", "/data/lancache-nats-xkey.seed"),
             nats_xkey_seed: set("NATS_XKEY_SEED"),
             secondary_registration_token: text("SECONDARY_REGISTRATION_TOKEN", ""),
-            lancache_image_registry: text("LANCACHE_IMAGE_REGISTRY", "ghcr.io"),
-            lancache_image_prefix: text("LANCACHE_IMAGE_PREFIX", "wiki-mod/lancache-ng"),
+            lancache_image_registry: need("LANCACHE_IMAGE_REGISTRY")?,
+            lancache_image_prefix: need("LANCACHE_IMAGE_PREFIX")?,
             lancache_image_channel: channel,
             lancache_image_tag: tag,
             nats_conf_path: text("NATS_CONF_PATH", "/etc/nats/nats.conf"),
