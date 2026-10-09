@@ -1817,29 +1817,38 @@ CASES
     _expect fallback-unwritable 2 "[CI-ERROR-SCAN-0019];raw:" || return 1
 }
 
+# What: one writer; held lock times out; stale reclaimed
+# Why: two writers must never race the same DB file
+# From: Issue #1683 | PR #1858
 @test "trivy db lock: one writer, a held lock times out, ensure_fresh hard-fails" {
-    # What: lock order, held lock timeout, lock dir error
-    # Why: two writers must never race the same DB file
-    # From: Issue #1683
-    local cache="${BATS_TEST_TMPDIR}/lockdb" order="${BATS_TEST_TMPDIR}/order" p1
-    mkdir -p "${cache}"; : > "${order}"
+    local cache order p1
     export CI_TRIVY_LOCK_POLL=1
-    (
-        _ci_trivy_db_lock_run "${cache}" 10 60 -- bash -c \
-            'echo first-start >> "'"${order}"'"; sleep 1; echo first-end >> "'"${order}"'"'
-    ) &
+    _wait_line() {
+        local n=0
+        until grep -qx -- "$2" "$1" 2> /dev/null; do
+            n=$((n + 1))
+            [ "${n}" -le 100 ] || { echo "never saw '$2' in $1"; return 1; }
+            sleep 0.1
+        done
+    }
+    cache="$(_val path)" order="$(_val path)"
+    ( _ci_trivy_db_lock_run "${cache}" 10 60 -- bash -c 'echo first-start >> "$1"; sleep 1; echo first-end >> "$1"' _ "${order}" ) &
     p1=$!
-    sleep 0.3
-    _ci_trivy_db_lock_run "${cache}" 10 60 -- bash -c \
-        'echo second-start >> "'"${order}"'"'
+    _wait_line "${order}" first-start || return 1
+    _ci_trivy_db_lock_run "${cache}" 10 60 -- bash -c 'echo second-start >> "$1"' _ "${order}"
     wait "${p1}"
     [ "$(paste -sd' ' "${order}")" = "first-start first-end second-start" ] || { echo "order: $(cat "${order}")"; return 1; }
-    cache="${BATS_TEST_TMPDIR}/heldlock"; mkdir -p "${cache}/.trivy-db-update.lock"
+    cache="$(_val path)" order="$(_val path)"
+    ( _ci_trivy_db_lock_run "${cache}" 10 60 -- bash -c 'echo held >> "$1"; sleep 6' _ "${order}" ) &
+    p1=$!
+    _wait_line "${order}" held || return 1
     run _ci_trivy_db_lock_run "${cache}" 1 3600 -- true
     _expect held-lock 2 "[CI-ERROR-SCAN-0011]" || return 1
-    cache="${BATS_TEST_TMPDIR}/lockedstale"; mkdir -p "${cache}/.trivy-db-update.lock"
     CI_TRIVY_LOCK_TIMEOUT=1 CI_TRIVY_LOCK_STALE=3600 run _ci_trivy_db_ensure_fresh "${cache}"
-    _expect ensure-fresh 2 "[CI-ERROR-SCAN-0012]" || return 1
+    _expect ensure-fresh 2 "[CI-ERROR-SCAN-0011];[CI-ERROR-SCAN-0012]" || return 1
+    run _ci_trivy_db_lock_run "${cache}" 1 1 -- echo reclaimed
+    _expect stale 0 "[CI-WARN-SCAN-0010];reclaimed" || return 1
+    wait "${p1}"
     run _ci_trivy_db_lock_run "/dev/null/$(_val name)" 1 5 -- true
     _expect lock-dir 2 "[CI-ERROR-SCAN-0013]" || return 1
 }
