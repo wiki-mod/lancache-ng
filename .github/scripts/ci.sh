@@ -3100,6 +3100,13 @@ _ci_rust_member_stubs() {
         fi
         targets="$(_ci_capture 0 awk '/^\[\[bin\]\]/ { s = "bin"; next } /^\[lib\]/ { s = "lib"; next } /^\[/ { s = ""; next }
             s != "" && /^path *=/ { v = $0; sub(/^path *= *"/, "", v); sub(/".*$/, "", v); print s "\t" v }' "${m}/Cargo.toml")" || return 2
+        # What: a member with no declared target path stops
+        # Why: cargo fails on a member with no stub
+        # From: Issue #1683 | PR #1905
+        if [ -z "${targets}" ]; then
+            ci_log "[CI-ERROR-RUSTBUILD-0049]" "member=\"${m}\" reason=\"no [lib] or [[bin]] path declared; a manifest-only stage cannot stub it\""
+            return 2
+        fi
         while IFS=$'\t' read -r sec p; do
             [ -n "${p}" ] || continue
             f="${m}/${p}"

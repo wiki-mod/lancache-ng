@@ -1014,6 +1014,28 @@ CASES
     _expect dropped 1 "[CI-ERROR-CHECK-0169];${svc}: Dockerfile stage;without ARG ${var}" || return 1
 }
 
+# What: stubs let cargo load every member; undeclared stops
+# Why: rust builder stages copy only the members' manifests
+# From: Issue #1683 | PR #1905
+@test "rust member stubs: every member loads, an undeclared one stops" {
+    local root d m out pick
+    local -a ms
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" d="$(_val path)"
+    out="$(cd "${root}" && _ci_cargo_members Cargo.toml)" || return 1
+    mapfile -t ms <<< "${out}"
+    [ -n "${ms[0]}" ] || { echo "no workspace members"; return 1; }
+    mkdir -p "${d}" && cp "${root}/Cargo.toml" "${d}/" || return 1
+    for m in "${ms[@]}"; do mkdir -p "${d}/${m}" && cp "${root}/${m}/Cargo.toml" "${d}/${m}/" || return 1; done
+    run bash -c 'cd "$1" && source "$2" && _ci_rust_member_stubs > stubs.txt && cargo metadata --no-deps --offline --format-version 1 > meta.json' _ "${d}" "${CI_SH}"
+    [ "${status}" -eq 0 ] && [ "$(jq '.workspace_members | length' "${d}/meta.json")" -eq "${#ms[@]}" ] \
+        || { echo "load: rc ${status}: ${output}"; return 1; }
+    pick="${ms[$(( SRANDOM % ${#ms[@]} ))]}"
+    awk '/^\[\[bin\]\]|^\[lib\]/ { s = 1; next } /^\[/ { s = 0 } !s' "${d}/${pick}/Cargo.toml" > "${d}/manifest.new" \
+        && mv "${d}/manifest.new" "${d}/${pick}/Cargo.toml" || return 1
+    run bash -c 'cd "$1" && source "$2" && _ci_rust_member_stubs' _ "${d}" "${CI_SH}"
+    _expect undeclared 2 "[CI-ERROR-RUSTBUILD-0049] member=\"${pick}\"" || return 1
+}
+
 # What: per row: runner env -> proxy env, names, CA bundle.
 # Why: AG-CI-009: self-hosted proxy only, CA job-local.
 # From: Issue #1683 | PR #1858
