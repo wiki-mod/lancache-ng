@@ -7401,7 +7401,7 @@ _ci_emit_secret_ref() {
 # Why: One place does write+mount for every plain secret.
 # From: Issue #1683
 _ci_emit_secret() {
-    _ci_write_secret "$1/$2" "$3"
+    _ci_write_secret "$1/$2" "$3" || return "$?"
     _ci_emit_secret_ref "$1" "$2"
 }
 

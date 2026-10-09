@@ -1309,7 +1309,7 @@ CASES
         [ "$7" = - ] || export SCCACHE_DIST_AUTH_TOKEN="$7"
         [ "$8" = - ] || export DISTCC_POTENTIAL_HOSTS="$8"
         [ "$9" = - ] || export PROJECT_SELFHOSTED_PROXY_CA="$9"
-        _ci_set_runtime
+        _ci_set_runtime ${RT_KIND:+"${RT_KIND}"}
     }
     while IFS='|' read -r case mode runner url tok sched stoken hosts ca rc want present pol; do
         dir="$(_val path)"
@@ -1349,10 +1349,16 @@ hosted-gha|required|github-hosted|@U@|yes|-|-|-|-|0|-|sccache_gha sccache_policy
 optional-local|optional|github-hosted|-|no|-|-|-|-|0|-|sccache_policy|optional -
 off|off|self-hosted|@U@|yes|@S@|@ST@|-|@CA@|0|-|project_selfhosted_proxy_ca sccache_policy|off -
 CASES
-    dir="$(_val path)"
-    : > "${dir}"
-    run _rt_probe "${dir}/$(_val name)" optional github-hosted - no - - - -
+    run _rt_probe "/proc/$(_val name)/$(_val name)" optional github-hosted - no - - - -
     _expect mkdir-fails 2 "[CI-ERROR-VARIABLES-0019];raw:" || return 1
+    run _rt_probe /proc/self optional github-hosted - no - - - -
+    _expect write-fails 2 "[CI-ERROR-VARIABLES-0018];raw:" || return 1
+    [[ "${output}" != *"--secret"* ]] || { echo "write-fails: a mount for an unwritten secret: ${output}"; return 1; }
+    dir="$(_val path)"
+    RT_KIND=apk run _rt_probe "${dir}" required self-hosted "${V["@U@"]}" yes "${V["@S@"]}" "${V["@ST@"]}" \
+        "${V["@H1@"]},cpp" "${V["@CA@"]}"
+    _expect apk-kind 0 "--secret id=project_selfhosted_proxy_ca,src=${dir}/project_selfhosted_proxy_ca" || return 1
+    [ "$(ls -A "${dir}")" = project_selfhosted_proxy_ca ] || { echo "apk-kind: cache secrets written: $(ls -A "${dir}")"; return 1; }
     dir="$(_val path)"
     mkdir -p "${dir}/sccache_dist_config"
     run _rt_probe "${dir}" optional github-hosted - no "${V["@S@"]}" "${V["@ST@"]}" - -
