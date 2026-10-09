@@ -169,18 +169,15 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-    tracing::warn!(
-        "lancache-cachehamster is a scaffold (issue #871): it does not yet resolve a Steam app ID to real depot chunk URLs. See docs/design-steam-prefill.md for the current implementation plan and open decisions."
-    );
+    tracing::warn!("no Steam app ID resolution; only CACHEHAMSTER_URLS is fetched");
 
-    let data_dir = env_opt("CACHEHAMSTER_DATA_DIR")
-        .context("CACHEHAMSTER_DATA_DIR is not set; the image sets it, a manual run must")?;
+    let data_dir = env_opt("CACHEHAMSTER_DATA_DIR").context("CACHEHAMSTER_DATA_DIR is not set")?;
     let persist = persistence_from(env_opt("CACHEHAMSTER_CREDENTIAL_PERSISTENCE").as_deref())?;
     let configured = credential(persist, Path::new(&data_dir))?.is_some();
     tracing::info!(
         credential_persistent = persist,
         credential_configured = configured,
-        "credential resolution complete (plaintext value itself is never logged)"
+        "credential resolved"
     );
 
     let urls: Vec<String> = env_opt("CACHEHAMSTER_URLS")
@@ -191,9 +188,7 @@ async fn main() -> Result<()> {
         .map(str::to_string)
         .collect();
     if urls.is_empty() {
-        tracing::warn!(
-            "CACHEHAMSTER_URLS is empty; nothing to fetch. This scaffold has no real depot-manifest resolution yet, so it can only warm a directly-configured URL list."
-        );
+        tracing::warn!("CACHEHAMSTER_URLS is empty; nothing to fetch");
         return Ok(());
     }
 
