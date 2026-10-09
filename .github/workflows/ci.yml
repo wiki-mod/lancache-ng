@@ -456,22 +456,10 @@ jobs:
       credentials: *ghcr_credentials
     steps:
       - *bootstrap
-      # What: pass phase results to ci.sh result gate
-      # Why: ci.sh owns pass/fail classification policy
-      # From: Issue #1683
+      # What: pass the native needs context to the gate
+      # Why: job ids live in needs only; ci.sh owns verdict
+      # From: Issue #1683 | PR #1858
       - name: Aggregate the pipeline result
         env:
-          CI_PHASE_RESULTS: >-
-            platform:${{ needs.platform.result }}
-            plan:${{ needs.plan.result }}
-            build:${{ needs.build.result }}
-            test:${{ needs.test.result }}
-            cargo-audit:${{ needs.cargo-audit.result }}
-            lint:${{ needs.lint.result }}
-            scan:${{ needs.scan.result }}
-            aggregate:${{ needs.aggregate.result }}
-            assemble:${{ needs.assemble.result }}
-            validate:${{ needs.validate.result }}
-            promote:${{ needs.promote.result }}
-            checks:${{ needs.checks.result }}
+          CI_NEEDS: ${{ toJSON(needs) }}
         run: bash .github/scripts/ci.sh result-gate

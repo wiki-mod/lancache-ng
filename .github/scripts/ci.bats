@@ -212,28 +212,48 @@ teardown() {
 # CORE INVARIANTS
 # =========================================================
 
+# What: real ci.yml needs per row -> gate rc and verdict.
+# Why: §62: only success or a NOOP skip may green the gate.
+# From: Issue #1683 | PR #1858
 @test "result-gate maps each phase-result set to its verdict" {
-    # What: per row: phase results -> rc and verdict line.
-    # Why: only success or a NOOP skip may green the gate.
-    # From: Issue #1683 | PR #1858
-    local case phases rc want
-    local -A V=([@O1@]="$(_val name)" [@O2@]="$(_val name)")
-    while IFS='|' read -r case phases rc want; do
-        if [ "${phases}" = - ]; then
-            run env -u CI_PHASE_RESULTS bash "${CI_SH}" result-gate
-        else
-            CI_PHASE_RESULTS="$(_fill "${phases}")" run bash "${CI_SH}" result-gate
-        fi
-        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
-    done <<'CASES'
-all-success|plan:success @O1@:success checks:success|0|-> SUCCESS
-noop-skips|plan:success @O1@:skipped @O2@:skipped checks:success|0|-> SUCCESS
-plan-failed|plan:failure checks:success|1|[CI-ERROR-CORE-0100] phase="plan" result="failure"
-checks-failed|plan:success checks:failure|1|[CI-ERROR-CORE-0100] phase="checks" result="failure"
-platform-skipped|platform:skipped plan:success checks:success|1|[CI-ERROR-CORE-0100] phase="platform" result="skipped"
-phase-failed|plan:success @O1@:failure checks:success|1|[CI-ERROR-CORE-0116] phase="@O1@" result="failure"
-empty|-|2|[CI-ERROR-CORE-0101]
-CASES
+    local needs req p all="" noop="" other=""
+    needs="$(awk '/^  result:$/ { r = 1; next } r && /^  [^ ]/ { exit }
+        r && /^    needs: \[/ { sub(/^    needs: \[/, ""); sub(/\].*$/, ""); gsub(/,/, " "); print; exit }' \
+        "${BATS_TEST_DIRNAME}/../workflows/ci.yml")"
+    req="$(_ci_block_entry_list ci_result_gate "" required)" || { echo "required: ${req}"; return 1; }
+    req=" ${req//$'\n'/ } "
+    [ -n "${needs// }" ] && [ -n "${req// }" ] || { echo "needs '${needs}' or required '${req}' empty"; return 1; }
+    for p in ${req}; do
+        [[ " ${needs} " == *" ${p} "* ]] || { echo "required ${p} is not in the result needs: ${needs}"; return 1; }
+    done
+    for p in ${needs}; do
+        all+=" ${p}:success"
+        if [[ "${req}" == *" ${p} "* ]]; then noop+=" ${p}:success"; else noop+=" ${p}:skipped" other="${other:-${p}}"; fi
+    done
+    [ -n "${other}" ] || { echo "no optional phase in the result needs: ${needs}"; return 1; }
+    _json() {
+        local e out=""
+        for e in $1; do out+="${out:+,}\"${e%%:*}\":{\"result\":\"${e#*:}\",\"outputs\":{}}"; done
+        printf '{%s}' "${out}"
+    }
+    _row() {
+        CI_NEEDS="$(_json "$4")" run ci_cmd_result_gate
+        _expect "$1" "$2" "$3"
+    }
+    CI_NEEDS="$(_json "${all}")" run bash "${CI_SH}" result-gate
+    _expect all-success-cli 0 "-> SUCCESS" || return 1
+    _row noop 0 "-> SUCCESS" "${noop}" || return 1
+    for p in ${req}; do
+        _row "${p}-skipped" 1 "[CI-ERROR-CORE-0100] phase=\"${p}\" result=\"skipped\"" "${all/ ${p}:success/ ${p}:skipped}" || return 1
+        _row "${p}-missing" 1 "[CI-ERROR-CORE-0132] phase=\"${p}\"" "${all/ ${p}:success/}" || return 1
+    done
+    _row "${other}-failed" 1 "[CI-ERROR-CORE-0116] phase=\"${other}\" result=\"failure\"" "${noop/ ${other}:skipped/ ${other}:failure}" || return 1
+    CI_NEEDS="" run ci_cmd_result_gate
+    _expect empty 2 "[CI-ERROR-CORE-0101]" || return 1
+    CI_NEEDS="{" run ci_cmd_result_gate
+    _expect not-json 2 '[CI-ERROR-CORE-0133];cmd="jq" rc=' || return 1
+    CI_NEEDS="[\"$(_val name)\"]" run ci_cmd_result_gate
+    _expect not-object 2 '[CI-ERROR-CORE-0133];cmd="jq" rc=' || return 1
 }
 
 # What: per row: bad or missing input -> rc 2 and its id.

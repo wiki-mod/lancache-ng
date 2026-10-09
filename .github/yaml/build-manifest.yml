@@ -493,6 +493,12 @@ ci_job_timeouts:
   validate: 60
   welcome: 15
 
+# What: CI phases that must run and succeed on every run.
+# Why: §62: a skipped plan or checks would hide a red run.
+# From: Issue #1683 | PR #1858
+ci_result_gate:
+  required: [platform, plan, checks]
+
 # What: Named build contexts services COPY from at build.
 # Why: A change here rebuilds every consumer, not just self.
 # From: Issue #1683

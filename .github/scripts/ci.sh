@@ -7109,41 +7109,55 @@ ci_cmd_validate() {
     _ci_validate_run "${cand}"
 }
 
-# What: Required-check gate over phase results (§62).
+# What: Required-check gate over the needs results (§62).
 # Why: pass/fail classification is ci.sh, not YAML (§5).
 # From: Issue #1683 | PR #1858
 ci_cmd_result_gate() {
-    local results="${CI_PHASE_RESULTS:-}" entry phase state
-    local -a entries
-    if [ -z "${results}" ]; then
-        ci_log "[CI-ERROR-CORE-0101]" "reason=\"CI_PHASE_RESULTS empty\""
+    local needs="${CI_NEEDS:-}" pairs required results="" phase state
+    local -A result=()
+    if [ -z "${needs}" ]; then
+        ci_log "[CI-ERROR-CORE-0101]" "reason=\"CI_NEEDS empty\""
         return 2
     fi
-    read -ra entries <<< "${results}"
-    for entry in "${entries[@]}"; do
-        phase="${entry%%:*}"
-        state="${entry#*:}"
-        case "${phase}" in
-            # What: always-run phases: succeed, never skip.
-            # Why: skipped plan/checks would hide a red run.
-            platform|plan|checks)
-                if [ "${state}" != success ]; then
-                    ci_log "[CI-ERROR-CORE-0100]" "phase=\"${phase}\" result=\"${state}\" results=\"${results}\" reason=\"always-run phase did not succeed\""
-                    return 1
-                fi
-                ;;
-            # every other phase skips on a NOOP or PR: skipped is success.
+    pairs="$(_ci_run "[CI-ERROR-CORE-0133]" "reason=\"CI_NEEDS is not a needs object\"" \
+        jq -r 'to_entries[] | "\(.key) \(.value.result)"' <<< "${needs}")" || return 2
+    required="$(_ci_block_entry_list ci_result_gate "" required)" || return 2
+    if [ -z "${required}" ]; then
+        ci_log "[CI-ERROR-CORE-0134]" "manifest=\"${CI_MANIFEST}\" reason=\"no SOT ci_result_gate.required phase\""
+        return 2
+    fi
+    while read -r phase state; do
+        [ -n "${phase}" ] || continue
+        result["${phase}"]="${state}"
+        results+="${results:+ }${phase}:${state}"
+    done <<< "${pairs}"
+    # What: every required phase reports and succeeded.
+    # Why: a renamed or skipped plan would hide a red run.
+    # From: Issue #1683 | PR #1858
+    while read -r phase; do
+        if [ -z "${result[${phase}]+set}" ]; then
+            ci_log "[CI-ERROR-CORE-0132]" "phase=\"${phase}\" results=\"${results}\" reason=\"required phase missing from needs\""
+            return 1
+        fi
+        if [ "${result[${phase}]}" != success ]; then
+            ci_log "[CI-ERROR-CORE-0100]" "phase=\"${phase}\" result=\"${result[${phase}]}\" results=\"${results}\" reason=\"required phase did not succeed\""
+            return 1
+        fi
+        unset "result[${phase}]"
+    done <<< "${required}"
+    # What: any other phase: success or skipped passes.
+    # Why: on a NOOP or a PR those phases skip by design.
+    # From: Issue #1683 | PR #1858
+    while read -r phase state; do
+        [ -n "${phase}" ] && [ -n "${result[${phase}]+set}" ] || continue
+        case "${state}" in
+            success|skipped) ;;
             *)
-                case "${state}" in
-                    success|skipped) ;;
-                    *)
-                        ci_log "[CI-ERROR-CORE-0116]" "phase=\"${phase}\" result=\"${state}\" results=\"${results}\" reason=\"phase neither succeeded nor skipped\""
-                        return 1
-                        ;;
-                esac
+                ci_log "[CI-ERROR-CORE-0116]" "phase=\"${phase}\" result=\"${state}\" results=\"${results}\" reason=\"phase neither succeeded nor skipped\""
+                return 1
                 ;;
         esac
-    done
+    done <<< "${pairs}"
     printf 'CI 2.0 result gate: %s -> SUCCESS\n' "${results}"
 }
 
