@@ -862,6 +862,12 @@ services:
       - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
       - WATCHDOG_STATUS_FILE=/var/run/watchdog/status.json
       - DESIRED_STATE_FILE=/data/desired-state.json
+      # What: file paths under the /data and /etc/nats mounts.
+      # Why: the image ENV lint rejects these names; compose owns them.
+      # From: Issue #1683
+      - NATS_AUTH_CALLOUT_PATH=/etc/nats/auth_callout.conf
+      - UI_SESSION_SECRET_FILE=/data/lancache-ui-session.secret
+      - SECONDARY_REGISTRATION_TOKEN_FILE=/data/lancache-secondary-registration.token
       - NATS_SERVICE=nats
       - NATS_LOG_FILE=/var/log/lancache-nats/nats.log
       - DNS_STANDARD_SERVICE=dns-standard
