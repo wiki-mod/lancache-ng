@@ -122,7 +122,12 @@ ENV TEMPLATE_DIR=/templates \
     NATS_ISSUER_SEED_PATH=/data/lancache-nats-issuer.seed \
     NATS_XKEY_SEED_PATH=/data/lancache-nats-xkey.seed \
     NATS_CONF_PATH=/etc/nats/nats.conf \
-    NATS_AUTH_CALLOUT_PATH=/etc/nats/auth_callout.conf
+    NATS_AUTH_CALLOUT_PATH=/etc/nats/auth_callout.conf \
+    UI_SESSION_SECRET_FILE=/data/lancache-ui-session.secret \
+    UI_DATABASE_FILE=/data/lancache-ui.db \
+    SECONDARY_REGISTRATION_TOKEN_FILE=/data/lancache-secondary-registration.token \
+    UI_LOG_FILE=/var/log/lancache-ui/ui.log \
+    UI_LISTEN_PORT=8080
 
 # What: one ui runtime uid/gid for user and binary.
 # Why: nginx logs share it; the root start drops to it.
@@ -135,7 +140,7 @@ RUN addgroup -g "${UI_RUNTIME_ID}" lancache \
     && mkdir -p /data /etc/nats \
     && chown -R lancache:lancache /data /etc/nats
 
-EXPOSE 8080
+EXPOSE ${UI_LISTEN_PORT}
 
 # What: the binary, via PATH; it does the root start itself.
 # Why: no wrapper; secrets, chown and uid drop are in Rust.

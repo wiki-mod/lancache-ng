@@ -181,6 +181,19 @@ struct Config {
     nats_auth_callout_path: String,
     nats_service: String,
     nats_log_file: String,
+    // What: where the session secret persists.
+    // Why: a recreate must not invalidate every open session.
+    // From: Issue #1683 | PR #1858
+    session_secret_file: String,
+    // What: the SQLite file of the secondary nodes.
+    // Why: runtime state stays in PowerDNS, Kea, NATS and Docker.
+    database_file: String,
+    // What: where a generated registration token persists.
+    // Why: a restart must not rotate the token secondaries hold.
+    registration_token_file: String,
+    // What: TCP port the server binds inside the container.
+    // Why: the Dockerfile owns it; the primary URL reuses it.
+    listen_port: u16,
     nats_store_dir: Option<String>,
     nats_monitor_port: Option<String>,
     netdata_conf_file: Option<String>,
@@ -244,6 +257,7 @@ impl Config {
         let ssl_ip = set("SSL_IP").ok_or("SSL_IP must be set")?;
         // What: the Docker API entry point must come from compose.
         // Why: compose owns the value; no second default here.
+        let nats_url = need("NATS_URL")?;
         let docker_proxy_url = set("DOCKER_PROXY_URL").ok_or("DOCKER_PROXY_URL must be set")?;
         let tag = need("LANCACHE_IMAGE_TAG")?;
         let channel = set("LANCACHE_IMAGE_CHANNEL")
@@ -360,10 +374,11 @@ impl Config {
             pdns_api_key: secret("PDNS_API_KEY")?,
             netdata_alarm_token: secret("NETDATA_ALARM_TOKEN")?,
             netdata_alarms_file: need("NETDATA_ALARMS_FILE")?,
-            nats_url: need("NATS_URL")?,
+            nats_url: nats_url.clone(),
             advertised_nats_url: advertised_nats_url(
                 &text("NATS_ADVERTISE_URL", ""),
                 &text("NATS_BIND_IP", ""),
+                &nats_url,
             ),
             nats_ui: login("NATS_UI_USER", "NATS_UI_PASSWORD")?,
             nats_dns_writer: login("NATS_DNS_WRITER_USER", "NATS_DNS_WRITER_PASSWORD")?,
@@ -383,6 +398,13 @@ impl Config {
             nats_auth_callout_path: need("NATS_AUTH_CALLOUT_PATH")?,
             nats_service: need("NATS_SERVICE")?,
             nats_log_file: need("NATS_LOG_FILE")?,
+            session_secret_file: need("UI_SESSION_SECRET_FILE")?,
+            database_file: need("UI_DATABASE_FILE")?,
+            registration_token_file: need("SECONDARY_REGISTRATION_TOKEN_FILE")?,
+            listen_port: need("UI_LISTEN_PORT").and_then(|v| {
+                v.parse::<u16>()
+                    .map_err(|_| format!("UI_LISTEN_PORT must be a port number, got {v:?}"))
+            })?,
             nats_store_dir: set("NATS_STORE_DIR"),
             nats_monitor_port: set("NATS_MONITOR_PORT"),
             netdata_conf_file: set("NETDATA_CONF_FILE"),
@@ -512,7 +534,7 @@ fn cache_max_gb_from(env: &dyn Fn(&str) -> Option<String>) -> Result<f64, String
 // What: the NATS URL a remote secondary can dial, or None.
 // Why: an unreachable internal URL must never be handed out.
 // From: Issue #866
-fn advertised_nats_url(explicit: &str, bind_ip: &str) -> Option<String> {
+fn advertised_nats_url(explicit: &str, bind_ip: &str, nats_url: &str) -> Option<String> {
     let explicit = explicit.trim();
     if !explicit.is_empty() {
         return Some(explicit.to_string());
@@ -524,9 +546,16 @@ fn advertised_nats_url(explicit: &str, bind_ip: &str) -> Option<String> {
         .unwrap_or(bind_ip);
     match bare.parse::<IpAddr>().ok()? {
         ip if ip.is_unspecified() || ip.is_loopback() => None,
-        IpAddr::V6(v6) => Some(format!("nats://[{v6}]:4222")),
-        IpAddr::V4(v4) => Some(format!("nats://{v4}:4222")),
+        IpAddr::V6(v6) => Some(format!("nats://[{v6}]:{}", nats_port(nats_url)?)),
+        IpAddr::V4(v4) => Some(format!("nats://{v4}:{}", nats_port(nats_url)?)),
     }
+}
+
+// What: the port of the NATS URL the ui connects to.
+// Why: NATS_URL owns the port; the advertise URL reuses it.
+fn nats_port(nats_url: &str) -> Option<&str> {
+    let (_, port) = nats_url.trim_end_matches('/').rsplit_once(':')?;
+    (!port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())).then_some(port)
 }
 
 // What: true for empty or a shared-secret placeholder.
@@ -657,7 +686,6 @@ const MAX_CSRF_BODY_BYTES: usize = 1024 * 1024;
 const MAX_UI_SESSION_TTL_SECONDS: u64 = 365 * 24 * 60 * 60;
 const SESSION_COOKIE_NAME: &str = "lancache_ui_session";
 const INTERNAL_CSRF_HEADER: &str = "x-lancache-ui-csrf-token";
-const SECONDARY_REGISTRATION_TOKEN_FILE: &str = "/data/lancache-secondary-registration.token";
 
 // What: the templates the ui loads at startup.
 // Why: a template missing here fails every render of it.
@@ -1283,28 +1311,16 @@ fn watchdog_json(path: &str) -> Value {
     }
 }
 
-// What: true for an absolute path under an allowed prefix.
-// Why: du and df only ever see paths the deployment mounts.
-fn path_allowed(path: &str, prefixes: &[&str]) -> bool {
-    Path::new(path).is_absolute()
-        && !path.contains("..")
-        && prefixes
-            .iter()
-            .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
+// What: true for an absolute path without "..".
+// Why: the env supplies it; a relative path is a typo.
+fn path_allowed(path: &str) -> bool {
+    Path::new(path).is_absolute() && !path.contains("..")
 }
-
-// What: where the cache may be mounted.
-// Why: /opt is the install path; the rest are container paths.
-const CACHE_PATHS: [&str; 3] = [
-    "/opt/lancache-ng/cache",
-    "/var/cache/proxy",
-    "/data/lancache",
-];
 
 // What: size of an allowed directory in GiB, 0 if refused.
 // Why: du beats a Rust walk over hundreds of GB of files.
-fn du_gb(path: &str, prefixes: &[&str]) -> f64 {
-    if !path_allowed(path, prefixes) {
+fn du_gb(path: &str) -> f64 {
+    if !path_allowed(path) {
         return 0.0;
     }
     let bytes: u64 = Command::new("du")
@@ -1324,7 +1340,7 @@ fn du_gb(path: &str, prefixes: &[&str]) -> f64 {
 // What: free MiB on the cache filesystem; None if unknown.
 // Why: callers must fail closed, never assume unlimited space.
 fn cache_free_mib(path: &str) -> Option<u64> {
-    path_allowed(path, &CACHE_PATHS)
+    path_allowed(path)
         .then(|| df(Path::new(path)))
         .flatten()
         .map(|space| space.avail_kib / 1024)
@@ -2857,7 +2873,10 @@ async fn secondaries_page(
     ctx.insert("secondaries", &secondaries);
     ctx.insert(
         "primary_url",
-        &format!("http://{}:8080", state.config.standard_ip),
+        &format!(
+            "http://{}:{}",
+            state.config.standard_ip, state.config.listen_port
+        ),
     );
     ctx.insert(
         "registration_token",
@@ -6216,9 +6235,6 @@ async fn remove_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redir
     }
     Redirect::to("/domains")
 }
-// What: syslog store paths du may measure.
-// Why: only the fixed syslog mount may reach du.
-const SYSLOG_PATHS: [&str; 1] = ["/var/log/lancache-syslog-ng"];
 
 // What: log lines the recent-activity widget shows.
 // Why: a short list keeps the page cheap to render.
@@ -6265,7 +6281,7 @@ async fn dashboard(State(state): Shared, headers: HeaderMap) -> Response {
     let cfg = &state.config;
     let (proxy, cache_used_gb, stats, recent, syslog_gb, syslog, alarms) = tokio::join!(
         proxy_statuses(&state),
-        blocking(&state, |s| du_gb(&s.config.cache_dir, &CACHE_PATHS)),
+        blocking(&state, |s| du_gb(&s.config.cache_dir)),
         blocking(&state, |s| log_stats(
             &s.config.standard_log,
             &s.config.ssl_log
@@ -6275,7 +6291,7 @@ async fn dashboard(State(state): Shared, headers: HeaderMap) -> Response {
         }),
         blocking(&state, |s| {
             if s.config.syslog_enabled {
-                du_gb(&s.config.syslog_log_root, &SYSLOG_PATHS)
+                du_gb(&s.config.syslog_log_root)
             } else {
                 0.0
             }
@@ -6683,31 +6699,25 @@ async fn set_service_desired_state(
         }
     }
 }
-// What: where the session secret persists.
-// Why: a recreate must not invalidate every open session.
-// From: Issue #1683 | PR #1858
-const SESSION_SECRET_FILE: &str = "/data/lancache-ui-session.secret";
-
-// What: the SQLite file of the secondary nodes.
-// Why: runtime state stays in PowerDNS, Kea, NATS and Docker.
-const DATABASE_FILE: &str = "/data/lancache-ui.db";
-
 // What: minimum registration token length, in characters.
 // Why: this token alone gates remote registration.
 const MIN_REGISTRATION_TOKEN_LEN: usize = 32;
 
-// What: effective ui log file (UI_LOG_FILE or the default).
+// What: the ui log file from UI_LOG_FILE; unset is fatal.
 // Why: tracing and the root start must agree on one path.
 // From: Issue #633 | PR #1858
 fn ui_log_file() -> String {
-    std::env::var("UI_LOG_FILE").unwrap_or_else(|_| "/var/log/lancache-ui/ui.log".to_string())
+    std::env::var("UI_LOG_FILE")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| container_start_fatal("UI_LOG_FILE is not set"))
 }
 
 // What: a real token as is, else a persisted random one.
 // Why: placeholders crash-looped the ui; it must not rotate.
-fn registration_token(configured: &str) -> Result<String, String> {
+fn registration_token(configured: &str, token_file: &str) -> Result<String, String> {
     let token = if is_placeholder(configured) {
-        let path = Path::new(SECONDARY_REGISTRATION_TOKEN_FILE);
+        let path = Path::new(token_file);
         load_or_create(
             path,
             || {
@@ -7250,8 +7260,11 @@ async fn run() -> anyhow::Result<()> {
     init_tracing();
     let mut cfg = Config::from_env().unwrap_or_else(|e| container_start_fatal(&e));
     let ui_session_ttl = preflight(&cfg).unwrap_or_else(|e| container_start_fatal(&e));
-    cfg.secondary_registration_token = registration_token(&cfg.secondary_registration_token)
-        .unwrap_or_else(|e| container_start_fatal(&e));
+    cfg.secondary_registration_token = registration_token(
+        &cfg.secondary_registration_token,
+        &cfg.registration_token_file,
+    )
+    .unwrap_or_else(|e| container_start_fatal(&e));
     let issuer = issuer_keypair(&cfg).unwrap_or_else(|e| container_start_fatal(&e));
     let xkey = callout_xkey(&cfg).unwrap_or_else(|e| container_start_fatal(&e));
     let nats = connect_nats_with_retry(&cfg).await;
@@ -7266,8 +7279,8 @@ async fn run() -> anyhow::Result<()> {
         kea_config_lock: tokio::sync::Mutex::new(()),
         dhcp_probe_lock: tokio::sync::Mutex::new(()),
         nats,
-        db: Mutex::new(open_database(DATABASE_FILE)?),
-        ui_session_secret: load_or_create_hex::<32>(Path::new(SESSION_SECRET_FILE))?,
+        db: Mutex::new(open_database(&cfg.database_file)?),
+        ui_session_secret: load_or_create_hex::<32>(Path::new(&cfg.session_secret_file))?,
         ui_session_ttl,
         nats_issuer_public_key: issuer.public_key(),
         nats_callout_xkey_public_key: xkey.public_key(),
@@ -7277,8 +7290,9 @@ async fn run() -> anyhow::Result<()> {
     // What: answer auth-callout requests for the process life.
     // Why: secondaries are checked per connect; no reload.
     tokio::spawn(run_auth_callout(state.clone(), issuer, xkey));
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
-    tracing::info!("LanCache Admin UI running on http://0.0.0.0:8080");
+    let port = state.config.listen_port;
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
+    tracing::info!("LanCache Admin UI running on http://0.0.0.0:{port}");
     axum::serve(listener, router(state)).await?;
     Ok(())
 }
