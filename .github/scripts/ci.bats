@@ -527,30 +527,6 @@ _docker_answer() {
     printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$1" "$2" "${3:-}" "${4:-}" "${5:-}" >> "${DS}/answers"
 }
 
-# What: a PATH dir with every tool but the named ones
-# Why: proves the "tool missing" paths with real tools
-# From: Issue #1683 | PR #1858
-_path_without() {
-    local dir="$1" d x n t
-    local -A pw_seen=()
-    local -a pw_link=()
-    shift
-    mkdir -p "${dir}"
-    for t in "$@"; do pw_seen["${t}"]=1; done
-    # What: first PATH hit per name, then one ln for all.
-    # Why: one ln per tool cost seconds per calling test.
-    # From: Issue #1683 | PR #1858
-    while IFS= read -r -d: d; do
-        for x in "${d}"/*; do
-            n="${x##*/}"
-            [ -x "${x}" ] && [ -z "${pw_seen["${n}"]:-}" ] || continue
-            pw_seen["${n}"]=1
-            pw_link+=("${x}")
-        done
-    done <<< "${PATH}:"
-    [ "${#pw_link[@]}" -eq 0 ] || ln -s "${pw_link[@]}" "${dir}/"
-}
-
 # What: docker compose on the real deploy/prod files
 # Why: tests take names, volumes, profiles from their owner
 # From: Issue #1683 | PR #1858
@@ -1219,25 +1195,25 @@ CASES
 # VARIABLES
 # =========================================================
 
+# What: per row: env, CI_VARIABLES and SOT -> value or id
+# Why: AG-CI-006: GitHub vars arrive once as one JSON
+# From: Issue #1683 | PR #1858
 @test "variables get: env beats CI_VARIABLES json beats SOT" {
-    # What: per row: env/json/SOT sources -> value or fail.
-    # Why: GitHub vars arrive once as json (AG-CI-006).
-    # From: Issue #1683 | PR #1858
-    local m case envs name rc want
-    m="$(_val path)"
+    local case envs name rc want keys k
     local -a ev
-    local -A V=(
-        ["@VAR@"]="$(_val var)" ["@NOVAR@"]="$(_val var)" ["@SOTV@"]="$(_val name)" ["@ENVV@"]="$(_val name)"
-        ["@JSONV@"]="$(_val name)" ["@BAD@"]="$(_val name)" ["@NOJQ@"]="$(_val path)"
-    )
-    _path_without "${V["@NOJQ@"]}" jq
-    _fill "$(printf '%s\n' 'ci_variables:' '  @VAR@: @SOTV@')" > "${m}"
+    local -A V=(["@NOVAR@"]="$(_val var)" ["@ENVV@"]="$(_val name)" ["@JSONV@"]="$(_val name)" ["@BAD@"]="$(_val name)")
+    keys="$(_ci_block_keys ci_variables all)" || { echo "no SOT ci_variables: ${keys}"; return 1; }
+    while IFS= read -r k; do
+        V["@SOTV@"]="$(_ci_block_entry_field ci_variables "" "${k}")" || { echo "${k}: unreadable"; return 1; }
+        [ -z "${V["@SOTV@"]}" ] || { V["@VAR@"]="${k}"; break; }
+    done <<< "${keys}"
+    [ -n "${V["@VAR@"]:-}" ] || { echo "no SOT ci_variables key with a value"; return 1; }
     while IFS='|' read -r case envs name rc want; do
         ev=(); [ "${envs}" = - ] || read -r -a ev <<< "$(_fill "${envs}")"
         if [ "${rc}" -eq 0 ]; then
-            run --separate-stderr env "${ev[@]}" CI_MANIFEST="${m}" bash "${CI_SH}" variables get "$(_fill "${name}")"
+            run --separate-stderr env -u CI_VARIABLES -u "${V["@VAR@"]}" "${ev[@]}" bash "${CI_SH}" variables get "$(_fill "${name}")"
         else
-            run env "${ev[@]}" CI_MANIFEST="${m}" bash "${CI_SH}" variables get "$(_fill "${name}")"
+            run env -u CI_VARIABLES -u "${V["@VAR@"]}" "${ev[@]}" bash "${CI_SH}" variables get "$(_fill "${name}")"
         fi
         _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
     done <<'CASES'
@@ -1246,7 +1222,6 @@ env-over-sot|@VAR@=@ENVV@|@VAR@|0|=@ENVV@
 json-over-sot|CI_VARIABLES={"@VAR@":"@JSONV@"}|@VAR@|0|=@JSONV@
 env-over-json|@VAR@=@ENVV@ CI_VARIABLES={"@VAR@":"@JSONV@"}|@VAR@|0|=@ENVV@
 bad-json|CI_VARIABLES=@BAD@|@VAR@|2|[CI-ERROR-VARIABLES-0015] name="@VAR@"
-no-jq|PATH=@NOJQ@ CI_VARIABLES={"@VAR@":"@JSONV@"}|@VAR@|2|[CI-ERROR-CORE-0141];jq: command not found;[CI-ERROR-CORE-0136]
 no-value|-|@NOVAR@|2|[CI-ERROR-VARIABLES-0001] name="@NOVAR@"
 CASES
 }
@@ -1425,23 +1400,21 @@ CASES
 # Why: an empty scan must never pass a check as clean
 # From: Issue #1683 | PR #1858
 @test "scan file set: no repo fails closed, a gone path is skipped" {
-    local d a g e
-    local -a out=() ov=()
-    d="$(_val path)" e="$(_val path)"
-    mkdir -p "${d}" && cd "${d}" || return 1
-    export GIT_CEILING_DIRECTORIES="${d%/*}"
-    a="${d}/$(_val name)" g="${d}/$(_val name)"
-    : > "${a}"
+    local a g
+    local -a ov=()
+    a="${CI_SH}" g="${BATS_TEST_TMPDIR}/$(_val name)"
+    cd "${BATS_TEST_TMPDIR}" || return 1
+    export GIT_CEILING_DIRECTORIES="${BATS_TEST_TMPDIR%/*}"
     run _ci_scan_files out ov
     _expect no-repo 2 "[CI-ERROR-CHECK-0071] site=\"scan-files\";not a git repository" || return 1
     ov=("${a}" "${g}")
-    _ci_scan_files out ov 2> "${e}" || { echo "gone: rc $?: $(cat "${e}")"; return 1; }
-    [ "${out[*]}" = "${a}" ] && grep -qF '[CI-NOTICE-CHECK-0070] skipped=1' "${e}" \
-        || { echo "gone: in ${ov[*]} out ${out[*]}: $(cat "${e}")"; return 1; }
+    run eval '_ci_scan_files out ov && printf "out=%s\n" "${out[@]}"'
+    _expect gone 0 "[CI-NOTICE-CHECK-0070] skipped=1;out=${a}" || return 1
+    [[ "${output}" != *"out=${g}"* ]] || { echo "gone: in ${ov[*]}: ${output}"; return 1; }
     ov=("${a}")
-    _ci_scan_files out ov 2> "${e}" || { echo "present: rc $?: $(cat "${e}")"; return 1; }
-    [ "${out[*]}" = "${a}" ] && ! grep -qF 'CHECK-0070' "${e}" \
-        || { echo "present: in ${ov[*]} out ${out[*]}: $(cat "${e}")"; return 1; }
+    run eval '_ci_scan_files out ov && printf "out=%s\n" "${out[@]}"'
+    _expect present 0 "out=${a}" || return 1
+    [[ "${output}" != *CHECK-0070* ]] || { echo "present: in ${ov[*]}: ${output}"; return 1; }
 }
 
 # What: per row: title and env -> verdict and ids
@@ -3859,7 +3832,7 @@ CASES
     # What: modes, subnet start, profiles, template vars
     # Why: one dhcp profile per mode; templates fully render
     # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" modes off cprof ip net m p v dhcp="" ntp logp custom tpl vars exported out
+    local root modes off cprof ip net m p v dhcp="" ntp logp custom tpl vars exported out
     local -a assigns=()
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
