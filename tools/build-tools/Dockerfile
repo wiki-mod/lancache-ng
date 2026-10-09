@@ -67,10 +67,11 @@ ARG APT_CACHE_BUST=""
 # From: Issue #1860 | PR #1872
 ARG BUILD_TOOLS_ACCELERATION_CACHE_BUST=clang-offload-packager-v1
 
-# What: switches apk's own repositories to plain http.
-# Why: Squid caches http; signed indices keep integrity.
-# From: Issue #1095
-RUN sed -i 's|^https://|http://|' /etc/apk/repositories
+# What: apk repos to plain http, adds @testing for trivy.
+# Why: Squid caches http; trivy is only in edge/testing.
+# From: Issue #1095 | PR #1858
+RUN sed -i 's|^https://|http://|' /etc/apk/repositories; \
+    echo '@testing http://dl-cdn.alpinelinux.org/alpine/edge/testing' >> /etc/apk/repositories
 
 # What: installs Alpine packages and distcc/clang links.
 # Why: native packages first; GNU tools per [AG-VAL-034].
@@ -132,6 +133,12 @@ RUN set -euo pipefail; \
       util-linux \
       xz \
       yq-go \
+      shfmt \
+      trivy@testing \
+      gcompat \
+      run-parts \
+      zlib-static \
+      openjdk21-jre-headless \
       docker-cli \
       docker-cli-buildx \
       docker-cli-compose \
@@ -276,6 +283,9 @@ RUN set -euo pipefail; \
       xargs \
       xz \
       yq \
+      shfmt \
+      trivy \
+      java \
       cc \
       g++ \
     ); \
@@ -319,6 +329,9 @@ RUN set -euo pipefail; \
     run_contract_check 'docker buildx version' docker buildx version; \
     run_contract_check 'expect -v' expect -v; \
     run_contract_check 'yq --version' yq --version; \
+    run_contract_check 'shfmt --version' shfmt --version; \
+    run_contract_check 'trivy --version' trivy --version; \
+    run_contract_check 'java -version' java -version; \
     printf 'PATH=%s\n' "$PATH"; \
     case ":$PATH:" in \
       *:/usr/local/bin:*) ;; \
