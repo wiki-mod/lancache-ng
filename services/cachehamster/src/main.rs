@@ -6,6 +6,7 @@
 //! From: Issue #871
 
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -200,14 +201,22 @@ async fn main() -> Result<()> {
     if let Some(warning) = warning {
         tracing::warn!("{warning}");
     }
-    let total = AtomicU64::new(0);
+    let total = Arc::new(AtomicU64::new(0));
     let client = reqwest::Client::new();
-    // What: bounded fetch fan-out with a throughput tick.
-    // Why: one task owns both, so no stop signal is needed.
+    // What: spawned fetches, capped, plus a throughput tick.
+    // Why: own tasks use many threads; no stop signal needed.
     // From: Issue #871
-    let fetch = stream::iter(&urls)
-        .map(|url| drain(&client, url, &total))
+    let fetch = stream::iter(urls)
+        .map(|url| {
+            let (client, total) = (client.clone(), Arc::clone(&total));
+            tokio::spawn(async move { drain(&client, &url, &total).await })
+        })
         .buffer_unordered(usize::try_from(limit)?)
+        .map(|joined| {
+            joined
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result)
+        })
         .collect::<Vec<_>>();
     tokio::pin!(fetch);
     let mut ticker = tokio::time::interval(THROUGHPUT_EVERY);
@@ -219,7 +228,12 @@ async fn main() -> Result<()> {
             _ = ticker.tick() => {
                 let now = total.load(Ordering::Relaxed);
                 let mbit = (now - last) as f64 * 8.0 / THROUGHPUT_EVERY.as_secs_f64() / 1_000_000.0;
-                tracing::info!(bytes_total = now, mbit_per_sec = format!("{mbit:.1}"), "prefill throughput");
+                tracing::info!(
+                    bytes_total = now,
+                    bytes_since_last = now - last,
+                    mbit_per_sec = format!("{mbit:.1}"),
+                    "prefill throughput"
+                );
                 last = now;
             }
         }
