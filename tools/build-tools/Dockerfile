@@ -134,6 +134,9 @@ RUN set -euo pipefail; \
       xz \
       yq-go \
       dhclient \
+      nano \
+      zstd \
+      pbzip2 \
       shfmt \
       trivy@testing \
       gcompat \
@@ -284,6 +287,9 @@ RUN set -euo pipefail; \
       xargs \
       xz \
       yq \
+      nano \
+      zstd \
+      pbzip2 \
       dhclient \
       shfmt \
       trivy \
