@@ -42,6 +42,11 @@ CI_TMPDIR="${CI_TMPDIR:-/var/tmp}"
 # From: Issue #1683 | PR #1858
 CI_DIGEST_RE='sha256:[0-9a-f]{64}'
 
+# What: The system CA bundle path of an Alpine filesystem.
+# Why: runner, build root and built image share this path.
+# From: Issue #1683 | PR #1858
+CI_SYSTEM_CA_PATH="/etc/ssl/certs/ca-certificates.crt"
+
 # What: The ci.sh subcommand dispatch table.
 # Why: One table is membership, dispatch and error text.
 # From: Issue #1683
@@ -165,7 +170,7 @@ _ci_runner_self_hosted() {
 # Why: AG-CI-009 proxy; hosted runners have no LAN route.
 # From: Issue #1683 | PR #1858
 _ci_proxy_init() {
-    local http="${PROJECT_SELFHOSTED_PROXY_HTTP:-}" sys="${CI_SYSTEM_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}"
+    local http="${PROJECT_SELFHOSTED_PROXY_HTTP:-}"
     if ! _ci_runner_self_hosted || [ -z "${http}" ]; then
         ci_log "[CI-INFO-CORE-0113]" "proxy=off runner=\"${RUNNER_ENVIRONMENT:-unset}\" http_set=$([ -n "${http}" ] && echo yes || echo no)"
         return 0
@@ -179,17 +184,23 @@ _ci_proxy_init() {
         ci_log "[CI-INFO-CORE-0114]" "proxy_ca=off reason=\"PROJECT_SELFHOSTED_PROXY_CA empty\""
         return 0
     fi
-    # What: job-local bundle = system CAs + proxy CA.
-    # Why: cargo/curl via the TLS proxy; never in an image.
-    # From: Issue #1683 | PR #1858
-    local bundle out
-    bundle="$(umask 077 && _ci_mktemp "${CI_TMPDIR}/ci-ca-bundle.XXXXXX")" || return 2
-    if ! out="$({ cat "${sys}" && printf '%s\n' "${PROJECT_SELFHOSTED_PROXY_CA}"; } 2>&1 > "${bundle}")"; then
-        ci_error "[CI-ERROR-CORE-0112]" "system_bundle=\"${sys}\" bundle=\"${bundle}\" reason=\"proxy CA bundle not built\"" "${out}"
-        return 2
-    fi
+    local bundle
+    bundle="$(_ci_ca_bundle "[CI-ERROR-CORE-0112]" "${CI_SYSTEM_CA_PATH}" "${PROJECT_SELFHOSTED_PROXY_CA}")" || return 2
     export CARGO_HTTP_CAINFO="${bundle}" CURL_CA_BUNDLE="${bundle}"
     ci_log "[CI-INFO-CORE-0115]" "proxy_ca=on bundle=\"${bundle}\""
+}
+
+# What: job-local bundle = system CAs + proxy CA, mode 600.
+# Why: tools pass the TLS proxy; never baked into an image.
+# From: Issue #1683 | PR #1858
+_ci_ca_bundle() {
+    local id="$1" sys="$2" ca="$3" bundle out
+    bundle="$(umask 077 && _ci_mktemp "${CI_TMPDIR}/ci-ca-bundle.XXXXXX")" || return 2
+    if ! out="$({ cat "${sys}" && printf '%s\n' "${ca}"; } 2>&1 > "${bundle}")"; then
+        ci_error "${id}" "system_bundle=\"${sys}\" bundle=\"${bundle}\" reason=\"proxy CA bundle not built\"" "${out}"
+        return 2
+    fi
+    printf '%s\n' "${bundle}"
 }
 
 # What: Proxy env names passed through to docker.
@@ -2826,11 +2837,7 @@ ci_cmd_apk_setup() {
     # Why: https fetches pass the TLS proxy; no undo step.
     # From: Issue #1683 | PR #1858
     if [ -s "${ca}" ]; then
-        bundle="$(_ci_mktemp -p "${CI_TMPDIR}")" || return 2
-        if ! out="$(cat "${root}/etc/ssl/certs/ca-certificates.crt" "${ca}" 2>&1 > "${bundle}")"; then
-            ci_error "[CI-ERROR-APKSETUP-0002]" "system_bundle=\"${root}/etc/ssl/certs/ca-certificates.crt\" bundle=\"${bundle}\" reason=\"proxy CA bundle not built\"" "${out}"
-            return 2
-        fi
+        bundle="$(_ci_ca_bundle "[CI-ERROR-APKSETUP-0002]" "${root}${CI_SYSTEM_CA_PATH}" "$(<"${ca}")")" || return 2
         export SSL_CERT_FILE="${bundle}"
     fi
     local -a plain_pkgs=() tagged_pkgs=()
@@ -7310,7 +7317,7 @@ _ci_bake_inspect() {
     done <<< "${envs}"
     marker="$(sed -n '2p' <<< "${PROJECT_SELFHOSTED_PROXY_CA:-}")"
     if [ -n "${marker}" ]; then
-        bundle="$(docker run --rm --network none --entrypoint cat "${image}" /etc/ssl/certs/ca-certificates.crt 2>&1)" || { printf '%s\n' "${bundle}"; return 2; }
+        bundle="$(docker run --rm --network none --entrypoint cat "${image}" "${CI_SYSTEM_CA_PATH}" 2>&1)" || { printf '%s\n' "${bundle}"; return 2; }
         n="$(_ci_capture 1 grep -cF -- "${marker}" <<< "${bundle}")" || return 2
     fi
     printf 'extra_ca %s\n' "${n:-0}"

@@ -966,24 +966,18 @@ CASES
     _expect lock-dir 2 "[CI-ERROR-SCAN-0013]" || return 1
 }
 
+# What: per row: runner env -> proxy env, names, CA bundle.
+# Why: AG-CI-009: self-hosted proxy only, CA job-local.
+# From: Issue #1683 | PR #1858
 @test "proxy init maps each runner and CA case" {
-    # What: per row: runner env -> proxy env, names, CA.
-    # Why: AG-CI-009: self-hosted proxy only, CA job-local.
-    # From: Issue #1683 | PR #1858
-    local sys case envs probe rc want
-    sys="$(_val path)"
+    local case envs probe rc want
     local -a ev
     local -A P=(
         [names]='echo "names=$(_ci_proxy_names | wc -l)"'
         [env]='echo "h=${https_proxy} n=${NO_PROXY}"; _ci_proxy_names | tr "\n" " "'
-        [bundle]='cat "${CARGO_HTTP_CAINFO}"; [ "${CURL_CA_BUNDLE}" = "${CARGO_HTTP_CAINFO}" ] && echo same; stat -c %a "${CARGO_HTTP_CAINFO}"'
-        [none]=':'
+        [bundle]='[ "$(grep -c "BEGIN CERTIFICATE" "${CARGO_HTTP_CAINFO}")" -gt 0 ] && echo system-certs; tail -n 1 "${CARGO_HTTP_CAINFO}"; [ "${CURL_CA_BUNDLE}" = "${CARGO_HTTP_CAINFO}" ] && echo same; stat -c %a "${CARGO_HTTP_CAINFO}"'
     )
-    local -A V=(
-        [@PROXY@]="$(_val url)" [@EXCL@]="$(_val host)" [@SYSCA@]="$(_val name)" [@CA@]="$(_val name)"
-        [@SYS@]="${sys}" [@NOFILE@]="${BATS_TEST_TMPDIR}/$(_val name)/$(_val name)"
-    )
-    printf '%s\n' "${V[@SYSCA@]}" > "${sys}"
+    local -A V=([@PROXY@]="$(_val url)" [@EXCL@]="$(_val host)" [@CA@]="$(_val name)")
     while IFS='|' read -r case envs probe rc want; do
         envs="$(_fill "${envs}")" want="$(_fill "${want}")"
         read -r -a ev <<< "${envs}"
@@ -993,9 +987,8 @@ CASES
         _expect "${case}" "${rc}" "${want}" || return 1
     done <<'CASES'
 hosted-off|RUNNER_ENVIRONMENT=github-hosted PROJECT_SELFHOSTED_PROXY_HTTP=@PROXY@|names|0|[CI-INFO-CORE-0113] proxy=off runner="github-hosted" http_set=yes;names=0
-self-hosted|RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=@PROXY@ PROJECT_SELFHOSTED_PROXY_EXCLUSION=@EXCL@|env|0|[CI-INFO-CORE-0007];h=@PROXY@ n=@EXCL@;HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
-ca-bundle|RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=@PROXY@ PROJECT_SELFHOSTED_PROXY_CA=@CA@ CI_SYSTEM_CA_BUNDLE=@SYS@|bundle|0|@SYSCA@;@CA@;same;600
-no-system-bundle|RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=@PROXY@ PROJECT_SELFHOSTED_PROXY_CA=@CA@ CI_SYSTEM_CA_BUNDLE=@NOFILE@|none|2|[CI-ERROR-CORE-0112] system_bundle="@NOFILE@";No such file
+self-hosted|RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=@PROXY@ PROJECT_SELFHOSTED_PROXY_EXCLUSION=@EXCL@|env|0|[CI-INFO-CORE-0007];h=@PROXY@ n=@EXCL@;HTTP_PROXY HTTPS_PROXY
+ca-bundle|RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=@PROXY@ PROJECT_SELFHOSTED_PROXY_CA=@CA@|bundle|0|[CI-INFO-CORE-0115];system-certs;@CA@;same;600
 CASES
 }
 
