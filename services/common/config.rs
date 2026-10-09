@@ -34,15 +34,14 @@ pub fn parse_bool(raw: &str) -> Option<bool> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutOfRange {
     Clamp,
-    Default,
+    Reject,
 }
 
 // What: one unsigned decimal knob and its limits.
-// Why: every service parses numeric env values alike.
+// Why: the owner file sets the number; Rust holds only limits.
 #[derive(Clone, Copy, Debug)]
 pub struct Uint {
     pub name: &'static str,
-    pub default: u64,
     pub min: u64,
     pub max: u64,
     pub below: OutOfRange,
@@ -50,43 +49,30 @@ pub struct Uint {
 }
 
 impl Uint {
-    // What: value of the knob, plus a warning if rejected.
-    // Why: blank is no warning; junk never crashes.
-    pub fn parse(&self, raw: Option<&str>) -> (u64, Option<String>) {
-        let Some(raw) = non_empty(raw.map(str::trim)) else {
-            return (self.default, None);
-        };
-        let rejected = || {
-            (
-                self.default,
-                Some(format!(
-                    "Invalid {}={raw}; using default {}",
-                    self.name, self.default
-                )),
-            )
-        };
+    // What: value of the knob, plus a warning if clamped.
+    // Why: unset, junk or rejected values stop the start.
+    pub fn parse(&self, raw: Option<&str>) -> Result<(u64, Option<String>), String> {
+        let name = self.name;
+        let raw = non_empty(raw.map(str::trim)).ok_or_else(|| format!("{name} is not set"))?;
         if !raw.bytes().all(|b| b.is_ascii_digit()) {
-            return rejected();
+            return Err(format!("{name}={raw} is not an unsigned decimal number"));
         }
-        let Ok(value) = raw.parse::<u64>() else {
-            return rejected();
-        };
+        let value = raw
+            .parse::<u64>()
+            .map_err(|_| format!("{name}={raw} is too large"))?;
         let (limit, policy, side) = if value < self.min {
             (self.min, self.below, "below the minimum")
         } else if value > self.max {
             (self.max, self.above, "above the maximum")
         } else {
-            return (value, None);
+            return Ok((value, None));
         };
         match policy {
-            OutOfRange::Default => rejected(),
-            OutOfRange::Clamp => (
+            OutOfRange::Reject => Err(format!("{name}={raw} is {side} ({limit})")),
+            OutOfRange::Clamp => Ok((
                 limit,
-                Some(format!(
-                    "{}={raw} is {side} ({limit}); using {limit}",
-                    self.name
-                )),
-            ),
+                Some(format!("{name}={raw} is {side} ({limit}); using {limit}")),
+            )),
         }
     }
 }
@@ -246,33 +232,31 @@ mod tests {
         }
     }
 
-    // What: limits resolve by policy, junk falls back.
-    // Why: one parser serves floors, ceilings and defaults.
+    // What: limits resolve by policy; unset and junk fail.
+    // Why: one parser serves floors and ceilings alike.
     #[test]
     fn uint_knob_resolves_by_policy() {
         let knob = |below, above| Uint {
             name: "K",
-            default: 30,
             min: 1,
             max: 100,
             below,
             above,
         };
-        let floor = knob(OutOfRange::Clamp, OutOfRange::Default);
-        assert_eq!(floor.parse(None), (30, None));
-        assert_eq!(floor.parse(Some("  ")), (30, None));
-        assert_eq!(floor.parse(Some(" 12 ")), (12, None));
-        assert_eq!(floor.parse(Some("0")).0, 1);
-        assert_eq!(floor.parse(Some("101")).0, 30);
-        assert_eq!(floor.parse(Some("99999999999999999999")).0, 30);
+        let floor = knob(OutOfRange::Clamp, OutOfRange::Reject);
+        assert!(floor.parse(None).unwrap_err().contains("not set"));
+        assert!(floor.parse(Some("  ")).is_err());
+        assert_eq!(floor.parse(Some(" 12 ")), Ok((12, None)));
+        assert_eq!(floor.parse(Some("0")).unwrap().0, 1);
+        assert!(floor.parse(Some("0")).unwrap().1.is_some());
+        assert!(floor.parse(Some("101")).is_err());
+        assert!(floor.parse(Some("99999999999999999999")).is_err());
         for junk in ["abc", "-5", "1x"] {
-            let (value, warning) = floor.parse(Some(junk));
-            assert_eq!(value, 30);
-            assert!(warning.is_some_and(|w| w.contains(junk)));
+            assert!(floor.parse(Some(junk)).unwrap_err().contains(junk));
         }
-        let ceiling = knob(OutOfRange::Default, OutOfRange::Clamp);
-        assert_eq!(ceiling.parse(Some("0")).0, 30);
-        assert_eq!(ceiling.parse(Some("101")).0, 100);
+        let ceiling = knob(OutOfRange::Reject, OutOfRange::Clamp);
+        assert!(ceiling.parse(Some("0")).is_err());
+        assert_eq!(ceiling.parse(Some("101")).unwrap().0, 100);
     }
 
     // What: each mode text maps to one mode and container.

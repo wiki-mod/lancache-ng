@@ -867,7 +867,7 @@ fn required(name: &str) -> String {
 // Why: one process owns apply, reconcile and rollback.
 #[tokio::main]
 async fn main() {
-    let nats_url = env_opt("NATS_URL").unwrap_or_else(|| "nats://nats:4222".to_string());
+    let nats_url = required("NATS_URL");
     let consumer_name = required("NATS_CONSUMER");
     let api_key = required("PDNS_API_KEY");
     // What: only a clear "off" disables record writes.
@@ -876,20 +876,22 @@ async fn main() {
     let reconcile = env_opt("NATS_RECONCILER").is_some_and(|v| parse_bool(&v) == Some(true));
     let keep = Uint {
         name: "KEEP_KNOWN_GOOD_CONFIGS",
-        default: 3,
         min: 1,
         max: u32::MAX.into(),
-        below: OutOfRange::Default,
-        above: OutOfRange::Default,
+        below: OutOfRange::Reject,
+        above: OutOfRange::Reject,
     };
-    let (keep_n, warning) = keep.parse(env_opt("KEEP_KNOWN_GOOD_CONFIGS").as_deref());
+    let (keep_n, warning) = keep
+        .parse(env_opt("KEEP_KNOWN_GOOD_CONFIGS").as_deref())
+        .unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(1);
+        });
     if let Some(warning) = warning {
         eprintln!("{warning}");
     }
-    let snapshot_dir = env_opt("DNS_CONFIG_SNAPSHOT_DIR")
-        .unwrap_or_else(|| "/var/lib/lancache-dns/config-snapshots".to_string());
-    let rollback_addr =
-        env_opt("DNS_ROLLBACK_LISTEN_ADDR").unwrap_or_else(|| "0.0.0.0:8083".to_string());
+    let snapshot_dir = required("DNS_CONFIG_SNAPSHOT_DIR");
+    let rollback_addr = required("DNS_ROLLBACK_LISTEN_ADDR");
 
     let mut options = async_nats::ConnectOptions::new()
         .max_reconnects(None)

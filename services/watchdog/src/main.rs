@@ -47,26 +47,15 @@ struct Settings {
 
 // What: curl-style seconds; 0 means no timeout (None).
 // Why: fractions stay valid; 0 must not time out at once.
-fn curl_timeout(
-    raw: Option<&str>,
-    name: &str,
-    default_secs: u64,
-) -> (Option<Duration>, Option<String>) {
-    let default = Some(Duration::from_secs(default_secs));
-    let Some(raw) = raw else {
-        return (default, None);
-    };
-    let invalid = |why: &str| {
-        let warning = format!("Invalid {name}={raw}{why}; using default {default_secs}");
-        (default, Some(warning))
-    };
+fn curl_timeout(raw: Option<&str>, name: &str) -> Result<Option<Duration>, String> {
+    let raw = raw.ok_or_else(|| format!("FATAL: {name} is not set."))?;
+    let invalid = |why: &str| format!("FATAL: invalid {name}={raw}{why}.");
     match raw.parse::<f64>() {
-        Ok(0.0) => (None, None),
-        Ok(secs) if secs.is_finite() && secs > 0.0 => match Duration::try_from_secs_f64(secs) {
-            Ok(timeout) => (Some(timeout), None),
-            Err(_) => invalid(" (out of range)"),
-        },
-        _ => invalid(""),
+        Ok(0.0) => Ok(None),
+        Ok(secs) if secs.is_finite() && secs > 0.0 => Duration::try_from_secs_f64(secs)
+            .map(Some)
+            .map_err(|_| invalid(" (out of range)")),
+        _ => Err(invalid("")),
     }
 }
 
@@ -76,37 +65,41 @@ fn curl_timeout(
 fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<String>), String> {
     let get = |name: &str| env(name).filter(|v| !v.is_empty());
     let mut warnings = Vec::new();
-    let mut knob = |name: &'static str, default: u64, min: u64, max: u64| {
+    let mut knob = |name: &'static str, min: u64, max: u64| -> Result<u64, String> {
         let spec = Uint {
             name,
-            default,
             min,
             max,
             below: OutOfRange::Clamp,
-            above: OutOfRange::Default,
+            above: OutOfRange::Reject,
         };
-        let (value, warning) = spec.parse(get(name).as_deref());
+        let (value, warning) = spec
+            .parse(get(name).as_deref())
+            .map_err(|e| format!("FATAL: {e}."))?;
         warnings.extend(warning);
-        value
+        Ok(value)
     };
-    let check_interval = knob("CHECK_INTERVAL", 30, 1, u64::MAX);
-    let restart_after = knob("RESTART_AFTER", 3, 1, u32::MAX.into());
-    let disk_warn_pct = knob("DISK_WARN_PCT", 85, 0, u32::MAX.into());
-    let disk_alarm_pct = knob("DISK_ALARM_PCT", 95, 0, u32::MAX.into());
-    let (curl_max_time, warn_a) = curl_timeout(get("CURL_MAX_TIME").as_deref(), "CURL_MAX_TIME", 5);
-    let (curl_max_time_restart, warn_b) = curl_timeout(
+    let check_interval = knob("CHECK_INTERVAL", 1, u64::MAX)?;
+    let restart_after = knob("RESTART_AFTER", 1, u32::MAX.into())?;
+    let disk_warn_pct = knob("DISK_WARN_PCT", 0, u32::MAX.into())?;
+    let disk_alarm_pct = knob("DISK_ALARM_PCT", 0, u32::MAX.into())?;
+    let curl_max_time = curl_timeout(get("CURL_MAX_TIME").as_deref(), "CURL_MAX_TIME")?;
+    let curl_max_time_restart = curl_timeout(
         get("CURL_MAX_TIME_RESTART").as_deref(),
         "CURL_MAX_TIME_RESTART",
-        30,
-    );
-    warnings.extend(warn_a);
-    warnings.extend(warn_b);
+    )?;
 
-    // What: a bool knob; junk is false, unset is the default.
-    // Why: keeps the contract these gates always had.
-    let flag =
-        |name: &str, default: bool| get(name).map_or(default, |v| parse_bool(&v).unwrap_or(false));
-    let ssl_enabled = flag("SSL_ENABLED", true);
+    // What: a value the env must supply; unset is fatal.
+    // Why: watchdog.env and compose own it; no default here.
+    let need = |name: &str| get(name).ok_or_else(|| format!("FATAL: {name} is not set."));
+    // What: a bool the env must supply; junk is fatal.
+    // Why: same owner as need; a typo must not flip a gate.
+    let need_flag = |name: &str| {
+        need(name).and_then(|v| {
+            parse_bool(&v).ok_or_else(|| format!("FATAL: {name} must be a boolean, got {v:?}."))
+        })
+    };
+    let ssl_enabled = need_flag("SSL_ENABLED")?;
 
     let fixed_names = [
         ("CONTAINER_PROXY", config::CONTAINER_PROXY, true),
@@ -141,7 +134,7 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
             ));
         }
         (None, Some(dir), _) | (None, None, Some(dir)) => dir,
-        (None, None, None) => "/var/cache/lancache".to_string(),
+        (None, None, None) => return Err("FATAL: CACHE_DIR is not set.".to_string()),
     };
 
     // What: the Docker API entry point must come from the env.
@@ -157,21 +150,17 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
         curl_max_time_restart,
         disk_warn_pct: disk_warn_pct as u32,
         disk_alarm_pct: disk_alarm_pct as u32,
-        status_file: get("STATUS_FILE").map_or_else(
-            || PathBuf::from("/var/run/watchdog/status.json"),
-            PathBuf::from,
-        ),
-        desired_state_file: get("DESIRED_STATE_FILE")
-            .map_or_else(|| PathBuf::from("/data/desired-state.json"), PathBuf::from),
+        status_file: PathBuf::from(need("STATUS_FILE")?),
+        desired_state_file: PathBuf::from(need("DESIRED_STATE_FILE")?),
         cache_dir: PathBuf::from(cache_dir),
         ssl_enabled,
-        // What: an unset DHCP_MODE means disabled.
-        // Why: no alert for a DHCP container never run.
-        dhcp_mode: DhcpMode::parse(&get("DHCP_MODE").unwrap_or_default(), false),
+        // What: DHCP_MODE must be set; "disabled" is a value.
+        // Why: compose passes it; unknown text fails closed.
+        dhcp_mode: DhcpMode::parse(&need("DHCP_MODE")?, false),
         // What: LOGGING_ENABLED gates the syslog container.
         // Why: SYSLOG_ENABLED gates retention only.
-        logging_enabled: flag("LOGGING_ENABLED", false),
-        ntp_enabled: flag("NTP_ENABLED", false),
+        logging_enabled: need_flag("LOGGING_ENABLED")?,
+        ntp_enabled: need_flag("NTP_ENABLED")?,
     };
     Ok((settings, warnings))
 }
@@ -595,22 +584,41 @@ async fn main() {
 mod tests {
     use super::*;
 
-    // What: settings from env pairs plus a test proxy URL.
-    // Why: the URL is required; tests set no process env.
+    // What: the values watchdog.env and compose would supply.
+    // Why: Rust keeps no defaults, so every load needs them.
+    const BASE: [(&str, &str); 14] = [
+        ("DOCKER_PROXY_URL", "http://proxy.test:1"),
+        ("CHECK_INTERVAL", "30"),
+        ("RESTART_AFTER", "3"),
+        ("DISK_WARN_PCT", "85"),
+        ("DISK_ALARM_PCT", "95"),
+        ("CURL_MAX_TIME", "5"),
+        ("CURL_MAX_TIME_RESTART", "30"),
+        ("CACHE_DIR", "/cache"),
+        ("STATUS_FILE", "/run/status.json"),
+        ("DESIRED_STATE_FILE", "/data/desired.json"),
+        ("SSL_ENABLED", "1"),
+        ("DHCP_MODE", "disabled"),
+        ("LOGGING_ENABLED", "0"),
+        ("NTP_ENABLED", "0"),
+    ];
+
+    // What: settings from BASE, overridden by env pairs.
+    // Why: tests set no process env; "" blanks a base value.
     fn load(pairs: &[(&str, &str)]) -> Result<(Settings, Vec<String>), String> {
         load_settings(|name| {
             pairs
                 .iter()
+                .chain(BASE.iter())
                 .find(|(key, _)| *key == name)
                 .map(|(_, value)| value.to_string())
-                .or_else(|| (name == "DOCKER_PROXY_URL").then(|| "http://proxy.test:1".to_string()))
         })
     }
 
-    // What: knobs keep defaults, floor and fall back.
+    // What: knobs take the owner's value, floor, or fail.
     // Why: a bad knob must not busy-loop or restart every reading.
     #[test]
-    fn knobs_floor_fall_back_and_default() {
+    fn knobs_floor_and_reject() {
         let (s, warnings) = load(&[]).unwrap();
         assert!(warnings.is_empty());
         assert_eq!(s.check_interval, Duration::from_secs(30));
@@ -620,14 +628,7 @@ mod tests {
         );
         assert_eq!(s.curl_max_time, Some(Duration::from_secs(5)));
         assert_eq!(s.curl_max_time_restart, Some(Duration::from_secs(30)));
-        assert_eq!(s.cache_dir, PathBuf::from("/var/cache/lancache"));
-        let blank = [
-            ("CHECK_INTERVAL", ""),
-            ("RESTART_AFTER", ""),
-            ("SSL_ENABLED", ""),
-        ];
-        let (s, warnings) = load(&blank).unwrap();
-        assert!(warnings.is_empty() && s.ssl_enabled && s.restart_after == 3);
+        assert_eq!(s.cache_dir, PathBuf::from("/cache"));
 
         let floored = [("CHECK_INTERVAL", "0"), ("RESTART_AFTER", "00")];
         let (s, warnings) = load(&floored).unwrap();
@@ -636,19 +637,19 @@ mod tests {
         assert!(warnings.iter().any(|w| w.contains("CHECK_INTERVAL=0")));
         assert!(warnings.iter().any(|w| w.contains("RESTART_AFTER=00")));
 
-        let junk = [
+        for (name, bad) in [
             ("CHECK_INTERVAL", "abc"),
             ("RESTART_AFTER", "4294967296"),
             ("DISK_WARN_PCT", "-5"),
-        ];
-        let (s, warnings) = load(&junk).unwrap();
-        assert_eq!(s.check_interval, Duration::from_secs(30));
-        assert_eq!((s.restart_after, s.disk_warn_pct), (3, 85));
-        assert_eq!(warnings.len(), 3);
+            ("DISK_ALARM_PCT", ""),
+        ] {
+            let err = load(&[(name, bad)]).err().unwrap();
+            assert!(err.contains(name), "{name}={bad}: {err}");
+        }
     }
 
     // What: curl timeouts keep fractions; 0 is unbounded.
-    // Why: 0 must not time out at once; junk falls back.
+    // Why: 0 must not time out at once; junk is fatal.
     #[test]
     fn curl_timeouts_handle_zero_fractions_and_junk() {
         let pairs = [("CURL_MAX_TIME", "0"), ("CURL_MAX_TIME_RESTART", "2.5")];
@@ -656,11 +657,22 @@ mod tests {
         assert_eq!(s.curl_max_time, None);
         assert_eq!(s.curl_max_time_restart, Some(Duration::from_secs_f64(2.5)));
         assert!(warnings.is_empty());
-        for bad in ["bogus", "-1.5", "1e999"] {
-            let (s, warnings) = load(&[("CURL_MAX_TIME", bad)]).unwrap();
-            assert_eq!(s.curl_max_time, Some(Duration::from_secs(5)));
-            let needle = format!("CURL_MAX_TIME={bad}");
-            assert!(warnings.iter().any(|w| w.contains(&needle)));
+        for bad in ["bogus", "-1.5", "1e999", ""] {
+            let err = load(&[("CURL_MAX_TIME", bad)]).err().unwrap();
+            assert!(err.contains("CURL_MAX_TIME"), "{bad}: {err}");
+        }
+    }
+
+    // What: unset or junk owner values are fatal.
+    // Why: the watchdog has no defaults to fall back on.
+    #[test]
+    fn missing_or_junk_owner_values_are_fatal() {
+        for (var, _) in BASE {
+            let err = load(&[(var, "")]).err().unwrap();
+            assert!(err.contains(var), "{var}: {err}");
+        }
+        for var in ["SSL_ENABLED", "LOGGING_ENABLED", "NTP_ENABLED"] {
+            assert!(load(&[(var, "maybe")]).is_err(), "{var}");
         }
     }
 
@@ -680,12 +692,16 @@ mod tests {
         }
         assert!(load(&[("CONTAINER_PROXY", "lancache-proxy")]).is_ok());
         assert!(load(&[("SSL_ENABLED", "0"), ("CONTAINER_DNS_SSL", "x")]).is_ok());
-        let split = [("CACHE_DIR_STANDARD", "/b"), ("CACHE_DIR_SSL", "/c")];
+        let split = [
+            ("CACHE_DIR", ""),
+            ("CACHE_DIR_STANDARD", "/b"),
+            ("CACHE_DIR_SSL", "/c"),
+        ];
         let err = load(&split).err().unwrap();
         assert!(err.contains("/b") && err.contains("/c"));
         let (s, _) = load(&[("CACHE_DIR", "/a"), ("CACHE_DIR_SSL", "/c")]).unwrap();
         assert_eq!(s.cache_dir, PathBuf::from("/a"));
-        let (s, _) = load(&[("CACHE_DIR_SSL", "/c")]).unwrap();
+        let (s, _) = load(&[("CACHE_DIR", ""), ("CACHE_DIR_SSL", "/c")]).unwrap();
         assert_eq!(s.cache_dir, PathBuf::from("/c"));
     }
 

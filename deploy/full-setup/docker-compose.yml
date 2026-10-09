@@ -170,10 +170,23 @@ services:
   # Watchdog for health monitoring
   watchdog:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}"
-    # What: the Docker API entry point, as in config/prod/watchdog.env.
-    # Why: the watchdog has no default and refuses to start without it.
+    # What: every value the watchdog needs, as config/prod sets it.
+    # Why: the watchdog has no defaults and refuses to start without.
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
+      - CHECK_INTERVAL=30
+      - RESTART_AFTER=3
+      - DISK_WARN_PCT=85
+      - DISK_ALARM_PCT=95
+      - CURL_MAX_TIME=5
+      - CURL_MAX_TIME_RESTART=30
+      - CACHE_DIR=/var/cache/lancache
+      - STATUS_FILE=/var/run/watchdog/status.json
+      - DESIRED_STATE_FILE=/data/desired-state.json
+      - SSL_ENABLED=1
+      - DHCP_MODE=disabled
+      - LOGGING_ENABLED=0
+      - NTP_ENABLED=0
     volumes:
       # What: cache mount is read-only (purge moved to retention).
       # Why: watchdog only reads; see deploy/prod's identical mount.
@@ -364,6 +377,9 @@ services:
       - KEA_CONFIG_SNAPSHOT_DIR=/var/lib/kea/config-snapshots
       - SYSLOG_ENABLED=false
       - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
+      - SYSLOG_MAX_GB=10
+      - KEEP_KNOWN_GOOD_CONFIGS=3
+      - UI_LOGS_MAX_ENTRIES=200
       - UI_SESSION_TTL_SECONDS=86400
       - NTP_UPSTREAM_SERVERS=0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com
       - DNS_STANDARD_SERVICE=dns-standard

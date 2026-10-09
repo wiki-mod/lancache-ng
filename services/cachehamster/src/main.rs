@@ -29,15 +29,14 @@ const NONCE_LEN: usize = 24;
 // Why: no config owner exists; it only paces a readout.
 const THROUGHPUT_EVERY: Duration = Duration::from_secs(10);
 
-// What: in-flight fetches; 4 when unset or invalid.
-// Why: a bad value costs speed only, so it does not fail.
+// What: limits of the in-flight fetch count.
+// Why: cachehamster.env owns the number; Rust owns limits.
 const CONCURRENCY: Uint = Uint {
     name: "CACHEHAMSTER_CONCURRENCY",
-    default: 4,
     min: 1,
     max: u32::MAX as u64,
-    below: OutOfRange::Default,
-    above: OutOfRange::Default,
+    below: OutOfRange::Reject,
+    above: OutOfRange::Reject,
 };
 
 // What: a credential as stored: salt, nonce, ciphertext.
@@ -192,7 +191,9 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let (limit, warning) = CONCURRENCY.parse(env_opt("CACHEHAMSTER_CONCURRENCY").as_deref());
+    let (limit, warning) = CONCURRENCY
+        .parse(env_opt("CACHEHAMSTER_CONCURRENCY").as_deref())
+        .map_err(anyhow::Error::msg)?;
     if let Some(warning) = warning {
         tracing::warn!("{warning}");
     }

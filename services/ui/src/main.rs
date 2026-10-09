@@ -221,20 +221,19 @@ impl Config {
         };
         let flag =
             |key: &str, default: bool| env(key).and_then(|v| parse_bool(&v)).unwrap_or(default);
-        let knob = |name: &'static str, default: u64, max: u64, above: OutOfRange| {
+        let knob = |name: &'static str, max: u64, above: OutOfRange| -> Result<u64, String> {
             let spec = Uint {
                 name,
-                default,
                 min: 1,
                 max,
-                below: OutOfRange::Default,
+                below: OutOfRange::Reject,
                 above,
             };
-            let (value, warning) = spec.parse(env(name).as_deref());
+            let (value, warning) = spec.parse(env(name).as_deref())?;
             if let Some(warning) = warning {
                 eprintln!("[lancache-ui] {warning}");
             }
-            value
+            Ok(value)
         };
 
         let standard_log = need("STANDARD_LOG")?;
@@ -334,10 +333,9 @@ impl Config {
             kea_config_snapshot_dir: need("KEA_CONFIG_SNAPSHOT_DIR")?,
             kea_keep_known_good_configs: knob(
                 "KEEP_KNOWN_GOOD_CONFIGS",
-                3,
                 u32::MAX.into(),
-                OutOfRange::Default,
-            ) as u32,
+                OutOfRange::Reject,
+            )? as u32,
             auth_user: set("UI_AUTH_USER"),
             auth_password: set("UI_AUTH_PASSWORD"),
             allow_insecure_ui: need_flag("ALLOW_INSECURE_UI")?,
@@ -354,7 +352,7 @@ impl Config {
                 "never" | "false" | "0" | "off" => HstsMode::Never,
                 _ => HstsMode::Auto,
             },
-            ui_logs_max_entries: knob("UI_LOGS_MAX_ENTRIES", 200, u64::MAX, OutOfRange::Default)
+            ui_logs_max_entries: knob("UI_LOGS_MAX_ENTRIES", u64::MAX, OutOfRange::Reject)?
                 as usize,
             pdns_auth_url: need("PDNS_AUTH_URL")?,
             pdns_rec_url: need("PDNS_REC_URL")?,
@@ -400,7 +398,7 @@ impl Config {
             dev_mode: flag("LANCACHE_DEV_MODE", false),
             syslog_enabled: need_flag("SYSLOG_ENABLED")?,
             syslog_log_root: need("SYSLOG_LOG_ROOT")?,
-            syslog_max_gb: knob("SYSLOG_MAX_GB", 10, 1_048_576, OutOfRange::Clamp) as u32,
+            syslog_max_gb: knob("SYSLOG_MAX_GB", 1_048_576, OutOfRange::Clamp)? as u32,
             watchdog_status_file: need("WATCHDOG_STATUS_FILE")?,
             desired_state_file: need("DESIRED_STATE_FILE")?,
         })

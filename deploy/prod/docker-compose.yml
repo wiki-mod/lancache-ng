@@ -896,6 +896,7 @@ services:
       - DHCP_API_URL=http://host.docker.internal:8000
       - DHCP_API_TOKEN=${KEA_CTRL_TOKEN}
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
+      - UI_LOGS_MAX_ENTRIES=200
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
       # What: DNS_ROLLBACK_URL, scoped to dns-standard only.
