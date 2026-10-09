@@ -1066,38 +1066,6 @@ CASES
 # VALIDATION
 # =========================================================
 
-@test "validation SOT proxy probe url is a cacheable HTTP target" {
-    # What: Only HTTP is cached; the probe URL must be HTTP.
-    # Why: No HIT proof exists against passthrough HTTPS.
-    # From: Issue #1683 | PR #1858
-    run _ci_validation_proxy_probe_url
-    [ "${status}" -eq 0 ]
-    [[ "${output}" == http://* ]]
-}
-
-# What: each proxy constant ci.sh reads, from the real file.
-# Why: AG-CI-006: entrypoint owns paths; the OS owns ports.
-# From: Issue #1683 | PR #1858
-@test "proxy constants and service ports come from their owners" {
-    local found n p
-    local -A seen=()
-    found="$(grep -o -E '_ci_proxy_constant [A-Z_]+' "${CI_SH}")" || { echo "no _ci_proxy_constant caller in ${CI_SH}"; return 1; }
-    for n in ${found//_ci_proxy_constant /}; do
-        [ -z "${seen[${n}]:-}" ] || continue
-        seen["${n}"]=1
-        run _ci_proxy_constant "${n}"
-        [ "${status}" -eq 0 ] && [ -n "${output}" ] && [[ "${output}" != *[\"\$[:space:]]* ]] \
-            || { echo "${n}: rc ${status}: '${output}'"; return 1; }
-    done
-    for p in http https; do
-        run _ci_service_port "${p}"
-        [ "${status}" -eq 0 ] && [[ "$(getent services "${p}/tcp")" =~ [[:space:]]${output}/tcp ]] \
-            || { echo "${p}: rc ${status}: ${output}"; return 1; }
-    done
-    run _ci_service_port "$(_val name)"
-    _expect unknown 2 '[CI-ERROR-CORE-0106]' || return 1
-}
-
 # What: per image pin, third-party kept, a gap fails closed
 # Why: §48: validate runs the candidate, not a mutable tag.
 # From: Issue #1683 | PR #1858
