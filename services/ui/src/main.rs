@@ -6113,7 +6113,7 @@ fn set_markers(state: &AppState, file: &str, enabled: bool) -> Result<(), Status
     ] {
         let path = Path::new(dir).join(file);
         let result = if enabled {
-            fs::write(&path, b"1")
+            write_file(&path, b"1", 0o644, Place::Replace)
         } else {
             match fs::remove_file(&path) {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
