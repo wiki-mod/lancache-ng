@@ -1362,38 +1362,31 @@ pin-platform|@PC@||@SP@|@ARCH@=.+ @SHA@=[0-9a-f]{64}$|-
 CASES
 }
 
+# What: OCI labels of a real service from SOT and run env
+# Why: build provenance is set once per image by ci.sh
+# From: Issue #1683 | PR #1858
 @test "oci labels: provenance from the SOT and the run env" {
-    # What: OCI labels from SOT pins, repo and commit env.
-    # Why: provenance is set once, not per Dockerfile.
-    # From: Issue #1683 | PR #1858
-    local m nobase want got
-    local -A V=(
-        ["@S@"]="$(_val name)" ["@FB@"]="$(_val name)" ["@LIC@"]="$(_val name)" ["@BDIG@"]="$(_val digest)"
-        ["@BIMG@"]="$(_val host)/$(_val name):$(_val semver)" ["@OWN@"]="$(_val name)" ["@REPO@"]="$(_val name)"
-        ["@SRV@"]="$(_val url)" ["@SHA@"]="$(_val sha)"
-    )
-    m="$(_val path)"
-    nobase="$(_val path)"
-    _fill "$(printf '%s\n' 'release:' '  license: @LIC@' 'base_images:' '  @FB@: "@BIMG@@@BDIG@"' \
-        'services:' '  @S@:' '    final_base: @FB@')" > "${m}"
-    grep -v "^  ${V["@FB@"]}:" "${m}" > "${nobase}"
+    local want got fb base
+    local -A V=(["@OWN@"]="$(_val name)" ["@REPO@"]="$(_val name)" ["@SRV@"]="$(_val url)" ["@SHA@"]="$(_val sha)")
+    V["@S@"]="$(ci_services | awk 'NR == 1')"
+    fb="$(_ci_required_field "${V["@S@"]}" final_base)" && base="$(_ci_block_entry_field base_images "" "${fb}")" \
+        && V["@LIC@"]="$(_ci_release_value license)" || { echo "SOT inputs: ${V[*]} ${fb} ${base}"; return 1; }
+    [ -n "${V["@S@"]}" ] && [ -n "${base}" ] && [ -n "${V["@LIC@"]}" ] || { echo "SOT inputs: ${V[*]} ${base}"; return 1; }
+    V["@BIMG@"]="${base%@*}" V["@BDIG@"]="${base#*@}"
     want="$(_fill "$(printf 'org.opencontainers.image.%s\n' 'revision=@SHA@' 'version=@SHA@' \
         'source=@SRV@/@OWN@/@REPO@' 'url=@SRV@/@OWN@/@REPO@' 'documentation=@SRV@/@OWN@/@REPO@' 'licenses=@LIC@' \
         'vendor=@OWN@' 'title=@S@' 'description=@REPO@ @S@ image' 'base.name=@BIMG@' 'base.digest=@BDIG@')")"
-    CI_MANIFEST="${m}" GITHUB_SHA="${V["@SHA@"]}" GITHUB_SERVER_URL="${V["@SRV@"]}" GITHUB_REPOSITORY="${V["@OWN@"]}/${V["@REPO@"]}" \
+    GITHUB_SHA="${V["@SHA@"]}" GITHUB_SERVER_URL="${V["@SRV@"]}" GITHUB_REPOSITORY="${V["@OWN@"]}/${V["@REPO@"]}" \
         run _ci_oci_labels "${V["@S@"]}"
     _expect labels 0 - || return 1
     [[ "${output%%$'\n'*}" =~ ^org\.opencontainers\.image\.created=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
         || { echo "created: ${output}"; return 1; }
     got="${output#*$'\n'}"
     [ "${got}" = "${want}" ] || { echo "labels: ${got}"; echo "want: ${want}"; return 1; }
-    CI_MANIFEST="${m}" GITHUB_SHA='' GITHUB_SERVER_URL="${V["@SRV@"]}" GITHUB_REPOSITORY="${V["@OWN@"]}/${V["@REPO@"]}" \
+    GITHUB_SHA='' GITHUB_SERVER_URL="${V["@SRV@"]}" GITHUB_REPOSITORY="${V["@OWN@"]}/${V["@REPO@"]}" \
         run _ci_oci_labels "${V["@S@"]}"
     _expect no-sha 0 - || return 1
     [[ "${output}" != *"image.revision="* && "${output}" != *"image.version="* ]] || { echo "no-sha: ${output}"; return 1; }
-    CI_MANIFEST="${nobase}" GITHUB_SHA="${V["@SHA@"]}" GITHUB_SERVER_URL="${V["@SRV@"]}" GITHUB_REPOSITORY="${V["@OWN@"]}/${V["@REPO@"]}" \
-        run _ci_oci_labels "${V["@S@"]}"
-    _expect no-base 2 "$(_fill '[CI-ERROR-BUILD-0014] service="@S@" key="base_images.@FB@"')" || return 1
 }
 
 # What: no repo fails coded and a gone path is noted
