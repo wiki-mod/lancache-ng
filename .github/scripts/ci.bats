@@ -2053,19 +2053,22 @@ _legacy_env() {
     [ "$(get_env_var UI_AUTH_PASSWORD "${t}/.env")" = "${real}" ] || { echo "kept: the operator password changed"; return 1; }
 }
 
+# What: reruns add no duplicate; a written key collapses
+# Why: AG-OP-006: one canonical assignment per key
+# From: Issue #1683 | PR #1858
 @test "migrate_env_for_update leaves no duplicate key assignments" {
     _stand_ins || return 1
-    # What: two runs must not stack duplicate key lines
-    # Why: set_env_key collapses duplicates (AG-OP-006)
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}/dup"
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    mkdir -p "${t}" && _legacy_env "${t}/.env"
+    local t="${BATS_TEST_TMPDIR}/dup"
+    _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
+    mkdir -p "${t}" && _legacy_env "${t}/.env" || return 1
+    printf 'PROXY_SECURITY_MODE=strict\n' >> "${t}/.env"
+    [ "$(grep -c '^PROXY_SECURITY_MODE=' "${t}/.env")" -eq 2 ] || { echo "no duplicate in the input"; return 1; }
     export CONV="${t}"
     _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}" && migrate_env_for_update "${CONV}"'
     [ "${status}" -eq 0 ] && [ -z "$(awk -F= '/^[A-Za-z_]/ { print $1 }' "${t}/.env" | sort | uniq -d)" ] \
-        || { echo "duplicates: ${output}"; return 1; }
+        || { echo "duplicates: $(awk -F= '/^[A-Za-z_]/ { print $1 }' "${t}/.env" | sort | uniq -d) ${output}"; return 1; }
+    [ "$(grep '^PROXY_SECURITY_MODE=' "${t}/.env")" = PROXY_SECURITY_MODE=lazy ] \
+        || { echo "collapse: $(grep '^PROXY_SECURITY_MODE=' "${t}/.env")"; return 1; }
 }
 
 @test "migrate_env_for_update keeps config/prod values per row" {
