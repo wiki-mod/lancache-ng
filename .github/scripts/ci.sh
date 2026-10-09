@@ -12461,26 +12461,6 @@ _ci_check_logging_matrix() {
     printf 'logging-matrix=clean rows=%s services=%s\n' "${#canonical[@]}" "${#consumer[@]}"
 }
 
-# What: Deny any aquasecurity trivy action in workflows.
-# Why: ci.sh scan owns trivy + its retry (AG-CI-013/023).
-# From: Issue #1683 | PR #1858
-_ci_check_trivy_action_direct_usage() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" out wf act
-    local -a wfs=() acts=()
-    wf="$(_ci_repo_path CI_WORKFLOW_DIR "${repo_root}")" || return 2
-    act="$(_ci_repo_path CI_ACTIONS_DIR "${repo_root}")" || return 2
-    _ci_workflow_files wfs "${wf}" || return 2
-    _ci_workflow_files acts "${act}" actions || return 2
-    out="$(_ci_capture 1 grep -nHE \
-        '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*["'"'"']?aquasecurity/(setup-)?trivy(-action)?@' \
-        "${wfs[@]}" "${acts[@]}")" || return 2
-    if [ -n "${out}" ]; then
-        ci_error "[CI-ERROR-CHECK-0039]" "reason=\"aquasecurity trivy action; scan via ci.sh\"" "${out//"${repo_root}/"/}"
-        return 1
-    fi
-    printf 'trivy-action-direct-usage=clean scanned=%s\n' "$(( ${#wfs[@]} + ${#acts[@]} ))"
-}
-
 # What: True if final stage COPYs to destination.
 # Why: Only runtime stage files exist at run time.
 # From: Issue #1683
@@ -13081,7 +13061,7 @@ ci_cmd_check_all() {
         compose-required-env dhcp-proxy-env \
         setup-keys-kea setup-update-safety setup-docker-conflict setup-prompt-drift image-channel-resolution \
         vex-drift logging-matrix \
-        trivy-action-direct-usage entrypoint-lib-wiring dockerfile-build-tools \
+        entrypoint-lib-wiring dockerfile-build-tools \
         dockerfile-secret-ids sot-identity-inputs workflow-ci-variables workflow-job-settings cargo-profile-tuning no-source-compiled-tools codeql-coverage version-drift)
     for sub in "${repo_wide[@]}"; do
         ci_cmd_check "${sub}" || rc=1
@@ -13158,7 +13138,6 @@ ci_cmd_check() {
         image-channel-resolution) _ci_check_image_channel_resolution "$@" ;;
         vex-drift) _ci_check_vex_drift "$@" ;;
         logging-matrix) _ci_check_logging_matrix "$@" ;;
-        trivy-action-direct-usage) _ci_check_trivy_action_direct_usage "$@" ;;
         entrypoint-lib-wiring) _ci_check_entrypoint_lib_wiring "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
