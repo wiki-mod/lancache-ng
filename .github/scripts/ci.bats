@@ -1691,24 +1691,23 @@ CASES
     [ ! -s "${gho}" ] || { echo "plan-matrix wrote output: $(cat "${gho}")"; return 1; }
 }
 
-@test "check governance-guards: partial scope needs an open Refs issue, an upload path fails" {
-    # What: partial scope needs Refs and a path upload fails
-    # Why: Prevent merging known-incomplete changes.
-    # From: Issue #1683
-    GOVERNANCE_PR_BODY='This is a partial fix, TODO later.' \
-        run bash "${CI_SH}" check governance-guards
-    [ "${status}" -ne 0 ]
-    GOVERNANCE_PR_BODY='This is a partial fix. Refs #7' CI_GOVERNANCE_ISSUE_STATE='7=open' \
-        run bash "${CI_SH}" check governance-guards
-    [ "${status}" -eq 0 ]
-    GOVERNANCE_PR_BODY='No TODO items left, nothing deferred here.' \
-        run bash "${CI_SH}" check governance-guards
-    [ "${status}" -eq 0 ]
-    GOVERNANCE_PR_BODY='@/tmp/pr-body-1234.txt' \
-        run bash "${CI_SH}" check governance-guards
-    [ "${status}" -ne 0 ]
-    [[ "${output}" == *"CI-ERROR-CHECK-0018"* ]]
-    [[ "${output}" == *"@/tmp"* ]]
+# What: per row: PR body -> clean or the governance gap
+# Why: AG-GH-010 and 011: real body text and open Refs
+# From: Issue #1683 | PR #1858
+@test "check governance-guards: partial scope needs an open Refs issue, a body must be real text" {
+    local case body rc want
+    local -A V=(["@W@"]="$(_val name)")
+    while IFS='|' read -r case body rc want; do
+        run env -u PR_TITLE -u CI_VARIABLES "PR_BODY=$(printf '%b' "$(_fill "${body}")")" bash "${CI_SH}" check governance-guards
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+    done <<'CASES'
+plain|@W@|0|governance-guards=clean
+negated|No TODO items left and nothing deferred here @W@|0|governance-guards=clean
+partial-no-refs|This is a partial fix @W@|1|[CI-ERROR-CHECK-0018];partial-scope language without an open Refs
+upload-path|@/tmp/@W@.txt|1|[CI-ERROR-CHECK-0018];literal @/tmp/... upload path
+json-quoted|"## @W@\\n@W@"|1|[CI-ERROR-CHECK-0018];JSON-quoted Markdown
+json-double|"## @W@\\\\n@W@"|1|[CI-ERROR-CHECK-0018];JSON-quoted Markdown
+CASES
 }
 
 @test "migrate_env_for_update repairs every empty required key" {

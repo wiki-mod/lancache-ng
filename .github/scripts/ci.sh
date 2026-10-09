@@ -10614,24 +10614,6 @@ _ci_check_action_node_versions() {
     printf 'action-node-versions=clean pins=%s\n' "${#uses_values[@]}"
 }
 
-# What: Resolve GitHub issue state; failure returns 2.
-# Why: an unknown state must not hide a stale TODO.
-# From: Issue #1683
-_ci_governance_issue_state() {
-    local issue="$1"
-    if [ -n "${CI_GOVERNANCE_ISSUE_STATE:-}" ]; then
-        local pair
-        IFS=';' read -ra _ci_gov_pairs <<<"${CI_GOVERNANCE_ISSUE_STATE}"
-        for pair in "${_ci_gov_pairs[@]}"; do
-            [ "${pair%%=*}" = "${issue}" ] && { printf '%s\n' "${pair#*=}"; return 0; }
-        done
-        printf 'unknown\n'; return 0
-    fi
-    local meta
-    meta="$(_ci_issue_meta "${issue}")" || return 2
-    printf '%s\n' "${meta#*$'\t'}"
-}
-
 # What: Print "<issue|pr>\t<open|closed>" for a number.
 # Why: /issues/N also serves PRs; callers must tell apart.
 # From: Issue #1683 | PR #1858
@@ -10877,7 +10859,7 @@ ci_cmd_close_linked_issues() {
 # From: Issue #1683
 _ci_check_governance_guards() {
     local -a _ci_override=("$@") changed=()
-    local title="${GOVERNANCE_PR_TITLE:-${PR_TITLE:-}}" body="${GOVERNANCE_PR_BODY:-${PR_BODY:-}}"
+    local title="${PR_TITLE:-}" body="${PR_BODY:-}"
     local -a viol=()
     local path line marker issue state hits grc
     if [ "$#" -gt 0 ]; then
@@ -10894,8 +10876,8 @@ _ci_check_governance_guards() {
             line="${marker%%:*}"; marker="${marker#*:}"
             issue="${marker##*#}"; issue="${issue%)*}"
             [[ "${issue}" =~ ^[0-9]+$ ]] || continue
-            state="$(_ci_governance_issue_state "${issue}")" || return 2
-            [ "${state}" = "closed" ] && viol+=("${path}:${line}: stale TODO/FIXME references closed #${issue}")
+            state="$(_ci_issue_meta "${issue}")" || return 2
+            [ "${state#*$'\t'}" = "closed" ] && viol+=("${path}:${line}: stale TODO/FIXME references closed #${issue}")
         done <<< "${hits}"
     done
     local combined="${title}"
@@ -10904,7 +10886,7 @@ _ci_check_governance_guards() {
     if [ -n "${combined}" ]; then
         if grep -Eq '(^|[[:space:]])@/tmp/[^[:space:]]+' <<<"${combined}"; then
             viol+=("PR title/body: looks like a literal @/tmp/... upload path, not real body text")
-        elif [[ "${combined}" == \"*\" && "${combined}" == *'\\n'* && "${combined}" != *$'\n'* ]]; then
+        elif [[ "${combined}" == \"*\" && "${combined}" == *'\n'* && "${combined}" != *$'\n'* ]]; then
             viol+=("PR title/body: looks like JSON-quoted Markdown, not real body text")
         fi
         local stripped
@@ -10913,8 +10895,8 @@ _ci_check_governance_guards() {
             local open_found=0 rest="${combined}"
             while [[ "${rest}" =~ Refs[[:space:]]+#([0-9]+) ]]; do
                 issue="${BASH_REMATCH[1]}"; rest="${rest#*"${BASH_REMATCH[0]}"}"
-                state="$(_ci_governance_issue_state "${issue}")" || return 2
-                [ "${state}" = "open" ] && { open_found=1; break; }
+                state="$(_ci_issue_meta "${issue}")" || return 2
+                [ "${state#*$'\t'}" = "open" ] && { open_found=1; break; }
             done
             [ "${open_found}" -eq 1 ] || \
                 viol+=("PR title/body: partial-scope language without an open Refs #... remainder issue")
