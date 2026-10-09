@@ -308,11 +308,11 @@ it.
 |---|---|---|
 | Compose project name | `deploy/prod/docker-compose.yml` `name:` | — |
 | Compose service names | `deploy/prod/docker-compose.yml` service keys | `services/ui/src/config.rs` (`*_SERVICE` defaults), `deploy/prod/docker-compose.yml` env values that build internal URLs |
-| Container names | `deploy/prod/docker-compose.yml` `container_name:` | `scripts/untracked/docker-socket-proxy.sh` (allowlist), `services/ui/src/docker_client.rs` (`container_name_for_service`), `services/watchdog/src/config.rs` (`CONTAINER_*` defaults/guard), `config/prod/watchdog.env` (`CONTAINER_*` overrides) |
+| Container names | `deploy/prod/docker-compose.yml` `container_name:` | `scripts/untracked/docker-socket-proxy.sh` (allowlist), `services/ui/src/docker_client.rs` (`container_name_for_service`), `services/common/config.rs` (`CONTAINER_*` defaults), `services/watchdog/src/main.rs` (override guard), `config/prod/watchdog.env` (`CONTAINER_*` overrides) |
 | Docker volumes | `deploy/prod/docker-compose.yml` `volumes:` top-level block | Service-level `volumes:` mount lists in the same file |
 | Host bind-mount directories | `docs/backup-restore.md`, `docs/how-to-change-ip.md` | `deploy/prod/docker-compose.yml`, `setup.sh` |
 | GHCR image/package names | `.github/yaml/build-manifest.yml` (`services:`) | `docs/release-versioning.md`, the `image:` lines of `deploy/prod` and `deploy/secondary` |
-| Service-referring env vars | See table above | `services/ui/src/config.rs`, `services/watchdog/src/config.rs`, `config/prod/*.env` |
+| Service-referring env vars | See table above | `services/ui/src/config.rs`, `services/common/config.rs`, `config/prod/*.env` |
 | Socket proxy allowlist | `scripts/untracked/docker-socket-proxy.sh` | (mounted read-only, unchanged, into the `docker-socket-proxy` service of `deploy/prod`) |
 
 ## CI guard

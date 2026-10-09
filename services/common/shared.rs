@@ -13,6 +13,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // What: health of one service in watchdog's status.json.
@@ -52,6 +53,60 @@ pub struct WatchdogStatus {
     pub updated: String,
     pub services: HashMap<String, ServiceHealth>,
     pub disk: DiskInfo,
+}
+
+// What: operator-requested run state of a service.
+// Why: the ui dock writes it, watchdog acts on it.
+// From: Issue #1437
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DesiredRunState {
+    Running,
+    Stopped,
+}
+
+// What: desired-state.json; an absent key is no opinion.
+// Why: a stale target must not fight a DHCP mode switch.
+// From: Issue #1437
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesiredState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dhcp: Option<DesiredRunState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ntp: Option<DesiredRunState>,
+}
+
+impl DesiredState {
+    // What: read the file; any failure means no opinion.
+    // Why: a read glitch must never stop a caller's loop.
+    pub fn read(path: &Path) -> Self {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+}
+
+// What: space figures of the filesystem holding a path.
+// Why: watchdog reads use%, the ui resize check free KiB.
+pub struct Df {
+    pub avail_kib: u64,
+    pub used_pct: u32,
+}
+
+// What: figures from `df -Pk <path>`; None on any failure.
+// Why: -P keeps one line per mount, so fields never shift.
+pub fn df(path: &Path) -> Option<Df> {
+    let output = Command::new("df").arg("-Pk").arg(path).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let fields: Vec<&str> = text.lines().nth(1)?.split_whitespace().collect();
+    Some(Df {
+        avail_kib: fields.get(3)?.parse().ok()?,
+        used_pct: fields.get(4)?.trim_end_matches('%').parse().ok()?,
+    })
 }
 
 // What: true for empty or a checked-in secret placeholder.

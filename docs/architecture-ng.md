@@ -341,11 +341,10 @@ These five `CONTAINER_*` variables exist only as a fail-loud consistency
 check, not a real renaming mechanism: the binary rejects any value that
 does not match the fixed default and exits at startup (issue #849 bug-hunt
 finding #5, carried forward from the bash implementation into
-`config::resolve_container_names`). Running more than one lancache-ng stack
-on the same host is a deliberate non-goal, not an unfinished feature -- see
-the fail-loud messages' own comments in `services/watchdog/src/config.rs`
-for the full reasoning and the pointer to open a feature request for a
-genuine multi-stack-per-host need.
+`load_settings` in `services/watchdog/src/main.rs`). Running more than one
+lancache-ng stack on the same host is a deliberate non-goal, not an
+unfinished feature; open a feature request for a genuine
+multi-stack-per-host need.
 
 Beyond the five restart-capable services above, the watchdog binary has
 alert-only paths that never call `restart()`: it probes `docker-socket-proxy`

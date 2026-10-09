@@ -13,7 +13,6 @@ license.workspace = true
 
 [dependencies]
 lancache-common = { path = "../common" }
-serde = { workspace = true }
 serde_json = { workspace = true }
 # What: reqwest client for docker-socket-proxy, on rustls.
 # Why: AG-REL-003 forbids openssl-sys.
