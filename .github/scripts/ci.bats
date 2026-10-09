@@ -1390,13 +1390,16 @@ CASES
 # Why: SOT owns every value; build-args only maps it.
 # From: Issue #1683 | PR #1858
 @test "build-args: real SOT targets give pinned, filled arguments" {
-    local s apk="" tool pc sp verify w case target fmt plat pre want absent
+    local s svcs bt apk="" tool pc sp verify w case target fmt plat pre want absent
     local -A N=()
-    for s in $(ci_services); do
-        [ "$(ci_service_field "${s}" build_type)" != apk ] || { apk="${s}"; break; }
+    svcs="$(ci_services)" || { echo "services unreadable: ${svcs}"; return 1; }
+    for s in ${svcs}; do
+        bt="$(ci_service_field "${s}" build_type)" || { echo "build_type ${s}: ${bt}"; return 1; }
+        [ "${bt}" != apk ] || { apk="${s}"; break; }
     done
-    tool="$(_ci_block_keys build_toolchain | awk 'NR == 1')"
-    pc="$(_pin_consumer)" sp="$(_ci_build_matrix_platforms | awk 'NR == 1')"
+    tool="$(_ci_block_keys build_toolchain)" && pc="$(_pin_consumer)" && sp="$(_ci_build_matrix_platforms)" \
+        || { echo "SOT readers failed"; return 1; }
+    tool="${tool%%$'\n'*}" sp="${sp%%$'\n'*}"
     [ -n "${apk}" ] && [ -n "${tool}" ] && [ -n "${pc}" ] && [ -n "${sp}" ] || { echo "inputs: ${apk} ${tool} ${pc} ${sp}"; return 1; }
     run --separate-stderr bash "${CI_SH}" version verify
     [ "${status}" -eq 0 ] || { echo "version verify rc ${status}: ${output} ${stderr}"; return 1; }
