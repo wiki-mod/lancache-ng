@@ -3323,76 +3323,84 @@ JSON
     # What: _sign_cert output and cleanup; regen decision.
     # Why: a bad leaf or a stale default cert breaks TLS.
     # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" log="${BATS_TEST_TMPDIR}/csr.log" s1 s2 p case at now san want
+    local root ep t="${BATS_TEST_TMPDIR}" s1 s2 p case at now san want row long w x base o
+    local -a pre post
+    local -A V=(
+        ["@D@"]="$(_val host).$(_val host)" ["@A@"]="$(_val host).$(_val host)" ["@DN@"]="$(_val host)"
+        ["@X@"]="$(_val host).$(_val host)" ["@Y@"]="$(_val host).$(_val host)" ["@Z@"]="$(_val host).$(_val host)"
+        ["@PC@"]="$(_val ipv4)"
+    )
+    base="$(_val int 0 255).$(_val int 0 255).$(_val int 0 255)" o="$(_val int 1 25)"
+    V["@PA@"]="${base}.${o}" V["@PB@"]="${base}.${o}1"
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    ep="${root}/services/proxy/entrypoint.sh"
     # shellcheck source=services/proxy/entrypoint.sh
-    source "$(_extract_functions "${root}/services/proxy/entrypoint.sh" _sign_cert _default_cert_needs_regen \
-        _bounded_cert_name)"
-    export CA_DIR="${t}/ca" CERT_DIR="${t}/certs" SERIAL_FILE="${t}/ca/ca.srl"
-    mkdir -p "${CA_DIR}" "${CERT_DIR}"
-    openssl req -new -newkey rsa:2048 -nodes -x509 -days 30 -subj "/CN=Test CA" \
-        -keyout "${CA_DIR}/ca.key" -out "${CA_DIR}/ca.crt" 2>/dev/null
-    printf '%016x\n' "$(date +%s%N)" > "${SERIAL_FILE}"
-    mktemp() { local m; m="$(command mktemp "$@")" || return; echo "${m}" >> "${log}"; printf '%s\n' "${m}"; }
-    _sign_cert cdn.example.com "${CERT_DIR}/a.key" "${CERT_DIR}/a.crt" \
-        "subjectAltName=DNS:cdn.example.com,DNS:*.cdn.example.com" 2>/dev/null
+    source "$(_extract_functions "${ep}" _ensure_ca_cert _sign_cert _default_cert_needs_regen _bounded_cert_name)"
+    export CA_DIR="${t}/ca" CERT_DIR="${t}/certs"
+    mkdir -p "${CERT_DIR}"
+    run _ensure_ca_cert
+    [ "${status}" -eq 0 ] || { echo "ca: ${output}"; return 1; }
+    sed -n '/^    SERIAL_FILE="\$CA_DIR\/ca\.srl"$/,/^    fi$/p' "${ep}" > "${t}/serial.sh"
+    [ -s "${t}/serial.sh" ]
+    # shellcheck source=services/proxy/entrypoint.sh
+    source "${t}/serial.sh"
+    shopt -s nullglob
+    pre=(/var/tmp/lancache-cert.*)
+    _sign_cert "${V[@D@]}" "${CERT_DIR}/a.key" "${CERT_DIR}/a.crt" "subjectAltName=DNS:${V[@D@]},DNS:*.${V[@D@]}"
     openssl verify -CAfile "${CA_DIR}/ca.crt" "${CERT_DIR}/a.crt"
     [ "$(openssl x509 -noout -subject -nameopt RFC2253 -in "${CERT_DIR}/a.crt")" = "subject=CN=lancache-ng" ]
     [ "$(openssl x509 -noout -ext subjectAltName -in "${CERT_DIR}/a.crt" | tail -n +2 | tr -d ' ')" \
-        = "DNS:cdn.example.com,DNS:*.cdn.example.com" ]
-    [ $(( ($(date -d "$(openssl x509 -noout -enddate -in "${CERT_DIR}/a.crt" | cut -d= -f2)" +%s) \
-        - $(date -d "$(openssl x509 -noout -startdate -in "${CERT_DIR}/a.crt" | cut -d= -f2)" +%s)) / 86400 )) -eq 3650 ]
+        = "DNS:${V[@D@]},DNS:*.${V[@D@]}" ]
     s1="$(openssl x509 -noout -serial -in "${CERT_DIR}/a.crt" | cut -d= -f2)"
-    _sign_cert "$(printf 'a%.0s' {1..300})" "${CERT_DIR}/b.key" "${CERT_DIR}/b.crt" 2>/dev/null
+    _sign_cert "$(printf 'a%.0s' {1..300})" "${CERT_DIR}/b.key" "${CERT_DIR}/b.crt"
     [ "$(openssl x509 -noout -subject -nameopt RFC2253 -in "${CERT_DIR}/b.crt")" = "subject=CN=lancache-ng" ]
     [ -z "$(openssl x509 -noout -ext subjectAltName -in "${CERT_DIR}/b.crt" 2>/dev/null)" ]
     s2="$(openssl x509 -noout -serial -in "${CERT_DIR}/b.crt" | cut -d= -f2)"
     [ $((16#${s2})) -gt $((16#${s1})) ] || { echo "serial ${s2} not above ${s1}"; return 1; }
     grep -qxE '[0-9A-Fa-f]+' "${SERIAL_FILE}"
-    local long w x
     long="$(printf 'a%.0s' {1..60})"
     long="${long}.${long}.${long}.${long}"
-    _sign_cert "${long}" "${CERT_DIR}/l.key" "${CERT_DIR}/l.crt" "subjectAltName=DNS:*.${long}" 2>/dev/null
+    _sign_cert "${long}" "${CERT_DIR}/l.key" "${CERT_DIR}/l.crt" "subjectAltName=DNS:*.${long}"
     [ "$(openssl x509 -noout -ext subjectAltName -in "${CERT_DIR}/l.crt" | tail -n +2 | tr -d ' ')" = "DNS:*.${long}" ]
     w="$(_bounded_cert_name "${long}" wildcard)"
     x="$(_bounded_cert_name "${long}" exact)"
     [[ "${w}" =~ ^[0-9a-f]{32}$ && "${x}" =~ ^[0-9a-f]{32}$ && "${w}" != "${x}" ]] || { echo "names ${w} ${x}"; return 1; }
     [ "$(_bounded_cert_name "${long}" wildcard)" = "${w}" ]
-    [[ "$(_bounded_cert_name a.example.com exact)" =~ ^[0-9a-f]{32}$ ]]
+    [[ "$(_bounded_cert_name "${V[@A@]}" exact)" =~ ^[0-9a-f]{32}$ ]]
     mkdir "${CERT_DIR}/kd" "${CERT_DIR}/y.crt"
-    run _sign_cert x.example.com "${CERT_DIR}/kd" "${CERT_DIR}/x.crt" "subjectAltName=DNS:x.example.com"
+    run _sign_cert "${V[@X@]}" "${CERT_DIR}/kd" "${CERT_DIR}/x.crt" "subjectAltName=DNS:${V[@X@]}"
     [ "${status}" -ne 0 ]
     [ ! -e "${CERT_DIR}/x.crt" ]
-    run _sign_cert y.example.com "${CERT_DIR}/y.key" "${CERT_DIR}/y.crt" "subjectAltName=DNS:y.example.com"
+    run _sign_cert "${V[@Y@]}" "${CERT_DIR}/y.key" "${CERT_DIR}/y.crt" "subjectAltName=DNS:${V[@Y@]}"
     [ "${status}" -ne 0 ]
     [ ! -e "${CERT_DIR}/y.key" ] || { echo "orphaned key after a sign failure"; return 1; }
     echo partial > "${CERT_DIR}/z.crt"
-    CA_DIR="${t}/missing" run _sign_cert z.example.com "${CERT_DIR}/z.key" "${CERT_DIR}/z.crt"
+    CA_DIR="${t}/missing" run _sign_cert "${V[@Z@]}" "${CERT_DIR}/z.key" "${CERT_DIR}/z.crt"
     [ "${status}" -ne 0 ]
     [ ! -e "${CERT_DIR}/z.crt" ] && [ ! -e "${CERT_DIR}/z.key" ] || { echo "partial output kept"; return 1; }
-    [ "$(wc -l < "${log}")" -eq 6 ] || { echo "csr files: $(cat "${log}")"; return 1; }
-    while IFS= read -r p; do
-        [ ! -e "${p}" ] || { echo "csr left: ${p}"; return 1; }
-    done < "${log}"
-    while IFS='|' read -r case at now san want; do
+    while IFS= read -r row; do
+        IFS='|' read -r case at now san want <<< "$(_fill "${row}")"
         rm -f "${CERT_DIR}/default.crt" "${CERT_DIR}/default.key"
         if [ "${san}" != none ]; then
-            IP_SSL="${at}" _sign_cert lancache-default "${CERT_DIR}/default.key" "${CERT_DIR}/default.crt" \
-                "${san:+subjectAltName=${san}}" 2>/dev/null
+            IP_SSL="${at}" _sign_cert "${V[@DN@]}" "${CERT_DIR}/default.key" "${CERT_DIR}/default.crt" \
+                "${san:+subjectAltName=${san}}"
         fi
         [ "${case}" != nokey ] || rm -f "${CERT_DIR}/default.key"
         IP_SSL="${now}" run _default_cert_needs_regen
         [ "${status}" -eq "${want}" ] || { echo "${case}: rc ${status}"; return 1; }
     done <<'CASES'
 missing|||none|0
-nokey|||DNS:lancache-default|0
+nokey|||DNS:@DN@|0
 nosan||||0
-exact|192.168.1.1|192.168.1.1|DNS:lancache-default,IP:192.168.1.1|1
-prefix|192.168.1.11|192.168.1.1|DNS:lancache-default,IP:192.168.1.11|0
-unrelated|10.0.0.5|192.168.1.1|DNS:lancache-default,IP:10.0.0.5|0
-dnsonly|||DNS:lancache-default|1
-ipnowempty|10.0.0.5||DNS:lancache-default,IP:10.0.0.5|1
+exact|@PA@|@PA@|DNS:@DN@,IP:@PA@|1
+prefix|@PB@|@PA@|DNS:@DN@,IP:@PB@|0
+unrelated|@PC@|@PA@|DNS:@DN@,IP:@PC@|0
+dnsonly|||DNS:@DN@|1
+ipnowempty|@PC@||DNS:@DN@,IP:@PC@|1
 CASES
+    post=(/var/tmp/lancache-cert.*)
+    p="$(comm -13 <(printf '%s\n' "${pre[@]}" | sort) <(printf '%s\n' "${post[@]}" | sort))"
+    [ -z "${p}" ] || { echo "csr left: ${p}"; return 1; }
     run awk '/^_bounded_cert_name\(\) \{$/ && !d { d = NR }
         /^if \[ "\$\{SSL_ENABLED\}" = "1" \]; then$/ && !s { s = NR }
         END { print (d && s && d < s) ? "before" : "d=" d " s=" s }' "${root}/services/proxy/entrypoint.sh"
