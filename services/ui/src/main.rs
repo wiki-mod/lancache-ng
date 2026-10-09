@@ -1184,13 +1184,17 @@ fn container_name(service: &str) -> anyhow::Result<&'static str> {
         })
 }
 
-// What: restart a service container after a 5 s grace.
+// What: seconds a restarted container may take to stop.
 // Why: nginx-style daemons need a moment to drain.
+const RESTART_GRACE_SECS: u32 = 5;
+
+// What: restart a service container after the grace.
+// Why: every ui restart goes through one named service.
 async fn docker_restart(docker: &DockerProxy, service: &str) -> anyhow::Result<()> {
     docker
-        .act(
+        .restart(
             container_name(service)?,
-            "restart?t=5",
+            RESTART_GRACE_SECS,
             Some(DOCKER_TIMEOUT),
         )
         .await

@@ -658,6 +658,18 @@ impl DockerProxy {
             .map(|_| ())
     }
 
+    // What: restart a container after a stop grace period.
+    // Why: callers differ in grace; the path is shared.
+    pub async fn restart(
+        &self,
+        name: &str,
+        grace_secs: u32,
+        timeout: Option<Duration>,
+    ) -> Result<(), DockerError> {
+        self.act(name, &format!("restart?t={grace_secs}"), timeout)
+            .await
+    }
+
     // What: GET /_ping; true only for the body "OK".
     // Why: a 200 stalling before the body must fail.
     pub async fn ping(&self, timeout: Option<Duration>) -> bool {

@@ -21,6 +21,10 @@ use lancache_ng::{
 };
 use time::OffsetDateTime;
 
+// What: seconds Docker waits for SIGTERM before SIGKILL.
+// Why: stays inside the restart call's own curl budget.
+const RESTART_GRACE_SECS: u32 = 2;
+
 // What: startup settings, read once from the environment.
 // Why: a deployment change recreates this container.
 struct Settings {
@@ -552,7 +556,7 @@ async fn main() {
                     log(&format!("UNHEALTHY {name} ({n}/{n})"));
                     log(&format!("RESTARTING {name}"));
                     if client
-                        .act(name, "restart?t=2", s.curl_max_time_restart)
+                        .restart(name, RESTART_GRACE_SECS, s.curl_max_time_restart)
                         .await
                         .is_err()
                     {
