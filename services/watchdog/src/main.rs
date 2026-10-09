@@ -130,13 +130,12 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
             ));
         }
         (None, Some(dir), _) | (None, None, Some(dir)) => dir,
-        (None, None, None) => return Err("FATAL: CACHE_DIR is not set.".to_string()),
+        (None, None, None) => return Err(format!("FATAL: {}.", config::not_set("CACHE_DIR"))),
     };
 
     // What: the Docker API address must come from the env.
     // Why: watchdog.env and compose own it; no default.
-    let docker_proxy_url =
-        get("DOCKER_PROXY_URL").ok_or_else(|| "FATAL: DOCKER_PROXY_URL is not set.".to_string())?;
+    let docker_proxy_url = need("DOCKER_PROXY_URL")?;
 
     let settings = Settings {
         docker_proxy_url,
@@ -390,6 +389,19 @@ fn log_err(msg: &str) {
     emit(msg, true);
 }
 
+// What: the call that moves a service to its wanted state.
+// Why: a service already in that state needs no call.
+fn reconcile_step(
+    want: DesiredRunState,
+    running: bool,
+) -> Option<(&'static str, &'static str, &'static str)> {
+    match (want, running) {
+        (DesiredRunState::Running, false) => Some(("start", "STARTING", "running")),
+        (DesiredRunState::Stopped, true) => Some(("stop", "STOPPING", "stopped")),
+        _ => None,
+    }
+}
+
 // What: start or stop dhcp/ntp to the desired state.
 // Why: watchdog is the sole actor; no opinion, no action.
 // From: Issue #1437
@@ -415,10 +427,8 @@ async fn reconcile(client: &DockerProxy, s: &Settings) {
         let Some(running) = running else {
             continue;
         };
-        let (action, verb, state) = match (want, running) {
-            (DesiredRunState::Running, false) => ("start", "STARTING", "running"),
-            (DesiredRunState::Stopped, true) => ("stop", "STOPPING", "stopped"),
-            _ => continue,
+        let Some((action, verb, state)) = reconcile_step(want, running) else {
+            continue;
         };
         log(&format!(
             "{verb} {name} ({label}: desired state is {state})"
@@ -433,26 +443,34 @@ async fn reconcile(client: &DockerProxy, s: &Settings) {
     }
 }
 
-// What: cache disk use as a traffic-light status.
-// Why: same rounding as df; a missing directory is unknown.
-fn disk_info(dir: &Path, warn_pct: u32, alarm_pct: u32) -> DiskHealth {
-    if !dir.is_dir() {
-        return DiskHealth {
-            pct: 0,
-            status: "unknown".to_string(),
-        };
-    }
-    let pct = df(dir).map_or(0, |d| d.used_pct);
-    let status = if pct >= alarm_pct {
+// What: the color of a disk use percent.
+// Why: alarm outranks warn; below both is green.
+fn disk_status(pct: u32, warn_pct: u32, alarm_pct: u32) -> &'static str {
+    if pct >= alarm_pct {
         "red"
     } else if pct >= warn_pct {
         "yellow"
     } else {
         "green"
+    }
+}
+
+// What: cache disk use as a traffic-light status.
+// Why: a missing directory or failed df is unknown.
+fn disk_info(dir: &Path, warn_pct: u32, alarm_pct: u32) -> DiskHealth {
+    let unknown = DiskHealth {
+        pct: 0,
+        status: "unknown".to_string(),
     };
-    DiskHealth {
-        pct,
-        status: status.to_string(),
+    if !dir.is_dir() {
+        return unknown;
+    }
+    match df(dir) {
+        Some(d) => DiskHealth {
+            pct: d.used_pct,
+            status: disk_status(d.used_pct, warn_pct, alarm_pct).to_string(),
+        },
+        None => unknown,
     }
 }
 
@@ -793,6 +811,44 @@ mod tests {
         let tail = names(&all).split_off(base.len());
         let want = ["lancache-dhcp-proxy", "lancache-syslog", "lancache-ntp"];
         assert_eq!(tail, want);
+    }
+
+    // What: the reconcile step per wanted and running pair.
+    // Why: a wrong pair would stop DHCP or NTP by mistake.
+    // From: Issue #1437
+    #[test]
+    fn reconcile_acts_only_on_a_difference() {
+        use DesiredRunState::{Running, Stopped};
+        assert_eq!(
+            reconcile_step(Running, false),
+            Some(("start", "STARTING", "running"))
+        );
+        assert_eq!(
+            reconcile_step(Stopped, true),
+            Some(("stop", "STOPPING", "stopped"))
+        );
+        assert_eq!(reconcile_step(Running, true), None);
+        assert_eq!(reconcile_step(Stopped, false), None);
+    }
+
+    // What: disk colors follow the warn and alarm limits.
+    // Why: alarm outranks warn; equal to a limit counts.
+    #[test]
+    fn disk_status_follows_the_limits() {
+        assert_eq!(disk_status(84, 85, 95), "green");
+        assert_eq!(disk_status(85, 85, 95), "yellow");
+        assert_eq!(disk_status(94, 85, 95), "yellow");
+        assert_eq!(disk_status(95, 85, 95), "red");
+        assert_eq!(disk_status(100, 85, 95), "red");
+    }
+
+    // What: a missing cache dir reads unknown, not green.
+    // Why: no reading must not look like a healthy disk.
+    #[test]
+    fn disk_info_is_unknown_for_a_missing_dir() {
+        let gone = Path::new("/nonexistent-lancache-test-dir");
+        let info = disk_info(gone, 85, 95);
+        assert_eq!((info.pct, info.status.as_str()), (0, "unknown"));
     }
 
     // What: the timestamp keeps its fixed UTC shape.
