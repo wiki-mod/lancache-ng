@@ -183,28 +183,10 @@ _fill() {
     printf '%s' "${s}"
 }
 
-# What: Removes dirs listed in a manifest file.
-# Why: Function lets a test prove the cleanup.
-# From: Issue #1683 | PR #1858
-_trivy_cleanup_var_tmp_dirs() {
-    local manifest="$1" d
-    if [ -f "${manifest}" ]; then
-        while IFS= read -r d; do
-            if [ -n "${d}" ]; then
-                rm -rf -- "${d}"
-            fi
-        done < "${manifest}"
-    fi
-}
-
-# What: Removes /var/tmp scratch dirs this test made.
-# Why: a "$(...)"-run helper can't set a var seen here.
+# What: on failure print the last run's raw values.
+# Why: a failed test must never hide its raw values.
 # From: Issue #1683 | PR #1858
 teardown() {
-    _trivy_cleanup_var_tmp_dirs "${BATS_TEST_TMPDIR}/.trivy-var-tmp-dirs"
-    # What: on failure print the last run's raw values.
-    # Why: a failed test must never hide its raw values.
-    # From: Issue #1683 | PR #1858
     [ -n "${BATS_TEST_COMPLETED:-}" ] ||
         printf 'last-run status=%s\nlast-run output=%s\n' "${status:-unset}" "${output-}"
 }
@@ -1808,37 +1790,31 @@ CASES
 # RETRY ENGINE (_ci_retry) + BUILD != PUBLISH INVARIANT
 # =========================================================
 
-# What: mktemp -d under /var/tmp, tracked for teardown.
-# Why: cache-dir tests must pass under any ambient TMPDIR.
+# What: probe; shared first; disk fallback; never /tmp
+# Why: §41.1 one shared DB on disk, never on tmpfs
 # From: Issue #1683 | PR #1858
-_trivy_var_tmp_dir() {
-    local d
-    d="$(mktemp -d "/var/tmp/ci-bats-trivy.XXXXXX")" || return 1
-    printf '%s\n' "${d}" >> "${BATS_TEST_TMPDIR}/.trivy-var-tmp-dirs"
-    printf '%s\n' "${d}"
-}
-
 @test "trivy cache dir: writable probe, shared first, disk fallback, never tmpfs" {
-    # What: probe, shared dir first, disk fallback, no tmpfs
-    # Why: §41.1 one shared DB on disk and never on tmpfs
-    # From: Issue #1683
-    local vt
+    local fb
+    [[ "${BATS_TEST_TMPDIR}" != /tmp && "${BATS_TEST_TMPDIR}" != /tmp/* ]] \
+        || { echo "BATS_TEST_TMPDIR ${BATS_TEST_TMPDIR} is under /tmp; run the suite via ci.sh check ci-bats"; return 1; }
     run _ci_trivy_dir_writable "${BATS_TEST_TMPDIR}"
-    [ "${status}" -eq 0 ] || { echo "writable: rc ${status}: ${output}"; return 1; }
-    run _ci_trivy_dir_writable "${BATS_TEST_TMPDIR}/does-not-exist"
+    _expect writable 0 - || return 1
+    run _ci_trivy_dir_writable "$(_val path)"
     [ "${status}" -ne 0 ] || { echo "missing dir passed: ${output}"; return 1; }
-    vt="$(_trivy_var_tmp_dir)"
-    mkdir -p "${vt}/shared"
-    CI_TRIVY_SHARED_DIR="${vt}/shared" CI_TRIVY_FALLBACK_DIR="${vt}/fallback" run _ci_trivy_cache_dir
-    [ "${status}" -eq 0 ] && [[ "${output}" == "dir=${vt}/shared source=nfs-shared" ]] || { echo "shared: ${output}"; return 1; }
-    vt="$(_trivy_var_tmp_dir)"
-    CI_TRIVY_SHARED_DIR="${vt}/no-such-share" CI_TRIVY_FALLBACK_DIR="${vt}/fallback" run _ci_trivy_cache_dir
-    [ "${status}" -eq 0 ] && [[ "${output}" == *"dir=${vt}/fallback source=local-fallback"* ]] && [ -d "${vt}/fallback" ] \
-        || { echo "fallback: ${output}"; return 1; }
-    CI_TRIVY_SHARED_DIR="/tmp/whatever" CI_TRIVY_FALLBACK_DIR="${BATS_TEST_TMPDIR}/fallback" run _ci_trivy_cache_dir
-    [ "${status}" -eq 2 ] && [[ "${output}" == *"CI-ERROR-SCAN-0007"* ]] || { echo "tmpfs shared: ${output}"; return 1; }
-    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}/no-such-share" CI_TRIVY_FALLBACK_DIR="/tmp/whatever" run _ci_trivy_cache_dir
-    [ "${status}" -eq 2 ] && [[ "${output}" == *"CI-ERROR-SCAN-0018"* ]] || { echo "tmpfs fallback: ${output}"; return 1; }
+    CI_TRIVY_SHARED_DIR="${BATS_TEST_TMPDIR}" CI_TRIVY_FALLBACK_DIR="$(_val path)" run _ci_trivy_cache_dir
+    _expect shared 0 "=dir=${BATS_TEST_TMPDIR} source=nfs-shared" || return 1
+    fb="$(_val path)"
+    CI_TRIVY_SHARED_DIR="$(_val path)" CI_TRIVY_FALLBACK_DIR="${fb}" run _ci_trivy_cache_dir
+    _expect fallback 0 "[CI-INFO-SCAN-0008];dir=${fb} source=local-fallback" || return 1
+    [ -d "${fb}" ] || { echo "fallback dir not made: ${fb}"; return 1; }
+    CI_TRIVY_SHARED_DIR="/tmp/$(_val name)" CI_TRIVY_FALLBACK_DIR="$(_val path)" run _ci_trivy_cache_dir
+    _expect tmp-shared 2 "[CI-ERROR-SCAN-0007]" || return 1
+    CI_TRIVY_SHARED_DIR="$(_val path)" CI_TRIVY_FALLBACK_DIR="/tmp/$(_val name)" run _ci_trivy_cache_dir
+    _expect tmp-fallback 2 "[CI-ERROR-SCAN-0018]" || return 1
+    CI_TRIVY_SHARED_DIR="$(_val path)" CI_TRIVY_FALLBACK_DIR="/proc/$(_val name)/$(_val name)" run _ci_trivy_cache_dir
+    _expect fallback-uncreatable 2 "[CI-ERROR-SCAN-0009];raw:" || return 1
+    CI_TRIVY_SHARED_DIR="$(_val path)" CI_TRIVY_FALLBACK_DIR=/proc/self run _ci_trivy_cache_dir
+    _expect fallback-unwritable 2 "[CI-ERROR-SCAN-0019];raw:" || return 1
 }
 
 @test "trivy db lock: one writer, a held lock times out, ensure_fresh hard-fails" {

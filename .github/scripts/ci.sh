@@ -3439,15 +3439,16 @@ _ci_trivy_dir_writable() {
     [ -d "${dir}" ] || return 1
     probe="${dir}/.trivy-cache-dir-write-probe.$$.${RANDOM}"
     subdir="${dir}/.trivy-cache-dir-write-probe-dir.$$.${RANDOM}"
-    ( set -e
-      printf 'probe' > "${probe}"
-      [ "$(cat "${probe}")" = "probe" ]
-      rm -f "${probe}"
-      mkdir "${subdir}"
-      printf 'probe' > "${subdir}/probe"
-      [ "$(cat "${subdir}/probe")" = "probe" ]
-      rm -rf "${subdir}"
-    ) 2>&1
+    # What: an && chain, not set -e, carries every failure.
+    # Why: callers run this in an if, where set -e is off.
+    # From: Issue #1683 | PR #1858
+    { printf 'probe' > "${probe}" \
+        && [ "$(cat "${probe}")" = "probe" ] \
+        && rm -f "${probe}" \
+        && mkdir "${subdir}" \
+        && printf 'probe' > "${subdir}/probe" \
+        && [ "$(cat "${subdir}/probe")" = "probe" ] \
+        && rm -rf "${subdir}"; } 2>&1
 }
 
 # What: Resolve a persistent Trivy DB cache-dir.
