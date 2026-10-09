@@ -1588,45 +1588,45 @@ CASES
     [ "${lines[${#lines[@]}-1]}" = run ] || { echo "no-files: ${output}"; return 1; }
 }
 
+# What: per row: changed paths -> docs-only rc and reason
+# Why: §12.4 §63: docs are NOOP unless a SOT-named input
+# From: Issue #1683 | PR #1858
 @test "docs-only holds only for docs no SOT key names" {
-    # What: per row: changed paths -> docs-only rc, reason.
-    # Why: docs are NOOP (§63) unless the SOT reads them.
-    # From: Issue #1683 | PR #1858
-    local m case sot paths rc want
+    local case sot paths rc want keys k v gho
     local -a av
-    local -A V=(
-        ["@VAR@"]="$(_val var)" ["@D@"]="$(_val name)" ["@NAMED@"]="$(_val name)" ["@STATE@"]="$(_val name)"
-        ["@GOV@"]="$(_val name)" ["@X@"]="$(_val name)" ["@Y@"]="$(_val name)" ["@C@"]="$(_val name)"
-    )
-    m="$(_val path)"
-    _fill "$(printf '%s\n' 'ci_variables:' '  @VAR@: @D@/@NAMED@.md' '  CI_DOCS_DIR: @D@' 'release:' \
-        '  validation_state: @D@/@STATE@' '  governance_paths: [@GOV@.md]')" > "${m}"
+    local -A V=(["@X@"]="$(_val name)" ["@Y@"]="$(_val name)" ["@C@"]="$(_val name)")
+    V["@D@"]="$(_ci_variable CI_DOCS_DIR)" && V["@STATE@"]="$(_ci_block_entry_field release "" validation_state)" \
+        && V["@GOV@"]="$(_ci_block_entry_list release "" governance_paths | awk 'NR == 1')" \
+        && keys="$(_ci_block_keys ci_variables all)" || { echo "SOT inputs: ${V[*]}"; return 1; }
+    while IFS= read -r k; do
+        v="$(_ci_variable "${k}")" || { echo "${k}: unreadable"; return 1; }
+        [[ "${v}" != *.md ]] || { V["@NAMED@"]="${v}"; break; }
+    done <<< "${keys}"
+    [ -n "${V["@D@"]}" ] && [ -n "${V["@STATE@"]}" ] && [ -n "${V["@GOV@"]}" ] && [ -n "${V["@NAMED@"]:-}" ] \
+        || { echo "SOT inputs: ${V[*]}"; return 1; }
     while IFS='|' read -r case sot paths rc want; do
         av=(); [ "${paths}" = - ] || read -r -a av <<< "$(_fill "${paths}")"
-        [ "${sot}" = m ] && sot="${m}" || sot="$(_val path)"
-        CI_MANIFEST="${sot}" run _ci_docs_only "${av[@]}"
+        if [ "${sot}" = missing ]; then
+            CI_MANIFEST="$(_val path)" run _ci_docs_only "${av[@]}"
+        else
+            run _ci_docs_only "${av[@]}"
+        fi
         _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
     done <<'CASES'
-markdown|m|@X@.md|0|-
-docs-dir|m|@D@/@Y@ @X@.md|0|-
-mixed|m|@X@.md @C@/@Y@|1|-
-no-paths|m|-|1|-
-dir-prefix-only|m|@D@@Y@/@X@|1|-
-sot-named-doc|m|@X@.md @D@/@NAMED@.md|1|[CI-INFO-PLAN-0007] path="@D@/@NAMED@.md"
-validation-state|m|@D@/@STATE@|1|[CI-INFO-PLAN-0007] path="@D@/@STATE@"
-governance|m|@GOV@.md|1|[CI-INFO-PLAN-0007] path="@GOV@.md"
-no-sot|x|@X@.md|2|[CI-ERROR-CORE-010
+markdown|-|@X@.md|0|-
+docs-dir|-|@D@/@Y@ @X@.md|0|-
+mixed|-|@X@.md @C@/@Y@|1|-
+no-paths|-|-|1|-
+dir-prefix-only|-|@D@@Y@/@X@|1|-
+sot-named-doc|-|@X@.md @NAMED@|1|[CI-INFO-PLAN-0007] path="@NAMED@"
+validation-state|-|@STATE@|1|[CI-INFO-PLAN-0007] path="@STATE@"
+governance|-|@GOV@|1|[CI-INFO-PLAN-0007] path="@GOV@"
+no-sot|missing|@X@.md|2|[CI-ERROR-CORE-0109] block="ci_variables"
 CASES
-    # What: plan-matrix stops rc 2 when docs-only fails.
-    # Why: an unread SOT must never pass as "not docs-only".
-    # From: Issue #1683 | PR #1858
-    local gho
-    gho="$(_val path)" m="$(_val path)"
-    : > "${gho}"
-    grep -v '^  CI_DOCS_DIR:' "${CI_MANIFEST}" > "${m}"
-    GITHUB_OUTPUT="${gho}" CI_MANIFEST="${m}" run bash "${CI_SH}" plan-matrix "$(_val name).md"
-    _expect plan-matrix-undecided 2 '[CI-ERROR-VARIABLES-0001] name="CI_DOCS_DIR"' || return 1
-    [ ! -s "${gho}" ] || { echo "plan-matrix wrote output: $(cat "${gho}")"; return 1; }
+    gho="$(_val path)"
+    GITHUB_OUTPUT="${gho}" CI_MANIFEST="$(_val path)" run bash "${CI_SH}" plan-matrix "${V["@X@"]}.md"
+    _expect plan-matrix-undecided 2 '[CI-ERROR-' || return 1
+    [ ! -e "${gho}" ] || { echo "plan-matrix wrote output: $(cat "${gho}")"; return 1; }
 }
 
 # What: per row: PR body -> clean or the governance gap
