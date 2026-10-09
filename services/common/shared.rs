@@ -297,9 +297,25 @@ pub enum Place {
     Exclusive,
 }
 
+// What: new owner of a written file; None leaves a field.
+// Why: root-started services hand files to a runtime user.
+pub type Owner = (Option<u32>, Option<u32>);
+
 // What: write a whole file; readers see all of it or none.
 // Why: one write path for secrets, settings and status.
 pub fn write_file(path: &Path, contents: &[u8], mode: u32, place: Place) -> io::Result<()> {
+    write_file_as(path, contents, mode, place, None)
+}
+
+// What: write_file that also sets the owner before placing.
+// Why: the file must never be visible with the wrong owner.
+pub fn write_file_as(
+    path: &Path,
+    contents: &[u8],
+    mode: u32,
+    place: Place,
+    owner: Option<Owner>,
+) -> io::Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
@@ -322,6 +338,9 @@ pub fn write_file(path: &Path, contents: &[u8], mode: u32, place: Place) -> io::
         .open(&tmp)
         .and_then(|mut file| {
             file.write_all(contents)?;
+            if let Some((uid, gid)) = owner {
+                std::os::unix::fs::fchown(&file, uid, gid)?;
+            }
             file.sync_all()
         })
         .and_then(|()| match place {
@@ -341,6 +360,27 @@ pub fn write_file(path: &Path, contents: &[u8], mode: u32, place: Place) -> io::
     // Why: the write result stays the outcome.
     let _ = fs::remove_file(&tmp);
     placed
+}
+
+// What: replace a file only when its bytes differ.
+// Why: reruns write nothing; mode and owner still converge.
+pub fn write_if_changed(
+    path: &Path,
+    contents: &[u8],
+    mode: u32,
+    owner: Option<Owner>,
+) -> io::Result<bool> {
+    let changed = fs::read(path).ok().as_deref() != Some(contents);
+    if changed {
+        write_file_as(path, contents, mode, Place::Replace, owner)?;
+    }
+    // What: converge mode and owner on an unchanged file too.
+    // Why: an old install may carry other rights.
+    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode))?;
+    if let Some((uid, gid)) = owner {
+        std::os::unix::fs::lchown(path, uid, gid)?;
+    }
+    Ok(changed)
 }
 
 // What: read a persisted secret, else create it once.
