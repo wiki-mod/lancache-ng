@@ -262,6 +262,8 @@ build_toolchain:
       - lld22
       - make
       - musl-dev
+      - nodejs
+      - npm
       - openjdk21-jre-headless
       - openssl
       - openssl-dev
@@ -336,6 +338,8 @@ build_toolchain:
       - mkdir
       - mktemp
       - mv
+      - node
+      - npm
       - openssl
       - parallel
       - pkg-config
