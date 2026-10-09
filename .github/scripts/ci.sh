@@ -2462,9 +2462,9 @@ _ci_require_ghcr_auth() {
 # From: Issue #1095 | PR #1858
 _ci_dockerhub_login() {
     [ -z "${_CI_DOCKERHUB_DONE:-}" ] || return 0
-    _CI_DOCKERHUB_DONE=1
     if [ -z "${DOCKERHUB_USERNAME:-}${DOCKERHUB_TOKEN:-}" ]; then
         ci_log "[CI-NOTICE-BUILD-0020]" "reason=\"DOCKERHUB_USERNAME/DOCKERHUB_TOKEN not set; docker.io pulls stay anonymous\""
+        _CI_DOCKERHUB_DONE=1
         return 0
     fi
     if [ -z "${DOCKERHUB_USERNAME:-}" ] || [ -z "${DOCKERHUB_TOKEN:-}" ]; then
@@ -2472,6 +2472,10 @@ _ci_dockerhub_login() {
         return 2
     fi
     _ci_retry registry _ci_registry_login_once "" DOCKERHUB_USERNAME DOCKERHUB_TOKEN >/dev/null || return 2
+    # What: done only after a login or anonymous on purpose.
+    # Why: a failed login must fail again, never pass.
+    # From: Issue #1683 | PR #1858
+    _CI_DOCKERHUB_DONE=1
 }
 
 # What: one login; user and token come by variable name

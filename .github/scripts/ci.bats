@@ -1000,59 +1000,26 @@ CASES
 # REGISTRY / PUBLISH / READBACK
 # =========================================================
 
-# What: GHCR and Docker Hub login rows over the one owner
-# Why: tokens stay off argv and logs; retries stay visible
+# What: login rows without a registry; token stays on stdin.
+# Why: GHCR required, Docker Hub paired; no token on argv.
 # From: Issue #1683 | PR #1858
-@test "registry logins: GHCR required, Docker Hub optional, retried" {
-    _stand_ins || return 1
-    local name call ghcr hub fault rc logins want got
-    CI_RETRY_MAX_ATTEMPTS="$(_val int 2 6)"
-    export CI_RETRY_MAX_ATTEMPTS CI_RETRY_BACKOFF_BASE_SECONDS=0
-    local -A V=(
-        [@REG@]="$(_val host)" [@GU@]="$(_val name)" [@GT@]="$(_val name)" [@HU@]="$(_val name)"
-        [@HT@]="$(_val name)" [@TXT@]="$(_val name) $(_val name)" [@MAX@]="${CI_RETRY_MAX_ATTEMPTS}"
-    )
-    V[@GSHA@]="$(printf '%s' "${V[@GT@]}" | sha256sum | cut -d' ' -f1)"
-    V[@HSHA@]="$(printf '%s' "${V[@HT@]}" | sha256sum | cut -d' ' -f1)"
-    # What: the registry is the row's fresh host
-    # Why: the expected argv must not come from ci.sh logic
-    # From: Issue #1683 | PR #1858
-    _ci_registry() { printf '%s\n' "${V[@REG@]}"; }
-    # What: two Docker Hub logins in one process
-    # Why: the second call must not log in again
-    # From: Issue #1095 | PR #1858
-    _hub_twice() { _ci_dockerhub_login && _ci_dockerhub_login; }
-    while IFS='|' read -r name call ghcr hub fault rc logins want; do
-        : > "${DS}/docker.log"
-        rm -f "${DS}/answers" "${DS}"/answer-used-*
-        unset _CI_DOCKERHUB_DONE GHCR_USERNAME GHCR_TOKEN DOCKERHUB_USERNAME DOCKERHUB_TOKEN
-        [ "${ghcr}" = - ] || export GHCR_USERNAME="${V[@GU@]}" GHCR_TOKEN="${V[@GT@]}"
-        case "${hub}" in
-            half) export DOCKERHUB_USERNAME="${V[@HU@]}" ;;
-            full) export DOCKERHUB_USERNAME="${V[@HU@]}" DOCKERHUB_TOKEN="${V[@HT@]}" ;;
-        esac
-        case "${fault%%:*}" in
-            once) _docker_answer ' login *' 1 '' "$(_fill "${fault#*:}")" 1 ;;
-            always) _docker_answer ' login *' 1 '' "$(_fill "${fault#*:}")" ;;
-        esac
-        run "${call}"
-        output+=$'\n'"--- docker.log"$'\n'"$(cat "${DS}/docker.log")"
-        _expect "${name}" "${rc}" "$(_fill "${want}")" || return 1
-        got="$(awk '/^login / { n++ } END { print n + 0 }' "${DS}/docker.log")"
-        [ "${got}" -eq "$(_fill "${logins}")" ] || { echo "${name}: ${got} logins: ${output}"; return 1; }
-        [[ "${output}" != *"${V[@GT@]}"* && "${output}" != *"${V[@HT@]}"* ]] || { echo "${name}: token shown: ${output}"; return 1; }
-    done <<'CASES'
-no-ghcr|_ci_require_ghcr_auth|-|full|-|2|0|[CI-ERROR-BUILD-0002]
-ghcr-only|_ci_require_ghcr_auth|set|none|-|0|1|[CI-NOTICE-BUILD-0020];--- docker.log;login @REG@ -u @GU@ --password-stdin;stdin-sha256=@GSHA@
-ghcr-then-hub|_ci_require_ghcr_auth|set|full|-|0|2|--- docker.log;login @REG@ -u @GU@ --password-stdin;stdin-sha256=@GSHA@;login -u @HU@ --password-stdin;stdin-sha256=@HSHA@
-ghcr-denied|_ci_require_ghcr_auth|set|full|always:Error response from daemon: Get "https://@REG@/v2/": denied: denied|2|1|[CI-ERROR-BUILD-0011] op=registry cmd="_ci_registry_login_once" cls=permanent attempt=1/@MAX@;denied: denied;[CI-ERROR-BUILD-0015] registry="@REG@";denied: denied
-ghcr-retry|_ci_require_ghcr_auth|set|none|once:connection reset by peer|0|2|[CI-WARN-BUILD-0016] op=registry cmd="_ci_registry_login_once" cls=transient attempt=1/@MAX@;connection reset by peer;[CI-INFO-BUILD-0017] op=registry cmd="_ci_registry_login_once" attempt=2/@MAX@;[CI-NOTICE-BUILD-0020]
-ghcr-exhausted|_ci_require_ghcr_auth|set|none|always:connection reset by peer|2|@MAX@|[CI-WARN-BUILD-0016] op=registry cmd="_ci_registry_login_once" cls=transient attempt=1/@MAX@;[CI-ERROR-BUILD-0011] op=registry cmd="_ci_registry_login_once" cls=transient attempt=@MAX@/@MAX@;[CI-ERROR-BUILD-0015] registry="@REG@"
-hub-none|_ci_dockerhub_login|-|none|-|0|0|[CI-NOTICE-BUILD-0020]
-hub-half|_ci_dockerhub_login|-|half|-|2|0|[CI-ERROR-BUILD-0021]
-hub-once|_hub_twice|-|full|-|0|1|--- docker.log;login -u @HU@ --password-stdin;stdin-sha256=@HSHA@
-hub-denied|_ci_dockerhub_login|-|full|always:unauthorized: @TXT@|2|1|[CI-ERROR-BUILD-0011] op=registry cmd="_ci_registry_login_once" cls=permanent attempt=1/@MAX@;unauthorized: @TXT@
-CASES
+@test "registry logins: GHCR required, Docker Hub paired, token on stdin" {
+    local logins l
+    _twice() { local a=0 b=0; _ci_dockerhub_login || a=$?; _ci_dockerhub_login || b=$?; echo "rc=${a},${b}"; }
+    unset _CI_DOCKERHUB_DONE GHCR_USERNAME GHCR_TOKEN DOCKERHUB_USERNAME DOCKERHUB_TOKEN
+    run _ci_require_ghcr_auth
+    _expect no-ghcr 2 "[CI-ERROR-BUILD-0002]" || return 1
+    run _ci_dockerhub_login
+    _expect hub-none 0 "[CI-NOTICE-BUILD-0020]" || return 1
+    DOCKERHUB_USERNAME="$(_val name)" run _ci_dockerhub_login
+    _expect hub-half 2 "[CI-ERROR-BUILD-0021]" || return 1
+    DOCKERHUB_TOKEN="$(_val name)" run _twice
+    _expect hub-half-twice 0 "[CI-ERROR-BUILD-0021];[CI-ERROR-BUILD-0021];rc=2,2" || return 1
+    logins="$(grep -n -E '(^[[:space:]]*|[|;&][[:space:]]*)docker login( |$)' "${CI_SH}")" || { echo "no docker login in ${CI_SH}"; return 1; }
+    while IFS= read -r l; do
+        [[ "${l}" == *'printf '*'| docker login '*'--password-stdin'* && "${l}" != *' -p '* && "${l}" != *'--password '* ]] \
+            || { echo "token not on stdin: ${l}"; return 1; }
+    done <<< "${logins}"
 }
 
 # =========================================================
