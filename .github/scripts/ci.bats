@@ -1575,6 +1575,9 @@ strip-inline-and-block|strip|a <!-- x --> b\nkeep <!-- start\nhidden\nend --> ta
 section-exact|section|## Summary\nx\n## Linked Issues  \r\nCloses #1\n```bash\n# not a heading\n```\n### Notes\ncloses #2\n## Linked Issuesx\n|Linked Issues|1\nCloses #1\n```bash\n# not a heading\n```
 section-twice|section|## Linked Issues\na\n## Linked Issues\nb|Linked Issues|2\na
 section-level-3|section|### Linked Issues\na|Linked Issues|0
+strip-two-inline|strip|a<!--x-->b<!--y-->c|-|abc
+section-tilde-fence|section|## Linked Issues\n~~~\n# not a heading\n~~~\nz|Linked Issues|1\n~~~\n# not a heading\n~~~\nz
+section-seven-hashes|section|## Linked Issues\n####### text\n## Next|Linked Issues|1\n####### text
 CASES
 }
 
