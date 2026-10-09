@@ -1014,23 +1014,25 @@ CASES
 # VALIDATION
 # =========================================================
 
-# What: per image pin, third-party kept, a gap fails closed
-# Why: §48: validate runs the candidate, not a mutable tag.
+# What: per image pin; third-party kept; a gap fails
+# Why: §48: validate runs the candidate, not a mutable tag
 # From: Issue #1683 | PR #1858
 @test "validate pin override: per image, third-party kept, gap fails" {
-    local root cfg cand="" s dig out ext img k miss extra shared
+    local root cfg svcs exts cand="" s dig out ext img k ks miss extra shared first
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    export GITHUB_REPOSITORY
-    GITHUB_REPOSITORY="$(awk -F= '$1 == "LANCACHE_IMAGE_PREFIX" { print $2; exit }' "${root}/deploy/prod/.env")"
+    cfg="$(docker compose -f "${root}/$(_ci_variable CI_COMPOSE_FILE)" config --format json)" && svcs="$(ci_services)" \
+        && exts="$(_ci_block_keys external_services)" || { echo "inputs: compose config, services or external services"; return 1; }
+    first="$(jq -r --arg s "$(awk 'NR == 1' <<< "${svcs}")" '.services[$s].image // empty' <<< "${cfg}")"
+    first="${first#*/}" first="${first%/*}"
+    [ -n "${first}" ] || { echo "no compose image for the first SOT service"; return 1; }
+    export GITHUB_REPOSITORY="${first}"
     dig="$(_val digest)"
-    while IFS= read -r s; do cand+="${s}=${dig}"$'\n'; done < <(ci_services)
-    [ -n "${GITHUB_REPOSITORY}" ] && [ -n "${cand}" ] || { echo "inputs: ${GITHUB_REPOSITORY} | ${cand}"; return 1; }
+    while IFS= read -r s; do cand+="${s}=${dig}"$'\n'; done <<< "${svcs}"
     run _ci_validate_pin_override "${cand}"
     _expect pin 0 "services:" || return 1
     out="${output}"
     [ -n "$(grep '^    image: ' <<< "${out}")" ] || { echo "nothing pinned: ${out}"; return 1; }
     [ -z "$(grep '^    image: ' <<< "${out}" | grep -v "@${dig}\$")" ] || { echo "pin without the digest: ${out}"; return 1; }
-    cfg="$(docker compose -f "${root}/$(_ci_variable CI_COMPOSE_FILE)" config --format json)"
     shared="$(jq -r '[.services | to_entries[] | {k: .key, i: .value.image}] | group_by(.i)
         | map(select(length > 1)) | (.[0] // []) | .[].k' <<< "${cfg}")"
     [ -n "${shared}" ] || { echo "no image shared by two compose services"; return 1; }
@@ -1038,11 +1040,13 @@ CASES
         grep -qx "  ${k}:" <<< "${out}" || { echo "shared image not pinned on ${k}: ${out}"; return 1; }
     done <<< "${shared}"
     while IFS= read -r ext; do
-        img="$(_ci_block_entry_field external_services "${ext}" image)"
+        img="$(_ci_block_entry_field external_services "${ext}" image)" \
+            && ks="$(jq -r --arg i "${img}" '.services | to_entries[] | select(.value.image == $i) | .key' <<< "${cfg}")" \
+            || { echo "${ext}: image unreadable"; return 1; }
         while IFS= read -r k; do
             [ -z "${k}" ] || ! grep -qx "  ${k}:" <<< "${out}" || { echo "third-party ${k} pinned: ${out}"; return 1; }
-        done < <(jq -r --arg i "${img}" '.services | to_entries[] | select(.value.image == $i) | .key' <<< "${cfg}")
-    done < <(_ci_block_keys external_services)
+        done <<< "${ks}"
+    done <<< "${exts}"
     miss="$(grep -m1 '^    image: ' <<< "${out}")" && miss="${miss%@*}" && miss="${miss##*/}"
     run _ci_validate_pin_override "$(grep -v "^${miss}=" <<< "${cand}")"
     _expect gap 2 "[CI-ERROR-VALIDATE-0007]" || return 1
