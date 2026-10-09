@@ -174,7 +174,7 @@ impl DhcpMode {
 }
 
 // What: the prefix every lancache container name carries.
-// Why: a compose service name is the container name without it.
+// Why: a service name is the container name without it.
 pub const CONTAINER_PREFIX: &str = "lancache-";
 
 // What: true if service names the container, short or full.

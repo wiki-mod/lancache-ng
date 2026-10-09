@@ -158,7 +158,6 @@ pub fn http_client() -> reqwest::Result<reqwest::Client> {
 
 // What: one lancache.dns.record message on NATS.
 // Why: ui and subscriber publish it; the subscriber reads it.
-// From: Issue #1252
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsRecord {
     pub action: String,
