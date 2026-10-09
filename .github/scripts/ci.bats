@@ -3131,64 +3131,85 @@ STUB
     # What: dhcp4, ctrl-agent, d2 from the real var list.
     # Why: a missed var or bad port stops kea from starting.
     # From: Issue #1683 | PR #1858
-    local root d="${BATS_TEST_TMPDIR}/kea" ep zones port want
+    local root d="${BATS_TEST_TMPDIR}/kea" ep dns zones key alg n1 n2 row port rc want
+    local -A V=(["@P@"]="$(_val port)")
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     ep="${root}/services/dhcp/entrypoint.sh"
+    dns="${root}/services/dns/entrypoint.sh"
     # shellcheck source=services/dhcp/entrypoint.sh
     source "$(_extract_functions "${ep}" is_ipv4 is_ipv4_csv resolve_ntp_server resolve_ntp_csv build_ntp_option \
         render_kea_config render_kea_dhcp4_config)"
     eval "$(grep -m1 '^ENVSUBST_VARS=' "${ep}")"
     [ -n "${ENVSUBST_VARS}" ]
-    export DHCP_SUBNET=10.0.0.0/24 DHCP_RANGE_START=10.0.0.128 DHCP_RANGE_END=10.0.0.254 \
-        DHCP_GATEWAY=10.0.0.1 DHCP_DOMAIN=example.com DHCP_LEASE_TIME=86400 DHCP_MAX_LEASE_TIME=172800 \
-        DHCP_NTP_SERVERS="8.8.8.8 1.1.1.1" DHCP_DNS_PRIMARY=10.0.0.2 DHCP_DNS_SECONDARY=10.0.0.3 \
-        DHCP_DNS_SERVER_IP=127.0.0.1 DHCP_DDNS_PORT=5300 KEA_CTRL_TOKEN=tok-123 KEA_CTRL_HOST=0.0.0.0 \
-        DDNS_TSIG_KEY=c2VjcmV0 KEA_LEASE_CMDS_HOOK_PATH=/usr/lib/kea/hooks/libdhcp_lease_cmds.so
+    n1="$(_val ipv4)" n2="$(_val ipv4)"
+    DHCP_SUBNET="$(_val cidr)" DHCP_RANGE_START="$(_val ipv4)" DHCP_RANGE_END="$(_val ipv4)"
+    DHCP_GATEWAY="$(_val ipv4)" DHCP_DOMAIN="$(_val host)" DHCP_LEASE_TIME="$(_val int 60 99999)"
+    DHCP_MAX_LEASE_TIME="$(_val int 60 99999)" DHCP_NTP_SERVERS="${n1} ${n2}" DHCP_DNS_PRIMARY="$(_val ipv4)"
+    DHCP_DNS_SECONDARY="$(_val ipv4)" DHCP_DNS_SERVER_IP="$(_val ipv4)" DHCP_DDNS_PORT="$(_val port)"
+    KEA_CTRL_TOKEN="$(_val name)" KEA_CTRL_HOST="$(_val ipv4)" DDNS_TSIG_KEY="$(_val name | base64)"
+    KEA_LEASE_CMDS_HOOK_PATH="$(_val path)"
+    export DHCP_SUBNET DHCP_RANGE_START DHCP_RANGE_END DHCP_GATEWAY DHCP_DOMAIN DHCP_LEASE_TIME \
+        DHCP_MAX_LEASE_TIME DHCP_NTP_SERVERS DHCP_DNS_PRIMARY DHCP_DNS_SECONDARY DHCP_DNS_SERVER_IP \
+        DHCP_DDNS_PORT KEA_CTRL_TOKEN KEA_CTRL_HOST DDNS_TSIG_KEY KEA_LEASE_CMDS_HOOK_PATH
     mkdir -p "${d}"
     for DHCP_DDNS_ENABLED in true false; do
         export DHCP_DDNS_ENABLED
         render_kea_dhcp4_config "${root}/services/dhcp/kea-dhcp4.conf" "${d}/dhcp4.json"
-        run jq -e --argjson on "${DHCP_DDNS_ENABLED}" '.Dhcp4 as $d | $d.subnet4[0] as $s
-            | $s.subnet == "10.0.0.0/24" and $s.pools[0].pool == "10.0.0.128 - 10.0.0.254"
-            and $s["valid-lifetime"] == 86400 and $s["max-valid-lifetime"] == 172800
-            and ([$s["option-data"][] | select(.name == "ntp-servers") | .data] == ["8.8.8.8,1.1.1.1"])
-            and $d["hooks-libraries"] == [{"library": "/usr/lib/kea/hooks/libdhcp_lease_cmds.so"}]
-            and $d["dhcp-ddns"]["enable-updates"] == $on and $d["ddns-qualifying-suffix"] == "example.com"' \
+        run jq -e --argjson on "${DHCP_DDNS_ENABLED}" --arg sub "${DHCP_SUBNET}" \
+            --arg pool "${DHCP_RANGE_START} - ${DHCP_RANGE_END}" --argjson lt "${DHCP_LEASE_TIME}" \
+            --argjson mlt "${DHCP_MAX_LEASE_TIME}" --arg ntp "${n1},${n2}" --arg hook "${KEA_LEASE_CMDS_HOOK_PATH}" \
+            --arg dom "${DHCP_DOMAIN}" '.Dhcp4 as $d | $d.subnet4[0] as $s
+            | $s.subnet == $sub and $s.pools[0].pool == $pool
+            and $s["valid-lifetime"] == $lt and $s["max-valid-lifetime"] == $mlt
+            and ([$s["option-data"][] | select(.name == "ntp-servers") | .data] == [$ntp])
+            and $d["hooks-libraries"] == [{"library": $hook}]
+            and $d["dhcp-ddns"]["enable-updates"] == $on and $d["ddns-qualifying-suffix"] == $dom' \
             "${d}/dhcp4.json"
         [ "${status}" -eq 0 ] || { echo "dhcp4 ddns=${DHCP_DDNS_ENABLED}: ${output}"; return 1; }
     done
     DHCP_NTP_SERVERS="" render_kea_dhcp4_config "${root}/services/dhcp/kea-dhcp4.conf" "${d}/dhcp4.json"
     jq -e '[.Dhcp4.subnet4[0]["option-data"][] | select(.name == "ntp-servers")] == []' "${d}/dhcp4.json"
     render_kea_config "${root}/services/dhcp/kea-ctrl-agent.conf" "${d}/ctrl.json"
-    jq -e '.["Control-agent"] | .["http-host"] == "0.0.0.0" and .authentication.type == "basic"
-        and .authentication.clients == [{"user": "admin", "password": "tok-123"}]' "${d}/ctrl.json"
+    jq -e --arg host "${KEA_CTRL_HOST}" --arg tok "${KEA_CTRL_TOKEN}" '.["Control-agent"]
+        | .["http-host"] == $host and .authentication.type == "basic"
+        and [.authentication.clients[].password] == [$tok]' "${d}/ctrl.json"
     render_kea_config "${root}/services/dhcp/kea-dhcp-ddns.conf" "${d}/d2.json"
     run grep -n '\${' "${d}/dhcp4.json" "${d}/ctrl.json" "${d}/d2.json"
     [ "${status}" -eq 1 ] || { echo "unrendered: ${output}"; return 1; }
-    zones="$(awk '/^PRIVATE_REVERSE_ZONES=\(/,/^\)/' "${root}/services/dns/entrypoint.sh" \
+    zones="$(awk '/^PRIVATE_REVERSE_ZONES=\(/,/^\)/' "${dns}" \
         | grep -oE '[0-9a-z.]+\.in-addr\.arpa\.' | jq -Rsc 'split("\n") | map(select(. != "")) | sort')"
     [ "$(jq length <<< "${zones}")" -gt 0 ]
-    run jq -e --argjson zones "${zones}" '.DhcpDdns as $d
-        | [$d["tsig-keys"][] | [.name, .algorithm, .secret]] == [["lancache-ddns-key", "HMAC-SHA256", "c2VjcmV0"]]
-        and $d.port == 53001 and $d["forward-ddns"]["ddns-domains"][0].name == "example.com."
+    key="$(sed -n 's/^DDNS_TSIG_NAME="\${DDNS_TSIG_NAME:-\([^}]*\)}"$/\1/p' "${dns}")"
+    alg="$(sed -n 's/^DDNS_TSIG_ALGORITHM="\${DDNS_TSIG_ALGORITHM:-\([^}]*\)}"$/\1/p' "${dns}")"
+    [ -n "${key}" ] || { echo "no DDNS_TSIG_NAME default in ${dns}"; return 1; }
+    [ -n "${alg}" ] || { echo "no DDNS_TSIG_ALGORITHM default in ${dns}"; return 1; }
+    run jq -e --slurpfile d4 "${d}/dhcp4.json" --argjson zones "${zones}" --arg key "${key}" --arg alg "${alg}" \
+        --arg tsig "${DDNS_TSIG_KEY}" --arg dom "${DHCP_DOMAIN}." --arg ip "${DHCP_DNS_SERVER_IP}" \
+        --argjson port "${DHCP_DDNS_PORT}" '.DhcpDdns as $d | $d4[0].Dhcp4["dhcp-ddns"] as $s
+        | [$d["tsig-keys"][] | [.name, (.algorithm | ascii_downcase), .secret]] == [[$key, ($alg | ascii_downcase), $tsig]]
+        and $d.port == $s["server-port"] and $d["ip-address"] == $s["server-ip"]
+        and $d["forward-ddns"]["ddns-domains"][0].name == $dom
         and ([$d["reverse-ddns"]["ddns-domains"][].name] | sort) == $zones
-        and ([$d["forward-ddns", "reverse-ddns"]["ddns-domains"][] | .["key-name"]] | unique) == ["lancache-ddns-key"]
+        and ([$d["forward-ddns", "reverse-ddns"]["ddns-domains"][] | .["key-name"]] | unique) == [$key]
         and ([$d["forward-ddns", "reverse-ddns"]["ddns-domains"][]["dns-servers"]
-            | length == 1 and .[0] == {"ip-address": "127.0.0.1", "port": 5300}] | all)' "${d}/d2.json"
+            | length == 1 and .[0] == {"ip-address": $ip, "port": $port}] | all)' "${d}/d2.json"
     [ "${status}" -eq 0 ] || { echo "d2: ${output}"; return 1; }
-    sed -n '/^: "\${DHCP_DDNS_PORT:=5300}"$/,/^fi$/p' "${ep}" > "${d}/port.sh"
-    [ "$(grep -c 'exit 1' "${d}/port.sh")" -eq 2 ]
-    while IFS='|' read -r port want; do
+    sed -n '/^: "\${DHCP_DDNS_PORT:=/,/^fi$/p' "${ep}" > "${d}/port.sh"
+    [ -s "${d}/port.sh" ]
+    while IFS= read -r row; do
+        IFS='|' read -r port rc want <<< "$(_fill "${row}")"
         run env DHCP_DDNS_PORT="${port}" bash -c ". '${d}/port.sh' && echo \"ok \${DHCP_DDNS_PORT}\""
+        [ "${status}" -eq "${rc}" ] || { echo "port '${port}': rc ${status}: ${output}"; return 1; }
         [[ "${output}" == *"${want}"* ]] || { echo "port '${port}': ${output}"; return 1; }
     done <<'CASES'
-|ok 5300
-1|ok 1
-65535|ok 65535
-0|must be between 1 and 65535 (got: 0)
-65536|must be between 1 and 65535 (got: 65536)
-53a|must be a numeric TCP/UDP port (got: 53a)
--1|must be a numeric TCP/UDP port (got: -1)
+|0|ok
+@P@|0|ok @P@
+1|0|ok 1
+65535|0|ok 65535
+0|1|must be between 1 and 65535 (got: 0)
+65536|1|must be between 1 and 65535 (got: 65536)
+@P@a|1|must be a numeric TCP/UDP port (got: @P@a)
+-@P@|1|must be a numeric TCP/UDP port (got: -@P@)
 CASES
 }
 
