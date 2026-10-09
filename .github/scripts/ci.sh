@@ -213,26 +213,114 @@ ci_require_manifest() {
 # SERVICE INVENTORY
 # =========================================================
 
+# What: SOT store: <prefix><kind letter>:<path> -> data.
+# Why: a SOT is parsed once per owning shell, not per field.
+# From: Issue #1683 | PR #1858
+declare -gA _CI_SOT=() _CI_SOT_LOADED=()
+_CI_SOT_SEQ=0
+
+# What: awk SOT index as one bash array assignment.
+# Why: one parse and one eval; readers then only look up.
+# From: Issue #1683 | PR #1858
+_CI_AWK_SOT_INDEX='
+    function keep(p) { return want == "" || p == want || index(p, want "/") == 1 }
+    function sq(x) { gsub(q, q "\"" q "\"" q, x); return q x q }
+    function put(k, v) { printf "[%s]=%s\n", sq(kp k), sq(v) }
+    function node(p, kind, raw,   v, n, seg, d2, anc, par) {
+        uerr = ""; v = (kind == "c") ? "" : unq(raw)
+        if (keep(p)) { put("k:" p, kind); put("r:" p, raw); put("v:" p, v); put("e:" p, uerr) }
+        n = split(p, seg, "/"); par = p; sub(/\/?[^\/]*$/, "", par)
+        kids[par] = kids[par] seg[n] "\n"
+        if (kind == "c") boxes[par] = boxes[par] seg[n] "\n"
+        anc = seg[1]
+        for (d2 = 2; d2 <= 3 && d2 < n; d2++) {
+            anc = anc "/" seg[d2]
+            if (!((anc "/" seg[n]) in first)) first[anc "/" seg[n]] = p
+            all[anc "/" seg[n]] = all[anc "/" seg[n]] p "\n"
+        }
+    }
+    function item(p, raw,   v) {
+        uerr = ""; v = unq(raw)
+        if (uerr == "") items[p] = items[p] v "\n"
+        else if (!(p in xerr)) xerr[p] = items[p] uerr
+    }
+    /^[[:space:]]*(#|$)/ { next }
+    {
+        match($0, /^ */); ind = RLENGTH; t = substr($0, ind + 1); sub(/[[:space:]]+$/, "", t)
+        while (d > 0 && si[d] >= ind) d--
+        if (t ~ /^-([[:space:]]|$)/) { sub(/^-[[:space:]]*/, "", t); if (d) item(sp[d], t); next }
+        if (!match(t, /^[A-Za-z0-9_.-]+:/)) next
+        key = substr(t, 1, RLENGTH - 1); rest = substr(t, RLENGTH + 1); sub(/^[[:space:]]+/, "", rest)
+        p = d ? sp[d] "/" key : key
+        if (rest == "") { node(p, "c", ""); d++; si[d] = ind; sp[d] = p; next }
+        if (substr(rest, 1, 1) != "[") { node(p, "s", rest); next }
+        node(p, "l", rest)
+        sub(/^\[/, "", rest); sub(/\].*$/, "", rest); gsub(/[[:space:],]+/, " ", rest)
+        n = split(rest, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") item(p, a[i])
+    }
+    END {
+        for (k in kids) if (keep(k)) put("c:" k, kids[k])
+        for (k in boxes) if (keep(k)) put("b:" k, boxes[k])
+        for (k in first) if (keep(k)) put("f:" k, first[k])
+        for (k in all) if (keep(k)) put("a:" k, all[k])
+        for (k in items) if (keep(k)) put("i:" k, items[k])
+        for (k in xerr) if (keep(k)) put("x:" k, xerr[k])
+    }
+'
+
+# What: index a SOT file, or one subtree, under a prefix.
+# Why: one awk pass and one eval; raw error in a global.
+# From: Issue #1683 | PR #1858
+_ci_sot_index() {
+    local idx
+    if ! idx="$(awk -v q="'" -v want="$2" -v kp="$3" "${_CI_AWK_UNQUOTE}${_CI_AWK_SOT_INDEX}" "$1" 2>&1)"; then
+        _CI_SOT_RAW_ERR="${idx}"
+        return 2
+    fi
+    eval "_CI_SOT+=(${idx})"
+}
+
+# What: index the SOT into the shared store of this shell.
+# Why: owners of CI_MANIFEST load once; readers look up.
+# From: Issue #1683 | PR #1858
+_ci_sot_load() {
+    local file="${1:-${CI_MANIFEST}}" kp
+    unset '_CI_SOT_LOADED[$file]'
+    _CI_SOT_SEQ=$((_CI_SOT_SEQ + 1))
+    kp="${file}"$'\037'"${_CI_SOT_SEQ}"$'\037'
+    if ! _ci_sot_index "${file}" "" "${kp}"; then
+        ci_error "[CI-ERROR-CORE-0136]" "manifest=\"${file}\" reason=\"SOT unreadable; not indexed\"" "${_CI_SOT_RAW_ERR}"
+        return 2
+    fi
+    _CI_SOT_LOADED["${file}"]="${kp}"
+}
+
+# What: prefix of the shared index, else one fresh subtree.
+# Why: a miss reads only what it needs, never as shared.
+# From: Issue #1683 | PR #1858
+_ci_sot_view() {
+    local -n _ci_vk="$2"
+    _ci_vk="${_CI_SOT_LOADED[${CI_MANIFEST}]:-}"
+    [ -z "${_ci_vk}" ] || return 0
+    _CI_SOT_SEQ=$((_CI_SOT_SEQ + 1))
+    _ci_vk="${CI_MANIFEST}"$'\037'"m${_CI_SOT_SEQ}"$'\037'
+    _ci_sot_index "${CI_MANIFEST}" "$1" "${_ci_vk}"
+}
+
 # What: List direct child keys under a top-level block.
-# Why: One awk reader, no yq/python (AG-REL-001/006).
-# From: Issue #1683
+# Why: One SOT index, no yq/python (AG-REL-001/006).
+# From: Issue #1683 | PR #1858
 _ci_block_keys() {
-    local block="$1" mode="${2:-blocks}" all="" out
+    local block="$1" mode="${2:-blocks}" kp t=b
+    if ! _ci_sot_view "${block}" kp; then
+        ci_error "[CI-ERROR-CORE-0109]" "block=\"${block}\" mode=\"${mode}\" manifest=\"${CI_MANIFEST}\" reason=\"SOT keys unreadable\"" "${_CI_SOT_RAW_ERR}"
+        return 2
+    fi
     # What: mode "all" also lists scalar keys (key: value).
     # Why: base_images holds values, not nested blocks.
     # From: Issue #1683 | PR #1858
-    [ "${mode}" = all ] && all=1
-    if ! out="$(awk -v block="$block" -v all="${all}" '
-        $0 ~ ("^" block ":[[:space:]]*$") { inb = 1; next }
-        inb && /^[^[:space:]]/ { inb = 0 }
-        inb && (/^  [A-Za-z0-9_.-]+:[[:space:]]*$/ || (all && /^  [A-Za-z0-9_.-]+:/)) {
-            key = $1; sub(/:.*$/, "", key); print key
-        }
-    ' "${CI_MANIFEST}" 2>&1)"; then
-        ci_error "[CI-ERROR-CORE-0109]" "block=\"${block}\" mode=\"${mode}\" manifest=\"${CI_MANIFEST}\" reason=\"SOT keys unreadable\"" "${out}"
-        return 2
-    fi
-    [ -z "${out}" ] || printf '%s\n' "${out}"
+    [ "${mode}" != all ] || t=c
+    printf '%s' "${_CI_SOT[${kp}${t}:${block}]:-}"
 }
 
 # What: Print the product-stack service names.
@@ -268,88 +356,77 @@ _ci_toolchain_target() {
 # =========================================================
 
 # What: awk unq(): YAML '..' and ".." scalars to raw text.
-# Why: one unquote for every SOT reader; odd forms fail.
+# Why: one unquote for the SOT index; odd forms set uerr.
 # From: Issue #1683 | PR #1858
 _CI_AWK_UNQUOTE='
-    function bad_val(v) { print "unsupported YAML quoting: " v > "/dev/stderr"; exit 3 }
+    function bad_val(v) { uerr = "unsupported YAML quoting: " v; return "" }
     function unq(v,  o, t, i, c) {
         if (substr(v, 1, 1) == q) {
-            if (length(v) < 2 || substr(v, length(v), 1) != q) bad_val(v)
+            if (length(v) < 2 || substr(v, length(v), 1) != q) return bad_val(v)
             v = substr(v, 2, length(v) - 2); t = v; gsub(q q, "", t)
-            if (index(t, q)) bad_val(v)
+            if (index(t, q)) return bad_val(v)
             gsub(q q, q, v); return v
         }
         if (substr(v, 1, 1) != "\"") return v
-        if (length(v) < 2 || substr(v, length(v), 1) != "\"") bad_val(v)
+        if (length(v) < 2 || substr(v, length(v), 1) != "\"") return bad_val(v)
         v = substr(v, 2, length(v) - 2); o = ""
         for (i = 1; i <= length(v); i++) {
             c = substr(v, i, 1)
-            if (c == "\"") bad_val(v)
+            if (c == "\"") return bad_val(v)
             if (c != "\\") { o = o c; continue }
             c = substr(v, ++i, 1)
-            if (c == "\"" || c == "\\" || c == "/") o = o c; else bad_val(v)
+            if (c == "\"" || c == "\\" || c == "/") o = o c; else return bad_val(v)
         }
         return o
     }
 '
 
 # What: Print one field of a block entry.
-# Why: One parser, no per-block duplicate.
-# From: Issue #1683
+# Why: One SOT index, no per-block duplicate.
+# From: Issue #1683 | PR #1858
 _ci_block_entry_field() {
-    local block="$1" entry="$2" field="$3" out
+    local block="$1" entry="$2" field="$3" kp p="" ctx
+    ctx="block=\"${block}\" entry=\"${entry}\" field=\"${field}\" manifest=\"${CI_MANIFEST}\" reason=\"SOT field unreadable\""
+    if ! _ci_sot_view "${block}${entry:+/${entry}}" kp; then
+        ci_error "[CI-ERROR-CORE-0107]" "${ctx}" "${_CI_SOT_RAW_ERR}"
+        return 2
+    fi
     # What: entry="" reads a block-level scalar; quotes cut.
     # Why: base_images has no entry level; one reader.
     # From: Issue #1683 | PR #1858
-    if ! out="$(awk -v block="$block" -v entry="$entry" -v field="$field" -v q="'" "${_CI_AWK_UNQUOTE}"'
-        $0 ~ ("^" block ":[[:space:]]*$") { inb = 1; inentry = (entry == ""); next }
-        inb && /^[^[:space:]]/ { inb = 0 }
-        inb && entry != "" && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
-            cur = $1; sub(/:$/, "", cur); inentry = (cur == entry)
-        }
-        inb && inentry && ((entry == "" && index($0, "  " field ":") == 1) || (entry != "" && $1 == (field ":"))) {
-            val = $0; sub(/^[[:space:]]*[A-Za-z0-9_.-]+:[[:space:]]*/, "", val)
-            print unq(val); exit
-        }
-    ' "${CI_MANIFEST}" 2>&1)"; then
-        ci_error "[CI-ERROR-CORE-0107]" "block=\"${block}\" entry=\"${entry}\" field=\"${field}\" manifest=\"${CI_MANIFEST}\" reason=\"SOT field unreadable\"" "${out}"
+    if [ -z "${entry}" ]; then
+        [ "${_CI_SOT[${kp}k:${block}]:-}" != c ] || p="${block}/${field}"
+    elif [ "${_CI_SOT[${kp}k:${block}/${entry}]:-}" = c ]; then
+        p="${_CI_SOT[${kp}f:${block}/${entry}/${field}]:-}"
+    fi
+    [ -n "${p}" ] && [ -n "${_CI_SOT[${kp}k:${p}]+set}" ] || return 0
+    if [ -n "${_CI_SOT[${kp}e:${p}]}" ]; then
+        ci_error "[CI-ERROR-CORE-0137]" "${ctx/SOT field unreadable/SOT value quoting unsupported}" "${_CI_SOT[${kp}e:${p}]}"
         return 2
     fi
-    [ -z "${out}" ] || printf '%s\n' "${out}"
+    [ -z "${_CI_SOT[${kp}v:${p}]}" ] || printf '%s\n' "${_CI_SOT[${kp}v:${p}]}"
 }
 
 # What: Print a block->entry->field list, one item per line.
 # Why: One list reader; inline [..] and block - items alike.
 # From: Issue #1683
 _ci_block_entry_list() {
-    local block="$1" entry="$2" field="$3" out
+    local block="$1" entry="$2" field="$3" kp node ctx
+    ctx="block=\"${block}\" entry=\"${entry}\" field=\"${field}\" manifest=\"${CI_MANIFEST}\" reason=\"SOT list unreadable\""
     # What: entry="" reads a 2-level block->field list.
     # Why: build_matrix has no entry level; one reader.
-    # From: Issue #1683
-    if ! out="$(awk -v block="$block" -v entry="$entry" -v field="$field" -v q="'" "${_CI_AWK_UNQUOTE}"'
-        BEGIN { fi = (entry == "") ? "  " : "    "; ii = (entry == "") ? "    " : "      " }
-        $0 ~ ("^" block ":[[:space:]]*$") { inb = 1; inentry = (entry == ""); next }
-        inb && /^[^[:space:]]/ { inb = 0 }
-        inb && entry != "" && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
-            cur = $1; sub(/:$/, "", cur); inentry = (cur == entry); inlist = 0
-        }
-        inb && inentry && $0 ~ ("^" fi field ":[[:space:]]*\\[") {
-            line = $0; sub(/^[^[]*\[/, "", line); sub(/\].*$/, "", line)
-            gsub(/[[:space:],]+/, " ", line)
-            n = split(line, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") print unq(a[i])
-            exit
-        }
-        inb && inentry && $0 ~ ("^" fi field ":[[:space:]]*$") { inlist = 1; next }
-        inlist && $0 ~ ("^" ii "-[[:space:]]") {
-            it = $0; sub(/^[[:space:]]*-[[:space:]]*/, "", it); print unq(it); next
-        }
-        inlist && $0 ~ ("^" fi "[^[:space:]]") { inlist = 0 }
-        inlist && /^  [^[:space:]]/ { inlist = 0 }
-    ' "${CI_MANIFEST}" 2>&1)"; then
-        ci_error "[CI-ERROR-CORE-0108]" "block=\"${block}\" entry=\"${entry}\" field=\"${field}\" manifest=\"${CI_MANIFEST}\" reason=\"SOT list unreadable\"" "${out}"
+    # From: Issue #1683 | PR #1858
+    node="${block}${entry:+/${entry}}"
+    if ! _ci_sot_view "${node}" kp; then
+        ci_error "[CI-ERROR-CORE-0108]" "${ctx}" "${_CI_SOT_RAW_ERR}"
         return 2
     fi
-    [ -z "${out}" ] || printf '%s\n' "${out}"
+    [ "${_CI_SOT[${kp}k:${node}]:-}" = c ] || return 0
+    if [ -n "${_CI_SOT[${kp}x:${node}/${field}]:-}" ]; then
+        ci_error "[CI-ERROR-CORE-0138]" "${ctx/SOT list unreadable/SOT list item quoting unsupported}" "${_CI_SOT[${kp}x:${node}/${field}]}"
+        return 2
+    fi
+    printf '%s' "${_CI_SOT[${kp}i:${node}/${field}]:-}"
 }
 
 # What: Query a service field (services or build_toolchain).
@@ -1217,6 +1294,7 @@ _ci_manifest_at() {
         ci_error "[CI-ERROR-IMPACT-0011]" "ref=\"${ref}\" dest=\"${dest}\" reason=\"base SOT not written\"" "${out}"
         return 2
     fi
+    _ci_sot_load "${dest}"
 }
 
 # What: Emit NOOP or BUILD per target and platform.
@@ -4153,22 +4231,18 @@ ci_cmd_assemble() {
 # Why: One release.channels reader; callers filter it.
 # From: Issue #1683
 _ci_channel_field() {
-    local out
-    if ! out="$(awk -v f="$1" '
-        /^release:[[:space:]]*$/ { inr = 1; next }
-        inr && /^[A-Za-z]/ { inr = 0; inc = 0 }
-        inr && /^  channels:[[:space:]]*$/ { inc = 1; next }
-        inr && inc && /^  [A-Za-z]/ { inc = 0 }
-        inc && /^    [A-Za-z0-9_.-]+:[[:space:]]*$/ { ch = $1; sub(/:$/, "", ch); next }
-        inc && ch != "" && $1 == (f ":") {
-            v = $0; sub(/^[^:]*:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
-            print ch, v
-        }
-    ' "${CI_MANIFEST}" 2>&1)"; then
-        ci_error "[CI-ERROR-CORE-0123]" "field=\"$1\" manifest=\"${CI_MANIFEST}\" reason=\"SOT release.channels unreadable\"" "${out}"
+    local kp ch p root=release/channels
+    if ! _ci_sot_view "${root}" kp; then
+        ci_error "[CI-ERROR-CORE-0123]" "field=\"$1\" manifest=\"${CI_MANIFEST}\" reason=\"SOT release.channels unreadable\"" "${_CI_SOT_RAW_ERR}"
         return 2
     fi
-    [ -z "${out}" ] || printf '%s\n' "${out}"
+    [ "${_CI_SOT[${kp}k:${root}]:-}" = c ] || return 0
+    while IFS= read -r ch; do
+        [ -n "${ch}" ] || continue
+        while IFS= read -r p; do
+            [ -z "${p}" ] || printf '%s %s\n' "${ch}" "${_CI_SOT[${kp}r:${p}]}"
+        done <<< "${_CI_SOT[${kp}a:${root}/${ch}/$1]:-}"
+    done <<< "${_CI_SOT[${kp}b:${root}]:-}"
 }
 
 # What: Channels whose field equals a value, one per line.
@@ -8317,6 +8391,10 @@ ci_main() {
     # Why: bind-mounted stage has no SOT present
     # From: Issue #1683
     case "${command}" in check|rust-build|apk-setup) ;; *) ci_require_manifest || return "$?" ;; esac
+    # What: index a present SOT once for this command.
+    # Why: readers then look fields up instead of rereading.
+    # From: Issue #1683 | PR #1858
+    [ ! -f "${CI_MANIFEST}" ] || _ci_sot_load || return 2
     "${fn}" "$@"
 }
 

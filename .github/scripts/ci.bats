@@ -24,6 +24,10 @@ setup() {
     # shellcheck source=.github/scripts/ci.sh
     source "${CI_SH}"
     CI_MANIFEST_SOURCE="${CI_MANIFEST}"
+    # What: index the real SOT once in the test shell.
+    # Why: sourced readers look up, as under ci_main.
+    # From: Issue #1683 | PR #1858
+    _ci_sot_load || return 1
 }
 
 # What: docker stand-in, apk stub, server URL, SOT copy.
@@ -60,6 +64,7 @@ _stand_ins() {
     CI_MANIFEST="${BATS_TEST_TMPDIR}/sot.yml"
     sed "${ed[@]}" "${CI_MANIFEST_SOURCE}" > "${CI_MANIFEST}" || return 1
     export CI_MANIFEST
+    _ci_sot_load || return 1
 }
 
 # What: one top-level block of the real SOT, for fixtures.
@@ -685,41 +690,28 @@ toolchain|${tfile}|${tool}
 CASES
 }
 
+# What: missing SOT: each reader rc 2, own id, raw error.
+# Why: a reader error must never read as an empty value.
+# From: Issue #1683 | PR #1858
 @test "an unreadable SOT fails every reader caller with raw" {
-    # What: each caller row: rc 2 plus the raw reader error.
-    # Why: a reader error must never read as an empty value.
-    # From: Issue #1683 | PR #1858
-    local call row
-    local -A V=(
-        [@SVC@]="$(_val name)" [@P@]="$(_val platform)" [@PATH@]="$(_val name)/$(_val name)"
-        [@VAR@]="$(_val var)" [@DIR@]="${BATS_TEST_TMPDIR}" [@NOSOT@]="$(_val path)" [@ID@]="$(_val name)"
-    )
-    while IFS= read -r row; do
-        [ -n "${row}" ] || continue
-        read -r -a call <<< "$(_fill "${row}")"
-        CI_MANIFEST="${V[@NOSOT@]}" GITHUB_REPOSITORY="$(_val name)/$(_val name)" \
-            CI_COMPOSE_FILE="$(_val name)" run "${call[@]}"
-        [ "${status}" -eq 2 ] && [[ "${output}" == *"No such file"* ]] \
-            && [[ "${output}" =~ \[CI-ERROR-CORE-010[789]\]\ block= ]] && [[ "${output}" == *"manifest=\"${V[@NOSOT@]}\""* ]] \
-            || { echo "${row}: rc ${status}: ${output}"; return 1; }
-    done <<'CASES'
-ci_service_field @SVC@ build_type
-_ci_required_field @SVC@ context
-_ci_platforms @SVC@
-_ci_platform_field @P@ apk @ID@
-ci_build_targets
-_ci_alpine_build_arg --build-arg
-_ci_service_packages @SVC@
-_ci_apk_repositories @SVC@
-_ci_apk_keys @SVC@
-_ci_build_tools_smoke smoke_tools
-_ci_variable_value @VAR@
-_ci_plan_candidate @SVC@ @PATH@
-_ci_identity_for @SVC@ @P@
-ci_cmd_codeql_config
-_ci_check_stable_external_images @DIR@
-_ci_check_dockerfile_build_tools @DIR@
-CASES
+    local nosot blk name
+    nosot="$(_val path)" name="$(_val name)"
+    blk="$(awk '/^[A-Za-z0-9_.-]+:[[:space:]]*$/ { sub(/:.*/, ""); print; exit }' "${CI_MANIFEST_SOURCE}")"
+    [ -n "${blk}" ] || { echo "no block in ${CI_MANIFEST_SOURCE}"; return 1; }
+    CI_MANIFEST="${nosot}" run _ci_block_keys "${blk}"
+    _expect keys 2 "[CI-ERROR-CORE-0109] block=\"${blk}\";manifest=\"${nosot}\";No such file" || return 1
+    CI_MANIFEST="${nosot}" run _ci_block_entry_field "${blk}" "" "${name}"
+    _expect field 2 "[CI-ERROR-CORE-0107] block=\"${blk}\";manifest=\"${nosot}\";No such file" || return 1
+    CI_MANIFEST="${nosot}" run _ci_block_entry_list "${blk}" "" "${name}"
+    _expect list 2 "[CI-ERROR-CORE-0108] block=\"${blk}\";manifest=\"${nosot}\";No such file" || return 1
+    CI_MANIFEST="${nosot}" run _ci_channel_field "${name}"
+    _expect channel 2 "[CI-ERROR-CORE-0123] field=\"${name}\";manifest=\"${nosot}\";No such file" || return 1
+    run _ci_sot_load "${nosot}"
+    _expect load 2 "[CI-ERROR-CORE-0136] manifest=\"${nosot}\";No such file" || return 1
+    CI_MANIFEST="${nosot}" run bash "${CI_SH}" plan "${name}"
+    _expect cli 2 "[CI-ERROR-CORE-0003] manifest=\"${nosot}\"" || return 1
+    run _ci_block_keys "${blk}" all
+    [ "${status}" -eq 0 ] && [ -n "${output}" ] || { echo "loaded real SOT no longer answers: rc ${status}: ${output}"; return 1; }
 }
 
 @test "core helpers fail with code, context and raw tool error" {
