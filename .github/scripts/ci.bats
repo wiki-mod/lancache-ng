@@ -1009,7 +1009,7 @@ CASES
         [env]='echo "h=${https_proxy} n=${NO_PROXY}"; _ci_proxy_names | tr "\n" " "'
         [bundle]='[ "$(grep -c "BEGIN CERTIFICATE" "${CARGO_HTTP_CAINFO}")" -gt 0 ] && echo system-certs; tail -n 1 "${CARGO_HTTP_CAINFO}"; [ "${CURL_CA_BUNDLE}" = "${CARGO_HTTP_CAINFO}" ] && echo same; stat -c %a "${CARGO_HTTP_CAINFO}"'
     )
-    local -A V=(["@PROXY@"]="$(_val url)" ["@EXCL@"]="$(_val host)" ["@CA@"]="$(_val name)")
+    local -A V=(["@PROXY@"]="$(_val url)" ["@PROXYS@"]="$(_val url)" ["@EXCL@"]="$(_val host)" ["@CA@"]="$(_val name)")
     while IFS='|' read -r case envs probe rc want; do
         envs="$(_fill "${envs}")" want="$(_fill "${want}")"
         read -r -a ev <<< "${envs}"
@@ -1019,7 +1019,9 @@ CASES
         _expect "${case}" "${rc}" "${want}" || return 1
     done <<'CASES'
 hosted-off|RUNNER_ENVIRONMENT=github-hosted PROJECT_SELFHOSTED_PROXY_HTTP=@PROXY@|names|0|[CI-INFO-CORE-0113] proxy=off runner="github-hosted" http_set=yes;names=0
-self-hosted|RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=@PROXY@ PROJECT_SELFHOSTED_PROXY_EXCLUSION=@EXCL@|env|0|[CI-INFO-CORE-0007];h=@PROXY@ n=@EXCL@;HTTP_PROXY HTTPS_PROXY
+self-hosted|RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=@PROXY@ PROJECT_SELFHOSTED_PROXY_EXCLUSION=@EXCL@|env|0|[CI-INFO-CORE-0007];[CI-INFO-CORE-0114];h=@PROXY@ n=@EXCL@;HTTP_PROXY HTTPS_PROXY
+self-hosted-no-http|RUNNER_ENVIRONMENT=self-hosted|names|0|[CI-INFO-CORE-0113] proxy=off runner="self-hosted" http_set=no;names=0
+https-own|RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=@PROXY@ PROJECT_SELFHOSTED_PROXY_HTTPS=@PROXYS@|env|0|[CI-INFO-CORE-0007];h=@PROXYS@ n=;HTTP_PROXY HTTPS_PROXY
 ca-bundle|RUNNER_ENVIRONMENT=self-hosted PROJECT_SELFHOSTED_PROXY_HTTP=@PROXY@ PROJECT_SELFHOSTED_PROXY_CA=@CA@|bundle|0|[CI-INFO-CORE-0115];system-certs;@CA@;same;600
 CASES
 }
