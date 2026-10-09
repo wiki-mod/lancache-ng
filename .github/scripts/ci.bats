@@ -1731,22 +1731,29 @@ CASES
     done
 }
 
+# What: an empty cache size or GB key derives from its pair
+# Why: keep the operator's size, not the template default
+# From: Issue #1683 | PR #1858
 @test "migrate_env_for_update derives CACHE_MAX_SIZE from CACHE_MAX_GB" {
     _stand_ins || return 1
-    # What: empty CACHE_MAX_SIZE comes from CACHE_MAX_GB
-    # Why: reuse the operator's size, not the default
-    # From: Issue #1683 | PR #1858
-    local root d gb
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    d="${BATS_TEST_TMPDIR}/cms/deploy/prod"
-    _converged_install "${d}" || return 1
-    gb="$(( $(get_env_var CACHE_MAX_GB "${d}/.env") * 3 ))"
-    set_env_key CACHE_MAX_GB "${gb}" "${d}/.env"
-    set_env_key CACHE_MAX_SIZE "" "${d}/.env"
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
-    [ "${status}" -eq 0 ] && [[ "$(get_env_var CACHE_MAX_SIZE "${d}/.env")" == "${gb}"[!0-9]* ]] \
-        || { echo "size: $(get_env_var CACHE_MAX_SIZE "${d}/.env") ${output}"; return 1; }
+    local d n m def
+    _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
+    _cache_row() {
+        d="${BATS_TEST_TMPDIR}/cms-$1/deploy/prod"
+        _converged_install "${d}" || return 1
+        set_env_key CACHE_MAX_GB "$2" "${d}/.env"
+        set_env_key CACHE_MAX_SIZE "$3" "${d}/.env"
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+        [ "${status}" -eq 0 ] || { echo "$1: rc ${status}: ${output}"; return 1; }
+    }
+    n="$(_val int 2 999)" m="$(_val int 2 999)"
+    def="$(prod_env_default CACHE_MAX_SIZE)" || { echo "no CACHE_MAX_SIZE default: ${def}"; return 1; }
+    _cache_row gb-to-size "${n}" "" || return 1
+    [ "$(get_env_var CACHE_MAX_SIZE "${d}/.env")" = "${n}g" ] || { echo "gb-to-size: $(get_env_var CACHE_MAX_SIZE "${d}/.env")"; return 1; }
+    _cache_row size-to-gb "" "${m}g" || return 1
+    [ "$(get_env_var CACHE_MAX_GB "${d}/.env")" = "${m}" ] || { echo "size-to-gb: $(get_env_var CACHE_MAX_GB "${d}/.env")"; return 1; }
+    _cache_row bad-gb "$(_val name)" "" || return 1
+    [ "$(get_env_var CACHE_MAX_SIZE "${d}/.env")" = "${def}" ] || { echo "bad-gb: $(get_env_var CACHE_MAX_SIZE "${d}/.env") want ${def}"; return 1; }
 }
 
 # What: TTL is a positive whole number up to setup.sh's max
