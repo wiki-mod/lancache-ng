@@ -646,40 +646,42 @@ STUB
 # SEMANTIC IMPACT
 # =========================================================
 
+# What: architecture §85 paths -> exactly their candidates.
+# Why: §11/§13: no unrelated target, no prefix-only match.
+# From: Issue #1683 | PR #1858
 @test "plan selects exactly the targets whose contexts a path touches" {
-    # What: own context and named contexts pick candidates.
-    # Why: no unrelated target and no prefix-only match.
-    # From: Issue #1683
-    local m e case sot path rc want row
-    m="$(_val path)" e="$(_val path)"
-    local -A V=(
-        [@A@]="$(_val name)" [@B@]="$(_val name)" [@T@]="$(_val name)" [@D@]="$(_val name)" [@CA@]="$(_val name)"
-        [@CB@]="$(_val name)" [@CT@]="$(_val name)" [@X1@]="$(_val name)" [@X2@]="$(_val name)" [@S@]="$(_val name)"
-        [@N1@]="$(_val name)" [@N2@]="$(_val name)" [@F@]="$(_val name)"
-    )
-    _fill "$(printf '%s\n' 'services:' '  @A@:' '    context: @D@/@CA@' '  @B@:' '    context: @D@/@CB@' \
-        'build_toolchain:' '  @T@:' '    context: @D@/@CT@' \
-        'named_contexts:' '  @X1@:' '    path: @S@/@N1@' '  @X2@:' '    path: @S@/@N2@' \
-        'dependency_graph:' '  @A@:' '    contexts: [@X1@, @X2@]' '  @B@:' '    contexts: [@X1@]')" > "${m}"
-    _fill "$(printf '%s\n' 'services:' '  @A@:' '    build_type: @F@')" > "${e}"
-    while IFS='|' read -r case sot path rc want; do
-        [ "${sot}" = m ] && sot="${m}" || sot="${e}"
-        CI_MANIFEST="${sot}" run bash "${CI_SH}" plan "$(_fill "${path}")"
-        if [ "${rc}" -ne 0 ]; then
-            _expect "${case}" "${rc}" "${want}" || return 1
-            [[ "${output}" != *"=false"* && "${output}" != *"=true"* ]] || { echo "${case}: guessed: ${output}"; return 1; }
-            continue
-        fi
-        row="$(grep -v 'CI-INFO' <<< "${output}" | paste -sd' ' -)"
-        [ "${status}" -eq 0 ] && [ "${row}" = "$(_fill "${want}")" ] || { echo "${case}: rc ${status}: ${row}"; return 1; }
-        [[ "${output}" == *"candidates only; identity/CAS decides build"* ]] || { echo "${case}: ${output}"; return 1; }
-    done <<'CASES'
-own-context|m|@D@/@CA@/@F@|0|@A@=true @B@=false @T@=false
-named-one-user|m|@S@/@N2@|0|@A@=true @B@=false @T@=false
-named-two-users|m|@S@/@N1@|0|@A@=true @B@=true @T@=false
-toolchain|m|@D@/@CT@/@F@|0|@A@=false @B@=false @T@=true
-no-prefix-match|m|@D@/@CA@@F@/@F@|0|@A@=false @B@=false @T@=false
-no-context|e|@D@/@CA@/@F@|2|[CI-ERROR-CORE-0009]
+    local root targets tool tctx tfile p case path want row l
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    targets="$(ci_build_targets)" || { echo "targets: ${targets}"; return 1; }
+    tool="$(_ci_block_keys build_toolchain all)" || { echo "build_toolchain: ${tool}"; return 1; }
+    tool="${tool%%$'\n'*}"
+    tctx="$(_ci_block_entry_field build_toolchain "${tool}" context)" || { echo "toolchain context: ${tctx}"; return 1; }
+    tfile="$(git -C "${root}" ls-files -- "${tctx}")" || { echo "ls-files ${tctx}: ${tfile}"; return 1; }
+    tfile="${tfile%%$'\n'*}"
+    [ -n "${tfile}" ] || { echo "no tracked file under ${tctx}"; return 1; }
+    p="services/dns$(_val name)/$(_val name)"
+    _want() {
+        local t out=""
+        for t in ${targets}; do
+            if [[ " $1 " == *" ${t} "* ]]; then out+="${t}=true "; else out+="${t}=false "; fi
+        done
+        printf '%s' "${out% }"
+    }
+    while IFS='|' read -r case path want; do
+        if [ "${case}" = readme ]; then run bash "${CI_SH}" plan "${path}"; else run ci_cmd_plan "${path}"; fi
+        [ "${status}" -eq 0 ] || { echo "${case}: rc ${status}: ${output}"; return 1; }
+        row=""
+        while IFS= read -r l; do
+            case "${l}" in *=true | *=false) row+="${l} " ;; esac
+        done <<< "${output}"
+        [ "${row% }" = "$(_want "${want}")" ] || { echo "${case}: got '${row% }' want '$(_want "${want}")'"; return 1; }
+        [[ "${output}" == *"candidates only; identity/CAS decides build"* ]] || { echo "${case}: no candidate note: ${output}"; return 1; }
+    done <<CASES
+readme|README.md|
+dns-input|services/dns/entrypoint.sh|dns
+dns-domains|services/dns/cdn-domains.txt|dns proxy
+prefix-only|${p}|
+toolchain|${tfile}|${tool}
 CASES
 }
 
