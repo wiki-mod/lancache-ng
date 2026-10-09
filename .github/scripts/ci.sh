@@ -5688,12 +5688,19 @@ _ci_validate_seed() {
 # Why: The full private B block gives ~32k /27 slots.
 # From: Issue #1683
 _ci_validate_subnet() {
-    local seed="$1" h o2 o3 sub
+    local seed="$1" pool slot plen base h
+    pool="$(_ci_variable CI_VALIDATE_SUBNET_POOL)" || return 2
+    slot="$(_ci_variable CI_VALIDATE_SLOT_PREFIX)" || return 2
+    plen="${pool#*/}"
+    if ! [[ "${pool}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ && "${slot}" =~ ^[0-9]{1,2}$ ]] \
+        || [ "${slot}" -le "${plen}" ] || [ "${slot}" -gt 32 ]; then
+        ci_log "[CI-ERROR-VALIDATE-0114]" "pool=\"${pool}\" slot=\"${slot}\" reason=\"SOT validation pool or slot prefix invalid\""
+        return 2
+    fi
+    base="$(_ci_ipv4_to_int "${pool%/*}")"
+    base=$(( base >> (32 - plen) << (32 - plen) ))
     h="$(printf '%s' "${seed}" | sha256sum)"
-    o2=$(( 16 + (16#$(printf '%s' "${h}" | cut -c1-4) % 16) ))
-    o3=$(( 16#$(printf '%s' "${h}" | cut -c5-10) % 256 ))
-    sub=$(( 16#$(printf '%s' "${h}" | cut -c11-12) % 8 ))
-    printf '172.%s.%s.%s/27' "${o2}" "${o3}" "$(( sub * 32 ))"
+    printf '%s/%s' "$(_ci_int_to_ipv4 $(( base + (16#${h:0:8} % (1 << (slot - plen))) * (1 << (32 - slot)) )))" "${slot}"
 }
 
 # What: Host-lock one /27; print the holder pid.
@@ -5815,7 +5822,7 @@ _ci_validate_reserve() {
     max="$(_ci_variable CI_VALIDATE_MAX_SLOTS)" || return 2
     for (( n=1; n<=max; n++ )); do
         seed="$(_ci_validate_seed "${run_id}" "${run_attempt}" "${n}")"
-        subnet="$(_ci_validate_subnet "${seed}")"
+        subnet="$(_ci_validate_subnet "${seed}")" || return 2
         crc=0
         overlap="$(_ci_validate_subnet_conflicts "${subnet}")" || crc=$?
         if [ "${crc}" -eq 0 ]; then
@@ -5885,7 +5892,7 @@ _ci_validate_startable() {
 # Why: Per-run subnet; reset host ports + fixed names.
 # From: Issue #1683
 _ci_validate_net_override() {
-    local subnet="$1" svc svcs base cfg nets net i=0
+    local subnet="$1" svc svcs base cfg nets net slot half i=0
     svcs="$(_ci_validate_startable)" || return 2
     cfg="$(_ci_validate_config_json)" || return 2
     if ! nets="$(jq -r '.networks // {} | keys[] | select(. != "default")' <<< "${cfg}" 2>&1)"; then
@@ -5896,14 +5903,18 @@ _ci_validate_net_override() {
     # Why: an auto /16 pool could swallow the /27 slot.
     # From: Issue #1683 | PR #1858
     base="$(_ci_ipv4_to_int "${subnet%/*}")"
-    printf 'networks:\n  default:\n    ipam:\n      config:\n        - subnet: %s/28\n' "$(_ci_int_to_ipv4 "${base}")"
+    slot="${subnet#*/}"
+    half=$(( 1 << (31 - slot) ))
+    printf 'networks:\n  default:\n    ipam:\n      config:\n        - subnet: %s/%s\n' \
+        "$(_ci_int_to_ipv4 "${base}")" "$(( slot + 1 ))"
     while IFS= read -r net; do
         [ -n "${net}" ] || continue
         if [ "${i}" -ge 2 ]; then
-            ci_log "[CI-ERROR-VALIDATE-0068]" "network=\"${net}\" reason=\"more than 2 extra compose networks; the /27 holds 2\""
+            ci_log "[CI-ERROR-VALIDATE-0068]" "network=\"${net}\" reason=\"more than 2 extra compose networks; the /${slot} holds 2\""
             return 2
         fi
-        printf '  %s:\n    ipam:\n      config:\n        - subnet: %s/29\n' "${net}" "$(_ci_int_to_ipv4 $(( base + 16 + 8 * i )))"
+        printf '  %s:\n    ipam:\n      config:\n        - subnet: %s/%s\n' "${net}" \
+            "$(_ci_int_to_ipv4 $(( base + half + half / 2 * i )))" "$(( slot + 2 ))"
         i=$(( i + 1 ))
     done <<< "${nets}"
     printf 'services:\n'
