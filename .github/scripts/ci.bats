@@ -2246,21 +2246,29 @@ CASES
     cmp -s "${d}/env.run1" "${d}/.env" || { echo "broken: run 2 changed .env"; return 1; }
 }
 
-@test "migrate_env_for_update refuses an empty IP_SSL before any write" {
+# What: an unusable IP_SSL stops the update; .env untouched
+# Why: dns-ssl binds IP_SSL apart (AG-SETUP-001, AG-OP-010)
+# From: Issue #1683 | PR #1858
+@test "migrate_env_for_update refuses an unusable IP_SSL before any write" {
     _stand_ins || return 1
-    # What: empty IP_SSL stops the update; .env untouched
-    # Why: prod binds dns-ssl to IP_SSL (AG-SETUP-001)
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}/nossl"
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    mkdir -p "${t}" && _legacy_env "${t}/.env"
-    set_env_key IP_SSL "" "${t}/.env"
-    cp "${t}/.env" "${t}/.env.before"
-    export CONV="${t}"
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"; echo unreached'
-    [ "${status}" -eq 1 ] && [[ "${output}" == *"IP_SSL is missing or empty in ${t}/.env"* && "${output}" != *unreached* ]] \
-        && cmp -s "${t}/.env.before" "${t}/.env" || { echo "empty IP_SSL: ${output}"; return 1; }
+    local t name val msg bad
+    _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
+    bad="$(_val host)"
+    while IFS='|' read -r name val msg; do
+        t="${BATS_TEST_TMPDIR}/${name}"
+        mkdir -p "${t}" && _legacy_env "${t}/.env" || return 1
+        [ "${val}" != @STD@ ] || val="$(get_env_var IP_STANDARD "${t}/.env")"
+        set_env_key IP_SSL "${val}" "${t}/.env"
+        cp "${t}/.env" "${t}/.env.before"
+        export CONV="${t}"
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"; echo unreached'
+        [ "${status}" -eq 1 ] && [[ "${output}" == *"${msg}"* && "${output}" != *unreached* ]] \
+            && cmp -s "${t}/.env.before" "${t}/.env" || { echo "${name}: rc ${status}: ${output}"; return 1; }
+    done <<ROWS
+empty||IP_SSL is missing or empty in ${BATS_TEST_TMPDIR}/empty/.env
+equal|@STD@|Standard IP and SSL IP must be different.
+invalid|${bad}|IP_SSL is not a valid IPv4 address: ${bad}
+ROWS
 }
 
 @test "production_state_root_default keeps deploy/prod state out of the checkout" {
