@@ -25,7 +25,7 @@ use lancache_ng::config::{
     CONTAINER_DNS_STANDARD, CONTAINER_NATS, CONTAINER_NETDATA, CONTAINER_NTP, CONTAINER_PROXY,
     CONTAINER_SYSLOG, CONTAINER_UI, DhcpMode, LAN_ZONE, NATS_STREAM_DNS, NATS_SUBJECT_DNS,
     NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, OutOfRange, PDNS_API_PATH, Uint, canonical_zone,
-    parse_bool, rollback_zones, zone_url,
+    is_container, parse_bool, rollback_zones, zone_url,
 };
 use lancache_ng::{
     DesiredRunState, DesiredState, DnsRecord, DockerError, DockerProxy, FlushRequest, Place,
@@ -1154,16 +1154,16 @@ fn load_templates(cfg: &Config) -> Tera {
 // What: services the ui may act on; no watchdog, no syslog.
 // Why: the ui must never stop the monitor or the log sink.
 // From: Issue #1486
-const DOCKER_SERVICES: [(&str, &str); 9] = [
-    ("proxy", CONTAINER_PROXY),
-    ("dns-standard", CONTAINER_DNS_STANDARD),
-    ("dns-ssl", CONTAINER_DNS_SSL),
-    ("dhcp", CONTAINER_DHCP),
-    ("dhcp-proxy", CONTAINER_DHCP_PROXY),
-    ("dhcp-probe", CONTAINER_DHCP_PROBE),
-    ("nats", CONTAINER_NATS),
-    ("ntp", CONTAINER_NTP),
-    ("ui", CONTAINER_UI),
+const DOCKER_SERVICES: [&str; 9] = [
+    CONTAINER_PROXY,
+    CONTAINER_DNS_STANDARD,
+    CONTAINER_DNS_SSL,
+    CONTAINER_DHCP,
+    CONTAINER_DHCP_PROXY,
+    CONTAINER_DHCP_PROBE,
+    CONTAINER_NATS,
+    CONTAINER_NTP,
+    CONTAINER_UI,
 ];
 
 // What: time bound of one Docker call from the ui.
@@ -1175,9 +1175,8 @@ const DOCKER_TIMEOUT: Duration = Duration::from_secs(120);
 // From: Issue #1592
 fn container_name(service: &str) -> anyhow::Result<&'static str> {
     DOCKER_SERVICES
-        .iter()
-        .find(|(short, full)| *short == service || *full == service)
-        .map(|(_, full)| *full)
+        .into_iter()
+        .find(|full| is_container(full, service))
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "Docker service '{service}' is not in the lancache-ng socket-proxy allowlist"
@@ -4378,15 +4377,14 @@ async fn stop_for_mode(
     mode: DhcpMode,
     previous: DhcpMode,
 ) -> Result<(), HtmlError> {
-    let mut stops = match mode {
-        DhcpMode::Disabled => vec!["dhcp", "dhcp-proxy"],
-        DhcpMode::Kea => vec!["dhcp-proxy"],
-        DhcpMode::DnsmasqProxy | DhcpMode::DnsmasqRelay => vec!["dhcp"],
-    };
+    let mut stops: Vec<&str> = [CONTAINER_DHCP, CONTAINER_DHCP_PROXY]
+        .into_iter()
+        .filter(|container| Some(*container) != mode.container())
+        .collect();
     // What: stop dhcp-proxy for a proxy/relay sub-mode change.
     // Why: one container serves both; it must reread its mode.
     if mode.is_dnsmasq() && previous.is_dnsmasq() && previous != mode {
-        stops.push("dhcp-proxy");
+        stops.push(CONTAINER_DHCP_PROXY);
     }
     for service in stops {
         docker_stop_if_present(&state.docker, service)
@@ -4399,10 +4397,13 @@ async fn stop_for_mode(
 // What: start the container a mode needs; sync Kea NTP.
 // Why: runs after the save so it reads the new mode.
 async fn start_for_mode(state: &AppState, mode: DhcpMode) -> Result<(), HtmlError> {
-    let (service, profile) = match mode {
-        DhcpMode::Disabled => return Ok(()),
-        DhcpMode::Kea => ("dhcp", "dhcp-kea"),
-        DhcpMode::DnsmasqProxy | DhcpMode::DnsmasqRelay => ("dhcp-proxy", "dhcp-proxy"),
+    let Some(service) = mode.container() else {
+        return Ok(());
+    };
+    let profile = if mode.is_kea() {
+        "dhcp-kea"
+    } else {
+        "dhcp-proxy"
     };
     docker_start(&state.docker, service).await.map_err(|e| {
         // What: explain a container that was never created.
@@ -5135,14 +5136,16 @@ fn current_run(logs: &str) -> &str {
 // Why: the proxy only allows start, wait and logs.
 async fn run_dhcp_probe(docker: &DockerProxy) -> Result<String, String> {
     let failed = |e: anyhow::Error| format!("Failed to execute DHCP check: {e:#}");
-    let container = container_name("dhcp-probe").map_err(failed)?;
-    docker_stop_if_present(docker, "dhcp-probe")
+    let container = container_name(CONTAINER_DHCP_PROBE).map_err(failed)?;
+    docker_stop_if_present(docker, CONTAINER_DHCP_PROBE)
         .await
         .map_err(failed)?;
     // What: remember the start second for the log filter.
     // Why: the logs call must not read the previous run.
     let since = unix_secs();
-    docker_start(docker, "dhcp-probe").await.map_err(failed)?;
+    docker_start(docker, CONTAINER_DHCP_PROBE)
+        .await
+        .map_err(failed)?;
 
     let begun = Instant::now();
     let exit_code = match docker.wait(container, Some(PROBE_WAIT_TIMEOUT)).await {
@@ -5159,7 +5162,7 @@ async fn run_dhcp_probe(docker: &DockerProxy) -> Result<String, String> {
                 },
                 Err(e) => format!("(failed to capture probe container logs: {e})"),
             };
-            let stopped = match docker_stop_if_present(docker, "dhcp-probe").await {
+            let stopped = match docker_stop_if_present(docker, CONTAINER_DHCP_PROBE).await {
                 Ok(()) => "the presumed-stuck container was stopped".to_string(),
                 Err(e) => format!("stopping the presumed-stuck container also failed: {e:#}"),
             };
@@ -6474,7 +6477,7 @@ async fn update_ntp_settings(
     // What: stop NTP before the save when it is or was running.
     // Why: a restart before the save would reread the old list.
     if !enabled || was_enabled {
-        docker_stop_if_present(&state.docker, "ntp")
+        docker_stop_if_present(&state.docker, CONTAINER_NTP)
             .await
             .map_err(|e| fail(format!("{e:#}")))?;
     }
@@ -6487,7 +6490,7 @@ async fn update_ntp_settings(
         // What: restart NTP if it was running before the failure.
         // Why: a failed save must not leave NTP stopped silently.
         // From: PR #1610
-        if was_enabled && let Err(start_err) = docker_start(&state.docker, "ntp").await {
+        if was_enabled && let Err(start_err) = docker_start(&state.docker, CONTAINER_NTP).await {
             return Err(fail(format!(
                 "Failed to persist NTP settings ({save_err}), and restarting NTP after that \
                  failure also failed ({start_err:#}). NTP is now stopped and needs manual recovery."
@@ -6496,7 +6499,7 @@ async fn update_ntp_settings(
         return Err(fail(save_err.to_string()));
     }
     if enabled {
-        docker_start(&state.docker, "ntp")
+        docker_start(&state.docker, CONTAINER_NTP)
             .await
             .map_err(|e| fail(format!("{e:#}")))?;
     }
@@ -6596,7 +6599,7 @@ setTimeout(pollHealth, 1500);
 async fn restart_ui_service(State(state): Shared) -> Html<&'static str> {
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(750)).await;
-        if let Err(e) = docker_restart(&state.docker, "ui").await {
+        if let Err(e) = docker_restart(&state.docker, CONTAINER_UI).await {
             tracing::error!("operator-requested Admin UI self-restart failed: {e:#}");
         }
     });

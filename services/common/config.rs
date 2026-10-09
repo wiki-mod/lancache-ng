@@ -173,6 +173,16 @@ impl DhcpMode {
     }
 }
 
+// What: the prefix every lancache container name carries.
+// Why: a compose service name is the container name without it.
+pub const CONTAINER_PREFIX: &str = "lancache-";
+
+// What: true if service names the container, short or full.
+// Why: one rule maps compose service names to containers.
+pub fn is_container(container: &str, service: &str) -> bool {
+    container == service || container.strip_prefix(CONTAINER_PREFIX) == Some(service)
+}
+
 // What: fixed container names of the stack.
 // Why: compose, the socket-proxy policy and services agree.
 pub const CONTAINER_PROXY: &str = "lancache-proxy";
@@ -387,6 +397,17 @@ mod tests {
         assert_eq!(
             zone_url("http://pdns/api", "lan"),
             "http://pdns/api/zones/lan"
+        );
+    }
+
+    // What: is_container accepts the short and the full name.
+    // Why: compose service names and container names both arrive.
+    #[test]
+    fn is_container_accepts_short_and_full_names() {
+        assert!(is_container(CONTAINER_NATS, "nats"));
+        assert!(is_container(CONTAINER_NATS, CONTAINER_NATS));
+        assert!(
+            !is_container(CONTAINER_NATS, "proxy") && !is_container(CONTAINER_NATS, "lancache")
         );
     }
 }
