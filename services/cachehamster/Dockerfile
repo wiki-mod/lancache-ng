@@ -106,6 +106,10 @@ RUN addgroup -g 10001 lancache && \
     mkdir -p /data && \
     chown lancache:lancache /data
 VOLUME ["/data"]
+# What: the state dir the binary reads, set once here.
+# Why: the image owns /data; main.rs holds no default path.
+# From: Issue #1683 | PR #1858
+ENV CACHEHAMSTER_DATA_DIR=/data
 USER lancache
 
 ENTRYPOINT ["/usr/local/bin/lancache-cachehamster"]

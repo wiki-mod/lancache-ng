@@ -18,15 +18,15 @@ use lancache_common::config::{OutOfRange, Uint, env_opt};
 use lancache_common::{Place, is_placeholder, load_or_create_hex, write_file};
 use serde::{Deserialize, Serialize};
 
-// What: where the master secret and credential live.
-// Why: the /data volume holds this service's state.
-const DEFAULT_DATA_DIR: &str = "/data";
-
 // What: sizes of master secret, salt and nonce in bytes.
 // Why: 192-bit random nonces; Argon2 wants a 16-byte salt.
 const MASTER_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
+
+// What: throughput log period, 10 s; a justified literal.
+// Why: no config owner exists; it only paces a readout.
+const THROUGHPUT_EVERY: Duration = Duration::from_secs(10);
 
 // What: in-flight fetches; 4 when unset or invalid.
 // Why: a bad value costs speed only, so it does not fail.
@@ -172,7 +172,8 @@ async fn main() -> Result<()> {
         "lancache-cachehamster is a scaffold (issue #871): it does not yet resolve a Steam app ID to real depot chunk URLs. See docs/design-steam-prefill.md for the current implementation plan and open decisions."
     );
 
-    let data_dir = env_opt("CACHEHAMSTER_DATA_DIR").unwrap_or_else(|| DEFAULT_DATA_DIR.to_string());
+    let data_dir = env_opt("CACHEHAMSTER_DATA_DIR")
+        .context("CACHEHAMSTER_DATA_DIR is not set; the image sets it, a manual run must")?;
     let persist = persistence_from(env_opt("CACHEHAMSTER_CREDENTIAL_PERSISTENCE").as_deref())?;
     let configured = credential(persist, Path::new(&data_dir))?.is_some();
     tracing::info!(
@@ -209,8 +210,7 @@ async fn main() -> Result<()> {
         .buffer_unordered(usize::try_from(limit)?)
         .collect::<Vec<_>>();
     tokio::pin!(fetch);
-    let every = Duration::from_secs(10);
-    let mut ticker = tokio::time::interval(every);
+    let mut ticker = tokio::time::interval(THROUGHPUT_EVERY);
     ticker.tick().await;
     let mut last = 0u64;
     let results = loop {
@@ -218,7 +218,7 @@ async fn main() -> Result<()> {
             results = &mut fetch => break results,
             _ = ticker.tick() => {
                 let now = total.load(Ordering::Relaxed);
-                let mbit = (now - last) as f64 * 8.0 / every.as_secs_f64() / 1_000_000.0;
+                let mbit = (now - last) as f64 * 8.0 / THROUGHPUT_EVERY.as_secs_f64() / 1_000_000.0;
                 tracing::info!(bytes_total = now, mbit_per_sec = format!("{mbit:.1}"), "prefill throughput");
                 last = now;
             }
