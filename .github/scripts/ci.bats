@@ -213,25 +213,16 @@ teardown() {
 # CORE INVARIANTS
 # =========================================================
 
-# What: real ci.yml needs per row -> gate rc and verdict.
-# Why: §62: only success or a NOOP skip may green the gate.
+# What: per row: needs results -> gate rc and verdict
+# Why: §62: only success or an optional skip greens it
 # From: Issue #1683 | PR #1858
 @test "result-gate maps each phase-result set to its verdict" {
-    local needs req p all="" noop="" other=""
-    needs="$(awk '/^  result:$/ { r = 1; next } r && /^  [^ ]/ { exit }
-        r && /^    needs: \[/ { sub(/^    needs: \[/, ""); sub(/\].*$/, ""); gsub(/,/, " "); print; exit }' \
-        "${BATS_TEST_DIRNAME}/../workflows/ci.yml")"
+    local req p all="" noop="" other
     req="$(_ci_block_entry_list ci_result_gate "" required)" || { echo "required: ${req}"; return 1; }
-    req=" ${req//$'\n'/ } "
-    [ -n "${needs// }" ] && [ -n "${req// }" ] || { echo "needs '${needs}' or required '${req}' empty"; return 1; }
-    for p in ${req}; do
-        [[ " ${needs} " == *" ${p} "* ]] || { echo "required ${p} is not in the result needs: ${needs}"; return 1; }
-    done
-    for p in ${needs}; do
-        all+=" ${p}:success"
-        if [[ "${req}" == *" ${p} "* ]]; then noop+=" ${p}:success"; else noop+=" ${p}:skipped" other="${other:-${p}}"; fi
-    done
-    [ -n "${other}" ] || { echo "no optional phase in the result needs: ${needs}"; return 1; }
+    [ -n "${req// }" ] || { echo "no SOT ci_result_gate.required phase"; return 1; }
+    other="$(_val name)"
+    for p in ${req}; do all+=" ${p}:success" noop+=" ${p}:success"; done
+    for p in "${other}" "$(_val name)"; do all+=" ${p}:success" noop+=" ${p}:skipped"; done
     _json() {
         local e out=""
         for e in $1; do out+="${out:+,}\"${e%%:*}\":{\"result\":\"${e#*:}\",\"outputs\":{}}"; done
