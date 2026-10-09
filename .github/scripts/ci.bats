@@ -1066,28 +1066,26 @@ CASES
     [[ "${output}" == http://* ]]
 }
 
-# What: _ci_proxy_constant and _ci_service_port per input
-# Why: one literal line or a services db port, else rc 2
+# What: each proxy constant ci.sh reads, from the real file.
+# Why: AG-CI-006: entrypoint owns paths; the OS owns ports.
 # From: Issue #1683 | PR #1858
 @test "proxy constants and service ports come from their owners" {
-    local case body rc want p
-    local -A V=([@N@]="$(_val name)" [@A@]="$(_val name)" [@B@]="$(_val name)" [@Y@]="$(_val name)")
-    while IFS='|' read -r case body rc want; do
-        run _ci_proxy_constant "${V[@N@]}" <(printf '%b' "$(_fill "${body}")")
-        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
-    done <<'CASES'
-quoted|@N@="/@A@/@B@"\n|0|=/@A@/@B@
-bare|@Y@=1\n@N@=@A@\n|0|=@A@
-absent|@Y@=1\n|2|[CI-ERROR-CORE-0129]
-twice|@N@=@A@\n@N@=@B@\n|2|[CI-ERROR-CORE-0129];@A@;@B@
-expanded|@N@="$@Y@/@A@"\n|2|[CI-ERROR-CORE-0129]
-CASES
+    local found n p
+    local -A seen=()
+    found="$(grep -o -E '_ci_proxy_constant [A-Z_]+' "${CI_SH}")" || { echo "no _ci_proxy_constant caller in ${CI_SH}"; return 1; }
+    for n in ${found//_ci_proxy_constant /}; do
+        [ -z "${seen[${n}]:-}" ] || continue
+        seen["${n}"]=1
+        run _ci_proxy_constant "${n}"
+        [ "${status}" -eq 0 ] && [ -n "${output}" ] && [[ "${output}" != *[\"\$[:space:]]* ]] \
+            || { echo "${n}: rc ${status}: '${output}'"; return 1; }
+    done
     for p in http https; do
         run _ci_service_port "${p}"
         [ "${status}" -eq 0 ] && [[ "$(getent services "${p}/tcp")" =~ [[:space:]]${output}/tcp ]] \
             || { echo "${p}: rc ${status}: ${output}"; return 1; }
     done
-    run _ci_service_port "${V[@A@]}"
+    run _ci_service_port "$(_val name)"
     _expect unknown 2 '[CI-ERROR-CORE-0106]' || return 1
 }
 
