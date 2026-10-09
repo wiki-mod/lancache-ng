@@ -174,6 +174,11 @@ _val() {
         semver) printf '%s.%s.%s' "$(( SRANDOM % 90 + 1 ))" "$(( SRANDOM % 100 ))" "$(( SRANDOM % 100 ))" ;;
         digest) printf 'sha256:%08x%08x%08x%08x%08x%08x%08x%08x' "${SRANDOM}" "${SRANDOM}" "${SRANDOM}" \
             "${SRANDOM}" "${SRANDOM}" "${SRANDOM}" "${SRANDOM}" "${SRANDOM}" ;;
+        ipv4) printf '%s.%s.%s.%s' "$(( SRANDOM % 256 ))" "$(( SRANDOM % 256 ))" "$(( SRANDOM % 256 ))" \
+            "$(( SRANDOM % 256 ))" ;;
+        ipv6) printf '%x:%x:%x::%x' "$(( SRANDOM % 65536 ))" "$(( SRANDOM % 65536 ))" "$(( SRANDOM % 65536 ))" \
+            "$(( SRANDOM % 65536 ))" ;;
+        cidr) printf '%s/%s' "$(_val ipv4)" "$(( SRANDOM % 33 ))" ;;
         *) echo "_val: unknown kind \"$1\"" >&2; return 2 ;;
     esac
 }
@@ -3038,42 +3043,39 @@ CASES
     # What: server/pool/allow lines per input; validator.
     # Why: chrony denies all clients without an allow line.
     # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}/chrony.conf.template" c="${BATS_TEST_TMPDIR}/chrony.conf"
-    local case up allow want vrc vmsg e
+    local root t c="${BATS_TEST_TMPDIR}/chrony.conf" row case up allow want vrc vmsg
+    local -A V=(
+        ["@H1@"]="$(_val host)" ["@H2@"]="$(_val host)" ["@I4A@"]="$(_val ipv4)" ["@I4B@"]="$(_val ipv4)"
+        ["@I6@"]="$(_val ipv6)" ["@C1@"]="$(_val cidr)" ["@C2@"]="$(_val cidr)"
+        ["@D@"]="$(_val int 0 9).$(_val host).$(_val host)"
+        ["@T@"]="$(_val int 0 255).$(_val int 0 255).$(_val int 0 255)"
+    )
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    t="${root}/services/ntp/chrony.conf"
     # shellcheck source=services/ntp/entrypoint.sh
     source "$(_extract_functions "${root}/services/ntp/entrypoint.sh" is_ip_literal render_ntp_config validate_ntp_config)"
-    for e in 192.0.2.1 2606:4700:f1::1 ::1; do
-        is_ip_literal "${e}" || { echo "${e} not literal"; return 1; }
-    done
-    for e in 0.debian.pool.ntp.org time.cloudflare.com 1.2.3; do
-        if is_ip_literal "${e}"; then echo "${e} literal"; return 1; fi
-    done
-    printf 'driftfile /var/lib/chrony/chrony.drift\n' > "${t}"
-    while IFS='|' read -r case NTP_UPSTREAM_SERVERS NTP_ALLOWED_CLIENT_CIDRS up allow vrc vmsg; do
+    while IFS= read -r row; do
+        IFS='|' read -r case NTP_UPSTREAM_SERVERS NTP_ALLOWED_CLIENT_CIDRS up allow vrc vmsg <<< "$(_fill "${row}")"
         [ "${NTP_UPSTREAM_SERVERS}" != . ] || NTP_UPSTREAM_SERVERS=""
         [ "${NTP_ALLOWED_CLIENT_CIDRS}" != . ] || NTP_ALLOWED_CLIENT_CIDRS=""
         export NTP_UPSTREAM_SERVERS NTP_ALLOWED_CLIENT_CIDRS
-        echo stale > "${c}"
         render_ntp_config "${c}" "${t}"
-        want="driftfile /var/lib/chrony/chrony.drift##"
+        want="$(paste -sd'#' "${t}")##"
         want+="# Upstream servers (NTP_UPSTREAM_SERVERS) -- rendered at container start."
         [ "${up}" = . ] || want+="#${up}"
-        want+="### LAN client access (NTP_ALLOWED_CLIENT_CIDRS) -- rendered at container start.#${allow}"
+        want+="### LAN client access (NTP_ALLOWED_CLIENT_CIDRS) -- rendered at container start."
+        [ "${allow}" = . ] || want+="#${allow}"
         [ "$(paste -sd'#' "${c}")" = "${want}" ] || { echo "${case}:"; cat "${c}"; return 1; }
         run validate_ntp_config "${c}"
         [ "${status}" -eq "${vrc}" ] || { echo "${case}: validate rc ${status}"; return 1; }
         [[ "${output}" == *"${vmsg}"* ]] || { echo "${case}: ${output}"; return 1; }
     done <<'CASES'
-pool|0.debian.pool.ntp.org|.|pool 0.debian.pool.ntp.org iburst|allow 0.0.0.0/0#allow ::/0|0|
-literal|192.0.2.1 2606:4700:f1::1|.|server 192.0.2.1 iburst#server 2606:4700:f1::1 iburst|allow 0.0.0.0/0#allow ::/0|0|
-cidrs|192.0.2.1|192.168.0.0/16 10.0.0.0/8|server 192.0.2.1 iburst|allow 192.168.0.0/16#allow 10.0.0.0/8|0|
-noserver|.|10.0.0.0/8|.|allow 10.0.0.0/8|1|no pool/server directive
+pool|@H1@ @D@ @T@|.|pool @H1@ iburst#pool @D@ iburst#pool @T@ iburst|allow 0.0.0.0/0#allow ::/0|0|
+literal|@I4A@ @I6@|.|server @I4A@ iburst#server @I6@ iburst|allow 0.0.0.0/0#allow ::/0|0|
+cidrs|@I4B@ @H2@|@C1@ @C2@|server @I4B@ iburst#pool @H2@ iburst|allow @C1@#allow @C2@|0|
+noserver|.|@C1@|.|allow @C1@|1|no pool/server directive
+blankcidrs|@H2@| |pool @H2@ iburst|.|1|no allow directive
 CASES
-    printf 'server 192.0.2.1 iburst\n' > "${c}"
-    run validate_ntp_config "${c}"
-    [ "${status}" -eq 1 ]
-    [[ "${output}" == *"no allow directive"* ]]
 }
 
 @test "dhcp kea ipv4 and ntp helpers per input" {
