@@ -24,9 +24,12 @@ setup() {
     # shellcheck source=.github/scripts/ci.sh
     source "${CI_SH}"
     CI_MANIFEST_SOURCE="${CI_MANIFEST}"
-    # What: every test gets the one docker stand-in on PATH
-    # Why: no test may reach a daemon or a real registry
-    # From: Issue #1683 | PR #1858
+}
+
+# What: docker stand-in, apk stub, server URL, SOT copy.
+# Why: callers need a daemon, registry or apk they lack.
+# From: Issue #1683 | PR #1858
+_stand_ins() {
     BIN="$(_val path)" DS="$(_val path)"; export BIN DS
     mkdir -p "${DS}/volumes" && _docker_stub "${BIN}" || return 1
     PATH="${BIN}:${PATH}"
@@ -254,7 +257,7 @@ CASES
         run env -u GHCR_USERNAME -u GHCR_TOKEN "${ev[@]}" bash "${CI_SH}" "${av[@]}"
         want="[${id}]"; [ "${wrap}" = - ] || want="[${wrap}];${want}"
         _expect "${case}" 2 "${want}" || return 1
-        # What: before the id only INFO, the wrapper and raw:
+        # What: only INFO, wrapper and raw: before the id
         # Why: any other line is a backend that ran first.
         # From: Issue #1683 | PR #1858
         [ -z "$(awk -v i="[${id}]" -v w="[${wrap}]" 'index($0, i) { exit }
@@ -715,6 +718,7 @@ CASES
 # =========================================================
 
 @test "identity is keyed, deterministic, per target and platform" {
+    _stand_ins || return 1
     # What: 64-hex per SOT platform; moves on own content.
     # Why: NOOP/reuse needs stable ids that never collide.
     # From: Issue #1683 | PR #1858
@@ -949,6 +953,7 @@ CASES
 # Why: apk has no source tests; a smoke failure fails test.
 # From: Issue #1683 | PR #1858
 @test "test dispatches per build type and fails closed" {
+    _stand_ins || return 1
     local m case fault svc rc want ran
     m="$(_val path)"
     local -A V=(
@@ -981,7 +986,7 @@ unknown-type|-|@ODD@|2|[CI-ERROR-TEST-0003];[CI-ERROR-TEST-0004] service="@ODD@"
 CASES
 }
 
-# What: temp root off tmpfs and made; uncreatable dirs coded.
+# What: temp root off tmpfs, made; uncreatable dirs coded.
 # Why: bare mktemp in tools must land on disk, not RAM.
 # From: Issue #1683 | PR #1858
 @test "temp and lock dirs: tmpfs refused, made on disk, else coded" {
@@ -1047,6 +1052,7 @@ CASES
 # Why: tokens stay off argv and logs; retries stay visible
 # From: Issue #1683 | PR #1858
 @test "registry logins: GHCR required, Docker Hub optional, retried" {
+    _stand_ins || return 1
     local name call ghcr hub fault rc logins want got
     CI_RETRY_MAX_ATTEMPTS="$(_val int 2 6)"
     export CI_RETRY_MAX_ATTEMPTS CI_RETRY_BACKOFF_BASE_SECONDS=0
@@ -1299,6 +1305,7 @@ STUB
 # Why: the /27 splits without overlap; ports, names reset
 # From: Issue #1683 | PR #1858
 @test "validate net override isolates and resets services" {
+    _stand_ins || return 1
     local case nets rc want count slot lo hi sub a b i j
     local -a subs starts ends ns
     local -A V=([@S@]="$(_val name)" [@H@]="$(_val name)")
@@ -1632,6 +1639,7 @@ CASES
 # Why: the template's own headings decide what is required
 # From: Issue #1683 | PR #1858
 @test "check pr-template: every template section filled, one box marked" {
+    _stand_ins || return 1
     local root="${BATS_TEST_TMPDIR}/prt" none="${BATS_TEST_TMPDIR}/prt-none" case env body rc want ex
     local -A V=([@A@]="$(_val name)" [@B@]="$(_val name)")
     V[@CB@]="$(_ci_block_entry_field pr_policy "" checkbox_section)"
@@ -1845,6 +1853,7 @@ CASES
 }
 
 @test "migrate_env_for_update repairs every empty required key" {
+    _stand_ins || return 1
     # What: every SOT repair key is refilled when emptied
     # Why: empty required keys break the stack (AG-OP-007)
     # From: Issue #1683 | PR #1858
@@ -1873,6 +1882,7 @@ CASES
 }
 
 @test "migrate_env_for_update derives CACHE_MAX_SIZE from CACHE_MAX_GB" {
+    _stand_ins || return 1
     # What: empty CACHE_MAX_SIZE comes from CACHE_MAX_GB
     # Why: reuse the operator's size, not the default
     # From: Issue #1683 | PR #1858
@@ -2102,6 +2112,7 @@ _version_fixture_repo() {
 }
 
 @test "version, verify and audit give one output and rc" {
+    _stand_ins || return 1
     # What: per state: the 3 names agree on output and rc.
     # Why: one pin-drift owner; no second walk of the SOT.
     # From: Issue #1683 | PR #1858
@@ -2153,6 +2164,7 @@ _legacy_env() {
 }
 
 @test "migrate_env_for_update is a no-op on an already-converged .env" {
+    _stand_ins || return 1
     # What: a converged .env stays byte-identical
     # Why: idempotent update, no rewrite (AG-OP-006)
     # From: Issue #1683 | PR #1858
@@ -2169,6 +2181,7 @@ _legacy_env() {
 }
 
 @test "migrate_env_for_update converges a legacy .env and is stable on rerun" {
+    _stand_ins || return 1
     # What: legacy keys migrate once; state root is written
     # Why: AG-OP-007 convergence; secrets must not rotate
     # From: Issue #1683 | PR #1858
@@ -2187,6 +2200,7 @@ _legacy_env() {
 }
 
 @test "migrate_env_for_update generates a UI password once, never rotates it" {
+    _stand_ins || return 1
     # What: a UI user without password gets one, once
     # Why: AG-OP-006 stable secrets on repeat execution
     # From: Issue #1683 | PR #1858
@@ -2204,6 +2218,7 @@ _legacy_env() {
 }
 
 @test "migrate_env_for_update leaves no duplicate key assignments" {
+    _stand_ins || return 1
     # What: two runs must not stack duplicate key lines
     # Why: set_env_key collapses duplicates (AG-OP-006)
     # From: Issue #1683 | PR #1858
@@ -2218,6 +2233,7 @@ _legacy_env() {
 }
 
 @test "migrate_env_for_update keeps config/prod values per row" {
+    _stand_ins || return 1
     # What: hand edits move to .env; bad ones change nothing
     # Why: AG-OP-009 edits survive; the checkout stays clean
     # From: Issue #1683 | PR #1858
@@ -2281,6 +2297,7 @@ CASES
 }
 
 @test "migrate_env_for_update preserves all custom per-service state dirs" {
+    _stand_ins || return 1
     # What: an operator's own per-service state dir survives
     # Why: AG-OP-009 override preservation
     # From: Issue #1683 | PR #1858
@@ -2301,6 +2318,7 @@ CASES
 }
 
 @test "migrate_env_for_update drops a per-service state dir equal to the one-root default" {
+    _stand_ins || return 1
     # What: a per-service dir equal to default is dropped
     # Why: one-root contract via LANCACHE_STATE_DIR
     # From: Issue #1683 | PR #1858
@@ -2317,6 +2335,7 @@ CASES
 }
 
 @test "migrate_env_for_update refuses an empty IP_SSL before any write" {
+    _stand_ins || return 1
     # What: empty IP_SSL stops the update; .env untouched
     # Why: prod binds dns-ssl to IP_SSL (AG-SETUP-001)
     # From: Issue #1683 | PR #1858
@@ -2354,6 +2373,7 @@ CASES
 }
 
 @test "setup quickstart install moves into deploy/prod once" {
+    _stand_ins || return 1
     # What: state, settings and CA move to deploy/prod
     # Why: AG-OP-007: a quickstart user loses nothing
     # From: Issue #1683 | PR #1858
@@ -2449,6 +2469,7 @@ CASES
 }
 
 @test "setup update pulls the checkout and continues on its setup.sh" {
+    _stand_ins || return 1
     # What: update pulls, runs the new setup.sh, rolls back
     # Why: compose, templates, script move as one revision
     # From: Issue #1683 | PR #1858
@@ -2495,6 +2516,15 @@ CASES
         timeout 600 busybox nc -lk -s "${p}" -p 80 -e true < /dev/null > /dev/null 2>&1 3>&- &
         pids+=("$!")
     done
+    # What: stop listeners; an exited one counts as stopped.
+    # Why: under load a listener may end before cleanup.
+    # From: Issue #1683 | PR #1858
+    _stop() {
+        local p
+        for p in "${pids[@]}"; do
+            kill "${p}" 2> /dev/null || ! kill -0 "${p}" 2> /dev/null || { echo "listener ${p} survived kill"; return 1; }
+        done
+    }
     export FAULT="${BATS_TEST_NAME}" CO="${t}/co"
     _update() {
         run env DOCKER_HOST="${SETUP_SH_DOCKER_HOST}" PATH="${BIN}:${PATH}" LANCACHE_BACKUP_ROOT="${t}/bk" \
@@ -2505,7 +2535,7 @@ CASES
         && [[ "${output}" == *"Stack updated at ${mark}"* ]] \
         && [ "$(grep -c "Continuing the update with" <<< "${output}")" -eq 1 ] \
         && grep -qE "^compose .* up -d --remove-orphans .*\b${svc}\b" "${DS}/docker.log" \
-        || { kill "${pids[@]}"; echo "update: ${output}"; return 1; }
+        || { _stop; echo "update: ${output}"; return 1; }
     # What: a failed apply returns checkout and config
     # Why: no mix of old config and new compose may stay
     # From: Issue #1683 | PR #1858
@@ -2519,13 +2549,13 @@ CASES
     [ "${status}" -eq 1 ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${c2}" ] \
         && [[ "${output}" == *"Returned ${t}/co to ${c2}"* && "${output}" == *"rolled back"* ]] \
         && cmp -s "${t}/env.before" "${t}/co/deploy/prod/.env.local" \
-        || { kill "${pids[@]}"; echo "rollback to ${c2} from ${c3}: ${output}"; return 1; }
+        || { _stop; echo "rollback to ${c2} from ${c3}: ${output}"; return 1; }
     # What: a detached checkout updates in place, unmoved
     # Why: a pinned revision is the operator's choice
     # From: Issue #1683 | PR #1858
     g -C "${t}/co" checkout -q --detach
     _update
-    kill "${pids[@]}"
+    _stop || return 1
     [ "${status}" -eq 0 ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${c2}" ] && [[ "${output}" == *"pinned commit"* ]] \
         && [[ "${output}" != *"Continuing the update with"* ]] || { echo "pinned: ${output}"; return 1; }
 }
@@ -2708,6 +2738,7 @@ STUB
 }
 
 @test "setup fresh install writes a config the prod compose takes" {
+    _stand_ins || return 1
     # What: the real wizard installs a checkout copy
     # Why: no other test runs the .env.local write
     # From: Issue #1683 | PR #1858
@@ -3243,6 +3274,7 @@ CASES
 }
 
 @test "dhcp kea ipv4 and ntp helpers per input" {
+    _stand_ins || return 1
     # What: ipv4 checks, ntp name lookup, kea ntp option.
     # Why: kea needs ipv4 ntp data; a bad value must stop.
     # From: Issue #1683 | PR #1858
@@ -3356,6 +3388,7 @@ CASES
 }
 
 @test "dhcp kea runtime config migration converges" {
+    _stand_ins || return 1
     # What: stale hook, old lease keys, ntp names migrated.
     # Why: an old volume must load and converge on restart.
     # From: Issue #1683 | PR #1858
@@ -4131,6 +4164,7 @@ CASES
 }
 
 @test "setup secondary registration end to end per primary answer" {
+    _stand_ins || return 1
     # What: cmd_secondary against a stub primary per answer
     # Why: token never in argv; failures stop before writes
     # From: Issue #1683 | PR #1858
@@ -4289,6 +4323,7 @@ CASES
 }
 
 @test "setup backup and restore round-trip per target and host" {
+    _stand_ins || return 1
     # What: rollback in place twice; restore on a new host
     # Why: a restore must reproduce files, paths and volumes
     # From: Issue #1683 | PR #1858
@@ -4386,6 +4421,7 @@ CASES
 }
 
 @test "setup debug stays read-only and converge folds UI settings once" {
+    _stand_ins || return 1
     # What: debug only reads; converge folds once, stable
     # Why: support commands must not change an install
     # From: Issue #1683 | PR #1858
