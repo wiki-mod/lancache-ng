@@ -2193,9 +2193,13 @@ CASES
     [ "$(get_env_assignment_value_raw "${first}" "${d}/.env")" = "${tv}" ] \
         || { echo "templated: ${first}=$(get_env_assignment_value_raw "${first}" "${d}/.env")"; return 1; }
     _state_row default || return 1
-    set_env_key "${first}" "$(get_env_var LANCACHE_STATE_DIR "${d}/.env")/$(prod_state_subdir "${first}")" "${d}/.env"
+    while IFS= read -r k; do
+        set_env_key "${k}" "$(get_env_var LANCACHE_STATE_DIR "${d}/.env")/$(prod_state_subdir "${k}")" "${d}/.env"
+    done <<< "${keys}"
     _state_run default || return 1
-    ! env_key_exists "${first}" "${d}/.env" || { echo "default: ${first} kept"; return 1; }
+    while IFS= read -r k; do
+        ! env_key_exists "${k}" "${d}/.env" || { echo "default: ${k} kept"; return 1; }
+    done <<< "${keys}"
     _state_row broken || return 1
     set_env_key "${first}" "$(_val int 1 99)" "${d}/.env"
     _state_run broken || return 1
@@ -2203,23 +2207,6 @@ CASES
     cp "${d}/.env" "${d}/env.run1"
     _state_run broken-rerun || return 1
     cmp -s "${d}/env.run1" "${d}/.env" || { echo "broken: run 2 changed .env"; return 1; }
-}
-
-@test "migrate_env_for_update drops a per-service state dir equal to the one-root default" {
-    _stand_ins || return 1
-    # What: a per-service dir equal to default is dropped
-    # Why: one-root contract via LANCACHE_STATE_DIR
-    # From: Issue #1683 | PR #1858
-    local root d k
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    d="${BATS_TEST_TMPDIR}/dflt/deploy/prod"
-    _converged_install "${d}" || return 1
-    while IFS= read -r k; do
-        set_env_key "${k}" "$(get_env_var LANCACHE_STATE_DIR "${d}/.env")/$(prod_state_subdir "${k}")" "${d}/.env"
-        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
-        [ "${status}" -eq 0 ] && ! env_key_exists "${k}" "${d}/.env" || { echo "${k} kept: ${output}"; return 1; }
-    done <<< "$(prod_state_keys | grep -vx CACHE_DIR)"
 }
 
 @test "migrate_env_for_update refuses an empty IP_SSL before any write" {
