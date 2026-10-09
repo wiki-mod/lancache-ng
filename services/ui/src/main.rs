@@ -7353,6 +7353,7 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lancache_ng::unique_temp_dir;
 
     // What: the domain rule agrees with the shared fixture.
     // Why: the shell validator reads the same cases.
@@ -7560,6 +7561,118 @@ mod tests {
             managed,
             Some("option code is managed by dedicated subnet fields")
         );
+    }
+
+    // What: HMAC-SHA256 equals an independent test vector.
+    // Why: the cookie signature is hand-rolled; pin it.
+    #[test]
+    fn hmac_matches_an_independent_vector() {
+        let key: [u8; 32] = std::array::from_fn(|i| i as u8);
+        let mac = hmac_sha256(&key, b"v1.123.abc");
+        assert_eq!(
+            hex::encode(mac),
+            "e7b377574b0e1054869f123b91a243c1b915d9043d53a11dc0cf4dd44131d849"
+        );
+    }
+
+    // What: LAN names become dotted FQDNs in the lan zone.
+    // Why: the bare name "lan" is the zone root.
+    #[test]
+    fn lan_names_are_normalized_into_the_zone() {
+        assert_eq!(normalize_lan_name("Host"), "host.lan.");
+        assert_eq!(normalize_lan_name(" HOST.Lan "), "host.lan.");
+        assert_eq!(normalize_lan_name("lan"), "lan.");
+        assert_eq!(normalize_lan_name("a.b.lan."), "a.b.lan.");
+        assert_eq!(normalize_lan_name("host.example.com."), "host.example.com.");
+        assert!(is_lan_name("host.lan.", false) && is_lan_name("lan.", false));
+        assert!(!is_lan_name("host.example.com.", false) && !is_lan_name("xlan.", false));
+    }
+
+    // What: LAN records pass by type, content, name, TTL.
+    // Why: each type has its own syntax; bad input fails.
+    #[test]
+    fn lan_records_are_validated_by_type() {
+        let ok = |name: &str, kind: &str, content: &str, ttl: u32| {
+            validate_lan_record(name, kind, content, ttl)
+        };
+        assert_eq!(
+            ok("h.lan.", "a", " 192.0.2.1 ", 300),
+            Some(("A", "192.0.2.1".into()))
+        );
+        assert_eq!(
+            ok("h.lan.", "AAAA", "2001:db8::1", 1),
+            Some(("AAAA", "2001:db8::1".into()))
+        );
+        assert_eq!(
+            ok("h.lan.", "CNAME", "other", 60),
+            Some(("CNAME", "other".into()))
+        );
+        assert_eq!(
+            ok("h.lan.", "MX", "10 mail", 60),
+            Some(("MX", "10 mail".into()))
+        );
+        assert_eq!(ok("_k.lan.", "TXT", "v=1", 60), Some(("TXT", "v=1".into())));
+        assert_eq!(ok("h.lan.", "A", "192.0.2.300", 300), None);
+        assert_eq!(ok("h.lan.", "A", "192.0.2.1", 0), None);
+        assert_eq!(ok("h.lan.", "A", "192.0.2.1", 2_147_483_648), None);
+        assert_eq!(ok("h.example.com.", "A", "192.0.2.1", 300), None);
+        assert_eq!(ok("_k.lan.", "A", "192.0.2.1", 300), None);
+        assert_eq!(ok("h.lan.", "MX", "x mail", 300), None);
+        assert_eq!(ok("h.lan.", "MX", "10 mail extra", 300), None);
+        assert_eq!(ok("h.lan.", "TXT", "", 300), None);
+        assert_eq!(ok("h.lan.", "SRV", "1 1 1 x", 300), None);
+    }
+
+    // What: delete accepts any record type of sound shape.
+    // Why: odd types must stay removable; junk is refused.
+    #[test]
+    fn delete_types_are_checked_by_shape() {
+        assert_eq!(delete_record_type(" a "), Some("A".to_string()));
+        assert_eq!(delete_record_type("SRV"), Some("SRV".to_string()));
+        assert_eq!(delete_record_type("type65"), Some("TYPE65".to_string()));
+        assert_eq!(delete_record_type("TYPEx"), None);
+        assert_eq!(delete_record_type("1A"), None);
+        assert_eq!(delete_record_type("A;B"), None);
+        assert_eq!(delete_record_type(&"A".repeat(17)), None);
+    }
+
+    // What: PTR rows come from enabled PTR records only.
+    // Why: foreign names and disabled records stay out.
+    #[test]
+    fn ptr_rows_skip_disabled_and_other_types() {
+        let rrsets = vec![
+            json!({"name": "1.2.0.192.in-addr.arpa.", "type": "PTR", "ttl": 300,
+                   "records": [{"content": "h.lan.", "disabled": false},
+                               {"content": "off.lan.", "disabled": true}]}),
+            json!({"name": "2.2.0.192.in-addr.arpa.", "type": "A", "ttl": 300,
+                   "records": [{"content": "x", "disabled": false}]}),
+            json!({"name": "example.com.", "type": "PTR", "ttl": 300,
+                   "records": [{"content": "y.", "disabled": false}]}),
+        ];
+        let rows = ptr_rows(&rrsets);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].ip.as_str(), rows[0].hostname.as_str()),
+            ("192.0.2.1", "h.lan.")
+        );
+        assert_eq!(rows[0].ttl, 300);
+    }
+
+    // What: a registration token is kept, made or refused.
+    // Why: a placeholder must not become a live secret.
+    #[test]
+    fn registration_token_is_real_generated_or_refused() {
+        let dir = unique_temp_dir("token");
+        let file = dir.join("token").to_string_lossy().into_owned();
+        let real = "r".repeat(32);
+        assert_eq!(registration_token(&real, &file), Ok(real.clone()));
+        assert!(registration_token("short-but-real", &file).is_err());
+        let made = registration_token("CHANGE_ME_token", &file).unwrap();
+        assert_eq!(made.len(), 64);
+        assert_eq!(registration_token("", &file), Ok(made));
+        fs::write(&file, "CHANGE_ME_x").unwrap();
+        assert!(registration_token("", &file).is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // What: malformed DNS answers are refused, not indexed.
