@@ -319,22 +319,31 @@ ship-platform|-|ship @SVC@|CI-ERROR-SHIP-0001|-
 CASES
 }
 
-@test "_ci_capture passes max-ok rc, fails higher rc or stderr" {
-    # What: max-ok rc passes; higher rc or stderr fails raw.
-    # Why: one owner keeps grep rc 2 from reading as a miss.
-    # From: Issue #1683 | PR #1858
+# What: wrappers: rc rules, then id, context and raw error.
+# Why: §68: no wrapper hides a failure or its raw text.
+# From: Issue #1683 | PR #1858
+@test "command wrappers fail with their id, context and raw tool error" {
+    local nofile id ctx site
+    nofile="$(_val path)" id="[CI-ERROR-$(_val name)]" ctx="$(_val name)=1" site="$(_val name)"
     run _ci_capture 0 printf 'a\nb\n'
-    [ "${status}" -eq 0 ]; [ "${output}" = $'a\nb' ]
+    _expect capture-ok 0 $'=a\nb' || return 1
     run _ci_capture 1 grep -x zz <<< "aa"
-    [ "${status}" -eq 0 ]; [ -z "${output}" ]
+    _expect capture-miss 0 "=" || return 1
     run _ci_capture 1 grep -x aa <<< "aa"
-    [ "${status}" -eq 0 ]; [ "${output}" = aa ]
-    run _ci_capture 1 grep x "${BATS_TEST_TMPDIR}/no-such-file"
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CORE-0106"*'rc="2"'*"no-such-file"* ]]
+    _expect capture-hit 0 "=aa" || return 1
+    run _ci_capture 1 grep x "${nofile}"
+    _expect capture-rc 2 "[CI-ERROR-CORE-0106];cmd=\"grep\" rc=2;No such file" || return 1
     run _ci_capture 0 sh -c 'echo out; echo warn >&2'
-    [ "${status}" -eq 2 ]
-    [[ "${output}" == *"CI-ERROR-CORE-0106"*'rc="0"'*"warn"* ]]
+    _expect capture-stderr 2 "[CI-ERROR-CORE-0106];cmd=\"sh\" rc=0;warn;stdout:;out" || return 1
+    run _ci_run "${id}" "${ctx}" sh -c 'echo out; echo warn >&2'
+    _expect run-warn 0 "warn;out" || return 1
+    run _ci_run "${id}" "${ctx}" grep x "${nofile}"
+    _expect run-fail 2 "${id} ${ctx} cmd=\"grep\" rc=2;No such file" || return 1
+    run _ci_mktemp -d "${nofile}/$(_val name).XXXXXX"
+    _expect mktemp 2 "[CI-ERROR-CORE-0110] args=\"-d ${nofile}/;No such file" || return 1
+    run _ci_ls_files "${site}" "${nofile}" "*.$(_val name)"
+    _expect ls-files 2 "[CI-ERROR-CHECK-0071] site=\"${site}\" root=\"${nofile}\";cmd=\"git\" rc=" || return 1
+    [[ "${output}" == *"cannot change to"* || "${output}" == *"No such file"* ]] || { echo "ls-files raw: ${output}"; return 1; }
 }
 
 # What: write <bin>/<tool>; the body comes on stdin.
@@ -712,21 +721,6 @@ CASES
     _expect cli 2 "[CI-ERROR-CORE-0003] manifest=\"${nosot}\"" || return 1
     run _ci_block_keys "${blk}" all
     [ "${status}" -eq 0 ] && [ -n "${output}" ] || { echo "loaded real SOT no longer answers: rc ${status}: ${output}"; return 1; }
-}
-
-@test "core helpers fail with code, context and raw tool error" {
-    # What: real failing input per helper: rc 2, code, raw.
-    # Why: a CI log must show where, with what and why.
-    # From: Issue #1683 | PR #1858
-    local f site
-    f="$(_val path)"
-    site="$(_val name)"
-    : > "${f}"
-    run _ci_mktemp -d "${f}/$(_val name).XXXXXX"
-    _expect mktemp 2 "[CI-ERROR-CORE-0110] args=\"-d ${f}/;Not a directory" || return 1
-    run _ci_ls_files "${site}" "${BATS_TEST_TMPDIR}/$(_val name)" "*.$(_val name)"
-    _expect ls-files 2 "[CI-ERROR-CHECK-0071] site=\"${site}\"" || return 1
-    [[ "${output}" == *"cannot change to"* || "${output}" == *"No such file"* ]] || { echo "ls-files raw: ${output}"; return 1; }
 }
 
 # =========================================================

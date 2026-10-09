@@ -84,28 +84,31 @@ ci_error() {
 # Why: grep rc 2 is not a miss; warnings are errors.
 # From: Issue #1683 | PR #1858
 _ci_capture() {
-    local okmax="$1" out err rc=0
+    local okmax="$1"
     shift
-    err="$(_ci_mktemp "${CI_TMPDIR}/ci-capture.XXXXXX")" || return 2
-    out="$("$@" 2>"${err}")" || rc=$?
-    if [ "${rc}" -gt "${okmax}" ] || [ -s "${err}" ]; then
-        ci_error "[CI-ERROR-CORE-0106]" "rc=\"${rc}\" cmd=\"$1\" reason=\"command failed or wrote stderr\"" "$(cat "${err}")"
-        rm -f "${err}"
-        return 2
-    fi
-    rm -f "${err}"
-    [ -z "${out}" ] || printf '%s\n' "${out}"
+    _ci_run -m "${okmax}" -s "[CI-ERROR-CORE-0106]" "reason=\"command failed or wrote stderr\"" "$@"
 }
 
 # What: run a command; failure = caller's id, ctx, rc, raw.
-# Why: one owner for coded command errors; stderr may warn.
+# Why: one owner for coded command errors and their raw.
 # From: Issue #1683 | PR #1858
 _ci_run() {
-    local id="$1" ctx="$2" err out rc=0
+    local okmax=0 strict="" id ctx err out rc=0
+    # What: -m N passes rc up to N; -s fails on any stderr.
+    # Why: grep rc 1 is a miss; strict: warnings are errors.
+    # From: Issue #1683 | PR #1858
+    while :; do
+        case "${1:-}" in
+            -m) okmax="$2"; shift 2 ;;
+            -s) strict=1; shift ;;
+            *) break ;;
+        esac
+    done
+    id="$1" ctx="$2"
     shift 2
     err="$(_ci_mktemp "${CI_TMPDIR}/ci-run.XXXXXX")" || return 2
     out="$("$@" 2>"${err}")" || rc=$?
-    if [ "${rc}" -ne 0 ]; then
+    if [ "${rc}" -gt "${okmax}" ] || { [ -n "${strict}" ] && [ -s "${err}" ]; }; then
         ci_error "${id}" "${ctx} cmd=\"$1\" rc=${rc}" "$(cat "${err}"; [ -z "${out}" ] || printf 'stdout:\n%s\n' "${out}")"
         rm -f "${err}"
         return 2
@@ -8416,13 +8419,10 @@ _ci_producer_ok() {
 # Why: an empty list from a failed ls would scan as clean.
 # From: Issue #1683 | PR #1858
 _ci_ls_files() {
-    local site="$1" root="$2" out
+    local site="$1" root="$2"
     shift 2
-    if ! out="$(git -C "${root}" ls-files -- "$@" 2>&1)"; then
-        ci_error "[CI-ERROR-CHECK-0071]" "site=\"${site}\" root=\"${root}\" pathspec=\"$*\" reason=\"git ls-files failed; refusing an empty scan\"" "${out}"
-        return 2
-    fi
-    [ -z "${out}" ] || printf '%s\n' "${out}"
+    _ci_run "[CI-ERROR-CHECK-0071]" "site=\"${site}\" root=\"${root}\" pathspec=\"$*\" reason=\"git ls-files failed; refusing an empty scan\"" \
+        git -C "${root}" ls-files -- "$@"
 }
 
 # What: out[]=override if non-empty, else git ls-files spec.
