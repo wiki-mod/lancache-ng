@@ -370,7 +370,7 @@ services:
       - PDNS_REC_URL=http://dns-standard:8082
       - PDNS_API_KEY=validation-pdns-key
       # What: must match the netdata service's own NETDATA_ALARM_TOKEN.
-      # Why: see routes/netdata_alarms.rs for what this token gates.
+      # Why: see main.rs for what this token gates.
       # From: Issue #849 | PR #1444
       - NETDATA_ALARM_TOKEN=validation-netdata-alarm-token
       - NATS_URL=nats://nats:4222

@@ -6,7 +6,7 @@
 # audit). Read by BOTH the bash validator (_is_valid_domain in
 # scripts/lib/domain-validation.sh, exercised via
 # tests/bats/domain_validation_parity.bats) and the Rust validator
-# (is_valid_domain in services/ui/src/routes/domains.rs, exercised via its
+# (is_valid_domain in services/ui/src/main.rs, exercised via its
 # own is_valid_domain_matches_shared_parity_fixture test), so the two
 # independent implementations are checked against the exact same cases and
 # can't silently diverge in what they accept or reject.

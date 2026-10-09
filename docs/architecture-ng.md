@@ -250,7 +250,7 @@ has no other legitimate caller: every real invocation is a genuine
 remote-secondary registration, so there is no "install that doesn't use
 remote secondaries" case that could be broken by refusing here -- an
 install that never runs `setup.sh secondary` never reaches this code path at
-all. See `services/ui/src/config.rs`'s `advertised_nats_url()` and its unit
+all. See `services/ui/src/main.rs`'s `advertised_nats_url()` and its unit
 tests for the exact precedence and rejection rules.
 
 Note that setting `NATS_BIND_IP`/`NATS_ADVERTISE_URL` on the primary and
@@ -271,7 +271,7 @@ itself publishes.
 - DDNS → PowerDNS: lease = automatically an A record (in the configured DHCP domain) and a PTR record (in the matching private reverse zone) via TSIG-secured nsupdate (RFC 2136). PTR updates were **not** applied in production until issue #768's fix: Kea's D2 daemon used to send every reverse update's on-wire zone as the literal `in-addr.arpa.`, which had no matching PowerDNS zone (only narrower private-range subzones exist), so PowerDNS rejected every PTR update regardless of octet; `reverse-ddns` now lists one entry per real private reverse zone instead. See [docs/dhcp-modes.md](dhcp-modes.md) for the full detail.
 - DDNS enable/disable (issue #1076): whether Kea writes those DNS records is a separate control from whether Kea DHCP is running at all. The `DHCP_DDNS_ENABLED` env var (`config/{dev,prod}/dhcp.env`) sets the first-boot default for Kea's `dhcp-ddns.enable-updates`, and the Admin UI's DHCP page carries an independent "Enable DDNS Updates" toggle that flips `enable-updates` live via the Kea Control API. It defaults **off** for a fresh install (opt-in, matching Kea's own default), while an already-running install keeps whatever value it already has — `migrate_dhcp4_config()` merges the persisted `dhcp-ddns` block over the default, so the toggle's choice (and any existing install's on-state) survives restarts.
 - REST API (Kea Control Agent) for Admin UI
-- NTP option (`ntp-servers`, DHCPv4 option 42): each subnet's value is a plain operator-editable field (`routes/dhcp.rs`'s `add_subnet`/`update_subnet`), defaulting to the project-wide `DHCP_NTP_SERVERS` setting. When the LanCache-NG-NTP container is enabled AND its separate "auto-set as DHCP NTP server" toggle is on, `routes/dhcp.rs`'s `apply_ntp_lan_ip_to_all_subnets` instead forces every subnet's `ntp-servers` option to that container's LAN address (`STANDARD_IP`), overriding any per-subnet manual value for as long as the toggle stays on; turning it off restores the project-wide default via `restore_default_ntp_on_all_subnets`. The toggle is deliberately independent from the NTP container's own enable/disable switch — enabling the container never auto-populates DHCP by itself.
+- NTP option (`ntp-servers`, DHCPv4 option 42): each subnet's value is a plain operator-editable field (`main.rs`'s `add_subnet`/`update_subnet`), defaulting to the project-wide `DHCP_NTP_SERVERS` setting. When the LanCache-NG-NTP container is enabled AND its separate "auto-set as DHCP NTP server" toggle is on, `main.rs`'s `apply_ntp_lan_ip_to_all_subnets` instead forces every subnet's `ntp-servers` option to that container's LAN address (`STANDARD_IP`), overriding any per-subnet manual value for as long as the toggle stays on; turning it off restores the project-wide default via `restore_default_ntp_on_all_subnets`. The toggle is deliberately independent from the NTP container's own enable/disable switch — enabling the container never auto-populates DHCP by itself.
 - **Multi-threading is explicitly disabled** (`"multi-threading": {"enable-multi-threading": false}` in `services/dhcp/kea-dhcp4.conf`, re-asserted on every migration by `services/dhcp/entrypoint.sh`'s `migrate_dhcp4_config`). This is a deliberate override, not an oversight: Kea has shipped multi-threaded packet processing enabled by default since 2.4.0, but that feature targets high-query-rate ISP/carrier deployments processing thousands of leases per second across many CPU cores -- this project's DHCP server serves one LAN/lab-scale subnet, so the added concurrency surface (interacting with the `lease_cmds` hook, the DDNS-forwarding path, and the Admin UI's config-write/rollback machinery, none of which were designed against concurrent packet handlers) buys no real benefit here. No project history (commit messages, linked PRs) documents an incompatibility that was actually hit; this is a preventive simplicity choice, re-stated here so it isn't mistaken for an unexamined default. An operator with a genuinely large multi-subnet deployment can re-enable it (Kea's own default), but should first re-verify it against the hooks/DDNS paths above.
 
 ## Admin UI security headers
@@ -378,7 +378,7 @@ the inspect allowlist does not grant or imply a Docker restart action for it.
   maintainer-directed watchdog-as-actor architecture):** the actual caller of
   `safe_dhcp_action`'s start/stop is now watchdog's own main loop, not the
   Admin UI -- the Admin UI only writes an operator's intent to
-  `desired-state.json` (`services/ui/src/routes/setup.rs`'s
+  `desired-state.json` (`services/ui/src/main.rs`'s
   `set_service_desired_state`), and watchdog's `reconcile_one`
   (`services/watchdog/src/main.rs`) reads it fresh every `CHECK_INTERVAL`
   and issues `start`/`stop` accordingly. This still never issues a
@@ -479,18 +479,18 @@ value resolving outside that prefix.
 - `watchdog.sh`'s `disk_info()` computes a yellow (85% full) / red (95% full)
   color and writes it into `status.json` every 30 seconds, monitoring actual
   disk usage, not just nginx `max_size`. Since issue #870, the Admin UI's
-  dashboard reads this file (`services/ui/src/watchdog_status.rs`) and
+  dashboard reads this file (`services/ui/src/main.rs`) and
   renders the color in the "Service health" card's "Cache disk" indicator,
   polling `GET /api/watchdog-status` every 10 seconds to stay live -- this
   closes #849 observability finding #3. The dashboard's own cache-usage bar
-  (`cache_pct` in `services/ui/src/routes/dashboard.rs`) remains a separate,
+  (`cache_pct` in `services/ui/src/main.rs`) remains a separate,
   independently computed value (used cache bytes vs. `CACHE_MAX_GB`), not
   this disk-usage color.
 
 **Status:** `watchdog.sh` computes per-service health and disk-usage color
 (green/yellow/red) into `status.json` every 30 seconds. Since issue #870,
-the Admin UI (`services/ui/src/routes/dashboard.rs`,
-`services/ui/src/watchdog_status.rs`, `templates/dashboard.html`) reads and
+the Admin UI (`services/ui/src/main.rs`,
+`services/ui/src/main.rs`, `templates/dashboard.html`) reads and
 renders that file as a per-service "traffic light" indicator in the
 dashboard's "Service health" card, sharing `status.json` via the
 `watchdog-status` named volume (mounted read-only into the `ui` container --
@@ -544,7 +544,7 @@ to their actual source -- collected here rather than left as unexplained
   service_healthy` between them), a connection-refused during `ui`'s first
   few seconds while `nats-server` is still initializing is an expected,
   self-resolving start-order race, confirmed harmless by design (the same
-  reasoning already documented on `services/ui/src/nats_auth_callout.rs`'s
+  reasoning already documented on `services/ui/src/main.rs`'s
   own unconditional reconnect loop, which treats "connection dropped, retry"
   as its permanent steady state, not just a startup-only condition).
 - **netdata: permission-denied on `/host/proc/<pid>/io` for nginx, and a
@@ -590,7 +590,7 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 - **Silent-data-loss detection** (new in the consolidation PR): a periodic detector compares syslog-ng's own "processed" stats counter (`syslog-ng-ctl stats`) against real bytes landing on disk under `SYSLOG_NG_LOG_ROOT`, alerting (and surfacing via a structured healthcheck status field) if syslog-ng believes it delivered messages that never actually reached disk -- e.g. a bind-mounted log-root directory left root-owned instead of chowned to uid 10001. `setup.sh` pre-creates and chowns this directory on fresh install specifically to avoid the condition; this detector is the defense-in-depth backstop for an installation that predates that fix or has its permissions changed later.
 - **Real dual-process healthcheck**: `services/syslog/healthcheck.sh` checks fluent-bit AND syslog-ng independently (not just "is the container running") and only reports healthy when both are, writing a structured per-process status file (including the data-loss alert flag above) for a future Admin UI/watchdog integration -- the granularity fix for the two-container era's single "one process, one Docker HEALTHCHECK slot" limitation.
 - `ci.sh check logging-matrix` (part of `ci.sh check all` in the CI checks job) fails if a Compose service has no row in the logging matrix table below, or if a row names a service that no longer exists.
-- Admin UI log reading from the central path: `services/ui/src/syslog_client.rs` (opt-in via `SYSLOG_ENABLED=true`, same 4-variable contract watchdog's retention engine uses) reads `/logs` and a dashboard tile from `SYSLOG_LOG_ROOT` directly, transparently decompressing rotated `.zst`/`.gz` files, instead of the `STANDARD_LOG`/`SSL_LOG` direct-nginx-read path. Disabled installs keep the old direct-nginx-read behavior unchanged.
+- Admin UI log reading from the central path: `services/ui/src/main.rs` (opt-in via `SYSLOG_ENABLED=true`, same 4-variable contract watchdog's retention engine uses) reads `/logs` and a dashboard tile from `SYSLOG_LOG_ROOT` directly, transparently decompressing rotated `.zst`/`.gz` files, instead of the `STANDARD_LOG`/`SSL_LOG` direct-nginx-read path. Disabled installs keep the old direct-nginx-read behavior unchanged.
 
 **Not implemented yet:**
 - Per-service log level configuration in the Admin UI.
@@ -720,7 +720,7 @@ described below is independent of that gap: it runs its own real
 disk-space check inside the Admin UI container regardless of whether
 `setup.sh`'s own prompt-time check has landed on this branch.)
 
-**Admin UI cache resize (`services/ui/src/routes/cache.rs`, issue #1069 part
+**Admin UI cache resize (`services/ui/src/main.rs`, issue #1069 part
 3):** the dashboard shows current usage, current `CACHE_MAX_SIZE`, and lets an
 operator submit a new whole-GB size. The request is re-validated against real
 free disk space at `CACHE_DIR` with the same buffer-scaled safety check as
@@ -733,7 +733,7 @@ proxy container via the runtime env
 `environment: - CACHE_MAX_SIZE=${CACHE_MAX_SIZE:?...}`), which this container has
 no filesystem access to, and the Admin UI's Docker access deliberately has no
 exec capability to send nginx a reload signal even if it did (see
-`services/ui/src/docker_client.rs`'s header comment). The request is instead
+`services/ui/src/main.rs`'s header comment). The request is instead
 persisted to the `ui-data`-backed settings file, and `setup.sh`'s
 `cmd_converge_reconcile` (run on the host by `lancache-converge.service`,
 currently every ~5 minutes) folds it into the real `.env` and lets the
@@ -760,7 +760,7 @@ the limit nginx enforces change in the same recreate.
 by-access / pin-app-ID surface. `services/watchdog/watchdog.sh`'s
 `maybe_purge()` is the only automatic purge path beyond nginx's own
 `inactive` eviction; there is no route or template anywhere in
-`services/ui/src/routes` that clears, previews, or selectively deletes cache
+`services/ui/src/main.rs` that clears, previews, or selectively deletes cache
 entries. See issue #1069's own feasibility notes for why an out-of-cycle
 cache-manager sweep needs a bespoke script (nginx has no external signal for
 one) rather than being a given.
@@ -780,10 +780,10 @@ one) rather than being a given.
   surface of their own. The `netdata:` service's compose command block now
   configures Netdata's `custom_sender()` alarm-notify mechanism to POST each
   alarm event to the Admin UI's `POST /api/netdata-alarms`
-  (`services/ui/src/routes/netdata_alarms.rs`), gated by a shared
+  (`services/ui/src/main.rs`), gated by a shared
   `NETDATA_ALARM_TOKEN` (issue #858 shared-secret pattern, same as
   `PDNS_API_KEY`). The dashboard's "Netdata alarms" card
-  (`services/ui/src/netdata_alarms.rs`) shows the most recent alarms
+  (`services/ui/src/main.rs`) shows the most recent alarms
   server-rendered, not live-polled — an alarm is a discrete event, not a
   continuously-changing gauge. This forwards alarm *events* only; Netdata's
   full metrics dashboard (port 19999) remains unpublished, so deep

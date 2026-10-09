@@ -406,7 +406,7 @@
     </section>
 
     {# Zone/record known-good snapshot rollback (#628). Populated by
-       routes/dns_snapshots.rs::fetch_zone_snapshot_groups, a thin HTTP call
+       main.rs::fetch_zone_snapshot_groups, a thin HTTP call
        to nats-subscriber's own listener -- the actual snapshot storage/
        retention/rollback logic all lives there, not in the Admin UI. Mirrors
        templates/dhcp.html's Kea snapshot table. #}

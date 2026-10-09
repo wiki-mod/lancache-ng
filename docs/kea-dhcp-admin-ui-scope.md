@@ -54,7 +54,7 @@ plus the JSON templates `kea-dhcp4.conf`, `kea-ctrl-agent.conf`,
 ### 1b. Operator-configurable via Admin UI today
 
 Routes are registered in `services/ui/src/main.rs`; handlers live in
-`services/ui/src/routes/dhcp.rs`.
+`services/ui/src/main.rs`.
 
 | Setting | Route | Handler |
 |---|---|---|
@@ -115,7 +115,7 @@ catch-all caused NOTAUTH rejections).
 - **#1076 — independent "Enable DDNS Updates" toggle.** Implemented: the
   template uses `DHCP_DDNS_ENABLED`, `services/dhcp/entrypoint.sh` normalizes
   the first-boot default and preserves the live persisted value, and
-  `services/ui/src/routes/dhcp.rs` exposes the live toggle.
+  `services/ui/src/main.rs` exposes the live toggle.
 - **#770/#1164 — DDNS updates deliberately reach `dns-standard` only.** Each
   `forward-ddns`/`reverse-ddns` domain's `dns-servers` list is a **failover**
   list (D2 tries the first server, falls back only on failure), **not** a

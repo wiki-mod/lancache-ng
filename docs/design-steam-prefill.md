@@ -260,7 +260,7 @@ authors could resolve unilaterally.** Two honest framings were possible:
    clearly-bounded standalone service over an embedded module. The
    `services/ui` `reqwest`-streaming precedent named in the earlier
    version of this decision (`bytes_stream()` in
-   `services/ui/src/routes/netdata_proxy.rs`) was a real, considered
+   `services/ui/src/main.rs`) was a real, considered
    alternative — not dismissed for a technical reason, superseded by this
    operational one.
 3. ~~**#871 reconciliation**~~ — resolved 2026-08-29, see above.

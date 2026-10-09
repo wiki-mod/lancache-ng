@@ -54,7 +54,7 @@ mkdir -p /run/chrony
 # same root cause as services/dhcp-proxy/entrypoint.sh's identical pattern,
 # fixed there first). This file is SHARED across multiple services'
 # Admin-UI-persisted settings -- NTP_UPSTREAM_SERVERS itself is strictly
-# validated (validate_ntp_upstream_servers, services/ui/src/routes/ntp.rs:
+# validated (validate_ntp_upstream_servers, services/ui/src/main.rs:
 # every entry must parse as a bare IPv4/IPv6 literal or an RFC 1123 hostname
 # label, no shell metacharacters possible), but this entrypoint dot-sourced
 # the WHOLE file, not just its own keys -- so a weakly-validated value
