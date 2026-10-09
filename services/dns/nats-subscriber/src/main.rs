@@ -21,8 +21,8 @@ use futures::StreamExt;
 use futures::future::join_all;
 use lancache_ng::config::{
     LAN_ZONE, NATS_STREAM_DNS, NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD,
-    OutOfRange, Uint, canonical_zone, env_opt, is_rollback_zone, need, parse_bool, process_env,
-    rollback_zones, zone_url,
+    OutOfRange, Uint, canonical_zone, env_opt, is_dns_name, is_rollback_zone, need, parse_bool,
+    process_env, rollback_zones, zone_url,
 };
 use lancache_ng::{
     DnsRecord, FlushRequest, PowerDns, SnapshotStore, ct_eq, die, http_client,
@@ -340,6 +340,12 @@ enum Outcome {
     RetryStop,
 }
 
+// What: true for a zone name safe in an API URL path.
+// Why: the zone comes from a NATS message, not a file.
+fn zone_is_safe(zone: &str) -> bool {
+    is_dns_name(zone.trim_end_matches('.'), false, false)
+}
+
 // What: apply one record message to PowerDNS.
 // Why: 4xx and malformed ack; 5xx and network errors retry.
 async fn apply_record(
@@ -361,6 +367,10 @@ async fn apply_record(
             return Outcome::Ack;
         }
     };
+    if !zone_is_safe(&record.zone) {
+        eprintln!("Acking DNS record with an invalid zone: {:?}", record.zone);
+        return Outcome::Ack;
+    }
     let key = record_key(&record);
     let seq = msg.info().ok().map(|info| info.stream_sequence);
     if let Some(seq) = seq
@@ -482,6 +492,10 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
     if let Some(request) = &request
         && let (Some(zone), Some(kind)) = (&request.zone, &request.record_type)
     {
+        if !zone_is_safe(zone) {
+            eprintln!("Acking recursor flush with an invalid zone: {zone:?}");
+            return Outcome::Ack;
+        }
         let mut confirmed = false;
         for _ in 0..CONFIRM_TRIES {
             // What: a failed zone read counts unconfirmed.
@@ -993,6 +1007,18 @@ mod tests {
             .map(|c| json!({"content": c, "disabled": false}))
             .collect();
         json!({"name": name, "type": kind, "ttl": ttl, "records": records})
+    }
+
+    // What: only plain zone names reach an API URL path.
+    // Why: a NATS message must not steer the request path.
+    #[test]
+    fn zone_names_from_messages_must_be_plain() {
+        for good in ["lan", "lan.", "10.in-addr.arpa.", "c.f.ip6.arpa."] {
+            assert!(zone_is_safe(good), "{good:?} must pass");
+        }
+        for bad in ["", ".", "../x", "lan/../x", "a?b=1", "a#b", "a b", "lan%2F"] {
+            assert!(!zone_is_safe(bad), "{bad:?} must fail");
+        }
     }
 
     // What: a replace message with the TTL and records.

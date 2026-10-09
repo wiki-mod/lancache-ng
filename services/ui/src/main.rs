@@ -25,7 +25,7 @@ use lancache_ng::config::{
     CONTAINER_DNS_STANDARD, CONTAINER_NATS, CONTAINER_NETDATA, CONTAINER_NTP, CONTAINER_PROXY,
     CONTAINER_SYSLOG, CONTAINER_UI, DhcpMode, LAN_ZONE, NATS_STREAM_DNS, NATS_SUBJECT_DNS,
     NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, OutOfRange, PDNS_API_PATH, Uint, canonical_zone,
-    is_container, parse_bool, rollback_zones, zone_url,
+    is_container, is_dns_name, parse_bool, rollback_zones, zone_url,
 };
 use lancache_ng::{
     DesiredRunState, DesiredState, DnsRecord, DockerError, DockerProxy, FlushRequest, Place,
@@ -5335,23 +5335,6 @@ fn domain_error_message(code: &str) -> Option<&'static str> {
         ),
         _ => None,
     }
-}
-
-// What: DNS name syntax without a trailing dot.
-// Why: one rule for CDN, DHCP and LAN names; flags widen it
-fn is_dns_name(name: &str, underscore: bool, wildcard: bool) -> bool {
-    !name.is_empty()
-        && name.len() <= 253
-        && name.split('.').enumerate().all(|(index, label)| {
-            (wildcard && index == 0 && label == "*")
-                || (!label.is_empty()
-                    && label.len() <= 63
-                    && !label.starts_with('-')
-                    && !label.ends_with('-')
-                    && label.bytes().all(|b| {
-                        b.is_ascii_alphanumeric() || b == b'-' || (underscore && b == b'_')
-                    }))
-        })
 }
 
 // What: a plain domain name as DHCP and NTP forms take it.

@@ -260,6 +260,23 @@ pub fn canonical_zone(zone: &str) -> String {
     }
 }
 
+// What: DNS name syntax without a trailing dot.
+// Why: one rule for CDN, DHCP, LAN names and API zone ids.
+pub fn is_dns_name(name: &str, underscore: bool, wildcard: bool) -> bool {
+    !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').enumerate().all(|(index, label)| {
+            (wildcard && index == 0 && label == "*")
+                || (!label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label.bytes().all(|b| {
+                        b.is_ascii_alphanumeric() || b == b'-' || (underscore && b == b'_')
+                    }))
+        })
+}
+
 // What: the path of PowerDNS's API below a server address.
 // Why: ui and dns/entrypoint.sh append the same fixed path.
 pub const PDNS_API_PATH: &str = "/api/v1/servers/localhost";
@@ -412,6 +429,27 @@ mod tests {
         assert!(need(&get, "EMPTY").is_err() && need(&get, "ABSENT").is_err());
         assert_eq!(need_flag(&get, "ON"), Ok(true));
         assert!(need_flag(&get, "JUNK").is_err() && need_flag(&get, "ABSENT").is_err());
+    }
+
+    // What: DNS names pass or fail by label rules.
+    // Why: a zone name is spliced into an API URL path.
+    #[test]
+    fn dns_names_follow_the_label_rules() {
+        assert!(is_dns_name("lan", false, false));
+        assert!(is_dns_name("1.168.192.in-addr.arpa", false, false));
+        assert!(is_dns_name("_srv.lan", true, false) && !is_dns_name("_srv.lan", false, false));
+        assert!(is_dns_name("*.lan", false, true) && !is_dns_name("*.lan", false, false));
+        for bad in [
+            "", "a..b", "-a.lan", "a-.lan", "a/b", "a b", "a?x=1", "../x", "a%2Fb",
+        ] {
+            assert!(!is_dns_name(bad, true, true), "{bad:?} must fail");
+        }
+        assert!(!is_dns_name(&"a".repeat(64), false, false));
+        assert!(!is_dns_name(
+            &format!("{}.com", "a.".repeat(127)),
+            false,
+            false
+        ));
     }
 
     // What: zone_url drops the trailing dot of the zone.
