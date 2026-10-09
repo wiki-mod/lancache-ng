@@ -921,7 +921,7 @@ CASES
 # Why: AG-VAL-008 off by default; §72 cache error no FAIL.
 # From: Issue #1683 | PR #1858
 @test "test-stack: rust off by default, apk skips, cache errors coded" {
-    local s bt rust="" apk=""
+    local s bt rust="" apk="" sot bad
     for s in $(_ci_block_keys services); do
         bt="$(_ci_block_entry_field services "${s}" build_type)" || { echo "build_type ${s}: ${bt}"; return 1; }
         [ "${bt}" != rust ] || rust="${rust:-${s}}"
@@ -933,6 +933,8 @@ CASES
     _expect rust-default 0 "service=${rust} tested=SKIP;AG-VAL-008" || return 1
     _ts CI_RUST_VALIDATION=false TEST_SERVICES="${rust}"
     _expect rust-false 0 "service=${rust} tested=SKIP;AG-VAL-008" || return 1
+    _ts CI_RUST_VALIDATION="$(_val name)" TEST_SERVICES="${rust}"
+    _expect rust-not-true 0 "service=${rust} tested=SKIP;AG-VAL-008" || return 1
     _ts CI_RUST_VALIDATION=true SCCACHE_REDIS_MODE=required RUNNER_ENVIRONMENT=self-hosted TEST_SERVICES="${rust}"
     _expect self-hosted-no-redis 2 "[CI-ERROR-TEST-0003] service=\"${rust}\";[CI-ERROR-VARIABLES-0012];[CI-ERROR-TEST-0009] service=\"${rust}\"" || return 1
     [[ "${output}" != *"tested="* ]] || { echo "self-hosted-no-redis read as a result: ${output}"; return 1; }
@@ -941,6 +943,15 @@ CASES
     [[ "${output}" != *"tested="* ]] || { echo "hosted-no-cache read as a result: ${output}"; return 1; }
     _ts TEST_SERVICES="${apk}"
     _expect apk-skip 0 "service=${apk} tested=SKIP reason=\"no source tests" || return 1
+    sot="${BATS_TEST_TMPDIR}/sot-edit.yml" bad="$(_val name)"
+    sed "/^  ${rust}:\$/,/^  [a-z0-9-]*:\$/ { /^    crate:/d }" "${CI_MANIFEST_SOURCE}" > "${sot}" \
+        && ! cmp -s "${sot}" "${CI_MANIFEST_SOURCE}" || { echo "no crate line of ${rust} removed"; return 1; }
+    _ts CI_MANIFEST="${sot}" CI_RUST_VALIDATION=true TEST_SERVICES="${rust}"
+    _expect no-crate 2 "[CI-ERROR-TEST-0003] service=\"${rust}\";[CI-ERROR-TEST-0005] service=\"${rust}\"" || return 1
+    sed "/^  ${rust}:\$/,/^  [a-z0-9-]*:\$/ s/^    build_type: rust\$/    build_type: ${bad}/" "${CI_MANIFEST_SOURCE}" > "${sot}" \
+        && ! cmp -s "${sot}" "${CI_MANIFEST_SOURCE}" || { echo "no build_type of ${rust} changed"; return 1; }
+    _ts CI_MANIFEST="${sot}" TEST_SERVICES="${rust}"
+    _expect unknown-type 2 "[CI-ERROR-TEST-0003] service=\"${rust}\";[CI-ERROR-TEST-0004] service=\"${rust}\" build_type=\"${bad}\"" || return 1
 }
 
 # What: export step args: SOT kill timeout, cache pair only.
