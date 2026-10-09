@@ -1991,16 +1991,28 @@ _legacy_env() {
     done
 }
 
+# What: legacy keys migrate once; reruns change nothing
+# Why: AG-OP-007 convergence; AG-OP-006 no second write
+# From: Issue #1683 | PR #1858
 @test "migrate_env_for_update converges a legacy .env and is stable on rerun" {
     _stand_ins || return 1
-    # What: legacy keys migrate once; state root is written
-    # Why: AG-OP-007 convergence; secrets must not rotate
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}/legacy" before
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    mkdir -p "${t}" && _legacy_env "${t}/.env"
-    export CONV="${t}"
+    local t before
+    _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
+    _legacy_row() {
+        t="${BATS_TEST_TMPDIR}/legacy-$1"
+        mkdir -p "${t}" && _legacy_env "${t}/.env" || return 1
+        export CONV="${t}"
+    }
+    _legacy_row strict-allowlist || return 1
+    set_env_key PROXY_ALLOWED_CLIENT_CIDRS "$(_val cidr)" "${t}/.env"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+    [ "${status}" -eq 0 ] && [ "$(get_env_var PROXY_SECURITY_MODE "${t}/.env")" = strict ] \
+        || { echo "strict-allowlist: $(get_env_var PROXY_SECURITY_MODE "${t}/.env") ${output}"; return 1; }
+    _legacy_row split-cache || return 1
+    set_env_key CACHE_DIR_SSL "$(_val path)" "${t}/.env"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+    _expect split-cache 1 "CACHE_DIR_STANDARD and CACHE_DIR_SSL point to different paths" || return 1
+    _legacy_row base || return 1
     _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
     [ "${status}" -eq 0 ] && ! env_key_exists CACHE_DIR_STANDARD "${t}/.env" && ! env_key_exists CACHE_DIR_SSL "${t}/.env" \
         && [ "$(get_env_var CACHE_DIR "${t}/.env")" = "${t}/cache" ] && [ "$(get_env_var PROXY_SECURITY_MODE "${t}/.env")" = lazy ] \
