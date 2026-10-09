@@ -1261,7 +1261,6 @@ const WATCHDOG_LABELS: [(&str, &str); 10] = [
 // Why: fresh, stale and missing data look different.
 // From: Issue #870
 fn watchdog_json(path: &str) -> Value {
-    let stale_after = Duration::from_secs(90);
     let age = fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
@@ -1294,7 +1293,7 @@ fn watchdog_json(path: &str) -> Value {
         .collect();
     services.sort_by(|a, b| (a.0, a.1["name"].as_str()).cmp(&(b.0, b.1["name"].as_str())));
     let services: Vec<Value> = services.into_iter().map(|(_, entry)| entry).collect();
-    if age > stale_after {
+    if age > status.stale_after() {
         json!({
             "state": "stale",
             "updated": status.updated,

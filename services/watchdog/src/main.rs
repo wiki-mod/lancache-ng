@@ -581,6 +581,7 @@ async fn main() {
             disk: DiskInfo {
                 cache: disk_info(&s.cache_dir, s.disk_warn_pct, s.disk_alarm_pct),
             },
+            interval_secs: s.check_interval.as_secs(),
         };
         // What: a failed status write exits the process.
         // Why: compose restarts on exit, not on red health.

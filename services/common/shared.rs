@@ -57,6 +57,29 @@ pub struct WatchdogStatus {
     pub updated: String,
     pub services: HashMap<String, ServiceHealth>,
     pub disk: DiskInfo,
+    // What: the watchdog's check interval in seconds.
+    // Why: the ui derives staleness; old files lack it.
+    #[serde(default)]
+    pub interval_secs: u64,
+}
+
+// What: stale limit when the document names no interval.
+// Why: an older watchdog wrote none; 90 s was its limit.
+const STALE_FALLBACK: Duration = Duration::from_secs(90);
+
+// What: missed check cycles after which status is stale.
+// Why: one late cycle is no outage; three are.
+const STALE_CYCLES: u32 = 3;
+
+impl WatchdogStatus {
+    // What: age beyond which the document counts as stale.
+    // Why: the limit follows the watchdog's own interval.
+    pub fn stale_after(&self) -> Duration {
+        match self.interval_secs {
+            0 => STALE_FALLBACK,
+            secs => Duration::from_secs(secs).saturating_mul(STALE_CYCLES),
+        }
+    }
 }
 
 // What: operator-requested run state of a service.
@@ -805,6 +828,31 @@ mod tests {
         let req: FlushRequest = serde_json::from_str(full).unwrap();
         assert_eq!(req.expected_ttl, Some(60));
         assert_eq!(req.expected_content, Some(vec!["192.0.2.5".to_string()]));
+    }
+
+    // What: stale limit is three intervals, else 90 s.
+    // Why: a wrong limit shows live data as stale.
+    #[test]
+    fn stale_limit_follows_the_interval() {
+        let status = |interval_secs| WatchdogStatus {
+            updated: String::new(),
+            services: HashMap::new(),
+            disk: DiskInfo {
+                cache: DiskHealth {
+                    pct: 0,
+                    status: "unknown".into(),
+                },
+            },
+            interval_secs,
+        };
+        assert_eq!(status(30).stale_after(), Duration::from_secs(90));
+        assert_eq!(status(10).stale_after(), Duration::from_secs(30));
+        assert_eq!(status(0).stale_after(), Duration::from_secs(90));
+        let old: WatchdogStatus = serde_json::from_str(
+            r#"{"updated":"x","services":{},"disk":{"cache":{"pct":1,"status":"green"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(old.interval_secs, 0);
     }
 
     // What: df output parses; odd output gives None.
