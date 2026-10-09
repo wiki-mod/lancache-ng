@@ -8502,17 +8502,27 @@ CI_DOCKERFILE_SPECS=('Dockerfile' '*/Dockerfile')
 # From: Issue #1683 | PR #1858
 _ci_shell_sources() {
     local -n _ci_ss_out="$1"
-    local -a _ci_ss_all=()
+    local -a _ci_ss_all=() _ci_ss_dock=()
     local _ci_ss_f _ci_ss_l1 _ci_ss_re='^#![[:space:]]*/([^[:space:]]*/)?(env[[:space:]]+)?(ba)?sh([[:space:]]|$)'
     _ci_scan_files _ci_ss_all "$2" || return 2
     _ci_ss_out=()
     for _ci_ss_f in "${_ci_ss_all[@]}"; do
         case "${_ci_ss_f##*/}" in
             *.sh|*.bash|*.bats) _ci_ss_out+=("${_ci_ss_f}"); continue ;;
-            *.*) continue ;;
+            *.*|Dockerfile) continue ;;
         esac
         _ci_ss_l1="$(_ci_run "[CI-ERROR-CHECK-0164]" "file=\"${_ci_ss_f}\" reason=\"first line unreadable\"" head -n 1 -- "${_ci_ss_f}")" || return 2
         if [[ "${_ci_ss_l1}" =~ ${_ci_ss_re} ]]; then
+            _ci_ss_out+=("${_ci_ss_f}")
+        fi
+    done
+    # What: "dockerfiles" adds Dockerfiles for their RUN shell.
+    # Why: an override list skips pathspecs; basename decides.
+    # From: Issue #1683 | PR #1858
+    [ "${3:-}" = dockerfiles ] || return 0
+    _ci_scan_files _ci_ss_dock "$2" "${CI_DOCKERFILE_SPECS[@]}" || return 2
+    for _ci_ss_f in "${_ci_ss_dock[@]}"; do
+        if [ "${_ci_ss_f##*/}" = Dockerfile ]; then
             _ci_ss_out+=("${_ci_ss_f}")
         fi
     done
@@ -8522,15 +8532,20 @@ _ci_shell_sources() {
 # Why: structure checks read bash's grammar, not raw lines.
 # From: Issue #1683 | PR #1858
 _ci_shell_canonical() {
-    local f="$1" src pp
+    local f="$1" src pp root
     case "${f##*/}" in
         *.bats)
-            pp="$(dirname -- "$(readlink -f -- "$(command -v bats)")")/../libexec/bats-core/bats-preprocess"
+            # What: bats root and lib dir derived as bats does.
+            # Why: bats-preprocess sources its common.bash there.
+            # From: Issue #1683 | PR #1858
+            root="$(readlink -f -- "$(command -v bats)")" && root="${root%/*/*}"
+            pp="${root}/libexec/bats-core/bats-preprocess"
             if [ ! -x "${pp}" ]; then
                 ci_log "[CI-ERROR-CHECK-0160]" "file=\"${f}\" preprocessor=\"${pp}\" reason=\"bats preprocessor not found\""
                 return 2
             fi
-            src="$(_ci_run -s "[CI-ERROR-CHECK-0161]" "file=\"${f}\" reason=\"bats preprocess failed\"" "${pp}" "${f}")" || return 2 ;;
+            src="$(BATS_ROOT="${root}" BATS_LIBDIR="${BATS_BASE_LIBDIR:-lib}" \
+                _ci_run -s "[CI-ERROR-CHECK-0161]" "file=\"${f}\" reason=\"bats preprocess failed\"" "${pp}" "${f}")" || return 2 ;;
         Dockerfile)
             src="$(_ci_run "[CI-ERROR-CHECK-0165]" "file=\"${f}\" reason=\"Dockerfile lines unreadable\"" _ci_dockerfile_logical_lines "${f}")" || return 2
             # What: RUN shell form only; flags cut, exec form skipped.
@@ -8711,17 +8726,17 @@ _CI_AWK_COMMENT_LEX='
         mb = (length("é") == 1); lead_re = "^[\300-\367]$"; cont_re = "^[\200-\277]$"
     }
     { L[FNR] = $0; sub(/\r$/, "", L[FNR]) }
-    # What: queue the heredoc delimiters a shell line opens.
-    # Why: <<< , quoted or (( )) << open no here-document.
+    # What: queue heredoc openers; quotes carry across lines.
+    # Why: <<<, (( )) or a << in a string opens no heredoc.
     # From: Issue #1683 | PR #1858
-    function cl_heredocs(s,  i, n, c, q, dep, rest, w) {
-        n = length(s); q = ""; dep = 0
+    function cl_heredocs(s,  i, n, c, dep, rest, w) {
+        n = length(s); dep = 0
         for (i = 1; i <= n; i++) {
             c = substr(s, i, 1)
-            if (q == sq) { if (c == sq) q = ""; continue }
+            if (hdq == sq) { if (c == sq) hdq = ""; continue }
             if (c == "\\") { i++; continue }
-            if (q == "\"") { if (c == "\"") q = ""; continue }
-            if (c == sq || c == "\"") { q = c; continue }
+            if (hdq == "\"") { if (c == "\"") hdq = ""; continue }
+            if (c == sq || c == "\"") { hdq = c; continue }
             if (c == "#" && (i == 1 || substr(s, i - 1, 1) ~ /[[:space:]]/)) break
             if (substr(s, i, 2) == "((") { dep++; i++; continue }
             if (substr(s, i, 2) == "))" && dep > 0) { dep--; i++; continue }
@@ -9125,9 +9140,12 @@ _ci_check_deny_short_sha() {
 # Why: AG-REL-001 Rust+shell; catches heredoc lang too.
 # From: Issue #1683
 _ci_check_language_policy() {
-    local -a _ci_override=("$@") files=()
+    local -a _ci_override=("$@") files=() shell=()
+    local -A is_sh=()
     _ci_scan_files files _ci_override || return 2
+    _ci_shell_sources shell _ci_override || return 2
     local path
+    for path in "${shell[@]}"; do is_sh["${path}"]=1; done
     local -a viol=()
     for path in "${files[@]}"; do
         # What: vendored minified UI asset, not authored.
@@ -9137,14 +9155,13 @@ _ci_check_language_policy() {
         case "${path}" in
             *.py|*.pyc|*.pyw|*.rb|*.php|*.pl|*.pm|*.js|*.mjs|*.cjs|*.ts) viol+=("${path}: banned-language file"); continue ;;
         esac
-        case "${path}" in
-            *.sh|*.bats|*.yml|*.yaml)
-                local inline
-                inline="$(_ci_capture 1 grep -E '(python3?|perl|ruby|node)[[:space:]]+-[eEc]|<<-?[[:space:]]*"?(PY|PYEOF|PYTHON|PERL|RUBY)' "${path}")" || return 2
-                if [ -n "${inline}" ]; then
-                    viol+=("${path}: inline foreign-language interpreter")
-                fi ;;
-        esac
+        if [ -n "${is_sh[${path}]:-}" ] || [[ "${path}" == *.yml || "${path}" == *.yaml ]]; then
+            local inline
+            inline="$(_ci_capture 1 grep -E '(python3?|perl|ruby|node)[[:space:]]+-[eEc]|<<-?[[:space:]]*"?(PY|PYEOF|PYTHON|PERL|RUBY)' "${path}")" || return 2
+            if [ -n "${inline}" ]; then
+                viol+=("${path}: inline foreign-language interpreter")
+            fi
+        fi
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0007]" "reason=\"banned language (AG-REL-001)\"" "$(printf '%s\n' "${viol[@]}")"
@@ -9371,7 +9388,7 @@ _ci_check_pipefail_early_exit() {
     # From: Issue #1683 | PR #1858
     local pat='(^|[^|])\|[[:space:]]*(grep([[:space:]]+-[a-zA-Z]+)*[[:space:]]+(-[a-zA-Z]*(q|m[[:space:]]*[0-9])|--(quiet|silent|max-count))|head([[:space:]]|$)|sed[^|]*([[:space:];{]|[0-9])q|awk[^|]*[^a-zA-Z_]exit([^a-zA-Z_]|$))'
     local -a _ci_override=("$@") files=()
-    _ci_scan_files files _ci_override '.github/scripts/*.sh' '.github/scripts/*.bats' '*/Dockerfile' 'Dockerfile' 'services/*.sh' || return 2
+    _ci_shell_sources files _ci_override dockerfiles || return 2
     local path out
     local -a viol=()
     for path in "${files[@]}"; do
@@ -9584,15 +9601,9 @@ _ci_check_exit_evidence() {
 # Why: else-less if and "if !" give 0 (AG-VAL-030).
 # From: Issue #1683 | PR #1858
 _ci_check_if_without_else_status() {
-    local -a _ci_override=("$@") files=() dock=()
+    local -a _ci_override=("$@") files=()
     local path canon produced produced_rc kind fn stmt
-    local -A seen=()
-    _ci_shell_sources files _ci_override || return 2
-    _ci_scan_files dock _ci_override "${CI_DOCKERFILE_SPECS[@]}" || return 2
-    for path in "${files[@]}"; do seen["${path}"]=1; done
-    for path in "${dock[@]}"; do
-        [ "${path##*/}" = Dockerfile ] && [ -z "${seen[${path}]:-}" ] && files+=("${path}")
-    done
+    _ci_shell_sources files _ci_override dockerfiles || return 2
     local -a viol=()
     for path in "${files[@]}"; do
         canon="$(_ci_shell_canonical "${path}")" || return 2
@@ -12998,9 +13009,7 @@ _ci_check_shellcheck() {
     # Why: shellcheck reads shell; yaml etc not input.
     # From: Issue #1683
     local f
-    for f in "${changed[@]}"; do
-        case "${f}" in *.sh|*.bats) [ -f "${f}" ] && files+=("${f}") ;; esac
-    done
+    [ "${#changed[@]}" -eq 0 ] || _ci_shell_sources files changed || return 2
     [ "${#files[@]}" -eq 0 ] && { printf 'shellcheck=noop\n'; return 0; }
     # What: one shellcheck process per file.
     # Why: one call on all files needs ~5 GB peak RAM.
