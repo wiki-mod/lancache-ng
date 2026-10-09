@@ -882,12 +882,6 @@ fetch|accel|error: failed to download from `@URL@`|permanent
 trivy-db|trivy|FATAL failed to download vulnerability DB: @TXT@|transient
 trivy-init|trivy|database is not initialized|transient
 trivy-other|trivy|@REF@: manifest unknown|permanent
-net-pool|validate-net|Error response from daemon: Pool overlaps with other one on this address space|collision
-net-address|validate-net|Error response from daemon: driver failed programming external connectivity: Bind for @HOST@:@PID@ failed: port is already in use|collision
-net-other|validate-net|@REF@: manifest unknown|permanent
-cas-rejected|cas-push| ! [rejected]        @GREF@ -> @GREF@ (non-fast-forward)|race
-cas-lock|cas-push|error: cannot lock ref '@GREF@': is at @TAG@ but expected @SYM@|race
-cas-other|cas-push|fatal: repository '@URL@' not found|permanent
 CASES
 }
 
