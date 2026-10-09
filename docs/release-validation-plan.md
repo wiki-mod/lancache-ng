@@ -644,7 +644,7 @@ propagation path end-to-end via a real `dig`, both for creation and removal.
   timed-out probe (not just a `Status` flip) and a genuine watchdog-triggered
   restart (new `StartedAt`).
 - Known open, non-blocking gap (#1166, surfaced during #1167's own live validation):
-  `restart_container()`'s `CURL_MAX_TIME` (default 5s) can be shorter than Docker's
+  `restart_container()`'s `CURL_MAX_TIME` (deployed value 5s, `config/prod/watchdog.env`) can be shorter than Docker's
   own restart grace period (10s) for a container slow to respond to SIGTERM, producing
   a spurious `WARNING: restart call failed` log line even when the restart actually
   succeeds a few seconds later. If you see this, cross-check `docker inspect

@@ -306,7 +306,7 @@ it.
 | Category | Canonical source | Also appears in |
 |---|---|---|
 | Compose project name | `deploy/prod/docker-compose.yml` `name:` | — |
-| Compose service names | `deploy/prod/docker-compose.yml` service keys | `services/ui/src/main.rs` (`*_SERVICE` defaults), `deploy/prod/docker-compose.yml` env values that build internal URLs |
+| Compose service names | `deploy/prod/docker-compose.yml` service keys | `services/ui/src/main.rs` (reads the required `*_SERVICE` variables), `deploy/prod/docker-compose.yml` env values that build internal URLs |
 | Container names | `deploy/prod/docker-compose.yml` `container_name:` | `scripts/untracked/docker-socket-proxy.sh` (allowlist), `services/ui/src/main.rs` (`container_name_for_service`), `services/common/config.rs` (`CONTAINER_*` defaults), `services/watchdog/src/main.rs` (override guard), `config/prod/watchdog.env` (`CONTAINER_*` overrides) |
 | Docker volumes | `deploy/prod/docker-compose.yml` `volumes:` top-level block | Service-level `volumes:` mount lists in the same file |
 | Host bind-mount directories | `docs/backup-restore.md`, `docs/how-to-change-ip.md` | `deploy/prod/docker-compose.yml`, `setup.sh` |
@@ -329,7 +329,7 @@ the parts of this contract that are mechanically verifiable:
 - The allowlist never names the watchdog container in an `acl` or
   `http-request` line and grants no lifecycle action (start, stop,
   restart, wait) to the watchdog or syslog containers (issue #1486).
-- The `*_SERVICE` defaults in `services/ui/src/main.rs` match a real
+- The `*_SERVICE` values the ui requires (set in compose) match a real
   Compose service name (not a container name) in
   `deploy/prod/docker-compose.yml`.
 
