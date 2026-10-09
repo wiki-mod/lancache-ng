@@ -8488,9 +8488,6 @@ _ci_shell_sources() {
 _ci_shell_ast() {
     local f="$1" src lang=bash
     case "${f##*/}" in
-        *.bats)
-            lang=bats
-            src="$(_ci_run "[CI-ERROR-CHECK-0166]" "file=\"${f}\" reason=\"source unreadable\"" cat -- "${f}")" || return 2 ;;
         Dockerfile)
             src="$(_ci_run "[CI-ERROR-CHECK-0165]" "file=\"${f}\" reason=\"Dockerfile lines unreadable\"" _ci_dockerfile_logical_lines "${f}")" || return 2
             # What: RUN shell text; SHELL pipefail -> set.
@@ -8506,7 +8503,9 @@ _ci_shell_ast() {
                     sub(/^[[:space:]]+/, "", t)
                     if (substr(t, 1, 1) != "[") print t
                 }' <<< "${src}")" || return 2 ;;
-        *) src="$(_ci_run "[CI-ERROR-CHECK-0166]" "file=\"${f}\" reason=\"source unreadable\"" cat -- "${f}")" || return 2 ;;
+        *)
+            [[ "${f##*/}" != *.bats ]] || lang=bats
+            src="$(_ci_run "[CI-ERROR-CHECK-0166]" "file=\"${f}\" reason=\"source unreadable\"" cat -- "${f}")" || return 2 ;;
     esac
     _ci_run -s "[CI-ERROR-CHECK-0162]" "file=\"${f}\" lang=\"${lang}\" reason=\"shfmt cannot parse the source\"" \
         shfmt -ln "${lang}" --to-json <<< "${src}"
