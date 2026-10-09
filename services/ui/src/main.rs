@@ -4442,13 +4442,12 @@ async fn update_dhcp_mode(
     Form(f): Form<Fields>,
 ) -> Result<Redirect, HtmlError> {
     let raw = f.get("dhcp_mode").to_ascii_lowercase();
-    if !["disabled", "kea", "dnsmasq-proxy", "dnsmasq-relay"].contains(&raw.as_str()) {
+    let Some(mode) = DhcpMode::from_name(&raw) else {
         return Err(dhcp_error(
             StatusCode::CONFLICT,
             "Invalid DHCP mode requested.",
         ));
-    }
-    let mode = DhcpMode::parse(&raw, false);
+    };
     let previous = state.config.dhcp_mode();
 
     // What: test the settings directory before any stop.
@@ -4460,6 +4459,8 @@ async fn update_dhcp_mode(
             state.config.ui_settings_file
         ))
     })?;
+    // What: remove the probe file; a failure is ignored.
+    // Why: the write passed; a leftover file is inert.
     let _ = fs::remove_file(&check);
 
     stop_for_mode(&state, mode, previous).await?;

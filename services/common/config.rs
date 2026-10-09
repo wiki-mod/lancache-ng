@@ -85,6 +85,8 @@ impl Uint {
     pub fn parse(&self, raw: Option<&str>) -> Result<(u64, Option<String>), String> {
         let name = self.name;
         let raw = non_empty(raw.map(str::trim)).ok_or_else(|| not_set(name))?;
+        // What: accept ASCII digits only.
+        // Why: u64 parsing alone accepts a leading plus.
         if !raw.bytes().all(|b| b.is_ascii_digit()) {
             return Err(format!("{name}={raw} is not an unsigned decimal number"));
         }
@@ -120,17 +122,30 @@ pub enum DhcpMode {
 }
 
 impl DhcpMode {
+    // What: every mode, the one list of valid mode names.
+    // Why: ui validation and parse must not keep own lists.
+    pub const ALL: [Self; 4] = [
+        Self::Disabled,
+        Self::Kea,
+        Self::DnsmasqProxy,
+        Self::DnsmasqRelay,
+    ];
+
+    // What: the mode whose text is exactly raw, or None.
+    // Why: a form value is valid only as a known mode name.
+    pub fn from_name(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == raw)
+    }
+
     // What: mode from text; empty uses the legacy flag.
     // Why: unknown text must fail closed to Disabled.
     // From: Issue #844
     pub fn parse(raw: &str, legacy_enabled: bool) -> Self {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "kea" => Self::Kea,
-            "dnsmasq-proxy" => Self::DnsmasqProxy,
-            "dnsmasq-relay" => Self::DnsmasqRelay,
-            "" if legacy_enabled => Self::Kea,
-            _ => Self::Disabled,
+        let raw = raw.trim().to_ascii_lowercase();
+        if raw.is_empty() && legacy_enabled {
+            return Self::Kea;
         }
+        Self::from_name(&raw).unwrap_or(Self::Disabled)
     }
 
     // What: the mode's text form, as DHCP_MODE spells it.
@@ -180,6 +195,8 @@ pub const CONTAINER_PREFIX: &str = "lancache-";
 // What: true if service names the container, short or full.
 // Why: one rule maps compose service names to containers.
 pub fn is_container(container: &str, service: &str) -> bool {
+    // What: match the full name or the unprefixed name.
+    // Why: compose service names omit the container prefix.
     container == service || container.strip_prefix(CONTAINER_PREFIX) == Some(service)
 }
 
@@ -322,17 +339,28 @@ mod tests {
     fn dhcp_mode_maps_text_and_container() {
         assert_eq!(
             DhcpMode::parse("kea", false).container(),
-            Some(CONTAINER_DHCP)
+            Some("lancache-dhcp")
         );
         for text in ["dnsmasq-proxy", "dnsmasq-relay"] {
             let mode = DhcpMode::parse(text, false);
             assert_eq!(mode.as_str(), text);
-            assert_eq!(mode.container(), Some(CONTAINER_DHCP_PROXY));
+            assert_eq!(mode.container(), Some("lancache-dhcp-proxy"));
         }
         assert_eq!(DhcpMode::parse("disabled", false).container(), None);
         assert_eq!(DhcpMode::parse("bogus", true), DhcpMode::Disabled);
         assert_eq!(DhcpMode::parse("", true), DhcpMode::Kea);
         assert_eq!(DhcpMode::parse("", false), DhcpMode::Disabled);
+    }
+
+    // What: the mode list holds the four names, none twice.
+    // Why: ui validation reads it; a gap rejects a mode.
+    #[test]
+    fn dhcp_mode_names_are_the_four_known_ones() {
+        let names: Vec<&str> = DhcpMode::ALL.iter().map(|m| m.as_str()).collect();
+        assert_eq!(names, ["disabled", "kea", "dnsmasq-proxy", "dnsmasq-relay"]);
+        assert_eq!(DhcpMode::from_name("kea"), Some(DhcpMode::Kea));
+        assert_eq!(DhcpMode::from_name("Kea"), None);
+        assert_eq!(DhcpMode::from_name(""), None);
     }
 
     // What: zone forms convert both ways, no doubled dots.
@@ -404,10 +432,50 @@ mod tests {
     // Why: service names and container names both arrive.
     #[test]
     fn is_container_accepts_short_and_full_names() {
-        assert!(is_container(CONTAINER_NATS, "nats"));
-        assert!(is_container(CONTAINER_NATS, CONTAINER_NATS));
-        assert!(
-            !is_container(CONTAINER_NATS, "proxy") && !is_container(CONTAINER_NATS, "lancache")
+        assert!(is_container("lancache-nats", "nats"));
+        assert!(is_container("lancache-nats", "lancache-nats"));
+        assert!(!is_container("lancache-nats", "proxy"));
+        assert!(!is_container("lancache-nats", "lancache"));
+    }
+
+    // What: each container name is in the prod compose.
+    // Why: a renamed container would break lookups.
+    #[test]
+    fn container_names_match_the_prod_compose_file() {
+        let path = format!(
+            "{}/../../deploy/prod/docker-compose.yml",
+            env!("CARGO_MANIFEST_DIR")
         );
+        let compose = std::fs::read_to_string(&path).expect("prod compose file");
+        let names = [
+            CONTAINER_PROXY,
+            CONTAINER_DNS_STANDARD,
+            CONTAINER_DNS_SSL,
+            CONTAINER_NATS,
+            CONTAINER_UI,
+            CONTAINER_NETDATA,
+            CONTAINER_DHCP,
+            CONTAINER_DHCP_PROXY,
+            CONTAINER_DHCP_PROBE,
+            CONTAINER_SYSLOG,
+            CONTAINER_NTP,
+            CONTAINER_DOCKER_SOCKET_PROXY,
+        ];
+        for name in names {
+            let line = format!("container_name: {name}\n");
+            assert!(compose.contains(&line), "compose lacks {name}");
+            assert!(name.starts_with(CONTAINER_PREFIX), "{name} has no prefix");
+        }
+    }
+
+    // What: the API path equals the entrypoint's path.
+    // Why: ui and the dns script append the same path.
+    #[test]
+    fn pdns_api_path_matches_the_entrypoint() {
+        let path = format!("{}/../dns/entrypoint.sh", env!("CARGO_MANIFEST_DIR"));
+        let script = std::fs::read_to_string(&path).expect("services/dns/entrypoint.sh");
+        let auth = format!("PDNS_AUTH_API_URL=\"http://127.0.0.1:8081{PDNS_API_PATH}\"");
+        let rec = format!("PDNS_REC_API_URL=\"http://127.0.0.1:8082{PDNS_API_PATH}\"");
+        assert!(script.contains(&auth) && script.contains(&rec));
     }
 }
