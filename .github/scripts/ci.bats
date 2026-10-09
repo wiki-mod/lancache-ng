@@ -2946,17 +2946,24 @@ _extract_functions() {
     # What: per env set: the full rendered lines + warnings.
     # Why: a bad entry must warn, never reach dnsmasq.conf.
     # From: Issue #1683 | PR #1858
-    local root c="${BATS_TEST_TMPDIR}/dnsmasq.conf" case i r n d bf bs co want warn w
+    local root c="${BATS_TEST_TMPDIR}/dnsmasq.conf" row case i r n d bf bs co s b u want warn w
     local -a ws
+    local -A V=(
+        ["@IF@"]="$(_val name)" ["@R@"]="$(_val host)" ["@N@"]="$(_val host)" ["@D@"]="$(_val name)"
+        ["@BF@"]="$(_val name)" ["@BS@"]="$(_val host)" ["@V1@"]="$(_val name)" ["@V2@"]="$(_val name)"
+        ["@V3@"]="$(_val name)" ["@V4@"]="$(_val name)"
+    )
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     # shellcheck source=services/dhcp-proxy/entrypoint.sh
     source "$(_extract_functions "${root}/services/dhcp-proxy/entrypoint.sh" _dhcp_proxy_reject_embedded_newline \
-        _dhcp_proxy_render_optional_directives _dhcp_proxy_render_custom_options)"
+        _dhcp_proxy_render_optional_directives _dhcp_proxy_render_custom_options \
+        _dhcp_proxy_render_pxe_service_directives)"
     # What: "." is an empty field, \n a raw newline.
     # Why: keeps every table row at ten visible fields.
     # From: Issue #1683 | PR #1858
     _v() { if [ "$1" = . ]; then printf ''; else printf '%b' "$1"; fi; }
-    while IFS='|' read -r case i r n d bf bs co want warn; do
+    while IFS= read -r row; do
+        IFS='|' read -r case i r n d bf bs co want warn <<< "$(_fill "${row}")"
         DHCP_PROXY_INTERFACE="$(_v "${i}")"; DHCP_PROXY_ROUTER="$(_v "${r}")"
         DHCP_NTP_SERVERS="$(_v "${n}")"; DHCP_PROXY_DOMAIN="$(_v "${d}")"
         DHCP_PROXY_BOOT_FILENAME="$(_v "${bf}")"; DHCP_PROXY_BOOT_SERVER="$(_v "${bs}")"
@@ -2978,30 +2985,27 @@ _extract_functions() {
         done
     done <<'CASES'
 none|.|.|.|.|.|.|.|.|-
-basic|eth0|10.0.0.1|ntp1|lan|.|.|.|interface=eth0#dhcp-option-pxe=3,10.0.0.1#dhcp-option-pxe=42,ntp1#dhcp-option-pxe=15,lan|-
-boot|.|.|.|.|pxe.efi|10.0.0.5|.|dhcp-boot=pxe.efi,,10.0.0.5|-
-bootempty|.|.|.|.|pxe.efi|.|.|dhcp-boot=pxe.efi,,|-
-bootsrvonly|.|.|.|.|.|10.0.0.5|.|.|without DHCP_PROXY_BOOT_FILENAME
-custom|.|.|.|.|.|.|66:tftp.lan;67:boot.efi|dhcp-option-pxe=66,tftp.lan#dhcp-option-pxe=67,boot.efi|-
-badcode|.|.|.|.|.|.|0:x;255:x;ab:x;66:ok|dhcp-option-pxe=66,ok|'0:x': option code 0 is outside^'255:x': option code 255 is outside^'ab:x': option code must be numeric
-nocolon|.|.|.|.|.|.|66tftp;67:b; :x|dhcp-option-pxe=67,b|'66tftp' (expected CODE:VALUE)^':x' (expected CODE:VALUE, both non-empty)
-code6|.|.|.|.|.|.|6:1.1.1.1|.|option code 6 (DNS servers) always collides
-collide|.|10.0.0.1|.|.|.|.|3:10.0.0.9;15:example.com;42:10.0.0.20|dhcp-option-pxe=3,10.0.0.1#dhcp-option-pxe=15,example.com#dhcp-option-pxe=42,10.0.0.20|option code 3 (router) collides with DHCP_PROXY_ROUTER
-collideall|.|r|n|d|.|.|3:a;15:b;42:c|dhcp-option-pxe=3,r#dhcp-option-pxe=42,n#dhcp-option-pxe=15,d|code 3 (router) collides^code 15 (domain name) collides^code 42 (NTP servers) collides
-nliface|eth\n0|.|.|.|.|.|.|.|DHCP_PROXY_INTERFACE contains an embedded newline
-nlfield|.|a\nb|ntp1|c\nd|.|.|.|dhcp-option-pxe=42,ntp1|DHCP_PROXY_ROUTER contains^DHCP_PROXY_DOMAIN contains
-nlboot|.|.|.|.|a\nb|10.0.0.5|.|.|DHCP_PROXY_BOOT_FILENAME/DHCP_PROXY_BOOT_SERVER contains
-nlcustom|.|.|.|.|.|.|60:PXEClient\ndhcp-option-pxe=99,evil|dhcp-option-pxe=60,PXEClient|-
-space|.|.|.|.|.|.|  60:PXE Client  ;93:0|dhcp-option-pxe=60,PXE Client#dhcp-option-pxe=93,0|-
+basic|@IF@|@R@|@N@|@D@|.|.|.|interface=@IF@#dhcp-option-pxe=3,@R@#dhcp-option-pxe=42,@N@#dhcp-option-pxe=15,@D@|-
+boot|.|.|.|.|@BF@|@BS@|.|dhcp-boot=@BF@,,@BS@|-
+bootempty|.|.|.|.|@BF@|.|.|dhcp-boot=@BF@,,|-
+bootsrvonly|.|.|.|.|.|@BS@|.|.|without DHCP_PROXY_BOOT_FILENAME
+custom|.|.|.|.|.|.|66:@V1@;67:@V2@|dhcp-option-pxe=66,@V1@#dhcp-option-pxe=67,@V2@|-
+badcode|.|.|.|.|.|.|0:@V1@;255:@V1@;ab:@V1@;66:@V2@|dhcp-option-pxe=66,@V2@|'0:@V1@': option code 0 is outside^'255:@V1@': option code 255 is outside^'ab:@V1@': option code must be numeric
+nocolon|.|.|.|.|.|.|66@V1@;67:@V2@; :@V3@|dhcp-option-pxe=67,@V2@|'66@V1@' (expected CODE:VALUE)^':@V3@' (expected CODE:VALUE, both non-empty)
+code6|.|.|.|.|.|.|6:@V1@|.|option code 6 (DNS servers) always collides
+collide|.|@R@|.|.|.|.|3:@V1@;15:@V2@;42:@V3@|dhcp-option-pxe=3,@R@#dhcp-option-pxe=15,@V2@#dhcp-option-pxe=42,@V3@|option code 3 (router) collides with DHCP_PROXY_ROUTER
+collideall|.|@R@|@N@|@D@|.|.|3:@V1@;15:@V2@;42:@V3@|dhcp-option-pxe=3,@R@#dhcp-option-pxe=42,@N@#dhcp-option-pxe=15,@D@|code 3 (router) collides^code 15 (domain name) collides^code 42 (NTP servers) collides
+nliface|@V1@\n@V2@|.|.|.|.|.|.|.|DHCP_PROXY_INTERFACE contains an embedded newline
+nlfield|.|@V1@\n@V2@|@N@|@V3@\n@V4@|.|.|.|dhcp-option-pxe=42,@N@|DHCP_PROXY_ROUTER contains^DHCP_PROXY_DOMAIN contains
+nlboot|.|.|.|.|@V1@\n@V2@|@BS@|.|.|DHCP_PROXY_BOOT_FILENAME/DHCP_PROXY_BOOT_SERVER contains
+nlcustom|.|.|.|.|.|.|60:@V1@\ndhcp-option-pxe=99,@V2@|dhcp-option-pxe=60,@V1@|-
+space|.|.|.|.|.|.|  60:@V1@ @V2@  ;93:0|dhcp-option-pxe=60,@V1@ @V2@#dhcp-option-pxe=93,0|-
 CASES
     # What: per BIOS/UEFI/server set: full lines + warnings.
     # Why: PXE clients need one matching boot pointer.
     # From: Issue #1683 | PR #1858
-    local s b u
-    # shellcheck source=services/dhcp-proxy/entrypoint.sh
-    source "$(_extract_functions "${root}/services/dhcp-proxy/entrypoint.sh" _dhcp_proxy_reject_embedded_newline \
-        _dhcp_proxy_render_pxe_service_directives)"
-    while IFS='|' read -r case s b u want warn; do
+    while IFS= read -r row; do
+        IFS='|' read -r case s b u want warn <<< "$(_fill "${row}")"
         [ "${s}" != . ] || s=""
         [ "${b}" != . ] || b=""
         [ "${u}" != . ] || u=""
@@ -3021,12 +3025,12 @@ CASES
         fi
     done <<'CASES'
 none|.|.|.|.|-
-serveronly|10.0.0.5|.|.|.|a boot server alone cannot produce a pxe-service directive
-fileonly|.|bios.0|.|.|a boot filename alone cannot produce a pxe-service directive
-bios|10.0.0.5|b.0|.|pxe-service=x86PC,"lancache-ng PXE boot (BIOS)",b.0,10.0.0.5#dhcp-match=set:lancache-pxe-bios,option:client-arch,0#dhcp-boot=tag:lancache-pxe-bios,b.0,,10.0.0.5|-
-uefi|10.0.0.5|.|u.efi|dhcp-match=set:lancache-pxe-uefi,option:client-arch,7#dhcp-match=set:lancache-pxe-uefi,option:client-arch,11#dhcp-boot=tag:lancache-pxe-uefi,u.efi,,10.0.0.5#pxe-service=IA64_EFI,"lancache-ng PXE proxy active",0|-
-both|10.0.0.5|b.0|u.efi|pxe-service=x86PC,"lancache-ng PXE boot (BIOS)",b.0,10.0.0.5#dhcp-match=set:lancache-pxe-bios,option:client-arch,0#dhcp-boot=tag:lancache-pxe-bios,b.0,,10.0.0.5#dhcp-match=set:lancache-pxe-uefi,option:client-arch,7#dhcp-match=set:lancache-pxe-uefi,option:client-arch,11#dhcp-boot=tag:lancache-pxe-uefi,u.efi,,10.0.0.5|-
-newline|10.0.0.5\ndhcp-boot=injected,,evil|bios.0|.|.|embedded newline
+serveronly|@BS@|.|.|.|a boot server alone cannot produce a pxe-service directive
+fileonly|.|@V1@|.|.|a boot filename alone cannot produce a pxe-service directive
+bios|@BS@|@V1@|.|pxe-service=x86PC,"lancache-ng PXE boot (BIOS)",@V1@,@BS@#dhcp-match=set:lancache-pxe-bios,option:client-arch,0#dhcp-boot=tag:lancache-pxe-bios,@V1@,,@BS@|-
+uefi|@BS@|.|@V2@|dhcp-match=set:lancache-pxe-uefi,option:client-arch,7#dhcp-match=set:lancache-pxe-uefi,option:client-arch,11#dhcp-boot=tag:lancache-pxe-uefi,@V2@,,@BS@#pxe-service=IA64_EFI,"lancache-ng PXE proxy active",0|-
+both|@BS@|@V1@|@V2@|pxe-service=x86PC,"lancache-ng PXE boot (BIOS)",@V1@,@BS@#dhcp-match=set:lancache-pxe-bios,option:client-arch,0#dhcp-boot=tag:lancache-pxe-bios,@V1@,,@BS@#dhcp-match=set:lancache-pxe-uefi,option:client-arch,7#dhcp-match=set:lancache-pxe-uefi,option:client-arch,11#dhcp-boot=tag:lancache-pxe-uefi,@V2@,,@BS@|-
+newline|@BS@\ndhcp-boot=injected,,@V3@|@V1@|.|.|embedded newline
 CASES
 }
 
