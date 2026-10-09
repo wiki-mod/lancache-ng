@@ -1750,20 +1750,28 @@ CASES
         || { echo "size: $(get_env_var CACHE_MAX_SIZE "${d}/.env") ${output}"; return 1; }
 }
 
+# What: TTL is a positive whole number up to setup.sh's max
+# Why: a bad TTL would be written or reused unchecked
+# From: Issue #1683 | PR #1858
 @test "validate_ui_session_ttl_seconds rejects invalid and accepts valid" {
-    # What: TTL positive int within max.
-    # Why: a bad TTL would be written or reused unchecked.
-    # From: Issue #1683 | PR #1858
-    local repo_root
-    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${repo_root}"
-    run validate_ui_session_ttl_seconds abc src
-    [[ "${output}" == *"unsigned integer"* ]]
+    local max
+    _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
+    max="${MAX_UI_SESSION_TTL_SECONDS:-}"
+    [[ "${max}" =~ ^[1-9][0-9]*$ ]] || { echo "no MAX_UI_SESSION_TTL_SECONDS in setup.sh: '${max}'"; return 1; }
+    run validate_ui_session_ttl_seconds "$(_val name)" src
+    _expect not-a-number 1 "unsigned integer" || return 1
     run validate_ui_session_ttl_seconds 0 src
-    [[ "${output}" == *"greater than zero"* ]]
-    run validate_ui_session_ttl_seconds 86400 src
-    [ "${status}" -eq 0 ]
-    [ -z "${output}" ]
+    _expect zero 1 "greater than zero" || return 1
+    run validate_ui_session_ttl_seconds 000 src
+    _expect zeros 1 "greater than zero" || return 1
+    run validate_ui_session_ttl_seconds "$((max + 1))" src
+    _expect over-max 1 "must be at most ${max} seconds" || return 1
+    run validate_ui_session_ttl_seconds "${max}" src
+    _expect at-max 0 "=" || return 1
+    run validate_ui_session_ttl_seconds 010 src
+    _expect leading-zero 0 "=" || return 1
+    run validate_ui_session_ttl_seconds "$(_val int 1 "${max}")" src
+    _expect valid 0 "=" || return 1
 }
 
 # What: per row: changed files, labels -> clean, note, warn
