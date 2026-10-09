@@ -709,15 +709,15 @@ CASES
     blk="$(awk '/^[A-Za-z0-9_.-]+:[[:space:]]*$/ { sub(/:.*/, ""); print; exit }' "${CI_MANIFEST_SOURCE}")"
     [ -n "${blk}" ] || { echo "no block in ${CI_MANIFEST_SOURCE}"; return 1; }
     CI_MANIFEST="${nosot}" run _ci_block_keys "${blk}"
-    _expect keys 2 "[CI-ERROR-CORE-0109] block=\"${blk}\";manifest=\"${nosot}\";No such file" || return 1
+    _expect keys 2 "[CI-ERROR-CORE-0139] file=\"${nosot}\";no such file or directory;[CI-ERROR-CORE-0109] block=\"${blk}\";manifest=\"${nosot}\"" || return 1
     CI_MANIFEST="${nosot}" run _ci_block_entry_field "${blk}" "" "${name}"
-    _expect field 2 "[CI-ERROR-CORE-0107] block=\"${blk}\";manifest=\"${nosot}\";No such file" || return 1
+    _expect field 2 "[CI-ERROR-CORE-0139] file=\"${nosot}\";no such file or directory;[CI-ERROR-CORE-0107] block=\"${blk}\";manifest=\"${nosot}\"" || return 1
     CI_MANIFEST="${nosot}" run _ci_block_entry_list "${blk}" "" "${name}"
-    _expect list 2 "[CI-ERROR-CORE-0108] block=\"${blk}\";manifest=\"${nosot}\";No such file" || return 1
+    _expect list 2 "[CI-ERROR-CORE-0139] file=\"${nosot}\";no such file or directory;[CI-ERROR-CORE-0108] block=\"${blk}\";manifest=\"${nosot}\"" || return 1
     CI_MANIFEST="${nosot}" run _ci_channel_field "${name}"
-    _expect channel 2 "[CI-ERROR-CORE-0123] field=\"${name}\";manifest=\"${nosot}\";No such file" || return 1
+    _expect channel 2 "[CI-ERROR-CORE-0139] file=\"${nosot}\";no such file or directory;[CI-ERROR-CORE-0123] field=\"${name}\";manifest=\"${nosot}\"" || return 1
     run _ci_sot_load "${nosot}"
-    _expect load 2 "[CI-ERROR-CORE-0136] manifest=\"${nosot}\";No such file" || return 1
+    _expect load 2 "[CI-ERROR-CORE-0139] file=\"${nosot}\";no such file or directory;[CI-ERROR-CORE-0136] manifest=\"${nosot}\"" || return 1
     CI_MANIFEST="${nosot}" run bash "${CI_SH}" plan "${name}"
     _expect cli 2 "[CI-ERROR-CORE-0003] manifest=\"${nosot}\"" || return 1
     run _ci_block_keys "${blk}" all
@@ -1311,7 +1311,7 @@ env-over-sot|@VAR@=@ENVV@|@VAR@|0|=@ENVV@
 json-over-sot|CI_VARIABLES={"@VAR@":"@JSONV@"}|@VAR@|0|=@JSONV@
 env-over-json|@VAR@=@ENVV@ CI_VARIABLES={"@VAR@":"@JSONV@"}|@VAR@|0|=@ENVV@
 bad-json|CI_VARIABLES=@BAD@|@VAR@|2|[CI-ERROR-VARIABLES-0015] name="@VAR@"
-no-jq|PATH=@NOJQ@ CI_VARIABLES={"@VAR@":"@JSONV@"}|@VAR@|2|[CI-ERROR-VARIABLES-0023] name="@VAR@";command not found;PATH=@NOJQ@
+no-jq|PATH=@NOJQ@ CI_VARIABLES={"@VAR@":"@JSONV@"}|@VAR@|2|[CI-ERROR-CORE-0141];jq: command not found;[CI-ERROR-CORE-0136]
 no-value|-|@NOVAR@|2|[CI-ERROR-VARIABLES-0001] name="@NOVAR@"
 CASES
 }

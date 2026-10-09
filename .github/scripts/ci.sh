@@ -233,62 +233,39 @@ ci_require_manifest() {
 declare -gA _CI_SOT=() _CI_SOT_LOADED=()
 _CI_SOT_SEQ=0
 
-# What: awk SOT index as one bash array assignment.
-# Why: one parse and one eval; readers then only look up.
+# What: jq over yq's SOT JSON: index lines for one eval.
+# Why: one YAML parser (yq); readers then only look up.
 # From: Issue #1683 | PR #1858
-_CI_AWK_SOT_INDEX='
-    function keep(p) { return want == "" || p == want || index(p, want "/") == 1 }
-    function sq(x) { gsub(q, q "\"" q "\"" q, x); return q x q }
-    function put(k, v) { printf "[%s]=%s\n", sq(kp k), sq(v) }
-    function node(p, kind, raw,   v, n, seg, d2, anc, par) {
-        uerr = ""; v = (kind == "c") ? "" : unq(raw)
-        if (keep(p)) { put("k:" p, kind); put("r:" p, raw); put("v:" p, v); put("e:" p, uerr) }
-        n = split(p, seg, "/"); par = p; sub(/\/?[^\/]*$/, "", par)
-        kids[par] = kids[par] seg[n] "\n"
-        if (kind == "c") boxes[par] = boxes[par] seg[n] "\n"
-        anc = seg[1]
-        for (d2 = 2; d2 <= 3 && d2 < n; d2++) {
-            anc = anc "/" seg[d2]
-            if (!((anc "/" seg[n]) in first)) first[anc "/" seg[n]] = p
-            all[anc "/" seg[n]] = all[anc "/" seg[n]] p "\n"
-        }
-    }
-    function item(p, raw,   v) {
-        uerr = ""; v = unq(raw)
-        if (uerr == "") items[p] = items[p] v "\n"
-        else if (!(p in xerr)) xerr[p] = items[p] uerr
-    }
-    /^[[:space:]]*(#|$)/ { next }
-    {
-        match($0, /^ */); ind = RLENGTH; t = substr($0, ind + 1); sub(/[[:space:]]+$/, "", t)
-        while (d > 0 && si[d] >= ind) d--
-        if (t ~ /^-([[:space:]]|$)/) { sub(/^-[[:space:]]*/, "", t); if (d) item(sp[d], t); next }
-        if (!match(t, /^[A-Za-z0-9_.-]+:/)) next
-        key = substr(t, 1, RLENGTH - 1); rest = substr(t, RLENGTH + 1); sub(/^[[:space:]]+/, "", rest)
-        p = d ? sp[d] "/" key : key
-        if (rest == "") { node(p, "c", ""); d++; si[d] = ind; sp[d] = p; next }
-        if (substr(rest, 1, 1) != "[") { node(p, "s", rest); next }
-        node(p, "l", rest)
-        sub(/^\[/, "", rest); sub(/\].*$/, "", rest); gsub(/[[:space:],]+/, " ", rest)
-        n = split(rest, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") item(p, a[i])
-    }
-    END {
-        for (k in kids) if (keep(k)) put("c:" k, kids[k])
-        for (k in boxes) if (keep(k)) put("b:" k, boxes[k])
-        for (k in first) if (keep(k)) put("f:" k, first[k])
-        for (k in all) if (keep(k)) put("a:" k, all[k])
-        for (k in items) if (keep(k)) put("i:" k, items[k])
-        for (k in xerr) if (keep(k)) put("x:" k, xerr[k])
-    }
-'
+_CI_JQ_SOT_INDEX='
+    def nodes($pre): to_entries[] | ($pre + [.key]) as $p
+        | {p: $p, v: .value}, (if (.value | type) == "object" then .value | nodes($p) else empty end);
+    def scal: if type == "string" then . elif . == null then "" else tojson end;
+    def sq: @sh;
+    def keep($s): $want == "" or $s == $want or ($s | startswith($want + "/"));
+    def put($k; $v): "[" + (($kp + $k) | sq) + "]=" + ($v | sq);
+    [nodes([]) | .s = (.p | join("/")) | .par = (.p[:-1] | join("/")) | .last = .p[-1]
+        | .kind = (if (.v | type) == "object" then "c" elif (.v | type) == "array" then "l" else "s" end)] as $n
+    | ($n[] | select(keep(.s)) | (if .kind == "s" then (.v | scal) else "" end) as $val
+        | put("k:" + .s; .kind), put("r:" + .s; $val), put("v:" + .s; $val)),
+      (reduce $n[] as $x ({};
+            .c[$x.par] += $x.last + "\n"
+            | (if $x.kind == "c" then .b[$x.par] += $x.last + "\n" else . end)
+            | (if ($x.v | type) == "array" and ($x.v | length) > 0
+                then .i[$x.s] = ($x.v | map(scal + "\n") | add) else . end)
+            | reduce range(2; [4, ($x.p | length)] | min) as $d (.;
+                (($x.p[:$d] | join("/")) + "/" + $x.last) as $a
+                | .f[$a] //= $x.s | .a[$a] += $x.s + "\n"))
+        | to_entries[] | .key as $t | .value | to_entries[] | select(keep(.key)) | put($t + ":" + .key; .value))'
 
 # What: index a SOT file, or one subtree, under a prefix.
-# Why: one awk pass and one eval; raw error in a global.
+# Why: one yq parse and one eval; raw logged by _ci_run.
 # From: Issue #1683 | PR #1858
 _ci_sot_index() {
-    local idx
-    if ! idx="$(awk -v q="'" -v want="$2" -v kp="$3" "${_CI_AWK_UNQUOTE}${_CI_AWK_SOT_INDEX}" "$1" 2>&1)"; then
-        _CI_SOT_RAW_ERR="${idx}"
+    local json idx
+    if ! json="$(_ci_run -s "[CI-ERROR-CORE-0139]" "file=\"$1\" reason=\"yq cannot read the SOT\"" yq -o=json '.' "$1")" \
+        || ! idx="$(_ci_run -s "[CI-ERROR-CORE-0141]" "file=\"$1\" reason=\"SOT index not built\"" \
+            jq -r --arg want "$2" --arg kp "$3" "${_CI_JQ_SOT_INDEX}" <<< "${json}")"; then
+        _CI_SOT_RAW_ERR="raw in the CORE-0139/0141 line above"
         return 2
     fi
     eval "_CI_SOT+=(${idx})"
@@ -322,7 +299,7 @@ _ci_sot_view() {
 }
 
 # What: List direct child keys under a top-level block.
-# Why: One SOT index, no yq/python (AG-REL-001/006).
+# Why: One SOT index from yq; no per-block parser.
 # From: Issue #1683 | PR #1858
 _ci_block_keys() {
     local block="$1" mode="${2:-blocks}" kp t=b
@@ -369,32 +346,6 @@ _ci_toolchain_target() {
 # SEMANTIC PARSERS
 # =========================================================
 
-# What: awk unq(): YAML '..' and ".." scalars to raw text.
-# Why: one unquote for the SOT index; odd forms set uerr.
-# From: Issue #1683 | PR #1858
-_CI_AWK_UNQUOTE='
-    function bad_val(v) { uerr = "unsupported YAML quoting: " v; return "" }
-    function unq(v,  o, t, i, c) {
-        if (substr(v, 1, 1) == q) {
-            if (length(v) < 2 || substr(v, length(v), 1) != q) return bad_val(v)
-            v = substr(v, 2, length(v) - 2); t = v; gsub(q q, "", t)
-            if (index(t, q)) return bad_val(v)
-            gsub(q q, q, v); return v
-        }
-        if (substr(v, 1, 1) != "\"") return v
-        if (length(v) < 2 || substr(v, length(v), 1) != "\"") return bad_val(v)
-        v = substr(v, 2, length(v) - 2); o = ""
-        for (i = 1; i <= length(v); i++) {
-            c = substr(v, i, 1)
-            if (c == "\"") return bad_val(v)
-            if (c != "\\") { o = o c; continue }
-            c = substr(v, ++i, 1)
-            if (c == "\"" || c == "\\" || c == "/") o = o c; else return bad_val(v)
-        }
-        return o
-    }
-'
-
 # What: Print one field of a block entry.
 # Why: One SOT index, no per-block duplicate.
 # From: Issue #1683 | PR #1858
@@ -405,7 +356,7 @@ _ci_block_entry_field() {
         ci_error "[CI-ERROR-CORE-0107]" "${ctx}" "${_CI_SOT_RAW_ERR}"
         return 2
     fi
-    # What: entry="" reads a block-level scalar; quotes cut.
+    # What: entry="" reads a block-level scalar.
     # Why: base_images has no entry level; one reader.
     # From: Issue #1683 | PR #1858
     if [ -z "${entry}" ]; then
@@ -414,10 +365,6 @@ _ci_block_entry_field() {
         p="${_CI_SOT["${kp}f:${block}/${entry}/${field}"]:-}"
     fi
     [ -n "${p}" ] && [ -n "${_CI_SOT["${kp}k:${p}"]+set}" ] || return 0
-    if [ -n "${_CI_SOT["${kp}e:${p}"]}" ]; then
-        ci_error "[CI-ERROR-CORE-0137]" "${ctx/SOT field unreadable/SOT value quoting unsupported}" "${_CI_SOT["${kp}e:${p}"]}"
-        return 2
-    fi
     [ -z "${_CI_SOT["${kp}v:${p}"]}" ] || printf '%s\n' "${_CI_SOT["${kp}v:${p}"]}"
 }
 
@@ -436,10 +383,6 @@ _ci_block_entry_list() {
         return 2
     fi
     [ "${_CI_SOT["${kp}k:${node}"]:-}" = c ] || return 0
-    if [ -n "${_CI_SOT["${kp}x:${node}/${field}"]:-}" ]; then
-        ci_error "[CI-ERROR-CORE-0138]" "${ctx/SOT list unreadable/SOT list item quoting unsupported}" "${_CI_SOT["${kp}x:${node}/${field}"]}"
-        return 2
-    fi
     printf '%s' "${_CI_SOT["${kp}i:${node}/${field}"]:-}"
 }
 

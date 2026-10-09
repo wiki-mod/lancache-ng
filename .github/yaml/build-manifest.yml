@@ -282,6 +282,7 @@ build_toolchain:
       - tcpdump
       - trivy@testing=0.74.0-r0
       - tzdata
+      - yq-go
       - zlib-dev
       - zlib-static
     # What: apk repos (tag=url) added by build and resolver
@@ -357,6 +358,7 @@ build_toolchain:
       - trivy
       - xargs
       - xz
+      - yq
     # What: Commands the toolchain smoke must run clean.
     # Why: present is not runnable; one owner of the runs.
     # From: Issue #1683 | PR #1858
@@ -372,6 +374,7 @@ build_toolchain:
       - bats --version
       - shellcheck --version
       - shfmt --version
+      - yq --version
       - docker compose version
       - docker buildx version
       - dhclient --version
