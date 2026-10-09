@@ -816,6 +816,12 @@ file_headers:
 build_variables:
   rust: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT, CI_TOOLCHAIN_COMPILERS]
 
+# What: CI variables every ci.sh build stage reads
+# Why: a stage has no SOT; these never key an identity
+# From: Issue #1683 | PR #1858
+stage_variables:
+  ci_sh: [CI_RETRY_MAX_ATTEMPTS, CI_RETRY_BACKOFF_BASE_SECONDS]
+
 # What: PR title taxonomy and project board for PR checks.
 # Why: AG-GH-018/008 name one CI policy owner for them.
 # From: Issue #1683 | PR #1858

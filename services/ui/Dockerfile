@@ -49,6 +49,11 @@ COPY services/ui/Cargo.toml services/ui/Cargo.toml
 COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
 COPY services/cachehamster/Cargo.toml services/cachehamster/Cargo.toml
 COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.toml
+# What: retry policy for ci.sh, from SOT stage_variables
+# Why: this stage has no SOT; ci.sh reads them from env
+# From: Issue #1683 | PR #1858
+ARG CI_RETRY_MAX_ATTEMPTS
+ARG CI_RETRY_BACKOFF_BASE_SECONDS
 # What: dep pre-cache; ci.sh stubs and removes the srcs.
 # Why: layer-caches deps so only real src changes rebuild.
 # From: Issue #1533 | PR #1858
@@ -95,6 +100,11 @@ ARG APK_PACKAGES
 # From: Issue #1683
 RUN apk add --no-cache bash
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# What: retry policy for ci.sh, from SOT stage_variables
+# Why: this stage has no SOT; ci.sh reads them from env
+# From: Issue #1683 | PR #1858
+ARG CI_RETRY_MAX_ATTEMPTS
+ARG CI_RETRY_BACKOFF_BASE_SECONDS
 # What: shared package setup via ci.sh.
 # Why: ci.sh owns repos, proxy CA, update+upgrade, add.
 # From: Issue #1683 | PR #1858

@@ -993,6 +993,27 @@ CASES
     _expect uncreatable 2 "[CI-ERROR-CORE-0111] dir=\"${long}\"" || return 1
 }
 
+# What: each ci.sh stage declares every SOT stage variable
+# Why: a stage has no SOT; a missing ARG starves ci.sh
+# From: Issue #1683 | PR #1858
+@test "dockerfile stage variables: every ci.sh stage declares them" {
+    local root t="${BATS_TEST_TMPDIR}/repo" out svc df var
+    local -a tg
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    run _ci_check_dockerfile_stage_variables "${root}"
+    _expect real 0 "dockerfile-stage-variables=clean" || return 1
+    out="$(ci_build_targets)" || return 1
+    mapfile -t tg <<< "${out}"
+    var="$(_ci_block_entry_list stage_variables "" ci_sh | awk 'NR == 1')"
+    [ "${#tg[@]}" -gt 0 ] && [ -n "${var}" ] || { echo "inputs: ${#tg[@]} targets, var '${var}'"; return 1; }
+    svc="${tg[$(( SRANDOM % ${#tg[@]} ))]}"
+    _checkout_copy "${root}" "${t}" || return 1
+    df="$(_ci_service_path "${svc}" Dockerfile "${t}")" || return 1
+    grep -v -x "ARG ${var}" "${df}" > "${df}.new" && mv "${df}.new" "${df}" || return 1
+    run _ci_check_dockerfile_stage_variables "${t}"
+    _expect dropped 1 "[CI-ERROR-CHECK-0169];${svc}: Dockerfile stage;without ARG ${var}" || return 1
+}
+
 # What: per row: runner env -> proxy env, names, CA bundle.
 # Why: AG-CI-009: self-hosted proxy only, CA job-local.
 # From: Issue #1683 | PR #1858

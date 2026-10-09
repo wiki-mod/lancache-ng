@@ -2665,12 +2665,12 @@ _ci_cache_to_spec() {
     esac
 }
 
-# What: NAME=value of a build type's set build variables.
+# What: NAME=value of the set variables of one SOT list.
 # Why: build-args and the identity read one resolution.
 # From: Issue #1683 | PR #1858
 _ci_build_variable_args() {
-    local build_type="$1" vnames vname vval vrc
-    vnames="$(_ci_block_entry_list build_variables "" "${build_type}")" || return 2
+    local build_type="$1" block="${2:-build_variables}" vnames vname vval vrc
+    vnames="$(_ci_block_entry_list "${block}" "" "${build_type}")" || return 2
     while IFS= read -r vname; do
         [ -n "${vname}" ] || continue
         vrc=0
@@ -2737,6 +2737,20 @@ _ci_docker_build() {
     # From: Issue #1683 | PR #1858
     local vargs
     vargs="$(_ci_build_variable_args "${build_type}")" || return 2
+    while IFS= read -r a; do
+        [ -n "${a}" ] && args+=(--build-arg "${a}")
+    done <<< "${vargs}"
+    # What: every ci.sh stage gets the SOT stage variables
+    # Why: a stage has no SOT; a missing value fails closed
+    # From: Issue #1683 | PR #1858
+    local snames sname
+    snames="$(_ci_block_entry_list stage_variables "" ci_sh)" || return 2
+    vargs="$(_ci_build_variable_args ci_sh stage_variables)" || return 2
+    while IFS= read -r sname; do
+        [ -n "${sname}" ] || continue
+        grep -q "^${sname}=" <<< "${vargs}" || {
+            ci_log "[CI-ERROR-BUILD-0022]" "service=\"${service}\" name=\"${sname}\" reason=\"stage variable has no value\""; return 2; }
+    done <<< "${snames}"
     while IFS= read -r a; do
         [ -n "${a}" ] && args+=(--build-arg "${a}")
     done <<< "${vargs}"
@@ -12680,6 +12694,53 @@ _ci_check_dockerfile_secret_ids() {
     printf 'dockerfile-secret-ids=clean targets=%s\n' "${n}"
 }
 
+# What: "stage name" per stage that runs <ere> sans ARG
+# Why: ARG scope is per stage; else no value reaches it
+# From: Issue #1683 | PR #1858
+_ci_dockerfile_stage_missing_args() {
+    local df="$1" argnames="$2" runs="$3"
+    _ci_capture 0 awk -v need="${argnames//$'\n'/ }" -v runs="${runs}" '
+        BEGIN { n = split(need, req, " "); st = 0; decl[0] = "|" }
+        /^[[:space:]]*#/ { next }
+        toupper($1) == "FROM" {
+            st++; i = 2; while ($i ~ /^--/) i++
+            b = tolower($i); decl[st] = (b in alias) ? decl[alias[b]] : "|"
+            if (toupper($(i + 1)) == "AS") alias[tolower($(i + 2))] = st
+            next
+        }
+        toupper($1) == "ARG" { for (i = 2; i <= NF; i++) { a = $i; sub(/=.*/, "", a); decl[st] = decl[st] a "|" }; next }
+        $0 ~ runs { for (j = 1; j <= n; j++) if (index(decl[st], "|" req[j] "|") == 0) print st " " req[j] }
+    ' "${df}"
+}
+
+# What: each ci.sh stage declares every SOT stage variable
+# Why: ARG scope is per stage; else ci.sh reads no value
+# From: Issue #1683 | PR #1858
+_ci_check_dockerfile_stage_variables() {
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}" service df svars targets missing bst bv n=0
+    local -a viol=()
+    svars="$(_ci_block_entry_list stage_variables "" ci_sh)" || return 2
+    [ -n "${svars}" ] || viol+=("SOT stage_variables.ci_sh lists no variable")
+    targets="$(ci_build_targets)" || return 2
+    for service in ${targets}; do
+        df="$(_ci_service_path "${service}" Dockerfile "${repo_root}")" || return 2
+        if [ ! -f "${df}" ]; then
+            viol+=("${service}: no Dockerfile at ${df#"${repo_root}/"}"); continue
+        fi
+        n=$(( n + 1 ))
+        missing="$(_ci_dockerfile_stage_missing_args "${df}" "${svars}" 'ci[.]sh (apk-setup|rust-build)')" || return 2
+        while read -r bst bv; do
+            [ -n "${bv}" ] || continue
+            viol+=("${service}: Dockerfile stage ${bst} runs ci.sh without ARG ${bv} (SOT stage_variables.ci_sh)")
+        done <<< "$(sort -u <<< "${missing}")"
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0169]" "dockerfiles=${n} reason=\"a ci.sh build stage lacks an SOT stage variable ARG\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'dockerfile-stage-variables=clean dockerfiles=%s\n' "${n}"
+}
+
 # What: rust Dockerfiles must use build-tools image.
 # Why: one toolchain owner; no self-compile (AG-CI-008).
 # From: Issue #1683
@@ -12701,18 +12762,7 @@ _ci_check_dockerfile_build_tools() {
         # What: rust-build stages declare every build var.
         # Why: ARG scope is per stage; else none reaches it.
         # From: Issue #1683 | PR #1858
-        missing="$(_ci_capture 0 awk -v need="${bvars//$'\n'/ }" '
-            BEGIN { n = split(need, req, " "); st = 0; decl[0] = "|" }
-            /^[[:space:]]*#/ { next }
-            toupper($1) == "FROM" {
-                st++; i = 2; while ($i ~ /^--/) i++
-                b = tolower($i); decl[st] = (b in alias) ? decl[alias[b]] : "|"
-                if (toupper($(i + 1)) == "AS") alias[tolower($(i + 2))] = st
-                next
-            }
-            toupper($1) == "ARG" { for (i = 2; i <= NF; i++) { a = $i; sub(/=.*/, "", a); decl[st] = decl[st] a "|" }; next }
-            /ci\.sh rust-build/ { for (j = 1; j <= n; j++) if (index(decl[st], "|" req[j] "|") == 0) print st " " req[j] }
-        ' "${df}")" || return 2
+        missing="$(_ci_dockerfile_stage_missing_args "${df}" "${bvars}" 'ci[.]sh rust-build')" || return 2
         missing="$(sort -u <<< "${missing}")"
         while read -r bst bv; do
             [ -n "${bv}" ] || continue
@@ -13023,7 +13073,7 @@ ci_cmd_check_all() {
         compose-required-env dhcp-proxy-env \
         setup-keys-kea setup-update-safety setup-docker-conflict setup-prompt-drift image-channel-resolution \
         vex-drift logging-matrix \
-        entrypoint-lib-wiring dockerfile-build-tools \
+        entrypoint-lib-wiring dockerfile-build-tools dockerfile-stage-variables \
         dockerfile-secret-ids sot-identity-inputs workflow-ci-variables workflow-job-settings cargo-profile-tuning no-source-compiled-tools codeql-coverage version-drift)
     for sub in "${repo_wide[@]}"; do
         ci_cmd_check "${sub}" || rc=1
@@ -13047,6 +13097,7 @@ ci_cmd_check() {
         all) ci_cmd_check_all "$@" ;;
         cargo-audit) _ci_check_cargo_audit "$@" ;;
         dockerfile-build-tools) _ci_check_dockerfile_build_tools "$@" ;;
+        dockerfile-stage-variables) _ci_check_dockerfile_stage_variables "$@" ;;
         dockerfile-secret-ids) _ci_check_dockerfile_secret_ids "$@" ;;
         sot-identity-inputs) _ci_check_sot_identity_inputs ;;
         workflow-ci-variables) _ci_check_workflow_ci_variables "$@" ;;
