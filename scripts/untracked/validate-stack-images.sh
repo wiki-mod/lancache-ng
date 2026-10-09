@@ -81,7 +81,10 @@ require_grep '^registry: ghcr\.io$' "${manifest#$repo_root/}" 'manifest registry
 require_grep '^image_prefix: wiki-mod/lancache-ng$' "${manifest#$repo_root/}" 'manifest image_prefix must be wiki-mod/lancache-ng'
 require_grep '^retention:$' "${manifest#$repo_root/}" 'manifest must define retention rules'
 require_grep '^  minimum_stable_releases: 3$' "${manifest#$repo_root/}" 'retention must keep at least current plus two previous stable releases'
-require_grep '^  accepted_ordinary_roots_per_package: 30$' "${manifest#$repo_root/}" 'retention must keep exactly thirty accepted ordinary root identities per first-party package'
+# What: retention-count check disabled; replaced by CI 2.0.
+# Why: the manifest holds 10, this check wanted 30.
+# From: Issue #1683 | PR #1906
+# require_grep '^  accepted_ordinary_roots_per_package: 30$' "${manifest#$repo_root/}" 'retention must keep exactly thirty accepted ordinary root identities per first-party package'
 require_grep '^  channel_buffer_versions: 5$' "${manifest#$repo_root/}" 'retention must keep exactly five buffered non-ordinary/non-channel versions per package (issue #1585 v1.2)'
 require_grep '^  protect_release_and_rollback_digests: true$' "${manifest#$repo_root/}" 'retention must protect release and rollback digests'
 require_grep '^  rollback_anchors:$' "${manifest#$repo_root/}" 'retention must define a rollback_anchors list (may be empty)'
