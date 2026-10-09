@@ -2474,7 +2474,7 @@ CASES
     # Why: compose, templates, script move as one revision
     # From: Issue #1683 | PR #1858
     local root t="${BATS_TEST_TMPDIR}" main lo std ssl svc mark c2 c3 f p
-    local -a pids=()
+    local -a pids=() ips=()
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
     require_helper_image
@@ -2513,17 +2513,21 @@ CASES
     g -C "${t}/src" commit -q -am c2 && g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}"
     c2="$(g -C "${t}/src" rev-parse HEAD)"
     for p in "${std}" "${ssl}"; do
-        timeout 600 busybox nc -lk -s "${p}" -p 80 -e true < /dev/null > /dev/null 2>&1 3>&- &
+        timeout 600 busybox nc -lk -s "${p}" -p 80 -e true < /dev/null > "${t}/nc-${p}.log" 2>&1 3>&- &
         pids+=("$!")
+        ips+=("${p}")
     done
-    # What: stop listeners; an exited one counts as stopped.
-    # Why: under load a listener may end before cleanup.
+    # What: stop listeners; a gone one fails, raw log shown
+    # Why: else the port 80 probe may hit another socket
     # From: Issue #1683 | PR #1858
     _stop() {
-        local p
-        for p in "${pids[@]}"; do
-            kill "${p}" 2> /dev/null || ! kill -0 "${p}" 2> /dev/null || { echo "listener ${p} survived kill"; return 1; }
+        local i err rc=0
+        for i in "${!pids[@]}"; do
+            err="$(kill "${pids[i]}" 2>&1)" && continue
+            echo "listener ${ips[i]}:80 gone before cleanup: ${err}; nc: $(cat "${t}/nc-${ips[i]}.log")"
+            rc=1
         done
+        return "${rc}"
     }
     export FAULT="${BATS_TEST_NAME}" CO="${t}/co"
     _update() {
