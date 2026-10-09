@@ -2022,22 +2022,35 @@ _legacy_env() {
     [ "${status}" -eq 0 ] && [ "$(cat "${t}/.env")" = "${before}" ] || { echo "second run changed .env"; return 1; }
 }
 
+# What: a UI user without a usable password gets one, once
+# Why: AG-OP-006: stable secrets never rotate on reruns
+# From: Issue #1683 | PR #1858
 @test "migrate_env_for_update generates a UI password once, never rotates it" {
     _stand_ins || return 1
-    # What: a UI user without password gets one, once
-    # Why: AG-OP-006 stable secrets on repeat execution
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}/ui" pw
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    mkdir -p "${t}" && _legacy_env "${t}/.env" "u${BATS_TEST_NUMBER}"
-    export CONV="${t}"
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+    local t user pw real
+    _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
+    _ui_row() {
+        t="${BATS_TEST_TMPDIR}/ui-$1"
+        mkdir -p "${t}" && _legacy_env "${t}/.env" "$2" || return 1
+        export CONV="${t}"
+        [ -z "${3:-}" ] || set_env_key UI_AUTH_PASSWORD "$3" "${t}/.env"
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+        [ "${status}" -eq 0 ] || { echo "$1: rc ${status}: ${output}"; return 1; }
+    }
+    user="$(_val name)" real="$(_val name)"
+    _ui_row gen "${user}" || return 1
     pw="$(get_env_var UI_AUTH_PASSWORD "${t}/.env")"
-    [ "${status}" -eq 0 ] && [ "$(get_env_var UI_AUTH_USER "${t}/.env")" = "u${BATS_TEST_NUMBER}" ] && [ -n "${pw}" ] \
-        || { echo "password: ${output}"; return 1; }
+    [[ "${pw}" =~ ^[A-Za-z0-9]{20}$ ]] && [ "$(get_env_var UI_AUTH_USER "${t}/.env")" = "${user}" ] \
+        || { echo "gen: user '$(get_env_var UI_AUTH_USER "${t}/.env")', password of ${#pw} chars"; return 1; }
     _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
-    [ "${status}" -eq 0 ] && [ "$(get_env_var UI_AUTH_PASSWORD "${t}/.env")" = "${pw}" ] || { echo "password rotated"; return 1; }
+    [ "${status}" -eq 0 ] && [ "$(get_env_var UI_AUTH_PASSWORD "${t}/.env")" = "${pw}" ] || { echo "gen: password rotated"; return 1; }
+    _ui_row no-user "" || return 1
+    [ -z "$(get_env_var UI_AUTH_PASSWORD "${t}/.env")" ] || { echo "no-user: a password was made"; return 1; }
+    _ui_row placeholder "${user}" "CHANGE_ME_$(_val name)" || return 1
+    pw="$(get_env_var UI_AUTH_PASSWORD "${t}/.env")"
+    [[ "${pw}" =~ ^[A-Za-z0-9]{20}$ ]] || { echo "placeholder: not replaced (${#pw} chars)"; return 1; }
+    _ui_row kept "${user}" "${real}" || return 1
+    [ "$(get_env_var UI_AUTH_PASSWORD "${t}/.env")" = "${real}" ] || { echo "kept: the operator password changed"; return 1; }
 }
 
 @test "migrate_env_for_update leaves no duplicate key assignments" {
