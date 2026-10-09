@@ -133,10 +133,8 @@ RUN set -euo pipefail; \
       util-linux \
       xz \
       yq-go \
-      dhclient \
       nano \
       zstd \
-      pbzip2 \
       shfmt \
       trivy@testing \
       gcompat \
@@ -289,8 +287,6 @@ RUN set -euo pipefail; \
       yq \
       nano \
       zstd \
-      pbzip2 \
-      dhclient \
       shfmt \
       trivy \
       java \
@@ -337,7 +333,6 @@ RUN set -euo pipefail; \
     run_contract_check 'docker buildx version' docker buildx version; \
     run_contract_check 'expect -v' expect -v; \
     run_contract_check 'yq --version' yq --version; \
-    run_contract_check 'dhclient --version' dhclient --version; \
     run_contract_check 'shfmt --version' shfmt --version; \
     run_contract_check 'trivy --version' trivy --version; \
     run_contract_check 'java -version' java -version; \
