@@ -365,6 +365,9 @@ CASES
     _expect run-fail 2 "${id} ${ctx} cmd=\"grep\" rc=2;No such file" || return 1
     run _ci_mktemp -d "${nofile}/$(_val name).XXXXXX"
     _expect mktemp 2 "[CI-ERROR-CORE-0110] args=\"-d ${nofile}/;No such file" || return 1
+    CI_TMPDIR="${nofile}" run _ci_run "${id}" "${ctx}" true
+    _expect run-no-temp 2 "[CI-ERROR-CORE-0110]" || return 1
+    [[ "${output}" != *"${id}"* ]] || { echo "run-no-temp: the command ran: ${output}"; return 1; }
     run _ci_ls_files "${site}" "${nofile}" "*.$(_val name)"
     _expect ls-files 2 "[CI-ERROR-CHECK-0071] site=\"${site}\" root=\"${nofile}\";cmd=\"git\" rc=" || return 1
     [[ "${output}" == *"cannot change to"* || "${output}" == *"No such file"* ]] || { echo "ls-files raw: ${output}"; return 1; }
