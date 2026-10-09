@@ -8492,6 +8492,70 @@ _ci_scan_files() {
     fi
 }
 
+# What: Dockerfile pathspecs of every Dockerfile scan.
+# Why: one owner for the file set the checks read.
+# From: Issue #1683 | PR #1858
+CI_DOCKERFILE_SPECS=('Dockerfile' '*/Dockerfile')
+
+# What: out[]: .sh/.bash/.bats files or a sh/bash shebang.
+# Why: every shell check reads one set (AG-VAL-032).
+# From: Issue #1683 | PR #1858
+_ci_shell_sources() {
+    local -n _ci_ss_out="$1"
+    local -a _ci_ss_all=()
+    local _ci_ss_f _ci_ss_l1 _ci_ss_re='^#![[:space:]]*/([^[:space:]]*/)?(env[[:space:]]+)?(ba)?sh([[:space:]]|$)'
+    _ci_scan_files _ci_ss_all "$2" || return 2
+    _ci_ss_out=()
+    for _ci_ss_f in "${_ci_ss_all[@]}"; do
+        case "${_ci_ss_f##*/}" in
+            *.sh|*.bash|*.bats) _ci_ss_out+=("${_ci_ss_f}"); continue ;;
+            *.*) continue ;;
+        esac
+        _ci_ss_l1="$(_ci_run "[CI-ERROR-CHECK-0164]" "file=\"${_ci_ss_f}\" reason=\"first line unreadable\"" head -n 1 -- "${_ci_ss_f}")" || return 2
+        if [[ "${_ci_ss_l1}" =~ ${_ci_ss_re} ]]; then
+            _ci_ss_out+=("${_ci_ss_f}")
+        fi
+    done
+}
+
+# What: bash's own parse of one source, as declare -f text.
+# Why: structure checks read bash's grammar, not raw lines.
+# From: Issue #1683 | PR #1858
+_ci_shell_canonical() {
+    local f="$1" src pp
+    case "${f##*/}" in
+        *.bats)
+            pp="$(dirname -- "$(readlink -f -- "$(command -v bats)")")/../libexec/bats-core/bats-preprocess"
+            if [ ! -x "${pp}" ]; then
+                ci_log "[CI-ERROR-CHECK-0160]" "file=\"${f}\" preprocessor=\"${pp}\" reason=\"bats preprocessor not found\""
+                return 2
+            fi
+            src="$(_ci_run -s "[CI-ERROR-CHECK-0161]" "file=\"${f}\" reason=\"bats preprocess failed\"" "${pp}" "${f}")" || return 2 ;;
+        Dockerfile)
+            src="$(_ci_run "[CI-ERROR-CHECK-0165]" "file=\"${f}\" reason=\"Dockerfile lines unreadable\"" _ci_dockerfile_logical_lines "${f}")" || return 2
+            # What: RUN shell form only; flags cut, exec form skipped.
+            # Why: only shell-form RUN text is a shell program.
+            # From: Issue #1683 | PR #1858
+            src="$(_ci_run "[CI-ERROR-CHECK-0163]" "file=\"${f}\" reason=\"RUN shell not extracted\"" awk '
+                { t = $0; sub(/^[[:space:]]+/, "", t) }
+                toupper(substr(t, 1, 4)) != "RUN " { next }
+                {
+                    t = substr(t, 5)
+                    while (match(t, /^[[:space:]]*--[A-Za-z-]+(=[^[:space:]]*)?[[:space:]]+/)) t = substr(t, RLENGTH + 1)
+                    sub(/^[[:space:]]+/, "", t)
+                    if (substr(t, 1, 1) != "[") print t
+                }' <<< "${src}")" || return 2 ;;
+        *) src="$(_ci_run "[CI-ERROR-CHECK-0166]" "file=\"${f}\" reason=\"source unreadable\"" cat -- "${f}")" || return 2 ;;
+    esac
+    # What: the source reaches bash on stdin, not as argv.
+    # Why: one argv string is capped at 128 KiB on Linux.
+    # From: Issue #1683 | PR #1858
+    _ci_run -s "[CI-ERROR-CHECK-0162]" "file=\"${f}\" reason=\"bash cannot parse the source\"" \
+        bash -O extglob -c 's="$(cat)" && eval "__ci_src() {
+${s}
+}" && declare -f __ci_src' <<< "${src}"
+}
+
 # What: Fail on any listed text file carrying CRLF.
 # Why: eol=lf can be bypassed (API write, pre-attr commit).
 # From: Issue #1683
@@ -9516,72 +9580,75 @@ _ci_check_exit_evidence() {
     printf 'exit-evidence=clean files=%s\n' "${#files[@]}"
 }
 
-# What: Flag a $? read first after an else-less if.
-# Why: that $? is the if's own 0 (AG-VAL-030).
+# What: Flag a $? that reads an if's status, not CMD's.
+# Why: else-less if and "if !" give 0 (AG-VAL-030).
 # From: Issue #1683 | PR #1858
 _ci_check_if_without_else_status() {
-    local -a _ci_override=("$@") files=()
-    _ci_scan_files files _ci_override '.github/scripts/*.sh' '.github/scripts/*.bats' '*/Dockerfile' 'Dockerfile' 'services/*.sh' || return 2
-    local path fi_line status_line
+    local -a _ci_override=("$@") files=() dock=()
+    local path canon produced produced_rc kind fn stmt
+    local -A seen=()
+    _ci_shell_sources files _ci_override || return 2
+    _ci_scan_files dock _ci_override "${CI_DOCKERFILE_SPECS[@]}" || return 2
+    for path in "${files[@]}"; do seen["${path}"]=1; done
+    for path in "${dock[@]}"; do
+        [ "${path##*/}" = Dockerfile ] && [ -z "${seen[${path}]:-}" ] && files+=("${path}")
+    done
     local -a viol=()
     for path in "${files[@]}"; do
-        local produced produced_rc=0
-        produced="$(awk '
-            { lines[NR] = $0 }
-            END {
-              depth = 0; nc = 0
-              for (i = 1; i <= NR; i++) {
-                stripped = lines[i]; sub(/#.*/, "", stripped)
-                n = split(stripped, toks, /[ \t;]+/)
-                for (k = 1; k <= n; k++) {
-                  t = toks[k]
-                  if (t == "if") { depth++; has_else[depth] = 0 }
-                  else if (t == "elif" || t == "else") { if (depth > 0) has_else[depth] = 1 }
-                  else if (t == "fi") { if (depth > 0) { if (has_else[depth] == 0) { nc++; fic[nc] = i } depth-- } }
+        canon="$(_ci_shell_canonical "${path}")" || return 2
+        produced_rc=0
+        # What: walk bash's canonical text; heredoc bodies skip.
+        # Why: quotes carry over lines; only unquoted $? counts.
+        # From: Issue #1683 | PR #1858
+        produced="$(awk -v style=hash -v h2= -v h3= "${_CI_AWK_COMMENT_LEX}"'
+            function qscan(s,  i, c, c2, len, hit) {
+                len = length(s); hit = 0
+                for (i = 1; i <= len; i++) {
+                    c = substr(s, i, 1); c2 = substr(s, i, 2)
+                    if (qs == "sq") { if (c == sq) qs = ""; continue }
+                    if (qs == "an") { if (c == "\\") i++; else if (c == sq) qs = ""; continue }
+                    if (c == "\\") { i++; continue }
+                    if (c2 == "$?" || substr(s, i, 4) == "${?}") { hit = 1; i++; continue }
+                    if (c2 == "$(" && substr(s, i, 3) != "$((") { qk[++qd] = qs; qp[qd] = 0; qs = ""; i++; continue }
+                    if (qs == "dq") { if (c == "\"") qs = ""; continue }
+                    if (c2 == "$" sq) { qs = "an"; i++; continue }
+                    if (c == sq) { qs = "sq"; continue }
+                    if (c == "\"") { qs = "dq"; continue }
+                    if (qd > 0 && c == "(") qp[qd]++
+                    else if (qd > 0 && c == ")") { if (qp[qd]) qp[qd]--; else qs = qk[qd--] }
                 }
-              }
-              for (c = 1; c <= nc; c++) {
-                fi_i = fic[c]; checked = 0
-                for (j = fi_i + 1; j <= NR && checked < 6; j++) {
-                  nxt = lines[j]
-                  if (nxt ~ /^[ \t]*$/) continue
-                  ns = nxt; sub(/^[ \t]*/, "", ns)
-                  if (ns ~ /^#/) { checked++; continue }
-                  checked++
-                  pre = substr(nxt, 1, index(nxt, "$?") - 1)
-                  if (nxt ~ /\$\?/ && pre !~ /(\||&|;)/ && nxt !~ /#[ \t]*if-status-safe:/) printf "fi:%d:%d\n", fi_i, j
-                  break
-                }
-              }
-              for (i = 1; i <= NR; i++) {
-                s0 = lines[i]; sub(/#.*/, "", s0)
-                if (s0 !~ /(^|[;&|[:space:]])if[[:space:]]+![[:space:]]/) continue
-                if (s0 ~ /then[[:space:]]*$/) {
-                  for (j = i + 1; j <= NR && j <= i + 6; j++) {
-                    nxt = lines[j]
-                    if (nxt ~ /^[ \t]*$/ || nxt ~ /^[ \t]*#/) continue
-                    if (nxt ~ /\$\?/ && nxt !~ /#[ \t]*if-status-safe:/) printf "neg:%d:%d\n", i, j
-                    break
-                  }
-                } else if (s0 ~ /then/) {
-                  rest = s0; sub(/.*then/, "", rest)
-                  if (rest ~ /\$\?/ && lines[i] !~ /#[ \t]*if-status-safe:/) printf "neg:%d:%d\n", i, i
-                }
-              }
+                return hit
             }
-          ' "${path}")" || produced_rc=$?
+            END {
+                cl_lex()
+                fn = "(top)"; k = 0; pf = -1; pn = -1
+                for (i = 3; i < n; i++) {
+                    if (H[i]) continue
+                    lead = (qs == "" && qd == 0)
+                    hit = qscan(L[i])
+                    if (!lead) continue
+                    match(L[i], /^ */); ind = RLENGTH; t = substr(L[i], ind + 1)
+                    if (pf >= 0) { if (ind == pf && hit) printf "fi\t%s\t%s\n", fn, t; pf = -1 }
+                    if (pn >= 0) { if (ind == pn && hit) printf "neg\t%s\t%s\n", fn, t; pn = -1 }
+                    if (t ~ /^function [^ ]+ \(\) *$/) { fn = t; sub(/^function /, "", fn); sub(/ \(\) *$/, "", fn) }
+                    else if (t ~ /^if /) { FI[++k] = ind; EL[k] = 0; if (t ~ /^if ! /) pn = ind + 4 }
+                    else if (t ~ /^elif ! /) pn = ind + 4
+                    else if (t == "else" && k > 0 && FI[k] == ind) EL[k] = 1
+                    else if (t ~ /^fi;?$/ && k > 0 && FI[k] == ind) { if (!EL[k] && t == "fi;") pf = ind; k-- }
+                }
+            }' <<< "${canon}")" || produced_rc=$?
         _ci_producer_ok "${produced_rc}" 0 || return 2
-        while IFS=: read -r kind fi_line status_line; do
-            [ -n "${fi_line}" ] || continue
+        while IFS=$'\t' read -r kind fn stmt; do
+            [ -n "${kind}" ] || continue
             if [ "${kind}" = neg ]; then
-                viol+=("${path}:${status_line}: reads \$? inside 'if ! CMD; then' (line ${fi_line}); that \$? is the negation's 0, not CMD's status -- use 'CMD || rc=\$?' or _ci_capture, or mark '# if-status-safe: <reason>'")
-                continue
+                viol+=("${path}: ${fn}: first \$? inside 'if ! CMD' is the negation's 0 -- use 'CMD || rc=\$?': ${stmt}")
+            else
+                viol+=("${path}: ${fn}: \$? after an else-less if is the if's 0 -- use 'if CMD; then rc=0; else rc=\$?; fi': ${stmt}")
             fi
-            viol+=("${path}:${status_line}: reads \$? after an else-less if (fi at line ${fi_line}); POSIX reports the if's own status 0, not the command's -- use 'if CMD; then STATUS=0; else STATUS=\$?; fi' or mark '# if-status-safe: <reason>'")
-        done <<<"${produced}"
+        done <<< "${produced}"
     done
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0065]" "reason=\"\$? read after else-less if masks status (AG-VAL-029)\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0065]" "reason=\"\$? reads an if's status, not the command's (AG-VAL-029)\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'if-without-else-status=clean files=%s\n' "${#files[@]}"
