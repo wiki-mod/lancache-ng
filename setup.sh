@@ -1598,16 +1598,15 @@ set_optional_env_path_override_if_needed() {
     if [[ -n "$existing_assignment" ]]; then
         if [[ "$existing_assignment" = "$derived_path" ]]; then
             remove_env_key "$key" "$env_file"
-        elif [[ "$existing_assignment" == *'$'* ]]; then
-            # Preserve intentionally templated values like ${LAN_CACHE_ROOT}/cache.
+            return 0
+        elif [[ "$existing_assignment" == *'$'* ]] || is_absolute_path "$existing_assignment"; then
             set_env_assignment "$key" "$existing_assignment" "$env_file"
-        elif is_absolute_path "$existing_assignment"; then
-            set_env_assignment "$key" "$existing_assignment" "$env_file"
-        else
-            # Repair obviously broken literal values such as "50" or "n".
-            set_env_key "$key" "$desired_path" "$env_file"
+            return 0
         fi
-        return 0
+        # What: a broken literal (e.g. "50") is dropped as unset
+        # Why: one run converges; a rerun changes nothing
+        # From: Issue #1683 | PR #1858
+        remove_env_key "$key" "$env_file"
     fi
 
     # Keep the one-root contract effective: if the derived state-root path is

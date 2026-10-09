@@ -967,8 +967,20 @@ CASES
 # Why: bare mktemp in tools must land on disk, not RAM
 # From: Issue #1683 | PR #1858
 @test "temp dirs: tmpfs refused, made on disk, else coded" {
-    local d long
+    local d long lnk rel bb bbd
     d="${BATS_TEST_TMPDIR}/$(_val name)/$(_val name)" long="${BATS_TEST_TMPDIR}/$(printf '%0300d' 0)"
+    lnk="${BATS_TEST_TMPDIR}/$(_val name)" rel="$(_val name)/$(_val name)" bb="${BATS_TEST_TMPDIR}/$(_val name)"
+    bbd="${BATS_TEST_TMPDIR}/$(_val name)/$(_val name)"
+    ln -s /tmp "${lnk}" || return 1
+    CI_TMPDIR="${lnk}/$(_val name)" run _ci_tmp_init
+    _expect symlink 2 "[CI-ERROR-CORE-0006]" || return 1
+    CI_TMPDIR="${BATS_TEST_TMPDIR}/$(_val name)$(printf '/..%.0s' {1..40})/tmp/$(_val name)" run _ci_tmp_init
+    _expect escape 2 "[CI-ERROR-CORE-0142]" || return 1
+    CI_TMPDIR="${rel}" run eval 'cd "${BATS_TEST_TMPDIR}" && _ci_tmp_init && echo "t=${TMPDIR}"'
+    _expect relative 0 "t=$(cd "${BATS_TEST_TMPDIR}" && pwd -P)/${rel}" || return 1
+    mkdir -p "${bb}" && ln -s "$(command -v busybox)" "${bb}/realpath" || { echo "busybox: no busybox"; return 1; }
+    CI_TMPDIR="${bbd}" PATH="${bb}:${PATH}" run eval '_ci_tmp_init && echo "t=${TMPDIR}"'
+    _expect busybox 0 "t=${bbd}" || return 1
     [[ "$(realpath -m -- "${BATS_TEST_TMPDIR}")" == /var/tmp/* ]] || { echo "bats temp dir not under /var/tmp: ${BATS_TEST_TMPDIR}"; return 1; }
     CI_TMPDIR=/tmp run _ci_tmp_init
     _expect tmpfs 2 "[CI-ERROR-CORE-0006]" || return 1
@@ -1991,16 +2003,28 @@ _legacy_env() {
     done
 }
 
+# What: legacy keys migrate once; reruns change nothing
+# Why: AG-OP-007 convergence; AG-OP-006 no second write
+# From: Issue #1683 | PR #1858
 @test "migrate_env_for_update converges a legacy .env and is stable on rerun" {
     _stand_ins || return 1
-    # What: legacy keys migrate once; state root is written
-    # Why: AG-OP-007 convergence; secrets must not rotate
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}/legacy" before
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    mkdir -p "${t}" && _legacy_env "${t}/.env"
-    export CONV="${t}"
+    local t before
+    _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
+    _legacy_row() {
+        t="${BATS_TEST_TMPDIR}/legacy-$1"
+        mkdir -p "${t}" && _legacy_env "${t}/.env" || return 1
+        export CONV="${t}"
+    }
+    _legacy_row strict-allowlist || return 1
+    set_env_key PROXY_ALLOWED_CLIENT_CIDRS "$(_val cidr)" "${t}/.env"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+    [ "${status}" -eq 0 ] && [ "$(get_env_var PROXY_SECURITY_MODE "${t}/.env")" = strict ] \
+        || { echo "strict-allowlist: $(get_env_var PROXY_SECURITY_MODE "${t}/.env") ${output}"; return 1; }
+    _legacy_row split-cache || return 1
+    set_env_key CACHE_DIR_SSL "$(_val path)" "${t}/.env"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+    _expect split-cache 1 "CACHE_DIR_STANDARD and CACHE_DIR_SSL point to different paths" || return 1
+    _legacy_row base || return 1
     _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
     [ "${status}" -eq 0 ] && ! env_key_exists CACHE_DIR_STANDARD "${t}/.env" && ! env_key_exists CACHE_DIR_SSL "${t}/.env" \
         && [ "$(get_env_var CACHE_DIR "${t}/.env")" = "${t}/cache" ] && [ "$(get_env_var PROXY_SECURITY_MODE "${t}/.env")" = lazy ] \
@@ -2010,58 +2034,73 @@ _legacy_env() {
     [ "${status}" -eq 0 ] && [ "$(cat "${t}/.env")" = "${before}" ] || { echo "second run changed .env"; return 1; }
 }
 
+# What: a UI user without a usable password gets one, once
+# Why: AG-OP-006: stable secrets never rotate on reruns
+# From: Issue #1683 | PR #1858
 @test "migrate_env_for_update generates a UI password once, never rotates it" {
     _stand_ins || return 1
-    # What: a UI user without password gets one, once
-    # Why: AG-OP-006 stable secrets on repeat execution
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}/ui" pw
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    mkdir -p "${t}" && _legacy_env "${t}/.env" "u${BATS_TEST_NUMBER}"
-    export CONV="${t}"
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+    local t user pw real
+    _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
+    _ui_row() {
+        t="${BATS_TEST_TMPDIR}/ui-$1"
+        mkdir -p "${t}" && _legacy_env "${t}/.env" "$2" || return 1
+        export CONV="${t}"
+        [ -z "${3:-}" ] || set_env_key UI_AUTH_PASSWORD "$3" "${t}/.env"
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+        [ "${status}" -eq 0 ] || { echo "$1: rc ${status}: ${output}"; return 1; }
+    }
+    user="$(_val name)" real="$(_val name)"
+    _ui_row gen "${user}" || return 1
     pw="$(get_env_var UI_AUTH_PASSWORD "${t}/.env")"
-    [ "${status}" -eq 0 ] && [ "$(get_env_var UI_AUTH_USER "${t}/.env")" = "u${BATS_TEST_NUMBER}" ] && [ -n "${pw}" ] \
-        || { echo "password: ${output}"; return 1; }
+    [[ "${pw}" =~ ^[A-Za-z0-9]{20}$ ]] && [ "$(get_env_var UI_AUTH_USER "${t}/.env")" = "${user}" ] \
+        || { echo "gen: user '$(get_env_var UI_AUTH_USER "${t}/.env")', password of ${#pw} chars"; return 1; }
     _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
-    [ "${status}" -eq 0 ] && [ "$(get_env_var UI_AUTH_PASSWORD "${t}/.env")" = "${pw}" ] || { echo "password rotated"; return 1; }
+    [ "${status}" -eq 0 ] && [ "$(get_env_var UI_AUTH_PASSWORD "${t}/.env")" = "${pw}" ] || { echo "gen: password rotated"; return 1; }
+    _ui_row no-user "" || return 1
+    [ -z "$(get_env_var UI_AUTH_PASSWORD "${t}/.env")" ] || { echo "no-user: a password was made"; return 1; }
+    _ui_row placeholder "${user}" "CHANGE_ME_$(_val name)" || return 1
+    pw="$(get_env_var UI_AUTH_PASSWORD "${t}/.env")"
+    [[ "${pw}" =~ ^[A-Za-z0-9]{20}$ ]] || { echo "placeholder: not replaced (${#pw} chars)"; return 1; }
+    _ui_row kept "${user}" "${real}" || return 1
+    [ "$(get_env_var UI_AUTH_PASSWORD "${t}/.env")" = "${real}" ] || { echo "kept: the operator password changed"; return 1; }
 }
 
+# What: reruns add no duplicate; a written key collapses
+# Why: AG-OP-006: one canonical assignment per key
+# From: Issue #1683 | PR #1858
 @test "migrate_env_for_update leaves no duplicate key assignments" {
     _stand_ins || return 1
-    # What: two runs must not stack duplicate key lines
-    # Why: set_env_key collapses duplicates (AG-OP-006)
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}/dup"
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    mkdir -p "${t}" && _legacy_env "${t}/.env"
+    local t="${BATS_TEST_TMPDIR}/dup"
+    _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
+    mkdir -p "${t}" && _legacy_env "${t}/.env" || return 1
+    printf 'PROXY_SECURITY_MODE=strict\n' >> "${t}/.env"
+    [ "$(grep -c '^PROXY_SECURITY_MODE=' "${t}/.env")" -eq 2 ] || { echo "no duplicate in the input"; return 1; }
     export CONV="${t}"
     _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}" && migrate_env_for_update "${CONV}"'
     [ "${status}" -eq 0 ] && [ -z "$(awk -F= '/^[A-Za-z_]/ { print $1 }' "${t}/.env" | sort | uniq -d)" ] \
-        || { echo "duplicates: ${output}"; return 1; }
+        || { echo "duplicates: $(awk -F= '/^[A-Za-z_]/ { print $1 }' "${t}/.env" | sort | uniq -d) ${output}"; return 1; }
+    [ "$(grep '^PROXY_SECURITY_MODE=' "${t}/.env")" = PROXY_SECURITY_MODE=lazy ] \
+        || { echo "collapse: $(grep '^PROXY_SECURITY_MODE=' "${t}/.env")"; return 1; }
 }
 
+# What: hand edits move to .env; bad ones change nothing
+# Why: AG-OP-009 edits survive; the checkout stays clean
+# From: Issue #1683 | PR #1858
 @test "migrate_env_for_update keeps config/prod values per row" {
     _stand_ins || return 1
-    # What: hand edits move to .env; bad ones change nothing
-    # Why: AG-OP-009 edits survive; the checkout stays clean
-    # From: Issue #1683 | PR #1858
-    local root ip srv srv2 net bios mode name extra init envw edit want kv msg base pd cpe
+    local root ip srv srv2 net bios bad mode=dnsmasq-proxy name extra init envw edit want kv msg base pd cpe
     local -a kvs
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
+    _load_setup_sh "${root}" || return 1
     ip="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")" net="${ip%.*}"
-    srv="${net}.$(( (${ip##*.} + 1) % 255 ))" srv2="${net}.$(( (${ip##*.} + 2) % 255 ))" bios="b${BATS_TEST_NUMBER}.0"
-    mode="$(declare -f migrate_env_for_update)"
-    mode="$(awk '/^ *[a-z-]+\)$/ { a = $1 } /neither DHCP_PROXY_PXE_BOOT_FILENAME_BIOS/ && !m { sub(/\)$/, "", a); m = a } END { print m }' <<< "${mode}")"
-    [ -n "${ip}" ] && is_valid_dhcp_mode "${mode}" || { echo "inputs: ${ip} ${mode}"; return 1; }
+    srv="${net}.$(( (${ip##*.} + 1) % 255 ))" srv2="${net}.$(( (${ip##*.} + 2) % 255 ))"
+    bios="$(_val name).0" bad="$(_val host)"
+    [ -n "${ip}" ] && is_valid_dhcp_mode "${mode}" || { echo "inputs: ip '${ip}', mode ${mode}"; return 1; }
     _cp_install() {
         base="${BATS_TEST_TMPDIR}/${1}" pd="${BATS_TEST_TMPDIR}/${1}/deploy/prod" cpe="${BATS_TEST_TMPDIR}/${1}/config/prod/dhcp-proxy.env"
         _prod_install "${pd}" || return 1
-        git -C "${base}" init -q && git -C "${base}" add config
-        git -C "${base}" -c user.email=t@t -c user.name=t commit -qm template
+        [ "${2:-}" = nogit ] || { git -C "${base}" init -q && git -C "${base}" add config \
+            && git -C "${base}" -c user.email=t@t -c user.name=t commit -qm template; } || return 1
         _legacy_env "${pd}/.env"
         export CONV="${pd}"
     }
@@ -2103,29 +2142,67 @@ CASES
             || { echo "${name}: rc ${status}: ${output}"; return 1; }
     done <<CASES
 incomplete-pair|DHCP_MODE=${mode};DHCP_SUBNET_START=${net}.0;DHCP_DNS_PRIMARY=${ip};UPSTREAM_DHCP_IP=${srv}|DHCP_PROXY_PXE_BOOT_SERVER=${srv}|neither DHCP_PROXY_PXE_BOOT_FILENAME_BIOS nor DHCP_PROXY_PXE_BOOT_FILENAME_UEFI is
-invalid-value|DHCP_MODE=${mode};DHCP_SUBNET_START=${net}.0;DHCP_DNS_PRIMARY=${ip};UPSTREAM_DHCP_IP=${srv}|DHCP_PROXY_ROUTER=x${BATS_TEST_NUMBER}|must be a valid IPv4 address or empty.
+invalid-value|DHCP_MODE=${mode};DHCP_SUBNET_START=${net}.0;DHCP_DNS_PRIMARY=${ip};UPSTREAM_DHCP_IP=${srv}|DHCP_PROXY_ROUTER=${bad}|must be a valid IPv4 address or empty.
 CASES
+    _cp_install only-changed || return 1
+    [ "$(awk -F= '/^[A-Za-z_]/ { n++ } END { print n + 0 }' "${cpe}")" -ge 1 ] || { echo "only-changed: template has no key"; return 1; }
+    set_env_key DHCP_PROXY_PXE_BOOT_SERVER "${srv}" "${cpe}"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; adopt_config_prod_edits "${CONV%/deploy/prod}" >/dev/null'
+    [ "${status}" -eq 0 ] && git -C "${base}" diff --quiet HEAD -- config \
+        && [ "$(awk -F= '/^[A-Za-z_]/ { print $1 }' "${cpe%.env}.local.env")" = DHCP_PROXY_PXE_BOOT_SERVER ] \
+        || { echo "only-changed: rc ${status}: $(awk -F= '/^[A-Za-z_]/ { print $1 }' "${cpe%.env}.local.env" | tr '\n' ' ')"; return 1; }
+    _cp_install deleted || return 1
+    rm "${cpe}"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; adopt_config_prod_edits "${CONV%/deploy/prod}" >/dev/null'
+    [ "${status}" -eq 0 ] && git -C "${base}" diff --quiet HEAD -- config && [ ! -e "${cpe%.env}.local.env" ] \
+        || { echo "deleted: rc ${status}: ${output}"; return 1; }
+    _cp_install no-git nogit || return 1
+    set_env_key DHCP_PROXY_PXE_BOOT_SERVER "${srv}" "${cpe}"
+    _setup_sh_run 'PATH="${BIN}:${PATH}"; adopt_config_prod_edits "${CONV%/deploy/prod}"'
+    [ "${status}" -eq 0 ] && [ "$(get_env_var DHCP_PROXY_PXE_BOOT_SERVER "${cpe}")" = "${srv}" ] && [ ! -e "${cpe%.env}.local.env" ] \
+        || { echo "no-git: rc ${status}: ${output}"; return 1; }
 }
 
+# What: own state dirs stay; defaults drop; broken ones heal
+# Why: AG-OP-009 keeps overrides; AG-OP-007 converges once
+# From: Issue #1683 | PR #1858
 @test "migrate_env_for_update preserves all custom per-service state dirs" {
     _stand_ins || return 1
-    # What: an operator's own per-service state dir survives
-    # Why: AG-OP-009 override preservation
-    # From: Issue #1683 | PR #1858
-    local root d keys k
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    d="${BATS_TEST_TMPDIR}/custom/deploy/prod"
-    _converged_install "${d}" || return 1
-    keys="$(prod_state_keys | grep -vx CACHE_DIR)"
-    while IFS= read -r k; do set_env_key "${k}" "${BATS_TEST_TMPDIR}/own/${k}" "${d}/.env"; done <<< "${keys}"
-    for _ in 1 2; do
+    local d keys k first tv
+    local -A own
+    _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
+    _state_row() { d="${BATS_TEST_TMPDIR}/$1/deploy/prod"; _converged_install "${d}"; }
+    _state_run() {
         _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
-        [ "${status}" -eq 0 ] || { echo "migrate: ${output}"; return 1; }
+        [ "${status}" -eq 0 ] || { echo "$1: rc ${status}: ${output}"; return 1; }
+    }
+    _state_row own || return 1
+    keys="$(prod_state_keys | grep -vx CACHE_DIR)" first="${keys%%$'\n'*}"
+    [ -n "${first}" ] || { echo "no state keys"; return 1; }
+    while IFS= read -r k; do own["${k}"]="$(_val path)"; set_env_key "${k}" "${own[${k}]}" "${d}/.env"; done <<< "${keys}"
+    for _ in 1 2; do
+        _state_run own || return 1
         while IFS= read -r k; do
-            [ "$(get_env_var "${k}" "${d}/.env")" = "${BATS_TEST_TMPDIR}/own/${k}" ] || { echo "${k} lost"; return 1; }
+            [ "$(get_env_var "${k}" "${d}/.env")" = "${own[${k}]}" ] || { echo "own: ${k} lost"; return 1; }
         done <<< "${keys}"
     done
+    _state_row templated || return 1
+    tv="\${LANCACHE_STATE_DIR}/$(_val name)"
+    set_env_assignment "${first}" "${tv}" "${d}/.env"
+    _state_run templated || return 1
+    [ "$(get_env_assignment_value_raw "${first}" "${d}/.env")" = "${tv}" ] \
+        || { echo "templated: ${first}=$(get_env_assignment_value_raw "${first}" "${d}/.env")"; return 1; }
+    _state_row default || return 1
+    set_env_key "${first}" "$(get_env_var LANCACHE_STATE_DIR "${d}/.env")/$(prod_state_subdir "${first}")" "${d}/.env"
+    _state_run default || return 1
+    ! env_key_exists "${first}" "${d}/.env" || { echo "default: ${first} kept"; return 1; }
+    _state_row broken || return 1
+    set_env_key "${first}" "$(_val int 1 99)" "${d}/.env"
+    _state_run broken || return 1
+    ! env_key_exists "${first}" "${d}/.env" || { echo "broken: ${first}=$(get_env_var "${first}" "${d}/.env")"; return 1; }
+    cp "${d}/.env" "${d}/env.run1"
+    _state_run broken-rerun || return 1
+    cmp -s "${d}/env.run1" "${d}/.env" || { echo "broken: run 2 changed .env"; return 1; }
 }
 
 @test "migrate_env_for_update drops a per-service state dir equal to the one-root default" {
