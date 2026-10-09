@@ -1824,8 +1824,8 @@ _artifact() {
 # VERSION MANAGEMENT
 # =========================================================
 
-# What: Copies pin consumers and release-version copies.
-# Why: sync tests must never touch the real repo files.
+# What: copy of every file the version owner reads
+# Why: drift rows edit a copy, never the real repo
 # From: Issue #1683 | PR #1858
 _version_fixture_repo() {
     local root="${CI_REPO_ROOT}" dir lock vf ws f consumers members
@@ -1839,28 +1839,45 @@ _version_fixture_repo() {
     printf '%s' "${dir}"
 }
 
-@test "version, verify and audit give one output and rc" {
-    _stand_ins || return 1
-    # What: per state: the 3 names agree on output and rc.
-    # Why: one pin-drift owner; no second walk of the SOT.
-    # From: Issue #1683 | PR #1858
-    local root vf state sub want_status want
-    for state in clean drifted; do
-        root="$(_version_fixture_repo)" || return 1
-        if [ "${state}" = drifted ]; then
-            vf="$(_ci_repo_path CI_VERSION_FILE "${root}")" && printf '%s\n' "$(_val semver)" > "${vf}"
-        fi
-        CI_REPO_ROOT="${root}" run bash "${CI_SH}" version
-        want_status="${status}" want="${output}"
-        case "${state}" in
-            clean) [ "${want_status}" -eq 0 ] ;;
-            drifted) [ "${want_status}" -eq 1 ] && [[ "${want}" == *"[CI-ERROR-VERSION-0024]"* ]] ;;
-        esac || { echo "${state}: rc ${want_status}: ${want}"; return 1; }
-        for sub in verify audit; do
-            CI_REPO_ROOT="${root}" run bash "${CI_SH}" version "${sub}"
-            [ "${status}" -eq "${want_status}" ] && [ "${output}" = "${want}" ] \
-                || { echo "${state}/${sub}: rc ${status}: ${output}"; return 1; }
-        done
+# What: real repo clean; one drift per row fails coded
+# Why: SOT owns versions; a copy or baked pin must not drift
+# From: Issue #1683 | PR #1858
+@test "version verify: real repo clean, each drift fails with its code" {
+    local real want sub out dep df keys arg lock vf ws mem pkg sv row verb f e want_rc code fx
+    real="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    want="$(_ci_release_value version)" || return 1
+    for sub in "" audit; do
+        CI_REPO_ROOT="${real}" run bash "${CI_SH}" version ${sub:+"${sub}"}
+        _expect "clean${sub:+-${sub}}" 0 "release-version=${want} consumers=clean" || return 1
+    done
+    out="${output}"
+    dep="$(_ci_version_consumers)" || { echo "consumers unreadable: ${dep}"; return 1; }
+    IFS='|' read -r dep df keys <<< "${dep%%$'\n'*}"
+    arg="$(sed -n "s/^key=${dep}\.consumer\.\([A-Z0-9_]*\) shape=bare\$/\1/p" <<< "${out}")"
+    arg="${arg%%$'\n'*}"
+    lock="$(_ci_variable CI_CARGO_LOCK)" && vf="$(_ci_variable CI_VERSION_FILE)" && ws="$(dirname "${lock}")/Cargo.toml" \
+        && mem="$(_ci_cargo_members "${real}/${ws}")" && pkg="$(_ci_cargo_member_names "${real}/${ws}")" \
+        || { echo "cargo inputs unreadable"; return 1; }
+    mem="${mem%%$'\n'*}" pkg="${pkg%%$'\n'*}"
+    [ -n "${df}" ] && [ -n "${keys}" ] && [ -n "${arg}" ] && [ -n "${mem}" ] && [ -n "${pkg}" ] \
+        || { echo "inputs: ${dep}|${df}|${keys}|${arg}|${mem}|${pkg}"; return 1; }
+    sv="$(_val semver)"
+    for row in version-file ws-version ws-license lock-entry member-owns arg-baked arg-missing audit-version-file; do
+        verb=verify want_rc=1
+        case "${row}" in
+            version-file|audit-version-file) f="${vf}" e="s/.*/${sv}/" code=0024 ;;
+            ws-version) f="${ws}" e="/^\[workspace\.package\]/,/^\[/ s/^version = .*/version = \"${sv}\"/" code=0021 ;;
+            ws-license) f="${ws}" e="/^\[workspace\.package\]/,/^\[/ s/^license = .*/license = \"$(_val name)\"/" code=0028 ;;
+            lock-entry) f="${lock}" e="/^name = \"${pkg}\"\$/,/^version = / s/^version = .*/version = \"${sv}\"/" code=0025 ;;
+            member-owns) f="${ws%/*}/${mem}/Cargo.toml" e="s/^version\.workspace = true\$/version = \"${sv}\"/" code=0022 ;;
+            arg-baked) f="${df}" e="s/^([[:space:]]*ARG[[:space:]]+${arg})[[:space:]]*\$/\1=$(_val name)/" want_rc=2 code=0009 ;;
+            arg-missing) f="${df}" e="/^[[:space:]]*ARG[[:space:]]+${arg}[[:space:]]*\$/d" want_rc=2 code=0008 ;;
+        esac
+        [ "${row}" != audit-version-file ] || verb=audit
+        fx="$(_version_fixture_repo)" && sed -i -E "${e}" "${fx}/${f}" || { echo "${row}: copy not edited"; return 1; }
+        ! cmp -s "${real}/${f}" "${fx}/${f}" || { echo "${row}: edit changed nothing in ${f}"; return 1; }
+        CI_MANIFEST="${CI_MANIFEST_SOURCE}" CI_REPO_ROOT="${fx}" run bash "${CI_SH}" version "${verb}"
+        _expect "${row}" "${want_rc}" "[CI-ERROR-VERSION-${code}]" || return 1
     done
 }
 
