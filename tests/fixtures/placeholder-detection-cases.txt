@@ -18,9 +18,9 @@
 #   2. setup.sh's own secret_value_is_placeholder() -- a separate WRITE path:
 #      it decides whether setup.sh must generate a fresh secret instead of
 #      preserving an existing .env value.
-#   3. services/ui/src/main.rs's secondary_registration_token_is_placeholder()
-#      -- a third, independent Rust implementation scoped to
-#      SECONDARY_REGISTRATION_TOKEN specifically.
+#   3. services/common/shared.rs's is_placeholder() -- the one Rust
+#      implementation, used by the ui (SECONDARY_REGISTRATION_TOKEN) and by
+#      cachehamster (the Steam credential).
 #
 # All three now normalize the same way before matching (lowercase, and "-"/"_"
 # treated as equivalent -- issue #967's explicit fail-safe hardening: this can
@@ -36,21 +36,9 @@
 #     and "setup" columns against secret_is_placeholder() (from
 #     scripts/lib/shared-secret-bootstrap.sh) and secret_value_is_placeholder()
 #     (extracted from setup.sh), respectively.
-#   - services/ui/src/main.rs's own
-#     secondary_registration_token_is_placeholder_matches_shared_parity_fixture
-#     test, which checks the "rust" column against
-#     secondary_registration_token_is_placeholder().
-#   - services/cachehamster/src/main.rs's own
-#     credential_is_placeholder_matches_shared_parity_fixture test (added
-#     issue #871), which also checks the "rust" column -- NOT a fourth
-#     independent pattern set, this is a deliberate byte-for-byte copy of
-#     implementation 3 above (see that function's own doc comment for why
-#     it is duplicated rather than shared: no crate boundary currently
-#     exists between services/ui and services/cachehamster). Checked against the
-#     same "rust" column as implementation 3 so a future edit to either
-#     copy that silently drifts from the other fails a test instead of
-#     going unnoticed, even though this is not the #967 Option B
-#     legitimate-divergence case the other three columns are about.
+#   - services/common/shared.rs's own
+#     is_placeholder_matches_shared_parity_fixture test, which checks the
+#     "rust" column against is_placeholder().
 #
 # Format: one case per line, whitespace-separated:
 #   <value> <shared:placeholder|real> <setup:placeholder|real> <rust:placeholder|real>
@@ -63,7 +51,7 @@
 # fixture field using this format's plain whitespace-splitting. Each
 # implementation already asserts the empty case directly in its own existing
 # tests (shared_secret_bootstrap.bats's "matches empty and universal
-# placeholders" test, main.rs's secondary_registration_token_rejects_empty_and_known_placeholders
+# placeholders" test, shared.rs's is_placeholder_matches_known_shapes
 # test, and the new setup.sh-specific case added alongside this fixture).
 
 # --- Universal placeholders: all three implementations agree (placeholder) ---
