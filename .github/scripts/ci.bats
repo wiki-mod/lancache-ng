@@ -67,15 +67,6 @@ _stand_ins() {
     _ci_sot_load || return 1
 }
 
-# What: one top-level block of the real SOT, for fixtures.
-# Why: fixture SOTs need the policy values ci.sh reads.
-# From: Issue #1683 | PR #1858
-_sot_block() {
-    awk -v b="$1" '$0 ~ ("^" b ":") { on = 1; print; next }
-        on && /^[^ #]/ { exit }
-        on { print }' "${CI_MANIFEST_SOURCE}"
-}
-
 # What: drop runner cache inputs, then run the args.
 # Why: one list keeps tests off the real runner caches.
 # From: Issue #1683 | PR #1858
@@ -1458,10 +1449,10 @@ CASES
     _expect no-base 2 "$(_fill '[CI-ERROR-BUILD-0014] service="@S@" key="base_images.@FB@"')" || return 1
 }
 
+# What: no repo fails coded and a gone path is noted
+# Why: an empty scan must never pass a check as clean
+# From: Issue #1683 | PR #1858
 @test "scan file set: no repo fails closed, a gone path is skipped" {
-    # What: no repo fails coded and a gone path is noted
-    # Why: an empty scan must never pass a check as clean
-    # From: Issue #1683 | PR #1858
     local d a g e
     local -a out=() ov=()
     d="$(_val path)" e="$(_val path)"
@@ -1481,35 +1472,41 @@ CASES
         || { echo "present: in ${ov[*]} out ${out[*]}: $(cat "${e}")"; return 1; }
 }
 
-@test "check pr-title: SOT types, derived scopes, warn/block/draft modes" {
-    # What: grammar + SOT sets; warn default, block, draft.
-    # Why: AG-GH-018: one policy owner; warn is the default.
-    # From: Issue #1683 | PR #1858
-    local m="${BATS_TEST_TMPDIR}/m.yml" t ex
-    ex="$(_val name)[bot]"
-    printf 'services:\n  svc-a:\n    context: a\nbuild_toolchain:\n  tc-x:\n    context: t\nexternal_services:\n  ext-y:\n    image: i\npr_policy:\n  title_types: [feat, fix, security]\n  title_scopes_extra: [area-z]\n  check_exempt_authors:\n    - %s\n' "${ex}" > "${m}"
-    _sot_block ci_variables >> "${m}"
-    unset PR_TITLE PR_AUTHOR PR_DRAFT PR_TITLE_LINT_MODE
-    for t in "feat(svc-a): x" "fix(tc-x)!: y" "feat(ext-y): x" "feat(area-z): x" \
-             "security: z" "feat!: x" $'feat(svc-a): crlf\r'; do
-        CI_MANIFEST="${m}" PR_TITLE="${t}" run bash "${CI_SH}" check pr-title
-        [ "${status}" -eq 0 ]; [[ "${output}" == *"pr-title=ok"* ]] || { echo "want ok: ${t}"; false; }
-    done
-    for t in "feat(bogus): x" "chore(svc-a): x" "not conventional"; do
-        CI_MANIFEST="${m}" PR_TITLE="${t}" run bash "${CI_SH}" check pr-title
-        [ "${status}" -eq 0 ]; [[ "${output}" == *"CI-ERROR-CHECK-0086"*"pr-title=warn"* ]]
-        CI_MANIFEST="${m}" PR_TITLE="${t}" PR_TITLE_LINT_MODE=block run bash "${CI_SH}" check pr-title
-        [ "${status}" -eq 1 ]; [[ "${output}" == *"reason=\"PR title convention\""* ]]
-        CI_MANIFEST="${m}" PR_TITLE="${t}" PR_TITLE_LINT_MODE=block PR_DRAFT=true run bash "${CI_SH}" check pr-title
-        [ "${status}" -eq 0 ]; [[ "${output}" == *"pr-title=warn-draft"* ]]
-    done
-    CI_MANIFEST="${m}" PR_TITLE="not conventional" PR_AUTHOR="${ex}" PR_TITLE_LINT_MODE=block run bash "${CI_SH}" check pr-title
-    [ "${status}" -eq 0 ]; [[ "${output}" == *"pr-title=skip author=\"${ex}\""* ]]
-    CI_MANIFEST="${m}" run bash "${CI_SH}" check pr-title
-    [ "${status}" -eq 2 ]; [[ "${output}" == *"CI-ERROR-CHECK-0012"* ]]
-    sed -i '/title_types/d' "${m}"
-    CI_MANIFEST="${m}" PR_TITLE="feat: x" run bash "${CI_SH}" check pr-title
-    [ "${status}" -eq 2 ]; [[ "${output}" == *"no SOT pr_policy.title_types"* ]]
+# What: per row: title and env -> verdict and ids
+# Why: AG-GH-018 owns format SOT sets and the modes
+# From: Issue #1683 | PR #1858
+@test "check pr-title: SOT types and scopes, warn default, block and draft" {
+    local case title envs rc want
+    local -a ev
+    local -A V=(["@BT@"]="$(_val name | tr '0-9' 'a-j')" ["@BS@"]="$(_val name)" ["@W@"]="$(_val name)")
+    V["@T@"]="$(_ci_block_entry_list pr_policy "" title_types | awk 'NR == 1')"
+    V["@S@"]="$(ci_build_targets | awk 'NR == 1')"
+    V["@E@"]="$(_ci_block_keys external_services | awk 'NR == 1')"
+    V["@X@"]="$(_ci_block_entry_list pr_policy "" title_scopes_extra | awk 'NR == 1')"
+    V["@A@"]="$(_ci_block_entry_list pr_policy "" check_exempt_authors | awk 'NR == 1')"
+    [ -n "${V["@T@"]}" ] && [ -n "${V["@S@"]}" ] && [ -n "${V["@E@"]}" ] && [ -n "${V["@X@"]}" ] && [ -n "${V["@A@"]}" ] \
+        || { echo "SOT inputs: ${V[*]}"; return 1; }
+    while IFS='|' read -r case title envs rc want; do
+        ev=()
+        [ "${envs}" = - ] || read -r -a ev <<< "$(_fill "${envs}")"
+        run env -u PR_TITLE_LINT_MODE -u PR_DRAFT -u PR_AUTHOR -u CI_VARIABLES "PR_TITLE=$(_fill "${title}")" "${ev[@]}" \
+            bash "${CI_SH}" check pr-title
+        _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
+    done <<'CASES'
+target|@T@(@S@): @W@|-|0|pr-title=ok
+target-breaking|@T@(@S@)!: @W@|-|0|pr-title=ok
+external|@T@(@E@): @W@|-|0|pr-title=ok
+extra|@T@(@X@): @W@|-|0|pr-title=ok
+no-scope|@T@: @W@|-|0|pr-title=ok
+no-scope-breaking|@T@!: @W@|-|0|pr-title=ok
+type-warn-default|@BT@(@S@): @W@|-|0|[CI-ERROR-CHECK-0086];type '@BT@' not allowed;pr-title=warn
+type-block|@BT@(@S@): @W@|PR_TITLE_LINT_MODE=block|1|[CI-ERROR-CHECK-0087] reason="PR title convention";type '@BT@' not allowed
+type-draft|@BT@(@S@): @W@|PR_TITLE_LINT_MODE=block PR_DRAFT=true|0|[CI-WARN-CHECK-0013];type '@BT@' not allowed;pr-title=warn-draft
+scope-block|@T@(@BS@): @W@|PR_TITLE_LINT_MODE=block|1|[CI-ERROR-CHECK-0087];scope '@BS@' not allowed
+grammar-block|@W@|PR_TITLE_LINT_MODE=block|1|[CI-ERROR-CHECK-0087];not a Conventional-Commit title
+empty-subject|@T@(@S@):  |PR_TITLE_LINT_MODE=block|1|[CI-ERROR-CHECK-0087];empty subject
+exempt|@W@|PR_TITLE_LINT_MODE=block PR_AUTHOR=@A@|0|pr-title=skip author="@A@"
+CASES
 }
 
 # What: per row: PR body -> ok, skip, draft warn or the gaps
