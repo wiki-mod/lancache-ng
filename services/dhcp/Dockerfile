@@ -30,6 +30,11 @@ ARG APK_PACKAGES
 # From: Issue #1683
 RUN apk add --no-cache bash
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# What: retry policy for ci.sh, from SOT stage_variables
+# Why: this stage has no SOT; ci.sh reads them from env
+# From: Issue #1683 | PR #1858
+ARG CI_RETRY_MAX_ATTEMPTS
+ARG CI_RETRY_BACKOFF_BASE_SECONDS
 # What: shared package setup via ci.sh.
 # Why: ci.sh owns update+upgrade; SOT owns packages.
 # From: Issue #1683

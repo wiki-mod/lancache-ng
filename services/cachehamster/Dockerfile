@@ -55,6 +55,11 @@ COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.
 # From: Issue #1683 | PR #1858
 COPY services/common services/common
 COPY services/cachehamster/src services/cachehamster/src
+# What: retry policy for ci.sh, from SOT stage_variables
+# Why: this stage has no SOT; ci.sh reads them from env
+# From: Issue #1683 | PR #1858
+ARG CI_RETRY_MAX_ATTEMPTS
+ARG CI_RETRY_BACKOFF_BASE_SECONDS
 # What: ci.sh owns the rust build accel policy (one owner).
 # Why: AG-CI-005/022/023; bind-mounted, never baked in.
 # From: Issue #1683
@@ -90,6 +95,11 @@ ARG APK_PACKAGES
 # From: Issue #1683
 RUN apk add --no-cache bash
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# What: retry policy for ci.sh, from SOT stage_variables
+# Why: this stage has no SOT; ci.sh reads them from env
+# From: Issue #1683 | PR #1858
+ARG CI_RETRY_MAX_ATTEMPTS
+ARG CI_RETRY_BACKOFF_BASE_SECONDS
 # What: shared package setup via ci.sh.
 # Why: ci.sh owns repos, proxy CA, update+upgrade, add.
 # From: Issue #1683 | PR #1858

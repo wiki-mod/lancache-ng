@@ -1005,6 +1005,27 @@ CASES
     _expect uncreatable 2 "[CI-ERROR-CORE-0111] dir=\"${long}\"" || return 1
 }
 
+# What: each ci.sh stage declares every SOT stage variable
+# Why: a stage has no SOT; a missing ARG starves ci.sh
+# From: Issue #1683 | PR #1858
+@test "dockerfile stage variables: every ci.sh stage declares them" {
+    local root t="${BATS_TEST_TMPDIR}/repo" out svc df var
+    local -a tg
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    run _ci_check_dockerfile_stage_variables "${root}"
+    _expect real 0 "dockerfile-stage-variables=clean" || return 1
+    out="$(ci_build_targets)" || return 1
+    mapfile -t tg <<< "${out}"
+    var="$(_ci_block_entry_list stage_variables "" ci_sh | awk 'NR == 1')"
+    [ "${#tg[@]}" -gt 0 ] && [ -n "${var}" ] || { echo "inputs: ${#tg[@]} targets, var '${var}'"; return 1; }
+    svc="${tg[$(( SRANDOM % ${#tg[@]} ))]}"
+    _checkout_copy "${root}" "${t}" || return 1
+    df="$(_ci_service_path "${svc}" Dockerfile "${t}")" || return 1
+    grep -v -x "ARG ${var}" "${df}" > "${df}.new" && mv "${df}.new" "${df}" || return 1
+    run _ci_check_dockerfile_stage_variables "${t}"
+    _expect dropped 1 "[CI-ERROR-CHECK-0169];${svc}: Dockerfile stage;without ARG ${var}" || return 1
+}
+
 # What: per row: runner env -> proxy env, names, CA bundle.
 # Why: AG-CI-009: self-hosted proxy only, CA job-local.
 # From: Issue #1683 | PR #1858
@@ -1387,6 +1408,22 @@ CASES
     CI_RUNTIME_SECRET_DIR="${dir}" run bash "${CI_SH}" variables clear-runtime
     _expect clear 0 "clear-runtime result=cleared" || return 1
     [ ! -e "${dir}" ] || { echo "clear: ${dir} left"; return 1; }
+}
+
+# What: a KEY=VALUE secret reaches the stage key by key
+# Why: the writer ends without a newline; no key may drop
+# From: Issue #1683 | PR #1858
+@test "build secret KEY=VALUE file exports every asked key in the stage" {
+    local f ru tok other
+    f="$(_val path)" ru="$(_val url)" tok="$(_val sha)=$(_val name)" other="$(_val var)"
+    _ci_write_secret "${f}" "ACTIONS_RESULTS_URL=${ru}"$'\n\n'"${other}=$(_val name)"$'\n'"ACTIONS_RUNTIME_TOKEN=${tok}" || return 1
+    [ "$(tail -c 1 "${f}" | od -An -c | tr -d ' ')" != '\n' ] || { echo "writer ends with a newline"; return 1; }
+    CI_SH="${CI_SH}" F="${f}" O="${other}" run env -u ACTIONS_RESULTS_URL -u ACTIONS_RUNTIME_TOKEN -u "${other}" bash -c \
+        'source "${CI_SH}" && _ci_secret_env "${F}" ACTIONS_RESULTS_URL ACTIONS_RUNTIME_TOKEN \
+            && printf "u=%s t=%s o=%s\n" "${ACTIONS_RESULTS_URL-unset}" "${ACTIONS_RUNTIME_TOKEN-unset}" "${!O-unset}"'
+    _expect roundtrip 0 "=u=${ru} t=${tok} o=unset" || return 1
+    CI_SH="${CI_SH}" F="$(_val path)" run bash -c 'source "${CI_SH}" && _ci_secret_env "${F}" ACTIONS_RESULTS_URL && echo none'
+    _expect absent 0 "=none" || return 1
 }
 
 # =========================================================
@@ -2205,9 +2242,13 @@ CASES
     [ "$(get_env_assignment_value_raw "${first}" "${d}/.env")" = "${tv}" ] \
         || { echo "templated: ${first}=$(get_env_assignment_value_raw "${first}" "${d}/.env")"; return 1; }
     _state_row default || return 1
-    set_env_key "${first}" "$(get_env_var LANCACHE_STATE_DIR "${d}/.env")/$(prod_state_subdir "${first}")" "${d}/.env"
+    while IFS= read -r k; do
+        set_env_key "${k}" "$(get_env_var LANCACHE_STATE_DIR "${d}/.env")/$(prod_state_subdir "${k}")" "${d}/.env"
+    done <<< "${keys}"
     _state_run default || return 1
-    ! env_key_exists "${first}" "${d}/.env" || { echo "default: ${first} kept"; return 1; }
+    while IFS= read -r k; do
+        ! env_key_exists "${k}" "${d}/.env" || { echo "default: ${k} kept"; return 1; }
+    done <<< "${keys}"
     _state_row broken || return 1
     set_env_key "${first}" "$(_val int 1 99)" "${d}/.env"
     _state_run broken || return 1
@@ -2215,23 +2256,6 @@ CASES
     cp "${d}/.env" "${d}/env.run1"
     _state_run broken-rerun || return 1
     cmp -s "${d}/env.run1" "${d}/.env" || { echo "broken: run 2 changed .env"; return 1; }
-}
-
-@test "migrate_env_for_update drops a per-service state dir equal to the one-root default" {
-    _stand_ins || return 1
-    # What: a per-service dir equal to default is dropped
-    # Why: one-root contract via LANCACHE_STATE_DIR
-    # From: Issue #1683 | PR #1858
-    local root d k
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    d="${BATS_TEST_TMPDIR}/dflt/deploy/prod"
-    _converged_install "${d}" || return 1
-    while IFS= read -r k; do
-        set_env_key "${k}" "$(get_env_var LANCACHE_STATE_DIR "${d}/.env")/$(prod_state_subdir "${k}")" "${d}/.env"
-        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
-        [ "${status}" -eq 0 ] && ! env_key_exists "${k}" "${d}/.env" || { echo "${k} kept: ${output}"; return 1; }
-    done <<< "$(prod_state_keys | grep -vx CACHE_DIR)"
 }
 
 @test "migrate_env_for_update refuses an empty IP_SSL before any write" {
