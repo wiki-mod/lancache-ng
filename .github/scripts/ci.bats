@@ -1509,38 +1509,46 @@ exempt|@W@|PR_TITLE_LINT_MODE=block PR_AUTHOR=@A@|0|pr-title=skip author="@A@"
 CASES
 }
 
-# What: per row: PR body -> ok, skip, draft warn or the gaps
-# Why: the template's own headings decide what is required
+# What: per row: PR body on the real template -> verdict
+# Why: AG-GH-010: every real template section is filled
 # From: Issue #1683 | PR #1858
-@test "check pr-template: every template section filled, one box marked" {
-    _stand_ins || return 1
-    local root="${BATS_TEST_TMPDIR}/prt" none="${BATS_TEST_TMPDIR}/prt-none" case env body rc want ex
-    local -A V=(["@A@"]="$(_val name)" ["@B@"]="$(_val name)")
+@test "check pr-template: every real template section filled, one box marked" {
+    local case envs rc want h heads body full="" nl=$'\n' fence='```'
+    local -a ev
+    local -A V=(["@W@"]="$(_val name)")
     V["@CB@"]="$(_ci_block_entry_field pr_policy "" checkbox_section)"
-    ex="$(_ci_block_entry_list pr_policy "" check_exempt_authors)"
-    V["@EX@"]="${ex%%$'\n'*}"
-    V["@NONE@"]="${none}"
-    [ -n "${V["@CB@"]}" ] && [ -n "${V["@EX@"]}" ] || { echo "SOT pr_policy inputs missing"; return 1; }
-    mkdir -p "${root}/$(dirname "$(_ci_variable CI_PR_TEMPLATE)")" "${none}"
-    printf '## %s\n\n## %s\n\n## %s\n' "${V["@A@"]}" "${V["@B@"]}" "${V["@CB@"]}" > "$(_ci_repo_path CI_PR_TEMPLATE "${root}")"
-    unset PR_AUTHOR PR_DRAFT
-    export CI_REPO_ROOT="${root}"
-    while IFS='|' read -r case env body rc want; do
-        [ "${env}" = - ] || export "$(_fill "${env}")"
-        PR_BODY="$(printf '%b' "$(_fill "${body}")")" run bash "${CI_SH}" check pr-template
-        [ "${env}" = - ] || unset "${env%%=*}"
-        export CI_REPO_ROOT="${root}"
+    V["@EX@"]="$(_ci_block_entry_list pr_policy "" check_exempt_authors | awk 'NR == 1')"
+    heads="$(grep '^## ' "$(_ci_repo_path CI_PR_TEMPLATE)" | sed 's/^## //')" || { echo "no template headings"; return 1; }
+    V["@H1@"]="$(grep -vxF -- "${V["@CB@"]}" <<< "${heads}" | awk 'NR == 1')"
+    grep -qxF -- "${V["@CB@"]}" <<< "${heads}" && [ -n "${V["@H1@"]}" ] && [ -n "${V["@EX@"]}" ] \
+        || { echo "inputs: ${V[*]} | ${heads}"; return 1; }
+    while IFS= read -r h; do
+        if [ "${h}" = "${V["@CB@"]}" ]; then full+="## ${h}${nl}- [x] ${V["@W@"]}${nl}"; else full+="## ${h}${nl}${V["@W@"]}${nl}"; fi
+    done <<< "${heads}"
+    local sec1="## ${V["@H1@"]}${nl}${V["@W@"]}${nl}"
+    while IFS='|' read -r case envs rc want; do
+        case "${case}" in
+            filled) body="${full}" ;;
+            heading-missing|draft) body="${full/"${sec1}"/}" ;;
+            heading-twice) body="${full}${sec1}" ;;
+            placeholder-only) body="${full/"${sec1}"/"## ${V["@H1@"]}${nl}<!-- ${V["@W@"]} -->${nl}"}" ;;
+            fences-only) body="${full/"${sec1}"/"## ${V["@H1@"]}${nl}${fence}${nl}${fence}${nl}"}" ;;
+            box-unmarked) body="${full/"- [x] ${V["@W@"]}"/"- [ ] ${V["@W@"]}"}" ;;
+            *) body="" ;;
+        esac
+        ev=()
+        [ "${envs}" = - ] || read -r -a ev <<< "$(_fill "${envs}")"
+        run env -u PR_DRAFT -u PR_AUTHOR -u CI_VARIABLES "PR_BODY=${body}" "${ev[@]}" bash "${CI_SH}" check pr-template
         _expect "${case}" "${rc}" "$(_fill "${want}")" || return 1
     done <<'CASES'
-filled|-|## @A@\nx\n## @B@\n```text\ny\n```\n## @CB@\n- [x] one|0|pr-template=ok
-heading-missing|-|## @A@\nx\n## @CB@\n- [x] one|1|[CI-ERROR-CHECK-0089];@B@: heading not found
-box-unmarked|-|## @A@\nx\n## @B@\ny\n## @CB@\n- [ ] one|1|[CI-ERROR-CHECK-0089];@CB@: no checkbox marked
-placeholder-only|-|## @A@\n<!-- fill\nthis in -->\n## @B@\ny\n## @CB@\n- [x] one|1|[CI-ERROR-CHECK-0089];@A@: empty (only template placeholder left)
-fences-only|-|## @A@\nx\n## @B@\n```\n```\n## @CB@\n- [x] one|1|[CI-ERROR-CHECK-0089];@B@: empty (only template placeholder left)
-heading-twice|-|## @A@\nx\n## @A@\nz\n## @B@\ny\n## @CB@\n- [x] one|1|[CI-ERROR-CHECK-0089];@A@: heading appears 2 times
-draft|PR_DRAFT=true|## @A@\nx|0|[CI-ERROR-CHECK-0088];pr-template=warn-draft
-exempt-author|PR_AUTHOR=@EX@|-|0|pr-template=skip author="@EX@"
-no-template|CI_REPO_ROOT=@NONE@|## @A@\nx|2|[CI-ERROR-CHECK-0015]
+filled|-|0|pr-template=ok
+heading-missing|-|1|[CI-ERROR-CHECK-0089];@H1@: heading not found
+heading-twice|-|1|[CI-ERROR-CHECK-0089];@H1@: heading appears 2 times
+placeholder-only|-|1|[CI-ERROR-CHECK-0089];@H1@: empty (only template placeholder left)
+fences-only|-|1|[CI-ERROR-CHECK-0089];@H1@: empty (only template placeholder left)
+box-unmarked|-|1|[CI-ERROR-CHECK-0089];@CB@: no checkbox marked
+draft|PR_DRAFT=true|0|[CI-ERROR-CHECK-0088];pr-template=warn-draft
+exempt|PR_AUTHOR=@EX@|0|pr-template=skip author="@EX@"
 CASES
 }
 
@@ -1563,21 +1571,26 @@ section-level-3|section|### Linked Issues\na|Linked Issues|0
 CASES
 }
 
+# What: per row: uses ref -> external (pin) or local
+# Why: AG-CI-001 pins every external action by full SHA
+# From: Issue #1683 | PR #1858
 @test "action ref is external unless local, docker, or this repo" {
-    # What: own repo (any case), ./ and docker:// are local.
-    # Why: this repo comes from the run, never a literal.
-    # From: Issue #1683 | PR #1858
-    local v
-    for v in ./a/b@x docker://img@x Owner/Fixture-Repo/.github/a@x owner/fixture-repo/b@y; do
-        GITHUB_REPOSITORY=owner/fixture-repo run _ci_action_ref_is_external "${v}"
-        [ "${status}" -eq 1 ] || { echo "want local: ${v}"; false; }
-    done
-    for v in other/tool@0a owner/other-repo/x@1b; do
-        GITHUB_REPOSITORY=owner/fixture-repo run _ci_action_ref_is_external "${v}"
-        [ "${status}" -eq 0 ] || { echo "want external: ${v}"; false; }
-    done
-    GITHUB_REPOSITORY=owner/fixture-repo run _ci_action_ref_is_external owner/fixture-repo
-    [ "${status}" -eq 1 ]
+    local case ref rc
+    local -A V=(["@O@"]="$(_val name)" ["@R@"]="$(_val name)" ["@X@"]="$(_val name)" ["@P@"]="$(_val name)" ["@SHA@"]="$(_val sha)")
+    V["@UO@"]="${V["@O@"]^^}" V["@UR@"]="${V["@R@"]^^}"
+    while IFS='|' read -r case ref rc; do
+        GITHUB_REPOSITORY="${V["@O@"]}/${V["@R@"]}" run _ci_action_ref_is_external "$(_fill "${ref}")"
+        _expect "${case}" "${rc}" - || return 1
+    done <<'CASES'
+relative|./@P@/@X@@@SHA@|1
+docker|docker://@P@@@SHA@|1
+own-subpath|@O@/@R@/@P@@@SHA@|1
+own-other-case|@UO@/@UR@/@P@@@SHA@|1
+no-ref|@X@/@P@|1
+other-owner|@X@/@P@@@SHA@|0
+same-owner-other-repo|@O@/@X@/@P@@@SHA@|0
+own-name-prefix-repo|@O@/@R@@X@/@P@@@SHA@|0
+CASES
 }
 
 # What: changed file -> skip only for a shell comment.
