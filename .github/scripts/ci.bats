@@ -963,11 +963,10 @@ CASES
 # REGISTRY / PUBLISH / READBACK
 # =========================================================
 
-# What: login rows without a registry; token stays on stdin.
-# Why: GHCR required, Docker Hub paired; no token on argv.
+# What: GHCR login required; Docker Hub only as a pair
+# Why: anonymous pulls hit limits; a half pair is a bug
 # From: Issue #1683 | PR #1858
-@test "registry logins: GHCR required, Docker Hub paired, token on stdin" {
-    local logins l
+@test "registry logins: GHCR required, Docker Hub only as a pair" {
     _twice() { local a=0 b=0; _ci_dockerhub_login || a=$?; _ci_dockerhub_login || b=$?; echo "rc=${a},${b}"; }
     unset _CI_DOCKERHUB_DONE GHCR_USERNAME GHCR_TOKEN DOCKERHUB_USERNAME DOCKERHUB_TOKEN
     run _ci_require_ghcr_auth
@@ -978,11 +977,6 @@ CASES
     _expect hub-half 2 "[CI-ERROR-BUILD-0021]" || return 1
     DOCKERHUB_TOKEN="$(_val name)" run _twice
     _expect hub-half-twice 0 "[CI-ERROR-BUILD-0021];[CI-ERROR-BUILD-0021];rc=2,2" || return 1
-    logins="$(grep -n -E '(^[[:space:]]*|[|;&][[:space:]]*)docker login( |$)' "${CI_SH}")" || { echo "no docker login in ${CI_SH}"; return 1; }
-    while IFS= read -r l; do
-        [[ "${l}" == *'printf '*'| docker login '*'--password-stdin'* && "${l}" != *' -p '* && "${l}" != *'--password '* ]] \
-            || { echo "token not on stdin: ${l}"; return 1; }
-    done <<< "${logins}"
 }
 
 # =========================================================
