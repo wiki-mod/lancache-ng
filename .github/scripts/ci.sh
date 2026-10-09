@@ -5606,11 +5606,17 @@ _ci_validation_dns_domain() {
     printf '%s\n' "${all%%$'\n'*}"
 }
 
-# What: Print the SOT proxy cache-probe URL.
-# Why: One cacheable HTTP target proves the HIT path.
+# What: SOT proxy probe url only when it is http
+# Why: https passthrough gives no HIT proof
 # From: Issue #1683 | PR #1858
 _ci_validation_proxy_probe_url() {
-    _ci_block_entry_field validation "" proxy_cache_probe_url
+    local url
+    url="$(_ci_block_entry_field validation "" proxy_cache_probe_url)" || return 2
+    if [[ "${url}" != http://?* ]]; then
+        ci_error "[CI-ERROR-VALIDATE-0115]" "url=\"${url}\" reason=\"proxy probe url is not http\"" "${url}"
+        return 2
+    fi
+    printf '%s\n' "${url}"
 }
 
 # What: Emit "service<TAB>image" for each compose service.
@@ -6282,11 +6288,11 @@ _ci_validate_dns() {
 _ci_validate_proxy() {
     local project="$1" url ip_std host h1 h2 port
     port="$(_ci_service_port http)" || return 2
-    url="$(_ci_validation_proxy_probe_url)"
+    url="$(_ci_validation_proxy_probe_url)" || return 2
     ip_std="$(_ci_validate_container_ip "${project}" proxy)"
     host="${url#http://}"; host="${host%%/*}"
-    if [ -z "${url}" ] || [ -z "${ip_std}" ] || [ -z "${host}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0012]" "reason=\"missing proxy probe url or proxy container IP\""
+    if [ -z "${ip_std}" ] || [ -z "${host}" ]; then
+        ci_error "[CI-ERROR-VALIDATE-0012]" "url=\"${url}\" reason=\"missing proxy container IP or probe host\"" "${ip_std}"
         return 2
     fi
     if ! h1="$(curl -fsS --resolve "${host}:${port}:${ip_std}" -D - -o /dev/null "${url}" 2>&1)"; then
