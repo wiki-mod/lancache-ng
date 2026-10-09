@@ -5,10 +5,7 @@
 //! Why: no Steam login yet; URLs come from the env.
 //! From: Issue #871
 
-use std::fs::{self, OpenOptions};
-use std::io::Write as _;
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -17,25 +14,33 @@ use argon2::Argon2;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use futures_util::{StreamExt, stream};
-use lancache_common::config::env_opt;
-use lancache_common::{is_placeholder, load_or_create_hex_secret};
+use lancache_common::config::{OutOfRange, Uint, env_opt};
+use lancache_common::{Place, is_placeholder, load_or_create_hex, write_file};
 use serde::{Deserialize, Serialize};
 
 // What: where the master secret and credential live.
 // Why: the /data volume holds this service's state.
-// From: Issue #871
 const DEFAULT_DATA_DIR: &str = "/data";
 
-// What: sizes of master secret, salt, nonce and key in bytes.
+// What: sizes of master secret, salt and nonce in bytes.
 // Why: 192-bit random nonces; Argon2 wants a 16-byte salt.
-// From: Issue #871
 const MASTER_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 
-// What: a credential as stored on disk, never in clear.
-// Why: only salt, nonce and ciphertext may reach the disk.
-// From: Issue #871
+// What: in-flight fetches; 4 when unset or invalid.
+// Why: a bad value costs speed only, so it does not fail.
+const CONCURRENCY: Uint = Uint {
+    name: "CACHEHAMSTER_CONCURRENCY",
+    default: 4,
+    min: 1,
+    max: u32::MAX as u64,
+    below: OutOfRange::Default,
+    above: OutOfRange::Default,
+};
+
+// What: a credential as stored: salt, nonce, ciphertext.
+// Why: the plaintext must never reach the disk.
 #[derive(Serialize, Deserialize)]
 struct Sealed {
     salt: Vec<u8>,
@@ -44,8 +49,7 @@ struct Sealed {
 }
 
 // What: the AEAD cipher keyed by Argon2id(master, salt).
-// Why: Argon2id as a raw KDF; the one-way PHC form has no key.
-// From: Issue #871
+// Why: the credential is recovered, so no one-way hash.
 fn cipher_for(master: &[u8; MASTER_LEN], salt: &[u8]) -> Result<XChaCha20Poly1305> {
     let mut key = [0u8; 32];
     Argon2::default()
@@ -55,8 +59,7 @@ fn cipher_for(master: &[u8; MASTER_LEN], salt: &[u8]) -> Result<XChaCha20Poly130
 }
 
 // What: seal plaintext under a fresh salt and nonce.
-// Why: the credential must never rest on disk in clear.
-// From: Issue #871
+// Why: equal credentials must not give equal files.
 fn seal(master: &[u8; MASTER_LEN], plaintext: &[u8]) -> Result<Sealed> {
     let salt: [u8; SALT_LEN] = rand::random();
     let nonce: [u8; NONCE_LEN] = rand::random();
@@ -70,9 +73,8 @@ fn seal(master: &[u8; MASTER_LEN], plaintext: &[u8]) -> Result<Sealed> {
     })
 }
 
-// What: open a sealed credential; the result stays in memory.
-// Why: the AEAD tag rejects a wrong secret or tampered data.
-// From: Issue #871
+// What: open a sealed credential; it stays in memory.
+// Why: the AEAD tag rejects a wrong secret or tampering.
 fn open(master: &[u8; MASTER_LEN], sealed: &Sealed) -> Result<Vec<u8>> {
     if sealed.nonce.len() != NONCE_LEN {
         bail!("persisted credential has a malformed nonce");
@@ -84,7 +86,6 @@ fn open(master: &[u8; MASTER_LEN], sealed: &Sealed) -> Result<Vec<u8>> {
 
 // What: whether the credential may rest on disk.
 // Why: the operator decides; an unknown value fails closed.
-// From: Issue #871
 fn persistence_from(value: Option<&str>) -> Result<bool> {
     match value {
         None | Some("none") => Ok(false),
@@ -108,31 +109,25 @@ fn real_credential(value: Option<String>) -> Result<Option<String>> {
 }
 
 // What: the credential for this run, or none configured.
-// Why: an env value wins and is sealed when persistence is on.
-// From: Issue #871
-fn credential(persist: bool, dir: &str) -> Result<Option<String>> {
+// Why: an env value wins and is sealed when persisting.
+fn credential(persist: bool, dir: &Path) -> Result<Option<String>> {
     let from_env = real_credential(env_opt("CACHEHAMSTER_STEAM_CREDENTIAL"))?;
     if !persist {
         return Ok(from_env);
     }
-    let master =
-        load_or_create_hex_secret::<MASTER_LEN>(&format!("{dir}/lancache-cachehamster-master.secret"))?;
-    let path = format!("{dir}/lancache-cachehamster-credential.json");
+    let master = load_or_create_hex::<MASTER_LEN>(&dir.join("lancache-cachehamster-master.secret"))?;
+    let path = dir.join("lancache-cachehamster-credential.json");
     if let Some(plain) = from_env {
-        let json = serde_json::to_string(&seal(&master, plain.as_bytes())?)?;
-        let mut options = OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut file = options.open(&path)?;
-        file.write_all(json.as_bytes())?;
-        file.sync_all()?;
+        let json = serde_json::to_vec(&seal(&master, plain.as_bytes())?)?;
+        write_file(&path, &json, 0o600, Place::Replace)?;
         return Ok(Some(plain));
     }
-    match fs::read_to_string(&path) {
+    match std::fs::read(&path) {
         Ok(json) => {
-            let plain = open(&master, &serde_json::from_str(&json)?)?;
-            Ok(Some(String::from_utf8(plain).context("persisted credential is not valid UTF-8")?))
+            let plain = open(&master, &serde_json::from_slice(&json)?)?;
+            Ok(Some(
+                String::from_utf8(plain).context("persisted credential is not valid UTF-8")?,
+            ))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
@@ -140,7 +135,7 @@ fn credential(persist: bool, dir: &str) -> Result<Option<String>> {
 }
 
 // What: stream one body and drop each chunk on arrival.
-// Why: the proxy caches the bytes; none are kept here (#816).
+// Why: the proxy caches the bytes; none are kept here.
 // From: Issue #816
 async fn drain(client: &reqwest::Client, url: &str, total: &AtomicU64) -> Result<u64> {
     let mut body = client.get(url).send().await?.error_for_status()?.bytes_stream();
@@ -153,16 +148,6 @@ async fn drain(client: &reqwest::Client, url: &str, total: &AtomicU64) -> Result
     Ok(bytes)
 }
 
-// What: the in-flight fetch cap; 4 when unset or invalid.
-// Why: a bad value costs speed only, so it does not fail.
-// From: Issue #871
-fn concurrency_from(value: Option<&str>) -> usize {
-    value
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(4)
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -172,16 +157,16 @@ async fn main() -> Result<()> {
         "lancache-cachehamster is a scaffold (issue #871): it does not yet resolve a Steam app ID to real depot chunk URLs. See docs/design-steam-prefill.md for the current implementation plan and open decisions."
     );
 
-    let dir = std::env::var("CACHEHAMSTER_DATA_DIR").unwrap_or_else(|_| DEFAULT_DATA_DIR.into());
+    let data_dir = env_opt("CACHEHAMSTER_DATA_DIR").unwrap_or_else(|| DEFAULT_DATA_DIR.to_string());
     let persist = persistence_from(env_opt("CACHEHAMSTER_CREDENTIAL_PERSISTENCE").as_deref())?;
-    let configured = credential(persist, &dir)?.is_some();
+    let configured = credential(persist, Path::new(&data_dir))?.is_some();
     tracing::info!(
         credential_persistent = persist,
         credential_configured = configured,
         "credential resolution complete (plaintext value itself is never logged)"
     );
 
-    let urls: Vec<String> = std::env::var("CACHEHAMSTER_URLS")
+    let urls: Vec<String> = env_opt("CACHEHAMSTER_URLS")
         .unwrap_or_default()
         .split(',')
         .map(str::trim)
@@ -195,15 +180,18 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    let (limit, warning) = CONCURRENCY.parse(env_opt("CACHEHAMSTER_CONCURRENCY").as_deref());
+    if let Some(warning) = warning {
+        tracing::warn!("{warning}");
+    }
     let total = AtomicU64::new(0);
     let client = reqwest::Client::new();
-    let concurrency = concurrency_from(std::env::var("CACHEHAMSTER_CONCURRENCY").ok().as_deref());
-    // What: fetch with a bounded fan-out and log throughput.
+    // What: bounded fetch fan-out beside a throughput ticker.
     // Why: one task owns both, so no stop signal is needed.
     // From: Issue #871
     let fetch = stream::iter(&urls)
         .map(|url| drain(&client, url, &total))
-        .buffer_unordered(concurrency)
+        .buffer_unordered(usize::try_from(limit)?)
         .collect::<Vec<_>>();
     tokio::pin!(fetch);
     let every = Duration::from_secs(10);
@@ -251,7 +239,7 @@ mod tests {
     }
 
     // What: only a set placeholder credential is rejected.
-    // Why: dropping it quietly would hide the operator's mistake.
+    // Why: dropping it quietly would hide the mistake.
     // From: Issue #967
     #[test]
     fn placeholder_credentials_are_rejected_others_pass() {
@@ -285,16 +273,5 @@ mod tests {
         let other: [u8; MASTER_LEN] = rand::random();
         let sealed = seal(&master, b"another-secret").unwrap();
         assert!(open(&other, &sealed).is_err());
-    }
-
-    // What: concurrency defaults to 4 on junk, zero or unset.
-    // Why: only a positive integer may change the fan-out.
-    // From: Issue #871
-    #[test]
-    fn concurrency_defaults_on_invalid_input() {
-        assert_eq!(concurrency_from(None), 4);
-        assert_eq!(concurrency_from(Some("0")), 4);
-        assert_eq!(concurrency_from(Some("x")), 4);
-        assert_eq!(concurrency_from(Some("16")), 16);
     }
 }

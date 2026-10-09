@@ -228,8 +228,13 @@ pub fn load_or_create_issuer_keypair(path: &str) -> Result<KeyPair, String> {
             let seed = kp
                 .seed()
                 .map_err(|e| format!("failed to encode newly generated issuer seed: {e}"))?;
-            lancache_common::create_secret_file(path, &seed)
-                .map_err(|e| format!("failed to write issuer seed file at {path}: {e}"))?;
+            lancache_common::write_file(
+                std::path::Path::new(path),
+                seed.as_bytes(),
+                0o600,
+                lancache_common::Place::Exclusive,
+            )
+            .map_err(|e| format!("failed to write issuer seed file at {path}: {e}"))?;
             Ok(kp)
         }
         Err(err) => Err(format!("failed to read issuer seed file at {path}: {err}")),
@@ -257,8 +262,13 @@ pub fn load_or_create_xkey(path: &str) -> Result<XKey, String> {
             let seed = kp
                 .seed()
                 .map_err(|e| format!("failed to encode newly generated xkey seed: {e}"))?;
-            lancache_common::create_secret_file(path, &seed)
-                .map_err(|e| format!("failed to write xkey seed file at {path}: {e}"))?;
+            lancache_common::write_file(
+                std::path::Path::new(path),
+                seed.as_bytes(),
+                0o600,
+                lancache_common::Place::Exclusive,
+            )
+            .map_err(|e| format!("failed to write xkey seed file at {path}: {e}"))?;
             Ok(kp)
         }
         Err(err) => Err(format!("failed to read xkey seed file at {path}: {err}")),

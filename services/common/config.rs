@@ -29,6 +29,68 @@ pub fn parse_bool(raw: &str) -> Option<bool> {
     }
 }
 
+// What: how a value outside [min, max] is resolved.
+// Why: floors and ceilings differ per knob, parsing does not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutOfRange {
+    Clamp,
+    Default,
+}
+
+// What: one unsigned decimal knob and its limits.
+// Why: every service parses numeric env values alike.
+#[derive(Clone, Copy, Debug)]
+pub struct Uint {
+    pub name: &'static str,
+    pub default: u64,
+    pub min: u64,
+    pub max: u64,
+    pub below: OutOfRange,
+    pub above: OutOfRange,
+}
+
+impl Uint {
+    // What: value of the knob, plus a warning if rejected.
+    // Why: unset or blank is no warning; junk never crashes.
+    pub fn parse(&self, raw: Option<&str>) -> (u64, Option<String>) {
+        let Some(raw) = non_empty(raw.map(str::trim)) else {
+            return (self.default, None);
+        };
+        let rejected = || {
+            (
+                self.default,
+                Some(format!(
+                    "Invalid {}={raw}; using default {}",
+                    self.name, self.default
+                )),
+            )
+        };
+        if !raw.bytes().all(|b| b.is_ascii_digit()) {
+            return rejected();
+        }
+        let Ok(value) = raw.parse::<u64>() else {
+            return rejected();
+        };
+        let (limit, policy, side) = if value < self.min {
+            (self.min, self.below, "below the minimum")
+        } else if value > self.max {
+            (self.max, self.above, "above the maximum")
+        } else {
+            return (value, None);
+        };
+        match policy {
+            OutOfRange::Default => rejected(),
+            OutOfRange::Clamp => (
+                limit,
+                Some(format!(
+                    "{}={raw} is {side} ({limit}); using {limit}",
+                    self.name
+                )),
+            ),
+        }
+    }
+}
+
 // What: the DHCP backend an install runs, or none.
 // Why: ui and watchdog must read DHCP_MODE the same way.
 // From: Issue #844
@@ -129,6 +191,35 @@ mod tests {
         for v in ["", "garbage", "2", "onn"] {
             assert_eq!(parse_bool(v), None, "expected {v:?} unknown");
         }
+    }
+
+    // What: limits resolve by policy, junk falls back.
+    // Why: one parser serves floors, ceilings and defaults.
+    #[test]
+    fn uint_knob_resolves_by_policy() {
+        let knob = |below, above| Uint {
+            name: "K",
+            default: 30,
+            min: 1,
+            max: 100,
+            below,
+            above,
+        };
+        let floor = knob(OutOfRange::Clamp, OutOfRange::Default);
+        assert_eq!(floor.parse(None), (30, None));
+        assert_eq!(floor.parse(Some("  ")), (30, None));
+        assert_eq!(floor.parse(Some(" 12 ")), (12, None));
+        assert_eq!(floor.parse(Some("0")).0, 1);
+        assert_eq!(floor.parse(Some("101")).0, 30);
+        assert_eq!(floor.parse(Some("99999999999999999999")).0, 30);
+        for junk in ["abc", "-5", "1x"] {
+            let (value, warning) = floor.parse(Some(junk));
+            assert_eq!(value, 30);
+            assert!(warning.is_some_and(|w| w.contains(junk)));
+        }
+        let ceiling = knob(OutOfRange::Default, OutOfRange::Clamp);
+        assert_eq!(ceiling.parse(Some("0")).0, 30);
+        assert_eq!(ceiling.parse(Some("101")).0, 100);
     }
 
     // What: each mode text maps to one mode and container.

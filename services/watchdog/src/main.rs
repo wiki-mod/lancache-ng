@@ -16,7 +16,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use lancache_common::config::{self, DhcpMode, env_opt, non_empty, parse_bool};
-use lancache_common::{DiskHealth, DiskInfo, ServiceHealth, WatchdogStatus, write_file_atomic};
+use lancache_common::{DiskHealth, DiskInfo, Place, ServiceHealth, WatchdogStatus, write_file};
 use serde::Deserialize;
 
 // What: decimal knob within [min, max], else a fallback.
@@ -949,7 +949,7 @@ async fn main() {
         // Why: compose restarts on exit, not on red health.
         let body = serde_json::to_string_pretty(&watchdog_status)
             .expect("WatchdogStatus has only serializable fields");
-        if let Err(e) = write_file_atomic(&settings.status_file, body.as_bytes()) {
+        if let Err(e) = write_file(&settings.status_file, body.as_bytes(), 0o644, Place::Replace) {
             log_err(&format!(
                 "ERROR: failed to write {}: {e}",
                 settings.status_file.display()

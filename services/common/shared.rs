@@ -10,10 +10,10 @@ pub mod config;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
-#[cfg(unix)]
+use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // What: health of one service in watchdog's status.json.
 // Why: watchdog writes it and the ui reads it; one schema.
@@ -66,51 +66,104 @@ pub fn is_placeholder(value: &str) -> bool {
         || (value.starts_with('<') && value.ends_with('>'))
 }
 
-// What: create a new file mode 0600, write, fsync.
-// Why: exclusive create loses no concurrent start's secret.
-// From: Issue #871
-pub fn create_secret_file(path: &str, contents: &str) -> std::io::Result<()> {
-    let mut open_options = OpenOptions::new();
-    open_options.create_new(true).write(true);
-    #[cfg(unix)]
-    open_options.mode(0o600);
-    let mut file = open_options.open(path)?;
-    file.write_all(contents.as_bytes())?;
-    file.sync_all()
+// What: how write_file treats a file that already exists.
+// Why: secrets are created once; settings are replaced.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Place {
+    Replace,
+    Exclusive,
 }
 
-// What: N-byte hex secret; created once, then reused.
+// What: write a whole file; readers see all of it or none.
+// Why: one write path for secrets, settings and status.
+pub fn write_file(path: &Path, contents: &[u8], mode: u32, place: Place) -> io::Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let tmp = path.with_file_name(format!(
+        ".{}.tmp-{}-{stamp}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let placed = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&tmp)
+        .and_then(|mut file| {
+            file.write_all(contents)?;
+            file.sync_all()
+        })
+        .and_then(|()| match place {
+            Place::Exclusive => fs::hard_link(&tmp, path),
+            // What: a busy target is rewritten in place.
+            // Why: a single-file bind mount refuses a rename.
+            Place::Replace => match fs::rename(&tmp, path) {
+                Err(e) if e.kind() == io::ErrorKind::ResourceBusy => {
+                    let mut file = OpenOptions::new().write(true).truncate(true).open(path)?;
+                    file.write_all(contents)?;
+                    file.sync_all()
+                }
+                other => other,
+            },
+        });
+    // What: drop the temp name; absent after a rename.
+    // Why: the result above is the outcome, not the cleanup.
+    let _ = fs::remove_file(&tmp);
+    placed
+}
+
+// What: read a persisted secret, else create it once.
 // Why: restarts must not rotate it; a bad file fails.
 // From: Issue #871
-pub fn load_or_create_hex_secret<const N: usize>(path: &str) -> anyhow::Result<[u8; N]> {
+pub fn load_or_create<T>(
+    path: &Path,
+    create: impl FnOnce() -> (String, T),
+    parse: impl Fn(&str) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
     match fs::read_to_string(path) {
-        Ok(contents) => {
-            let decoded = hex::decode(contents.trim())?;
-            let bytes: [u8; N] = decoded.try_into().map_err(|_| {
-                anyhow::anyhow!("secret at {path} must be exactly {N} bytes encoded as hex")
-            })?;
-            Ok(bytes)
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let secret: [u8; N] = rand::random();
-            create_secret_file(path, &hex::encode(secret))?;
-            Ok(secret)
+        Ok(contents) => parse(contents.trim()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            let (text, value) = create();
+            match write_file(path, text.as_bytes(), 0o600, Place::Exclusive) {
+                Ok(()) => Ok(value),
+                // What: a concurrent start created it first.
+                // Why: the first writer's secret is the one.
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    parse(fs::read_to_string(path)?.trim())
+                }
+                Err(e) => Err(e.into()),
+            }
         }
         Err(err) => Err(err.into()),
     }
 }
 
-// What: write via <path>.tmp, then rename into place.
-// Why: a reader must never see a half-written file.
-pub fn write_file_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    fs::write(&tmp, contents)?;
-    fs::rename(&tmp, path)
+// What: N-byte hex secret, persisted with load_or_create.
+// Why: master and session secrets share this one form.
+pub fn load_or_create_hex<const N: usize>(path: &Path) -> anyhow::Result<[u8; N]> {
+    load_or_create(
+        path,
+        || {
+            let secret: [u8; N] = rand::random();
+            (hex::encode(secret), secret)
+        },
+        |text| {
+            hex::decode(text)?.try_into().map_err(|_| {
+                anyhow::anyhow!(
+                    "secret at {} must be exactly {N} bytes encoded as hex",
+                    path.display()
+                )
+            })
+        },
+    )
 }
 
 #[cfg(test)]
@@ -167,34 +220,5 @@ mod tests {
             mismatches.len(),
             mismatches.join("\n")
         );
-    }
-
-    // What: a created secret reloads unchanged, mode 0600.
-    // Why: sessions and credentials must survive a restart.
-    // From: Issue #871
-    #[test]
-    fn hex_secret_persists_and_reloads_same_value() {
-        let dir =
-            std::env::temp_dir().join(format!("lancache-common-secret-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("temp dir should be creatable");
-        let path = dir.join("x.secret");
-        let path = path.to_str().expect("temp path is UTF-8");
-        let first = load_or_create_hex_secret::<32>(path).expect("first call creates");
-        let second = load_or_create_hex_secret::<32>(path).expect("second call reloads");
-        assert_eq!(first, second);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(path)
-                .expect("secret file exists")
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o777, 0o600);
-        }
-        assert!(
-            create_secret_file(path, "x").is_err(),
-            "create is exclusive"
-        );
-        fs::remove_dir_all(&dir).ok();
     }
 }

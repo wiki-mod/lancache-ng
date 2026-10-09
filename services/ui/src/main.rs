@@ -111,7 +111,13 @@ fn load_or_create_secondary_registration_token(
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             let token = hex::encode(rand::random::<[u8; 32]>());
-            lancache_common::create_secret_file(path, &token).map_err(|e| {
+            lancache_common::write_file(
+                Path::new(path),
+                token.as_bytes(),
+                0o600,
+                lancache_common::Place::Exclusive,
+            )
+            .map_err(|e| {
                 format!("failed to write secondary registration token file at {path}: {e}")
             })?;
             tracing::warn!(
@@ -1069,7 +1075,7 @@ async fn run() -> Result<()> {
     // Why: a recreate must not invalidate every open session.
     // From: Issue #1683 | PR #1858
     let ui_session_secret =
-        lancache_common::load_or_create_hex_secret::<32>("/data/lancache-ui-session.secret")?;
+        lancache_common::load_or_create_hex::<32>(Path::new("/data/lancache-ui-session.secret"))?;
 
     // What: issuer key from NATS_ISSUER_SEED or its file.
     // Why: the fragment write below needs its public key.
