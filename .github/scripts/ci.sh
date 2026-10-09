@@ -2295,11 +2295,23 @@ _ci_sccache_backend() {
     [[ "${chain}" != *,* ]] || [ "${mode}" != optional ] || export SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=ignore
 }
 
+# What: export the named keys of a KEY=VALUE secret file
+# Why: secrets end without a newline; the last line counts
+# From: Issue #1683 | PR #1858
+_ci_secret_env() {
+    local file="$1" k v
+    shift
+    [ -s "${file}" ] || return 0
+    while IFS='=' read -r k v || [ -n "${k}" ]; do
+        case " $* " in *" ${k} "*) export "${k}=${v}" ;; esac
+    done < "${file}"
+}
+
 # What: sccache as rustc wrapper on the policy chain.
 # Why: AG-CI-009 levels; required fails closed (AG-CI-011).
 # From: Issue #1683 | PR #1858
 _ci_sccache_env() {
-    local prefix="$1" wrapper="${2:-sccache}" url="${SCCACHE_REDIS_URL:-}" sf policy mode chain k v
+    local prefix="$1" wrapper="${2:-sccache}" url="${SCCACHE_REDIS_URL:-}" sf policy mode chain
     # What: a build reads the runner policy; else compute.
     # Why: the chain is decided once, on the runner.
     # From: Issue #1683 | PR #1858
@@ -2311,12 +2323,7 @@ _ci_sccache_env() {
     export SCCACHE_REDIS_KEY_PREFIX="${prefix}"
     sf="$(_ci_secret_file sccache_redis_url)"
     if [ -s "${sf}" ]; then url="$(<"${sf}")"; fi
-    sf="$(_ci_secret_file sccache_gha)"
-    if [ -s "${sf}" ]; then
-        while IFS='=' read -r k v; do
-            case "${k}" in ACTIONS_RESULTS_URL|ACTIONS_RUNTIME_TOKEN) export "${k}=${v}" ;; esac
-        done < "${sf}"
-    fi
+    _ci_secret_env "$(_ci_secret_file sccache_gha)" ACTIONS_RESULTS_URL ACTIONS_RUNTIME_TOKEN
     _ci_sccache_backend "${chain}" "${url}" "${mode}"
     if [ -n "${chain}" ]; then
         ci_log "[CI-INFO-CACHE-0001]" "prefix=\"${prefix}\" mode=${mode} chain=\"${chain}\" runner=\"${RUNNER_ENVIRONMENT:-unset}\""

@@ -1398,6 +1398,22 @@ CASES
     [ ! -e "${dir}" ] || { echo "clear: ${dir} left"; return 1; }
 }
 
+# What: a KEY=VALUE secret reaches the stage key by key
+# Why: the writer ends without a newline; no key may drop
+# From: Issue #1683 | PR #1858
+@test "build secret KEY=VALUE file exports every asked key in the stage" {
+    local f ru tok other
+    f="$(_val path)" ru="$(_val url)" tok="$(_val sha)=$(_val name)" other="$(_val var)"
+    _ci_write_secret "${f}" "ACTIONS_RESULTS_URL=${ru}"$'\n\n'"${other}=$(_val name)"$'\n'"ACTIONS_RUNTIME_TOKEN=${tok}" || return 1
+    [ "$(tail -c 1 "${f}" | od -An -c | tr -d ' ')" != '\n' ] || { echo "writer ends with a newline"; return 1; }
+    CI_SH="${CI_SH}" F="${f}" O="${other}" run env -u ACTIONS_RESULTS_URL -u ACTIONS_RUNTIME_TOKEN -u "${other}" bash -c \
+        'source "${CI_SH}" && _ci_secret_env "${F}" ACTIONS_RESULTS_URL ACTIONS_RUNTIME_TOKEN \
+            && printf "u=%s t=%s o=%s\n" "${ACTIONS_RESULTS_URL-unset}" "${ACTIONS_RUNTIME_TOKEN-unset}" "${!O-unset}"'
+    _expect roundtrip 0 "=u=${ru} t=${tok} o=unset" || return 1
+    CI_SH="${CI_SH}" F="$(_val path)" run bash -c 'source "${CI_SH}" && _ci_secret_env "${F}" ACTIONS_RESULTS_URL && echo none'
+    _expect absent 0 "=none" || return 1
+}
+
 # =========================================================
 # BUILD-ARGS EMISSION (SOT -> --build-arg)
 # =========================================================
