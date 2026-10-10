@@ -2570,50 +2570,8 @@ derive_release_archive_image_tag() {
 
         if [[ "$git_status" -ne 0 ]]; then
             if [[ "$git_stderr" == *"detected dubious ownership"* ]]; then
-                # Since Git 2.35.2 (the CVE-2022-24765 fix), git refuses to
-                # operate on a repository whose directory is owned by a
-                # different user/UID than the process invoking git. That is a
-                # normal, non-malicious situation for this project's own
-                # supported use cases -- a bind-mounted checkout run inside a
-                # container under a different UID, or `sudo ./setup.sh` after
-                # a plain-user `git clone` -- so it must not be silently
-                # conflated with "there is no .git directory" (the genuine
-                # release-archive case the VERSION-file fallback below exists
-                # for) and must not silently resolve a possibly-stale
-                # VERSION tag instead.
-                #
-                # Trust the path this run's dubious-ownership check actually
-                # rejected -- not necessarily $SCRIPT_DIR verbatim. Git checks
-                # safe.directory against the repository's real (symlink-
-                # resolved) path, so if $SCRIPT_DIR is itself a symlink,
-                # scoping trust to the symlink path would not match and this
-                # retry would still fail, falling through to the possibly-
-                # stale VERSION file -- exactly the bug this is meant to
-                # avoid. Git's own error message already names the exact path
-                # it checked ("... in repository at '<path>' ..."), so parse
-                # that out instead of assuming $SCRIPT_DIR is already the
-                # physical path; fall back to $SCRIPT_DIR only if the message
-                # format is ever unrecognized.
-                #
-                # Either way, this is scoped for this ONE git invocation only,
-                # via `-c` on the command line. This is deliberately narrower
-                # than `git config --global --add safe.directory`: it is
-                # never written to any git config file, never persists beyond
-                # this single process, never affects any other git invocation
-                # on the system, and never uses a wildcard ("*") that would
-                # trust every repository regardless of path -- so it does not
-                # weaken the dubious-ownership protection for anything other
-                # than this script resolving its own, already-trusted path.
-                # Match against only git's first stderr line: the full
-                # message also repeats the path later (in its own
-                # single-quoted "git config --global --add safe.directory
-                # '<path>'" suggestion), and a greedy (.+) spanning the
-                # whole multi-line string would capture through to that
-                # later quote instead of stopping at the first line's own
-                # closing quote -- confirmed live (a path containing a
-                # space reproduced this: the over-captured value never
-                # matched what git actually checked, so the retry below
-                # still failed and fell through to the stale VERSION file).
+                # What: trusts the path git names on stderr
+                # Why: bind mounts trigger dubious ownership
                 local dubious_path="$SCRIPT_DIR"
                 local dubious_first_line="${git_stderr%%$'\n'*}"
                 if [[ "$dubious_first_line" =~ dubious\ ownership\ in\ repository\ at\ \'(.+)\' ]]; then
@@ -2644,10 +2602,8 @@ derive_release_archive_image_tag() {
             printf '%s\n' "$tag"
             return 0
         fi
-        # .git exists but git still refuses it even with dubious-ownership
-        # trust scoped to this one call (some other problem, already warned
-        # about above) -- fall through to the VERSION-file branch as a last
-        # resort.
+        # What: falls through to the VERSION file
+        # Why: git still refuses the .git after the retry
     fi
 
     [[ -f "$SCRIPT_DIR/VERSION" ]] || return 1
@@ -2711,18 +2667,8 @@ resolve_lancache_image_prefix() {
     printf '%s\n' "$prefix"
 }
 
-# Resolves which release channel (latest/nightly/pinned) this install should
-# track, in this precedence order:
-#   1. An explicit LANCACHE_IMAGE_CHANNEL (shell env, then .env).
-#   2. If no channel was set but LANCACHE_IMAGE_TAG names a moving channel
-#      word (latest/nightly), infer that as the channel; if it names an
-#      immutable tag (sha-*/vX.Y.Z), infer channel=pinned.
-#   3. If still unresolved and this is a git checkout/release archive with a
-#      derivable release tag, infer channel=pinned so that exact release is used.
-#   4. Otherwise default to "latest" — deliberately the stable channel, never
-#      silently "nightly" or "master", so a plain install never opts a production
-#      host into a moving pre-release channel without saying so explicitly.
-# The result is always validated before being returned.
+# What: picks the channel from env, tag, or derived release
+# Why: untagged installs default to latest, never nightly
 resolve_lancache_image_channel() {
     local env_file="${1:-}" channel="${LANCACHE_IMAGE_CHANNEL:-}" tag="${LANCACHE_IMAGE_TAG:-}" release_tag=""
 
@@ -2752,32 +2698,15 @@ resolve_lancache_image_channel() {
         [[ -n "$release_tag" ]] && channel="pinned"
     fi
 
-    # Normal installs default to the stable channel. Untagged development or
-    # pre-stable testing must opt into nightly explicitly so production users do
-    # not drift onto a moving integration channel by accident. "latest", not
-    # "stable", stays the hardcoded fallback here so an install with genuinely
-    # nothing configured lands on the name that has existed the whole time
-    # (both resolve identically either way -- see lancache_channel_image_refs).
+    # What: falls back to latest when nothing is configured
+    # Why: latest is the name that has always existed
     channel="${channel:-latest}"
     validate_lancache_image_channel "$channel"
     printf '%s\n' "$channel"
 }
 
-# Pure name mapping, no I/O: which physical GHCR "stack:<tag>" pointer image
-# backs a given operator-facing LANCACHE_IMAGE_CHANNEL value. "stable" (#819)
-# is the operator-facing name for the exact same underlying stack:latest
-# pointer image -- there is no separate stack:stable GHCR tag, and none is
-# planned; both names are published identically by the release job. Every
-# other channel name passes through unchanged. Kept as its own tiny function
-# (rather than inlined where it's used) specifically so this one mapping can
-# be unit-tested with zero docker/tar involved.
-#
-# Note there is deliberately no "edge -> nightly" mapping here: the old "edge"
-# channel was hard-cut, not aliased, in v0.3.0 (#1056) -- an edge value is
-# rejected by validate_lancache_image_channel long before this function, so it
-# never reaches this pointer resolution. The same is true of the retired
-# "dev" channel (#825/#1141): validate_lancache_image_channel rejects it
-# before this function ever sees it, so there is no "dev" case here either.
+# What: maps stable to latest, other channels pass through
+# Why: no stack:stable tag exists; both names publish alike
 lancache_stack_pointer_channel_for() {
     local channel="$1"
     if [[ "$channel" = "stable" ]]; then
@@ -3067,26 +2996,16 @@ resolve_lancache_image_tag() {
     printf '%s\n' "$tag"
 }
 
-# Update migrations must be idempotent. They add keys introduced after an older
-# install, preserve real operator secrets, replace placeholders, and normalize
-# legacy profile/DHCP/cache state without rewriting the whole file blindly.
+# What: adds missing keys and normalizes legacy .env state
+# Why: updates must be idempotent and keep operator secrets
 migrate_env_for_update() (
-    # preserve_image_tag: "1" keeps an already-valid LANCACHE_IMAGE_TAG as-is
-    # instead of re-resolving it against the current channel pointer. update
-    # always wants the default (0) re-resolve behavior, since that is how a
-    # channel-tracking install picks up a new image on every update. restore
-    # passes 1: restoring an old backup to roll back a bad channel image must
-    # keep the archived immutable tag, not silently re-resolve back to
-    # whatever the channel (e.g. nightly/latest) currently points to -- which,
-    # right after a bad release, is likely still the same bad tag.
+    # What: keeps a valid tag when preserve_image_tag is 1
+    # Why: restore must not re-resolve a rolled-back tag
     local install_dir="$1" preserve_image_tag="${2:-0}" env_file dhcp_enabled dhcp_mode
     local dhcp_proxy_interface dhcp_proxy_router dhcp_ntp_servers dhcp_proxy_domain
     local dhcp_proxy_boot_filename dhcp_proxy_boot_server _dhcp_ntp_check _dhcp_ntp_ip dhcp_relay_local_addr
-    # dhcp_proxy_pxe_boot_server/_bios/_uefi were previously missing from this
-    # local list -- get_env_var's assignment to them below still worked (bash
-    # does not require prior declaration), but each one silently leaked as a
-    # global for the rest of the script's process lifetime instead of staying
-    # scoped to this function like every other migration temp variable here.
+    # What: declares every temporary as function-local
+    # Why: undeclared names leaked as globals
     local dhcp_proxy_pxe_boot_server dhcp_proxy_pxe_boot_filename_bios dhcp_proxy_pxe_boot_filename_uefi
     local default_cache_size default_cache_gb
     local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ui_generated_password ui_password ui_user
@@ -3131,18 +3050,8 @@ migrate_env_for_update() (
     ip_ssl=$(get_env_var IP_SSL "$env_file") || exit $?
     require_separate_lan_ips "$ip_standard" "$ip_ssl"
 
-    # Resolve, verify, and persist the image registry/prefix/channel/tag
-    # before any other .env mutation below (#665). This used to run after
-    # several unrelated normalizations (session TTL, cache/state directory
-    # migration, PROXY_SECURITY_MODE, ...), so a host whose resolved tag
-    # lacks this platform would still have all of those already rewritten
-    # into .env by the time assert_resolved_image_tag_platform_supported
-    # aborted the update -- more partial state than necessary, even though
-    # cmd_update's pre-update backup (taken before this function runs) still
-    # makes it recoverable. Resolving into local variables first and calling
-    # assert_resolved_image_tag_platform_supported before writing anything
-    # means a platform failure here leaves every key in the rest of this
-    # function's migration untouched, not just these four.
+    # What: resolves and checks the image tag first
+    # Why: a platform failure leaves other keys untouched
     lancache_image_registry=$(resolve_lancache_image_registry "$env_file") || exit $?
     validate_lancache_image_registry "$lancache_image_registry"
     lancache_image_prefix=$(resolve_lancache_image_prefix "$env_file") || exit $?
@@ -3154,11 +3063,8 @@ migrate_env_for_update() (
         || die "Failed to read the image pins from $env_file (exit $?)."
     if [[ "$preserve_image_tag" = "1" ]] \
         && [[ "$existing_image_tag" =~ ^(sha-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}|v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$ ]]; then
-        # Restoring a backup to roll back a bad channel-tracked image: keep
-        # the archived immutable tag as-is instead of re-resolving it below,
-        # which would silently pull whatever the channel (nightly/latest)
-        # currently points to -- right after a bad release that is likely
-        # still the same bad tag, defeating the whole point of the restore.
+        # What: keeps the archived immutable tag as-is
+        # Why: re-resolving would pull the bad channel image
         validate_lancache_image_tag "$existing_image_tag"
         lancache_image_tag="$existing_image_tag"
     elif [[ "$preserve_image_tag" = "1" && "$existing_image_tag" =~ ^(latest|nightly)$ && -n "$archived_refs" ]]; then
@@ -3168,13 +3074,8 @@ migrate_env_for_update() (
         lancache_image_tag="$existing_image_tag"
         keep_image_refs=1
     else
-        # resolve_lancache_image_tag independently re-derives the same
-        # tag-implies-channel inference resolve_lancache_image_channel just
-        # computed (see its own docstring: "mirrors, and is deliberately more
-        # specific than" that precedence) by reading env_file directly, so it
-        # does not need lancache_image_channel written into .env first to
-        # reach the same result -- verified by tracing every branch of both
-        # functions.
+        # What: re-derives the channel from the tag itself
+        # Why: no channel write to .env is needed first
         lancache_image_tag=$(resolve_lancache_image_tag "$env_file") || exit $?
         lancache_image_refs=$(lancache_image_refs_for_tag "$env_file" "$lancache_image_tag") \
             || die "Cannot pin the images of ${lancache_image_tag} for ${env_file}; it stays unchanged (exit $?)."
@@ -3198,20 +3099,16 @@ migrate_env_for_update() (
     # From: Issue #1683 | PR #1858
     set_env_key_if_empty_or_missing SSL_ENABLED 1 "$env_file"
 
-    # An install from before #819 has no AUTO_UPDATE_ENABLED key at all; "0"
-    # (disabled) is the safe default, matching the interactive picker's own
-    # opt-in default -- migration must never silently turn scheduled automatic
-    # updates on for an existing install that never asked for them.
+    # What: missing AUTO_UPDATE_ENABLED defaults to 0
+    # Why: migration never turns auto-update on
     set_env_key_if_empty_or_missing AUTO_UPDATE_ENABLED "0" "$env_file"
 
     state_dir=$(install_state_root "$install_dir" "$env_file") \
         || die "Cannot resolve the state root of $install_dir (exit $?)."
     set_env_key_if_empty_or_missing LANCACHE_STATE_DIR "$state_dir" "$env_file"
 
-    # CACHE_DIR is the canonical install-time cache path.
-    # Legacy split cache keys can still be present on disk, but they must
-    # collapse to one shared directory before update continues. Fall back to the
-    # legacy /srv path or the shared state root when nothing is configured yet.
+    # What: CACHE_DIR is the canonical cache path
+    # Why: legacy split cache keys must collapse into it
     cache_dir=$(get_env_var CACHE_DIR "$env_file") || exit $?
     legacy_cache_std=$(get_env_var CACHE_DIR_STANDARD "$env_file") || exit $?
     legacy_cache_ssl=$(get_env_var CACHE_DIR_SSL "$env_file") || exit $?
@@ -3227,10 +3124,8 @@ migrate_env_for_update() (
     remove_env_key CACHE_DIR_STANDARD "$env_file"
     remove_env_key CACHE_DIR_SSL "$env_file"
 
-    # Older repository-based prod installs stored state below one legacy root.
-    # Preserve that root first, then derive per-service defaults from it so both
-    # automatic setup updates and documented manual prod upgrades use one state
-    # contract instead of several unrelated path edits.
+    # What: derives state dirs from the legacy root
+    # Why: one state contract for update and upgrades
     state_keys=$(prod_state_keys) || die "Cannot list the state keys of $PROD_COMPOSE (exit $?)."
     while IFS= read -r state_key; do
         state_sub=$(prod_state_subdir "$state_key") \
@@ -3261,10 +3156,8 @@ migrate_env_for_update() (
     set_env_key CACHE_MEM_MB "$cache_mem_mb" "$env_file"
     migrate_proxy_security_mode_for_update "$env_file"
     set_template_owned_env_defaults "$env_file"
-    # LANCACHE_IMAGE_REGISTRY/PREFIX/CHANNEL/TAG (including the #731
-    # preserve_image_tag restore-rollback exception) were already resolved,
-    # verified, and written near the top of this function, before any of the
-    # migration above -- see the #665 comment there.
+    # What: image keys were resolved at the top
+    # Why: the platform check runs before migration writes
 
     set_env_key_if_empty_or_missing CACHE_MAX_GB "$cache_gb" "$env_file"
     ip_standard=$(get_env_var IP_STANDARD "$env_file") || die "Cannot read IP_STANDARD from $env_file (exit $?)."
@@ -3280,15 +3173,8 @@ migrate_env_for_update() (
     # From: Issue #1683 | PR #1858
     append_env_key_if_missing NTP_ENABLED "0" "$env_file"
 
-    # Central logging (issue #1343): unlike DHCP/NTP above, this default is
-    # "1" (enabled), not "0" -- a pre-existing install that has never touched
-    # LOGGING_ENABLED gets converged to the now-correct always-on-by-default
-    # behavior on its next `setup.sh update`, exactly as this issue requires
-    # (AG-OP-007: converge old/incomplete installations toward the current
-    # expected state). An operator who has already explicitly set
-    # LOGGING_ENABLED=0 keeps that choice (AG-OP-009: preserve existing
-    # non-empty local values) -- this helper writes the default value only
-    # when the key is absent, never overwriting a real prior value.
+    # What: logging defaults to 1 when the key is absent
+    # Why: existing LOGGING_ENABLED values are kept
     append_env_key_if_missing LOGGING_ENABLED "1" "$env_file"
 
     compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file") || exit $?
@@ -3383,20 +3269,8 @@ migrate_env_for_update() (
                 || die "DHCP_PROXY_PXE_BOOT_FILENAME_BIOS in $env_file must not contain whitespace, commas, or other characters unsafe in a .env value (newline, \$, \`, \", ', \\, or #)."
             [[ -z "$dhcp_proxy_pxe_boot_filename_uefi" ]] || is_valid_dhcp_proxy_boot_filename "$dhcp_proxy_pxe_boot_filename_uefi" \
                 || die "DHCP_PROXY_PXE_BOOT_FILENAME_UEFI in $env_file must not contain whitespace, commas, or other characters unsafe in a .env value (newline, \$, \`, \", ', \\, or #)."
-            # The three PXE boot-pointer fields above are validated individually,
-            # but entrypoint.sh's pxe-service rendering needs the server AND at
-            # least one boot filename together (see
-            # pxe_boot_pointer_answers_are_complete's own header comment) -- a
-            # server with no filename, or a filename with no server, produces
-            # no pxe-service directive at all (a silent, always-on startup
-            # WARNING, not a fatal error). Unlike the interactive wizard (which
-            # can safely auto-correct because it is mid-conversation with the
-            # operator), `setup.sh update` runs unattended -- silently clearing
-            # an operator-set value here would discard their input with no
-            # chance to notice or fix it before it's gone. Fail closed instead,
-            # matching every other validation in this block: leave the .env
-            # untouched and require the operator to fix the inconsistency
-            # themselves.
+            # What: PXE needs both server and filename
+            # Why: update is unattended; never clears input
             if [[ -n "$dhcp_proxy_pxe_boot_server" ]] \
                 && ! pxe_boot_pointer_answers_are_complete "$dhcp_proxy_pxe_boot_server" "$dhcp_proxy_pxe_boot_filename_bios" "$dhcp_proxy_pxe_boot_filename_uefi"; then
                 die "DHCP_PROXY_PXE_BOOT_SERVER is set in $env_file but neither DHCP_PROXY_PXE_BOOT_FILENAME_BIOS nor DHCP_PROXY_PXE_BOOT_FILENAME_UEFI is; PXE boot-pointer support needs at least one boot filename to activate. Set one of them, or clear DHCP_PROXY_PXE_BOOT_SERVER, then re-run update."
@@ -3405,10 +3279,8 @@ migrate_env_for_update() (
             fi
             ;;
         dnsmasq-relay)
-            # Issue #844: relay mode forwards to an upstream server and injects
-            # nothing of its own, so the only two required values are this
-            # relay's client-facing address (giaddr source) and the upstream
-            # server -- NOT the ProxyDHCP subnet/DNS fields.
+            # What: relay needs local and upstream IPs
+            # Why: ProxyDHCP fields are unused in relay
             is_valid_ipv4 "$dhcp_relay_local_addr" \
                 || die "DHCP_MODE=dnsmasq-relay requires DHCP_RELAY_LOCAL_ADDR (this relay's own IPv4 on the client network) in $env_file. Set it, then rerun setup.sh update."
             is_valid_ipv4 "$upstream_dhcp_ip" \
@@ -3437,17 +3309,13 @@ migrate_env_for_update() (
     set_env_key DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$dhcp_proxy_pxe_boot_filename_bios" "$env_file"
     set_env_key DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$dhcp_proxy_pxe_boot_filename_uefi" "$env_file"
 
-    # Mandatory service tokens. Preserve real values; regenerate empty values
-    # and known placeholders like CHANGE_ME_* or lancache-*-secret.
+    # What: generates empty or placeholder service tokens
+    # Why: real operator values are preserved
     ensure_secret_env_key KEA_CTRL_TOKEN "$env_file" hex32
     ensure_secret_env_key DDNS_TSIG_KEY "$env_file" base64_32
     ensure_secret_env_key PDNS_API_KEY "$env_file" hex32
-    # Bug hunt #849, observability.md finding #3: shared token gating
-    # POST /api/netdata-alarms (services/ui/src/routes/netdata_alarms.rs).
-    # Same generate-or-preserve treatment as PDNS_API_KEY above -- the
-    # netdata/ui containers' own shared-secret-bootstrap (#858) fallback
-    # only self-heals a value left empty/placeholder here, it does not
-    # replace this proactive generation step.
+    # What: NETDATA_ALARM_TOKEN is generated proactively
+    # Why: shared bootstrap only heals placeholders
     ensure_secret_env_key NETDATA_ALARM_TOKEN "$env_file" hex32
     set_env_key_if_empty_or_missing NATS_UI_USER "lancache-ui" "$env_file"
     ensure_secret_env_key NATS_UI_PASSWORD "$env_file" hex32
@@ -3457,9 +3325,8 @@ migrate_env_for_update() (
     ensure_secret_env_key NATS_DNS_REPLICA_PASSWORD "$env_file" hex32
     set_env_key_if_empty_or_missing NATS_CALLOUT_USER "lancache-nats-callout" "$env_file"
     ensure_secret_env_key NATS_CALLOUT_PASSWORD "$env_file" hex32
-    # Issue #681: system-account identity so an already-installed primary
-    # converges to the new active-disconnect capability on its next update,
-    # the same as any other mandatory NATS static role above.
+    # What: NATS_SYS_USER is set if missing
+    # Why: installed primary converges to new capability
     set_env_key_if_empty_or_missing NATS_SYS_USER "lancache-nats-sys" "$env_file"
     ensure_secret_env_key NATS_SYS_PASSWORD "$env_file" hex32
     ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
@@ -3471,8 +3338,8 @@ migrate_env_for_update() (
         "$(compose_profiles_for_runtime "$compose_profiles" "$dhcp_mode" "$ntp_enabled" "$logging_enabled")" \
         "$env_file"
 
-    # UI auth stays a user choice. A configured username must have a real
-    # password; otherwise the UI is explicitly marked insecure.
+    # What: UI auth is user-chosen; user needs a password
+    # Why: unset user and password mean insecure UI
     append_env_key_if_missing UI_AUTH_USER "" "$env_file"
     append_env_key_if_missing UI_AUTH_PASSWORD "" "$env_file"
     ui_user=$(get_env_var UI_AUTH_USER "$env_file") || exit $?
@@ -3492,11 +3359,8 @@ migrate_env_for_update() (
     adopt_moved_config_prod_keys "$install_dir" "$env_file" drop
 )
 
-# The apt package that provides a binary sometimes has a different name than
-# the binary itself -- `dig` moved from the `dnsutils` metapackage to
-# `bind9-dnsutils` on modern Debian/Ubuntu, so `apt-get install dig` fails
-# outright. Falls back to the binary name for the common case (tar, rsync,
-# openssl, ...) where package and binary names match.
+# What: maps a tool to its apt package name
+# Why: dig ships in bind9-dnsutils or dnsutils, not dig
 package_name_for_tool() {
     case "$1" in
         dig)
@@ -3536,14 +3400,8 @@ install_missing_tools() {
     done
 }
 
-# Prints the newline-separated list of absolute host paths that a backup
-# (config or full) should include: .env(s), compose file, certs/scripts,
-# deploy/prod's external repo-root inputs, and every per-service state
-# directory that actually exists on disk — falling back through
-# get_env_var -> state_dir default the same way migrate_env_for_update does,
-# so a backup captures the real paths in use even on an install that has
-# never been through migrate_env_for_update. "full" mode additionally
-# includes the (potentially huge) cache directories.
+# What: lists the paths a config or full backup includes
+# Why: existing state dirs; cache only in full mode
 backup_manifest() {
     local install_dir="$1" mode="$2"
     local env_file cache_env_file
@@ -3583,8 +3441,8 @@ backup_manifest() {
     true
 }
 
-# Prevent recursive backups such as /var/backups being archived into itself.
-# That case can fill disks and produce archives that cannot be restored safely.
+# What: true if child path is inside parent path
+# Why: recursive backups can fill disks and corrupt restores
 path_is_inside() {
     local child="$1" parent="$2"
     child=$(realpath -m "$child")
@@ -3592,35 +3450,22 @@ path_is_inside() {
     [[ "$child" = "$parent" || "$child" = "$parent"/* ]]
 }
 
-# Shared "no stack at this path" failure (#1068 item 22), used by every
-# command that operates on an existing install directory defaulting to
-# /opt/lancache-ng (backup, restore, update/auto-update, debug,
-# create-logs-for-issue, reset-to-last-known-good-config, update-ip). A
-# secondary DNS node's stack lives in its own --name-derived directory under
-# wherever cmd_secondary was run (see cmd_secondary's own secondary_dir
-# handling), never /opt/lancache-ng -- so any of these commands, run bare on
-# a fresh secondary host, hits this by default. The previous plain "Run
-# ./setup.sh first." read as if only a primary install were possible, which
-# is actively misleading for that case; point at both real fixes instead of
-# guessing which one applies.
+# What: fails with a secondary-directory hint
+# Why: a secondary stack lives outside /opt/lancache-ng
 die_no_stack_found() {
     local install_dir="$1"
     die "No stack found in ${install_dir}. If this is a fresh primary install, run ./setup.sh install. If this is a secondary DNS node, run this command from its own directory instead (the one named after --name when it was registered via ./setup.sh secondary), or pass that directory explicitly, e.g.: ./setup.sh <command> /path/to/that-directory"
 }
 
-# Compose helpers are deliberately no-ops when the stack is unavailable so
-# config-only backup/restore can still handle partial or damaged installs.
+# What: compose helpers return early without a stack
+# Why: backup and restore must handle damaged installs
 compose_stack_available() {
     local install_dir="$1"
     [[ -f "$install_dir/docker-compose.yml" ]] && command -v docker >/dev/null 2>&1
 }
 
-# Reports whether any container in this compose project is currently in a
-# running state (plain `ps -q`, not `--all`). Backup/restore call this BEFORE
-# compose_stack_stop so their cleanup traps can restart the stack only if it
-# was actually running beforehand, instead of unconditionally undoing a
-# deliberate prior stop (e.g. `systemctl stop lancache.service`, or manual
-# maintenance) -- see #669.
+# What: true if any compose container is running
+# Why: restore only restarts a stack that was running
 compose_stack_running() {
     local install_dir="$1" env_file out
     compose_stack_available "$install_dir" || return 1
@@ -3630,10 +3475,8 @@ compose_stack_running() {
     [[ -n "$out" ]]
 }
 
-# Stops the stack before a backup/restore so files on disk are consistent
-# (no service writing to cache/state mid-copy). A stop failure only warns,
-# not dies, since backup/restore should still be attempted even if the stack
-# was already in a bad state.
+# What: stops the stack before backup or restore
+# Why: a stop failure warns, so backup can proceed
 compose_stack_stop() {
     local install_dir="$1"
     local env_file
