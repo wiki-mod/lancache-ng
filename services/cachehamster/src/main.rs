@@ -260,7 +260,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lancache_ng::unique_temp_dir;
+    use lancache_ng::{serve_canned, unique_temp_dir};
 
     // What: persistence values parse; unknown fails closed.
     // Why: persistence is the operator's call, not guessed.
@@ -334,5 +334,34 @@ mod tests {
         let other: [u8; MASTER_LEN] = rand::random();
         let sealed = seal(&master, b"another-secret").unwrap();
         assert!(open(&other, &sealed).is_err());
+    }
+
+    // What: an unreadable stored credential fails.
+    // Why: only a missing file means none.
+    #[test]
+    fn unreadable_persisted_credential_is_an_error() {
+        let dir = unique_temp_dir("cred-unreadable");
+        assert_eq!(credential(None, true, &dir).unwrap(), None);
+        fs::create_dir(dir.join(CREDENTIAL_FILE)).unwrap();
+        assert!(credential(None, true, &dir).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: drain counts the bytes of each body it streams.
+    // Why: the total feeds the progress line.
+    #[tokio::test]
+    async fn drain_counts_every_byte_and_refuses_errors() {
+        let (base, _server) = serve_canned(vec![
+            (200, b"12345".to_vec()),
+            (200, b"678".to_vec()),
+            (500, b"no".to_vec()),
+        ]);
+        let client = reqwest::Client::new();
+        let total = AtomicU64::new(0);
+        assert_eq!(drain(&client, &base, &total).await.unwrap(), 5);
+        assert_eq!(drain(&client, &base, &total).await.unwrap(), 3);
+        assert_eq!(total.load(Ordering::Relaxed), 8);
+        assert!(drain(&client, &base, &total).await.is_err());
+        assert_eq!(total.load(Ordering::Relaxed), 8);
     }
 }

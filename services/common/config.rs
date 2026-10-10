@@ -520,4 +520,50 @@ mod tests {
         let rec = format!("PDNS_REC_API_URL=\"http://127.0.0.1:8082{PDNS_API_PATH}\"");
         assert!(script.contains(&auth) && script.contains(&rec));
     }
+
+    // What: the live-env readers see the real environment.
+    // Why: they are the only readers of the process env.
+    // From: Issue #871 | PR #1858
+    #[test]
+    fn live_env_readers_follow_the_process_environment() {
+        let path = std::env::var("PATH").unwrap();
+        assert_eq!(process_env("PATH"), Some(path.clone()));
+        assert_eq!(env_opt("PATH"), Some(path));
+        assert_eq!(process_env("LANCACHE_TEST_NEVER_SET"), None);
+        assert_eq!(env_opt("LANCACHE_TEST_NEVER_SET"), None);
+    }
+
+    // What: limits are inclusive; one outside fails.
+    // Why: an off-by-one would accept a forbidden value.
+    #[test]
+    fn uint_limits_are_inclusive() {
+        let knob = Uint {
+            name: "KNOB",
+            min: 5,
+            max: 10,
+            below: OutOfRange::Reject,
+            above: OutOfRange::Reject,
+        };
+        assert_eq!(knob.parse(Some("5")), Ok((5, None)));
+        assert_eq!(knob.parse(Some("10")), Ok((10, None)));
+        assert!(knob.parse(Some("4")).is_err());
+        assert!(knob.parse(Some("11")).is_err());
+    }
+
+    // What: each DHCP mode answers the backend questions.
+    // Why: services pick containers from these answers.
+    #[test]
+    fn dhcp_modes_answer_the_backend_questions() {
+        let table = [
+            (DhcpMode::Disabled, false, false, false),
+            (DhcpMode::Kea, true, false, false),
+            (DhcpMode::DnsmasqProxy, false, true, false),
+            (DhcpMode::DnsmasqRelay, false, true, true),
+        ];
+        for (mode, kea, dnsmasq, relay) in table {
+            assert_eq!(mode.is_kea(), kea);
+            assert_eq!(mode.is_dnsmasq(), dnsmasq);
+            assert_eq!(mode.is_dnsmasq_relay(), relay);
+        }
+    }
 }

@@ -30,3 +30,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 subtle = { workspace = true }
+
+# What: tokio for the async tests of the HTTP clients.
+# Why: tests use a local server; no service code uses it.
+# From: Issue #1683 | PR #1858
+[dev-dependencies]
+tokio = { workspace = true }

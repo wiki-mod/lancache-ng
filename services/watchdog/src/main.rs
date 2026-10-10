@@ -866,4 +866,25 @@ mod tests {
         let at = date.with_hms(3, 4, 5).unwrap().assume_utc();
         assert_eq!(stamp(at), "2026-01-02T03:04:05Z");
     }
+
+    // What: curl timeouts refuse inf, NaN, negatives.
+    // Why: only a finite positive number is a real limit.
+    #[test]
+    fn curl_timeout_refuses_non_finite_and_negative_numbers() {
+        for bad in ["inf", "NaN", "-1.5"] {
+            assert_eq!(
+                curl_timeout(Some(bad), "CURL_MAX_TIME"),
+                Err(format!("FATAL: invalid CURL_MAX_TIME={bad}."))
+            );
+        }
+    }
+
+    // What: an existing cache dir reads a real status.
+    // Why: only a missing dir or failed df is unknown.
+    #[test]
+    fn disk_info_reads_an_existing_dir() {
+        let info = disk_info(&std::env::temp_dir(), 101, 102);
+        assert_ne!(info.status, "unknown");
+        assert!(info.pct <= 100);
+    }
 }

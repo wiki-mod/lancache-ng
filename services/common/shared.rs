@@ -175,6 +175,62 @@ pub fn unique_temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
+// What: a local HTTP server that answers canned replies.
+// Why: client code is tested without a network or Docker.
+// From: Issue #1683 | PR #1858
+pub fn serve_canned(
+    replies: Vec<(u16, Vec<u8>)>,
+) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free local port");
+    listener.set_nonblocking(true).expect("non-blocking accept");
+    let base = format!("http://{}", listener.local_addr().expect("local address"));
+    let handle = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        for (status, body) in replies {
+            // What: give up when no client comes.
+            // Why: a skipped call fails the test; no hang.
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => return seen,
+                }
+            };
+            stream.set_nonblocking(false).expect("blocking stream");
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                if stream.read(&mut byte).unwrap_or(0) == 0 {
+                    break;
+                }
+                request.push(byte[0]);
+            }
+            let head = String::from_utf8_lossy(&request).to_lowercase();
+            let length = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .and_then(|n| n.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            let mut payload = vec![0u8; length];
+            let _ = stream.read_exact(&mut payload);
+            request.extend_from_slice(&payload);
+            seen.push(String::from_utf8_lossy(&request).into_owned());
+            let reply = format!(
+                "HTTP/1.1 {status} Canned\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(reply.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+        seen
+    });
+    (base, handle)
+}
+
 // What: print a FATAL start error with its tag, exit 1.
 // Why: every service fails closed at start the same way.
 pub fn die(tag: &str, message: &str) -> ! {
@@ -996,5 +1052,212 @@ mod tests {
             Some(1_700_000)
         );
         assert_eq!(snapshot_created_unix("../etc"), None);
+    }
+
+    // What: unix_secs follows the system clock.
+    // Why: callers refuse to issue anything from 1970.
+    #[test]
+    fn unix_secs_follows_the_system_clock() {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        assert!(unix_secs().abs_diff(now.as_secs()) <= 2);
+    }
+
+    // What: df reads a real dir, refuses a missing one.
+    // Why: a failed df must not read as free space.
+    #[test]
+    fn df_reads_a_real_directory_and_refuses_a_missing_one() {
+        let figures = df(&std::env::temp_dir()).unwrap();
+        assert!(figures.used_pct <= 100);
+        assert!(df(Path::new("/nonexistent-lancache-test-dir")).is_none());
+    }
+
+    // What: each placeholder rule needs both of its halves.
+    // Why: a real secret must not pass as an example value.
+    // From: Issue #967
+    #[test]
+    fn is_placeholder_needs_both_halves_of_a_shape() {
+        assert!(is_placeholder("LANCACHE_DB_SECRET"));
+        assert!(!is_placeholder("lancache_db_token"));
+        assert!(!is_placeholder("db_secret"));
+        assert!(is_placeholder("<steam>"));
+        assert!(!is_placeholder("<steam"));
+        assert!(!is_placeholder("steam>"));
+        assert!(!is_placeholder("your_value_there"));
+        assert!(!is_placeholder("value_here"));
+    }
+
+    // What: DockerError renders one short line per kind.
+    // Why: logs and watchdog output show this text.
+    #[test]
+    fn docker_errors_render_one_line_each() {
+        assert_eq!(
+            DockerError::Status(500).to_string(),
+            "Docker answered HTTP 500"
+        );
+        assert_eq!(DockerError::Timeout.to_string(), "Docker call timed out");
+        assert_eq!(
+            DockerError::Transport("boom".into()).to_string(),
+            "Docker call failed: boom"
+        );
+    }
+
+    // What: the first writer's secret wins; errors stay.
+    // Why: a second start must not replace the secret.
+    // From: Issue #871
+    #[test]
+    fn load_or_create_keeps_the_first_writer_and_fails_on_read_errors() {
+        let dir = unique_temp_dir("load-or-create");
+        let raced = dir.join("raced");
+        let value = load_or_create(
+            &raced,
+            || {
+                fs::write(&raced, "first\n").unwrap();
+                ("second".to_string(), "second".to_string())
+            },
+            |text| Ok(text.to_string()),
+        )
+        .unwrap();
+        assert_eq!(value, "first");
+
+        let mut created = false;
+        let broken = load_or_create(
+            &dir,
+            || {
+                created = true;
+                ("x".to_string(), "x".to_string())
+            },
+            |text| Ok(text.to_string()),
+        );
+        assert!(broken.is_err());
+        assert!(!created);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: Docker calls use the allowed paths, decode.
+    // Why: the proxy grants exactly these calls.
+    // From: Issue #1683 | PR #1858
+    #[tokio::test]
+    async fn docker_calls_use_the_allowlisted_paths_and_decode_answers() {
+        let frames = [&[1, 0, 0, 0, 0, 0, 0, 2][..], b"hi"].concat();
+        let (base, server) = serve_canned(vec![
+            (200, br#"{"State":{"Running":true}}"#.to_vec()),
+            (204, vec![]),
+            (204, vec![]),
+            (200, b"OK\n".to_vec()),
+            (200, br#"{"StatusCode":3}"#.to_vec()),
+            (200, frames),
+        ]);
+        let docker = DockerProxy::new(&format!(" {base}/ "));
+        let state = docker.inspect("web", None).await.unwrap();
+        assert_eq!(state["State"]["Running"], true);
+        docker.act("web", "stop", None).await.unwrap();
+        docker.restart("web", 2, None).await.unwrap();
+        assert!(docker.ping(None).await);
+        assert_eq!(docker.wait("web", None).await.unwrap(), 3);
+        assert_eq!(docker.logs("web", 7, None).await.unwrap(), "hi");
+        let seen = server.join().unwrap();
+        let lines: Vec<&str> = seen.iter().filter_map(|r| r.lines().next()).collect();
+        assert_eq!(
+            lines,
+            [
+                "GET /containers/web/json HTTP/1.1",
+                "POST /containers/web/stop HTTP/1.1",
+                "POST /containers/web/restart?t=2 HTTP/1.1",
+                "GET /_ping HTTP/1.1",
+                "POST /containers/web/wait?condition=not-running HTTP/1.1",
+                "GET /containers/web/logs?stdout=1&stderr=1&since=7 HTTP/1.1",
+            ]
+        );
+    }
+
+    // What: status codes map to errors; 304 counts as done.
+    // Why: a redirect must never reach an ungranted path.
+    // From: Issue #1683 | PR #1858
+    #[tokio::test]
+    async fn docker_status_codes_map_to_errors_and_304_is_done() {
+        let (base, _server) = serve_canned(vec![
+            (500, vec![]),
+            (404, vec![]),
+            (302, vec![]),
+            (304, vec![]),
+        ]);
+        let docker = DockerProxy::new(&base);
+        let act = |name: &'static str| docker.act(name, "stop", None);
+        assert!(matches!(act("a").await, Err(DockerError::Status(500))));
+        assert!(matches!(act("b").await, Err(DockerError::Status(404))));
+        assert!(matches!(act("c").await, Err(DockerError::Status(302))));
+        assert!(act("d").await.is_ok());
+    }
+
+    // What: Docker reads refuse bad answers.
+    // Why: a bad answer is not a healthy container.
+    #[tokio::test]
+    async fn docker_reads_refuse_bad_answers() {
+        let (base, _server) = serve_canned(vec![
+            (200, b"NOPE".to_vec()),
+            (500, b"OK".to_vec()),
+            (500, br#"{"a":1}"#.to_vec()),
+            (200, b"not json".to_vec()),
+            (200, br#"{"x":1}"#.to_vec()),
+            (500, vec![]),
+        ]);
+        let docker = DockerProxy::new(&base);
+        assert!(!docker.ping(None).await);
+        assert!(!docker.ping(None).await);
+        assert!(docker.inspect("a", None).await.is_none());
+        assert!(docker.inspect("a", None).await.is_none());
+        assert!(matches!(
+            docker.wait("a", None).await,
+            Err(DockerError::Transport(_))
+        ));
+        assert!(matches!(
+            docker.logs("a", 0, None).await,
+            Err(DockerError::Status(500))
+        ));
+    }
+
+    // What: PowerDNS exports rrsets, reports failures.
+    // Why: an error body must not read as an empty zone.
+    #[tokio::test]
+    async fn powerdns_exports_rrsets_and_reports_failures() {
+        let (base, server) = serve_canned(vec![
+            (200, br#"{"rrsets":[{"name":"a.lan."}]}"#.to_vec()),
+            (200, br#"{"error":"none"}"#.to_vec()),
+            (404, br#"{"rrsets":[{"name":"x"}]}"#.to_vec()),
+            (200, b"not json".to_vec()),
+        ]);
+        let pdns = PowerDns::new(http_client().unwrap(), "k3y".to_string());
+        assert_eq!(pdns.api_key(), "k3y");
+        let root = format!("{base}/api/v1/servers/localhost");
+        let rrsets = pdns.zone_rrsets(&root, "lan.").await.unwrap();
+        assert_eq!(rrsets.len(), 1);
+        assert_eq!(rrsets[0]["name"], "a.lan.");
+        assert!(pdns.zone_rrsets(&root, "lan.").await.unwrap().is_empty());
+        let missing = pdns.zone_rrsets(&root, "lan.").await.unwrap_err();
+        assert_eq!(missing, "PowerDNS returned 404 Not Found");
+        let junk = pdns.zone_rrsets(&root, "lan.").await.unwrap_err();
+        assert!(junk.starts_with("cannot decode the zone export"));
+        let seen = server.join().unwrap();
+        assert!(seen[0].starts_with("GET /api/v1/servers/localhost/zones/lan HTTP/1.1"));
+        assert!(seen[0].to_lowercase().contains("x-api-key: k3y"));
+    }
+
+    // What: a PowerDNS call sends the key and a JSON body.
+    // Why: every call site shares auth and JSON headers.
+    #[tokio::test]
+    async fn powerdns_call_sends_the_key_and_a_json_body() {
+        let (base, server) = serve_canned(vec![(204, vec![]), (204, vec![])]);
+        let pdns = PowerDns::new(http_client().unwrap(), "k3y".to_string());
+        let url = format!("{base}/x");
+        let body = Some(r#"{"a":1}"#.to_string());
+        pdns.call(reqwest::Method::PATCH, &url, body).await.unwrap();
+        pdns.call(reqwest::Method::PUT, &url, None).await.unwrap();
+        let seen = server.join().unwrap();
+        let first = seen[0].to_lowercase();
+        assert!(first.starts_with("patch /x http/1.1"));
+        assert!(first.contains("content-type: application/json"));
+        assert!(first.contains("x-api-key: k3y"));
+        assert!(first.ends_with(r#"{"a":1}"#));
+        assert!(!seen[1].to_lowercase().contains("content-type"));
     }
 }
