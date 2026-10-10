@@ -6626,21 +6626,8 @@ done
 # ── 5. Release channel ────────────────────────────────────────────────────────
 print_step "Release channel"
 
-# Unlike the other prompts in this flow (INSTALL_DIR, detected_ip, ...), an
-# already-set LANCACHE_IMAGE_CHANNEL is NOT just a default to confirm -- it is
-# respected outright and the prompt is skipped entirely. Two real callers rely
-# on this: (1) the documented `LANCACHE_IMAGE_CHANNEL=nightly ./setup.sh install`
-# non-interactive invocation (see lancache_channel_ref_pass's own
-# die() message), and (2) scripts/untracked/simulations/setup-cli-simulation.sh, which exports
-# LANCACHE_IMAGE_CHANNEL=pinned (plus an explicit LANCACHE_IMAGE_TAG) so CI
-# installs THIS commit's own just-built images rather than any published
-# channel. "pinned" is not a stable/nightly choice at all -- it is a request for
-# one specific immutable tag -- so re-prompting and overwriting it with
-# whatever the operator/simulation answers here would silently discard that
-# request (a real regression caught in CI, not a hypothetical). Respecting any
-# pre-set value, of any kind, keeps this idempotent with the rest of this
-# script's "existing non-empty local values must be preserved by default"
-# convention (AGENTS.md) instead of treating this one field as an exception.
+# What: a pre-set LANCACHE_IMAGE_CHANNEL skips the prompt
+# Why: CI and non-interactive installs rely on the value
 if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
     validate_lancache_image_channel "$LANCACHE_IMAGE_CHANNEL"
     print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
@@ -6657,22 +6644,8 @@ else
     printf "           proceed instead. Once a stable release ships, this becomes the\n"
     printf "           recommended default again.\n\n"
 
-    # Writes the plain LANCACHE_IMAGE_CHANNEL shell variable that
-    # resolve_lancache_image_channel already checks first (see its precedence
-    # comment above); nothing downstream needs to change to pick this up.
-    # "stable" and "latest" resolve to the identical promoted channel tags
-    # (see lancache_channel_image_refs) -- "stable" is only the
-    # friendlier, self-explanatory name this prompt writes for new installs.
-    #
-    # Default answer and recommendation deliberately flipped from "stable" to
-    # "nightly" (#1068 field-testing finding): pre-1.0, accepting the prior
-    # default silently walked a new operator straight into a "manifest
-    # unknown" dead end (lancache_channel_ref_pass's own die()
-    # message already explains this gracefully if reached, so "stable" stays
-    # a valid, non-rejected answer here for the operator who explicitly wants
-    # it or is running this after a real stable release exists -- only the
-    # picker's own default/recommendation changes, not what inputs it
-    # accepts).
+    # What: writes the prompt's LANCACHE_IMAGE_CHANNEL
+    # Why: nightly is the recommended pre-1.0 default
     channel_hint=$(IFS=/; printf '%s' "${LANCACHE_SELECTABLE_CHANNELS[*]}")
     while true; do
         ask "Release channel [$channel_hint]" "${LANCACHE_SELECTABLE_CHANNELS[0]}"
@@ -6686,9 +6659,8 @@ else
             break
         fi
         case "${REPLY,,}" in
-            # "edge" was the old name of the nightly channel (renamed in v0.3.0,
-            # #1056) and is intentionally NOT accepted as a synonym here -- point
-            # the operator at the new name rather than silently substituting it.
+            # What: edge is rejected, nightly is named
+            # Why: edge was renamed to nightly in v0.3.0
             edge)
                 print_error "The 'edge' channel was renamed to 'nightly' in v0.3.0. Please answer 'nightly'."
                 ;;
@@ -6700,18 +6672,8 @@ else
 fi
 
 # ── 6. Scheduled automatic updates ────────────────────────────────────────────
-# Replaces the former Watchtower opt-in (#819): Watchtower was removed because
-# it structurally cannot deliver what this project needs from an updater --
-# it never verifies a container/stack is actually healthy after recreating it
-# (its one health-aware mode is documented as incompatible with any container
-# that has dependency links, which this stack's own depends_on topology
-# rules out outright), and it has no rollback path at all. This project's own
-# orchestrator (cmd_auto_update, invoked by a host systemd timer -- see the
-# "Installing systemd watchdog" step below) replaces it: it only acts when
-# the channel pointer actually moved, brings the whole stack up ordered and
-# health-gated with the Admin UI last, and rolls back to the pre-update
-# backup on a failed health check, instead of Watchtower's uncoordinated
-# per-container recreate-and-hope.
+# What: scheduled updates via the host timer, not Watchtower
+# Why: Watchtower cannot verify health or roll back
 print_step "Scheduled automatic updates"
 
 printf "  A systemd timer can periodically run this project's own update logic:\n"
@@ -6767,10 +6729,12 @@ DHCP_SUBNET_START=""
 DHCP_DNS_PRIMARY="$IP_STANDARD"
 DHCP_DNS_SECONDARY="${IP_SSL:-$IP_STANDARD}"
 UPSTREAM_DHCP_IP="$DHCP_GATEWAY"
-# Issue #844: relay-mode local address, empty unless dnsmasq-relay is chosen.
+# What: relay-mode local address, empty by default
+# Why: only dnsmasq-relay uses it
 DHCP_RELAY_LOCAL_ADDR=""
-# Issue #450: additional optional dnsmasq relay/proxy fields, all left empty
-# unless the operator opts in below.
+# What: optional dnsmasq fields, empty unless opted in
+# Why: the operator opts in below
+# From: Issue #450
 DHCP_PROXY_INTERFACE=""
 DHCP_PROXY_ROUTER=""
 DHCP_NTP_SERVERS=""
@@ -6778,10 +6742,8 @@ DHCP_PROXY_DOMAIN=""
 DHCP_PROXY_BOOT_FILENAME=""
 DHCP_PROXY_BOOT_SERVER=""
 DHCP_PROXY_CUSTOM_OPTIONS=""
-# Issue #705: PXE boot-pointer (`pxe-service`) fields, separate from the
-# #450 fields above -- the only other way to set these is hand-editing
-# config/prod/dhcp-proxy.env directly, so a fresh install writes real,
-# wizard-driven values (or the empty default) here instead.
+# What: PXE boot-pointer fields set by the wizard or default
+# Why: the only other way is hand-editing dhcp-proxy.env
 DHCP_PROXY_PXE_BOOT_SERVER=""
 DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=""
 DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=""
@@ -6867,11 +6829,9 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
         print_error "Invalid IPv4 address: $UPSTREAM_DHCP_IP"
     done
 
-    # Issue #450: additional optional dnsmasq relay/proxy options. All are
-    # skippable (empty = not configured); this whole block is only offered
-    # if the operator explicitly wants it, so a plain Enter through the
-    # required prompts above still gets a working minimal proxy setup with
-    # no behavior change from before this issue.
+    # What: optional relay/proxy options; all skippable
+    # Why: a plain Enter still gives a working proxy
+    # From: Issue #450
     print_warn "Optional: additional dnsmasq relay/proxy options (router, NTP, domain, PXE/TFTP boot, listen interface, custom options)."
     print_warn "These are delivered only to PXE/network-boot-aware clients via the supplemental ProxyDHCP exchange, never to ordinary DHCP clients -- see docs/dhcp-modes.md."
     if confirm "Configure additional dnsmasq relay/proxy options now? [y/N]" "N"; then
@@ -6945,19 +6905,8 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
         print_ok "Additional dnsmasq relay/proxy options configured. Custom safe options (DHCP_PROXY_CUSTOM_OPTIONS) can be added later from the Admin UI DHCP page."
     fi
 
-    # Issue #705: PXE boot-pointer support (`pxe-service`), kept as its own
-    # separate opt-in gate rather than folded into the #450 options block
-    # above -- entrypoint.sh's own investigation (see
-    # _dhcp_proxy_render_pxe_service_directives's header comment) found this
-    # is a real behavior change, not just another optional field: dnsmasq's
-    # ProxyDHCP mode does not reply to ANY DHCPDISCOVER at all until at
-    # least one `pxe-service` directive exists, so turning this on makes an
-    # installation that previously never replied start replying to every
-    # PXE-tagged client on the segment. That deserves its own explicit,
-    # separately-worded confirmation, not a field buried in a generic
-    # "additional options" prompt. lancache-ng only points at an operator's
-    # EXISTING external PXE/TFTP boot server -- it never hosts boot files
-    # itself (docs/dhcp-modes.md).
+    # What: PXE boot-pointer is its own opt-in gate
+    # Why: without pxe-service dnsmasq never replies
     print_warn "Optional: PXE boot-pointer support. This makes dnsmasq start REPLYING to every PXE-tagged client on this segment, pointing them at an EXISTING external PXE/TFTP boot server -- lancache-ng does not host boot files itself. See docs/dhcp-modes.md."
     if confirm "Configure PXE boot-pointer support now? [y/N]" "N"; then
         ask "External PXE/TFTP boot server address (blank = skip PXE boot-pointer support)" "$DHCP_PROXY_PXE_BOOT_SERVER"
@@ -6991,10 +6940,8 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
             if pxe_boot_pointer_answers_are_complete "$DHCP_PROXY_PXE_BOOT_SERVER" "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI"; then
                 print_ok "PXE boot-pointer support configured (external boot server: $DHCP_PROXY_PXE_BOOT_SERVER)."
             else
-                # Matches entrypoint.sh's own fail-safe: a boot server alone
-                # renders no pxe-service directive at all (just a WARNING on
-                # every start), so reset it here rather than persist a
-                # permanently-incomplete, warning-generating config.
+                # What: a server alone renders nothing
+                # Why: it only logs a startup warning
                 print_warn "No BIOS or UEFI boot filename set; PXE boot-pointer support will remain inactive."
                 DHCP_PROXY_PXE_BOOT_SERVER=""
             fi
@@ -7003,9 +6950,8 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
 
     print_ok "DHCP proxy mode enabled — subnet start: $DHCP_SUBNET_START"
 elif [[ "$DHCP_MODE" = "dnsmasq-relay" ]]; then
-    # Issue #844: real DHCP relay. Only two values matter -- this relay's own
-    # client-facing address (forwarded as giaddr) and the upstream server it
-    # relays to. No subnet/DNS/PXE prompts: a relay injects nothing of its own.
+    # What: relay mode needs only local and upstream IPs
+    # Why: a relay injects no subnet, DNS or PXE options
     print_warn "dnsmasq-relay forwards every client's DHCP request to an upstream DHCP server on another segment."
     print_warn "The upstream server owns the whole lease and every option; LanCache injects nothing of its own here."
 
@@ -7029,13 +6975,8 @@ else
 fi
 
 # ── 7b. LanCache-NG-NTP ───────────────────────────────────────────────────────
-# Kept minimal and non-interactive by design: the container's own upstream
-# server list and the DHCP auto-populate toggle are Admin-UI-configured
-# settings (requirement 2 of the issue this service was built for), not
-# install-wizard prompts -- this section only decides whether the container
-# is created at all (NTP_ENABLED / the `ntp` Compose profile), matching how
-# little SSL_ENABLED asks up front for its own similarly toggle-shaped
-# feature above.
+# What: NTP only decides whether the container is created
+# Why: upstream servers are configured in the Admin UI
 print_step "LanCache-NG-NTP"
 
 printf "  A small, self-contained NTP server, disciplined against public NTP\n"
@@ -7054,25 +6995,8 @@ else
 fi
 
 # ── 7c. Central logging ───────────────────────────────────────────────────────
-# Issue #1343: central logging (syslog-ng + Fluent Bit, #453) was always meant
-# to be a core, on-by-default feature -- the maintainer confirmed directly
-# that it should be "always on" in intent -- but this wizard never asked
-# about it at all, and the underlying Compose services carry `profiles:
-# [logging]`, so a standard install never actually started them. Corrected
-# design (maintainer decision after the initial "fully non-optional" framing
-# was reconsidered): keep a real, working opt-out for genuinely
-# storage-constrained installs, but default it to enabled -- the opposite
-# default from SSL/DHCP/NTP above, which all default to OFF because they are
-# genuinely opt-in features. A separate, Admin-UI-configurable log-verbosity
-# control was considered while implementing this (per-service severity
-# filtering, e.g. "only forward nginx WARN+") but deliberately NOT built here:
-# fluent-bit's pipeline currently forwards every tailed line verbatim with no
-# severity filter anywhere, nginx's access.log has no severity field to filter
-# on at all, and a fluent-bit `-l`/Log_Level flag only controls fluent-bit's
-# OWN diagnostic verbosity, not what it forwards -- wiring that flag to a UI
-# control would have shipped a setting that does not do what its label says.
-# See the #1343 issue thread for the decision list this was flagged back to
-# the maintainer as, rather than silently building or silently dropping it.
+# What: central logging is on by default; opt-out exists
+# Why: per-service severity filtering is not built
 print_step "Central logging"
 
 printf "  Central logging (syslog-ng + Fluent Bit) collects and forwards logs from\n"
@@ -7119,11 +7043,8 @@ if [[ "${REPLY,,}" = "y" ]]; then
         UI_AUTH_PASSWORD=$(get_env_var UI_AUTH_PASSWORD "$ENV_LOCAL") || exit $?
         print_ok "Existing Admin-UI password preserved"
     elif [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
-        # Issue #1176: introspection mode must not fabricate and print a real
-        # random secret on every run -- it never gets written anywhere, and
-        # doing so would also make list-prompts' own output non-deterministic
-        # across repeat runs with identical answers (AG-OP-006/007), even
-        # though the actual PROMPT sequence itself is unaffected either way.
+        # What: introspection mode prints no real secret
+        # Why: repeat runs must stay deterministic
         UI_AUTH_PASSWORD=""
         print_ok "Admin-UI password would be generated (skipped: introspection mode)"
     else
@@ -7156,20 +7077,12 @@ if [[ -f "$env_file" ]]; then
     [[ "${REPLY,,}" = "y" ]] || die "Cancelled."
 fi
 
-# Issue #1176: from here through the end of "Installing systemd watchdog"
-# below is every remaining real mutation the install performs (secret
-# generation, the actual .env write, cache/Kea/NTP directory creation,
-# systemd unit files, `systemctl daemon-reload`) -- none of it can run in
-# introspection mode, which must leave the host completely untouched. No
-# prompt is asked anywhere in this span (confirmed by
-# scripts/tracked/check-setup-prompt-drift.sh's own wizard-region scan, which would
-# fail closed on a stray ask()/confirm() call site inside a newly
-# unbalanced block here), so skipping it wholesale changes no prompt
-# ordering -- control falls straight through to the unconditional
-# "Start now?" prompt after "Installing systemd watchdog" either way.
+# What: from here on, the real install mutations run
+# Why: introspection mode must leave the host untouched
 if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
 
-# Generate or preserve secrets. Empty values and known placeholders are regenerated.
+# What: generates or keeps secrets; placeholders regenerate
+# Why: empty or placeholder values are never used
 LANCACHE_IMAGE_REGISTRY=$(resolve_lancache_image_registry "$env_file")
 LANCACHE_IMAGE_PREFIX=$(resolve_lancache_image_prefix "$env_file")
 LANCACHE_IMAGE_CHANNEL=$(resolve_lancache_image_channel "$env_file")
@@ -7177,17 +7090,15 @@ LANCACHE_IMAGE_TAG=$(resolve_lancache_image_tag "$env_file")
 LANCACHE_IMAGE_REFS=$(lancache_image_refs_for_tag "$env_file" "$LANCACHE_IMAGE_TAG") \
     || die "Cannot pin the images of ${LANCACHE_IMAGE_TAG}; ${env_file} was not written (exit $?)."
 
-# Verify the resolved tag actually publishes an image for this host's
-# architecture before any state below is written (#665). The earlier
-# assert_prebuilt_image_platform_supported call only checked the host
-# architecture in general, not this specific tag/channel.
+# What: verifies the tag publishes this platform
+# Why: a platform failure must stop before state writes
 assert_resolved_image_tag_platform_supported "$LANCACHE_IMAGE_REGISTRY" "$LANCACHE_IMAGE_PREFIX" "$LANCACHE_IMAGE_TAG"
 
 KEA_CTRL_TOKEN=$(get_or_generate_secret KEA_CTRL_TOKEN "$env_file" hex32)
 DDNS_TSIG_KEY=$(get_or_generate_secret DDNS_TSIG_KEY "$env_file" base64_32)
 PDNS_API_KEY=$(get_or_generate_secret PDNS_API_KEY "$env_file" hex32)
-# Bug hunt #849, observability.md finding #3: shared token gating
-# POST /api/netdata-alarms (services/ui/src/routes/netdata_alarms.rs).
+# What: NETDATA_ALARM_TOKEN gates the netdata-alarm POST
+# Why: the netdata-alarms route needs a shared token
 NETDATA_ALARM_TOKEN=$(get_or_generate_secret NETDATA_ALARM_TOKEN "$env_file" hex32)
 NATS_UI_USER=$(get_env_var NATS_UI_USER "$env_file")
 NATS_UI_USER="${NATS_UI_USER:-lancache-ui}"
@@ -7201,9 +7112,8 @@ NATS_DNS_REPLICA_PASSWORD=$(get_or_generate_secret NATS_DNS_REPLICA_PASSWORD "$e
 NATS_CALLOUT_USER=$(get_env_var NATS_CALLOUT_USER "$env_file")
 NATS_CALLOUT_USER="${NATS_CALLOUT_USER:-lancache-nats-callout}"
 NATS_CALLOUT_PASSWORD=$(get_or_generate_secret NATS_CALLOUT_PASSWORD "$env_file" hex32)
-# Issue #681: system-account identity, used only by the Admin UI's kicker
-# connection (nats_kick.rs) to look up and force-disconnect a removed/rotated
-# secondary's live connection.
+# What: NATS_SYS_USER is the Admin UI kicker identity
+# Why: force-disconnects a removed secondary session
 NATS_SYS_USER=$(get_env_var NATS_SYS_USER "$env_file")
 NATS_SYS_USER="${NATS_SYS_USER:-lancache-nats-sys}"
 NATS_SYS_PASSWORD=$(get_or_generate_secret NATS_SYS_PASSWORD "$env_file" hex32)
@@ -7444,38 +7354,15 @@ if [[ "$NTP_ENABLED" = "1" && -n "$NTP_DATA_DIR" ]]; then
     print_ok "NTP data:       $NTP_DATA_DIR"
 fi
 if [[ "$LOGGING_ENABLED" = "1" ]]; then
-    # Real, reproduced bug this pre-creation step fixes (see the combined
-    # `syslog` container's own data-loss-detector.sh header for the full
-    # finding): a bind-mounted host directory that does not already exist
-    # before first container start is auto-created by Docker as root:root
-    # 0755, which the non-root (uid 10001) syslog-ng process in the combined
-    # container cannot write its own per-host subdirectories into --
-    # silently, with `syslog-ng-ctl stats` still reporting messages as
-    # "processed" even though zero bytes reach disk. Pre-creating and
-    # chowning this path here, mirroring $CACHE_DIR's existing pattern
-    # above, is the fix at the deployment-tooling layer; the combined
-    # container's own periodic detector is the defense-in-depth backstop for
-    # an install that predates this fix or has its permissions changed
-    # later (e.g. by a manual `chown` mistake, or a restore from a backup
-    # taken with different ownership).
-    #
-    # Idempotence (AG-OP-006/013): `mkdir -p` and `chown` are both naturally
-    # idempotent -- re-running this block against an already-correct
-    # directory changes nothing and does not error. `${SYSLOG_NG_LOG_DIR:-}`
-    # honors an operator override the same way deploy/*/docker-compose.yml's
-    # own `${SYSLOG_NG_LOG_DIR:-...}` fallback does, so a customized path is
-    # preserved rather than silently redirected to the computed default
-    # (AG-OP-009).
+    # What: pre-creates syslog log root as uid 10001
+    # Why: Docker would create it root-owned, unwritable
     syslog_ng_log_dir="${SYSLOG_NG_LOG_DIR:-$LANCACHE_STATE_DIR/syslog-ng}"
     mkdir -p "$syslog_ng_log_dir" || die "Failed to create $syslog_ng_log_dir (exit $?)."
     if chown_err=$(chown 10001:10001 "$syslog_ng_log_dir" 2>&1); then
         print_ok "Syslog-ng log root: $syslog_ng_log_dir (owned by uid 10001)"
     else
-        # Non-fatal: this host may not grant setup.sh's own invoking user
-        # permission to chown (e.g. running unprivileged against an existing
-        # directory owned by someone else already). The combined container's
-        # data-loss detector still catches the resulting silent-write
-        # failure at runtime rather than this install failing closed here.
+        # What: a failed chown is only a warning
+        # Why: the container detector catches write loss
         print_warn "Could not chown $syslog_ng_log_dir to uid 10001 ($chown_err) -- the combined syslog container may not be able to write logs there. See docs/architecture-ng.md's syslog-ng section, or chown it manually before starting the stack."
     fi
 fi
@@ -7561,16 +7448,14 @@ fi
 printf "${BOLD}└──────────────────────────────────────────────┘${RESET}\n\n"
 
 ask "Start now? [Y/n]" "Y"
-# Issue #1176: this is the last prompt list-prompts needs -- reusing the
-# existing "start later" exit path here (rather than adding a second exit
-# point) also guarantees introspection never reaches the real pull/systemctl/
-# docker-compose-up mutations below, regardless of what an answers file said.
+# What: skips the real start when introspection mode is on
+# Why: the walk never reaches pull or systemctl
 [[ "$WIZARD_INTROSPECT_MODE" != "1" && "${REPLY,,}" != "n" ]] \
     || { printf "\n  Start later with: %s compose %s up -d\n\n" "$SCRIPT_DIR/setup.sh" "$INSTALL_DIR"; exit 0; }
 
 # ── 13. Starting stack ───────────────────────────────────────────────────────
-# Pull before starting so GHCR/auth/platform failures happen while systemd units
-# are installed but not yet enabled, keeping failed first installs reversible.
+# What: pulls images before enabling any unit
+# Why: failed first installs stay reversible
 print_step "Pulling images"
 cd "$INSTALL_DIR"
 assert_prebuilt_image_platform_supported
