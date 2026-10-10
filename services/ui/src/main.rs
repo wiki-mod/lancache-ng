@@ -2,12 +2,11 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //! What: the Admin UI server, one-shot modes and clients.
-//! Why: one binary serves pages and drives Docker/NATS/Kea.
+//! Why: one binary serves pages and drives NATS/Kea.
 //! From: Issue #1683 | PR #1858
 
 #![deny(warnings)]
 
-use anyhow::Context as _;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::Router;
 use axum::body::{Body, Bytes, to_bytes};
@@ -19,20 +18,18 @@ use axum::routing::{MethodRouter, delete, get, post};
 use base64::Engine as _;
 use futures_util::StreamExt as _;
 use lancache_ng::config::{
-    self, CONTAINER_DHCP, CONTAINER_DHCP_PROBE, CONTAINER_DHCP_PROXY, CONTAINER_DNS_SSL,
-    CONTAINER_DNS_STANDARD, CONTAINER_NATS, CONTAINER_NETDATA, CONTAINER_NTP, CONTAINER_PROXY,
-    CONTAINER_SYSLOG, CONTAINER_UI, DEFAULT_RECORD_TTL, DhcpMode, LAN_ZONE, NATS_SUBJECT_FLUSH,
+    self, DDNS_UNSIGNED_MARKER, DEFAULT_RECORD_TTL, DhcpMode, LAN_ZONE, NATS_SUBJECT_FLUSH,
     NATS_SUBJECT_RECORD, NatsLogin, NatsRoles, OPTION_CODE_MAX, OPTION_CODE_MIN, OutOfRange,
     PDNS_API_PATH, PDNS_AUTH_PORT, Uint, canonical_zone, dns_reader_publish, dns_subscribe,
-    is_container, is_dns_name, option_code, option_data, parse_bool, parse_custom_options,
-    rollback_zones, zone_url,
+    is_dns_name, option_code, option_data, parse_bool, parse_custom_options, rollback_zones,
+    zone_url,
 };
 use lancache_ng::{
-    DesiredRunState, DesiredState, DnsRecord, DockerApi, DockerError, FlushRequest, Place,
-    PowerDns, ProbeAnswer, ProbeReport, SnapshotStore, WatchdogStatus, ct_eq, df, die, hex32,
-    http_client, is_placeholder, load_or_create, load_or_create_hex, resolve_shared_secret,
-    shared_secret, shared_secret_file_name, shared_secret_is_placeholder, snapshot_created_unix,
-    unix_secs, write_file, write_if_changed,
+    DesiredRunState, DesiredState, DnsRecord, FlushRequest, Place, PowerDns, ProbeAnswer,
+    ProbeReport, SnapshotStore, WatchdogStatus, ct_eq, df, die, hex32, http_client, is_placeholder,
+    load_or_create, load_or_create_hex, resolve_shared_secret, shared_secret,
+    shared_secret_file_name, shared_secret_is_placeholder, snapshot_created_unix, unix_secs,
+    write_file, write_if_changed,
 };
 use nkeys::{KeyPair, XKey};
 use regex::Regex;
@@ -123,16 +120,11 @@ struct Config {
     standard_log: String,
     ssl_log: String,
     cache_dir: String,
-    dns_standard_state_dir: String,
-    dns_ssl_state_dir: String,
+    dns_state_dir: String,
     shared_secret_dir: String,
     proxy_standard_url: String,
     proxy_ssl_url: String,
     netdata_url: String,
-    dns_standard_service: String,
-    dns_ssl_service: String,
-    proxy_ssl_service: String,
-    docker_proxy_url: String,
     ssl_enabled: bool,
     cache_max_gb: f64,
     standard_ip: String,
@@ -194,7 +186,6 @@ struct Config {
     netdata_alarm_max_time: Option<String>,
     netdata_alarm_recipient: Option<String>,
     dev_mode: bool,
-    syslog_enabled: bool,
     syslog_log_root: String,
     syslog_max_gb: u32,
     watchdog_status_file: String,
@@ -244,21 +235,13 @@ impl Config {
         // Why: no LAN address is hardcoded (AG-SEC-007).
         let standard_ip = need("STANDARD_IP")?;
         let ssl_ip = need("SSL_IP")?;
-        // What: the Docker API URL comes from compose.
-        // Why: compose owns the value; no second default.
         let nats_url = need("NATS_URL")?;
-        let docker_proxy_url = need("DOCKER_PROXY_URL")?;
         let tag = need("LANCACHE_IMAGE_TAG")?;
         let channel = set("LANCACHE_IMAGE_CHANNEL")
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| derive_image_channel(&tag));
         let cache_max_gb = cache_max_gb_from(env)?;
-        // What: DHCP_ENABLED is an optional legacy switch.
-        // Why: the ui gets none; unset keeps DHCP off.
-        let dhcp_mode = DhcpMode::parse(
-            &env("DHCP_MODE").unwrap_or_default(),
-            flag("DHCP_ENABLED", false),
-        );
+        let dhcp_mode = DhcpMode::parse(&env("DHCP_MODE").unwrap_or_default());
         let secret_dir = need("LANCACHE_SHARED_SECRET_DIR")?;
         let secret = |var: &str| shared_secret(&secret_dir, var, env);
         let login = |user_key: &str, password_key: &str| -> Result<NatsLogin, String> {
@@ -316,15 +299,10 @@ impl Config {
             ssl_log: need("SSL_LOG")?,
             standard_log,
             cache_dir: need("CACHE_DIR")?,
-            dns_standard_state_dir: need("DNS_STANDARD_STATE_DIR")?,
-            dns_ssl_state_dir: need("DNS_SSL_STATE_DIR")?,
+            dns_state_dir: need("DNS_STATE_DIR")?,
             proxy_ssl_url: need("PROXY_SSL_URL")?,
             proxy_standard_url,
             netdata_url: need("NETDATA_URL")?,
-            dns_standard_service: need("DNS_STANDARD_SERVICE")?,
-            dns_ssl_service: need("DNS_SSL_SERVICE")?,
-            proxy_ssl_service: need("PROXY_SSL_SERVICE")?,
-            docker_proxy_url,
             ssl_enabled: need_flag("SSL_ENABLED")?,
             cache_max_gb,
             standard_ip,
@@ -390,7 +368,6 @@ impl Config {
             // What: dev mode is an optional switch, off.
             // Why: the ui gets none; prod stays off.
             dev_mode: flag("LANCACHE_DEV_MODE", false),
-            syslog_enabled: need_flag("SYSLOG_ENABLED")?,
             syslog_log_root: need("SYSLOG_LOG_ROOT")?,
             syslog_max_gb: read(config::SYSLOG_MAX_GB)? as u32,
             watchdog_status_file: need("WATCHDOG_STATUS_FILE")?,
@@ -414,7 +391,7 @@ impl Config {
     // What: the DHCP mode in effect now.
     // Why: the saved mode has no legacy flag fallback.
     fn dhcp_mode(&self) -> DhcpMode {
-        DhcpMode::parse(&self.setting("DHCP_MODE"), false)
+        DhcpMode::parse(&self.setting("DHCP_MODE"))
     }
 
     // What: the cache size an operator requested, in GB.
@@ -598,7 +575,6 @@ const ADMIN_UI_CSP: &str = "default-src 'self'; base-uri 'self'; object-src 'non
 struct AppState {
     templates: Tera,
     config: Config,
-    docker: DockerApi,
     http_client: reqwest::Client,
     pdns: PowerDns,
     file_lock: Mutex<()>,
@@ -1037,112 +1013,6 @@ fn load_templates(cfg: &Config) -> Tera {
     }
     tera
 }
-// What: services the ui may act on; no watchdog, no syslog.
-// Why: the ui must never stop the monitor or the log sink.
-// From: Issue #1486
-const DOCKER_SERVICES: [&str; 9] = [
-    CONTAINER_PROXY,
-    CONTAINER_DNS_STANDARD,
-    CONTAINER_DNS_SSL,
-    CONTAINER_DHCP,
-    CONTAINER_DHCP_PROXY,
-    CONTAINER_DHCP_PROBE,
-    CONTAINER_NATS,
-    CONTAINER_NTP,
-    CONTAINER_UI,
-];
-
-// What: time bound of one Docker call from the ui.
-// Why: a stuck proxy must not hang a page request.
-const DOCKER_TIMEOUT: Duration = Duration::from_secs(120);
-
-// What: the container name of an allowlisted service.
-// Why: any other name is refused before Docker sees it.
-// From: Issue #1592
-fn container_name(service: &str) -> anyhow::Result<&'static str> {
-    DOCKER_SERVICES
-        .into_iter()
-        .find(|full| is_container(full, service))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Docker service '{service}' is not in the lancache-ng socket-proxy allowlist"
-            )
-        })
-}
-
-// What: seconds a restarted container may take to stop.
-// Why: nginx-style daemons need a moment to drain.
-const RESTART_GRACE_SECS: u32 = 5;
-
-// What: restart a service container after the grace.
-// Why: every ui restart goes through one named service.
-async fn docker_restart(docker: &DockerApi, service: &str) -> anyhow::Result<()> {
-    docker
-        .restart(
-            container_name(service)?,
-            RESTART_GRACE_SECS,
-            Some(DOCKER_TIMEOUT),
-        )
-        .await
-        .with_context(|| format!("Failed to restart '{service}'"))?;
-    tracing::info!("Restarted service '{service}'");
-    Ok(())
-}
-
-// What: start a service container.
-// Why: the stop/start pairs of the mode switches need it.
-async fn docker_start(docker: &DockerApi, service: &str) -> anyhow::Result<()> {
-    docker
-        .act(container_name(service)?, "start", Some(DOCKER_TIMEOUT))
-        .await
-        .with_context(|| format!("Failed to start '{service}'"))?;
-    tracing::info!("Started service '{service}'");
-    Ok(())
-}
-
-// What: stop a service; an absent container is fine.
-// Why: a 404 means the wanted state already holds.
-async fn docker_stop_if_present(docker: &DockerApi, service: &str) -> anyhow::Result<()> {
-    match docker
-        .act(container_name(service)?, "stop?t=10", Some(DOCKER_TIMEOUT))
-        .await
-    {
-        Ok(()) => {
-            tracing::info!("Stopped service '{service}'");
-            Ok(())
-        }
-        Err(DockerError::Status(404)) => Ok(()),
-        Err(err) => Err(err).with_context(|| format!("Failed to stop '{service}'")),
-    }
-}
-
-// What: true when a start failed because it never existed.
-// Why: only a profile-gated service gives 404; hint it.
-fn container_never_created(err: &anyhow::Error) -> bool {
-    err.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<DockerError>(),
-            Some(DockerError::Status(404))
-        )
-    })
-}
-
-// What: services in watchdog display order, with labels.
-// Why: restart-capable ones sort before alert-only ones.
-// From: Issue #1437
-const WATCHDOG_LABELS: [(&str, &str); 10] = [
-    (CONTAINER_PROXY, "Proxy"),
-    (CONTAINER_DNS_STANDARD, "DNS (standard)"),
-    (CONTAINER_DNS_SSL, "DNS (SSL)"),
-    (CONTAINER_NATS, "NATS"),
-    (CONTAINER_UI, "Admin UI"),
-    (CONTAINER_DHCP, "DHCP (Kea)"),
-    (CONTAINER_DHCP_PROXY, "DHCP (proxy/relay)"),
-    (CONTAINER_NTP, "NTP"),
-    (CONTAINER_SYSLOG, "Central logging"),
-    (CONTAINER_NETDATA, "Netdata"),
-];
-
 // What: the watchdog document as the dashboard shows it.
 // Why: fresh, stale and missing data look different.
 // From: Issue #870
@@ -1161,24 +1031,22 @@ fn watchdog_json(path: &str) -> Value {
     let (Some(status), Some(age)) = (status, age) else {
         return json!({ "state": "unavailable" });
     };
-    let mut services: Vec<(usize, Value)> = status
-        .services
-        .iter()
-        .map(|(name, health)| {
-            let slot = WATCHDOG_LABELS.iter().position(|(n, _)| n == name);
-            let label = slot.map_or(name.as_str(), |i| WATCHDOG_LABELS[i].1);
-            let entry = json!({
+    // What: compose service names, sorted by name.
+    // Why: the SOT names them; the ui keeps no own list.
+    let mut names: Vec<&String> = status.services.keys().collect();
+    names.sort();
+    let services: Vec<Value> = names
+        .into_iter()
+        .map(|name| {
+            let health = &status.services[name];
+            json!({
                 "name": name,
-                "label": label,
                 "status": health.status,
                 "health": health.health,
                 "failures": health.failures,
-            });
-            (slot.unwrap_or(WATCHDOG_LABELS.len()), entry)
+            })
         })
         .collect();
-    services.sort_by(|a, b| (a.0, a.1["name"].as_str()).cmp(&(b.0, b.1["name"].as_str())));
-    let services: Vec<Value> = services.into_iter().map(|(_, entry)| entry).collect();
     if age > status.stale_after() {
         json!({
             "state": "stale",
@@ -4102,74 +3970,9 @@ async fn sync_subnet_ntp(state: &AppState, auto: bool) -> Result<(), String> {
     .await
 }
 
-// What: stop the containers a mode must not leave running.
-// Why: runs before the save; a sub-mode switch restarts.
-// From: Issue #1486
-async fn stop_for_mode(
-    state: &AppState,
-    mode: DhcpMode,
-    previous: DhcpMode,
-) -> Result<(), HtmlError> {
-    let mut stops: Vec<&str> = [CONTAINER_DHCP, CONTAINER_DHCP_PROXY]
-        .into_iter()
-        .filter(|container| Some(*container) != mode.container())
-        .collect();
-    // What: stop dhcp-proxy on a proxy/relay mode change.
-    // Why: one container serves both; it must reread mode.
-    if mode.is_dnsmasq() && previous.is_dnsmasq() && previous != mode {
-        stops.push(CONTAINER_DHCP_PROXY);
-    }
-    for service in stops {
-        docker_stop_if_present(&state.docker, service)
-            .await
-            .map_err(|e| fail(format!("{e:#}")))?;
-    }
-    Ok(())
-}
-
-// What: start the container a mode needs; sync Kea NTP.
-// Why: runs after the save so it reads the new mode.
-async fn start_for_mode(state: &AppState, mode: DhcpMode) -> Result<(), HtmlError> {
-    let Some(service) = mode.container() else {
-        return Ok(());
-    };
-    let profile = if mode.is_kea() {
-        "dhcp-kea"
-    } else {
-        "dhcp-proxy"
-    };
-    docker_start(&state.docker, service).await.map_err(|e| {
-        // What: explain a container that was never created.
-        // Why: the ui starts containers; it never creates.
-        if container_never_created(&e) {
-            fail(format!(
-                "The '{service}' container has not been created yet: this Compose stack was \
-                 never started with the '{profile}' profile active, so Docker has no container \
-                 for the Admin UI to start (it is only allowed to start/stop existing \
-                 containers, never create new ones). Fix: in the lancache-ng install \
-                 directory, run `docker compose --profile {profile} up -d {service}` once to \
-                 create it, then switch DHCP mode again here. If a `lancache-converge.timer` is \
-                 installed, it will also pick this up automatically within a few minutes after \
-                 that."
-            ))
-        } else {
-            fail(format!("{e:#}"))
-        }
-    })?;
-    // What: push the NTP address to Kea after the switch.
-    // Why: best effort; Kea may still be starting up.
-    if mode.is_kea()
-        && state.config.flag("NTP_ENABLED")
-        && state.config.flag("NTP_AUTO_DHCP")
-        && let Err(e) = sync_subnet_ntp(state, true).await
-    {
-        tracing::warn!(error = %e, "failed to push the NTP address into Kea subnets; the next NTP or DHCP save retries");
-    }
-    Ok(())
-}
-
 // What: switch the stack between the DHCP backends.
-// Why: stop, save, start in that order, with a way back.
+// Why: the ui saves; the dhcp supervisor starts the mode.
+// From: Issue #1486 | Issue #1683
 async fn update_dhcp_mode(
     State(state): Shared,
     Form(f): Form<Fields>,
@@ -4181,42 +3984,16 @@ async fn update_dhcp_mode(
             "Invalid DHCP mode requested.",
         ));
     };
-    let previous = state.config.dhcp_mode();
-
-    // What: test the settings directory before any stop.
-    // Why: a full or read-only volume must fail pre-stop.
-    let check = Path::new(&state.config.ui_settings_file).with_file_name(".dhcp-mode-write-check");
-    write_file(&check, b"", 0o600, Place::Replace).map_err(|e| {
-        fail(format!(
-            "DHCP settings file {} is not writable: {e}",
-            state.config.ui_settings_file
-        ))
-    })?;
-    // What: remove the probe file; a failure is ignored.
-    // Why: the write passed; a leftover file is inert.
-    let _ = fs::remove_file(&check);
-
-    stop_for_mode(&state, mode, previous).await?;
-    if let Err(saved) = save_dhcp_settings(&state, &[("DHCP_MODE", mode.as_str().to_string())]) {
-        // What: restart the old mode after a failed save.
-        // Why: the file still names the old mode.
-        if mode != previous
-            && let Err(restarted) = start_for_mode(&state, previous).await
-        {
-            return Err(fail(format!(
-                "Failed to persist DHCP mode ({}), and rolling the '{}' containers back to the \
-                 previous '{}' mode also failed ({}). DHCP containers are now stopped but the \
-                 UI may still report '{}' until this is resolved manually.",
-                saved.message,
-                mode.as_str(),
-                previous.as_str(),
-                restarted.message,
-                previous.as_str()
-            )));
-        }
-        return Err(saved);
+    save_dhcp_settings(&state, &[("DHCP_MODE", mode.as_str().to_string())])?;
+    // What: push the NTP address to Kea after the switch.
+    // Why: best effort; Kea may still be starting up.
+    if mode.is_kea()
+        && state.config.flag("NTP_ENABLED")
+        && state.config.flag("NTP_AUTO_DHCP")
+        && let Err(e) = sync_subnet_ntp(&state, true).await
+    {
+        tracing::warn!(error = %e, "failed to push the NTP address into Kea subnets; the next NTP or DHCP save retries");
     }
-    start_for_mode(&state, mode).await?;
     Ok(Redirect::to("/dhcp"))
 }
 
@@ -4753,14 +4530,6 @@ fn flush_name(domain: &str) -> FlushRequest {
     }
 }
 
-// What: restart the SSL proxy.
-// Why: it reads the domain list only at start.
-async fn restart_ssl(state: &AppState) {
-    if let Err(e) = docker_restart(&state.docker, &state.config.proxy_ssl_service).await {
-        tracing::error!("Restart proxy service failed: {e:#}");
-    }
-}
-
 // What: a LAN record name as a dotted FQDN in zone lan.
 // Why: the bare name "lan" is the zone root, not lan.lan.
 fn normalize_lan_name(name: &str) -> String {
@@ -5076,11 +4845,7 @@ async fn domains_page(
         fetch_ptr_records(&state),
         fetch_zone_groups(&state),
     );
-    let marker_set = |file: &str| {
-        [&cfg.dns_standard_state_dir, &cfg.dns_ssl_state_dir]
-            .iter()
-            .any(|dir| Path::new(dir).join(file).exists())
-    };
+    let marker_set = |file: &str| Path::new(&cfg.dns_state_dir).join(file).exists();
     let mut ctx = page_ctx(&headers, "domains");
     ctx.insert("dns_domains", &rows);
     ctx.insert("lan_records", &lan);
@@ -5117,13 +4882,10 @@ fn write_failed(action: &str, e: anyhow::Error) -> StatusCode {
     StatusCode::INTERNAL_SERVER_ERROR
 }
 
-// What: flush DNS and restart the SSL proxy after a change.
-// Why: the proxy derives certs from the list at start.
+// What: flush DNS after a domain list change.
+// Why: the proxy supervisor watches the list itself.
 async fn after_domain_change(state: &AppState, domain: &str) {
     flush_recursor_cache(state, flush_name(domain)).await;
-    if state.config.ssl_enabled {
-        restart_ssl(state).await;
-    }
 }
 
 // What: add a CDN domain, or re-enable a disabled one.
@@ -5240,39 +5002,26 @@ async fn remove_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redir
     Redirect::to("/domains")
 }
 
-// What: marker file names the dns containers read.
-// Why: the ui writes them; dns reads only their existence.
+// What: marker file the dns recursor lua reads.
+// Why: the ui writes it; dns reads only its existence.
 const AAAA_FILTER_MARKER: &str = "aaaa-filter-enabled";
-const DDNS_UNSIGNED_MARKER: &str = "ddns-allow-unsigned-updates";
 
-// What: set or clear a marker file in both DNS state dirs.
-// Why: the dns containers read the marker's existence.
+// What: set or clear a marker file in the DNS state dir.
+// Why: the dns container reads the marker's existence.
 fn set_markers(state: &AppState, file: &str, enabled: bool) -> Result<(), StatusCode> {
-    let mut failed = false;
-    for dir in [
-        &state.config.dns_standard_state_dir,
-        &state.config.dns_ssl_state_dir,
-    ] {
-        let path = Path::new(dir).join(file);
-        let result = if enabled {
-            write_file(&path, b"1", 0o644, Place::Replace)
-        } else {
-            match fs::remove_file(&path) {
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-                other => other,
-            }
-        };
-        if let Err(e) = result {
-            tracing::error!(path = %path.display(), enabled, error = %e, "{file} toggle failed");
-            failed = true;
+    let path = Path::new(&state.config.dns_state_dir).join(file);
+    let result = if enabled {
+        write_file(&path, b"1", 0o644, Place::Replace)
+    } else {
+        match fs::remove_file(&path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            other => other,
         }
-    }
-    // What: fail if either DNS instance lacks the state.
-    // Why: the page must not claim what one node can't see.
-    if failed {
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
-    Ok(())
+    };
+    result.map_err(|e| {
+        tracing::error!(path = %path.display(), enabled, error = %e, "{file} toggle failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
 }
 
 // What: turn the AAAA filter marker on or off.
@@ -5296,19 +5045,9 @@ async fn toggle_ddns_allow_unsigned_updates(
     if enable && !tsig_key_configured(&state.config) {
         return Ok(Redirect::to("/domains?error=ddns_allow_unsigned_no_key"));
     }
+    // What: pdns watches the marker and restarts itself.
+    // Why: the ui has no Docker; the supervisor converges.
     set_markers(&state, DDNS_UNSIGNED_MARKER, enable)?;
-    // What: restart both DNS services on a marker change.
-    // Why: without it the click waits for the next restart.
-    for service in [
-        &state.config.dns_standard_service,
-        &state.config.dns_ssl_service,
-    ] {
-        if let Err(e) = docker_restart(&state.docker, service).await {
-            tracing::error!(
-                "Restart {service} for ddns-allow-unsigned-updates toggle failed: {e:#}"
-            );
-        }
-    }
     Ok(Redirect::to("/domains"))
 }
 
@@ -5421,20 +5160,8 @@ async fn dashboard(State(state): Shared, headers: HeaderMap) -> Response {
         blocking(&state, |s| {
             merged_log_tail(&s.config.standard_log, &s.config.ssl_log, RECENT_LOGS)
         }),
-        blocking(&state, |s| {
-            if s.config.syslog_enabled {
-                du_gb(&s.config.syslog_log_root)
-            } else {
-                0.0
-            }
-        }),
-        blocking(&state, |s| {
-            if s.config.syslog_enabled {
-                syslog_stats(&s.config.syslog_log_root)
-            } else {
-                SyslogStats::default()
-            }
-        }),
+        blocking(&state, |s| du_gb(&s.config.syslog_log_root)),
+        blocking(&state, |s| syslog_stats(&s.config.syslog_log_root)),
         blocking(&state, |s| read_alarms(&s.config.netdata_alarms_file)),
     );
     // What: the cache bar follows the running size.
@@ -5465,7 +5192,6 @@ async fn dashboard(State(state): Shared, headers: HeaderMap) -> Response {
     ctx.insert("effective_cache_max_gb", &format!("{requested_gb:.0}"));
     ctx.insert("log_stats", &stats);
     ctx.insert("recent_logs", &recent);
-    ctx.insert("syslog_enabled", &cfg.syslog_enabled);
     ctx.insert("syslog_size_gb", &format!("{syslog_gb:.1}"));
     ctx.insert("syslog_max_gb", &cfg.syslog_max_gb);
     ctx.insert("syslog_stats", &syslog);
@@ -5498,9 +5224,9 @@ async fn stats_page(State(state): Shared, headers: HeaderMap) -> Response {
     render(&state, "stats.html", &page_ctx(&headers, "stats"))
 }
 
-// What: the log page, from syslog-ng or the nginx logs.
-// Why: once enabled, syslog-ng holds the fuller view.
-// From: Issue #633
+// What: the log page, from the central syslog-ng store.
+// Why: every container logs there; one view covers all.
+// From: Issue #633 | Issue #1683
 async fn logs_page(
     State(state): Shared,
     headers: HeaderMap,
@@ -5508,38 +5234,21 @@ async fn logs_page(
 ) -> Response {
     let max = state.config.ui_logs_max_entries;
     let mut ctx = page_ctx(&headers, "logs");
-    if state.config.syslog_enabled {
-        let requested = params.get("host").cloned().unwrap_or_default();
-        let (mut entries, hosts, selected) = blocking(&state, move |s| {
-            let root = &s.config.syslog_log_root;
-            let hosts = syslog_hosts(root);
-            // What: accept only a host with a directory.
-            // Why: the query value is caller input.
-            let selected = Some(requested).filter(|h| hosts.contains(h));
-            let entries = syslog_tail(root, selected.as_deref(), max);
-            (entries, hosts, selected)
-        })
-        .await;
-        entries.reverse();
-        ctx.insert("syslog_mode", &true);
-        ctx.insert("syslog_logs", &entries);
-        ctx.insert("syslog_hosts", &hosts);
-        ctx.insert("selected_host", &selected);
-        // What: an empty nginx list in syslog mode.
-        // Why: Tera fails on a variable the template reads.
-        ctx.insert("logs", &Vec::<LogEntry>::new());
-        return render(&state, "logs.html", &ctx);
-    }
-    let mut entries = blocking(&state, move |s| {
-        merged_log_tail(&s.config.standard_log, &s.config.ssl_log, max)
+    let requested = params.get("host").cloned().unwrap_or_default();
+    let (mut entries, hosts, selected) = blocking(&state, move |s| {
+        let root = &s.config.syslog_log_root;
+        let hosts = syslog_hosts(root);
+        // What: accept only a host with a directory.
+        // Why: the query value is caller input.
+        let selected = Some(requested).filter(|h| hosts.contains(h));
+        let entries = syslog_tail(root, selected.as_deref(), max);
+        (entries, hosts, selected)
     })
     .await;
     entries.reverse();
-    if let Some(wanted) = params.get("filter") {
-        entries.retain(|entry| &entry.cache_status == wanted);
-    }
-    ctx.insert("syslog_mode", &false);
-    ctx.insert("logs", &entries);
+    ctx.insert("syslog_logs", &entries);
+    ctx.insert("syslog_hosts", &hosts);
+    ctx.insert("selected_host", &selected);
     render(&state, "logs.html", &ctx)
 }
 
@@ -5648,38 +5357,16 @@ async fn update_ntp_settings(
     let cfg = &state.config;
     let enabled = !f.get("ntp_enabled").is_empty();
     let auto = !f.get("ntp_auto_dhcp").is_empty();
-    let was_enabled = cfg.flag("NTP_ENABLED");
-    let was_auto = was_enabled && cfg.flag("NTP_AUTO_DHCP");
+    let was_auto = cfg.flag("NTP_ENABLED") && cfg.flag("NTP_AUTO_DHCP");
 
-    // What: stop NTP before saving if it was running.
-    // Why: a restart before saving rereads the old list.
-    if !enabled || was_enabled {
-        docker_stop_if_present(&state.docker, CONTAINER_NTP)
-            .await
-            .map_err(|e| fail(format!("{e:#}")))?;
-    }
-    let saved = cfg.save_settings(&[
+    // What: save only; chronyd follows the settings file.
+    // Why: the ui has no Docker; the supervisor converges.
+    cfg.save_settings(&[
         ("NTP_ENABLED", bool_text(enabled)),
         ("NTP_UPSTREAM_SERVERS", servers),
         ("NTP_AUTO_DHCP", bool_text(auto)),
-    ]);
-    if let Err(save_err) = saved {
-        // What: restart NTP if it ran before the failure.
-        // Why: a failed save must not leave NTP stopped.
-        // From: PR #1610
-        if was_enabled && let Err(start_err) = docker_start(&state.docker, CONTAINER_NTP).await {
-            return Err(fail(format!(
-                "Failed to persist NTP settings ({save_err}), and restarting NTP after that \
-                 failure also failed ({start_err:#}). NTP is now stopped and needs manual recovery."
-            )));
-        }
-        return Err(fail(save_err.to_string()));
-    }
-    if enabled {
-        docker_start(&state.docker, CONTAINER_NTP)
-            .await
-            .map_err(|e| fail(format!("{e:#}")))?;
-    }
+    ])
+    .map_err(|e| fail(e.to_string()))?;
     // What: touch Kea's NTP option only when auto changes.
     // Why: a save leaving auto alone keeps subnet edits.
     if enabled && auto {
@@ -5770,15 +5457,14 @@ setTimeout(pollHealth, 1500);
 </script></body></html>
 "##;
 
-// What: answer with the wait page, then restart the ui.
-// Why: the restart ends this process; it runs out of line.
-// From: Issue #1486
-async fn restart_ui_service(State(state): Shared) -> Html<&'static str> {
-    tokio::spawn(async move {
+// What: answer with the wait page, then end the ui.
+// Why: compose "restart: always" starts it; no Docker.
+// From: Issue #1486 | Issue #1683
+async fn restart_ui_service() -> Html<&'static str> {
+    tokio::spawn(async {
         tokio::time::sleep(Duration::from_millis(750)).await;
-        if let Err(e) = docker_restart(&state.docker, CONTAINER_UI).await {
-            tracing::error!("operator-requested Admin UI self-restart failed: {e:#}");
-        }
+        tracing::info!("operator-requested Admin UI restart");
+        std::process::exit(0);
     });
     Html(RESTART_UI_PAGE)
 }
@@ -5973,8 +5659,7 @@ fn ui_written_dirs(cfg: &Config, log_file: &Path) -> Vec<PathBuf> {
         .iter()
         .filter_map(|file| Path::new(file.as_str()).parent().map(Path::to_path_buf))
         .chain([
-            PathBuf::from(&cfg.dns_standard_state_dir),
-            PathBuf::from(&cfg.dns_ssl_state_dir),
+            PathBuf::from(&cfg.dns_state_dir),
             PathBuf::from(&cfg.kea_config_snapshot_dir),
         ])
         .chain(log_file.parent().map(Path::to_path_buf))
@@ -6342,7 +6027,6 @@ async fn run() -> anyhow::Result<()> {
     let http = http_client()?;
     let state = Arc::new(AppState {
         templates: load_templates(&cfg),
-        docker: DockerApi::new(&cfg.docker_proxy_url),
         http_client: http.clone(),
         pdns: PowerDns::new(http, cfg.pdns_api_key.clone()),
         file_lock: Mutex::new(()),
@@ -6904,26 +6588,21 @@ mod tests {
         assert_eq!(fields.number::<u32>("none"), None);
     }
 
-    const TEXT_KEYS: [&str; 41] = [
+    const TEXT_KEYS: [&str; 36] = [
         "STANDARD_LOG",
         "PROXY_STANDARD_URL",
         "STANDARD_IP",
         "SSL_IP",
         "NATS_URL",
-        "DOCKER_PROXY_URL",
         "LANCACHE_IMAGE_TAG",
         "NTP_UPSTREAM_SERVERS",
         "TEMPLATE_DIR",
         "CDN_DOMAINS_FILE",
         "SSL_LOG",
         "CACHE_DIR",
-        "DNS_STANDARD_STATE_DIR",
-        "DNS_SSL_STATE_DIR",
+        "DNS_STATE_DIR",
         "PROXY_SSL_URL",
         "NETDATA_URL",
-        "DNS_STANDARD_SERVICE",
-        "DNS_SSL_SERVICE",
-        "PROXY_SSL_SERVICE",
         "DHCP_API_URL",
         "DHCP_API_USER",
         "UI_SETTINGS_FILE",
@@ -6956,7 +6635,7 @@ mod tests {
         ("SYSLOG_MAX_GB", "3"),
     ];
 
-    const FLAG_KEYS: [&str; 3] = ["SSL_ENABLED", "ALLOW_INSECURE_UI", "SYSLOG_ENABLED"];
+    const FLAG_KEYS: [&str; 2] = ["SSL_ENABLED", "ALLOW_INSECURE_UI"];
 
     // What: a complete env; each text value names its key.
     // Why: a swapped field then shows in the value.
@@ -6990,17 +6669,12 @@ mod tests {
         assert_eq!(cfg.standard_ip, "v-STANDARD_IP");
         assert_eq!(cfg.ssl_ip, "v-SSL_IP");
         assert_eq!(cfg.nats_url, "v-NATS_URL");
-        assert_eq!(cfg.docker_proxy_url, "v-DOCKER_PROXY_URL");
         assert_eq!(cfg.lancache_image_tag, "v-LANCACHE_IMAGE_TAG");
         assert_eq!(cfg.template_dir, "v-TEMPLATE_DIR");
         assert_eq!(cfg.cdn_domains_file, "v-CDN_DOMAINS_FILE");
         assert_eq!(cfg.cache_dir, "v-CACHE_DIR");
-        assert_eq!(cfg.dns_standard_state_dir, "v-DNS_STANDARD_STATE_DIR");
-        assert_eq!(cfg.dns_ssl_state_dir, "v-DNS_SSL_STATE_DIR");
+        assert_eq!(cfg.dns_state_dir, "v-DNS_STATE_DIR");
         assert_eq!(cfg.netdata_url, "v-NETDATA_URL");
-        assert_eq!(cfg.dns_standard_service, "v-DNS_STANDARD_SERVICE");
-        assert_eq!(cfg.dns_ssl_service, "v-DNS_SSL_SERVICE");
-        assert_eq!(cfg.proxy_ssl_service, "v-PROXY_SSL_SERVICE");
         assert_eq!(cfg.dhcp_api_url, "v-DHCP_API_URL");
         assert_eq!(cfg.ui_settings_file, "v-UI_SETTINGS_FILE");
         assert_eq!(cfg.kea_config_snapshot_dir, "v-KEA_CONFIG_SNAPSHOT_DIR");
@@ -7033,7 +6707,7 @@ mod tests {
         assert_eq!(cfg.ui_logs_max_entries, 250);
         assert_eq!(cfg.listen_port, 8081);
         assert_eq!(cfg.syslog_max_gb, 3);
-        assert!(cfg.ssl_enabled && cfg.allow_insecure_ui && cfg.syslog_enabled);
+        assert!(cfg.ssl_enabled && cfg.allow_insecure_ui);
         assert_eq!(cfg.cache_max_gb, 50.0);
     }
 
@@ -7248,69 +6922,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // What: Docker helpers act on allowlisted containers.
-    // Why: an unlisted name is refused before Docker.
-    // From: Issue #1592
-    #[tokio::test]
-    async fn docker_helpers_post_to_allowlisted_containers() {
-        let replies = vec![
-            (204, vec![]),
-            (204, vec![]),
-            (204, vec![]),
-            (404, vec![]),
-            (500, vec![]),
-        ];
-        let (base, server) = serve_canned(replies);
-        let docker = DockerApi::new(&base);
-        docker_restart(&docker, "proxy").await.unwrap();
-        docker_start(&docker, "dns-ssl").await.unwrap();
-        docker_stop_if_present(&docker, "lancache-nats")
-            .await
-            .unwrap();
-        docker_stop_if_present(&docker, "ntp").await.unwrap();
-        let failed = docker_stop_if_present(&docker, "ui").await.unwrap_err();
-        assert!(format!("{failed:#}").contains("Failed to stop 'ui'"));
-        for refused in ["watchdog", "syslog", "nope", ""] {
-            assert!(container_name(refused).is_err(), "{refused:?}");
-            assert!(docker_restart(&docker, refused).await.is_err());
-            assert!(docker_start(&docker, refused).await.is_err());
-            assert!(docker_stop_if_present(&docker, refused).await.is_err());
-        }
-        let seen = server.join().unwrap();
-        let lines: Vec<&str> = seen.iter().filter_map(|r| r.lines().next()).collect();
-        assert_eq!(
-            lines,
-            [
-                "POST /containers/lancache-proxy/restart?t=5 HTTP/1.1",
-                "POST /containers/lancache-dns-ssl/start HTTP/1.1",
-                "POST /containers/lancache-nats/stop?t=10 HTTP/1.1",
-                "POST /containers/lancache-ntp/stop?t=10 HTTP/1.1",
-                "POST /containers/lancache-ui/stop?t=10 HTTP/1.1",
-            ]
-        );
-    }
-
-    // What: container_name maps short and full names.
-    // Why: compose and the proxy policy spell both ways.
-    #[test]
-    fn container_names_resolve_short_and_full() {
-        assert_eq!(container_name("proxy").unwrap(), "lancache-proxy");
-        assert_eq!(container_name("lancache-ui").unwrap(), "lancache-ui");
-        let err = container_name("watchdog").unwrap_err().to_string();
-        assert!(err.contains("'watchdog'") && err.contains("allowlist"));
-    }
-
-    // What: only a Docker 404 reads as never created.
-    // Why: a profile-gated service gives 404 on start.
-    #[test]
-    fn missing_containers_are_told_apart() {
-        let missing = anyhow::Error::new(DockerError::Status(404)).context("start");
-        assert!(container_never_created(&missing));
-        let busy = anyhow::Error::new(DockerError::Status(500));
-        assert!(!container_never_created(&busy));
-        assert!(!container_never_created(&anyhow::anyhow!("other")));
-    }
-
     // What: the watchdog document is fresh, stale, absent.
     // Why: the dashboard shows each case differently.
     // From: Issue #870
@@ -7324,9 +6935,9 @@ mod tests {
         assert_eq!(watchdog_json(&path), json!({"state": "unavailable"}));
         let doc = r#"{"updated":"t1","interval_secs":30,"disk":{"cache":{"pct":10,"status":"green"}},
             "services":{"zeta":{"status":"red","health":"x","failures":2},
-                        "lancache-ui":{"status":"green","health":"healthy","failures":0},
+                        "ui":{"status":"green","health":"healthy","failures":0},
                         "alpha":{"status":"green","health":"","failures":0},
-                        "lancache-proxy":{"status":"amber","health":"starting","failures":1}}}"#;
+                        "proxy":{"status":"amber","health":"starting","failures":1}}}"#;
         fs::write(&file, doc).unwrap();
         let fresh = watchdog_json(&path);
         let names: Vec<&str> = fresh["services"]
@@ -7335,14 +6946,11 @@ mod tests {
             .iter()
             .map(|s| s["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["lancache-proxy", "lancache-ui", "alpha", "zeta"]);
+        assert_eq!(names, ["alpha", "proxy", "ui", "zeta"]);
         assert_eq!(
-            fresh["services"][0],
-            json!({"name": "lancache-proxy", "label": "Proxy", "status": "amber",
-                   "health": "starting", "failures": 1})
+            fresh["services"][1],
+            json!({"name": "proxy", "status": "amber", "health": "starting", "failures": 1})
         );
-        assert_eq!(fresh["services"][1]["label"], "Admin UI");
-        assert_eq!(fresh["services"][2]["label"], "alpha");
         assert_eq!(fresh["state"], "fresh");
         assert_eq!(fresh["updated"], "t1");
         assert_eq!(fresh["disk"]["cache"]["pct"], 10);
@@ -9172,8 +8780,7 @@ mod tests {
             ("DESIRED_STATE_FILE", "/a/desired.json"),
             ("NATS_AUTH_CALLOUT_PATH", "/d/auth.conf"),
             ("DHCP_PROBE_REQUEST_FILE", "/a/probe"),
-            ("DNS_STANDARD_STATE_DIR", "/s1"),
-            ("DNS_SSL_STATE_DIR", "/s2"),
+            ("DNS_STATE_DIR", "/s"),
             ("KEA_CONFIG_SNAPSHOT_DIR", "/k"),
         ];
         for (key, value) in paths {
@@ -9181,13 +8788,13 @@ mod tests {
         }
         let cfg = load_from(&env).unwrap();
         let dirs = ui_written_dirs(&cfg, Path::new("/l/ui.log"));
-        let want: Vec<PathBuf> = ["/a", "/b", "/c", "/d", "/k", "/l", "/s1", "/s2"]
+        let want: Vec<PathBuf> = ["/a", "/b", "/c", "/d", "/k", "/l", "/s"]
             .iter()
             .map(PathBuf::from)
             .collect();
         assert_eq!(dirs, want);
         let bare = ui_written_dirs(&cfg, Path::new("ui.log"));
-        assert_eq!(bare.len(), 7);
+        assert_eq!(bare.len(), 6);
     }
 
     // What: ownership and modes are set on a log tree.
@@ -9407,7 +9014,6 @@ mod tests {
             .unwrap();
         let state = Arc::new(AppState {
             templates: load_templates(&cfg),
-            docker: DockerApi::new(&cfg.docker_proxy_url),
             http_client: http.clone(),
             pdns: PowerDns::new(http, cfg.pdns_api_key.clone()),
             file_lock: Mutex::new(()),
@@ -10221,19 +9827,14 @@ mod tests {
         let _ = fs::remove_dir_all(&sdir);
     }
 
-    // What: NTP settings are checked, saved and applied.
-    // Why: the container reads its settings only at start.
+    // What: NTP settings are checked, then saved.
+    // Why: the services supervisor follows the saved file.
     #[tokio::test]
-    async fn ntp_settings_stop_save_and_start_ntp() {
+    async fn ntp_settings_are_checked_then_saved() {
         let dir = unique_temp_dir("ntp-settings");
         let conf = dir.join("ui.conf");
         let settings = conf.to_string_lossy().to_string();
-        let (docker, seen) = serve_canned(vec![(204, vec![]), (204, vec![])]);
-        let (base, state, sdir) = test_server(move |cfg| {
-            cfg.ui_settings_file = settings;
-            cfg.docker_proxy_url = docker;
-        })
-        .await;
+        let (base, state, sdir) = test_server(move |cfg| cfg.ui_settings_file = settings).await;
         let session = open_session(&base, &state).await;
         let empty = post_form(&base, &session, "/ntp/settings", "ntp_upstream_servers=").await;
         assert_eq!(empty.status(), 400);
@@ -10275,46 +9876,28 @@ mod tests {
                 .unwrap()
                 .contains("NTP_ENABLED=0\n")
         );
-        let requests = seen.join().unwrap();
-        assert_eq!(requests.len(), 2);
-        assert!(requests[0].contains("/start "));
-        assert!(requests[1].contains("/stop?t=10 "));
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&sdir);
     }
 
-    // What: AAAA and DDNS markers appear in both DNS dirs.
-    // Why: both DNS nodes must see the requested state.
+    // What: AAAA and DDNS markers appear in the DNS dir.
+    // Why: the dns container reads the requested state.
     #[tokio::test]
-    async fn dns_marker_toggles_write_both_state_dirs() {
+    async fn dns_marker_toggles_write_the_state_dir() {
         let dir = unique_temp_dir("markers");
-        let (standard, ssl) = (dir.join("standard"), dir.join("ssl"));
-        fs::create_dir_all(&standard).unwrap();
-        fs::create_dir_all(&ssl).unwrap();
-        let (a, b) = (
-            standard.to_string_lossy().to_string(),
-            ssl.to_string_lossy().to_string(),
-        );
-        let (base, state, sdir) = test_server(move |cfg| {
-            cfg.dns_standard_state_dir = a;
-            cfg.dns_ssl_state_dir = b;
-        })
-        .await;
+        let path = dir.to_string_lossy().to_string();
+        let (base, state, sdir) = test_server(move |cfg| cfg.dns_state_dir = path).await;
         let session = open_session(&base, &state).await;
         let on = post_form(&base, &session, "/domains/aaaa-filter", "enabled=1").await;
         assert_eq!(on.status(), 303);
         assert_eq!(on.headers()[header::LOCATION], "/domains");
-        for root in [&standard, &ssl] {
-            assert_eq!(
-                fs::read_to_string(root.join("aaaa-filter-enabled")).unwrap(),
-                "1"
-            );
-        }
+        assert_eq!(
+            fs::read_to_string(dir.join("aaaa-filter-enabled")).unwrap(),
+            "1"
+        );
         let off = post_form(&base, &session, "/domains/aaaa-filter", "enabled=0").await;
         assert_eq!(off.status(), 303);
-        for root in [&standard, &ssl] {
-            assert!(!root.join("aaaa-filter-enabled").exists());
-        }
+        assert!(!dir.join("aaaa-filter-enabled").exists());
         let again = post_form(&base, &session, "/domains/aaaa-filter", "enabled=0").await;
         assert_eq!(again.status(), 303);
 
@@ -10329,7 +9912,7 @@ mod tests {
             blocked.headers()[header::LOCATION],
             "/domains?error=ddns_allow_unsigned_no_key"
         );
-        assert!(!standard.join("ddns-allow-unsigned-updates").exists());
+        assert!(!dir.join(DDNS_UNSIGNED_MARKER).exists());
         fs::write(sdir.join("ddns-tsig-key"), "tsig").unwrap();
         let allowed = post_form(
             &base,
@@ -10339,9 +9922,7 @@ mod tests {
         )
         .await;
         assert_eq!(allowed.headers()[header::LOCATION], "/domains");
-        for root in [&standard, &ssl] {
-            assert!(root.join("ddns-allow-unsigned-updates").exists());
-        }
+        assert!(dir.join(DDNS_UNSIGNED_MARKER).exists());
         let revoked = post_form(
             &base,
             &session,
@@ -10350,7 +9931,7 @@ mod tests {
         )
         .await;
         assert_eq!(revoked.headers()[header::LOCATION], "/domains");
-        assert!(!standard.join("ddns-allow-unsigned-updates").exists());
+        assert!(!dir.join(DDNS_UNSIGNED_MARKER).exists());
         fs::remove_file(sdir.join("ddns-tsig-key")).unwrap();
         fs::write(sdir.join("ddns-tsig-key"), "").unwrap();
         let empty = post_form(
@@ -10768,90 +10349,28 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // What: a DHCP mode switch stops, saves, starts.
-    // Why: the order keeps a failed save from losing DHCP.
+    // What: a DHCP mode switch only saves the mode.
+    // Why: the dhcp supervisor starts what the file names.
+    // From: Issue #1486 | Issue #1683
     #[tokio::test]
-    async fn dhcp_mode_switch_stops_saves_then_starts() {
+    async fn dhcp_mode_switch_saves_the_mode() {
         let dir = unique_temp_dir("dhcp-mode");
         let conf = dir.join("ui.conf");
         fs::write(&conf, "DHCP_MODE=disabled\n").unwrap();
-        let (docker, seen) = serve_canned(vec![(204, vec![]), (204, vec![])]);
-        let (path, url) = (conf.to_string_lossy().to_string(), docker);
-        let (base, state, sdir) = test_server(move |cfg| {
-            cfg.ui_settings_file = path;
-            cfg.docker_proxy_url = url;
-        })
-        .await;
+        let path = conf.to_string_lossy().to_string();
+        let (base, state, sdir) = test_server(move |cfg| cfg.ui_settings_file = path).await;
         let session = open_session(&base, &state).await;
         let bad = post_form(&base, &session, "/dhcp/mode", "dhcp_mode=bogus").await;
         assert_eq!(bad.status(), 409);
-        let ok = post_form(&base, &session, "/dhcp/mode", "dhcp_mode=KEA").await;
-        assert_eq!(ok.status(), 303);
-        assert_eq!(ok.headers()[header::LOCATION], "/dhcp");
-        assert!(
-            fs::read_to_string(&conf)
-                .unwrap()
-                .starts_with("DHCP_MODE=kea\n")
-        );
-        assert!(!dir.join(".dhcp-mode-write-check").exists());
-        let requests = seen.join().unwrap();
-        assert_eq!(requests.len(), 2);
-        assert!(requests[0].starts_with("POST /containers/lancache-dhcp-proxy/stop?t=10 "));
-        assert!(requests[1].starts_with("POST /containers/lancache-dhcp/start "));
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&sdir);
-    }
-
-    // What: proxy to relay restarts the shared container.
-    // Why: one container serves both and must reread mode.
-    #[tokio::test]
-    async fn dhcp_proxy_and_relay_switch_restarts_the_container() {
-        let dir = unique_temp_dir("dhcp-relay");
-        let conf = dir.join("ui.conf");
-        fs::write(&conf, "DHCP_MODE=dnsmasq-proxy\n").unwrap();
-        let replies = vec![(204, vec![]), (204, vec![]), (204, vec![])];
-        let (docker, seen) = serve_canned(replies);
-        let (path, url) = (conf.to_string_lossy().to_string(), docker);
-        let (base, state, sdir) = test_server(move |cfg| {
-            cfg.ui_settings_file = path;
-            cfg.docker_proxy_url = url;
-        })
-        .await;
-        let session = open_session(&base, &state).await;
-        let body = "dhcp_mode=dnsmasq-relay";
-        let ok = post_form(&base, &session, "/dhcp/mode", body).await;
-        assert_eq!(ok.status(), 303);
-        let saved = fs::read_to_string(&conf).unwrap();
-        assert!(saved.starts_with("DHCP_MODE=dnsmasq-relay\n"));
-        let requests = seen.join().unwrap();
-        assert_eq!(requests.len(), 3);
-        assert!(requests[0].starts_with("POST /containers/lancache-dhcp/stop?t=10 "));
-        assert!(requests[1].starts_with("POST /containers/lancache-dhcp-proxy/stop?t=10 "));
-        assert!(requests[2].starts_with("POST /containers/lancache-dhcp-proxy/start "));
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&sdir);
-    }
-
-    // What: a missing container, a bad volume are reported.
-    // Why: the operator needs the fix, not a bare 500.
-    #[tokio::test]
-    async fn dhcp_mode_switch_reports_start_and_write_failures() {
-        let dir = unique_temp_dir("dhcp-mode-fail");
-        let conf = dir.join("ui.conf");
-        fs::write(&conf, "DHCP_MODE=disabled\n").unwrap();
-        let (docker, _seen) = serve_canned(vec![(204, vec![]), (404, vec![])]);
-        let (path, url) = (conf.to_string_lossy().to_string(), docker);
-        let (base, state, sdir) = test_server(move |cfg| {
-            cfg.ui_settings_file = path;
-            cfg.docker_proxy_url = url;
-        })
-        .await;
-        let session = open_session(&base, &state).await;
-        let never = post_form(&base, &session, "/dhcp/mode", "dhcp_mode=kea").await;
-        assert_eq!(never.status(), 500);
-        let text = never.text().await.unwrap();
-        assert!(text.contains("has not been created yet"));
-        assert!(text.contains("--profile dhcp-kea up -d lancache-dhcp"));
+        for mode in ["KEA", "dnsmasq-proxy", "dnsmasq-relay"] {
+            let body = format!("dhcp_mode={mode}");
+            let ok = post_form(&base, &session, "/dhcp/mode", &body).await;
+            assert_eq!(ok.status(), 303);
+            assert_eq!(ok.headers()[header::LOCATION], "/dhcp");
+            let saved = fs::read_to_string(&conf).unwrap();
+            let want = format!("DHCP_MODE={}\n", mode.to_lowercase());
+            assert!(saved.starts_with(&want), "{saved}");
+        }
         let _ = fs::remove_dir_all(&sdir);
 
         let blocker = dir.join("file");
@@ -10861,7 +10380,6 @@ mod tests {
         let session = open_session(&base, &state).await;
         let ro = post_form(&base, &session, "/dhcp/mode", "dhcp_mode=kea").await;
         assert_eq!(ro.status(), 500);
-        assert!(ro.text().await.unwrap().contains("is not writable"));
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&sdir);
     }

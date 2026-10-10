@@ -220,73 +220,11 @@ reference; do not introduce a second set of image-location variables.
 
 ### Environment variables that refer to services or containers
 
-Rule: which namespace (see above) an env var's default value must match is
-determined by what the variable is used for, not by convention alone —
-document the mapping explicitly rather than leaving it implicit:
-
-| Variable | Default | Namespace | Used for |
-|---|---|---|---|
-| `PROXY_SSL_SERVICE` | `proxy` (set in compose) | Compose service name, also fed into `container_name_for_service()` | Restarting the proxy for a domain-list reload (`services/ui/src/main.rs`) |
-| `DNS_STANDARD_SERVICE` | `dns-standard` | Compose service name | UI-internal service identification, dashboard labels |
-| `DNS_SSL_SERVICE` | `dns-ssl` | Compose service name | Same as above |
-| `CONTAINER_PROXY` | `lancache-proxy` | Container name | Watchdog health/restart calls through the socket proxy |
-| `CONTAINER_DNS_STANDARD` | `lancache-dns-standard` | Container name | Same as above |
-| `CONTAINER_DNS_SSL` | `lancache-dns-ssl` | Container name | Same as above |
-| `DOCKER_PROXY_URL` | `http://docker-socket-proxy:2375` | Compose service name (URL host) | Admin UI/watchdog's Docker API entry point |
-
-`PROXY_SSL_SERVICE` sits at the seam between the two
-namespaces: its *default value* is a Compose service name, but it is
-also passed straight into `container_name_for_service()` (see below), which
-accepts either a bare service name or a `lancache-`-prefixed container name
-and resolves either one to the real container name before the Docker API
-call. That dual acceptance is what lets a Compose-service-name default work
-correctly as a Docker-API restart target without a separate, redundant
-`CONTAINER_*` variable for the proxy restart path. NATS needs no restart
-call: the dns supervisor restarts nats-server when the auth_callout
-fragment changes.
-
-`services/ui/src/main.rs`'s `container_name_for_service()` mirrors
-the container-name namespace directly (it accepts either the bare Compose
-service name or the `lancache-`-prefixed container name as input, and
-always resolves to the container name before calling the Docker API) — it
-is not driven by an environment variable because the socket-proxy allowlist
-it must match is also a fixed, non-configurable set of strings.
-
-### Docker socket proxy allowlist
-
-Rule: `scripts/untracked/docker-socket-proxy.sh` is the **single source of truth**
-for the allowlist. It is mounted read-only into the `docker-socket-proxy`
-container from `deploy/prod` — there is exactly one copy of the allowlist
-logic. Every container name in the allowlist regexes must be
-a real `container_name:` declared in the same Compose file that mounts this
-script. Every container-name literal the Admin UI sends to the Docker API
-(`services/ui/src/main.rs`) and every `CONTAINER_*` default the
-watchdog uses (`services/common/config.rs`) must be a subset of this
-allowlist — code must never assume it can act on a name the allowlist
-doesn't grant, even if that assumption happens to be harmless today.
-
-Issue #1170 Part 1 note: watchdog's `probe_docker_socket_proxy` function
-calls `GET /_ping` on `docker-socket-proxy` directly by URL (`DOCKER_PROXY_URL`),
-not a `/containers/<name>/...` Docker-API call built from a `CONTAINER_*`
-default. Its `C_DOCKER_PROXY="lancache-docker-socket-proxy"` label is
-therefore a plain literal, not a `${CONTAINER_*:-lancache-*}`-shaped
-default — `scripts/tracked/check-naming-consistency.sh`'s `watchdog_names`
-extraction (which greps for exactly that shape) correctly never sees it, and
-it correctly is not, and must not become, an allowlist entry (see
-"Operator-visible consistency" above: `docker-socket-proxy` has a real
-`container_name` but is deliberately not an allowlist target).
-
-Historical note: earlier revisions of this project also carried three
-near-identical copies of this HAProxy config as an unused Compose YAML
-anchor (`x-docker-socket-proxy-command`) at the top of each of the three
-Compose files, left over from before the config was extracted into
-`scripts/untracked/docker-socket-proxy.sh` and mounted in. Those anchors were never
-referenced by anything (`grep` for `*docker-socket-proxy-command` found no
-alias use) — they were dead, unreachable duplicates of the real allowlist
-that could silently drift from it without any functional effect, which is
-exactly the kind of accidental multi-copy naming surface this document
-exists to eliminate. This change deletes them; see "Migration impact"
-below.
+Rule: no environment variable names a service or a container. The ui has
+no Docker access: it writes settings, marker and request files, and the
+supervisor in the owning container restarts its own program when a
+watched file changes. Only the watchdog in `services` talks to Docker,
+and it finds the stack by its compose project label, not by a name list.
 
 ### Backup/restore paths that depend on these names
 

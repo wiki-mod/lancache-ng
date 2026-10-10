@@ -160,15 +160,11 @@ impl DhcpMode {
         Self::ALL.into_iter().find(|mode| mode.as_str() == raw)
     }
 
-    // What: mode from text; empty uses the legacy flag.
+    // What: mode from text; unknown or empty is Disabled.
     // Why: unknown text must fail closed to Disabled.
     // From: Issue #844
-    pub fn parse(raw: &str, legacy_enabled: bool) -> Self {
-        let raw = raw.trim().to_ascii_lowercase();
-        if raw.is_empty() && legacy_enabled {
-            return Self::Kea;
-        }
-        Self::from_name(&raw).unwrap_or(Self::Disabled)
+    pub fn parse(raw: &str) -> Self {
+        Self::from_name(&raw.trim().to_ascii_lowercase()).unwrap_or(Self::Disabled)
     }
 
     // What: the mode's text form, as DHCP_MODE spells it.
@@ -188,8 +184,8 @@ impl DhcpMode {
         matches!(self, Self::Kea)
     }
 
-    // What: true for proxy and relay (one container).
-    // Why: both run in dhcp-proxy with one config surface.
+    // What: true for proxy and relay (one dnsmasq).
+    // Why: both run dnsmasq with one config surface.
     pub fn is_dnsmasq(self) -> bool {
         matches!(self, Self::DnsmasqProxy | Self::DnsmasqRelay)
     }
@@ -199,44 +195,12 @@ impl DhcpMode {
     pub fn is_dnsmasq_relay(self) -> bool {
         matches!(self, Self::DnsmasqRelay)
     }
-
-    // What: the one DHCP container this mode provisions.
-    // Why: monitoring an absent container is a false alarm.
-    pub fn container(self) -> Option<&'static str> {
-        match self {
-            Self::Kea => Some(CONTAINER_DHCP),
-            Self::DnsmasqProxy | Self::DnsmasqRelay => Some(CONTAINER_DHCP_PROXY),
-            Self::Disabled => None,
-        }
-    }
 }
 
-// What: the prefix every lancache container name carries.
-// Why: a service name is the container name without it.
-pub const CONTAINER_PREFIX: &str = "lancache-";
-
-// What: true if service names the container, short or full.
-// Why: one rule maps compose service names to containers.
-pub fn is_container(container: &str, service: &str) -> bool {
-    // What: match the full name or the unprefixed name.
-    // Why: compose service names omit the container prefix.
-    container == service || container.strip_prefix(CONTAINER_PREFIX) == Some(service)
-}
-
-// What: fixed container names of the stack.
-// Why: compose, the socket-proxy policy and services agree.
-pub const CONTAINER_PROXY: &str = "lancache-proxy";
-pub const CONTAINER_DNS_STANDARD: &str = "lancache-dns-standard";
-pub const CONTAINER_DNS_SSL: &str = "lancache-dns-ssl";
-pub const CONTAINER_NATS: &str = "lancache-nats";
-pub const CONTAINER_UI: &str = "lancache-ui";
-pub const CONTAINER_NETDATA: &str = "lancache-netdata";
-pub const CONTAINER_DHCP: &str = "lancache-dhcp";
-pub const CONTAINER_DHCP_PROXY: &str = "lancache-dhcp-proxy";
-pub const CONTAINER_DHCP_PROBE: &str = "lancache-dhcp-probe";
-pub const CONTAINER_SYSLOG: &str = "lancache-syslog";
-pub const CONTAINER_NTP: &str = "lancache-ntp";
-pub const CONTAINER_DOCKER_SOCKET_PROXY: &str = "lancache-docker-socket-proxy";
+// What: marker file of the unsigned-DDNS switch.
+// Why: the ui writes it; the dns supervisor restarts pdns.
+// From: Issue #815
+pub const DDNS_UNSIGNED_MARKER: &str = "ddns-allow-unsigned-updates";
 
 // What: the DNS stream and its subjects on NATS.
 // Why: ui publishes, subscriber consumes; one spelling.
@@ -655,24 +619,19 @@ mod tests {
         assert_eq!(ceiling.parse(Some("101")).unwrap().0, 100);
     }
 
-    // What: each mode text maps to one mode and container.
-    // Why: unknown text must not select a DHCP container.
+    // What: each mode text maps to one mode.
+    // Why: unknown text must not start a DHCP server.
     // From: Issue #844
     #[test]
-    fn dhcp_mode_maps_text_and_container() {
-        assert_eq!(
-            DhcpMode::parse("kea", false).container(),
-            Some("lancache-dhcp")
-        );
-        for text in ["dnsmasq-proxy", "dnsmasq-relay"] {
-            let mode = DhcpMode::parse(text, false);
-            assert_eq!(mode.as_str(), text);
-            assert_eq!(mode.container(), Some("lancache-dhcp-proxy"));
+    fn dhcp_mode_maps_text() {
+        for mode in DhcpMode::ALL {
+            assert_eq!(
+                DhcpMode::parse(&format!(" {} ", mode.as_str().to_uppercase())),
+                mode
+            );
         }
-        assert_eq!(DhcpMode::parse("disabled", false).container(), None);
-        assert_eq!(DhcpMode::parse("bogus", true), DhcpMode::Disabled);
-        assert_eq!(DhcpMode::parse("", true), DhcpMode::Kea);
-        assert_eq!(DhcpMode::parse("", false), DhcpMode::Disabled);
+        assert_eq!(DhcpMode::parse("bogus"), DhcpMode::Disabled);
+        assert_eq!(DhcpMode::parse(""), DhcpMode::Disabled);
     }
 
     // What: the mode list holds the four names, none twice.
@@ -770,46 +729,6 @@ mod tests {
             zone_url("http://pdns/api", "lan"),
             "http://pdns/api/zones/lan"
         );
-    }
-
-    // What: is_container accepts the short and full name.
-    // Why: service names and container names both arrive.
-    #[test]
-    fn is_container_accepts_short_and_full_names() {
-        assert!(is_container("lancache-nats", "nats"));
-        assert!(is_container("lancache-nats", "lancache-nats"));
-        assert!(!is_container("lancache-nats", "proxy"));
-        assert!(!is_container("lancache-nats", "lancache"));
-    }
-
-    // What: each container name is in the prod compose.
-    // Why: a renamed container would break lookups.
-    #[test]
-    fn container_names_match_the_prod_compose_file() {
-        let path = format!(
-            "{}/../../deploy/prod/docker-compose.yml",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let compose = std::fs::read_to_string(&path).expect("prod compose file");
-        let names = [
-            CONTAINER_PROXY,
-            CONTAINER_DNS_STANDARD,
-            CONTAINER_DNS_SSL,
-            CONTAINER_NATS,
-            CONTAINER_UI,
-            CONTAINER_NETDATA,
-            CONTAINER_DHCP,
-            CONTAINER_DHCP_PROXY,
-            CONTAINER_DHCP_PROBE,
-            CONTAINER_SYSLOG,
-            CONTAINER_NTP,
-            CONTAINER_DOCKER_SOCKET_PROXY,
-        ];
-        for name in names {
-            let line = format!("container_name: {name}\n");
-            assert!(compose.contains(&line), "compose lacks {name}");
-            assert!(name.starts_with(CONTAINER_PREFIX), "{name} has no prefix");
-        }
     }
 
     // What: the API path equals the entrypoint's path.

@@ -358,7 +358,6 @@ release-sbom-stack|-|release-sbom-stack|CI-ERROR-RELEASE-0013|-
 release-vex|-|release-vex|CI-ERROR-RELEASE-0010|-
 release-notes|-|release-notes|CI-ERROR-RELEASE-0031|-
 release-changelog|-|release-changelog|CI-ERROR-RELEASE-0032|-
-socket-proxy-config|-|socket-proxy-config|CI-ERROR-SOCKETPROXY-0001|-
 close-linked-pr|-|close-linked-issues --pr|CI-ERROR-LINK-0002|-
 close-linked-arg|-|close-linked-issues @BAD@|CI-ERROR-LINK-0013|-
 gc-arg|-|gc --@BAD@|CI-ERROR-GC-0006|-

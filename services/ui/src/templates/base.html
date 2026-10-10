@@ -403,7 +403,7 @@
         const dot = document.createElement('span');
         dot.className = 'beambar-dot ' + window.LancacheWatchdog.colorClass(svc.status);
         wrap.appendChild(dot);
-        wrap.appendChild(document.createTextNode(svc.label));
+        wrap.appendChild(document.createTextNode(svc.name));
         const dockService = DOCK_CONTROLLABLE_SERVICES[svc.name];
         if (dockService) {
           // What: red/gray reads as "not running" for the button label
