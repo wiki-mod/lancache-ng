@@ -119,16 +119,6 @@ _cache_env_clean() {
     [ "$#" -eq 0 ] || "$@"
 }
 
-# What: Write an executable stub that prints/exits fixed.
-# Why: Inject build/CAS/probe backends without real infra.
-# From: Issue #1683
-_stub() {
-    local path
-    path="$(_val path)"
-    _tool_stub "${path%/*}" "${path##*/}" <<<"$1"
-    printf '%s\n' "${path}"
-}
-
 # What: sources the real setup.sh; its guard stops before run
 # Why: tests drive the product code with its real die
 # From: Issue #1683 | PR #1858
@@ -554,23 +544,6 @@ _checkout_copy() {
     git -C "${root}" -c core.quotePath=false ls-files > "${list}" || return 1
     tar -C "${root}" -T "${list}" -cf "${tree}" || return 1
     mkdir -p "${dir}" && tar -C "${dir}" -xf "${tree}"
-}
-
-# What: sccache stub failing per level; logs the env seen.
-# Why: no real server; the cache chain env is observable.
-# From: Issue #1683 | PR #1858
-_stub_sccache() {
-    local bin="$1" fail="$2" raw="${3:-}" log="${4:-/dev/null}"
-    _tool_stub "${bin}" sccache <<STUB
-printf 'r=%s g=%s c=%s w=%s\n' "\${SCCACHE_REDIS:-}" "\${SCCACHE_GHA_ENABLED:-}" \
-    "\${SCCACHE_MULTILEVEL_CHAIN:-}" "\${SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY:-}" >> '${log}'
-case '${fail}' in
-    always) echo '${raw}' >&2; exit 2 ;;
-    redis) [ -z "\${SCCACHE_REDIS:-}" ] || { echo '${raw}' >&2; exit 2; } ;;
-    gha) [ -z "\${SCCACHE_GHA_ENABLED:-}" ] || { echo '${raw}' >&2; exit 2; } ;;
-esac
-exit 0
-STUB
 }
 
 # What: SOT registry and run repo -> name, ref and tags
@@ -1883,7 +1856,7 @@ CASES
     export CI_TRIVY_LOCK_POLL=1
     _wait_line() {
         local n=0
-        until grep -qx -- "$2" "$1" 2> /dev/null; do
+        until [ -e "$1" ] && grep -qx -- "$2" "$1"; do
             n=$((n + 1))
             [ "${n}" -le 100 ] || { echo "never saw '$2' in $1"; return 1; }
             sleep 0.1
@@ -1907,7 +1880,9 @@ CASES
     run _ci_trivy_db_lock_run "${cache}" 1 1 -- echo reclaimed
     _expect stale 0 "[CI-WARN-SCAN-0010];reclaimed" || return 1
     wait "${p1}"
-    run _ci_trivy_db_lock_run "/dev/null/$(_val name)" 1 5 -- true
+    cache="$(_val path)"
+    : > "${cache}" || return 1
+    run _ci_trivy_db_lock_run "${cache}/$(_val name)" 1 5 -- true
     _expect lock-dir 2 "[CI-ERROR-SCAN-0013]" || return 1
 }
 
