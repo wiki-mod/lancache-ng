@@ -7356,6 +7356,7 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use lancache_ng::{serve_canned, unique_temp_dir};
+    use std::net::SocketAddr;
 
     // What: the domain rule agrees with the shared fixture.
     // Why: the shell validator reads the same cases.
@@ -9142,6 +9143,10 @@ mod tests {
     // What: a Config with the five NATS roles filled in.
     // Why: nats.conf and the fragment render from it.
     fn nats_config() -> Config {
+        load_from(&nats_env()).expect("a complete NATS env loads")
+    }
+
+    fn nats_env() -> HashMap<String, String> {
         let mut env = full_env();
         let extra = [
             ("NATS_UI_USER", "ui"),
@@ -9163,7 +9168,7 @@ mod tests {
         for (key, value) in extra {
             env.insert(key.to_string(), value.to_string());
         }
-        load_from(&env).expect("a complete NATS env loads")
+        env
     }
 
     // What: unsafe NATS strings are named by their problem.
@@ -9488,5 +9493,1665 @@ mod tests {
         let outer = decode_jwt_payload(&refused).unwrap();
         assert_eq!(outer["nats"]["error"], "invalid secondary credentials");
         assert!(outer["nats"].get("jwt").is_none());
+    }
+
+    fn fields(pairs: &[(&str, &str)]) -> Fields {
+        Fields(
+            pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        )
+    }
+
+    // What: Kea replies give a result code and text.
+    // Why: Kea reports failures inside a 200 response.
+    #[test]
+    fn kea_replies_expose_code_and_text() {
+        let ok = json!([{"result": 0, "text": "done"}]);
+        assert_eq!((kea_code(&ok), kea_text(&ok)), (0, "done"));
+        let bad = json!([{"result": 2}]);
+        assert_eq!((kea_code(&bad), kea_text(&bad)), (2, "Kea error"));
+        for odd in [json!([]), json!({}), json!([{"result": "x"}]), json!(null)] {
+            assert_eq!(kea_code(&odd), 1, "{odd}");
+            assert_eq!(kea_text(&odd), "Kea error");
+        }
+    }
+
+    // What: subnet4 is found, edited or missing by level.
+    // Why: each missing level gets its own debug message.
+    #[test]
+    fn subnet_lookup_names_the_missing_level() {
+        let mut config = json!({"Dhcp4": {"subnet4": [{"id": 1}, {"id": 2, "subnet": "x"}]}});
+        assert_eq!(subnets_in(&config).len(), 2);
+        assert_eq!(subnets_mut(&mut config).unwrap().len(), 2);
+        assert_eq!(find_subnet_mut(&mut config, 2).unwrap()["subnet"], "x");
+        assert_eq!(
+            find_subnet_mut(&mut config, 3).unwrap_err(),
+            "subnet not found"
+        );
+        let mut none = json!({});
+        assert!(subnets_in(&none).is_empty());
+        assert_eq!(subnets_mut(&mut none).unwrap_err(), "Dhcp4 missing");
+        let mut no_list = json!({"Dhcp4": {}});
+        assert_eq!(subnets_mut(&mut no_list).unwrap_err(), "subnet4 missing");
+        let mut bad = json!({"Dhcp4": {"subnet4": 5}});
+        assert_eq!(subnets_mut(&mut bad).unwrap_err(), "subnet4 not an array");
+        assert!(subnets_in(&bad).is_empty());
+    }
+
+    // What: options are told apart by space, name and code.
+    // Why: dedicated fields own five; the rest are custom.
+    #[test]
+    fn dhcp_options_are_classified() {
+        assert_eq!(text_of(&json!({"a": "x"}), "a", "d"), "x");
+        assert_eq!(text_of(&json!({"a": 5}), "a", "d"), "d");
+        assert_eq!(text_of(&json!({}), "a", "d"), "d");
+        assert!(is_dhcp4_option(&json!({})));
+        assert!(is_dhcp4_option(&json!({"space": "dhcp4"})));
+        assert!(!is_dhcp4_option(&json!({"space": "vendor"})));
+        for name in [
+            "routers",
+            "domain-name",
+            "domain-search",
+            "domain-name-servers",
+            "ntp-servers",
+        ] {
+            assert!(is_managed_option(&json!({"name": name})), "{name}");
+        }
+        for code in [3, 6, 15, 42, 119] {
+            assert!(is_managed_option(&json!({"code": code})), "{code}");
+        }
+        assert!(!is_managed_option(&json!({"code": 66})));
+        assert!(!is_managed_option(
+            &json!({"name": "routers", "space": "vendor"})
+        ));
+        assert!(!is_managed_option(&json!({"name": "tftp-server-name"})));
+        let custom = |value: Value| is_custom_option(&value);
+        assert!(custom(json!({"code": 66, "data": "tftp"})));
+        assert!(custom(json!({"code": 1, "data": "x", "space": "dhcp4"})));
+        assert!(custom(json!({"code": 254, "data": "x"})));
+        assert!(!custom(json!({"code": 0, "data": "x"})));
+        assert!(!custom(json!({"code": 255, "data": "x"})));
+        assert!(!custom(json!({"code": 6, "data": "x"})));
+        assert!(!custom(json!({"code": 66, "data": 5})));
+        assert!(!custom(json!({"code": 66})));
+        assert!(!custom(json!({"code": 66, "data": "x", "space": "vendor"})));
+        assert_eq!(split_list("a, b  c,,d\te"), ["a", "b", "c", "d", "e"]);
+        assert!(split_list(" , ").is_empty());
+    }
+
+    // What: a Kea subnet becomes the page read-model.
+    // Why: options are found by name or code.
+    #[test]
+    fn kea_subnets_become_page_rows() {
+        let subnet = json!({
+            "id": 4, "subnet": "198.51.100.0/24", "valid-lifetime": 7200,
+            "pools": [{"pool": "198.51.100.10 - 198.51.100.200"}],
+            "option-data": [
+                {"name": "routers", "data": "198.51.100.1"},
+                {"code": 6, "data": "198.51.100.2, 198.51.100.3"},
+                {"name": "domain-name", "data": "lan.example"},
+                {"name": "ntp-servers", "data": "198.51.100.4"},
+                {"space": "dhcp4", "code": 66, "data": "tftp"},
+                {"space": "vendor", "name": "routers", "data": "wrong"}
+            ]
+        });
+        let row = serde_json::to_value(read_subnet(&subnet)).unwrap();
+        assert_eq!(
+            row,
+            json!({"id": 4, "subnet": "198.51.100.0/24", "pool_start": "198.51.100.10",
+                   "pool_end": "198.51.100.200", "gateway": "198.51.100.1",
+                   "dns_primary": "198.51.100.2", "dns_secondary": "198.51.100.3",
+                   "ntp_servers": "198.51.100.4", "lease_time": 7200, "domain": "lan.example",
+                   "custom_options": [{"code": 66, "data": "tftp"}]})
+        );
+        let bare = serde_json::to_value(read_subnet(&json!({}))).unwrap();
+        assert_eq!(
+            bare,
+            json!({"id": 0, "subnet": "", "pool_start": "", "pool_end": "", "gateway": "",
+                   "dns_primary": "", "dns_secondary": "", "ntp_servers": "",
+                   "lease_time": 86400, "domain": "", "custom_options": []})
+        );
+        let single = json!({"pools": [{"pool": " 10.0.0.1 "}]});
+        let one = read_subnet(&single);
+        assert_eq!(
+            (one.pool_start.as_str(), one.pool_end.as_str()),
+            ("10.0.0.1", "")
+        );
+    }
+
+    // What: reservations are listed flat with their subnet.
+    // Why: Kea nests them per subnet; the page is flat.
+    #[test]
+    fn kea_reservations_are_listed_flat() {
+        let config = json!({"Dhcp4": {"subnet4": [
+            {"id": 1, "reservations": [
+                {"hw-address": "AA-BB-CC-DD-EE-FF", "ip-address": "10.0.0.5", "hostname": "pc"},
+                {}]},
+            {"id": 2},
+            {"id": 3, "reservations": [{"hw-address": "aabbccddeeff", "ip-address": "10.0.1.5"}]}
+        ]}});
+        let rows = serde_json::to_value(read_reservations(&config)).unwrap();
+        assert_eq!(
+            rows,
+            json!([
+                {"subnet_id": 1, "ip": "10.0.0.5", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "pc"},
+                {"subnet_id": 1, "ip": "?", "mac": "?", "hostname": ""},
+                {"subnet_id": 3, "ip": "10.0.1.5", "mac": "aa:bb:cc:dd:ee:ff", "hostname": ""}
+            ])
+        );
+        assert!(read_reservations(&json!({})).is_empty());
+    }
+
+    // What: addresses, MACs and CIDRs follow strict shapes.
+    // Why: Kea entries and form input must compare equal.
+    #[test]
+    fn address_text_follows_strict_shapes() {
+        assert_eq!(ipv4(" 10.0.0.1 "), Some(Ipv4Addr::new(10, 0, 0, 1)));
+        assert_eq!(ipv4("10.0.0"), None);
+        for good in ["aa:bb:cc:dd:ee:ff", "AA-BB-CC-DD-EE-FF", "aabbccddeeff"] {
+            assert!(is_valid_mac(good), "{good}");
+            assert_eq!(normalize_mac(good), "aa:bb:cc:dd:ee:ff");
+        }
+        for bad in [
+            "",
+            "aa:bb:cc:dd:ee",
+            "aa:bb:cc:dd:ee:fg",
+            "aa:bb:cc:dd:ee:ff:00",
+            "aabbccddeeff0",
+        ] {
+            assert!(!is_valid_mac(bad), "{bad}");
+        }
+        assert_eq!(normalize_mac("A"), "a");
+        assert_eq!(
+            parse_cidr("198.51.100.0/24"),
+            Some((0xC633_6400, 0xFFFF_FF00))
+        );
+        assert_eq!(parse_cidr(" 10.0.0.0/8"), Some((0x0A00_0000, 0xFF00_0000)));
+        assert_eq!(parse_cidr("10.0.0.0/32"), Some((0x0A00_0000, u32::MAX)));
+        assert_eq!(parse_cidr("0.0.0.0/0"), Some((0, 0)));
+        assert_eq!(parse_cidr("10.1.2.3/0"), Some((0, 0)));
+        for bad in [
+            "10.0.0.1/24",
+            "10.0.0.0/33",
+            "10.0.0.0",
+            "x/24",
+            "10.0.0.0/-1",
+            "10.0.0.0/ 24",
+            "10.0.0.0/",
+        ] {
+            assert_eq!(parse_cidr(bad), None, "{bad}");
+        }
+    }
+
+    // What: interface and boot file names are plain.
+    // Why: they land unquoted in dnsmasq's config lines.
+    #[test]
+    fn interface_and_boot_names_are_plain() {
+        for good in ["eth0", " br-lan.100 ", "a_b"] {
+            assert!(is_valid_interface_name(good), "{good}");
+        }
+        assert!(is_valid_interface_name(&"a".repeat(64)));
+        for bad in ["", " ", "a b", "a/b", "a,b", "ä"] {
+            assert!(!is_valid_interface_name(bad), "{bad:?}");
+        }
+        assert!(!is_valid_interface_name(&"a".repeat(65)));
+        assert!(is_valid_boot_filename(" pxelinux.0 "));
+        assert!(is_valid_boot_filename("dir/boot.efi"));
+        assert!(is_valid_boot_filename(&"a".repeat(255)));
+        for bad in ["", " ", "a,b", "a b", "a\tb", "a\u{7f}b", &"a".repeat(256)] {
+            assert!(!is_valid_boot_filename(bad), "{bad:?}");
+        }
+    }
+
+    fn subnet_form() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("subnet", "198.51.100.0/24"),
+            ("pool_start", "198.51.100.10"),
+            ("pool_end", "198.51.100.200"),
+            ("gateway", "198.51.100.1"),
+            ("dns_primary", "198.51.100.2"),
+            ("dns_secondary", ""),
+            ("ntp_servers", ""),
+            ("domain", ""),
+            ("lease_time", "3600"),
+        ]
+    }
+
+    fn form_with(key: &str, value: &str) -> Fields {
+        let mut pairs = subnet_form();
+        pairs.retain(|(k, _)| *k != key);
+        pairs.push((key, value));
+        fields(&pairs)
+    }
+
+    // What: the subnet form is checked field by field.
+    // Why: pool, gateway and subnet depend on each other.
+    #[test]
+    fn subnet_form_is_validated_field_by_field() {
+        let ok = validate_subnet(&fields(&subnet_form()));
+        assert_eq!(ok, Ok((3600, (0xC633_6400, 0xFFFF_FF00))));
+        let edge = validate_subnet(&form_with("lease_time", "60"));
+        assert_eq!(edge.unwrap().0, 60);
+        assert_eq!(
+            validate_subnet(&form_with("lease_time", "604800"))
+                .unwrap()
+                .0,
+            604_800
+        );
+        let lease_msg = Err("Lease time must be between 60 and 604800 seconds.");
+        for bad in ["59", "604801", "x", ""] {
+            assert_eq!(
+                validate_subnet(&form_with("lease_time", bad)),
+                lease_msg,
+                "{bad:?}"
+            );
+        }
+        let cidr_msg = "Invalid subnet: use a network such as 198.51.100.0/24 with host bits zero.";
+        for bad in ["198.51.100.5/24", "x", ""] {
+            assert_eq!(
+                validate_subnet(&form_with("subnet", bad)),
+                Err(cidr_msg),
+                "{bad:?}"
+            );
+        }
+        for (key, msg) in [
+            ("pool_start", "Invalid pool start address."),
+            ("pool_end", "Invalid pool end address."),
+            ("gateway", "Invalid gateway address."),
+            ("dns_primary", "Invalid primary DNS address."),
+        ] {
+            assert_eq!(validate_subnet(&form_with(key, "nope")), Err(msg), "{key}");
+        }
+        let secondary = validate_subnet(&form_with("dns_secondary", "nope"));
+        assert_eq!(secondary, Err("Invalid secondary DNS address."));
+        assert!(validate_subnet(&form_with("dns_secondary", "198.51.100.3")).is_ok());
+        let range = "Pool and gateway must lie inside the subnet, and the pool start must not follow its end.";
+        for (key, value) in [
+            ("pool_start", "198.51.101.10"),
+            ("pool_end", "198.51.101.200"),
+            ("gateway", "198.51.101.1"),
+            ("pool_start", "198.51.100.201"),
+        ] {
+            assert_eq!(
+                validate_subnet(&form_with(key, value)),
+                Err(range),
+                "{key}={value}"
+            );
+        }
+        let one = fields(&[
+            ("subnet", "198.51.100.0/24"),
+            ("pool_start", "198.51.100.9"),
+            ("pool_end", "198.51.100.9"),
+            ("gateway", "198.51.100.1"),
+            ("dns_primary", "198.51.100.2"),
+            ("lease_time", "60"),
+        ]);
+        assert!(validate_subnet(&one).is_ok());
+        let ntp = validate_subnet(&form_with("ntp_servers", " , "));
+        assert_eq!(
+            ntp,
+            Err("Invalid NTP servers: use a list of addresses or host names.")
+        );
+        assert!(validate_subnet(&form_with("ntp_servers", "198.51.100.4, pool.ntp.org")).is_ok());
+        let domain = validate_subnet(&form_with("domain", "bad domain!"));
+        assert_eq!(
+            domain,
+            Err("Invalid domain: use a plain DNS domain name (letters, digits, '-', '.').")
+        );
+        assert!(validate_subnet(&form_with("domain", "lan.example")).is_ok());
+    }
+
+    // What: the form values land in one subnet4 entry.
+    // Why: add and edit share it; edit keeps options.
+    #[test]
+    fn subnet_form_is_written_into_the_entry() {
+        let form = fields(&[
+            ("subnet", "198.51.100.0/24"),
+            ("pool_start", "198.51.100.10"),
+            ("pool_end", "198.51.100.200"),
+            ("gateway", "198.51.100.1"),
+            ("dns_primary", "198.51.100.2"),
+            ("dns_secondary", "198.51.100.3"),
+            ("domain", "lan.example"),
+        ]);
+        let cidr = (0xC633_6400, 0xFFFF_FF00);
+        let mut entry = json!({
+            "id": 1, "interface": "eth0", "default-lease-time": 5, "max-lease-time": 6,
+            "host-reservation-identifiers": ["hw-address"],
+            "option-data": [
+                {"name": "routers", "data": "old"},
+                {"space": "dhcp4", "code": 66, "data": "tftp"}],
+            "reservations": [
+                {"ip-address": "198.51.100.50"}, {"ip-address": "192.0.2.5"}, {"hw-address": "x"}]
+        });
+        apply_subnet(&mut entry, &form, 7, 3600, "198.51.100.4", cidr).unwrap();
+        assert_eq!(
+            entry,
+            json!({
+                "id": 7, "interface": "eth0", "subnet": "198.51.100.0/24",
+                "pools": [{"pool": "198.51.100.10 - 198.51.100.200"}],
+                "valid-lifetime": 3600, "max-valid-lifetime": 7200,
+                "option-data": [
+                    {"space": "dhcp4", "code": 66, "data": "tftp"},
+                    {"name": "routers", "data": "198.51.100.1"},
+                    {"name": "domain-name-servers", "data": "198.51.100.2, 198.51.100.3"},
+                    {"name": "domain-name", "data": "lan.example"},
+                    {"name": "domain-search", "data": "lan.example"},
+                    {"name": "ntp-servers", "data": "198.51.100.4"}],
+                "reservations": [{"ip-address": "198.51.100.50"}, {"hw-address": "x"}]
+            })
+        );
+        let mut plain = json!({});
+        apply_subnet(&mut plain, &form, 1, 604_800, "", cidr).unwrap();
+        assert_eq!(plain["max-valid-lifetime"], 604_800);
+        assert!(plain.get("reservations").is_none());
+        let names: Vec<&str> = plain["option-data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "routers",
+                "domain-name-servers",
+                "domain-name",
+                "domain-search"
+            ]
+        );
+        let same = fields(&[
+            ("dns_primary", "198.51.100.2"),
+            ("dns_secondary", "198.51.100.2"),
+        ]);
+        let mut dup = json!({});
+        apply_subnet(&mut dup, &same, 1, 60, "", cidr).unwrap();
+        assert_eq!(dup["option-data"][1]["data"], "198.51.100.2");
+        let mut huge = json!({});
+        let too_large = apply_subnet(&mut huge, &form, 1, u32::MAX, "", cidr);
+        assert_eq!(too_large, Err("lease_time too large"));
+        let mut scalar = json!(5);
+        let not_object = apply_subnet(&mut scalar, &form, 1, 60, "", cidr);
+        assert_eq!(not_object, Err("subnet not an object"));
+    }
+
+    // What: custom option keys, data and edits are checked.
+    // Why: managed codes keep their own fields.
+    #[test]
+    fn custom_options_are_keyed_checked_and_edited() {
+        assert!(matches!(
+            custom_option_key(" 66 "),
+            Ok(CustomOptionKey::Numeric(66))
+        ));
+        assert!(matches!(
+            custom_option_key("next-server"),
+            Ok(CustomOptionKey::Pxe("next-server"))
+        ));
+        assert!(matches!(
+            custom_option_key("boot-file-name"),
+            Ok(CustomOptionKey::Pxe("boot-file-name"))
+        ));
+        for managed in ["3", "6", "15", "42", "119"] {
+            let err = custom_option_key(managed).err();
+            assert_eq!(
+                err,
+                Some("option code is managed by dedicated subnet fields")
+            );
+        }
+        assert_eq!(
+            custom_option_key("0").err(),
+            Some("option code must be between 1 and 254")
+        );
+        assert_eq!(
+            custom_option_key("abc").err(),
+            Some("option code must be a number")
+        );
+        assert_eq!(option_data("  x  "), Ok("x".to_string()));
+        assert_eq!(option_data(" "), Err("option data must not be empty"));
+        assert_eq!(option_data(&"a".repeat(1024)), Ok("a".repeat(1024)));
+        assert_eq!(
+            option_data(&"a".repeat(1025)),
+            Err("option data is too long")
+        );
+        assert_eq!(option_data("a\nb"), Err("option data must fit on one line"));
+        assert_eq!(option_data("a\rb"), Err("option data must fit on one line"));
+        let next = CustomOptionKey::Pxe("next-server");
+        assert_eq!(
+            custom_option_data(next, " 10.0.0.9 "),
+            Ok("10.0.0.9".to_string())
+        );
+        assert_eq!(
+            custom_option_data(next, "host"),
+            Err("next-server must be a valid IPv4 address")
+        );
+        let host = CustomOptionKey::Pxe("server-hostname");
+        assert!(custom_option_data(host, &"h".repeat(64)).is_ok());
+        assert_eq!(
+            custom_option_data(host, &"h".repeat(65)),
+            Err("value is too long for this field")
+        );
+        let file = CustomOptionKey::Pxe("boot-file-name");
+        assert!(custom_option_data(file, &"f".repeat(128)).is_ok());
+        assert_eq!(
+            custom_option_data(file, &"f".repeat(129)),
+            Err("value is too long for this field")
+        );
+        assert_eq!(
+            custom_option_data(file, ""),
+            Err("option data must not be empty")
+        );
+        let numeric = CustomOptionKey::Numeric(66);
+        assert_eq!(
+            custom_option_data(numeric, &"n".repeat(500)),
+            Ok("n".repeat(500))
+        );
+        assert_eq!(
+            custom_option_data(numeric, ""),
+            Err("option data must not be empty")
+        );
+    }
+
+    // What: custom options are added and removed once.
+    // Why: a double submit must not apply both.
+    #[test]
+    fn custom_option_edits_add_and_remove_once() {
+        let mut subnet = json!({"id": 1});
+        let key = CustomOptionKey::Numeric(66);
+        edit_custom_option(&mut subnet, key, "tftp", true).unwrap();
+        assert_eq!(
+            subnet["option-data"],
+            json!([{"space": "dhcp4", "code": 66, "data": "tftp"}])
+        );
+        assert_eq!(
+            edit_custom_option(&mut subnet, key, "tftp", true),
+            Err("custom option already exists")
+        );
+        edit_custom_option(&mut subnet, key, "other", true).unwrap();
+        assert_eq!(subnet["option-data"].as_array().unwrap().len(), 2);
+        edit_custom_option(&mut subnet, key, "tftp", false).unwrap();
+        assert_eq!(
+            subnet["option-data"],
+            json!([{"space": "dhcp4", "code": 66, "data": "other"}])
+        );
+        assert_eq!(
+            edit_custom_option(&mut subnet, key, "tftp", false),
+            Err("custom option not found")
+        );
+        let other_code = CustomOptionKey::Numeric(67);
+        assert_eq!(
+            edit_custom_option(&mut subnet, other_code, "other", false),
+            Err("custom option not found")
+        );
+        let pxe = CustomOptionKey::Pxe("next-server");
+        edit_custom_option(&mut subnet, pxe, "10.0.0.9", true).unwrap();
+        assert_eq!(subnet["next-server"], "10.0.0.9");
+        assert_eq!(
+            edit_custom_option(&mut subnet, pxe, "10.0.0.9", true),
+            Err("custom option already exists")
+        );
+        edit_custom_option(&mut subnet, pxe, "10.0.0.8", true).unwrap();
+        assert_eq!(subnet["next-server"], "10.0.0.8");
+        assert_eq!(
+            edit_custom_option(&mut subnet, pxe, "10.0.0.9", false),
+            Err("custom option not found")
+        );
+        assert_eq!(subnet["next-server"], "10.0.0.8");
+        edit_custom_option(&mut subnet, pxe, "10.0.0.8", false).unwrap();
+        assert!(subnet.get("next-server").is_none());
+        let mut scalar = json!(5);
+        assert_eq!(
+            edit_custom_option(&mut scalar, key, "x", true),
+            Err("subnet not an object")
+        );
+        let mut bad = json!({"option-data": 5});
+        assert_eq!(
+            edit_custom_option(&mut bad, key, "x", true),
+            Err("option-data not an array")
+        );
+    }
+
+    // What: the NTP option is replaced, not rebuilt.
+    // Why: the NTP sync must not touch gateway or DNS.
+    #[test]
+    fn subnet_ntp_is_replaced_in_place() {
+        let mut subnet = json!({"option-data": [
+            {"name": "routers", "data": "g"},
+            {"name": "ntp-servers", "data": "old"},
+            {"code": 42, "data": "old2"},
+            {"space": "vendor", "code": 42, "data": "keep"}]});
+        set_subnet_ntp(&mut subnet, "10.0.0.4").unwrap();
+        assert_eq!(
+            subnet["option-data"],
+            json!([{"name": "routers", "data": "g"},
+                   {"space": "vendor", "code": 42, "data": "keep"},
+                   {"name": "ntp-servers", "data": "10.0.0.4"}])
+        );
+        set_subnet_ntp(&mut subnet, "").unwrap();
+        assert_eq!(subnet["option-data"].as_array().unwrap().len(), 2);
+        let mut none = json!({});
+        assert_eq!(
+            set_subnet_ntp(&mut none, "x"),
+            Err("subnet option-data missing or not an array")
+        );
+    }
+
+    // What: a reservation is added or updated by MAC.
+    // Why: a repeated submit edits the device once.
+    #[test]
+    fn reservations_are_upserted_by_mac() {
+        let mut subnet = json!({"id": 1});
+        upsert_reservation(&mut subnet, "aa:bb:cc:dd:ee:ff", "10.0.0.5", "pc").unwrap();
+        assert_eq!(
+            subnet["reservations"],
+            json!([{"hw-address": "aa:bb:cc:dd:ee:ff", "ip-address": "10.0.0.5",
+                    "hostname": "pc", "option-data": [], "client-classes": []}])
+        );
+        subnet["reservations"][0]["client-classes"] = json!(["x"]);
+        subnet["reservations"][0]["hw-address"] = json!("AA-BB-CC-DD-EE-FF");
+        upsert_reservation(&mut subnet, "aa:bb:cc:dd:ee:ff", "10.0.0.6", "pc2").unwrap();
+        let list = subnet["reservations"].as_array().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(
+            list[0],
+            json!({"hw-address": "aa:bb:cc:dd:ee:ff", "ip-address": "10.0.0.6",
+                   "hostname": "pc2", "option-data": [], "client-classes": ["x"]})
+        );
+        upsert_reservation(&mut subnet, "11:22:33:44:55:66", "10.0.0.7", "").unwrap();
+        assert_eq!(subnet["reservations"].as_array().unwrap().len(), 2);
+        let mut scalar = json!(5);
+        assert_eq!(
+            upsert_reservation(&mut scalar, "m", "i", "h"),
+            Err("subnet not an object")
+        );
+        let mut bad = json!({"reservations": 5});
+        assert_eq!(
+            upsert_reservation(&mut bad, "m", "i", "h"),
+            Err("reservations not an array")
+        );
+        let mut odd = json!({"reservations": [{"hw-address": "aa:bb:cc:dd:ee:ff"}]});
+        odd["reservations"][0] = json!("aa:bb:cc:dd:ee:ff");
+        assert!(upsert_reservation(&mut odd, "aa:bb:cc:dd:ee:ff", "i", "h").is_ok());
+    }
+
+    // What: reservations need hw-address among the ids.
+    // Why: such a reservation would never be matched.
+    #[test]
+    fn host_identifiers_must_include_hw_address() {
+        assert!(identifiers_include_hw_address(&json!({})));
+        assert!(identifiers_include_hw_address(&json!({"Dhcp4": {}})));
+        let with = json!({"Dhcp4": {"host-reservation-identifiers": ["duid", "hw-address"]}});
+        assert!(identifiers_include_hw_address(&with));
+        let without = json!({"Dhcp4": {"host-reservation-identifiers": ["duid"]}});
+        assert!(!identifiers_include_hw_address(&without));
+        let scalar = json!({"Dhcp4": {"host-reservation-identifiers": "hw-address"}});
+        assert!(!identifiers_include_hw_address(&scalar));
+    }
+
+    // What: banner codes map to fixed text only.
+    // Why: a URL parameter must never become page text.
+    #[test]
+    fn domain_error_banners_are_fixed_text() {
+        for code in [
+            "invalid_domain",
+            "ddns_allow_unsigned_no_key",
+            "zone_rollback_failed",
+            "zone_rollback_unknown",
+        ] {
+            assert!(domain_error_message(code).is_some(), "{code}");
+        }
+        assert!(
+            domain_error_message("invalid_domain")
+                .unwrap()
+                .starts_with("That domain was not added:")
+        );
+        assert!(
+            domain_error_message("zone_rollback_failed")
+                .unwrap()
+                .starts_with("The zone rollback did not complete:")
+        );
+        assert!(
+            domain_error_message("zone_rollback_unknown")
+                .unwrap()
+                .starts_with("The zone rollback request timed out")
+        );
+        assert!(
+            domain_error_message("ddns_allow_unsigned_no_key")
+                .unwrap()
+                .starts_with("Allowing unsigned DNS updates")
+        );
+        assert_eq!(domain_error_message("<script>"), None);
+        assert_eq!(domain_error_message(""), None);
+    }
+
+    // What: DHCP errors carry the DHCP area and a status.
+    // Why: every DHCP failure returns to /dhcp alike.
+    #[test]
+    fn dhcp_errors_carry_status_and_area() {
+        let bad = invalid("x");
+        assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+        assert_eq!(bad.message, "x");
+        assert_eq!(bad.area.href, "/dhcp");
+        let broken = fail("y");
+        assert_eq!(broken.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(broken.area.title, "DHCP Configuration Error");
+        let custom = dhcp_error(StatusCode::CONFLICT, String::from("z"));
+        assert_eq!(custom.status, StatusCode::CONFLICT);
+    }
+
+    const MARKER: &str = "# ==== lancache-ng: entries added via the Admin UI are appended below this exact line ====";
+
+    fn cdn(text: &str) -> CdnDomain {
+        parse_cdn_domain(text).expect("a valid entry")
+    }
+
+    // What: text splits into lines with their own endings.
+    // Why: kept lines keep CRLF or LF; \r must not leak.
+    #[test]
+    fn text_splits_into_lines_with_terminators() {
+        assert_eq!(
+            split_terminated("a\r\nb\nc"),
+            [("a", "\r\n"), ("b", "\n"), ("c", "")]
+        );
+        assert_eq!(split_terminated("\n"), [("", "\n")]);
+        assert!(split_terminated("").is_empty());
+    }
+
+    // What: list lines parse to entries and print back.
+    // Why: a leading ! marks a disabled shipped default.
+    #[test]
+    fn list_lines_parse_and_print_back() {
+        let (domain, enabled) = stored_line(" !.steam.com ").unwrap();
+        assert!(domain.wildcard_only && !enabled);
+        assert_eq!(domain.domain, "steam.com");
+        let (plain, on) = stored_line("Epic.COM").unwrap();
+        assert!(!plain.wildcard_only && on);
+        assert_eq!(plain.domain, "epic.com");
+        for bad in ["com", "", "!!x.com", "bad_name.com", "# c.com"] {
+            assert!(stored_line(bad).is_none(), "{bad:?}");
+        }
+        assert_eq!(stored_text(&cdn("steam.com"), true), "steam.com");
+        assert_eq!(stored_text(&cdn("steam.com"), false), "!steam.com");
+        assert_eq!(stored_text(&cdn(".steam.com"), true), ".steam.com");
+        assert_eq!(stored_text(&cdn(".steam.com"), false), "!.steam.com");
+    }
+
+    // What: list rows split defaults from additions.
+    // Why: no marker means an old file: all defaults.
+    #[test]
+    fn list_rows_split_defaults_from_additions() {
+        let content = format!(
+            "# comment\n\nsteam.com\n!epic.com\nbad_line!\n{MARKER}\n.custom.com\n!bad2\n  \n"
+        );
+        let rows = serde_json::to_value(domain_rows(&content)).unwrap();
+        assert_eq!(
+            rows,
+            json!([
+                {"raw": "steam.com", "display": "steam.com", "enabled": true, "is_default": true, "is_valid": true},
+                {"raw": "!epic.com", "display": "epic.com", "enabled": false, "is_default": true, "is_valid": true},
+                {"raw": "bad_line!", "display": "bad_line!", "enabled": true, "is_default": true, "is_valid": false},
+                {"raw": ".custom.com", "display": ".custom.com", "enabled": true, "is_default": false, "is_valid": true},
+                {"raw": "!bad2", "display": "bad2", "enabled": true, "is_default": false, "is_valid": false}
+            ])
+        );
+        assert!(domain_rows("").is_empty());
+    }
+
+    // What: one entry is switched, once.
+    // Why: a repeated click must not rewrite the file.
+    #[test]
+    fn list_entries_switch_once() {
+        let text = "steam.com\n!epic.com\r\nweird line\n";
+        assert_eq!(
+            with_enabled(text, &cdn("epic.com"), true).as_deref(),
+            Some("steam.com\nepic.com\r\nweird line\n")
+        );
+        assert_eq!(
+            with_enabled(text, &cdn("steam.com"), false).as_deref(),
+            Some("!steam.com\n!epic.com\r\nweird line\n")
+        );
+        assert_eq!(with_enabled(text, &cdn("steam.com"), true), None);
+        assert_eq!(with_enabled(text, &cdn("epic.com"), false), None);
+        assert_eq!(with_enabled(text, &cdn("other.com"), true), None);
+        assert_eq!(with_enabled(text, &cdn(".steam.com"), false), None);
+    }
+
+    // What: an entry is added once, behind the marker.
+    // Why: add re-enables a disabled entry, no repeat.
+    #[test]
+    fn list_entries_are_added_behind_the_marker() {
+        let epic = cdn("epic.com");
+        assert_eq!(
+            with_added("", &epic).as_deref(),
+            Some(format!("{MARKER}\nepic.com\n").as_str())
+        );
+        assert_eq!(
+            with_added("steam.com\n", &epic).as_deref(),
+            Some(format!("steam.com\n\n{MARKER}\nepic.com\n").as_str())
+        );
+        let marked = format!("steam.com\n\n{MARKER}\nold.com");
+        assert_eq!(
+            with_added(&marked, &epic).as_deref(),
+            Some(format!("{marked}\nepic.com\n").as_str())
+        );
+        assert_eq!(
+            with_added("!epic.com\n", &epic).as_deref(),
+            Some("epic.com\n")
+        );
+        assert_eq!(with_added("epic.com\n", &epic), None);
+        let wildcard = cdn(".epic.com");
+        let both = with_added("epic.com\n", &wildcard).unwrap();
+        assert!(both.ends_with(&format!("{MARKER}\n.epic.com\n")));
+    }
+
+    // What: a removal request targets a domain or raw text.
+    // Why: malformed legacy lines must stay removable.
+    #[test]
+    fn removal_targets_cover_legacy_lines() {
+        assert!(
+            matches!(delete_target(" Steam.com "), Some(DeleteTarget::Domain(d)) if d.domain == "steam.com")
+        );
+        assert!(matches!(delete_target("com"), Some(DeleteTarget::Raw(raw)) if raw == "com"));
+        assert!(matches!(
+            delete_target("bad_line!"),
+            Some(DeleteTarget::Raw(_))
+        ));
+        for refused in ["", "  ", "# note", "a\u{7}b"] {
+            assert!(delete_target(refused).is_none(), "{refused:?}");
+        }
+        let text = "steam.com\r\n!steam.com\n.steam.com\nBad_Line!\nkeep.com\n";
+        let by_domain = DeleteTarget::Domain(cdn("steam.com"));
+        assert_eq!(
+            without_domain(text, &by_domain).as_deref(),
+            Some("!steam.com\n.steam.com\nBad_Line!\nkeep.com\n")
+        );
+        let by_raw = DeleteTarget::Raw("bad_line!".to_string());
+        assert_eq!(
+            without_domain(text, &by_raw).as_deref(),
+            Some("steam.com\r\n!steam.com\n.steam.com\nkeep.com\n")
+        );
+        assert_eq!(
+            without_domain(text, &DeleteTarget::Raw("none".to_string())),
+            None
+        );
+    }
+
+    // What: a flush for a name has no zone or record data.
+    // Why: CDN changes have no record to confirm.
+    #[test]
+    fn name_flushes_carry_the_name_only() {
+        let request = flush_name("steam.com");
+        assert_eq!(request.domain, "steam.com");
+        assert!(request.zone.is_none() && request.record_type.is_none());
+        assert!(request.expected_content.is_none() && request.expected_ttl.is_none());
+    }
+
+    // What: LAN names and records follow the zone rules.
+    // Why: the ui may only touch records of its own zone.
+    #[test]
+    fn lan_names_and_records_follow_zone_rules() {
+        assert_eq!(normalize_lan_name("xlan"), "xlan.lan.");
+        assert_eq!(normalize_lan_name("a.LAN"), "a.lan.");
+        assert!(is_lan_name("_k.lan.", true));
+        assert!(!is_lan_name("_k.lan.", false));
+        assert!(is_lan_name("*.lan.", false));
+        assert!(!is_lan_name("lan", false));
+        assert!(!is_lan_name("evil-lan.", false));
+        let ok = |name: &str, kind: &str, content: &str, ttl: u32| {
+            validate_lan_record(name, kind, content, ttl)
+        };
+        assert!(ok("h.lan.", "A", "10.0.0.1", 1).is_some());
+        assert!(ok("h.lan.", "A", "10.0.0.1", 2_147_483_647).is_some());
+        assert!(ok("h.lan.", "A", "10.0.0.1", 2_147_483_648).is_none());
+        assert_eq!(
+            ok("h.lan.", " mx ", "65535 mail", 60),
+            Some(("MX", "65535 mail".to_string()))
+        );
+        assert!(ok("h.lan.", "MX", "65536 mail", 60).is_none());
+        assert!(ok("h.lan.", "MX", "10 bad_name", 60).is_none());
+        assert!(ok("h.lan.", "MX", "10", 60).is_none());
+        assert!(ok("h.lan.", "CNAME", "bad_name", 60).is_none());
+        assert!(ok("h.lan.", "CNAME", "", 60).is_none());
+        assert!(ok("h.lan.", "AAAA", "10.0.0.1", 60).is_none());
+        assert!(ok("h.lan.", "A", "2001:db8::1", 60).is_none());
+        let long_ok = "t".repeat(64_986);
+        assert!(ok("h.lan.", "TXT", &long_ok, 60).is_some());
+        assert!(ok("h.lan.", "TXT", &"t".repeat(64_987), 60).is_none());
+        assert!(ok("h.lan.", "TXT", "a\u{7}b", 60).is_none());
+        assert!(ok("h.lan.", "PTR", "x", 60).is_none());
+        assert_eq!(
+            delete_record_type("TYPE65535"),
+            Some("TYPE65535".to_string())
+        );
+        assert_eq!(delete_record_type("TYPE65536"), None);
+        assert_eq!(delete_record_type("TYPE"), None);
+        assert_eq!(delete_record_type(&"A".repeat(16)), Some("A".repeat(16)));
+    }
+
+    // What: PTR targets and locations follow the zones.
+    // Why: only provisioned zones exist; others would 404.
+    #[test]
+    fn ptr_targets_and_locations_follow_the_zones() {
+        assert_eq!(
+            ptr_location("10.1.2.3"),
+            Some((
+                "10.in-addr.arpa.".to_string(),
+                "3.2.1.10.in-addr.arpa.".to_string()
+            ))
+        );
+        assert_eq!(ptr_location("8.8.8.8"), None);
+        assert_eq!(ptr_location("x"), None);
+        assert_eq!(
+            normalize_ptr_target(" Host.Example.com "),
+            Some("host.example.com.".to_string())
+        );
+        assert_eq!(
+            normalize_ptr_target("host.lan."),
+            Some("host.lan.".to_string())
+        );
+        for bad in ["", "_x.lan", "*.lan", "bad name"] {
+            assert_eq!(normalize_ptr_target(bad), None, "{bad:?}");
+        }
+        let rrsets = vec![json!({"name": "5.0.0.10.in-addr.arpa.", "type": "PTR",
+            "records": [{"content": "a.lan."}, {"content": "b.lan.", "disabled": false}, {"disabled": false}]})];
+        let rows = ptr_rows(&rrsets);
+        let seen: Vec<(&str, &str, u32, u32)> = rows
+            .iter()
+            .map(|r| (r.ip.as_str(), r.hostname.as_str(), r.ttl, r.sort_key))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("10.0.0.5", "a.lan.", 0, 0x0A00_0005),
+                ("10.0.0.5", "b.lan.", 0, 0x0A00_0005)
+            ]
+        );
+        assert!(ptr_rows(&[json!({"name": "x", "type": "PTR"})]).is_empty());
+    }
+
+    // What: option lines become the stored one-line form.
+    // Why: the file keeps one line; entries join by ';'.
+    #[test]
+    fn proxy_option_lines_join_or_name_the_line() {
+        assert_eq!(
+            parse_custom_options("66:tftp\n\n 67 : boot.0 \n"),
+            Ok("66:tftp;67:boot.0".to_string())
+        );
+        assert_eq!(parse_custom_options(""), Ok(String::new()));
+        let cases = [
+            ("66", "line 1: expected CODE:VALUE"),
+            ("66:ok\nabc:x", "line 2: option code must be a number"),
+            (
+                "3:10.0.0.1",
+                "line 1: option code is managed by dedicated dnsmasq-proxy fields",
+            ),
+            (
+                "66:a;b",
+                "line 1: option data must not contain ';' (used as the entry separator)",
+            ),
+            ("66: ", "line 1: option data must not be empty"),
+        ];
+        for (raw, message) in cases {
+            assert_eq!(
+                parse_custom_options(raw),
+                Err(message.to_string()),
+                "{raw:?}"
+            );
+        }
+        assert!(parse_custom_options("119:search.lan").is_ok());
+    }
+
+    // What: the probe report has one overall word.
+    // Why: severity order; a found server beats everything.
+    #[test]
+    fn probe_reports_rank_their_checks() {
+        let found = || ConflictCheck::Found {
+            output: "10.0.0.1".into(),
+            details: vec![],
+        };
+        let passed = || ClientCheck::Passed {
+            output: String::new(),
+            details: vec![],
+        };
+        let failed = || ClientCheck::Failed {
+            output: String::new(),
+        };
+        let gone = || ClientCheck::Unavailable {
+            reason: String::new(),
+        };
+        let no_conflict = || ConflictCheck::Unavailable {
+            reason: String::new(),
+        };
+        let overall = |conflict, client| ProbeReport { conflict, client }.overall();
+        assert_eq!(overall(found(), gone()), "conflict_found");
+        assert_eq!(overall(found(), passed()), "conflict_found");
+        assert_eq!(overall(no_conflict(), passed()), "unavailable");
+        assert_eq!(overall(ConflictCheck::NotFound, gone()), "unavailable");
+        assert_eq!(overall(ConflictCheck::NotFound, failed()), "client_failed");
+        assert_eq!(overall(ConflictCheck::NotFound, passed()), "verified");
+        let report = ProbeReport::unavailable("why".to_string());
+        assert_eq!(
+            serde_json::to_value(&report).unwrap(),
+            json!({
+            "conflict": {"status": "unavailable", "reason": "why"},
+            "client": {"status": "unavailable", "reason": "why"}})
+        );
+        assert_eq!(report.overall(), "unavailable");
+    }
+
+    // What: a test OFFER with a server's option set.
+    // Why: read_offer must show exactly the fields present.
+    fn offer_message(xid: u32, kind: MessageType, yiaddr: Ipv4Addr, server: Ipv4Addr) -> Message {
+        let mut msg = dhcp_message(
+            xid,
+            &[2, 0, 0, 0, 0, 1],
+            Ipv4Addr::UNSPECIFIED,
+            kind,
+            vec![],
+        );
+        msg.set_yiaddr(yiaddr);
+        let extra = [
+            DhcpOption::ServerIdentifier(server),
+            DhcpOption::AddressLeaseTime(3600),
+            DhcpOption::Renewal(1800),
+            DhcpOption::Rebinding(3150),
+            DhcpOption::SubnetMask(Ipv4Addr::new(255, 255, 255, 0)),
+            DhcpOption::Router(vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)]),
+            DhcpOption::DomainNameServer(vec![
+                Ipv4Addr::new(10, 0, 0, 3),
+                Ipv4Addr::new(10, 0, 0, 4),
+            ]),
+            DhcpOption::DomainName("lan.example".to_string()),
+            DhcpOption::BroadcastAddr(Ipv4Addr::new(10, 0, 0, 255)),
+        ];
+        for option in extra {
+            msg.opts_mut().insert(option);
+        }
+        msg
+    }
+
+    // What: an OFFER becomes address, server and rows.
+    // Why: REQUEST needs address and server; page, rows.
+    #[test]
+    fn dhcp_offers_become_labelled_rows() {
+        let server = Ipv4Addr::new(10, 0, 0, 9);
+        let msg = offer_message(5, MessageType::Offer, Ipv4Addr::new(10, 0, 0, 50), server);
+        let offer = read_offer(&msg);
+        assert_eq!(offer.address, Some(Ipv4Addr::new(10, 0, 0, 50)));
+        assert_eq!(offer.server, Some(server));
+        let rows: Vec<(&str, &str)> = offer
+            .details
+            .iter()
+            .map(|d| (d.label.as_str(), d.value.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Server Identifier", "10.0.0.9"),
+                ("IP Offered", "10.0.0.50"),
+                ("IP Address Lease Time (seconds)", "3600"),
+                ("Renewal Time (seconds)", "1800"),
+                ("Rebinding Time (seconds)", "3150"),
+                ("Subnet Mask", "255.255.255.0"),
+                ("Router", "10.0.0.1"),
+                ("Domain Name Server", "10.0.0.3, 10.0.0.4"),
+                ("Domain Name", "lan.example"),
+                ("Broadcast Address", "10.0.0.255"),
+            ]
+        );
+        let bare = dhcp_message(
+            1,
+            &[2, 0, 0, 0, 0, 2],
+            Ipv4Addr::UNSPECIFIED,
+            MessageType::Offer,
+            vec![],
+        );
+        let none = read_offer(&bare);
+        assert!(none.address.is_none() && none.server.is_none() && none.details.is_empty());
+        assert!(is_kind(&msg, MessageType::Offer));
+        assert!(!is_kind(&msg, MessageType::Ack));
+        assert!(!is_kind(&Message::default(), MessageType::Offer));
+    }
+
+    // What: probe messages carry type, flags and options.
+    // Why: RELEASE has a client address and no broadcast.
+    #[test]
+    fn dhcp_messages_carry_type_flags_and_options() {
+        let mac = [2, 1, 2, 3, 4, 5];
+        let discover = dhcp_message(
+            7,
+            &mac,
+            Ipv4Addr::UNSPECIFIED,
+            MessageType::Discover,
+            vec![request_list()],
+        );
+        assert_eq!(discover.xid(), 7);
+        assert!(discover.flags().broadcast());
+        assert!(is_kind(&discover, MessageType::Discover));
+        assert_eq!(&discover.chaddr()[..6], &mac);
+        let release = dhcp_message(
+            8,
+            &mac,
+            Ipv4Addr::new(10, 0, 0, 5),
+            MessageType::Release,
+            vec![],
+        );
+        assert!(!release.flags().broadcast());
+        assert_eq!(release.ciaddr(), Ipv4Addr::new(10, 0, 0, 5));
+        let DhcpOption::ParameterRequestList(codes) = request_list() else {
+            panic!("a parameter request list");
+        };
+        assert_eq!(
+            codes,
+            [
+                OptionCode::AddressLeaseTime,
+                OptionCode::Renewal,
+                OptionCode::Rebinding,
+                OptionCode::SubnetMask,
+                OptionCode::Router,
+                OptionCode::DomainNameServer,
+                OptionCode::DomainName,
+                OptionCode::BroadcastAddr
+            ]
+        );
+    }
+
+    // What: a message goes out over UDP, heard by xid.
+    // Why: others share the broadcast domain.
+    #[test]
+    fn dhcp_listening_filters_by_transaction() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let SocketAddr::V4(to) = receiver.local_addr().unwrap() else {
+            panic!("ipv4")
+        };
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let other = dhcp_message(
+            1,
+            &[2; 6],
+            Ipv4Addr::UNSPECIFIED,
+            MessageType::Offer,
+            vec![],
+        );
+        let ours = dhcp_message(2, &[2; 6], Ipv4Addr::UNSPECIFIED, MessageType::Ack, vec![]);
+        send_dhcp(&sender, &other, to).unwrap();
+        send_dhcp(&sender, &ours, to).unwrap();
+        let mut seen = Vec::new();
+        let until = Instant::now() + Duration::from_secs(2);
+        listen(&receiver, 2, until, |msg| {
+            seen.push(is_kind(msg, MessageType::Ack));
+            true
+        })
+        .unwrap();
+        assert_eq!(seen, [true]);
+        let mut calls = 0;
+        send_dhcp(&sender, &ours, to).unwrap();
+        listen(
+            &receiver,
+            2,
+            Instant::now() + Duration::from_millis(300),
+            |_| {
+                calls += 1;
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, 1);
+        let late = Instant::now();
+        listen(&receiver, 2, late, |_| panic!("no wait past the deadline")).unwrap();
+    }
+
+    // What: a stand-in DHCP server for the dry run.
+    // Why: the client side is tested without a network.
+    fn dry_run_server(
+        reply: Option<(MessageType, Ipv4Addr)>,
+    ) -> (SocketAddrV4, std::thread::JoinHandle<Option<Message>>) {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let SocketAddr::V4(addr) = server.local_addr().unwrap() else {
+            panic!("ipv4")
+        };
+        let handle = std::thread::spawn(move || {
+            let mut buf = [0u8; 1500];
+            let (n, from) = server.recv_from(&mut buf).ok()?;
+            let request = Message::decode(&mut Decoder::new(&buf[..n])).ok()?;
+            if let Some((kind, server_id)) = reply {
+                let answer =
+                    offer_message(request.xid(), kind, Ipv4Addr::new(10, 0, 0, 50), server_id);
+                send_dhcp(
+                    &server,
+                    &answer,
+                    match from {
+                        SocketAddr::V4(v4) => v4,
+                        SocketAddr::V6(_) => return None,
+                    },
+                )
+                .ok()?;
+            }
+            Some(request)
+        });
+        (addr, handle)
+    }
+
+    fn offer_for(server: Ipv4Addr) -> Offer {
+        Offer {
+            address: Some(Ipv4Addr::new(10, 0, 0, 50)),
+            server: Some(server),
+            details: vec![],
+        }
+    }
+
+    // What: the dry run requests the offer, reads the ACK.
+    // Why: it proves a client can get a lease.
+    #[test]
+    fn dry_run_passes_on_an_ack_from_the_offering_server() {
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_ip = Ipv4Addr::new(10, 0, 0, 9);
+        let (addr, handle) = dry_run_server(Some((MessageType::Ack, server_ip)));
+        let check = dry_run(&client, 77, &[2; 6], &offer_for(server_ip), addr);
+        let ClientCheck::Passed { output, details } = check else {
+            panic!("passed")
+        };
+        assert_eq!(output, "DHCP client dry-run succeeded, assigned 10.0.0.50");
+        assert_eq!(details.len(), 10);
+        let request = handle.join().unwrap().unwrap();
+        assert_eq!(request.xid(), 77);
+        assert!(is_kind(&request, MessageType::Request));
+        assert_eq!(
+            request.opts().get(OptionCode::RequestedIpAddress),
+            Some(&DhcpOption::RequestedIpAddress(Ipv4Addr::new(10, 0, 0, 50)))
+        );
+        assert_eq!(
+            request.opts().get(OptionCode::ServerIdentifier),
+            Some(&DhcpOption::ServerIdentifier(server_ip))
+        );
+        assert!(
+            request
+                .opts()
+                .get(OptionCode::ParameterRequestList)
+                .is_some()
+        );
+    }
+
+    // What: the dry run fails clearly on NAK or bad input.
+    // Why: the page tells the operator what went wrong.
+    #[test]
+    fn dry_run_fails_with_the_reason() {
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_ip = Ipv4Addr::new(10, 0, 0, 9);
+        let (addr, _handle) = dry_run_server(Some((MessageType::Nak, server_ip)));
+        let nak = dry_run(&client, 5, &[2; 6], &offer_for(server_ip), addr);
+        let ClientCheck::Failed { output } = nak else {
+            panic!("failed")
+        };
+        assert_eq!(output, "server sent DHCPNAK for the requested address");
+        let missing = Offer {
+            address: None,
+            server: Some(server_ip),
+            details: vec![],
+        };
+        let (addr, _handle) = dry_run_server(None);
+        let ClientCheck::Failed { output } = dry_run(&client, 5, &[2; 6], &missing, addr) else {
+            panic!("failed")
+        };
+        assert!(
+            output.starts_with("the DHCPOFFER was missing a requested IP or server identifier")
+        );
+        let no_server = Offer {
+            address: Some(Ipv4Addr::new(10, 0, 0, 5)),
+            server: None,
+            details: vec![],
+        };
+        assert!(matches!(
+            dry_run(&client, 5, &[2; 6], &no_server, addr),
+            ClientCheck::Failed { .. }
+        ));
+    }
+
+    // What: a wrong-server ACK or silence times out.
+    // Why: only the offering server's ACK counts.
+    #[test]
+    fn dry_run_times_out_on_silence_or_a_foreign_ack() {
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_ip = Ipv4Addr::new(10, 0, 0, 9);
+        let (addr, _handle) = dry_run_server(Some((MessageType::Ack, Ipv4Addr::new(10, 0, 0, 77))));
+        let ClientCheck::Failed { output } =
+            dry_run(&client, 5, &[2; 6], &offer_for(server_ip), addr)
+        else {
+            panic!("failed")
+        };
+        assert_eq!(
+            output,
+            "received an ACK, but not from the expected server identifier"
+        );
+        let (addr, _handle) = dry_run_server(None);
+        let ClientCheck::Failed { output } =
+            dry_run(&client, 6, &[2; 6], &offer_for(server_ip), addr)
+        else {
+            panic!("failed")
+        };
+        assert_eq!(output, "no ACK received before the timeout");
+    }
+
+    // What: log tails cut at char borders, runs by marker.
+    // Why: a slice mid-character would panic the diagnosis.
+    #[test]
+    fn probe_logs_are_cut_safely() {
+        assert_eq!(tail_bytes("  short  ", 100), "short");
+        assert_eq!(tail_bytes("abcdefghij", 4), "...(truncated)... ghij");
+        assert_eq!(tail_bytes("aäb", 2), "...(truncated)... b");
+        assert_eq!(tail_bytes("aäb", 3), "...(truncated)... äb");
+        assert_eq!(tail_bytes("abc", 3), "abc");
+        assert_eq!(
+            current_run("old\n__LANCACHE_DHCP_PROBE_START__\nnew"),
+            "\nnew"
+        );
+        assert_eq!(
+            current_run("a__LANCACHE_DHCP_PROBE_START__b__LANCACHE_DHCP_PROBE_START__c"),
+            "c"
+        );
+        assert_eq!(current_run("no marker"), "no marker");
+    }
+
+    fn log_frame(text: &str) -> Vec<u8> {
+        let mut frame = vec![1, 0, 0, 0];
+        frame.extend_from_slice(&(text.len() as u32).to_be_bytes());
+        frame.extend_from_slice(text.as_bytes());
+        frame
+    }
+
+    // What: the probe container runs once, output returns.
+    // Why: the proxy allows only stop, start, wait, logs.
+    #[tokio::test]
+    async fn the_dhcp_probe_container_runs_stop_start_wait_logs() {
+        let logs = log_frame("old\n__LANCACHE_DHCP_PROBE_START__\nresult\n");
+        let (base, server) = serve_canned(vec![
+            (204, vec![]),
+            (204, vec![]),
+            (200, br#"{"StatusCode":0}"#.to_vec()),
+            (200, logs),
+        ]);
+        let output = run_dhcp_probe(&DockerProxy::new(&base)).await.unwrap();
+        assert_eq!(output, "\nresult\n");
+        let seen = server.join().unwrap();
+        let heads: Vec<&str> = seen.iter().filter_map(|r| r.lines().next()).collect();
+        assert_eq!(
+            heads[0],
+            "POST /containers/lancache-dhcp-probe/stop?t=10 HTTP/1.1"
+        );
+        assert_eq!(
+            heads[1],
+            "POST /containers/lancache-dhcp-probe/start HTTP/1.1"
+        );
+        assert_eq!(
+            heads[2],
+            "POST /containers/lancache-dhcp-probe/wait?condition=not-running HTTP/1.1"
+        );
+        assert!(
+            heads[3]
+                .starts_with("GET /containers/lancache-dhcp-probe/logs?stdout=1&stderr=1&since=")
+        );
+        let (base, _server) = serve_canned(vec![
+            (404, vec![]),
+            (204, vec![]),
+            (200, br#"{"StatusCode":3}"#.to_vec()),
+            (200, log_frame(" boom \n")),
+        ]);
+        let failed = run_dhcp_probe(&DockerProxy::new(&base)).await.unwrap_err();
+        assert_eq!(failed, "DHCP probe container exited with code 3: boom");
+        let (base, _server) = serve_canned(vec![(500, vec![])]);
+        let stop = run_dhcp_probe(&DockerProxy::new(&base)).await.unwrap_err();
+        assert!(
+            stop.starts_with("Failed to execute DHCP check: Failed to stop"),
+            "{stop}"
+        );
+        let (base, _server) = serve_canned(vec![(204, vec![]), (204, vec![]), (500, vec![])]);
+        let wait = run_dhcp_probe(&DockerProxy::new(&base)).await.unwrap_err();
+        assert!(
+            wait.starts_with("Failed to execute DHCP check: read DHCP probe wait response:"),
+            "{wait}"
+        );
+        let (base, _server) = serve_canned(vec![
+            (204, vec![]),
+            (204, vec![]),
+            (200, br#"{"StatusCode":0}"#.to_vec()),
+            (500, vec![]),
+        ]);
+        let logs = run_dhcp_probe(&DockerProxy::new(&base)).await.unwrap_err();
+        assert!(
+            logs.starts_with("Failed to execute DHCP check: read DHCP probe logs:"),
+            "{logs}"
+        );
+    }
+
+    // What: the resize refusal names the largest size.
+    // Why: the operator needs a value that would pass.
+    #[test]
+    fn resize_refusals_name_the_largest_size() {
+        assert_eq!(
+            resize_rejection("/cache", 50, 10 * 1024),
+            "50 GB would not leave a safety buffer at /cache (only 10 GB free there). \
+             The largest value that currently passes is 8 GB."
+        );
+        assert_eq!(
+            resize_rejection("/cache", 5, 1000),
+            "Not enough free space at /cache for any cache size with a safety buffer (only 0 GB \
+             free there). Free up disk space or choose a smaller size."
+        );
+        assert!(is_valid_ui_channel("stable") && is_valid_ui_channel("nightly"));
+        for bad in ["edge", "latest", "", "Stable", "sha-1"] {
+            assert!(!is_valid_ui_channel(bad), "{bad:?}");
+        }
+    }
+
+    // What: a registration token is long enough in chars.
+    // Why: this token alone gates remote registration.
+    #[test]
+    fn registration_tokens_need_thirty_two_characters() {
+        let dir = unique_temp_dir("token-len");
+        let file = dir.join("t").to_string_lossy().into_owned();
+        let exact = "k".repeat(32);
+        assert_eq!(registration_token(&exact, &file), Ok(exact));
+        let short = registration_token(&"k".repeat(31), &file).unwrap_err();
+        assert!(
+            short.starts_with("SECONDARY_REGISTRATION_TOKEN is only 31 character(s)"),
+            "{short}"
+        );
+        assert!(short.contains("minimum of 32"));
+        let wide = "é".repeat(32);
+        assert_eq!(registration_token(&wide, &file), Ok(wide));
+        assert!(registration_token(&"é".repeat(31), &file).is_err());
+        assert!(!Path::new(&file).exists(), "a real token creates no file");
+        fs::write(&file, "short").unwrap();
+        let kept = registration_token("", &file).unwrap_err();
+        assert!(kept.contains("only 5 character(s)"), "{kept}");
+        fs::write(&file, "CHANGE_ME_x").unwrap();
+        let placeholder = registration_token("", &file).unwrap_err();
+        assert!(
+            placeholder.starts_with("secondary registration token:"),
+            "{placeholder}"
+        );
+        assert!(placeholder.contains("placeholder; delete"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: start-up refuses half-set or missing auth.
+    // Why: a half-set pair would run without a login.
+    #[test]
+    fn preflight_requires_auth_or_an_explicit_opt_out() {
+        let with = |extra: &[(&str, &str)]| {
+            let mut env = nats_env();
+            for (key, value) in extra {
+                env.insert(key.to_string(), value.to_string());
+            }
+            preflight(&load_from(&env).unwrap())
+        };
+        let both = [("UI_AUTH_USER", "admin"), ("UI_AUTH_PASSWORD", "pw")];
+        assert_eq!(with(&both), Ok(Duration::from_secs(3600)));
+        assert_eq!(
+            with(&[("ALLOW_INSECURE_UI", "true")]),
+            Ok(Duration::from_secs(3600))
+        );
+        let missing = with(&[("ALLOW_INSECURE_UI", "false")]).unwrap_err();
+        assert!(
+            missing.starts_with("Admin-UI authentication is required. Set UI_AUTH_USER"),
+            "{missing}"
+        );
+        for half in [("UI_AUTH_USER", "admin"), ("UI_AUTH_PASSWORD", "pw")] {
+            let err = with(&[half, ("ALLOW_INSECURE_UI", "true")]).unwrap_err();
+            assert!(
+                err.starts_with("UI_AUTH_USER and UI_AUTH_PASSWORD must either both be set"),
+                "{err}"
+            );
+        }
+        let broken =
+            with(&[("NATS_UI_USER", "bad user"), ("ALLOW_INSECURE_UI", "true")]).unwrap_err();
+        assert!(
+            broken.starts_with("Invalid NATS UI credentials"),
+            "{broken}"
+        );
+    }
+
+    // What: the dirs the ui writes follow its own config.
+    // Why: chown follows the configured paths, no 2nd list.
+    #[test]
+    fn written_dirs_follow_the_configured_paths() {
+        let mut env = nats_env();
+        let paths = [
+            ("CDN_DOMAINS_FILE", "/a/cdn.txt"),
+            ("NETDATA_ALARMS_FILE", "/b/alarms.json"),
+            ("NATS_XKEY_SEED_PATH", "/c/xkey"),
+            ("DESIRED_STATE_FILE", "/a/desired.json"),
+            ("NATS_CONF_PATH", "/d/nats.conf"),
+            ("NATS_AUTH_CALLOUT_PATH", "/d/auth.conf"),
+            ("DNS_STANDARD_STATE_DIR", "/s1"),
+            ("DNS_SSL_STATE_DIR", "/s2"),
+        ];
+        for (key, value) in paths {
+            env.insert(key.to_string(), value.to_string());
+        }
+        let cfg = load_from(&env).unwrap();
+        let dirs = ui_written_dirs(&cfg, Path::new("/l/ui.log"));
+        let want: Vec<PathBuf> = ["/a", "/b", "/c", "/d", "/l", "/s1", "/s2"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        assert_eq!(dirs, want);
+        let bare = ui_written_dirs(&cfg, Path::new("ui.log"));
+        assert_eq!(bare.len(), 6);
+    }
+
+    // What: ownership and modes are set on a log tree.
+    // Why: the shared log reader gid must keep read access.
+    #[test]
+    fn log_dirs_open_to_the_group_without_following_links() {
+        let dir = unique_temp_dir("chown");
+        let own = fs::metadata(&dir).unwrap();
+        let (uid, gid) = (own.uid(), own.gid());
+        fs::create_dir(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub/f"), "x").unwrap();
+        chown_tree(&dir, uid, gid).unwrap();
+        assert_eq!(fs::metadata(dir.join("sub/f")).unwrap().gid(), gid);
+        assert!(chown_tree(&dir.join("missing"), uid, gid).is_err());
+        let logs = dir.join("logs");
+        fs::create_dir(&logs).unwrap();
+        fs::write(logs.join("a.log"), "x").unwrap();
+        fs::set_permissions(logs.join("a.log"), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::create_dir(logs.join("inner")).unwrap();
+        open_log_dir_to_group(&logs, gid).unwrap();
+        assert_eq!(
+            fs::metadata(&logs).unwrap().permissions().mode() & 0o7777,
+            0o2775
+        );
+        assert_eq!(
+            fs::metadata(logs.join("a.log"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640
+        );
+        assert_eq!(fs::metadata(logs.join("a.log")).unwrap().gid(), gid);
+        assert_ne!(
+            fs::metadata(logs.join("inner"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o2775
+        );
+        assert!(open_log_dir_to_group(&dir.join("missing"), gid).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: files are written only when they differ.
+    // Why: reruns on every start must write nothing.
+    #[test]
+    fn prepared_files_are_written_once() {
+        let dir = unique_temp_dir("put");
+        let file = dir.join("conf");
+        put(&file, "one", 0o600, None).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "one");
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        put(&file, "two", 0o644, None).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "two");
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        let stub = dir.join("stub");
+        create_if_absent(&stub, 0o644, None).unwrap();
+        assert_eq!(fs::read_to_string(&stub).unwrap(), "");
+        fs::write(&stub, "mine").unwrap();
+        create_if_absent(&stub, 0o644, None).unwrap();
+        assert_eq!(fs::read_to_string(&stub).unwrap(), "mine");
+        std::os::unix::fs::symlink("/nowhere", dir.join("dangling")).unwrap();
+        create_if_absent(&dir.join("dangling"), 0o644, None).unwrap();
+        assert!(!dir.join("nowhere").exists());
+        fs::write(dir.join("plain"), "x").unwrap();
+        let blocked = put(&dir.join("plain/child"), "x", 0o644, None).unwrap_err();
+        assert!(blocked.starts_with("cannot write "), "{blocked}");
+        let stat = create_if_absent(&dir.join("plain/child"), 0o644, None).unwrap_err();
+        assert!(
+            stat.starts_with("cannot stat ") || stat.starts_with("cannot write "),
+            "{stat}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: the secondaries DB is created and upgraded.
+    // Why: old installs lack columns; additive changes.
+    // From: Issue #583
+    #[test]
+    fn the_database_is_created_and_upgraded() {
+        let dir = unique_temp_dir("db");
+        let path = dir.join("ui.db").to_string_lossy().into_owned();
+        let columns = |conn: &Connection| -> Vec<String> {
+            let mut stmt = conn.prepare("PRAGMA table_info(secondaries)").unwrap();
+            stmt.query_map([], |row| row.get(1))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let want = [
+            "name",
+            "nats_token",
+            "consumer_name",
+            "registered_at",
+            "last_seen",
+            "nats_user",
+            "nats_password_hash",
+            "address",
+        ];
+        let conn = open_database(&path).unwrap();
+        assert_eq!(columns(&conn), want);
+        drop(conn);
+        let conn = open_database(&path).unwrap();
+        assert_eq!(columns(&conn), want);
+        let insert = |name: &str, user: Option<&str>| {
+            conn.execute(
+                "INSERT INTO secondaries (name, nats_token, consumer_name, registered_at, nats_user) VALUES (?1, 't', ?1, 1, ?2)",
+                rusqlite::params![name, user],
+            )
+        };
+        insert("a", Some("u1")).unwrap();
+        assert!(
+            insert("b", Some("u1")).is_err(),
+            "one NATS identity per row"
+        );
+        insert("c", None).unwrap();
+        insert("d", None).unwrap();
+        let old = dir.join("old.db").to_string_lossy().into_owned();
+        let legacy = Connection::open(&old).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE secondaries (name TEXT PRIMARY KEY, nats_token TEXT NOT NULL, consumer_name TEXT NOT NULL UNIQUE, registered_at INTEGER NOT NULL, last_seen INTEGER);
+                 INSERT INTO secondaries VALUES ('old', 'tok', 'cons', 5, NULL);",
+            )
+            .unwrap();
+        drop(legacy);
+        let upgraded = open_database(&old).unwrap();
+        assert_eq!(columns(&upgraded), want);
+        let kept: String = upgraded
+            .query_row(
+                "SELECT nats_token FROM secondaries WHERE name='old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, "tok");
+        assert!(open_database("/no/such/dir/ui.db").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: the issuer and xkey come from seed or file.
+    // Why: a restart must not rotate either of them.
+    // From: Issue #583
+    #[test]
+    fn nats_keys_come_from_a_seed_or_a_persisted_file() {
+        let dir = unique_temp_dir("keys");
+        let mut env = nats_env();
+        let issuer_file = dir.join("issuer.seed").to_string_lossy().into_owned();
+        let xkey_file = dir.join("xkey.seed").to_string_lossy().into_owned();
+        env.insert("NATS_ISSUER_SEED_PATH".to_string(), issuer_file.clone());
+        env.insert("NATS_XKEY_SEED_PATH".to_string(), xkey_file.clone());
+        let cfg = load_from(&env).unwrap();
+        let first = issuer_keypair(&cfg).unwrap();
+        assert!(first.public_key().starts_with('A'));
+        assert_eq!(
+            issuer_keypair(&cfg).unwrap().public_key(),
+            first.public_key()
+        );
+        assert_eq!(
+            fs::read_to_string(&issuer_file).unwrap(),
+            first.seed().unwrap()
+        );
+        let xkey = callout_xkey(&cfg).unwrap();
+        assert!(xkey.public_key().starts_with('X'));
+        assert_eq!(callout_xkey(&cfg).unwrap().public_key(), xkey.public_key());
+        let seeded = KeyPair::new_account();
+        env.insert("NATS_ISSUER_SEED".to_string(), seeded.seed().unwrap());
+        let x_seeded = XKey::new();
+        env.insert("NATS_XKEY_SEED".to_string(), x_seeded.seed().unwrap());
+        let cfg = load_from(&env).unwrap();
+        assert_eq!(
+            issuer_keypair(&cfg).unwrap().public_key(),
+            seeded.public_key()
+        );
+        assert_eq!(
+            callout_xkey(&cfg).unwrap().public_key(),
+            x_seeded.public_key()
+        );
+        env.insert("NATS_ISSUER_SEED".to_string(), "junk".to_string());
+        env.insert("NATS_XKEY_SEED".to_string(), "junk".to_string());
+        let cfg = load_from(&env).unwrap();
+        assert!(
+            issuer_keypair(&cfg)
+                .unwrap_err()
+                .starts_with("NATS_ISSUER_SEED is not a valid NKey seed:")
+        );
+        assert!(
+            callout_xkey(&cfg)
+                .err()
+                .unwrap()
+                .starts_with("NATS_XKEY_SEED is not a valid NKey seed:")
+        );
+        env.remove("NATS_ISSUER_SEED");
+        env.remove("NATS_XKEY_SEED");
+        fs::write(&issuer_file, "junk").unwrap();
+        fs::write(&xkey_file, "junk").unwrap();
+        let cfg = load_from(&env).unwrap();
+        assert!(
+            issuer_keypair(&cfg)
+                .unwrap_err()
+                .contains("issuer NKey seed at")
+        );
+        assert!(callout_xkey(&cfg).err().unwrap().contains("xkey seed at"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }
