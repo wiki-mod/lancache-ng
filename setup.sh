@@ -2524,6 +2524,15 @@ require_env_value_for_update() {
         || die "$key is missing or empty in $env_file. Set it before running setup.sh update."
 }
 
+# What: IP_STANDARD and IP_SSL are two valid, distinct IPv4s
+# Why: dns-standard and dns-ssl bind apart (AG-SETUP-001)
+# From: Issue #1683 | PR #1858
+require_separate_lan_ips() {
+    is_valid_ipv4 "$1" || die "IP_STANDARD is not a valid IPv4 address: $1"
+    is_valid_ipv4 "$2" || die "IP_SSL is not a valid IPv4 address: $2"
+    [[ "$1" != "$2" ]] || die "Standard IP and SSL IP must be different."
+}
+
 # Generates and stores a secret for key only if it doesn't already hold a
 # usable (non-placeholder) value — a thin wrapper combining
 # env_key_has_usable_secret + generate_secret_value for the common
@@ -3420,6 +3429,9 @@ migrate_env_for_update() (
     # Why: prod always runs dns-ssl on it (AG-SETUP-001)
     # From: Issue #1683 | PR #1858
     require_env_value_for_update IP_SSL "$env_file"
+    ip_standard=$(get_env_var IP_STANDARD "$env_file") || exit $?
+    ip_ssl=$(get_env_var IP_SSL "$env_file") || exit $?
+    require_separate_lan_ips "$ip_standard" "$ip_ssl"
 
     # Resolve, verify, and persist the image registry/prefix/channel/tag
     # before any other .env mutation below (#665). This used to run after
@@ -6966,8 +6978,7 @@ cmd_update_ip() {
         print_error "Invalid IPv4 address: $new_ip_ssl"
     done
 
-    [[ "$new_ip_standard" != "$new_ip_ssl" ]] \
-        || die "Standard IP and SSL IP must be different."
+    require_separate_lan_ips "$new_ip_standard" "$new_ip_ssl"
 
     printf "\n"
     printf "  ${BOLD}New configuration:${RESET}\n"
@@ -7674,8 +7685,7 @@ while true; do
     is_valid_ipv4 "$IP_SSL" && break
     print_error "Invalid IPv4 address: $IP_SSL"
 done
-[[ "$IP_STANDARD" != "$IP_SSL" ]] \
-    || die "Standard IP and SSL IP must be different."
+require_separate_lan_ips "$IP_STANDARD" "$IP_SSL"
 # What: IP_SSL goes on IP_STANDARD's device and prefix
 # Why: same link and subnet; no guessed device or mask
 # From: Issue #1683 | PR #1858

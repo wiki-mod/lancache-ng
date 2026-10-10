@@ -1026,6 +1026,28 @@ CASES
     _expect dropped 1 "[CI-ERROR-CHECK-0169];${svc}: Dockerfile stage;without ARG ${var}" || return 1
 }
 
+# What: stubs let cargo load every member; undeclared stops
+# Why: rust builder stages copy only the members' manifests
+# From: Issue #1683 | PR #1905
+@test "rust member stubs: every member loads, an undeclared one stops" {
+    local root d m out pick
+    local -a ms
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" d="$(_val path)"
+    out="$(cd "${root}" && _ci_cargo_members Cargo.toml)" || return 1
+    mapfile -t ms <<< "${out}"
+    [ -n "${ms[0]}" ] || { echo "no workspace members"; return 1; }
+    mkdir -p "${d}" && cp "${root}/Cargo.toml" "${d}/" || return 1
+    for m in "${ms[@]}"; do mkdir -p "${d}/${m}" && cp "${root}/${m}/Cargo.toml" "${d}/${m}/" || return 1; done
+    run bash -c 'cd "$1" && source "$2" && _ci_rust_member_stubs > stubs.txt && cargo metadata --no-deps --offline --format-version 1 > meta.json' _ "${d}" "${CI_SH}"
+    [ "${status}" -eq 0 ] && [ "$(jq '.workspace_members | length' "${d}/meta.json")" -eq "${#ms[@]}" ] \
+        || { echo "load: rc ${status}: ${output}"; return 1; }
+    pick="${ms[$(( SRANDOM % ${#ms[@]} ))]}"
+    awk '/^\[\[bin\]\]|^\[lib\]/ { s = 1; next } /^\[/ { s = 0 } !s' "${d}/${pick}/Cargo.toml" > "${d}/manifest.new" \
+        && mv "${d}/manifest.new" "${d}/${pick}/Cargo.toml" || return 1
+    run bash -c 'cd "$1" && source "$2" && _ci_rust_member_stubs' _ "${d}" "${CI_SH}"
+    _expect undeclared 2 "[CI-ERROR-RUSTBUILD-0049] member=\"${pick}\"" || return 1
+}
+
 # What: per row: runner env -> proxy env, names, CA bundle.
 # Why: AG-CI-009: self-hosted proxy only, CA job-local.
 # From: Issue #1683 | PR #1858
@@ -1929,6 +1951,44 @@ CASES
     _expect lock-dir 2 "[CI-ERROR-SCAN-0013]" || return 1
 }
 
+# What: the scan argv passes the pinned trivy's flag parser
+# Why: a stub took --trivyignores; the real trivy refused it
+# From: Issue #1683 | PR #1858
+@test "trivy scan argv: the pinned trivy accepts every flag" {
+    local root out skip
+    local -a a
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    for skip in 0 1; do
+        out="$(CI_REPO_ROOT="${root}" CI_TRIVY_TIMEOUT="$(_val int 1 9)m" _ci_trivy_args "$(_val path)" "${skip}")" || return 1
+        mapfile -t a <<< "${out}"
+        [ "${a[0]} ${a[1]}" = "trivy image" ] || { echo "argv: ${a[*]}"; return 1; }
+        run "${a[@]}" --help
+        [ "${status}" -eq 0 ] && [[ "${output}" != *"unknown flag"* ]] \
+            || { echo "skip ${skip}: ${a[*]}: rc ${status}: $(grep -m 1 -i -E 'error|unknown' <<< "${output}")"; return 1; }
+    done
+    [[ " ${a[*]} " == *" --ignorefile ${root}/"* && " ${a[*]} " == *" --skip-db-update "* ]] \
+        || { echo "argv lacks the ignore file or skip-db-update: ${a[*]}"; return 1; }
+}
+
+# What: each scan status gets its own code and exit code
+# Why: a run, DB or setup failure never reads as a finding
+# From: Issue #1683 | PR #1858
+@test "scan outcome: every trivy scan status has its own code" {
+    local svc raw st rc want odd
+    svc="$(_val name)" raw="$(_val name)" odd="$(_val int 5 99)"
+    while IFS='|' read -r st rc want; do
+        run _ci_scan_outcome "${svc}" "${st}" "${raw}"
+        _expect "status-${st}" "${rc}" "${want}" || return 1
+    done <<ROWS
+0|0|=
+1|2|[CI-ERROR-SCAN-0005] service="${svc}" reason="scan reported findings";${raw}
+3|3|[CI-ERROR-SCAN-0006] service="${svc}";${raw}
+4|3|[CI-ERROR-SCAN-0021] service="${svc}" reason="trivy run failed without a report;${raw}
+2|2|[CI-ERROR-SCAN-0022] service="${svc}" rc=2;${raw}
+${odd}|2|[CI-ERROR-SCAN-0022] service="${svc}" rc=${odd};${raw}
+ROWS
+}
+
 # What: one artifact state: ledger record + registry answer
 # Why: the real resolver reads both; no state is injected
 # From: Issue #1683 | PR #1858
@@ -2258,21 +2318,29 @@ CASES
     cmp -s "${d}/env.run1" "${d}/.env" || { echo "broken: run 2 changed .env"; return 1; }
 }
 
-@test "migrate_env_for_update refuses an empty IP_SSL before any write" {
+# What: an unusable IP_SSL stops the update; .env untouched
+# Why: dns-ssl binds IP_SSL apart (AG-SETUP-001, AG-OP-010)
+# From: Issue #1683 | PR #1858
+@test "migrate_env_for_update refuses an unusable IP_SSL before any write" {
     _stand_ins || return 1
-    # What: empty IP_SSL stops the update; .env untouched
-    # Why: prod binds dns-ssl to IP_SSL (AG-SETUP-001)
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}/nossl"
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    mkdir -p "${t}" && _legacy_env "${t}/.env"
-    set_env_key IP_SSL "" "${t}/.env"
-    cp "${t}/.env" "${t}/.env.before"
-    export CONV="${t}"
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"; echo unreached'
-    [ "${status}" -eq 1 ] && [[ "${output}" == *"IP_SSL is missing or empty in ${t}/.env"* && "${output}" != *unreached* ]] \
-        && cmp -s "${t}/.env.before" "${t}/.env" || { echo "empty IP_SSL: ${output}"; return 1; }
+    local t name val msg bad
+    _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
+    bad="$(_val host)"
+    while IFS='|' read -r name val msg; do
+        t="${BATS_TEST_TMPDIR}/${name}"
+        mkdir -p "${t}" && _legacy_env "${t}/.env" || return 1
+        [ "${val}" != @STD@ ] || val="$(get_env_var IP_STANDARD "${t}/.env")"
+        set_env_key IP_SSL "${val}" "${t}/.env"
+        cp "${t}/.env" "${t}/.env.before"
+        export CONV="${t}"
+        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"; echo unreached'
+        [ "${status}" -eq 1 ] && [[ "${output}" == *"${msg}"* && "${output}" != *unreached* ]] \
+            && cmp -s "${t}/.env.before" "${t}/.env" || { echo "${name}: rc ${status}: ${output}"; return 1; }
+    done <<ROWS
+empty||IP_SSL is missing or empty in ${BATS_TEST_TMPDIR}/empty/.env
+equal|@STD@|Standard IP and SSL IP must be different.
+invalid|${bad}|IP_SSL is not a valid IPv4 address: ${bad}
+ROWS
 }
 
 @test "production_state_root_default keeps deploy/prod state out of the checkout" {
