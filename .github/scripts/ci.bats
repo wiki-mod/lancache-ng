@@ -381,24 +381,6 @@ _docker_stub() {
     _tool_stub "$1" docker <<'STUB'
 : "${DS:?the docker stub needs DS, its state dir}"
 printf '%s\n' "$*" >> "${DS}/docker.log"
-[ "$1" != login ] || printf 'stdin-sha256=%s\n' "$(sha256sum | cut -d' ' -f1)" >> "${DS}/docker.log"
-if [ -s "${DS}/answers" ]; then
-    n=0
-    while IFS=$'\x1f' read -r glob rc out err times; do
-        n=$(( n + 1 ))
-        [[ " $* " == ${glob} ]] || continue
-        used=0
-        [ ! -e "${DS}/answer-used-${n}" ] || used="$(cat "${DS}/answer-used-${n}")"
-        [ -z "${times}" ] || [ "${used}" -lt "${times}" ] || continue
-        used=$(( used + 1 ))
-        echo "${used}" > "${DS}/answer-used-${n}"
-        out="${out//%CALL%/${used}}"
-        [ -z "${out}" ] || printf '%b\n' "${out}"
-        [ -z "${err}" ] || printf '%b\n' "${err}" >&2
-        exit "${rc}"
-    done < "${DS}/answers"
-fi
-[ ! -e "${DS}/fail-$1" ] || { echo "docker $1: ${FAULT:?a failure injection needs FAULT}" >&2; exit 1; }
 here="$(dirname "$(readlink -f "$0")")" || exit 1
 case "$1" in
     --version) echo 'docker CLI (test stub)' ;;
@@ -408,27 +390,23 @@ case "$1" in
         shift
         while :; do case "${1:-}" in --env-file|-f|-p|--profile) shift 2 ;; *) break ;; esac; done
         case "$1" in
-            config) [ ! -e "${DS}/fail-config" ] || { echo "compose config: ${FAULT:?a failure injection needs FAULT}" >&2; exit 1; }
-                [ ! -e "${DS}/fail-config-after-up" ] || [ ! -e "${DS}/running" ] \
+            config) [ ! -e "${DS}/fail-config-after-up" ] || [ ! -e "${DS}/running" ] \
                     || { echo "compose config: ${FAULT:?a failure injection needs FAULT}" >&2; exit 1; }
                 exec "$(cat "${here}/docker-real")" "${all[@]}" ;;
             ps) case "${2:-}" in
                     --all) ;;
-                    -a) [ ! -e "${DS}/running" ] || [ -e "${DS}/gone-${!#}" ] || echo "${DS##*/}-${!#}" ;;
+                    -a) [ ! -e "${DS}/running" ] || echo "${DS##*/}-${!#}" ;;
                     -q) [ ! -e "${DS}/running" ] || echo "${DS##*/}" ;;
-                    *) echo "${DS##*/} ${STUB_SECRET:-}" ;;
+                    *) echo "${DS##*/}" ;;
                 esac ;;
-            stop|down) rm -f "${DS}/running" ;;
+            stop) rm -f "${DS}/running" ;;
             up) [ ! -e "${DS}/fail-apply" ] || case " $* " in
                     *" --remove-orphans "*) echo "compose up: ${FAULT:?a failure injection needs FAULT}" >&2; exit 1 ;;
                 esac
                 printf '%s\n' "${all[@]:0:${#all[@]}-$#}" > "${DS}/running" ;;
             pull) ;;
-            exec) shift; [ "$1" != -T ] || shift; shift
-                [ ! -e "${DS}/pdns-api-key" ] || PDNS_API_KEY="$(cat "${DS}/pdns-api-key")" exec "$@"
-                exec "$@" ;;
             images) echo '[]' ;;
-            logs) echo "${!#} ${STUB_SECRET:-}" ;;
+            logs) echo "${!#}" ;;
             version) echo 'docker compose (test stub)' ;;
             *) echo "unexpected docker compose call: $*" >&2; exit 97 ;;
         esac ;;
@@ -436,11 +414,8 @@ case "$1" in
         case "$2" in
             ls) ls -1 "${DS}/volumes" ;;
             create) mkdir -p "${DS}/volumes/$3" ;;
-            rm) shift 2; for v in "$@"; do [ "${v}" = -f ] || rm -rf "${DS:?}/volumes/${v}"; done ;;
             *) echo "unexpected docker volume call: $*" >&2; exit 97 ;;
         esac ;;
-    login) ;;
-    push) ;;
     run)
         shift
         maps=("/tmp=$(mktemp -d "${DS}/run.XXXXXX")") ep=()
@@ -463,23 +438,12 @@ case "$1" in
             args+=("${a}")
         done
         exec "${ep[@]}" "${args[@]}" ;;
-    ps) [ ! -e "${DS}/foreign" ] || cut -d' ' -f1 "${DS}/foreign" ;;
-    inspect) svc="${!#}"; svc="${svc#"${DS##*/}"-}"
+    ps) ;;
+    inspect)
         case "$3" in
-            *State.Health*)
-                if [ -e "${DS}/health-${svc}" ]; then
-                    h="$(head -n 1 "${DS}/health-${svc}")"
-                    [ "$(wc -l < "${DS}/health-${svc}")" -le 1 ] || sed -i 1d "${DS}/health-${svc}"
-                    [ "${h}" = none ] || echo "${h}"
-                elif [ -e "${DS}/running" ]; then echo healthy; fi ;;
-            *State.Status*)
-                if [ -e "${DS}/status-${svc}" ]; then cat "${DS}/status-${svc}"
-                elif [ -e "${DS}/running" ]; then echo running; else echo exited; fi ;;
-            *RestartPolicy*) if [ -e "${DS}/restart-${svc}" ]; then cat "${DS}/restart-${svc}"; else echo unless-stopped; fi ;;
-            *ExitCode*) if [ -e "${DS}/exitcode-${svc}" ]; then cat "${DS}/exitcode-${svc}"; else echo 0; fi ;;
-            *) [ ! -e "${DS}/foreign" ] || awk -v id="${!#}" '$1 == id { print $2 }' "${DS}/foreign" ;;
+            *State.Health*) [ ! -e "${DS}/running" ] || echo healthy ;;
+            *) echo "unexpected docker inspect call: $*" >&2; exit 97 ;;
         esac ;;
-    logs) echo "${!#} log ${STUB_SECRET:-}" ;;
     port) svc="$2"; svc="${svc#"${DS##*/}"-}"
         mapfile -t up < "${DS}/running"
         json="$("$(cat "${here}/docker-real")" "${up[@]}" config --format json)" || exit 1
@@ -493,20 +457,13 @@ case "$1" in
     buildx)
         case "$2" in
             version) echo 'docker buildx (test stub)' ;;
-            build) ;;
             imagetools)
-                [ ! -e "${DS}/inspect-fail" ] || { echo "ERROR: ${FAULT:?a failure injection needs FAULT}" >&2; exit 1; }
                 case "$*" in
                     *"{{.Manifest.Digest}}"*)
                         [ -e "${DS}/digest" ] || { echo "ERROR: $4: not found" >&2; exit 1; }
-                        n=1; [ ! -e "${DS}/inspect-calls" ] || n=$(( $(cat "${DS}/inspect-calls") + 1 ))
-                        echo "${n}" > "${DS}/inspect-calls"
-                        [ ! -e "${DS}/digest-flip" ] || [ "${n}" != "$(cut -d' ' -f1 "${DS}/digest-flip")" ] \
-                            || cut -d' ' -f2 "${DS}/digest-flip" > "${DS}/digest"
                         cat "${DS}/digest" ;;
-                    *--format*) [ ! -e "${DS}/single-platform" ] || cat "${DS}/single-platform" ;;
-                    *) pf="${here}/docker-platforms"; [ ! -e "${DS}/published" ] || pf="${DS}/published"
-                        echo 'Manifests:'; awk '{ print "  Platform:    " $0 }' "${pf}" ;;
+                    *--format*) ;;
+                    *) echo 'Manifests:'; awk '{ print "  Platform:    " $0 }' "${here}/docker-platforms" ;;
                 esac ;;
             *) echo "unexpected docker buildx call: $*" >&2; exit 97 ;;
         esac ;;
@@ -524,17 +481,9 @@ STUB
     # Why: the update health gate resolves one CDN name
     # From: Issue #1683 | PR #1858
     _tool_stub "$1" dig <<'STUB'
-[ ! -e "${DS}/no-answer" ] || exit 0
 for a in "$@"; do case "${a}" in @*) server="${a#@}" ;; esac; done
 echo "${server:?the dig stub needs @server}"
 STUB
-}
-
-# What: script one docker answer: glob, rc, out, err, times
-# Why: the one stand-in answers any call; first match wins
-# From: Issue #1683 | PR #1858
-_docker_answer() {
-    printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$1" "$2" "${3:-}" "${4:-}" "${5:-}" >> "${DS}/answers"
 }
 
 # What: docker compose on the real deploy/prod files
@@ -1977,24 +1926,6 @@ ${odd}|2|[CI-ERROR-SCAN-0022] service="${svc}" rc=${odd};${raw}
 ROWS
 }
 
-# What: one artifact state: ledger record + registry answer
-# Why: the real resolver reads both; no state is injected
-# From: Issue #1683 | PR #1858
-_artifact() {
-    local state="$1" svc="$2" plat="$3" dig="$4" id tag
-    id="$(_ci_identity_for "${svc}" "${plat}")" && tag="$(_ci_image_tag "${svc}" "${plat}" "${id}")" || return 1
-    case "${state}" in
-        PRESENT_ACCEPTED|MISMATCH) _ci_ledger_append origin "${id}" "${svc}" "${plat}" ACCEPTED "${dig}" > /dev/null || return 1 ;;
-    esac
-    case "${state}" in
-        PRESENT_ACCEPTED|PRODUCED_UNVERIFIED) _docker_answer " buildx imagetools inspect ${tag} --format *" 0 "${dig}" ;;
-        MISMATCH) _docker_answer " buildx imagetools inspect ${tag} --format *" 0 "$(_val digest)" ;;
-        MISSING_CONFIRMED) _docker_answer " buildx imagetools inspect ${tag} --format *" 1 '' "ERROR: ${tag}: not found" ;;
-        UNKNOWN) _docker_answer " buildx imagetools inspect ${tag} --format *" 1 '' "denied: $(_val name)" ;;
-        *) echo "_artifact: unknown state ${state}" >&2; return 1 ;;
-    esac
-}
-
 # =========================================================
 # VERSION MANAGEMENT
 # =========================================================
@@ -2310,7 +2241,6 @@ CASES
 # Why: dns-ssl binds IP_SSL apart (AG-SETUP-001, AG-OP-010)
 # From: Issue #1683 | PR #1858
 @test "migrate_env_for_update refuses an unusable IP_SSL before any write" {
-    _stand_ins || return 1
     local t name val msg bad
     _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
     bad="$(_val host)"
@@ -2321,7 +2251,7 @@ CASES
         set_env_key IP_SSL "${val}" "${t}/.env"
         cp "${t}/.env" "${t}/.env.before"
         export CONV="${t}"
-        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"; echo unreached'
+        _setup_sh_run 'migrate_env_for_update "${CONV}"; echo unreached'
         [ "${status}" -eq 1 ] && [[ "${output}" == *"${msg}"* && "${output}" != *unreached* ]] \
             && cmp -s "${t}/.env.before" "${t}/.env" || { echo "${name}: rc ${status}: ${output}"; return 1; }
     done <<ROWS
