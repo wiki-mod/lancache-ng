@@ -1,25 +1,13 @@
 #!/bin/bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# Guided lifecycle CLI for a lancache-ng installation. Subcommands: install
-# (interactive first-time setup — installs Docker/Compose if missing on
-# Debian/Ubuntu/RHEL-family hosts, writes .env with generated secrets,
-# configures DHCP mode/cache sizing/DNS IPs, enables the systemd
-# service+converge timer, and starts the stack), update, update-ip, debug,
-# create-logs-for-issue (bundles redacted logs/config for a GitHub bug
-# report), secondary (register/rotate a secondary DNS node against a
-# primary), backup, and restore. Also hosts the shared .env helpers
-# (read/write/generate secret values, validate CIDR/DHCP-mode input) reused
-# by the secondary registration flow.
-# Usage: ./setup.sh [command] [install-dir]
+# What: lifecycle CLI; subcommands dispatched at file end
+# Why: .env helpers are shared with secondary registration
 set -euo pipefail
 export LANG=C LC_ALL=C
 
-# Keep the normal installer as the production path: collect runtime settings,
-# generate or preserve secrets, write the quickstart .env/compose files, pull
-# prebuilt images, and start the stack. Development-only behavior belongs behind
-# an explicit future opt-in path, not inside the default first-user flow.
+# What: normal install path is the production profile
+# Why: development-only behaviour needs an explicit opt-in
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 PROD_COMPOSE="$SCRIPT_DIR/deploy/prod/docker-compose.yml"
 # What: helper container image; require_helper_image sets it
@@ -60,46 +48,19 @@ print_error(){ printf "  ${RED}✗${RESET} %s\n" "$*" >&2; }
 die()        { print_error "$*"; exit 1; }
 
 REPLY=""
-# Issue #1176: set by the `list-prompts` subcommand (never by an operator
-# directly) to redirect every ask()/confirm() call in the install wizard into
-# introspection mode instead of its normal interactive behavior -- see
-# wizard_introspect_record_prompt's own comment for what that mode does and
-# why it exists as one shared helper rather than a second, hand-duplicated
-# copy of the wizard's prompt text.
+# What: list-prompts makes ask()/confirm() record prompts
+# Why: one shared recorder keeps the prompt walk in sync
 WIZARD_INTROSPECT_MODE=0
-# fd 9 is reserved for `list-prompts`' optional answers file (opened once via
-# `exec 9<...` where the subcommand is dispatched); unset/empty means no
-# answers file was given, so every prompt just resolves to its own default,
-# same as an operator hitting Enter on every prompt.
+# What: fd 9 is the optional list-prompts answers file
+# Why: unset means every prompt takes its default
 WIZARD_INTROSPECT_ANSWERS_FD=""
 # What: the previous prompt of the list-prompts walk
 # Why: finds a validation loop that cannot converge
 # From: Issue #1683 | PR #1858
 WIZARD_INTROSPECT_LAST_PROMPT=""
 
-# Issue #1176: the ONE place that knows how to turn an ask()/confirm() call
-# into an introspection-mode result, shared by both functions below so
-# `setup.sh list-prompts` walks the exact same call sites, in the exact same
-# order, as a real interactive install -- it cannot re-implement or copy the
-# wizard's branch logic anywhere, only observe it, which is what actually
-# closes the blind spot named in issue #1176 (a new prompt on a conditional
-# branch a simulation script's answers actually reach previously had no
-# single source of truth checking it; now the simulation scripts derive their
-# expected prompt sequence from this function's own output instead of
-# hand-encoding it).
-#
-# Output format: "PROMPT\t<prompt text>\t<default>\n" on stdout -- deliberately
-# plain and grep/cut-friendly (no JSON/YAML dependency, matching this
-# project's shell-first tooling convention) and matches the exact text ask()
-# would otherwise print interactively (prompt, then " [default]: "), so a
-# consumer can reconstruct the real rendered prompt without duplicating
-# ask()'s own formatting logic a second time.
-#
-# Resolving REPLY: pulls the next line from the answers-file fd if one was
-# given, otherwise (or once that file is exhausted) falls back to the
-# prompt's own default -- the same fallback ask() already applies for a blank
-# interactive Enter keypress, so an answers file only needs to name the
-# prompts where the operator would deliberately deviate from the default.
+# What: prints PROMPT; REPLY from answer fd, else default
+# Why: one code path, so the walk matches the real wizard
 wizard_introspect_record_prompt() {
     local prompt="$1" default="$2" line="" answered=0
     printf 'PROMPT\t%s\t%s\n' "$prompt" "$default"
@@ -119,10 +80,8 @@ wizard_introspect_record_prompt() {
     REPLY="${line:-$default}"
 }
 
-# Reads from /dev/tty explicitly, not stdin: this script is commonly run via
-# `curl ... | bash`, which occupies stdin with the script body itself. Without
-# this, every prompt would silently read leftover script text instead of
-# waiting for the user.
+# What: ask() reads from /dev/tty, not stdin
+# Why: curl ... | bash occupies stdin with the script body
 ask() {
     local prompt="$1" default="${2:-}"
     if [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
@@ -147,40 +106,35 @@ require_value() {
 is_valid_ipv4() {
     local ip="$1"
 
-    # Keep IPv4 validation as one readable regular expression so every octet
-    # is range-checked before the value is written into Docker or DNS config.
-    # Accepted: 0.0.0.0 through 255.255.255.255. Rejected: partial IPs,
-    # hostnames, negative numbers, and out-of-range octets such as 256.
+    # What: one regex range-checks each IPv4 octet
+    # Why: values are written to Docker and DNS config
     local octet='(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])'
     [[ "$ip" =~ ^${octet}\.${octet}\.${octet}\.${octet}$ ]]
 }
 
-# True for unsigned decimal integers greater than zero. The 10# base prefix
-# forces base-10 arithmetic so a leading-zero value like "010" is read as ten,
-# not misinterpreted as octal by bash arithmetic.
+# What: true for integers above zero, base-10 forced
+# Why: leading zeros like 010 must not parse as octal
 is_positive_integer() {
     [[ "${1:-}" =~ ^[0-9]+$ ]] && (( 10#$1 > 0 ))
 }
 
-# True if the value is non-empty and starts with /, i.e. a filesystem absolute path.
+# What: true if the value starts with /
+# Why: cache and Kea data dirs must be absolute paths
 is_absolute_path() {
     [[ -n "${1:-}" && "$1" == /* ]]
 }
 
-# Proxy-DHCP (dnsmasq) needs a subnet *base* address, not an arbitrary host IP,
-# so it must be a valid IPv4 address ending in ".0".
+# What: true if the value is a valid IPv4 ending in .0
+# Why: dnsmasq proxy-DHCP needs a subnet base address
 is_dnsmasq_subnet_start() {
     local ip="$1"
 
     is_valid_ipv4 "$ip" && [[ "$ip" == *".0" ]]
 }
 
-# Issue #450: light shape validation for the optional dnsmasq relay/proxy
-# fields, mirroring services/ui/src/routes/dhcp.rs's Rust-side validators of
-# the same name/intent (is_valid_interface_name, is_valid_domain_name,
-# is_valid_boot_filename) so a hand-edited .env fails just as closed as an
-# Admin UI submission would. All three are optional -- callers only invoke
-# them when the value is non-empty.
+# What: shape checks for optional dnsmasq relay/proxy values
+# Why: hand-edited .env fails as closed as Admin UI input
+# From: Issue #450
 is_valid_dhcp_proxy_interface() {
     [[ "${1:-}" =~ ^[A-Za-z0-9._-]{1,64}$ ]]
 }
@@ -200,15 +154,8 @@ is_valid_dhcp_proxy_boot_filename() {
     local filename="${1:-}"
     [[ -n "$filename" && "${#filename}" -le 255 ]] || return 1
     [[ "$filename" != *[[:space:],]* ]] || return 1
-    # Every accepted value here is later written to .env, which
-    # validate_env_value()/validate_env_values_for_initial_write() reject if
-    # it contains a newline, $, backtick, ", ', \, or # -- accepting a
-    # filename here that fails that later check would let the wizard walk
-    # the operator through several more install steps (Docker/Compose
-    # provisioning, other prompts) before dying on a value this function
-    # could have rejected immediately. Reject the identical character set
-    # here so every value this function accepts is also guaranteed
-    # writable.
+    # What: rejects newline and shell or .env metachars
+    # Why: a later .env write fails after earlier steps ran
     case "$filename" in
         *$'\n'* | *'$'* | *'`'* | *'"'* | *"'"* | *'\'* | *'#'* )
             return 1
@@ -217,18 +164,8 @@ is_valid_dhcp_proxy_boot_filename() {
     return 0
 }
 
-# True (exit 0) only when a PXE boot-pointer answer set has both a boot
-# server AND at least one boot filename -- the combination
-# services/dhcp-proxy/entrypoint.sh's _dhcp_proxy_render_pxe_service_directives
-# actually needs to render a real pxe-service directive. A server alone, or
-# a filename alone, produces no directive at all: dnsmasq just logs a
-# startup WARNING and PXE boot-pointer support stays silently inactive.
-# Shared by both the interactive install wizard (which only ever asks for a
-# filename once a server is already given, so it can only hit the
-# server-without-filename half of this check) and migrate_env_for_update
-# (which validates a possibly hand-edited existing .env/.env.local that can
-# carry either half incomplete) so the two callers can never drift apart on
-# what "complete" means for this feature.
+# What: true if a server and any filename are both set
+# Why: dnsmasq emits no pxe-service with a half missing
 pxe_boot_pointer_answers_are_complete() {
     local server="$1" filename_bios="$2" filename_uefi="$3"
     [[ -n "$server" ]] || return 1
@@ -330,10 +267,8 @@ secondary_suggest_alternate_listen_ip() {
     return 1
 }
 
-# Interactive gate before starting the secondary node: reports what else is
-# bound to port 53 on the chosen IP (via ss/fuser/lsof) and offers a suggested
-# alternate. Requires an actual terminal to prompt, so it fails closed instead
-# of looping forever when run non-interactively (e.g. from another script).
+# What: port-53 holders shown; prompt for alternate IP
+# Why: fails closed without a terminal, no endless loop
 secondary_choose_listen_ip() {
     local listen_ip="$1" conflicts suggestion
 
@@ -371,8 +306,8 @@ secondary_choose_listen_ip() {
     done
 }
 
-# Validates a full IPv4 CIDR (address + /prefix), octet-by-octet and with the
-# prefix length bounded to 1-32, before it is written into DHCP subnet config.
+# What: validates IPv4 CIDR with prefix 1-32
+# Why: rejects bad masks before DHCP config is written
 is_valid_cidr() {
     local cidr="$1" ip mask octets part
 
@@ -395,11 +330,8 @@ is_valid_cidr() {
     return 0
 }
 
-# Enumerates the only DHCP_MODE values setup.sh understands: DHCP off, our own
-# Kea server, dnsmasq acting as a proxy-DHCP helper for PXE, or dnsmasq acting
-# as a real DHCP relay to an upstream server (issue #844). Both dnsmasq modes
-# run in the same `dhcp-proxy` container/profile; DHCP_MODE is what tells them
-# apart.
+# What: lists the valid DHCP_MODE values
+# Why: unknown modes must be rejected, not defaulted
 is_valid_dhcp_mode() {
     case "$1" in
         disabled|kea|dnsmasq-proxy|dnsmasq-relay) return 0 ;;
@@ -430,18 +362,8 @@ validate_ui_session_ttl_seconds() {
     fi
 }
 
-# Centralize runtime profile calculation so install and update cannot drift:
-# SSL, Kea DHCP, dnsmasq proxy mode, LanCache-NG-NTP, and central logging are
-# represented once in COMPOSE_PROFILES while unrelated profiles are preserved.
-#
-# logging_enabled defaults to "1" (issue #1343), unlike every other profile
-# flag here, which defaults to "0"/disabled -- central logging is meant to be
-# on by default with a real, working opt-out (LOGGING_ENABLED=0 in .env, or
-# "n" at the install wizard's logging prompt), not an opt-in feature like SSL/
-# DHCP/NTP. A caller that omits this argument entirely (there should be none
-# left after this change, but a future call site addition might forget it)
-# fails safe toward "still enabled" rather than silently regressing to the
-# exact bug this issue exists to fix.
+# What: rebuilds COMPOSE_PROFILES; keeps unrelated profiles
+# Why: keeps install and update from drifting apart
 compose_profiles_for_runtime() {
     local existing="${1:-}" dhcp_mode="${2:-disabled}" ntp_enabled="${3:-0}" logging_enabled="${4:-1}"
     local profile result="" trimmed
@@ -469,11 +391,8 @@ compose_profiles_for_runtime() {
             result+="dhcp-kea"
             ;;
         dnsmasq-proxy|dnsmasq-relay)
-            # Both dnsmasq sub-modes (ProxyDHCP and relay, issue #844) run in
-            # the same `dhcp-proxy` compose service, so they map to the same
-            # profile; the container reads DHCP_MODE to render the matching
-            # config. The strip loop above already removes `dhcp-proxy` from
-            # `existing`, so mutual exclusion with dhcp-kea still holds.
+            # What: dnsmasq modes share dhcp-proxy profile
+            # Why: container reads DHCP_MODE for its config
             [[ -n "$result" ]] && result+=","
             result+="dhcp-proxy"
             ;;
@@ -510,24 +429,8 @@ run_kea_dhcp_activation_preflight() {
     print_step "DHCP activation preflight"
     printf "  Discovery-only check: the Kea image will run nmap and exit without starting Kea.\n"
 
-    # No -e/--interface flag: nmap has no "any" pseudo-interface (confirmed
-    # directly -- "I cannot figure out what source address to use for
-    # device any, does it even exist?"), so passing one made this probe
-    # fail its own execution on every single run, unconditionally forcing
-    # the "could not be executed" confirmation path below regardless of
-    # whether a real conflict existed. Letting nmap auto-select the
-    # interface (no -e at all) is the already-proven working invocation.
-    #
-    # This is a SEPARATE nmap usage from the Admin UI's own dhcp-probe
-    # container: it runs nmap directly inside the `dhcp` (Kea) service
-    # image (services/dhcp/Dockerfile), not the `ui` image. Issue #1288
-    # replaced the `ui` image's former dhcp-probe.sh (nmap + dhclient) with
-    # a native Rust DHCP probe, but deliberately did not touch this
-    # `dhcp`-image nmap call -- out of that issue's stated scope (see its
-    # own "current architecture" section, which only describes
-    # services/ui) and flagged explicitly rather than silently left as
-    # unfinished parity. `services/dhcp/Dockerfile` still installs nmap for
-    # exactly this call site.
+    # What: runs nmap DHCP discovery in the dhcp (Kea) image
+    # Why: nmap has no 'any' interface, so no -e is passed
     if ! output=$(docker compose --env-file "$env_file" -f "$PROD_COMPOSE" --profile dhcp-kea run --rm --no-deps dhcp \
         nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5 2>&1); then
         print_warn "DHCP discovery preflight could not be executed inside the Kea image."
@@ -537,8 +440,8 @@ run_kea_dhcp_activation_preflight() {
         return 0
     fi
 
-    # What: sed anchors at line start (strips nmap's leading |/_ prefix) and takes the first match via a here-string.
-    # Why: consistency with this file's other SIGPIPE-safe conversions -- both sed stages already lack q/Q and read to EOF regardless.
+    # What: first Server Identifier line of the nmap output
+    # Why: here-strings avoid a live pipe under pipefail
     # From: Issue #1377
     server_identifier="$(sed -n '1p' <<<"$(sed -n 's/^[|_[:space:]]*Server Identifier:[[:space:]]*//p' <<<"$output")")"
 
@@ -552,10 +455,8 @@ run_kea_dhcp_activation_preflight() {
     fi
 }
 
-# Installs the given packages via whichever supported package manager is
-# present (apt/dnf/yum/pacman), after an explicit operator confirmation since
-# this mutates the host outside setup.sh's own config. Fails closed if no
-# supported package manager is found rather than guessing a command.
+# What: installs packages via apt, dnf, yum or pacman
+# Why: host changes need confirmation; unknown PM fails
 install_packages() {
     local reason="$1"
     shift
@@ -581,9 +482,8 @@ install_packages() {
     fi
 }
 
-# Package installation is intentionally interactive because setup.sh mutates the
-# host. Missing prerequisites are offered to DAU users, but unsupported package
-# managers fail closed instead of guessing.
+# What: package installs ask first; unknown managers fail
+# Why: setup.sh mutates the host, so it must not guess
 install_required_command() {
     local command_name="$1" reason="$2"
     shift 2
@@ -595,8 +495,8 @@ install_required_command() {
         || die "$command_name is still missing after installing package(s): $*"
 }
 
-# Thin named wrappers around install_required_command so call sites read as
-# "install_curl" / "install_git" rather than a repeated three-argument call.
+# What: named wrappers for curl and git
+# Why: call sites read as install_curl and install_git
 install_curl() {
     install_required_command curl "curl is missing." curl
 }
@@ -605,8 +505,8 @@ install_git() {
     install_required_command git "git is missing." git
 }
 
-# True if apt's package index has any candidate version for the named package
-# (does not check whether it is already installed).
+# What: true if apt has a candidate version for the package
+# Why: installed state is not checked here
 apt_package_available() {
     local version
     version=$(apt_package_candidate_version "$1") \
@@ -614,17 +514,16 @@ apt_package_available() {
     [[ -n "$version" && "$version" != "(none)" ]]
 }
 
-# Reads the version apt would install for a package right now, without
-# installing anything, so callers can branch on version before committing.
+# What: reads the version apt would install now
+# Why: callers branch on version before installing
 apt_package_candidate_version() {
     local policy
     policy=$(apt-cache policy "$1") || die "apt-cache policy $1 failed (exit $?)."
     awk '/^[[:space:]]*Candidate:/ {print $2; exit}' <<< "$policy"
 }
 
-# Some distro apt indexes reuse the legacy "docker-compose" package name for
-# Compose v2 (see apt_compose_package below); this checks the candidate
-# version's leading digit to tell v2 apart from the old Python-based v1.
+# What: true if the apt docker-compose candidate is v2
+# Why: legacy name can ship Compose v2 (Trixie)
 apt_docker_compose_is_v2() {
     local version=""
 
@@ -642,8 +541,8 @@ apt_compose_package() {
     elif apt_package_available docker-compose-v2; then
         printf '%s\n' docker-compose-v2
     elif apt_package_available docker-compose && apt_docker_compose_is_v2; then
-        # Debian Trixie packages Compose v2 under the historical docker-compose
-        # package name while still providing the `docker compose` CLI plugin.
+        # What: Trixie docker-compose package is Compose v2
+        # Why: gives the docker compose CLI plugin
         printf '%s\n' docker-compose
     fi
 }
@@ -659,9 +558,8 @@ apt_buildx_package() {
     fi
 }
 
-# Docker bootstrap is a first-install convenience, not a build environment
-# contract. Changes here affect production setup directly and must stay separate
-# from future dev-mode/compiler-farm decisions.
+# What: Docker install is a first-install convenience only
+# Why: production setup must stay separate from dev builds
 verify_docker_installation() {
     local out
     command -v docker >/dev/null 2>&1 \
@@ -671,10 +569,8 @@ verify_docker_installation() {
         || die "Docker Compose v2 is missing after installation (exit $?): $out"
 }
 
-# Debian Trixie's docker.io package no longer ships /usr/bin/docker itself;
-# the client lives in the separate docker-cli package. Install it only when
-# docker is still missing after docker.io, to stay a no-op on older distros
-# where docker.io already provides the client.
+# What: installs docker-cli only if docker is still missing
+# Why: Trixie's docker.io no longer ships /usr/bin/docker
 ensure_apt_docker_client() {
     if command -v docker >/dev/null 2>&1; then
         return 0
@@ -690,9 +586,8 @@ ensure_apt_docker_client() {
         || die "Docker client binary is missing after installation. Install docker-cli or docker-ce-cli manually, then rerun setup.sh."
 }
 
-# Fallback for when the distro's own apt index has no Compose v2 package at
-# all: adds Docker's official apt repository (GPG key + sources list) so a
-# supported package becomes available, then refreshes the index.
+# What: adds Docker's apt repo when no Compose v2 package
+# Why: the distro index may lack a supported package
 install_docker_apt_repo() {
     local os_id="" codename="" repo_file="" dpkg_arch=""
 
@@ -734,10 +629,8 @@ install_docker_apt_repo() {
     apt-get update -y || die "apt-get update failed after adding Docker's repository (exit $?)."
 }
 
-# Installs Docker + Compose v2 on Debian/Ubuntu. Prefers the distro's own
-# packages; only adds Docker's apt repo (install_docker_apt_repo) if the distro
-# index has no Compose v2 package. Uses the lighter docker.io + ensure_apt_docker_client
-# path when possible instead of always pulling in Docker's own docker-ce group.
+# What: installs Docker and Compose v2 on Debian/Ubuntu
+# Why: distro packages are preferred over Docker's own repo
 install_docker_apt() {
     local compose_package="" buildx_package=""
     local -a docker_packages=()
@@ -752,13 +645,8 @@ install_docker_apt() {
             || die "No Docker Compose v2 package found. Please install Docker and the Docker Compose plugin manually, then rerun setup.sh."
     fi
 
-    # assert_resolved_image_tag_platform_supported (#665) hard-requires
-    # `docker buildx` before the first pull. Install it alongside Docker/Compose
-    # here so that check does not immediately abort a fresh install right after
-    # setup.sh finished installing its own prerequisites -- best-effort only:
-    # if this apt index has neither buildx package name, skip it and let the
-    # later platform check fail closed with its own actionable message instead
-    # of failing this whole Docker install over an unrelated package gap.
+    # What: installs buildx when the apt index has it
+    # Why: docker buildx is needed before the first pull
     buildx_package=$(apt_buildx_package) || die "Cannot look up the Buildx apt package (exit $?)."
 
     if [[ "$compose_package" = docker-compose-plugin ]]; then
@@ -771,8 +659,8 @@ install_docker_apt() {
         [[ -n "$buildx_package" ]] && docker_packages+=("$buildx_package")
         apt-get install -y --no-install-recommends "${docker_packages[@]}" \
             || die "Failed to install ${docker_packages[*]} (exit $?)."
-        # Debian Trixie splits the Docker client into docker-cli, so install it
-        # only when docker.io did not already provide /usr/bin/docker.
+        # What: falls back to docker-cli if needed
+        # Why: Trixie ships the client in docker-cli
         ensure_apt_docker_client
     fi
 
@@ -874,9 +762,8 @@ guard_rpm_docker_conflicts() {
     die "Docker's RPM packages conflict with these installed packages: ${conflicts[*]}. Remove them first (for example: dnf remove ${conflicts[*]}), then rerun setup.sh."
 }
 
-# Docker publishes separate yum/dnf repo files per RHEL-family distro; picks
-# the matching one by /etc/os-release ID, defaulting to the CentOS repo for
-# other RHEL derivatives that aren't Fedora or RHEL itself.
+# What: picks Docker's rpm repo URL by os-release ID
+# Why: Fedora, RHEL own repos; other RHEL use CentOS
 docker_rpm_repo_url() {
     local os_id=""
 
@@ -895,11 +782,8 @@ docker_rpm_repo_url() {
     fi
 }
 
-# Installs Docker (or just its Compose plugin) on dnf/yum systems by adding
-# Docker's own repo and installing the given packages (defaulting to the full
-# docker-ce set). Only runs the podman/runc conflict guard when an actual
-# Docker engine package is being installed, so a compose-plugin-only install
-# is not blocked by an unrelated podman conflict rule.
+# What: installs Docker via Docker's own rpm repo
+# Why: engine conflict guard runs only for engine packages
 install_docker_rpm() {
     local manager="$1"
     shift
@@ -907,13 +791,8 @@ install_docker_rpm() {
     local packages=("$@")
 
     if (( ${#packages[@]} == 0 )); then
-        # docker-buildx-plugin is included here (not just docker-compose-plugin)
-        # so a fresh full Docker install already satisfies
-        # assert_resolved_image_tag_platform_supported's (#665) `docker buildx`
-        # requirement -- this repo_url is always Docker's own official repo
-        # (see docker_rpm_repo_url above), which publishes docker-buildx-plugin
-        # directly, unlike the apt path where it must be probed for (see
-        # apt_buildx_package).
+        # What: default set adds buildx and compose plugins
+        # Why: full install satisfies the buildx check
         packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
     fi
 
@@ -948,9 +827,8 @@ install_docker_rpm() {
     verify_docker_installation
 }
 
-# Interactive installer for the Compose v2 plugin only (Docker engine already
-# present). Dispatches to the right package manager, each with its own
-# operator confirmation before mutating the host.
+# What: installs only the Compose v2 plugin
+# Why: each manager asks for confirmation before changes
 install_docker_compose() {
     local packages=()
 
@@ -988,8 +866,8 @@ install_docker_compose() {
     fi
 }
 
-# Interactive installer for Docker engine + Compose v2 together, dispatching to
-# the right package manager with its own confirmation prompt and package set.
+# What: installs Docker engine and Compose v2 per manager
+# Why: each manager has its own confirmation and package set
 install_docker() {
     local packages=()
 
@@ -1027,20 +905,8 @@ install_docker() {
     fi
 }
 
-# Shared prerequisite-install flow: curl, Docker engine, a running Docker
-# daemon, and the Docker Compose v2 plugin. Used by the interactive `install`
-# flow below and by the standalone `install-requirements-primary`/
-# `install-requirements-secondary` commands (#1068 item 20) so an operator
-# who only needs the Docker prerequisites -- e.g. a fresh secondary host,
-# where `cmd_secondary` itself only checks for these tools and dies with
-# "docker is not installed" rather than installing them -- can provision
-# exactly that, standalone, without walking through the full interactive
-# installer. Both commands currently call this identical logic: a secondary
-# node needs the same Docker engine + Compose v2 plugin as a primary, nothing
-# less. Kept as two distinct command names anyway (rather than one shared
-# "install-requirements") so the operator-facing entry points stay
-# self-describing and can diverge later without a breaking rename if a
-# primary- or secondary-only requirement is ever added.
+# What: installs curl, Docker, Docker Compose v2 plugin
+# Why: secondary needs the same set as primary
 ensure_stack_requirements_installed() {
     local info out
     [[ "$(id -u)" = "0" ]] \
@@ -1088,24 +954,18 @@ cmd_install_requirements_secondary() {
     print_ok "Secondary node requirements installed (curl, jq, Docker, Docker Compose v2). Run ./setup.sh secondary --primary <url> --token <token> --name <name> --proxy-ip <ip> next."
 }
 
-# Approximates Docker Compose's own .env value semantics for a value read back
-# out of an existing file: strips a fully single- or double-quoted value's
-# surrounding quotes, and drops an unquoted inline comment (a '#' preceded by
-# whitespace). Without this, migrating an older but valid Compose value (e.g.
-# `CACHE_DIR=/srv/lancache # nvme` or `CACHE_DIR="/srv/lancache cache"`) into
-# validate_env_value() would reject it for characters Compose itself parses
-# away.
+# What: strips quotes and unquoted inline comments
+# Why: Compose-valid values must pass validate_env_value
 _compose_parse_env_value() {
     local value="$1" rest
 
-    # Trim leading whitespace before checking for a quote so a value like
-    # ` "foo"` is still recognized as quoted.
+    # What: trims leading whitespace before the quote check
+    # Why: otherwise a leading space hides the quote
     value="${value#"${value%%[![:space:]]*}"}"
 
     if [[ "$value" == \"* ]]; then
-        # Take everything up to the FIRST closing quote, not the end of the
-        # string — a trailing inline comment like `"foo" # bar` is valid
-        # Compose syntax and must not be treated as part of the value.
+        # What: takes text up to the first closing quote
+        # Why: trailing comments after quotes are valid
         rest="${value#\"}"
         value="${rest%%\"*}"
     elif [[ "$value" == \'* ]]; then
@@ -1172,8 +1032,8 @@ get_env_assignment_value_raw_nonempty() {
     printf '%s' "$found"
 }
 
-# .env helpers stay in setup.sh because this script owns install, update, and
-# migration behavior for curl | bash users.
+# What: .env helpers for install, update and migration
+# Why: setup.sh owns these for curl | bash users
 
 # What: true if KEY= is assigned; a missing file has none
 # Why: a read error must stop setup, never read as absent
@@ -1186,47 +1046,16 @@ env_key_exists() {
     return "$rc"
 }
 
-# True if the key exists in the .env file with a non-empty parsed value.
+# What: true if the key has a non-empty parsed value
+# Why: empty values count as unset for setup decisions
 env_key_has_value() {
     local key="$1" env_file="$2" value
     value=$(get_env_var "$key" "$env_file") || exit $?
     [[ -n "$value" ]]
 }
 
-# Recognizes placeholder-style secret values (empty, CHANGE_ME_*, YOUR_*_HERE,
-# changeme*, or the old lancache-*-secret template default) so setup.sh can
-# tell "operator has not configured a real secret yet" apart from "operator
-# configured this on purpose" and knows when it must generate a real value
-# instead of trusting the placeholder as configured.
-#
-# Matching is case-insensitive and treats "-"/"_" as equivalent (issue #967:
-# e.g. "change-me", "CHANGE_ME", and "Change-Me" are all recognized) --
-# normalize first, then match against lowercase/underscore patterns. This is a
-# deliberate fail-safe widening: it can only make MORE values match as a
-# placeholder, never fewer, so a real randomly-generated hex/base64 secret is
-# not realistically affected.
-#
-# This is one of three independently-maintained placeholder detectors in this
-# repo (the others: scripts/lib/shared-secret-bootstrap.sh's
-# secret_is_placeholder, embedded into the dns/dhcp/ui entrypoints, and
-# services/ui/src/main.rs's secondary_registration_token_is_placeholder), kept
-# deliberately separate per the maintainer decision recorded in issue #967
-# (Option B: cross-validate, don't unify) rather than sourcing the shared
-# library directly. Divergences from the shared library, confirmed via
-# tests/fixtures/placeholder-detection-cases.txt and
-# tests/bats/placeholder_detection_parity.bats:
-#   - This write path additionally recognizes the legacy "lancache-*-secret"
-#     template-default shape and a bare "change-me"/"change_me" infix. This
-#     IS deliberate: setup.sh must never mistake a stale template default for
-#     a real secret it should preserve, unlike the shared library's read path
-#     (see that function's own comment for why it omits both).
-#   - This write path requires a full YOUR_*_HERE suffix match, and does not
-#     have the shared library's generic *_HERE-on-any-value rule, both
-#     narrower than the shared library. Pre-existing, not reconciled here
-#     (#967 Option B keeps the pattern sets separate); no shipped placeholder
-#     in this repo actually needs either bare form, so the gap has not
-#     mattered in practice, but it is a real, confirmed divergence, not an
-#     intentional design choice.
+# What: true for empty, CHANGE_ME_* and similar placeholders
+# Why: setup replaces placeholders, not keeps them
 secret_value_is_placeholder() {
     local value="$1"
     local normalized="${value,,}"
@@ -1239,18 +1068,16 @@ secret_value_is_placeholder() {
     return 1
 }
 
-# True only if the key holds a real, usable secret — i.e. it has a value and
-# that value is not one of the known placeholder patterns above. Used to gate
-# secret generation so setup.sh never overwrites an operator's real secret but
-# always replaces a placeholder.
+# What: true if the key has a non-placeholder value
+# Why: setup overwrites placeholders, never real secrets
 env_key_has_usable_secret() {
     local key="$1" env_file="$2" value
     value=$(get_env_var "$key" "$env_file") || exit $?
     ! secret_value_is_placeholder "$value"
 }
 
-# Secret generation must fail closed. setup.sh must never write empty secrets
-# after a missing openssl binary, broken RNG, or interrupted generator command.
+# What: generate_secret_value fails on any generator error
+# Why: an empty secret must never be written
 generate_secret_value() {
     local name="$1" kind="$2" value chunk managed
     # What: only a key on managed_secret_env_keys is made
@@ -1300,29 +1127,17 @@ get_or_generate_secret() {
     fi
 }
 
-# validate_env_value — Guard against .env value characters that could break parsing.
-#
-# Docker Compose's .env reader is strict: unquoted values with spaces, special
-# characters, or problematic punctuation can silently change their semantics or
-# be interpreted as directive markers (# for comments, $ for substitution, etc.).
-# This function rejects values that contain unescapable characters rather than
-# trying to quote/escape them, to minimize diff and maintain confidence that
-# output values will parse identically to the original unquoted form.
-#
-# Safe characters: empty string, alphanumeric, spaces, common separators and URLs:
-#   . : - _ / + = ,
-# Unsafe characters (REJECTED): newline, $, backtick, double-quote, single-quote,
-#   backslash, hash (comment marker), and other shell metacharacters.
-#
-# Exit 0 if safe; die with message if unsafe.
+# What: dies on values with shell or .env metachars
+# Why: Compose .env parsing would change the value
 validate_env_value() {
     local key="$1" value="$2"
 
-    # Empty values are allowed (e.g., IP_SSL="", DHCP_SUBNET="").
+    # What: empty values are accepted
+    # Why: optional settings are written as empty strings
     [[ -z "$value" ]] && return 0
 
-    # Use case pattern matching to detect forbidden characters.
-    # Reject if the value contains any of: newline, $, `, ", ', \, #
+    # What: rejects newline and shell or .env metachars
+    # Why: Compose .env parsing would change the value
     case "$value" in
         *$'\n'* | *'$'* | *'`'* | *'"'* | *"'"* | *'\'* | *'#'* )
             die "$key contains unsafe characters for .env. Cannot proceed. Value: $value"
@@ -1332,15 +1147,13 @@ validate_env_value() {
     return 0
 }
 
-# Runs validate_env_value over every KEY=VALUE pair before the first-install
-# .env heredoc is written (see comment inside for why that heredoc specifically
-# needs this pre-check).
+# What: validates each KEY=VALUE before the first .env write
+# Why: heredoc interpolates values unquoted
 validate_env_values_for_initial_write() {
     local key value pair
 
-    # The first-install .env writer below is a heredoc with unquoted
-    # substitutions. Validate every interpolated value before opening the file
-    # so unsafe characters cannot change Compose .env parsing semantics.
+    # What: validates every value before the .env file opens
+    # Why: unquoted heredoc values could change parsing
     for pair in "$@"; do
         key="${pair%%=*}"
         value="${pair#*=}"
@@ -1368,31 +1181,23 @@ rewrite_env_key() {
         || die "Failed to write $key into $env_file (exit $?)."
 }
 
-# Sets KEY=VALUE in the .env file, validating the value's characters first.
-# If the key already has one or more assignments, the awk pass rewrites only
-# the first occurrence and drops any later duplicate lines for the same key,
-# so the file always converges on a single canonical assignment per key.
+# What: sets KEY=VALUE after validating its characters
+# Why: duplicate lines are dropped, one assignment remains
 set_env_key() {
     local key="$1" value="$2" env_file="$3"
     validate_env_value "$key" "$value"
     if env_key_exists "$key" "$env_file"; then
         rewrite_env_key "$env_file" "$key" "$value" set
     else
-        # Explicit die() instead of relying on `set -e`: a caller running this
-        # inside a subshell whose own exit status is being tested (e.g.
-        # `if ! ( fn1 && fn2 )`) sits in a bash context where errexit is
-        # silently ignored for everything inside that subshell, so a bare
-        # failed append here would otherwise go unnoticed instead of aborting.
+        # What: explicit die on append failure
+        # Why: errexit is ignored in tested subshells
         printf '%s=%s\n' "$key" "$value" >> "$env_file" \
             || die "Failed to append $key to $env_file."
     fi
 }
 
-# Like set_env_key, but writes a raw assignment value verbatim (only rejecting
-# embedded newlines) instead of running it through validate_env_value's strict
-# character check. Used to carry over an existing raw .env assignment — which
-# may legitimately contain ${VAR} interpolation — without re-validating
-# characters that Compose itself already parses safely.
+# What: sets raw value without character validation
+# Why: raw values may contain ${VAR} interpolation
 set_env_assignment() {
     local key="$1" assignment_value="$2" env_file="$3"
     case "$key" in
@@ -1409,8 +1214,8 @@ set_env_assignment() {
     if env_key_exists "$key" "$env_file"; then
         rewrite_env_key "$env_file" "$key" "$assignment_value" set
     else
-        # See set_env_key's matching comment: explicit die() so a failure
-        # here is never silently swallowed by a tested-subshell errexit gap.
+        # What: same explicit die as set_env_key
+        # Why: errexit is ignored in tested subshells
         printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file" \
             || die "Failed to append $key to $env_file."
     fi
@@ -1444,8 +1249,8 @@ set_env_key_if_empty_or_missing() {
             set_env_key "$key" "$value" "$env_file"
         fi
     else
-        # See set_env_key's matching comment: explicit die() so a failure
-        # here is never silently swallowed by a tested-subshell errexit gap.
+        # What: same explicit die as set_env_key
+        # Why: errexit is ignored in tested subshells
         printf '%s=%s\n' "$key" "$value" >> "$env_file" \
             || die "Failed to append $key to $env_file."
     fi
@@ -1464,51 +1269,43 @@ append_env_assignment_if_missing() {
             die "$key contains a newline and cannot be copied into .env."
             ;;
     esac
-    # Migration-only helper: duplicate an existing Compose .env assignment
-    # without destroying supported interpolation such as ${LAN_CACHE_ROOT:-...}.
-    # Explicit die() (see set_env_key's matching comment) instead of relying
-    # on `set -e` alone.
+    # What: appends an assignment verbatim if key is missing
+    # Why: keeps ${VAR:-...} interpolation intact
     env_key_exists "$key" "$env_file" \
         || printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file" \
         || die "Failed to append $key to $env_file."
 }
 
-# Migrates an optional key from an old name (source_key) to a new one
-# (target_key), or seeds fallback_value if there is nothing to migrate. Used
-# for renamed .env keys where an empty target value is a valid, intentional
-# state (see comment inside).
+# What: migrates an old key to a new one, or seeds fallback
+# Why: an empty target is a valid, intentional state
 append_env_migrated_assignment_if_missing() {
     local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
     local source_assignment
 
-    # Preserve intentionally empty optional targets. UI_BIND_IP=, for example,
-    # deliberately keeps Compose's ${UI_BIND_IP:-${IP_STANDARD}} fallback alive.
+    # What: keeps an existing empty optional target as is
+    # Why: an empty value keeps Compose's fallback alive
     if env_key_exists "$target_key" "$env_file"; then
         return 0
     fi
 
     source_assignment=$(get_env_assignment_value_raw_nonempty "$source_key" "$env_file") || exit $?
     if [[ -n "$source_assignment" ]]; then
-        # Rewrite empty migrated targets in place so updates do not append
-        # duplicate KEY= lines.
+        # What: rewrites an empty migrated target in place
+        # Why: avoids duplicate KEY= lines on update
         set_env_assignment "$target_key" "$source_assignment" "$env_file"
     elif env_key_exists "$target_key" "$env_file" || [[ -n "$fallback_value" ]]; then
         set_env_key "$target_key" "$fallback_value" "$env_file"
     fi
 }
 
-# Same migration idea as append_env_migrated_assignment_if_missing, but for
-# keys that must never end up empty (e.g. bind-mount paths); repairs an empty
-# target instead of leaving it alone (see comment inside for why).
+# What: migrates a required key; repairs an empty target
+# Why: Compose would turn KEY= into an invalid bind mount
 append_required_env_migrated_assignment_if_empty_or_missing() {
     local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
     local target_assignment source_assignment
 
-    # Required migrated paths cannot stay empty: Compose would turn KEY= into an
-    # invalid bind mount. This helper repairs only those required keys and keeps
-    # the optional migration helper above from changing deliberate empty values.
-    # Preserve a later non-empty duplicate before falling back to source or
-    # default state so updates converge on the operator's actual cache dir.
+    # What: keeps a non-empty duplicate target value
+    # Why: updates must converge on the operator's real dir
     target_assignment=$(get_env_assignment_value_raw_nonempty "$target_key" "$env_file") || exit $?
     if [[ -n "$target_assignment" ]]; then
         set_env_assignment "$target_key" "$target_assignment" "$env_file"
@@ -2659,8 +2456,8 @@ assert_resolved_image_tag_platform_supported() {
     [[ -n "$discovered_platforms" ]] \
         || die "${image} did not expose any usable platform metadata; cannot verify ${platform} support for tag '${tag}'."
 
-    # What: feeds grep -q via a here-string, not a live pipe.
-    # Why: $discovered_platforms can list several platforms.
+    # What: grep -q reads a here-string, not a live pipe.
+    # Why: avoids SIGPIPE on multi-line platform lists
     # From: Issue #1377
     grep -Eq "^${platform}(/.*)?$" <<<"$discovered_platforms" \
         || die "Image tag '${tag}' does not publish a ${platform} image for this ${arch} host (published: $(printf '%s' "$discovered_platforms" | tr '\n' ',' | sed 's/,$//')). Choose a tag or channel that publishes ${platform}, then rerun setup.sh."
@@ -4019,8 +3816,8 @@ compose_project_name() {
     name="${COMPOSE_PROJECT_NAME:-}"
     [[ -n "$name" ]] || name=$(get_env_var COMPOSE_PROJECT_NAME "$env_file")
     if [[ -z "$name" && -f "$compose_dir/docker-compose.yml" ]]; then
-        # What: captures sed's matches into a variable, then reads via a here-string, not a live pipe from sed.
-        # Why: avoids a SIGPIPE if the compose file ever has more than one unindented top-level `name:` key.
+        # What: sed output is captured, then head reads it
+        # Why: avoids SIGPIPE when several name: keys match
         # From: Issue #1377
         local compose_name_lines
         compose_name_lines=$(sed -n 's/^name:[[:space:]]*//p' "$compose_dir/docker-compose.yml") \
@@ -4077,35 +3874,20 @@ compose_volume_names() {
     awk 'NF' <<< "$names" | sort -u
 }
 
-# What: reports whether any named Docker volume still carries this Compose project label.
-# Why: after `docker compose down`, the durable project label remains on the volume object even when the containers and their working_dir owner label are already gone, so restore must still detect this ambiguity source.
-# From: Issue #456
+# What: true if any named volume carries this project label
+# Why: label survives docker compose down on the volume
 compose_project_has_named_volumes() {
     local project="$1"
     local volume_names
-    # What: captures the labeled volume listing before checking whether any names exist.
-    # Why: under this file's `pipefail`, a live `docker volume ls | grep -q .`
-    #   pipeline can report SIGPIPE/141 once grep exits on the first match,
-    #   even though the project really does still own named volumes.
-    # From: Issue #456
+    # What: captures the volume listing before testing it
+    # Why: a live pipe can SIGPIPE under pipefail
     volume_names="$(docker volume ls --filter "label=com.docker.compose.project=${project}" --format '{{.Name}}')" \
         || die "Failed to list the volumes of compose project $project (exit $?)."
     grep -q . <<<"$volume_names"
 }
 
-# Archives every Docker named volume used by this stack into its own tar file
-# under volume_root, using a throwaway alpine container to read the volume
-# read-only — avoids needing tar/permissions to reach the volume's real
-# on-disk location directly, which varies by Docker storage driver.
-#
-# The cache volume is skipped outside of `--full` mode: it can be hundreds of
-# GB on a prod install, and config-mode backups (including the automatic
-# pre-update rollback backup every `setup.sh update` runs) are documented as
-# excluding cache payloads — backup_manifest() already gates the bind-mounted
-# cache directories the same way. Docker still reports the bind-backed
-# `proxy-cache` volume's mount `.Type` as "volume" (its driver_opts make it a
-# bind mount under the hood, but Compose still models it as a named volume),
-# so without this it slipped through the mode gate entirely (#669 #1).
+# What: archives named volumes; cache volume only in full
+# Why: cache payloads can be huge; config backups skip them
 backup_compose_volumes() {
     local install_dir="$1" volume_root="$2" mode="$3" volume env_file cache_volume volumes
     compose_stack_available "$install_dir" || return 0
@@ -4161,20 +3943,8 @@ restore_compose_volumes() {
     done <<< "$archives"
 }
 
-# The compose project name ("lancache-ng") is fixed across every compose file
-# in this repo (deploy/quickstart, deploy/prod), not derived from
-# install_dir. Two installs on the same Docker host therefore resolve to the
-# SAME named Docker volumes regardless of install directory. `cmd_restore`'s
-# own --help documents remapping a restore to a different [install-dir] as
-# supported, but restore only stops the stack at the *target* install_dir
-# before restore_compose_volumes wipes and reloads those shared volumes — if
-# a DIFFERENT install on the same host still has compose containers present
-# under the same project name, its volumes can get clobbered without ever
-# being detached from that other install first.
-#
-# What: blocks restore when the fixed Compose project's shared named volumes are still attributable to a different or now-unattributable same-host install.
-# Why: the project name is not per-install-dir, so restores can otherwise overwrite another install's attached state; `docker ps -a` catches live/stopped containers, and the surviving volume label catches the post-`docker compose down` cross-directory ambiguity Docker can no longer attribute to one install path.
-# From: Issue #456
+# What: blocks restore if other installs share the volumes
+# Why: project name is fixed, so volumes are shared
 guard_restore_shared_project_volumes() {
     local install_dir="$1" archived_install_dir="$2" project="$3" container working_dir containers
     command -v docker >/dev/null 2>&1 || return 0
@@ -4452,8 +4222,8 @@ cmd_restore() (
     }
     trap restore_cleanup EXIT
     tar -C "$tmp" -xzf "$archive" || die "Failed to unpack $archive (exit $?)."
-    # What: `-print -quit` stops find at the first match, instead of relying on `head -1` to force an early pipe close.
-    # Why: an early pipe close could SIGPIPE find on a backup nesting more than one `rootfs` directory; this restore path is fixed outright, not just marked safe.
+    # What: find stops at the first rootfs match via -quit
+    # Why: avoids SIGPIPE from an early pipe close
     # From: Issue #1377
     root=$(find "$tmp" -mindepth 2 -maxdepth 2 -type d -name rootfs -print -quit) \
         || die "Failed to search $tmp for the archived rootfs (exit $?)."
