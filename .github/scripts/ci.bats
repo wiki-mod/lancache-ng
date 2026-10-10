@@ -3955,23 +3955,23 @@ CASES
     [ "${status}" -eq 0 ] && [ -z "${output}" ] || { echo "${output}"; return 1; }
 }
 
+# What: moved keys go from <svc>.local.env to .env.local
+# Why: compose maps them from there; the value must stay
+# From: Issue #1683 | PR #1858
 @test "setup moves config/prod overrides into the runtime env once" {
-    # What: moved keys go from <svc>.local.env to .env.local
-    # Why: compose maps them from there; the value must stay
-    # From: Issue #1683 | PR #1858
     local root t="${BATS_TEST_TMPDIR}" rows trows prows svc key target v cp ip bad rest
     local -a plain=()
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
+    _load_setup_sh "${root}" || return 1
     export D="${t}/repo/deploy/prod" E="${t}/repo/deploy/prod/.env.local" Q="${t}/a/qs"
-    _prod_install "${D}"
+    _prod_install "${D}" || return 1
     cp="${t}/repo/config/prod"
-    rows="$(config_prod_moved_keys)"
+    rows="$(config_prod_moved_keys)" || { echo "config_prod_moved_keys rc $?"; return 1; }
     trows="$(awk 'NF == 3' <<< "${rows}")"
     prows="$(awk 'NF == 2 && !seen[$1]++' <<< "${rows}" | awk 'NR <= 2')"
     [ "$(wc -l <<< "${trows}")" -ge 2 ] && [ "$(wc -l <<< "${prows}")" -eq 2 ] || { echo "rows: ${rows}"; return 1; }
-    cp "${D}/.env" "${E}"
-    rest="X${BATS_TEST_NUMBER}=${BATS_TEST_NUMBER}"
+    cp "${D}/.env" "${E}" || return 1
+    rest="$(_val var)=$(_val name)"
     while read -r svc key target; do
         v="$(get_env_assignment_value_raw "${target}" "${E}")"
         [ -n "${v}" ] || { echo "template sets no ${target}"; return 1; }
