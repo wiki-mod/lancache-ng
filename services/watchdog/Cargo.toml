@@ -20,9 +20,9 @@ path = "src/main.rs"
 
 [dependencies]
 LanCache-NG = { path = "../common" }
+liblzma = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-zstd = { workspace = true }
 # What: time with the macros feature.
 # Why: status.json timestamps use format_description!.
 # From: Issue #1683 | PR #1858

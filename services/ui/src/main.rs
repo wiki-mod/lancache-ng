@@ -1676,19 +1676,15 @@ fn syslog_hosts(root: &str) -> Vec<String> {
         .collect()
 }
 
-// What: file content, decompressed by extension.
-// Why: rotated files may be plain, zstd or gzip.
+// What: file content; .xz files are decompressed.
+// Why: the watchdog compresses closed log files to xz.
+// From: Issue #1683
 fn read_syslog_file(path: &Path) -> Option<String> {
     let raw = fs::read(path).ok()?;
     let bytes = match path.extension().and_then(|e| e.to_str()) {
-        Some("zst") => {
+        Some("xz") => {
             let mut out = Vec::new();
-            zstd::stream::copy_decode(&raw[..], &mut out).ok()?;
-            out
-        }
-        Some("gz") => {
-            let mut out = Vec::new();
-            flate2::read::GzDecoder::new(&raw[..])
+            liblzma::read::XzDecoder::new(&raw[..])
                 .read_to_end(&mut out)
                 .ok()?;
             out
@@ -8717,27 +8713,22 @@ mod tests {
         assert!(parse_syslog_line("h", "   \t").is_none());
     }
 
-    // What: syslog files are read plain, zstd or gzip.
-    // Why: rotated files may be compressed; junk is None.
+    // What: syslog files are read plain or from xz.
+    // Why: closed files are xz; junk xz reads as None.
     #[test]
     fn syslog_files_are_decompressed_by_extension() {
         use std::io::Write as _;
         let dir = unique_temp_dir("syslog-read");
         fs::write(dir.join("a.log"), "plain\n").unwrap();
-        let zst = zstd::stream::encode_all(&b"zstd data\n"[..], 0).unwrap();
-        fs::write(dir.join("b.log.zst"), zst).unwrap();
-        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        gz.write_all(b"gzip data\n").unwrap();
-        fs::write(dir.join("c.log.gz"), gz.finish().unwrap()).unwrap();
-        fs::write(dir.join("d.log.zst"), "not zstd").unwrap();
-        fs::write(dir.join("e.log.gz"), "not gzip").unwrap();
+        let mut xz = liblzma::write::XzEncoder::new(Vec::new(), 6);
+        xz.write_all(b"xz data\n").unwrap();
+        fs::write(dir.join("b.log.xz"), xz.finish().unwrap()).unwrap();
+        fs::write(dir.join("d.log.xz"), "not xz").unwrap();
         fs::write(dir.join("f.log"), b"bad \xff byte").unwrap();
         let read = |name: &str| read_syslog_file(&dir.join(name));
         assert_eq!(read("a.log").as_deref(), Some("plain\n"));
-        assert_eq!(read("b.log.zst").as_deref(), Some("zstd data\n"));
-        assert_eq!(read("c.log.gz").as_deref(), Some("gzip data\n"));
-        assert_eq!(read("d.log.zst"), None);
-        assert_eq!(read("e.log.gz"), None);
+        assert_eq!(read("b.log.xz").as_deref(), Some("xz data\n"));
+        assert_eq!(read("d.log.xz"), None);
         assert_eq!(read("missing.log"), None);
         assert_eq!(read("f.log").as_deref(), Some("bad \u{fffd} byte"));
         let _ = fs::remove_dir_all(&dir);
@@ -8857,7 +8848,7 @@ mod tests {
         let root = dir.to_string_lossy().into_owned();
         fs::create_dir_all(dir.join("hostA/subdir")).unwrap();
         fs::write(dir.join("hostA/20261010.log"), "0123456789").unwrap();
-        fs::write(dir.join("hostA/20261011.log.zst"), "01234").unwrap();
+        fs::write(dir.join("hostA/20261011.log.xz"), "01234").unwrap();
         fs::write(dir.join("hostA/20261011.log"), "0").unwrap();
         fs::write(dir.join("hostA/notes.txt"), "012").unwrap();
         fs::create_dir(dir.join("hostB")).unwrap();
@@ -11801,7 +11792,7 @@ mod tests {
         fs::create_dir_all(&host).unwrap();
         for name in [
             "20260101.log",
-            "20260101.log.gz",
+            "20260101.log.xz",
             "20260102.log",
             "2026010x.log",
             "123.log",
