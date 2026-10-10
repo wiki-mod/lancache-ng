@@ -17,23 +17,22 @@ use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Json, Redirect, Response};
 use axum::routing::{MethodRouter, delete, get, post};
 use base64::Engine as _;
-use dhcproto::v4::{DhcpOption, Flags, Message, MessageType, OptionCode};
-use dhcproto::{Decodable, Decoder, Encodable, Encoder};
 use futures_util::StreamExt as _;
 use lancache_ng::config::{
     self, CONTAINER_DHCP, CONTAINER_DHCP_PROBE, CONTAINER_DHCP_PROXY, CONTAINER_DNS_SSL,
     CONTAINER_DNS_STANDARD, CONTAINER_NATS, CONTAINER_NETDATA, CONTAINER_NTP, CONTAINER_PROXY,
     CONTAINER_SYSLOG, CONTAINER_UI, DEFAULT_RECORD_TTL, DhcpMode, LAN_ZONE, NATS_SUBJECT_FLUSH,
-    NATS_SUBJECT_RECORD, NatsLogin, NatsRoles, OutOfRange, PDNS_API_PATH, Uint, canonical_zone,
-    dns_reader_publish, dns_subscribe, is_container, is_dns_name, parse_bool, rollback_zones,
-    zone_url,
+    NATS_SUBJECT_RECORD, NatsLogin, NatsRoles, OPTION_CODE_MAX, OPTION_CODE_MIN, OutOfRange,
+    PDNS_API_PATH, PDNS_AUTH_PORT, Uint, canonical_zone, dns_reader_publish, dns_subscribe,
+    is_container, is_dns_name, option_code, option_data, parse_bool, parse_custom_options,
+    rollback_zones, zone_url,
 };
 use lancache_ng::{
     DesiredRunState, DesiredState, DnsRecord, DockerApi, DockerError, FlushRequest, Place,
-    PowerDns, SnapshotStore, WatchdogStatus, ct_eq, df, die, hex32, http_client, is_placeholder,
-    load_or_create, load_or_create_hex, resolve_shared_secret, shared_secret,
-    shared_secret_file_name, shared_secret_is_placeholder, snapshot_created_unix, unix_secs,
-    write_file, write_if_changed,
+    PowerDns, ProbeAnswer, ProbeReport, SnapshotStore, WatchdogStatus, ct_eq, df, die, hex32,
+    http_client, is_placeholder, load_or_create, load_or_create_hex, resolve_shared_secret,
+    shared_secret, shared_secret_file_name, shared_secret_is_placeholder, snapshot_created_unix,
+    unix_secs, write_file, write_if_changed,
 };
 use nkeys::{KeyPair, XKey};
 use regex::Regex;
@@ -44,7 +43,7 @@ use sha2::{Digest, Sha256, Sha512_256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -140,9 +139,12 @@ struct Config {
     ssl_ip: String,
     dhcp_api_url: String,
     dhcp_api_token: String,
+    dhcp_api_user: String,
     ui_settings_file: String,
     startup_settings: HashMap<&'static str, String>,
     kea_config_snapshot_dir: String,
+    dhcp_probe_request_file: String,
+    dhcp_probe_result_file: String,
     kea_keep_known_good_configs: u32,
     auth_user: Option<String>,
     auth_password: Option<String>,
@@ -329,9 +331,12 @@ impl Config {
             ssl_ip,
             dhcp_api_url: need("DHCP_API_URL")?,
             dhcp_api_token,
+            dhcp_api_user: need("DHCP_API_USER")?,
             ui_settings_file: need("UI_SETTINGS_FILE")?,
             startup_settings,
             kea_config_snapshot_dir: need("KEA_CONFIG_SNAPSHOT_DIR")?,
+            dhcp_probe_request_file: need("DHCP_PROBE_REQUEST_FILE")?,
+            dhcp_probe_result_file: need("DHCP_PROBE_RESULT_FILE")?,
             kea_keep_known_good_configs: knob(
                 "KEEP_KNOWN_GOOD_CONFIGS",
                 u32::MAX.into(),
@@ -2787,9 +2792,6 @@ async fn rotate_token(
         json!({"nats_user": name, "nats_password": nats_password}),
     ))
 }
-// What: the port of the primary's authoritative PowerDNS.
-// Why: pdns.conf.template sets local-port; AXFR uses it.
-const PDNS_AUTH_PORT: u16 = 5300;
 
 // What: lease time limits in seconds.
 // Why: Kea needs a floor; seven days is the documented cap.
@@ -2800,10 +2802,6 @@ const MAX_LEASE_TIME: u32 = 604_800;
 // Why: equals the dhcp image default of DHCP_LEASE_TIME.
 const DEFAULT_LEASE_TIME: u32 = 86_400;
 
-// What: the user of the Kea control agent API.
-// Why: kea-ctrl-agent.conf names it; the ui must match.
-const KEA_API_USER: &str = "admin";
-
 // What: Kea error texts that mean "not found".
 // Why: kea_modify maps exactly these to a 404.
 const KEA_SUBNET_MISSING: &str = "subnet not found";
@@ -2812,32 +2810,6 @@ const KEA_OPTION_MISSING: &str = "custom option not found";
 // What: option codes the dedicated subnet fields own.
 // Why: routers 3, DNS 6, domain 15, NTP 42, search 119.
 const KEA_MANAGED_CODES: [u16; 5] = [3, 6, 15, 42, 119];
-
-// What: option codes dnsmasq-proxy renders itself.
-// Why: router, DNS, domain and NTP; search stays custom.
-const DNSMASQ_MANAGED_CODES: [u16; 4] = [3, 6, 15, 42];
-
-// What: lowest and highest code an operator may add.
-// Why: 0 is padding and 255 is the end marker.
-const OPTION_CODE_MIN: u16 = 1;
-const OPTION_CODE_MAX: u16 = 254;
-
-// What: an option code from form text, range checked.
-// Why: Kea and dnsmasq forms share one number rule.
-fn option_code(raw: &str) -> Result<u16, &'static str> {
-    let code = raw
-        .trim()
-        .parse::<u16>()
-        .map_err(|_| "option code must be a number")?;
-    if !(OPTION_CODE_MIN..=OPTION_CODE_MAX).contains(&code) {
-        return Err("option code must be between 1 and 254");
-    }
-    Ok(code)
-}
-
-// What: longest custom option value in bytes.
-// Why: one form must not write unbounded data into Kea.
-const CUSTOM_OPTION_DATA_MAX: usize = 1024;
 
 // What: BOOTP subnet fields shown as custom options.
 // Why: Kea keeps them top-level, not in option-data.
@@ -2974,7 +2946,10 @@ async fn kea_post(
     state
         .http_client
         .post(format!("{}/", state.config.dhcp_api_url))
-        .basic_auth(KEA_API_USER, Some(&state.config.dhcp_api_token))
+        .basic_auth(
+            &state.config.dhcp_api_user,
+            Some(&state.config.dhcp_api_token),
+        )
         .json(&body)
         .send()
         .await
@@ -3635,22 +3610,6 @@ fn custom_option_key(raw: &str) -> Result<CustomOptionKey, &'static str> {
     Ok(CustomOptionKey::Numeric(code))
 }
 
-// What: one-line option data within the length limit.
-// Why: values are opaque strings; only the shape counts.
-fn option_data(raw: &str) -> Result<String, &'static str> {
-    let data = raw.trim();
-    if data.is_empty() {
-        return Err("option data must not be empty");
-    }
-    if data.len() > CUSTOM_OPTION_DATA_MAX {
-        return Err("option data is too long");
-    }
-    if data.contains(['\n', '\r']) {
-        return Err("option data must fit on one line");
-    }
-    Ok(data.to_string())
-}
-
 // What: option data checked against what the key accepts.
 // Why: next-server needs an IPv4; BOOTP fields are capped.
 fn custom_option_data(key: CustomOptionKey, raw: &str) -> Result<String, &'static str> {
@@ -4261,40 +4220,6 @@ async fn update_dhcp_mode(
     Ok(Redirect::to("/dhcp"))
 }
 
-// What: parse "CODE:VALUE" lines into the stored form.
-// Why: the file keeps one line; entries join by semicolon.
-fn parse_custom_options(raw: &str) -> Result<String, String> {
-    let mut entries = Vec::new();
-    for (index, line) in raw.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let at = |message: &str| format!("line {}: {message}", index + 1);
-        let (code, data) = line
-            .split_once(':')
-            .ok_or_else(|| at("expected CODE:VALUE"))?;
-        // What: refuse the four codes dnsmasq-proxy owns.
-        // Why: dnsmasq renders router, DNS, domain, NTP.
-        let code = option_code(code).map_err(at)?;
-        if DNSMASQ_MANAGED_CODES.contains(&code) {
-            return Err(at(
-                "option code is managed by dedicated dnsmasq-proxy fields",
-            ));
-        }
-        let data = option_data(data).map_err(at)?;
-        // What: refuse a semicolon inside option data.
-        // Why: it is the entry separator on the shell side.
-        if data.contains(';') {
-            return Err(at(
-                "option data must not contain ';' (used as the entry separator)",
-            ));
-        }
-        entries.push(format!("{code}:{data}"));
-    }
-    Ok(entries.join(";"))
-}
-
 // What: validate and save the dnsmasq-proxy settings.
 // Why: a typo should fail here, not at dnsmasq start.
 // From: Issue #450
@@ -4436,562 +4361,38 @@ async fn update_dhcp_relay(
     )?;
     Ok(Redirect::to("/dhcp"))
 }
-// What: DHCP client and server UDP ports (RFC 2131).
-// Why: the probe binds the client port and talks to servers
-const DHCP_CLIENT_PORT: u16 = 68;
-const DHCP_SERVER_PORT: u16 = 67;
 
-// What: how long offers are collected after a DISCOVER.
-// Why: every offering server counts, so the window runs out
-const DISCOVER_WINDOW: Duration = Duration::from_secs(5);
-
-// What: how long the REQUEST waits for an ACK or NAK.
-// Why: a server that just offered should answer at once.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
-
-// What: DISCOVER sends within one window, spread evenly.
-// Why: one dropped broadcast must not read as a clear LAN.
-const DISCOVER_RETRANSMITS: u32 = 3;
-
-// What: container wait limit for one probe run.
-// Why: worst case is 8 s of probing; 30 s covers start-up.
+// What: ui wait limit for one probe answer.
+// Why: worst case is 8 s of probing; 30 s covers a tick.
 const PROBE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
-// What: bytes of probe output kept on a timeout.
-// Why: enough to diagnose, never an unbounded reason text.
-const PROBE_LOG_TAIL_BYTES: usize = 2000;
-
-// What: marker lines of the probe's output.
-// Why: the parent drops older runs and finds the result.
-const PROBE_START_MARKER: &str = "__LANCACHE_DHCP_PROBE_START__";
-const PROBE_RESULT_MARKER: &str = "__LANCACHE_DHCP_PROBE_RESULT_JSON__";
-
-// What: option fields shown per offer, as (label, code).
-// Why: None is the offered address; the rest are options.
-const OFFER_FIELDS: [(&str, Option<OptionCode>); 10] = [
-    ("Server Identifier", Some(OptionCode::ServerIdentifier)),
-    ("IP Offered", None),
-    (
-        "IP Address Lease Time (seconds)",
-        Some(OptionCode::AddressLeaseTime),
-    ),
-    ("Renewal Time (seconds)", Some(OptionCode::Renewal)),
-    ("Rebinding Time (seconds)", Some(OptionCode::Rebinding)),
-    ("Subnet Mask", Some(OptionCode::SubnetMask)),
-    ("Router", Some(OptionCode::Router)),
-    ("Domain Name Server", Some(OptionCode::DomainNameServer)),
-    ("Domain Name", Some(OptionCode::DomainName)),
-    ("Broadcast Address", Some(OptionCode::BroadcastAddr)),
-];
-
-// What: one label and value row of an offer or ACK.
-// Why: servers differ in fields; the page lists what exists
-#[derive(Clone, Deserialize, Serialize)]
-struct Detail {
-    label: String,
-    value: String,
-}
-
-// What: result of the rogue DHCP server check.
-// Why: the status tag is the shape the page script reads.
-#[derive(Deserialize, Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-enum ConflictCheck {
-    Found {
-        output: String,
-        details: Vec<Detail>,
-    },
-    NotFound,
-    Unavailable {
-        reason: String,
-    },
-}
-
-// What: result of the client dry run.
-// Why: a failed run has no lease data, so no details.
-#[derive(Deserialize, Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-enum ClientCheck {
-    Passed {
-        output: String,
-        details: Vec<Detail>,
-    },
-    Failed {
-        output: String,
-    },
-    Unavailable {
-        reason: String,
-    },
-}
-
-// What: both checks of one probe run.
-// Why: the probe prints it as JSON, the ui reads it back.
-#[derive(Deserialize, Serialize)]
-struct ProbeReport {
-    conflict: ConflictCheck,
-    client: ClientCheck,
-}
-
-impl ProbeReport {
-    // What: a report where neither check could run.
-    // Why: both checks share the reason they did not run.
-    fn unavailable(reason: String) -> Self {
-        Self {
-            conflict: ConflictCheck::Unavailable {
-                reason: reason.clone(),
-            },
-            client: ClientCheck::Unavailable { reason },
-        }
-    }
-
-    // What: one status word for the whole report.
-    // Why: severity order; a found server beats everything.
-    fn overall(&self) -> &'static str {
-        match (&self.conflict, &self.client) {
-            (ConflictCheck::Found { .. }, _) => "conflict_found",
-            (ConflictCheck::Unavailable { .. }, _) | (_, ClientCheck::Unavailable { .. }) => {
-                "unavailable"
-            }
-            (_, ClientCheck::Failed { .. }) => "client_failed",
-            (_, ClientCheck::Passed { .. }) => "verified",
-        }
-    }
-}
-
-// What: what the probe keeps of one OFFER or ACK.
-// Why: REQUEST needs address and server; page needs rows.
-struct Offer {
-    address: Option<Ipv4Addr>,
-    server: Option<Ipv4Addr>,
-    details: Vec<Detail>,
-}
-
-// What: read an OFFER or ACK into address, server, rows.
-// Why: both message types carry the same option set.
-fn read_offer(msg: &Message) -> Offer {
-    let opts = msg.opts();
-    let address = Some(msg.yiaddr()).filter(|a| !a.is_unspecified());
-    let option_text = |code: OptionCode| -> Option<String> {
-        Some(match opts.get(code)? {
-            DhcpOption::ServerIdentifier(a)
-            | DhcpOption::SubnetMask(a)
-            | DhcpOption::BroadcastAddr(a) => a.to_string(),
-            DhcpOption::AddressLeaseTime(s) | DhcpOption::Renewal(s) | DhcpOption::Rebinding(s) => {
-                s.to_string()
-            }
-            DhcpOption::Router(list) => list.first()?.to_string(),
-            DhcpOption::DomainNameServer(list) => list
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", "),
-            DhcpOption::DomainName(name) => name.clone(),
-            _ => return None,
-        })
-    };
-    let details = OFFER_FIELDS
-        .iter()
-        .filter_map(|(label, code)| {
-            let value = match code {
-                Some(code) => option_text(*code),
-                None => address.map(|a| a.to_string()),
-            }?;
-            (!value.is_empty()).then(|| Detail {
-                label: label.to_string(),
-                value,
-            })
-        })
-        .collect();
-    let server = match opts.get(OptionCode::ServerIdentifier) {
-        Some(DhcpOption::ServerIdentifier(a)) => Some(*a),
-        _ => None,
-    };
-    Offer {
-        address,
-        server,
-        details,
-    }
-}
-
-// What: true when a message has the given DHCP type.
-// Why: replies of other types on the segment are ignored.
-fn is_kind(msg: &Message, kind: MessageType) -> bool {
-    matches!(msg.opts().get(OptionCode::MessageType), Some(DhcpOption::MessageType(t)) if t == &kind)
-}
-
-// What: build a DHCP message of one type.
-// Why: DISCOVER, REQUEST and RELEASE differ only in options
-fn dhcp_message(
-    xid: u32,
-    chaddr: &[u8; 6],
-    ciaddr: Ipv4Addr,
-    kind: MessageType,
-    options: Vec<DhcpOption>,
-) -> Message {
-    let none = Ipv4Addr::UNSPECIFIED;
-    let mut msg = Message::new_with_id(xid, ciaddr, none, none, none, chaddr);
-    // What: set the broadcast flag on all but the RELEASE.
-    // Why: no client address, so replies must broadcast.
-    if !matches!(kind, MessageType::Release) {
-        msg.set_flags(Flags::default().set_broadcast());
-    }
-    msg.opts_mut().insert(DhcpOption::MessageType(kind));
-    for option in options {
-        msg.opts_mut().insert(option);
-    }
-    msg
-}
-
-// What: the options asked of every server.
-// Why: exactly the fields the probe can show.
-fn request_list() -> DhcpOption {
-    DhcpOption::ParameterRequestList(
-        OFFER_FIELDS
-            .iter()
-            .filter_map(|(_, code)| *code)
-            .filter(|code| !matches!(code, OptionCode::ServerIdentifier))
-            .collect(),
-    )
-}
-
-// What: encode and send one message.
-// Why: all probe traffic goes out through this one path.
-fn send_dhcp(socket: &UdpSocket, msg: &Message, to: SocketAddrV4) -> io::Result<()> {
-    let mut buffer = Vec::new();
-    msg.encode(&mut Encoder::new(&mut buffer))
-        .map_err(io::Error::other)?;
-    socket.send_to(&buffer, to).map(|_| ())
-}
-
-// What: feed replies of one exchange to a handler.
-// Why: stops at the deadline or when the handler says done.
-fn listen(
-    socket: &UdpSocket,
-    xid: u32,
-    until: Instant,
-    mut handle: impl FnMut(&Message) -> bool,
-) -> io::Result<()> {
-    let mut buffer = [0u8; 1500];
-    loop {
-        let left = until.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Ok(());
-        }
-        socket.set_read_timeout(Some(left))?;
-        match socket.recv_from(&mut buffer) {
-            // What: skip datagrams that are not ours.
-            // Why: others share the broadcast domain.
-            Ok((n, _)) => {
-                if let Ok(msg) = Message::decode(&mut Decoder::new(&buffer[..n]))
-                    && msg.xid() == xid
-                    && handle(&msg)
-                {
-                    return Ok(());
-                }
-            }
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-// What: REQUEST the first offer, wait for the ACK, release.
-// Why: proves a client can get a lease; it is returned.
-fn dry_run(
-    socket: &UdpSocket,
-    xid: u32,
-    chaddr: &[u8; 6],
-    offer: &Offer,
-    destination: SocketAddrV4,
-) -> ClientCheck {
-    let (Some(address), Some(server)) = (offer.address, offer.server) else {
-        return ClientCheck::Failed {
-            output: "the DHCPOFFER was missing a requested IP or server identifier, \
-                     so no DHCPREQUEST could be built"
-                .into(),
-        };
-    };
-    let request = dhcp_message(
-        xid,
-        chaddr,
-        Ipv4Addr::UNSPECIFIED,
-        MessageType::Request,
-        vec![
-            DhcpOption::RequestedIpAddress(address),
-            DhcpOption::ServerIdentifier(server),
-            request_list(),
-        ],
-    );
-    if let Err(e) = send_dhcp(socket, &request, destination) {
-        return ClientCheck::Unavailable {
-            reason: format!("failed to send DHCPREQUEST: {e}"),
-        };
-    }
-    let mut verdict: Result<Offer, &str> = Err("no ACK received before the timeout");
-    let heard = listen(socket, xid, Instant::now() + REQUEST_TIMEOUT, |msg| {
-        if is_kind(msg, MessageType::Ack) {
-            let ack = read_offer(msg);
-            if ack.server == Some(server) {
-                verdict = Ok(ack);
-                return true;
-            }
-            verdict = Err("received an ACK, but not from the expected server identifier");
-        } else if is_kind(msg, MessageType::Nak) {
-            verdict = Err("server sent DHCPNAK for the requested address");
-            return true;
-        }
-        false
-    });
-    if let Err(e) = heard {
-        return ClientCheck::Unavailable {
-            reason: format!("failed while waiting for DHCPACK: {e}"),
-        };
-    }
-    let ack = match verdict {
-        Ok(ack) => ack,
-        Err(reason) => {
-            return ClientCheck::Failed {
-                output: reason.into(),
-            };
-        }
-    };
-    // What: return the leased address to the server's pool.
-    // Why: best effort; the lease would expire on its own.
-    if let Some(leased) = ack.address {
-        let release = dhcp_message(
-            rand::random(),
-            chaddr,
-            leased,
-            MessageType::Release,
-            vec![DhcpOption::ServerIdentifier(server)],
-        );
-        let _ = send_dhcp(
-            socket,
-            &release,
-            SocketAddrV4::new(server, DHCP_SERVER_PORT),
-        );
-    }
-    ClientCheck::Passed {
-        output: match ack.address {
-            Some(ip) => format!("DHCP client dry-run succeeded, assigned {ip}"),
-            None => "DHCP client dry-run succeeded".into(),
-        },
-        details: ack.details,
-    }
-}
-
-// What: one broadcast round answering both checks.
-// Why: offers expose rogue servers; first one dry-runs.
-fn run_probe() -> ProbeReport {
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, DHCP_CLIENT_PORT)).and_then(|socket| {
-        socket.set_broadcast(true)?;
-        Ok(socket)
-    });
-    let socket = match socket {
-        Ok(socket) => socket,
-        Err(e) => {
-            return ProbeReport::unavailable(format!(
-                "could not open a DHCP broadcast socket: {e}"
-            ));
-        }
-    };
-    let destination = SocketAddrV4::new(Ipv4Addr::BROADCAST, DHCP_SERVER_PORT);
-    // What: one transaction id for DISCOVER and REQUEST.
-    // Why: a server honours a REQUEST only for its offer.
-    let xid: u32 = rand::random();
-    // What: a random locally administered unicast MAC.
-    // Why: the probe must not look like a real device.
-    let mut chaddr: [u8; 6] = rand::random();
-    chaddr[0] = (chaddr[0] | 0x02) & !0x01;
-
-    let discover = dhcp_message(
-        xid,
-        &chaddr,
-        Ipv4Addr::UNSPECIFIED,
-        MessageType::Discover,
-        vec![request_list()],
-    );
-    let end = Instant::now() + DISCOVER_WINDOW;
-    let mut offers: Vec<Offer> = Vec::new();
-    for attempt in 1..=DISCOVER_RETRANSMITS {
-        if let Err(e) = send_dhcp(&socket, &discover, destination) {
-            return ProbeReport::unavailable(format!("failed to broadcast DHCPDISCOVER: {e}"));
-        }
-        let slice = Instant::now() + DISCOVER_WINDOW / DISCOVER_RETRANSMITS;
-        let until = if attempt == DISCOVER_RETRANSMITS {
-            end
-        } else {
-            slice.min(end)
-        };
-        // What: a failed read ends the slice only.
-        // Why: later retransmits may still collect offers.
-        let _ = listen(&socket, xid, until, |msg| {
-            if is_kind(msg, MessageType::Offer) {
-                let offer = read_offer(msg);
-                // What: count each server once.
-                // Why: answering twice is no second rogue.
-                let seen = offers
-                    .iter()
-                    .any(|o| o.server.is_some() && o.server == offer.server);
-                if !seen {
-                    offers.push(offer);
-                }
-            }
-            false
-        });
-    }
-
-    let conflict = match offers.first() {
-        None => ConflictCheck::NotFound,
-        Some(first) => ConflictCheck::Found {
-            output: first
-                .server
-                .map_or_else(|| "unknown".to_string(), |ip| ip.to_string()),
-            details: offers.iter().flat_map(|o| o.details.clone()).collect(),
-        },
-    };
-    let client = match offers.first() {
-        None => ClientCheck::Failed {
-            output: format!(
-                "no DHCPOFFER received within {:.0}s",
-                DISCOVER_WINDOW.as_secs_f64()
-            ),
-        },
-        Some(first) => dry_run(&socket, xid, &chaddr, first, destination),
-    };
-    ProbeReport { conflict, client }
-}
-
-// What: the probe container's whole job: print the result.
-// Why: every outcome exits 0; the update gate needs that.
-// From: Issue #1288
-fn print_probe_report() {
-    let report = run_probe();
-    println!("{PROBE_START_MARKER}");
-    // What: an empty line if serializing ever failed.
-    // Why: the ui then reports a bad result, not a hang.
-    let json = serde_json::to_string(&report).unwrap_or_default();
-    println!("{PROBE_RESULT_MARKER} {json}");
-}
-
-// What: the last bytes of a text, cut at a char boundary.
-// Why: a byte slice mid-character would panic the diagnosis
-fn tail_bytes(text: &str, max: usize) -> String {
-    let text = text.trim();
-    if text.len() <= max {
-        return text.to_string();
-    }
-    let start = (text.len() - max..=text.len())
-        .find(|i| text.is_char_boundary(*i))
-        .unwrap_or(text.len());
-    format!("...(truncated)... {}", text[start..].trim())
-}
-
-// What: the output of the newest run in a log text.
-// Why: Docker's since filter is coarse; old runs leak in
-fn current_run(logs: &str) -> &str {
-    logs.rsplit_once(PROBE_START_MARKER)
-        .map_or(logs, |(_, current)| current)
-}
-
-// What: run the probe container once; return its output.
-// Why: the proxy only allows start, wait and logs.
-async fn run_dhcp_probe(docker: &DockerApi) -> Result<String, String> {
-    let failed = |e: anyhow::Error| format!("Failed to execute DHCP check: {e:#}");
-    let container = container_name(CONTAINER_DHCP_PROBE).map_err(failed)?;
-    docker_stop_if_present(docker, CONTAINER_DHCP_PROBE)
-        .await
-        .map_err(failed)?;
-    // What: remember the start second for the log filter.
-    // Why: the logs call must not read the previous run.
-    let since = unix_secs();
-    docker_start(docker, CONTAINER_DHCP_PROBE)
-        .await
-        .map_err(failed)?;
-
-    let begun = Instant::now();
-    let exit_code = match docker.wait(container, Some(PROBE_WAIT_TIMEOUT)).await {
-        Ok(code) => code,
-        // What: keep output and stop a hanging container.
-        // Why: a bare timeout must say what the probe did.
-        Err(DockerError::Timeout) => {
-            let tail = match docker.logs(container, since, Some(DOCKER_TIMEOUT)).await {
-                Ok(logs) => match tail_bytes(current_run(&logs), PROBE_LOG_TAIL_BYTES) {
-                    tail if tail.is_empty() => {
-                        "(none -- the container produced no output before the timeout)".to_string()
-                    }
-                    tail => tail,
-                },
-                Err(e) => format!("(failed to capture probe container logs: {e})"),
-            };
-            let stopped = match docker_stop_if_present(docker, CONTAINER_DHCP_PROBE).await {
-                Ok(()) => "the presumed-stuck container was stopped".to_string(),
-                Err(e) => format!("stopping the presumed-stuck container also failed: {e:#}"),
-            };
-            return Err(format!(
-                "DHCP probe timed out after {:.0}s with no result from the container ({stopped}). \
-                 Captured probe output up to the timeout: {tail}",
-                begun.elapsed().as_secs_f64()
-            ));
-        }
-        Err(e) => {
-            return Err(format!(
-                "Failed to execute DHCP check: read DHCP probe wait response: {e}"
-            ));
-        }
-    };
-    let logs = docker
-        .logs(container, since, Some(DOCKER_TIMEOUT))
-        .await
-        .map_err(|e| format!("Failed to execute DHCP check: read DHCP probe logs: {e}"))?;
-    let output = current_run(&logs).to_string();
-    if exit_code != 0 {
-        return Err(format!(
-            "DHCP probe container exited with code {exit_code}: {}",
-            output.trim()
-        ));
-    }
-    Ok(output)
-}
-
-// What: run one probe and read its JSON result line.
-// Why: the last result line wins over any stale one.
-async fn check_dhcp_probe(state: &AppState) -> ProbeReport {
-    // What: serialize probe runs on the one container.
-    // Why: concurrent runs would restart each other.
-    let _guard = state.dhcp_probe_lock.lock().await;
-    let output = match run_dhcp_probe(&state.docker).await {
-        Ok(output) => output,
-        Err(reason) => return ProbeReport::unavailable(reason),
-    };
-    let Some(json) = output
-        .lines()
-        .rev()
-        .find_map(|line| line.trim().strip_prefix(PROBE_RESULT_MARKER).map(str::trim))
-    else {
-        return ProbeReport::unavailable("dhcp-probe produced no JSON result line".into());
-    };
-    serde_json::from_str(json)
-        .unwrap_or_else(|e| ProbeReport::unavailable(format!("malformed dhcp-probe result: {e}")))
-}
-
-// What: run the DHCP conflict check; POST because it acts.
-// Why: starting a container is no safe GET; POST has CSRF.
-// From: Issue #947
+// What: ask the dhcp supervisor for one probe run.
+// Why: the ui has no Docker; a request file starts it.
+// From: Issue #947 | Issue #1683
 async fn check_dhcp_conflict(State(state): Shared) -> Json<Value> {
-    let report = check_dhcp_probe(&state).await;
-    Json(json!({
-        "status": report.overall(),
-        "conflict": report.conflict,
-        "client": report.client,
-    }))
+    // What: one probe request at a time.
+    // Why: a second request would replace the first id.
+    let _guard = state.dhcp_probe_lock.lock().await;
+    let unavailable = |reason: String| Json(ProbeReport::unavailable(reason).page());
+    let id = hex32();
+    let request = Path::new(&state.config.dhcp_probe_request_file);
+    if let Err(e) = write_file(request, id.as_bytes(), 0o644, Place::Replace) {
+        return unavailable(format!("cannot write {}: {e}", request.display()));
+    }
+    let deadline = Instant::now() + PROBE_WAIT_TIMEOUT;
+    while Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let answer = fs::read_to_string(&state.config.dhcp_probe_result_file)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<ProbeAnswer>(&raw).ok());
+        if let Some(answer) = answer.filter(|a| a.id == id) {
+            return Json(answer.page);
+        }
+    }
+    unavailable(format!(
+        "no DHCP probe answer within {}s; is the dhcp container running?",
+        PROBE_WAIT_TIMEOUT.as_secs()
+    ))
 }
 // What: TTL limits for operator records, in seconds.
 // Why: 2^31-1 is the RFC 2181 ceiling; above it reads as 0.
@@ -6566,6 +5967,7 @@ fn ui_written_dirs(cfg: &Config, log_file: &Path) -> Vec<PathBuf> {
         &cfg.nats_xkey_seed_path,
         &cfg.desired_state_file,
         &cfg.nats_auth_callout_path,
+        &cfg.dhcp_probe_request_file,
     ];
     let mut dirs: Vec<PathBuf> = files
         .iter()
@@ -6573,6 +5975,7 @@ fn ui_written_dirs(cfg: &Config, log_file: &Path) -> Vec<PathBuf> {
         .chain([
             PathBuf::from(&cfg.dns_standard_state_dir),
             PathBuf::from(&cfg.dns_ssl_state_dir),
+            PathBuf::from(&cfg.kea_config_snapshot_dir),
         ])
         .chain(log_file.parent().map(Path::to_path_buf))
         .filter(|dir| !dir.as_os_str().is_empty())
@@ -6967,16 +6370,12 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-// What: pick root prep, the DHCP probe, or the server.
+// What: pick root prep or the server.
 // Why: one-shots run as root as is; the server drops root.
 // From: Issue #1288 | PR #1858
 fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
         Some("--prepare") => prepare_runtime(&std::env::args().skip(2).collect::<Vec<_>>()),
-        Some("--dhcp-probe") => {
-            print_probe_report();
-            return Ok(());
-        }
         _ => container_root_start(),
     }
     run()
@@ -6988,7 +6387,6 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use lancache_ng::{serve_canned, unique_temp_dir};
-    use std::net::SocketAddr;
 
     // What: the domain rule agrees with the shared fixture.
     // Why: the shell validator reads the same cases.
@@ -7136,22 +6534,6 @@ mod tests {
         assert_eq!(soa_query(0x1234, "lan."), want);
         let two = soa_query(0, "a.lan");
         assert_eq!(&two[12..], &[1, b'a', 3, b'l', b'a', b'n', 0, 0, 6, 0, 1]);
-    }
-
-    // What: these constants equal their owner files.
-    // Why: a drift would show or send a wrong value to Kea.
-    #[test]
-    fn constants_match_their_owner_files() {
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../dhcp");
-        let entry = fs::read_to_string(format!("{dir}/entrypoint.sh")).unwrap();
-        assert!(entry.contains(": \"${DHCP_LEASE_TIME:=86400}\""));
-        assert_eq!(DEFAULT_LEASE_TIME, 86_400);
-        let agent = fs::read_to_string(format!("{dir}/kea-ctrl-agent.conf")).unwrap();
-        assert!(agent.contains("\"user\": \"admin\""));
-        assert_eq!(KEA_API_USER, "admin");
-        let pdns = fs::read_to_string(format!("{dir}/../dns/pdns.conf.template")).unwrap();
-        assert!(pdns.lines().any(|line| line == "local-port=5300"));
-        assert_eq!(PDNS_AUTH_PORT, 5300);
     }
 
     // What: option codes parse in 1..=254, nothing else.
@@ -7522,7 +6904,7 @@ mod tests {
         assert_eq!(fields.number::<u32>("none"), None);
     }
 
-    const TEXT_KEYS: [&str; 38] = [
+    const TEXT_KEYS: [&str; 41] = [
         "STANDARD_LOG",
         "PROXY_STANDARD_URL",
         "STANDARD_IP",
@@ -7543,8 +6925,11 @@ mod tests {
         "DNS_SSL_SERVICE",
         "PROXY_SSL_SERVICE",
         "DHCP_API_URL",
+        "DHCP_API_USER",
         "UI_SETTINGS_FILE",
         "KEA_CONFIG_SNAPSHOT_DIR",
+        "DHCP_PROBE_REQUEST_FILE",
+        "DHCP_PROBE_RESULT_FILE",
         "PDNS_AUTH_URL",
         "PDNS_REC_URL",
         "DNS_ROLLBACK_URL",
@@ -7619,6 +7004,8 @@ mod tests {
         assert_eq!(cfg.dhcp_api_url, "v-DHCP_API_URL");
         assert_eq!(cfg.ui_settings_file, "v-UI_SETTINGS_FILE");
         assert_eq!(cfg.kea_config_snapshot_dir, "v-KEA_CONFIG_SNAPSHOT_DIR");
+        assert_eq!(cfg.dhcp_probe_request_file, "v-DHCP_PROBE_REQUEST_FILE");
+        assert_eq!(cfg.dhcp_probe_result_file, "v-DHCP_PROBE_RESULT_FILE");
         assert_eq!(
             cfg.pdns_auth_api,
             "v-PDNS_AUTH_URL/api/v1/servers/localhost"
@@ -9685,462 +9072,6 @@ mod tests {
         assert!(ptr_rows(&[json!({"name": "x", "type": "PTR"})]).is_empty());
     }
 
-    // What: option lines become the stored one-line form.
-    // Why: the file keeps one line; entries join by ';'.
-    #[test]
-    fn proxy_option_lines_join_or_name_the_line() {
-        assert_eq!(
-            parse_custom_options("66:tftp\n\n 67 : boot.0 \n"),
-            Ok("66:tftp;67:boot.0".to_string())
-        );
-        assert_eq!(parse_custom_options(""), Ok(String::new()));
-        let cases = [
-            ("66", "line 1: expected CODE:VALUE"),
-            ("66:ok\nabc:x", "line 2: option code must be a number"),
-            (
-                "3:10.0.0.1",
-                "line 1: option code is managed by dedicated dnsmasq-proxy fields",
-            ),
-            (
-                "66:a;b",
-                "line 1: option data must not contain ';' (used as the entry separator)",
-            ),
-            ("66: ", "line 1: option data must not be empty"),
-        ];
-        for (raw, message) in cases {
-            assert_eq!(
-                parse_custom_options(raw),
-                Err(message.to_string()),
-                "{raw:?}"
-            );
-        }
-        assert!(parse_custom_options("119:search.lan").is_ok());
-    }
-
-    // What: the probe report has one overall word.
-    // Why: severity order; a found server beats everything.
-    #[test]
-    fn probe_reports_rank_their_checks() {
-        let found = || ConflictCheck::Found {
-            output: "10.0.0.1".into(),
-            details: vec![],
-        };
-        let passed = || ClientCheck::Passed {
-            output: String::new(),
-            details: vec![],
-        };
-        let failed = || ClientCheck::Failed {
-            output: String::new(),
-        };
-        let gone = || ClientCheck::Unavailable {
-            reason: String::new(),
-        };
-        let no_conflict = || ConflictCheck::Unavailable {
-            reason: String::new(),
-        };
-        let overall = |conflict, client| ProbeReport { conflict, client }.overall();
-        assert_eq!(overall(found(), gone()), "conflict_found");
-        assert_eq!(overall(found(), passed()), "conflict_found");
-        assert_eq!(overall(no_conflict(), passed()), "unavailable");
-        assert_eq!(overall(ConflictCheck::NotFound, gone()), "unavailable");
-        assert_eq!(overall(ConflictCheck::NotFound, failed()), "client_failed");
-        assert_eq!(overall(ConflictCheck::NotFound, passed()), "verified");
-        let report = ProbeReport::unavailable("why".to_string());
-        assert_eq!(
-            serde_json::to_value(&report).unwrap(),
-            json!({
-            "conflict": {"status": "unavailable", "reason": "why"},
-            "client": {"status": "unavailable", "reason": "why"}})
-        );
-        assert_eq!(report.overall(), "unavailable");
-    }
-
-    // What: a test OFFER with a server's option set.
-    // Why: read_offer must show exactly the fields present.
-    fn offer_message(xid: u32, kind: MessageType, yiaddr: Ipv4Addr, server: Ipv4Addr) -> Message {
-        let mut msg = dhcp_message(
-            xid,
-            &[2, 0, 0, 0, 0, 1],
-            Ipv4Addr::UNSPECIFIED,
-            kind,
-            vec![],
-        );
-        msg.set_yiaddr(yiaddr);
-        let extra = [
-            DhcpOption::ServerIdentifier(server),
-            DhcpOption::AddressLeaseTime(3600),
-            DhcpOption::Renewal(1800),
-            DhcpOption::Rebinding(3150),
-            DhcpOption::SubnetMask(Ipv4Addr::new(255, 255, 255, 0)),
-            DhcpOption::Router(vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)]),
-            DhcpOption::DomainNameServer(vec![
-                Ipv4Addr::new(10, 0, 0, 3),
-                Ipv4Addr::new(10, 0, 0, 4),
-            ]),
-            DhcpOption::DomainName("lan.example".to_string()),
-            DhcpOption::BroadcastAddr(Ipv4Addr::new(10, 0, 0, 255)),
-        ];
-        for option in extra {
-            msg.opts_mut().insert(option);
-        }
-        msg
-    }
-
-    // What: an OFFER becomes address, server and rows.
-    // Why: REQUEST needs address and server; page, rows.
-    #[test]
-    fn dhcp_offers_become_labelled_rows() {
-        let server = Ipv4Addr::new(10, 0, 0, 9);
-        let msg = offer_message(5, MessageType::Offer, Ipv4Addr::new(10, 0, 0, 50), server);
-        let offer = read_offer(&msg);
-        assert_eq!(offer.address, Some(Ipv4Addr::new(10, 0, 0, 50)));
-        assert_eq!(offer.server, Some(server));
-        let rows: Vec<(&str, &str)> = offer
-            .details
-            .iter()
-            .map(|d| (d.label.as_str(), d.value.as_str()))
-            .collect();
-        assert_eq!(
-            rows,
-            [
-                ("Server Identifier", "10.0.0.9"),
-                ("IP Offered", "10.0.0.50"),
-                ("IP Address Lease Time (seconds)", "3600"),
-                ("Renewal Time (seconds)", "1800"),
-                ("Rebinding Time (seconds)", "3150"),
-                ("Subnet Mask", "255.255.255.0"),
-                ("Router", "10.0.0.1"),
-                ("Domain Name Server", "10.0.0.3, 10.0.0.4"),
-                ("Domain Name", "lan.example"),
-                ("Broadcast Address", "10.0.0.255"),
-            ]
-        );
-        let bare = dhcp_message(
-            1,
-            &[2, 0, 0, 0, 0, 2],
-            Ipv4Addr::UNSPECIFIED,
-            MessageType::Offer,
-            vec![],
-        );
-        let none = read_offer(&bare);
-        assert!(none.address.is_none() && none.server.is_none() && none.details.is_empty());
-        assert!(is_kind(&msg, MessageType::Offer));
-        assert!(!is_kind(&msg, MessageType::Ack));
-        assert!(!is_kind(&Message::default(), MessageType::Offer));
-    }
-
-    // What: probe messages carry type, flags and options.
-    // Why: RELEASE has a client address and no broadcast.
-    #[test]
-    fn dhcp_messages_carry_type_flags_and_options() {
-        let mac = [2, 1, 2, 3, 4, 5];
-        let discover = dhcp_message(
-            7,
-            &mac,
-            Ipv4Addr::UNSPECIFIED,
-            MessageType::Discover,
-            vec![request_list()],
-        );
-        assert_eq!(discover.xid(), 7);
-        assert!(discover.flags().broadcast());
-        assert!(is_kind(&discover, MessageType::Discover));
-        assert_eq!(&discover.chaddr()[..6], &mac);
-        let release = dhcp_message(
-            8,
-            &mac,
-            Ipv4Addr::new(10, 0, 0, 5),
-            MessageType::Release,
-            vec![],
-        );
-        assert!(!release.flags().broadcast());
-        assert_eq!(release.ciaddr(), Ipv4Addr::new(10, 0, 0, 5));
-        let DhcpOption::ParameterRequestList(codes) = request_list() else {
-            panic!("a parameter request list");
-        };
-        assert_eq!(
-            codes,
-            [
-                OptionCode::AddressLeaseTime,
-                OptionCode::Renewal,
-                OptionCode::Rebinding,
-                OptionCode::SubnetMask,
-                OptionCode::Router,
-                OptionCode::DomainNameServer,
-                OptionCode::DomainName,
-                OptionCode::BroadcastAddr
-            ]
-        );
-    }
-
-    // What: a message goes out over UDP, heard by xid.
-    // Why: others share the broadcast domain.
-    #[test]
-    fn dhcp_listening_filters_by_transaction() {
-        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let SocketAddr::V4(to) = receiver.local_addr().unwrap() else {
-            panic!("ipv4")
-        };
-        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let other = dhcp_message(
-            1,
-            &[2; 6],
-            Ipv4Addr::UNSPECIFIED,
-            MessageType::Offer,
-            vec![],
-        );
-        let ours = dhcp_message(2, &[2; 6], Ipv4Addr::UNSPECIFIED, MessageType::Ack, vec![]);
-        send_dhcp(&sender, &other, to).unwrap();
-        send_dhcp(&sender, &ours, to).unwrap();
-        let mut seen = Vec::new();
-        let until = Instant::now() + Duration::from_secs(2);
-        listen(&receiver, 2, until, |msg| {
-            seen.push(is_kind(msg, MessageType::Ack));
-            true
-        })
-        .unwrap();
-        assert_eq!(seen, [true]);
-        let mut calls = 0;
-        send_dhcp(&sender, &ours, to).unwrap();
-        listen(
-            &receiver,
-            2,
-            Instant::now() + Duration::from_millis(300),
-            |_| {
-                calls += 1;
-                false
-            },
-        )
-        .unwrap();
-        assert_eq!(calls, 1);
-        let late = Instant::now();
-        listen(&receiver, 2, late, |_| panic!("no wait past the deadline")).unwrap();
-    }
-
-    // What: a stand-in DHCP server for the dry run.
-    // Why: the client side is tested without a network.
-    fn dry_run_server(
-        reply: Option<(MessageType, Ipv4Addr)>,
-    ) -> (SocketAddrV4, std::thread::JoinHandle<Option<Message>>) {
-        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
-        server
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let SocketAddr::V4(addr) = server.local_addr().unwrap() else {
-            panic!("ipv4")
-        };
-        let handle = std::thread::spawn(move || {
-            let mut buf = [0u8; 1500];
-            let (n, from) = server.recv_from(&mut buf).ok()?;
-            let request = Message::decode(&mut Decoder::new(&buf[..n])).ok()?;
-            if let Some((kind, server_id)) = reply {
-                let answer =
-                    offer_message(request.xid(), kind, Ipv4Addr::new(10, 0, 0, 50), server_id);
-                send_dhcp(
-                    &server,
-                    &answer,
-                    match from {
-                        SocketAddr::V4(v4) => v4,
-                        SocketAddr::V6(_) => return None,
-                    },
-                )
-                .ok()?;
-            }
-            Some(request)
-        });
-        (addr, handle)
-    }
-
-    fn offer_for(server: Ipv4Addr) -> Offer {
-        Offer {
-            address: Some(Ipv4Addr::new(10, 0, 0, 50)),
-            server: Some(server),
-            details: vec![],
-        }
-    }
-
-    // What: the dry run requests the offer, reads the ACK.
-    // Why: it proves a client can get a lease.
-    #[test]
-    fn dry_run_passes_on_an_ack_from_the_offering_server() {
-        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let server_ip = Ipv4Addr::new(10, 0, 0, 9);
-        let (addr, handle) = dry_run_server(Some((MessageType::Ack, server_ip)));
-        let check = dry_run(&client, 77, &[2; 6], &offer_for(server_ip), addr);
-        let ClientCheck::Passed { output, details } = check else {
-            panic!("passed")
-        };
-        assert_eq!(output, "DHCP client dry-run succeeded, assigned 10.0.0.50");
-        assert_eq!(details.len(), 10);
-        let request = handle.join().unwrap().unwrap();
-        assert_eq!(request.xid(), 77);
-        assert!(is_kind(&request, MessageType::Request));
-        assert_eq!(
-            request.opts().get(OptionCode::RequestedIpAddress),
-            Some(&DhcpOption::RequestedIpAddress(Ipv4Addr::new(10, 0, 0, 50)))
-        );
-        assert_eq!(
-            request.opts().get(OptionCode::ServerIdentifier),
-            Some(&DhcpOption::ServerIdentifier(server_ip))
-        );
-        assert!(
-            request
-                .opts()
-                .get(OptionCode::ParameterRequestList)
-                .is_some()
-        );
-    }
-
-    // What: the dry run fails clearly on NAK or bad input.
-    // Why: the page tells the operator what went wrong.
-    #[test]
-    fn dry_run_fails_with_the_reason() {
-        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let server_ip = Ipv4Addr::new(10, 0, 0, 9);
-        let (addr, _handle) = dry_run_server(Some((MessageType::Nak, server_ip)));
-        let nak = dry_run(&client, 5, &[2; 6], &offer_for(server_ip), addr);
-        let ClientCheck::Failed { output } = nak else {
-            panic!("failed")
-        };
-        assert_eq!(output, "server sent DHCPNAK for the requested address");
-        let missing = Offer {
-            address: None,
-            server: Some(server_ip),
-            details: vec![],
-        };
-        let (addr, _handle) = dry_run_server(None);
-        let ClientCheck::Failed { output } = dry_run(&client, 5, &[2; 6], &missing, addr) else {
-            panic!("failed")
-        };
-        assert!(
-            output.starts_with("the DHCPOFFER was missing a requested IP or server identifier")
-        );
-        let no_server = Offer {
-            address: Some(Ipv4Addr::new(10, 0, 0, 5)),
-            server: None,
-            details: vec![],
-        };
-        assert!(matches!(
-            dry_run(&client, 5, &[2; 6], &no_server, addr),
-            ClientCheck::Failed { .. }
-        ));
-    }
-
-    // What: a wrong-server ACK or silence times out.
-    // Why: only the offering server's ACK counts.
-    #[test]
-    fn dry_run_times_out_on_silence_or_a_foreign_ack() {
-        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let server_ip = Ipv4Addr::new(10, 0, 0, 9);
-        let (addr, _handle) = dry_run_server(Some((MessageType::Ack, Ipv4Addr::new(10, 0, 0, 77))));
-        let ClientCheck::Failed { output } =
-            dry_run(&client, 5, &[2; 6], &offer_for(server_ip), addr)
-        else {
-            panic!("failed")
-        };
-        assert_eq!(
-            output,
-            "received an ACK, but not from the expected server identifier"
-        );
-        let (addr, _handle) = dry_run_server(None);
-        let ClientCheck::Failed { output } =
-            dry_run(&client, 6, &[2; 6], &offer_for(server_ip), addr)
-        else {
-            panic!("failed")
-        };
-        assert_eq!(output, "no ACK received before the timeout");
-    }
-
-    // What: log tails cut at char borders, runs by marker.
-    // Why: a slice mid-character would panic the diagnosis.
-    #[test]
-    fn probe_logs_are_cut_safely() {
-        assert_eq!(tail_bytes("  short  ", 100), "short");
-        assert_eq!(tail_bytes("abcdefghij", 4), "...(truncated)... ghij");
-        assert_eq!(tail_bytes("aäb", 2), "...(truncated)... b");
-        assert_eq!(tail_bytes("aäb", 3), "...(truncated)... äb");
-        assert_eq!(tail_bytes("abc", 3), "abc");
-        assert_eq!(
-            current_run("old\n__LANCACHE_DHCP_PROBE_START__\nnew"),
-            "\nnew"
-        );
-        assert_eq!(
-            current_run("a__LANCACHE_DHCP_PROBE_START__b__LANCACHE_DHCP_PROBE_START__c"),
-            "c"
-        );
-        assert_eq!(current_run("no marker"), "no marker");
-    }
-
-    fn log_frame(text: &str) -> Vec<u8> {
-        let mut frame = vec![1, 0, 0, 0];
-        frame.extend_from_slice(&(text.len() as u32).to_be_bytes());
-        frame.extend_from_slice(text.as_bytes());
-        frame
-    }
-
-    // What: the probe container runs once, output returns.
-    // Why: the proxy allows only stop, start, wait, logs.
-    #[tokio::test]
-    async fn the_dhcp_probe_container_runs_stop_start_wait_logs() {
-        let logs = log_frame("old\n__LANCACHE_DHCP_PROBE_START__\nresult\n");
-        let (base, server) = serve_canned(vec![
-            (204, vec![]),
-            (204, vec![]),
-            (200, br#"{"StatusCode":0}"#.to_vec()),
-            (200, logs),
-        ]);
-        let output = run_dhcp_probe(&DockerApi::new(&base)).await.unwrap();
-        assert_eq!(output, "\nresult\n");
-        let seen = server.join().unwrap();
-        let heads: Vec<&str> = seen.iter().filter_map(|r| r.lines().next()).collect();
-        assert_eq!(
-            heads[0],
-            "POST /containers/lancache-dhcp-probe/stop?t=10 HTTP/1.1"
-        );
-        assert_eq!(
-            heads[1],
-            "POST /containers/lancache-dhcp-probe/start HTTP/1.1"
-        );
-        assert_eq!(
-            heads[2],
-            "POST /containers/lancache-dhcp-probe/wait?condition=not-running HTTP/1.1"
-        );
-        assert!(
-            heads[3]
-                .starts_with("GET /containers/lancache-dhcp-probe/logs?stdout=1&stderr=1&since=")
-        );
-        let (base, _server) = serve_canned(vec![
-            (404, vec![]),
-            (204, vec![]),
-            (200, br#"{"StatusCode":3}"#.to_vec()),
-            (200, log_frame(" boom \n")),
-        ]);
-        let failed = run_dhcp_probe(&DockerApi::new(&base)).await.unwrap_err();
-        assert_eq!(failed, "DHCP probe container exited with code 3: boom");
-        let (base, _server) = serve_canned(vec![(500, vec![])]);
-        let stop = run_dhcp_probe(&DockerApi::new(&base)).await.unwrap_err();
-        assert!(
-            stop.starts_with("Failed to execute DHCP check: Failed to stop"),
-            "{stop}"
-        );
-        let (base, _server) = serve_canned(vec![(204, vec![]), (204, vec![]), (500, vec![])]);
-        let wait = run_dhcp_probe(&DockerApi::new(&base)).await.unwrap_err();
-        assert!(
-            wait.starts_with("Failed to execute DHCP check: read DHCP probe wait response:"),
-            "{wait}"
-        );
-        let (base, _server) = serve_canned(vec![
-            (204, vec![]),
-            (204, vec![]),
-            (200, br#"{"StatusCode":0}"#.to_vec()),
-            (500, vec![]),
-        ]);
-        let logs = run_dhcp_probe(&DockerApi::new(&base)).await.unwrap_err();
-        assert!(
-            logs.starts_with("Failed to execute DHCP check: read DHCP probe logs:"),
-            "{logs}"
-        );
-    }
-
     // What: the resize refusal names the largest size.
     // Why: the operator needs a value that would pass.
     #[test]
@@ -10239,23 +9170,24 @@ mod tests {
             ("NETDATA_ALARMS_FILE", "/b/alarms.json"),
             ("NATS_XKEY_SEED_PATH", "/c/xkey"),
             ("DESIRED_STATE_FILE", "/a/desired.json"),
-            ("NATS_CONF_PATH", "/d/nats.conf"),
             ("NATS_AUTH_CALLOUT_PATH", "/d/auth.conf"),
+            ("DHCP_PROBE_REQUEST_FILE", "/a/probe"),
             ("DNS_STANDARD_STATE_DIR", "/s1"),
             ("DNS_SSL_STATE_DIR", "/s2"),
+            ("KEA_CONFIG_SNAPSHOT_DIR", "/k"),
         ];
         for (key, value) in paths {
             env.insert(key.to_string(), value.to_string());
         }
         let cfg = load_from(&env).unwrap();
         let dirs = ui_written_dirs(&cfg, Path::new("/l/ui.log"));
-        let want: Vec<PathBuf> = ["/a", "/b", "/c", "/d", "/l", "/s1", "/s2"]
+        let want: Vec<PathBuf> = ["/a", "/b", "/c", "/d", "/k", "/l", "/s1", "/s2"]
             .iter()
             .map(PathBuf::from)
             .collect();
         assert_eq!(dirs, want);
         let bare = ui_written_dirs(&cfg, Path::new("ui.log"));
-        assert_eq!(bare.len(), 6);
+        assert_eq!(bare.len(), 7);
     }
 
     // What: ownership and modes are set on a log tree.

@@ -252,20 +252,28 @@ services:
   dhcp:
     container_name: LanCache-NG-dhcp
     image: ${LANCACHE_IMAGE_REF_DHCP:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp:${LANCACHE_IMAGE_TAG:-latest}}
+    init: true
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:?KEEP_KNOWN_GOOD_CONFIGS is required}
       - DHCP_DOMAIN=${DHCP_DOMAIN:?DHCP_DOMAIN is required}
       - DHCP_LEASE_TIME=${DHCP_LEASE_TIME:?DHCP_LEASE_TIME is required}
       - DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS:-}
       - DHCP_DDNS_ENABLED=${DHCP_DDNS_ENABLED:?DHCP_DDNS_ENABLED is required}
-      # What: Kea Control Agent API bind address.
-      # Why: entrypoint fences it to loopback and Docker nets.
-      # From: Issue #1683 | PR #1858
-      - KEA_CTRL_HOST=0.0.0.0
       - DHCP_MODE=${DHCP_MODE:-disabled}
+      - SUPERVISE_RUN_DIR=/run/lancache
+      - UI_SETTINGS_FILE=/data/lancache-ui-settings.env
+      - DESIRED_STATE_FILE=/data/desired-state.json
+      - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
+      - LANCACHE_SHARED_SECRET_GID=10001
+      - KEA_DATA_DIR=/var/lib/kea
+      - DHCP_CONFIG_SNAPSHOT_DIR=/var/lib/lancache-dhcp/config-snapshots
+      - DHCP_PROBE_REQUEST_FILE=/data/dhcp-probe-request
+      - DHCP_PROBE_RESULT_FILE=/var/lib/kea/dhcp-probe-result.json
       - DHCP_DNS_SERVER_IP=${IP_STANDARD}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
+      - KEA_CTRL_USER=${KEA_CTRL_USER:?KEA_CTRL_USER is required}
+      - KEA_CTRL_PORT=${KEA_CTRL_PORT:?KEA_CTRL_PORT is required}
       - KEA_CONFIG_SNAPSHOT_DIR=${KEA_CONFIG_SNAPSHOT_DIR:?KEA_CONFIG_SNAPSHOT_DIR is required}
       - DHCP_SUBNET=${DHCP_SUBNET:-}
       - DHCP_RANGE_START=${DHCP_RANGE_START:-}
@@ -288,9 +296,10 @@ services:
     volumes:
       - shared-secrets:/var/lib/lancache-secrets
       - ui-data:/data:ro
-      - watchdog-status:/var/run/watchdog
       - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/kea}:/var/lib/kea
       - dhcp-config-snapshots:/var/lib/lancache-dhcp
+    tmpfs:
+      - /run/lancache
     network_mode: host
     cap_add:
       - NET_BIND_SERVICE
@@ -321,6 +330,8 @@ services:
       - UI_SESSION_SECRET_FILE=/data/lancache-ui-session.secret
       - SECONDARY_REGISTRATION_TOKEN_FILE=/data/lancache-secondary-registration.token
       - KEA_CONFIG_SNAPSHOT_DIR=${KEA_CONFIG_SNAPSHOT_DIR:?KEA_CONFIG_SNAPSHOT_DIR is required}
+      - DHCP_PROBE_REQUEST_FILE=/data/dhcp-probe-request
+      - DHCP_PROBE_RESULT_FILE=/var/lib/kea/dhcp-probe-result.json
       - SSL_ENABLED=${SSL_ENABLED:-1}
       - PROXY_STANDARD_URL=http://proxy
       - PROXY_SSL_URL=http://proxy
@@ -342,7 +353,8 @@ services:
       - ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI:-false}
       - UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS:-86400}
       - DHCP_MODE=${DHCP_MODE:-disabled}
-      - DHCP_API_URL=http://host.docker.internal:8000
+      - DHCP_API_URL=http://host.docker.internal:${KEA_CTRL_PORT:?KEA_CTRL_PORT is required}
+      - DHCP_API_USER=${KEA_CTRL_USER:?KEA_CTRL_USER is required}
       - DHCP_API_TOKEN=${KEA_CTRL_TOKEN}
       - UI_LOGS_MAX_ENTRIES=200
       - PDNS_AUTH_URL=http://dns:8081

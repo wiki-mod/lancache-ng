@@ -519,6 +519,86 @@ pub fn zone_api_id(zone: &str) -> &str {
     zone.trim_end_matches('.')
 }
 
+// What: the port of the primary's authoritative PowerDNS.
+// Why: dns renders it; AXFR, DDNS and recursors use it.
+pub const PDNS_AUTH_PORT: u16 = 5300;
+
+// What: option codes dnsmasq-proxy renders itself.
+// Why: router, DNS, domain and NTP; search stays custom.
+pub const DNSMASQ_MANAGED_CODES: [u16; 4] = [3, 6, 15, 42];
+
+// What: lowest and highest code an operator may add.
+// Why: 0 is padding and 255 is the end marker.
+pub const OPTION_CODE_MIN: u16 = 1;
+pub const OPTION_CODE_MAX: u16 = 254;
+
+// What: an option code from form text, range checked.
+// Why: Kea and dnsmasq forms share one number rule.
+pub fn option_code(raw: &str) -> Result<u16, &'static str> {
+    let code = raw
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| "option code must be a number")?;
+    if !(OPTION_CODE_MIN..=OPTION_CODE_MAX).contains(&code) {
+        return Err("option code must be between 1 and 254");
+    }
+    Ok(code)
+}
+
+// What: longest custom option value in bytes.
+// Why: one form must not write unbounded data into Kea.
+pub const CUSTOM_OPTION_DATA_MAX: usize = 1024;
+
+// What: one-line option data within the length limit.
+// Why: values are opaque strings; only the shape counts.
+pub fn option_data(raw: &str) -> Result<String, &'static str> {
+    let data = raw.trim();
+    if data.is_empty() {
+        return Err("option data must not be empty");
+    }
+    if data.len() > CUSTOM_OPTION_DATA_MAX {
+        return Err("option data is too long");
+    }
+    if data.contains(['\n', '\r']) {
+        return Err("option data must fit on one line");
+    }
+    Ok(data.to_string())
+}
+
+// What: parse "CODE:VALUE" lines into the stored form.
+// Why: the file keeps one line; entries join by semicolon.
+pub fn parse_custom_options(raw: &str) -> Result<String, String> {
+    let mut entries = Vec::new();
+    for (index, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let at = |message: &str| format!("line {}: {message}", index + 1);
+        let (code, data) = line
+            .split_once(':')
+            .ok_or_else(|| at("expected CODE:VALUE"))?;
+        // What: refuse the four codes dnsmasq-proxy owns.
+        // Why: dnsmasq renders router, DNS, domain, NTP.
+        let code = option_code(code).map_err(at)?;
+        if DNSMASQ_MANAGED_CODES.contains(&code) {
+            return Err(at(
+                "option code is managed by dedicated dnsmasq-proxy fields",
+            ));
+        }
+        let data = option_data(data).map_err(at)?;
+        // What: refuse a semicolon inside option data.
+        // Why: it is the entry separator on the shell side.
+        if data.contains(';') {
+            return Err(at(
+                "option data must not contain ';' (used as the entry separator)",
+            ));
+        }
+        entries.push(format!("{code}:{data}"));
+    }
+    Ok(entries.join(";"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -978,5 +1058,37 @@ mod tests {
         bad.ui.user = "bad user".into();
         let user = render_nats_conf(&bad, "/data", 8222, conf, "/etc/nats/auth.conf").unwrap_err();
         assert!(user.starts_with("Invalid NATS UI credentials"), "{user}");
+    }
+
+    // What: option lines become the stored one-line form.
+    // Why: the file keeps one line; entries join by ';'.
+    #[test]
+    fn proxy_option_lines_join_or_name_the_line() {
+        assert_eq!(
+            parse_custom_options("66:tftp\n\n 67 : boot.0 \n"),
+            Ok("66:tftp;67:boot.0".to_string())
+        );
+        assert_eq!(parse_custom_options(""), Ok(String::new()));
+        let cases = [
+            ("66", "line 1: expected CODE:VALUE"),
+            ("66:ok\nabc:x", "line 2: option code must be a number"),
+            (
+                "3:10.0.0.1",
+                "line 1: option code is managed by dedicated dnsmasq-proxy fields",
+            ),
+            (
+                "66:a;b",
+                "line 1: option data must not contain ';' (used as the entry separator)",
+            ),
+            ("66: ", "line 1: option data must not be empty"),
+        ];
+        for (raw, message) in cases {
+            assert_eq!(
+                parse_custom_options(raw),
+                Err(message.to_string()),
+                "{raw:?}"
+            );
+        }
+        assert!(parse_custom_options("119:search.lan").is_ok());
     }
 }

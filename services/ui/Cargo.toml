@@ -23,7 +23,6 @@ async-nats = { workspace = true }
 axum = { workspace = true, features = ["form"] }
 base64 = { workspace = true }
 data-encoding = { workspace = true }
-dhcproto = { workspace = true }
 form_urlencoded = { workspace = true }
 futures-util = { workspace = true }
 hex = { workspace = true }
