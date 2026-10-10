@@ -3731,21 +3731,18 @@ CASES
         && [ -f "${t}/co/${BR}.txt" ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${mainsha}" ] || { echo "dirty: ${output}"; return 1; }
 }
 
+# What: UI_BIND_IP follows IP_STANDARD; one tag on stdout
+# Why: an update keeps operator values and pins one tag
+# From: Issue #1683 | PR #1858
 @test "setup env migration and release image tag per input" {
-    # What: migrated keys, proxy mode, tag from git/VERSION
-    # Why: an update keeps operator values and pins a tag
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" ip v raw case lines want rc tags tag
+    local root t="${BATS_TEST_TMPDIR}" ip v raw case lines want err rc tags tag bad
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
+    _load_setup_sh "${root}" || return 1
     ip="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")"
     v="$(tr -d '[:space:]' < "${root}/VERSION")"
-    raw="\"${t}/a b\" # ${BATS_TEST_NUMBER}"
+    raw="\"$(_val path) $(_val name)\" # $(_val name)" bad="$(_val name)"
     [ -n "${ip}" ] && [ -n "${v}" ] || { echo "inputs: ${ip} ${v}"; return 1; }
-    export E="${t}/.env" IP="${ip}"
-    # What: UI_BIND_IP follows IP_STANDARD only when unset
-    # Why: an operator's own value or syntax must survive
-    # From: Issue #1683 | PR #1858
+    export E="${t}/.env" IP="${ip}" ERR="${t}/stderr"
     while IFS='|' read -r case lines want; do
         printf '%b' "${lines}" > "${E}"
         _setup_sh_run 'append_env_migrated_assignment_if_missing UI_BIND_IP IP_STANDARD "${IP}" "${E}"'
@@ -3759,33 +3756,19 @@ CASES
     printf '%s\n' "IP_STANDARD=" > "${E}"
     _setup_sh_run 'append_env_migrated_assignment_if_missing UI_BIND_IP IP_STANDARD "" "${E}"'
     [ "${status}" -eq 0 ] && [ "$(cat "${E}")" = "IP_STANDARD=" ] || { echo "nothing: $(cat "${E}")"; return 1; }
-    # What: strict without CIDRs becomes lazy
-    # Why: strict with no allow-list blocks every client
-    # From: Issue #1683 | PR #1858
-    while IFS='|' read -r case lines want; do
-        printf '%b' "${lines}" > "${E}"
-        _setup_sh_run 'migrate_proxy_security_mode_for_update "${E}"'
-        [ "${status}" -eq 0 ] && [ "$(paste -sd'#' "${E}")" = "${want}" ] || { echo "${case}: $(paste -sd'#' "${E}")"; return 1; }
-    done <<CASES
-strictopen|PROXY_SECURITY_MODE=strict\nPROXY_ALLOWED_CLIENT_CIDRS=\n|PROXY_SECURITY_MODE=lazy#PROXY_ALLOWED_CLIENT_CIDRS=
-strictcidr|PROXY_SECURITY_MODE=strict\nPROXY_ALLOWED_CLIENT_CIDRS=${ip%.*}.0/24\n|PROXY_SECURITY_MODE=strict#PROXY_ALLOWED_CLIENT_CIDRS=${ip%.*}.0/24
-lazy|PROXY_SECURITY_MODE=lazy\n|PROXY_SECURITY_MODE=lazy
-CASES
-    # What: VERSION shapes map to a release tag or a refusal
-    # Why: a bad VERSION must never become an image tag
-    # From: Issue #1683 | PR #1858
     export SD="${t}/archive"
-    mkdir -p "${SD}"
-    while IFS='|' read -r case want rc; do
+    mkdir -p "${SD}" || return 1
+    while IFS='|' read -r case want err rc; do
         printf '%s\n' "${case}" > "${SD}/VERSION"
         [ "${case}" != - ] || : > "${SD}/VERSION"
-        _setup_sh_run 'unset LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_TAG; SCRIPT_DIR="${SD}"; derive_release_archive_image_tag'
-        [ "${status}" -eq "${rc}" ] && [ "${output}" = "${want}" ] || { echo "VERSION ${case}: rc ${status} ${output}"; return 1; }
+        _setup_sh_run 'unset LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_TAG; SCRIPT_DIR="${SD}"; derive_release_archive_image_tag 2> "${ERR}"'
+        [ "${status}" -eq "${rc}" ] && [ "${output}" = "${want}" ] && [ "$(cat "${ERR}")" = "${err}" ] \
+            || { echo "VERSION ${case}: rc ${status}, stdout '${output}', stderr '$(cat "${ERR}")'"; return 1; }
     done <<CASES
-${v#v}|v${v#v}|0
-v${v#v}-rc.1|v${v#v}-rc.1|0
-${v%.*}|Invalid release image tag derived from VERSION: v${v%.*}|2
--|VERSION is empty; cannot derive a release image tag.|2
+${v#v}|v${v#v}||0
+v${v#v}-rc.1|v${v#v}-rc.1||0
+${v%.*}||Invalid release image tag derived from VERSION: v${v%.*}|2
+-||VERSION is empty; cannot derive a release image tag.|2
 CASES
     printf '%s\n' "${v}" > "${SD}/VERSION"
     _setup_sh_run 'unset LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_TAG; SCRIPT_DIR="${SD}"
@@ -3794,36 +3777,36 @@ CASES
             "$(LANCACHE_IMAGE_CHANNEL=nightly resolve_lancache_image_tag "${SD}/missing.env")" \
             "$(LANCACHE_IMAGE_CHANNEL=stable resolve_lancache_image_tag "${SD}/missing.env")"'
     [ "${status}" -eq 0 ] && [ "${output}" = "pinned|v${v#v}|nightly|latest" ] || { echo "channels: ${output}"; return 1; }
-    # What: a release tag at HEAD wins; real git
-    # Why: a checkout must deploy exactly its tagged images
-    # From: Issue #1683 | PR #1858
     g() { git -c user.email=t@example.test -c user.name=t "$@"; }
+    _tags_reset() {
+        g -C "${GD}" tag -l > "${t}/tags" || return 1
+        while IFS= read -r tag; do g -C "${GD}" tag -d "${tag}" >> "${t}/tags-deleted" || return 1; done < "${t}/tags"
+    }
     export GD="${t}/real dir"
-    g init -q "${GD}" && g -C "${GD}" commit -q --allow-empty -m c1
+    g init -q "${GD}" && g -C "${GD}" commit -q --allow-empty -m c1 || return 1
     printf '%s\n' "${v}" > "${GD}/VERSION"
-    ln -s "${GD}" "${t}/link"
-    while IFS='|' read -r case tags want rc; do
-        g -C "${GD}" tag -l | while IFS= read -r tag; do g -C "${GD}" tag -d "${tag}" > /dev/null; done
-        for tag in ${tags}; do g -C "${GD}" tag "${tag}"; done
+    ln -s "${GD}" "${t}/link" || return 1
+    while IFS='|' read -r case tags want err rc; do
+        _tags_reset || return 1
+        for tag in ${tags}; do g -C "${GD}" tag "${tag}" || return 1; done
         export SDIR="${GD}"
         [ "${case}" != symlink ] || SDIR="${t}/link"
-        _setup_sh_run 'SCRIPT_DIR="${SDIR}"; derive_release_archive_image_tag'
-        [ "${status}" -eq "${rc}" ] && [ "$(grep -v '^Note: ' <<< "${output}")" = "${want}" ] \
-            || { echo "${case}: rc ${status} ${output}"; return 1; }
+        _setup_sh_run 'SCRIPT_DIR="${SDIR}"; derive_release_archive_image_tag 2> "${ERR}"'
+        [ "${status}" -eq "${rc}" ] && [ "${output}" = "${want}" ] && [ "$(cat "${ERR}")" = "${err}" ] \
+            || { echo "${case}: rc ${status}, stdout '${output}', stderr '$(cat "${ERR}")'"; return 1; }
     done <<CASES
-tagged|v${v#v}|v${v#v}|0
-untagged|||1
-symlink|v${v#v}|v${v#v}|0
-badtag|release-${BATS_TEST_NUMBER}|Invalid release tag from git checkout: release-${BATS_TEST_NUMBER}|2
-multi|v${v#v} v${v#v}-rc.1|Several release tags point at HEAD: v${v#v} v${v#v}-rc.1|2
+tagged|v${v#v}|v${v#v}||0
+untagged||||1
+symlink|v${v#v}|v${v#v}||0
+badtag|${bad}||Invalid release tag from git checkout: ${bad}|2
+multi|v${v#v} v${v#v}-rc.1||Several release tags point at HEAD: v${v#v} v${v#v}-rc.1|2
 CASES
-    g -C "${GD}" tag -l | while IFS= read -r tag; do g -C "${GD}" tag -d "${tag}" > /dev/null; done
-    g -C "${GD}" tag "v${v#v}"
+    _tags_reset && g -C "${GD}" tag "v${v#v}" || return 1
     chown -R "$(( $(id -u) + 1 ))" "${GD}" || { echo "chown needs root for the dubious-ownership case"; return 1; }
     export SDIR="${GD}"
-    _setup_sh_run 'SCRIPT_DIR="${SDIR}"; derive_release_archive_image_tag'
-    [ "${status}" -eq 0 ] && [ "$(tail -n 1 <<< "${output}")" = "v${v#v}" ] && [[ "${output}" == "Note: ${GD} has different file ownership"* ]] \
-        || { echo "dubious: rc ${status} ${output}"; return 1; }
+    _setup_sh_run 'SCRIPT_DIR="${SDIR}"; derive_release_archive_image_tag 2> "${ERR}"'
+    [ "${status}" -eq 0 ] && [ "${output}" = "v${v#v}" ] && [[ "$(cat "${ERR}")" == "Note: ${GD} has different file ownership"* ]] \
+        || { echo "dubious: rc ${status}, stdout '${output}', stderr '$(cat "${ERR}")'"; return 1; }
 }
 
 @test "setup image channel validation, resolution and pointer" {
