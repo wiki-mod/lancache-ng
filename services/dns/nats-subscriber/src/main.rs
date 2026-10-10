@@ -1029,6 +1029,7 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     // What: build one rrset with a single record content.
     // Why: most tests need a small literal rrset.
@@ -1266,5 +1267,398 @@ mod tests {
         assert_eq!(grow(1), 2);
         assert_eq!(grow(16), 30);
         assert_eq!(grow(30), 30);
+    }
+
+    // What: a Ctx with an offline NATS client.
+    // Why: publishes fail fast; the rest runs for real.
+    async fn offline_ctx(pdns_base: &str, dir: PathBuf) -> Ctx {
+        let client = async_nats::ConnectOptions::new()
+            .retry_on_initial_connect()
+            .connect("nats://127.0.0.1:1")
+            .await
+            .expect("a client that retries in the background");
+        let js = jetstream::ContextBuilder::new()
+            .timeout(Duration::from_millis(200))
+            .build(client);
+        Ctx {
+            pdns: PowerDns::new(http_client().unwrap(), "k3y".to_string()),
+            pdns_auth_url: format!("{pdns_base}/api/v1/servers/localhost"),
+            pdns_rec_url: format!("{pdns_base}/rec"),
+            pdns_auth_config_dir: "/no/such/config".to_string(),
+            snapshot_dir: dir,
+            keep_n: 3,
+            lock: tokio::sync::Mutex::new(()),
+            js,
+        }
+    }
+
+    fn zone_export(rrsets: &[Value]) -> Vec<u8> {
+        json!({"rrsets": rrsets}).to_string().into_bytes()
+    }
+
+    fn lan_a(name: &str, content: &str) -> Value {
+        rrset(name, "A", 60, &[content])
+    }
+
+    // What: the newest snapshot decides what is unchanged.
+    // Why: the watcher must not evict history with copies.
+    #[test]
+    fn matches_latest_compares_with_the_newest_snapshot() {
+        let dir = lancache_ng::unique_temp_dir("latest");
+        let store = SnapshotStore::new(dir.join("zones/lan."), "zone.json", "dns");
+        assert!(matches_latest(&store, &json!([])));
+        assert!(!matches_latest(&store, &json!([lan_a("a.lan.", "1")])));
+        let first = json!([lan_a("a.lan.", "1")]);
+        store.create(&first, 3).unwrap();
+        assert!(matches_latest(&store, &first));
+        assert!(matches_latest(
+            &store,
+            &json!([rrset("a.lan.", "A", 60, &["1"])])
+        ));
+        assert!(!matches_latest(&store, &json!([lan_a("a.lan.", "2")])));
+        assert!(!matches_latest(&store, &json!([])));
+        let second = json!([lan_a("a.lan.", "2")]);
+        store.create(&second, 3).unwrap();
+        assert!(matches_latest(&store, &second));
+        assert!(!matches_latest(&store, &first));
+        let latest = store.ids().unwrap().pop().unwrap();
+        fs::write(
+            dir.join("zones/lan.").join(&latest).join("zone.json"),
+            "junk",
+        )
+        .unwrap();
+        assert!(!matches_latest(&store, &second));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: the zone export is a JSON array or an error.
+    // Why: snapshots, rollback and the reconciler read it.
+    #[tokio::test]
+    async fn the_zone_export_is_an_array_or_an_error() {
+        let dir = lancache_ng::unique_temp_dir("export");
+        let rrsets = [lan_a("a.lan.", "1")];
+        let (base, server) =
+            lancache_ng::serve_canned(vec![(200, zone_export(&rrsets)), (404, vec![])]);
+        let ctx = offline_ctx(&base, dir.clone()).await;
+        assert_eq!(ctx.zone_rrsets("lan.").await, Ok(json!(rrsets)));
+        assert!(ctx.zone_rrsets("lan.").await.is_err());
+        let seen = server.join().unwrap();
+        assert!(seen[0].starts_with("GET /api/v1/servers/localhost/zones/lan HTTP/1.1"));
+        assert_eq!(ctx.store("lan.").ids().unwrap(), Vec::<String>::new());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: a zone is snapshotted only on change.
+    // Why: also covers Kea DDNS writes that bypass NATS.
+    // From: Issue #628
+    #[tokio::test]
+    async fn zones_are_snapshotted_on_change_only() {
+        let dir = lancache_ng::unique_temp_dir("snapshot");
+        let soa = rrset("lan.", "SOA", 3600, &["x"]);
+        let one = zone_export(&[soa.clone(), lan_a("a.lan.", "1")]);
+        let two = zone_export(&[soa, lan_a("a.lan.", "2")]);
+        let (base, server) = lancache_ng::serve_canned(vec![
+            (200, one.clone()),
+            (200, one),
+            (200, two),
+            (500, vec![]),
+        ]);
+        let ctx = offline_ctx(&base, dir.clone()).await;
+        snapshot_zone(&ctx, "example.com.").await;
+        assert!(ctx.store("example.com.").ids().unwrap().is_empty());
+        snapshot_zone(&ctx, "lan.").await;
+        let ids = ctx.store("lan.").ids().unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(
+            ctx.store("lan.").read(&ids[0]).unwrap(),
+            json!([lan_a("a.lan.", "1")])
+        );
+        snapshot_zone(&ctx, "lan.").await;
+        assert_eq!(ctx.store("lan.").ids().unwrap().len(), 1);
+        snapshot_zone(&ctx, "lan.").await;
+        assert_eq!(ctx.store("lan.").ids().unwrap().len(), 2);
+        snapshot_zone(&ctx, "lan.").await;
+        assert_eq!(ctx.store("lan.").ids().unwrap().len(), 2);
+        assert_eq!(server.join().unwrap().len(), 4);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: publishing fails when no stream acks it.
+    // Why: a permission denial only shows as a missing ack.
+    #[tokio::test]
+    async fn publishing_without_an_ack_is_an_error() {
+        let dir = lancache_ng::unique_temp_dir("publish");
+        let ctx = offline_ctx("http://127.0.0.1:1", dir.clone()).await;
+        assert!(
+            publish(&ctx.js, "lancache.dns.record", Some("id-1"), b"{}".to_vec())
+                .await
+                .is_err()
+        );
+        assert!(
+            publish(&ctx.js, "lancache.dns.flush", None, b"{}".to_vec())
+                .await
+                .is_err()
+        );
+        let record = rrset_record("replace", "lan", &lan_a("a.lan.", "1")).unwrap();
+        publish_record(&ctx.js, "id-2", &record).await;
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: the listener needs the key; newest first.
+    // Why: the ui lists snapshots for the operator.
+    #[tokio::test]
+    async fn the_snapshot_list_needs_the_key() {
+        let dir = lancache_ng::unique_temp_dir("list");
+        let ctx = Arc::new(offline_ctx("http://127.0.0.1:1", dir.clone()).await);
+        let first = ctx.store("lan.").create(&json!([]), 3).unwrap();
+        let second = ctx
+            .store("lan.")
+            .create(&json!([lan_a("a.lan.", "1")]), 3)
+            .unwrap();
+        let key = |value: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("X-API-Key", value.parse().unwrap());
+            headers
+        };
+        let denied = list_snapshots(State(ctx.clone()), key("wrong")).await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let body = axum::body::to_bytes(denied.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({"error": "missing or invalid X-API-Key"})
+        );
+        let none = list_snapshots(State(ctx.clone()), HeaderMap::new()).await;
+        assert_eq!(none.status(), StatusCode::UNAUTHORIZED);
+        let allowed = list_snapshots(State(ctx), key("k3y")).await;
+        assert_eq!(allowed.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(allowed.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let listed: Value = serde_json::from_slice(&body).unwrap();
+        let ids: Vec<&str> = listed["zones"]["lan."]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, [second.as_str(), first.as_str()]);
+        assert!(listed["zones"]["lan."][0]["created_unix"].as_u64().unwrap() > 1_700_000_000);
+        assert_eq!(listed["zones"]["10.in-addr.arpa."], json!([]));
+        assert_eq!(
+            listed["zones"].as_object().unwrap().len(),
+            rollback_zones().len()
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    async fn reply_json(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    // What: rollback checks key, body, zone and id.
+    // Why: unauthenticated callers reach no parse errors.
+    #[tokio::test]
+    async fn rollback_requests_are_refused_before_any_write() {
+        let dir = lancache_ng::unique_temp_dir("refuse");
+        let ctx = Arc::new(offline_ctx("http://127.0.0.1:1", dir.clone()).await);
+        let id = ctx.store("lan.").create(&json!([]), 3).unwrap();
+        let mut ok_key = HeaderMap::new();
+        ok_key.insert("X-API-Key", "k3y".parse().unwrap());
+        let call = |headers: HeaderMap, body: String| {
+            let ctx = ctx.clone();
+            async move { reply_json(rollback_handler(State(ctx), headers, body.into()).await).await }
+        };
+        let (status, body) = call(HeaderMap::new(), "{}".to_string()).await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (
+                StatusCode::UNAUTHORIZED,
+                Some("missing or invalid X-API-Key")
+            )
+        );
+        let (status, body) = call(ok_key.clone(), "not json".to_string()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("invalid request body:")
+        );
+        let other = json!({"zone": "example.com", "snapshot_id": id}).to_string();
+        let (status, body) = call(ok_key.clone(), other).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body["error"],
+            "zone example.com. is not managed by this rollback mechanism"
+        );
+        let unknown = json!({"zone": "lan", "snapshot_id": "123"}).to_string();
+        let (status, body) = call(ok_key.clone(), unknown).await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (
+                StatusCode::NOT_FOUND,
+                Some("unknown or no-longer-available snapshot")
+            )
+        );
+        let traversal = json!({"zone": "lan", "snapshot_id": "../x"}).to_string();
+        assert_eq!(
+            call(ok_key.clone(), traversal).await.0,
+            StatusCode::NOT_FOUND
+        );
+        fs::write(dir.join("zones/lan.").join(&id).join("zone.json"), "junk").unwrap();
+        let broken = json!({"zone": "lan", "snapshot_id": id}).to_string();
+        let (status, body) = call(ok_key, broken).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("stored snapshot could not be read:")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn rollback_request(id: &str) -> RollbackRequest {
+        RollbackRequest {
+            zone: "lan".to_string(),
+            snapshot_id: id.to_string(),
+        }
+    }
+
+    // What: a rollback patches only what differs.
+    // Why: unchanged rrsets stay out; flush names precise.
+    // From: Issue #628
+    #[tokio::test]
+    async fn a_rollback_patches_republishes_and_records_a_snapshot() {
+        let dir = lancache_ng::unique_temp_dir("rollback");
+        let target = json!([lan_a("a.lan.", "1.1.1.1")]);
+        let current = zone_export(&[
+            rrset("lan.", "SOA", 3600, &["x"]),
+            lan_a("a.lan.", "2.2.2.2"),
+            lan_a("b.lan.", "3.3.3.3"),
+        ]);
+        let (base, server) = lancache_ng::serve_canned(vec![(200, current), (204, vec![])]);
+        let ctx = offline_ctx(&base, dir.clone()).await;
+        let target_id = ctx.store("lan.").create(&target, 3).unwrap();
+        ctx.store("lan.")
+            .create(&json!([lan_a("a.lan.", "9.9.9.9")]), 3)
+            .unwrap();
+        let reply = rollback(&ctx, rollback_request(&target_id))
+            .await
+            .ok()
+            .unwrap();
+        assert_eq!(
+            reply,
+            json!({"applied": true, "changed_names": ["a.lan.", "b.lan."],
+                   "zone_check_passed": false, "republished_to_nats": true,
+                   "flush_ok": false, "flush_failed_names": ["a.lan.", "b.lan."]})
+        );
+        let seen = server.join().unwrap();
+        assert!(seen[0].starts_with("GET /api/v1/servers/localhost/zones/lan HTTP/1.1"));
+        assert!(seen[1].starts_with("PATCH /api/v1/servers/localhost/zones/lan HTTP/1.1"));
+        let body: Value = serde_json::from_str(seen[1].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(
+            body,
+            json!({"rrsets": [
+                {"name": "a.lan.", "type": "A", "ttl": 60, "changetype": "REPLACE",
+                 "records": [{"content": "1.1.1.1", "disabled": false}]},
+                {"name": "b.lan.", "type": "A", "changetype": "DELETE"}]})
+        );
+        assert_eq!(ctx.store("lan.").ids().unwrap().len(), 3);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: a rollback to the live state changes nothing.
+    // Why: no PATCH, no flush, no extra snapshot.
+    #[tokio::test]
+    async fn a_rollback_to_the_live_state_changes_nothing() {
+        let dir = lancache_ng::unique_temp_dir("noop");
+        let live = [lan_a("a.lan.", "1.1.1.1")];
+        let (base, server) = lancache_ng::serve_canned(vec![(200, zone_export(&live))]);
+        let ctx = offline_ctx(&base, dir.clone()).await;
+        let id = ctx.store("lan.").create(&json!(live), 3).unwrap();
+        let reply = rollback(&ctx, rollback_request(&id)).await.ok().unwrap();
+        assert_eq!(
+            reply,
+            json!({"applied": true, "changed_names": [], "zone_check_passed": false,
+                   "republished_to_nats": false, "flush_ok": true, "flush_failed_names": []})
+        );
+        assert_eq!(server.join().unwrap().len(), 1);
+        assert_eq!(ctx.store("lan.").ids().unwrap().len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: a failed PATCH or zone read fails the rollback.
+    // Why: the operator sees why; nothing is half-recorded.
+    #[tokio::test]
+    async fn a_rollback_reports_powerdns_failures() {
+        let dir = lancache_ng::unique_temp_dir("rollback-fail");
+        let current = zone_export(&[lan_a("a.lan.", "2.2.2.2")]);
+        let (base, _server) = lancache_ng::serve_canned(vec![(200, current), (500, vec![])]);
+        let ctx = offline_ctx(&base, dir.clone()).await;
+        let id = ctx
+            .store("lan.")
+            .create(&json!([lan_a("a.lan.", "1.1.1.1")]), 3)
+            .unwrap();
+        let (status, body) = reply_json(
+            rollback(&ctx, rollback_request(&id))
+                .await
+                .err()
+                .unwrap()
+                .into_response(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body["error"],
+            "PowerDNS rejected rollback PATCH: 500 Internal Server Error"
+        );
+        assert_eq!(ctx.store("lan.").ids().unwrap().len(), 1);
+        let (base, _server) = lancache_ng::serve_canned(vec![(500, vec![])]);
+        let ctx = offline_ctx(&base, dir.clone()).await;
+        let (status, body) = reply_json(
+            rollback(&ctx, rollback_request(&id))
+                .await
+                .err()
+                .unwrap()
+                .into_response(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("failed to fetch current zone state:")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: the zone check fails when pdnsutil is absent.
+    // Why: a wedged or missing tool is never a pass.
+    #[tokio::test]
+    async fn the_zone_check_fails_without_pdnsutil() {
+        let dir = lancache_ng::unique_temp_dir("check");
+        let ctx = offline_ctx("http://127.0.0.1:1", dir.clone()).await;
+        let store = ctx.store("lan.");
+        assert!(!check_zone(&ctx, &store, "lan.").await);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: the retry delay doubles and stops at 30.
+    // Why: a down server must not be hammered or ignored.
+    #[test]
+    fn retry_delay_grows_to_the_cap() {
+        assert_eq!(grow(0), 0);
+        assert_eq!(grow(1), 2);
+        assert_eq!(grow(14), 28);
+        assert_eq!(grow(15), 30);
+        assert_eq!(grow(16), 30);
     }
 }
