@@ -7399,9 +7399,8 @@ if [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     [[ -n "$DHCP_NTP_SERVERS" ]] && printf "  %-26s %s\n" "  NTP option (PXE-scoped):" "$DHCP_NTP_SERVERS"
     [[ -n "$DHCP_PROXY_DOMAIN" ]] && printf "  %-26s %s\n" "  Domain option (PXE-scoped):" "$DHCP_PROXY_DOMAIN"
     [[ -n "$DHCP_PROXY_BOOT_FILENAME" ]] && printf "  %-26s %s\n" "  PXE boot filename:" "$DHCP_PROXY_BOOT_FILENAME"
-    # An operator-set value that never appears in this install summary looks
-    # unconfigured even when it isn't -- print it whenever it is non-empty,
-    # matching the other conditional lines in this block.
+    # What: summary shows operator-set values when set
+    # Why: an unshown value looks unconfigured
     [[ -n "$DHCP_PROXY_BOOT_SERVER" ]] && printf "  %-26s %s\n" "  PXE boot server:" "$DHCP_PROXY_BOOT_SERVER"
     [[ -n "$DHCP_PROXY_PXE_BOOT_SERVER" ]] && printf "  %-26s %s\n" "  PXE boot-pointer server:" "$DHCP_PROXY_PXE_BOOT_SERVER"
     [[ -n "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" ]] && printf "  %-26s %s\n" "  PXE boot-pointer (BIOS):" "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS"
