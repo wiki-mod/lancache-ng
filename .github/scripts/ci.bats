@@ -2945,59 +2945,54 @@ CASES
 # PRODUCT RUNTIME: SHARED SECRETS
 # =========================================================
 
+# What: operator value wins; else one value is made, kept
+# Why: AG-OP-006: reruns and parallel starts never rotate
+# From: Issue #858 | PR #1858
 @test "shared secret: generated once, never rotated, fails closed, parallel writers converge" {
-    # What: lib nats, dns, dhcp and ui resolve secrets with.
-    # Why: AG-OP-006; reruns must not rotate stable secrets.
-    # From: Issue #1683
-    local lib v1 v
-    lib="$(ci_context_path shared-secret)"
+    local lib n op v1 i bad d out
+    lib="$(ci_context_path shared-secret)" || return 1
     # shellcheck source=scripts/lib/shared-secret-bootstrap.sh
-    source "${BATS_TEST_DIRNAME}/../../${lib}"
-    export LANCACHE_SHARED_SECRET_DIR="${BATS_TEST_TMPDIR}/secrets"
-    LANCACHE_SHARED_SECRET_GID="$(id -g)"; export LANCACHE_SHARED_SECRET_GID
-    _gen() { printf 'g\n' >> "${BATS_TEST_TMPDIR}/gen.log"; printf '%s' "$(_val name)"; }
-    v1="$(resolve_shared_secret s1 "" _gen)"
-    [ -n "${v1}" ]
+    source "${BATS_TEST_DIRNAME}/../../${lib}" || return 1
+    LANCACHE_SHARED_SECRET_DIR="$(_val path)" LANCACHE_SHARED_SECRET_GID="$(id -g)"
+    export LANCACHE_SHARED_SECRET_DIR LANCACHE_SHARED_SECRET_GID
+    n="$(_val name)" op="$(_val sha)"
+    run resolve_shared_secret "${n}" "" lancache_gen_hex32
+    v1="${output}"
+    [ "${status}" -eq 0 ] && [[ "${v1}" =~ ^[0-9a-f]{64}$ ]] && [ "$(cat "${LANCACHE_SHARED_SECRET_DIR}/${n}")" = "${v1}" ] \
+        || { echo "generate: rc ${status}, ${#v1} chars"; return 1; }
     for _ in 1 2 3; do
-        v="$(resolve_shared_secret s1 "" _gen)"
-        [ "${v}" = "${v1}" ]
+        run resolve_shared_secret "${n}" "" lancache_gen_hex32
+        _expect rerun 0 "=${v1}" || return 1
     done
-    [ "$(wc -l < "${BATS_TEST_TMPDIR}/gen.log")" -eq 1 ]
     for _ in 1 2; do
-        v="$(resolve_shared_secret s1 real-value _gen)"
-        [ "${v}" = real-value ]
-        [ "$(cat "${LANCACHE_SHARED_SECRET_DIR}/s1")" = real-value ]
+        run resolve_shared_secret "${n}" "${op}" lancache_gen_hex32
+        _expect operator 0 "=${op}" || return 1
+        [ "$(cat "${LANCACHE_SHARED_SECRET_DIR}/${n}")" = "${op}" ] || { echo "operator: value not stored"; return 1; }
     done
-    [ "$(resolve_shared_secret s1 "" _gen)" = real-value ]
-    [ "$(wc -l < "${BATS_TEST_TMPDIR}/gen.log")" -eq 1 ]
-    # What: unwritable store formats and parallel writers
-    # Why: services on different secrets lose their link
-    # From: Issue #858 | PR #1858
-    local i d="${BATS_TEST_TMPDIR}/ss"
-    : > "${BATS_TEST_TMPDIR}/file"
-    LANCACHE_SHARED_SECRET_DIR="${BATS_TEST_TMPDIR}/file/secrets"
-    run resolve_shared_secret k "real-op" lancache_gen_hex32
-    [ "${status}" -eq 0 ] && [ "${output}" = real-op ] || { echo "unwritable: rc ${status}: ${output}"; return 1; }
-    run resolve_shared_secret k "real-op" lancache_gen_base64_32 require-persist
-    [ "${status}" -ne 0 ] || { echo "require-persist passed: ${output}"; return 1; }
-    run bash -c 'set -euo pipefail; . "$1"
-        if ! v="$(resolve_shared_secret k real-op lancache_gen_hex32)"; then v=FAILED; fi
-        printf "%s" "${v}"' _ "${BATS_TEST_DIRNAME}/../../${lib}"
-    [ "${status}" -eq 0 ] && [ "${output}" = real-op ] || { echo "set -e: rc ${status}: ${output}"; return 1; }
-    LANCACHE_SHARED_SECRET_DIR="${d}"
-    mkdir -p "${d}"
-    run resolve_shared_secret h "" lancache_gen_hex32
-    [[ "${output}" =~ ^[0-9a-f]{64}$ ]] && [ "$(cat "${d}/h")" = "${output}" ] || { echo "hex32: ${output}"; return 1; }
-    run resolve_shared_secret b "" lancache_gen_base64_32
-    [ "$(printf '%s' "${output}" | base64 -d | wc -c)" -eq 32 ] || { echo "base64_32: ${output}"; return 1; }
-    mkdir -p "${BATS_TEST_TMPDIR}/out"
+    run resolve_shared_secret "${n}" "" lancache_gen_hex32
+    _expect stored 0 "=${op}" || return 1
+    bad="$(_val path)"
+    : > "${bad}" || return 1
+    LANCACHE_SHARED_SECRET_DIR="${bad}/$(_val name)" run resolve_shared_secret "${n}" "${op}" lancache_gen_hex32
+    _expect unwritable 0 "=${op}" || return 1
+    LANCACHE_SHARED_SECRET_DIR="${bad}/$(_val name)" run resolve_shared_secret "${n}" "${op}" lancache_gen_base64_32 require-persist
+    _expect require-persist 1 "=" || return 1
+    LANCACHE_SHARED_SECRET_DIR="${bad}/$(_val name)" run bash -c 'set -euo pipefail; . "$1"
+        if ! v="$(resolve_shared_secret "$2" "$3" lancache_gen_hex32)"; then v=FAILED; fi
+        printf "%s" "${v}"' _ "${BATS_TEST_DIRNAME}/../../${lib}" "${n}" "${op}"
+    _expect set-e-caller 0 "=${op}" || return 1
+    d="$(_val path)" out="$(_val path)"
+    mkdir -p "${d}" "${out}" || return 1
+    LANCACHE_SHARED_SECRET_DIR="${d}" run resolve_shared_secret "$(_val name)" "" lancache_gen_base64_32
+    [ "${status}" -eq 0 ] && [ "$(printf '%s' "${output}" | base64 -d | wc -c)" -eq 32 ] || { echo "base64_32: rc ${status}"; return 1; }
+    n="$(_val name)"
     for i in $(seq 1 20); do
-        ( v="$(resolve_shared_secret race "" lancache_gen_hex32)"; printf '%s\n' "${v}" > "${BATS_TEST_TMPDIR}/out/${i}" ) &
+        ( LANCACHE_SHARED_SECRET_DIR="${d}" resolve_shared_secret "${n}" "" lancache_gen_hex32 > "${out}/${i}" ) &
     done
     wait
-    [ "$(sort -u "${BATS_TEST_TMPDIR}"/out/* | wc -l)" -eq 1 ] || { echo "writers disagree"; return 1; }
-    [ "$(cat "${BATS_TEST_TMPDIR}/out/1")" = "$(cat "${d}/race")" ] || { echo "race file differs"; return 1; }
-    [ -z "$(find "${d}" -maxdepth 1 -name '.secret.*')" ] || { echo "temp files left in ${d}"; return 1; }
+    [ "$(sort -u "${out}"/* | wc -l)" -eq 1 ] && [ "$(cat "${out}/1")" = "$(cat "${d}/${n}")" ] \
+        || { echo "parallel: $(sort -u "${out}"/* | wc -l) distinct values"; return 1; }
+    [ -z "$(find "${d}" -maxdepth 1 -name '.secret.*')" ] || { echo "parallel: temp files left in ${d}"; return 1; }
 }
 
 @test "domain validator matches the parity fixture and the cdn list" {
