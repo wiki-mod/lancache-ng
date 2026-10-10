@@ -67,6 +67,67 @@ _stand_ins() {
     _ci_sot_load || return 1
 }
 
+# What: the SOT release version as its image tag, vX.Y.Z
+# Why: fixtures and the test registry name one tag
+# From: Issue #1683 | PR #1858
+_release_tag() {
+    local v
+    v="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_release_value version)" || return 1
+    printf 'v%s\n' "${v}"
+}
+
+# What: a TLS registry on the test daemon with dns:<tag>
+# Why: setup.sh image lookups reach a real registry
+# From: Issue #1683 | PR #1858
+_registry() {
+    local d="${BATS_TEST_TMPDIR}/registry" img alp tag id port gw c host="" san="" i ref failed=""
+    local -a reg_hosts=() ec=(-newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes)
+    img="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_field base_images "" registry)" \
+        && alp="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_field base_images "" alpine)" \
+        && tag="$(_release_tag)" || return 1
+    [ -n "${img}" ] && [ -n "${alp}" ] || { echo "SOT base_images.registry or .alpine is empty"; return 1; }
+    case "${DOCKER_HOST:-}" in tcp://*) c="${DOCKER_HOST#tcp://}"; reg_hosts+=("${c%:*}") ;; esac
+    gw="$(awk 'NR > 1 && $2 == "00000000" { print $3; exit }' /proc/net/route)" || return 1
+    [ -z "${gw}" ] || reg_hosts+=("$(printf '%d.%d.%d.%d' "0x${gw:6:2}" "0x${gw:4:2}" "0x${gw:2:2}" "0x${gw:0:2}")")
+    reg_hosts+=(127.0.0.1)
+    for c in "${reg_hosts[@]}"; do
+        case "${c}" in *[!0-9.]*) san+=",DNS:${c}" ;; *) san+=",IP:${c}" ;; esac
+    done
+    mkdir -p "${d}/certs" && printf 'subjectAltName=%s\n' "${san#,}" > "${d}/san" || return 1
+    openssl req -x509 "${ec[@]}" -days 1 -subj /CN=ci-bats-ca -keyout "${d}/ca.key" -out "${d}/ca.crt" \
+        > "${d}/openssl.log" 2>&1 \
+        && openssl req "${ec[@]}" -subj /CN=ci-bats-registry -keyout "${d}/certs/r.key" -out "${d}/r.csr" \
+        >> "${d}/openssl.log" 2>&1 \
+        && openssl x509 -req -in "${d}/r.csr" -CA "${d}/ca.crt" -CAkey "${d}/ca.key" -CAcreateserial -days 1 \
+        -extfile "${d}/san" -out "${d}/certs/r.crt" >> "${d}/openssl.log" 2>&1 || { cat "${d}/openssl.log"; return 1; }
+    cat "${CI_SYSTEM_CA_PATH}" "${d}/ca.crt" > "${d}/bundle.crt" || return 1
+    id="$(docker create -p 5000 -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/r.crt -e REGISTRY_HTTP_TLS_KEY=/certs/r.key "${img}")" \
+        || return 1
+    printf '%s %s\n' "${DOCKER_HOST:--}" "${id}" >> "${BATS_TEST_TMPDIR}/containers" || return 1
+    docker cp "${d}/certs" "${id}:/certs" && docker start "${id}" > "${d}/start.log" && port="$(docker port "${id}" 5000/tcp)" \
+        || return 1
+    port="${port%%$'\n'*}" port="${port##*:}"
+    for i in $(seq 1 20); do
+        for c in "${reg_hosts[@]}"; do
+            if curl -sf --max-time 1 --cacert "${d}/ca.crt" -o "${d}/v2.out" "https://${c}:${port}/v2/" \
+                > "${d}/curl-${i}.log" 2>&1; then
+                host="${c}"
+                break 2
+            fi
+        done
+        sleep 1
+    done
+    [ -n "${host}" ] || { echo "registry ${id} answers on none of ${reg_hosts[*]} port ${port}"; cat "${d}/curl-${i}.log"
+        docker logs "${id}"; return 1; }
+    LANCACHE_IMAGE_PREFIX="$(_val name)"
+    export SSL_CERT_FILE="${d}/bundle.crt" LANCACHE_IMAGE_REGISTRY="${host}:${port}" LANCACHE_IMAGE_PREFIX
+    ref="localhost:${port}/${LANCACHE_IMAGE_PREFIX}/dns:${tag}"
+    docker pull -q "${alp}" > "${d}/push.log" 2>&1 && docker tag "${alp}" "${ref}" || { cat "${d}/push.log"; return 1; }
+    docker push -q "${ref}" >> "${d}/push.log" 2>&1 || failed+=" push"
+    docker rmi "${ref}" >> "${d}/push.log" 2>&1 || failed+=" rmi"
+    [ -z "${failed}" ] || { echo "registry image ${ref}:${failed} failed"; cat "${d}/push.log"; return 1; }
+}
+
 # What: drop runner cache inputs, then run the args.
 # Why: one list keeps tests off the real runner caches.
 # From: Issue #1683 | PR #1858
@@ -183,12 +244,20 @@ _fill() {
     printf '%s' "${s}"
 }
 
-# What: on failure print the last run's raw values.
-# Why: a failed test must never hide its raw values.
+# What: remove the test's containers; on failure raw values
+# Why: no container outlives its test; raw values stay shown
 # From: Issue #1683 | PR #1858
 teardown() {
+    local rc=0 f="${BATS_TEST_TMPDIR}/containers" h id
+    if [ -s "${f}" ]; then
+        while read -r h id; do
+            if [ "${h}" = - ]; then env -u DOCKER_HOST docker rm -f "${id}"; else DOCKER_HOST="${h}" docker rm -f "${id}"; fi \
+                > "${f}.rm.log" 2>&1 || { rc=$?; cat "${f}.rm.log"; }
+        done < "${f}"
+    fi
     [ -n "${BATS_TEST_COMPLETED:-}" ] ||
         printf 'last-run status=%s\nlast-run output=%s\n' "${status:-unset}" "${output-}"
+    return "${rc}"
 }
 
 # =========================================================
@@ -520,7 +589,7 @@ _prod_install() {
     cp "${root}/.github/yaml/build-manifest.yml" "${dir}/../../.github/yaml/" || return 1
     cp "${root}/.github/scripts/ci.sh" "${dir}/../../.github/scripts/" || return 1
     set_env_key LANCACHE_STATE_DIR "${dir}/state" "${dir}/.env"
-    set_env_key LANCACHE_IMAGE_TAG "v$(cat "${root}/VERSION")" "${dir}/.env"
+    set_env_key LANCACHE_IMAGE_TAG "$(_release_tag)" "${dir}/.env"
 }
 
 # What: tracked tree copy for a setup.sh run of its own
@@ -1727,7 +1796,7 @@ CASES
 # Why: AG-OP-007: an incomplete install must converge
 # From: Issue #1683 | PR #1858
 @test "migrate_env_for_update repairs every empty required key" {
-    _stand_ins || return 1
+    _registry || return 1
     local keys key d
     keys="$(_ci_block_entry_field validation "" setup_required_repairs)" && [ -n "${keys}" ] \
         || { echo "no SOT validation.setup_required_repairs: ${keys}"; return 1; }
@@ -1737,7 +1806,7 @@ CASES
         _converged_install "${d}" || return 1
         set_env_key "${key}" "" "${d}/.env"
         cp "${d}/.env" "${d}/.env.before"
-        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+        _setup_sh_run 'migrate_env_for_update "${CONV}"'
         # What: a pin without a tag is refused, not guessed
         # Why: only the operator picks an immutable tag
         # From: Issue #1683 | PR #1858
@@ -1755,7 +1824,7 @@ CASES
 # Why: keep the operator's size, not the template default
 # From: Issue #1683 | PR #1858
 @test "migrate_env_for_update derives CACHE_MAX_SIZE from CACHE_MAX_GB" {
-    _stand_ins || return 1
+    _registry || return 1
     local d n m def
     _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
     _cache_row() {
@@ -1763,7 +1832,7 @@ CASES
         _converged_install "${d}" || return 1
         set_env_key CACHE_MAX_GB "$2" "${d}/.env"
         set_env_key CACHE_MAX_SIZE "$3" "${d}/.env"
-        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+        _setup_sh_run 'migrate_env_for_update "${CONV}"'
         [ "${status}" -eq 0 ] || { echo "$1: rc ${status}: ${output}"; return 1; }
     }
     n="$(_val int 2 999)" m="$(_val int 2 999)"
@@ -1997,7 +2066,7 @@ _version_fixture_repo() {
 _converged_install() {
     _prod_install "$1" || return 1
     export CONV="$1"
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+    _setup_sh_run 'migrate_env_for_update "${CONV}"'
     [ "${status}" -eq 0 ] || { echo "converge $1: ${output}"; return 1; }
 }
 
@@ -2010,7 +2079,7 @@ _legacy_env() {
     tpl="${root}/deploy/prod/.env"
     printf '%s\n' "IP_STANDARD=$(get_env_var IP_STANDARD "${tpl}")" "IP_SSL=$(get_env_var IP_SSL "${tpl}")" \
         "CACHE_DIR_STANDARD=${file%/*}/cache" "CACHE_DIR_SSL=${file%/*}/cache" 'PROXY_SECURITY_MODE=strict' \
-        'PROXY_ALLOWED_CLIENT_CIDRS=' "LANCACHE_IMAGE_TAG=v$(tr -d '[:space:]' < "${root}/VERSION")" \
+        'PROXY_ALLOWED_CLIENT_CIDRS=' "LANCACHE_IMAGE_TAG=$(_release_tag)" \
         "UI_AUTH_USER=${user}" 'UI_AUTH_PASSWORD=' > "${file}"
 }
 
@@ -2018,7 +2087,7 @@ _legacy_env() {
 # Why: idempotent update, no rewrite (AG-OP-006)
 # From: Issue #1683 | PR #1858
 @test "migrate_env_for_update is a no-op on an already-converged .env" {
-    _stand_ins || return 1
+    _registry || return 1
     local root d h
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
@@ -2026,7 +2095,7 @@ _legacy_env() {
     _converged_install "${d}" || return 1
     h="$(sha256sum < "${d}/.env")"
     for _ in 1 2; do
-        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+        _setup_sh_run 'migrate_env_for_update "${CONV}"'
         [ "${status}" -eq 0 ] && [ "$(sha256sum < "${d}/.env")" = "${h}" ] || { echo "rewrite: ${output}"; return 1; }
     done
 }
@@ -2035,7 +2104,7 @@ _legacy_env() {
 # Why: AG-OP-007 convergence; AG-OP-006 no second write
 # From: Issue #1683 | PR #1858
 @test "migrate_env_for_update converges a legacy .env and is stable on rerun" {
-    _stand_ins || return 1
+    _registry || return 1
     local t before
     _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
     _legacy_row() {
@@ -2045,20 +2114,20 @@ _legacy_env() {
     }
     _legacy_row strict-allowlist || return 1
     set_env_key PROXY_ALLOWED_CLIENT_CIDRS "$(_val cidr)" "${t}/.env"
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+    _setup_sh_run 'migrate_env_for_update "${CONV}"'
     [ "${status}" -eq 0 ] && [ "$(get_env_var PROXY_SECURITY_MODE "${t}/.env")" = strict ] \
         || { echo "strict-allowlist: $(get_env_var PROXY_SECURITY_MODE "${t}/.env") ${output}"; return 1; }
     _legacy_row split-cache || return 1
     set_env_key CACHE_DIR_SSL "$(_val path)" "${t}/.env"
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+    _setup_sh_run 'migrate_env_for_update "${CONV}"'
     _expect split-cache 1 "CACHE_DIR_STANDARD and CACHE_DIR_SSL point to different paths" || return 1
     _legacy_row base || return 1
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+    _setup_sh_run 'migrate_env_for_update "${CONV}"'
     [ "${status}" -eq 0 ] && ! env_key_exists CACHE_DIR_STANDARD "${t}/.env" && ! env_key_exists CACHE_DIR_SSL "${t}/.env" \
         && [ "$(get_env_var CACHE_DIR "${t}/.env")" = "${t}/cache" ] && [ "$(get_env_var PROXY_SECURITY_MODE "${t}/.env")" = lazy ] \
         && [[ "$(get_env_var LANCACHE_STATE_DIR "${t}/.env")" == /* ]] || { echo "legacy: ${output}"; cat "${t}/.env"; return 1; }
     before="$(cat "${t}/.env")"
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+    _setup_sh_run 'migrate_env_for_update "${CONV}"'
     [ "${status}" -eq 0 ] && [ "$(cat "${t}/.env")" = "${before}" ] || { echo "second run changed .env"; return 1; }
 }
 
@@ -2066,7 +2135,7 @@ _legacy_env() {
 # Why: AG-OP-006: stable secrets never rotate on reruns
 # From: Issue #1683 | PR #1858
 @test "migrate_env_for_update generates a UI password once, never rotates it" {
-    _stand_ins || return 1
+    _registry || return 1
     local t user pw real
     _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
     _ui_row() {
@@ -2074,7 +2143,7 @@ _legacy_env() {
         mkdir -p "${t}" && _legacy_env "${t}/.env" "$2" || return 1
         export CONV="${t}"
         [ -z "${3:-}" ] || set_env_key UI_AUTH_PASSWORD "$3" "${t}/.env"
-        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+        _setup_sh_run 'migrate_env_for_update "${CONV}"'
         [ "${status}" -eq 0 ] || { echo "$1: rc ${status}: ${output}"; return 1; }
     }
     user="$(_val name)" real="$(_val name)"
@@ -2082,7 +2151,7 @@ _legacy_env() {
     pw="$(get_env_var UI_AUTH_PASSWORD "${t}/.env")"
     [[ "${pw}" =~ ^[A-Za-z0-9]{20}$ ]] && [ "$(get_env_var UI_AUTH_USER "${t}/.env")" = "${user}" ] \
         || { echo "gen: user '$(get_env_var UI_AUTH_USER "${t}/.env")', password of ${#pw} chars"; return 1; }
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+    _setup_sh_run 'migrate_env_for_update "${CONV}"'
     [ "${status}" -eq 0 ] && [ "$(get_env_var UI_AUTH_PASSWORD "${t}/.env")" = "${pw}" ] || { echo "gen: password rotated"; return 1; }
     _ui_row no-user "" || return 1
     [ -z "$(get_env_var UI_AUTH_PASSWORD "${t}/.env")" ] || { echo "no-user: a password was made"; return 1; }
@@ -2097,14 +2166,14 @@ _legacy_env() {
 # Why: AG-OP-006: one canonical assignment per key
 # From: Issue #1683 | PR #1858
 @test "migrate_env_for_update leaves no duplicate key assignments" {
-    _stand_ins || return 1
+    _registry || return 1
     local t="${BATS_TEST_TMPDIR}/dup"
     _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
     mkdir -p "${t}" && _legacy_env "${t}/.env" || return 1
     printf 'PROXY_SECURITY_MODE=strict\n' >> "${t}/.env"
     [ "$(grep -c '^PROXY_SECURITY_MODE=' "${t}/.env")" -eq 2 ] || { echo "no duplicate in the input"; return 1; }
     export CONV="${t}"
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}" && migrate_env_for_update "${CONV}"'
+    _setup_sh_run 'migrate_env_for_update "${CONV}" && migrate_env_for_update "${CONV}"'
     [ "${status}" -eq 0 ] && [ -z "$(awk -F= '/^[A-Za-z_]/ { print $1 }' "${t}/.env" | sort | uniq -d)" ] \
         || { echo "duplicates: $(awk -F= '/^[A-Za-z_]/ { print $1 }' "${t}/.env" | sort | uniq -d) ${output}"; return 1; }
     [ "$(grep '^PROXY_SECURITY_MODE=' "${t}/.env")" = PROXY_SECURITY_MODE=lazy ] \
@@ -2115,7 +2184,7 @@ _legacy_env() {
 # Why: AG-OP-009 edits survive; the checkout stays clean
 # From: Issue #1683 | PR #1858
 @test "migrate_env_for_update keeps config/prod values per row" {
-    _stand_ins || return 1
+    _registry || return 1
     local root ip srv srv2 net bios bad mode=dnsmasq-proxy name extra init envw edit want kv msg base pd cpe
     local -a kvs
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
@@ -2139,12 +2208,12 @@ _legacy_env() {
         _cp_install "${name}" || return 1
         IFS=';' read -r -a kvs <<< "${init}"
         for kv in "${kvs[@]}"; do set_env_key "${kv%%=*}" "${kv#*=}" "${cpe}"; done
-        _setup_sh_run 'PATH="${BIN}:${PATH}"; adopt_config_prod_edits "${CONV%/deploy/prod}" >/dev/null && migrate_env_for_update "${CONV}"'
+        _setup_sh_run 'adopt_config_prod_edits "${CONV%/deploy/prod}" && migrate_env_for_update "${CONV}"'
         [ "${status}" -eq 0 ] || { echo "${name}: run 1: ${output}"; return 1; }
         IFS=';' read -r -a kvs <<< "${envw}"
         for kv in "${kvs[@]}"; do grep -qx -- "${kv}" "${pd}/.env" || { echo "${name}: .env lacks ${kv}"; return 1; }; done
         [ "${edit}" = - ] || set_env_key "${edit%%=*}" "${edit#*=}" "${cpe}"
-        _setup_sh_run 'PATH="${BIN}:${PATH}"; adopt_config_prod_edits "${CONV%/deploy/prod}" >/dev/null && migrate_env_for_update "${CONV}"'
+        _setup_sh_run 'adopt_config_prod_edits "${CONV%/deploy/prod}" && migrate_env_for_update "${CONV}"'
         [ "${status}" -eq 0 ] && git -C "${base}" diff --quiet HEAD -- config || { echo "${name}: run 2: ${output}"; return 1; }
         IFS=';' read -r -a kvs <<< "${want}"
         for kv in "${kvs[@]}"; do
@@ -2162,9 +2231,9 @@ CASES
         _cp_install "${name}" || return 1
         tr ';' '\n' <<< "${extra}" >> "${pd}/.env"
         set_env_key "${kv%%=*}" "${kv#*=}" "${cpe}"
-        _setup_sh_run 'PATH="${BIN}:${PATH}"; adopt_config_prod_edits "${CONV%/deploy/prod}" >/dev/null'
+        _setup_sh_run 'adopt_config_prod_edits "${CONV%/deploy/prod}"'
         cp "${pd}/.env" "${base}/env.before"
-        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"; echo unreached'
+        _setup_sh_run 'migrate_env_for_update "${CONV}"; echo unreached'
         [ "${status}" -eq 1 ] && [[ "${output}" == *"${msg}"* && "${output}" == *"Restored ${pd}/.env to its state before the update"* ]] \
             && [[ "${output}" != *unreached* ]] && cmp -s "${base}/env.before" "${pd}/.env" && grep -qx -- "${kv}" "${cpe%.env}.local.env" \
             || { echo "${name}: rc ${status}: ${output}"; return 1; }
@@ -2175,18 +2244,18 @@ CASES
     _cp_install only-changed || return 1
     [ "$(awk -F= '/^[A-Za-z_]/ { n++ } END { print n + 0 }' "${cpe}")" -ge 1 ] || { echo "only-changed: template has no key"; return 1; }
     set_env_key DHCP_PROXY_PXE_BOOT_SERVER "${srv}" "${cpe}"
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; adopt_config_prod_edits "${CONV%/deploy/prod}" >/dev/null'
+    _setup_sh_run 'adopt_config_prod_edits "${CONV%/deploy/prod}"'
     [ "${status}" -eq 0 ] && git -C "${base}" diff --quiet HEAD -- config \
         && [ "$(awk -F= '/^[A-Za-z_]/ { print $1 }' "${cpe%.env}.local.env")" = DHCP_PROXY_PXE_BOOT_SERVER ] \
         || { echo "only-changed: rc ${status}: $(awk -F= '/^[A-Za-z_]/ { print $1 }' "${cpe%.env}.local.env" | tr '\n' ' ')"; return 1; }
     _cp_install deleted || return 1
     rm "${cpe}"
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; adopt_config_prod_edits "${CONV%/deploy/prod}" >/dev/null'
+    _setup_sh_run 'adopt_config_prod_edits "${CONV%/deploy/prod}"'
     [ "${status}" -eq 0 ] && git -C "${base}" diff --quiet HEAD -- config && [ ! -e "${cpe%.env}.local.env" ] \
         || { echo "deleted: rc ${status}: ${output}"; return 1; }
     _cp_install no-git nogit || return 1
     set_env_key DHCP_PROXY_PXE_BOOT_SERVER "${srv}" "${cpe}"
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; adopt_config_prod_edits "${CONV%/deploy/prod}"'
+    _setup_sh_run 'adopt_config_prod_edits "${CONV%/deploy/prod}"'
     [ "${status}" -eq 0 ] && [ "$(get_env_var DHCP_PROXY_PXE_BOOT_SERVER "${cpe}")" = "${srv}" ] && [ ! -e "${cpe%.env}.local.env" ] \
         || { echo "no-git: rc ${status}: ${output}"; return 1; }
 }
@@ -2195,13 +2264,13 @@ CASES
 # Why: AG-OP-009 keeps overrides; AG-OP-007 converges once
 # From: Issue #1683 | PR #1858
 @test "migrate_env_for_update preserves all custom per-service state dirs" {
-    _stand_ins || return 1
+    _registry || return 1
     local d keys k first tv
     local -A own
     _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
     _state_row() { d="${BATS_TEST_TMPDIR}/$1/deploy/prod"; _converged_install "${d}"; }
     _state_run() {
-        _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${CONV}"'
+        _setup_sh_run 'migrate_env_for_update "${CONV}"'
         [ "${status}" -eq 0 ] || { echo "$1: rc ${status}: ${output}"; return 1; }
     }
     _state_row own || return 1
