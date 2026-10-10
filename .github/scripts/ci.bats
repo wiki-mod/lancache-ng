@@ -2331,25 +2331,40 @@ invalid|${bad}|IP_SSL is not a valid IPv4 address: ${bad}
 ROWS
 }
 
+# What: deploy/prod state root is compose's one default
+# Why: state stays off the checkout; compose and setup agree
+# From: Issue #1683 | PR #1858
 @test "production_state_root_default keeps deploy/prod state out of the checkout" {
-    # What: Deploy/prod state defaults off checkout.
-    # Why: Runtime state outside git checkout.
-    # From: Issue #1683 | PR #1858
-    local repo_root root co="${BATS_TEST_TMPDIR}/co" dp binds
-    repo_root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${repo_root}"
-    dp="${co}/deploy/prod"
-    _prod_install "${dp}"
+    local co="${BATS_TEST_TMPDIR}/co" dp cf root binds other name to scope msg
+    _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
+    dp="${co}/deploy/prod" cf="${co}/deploy/prod/docker-compose.yml"
+    _prod_install "${dp}" || return 1
     remove_env_key LANCACHE_STATE_DIR "${dp}/.env"
-    root="$(production_state_root_default "${dp}")"
-    [[ "${root}" == /* && "${root}/" != "${co}/"* ]] || { echo "root: ${root}"; return 1; }
-    # What: compose itself resolves state under that root
-    # Why: setup.sh and compose must share one default
-    # From: Issue #1683 | PR #1858
-    binds="$(docker compose --env-file "${dp}/.env" -f "${dp}/docker-compose.yml" config --format json)"
+    run production_state_root_default "${dp}"
+    root="${output}"
+    [ "${status}" -eq 0 ] && [[ "${root}" == /* && "${root}/" != "${co}/"* ]] || { echo "prod: rc ${status}: ${root}"; return 1; }
+    binds="$(docker compose --env-file "${dp}/.env" -f "${cf}" config --format json)" || { echo "prod: compose config failed"; return 1; }
     binds="$(jq -r '.services[].volumes[]? | select(.type == "bind") | .source' <<< "${binds}")"
-    grep -q "^${root}/" <<< "${binds}" || { echo "no state bind under ${root}: ${binds}"; return 1; }
-    [ "$(production_state_root_default "${BATS_TEST_TMPDIR}/legacy")" = "${BATS_TEST_TMPDIR}/legacy" ]
+    grep -q "^${root}/" <<< "${binds}" || { echo "prod: no state bind under ${root}: ${binds}"; return 1; }
+    other="$(_val path)"
+    run production_state_root_default "${other}"
+    _expect other 0 "=${other}" || return 1
+    cp "${cf}" "${cf}.orig" || return 1
+    while IFS='|' read -r name to scope msg; do
+        if [ "${scope}" = first ]; then
+            awk -v a="LANCACHE_STATE_DIR:-${root}}" -v b="${to}" \
+                '!d && (i = index($0, a)) { $0 = substr($0, 1, i - 1) b substr($0, i + length(a)); d = 1 } { print }' \
+                "${cf}.orig" > "${cf}" || return 1
+        else
+            cp "${cf}.orig" "${cf}" && replace_literal_in_file "${cf}" "LANCACHE_STATE_DIR:-${root}}" "${to}" || return 1
+        fi
+        run production_state_root_default "${dp}"
+        _expect "${name}" 1 "${msg}" || return 1
+    done <<ROWS
+two|LANCACHE_STATE_DIR:-${root}/$(_val name)}|first|gives no single LANCACHE_STATE_DIR default
+relative|LANCACHE_STATE_DIR:-$(_val name)}|all|gives no single LANCACHE_STATE_DIR default
+none|LANCACHE_STATE_DIR}|all|has no LANCACHE_STATE_DIR default
+ROWS
 }
 
 @test "setup quickstart install moves into deploy/prod once" {
