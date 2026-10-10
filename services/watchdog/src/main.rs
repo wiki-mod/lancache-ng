@@ -512,17 +512,12 @@ struct Retention {
     cache_prefix: PathBuf,
     cache_valid_days: u64,
     purge_stamp: PathBuf,
-    syslog_enabled: bool,
     syslog_root: String,
     syslog_prefix: PathBuf,
     syslog_days: u64,
     syslog_max_bytes: u64,
     syslog_cooldown: u64,
     syslog_stamp: PathBuf,
-    selflog_file: String,
-    selflog_prefix: PathBuf,
-    selflog_max_bytes: u64,
-    selflog_rotations: u64,
 }
 
 // What: retention settings from an env reader.
@@ -560,26 +555,18 @@ fn load_retention(
         above: OutOfRange::Clamp,
         ..at_least("SYSLOG_PRUNE_RETRY_COOLDOWN", 0, DAY)
     })?;
-    let selflog_mb = knob(at_least("FLUENT_BIT_SELFLOG_MAX_MB", 1, u64::MAX >> 20))?;
-    let selflog_rotations = knob(at_least("FLUENT_BIT_SELFLOG_MAX_ROTATIONS", 1, u64::MAX))?;
     let retention = Retention {
         interval: Duration::from_secs(interval),
         cache_dir: cache_dir(&get)?,
         cache_prefix: absolute("CACHE_DIR_ALLOWED_PREFIX")?,
         cache_valid_days,
         purge_stamp: absolute("PURGE_STAMP")?,
-        syslog_enabled: config::need_flag(&env, "SYSLOG_ENABLED")
-            .map_err(|e| format!("FATAL: {e}."))?,
         syslog_root: need("SYSLOG_LOG_ROOT")?,
         syslog_prefix: absolute("SYSLOG_LOG_ROOT_ALLOWED_PREFIX")?,
         syslog_days,
         syslog_max_bytes: syslog_gb << 30,
         syslog_cooldown,
         syslog_stamp: absolute("SYSLOG_PRUNE_STAMP")?,
-        selflog_file: need("FLUENT_BIT_SELFLOG_FILE")?,
-        selflog_prefix: absolute("FLUENT_BIT_SELFLOG_ALLOWED_PREFIX")?,
-        selflog_max_bytes: selflog_mb << 20,
-        selflog_rotations,
     };
     Ok((retention, warnings))
 }
@@ -789,7 +776,7 @@ fn written_today(meta: &fs::Metadata, now: u64) -> bool {
 // Why: the budget wins over the floor; today's log stays.
 // From: Issue #633 | PR #1858
 fn prune_syslog(r: &Retention, now: u64) {
-    if !r.syslog_enabled || now - read_stamp(&r.syslog_stamp, now) < DAY {
+    if now - read_stamp(&r.syslog_stamp, now) < DAY {
         return;
     }
     let root = match retention_target("SYSLOG_LOG_ROOT", &r.syslog_root, &r.syslog_prefix) {
@@ -867,94 +854,72 @@ fn prune_syslog(r: &Retention, now: u64) {
     }
 }
 
-// What: the UTC stamp a rotation name carries.
-// Why: one sortable name per rotation, never reused.
-fn rotation_stamp(at: OffsetDateTime) -> String {
-    const FORMAT: &[time::format_description::FormatItem] = time::macros::format_description!(
-        "[year][month][day]T[hour][minute][second]Z"
-    );
-    at.format(FORMAT)
-        .expect("fixed UTC format description must always succeed")
+// What: the suffix of a compressed log file.
+// Why: compressed files are skipped; the ui reads them.
+// From: Issue #1683
+const XZ_SUFFIX: &str = ".xz";
+
+// What: xz preset 6, the xz command line default.
+// Why: the maintainer set xz as the default compression.
+// From: Issue #1683
+const XZ_PRESET: u32 = 6;
+
+// What: xz-compress one closed log file, then drop it.
+// Why: a failed copy keeps the original; no half file.
+// From: Issue #1683
+fn compress_file(path: &Path) -> Result<PathBuf, String> {
+    let mut packed = path.as_os_str().to_owned();
+    packed.push(XZ_SUFFIX);
+    let packed = PathBuf::from(packed);
+    let written = fs::File::open(path).and_then(|mut src| {
+        let dst = fs::File::create_new(&packed)?;
+        let mut xz = liblzma::write::XzEncoder::new(dst, XZ_PRESET);
+        io::copy(&mut src, &mut xz)?;
+        xz.finish()?.sync_all()
+    });
+    if let Err(e) = written {
+        let cleanup = match fs::remove_file(&packed) {
+            Ok(()) => String::new(),
+            Err(gone) if gone.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(gone) => format!("; cannot remove {}: {gone}", packed.display()),
+        };
+        return Err(format!(
+            "ERROR: cannot compress {}: {e}{cleanup}",
+            path.display()
+        ));
+    }
+    fs::remove_file(path).map_err(|e| {
+        format!(
+            "ERROR: compressed {} but cannot remove it: {e}",
+            path.display()
+        )
+    })?;
+    Ok(packed)
 }
 
-// What: zstd copy, truncate, then cap the rotations.
-// Why: fluent-bit keeps it open; a failed copy keeps it
-// From: Issue #1236 | PR #1858
-fn rotate_selflog(r: &Retention, at: OffsetDateTime) {
-    let file = Path::new(&r.selflog_file);
-    let (Some(parent), Some(name)) = (file.parent(), file.file_name()) else {
-        return log_err(&format!(
-            "FATAL: FLUENT_BIT_SELFLOG_FILE={} names no file; refusing.",
-            r.selflog_file
-        ));
-    };
-    let dir = match retention_target(
-        "FLUENT_BIT_SELFLOG_FILE",
-        &parent.to_string_lossy(),
-        &r.selflog_prefix,
-    ) {
-        Ok(dir) => dir,
+// What: xz every closed syslog file under the root.
+// Why: today's files are still open in syslog-ng.
+// From: Issue #1683
+fn compress_syslog(r: &Retention, now: u64) {
+    let root = match retention_target("SYSLOG_LOG_ROOT", &r.syslog_root, &r.syslog_prefix) {
+        Ok(root) => root,
         Err(e) => return log_err(&e),
     };
-    let name = name.to_string_lossy();
-    let live = dir.join(&*name);
-    let size = match fs::symlink_metadata(&live) {
-        Ok(meta) if meta.is_file() => meta.len(),
-        _ => return,
-    };
-    if size <= r.selflog_max_bytes {
+    if !root.is_dir() {
         return;
     }
-    log(&format!(
-        "Fluent-bit self-log budget exceeded: {size} > {} bytes; rotating",
-        r.selflog_max_bytes
-    ));
-    let rotated = dir.join(format!("{name}.{}.zst", rotation_stamp(at)));
-    let encoded = fs::File::open(&live).and_then(|src| {
-        let dst = fs::File::create_new(&rotated)?;
-        zstd::stream::copy_encode(src, dst, zstd::DEFAULT_COMPRESSION_LEVEL)
-    });
-    if let Err(e) = encoded {
-        let _ = fs::remove_file(&rotated);
-        return log_err(&format!(
-            "ERROR: cannot write {}: {e}; not rotating",
-            rotated.display()
-        ));
-    }
-    let truncated = fs::OpenOptions::new()
-        .write(true)
-        .open(&live)
-        .and_then(|f| f.set_len(0));
-    match truncated {
-        Ok(()) => log(&format!("Rotated fluent-bit self-log to {}", rotated.display())),
-        Err(e) => log_err(&format!("ERROR: cannot truncate {}: {e}", live.display())),
-    }
-    cap_rotations(&dir, &format!("{name}."), r.selflog_rotations);
-}
-
-// What: delete the oldest rotations beyond the limit.
-// Why: a long outage must not fill the volume.
-fn cap_rotations(dir: &Path, prefix: &str, keep: u64) {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) => return log_err(&format!("ERROR: cannot list {}: {e}", dir.display())),
+    let files = match files_under(&root) {
+        Ok(files) => files,
+        Err(e) => return log_err(&format!("ERROR: cannot scan {}: {e}", root.display())),
     };
-    let mut rotations: Vec<(PathBuf, Option<SystemTime>)> = entries
-        .filter_map(Result::ok)
-        .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
-        .filter_map(|e| {
-            let meta = fs::symlink_metadata(e.path()).ok()?;
-            meta.is_file().then(|| (e.path(), meta.modified().ok()))
-        })
-        .collect();
-    let excess = (rotations.len() as u64).saturating_sub(keep);
-    rotations.sort_by_key(|(_, mtime)| *mtime);
-    for (path, _) in rotations.iter().take(excess as usize) {
-        if remove_file_if_regular(path) {
-            log(&format!(
-                "Pruned old fluent-bit self-log rotation: {}",
-                path.display()
-            ));
+    for (path, meta) in &files {
+        let done = path.as_os_str().to_string_lossy().ends_with(XZ_SUFFIX);
+        if done || !meta.is_file() || written_today(meta, now) {
+            continue;
+        }
+        match compress_file(path) {
+            Ok(packed) => log(&format!("Compressed syslog file: {}", packed.display())),
+            Err(e) => log_err(&e),
         }
     }
 }
@@ -965,11 +930,10 @@ fn cap_rotations(dir: &Path, prefix: &str, keep: u64) {
 async fn run_retention(r: &Retention, stop: impl std::future::Future<Output = ()>) {
     tokio::pin!(stop);
     loop {
-        let at = OffsetDateTime::now_utc();
         let now = unix_secs();
         purge_cache(r, now);
+        compress_syslog(r, now);
         prune_syslog(r, now);
-        rotate_selflog(r, at);
         tokio::select! {
             () = &mut stop => {
                 return log("SIGTERM/SIGINT received; retention stopping");
@@ -1003,15 +967,12 @@ async fn retention() {
         }
     };
     log(&format!(
-        "Retention daemon started. Cache: {} (valid {}d, prefix {}) | Syslog: {} (enabled={}, prefix {}) | Fluent-bit self-log: {} (prefix {}) | Interval: {}s",
+        "Retention daemon started. Cache: {} (valid {}d, prefix {}) | Syslog: {} (xz, prefix {}) | Interval: {}s",
         r.cache_dir,
         r.cache_valid_days,
         r.cache_prefix.display(),
         r.syslog_root,
-        u8::from(r.syslog_enabled),
         r.syslog_prefix.display(),
-        r.selflog_file,
-        r.selflog_prefix.display(),
         r.interval.as_secs(),
     ));
     let stop = async move {
@@ -1571,17 +1532,12 @@ mod tests {
             ("CACHE_DIR_ALLOWED_PREFIX", gen_path()),
             ("CACHE_VALID_DAYS", rnd(0, DAY).to_string()),
             ("PURGE_STAMP", gen_path()),
-            ("SYSLOG_ENABLED", gen_flag().to_string()),
             ("SYSLOG_LOG_ROOT", gen_path()),
             ("SYSLOG_LOG_ROOT_ALLOWED_PREFIX", gen_path()),
             ("SYSLOG_RETENTION_DAYS", rnd(0, DAY).to_string()),
             ("SYSLOG_MAX_GB", rnd(gb.min, gb.max).to_string()),
             ("SYSLOG_PRUNE_RETRY_COOLDOWN", rnd(0, DAY).to_string()),
             ("SYSLOG_PRUNE_STAMP", gen_path()),
-            ("FLUENT_BIT_SELFLOG_FILE", gen_path()),
-            ("FLUENT_BIT_SELFLOG_ALLOWED_PREFIX", gen_path()),
-            ("FLUENT_BIT_SELFLOG_MAX_MB", rnd(1, u32::MAX.into()).to_string()),
-            ("FLUENT_BIT_SELFLOG_MAX_ROTATIONS", rnd(1, u32::MAX.into()).to_string()),
         ]
     }
 
@@ -1594,28 +1550,22 @@ mod tests {
         let (r, warnings) = load_retention(reader(&env, &[])).expect("settings");
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(r.syslog_max_bytes, num("SYSLOG_MAX_GB") << 30);
-        assert_eq!(r.selflog_max_bytes, num("FLUENT_BIT_SELFLOG_MAX_MB") << 20);
         assert_eq!(
-            (r.cache_valid_days, r.syslog_days, r.syslog_cooldown, r.selflog_rotations),
+            (r.cache_valid_days, r.syslog_days, r.syslog_cooldown),
             (
                 num("CACHE_VALID_DAYS"),
                 num("SYSLOG_RETENTION_DAYS"),
-                num("SYSLOG_PRUNE_RETRY_COOLDOWN"),
-                num("FLUENT_BIT_SELFLOG_MAX_ROTATIONS")
+                num("SYSLOG_PRUNE_RETRY_COOLDOWN")
             )
         );
         assert_eq!(r.purge_stamp, PathBuf::from(value(&env, "PURGE_STAMP")));
-        assert_eq!(r.selflog_file, value(&env, "FLUENT_BIT_SELFLOG_FILE"));
         for (key, _) in &env {
             assert!(load_retention(reader(&env, &[(*key, "")])).is_err(), "{key} blank");
         }
         let (junk, relative) = (gen_name(), format!("{}/{}", gen_name(), gen_name()));
         let bad = [
             ("SYSLOG_MAX_GB", "0"),
-            ("FLUENT_BIT_SELFLOG_MAX_MB", "0"),
-            ("FLUENT_BIT_SELFLOG_MAX_ROTATIONS", "0"),
             ("CACHE_VALID_DAYS", junk.as_str()),
-            ("SYSLOG_ENABLED", junk.as_str()),
             ("CACHE_DIR_ALLOWED_PREFIX", relative.as_str()),
             ("PURGE_STAMP", relative.as_str()),
         ];
@@ -1644,25 +1594,19 @@ mod tests {
     fn scratch_retention(root: &Path) -> Retention {
         let max_days = unix_secs() / DAY / 2;
         let under = |prefix: &Path| prefix.join(gen_name()).display().to_string();
-        let (cache, syslog, selflog) =
-            (root.join(gen_name()), root.join(gen_name()), root.join(gen_name()));
+        let (cache, syslog) = (root.join(gen_name()), root.join(gen_name()));
         Retention {
             interval: Duration::from_secs(rnd(DAY, 2 * DAY)),
             cache_dir: under(&cache),
             cache_prefix: cache,
             cache_valid_days: rnd(1, max_days),
             purge_stamp: root.join(gen_name()),
-            syslog_enabled: true,
             syslog_root: under(&syslog),
             syslog_prefix: syslog,
             syslog_days: rnd(1, max_days),
             syslog_max_bytes: rnd(4, u16::MAX.into()),
             syslog_cooldown: rnd(0, DAY),
             syslog_stamp: root.join(gen_name()),
-            selflog_file: under(&selflog.join(gen_name())),
-            selflog_prefix: selflog,
-            selflog_max_bytes: rnd(1, u16::MAX.into()),
-            selflog_rotations: rnd(1, u8::MAX.into()),
         }
     }
 
@@ -1780,7 +1724,7 @@ mod tests {
     #[test]
     fn syslog_prune_keeps_floor_budget_and_today() {
         let root = scratch();
-        let mut r = scratch_retention(&root);
+        let r = scratch_retention(&root);
         let dir = PathBuf::from(&r.syslog_root).join(gen_name());
         let (aged, live) = (dir.join(gen_name()), dir.join(gen_name()));
         let (older, newer) = (dir.join(gen_name()), dir.join(gen_name()));
@@ -1796,10 +1740,6 @@ mod tests {
         file_at(&live, live_len, rnd(midnight, now));
         file_at(&newer, newer_len, newer_at);
         file_at(&older, older_len, newer_at - rnd(1, quarter));
-        r.syslog_enabled = false;
-        prune_syslog(&r, now);
-        assert!(aged.exists() && !r.syslog_stamp.exists(), "a disabled prune ran");
-        r.syslog_enabled = true;
         prune_syslog(&r, now);
         assert!(!aged.exists() && !older.exists(), "floor or budget not applied");
         assert!(live.exists() && newer.exists(), "pruned beyond the budget");
@@ -1812,45 +1752,55 @@ mod tests {
         assert_eq!(stamp_of(&r.syslog_stamp), later + r.syslog_cooldown - DAY);
     }
 
-    // What: zstd copy, truncate, keep the rotation limit.
-    // Why: the live file stays open; oldest go first
+    // What: closed files become .xz; today's stay plain.
+    // Why: syslog-ng still writes today's per-host files.
     #[test]
-    fn selflog_rotates_and_caps_rotations() {
+    fn syslog_files_compress_to_xz_except_today() {
         let root = scratch();
         let r = scratch_retention(&root);
-        let live = PathBuf::from(&r.selflog_file);
-        let (dir, name) = (live.parent().unwrap(), live.file_name().unwrap().to_string_lossy());
-        let (keep, now) = (r.selflog_rotations, unix_secs());
-        let old: Vec<PathBuf> = (0..keep)
-            .map(|i| {
-                let path = dir.join(format!("{name}.{}", gen_name()));
-                file_at(&path, rnd(1, u8::MAX.into()), now - (keep - i) * DAY);
-                path
-            })
-            .collect();
-        file_at(&live, rnd(0, r.selflog_max_bytes), now);
-        rotate_selflog(&r, OffsetDateTime::now_utc());
-        assert!(old.iter().all(|p| p.exists()), "rotated below the limit");
-        let content: Vec<u8> = (0..r.selflog_max_bytes + rnd(1, r.selflog_max_bytes))
+        let dir = PathBuf::from(&r.syslog_root).join(gen_name());
+        let (closed, live) = (dir.join(gen_name()), dir.join(gen_name()));
+        let midnight = unix_secs() / DAY * DAY;
+        let now = midnight + rnd(1, DAY - 1);
+        let content: Vec<u8> = (0..rnd(1, u16::MAX.into()))
             .map(|_| rnd(0, u8::MAX.into()) as u8)
             .collect();
-        fs::write(&live, &content).expect("live");
-        let at = OffsetDateTime::now_utc();
-        rotate_selflog(&r, at);
-        assert_eq!(fs::metadata(&live).expect("live").len(), 0, "live file not truncated");
-        let rotated = dir.join(format!("{name}.{}.zst", rotation_stamp(at)));
-        let decoded = zstd::stream::decode_all(fs::File::open(&rotated).expect("rotated"));
-        assert_eq!(decoded.expect("zstd"), content);
-        assert!(!old[0].exists() && old[1..].iter().all(|p| p.exists()), "wrong rotation pruned");
-        let prefix = format!("{name}.");
-        let count = fs::read_dir(dir)
-            .expect("dir")
-            .filter(|e| {
-                let n = e.as_ref().expect("entry").file_name();
-                n.to_string_lossy().starts_with(&prefix)
-            })
-            .count();
-        assert_eq!(count as u64, keep);
+        fs::create_dir_all(&dir).expect("dir");
+        fs::write(&closed, &content).expect("closed");
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(midnight - rnd(1, DAY));
+        fs::File::options()
+            .write(true)
+            .open(&closed)
+            .and_then(|f| f.set_modified(at))
+            .expect("set mtime");
+        file_at(&live, rnd(1, u8::MAX.into()), rnd(midnight, now));
+        compress_syslog(&r, now);
+        let mut packed = closed.as_os_str().to_owned();
+        packed.push(XZ_SUFFIX);
+        let packed = PathBuf::from(packed);
+        assert!(!closed.exists() && live.exists(), "wrong file compressed");
+        let mut decoded = Vec::new();
+        let file = fs::File::open(&packed).expect("xz file");
+        io::Read::read_to_end(&mut liblzma::read::XzDecoder::new(file), &mut decoded)
+            .expect("xz decode");
+        assert_eq!(decoded, content);
+        compress_syslog(&r, now);
+        assert!(packed.exists(), "an .xz file was compressed again");
+    }
+
+    // What: a failed compression keeps the original file.
+    // Why: no log line may vanish; no half .xz may stay.
+    #[test]
+    fn a_failed_compression_keeps_the_original() {
+        let root = scratch();
+        let path = root.join(gen_name());
+        fs::write(&path, gen_name()).expect("file");
+        let mut packed = path.as_os_str().to_owned();
+        packed.push(XZ_SUFFIX);
+        fs::create_dir(PathBuf::from(&packed)).expect("blocker");
+        let err = compress_file(&path).expect_err("compressed over a dir");
+        assert!(err.contains(&path.display().to_string()), "{err}");
+        assert!(path.exists(), "the original was removed");
     }
 
     // What: the loop ends when stop fires mid-sleep

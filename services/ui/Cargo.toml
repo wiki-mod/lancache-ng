@@ -24,10 +24,10 @@ axum = { workspace = true, features = ["form"] }
 base64 = { workspace = true }
 data-encoding = { workspace = true }
 dhcproto = { workspace = true }
-flate2 = { workspace = true }
 form_urlencoded = { workspace = true }
 futures-util = { workspace = true }
 hex = { workspace = true }
+liblzma = { workspace = true }
 nkeys = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
@@ -41,4 +41,3 @@ time = { workspace = true, features = ["macros", "parsing"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-zstd = { workspace = true }
