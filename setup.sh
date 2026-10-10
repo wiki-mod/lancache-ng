@@ -4670,11 +4670,8 @@ perform_stack_update_flow() {
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die_no_stack_found "$install_dir"
     assert_prebuilt_image_platform_supported
-    # Installed up front, before anything is mutated, so the post-update
-    # verify_stack_functional_health gate below actually runs its DNS/HTTP
-    # probes on a default install instead of silently no-oping because curl
-    # or dig was never present (verify_stack_functional_health still fails
-    # closed on its own if a tool ever goes missing again after this point).
+    # What: installs curl, dig and jq before any mutation
+    # Why: the functional health gate must not silently skip
     install_missing_tools curl dig jq
     cd "$install_dir"
     _UPDATE_ENV_FILE=$(runtime_env_file_for_install_dir "$install_dir")
@@ -4839,38 +4836,8 @@ cmd_auto_update() {
 }
 
 # ── converge-reconcile subcommand (#819) ──────────────────────────────────────
-# Internal entry point, not meant for interactive use: invoked as the first
-# ExecStart of lancache-converge.service, immediately before its existing
-# container-drift convergence step further below (see the "Installing
-# systemd watchdog" step -- that ExecStart line brings the whole compose
-# stack back up, unchanged by this commit). Bridges the Admin UI's release-
-# channel/scheduled-update control (services/ui/src/routes/setup.rs's
-# update_stack_settings) onto the host.
-#
-# That control can only write into the ui-data Docker-managed *named volume*
-# (routes/dhcp.rs's persist_ui_settings/write_ui_settings_file target) -- a
-# plain host script cannot read that as a filesystem path. Rather than
-# migrate ui-data to a LANCACHE_STATE_DIR bind-mount (a real, irreversible-
-# if-wrong change to every existing install's already-saved DHCP settings),
-# this reads the volume's content through a throwaway read-only container,
-# the same idiom backup_compose_volumes already uses for exactly this reason.
-#
-# Only two keys are ever pulled: LANCACHE_IMAGE_CHANNEL and
-# AUTO_UPDATE_ENABLED, validated independently of the wider
-# validate_lancache_image_channel (which `die`s on an unrecognized value --
-# unsuitable here, since an unexpected value from the UI must be a silent
-# no-op tick, not an aborted systemd service run). Only "stable"/"nightly" are
-# accepted, matching exactly what routes/setup.rs's is_valid_ui_channel now
-# offers the operator; this intentionally does not widen to "pinned" even
-# once another codepath's validator learns it, since this control was never
-# meant to set it. "edge" (the old name of "nightly", renamed in v0.3.0
-# #1056) and "dev" (retired, not renamed, in v0.3.0 #825/#1141) are both
-# deliberately NOT accepted -- consistent with the hard cut elsewhere, and
-# neither was ever offered by the Admin UI to begin with. A settings volume
-# still holding "edge" from a pre-rename Admin UI is treated as an
-# unrecognized value and no-op'd here (this must not `die` -- see above --
-# because it runs inside the auto-update service tick); the operator re-picks a
-# valid channel in the current UI.
+# What: true if the UI channel is in the selectable list
+# Why: edge and dev are hard cuts; no-op, not die, on a tick
 lancache_ui_channel_override_is_valid() {
     local channel
     for channel in "${LANCACHE_SELECTABLE_CHANNELS[@]}"; do
@@ -4884,36 +4851,15 @@ lancache_ui_channel_override_is_valid() {
 # From: Issue #1683 | PR #1858
 LANCACHE_SELECTABLE_CHANNELS=(nightly stable)
 
-# Validates a CACHE_MAX_GB override pulled from the Admin UI's settings
-# volume (services/ui/src/routes/cache.rs's resize_cache, issue #1069 part
-# 3: the Admin UI cache-resize capability). Must be a positive whole number
-# of GiB, same shape setup.sh's own "Cache size in GiB" prompt accepts.
-# Deliberately does NOT re-run a disk-space/safety-buffer check here: the
-# Admin UI already validated the requested size against real free space at
-# its own read-only view of CACHE_DIR (the same proxy-cache volume) before
-# ever writing this override, so re-deriving that check on the host would
-# just duplicate logic that has to be kept in sync in two languages for no
-# real additional safety -- the actual gap this leaves is a real disk-usage
-# change in the window between the Admin UI's validation and this
-# convergence tick picking it up (currently up to ~5 minutes), which is a
-# documented, accepted limitation (see docs/architecture-ng.md's Cache
-# Retention & Cleanup section), not something silently unguarded.
-# The `10#` base prefix mirrors the existing "Cache size in GiB" prompt's own
-# leading-zero handling further down in this script: without it, a
-# settings-file value like "008" would be parsed as octal by `(( ))` and abort
-# on an invalid digit (8/9) rather than being treated as decimal 8.
+# What: true for a positive whole number of GiB
+# Why: a leading 0 must parse as decimal, not octal
 lancache_ui_cache_max_gb_override_is_valid() {
     [[ "$1" =~ ^[0-9]+$ ]] || return 1
     (( 10#$1 > 0 ))
 }
 
-# Reads a single KEY=value line out of the ui-data volume's
-# lancache-ui-settings.env, or prints nothing if the volume doesn't exist yet
-# (a fresh install before the UI container has ever started), Docker itself
-# isn't available, or the settings file hasn't been written yet. Deliberately
-# checks `docker volume inspect` before `docker run -v`: mounting a
-# not-yet-existing named volume silently CREATES an empty one as a side
-# effect, which would turn this read-only helper into an accidental write.
+# What: reads one KEY from the ui-data settings file
+# Why: checks the volume exists; docker run would create it
 lancache_read_ui_settings_override() {
     local install_dir="$1" env_file="$2" key="$3" project volume raw rc=0
     command -v docker >/dev/null 2>&1 || return 0
@@ -4957,12 +4903,8 @@ cmd_converge_reconcile() {
     local current_ntp_enabled ui_logging_enabled current_logging_enabled
 
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
-    # A converge tick can fire before the very first install completes (the
-    # timer/service are both installed, then enabled, in that order -- see
-    # "Installing systemd watchdog"/"Starting stack"); silently skip rather
-    # than die, exactly like the pre-existing container-drift convergence
-    # ExecStart line this runs alongside would also have nothing to converge
-    # yet.
+    # What: a tick before the first install does nothing
+    # Why: no compose file or .env exists to converge
     [[ -f "$install_dir/docker-compose.yml" ]] || return 0
     command -v docker >/dev/null 2>&1 || return 0
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
@@ -4988,38 +4930,16 @@ cmd_converge_reconcile() {
         fi
     fi
 
-    # Issue #1068 item 6: DHCP_MODE is the one Admin-UI-editable setting among
-    # these that also has a real Compose-profile side effect (the `dhcp`/
-    # `dhcp-proxy` services are profile-gated -- see docker-compose.yml).
-    # Without this fold, switching DHCP mode in the Admin UI updated only the
-    # ui-settings volume; .env's COMPOSE_PROFILES (and therefore what
-    # `docker compose up` actually creates) never learned about the change,
-    # so a mode an operator had never used before could never be started --
-    # the Admin UI's own docker-socket-proxy access has no container-create
-    # capability (routes/dhcp.rs's reconcile_dhcp_mode can only start/stop an
-    # ALREADY-EXISTING container). Folding it here, the same way the channel/
-    # auto-update keys already are above, means: once an operator has saved a
-    # new DHCP mode in the UI (which itself may still require one manual
-    # `docker compose --profile ... up -d ...` the very first time that mode
-    # is ever used, per routes/dhcp.rs's start_service_error guidance), this
-    # tick keeps .env's COMPOSE_PROFILES converged with it from then on, so
-    # the container survives a future `setup.sh update` / host reboot /
-    # `docker compose up` instead of silently falling out of the active
-    # profile set again.
+    # What: folds the UI DHCP mode into .env profiles
+    # Why: UI cannot create containers, only start them
     ui_dhcp_mode=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "DHCP_MODE") \
         || die "Cannot read the UI setting DHCP_MODE (exit $?)."
     if [[ -n "$ui_dhcp_mode" ]] && is_valid_dhcp_mode "$ui_dhcp_mode"; then
         current_dhcp_mode=$(get_env_var DHCP_MODE "$env_file") || exit $?
         if [[ "$ui_dhcp_mode" != "$current_dhcp_mode" ]]; then
             current_compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file") || exit $?
-            # Must read the real current NTP_ENABLED and LOGGING_ENABLED
-            # values here rather than relying on compose_profiles_for_runtime's
-            # own parameter defaults ("0" for ntp_enabled): omitting either
-            # argument on this DHCP-mode-change tick would silently strip that
-            # profile from COMPOSE_PROFILES even though nothing about it
-            # changed -- e.g. an operator with LanCache-NG-NTP already enabled
-            # would lose the NTP container on the next `docker compose up`
-            # convergence, purely as a side effect of a DHCP mode change.
+            # What: keeps NTP and logging profiles
+            # Why: omitted flags would drop those profiles
             current_ntp_enabled=$(get_env_var NTP_ENABLED "$env_file") || exit $?
             current_logging_enabled=$(get_env_var LOGGING_ENABLED "$env_file") || exit $?
             new_compose_profiles=$(compose_profiles_for_runtime \
@@ -5030,11 +4950,8 @@ cmd_converge_reconcile() {
         fi
     fi
 
-    # Central logging (issue #1343): same fold-into-convergence pattern as
-    # DHCP_MODE above -- LOGGING_ENABLED has a real Compose-profile side
-    # effect (the `syslog`/`syslog-ng` services are profile-gated), so an
-    # Admin UI toggle must reach COMPOSE_PROFILES here, not just the
-    # ui-settings volume.
+    # What: folds the Admin UI logging toggle into profiles
+    # Why: the syslog services are profile-gated
     ui_logging_enabled=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "LOGGING_ENABLED") \
         || die "Cannot read the UI setting LOGGING_ENABLED (exit $?)."
     if [[ "$ui_logging_enabled" = "0" || "$ui_logging_enabled" = "1" ]]; then
@@ -5150,26 +5067,8 @@ cmd_debug() {
 }
 
 # ── create-logs-for-issue subcommand ──────────────────────────────────────────
-# #762: bundles the diagnostic state a maintainer needs to triage a bug
-# report into one compressed, secret-redacted archive, so a non-technical
-# operator (this project's actual audience per AGENTS.md's project description --
-# corrected 2026-08-05, issue #1391 doc-sweep audit: CLAUDE.md no longer carries
-# this content as of 2026-07-31) can attach one
-# file to a GitHub issue instead of manually running and pasting a series of
-# commands. Read-only like cmd_debug above: this never repairs, restarts, or
-# rewrites anything, it only collects and redacts.
-#
-# Redaction is intentionally two-layered (see #762 review) because a
-# name-based scrub of just the .env file is not enough on its own:
-# `docker compose config` re-emits the same secret VALUES interpolated into
-# the resolved YAML wherever a service references them via ${VAR}/env_file:,
-# and a service's own startup logs can echo a secret value verbatim (e.g. a
-# connection URL embedding a password). Redacting only .env would still ship
-# every one of those values in a different file inside the same archive.
-# So every collected artifact — not just .env — is run through
-# logbundle_redact_stream, which substitutes the literal current VALUE of
-# every credential-shaped variable, on top of (not instead of) the
-# name-based, line-level redaction applied to the .env copy itself.
+# What: bundles redacted diagnostics for a bug report
+# Why: secrets leak via compose config and logs too
 
 # What: every secret env key setup.sh makes and redacts
 # Why: one list; generation refuses a key not on it
@@ -5229,7 +5128,7 @@ logbundle_collect_secret_values() {
                 || die "Cannot read $key from $env_file (exit $?); no log bundle was written."
             [[ -n "$value" ]] || continue
             # What: skips default placeholder secrets
-            # Why: redacting placeholders clutters every log
+            # Why: redacting placeholders clutters logs
             # From: Issue #782
             secret_value_is_placeholder "$value" && continue
             printf '%s\n' "$value"
@@ -5267,15 +5166,8 @@ logbundle_capture() {
         || die "Failed to write $out (exit $?)."
 }
 
-# Writes a redacted copy of an env file: every line whose KEY looks
-# credential-shaped (logbundle_key_looks_like_secret) has its VALUE replaced
-# with [REDACTED] unconditionally — including an already-empty or
-# still-placeholder value — so the archived file consistently reads as
-# "this field is a secret" rather than incidentally revealing which
-# credentials were still on their generated/placeholder default. Lines that
-# don't look credential-shaped (IPs, DHCP mode, SSL_ENABLED, ...) are copied
-# through unmodified since they're exactly the operational context a
-# maintainer needs to triage the report.
+# What: copies env file; redacts secret-shaped values
+# Why: placeholders are redacted too, defaults stay hidden
 logbundle_redact_env_file() {
     local src="$1" dst="$2"
     local line key
@@ -5293,16 +5185,8 @@ logbundle_redact_env_file() {
     done < "$src"
 }
 
-# Picks the best compressor actually available on the host, preferring
-# zstd > bzip2 > gzip per #762's explicit scope. This extends, rather than
-# invents, the "prefer the best available compressor, fall back gracefully"
-# idiom this project already uses for syslog-ng log rotation
-# (deploy/*/docker-compose.yml's zstd-preferred/gzip-fallback rotation
-# block) — that existing idiom is only two-tiered (zstd or gzip, no bzip2
-# anywhere in this codebase today), so this adds the missing middle tier
-# rather than copying a pre-existing three-way chain that does not exist
-# yet. gzip is always available on every Debian host this project targets,
-# so this chain always terminates. Prints one of zst/bz2/gz.
+# What: prints the best available compressor: zst, bz2 or gz
+# Why: gzip is always present, so the chain terminates
 logbundle_select_compressor() {
     if command -v zstd >/dev/null 2>&1; then
         printf 'zst\n'
@@ -5313,16 +5197,8 @@ logbundle_select_compressor() {
     fi
 }
 
-# Directory listings (never file content) of the known-good-snapshot volumes
-# documented in docs/known-good-config-snapshots.md. proxy/dhcp-proxy/pdns
-# snapshot volumes are, per that document and their own docker-compose.yml
-# declaration comment ("Deliberately plain Docker-managed volumes ... out of
-# scope for setup.sh backup/restore"), plain Docker-managed named volumes
-# outside the LANCACHE_STATE_DIR bind-mount contract backup_manifest()
-# already walks — so they are not reachable as host paths and need the same
-# `docker run --rm -v <volume>:/data busybox ls -la /data` approach that
-# doc's own "Manual recovery" section documents for hand triage. Only `ls`
-# ever runs inside the throwaway container; it cannot read file content.
+# What: lists known-good snapshot volumes with ls only
+# Why: volumes are not host paths; ls runs in a container
 logbundle_named_volume_listing() {
     local install_dir="$1" env_file="$2" base_name="$3" subpath="$4" out="$5"
     if ! command -v docker >/dev/null 2>&1; then
@@ -5350,11 +5226,8 @@ logbundle_named_volume_listing() {
         > "$out" 2>&1 || printf '(listing failed, exit %s)\n' "$?" >> "$out"
 }
 
-# Counterpart to logbundle_named_volume_listing for a known-good-snapshot
-# path that is (or may be) a real host directory instead of a Docker-managed
-# volume — this is Kea's case in prod/quickstart, where KEA_DATA_DIR is a
-# plain bind mount (unlike proxy/dhcp-proxy/pdns's snapshot volumes above),
-# so the host path is directly listable with no container needed.
+# What: lists a known-good snapshot host path directly
+# Why: Kea's snapshot path is a plain bind mount
 logbundle_host_path_listing() {
     local dir="$1" out="$2"
     if [[ -d "$dir" ]]; then
@@ -5398,11 +5271,8 @@ cmd_create_logs_for_issue() (
     old_umask=$(umask)
     umask 077
 
-    # Cleanup always removes the working directory and the secrets scratch
-    # file, whether this succeeds, fails partway, or is interrupted — the
-    # working directory's contents only ever matter once folded into the
-    # final archive below, and the secrets file must never survive on disk
-    # longer than this run needs it.
+    # What: cleanup removes the workspace and secrets file
+    # Why: the secrets file must not outlive this run
     logbundle_cleanup() {
         local status=$?
         rm -rf "$dest" || print_error "Failed to remove the bundle workspace $dest (exit $?)."
@@ -5423,17 +5293,8 @@ cmd_create_logs_for_issue() (
     logbundle_collect_secret_values "${env_files[@]}" > "$secrets_file" \
         || die "Cannot collect the secret values to redact (exit $?); no log bundle was written."
 
-    # Host facts (#762 scope: Docker version, Compose version, disk space).
-    # Follows the same docker/compose version commands already used for the
-    # one-off terminal print_ok lines in the main install flow above, but
-    # keeps their full, unstripped output here (that flow trims to a bare
-    # version number for a short interactive message; a diagnostic bundle
-    # benefits from the fuller string instead). Disk space has no prior
-    # helper to reuse — nothing in this script gathers it today — so `df -h`
-    # is added fresh. Distro (ID/VERSION_ID/PRETTY_NAME) is likewise new here:
-    # `uname -srm` alone reports kernel, not distro, and this script's own
-    # Debian/Ubuntu/RHEL-family install paths (install_docker_apt_repo() and
-    # its siblings above) already source /etc/os-release the same way.
+    # What: writes Docker, Compose, disk and distro facts
+    # Why: the fuller version strings help triage
     {
         printf 'Generated: %s UTC\n' "$stamp"
         printf 'Install directory: %s\n' "$install_dir"
@@ -5447,10 +5308,8 @@ cmd_create_logs_for_issue() (
 
     print_step "Container status and configuration"
     logbundle_capture "$secrets_file" "$dest/compose-ps.txt" stack_compose "$install_dir" "$env_file" ps
-    # config re-interpolates every ${VAR}/env_file: reference into plain
-    # text, which is exactly why this is redacted the same way as logs
-    # instead of being assumed safe just because it's "just config" (#762
-    # review — see the function comment above logbundle_redact_stream).
+    # What: config output is redacted like logs
+    # Why: config re-interpolates ${VAR} secret values
     logbundle_capture "$secrets_file" "$dest/compose-config.txt" stack_compose "$install_dir" "$env_file" config
 
     print_step "Collecting service logs"
@@ -5494,12 +5353,8 @@ cmd_create_logs_for_issue() (
         logbundle_named_volume_listing "$install_dir" "$env_file" pdns-config-snapshots-ssl config-snapshots \
             "$dest/known-good-snapshots/dns-ssl.txt"
     fi
-    # Kea's config-snapshots directory is a plain host bind mount in both
-    # remaining deploy profiles (prod/quickstart, KEA_DATA_DIR). The
-    # now-retired deploy/dev stack (v0.3.0, #766) used a real named Docker
-    # volume for the same path instead -- try the host path first and only
-    # fall back to the named-volume approach if it does not exist, so this
-    # keeps working for any pre-v0.3.0 dev-stack install still around.
+    # What: Kea snapshots: host path, then named volume
+    # Why: pre-v0.3.0 dev stacks used a named volume
     local kea_dir
     kea_dir=$(prod_state_dir_for_key KEA_DATA_DIR "$env_file" "$state_dir") \
         || die "Cannot resolve KEA_DATA_DIR of $install_dir (exit $?)."
@@ -5544,17 +5399,8 @@ EOF
 )
 
 # ── reset-to-last-known-good-config subcommand ────────────────────────────────
-# CLI fallback for #763: when the Admin UI itself is unreachable, an operator
-# still needs a way to roll a service back to its last known-good persisted
-# config -- the Admin UI's own per-service rollback pages (/dhcp for Kea) are
-# not an option if the UI can't be reached. docs/known-good-config-snapshots.md's
-# "Manual recovery" section already documents doing this by hand for Kea:
-# inspect the snapshot JSON files under kea-data/config-snapshots, then apply
-# one via config-test -> config-set -> config-write against the real Kea
-# Control Agent (the same three-call sequence services/ui/src/routes/dhcp.rs's
-# rollback_kea_snapshot already runs when the UI IS reachable). This command
-# automates exactly that sequence into one invocation, rather than inventing a
-# new mechanism.
+# What: rolls a Kea or DNS service back to a snapshot
+# Why: works when the Admin UI is unreachable
 cmd_reset_to_last_known_good_config() {
     local service="" install_dir="$DEFAULT_INSTALL_DIR" snapshot_id="" zone="" assume_yes=0
     local -a positional=()
@@ -5566,23 +5412,12 @@ cmd_reset_to_last_known_good_config() {
     done
     service="${positional[0]:-}"
     [[ -n "${positional[1]:-}" ]] && install_dir="${positional[1]}"
-    # Normalizes a relative [install-dir] to absolute, matching cmd_update_ip's
-    # identical `realpath -m` call: reset_dns_to_last_known_good_config's
-    # dns_rollback_exec runs `cd "$install_dir" && docker compose --env-file
-    # "$env_file" ...` (needed so `docker compose exec` resolves the right
-    # project/container -- see that function's own doc comment), and
-    # env_file is itself computed as "$install_dir/.env" -- if install_dir
-    # were left relative, that cd would re-resolve env_file a second time
-    # relative to the NEW cwd, silently doubling the path (e.g.
-    # "a/b/a/b/.env"). Confirmed empirically while validating this command
-    # against a real stack with a relative install-dir argument.
+    # What: normalizes install-dir to an absolute path
+    # Why: a relative path would double env_file's path
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
 
-    # PowerDNS's zone/record snapshots are inherently per-zone (lan.,
-    # local.lan., and 20 private reverse zones -- see zone_snapshots.rs's
-    # ROLLBACK_ZONES), unlike Kea's single dhcp4.json: positional[2] means
-    # "zone" for dns/pdns targets and "snapshot-id" for kea, and dns/pdns
-    # additionally consumes positional[3] as its own snapshot-id.
+    # What: positional[2] is zone (DNS) or snapshot (Kea)
+    # Why: DNS snapshots are per zone; Kea has one file
     case "$service" in
         dns|pdns|dns-standard|dns-ssl)
             zone="${positional[2]:-}"
@@ -5598,18 +5433,13 @@ cmd_reset_to_last_known_good_config() {
             reset_kea_to_last_known_good_config "$install_dir" "$snapshot_id" "$assume_yes"
             ;;
         dns|pdns)
-            # Scoped to dns-standard by default, matching services/ui/src/
-            # routes/dns_snapshots.rs's own current single-primary scope
-            # decision (see that file's module doc comment) -- not a new
-            # scope choice invented here.
+            # What: dns and pdns both target dns-standard
+            # Why: matches the UI's single-primary scope
             reset_dns_to_last_known_good_config "dns-standard" "$install_dir" "$zone" "$snapshot_id" "$assume_yes"
             ;;
         dns-standard|dns-ssl)
-            # The rollback listener (services/dns/nats-subscriber/src/
-            # rollback_listener.rs) runs identically in both containers with
-            # independent snapshot histories (separate pdns-config-snapshots-
-            # {standard,ssl} volumes) -- accepting an explicit target here is
-            # a direct use of that existing mechanism, not new scope.
+            # What: explicit DNS target is passed through
+            # Why: rollback listener runs in both containers
             reset_dns_to_last_known_good_config "$service" "$install_dir" "$zone" "$snapshot_id" "$assume_yes"
             ;;
         "")
@@ -5621,15 +5451,8 @@ cmd_reset_to_last_known_good_config() {
     esac
 }
 
-# Lists this install's known-good Kea config snapshot ids, oldest first.
-# Mirrors services/ui/src/kea_snapshots.rs::list_snapshot_ids exactly: a
-# snapshot only counts if its directory holds a finalized dhcp4.json payload,
-# not a leftover ".staging-<id>" directory from an interrupted write (that
-# staging naming, and the fact that a real id is a plain run of digits, is
-# also why the loop below skips any directory name that isn't all-digits
-# rather than special-casing the "staging-" prefix alone). Directory names
-# sort correctly as plain strings here because every real id is the same
-# fixed 20-digit zero-padded width (kea_snapshots.rs's `format!("{nanos:020}")`).
+# What: lists finalized Kea snapshot ids, oldest first
+# Why: staging dirs are skipped; ids are fixed-width digits
 list_kea_snapshot_ids() {
     local snapshot_root="$1" entry id
     local -a ids=()
@@ -5728,15 +5551,8 @@ kea_snapshot_host_dir() {
     esac
 }
 
-# Automates docs/known-good-config-snapshots.md's Kea manual-recovery
-# sequence (see that doc's "Manual recovery" section for the by-hand version
-# this replaces): list known-good dhcp4.json snapshots from the shared
-# kea-data volume (newest last), apply the requested one -- or, if none was
-# given, the newest after an explicit confirmation -- via the real
-# config-test -> config-set -> config-write chain against Kea's own Control
-# Agent, the exact sequence services/ui/src/routes/dhcp.rs's
-# rollback_kea_snapshot already runs for an operator who CAN reach the Admin
-# UI. This is the fallback for when they can't.
+# What: rolls Kea back to a snapshot through Control Agent
+# Why: config-test, config-set and config-write run in order
 reset_kea_to_last_known_good_config() {
     local install_dir="$1" snapshot_id="$2" assume_yes="${3:-0}"
     local env_file state_dir kea_dir snapshot_root repo_root
@@ -5757,11 +5573,8 @@ reset_kea_to_last_known_good_config() {
 
     kea_ctrl_host=$(get_env_var KEA_CTRL_HOST "$env_file") || exit $?
     kea_ctrl_host="${kea_ctrl_host:-127.0.0.1}"
-    # The dhcp service runs with network_mode: host (deploy/prod/docker-compose.yml),
-    # so its Control Agent is reachable directly from THIS host's own loopback
-    # -- 0.0.0.0 (the container's own bind-all default) is not a valid address
-    # to connect *to*, so it is remapped to 127.0.0.1 exactly like the dhcp
-    # service's own healthcheck already does in docker-compose.yml.
+    # What: maps a 0.0.0.0 Control Agent host to 127.0.0.1
+    # Why: dhcp uses host networking; 0.0.0.0 is no target
     [[ "$kea_ctrl_host" = "0.0.0.0" ]] && kea_ctrl_host="127.0.0.1"
     # What: Control Agent port from the dhcp conf
     # Why: kea-ctrl-agent.conf owns it; no second copy
@@ -5787,10 +5600,8 @@ reset_kea_to_last_known_good_config() {
 
     print_step "Known-good Kea config snapshots (oldest first)"
     for sid in "${snapshot_ids[@]}"; do
-        # 10#$sid forces base-10: sid is a fixed-width, zero-padded digit
-        # string, which bash arithmetic would otherwise misparse as octal
-        # (a leading "0" with an 8 or 9 in it is a hard bash error, and any
-        # other leading-zero value is silently mis-evaluated).
+        # What: forces base-10 for the snapshot id
+        # Why: zero-padded ids would parse as octal
         printf '  %s  (%s UTC)\n' "$sid" "$(date -u -d "@$(( 10#$sid / 1000000000 ))" '+%Y-%m-%d %H:%M:%S' 2>&1 || printf ' (exit %s)' "$?")"
     done
 
@@ -5826,11 +5637,8 @@ reset_kea_to_last_known_good_config() {
     print_warn "This CLI fallback does not itself record a fresh known-good snapshot of the restored state (services/ui/src/routes/dhcp.rs's rollback_kea_snapshot does, when reached via the Admin UI) -- the next config change made through the Admin UI will."
 }
 
-# Normalizes a zone name to the canonical, dot-terminated form the rollback
-# listener's ROLLBACK_ZONES/snapshot directories use (mirrors
-# services/dns/nats-subscriber/src/zone_snapshots.rs's canonical_zone exactly)
-# so an operator can type "lan" instead of "lan." without the listener
-# rejecting it as an unmanaged zone.
+# What: adds the trailing dot to a zone name if missing
+# Why: the rollback listener uses dot-terminated names
 canonical_dns_zone() {
     local zone="$1"
     if [[ "$zone" == *. ]]; then
@@ -5854,32 +5662,8 @@ dns_zone_snapshot_entries() {
     json_value '.zones[$zone][]? | "\(.id) \(.created_unix)"' "$1" --arg zone "$2"
 }
 
-# Issues one PowerDNS zone-rollback-listener request (GET /snapshots or
-# POST /rollback) by execing curl INSIDE the target dns-standard/dns-ssl
-# container, rather than calling it directly from this host: unlike Kea's
-# Control Agent (reachable from the host via network_mode: host, see
-# reset_kea_to_last_known_good_config above), nats-subscriber's rollback
-# listener (port 8083, services/dns/nats-subscriber/src/rollback_listener.rs)
-# is deliberately only `expose`d to the Compose network, never published to
-# the host -- so there is no host-reachable address for this command to call
-# directly. `docker compose exec` runs the curl call from inside the exact
-# same container the listener binds 127.0.0.1:8083 in, sidestepping the need
-# to discover the Compose network name or publish a new host port.
-#
-# The X-API-Key value is resolved INSIDE the exec'd shell, not read from this
-# host's .env and passed in as an argument: the #858 shared-secrets
-# first-writer-wins bootstrap (services/dns/entrypoint.sh) means a fresh
-# install's .env-configured PDNS_API_KEY can legitimately be blank/placeholder,
-# with the real effective key only ever resolved into the running
-# entrypoint.sh process's own environment -- which a brand-new `docker exec`
-# process does NOT inherit (it only sees the container's create-time
-# Config.Env, i.e. whatever .env held when `docker compose up` last ran) --
-# or written out to the shared-secrets volume this same container already
-# mounts at /var/lib/lancache-secrets. Reproducing entrypoint.sh's own
-# placeholder-then-shared-file resolution order here (mirroring
-# scripts/lib/shared-secret-bootstrap.sh's resolve_shared_secret contract) is
-# what keeps this working in that case instead of silently sending an
-# empty/stale key and misreporting a real 401 as "wrong install".
+# What: runs one listener request inside the DNS container
+# Why: the listener is not published to the host
 dns_rollback_exec() (
     local install_dir="$1" env_file="$2" container="$3" method="$4" path="$5" body="${6:-}"
     local project stdout_val rc=0 exec_err http_status response_body
@@ -5938,25 +5722,8 @@ dns_rollback_exec() (
     printf '%s\n' "$response_body"
 )
 
-# Automates docs/known-good-config-snapshots.md's PowerDNS zone/record
-# manual-recovery sequence (that doc's "Manual recovery" section: "The
-# PowerDNS zone/record adapter... has no equivalent manual-CLI fallback
-# documented here yet" -- this is that fallback): list this install's
-# known-good zone snapshots for the requested zone from nats-subscriber's
-# rollback listener, apply the requested one -- or, if none was given, the
-# newest after an explicit confirmation -- via that listener's real
-# diff/PATCH/check-zone/flush/republish chain
-# (services/dns/nats-subscriber/src/rollback_listener.rs), the exact same
-# listener services/ui/src/routes/dns_snapshots.rs already forwards to when
-# the Admin UI IS reachable.
-#
-# Unlike Kea (one dhcp4.json, one snapshot history), PowerDNS tracks
-# snapshots per zone (zone_snapshots::ROLLBACK_ZONES: lan., local.lan., and
-# 20 private reverse zones) -- so a zone must be selected before a snapshot
-# id means anything. A missing zone lists which zones currently have
-# snapshots and stops there rather than guessing one (unlike the
-# snapshot-id-defaults-to-newest behavior below, which is safe precisely
-# because it stays within one already-explicit zone).
+# What: rolls a DNS zone back to a chosen snapshot
+# Why: a zone is required; PDNS snapshots are per zone
 reset_dns_to_last_known_good_config() {
     local container="$1" install_dir="$2" zone="$3" snapshot_id="$4" assume_yes="${5:-0}"
     local env_file snapshots_body zone_canon rollback_body resp zone_list entry_list
@@ -6060,12 +5827,8 @@ reset_dns_to_last_known_good_config() {
 }
 
 # ── update-ip subcommand ───────────────────────────────────────────────────────
-# update-ip is the reconfiguration path for an existing install. It changes
-# only listener/DNS IP references and restarts that install's compose stack.
-# Mirrors cmd_update's install_dir resolution (${1:-/opt/lancache-ng}) so the
-# guided-install hint banner's suggested invocation actually operates on the
-# real running install instead of always reading/writing the repo checkout's
-# own deploy/prod tree (#666).
+# What: reconfigures IPs of an existing install
+# Why: uses the install's directory, not the repo
 cmd_update_ip() {
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
