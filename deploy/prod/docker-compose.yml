@@ -138,7 +138,7 @@ services:
     restart: always
     logging: *logging
 
-  # What: PowerDNS auth, two recursors, NATS, subscriber.
+  # What: PowerDNS auth, dns-http, dns-https, NATS.
   # Why: one container answers on IP_STANDARD and IP_SSL.
   # From: Issue #1683
   dns:
@@ -150,8 +150,8 @@ services:
         required: false
     environment:
       - PROXY_IP=${IP_STANDARD:?IP_STANDARD is required}
-      - PROXY_SSL_IP=${IP_SSL:?IP_SSL is required}
-      - DNS_SSL_LISTEN_PORT=1053
+      - PROXY_HTTPS_IP=${IP_SSL:?IP_SSL is required}
+      - DNS_HTTPS_LISTEN_PORT=1053
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - PDNS_API_KEY=${PDNS_API_KEY}
       - DDNS_ALLOW_FROM=${IP_STANDARD},${IP_SSL}
@@ -183,7 +183,7 @@ services:
       - ${NATS_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats}:/var/lib/nats
       - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf}:/etc/nats
       - dns-config-snapshots:/var/lib/lancache-dns
-    # What: standard recursor on IP_STANDARD, SSL on IP_SSL.
+    # What: dns-http on IP_STANDARD, dns-https on IP_SSL.
     # Why: one container port each keeps the caches apart.
     # From: Issue #1683
     ports:
