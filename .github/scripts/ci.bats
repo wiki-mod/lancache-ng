@@ -2623,28 +2623,30 @@ STUB
 @test "setup fresh install writes a config the prod compose takes" {
     _registry || return 1
     _stand_ins || return 1
-    local root t="${BATS_TEST_TMPDIR}" repo env tpl cfg port std other dev pfx keys k v n ddir np i calls after fault
+    local root t="${BATS_TEST_TMPDIR}" repo env tpl cfg port std other dev pfx keys k v ddir np i calls after fault
     [ ! -d /run/systemd/system ] || { echo "systemd host: a real install would write /etc units"; return 1; }
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}" || return 1
     repo="${t}/repo" env="${t}/repo/deploy/prod/.env.local" tpl="${t}/repo/deploy/prod/.env"
     _checkout_copy "${root}" "${repo}" || { echo "checkout copy failed"; return 1; }
     cfg="$(docker compose --env-file "${tpl}" -f "${repo}/deploy/prod/docker-compose.yml" config --format json)" \
-        && port="$(jq -r '.services.ui.ports[0].published' <<< "${cfg}")" || { echo "prod compose config: ${cfg}"; return 1; }
-    sed -i "s/}:${port}:/}:$((port + 1)):/" "${repo}/deploy/prod/docker-compose.yml" \
-        && [ "$(grep -c "}:$((port + 1)):" "${repo}/deploy/prod/docker-compose.yml")" -eq 1 ] \
-        || { echo "port ${port} not shifted"; return 1; }
+        && port="$(jq -r '.services.ui.ports[0].published' <<< "${cfg}")" && [[ "${port}" =~ ^[0-9]+$ ]] \
+        || { echo "prod compose config: ${cfg}"; return 1; }
     : > "${t}/owned.env" && set_template_owned_env_defaults "${t}/owned.env" \
         && keys="$(awk -F= '/^[A-Z]/ { print $1 }' "${t}/owned.env")" && [ -n "${keys}" ] \
         || { echo "no template-owned keys: $(cat "${t}/owned.env")"; return 1; }
-    n=0
+    # What: setup.sh holds no template default or ui port
+    # Why: one owner each; a copy passes the checks below
+    # From: Issue #1683 | PR #1858
+    if grep -qw -- "${port}" "${repo}/setup.sh"; then echo "ui port ${port} is a literal in setup.sh"; return 1; fi
     for k in ${keys}; do
         v="$(get_env_var "${k}" "${tpl}")"
-        [[ "${v}" =~ ^([0-9]+)([a-z])$ ]] || continue
-        set_env_key "${k}" "$((BASH_REMATCH[1] + 1))${BASH_REMATCH[2]}" "${tpl}" || return 1
-        n=$((n + 1))
+        [ -n "${v}" ] || continue
+        if grep -qF -e "${k}=${v}" -e "${k}:-${v}" "${repo}/setup.sh"; then
+            echo "${k} default ${v} is a literal in setup.sh"
+            return 1
+        fi
     done
-    [ "${n}" -gt 0 ] || { echo "no template default shifted: ${keys}"; return 1; }
     std="10.$(_val int 0 127).$(_val int 0 255).$(_val int 1 254)" dev="$(_val name)" pfx="$(_val int 16 30)"
     other="10.$(_val int 128 255).$(_val int 0 255).$(_val int 1 254)"
     [ "${std}" != "$(get_env_var IP_STANDARD "${tpl}")" ] || { echo "host address equals the template's"; return 1; }
@@ -2674,7 +2676,7 @@ STUB
         || { echo "no command: rc ${status} docker calls ${calls}->${after}: ${output}"; return 1; }
     run timeout -k 5 300 script -qec "bash ${repo}/setup.sh install" "${t}/typescript" < "${t}/answers"
     [ "${status}" -eq 0 ] && [[ "${output}" == *"Stack started"* ]] || { echo "install: rc ${status}: ${output}"; return 1; }
-    [[ "${output}" == *"http://${std}:$((port + 1))"* ]] || { echo "ui url: ${output}"; return 1; }
+    [[ "${output}" == *"http://${std}:${port}"* ]] || { echo "ui url: ${output}"; return 1; }
     [ "$(awk -v e="compose --env-file ${env} " 'index($0, e) == 1 && ($NF == "pull" || / up -d$/) { n++ } END { print n + 0 }' \
         "${DS}/docker.log")" -eq 2 ] || { echo "pull/up: $(cat "${DS}/docker.log")"; return 1; }
     _setup_sh_run 'stack_compose "${REPO}/deploy/prod" "${ENVL}" config --quiet'
