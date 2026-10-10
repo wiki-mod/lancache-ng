@@ -2732,22 +2732,20 @@ STUB
 # PRODUCT RUNTIME: RETENTION
 # =========================================================
 
-# What: source retention.sh's functions, not its loop.
-# Why: tests call the real code without the daemon.
+# What: sources retention.sh; its guard skips the loop
+# Why: tests call the real functions without the daemon
 # From: Issue #842 | PR #1858
 _load_retention_functions() {
-    local f="${BATS_TEST_TMPDIR}/retention-functions.sh"
-    awk '/^log\(\) \{/ { c = 1 } /^log "Retention daemon started\./ { c = 0 } c { print }' \
-        "${BATS_TEST_DIRNAME}/../../services/watchdog/retention.sh" > "${f}"
+    local -
     # shellcheck source=services/watchdog/retention.sh
-    source "${f}"
+    source "${BATS_TEST_DIRNAME}/../../services/watchdog/retention.sh"
 }
 
+# What: retention dirs validated per input; purge refuses
+# Why: a bad CACHE_DIR must never reach find or rm
+# From: Issue #842 | PR #1858
 @test "retention dir validation maps each path and purge refuses outside its prefix" {
-    # What: validate_retention_dir per input, one table.
-    # Why: a bad CACHE_DIR must never reach find or rm.
-    # From: Issue #842 | PR #1858
-    local t="${BATS_TEST_TMPDIR}" name val rc want
+    local t="${BATS_TEST_TMPDIR}" name val rc want old
     _load_retention_functions
     mkdir -p "${t}/cache/lancache/sub"
     while IFS='|' read -r name val rc want; do
@@ -2769,24 +2767,29 @@ CASES
     # Why: no find or rm and no stamp so a fix retries
     # From: Issue #842 | PR #1858
     export CACHE_DIR="${t}/outside/cache" CACHE_DIR_ALLOWED_PREFIX="${t}/expected-cache-root"
-    export CACHE_VALID_DAYS=30 PURGE_STAMP="${t}/purge.stamp"
+    CACHE_VALID_DAYS="$(_val int 1 3650)"
+    export CACHE_VALID_DAYS PURGE_STAMP="${t}/purge.stamp"
+    old="${CACHE_DIR}/$(_val name)"
+    mkdir -p "${CACHE_DIR}" && touch -d "@$(( $(date +%s) - (CACHE_VALID_DAYS + 2) * 86400 ))" "${old}" \
+        && [ -n "$(find "${old}" -mtime "+${CACHE_VALID_DAYS}")" ] || { echo "no purgeable file at ${old}"; return 1; }
     _load_retention_functions
     run maybe_purge
-    [ "${status}" -eq 0 ] && [ ! -f "${PURGE_STAMP}" ] && [[ "${output}" == *"outside the expected"* ]] \
-        || { echo "purge outside: rc ${status}: ${output}"; return 1; }
+    [ "${status}" -eq 0 ] && [ ! -f "${PURGE_STAMP}" ] && [ -f "${old}" ] && [[ "${output}" == *"outside the expected"* ]] \
+        || { echo "purge outside: rc ${status}, file kept: $([ -f "${old}" ] && echo yes || echo no): ${output}"; return 1; }
 }
 
+# What: a real TERM during the interval sleep ends it
+# Why: docker stop sends TERM; a hung stop ends in a kill
+# From: Issue #1683 | PR #1858
 @test "retention stops promptly with rc 0 on SIGTERM mid-sleep" {
-    # What: a real TERM during the interval sleep ends it.
-    # Why: PID 1 bash ignored TERM; docker stop had to kill.
-    # From: Issue #1683 | PR #1858
-    local t="${BATS_TEST_TMPDIR}/ret" pid kid="" c rc=0
+    local t="${BATS_TEST_TMPDIR}/ret" pid kid="" c rc=0 interval
+    interval="$(_val int 60 3600)"
     mkdir -p "${t}/cache/lancache" "${t}/state" "${t}/log/syslog" "${t}/lib/fb"
     CACHE_DIR="${t}/cache/lancache" CACHE_DIR_ALLOWED_PREFIX="${t}/cache" \
         PURGE_STAMP="${t}/state/purge.stamp" SYSLOG_ENABLED=false \
         SYSLOG_PRUNE_STAMP="${t}/state/syslog.stamp" SYSLOG_LOG_ROOT="${t}/log/syslog" \
         SYSLOG_LOG_ROOT_ALLOWED_PREFIX="${t}/log" FLUENT_BIT_SELFLOG_DIR="${t}/lib/fb" \
-        FLUENT_BIT_SELFLOG_DIR_ALLOWED_PREFIX="${t}/lib" RETENTION_INTERVAL=60 \
+        FLUENT_BIT_SELFLOG_DIR_ALLOWED_PREFIX="${t}/lib" RETENTION_INTERVAL="${interval}" \
         bash "${BATS_TEST_DIRNAME}/../../services/watchdog/retention.sh" > "${t}/out.log" 2>&1 &
     pid=$!
     for _ in $(seq 1 100); do

@@ -233,19 +233,21 @@ impl Config {
         let need_flag = |key: &str| config::need_flag(env, key);
         let flag =
             |key: &str, default: bool| env(key).and_then(|v| parse_bool(&v)).unwrap_or(default);
-        let knob = |name: &'static str, max: u64, above: OutOfRange| -> Result<u64, String> {
-            let spec = Uint {
+        let read = |spec: Uint| -> Result<u64, String> {
+            let (value, warning) = spec.parse(env(spec.name).as_deref())?;
+            if let Some(warning) = warning {
+                eprintln!("[lancache-ui] {warning}");
+            }
+            Ok(value)
+        };
+        let knob = |name: &'static str, max: u64, above: OutOfRange| {
+            read(Uint {
                 name,
                 min: 1,
                 max,
                 below: OutOfRange::Reject,
                 above,
-            };
-            let (value, warning) = spec.parse(env(name).as_deref())?;
-            if let Some(warning) = warning {
-                eprintln!("[lancache-ui] {warning}");
-            }
-            Ok(value)
+            })
         };
 
         let standard_log = need("STANDARD_LOG")?;
@@ -411,7 +413,7 @@ impl Config {
             dev_mode: flag("LANCACHE_DEV_MODE", false),
             syslog_enabled: need_flag("SYSLOG_ENABLED")?,
             syslog_log_root: need("SYSLOG_LOG_ROOT")?,
-            syslog_max_gb: knob("SYSLOG_MAX_GB", 1_048_576, OutOfRange::Clamp)? as u32,
+            syslog_max_gb: read(config::SYSLOG_MAX_GB)? as u32,
             watchdog_status_file: need("WATCHDOG_STATUS_FILE")?,
             desired_state_file: need("DESIRED_STATE_FILE")?,
         })
@@ -8277,7 +8279,7 @@ mod tests {
         }
         let mut env = full_env();
         env.insert("SYSLOG_MAX_GB".to_string(), "9999999".to_string());
-        assert_eq!(load_from(&env).unwrap().syslog_max_gb, 1_048_576);
+        assert_eq!(load_from(&env).unwrap().syslog_max_gb as u64, config::SYSLOG_MAX_GB.max);
     }
 
     // What: the saved setting beats the startup value.

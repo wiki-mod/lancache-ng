@@ -659,6 +659,13 @@ if [ "$RETENTION_INTERVAL" -lt 1 ]; then
     RETENTION_INTERVAL=1
 fi
 
+# What: a sourced retention.sh stops here: functions only
+# Why: tests load the real functions without the loop
+# From: Issue #1683 | PR #1858
+if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
+
 log "Retention daemon started. Cache: $CACHE_DIR (valid ${CACHE_VALID_DAYS}d, allowed prefix ${CACHE_DIR_ALLOWED_PREFIX}) | Syslog: $SYSLOG_LOG_ROOT (enabled=$SYSLOG_ENABLED, allowed prefix ${SYSLOG_LOG_ROOT_ALLOWED_PREFIX}) | Fluent-bit self-log: $FLUENT_BIT_SELFLOG_DIR (allowed prefix ${FLUENT_BIT_SELFLOG_DIR_ALLOWED_PREFIX})"
 
 # What: stop promptly on SIGTERM, even mid-sleep.
