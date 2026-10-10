@@ -4246,37 +4246,39 @@ CASES
     unset SEC_SCRIPT_DIR
 }
 
+# What: rollback in place twice; restore on a new host
+# Why: a restore must reproduce files, paths and volumes
+# From: Issue #1683 | PR #1858
 @test "setup backup and restore round-trip per target and host" {
     _registry || return 1
     _stand_ins || return 1
-    # What: rollback in place twice; restore on a new host
-    # Why: a restore must reproduce files, paths and volumes
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" archive round vol v keys excl key e
+    local root t="${BATS_TEST_TMPDIR}" archive round cfg name bv vol v keys excl key sub e manifest
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    vol="$(_prod_compose config --format json | jq -r .name)_$(_backup_volume)"
-    export DS="${t}/ds" BIN="${t}/bin" T="${t}" S="${t}/a/deploy/prod" D="${t}/b/deploy/prod"
+    _load_setup_sh "${root}" || return 1
+    cfg="$(_prod_compose config --format json)" && name="$(jq -r .name <<< "${cfg}")" && bv="$(_backup_volume)" \
+        || { echo "compose name or backup volume: ${cfg}"; return 1; }
+    vol="${name}_${bv}"
+    export T="${t}" S="${t}/a/deploy/prod" D="${t}/b/deploy/prod"
     v="${DS}/volumes/${vol}"
-    _prod_install "${S}"
-    mkdir -p "${S}/certs" "${v}"
-    printf '%s\n' "${S}" > "${S}/certs/${vol}"
-    printf '%s\n' "${vol}" > "${v}/${vol}"; printf '%s\n' "${DS}" > "${v}/.${vol}"
-    # What: one file in every state dir the compose mounts
-    # Why: backups carry each but the excluded cache/logs
-    # From: Issue #1683 | PR #1858
-    keys="$(prod_state_keys)"
-    excl="$(awk '/^backup_manifest\(\) \{/ { f = 1 } f && /^}/ { exit } f' "${root}/setup.sh" \
-        | sed -n 's/.*case "\$key" in \([A-Z_|]*\)).*/\1/p' | tr '|' '\n')"
-    [ -n "${keys}" ] && [ -n "${excl}" ] || { echo "state keys: ${keys} | ${excl}"; return 1; }
+    _prod_install "${S}" && mkdir -p "${S}/certs" "${v}" && printf '%s\n' "${S}" > "${S}/certs/${vol}" \
+        && printf '%s\n' "${vol}" > "${v}/${vol}" && printf '%s\n' "${DS}" > "${v}/.${vol}" || return 1
+    keys="$(prod_state_keys)" && [ -n "${keys}" ] || { echo "no state keys"; return 1; }
     while IFS= read -r key; do
-        mkdir -p "${S}/state/$(prod_state_subdir "${key}")"
-        printf '%s\n' "${key}" > "${S}/state/$(prod_state_subdir "${key}")/${key}"
+        sub="$(prod_state_subdir "${key}")" && mkdir -p "${S}/state/${sub}" \
+            && printf '%s\n' "${key}" > "${S}/state/${sub}/${key}" || return 1
     done <<< "${keys}"
+    manifest="$(backup_manifest "${S}" config)" || { echo "manifest: ${manifest}"; return 1; }
+    excl=""
+    while IFS= read -r key; do
+        sub="$(prod_state_subdir "${key}")" || return 1
+        grep -qxF -- "${S}/state/${sub}" <<< "${manifest}" || excl+="${key}"$'\n'
+    done <<< "${keys}"
+    [ -n "${excl}" ] && [ "$(grep -c . <<< "${excl}")" -lt "$(grep -c . <<< "${keys}")" ] \
+        || { echo "a config backup must keep some state dirs and drop others: ${manifest}"; return 1; }
     _state_matches() {
         local dest="$1" key sub
         while IFS= read -r key; do
-            sub="$(prod_state_subdir "${key}")"
+            sub="$(prod_state_subdir "${key}")" || return 1
             if grep -qx -- "${key}" <<< "${excl}"; then
                 ! cmp -s "${t}/S.first/state/${sub}/${key}" "${dest}/state/${sub}/${key}" \
                     || { echo "${key} came from a config backup"; return 1; }
@@ -4285,25 +4287,27 @@ CASES
             fi
         done <<< "${keys}"
     }
-    : > "${DS}/running"
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; migrate_env_for_update "${S}" 1 && cmd_backup --config --dest "${T}/bk" "${S}"'
+    : > "${DS}/running" || return 1
+    _setup_sh_run 'migrate_env_for_update "${S}" 1 && cmd_backup --config --dest "${T}/bk" "${S}"'
     [ "${status}" -eq 0 ] && [ -e "${DS}/running" ] || { echo "converge and backup: ${output}"; return 1; }
-    archive="$(find "${t}/bk" -mindepth 1 -maxdepth 1)"
+    archive="$(find "${t}/bk" -mindepth 1 -maxdepth 1)" || return 1
     [ "$(wc -l <<< "${archive}")" -eq 1 ] && [ -f "${archive}" ] || { echo "backup root: ${archive}"; return 1; }
     export AR="${archive}"
-    cp -a "${S}" "${t}/S.first"; cp -a "${v}" "${t}/v.first"
-    printf '%s\n' "${t}" > "${v}/${vol}"; printf '%s\n' "${t}" > "${S}/certs/${vol}"
-    while IFS= read -r key; do printf '%s\n' "${t}" > "${S}/state/$(prod_state_subdir "${key}")/${key}"; done <<< "${keys}"
+    cp -a "${S}" "${t}/S.first" && cp -a "${v}" "${t}/v.first" && printf '%s\n' "${t}" > "${v}/${vol}" \
+        && printf '%s\n' "${t}" > "${S}/certs/${vol}" || return 1
+    while IFS= read -r key; do
+        printf '%s\n' "${t}" > "${S}/state/$(prod_state_subdir "${key}")/${key}" || return 1
+    done <<< "${keys}"
     for round in first second; do
-        _setup_sh_run 'PATH="${BIN}:${PATH}"; cmd_restore "${AR}" "${S}"'
+        _setup_sh_run 'cmd_restore "${AR}" "${S}"'
         [ "${status}" -eq 0 ] && [ -e "${DS}/running" ] || { echo "restore ${round}: ${output}"; return 1; }
         for e in "${t}/S.first"/* "${t}/S.first"/.[!.]*; do
             [ ! -e "${e}" ] || [ "${e##*/}" = state ] || diff -r "${e}" "${S}/${e##*/}" || { echo "restore ${round}: ${e##*/}"; return 1; }
         done
         _state_matches "${S}" && diff -r "${t}/v.first" "${v}" || { echo "restore ${round} state"; return 1; }
     done
-    rm -rf "${DS}/volumes" && mkdir "${DS}/volumes"
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; cmd_restore "${AR}" "${D}"'
+    rm -rf "${DS}/volumes" && mkdir "${DS}/volumes" || return 1
+    _setup_sh_run 'cmd_restore "${AR}" "${D}"'
     [ "${status}" -eq 0 ] || { echo "fresh host: ${output}"; return 1; }
     [ "$(get_env_var LANCACHE_STATE_DIR "${D}/.env")" = "${D}/state" ] && ! grep -qF -- "${S}" "${D}/.env" \
         && _state_matches "${D}" && diff -r "${t}/v.first" "${v}" || { echo "fresh host state"; return 1; }
