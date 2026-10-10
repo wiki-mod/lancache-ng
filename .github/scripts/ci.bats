@@ -882,7 +882,7 @@ CASES
     _ts TEST_SERVICES="${apk}"
     _expect apk-skip 0 "service=${apk} tested=SKIP reason=\"no source tests" || return 1
     sot="${BATS_TEST_TMPDIR}/sot-edit.yml" bad="$(_val name)"
-    sed "/^  ${rust}:\$/,/^  [a-z0-9-]*:\$/ { /^    crate:/d }" "${CI_MANIFEST_SOURCE}" > "${sot}" \
+    sed "/^  ${rust}:\$/,/^  [a-z0-9-]*:\$/ { /^    crates:/d }" "${CI_MANIFEST_SOURCE}" > "${sot}" \
         && ! cmp -s "${sot}" "${CI_MANIFEST_SOURCE}" || { echo "no crate line of ${rust} removed"; return 1; }
     _ts CI_MANIFEST="${sot}" CI_RUST_VALIDATION=true TEST_SERVICES="${rust}"
     _expect no-crate 2 "[CI-ERROR-TEST-0003] service=\"${rust}\";[CI-ERROR-TEST-0005] service=\"${rust}\"" || return 1

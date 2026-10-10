@@ -1125,16 +1125,20 @@ _ci_service_packages() {
 }
 
 # What: base, own and build-type smoke checks of a service.
-# Why: one rule per build type; @CRATE@ = the service crate.
+# Why: one rule per build type; @CRATE@ = each image crate.
 # From: Issue #1683 | PR #1858
 _ci_service_smoke() {
-    local service="$1" own build_type runtime crate
+    local service="$1" own build_type runtime crates crate each=""
     own="$(_ci_block_entry_list services "${service}" smoke)" || return 2
     build_type="$(_ci_required_field "${service}" build_type)" || return 2
     runtime="$(_ci_block_entry_list build_runtime "${build_type}" smoke)" || return 2
     if [[ "${runtime}" == *@CRATE@* ]]; then
-        crate="$(_ci_required_field "${service}" crate)" || return 2
-        runtime="${runtime//@CRATE@/${crate}}"
+        crates="$(_ci_target_list "${service}" crates)" || return 2
+        [ -n "${crates}" ] || { ci_log "[CI-ERROR-CORE-0009]" "target=\"${service}\" field=\"crates\" reason=\"required SOT field missing\""; return 2; }
+        while IFS= read -r crate; do
+            each="${each}${runtime//@CRATE@/${crate}}"$'\n'
+        done <<< "${crates}"
+        runtime="${each}"
     fi
     _ci_image_base_plus smoke "${own}"$'\n'"${runtime}"
 }
@@ -2950,9 +2954,10 @@ _ci_rust_build_cleanup() {
 # Why: a real build error fails at once, never degrades.
 # From: Issue #1683 | PR #1858
 _ci_rust_cargo_build() {
-    local crate="$1" musl_target="$2" cargo_jobs="$3"
+    local crates="$1" musl_target="$2" cargo_jobs="$3" crate
     local cargo_log cargo_status_file cargo_status degraded=0
-    local -a layers=()
+    local -a layers=() picks=()
+    for crate in ${crates}; do picks+=(-p "${crate}"); done
     # What: active layers from rust-build, dropped in order.
     # Why: rust-build owns ccache_enabled and the disable_*.
     [ "${ccache_enabled:-0}" = "1" ] && layers+=(ccache)
@@ -2961,7 +2966,7 @@ _ci_rust_cargo_build() {
     while :; do
         cargo_log="$(_ci_mktemp -p "${CI_TMPDIR}")" || return 2
         cargo_status_file="$(_ci_mktemp -p "${CI_TMPDIR}")" || { rm -f "${cargo_log}"; return 2; }
-        { set +e; cargo build -j "${cargo_jobs}" --release --locked --target "${musl_target}" -p "${crate}" 2>&1; echo "$?" >"${cargo_status_file}"; set -e; } | tee "${cargo_log}"
+        { set +e; cargo build -j "${cargo_jobs}" --release --locked --target "${musl_target}" "${picks[@]}" 2>&1; echo "$?" >"${cargo_status_file}"; set -e; } | tee "${cargo_log}"
         cargo_status="$(cat "${cargo_status_file}")"; rm -f "${cargo_status_file}"
         if [ "${cargo_status}" = "0" ]; then
             rm -f "${cargo_log}"
@@ -3122,9 +3127,9 @@ _ci_rust_member_stubs() {
 # Why: one owner for dns/ui/watchdog builders (was 3x).
 # From: Issue #1683
 ci_cmd_rust_build() {
-    local service="${1:-}" crate="${2:-}" mode="${3:-build}"
+    local service="${1:-}" crates="${2:-}" mode="${3:-build}" crate
     [ -n "${service}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0001]" "reason=\"service arg required\""; return 2; }
-    [ -n "${crate}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0002]" "reason=\"crate arg required\""; return 2; }
+    [ -n "${crates}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0002]" "reason=\"crate arg required\""; return 2; }
     # What: mode build (real+cp) or deps (pre-cache, no cp).
     # Why: services with stub-src dep-cache stage call deps.
     case "${mode}" in build|deps) ;; *) ci_log "[CI-ERROR-RUSTBUILD-0005]" "mode=\"${mode}\" reason=\"mode must be build or deps\""; return 2 ;; esac
@@ -3371,14 +3376,16 @@ ci_cmd_rust_build() {
     resolve_cargo_profile_overrides
     local cargo_jobs
     cargo_jobs="$(resolve_cargo_jobs)"
-    # What: drop crate's stale artifact before real build.
+    # What: drop each crate's stale artifact first.
     # Why: dep pre-cache stub rlib outdates COPYed src.
     if [ "${mode}" = "build" ]; then
-        cargo clean -p "${crate}" --release --target "${musl_target}"
+        for crate in ${crates}; do
+            cargo clean -p "${crate}" --release --target "${musl_target}"
+        done
     fi
     local stubs s
     stubs="$(_ci_rust_member_stubs)" || return 2
-    _ci_rust_cargo_build "${crate}" "${musl_target}" "${cargo_jobs}"
+    _ci_rust_cargo_build "${crates}" "${musl_target}" "${cargo_jobs}"
     # What: remove exactly the stub files this run created.
     # Why: a stub left behind would ship in the real build.
     # From: Issue #1683 | PR #1858
@@ -3400,10 +3407,12 @@ ci_cmd_rust_build() {
         fi
         rm -f "${ccache_final_stats}"
     fi
-    # What: copy built binary out only for real build.
+    # What: copy built binaries out only for real build.
     # Why: deps pre-cache pass produces no shippable binary.
     if [ "${mode}" = "build" ]; then
-        cp "target/${musl_target}/release/${crate}" "/build/${crate}-out"
+        for crate in ${crates}; do
+            cp "target/${musl_target}/release/${crate}" "/build/${crate}-out"
+        done
     fi
 }
 
@@ -3945,21 +3954,24 @@ _ci_test_rust() {
         1) printf 'service=%s tested=SKIP reason="CI_RUST_VALIDATION is not true (AG-VAL-008)"\n' "${service}"; return 0 ;;
         *) return 2 ;;
     esac
-    ctx="$(ci_service_field "${service}" crate)" || return 2
+    ctx="$(_ci_target_list "${service}" crates)" || return 2
     if [ -z "${ctx}" ]; then
         ci_log "[CI-ERROR-TEST-0005]" "service=\"${service}\" reason=\"no crate in SOT\""
         return 2
     fi
-    # What: workspace-root cargo on service's own crate.
+    # What: workspace-root cargo on the service's crates.
     # Why: build context is no crate; AG-VAL-008 per crate.
     # From: PR #1858
-    local trc=0
+    local trc=0 c
+    local -a picks=()
+    for c in ${ctx}; do picks+=(-p "${c}"); done
+    ctx="${ctx//$'\n'/ }"
     ( _ci_sccache_env "lancache-${service}" || exit 200
         trap _ci_sccache_stop EXIT
         cd "${CI_REPO_ROOT:-.}" \
-            && cargo fmt --check -p "${ctx}" \
-            && cargo clippy --locked --all-targets -p "${ctx}" -- -D warnings \
-            && cargo test --locked -p "${ctx}" ) || trc=$?
+            && cargo fmt --check "${picks[@]}" \
+            && cargo clippy --locked --all-targets "${picks[@]}" -- -D warnings \
+            && cargo test --locked "${picks[@]}" ) || trc=$?
     # What: 200 = sccache setup error -> rc 2, not FAIL.
     # Why: §72: infra UNKNOWN never reads as a test FAIL.
     # From: Issue #1683 | PR #1858
@@ -7630,12 +7642,12 @@ _ci_service_build_args() {
             [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0009]" "arg=\"BUILD_TOOLS_IMAGE\" service=\"${service}\" reason=\"empty resolved build-tools image; FAIL CLOSED\""; return 2; }
             out="${out}${prefix}BUILD_TOOLS_IMAGE=${val}"$'\n'
         fi
-        # What: emit the SOT workspace crate for rust-build.
+        # What: emit the SOT workspace crates for rust-build.
         # Why: one crate owner; the Dockerfile names none.
         # From: Issue #1683 | PR #1858
-        val="$(_ci_block_entry_field services "${service}" crate)" || return 2
-        [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0014]" "arg=\"RUST_CRATE\" service=\"${service}\" reason=\"no crate in SOT; FAIL CLOSED\""; return 2; }
-        out="${out}${prefix}RUST_CRATE=${val}"$'\n'
+        val="$(_ci_target_list "${service}" crates)" || return 2
+        [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0014]" "arg=\"RUST_CRATES\" service=\"${service}\" reason=\"no crate in SOT; FAIL CLOSED\""; return 2; }
+        out="${out}${prefix}RUST_CRATES=${val//$'\n'/ }"$'\n'
         # What: emit the platform's SOT rust target triple.
         # Why: apk Rust ships only its host std, no rustup.
         # From: Issue #1683 | PR #1858
@@ -7645,6 +7657,11 @@ _ci_service_build_args() {
             out="${out}${prefix}MUSL_TARGET=${triple}"$'\n'
         fi
     fi
+    # What: the SOT process list of a supervised image.
+    # Why: the Dockerfile bakes it as LANCACHE_PROCESSES.
+    # From: Issue #1683
+    val="$(_ci_target_list "${service}" processes)" || return 2
+    [ -z "${val}" ] || out="${out}${prefix}LANCACHE_PROCESSES=${val//$'\n'/ }"$'\n'
     # What: SOT-pinned external inputs of this Dockerfile.
     # Why: one pin->ARG owner shared with version verify.
     # From: Issue #1683 | PR #1858

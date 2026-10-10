@@ -71,6 +71,10 @@ services:
     # Why: supervisor and cachehamster run in one container.
     # From: Issue #1683
     crates: [lancache-watchdog, lancache-cachehamster]
+    # What: processes lancache-watchdog supervise runs.
+    # Why: ci.sh bakes them as LANCACHE_PROCESSES; one list.
+    # From: Issue #1683
+    processes: [watch, retention, syslog-ng, chronyd, netdata]
     final_base: alpine
     # What: final-image apk packages; the SOT owns the list.
     # Why: consumers derive; no hardcoding (AG-CI-006)
