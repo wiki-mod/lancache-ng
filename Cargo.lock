@@ -1175,6 +1175,7 @@ version = "0.3.0"
 dependencies = [
  "LanCache-NG",
  "liblzma",
+ "serde",
  "serde_json",
  "time",
  "tokio",

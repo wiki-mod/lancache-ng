@@ -7,51 +7,46 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Write as _};
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+use std::io;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
-use lancache_ng::config::{self, DhcpMode, OutOfRange, Uint, env_opt};
+use lancache_ng::config::{self, OutOfRange, Uint, env_opt};
 use lancache_ng::{
-    DesiredRunState, DesiredState, DiskHealth, DiskInfo, DockerProxy, Place, ServiceHealth,
-    WatchdogStatus, df, unix_secs, write_file,
+    COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL, DesiredRunState, DesiredState, DiskHealth,
+    DiskInfo, DockerApi, Place, ServiceHealth, WatchdogStatus, df, unix_secs, write_file,
 };
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use time::OffsetDateTime;
 
 // What: seconds Docker waits for SIGTERM before SIGKILL.
 // Why: stays inside the restart call's own curl budget.
 const RESTART_GRACE_SECS: u32 = 2;
 
-// What: startup settings, read once from the environment.
+// What: central-control settings, read once at start.
 // Why: a deployment change recreates this container.
 struct Settings {
-    docker_proxy_url: String,
+    docker_host: String,
     check_interval: Duration,
     restart_after: u32,
-    // What: None means no timeout, like curl --max-time 0.
-    // Why: ZERO would mean "instant" to the proxy client.
-    curl_max_time: Option<Duration>,
-    curl_max_time_restart: Option<Duration>,
+    // What: None means no timeout; 0 in the env.
+    // Why: ZERO would mean "instant" to the HTTP client.
+    api_timeout: Option<Duration>,
+    restart_timeout: Option<Duration>,
     disk_warn_pct: u32,
     disk_alarm_pct: u32,
     status_file: PathBuf,
-    // What: read fresh every loop iteration, not once.
-    // Why: a dock action must apply without a restart.
-    // From: Issue #1437
-    desired_state_file: PathBuf,
     cache_dir: PathBuf,
-    ssl_enabled: bool,
-    dhcp_mode: DhcpMode,
-    logging_enabled: bool,
-    ntp_enabled: bool,
+    // What: this container's id, Docker's default hostname.
+    // Why: its compose project label names the stack.
+    own_id: String,
 }
 
-// What: curl-style seconds; 0 means no timeout (None).
+// What: seconds as a timeout; 0 means no timeout (None).
 // Why: fractions stay valid; 0 must not time out at once.
-fn curl_timeout(raw: Option<&str>, name: &str) -> Result<Option<Duration>, String> {
+fn api_timeout(raw: Option<&str>, name: &str) -> Result<Option<Duration>, String> {
     let raw = raw.ok_or_else(|| format!("FATAL: {}.", config::not_set(name)))?;
     let invalid = |why: &str| format!("FATAL: invalid {name}={raw}{why}.");
     match raw.parse::<f64>() {
@@ -64,7 +59,7 @@ fn curl_timeout(raw: Option<&str>, name: &str) -> Result<Option<Duration>, Strin
 }
 
 // What: one Uint knob from the env; a clamp warns.
-// Why: both modes read their knobs by one rule.
+// Why: watch and retention read knobs by one rule.
 fn read_knob(
     get: &dyn Fn(&str) -> Option<String>,
     spec: Uint,
@@ -77,28 +72,9 @@ fn read_knob(
     Ok(value)
 }
 
-// What: CACHE_DIR, else the one split cache dir.
-// Why: watch and retention must name the same cache.
-fn cache_dir(get: &dyn Fn(&str) -> Option<String>) -> Result<String, String> {
-    if let Some(dir) = get("CACHE_DIR") {
-        return Ok(dir);
-    }
-    let (standard, ssl) = (get("CACHE_DIR_STANDARD"), get("CACHE_DIR_SSL"));
-    if let (Some(std), Some(ssl)) = (&standard, &ssl)
-        && std != ssl
-    {
-        return Err(format!(
-            "FATAL: CACHE_DIR_STANDARD={std} and CACHE_DIR_SSL={ssl} point to different paths without CACHE_DIR. Set CACHE_DIR to one shared cache directory."
-        ));
-    }
-    standard
-        .or(ssl)
-        .ok_or_else(|| format!("FATAL: {}.", config::not_set("CACHE_DIR")))
-}
-
 // What: settings from an env reader, plus startup warnings.
 // Why: Err is fatal; a reader arg keeps tests env-free.
-// From: Issue #849 | PR #1858
+// From: Issue #849 | Issue #1683
 fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<String>), String> {
     let get = |name: &str| config::opt(&env, name);
     let mut warnings = Vec::new();
@@ -116,66 +92,23 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
     let restart_after = knob("RESTART_AFTER", 1, u32::MAX.into())?;
     let disk_warn_pct = knob("DISK_WARN_PCT", 0, u32::MAX.into())?;
     let disk_alarm_pct = knob("DISK_ALARM_PCT", 0, u32::MAX.into())?;
-    let curl_max_time = curl_timeout(get("CURL_MAX_TIME").as_deref(), "CURL_MAX_TIME")?;
-    let curl_max_time_restart = curl_timeout(
-        get("CURL_MAX_TIME_RESTART").as_deref(),
-        "CURL_MAX_TIME_RESTART",
+    let api = api_timeout(get("DOCKER_API_TIMEOUT").as_deref(), "DOCKER_API_TIMEOUT")?;
+    let restart = api_timeout(
+        get("DOCKER_RESTART_TIMEOUT").as_deref(),
+        "DOCKER_RESTART_TIMEOUT",
     )?;
-
-    // What: a value the env must supply; unset is fatal.
-    // Why: watchdog.env and compose own it; no default.
     let need = |name: &str| config::need(&env, name).map_err(|e| format!("FATAL: {e}."));
-    // What: a bool the env must supply; junk is fatal.
-    // Why: same owner as need; a typo must not flip a gate.
-    let need_flag = |name: &str| config::need_flag(&env, name).map_err(|e| format!("FATAL: {e}."));
-    let ssl_enabled = need_flag("SSL_ENABLED")?;
-
-    let fixed_names = [
-        ("CONTAINER_PROXY", config::CONTAINER_PROXY, true),
-        (
-            "CONTAINER_DNS_STANDARD",
-            config::CONTAINER_DNS_STANDARD,
-            true,
-        ),
-        ("CONTAINER_DNS_SSL", config::CONTAINER_DNS_SSL, ssl_enabled),
-        ("CONTAINER_NATS", config::CONTAINER_NATS, true),
-    ];
-    for (var, expected, active) in fixed_names {
-        if let Some(got) = get(var)
-            && active
-            && got != expected
-        {
-            return Err(format!(
-                "FATAL: {var}={got} is not supported (expected '{expected}'). The docker-socket-proxy allowlist and the Admin UI know only this fixed name. Revert {var} to the default."
-            ));
-        }
-    }
-
-    let cache_dir = cache_dir(&get)?;
-
-    // What: the Docker API address must come from the env.
-    // Why: watchdog.env and compose own it; no default.
-    let docker_proxy_url = need("DOCKER_PROXY_URL")?;
-
     let settings = Settings {
-        docker_proxy_url,
+        docker_host: need("DOCKER_HOST")?,
         check_interval: Duration::from_secs(check_interval),
         restart_after: restart_after as u32,
-        curl_max_time,
-        curl_max_time_restart,
+        api_timeout: api,
+        restart_timeout: restart,
         disk_warn_pct: disk_warn_pct as u32,
         disk_alarm_pct: disk_alarm_pct as u32,
         status_file: PathBuf::from(need("STATUS_FILE")?),
-        desired_state_file: PathBuf::from(need("DESIRED_STATE_FILE")?),
-        cache_dir: PathBuf::from(cache_dir),
-        ssl_enabled,
-        // What: DHCP_MODE must be set; "disabled" is valid.
-        // Why: compose sets it; unknown text fails closed.
-        dhcp_mode: DhcpMode::parse(&need("DHCP_MODE")?, false),
-        // What: LOGGING_ENABLED gates the syslog container.
-        // Why: SYSLOG_ENABLED gates retention only.
-        logging_enabled: need_flag("LOGGING_ENABLED")?,
-        ntp_enabled: need_flag("NTP_ENABLED")?,
+        cache_dir: PathBuf::from(need("CACHE_DIR")?),
+        own_id: need("HOSTNAME")?,
     };
     Ok((settings, warnings))
 }
@@ -311,33 +244,6 @@ impl Counter {
     }
 }
 
-// What: monitored containers in probe order, restart flag.
-// Why: dns-ssl, dhcp, syslog, ntp exist only when enabled.
-// From: Issue #842
-fn targets(s: &Settings) -> Vec<(&'static str, bool)> {
-    let mut list = vec![
-        (config::CONTAINER_PROXY, true),
-        (config::CONTAINER_DNS_STANDARD, true),
-    ];
-    if s.ssl_enabled {
-        list.push((config::CONTAINER_DNS_SSL, true));
-    }
-    list.extend([
-        (config::CONTAINER_NATS, true),
-        (config::CONTAINER_NETDATA, true),
-        (config::CONTAINER_DOCKER_SOCKET_PROXY, false),
-        (config::CONTAINER_UI, false),
-    ]);
-    list.extend(s.dhcp_mode.container().map(|name| (name, false)));
-    if s.logging_enabled {
-        list.push((config::CONTAINER_SYSLOG, false));
-    }
-    if s.ntp_enabled {
-        list.push((config::CONTAINER_NTP, false));
-    }
-    list
-}
-
 // What: UTC time as YYYY-MM-DDTHH:MM:SSZ, no fractions.
 // Why: status.json's `updated` format is a fixed contract.
 fn stamp(at: OffsetDateTime) -> String {
@@ -347,58 +253,29 @@ fn stamp(at: OffsetDateTime) -> String {
         .expect("fixed UTC format description must always succeed")
 }
 
-// What: log tag of the running mode, set once at start.
-// Why: retention lines keep their own [retention] tag.
-static MODE: OnceLock<&'static str> = OnceLock::new();
+tokio::task_local! {
+    // What: log tag of the task writing a line.
+    // Why: watch, retention, supervise share one process.
+    // From: Issue #1683
+    static TAG: &'static str;
+}
 
-// What: the "[mode] HH:MM:SS" line prefix.
-// Why: operators grep the docker logs for this exact shape.
+// What: the "[tag] HH:MM:SS" line prefix.
+// Why: operators grep the logs for this exact shape.
 fn prefix() -> String {
-    let mode = MODE.get().copied().unwrap_or("watchdog");
-    format!("[{mode}] {}", &stamp(OffsetDateTime::now_utc())[11..19])
+    let tag = TAG.try_with(|t| *t).unwrap_or("watchdog");
+    format!("[{tag}] {}", &stamp(OffsetDateTime::now_utc())[11..19])
 }
 
-// What: WATCHDOG_LOG_FILE opened once for append, or none.
-// Why: fluent-bit tails the file; compose runs no tee.
-// From: Issue #1683 | PR #1858
-fn log_file() -> Option<&'static Mutex<fs::File>> {
-    static FILE: OnceLock<Option<Mutex<fs::File>>> = OnceLock::new();
-    FILE.get_or_init(|| {
-        let path = env_opt("WATCHDOG_LOG_FILE")?;
-        fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o640)
-            .open(&path)
-            .inspect_err(|e| eprintln!("{} WARNING: cannot open {path}: {e}", prefix()))
-            .ok()
-            .map(Mutex::new)
-    })
-    .as_ref()
-}
-
-// What: a line to its stream and to the log file, if any.
-// Why: a failed file write is shown once, never silent.
-// From: Issue #1683 | PR #1858
+// What: one prefixed line to stdout or stderr.
+// Why: Docker sends both streams on to syslog-ng.
+// From: Issue #1683
 fn emit(msg: &str, to_stderr: bool) {
-    static WARNED: AtomicBool = AtomicBool::new(false);
     let line = format!("{} {msg}", prefix());
     if to_stderr {
         eprintln!("{line}");
     } else {
         println!("{line}");
-    }
-    let Some(file) = log_file() else {
-        return;
-    };
-    let written = match file.lock() {
-        Ok(mut f) => writeln!(f, "{line}").map_err(|e| e.to_string()),
-        Err(e) => Err(e.to_string()),
-    };
-    if let Err(e) = written
-        && !WARNED.swap(true, Ordering::Relaxed)
-    {
-        eprintln!("{} WARNING: cannot write the log file: {e}", prefix());
     }
 }
 
@@ -412,60 +289,6 @@ fn log(msg: &str) {
 // Why: errors stay visible apart from normal output.
 fn log_err(msg: &str) {
     emit(msg, true);
-}
-
-// What: the call that moves a service to its wanted state.
-// Why: a service already in that state needs no call.
-fn reconcile_step(
-    want: DesiredRunState,
-    running: bool,
-) -> Option<(&'static str, &'static str, &'static str)> {
-    match (want, running) {
-        (DesiredRunState::Running, false) => Some(("start", "STARTING", "running")),
-        (DesiredRunState::Stopped, true) => Some(("stop", "STOPPING", "stopped")),
-        _ => None,
-    }
-}
-
-// What: start or stop dhcp/ntp to the desired state.
-// Why: watchdog is the sole actor; no opinion, no action.
-// From: Issue #1437
-async fn reconcile(client: &DockerProxy, s: &Settings) {
-    let desired = DesiredState::read(&s.desired_state_file);
-    let mut services = Vec::new();
-    if let Some(name) = s.dhcp_mode.container() {
-        services.push(("dhcp", name, desired.dhcp));
-    }
-    if s.ntp_enabled {
-        services.push(("ntp", config::CONTAINER_NTP, desired.ntp));
-    }
-    for (label, name, want) in services {
-        let Some(want) = want else {
-            continue;
-        };
-        // What: an unknown running state skips this cycle.
-        // Why: acting on a guess could fight a rollback.
-        let running = client
-            .inspect(name, s.curl_max_time)
-            .await
-            .and_then(|body| body.pointer("/State/Running")?.as_bool());
-        let Some(running) = running else {
-            continue;
-        };
-        let Some((action, verb, state)) = reconcile_step(want, running) else {
-            continue;
-        };
-        log(&format!(
-            "{verb} {name} ({label}: desired state is {state})"
-        ));
-        if client
-            .act(name, action, s.curl_max_time_restart)
-            .await
-            .is_err()
-        {
-            log_err(&format!("WARNING: {action} call failed for {name}"));
-        }
-    }
 }
 
 // What: the color of a disk use percent.
@@ -557,7 +380,7 @@ fn load_retention(
     })?;
     let retention = Retention {
         interval: Duration::from_secs(interval),
-        cache_dir: cache_dir(&get)?,
+        cache_dir: need("CACHE_DIR")?,
         cache_prefix: absolute("CACHE_DIR_ALLOWED_PREFIX")?,
         cache_valid_days,
         purge_stamp: absolute("PURGE_STAMP")?,
@@ -606,7 +429,9 @@ fn canonical(path: &Path) -> io::Result<PathBuf> {
 // From: Issue #842 | PR #1858
 fn retention_target(name: &str, raw: &str, prefix: &Path) -> Result<PathBuf, String> {
     if raw.is_empty() {
-        return Err(format!("FATAL: {name} is empty; refusing to guess a target."));
+        return Err(format!(
+            "FATAL: {name} is empty; refusing to guess a target."
+        ));
     }
     if !raw.starts_with('/') {
         return Err(format!(
@@ -700,7 +525,10 @@ fn read_stamp(path: &Path, now: u64) -> u64 {
         Ok(raw) => raw,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return 0,
         Err(e) => {
-            log_err(&format!("ERROR: cannot read {}: {e}; resetting", path.display()));
+            log_err(&format!(
+                "ERROR: cannot read {}: {e}; resetting",
+                path.display()
+            ));
             return 0;
         }
     };
@@ -709,7 +537,10 @@ fn read_stamp(path: &Path, now: u64) -> u64 {
     match raw.parse::<u64>() {
         Ok(last) if digits && last <= now => last,
         Ok(_) if digits => {
-            log(&format!("{}={raw} is in the future; resetting", path.display()));
+            log(&format!(
+                "{}={raw} is in the future; resetting",
+                path.display()
+            ));
             0
         }
         _ => {
@@ -797,7 +628,10 @@ fn prune_syslog(r: &Retention, now: u64) {
     ));
     let scan = |what: &str| {
         files_under(&root).map_err(|e| {
-            log_err(&format!("ERROR: cannot scan {} ({what}): {e}", root.display()))
+            log_err(&format!(
+                "ERROR: cannot scan {} ({what}): {e}",
+                root.display()
+            ))
         })
     };
     let Ok(files) = scan("age") else { return };
@@ -816,7 +650,9 @@ fn prune_syslog(r: &Retention, now: u64) {
     let Ok(mut files) = scan("size") else { return };
     let mut size: u64 = files.iter().map(|(_, meta)| meta.len()).sum();
     if size <= budget {
-        log(&format!("Syslog size within budget: {size} <= {budget} bytes"));
+        log(&format!(
+            "Syslog size within budget: {size} <= {budget} bytes"
+        ));
         return write_stamp(&r.syslog_stamp, now);
     }
     log(&format!(
@@ -848,7 +684,10 @@ fn prune_syslog(r: &Retention, now: u64) {
             "WARNING: syslog size budget still exceeded; today's per-host files stay open in syslog-ng; retry in {}s",
             r.syslog_cooldown
         ));
-        write_stamp(&r.syslog_stamp, (now + r.syslog_cooldown).saturating_sub(DAY));
+        write_stamp(
+            &r.syslog_stamp,
+            (now + r.syslog_cooldown).saturating_sub(DAY),
+        );
     } else {
         write_stamp(&r.syslog_stamp, now);
     }
@@ -943,31 +782,14 @@ async fn run_retention(r: &Retention, stop: impl std::future::Future<Output = ()
     }
 }
 
-// What: retention mode, its own container and process.
-// Why: deletes must never share a fate with health checks.
-// From: Issue #842 | PR #1858
-async fn retention() {
-    use tokio::signal::unix::{SignalKind, signal};
-    let _ = MODE.set("retention");
-    let (r, warnings) = load_retention(config::process_env).unwrap_or_else(|msg| {
-        log_err(&msg);
-        std::process::exit(1);
-    });
+// What: retention settings, then the loop until stop.
+// Why: a bad setting must stop the task before deletes.
+// From: Issue #842 | Issue #1683
+async fn retention() -> Result<(), String> {
+    let (r, warnings) = load_retention(config::process_env)?;
     warnings.iter().for_each(|w| log(w));
-    // What: TERM and INT handlers exist before any work.
-    // Why: PID 1 has no default TERM action to rely on
-    let (mut term, mut int) = match (
-        signal(SignalKind::terminate()),
-        signal(SignalKind::interrupt()),
-    ) {
-        (Ok(term), Ok(int)) => (term, int),
-        (Err(e), _) | (_, Err(e)) => {
-            log_err(&format!("FATAL: cannot install TERM/INT handlers: {e}"));
-            std::process::exit(1);
-        }
-    };
     log(&format!(
-        "Retention daemon started. Cache: {} (valid {}d, prefix {}) | Syslog: {} (xz, prefix {}) | Interval: {}s",
+        "Retention started. Cache: {} (valid {}d, prefix {}) | Syslog: {} (xz, prefix {}) | Interval: {}s",
         r.cache_dir,
         r.cache_valid_days,
         r.cache_prefix.display(),
@@ -975,118 +797,100 @@ async fn retention() {
         r.syslog_prefix.display(),
         r.interval.as_secs(),
     ));
-    let stop = async move {
-        tokio::select! {
-            _ = term.recv() => {}
-            _ = int.recv() => {}
-        }
-    };
-    run_retention(&r, stop).await;
+    run_retention(&r, std::future::pending()).await;
+    Ok(())
 }
 
-// What: the watch mode, or retention with --retention.
-// Why: one binary; each mode runs in its own container.
-// From: Issue #842 | PR #1858
-#[tokio::main]
-async fn main() {
-    match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
-        [] => watch().await,
-        [mode] if mode == "--retention" => retention().await,
-        _ => {
-            log_err("FATAL: usage: lancache-watchdog [--retention]");
-            std::process::exit(2);
-        }
+// What: the stack's compose project, from this container.
+// Why: the watchdog checks what compose started; no list.
+// From: Issue #1683
+async fn own_project(docker: &DockerApi, s: &Settings) -> Result<(String, String), String> {
+    let body = docker
+        .inspect(&s.own_id, s.api_timeout)
+        .await
+        .ok_or_else(|| format!("cannot inspect own container {}", s.own_id))?;
+    let label = format!("/Config/Labels/{COMPOSE_PROJECT_LABEL}");
+    let project = body.pointer(&label).and_then(Value::as_str);
+    let name = body.pointer("/Name").and_then(Value::as_str);
+    match (project, name) {
+        (Some(project), Some(name)) => Ok((project.to_string(), container_name(name))),
+        _ => Err(format!("container {} has no compose project", s.own_id)),
     }
 }
 
-// What: load settings, then run the watch loop.
-// Why: a bad setting must stop the service before it acts.
-async fn watch() {
-    let (s, warnings) = load_settings(config::process_env).unwrap_or_else(|msg| {
-        log_err(&msg);
-        std::process::exit(1);
-    });
-    warnings.iter().for_each(|w| log(w));
-    let client = DockerProxy::new(&s.docker_proxy_url);
+// What: a container name without Docker's leading slash.
+// Why: list and inspect answers both carry the slash.
+fn container_name(raw: &str) -> String {
+    raw.trim_start_matches('/').to_string()
+}
 
-    let list = targets(&s);
-    let names = |restart: bool| {
-        let picked: Vec<&str> = list
-            .iter()
-            .filter(|t| t.1 == restart)
-            .map(|t| t.0)
-            .collect();
-        picked.join(" ")
-    };
+// What: name and compose service of one list entry.
+// Why: status.json is keyed by service, calls by name.
+fn listed(entry: &Value) -> Option<(String, String)> {
+    let name = entry.pointer("/Names/0")?.as_str()?;
+    let service = entry.get("Labels")?.get(COMPOSE_SERVICE_LABEL)?.as_str()?;
+    Some((container_name(name), service.to_string()))
+}
+
+// What: check every stack container; restart failures.
+// Why: one actor with the socket; its own box only alerts.
+// From: Issue #842 | Issue #1683
+async fn watch() -> Result<(), String> {
+    let (s, warnings) = load_settings(config::process_env)?;
+    warnings.iter().for_each(|w| log(w));
+    let docker = DockerApi::new(&s.docker_host);
+    let (project, own_name) = own_project(&docker, &s).await?;
     log(&format!(
-        "Watchdog started. Monitoring: {} (SSL_ENABLED={}); alert-only monitored: {}",
-        names(true),
-        u8::from(s.ssl_enabled),
-        names(false),
-    ));
-    log(&format!("Cache directory: {}", s.cache_dir.display()));
-    log(&format!(
-        "Interval: {}s | Restart after: {} | Disk warn: {}% alarm: {}%",
+        "Watchdog started. Project: {project} | Interval: {}s | Restart after: {} | Disk warn: {}% alarm: {}% | Cache: {}",
         s.check_interval.as_secs(),
         s.restart_after,
         s.disk_warn_pct,
         s.disk_alarm_pct,
+        s.cache_dir.display(),
     ));
-
-    let mut counters: HashMap<&str, Counter> = HashMap::new();
+    let mut counters: HashMap<String, Counter> = HashMap::new();
     loop {
-        // What: apply the dhcp/ntp overrides first.
-        // Why: the health report must reflect the result.
-        // From: Issue #1437
-        reconcile(&client, &s).await;
-
         let mut services: HashMap<String, ServiceHealth> = HashMap::new();
-        for &(name, restart) in &list {
-            // What: the socket proxy is probed with /_ping.
-            // Why: it is the Docker channel; no inspect.
-            let reading = if name == config::CONTAINER_DOCKER_SOCKET_PROXY {
-                if client.ping(s.curl_max_time).await {
-                    Reading::Healthy
-                } else {
-                    Reading::Unhealthy
-                }
-            } else {
-                match client.inspect(name, s.curl_max_time).await {
-                    Some(body) => Reading::from_inspect(&body),
-                    None => Reading::Unreachable,
-                }
+        let listing = docker.project_containers(&project, s.api_timeout).await;
+        let Some(listing) = listing else {
+            log_err("WARNING: cannot list the stack containers");
+            write_status(&s, services)?;
+            tokio::time::sleep(s.check_interval).await;
+            continue;
+        };
+        for (name, service) in listing.iter().filter_map(listed) {
+            let reading = match docker.inspect(&name, s.api_timeout).await {
+                Some(body) => Reading::from_inspect(&body),
+                None => Reading::Unreachable,
             };
-            let counter = counters.entry(name).or_default();
+            // What: the watchdog's own container is alert-only.
+            // Why: restarting itself would end the restart call.
+            let restart = name != own_name;
+            let counter = counters.entry(name.clone()).or_default();
             let event = if restart {
                 counter.observe(&reading, s.restart_after)
             } else {
                 counter.observe_alert(reading.is_alert_ok())
             };
-            match (event, restart) {
-                (Event::None, _) => {}
-                (Event::Recovered, _) => log(&format!("RECOVERED {name}")),
-                (Event::Failing(count), true) => {
+            match event {
+                Event::None => {}
+                Event::Recovered => log(&format!("RECOVERED {name}")),
+                Event::Failing(count) => {
                     log(&format!("UNHEALTHY {name} ({count}/{})", s.restart_after));
                 }
-                (Event::Failing(count), false) => log(&format!(
-                    "UNHEALTHY {name} ({count} consecutive failures) -- alert only, watchdog does not restart this service"
-                )),
-                (Event::Restart, _) => {
-                    let n = s.restart_after;
-                    log(&format!("UNHEALTHY {name} ({n}/{n})"));
+                Event::Restart => {
                     log(&format!("RESTARTING {name}"));
-                    if client
-                        .restart(name, RESTART_GRACE_SECS, s.curl_max_time_restart)
+                    if let Err(e) = docker
+                        .restart(&name, RESTART_GRACE_SECS, s.restart_timeout)
                         .await
-                        .is_err()
                     {
-                        log(&format!("WARNING: restart call failed for {name}"));
+                        log_err(&format!("WARNING: restart of {name} failed: {e}"));
                     }
                 }
             }
             let (health, color) = reading.describe();
             services.insert(
-                name.to_string(),
+                service,
                 ServiceHealth {
                     status: color.to_string(),
                     health: health.to_string(),
@@ -1094,28 +898,513 @@ async fn watch() {
                 },
             );
         }
-
-        let status = WatchdogStatus {
-            updated: stamp(OffsetDateTime::now_utc()),
-            services,
-            disk: DiskInfo {
-                cache: disk_info(&s.cache_dir, s.disk_warn_pct, s.disk_alarm_pct),
-            },
-            interval_secs: s.check_interval.as_secs(),
-        };
-        // What: a failed status write exits the process.
-        // Why: compose restarts on exit, not on red health.
-        let body = serde_json::to_string_pretty(&status)
-            .expect("WatchdogStatus has only serializable fields");
-        if let Err(e) = write_file(&s.status_file, body.as_bytes(), 0o644, Place::Replace) {
-            log_err(&format!(
-                "ERROR: failed to write {}: {e}",
-                s.status_file.display()
-            ));
-            std::process::exit(1);
-        }
-
+        write_status(&s, services)?;
         tokio::time::sleep(s.check_interval).await;
+    }
+}
+
+// What: write status.json for the ui, atomically.
+// Why: a failed write ends the task; health turns red.
+fn write_status(s: &Settings, services: HashMap<String, ServiceHealth>) -> Result<(), String> {
+    let status = WatchdogStatus {
+        updated: stamp(OffsetDateTime::now_utc()),
+        services,
+        disk: DiskInfo {
+            cache: disk_info(&s.cache_dir, s.disk_warn_pct, s.disk_alarm_pct),
+        },
+        interval_secs: s.check_interval.as_secs(),
+    };
+    let body =
+        serde_json::to_string_pretty(&status).expect("WatchdogStatus has only serializable fields");
+    write_file(&s.status_file, body.as_bytes(), 0o644, Place::Replace)
+        .map_err(|e| format!("cannot write {}: {e}", s.status_file.display()))
+}
+
+// What: pause before a program or task starts again.
+// Why: a crash loop must not spin; it caps at 30 s.
+const BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+// What: a run this long resets the restart backoff.
+// Why: a crash after a good run is a fresh failure.
+const BACKOFF_RESET: Duration = Duration::from_secs(60);
+
+// What: how often the supervisor converges.
+// Why: a settings change applies within one tick.
+const TICK: Duration = Duration::from_secs(2);
+
+// What: wait for a stopped program before SIGKILL.
+// Why: Docker's own stop grace is 10 s; stay inside it.
+const STOP_GRACE: Duration = Duration::from_secs(8);
+
+// What: oldest supervisor status the healthcheck accepts.
+// Why: a hung supervisor stops writing; that is red.
+const STATUS_MAX_AGE: u64 = 30;
+
+// What: inputs every program reads at render time.
+// Why: settings file beats env; the run dir is private.
+// From: Issue #1683
+struct Ctx {
+    run_dir: PathBuf,
+    settings_file: PathBuf,
+    desired_file: PathBuf,
+}
+
+impl Ctx {
+    // What: the saved ui setting, else the env value.
+    // Why: operators change settings live in the ui.
+    fn setting(&self, key: &str) -> Option<String> {
+        config::non_empty(config::saved_setting(&self.settings_file, key).as_deref())
+            .map(str::to_string)
+            .or_else(|| env_opt(key))
+    }
+
+    // What: a required value from the env.
+    // Why: no defaults in Rust; the env files own them.
+    fn need(&self, key: &str) -> Result<String, String> {
+        config::need(&config::process_env, key)
+    }
+
+    // What: a file in the run dir, written fresh.
+    // Why: each start renders from the current settings.
+    fn render(&self, file: &str, body: &str) -> Result<String, String> {
+        let path = self.run_dir.join(file);
+        write_file(&path, body.as_bytes(), 0o644, Place::Replace)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        Ok(path.display().to_string())
+    }
+}
+
+// What: one program or task the supervisor keeps alive.
+// Why: LANCACHE_PROCESSES names them; the SOT owns it.
+// From: Issue #1683
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Watch,
+    Retention,
+    SyslogNg,
+    Chronyd,
+    Netdata,
+}
+
+impl Kind {
+    // What: the kind of one LANCACHE_PROCESSES entry.
+    // Why: an unknown name is a build error; fail closed.
+    fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "watch" => Self::Watch,
+            "retention" => Self::Retention,
+            "syslog-ng" => Self::SyslogNg,
+            "chronyd" => Self::Chronyd,
+            "netdata" => Self::Netdata,
+            _ => return None,
+        })
+    }
+
+    // What: the name as LANCACHE_PROCESSES spells it.
+    // Why: logs and the status file use the same name.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Watch => "watch",
+            Self::Retention => "retention",
+            Self::SyslogNg => "syslog-ng",
+            Self::Chronyd => "chronyd",
+            Self::Netdata => "netdata",
+        }
+    }
+
+    // What: whether this kind should run right now.
+    // Why: NTP follows the saved setting and desired state.
+    // From: Issue #1437 | Issue #1683
+    fn wanted(self, ctx: &Ctx) -> bool {
+        match self {
+            Self::Chronyd => {
+                let on = ctx
+                    .setting("NTP_ENABLED")
+                    .as_deref()
+                    .and_then(config::parse_bool);
+                let desired = DesiredState::read(&ctx.desired_file).ntp;
+                on == Some(true) && desired != Some(DesiredRunState::Stopped)
+            }
+            _ => true,
+        }
+    }
+
+    // What: render the config, return the command line.
+    // Why: a render error keeps the program stopped.
+    fn launch(self, ctx: &Ctx) -> Result<Vec<String>, String> {
+        match self {
+            Self::Watch | Self::Retention => Ok(Vec::new()),
+            Self::SyslogNg => syslog_ng(ctx),
+            Self::Chronyd => chronyd(ctx),
+            Self::Netdata => Ok(vec!["netdata".into(), "-D".into()]),
+        }
+    }
+}
+
+// What: syslog-ng.conf for the Docker syslog input.
+// Why: one file per container and day; xz comes later.
+// From: Issue #1683
+fn syslog_ng_conf(port: &str, root: &str) -> Result<String, String> {
+    if port.parse::<u16>().map_or(true, |p| p == 0) {
+        return Err(format!("LANCACHE_LOG_PORT={port} is no port"));
+    }
+    if !root.starts_with('/') || root.contains(['"', '\n', '\r', '$']) {
+        return Err(format!("SYSLOG_LOG_ROOT={root} is no plain absolute path"));
+    }
+    Ok(format!(
+        r#"@version: current
+options {{ create-dirs(yes); dir-perm(0750); perm(0640); keep-hostname(yes); time-reap(30); }};
+source s_docker {{ network(transport("udp") port({port}) flags(syslog-protocol)); }};
+filter f_named {{ program("^[A-Za-z0-9_-]+$" type(pcre)); }};
+destination d_store {{ file("{root}/${{PROGRAM}}/${{YEAR}}${{MONTH}}${{DAY}}.log" template("${{ISODATE}} ${{HOST}} ${{PROGRAM}}: ${{MSGONLY}}\n")); }};
+log {{ source(s_docker); filter(f_named); destination(d_store); }};
+"#
+    ))
+}
+
+// What: render syslog-ng.conf; the syslog-ng command.
+// Why: state files live in the private run dir.
+fn syslog_ng(ctx: &Ctx) -> Result<Vec<String>, String> {
+    let conf = syslog_ng_conf(
+        &ctx.need("LANCACHE_LOG_PORT")?,
+        &ctx.need("SYSLOG_LOG_ROOT")?,
+    )?;
+    let conf = ctx.render("syslog-ng.conf", &conf)?;
+    let run = |file: &str| ctx.run_dir.join(file).display().to_string();
+    Ok(vec![
+        "syslog-ng".into(),
+        "-F".into(),
+        "--no-caps".into(),
+        "-f".into(),
+        conf,
+        "-R".into(),
+        run("syslog-ng.persist"),
+        "-p".into(),
+        run("syslog-ng.pid"),
+        "-c".into(),
+        run("syslog-ng.ctl"),
+    ])
+}
+
+// What: an IP literal (server) or a name (pool).
+// Why: chrony needs pool for names, server for IPs.
+fn is_ip_literal(entry: &str) -> bool {
+    entry.parse::<std::net::IpAddr>().is_ok()
+}
+
+// What: chrony.conf from upstreams and client CIDRs.
+// Why: NTP never runs alone; no CIDR serves everyone.
+// From: Issue #1683
+fn chrony_conf(upstreams: &str, cidrs: &str, drift: &str) -> Result<String, String> {
+    let plain = |v: &str| {
+        v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || ".:/-_".contains(c))
+    };
+    let servers: Vec<&str> = upstreams.split_whitespace().collect();
+    if servers.is_empty() {
+        return Err("NTP_UPSTREAM_SERVERS is empty; NTP never runs alone".into());
+    }
+    let allowed: Vec<&str> = cidrs.split_whitespace().collect();
+    if let Some(bad) = servers.iter().chain(&allowed).find(|v| !plain(v)) {
+        return Err(format!("NTP value {bad:?} has unsafe characters"));
+    }
+    if !drift.starts_with('/') || !plain(drift) {
+        return Err(format!("NTP_DRIFT_FILE={drift} is no plain absolute path"));
+    }
+    let mut conf = format!("driftfile {drift}\nmakestep 1.0 3\nrtcsync\n");
+    for entry in servers {
+        let kind = if is_ip_literal(entry) {
+            "server"
+        } else {
+            "pool"
+        };
+        conf.push_str(&format!("{kind} {entry} iburst\n"));
+    }
+    if allowed.is_empty() {
+        conf.push_str("allow 0.0.0.0/0\nallow ::/0\n");
+    }
+    for cidr in allowed {
+        conf.push_str(&format!("allow {cidr}\n"));
+    }
+    Ok(conf)
+}
+
+// What: render chrony.conf; chronyd in the foreground.
+// Why: -d keeps it attached and logging to stderr.
+fn chronyd(ctx: &Ctx) -> Result<Vec<String>, String> {
+    let conf = chrony_conf(
+        &ctx.setting("NTP_UPSTREAM_SERVERS").unwrap_or_default(),
+        &ctx.setting("NTP_ALLOWED_CLIENT_CIDRS").unwrap_or_default(),
+        &ctx.need("NTP_DRIFT_FILE")?,
+    )?;
+    let conf = ctx.render("chrony.conf", &conf)?;
+    Ok(vec!["chronyd".into(), "-d".into(), "-f".into(), conf])
+}
+
+// What: one supervised slot and its restart state.
+// Why: the loop converges each slot to wanted state.
+struct Slot {
+    kind: Kind,
+    child: Option<tokio::process::Child>,
+    task: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    started: Option<std::time::Instant>,
+    not_before: std::time::Instant,
+    backoff: Duration,
+    restarts: u32,
+}
+
+impl Slot {
+    // What: true while the program or task is alive.
+    // Why: the status file and healthcheck report it.
+    fn running(&self) -> bool {
+        self.child.is_some() || self.task.as_ref().is_some_and(|t| !t.is_finished())
+    }
+
+    // What: start the program or task once.
+    // Why: a failed start waits out the backoff first.
+    fn start(&mut self, ctx: &Ctx) {
+        let name = self.kind.name();
+        let argv = match self.kind.launch(ctx) {
+            Ok(argv) => argv,
+            Err(e) => return self.failed(&format!("{name}: {e}")),
+        };
+        let task = match self.kind {
+            Kind::Watch => Some(tokio::spawn(TAG.scope("watch", watch()))),
+            Kind::Retention => Some(tokio::spawn(TAG.scope("retention", retention()))),
+            _ => None,
+        };
+        if task.is_none() {
+            match tokio::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .spawn()
+            {
+                Ok(child) => self.child = Some(child),
+                Err(e) => return self.failed(&format!("{name}: cannot start: {e}")),
+            }
+        }
+        self.task = task;
+        self.started = Some(std::time::Instant::now());
+        log(&format!("STARTED {name}"));
+    }
+
+    // What: log a failure and schedule the next start.
+    // Why: the delay doubles up to BACKOFF_MAX.
+    fn failed(&mut self, why: &str) {
+        log_err(&format!(
+            "ERROR: {why}; next start in {}s",
+            self.backoff.as_secs()
+        ));
+        self.not_before = std::time::Instant::now() + self.backoff;
+        self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
+        self.restarts = self.restarts.saturating_add(1);
+    }
+
+    // What: notice an exited program or task.
+    // Why: an exit is a failure; a long run resets backoff.
+    async fn reap(&mut self) {
+        let name = self.kind.name();
+        let ran_long = self.started.is_some_and(|at| at.elapsed() >= BACKOFF_RESET);
+        let exit = if let Some(child) = &mut self.child {
+            match child.try_wait() {
+                Ok(Some(status)) => Some(format!("{name} exited: {status}")),
+                Ok(None) => None,
+                Err(e) => Some(format!("{name}: cannot read exit: {e}")),
+            }
+        } else if let Some(task) = self.task.take_if(|t| t.is_finished()) {
+            Some(match task.await {
+                Ok(Ok(())) => format!("{name} ended"),
+                Ok(Err(e)) => format!("{name}: {e}"),
+                Err(e) => format!("{name} panicked: {e}"),
+            })
+        } else {
+            None
+        };
+        if let Some(why) = exit {
+            self.child = None;
+            if ran_long {
+                self.backoff = Duration::from_secs(1);
+            }
+            self.failed(&why);
+        }
+    }
+
+    // What: stop the program: TERM, wait, then KILL.
+    // Why: a clean stop lets daemons flush their state.
+    async fn stop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if let Some(pid) = child.id() {
+            let _ = tokio::process::Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .status()
+                .await
+                .inspect_err(|e| log_err(&format!("WARNING: kill -TERM {pid}: {e}")));
+        }
+        if tokio::time::timeout(STOP_GRACE, child.wait())
+            .await
+            .is_err()
+        {
+            log_err(&format!(
+                "WARNING: {} ignored TERM; killing",
+                self.kind.name()
+            ));
+            if let Err(e) = child.kill().await {
+                log_err(&format!("WARNING: cannot kill {}: {e}", self.kind.name()));
+            }
+        }
+        log(&format!("STOPPED {}", self.kind.name()));
+    }
+}
+
+// What: the supervisor's report for the healthcheck.
+// Why: the healthcheck runs as its own process.
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+struct SuperviseStatus {
+    updated: u64,
+    // What: wanted programs that are not running now.
+    // Why: one red entry makes the container unhealthy.
+    down: Vec<String>,
+    restarts: HashMap<String, u32>,
+}
+
+// What: the kinds this container runs, in order.
+// Why: an unknown or doubled name fails the start.
+fn kinds(raw: &str) -> Result<Vec<Kind>, String> {
+    let mut out: Vec<Kind> = Vec::new();
+    for name in raw.split_whitespace() {
+        let kind = Kind::from_name(name)
+            .ok_or_else(|| format!("LANCACHE_PROCESSES names unknown {name:?}"))?;
+        if out.contains(&kind) {
+            return Err(format!("LANCACHE_PROCESSES names {name:?} twice"));
+        }
+        out.push(kind);
+    }
+    if out.is_empty() {
+        return Err("LANCACHE_PROCESSES is empty".into());
+    }
+    Ok(out)
+}
+
+// What: keep every wanted program running until TERM.
+// Why: one supervisor per container replaces entrypoints.
+// From: Issue #1683
+async fn supervise() -> Result<(), String> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let need = |key: &str| config::need(&config::process_env, key);
+    let kinds = kinds(&need("LANCACHE_PROCESSES")?)?;
+    let ctx = Ctx {
+        run_dir: PathBuf::from(need("SUPERVISE_RUN_DIR")?),
+        settings_file: PathBuf::from(need("UI_SETTINGS_FILE")?),
+        desired_file: PathBuf::from(need("DESIRED_STATE_FILE")?),
+    };
+    let status_file = ctx.run_dir.join("supervise.json");
+    fs::create_dir_all(&ctx.run_dir)
+        .map_err(|e| format!("cannot create {}: {e}", ctx.run_dir.display()))?;
+    let mut term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
+    let mut int = signal(SignalKind::interrupt()).map_err(|e| e.to_string())?;
+    let now = std::time::Instant::now();
+    let mut slots: Vec<Slot> = kinds
+        .into_iter()
+        .map(|kind| Slot {
+            kind,
+            child: None,
+            task: None,
+            started: None,
+            not_before: now,
+            backoff: Duration::from_secs(1),
+            restarts: 0,
+        })
+        .collect();
+    let names: Vec<&str> = slots.iter().map(|s| s.kind.name()).collect();
+    log(&format!("Supervisor started: {}", names.join(" ")));
+    loop {
+        let mut status = SuperviseStatus {
+            updated: unix_secs(),
+            ..SuperviseStatus::default()
+        };
+        for slot in &mut slots {
+            slot.reap().await;
+            let wanted = slot.kind.wanted(&ctx);
+            if wanted && !slot.running() && std::time::Instant::now() >= slot.not_before {
+                slot.start(&ctx);
+            } else if !wanted && slot.running() {
+                slot.stop().await;
+            }
+            if wanted && !slot.running() {
+                status.down.push(slot.kind.name().to_string());
+            }
+            status
+                .restarts
+                .insert(slot.kind.name().to_string(), slot.restarts);
+        }
+        let body = serde_json::to_vec(&status).expect("SuperviseStatus serializes");
+        if let Err(e) = write_file(&status_file, &body, 0o644, Place::Replace) {
+            log_err(&format!(
+                "WARNING: cannot write {}: {e}",
+                status_file.display()
+            ));
+        }
+        tokio::select! {
+            _ = term.recv() => break,
+            _ = int.recv() => break,
+            () = tokio::time::sleep(TICK) => {}
+        }
+    }
+    log("TERM received; stopping all programs");
+    for slot in &mut slots {
+        slot.stop().await;
+    }
+    Ok(())
+}
+
+// What: healthy when the supervisor is fresh and all up.
+// Why: Docker health then covers every program inside.
+// From: Issue #1683
+fn healthcheck() -> Result<(), String> {
+    let dir = config::need(&config::process_env, "SUPERVISE_RUN_DIR")?;
+    let path = Path::new(&dir).join("supervise.json");
+    let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let status: SuperviseStatus =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    health_verdict(&status, unix_secs())
+}
+
+// What: the verdict for one status at one time.
+// Why: pure, so tests feed it any status and clock.
+fn health_verdict(status: &SuperviseStatus, now: u64) -> Result<(), String> {
+    let age = now.saturating_sub(status.updated);
+    if age > STATUS_MAX_AGE {
+        return Err(format!("supervisor status is {age}s old"));
+    }
+    if !status.down.is_empty() {
+        return Err(format!("not running: {}", status.down.join(" ")));
+    }
+    Ok(())
+}
+
+// What: supervise (default) or healthcheck.
+// Why: one binary per container, two entry points.
+// From: Issue #1683
+#[tokio::main]
+async fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let result = match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        [] | ["supervise"] => TAG.scope("supervise", supervise()).await,
+        ["healthcheck"] => healthcheck(),
+        _ => Err("usage: lancache-watchdog [supervise|healthcheck]".to_string()),
+    };
+    if let Err(e) = result {
+        log_err(&format!("FATAL: {e}"));
+        std::process::exit(1);
     }
 }
 
@@ -1147,12 +1436,6 @@ mod tests {
         format!("/{}/{}", gen_name(), gen_name())
     }
 
-    // What: a fresh boolean in the env grammar.
-    // Why: gates must hold for either value.
-    fn gen_flag() -> bool {
-        rnd(0, 1) == 1
-    }
-
     // What: the value one generated env holds for key.
     // Why: assertions compare with what was loaded.
     fn value<'a>(env: &'a [(&str, String)], key: &str) -> &'a str {
@@ -1182,25 +1465,17 @@ mod tests {
     // Why: Rust keeps no defaults; every load needs them.
     fn base_env() -> Vec<(&'static str, String)> {
         let warn = rnd(0, u64::from(u32::MAX) - 1);
-        let mode = DhcpMode::ALL[rnd(0, DhcpMode::ALL.len() as u64 - 1) as usize];
         vec![
-            (
-                "DOCKER_PROXY_URL",
-                format!("http://{}:{}", gen_name(), rnd(1, u16::MAX.into())),
-            ),
+            ("DOCKER_HOST", format!("unix://{}", gen_path())),
             ("CHECK_INTERVAL", rnd(1, DAY).to_string()),
             ("RESTART_AFTER", rnd(1, u32::MAX.into()).to_string()),
             ("DISK_WARN_PCT", warn.to_string()),
             ("DISK_ALARM_PCT", rnd(warn + 1, u32::MAX.into()).to_string()),
-            ("CURL_MAX_TIME", rnd(1, DAY).to_string()),
-            ("CURL_MAX_TIME_RESTART", rnd(1, DAY).to_string()),
+            ("DOCKER_API_TIMEOUT", rnd(1, DAY).to_string()),
+            ("DOCKER_RESTART_TIMEOUT", rnd(1, DAY).to_string()),
             ("CACHE_DIR", gen_path()),
             ("STATUS_FILE", gen_path()),
-            ("DESIRED_STATE_FILE", gen_path()),
-            ("SSL_ENABLED", gen_flag().to_string()),
-            ("DHCP_MODE", mode.as_str().to_string()),
-            ("LOGGING_ENABLED", gen_flag().to_string()),
-            ("NTP_ENABLED", gen_flag().to_string()),
+            ("HOSTNAME", gen_name()),
         ]
     }
 
@@ -1232,22 +1507,33 @@ mod tests {
             )
         );
         assert_eq!(
-            (s.curl_max_time, s.curl_max_time_restart),
+            (s.api_timeout, s.restart_timeout),
             (
-                Some(Duration::from_secs(num("CURL_MAX_TIME"))),
-                Some(Duration::from_secs(num("CURL_MAX_TIME_RESTART")))
+                Some(Duration::from_secs(num("DOCKER_API_TIMEOUT"))),
+                Some(Duration::from_secs(num("DOCKER_RESTART_TIMEOUT")))
             )
         );
         assert_eq!(s.cache_dir, PathBuf::from(value(&env, "CACHE_DIR")));
+        assert_eq!(s.docker_host, value(&env, "DOCKER_HOST"));
+        assert_eq!(s.own_id, value(&env, "HOSTNAME"));
 
         let interval = "0".repeat(rnd(1, u8::MAX.into()) as usize);
         let restart = "0".repeat(rnd(1, u8::MAX.into()) as usize);
-        let floored = [("CHECK_INTERVAL", interval.as_str()), ("RESTART_AFTER", restart.as_str())];
+        let floored = [
+            ("CHECK_INTERVAL", interval.as_str()),
+            ("RESTART_AFTER", restart.as_str()),
+        ];
         let (s, warnings) = load_settings(reader(&env, &floored)).expect("floored");
-        assert_eq!((s.check_interval, s.restart_after), (Duration::from_secs(1), 1));
+        assert_eq!(
+            (s.check_interval, s.restart_after),
+            (Duration::from_secs(1), 1)
+        );
         for (key, raw) in floored {
             let want = format!("{key}={raw}");
-            assert!(warnings.iter().any(|w| w.contains(&want)), "{want}: {warnings:?}");
+            assert!(
+                warnings.iter().any(|w| w.contains(&want)),
+                "{want}: {warnings:?}"
+            );
         }
 
         let junk = gen_name();
@@ -1259,27 +1545,34 @@ mod tests {
             ("DISK_WARN_PCT", negative.as_str()),
             ("DISK_ALARM_PCT", ""),
         ] {
-            let err = load_settings(reader(&env, &[(name, bad)])).err().expect("fails");
+            let err = load_settings(reader(&env, &[(name, bad)]))
+                .err()
+                .expect("fails");
             assert!(err.contains(name), "{name}={bad}: {err}");
         }
     }
 
-    // What: curl timeouts keep fractions; 0 is unbounded.
+    // What: API timeouts keep fractions; 0 is unbounded.
     // Why: 0 must not time out at once; junk is fatal.
     #[test]
-    fn curl_timeouts_handle_zero_fractions_and_junk() {
+    fn api_timeouts_handle_zero_fractions_and_junk() {
         let fraction = format!("{}.{}", rnd(0, DAY), rnd(1, u32::MAX.into()));
-        let pairs = [("CURL_MAX_TIME", "0"), ("CURL_MAX_TIME_RESTART", fraction.as_str())];
+        let pairs = [
+            ("DOCKER_API_TIMEOUT", "0"),
+            ("DOCKER_RESTART_TIMEOUT", fraction.as_str()),
+        ];
         let (s, warnings) = load(&pairs).expect("settings");
         let secs: f64 = fraction.parse().expect("number");
-        assert_eq!(s.curl_max_time, None);
-        assert_eq!(s.curl_max_time_restart, Some(Duration::from_secs_f64(secs)));
+        assert_eq!(s.api_timeout, None);
+        assert_eq!(s.restart_timeout, Some(Duration::from_secs_f64(secs)));
         assert!(warnings.is_empty(), "{warnings:?}");
         let overflow = format!("1e{}", rnd((f64::MAX_10_EXP + 1) as u64, u16::MAX.into()));
         let negative = format!("-{fraction}");
         for bad in [gen_name(), negative, overflow, String::new()] {
-            let err = load(&[("CURL_MAX_TIME", bad.as_str())]).err().expect("fails");
-            assert!(err.contains("CURL_MAX_TIME"), "{bad}: {err}");
+            let err = load(&[("DOCKER_API_TIMEOUT", bad.as_str())])
+                .err()
+                .expect("fails");
+            assert!(err.contains("DOCKER_API_TIMEOUT"), "{bad}: {err}");
         }
     }
 
@@ -1289,42 +1582,11 @@ mod tests {
     fn missing_or_junk_owner_values_are_fatal() {
         let env = base_env();
         for (var, _) in &env {
-            let err = load_settings(reader(&env, &[(*var, "")])).err().expect("fails");
+            let err = load_settings(reader(&env, &[(*var, "")]))
+                .err()
+                .expect("fails");
             assert!(err.contains(var), "{var}: {err}");
         }
-        for var in ["SSL_ENABLED", "LOGGING_ENABLED", "NTP_ENABLED"] {
-            assert!(load(&[(var, gen_name().as_str())]).is_err(), "{var}");
-        }
-    }
-
-    // What: renamed containers and split cache dirs fail.
-    // Why: the proxy allowlist has fixed names; no guess.
-    // From: Issue #849
-    #[test]
-    fn renames_and_conflicting_cache_dirs_are_fatal() {
-        let vars = [
-            "CONTAINER_PROXY",
-            "CONTAINER_DNS_STANDARD",
-            "CONTAINER_DNS_SSL",
-            "CONTAINER_NATS",
-        ];
-        let ssl = [("SSL_ENABLED", "true")];
-        for var in vars {
-            let renamed = gen_name();
-            assert!(load(&[(var, renamed.as_str()), ssl[0]]).is_err(), "{var}");
-        }
-        assert!(load(&[("CONTAINER_PROXY", config::CONTAINER_PROXY)]).is_ok());
-        let other = gen_name();
-        let off = [("SSL_ENABLED", "false"), ("CONTAINER_DNS_SSL", other.as_str())];
-        assert!(load(&off).is_ok());
-        let (a, b, c) = (gen_path(), gen_path(), gen_path());
-        let split = [("CACHE_DIR", ""), ("CACHE_DIR_STANDARD", b.as_str()), ("CACHE_DIR_SSL", c.as_str())];
-        let err = load(&split).err().expect("fails");
-        assert!(err.contains(&b) && err.contains(&c), "{err}");
-        let (s, _) = load(&[("CACHE_DIR", a.as_str()), ("CACHE_DIR_SSL", c.as_str())]).expect("settings");
-        assert_eq!(s.cache_dir, PathBuf::from(&a));
-        let (s, _) = load(&[("CACHE_DIR", ""), ("CACHE_DIR_SSL", c.as_str())]).expect("settings");
-        assert_eq!(s.cache_dir, PathBuf::from(&c));
     }
 
     // What: inspect bodies map to readings and colors.
@@ -1398,66 +1660,132 @@ mod tests {
         assert_eq!(counter.observe_alert(true), Event::None);
     }
 
-    // What: targets follow the SSL, DHCP, log, NTP gates.
-    // Why: a gated service that is off must raise no alarm.
-    // From: Issue #842
+    // What: list entries yield name and compose service.
+    // Why: an entry without labels must be skipped.
+    // From: Issue #1683
     #[test]
-    fn targets_follow_the_gates() {
-        let names = |pairs: &[(&str, &str)]| {
-            let (s, _) = load(pairs).expect("settings");
-            targets(&s).into_iter().map(|t| t.0).collect::<Vec<_>>()
-        };
-        let off = [
-            ("SSL_ENABLED", "true"),
-            ("DHCP_MODE", DhcpMode::Disabled.as_str()),
-            ("LOGGING_ENABLED", "false"),
-            ("NTP_ENABLED", "false"),
-        ];
-        let base = [
-            config::CONTAINER_PROXY,
-            config::CONTAINER_DNS_STANDARD,
-            config::CONTAINER_DNS_SSL,
-            config::CONTAINER_NATS,
-            config::CONTAINER_NETDATA,
-            config::CONTAINER_DOCKER_SOCKET_PROXY,
-            config::CONTAINER_UI,
-        ];
-        assert_eq!(names(&off), base);
-        let no_ssl = [("SSL_ENABLED", "false"), off[1], off[2], off[3]];
-        assert!(!names(&no_ssl).contains(&config::CONTAINER_DNS_SSL));
-        for mode in DhcpMode::ALL {
-            let all = [
-                off[0],
-                ("DHCP_MODE", mode.as_str()),
-                ("LOGGING_ENABLED", "true"),
-                ("NTP_ENABLED", "true"),
-            ];
-            let tail = names(&all).split_off(base.len());
-            let want: Vec<&str> = mode
-                .container()
-                .into_iter()
-                .chain([config::CONTAINER_SYSLOG, config::CONTAINER_NTP])
-                .collect();
-            assert_eq!(tail, want, "{}", mode.as_str());
-        }
+    fn list_entries_yield_name_and_service() {
+        let (name, service) = (gen_name(), gen_name());
+        let entry = serde_json::json!({
+            "Names": [format!("/{name}")],
+            "Labels": {COMPOSE_SERVICE_LABEL: service},
+        });
+        assert_eq!(listed(&entry), Some((name.clone(), service)));
+        let bare = serde_json::json!({"Names": [format!("/{name}")]});
+        assert_eq!(listed(&bare), None);
+        assert_eq!(container_name(&format!("/{name}")), name);
     }
 
-    // What: the reconcile step per wanted and running pair.
-    // Why: a wrong pair would stop DHCP or NTP by mistake.
-    // From: Issue #1437
+    // What: LANCACHE_PROCESSES parses, refuses junk.
+    // Why: an unknown or doubled name is a build error.
+    // From: Issue #1683
     #[test]
-    fn reconcile_acts_only_on_a_difference() {
-        use DesiredRunState::{Running, Stopped};
-        assert_eq!(
-            reconcile_step(Running, false),
-            Some(("start", "STARTING", "running"))
+    fn process_lists_parse_and_refuse_junk() {
+        let all = [
+            Kind::Watch,
+            Kind::Retention,
+            Kind::SyslogNg,
+            Kind::Chronyd,
+            Kind::Netdata,
+        ];
+        let text: Vec<&str> = all.iter().map(|k| k.name()).collect();
+        assert_eq!(kinds(&text.join(" ")).expect("kinds"), all);
+        assert!(kinds("").is_err());
+        assert!(kinds(&gen_name()).is_err());
+        assert!(kinds("watch watch").is_err());
+    }
+
+    // What: chrony.conf has the pools, servers, allows.
+    // Why: no upstream or an unsafe value must not start.
+    // From: Issue #1683
+    #[test]
+    fn chrony_conf_lists_upstreams_and_clients() {
+        let (pool, drift) = (format!("{}.example", gen_name()), gen_path());
+        let ip = format!("192.0.2.{}", rnd(1, 254));
+        let cidr = format!("10.{}.0.0/16", rnd(0, 255));
+        let conf = chrony_conf(&format!("{pool} {ip}"), &cidr, &drift).expect("conf");
+        assert!(conf.contains(&format!("pool {pool} iburst\n")), "{conf}");
+        assert!(conf.contains(&format!("server {ip} iburst\n")), "{conf}");
+        assert!(conf.contains(&format!("allow {cidr}\n")), "{conf}");
+        assert!(conf.contains(&format!("driftfile {drift}\n")), "{conf}");
+        let open = chrony_conf(&pool, "", &drift).expect("conf");
+        assert!(open.contains("allow 0.0.0.0/0\n") && open.contains("allow ::/0\n"));
+        assert!(chrony_conf(" ", "", &drift).is_err());
+        assert!(chrony_conf(&format!("{pool};allow"), "", &drift).is_err());
+        assert!(chrony_conf(&pool, "", &gen_name()).is_err());
+    }
+
+    // What: syslog-ng.conf takes a port and a root path.
+    // Why: a junk port or path must not reach the config.
+    // From: Issue #1683
+    #[test]
+    fn syslog_ng_conf_takes_a_port_and_a_root() {
+        let (port, root) = (rnd(1, u16::MAX.into()).to_string(), gen_path());
+        let conf = syslog_ng_conf(&port, &root).expect("conf");
+        assert!(conf.contains(&format!("port({port})")), "{conf}");
+        assert!(
+            conf.contains(&format!("file(\"{root}/${{PROGRAM}}/")),
+            "{conf}"
         );
-        assert_eq!(
-            reconcile_step(Stopped, true),
-            Some(("stop", "STOPPING", "stopped"))
+        assert!(syslog_ng_conf("0", &root).is_err());
+        assert!(syslog_ng_conf(&gen_name(), &root).is_err());
+        assert!(syslog_ng_conf(&port, &gen_name()).is_err());
+        assert!(syslog_ng_conf(&port, &format!("{root}\"")).is_err());
+    }
+
+    // What: chronyd follows the saved flag and the dock.
+    // Why: the ui is dumb; the supervisor converges NTP.
+    // From: Issue #1437 | Issue #1683
+    #[test]
+    fn chronyd_follows_the_setting_and_desired_state() {
+        let root = scratch();
+        let ctx = Ctx {
+            run_dir: root.join(gen_name()),
+            settings_file: root.join(gen_name()),
+            desired_file: root.join(gen_name()),
+        };
+        let set = |on: bool, desired: &str| {
+            fs::write(
+                &ctx.settings_file,
+                format!("NTP_ENABLED={}\n", u8::from(on)),
+            )
+            .expect("settings");
+            fs::write(&ctx.desired_file, desired).expect("desired");
+            Kind::Chronyd.wanted(&ctx)
+        };
+        assert!(set(true, "{}"));
+        assert!(set(true, r#"{"ntp":"running"}"#));
+        assert!(!set(true, r#"{"ntp":"stopped"}"#));
+        assert!(!set(false, r#"{"ntp":"running"}"#));
+        assert!(Kind::SyslogNg.wanted(&ctx) && Kind::Netdata.wanted(&ctx));
+    }
+
+    // What: health is red when stale or a program is down.
+    // Why: Docker health must cover every program inside.
+    // From: Issue #1683
+    #[test]
+    fn health_needs_a_fresh_status_and_no_program_down() {
+        let now = rnd(STATUS_MAX_AGE + 1, DAY);
+        let fresh = SuperviseStatus {
+            updated: now - rnd(0, STATUS_MAX_AGE),
+            ..SuperviseStatus::default()
+        };
+        assert!(health_verdict(&fresh, now).is_ok());
+        let stale = SuperviseStatus {
+            updated: now - STATUS_MAX_AGE - 1,
+            ..SuperviseStatus::default()
+        };
+        assert!(health_verdict(&stale, now).is_err());
+        let name = gen_name();
+        let down = SuperviseStatus {
+            down: vec![name.clone()],
+            ..fresh
+        };
+        assert!(
+            health_verdict(&down, now)
+                .expect_err("down")
+                .contains(&name)
         );
-        assert_eq!(reconcile_step(Running, true), None);
-        assert_eq!(reconcile_step(Stopped, false), None);
     }
 
     // What: disk colors follow the warn and alarm limits.
@@ -1499,15 +1827,15 @@ mod tests {
         assert_eq!(stamp(at), want);
     }
 
-    // What: curl timeouts refuse inf, NaN, negatives.
+    // What: API timeouts refuse inf, NaN, negatives.
     // Why: only a finite positive number is a real limit.
     #[test]
-    fn curl_timeout_refuses_non_finite_and_negative_numbers() {
+    fn api_timeout_refuses_non_finite_and_negative_numbers() {
         let negative = format!("-{}.{}", rnd(0, DAY), rnd(1, u32::MAX.into()));
         for bad in ["inf", "NaN", negative.as_str()] {
             assert_eq!(
-                curl_timeout(Some(bad), "CURL_MAX_TIME"),
-                Err(format!("FATAL: invalid CURL_MAX_TIME={bad}."))
+                api_timeout(Some(bad), "DOCKER_API_TIMEOUT"),
+                Err(format!("FATAL: invalid DOCKER_API_TIMEOUT={bad}."))
             );
         }
     }
@@ -1560,7 +1888,10 @@ mod tests {
         );
         assert_eq!(r.purge_stamp, PathBuf::from(value(&env, "PURGE_STAMP")));
         for (key, _) in &env {
-            assert!(load_retention(reader(&env, &[(*key, "")])).is_err(), "{key} blank");
+            assert!(
+                load_retention(reader(&env, &[(*key, "")])).is_err(),
+                "{key} blank"
+            );
         }
         let (junk, relative) = (gen_name(), format!("{}/{}", gen_name(), gen_name()));
         let bad = [
@@ -1570,11 +1901,17 @@ mod tests {
             ("PURGE_STAMP", relative.as_str()),
         ];
         for (key, raw) in bad {
-            assert!(load_retention(reader(&env, &[(key, raw)])).is_err(), "{key}={raw}");
+            assert!(
+                load_retention(reader(&env, &[(key, raw)])).is_err(),
+                "{key}={raw}"
+            );
         }
         let above = (config::SYSLOG_MAX_GB.max + rnd(1, DAY)).to_string();
         let long = (DAY + rnd(1, DAY)).to_string();
-        let high = [("SYSLOG_MAX_GB", above.as_str()), ("SYSLOG_PRUNE_RETRY_COOLDOWN", long.as_str())];
+        let high = [
+            ("SYSLOG_MAX_GB", above.as_str()),
+            ("SYSLOG_PRUNE_RETRY_COOLDOWN", long.as_str()),
+        ];
         let (r, warnings) = load_retention(reader(&env, &high)).expect("clamped");
         assert_eq!(
             (r.syslog_max_bytes, r.syslog_cooldown),
@@ -1653,27 +1990,48 @@ mod tests {
         std::os::unix::fs::symlink(&outside, &escape).expect("symlink");
         std::os::unix::fs::symlink(root.join(gen_name()), &dangling).expect("symlink");
         let at = |p: &Path| p.display().to_string();
-        let back = format!("{}/{sub}/../../{}", at(&real), real.file_name().unwrap().to_string_lossy());
+        let back = format!(
+            "{}/{sub}/../../{}",
+            at(&real),
+            real.file_name().unwrap().to_string_lossy()
+        );
         let ok = [
             (at(&real), real.clone()),
             (at(&prefix.join(&missing)), prefix.join(&missing)),
             (back, real.clone()),
         ];
         for (raw, want) in ok {
-            assert_eq!(retention_target("CACHE_DIR", &raw, &prefix), Ok(want), "{raw}");
+            assert_eq!(
+                retention_target("CACHE_DIR", &raw, &prefix),
+                Ok(want),
+                "{raw}"
+            );
         }
         let bad = [
             (String::new(), "is empty"),
-            (format!("{}/{}", gen_name(), gen_name()), "is not an absolute path"),
+            (
+                format!("{}/{}", gen_name(), gen_name()),
+                "is not an absolute path",
+            ),
             (at(&outside), "outside the expected"),
-            (format!("{}/../../{}", at(&real), outside.file_name().unwrap().to_string_lossy()), "outside the expected"),
+            (
+                format!(
+                    "{}/../../{}",
+                    at(&real),
+                    outside.file_name().unwrap().to_string_lossy()
+                ),
+                "outside the expected",
+            ),
             (at(&escape.join(gen_name())), "outside the expected"),
             (at(&dangling.join(gen_name())), "could not be canonicalized"),
             (at(&prefix), "itself, not a subdirectory"),
         ];
         for (raw, want) in bad {
             let got = retention_target("CACHE_DIR", &raw, &prefix);
-            assert!(got.as_ref().is_err_and(|e| e.contains(want)), "{raw}: {got:?}");
+            assert!(
+                got.as_ref().is_err_and(|e| e.contains(want)),
+                "{raw}: {got:?}"
+            );
         }
     }
 
@@ -1704,7 +2062,11 @@ mod tests {
         let new = dir.join(gen_name()).join(gen_name());
         let (days, now) = (r.cache_valid_days, unix_secs());
         file_at(&old, rnd(1, u8::MAX.into()), now - past(days));
-        file_at(&new, rnd(1, u8::MAX.into()), now - days * DAY - rnd(0, DAY - 1));
+        file_at(
+            &new,
+            rnd(1, u8::MAX.into()),
+            now - days * DAY - rnd(0, DAY - 1),
+        );
         purge_cache(&r, now);
         assert!(!old.exists() && new.exists(), "wrong files purged");
         assert_eq!(stamp_of(&r.purge_stamp), now);
@@ -1741,12 +2103,19 @@ mod tests {
         file_at(&newer, newer_len, newer_at);
         file_at(&older, older_len, newer_at - rnd(1, quarter));
         prune_syslog(&r, now);
-        assert!(!aged.exists() && !older.exists(), "floor or budget not applied");
+        assert!(
+            !aged.exists() && !older.exists(),
+            "floor or budget not applied"
+        );
         assert!(live.exists() && newer.exists(), "pruned beyond the budget");
         assert_eq!(stamp_of(&r.syslog_stamp), now);
         fs::remove_file(&newer).expect("remove");
         let later = now + DAY + rnd(0, DAY);
-        file_at(&live, budget + rnd(1, budget), rnd(later - later % DAY, later));
+        file_at(
+            &live,
+            budget + rnd(1, budget),
+            rnd(later - later % DAY, later),
+        );
         prune_syslog(&r, later);
         assert!(live.exists(), "the file written today was pruned");
         assert_eq!(stamp_of(&r.syslog_stamp), later + r.syslog_cooldown - DAY);
