@@ -21,27 +21,54 @@ services:
   services:
     container_name: LanCache-NG-services
     image: ${LANCACHE_IMAGE_REF_SERVICES:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/services:${LANCACHE_IMAGE_TAG:-latest}}
-    # What: tracked defaults, then untracked overrides
-    # Why: overrides in *.local.env keep git pulls clean
-    # From: Issue #1683 | PR #1858
-    env_file:
-      - ../../config/prod/watchdog.env
-      - path: ../../config/prod/watchdog.local.env
-        required: false
-      - ../../config/prod/ntp.env
-      - path: ../../config/prod/ntp.local.env
-        required: false
-      - ../../config/prod/cachehamster.env
-      - path: ../../config/prod/cachehamster.local.env
-        required: false
+    # What: tini as PID 1 reaps the supervisor's children.
+    # Why: lancache-watchdog supervise is no init process.
+    # From: Issue #1683
+    init: true
     environment:
+      # What: operator values from the one .env file.
+      # Why: no config/prod defaults; .env is the one owner.
+      # From: Issue #1683
       - LANCACHE_LOG_PORT=${LANCACHE_LOG_PORT:?LANCACHE_LOG_PORT is required}
-      - SSL_ENABLED=${SSL_ENABLED:-1}
       - NTP_ENABLED=${NTP_ENABLED:-0}
+      - NTP_UPSTREAM_SERVERS=${NTP_UPSTREAM_SERVERS:?NTP_UPSTREAM_SERVERS is required}
+      - NTP_ALLOWED_CLIENT_CIDRS=${NTP_ALLOWED_CLIENT_CIDRS:-}
       - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:?SYSLOG_MAX_GB is required}
       - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:?SYSLOG_RETENTION_DAYS is required}
+      - SYSLOG_PRUNE_RETRY_COOLDOWN=${SYSLOG_PRUNE_RETRY_COOLDOWN:?SYSLOG_PRUNE_RETRY_COOLDOWN is required}
+      - CACHE_VALID_DAYS=${CACHE_VALID_DAYS:?CACHE_VALID_DAYS is required}
+      - CHECK_INTERVAL=${CHECK_INTERVAL:?CHECK_INTERVAL is required}
+      - RESTART_AFTER=${RESTART_AFTER:?RESTART_AFTER is required}
+      - DISK_WARN_PCT=${DISK_WARN_PCT:?DISK_WARN_PCT is required}
+      - DISK_ALARM_PCT=${DISK_ALARM_PCT:?DISK_ALARM_PCT is required}
+      - DOCKER_API_TIMEOUT=${DOCKER_API_TIMEOUT:?DOCKER_API_TIMEOUT is required}
+      - DOCKER_RESTART_TIMEOUT=${DOCKER_RESTART_TIMEOUT:?DOCKER_RESTART_TIMEOUT is required}
       - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
+      - CACHEHAMSTER_CREDENTIAL_PERSISTENCE=${CACHEHAMSTER_CREDENTIAL_PERSISTENCE:-}
+      - CACHEHAMSTER_STEAM_CREDENTIAL=${CACHEHAMSTER_STEAM_CREDENTIAL:-}
+      - CACHEHAMSTER_URLS=${CACHEHAMSTER_URLS:-}
+      - CACHEHAMSTER_CONCURRENCY=${CACHEHAMSTER_CONCURRENCY:?CACHEHAMSTER_CONCURRENCY is required}
+      # What: paths inside the mounts listed below.
+      # Why: the mount and its path have one owner here.
+      # From: Issue #1683
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - SUPERVISE_RUN_DIR=/run/lancache
+      - STATUS_FILE=/var/run/watchdog/status.json
+      - DESIRED_STATE_FILE=/data/desired-state.json
+      - UI_SETTINGS_FILE=/data/lancache-ui-settings.env
+      - CACHE_DIR=/var/cache/lancache
+      - CACHE_DIR_ALLOWED_PREFIX=/var/cache
+      - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
+      - SYSLOG_LOG_ROOT_ALLOWED_PREFIX=/var/log
+      - PURGE_STAMP=/var/lib/lancache-retention-state/purge.stamp
+      - SYSLOG_PRUNE_STAMP=/var/lib/lancache-retention-state/syslog-prune.stamp
+      - NTP_DRIFT_FILE=/var/lib/chrony/drift
       - CACHEHAMSTER_DATA_DIR=/var/lib/lancache-cachehamster
+    # What: rendered syslog-ng, chrony and status files.
+    # Why: each start renders fresh; nothing survives.
+    # From: Issue #1683
+    tmpfs:
+      - /run/lancache
     # What: the log input on loopback; NTP for the LAN.
     # Why: only the local Docker daemon may send log lines.
     # From: Issue #1683
@@ -97,18 +124,15 @@ services:
   proxy:
     container_name: LanCache-NG-proxy
     image: ${LANCACHE_IMAGE_REF_PROXY:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/proxy:${LANCACHE_IMAGE_TAG:-latest}}
-    env_file:
-      - ../../config/prod/proxy.env
-      - path: ../../config/prod/proxy.local.env
-        required: false
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:?KEEP_KNOWN_GOOD_CONFIGS is required}
       - IP_STANDARD=${IP_STANDARD}
       - IP_SSL=${IP_SSL}
       - SSL_ENABLED=${SSL_ENABLED:-1}
       # What: per-install values from the operator .env
-      # Why: one owner; config/prod holds service defaults
-      # From: Issue #1683 | PR #1858
+      # Why: one owner; no config/prod defaults any more
+      # From: Issue #1683
+      - CACHE_MIN_FREE=${CACHE_MIN_FREE:?CACHE_MIN_FREE is required}
       - CACHE_MAX_SIZE=${CACHE_MAX_SIZE:?CACHE_MAX_SIZE is required}
       - CACHE_MEM_MB=${CACHE_MEM_MB:?CACHE_MEM_MB is required}
       - CACHE_SLICE_SIZE=${CACHE_SLICE_SIZE:?CACHE_SLICE_SIZE is required}
@@ -145,12 +169,13 @@ services:
   dns:
     container_name: LanCache-NG-dns
     image: ${LANCACHE_IMAGE_REF_DNS:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}}
-    env_file:
-      - ../../config/prod/dns-standard.env
-      - path: ../../config/prod/dns-standard.local.env
-        required: false
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:?KEEP_KNOWN_GOOD_CONFIGS is required}
+      - LOG_QUERIES=${LOG_QUERIES:?LOG_QUERIES is required}
+      - ROOT_ZONE_MIRROR=${ROOT_ZONE_MIRROR:?ROOT_ZONE_MIRROR is required}
+      - PDNS_SOA_REFRESH=${PDNS_SOA_REFRESH:?PDNS_SOA_REFRESH is required}
+      - PDNS_SOA_RETRY=${PDNS_SOA_RETRY:?PDNS_SOA_RETRY is required}
+      - PDNS_SOA_RESYNC_INTERVAL=${PDNS_SOA_RESYNC_INTERVAL:?PDNS_SOA_RESYNC_INTERVAL is required}
       - PROXY_IP=${IP_STANDARD:?IP_STANDARD is required}
       - PROXY_HTTPS_IP=${IP_SSL:?IP_SSL is required}
       - DNS_HTTPS_LISTEN_PORT=1053
@@ -218,12 +243,16 @@ services:
   dhcp:
     container_name: LanCache-NG-dhcp
     image: ${LANCACHE_IMAGE_REF_DHCP:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp:${LANCACHE_IMAGE_TAG:-latest}}
-    env_file:
-      - ../../config/prod/dhcp.env
-      - path: ../../config/prod/dhcp.local.env
-        required: false
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:?KEEP_KNOWN_GOOD_CONFIGS is required}
+      - DHCP_DOMAIN=${DHCP_DOMAIN:?DHCP_DOMAIN is required}
+      - DHCP_LEASE_TIME=${DHCP_LEASE_TIME:?DHCP_LEASE_TIME is required}
+      - DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS:-}
+      - DHCP_DDNS_ENABLED=${DHCP_DDNS_ENABLED:?DHCP_DDNS_ENABLED is required}
+      # What: Kea Control Agent API bind address.
+      # Why: entrypoint fences it to loopback and Docker nets.
+      # From: Issue #1683 | PR #1858
+      - KEA_CTRL_HOST=0.0.0.0
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - DHCP_DNS_SERVER_IP=${IP_STANDARD}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
@@ -272,12 +301,10 @@ services:
   ui:
     container_name: LanCache-NG-ui
     image: ${LANCACHE_IMAGE_REF_UI:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}}
-    env_file:
-      - ../../config/prod/ntp.env
-      - path: ../../config/prod/ntp.local.env
-        required: false
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:?KEEP_KNOWN_GOOD_CONFIGS is required}
+      - NTP_UPSTREAM_SERVERS=${NTP_UPSTREAM_SERVERS:?NTP_UPSTREAM_SERVERS is required}
+      - NTP_ALLOWED_CLIENT_CIDRS=${NTP_ALLOWED_CLIENT_CIDRS:-}
       - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
       - WATCHDOG_STATUS_FILE=/var/run/watchdog/status.json
       - DESIRED_STATE_FILE=/data/desired-state.json

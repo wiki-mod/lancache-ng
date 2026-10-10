@@ -2151,12 +2151,19 @@ set_env_defaults_if_empty_or_missing() {
 # From: Issue #1683 | PR #1858
 set_template_owned_env_defaults() {
     set_env_defaults_if_empty_or_missing "$1" CACHE_SLICE_SIZE CACHE_VALID_HIT CACHE_VALID_ANY \
-        CACHE_INACTIVE NGINX_UPSTREAM_RESOLVER PROXY_SECURITY_MODE KEA_CONFIG_SNAPSHOT_DIR
-    append_env_defaults_if_missing "$1" PROXY_ALLOWED_CLIENT_CIDRS
+        CACHE_INACTIVE NGINX_UPSTREAM_RESOLVER PROXY_SECURITY_MODE KEA_CONFIG_SNAPSHOT_DIR \
+        KEEP_KNOWN_GOOD_CONFIGS CACHE_MIN_FREE LANCACHE_LOG_PORT SYSLOG_MAX_GB SYSLOG_RETENTION_DAYS \
+        SYSLOG_PRUNE_RETRY_COOLDOWN DHCP_DOMAIN DHCP_LEASE_TIME DHCP_DDNS_ENABLED LOG_QUERIES \
+        ROOT_ZONE_MIRROR PDNS_SOA_REFRESH PDNS_SOA_RETRY PDNS_SOA_RESYNC_INTERVAL NTP_UPSTREAM_SERVERS \
+        CHECK_INTERVAL RESTART_AFTER DISK_WARN_PCT DISK_ALARM_PCT DOCKER_API_TIMEOUT \
+        DOCKER_RESTART_TIMEOUT CACHE_VALID_DAYS CACHEHAMSTER_CONCURRENCY
+    append_env_defaults_if_missing "$1" PROXY_ALLOWED_CLIENT_CIDRS NTP_ALLOWED_CLIENT_CIDRS \
+        DHCP_NTP_SERVERS CACHEHAMSTER_CREDENTIAL_PERSISTENCE CACHEHAMSTER_STEAM_CREDENTIAL \
+        CACHEHAMSTER_URLS
 }
 
 # What: "svc KEY [TARGET]" rows moved out of config/prod
-# Why: compose maps these per service from the .env now
+# Why: config/prod is gone; .env is the one value owner
 # From: Issue #1683 | PR #1858
 config_prod_moved_keys() {
     printf '%s\n' 'dns-standard PROXY_IP IP_STANDARD' 'dns-ssl PROXY_IP IP_SSL' 'watchdog SSL_ENABLED' \
@@ -2169,7 +2176,14 @@ config_prod_moved_keys() {
         'dhcp-proxy DHCP_NTP_SERVERS' 'dhcp-proxy DHCP_PROXY_DOMAIN' 'dhcp-proxy DHCP_PROXY_BOOT_FILENAME' \
         'dhcp-proxy DHCP_PROXY_BOOT_SERVER' 'dhcp-proxy DHCP_PROXY_CUSTOM_OPTIONS' \
         'dhcp-proxy DHCP_PROXY_PXE_BOOT_SERVER' 'dhcp-proxy DHCP_PROXY_PXE_BOOT_FILENAME_BIOS' \
-        'dhcp-proxy DHCP_PROXY_PXE_BOOT_FILENAME_UEFI'
+        'dhcp-proxy DHCP_PROXY_PXE_BOOT_FILENAME_UEFI' 'watchdog CHECK_INTERVAL' \
+        'watchdog RESTART_AFTER' 'watchdog DISK_WARN_PCT' 'watchdog DISK_ALARM_PCT' \
+        'watchdog CACHE_VALID_DAYS' 'ntp NTP_UPSTREAM_SERVERS' 'ntp NTP_ALLOWED_CLIENT_CIDRS' \
+        'cachehamster CACHEHAMSTER_CREDENTIAL_PERSISTENCE' 'cachehamster CACHEHAMSTER_STEAM_CREDENTIAL' \
+        'cachehamster CACHEHAMSTER_URLS' 'cachehamster CACHEHAMSTER_CONCURRENCY' 'proxy CACHE_MIN_FREE' \
+        'dns-standard LOG_QUERIES' 'dns-standard ROOT_ZONE_MIRROR' 'dns-standard PDNS_SOA_REFRESH' \
+        'dns-standard PDNS_SOA_RETRY' 'dns-standard PDNS_SOA_RESYNC_INTERVAL' 'dhcp DHCP_DOMAIN' \
+        'dhcp DHCP_LEASE_TIME' 'dhcp DHCP_NTP_SERVERS' 'dhcp DHCP_DDNS_ENABLED'
 }
 
 # What: moves those keys from <svc>.local.env to the .env
