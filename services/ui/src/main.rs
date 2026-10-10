@@ -7355,7 +7355,7 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lancache_ng::unique_temp_dir;
+    use lancache_ng::{serve_canned, unique_temp_dir};
 
     // What: the domain rule agrees with the shared fixture.
     // Why: the shell validator reads the same cases.
@@ -7684,5 +7684,1809 @@ mod tests {
         assert!(classify_soa(&[], 1).is_err());
         assert!(classify_soa(&[0; 11], 1).is_err());
         assert!(classify_soa(&[0, 2, 0x84, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1).is_err());
+    }
+
+    // What: image tags map to a channel for display.
+    // Why: only sha and version tags count as pinned.
+    #[test]
+    fn image_channels_follow_the_tag() {
+        for same in ["dev", "nightly", "latest"] {
+            assert_eq!(derive_image_channel(same), same);
+        }
+        for pinned in ["sha-abc123", "v1", "v2.0.1"] {
+            assert_eq!(derive_image_channel(pinned), "pinned", "{pinned}");
+        }
+        for other in ["edge", "v", "vx", "1.2.3", "main", ""] {
+            assert_eq!(derive_image_channel(other), "latest", "{other:?}");
+        }
+    }
+
+    // What: HSTS is sent by mode, and by scheme in auto.
+    // Why: plain HTTP must never get the header.
+    #[test]
+    fn hsts_is_sent_by_mode_and_scheme() {
+        assert!(HstsMode::Auto.should_send(true));
+        assert!(!HstsMode::Auto.should_send(false));
+        assert!(HstsMode::Always.should_send(false));
+        assert!(!HstsMode::Never.should_send(true));
+    }
+
+    // What: flags are written as 1 and 0.
+    // Why: setup.sh reads the settings file this way.
+    #[test]
+    fn bools_are_written_as_digits() {
+        assert_eq!(bool_text(true), "1");
+        assert_eq!(bool_text(false), "0");
+    }
+
+    // What: the advertised NATS URL is explicit or derived.
+    // Why: an unreachable internal URL must not go out.
+    // From: Issue #866
+    #[test]
+    fn advertised_nats_url_is_explicit_or_derived() {
+        let internal = "nats://nats:4222";
+        assert_eq!(
+            advertised_nats_url(" nats://x:1 ", "", ""),
+            Some("nats://x:1".to_string())
+        );
+        assert_eq!(
+            advertised_nats_url("", " 192.0.2.5 ", internal),
+            Some("nats://192.0.2.5:4222".to_string())
+        );
+        let v6 = Some("nats://[2001:db8::1]:4222".to_string());
+        assert_eq!(advertised_nats_url("", "[2001:db8::1]", internal), v6);
+        assert_eq!(advertised_nats_url("", "2001:db8::1", internal), v6);
+        for none in ["", "0.0.0.0", "::", "127.0.0.1", "::1", "no-ip"] {
+            assert_eq!(advertised_nats_url("", none, internal), None, "{none:?}");
+        }
+        assert_eq!(advertised_nats_url("", "192.0.2.5", "nats://nats"), None);
+    }
+
+    // What: the NATS port is the digits after the colon.
+    // Why: anything else must not become an advertised URL.
+    #[test]
+    fn nats_port_needs_digits_after_the_last_colon() {
+        assert_eq!(nats_port("nats://h:4222"), Some("4222"));
+        assert_eq!(nats_port("nats://h:4222//"), Some("4222"));
+        for bad in ["nats://h", "nats://h:", "nats://h:42a", "h:-1", ""] {
+            assert_eq!(nats_port(bad), None, "{bad:?}");
+        }
+    }
+
+    // What: secret files are named and read by variable.
+    // Why: a real env value wins; a placeholder reads file.
+    // From: Issue #858
+    #[test]
+    fn shared_secrets_are_read_from_env_or_file() {
+        assert_eq!(
+            shared_secret_file_name("NATS_UI_PASSWORD"),
+            "nats-ui-password"
+        );
+        let dir = unique_temp_dir("secret-read");
+        let path = dir.to_string_lossy().into_owned();
+        let unset = |_: &str| None;
+        assert_eq!(
+            shared_secret(&path, "PDNS_API_KEY", &unset),
+            Ok(String::new())
+        );
+        fs::write(dir.join("pdns-api-key"), "from-file\n").unwrap();
+        assert_eq!(
+            shared_secret(&path, "PDNS_API_KEY", &unset),
+            Ok("from-file".to_string())
+        );
+        let real = |_: &str| Some("real-value".to_string());
+        assert_eq!(
+            shared_secret(&path, "PDNS_API_KEY", &real),
+            Ok("real-value".to_string())
+        );
+        let placeholder = |_: &str| Some("CHANGE_ME_x".to_string());
+        assert_eq!(
+            shared_secret(&path, "PDNS_API_KEY", &placeholder),
+            Ok("from-file".to_string())
+        );
+        fs::create_dir(dir.join("kea-ctrl-token")).unwrap();
+        assert!(shared_secret(&path, "KEA_CTRL_TOKEN", &unset).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: the first writer of a secret file wins.
+    // Why: independent starters must not split a secret.
+    // From: Issue #858
+    #[test]
+    fn secret_files_keep_the_first_writer() {
+        let dir = unique_temp_dir("secret-write");
+        let made = resolve_shared_secret(&dir, "a", "", 0).unwrap();
+        assert_eq!(made.len(), 64);
+        assert!(made.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(fs::read_to_string(dir.join("a")).unwrap(), made);
+        let mode = fs::metadata(dir.join("a")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o640);
+        assert_eq!(resolve_shared_secret(&dir, "a", "", 0), Ok(made.clone()));
+        assert_eq!(resolve_shared_secret(&dir, "a", &made, 0), Ok(made));
+        assert_eq!(
+            resolve_shared_secret(&dir, "a", "mine", 0),
+            Ok("mine".to_string())
+        );
+        assert_eq!(fs::read_to_string(dir.join("a")).unwrap(), "mine");
+        assert_eq!(
+            resolve_shared_secret(&dir, "b", "given", 0),
+            Ok("given".to_string())
+        );
+        assert_eq!(fs::read_to_string(dir.join("b")).unwrap(), "given");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: a failed secret write keeps a configured value.
+    // Why: only a disagreeing file makes it unsafe to use.
+    // From: PR #1775
+    #[test]
+    fn failed_secret_writes_keep_or_refuse() {
+        let dir = unique_temp_dir("secret-fail");
+        fs::write(dir.join("not-a-dir"), "x").unwrap();
+        let gone = dir.join("not-a-dir");
+        assert_eq!(
+            resolve_shared_secret(&gone, "a", "cfg", 0),
+            Ok("cfg".to_string())
+        );
+        assert!(resolve_shared_secret(&gone, "a", "", 0).is_err());
+        fs::create_dir(dir.join("blocked")).unwrap();
+        assert!(resolve_shared_secret(&dir, "blocked", "cfg", 0).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: the cookie signature equals a known vector.
+    // Why: the signature binds expiry and token to a key.
+    #[test]
+    fn cookie_signature_equals_the_vector() {
+        let key: [u8; 32] = std::array::from_fn(|i| i as u8);
+        assert_eq!(
+            cookie_signature(&key, 123, "abc"),
+            "e7b377574b0e1054869f123b91a243c1b915d9043d53a11dc0cf4dd44131d849"
+        );
+    }
+
+    // What: a cookie needs version, expiry, shape, sign.
+    // Why: each broken part must fail on its own.
+    #[test]
+    fn session_cookie_checks_each_part() {
+        let key = [3u8; 32];
+        let later = unix_secs() + 1000;
+        let sig = cookie_signature(&key, later, "tok");
+        let good = format!("v1.{later}.tok.{sig}");
+        let held = validate_session(&good, &key).expect("a fresh cookie holds");
+        assert_eq!(held.csrf_token, "tok");
+        assert_eq!(held.cookie_value, good);
+        let past = cookie_signature(&key, 1, "tok");
+        for bad in [
+            format!("v2.{later}.tok.{sig}"),
+            format!("v1.1.tok.{past}"),
+            format!("v1.x.tok.{sig}"),
+            format!("v1.{later}.tok"),
+            format!("v1.{later}.other.{sig}"),
+            String::new(),
+        ] {
+            assert!(validate_session(&bad, &key).is_none(), "{bad:?}");
+        }
+    }
+
+    // What: a new session is random and bound to its ttl.
+    // Why: every first request needs its own CSRF token.
+    #[test]
+    fn issued_sessions_are_random_and_expire_with_the_ttl() {
+        let key = [5u8; 32];
+        let before = unix_secs();
+        let a = issue_session(&key, Duration::from_secs(3600));
+        let b = issue_session(&key, Duration::from_secs(3600));
+        let after = unix_secs();
+        assert_ne!(a.csrf_token, b.csrf_token);
+        assert_eq!(a.csrf_token.len(), 64);
+        let parts: Vec<&str> = a.cookie_value.split('.').collect();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], "v1");
+        let expires: u64 = parts[1].parse().unwrap();
+        assert!((before + 3600..=after + 3600).contains(&expires));
+        assert_eq!(parts[2], a.csrf_token);
+        assert_eq!(parts[3], cookie_signature(&key, expires, parts[2]));
+    }
+
+    // What: the session cookie is found among others.
+    // Why: cookies of other apps on the origin are ignored.
+    #[test]
+    fn session_cookie_is_found_among_others() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(session_cookie(&headers), None);
+        let own = "a=b; lancache_ui_session=v1.2.3.4; c=d";
+        headers.insert(header::COOKIE, HeaderValue::from_static(own));
+        assert_eq!(session_cookie(&headers), Some("v1.2.3.4"));
+        let foreign = "xlancache_ui_session=1; other=2";
+        headers.insert(header::COOKIE, HeaderValue::from_static(foreign));
+        assert_eq!(session_cookie(&headers), None);
+    }
+
+    // What: only a first https hop counts as https.
+    // Why: only a TLS-terminating proxy in front sets it.
+    #[test]
+    fn forwarded_proto_reads_the_first_hop() {
+        let proto = |value: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-proto", HeaderValue::from_static(value));
+            forwarded_proto_is_https(&headers)
+        };
+        assert!(proto("https"));
+        assert!(proto(" HTTPS , http"));
+        assert!(!proto("http"));
+        assert!(!proto("http, https"));
+        assert!(!forwarded_proto_is_https(&HeaderMap::new()));
+    }
+
+    // What: the session cookie header has fixed attributes.
+    // Why: SameSite=Strict and HttpOnly keep scripts out.
+    #[test]
+    fn session_cookie_header_has_fixed_attributes() {
+        let session = Session {
+            csrf_token: "t".to_string(),
+            cookie_value: "v1.9.t.s".to_string(),
+        };
+        let ttl = Duration::from_secs(60);
+        let set = |secure: bool| {
+            let mut response = Response::new(Body::empty());
+            attach_session_cookie(&mut response, &session, ttl, secure);
+            let value = response.headers().get(header::SET_COOKIE).unwrap();
+            value.to_str().unwrap().to_string()
+        };
+        let plain = "lancache_ui_session=v1.9.t.s; Path=/; SameSite=Strict; HttpOnly; Max-Age=60";
+        assert_eq!(set(false), plain);
+        assert_eq!(set(true), format!("{plain}; Secure"));
+    }
+
+    // What: HTML text is escaped in all five places.
+    // Why: error pages echo operator input back.
+    #[test]
+    fn html_text_is_escaped() {
+        assert_eq!(
+            html_escape("<a href=\"x\">'&'</a>"),
+            "&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;"
+        );
+        assert_eq!(html_escape("plain"), "plain");
+    }
+
+    // What: an error page carries area, status and message.
+    // Why: operators need the reason and a way back.
+    #[tokio::test]
+    async fn html_errors_render_area_status_and_escaped_text() {
+        let error = HtmlError::new(StatusCode::BAD_REQUEST, &NTP_AREA, "bad <x>");
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            String::from_utf8(bytes.to_vec()).unwrap(),
+            "<!DOCTYPE html>\n<html>\n<head><title>NTP Configuration Error</title></head>\n\
+             <body><h1>NTP Configuration Error</h1>\n<p>bad &lt;x&gt;</p>\n\
+             <p><a href=\"/ntp\">Return to NTP settings</a></p>\n</body>\n</html>"
+        );
+    }
+
+    // What: assets carry a type; cached ones are public.
+    // Why: brand assets cache long, the stylesheet not.
+    #[test]
+    fn assets_set_type_and_caching() {
+        let plain = asset("text/css", false, b"x");
+        assert_eq!(plain.headers()[header::CONTENT_TYPE], "text/css");
+        assert!(plain.headers().get(header::CACHE_CONTROL).is_none());
+        let cached = asset("image/png", true, b"x");
+        assert_eq!(cached.headers()[header::CONTENT_TYPE], "image/png");
+        assert_eq!(
+            cached.headers()[header::CACHE_CONTROL],
+            "public, max-age=31536000"
+        );
+    }
+
+    // What: form fields are trimmed; absent ones are empty.
+    // Why: a malformed number fails like a missing one.
+    #[test]
+    fn form_fields_trim_and_parse() {
+        let fields = Fields(HashMap::from([
+            ("a".to_string(), "  5 ".to_string()),
+            ("b".to_string(), "x".to_string()),
+        ]));
+        assert_eq!(fields.get("a"), "5");
+        assert_eq!(fields.get("none"), "");
+        assert_eq!(fields.number::<u32>("a"), Some(5));
+        assert_eq!(fields.number::<u32>("b"), None);
+        assert_eq!(fields.number::<u32>("none"), None);
+    }
+
+    const TEXT_KEYS: [&str; 41] = [
+        "STANDARD_LOG",
+        "PROXY_STANDARD_URL",
+        "STANDARD_IP",
+        "SSL_IP",
+        "NATS_URL",
+        "DOCKER_PROXY_URL",
+        "LANCACHE_IMAGE_TAG",
+        "NTP_UPSTREAM_SERVERS",
+        "TEMPLATE_DIR",
+        "CDN_DOMAINS_FILE",
+        "SSL_LOG",
+        "CACHE_DIR",
+        "DNS_STANDARD_STATE_DIR",
+        "DNS_SSL_STATE_DIR",
+        "PROXY_SSL_URL",
+        "NETDATA_URL",
+        "DNS_STANDARD_SERVICE",
+        "DNS_SSL_SERVICE",
+        "PROXY_SSL_SERVICE",
+        "DHCP_API_URL",
+        "UI_SETTINGS_FILE",
+        "KEA_CONFIG_SNAPSHOT_DIR",
+        "PDNS_AUTH_URL",
+        "PDNS_REC_URL",
+        "DNS_ROLLBACK_URL",
+        "NETDATA_ALARMS_FILE",
+        "NATS_ISSUER_SEED_PATH",
+        "NATS_XKEY_SEED_PATH",
+        "LANCACHE_IMAGE_REGISTRY",
+        "LANCACHE_IMAGE_PREFIX",
+        "NATS_CONF_PATH",
+        "NATS_AUTH_CALLOUT_PATH",
+        "NATS_SERVICE",
+        "NATS_LOG_FILE",
+        "UI_SESSION_SECRET_FILE",
+        "UI_DATABASE_FILE",
+        "SECONDARY_REGISTRATION_TOKEN_FILE",
+        "SYSLOG_LOG_ROOT",
+        "WATCHDOG_STATUS_FILE",
+        "DESIRED_STATE_FILE",
+        "LANCACHE_SHARED_SECRET_DIR",
+    ];
+
+    const NUMBER_KEYS: [(&str, &str); 5] = [
+        ("UI_SESSION_TTL_SECONDS", "3600"),
+        ("KEEP_KNOWN_GOOD_CONFIGS", "7"),
+        ("UI_LOGS_MAX_ENTRIES", "250"),
+        ("UI_LISTEN_PORT", "8081"),
+        ("SYSLOG_MAX_GB", "3"),
+    ];
+
+    const FLAG_KEYS: [&str; 3] = ["SSL_ENABLED", "ALLOW_INSECURE_UI", "SYSLOG_ENABLED"];
+
+    // What: a complete env; each text value names its key.
+    // Why: a swapped field then shows in the value.
+    fn full_env() -> HashMap<String, String> {
+        let mut env: HashMap<String, String> = HashMap::new();
+        for key in TEXT_KEYS {
+            env.insert(key.to_string(), format!("v-{key}"));
+        }
+        for (key, value) in NUMBER_KEYS {
+            env.insert(key.to_string(), value.to_string());
+        }
+        for key in FLAG_KEYS {
+            env.insert(key.to_string(), "true".to_string());
+        }
+        env
+    }
+
+    fn load_from(env: &HashMap<String, String>) -> Result<Config, String> {
+        Config::load(&|key: &str| env.get(key).cloned())
+    }
+
+    // What: every key lands in its own config field.
+    // Why: compose owns the values; a swap would misroute.
+    #[test]
+    fn config_load_maps_every_key_to_its_field() {
+        let cfg = load_from(&full_env()).expect("a complete env loads");
+        assert_eq!(cfg.standard_log, "v-STANDARD_LOG");
+        assert_eq!(cfg.ssl_log, "v-SSL_LOG");
+        assert_eq!(cfg.proxy_standard_url, "v-PROXY_STANDARD_URL");
+        assert_eq!(cfg.proxy_ssl_url, "v-PROXY_SSL_URL");
+        assert_eq!(cfg.standard_ip, "v-STANDARD_IP");
+        assert_eq!(cfg.ssl_ip, "v-SSL_IP");
+        assert_eq!(cfg.nats_url, "v-NATS_URL");
+        assert_eq!(cfg.docker_proxy_url, "v-DOCKER_PROXY_URL");
+        assert_eq!(cfg.lancache_image_tag, "v-LANCACHE_IMAGE_TAG");
+        assert_eq!(cfg.template_dir, "v-TEMPLATE_DIR");
+        assert_eq!(cfg.cdn_domains_file, "v-CDN_DOMAINS_FILE");
+        assert_eq!(cfg.cache_dir, "v-CACHE_DIR");
+        assert_eq!(cfg.dns_standard_state_dir, "v-DNS_STANDARD_STATE_DIR");
+        assert_eq!(cfg.dns_ssl_state_dir, "v-DNS_SSL_STATE_DIR");
+        assert_eq!(cfg.netdata_url, "v-NETDATA_URL");
+        assert_eq!(cfg.dns_standard_service, "v-DNS_STANDARD_SERVICE");
+        assert_eq!(cfg.dns_ssl_service, "v-DNS_SSL_SERVICE");
+        assert_eq!(cfg.proxy_ssl_service, "v-PROXY_SSL_SERVICE");
+        assert_eq!(cfg.dhcp_api_url, "v-DHCP_API_URL");
+        assert_eq!(cfg.ui_settings_file, "v-UI_SETTINGS_FILE");
+        assert_eq!(cfg.kea_config_snapshot_dir, "v-KEA_CONFIG_SNAPSHOT_DIR");
+        assert_eq!(
+            cfg.pdns_auth_api,
+            "v-PDNS_AUTH_URL/api/v1/servers/localhost"
+        );
+        assert_eq!(cfg.pdns_rec_api, "v-PDNS_REC_URL/api/v1/servers/localhost");
+        assert_eq!(cfg.dns_rollback_url, "v-DNS_ROLLBACK_URL");
+        assert_eq!(cfg.netdata_alarms_file, "v-NETDATA_ALARMS_FILE");
+        assert_eq!(cfg.nats_issuer_seed_path, "v-NATS_ISSUER_SEED_PATH");
+        assert_eq!(cfg.nats_xkey_seed_path, "v-NATS_XKEY_SEED_PATH");
+        assert_eq!(cfg.lancache_image_registry, "v-LANCACHE_IMAGE_REGISTRY");
+        assert_eq!(cfg.lancache_image_prefix, "v-LANCACHE_IMAGE_PREFIX");
+        assert_eq!(cfg.nats_conf_path, "v-NATS_CONF_PATH");
+        assert_eq!(cfg.nats_auth_callout_path, "v-NATS_AUTH_CALLOUT_PATH");
+        assert_eq!(cfg.nats_service, "v-NATS_SERVICE");
+        assert_eq!(cfg.nats_log_file, "v-NATS_LOG_FILE");
+        assert_eq!(cfg.session_secret_file, "v-UI_SESSION_SECRET_FILE");
+        assert_eq!(cfg.database_file, "v-UI_DATABASE_FILE");
+        assert_eq!(
+            cfg.registration_token_file,
+            "v-SECONDARY_REGISTRATION_TOKEN_FILE"
+        );
+        assert_eq!(cfg.syslog_log_root, "v-SYSLOG_LOG_ROOT");
+        assert_eq!(cfg.watchdog_status_file, "v-WATCHDOG_STATUS_FILE");
+        assert_eq!(cfg.desired_state_file, "v-DESIRED_STATE_FILE");
+        assert_eq!(cfg.shared_secret_dir, "v-LANCACHE_SHARED_SECRET_DIR");
+        assert_eq!(cfg.ui_session_ttl_seconds, 3600);
+        assert_eq!(cfg.kea_keep_known_good_configs, 7);
+        assert_eq!(cfg.ui_logs_max_entries, 250);
+        assert_eq!(cfg.listen_port, 8081);
+        assert_eq!(cfg.syslog_max_gb, 3);
+        assert!(cfg.ssl_enabled && cfg.allow_insecure_ui && cfg.syslog_enabled);
+        assert_eq!(cfg.cache_max_gb, 50.0);
+    }
+
+    // What: unset optional keys take their default.
+    // Why: the ui gets none of them from compose.
+    #[test]
+    fn config_load_defaults_for_optional_keys() {
+        let cfg = load_from(&full_env()).unwrap();
+        assert_eq!(cfg.auth_user, None);
+        assert_eq!(cfg.auth_password, None);
+        assert!(cfg.security_headers_enabled);
+        assert_eq!(cfg.hsts_mode, HstsMode::Auto);
+        assert!(!cfg.dev_mode);
+        assert_eq!(cfg.secondary_registration_token, "");
+        assert_eq!(cfg.advertised_nats_url, None);
+        assert_eq!(cfg.nats_monitor_port, None);
+        assert_eq!(cfg.nats_store_dir, None);
+        assert_eq!(cfg.nats_ui.user, "");
+        assert_eq!(cfg.nats_ui.password, None);
+        assert_eq!(cfg.lancache_image_channel, "latest");
+        assert_eq!(cfg.pdns_api_key, "");
+        assert_eq!(cfg.dhcp_api_token, "");
+        assert_eq!(cfg.dhcp_mode(), DhcpMode::Disabled);
+        let start = |key: &str| cfg.startup_settings[key].as_str();
+        assert_eq!(start("DHCP_MODE"), "disabled");
+        assert_eq!(start("DHCP_DNS_PRIMARY"), "v-STANDARD_IP");
+        assert_eq!(start("DHCP_DNS_SECONDARY"), "v-SSL_IP");
+        assert_eq!(start("NTP_UPSTREAM_SERVERS"), "v-NTP_UPSTREAM_SERVERS");
+        assert_eq!(start("AUTO_UPDATE_ENABLED"), "0");
+        assert_eq!(start("NTP_ENABLED"), "0");
+        assert_eq!(start("NTP_AUTO_DHCP"), "0");
+        assert_eq!(start("CACHE_MAX_GB"), "50");
+        assert_eq!(start("LANCACHE_IMAGE_CHANNEL"), "latest");
+        assert_eq!(start("DHCP_SUBNET_START"), "");
+    }
+
+    // What: set optional keys reach their fields.
+    // Why: operators tune these without a code change.
+    #[test]
+    fn config_load_reads_optional_keys() {
+        let mut env = full_env();
+        let extra = [
+            ("UI_AUTH_USER", "admin"),
+            ("UI_AUTH_PASSWORD", "pw"),
+            ("UI_SECURITY_HEADERS", "false"),
+            ("UI_HSTS_MODE", "always"),
+            ("LANCACHE_DEV_MODE", "1"),
+            ("SECONDARY_REGISTRATION_TOKEN", "tok"),
+            ("NATS_BIND_IP", "192.0.2.9"),
+            ("NATS_MONITOR_PORT", "8222"),
+            ("NATS_STORE_DIR", "/store"),
+            ("NATS_UI_USER", "ui"),
+            ("NATS_UI_PASSWORD", "ui-secret"),
+            ("DHCP_API_TOKEN", "kea-token"),
+            ("PDNS_API_KEY", "pdns-key"),
+            ("NETDATA_ALARM_TOKEN", "alarm-token"),
+            ("LANCACHE_IMAGE_CHANNEL", "nightly"),
+            ("DHCP_MODE", "kea"),
+            ("AUTO_UPDATE_ENABLED", "yes"),
+            ("NTP_ENABLED", "on"),
+            ("CACHE_MAX_GB", "75"),
+            ("NETDATA_CONF_FILE", "/n/conf"),
+            ("NETDATA_NOTIFY_FILE", "/n/notify"),
+            ("NETDATA_TOKEN_FILE", "/n/token"),
+            ("NETDATA_DAEMON_LOG", "/n/daemon"),
+            ("NETDATA_HEALTH_LOG", "/n/health"),
+            ("NETDATA_ALARM_UI_URL", "https://ui"),
+            ("NETDATA_ALARM_MAX_TIME", "60"),
+            ("NETDATA_ALARM_RECIPIENT", "ops"),
+            ("NATS_ISSUER_SEED", "issuer"),
+            ("NATS_XKEY_SEED", "xkey"),
+        ];
+        for (key, value) in extra {
+            env.insert(key.to_string(), value.to_string());
+        }
+        let cfg = load_from(&env).unwrap();
+        assert_eq!(cfg.auth_user.as_deref(), Some("admin"));
+        assert_eq!(cfg.auth_password.as_deref(), Some("pw"));
+        assert!(!cfg.security_headers_enabled);
+        assert_eq!(cfg.hsts_mode, HstsMode::Always);
+        assert!(cfg.dev_mode);
+        assert_eq!(cfg.secondary_registration_token, "tok");
+        assert_eq!(
+            cfg.advertised_nats_url.as_deref(),
+            None,
+            "the internal v-NATS_URL has no port"
+        );
+        assert_eq!(cfg.nats_monitor_port, Some(8222));
+        assert_eq!(cfg.nats_store_dir.as_deref(), Some("/store"));
+        assert_eq!(cfg.nats_ui.user, "ui");
+        assert_eq!(cfg.nats_ui.password.as_deref(), Some("ui-secret"));
+        assert_eq!(cfg.dhcp_api_token, "kea-token");
+        assert_eq!(cfg.pdns_api_key, "pdns-key");
+        assert_eq!(cfg.netdata_alarm_token, "alarm-token");
+        assert_eq!(cfg.lancache_image_channel, "nightly");
+        assert_eq!(cfg.dhcp_mode(), DhcpMode::Kea);
+        assert_eq!(cfg.startup_settings["AUTO_UPDATE_ENABLED"], "1");
+        assert_eq!(cfg.startup_settings["NTP_ENABLED"], "1");
+        assert_eq!(cfg.cache_max_gb, 75.0);
+        assert_eq!(cfg.netdata_conf_file.as_deref(), Some("/n/conf"));
+        assert_eq!(cfg.netdata_notify_file.as_deref(), Some("/n/notify"));
+        assert_eq!(cfg.netdata_token_file.as_deref(), Some("/n/token"));
+        assert_eq!(cfg.netdata_daemon_log.as_deref(), Some("/n/daemon"));
+        assert_eq!(cfg.netdata_health_log.as_deref(), Some("/n/health"));
+        assert_eq!(cfg.netdata_alarm_ui_url.as_deref(), Some("https://ui"));
+        assert_eq!(cfg.netdata_alarm_max_time.as_deref(), Some("60"));
+        assert_eq!(cfg.netdata_alarm_recipient.as_deref(), Some("ops"));
+        assert_eq!(cfg.nats_issuer_seed.as_deref(), Some("issuer"));
+        assert_eq!(cfg.nats_xkey_seed.as_deref(), Some("xkey"));
+        env.insert("NATS_URL".to_string(), "nats://nats:4222".to_string());
+        let cfg = load_from(&env).unwrap();
+        assert_eq!(
+            cfg.advertised_nats_url.as_deref(),
+            Some("nats://192.0.2.9:4222")
+        );
+    }
+
+    // What: each missing or bad key stops the start.
+    // Why: compose owns every value; no silent default.
+    #[test]
+    fn config_load_names_the_missing_or_bad_key() {
+        let all = TEXT_KEYS
+            .iter()
+            .copied()
+            .chain(NUMBER_KEYS.iter().map(|(key, _)| *key))
+            .chain(FLAG_KEYS);
+        for key in all {
+            let mut env = full_env();
+            env.remove(key);
+            let err = load_from(&env).err().unwrap_or_default();
+            assert!(err.contains(key), "{key}: {err:?}");
+        }
+        for key in FLAG_KEYS {
+            let mut env = full_env();
+            env.insert(key.to_string(), "maybe".to_string());
+            assert!(load_from(&env).is_err(), "{key} junk");
+        }
+        for (key, junk) in [
+            ("UI_SESSION_TTL_SECONDS", "31536001"),
+            ("UI_LISTEN_PORT", "65536"),
+            ("KEEP_KNOWN_GOOD_CONFIGS", "0"),
+            ("NATS_MONITOR_PORT", "x"),
+        ] {
+            let mut env = full_env();
+            env.insert(key.to_string(), junk.to_string());
+            assert!(load_from(&env).is_err(), "{key}={junk}");
+        }
+        let mut env = full_env();
+        env.insert("SYSLOG_MAX_GB".to_string(), "9999999".to_string());
+        assert_eq!(load_from(&env).unwrap().syslog_max_gb, 1_048_576);
+    }
+
+    // What: the saved setting beats the startup value.
+    // Why: operators change settings live, no restart.
+    #[test]
+    fn saved_settings_beat_startup_values() {
+        let dir = unique_temp_dir("settings");
+        let file = dir.join("ui.conf");
+        let mut env = full_env();
+        env.insert(
+            "UI_SETTINGS_FILE".to_string(),
+            file.to_string_lossy().into_owned(),
+        );
+        env.insert("CACHE_MAX_GB".to_string(), "60".to_string());
+        let cfg = load_from(&env).unwrap();
+        assert_eq!(cfg.setting("DHCP_MODE"), "disabled");
+        assert!(!cfg.flag("NTP_ENABLED"));
+        assert_eq!(cfg.requested_cache_gb(), 60.0);
+        assert_eq!(cfg.setting("NO_SUCH_KEY"), "");
+        fs::write(
+            &file,
+            " DHCP_MODE=dnsmasq-proxy \nNTP_ENABLED = 1\nNTP_ENABLED=1\nCACHE_MAX_GB=abc\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.setting("DHCP_MODE"), "dnsmasq-proxy");
+        assert_eq!(cfg.dhcp_mode(), DhcpMode::DnsmasqProxy);
+        assert!(cfg.flag("NTP_ENABLED"));
+        assert_eq!(cfg.requested_cache_gb(), 60.0);
+        fs::write(&file, "CACHE_MAX_GB= 90 \nNTP_ENABLED=0\n").unwrap();
+        assert_eq!(cfg.requested_cache_gb(), 90.0);
+        assert!(!cfg.flag("NTP_ENABLED"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: saving rewrites known keys, keeps the others.
+    // Why: one whole-file writer must not lose a setting.
+    #[test]
+    fn save_settings_rewrites_the_whole_file() {
+        let dir = unique_temp_dir("save");
+        let file = dir.join("ui.conf");
+        let mut env = full_env();
+        env.insert(
+            "UI_SETTINGS_FILE".to_string(),
+            file.to_string_lossy().into_owned(),
+        );
+        let cfg = load_from(&env).unwrap();
+        cfg.save_settings(&[
+            ("DHCP_MODE", " kea ".to_string()),
+            ("DHCP_SUBNET_START", "   ".to_string()),
+            ("NTP_ENABLED", "1".to_string()),
+        ])
+        .unwrap();
+        let saved = fs::read_to_string(&file).unwrap();
+        let mode = fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
+        assert_eq!(
+            saved,
+            "DHCP_MODE=kea\nDHCP_DNS_PRIMARY=v-STANDARD_IP\nDHCP_DNS_SECONDARY=v-SSL_IP\n\
+             LANCACHE_IMAGE_CHANNEL=latest\nAUTO_UPDATE_ENABLED=0\nNTP_ENABLED=1\n\
+             NTP_UPSTREAM_SERVERS=v-NTP_UPSTREAM_SERVERS\nNTP_AUTO_DHCP=0\nCACHE_MAX_GB=50\n"
+        );
+        cfg.save_settings(&[("NTP_AUTO_DHCP", "1".to_string())])
+            .unwrap();
+        let again = fs::read_to_string(&file).unwrap();
+        assert!(again.contains("DHCP_MODE=kea\n") && again.contains("NTP_AUTO_DHCP=1\n"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: Docker helpers act on allowlisted containers.
+    // Why: an unlisted name is refused before Docker.
+    // From: Issue #1592
+    #[tokio::test]
+    async fn docker_helpers_post_to_allowlisted_containers() {
+        let replies = vec![
+            (204, vec![]),
+            (204, vec![]),
+            (204, vec![]),
+            (404, vec![]),
+            (500, vec![]),
+        ];
+        let (base, server) = serve_canned(replies);
+        let docker = DockerProxy::new(&base);
+        docker_restart(&docker, "proxy").await.unwrap();
+        docker_start(&docker, "dns-ssl").await.unwrap();
+        docker_stop_if_present(&docker, "lancache-nats")
+            .await
+            .unwrap();
+        docker_stop_if_present(&docker, "ntp").await.unwrap();
+        let failed = docker_stop_if_present(&docker, "ui").await.unwrap_err();
+        assert!(format!("{failed:#}").contains("Failed to stop 'ui'"));
+        for refused in ["watchdog", "syslog", "nope", ""] {
+            assert!(container_name(refused).is_err(), "{refused:?}");
+            assert!(docker_restart(&docker, refused).await.is_err());
+            assert!(docker_start(&docker, refused).await.is_err());
+            assert!(docker_stop_if_present(&docker, refused).await.is_err());
+        }
+        let seen = server.join().unwrap();
+        let lines: Vec<&str> = seen.iter().filter_map(|r| r.lines().next()).collect();
+        assert_eq!(
+            lines,
+            [
+                "POST /containers/lancache-proxy/restart?t=5 HTTP/1.1",
+                "POST /containers/lancache-dns-ssl/start HTTP/1.1",
+                "POST /containers/lancache-nats/stop?t=10 HTTP/1.1",
+                "POST /containers/lancache-ntp/stop?t=10 HTTP/1.1",
+                "POST /containers/lancache-ui/stop?t=10 HTTP/1.1",
+            ]
+        );
+    }
+
+    // What: container_name maps short and full names.
+    // Why: compose and the proxy policy spell both ways.
+    #[test]
+    fn container_names_resolve_short_and_full() {
+        assert_eq!(container_name("proxy").unwrap(), "lancache-proxy");
+        assert_eq!(container_name("lancache-ui").unwrap(), "lancache-ui");
+        let err = container_name("watchdog").unwrap_err().to_string();
+        assert!(err.contains("'watchdog'") && err.contains("allowlist"));
+    }
+
+    // What: only a Docker 404 reads as never created.
+    // Why: a profile-gated service gives 404 on start.
+    #[test]
+    fn missing_containers_are_told_apart() {
+        let missing = anyhow::Error::new(DockerError::Status(404)).context("start");
+        assert!(container_never_created(&missing));
+        let busy = anyhow::Error::new(DockerError::Status(500));
+        assert!(!container_never_created(&busy));
+        assert!(!container_never_created(&anyhow::anyhow!("other")));
+    }
+
+    // What: the watchdog document is fresh, stale, absent.
+    // Why: the dashboard shows each case differently.
+    // From: Issue #870
+    #[test]
+    fn watchdog_json_reports_fresh_stale_and_missing() {
+        let dir = unique_temp_dir("watchdog-json");
+        let file = dir.join("status.json");
+        let path = file.to_string_lossy().into_owned();
+        assert_eq!(watchdog_json(&path), json!({"state": "unavailable"}));
+        fs::write(&file, "not json").unwrap();
+        assert_eq!(watchdog_json(&path), json!({"state": "unavailable"}));
+        let doc = r#"{"updated":"t1","interval_secs":30,"disk":{"cache":{"pct":10,"status":"green"}},
+            "services":{"zeta":{"status":"red","health":"x","failures":2},
+                        "lancache-ui":{"status":"green","health":"healthy","failures":0},
+                        "alpha":{"status":"green","health":"","failures":0},
+                        "lancache-proxy":{"status":"amber","health":"starting","failures":1}}}"#;
+        fs::write(&file, doc).unwrap();
+        let fresh = watchdog_json(&path);
+        let names: Vec<&str> = fresh["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["lancache-proxy", "lancache-ui", "alpha", "zeta"]);
+        assert_eq!(
+            fresh["services"][0],
+            json!({"name": "lancache-proxy", "label": "Proxy", "status": "amber",
+                   "health": "starting", "failures": 1})
+        );
+        assert_eq!(fresh["services"][1]["label"], "Admin UI");
+        assert_eq!(fresh["services"][2]["label"], "alpha");
+        assert_eq!(fresh["state"], "fresh");
+        assert_eq!(fresh["updated"], "t1");
+        assert_eq!(fresh["disk"]["cache"]["pct"], 10);
+        assert!(fresh.get("age_seconds").is_none());
+        let old = SystemTime::now() - Duration::from_secs(1000);
+        let handle = OpenOptions::new().write(true).open(&file).unwrap();
+        handle.set_modified(old).unwrap();
+        let stale = watchdog_json(&path);
+        assert_eq!(stale["state"], "stale");
+        let age = stale["age_seconds"].as_u64().unwrap();
+        assert!((1000..1100).contains(&age), "age {age}");
+        assert_eq!(stale["updated"], "t1");
+        assert_eq!(stale["services"].as_array().unwrap().len(), 4);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: only absolute paths without dots-dots pass.
+    // Why: the env supplies it; a relative path is a typo.
+    #[test]
+    fn paths_must_be_absolute_and_plain() {
+        assert!(path_allowed("/a/b"));
+        assert!(!path_allowed("a/b"));
+        assert!(!path_allowed("/a/../b"));
+        assert!(!path_allowed("/a..b"));
+        assert!(!path_allowed(""));
+    }
+
+    // What: sizes and free space are read for real paths.
+    // Why: a refused path reads 0 or unknown.
+    #[test]
+    fn cache_size_and_free_space_need_an_allowed_path() {
+        let dir = unique_temp_dir("du");
+        fs::write(dir.join("f"), vec![1u8; 4096]).unwrap();
+        let path = dir.to_string_lossy().into_owned();
+        let gb = du_gb(&path);
+        assert!(gb > 0.0 && gb < 0.001, "{gb}");
+        assert_eq!(du_gb("relative/dir"), 0.0);
+        assert_eq!(du_gb("/no/such/dir/anywhere"), 0.0);
+        assert!(cache_free_mib(&path).is_some());
+        assert_eq!(cache_free_mib("relative/dir"), None);
+        assert_eq!(cache_free_mib("/no/such/dir/anywhere"), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: the cache buffer grows with the cache size.
+    // Why: the cache manager overshoots max_size briefly.
+    // From: Issue #1069
+    #[test]
+    fn cache_buffer_and_fit_have_exact_edges() {
+        for (gb, buffer) in [
+            (0, 512),
+            (4, 512),
+            (5, 1024),
+            (6, 1024),
+            (7, 2048),
+            (900, 2048),
+        ] {
+            assert_eq!(cache_buffer_mib(gb), buffer, "{gb} GB");
+        }
+        assert!(cache_fits(10, 12 * 1024));
+        assert!(!cache_fits(10, 12 * 1024 - 1));
+        assert!(cache_fits(5, 6 * 1024));
+        assert!(!cache_fits(5, 6 * 1024 - 1));
+        assert!(cache_fits(1, 1536));
+        assert!(!cache_fits(1, 1535));
+        assert!(!cache_fits(1, 0));
+        assert_eq!(largest_cache_gb(1536), Some(1));
+        assert_eq!(largest_cache_gb(1535), None);
+        assert_eq!(largest_cache_gb(0), None);
+    }
+
+    // What: byte counts print in B, KB, MB and GB.
+    // Why: logs and stats show sizes in one spelling.
+    #[test]
+    fn byte_counts_print_in_the_right_unit() {
+        for (bytes, text) in [
+            (0, "0 B"),
+            (1023, "1023 B"),
+            (1024, "1.0 KB"),
+            (1536, "1.5 KB"),
+            (1_048_575, "1024.0 KB"),
+            (1_048_576, "1.0 MB"),
+            (1_073_741_823, "1024.0 MB"),
+            (1_073_741_824, "1.0 GB"),
+            (1_610_612_736, "1.5 GB"),
+        ] {
+            assert_eq!(format_bytes(bytes), text, "{bytes}");
+        }
+    }
+
+    // What: nginx stub_status text becomes typed counters.
+    // Why: the dashboard shows a gap when nginx is down.
+    #[tokio::test]
+    async fn nginx_status_parses_the_stub_page() {
+        let page = "Active connections: 291 \nserver accepts handled requests\n \
+                    16630948 16630947 31070465 \nReading: 6 Writing: 179 Waiting: 106 \n";
+        let (base, server) = serve_canned(vec![(200, page.as_bytes().to_vec())]);
+        let client = http_client().unwrap();
+        let status = nginx_status(&client, &base).await.expect("an answer");
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            json!({"active": 291, "accepts": 16630948, "handled": 16630947,
+                   "requests": 31070465, "reading": 6, "writing": 179, "waiting": 106})
+        );
+        let seen = server.join().unwrap();
+        assert!(seen[0].starts_with("GET /nginx_status HTTP/1.1"));
+        let short = "Active connections: 1\nserver accepts handled requests\n 1 2\n";
+        let (base, _server) = serve_canned(vec![(200, short.as_bytes().to_vec())]);
+        let status = nginx_status(&client, &base).await.unwrap();
+        assert_eq!((status.active, status.accepts, status.requests), (1, 0, 0));
+        assert!(nginx_status(&client, "http://127.0.0.1:1").await.is_none());
+    }
+
+    // What: a log tail returns whole lines, oldest first.
+    // Why: reading backwards must not cut the first line.
+    #[test]
+    fn log_tails_return_whole_lines_oldest_first() {
+        let dir = unique_temp_dir("tail");
+        let file = dir.join("log");
+        let path = file.to_string_lossy().into_owned();
+        assert!(tail_lines(&path, 5).is_empty());
+        fs::write(&file, "a\nb\nc\nd\ne").unwrap();
+        assert_eq!(tail_lines(&path, 3), ["c", "d", "e"]);
+        assert_eq!(tail_lines(&path, 10), ["a", "b", "c", "d", "e"]);
+        assert!(tail_lines(&path, 0).is_empty());
+        let big: String = (0..5000)
+            .map(|i| format!("line-{i:05} {}\n", "x".repeat(90)))
+            .collect();
+        fs::write(&file, &big).unwrap();
+        let last = tail_lines(&path, 7);
+        let first_wanted = format!("line-{:05} ", 4993);
+        assert_eq!(last.len(), 7);
+        assert!(last[0].starts_with(&first_wanted), "{:?}", last[0]);
+        assert!(last[6].starts_with("line-04999 "));
+        let all = tail_lines(&path, 6000);
+        assert_eq!(all.len(), 5000);
+        assert!(all[0].starts_with("line-00000 "));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    const HIT_LINE: &str = "192.0.2.1 - [10/Oct/2026:12:00:05 +0000] \"GET /a/b HTTP/1.1\" 200 2048 \"HIT\" \"steam.example\"";
+
+    // What: an access-log line becomes a typed entry.
+    // Why: the logs page renders fields, not raw text.
+    #[test]
+    fn access_log_lines_become_entries() {
+        let dir = unique_temp_dir("parse-log");
+        let file = dir.join("access.log");
+        let path = file.to_string_lossy().into_owned();
+        fs::write(&file, format!("garbage\n{HIT_LINE}\n")).unwrap();
+        let entries = parse_log_tail(&path, 10);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&entries[0]).unwrap(),
+            json!({"ip": "192.0.2.1", "time": "10/Oct/2026:12:00:05 +0000", "method": "GET",
+                   "path": "/a/b", "host": "steam.example", "status": 200,
+                   "bytes_human": "2.0 KB", "cache_status": "HIT", "source": ""})
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: nginx $time_local becomes epoch seconds.
+    // Why: entries of two logs must order by real time.
+    #[test]
+    fn log_times_become_epoch_seconds() {
+        assert_eq!(log_time_epoch("10/Oct/2026:12:00:00 +0000"), 1_791_633_600);
+        assert_eq!(log_time_epoch("10/Oct/2026:12:00:00 +0200"), 1_791_626_400);
+        assert_eq!(log_time_epoch("10/Oct/2026:12:00:00 -0130"), 1_791_639_000);
+        assert_eq!(log_time_epoch("not a time"), 0);
+    }
+
+    fn log_line(second: u32, cache: &str, bytes: u64) -> String {
+        format!(
+            "192.0.2.1 - [10/Oct/2026:12:00:{second:02} +0000] \"GET /p{second} HTTP/1.1\" 200 {bytes} \"{cache}\" \"h\"\n"
+        )
+    }
+
+    // What: two logs merge by time and carry their source.
+    // Why: the cap applies after the merge.
+    #[test]
+    fn two_logs_merge_by_time_with_a_source_label() {
+        let dir = unique_temp_dir("merge");
+        let (standard, ssl) = (dir.join("std.log"), dir.join("ssl.log"));
+        fs::write(
+            &standard,
+            format!("{}{}", log_line(5, "HIT", 1), log_line(1, "HIT", 1)),
+        )
+        .unwrap();
+        fs::write(&ssl, log_line(3, "MISS", 1)).unwrap();
+        let (std_path, ssl_path) = (
+            standard.to_string_lossy().into_owned(),
+            ssl.to_string_lossy().into_owned(),
+        );
+        let merged = merged_log_tail(&std_path, &ssl_path, 10);
+        let seen: Vec<(&str, &str)> = merged
+            .iter()
+            .map(|e| (e.path.as_str(), e.source.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            [("/p1", "Standard"), ("/p3", "SSL"), ("/p5", "Standard")]
+        );
+        let capped = merged_log_tail(&std_path, &ssl_path, 2);
+        let paths: Vec<&str> = capped.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["/p3", "/p5"]);
+        let shared = merged_log_tail(&std_path, &std_path, 10);
+        assert_eq!(shared.len(), 2);
+        assert!(shared.iter().all(|e| e.source == "Shared"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: log totals count each line once per file.
+    // Why: an identical path is counted once, not twice.
+    #[test]
+    fn log_stats_count_hits_and_bytes() {
+        let dir = unique_temp_dir("stats");
+        let (standard, ssl) = (dir.join("std.log"), dir.join("ssl.log"));
+        let gib = 1_073_741_824;
+        let mut text = String::new();
+        text += &log_line(1, "HIT", gib);
+        text += &log_line(2, "MISS", gib);
+        text += &log_line(3, "EXPIRED", 0);
+        text += &log_line(4, "BYPASS", 0);
+        text += "not a log line\n";
+        let mut bytes = text.into_bytes();
+        bytes.extend_from_slice(b"\xff\xfe broken\n");
+        bytes.extend_from_slice(log_line(6, "HIT", 0).as_bytes());
+        fs::write(&standard, &bytes).unwrap();
+        fs::write(&ssl, log_line(7, "MISS", 0)).unwrap();
+        let (std_path, ssl_path) = (
+            standard.to_string_lossy().into_owned(),
+            ssl.to_string_lossy().into_owned(),
+        );
+        let stats = log_stats(&std_path, &ssl_path);
+        assert_eq!(
+            serde_json::to_value(&stats).unwrap(),
+            json!({"hits": 2, "misses": 2, "expired": 1, "other": 1,
+                   "total_bytes_gb": 2.0, "total_requests": 6, "hit_pct": 2.0 / 6.0 * 100.0})
+        );
+        let once = log_stats(&std_path, &std_path);
+        assert_eq!(once.total_requests, 5);
+        let none = log_stats("/no/such/log", "/no/such/log");
+        assert_eq!((none.total_requests, none.hit_pct), (0, 0.0));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn syslog_entry(host: &str, timestamp: &str) -> SyslogEntry {
+        SyslogEntry {
+            timestamp: timestamp.to_string(),
+            host: host.to_string(),
+            program: "p".to_string(),
+            message: format!("{host}-{timestamp}"),
+        }
+    }
+
+    // What: a syslog line splits into time, program, text.
+    // Why: a stack-trace line must not vanish.
+    #[test]
+    fn syslog_lines_split_or_stay_raw() {
+        let line = "2026-10-10T10:00:00Z hostA prog[7]: the message: here";
+        let parsed = parse_syslog_line("hostA", line).unwrap();
+        assert_eq!(parsed.timestamp, "2026-10-10T10:00:00Z");
+        assert_eq!(parsed.host, "hostA");
+        assert_eq!(parsed.program, "prog[7]");
+        assert_eq!(parsed.message, "the message: here");
+        let raw = parse_syslog_line("hostB", "    at java.lang.Thread").unwrap();
+        assert_eq!(raw.timestamp, "");
+        assert_eq!(raw.program, "");
+        assert_eq!(raw.host, "hostB");
+        assert_eq!(raw.message, "    at java.lang.Thread");
+        assert!(parse_syslog_line("h", "").is_none());
+        assert!(parse_syslog_line("h", "   \t").is_none());
+    }
+
+    // What: syslog files are read plain, zstd or gzip.
+    // Why: rotated files may be compressed; junk is None.
+    #[test]
+    fn syslog_files_are_decompressed_by_extension() {
+        use std::io::Write as _;
+        let dir = unique_temp_dir("syslog-read");
+        fs::write(dir.join("a.log"), "plain\n").unwrap();
+        let zst = zstd::stream::encode_all(&b"zstd data\n"[..], 0).unwrap();
+        fs::write(dir.join("b.log.zst"), zst).unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(b"gzip data\n").unwrap();
+        fs::write(dir.join("c.log.gz"), gz.finish().unwrap()).unwrap();
+        fs::write(dir.join("d.log.zst"), "not zstd").unwrap();
+        fs::write(dir.join("e.log.gz"), "not gzip").unwrap();
+        fs::write(dir.join("f.log"), b"bad \xff byte").unwrap();
+        let read = |name: &str| read_syslog_file(&dir.join(name));
+        assert_eq!(read("a.log").as_deref(), Some("plain\n"));
+        assert_eq!(read("b.log.zst").as_deref(), Some("zstd data\n"));
+        assert_eq!(read("c.log.gz").as_deref(), Some("gzip data\n"));
+        assert_eq!(read("d.log.zst"), None);
+        assert_eq!(read("e.log.gz"), None);
+        assert_eq!(read("missing.log"), None);
+        assert_eq!(read("f.log").as_deref(), Some("bad \u{fffd} byte"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: a merged tail keeps quiet hosts in view.
+    // Why: a quiet host's only error must stay in view.
+    // From: Issue #859
+    #[test]
+    fn fair_window_keeps_quiet_hosts() {
+        assert!(fair_window(vec![], 5).is_empty());
+        let mut entries: Vec<SyslogEntry> = (1..=5)
+            .map(|n| syslog_entry("a", &format!("t{n}")))
+            .collect();
+        entries.push(syslog_entry("b", "t0"));
+        let kept = fair_window(entries.clone(), 3);
+        let seen: Vec<&str> = kept.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(seen, ["b-t0", "a-t4", "a-t5"]);
+        let all = fair_window(entries.clone(), 100);
+        assert_eq!(all.len(), 6);
+        assert_eq!(all[0].message, "b-t0");
+        assert_eq!(all[5].message, "a-t5");
+        assert_eq!(fair_window(entries, 1).len(), 1);
+        let many: Vec<SyslogEntry> = (0..30)
+            .map(|n| syslog_entry("a", &format!("t{n:02}")))
+            .collect();
+        assert_eq!(fair_window(many, 25).len(), 25);
+    }
+
+    // What: host directories are listed sorted.
+    // Why: the log page filter offers exactly these.
+    #[test]
+    fn syslog_hosts_are_the_sorted_directories() {
+        let dir = unique_temp_dir("syslog-hosts");
+        let root = dir.to_string_lossy().into_owned();
+        fs::create_dir(dir.join("hostB")).unwrap();
+        fs::create_dir(dir.join("hostA")).unwrap();
+        fs::write(dir.join("stray-file"), "x").unwrap();
+        assert_eq!(syslog_hosts(&root), ["hostA", "hostB"]);
+        assert_eq!(
+            syslog_host_dirs(&root),
+            [dir.join("hostA"), dir.join("hostB")]
+        );
+        assert!(syslog_hosts("/no/such/store").is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: the syslog tail merges hosts, checks the name.
+    // Why: the URL gives the host; it must not escape.
+    #[test]
+    fn syslog_tail_merges_hosts_and_refuses_odd_names() {
+        let dir = unique_temp_dir("syslog-tail");
+        let root = dir.to_string_lossy().into_owned();
+        for host in ["hostA", "hostB"] {
+            fs::create_dir(dir.join(host)).unwrap();
+        }
+        let a = "2026-10-10T10:00:01Z hostA prog: a1\n2026-10-10T10:00:02Z hostA prog: a2\n";
+        fs::write(dir.join("hostA/20261010.log"), a).unwrap();
+        fs::write(
+            dir.join("hostB/20261010.log"),
+            "2026-10-10T10:00:03Z hostB prog: b1\n",
+        )
+        .unwrap();
+        let messages = |entries: Vec<SyslogEntry>| -> Vec<String> {
+            entries.into_iter().map(|e| e.message).collect()
+        };
+        assert_eq!(messages(syslog_tail(&root, None, 10)), ["a1", "a2", "b1"]);
+        assert_eq!(messages(syslog_tail(&root, None, 2)), ["a2", "b1"]);
+        assert_eq!(
+            messages(syslog_tail(&root, Some("hostA"), 10)),
+            ["a1", "a2"]
+        );
+        let host_b = syslog_tail(&root, Some("hostB"), 10);
+        assert_eq!(
+            (host_b[0].host.as_str(), host_b[0].program.as_str()),
+            ("hostB", "prog")
+        );
+        assert!(syslog_tail(&root, None, 0).is_empty());
+        for odd in ["", ".", "..", "a/b", "a\\b", "hostA\0"] {
+            assert!(syslog_tail(&root, Some(odd), 10).is_empty(), "{odd:?}");
+        }
+        assert!(syslog_tail(&root, Some("nohost"), 10).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: the early stop never hides a host with data.
+    // Why: every host with files shows before the stop.
+    // From: Issue #859
+    #[test]
+    fn syslog_tail_reads_every_host_before_stopping() {
+        let dir = unique_temp_dir("syslog-stop");
+        let root = dir.to_string_lossy().into_owned();
+        for host in ["hostA", "hostB"] {
+            fs::create_dir(dir.join(host)).unwrap();
+        }
+        let newer = "2026-10-10T10:00:05Z hostA prog: a5\n2026-10-10T10:00:06Z hostA prog: a6\n";
+        fs::write(dir.join("hostA/20261011.log"), newer).unwrap();
+        let older = "2026-10-10T10:00:01Z hostB prog: b1\n";
+        fs::write(dir.join("hostB/20261010.log"), older).unwrap();
+        let past = SystemTime::now() - Duration::from_secs(3600);
+        let file = OpenOptions::new()
+            .write(true)
+            .open(dir.join("hostB/20261010.log"))
+            .unwrap();
+        file.set_modified(past).unwrap();
+        let tail = syslog_tail(&root, None, 2);
+        let messages: Vec<&str> = tail.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(messages, ["b1", "a6"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: syslog stats count files, bytes and days.
+    // Why: metadata only; the day is the name prefix.
+    #[test]
+    fn syslog_stats_count_files_bytes_and_days() {
+        let dir = unique_temp_dir("syslog-stats");
+        let root = dir.to_string_lossy().into_owned();
+        fs::create_dir_all(dir.join("hostA/subdir")).unwrap();
+        fs::write(dir.join("hostA/20261010.log"), "0123456789").unwrap();
+        fs::write(dir.join("hostA/20261011.log.zst"), "01234").unwrap();
+        fs::write(dir.join("hostA/20261011.log"), "0").unwrap();
+        fs::write(dir.join("hostA/notes.txt"), "012").unwrap();
+        fs::create_dir(dir.join("hostB")).unwrap();
+        let stats = syslog_stats(&root);
+        assert_eq!(
+            serde_json::to_value(&stats).unwrap(),
+            json!({"hosts": [
+                {"host": "hostA", "files": 4, "size_bytes": 19, "days": 2, "size_human": "19 B"},
+                {"host": "hostB", "files": 0, "size_bytes": 0, "days": 0, "size_human": "0 B"}],
+                "total_files": 4, "total_size_bytes": 19})
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn alarm(id: i64) -> NetdataAlarm {
+        NetdataAlarm {
+            unique_id: id,
+            name: format!("alarm-{id}"),
+            ..NetdataAlarm::default()
+        }
+    }
+
+    // What: stored alarms are newest first and capped.
+    // Why: netdata resends; a burst must not grow the file.
+    #[test]
+    fn alarms_are_stored_once_newest_first_and_capped() {
+        let dir = unique_temp_dir("alarms");
+        let file = dir.join("alarms.json");
+        let path = file.to_string_lossy().into_owned();
+        assert!(read_alarms(&path).is_empty());
+        fs::write(&file, "not json").unwrap();
+        assert!(read_alarms(&path).is_empty());
+        assert!(read_alarms(&dir.to_string_lossy()).is_empty());
+        fs::remove_file(&file).unwrap();
+        append_alarm(&path, alarm(1)).unwrap();
+        append_alarm(&path, alarm(2)).unwrap();
+        append_alarm(&path, alarm(1)).unwrap();
+        let ids: Vec<i64> = read_alarms(&path).iter().map(|a| a.unique_id).collect();
+        assert_eq!(ids, [2, 1]);
+        assert_eq!(read_alarms(&path)[0], alarm(2));
+        let mode = fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
+        for id in 3..=60 {
+            append_alarm(&path, alarm(id)).unwrap();
+        }
+        let kept = read_alarms(&path);
+        assert_eq!(kept.len(), 50);
+        assert_eq!(kept[0].unique_id, 60);
+        assert_eq!(kept[49].unique_id, 11);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: alarm views carry a readable UTC time.
+    // Why: this Tera version has no date filter.
+    #[test]
+    fn alarm_views_show_a_utc_time() {
+        let mut first = alarm(7);
+        first.when = 1_791_633_600;
+        first.chart = "cpu".to_string();
+        first.host = "h".to_string();
+        first.status = "CRITICAL".to_string();
+        first.value_string = "99%".to_string();
+        first.info = "busy".to_string();
+        let mut odd = alarm(8);
+        odd.when = i64::MAX;
+        let views = alarm_views(&[first, odd]);
+        assert_eq!(
+            views[0],
+            json!({"unique_id": 7, "name": "alarm-7", "chart": "cpu", "host": "h",
+                   "status": "CRITICAL", "value_string": "99%", "info": "busy",
+                   "when_display": "2026-10-10T12:00:00Z"})
+        );
+        assert_eq!(views[1]["when_display"], "9223372036854775807");
+        assert!(alarm_views(&[]).is_empty());
+    }
+
+    // What: the netdata sender script comes from fields.
+    // Why: netdata and the ui must agree on the payload.
+    // From: Issue #858
+    #[test]
+    fn alarm_sender_script_names_every_field() {
+        let script = render_alarm_notify_conf("http://ui:8080", "/t/token", "30", "ops").unwrap();
+        assert!(script.starts_with("SEND_CUSTOM=\"YES\"\nDEFAULT_RECIPIENT_CUSTOM=\"ops\"\n"));
+        assert!(script.contains("token=\"$(cat \"/t/token\")\" || return 1"));
+        assert!(script.contains("docurl --max-time 30 -X POST"));
+        assert!(script.contains("-H \"X-Netdata-Alarm-Token: ${token}\""));
+        assert!(script.contains("\"http://ui:8080/api/netdata-alarms\")\" || {"));
+        assert!(script.contains("[ \"${httpcode}\" = \"200\" ] && return 0"));
+        let fields = r#"-d "{\"alarm_id\":${alarm_id},\"chart\":\"$(_lancache_json_escape "${chart}")\",\"duration\":${duration},\"event_id\":${event_id},\"host\":\"$(_lancache_json_escape "${host}")\",\"info\":\"$(_lancache_json_escape "${info}")\",\"name\":\"$(_lancache_json_escape "${name}")\",\"old_status\":\"$(_lancache_json_escape "${old_status}")\",\"status\":\"$(_lancache_json_escape "${status}")\",\"unique_id\":${unique_id},\"units\":\"$(_lancache_json_escape "${units}")\",\"value_string\":\"$(_lancache_json_escape "${value_string}")\",\"when\":${when}}""#;
+        assert!(script.contains(fields), "{script}");
+        for (url, file, time, to) in [
+            ("", "/t", "30", "ops"),
+            ("http://ui", "", "30", "ops"),
+            ("http://ui", "/t", "", "ops"),
+            ("http://ui", "/t", "30", ""),
+            ("http://ui", "/t y", "30", "ops"),
+            ("http://ui", "/t", "30", "o\"ps"),
+        ] {
+            assert!(render_alarm_notify_conf(url, file, time, to).is_err());
+        }
+    }
+
+    // What: IPv4 addresses map to PTR names and zones.
+    // Why: only zones the stack provisions may hold a PTR.
+    #[test]
+    fn ptr_names_and_reverse_zones_follow_the_address() {
+        let ip = |text: &str| text.parse::<Ipv4Addr>().unwrap();
+        assert_eq!(
+            ptr_name_for_ipv4(ip("192.0.2.17")),
+            "17.2.0.192.in-addr.arpa."
+        );
+        assert_eq!(
+            ipv4_from_ptr_name("17.2.0.192.in-addr.arpa."),
+            Some(ip("192.0.2.17"))
+        );
+        assert_eq!(
+            ipv4_from_ptr_name("17.2.0.192.IN-ADDR.ARPA"),
+            Some(ip("192.0.2.17"))
+        );
+        for bad in [
+            "2.0.192.in-addr.arpa.",
+            "x.2.0.192.in-addr.arpa.",
+            "1.2.0.192.example.",
+            "256.2.0.192.in-addr.arpa.",
+        ] {
+            assert_eq!(ipv4_from_ptr_name(bad), None, "{bad}");
+        }
+        for (addr, zone) in [
+            ("10.1.2.3", Some("10.in-addr.arpa.")),
+            ("192.168.5.5", Some("168.192.in-addr.arpa.")),
+            ("172.16.0.1", Some("16.172.in-addr.arpa.")),
+            ("172.31.0.1", Some("31.172.in-addr.arpa.")),
+            ("172.15.0.1", None),
+            ("172.32.0.1", None),
+            ("8.8.8.8", None),
+        ] {
+            assert_eq!(reverse_zone_for_ipv4(ip(addr)).as_deref(), zone, "{addr}");
+        }
+        assert_eq!(parse_private_ipv4(" 10.0.0.5 "), Some(ip("10.0.0.5")));
+        assert_eq!(parse_private_ipv4("192.168.1.1"), Some(ip("192.168.1.1")));
+        for public in ["8.8.8.8", "127.0.0.1", "x", ""] {
+            assert_eq!(parse_private_ipv4(public), None, "{public:?}");
+        }
+    }
+
+    // What: a test SOA answer for the lan. zone.
+    // Why: the classifier reads real wire bytes.
+    fn soa_response(id: u16, flags: [u8; 2], answers: u16, serial: u32) -> Vec<u8> {
+        let mut msg = id.to_be_bytes().to_vec();
+        msg.extend_from_slice(&flags);
+        msg.extend_from_slice(&[0, 1]);
+        msg.extend_from_slice(&answers.to_be_bytes());
+        msg.extend_from_slice(&[0, 0, 0, 0]);
+        msg.extend_from_slice(&[3, b'l', b'a', b'n', 0, 0, 6, 0, 1]);
+        if answers > 0 {
+            msg.extend_from_slice(&[0xC0, 12, 0, 6, 0, 1, 0, 0, 0, 60]);
+            let mut rdata = vec![1, b'n', 0, 1, b'r', 0];
+            rdata.extend_from_slice(&serial.to_be_bytes());
+            rdata.extend_from_slice(&[0; 16]);
+            msg.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+            msg.extend_from_slice(&rdata);
+        }
+        msg
+    }
+
+    // What: DNS names are skipped by labels and pointers.
+    // Why: a bad label byte must end the parse.
+    #[test]
+    fn dns_names_are_skipped_by_labels_and_pointers() {
+        assert_eq!(skip_dns_name(&[0], 0), Some(1));
+        assert_eq!(skip_dns_name(&[3, b'a', b'b', b'c', 0], 0), Some(5));
+        assert_eq!(skip_dns_name(&[9, 9, 2, b'a', b'b', 0], 2), Some(6));
+        assert_eq!(skip_dns_name(&[0xC0, 12], 0), Some(2));
+        assert_eq!(skip_dns_name(&[0x40, 1], 0), None);
+        assert_eq!(skip_dns_name(&[0x80, 1], 0), None);
+        assert_eq!(skip_dns_name(&[5, b'a'], 0), None);
+        assert_eq!(skip_dns_name(&[], 0), None);
+    }
+
+    // What: the SOA serial is read from a good answer only.
+    // Why: informational only; any oddity yields None.
+    #[test]
+    fn soa_serial_is_read_from_a_good_answer_only() {
+        let good = soa_response(1, [0x84, 0], 1, 2_026_101_001);
+        assert_eq!(soa_serial(&good), Some(2_026_101_001));
+        assert_eq!(soa_serial(&good[..good.len() - 1]), Some(2_026_101_001));
+        assert_eq!(soa_serial(&good[..good.len() - 17]), None);
+        assert_eq!(soa_serial(&good[..30]), None);
+        assert_eq!(soa_serial(&soa_response(1, [0x84, 0], 0, 0)), None);
+        let mut wrong_type = good.clone();
+        wrong_type[24] = 1;
+        assert_eq!(soa_serial(&wrong_type), None);
+        let mut short_rdata = good.clone();
+        short_rdata[32] = 4;
+        assert_eq!(soa_serial(&short_rdata), None);
+        assert_eq!(soa_serial(&[]), None);
+    }
+
+    // What: each SOA answer maps to one operator status.
+    // Why: AA flag and RCODE tell served-here from relayed.
+    #[test]
+    fn soa_answers_map_to_statuses() {
+        let probe = |flags: [u8; 2], answers: u16| {
+            classify_soa(&soa_response(9, flags, answers, 42), 9).unwrap()
+        };
+        let ok = probe([0x84, 0], 1);
+        assert_eq!((ok.status, ok.serial), ("ok", Some(42)));
+        assert_eq!(ok.detail, "answered authoritatively for lan. (SOA present)");
+        let relayed = probe([0x80, 0], 1);
+        assert_eq!(
+            (relayed.status, relayed.serial),
+            ("not_authoritative", Some(42))
+        );
+        let empty = probe([0x84, 0], 0);
+        assert_eq!((empty.status, empty.serial), ("error", None));
+        assert_eq!(empty.detail, "NOERROR but no answer for lan. SOA");
+        let refused = probe([0x84, 5], 0);
+        assert_eq!((refused.status, refused.serial), ("no_zone", None));
+        let failed = probe([0x84, 2], 1);
+        assert_eq!((failed.status, failed.serial), ("broken", None));
+        let other = probe([0x84, 3], 0);
+        assert_eq!(other.status, "error");
+        assert_eq!(other.detail, "unexpected DNS response code (RCODE 3)");
+        let wrong_id = classify_soa(&soa_response(9, [0x84, 0], 1, 1), 10);
+        assert_eq!(
+            wrong_id,
+            Err("DNS response transaction id mismatch".to_string())
+        );
+        let query = classify_soa(&soa_response(9, [0x04, 0], 1, 1), 9);
+        assert_eq!(
+            query,
+            Err("DNS message is not a response (QR bit unset)".to_string())
+        );
+        let short = classify_soa(&[0; 11], 0);
+        assert_eq!(short, Err("short DNS response (<12 bytes)".to_string()));
+    }
+
+    // What: the SOA probe talks UDP and reports silence.
+    // Why: a silent host is a status, not an error.
+    #[tokio::test]
+    async fn soa_probe_asks_over_udp_and_reports_the_answer() {
+        let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        server
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let handle = std::thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            let (n, from) = server.recv_from(&mut buf).unwrap();
+            let id = u16::from_be_bytes([buf[0], buf[1]]);
+            server
+                .send_to(&soa_response(id, [0x84, 0], 1, 77), from)
+                .unwrap();
+            buf[..n].to_vec()
+        });
+        let result = probe_secondary_soa(Ipv4Addr::LOCALHOST, port).await;
+        assert_eq!((result.status, result.serial), ("ok", Some(77)));
+        let query = handle.join().unwrap();
+        assert_eq!(&query[2..], &soa_query(0, "lan")[2..]);
+        let closed = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let free = closed.local_addr().unwrap().port();
+        drop(closed);
+        let gone = probe_secondary_soa(Ipv4Addr::LOCALHOST, free).await;
+        assert_eq!(gone.status, "unreachable");
+        assert!(
+            gone.detail
+                .starts_with(&format!("DNS query to 127.0.0.1:{free} failed"))
+        );
+    }
+
+    // What: backoff doubles the delay up to a cap.
+    // Why: one step serves every NATS retry loop.
+    #[tokio::test(start_paused = true)]
+    async fn backoff_doubles_up_to_the_cap() {
+        let mut delay = Duration::from_secs(1);
+        let max = Duration::from_secs(5);
+        backoff(&mut delay, max).await;
+        assert_eq!(delay, Duration::from_secs(2));
+        backoff(&mut delay, max).await;
+        assert_eq!(delay, Duration::from_secs(4));
+        backoff(&mut delay, max).await;
+        assert_eq!(delay, max);
+    }
+
+    // What: a Config with the five NATS roles filled in.
+    // Why: nats.conf and the fragment render from it.
+    fn nats_config() -> Config {
+        let mut env = full_env();
+        let extra = [
+            ("NATS_UI_USER", "ui"),
+            ("NATS_UI_PASSWORD", "pw-ui"),
+            ("NATS_DNS_WRITER_USER", "dnsw"),
+            ("NATS_DNS_WRITER_PASSWORD", "pw-dnsw"),
+            ("NATS_DNS_REPLICA_USER", "dnsr"),
+            ("NATS_DNS_REPLICA_PASSWORD", "pw-dnsr"),
+            ("NATS_CALLOUT_USER", "callout"),
+            ("NATS_CALLOUT_PASSWORD", "pw-callout"),
+            ("NATS_SYS_USER", "sys"),
+            ("NATS_SYS_PASSWORD", "pw-sys"),
+            ("NATS_STORE_DIR", "/data"),
+            ("NATS_MONITOR_PORT", "8222"),
+            ("NATS_CONF_PATH", "/etc/nats/nats.conf"),
+            ("NATS_AUTH_CALLOUT_PATH", "/etc/nats/auth.conf"),
+            ("NATS_LOG_FILE", "/log/nats.log"),
+        ];
+        for (key, value) in extra {
+            env.insert(key.to_string(), value.to_string());
+        }
+        load_from(&env).expect("a complete NATS env loads")
+    }
+
+    // What: unsafe NATS strings are named by their problem.
+    // Why: a quote or control char breaks nats.conf.
+    #[test]
+    fn nats_text_problems_are_named() {
+        assert_eq!(
+            nats_text_problem("L", ""),
+            Some("L cannot be empty".to_string())
+        );
+        for control in ["a\nb", "a\u{7f}b", "a\u{1f}"] {
+            let want = Some("L contains control characters".to_string());
+            assert_eq!(nats_text_problem("L", control), want, "{control:?}");
+        }
+        let quote = nats_text_problem("L", "a\"b");
+        assert_eq!(quote, Some("L contains double quotes".to_string()));
+        let slash = nats_text_problem("L", "a\\b");
+        assert_eq!(slash, Some("L contains backslashes".to_string()));
+        assert_eq!(nats_text_problem("L", "fine value 1"), None);
+        assert_eq!(nats_text_problem("L", " "), None);
+    }
+
+    // What: a role needs a plain user and a safe password.
+    // Why: bad values must fail before nats.conf is made.
+    #[test]
+    fn nats_logins_are_validated_with_a_role_label() {
+        let login = |user: &str, password: Option<&str>| NatsLogin {
+            user: user.to_string(),
+            password: password.map(str::to_string),
+        };
+        assert_eq!(
+            validate_nats_login("R", &login("ui-1.a_b", Some("x"))),
+            Ok(())
+        );
+        let cases = [
+            (login("", Some("x")), "NATS username cannot be empty"),
+            (login("ui", None), "NATS password cannot be empty"),
+            (login("ui", Some("")), "NATS password cannot be empty"),
+            (
+                login("ui", Some("a\"b")),
+                "NATS password contains double quotes",
+            ),
+            (
+                login("bad user", Some("x")),
+                "NATS username contains invalid characters (allowed: [A-Za-z0-9_.-]), got: bad user",
+            ),
+        ];
+        for (bad, problem) in cases {
+            let want = Err(format!("Invalid R credentials: {problem}"));
+            assert_eq!(validate_nats_login("R", &bad), want);
+        }
+        let cfg = nats_config();
+        assert_eq!(validate_nats_credentials(&cfg), Ok(()));
+        let labels: Vec<&str> = nats_roles(&cfg).iter().map(|(label, _)| *label).collect();
+        assert_eq!(
+            labels,
+            [
+                "NATS UI",
+                "NATS DNS writer",
+                "NATS DNS replica",
+                "NATS auth-callout",
+                "NATS system account"
+            ]
+        );
+    }
+
+    // What: a missing role password fails the whole set.
+    // Why: nats.conf and the ui connection fail closed.
+    #[test]
+    fn a_role_without_a_password_fails_validation() {
+        let mut env = full_env();
+        env.insert("NATS_SYS_USER".to_string(), "sys".to_string());
+        let cfg = load_from(&env).unwrap();
+        let err = validate_nats_credentials(&cfg).unwrap_err();
+        assert_eq!(
+            err,
+            "Invalid NATS UI credentials: NATS username cannot be empty"
+        );
+    }
+
+    // What: lists and role blocks use the nats.conf syntax.
+    // Why: the callout user must have no subject rights.
+    #[test]
+    fn nats_role_blocks_grant_rights_only_when_given() {
+        assert_eq!(nats_list(&["a", "b.>"]), "[\"a\", \"b.>\"]");
+        assert_eq!(nats_list::<&str>(&[]), "[]");
+        let login = NatsLogin {
+            user: "u".to_string(),
+            password: Some("p".to_string()),
+        };
+        let none: [&str; 0] = [];
+        assert_eq!(
+            nats_role_block(&login, &none, &none),
+            "    {\n      user: \"u\"\n      password: \"p\"\n    }\n"
+        );
+        assert_eq!(
+            nats_role_block(&login, &["x"], &none),
+            "    {\n      user: \"u\"\n      password: \"p\"\n      permissions = {\n        publish = [\"x\"]\n      }\n    }\n"
+        );
+        assert_eq!(
+            nats_role_block(&login, &["x"], &["y"]),
+            "    {\n      user: \"u\"\n      password: \"p\"\n      permissions = {\n        publish = [\"x\"]\n        subscribe = [\"y\"]\n      }\n    }\n"
+        );
+        assert_eq!(
+            nats_role_block(&login, &none, &["y"]),
+            "    {\n      user: \"u\"\n      password: \"p\"\n    }\n"
+        );
+    }
+
+    // What: DNS readers get fixed publish and subscribe.
+    // Why: static DNS roles and secondaries grant alike.
+    #[test]
+    fn dns_reader_rights_are_fixed() {
+        assert_eq!(
+            dns_reader_publish(),
+            [
+                "$JS.API.STREAM.INFO.LANCACHE_DNS",
+                "$JS.API.CONSUMER.INFO.LANCACHE_DNS.>",
+                "$JS.API.CONSUMER.CREATE.LANCACHE_DNS.>",
+                "$JS.API.CONSUMER.DURABLE.CREATE.LANCACHE_DNS.>",
+                "$JS.API.CONSUMER.MSG.NEXT.LANCACHE_DNS.>",
+                "$JS.ACK.LANCACHE_DNS.>",
+            ]
+        );
+        assert_eq!(dns_subscribe(), ["lancache.dns.>", "_INBOX.>"]);
+    }
+
+    // What: the static nats.conf for the fixed roles.
+    // Why: one owner of NATS users, rights and the include.
+    #[test]
+    fn nats_conf_renders_roles_and_the_include() {
+        let writer = "[\"lancache.dns.record\", \"lancache.dns.flush\", \"$JS.API.STREAM.CREATE.LANCACHE_DNS\", \"$JS.API.STREAM.INFO.LANCACHE_DNS\", \"$JS.API.CONSUMER.INFO.LANCACHE_DNS.>\", \"$JS.API.CONSUMER.CREATE.LANCACHE_DNS.>\", \"$JS.API.CONSUMER.DURABLE.CREATE.LANCACHE_DNS.>\", \"$JS.API.CONSUMER.MSG.NEXT.LANCACHE_DNS.>\", \"$JS.ACK.LANCACHE_DNS.>\"]";
+        let reader = "[\"lancache.dns.>\", \"_INBOX.>\"]";
+        let role = |user: &str, rights: &str| {
+            format!(
+                "    {{\n      user: \"{user}\"\n      password: \"pw-{user}\"\n{rights}    }}\n"
+            )
+        };
+        let ui = "      permissions = {\n        publish = [\"lancache.dns.record\", \"lancache.dns.flush\"]\n      }\n";
+        let dns = format!(
+            "      permissions = {{\n        publish = {writer}\n        subscribe = {reader}\n      }}\n"
+        );
+        let want = format!(
+            "jetstream {{\n  store_dir: \"/data\"\n}}\nhttp_port: 8222\nlog_file: \"/log/nats.log\"\nauthorization {{\n  users = [\n{}{}{}{}  ]\n  include \"auth.conf\"\n}}\naccounts {{\n  SYS: {{\n    users: [\n      {{ user: \"sys\", password: \"pw-sys\" }}\n    ]\n  }}\n}}\nsystem_account: SYS\n",
+            role("ui", ui),
+            role("dnsw", &dns),
+            role("dnsr", &dns),
+            role("callout", ""),
+        );
+        let got = render_nats_conf(&nats_config()).unwrap();
+        assert_eq!(got, want);
+    }
+
+    // What: nats.conf is refused for unsafe or missing data
+    // Why: a bad file would stop the broker on restart.
+    #[test]
+    fn nats_conf_refuses_bad_input() {
+        let base = |key: &str, value: Option<&str>| {
+            let mut env = full_env();
+            let all = [
+                ("NATS_UI_USER", "ui"),
+                ("NATS_UI_PASSWORD", "a"),
+                ("NATS_DNS_WRITER_USER", "w"),
+                ("NATS_DNS_WRITER_PASSWORD", "a"),
+                ("NATS_DNS_REPLICA_USER", "r"),
+                ("NATS_DNS_REPLICA_PASSWORD", "a"),
+                ("NATS_CALLOUT_USER", "c"),
+                ("NATS_CALLOUT_PASSWORD", "a"),
+                ("NATS_SYS_USER", "s"),
+                ("NATS_SYS_PASSWORD", "a"),
+                ("NATS_STORE_DIR", "/data"),
+                ("NATS_MONITOR_PORT", "8222"),
+                ("NATS_CONF_PATH", "/etc/nats/nats.conf"),
+                ("NATS_AUTH_CALLOUT_PATH", "/etc/nats/auth.conf"),
+                ("NATS_LOG_FILE", "/log/nats.log"),
+            ];
+            for (k, v) in all {
+                env.insert(k.to_string(), v.to_string());
+            }
+            match value {
+                Some(v) => env.insert(key.to_string(), v.to_string()),
+                None => env.remove(key),
+            };
+            render_nats_conf(&load_from(&env).unwrap())
+        };
+        assert_eq!(
+            base("NATS_STORE_DIR", None),
+            Err("NATS_STORE_DIR is not set".to_string())
+        );
+        let port = base("NATS_MONITOR_PORT", None).unwrap_err();
+        assert!(port.contains("NATS_MONITOR_PORT"), "{port}");
+        let apart = base("NATS_AUTH_CALLOUT_PATH", Some("/other/auth.conf")).unwrap_err();
+        assert_eq!(
+            apart,
+            "/other/auth.conf must sit next to /etc/nats/nats.conf"
+        );
+        let quote = base("NATS_LOG_FILE", Some("/log/\"x\"")).unwrap_err();
+        assert_eq!(quote, "NATS log file contains double quotes");
+        let store = base("NATS_STORE_DIR", Some("/da\\ta")).unwrap_err();
+        assert_eq!(store, "NATS store dir contains backslashes");
+        let nameless = base("NATS_AUTH_CALLOUT_PATH", Some("/etc/nats/")).unwrap_err();
+        assert_eq!(nameless, "/etc/nats/ must sit next to /etc/nats/nats.conf");
+        let user = base("NATS_UI_USER", Some("bad user")).unwrap_err();
+        assert!(user.starts_with("Invalid NATS UI credentials"));
+    }
+
+    // What: the auth_callout stanza lists the static users.
+    // Why: static roles skip the callout; others use it.
+    #[test]
+    fn auth_callout_fragment_lists_every_static_user() {
+        assert_eq!(
+            render_auth_callout_fragment(&nats_config(), "ISS", "XK"),
+            "auth_callout {\n  issuer: \"ISS\"\n  xkey: \"XK\"\n  auth_users: [\"ui\", \"dnsw\", \"dnsr\", \"callout\", \"sys\"]\n}\n"
+        );
+    }
+
+    // What: a signed JWT has header, claims, a valid sig.
+    // Why: nats-server rejects any unsigned or altered JWT.
+    #[test]
+    fn nats_jwt_is_signed_and_carries_its_claims() {
+        let signer = KeyPair::new_account();
+        let token = encode_nats_jwt(json!({"sub": "s", "n": 1}), &signer).unwrap();
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(b64url(br#"{"typ":"JWT","alg":"ed25519-nkey"}"#), parts[0]);
+        let claims = decode_jwt_payload(&token).unwrap();
+        assert_eq!(claims["sub"], "s");
+        assert_eq!(claims["n"], 1);
+        let jti = claims["jti"].as_str().unwrap();
+        assert_eq!(jti.len(), 52);
+        assert!(
+            jti.bytes()
+                .all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b))
+        );
+        let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(parts[2])
+            .unwrap();
+        let input = format!("{}.{}", parts[0], parts[1]);
+        assert!(signer.verify(input.as_bytes(), &signature).is_ok());
+        assert!(signer.verify(b"other", &signature).is_err());
+        let other = encode_nats_jwt(json!({"sub": "t"}), &signer).unwrap();
+        let other_jti = decode_jwt_payload(&other).unwrap()["jti"].clone();
+        assert_ne!(other_jti, claims["jti"]);
+        assert_eq!(b64url(&[0xfb, 0xff, 0xfe]), "-__-");
+    }
+
+    // What: a JWT payload decodes or fails with a reason.
+    // Why: the request is trusted by subject, no signature.
+    #[test]
+    fn jwt_payloads_decode_or_explain() {
+        assert_eq!(decode_jwt_payload("a.e30.c"), Ok(json!({})));
+        assert_eq!(
+            decode_jwt_payload("a.b"),
+            Err("malformed JWT: expected 3 dot-separated parts".to_string())
+        );
+        assert!(decode_jwt_payload("a.b.c.d").is_err());
+        let bad_b64 = decode_jwt_payload("a.!!.c").unwrap_err();
+        assert!(bad_b64.starts_with("failed to base64url-decode JWT payload"));
+        let bad_json = decode_jwt_payload(&format!("a.{}.c", b64url(b"nope"))).unwrap_err();
+        assert!(bad_json.starts_with("failed to parse JWT payload"));
+    }
+
+    // What: password hashes are Argon2id and verify.
+    // Why: only the hash is stored; plaintext shows once.
+    #[test]
+    fn nats_passwords_hash_to_argon2id() {
+        let hash = hash_nats_password("secret").unwrap();
+        assert!(hash.starts_with("$argon2id$"), "{hash}");
+        assert_ne!(hash, hash_nats_password("secret").unwrap());
+        let parsed = PasswordHash::new(&hash).unwrap();
+        assert!(
+            Argon2::default()
+                .verify_password(b"secret", &parsed)
+                .is_ok()
+        );
+        assert!(
+            Argon2::default()
+                .verify_password(b"other", &parsed)
+                .is_err()
+        );
+        let fresh = new_nats_password();
+        assert_eq!(fresh.len(), 64);
+        assert!(fresh.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_ne!(fresh, new_nats_password());
+    }
+
+    // What: the callout answer grants DNS-reader rights.
+    // Why: a user JWT with reader rights, or an error.
+    #[test]
+    fn auth_callout_answers_grant_or_refuse() {
+        let issuer = KeyPair::new_account();
+        let now = unix_secs() as i64;
+        let granted = auth_callout_response(&issuer, "srv", "UNKEY", Some("sec1")).unwrap();
+        let outer = decode_jwt_payload(&granted).unwrap();
+        assert_eq!(outer["iss"], issuer.public_key());
+        assert_eq!(outer["sub"], "UNKEY");
+        assert_eq!(outer["aud"], "srv");
+        assert!((now..now + 5).contains(&outer["iat"].as_i64().unwrap()));
+        assert_eq!(outer["nats"]["type"], "authorization_response");
+        assert_eq!(outer["nats"]["version"], 2);
+        assert!(outer["nats"].get("error").is_none());
+        let user = decode_jwt_payload(outer["nats"]["jwt"].as_str().unwrap()).unwrap();
+        assert_eq!(user["iss"], issuer.public_key());
+        assert_eq!(user["sub"], "UNKEY");
+        assert_eq!(user["aud"], "$G");
+        assert_eq!(user["name"], "sec1");
+        assert_eq!(
+            user["exp"].as_i64().unwrap() - user["iat"].as_i64().unwrap(),
+            7_776_000
+        );
+        assert_eq!(user["nats"]["pub"]["allow"], json!(dns_reader_publish()));
+        assert_eq!(
+            user["nats"]["sub"]["allow"],
+            json!(["lancache.dns.>", "_INBOX.>"])
+        );
+        for key in ["subs", "data", "payload"] {
+            assert_eq!(user["nats"][key], -1, "{key}");
+        }
+        assert_eq!(user["nats"]["type"], "user");
+        assert_eq!(user["nats"]["version"], 2);
+        let refused = auth_callout_response(&issuer, "srv", "UNKEY", None).unwrap();
+        let outer = decode_jwt_payload(&refused).unwrap();
+        assert_eq!(outer["nats"]["error"], "invalid secondary credentials");
+        assert!(outer["nats"].get("jwt").is_none());
     }
 }
