@@ -2473,7 +2473,7 @@ ROWS
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
     require_helper_image
-    main="$(declare -f git_default_branch_name | sed -n 's/.*default_branch:-\([A-Za-z0-9_-]*\)}.*/\1/p')"
+    main="$(_val name)"
     lo="127.$(( BATS_TEST_NUMBER % 250 + 1 ))" svc="probe${BATS_TEST_NUMBER}" mark="rev${BATS_TEST_NUMBER}"
     std="${lo}.0.1" ssl="${lo}.0.2"
     g() { git -c user.email=t@example.test -c user.name=t -c init.defaultBranch="${main}" "$@"; }
@@ -3662,40 +3662,28 @@ CASES
         echo "acl cidrs: ${output}"; return 1; }
 }
 
+# What: each ref kind pins its commit; the fallback is SOT's
+# Why: an operator ref must pin exactly that revision
+# From: Issue #1683 | PR #1858
 @test "setup bootstrap ref pins the checkout per ref kind" {
-    # What: tag, branch, commit, unknown ref, dirty tree
-    # Why: an operator ref must pin exactly that revision
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" main tagsha brsha mainsha ref want
+    local root t="${BATS_TEST_TMPDIR}" main tagsha brsha mainsha ref want err cur nb sot
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    TAG="v$(cat "${root}/VERSION")"
-    export T="${t}" TAG BR="b${BATS_TEST_NUMBER}" REF
-    main="$(declare -f git_default_branch_name | sed -n 's/.*default_branch:-\([A-Za-z0-9_-]*\)}.*/\1/p')"
-    [ -n "${main}" ] || { echo "no fallback branch in git_default_branch_name"; return 1; }
+    _load_setup_sh "${root}" || return 1
+    TAG="v$(_val semver)" BR="$(_val name)" main="$(_val name)" nb="$(_val name)"
+    export T="${t}" TAG BR REF
     g() { git -c user.email=t@example.test -c user.name=t -c init.defaultBranch="${main}" "$@"; }
-    g init -q --bare "${t}/origin.git"
-    g init -q "${t}/src"
-    g -C "${t}/src" commit -q --allow-empty -m c1
-    g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}"
-    g -C "${t}/src" tag "${TAG}"
-    g -C "${t}/src" push -q "${t}/origin.git" "${TAG}"
-    g -C "${t}/src" commit -q --allow-empty -m c2
-    g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}"
-    mainsha="$(g -C "${t}/src" rev-parse HEAD)"
-    tagsha="$(g -C "${t}/src" rev-parse "${TAG}^{commit}")"
-    g -C "${t}/src" checkout -q -b "${BR}"
-    g -C "${t}/src" commit -q --allow-empty -m d1
-    g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${BR}"
-    brsha="$(g -C "${t}/src" rev-parse HEAD)"
-    g clone -q "${t}/origin.git" "${t}/co"
+    g init -q --bare "${t}/origin.git" && g init -q "${t}/src" && g -C "${t}/src" commit -q --allow-empty -m c1 \
+        && g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}" && g -C "${t}/src" tag "${TAG}" \
+        && g -C "${t}/src" push -q "${t}/origin.git" "${TAG}" && g -C "${t}/src" commit -q --allow-empty -m c2 \
+        && g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}" || { echo "origin setup failed"; return 1; }
+    mainsha="$(g -C "${t}/src" rev-parse HEAD)" && tagsha="$(g -C "${t}/src" rev-parse "${TAG}^{commit}")" || return 1
+    g -C "${t}/src" checkout -q -b "${BR}" && g -C "${t}/src" commit -q --allow-empty -m d1 \
+        && g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${BR}" || { echo "branch setup failed"; return 1; }
+    brsha="$(g -C "${t}/src" rev-parse HEAD)" && g clone -q "${t}/origin.git" "${t}/co" || return 1
     _setup_sh_run 'unset LANCACHE_SETUP_GIT_REF; resolve_setup_bootstrap_ref'
     [ "${status}" -eq 0 ] && [ -z "${output}" ] || { echo "unset ref: ${output}"; return 1; }
     _setup_sh_run 'LANCACHE_SETUP_GIT_REF="${TAG}" resolve_setup_bootstrap_ref'
     [ "${status}" -eq 0 ] && [ "${output}" = "${TAG}" ] || { echo "set ref: ${output}"; return 1; }
-    # What: each ref kind lands on exactly its commit
-    # Why: tag, branch and commit pins must not drift
-    # From: Issue #1683 | PR #1858
     while read -r ref want; do
         REF="${ref}"
         _setup_sh_run 'sync_repo_to_ref "${T}/co" "${REF}"'
@@ -3705,30 +3693,51 @@ ${TAG} ${tagsha}
 ${BR} ${brsha}
 ${tagsha} ${tagsha}
 CASES
+    _setup_sh_run 'print_error ""'
+    [ "${status}" -eq 0 ] && [ -n "${output}" ] || { echo "print_error: ${output}"; return 1; }
+    err="${output}"
+    aborted_on() {
+        local e
+        e="$(awk -v p="${err}" 'index($0, p) == 1' <<< "${output}")"
+        [ "${status}" -eq 1 ] && [[ "${output}" != *unreached* && "$(wc -l <<< "${e}")" -eq 1 && "${e}" == *"$1"* ]]
+    }
     REF="missing-${BR}"
     _setup_sh_run 'sync_repo_to_ref "${T}/co" "${REF}"; echo unreached'
-    [ "${status}" -eq 1 ] && [[ "${output}" == *"Failed to fetch ref '${REF}'"* && "${output}" != *unreached* ]] \
-        || { echo "missing ref: ${output}"; return 1; }
+    aborted_on "Failed to fetch ref '${REF}'" || { echo "missing ref: ${output}"; return 1; }
     _setup_sh_run 'sync_repo_to_default_branch "${T}/co"'
     [ "${status}" -eq 0 ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${mainsha}" ] || { echo "default: ${output}"; return 1; }
-    g -C "${t}/co" remote set-head origin --delete
+    g -C "${t}/co" remote set-head origin --delete || return 1
     REF="${BR}"
     _setup_sh_run 'sync_repo_to_ref "${T}/co" "${REF}" && sync_repo_to_default_branch "${T}/co"'
     [ "${status}" -eq 0 ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${mainsha}" ] || { echo "no origin/HEAD: ${output}"; return 1; }
-    g init -q "${t}/noorigin"
+    g init -q "${t}/noorigin" || return 1
     _setup_sh_run 'git_default_branch_name "${T}/noorigin"; echo unreached'
-    [ "${status}" -eq 1 ] && [[ "${output}" == *"Failed to read the remote origin of ${t}/noorigin"* && "${output}" != *unreached* ]] \
-        || { echo "noorigin: ${output}"; return 1; }
-    g init -q --bare "${t}/nohead.git"
-    g init -q "${t}/unknown"
-    g -C "${t}/unknown" remote add origin "${t}/nohead.git"
-    _setup_sh_run 'git_default_branch_name "${T}/unknown"'
-    [ "${status}" -eq 0 ] && [ "${output}" = "${main}" ] || { echo "unknown head: ${output}"; return 1; }
-    printf '%s\n' "${BR}" > "${t}/co/${BR}.txt"
+    aborted_on "Failed to read the remote origin of ${t}/noorigin" || { echo "noorigin: ${output}"; return 1; }
+    g init -q --bare "${t}/nohead.git" && g init -q "${t}/unknown" \
+        && g -C "${t}/unknown" remote add origin "${t}/nohead.git" || { echo "nohead setup failed"; return 1; }
+    _setup_sh_run 'git_default_branch_name "${T}/unknown"; echo unreached'
+    aborted_on "Failed to read the release branch from the SOT of ${t}/unknown" || { echo "no SOT: ${output}"; return 1; }
+    cur="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_release_ref)" || return 1
+    sot="${t}/unknown/${CI_MANIFEST_REL}"
+    mkdir -p "${t}/unknown/${CI_SCRIPT_DIR#"${CI_REPO_ROOT}/"}" "${sot%/*}" \
+        && cp "${CI_SH}" "${t}/unknown/${CI_SCRIPT_DIR#"${CI_REPO_ROOT}/"}/" || return 1
+    export CI_MANIFEST="${CI_MANIFEST_SOURCE}" CI_REPO_ROOT ERR="${t}/stderr"
+    sot_ref() {
+        sed "s|^\( *ref: \)${cur//./\\.}\$|\1$1|" "${CI_MANIFEST_SOURCE}" > "${sot}" \
+            && [ "$(CI_MANIFEST="${sot}" _ci_release_ref)" = "$1" ] || { echo "SOT ref ${cur} not set to $1"; return 1; }
+    }
+    sot_ref "refs/heads/${nb}" || return 1
+    _setup_sh_run 'git_default_branch_name "${T}/unknown" 2> "${ERR}"; echo unreached'
+    [ "${status}" -eq 0 ] && [ "${output}" = "${nb}"$'\n'unreached ] && ! grep -qF -- "${err}" "${ERR}" \
+        || { echo "SOT branch: ${output} | $(cat "${ERR}")"; return 1; }
+    sot_ref "refs/tags/${nb}" || return 1
+    _setup_sh_run 'git_default_branch_name "${T}/unknown"; echo unreached'
+    aborted_on "The SOT of ${t}/unknown names no release branch ref: 'refs/tags/${nb}'" || { echo "SOT tag: ${output}"; return 1; }
+    printf '%s\n' "${BR}" > "${t}/co/${BR}.txt" || return 1
     REF="${TAG}"
     _setup_sh_run 'sync_repo_to_ref "${T}/co" "${REF}"; echo unreached'
-    [ "${status}" -eq 1 ] && [[ "${output}" == *"has local changes"* && "${output}" != *unreached* ]] \
-        && [ -f "${t}/co/${BR}.txt" ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${mainsha}" ] || { echo "dirty: ${output}"; return 1; }
+    aborted_on "has local changes" && [ -f "${t}/co/${BR}.txt" ] \
+        && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${mainsha}" ] || { echo "dirty: ${output}"; return 1; }
 }
 
 # What: UI_BIND_IP follows IP_STANDARD; one tag on stdout

@@ -2246,11 +2246,11 @@ EOF
     systemctl daemon-reload || die "systemctl daemon-reload failed."
 }
 
-# What: origin's default branch; "master" if it names none
+# What: origin's default branch; else the SOT release branch
 # Why: the local symref avoids a network call when it is set
 # From: Issue #1683 | PR #1858
 git_default_branch_name() {
-    local repo_dir="$1" default_branch="" rc=0 remote
+    local repo_dir="$1" default_branch="" rc=0 remote ref
 
     default_branch=$(git -C "$repo_dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD) || rc=$?
     [[ "$rc" -le 1 ]] || die "Failed to read origin/HEAD of $repo_dir (exit $rc)."
@@ -2260,8 +2260,14 @@ git_default_branch_name() {
             || die "Failed to read the remote origin of $repo_dir (exit $?)."
         default_branch=$(awk '/HEAD branch/ && $NF != "(unknown)" {print $NF; exit}' <<< "$remote")
     fi
+    if [[ -z "$default_branch" ]]; then
+        ref=$(env -u CI_MANIFEST -u CI_REPO_ROOT bash "$repo_dir/.github/scripts/ci.sh" release-ref) \
+            || die "Failed to read the release branch from the SOT of $repo_dir (exit $?); set LANCACHE_SETUP_GIT_REF."
+        [[ "$ref" == refs/heads/?* ]] || die "The SOT of $repo_dir names no release branch ref: '$ref'."
+        default_branch="${ref#refs/heads/}"
+    fi
 
-    printf '%s\n' "${default_branch:-master}"
+    printf '%s\n' "$default_branch"
 }
 
 # True if the working tree has no uncommitted changes (`git status --porcelain` is empty).
