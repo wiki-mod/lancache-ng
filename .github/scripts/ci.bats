@@ -30,41 +30,13 @@ setup() {
     _ci_sot_load || return 1
 }
 
-# What: docker stand-in, apk stub, server URL, SOT copy.
-# Why: callers need a daemon, registry or apk they lack.
+# What: docker and dig stand-ins first on PATH, state in DS
+# Why: setup.sh flows drive containers the test box lacks
 # From: Issue #1683 | PR #1858
 _stand_ins() {
     BIN="$(_val path)" DS="$(_val path)"; export BIN DS
     mkdir -p "${DS}/volumes" && _docker_stub "${BIN}" || return 1
     PATH="${BIN}:${PATH}"
-    # What: default apk resolver, rust ids docker-free.
-    # Why: rust identity now keys the build-tools signature.
-    # From: Issue #1683
-    CI_APK_RESOLVE_CMD="$(_stub "printf '%s\n' '$(_val name)'")"; export CI_APK_RESOLVE_CMD
-    # What: server URL every Actions run provides, fresh.
-    # Why: label provenance needs it; no real host in tests.
-    # From: Issue #1683 | PR #1858
-    GITHUB_SERVER_URL="$(_val url)"; export GITHUB_SERVER_URL
-    # What: SOT copy; fresh registry, platforms, runners.
-    # Why: tests read them back; no real or fixed value.
-    # From: Issue #1683 | PR #1858
-    local -a ed=(-e "s|^  registry: .*|  registry: $(_val host)|")
-    local plats p k f v
-    plats="$(_ci_build_matrix_platforms)" || return 1
-    for p in ${plats}; do
-        v="$(_val platform)"
-        ed+=(-e "s|${p//./\\.}|${v}|g" -e "s|^  ${p##*/}:\$|  ${v##*/}:|")
-    done
-    for k in $(_ci_block_keys platform_arch); do
-        for f in rust_target apk runner; do
-            v="$(_ci_block_entry_field platform_arch "${k}" "${f}")" || return 1
-            [ -z "${v}" ] || ed+=(-e "s|${v//./\\.}|$(_val name)|g")
-        done
-    done
-    CI_MANIFEST="${BATS_TEST_TMPDIR}/sot.yml"
-    sed "${ed[@]}" "${CI_MANIFEST_SOURCE}" > "${CI_MANIFEST}" || return 1
-    export CI_MANIFEST
-    _ci_sot_load || return 1
 }
 
 # What: the SOT release version as its image tag, vX.Y.Z
