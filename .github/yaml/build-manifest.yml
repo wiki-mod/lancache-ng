@@ -127,17 +127,15 @@ services:
   dns:
     context: services/dns
     labels: [dns, pdns, nats]
-    # What: named contexts for shared-secret and known-good
-    # Why: dns sources scripts/lib, not embedded.
-    # From: Issue #858
-    external_contexts:
-      - shared-secret=scripts/lib
-      - known-good=scripts/lib
     build_type: rust
     # What: workspace crates (cargo -p) built for this image.
     # Why: subscriber and supervisor run in one container.
     # From: Issue #1683
     crates: [nats-subscriber, lancache-watchdog]
+    # What: processes lancache-watchdog supervise runs.
+    # Why: ci.sh bakes them as LANCACHE_PROCESSES; one list.
+    # From: Issue #1683
+    processes: [pdns, dns-http, dns-https, nats-server, nats-subscriber, soa]
     final_base: alpine
     # What: final-image apk packages; the SOT owns the list.
     # Why: consumers derive; no hardcoding (AG-CI-006)
@@ -487,7 +485,7 @@ dependency_graph:
   proxy:
     contexts: [known-good, dns-domains]
   dns:
-    contexts: [shared-secret, known-good]
+    contexts: []
   dhcp:
     contexts: [shared-secret, known-good]
   ui:

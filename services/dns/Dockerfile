@@ -2,8 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# What: PowerDNS, nats-subscriber and Lua RPZ on Alpine.
-# Why: record ingest ships in the same image as the DNS.
+# What: PowerDNS auth, two recursors, NATS on Alpine.
+# Why: five-container decision; one supervisor runs it.
+# From: Issue #1683
 
 # What: base image pin, supplied by ci.sh from the SOT.
 # Why: SOT base_images.alpine is the sole owner (AG-CI-006).
@@ -17,16 +18,16 @@ ARG BUILD_TOOLS_IMAGE
 # What: scratch only when ci.sh passed no image arg.
 # Why: no baked image; a missing arg fails the build.
 # From: Issue #1683 | PR #1858
-FROM ${BUILD_TOOLS_IMAGE:-scratch} AS subscriber-builder
+FROM ${BUILD_TOOLS_IMAGE:-scratch} AS dns-builder
 
 # What: musl cross-target, supplied by ci.sh per platform.
 # Why: ci.sh owns arch mapping; no uname -m in the image.
 # From: Issue #1683
 ARG MUSL_TARGET
-# What: workspace crate, supplied by ci.sh from the SOT.
-# Why: the SOT owns the crate; rust-build receives it.
+# What: workspace crates, supplied by ci.sh from the SOT.
+# Why: the SOT owns the crates; rust-build receives them.
 # From: Issue #1683 | PR #1858
-ARG RUST_CRATE
+ARG RUST_CRATES
 
 # What: cargo tuning args, consumed by ci.sh rust-build.
 # Why: PROJECT_CARGO_*/CARGO_BUILD_JOBS own these.
@@ -54,6 +55,7 @@ COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
 # From: Issue #1683 | PR #1858
 COPY services/common services/common
 COPY services/dns/nats-subscriber/src services/dns/nats-subscriber/src
+COPY services/watchdog/src services/watchdog/src
 # What: retry policy for ci.sh, from SOT stage_variables
 # Why: this stage has no SOT; ci.sh reads them from env
 # From: Issue #1683 | PR #1858
@@ -70,27 +72,14 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
-    bash /usr/local/bin/ci.sh rust-build dns "${RUST_CRATE}"
+    bash /usr/local/bin/ci.sh rust-build dns "${RUST_CRATES}"
 
 # What: scratch only when ci.sh passed no image arg.
 # Why: no baked image; a missing arg fails the build.
 # From: Issue #1683 | PR #1858
 FROM ${ALPINE_IMAGE:-scratch}
 
-LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
-
-# What: dns owns domain-validation.sh; copied from its dir.
-# Why: dns is the arch owner; no shared-scripts indirection.
-# From: Issue #1683
-COPY services/dns/domain-validation.sh /usr/local/lib/domain-validation.sh
-# What: copy the shared-secret bootstrap lib.
-# Why: entrypoint uses it; no duplicate copy.
-# From: Issue #1683
-COPY --from=shared-secret shared-secret-bootstrap.sh /usr/local/lib/shared-secret-bootstrap.sh
-# What: copy the known-good-snapshot library.
-# Why: entrypoint uses it; no duplicate copy.
-# From: Issue #1683
-COPY --from=known-good known-good-snapshots.sh /usr/local/lib/known-good-snapshots.sh
+LABEL org.opencontainers.image.description="LanCache-NG dns: PowerDNS auth, dns-http and dns-https recursors, NATS server and subscriber."
 
 # What: build identity keys the cache of later layers.
 # Why: a new package set must not reuse a stale apk layer.
@@ -126,19 +115,26 @@ ENV VISUAL=$EDITOR
 RUN mkdir -p /etc/pdns/auth /var/lib/powerdns /var/run/pdns \
     && chown -R pdns:pdns /var/lib/powerdns /var/run/pdns
 
-COPY --from=subscriber-builder /build/nats-subscriber-out /usr/local/bin/nats-subscriber
+COPY --from=dns-builder /build/nats-subscriber-out /usr/local/bin/nats-subscriber
+COPY --from=dns-builder /build/lancache-watchdog-out /usr/local/bin/lancache-watchdog
 
-COPY services/dns/recursor.conf.template /etc/pdns/recursor.conf.template
-COPY services/dns/pdns.conf.template /etc/pdns/auth/pdns.conf.template
-COPY services/dns/recursor.lua /etc/pdns/recursor.lua
+# What: static inputs and the env names that point at them.
+# Why: the COPY and its path have one owner: this file.
+# From: Issue #815 | Issue #1683
 COPY services/dns/filter-aaaa.lua /etc/pdns/filter-aaaa.lua
 COPY services/dns/cdn-domains.txt /etc/pdns/cdn-domains.txt
-# What: vendored gsqlite3 schema for pdns-backend-sqlite3.
-# Why: the Alpine package ships no schema file.
-# From: Issue #815
 COPY services/dns/schema.sqlite3.sql /usr/share/lancache-ng/schema.sqlite3.sql
-COPY services/dns/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-EXPOSE 53/udp 53/tcp 8081 8082 8083
+ENV PDNS_LUA_DNS_SCRIPT=/etc/pdns/filter-aaaa.lua \
+    CDN_DOMAINS_FILE=/etc/pdns/cdn-domains.txt \
+    PDNS_SCHEMA_FILE=/usr/share/lancache-ng/schema.sqlite3.sql
 
-ENTRYPOINT ["/entrypoint.sh"]
+# What: processes the supervisor runs, from the SOT.
+# Why: ci.sh passes the list; the image holds no copy.
+# From: Issue #1683
+ARG LANCACHE_PROCESSES
+ENV LANCACHE_PROCESSES=${LANCACHE_PROCESSES}
+
+# What: the supervisor is the entrypoint; no shell script.
+# Why: entrypoint.sh is legacy; Rust starts every process.
+# From: Issue #1683
+ENTRYPOINT ["/usr/local/bin/lancache-watchdog", "supervise"]

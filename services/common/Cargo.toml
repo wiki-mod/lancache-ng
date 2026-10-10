@@ -22,7 +22,7 @@ path = "shared.rs"
 anyhow = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
-# What: reqwest client of the docker-socket-proxy (rustls).
+# What: reqwest client of the Docker API (rustls).
 # Why: AG-REL-003 forbids openssl-sys.
 # From: Issue #1683 | PR #1858
 reqwest = { workspace = true }
