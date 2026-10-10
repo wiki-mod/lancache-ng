@@ -169,6 +169,7 @@ services:
   dns:
     container_name: LanCache-NG-dns
     image: ${LANCACHE_IMAGE_REF_DNS:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}}
+    init: true
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:?KEEP_KNOWN_GOOD_CONFIGS is required}
       - LOG_QUERIES=${LOG_QUERIES:?LOG_QUERIES is required}
@@ -178,12 +179,20 @@ services:
       - PDNS_SOA_RESYNC_INTERVAL=${PDNS_SOA_RESYNC_INTERVAL:?PDNS_SOA_RESYNC_INTERVAL is required}
       - PROXY_IP=${IP_STANDARD:?IP_STANDARD is required}
       - PROXY_HTTPS_IP=${IP_SSL:?IP_SSL is required}
-      - DNS_HTTPS_LISTEN_PORT=1053
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - PDNS_API_KEY=${PDNS_API_KEY}
       - DDNS_ALLOW_FROM=${IP_STANDARD},${IP_SSL}
       - DNS_REPLICATION_ROLE=primary
-      - NATS_SERVER_ENABLED=1
+      - SUPERVISE_RUN_DIR=/run/lancache
+      - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
+      - LANCACHE_SHARED_SECRET_GID=10001
+      - PDNS_DATA_DIR=/var/lib/powerdns
+      - DNS_STATE_DIR=/var/lib/powerdns-state
+      - DNS_CONFIG_SNAPSHOT_DIR=/var/lib/lancache-dns/config-snapshots
+      - NATS_CONF_PATH=/etc/nats/nats.conf
+      - NATS_AUTH_CALLOUT_PATH=/etc/nats/auth_callout.conf
+      - NATS_STORE_DIR=/var/lib/nats
+      - NATS_MONITOR_PORT=8222
       - NATS_URL=nats://127.0.0.1:4222
       - NATS_USER=${NATS_DNS_WRITER_USER:?NATS_DNS_WRITER_USER is required}
       - NATS_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-}
@@ -202,14 +211,14 @@ services:
       - NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD:-}
     volumes:
       - shared-secrets:/var/lib/lancache-secrets
-      - ui-data:/data:ro
-      - watchdog-status:/var/run/watchdog
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       - ${PDNS_STANDARD_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-standard}:/var/lib/powerdns
       - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
       - ${NATS_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats}:/var/lib/nats
       - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf}:/etc/nats
       - dns-config-snapshots:/var/lib/lancache-dns
+    tmpfs:
+      - /run/lancache
     # What: dns-http on IP_STANDARD, dns-https on IP_SSL.
     # Why: one container port each keeps the caches apart.
     # From: Issue #1683
