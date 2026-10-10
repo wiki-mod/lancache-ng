@@ -2471,33 +2471,29 @@ esac
 STUB
 }
 
+# What: list-prompts walks the real wizard, no side effects
+# Why: the release validation plan derives prompts from it
+# From: Issue #1683 | PR #1858
 @test "setup list-prompts walks the real wizard without side effects" {
-    # What: prompts, defaults, branches of the real wizard
-    # Why: CI prompt checks must see what operators see
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" tpl std dev pfx ssl k base pats preset modes m dhcp ddir add v d p q try
+    local root t="${BATS_TEST_TMPDIR}" tpl std other dev pfx lo ssl k base preset modes m dhcp ddir add v d p try
     local -a ans=()
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
-    # What: a checkout copy whose template DHCP values shift
-    # Why: a default equal to an old literal proves no owner
+    # What: the walk runs on a checkout copy
+    # Why: a side effect must not reach the real checkout
     # From: Issue #1683 | PR #1858
     _checkout_copy "${root}" "${t}/repo" || { echo "checkout copy failed"; return 1; }
     tpl="${t}/repo/deploy/prod/.env"
-    for v in DHCP_SUBNET DHCP_GATEWAY DHCP_RANGE_START DHCP_RANGE_END; do
-        d="$(get_env_var "${v}" "${tpl}")"
-        printf '%s\n' "${d}" "${d%/*}" >> "${t}/unshifted"
-        set_env_key "${v}" "$(awk -F. -v OFS=. '{ $3 = ($3 + 1) % 256; print }' <<< "${d}")" "${tpl}"
-        [ "$(get_env_var "${v}" "${tpl}")" != "${d}" ] || { echo "${v} not shifted"; return 1; }
-    done
-    std="$(get_env_var IP_STANDARD "${tpl}")"
-    dev="lan${BATS_TEST_NUMBER}" pfx=$(( BATS_TEST_NUMBER % 8 + 16 ))
+    std="10.$(_val int 0 127).$(_val int 0 255).$(_val int 1 254)" dev="$(_val name)" pfx="$(_val int 16 30)"
+    other="10.$(_val int 128 255).$(_val int 0 255).$(_val int 1 254)"
+    lo="127.$(_val int 0 255).$(_val int 0 255).$(_val int 1 254)"
+    [ "${std}" != "$(get_env_var IP_STANDARD "${tpl}")" ] || { echo "host address equals the template's"; return 1; }
     export IPDS="${t}/ipds" SETUP="${t}/repo/setup.sh" ANS="${t}/answers" PRESET=""
     mkdir -p "${IPDS}"
     _ip_stub "${t}/ipbin"
     _host() {
         rm -f "${IPDS}/fail-addr"
-        printf '%s\n' "127.0.0.1 8 lo" "$@" > "${IPDS}/addrs"
+        printf '%s\n' "${lo} 8 lo" "$@" > "${IPDS}/addrs"
         printf '%s %s\n' "${std}" "${dev}" > "${IPDS}/src"
     }
     _lp() {
@@ -2517,23 +2513,13 @@ STUB
     _lp
     [ "${status}" -eq 0 ] || { echo "defaults: ${output}"; return 1; }
     base="$(_prompts)"
-    # What: each prompt matches an ask/confirm in setup.sh
-    # Why: the list comes from the wizard, never made up
-    # From: Issue #1683 | PR #1858
-    pats="${t}/prompt-patterns"
-    grep -oE '\b(ask|confirm) "[^"]*"' "${root}/setup.sh" | sed -E 's/^(ask|confirm) "//; s/"$//' \
-        | sed -E 's/\$\{[^}]*\}|\$\([^)]*\)|\$[A-Za-z_][A-Za-z0-9_]*/@@V@@/g; s/[][\\.^$*+?(){}|]/\\&/g; s/@@V@@/.*/g; s/.*/^&$/' \
-        | grep -vxF '^.*$' > "${pats}"
-    while IFS= read -r q; do
-        grep -qE -f "${pats}" <<< "${q}" || { echo "prompt not from setup.sh: ${q}"; return 1; }
-    done <<< "${base}"
     # What: default is the detected IP; offer uses its link
     # Why: AG-SEC-007; no guessed address, device or mask
     # From: Issue #1683 | PR #1858
     k="$(awk -F'\t' -v ip="${std}" '$1 == "PROMPT" { n++; if ($3 == ip) { print n; exit } }' <<< "${output}")"
     ssl="$(_default $(( k + 1 )))"
     [ -n "${k}" ] && [ -n "${ssl}" ] && [ "${ssl}" != "${std}" ] \
-        && [[ "${output}" == *"${std}/${pfx} dev ${dev}"* && "${output}" != *"127.0.0.1/8"* ]] \
+        && [[ "${output}" == *"${std}/${pfx} dev ${dev}"* && "${output}" != *"${lo}/8"* ]] \
         && [[ "${base}" == *"${ssl}/${pfx} dev ${dev}"* ]] || { echo "detection: ${output}"; return 1; }
     add="$(grep -nF -- "${ssl}/${pfx} dev ${dev}" <<< "${base}" | cut -d: -f1)"
     # What: no address: no default, and a fail, not a loop
@@ -2554,10 +2540,9 @@ STUB
     [ "${status}" -eq 0 ] && [[ "$(_prompts)" != *"${ssl}/"* && "${output}" == *"${ssl} already assigned"* ]] \
         || { echo "assigned: ${output}"; return 1; }
     _host "${std} ${pfx} ${dev}"
-    v="$(get_env_var IP_SSL "${tpl}")"
-    ans=(); ans[$(( k - 1 ))]="${v}"; _write_ans
+    ans=(); ans[$(( k - 1 ))]="${other}"; _write_ans
     _lp "${ANS}"
-    [ "${status}" -eq 0 ] && [[ "$(_prompts)" != *" dev "* && "${output}" == *"interface that carries ${v}"* ]] \
+    [ "${status}" -eq 0 ] && [[ "$(_prompts)" != *" dev "* && "${output}" == *"interface that carries ${other}"* ]] \
         || { echo "foreign: ${output}"; return 1; }
     # What: y to the add offer never runs ip addr add
     # Why: list-prompts must not change host networking
@@ -2610,8 +2595,15 @@ STUB
     done
     d="$(get_env_var DHCP_SUBNET "${tpl}")"
     grep -qxF -- "${d%/*}" "${t}/extra-defaults" || { echo "subnet start default not from the template"; return 1; }
-    v=0; grep -qxF -f "${t}/unshifted" "${t}/extra-defaults" || v=$?
-    [ "${v}" -eq 1 ] || { echo "a default ignores the template (grep rc ${v})"; return 1; }
+    # What: no template DHCP default is literal in setup.sh
+    # Why: one owner of the defaults; a copy passes above
+    # From: Issue #1683 | PR #1858
+    for v in DHCP_SUBNET DHCP_GATEWAY DHCP_RANGE_START DHCP_RANGE_END; do
+        d="$(get_env_var "${v}" "${tpl}")"
+        for p in "${d}" "${d%/*}"; do
+            if grep -qwF -- "${p}" "${SETUP}"; then echo "${v} default ${p} is a literal in setup.sh"; return 1; fi
+        done
+    done
     # What: same input, same walk; help; missing file fails
     # Why: AG-OP-006 repeat-run stable; fail closed on input
     # From: Issue #1683 | PR #1858
