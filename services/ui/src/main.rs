@@ -4609,7 +4609,7 @@ fn parse_custom_options(raw: &str) -> Result<String, String> {
 }
 
 // What: validate and save the dnsmasq-proxy settings.
-// Why: a typo should fail here, not when dnsmasq starts.
+// Why: a typo should fail here, not at dnsmasq start.
 // From: Issue #450
 async fn update_dhcp_proxy(
     State(state): Shared,
@@ -12533,5 +12533,221 @@ mod tests {
         assert_eq!(ok.status(), 303);
         assert_eq!(kea.lock().unwrap().config, snapshot);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: a DHCP mode switch stops, saves, starts.
+    // Why: the order keeps a failed save from losing DHCP.
+    #[tokio::test]
+    async fn dhcp_mode_switch_stops_saves_then_starts() {
+        let dir = unique_temp_dir("dhcp-mode");
+        let conf = dir.join("ui.conf");
+        fs::write(&conf, "DHCP_MODE=disabled\n").unwrap();
+        let (docker, seen) = serve_canned(vec![(204, vec![]), (204, vec![])]);
+        let (path, url) = (conf.to_string_lossy().to_string(), docker);
+        let (base, state, sdir) = test_server(move |cfg| {
+            cfg.ui_settings_file = path;
+            cfg.docker_proxy_url = url;
+        })
+        .await;
+        let session = open_session(&base, &state).await;
+        let bad = post_form(&base, &session, "/dhcp/mode", "dhcp_mode=bogus").await;
+        assert_eq!(bad.status(), 409);
+        let ok = post_form(&base, &session, "/dhcp/mode", "dhcp_mode=KEA").await;
+        assert_eq!(ok.status(), 303);
+        assert_eq!(ok.headers()[header::LOCATION], "/dhcp");
+        assert!(
+            fs::read_to_string(&conf)
+                .unwrap()
+                .starts_with("DHCP_MODE=kea\n")
+        );
+        assert!(!dir.join(".dhcp-mode-write-check").exists());
+        let requests = seen.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("POST /containers/lancache-dhcp-proxy/stop?t=10 "));
+        assert!(requests[1].starts_with("POST /containers/lancache-dhcp/start "));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&sdir);
+    }
+
+    // What: proxy to relay restarts the shared container.
+    // Why: one container serves both and must reread mode.
+    #[tokio::test]
+    async fn dhcp_proxy_and_relay_switch_restarts_the_container() {
+        let dir = unique_temp_dir("dhcp-relay");
+        let conf = dir.join("ui.conf");
+        fs::write(&conf, "DHCP_MODE=dnsmasq-proxy\n").unwrap();
+        let replies = vec![(204, vec![]), (204, vec![]), (204, vec![])];
+        let (docker, seen) = serve_canned(replies);
+        let (path, url) = (conf.to_string_lossy().to_string(), docker);
+        let (base, state, sdir) = test_server(move |cfg| {
+            cfg.ui_settings_file = path;
+            cfg.docker_proxy_url = url;
+        })
+        .await;
+        let session = open_session(&base, &state).await;
+        let body = "dhcp_mode=dnsmasq-relay";
+        let ok = post_form(&base, &session, "/dhcp/mode", body).await;
+        assert_eq!(ok.status(), 303);
+        let saved = fs::read_to_string(&conf).unwrap();
+        assert!(saved.starts_with("DHCP_MODE=dnsmasq-relay\n"));
+        let requests = seen.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].starts_with("POST /containers/lancache-dhcp/stop?t=10 "));
+        assert!(requests[1].starts_with("POST /containers/lancache-dhcp-proxy/stop?t=10 "));
+        assert!(requests[2].starts_with("POST /containers/lancache-dhcp-proxy/start "));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&sdir);
+    }
+
+    // What: a missing container, a bad volume are reported.
+    // Why: the operator needs the fix, not a bare 500.
+    #[tokio::test]
+    async fn dhcp_mode_switch_reports_start_and_write_failures() {
+        let dir = unique_temp_dir("dhcp-mode-fail");
+        let conf = dir.join("ui.conf");
+        fs::write(&conf, "DHCP_MODE=disabled\n").unwrap();
+        let (docker, _seen) = serve_canned(vec![(204, vec![]), (404, vec![])]);
+        let (path, url) = (conf.to_string_lossy().to_string(), docker);
+        let (base, state, sdir) = test_server(move |cfg| {
+            cfg.ui_settings_file = path;
+            cfg.docker_proxy_url = url;
+        })
+        .await;
+        let session = open_session(&base, &state).await;
+        let never = post_form(&base, &session, "/dhcp/mode", "dhcp_mode=kea").await;
+        assert_eq!(never.status(), 500);
+        let text = never.text().await.unwrap();
+        assert!(text.contains("has not been created yet"));
+        assert!(text.contains("--profile dhcp-kea up -d lancache-dhcp"));
+        let _ = fs::remove_dir_all(&sdir);
+
+        let blocker = dir.join("file");
+        fs::write(&blocker, "x").unwrap();
+        let path = format!("{}/ui.conf", blocker.to_string_lossy());
+        let (base, state, sdir) = test_server(move |cfg| cfg.ui_settings_file = path).await;
+        let session = open_session(&base, &state).await;
+        let ro = post_form(&base, &session, "/dhcp/mode", "dhcp_mode=kea").await;
+        assert_eq!(ro.status(), 500);
+        assert!(ro.text().await.unwrap().contains("is not writable"));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&sdir);
+    }
+
+    // What: the proxy form is checked, then saved.
+    // Why: a typo should fail here, not at dnsmasq start.
+    #[tokio::test]
+    async fn dhcp_proxy_form_is_validated_then_saved() {
+        let dir = unique_temp_dir("dhcp-proxy");
+        let conf = dir.join("ui.conf");
+        let path = conf.to_string_lossy().to_string();
+        let (base, state, sdir) = test_server(move |cfg| cfg.ui_settings_file = path).await;
+        let session = open_session(&base, &state).await;
+        let base_form = [
+            ("dhcp_subnet_start", "192.168.1.100"),
+            ("dhcp_dns_primary", "192.168.1.2"),
+            ("upstream_dhcp_ip", "192.168.1.1"),
+        ];
+        let body = |changes: &[(&str, &str)]| {
+            let mut pairs: Vec<(&str, &str)> = base_form.to_vec();
+            for (key, value) in changes {
+                pairs.retain(|(k, _)| k != key);
+                pairs.push((key, value));
+            }
+            pairs
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("&")
+        };
+        let cases: [(&[(&str, &str)], &str); 11] = [
+            (&[("dhcp_subnet_start", "x")], "Invalid relay subnet start"),
+            (&[("dhcp_dns_primary", "")], "Invalid primary DNS"),
+            (
+                &[("upstream_dhcp_ip", "1.2.3")],
+                "Invalid upstream DHCP server",
+            ),
+            (&[("dhcp_dns_secondary", "x")], "Invalid secondary DNS"),
+            (
+                &[("dhcp_proxy_interface", "e t h")],
+                "Invalid relay/proxy listen interface",
+            ),
+            (
+                &[("dhcp_proxy_router", "x")],
+                "Invalid router/gateway option",
+            ),
+            (
+                &[("dhcp_ntp_servers", "1.1.1.1,x")],
+                "Invalid NTP servers option",
+            ),
+            (
+                &[("dhcp_proxy_domain", "bad_domain!")],
+                "Invalid domain option",
+            ),
+            (
+                &[("dhcp_proxy_boot_filename", "a b")],
+                "Invalid PXE boot filename",
+            ),
+            (
+                &[("dhcp_proxy_boot_server", "x")],
+                "Invalid PXE boot server address",
+            ),
+            (
+                &[("dhcp_proxy_boot_server", "192.168.1.9")],
+                "requires a boot filename",
+            ),
+        ];
+        for (changes, message) in cases {
+            let response = post_form(&base, &session, "/dhcp/proxy", &body(changes)).await;
+            assert_eq!(response.status(), 400, "{message}");
+            assert!(
+                response.text().await.unwrap().contains(message),
+                "{message}"
+            );
+            assert!(!conf.exists());
+        }
+        let custom = post_form(
+            &base,
+            &session,
+            "/dhcp/proxy",
+            &body(&[("dhcp_proxy_custom_options", "nocolon")]),
+        )
+        .await;
+        assert_eq!(custom.status(), 400);
+        assert!(
+            custom
+                .text()
+                .await
+                .unwrap()
+                .contains("Invalid custom DHCP option")
+        );
+        let full = body(&[
+            ("dhcp_dns_secondary", "192.168.1.3"),
+            ("dhcp_proxy_interface", "eth0"),
+            ("dhcp_proxy_router", "192.168.1.1"),
+            ("dhcp_ntp_servers", "192.168.1.5,192.168.1.6"),
+            ("dhcp_proxy_domain", "lan.example"),
+            ("dhcp_proxy_boot_filename", "pxelinux.0"),
+            ("dhcp_proxy_boot_server", "192.168.1.9"),
+        ]);
+        let ok = post_form(&base, &session, "/dhcp/proxy", &full).await;
+        assert_eq!(ok.status(), 303);
+        assert_eq!(ok.headers()[header::LOCATION], "/dhcp");
+        let saved = fs::read_to_string(&conf).unwrap();
+        for line in [
+            "DHCP_SUBNET_START=192.168.1.100",
+            "DHCP_DNS_PRIMARY=192.168.1.2",
+            "DHCP_DNS_SECONDARY=192.168.1.3",
+            "UPSTREAM_DHCP_IP=192.168.1.1",
+            "DHCP_NTP_SERVERS=192.168.1.5,192.168.1.6",
+            "DHCP_PROXY_INTERFACE=eth0",
+            "DHCP_PROXY_ROUTER=192.168.1.1",
+            "DHCP_PROXY_DOMAIN=lan.example",
+            "DHCP_PROXY_BOOT_FILENAME=pxelinux.0",
+            "DHCP_PROXY_BOOT_SERVER=192.168.1.9",
+        ] {
+            assert!(saved.lines().any(|l| l == line), "{line}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&sdir);
     }
 }
