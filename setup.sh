@@ -93,9 +93,8 @@ ask() {
     REPLY="${REPLY:-$default}"
 }
 
-# CLI argument-parsing guard: dies if a flag's value is missing or looks like
-# another flag (e.g. `--token --name`), which would otherwise silently consume
-# the next option as this one's value.
+# What: rejects a missing value or a flag as value
+# Why: a flag would silently consume the next option
 require_value() {
     local option="$1" value="${2:-}"
     if [[ -z "$value" || "$value" == --* ]]; then
@@ -218,9 +217,8 @@ detect_lan_ip() {
     return 1
 }
 
-# Cluster: detects and works around another process (e.g. systemd-resolved)
-# already bound to port 53 on the chosen Secondary listen IP, since that would
-# otherwise fail silently at container start rather than during setup.
+# What: lists port-53 holders on the chosen listen IP
+# Why: a busy port would fail silently at container start
 secondary_listen_ip_conflicts() {
     local listen_ip="$1" sockets
 
@@ -339,18 +337,16 @@ is_valid_dhcp_mode() {
     esac
 }
 
-# Validates UI_SESSION_TTL_SECONDS is a positive integer no greater than
-# MAX_UI_SESSION_TTL_SECONDS (1 year), so a malformed or absurd .env value
-# cannot produce a session cookie that never expires.
+# What: checks UI session TTL is 1 to MAX seconds (1 year)
+# Why: a bad value must not yield a never-expiring cookie
 validate_ui_session_ttl_seconds() {
     local value="$1" source="${2:-UI_SESSION_TTL_SECONDS}" numeric max
 
     if [[ ! "$value" =~ ^[0-9]+$ ]]; then
         die "UI_SESSION_TTL_SECONDS in ${source} must be an unsigned integer number of seconds."
     fi
-    # Strip leading zeros before the numeric comparisons below: bash arithmetic
-    # treats a leading-zero literal (e.g. "010") as octal, which would silently
-    # misparse or reject an otherwise valid decimal value.
+    # What: strips leading zeros before the comparisons
+    # Why: bash reads a leading zero as octal
     numeric="${value#"${value%%[!0]*}"}"
     numeric="${numeric:-0}"
     if [[ "$numeric" = "0" ]]; then
@@ -411,16 +407,16 @@ compose_profiles_for_runtime() {
     printf '%s\n' "$result"
 }
 
-# Wraps ask() into a yes/no boolean prompt (accepts "y" or "yes", case-insensitive).
+# What: yes/no prompt; accepts y or yes, any case
+# Why: wraps ask() for boolean decisions
 confirm() {
     local prompt="$1" default="${2:-N}"
     ask "$prompt" "$default"
     [[ "${REPLY,,}" = "y" || "${REPLY,,}" = "yes" ]]
 }
 
-# The Kea path must stay discovery-first: run a non-invasive broadcast probe
-# before the stack is activated so we can stop or warn before becoming a
-# second active DHCP server on the LAN.
+# What: runs a broadcast DHCP probe before Kea activation
+# Why: stops or warns before a second DHCP server exists
 run_kea_dhcp_activation_preflight() {
     local env_file="$1" output server_identifier=""
 
@@ -667,8 +663,8 @@ install_docker_apt() {
     verify_docker_installation
 }
 
-# Same fallback logic as install_docker_apt, but for the case where Docker
-# itself is already installed and only the Compose v2 plugin is missing.
+# What: Compose-only install via apt, same fallbacks
+# Why: Docker present; only the Compose plugin missing
 install_docker_compose_apt() {
     local compose_package=""
 
@@ -687,8 +683,8 @@ install_docker_compose_apt() {
     verify_docker_installation
 }
 
-# Filters an arbitrary package name list down to just the ones actually
-# installed, via rpm -q, for use as a generic conflict-detection building block.
+# What: keeps only the named packages that rpm lists
+# Why: generic building block for conflict checks
 rpm_installed_package_list() {
     local installed package
 
@@ -701,9 +697,8 @@ rpm_installed_package_list() {
     done
 }
 
-# Lists the historical Docker Inc./distro-provided package names that conflict
-# with Docker CE's own RPM packages, so they can be surfaced before installing
-# and the operator is told what to remove instead of hitting an opaque rpm error.
+# What: lists legacy Docker packages that conflict
+# Why: the operator sees removals, not an rpm error
 rpm_legacy_docker_package_list() {
     rpm_installed_package_list \
         docker \
@@ -718,9 +713,8 @@ rpm_legacy_docker_package_list() {
         docker-engine
 }
 
-# Returns every installed package that would block a clean Docker CE RPM
-# install, using OS-specific rules (see the branch comments below) since
-# Fedora and RHEL-family hosts have different podman/runc conflict policies.
+# What: lists installed packages that block Docker CE
+# Why: podman and runc rules differ on Fedora and RHEL
 rpm_conflicting_docker_packages() {
     local os_id=""
 
@@ -731,13 +725,13 @@ rpm_conflicting_docker_packages() {
     fi
 
     if [[ "$os_id" = fedora ]]; then
-        # Fedora's supported Docker install path only requires removing
-        # Docker-family packages. Stock podman/runc must remain allowed.
+        # What: Fedora: only Docker-family packages must go
+        # Why: stock podman and runc stay allowed
         rpm_installed_package_list podman-docker
         rpm_legacy_docker_package_list
     else
-        # RHEL-family Docker packages additionally conflict with stock
-        # podman/runc, so fail before mutating repository configuration.
+        # What: RHEL-family also rejects podman and runc
+        # Why: repo config must not change before the check
         rpm_legacy_docker_package_list
         rpm_installed_package_list \
             podman \
@@ -745,8 +739,8 @@ rpm_conflicting_docker_packages() {
     fi
 }
 
-# Fails closed with a concrete remediation command (dnf remove ...) instead of
-# letting rpm/dnf hit the conflict mid-install and leave the host half-configured.
+# What: fails closed with a dnf remove command
+# Why: rpm conflicts mid-install would half-configure
 guard_rpm_docker_conflicts() {
     local package list
     local -a conflicts=()
@@ -1116,7 +1110,8 @@ generate_secret_value() {
     printf '%s\n' "$value"
 }
 
-# Keep real existing secrets, but replace empty values and known placeholders.
+# What: keeps a usable secret, else generates one
+# Why: empty values and placeholders are replaced
 get_or_generate_secret() {
     local key="$1" env_file="$2" kind="$3"
 
@@ -1221,27 +1216,26 @@ set_env_assignment() {
     fi
 }
 
-# Adds KEY=VALUE only if the key is completely absent; never touches an
-# existing assignment, even if it is empty (see comment inside).
+# What: adds KEY=VALUE only if the key is absent
+# Why: an existing assignment, even empty, is kept
 append_env_key_if_missing() {
     local key="$1" value="$2" env_file="$3"
     validate_env_value "$key" "$value"
-    # Preserve intentional empty placeholders; only add the key when it is
-    # absent. Explicit die() (see set_env_key's matching comment) instead of
-    # relying on `set -e` alone.
+    # What: adds the key only when absent
+    # Why: empty placeholders must survive updates
     env_key_exists "$key" "$env_file" \
         || printf '%s=%s\n' "$key" "$value" >> "$env_file" \
         || die "Failed to append $key to $env_file."
 }
 
-# Fills in a default only when the key is missing or its current value is
-# empty; a non-empty existing assignment (even raw/interpolated) is kept as-is.
+# What: fills a default only when missing or empty
+# Why: a non-empty raw assignment is kept as-is
 set_env_key_if_empty_or_missing() {
     local key="$1" value="$2" env_file="$3" existing_assignment
     validate_env_value "$key" "$value"
     if env_key_exists "$key" "$env_file"; then
-        # Keep an operator's existing non-empty assignment verbatim so Compose
-        # interpolation and other already-valid raw values survive update.
+        # What: keeps an existing non-empty assignment
+        # Why: Compose interpolation must survive updates
         existing_assignment=$(get_env_assignment_value_raw_nonempty "$key" "$env_file") || exit $?
         if [[ -n "$existing_assignment" ]]; then
             set_env_assignment "$key" "$existing_assignment" "$env_file"
@@ -1256,7 +1250,8 @@ set_env_key_if_empty_or_missing() {
     fi
 }
 
-# Like append_env_key_if_missing, but for a raw assignment (see set_env_assignment).
+# What: appends a raw assignment if the key is missing
+# Why: raw values keep their interpolation
 append_env_assignment_if_missing() {
     local key="$1" assignment_value="$2" env_file="$3"
     case "$key" in
@@ -1405,15 +1400,14 @@ set_optional_env_path_override_if_needed() {
         remove_env_key "$key" "$env_file"
     fi
 
-    # Keep the one-root contract effective: if the derived state-root path is
-    # already correct, leave optional per-service keys absent so a later
-    # LANCACHE_STATE_DIR change still retargets the service.
+    # What: leaves optional keys absent at the derived root
+    # Why: a later LANCACHE_STATE_DIR change still applies
     [[ "$desired_path" = "$derived_path" ]] && return 0
     set_env_key "$key" "$desired_path" "$env_file"
 }
 
-# Deletes every line assigning the given key, if any exist; a no-op if the key
-# is already absent.
+# What: deletes every assignment of the key
+# Why: a missing key is a no-op
 remove_env_key() {
     local key="$1" env_file="$2"
 
@@ -1421,14 +1415,13 @@ remove_env_key() {
     rewrite_env_key "$env_file" "$key" "" remove
 }
 
-# Default LANCACHE_STATE_DIR for a given install_dir (see comment inside for
-# the deploy/prod special case).
+# What: default LANCACHE_STATE_DIR for an install dir
+# Why: deploy/prod reads the compose file's default
 production_state_root_default() {
     local install_dir="$1" compose roots
 
-    # A manual production checkout runs setup.sh update against deploy/prod,
-    # but runtime state must still live in the approved production root instead
-    # of inside the Git checkout.
+    # What: prod runs keep state outside the checkout
+    # Why: state must not live in the Git checkout
     if is_deploy_prod_install_dir "$install_dir"; then
         # What: the root the prod compose falls back to
         # Why: the compose file owns the state default
@@ -1461,8 +1454,8 @@ install_state_root() {
     printf '%s\n' "$state"
 }
 
-# True if install_dir is the manual production checkout path (.../deploy/prod),
-# as opposed to a quickstart-installed directory like /opt/lancache-ng.
+# What: true for the manual checkout path deploy/prod
+# Why: quickstart installs live elsewhere
 is_deploy_prod_install_dir() {
     local install_dir="$1"
     [[ "$(basename "$install_dir")" = "prod" && "$(basename "$(dirname "$install_dir")")" = "deploy" ]]
