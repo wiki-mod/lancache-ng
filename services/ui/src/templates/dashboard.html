@@ -66,7 +66,7 @@
            own doc comment, never actually rendered anywhere in this
            template until now. #}
         <span class="w-2.5 h-2.5 rounded-full {% if svc.status == "green" %}bg-green-400{% elif svc.status == "amber" %}bg-amber-400{% elif svc.status == "yellow" %}bg-yellow-400{% elif svc.status == "red" %}bg-red-400{% else %}bg-slate-500{% endif %}" data-role="dot" title="{{ svc.health }}"></span>
-        <span class="text-sm text-slate-300">{{ svc.label }}</span>
+        <span class="text-sm text-slate-300">{{ svc.name }}</span>
         {% if svc.failures > 0 %}
         <span class="text-xs text-amber-400" data-role="failures">({{ svc.failures }} failures)</span>
         {% endif %}
@@ -256,11 +256,7 @@
     </div>
   </div>
 
-  <!-- Central syslog store (#633 PR4): only rendered once an install opts
-       into `docker compose --profile logging` (SYSLOG_ENABLED=true) --
-       syslog_size_gb/syslog_stats come from syslog_client::get_syslog_size_gb
-       / get_syslog_stats (main.rs), both no-ops otherwise. -->
-  {% if syslog_enabled %}
+  <!-- Central syslog store: size and per-host breakdown. -->
   <div class="card">
     <div class="flex items-center justify-between mb-3">
       <div>
@@ -299,34 +295,13 @@
     {% endif %}
     <p class="text-xs text-slate-500 mt-2">Storage-budget retention is watchdog's responsibility, not this page's.</p>
   </div>
-  {% endif %}
 
-  <!-- Recent requests: the most recent entries across the proxy's access
-       log(s) (recent_logs_task, main.rs). When standard_log and
-       ssl_log are the same file, this is simply that file's tail
-       (nginx_client::parse_log_tail). When they differ, each source is read
-       up to the same limit and merged chronologically by parsed timestamp
-       (merge_recent_logs), so the result interleaves both sources by actual
-       recency rather than showing one source's entire block before the
-       other's.
-
-       This tile always reads nginx's own direct access log(s), even once
-       syslog mode is enabled and /logs switches to the central syslog-ng
-       store instead -- the two pages can then show data through different
-       pipelines on the same install. This is not a data-loss concern
-       (nginx keeps writing its own access log regardless of whether
-       syslog-ng also receives a forwarded copy); the two are deliberately
-       kept separate rather than merged because they are structurally
-       different log formats (syslog-ng's forwarded lines carry raw
-       timestamp/host/program/message fields, not nginx's parsed
-       method/path/status/cache-status shape) -- hence the explicit
-       "direct nginx log" label below whenever syslog mode is on. -->
+  <!-- Recent requests: newest lines of the nginx access
+       log(s), merged by time; syslog-ng is on /logs. -->
   <div class="card">
     <div class="flex items-center justify-between mb-3">
       <h2 class="font-semibold text-slate-200">Recent requests (proxy)</h2>
-      {% if syslog_enabled %}
-      <span class="text-xs text-slate-500" title="This tile always reads nginx's own direct access log, even in syslog mode. The central syslog-ng view (aggregating every wired service, not just the proxy) is on the Logs page.">direct nginx log · see <a href="/logs" class="underline hover:text-slate-300">Logs</a> for the syslog-ng view</span>
-      {% endif %}
+      <span class="text-xs text-slate-500" title="This tile reads nginx's own access log. The central syslog-ng view of every container is on the Logs page.">direct nginx log · see <a href="/logs" class="underline hover:text-slate-300">Logs</a> for the syslog-ng view</span>
     </div>
     {% if recent_logs %}
     <div class="overflow-x-auto">

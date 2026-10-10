@@ -59,7 +59,7 @@ declare -A CI_DISPATCH=(
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-status]=ci_cmd_nightly_status
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
     [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog
-    [gc]=ci_cmd_gc [variables]=ci_cmd_variables [socket-proxy-config]=ci_cmd_socket_proxy_config [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
+    [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
     [welcome]=ci_cmd_welcome [version]=ci_cmd_version
 )
 
@@ -6169,11 +6169,6 @@ _ci_validate_up() {
     while IFS= read -r svc; do
         [ -n "${svc}" ] && ci_log "[CI-INFO-VALIDATE-0055]" "service=\"${svc}\" reason=\"host network mode cannot be isolated in a /27; excluded\""
     done <<< "${raw}"
-    # What: the socket-proxy allowlist exists before the up
-    # Why: the proxy starts on the file ci.sh renders
-    # From: Issue #1683 | PR #1858
-    raw="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    ci_cmd_socket_proxy_config "${raw}" || return 2
     _ci_validate_compose "${project}" "${net_override}" "${pin_override}" up -d "${svcs[@]}"
 }
 
@@ -10982,8 +10977,8 @@ _ci_check_governance_guards() {
     printf 'governance-guards=clean\n'
 }
 
-# What: Container names stay in lockstep repo-wide.
-# Why: ui and watchdog call Docker by these fixed names
+# What: container names share one prefix + service name.
+# Why: operators find a container by its service name.
 # From: Issue #1683 | PR #1858
 _ci_check_naming_consistency() {
     local root="${1:-${CI_REPO_ROOT}}" dep inst
@@ -10991,14 +10986,9 @@ _ci_check_naming_consistency() {
     inst="$(_ci_installer_compose "${root}")" || return 2
     local -a compose_files=("${root}/${dep}")
     [ "${inst}" = "${dep}" ] || compose_files+=("${root}/${inst}")
-    local cfg_rs="${root}/services/common/config.rs"
     local -a viol=()
-    local -A cnames=() services=() uienv=()
-    local cf cfg project name list var val
+    local cf cfg project line
 
-    # What: compose container names and services, rendered
-    # Why: rust must name containers compose creates
-    # From: Issue #1683 | PR #1858
     for cf in "${compose_files[@]}"; do
         if [ ! -f "${cf}" ]; then
             viol+=("${cf}: compose file missing")
@@ -11007,37 +10997,18 @@ _ci_check_naming_consistency() {
         cfg="$(_ci_compose_json "${cf}")" || return 2
         project="$(_ci_capture 0 jq -r '.name' <<<"${cfg}")" || return 2
         [ "${project}" = lancache-ng ] || viol+=("${cf}: compose project name '${project}' is not lancache-ng")
-        cnames[${cf}]="$(_ci_capture 0 jq -r '.services[].container_name // empty' <<<"${cfg}")" || return 2
-        services[${cf}]="$(_ci_capture 0 jq -r '.services | keys[]' <<<"${cfg}")" || return 2
-        uienv[${cf}]="$(_ci_capture 0 jq -r '.services.ui.environment // {} | to_entries[]
-            | select(.key | endswith("_SERVICE")) | "\(.key)=\(.value)"' <<<"${cfg}")" || return 2
-    done
-
-    # What: rust CONTAINER_* names are compose containers
-    # Why: ui and watchdog call Docker by these fixed names
-    # From: Issue #1683 | PR #1905
-    if [ ! -f "${cfg_rs}" ]; then
-        viol+=("${cfg_rs}: container name owner missing")
-    else
-        list="$(_ci_capture 1 grep -oE 'const CONTAINER_[A-Z_]+: &str = "lancache-[a-z0-9-]+"' "${cfg_rs}")" || return 2
-        list="$(sed -E 's/^.*"(lancache-[a-z0-9-]+)"$/\1/' <<<"${list}" | sort -u)"
-        [ -n "${list}" ] || viol+=("${cfg_rs}: no CONTAINER_* names found")
-        while IFS= read -r name; do
-            [ -n "${name}" ] || continue
-            for cf in "${!cnames[@]}"; do
-                grep -qxF -- "${name}" <<<"${cnames[${cf}]}" || viol+=("${cfg_rs}: '${name}' is no container_name in ${cf}")
-            done
-        done <<<"${list}"
-    fi
-
-    # What: each ui *_SERVICE value is a compose service
-    # Why: the ui reaches each service by this name
-    # From: Issue #1683 | PR #1905
-    for cf in "${!uienv[@]}"; do
-        [ -n "${uienv[${cf}]}" ] || { viol+=("${cf}: the ui service sets no *_SERVICE variable"); continue; }
-        while IFS='=' read -r var val; do
-            grep -qxF -- "${val}" <<<"${services[${cf}]}" || viol+=("${cf}: ui ${var}='${val}' is no service")
-        done <<<"${uienv[${cf}]}"
+        # What: one prefix; each name ends in -<service>.
+        # Why: a second spelling splits logs and dashboards.
+        line="$(_ci_capture 0 jq -r '[.services | to_entries[]
+            | {s: .key, c: (.value.container_name // "")}] as $all
+            | ($all | map(select(.c == "")) | map("service \(.s) has no container_name")[]),
+              ($all | map(select(.c != "" and (.s as $s | .c | endswith("-" + $s) | not)))
+                | map("container_name \(.c) does not end in -\(.s)")[]),
+              ($all | map(select(.c != "") | .c[0:(.c | length) - (.s | length) - 1]) | unique
+                | select(length > 1) | "container prefixes differ: \(join(", "))")' <<<"${cfg}")" || return 2
+        while IFS= read -r project; do
+            [ -n "${project}" ] && viol+=("${cf}: ${project}")
+        done <<<"${line}"
     done
 
     if [ "${#viol[@]}" -gt 0 ]; then
@@ -11523,107 +11494,6 @@ _ci_copy_if_changed() {
     printf 'written\n'
 }
 
-# What: SOT operation -> Docker Engine API method, path
-# Why: the policy names operations, haproxy matches paths
-# From: Issue #1683 | PR #1858
-_ci_socket_proxy_api() {
-    printf '%s\n' '[["inspect","get","json"],["logs","get","logs"],["restart","post","restart"],["start","post","start"],["stop","post","stop"],["wait","post","wait"]]'
-}
-
-# What: haproxy config granting exactly the SOT API calls
-# Why: deny by default; names and port come from compose
-# From: Issue #1683 | PR #1858
-_ci_socket_proxy_render() {
-    local cfg="$1" field list fields api policy='{}'
-    local -a names=()
-    api="$(_ci_socket_proxy_api)"
-    fields="$(_ci_capture 0 jq -r '.[][0]' <<<"${api}")" || return 2
-    mapfile -t names <<< "${fields}"
-    for field in "${names[@]}" endpoints timeouts; do
-        list="$(_ci_block_entry_list external_services docker-socket-proxy "${field}")" || return 2
-        policy="$(_ci_capture 0 jq -c --arg f "${field}" --arg l "${list}" \
-            '.[$f] = ($l | split("\n") | map(select(length > 0)))' <<<"${policy}")" || return 2
-    done
-    _ci_capture 0 jq -r --argjson p "${policy}" --argjson api "${api}" '
-        def fail(m): error("socket-proxy: " + m);
-        def re: gsub("\\."; "\\.");
-        .services as $s
-        | ($s.ui.environment.DOCKER_PROXY_URL // fail("ui has no DOCKER_PROXY_URL")) as $url
-        | (($url | capture(":(?<n>[0-9]+)/?$") | .n) // fail("no port in DOCKER_PROXY_URL \($url)")) as $port
-        | [($s["docker-socket-proxy"].volumes // [])[]
-            | select(.type == "bind" and (.target | endswith(".sock"))) | .target] as $socks
-        | (if ($socks | length) == 1 then $socks[0]
-            else fail("need one .sock bind, found \($socks | length)") end) as $sock
-        | [$api[] | . as [$op, $m, $tail]
-            | [($p[$op] // [])[] | . as $svc
-                | ($s[$svc].container_name // fail("SOT service \($svc) has no compose container_name")) | re] as $n
-            | select($n | length > 0)
-            | {acl: $op, m: $m, re: "/containers/(\($n | join("|")))/\($tail)"}]
-          + (if ($p.endpoints | length) > 0
-              then [{acl: "endpoints", m: "get", re: "/(\($p.endpoints | map(re) | join("|")))"}] else [] end)
-          as $rules
-        | (if ($rules | length) == 0 then fail("the SOT grants no Docker API call") else . end)
-        | (if ($p.timeouts | length) == 0 then fail("the SOT sets no haproxy timeouts") else . end)
-        | (["global", "    log stdout format raw daemon info", "", "defaults", "    mode http",
-            "    log global", "    option httplog", "    option dontlognull", "    option http-server-close"]
-          + [$p.timeouts[] | "    timeout \(.)"]
-          + ["", "backend dockerbackend", "    server dockersocket \($sock)", "",
-             "frontend dockerfrontend", "    bind [::]:\($port) v4v6", "    acl get method GET",
-             "    acl post method POST"]
-          + [$rules[] | "    acl \(.acl) path,url_dec -m reg -i ^(/v[0-9.]+)?\(.re)$"]
-          + [$rules[] | "    http-request allow if \(.m) \(.acl)"]
-          + ["    http-request deny", "    default_backend dockerbackend"])
-        | join("\n")' <<<"${cfg}"
-}
-
-# What: host path of the config haproxy loads via -f
-# Why: compose owns that mount; the writer follows it
-# From: Issue #1683 | PR #1858
-_ci_socket_proxy_target() {
-    _ci_capture 0 jq -r '
-        def fail(m): error("socket-proxy: " + m);
-        .services["docker-socket-proxy"] as $d
-        | ($d.entrypoint // []) as $e
-        | [range(0; ($e | length) - 1) as $i | select($e[$i] == "-f") | $e[$i + 1]] as $f
-        | (if ($f | length) == 1 then $f[0] else fail("entrypoint needs one haproxy -f path") end) as $path
-        | [($d.volumes // [])[] | select(.type == "bind") | . as $v
-            | if $v.target == $path then $v.source
-              elif ($path | startswith($v.target + "/")) then $v.source + ($path | ltrimstr($v.target))
-              else empty end] as $hits
-        | if ($hits | length) == 1 then $hits[0] else fail("no single bind mount holds \($path)") end' <<<"$1"
-}
-
-# What: write the socket-proxy allowlist where compose mounts it
-# Why: setup.sh and validate start the proxy on this file
-# From: Issue #1683 | PR #1858
-ci_cmd_socket_proxy_config() {
-    local file="${1:-}" env_file="${2:-}" cfg body target tmp out st
-    if [ -z "${file}" ]; then
-        ci_log "[CI-ERROR-SOCKETPROXY-0001]" "reason=\"usage: ci.sh socket-proxy-config <compose-file> [env-file]\""
-        return 2
-    fi
-    cfg="$(_ci_compose_json "${file}" "${env_file}")" || return 2
-    body="$(_ci_socket_proxy_render "${cfg}")" || return 2
-    target="$(_ci_socket_proxy_target "${cfg}")" || return 2
-    if ! out="$(mkdir -p "${target%/*}" 2>&1)"; then
-        ci_error "[CI-ERROR-SOCKETPROXY-0002]" "dir=\"${target%/*}\" reason=\"config dir not created\"" "${out}"
-        return 2
-    fi
-    tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-socket-proxy.XXXXXX")" || return 2
-    if ! out="$(printf '%s\n' "${body}" 2>&1 > "${tmp}")"; then
-        ci_error "[CI-ERROR-SOCKETPROXY-0003]" "path=\"${tmp}\" reason=\"config not rendered\"" "${out}"
-        rm -f "${tmp}"
-        return 2
-    fi
-    if ! st="$(_ci_copy_if_changed "${tmp}" "${target}")"; then
-        ci_error "[CI-ERROR-SOCKETPROXY-0004]" "path=\"${target}\" reason=\"config not written\"" "${st}"
-        rm -f "${tmp}"
-        return 2
-    fi
-    rm -f "${tmp}"
-    printf 'socket-proxy-config=%s path=%s\n' "${st}" "${target}"
-}
-
 # What: every stack compose renders clean in every profile.
 # Why: profiles come from the file; none is skipped.
 # From: Issue #1683 | PR #1858
@@ -11730,47 +11600,6 @@ _ci_check_nats_atomic_write() {
         return 1
     fi
     printf 'nats-atomic-write=clean\n'
-}
-
-# What: Fail unless socket proxy stays deny-by-default.
-# Why: a broad allowlist re-exposes generic container APIs.
-# From: Issue #1683 | PR #1858
-_ci_check_docker_socket_proxy() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
-    local -a viol=() files=()
-    local cf dep inst out
-    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    inst="$(_ci_installer_compose "${repo_root}")" || return 2
-    files=("${dep}")
-    [ "${inst}" = "${dep}" ] || files+=("${inst}")
-    for cf in "${files[@]}"; do
-        # What: ui/watchdog start once their deps started.
-        # Why: a dep health flap must not stop them.
-        # From: Issue #763 | PR #1858
-        local cfg deps line
-        cfg="$(_ci_compose_json "${repo_root}/${cf}")" || return 2
-        deps="$(_ci_capture 0 jq -r '.services as $s
-            | ("ui", "watchdog") as $n | ($s[$n].depends_on // {}) as $d
-            | (if ($d["docker-socket-proxy"].condition // "none") != "service_started"
-                then "\($n) must depend on docker-socket-proxy with service_started" else empty end),
-              ($d | to_entries[] | select(.value.condition == "service_healthy")
-                | "\($n) waits for \(.key) to be healthy; use service_started")' <<<"${cfg}")" || return 2
-        while IFS= read -r line; do
-            [ -z "${line}" ] || viol+=("${cf}: ${line}")
-        done <<<"${deps}"
-        # What: haproxy runs the config the SOT policy renders
-        # Why: a missing service or mount stops the proxy start
-        # From: Issue #1683 | PR #1858
-        out="$(_ci_capture 0 jq -r '.services["docker-socket-proxy"].entrypoint[0] // ""' <<<"${cfg}")" || return 2
-        [ "${out}" = haproxy ] || viol+=("${cf}: docker-socket-proxy entrypoint is '${out}', not haproxy")
-        out="$(_ci_socket_proxy_target "${cfg}" 2>&1)" || viol+=("${cf}: ${out}")
-        out="$(_ci_socket_proxy_render "${cfg}" 2>&1)" || viol+=("${cf}: ${out}")
-    done
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0046]" "reason=\"docker socket proxy allowlist violated\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'docker-socket-proxy=clean\n'
 }
 
 # What: netdata-net holds netdata and the ui, nothing else.
@@ -13104,7 +12933,7 @@ ci_cmd_check_all() {
         workflow-line-limit stable-external-images compose-healthchecks \
         proxy-cache-env-doc-drift \
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
-        docker-socket-proxy netdata-isolation syslog-logs-volume proxy-cert-volume proxy-nginx-policy \
+        netdata-isolation syslog-logs-volume proxy-cert-volume proxy-nginx-policy \
         compose-required-env dhcp-proxy-env \
         setup-keys-kea setup-update-safety setup-docker-conflict setup-prompt-drift image-channel-resolution \
         vex-drift logging-matrix \
@@ -13173,7 +13002,6 @@ ci_cmd_check() {
         prod-state-wiring) _ci_check_prod_state_wiring "$@" ;;
         compose-config) _ci_check_compose_config "$@" ;;
         nats-atomic-write) _ci_check_nats_atomic_write "$@" ;;
-        docker-socket-proxy) _ci_check_docker_socket_proxy "$@" ;;
         netdata-isolation) _ci_check_netdata_isolation "$@" ;;
         syslog-logs-volume) _ci_check_syslog_logs_volume "$@" ;;
         proxy-cert-volume) _ci_check_proxy_cert_volume "$@" ;;

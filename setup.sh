@@ -1537,27 +1537,7 @@ stack_compose() {
     local -a stack_files
     shift 2
     compose_files_into stack_files "$install_dir" "$env_file"
-    # What: a container start first writes the allowlist
-    # Why: the socket proxy cannot start without that file
-    # From: Issue #1683 | PR #1858
-    if [[ " $* " =~ \ (up|run|start|restart|create)\  ]] && is_deploy_prod_install_dir "$install_dir"; then
-        render_socket_proxy_config "$install_dir" "$env_file" || return $?
-    fi
     docker compose --env-file "$env_file" "${stack_files[@]}" "$@"
-}
-
-# What: ci.sh renders the socket-proxy allowlist for a stack
-# Why: one renderer; the SOT policy reaches every start
-# From: Issue #1683 | PR #1858
-render_socket_proxy_config() {
-    local install_dir="$1" env_file="$2" out rc=0
-    out=$(bash "$(deploy_prod_repo_root "$install_dir")/.github/scripts/ci.sh" \
-        socket-proxy-config "$install_dir/docker-compose.yml" "$env_file" 2>&1) || rc=$?
-    if (( rc != 0 )); then
-        print_error "The docker-socket-proxy allowlist was not written (ci.sh exit $rc):"
-        printf '%s\n' "$out" >&2
-        return "$rc"
-    fi
 }
 
 # What: sorted entries of a volume/dir: mode, owner, hash

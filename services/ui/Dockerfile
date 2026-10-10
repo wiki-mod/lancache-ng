@@ -131,7 +131,6 @@ ENV TEMPLATE_DIR=/templates \
     NETDATA_ALARMS_FILE=/data/netdata-alarms.json \
     NATS_ISSUER_SEED_PATH=/data/lancache-nats-issuer.seed \
     NATS_XKEY_SEED_PATH=/data/lancache-nats-xkey.seed \
-    NATS_CONF_PATH=/etc/nats/nats.conf \
     UI_DATABASE_FILE=/data/lancache-ui.db \
     UI_LOG_FILE=/var/log/lancache-ui/ui.log \
     UI_LISTEN_PORT=8080

@@ -1063,10 +1063,19 @@ impl Kind {
     // From: Issue #1437 | Issue #1683
     fn wanted(self, ctx: &Ctx) -> bool {
         let secondary = || env_opt("DNS_REPLICATION_ROLE").as_deref() == Some("secondary");
-        let dhcp = || DhcpMode::parse(&ctx.setting("DHCP_MODE").unwrap_or_default(), false);
+        let dhcp = || DhcpMode::parse(&ctx.setting("DHCP_MODE").unwrap_or_default());
+        // What: the dock's run request for one service.
+        // Why: "stopped" overrides the saved setting.
+        let desired = || {
+            ctx.desired_file
+                .as_deref()
+                .map(DesiredState::read)
+                .unwrap_or_default()
+        };
+        let dhcp_on = || desired().dhcp != Some(DesiredRunState::Stopped);
         match self {
-            Self::KeaDhcp4 | Self::KeaCtrlAgent | Self::KeaDhcpDdns => dhcp().is_kea(),
-            Self::Dnsmasq => dhcp().is_dnsmasq(),
+            Self::KeaDhcp4 | Self::KeaCtrlAgent | Self::KeaDhcpDdns => dhcp().is_kea() && dhcp_on(),
+            Self::Dnsmasq => dhcp().is_dnsmasq() && dhcp_on(),
             Self::NatsServer | Self::Soa => !secondary(),
             Self::DnsHttps => DNS_HTTPS.runs(),
             Self::Chronyd => {
@@ -1074,11 +1083,7 @@ impl Kind {
                     .setting("NTP_ENABLED")
                     .as_deref()
                     .and_then(config::parse_bool);
-                let desired = ctx
-                    .desired_file
-                    .as_deref()
-                    .and_then(|f| DesiredState::read(f).ntp);
-                on == Some(true) && desired != Some(DesiredRunState::Stopped)
+                on == Some(true) && desired().ntp != Some(DesiredRunState::Stopped)
             }
             _ => true,
         }
@@ -1094,8 +1099,7 @@ impl Kind {
             Self::KeaDhcpDdns => kea_dhcp_ddns(ctx),
             Self::Dnsmasq => dnsmasq(
                 ctx,
-                DhcpMode::parse(&ctx.setting("DHCP_MODE").unwrap_or_default(), false)
-                    .is_dnsmasq_relay(),
+                DhcpMode::parse(&ctx.setting("DHCP_MODE").unwrap_or_default()).is_dnsmasq_relay(),
             ),
             Self::SyslogNg => syslog_ng(ctx),
             Self::Chronyd => chronyd(ctx),
@@ -1729,13 +1733,7 @@ fn dns_zones(
             Err(e) => return Err(e),
         }
     }
-    let state = config::need(&config::process_env, "DNS_STATE_DIR")?;
-    ddns_tsig(
-        dir,
-        &zones,
-        tsig,
-        &Path::new(&state).join("ddns-allow-unsigned-updates"),
-    )?;
+    ddns_tsig(dir, &zones, tsig, &ddns_unsigned_marker()?)?;
     let targets: Vec<String> = notify.iter().map(ToString::to_string).collect();
     for zone in &zones {
         pdnsutil(dir, &["zone", "set-kind", zone, "primary"])?;
@@ -1752,6 +1750,14 @@ fn dns_zones(
         }
     }
     Ok(())
+}
+
+// What: the ui's unsigned-DDNS marker in the state dir.
+// Why: pdns watches it; a toggle restarts and re-keys.
+// From: Issue #815 | Issue #1683
+fn ddns_unsigned_marker() -> Result<PathBuf, String> {
+    let state = config::need(&config::process_env, "DNS_STATE_DIR")?;
+    Ok(Path::new(&state).join(config::DDNS_UNSIGNED_MARKER))
 }
 
 // What: today's date serial, YYMMDD000 (UTC).
@@ -1849,6 +1855,11 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
             "--guardian=no".into(),
             "--daemon=no".into(),
         ],
+        watch: if primary.is_none() {
+            vec![ddns_unsigned_marker()?]
+        } else {
+            Vec::new()
+        },
         ..Run::default()
     })
 }
