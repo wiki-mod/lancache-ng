@@ -33,7 +33,7 @@ find /var/log/lancache-dhcp-proxy -maxdepth 1 -type f -exec chgrp 10001 {} + -ex
 #
 # Deliberately does NOT `. <file>` (dot-source) the settings file, even
 # though an earlier version of this function did: `write_ui_settings_file`
-# (services/ui/src/routes/dhcp.rs) writes raw, unquoted `KEY=value` lines
+# (services/ui/src/main.rs) writes raw, unquoted `KEY=value` lines
 # with no shell-metacharacter escaping, and at least one value that can
 # legitimately end up there -- DHCP_PROXY_CUSTOM_OPTIONS, via the Admin
 # UI's own custom-DHCP-option form field -- is validated
@@ -413,7 +413,7 @@ _dhcp_proxy_render_optional_directives() {
 # silently produce two `dhcp-option-pxe=<code>,...` lines for the same code
 # in the rendered config, with no warning telling the operator which one (if
 # either) dnsmasq actually honors. The Admin UI's own
-# parse_custom_options_form (services/ui/src/routes/dhcp.rs) already blocks
+# parse_custom_options_form (services/ui/src/main.rs) already blocks
 # these same four codes for dnsmasq-proxy's custom-options field for the
 # identical reason; this is the entrypoint-side backstop for anyone who
 # edits DHCP_PROXY_CUSTOM_OPTIONS directly (env file, docker-compose

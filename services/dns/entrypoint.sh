@@ -142,13 +142,19 @@ PDNS_SOA_SEED_SERIAL="$(date +%y%m%d)000"
 PDNS_SOA_RESYNC_INTERVAL="${PDNS_SOA_RESYNC_INTERVAL:-3600}"
 DNS_CONFIG_SNAPSHOT_DIR="${DNS_CONFIG_SNAPSHOT_DIR:-/var/lib/lancache-dns/config-snapshots}"
 # Zone/record rollback listener (#628, nats-subscriber's own process -- see
-# services/dns/nats-subscriber/src/rollback_listener.rs). Bound to 0.0.0.0,
+# services/dns/nats-subscriber/src/main.rs). Bound to 0.0.0.0,
 # not 127.0.0.1: the Admin UI reaching this port lives in a different
 # container/network-namespace, the same reasoning that already applies to
-# PowerDNS's own 8081/8082 (see rollback_listener.rs's module doc comment).
+# PowerDNS's own 8081/8082 (see serve_rollback in that main.rs).
 DNS_ROLLBACK_LISTEN_ADDR="${DNS_ROLLBACK_LISTEN_ADDR:-0.0.0.0:8083}"
 RECURSOR_CONF_FILE="/etc/pdns/recursor.conf"
 PDNS_AUTH_CONF_FILE="/etc/pdns/auth/pdns.conf"
+# What: auth config dir and the local PowerDNS API roots.
+# Why: one owner for this script and nats-subscriber.
+# From: Issue #1683
+PDNS_AUTH_CONFIG_DIR="$(dirname "$PDNS_AUTH_CONF_FILE")"
+PDNS_AUTH_API_URL="http://127.0.0.1:8081/api/v1/servers/localhost"
+PDNS_REC_API_URL="http://127.0.0.1:8082/api/v1/servers/localhost"
 # DDNS "allow unsigned updates" Admin UI toggle (issue #815 follow-up,
 # SUPERSEDES an earlier design of this same feature). The earlier design
 # added a toggle that turned the global `dnsupdate-require-tsig` setting ON,
@@ -402,6 +408,7 @@ export PDNS_SOA_REFRESH PDNS_SOA_RETRY PDNS_SOA_SEED_SERIAL PDNS_SOA_RESYNC_INTE
 # static-file adapter above (#615), DNS_ROLLBACK_LISTEN_ADDR is new for the
 # zone/record rollback listener.
 export KEEP_KNOWN_GOOD_CONFIGS DNS_CONFIG_SNAPSHOT_DIR DNS_ROLLBACK_LISTEN_ADDR
+export PDNS_AUTH_CONFIG_DIR PDNS_AUTH_API_URL PDNS_REC_API_URL
 
 # ────────────────────────────────────────────────────────────────────────────
 # Known-good configuration snapshot library (#415, #615)
@@ -1144,7 +1151,7 @@ NATS_PID=$!
 # From: Issue #1095
 _dns_soa_maintain_zone() {
     local zone="$1"
-    local api="http://127.0.0.1:8081/api/v1/servers/localhost/zones"
+    local api="${PDNS_AUTH_API_URL}/zones"
     local soa mname rname cur expire minttl want target content body code
     # What: canonical FQDN with exactly one trailing dot.
     # Why: DDNS_UPDATE_ZONES mixes dotted/undotted names.
@@ -1193,7 +1200,7 @@ run_soa_maintainer() {
     for i in $(seq 1 30); do
         code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
             -H "X-API-Key: $PDNS_API_KEY" \
-            "http://127.0.0.1:8081/api/v1/servers/localhost/zones" 2>/dev/null)
+            "${PDNS_AUTH_API_URL}/zones" 2>/dev/null)
         [ "$code" = "200" ] && break
         sleep 2
     done

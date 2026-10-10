@@ -585,7 +585,7 @@ codeql_languages:
     paths: [.github/workflows]
   rust:
     files: ["*.rs"]
-    paths: [services/cachehamster/src, services/dns/nats-subscriber/src, services/dns/nats-subscriber/fuzz, services/ui/src, services/ui/fuzz, services/watchdog/src]
+    paths: [services/cachehamster/src, services/common, services/dns/nats-subscriber/src, services/ui/src, services/watchdog/src]
 
 # What: release version, channels, validation and GC inputs
 # Why: AG-REL-010: one release and artifact inventory

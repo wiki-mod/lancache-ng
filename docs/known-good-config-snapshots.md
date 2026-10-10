@@ -491,7 +491,7 @@ every restart until the input is fixed.
 ## Kea
 
 Kea already has a real, working, single-level safety net from PR #380:
-`kea_config_modify()` in `services/ui/src/routes/dhcp.rs` retains the config
+`kea_config_modify()` in `services/ui/src/main.rs` retains the config
 from `config-get`, applies the candidate via `config-test` → `config-set`,
 and — if the follow-up `config-write` (persist to disk) fails in a confirmed
 way — rolls back to the retained old config via another `config-set`. That
@@ -507,7 +507,7 @@ config is mutated live through this Admin UI's own Rust HTTP client against
 the Kea Control Agent, not regenerated from a shell template at container
 startup — so this adapter is not a byte-identical embedded shell library
 copy like the other three. It is a Rust reimplementation of the same
-documented contract, in `services/ui/src/kea_snapshots.rs`:
+documented contract, in `services/ui/src/main.rs`:
 
 - **Snapshot creation is a side effect of `kea_config_modify()`'s existing
   chain**, not a separate step: every one of the DHCP mutation routes
@@ -554,7 +554,7 @@ documented contract, in `services/ui/src/kea_snapshots.rs`:
   `deploy/*/docker-compose.yml`'s `nats` service).
 - No shell-drift check covers this adapter: none of it lives in a shell
   entrypoint, so there is no shell copy to drift. Coverage lives in
-  `services/ui/src/kea_snapshots.rs`'s and `services/ui/src/routes/dhcp.rs`'s
+  `services/ui/src/main.rs`'s and `services/ui/src/main.rs`'s
   own `cargo test` suites instead.
 - **`kea-ctrl-agent.conf` and `kea-dhcp-ddns.conf` are outside this
   mechanism entirely and are not user-editable.** Unlike `kea-dhcp4.conf`
@@ -705,9 +705,8 @@ completely different implications than rolling back a static config file —
 it can silently undo legitimate client DHCP leases, DDNS-driven hostname
 records, or secondary-node reconciliation state that changed after the
 snapshot was taken. Issue #628 implemented this design; everything below
-describes running behavior (`services/dns/nats-subscriber/src/
-zone_snapshots.rs`, `rollback_listener.rs`, `services/ui/src/routes/
-dns_snapshots.rs`), not a proposal for a future implementation PR.
+describes running behavior (`services/dns/nats-subscriber/src/main.rs`,
+`services/common/shared.rs`, `services/ui/src/main.rs`), not a proposal for a future implementation PR.
 
 **Scope decision.** Looking at what `services/dns/entrypoint.sh` actually
 does on every start narrows the problem a lot:
@@ -744,7 +743,7 @@ does on every start narrows the problem a lot:
   DDNS updates (Kea leases, hostname registrations) applied directly to the
   primary's PowerDNS instance. **Correction on NATS coverage:** only the
   `lan.` zone has any NATS-driven path today — the Admin UI's record
-  mutation routes (`services/ui/src/routes/domains.rs`) publish with a
+  mutation routes (`services/ui/src/main.rs`) publish with a
   hardcoded `"zone": "lan"`, and `nats-subscriber`'s `reconciler()` only
   polls/republishes `/zones/lan` (`services/dns/nats-subscriber/src/main.rs`).
   `local.lan.` and the private reverse zones have no NATS reconciliation
@@ -780,12 +779,12 @@ against a `pdns.sqlite3` file that a live `pdns_server` in another container
 already has open is not a safe way to read or mutate it.
 
 What the Admin UI *does* already reach is PowerDNS's Authoritative HTTP API
-on port 8081 (`services/ui/src/config.rs`'s `pdns_auth_url`, default
+on port 8081 (`services/ui/src/main.rs`'s `pdns_auth_url`, default
 `http://dns-standard:8081`) — the same API `services/dns/nats-subscriber`
 already uses for `GET`/`PATCH /zones/lan` (`handle_dns_record`, the
 `reconciler`) and the same API family whose recursor sibling on 8082 the UI
 already calls for cache flushes (`flush_recursor_cache` in
-`services/ui/src/routes/domains.rs`). This design therefore routes zone
+`services/ui/src/main.rs`). This design therefore routes zone
 snapshot capture and rollback through that API instead of `pdnsutil`:
 
 - **Snapshot mechanism.** The canonical, rollback-usable snapshot artifact is
@@ -822,7 +821,7 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
   (`services/dns/Dockerfile` has no such `COPY`). This adapter therefore
   needs its own Rust reimplementation of the retention primitives (create/
   list/prune), the same decision already made for Kea's
-  `services/ui/src/kea_snapshots.rs` — not a fourth embedded shell copy, and
+  `services/ui/src/main.rs` — not a fourth embedded shell copy, and
   not a cross-process call into `entrypoint.sh`.
 - **Trigger point.** `nats-subscriber`'s `handle_dns_record` (the NATS-driven
   apply path) is one trigger, but not the only in-scope write path: Kea's
@@ -835,9 +834,9 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
   1. `handle_dns_record`'s post-`PATCH` hook (`main.rs`'s `maybe_snapshot_
      zone`, called right after a successful PATCH) covers the NATS-applied
      path.
-  2. `zone_snapshot_watcher` (`main.rs`) is the periodic export-and-diff
+  2. `snapshot_watcher` (`main.rs`) is the periodic export-and-diff
      trigger for DDNS-originated changes: it polls every zone in
-     `zone_snapshots::ROLLBACK_ZONES` every 60 seconds (the same interval
+     `rollback_zones()` (`services/common/config.rs`) every 60 seconds (the same interval
      shape as the existing `reconciler`) and runs unconditionally on every
      node, since it is not gated on NATS reconciliation being enabled — the
      alternative considered (a PowerDNS primary-notify-style hook) would
@@ -859,7 +858,7 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
     republishes burn through the default retention of 3 snapshots within
     minutes, pushing out genuinely different history. Both triggers compare
     the freshly exported zone against the most recently stored snapshot
-    before creating a new one (`zone_snapshots::matches_latest_snapshot`):
+    before creating a new one (`matches_latest` in `main.rs`):
     rather than hashing serialized bytes (order-sensitive), both sides are
     canonicalized -- the rrsets array sorted by (name, type), each rrset's
     own `records` array sorted by content -- and compared with plain `==`,
@@ -928,15 +927,15 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
   port 8081 is reachable by every container on the same network this new
   listener would be, and it still requires the `X-API-Key` header
   (`PDNS_API_KEY`) on every call (`services/dns/nats-subscriber/src/main.rs`,
-  `services/ui/src/routes/domains.rs`); NATS itself went further and moved
+  `services/ui/src/main.rs`); NATS itself went further and moved
   from a single shared credential to individually-revocable per-secondary
-  identities via an auth callout (`services/ui/src/nats_auth_callout.rs`,
+  identities via an auth callout (`services/ui/src/main.rs`,
   #583) rather than relying on network placement alone. A rollback listener
   with no equivalent check would let anything else reachable on the same
   Compose network — not just the Admin UI — list and roll back zone
   snapshots, silently bypassing whatever authentication the Admin UI itself
   enforces on the operator. This listener (`services/dns/nats-subscriber/
-  src/rollback_listener.rs`) gates every request the same way this project
+  src/main.rs`) gates every request the same way this project
   already gates every comparable internal surface: a constant-time
   comparison of the `X-API-Key` header against `PDNS_API_KEY`, checked
   before the request body is even parsed. It binds `0.0.0.0:8083`, not
@@ -950,7 +949,7 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
   by the header check alone.
 - **Flush recursor caches after a rollback.** A `load`/`PATCH`-style
   rollback can change or delete many names in one operation, but
-  `flush_recursor_cache` (`services/ui/src/routes/domains.rs:264-289`)
+  `flush_recursor_cache` (`services/ui/src/main.rs:264-289`)
   documents that PowerDNS Recursor's flush endpoint only clears an exact
   name — even `?domain=lan.` leaves an already-changed leaf record cached —
   and the recursor's packet cache keeps successful answers for 3600 seconds
@@ -992,10 +991,10 @@ things follow from that:
 - For `lan.`, a rollback re-publishes the restored state onto the NATS
   stream so secondaries converge, rather than leaving the primary and its
   secondaries silently holding different data for the rolled-back zone.
-  `rollback_listener.rs`'s `publish_rollback_records` (called only when
+  `main.rs`'s `publish_patch` (called only when
   `zone == "lan."`) re-publishes every REPLACE/DELETE entry from the
   applied rollback patch onto `lancache.dns.record`, reusing the same
-  message shape `nats_publish::publish_dns_record` already provides to the
+  message shape `publish_record` already provides to the
   existing `reconciler`. Each entry gets a fresh, rollback-specific message
   id (`rollback-<batch timestamp>-<name>-<type>`) rather than reusing the
   reconciler's stable `reconcile-lan-<name>-<type>` id, so JetStream's
@@ -1091,7 +1090,7 @@ explicit target container, defaulting to `dns-standard` to match the Admin
 UI's own current single-primary scope) lists this install's known-good
 snapshots for the given zone and applies one via nats-subscriber's real
 rollback listener -- the same list/diff/PATCH/check-zone/flush/republish
-chain `services/ui/src/routes/dns_snapshots.rs` already forwards to when the
+chain `services/ui/src/main.rs` already forwards to when the
 Admin UI IS reachable. Unlike Kea (one `dhcp4.json`, one snapshot history),
 PowerDNS tracks snapshots per zone (`lan.`, `local.lan.`, and the private
 reverse zones), so `<zone>` is a required argument for this target; omitting

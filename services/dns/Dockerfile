@@ -49,6 +49,10 @@ COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.
 COPY services/ui/Cargo.toml services/ui/Cargo.toml
 COPY services/cachehamster/Cargo.toml services/cachehamster/Cargo.toml
 COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
+# What: shared crate manifest and sources, copied whole.
+# Why: real sources before any build; no stale stub rlib.
+# From: Issue #1683 | PR #1858
+COPY services/common services/common
 COPY services/dns/nats-subscriber/src services/dns/nats-subscriber/src
 # What: retry policy for ci.sh, from SOT stage_variables
 # Why: this stage has no SOT; ci.sh reads them from env

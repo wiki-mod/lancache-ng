@@ -5,7 +5,7 @@
 # Domain-entry validation contract, shared by every consumer of
 # cdn-domains.txt-style domain lists (proxy wildcard-cert/nginx-map
 # generation, DNS RPZ zone generation). Mirrors the label-strict rules from
-# the Admin UI's Rust validator (services/ui/src/routes/domains.rs's
+# the Admin UI's Rust validator (services/ui/src/main.rs's
 # is_valid_domain/is_valid_domain_label) so a malformed or overly-broad entry
 # (e.g. a bare TLD, a single label like "localhost", or "*") is rejected the
 # same way everywhere a domain list is consumed, not just in the UI that
@@ -25,7 +25,7 @@
 # From: Issue #1683
 #
 # tests/bats/domain_validation_parity.bats and
-# services/ui/src/routes/domains.rs's own
+# services/ui/src/main.rs's own
 # `is_valid_domain_matches_shared_parity_fixture` test both iterate the same
 # shared fixture file (tests/fixtures/domain-validation-cases.txt) so the
 # bash and Rust validators can't silently diverge in what they accept or

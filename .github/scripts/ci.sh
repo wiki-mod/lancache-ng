@@ -7043,17 +7043,16 @@ _ci_register_secondary() {
     printf '%s' "${out%$'\n'*}"
 }
 
-# What: path of the ui's secondary registration token file
-# Why: the ui source const owns it; CI reads, never copies
-# From: Issue #583 | PR #1858
+# What: the ui's token file path from its running env
+# Why: the ui reads it from env; CI asks it, never copies
+# From: Issue #583 | PR #1905
 _ci_validate_ui_token_file() {
-    local main tf
-    main="$(_ci_service_path ui src/main.rs)" || return 2
-    if ! tf="$(_ci_file_value "${main}" 's/^const SECONDARY_REGISTRATION_TOKEN_FILE: &str = "([^"]+)";$/\1/p')"; then
-        ci_error "[CI-ERROR-VALIDATE-0112]" "file=\"${main}\" reason=\"need exactly one SECONDARY_REGISTRATION_TOKEN_FILE const\"" "${tf}"
+    local cid="$1" tf
+    if ! tf="$(_ci_capture 0 docker exec "${cid}" printenv SECONDARY_REGISTRATION_TOKEN_FILE)" || [ -z "${tf//$'\n'/}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0112]" "container=\"${cid}\" reason=\"no SECONDARY_REGISTRATION_TOKEN_FILE value in the ui env (raw above if any)\""
         return 2
     fi
-    printf '%s\n' "${tf}"
+    printf '%s\n' "${tf//$'\n'/}"
 }
 
 # What: Prove each secondary gets unique identity.
@@ -7061,13 +7060,13 @@ _ci_validate_ui_token_file() {
 # From: Issue #1683
 _ci_validate_secondary_identity() {
     local project="$1" base cid token a b au bu ap bp trc=0 tf label
-    tf="$(_ci_validate_ui_token_file)" || return 2
     label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
     cid="$(_ci_validate_cid "${project}" ui)" || return 2
     if [ -z "${cid}" ] || ! base="$(_ci_validate_ui_base "${project}" "${cid}")"; then
         ci_log "[CI-ERROR-VALIDATE-0045]" "reason=\"no ui container/IP for secondary-identity check\""
         return 2
     fi
+    tf="$(_ci_validate_ui_token_file "${cid}")" || return 2
     # What: token as the ui resolves it: its file, else env.
     # Why: no file when the ui got a real token via env.
     # From: Issue #583 | PR #1858
@@ -10974,15 +10973,13 @@ _ci_check_naming_consistency() {
     inst="$(_ci_installer_compose "${root}")" || return 2
     local -a compose_files=("${root}/${dep}")
     [ "${inst}" = "${dep}" ] || compose_files+=("${root}/${inst}")
-    local docker_client_rs="${root}/services/ui/src/docker_client.rs"
-    local watchdog_rs="${root}/services/watchdog/src/config.rs"
-    local ui_config_rs="${root}/services/ui/src/config.rs"
+    local cfg_rs="${root}/services/common/config.rs"
     local -a viol=()
-    local -A cnames=() services=()
-    local cf cfg project name list src
+    local -A cnames=() services=() uienv=()
+    local cf cfg project name list var val
 
-    # What: container names and services as compose renders them
-    # Why: the rust code must name containers compose creates
+    # What: compose container names and services, rendered
+    # Why: rust must name containers compose creates
     # From: Issue #1683 | PR #1858
     for cf in "${compose_files[@]}"; do
         if [ ! -f "${cf}" ]; then
@@ -10994,48 +10991,36 @@ _ci_check_naming_consistency() {
         [ "${project}" = lancache-ng ] || viol+=("${cf}: compose project name '${project}' is not lancache-ng")
         cnames[${cf}]="$(_ci_capture 0 jq -r '.services[].container_name // empty' <<<"${cfg}")" || return 2
         services[${cf}]="$(_ci_capture 0 jq -r '.services | keys[]' <<<"${cfg}")" || return 2
+        uienv[${cf}]="$(_ci_capture 0 jq -r '.services.ui.environment // {} | to_entries[]
+            | select(.key | endswith("_SERVICE")) | "\(.key)=\(.value)"' <<<"${cfg}")" || return 2
     done
 
-    for src in "${docker_client_rs}" "${watchdog_rs}"; do
-        [ -f "${src}" ] || continue
-        if [ "${src}" = "${docker_client_rs}" ]; then
-            list="$(_ci_capture 1 grep -oE '=> "lancache-[a-z0-9-]+"' "${src}")" || return 2
-        else
-            list="$(_ci_capture 1 grep -oE 'const [A-Z_]+: &str = "lancache-[a-z0-9-]+"' "${src}")" || return 2
-        fi
+    # What: rust CONTAINER_* names are compose containers
+    # Why: ui and watchdog call Docker by these fixed names
+    # From: Issue #1683 | PR #1905
+    if [ ! -f "${cfg_rs}" ]; then
+        viol+=("${cfg_rs}: container name owner missing")
+    else
+        list="$(_ci_capture 1 grep -oE 'const CONTAINER_[A-Z_]+: &str = "lancache-[a-z0-9-]+"' "${cfg_rs}")" || return 2
         list="$(sed -E 's/^.*"(lancache-[a-z0-9-]+)"$/\1/' <<<"${list}" | sort -u)"
-        [ -n "${list}" ] || viol+=("${src}: no lancache-* container names found")
+        [ -n "${list}" ] || viol+=("${cfg_rs}: no CONTAINER_* names found")
         while IFS= read -r name; do
             [ -n "${name}" ] || continue
             for cf in "${!cnames[@]}"; do
-                grep -qxF -- "${name}" <<<"${cnames[${cf}]}" || viol+=("${src}: '${name}' is no container_name in ${cf}")
+                grep -qxF -- "${name}" <<<"${cnames[${cf}]}" || viol+=("${cfg_rs}: '${name}' is no container_name in ${cf}")
             done
         done <<<"${list}"
-    done
-
-    if [ -f "${ui_config_rs}" ]; then
-        local -A service_defaults=(
-            [DNS_STANDARD_SERVICE]=dns-standard [DNS_SSL_SERVICE]=dns-ssl
-            [PROXY_SERVICE]=proxy [NATS_SERVICE]=nats
-        )
-        local var expected actual
-        for var in "${!service_defaults[@]}"; do
-            expected="${service_defaults[${var}]}"
-            actual="$(_ci_capture 1 grep -oE "env_str\(\"${var}\", \"[a-z0-9-]+\"\)|env_or\(\"${var}\", \"[a-z0-9-]+\"" "${ui_config_rs}")" || return 2
-            actual="$(sed -E 's/^.*, "([a-z0-9-]+)"\)?$/\1/' <<<"${actual}" | tail -n 1)"
-            if [ -z "${actual}" ]; then
-                viol+=("${ui_config_rs}: no default found for \$${var}")
-            elif [ "${actual}" != "${expected}" ]; then
-                viol+=("${ui_config_rs}: \$${var} defaults to '${actual}', expected '${expected}'")
-            fi
-            for cf in "${compose_files[@]}"; do
-                [ -n "${services[${cf}]+set}" ] || continue
-                grep -qxF -- "${expected}" <<<"${services[${cf}]}" || viol+=("${cf}: no '${expected}:' service for \$${var}")
-            done
-        done
-        grep -Fq 'env_or("PROXY_SSL_SERVICE", proxy_service.clone())' "${ui_config_rs}" || \
-            viol+=("${ui_config_rs}: \$PROXY_SSL_SERVICE must inherit from proxy_service.clone()")
     fi
+
+    # What: each ui *_SERVICE value is a compose service
+    # Why: the ui reaches each service by this name
+    # From: Issue #1683 | PR #1905
+    for cf in "${!uienv[@]}"; do
+        [ -n "${uienv[${cf}]}" ] || { viol+=("${cf}: the ui service sets no *_SERVICE variable"); continue; }
+        while IFS='=' read -r var val; do
+            grep -qxF -- "${val}" <<<"${services[${cf}]}" || viol+=("${cf}: ui ${var}='${val}' is no service")
+        done <<<"${uienv[${cf}]}"
+    done
 
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0096]" "reason=\"naming-consistency drift (docs/naming-conventions.md)\"" "$(printf '%s\n' "${viol[@]}")"
@@ -12111,7 +12096,7 @@ _ci_check_image_channel_resolution() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local su sec prod dep
     su="$(_ci_installer "${repo_root}")" || return 2
-    sec="$(_ci_service_path ui src/routes/secondaries.rs "${repo_root}")" || return 2
+    sec="$(_ci_service_path ui src/main.rs "${repo_root}")" || return 2
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     prod="${repo_root}/${dep}"
     local -a viol=()
@@ -12138,18 +12123,22 @@ _ci_check_image_channel_resolution() {
         'channel="${channel:-latest}"'; do
         grep -Fq "${f}" "${su}" || viol+=("setup.sh must keep image-resolution: ${f}")
     done
-    if [ -f "${sec}" ]; then
+    if [ ! -f "${sec}" ]; then
+        viol+=("ui source missing: ${sec}")
+    else
         for f in \
-            'pub image_tag: String' 'pub image_registry: String' \
-            'pub image_prefix: String' 'pub image_channel: String' \
+            '    image_tag: String,' '    image_registry: String,' \
+            '    image_prefix: String,' '    image_channel: String,' \
             'image_tag: state.config.lancache_image_tag.clone()' \
             'image_registry: state.config.lancache_image_registry.clone()' \
             'image_prefix: state.config.lancache_image_prefix.clone()' \
             'image_channel: state.config.lancache_image_channel.clone()'; do
-            grep -Fq "${f}" "${sec}" || viol+=("secondaries.rs must expose/use ${f}")
+            grep -Fq "${f}" "${sec}" || viol+=("ui main.rs must expose/use ${f}")
         done
     fi
-    if [ -f "${prod}" ]; then
+    if [ ! -f "${prod}" ]; then
+        viol+=("prod compose missing: ${prod}")
+    else
         for f in \
             'LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY:-ghcr.io}' \
             'LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}' \

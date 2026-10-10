@@ -46,7 +46,7 @@ log() { echo "[retention] $(date -u +%H:%M:%S) $*"; }
 log_err() { echo "[retention] $(date -u +%H:%M:%S) $*" >&2; }
 
 # Canonical truthy-parsing contract shared with the Admin UI's env_bool()
-# (services/ui/src/config.rs) and watchdog.sh's own identical copy -- see
+# (services/ui/src/main.rs) and watchdog.sh's own identical copy -- see
 # that file's is_truthy() for the full rationale (1/true/yes/on,
 # case-insensitive, trimmed). Duplicated here rather than shared; see this
 # file's header for why.

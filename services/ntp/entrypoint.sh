@@ -54,7 +54,7 @@ mkdir -p /run/chrony
 # same root cause as services/dhcp-proxy/entrypoint.sh's identical pattern,
 # fixed there first). This file is SHARED across multiple services'
 # Admin-UI-persisted settings -- NTP_UPSTREAM_SERVERS itself is strictly
-# validated (validate_ntp_upstream_servers, services/ui/src/routes/ntp.rs:
+# validated (validate_ntp_upstream_servers, services/ui/src/main.rs:
 # every entry must parse as a bare IPv4/IPv6 literal or an RFC 1123 hostname
 # label, no shell metacharacters possible), but this entrypoint dot-sourced
 # the WHOLE file, not just its own keys -- so a weakly-validated value
@@ -488,12 +488,11 @@ clock_control_available() {
 # here) and having the healthcheck `cat` it back verbatim keeps the exact
 # wording defined in exactly one place -- entrypoint.sh and the compose
 # YAML's healthcheck test string would otherwise duplicate this sentence
-# and could silently drift apart. `services/watchdog/src/docker_client.rs`
+# and could silently drift apart. `services/watchdog/src/main.rs`
 # reads this same text back out of Docker's own `.State.Health.Log` (part
 # of the container-inspect response it already fetches) to produce a
-# genuinely distinct `HealthReading::Degraded` -- see that module's
-# `degraded_reason_from_health_log()` for the `DEGRADED: ` prefix
-# convention this file's content feeds into. /run is a fresh tmpfs per
+# genuinely distinct `Reading::Degraded` -- see `Reading::from_inspect()`
+# there for the `DEGRADED: ` prefix convention this file's content feeds into. /run is a fresh tmpfs per
 # container start (same reasoning as /run/chrony above), so this must be
 # (re)written every start, not just once at image build time, and a
 # restart onto a host that now grants CAP_SYS_TIME correctly stops writing

@@ -167,7 +167,7 @@ non-removed answer -- choosing it explicitly pre-1.0 still hits
 `resolve_lancache_stack_channel_tag`'s clear explanation rather than a raw
 Docker error, and it automatically becomes the right default again once a
 real `vX.Y.Z` stable release exists and moves `latest`. The Admin UI's own
-channel selector (`services/ui/src/routes/setup.rs` / `setup.html`) needs no
+channel selector (`services/ui/src/main.rs` / `setup.html`) needs no
 equivalent change: it only ever displays and edits an *existing* install's
 already-resolved channel value, so it has no "default a new choice" moment.
 

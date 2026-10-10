@@ -49,6 +49,10 @@ COPY services/ui/Cargo.toml services/ui/Cargo.toml
 COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
 COPY services/cachehamster/Cargo.toml services/cachehamster/Cargo.toml
 COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.toml
+# What: shared crate manifest and sources, copied whole.
+# Why: real sources before any build; no stale stub rlib.
+# From: Issue #1683 | PR #1858
+COPY services/common services/common
 # What: retry policy for ci.sh, from SOT stage_variables
 # Why: this stage has no SOT; ci.sh reads them from env
 # From: Issue #1683 | PR #1858
@@ -118,6 +122,20 @@ ENV VISUAL=$EDITOR
 COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
 COPY services/ui/src/templates /templates
 
+# What: the ui's file layout, handed over as environment.
+# Why: this image creates these paths; Rust keeps no copy.
+# From: Issue #1683
+ENV TEMPLATE_DIR=/templates \
+    CDN_DOMAINS_FILE=/data/cdn-domains.txt \
+    UI_SETTINGS_FILE=/data/lancache-ui-settings.env \
+    NETDATA_ALARMS_FILE=/data/netdata-alarms.json \
+    NATS_ISSUER_SEED_PATH=/data/lancache-nats-issuer.seed \
+    NATS_XKEY_SEED_PATH=/data/lancache-nats-xkey.seed \
+    NATS_CONF_PATH=/etc/nats/nats.conf \
+    UI_DATABASE_FILE=/data/lancache-ui.db \
+    UI_LOG_FILE=/var/log/lancache-ui/ui.log \
+    UI_LISTEN_PORT=8080
+
 # What: one ui runtime uid/gid for user and binary.
 # Why: nginx logs share it; the root start drops to it.
 # From: Issue #1427 | PR #1858
@@ -129,7 +147,7 @@ RUN addgroup -g "${UI_RUNTIME_ID}" lancache \
     && mkdir -p /data /etc/nats \
     && chown -R lancache:lancache /data /etc/nats
 
-EXPOSE 8080
+EXPOSE ${UI_LISTEN_PORT}
 
 # What: the binary, via PATH; it does the root start itself.
 # Why: no wrapper; secrets, chown and uid drop are in Rust.

@@ -50,6 +50,10 @@ COPY services/cachehamster/Cargo.toml services/cachehamster/Cargo.toml
 COPY services/ui/Cargo.toml services/ui/Cargo.toml
 COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
 COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.toml
+# What: shared crate manifest and sources, copied whole.
+# Why: real sources before any build; no stale stub rlib.
+# From: Issue #1683 | PR #1858
+COPY services/common services/common
 COPY services/cachehamster/src services/cachehamster/src
 # What: retry policy for ci.sh, from SOT stage_variables
 # Why: this stage has no SOT; ci.sh reads them from env
@@ -112,6 +116,10 @@ RUN addgroup -g 10001 lancache && \
     mkdir -p /data && \
     chown lancache:lancache /data
 VOLUME ["/data"]
+# What: the state dir the binary reads, set once here.
+# Why: the image owns /data; main.rs holds no default path.
+# From: Issue #1683 | PR #1858
+ENV CACHEHAMSTER_DATA_DIR=/data
 USER lancache
 
 ENTRYPOINT ["/usr/local/bin/lancache-cachehamster"]

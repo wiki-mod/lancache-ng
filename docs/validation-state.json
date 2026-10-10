@@ -47,7 +47,7 @@
       "evidence_ref": "https://github.com/wiki-mod/lancache-ng/issues/1391; see last_stack_validation.summary above for the full result"
     },
     "nats": {
-      "path_prefixes": ["services/ui/src/nats_*.rs", "services/ui/src/nats_config.rs", "services/nats/", "setup.sh", "deploy/*/docker-compose.yml"],
+      "path_prefixes": ["services/ui/src/main.rs", "services/nats/", "setup.sh", "deploy/*/docker-compose.yml"],
       "note": "NATS has no single service directory -- its functional surface spans the ui, setup and deploy paths. A change under any prefix above makes this entry stale.",
       "layer": "stack",
       "commit": "885e2f40682d908451ebab465f291601866b0d8c",

@@ -205,7 +205,7 @@ as proof of it:**
 
 | Subsystem | What to check | How to check it for real | Pass/fail |
 |---|---|---|---|
-| **DHCP — Kea** | the ci.bats "dhcp kea" tests pass, the Kea lease/control-agent Rust unit tests pass, AND the validate stack's Kea rollback leg accepts | `bats --filter "dhcp kea" .github/scripts/ci.bats` (build-tools container) for config-gen and migration; `cargo test` for `services/ui` (`routes/dhcp.rs`, `kea_snapshots.rs`); `ci.sh validate` (`_ci_validate_kea_rollback`: real Kea + UI, snapshot, bad write, rollback) | Fail if any of the three fails. A real DHCPDISCOVER→DHCPACK cycle is not covered by CI (dhcp runs `network_mode: host`, outside the validate stack) and needs a manual check on a real LAN |
+| **DHCP — Kea** | the ci.bats "dhcp kea" tests pass, the Kea lease/control-agent Rust unit tests pass, AND the validate stack's Kea rollback leg accepts | `bats --filter "dhcp kea" .github/scripts/ci.bats` (build-tools container) for config-gen and migration; `cargo test` for `services/ui` (`main.rs`, `kea_snapshots.rs`); `ci.sh validate` (`_ci_validate_kea_rollback`: real Kea + UI, snapshot, bad write, rollback) | Fail if any of the three fails. A real DHCPDISCOVER→DHCPACK cycle is not covered by CI (dhcp runs `network_mode: host`, outside the validate stack) and needs a manual check on a real LAN |
 | **DHCP — Kea Admin UI mutation + rollback** (added 2026-08-05, issue #1391 audit — previously wired into CI but never referenced in this document) | A static reservation added via the Admin UI (`POST /dhcp/static/add`, issue #634) genuinely affects a subsequent real lease request; the Admin UI's own Kea-rollback route (issue #837) genuinely restores Kea to an earlier real snapshot | `full-setup-validate.yml`'s `dhcp-kea-ctrl-agent-mutation-simulation` job (`scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh`) for the UI-driven mutation proof; `full-setup-deep-validate.yml`'s `dhcp-kea-ui-rollback-simulation` job (`scripts/untracked/simulations/dhcp-kea-ui-rollback-simulation.sh`) for the UI-driven rollback proof — both already CI-wired, reuse rather than re-derive | Fail if the mutation isn't reflected in a subsequent real lease, or if the post-rollback Kea state doesn't match the earlier snapshot |
 | **DHCP — dnsmasq ProxyDHCP** | ci.bats "dhcp-proxy config adapter snapshots, rolls back, reports" and "dhcp-proxy optional directives render exactly per input" pass; PXE-relevant options actually get injected | Same bats files; `full-setup-validate.yml`'s `dhcp-proxy-pxe-simulation` job for a real PXE client boot-option probe | Fail if bats fail or the PXE simulation doesn't observe the expected boot options on the wire |
 | **DHCP — dnsmasq relay** (new, PR #1117) | `dnsmasq-relay` mode genuinely **relays** (not just injects options) between two network segments | `bash scripts/untracked/simulations/dhcp-relay-flow-simulation.sh` (build-tools container / real Docker host) — this is the exact script #1117 used: two isolated bridges (client-net, server-net), a real `dhclient` DISCOVER on the client-net side, confirms the upstream DHCP server on the separate server-net received the request via the relay's `giaddr` and answered with a lease from the *client subnet's* pool. ci.bats "setup dhcp mode, compose profiles and dnsmasq templates" for the mode-selection/config-render unit coverage | Fail unless the granted lease's subnet matches the client-side pool specifically (proves `giaddr` routing worked, not a coincidental same-subnet fallback) |
@@ -486,7 +486,7 @@ use a real Linux host, e.g. over SSH to a self-hosted runner, per
   lancache-dhcp-proxy --format '{{.State.StartedAt}}'` (or `docker logs`'s own
   entrypoint banner) that the container genuinely restarted, then confirm the
   rendered dnsmasq config inside the container reflects the NEW sub-mode, not the
-  one it was running before the save. Before `routes/dhcp.rs`'s
+  one it was running before the save. Before `main.rs`'s
   `reconcile_dhcp_mode_stop`/`reconcile_dhcp_mode_start` split, this transition
   silently kept serving the OLD sub-mode forever (`start_service` on an
   already-running container is a no-op) — this scenario exists specifically to catch
@@ -575,7 +575,7 @@ propagation path end-to-end via a real `dig`, both for creation and removal.
 - **DHCP/NTP dock start/stop controls (added issue #1437, maintainer-directed
   watchdog-as-actor architecture):** the dock's Start/Stop buttons for the `dhcp`
   and `ntp` rows POST to `/api/services/{service}/desired-state`, which writes
-  `desired-state.json` (`services/ui/src/routes/setup.rs`'s
+  `desired-state.json` (`services/ui/src/main.rs`'s
   `set_service_desired_state`); watchdog's own main loop (not the UI, not
   `dhcp.rs`/`ntp.rs`'s existing settings-reconcile paths) is the sole actor that
   reads that file and calls `start`/`stop` through `docker-socket-proxy`'s
@@ -644,7 +644,7 @@ propagation path end-to-end via a real `dig`, both for creation and removal.
   timed-out probe (not just a `Status` flip) and a genuine watchdog-triggered
   restart (new `StartedAt`).
 - Known open, non-blocking gap (#1166, surfaced during #1167's own live validation):
-  `restart_container()`'s `CURL_MAX_TIME` (default 5s) can be shorter than Docker's
+  `restart_container()`'s `CURL_MAX_TIME` (deployed value 5s, `config/prod/watchdog.env`) can be shorter than Docker's
   own restart grace period (10s) for a container slow to respond to SIGTERM, producing
   a spurious `WARNING: restart call failed` log line even when the restart actually
   succeeds a few seconds later. If you see this, cross-check `docker inspect
@@ -757,7 +757,7 @@ a CI proof does not, by itself, satisfy a Part B stack-validation claim.
   container genuinely restarted, and confirm `chronyc sources` (or the container's
   own startup log line, "Starting LanCache-NG-NTP (chronyd) with upstream servers:
   ...") now lists the NEW servers, not the ones configured before the save. Before
-  `routes/ntp.rs`'s `reconcile_ntp_container_stop`/`reconcile_ntp_container_start`
+  `main.rs`'s `reconcile_ntp_container_stop`/`reconcile_ntp_container_start`
   split, an already-running `ntp` container was never restarted on a settings save
   (`start_service` on an already-running container is a no-op) — this scenario
   exists specifically to catch a regression of that exact bug. **Not yet run as part
@@ -1312,8 +1312,8 @@ explicit pass:**
   the `netdata` container's `custom_sender()` integration
   (`deploy/*/docker-compose.yml`'s `netdata:` service, all three real profiles)
   POSTs each Netdata health.d alarm event to the Admin UI's new
-  `POST /api/netdata-alarms` (`services/ui/src/routes/netdata_alarms.rs`,
-  `services/ui/src/netdata_alarms.rs`), gated by a shared `NETDATA_ALARM_TOKEN`
+  `POST /api/netdata-alarms` (`services/ui/src/main.rs`,
+  `services/ui/src/main.rs`), gated by a shared `NETDATA_ALARM_TOKEN`
   (issue #858 pattern) and rendered on the dashboard's new "Netdata alarms"
   card. Durable coverage added: `docker compose -f <file> config --quiet` for
   all three deployment profiles (catching a real Compose `$`-interpolation

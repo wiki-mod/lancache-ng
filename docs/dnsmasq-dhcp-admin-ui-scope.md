@@ -60,7 +60,7 @@ That means #450's template comment was **correct about current behaviour**
 
 The `dnsmasq-proxy` mode is selected via the same DHCP mode switch as Kea
 (`POST /dhcp/mode`, value `dnsmasq-proxy`). Its settings are edited via
-`POST /dhcp/proxy` (`update_dhcp_proxy` in `services/ui/src/routes/dhcp.rs`) and
+`POST /dhcp/proxy` (`update_dhcp_proxy` in `services/ui/src/main.rs`) and
 rendered into `dnsmasq.conf.template` by `services/dhcp-proxy/entrypoint.sh` via
 `envsubst`.
 

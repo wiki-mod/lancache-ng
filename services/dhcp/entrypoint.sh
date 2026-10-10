@@ -38,7 +38,7 @@ case "${1:-}" in
 esac
 
 # Known-good Kea config snapshots (#614, follow-up to #415) are written by
-# the Admin UI's own process (services/ui/src/kea_snapshots.rs), not by this
+# the Admin UI's own process (services/ui/src/main.rs), not by this
 # entrypoint or the Kea daemons themselves -- Kea never reads or writes this
 # directory. The UI container runs as a fixed non-root UID/GID (10001, see
 # services/ui/Dockerfile), while this container runs as root and owns

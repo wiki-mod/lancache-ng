@@ -36,14 +36,14 @@ the top is a signal that its threats need re-checking.
 | DNS spoofing (PowerDNS RPZ) | `services/dns/entrypoint.sh`, `services/dns/cdn-domains.txt` | v0.2.0 | T1, T4, T11 |
 | TLS interception + local CA | `services/proxy/entrypoint.sh`, `services/proxy/conf.d/https.conf` | v0.2.0 | T7, T8, T10 |
 | Proxy request policy (client CIDR + host allowlists) | `services/proxy/entrypoint.sh`, `services/proxy/conf.d/http.conf` | v0.2.0 | T2, T9 |
-| Admin UI authentication | `services/ui/src/main.rs`, `services/ui/src/config.rs` | v0.2.0 | T3 |
+| Admin UI authentication | `services/ui/src/main.rs` | v0.2.0 | T3 |
 | Docker access mediation (socket-proxy) | `deploy/prod/docker-compose.yml` | v0.2.0 | T6 |
 | DHCP — Kea mode | `services/dhcp/entrypoint.sh`, `docs/dhcp-modes.md` | v0.2.0 | T12 |
 | DHCP — dnsmasq-proxy mode | `services/dhcp-proxy/entrypoint.sh`, `docs/dhcp-modes.md` | v0.2.0 | T12, T13 |
 | NATS event bus + role-scoped credentials | `deploy/prod/docker-compose.yml` (nats), `services/dns/nats-subscriber/` | v0.2.0 | T5 |
 | Secondary-node registration / remote NATS | `deploy/prod/docker-compose.nats-secondary.yml`, `services/ui/src/main.rs` | v0.2.0 | T5, T14 |
 | Console exclusion-by-omission | `services/dns/cdn-domains.txt`, `docs/install-ca-cert.md` | v0.2.0 | T4, T10 |
-| Zone/record known-good snapshot + rollback listener | `services/dns/nats-subscriber/src/rollback_listener.rs`, `docs/known-good-config-snapshots.md` | v0.3.0 | T4 |
+| Zone/record known-good snapshot + rollback listener | `services/dns/nats-subscriber/src/main.rs`, `docs/known-good-config-snapshots.md` | v0.3.0 | T4 |
 
 ---
 
@@ -237,7 +237,7 @@ untrusted network · **Impact**: High
 - Startup also fails closed if `SECONDARY_REGISTRATION_TOKEN` is empty (an empty
   token would authenticate any secondary; see T14).
 - `POST /api/netdata-alarms` (issue #849 observability.md finding #3's
-  alarm-forwarding webhook, `services/ui/src/routes/netdata_alarms.rs`) sits
+  alarm-forwarding webhook, `services/ui/src/main.rs`) sits
   outside the Basic Auth gate for the same reason `/api/secondary/register`
   does (it is a machine-to-machine call with no browser session to attach
   CSRF/cookie state to), but is not unauthenticated: it requires a matching
@@ -281,7 +281,7 @@ appliance spoofs.
   over the authenticated NATS event bus and the PowerDNS API (see T5), not from
   arbitrary clients.
 - **Zone/record rollback listener (issue #628, added since v0.2.0)**:
-  `services/dns/nats-subscriber/src/rollback_listener.rs` exposes a local HTTP
+  `services/dns/nats-subscriber/src/main.rs` exposes a local HTTP
   API (`DNS_ROLLBACK_LISTEN_ADDR`, default `0.0.0.0:8083`) the Admin UI calls to
   list known-good zone/record snapshots and trigger an operator-selected
   rollback — another path, besides NATS and the PowerDNS API, that can mutate
@@ -340,7 +340,7 @@ record changes, or subscribes to read cache/DNS metadata.
     own `nats-subscriber` can signal a post-rollback recursor cache-flush;
     (issue #906, a deliberate widening beyond the original least-
     privilege scope) `publish` on `lancache.dns.record`, so the same
-    `rollback_listener.rs`'s `publish_rollback_records` can republish
+    `main.rs`'s `publish_patch` can republish
     restored `lan.` records if `DNS_ROLLBACK_URL` is ever pointed at
     dns-ssl instead of its default `dns-standard:8083` (not the case in any
     shipped deployment today, but the identity's permissions must hold
@@ -381,7 +381,7 @@ record changes, or subscribes to read cache/DNS metadata.
   the affected process starts.
 - **Registered secondaries no longer share a credential (issue #583).** Each
   gets its own unique NATS username/password at registration time, issued via
-  NATS's auth-callout mechanism (see `services/ui/src/nats_auth_callout.rs`):
+  NATS's auth-callout mechanism (see `services/ui/src/main.rs`):
   the Admin UI signs a per-connection JWT after checking the presented
   credential's hash against that one secondary's row in its `secondaries`
   table, live, on every single connection attempt. Removing a secondary
@@ -396,10 +396,9 @@ record changes, or subscribes to read cache/DNS metadata.
   NATS connection open at the moment it was removed/rotated kept using its
   already-issued user JWT (90-day TTL, `USER_JWT_TTL_SECS` in
   `nats_auth_callout.rs`) until it happened to reconnect on its own. Both
-  `remove_secondary` and `rotate_token` (`services/ui/src/routes/
-  secondaries.rs`) now additionally force-disconnect that secondary's current
+  `remove_secondary` and `rotate_token` (`services/ui/src/main.rs`) now additionally force-disconnect that secondary's current
   live connection immediately after committing the DB write, via
-  `services/ui/src/nats_kick.rs` (NATS's `$SYS.REQ.SERVER.*` system-services
+  `services/ui/src/main.rs` (NATS's `$SYS.REQ.SERVER.*` system-services
   API: `CONNZ` to find the connection, `KICK` to disconnect it). This is
   best-effort, fire-and-forget, and additive — a NATS outage or a slow kick
   never blocks or fails the Admin UI's HTTP response, and the DB-level
@@ -435,7 +434,7 @@ record changes, or subscribes to read cache/DNS metadata.
   for a wildcard (`0.0.0.0`/`::`, bracketed or not), loopback
   (`127.0.0.1`/`::1`), or hostname `NATS_BIND_IP` with no explicit
   `NATS_ADVERTISE_URL` set, since none of those are addresses a genuinely
-  remote secondary could dial — see `services/ui/src/config.rs`'s
+  remote secondary could dial — see `services/ui/src/main.rs`'s
   `advertised_nats_url()` and its unit tests for the exact rejected cases.
 
 **Residual risk**: Medium — correct firewalling of the optional secondary
@@ -555,10 +554,10 @@ or saturating the proxy.
   forwarded: the `netdata` container's `custom_sender()` integration
   (`deploy/*/docker-compose.yml`'s `netdata:` service command block) POSTs
   each alarm event to the Admin UI's `POST /api/netdata-alarms`
-  (`services/ui/src/routes/netdata_alarms.rs`), gated by its own shared
+  (`services/ui/src/main.rs`), gated by its own shared
   `NETDATA_ALARM_TOKEN` (issue #858 shared-secret pattern), and the
   dashboard's "Netdata alarms" card renders the recent history
-  (`services/ui/src/netdata_alarms.rs`). This closes the remainder of #849
+  (`services/ui/src/main.rs`). This closes the remainder of #849
   finding #3: an operator no longer needs direct `docker exec`/Netdata-API
   access to learn that a health.d alarm fired. Netdata's own full metrics
   dashboard (port 19999) is still never published to the host — this
@@ -809,7 +808,7 @@ tagging each release, then update the top marker and the
    2026-07-31) and diff the sources listed in the inventory table:
    - `services/dns/entrypoint.sh`, `services/dns/cdn-domains.txt`
    - `services/proxy/entrypoint.sh`, `services/proxy/conf.d/*.conf`
-   - `services/ui/src/config.rs`, `services/ui/src/main.rs`
+   - `services/ui/src/main.rs`
      (`resolve_admin_ui_auth_mode`, `ALLOW_INSECURE_UI`, startup guards)
    - `services/dhcp/entrypoint.sh`, `services/dhcp-proxy/entrypoint.sh`,
      `docs/dhcp-modes.md`

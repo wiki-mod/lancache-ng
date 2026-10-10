@@ -1,160 +1,359 @@
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//!
 //! What: watchdog health loop, restarts and status.json.
 //! Why: one daemon keeps core services up, reports health.
+//! From: Issue #842 | PR #1858
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use lancache_watchdog::config::{self, ContainerNames, MonitoredService};
-use lancache_watchdog::docker_client::DockerProxyClient;
-use lancache_watchdog::health::{Action, AlertAction, AlertCounter, FailureCounter, HealthReading};
-use lancache_watchdog::status::{self, DiskInfo, ServiceHealth, WatchdogStatus};
+use lancache_ng::config::{self, DhcpMode, OutOfRange, Uint, env_opt};
+use lancache_ng::{
+    DesiredRunState, DesiredState, DiskHealth, DiskInfo, DockerProxy, Place, ServiceHealth,
+    WatchdogStatus, df, write_file,
+};
+use time::OffsetDateTime;
 
-// What: containers watchdog only alerts on, never restarts.
-// Why: dhcp/ntp restarts could race their config rollback.
-// From: Issue #842
-fn resolve_alert_only_targets(
-    dhcp_mode: &str,
+// What: seconds Docker waits for SIGTERM before SIGKILL.
+// Why: stays inside the restart call's own curl budget.
+const RESTART_GRACE_SECS: u32 = 2;
+
+// What: startup settings, read once from the environment.
+// Why: a deployment change recreates this container.
+struct Settings {
+    docker_proxy_url: String,
+    check_interval: Duration,
+    restart_after: u32,
+    // What: None means no timeout, like curl --max-time 0.
+    // Why: ZERO would mean "instant" to the proxy client.
+    curl_max_time: Option<Duration>,
+    curl_max_time_restart: Option<Duration>,
+    disk_warn_pct: u32,
+    disk_alarm_pct: u32,
+    status_file: PathBuf,
+    // What: read fresh every loop iteration, not once.
+    // Why: a dock action must apply without a restart.
+    // From: Issue #1437
+    desired_state_file: PathBuf,
+    cache_dir: PathBuf,
+    ssl_enabled: bool,
+    dhcp_mode: DhcpMode,
     logging_enabled: bool,
     ntp_enabled: bool,
-) -> Vec<String> {
-    // ui is never profile-gated in any deploy/*/docker-compose.yml profile,
-    // unlike dhcp/dhcp-proxy/syslog/ntp, so it is always monitored here.
-    let mut targets = vec![config::CONTAINER_UI.to_string()];
-    if let Some(dhcp_container) = config::dhcp_alert_container(dhcp_mode) {
-        targets.push(dhcp_container.to_string());
-    }
-    if logging_enabled {
-        targets.push(config::CONTAINER_SYSLOG.to_string());
-    }
-    // NTP is profile-gated. Monitoring it when disabled would create a
-    // permanent false alert for a container that intentionally does not exist.
-    if ntp_enabled {
-        targets.push(config::CONTAINER_NTP.to_string());
-    }
-    targets
 }
 
-// What: dhcp/ntp targets reconcile_desired_state acts on
-// Why: shared shape for loop call site and tests
-// From: Issue #1437
-fn desired_state_targets(dhcp_mode: &str, ntp_enabled: bool) -> Vec<(&'static str, String)> {
-    let mut targets = Vec::new();
-    if let Some(dhcp_container) = config::dhcp_alert_container(dhcp_mode) {
-        targets.push(("dhcp", dhcp_container.to_string()));
-    }
-    if ntp_enabled {
-        targets.push(("ntp", config::CONTAINER_NTP.to_string()));
-    }
-    targets
-}
-
-// What: starts/stops one service to match its desired state
-// Why: acts on diff; absent entry = no opinion
-// From: Issue #1437
-async fn reconcile_one(
-    client: &DockerProxyClient,
-    label: &str,
-    container_name: &str,
-    desired: Option<status::DesiredRunState>,
-    timeout: Option<Duration>,
-    action_timeout: Option<Duration>,
-) {
-    // No entry in desired-state.json is not "should run": that would make
-    // watchdog start a container settings-reconcile just stopped on purpose
-    // (dhcp_mode/ntp_enabled are resolved once at watchdog startup, so a
-    // mode switch can leave a stale target here for several minutes). Only
-    // an explicit dock action justifies watchdog taking either action.
-    let Some(desired) = desired else {
-        return;
-    };
-    let should_run = desired.should_run();
-    let Some(running) = client.is_running(container_name, timeout).await else {
-        return;
-    };
-    if should_run && !running {
-        log(&format!(
-            "STARTING {container_name} ({label}: desired state is running)"
-        ));
-        if !client.start(container_name, action_timeout).await {
-            log_err(&format!("WARNING: start call failed for {container_name}"));
-        }
-    } else if !should_run && running {
-        log(&format!(
-            "STOPPING {container_name} ({label}: desired state is stopped)"
-        ));
-        if !client.stop(container_name, action_timeout).await {
-            log_err(&format!("WARNING: stop call failed for {container_name}"));
-        }
+// What: curl-style seconds; 0 means no timeout (None).
+// Why: fractions stay valid; 0 must not time out at once.
+fn curl_timeout(raw: Option<&str>, name: &str) -> Result<Option<Duration>, String> {
+    let raw = raw.ok_or_else(|| format!("FATAL: {}.", config::not_set(name)))?;
+    let invalid = |why: &str| format!("FATAL: invalid {name}={raw}{why}.");
+    match raw.parse::<f64>() {
+        Ok(0.0) => Ok(None),
+        Ok(secs) if secs.is_finite() && secs > 0.0 => Duration::try_from_secs_f64(secs)
+            .map(Some)
+            .map_err(|_| invalid(" (out of range)")),
+        _ => Err(invalid("")),
     }
 }
 
-// What: reconcile DHCP/NTP to desired state
-// Why: watchdog is now the sole actor for these two services
-// From: Issue #1437
-async fn reconcile_desired_state(client: &DockerProxyClient, settings: &Settings) {
-    let desired = status::read_desired_state(&settings.desired_state_file);
-    for (label, container_name) in desired_state_targets(&settings.dhcp_mode, settings.ntp_enabled)
-    {
-        let desired_state = match label {
-            "dhcp" => desired.dhcp,
-            "ntp" => desired.ntp,
-            _ => None,
+// What: settings from an env reader, plus startup warnings.
+// Why: Err is fatal; a reader arg keeps tests env-free.
+// From: Issue #849 | PR #1858
+fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<String>), String> {
+    let get = |name: &str| config::opt(&env, name);
+    let mut warnings = Vec::new();
+    let mut knob = |name: &'static str, min: u64, max: u64| -> Result<u64, String> {
+        let spec = Uint {
+            name,
+            min,
+            max,
+            below: OutOfRange::Clamp,
+            above: OutOfRange::Reject,
         };
-        reconcile_one(
-            client,
-            label,
-            &container_name,
-            desired_state,
-            settings.curl_max_time,
-            settings.curl_max_time_restart,
+        let (value, warning) = spec
+            .parse(get(name).as_deref())
+            .map_err(|e| format!("FATAL: {e}."))?;
+        warnings.extend(warning);
+        Ok(value)
+    };
+    let check_interval = knob("CHECK_INTERVAL", 1, u64::MAX)?;
+    let restart_after = knob("RESTART_AFTER", 1, u32::MAX.into())?;
+    let disk_warn_pct = knob("DISK_WARN_PCT", 0, u32::MAX.into())?;
+    let disk_alarm_pct = knob("DISK_ALARM_PCT", 0, u32::MAX.into())?;
+    let curl_max_time = curl_timeout(get("CURL_MAX_TIME").as_deref(), "CURL_MAX_TIME")?;
+    let curl_max_time_restart = curl_timeout(
+        get("CURL_MAX_TIME_RESTART").as_deref(),
+        "CURL_MAX_TIME_RESTART",
+    )?;
+
+    // What: a value the env must supply; unset is fatal.
+    // Why: watchdog.env and compose own it; no default.
+    let need = |name: &str| config::need(&env, name).map_err(|e| format!("FATAL: {e}."));
+    // What: a bool the env must supply; junk is fatal.
+    // Why: same owner as need; a typo must not flip a gate.
+    let need_flag = |name: &str| config::need_flag(&env, name).map_err(|e| format!("FATAL: {e}."));
+    let ssl_enabled = need_flag("SSL_ENABLED")?;
+
+    let fixed_names = [
+        ("CONTAINER_PROXY", config::CONTAINER_PROXY, true),
+        (
+            "CONTAINER_DNS_STANDARD",
+            config::CONTAINER_DNS_STANDARD,
+            true,
+        ),
+        ("CONTAINER_DNS_SSL", config::CONTAINER_DNS_SSL, ssl_enabled),
+        ("CONTAINER_NATS", config::CONTAINER_NATS, true),
+    ];
+    for (var, expected, active) in fixed_names {
+        if let Some(got) = get(var)
+            && active
+            && got != expected
+        {
+            return Err(format!(
+                "FATAL: {var}={got} is not supported (expected '{expected}'). The docker-socket-proxy allowlist and the Admin UI know only this fixed name. Revert {var} to the default."
+            ));
+        }
+    }
+
+    let (standard, ssl) = (get("CACHE_DIR_STANDARD"), get("CACHE_DIR_SSL"));
+    let cache_dir = match get("CACHE_DIR") {
+        Some(dir) => dir,
+        None => {
+            if let (Some(std), Some(ssl)) = (&standard, &ssl)
+                && std != ssl
+            {
+                return Err(format!(
+                    "FATAL: CACHE_DIR_STANDARD={std} and CACHE_DIR_SSL={ssl} point to different paths without CACHE_DIR. Set CACHE_DIR to one shared cache directory."
+                ));
+            }
+            standard
+                .or(ssl)
+                .ok_or_else(|| format!("FATAL: {}.", config::not_set("CACHE_DIR")))?
+        }
+    };
+
+    // What: the Docker API address must come from the env.
+    // Why: watchdog.env and compose own it; no default.
+    let docker_proxy_url = need("DOCKER_PROXY_URL")?;
+
+    let settings = Settings {
+        docker_proxy_url,
+        check_interval: Duration::from_secs(check_interval),
+        restart_after: restart_after as u32,
+        curl_max_time,
+        curl_max_time_restart,
+        disk_warn_pct: disk_warn_pct as u32,
+        disk_alarm_pct: disk_alarm_pct as u32,
+        status_file: PathBuf::from(need("STATUS_FILE")?),
+        desired_state_file: PathBuf::from(need("DESIRED_STATE_FILE")?),
+        cache_dir: PathBuf::from(cache_dir),
+        ssl_enabled,
+        // What: DHCP_MODE must be set; "disabled" is valid.
+        // Why: compose sets it; unknown text fails closed.
+        dhcp_mode: DhcpMode::parse(&need("DHCP_MODE")?, false),
+        // What: LOGGING_ENABLED gates the syslog container.
+        // Why: SYSLOG_ENABLED gates retention only.
+        logging_enabled: need_flag("LOGGING_ENABLED")?,
+        ntp_enabled: need_flag("NTP_ENABLED")?,
+    };
+    Ok((settings, warnings))
+}
+
+// What: typed Docker health plus watchdog's own outcomes.
+// Why: only Healthy and Unhealthy move a failure counter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Reading {
+    Healthy,
+    Unhealthy,
+    Starting,
+    // What: Docker reports no health status at all.
+    // Why: a valid answer, unlike an unreachable proxy.
+    None,
+    // What: no reading at all (network, timeout, non-2xx).
+    // Why: not a Docker-reported state.
+    Unreachable,
+    // What: an unknown Docker health string, verbatim.
+    // Why: never coerce it into a known variant.
+    Other(String),
+    // What: healthy, but the check printed DEGRADED: text.
+    // Why: reduced guarantees must stay visible (ntp).
+    Degraded,
+}
+
+impl Reading {
+    // What: a reading from one docker inspect JSON body.
+    // Why: Degraded refines healthy, never replaces it.
+    // From: Issue #1296
+    fn from_inspect(body: &serde_json::Value) -> Self {
+        let status = body
+            .pointer("/State/Health/Status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("none");
+        // What: only the newest check-log entry counts.
+        // Why: an old DEGRADED line must expire with it.
+        let degraded = body
+            .pointer("/State/Health/Log")
+            .and_then(|log| log.as_array())
+            .and_then(|log| log.last())
+            .and_then(|entry| entry.get("Output"))
+            .and_then(|output| output.as_str())
+            .is_some_and(|out| out.lines().any(|line| line.starts_with("DEGRADED: ")));
+        match status {
+            "healthy" if degraded => Self::Degraded,
+            "healthy" => Self::Healthy,
+            "unhealthy" => Self::Unhealthy,
+            "starting" => Self::Starting,
+            "none" => Self::None,
+            other => Self::Other(other.to_string()),
+        }
+    }
+
+    // What: the status.json health string and card color.
+    // Why: the ui shows both verbatim; dashboard matches.
+    // From: Issue #1296
+    fn describe(&self) -> (&str, &'static str) {
+        match self {
+            Self::Healthy => ("healthy", "green"),
+            Self::Unhealthy => ("unhealthy", "red"),
+            Self::Starting => ("starting", "yellow"),
+            Self::None => ("none", "yellow"),
+            Self::Unreachable => ("unreachable", "yellow"),
+            Self::Other(raw) => (raw, "yellow"),
+            Self::Degraded => ("degraded", "amber"),
+        }
+    }
+
+    // What: true if an alert-only service is not failing.
+    // Why: Degraded is known; Other is treated as a fault.
+    fn is_alert_ok(&self) -> bool {
+        matches!(
+            self,
+            Self::Healthy | Self::Starting | Self::None | Self::Degraded
         )
-        .await;
     }
 }
 
-// What: HH:MM:SS of the "[watchdog] HH:MM:SS msg" lines.
-// Why: operators grep the docker logs for this exact shape.
-fn timestamp_hms() -> String {
+// What: what the loop logs or does after one reading.
+// Why: None covers steady health and all inert readings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Event {
+    None,
+    Failing(u32),
+    // What: restart, then the counter resets to 0.
+    // Why: reset even if the restart call itself fails.
+    Restart,
+    Recovered,
+}
+
+// What: consecutive failures of one monitored service.
+// Why: a restart fires only after RESTART_AFTER misses.
+#[derive(Debug, Default)]
+struct Counter(u32);
+
+impl Counter {
+    // What: reset to zero; Recovered if a streak ran.
+    // Why: RECOVERED is logged once per outage, not cycle.
+    fn clear(&mut self) -> Event {
+        if std::mem::take(&mut self.0) > 0 {
+            Event::Recovered
+        } else {
+            Event::None
+        }
+    }
+
+    // What: count one reading of a restart-capable service.
+    // Why: inert readings keep the counter; no restart.
+    fn observe(&mut self, reading: &Reading, restart_after: u32) -> Event {
+        match reading {
+            Reading::Unhealthy => {
+                self.0 = self.0.saturating_add(1);
+                if self.0 >= restart_after {
+                    self.0 = 0;
+                    Event::Restart
+                } else {
+                    Event::Failing(self.0)
+                }
+            }
+            Reading::Healthy => self.clear(),
+            _ => Event::None,
+        }
+    }
+
+    // What: count one reading of an alert-only service.
+    // Why: watchdog must not restart these; only reports.
+    fn observe_alert(&mut self, ok: bool) -> Event {
+        if ok {
+            return self.clear();
+        }
+        self.0 = self.0.saturating_add(1);
+        Event::Failing(self.0)
+    }
+}
+
+// What: monitored containers in probe order, restart flag.
+// Why: dns-ssl, dhcp, syslog, ntp exist only when enabled.
+// From: Issue #842
+fn targets(s: &Settings) -> Vec<(&'static str, bool)> {
+    let mut list = vec![
+        (config::CONTAINER_PROXY, true),
+        (config::CONTAINER_DNS_STANDARD, true),
+    ];
+    if s.ssl_enabled {
+        list.push((config::CONTAINER_DNS_SSL, true));
+    }
+    list.extend([
+        (config::CONTAINER_NATS, true),
+        (config::CONTAINER_NETDATA, true),
+        (config::CONTAINER_DOCKER_SOCKET_PROXY, false),
+        (config::CONTAINER_UI, false),
+    ]);
+    list.extend(s.dhcp_mode.container().map(|name| (name, false)));
+    if s.logging_enabled {
+        list.push((config::CONTAINER_SYSLOG, false));
+    }
+    if s.ntp_enabled {
+        list.push((config::CONTAINER_NTP, false));
+    }
+    list
+}
+
+// What: UTC time as YYYY-MM-DDTHH:MM:SSZ, no fractions.
+// Why: status.json's `updated` format is a fixed contract.
+fn stamp(at: OffsetDateTime) -> String {
     const FORMAT: &[time::format_description::FormatItem] =
-        time::macros::format_description!("[hour]:[minute]:[second]");
-    time::OffsetDateTime::now_utc()
-        .format(FORMAT)
+        time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
+    at.format(FORMAT)
         .expect("fixed UTC format description must always succeed")
+}
+
+// What: the "[watchdog] HH:MM:SS" line prefix.
+// Why: operators grep the docker logs for this exact shape.
+fn prefix() -> String {
+    format!("[watchdog] {}", &stamp(OffsetDateTime::now_utc())[11..19])
 }
 
 // What: WATCHDOG_LOG_FILE opened once for append, or none.
 // Why: fluent-bit tails the file; compose runs no tee.
 // From: Issue #1683 | PR #1858
-fn log_file() -> Option<&'static Mutex<std::fs::File>> {
-    static FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+fn log_file() -> Option<&'static Mutex<fs::File>> {
+    static FILE: OnceLock<Option<Mutex<fs::File>>> = OnceLock::new();
     FILE.get_or_init(|| {
-        let path = std::env::var("WATCHDOG_LOG_FILE")
-            .ok()
-            .filter(|p| !p.is_empty())?;
-        let opened = std::fs::OpenOptions::new()
+        let path = env_opt("WATCHDOG_LOG_FILE")?;
+        fs::OpenOptions::new()
             .create(true)
             .append(true)
             .mode(0o640)
-            .open(&path);
-        match opened {
-            Ok(file) => Some(Mutex::new(file)),
-            Err(e) => {
-                eprintln!(
-                    "[watchdog] {} WARNING: cannot open {path}: {e}",
-                    timestamp_hms()
-                );
-                None
-            }
-        }
+            .open(&path)
+            .inspect_err(|e| eprintln!("{} WARNING: cannot open {path}: {e}", prefix()))
+            .ok()
+            .map(Mutex::new)
     })
     .as_ref()
 }
@@ -162,8 +361,9 @@ fn log_file() -> Option<&'static Mutex<std::fs::File>> {
 // What: a line to its stream and to the log file, if any.
 // Why: a failed file write is shown once, never silent.
 // From: Issue #1683 | PR #1858
-fn emit(line: &str, to_stderr: bool) {
+fn emit(msg: &str, to_stderr: bool) {
     static WARNED: AtomicBool = AtomicBool::new(false);
+    let line = format!("{} {msg}", prefix());
     if to_stderr {
         eprintln!("{line}");
     } else {
@@ -179,509 +379,512 @@ fn emit(line: &str, to_stderr: bool) {
     if let Err(e) = written
         && !WARNED.swap(true, Ordering::Relaxed)
     {
-        eprintln!(
-            "[watchdog] {} WARNING: cannot write the log file: {e}",
-            timestamp_hms()
-        );
+        eprintln!("{} WARNING: cannot write the log file: {e}", prefix());
     }
 }
 
+// What: write one info line.
+// Why: callers need no stream choice for normal output.
 fn log(msg: &str) {
-    emit(&format!("[watchdog] {} {msg}", timestamp_hms()), false);
+    emit(msg, false);
 }
 
+// What: write one error line to stderr.
+// Why: errors stay visible apart from normal output.
 fn log_err(msg: &str) {
-    emit(&format!("[watchdog] {} {msg}", timestamp_hms()), true);
+    emit(msg, true);
 }
 
-// What: startup settings, read once from the environment.
-// Why: env reads stay here; config::* stays pure, tested.
-struct Settings {
-    docker_proxy_url: String,
-    check_interval: Duration,
-    restart_after: u32,
-    // `None` means "no timeout", matching curl's own `--max-time 0`
-    // semantics for CURL_MAX_TIME/CURL_MAX_TIME_RESTART -- see
-    // config::parse_curl_timeout's doc comment. Never represented as
-    // `Duration::ZERO`: docker_client's bounded()/apply_timeout() treat
-    // that as "essentially instant", the opposite of "unbounded".
-    curl_max_time: Option<Duration>,
-    curl_max_time_restart: Option<Duration>,
-    disk_warn_pct: u32,
-    disk_alarm_pct: u32,
-    status_file: PathBuf,
-    // What: read fresh every loop iteration, not once
-    // Why: an operator's dock action must apply without a restart
-    // From: Issue #1437
-    desired_state_file: PathBuf,
-    cache_dir: PathBuf,
-    container_names: ContainerNames,
-    // These gates describe whether optional alert-only containers are part of
-    // the running stack. A deployment change recreates this container, so the
-    // values are intentionally resolved once at startup.
-    dhcp_mode: String,
-    logging_enabled: bool,
-    ntp_enabled: bool,
+// What: the call that moves a service to its wanted state.
+// Why: a service already in that state needs no call.
+fn reconcile_step(
+    want: DesiredRunState,
+    running: bool,
+) -> Option<(&'static str, &'static str, &'static str)> {
+    match (want, running) {
+        (DesiredRunState::Running, false) => Some(("start", "STARTING", "running")),
+        (DesiredRunState::Stopped, true) => Some(("stop", "STOPPING", "stopped")),
+        _ => None,
+    }
 }
 
-fn load_settings() -> Settings {
-    // Filters an explicitly-empty env value (e.g. `DOCKER_PROXY_URL=` set
-    // but blank) down to `None` here, at the single point every setting in
-    // this function reads from -- see config::non_empty's own doc comment
-    // for why bash's `${VAR:-default}` treats empty and unset identically.
-    // This also makes the equivalent filtering inside config::resolve_bool/
-    // parse_u64_with_default/resolve_container_names redundant for THESE
-    // call sites specifically, which is fine: those functions still need
-    // their own guard so they stay correct for any other caller, not just
-    // this one.
-    let env = |name: &str| {
-        let value = std::env::var(name).ok();
-        config::non_empty(value.as_deref()).map(str::to_string)
-    };
-
-    let docker_proxy_url =
-        env("DOCKER_PROXY_URL").unwrap_or_else(|| "http://docker-socket-proxy:2375".to_string());
-
-    let (check_interval, warnings) = config::parse_check_interval(env("CHECK_INTERVAL").as_deref());
-    for w in warnings {
-        log(&w);
+// What: start or stop dhcp/ntp to the desired state.
+// Why: watchdog is the sole actor; no opinion, no action.
+// From: Issue #1437
+async fn reconcile(client: &DockerProxy, s: &Settings) {
+    let desired = DesiredState::read(&s.desired_state_file);
+    let mut services = Vec::new();
+    if let Some(name) = s.dhcp_mode.container() {
+        services.push(("dhcp", name, desired.dhcp));
     }
-
-    let (restart_after, warnings) = config::parse_restart_after(env("RESTART_AFTER").as_deref());
-    for w in warnings {
-        log(&w);
+    if s.ntp_enabled {
+        services.push(("ntp", config::CONTAINER_NTP, desired.ntp));
     }
-
-    let (curl_max_time, warnings) =
-        config::parse_curl_timeout(env("CURL_MAX_TIME").as_deref(), "CURL_MAX_TIME", 5);
-    for w in warnings {
-        log(&w);
-    }
-    let (curl_max_time_restart, warnings) = config::parse_curl_timeout(
-        env("CURL_MAX_TIME_RESTART").as_deref(),
-        "CURL_MAX_TIME_RESTART",
-        30,
-    );
-    for w in warnings {
-        log(&w);
-    }
-
-    let (disk_warn_pct, warnings) =
-        config::parse_u32_with_default(env("DISK_WARN_PCT").as_deref(), "DISK_WARN_PCT", 85);
-    for w in warnings {
-        log(&w);
-    }
-    let (disk_alarm_pct, warnings) =
-        config::parse_u32_with_default(env("DISK_ALARM_PCT").as_deref(), "DISK_ALARM_PCT", 95);
-    for w in warnings {
-        log(&w);
-    }
-
-    // What: SSL_ENABLED defaults to true.
-    // Why: same default as the ui's SSL_ENABLED.
-    let ssl_enabled = config::resolve_bool(env("SSL_ENABLED").as_deref(), true);
-
-    let container_names = match config::resolve_container_names(
-        env("CONTAINER_PROXY").as_deref(),
-        env("CONTAINER_DNS_STANDARD").as_deref(),
-        env("CONTAINER_DNS_SSL").as_deref(),
-        env("CONTAINER_NATS").as_deref(),
-        ssl_enabled,
-    ) {
-        Ok(names) => names,
-        Err(msg) => {
-            log_err(&msg);
-            std::process::exit(1);
+    for (label, name, want) in services {
+        let Some(want) = want else {
+            continue;
+        };
+        // What: an unknown running state skips this cycle.
+        // Why: acting on a guess could fight a rollback.
+        let running = client
+            .inspect(name, s.curl_max_time)
+            .await
+            .and_then(|body| body.pointer("/State/Running")?.as_bool());
+        let Some(running) = running else {
+            continue;
+        };
+        let Some((action, verb, state)) = reconcile_step(want, running) else {
+            continue;
+        };
+        log(&format!(
+            "{verb} {name} ({label}: desired state is {state})"
+        ));
+        if client
+            .act(name, action, s.curl_max_time_restart)
+            .await
+            .is_err()
+        {
+            log_err(&format!("WARNING: {action} call failed for {name}"));
         }
-    };
-
-    let status_file = env("STATUS_FILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/run/watchdog/status.json"));
-
-    // What: default path matches ui's own /data mount point
-    // Why: no compose env override needed (like STATUS_FILE)
-    // From: Issue #1437
-    let desired_state_file = env("DESIRED_STATE_FILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/data/desired-state.json"));
-
-    // What: CACHE_DIR, else the legacy split pair.
-    // Why: old installs may set only the CACHE_DIR_* pair.
-    let cache_dir = match config::resolve_cache_dir(
-        env("CACHE_DIR").as_deref(),
-        env("CACHE_DIR_STANDARD").as_deref(),
-        env("CACHE_DIR_SSL").as_deref(),
-    ) {
-        Ok(dir) => PathBuf::from(dir),
-        Err(msg) => {
-            log_err(&msg);
-            std::process::exit(1);
-        }
-    };
-
-    // An absent or invalid DHCP mode must not create an alert for a DHCP
-    // container that was never provisioned. The classifier itself owns the
-    // accepted mode mapping and falls back to monitoring neither service.
-    let dhcp_mode = env("DHCP_MODE").unwrap_or_else(|| "disabled".to_string());
-
-    // LOGGING_ENABLED represents whether the combined syslog container is
-    // part of the stack. SYSLOG_ENABLED is deliberately narrower and controls
-    // only the storage-budget retention/pruning engine, so using it here would
-    // leave the normal logging-enabled, retention-disabled deployment
-    // unmonitored.
-    let logging_enabled = config::resolve_bool(env("LOGGING_ENABLED").as_deref(), false);
-
-    // NTP monitoring follows the same gate that controls whether the optional
-    // NTP container exists, avoiding a false alert when the profile is off.
-    let ntp_enabled = config::resolve_bool(env("NTP_ENABLED").as_deref(), false);
-
-    Settings {
-        docker_proxy_url,
-        check_interval,
-        restart_after,
-        curl_max_time,
-        curl_max_time_restart,
-        disk_warn_pct,
-        disk_alarm_pct,
-        status_file,
-        desired_state_file,
-        cache_dir,
-        container_names,
-        dhcp_mode,
-        logging_enabled,
-        ntp_enabled,
     }
 }
 
+// What: the color of a disk use percent.
+// Why: alarm outranks warn; below both is green.
+fn disk_status(pct: u32, warn_pct: u32, alarm_pct: u32) -> &'static str {
+    if pct >= alarm_pct {
+        "red"
+    } else if pct >= warn_pct {
+        "yellow"
+    } else {
+        "green"
+    }
+}
+
+// What: cache disk use as a traffic-light status.
+// Why: a missing directory or failed df is unknown.
+fn disk_info(dir: &Path, warn_pct: u32, alarm_pct: u32) -> DiskHealth {
+    let unknown = DiskHealth {
+        pct: 0,
+        status: "unknown".to_string(),
+    };
+    if !dir.is_dir() {
+        return unknown;
+    }
+    match df(dir) {
+        Some(d) => DiskHealth {
+            pct: d.used_pct,
+            status: disk_status(d.used_pct, warn_pct, alarm_pct).to_string(),
+        },
+        None => unknown,
+    }
+}
+
+// What: load settings, then run the watch loop.
+// Why: a bad setting must stop the service before it acts.
 #[tokio::main]
 async fn main() {
-    let settings = load_settings();
-    let client = DockerProxyClient::new(settings.docker_proxy_url.clone())
-        .expect("building the reqwest client must not fail (no invalid static config)");
-
-    // The data-driven service table replaces individually-named loop state.
-    // ContainerNames remains separate because status generation also needs
-    // the validated SSL-mode omission directly.
-    let mut monitored: Vec<MonitoredService> = vec![
-        MonitoredService {
-            container_name: settings.container_names.proxy.clone(),
-            restart_after: settings.restart_after,
-            grace_period: None,
-        },
-        MonitoredService {
-            container_name: settings.container_names.dns_standard.clone(),
-            restart_after: settings.restart_after,
-            grace_period: None,
-        },
-    ];
-    if let Some(dns_ssl) = &settings.container_names.dns_ssl {
-        monitored.push(MonitoredService {
-            container_name: dns_ssl.clone(),
-            restart_after: settings.restart_after,
-            grace_period: None,
-        });
-    }
-    monitored.push(MonitoredService {
-        container_name: settings.container_names.nats.clone(),
-        restart_after: settings.restart_after,
-        grace_period: None,
+    let (s, warnings) = load_settings(config::process_env).unwrap_or_else(|msg| {
+        log_err(&msg);
+        std::process::exit(1);
     });
-    // netdata (issue #842, 2026-08-07 restart-capability decision): real
-    // restart-capable, not alert-only -- unlike ui/dhcp/dhcp-proxy/syslog/
-    // ntp (see resolve_alert_only_targets()'s own doc comment for why those
-    // stay alert-only). No conflicting rollback-safety concern exists for
-    // netdata anywhere in issue #842's history, unlike dhcp/dhcp-proxy.
-    // netdata is never profile-gated, so it is unconditionally monitored
-    // here, matching resolve_alert_only_targets()'s own ui handling.
-    monitored.push(MonitoredService {
-        container_name: config::CONTAINER_NETDATA.to_string(),
-        restart_after: settings.restart_after,
-        grace_period: None,
-    });
+    warnings.iter().for_each(|w| log(w));
+    let client = DockerProxy::new(&s.docker_proxy_url);
 
-    let mut failure_counters: HashMap<String, FailureCounter> = monitored
-        .iter()
-        .map(|s| (s.container_name.clone(), FailureCounter::default()))
-        .collect();
-    let mut docker_proxy_alert_counter = AlertCounter::default();
-
-    // Alert-only services use independent counters because an outage must
-    // remain visible without ever crossing into restart behavior.
-    let alert_only_targets = resolve_alert_only_targets(
-        &settings.dhcp_mode,
-        settings.logging_enabled,
-        settings.ntp_enabled,
-    );
-    let mut alert_only_counters: HashMap<String, AlertCounter> = alert_only_targets
-        .iter()
-        .map(|name| (name.clone(), AlertCounter::default()))
-        .collect();
-
-    log(&format!(
-        "Watchdog started. Monitoring: {} (SSL_ENABLED={}); alert-only probe: {}; alert-only monitored: {}",
-        monitored
+    let list = targets(&s);
+    let names = |restart: bool| {
+        let picked: Vec<&str> = list
             .iter()
-            .map(|s| s.container_name.as_str())
-            .collect::<Vec<_>>()
-            .join(" "),
-        if settings.container_names.dns_ssl.is_some() {
-            1
-        } else {
-            0
-        },
-        settings.container_names.docker_socket_proxy,
-        if alert_only_targets.is_empty() {
-            "none".to_string()
-        } else {
-            alert_only_targets.join(" ")
-        },
-    ));
+            .filter(|t| t.1 == restart)
+            .map(|t| t.0)
+            .collect();
+        picked.join(" ")
+    };
     log(&format!(
-        "Cache directory: {}",
-        settings.cache_dir.display()
+        "Watchdog started. Monitoring: {} (SSL_ENABLED={}); alert-only monitored: {}",
+        names(true),
+        u8::from(s.ssl_enabled),
+        names(false),
     ));
+    log(&format!("Cache directory: {}", s.cache_dir.display()));
     log(&format!(
         "Interval: {}s | Restart after: {} | Disk warn: {}% alarm: {}%",
-        settings.check_interval.as_secs(),
-        settings.restart_after,
-        settings.disk_warn_pct,
-        settings.disk_alarm_pct,
+        s.check_interval.as_secs(),
+        s.restart_after,
+        s.disk_warn_pct,
+        s.disk_alarm_pct,
     ));
 
+    let mut counters: HashMap<&str, Counter> = HashMap::new();
     loop {
-        // What: acts on the operator's dhcp/ntp overrides this tick
-        // Why: must run before health reporting reflects the result
+        // What: apply the dhcp/ntp overrides first.
+        // Why: the health report must reflect the result.
         // From: Issue #1437
-        reconcile_desired_state(&client, &settings).await;
+        reconcile(&client, &s).await;
 
-        let mut services_status: HashMap<String, ServiceHealth> = HashMap::new();
-
-        for service in &monitored {
-            let reading = client
-                .get_health(&service.container_name, settings.curl_max_time)
-                .await;
-            let counter = failure_counters
-                .get_mut(&service.container_name)
-                .expect("every monitored service has a counter");
-            let name = &service.container_name;
-
-            match counter.record(&reading, service.restart_after) {
-                Action::None => {}
-                Action::Unhealthy { count, threshold } => {
-                    log(&format!("UNHEALTHY {name} ({count}/{threshold})"));
+        let mut services: HashMap<String, ServiceHealth> = HashMap::new();
+        for &(name, restart) in &list {
+            // What: the socket proxy is probed with /_ping.
+            // Why: it is the Docker channel; no inspect.
+            let reading = if name == config::CONTAINER_DOCKER_SOCKET_PROXY {
+                if client.ping(s.curl_max_time).await {
+                    Reading::Healthy
+                } else {
+                    Reading::Unhealthy
                 }
-                Action::Restart { threshold } => {
-                    log(&format!("UNHEALTHY {name} ({threshold}/{threshold})"));
+            } else {
+                match client.inspect(name, s.curl_max_time).await {
+                    Some(body) => Reading::from_inspect(&body),
+                    None => Reading::Unreachable,
+                }
+            };
+            let counter = counters.entry(name).or_default();
+            let event = if restart {
+                counter.observe(&reading, s.restart_after)
+            } else {
+                counter.observe_alert(reading.is_alert_ok())
+            };
+            match (event, restart) {
+                (Event::None, _) => {}
+                (Event::Recovered, _) => log(&format!("RECOVERED {name}")),
+                (Event::Failing(count), true) => {
+                    log(&format!("UNHEALTHY {name} ({count}/{})", s.restart_after));
+                }
+                (Event::Failing(count), false) => log(&format!(
+                    "UNHEALTHY {name} ({count} consecutive failures) -- alert only, watchdog does not restart this service"
+                )),
+                (Event::Restart, _) => {
+                    let n = s.restart_after;
+                    log(&format!("UNHEALTHY {name} ({n}/{n})"));
                     log(&format!("RESTARTING {name}"));
-                    if !client.restart(name, settings.curl_max_time_restart).await {
+                    if client
+                        .restart(name, RESTART_GRACE_SECS, s.curl_max_time_restart)
+                        .await
+                        .is_err()
+                    {
                         log(&format!("WARNING: restart call failed for {name}"));
                     }
                 }
-                Action::Recovered => {
-                    log(&format!("RECOVERED {name}"));
-                }
             }
-
-            services_status.insert(
-                name.clone(),
-                ServiceHealth::from_reading(&reading, counter.0),
-            );
-        }
-
-        // The Docker proxy is alert-only because watchdog cannot safely
-        // restart its own management channel.
-        let reachable = client.ping(settings.curl_max_time).await;
-        let docker_proxy_name = settings.container_names.docker_socket_proxy;
-        match docker_proxy_alert_counter.record(reachable) {
-            AlertAction::None => {}
-            AlertAction::Recovered => log(&format!("RECOVERED {docker_proxy_name}")),
-            AlertAction::Unreachable { count } => log(&format!(
-                "UNHEALTHY {docker_proxy_name} ({count} consecutive failures) -- alert only, watchdog cannot restart its own Docker API channel"
-            )),
-        }
-        // What: proxy reachability as a health reading.
-        // Why: red status without the restart counter.
-        let docker_proxy_reading = if reachable {
-            HealthReading::Healthy
-        } else {
-            HealthReading::Unhealthy
-        };
-        services_status.insert(
-            docker_proxy_name.to_string(),
-            ServiceHealth::from_reading(&docker_proxy_reading, docker_proxy_alert_counter.0),
-        );
-
-        // Alert-only targets use the same Docker health read as restart-capable
-        // services but route the result through AlertCounter, so they can
-        // recover and accumulate failures without ever issuing a restart.
-        for name in &alert_only_targets {
-            let reading = client.get_health(name, settings.curl_max_time).await;
-            let counter = alert_only_counters
-                .get_mut(name)
-                .expect("every alert-only target has a counter");
-            match counter.record(reading.is_alert_ok()) {
-                AlertAction::None => {}
-                AlertAction::Recovered => log(&format!("RECOVERED {name}")),
-                AlertAction::Unreachable { count } => log(&format!(
-                    "UNHEALTHY {name} ({count} consecutive failures) -- alert only, watchdog does not restart this service"
-                )),
-            }
-            services_status.insert(
+            let (health, color) = reading.describe();
+            services.insert(
                 name.to_string(),
-                ServiceHealth::from_reading(&reading, counter.0),
+                ServiceHealth {
+                    status: color.to_string(),
+                    health: health.to_string(),
+                    failures: counter.0,
+                },
             );
         }
 
-        let disk_cache = status::disk_info(
-            &settings.cache_dir,
-            settings.disk_warn_pct,
-            settings.disk_alarm_pct,
-        );
-        let watchdog_status = WatchdogStatus {
-            updated: status::format_updated_timestamp(time::OffsetDateTime::now_utc()),
-            services: services_status,
-            disk: DiskInfo { cache: disk_cache },
+        let status = WatchdogStatus {
+            updated: stamp(OffsetDateTime::now_utc()),
+            services,
+            disk: DiskInfo {
+                cache: disk_info(&s.cache_dir, s.disk_warn_pct, s.disk_alarm_pct),
+            },
+            interval_secs: s.check_interval.as_secs(),
         };
         // What: a failed status write exits the process.
         // Why: compose restarts on exit, not on red health.
-        if let Err(e) = status::write_status(&settings.status_file, &watchdog_status) {
+        let body = serde_json::to_string_pretty(&status)
+            .expect("WatchdogStatus has only serializable fields");
+        if let Err(e) = write_file(&s.status_file, body.as_bytes(), 0o644, Place::Replace) {
             log_err(&format!(
                 "ERROR: failed to write {}: {e}",
-                settings.status_file.display()
+                s.status_file.display()
             ));
             std::process::exit(1);
         }
 
-        // Filesystem-retention passes run as their own dedicated `retention`
-        // Compose service, so this daemon intentionally never invokes them.
-        tokio::time::sleep(settings.check_interval).await;
+        tokio::time::sleep(s.check_interval).await;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::net::TcpListener;
-    use tokio::time::timeout;
 
-    #[test]
-    // With every optional profile disabled, only the one always-on
-    // alert-only service (ui) belongs in this set -- netdata moved to the
-    // restart-capable `monitored` list in main() (issue #842, 2026-08-07
-    // decision) and is no longer resolved here at all.
-    fn no_optional_services_enabled_monitors_only_ui() {
-        let targets = resolve_alert_only_targets("disabled", false, false);
-        assert_eq!(targets, vec!["lancache-ui".to_string()]);
+    // What: values watchdog.env and compose would supply.
+    // Why: Rust keeps no defaults; every load needs them.
+    const BASE: [(&str, &str); 14] = [
+        ("DOCKER_PROXY_URL", "http://proxy.test:1"),
+        ("CHECK_INTERVAL", "30"),
+        ("RESTART_AFTER", "3"),
+        ("DISK_WARN_PCT", "85"),
+        ("DISK_ALARM_PCT", "95"),
+        ("CURL_MAX_TIME", "5"),
+        ("CURL_MAX_TIME_RESTART", "30"),
+        ("CACHE_DIR", "/cache"),
+        ("STATUS_FILE", "/run/status.json"),
+        ("DESIRED_STATE_FILE", "/data/desired.json"),
+        ("SSL_ENABLED", "1"),
+        ("DHCP_MODE", "disabled"),
+        ("LOGGING_ENABLED", "0"),
+        ("NTP_ENABLED", "0"),
+    ];
+
+    // What: settings from BASE, overridden by env pairs.
+    // Why: tests set no process env; "" blanks a value.
+    fn load(pairs: &[(&str, &str)]) -> Result<(Settings, Vec<String>), String> {
+        load_settings(|name| {
+            pairs
+                .iter()
+                .chain(BASE.iter())
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        })
     }
 
+    // What: knobs take the owner's value, floor, or fail.
+    // Why: a bad knob must not busy-loop or restart.
     #[test]
-    // NTP_ENABLED must add the real NTP container independently of the DHCP
-    // and central-logging gates so degraded NTP health can become observable.
-    fn ntp_enabled_adds_the_ntp_container() {
-        let targets = resolve_alert_only_targets("disabled", false, true);
-        assert!(targets.contains(&"lancache-ntp".to_string()));
-    }
-
-    #[test]
-    // A disabled NTP profile has no NTP container, even when the other
-    // optional services are active, so monitoring it would be a false alert.
-    fn ntp_disabled_never_adds_the_ntp_container_even_with_others_enabled() {
-        let targets = resolve_alert_only_targets("kea", true, false);
-        assert!(!targets.contains(&"lancache-ntp".to_string()));
-    }
-
-    #[test]
-    // Independent optional gates must compose without suppressing one another.
-    fn all_optional_services_enabled_together() {
-        let targets = resolve_alert_only_targets("kea", true, true);
+    fn knobs_floor_and_reject() {
+        let (s, warnings) = load(&[]).unwrap();
+        assert!(warnings.is_empty());
+        assert_eq!(s.check_interval, Duration::from_secs(30));
         assert_eq!(
-            targets,
-            vec![
-                "lancache-ui".to_string(),
-                "lancache-dhcp".to_string(),
-                "lancache-syslog".to_string(),
-                "lancache-ntp".to_string(),
-            ]
+            (s.restart_after, s.disk_warn_pct, s.disk_alarm_pct),
+            (3, 85, 95)
         );
-        // netdata is restart-capable now (main()'s own `monitored` list),
-        // never resolved by this alert-only function -- see this file's own
-        // resolve_alert_only_targets_never_includes_netdata() below for a
-        // dedicated negative assertion.
+        assert_eq!(s.curl_max_time, Some(Duration::from_secs(5)));
+        assert_eq!(s.curl_max_time_restart, Some(Duration::from_secs(30)));
+        assert_eq!(s.cache_dir, PathBuf::from("/cache"));
+
+        let floored = [("CHECK_INTERVAL", "0"), ("RESTART_AFTER", "00")];
+        let (s, warnings) = load(&floored).unwrap();
+        assert_eq!(s.check_interval, Duration::from_secs(1));
+        assert_eq!(s.restart_after, 1);
+        assert!(warnings.iter().any(|w| w.contains("CHECK_INTERVAL=0")));
+        assert!(warnings.iter().any(|w| w.contains("RESTART_AFTER=00")));
+
+        for (name, bad) in [
+            ("CHECK_INTERVAL", "abc"),
+            ("RESTART_AFTER", "4294967296"),
+            ("DISK_WARN_PCT", "-5"),
+            ("DISK_ALARM_PCT", ""),
+        ] {
+            let err = load(&[(name, bad)]).err().unwrap();
+            assert!(err.contains(name), "{name}={bad}: {err}");
+        }
     }
 
+    // What: curl timeouts keep fractions; 0 is unbounded.
+    // Why: 0 must not time out at once; junk is fatal.
     #[test]
-    // netdata must never reappear in the alert-only set -- it is
-    // restart-capable now (issue #842, 2026-08-07 decision), wired directly
-    // into main()'s own `monitored`/`failure_counters`, not through this
-    // function at all. A regression here would double-monitor netdata
-    // (once via AlertCounter, once via FailureCounter) with two independent,
-    // disagreeing counters writing the same status.json key.
-    fn resolve_alert_only_targets_never_includes_netdata() {
-        let targets = resolve_alert_only_targets("kea", true, true);
-        assert!(!targets.iter().any(|t| t.starts_with("lancache-netdata")));
+    fn curl_timeouts_handle_zero_fractions_and_junk() {
+        let pairs = [("CURL_MAX_TIME", "0"), ("CURL_MAX_TIME_RESTART", "2.5")];
+        let (s, warnings) = load(&pairs).unwrap();
+        assert_eq!(s.curl_max_time, None);
+        assert_eq!(s.curl_max_time_restart, Some(Duration::from_secs_f64(2.5)));
+        assert!(warnings.is_empty());
+        for bad in ["bogus", "-1.5", "1e999", ""] {
+            let err = load(&[("CURL_MAX_TIME", bad)]).err().unwrap();
+            assert!(err.contains("CURL_MAX_TIME"), "{bad}: {err}");
+        }
     }
 
-    // What: only provisioned services are reconcile candidates
-    // Why: proves disabled DHCP/NTP produce zero reconcile targets
+    // What: unset or junk owner values are fatal.
+    // Why: the watchdog has no defaults to fall back on.
+    #[test]
+    fn missing_or_junk_owner_values_are_fatal() {
+        for (var, _) in BASE {
+            let err = load(&[(var, "")]).err().unwrap();
+            assert!(err.contains(var), "{var}: {err}");
+        }
+        for var in ["SSL_ENABLED", "LOGGING_ENABLED", "NTP_ENABLED"] {
+            assert!(load(&[(var, "maybe")]).is_err(), "{var}");
+        }
+    }
+
+    // What: renamed containers and split cache dirs fail.
+    // Why: the proxy allowlist has fixed names; no guess.
+    // From: Issue #849
+    #[test]
+    fn renames_and_conflicting_cache_dirs_are_fatal() {
+        let vars = [
+            "CONTAINER_PROXY",
+            "CONTAINER_DNS_STANDARD",
+            "CONTAINER_DNS_SSL",
+            "CONTAINER_NATS",
+        ];
+        for var in vars {
+            assert!(load(&[(var, "renamed")]).is_err(), "{var}");
+        }
+        assert!(load(&[("CONTAINER_PROXY", "lancache-proxy")]).is_ok());
+        assert!(load(&[("SSL_ENABLED", "0"), ("CONTAINER_DNS_SSL", "x")]).is_ok());
+        let split = [
+            ("CACHE_DIR", ""),
+            ("CACHE_DIR_STANDARD", "/b"),
+            ("CACHE_DIR_SSL", "/c"),
+        ];
+        let err = load(&split).err().unwrap();
+        assert!(err.contains("/b") && err.contains("/c"));
+        let (s, _) = load(&[("CACHE_DIR", "/a"), ("CACHE_DIR_SSL", "/c")]).unwrap();
+        assert_eq!(s.cache_dir, PathBuf::from("/a"));
+        let (s, _) = load(&[("CACHE_DIR", ""), ("CACHE_DIR_SSL", "/c")]).unwrap();
+        assert_eq!(s.cache_dir, PathBuf::from("/c"));
+    }
+
+    // What: inspect bodies map to readings and colors.
+    // Why: only the newest check-log entry marks Degraded.
+    // From: Issue #1296
+    #[test]
+    fn inspect_bodies_map_to_readings_and_colors() {
+        let read = |status: &str, last_output: &str| {
+            let log = serde_json::json!([{"Output": "DEGRADED: old"}, {"Output": last_output}]);
+            let health = serde_json::json!({"Status": status, "Log": log});
+            Reading::from_inspect(&serde_json::json!({"State": {"Health": health}}))
+        };
+        assert_eq!(read("healthy", "ok"), Reading::Healthy);
+        assert_eq!(read("healthy", "x\nDEGRADED: no clock"), Reading::Degraded);
+        assert_eq!(read("unhealthy", "DEGRADED: x"), Reading::Unhealthy);
+        assert_eq!(read("weird", ""), Reading::Other("weird".to_string()));
+        let bare = serde_json::json!({"State": {}});
+        assert_eq!(Reading::from_inspect(&bare), Reading::None);
+        let colors = [
+            (Reading::Healthy, "green"),
+            (Reading::Unhealthy, "red"),
+            (Reading::Starting, "yellow"),
+            (Reading::None, "yellow"),
+            (Reading::Unreachable, "yellow"),
+            (Reading::Other("huh".into()), "yellow"),
+            (Reading::Degraded, "amber"),
+        ];
+        for (reading, color) in colors {
+            assert_eq!(reading.describe().1, color);
+        }
+        assert_eq!(Reading::Degraded.describe().0, "degraded");
+        assert!(Reading::Degraded.is_alert_ok() && Reading::None.is_alert_ok());
+        assert!(!Reading::Unreachable.is_alert_ok());
+        assert!(!Reading::Other("huh".into()).is_alert_ok());
+    }
+
+    // What: restart at threshold; inert reads never count.
+    // Why: restarting an unreachable service is unsafe.
+    #[test]
+    fn counters_restart_at_threshold_and_recover_once() {
+        let inert = [
+            Reading::Starting,
+            Reading::None,
+            Reading::Unreachable,
+            Reading::Degraded,
+        ];
+        for reading in inert {
+            let mut counter = Counter(2);
+            assert_eq!(counter.observe(&reading, 3), Event::None);
+            assert_eq!(counter.0, 2);
+        }
+        let mut counter = Counter::default();
+        assert_eq!(counter.observe(&Reading::Unhealthy, 3), Event::Failing(1));
+        assert_eq!(counter.observe(&Reading::Unhealthy, 3), Event::Failing(2));
+        assert_eq!(counter.observe(&Reading::Unhealthy, 3), Event::Restart);
+        assert_eq!(counter.0, 0);
+        counter.0 = 2;
+        assert_eq!(counter.observe(&Reading::Healthy, 3), Event::Recovered);
+        assert_eq!(counter.observe(&Reading::Healthy, 3), Event::None);
+
+        assert_eq!(counter.observe_alert(false), Event::Failing(1));
+        assert_eq!(counter.observe_alert(false), Event::Failing(2));
+        assert_eq!(counter.observe_alert(true), Event::Recovered);
+        assert_eq!(counter.observe_alert(true), Event::None);
+    }
+
+    // What: targets follow the SSL, DHCP, log, NTP gates.
+    // Why: a gated service that is off must raise no alarm.
+    // From: Issue #842
+    #[test]
+    fn targets_follow_the_gates() {
+        let names = |pairs: &[(&str, &str)]| {
+            let (s, _) = load(pairs).unwrap();
+            targets(&s).into_iter().map(|t| t.0).collect::<Vec<_>>()
+        };
+        let base = [
+            "lancache-proxy",
+            "lancache-dns-standard",
+            "lancache-dns-ssl",
+            "lancache-nats",
+            "lancache-netdata",
+            "lancache-docker-socket-proxy",
+            "lancache-ui",
+        ];
+        assert_eq!(names(&[]), base);
+        assert!(!names(&[("SSL_ENABLED", "0")]).contains(&"lancache-dns-ssl"));
+        let all = [
+            ("DHCP_MODE", "dnsmasq-relay"),
+            ("LOGGING_ENABLED", "1"),
+            ("NTP_ENABLED", "yes"),
+        ];
+        let tail = names(&all).split_off(base.len());
+        let want = ["lancache-dhcp-proxy", "lancache-syslog", "lancache-ntp"];
+        assert_eq!(tail, want);
+    }
+
+    // What: the reconcile step per wanted and running pair.
+    // Why: a wrong pair would stop DHCP or NTP by mistake.
     // From: Issue #1437
     #[test]
-    fn desired_state_targets_is_empty_when_neither_service_is_provisioned() {
-        let targets = desired_state_targets("disabled", false);
-        assert!(targets.is_empty());
-    }
-
-    #[test]
-    // Both the Kea and dnsmasq DHCP_MODE values must resolve to the "dhcp"
-    // label -- an operator's start/stop control must not care which
-    // container is actually behind it, only that "dhcp" is provisioned.
-    fn desired_state_targets_resolves_dhcp_for_either_provisioned_mode() {
-        let kea = desired_state_targets("kea", false);
-        assert_eq!(kea, vec![("dhcp", "lancache-dhcp".to_string())]);
-
-        let dnsmasq = desired_state_targets("dnsmasq-proxy", false);
-        assert_eq!(dnsmasq, vec![("dhcp", "lancache-dhcp-proxy".to_string())]);
-    }
-
-    #[test]
-    // What: dhcp and ntp provisioned yield both targets.
-    // Why: a dropped target leaves its dock action unapplied.
-    // From: Issue #1437 | PR #1858
-    fn desired_state_targets_lists_both_provisioned_services() {
-        let targets = desired_state_targets("kea", true);
+    fn reconcile_acts_only_on_a_difference() {
+        use DesiredRunState::{Running, Stopped};
         assert_eq!(
-            targets,
-            vec![
-                ("dhcp", "lancache-dhcp".to_string()),
-                ("ntp", "lancache-ntp".to_string()),
-            ]
+            reconcile_step(Running, false),
+            Some(("start", "STARTING", "running"))
         );
+        assert_eq!(
+            reconcile_step(Stopped, true),
+            Some(("stop", "STOPPING", "stopped"))
+        );
+        assert_eq!(reconcile_step(Running, true), None);
+        assert_eq!(reconcile_step(Stopped, false), None);
     }
 
-    // What: absent entry prevents proxy contact
-    // Why: prevent watchdog-sync conflict
-    // From: Issue #1437
-    #[tokio::test]
-    async fn reconcile_one_takes_no_action_when_desired_state_is_absent() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind an ephemeral local port");
-        let addr = listener
-            .local_addr()
-            .expect("listener must have a local address");
-        let client = DockerProxyClient::new(format!("http://{addr}"))
-            .expect("valid base url for an ephemeral loopback port");
+    // What: disk colors follow the warn and alarm limits.
+    // Why: alarm outranks warn; equal to a limit counts.
+    #[test]
+    fn disk_status_follows_the_limits() {
+        assert_eq!(disk_status(84, 85, 95), "green");
+        assert_eq!(disk_status(85, 85, 95), "yellow");
+        assert_eq!(disk_status(94, 85, 95), "yellow");
+        assert_eq!(disk_status(95, 85, 95), "red");
+        assert_eq!(disk_status(100, 85, 95), "red");
+    }
 
-        reconcile_one(&client, "dhcp", "lancache-dhcp", None, None, None).await;
+    // What: a missing cache dir reads unknown, not green.
+    // Why: no reading must not look like a healthy disk.
+    #[test]
+    fn disk_info_is_unknown_for_a_missing_dir() {
+        let gone = Path::new("/nonexistent-lancache-test-dir");
+        let info = disk_info(gone, 85, 95);
+        assert_eq!((info.pct, info.status.as_str()), (0, "unknown"));
+    }
 
-        // No entry means "no opinion" (see status::DesiredState's doc
-        // comment): reconcile_one must return before ever calling
-        // is_running/start/stop, so no connection to the proxy is ever
-        // attempted. A short timeout on accept() proves that absence.
-        let accept_result = timeout(Duration::from_millis(200), listener.accept()).await;
-        assert!(
-            accept_result.is_err(),
-            "reconcile_one must not contact the docker proxy when desired state is absent"
-        );
+    // What: the timestamp keeps its fixed UTC shape.
+    // Why: status.json's `updated` field is a contract.
+    #[test]
+    fn stamp_has_the_fixed_shape() {
+        let date = time::Date::from_calendar_date(2026, time::Month::January, 2).unwrap();
+        let at = date.with_hms(3, 4, 5).unwrap().assume_utc();
+        assert_eq!(stamp(at), "2026-01-02T03:04:05Z");
+    }
+
+    // What: curl timeouts refuse inf, NaN, negatives.
+    // Why: only a finite positive number is a real limit.
+    #[test]
+    fn curl_timeout_refuses_non_finite_and_negative_numbers() {
+        for bad in ["inf", "NaN", "-1.5"] {
+            assert_eq!(
+                curl_timeout(Some(bad), "CURL_MAX_TIME"),
+                Err(format!("FATAL: invalid CURL_MAX_TIME={bad}."))
+            );
+        }
+    }
+
+    // What: an existing cache dir reads a real status.
+    // Why: only a missing dir or failed df is unknown.
+    #[test]
+    fn disk_info_reads_an_existing_dir() {
+        let info = disk_info(&std::env::temp_dir(), 101, 102);
+        assert_ne!(info.status, "unknown");
+        assert!(info.pct <= 100);
     }
 }

@@ -51,7 +51,7 @@ and they intentionally use different literal values:
    to the **Docker Engine API** — `GET /containers/<name>/json`,
    `POST /containers/<name>/restart`, etc. The Docker Engine API has no
    concept of a Compose service name; it only knows container names/IDs.
-   The Admin UI's Docker socket calls (`services/ui/src/docker_client.rs`),
+   The Admin UI's Docker socket calls (`services/ui/src/main.rs`),
    the watchdog's health/restart loop (`services/watchdog/src/`), and
    the socket proxy's allowlist (`scripts/untracked/docker-socket-proxy.sh`) all
    operate in this namespace.
@@ -226,11 +226,10 @@ document the mapping explicitly rather than leaving it implicit:
 
 | Variable | Default | Namespace | Used for |
 |---|---|---|---|
-| `PROXY_SERVICE` | `proxy` | Compose service name | Building `PROXY_STANDARD_URL`/`PROXY_SSL_URL` defaults (`http://proxy`) |
-| `PROXY_SSL_SERVICE` | `proxy` (inherits `PROXY_SERVICE`'s resolved value, not an independent literal) | Compose service name, also fed into `container_name_for_service()` | Restarting the proxy for a domain-list reload (`services/ui/src/routes/domains.rs`) |
+| `PROXY_SSL_SERVICE` | `proxy` (set in compose) | Compose service name, also fed into `container_name_for_service()` | Restarting the proxy for a domain-list reload (`services/ui/src/main.rs`) |
 | `DNS_STANDARD_SERVICE` | `dns-standard` | Compose service name | UI-internal service identification, dashboard labels |
 | `DNS_SSL_SERVICE` | `dns-ssl` | Compose service name | Same as above |
-| `NATS_SERVICE` | `nats` | Compose service name, also fed into `container_name_for_service()` | Restarting NATS after a secondary registration rewrites `nats.conf` (`services/ui/src/routes/secondaries.rs`) |
+| `NATS_SERVICE` | `nats` | Compose service name, also fed into `container_name_for_service()` | Restarting NATS after a secondary registration rewrites `nats.conf` (`services/ui/src/main.rs`) |
 | `CONTAINER_PROXY` | `lancache-proxy` | Container name | Watchdog health/restart calls through the socket proxy |
 | `CONTAINER_DNS_STANDARD` | `lancache-dns-standard` | Container name | Same as above |
 | `CONTAINER_DNS_SSL` | `lancache-dns-ssl` | Container name | Same as above |
@@ -245,7 +244,7 @@ call. That dual acceptance is what lets a Compose-service-name default work
 correctly as a Docker-API restart target without a separate, redundant
 `CONTAINER_*` variable for the proxy and NATS restart paths.
 
-`services/ui/src/docker_client.rs`'s `container_name_for_service()` mirrors
+`services/ui/src/main.rs`'s `container_name_for_service()` mirrors
 the container-name namespace directly (it accepts either the bare Compose
 service name or the `lancache-`-prefixed container name as input, and
 always resolves to the container name before calling the Docker API) — it
@@ -260,8 +259,8 @@ container from `deploy/prod` — there is exactly one copy of the allowlist
 logic. Every container name in the allowlist regexes must be
 a real `container_name:` declared in the same Compose file that mounts this
 script. Every container-name literal the Admin UI sends to the Docker API
-(`services/ui/src/docker_client.rs`) and every `CONTAINER_*` default the
-watchdog uses (`services/watchdog/src/config.rs`) must be a subset of this
+(`services/ui/src/main.rs`) and every `CONTAINER_*` default the
+watchdog uses (`services/common/config.rs`) must be a subset of this
 allowlist — code must never assume it can act on a name the allowlist
 doesn't grant, even if that assumption happens to be harmless today.
 
@@ -307,12 +306,12 @@ it.
 | Category | Canonical source | Also appears in |
 |---|---|---|
 | Compose project name | `deploy/prod/docker-compose.yml` `name:` | — |
-| Compose service names | `deploy/prod/docker-compose.yml` service keys | `services/ui/src/config.rs` (`*_SERVICE` defaults), `deploy/prod/docker-compose.yml` env values that build internal URLs |
-| Container names | `deploy/prod/docker-compose.yml` `container_name:` | `scripts/untracked/docker-socket-proxy.sh` (allowlist), `services/ui/src/docker_client.rs` (`container_name_for_service`), `services/watchdog/src/config.rs` (`CONTAINER_*` defaults/guard), `config/prod/watchdog.env` (`CONTAINER_*` overrides) |
+| Compose service names | `deploy/prod/docker-compose.yml` service keys | `services/ui/src/main.rs` (reads the required `*_SERVICE` variables), `deploy/prod/docker-compose.yml` env values that build internal URLs |
+| Container names | `deploy/prod/docker-compose.yml` `container_name:` | `scripts/untracked/docker-socket-proxy.sh` (allowlist), `services/ui/src/main.rs` (`container_name_for_service`), `services/common/config.rs` (`CONTAINER_*` defaults), `services/watchdog/src/main.rs` (override guard), `config/prod/watchdog.env` (`CONTAINER_*` overrides) |
 | Docker volumes | `deploy/prod/docker-compose.yml` `volumes:` top-level block | Service-level `volumes:` mount lists in the same file |
 | Host bind-mount directories | `docs/backup-restore.md`, `docs/how-to-change-ip.md` | `deploy/prod/docker-compose.yml`, `setup.sh` |
 | GHCR image/package names | `.github/yaml/build-manifest.yml` (`services:`) | `docs/release-versioning.md`, the `image:` lines of `deploy/prod` and `deploy/secondary` |
-| Service-referring env vars | See table above | `services/ui/src/config.rs`, `services/watchdog/src/config.rs`, `config/prod/*.env` |
+| Service-referring env vars | See table above | `services/ui/src/main.rs`, `services/common/config.rs`, `config/prod/*.env` |
 | Socket proxy allowlist | `scripts/untracked/docker-socket-proxy.sh` | (mounted read-only, unchanged, into the `docker-socket-proxy` service of `deploy/prod`) |
 
 ## CI guard
@@ -323,14 +322,14 @@ the parts of this contract that are mechanically verifiable:
 - `deploy/prod/docker-compose.yml` declares `name: lancache-ng`.
 - Every allowlist container name in `scripts/untracked/docker-socket-proxy.sh`
   has a matching `container_name:` in `deploy/prod`.
-- Every container-name literal `services/ui/src/docker_client.rs` can
+- Every container-name literal `services/ui/src/main.rs` can
   resolve to is a subset of that same allowlist.
 - Every `lancache-*` container-name constant in
-  `services/watchdog/src/config.rs` is a subset of that same allowlist.
+  `services/common/config.rs` is a subset of that same allowlist.
 - The allowlist never names the watchdog container in an `acl` or
   `http-request` line and grants no lifecycle action (start, stop,
   restart, wait) to the watchdog or syslog containers (issue #1486).
-- The `*_SERVICE` defaults in `services/ui/src/config.rs` match a real
+- The `*_SERVICE` values the ui requires (set in compose) match a real
   Compose service name (not a container name) in
   `deploy/prod/docker-compose.yml`.
 

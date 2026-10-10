@@ -1,148 +1,44 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Manifest for the lancache-ui monitoring dashboard.
 
+# What: manifest of the lancache-ui Admin UI, one main.rs.
+# Why: server, Docker/NATS/Kea/syslog clients and templates.
+# From: Issue #1683 | PR #1858
 [package]
 name = "lancache-ui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[lib]
-# Exposes pure, client/external-input-parsing helpers (kea_response_parse,
-# netdata_url) so fuzz/'s cargo-fuzz harnesses can link them directly instead
-# of constructing a real AppState/axum router/Docker/NATS client. See
-# src/lib.rs's module doc comment.
-name = "lancache_ui"
-path = "src/lib.rs"
-
 [[bin]]
 name = "lancache-ui"
 path = "src/main.rs"
 
 [dependencies]
-# Most of the crates below are only needed by main.rs's real Admin UI server
-# (AppState, axum router/middleware, Docker/NATS/Kea/syslog clients). The two
-# pure fuzz-target modules (src/kea_response_parse.rs, src/netdata_url.rs)
-# need only serde/serde_json/axum's http types/reqwest's Url type -- so the
-# rest are gated behind this default-on "runtime" feature, the same pattern
-# and reason as services/dns/nats-subscriber/Cargo.toml: cargo compiles every
-# declared dependency for every target in a package regardless of whether
-# that target's source actually uses it, and several of these (tokio's
-# "full" feature set especially) hit a real rustc ICE under cargo-fuzz's
-# default AddressSanitizer + SanitizerCoverage instrumentation -- confirmed
-# empirically while building this issue's fuzz harnesses, not a hypothetical
-# concern. fuzz/Cargo.toml depends on this crate with `default-features =
-# false` so its sanitizer-instrumented build compiles only what the fuzz
-# targets actually exercise. Never disabled for a normal build -- main.rs
-# unconditionally uses all of these, so `cargo build`/the production Docker
-# image are unaffected.
+LanCache-NG = { path = "../common" }
+anyhow = { workspace = true }
+argon2 = { workspace = true }
+async-nats = { workspace = true }
 axum = { workspace = true, features = ["form"] }
-tokio = { workspace = true, optional = true }
-tera = { workspace = true, optional = true }
-bollard = { workspace = true, optional = true }
+base64 = { workspace = true }
+data-encoding = { workspace = true }
+dhcproto = { workspace = true }
+flate2 = { workspace = true }
+form_urlencoded = { workspace = true }
+futures-util = { workspace = true }
+hex = { workspace = true }
+nkeys = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }
+rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-anyhow = { workspace = true, optional = true }
-tracing = { workspace = true, optional = true }
-tracing-subscriber = { workspace = true, optional = true }
-regex = { workspace = true, optional = true }
-base64 = { workspace = true, optional = true }
-futures-util = { workspace = true, optional = true }
-async-nats = { workspace = true, optional = true }
-rusqlite = { workspace = true, optional = true }
-rand = { workspace = true, optional = true }
-hex = { workspace = true, optional = true }
-form_urlencoded = { workspace = true, optional = true }
-subtle = { workspace = true, optional = true }
-sha2 = { workspace = true, optional = true }
-# Argon2id password-hashing for secondary NATS credentials at rest (#680),
-# replacing the previous unsalted SHA-256. Default features provide the
-# `password-hash` PHC string API plus the OsRng salt source used below.
-argon2 = { workspace = true, optional = true }
-# "xkeys" feature pulls in crypto_box for the X25519/curve25519 XKey type
-# (issue #682: NATS auth-callout request/response encryption). Not enabled by
-# default upstream since most nkeys consumers only need the Ed25519 NKey
-# signing type this crate is named for.
-nkeys = { workspace = true, optional = true }
-data-encoding = { workspace = true, optional = true }
-# Transparent decompression of syslog-ng's rotated log output (#633:
-# syslog_client.rs). syslog-ng compresses rotated files with zstd, falling
-# back to gzip only if zstd could not be installed at container start (see
-# deploy/*/docker-compose.yml's syslog-ng rotation loop) -- both crates are
-# needed so the Admin UI reader can transparently read either outcome.
-zstd = { workspace = true, optional = true }
-flate2 = { workspace = true, optional = true }
-# DHCPv4 wire-format encode/decode for the native DHCP probe (issue #1288),
-# replacing the former dhcp-probe.sh's use of nmap (rogue-server detection)
-# and dhclient (client dry-run) -- both EOL/no longer packaged on Alpine. A
-# pure protocol crate (no socket/state-machine handling of its own), paired
-# with our own broadcast UDP socket code in dhcp_probe_native.rs. Chosen
-# over mozim (the issue's other researched candidate, a higher-level DHCP
-# client library) specifically because a pure wire-format crate keeps this
-# project's own code in full control of socket lifecycle and, critically,
-# guarantees the negotiated lease is never bound to a real network
-# interface -- a higher-level client library's own state machine would need
-# individual auditing for that same guarantee before it could be trusted
-# here. Maintained by BlueCat Engineering, a real DDI (DNS/DHCP/IPAM)
-# vendor -- a strong trust signal for a crate this project uses to speak
-# the DHCP protocol directly on a LAN segment.
-dhcproto = { workspace = true, optional = true }
-# Formats the Netdata alarm forwarding card's timestamp (netdata_alarms.rs,
-# bug hunt #849 finding #3) as RFC 3339 -- Tera's bundled filter set has no
-# built-in date formatting in this project's pinned tera version (confirmed
-# empirically: an earlier `| date(...)` template filter failed a real
-# `cargo test` run with "Unknown filter `date`", not assumed from docs).
-# Already resolved as a transitive dependency at this same version (pulled
-# in by the rustls/hickory chain, see Cargo.lock) -- promoting it to a
-# direct dependency for this one formatting call adds no new crate to the
-# build, only a manifest declaration, so this is not the kind of new
-# dependency AG-REL-001 asks for approval on. "formatting" is the minimum
-# feature needed for `OffsetDateTime::format`; "macros" (compile-time custom
-# format descriptions) is not needed since the well_known::Rfc3339 constant
-# covers this use case.
-time = { workspace = true, optional = true }
-
-[features]
-default = ["runtime"]
-# The actual Admin UI server binary's runtime dependencies (see the
-# [dependencies] comment above). Never disabled for a normal build.
-runtime = [
-    "dep:tokio",
-    "dep:tera",
-    "dep:bollard",
-    "dep:anyhow",
-    "dep:tracing",
-    "dep:tracing-subscriber",
-    "dep:regex",
-    "dep:base64",
-    "dep:futures-util",
-    "dep:async-nats",
-    "dep:rusqlite",
-    "dep:rand",
-    "dep:hex",
-    "dep:form_urlencoded",
-    "dep:subtle",
-    "dep:sha2",
-    "dep:argon2",
-    "dep:nkeys",
-    "dep:data-encoding",
-    "dep:zstd",
-    "dep:flate2",
-    "dep:dhcproto",
-    "dep:time",
-]
-
-[dev-dependencies]
-# Only used by the basic_auth integration test (main.rs), to drive real
-# axum::extract::Request values through the actual Router + middleware stack
-# via ServiceExt::oneshot -- axum itself depends on tower already, so this
-# adds no new runtime behavior, just the test-only `util` feature that
-# exposes `oneshot`.
-tower = { workspace = true }
-
-# What: release profile now lives at the workspace root.
-# Why: cargo ignores a member profile in a workspace.
-# From: Issue #1095
+sha2 = { workspace = true }
+tera = { workspace = true }
+time = { workspace = true, features = ["macros", "parsing"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+zstd = { workspace = true }

@@ -189,6 +189,18 @@ _val() {
     esac
 }
 
+# What: the DHCP mode names of the Rust owner, in its order
+# Why: setup.sh must offer exactly the modes the ui accepts
+# From: Issue #1683 | PR #1858
+_rust_dhcp_modes() {
+    local src="$1/services/common/config.rs" out
+    [ -r "${src}" ] || { echo "_rust_dhcp_modes: ${src} not readable" >&2; return 1; }
+    out="$(awk '/^impl DhcpMode/ { d = 1 } d && /pub fn as_str/ { f = 1 } f && /^    }$/ { exit } f' "${src}" \
+        | sed -n 's/.*Self::[A-Za-z]* => "\([a-z-]*\)",/\1/p')"
+    [ -n "${out}" ] || { echo "_rust_dhcp_modes: no DhcpMode::as_str names in ${src}" >&2; return 1; }
+    printf '%s\n' "${out}"
+}
+
 # What: replace each @KEY@ in a row from the caller's V map.
 # Why: one fill for every table built on _val values.
 # From: Issue #1683 | PR #1858
@@ -2563,7 +2575,7 @@ STUB
         || { echo "channel preset: ${output}"; return 1; }
     export PRESET="${preset}"
     _lp; base="$(_prompts)"
-    modes="$(awk '/pub fn as_str/ { f = 1 } f && /^    }$/ { exit } f' "${root}/services/ui/src/config.rs" | sed -n 's/.*Self::[A-Za-z]* => "\([a-z-]*\)",/\1/p')"
+    modes="$(_rust_dhcp_modes "${root}")" || return 1
     dhcp="$(awk -v m="$(paste -sd'|' <<< "${modes}")" 'BEGIN { n = split(m, a, "|") } { ok = 1; for (i = 1; i <= n; i++) if (index($0, a[i]) == 0) ok = 0; if (ok) { print NR - 1; exit } }' <<< "${base}")"
     ddir="$(awk -F'\t' -v d="$(production_state_root_default "${t}/repo/deploy/prod")" '$1 == "PROMPT" { n++; if ($3 == d) { print n - 1; exit } }' <<< "${output}")"
     [ -n "${dhcp}" ] && [ -n "${ddir}" ] || { echo "prompts not found: dhcp=${dhcp} ddir=${ddir}"; return 1; }
@@ -3759,8 +3771,8 @@ CASES
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
     ui="${root}/services/ui/src"
-    chans="$(awk '/^fn is_valid_ui_channel/ { f = 1 } f && /matches!/ { print; exit }' "${ui}/routes/setup.rs" | grep -oE '"[a-z]+"' | tr -d '"')"
-    modes="$(awk '/pub fn as_str/ { f = 1 } f && /^    }$/ { exit } f' "${ui}/config.rs" | sed -n 's/.*Self::[A-Za-z]* => "\([a-z-]*\)",/\1/p')"
+    chans="$(awk '/^fn is_valid_ui_channel/ { f = 1 } f && /matches!/ { print; exit }' "${ui}/main.rs" | grep -oE '"[a-z]+"' | tr -d '"')"
+    modes="$(_rust_dhcp_modes "${root}")" || return 1
     other="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_mutable_channels | grep -vxF -f <(printf '%s\n' "${chans}"))"
     other+=$'\n'"$(declare -f validate_lancache_image_channel | sed -n 's/^ *\([a-z| ]*\))$/\1/p' | tr -d ' ' | tr '|' '\n' | grep -vxF -f <(printf '%s\n' "${chans}"))"
     gb="$(cache_size_gb_from_env "$(get_env_var CACHE_MAX_SIZE "${root}/deploy/prod/.env")")"
@@ -3956,8 +3968,7 @@ CASES
     local -a assigns=()
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
-    modes="$(awk '/pub fn as_str/ { f = 1 } f && /^    }$/ { exit } f' "${root}/services/ui/src/config.rs" \
-        | sed -n 's/.*Self::[A-Za-z]* => "\([a-z-]*\)",/\1/p')"
+    modes="$(_rust_dhcp_modes "${root}")" || return 1
     off="$(awk 'NR == 1' <<< "${modes}")"
     cprof="$(_prod_compose config --profiles)"
     ip="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")" net="${ip%.*}.0"
@@ -4016,13 +4027,15 @@ CASES
     local env gen canon over required first rest
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
-    rs="${root}/services/ui/src/routes/secondaries.rs"
+    rs="${root}/services/ui/src/main.rs"
     std="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")"
     lip="$(get_env_var IP_SSL "${root}/deploy/prod/.env")"
     ui="$(_prod_compose config --format json | jq -r '.services.ui.ports[0].published')"
     name="$(_prod_compose config --format json | jq -r .name)"
-    xfr="$(grep -oE 'format!\("\{\}:[0-9]+", state\.config\.standard_ip\)' "${rs}" | grep -oE ':[0-9]+')"
-    fields="$(awk '/pub struct RegisterResponse/,/^}/' "${rs}" | sed -n 's/^ *pub \([a-z_]*\): String,$/\1/p')"
+    xfr=""
+    ! grep -qF 'dns_xfr_primary: format!("{}:{PDNS_AUTH_PORT}", state.config.standard_ip)' "${rs}" \
+        || xfr="$(sed -n 's/^const PDNS_AUTH_PORT: u16 = \([0-9][0-9]*\);$/:\1/p' "${rs}")"
+    fields="$(awk '/^struct RegisterResponse/,/^}/' "${rs}" | sed -n 's/^ *\([a-z_]*\): String,$/\1/p')"
     reg="$(resolve_lancache_image_registry "${root}/deploy/prod/.env")"
     pre="$(resolve_lancache_image_prefix "${root}/deploy/prod/.env")"
     tag="v$(cat "${root}/VERSION")"

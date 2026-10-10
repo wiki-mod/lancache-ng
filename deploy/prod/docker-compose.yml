@@ -611,7 +611,7 @@ services:
                   "lancache.dns.record",
                   # What: publish permission on lancache.dns.flush for the dns-standard identity's zone-rollback listener.
                   # Why: needed for its post-rollback cache-flush publish.
-                  # From: services/dns/nats-subscriber/src/rollback_listener.rs
+                  # From: Issue #628
                   "lancache.dns.flush",
                   "$$JS.API.STREAM.INFO.LANCACHE_DNS",
                   "$$JS.API.STREAM.CREATE.LANCACHE_DNS",
@@ -849,11 +849,29 @@ services:
       - watchdog-status:/var/run/watchdog:ro
     ports:
       - "${UI_BIND_IP:-${IP_STANDARD}}:8080:8080"
+    # What: the ntp env files, for NTP_UPSTREAM_SERVERS.
+    # Why: config/prod/ntp.env owns the list; no ui copy.
+    env_file:
+      - ../../config/prod/ntp.env
+      - path: ../../config/prod/ntp.local.env
+        required: false
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
+      # What: mount paths above, as the ui must read them.
+      # Why: compose owns the mount targets; no ui copy.
+      - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
+      - WATCHDOG_STATUS_FILE=/var/run/watchdog/status.json
+      - DESIRED_STATE_FILE=/data/desired-state.json
+      # What: paths below the /data and /etc/nats mounts.
+      # Why: the image ENV lint rejects these names.
+      # From: Issue #1683
+      - NATS_AUTH_CALLOUT_PATH=/etc/nats/auth_callout.conf
+      - UI_SESSION_SECRET_FILE=/data/lancache-ui-session.secret
+      - SECONDARY_REGISTRATION_TOKEN_FILE=/data/lancache-secondary-registration.token
+      - NATS_SERVICE=nats
+      - NATS_LOG_FILE=/var/log/lancache-nats/nats.log
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
-      - PROXY_SERVICE=proxy
       - KEA_CONFIG_SNAPSHOT_DIR=${KEA_CONFIG_SNAPSHOT_DIR:?KEA_CONFIG_SNAPSHOT_DIR is required}
       - SSL_ENABLED=${SSL_ENABLED:-1}
       - PROXY_STANDARD_URL=http://proxy
@@ -884,6 +902,7 @@ services:
       - DHCP_API_URL=http://host.docker.internal:8000
       - DHCP_API_TOKEN=${KEA_CTRL_TOKEN}
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
+      - UI_LOGS_MAX_ENTRIES=200
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
       # What: DNS_ROLLBACK_URL, scoped to dns-standard only.
