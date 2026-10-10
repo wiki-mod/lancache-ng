@@ -50,6 +50,18 @@ pub fn need_flag(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Result<boo
     parse_bool(&raw).ok_or_else(|| format!("{name} must be a boolean, got {raw:?}"))
 }
 
+// What: one KEY=value from the ui settings file, trimmed.
+// Why: the ui saves live settings; services read them.
+// From: Issue #1683
+pub fn saved_setting(path: &std::path::Path, key: &str) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    content.lines().map(str::trim).find_map(|line| {
+        line.strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix('='))
+            .map(|value| value.trim().to_string())
+    })
+}
+
 // What: 1/true/yes/on or 0/false/no/off, trimmed, any case.
 // Why: one boolean grammar for ui, watchdog, retention.sh.
 pub fn parse_bool(raw: &str) -> Option<bool> {

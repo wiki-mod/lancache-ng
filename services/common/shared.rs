@@ -663,28 +663,81 @@ impl PowerDns {
     }
 }
 
-// What: client of the proxy's allowlisted Docker calls.
-// Why: ui and watchdog drive containers; one owner.
-// From: Issue #1683 | PR #1858
-pub struct DockerProxy {
+// What: the label compose sets to the project name.
+// Why: the watchdog finds its stack by this label.
+// From: Issue #1683
+pub const COMPOSE_PROJECT_LABEL: &str = "com.docker.compose.project";
+
+// What: the label compose sets to the service name.
+// Why: status.json names each container by its service.
+// From: Issue #1683
+pub const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
+
+// What: the endpoint prefix of a local Docker socket.
+// Why: unix:///path talks HTTP over that socket file.
+// From: Issue #1683
+pub const DOCKER_UNIX_PREFIX: &str = "unix://";
+
+// What: client of the Docker Engine API.
+// Why: only the watchdog drives containers; one owner.
+// From: Issue #1683
+pub struct DockerApi {
     client: reqwest::Client,
     base_url: String,
 }
 
-impl DockerProxy {
-    // What: build a client for one proxy base URL.
+impl DockerApi {
+    // What: a client for unix:///socket or an http:// URL.
     // Why: redirects and timeouts must stay under control.
-    pub fn new(base_url: &str) -> Self {
-        let client = reqwest::Client::builder()
-            // What: never follow a redirect.
-            // Why: a 3xx could reach an ungranted path.
-            .redirect(reqwest::redirect::Policy::none())
+    // From: Issue #1683
+    pub fn new(endpoint: &str) -> Self {
+        let endpoint = endpoint.trim();
+        // What: never follow a redirect.
+        // Why: a 3xx could reach an unexpected path.
+        let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+        let (builder, base_url) = match endpoint.strip_prefix(DOCKER_UNIX_PREFIX) {
+            Some(socket) => (
+                builder.unix_socket(PathBuf::from(socket)),
+                "http://docker".to_string(),
+            ),
+            None => (builder, endpoint.trim_end_matches('/').to_string()),
+        };
+        let client = builder
             .build()
             .expect("a client without custom TLS settings always builds");
-        Self {
-            client,
-            base_url: base_url.trim().trim_end_matches('/').to_string(),
-        }
+        Self { client, base_url }
+    }
+
+    // What: containers carrying one compose project label.
+    // Why: the stack is whatever compose started; no list.
+    // From: Issue #1683
+    pub async fn project_containers(
+        &self,
+        project: &str,
+        timeout: Option<Duration>,
+    ) -> Option<Vec<Value>> {
+        let filter = serde_json::json!({ "label": [format!("{COMPOSE_PROJECT_LABEL}={project}")] });
+        let url = reqwest::Url::parse_with_params(
+            "http://docker/containers/json",
+            [("all", "1"), ("filters", filter.to_string().as_str())],
+        )
+        .ok()?;
+        let path = format!("{}?{}", url.path(), url.query()?);
+        let body = self.call(reqwest::Method::GET, &path, timeout).await.ok()?;
+        serde_json::from_slice(&body).ok()
+    }
+
+    // What: send one signal to a container's main process.
+    // Why: nginx reopens its access log on USR1.
+    // From: Issue #1683
+    pub async fn signal(
+        &self,
+        name: &str,
+        signal: &str,
+        timeout: Option<Duration>,
+    ) -> Result<(), DockerError> {
+        self.act(name, &format!("kill?signal={signal}"), timeout)
+            .await
     }
 
     // What: one call; the body of a 2xx or 304 answer.
@@ -1035,12 +1088,14 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    // What: the proxy client builds and trims its base URL.
+    // What: both endpoint forms build; URLs are trimmed.
     // Why: new() unwraps the builder; this shows it builds.
     #[test]
-    fn docker_proxy_builds_and_trims_the_base_url() {
-        let proxy = DockerProxy::new(" http://proxy:2375/ ");
-        assert_eq!(proxy.base_url, "http://proxy:2375");
+    fn docker_api_builds_for_a_socket_and_a_url() {
+        let tcp = DockerApi::new(" http://engine:2375/ ");
+        assert_eq!(tcp.base_url, "http://engine:2375");
+        let unix = DockerApi::new(" unix:///var/run/docker.sock ");
+        assert_eq!(unix.base_url, "http://docker");
     }
 
     // What: an id yields its second; non-numbers none.
@@ -1133,9 +1188,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // What: Docker calls use the allowed paths, decode.
-    // Why: the proxy grants exactly these calls.
-    // From: Issue #1683 | PR #1858
+    // What: Docker calls use the expected paths, decode.
+    // Why: a wrong path would act on the wrong object.
+    // From: Issue #1683
     #[tokio::test]
     async fn docker_calls_use_the_allowlisted_paths_and_decode_answers() {
         let frames = [&[1, 0, 0, 0, 0, 0, 0, 2][..], b"hi"].concat();
@@ -1146,8 +1201,10 @@ mod tests {
             (200, b"OK\n".to_vec()),
             (200, br#"{"StatusCode":3}"#.to_vec()),
             (200, frames),
+            (200, br#"[{"Names":["/LanCache-NG-dns"]}]"#.to_vec()),
+            (204, vec![]),
         ]);
-        let docker = DockerProxy::new(&format!(" {base}/ "));
+        let docker = DockerApi::new(&format!(" {base}/ "));
         let state = docker.inspect("web", None).await.unwrap();
         assert_eq!(state["State"]["Running"], true);
         docker.act("web", "stop", None).await.unwrap();
@@ -1155,6 +1212,12 @@ mod tests {
         assert!(docker.ping(None).await);
         assert_eq!(docker.wait("web", None).await.unwrap(), 3);
         assert_eq!(docker.logs("web", 7, None).await.unwrap(), "hi");
+        let listed = docker
+            .project_containers("lancache-ng", None)
+            .await
+            .unwrap();
+        assert_eq!(listed[0]["Names"][0], "/LanCache-NG-dns");
+        docker.signal("web", "USR1", None).await.unwrap();
         let seen = server.join().unwrap();
         let lines: Vec<&str> = seen.iter().filter_map(|r| r.lines().next()).collect();
         assert_eq!(
@@ -1166,6 +1229,8 @@ mod tests {
                 "GET /_ping HTTP/1.1",
                 "POST /containers/web/wait?condition=not-running HTTP/1.1",
                 "GET /containers/web/logs?stdout=1&stderr=1&since=7 HTTP/1.1",
+                "GET /containers/json?all=1&filters=%7B%22label%22%3A%5B%22com.docker.compose.project%3Dlancache-ng%22%5D%7D HTTP/1.1",
+                "POST /containers/web/kill?signal=USR1 HTTP/1.1",
             ]
         );
     }
@@ -1181,7 +1246,7 @@ mod tests {
             (302, vec![]),
             (304, vec![]),
         ]);
-        let docker = DockerProxy::new(&base);
+        let docker = DockerApi::new(&base);
         let act = |name: &'static str| docker.act(name, "stop", None);
         assert!(matches!(act("a").await, Err(DockerError::Status(500))));
         assert!(matches!(act("b").await, Err(DockerError::Status(404))));
@@ -1201,7 +1266,7 @@ mod tests {
             (200, br#"{"x":1}"#.to_vec()),
             (500, vec![]),
         ]);
-        let docker = DockerProxy::new(&base);
+        let docker = DockerApi::new(&base);
         assert!(!docker.ping(None).await);
         assert!(!docker.ping(None).await);
         assert!(docker.inspect("a", None).await.is_none());

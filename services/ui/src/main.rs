@@ -28,7 +28,7 @@ use lancache_ng::config::{
     canonical_zone, is_container, is_dns_name, parse_bool, rollback_zones, zone_url,
 };
 use lancache_ng::{
-    DesiredRunState, DesiredState, DnsRecord, DockerError, DockerProxy, FlushRequest, Place,
+    DesiredRunState, DesiredState, DnsRecord, DockerApi, DockerError, FlushRequest, Place,
     PowerDns, SnapshotStore, WatchdogStatus, ct_eq, df, die, http_client, is_placeholder,
     load_or_create, load_or_create_hex, snapshot_created_unix, unix_secs, write_file,
     write_file_as, write_if_changed,
@@ -422,15 +422,7 @@ impl Config {
     // What: a setting; the saved value beats startup's.
     // Why: operators change settings live, no restart.
     fn setting(&self, key: &str) -> String {
-        fs::read_to_string(&self.ui_settings_file)
-            .ok()
-            .and_then(|content| {
-                content.lines().map(str::trim).find_map(|line| {
-                    line.strip_prefix(key)
-                        .and_then(|rest| rest.strip_prefix('='))
-                        .map(|value| value.trim().to_string())
-                })
-            })
+        config::saved_setting(Path::new(&self.ui_settings_file), key)
             .unwrap_or_else(|| self.startup_settings.get(key).cloned().unwrap_or_default())
     }
 
@@ -725,7 +717,7 @@ const ADMIN_UI_CSP: &str = "default-src 'self'; base-uri 'self'; object-src 'non
 struct AppState {
     templates: Tera,
     config: Config,
-    docker: DockerProxy,
+    docker: DockerApi,
     http_client: reqwest::Client,
     pdns: PowerDns,
     file_lock: Mutex<()>,
@@ -1203,7 +1195,7 @@ const RESTART_GRACE_SECS: u32 = 5;
 
 // What: restart a service container after the grace.
 // Why: every ui restart goes through one named service.
-async fn docker_restart(docker: &DockerProxy, service: &str) -> anyhow::Result<()> {
+async fn docker_restart(docker: &DockerApi, service: &str) -> anyhow::Result<()> {
     docker
         .restart(
             container_name(service)?,
@@ -1218,7 +1210,7 @@ async fn docker_restart(docker: &DockerProxy, service: &str) -> anyhow::Result<(
 
 // What: start a service container.
 // Why: the stop/start pairs of the mode switches need it.
-async fn docker_start(docker: &DockerProxy, service: &str) -> anyhow::Result<()> {
+async fn docker_start(docker: &DockerApi, service: &str) -> anyhow::Result<()> {
     docker
         .act(container_name(service)?, "start", Some(DOCKER_TIMEOUT))
         .await
@@ -1229,7 +1221,7 @@ async fn docker_start(docker: &DockerProxy, service: &str) -> anyhow::Result<()>
 
 // What: stop a service; an absent container is fine.
 // Why: a 404 means the wanted state already holds.
-async fn docker_stop_if_present(docker: &DockerProxy, service: &str) -> anyhow::Result<()> {
+async fn docker_stop_if_present(docker: &DockerApi, service: &str) -> anyhow::Result<()> {
     match docker
         .act(container_name(service)?, "stop?t=10", Some(DOCKER_TIMEOUT))
         .await
@@ -5214,7 +5206,7 @@ fn current_run(logs: &str) -> &str {
 
 // What: run the probe container once; return its output.
 // Why: the proxy only allows start, wait and logs.
-async fn run_dhcp_probe(docker: &DockerProxy) -> Result<String, String> {
+async fn run_dhcp_probe(docker: &DockerApi) -> Result<String, String> {
     let failed = |e: anyhow::Error| format!("Failed to execute DHCP check: {e:#}");
     let container = container_name(CONTAINER_DHCP_PROBE).map_err(failed)?;
     docker_stop_if_present(docker, CONTAINER_DHCP_PROBE)
@@ -7307,7 +7299,7 @@ async fn run() -> anyhow::Result<()> {
     let http = http_client()?;
     let state = Arc::new(AppState {
         templates: load_templates(&cfg),
-        docker: DockerProxy::new(&cfg.docker_proxy_url),
+        docker: DockerApi::new(&cfg.docker_proxy_url),
         http_client: http.clone(),
         pdns: PowerDns::new(http, cfg.pdns_api_key.clone()),
         file_lock: Mutex::new(()),
@@ -8275,7 +8267,10 @@ mod tests {
         }
         let mut env = full_env();
         env.insert("SYSLOG_MAX_GB".to_string(), "9999999".to_string());
-        assert_eq!(load_from(&env).unwrap().syslog_max_gb as u64, config::SYSLOG_MAX_GB.max);
+        assert_eq!(
+            load_from(&env).unwrap().syslog_max_gb as u64,
+            config::SYSLOG_MAX_GB.max
+        );
     }
 
     // What: the saved setting beats the startup value.
@@ -8357,7 +8352,7 @@ mod tests {
             (500, vec![]),
         ];
         let (base, server) = serve_canned(replies);
-        let docker = DockerProxy::new(&base);
+        let docker = DockerApi::new(&base);
         docker_restart(&docker, "proxy").await.unwrap();
         docker_start(&docker, "dns-ssl").await.unwrap();
         docker_stop_if_present(&docker, "lancache-nats")
@@ -10766,7 +10761,7 @@ mod tests {
             (200, br#"{"StatusCode":0}"#.to_vec()),
             (200, logs),
         ]);
-        let output = run_dhcp_probe(&DockerProxy::new(&base)).await.unwrap();
+        let output = run_dhcp_probe(&DockerApi::new(&base)).await.unwrap();
         assert_eq!(output, "\nresult\n");
         let seen = server.join().unwrap();
         let heads: Vec<&str> = seen.iter().filter_map(|r| r.lines().next()).collect();
@@ -10792,16 +10787,16 @@ mod tests {
             (200, br#"{"StatusCode":3}"#.to_vec()),
             (200, log_frame(" boom \n")),
         ]);
-        let failed = run_dhcp_probe(&DockerProxy::new(&base)).await.unwrap_err();
+        let failed = run_dhcp_probe(&DockerApi::new(&base)).await.unwrap_err();
         assert_eq!(failed, "DHCP probe container exited with code 3: boom");
         let (base, _server) = serve_canned(vec![(500, vec![])]);
-        let stop = run_dhcp_probe(&DockerProxy::new(&base)).await.unwrap_err();
+        let stop = run_dhcp_probe(&DockerApi::new(&base)).await.unwrap_err();
         assert!(
             stop.starts_with("Failed to execute DHCP check: Failed to stop"),
             "{stop}"
         );
         let (base, _server) = serve_canned(vec![(204, vec![]), (204, vec![]), (500, vec![])]);
-        let wait = run_dhcp_probe(&DockerProxy::new(&base)).await.unwrap_err();
+        let wait = run_dhcp_probe(&DockerApi::new(&base)).await.unwrap_err();
         assert!(
             wait.starts_with("Failed to execute DHCP check: read DHCP probe wait response:"),
             "{wait}"
@@ -10812,7 +10807,7 @@ mod tests {
             (200, br#"{"StatusCode":0}"#.to_vec()),
             (500, vec![]),
         ]);
-        let logs = run_dhcp_probe(&DockerProxy::new(&base)).await.unwrap_err();
+        let logs = run_dhcp_probe(&DockerApi::new(&base)).await.unwrap_err();
         assert!(
             logs.starts_with("Failed to execute DHCP check: read DHCP probe logs:"),
             "{logs}"
@@ -11167,7 +11162,7 @@ mod tests {
             .unwrap();
         let state = Arc::new(AppState {
             templates: load_templates(&cfg),
-            docker: DockerProxy::new(&cfg.docker_proxy_url),
+            docker: DockerApi::new(&cfg.docker_proxy_url),
             http_client: http.clone(),
             pdns: PowerDns::new(http, cfg.pdns_api_key.clone()),
             file_lock: Mutex::new(()),
