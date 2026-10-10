@@ -42,11 +42,11 @@ Responsibility: determine reachability -> protected artifacts -> unreferenced ar
 ## 7. Central service list
 There is exactly one authoritative product-service list, owned by `.github/yaml/build-manifest.yml`. Current members:
 ```bash
-CI_SERVICES=( proxy dns watchdog dhcp dhcp-proxy ntp syslog ui cachehamster )
+CI_SERVICES=( services proxy dns dhcp ui )
 ```
 `build-tools` is not a product service; it is the separately owned CI build toolchain under `build_toolchain:` in the same SOT. No workflow contains a second product-service list. No scan contains a second list. No release contains a second list. No GC contains a second list. No multi-arch job contains a second list. No full-setup job contains a second list.
 
-`netdata` is not a product service: by maintainer decision (PR #1858 decision record, 2026-10-01) the stack runs the upstream image `netdata/netdata:latest`, declared in `external_services` of the SOT with `policy: tag-latest`. There is no first-party netdata build.
+`netdata` is not a separate image: by maintainer decision (five-container rule, 2026-10-10) it runs as a process inside the product service `services`, installed as an Alpine package. The SOT has no `external_services` entry for it.
 ## 8. Central service metadata
 `build-manifest.yml` has exactly one product-service definition and a separate `build_toolchain` definition. `ci.sh` consumes this metadata; it does not maintain a second inventory. Conceptually: ```text service: name build context external build contexts platforms runner class compiler class build dependencies runtime dependencies test domains validation domains artifact repository ``` Example: ```text proxy: context = services/proxy external-context = services/dns platforms = amd64,arm64 runner = light dns: context = services/dns platforms = amd64,arm64 runner = heavy rust = true build_toolchain/build-tools: context = tools/build-tools platforms = amd64,arm64 runner = toolchain ``` GitHub matrices are derived from the SOT. Not the other way around.
 ## 9. Central CLI contract
@@ -488,25 +488,21 @@ ACCEPTED
 ```
 A missing platform does not trigger a rebuild of the successful platform.
 ## 46. Service failure domains
-Each product service is its own failure domain. ```text proxy ACCEPTED dns ACCEPTED watchdog FAILED dhcp ACCEPTED dhcp-proxy ACCEPTED ntp ACCEPTED syslog ACCEPTED ui ACCEPTED cachehamster ACCEPTED ``` Result: watchdog's candidate failed; every other product-service result stays valid, stay ACCEPTED, and may be reused on the next run.
+Each product service is its own failure domain. ```text services FAILED proxy ACCEPTED dns ACCEPTED dhcp ACCEPTED ui ACCEPTED ``` Result: services' candidate failed; every other product-service result stays valid, stay ACCEPTED, and may be reused on the next run.
 ## 47. Stack assembly
 A complete stack consists exclusively of ACCEPTED digests.
 ```text
+services digest
 proxy digest
 dns digest
-watchdog digest
 dhcp digest
-dhcp-proxy digest
-ntp digest
-syslog digest
 ui digest
-cachehamster digest
         |
         v
 STACK CANDIDATE
 ```
 ## 48. Stack Candidate
-Contains exact digests. No moving service tags. ```text proxy=sha256:... dns=sha256:... watchdog=sha256:... ... ```
+Contains exact digests. No moving service tags. ```text services=sha256:... proxy=sha256:... dns=sha256:... dhcp=sha256:... ui=sha256:... ```
 ## 49. Stack Validation
 Full setup uses exclusively these exact digests.
 ```text
