@@ -65,9 +65,9 @@ const CONFIRM_MAX_DELIVERIES: i64 = 100;
 struct Ctx {
     pdns: PowerDns,
     // What: auth and recursor API roots, auth config dir.
-    // Why: dns/entrypoint.sh owns the layout, exports it.
+    // Why: the dns supervisor owns the layout, passes it.
     pdns_auth_url: String,
-    pdns_rec_url: String,
+    pdns_rec_urls: Vec<String>,
     pdns_auth_config_dir: String,
     snapshot_dir: PathBuf,
     keep_n: u32,
@@ -553,27 +553,33 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
             );
         }
     }
-    let url = match flush_url(&ctx.pdns_rec_url, domain) {
-        Ok(url) => url,
-        Err(e) => {
-            eprintln!("Acking recursor flush, bad PDNS_REC_API_URL: {e}");
-            return Outcome::Ack;
-        }
-    };
-    match ctx.pdns.call(Method::PUT, url.as_str(), None).await {
-        Ok(response) if response.status().is_success() => {
-            println!("Flushed PDNS cache");
-            Outcome::Ack
-        }
-        Ok(response) => {
-            eprintln!("PDNS flush error: {}", response.status());
-            Outcome::Retry
-        }
-        Err(e) => {
-            eprintln!("Error sending flush request: {e}");
-            Outcome::Retry
+    // What: flush every recursor; one failure retries all.
+    // Why: each recursor caches apart; a flush repeats safely.
+    // From: Issue #1683
+    let mut outcome = Outcome::Ack;
+    for rec_url in &ctx.pdns_rec_urls {
+        let url = match flush_url(rec_url, domain) {
+            Ok(url) => url,
+            Err(e) => {
+                eprintln!("Skipping recursor flush, bad PDNS_REC_API_URLS entry: {e}");
+                continue;
+            }
+        };
+        match ctx.pdns.call(Method::PUT, url.as_str(), None).await {
+            Ok(response) if response.status().is_success() => {
+                println!("Flushed PDNS cache at {rec_url}");
+            }
+            Ok(response) => {
+                eprintln!("PDNS flush error at {rec_url}: {}", response.status());
+                outcome = Outcome::Retry;
+            }
+            Err(e) => {
+                eprintln!("Error sending flush request to {rec_url}: {e}");
+                outcome = Outcome::Retry;
+            }
         }
     }
+    outcome
 }
 
 // What: route one message by subject.
@@ -958,7 +964,10 @@ async fn main() {
     let ctx = Arc::new(Ctx {
         pdns: PowerDns::new(http, api_key),
         pdns_auth_url: required("PDNS_AUTH_API_URL"),
-        pdns_rec_url: required("PDNS_REC_API_URL"),
+        pdns_rec_urls: required("PDNS_REC_API_URLS")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect(),
         pdns_auth_config_dir: required("PDNS_AUTH_CONFIG_DIR"),
         snapshot_dir: PathBuf::from(snapshot_dir),
         keep_n: keep_n as u32,
@@ -1283,7 +1292,7 @@ mod tests {
         Ctx {
             pdns: PowerDns::new(http_client().unwrap(), "k3y".to_string()),
             pdns_auth_url: format!("{pdns_base}/api/v1/servers/localhost"),
-            pdns_rec_url: format!("{pdns_base}/rec"),
+            pdns_rec_urls: vec![format!("{pdns_base}/rec")],
             pdns_auth_config_dir: "/no/such/config".to_string(),
             snapshot_dir: dir,
             keep_n: 3,

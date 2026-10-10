@@ -1,9 +1,9 @@
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! What: watchdog health loop, restarts and status.json.
-//! Why: one daemon keeps core services up, reports health.
-//! From: Issue #842 | PR #1858
+//! What: supervisor of every program in one container.
+//! Why: it replaces the shell entrypoints of all images.
+//! From: Issue #842 | Issue #1683
 
 use std::collections::HashMap;
 use std::fs;
@@ -15,14 +15,15 @@ use std::time::{Duration, SystemTime};
 use lancache_ng::config::{self, OutOfRange, Uint, env_opt};
 use lancache_ng::{
     COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL, DesiredRunState, DesiredState, DiskHealth,
-    DiskInfo, DockerApi, Place, ServiceHealth, WatchdogStatus, df, unix_secs, write_file,
+    DiskInfo, DockerApi, Place, ServiceHealth, WatchdogStatus, df, hex32, resolve_shared_secret,
+    shared_secret_file_name, shared_secret_is_placeholder, unix_secs, write_file,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 
 // What: seconds Docker waits for SIGTERM before SIGKILL.
-// Why: stays inside the restart call's own curl budget.
+// Why: stays inside the restart call's own API budget.
 const RESTART_GRACE_SECS: u32 = 2;
 
 // What: central-control settings, read once at start.
@@ -984,6 +985,12 @@ enum Kind {
     SyslogNg,
     Chronyd,
     Netdata,
+    Pdns,
+    DnsHttp,
+    DnsHttps,
+    NatsServer,
+    NatsSubscriber,
+    Soa,
 }
 
 impl Kind {
@@ -996,6 +1003,12 @@ impl Kind {
             "syslog-ng" => Self::SyslogNg,
             "chronyd" => Self::Chronyd,
             "netdata" => Self::Netdata,
+            "pdns" => Self::Pdns,
+            "dns-http" => Self::DnsHttp,
+            "dns-https" => Self::DnsHttps,
+            "nats-server" => Self::NatsServer,
+            "nats-subscriber" => Self::NatsSubscriber,
+            "soa" => Self::Soa,
             _ => return None,
         })
     }
@@ -1009,14 +1022,23 @@ impl Kind {
             Self::SyslogNg => "syslog-ng",
             Self::Chronyd => "chronyd",
             Self::Netdata => "netdata",
+            Self::Pdns => "pdns",
+            Self::DnsHttp => DNS_HTTP.name,
+            Self::DnsHttps => DNS_HTTPS.name,
+            Self::NatsServer => "nats-server",
+            Self::NatsSubscriber => "nats-subscriber",
+            Self::Soa => "soa",
         }
     }
 
     // What: whether this kind should run right now.
-    // Why: NTP follows the saved setting and desired state.
+    // Why: NTP follows the ui; NATS and SOA a primary only.
     // From: Issue #1437 | Issue #1683
     fn wanted(self, ctx: &Ctx) -> bool {
+        let secondary = || env_opt("DNS_REPLICATION_ROLE").as_deref() == Some("secondary");
         match self {
+            Self::NatsServer | Self::Soa => !secondary(),
+            Self::DnsHttps => env_opt(DNS_HTTPS.ip_key).is_some(),
             Self::Chronyd => {
                 let on = ctx
                     .setting("NTP_ENABLED")
@@ -1029,16 +1051,49 @@ impl Kind {
         }
     }
 
-    // What: render the config, return the command line.
+    // What: render the config, return what to start.
     // Why: a render error keeps the program stopped.
-    fn launch(self, ctx: &Ctx) -> Result<Vec<String>, String> {
+    fn launch(self, ctx: &Ctx) -> Result<Run, String> {
         match self {
-            Self::Watch | Self::Retention => Ok(Vec::new()),
+            Self::Watch | Self::Retention | Self::Soa => Ok(Run::default()),
             Self::SyslogNg => syslog_ng(ctx),
             Self::Chronyd => chronyd(ctx),
-            Self::Netdata => Ok(vec!["netdata".into(), "-D".into()]),
+            Self::Netdata => Ok(Run {
+                argv: vec!["netdata".into(), "-D".into()],
+                ..Run::default()
+            }),
+            Self::Pdns => pdns_auth(ctx),
+            Self::DnsHttp => recursor(ctx, &DNS_HTTP),
+            Self::DnsHttps => recursor(ctx, &DNS_HTTPS),
+            Self::NatsServer => nats_server(ctx),
+            Self::NatsSubscriber => nats_subscriber(ctx),
         }
     }
+}
+
+// What: what the supervisor starts for one kind.
+// Why: a program gets argv and env; inputs restart it.
+// From: Issue #1683
+#[derive(Debug, Default)]
+struct Run {
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+    // What: files whose change restarts the program.
+    // Why: the ui writes files; the program converges.
+    watch: Vec<PathBuf>,
+}
+
+// What: size and mtime of each watched file, if any.
+// Why: a changed input means a restart; absent is a state.
+fn fingerprint(files: &[PathBuf]) -> Vec<Option<(u64, i64, i64)>> {
+    files
+        .iter()
+        .map(|f| {
+            fs::metadata(f)
+                .ok()
+                .map(|m| (m.len(), m.mtime(), m.mtime_nsec()))
+        })
+        .collect()
 }
 
 // What: syslog-ng.conf for the Docker syslog input.
@@ -1064,14 +1119,14 @@ log {{ source(s_docker); filter(f_named); destination(d_store); }};
 
 // What: render syslog-ng.conf; the syslog-ng command.
 // Why: state files live in the private run dir.
-fn syslog_ng(ctx: &Ctx) -> Result<Vec<String>, String> {
+fn syslog_ng(ctx: &Ctx) -> Result<Run, String> {
     let conf = syslog_ng_conf(
         &ctx.need("LANCACHE_LOG_PORT")?,
         &ctx.need("SYSLOG_LOG_ROOT")?,
     )?;
     let conf = ctx.render("syslog-ng.conf", &conf)?;
     let run = |file: &str| ctx.run_dir.join(file).display().to_string();
-    Ok(vec![
+    let argv = vec![
         "syslog-ng".into(),
         "-F".into(),
         "--no-caps".into(),
@@ -1083,7 +1138,11 @@ fn syslog_ng(ctx: &Ctx) -> Result<Vec<String>, String> {
         run("syslog-ng.pid"),
         "-c".into(),
         run("syslog-ng.ctl"),
-    ])
+    ];
+    Ok(Run {
+        argv,
+        ..Run::default()
+    })
 }
 
 // What: an IP literal (server) or a name (pool).
@@ -1130,21 +1189,936 @@ fn chrony_conf(upstreams: &str, cidrs: &str, drift: &str) -> Result<String, Stri
 }
 
 // What: render chrony.conf; chronyd in the foreground.
-// Why: -d keeps it attached and logging to stderr.
-fn chronyd(ctx: &Ctx) -> Result<Vec<String>, String> {
+// Why: -d logs to stderr; a ui change restarts it.
+fn chronyd(ctx: &Ctx) -> Result<Run, String> {
     let conf = chrony_conf(
         &ctx.setting("NTP_UPSTREAM_SERVERS").unwrap_or_default(),
         &ctx.setting("NTP_ALLOWED_CLIENT_CIDRS").unwrap_or_default(),
         &ctx.need("NTP_DRIFT_FILE")?,
     )?;
     let conf = ctx.render("chrony.conf", &conf)?;
-    Ok(vec!["chronyd".into(), "-d".into(), "-f".into(), conf])
+    Ok(Run {
+        argv: vec!["chronyd".into(), "-d".into(), "-f".into(), conf],
+        watch: vec![ctx.settings_file.clone()],
+        ..Run::default()
+    })
+}
+
+// What: the dns role of this node.
+// Why: a primary owns the zones; a secondary copies them.
+// From: Issue #1164
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DnsRole {
+    Primary,
+    Secondary,
+}
+
+// What: DNS_REPLICATION_ROLE as a role.
+// Why: an unknown spelling must never start a server.
+fn dns_role(raw: &str) -> Result<DnsRole, String> {
+    match raw {
+        "primary" => Ok(DnsRole::Primary),
+        "secondary" => Ok(DnsRole::Secondary),
+        _ => Err(format!(
+            "DNS_REPLICATION_ROLE={raw} is neither primary nor secondary"
+        )),
+    }
+}
+
+// What: ports of the PowerDNS servers in this container.
+// Why: compose maps 53 and 1053; the APIs stay inside.
+// From: Issue #1683
+const AUTH_PORT: u16 = 5300;
+const AUTH_API_PORT: u16 = 8081;
+const ROLLBACK_LISTEN: &str = "0.0.0.0:8083";
+
+// What: one recursor: name, answer IP, ports.
+// Why: dns-http and dns-https differ only in these.
+// From: Issue #1683
+struct Recursor {
+    name: &'static str,
+    ip_key: &'static str,
+    port: u16,
+    api_port: u16,
+}
+
+// What: dns-http answers with IP_STANDARD, dns-https SSL.
+// Why: one cache per proxy IP keeps the answers apart.
+// From: Issue #1683
+const DNS_HTTP: Recursor = Recursor {
+    name: "dns-http",
+    ip_key: "PROXY_IP",
+    port: 53,
+    api_port: 8082,
+};
+const DNS_HTTPS: Recursor = Recursor {
+    name: "dns-https",
+    ip_key: "PROXY_HTTPS_IP",
+    port: 1053,
+    api_port: 8084,
+};
+
+// What: secondary AXFR poll seconds and negative TTL.
+// Why: #1164 bounds a missed NOTIFY to this many seconds.
+// From: Issue #1164
+const XFR_CYCLE_SECS: u64 = 15;
+
+// What: TSIG key name and algorithm of DDNS and AXFR.
+// Why: Kea signs with the same name; one spelling.
+// From: Issue #858
+const TSIG_NAME: &str = "lancache-ddns-key";
+const TSIG_ALGORITHM: &str = "hmac-sha256";
+
+// What: the local API root of a PowerDNS server.
+// Why: the supervisor and nats-subscriber share it.
+fn api_root(port: u16) -> String {
+    format!("http://127.0.0.1:{port}{}", config::PDNS_API_PATH)
+}
+
+// What: 32 random bytes in base64, a TSIG secret.
+// Why: Kea and PowerDNS read the key in this form.
+fn base64_32() -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(rand::random::<[u8; 32]>())
+}
+
+// What: a configured secret, else the shared file.
+// Why: dns, ui and dhcp must agree on one value.
+// From: Issue #858
+fn dns_secret(var: &str, file: &str, make: fn() -> String) -> Result<String, String> {
+    let need = |key: &str| config::need(&config::process_env, key);
+    let dir = need("LANCACHE_SHARED_SECRET_DIR")?;
+    let gid = need("LANCACHE_SHARED_SECRET_GID")?
+        .parse::<u32>()
+        .map_err(|_| "LANCACHE_SHARED_SECRET_GID is no group id".to_string())?;
+    let configured = env_opt(var).unwrap_or_default();
+    let current = if shared_secret_is_placeholder(&configured) {
+        ""
+    } else {
+        configured.as_str()
+    };
+    resolve_shared_secret(Path::new(&dir), file, current, gid, make)
+        .map_err(|e| format!("{var}: {e}"))
+}
+
+// What: the PowerDNS API key, at least 16 characters.
+// Why: it guards the zone and cache APIs of the stack.
+// From: Issue #858
+fn pdns_api_key() -> Result<String, String> {
+    let key = dns_secret(
+        "PDNS_API_KEY",
+        &shared_secret_file_name("PDNS_API_KEY"),
+        hex32,
+    )?;
+    if key.len() < 16 {
+        return Err(format!(
+            "PDNS_API_KEY has {} characters; 16 is the minimum",
+            key.len()
+        ));
+    }
+    Ok(key)
+}
+
+// What: one whole-number knob inside [min, max].
+// Why: a bad SOA value would render an invalid zone.
+fn bounded(key: &str, min: u64, max: u64) -> Result<u64, String> {
+    let raw = config::need(&config::process_env, key)?;
+    match raw.parse::<u64>() {
+        Ok(v) if (min..=max).contains(&v) => Ok(v),
+        _ => Err(format!(
+            "{key}={raw} must be a whole number in {min}..={max}"
+        )),
+    }
+}
+
+// What: SOA refresh, retry and resync seconds.
+// Why: retry below refresh (RFC 1912); all bounded.
+// From: Issue #1095
+fn soa_knobs() -> Result<(u64, u64, u64), String> {
+    let refresh = bounded("PDNS_SOA_REFRESH", 10, 86_400)?;
+    let retry = bounded("PDNS_SOA_RETRY", 1, refresh - 1)?;
+    let resync = bounded("PDNS_SOA_RESYNC_INTERVAL", 60, 86_400)?;
+    Ok((refresh, retry, resync))
+}
+
+// What: this container's own non-loopback IPv4 address.
+// Why: DDNS from dhcp cannot reach a loopback-only bind.
+// From: Issue #706
+fn own_address() -> Result<std::net::Ipv4Addr, String> {
+    // What: a connected UDP socket names the route source.
+    // Why: connect() sends no packet; no ip tool needed.
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| s.connect("1.1.1.1:53").map(|()| s))
+        .map_err(|e| format!("no route to find the own address: {e}"))?;
+    match socket.local_addr() {
+        Ok(std::net::SocketAddr::V4(a)) if !a.ip().is_loopback() && !a.ip().is_unspecified() => {
+            Ok(*a.ip())
+        }
+        other => Err(format!("no own non-loopback IPv4 address: {other:?}")),
+    }
+}
+
+// What: host:port with the host resolved to IPv4.
+// Why: PowerDNS needs IP:port, not a name; retry later.
+// From: Issue #1164 | PR #1775
+fn endpoint(raw: &str, key: &str) -> Result<std::net::SocketAddrV4, String> {
+    use std::net::ToSocketAddrs as _;
+    let (host, port) = raw
+        .rsplit_once(':')
+        .filter(|(h, p)| !h.is_empty() && !p.is_empty())
+        .ok_or_else(|| format!("{key}={raw} is not host:port"))?;
+    let port: u16 = port
+        .parse()
+        .map_err(|_| format!("{key}={raw} has no valid port"))?;
+    (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("{key} host {host} does not resolve: {e}"))?
+        .find_map(|a| match a {
+            std::net::SocketAddr::V4(v4) => Some(v4),
+            std::net::SocketAddr::V6(_) => None,
+        })
+        .ok_or_else(|| format!("{key} host {host} has no IPv4 address"))
+}
+
+// What: the comma list of DNS_XFR_NOTIFY_TARGETS.
+// Why: a primary notifies and allows AXFR to each one.
+fn notify_targets() -> Result<Vec<std::net::SocketAddrV4>, String> {
+    env_opt("DNS_XFR_NOTIFY_TARGETS")
+        .unwrap_or_default()
+        .split([',', ' '])
+        .filter(|t| !t.is_empty())
+        .map(|t| endpoint(t, "DNS_XFR_NOTIFY_TARGETS"))
+        .collect()
+}
+
+// What: pdns.conf for the authoritative server.
+// Why: one render replaces the envsubst template.
+// From: Issue #1683
+struct AuthConf<'a> {
+    local: std::net::Ipv4Addr,
+    database: &'a str,
+    role: DnsRole,
+    notify_from: &'a str,
+    axfr_ips: &'a str,
+    allow_from: &'a str,
+    seed_serial: &'a str,
+    refresh: u64,
+    retry: u64,
+    api_key: &'a str,
+}
+
+impl AuthConf<'_> {
+    fn render(&self) -> String {
+        let yes = |on: bool| if on { "yes" } else { "no" };
+        format!(
+            "local-address=127.0.0.1,{local}\nlocal-port={AUTH_PORT}\nlaunch=gsqlite3\n\
+             gsqlite3-database={db}\nprimary={primary}\nsecondary={secondary}\n\
+             xfr-cycle-interval={XFR_CYCLE_SECS}\nallow-notify-from={notify}\n\
+             allow-axfr-ips={axfr}\ndnsupdate=yes\nallow-dnsupdate-from={allow}\n\
+             dnsupdate-require-tsig=no\n\
+             default-soa-content=localhost. admin.@ {seed} {refresh} {retry} 604800 3600\n\
+             webserver=yes\nwebserver-address=0.0.0.0\nwebserver-port={AUTH_API_PORT}\n\
+             webserver-allow-from=127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16\n\
+             api=yes\napi-key={key}\nloglevel=3\nguardian=no\ndaemon=no\n",
+            local = self.local,
+            db = self.database,
+            primary = yes(self.role == DnsRole::Primary),
+            secondary = yes(self.role == DnsRole::Secondary),
+            notify = self.notify_from,
+            axfr = self.axfr_ips,
+            allow = self.allow_from,
+            seed = self.seed_serial,
+            refresh = self.refresh,
+            retry = self.retry,
+            key = self.api_key,
+        )
+    }
+}
+
+// What: true when a config check command exits 0.
+// Why: pdns_server and pdns_recursor check side-effect free.
+fn conf_ok(check: &[String]) -> bool {
+    match std::process::Command::new(&check[0])
+        .args(&check[1..])
+        .output()
+    {
+        Ok(out) if out.status.success() => true,
+        Ok(out) => {
+            log_err(&format!(
+                "ERROR: {} rejected the config: {}",
+                check[0],
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+            false
+        }
+        Err(e) => {
+            log_err(&format!("ERROR: cannot run {}: {e}", check[0]));
+            false
+        }
+    }
+}
+
+// What: KEEP_KNOWN_GOOD_CONFIGS, at least 1.
+// Why: a rollback needs one good config to go back to.
+// From: Issue #415
+fn keep_known_good() -> Result<u32, String> {
+    bounded("KEEP_KNOWN_GOOD_CONFIGS", 1, u32::MAX.into()).map(|v| v as u32)
+}
+
+// What: write a config; on a failed check roll back.
+// Why: a bad render must not serve; rescue is stopping.
+// From: Issue #415 | Issue #615
+fn checked_conf(
+    path: &Path,
+    body: &str,
+    check: &[String],
+    store: &lancache_ng::SnapshotStore,
+    restamp: &dyn Fn(&str) -> String,
+) -> Result<(), String> {
+    let put = |text: &str| {
+        write_file(path, text.as_bytes(), 0o640, Place::Replace)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))
+    };
+    put(body)?;
+    if conf_ok(check) {
+        if let Err(e) = store.create(&Value::String(body.to_string()), keep_known_good()?) {
+            log_err(&format!(
+                "WARNING: {} not saved as known-good: {e:#}",
+                path.display()
+            ));
+        }
+        return Ok(());
+    }
+    // What: newest snapshot first; re-stamp live values.
+    // Why: an old address or key would break the restore.
+    let ids = store
+        .ids()
+        .map_err(|e| format!("cannot list snapshots: {e}"))?;
+    for id in ids.iter().rev() {
+        let Ok(Value::String(old)) = store.read(id) else {
+            continue;
+        };
+        put(&restamp(&old))?;
+        if conf_ok(check) {
+            log_err(&format!(
+                "WARNING: {} runs from known-good snapshot {id}, not the new render",
+                path.display()
+            ));
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "{} fails its check and no known-good snapshot passes",
+        path.display()
+    ))
+}
+
+// What: replace each line that starts with a key.
+// Why: a restored snapshot gets this start's values.
+fn restamp_lines(text: &str, lines: &[(&str, String)]) -> String {
+    text.lines()
+        .map(|line| {
+            lines
+                .iter()
+                .find(|(key, _)| line.trim_start().starts_with(key))
+                .map_or_else(|| line.to_string(), |(_, new)| new.clone())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+// What: run pdnsutil on the auth config; text or error.
+// Why: every zone and key change goes through one call.
+fn pdnsutil(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new("pdnsutil")
+        .arg(format!("--config-dir={}", dir.display()))
+        .args(args)
+        .output()
+        .map_err(|e| format!("cannot run pdnsutil: {e}"))?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if out.status.success() {
+        Ok(text)
+    } else {
+        Err(format!("pdnsutil {}: {}", args.join(" "), text.trim()))
+    }
+}
+
+// What: true for pdnsutil's "exists already" refusal.
+// Why: a restart finds every zone; only that is fine.
+fn exists_already(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("exists already")
+}
+
+// What: the sqlite database, created once from schema.
+// Why: Alpine's backend ships no schema; the image does.
+// From: Issue #815
+fn pdns_database(data_dir: &Path) -> Result<PathBuf, String> {
+    let db = data_dir.join("pdns.sqlite3");
+    if db.exists() {
+        return Ok(db);
+    }
+    let schema_file = config::need(&config::process_env, "PDNS_SCHEMA_FILE")?;
+    let schema = fs::read(&schema_file).map_err(|e| format!("cannot read {schema_file}: {e}"))?;
+    let mut child = std::process::Command::new("sqlite3")
+        .arg(&db)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run sqlite3: {e}"))?;
+    use std::io::Write as _;
+    child
+        .stdin
+        .take()
+        .ok_or("sqlite3 has no stdin")?
+        .write_all(&schema)
+        .map_err(|e| format!("cannot feed the schema: {e}"))?;
+    let status = child.wait().map_err(|e| format!("sqlite3: {e}"))?;
+    if !status.success() {
+        return Err(format!("sqlite3 {} failed: {status}", db.display()));
+    }
+    run_ok(&["chown", "pdns:pdns", &db.display().to_string()])?;
+    log(&format!("Created {}", db.display()));
+    Ok(db)
+}
+
+// What: run a command; a non-zero exit is an error.
+// Why: chown and friends must never fail silently.
+fn run_ok(argv: &[&str]) -> Result<(), String> {
+    let status = std::process::Command::new(argv[0])
+        .args(&argv[1..])
+        .status()
+        .map_err(|e| format!("cannot run {}: {e}", argv[0]))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{} failed: {status}", argv.join(" ")))
+    }
+}
+
+// What: TSIG rights for DDNS on every LAN zone.
+// Why: an empty key revokes; the ui marker relaxes.
+// From: Issue #815 | Issue #858
+fn ddns_tsig(dir: &Path, zones: &[String], tsig: &str, unsigned: &Path) -> Result<(), String> {
+    if tsig.is_empty() {
+        for zone in zones {
+            pdnsutil(dir, &["set-meta", zone, "TSIG-ALLOW-DNSUPDATE"])?;
+        }
+        if let Err(e) = pdnsutil(dir, &["delete-tsig-key", TSIG_NAME]) {
+            log(&format!("No TSIG key to delete: {e}"));
+        }
+        log("DDNS_TSIG_KEY is empty; DDNS stays loopback-only, TSIG rights revoked");
+        return Ok(());
+    }
+    pdnsutil(dir, &["import-tsig-key", TSIG_NAME, TSIG_ALGORITHM, tsig])?;
+    let relaxed = unsigned.exists();
+    if relaxed {
+        log_err("WARNING: the ui allows unsigned DNS UPDATE for LAN zones");
+    }
+    for zone in zones {
+        let mut args = vec!["set-meta", zone.as_str(), "TSIG-ALLOW-DNSUPDATE"];
+        if !relaxed {
+            args.push(TSIG_NAME);
+        }
+        pdnsutil(dir, &args)?;
+    }
+    Ok(())
+}
+
+// What: zones as primary or AXFR secondary, keyed.
+// Why: one writer; NOTIFY and polling converge on it.
+// From: Issue #1164
+fn dns_zones(
+    dir: &Path,
+    role: DnsRole,
+    tsig: &str,
+    primary: Option<std::net::SocketAddrV4>,
+    notify: &[std::net::SocketAddrV4],
+) -> Result<(), String> {
+    let zones = config::rollback_zones();
+    if let (DnsRole::Secondary, Some(primary)) = (role, primary) {
+        if tsig.is_empty() {
+            return Err("DDNS_TSIG_KEY is required for AXFR from the primary".into());
+        }
+        pdnsutil(dir, &["import-tsig-key", TSIG_NAME, TSIG_ALGORITHM, tsig])?;
+        let primary = primary.to_string();
+        for zone in &zones {
+            match pdnsutil(dir, &["zone", "create-secondary", zone, &primary]) {
+                Ok(_) => {}
+                Err(e) if exists_already(&e) => {
+                    pdnsutil(dir, &["zone", "set-kind", zone, "secondary"])?;
+                    pdnsutil(dir, &["zone", "change-primary", zone, &primary])?;
+                }
+                Err(e) => return Err(e),
+            }
+            pdnsutil(dir, &["tsigkey", "activate", zone, TSIG_NAME, "secondary"])?;
+        }
+        return Ok(());
+    }
+    for zone in &zones {
+        match pdnsutil(dir, &["create-zone", zone]) {
+            Ok(_) => {}
+            Err(e) if exists_already(&e) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let state = config::need(&config::process_env, "DNS_STATE_DIR")?;
+    ddns_tsig(
+        dir,
+        &zones,
+        tsig,
+        &Path::new(&state).join("ddns-allow-unsigned-updates"),
+    )?;
+    let targets: Vec<String> = notify.iter().map(ToString::to_string).collect();
+    for zone in &zones {
+        pdnsutil(dir, &["zone", "set-kind", zone, "primary"])?;
+        pdnsutil(dir, &["set-meta", zone, "SOA-EDIT-DNSUPDATE", "INCREASE"])?;
+        pdnsutil(dir, &["set-meta", zone, "SOA-EDIT-API", "INCREASE"])?;
+        pdnsutil(dir, &["set-meta", zone, "NOTIFY-DNSUPDATE", "1"])?;
+        if !tsig.is_empty() {
+            pdnsutil(dir, &["tsigkey", "activate", zone, TSIG_NAME, "primary"])?;
+        }
+        if !targets.is_empty() {
+            let mut args = vec!["set-meta", zone.as_str(), "ALSO-NOTIFY"];
+            args.extend(targets.iter().map(String::as_str));
+            pdnsutil(dir, &args)?;
+        }
+    }
+    Ok(())
+}
+
+// What: today's date serial, YYMMDD000 (UTC).
+// Why: under 2^31 (RFC 1982); 1000 changes per day.
+// From: Issue #1095
+fn date_serial() -> u64 {
+    let today = OffsetDateTime::now_utc();
+    (u64::from(today.year().rem_euclid(100) as u16) * 10_000
+        + u64::from(u8::from(today.month())) * 100
+        + u64::from(today.day()))
+        * 1000
+}
+
+// What: render, check and key the authoritative server.
+// Why: replaces dns/entrypoint.sh; any error waits a retry.
+// From: Issue #1683
+fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
+    let role = dns_role(&ctx.need("DNS_REPLICATION_ROLE")?)?;
+    let api_key = pdns_api_key()?;
+    // What: TSIG off when the shared key cannot persist.
+    // Why: a key only this container knows signs nothing.
+    let tsig = dns_secret(
+        "DDNS_TSIG_KEY",
+        &shared_secret_file_name("DDNS_TSIG_KEY"),
+        base64_32,
+    )
+    .unwrap_or_else(|e| {
+        log_err(&format!("WARNING: DDNS TSIG is off: {e}"));
+        String::new()
+    });
+    // What: no key means DDNS only from loopback.
+    // Why: unsigned updates from the LAN must be refused.
+    let allow_from = if tsig.is_empty() {
+        "127.0.0.1".to_string()
+    } else {
+        ctx.need("DDNS_ALLOW_FROM")?
+    };
+    let (refresh, retry, _) = soa_knobs()?;
+    let local = own_address()?;
+    let (primary, notify) = match role {
+        DnsRole::Secondary => (
+            Some(endpoint(&ctx.need("DNS_XFR_PRIMARY")?, "DNS_XFR_PRIMARY")?),
+            Vec::new(),
+        ),
+        DnsRole::Primary => (None, notify_targets()?),
+    };
+    let notify_from = primary.map(|p| p.ip().to_string()).unwrap_or_default();
+    let axfr_ips = std::iter::once("127.0.0.0/8,::1".to_string())
+        .chain(notify.iter().map(|t| t.ip().to_string()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let data_dir = PathBuf::from(ctx.need("PDNS_DATA_DIR")?);
+    let database = pdns_database(&data_dir)?;
+    let database = database.display().to_string();
+    let seed = date_serial().to_string();
+    let conf = AuthConf {
+        local,
+        database: &database,
+        role,
+        notify_from: &notify_from,
+        axfr_ips: &axfr_ips,
+        allow_from: &allow_from,
+        seed_serial: &seed,
+        refresh,
+        retry,
+        api_key: &api_key,
+    };
+    let dir = ctx.run_dir.join("auth");
+    let store = lancache_ng::SnapshotStore::new(
+        PathBuf::from(ctx.need("DNS_CONFIG_SNAPSHOT_DIR")?).join("auth"),
+        "pdns.conf",
+        "dns-auth",
+    );
+    let restamp = |old: &str| {
+        restamp_lines(
+            old,
+            &[
+                ("local-address=", format!("local-address=127.0.0.1,{local}")),
+                ("api-key=", format!("api-key={api_key}")),
+            ],
+        )
+    };
+    let config_dir = format!("--config-dir={}", dir.display());
+    checked_conf(
+        &dir.join("pdns.conf"),
+        &conf.render(),
+        &[
+            "pdns_server".into(),
+            "--config=check".into(),
+            config_dir.clone(),
+        ],
+        &store,
+        &restamp,
+    )?;
+    dns_zones(&dir, role, &tsig, primary, &notify)?;
+    Ok(Run {
+        argv: vec![
+            "pdns_server".into(),
+            config_dir,
+            "--guardian=no".into(),
+            "--daemon=no".into(),
+        ],
+        ..Run::default()
+    })
+}
+
+// What: RPZ zone mapping each CDN name to the proxy.
+// Why: "." marks a wildcard-only row, "!" a disabled one.
+// From: Issue #1072 | Issue #1073
+fn rpz_zone(domains: &str, proxy: std::net::Ipv4Addr, serial: u64) -> (String, usize) {
+    let mut zone = format!(
+        "$ORIGIN rpz.\n$TTL 60\n@ SOA localhost. admin.rpz. {serial} 3600 900 604800 60\n\
+         @ NS localhost.\n\n"
+    );
+    let mut count = 0;
+    for row in domains.lines().map(str::trim) {
+        if row.is_empty() || row.starts_with('#') || row.starts_with('!') {
+            continue;
+        }
+        let (wildcard, name) = match row.strip_prefix('.') {
+            Some(rest) => (true, rest),
+            None => (false, row),
+        };
+        let name = name.to_ascii_lowercase();
+        if !name.contains('.') || !config::is_dns_name(&name, false, false) {
+            log_err(&format!("WARNING: skipping invalid RPZ entry {row:?}"));
+            continue;
+        }
+        let owner = if wildcard { format!("*.{name}") } else { name };
+        zone.push_str(&format!("{owner} 60 IN A {proxy}\n"));
+        count += 1;
+    }
+    (zone, count)
+}
+
+// What: recursor.lua: RPZ, LAN trust anchors, root copy.
+// Why: one render per recursor; the RPZ path differs.
+// From: Issue #1683
+fn recursor_lua(rpz: &str, zones: &[String], root_mirror: bool) -> String {
+    let mut lua = format!("rpzFile(\"{rpz}\", {{ policyName=\"lancache-rpz\" }})\n");
+    for zone in zones {
+        lua.push_str(&format!(
+            "addNTA(\"{}\", \"lancache-ng: locally forwarded, intentionally unsigned zone\")\n",
+            zone.trim_end_matches('.')
+        ));
+    }
+    if root_mirror {
+        for ip in ["199.9.14.201", "192.33.4.12", "192.5.5.241"] {
+            lua.push_str(&format!(
+                "zoneToCache(\".\", \"axfr\", \"{ip}\", {{ refreshPeriod=3600, retryOnError=3600 }})\n"
+            ));
+        }
+    }
+    lua
+}
+
+// What: recursor.conf (YAML) of one recursor.
+// Why: LAN zones go to the local auth on AUTH_PORT.
+// From: Issue #1683
+struct RecursorConf<'a> {
+    port: u16,
+    api_port: u16,
+    api_key: &'a str,
+    negative_ttl: u64,
+    loglevel: u8,
+    lua_config: &'a str,
+    lua_dns: &'a str,
+    zones: &'a [String],
+}
+
+impl RecursorConf<'_> {
+    fn render(&self) -> String {
+        let forwards: String = self
+            .zones
+            .iter()
+            .map(|z| {
+                format!(
+                    "    - zone: {}\n      forwarders: [127.0.0.1:{AUTH_PORT}]\n",
+                    z.trim_end_matches('.')
+                )
+            })
+            .collect();
+        let lan =
+            "    - 10.0.0.0/8\n    - 172.16.0.0/12\n    - 192.168.0.0/16\n    - 127.0.0.0/8\n";
+        format!(
+            "incoming:\n  listen:\n    - 0.0.0.0\n  port: {port}\n  allow_from:\n{lan}    - fc00::/7\n\
+             recursor:\n  forward_zones:\n{forwards}  lua_config_file: {lua_config}\n\
+             \x20 lua_dns_script: {lua_dns}\n  minimum_ttl_override: 60\n\
+             recordcache:\n  max_entries: 1000000\n  refresh_on_ttl_perc: 10\n\
+             \x20 serve_stale_extensions: 120\n  max_negative_ttl: {ttl}\n\
+             packetcache:\n  max_entries: 500000\n  ttl: 3600\n  negative_ttl: {ttl}\n\
+             \x20 servfail_ttl: 30\n\
+             webservice:\n  webserver: true\n  address: 0.0.0.0\n  port: {api_port}\n\
+             \x20 allow_from:\n{lan}  api_key: {key}\n\
+             logging:\n  loglevel: {loglevel}\n",
+            port = self.port,
+            lua_config = self.lua_config,
+            lua_dns = self.lua_dns,
+            ttl = self.negative_ttl,
+            api_port = self.api_port,
+            key = self.api_key,
+            loglevel = self.loglevel,
+        )
+    }
+}
+
+// What: render RPZ, lua and conf; start one recursor.
+// Why: cdn-domains.txt changes restart it with new RPZ.
+// From: Issue #1683
+fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
+    let api_key = pdns_api_key()?;
+    let ip = ctx.need(rec.ip_key)?;
+    let proxy: std::net::Ipv4Addr = ip
+        .parse()
+        .map_err(|_| format!("{}={ip} is no IPv4 address", rec.ip_key))?;
+    let role = dns_role(&ctx.need("DNS_REPLICATION_ROLE")?)?;
+    let negative_ttl = if role == DnsRole::Secondary {
+        XFR_CYCLE_SECS
+    } else {
+        120
+    };
+    let flag = |key: &str| ctx.setting(key).as_deref().and_then(config::parse_bool);
+    let loglevel = if flag("LOG_QUERIES") == Some(true) {
+        6
+    } else {
+        3
+    };
+    let domains_file = PathBuf::from(ctx.need("CDN_DOMAINS_FILE")?);
+    let domains = fs::read_to_string(&domains_file)
+        .map_err(|e| format!("cannot read {}: {e}", domains_file.display()))?;
+    let dir = ctx.run_dir.join(rec.name);
+    let (rpz, count) = rpz_zone(&domains, proxy, unix_secs());
+    let rpz_file = dir.join("rpz.zone");
+    let lua_file = dir.join("recursor.lua");
+    let zones = config::rollback_zones();
+    for (path, body) in [
+        (&rpz_file, rpz),
+        (
+            &lua_file,
+            recursor_lua(
+                &rpz_file.display().to_string(),
+                &zones,
+                flag("ROOT_ZONE_MIRROR") != Some(false),
+            ),
+        ),
+    ] {
+        write_file(path, body.as_bytes(), 0o644, Place::Replace)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
+    log(&format!("{}: RPZ holds {count} records", rec.name));
+    let lua_dns = ctx.need("PDNS_LUA_DNS_SCRIPT")?;
+    let conf = RecursorConf {
+        port: rec.port,
+        api_port: rec.api_port,
+        api_key: &api_key,
+        negative_ttl,
+        loglevel,
+        lua_config: &lua_file.display().to_string(),
+        lua_dns: &lua_dns,
+        zones: &zones,
+    };
+    let store = lancache_ng::SnapshotStore::new(
+        PathBuf::from(ctx.need("DNS_CONFIG_SNAPSHOT_DIR")?).join(rec.name),
+        "recursor.conf",
+        "dns-recursor",
+    );
+    let restamp = |old: &str| restamp_lines(old, &[("api_key:", format!("  api_key: {api_key}"))]);
+    let config_dir = format!("--config-dir={}", dir.display());
+    checked_conf(
+        &dir.join("recursor.conf"),
+        &conf.render(),
+        &[
+            "pdns_recursor".into(),
+            "--config=check".into(),
+            config_dir.clone(),
+        ],
+        &store,
+        &restamp,
+    )?;
+    Ok(Run {
+        argv: vec![
+            "pdns_recursor".into(),
+            config_dir,
+            format!("--socket-dir={}", dir.display()),
+        ],
+        watch: vec![domains_file],
+        ..Run::default()
+    })
+}
+
+// What: nats-server with the conf the ui writes.
+// Why: the ui owns users and callout; a change restarts.
+// From: Issue #811 | Issue #1683
+fn nats_server(ctx: &Ctx) -> Result<Run, String> {
+    let conf = PathBuf::from(ctx.need("NATS_CONF_PATH")?);
+    let fragment = PathBuf::from(ctx.need("NATS_AUTH_CALLOUT_PATH")?);
+    if !conf.exists() {
+        return Err(format!("waiting for the ui to write {}", conf.display()));
+    }
+    Ok(Run {
+        argv: vec![
+            "nats-server".into(),
+            "-c".into(),
+            conf.display().to_string(),
+        ],
+        watch: vec![conf, fragment],
+        ..Run::default()
+    })
+}
+
+// What: nats-subscriber with resolved secrets and URLs.
+// Why: it flushes both recursors and writes the zones.
+// From: Issue #1683
+fn nats_subscriber(ctx: &Ctx) -> Result<Run, String> {
+    let mut env = vec![
+        ("PDNS_API_KEY".to_string(), pdns_api_key()?),
+        ("PDNS_AUTH_API_URL".to_string(), api_root(AUTH_API_PORT)),
+        (
+            "PDNS_REC_API_URLS".to_string(),
+            [&DNS_HTTP, &DNS_HTTPS]
+                .iter()
+                .map(|r| api_root(r.api_port))
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        (
+            "PDNS_AUTH_CONFIG_DIR".to_string(),
+            ctx.run_dir.join("auth").display().to_string(),
+        ),
+        (
+            "DNS_ROLLBACK_LISTEN_ADDR".to_string(),
+            ROLLBACK_LISTEN.into(),
+        ),
+    ];
+    // What: the writer's NATS password from the shared file.
+    // Why: a remote secondary has its own; no file is used.
+    if let Some(file) = env_opt("NATS_PASSWORD_SHARED_SECRET") {
+        env.push((
+            "NATS_PASSWORD".to_string(),
+            dns_secret("NATS_PASSWORD", &file, hex32)?,
+        ));
+    }
+    Ok(Run {
+        argv: vec!["nats-subscriber".into()],
+        env,
+        watch: Vec::new(),
+    })
+}
+
+// What: the SOA of one zone: date serial, our timers.
+// Why: migrates refresh; a NOTIFY resyncs secondaries.
+// From: Issue #1095
+async fn soa_bump(
+    pdns: &lancache_ng::PowerDns,
+    zone: &str,
+    refresh: u64,
+    retry: u64,
+) -> Result<(), String> {
+    let root = api_root(AUTH_API_PORT);
+    let rrsets = pdns.zone_rrsets(&root, zone).await?;
+    let content = rrsets
+        .iter()
+        .find(|r| r.get("type").and_then(Value::as_str) == Some("SOA"))
+        .and_then(|r| r.pointer("/records/0/content"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{zone} has no SOA yet"))?;
+    let fields: Vec<&str> = content.split_whitespace().collect();
+    let [mname, rname, serial, _, _, expire, minimum] = fields.as_slice() else {
+        return Err(format!("{zone} SOA has an odd shape: {content}"));
+    };
+    let serial: u64 = serial
+        .parse()
+        .map_err(|_| format!("{zone} SOA serial {serial} is no number"))?;
+    let want = date_serial();
+    let next = if serial < want { want } else { serial + 1 };
+    let ttl: u64 = minimum.parse().unwrap_or(3600);
+    let name = config::canonical_zone(zone);
+    let body = serde_json::json!({"rrsets": [{
+        "name": name, "type": "SOA", "ttl": ttl, "changetype": "REPLACE",
+        "records": [{"content": format!("{mname} {rname} {next} {refresh} {retry} {expire} {minimum}"),
+                     "disabled": false}]
+    }]});
+    let url = config::zone_url(&root, zone);
+    let response = pdns
+        .call(reqwest::Method::PATCH, &url, Some(body.to_string()))
+        .await?;
+    if !response.status().is_success() {
+        return Err(format!("{zone} SOA PATCH returned {}", response.status()));
+    }
+    let notify = pdns
+        .call(reqwest::Method::PUT, &format!("{url}/notify"), None)
+        .await?;
+    if !notify.status().is_success() {
+        log_err(&format!(
+            "WARNING: {zone} NOTIFY returned {}",
+            notify.status()
+        ));
+    }
+    Ok(())
+}
+
+// What: keep every primary zone's SOA current.
+// Why: a lost NOTIFY heals within one resync period.
+// From: Issue #1095
+async fn soa_upkeep() -> Result<(), String> {
+    let (refresh, retry, resync) = soa_knobs()?;
+    let http = lancache_ng::http_client().map_err(|e| format!("HTTP client: {e}"))?;
+    let pdns = lancache_ng::PowerDns::new(http, pdns_api_key()?);
+    loop {
+        let mut ok = 0;
+        for zone in config::rollback_zones() {
+            match soa_bump(&pdns, &zone, refresh, retry).await {
+                Ok(()) => ok += 1,
+                Err(e) => log_err(&format!("WARNING: {e}")),
+            }
+        }
+        // What: retry soon while no zone could be written.
+        // Why: a cold auth server must not wait an hour.
+        let pause = if ok == 0 { 5 } else { resync };
+        tokio::time::sleep(Duration::from_secs(pause)).await;
+    }
 }
 
 // What: one supervised slot and its restart state.
 // Why: the loop converges each slot to wanted state.
 struct Slot {
     kind: Kind,
+    // What: watched inputs and their state at the start.
+    // Why: a differing state restarts the program.
+    watch: Vec<PathBuf>,
+    seen: Vec<Option<(u64, i64, i64)>>,
     child: Option<tokio::process::Child>,
     task: Option<tokio::task::JoinHandle<Result<(), String>>>,
     started: Option<std::time::Instant>,
@@ -1164,18 +2138,22 @@ impl Slot {
     // Why: a failed start waits out the backoff first.
     fn start(&mut self, ctx: &Ctx) {
         let name = self.kind.name();
-        let argv = match self.kind.launch(ctx) {
-            Ok(argv) => argv,
+        let run = match self.kind.launch(ctx) {
+            Ok(run) => run,
             Err(e) => return self.failed(&format!("{name}: {e}")),
         };
         let task = match self.kind {
             Kind::Watch => Some(tokio::spawn(TAG.scope("watch", watch()))),
             Kind::Retention => Some(tokio::spawn(TAG.scope("retention", retention()))),
+            Kind::Soa => Some(tokio::spawn(TAG.scope("soa", soa_upkeep()))),
             _ => None,
         };
+        self.seen = fingerprint(&run.watch);
+        self.watch = run.watch;
         if task.is_none() {
-            match tokio::process::Command::new(&argv[0])
-                .args(&argv[1..])
+            match tokio::process::Command::new(&run.argv[0])
+                .args(&run.argv[1..])
+                .envs(run.env)
                 .spawn()
             {
                 Ok(child) => self.child = Some(child),
@@ -1311,6 +2289,8 @@ async fn supervise() -> Result<(), String> {
         .into_iter()
         .map(|kind| Slot {
             kind,
+            watch: Vec::new(),
+            seen: Vec::new(),
             child: None,
             task: None,
             started: None,
@@ -1331,7 +2311,12 @@ async fn supervise() -> Result<(), String> {
             let wanted = slot.kind.wanted(&ctx);
             if wanted && !slot.running() && std::time::Instant::now() >= slot.not_before {
                 slot.start(&ctx);
-            } else if !wanted && slot.running() {
+            } else if slot.running() && (!wanted || fingerprint(&slot.watch) != slot.seen) {
+                // What: a wanted program restarts next tick.
+                // Why: its input changed; it must read it anew.
+                if wanted {
+                    log(&format!("{}: input changed; restarting", slot.kind.name()));
+                }
                 slot.stop().await;
             }
             if wanted && !slot.running() {
@@ -2190,5 +3175,177 @@ mod tests {
             .await
             .expect("still running after stop")
             .expect("retention task");
+    }
+
+    // What: a random IPv4 address for a proxy IP.
+    // Why: render tests must not depend on one address.
+    fn gen_ipv4() -> std::net::Ipv4Addr {
+        std::net::Ipv4Addr::from(rnd(1, u32::MAX.into()) as u32)
+    }
+
+    // What: plain, wildcard, disabled and junk RPZ rows.
+    // Why: a bare TLD or "!" row must never redirect.
+    // From: Issue #1072 | Issue #1073
+    #[test]
+    fn rpz_zone_maps_valid_rows_to_the_proxy() {
+        let (host, wild, off) = (gen_name(), gen_name(), gen_name());
+        let ip = gen_ipv4();
+        let serial = rnd(1, u32::MAX.into());
+        let rows =
+            format!("# c\n\n{host}.example\n .{wild}.EXAMPLE \n!{off}.example\ncom\nb@d.example\n");
+        let (zone, count) = rpz_zone(&rows, ip, serial);
+        assert_eq!(count, 2, "{zone}");
+        assert!(
+            zone.contains(&format!("\n{host}.example 60 IN A {ip}\n")),
+            "{zone}"
+        );
+        assert!(
+            zone.contains(&format!("\n*.{wild}.example 60 IN A {ip}\n")),
+            "{zone}"
+        );
+        assert!(
+            zone.contains(&format!(" {serial} 3600 900 604800 60\n")),
+            "{zone}"
+        );
+        assert!(!zone.contains(&off) && !zone.contains("\ncom ") && !zone.contains("b@d"));
+    }
+
+    // What: lua names the RPZ file, every zone, the root.
+    // Why: a missing NTA breaks DNSSEC for LAN names.
+    #[test]
+    fn recursor_lua_lists_rpz_zones_and_root_copy() {
+        let rpz = gen_path();
+        let zones = config::rollback_zones();
+        let lua = recursor_lua(&rpz, &zones, true);
+        assert!(lua.starts_with(&format!("rpzFile(\"{rpz}\"")), "{lua}");
+        for zone in &zones {
+            assert!(lua.contains(&format!("addNTA(\"{}\"", zone.trim_end_matches('.'))));
+        }
+        assert_eq!(lua.matches("zoneToCache").count(), 3);
+        assert!(!recursor_lua(&rpz, &zones, false).contains("zoneToCache"));
+    }
+
+    // What: recursor.conf carries ports, key, TTL, zones.
+    // Why: dns-http and dns-https differ only in these.
+    #[test]
+    fn recursor_conf_renders_its_inputs() {
+        let zones = config::rollback_zones();
+        let (key, lua_c, lua_d) = (gen_name(), gen_path(), gen_path());
+        let ttl = rnd(1, DAY);
+        for rec in [&DNS_HTTP, &DNS_HTTPS] {
+            let conf = RecursorConf {
+                port: rec.port,
+                api_port: rec.api_port,
+                api_key: &key,
+                negative_ttl: ttl,
+                loglevel: 6,
+                lua_config: &lua_c,
+                lua_dns: &lua_d,
+                zones: &zones,
+            }
+            .render();
+            for want in [
+                format!("  port: {}\n", rec.port),
+                format!("  port: {}\n", rec.api_port),
+                format!("  api_key: {key}\n"),
+                format!("  negative_ttl: {ttl}\n"),
+                format!("  lua_config_file: {lua_c}\n"),
+                format!("  lua_dns_script: {lua_d}\n"),
+                format!("forwarders: [127.0.0.1:{AUTH_PORT}]"),
+                "  loglevel: 6\n".to_string(),
+            ] {
+                assert!(conf.contains(&want), "{want:?} missing in {conf}");
+            }
+            assert_eq!(conf.matches("    - zone: ").count(), zones.len());
+        }
+    }
+
+    // What: pdns.conf follows the role and its inputs.
+    // Why: a secondary must never act as a primary.
+    #[test]
+    fn auth_conf_renders_role_and_inputs() {
+        let (db, key, allow, seed) = (gen_path(), gen_name(), gen_name(), gen_name());
+        let local = gen_ipv4();
+        let refresh = rnd(10, DAY);
+        for (role, primary, secondary) in [
+            (DnsRole::Primary, "yes", "no"),
+            (DnsRole::Secondary, "no", "yes"),
+        ] {
+            let conf = AuthConf {
+                local,
+                database: &db,
+                role,
+                notify_from: "",
+                axfr_ips: "127.0.0.0/8,::1",
+                allow_from: &allow,
+                seed_serial: &seed,
+                refresh,
+                retry: refresh - 1,
+                api_key: &key,
+            }
+            .render();
+            for want in [
+                format!("local-address=127.0.0.1,{local}\n"),
+                format!("gsqlite3-database={db}\n"),
+                format!("primary={primary}\nsecondary={secondary}\n"),
+                format!("allow-dnsupdate-from={allow}\n"),
+                format!("admin.@ {seed} {refresh} {} 604800", refresh - 1),
+                format!("api-key={key}\n"),
+            ] {
+                assert!(conf.contains(&want), "{want:?} missing in {conf}");
+            }
+        }
+    }
+
+    // What: restamp swaps keyed lines, keeps the rest.
+    // Why: a restored snapshot must use this start's key.
+    #[test]
+    fn restamp_replaces_only_keyed_lines() {
+        let (old, new, other) = (gen_name(), gen_name(), gen_name());
+        let text = format!("a={other}\n  api_key: {old}\nb=1");
+        let out = restamp_lines(&text, &[("api_key:", format!("  api_key: {new}"))]);
+        assert_eq!(out, format!("a={other}\n  api_key: {new}\nb=1\n"));
+    }
+
+    // What: roles parse; others and IPv4 endpoints.
+    // Why: an unknown role or a bad endpoint must not start.
+    #[test]
+    fn dns_role_and_endpoint_parse() {
+        assert_eq!(dns_role("primary"), Ok(DnsRole::Primary));
+        assert_eq!(dns_role("secondary"), Ok(DnsRole::Secondary));
+        assert!(dns_role(&gen_name()).is_err());
+        let ip = gen_ipv4();
+        let port = rnd(1, u16::MAX.into()) as u16;
+        let got = endpoint(&format!("{ip}:{port}"), "K").expect("endpoint");
+        assert_eq!(got, std::net::SocketAddrV4::new(ip, port));
+        assert!(endpoint(&ip.to_string(), "K").is_err());
+        assert!(endpoint(&format!("{ip}:x"), "K").is_err());
+    }
+
+    // What: the date serial is YYMMDD000 below 2^31.
+    // Why: RFC 1982 compares serials in 32-bit space.
+    #[test]
+    fn date_serial_has_the_date_shape() {
+        let serial = date_serial();
+        assert_eq!(serial % 1000, 0);
+        assert!(serial < 1 << 31);
+        let day = (serial / 1000) % 100;
+        let month = (serial / 100_000) % 100;
+        assert!((1..=31).contains(&day) && (1..=12).contains(&month));
+    }
+
+    // What: a changed watched file changes the print.
+    // Why: that difference is what restarts a program.
+    #[test]
+    fn fingerprint_sees_a_changed_file() {
+        let dir = scratch();
+        let file = dir.join(gen_name());
+        let files = vec![file.clone()];
+        let absent = fingerprint(&files);
+        fs::write(&file, gen_name()).expect("write");
+        let first = fingerprint(&files);
+        assert_ne!(absent, first);
+        fs::write(&file, format!("{}{}", gen_name(), gen_name())).expect("write");
+        assert_ne!(first, fingerprint(&files));
     }
 }

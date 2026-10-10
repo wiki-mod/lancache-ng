@@ -29,9 +29,10 @@ use lancache_ng::config::{
 };
 use lancache_ng::{
     DesiredRunState, DesiredState, DnsRecord, DockerApi, DockerError, FlushRequest, Place,
-    PowerDns, SnapshotStore, WatchdogStatus, ct_eq, df, die, http_client, is_placeholder,
-    load_or_create, load_or_create_hex, snapshot_created_unix, unix_secs, write_file,
-    write_file_as, write_if_changed,
+    PowerDns, SnapshotStore, WatchdogStatus, ct_eq, df, die, hex32, http_client, is_placeholder,
+    load_or_create, load_or_create_hex, resolve_shared_secret, shared_secret,
+    shared_secret_file_name, shared_secret_is_placeholder, snapshot_created_unix, unix_secs,
+    write_file, write_if_changed,
 };
 use nkeys::{KeyPair, XKey};
 use regex::Regex;
@@ -561,110 +562,6 @@ fn nats_port(nats_url: &str) -> Option<&str> {
     (!port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())).then_some(port)
 }
 
-// What: true for empty or a shared-secret placeholder.
-// Why: mirrors the shell library; dev secrets stay real.
-// From: Issue #967
-fn shared_secret_is_placeholder(value: &str) -> bool {
-    let normalized = value.to_ascii_lowercase().replace('-', "_");
-    normalized.is_empty()
-        || normalized.starts_with("change_me")
-        || normalized.starts_with("changeme")
-        || normalized.starts_with("your_")
-        || normalized.ends_with("_here")
-}
-
-// What: shared-secret file name of a variable (A_B -> a-b).
-// Why: one naming rule replaces any per-secret name list.
-// From: Issue #858
-fn shared_secret_file_name(var: &str) -> String {
-    var.to_ascii_lowercase().replace('_', "-")
-}
-
-// What: a real env value, else its shared-secret file.
-// Why: backends write the file; the ui only reads it.
-// From: Issue #858
-fn shared_secret(
-    dir: &str,
-    var: &str,
-    env: &dyn Fn(&str) -> Option<String>,
-) -> Result<String, String> {
-    let configured = env(var).unwrap_or_default();
-    if !shared_secret_is_placeholder(&configured) {
-        return Ok(configured);
-    }
-    let path = Path::new(dir).join(shared_secret_file_name(var));
-    match fs::read_to_string(&path) {
-        Ok(value) => Ok(value.replace('\n', "")),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(format!("cannot read {var} from {}: {e}", path.display())),
-    }
-}
-
-// What: first-writer-wins read-or-create of a secret file.
-// Why: independent starters must not split-brain a secret.
-// From: Issue #858
-fn resolve_shared_secret(
-    dir: &Path,
-    name: &str,
-    current: &str,
-    gid: u32,
-) -> Result<String, String> {
-    let file = dir.join(name);
-    let on_disk = || {
-        fs::read_to_string(&file)
-            .ok()
-            .map(|v| v.replace('\n', ""))
-            .filter(|v| !v.is_empty())
-    };
-    if let Some(existing) = on_disk()
-        && (current.is_empty() || existing == current)
-    {
-        return Ok(existing);
-    }
-    // What: a configured value survives a failed write.
-    // Why: only a disagreeing file makes it unsafe to use.
-    // From: PR #1775
-    let keep_current = || {
-        let conflict = match on_disk() {
-            Some(v) => v != current,
-            None => file.exists(),
-        };
-        !current.is_empty() && !conflict
-    };
-    let value = if current.is_empty() {
-        hex::encode(rand::random::<[u8; 32]>())
-    } else {
-        current.to_string()
-    };
-    let place = if current.is_empty() {
-        Place::Exclusive
-    } else {
-        Place::Replace
-    };
-    // What: try with the reader group, then without it.
-    // Why: some volumes refuse chgrp; 0640 stays anyway.
-    let written = write_file_as(
-        &file,
-        value.as_bytes(),
-        0o640,
-        place,
-        Some((None, Some(gid))),
-    )
-    .or_else(|_| write_file_as(&file, value.as_bytes(), 0o640, place, None));
-    if written.is_ok() {
-        return Ok(value);
-    }
-    if current.is_empty()
-        && let Some(existing) = on_disk()
-    {
-        return Ok(existing);
-    }
-    if keep_current() {
-        return Ok(current.to_string());
-    }
-    Err(format!("cannot place {}", file.display()))
-}
-
 // What: read-or-create the secret files named by a prefix.
 // Why: each starter makes only its own; "" means all.
 // From: Issue #858
@@ -676,8 +573,14 @@ fn ensure_shared_secrets(dir: &str, gid: u32, prefix: &str) -> Result<(), String
         } else {
             configured.as_str()
         };
-        resolve_shared_secret(Path::new(dir), &shared_secret_file_name(var), current, gid)
-            .map_err(|e| format!("{var}: {e}"))?;
+        resolve_shared_secret(
+            Path::new(dir),
+            &shared_secret_file_name(var),
+            current,
+            gid,
+            hex32,
+        )
+        .map_err(|e| format!("{var}: {e}"))?;
     }
     Ok(())
 }
@@ -7483,32 +7386,6 @@ mod tests {
         }
     }
 
-    // What: the ui secret check equals the shared column.
-    // Why: it mirrors the shell check; the fixture pins it.
-    // From: Issue #967
-    #[test]
-    fn shared_secret_check_matches_the_fixture_column() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../tests/fixtures/placeholder-detection-cases.txt"
-        );
-        let fixture = fs::read_to_string(path).expect("shared fixture is readable");
-        let mut cases = 0;
-        for line in fixture.lines().map(str::trim_end) {
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            let [value, shared, _setup, _rust] = fields.as_slice() else {
-                panic!("malformed fixture line: {line:?}");
-            };
-            let want = *shared == "placeholder";
-            assert_eq!(shared_secret_is_placeholder(value), want, "case: {line}");
-            cases += 1;
-        }
-        assert!(cases > 0, "the fixture holds no cases");
-    }
-
     // What: the SOA query is the exact wire bytes.
     // Why: a wrong byte makes every secondary look silent.
     #[test]
@@ -7742,87 +7619,6 @@ mod tests {
         for bad in ["nats://h", "nats://h:", "nats://h:42a", "h:-1", ""] {
             assert_eq!(nats_port(bad), None, "{bad:?}");
         }
-    }
-
-    // What: secret files are named and read by variable.
-    // Why: a real env value wins; a placeholder reads file.
-    // From: Issue #858
-    #[test]
-    fn shared_secrets_are_read_from_env_or_file() {
-        assert_eq!(
-            shared_secret_file_name("NATS_UI_PASSWORD"),
-            "nats-ui-password"
-        );
-        let dir = unique_temp_dir("secret-read");
-        let path = dir.to_string_lossy().into_owned();
-        let unset = |_: &str| None;
-        assert_eq!(
-            shared_secret(&path, "PDNS_API_KEY", &unset),
-            Ok(String::new())
-        );
-        fs::write(dir.join("pdns-api-key"), "from-file\n").unwrap();
-        assert_eq!(
-            shared_secret(&path, "PDNS_API_KEY", &unset),
-            Ok("from-file".to_string())
-        );
-        let real = |_: &str| Some("real-value".to_string());
-        assert_eq!(
-            shared_secret(&path, "PDNS_API_KEY", &real),
-            Ok("real-value".to_string())
-        );
-        let placeholder = |_: &str| Some("CHANGE_ME_x".to_string());
-        assert_eq!(
-            shared_secret(&path, "PDNS_API_KEY", &placeholder),
-            Ok("from-file".to_string())
-        );
-        fs::create_dir(dir.join("kea-ctrl-token")).unwrap();
-        assert!(shared_secret(&path, "KEA_CTRL_TOKEN", &unset).is_err());
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    // What: the first writer of a secret file wins.
-    // Why: independent starters must not split a secret.
-    // From: Issue #858
-    #[test]
-    fn secret_files_keep_the_first_writer() {
-        let dir = unique_temp_dir("secret-write");
-        let made = resolve_shared_secret(&dir, "a", "", 0).unwrap();
-        assert_eq!(made.len(), 64);
-        assert!(made.bytes().all(|b| b.is_ascii_hexdigit()));
-        assert_eq!(fs::read_to_string(dir.join("a")).unwrap(), made);
-        let mode = fs::metadata(dir.join("a")).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o640);
-        assert_eq!(resolve_shared_secret(&dir, "a", "", 0), Ok(made.clone()));
-        assert_eq!(resolve_shared_secret(&dir, "a", &made, 0), Ok(made));
-        assert_eq!(
-            resolve_shared_secret(&dir, "a", "mine", 0),
-            Ok("mine".to_string())
-        );
-        assert_eq!(fs::read_to_string(dir.join("a")).unwrap(), "mine");
-        assert_eq!(
-            resolve_shared_secret(&dir, "b", "given", 0),
-            Ok("given".to_string())
-        );
-        assert_eq!(fs::read_to_string(dir.join("b")).unwrap(), "given");
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    // What: a failed secret write keeps a configured value.
-    // Why: only a disagreeing file makes it unsafe to use.
-    // From: PR #1775
-    #[test]
-    fn failed_secret_writes_keep_or_refuse() {
-        let dir = unique_temp_dir("secret-fail");
-        fs::write(dir.join("not-a-dir"), "x").unwrap();
-        let gone = dir.join("not-a-dir");
-        assert_eq!(
-            resolve_shared_secret(&gone, "a", "cfg", 0),
-            Ok("cfg".to_string())
-        );
-        assert!(resolve_shared_secret(&gone, "a", "", 0).is_err());
-        fs::create_dir(dir.join("blocked")).unwrap();
-        assert!(resolve_shared_secret(&dir, "blocked", "cfg", 0).is_err());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // What: the cookie signature equals a known vector.
