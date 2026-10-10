@@ -2828,29 +2828,33 @@ STUB
         && [[ "${output}" == *"render refused"* ]] || { echo "url failure: rc ${status}: ${output}"; return 1; }
 }
 
+# What: every repo input compose mounts or reads is listed
+# Why: update rollback restores exactly those (AG-OP-010)
+# From: Issue #1683 | PR #1858
 @test "deploy_prod_repo_input_paths snapshots repo-root runtime inputs for deploy/prod" {
-    # What: lists each repo input compose mounts or reads
-    # Why: rollback restores the config that existed before
-    # From: Issue #1683 | PR #1858
-    local root dp paths json inputs i p ok
+    local root dp paths json inputs i p ok other
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
+    _load_setup_sh "${root}" || return 1
     dp="${root}/deploy/prod"
-    paths="$(deploy_prod_repo_input_paths "${dp}")"
+    paths="$(deploy_prod_repo_input_paths "${dp}")" || { echo "owner rc $?"; return 1; }
     json="$(NATS_BIND_IP="$(get_env_var IP_STANDARD "${dp}/.env")" docker compose --env-file "${dp}/.env" \
-        -f "${dp}/docker-compose.yml" -f "${dp}/docker-compose.nats-secondary.yml" config --format json)"
+        -f "${dp}/docker-compose.yml" -f "${dp}/docker-compose.nats-secondary.yml" config --format json)" \
+        || { echo "compose config failed"; return 1; }
     inputs="$(jq -r --arg r "${root}/" '[.services[] | ((.volumes // [])[] | select(.type == "bind") | .source),
         ((.env_file // [])[] | if type == "object" then .path else . end)] | unique[] | select(startswith($r))' <<< "${json}")"
     [ -n "${inputs}" ] && [ -n "${paths}" ] || { echo "inputs: ${inputs} | paths: ${paths}"; return 1; }
     while IFS= read -r i; do
-        [ -e "${i}" ] || continue
+        [ -e "${i}" ] || { echo "compose input ${i} is missing in the checkout"; return 1; }
         ok=0
         while IFS= read -r p; do [ "${i}" != "${p}" ] && [[ "${i}" != "${p}/"* ]] || ok=1; done <<< "${paths}"
         [ "${ok}" -eq 1 ] || { echo "compose input ${i} not in the backup list"; return 1; }
     done <<< "${inputs}"
     while IFS= read -r p; do [[ "${p}" == "${root}/"* && -e "${p}" ]] || { echo "listed ${p} is no repo path"; return 1; }; done <<< "${paths}"
-    mkdir -p "${BATS_TEST_TMPDIR}/legacy"
-    [ -z "$(deploy_prod_repo_input_paths "${BATS_TEST_TMPDIR}/legacy")" ] || { echo "non-prod install listed inputs"; return 1; }
+    _checkout_copy "${root}" "${BATS_TEST_TMPDIR}/repo" || return 1
+    other="${BATS_TEST_TMPDIR}/repo/deploy/$(_val name)"
+    mkdir -p "${other}" && cp "${dp}"/docker-compose*.y*ml "${other}/" || return 1
+    run deploy_prod_repo_input_paths "${other}"
+    _expect non-prod 0 "=" || return 1
 }
 
 # =========================================================
