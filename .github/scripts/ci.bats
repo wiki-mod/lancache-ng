@@ -2695,64 +2695,54 @@ STUB
     [ "${status}" -ne 0 ] || { echo "missing answers file accepted"; return 1; }
 }
 
+# What: the real wizard installs a checkout copy
+# Why: values come from the template and the host only
+# From: Issue #1683 | PR #1858
 @test "setup fresh install writes a config the prod compose takes" {
     _registry || return 1
     _stand_ins || return 1
-    # What: the real wizard installs a checkout copy
-    # Why: no other test runs the .env.local write
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" repo env tpl cfg port std dev pfx keys k v n ddir np i calls after
-    # What: refuses to run on a host with a live systemd
-    # Why: install would write units outside the test dir
-    # From: Issue #1683 | PR #1858
+    local root t="${BATS_TEST_TMPDIR}" repo env tpl cfg port std other dev pfx keys k v n ddir np i calls after fault
     [ ! -d /run/systemd/system ] || { echo "systemd host: a real install would write /etc units"; return 1; }
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
+    _load_setup_sh "${root}" || return 1
     repo="${t}/repo" env="${t}/repo/deploy/prod/.env.local" tpl="${t}/repo/deploy/prod/.env"
     _checkout_copy "${root}" "${repo}" || { echo "checkout copy failed"; return 1; }
-    # What: the copy shifts ui port and size/age defaults
-    # Why: a literal port or value copy would miss the shift
-    # From: Issue #1683 | PR #1858
-    cfg="$(docker compose --env-file "${tpl}" -f "${repo}/deploy/prod/docker-compose.yml" config --format json)"
-    port="$(jq -r '.services.ui.ports[0].published' <<< "${cfg}")"
-    sed -i "s/}:${port}:/}:$((port + 1)):/" "${repo}/deploy/prod/docker-compose.yml"
-    [ "$(grep -c "}:$((port + 1)):" "${repo}/deploy/prod/docker-compose.yml")" -eq 1 ] || { echo "port ${port} not shifted"; return 1; }
-    keys="$(declare -f set_template_owned_env_defaults)"
-    keys="$(grep -oE '\b[A-Z][A-Z0-9_]{2,}\b' <<< "${keys}" | sort -u)"
+    cfg="$(docker compose --env-file "${tpl}" -f "${repo}/deploy/prod/docker-compose.yml" config --format json)" \
+        && port="$(jq -r '.services.ui.ports[0].published' <<< "${cfg}")" || { echo "prod compose config: ${cfg}"; return 1; }
+    sed -i "s/}:${port}:/}:$((port + 1)):/" "${repo}/deploy/prod/docker-compose.yml" \
+        && [ "$(grep -c "}:$((port + 1)):" "${repo}/deploy/prod/docker-compose.yml")" -eq 1 ] \
+        || { echo "port ${port} not shifted"; return 1; }
+    : > "${t}/owned.env" && set_template_owned_env_defaults "${t}/owned.env" \
+        && keys="$(awk -F= '/^[A-Z]/ { print $1 }' "${t}/owned.env")" && [ -n "${keys}" ] \
+        || { echo "no template-owned keys: $(cat "${t}/owned.env")"; return 1; }
     n=0
     for k in ${keys}; do
         v="$(get_env_var "${k}" "${tpl}")"
         [[ "${v}" =~ ^([0-9]+)([a-z])$ ]] || continue
-        set_env_key "${k}" "$((BASH_REMATCH[1] + 1))${BASH_REMATCH[2]}" "${tpl}"
+        set_env_key "${k}" "$((BASH_REMATCH[1] + 1))${BASH_REMATCH[2]}" "${tpl}" || return 1
         n=$((n + 1))
     done
     [ "${n}" -gt 0 ] || { echo "no template default shifted: ${keys}"; return 1; }
-    std="$(get_env_var IP_STANDARD "${tpl}")" dev="lan${BATS_TEST_NUMBER}" pfx=$(( BATS_TEST_NUMBER % 8 + 16 ))
+    std="10.$(_val int 0 127).$(_val int 0 255).$(_val int 1 254)" dev="$(_val name)" pfx="$(_val int 16 30)"
+    other="10.$(_val int 128 255).$(_val int 0 255).$(_val int 1 254)"
+    [ "${std}" != "$(get_env_var IP_STANDARD "${tpl}")" ] || { echo "host address equals the template's"; return 1; }
+    ID_REAL="$(type -P id)" || return 1
     export IPDS="${t}/ipds" REPO="${repo}" ENVL="${env}" ID_REAL
-    ID_REAL="$(type -P id)"
-    mkdir -p "${IPDS}" && _ip_stub "${BIN}"
-    printf '%s\n' "127.0.0.1 8 lo" "${std} ${pfx} ${dev}" > "${IPDS}/addrs"
-    printf '%s %s\n' "${std}" "${dev}" > "${IPDS}/src"
-    # What: id -u reports root; the rest is the real host
-    # Why: setup.sh requires root; the test box may not be
-    # From: Issue #1683 | PR #1858
-    _tool_stub "${BIN}" id <<<'[ "$*" != -u ] || { echo 0; exit 0; }; exec "${ID_REAL:?}" "$@"'
-    LANCACHE_IMAGE_TAG="v$(tr -d '[:space:]' < "${root}/VERSION")"
+    mkdir -p "${IPDS}" && _ip_stub "${BIN}" \
+        && printf '%s\n' "127.$(_val int 0 255).$(_val int 0 255).$(_val int 1 254) 8 lo" "${other} ${pfx} ${dev}" \
+        "${std} ${pfx} ${dev}" > "${IPDS}/addrs" && printf '%s %s\n' "${std}" "${dev}" > "${IPDS}/src" || return 1
+    _tool_stub "${BIN}" id <<<'[ "$*" != -u ] || { echo 0; exit 0; }; exec "${ID_REAL:?}" "$@"' || return 1
+    LANCACHE_IMAGE_TAG="$(_release_tag)" || return 1
     export LANCACHE_IMAGE_CHANNEL=pinned LANCACHE_IMAGE_TAG
-    # What: one answer per wizard prompt, all defaults
-    # Why: only the state dir moves under the test dir
-    # From: Issue #1683 | PR #1858
     run timeout -k 5 120 bash "${repo}/setup.sh" list-prompts
     [ "${status}" -eq 0 ] || { echo "prompts: ${output}"; return 1; }
-    ddir="$(awk -F'\t' -v d="$(production_state_root_default "${repo}/deploy/prod")" '$1 == "PROMPT" { n++; if ($3 == d) { print n; exit } }' <<< "${output}")"
+    ddir="$(awk -F'\t' -v d="$(production_state_root_default "${repo}/deploy/prod")" \
+        '$1 == "PROMPT" { n++; if ($3 == d) { print n; exit } }' <<< "${output}")"
     np="$(grep -cP '^PROMPT\t' <<< "${output}")"
     [ -n "${ddir}" ] && [ "${np}" -gt 0 ] || { echo "no state dir prompt: ${output}"; return 1; }
     for ((i = 1; i <= np; i++)); do
         if [ "${i}" -eq "${ddir}" ]; then printf '%s\n' "${t}/state"; else printf '\n'; fi
-    done > "${t}/answers"
-    # What: no command prints the help and writes nothing
-    # Why: only the explicit install command installs
-    # From: Issue #1683 | PR #1858
+    done > "${t}/answers" || return 1
     calls=0
     [ ! -e "${DS}/docker.log" ] || calls="$(wc -l < "${DS}/docker.log")"
     run timeout -k 5 60 bash "${repo}/setup.sh"
@@ -2760,14 +2750,11 @@ STUB
     [ ! -e "${DS}/docker.log" ] || after="$(wc -l < "${DS}/docker.log")"
     [ "${status}" -eq 0 ] && [[ "${output}" == *"Usage:"* ]] && [ ! -e "${env}" ] && [ "${after}" -eq "${calls}" ] \
         || { echo "no command: rc ${status} docker calls ${calls}->${after}: ${output}"; return 1; }
-    run timeout -k 5 300 script -qec "bash ${repo}/setup.sh install" /dev/null < "${t}/answers"
+    run timeout -k 5 300 script -qec "bash ${repo}/setup.sh install" "${t}/typescript" < "${t}/answers"
     [ "${status}" -eq 0 ] && [[ "${output}" == *"Stack started"* ]] || { echo "install: rc ${status}: ${output}"; return 1; }
     [[ "${output}" == *"http://${std}:$((port + 1))"* ]] || { echo "ui url: ${output}"; return 1; }
-    [ "$(awk -v e="compose --env-file ${env} " 'index($0, e) == 1 && ($NF == "pull" || / up -d$/) { n++ } END { print n + 0 }' "${DS}/docker.log")" -eq 2 ] \
-        || { echo "pull/up: $(cat "${DS}/docker.log")"; return 1; }
-    # What: prod compose renders with the written config
-    # Why: compose fails closed on a missing required key
-    # From: Issue #1683 | PR #1858
+    [ "$(awk -v e="compose --env-file ${env} " 'index($0, e) == 1 && ($NF == "pull" || / up -d$/) { n++ } END { print n + 0 }' \
+        "${DS}/docker.log")" -eq 2 ] || { echo "pull/up: $(cat "${DS}/docker.log")"; return 1; }
     _setup_sh_run 'stack_compose "${REPO}/deploy/prod" "${ENVL}" config --quiet'
     [ "${status}" -eq 0 ] || { echo "compose config: ${output}"; return 1; }
     for k in ${keys}; do
@@ -2775,16 +2762,13 @@ STUB
     done
     [ "$(get_env_var IP_STANDARD "${env}")" = "${std}" ] && [ "$(get_env_var LOGGING_ENABLED "${env}")" = 1 ] \
         && [[ ",$(get_env_var COMPOSE_PROFILES "${env}")," == *,logging,* ]] || { echo "values: $(cat "${env}")"; return 1; }
-    # What: a failed URL render warns; the install ends 0
-    # Why: a print after the start must never abort setup
-    # From: Issue #1683 | PR #1858
-    _checkout_copy "${root}" "${t}/repo2" || { echo "second copy failed"; return 1; }
-    rm -f "${DS}/running"
-    : > "${DS}/fail-config-after-up"
-    FAULT="render refused" run timeout -k 5 300 script -qec "bash ${t}/repo2/setup.sh install" /dev/null < "${t}/answers"
-    rm -f "${DS}/fail-config-after-up"
+    _checkout_copy "${root}" "${t}/repo2" && rm -f "${DS}/running" && : > "${DS}/fail-config-after-up" \
+        || { echo "second copy failed"; return 1; }
+    fault="$(_val name)"
+    FAULT="${fault}" run timeout -k 5 300 script -qec "bash ${t}/repo2/setup.sh install" "${t}/typescript2" < "${t}/answers"
+    rm -f "${DS}/fail-config-after-up" || return 1
     [ "${status}" -eq 0 ] && [[ "${output}" == *"Stack started"* && "${output}" == *"Cannot derive the Admin-UI URL"* ]] \
-        && [[ "${output}" == *"render refused"* ]] || { echo "url failure: rc ${status}: ${output}"; return 1; }
+        && [[ "${output}" == *"${fault}"* ]] || { echo "url failure: rc ${status}: ${output}"; return 1; }
 }
 
 # What: every repo input compose mounts or reads is listed
