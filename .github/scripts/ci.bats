@@ -4354,49 +4354,54 @@ CASES
         && grep -qxF -- "$(tail -n 1 "${t}/src.env")" "${t}/dst.env" || { echo "env: $(paste -sd'#' "${t}/dst.env")"; return 1; }
 }
 
+# What: debug only reads; converge folds UI settings once
+# Why: support commands must not change an install
+# From: Issue #1683 | PR #1858
 @test "setup debug stays read-only and converge folds UI settings once" {
     _stand_ins || return 1
-    # What: debug only reads; converge folds once, stable
-    # Why: support commands must not change an install
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" body vsuffix sfile vols channel mode size gb unit profiles kv p known
+    local root t="${BATS_TEST_TMPDIR}" cfg project v reads vsuffix sfile channel mode size gb unit profiles kv p known
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    _tool_stub "${t}/bin" curl <<<'exit 7'
-    export DS="${t}/ds" BIN="${t}/bin" T="${t}" I="${t}/repo/deploy/prod"
-    _prod_install "${I}"
-    mkdir -p "${DS}/volumes" "$(get_env_var LANCACHE_STATE_DIR "${I}/.env")"
-    cp "${I}/.env" "${t}/env.before"
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; cmd_debug "${I}"; cmd_debug "${I}"'
+    _load_setup_sh "${root}" || return 1
+    _tool_stub "${BIN}" curl <<<'exit 7' || return 1
+    export T="${t}" I="${t}/repo/deploy/prod"
+    _prod_install "${I}" && mkdir -p "$(get_env_var LANCACHE_STATE_DIR "${I}/.env")" && cp "${I}/.env" "${t}/env.before" \
+        || return 1
+    _setup_sh_run 'cmd_debug "${I}" && cmd_debug "${I}"'
     [ "${status}" -eq 0 ] && cmp "${t}/env.before" "${I}/.env" || { echo "debug: ${output}"; return 1; }
     ! grep -Eq '^compose .* (up|pull|down|stop|rm|restart|create|start|kill)( |$)' "${DS}/docker.log" \
         && grep -Eq '^compose .* ps( |$)' "${DS}/docker.log" || { echo "debug calls: $(paste -sd'#' "${DS}/docker.log")"; return 1; }
-    body="$(declare -f lancache_read_ui_settings_override)"
-    vsuffix="$(sed -n 's/.*volume="\${project}_\([^"]*\)".*/\1/p' <<< "${body}")"
-    sfile="$(grep -oE '/volume/[A-Za-z0-9._-]+' <<< "${body}" | awk 'NR == 1 { sub(/^\/volume\//, ""); print }')"
-    vols="$(_prod_compose config --volumes)"
-    grep -qx -- "${vsuffix}" <<< "${vols}" && [ -n "${sfile}" ] || { echo "ui volume ${vsuffix}/${sfile}"; return 1; }
-    channel="$(_ci_block_entry_field release "" default_channel)"
+    cfg="$(_prod_compose config --format json)" && project="$(jq -r .name <<< "${cfg}")" \
+        && v="$(jq -r '.volumes | keys[]' <<< "${cfg}")" && [ -n "${v}" ] || { echo "prod volumes: ${cfg}"; return 1; }
+    while IFS= read -r p; do mkdir -p "${DS}/volumes/${project}_${p}" || return 1; done <<< "${v}"
+    : > "${DS}/docker.log" || return 1
+    _setup_sh_run 'cmd_converge_reconcile "${I}"'
+    reads="$(grep -E '^run .* -v [^ ]+:/volume:ro ' "${DS}/docker.log")"
+    [ "${status}" -eq 0 ] && [ -n "${reads}" ] || { echo "settings read: ${output} $(paste -sd'#' "${DS}/docker.log")"; return 1; }
+    vsuffix="$(sed -n 's/.* -v \([^ :]*\):\/volume:ro .*/\1/p' <<< "${reads}" | sort -u)"
+    sfile="$(grep -oE 'cat /volume/[A-Za-z0-9._-]+' <<< "${reads}" | sed 's/^cat \/volume\///' | sort -u)"
+    [ "$(wc -l <<< "${vsuffix}")" -eq 1 ] && [ "$(wc -l <<< "${sfile}")" -eq 1 ] && [ -n "${sfile}" ] \
+        && grep -qx -- "${vsuffix#"${project}_"}" <<< "${v}" || { echo "ui settings at ${vsuffix}/${sfile}: ${reads}"; return 1; }
+    channel="$(_ci_block_entry_field release "" default_channel)" || return 1
     lancache_ui_channel_override_is_valid "${channel}" || { echo "SOT channel ${channel} not UI-valid"; return 1; }
     mode=""
     while IFS= read -r p; do
         is_valid_dhcp_mode "${p#dhcp-}" && [ "${p#dhcp-}" != "${p}" ] && { mode="${p#dhcp-}"; break; }
     done < <(_prod_compose config --profiles)
-    size="$(get_env_var CACHE_MAX_SIZE "${root}/deploy/prod/.env")"; unit="${size//[0-9]/}"; gb=$(( ${size%"${unit}"} * 2 ))
+    size="$(get_env_var CACHE_MAX_SIZE "${root}/deploy/prod/.env")" && unit="${size//[0-9]/}" || return 1
+    gb=$(( ${size%"${unit}"} * 2 ))
     [ -n "${mode}" ] && lancache_ui_cache_max_gb_override_is_valid "${gb}" || { echo "no UI inputs: ${mode} ${gb}"; return 1; }
-    vsuffix="$(_prod_compose config --format json | jq -r .name)_${vsuffix}"
-    mkdir -p "${DS}/volumes/${vsuffix}"
-    printf '%s\n' "LANCACHE_IMAGE_CHANNEL=${channel}" AUTO_UPDATE_ENABLED=1 "DHCP_MODE=${mode}" LOGGING_ENABLED=1 "CACHE_MAX_GB=${gb}" \
-        > "${DS}/volumes/${vsuffix}/${sfile}"
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; cmd_converge_reconcile "${I}"; cp "${I}/.env" "${T}/env.first"; cmd_converge_reconcile "${I}"'
+    printf '%s\n' "LANCACHE_IMAGE_CHANNEL=${channel}" AUTO_UPDATE_ENABLED=1 "DHCP_MODE=${mode}" LOGGING_ENABLED=1 \
+        "CACHE_MAX_GB=${gb}" > "${DS}/volumes/${vsuffix}/${sfile}" || return 1
+    _setup_sh_run 'cmd_converge_reconcile "${I}" && cp "${I}/.env" "${T}/env.first" && cmd_converge_reconcile "${I}"'
     [ "${status}" -eq 0 ] && cmp "${t}/env.first" "${I}/.env" || { echo "converge: ${output}"; return 1; }
     while IFS= read -r kv; do
         grep -qxF -- "${kv}" "${I}/.env" || { echo "missing ${kv}: $(paste -sd'#' "${I}/.env")"; return 1; }
     done < "${DS}/volumes/${vsuffix}/${sfile}"
     [ "$(get_env_var CACHE_MAX_SIZE "${I}/.env")" = "${gb}${unit}" ] || { echo "cache size not derived from ${gb}"; return 1; }
-    profiles="$(compose_profiles_for_runtime "" "${mode}" "$(get_env_var NTP_ENABLED "${I}/.env")" 1)"
-    [ "$(get_env_var COMPOSE_PROFILES "${I}/.env")" = "${profiles}" ] || { echo "profiles: $(get_env_var COMPOSE_PROFILES "${I}/.env")"; return 1; }
-    known="$(_prod_compose config --profiles)"
+    profiles="$(compose_profiles_for_runtime "" "${mode}" "$(get_env_var NTP_ENABLED "${I}/.env")" 1)" || return 1
+    [ "$(get_env_var COMPOSE_PROFILES "${I}/.env")" = "${profiles}" ] \
+        || { echo "profiles: $(get_env_var COMPOSE_PROFILES "${I}/.env")"; return 1; }
+    known="$(_prod_compose config --profiles)" || return 1
     while IFS= read -r p; do
         grep -qx -- "${p}" <<< "${known}" || { echo "profile ${p} unknown to prod"; return 1; }
     done < <(tr ',' '\n' <<< "${profiles}" | awk 'NF')
