@@ -60,6 +60,34 @@ image_base:
 # Why: One list; matrices/scans/release derive from it.
 # From: Issue #1683
 services:
+  # What: one image for watchdog, syslog, NTP and netdata.
+  # Why: five-container decision; watchdog owns the image.
+  # From: Issue #1683
+  services:
+    context: services/watchdog
+    labels: [services, watchdog, syslog, ntp, netdata]
+    build_type: rust
+    # What: workspace crates (cargo -p) built for this image.
+    # Why: supervisor and cachehamster run in one container.
+    # From: Issue #1683
+    crates: [lancache-watchdog, lancache-cachehamster]
+    final_base: alpine
+    # What: final-image apk packages; the SOT owns the list.
+    # Why: consumers derive; no hardcoding (AG-CI-006)
+    # From: Issue #1683
+    packages:
+      - syslog-ng
+      - chrony-nts
+      - netdata
+      - netdata-go-plugins
+      - tzdata
+    # What: execute-smoke checks run post-build by ci.sh.
+    # Why: prove apk binaries run, not just exist
+    # From: Issue #1613
+    smoke:
+      - syslog-ng --version
+      - chronyd -v
+      - netdata -v
   proxy:
     context: services/proxy
     labels: [proxy, nginx]
@@ -94,18 +122,18 @@ services:
       - 'v="$(nginx -V 2>&1)" && grep -q -- --with-stream_ssl_preread_module <<< "${v}"'
   dns:
     context: services/dns
-    labels: [dns, pdns]
+    labels: [dns, pdns, nats]
     # What: named contexts for shared-secret and known-good
-    # Why: entrypoint sources scripts/lib, not embedded.
+    # Why: dns sources scripts/lib, not embedded.
     # From: Issue #858
     external_contexts:
       - shared-secret=scripts/lib
       - known-good=scripts/lib
     build_type: rust
-    # What: the workspace crate (cargo -p) of this service.
-    # Why: rust checks target crate not build context
-    # From: Issue #1683 | PR #1858
-    crate: nats-subscriber
+    # What: workspace crates (cargo -p) built for this image.
+    # Why: subscriber and supervisor run in one container.
+    # From: Issue #1683
+    crates: [nats-subscriber, lancache-watchdog]
     final_base: alpine
     # What: final-image apk packages; the SOT owns the list.
     # Why: consumers derive; no hardcoding (AG-CI-006)
@@ -114,27 +142,29 @@ services:
       - pdns
       - pdns-backend-sqlite3
       - pdns-recursor-luajit
+      - nats-server
       - bind-tools
       - sqlite
       - iproute2
-  watchdog:
-    context: services/watchdog
-    labels: [watchdog]
-    build_type: rust
-    # What: the workspace crate (cargo -p) of this service.
-    # Why: rust checks target crate not build context
-    # From: Issue #1683 | PR #1858
-    crate: lancache-watchdog
-    final_base: alpine
+    # What: execute-smoke checks run post-build by ci.sh.
+    # Why: prove apk binaries run, not just exist
+    # From: Issue #1613
+    smoke:
+      - nats-server --version
   dhcp:
     context: services/dhcp
-    labels: [dhcp, kea]
-    # What: named context for the shared-secret lib.
-    # Why: entrypoint sources scripts/lib, not embedded.
+    labels: [dhcp, kea, dnsmasq]
+    # What: named contexts for shared-secret and known-good
+    # Why: dhcp sources scripts/lib, not embedded.
     # From: Issue #858
     external_contexts:
       - shared-secret=scripts/lib
-    build_type: apk
+      - known-good=scripts/lib
+    build_type: rust
+    # What: workspace crates (cargo -p) built for this image.
+    # Why: the supervisor switches Kea and dnsmasq modes.
+    # From: Issue #1683
+    crates: [lancache-watchdog]
     final_base: alpine
     # What: final-image apk packages; the SOT owns the list.
     # Why: consumers derive; no hardcoding (AG-CI-006)
@@ -145,7 +175,7 @@ services:
       - kea-dhcp-ddns
       - kea-admin
       - kea-hook-lease-cmds
-      - nmap
+      - dnsmasq
       - openssl
       - iptables
     # What: execute-smoke checks run post-build by ci.sh.
@@ -153,81 +183,15 @@ services:
     # From: Issue #1613
     smoke:
       - kea-dhcp4 -v
-  dhcp-proxy:
-    context: services/dhcp-proxy
-    labels: [dhcp-proxy, dnsmasq]
-    # What: named context for the known-good lib.
-    # Why: entrypoint sources scripts/lib, not embedded.
-    # From: Issue #1683
-    external_contexts:
-      - known-good=scripts/lib
-    build_type: apk
-    final_base: alpine
-    # What: final-image apk packages; the SOT owns the list.
-    # Why: consumers derive; no hardcoding (AG-CI-006)
-    # From: Issue #1683
-    packages:
-      - dnsmasq
-    # What: execute-smoke checks run post-build by ci.sh.
-    # Why: prove apk binaries run, not just exist
-    # From: Issue #1613
-    smoke:
       - dnsmasq --version
-  ntp:
-    context: services/ntp
-    labels: [ntp]
-    build_type: apk
-    final_base: alpine
-    # What: final-image apk packages; the SOT owns the list.
-    # Why: consumers derive; no hardcoding (AG-CI-006)
-    # From: Issue #1683
-    packages:
-      - chrony-nts
-    # What: execute-smoke checks run post-build by ci.sh.
-    # Why: prove apk binaries run, not just exist
-    # From: Issue #1613
-    smoke:
-      - chronyd -v
-  syslog:
-    context: services/syslog
-    labels: [syslog]
-    # What: apk syslog-ng plus copied fluent-bit binary.
-    # Why: No compile, prebuilt binary -> light runner.
-    # From: Issue #1683
-    build_type: apk
-    external_image: fluent_bit
-    final_base: alpine
-    # What: final-image apk packages; the SOT owns the list.
-    # Why: consumers derive; no hardcoding (AG-CI-006)
-    # From: Issue #1683
-    packages:
-      - syslog-ng
-      - syslog-ng-json
-      - tzdata
-    # What: execute-smoke checks run post-build by ci.sh.
-    # Why: prove apk binaries run, not just exist
-    # From: Issue #1613
-    smoke:
-      - syslog-ng --version
   ui:
     context: services/ui
     labels: [admin-ui]
     build_type: rust
-    # What: the workspace crate (cargo -p) of this service.
-    # Why: rust checks target crate not build context
+    # What: workspace crates (cargo -p) built for this image.
+    # Why: rust checks target crates, not the build context
     # From: Issue #1683 | PR #1858
-    crate: lancache-ui
-    final_base: alpine
-  cachehamster:
-    context: services/cachehamster
-    # What: Rust compile via BUILD_TOOLS_IMAGE stage.
-    # Why: Real compile step -> heavy runner per AG-CI-002.
-    # From: Issue #1683
-    build_type: rust
-    # What: the workspace crate (cargo -p) of this service.
-    # Why: rust checks target crate not build context
-    # From: Issue #1683 | PR #1858
-    crate: lancache-cachehamster
+    crates: [lancache-ui]
     final_base: alpine
 
 # What: The toolchain image that builds the product stack.
@@ -386,48 +350,11 @@ build_toolchain:
       - trivy --version
       - java -version
 
-# What: Runtime services not built by this project.
-# Why: Explicit out-of-build entry, no silent omission.
-# From: Issue #1683
-external_services:
-  nats:
-    image: "nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0"
-    role: runtime
-  docker-socket-proxy:
-    image: "tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476"
-    role: runtime
-    # What: Docker API calls of ui and watchdog per service
-    # Why: haproxy denies every call not granted here
-    # From: Issue #1683 | PR #1858
-    inspect: [proxy, dns-standard, dns-ssl, nats, netdata, ui, dhcp, dhcp-proxy, ntp, syslog]
-    restart: [proxy, dns-standard, dns-ssl, nats, netdata, ui]
-    start: [dhcp, dhcp-proxy, ntp, dhcp-probe]
-    stop: [dhcp, dhcp-proxy, ntp, dhcp-probe]
-    wait: [dhcp-probe]
-    logs: [dhcp-probe]
-    endpoints: [_ping]
-    # What: haproxy timeouts for the Docker API frontend
-    # Why: client/server outlast the ui's 120 s call limit
-    # From: Issue #1683 | PR #1858
-    timeouts:
-      - "http-request 10s"
-      - "connect 10s"
-      - "client 10m"
-      - "server 10m"
-  # What: upstream netdata, deliberately on its mutable tag.
-  # Why: maintainer decision; no first-party netdata build.
-  # From: Issue #1683 | PR #1858
-  netdata:
-    image: "netdata/netdata:latest"
-    role: runtime
-    policy: tag-latest
-
 # What: Pinned external base images by full digest.
 # Why: Single owner of the alpine pin, no per-file copies.
 # From: Issue #1683
 base_images:
   alpine: "mirror.gcr.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6"
-  fluent_bit: "cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562"
   # What: the registry ci.bats runs on the test daemon.
   # Why: image lookups hit a real registry, no stub.
   # From: Issue #1683 | PR #1858
@@ -551,23 +478,15 @@ build_runtime:
 # Why: plan picks candidates, identity decides the build.
 # From: Issue #1683
 dependency_graph:
+  services:
+    contexts: []
   proxy:
     contexts: [known-good, dns-domains]
   dns:
     contexts: [shared-secret, known-good]
-  watchdog:
-    contexts: []
-  ui:
-    contexts: []
   dhcp:
-    contexts: [shared-secret]
-  dhcp-proxy:
-    contexts: [known-good]
-  ntp:
-    contexts: []
-  syslog:
-    contexts: []
-  cachehamster:
+    contexts: [shared-secret, known-good]
+  ui:
     contexts: []
 
 # What: CodeQL query suites and ignored paths.
@@ -901,10 +820,6 @@ validation:
   # Why: AG-CI-001: verified fail-closed, never assumed.
   # From: Issue #1683
   host_tools: [bash, docker, jq, curl, dig, git, awk, sed, find, flock, openssl, getent]
-  # What: compose services exempt from the healthcheck rule.
-  # Why: some services genuinely have none of their own.
-  # From: Issue #1683 | PR #1858
-  healthcheck_exempt: [dhcp-probe, syslog-logs-permissions, watchdog-prepare, retention, cachehamster]
   # What: CDN domains that resolve from validation hosts.
   # Why: Real dig targets; some Steam domains fail.
   # From: Issue #1683 | PR #1858
