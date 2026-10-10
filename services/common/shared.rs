@@ -948,6 +948,99 @@ impl DockerApi {
     }
 }
 
+// What: one label and value row of an offer or ACK.
+// Why: servers differ in fields; the page lists what exists
+#[derive(Clone, Deserialize, Serialize)]
+pub struct Detail {
+    pub label: String,
+    pub value: String,
+}
+
+// What: result of the rogue DHCP server check.
+// Why: the status tag is the shape the page script reads.
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ConflictCheck {
+    Found {
+        output: String,
+        details: Vec<Detail>,
+    },
+    NotFound,
+    Unavailable {
+        reason: String,
+    },
+}
+
+// What: result of the client dry run.
+// Why: a failed run has no lease data, so no details.
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ClientCheck {
+    Passed {
+        output: String,
+        details: Vec<Detail>,
+    },
+    Failed {
+        output: String,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+// What: both checks of one probe run.
+// Why: the probe prints it as JSON, the ui reads it back.
+#[derive(Deserialize, Serialize)]
+pub struct ProbeReport {
+    pub conflict: ConflictCheck,
+    pub client: ClientCheck,
+}
+
+impl ProbeReport {
+    // What: a report where neither check could run.
+    // Why: both checks share the reason they did not run.
+    pub fn unavailable(reason: String) -> Self {
+        Self {
+            conflict: ConflictCheck::Unavailable {
+                reason: reason.clone(),
+            },
+            client: ClientCheck::Unavailable { reason },
+        }
+    }
+
+    // What: one status word for the whole report.
+    // Why: severity order; a found server beats everything.
+    pub fn overall(&self) -> &'static str {
+        match (&self.conflict, &self.client) {
+            (ConflictCheck::Found { .. }, _) => "conflict_found",
+            (ConflictCheck::Unavailable { .. }, _) | (_, ClientCheck::Unavailable { .. }) => {
+                "unavailable"
+            }
+            (_, ClientCheck::Failed { .. }) => "client_failed",
+            (_, ClientCheck::Passed { .. }) => "verified",
+        }
+    }
+
+    // What: the page's JSON: one status plus both checks.
+    // Why: the dhcp page script reads exactly this shape.
+    pub fn page(&self) -> Value {
+        serde_json::json!({
+            "status": self.overall(),
+            "conflict": self.conflict,
+            "client": self.client,
+        })
+    }
+}
+
+// What: one probe answer, keyed by the request it answers.
+// Why: the ui waits for its own id, never an older run.
+// From: Issue #947 | Issue #1683
+#[derive(Deserialize, Serialize)]
+pub struct ProbeAnswer {
+    pub id: String,
+    pub page: Value,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1547,5 +1640,45 @@ mod tests {
         assert!(first.contains("x-api-key: k3y"));
         assert!(first.ends_with(r#"{"a":1}"#));
         assert!(!seen[1].to_lowercase().contains("content-type"));
+    }
+
+    // What: the probe report has one overall word.
+    // Why: severity order; a found server beats everything.
+    #[test]
+    fn probe_reports_rank_their_checks() {
+        let found = || ConflictCheck::Found {
+            output: "10.0.0.1".into(),
+            details: vec![],
+        };
+        let passed = || ClientCheck::Passed {
+            output: String::new(),
+            details: vec![],
+        };
+        let failed = || ClientCheck::Failed {
+            output: String::new(),
+        };
+        let gone = || ClientCheck::Unavailable {
+            reason: String::new(),
+        };
+        let no_conflict = || ConflictCheck::Unavailable {
+            reason: String::new(),
+        };
+        let overall = |conflict, client| ProbeReport { conflict, client }.overall();
+        assert_eq!(overall(found(), gone()), "conflict_found");
+        assert_eq!(overall(found(), passed()), "conflict_found");
+        assert_eq!(overall(no_conflict(), passed()), "unavailable");
+        assert_eq!(overall(ConflictCheck::NotFound, gone()), "unavailable");
+        assert_eq!(overall(ConflictCheck::NotFound, failed()), "client_failed");
+        assert_eq!(overall(ConflictCheck::NotFound, passed()), "verified");
+        let report = ProbeReport::unavailable("why".to_string());
+        assert_eq!(
+            serde_json::to_value(&report).unwrap(),
+            serde_json::json!({
+            "conflict": {"status": "unavailable", "reason": "why"},
+            "client": {"status": "unavailable", "reason": "why"}})
+        );
+        assert_eq!(report.overall(), "unavailable");
+        assert_eq!(report.page()["status"], "unavailable");
+        assert_eq!(report.page()["client"]["reason"], "why");
     }
 }

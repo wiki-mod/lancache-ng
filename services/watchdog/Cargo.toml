@@ -21,6 +21,7 @@ path = "src/main.rs"
 [dependencies]
 LanCache-NG = { path = "../common" }
 base64 = { workspace = true }
+dhcproto = { workspace = true }
 liblzma = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }

@@ -2156,7 +2156,7 @@ set_template_owned_env_defaults() {
         SYSLOG_PRUNE_RETRY_COOLDOWN DHCP_DOMAIN DHCP_LEASE_TIME DHCP_DDNS_ENABLED LOG_QUERIES \
         ROOT_ZONE_MIRROR PDNS_SOA_REFRESH PDNS_SOA_RETRY PDNS_SOA_RESYNC_INTERVAL NTP_UPSTREAM_SERVERS \
         CHECK_INTERVAL RESTART_AFTER DISK_WARN_PCT DISK_ALARM_PCT DOCKER_API_TIMEOUT \
-        DOCKER_RESTART_TIMEOUT CACHE_VALID_DAYS CACHEHAMSTER_CONCURRENCY
+        DOCKER_RESTART_TIMEOUT CACHE_VALID_DAYS CACHEHAMSTER_CONCURRENCY KEA_CTRL_USER KEA_CTRL_PORT
     append_env_defaults_if_missing "$1" PROXY_ALLOWED_CLIENT_CIDRS NTP_ALLOWED_CLIENT_CIDRS \
         DHCP_NTP_SERVERS CACHEHAMSTER_CREDENTIAL_PERSISTENCE CACHEHAMSTER_STEAM_CREDENTIAL \
         CACHEHAMSTER_URLS
@@ -5506,7 +5506,7 @@ compose_config_value() {
 # Why: Kea answers per service; result 0 means success
 # From: Issue #1683 | PR #1858
 kea_ctrl_post() {
-    local kea_ctrl_url="$1" kea_ctrl_token="$2" body="$3"
+    local kea_ctrl_url="$1" kea_ctrl_user="$2" kea_ctrl_token="$3" body="$4"
     local out http_status response result_code result_text
 
     # What: passes the Basic-Auth token to curl via -K stdin
@@ -5514,7 +5514,7 @@ kea_ctrl_post() {
     # From: Issue #1304 | PR #1550
     local kea_ctrl_token_escaped
     kea_ctrl_token_escaped=$(printf '%s' "$kea_ctrl_token" | sed 's/\\/\\\\/g; s/"/\\"/g')
-    if ! out=$(printf 'user = "admin:%s"\n' "$kea_ctrl_token_escaped" | curl -sS -w '\n%{http_code}' -X POST \
+    if ! out=$(printf 'user = "%s:%s"\n' "$kea_ctrl_user" "$kea_ctrl_token_escaped" | curl -sS -w '\n%{http_code}' -X POST \
         -H "Content-Type: application/json" \
         -K - \
         -d "$body" \
@@ -5559,8 +5559,8 @@ kea_snapshot_host_dir() {
 # Why: config-test, config-set and config-write run in order
 reset_kea_to_last_known_good_config() {
     local install_dir="$1" snapshot_id="$2" assume_yes="${3:-0}"
-    local env_file state_dir kea_dir snapshot_root repo_root
-    local kea_ctrl_host kea_ctrl_token kea_ctrl_url kea_ctrl_port
+    local env_file state_dir kea_dir snapshot_root
+    local kea_ctrl_host kea_ctrl_user kea_ctrl_token kea_ctrl_url kea_ctrl_port
     local -a snapshot_ids=()
     local sid config_json
 
@@ -5580,13 +5580,13 @@ reset_kea_to_last_known_good_config() {
     # What: maps a 0.0.0.0 Control Agent host to 127.0.0.1
     # Why: dhcp uses host networking; 0.0.0.0 is no target
     [[ "$kea_ctrl_host" = "0.0.0.0" ]] && kea_ctrl_host="127.0.0.1"
-    # What: Control Agent port from the dhcp conf
-    # Why: kea-ctrl-agent.conf owns it; no second copy
+    # What: Control Agent user and port from the .env
+    # Why: .env owns both; dhcp, ui and this read them
     # From: Issue #1683 | PR #1858
-    repo_root=$(deploy_prod_repo_root "$install_dir") \
-        || die "Cannot resolve the repository root of $install_dir (exit $?)."
-    kea_ctrl_port=$(jq -er '.["Control-agent"]["http-port"]' "$repo_root/services/dhcp/kea-ctrl-agent.conf") \
-        || die "Cannot read the Kea Control Agent port from $repo_root/services/dhcp/kea-ctrl-agent.conf (exit $?)."
+    kea_ctrl_user=$(get_env_var KEA_CTRL_USER "$env_file") || exit $?
+    kea_ctrl_port=$(get_env_var KEA_CTRL_PORT "$env_file") || exit $?
+    [[ -n "$kea_ctrl_user" && "$kea_ctrl_port" =~ ^[0-9]+$ ]] \
+        || die "KEA_CTRL_USER or KEA_CTRL_PORT is missing in $env_file."
     kea_ctrl_url="http://${kea_ctrl_host}:${kea_ctrl_port}/"
 
     state_dir=$(install_state_root "$install_dir" "$env_file") \
@@ -5623,17 +5623,17 @@ reset_kea_to_last_known_good_config() {
     config_json=$(cat "$snapshot_root/$snapshot_id/dhcp4.json")
 
     print_step "Validating snapshot $snapshot_id (config-test)"
-    kea_ctrl_post "$kea_ctrl_url" "$kea_ctrl_token" \
+    kea_ctrl_post "$kea_ctrl_url" "$kea_ctrl_user" "$kea_ctrl_token" \
         "{\"command\":\"config-test\",\"service\":[\"dhcp4\"],\"arguments\":${config_json}}" >/dev/null
     print_ok "Snapshot validated."
 
     print_step "Applying snapshot $snapshot_id (config-set)"
-    kea_ctrl_post "$kea_ctrl_url" "$kea_ctrl_token" \
+    kea_ctrl_post "$kea_ctrl_url" "$kea_ctrl_user" "$kea_ctrl_token" \
         "{\"command\":\"config-set\",\"service\":[\"dhcp4\"],\"arguments\":${config_json}}" >/dev/null
     print_ok "Snapshot applied to the running Kea server."
 
     print_step "Persisting snapshot $snapshot_id (config-write)"
-    kea_ctrl_post "$kea_ctrl_url" "$kea_ctrl_token" \
+    kea_ctrl_post "$kea_ctrl_url" "$kea_ctrl_user" "$kea_ctrl_token" \
         '{"command":"config-write","service":["dhcp4"]}' >/dev/null
     print_ok "Snapshot persisted to kea-dhcp4.conf."
 

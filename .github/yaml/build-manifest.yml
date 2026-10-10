@@ -156,17 +156,15 @@ services:
   dhcp:
     context: services/dhcp
     labels: [dhcp, kea, dnsmasq]
-    # What: named contexts for shared-secret and known-good
-    # Why: dhcp sources scripts/lib, not embedded.
-    # From: Issue #858
-    external_contexts:
-      - shared-secret=scripts/lib
-      - known-good=scripts/lib
     build_type: rust
     # What: workspace crates (cargo -p) built for this image.
     # Why: the supervisor switches Kea and dnsmasq modes.
     # From: Issue #1683
     crates: [lancache-watchdog]
+    # What: processes lancache-watchdog supervise runs.
+    # Why: ci.sh bakes them as LANCACHE_PROCESSES; one list.
+    # From: Issue #1683
+    processes: [kea-dhcp4, kea-ctrl-agent, kea-dhcp-ddns, dnsmasq, dhcp-probe]
     final_base: alpine
     # What: final-image apk packages; the SOT owns the list.
     # Why: consumers derive; no hardcoding (AG-CI-006)
@@ -446,8 +444,6 @@ ci_result_gate:
 # Why: A change here rebuilds every consumer, not just self.
 # From: Issue #1683
 named_contexts:
-  shared-secret:
-    path: scripts/lib/shared-secret-bootstrap.sh
   known-good:
     path: scripts/lib/known-good-snapshots.sh
   dns-domains:
@@ -487,7 +483,7 @@ dependency_graph:
   dns:
     contexts: []
   dhcp:
-    contexts: [shared-secret, known-good]
+    contexts: []
   ui:
     contexts: []
 

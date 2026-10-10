@@ -541,36 +541,26 @@ documented contract, in `services/ui/src/main.rs`:
 - `KEA_CONFIG_SNAPSHOT_DIR` is owned by `deploy/prod/.env`
   (`/var/lib/kea/config-snapshots`, inside the Kea data mount) and passed to
   both the `ui` and the `dhcp` service: the Admin UI writes snapshots there,
-  the `dhcp` entrypoint creates it and reads it in rescue mode, and
+  the `dhcp` supervisor reads it when `kea-dhcp4 -t` rejects the live
+  config, and
   `setup.sh reset-to-last-known-good-config kea` maps it to the host path
   through the Kea data mount (a value outside that mount is refused).
   `KEEP_KNOWN_GOOD_CONFIGS` (default 3, same variable name as the shell
   adapters) is read by the Admin UI process.
-- The `dhcp` (Kea) container's `services/dhcp/entrypoint.sh` chowns
-  that directory to the Admin UI's fixed UID/GID (10001) on every
-  start, since that container runs as root and the Admin UI runs as a fixed
-  non-root user — the same pattern already used to keep the shared
-  `nats.conf` writable by the Admin UI after a NATS restart (see
-  `deploy/*/docker-compose.yml`'s `nats` service).
+- The Admin UI owns that directory: at start, as root, it chowns it to
+  its fixed UID/GID before it drops privileges.
 - No shell-drift check covers this adapter: none of it lives in a shell
   entrypoint, so there is no shell copy to drift. Coverage lives in
   `services/ui/src/main.rs`'s and `services/ui/src/main.rs`'s
   own `cargo test` suites instead.
 - **`kea-ctrl-agent.conf` and `kea-dhcp-ddns.conf` are outside this
-  mechanism entirely and are not user-editable.** Unlike `kea-dhcp4.conf`
-  (mutated live by the Admin UI, so `entrypoint.sh` merges narrowly to
-  preserve that state — see `migrate_dhcp4_config()`), these two files have
-  no UI-mutated state to protect, so `entrypoint.sh` fully regenerates each
-  from its template on every start and overwrites the persisted copy
-  whenever the rendered output differs (a full-file `cmp`, not a
-  field-level merge). This is deliberate: it lets a future template change
-  reach already-deployed installs on upgrade, the same reasoning that
-  motivated regenerating `kea-ctrl-agent.conf` on `KEA_CTRL_TOKEN`/
-  `KEA_CTRL_HOST` changes in the first place. The tradeoff is that any
-  manual edit made directly to either persisted file (e.g. added TLS
-  settings or an extra authenticated client in `kea-ctrl-agent.conf`) is
-  silently discarded on the next container start. Do not hand-edit these
-  files (#651).
+  mechanism entirely and are not user-editable.** The `dhcp` supervisor
+  (`services/watchdog/src/main.rs`) renders both into its private run
+  directory on every start from `KEA_CTRL_USER`, `KEA_CTRL_PORT`, the
+  shared `KEA_CTRL_TOKEN` and `DDNS_TSIG_KEY`. Only `kea-dhcp4.conf`
+  persists: the supervisor writes it on the first start and afterwards
+  only resets the keys the stack owns (control socket, lease hook, DDNS
+  link, loggers); the Admin UI changes everything else through Kea's API.
 
 ## PowerDNS
 

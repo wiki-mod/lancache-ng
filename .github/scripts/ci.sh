@@ -6839,19 +6839,19 @@ _ci_validate_new_snapshot() {
         | jq -e --arg p "$3" --arg z "$4" '(.zones[$z][0].id // "") as $i | $i != "" and $i != $p' >/dev/null
 }
 
-# What: http-port or user of the Kea control agent config
-# Why: the agent config owns where and as whom it answers
+# What: http-port or user of the Kea control agent
+# Why: the deploy .env owns both; dhcp renders from them
 # From: Issue #763 | PR #1858
 _ci_validate_kea_agent() {
-    local field="$1" conf expr out
-    conf="$(_ci_service_path dhcp kea-ctrl-agent.conf)" || return 2
+    local field="$1" compose key out
     case "${field}" in
-        http-port) expr='s/^[[:space:]]*"http-port":[[:space:]]*([0-9]+),?[[:space:]]*$/\1/p' ;;
-        user) expr='s/^[[:space:]]*"user":[[:space:]]*"([^"$]+)",?[[:space:]]*$/\1/p' ;;
+        http-port) key=KEA_CTRL_PORT ;;
+        user) key=KEA_CTRL_USER ;;
         *) ci_log "[CI-ERROR-VALIDATE-0109]" "field=\"${field}\" reason=\"unknown Kea agent field\""; return 2 ;;
     esac
-    out="$(_ci_file_value "${conf}" "${expr}")" || {
-        [ "$?" -eq 2 ] || ci_error "[CI-ERROR-VALIDATE-0110]" "file=\"${conf}\" field=\"${field}\" reason=\"need exactly one literal value\"" "${out}"
+    compose="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    out="$(_ci_file_value "$(dirname "${compose}")/.env" "s/^${key}=([^[:space:]\$]+)$/\\1/p")" || {
+        [ "$?" -eq 2 ] || ci_error "[CI-ERROR-VALIDATE-0110]" "file=\"$(dirname "${compose}")/.env\" field=\"${field}\" reason=\"need exactly one literal value\"" "${out}"
         return 2
     }
     printf '%s\n' "${out}"
@@ -7020,7 +7020,8 @@ _ci_validate_kea_rollback() {
     uname="${project}-kea-ui"
     kport="$(_ci_validate_kea_agent http-port)" || return 2
     _ci_run "[CI-ERROR-VALIDATE-0096]" "project=\"${project}\" service=\"dhcp\" reason=\"Kea run container not started\"" \
-        _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${kname}" dhcp >/dev/null || return $?
+        _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${kname}" \
+            -e DHCP_MODE=kea dhcp >/dev/null || return $?
     if ! kip="$(_ci_validate_cid_ip "${project}" "${kname}")"; then
         ci_log "[CI-ERROR-VALIDATE-0097]" "container=\"${kname}\" reason=\"no /27 IP for the Kea run container\""
         rc=2
