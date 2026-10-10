@@ -4869,7 +4869,7 @@ _UPDATE_STACK_DIR=""
 # -> unhealthy) instead of on any currently-unhealthy service regardless of
 # whether the update caused it. See both functions' own header comments for
 # the full rationale (issue #1391).
-declare -A _UPDATE_HEALTH_BASELINE=()
+declare -gA _UPDATE_HEALTH_BASELINE=()
 
 # Shared container-id lookup for the current update flow's compose project.
 # Factored out of service_container_is_healthy so capture_stack_health_baseline
@@ -5193,7 +5193,7 @@ capture_stack_health_baseline() {
 # caller names it), value is the exact "host" field
 # services/syslog/fluent-bit.conf's record_modifier filter stamps onto that
 # service's forwarded lines.
-declare -A _REGRESSED_SERVICE_SYSLOG_HOST=(
+declare -gA _REGRESSED_SERVICE_SYSLOG_HOST=(
     [dhcp-proxy]="lancache-dhcp-proxy"
     [nats]="lancache-nats"
     [syslog]="lancache-syslog"
@@ -7469,6 +7469,13 @@ EOF
 
     print_ok "Secondary DNS '${name}' is running. Configure this host's IP as DNS on your clients."
 }
+
+# What: a sourced setup.sh stops here: functions, no run
+# Why: tests load every function from the real file
+# From: Issue #1683 | PR #1858
+if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
 
 # ── Dispatch subcommands ──────────────────────────────────────────────────────
 # Keep this command router in setup.sh rather than splitting files. Operators can

@@ -129,41 +129,26 @@ _stub() {
     printf '%s\n' "${path}"
 }
 
-# What: loads every setup.sh function, never runs setup.sh
+# What: sources the real setup.sh; its guard stops before run
 # Why: tests drive the product code with its real die
 # From: Issue #1683 | PR #1858
 _load_setup_sh() {
-    local repo_root="$1"
-    local helper_file="${BATS_TEST_TMPDIR}/setup-sh.sh"
-    # What: setup.sh up to its dispatcher; nothing executes
-    # Why: declare -gA keeps top-level maps global in here
-    # From: Issue #1683 | PR #1858
-    {
-        printf 'SCRIPT_DIR=%q\n' "${repo_root}"
-        awk 'NR == 1 || /^set -euo pipefail$/ || /^SCRIPT_DIR=/ { next }
-            /^case "\$\{1:-install\}" in$/ { exit }
-            { sub(/^declare -A /, "declare -gA "); print }' "${repo_root}/setup.sh"
-    } > "${helper_file}"
-    grep -q '^cmd_backup() ($' "${helper_file}" || { echo "setup.sh cut is incomplete"; return 1; }
-    export DOCKER_HOST="${SETUP_SH_DOCKER_HOST}"
+    local opts
+    opts="$(set +o)" || return 1
+    SETUP_SH="$1/setup.sh"
+    export SETUP_SH DOCKER_HOST="${SETUP_SH_DOCKER_HOST}"
     # shellcheck source=setup.sh
-    source "${helper_file}"
+    source "${SETUP_SH}" "$(_val name)"
+    eval "${opts}"
 }
 
 # What: runs a snippet on loaded setup.sh fns, setup.sh opts
 # Why: failure paths are proven under set -euo pipefail
 # From: Issue #1683 | PR #1858
 _setup_sh_run() {
-    local root msg="${BATS_TEST_TMPDIR}/setup-msg.sh" full="${BATS_TEST_TMPDIR}/setup-sh.sh"
-    if [ -f "${full}" ]; then
-        run env DOCKER_HOST="${SETUP_SH_DOCKER_HOST}" bash -c 'set -euo pipefail; . "$1"; eval "$2"' _ "${full}" "$1"
-        return 0
-    fi
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    grep -E '^(print_step|print_ok|print_warn|print_error|die) *\(\) *\{.*\}$' "${root}/setup.sh" > "${msg}"
-    [ "$(wc -l < "${msg}")" -eq 5 ]
-    run env DOCKER_HOST="${SETUP_SH_DOCKER_HOST}" bash -c 'set -euo pipefail; YELLOW="" RED="" RESET="" BOLD="" CYAN="" GREEN=""
-        . "$1"; . "$2"; eval "$3"' _ "${msg}" "${BATS_TEST_TMPDIR}/fns-setup.sh" "$1"
+    [ -n "${SETUP_SH:-}" ] || { echo "_setup_sh_run needs _load_setup_sh first"; return 1; }
+    run env DOCKER_HOST="${SETUP_SH_DOCKER_HOST}" bash -c 'set -euo pipefail; . "$1" "$3"; eval "$2"' _ "${SETUP_SH}" "$1" \
+        "$(_val name)"
 }
 
 # What: check rc and the ;-list of output parts in order.
