@@ -5859,13 +5859,8 @@ cmd_update_ip() {
     current_ip_standard=$(get_env_var IP_STANDARD "$deploy_env") || exit $?
     current_ip_ssl=$(get_env_var IP_SSL "$deploy_env") || exit $?
 
-    # UI_BIND_IP and DHCP_DNS_PRIMARY/SECONDARY default to IP_STANDARD/IP_SSL
-    # at install time (see cmd_setup below) and, for a default quickstart
-    # install, are written into deploy_env as concrete values rather than
-    # staying empty -- Compose's ${UI_BIND_IP:-${IP_STANDARD}} fallback never
-    # kicks in. Read them here so the update below can tell "still the
-    # install-time default" apart from "operator set this explicitly" and
-    # only rewrite the former (e.g. 127.0.0.1 or a custom DNS IP survives).
+    # What: defaults for UI_BIND_IP and DHCP DNS follow IP_*
+    # Why: only install-time default values may be rewritten
     local current_ui_bind_ip current_dhcp_mode
     local current_dhcp_dns_primary current_dhcp_dns_secondary
     current_ui_bind_ip=$(get_env_var UI_BIND_IP "$deploy_env") || exit $?
@@ -5912,21 +5907,15 @@ cmd_update_ip() {
     set_env_key IP_SSL "$new_ip_ssl" "$deploy_env"
     print_ok "Updated: $deploy_env (IP_STANDARD, IP_SSL)"
 
-    # What: rewrites UI_BIND_IP only while it still equals the pre-update Standard IP; a set-but-explicit override or an empty value are both left untouched.
-    # Why: an unmodified default install would otherwise stay bound to the address docker-compose.yml just removed; an empty value already tracks IP_STANDARD via Compose's own `${UI_BIND_IP:-${IP_STANDARD}}` fallback.
-    # From: PR #745
+    # What: rewrites UI_BIND_IP while it equals old IP
+    # Why: an empty or explicit value stays untouched
     if [[ -n "$current_ui_bind_ip" && "$current_ui_bind_ip" = "$current_ip_standard" ]]; then
         set_env_key UI_BIND_IP "$new_ip_standard" "$deploy_env"
         print_ok "Updated: $deploy_env (UI_BIND_IP)"
     fi
 
-    # Same idea for the proxy-DHCP/PXE DNS options: DHCP_DNS_PRIMARY/SECONDARY
-    # default to IP_STANDARD/IP_SSL at install time and are only actually
-    # consumed by deploy/quickstart/docker-compose.yml's dhcp-proxy service
-    # when DHCP_MODE=dnsmasq-proxy (the Kea dhcp service re-derives its DNS
-    # options from IP_STANDARD/IP_SSL directly and never goes stale). Only
-    # rewrite values that still match the pre-update defaults so an operator
-    # who pointed proxy-DHCP clients at real DNS servers keeps that choice.
+    # What: rewrites DHCP DNS while it equals old IP
+    # Why: dnsmasq-proxy reads these; Kea derives its own
     if [[ "$current_dhcp_mode" = "dnsmasq-proxy" ]]; then
         if [[ -n "$current_dhcp_dns_primary" && "$current_dhcp_dns_primary" = "$current_ip_standard" ]]; then
             set_env_key DHCP_DNS_PRIMARY "$new_ip_standard" "$deploy_env"
@@ -5940,12 +5929,8 @@ cmd_update_ip() {
 
     print_step "Restarting containers"
 
-    # `cmd1 && cmd2` as a bare statement is exempt from set -e when cmd1 is
-    # not the list's last command (verified: `set -e; false && echo hi` does
-    # NOT exit) -- so a failing `docker compose up -d` here would silently
-    # fall through to the "Reconfiguration complete!" banner below even
-    # though the running containers are still bound to the old IPs. Branch
-    # explicitly and die() so a restart failure is fatal and visible.
+    # What: restart failure is checked explicitly
+    # Why: a bare && is exempt from set -e here
     if stack_compose "$install_dir" "$deploy_env" up -d; then
         print_ok "Stack restarted"
     else
@@ -6102,20 +6087,8 @@ EOF
         fi
     fi
 
-    # --rotate against an existing secondary directory can resolve
-    # registry/prefix/channel/tag entirely from local config (an explicit
-    # LANCACHE_IMAGE_* env var or the existing .env) with no need for the
-    # primary's response below. Check the platform for that case here, before
-    # the registration POST rotates this secondary's NATS password on the
-    # primary (#665) -- otherwise a Buildx/platform failure surfacing only
-    # after the POST would leave the primary already expecting the new
-    # password while this host's .env still has the old one, with no way to
-    # recover except registering again. A fresh (non-rotate) registration has
-    # no local .env to resolve from yet, so it necessarily keeps relying on
-    # the existing post-registration check further down; the same is true for
-    # a --rotate run whose local channel/tag genuinely can't be resolved
-    # without the primary's response (e.g. a still-mutable, non-pinned
-    # channel with no LANCACHE_IMAGE_TAG override).
+    # What: --rotate may check the platform before the POST
+    # Why: a late failure would leave a rotated password
     if [[ "$rotate" -eq 1 ]]; then
         preflight_dir="$secondary_dir"
         preflight_env_file=""
@@ -6141,14 +6114,8 @@ EOF
                 validate_lancache_image_prefix "$preflight_prefix"
                 validate_lancache_image_channel "$preflight_channel"
 
-                # A non-pinned (mutable) channel with no explicit
-                # LANCACHE_IMAGE_TAG override still resolves entirely from
-                # local/registry state (it pulls the channel's own pointer
-                # image), so it counts as locally resolvable too. A pinned
-                # channel, by contrast, has no channel pointer of its own --
-                # it requires an actual tag from either the shell env or the
-                # existing .env; if neither has one, only the primary's
-                # response can supply it, so this preflight must be skipped.
+                # What: pinned channel needs a tag to check
+                # Why: only the primary can supply the tag
                 if [[ "$preflight_channel" != "pinned" || -n "$preflight_env_tag" ]]; then
                     preflight_tag=$(LANCACHE_IMAGE_REGISTRY="$preflight_registry" \
                         LANCACHE_IMAGE_PREFIX="$preflight_prefix" \
@@ -6183,32 +6150,8 @@ EOF
         || die "Unrecognized response from primary server at ${primary}."
 
     if [[ "$http_status" = "503" ]]; then
-        # Issue #866: the primary's register_secondary refuses with 503,
-        # specifically (not a generic 4xx), when it has no genuinely
-        # reachable NATS URL to hand out -- neither NATS_BIND_IP nor
-        # NATS_ADVERTISE_URL is configured on the primary. This is not a
-        # problem with this command's own arguments, so give the operator
-        # the actual fix instead of the generic "verify token/name" message
-        # below, which would send them looking in the wrong place.
-        #
-        # Setting NATS_BIND_IP/NATS_ADVERTISE_URL and restarting only the
-        # `ui` container is NOT sufficient on its own: `ui` only reads the
-        # value to compute what to advertise, but the `nats` service itself
-        # still needs `docker-compose.nats-secondary.yml` included (and the
-        # stack recreated with it) to actually publish port 4222 on that
-        # address -- see that file's own `NATS_BIND_IP:?...` host-port
-        # binding. Telling the operator to restart only `ui` here would let
-        # registration "succeed" while `nats` still has no host-port
-        # publish, reproducing the exact silent-sync-failure this change
-        # exists to prevent.
-        #
-        # The recreate example must include `--env-file .env.local` when
-        # that is where the operator set the variable: Docker Compose only
-        # auto-loads the project directory's default `.env`, never
-        # `.env.local`, so a recreate command copied verbatim without
-        # `--env-file .env.local` would leave `NATS_BIND_IP`'s
-        # `${NATS_BIND_IP:?...}` guard in docker-compose.nats-secondary.yml
-        # unset and the override would not actually apply.
+        # What: 503 means primary lacks a reachable NATS URL
+        # Why: nats needs the secondary override too
         die "Primary server at ${primary} is not configured to register remote secondaries (HTTP 503): it needs NATS_BIND_IP (or the more specific NATS_ADVERTISE_URL) set in its .env/.env.local to a NATS address this secondary can reach, AND its 'nats' service recreated with the docker-compose.nats-secondary.yml override included -- e.g. docker compose -f docker-compose.yml -f docker-compose.nats-secondary.yml up -d if the variable is in .env, or docker compose --env-file .env.local -f docker-compose.yml -f docker-compose.nats-secondary.yml up -d if it is in .env.local (Compose does not auto-load .env.local) -- so NATS actually publishes that address; restarting only the ui container is not enough. See docs/architecture-ng.md's \"Remote secondary NATS access\" section."
     elif [[ ! "$http_status" =~ ^2 ]]; then
         die "Primary server rejected the registration request with HTTP ${http_status}. Verify the registration token, secondary name, and primary server logs."
@@ -6312,15 +6255,8 @@ EOF
             || die "Channel ${lancache_image_tag} resolved no LANCACHE_IMAGE_REF_DNS pin for the secondary."
     fi
 
-    # Verify the resolved tag actually publishes an image for this secondary
-    # host's architecture before any secondary state below is written (#665).
-    # The earlier assert_prebuilt_image_platform_supported call only checked
-    # the host architecture in general, not this specific tag/channel. Skip
-    # this if the --rotate preflight above (before the registration POST)
-    # already verified these exact registry/prefix/tag values -- re-running it
-    # here would only repeat the same registry inspect for no new information.
-    # Any drift from the preflight (e.g. the response provided different
-    # values than local config) still falls through to a fresh, real check.
+    # What: verifies tag platform before secondary writes
+    # Why: skips a repeat of the rotate preflight check
     if [[ -z "$preflight_verified_tag" \
         || "$lancache_image_registry" != "$preflight_verified_registry" \
         || "$lancache_image_prefix" != "$preflight_verified_prefix" \
@@ -6328,9 +6264,8 @@ EOF
         assert_resolved_image_tag_platform_supported "$lancache_image_registry" "$lancache_image_prefix" "$lancache_image_tag"
     fi
 
-    # What: resolves KEEP_KNOWN_GOOD_CONFIGS the same way as the image registry/prefix/channel above -- explicit env var wins, then the existing generated .env (so --rotate doesn't silently reset an operator's prior choice), then the default.
-    # Why: same variable and default (3) as config/{dev,prod}/dns-standard.env; the primary's registration response has no opinion on this purely local, per-secondary-node setting.
-    # From: Issue #615
+    # What: KEEP_KNOWN_GOOD_CONFIGS: env, .env, else 3
+    # Why: a local per-node setting; the primary has no say
     keep_known_good_configs="${KEEP_KNOWN_GOOD_CONFIGS:-}"
     if [[ -z "$keep_known_good_configs" && -n "$existing_env_file" ]]; then
         keep_known_good_configs=$(get_env_var KEEP_KNOWN_GOOD_CONFIGS "$existing_env_file") || exit $?
@@ -6374,9 +6309,6 @@ if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "$0" ]]; then
 fi
 
 # ── Dispatch subcommands ──────────────────────────────────────────────────────
-# Keep this command router in setup.sh rather than splitting files. Operators can
-# read one script, while command names still follow a simple verb / verb-suffix
-# pattern: install, update, update-ip, debug, backup, restore.
 # What: no command prints the help and changes nothing
 # Why: only the explicit install command installs
 # From: Issue #1683 | PR #1858
@@ -6392,14 +6324,8 @@ case "${1:-install}" in
         fi
         ;;
     list-prompts)
-        # Issue #1176: introspection mode. Deliberately does NOT `exit 0` here
-        # -- it falls through to the exact same top-level wizard code the
-        # `install|""` case above falls through to (see the "Main setup"
-        # header comment below), so `list-prompts` walks the real, current
-        # branch logic instead of a second, hand-duplicated copy of it. The
-        # wizard itself checks WIZARD_INTROSPECT_MODE at every real
-        # filesystem/network/Docker mutation point and skips them; see those
-        # checks' own comments for the specific list.
+        # What: list-prompts records, then falls through
+        # Why: the walk uses the real wizard branch logic
         if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
             print_command_help list-prompts
             exit 0
@@ -6407,9 +6333,8 @@ case "${1:-install}" in
         WIZARD_INTROSPECT_MODE=1
         if [[ -n "${2:-}" ]]; then
             [[ -f "$2" ]] || die "Answers file not found: $2"
-            # Fixed fd 9: this subcommand never nests or re-execs itself, so
-            # there is no risk of a second `list-prompts` invocation in the
-            # same process colliding on this fd.
+            # What: fd 9 is opened once for the answers file
+            # Why: no nested re-exec can reuse fd 9
             exec 9<"$2"
             WIZARD_INTROSPECT_ANSWERS_FD=9
         fi
@@ -6439,10 +6364,8 @@ case "${1:-install}" in
         fi
         cmd_auto_update "${2:-$DEFAULT_INSTALL_DIR}"; exit 0 ;;
     converge-reconcile)
-        # Internal-only (#819): invoked by lancache-converge.service, not
-        # documented in print_command_help/print_usage and not meant for
-        # interactive use -- see cmd_converge_reconcile's own comment for what
-        # it does and why.
+        # What: internal-only; not in the usage text
+        # Why: the converge service calls it
         cmd_converge_reconcile "${2:-$DEFAULT_INSTALL_DIR}"; exit 0 ;;
     compose)
         # What: internal; units and recovery hints call it
@@ -6504,9 +6427,8 @@ esac
 # ══════════════════════════════════════════════════════════════════════════════
 # Main setup
 # ══════════════════════════════════════════════════════════════════════════════
-# This is the first-user production flow. Keep it linear and readable: prompt
-# for runtime choices, write the config once, install watchdog units, show the
-# final summary, then pull/start prebuilt containers.
+# What: first-user production flow, linear and readable
+# Why: prompt, write config once, then start containers
 
 printf "\n"
 printf "${BOLD}╔══════════════════════════════════════════╗${RESET}\n"
@@ -6518,11 +6440,8 @@ printf "  After: ./setup.sh update  |  ./setup.sh debug  |  ./setup.sh update-ip
 printf "  Help:  ./setup.sh --help (use './setup.sh <command> --help' for details)\n"
 
 # ── 1. Prerequisites ──────────────────────────────────────────────────────────
-# Issue #1176: introspection mode needs none of this -- no root, no Docker, no
-# git clone -- it only walks the wizard's prompt/branch logic below. Skipping
-# it here (rather than making list-prompts require root/Docker/a real repo
-# checkout just like a real install) is what lets it run cheaply and
-# repeatedly in CI/bats fixtures.
+# What: list-prompts skips root, Docker and git checks
+# Why: lets list-prompts run cheaply in CI
 if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     print_step "Checking prerequisites"
 
