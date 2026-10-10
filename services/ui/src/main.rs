@@ -11154,4 +11154,984 @@ mod tests {
         assert!(callout_xkey(&cfg).err().unwrap().contains("xkey seed at"));
         let _ = fs::remove_dir_all(&dir);
     }
+
+    // What: a UI on a free port with an offline NATS.
+    // Why: handler tests then pass the real router.
+    async fn test_server(
+        tweak: impl FnOnce(&mut Config),
+    ) -> (String, Arc<AppState>, std::path::PathBuf) {
+        let dir = unique_temp_dir("ui-server");
+        let mut cfg = load_from(&full_env()).expect("a complete env loads");
+        cfg.shared_secret_dir = dir.to_string_lossy().to_string();
+        cfg.hsts_mode = HstsMode::Auto;
+        cfg.template_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/templates").to_string();
+        tweak(&mut cfg);
+        let http = lancache_ng::http_client().unwrap();
+        let nats = async_nats::ConnectOptions::new()
+            .retry_on_initial_connect()
+            .connect("nats://127.0.0.1:1")
+            .await
+            .unwrap();
+        let state = Arc::new(AppState {
+            templates: load_templates(&cfg),
+            docker: DockerProxy::new(&cfg.docker_proxy_url),
+            http_client: http.clone(),
+            pdns: PowerDns::new(http, cfg.pdns_api_key.clone()),
+            file_lock: Mutex::new(()),
+            netdata_alarms_lock: Mutex::new(()),
+            kea_config_lock: tokio::sync::Mutex::new(()),
+            dhcp_probe_lock: tokio::sync::Mutex::new(()),
+            nats,
+            db: Mutex::new(open_database(&dir.join("ui.db").to_string_lossy()).unwrap()),
+            ui_session_secret: [9u8; 32],
+            ui_session_ttl: Duration::from_secs(3600),
+            nats_issuer_public_key: String::new(),
+            nats_callout_xkey_public_key: String::new(),
+            config: cfg,
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(axum::serve(listener, router(state.clone())).into_future());
+        (base, state, dir)
+    }
+
+    // What: open a session: cookie header and CSRF token.
+    // Why: protected POSTs need both, like a browser has.
+    async fn open_session(base: &str, state: &AppState) -> (String, String) {
+        let response = reqwest::get(format!("{base}/static/admin.css"))
+            .await
+            .unwrap();
+        let set = response.headers()[header::SET_COOKIE].to_str().unwrap();
+        let pair = set.split(';').next().unwrap().to_string();
+        let value = pair.strip_prefix("lancache_ui_session=").unwrap();
+        let session = validate_session(value, &state.ui_session_secret).unwrap();
+        (pair, session.csrf_token)
+    }
+
+    // What: the public routes and compiled-in assets.
+    // Why: the probe and static files must not drift.
+    #[tokio::test]
+    async fn public_routes_serve_health_and_assets() {
+        let (base, _state, dir) = test_server(|_| {}).await;
+        let health = reqwest::get(format!("{base}/health")).await.unwrap();
+        assert_eq!(health.status(), 200);
+        assert_eq!(health.text().await.unwrap(), "ok");
+        let cases = [
+            ("/favicon.ico", "image/x-icon", true),
+            ("/static/logo-icon.png", "image/png", true),
+            ("/static/admin.css", "text/css; charset=utf-8", false),
+            (
+                "/static/chart.umd.min.js",
+                "application/javascript; charset=utf-8",
+                true,
+            ),
+        ];
+        for (path, content_type, cached) in cases {
+            let response = reqwest::get(format!("{base}{path}")).await.unwrap();
+            assert_eq!(response.status(), 200, "{path}");
+            assert_eq!(response.headers()[header::CONTENT_TYPE], content_type);
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL).is_some(),
+                cached,
+                "{path}"
+            );
+            assert!(!response.bytes().await.unwrap().is_empty(), "{path}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: security headers follow switch and scheme.
+    // Why: HSTS over plain http would lock browsers out.
+    #[tokio::test]
+    async fn security_headers_follow_config_and_scheme() {
+        let (base, _state, dir) = test_server(|_| {}).await;
+        let client = reqwest::Client::new();
+        let plain = client.get(format!("{base}/health")).send().await.unwrap();
+        let headers = plain.headers();
+        assert_eq!(headers["content-security-policy"], ADMIN_UI_CSP);
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+        assert_eq!(headers["x-frame-options"], "DENY");
+        assert_eq!(headers["referrer-policy"], "no-referrer");
+        assert!(headers.get("strict-transport-security").is_none());
+        let secure = client
+            .get(format!("{base}/health"))
+            .header("x-forwarded-proto", "https")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            secure.headers()["strict-transport-security"],
+            "max-age=31536000; includeSubDomains"
+        );
+        let _ = fs::remove_dir_all(&dir);
+
+        let (base, _state, dir) = test_server(|cfg| cfg.security_headers_enabled = false).await;
+        let off = client.get(format!("{base}/health")).send().await.unwrap();
+        assert!(off.headers().get("content-security-policy").is_none());
+        assert!(off.headers().get("x-frame-options").is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: Basic auth needs both parts to match.
+    // Why: one correct half must never open the admin UI.
+    #[tokio::test]
+    async fn basic_auth_needs_user_and_password() {
+        let (base, _state, dir) = test_server(|cfg| {
+            cfg.auth_user = Some("op".to_string());
+            cfg.auth_password = Some("pw".to_string());
+        })
+        .await;
+        let client = reqwest::Client::new();
+        let url = format!("{base}/static/admin.css");
+        let denied = client.get(&url).send().await.unwrap();
+        assert_eq!(denied.status(), 401);
+        assert_eq!(
+            denied.headers()[header::WWW_AUTHENTICATE],
+            r#"Basic realm="LanCache Admin""#
+        );
+        for (user, pass) in [("op", "bad"), ("bad", "pw"), ("bad", "bad")] {
+            let wrong = client
+                .get(&url)
+                .basic_auth(user, Some(pass))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(wrong.status(), 401, "{user}:{pass}");
+        }
+        let garbage = client
+            .get(&url)
+            .header(header::AUTHORIZATION, "Basic ***")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(garbage.status(), 401);
+        let ok = client
+            .get(&url)
+            .basic_auth("op", Some("pw"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), 200);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: a session cookie is issued once, CSRF on POST.
+    // Why: a post without the token must be refused.
+    #[tokio::test]
+    async fn sessions_and_csrf_gate_mutating_requests() {
+        let (base, state, dir) = test_server(|_| {}).await;
+        let client = reqwest::Client::new();
+        let first = client
+            .get(format!("{base}/static/admin.css"))
+            .send()
+            .await
+            .unwrap();
+        let set = first.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(set.starts_with("lancache_ui_session="));
+        assert!(!set.contains("Secure"));
+        let (cookie, csrf) = open_session(&base, &state).await;
+        let again = client
+            .get(format!("{base}/static/admin.css"))
+            .header(header::COOKIE, &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert!(again.headers().get(header::SET_COOKIE).is_none());
+        let secure = client
+            .get(format!("{base}/static/admin.css"))
+            .header("x-forwarded-proto", "https")
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            secure.headers()[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .contains("Secure")
+        );
+
+        let url = format!("{base}/api/secondary/none");
+        let no_token = client
+            .delete(&url)
+            .header(header::COOKIE, &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(no_token.status(), 403);
+        let wrong = client
+            .delete(&url)
+            .header(header::COOKIE, &cookie)
+            .header("X-CSRF-Token", "nope")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), 403);
+        let by_header = client
+            .delete(&url)
+            .header(header::COOKIE, &cookie)
+            .header("X-CSRF-Token", &csrf)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(by_header.status(), 404);
+        let by_form = client
+            .post(format!("{base}/api/secondary/none/rotate-token"))
+            .header(header::COOKIE, &cookie)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(format!("csrf_token={csrf}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(by_form.status(), 415);
+        let bad_form = client
+            .post(format!("{base}/api/secondary/none/rotate-token"))
+            .header(header::COOKIE, &cookie)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body("csrf_token=nope")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad_form.status(), 403);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: register a secondary with the shared token.
+    // Why: a wrong token or half-set stack must not pass.
+    #[tokio::test]
+    async fn registration_checks_token_name_and_stack() {
+        let (base, state, dir) = test_server(|cfg| {
+            cfg.secondary_registration_token = "tok".to_string();
+            cfg.advertised_nats_url = Some("nats://10.0.0.1:4222".to_string());
+        })
+        .await;
+        let client = reqwest::Client::new();
+        let url = format!("{base}/api/secondary/register");
+        let post = |token: &str, name: &str, address: Option<&str>| {
+            let body = json!({"token": token, "name": name, "address": address});
+            client.post(&url).json(&body).send()
+        };
+        assert_eq!(post("tok", "sec-1", None).await.unwrap().status(), 503);
+        fs::write(dir.join("ddns-tsig-key"), "  \n").unwrap();
+        assert_eq!(post("tok", "sec-1", None).await.unwrap().status(), 503);
+        fs::write(dir.join("ddns-tsig-key"), "tsigkey\n").unwrap();
+        assert_eq!(post("bad", "sec-1", None).await.unwrap().status(), 401);
+        for name in ["", "a_b", "a b", &"x".repeat(33)] {
+            let response = post("tok", name, None).await.unwrap();
+            assert_eq!(response.status(), 400, "{name:?}");
+        }
+        let long = "x".repeat(32);
+        assert_eq!(post("tok", &long, None).await.unwrap().status(), 200);
+
+        let ok = post("tok", "sec-1", Some("192.168.1.9")).await.unwrap();
+        assert_eq!(ok.status(), 200);
+        let body: Value = ok.json().await.unwrap();
+        assert_eq!(body["nats_url"], "nats://10.0.0.1:4222");
+        assert_eq!(body["nats_user"], "sec-1");
+        assert_eq!(body["consumer_name"], "sec-1");
+        assert_eq!(body["ddns_tsig_key"], "tsigkey");
+        assert_eq!(body["proxy_ip"], "v-STANDARD_IP");
+        assert_eq!(body["dns_xfr_primary"], "v-STANDARD_IP:5300");
+        assert_eq!(body["pdns_api_key"], state.config.pdns_api_key.as_str());
+        assert_eq!(body["image_registry"], "v-LANCACHE_IMAGE_REGISTRY");
+        assert_eq!(body["image_prefix"], "v-LANCACHE_IMAGE_PREFIX");
+        assert_eq!(
+            body["image_channel"],
+            state.config.lancache_image_channel.as_str()
+        );
+        assert_eq!(body["image_tag"], state.config.lancache_image_tag.as_str());
+        let password = body["nats_password"].as_str().unwrap();
+        assert_eq!(password.len(), 64);
+        assert!(password.chars().all(|c| c.is_ascii_hexdigit()));
+        let stored = |name: &str| -> Option<String> {
+            with_db(&state, |db| {
+                db.query_row(
+                    "SELECT address FROM secondaries WHERE name = ?",
+                    [name],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap()
+        };
+        assert_eq!(stored("sec-1").as_deref(), Some("192.168.1.9"));
+        // What: a public address is dropped, old one stays.
+        let again = post("tok", "sec-1", Some("8.8.8.8")).await.unwrap();
+        assert_eq!(again.status(), 200);
+        assert_eq!(stored("sec-1").as_deref(), Some("192.168.1.9"));
+        let _ = fs::remove_dir_all(&dir);
+
+        let (base, _state, dir) = test_server(|cfg| {
+            cfg.advertised_nats_url = Some("nats://10.0.0.1:4222".to_string());
+        })
+        .await;
+        let open = reqwest::Client::new()
+            .post(format!("{base}/api/secondary/register"))
+            .json(&json!({"token": "", "name": "sec-1"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(open.status(), 401);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: no NATS URL means no registration.
+    // Why: the internal URL is unreachable remotely.
+    #[tokio::test]
+    async fn registration_needs_an_advertised_nats_url() {
+        let (base, _state, dir) = test_server(|cfg| {
+            cfg.secondary_registration_token = "tok".to_string();
+            cfg.advertised_nats_url = None;
+        })
+        .await;
+        fs::write(dir.join("ddns-tsig-key"), "tsigkey").unwrap();
+        let response = reqwest::Client::new()
+            .post(format!("{base}/api/secondary/register"))
+            .json(&json!({"token": "tok", "name": "sec-1"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 503);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: manage registered secondaries over the router.
+    // Why: address, token, health and removal edit one row.
+    #[tokio::test]
+    async fn secondaries_can_be_changed_and_removed() {
+        let (base, state, dir) = test_server(|cfg| {
+            cfg.secondary_registration_token = "tok".to_string();
+            cfg.advertised_nats_url = Some("nats://10.0.0.1:4222".to_string());
+        })
+        .await;
+        fs::write(dir.join("ddns-tsig-key"), "tsigkey").unwrap();
+        let client = reqwest::Client::new();
+        let register = client
+            .post(format!("{base}/api/secondary/register"))
+            .json(&json!({"token": "tok", "name": "sec-1"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(register.status(), 200);
+        let (cookie, csrf) = open_session(&base, &state).await;
+        let send = |method: reqwest::Method, path: &str, body: Value| {
+            client
+                .request(method, format!("{base}{path}"))
+                .header(header::COOKIE, &cookie)
+                .header("X-CSRF-Token", &csrf)
+                .json(&body)
+                .send()
+        };
+        let post = reqwest::Method::POST;
+
+        let page = client
+            .get(format!("{base}/secondaries"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(page.status(), 200);
+        assert!(page.text().await.unwrap().contains("sec-1"));
+
+        let none = send(post.clone(), "/api/secondary/sec-1/health", json!({})).await;
+        let none: Value = none.unwrap().json().await.unwrap();
+        assert_eq!(none["status"], "no_address");
+        let unknown = send(post.clone(), "/api/secondary/zzz/health", json!({})).await;
+        assert_eq!(unknown.unwrap().status(), 404);
+
+        let public = json!({"address": "8.8.8.8"});
+        let refused = send(post.clone(), "/api/secondary/sec-1/address", public).await;
+        assert_eq!(refused.unwrap().status(), 400);
+        let lost = json!({"address": "10.0.0.5"});
+        let missing = send(post.clone(), "/api/secondary/zzz/address", lost.clone()).await;
+        assert_eq!(missing.unwrap().status(), 404);
+        let set = send(post.clone(), "/api/secondary/sec-1/address", lost).await;
+        let set: Value = set.unwrap().json().await.unwrap();
+        assert_eq!(set, json!({"ok": true, "address": "10.0.0.5"}));
+
+        let hash = |state: &AppState| -> String {
+            with_db(state, |db| {
+                db.query_row(
+                    "SELECT nats_password_hash FROM secondaries WHERE name = 'sec-1'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap()
+        };
+        let before = hash(&state);
+        let bad = json!({"token": "bad"});
+        let denied = send(post.clone(), "/api/secondary/sec-1/rotate-token", bad).await;
+        assert_eq!(denied.unwrap().status(), 401);
+        assert_eq!(hash(&state), before);
+        let good = json!({"token": "tok"});
+        let nobody = send(
+            post.clone(),
+            "/api/secondary/zzz/rotate-token",
+            good.clone(),
+        )
+        .await;
+        assert_eq!(nobody.unwrap().status(), 404);
+        let rotated = send(post, "/api/secondary/sec-1/rotate-token", good).await;
+        let rotated: Value = rotated.unwrap().json().await.unwrap();
+        assert_eq!(rotated["nats_user"], "sec-1");
+        assert_eq!(rotated["nats_password"].as_str().unwrap().len(), 64);
+        assert_ne!(hash(&state), before);
+
+        let delete = reqwest::Method::DELETE;
+        let gone = send(delete.clone(), "/api/secondary/zzz", json!({})).await;
+        assert_eq!(gone.unwrap().status(), 404);
+        let removed = send(delete, "/api/secondary/sec-1", json!({})).await;
+        let removed: Value = removed.unwrap().json().await.unwrap();
+        assert_eq!(removed, json!({"ok": true}));
+        let rows: i64 = with_db(&state, |db| {
+            db.query_row("SELECT COUNT(*) FROM secondaries", [], |row| row.get(0))
+        })
+        .unwrap();
+        assert_eq!(rows, 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: alarms are stored only with the right token.
+    // Why: an unset token must reject every sender.
+    #[tokio::test]
+    async fn alarm_ingest_checks_token_and_payload() {
+        let dir = unique_temp_dir("alarm-ingest");
+        let file = dir.join("alarms.json").to_string_lossy().to_string();
+        let path = file.clone();
+        let (base, _state, sdir) = test_server(move |cfg| {
+            cfg.netdata_alarm_token = "secret-token".to_string();
+            cfg.netdata_alarms_file = path;
+        })
+        .await;
+        let client = reqwest::Client::new();
+        let url = format!("{base}/api/netdata-alarms");
+        let alarm = json!({
+            "unique_id": 5, "alarm_id": 1, "event_id": 2, "when": 100,
+            "name": "disk", "chart": "c", "host": "h", "status": "CRITICAL",
+            "old_status": "WARNING", "value_string": "9", "units": "%",
+            "info": "full", "duration": 3
+        });
+        let send = |token: Option<&str>, body: String| {
+            let mut request = client.post(&url).body(body);
+            if let Some(token) = token {
+                request = request.header("X-Netdata-Alarm-Token", token);
+            }
+            request.send()
+        };
+        let none = send(None, alarm.to_string()).await.unwrap();
+        assert_eq!(none.status(), 401);
+        let wrong = send(Some("bad"), alarm.to_string()).await.unwrap();
+        assert_eq!(wrong.status(), 401);
+        let empty = send(Some(""), alarm.to_string()).await.unwrap();
+        assert_eq!(empty.status(), 401);
+        let malformed = send(Some("secret-token"), "{".to_string()).await.unwrap();
+        assert_eq!(malformed.status(), 400);
+        assert!(read_alarms(&file).is_empty());
+        let ok = send(Some("secret-token"), alarm.to_string()).await.unwrap();
+        assert_eq!(ok.status(), 200);
+        let again = send(Some("secret-token"), alarm.to_string()).await.unwrap();
+        assert_eq!(again.status(), 200);
+        let stored = read_alarms(&file);
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].unique_id, 5);
+        assert_eq!(stored[0].name, "disk");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&sdir);
+
+        let (base, _state, sdir) = test_server(|cfg| {
+            cfg.netdata_alarm_token = String::new();
+        })
+        .await;
+        let open = client
+            .post(format!("{base}/api/netdata-alarms"))
+            .header("X-Netdata-Alarm-Token", "")
+            .body(alarm.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(open.status(), 401);
+        let _ = fs::remove_dir_all(&sdir);
+    }
+
+    // What: an unwritable alarm file is reported as 503.
+    // Why: netdata retries instead of losing the alarm.
+    #[tokio::test]
+    async fn alarm_ingest_reports_a_store_failure() {
+        let dir = unique_temp_dir("alarm-blocked");
+        let blocker = dir.join("file").to_string_lossy().to_string();
+        fs::write(&blocker, "x").unwrap();
+        let (base, _state, dir) = test_server(|cfg| {
+            cfg.netdata_alarm_token = "t".to_string();
+            cfg.netdata_alarms_file = format!("{}/x/alarms.json", blocker);
+        })
+        .await;
+        let response = reqwest::Client::new()
+            .post(format!("{base}/api/netdata-alarms"))
+            .header("X-Netdata-Alarm-Token", "t")
+            .body(
+                r#"{"unique_id": 1, "alarm_id": 1, "event_id": 1, "when": 1,
+                "name": "n", "chart": "c", "host": "h", "status": "s",
+                "old_status": "o", "value_string": "v", "units": "u",
+                "info": "i", "duration": 1}"#,
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 503);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: the netdata proxy forwards two paths only.
+    // Why: a client may not choose another upstream path.
+    #[tokio::test]
+    async fn netdata_proxy_forwards_data_and_charts_only() {
+        let (upstream, seen) =
+            serve_canned(vec![(200, b"{\"x\":1}".to_vec()), (404, b"gone".to_vec())]);
+        let (base, _state, dir) = test_server(move |cfg| cfg.netdata_url = upstream).await;
+        let client = reqwest::Client::new();
+        let get = |path: &str| client.get(format!("{base}/api/netdata/{path}")).send();
+        for bad in ["a..b", "a%2fb"] {
+            assert_eq!(get(bad).await.unwrap().status(), 400, "{bad}");
+        }
+        assert_eq!(get("other").await.unwrap().status(), 404);
+        assert_eq!(get("DATA").await.unwrap().status(), 404);
+        let data = get("data?b=2&a=1").await.unwrap();
+        assert_eq!(data.status(), 200);
+        assert_eq!(data.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(data.text().await.unwrap(), "{\"x\":1}");
+        let charts = get("charts").await.unwrap();
+        assert_eq!(charts.status(), 404);
+        assert_eq!(charts.text().await.unwrap(), "gone");
+        let requests = seen.join().unwrap();
+        assert!(requests[0].starts_with("GET /api/v1/data?a=1&b=2 "));
+        assert!(requests[1].starts_with("GET /api/v1/charts"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: the proxy caps the buffered upstream body.
+    // Why: a wide chart range must not exhaust memory.
+    #[tokio::test]
+    async fn netdata_proxy_caps_the_body_at_16_mib() {
+        const CAP: usize = 16 * 1024 * 1024;
+        let (upstream, seen) = serve_canned(vec![(200, vec![b'x'; CAP])]);
+        let (base, _state, dir) = test_server(move |cfg| cfg.netdata_url = upstream).await;
+        let client = reqwest::Client::new();
+        let at_cap = client
+            .get(format!("{base}/api/netdata/data"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(at_cap.status(), 200);
+        assert_eq!(at_cap.bytes().await.unwrap().len(), CAP);
+        seen.join().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+
+        let (upstream, seen) = serve_canned(vec![(200, vec![b'x'; CAP + 1])]);
+        let (base, _state, dir) = test_server(move |cfg| cfg.netdata_url = upstream).await;
+        let over = client
+            .get(format!("{base}/api/netdata/data"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(over.status(), 502);
+        let _ = seen.join();
+        let _ = fs::remove_dir_all(&dir);
+
+        let (base, _state, dir) =
+            test_server(|cfg| cfg.netdata_url = "http://127.0.0.1:1".to_string()).await;
+        let down = client
+            .get(format!("{base}/api/netdata/charts"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(down.status(), 502);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: NTP entries must be IPv4 literals or names.
+    // Why: a typo like 1.2.3 must not reach DNS.
+    #[tokio::test]
+    async fn ntp_servers_resolve_or_are_rejected() {
+        let ok = resolve_ntp_servers("192.168.1.1, localhost").await;
+        assert_eq!(ok, Ok("192.168.1.1, 127.0.0.1".to_string()));
+        for bad in ["1.2.3", "300.1.1.1", "12345", "1.2.3.4.5"] {
+            let err = resolve_ntp_servers(bad).await.unwrap_err();
+            assert_eq!(
+                err,
+                format!("NTP server '{bad}' is not a valid IPv4 address")
+            );
+        }
+        assert_eq!(resolve_ntp_servers("").await, Ok(String::new()));
+    }
+
+    // What: a 12-byte DNS answer is complete, not short.
+    // Why: the header alone is a valid, answer-less reply.
+    #[test]
+    fn a_header_only_dns_answer_is_not_short() {
+        let mut header = vec![0x12, 0x34, 0x84, 0x00, 0, 0, 0, 0, 0, 0, 0, 0];
+        let result = classify_soa(&header, 0x1234).unwrap();
+        assert_eq!(result.status, "error");
+        assert_eq!(result.detail, "NOERROR but no answer for lan. SOA");
+        header.truncate(11);
+        let short = classify_soa(&header, 0x1234).unwrap_err();
+        assert_eq!(short, "short DNS response (<12 bytes)");
+    }
+
+    // What: the fair window shares lines among busy hosts.
+    // Why: a busy host must not push others out of view.
+    #[test]
+    fn fair_window_shares_lines_between_busy_hosts() {
+        let mut entries: Vec<SyslogEntry> = (4..=9)
+            .map(|n| syslog_entry("a", &format!("t0{n}")))
+            .collect();
+        entries.extend((1..=3).map(|n| syslog_entry("b", &format!("t0{n}"))));
+        let kept: Vec<String> = fair_window(entries, 6)
+            .into_iter()
+            .map(|e| e.timestamp)
+            .collect();
+        assert_eq!(kept, ["t01", "t02", "t03", "t07", "t08", "t09"]);
+    }
+
+    // What: only YYYYMMDD names count as retention days.
+    // Why: a stray file must not inflate the day count.
+    #[test]
+    fn syslog_stats_count_only_dated_files() {
+        let dir = unique_temp_dir("syslog-stats");
+        let host = dir.join("host1");
+        fs::create_dir_all(&host).unwrap();
+        for name in [
+            "20260101.log",
+            "20260101.log.gz",
+            "20260102.log",
+            "2026010x.log",
+            "123.log",
+            "notes",
+        ] {
+            fs::write(host.join(name), "12345").unwrap();
+        }
+        let stats = syslog_stats(&dir.to_string_lossy());
+        assert_eq!(stats.hosts.len(), 1);
+        assert_eq!(stats.hosts[0].host, "host1");
+        assert_eq!(stats.hosts[0].files, 6);
+        assert_eq!(stats.hosts[0].days, 2);
+        assert_eq!(stats.hosts[0].size_bytes, 30);
+        assert_eq!(stats.total_files, 6);
+        assert_eq!(stats.total_size_bytes, 30);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: a placeholder DHCP token uses the Kea one.
+    // Why: a shipped example must never be the secret.
+    #[test]
+    fn a_placeholder_dhcp_token_is_ignored() {
+        let mut env = full_env();
+        env.insert("KEA_CTRL_TOKEN".to_string(), "kea-ctrl".to_string());
+        env.insert("DHCP_API_TOKEN".to_string(), "change-me".to_string());
+        let cfg = load_from(&env).unwrap();
+        assert_eq!(cfg.dhcp_api_token, "kea-ctrl");
+        env.insert("DHCP_API_TOKEN".to_string(), "real-token".to_string());
+        let cfg = load_from(&env).unwrap();
+        assert_eq!(cfg.dhcp_api_token, "real-token");
+    }
+
+    // What: post a form with session cookie and CSRF token.
+    // Why: protected forms need both; redirects stay.
+    async fn post_form(
+        base: &str,
+        session: &(String, String),
+        path: &str,
+        fields: &str,
+    ) -> reqwest::Response {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        client
+            .post(format!("{base}{path}"))
+            .header(header::COOKIE, &session.0)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(format!("{fields}&csrf_token={}", session.1))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    // What: dhcp and ntp record whether they should run.
+    // Why: the watchdog starts and stops from this file.
+    #[tokio::test]
+    async fn desired_state_is_recorded_per_service() {
+        let dir = unique_temp_dir("desired");
+        let file = dir.join("desired.json");
+        let path = file.to_string_lossy().to_string();
+        let (base, state, sdir) = test_server(move |cfg| cfg.desired_state_file = path).await;
+        let (cookie, csrf) = open_session(&base, &state).await;
+        let client = reqwest::Client::new();
+        let put = |service: &str, value: &str| {
+            client
+                .post(format!("{base}/api/services/{service}/desired-state"))
+                .header(header::COOKIE, &cookie)
+                .header("X-CSRF-Token", &csrf)
+                .json(&json!({"state": value}))
+                .send()
+        };
+        assert_eq!(put("web", "running").await.unwrap().status(), 404);
+        assert_eq!(put("dhcp", "paused").await.unwrap().status(), 400);
+        assert_eq!(put("dhcp", "running").await.unwrap().status(), 204);
+        assert_eq!(put("ntp", "stopped").await.unwrap().status(), 204);
+        let desired = DesiredState::read(&file);
+        assert_eq!(desired.dhcp, Some(DesiredRunState::Running));
+        assert_eq!(desired.ntp, Some(DesiredRunState::Stopped));
+        assert_eq!(put("dhcp", "stopped").await.unwrap().status(), 204);
+        let desired = DesiredState::read(&file);
+        assert_eq!(desired.dhcp, Some(DesiredRunState::Stopped));
+        assert_eq!(desired.ntp, Some(DesiredRunState::Stopped));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&sdir);
+    }
+
+    // What: a cache size is checked, then saved.
+    // Why: a size that does not fit must never be stored.
+    #[tokio::test]
+    async fn cache_resize_checks_space_before_saving() {
+        let dir = unique_temp_dir("resize");
+        let (cache, conf) = (dir.to_string_lossy().to_string(), dir.join("ui.conf"));
+        let settings = conf.to_string_lossy().to_string();
+        let (base, state, sdir) = test_server(move |cfg| {
+            cfg.cache_dir = cache;
+            cfg.ui_settings_file = settings;
+        })
+        .await;
+        let session = open_session(&base, &state).await;
+        for bad in ["cache_gb=0", "cache_gb=abc", "cache_gb="] {
+            let response = post_form(&base, &session, "/cache/resize", bad).await;
+            assert_eq!(response.status(), 400, "{bad}");
+            assert!(
+                response
+                    .text()
+                    .await
+                    .unwrap()
+                    .contains("positive whole number")
+            );
+        }
+        let huge = post_form(&base, &session, "/cache/resize", "cache_gb=99999999").await;
+        assert_eq!(huge.status(), 400);
+        assert!(
+            huge.text()
+                .await
+                .unwrap()
+                .contains("would not leave a safety buffer")
+        );
+        assert!(!conf.exists());
+        let ok = post_form(&base, &session, "/cache/resize", "cache_gb=1").await;
+        assert_eq!(ok.status(), 303);
+        assert_eq!(ok.headers()[header::LOCATION], "/");
+        assert!(
+            fs::read_to_string(&conf)
+                .unwrap()
+                .contains("CACHE_MAX_GB=1\n")
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&sdir);
+
+        let (base, state, sdir) =
+            test_server(|cfg| cfg.cache_dir = "relative/cache".to_string()).await;
+        let session = open_session(&base, &state).await;
+        let unknown = post_form(&base, &session, "/cache/resize", "cache_gb=1").await;
+        assert_eq!(unknown.status(), 500);
+        assert!(unknown.text().await.unwrap().contains("Refusing to resize"));
+        let _ = fs::remove_dir_all(&sdir);
+    }
+
+    // What: stack settings take two known channels only.
+    // Why: pinned tags and the old edge name are no choice.
+    #[tokio::test]
+    async fn stack_settings_save_channel_and_auto_update() {
+        let dir = unique_temp_dir("stack");
+        let conf = dir.join("ui.conf");
+        let settings = conf.to_string_lossy().to_string();
+        let (base, state, sdir) = test_server(move |cfg| cfg.ui_settings_file = settings).await;
+        let session = open_session(&base, &state).await;
+        let bad = post_form(
+            &base,
+            &session,
+            "/setup/update",
+            "lancache_image_channel=edge",
+        )
+        .await;
+        assert_eq!(bad.status(), 400);
+        assert!(
+            bad.text()
+                .await
+                .unwrap()
+                .contains("Invalid release channel")
+        );
+        assert!(!conf.exists());
+        let body = "lancache_image_channel=nightly&auto_update_enabled=1";
+        let ok = post_form(&base, &session, "/setup/update", body).await;
+        assert_eq!(ok.status(), 303);
+        assert_eq!(ok.headers()[header::LOCATION], "/setup");
+        let saved = fs::read_to_string(&conf).unwrap();
+        assert!(saved.contains("LANCACHE_IMAGE_CHANNEL=nightly\n"));
+        assert!(saved.contains("AUTO_UPDATE_ENABLED=1\n"));
+        let off = post_form(
+            &base,
+            &session,
+            "/setup/update",
+            "lancache_image_channel=stable",
+        )
+        .await;
+        assert_eq!(off.status(), 303);
+        assert!(
+            fs::read_to_string(&conf)
+                .unwrap()
+                .contains("AUTO_UPDATE_ENABLED=0\n")
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&sdir);
+    }
+
+    // What: NTP settings are checked, saved and applied.
+    // Why: the container reads its settings only at start.
+    #[tokio::test]
+    async fn ntp_settings_stop_save_and_start_ntp() {
+        let dir = unique_temp_dir("ntp-settings");
+        let conf = dir.join("ui.conf");
+        let settings = conf.to_string_lossy().to_string();
+        let (docker, seen) = serve_canned(vec![(204, vec![]), (204, vec![])]);
+        let (base, state, sdir) = test_server(move |cfg| {
+            cfg.ui_settings_file = settings;
+            cfg.docker_proxy_url = docker;
+        })
+        .await;
+        let session = open_session(&base, &state).await;
+        let empty = post_form(&base, &session, "/ntp/settings", "ntp_upstream_servers=").await;
+        assert_eq!(empty.status(), 400);
+        assert!(
+            empty
+                .text()
+                .await
+                .unwrap()
+                .contains("At least one upstream")
+        );
+        let bad = post_form(
+            &base,
+            &session,
+            "/ntp/settings",
+            "ntp_upstream_servers=bad%20host!",
+        )
+        .await;
+        assert_eq!(bad.status(), 400);
+        assert!(bad.text().await.unwrap().contains("is not a valid"));
+        assert!(!conf.exists());
+        let on = "ntp_enabled=1&ntp_upstream_servers=pool.ntp.org%2C+10.0.0.1";
+        let ok = post_form(&base, &session, "/ntp/settings", on).await;
+        assert_eq!(ok.status(), 303);
+        assert_eq!(ok.headers()[header::LOCATION], "/ntp");
+        let saved = fs::read_to_string(&conf).unwrap();
+        assert!(saved.contains("NTP_ENABLED=1\n"));
+        assert!(saved.contains("NTP_UPSTREAM_SERVERS=pool.ntp.org 10.0.0.1\n"));
+        assert!(saved.contains("NTP_AUTO_DHCP=0\n"));
+        let off = post_form(
+            &base,
+            &session,
+            "/ntp/settings",
+            "ntp_upstream_servers=10.0.0.1",
+        )
+        .await;
+        assert_eq!(off.status(), 303);
+        assert!(
+            fs::read_to_string(&conf)
+                .unwrap()
+                .contains("NTP_ENABLED=0\n")
+        );
+        let requests = seen.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].contains("/start "));
+        assert!(requests[1].contains("/stop?t=10 "));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&sdir);
+    }
+
+    // What: AAAA and DDNS markers appear in both DNS dirs.
+    // Why: both DNS nodes must see the requested state.
+    #[tokio::test]
+    async fn dns_marker_toggles_write_both_state_dirs() {
+        let dir = unique_temp_dir("markers");
+        let (standard, ssl) = (dir.join("standard"), dir.join("ssl"));
+        fs::create_dir_all(&standard).unwrap();
+        fs::create_dir_all(&ssl).unwrap();
+        let (a, b) = (
+            standard.to_string_lossy().to_string(),
+            ssl.to_string_lossy().to_string(),
+        );
+        let (base, state, sdir) = test_server(move |cfg| {
+            cfg.dns_standard_state_dir = a;
+            cfg.dns_ssl_state_dir = b;
+        })
+        .await;
+        let session = open_session(&base, &state).await;
+        let on = post_form(&base, &session, "/domains/aaaa-filter", "enabled=1").await;
+        assert_eq!(on.status(), 303);
+        assert_eq!(on.headers()[header::LOCATION], "/domains");
+        for root in [&standard, &ssl] {
+            assert_eq!(
+                fs::read_to_string(root.join("aaaa-filter-enabled")).unwrap(),
+                "1"
+            );
+        }
+        let off = post_form(&base, &session, "/domains/aaaa-filter", "enabled=0").await;
+        assert_eq!(off.status(), 303);
+        for root in [&standard, &ssl] {
+            assert!(!root.join("aaaa-filter-enabled").exists());
+        }
+        let again = post_form(&base, &session, "/domains/aaaa-filter", "enabled=0").await;
+        assert_eq!(again.status(), 303);
+
+        let blocked = post_form(
+            &base,
+            &session,
+            "/domains/ddns-allow-unsigned-updates",
+            "enabled=1",
+        )
+        .await;
+        assert_eq!(
+            blocked.headers()[header::LOCATION],
+            "/domains?error=ddns_allow_unsigned_no_key"
+        );
+        assert!(!standard.join("ddns-allow-unsigned-updates").exists());
+        fs::write(sdir.join("ddns-tsig-key"), "tsig").unwrap();
+        let allowed = post_form(
+            &base,
+            &session,
+            "/domains/ddns-allow-unsigned-updates",
+            "enabled=1",
+        )
+        .await;
+        assert_eq!(allowed.headers()[header::LOCATION], "/domains");
+        for root in [&standard, &ssl] {
+            assert!(root.join("ddns-allow-unsigned-updates").exists());
+        }
+        let revoked = post_form(
+            &base,
+            &session,
+            "/domains/ddns-allow-unsigned-updates",
+            "enabled=0",
+        )
+        .await;
+        assert_eq!(revoked.headers()[header::LOCATION], "/domains");
+        assert!(!standard.join("ddns-allow-unsigned-updates").exists());
+        fs::remove_file(sdir.join("ddns-tsig-key")).unwrap();
+        fs::write(sdir.join("ddns-tsig-key"), "").unwrap();
+        let empty = post_form(
+            &base,
+            &session,
+            "/domains/ddns-allow-unsigned-updates",
+            "enabled=1",
+        )
+        .await;
+        assert_eq!(
+            empty.headers()[header::LOCATION],
+            "/domains?error=ddns_allow_unsigned_no_key"
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&sdir);
+    }
 }
