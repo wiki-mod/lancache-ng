@@ -1204,6 +1204,7 @@ dependencies = [
  "serde_json",
  "time",
  "tokio",
+ "zstd",
 ]
 
 [[package]]
