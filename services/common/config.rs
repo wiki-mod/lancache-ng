@@ -110,6 +110,17 @@ impl Uint {
     }
 }
 
+// What: SYSLOG_MAX_GB, the syslog store budget in GiB.
+// Why: the ui shows and retention enforces one limit.
+// From: Issue #633 | PR #1858
+pub const SYSLOG_MAX_GB: Uint = Uint {
+    name: "SYSLOG_MAX_GB",
+    min: 1,
+    max: 1_048_576,
+    below: OutOfRange::Reject,
+    above: OutOfRange::Clamp,
+};
+
 // What: the DHCP backend an install runs, or none.
 // Why: ui and watchdog must read DHCP_MODE the same way.
 // From: Issue #844
