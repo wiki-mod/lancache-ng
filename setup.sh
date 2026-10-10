@@ -1609,7 +1609,7 @@ set_optional_env_path_override_if_needed() {
             set_env_assignment "$key" "$existing_assignment" "$env_file"
             return 0
         fi
-        # What: a broken literal (e.g. "50") is dropped as unset
+        # What: a broken value (e.g. 50) is dropped as unset
         # Why: one run converges; a rerun changes nothing
         # From: Issue #1683 | PR #1858
         remove_env_key "$key" "$env_file"

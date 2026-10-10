@@ -103,7 +103,7 @@ _registry() {
     cat "${CI_SYSTEM_CA_PATH}" "${d}/ca.crt" > "${d}/bundle.crt" || return 1
     id="$(docker create -p 5000 -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/r.crt -e REGISTRY_HTTP_TLS_KEY=/certs/r.key "${img}")" \
         || return 1
-    printf '%s %s\n' "${DOCKER_HOST:--}" "${id}" >> "${BATS_TEST_TMPDIR}/containers" || return 1
+    printf '%s %s %s\n' "$(type -P docker)" "${DOCKER_HOST:--}" "${id}" >> "${BATS_TEST_TMPDIR}/containers" || return 1
     docker cp "${d}/certs" "${id}:/certs" && docker start "${id}" > "${d}/start.log" && port="$(docker port "${id}" 5000/tcp)" \
         || return 1
     port="${port%%$'\n'*}" port="${port##*:}"
@@ -248,10 +248,10 @@ _fill() {
 # Why: no container outlives its test; raw values stay shown
 # From: Issue #1683 | PR #1858
 teardown() {
-    local rc=0 f="${BATS_TEST_TMPDIR}/containers" h id
+    local rc=0 f="${BATS_TEST_TMPDIR}/containers" bin h id
     if [ -s "${f}" ]; then
-        while read -r h id; do
-            if [ "${h}" = - ]; then env -u DOCKER_HOST docker rm -f "${id}"; else DOCKER_HOST="${h}" docker rm -f "${id}"; fi \
+        while read -r bin h id; do
+            if [ "${h}" = - ]; then env -u DOCKER_HOST "${bin}" rm -f "${id}"; else DOCKER_HOST="${h}" "${bin}" rm -f "${id}"; fi \
                 > "${f}.rm.log" 2>&1 || { rc=$?; cat "${f}.rm.log"; }
         done < "${f}"
     fi
@@ -523,29 +523,12 @@ case "$1" in
         [ -n "${out}" ] || { echo "Error: No public port '$3' published for $2" >&2; exit 1; }
         printf '%s\n' "${out}" ;;
     exec) [ -e "${DS}/running" ] ;;
-    buildx)
-        case "$2" in
-            version) echo 'docker buildx (test stub)' ;;
-            imagetools)
-                case "$*" in
-                    *"{{.Manifest.Digest}}"*)
-                        [ -e "${DS}/digest" ] || { echo "ERROR: $4: not found" >&2; exit 1; }
-                        cat "${DS}/digest" ;;
-                    *--format*) ;;
-                    *) echo 'Manifests:'; awk '{ print "  Platform:    " $0 }' "${here}/docker-platforms" ;;
-                esac ;;
-            *) echo "unexpected docker buildx call: $*" >&2; exit 97 ;;
-        esac ;;
+    buildx) exec "$(cat "${here}/docker-real")" "$@" ;;
     *) echo "unexpected docker call: $*" >&2; exit 97 ;;
 esac
 STUB
-    # What: the stub publishes the real SOT platforms
-    # Why: setup.sh checks the real host, not test arches
-    # From: Issue #1683 | PR #1858
-    CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_platforms dns > "$1/docker-platforms" \
-        || { echo "SOT platforms unreadable"; return 1; }
     type -P docker > "$1/docker-real" && [ "$(cat "$1/docker-real")" != "$1/docker" ] \
-        || { echo "no real docker binary for compose config"; return 1; }
+        || { echo "no real docker binary for compose config and buildx"; return 1; }
     # What: the cache DNS answers CDN names with its own IP
     # Why: the update health gate resolves one CDN name
     # From: Issue #1683 | PR #1858
@@ -2462,58 +2445,43 @@ ROWS
     done
 }
 
+# What: update pulls, reruns the new setup.sh, rolls back
+# Why: compose, templates, script move as one revision
+# From: Issue #1683 | PR #1858
 @test "setup update pulls the checkout and continues on its setup.sh" {
+    _registry || return 1
     _stand_ins || return 1
-    # What: update pulls, runs the new setup.sh, rolls back
-    # Why: compose, templates, script move as one revision
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" main lo std ssl svc mark c2 c3 f p
+    local root t="${BATS_TEST_TMPDIR}" main lo std ssl svc mark em line out c2 c3 p
     local -a pids=() ips=()
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    require_helper_image
-    main="$(_val name)"
-    lo="127.$(( BATS_TEST_NUMBER % 250 + 1 ))" svc="probe${BATS_TEST_NUMBER}" mark="rev${BATS_TEST_NUMBER}"
-    std="${lo}.0.1" ssl="${lo}.0.2"
-    g() { git -c user.email=t@example.test -c user.name=t -c init.defaultBranch="${main}" "$@"; }
-    # What: an origin holding the real checkout files
-    # Why: the update must run exactly what a clone carries
-    # From: Issue #1683 | PR #1858
-    g init -q --bare "${t}/origin.git"
-    mkdir -p "${t}/src"
-    for f in setup.sh VERSION .gitignore deploy/prod/docker-compose.yml deploy/prod/.env \
-        deploy/prod/docker-compose.nats-secondary.yml .github/yaml/build-manifest.yml .github/scripts/ci.sh \
-        $(cd "${root}" && git ls-files config/prod); do
-        mkdir -p "$(dirname "${t}/src/${f}")" && cp "${root}/${f}" "${t}/src/${f}"
-    done
-    chmod +x "${t}/src/setup.sh"
-    g -C "${t}/src" init -q && g -C "${t}/src" add -A && g -C "${t}/src" commit -q -m c1
-    g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}"
-    g clone -q "${t}/origin.git" "${t}/co"
-    cp "${t}/co/deploy/prod/.env" "${t}/co/deploy/prod/.env.local"
-    set_env_key LANCACHE_STATE_DIR "${t}/state" "${t}/co/deploy/prod/.env.local"
-    set_env_key IP_STANDARD "${std}" "${t}/co/deploy/prod/.env.local"
-    set_env_key IP_SSL "${ssl}" "${t}/co/deploy/prod/.env.local"
-    set_env_key LANCACHE_IMAGE_TAG "v$(tr -d '[:space:]' < "${root}/VERSION")" "${t}/co/deploy/prod/.env.local"
-    [ -z "$(g -C "${t}/co" status --porcelain)" ] || { echo "fixture checkout is dirty"; return 1; }
-    # What: revision 2 adds a service and marks setup.sh
-    # Why: both must reach the run after the pull
-    # From: Issue #1683 | PR #1858
-    printf '  %s:\n    image: %s\n' "${svc}" "${LANCACHE_HELPER_IMAGE}" > "${t}/svc.yml"
-    awk -v add="${t}/svc.yml" '{ print } /^services:$/ { while ((getline l < add) > 0) print l }' \
-        "${t}/src/deploy/prod/docker-compose.yml" > "${t}/c.yml" && mv "${t}/c.yml" "${t}/src/deploy/prod/docker-compose.yml"
-    sed -i "s/print_ok \"Stack updated\"/print_ok \"Stack updated at ${mark}\"/" "${t}/src/setup.sh"
-    grep -qF "Stack updated at ${mark}" "${t}/src/setup.sh" || { echo "marker not placed"; return 1; }
-    g -C "${t}/src" commit -q -am c2 && g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}"
-    c2="$(g -C "${t}/src" rev-parse HEAD)"
+    _load_setup_sh "${root}" || return 1
+    require_helper_image || return 1
+    main="$(_val name)" svc="$(_val name)" mark="$(_val name)" em="$(_val name)@$(_val host)"
+    lo="127.$(_val int 1 254).$(_val int 1 254)"
+    std="${lo}.1" ssl="${lo}.2"
+    g() { git -c user.email="${em}" -c user.name="${main}" -c init.defaultBranch="${main}" "$@"; }
+    g init -q --bare "${t}/origin.git" && _checkout_copy "${root}" "${t}/src" && g -C "${t}/src" init -q \
+        && g -C "${t}/src" add -A && g -C "${t}/src" commit -q -m c1 \
+        && g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}" && g clone -q "${t}/origin.git" "${t}/co" \
+        && cp "${t}/co/deploy/prod/.env" "${t}/co/deploy/prod/.env.local" || { echo "origin setup failed"; return 1; }
+    set_env_key LANCACHE_STATE_DIR "${t}/state" "${t}/co/deploy/prod/.env.local" \
+        && set_env_key IP_STANDARD "${std}" "${t}/co/deploy/prod/.env.local" \
+        && set_env_key IP_SSL "${ssl}" "${t}/co/deploy/prod/.env.local" \
+        && set_env_key LANCACHE_IMAGE_TAG "$(_release_tag)" "${t}/co/deploy/prod/.env.local" || return 1
+    out="$(g -C "${t}/co" status --porcelain)" && [ -z "${out}" ] || { echo "fixture checkout is dirty: ${out}"; return 1; }
+    line="printf '%s\n' ${mark} >&2"
+    printf '  %s:\n    image: %s\n' "${svc}" "${LANCACHE_HELPER_IMAGE}" > "${t}/svc.yml" \
+        && awk -v add="${t}/svc.yml" '{ print } /^services:$/ { while ((getline l < add) > 0) print l }' \
+        "${t}/src/deploy/prod/docker-compose.yml" > "${t}/c.yml" && mv "${t}/c.yml" "${t}/src/deploy/prod/docker-compose.yml" \
+        && grep -qx "  ${svc}:" "${t}/src/deploy/prod/docker-compose.yml" \
+        && L="${line}" awk 'NR == 2 { print ENVIRON["L"] } { print }' "${t}/src/setup.sh" > "${t}/s.sh" \
+        && cat "${t}/s.sh" > "${t}/src/setup.sh" && g -C "${t}/src" commit -q -am c2 \
+        && g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}" && c2="$(g -C "${t}/src" rev-parse HEAD)" \
+        || { echo "revision 2 not published"; return 1; }
     for p in "${std}" "${ssl}"; do
-        timeout 600 busybox nc -lk -s "${p}" -p 80 -e true < /dev/null > "${t}/nc-${p}.log" 2>&1 3>&- &
-        pids+=("$!")
-        ips+=("${p}")
+        timeout 600 busybox nc -lk -s "${p}" -p 80 -e true 0<&- > "${t}/nc-${p}.log" 2>&1 3>&- &
+        pids+=("$!") ips+=("${p}")
     done
-    # What: stop listeners; a gone one fails, raw log shown
-    # Why: else the port 80 probe may hit another socket
-    # From: Issue #1683 | PR #1858
     _stop() {
         local i err rc=0
         for i in "${!pids[@]}"; do
@@ -2523,35 +2491,27 @@ ROWS
         done
         return "${rc}"
     }
-    export FAULT="${BATS_TEST_NAME}" CO="${t}/co"
+    FAULT="$(_val name)" CO="${t}/co"
+    export FAULT CO
     _update() {
-        run env DOCKER_HOST="${SETUP_SH_DOCKER_HOST}" PATH="${BIN}:${PATH}" LANCACHE_BACKUP_ROOT="${t}/bk" \
-            bash "${CO}/setup.sh" update "${CO}/deploy/prod"
+        run env DOCKER_HOST="${SETUP_SH_DOCKER_HOST}" LANCACHE_BACKUP_ROOT="${t}/bk" bash "${CO}/setup.sh" update "${CO}/deploy/prod"
     }
     _update
     [ "${status}" -eq 0 ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${c2}" ] \
-        && [[ "${output}" == *"Stack updated at ${mark}"* ]] \
+        && [ "$(grep -cxF -- "${mark}" <<< "${output}")" -eq 1 ] \
         && [ "$(grep -c "Continuing the update with" <<< "${output}")" -eq 1 ] \
         && grep -qE "^compose .* up -d --remove-orphans .*\b${svc}\b" "${DS}/docker.log" \
         || { _stop; echo "update: ${output}"; return 1; }
-    # What: a failed apply returns checkout and config
-    # Why: no mix of old config and new compose may stay
-    # From: Issue #1683 | PR #1858
-    sed -i "s/Stack updated at ${mark}/Stack updated at ${mark}x/" "${t}/src/setup.sh"
-    g -C "${t}/src" commit -q -am c3 && g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}"
-    c3="$(g -C "${t}/src" rev-parse HEAD)"
-    cp "${t}/co/deploy/prod/.env.local" "${t}/env.before"
-    : > "${DS}/fail-apply"
+    g -C "${t}/src" commit -q --allow-empty -m c3 && g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}" \
+        && c3="$(g -C "${t}/src" rev-parse HEAD)" && cp "${t}/co/deploy/prod/.env.local" "${t}/env.before" \
+        && : > "${DS}/fail-apply" || { _stop; echo "revision 3 not published"; return 1; }
     _update
-    rm -f "${DS}/fail-apply"
+    rm -f "${DS}/fail-apply" || { _stop; return 1; }
     [ "${status}" -eq 1 ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${c2}" ] \
         && [[ "${output}" == *"Returned ${t}/co to ${c2}"* && "${output}" == *"rolled back"* ]] \
         && cmp -s "${t}/env.before" "${t}/co/deploy/prod/.env.local" \
         || { _stop; echo "rollback to ${c2} from ${c3}: ${output}"; return 1; }
-    # What: a detached checkout updates in place, unmoved
-    # Why: a pinned revision is the operator's choice
-    # From: Issue #1683 | PR #1858
-    g -C "${t}/co" checkout -q --detach
+    g -C "${t}/co" checkout -q --detach || { _stop; return 1; }
     _update
     _stop || return 1
     [ "${status}" -eq 0 ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${c2}" ] && [[ "${output}" == *"pinned commit"* ]] \
@@ -2736,6 +2696,7 @@ STUB
 }
 
 @test "setup fresh install writes a config the prod compose takes" {
+    _registry || return 1
     _stand_ins || return 1
     # What: the real wizard installs a checkout copy
     # Why: no other test runs the .env.local write
@@ -2776,7 +2737,6 @@ STUB
     # Why: setup.sh requires root; the test box may not be
     # From: Issue #1683 | PR #1858
     _tool_stub "${BIN}" id <<<'[ "$*" != -u ] || { echo 0; exit 0; }; exec "${ID_REAL:?}" "$@"'
-    printf 'sha256:%s' "$(printf '%064d' 0 | tr 0 a)" > "${DS}/digest"
     LANCACHE_IMAGE_TAG="v$(tr -d '[:space:]' < "${root}/VERSION")"
     export LANCACHE_IMAGE_CHANNEL=pinned LANCACHE_IMAGE_TAG
     # What: one answer per wizard prompt, all defaults
@@ -3698,7 +3658,8 @@ CASES
     aborted_on() {
         local e
         e="$(awk -v p="${err}" 'index($0, p) == 1' <<< "${output}")"
-        [ "${status}" -eq 1 ] && [[ "${output}" != *unreached* && "$(wc -l <<< "${e}")" -eq 1 && "${e}" == *"$1"* ]]
+        [ "${status}" -eq 1 ] && [[ "${output}" != *unreached* && "$(wc -l <<< "${e}")" -eq 1 && "${e}" == *"$1"* ]] \
+            || return 1
     }
     REF="missing-${BR}"
     _setup_sh_run 'sync_repo_to_ref "${T}/co" "${REF}"; echo unreached'
@@ -4142,6 +4103,7 @@ CASES
 }
 
 @test "setup secondary registration end to end per primary answer" {
+    _registry || return 1
     _stand_ins || return 1
     # What: cmd_secondary against a stub primary per answer
     # Why: token never in argv; failures stop before writes
@@ -4301,6 +4263,7 @@ CASES
 }
 
 @test "setup backup and restore round-trip per target and host" {
+    _registry || return 1
     _stand_ins || return 1
     # What: rollback in place twice; restore on a new host
     # Why: a restore must reproduce files, paths and volumes
