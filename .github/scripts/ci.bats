@@ -1939,6 +1939,44 @@ CASES
     _expect lock-dir 2 "[CI-ERROR-SCAN-0013]" || return 1
 }
 
+# What: the scan argv passes the pinned trivy's flag parser
+# Why: a stub took --trivyignores; the real trivy refused it
+# From: Issue #1683 | PR #1858
+@test "trivy scan argv: the pinned trivy accepts every flag" {
+    local root out skip
+    local -a a
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    for skip in 0 1; do
+        out="$(CI_REPO_ROOT="${root}" CI_TRIVY_TIMEOUT="$(_val int 1 9)m" _ci_trivy_args "$(_val path)" "${skip}")" || return 1
+        mapfile -t a <<< "${out}"
+        [ "${a[0]} ${a[1]}" = "trivy image" ] || { echo "argv: ${a[*]}"; return 1; }
+        run "${a[@]}" --help
+        [ "${status}" -eq 0 ] && [[ "${output}" != *"unknown flag"* ]] \
+            || { echo "skip ${skip}: ${a[*]}: rc ${status}: $(grep -m 1 -i -E 'error|unknown' <<< "${output}")"; return 1; }
+    done
+    [[ " ${a[*]} " == *" --ignorefile ${root}/"* && " ${a[*]} " == *" --skip-db-update "* ]] \
+        || { echo "argv lacks the ignore file or skip-db-update: ${a[*]}"; return 1; }
+}
+
+# What: each scan status gets its own code and exit code
+# Why: a run, DB or setup failure never reads as a finding
+# From: Issue #1683 | PR #1858
+@test "scan outcome: every trivy scan status has its own code" {
+    local svc raw st rc want odd
+    svc="$(_val name)" raw="$(_val name)" odd="$(_val int 5 99)"
+    while IFS='|' read -r st rc want; do
+        run _ci_scan_outcome "${svc}" "${st}" "${raw}"
+        _expect "status-${st}" "${rc}" "${want}" || return 1
+    done <<ROWS
+0|0|=
+1|2|[CI-ERROR-SCAN-0005] service="${svc}" reason="scan reported findings";${raw}
+3|3|[CI-ERROR-SCAN-0006] service="${svc}";${raw}
+4|3|[CI-ERROR-SCAN-0021] service="${svc}" reason="trivy run failed without a report;${raw}
+2|2|[CI-ERROR-SCAN-0022] service="${svc}" rc=2;${raw}
+${odd}|2|[CI-ERROR-SCAN-0022] service="${svc}" rc=${odd};${raw}
+ROWS
+}
+
 # What: one artifact state: ledger record + registry answer
 # Why: the real resolver reads both; no state is injected
 # From: Issue #1683 | PR #1858

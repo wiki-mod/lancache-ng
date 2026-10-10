@@ -3625,29 +3625,39 @@ _ci_trivy_db_ensure_fresh() {
     printf 'present=false\n'
 }
 
-# What: Scan an image digest with Trivy on the runner.
-# Why: A written report is a finding; only DB miss retries.
-# From: Issue #1683
-_ci_trivy_scan() {
-    local service="$1" digest="$2" ref report rc=0
-    local scanners ignore cache_rec cache_dir fresh_rec skip_db=0
+# What: trivy image argv for one scan, one item per line
+# Why: one owner; a test runs it through the real trivy
+# From: Issue #1683 | PR #1858
+_ci_trivy_args() {
+    local cache_dir="$1" skip_db="$2" scanners ignore
     scanners="$(_ci_variable CI_TRIVY_SCANNERS)" || return 2
     ignore="$(_ci_repo_path CI_TRIVY_IGNORE)" || return 2
+    printf '%s\n' trivy image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed \
+        --scanners "${scanners}" --cache-dir "${cache_dir}"
+    [ "${skip_db}" -ne 1 ] || printf '%s\n' --skip-db-update
+    [ ! -f "${ignore}" ] || printf '%s\n' --ignorefile "${ignore}"
+    [ -z "${CI_TRIVY_TIMEOUT:-}" ] || printf '%s\n' --timeout "${CI_TRIVY_TIMEOUT}"
+}
+
+# What: Scan an image digest; rc 1 finding, 3 DB, 4 run
+# Why: a failed run or a DB gap is never read as a finding
+# From: Issue #1683 | PR #1858
+_ci_trivy_scan() {
+    local service="$1" digest="$2" ref report rc=0 out
+    local cache_rec cache_dir fresh_rec skip_db=0
+    local -a targs
     cache_rec="$(_ci_trivy_cache_dir)" || return 3
     cache_dir="$(_ci_record_field "${cache_rec}" dir)"
     fresh_rec="$(_ci_trivy_db_ensure_fresh "${cache_dir}")" || return 3
     [ "$(_ci_record_field "${fresh_rec}" present)" = "true" ] && skip_db=1
     ref="$(_ci_image_ref "${service}" "${digest}")" || return 2
+    out="$(_ci_trivy_args "${cache_dir}" "${skip_db}")" || return 2
+    mapfile -t targs <<< "${out}"
     report="$(_ci_mktemp "${CI_TMPDIR}/ci-trivy.XXXXXX")" || return 2
-    local -a targs=(trivy image --severity "HIGH,CRITICAL" --exit-code 1
-        --ignore-unfixed --scanners "${scanners}" --cache-dir "${cache_dir}")
-    [ "${skip_db}" -eq 1 ] && targs+=(--skip-db-update)
-    [ -f "${ignore}" ] && targs+=(--trivyignores "${ignore}")
-    [ -n "${CI_TRIVY_TIMEOUT:-}" ] && targs+=(--timeout "${CI_TRIVY_TIMEOUT}")
-    _ci_retry trivy _ci_trivy_scan_once "${report}" "${ref}" "${targs[@]}" > /dev/null || rc=$?
+    _ci_retry trivy _ci_trivy_scan_once "${report}" "${ref}" "${targs[@]}" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         rm -f "${report}"
-        return 3
+        return 4
     fi
     # What: A written report means trivy scanned.
     # Why: A finding is deterministic; no retry.
@@ -4065,6 +4075,20 @@ _ci_trivy_sbom() {
     return 1
 }
 
+# What: one coded line per _ci_trivy_scan status; rc
+# Why: a run, DB or setup failure never reads as a finding
+# From: Issue #1683 | PR #1858
+_ci_scan_outcome() {
+    local service="$1" status="$2" raw="$3"
+    case "${status}" in
+        0) return 0 ;;
+        1) ci_error "[CI-ERROR-SCAN-0005]" "service=\"${service}\" reason=\"scan reported findings\"" "${raw}"; return 2 ;;
+        3) ci_error "[CI-ERROR-SCAN-0006]" "service=\"${service}\" reason=\"scan DB unavailable after retries; not a finding, escalate\"" "${raw}"; return 3 ;;
+        4) ci_error "[CI-ERROR-SCAN-0021]" "service=\"${service}\" reason=\"trivy run failed without a report; not a finding, escalate\"" "${raw}"; return 3 ;;
+        *) ci_error "[CI-ERROR-SCAN-0022]" "service=\"${service}\" rc=${status} reason=\"scan setup failed; not a finding\"" "${raw}"; return 2 ;;
+    esac
+}
+
 # What: Scan a published digest for vulnerabilities.
 # Why: /var/tmp staging (no tmpfs OOM), authed, fail-closed.
 # From: Issue #1683
@@ -4075,17 +4099,7 @@ ci_cmd_scan() {
     _ci_require_ghcr_auth || return "$?"
     local raw status
     if raw="$(TMPDIR="${CI_TMPDIR}" _ci_trivy_scan "${service}" "${digest}" 2>&1)"; then status=0; else status=$?; fi
-    # What: DB-unavailable is not a finding; escalate it.
-    # Why: A DB outage must not read as a finding.
-    # From: Issue #1683
-    if [ "${status}" -eq 3 ]; then
-        ci_error "[CI-ERROR-SCAN-0006]" "service=\"${service}\" reason=\"scan DB unavailable after retries; not a finding, escalate\"" "${raw}"
-        return 3
-    fi
-    if [ "${status}" -ne 0 ]; then
-        ci_error "[CI-ERROR-SCAN-0005]" "service=\"${service}\" reason=\"scan reported findings\"" "${raw}"
-        return 2
-    fi
+    _ci_scan_outcome "${service}" "${status}" "${raw}" || return "$?"
     printf 'service=%s scanned=clean digest=%s tmpdir=%s\n' "${service}" "${digest}" "${CI_TMPDIR}"
 }
 
