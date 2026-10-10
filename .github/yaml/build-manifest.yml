@@ -835,7 +835,7 @@ validation:
   # What: placeholder env for targets without .env
   # Why: operator keys are :?-required
   # From: Issue #1683 | PR #1858
-  compose_validation_env: CACHE_VALID_ANY=1h CACHE_VALID_HIT=30d IP_SSL=127.0.0.2 IP_STANDARD=127.0.0.1 LISTEN_IP=127.0.0.3 ALLOW_INSECURE_UI=true NATS_CONSUMER=ci-secondary NATS_DNS_REPLICA_USER=ci-nats-dns-replica NATS_DNS_WRITER_USER=ci-nats-dns-writer NATS_CALLOUT_USER=ci-nats-callout NATS_SYS_USER=ci-nats-sys NATS_UI_USER=ci-nats-ui NATS_USER=ci-nats-user NATS_ADVERTISE_URL=nats://192.0.2.10:4222 NATS_URL=nats://127.0.0.1:4222 NGINX_UPSTREAM_RESOLVER=1.1.1.1 PROXY_IP=127.0.0.1 SSL_CACHE_MAX_GB=10 STANDARD_CACHE_MAX_GB=10
+  compose_validation_env: CACHE_VALID_ANY=1h CACHE_VALID_HIT=30d DNS_XFR_PRIMARY=192.0.2.10:5300 IP_SSL=127.0.0.2 IP_STANDARD=127.0.0.1 LANCACHE_LOG_PORT=5514 LISTEN_IP=127.0.0.3 ALLOW_INSECURE_UI=true NATS_CONSUMER=ci-secondary NATS_DNS_REPLICA_USER=ci-nats-dns-replica NATS_DNS_WRITER_USER=ci-nats-dns-writer NATS_CALLOUT_USER=ci-nats-callout NATS_SYS_USER=ci-nats-sys NATS_UI_USER=ci-nats-ui NATS_USER=ci-nats-user NATS_ADVERTISE_URL=nats://192.0.2.10:4222 NATS_URL=nats://127.0.0.1:4222 NGINX_UPSTREAM_RESOLVER=1.1.1.1 PROXY_IP=127.0.0.1 SSL_CACHE_MAX_GB=10 STANDARD_CACHE_MAX_GB=10 SYSLOG_MAX_GB=10 SYSLOG_RETENTION_DAYS=30
   # What: secret keys of the render env, by value format.
   # Why: no secret value in the SOT; ci.sh makes each run.
   # From: Issue #1683 | PR #1858

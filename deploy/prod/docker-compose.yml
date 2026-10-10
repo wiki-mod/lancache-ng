@@ -38,8 +38,8 @@ services:
       - LANCACHE_LOG_PORT=${LANCACHE_LOG_PORT:?LANCACHE_LOG_PORT is required}
       - SSL_ENABLED=${SSL_ENABLED:-1}
       - NTP_ENABLED=${NTP_ENABLED:-0}
-      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
-      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
+      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:?SYSLOG_MAX_GB is required}
+      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:?SYSLOG_RETENTION_DAYS is required}
       - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
       - CACHEHAMSTER_DATA_DIR=/var/lib/lancache-cachehamster
     # What: the log input on loopback; NTP for the LAN.
@@ -326,8 +326,8 @@ services:
       - NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD:-}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
       - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
-      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
-      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
+      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:?SYSLOG_MAX_GB is required}
+      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:?SYSLOG_RETENTION_DAYS is required}
     volumes:
       - shared-secrets:/var/lib/lancache-secrets
       - ui-data:/data
