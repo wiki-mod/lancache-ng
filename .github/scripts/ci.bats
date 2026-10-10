@@ -119,17 +119,15 @@ _cache_env_clean() {
     [ "$#" -eq 0 ] || "$@"
 }
 
-# What: sources the real setup.sh; its guard stops before run
+# What: sources setup.sh; its guard stops before the run
 # Why: tests drive the product code with its real die
 # From: Issue #1683 | PR #1858
 _load_setup_sh() {
-    local opts
-    opts="$(set +o)" || return 1
+    local -
     SETUP_SH="$1/setup.sh"
     export SETUP_SH DOCKER_HOST="${SETUP_SH_DOCKER_HOST}"
     # shellcheck source=setup.sh
     source "${SETUP_SH}" "$(_val name)"
-    eval "${opts}"
 }
 
 # What: runs a snippet on loaded setup.sh fns, setup.sh opts
