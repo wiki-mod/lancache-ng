@@ -23,9 +23,10 @@ use futures_util::StreamExt as _;
 use lancache_ng::config::{
     self, CONTAINER_DHCP, CONTAINER_DHCP_PROBE, CONTAINER_DHCP_PROXY, CONTAINER_DNS_SSL,
     CONTAINER_DNS_STANDARD, CONTAINER_NATS, CONTAINER_NETDATA, CONTAINER_NTP, CONTAINER_PROXY,
-    CONTAINER_SYSLOG, CONTAINER_UI, DEFAULT_RECORD_TTL, DhcpMode, LAN_ZONE, NATS_STREAM_DNS,
-    NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, OutOfRange, PDNS_API_PATH, Uint,
-    canonical_zone, is_container, is_dns_name, parse_bool, rollback_zones, zone_url,
+    CONTAINER_SYSLOG, CONTAINER_UI, DEFAULT_RECORD_TTL, DhcpMode, LAN_ZONE, NATS_SUBJECT_FLUSH,
+    NATS_SUBJECT_RECORD, NatsLogin, NatsRoles, OutOfRange, PDNS_API_PATH, Uint, canonical_zone,
+    dns_reader_publish, dns_subscribe, is_container, is_dns_name, parse_bool, rollback_zones,
+    zone_url,
 };
 use lancache_ng::{
     DesiredRunState, DesiredState, DnsRecord, DockerApi, DockerError, FlushRequest, Place,
@@ -115,13 +116,6 @@ impl HstsMode {
     }
 }
 
-// What: user and password of one static NATS role.
-// Why: the password is Option so unset fails validation.
-struct NatsLogin {
-    user: String,
-    password: Option<String>,
-}
-
 // What: every startup value of the ui, read once.
 // Why: no Debug impl, so no log line can print a secret.
 struct Config {
@@ -165,11 +159,7 @@ struct Config {
     netdata_alarms_file: String,
     nats_url: String,
     advertised_nats_url: Option<String>,
-    nats_ui: NatsLogin,
-    nats_dns_writer: NatsLogin,
-    nats_dns_replica: NatsLogin,
-    nats_callout: NatsLogin,
-    nats_sys: NatsLogin,
+    nats: NatsRoles,
     nats_issuer_seed_path: String,
     nats_issuer_seed: Option<String>,
     nats_xkey_seed_path: String,
@@ -179,10 +169,7 @@ struct Config {
     lancache_image_prefix: String,
     lancache_image_channel: String,
     lancache_image_tag: String,
-    nats_conf_path: String,
     nats_auth_callout_path: String,
-    nats_service: String,
-    nats_log_file: String,
     // What: where the session secret persists.
     // Why: a recreate must not invalidate open sessions.
     // From: Issue #1683 | PR #1858
@@ -196,8 +183,6 @@ struct Config {
     // What: TCP port the server binds inside the container.
     // Why: Dockerfile owns it; the primary URL reuses it.
     listen_port: u16,
-    nats_store_dir: Option<String>,
-    nats_monitor_port: Option<u16>,
     netdata_conf_file: Option<String>,
     netdata_notify_file: Option<String>,
     netdata_token_file: Option<String>,
@@ -374,11 +359,7 @@ impl Config {
                 &text("NATS_BIND_IP", ""),
                 &nats_url,
             ),
-            nats_ui: login("NATS_UI_USER", "NATS_UI_PASSWORD")?,
-            nats_dns_writer: login("NATS_DNS_WRITER_USER", "NATS_DNS_WRITER_PASSWORD")?,
-            nats_dns_replica: login("NATS_DNS_REPLICA_USER", "NATS_DNS_REPLICA_PASSWORD")?,
-            nats_callout: login("NATS_CALLOUT_USER", "NATS_CALLOUT_PASSWORD")?,
-            nats_sys: login("NATS_SYS_USER", "NATS_SYS_PASSWORD")?,
+            nats: NatsRoles::read(&login)?,
             nats_issuer_seed_path: need("NATS_ISSUER_SEED_PATH")?,
             nats_issuer_seed: set("NATS_ISSUER_SEED"),
             nats_xkey_seed_path: need("NATS_XKEY_SEED_PATH")?,
@@ -388,19 +369,11 @@ impl Config {
             lancache_image_prefix: need("LANCACHE_IMAGE_PREFIX")?,
             lancache_image_channel: channel,
             lancache_image_tag: tag,
-            nats_conf_path: need("NATS_CONF_PATH")?,
             nats_auth_callout_path: need("NATS_AUTH_CALLOUT_PATH")?,
-            nats_service: need("NATS_SERVICE")?,
-            nats_log_file: need("NATS_LOG_FILE")?,
             session_secret_file: need("UI_SESSION_SECRET_FILE")?,
             database_file: need("UI_DATABASE_FILE")?,
             registration_token_file: need("SECONDARY_REGISTRATION_TOKEN_FILE")?,
             listen_port: knob("UI_LISTEN_PORT", u16::MAX.into(), OutOfRange::Reject)? as u16,
-            nats_store_dir: set("NATS_STORE_DIR"),
-            nats_monitor_port: set("NATS_MONITOR_PORT")
-                .map(|_| knob("NATS_MONITOR_PORT", u16::MAX.into(), OutOfRange::Reject))
-                .transpose()?
-                .map(|port| port as u16),
             netdata_conf_file: set("NETDATA_CONF_FILE"),
             netdata_notify_file: set("NETDATA_NOTIFY_FILE"),
             netdata_token_file: set("NETDATA_TOKEN_FILE"),
@@ -2178,7 +2151,7 @@ async fn nats_connect(url: &str, login: &NatsLogin) -> Result<async_nats::Client
 async fn connect_nats_with_retry(cfg: &Config) -> async_nats::Client {
     let mut delay = Duration::from_secs(1);
     loop {
-        match nats_connect(&cfg.nats_url, &cfg.nats_ui).await {
+        match nats_connect(&cfg.nats_url, &cfg.nats.ui).await {
             Ok(client) => {
                 tracing::info!("Connected to NATS at {}", cfg.nats_url);
                 return client;
@@ -2194,187 +2167,13 @@ async fn connect_nats_with_retry(cfg: &Config) -> async_nats::Client {
     }
 }
 
-// What: why a value cannot sit in a quoted NATS string.
-// Why: a quote, backslash or control char breaks nats.conf.
-fn nats_text_problem(label: &str, value: &str) -> Option<String> {
-    if value.is_empty() {
-        Some(format!("{label} cannot be empty"))
-    } else if value.chars().any(|c| (c as u32) < 32 || c as u32 == 127) {
-        Some(format!("{label} contains control characters"))
-    } else if value.contains('"') {
-        Some(format!("{label} contains double quotes"))
-    } else if value.contains('\\') {
-        Some(format!("{label} contains backslashes"))
-    } else {
-        None
-    }
-}
-
-// What: check one role's user name and password.
-// Why: bad values must fail before nats.conf is written.
-fn validate_nats_login(label: &str, login: &NatsLogin) -> Result<(), String> {
-    let problem = nats_text_problem("NATS username", &login.user)
-        .or_else(|| {
-            let allowed = |c: char| c.is_ascii_alphanumeric() || "_.-".contains(c);
-            (!login.user.chars().all(allowed)).then(|| {
-                format!(
-                    "NATS username contains invalid characters (allowed: [A-Za-z0-9_.-]), got: {}",
-                    login.user
-                )
-            })
-        })
-        .or_else(|| match login.password.as_deref() {
-            Some(password) => nats_text_problem("NATS password", password),
-            None => Some("NATS password cannot be empty".to_string()),
-        });
-    problem.map_or(Ok(()), |p| Err(format!("Invalid {label} credentials: {p}")))
-}
-
-// What: the five static roles with their display labels.
-// Why: nats.conf, validation and callout share one list.
-fn nats_roles(cfg: &Config) -> [(&'static str, &NatsLogin); 5] {
-    [
-        ("NATS UI", &cfg.nats_ui),
-        ("NATS DNS writer", &cfg.nats_dns_writer),
-        ("NATS DNS replica", &cfg.nats_dns_replica),
-        ("NATS auth-callout", &cfg.nats_callout),
-        ("NATS system account", &cfg.nats_sys),
-    ]
-}
-
-// What: every static role has valid credentials.
-// Why: nats.conf and the ui connection fail closed on env.
-fn validate_nats_credentials(cfg: &Config) -> Result<(), String> {
-    nats_roles(cfg)
-        .iter()
-        .try_for_each(|(label, login)| validate_nats_login(label, login))
-}
-
-// What: publish rights of every reader of the DNS stream.
-// Why: static DNS roles and secondaries must grant alike.
-fn dns_reader_publish() -> Vec<String> {
-    let stream = NATS_STREAM_DNS;
-    [
-        format!("$JS.API.STREAM.INFO.{stream}"),
-        format!("$JS.API.CONSUMER.INFO.{stream}.>"),
-        format!("$JS.API.CONSUMER.CREATE.{stream}.>"),
-        format!("$JS.API.CONSUMER.DURABLE.CREATE.{stream}.>"),
-        format!("$JS.API.CONSUMER.MSG.NEXT.{stream}.>"),
-        format!("$JS.ACK.{stream}.>"),
-    ]
-    .into()
-}
-
-// What: subjects every reader of the DNS stream receives.
-// Why: static DNS roles and secondaries must grant alike.
-fn dns_subscribe() -> [&'static str; 2] {
-    [NATS_SUBJECT_DNS, "_INBOX.>"]
-}
-
-// What: a NATS list of double-quoted strings.
-// Why: every subject list in nats.conf uses one syntax.
-fn nats_list<S: AsRef<str>>(items: &[S]) -> String {
-    let quoted: Vec<String> = items
-        .iter()
-        .map(|s| format!("\"{}\"", s.as_ref()))
-        .collect();
-    format!("[{}]", quoted.join(", "))
-}
-
-// What: one static user block, rights only when given.
-// Why: the callout user must have no subject rights.
-fn nats_role_block<P: AsRef<str>, S: AsRef<str>>(
-    login: &NatsLogin,
-    publish: &[P],
-    subscribe: &[S],
-) -> String {
-    let password = login.password.as_deref().unwrap_or_default();
-    let mut block = format!(
-        "    {{\n      user: \"{}\"\n      password: \"{password}\"\n",
-        login.user
-    );
-    if !publish.is_empty() {
-        block.push_str("      permissions = {\n");
-        block.push_str(&format!("        publish = {}\n", nats_list(publish)));
-        if !subscribe.is_empty() {
-            block.push_str(&format!("        subscribe = {}\n", nats_list(subscribe)));
-        }
-        block.push_str("      }\n");
-    }
-    block.push_str("    }\n");
-    block
-}
-
-// What: the static nats.conf of the stack's fixed roles.
-// Why: one owner of NATS users, rights and the include.
-// From: Issue #1683 | PR #1858
-fn render_nats_conf(cfg: &Config) -> Result<String, String> {
-    validate_nats_credentials(cfg)?;
-    let store_dir = cfg
-        .nats_store_dir
-        .as_deref()
-        .ok_or("NATS_STORE_DIR is not set")?;
-    let monitor_port = cfg
-        .nats_monitor_port
-        .ok_or_else(|| config::not_set("NATS_MONITOR_PORT"))?;
-    let fragment = Path::new(&cfg.nats_auth_callout_path);
-    if fragment.parent() != Path::new(&cfg.nats_conf_path).parent() {
-        return Err(format!(
-            "{} must sit next to {}",
-            cfg.nats_auth_callout_path, cfg.nats_conf_path
-        ));
-    }
-    let include = fragment
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| format!("{} has no file name", cfg.nats_auth_callout_path))?;
-    for (label, value) in [
-        ("NATS store dir", store_dir),
-        ("NATS log file", cfg.nats_log_file.as_str()),
-        ("NATS fragment name", include),
-    ] {
-        if let Some(problem) = nats_text_problem(label, value) {
-            return Err(problem);
-        }
-    }
-    let writer_publish: Vec<String> = [NATS_SUBJECT_RECORD, NATS_SUBJECT_FLUSH]
-        .into_iter()
-        .map(str::to_string)
-        .chain([format!("$JS.API.STREAM.CREATE.{NATS_STREAM_DNS}")])
-        .chain(dns_reader_publish())
-        .collect();
-    let none: [&str; 0] = [];
-    let users = [
-        nats_role_block(
-            &cfg.nats_ui,
-            &[NATS_SUBJECT_RECORD, NATS_SUBJECT_FLUSH],
-            &none,
-        ),
-        nats_role_block(&cfg.nats_dns_writer, &writer_publish, &dns_subscribe()),
-        nats_role_block(&cfg.nats_dns_replica, &writer_publish, &dns_subscribe()),
-        nats_role_block(&cfg.nats_callout, &none, &none),
-    ]
-    .concat();
-    let log_file = &cfg.nats_log_file;
-    let sys = &cfg.nats_sys;
-    let sys_password = sys.password.as_deref().unwrap_or_default();
-    let sys_user = &sys.user;
-    Ok(format!(
-        "jetstream {{\n  store_dir: \"{store_dir}\"\n}}\n\
-         http_port: {monitor_port}\n\
-         log_file: \"{log_file}\"\n\
-         authorization {{\n  users = [\n{users}  ]\n  include \"{include}\"\n}}\n\
-         accounts {{\n  SYS: {{\n    users: [\n      \
-         {{ user: \"{sys_user}\", password: \"{sys_password}\" }}\n    ]\n  }}\n}}\n\
-         system_account: SYS\n"
-    ))
-}
-
 // What: the auth_callout stanza nats.conf includes.
 // Why: only the ui knows the issuer and xkey public keys.
 // From: Issue #811 | PR #1858
 fn render_auth_callout_fragment(cfg: &Config, issuer: &str, xkey: &str) -> String {
-    let users: Vec<String> = nats_roles(cfg)
+    let users: Vec<String> = cfg
+        .nats
+        .labelled()
         .iter()
         .map(|(_, l)| format!("\"{}\"", l.user))
         .collect();
@@ -2384,29 +2183,24 @@ fn render_auth_callout_fragment(cfg: &Config, issuer: &str, xkey: &str) -> Strin
     )
 }
 
-// What: write the fragment; restart NATS only on a change.
-// Why: nats-server has no hot reload; a restart kicks all.
-// From: Issue #811
-async fn reload_nats_conf(state: &AppState) -> Result<(), String> {
-    validate_nats_credentials(&state.config)?;
+// What: write the auth_callout fragment when it changed.
+// Why: the dns supervisor restarts nats-server on a change.
+// From: Issue #811 | Issue #1683
+fn write_callout_fragment(state: &AppState) -> Result<(), String> {
+    state.config.nats.validate()?;
     let fragment = render_auth_callout_fragment(
         &state.config,
         &state.nats_issuer_public_key,
         &state.nats_callout_xkey_public_key,
     );
-    let changed = write_if_changed(
+    write_if_changed(
         Path::new(&state.config.nats_auth_callout_path),
         fragment.as_bytes(),
         0o644,
         None,
     )
-    .map_err(|e| e.to_string())?;
-    if !changed {
-        return Ok(());
-    }
-    docker_restart(&state.docker, &state.config.nats_service)
-        .await
-        .map_err(|e| format!("Failed to restart NATS service: {e:#}"))
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 // What: base64url without padding.
@@ -2585,7 +2379,7 @@ async fn answer_auth_callout(
 async fn run_auth_callout(state: Arc<AppState>, issuer: KeyPair, xkey: XKey) {
     let mut delay = Duration::from_secs(1);
     loop {
-        let client = match nats_connect(&state.config.nats_url, &state.config.nats_callout).await {
+        let client = match nats_connect(&state.config.nats_url, &state.config.nats.callout).await {
             Ok(client) => {
                 delay = Duration::from_secs(1);
                 client
@@ -2621,12 +2415,12 @@ async fn run_auth_callout(state: Arc<AppState>, issuer: KeyPair, xkey: XKey) {
 // From: Issue #681
 async fn kick_secondary(state: &AppState, nats_user: &str) -> Result<usize, String> {
     const STEP: Duration = Duration::from_secs(5);
-    if state.config.nats_sys.user.is_empty() {
+    if state.config.nats.sys.user.is_empty() {
         return Err("NATS_SYS_USER is not configured".to_string());
     }
     let client = tokio::time::timeout(
         STEP,
-        nats_connect(&state.config.nats_url, &state.config.nats_sys),
+        nats_connect(&state.config.nats_url, &state.config.nats.sys),
     )
     .await
     .map_err(|_| "timed out connecting to NATS as the system account".to_string())??;
@@ -6688,7 +6482,7 @@ fn registration_token(configured: &str, token_file: &str) -> Result<String, Stri
 // What: the session lifetime, after all start-up checks.
 // Why: bad env must fail closed before NATS or state.
 fn preflight(cfg: &Config) -> Result<Duration, String> {
-    validate_nats_credentials(cfg)?;
+    cfg.nats.validate()?;
     // What: auth must be fully set, or insecure chosen.
     // Why: a half-set pair would run without a login.
     match (&cfg.auth_user, &cfg.auth_password) {
@@ -6771,7 +6565,7 @@ fn ui_written_dirs(cfg: &Config, log_file: &Path) -> Vec<PathBuf> {
         &cfg.netdata_alarms_file,
         &cfg.nats_xkey_seed_path,
         &cfg.desired_state_file,
-        &cfg.nats_conf_path,
+        &cfg.nats_auth_callout_path,
     ];
     let mut dirs: Vec<PathBuf> = files
         .iter()
@@ -6874,17 +6668,6 @@ fn put(path: &Path, content: &str, mode: u32, owner: Option<(u32, u32)>) -> Resu
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
-// What: an empty file only when none exists yet.
-// Why: the ui owns the fragment; a rerun never clobbers it.
-// From: Issue #811 | PR #1858
-fn create_if_absent(path: &Path, mode: u32, owner: Option<(u32, u32)>) -> Result<(), String> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => put(path, "", mode, owner),
-        Err(e) => Err(format!("cannot stat {}: {e}", path.display())),
-    }
-}
-
 // What: resolve one prefix's secrets, then load Config.
 // Why: Config reads a secret file only once it exists.
 // From: Issue #1683 | PR #1858
@@ -6892,25 +6675,6 @@ fn prepared_config(gid: u32, prefix: &str) -> Result<Config, String> {
     let cfg = Config::from_env()?;
     ensure_shared_secrets(&cfg.shared_secret_dir, gid, prefix)?;
     Config::from_env()
-}
-
-// What: nats.conf, the fragment stub and the nats log dir.
-// Why: nats-server reads all of them at its first start.
-// From: Issue #1683 | PR #1858
-fn prepare_nats(gid: u32) -> Result<(), String> {
-    let owner = Some((required_env_id("UI_RUNTIME_UID"), gid));
-    let cfg = prepared_config(gid, "NATS_")?;
-    put(
-        Path::new(&cfg.nats_conf_path),
-        &render_nats_conf(&cfg)?,
-        0o600,
-        owner,
-    )?;
-    create_if_absent(Path::new(&cfg.nats_auth_callout_path), 0o644, owner)?;
-    let dir = Path::new(&cfg.nats_log_file)
-        .parent()
-        .ok_or_else(|| format!("NATS_LOG_FILE={} has no directory", cfg.nats_log_file))?;
-    open_log_dir_to_group(dir, gid).map_err(|e| format!("{}: {e}", dir.display()))
 }
 
 // What: alarm token, sender, log config and log dir.
@@ -6967,14 +6731,13 @@ fn prepare_netdata(gid: u32) -> Result<(), String> {
 fn prepare_runtime(args: &[String]) -> ! {
     let gid = required_env_id("UI_RUNTIME_GID");
     let done = match args {
-        [target] if target == "nats" => prepare_nats(gid),
         [target] if target == "netdata" => prepare_netdata(gid),
         [target, dirs @ ..] if target == "logs" && !dirs.is_empty() => {
             dirs.iter().try_for_each(|d| {
                 open_log_dir_to_group(Path::new(d), gid).map_err(|e| format!("{d}: {e}"))
             })
         }
-        _ => Err("usage: --prepare nats | netdata | logs <dir>...".to_string()),
+        _ => Err("usage: --prepare netdata | logs <dir>...".to_string()),
     };
     match done {
         Ok(()) => std::process::exit(0),
@@ -7071,32 +6834,6 @@ fn callout_xkey(cfg: &Config) -> Result<XKey, String> {
         },
     )
     .map_err(|e| format!("{e:#}"))
-}
-
-// What: write the callout fragment; restart NATS on change.
-// Why: the docker proxy may not be ready at ui start.
-// From: Issue #811 | PR #1610
-async fn apply_callout_fragment(state: &AppState) {
-    // What: 8 tries; delay starts at 1 s and caps at 8 s.
-    // Why: the Docker proxy may start after the ui.
-    const ATTEMPTS: u32 = 8;
-    let mut delay = Duration::from_secs(1);
-    for attempt in 1..=ATTEMPTS {
-        match reload_nats_conf(state).await {
-            Ok(()) => return,
-            Err(e) if attempt == ATTEMPTS => tracing::error!(
-                "Failed to apply the auth_callout fragment after {ATTEMPTS} attempts; NATS keeps \
-                 its previous fragment and may reject callout responses: {e}"
-            ),
-            Err(e) => {
-                tracing::warn!(
-                    "Could not apply the auth_callout fragment (attempt {attempt}/{ATTEMPTS}): \
-                     {e}. Retrying in {delay:?}"
-                );
-                backoff(&mut delay, Duration::from_secs(8)).await;
-            }
-        }
-    }
 }
 
 // What: every route of the ui, public and protected.
@@ -7217,7 +6954,9 @@ async fn run() -> anyhow::Result<()> {
         nats_callout_xkey_public_key: xkey.public_key(),
         config: cfg,
     });
-    apply_callout_fragment(&state).await;
+    if let Err(e) = write_callout_fragment(&state) {
+        tracing::error!("Failed to write the auth_callout fragment: {e}");
+    }
     // What: answer auth-callout requests while running.
     // Why: secondaries are checked per connect; no reload.
     tokio::spawn(run_auth_callout(state.clone(), issuer, xkey));
@@ -7783,7 +7522,7 @@ mod tests {
         assert_eq!(fields.number::<u32>("none"), None);
     }
 
-    const TEXT_KEYS: [&str; 41] = [
+    const TEXT_KEYS: [&str; 38] = [
         "STANDARD_LOG",
         "PROXY_STANDARD_URL",
         "STANDARD_IP",
@@ -7814,10 +7553,7 @@ mod tests {
         "NATS_XKEY_SEED_PATH",
         "LANCACHE_IMAGE_REGISTRY",
         "LANCACHE_IMAGE_PREFIX",
-        "NATS_CONF_PATH",
         "NATS_AUTH_CALLOUT_PATH",
-        "NATS_SERVICE",
-        "NATS_LOG_FILE",
         "UI_SESSION_SECRET_FILE",
         "UI_DATABASE_FILE",
         "SECONDARY_REGISTRATION_TOKEN_FILE",
@@ -7894,10 +7630,7 @@ mod tests {
         assert_eq!(cfg.nats_xkey_seed_path, "v-NATS_XKEY_SEED_PATH");
         assert_eq!(cfg.lancache_image_registry, "v-LANCACHE_IMAGE_REGISTRY");
         assert_eq!(cfg.lancache_image_prefix, "v-LANCACHE_IMAGE_PREFIX");
-        assert_eq!(cfg.nats_conf_path, "v-NATS_CONF_PATH");
         assert_eq!(cfg.nats_auth_callout_path, "v-NATS_AUTH_CALLOUT_PATH");
-        assert_eq!(cfg.nats_service, "v-NATS_SERVICE");
-        assert_eq!(cfg.nats_log_file, "v-NATS_LOG_FILE");
         assert_eq!(cfg.session_secret_file, "v-UI_SESSION_SECRET_FILE");
         assert_eq!(cfg.database_file, "v-UI_DATABASE_FILE");
         assert_eq!(
@@ -7929,10 +7662,8 @@ mod tests {
         assert!(!cfg.dev_mode);
         assert_eq!(cfg.secondary_registration_token, "");
         assert_eq!(cfg.advertised_nats_url, None);
-        assert_eq!(cfg.nats_monitor_port, None);
-        assert_eq!(cfg.nats_store_dir, None);
-        assert_eq!(cfg.nats_ui.user, "");
-        assert_eq!(cfg.nats_ui.password, None);
+        assert_eq!(cfg.nats.ui.user, "");
+        assert_eq!(cfg.nats.ui.password, None);
         assert_eq!(cfg.lancache_image_channel, "latest");
         assert_eq!(cfg.pdns_api_key, "");
         assert_eq!(cfg.dhcp_api_token, "");
@@ -7963,8 +7694,6 @@ mod tests {
             ("LANCACHE_DEV_MODE", "1"),
             ("SECONDARY_REGISTRATION_TOKEN", "tok"),
             ("NATS_BIND_IP", "192.0.2.9"),
-            ("NATS_MONITOR_PORT", "8222"),
-            ("NATS_STORE_DIR", "/store"),
             ("NATS_UI_USER", "ui"),
             ("NATS_UI_PASSWORD", "ui-secret"),
             ("DHCP_API_TOKEN", "kea-token"),
@@ -8001,10 +7730,8 @@ mod tests {
             None,
             "the internal v-NATS_URL has no port"
         );
-        assert_eq!(cfg.nats_monitor_port, Some(8222));
-        assert_eq!(cfg.nats_store_dir.as_deref(), Some("/store"));
-        assert_eq!(cfg.nats_ui.user, "ui");
-        assert_eq!(cfg.nats_ui.password.as_deref(), Some("ui-secret"));
+        assert_eq!(cfg.nats.ui.user, "ui");
+        assert_eq!(cfg.nats.ui.password.as_deref(), Some("ui-secret"));
         assert_eq!(cfg.dhcp_api_token, "kea-token");
         assert_eq!(cfg.pdns_api_key, "pdns-key");
         assert_eq!(cfg.netdata_alarm_token, "alarm-token");
@@ -8055,7 +7782,6 @@ mod tests {
             ("UI_SESSION_TTL_SECONDS", "31536001"),
             ("UI_LISTEN_PORT", "65536"),
             ("KEEP_KNOWN_GOOD_CONFIGS", "0"),
-            ("NATS_MONITOR_PORT", "x"),
         ] {
             let mut env = full_env();
             env.insert(key.to_string(), junk.to_string());
@@ -8943,80 +8669,11 @@ mod tests {
             ("NATS_CALLOUT_PASSWORD", "pw-callout"),
             ("NATS_SYS_USER", "sys"),
             ("NATS_SYS_PASSWORD", "pw-sys"),
-            ("NATS_STORE_DIR", "/data"),
-            ("NATS_MONITOR_PORT", "8222"),
-            ("NATS_CONF_PATH", "/etc/nats/nats.conf"),
-            ("NATS_AUTH_CALLOUT_PATH", "/etc/nats/auth.conf"),
-            ("NATS_LOG_FILE", "/log/nats.log"),
         ];
         for (key, value) in extra {
             env.insert(key.to_string(), value.to_string());
         }
         env
-    }
-
-    // What: unsafe NATS strings are named by their problem.
-    // Why: a quote or control char breaks nats.conf.
-    #[test]
-    fn nats_text_problems_are_named() {
-        assert_eq!(
-            nats_text_problem("L", ""),
-            Some("L cannot be empty".to_string())
-        );
-        for control in ["a\nb", "a\u{7f}b", "a\u{1f}"] {
-            let want = Some("L contains control characters".to_string());
-            assert_eq!(nats_text_problem("L", control), want, "{control:?}");
-        }
-        let quote = nats_text_problem("L", "a\"b");
-        assert_eq!(quote, Some("L contains double quotes".to_string()));
-        let slash = nats_text_problem("L", "a\\b");
-        assert_eq!(slash, Some("L contains backslashes".to_string()));
-        assert_eq!(nats_text_problem("L", "fine value 1"), None);
-        assert_eq!(nats_text_problem("L", " "), None);
-    }
-
-    // What: a role needs a plain user and a safe password.
-    // Why: bad values must fail before nats.conf is made.
-    #[test]
-    fn nats_logins_are_validated_with_a_role_label() {
-        let login = |user: &str, password: Option<&str>| NatsLogin {
-            user: user.to_string(),
-            password: password.map(str::to_string),
-        };
-        assert_eq!(
-            validate_nats_login("R", &login("ui-1.a_b", Some("x"))),
-            Ok(())
-        );
-        let cases = [
-            (login("", Some("x")), "NATS username cannot be empty"),
-            (login("ui", None), "NATS password cannot be empty"),
-            (login("ui", Some("")), "NATS password cannot be empty"),
-            (
-                login("ui", Some("a\"b")),
-                "NATS password contains double quotes",
-            ),
-            (
-                login("bad user", Some("x")),
-                "NATS username contains invalid characters (allowed: [A-Za-z0-9_.-]), got: bad user",
-            ),
-        ];
-        for (bad, problem) in cases {
-            let want = Err(format!("Invalid R credentials: {problem}"));
-            assert_eq!(validate_nats_login("R", &bad), want);
-        }
-        let cfg = nats_config();
-        assert_eq!(validate_nats_credentials(&cfg), Ok(()));
-        let labels: Vec<&str> = nats_roles(&cfg).iter().map(|(label, _)| *label).collect();
-        assert_eq!(
-            labels,
-            [
-                "NATS UI",
-                "NATS DNS writer",
-                "NATS DNS replica",
-                "NATS auth-callout",
-                "NATS system account"
-            ]
-        );
     }
 
     // What: a missing role password fails the whole set.
@@ -9026,137 +8683,11 @@ mod tests {
         let mut env = full_env();
         env.insert("NATS_SYS_USER".to_string(), "sys".to_string());
         let cfg = load_from(&env).unwrap();
-        let err = validate_nats_credentials(&cfg).unwrap_err();
+        let err = cfg.nats.validate().unwrap_err();
         assert_eq!(
             err,
             "Invalid NATS UI credentials: NATS username cannot be empty"
         );
-    }
-
-    // What: lists and role blocks use the nats.conf syntax.
-    // Why: the callout user must have no subject rights.
-    #[test]
-    fn nats_role_blocks_grant_rights_only_when_given() {
-        assert_eq!(nats_list(&["a", "b.>"]), "[\"a\", \"b.>\"]");
-        assert_eq!(nats_list::<&str>(&[]), "[]");
-        let login = NatsLogin {
-            user: "u".to_string(),
-            password: Some("p".to_string()),
-        };
-        let none: [&str; 0] = [];
-        assert_eq!(
-            nats_role_block(&login, &none, &none),
-            "    {\n      user: \"u\"\n      password: \"p\"\n    }\n"
-        );
-        assert_eq!(
-            nats_role_block(&login, &["x"], &none),
-            "    {\n      user: \"u\"\n      password: \"p\"\n      permissions = {\n        publish = [\"x\"]\n      }\n    }\n"
-        );
-        assert_eq!(
-            nats_role_block(&login, &["x"], &["y"]),
-            "    {\n      user: \"u\"\n      password: \"p\"\n      permissions = {\n        publish = [\"x\"]\n        subscribe = [\"y\"]\n      }\n    }\n"
-        );
-        assert_eq!(
-            nats_role_block(&login, &none, &["y"]),
-            "    {\n      user: \"u\"\n      password: \"p\"\n    }\n"
-        );
-    }
-
-    // What: DNS readers get fixed publish and subscribe.
-    // Why: static DNS roles and secondaries grant alike.
-    #[test]
-    fn dns_reader_rights_are_fixed() {
-        assert_eq!(
-            dns_reader_publish(),
-            [
-                "$JS.API.STREAM.INFO.LANCACHE_DNS",
-                "$JS.API.CONSUMER.INFO.LANCACHE_DNS.>",
-                "$JS.API.CONSUMER.CREATE.LANCACHE_DNS.>",
-                "$JS.API.CONSUMER.DURABLE.CREATE.LANCACHE_DNS.>",
-                "$JS.API.CONSUMER.MSG.NEXT.LANCACHE_DNS.>",
-                "$JS.ACK.LANCACHE_DNS.>",
-            ]
-        );
-        assert_eq!(dns_subscribe(), ["lancache.dns.>", "_INBOX.>"]);
-    }
-
-    // What: the static nats.conf for the fixed roles.
-    // Why: one owner of NATS users, rights and the include.
-    #[test]
-    fn nats_conf_renders_roles_and_the_include() {
-        let writer = "[\"lancache.dns.record\", \"lancache.dns.flush\", \"$JS.API.STREAM.CREATE.LANCACHE_DNS\", \"$JS.API.STREAM.INFO.LANCACHE_DNS\", \"$JS.API.CONSUMER.INFO.LANCACHE_DNS.>\", \"$JS.API.CONSUMER.CREATE.LANCACHE_DNS.>\", \"$JS.API.CONSUMER.DURABLE.CREATE.LANCACHE_DNS.>\", \"$JS.API.CONSUMER.MSG.NEXT.LANCACHE_DNS.>\", \"$JS.ACK.LANCACHE_DNS.>\"]";
-        let reader = "[\"lancache.dns.>\", \"_INBOX.>\"]";
-        let role = |user: &str, rights: &str| {
-            format!(
-                "    {{\n      user: \"{user}\"\n      password: \"pw-{user}\"\n{rights}    }}\n"
-            )
-        };
-        let ui = "      permissions = {\n        publish = [\"lancache.dns.record\", \"lancache.dns.flush\"]\n      }\n";
-        let dns = format!(
-            "      permissions = {{\n        publish = {writer}\n        subscribe = {reader}\n      }}\n"
-        );
-        let want = format!(
-            "jetstream {{\n  store_dir: \"/data\"\n}}\nhttp_port: 8222\nlog_file: \"/log/nats.log\"\nauthorization {{\n  users = [\n{}{}{}{}  ]\n  include \"auth.conf\"\n}}\naccounts {{\n  SYS: {{\n    users: [\n      {{ user: \"sys\", password: \"pw-sys\" }}\n    ]\n  }}\n}}\nsystem_account: SYS\n",
-            role("ui", ui),
-            role("dnsw", &dns),
-            role("dnsr", &dns),
-            role("callout", ""),
-        );
-        let got = render_nats_conf(&nats_config()).unwrap();
-        assert_eq!(got, want);
-    }
-
-    // What: nats.conf is refused for unsafe or missing data
-    // Why: a bad file would stop the broker on restart.
-    #[test]
-    fn nats_conf_refuses_bad_input() {
-        let base = |key: &str, value: Option<&str>| {
-            let mut env = full_env();
-            let all = [
-                ("NATS_UI_USER", "ui"),
-                ("NATS_UI_PASSWORD", "a"),
-                ("NATS_DNS_WRITER_USER", "w"),
-                ("NATS_DNS_WRITER_PASSWORD", "a"),
-                ("NATS_DNS_REPLICA_USER", "r"),
-                ("NATS_DNS_REPLICA_PASSWORD", "a"),
-                ("NATS_CALLOUT_USER", "c"),
-                ("NATS_CALLOUT_PASSWORD", "a"),
-                ("NATS_SYS_USER", "s"),
-                ("NATS_SYS_PASSWORD", "a"),
-                ("NATS_STORE_DIR", "/data"),
-                ("NATS_MONITOR_PORT", "8222"),
-                ("NATS_CONF_PATH", "/etc/nats/nats.conf"),
-                ("NATS_AUTH_CALLOUT_PATH", "/etc/nats/auth.conf"),
-                ("NATS_LOG_FILE", "/log/nats.log"),
-            ];
-            for (k, v) in all {
-                env.insert(k.to_string(), v.to_string());
-            }
-            match value {
-                Some(v) => env.insert(key.to_string(), v.to_string()),
-                None => env.remove(key),
-            };
-            render_nats_conf(&load_from(&env).unwrap())
-        };
-        assert_eq!(
-            base("NATS_STORE_DIR", None),
-            Err("NATS_STORE_DIR is not set".to_string())
-        );
-        let port = base("NATS_MONITOR_PORT", None).unwrap_err();
-        assert!(port.contains("NATS_MONITOR_PORT"), "{port}");
-        let apart = base("NATS_AUTH_CALLOUT_PATH", Some("/other/auth.conf")).unwrap_err();
-        assert_eq!(
-            apart,
-            "/other/auth.conf must sit next to /etc/nats/nats.conf"
-        );
-        let quote = base("NATS_LOG_FILE", Some("/log/\"x\"")).unwrap_err();
-        assert_eq!(quote, "NATS log file contains double quotes");
-        let store = base("NATS_STORE_DIR", Some("/da\\ta")).unwrap_err();
-        assert_eq!(store, "NATS store dir contains backslashes");
-        let nameless = base("NATS_AUTH_CALLOUT_PATH", Some("/etc/nats/")).unwrap_err();
-        assert_eq!(nameless, "/etc/nats/ must sit next to /etc/nats/nats.conf");
-        let user = base("NATS_UI_USER", Some("bad user")).unwrap_err();
-        assert!(user.starts_with("Invalid NATS UI credentials"));
     }
 
     // What: the auth_callout stanza lists the static users.
@@ -10788,23 +10319,9 @@ mod tests {
             fs::metadata(&file).unwrap().permissions().mode() & 0o777,
             0o644
         );
-        let stub = dir.join("stub");
-        create_if_absent(&stub, 0o644, None).unwrap();
-        assert_eq!(fs::read_to_string(&stub).unwrap(), "");
-        fs::write(&stub, "mine").unwrap();
-        create_if_absent(&stub, 0o644, None).unwrap();
-        assert_eq!(fs::read_to_string(&stub).unwrap(), "mine");
-        std::os::unix::fs::symlink("/nowhere", dir.join("dangling")).unwrap();
-        create_if_absent(&dir.join("dangling"), 0o644, None).unwrap();
-        assert!(!dir.join("nowhere").exists());
         fs::write(dir.join("plain"), "x").unwrap();
         let blocked = put(&dir.join("plain/child"), "x", 0o644, None).unwrap_err();
         assert!(blocked.starts_with("cannot write "), "{blocked}");
-        let stat = create_if_absent(&dir.join("plain/child"), 0o644, None).unwrap_err();
-        assert!(
-            stat.starts_with("cannot stat ") || stat.starts_with("cannot write "),
-            "{stat}"
-        );
         let _ = fs::remove_dir_all(&dir);
     }
 

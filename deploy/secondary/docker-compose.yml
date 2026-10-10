@@ -13,6 +13,7 @@ services:
   dns:
     container_name: LanCache-NG-dns
     image: ${LANCACHE_IMAGE_REF_DNS:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}}
+    init: true
     environment:
       - PROXY_IP=${PROXY_IP:?PROXY_IP is required}
       - PDNS_API_KEY=${PDNS_API_KEY}
@@ -20,6 +21,12 @@ services:
       - DDNS_ALLOW_FROM=127.0.0.1
       - DNS_REPLICATION_ROLE=secondary
       - DNS_XFR_PRIMARY=${DNS_XFR_PRIMARY:?DNS_XFR_PRIMARY is required}
+      - SUPERVISE_RUN_DIR=/run/lancache
+      - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-dns/secrets
+      - LANCACHE_SHARED_SECRET_GID=0
+      - PDNS_DATA_DIR=/var/lib/powerdns
+      - DNS_STATE_DIR=/var/lib/powerdns-state
+      - DNS_CONFIG_SNAPSHOT_DIR=/var/lib/lancache-dns/config-snapshots
       - NATS_URL=${NATS_URL:?NATS_URL is required}
       - NATS_USER=${NATS_USER:?NATS_USER is required}
       - NATS_PASSWORD=${NATS_PASSWORD}
@@ -30,6 +37,8 @@ services:
       - pdns-data:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
       - dns-config-snapshots:/var/lib/lancache-dns
+    tmpfs:
+      - /run/lancache
     # What: dns-http only; a secondary has one LAN IP.
     # Why: LISTEN_IP is the address setup.sh registered.
     # From: Issue #1683

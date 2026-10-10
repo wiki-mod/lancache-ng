@@ -245,6 +245,205 @@ pub const NATS_SUBJECT_DNS: &str = "lancache.dns.>";
 pub const NATS_SUBJECT_RECORD: &str = "lancache.dns.record";
 pub const NATS_SUBJECT_FLUSH: &str = "lancache.dns.flush";
 
+// What: user and password of one static NATS role.
+// Why: the password is Option so unset fails validation.
+pub struct NatsLogin {
+    pub user: String,
+    pub password: Option<String>,
+}
+
+// What: the five static NATS roles of the stack.
+// Why: nats.conf, validation and callout share one list.
+// From: Issue #1683 | PR #1858
+pub struct NatsRoles {
+    pub ui: NatsLogin,
+    pub dns_writer: NatsLogin,
+    pub dns_replica: NatsLogin,
+    pub callout: NatsLogin,
+    pub sys: NatsLogin,
+}
+
+impl NatsRoles {
+    // What: every role from its user and password keys.
+    // Why: ui and dns read the same keys by their own rule.
+    pub fn read(
+        load: &dyn Fn(&str, &str) -> Result<NatsLogin, String>,
+    ) -> Result<NatsRoles, String> {
+        Ok(NatsRoles {
+            ui: load("NATS_UI_USER", "NATS_UI_PASSWORD")?,
+            dns_writer: load("NATS_DNS_WRITER_USER", "NATS_DNS_WRITER_PASSWORD")?,
+            dns_replica: load("NATS_DNS_REPLICA_USER", "NATS_DNS_REPLICA_PASSWORD")?,
+            callout: load("NATS_CALLOUT_USER", "NATS_CALLOUT_PASSWORD")?,
+            sys: load("NATS_SYS_USER", "NATS_SYS_PASSWORD")?,
+        })
+    }
+
+    // What: the five roles with their display labels.
+    // Why: validation and the callout user list iterate them.
+    pub fn labelled(&self) -> [(&'static str, &NatsLogin); 5] {
+        [
+            ("NATS UI", &self.ui),
+            ("NATS DNS writer", &self.dns_writer),
+            ("NATS DNS replica", &self.dns_replica),
+            ("NATS auth-callout", &self.callout),
+            ("NATS system account", &self.sys),
+        ]
+    }
+
+    // What: every static role has valid credentials.
+    // Why: nats.conf and the ui connection fail closed.
+    pub fn validate(&self) -> Result<(), String> {
+        self.labelled()
+            .iter()
+            .try_for_each(|(label, login)| validate_nats_login(label, login))
+    }
+}
+
+// What: why a value cannot sit in a quoted NATS string.
+// Why: a quote, backslash or control char breaks nats.conf.
+fn nats_text_problem(label: &str, value: &str) -> Option<String> {
+    if value.is_empty() {
+        Some(format!("{label} cannot be empty"))
+    } else if value.chars().any(|c| (c as u32) < 32 || c as u32 == 127) {
+        Some(format!("{label} contains control characters"))
+    } else if value.contains('"') {
+        Some(format!("{label} contains double quotes"))
+    } else if value.contains('\\') {
+        Some(format!("{label} contains backslashes"))
+    } else {
+        None
+    }
+}
+
+// What: check one role's user name and password.
+// Why: bad values must fail before nats.conf is written.
+fn validate_nats_login(label: &str, login: &NatsLogin) -> Result<(), String> {
+    let problem = nats_text_problem("NATS username", &login.user)
+        .or_else(|| {
+            let allowed = |c: char| c.is_ascii_alphanumeric() || "_.-".contains(c);
+            (!login.user.chars().all(allowed)).then(|| {
+                format!(
+                    "NATS username contains invalid characters (allowed: [A-Za-z0-9_.-]), got: {}",
+                    login.user
+                )
+            })
+        })
+        .or_else(|| match login.password.as_deref() {
+            Some(password) => nats_text_problem("NATS password", password),
+            None => Some("NATS password cannot be empty".to_string()),
+        });
+    problem.map_or(Ok(()), |p| Err(format!("Invalid {label} credentials: {p}")))
+}
+
+// What: publish rights of every reader of the DNS stream.
+// Why: static DNS roles and secondaries must grant alike.
+pub fn dns_reader_publish() -> Vec<String> {
+    let stream = NATS_STREAM_DNS;
+    [
+        format!("$JS.API.STREAM.INFO.{stream}"),
+        format!("$JS.API.CONSUMER.INFO.{stream}.>"),
+        format!("$JS.API.CONSUMER.CREATE.{stream}.>"),
+        format!("$JS.API.CONSUMER.DURABLE.CREATE.{stream}.>"),
+        format!("$JS.API.CONSUMER.MSG.NEXT.{stream}.>"),
+        format!("$JS.ACK.{stream}.>"),
+    ]
+    .into()
+}
+
+// What: subjects every reader of the DNS stream receives.
+// Why: static DNS roles and secondaries must grant alike.
+pub fn dns_subscribe() -> [&'static str; 2] {
+    [NATS_SUBJECT_DNS, "_INBOX.>"]
+}
+
+// What: a NATS list of double-quoted strings.
+// Why: every subject list in nats.conf uses one syntax.
+fn nats_list<S: AsRef<str>>(items: &[S]) -> String {
+    let quoted: Vec<String> = items
+        .iter()
+        .map(|s| format!("\"{}\"", s.as_ref()))
+        .collect();
+    format!("[{}]", quoted.join(", "))
+}
+
+// What: one static user block, rights only when given.
+// Why: the callout user must have no subject rights.
+fn nats_role_block<P: AsRef<str>, S: AsRef<str>>(
+    login: &NatsLogin,
+    publish: &[P],
+    subscribe: &[S],
+) -> String {
+    let password = login.password.as_deref().unwrap_or_default();
+    let mut block = format!(
+        "    {{\n      user: \"{}\"\n      password: \"{password}\"\n",
+        login.user
+    );
+    if !publish.is_empty() {
+        block.push_str("      permissions = {\n");
+        block.push_str(&format!("        publish = {}\n", nats_list(publish)));
+        if !subscribe.is_empty() {
+            block.push_str(&format!("        subscribe = {}\n", nats_list(subscribe)));
+        }
+        block.push_str("      }\n");
+    }
+    block.push_str("    }\n");
+    block
+}
+
+// What: the static nats.conf of the stack's fixed roles.
+// Why: one owner of NATS users, rights and the include.
+// From: Issue #1683 | PR #1858
+pub fn render_nats_conf(
+    roles: &NatsRoles,
+    store_dir: &str,
+    monitor_port: u16,
+    conf_path: &str,
+    fragment_path: &str,
+) -> Result<String, String> {
+    roles.validate()?;
+    let fragment = std::path::Path::new(fragment_path);
+    if fragment.parent() != std::path::Path::new(conf_path).parent() {
+        return Err(format!("{fragment_path} must sit next to {conf_path}"));
+    }
+    let include = fragment
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("{fragment_path} has no file name"))?;
+    for (label, value) in [
+        ("NATS store dir", store_dir),
+        ("NATS fragment name", include),
+    ] {
+        if let Some(problem) = nats_text_problem(label, value) {
+            return Err(problem);
+        }
+    }
+    let writer_publish: Vec<String> = [NATS_SUBJECT_RECORD, NATS_SUBJECT_FLUSH]
+        .into_iter()
+        .map(str::to_string)
+        .chain([format!("$JS.API.STREAM.CREATE.{NATS_STREAM_DNS}")])
+        .chain(dns_reader_publish())
+        .collect();
+    let none: [&str; 0] = [];
+    let users = [
+        nats_role_block(&roles.ui, &[NATS_SUBJECT_RECORD, NATS_SUBJECT_FLUSH], &none),
+        nats_role_block(&roles.dns_writer, &writer_publish, &dns_subscribe()),
+        nats_role_block(&roles.dns_replica, &writer_publish, &dns_subscribe()),
+        nats_role_block(&roles.callout, &none, &none),
+    ]
+    .concat();
+    let sys = &roles.sys;
+    let sys_password = sys.password.as_deref().unwrap_or_default();
+    let sys_user = &sys.user;
+    Ok(format!(
+        "jetstream {{\n  store_dir: \"{store_dir}\"\n}}\n\
+         http_port: {monitor_port}\n\
+         authorization {{\n  users = [\n{users}  ]\n  include \"{include}\"\n}}\n\
+         accounts {{\n  SYS: {{\n    users: [\n      \
+         {{ user: \"{sys_user}\", password: \"{sys_password}\" }}\n    ]\n  }}\n}}\n\
+         system_account: SYS\n"
+    ))
+}
+
 // What: TTL of a record written without one, in seconds.
 // Why: ui forms and the subscriber must default alike.
 pub const DEFAULT_RECORD_TTL: i32 = 300;
@@ -588,5 +787,196 @@ mod tests {
             assert_eq!(mode.is_dnsmasq(), dnsmasq);
             assert_eq!(mode.is_dnsmasq_relay(), relay);
         }
+    }
+
+    fn login(user: &str, password: Option<&str>) -> NatsLogin {
+        NatsLogin {
+            user: user.to_string(),
+            password: password.map(str::to_string),
+        }
+    }
+
+    // What: the five roles, each with password pw-<user>.
+    // Why: nats.conf and the callout list render from it.
+    fn roles() -> NatsRoles {
+        let users = [
+            ("NATS_UI_USER", "ui"),
+            ("NATS_DNS_WRITER_USER", "dnsw"),
+            ("NATS_DNS_REPLICA_USER", "dnsr"),
+            ("NATS_CALLOUT_USER", "callout"),
+            ("NATS_SYS_USER", "sys"),
+        ];
+        NatsRoles::read(&|user_key, _| {
+            let user = users.iter().find(|(k, _)| *k == user_key).unwrap().1;
+            Ok(login(user, Some(&format!("pw-{user}"))))
+        })
+        .unwrap()
+    }
+
+    // What: unsafe NATS strings are named by their problem.
+    // Why: a quote or control char breaks nats.conf.
+    #[test]
+    fn nats_text_problems_are_named() {
+        assert_eq!(
+            nats_text_problem("L", ""),
+            Some("L cannot be empty".to_string())
+        );
+        for control in ["a\nb", "a\u{7f}b", "a\u{1f}"] {
+            let want = Some("L contains control characters".to_string());
+            assert_eq!(nats_text_problem("L", control), want, "{control:?}");
+        }
+        let quote = nats_text_problem("L", "a\"b");
+        assert_eq!(quote, Some("L contains double quotes".to_string()));
+        let slash = nats_text_problem("L", "a\\b");
+        assert_eq!(slash, Some("L contains backslashes".to_string()));
+        assert_eq!(nats_text_problem("L", "fine value 1"), None);
+        assert_eq!(nats_text_problem("L", " "), None);
+    }
+
+    // What: a role needs a plain user and a safe password.
+    // Why: bad values must fail before nats.conf is made.
+    #[test]
+    fn nats_logins_are_validated_with_a_role_label() {
+        assert_eq!(
+            validate_nats_login("R", &login("ui-1.a_b", Some("x"))),
+            Ok(())
+        );
+        let cases = [
+            (login("", Some("x")), "NATS username cannot be empty"),
+            (login("ui", None), "NATS password cannot be empty"),
+            (login("ui", Some("")), "NATS password cannot be empty"),
+            (
+                login("ui", Some("a\"b")),
+                "NATS password contains double quotes",
+            ),
+            (
+                login("bad user", Some("x")),
+                "NATS username contains invalid characters (allowed: [A-Za-z0-9_.-]), got: bad user",
+            ),
+        ];
+        for (bad, problem) in cases {
+            let want = Err(format!("Invalid R credentials: {problem}"));
+            assert_eq!(validate_nats_login("R", &bad), want);
+        }
+        let all = roles();
+        assert_eq!(all.validate(), Ok(()));
+        let labels: Vec<&str> = all.labelled().iter().map(|(label, _)| *label).collect();
+        assert_eq!(
+            labels,
+            [
+                "NATS UI",
+                "NATS DNS writer",
+                "NATS DNS replica",
+                "NATS auth-callout",
+                "NATS system account"
+            ]
+        );
+        let mut no_password = roles();
+        no_password.sys.password = None;
+        assert_eq!(
+            no_password.validate(),
+            Err("Invalid NATS system account credentials: NATS password cannot be empty".into())
+        );
+    }
+
+    // What: lists and role blocks use the nats.conf syntax.
+    // Why: the callout user must have no subject rights.
+    #[test]
+    fn nats_role_blocks_grant_rights_only_when_given() {
+        assert_eq!(nats_list(&["a", "b.>"]), "[\"a\", \"b.>\"]");
+        assert_eq!(nats_list::<&str>(&[]), "[]");
+        let user = login("u", Some("p"));
+        let none: [&str; 0] = [];
+        assert_eq!(
+            nats_role_block(&user, &none, &none),
+            "    {\n      user: \"u\"\n      password: \"p\"\n    }\n"
+        );
+        assert_eq!(
+            nats_role_block(&user, &["x"], &none),
+            "    {\n      user: \"u\"\n      password: \"p\"\n      permissions = {\n        publish = [\"x\"]\n      }\n    }\n"
+        );
+        assert_eq!(
+            nats_role_block(&user, &["x"], &["y"]),
+            "    {\n      user: \"u\"\n      password: \"p\"\n      permissions = {\n        publish = [\"x\"]\n        subscribe = [\"y\"]\n      }\n    }\n"
+        );
+        assert_eq!(
+            nats_role_block(&user, &none, &["y"]),
+            "    {\n      user: \"u\"\n      password: \"p\"\n    }\n"
+        );
+    }
+
+    // What: DNS readers get fixed publish and subscribe.
+    // Why: static DNS roles and secondaries grant alike.
+    #[test]
+    fn dns_reader_rights_are_fixed() {
+        assert_eq!(
+            dns_reader_publish(),
+            [
+                "$JS.API.STREAM.INFO.LANCACHE_DNS",
+                "$JS.API.CONSUMER.INFO.LANCACHE_DNS.>",
+                "$JS.API.CONSUMER.CREATE.LANCACHE_DNS.>",
+                "$JS.API.CONSUMER.DURABLE.CREATE.LANCACHE_DNS.>",
+                "$JS.API.CONSUMER.MSG.NEXT.LANCACHE_DNS.>",
+                "$JS.ACK.LANCACHE_DNS.>",
+            ]
+        );
+        assert_eq!(dns_subscribe(), ["lancache.dns.>", "_INBOX.>"]);
+    }
+
+    // What: the static nats.conf for the fixed roles.
+    // Why: one owner of NATS users, rights and the include.
+    #[test]
+    fn nats_conf_renders_roles_and_the_include() {
+        let writer = "[\"lancache.dns.record\", \"lancache.dns.flush\", \"$JS.API.STREAM.CREATE.LANCACHE_DNS\", \"$JS.API.STREAM.INFO.LANCACHE_DNS\", \"$JS.API.CONSUMER.INFO.LANCACHE_DNS.>\", \"$JS.API.CONSUMER.CREATE.LANCACHE_DNS.>\", \"$JS.API.CONSUMER.DURABLE.CREATE.LANCACHE_DNS.>\", \"$JS.API.CONSUMER.MSG.NEXT.LANCACHE_DNS.>\", \"$JS.ACK.LANCACHE_DNS.>\"]";
+        let reader = "[\"lancache.dns.>\", \"_INBOX.>\"]";
+        let role = |user: &str, rights: &str| {
+            format!(
+                "    {{\n      user: \"{user}\"\n      password: \"pw-{user}\"\n{rights}    }}\n"
+            )
+        };
+        let ui = "      permissions = {\n        publish = [\"lancache.dns.record\", \"lancache.dns.flush\"]\n      }\n";
+        let dns = format!(
+            "      permissions = {{\n        publish = {writer}\n        subscribe = {reader}\n      }}\n"
+        );
+        let want = format!(
+            "jetstream {{\n  store_dir: \"/data\"\n}}\nhttp_port: 8222\nauthorization {{\n  users = [\n{}{}{}{}  ]\n  include \"auth.conf\"\n}}\naccounts {{\n  SYS: {{\n    users: [\n      {{ user: \"sys\", password: \"pw-sys\" }}\n    ]\n  }}\n}}\nsystem_account: SYS\n",
+            role("ui", ui),
+            role("dnsw", &dns),
+            role("dnsr", &dns),
+            role("callout", ""),
+        );
+        let got = render_nats_conf(
+            &roles(),
+            "/data",
+            8222,
+            "/etc/nats/nats.conf",
+            "/etc/nats/auth.conf",
+        );
+        assert_eq!(got, Ok(want));
+    }
+
+    // What: nats.conf is refused for unsafe or misplaced input.
+    // Why: a bad file would stop the broker on restart.
+    #[test]
+    fn nats_conf_refuses_bad_input() {
+        let conf = "/etc/nats/nats.conf";
+        let render =
+            |store: &str, fragment: &str| render_nats_conf(&roles(), store, 8222, conf, fragment);
+        assert_eq!(
+            render("/data", "/other/auth.conf"),
+            Err("/other/auth.conf must sit next to /etc/nats/nats.conf".into())
+        );
+        assert_eq!(
+            render("/data", "/etc/nats/"),
+            Err("/etc/nats/ must sit next to /etc/nats/nats.conf".into())
+        );
+        assert_eq!(
+            render("/da\\ta", "/etc/nats/auth.conf"),
+            Err("NATS store dir contains backslashes".into())
+        );
+        let mut bad = roles();
+        bad.ui.user = "bad user".into();
+        let user = render_nats_conf(&bad, "/data", 8222, conf, "/etc/nats/auth.conf").unwrap_err();
+        assert!(user.starts_with("Invalid NATS UI credentials"), "{user}");
     }
 }

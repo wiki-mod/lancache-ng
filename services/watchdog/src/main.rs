@@ -12,7 +12,9 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use lancache_ng::config::{self, OutOfRange, Uint, env_opt};
+use lancache_ng::config::{
+    self, NatsLogin, NatsRoles, OutOfRange, Uint, env_opt, render_nats_conf,
+};
 use lancache_ng::{
     COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL, DesiredRunState, DesiredState, DiskHealth,
     DiskInfo, DockerApi, Place, ServiceHealth, WatchdogStatus, df, hex32, resolve_shared_secret,
@@ -942,19 +944,23 @@ const STOP_GRACE: Duration = Duration::from_secs(8);
 const STATUS_MAX_AGE: u64 = 30;
 
 // What: inputs every program reads at render time.
-// Why: settings file beats env; the run dir is private.
+// Why: settings file beats env; a secondary has no ui files.
 // From: Issue #1683
 struct Ctx {
     run_dir: PathBuf,
-    settings_file: PathBuf,
-    desired_file: PathBuf,
+    settings_file: Option<PathBuf>,
+    desired_file: Option<PathBuf>,
 }
 
 impl Ctx {
     // What: the saved ui setting, else the env value.
     // Why: operators change settings live in the ui.
     fn setting(&self, key: &str) -> Option<String> {
-        config::non_empty(config::saved_setting(&self.settings_file, key).as_deref())
+        let saved = self
+            .settings_file
+            .as_deref()
+            .and_then(|file| config::saved_setting(file, key));
+        config::non_empty(saved.as_deref())
             .map(str::to_string)
             .or_else(|| env_opt(key))
     }
@@ -1038,13 +1044,16 @@ impl Kind {
         let secondary = || env_opt("DNS_REPLICATION_ROLE").as_deref() == Some("secondary");
         match self {
             Self::NatsServer | Self::Soa => !secondary(),
-            Self::DnsHttps => env_opt(DNS_HTTPS.ip_key).is_some(),
+            Self::DnsHttps => DNS_HTTPS.runs(),
             Self::Chronyd => {
                 let on = ctx
                     .setting("NTP_ENABLED")
                     .as_deref()
                     .and_then(config::parse_bool);
-                let desired = DesiredState::read(&ctx.desired_file).ntp;
+                let desired = ctx
+                    .desired_file
+                    .as_deref()
+                    .and_then(|f| DesiredState::read(f).ntp);
                 on == Some(true) && desired != Some(DesiredRunState::Stopped)
             }
             _ => true,
@@ -1199,7 +1208,7 @@ fn chronyd(ctx: &Ctx) -> Result<Run, String> {
     let conf = ctx.render("chrony.conf", &conf)?;
     Ok(Run {
         argv: vec!["chronyd".into(), "-d".into(), "-f".into(), conf],
-        watch: vec![ctx.settings_file.clone()],
+        watch: ctx.settings_file.iter().cloned().collect(),
         ..Run::default()
     })
 }
@@ -1240,6 +1249,14 @@ struct Recursor {
     ip_key: &'static str,
     port: u16,
     api_port: u16,
+}
+
+impl Recursor {
+    // What: a recursor runs only when its answer IP is set.
+    // Why: a secondary has one LAN IP and no dns-https.
+    fn runs(&self) -> bool {
+        env_opt(self.ip_key).is_some()
+    }
 }
 
 // What: dns-http answers with IP_STANDARD, dns-https SSL.
@@ -1909,7 +1926,7 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
     } else {
         120
     };
-    let flag = |key: &str| ctx.setting(key).as_deref().and_then(config::parse_bool);
+    let flag = |key: &str| env_opt(key).as_deref().and_then(config::parse_bool);
     let loglevel = if flag("LOG_QUERIES") == Some(true) {
         6
     } else {
@@ -1978,28 +1995,41 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
     })
 }
 
-// What: nats-server with the conf the ui writes.
-// Why: the ui owns users and callout; a change restarts.
+// What: nats.conf from the roles, then nats-server.
+// Why: the ui writes only the callout; a change restarts.
 // From: Issue #811 | Issue #1683
 fn nats_server(ctx: &Ctx) -> Result<Run, String> {
-    let conf = PathBuf::from(ctx.need("NATS_CONF_PATH")?);
-    let fragment = PathBuf::from(ctx.need("NATS_AUTH_CALLOUT_PATH")?);
-    if !conf.exists() {
-        return Err(format!("waiting for the ui to write {}", conf.display()));
+    let conf = ctx.need("NATS_CONF_PATH")?;
+    let fragment = ctx.need("NATS_AUTH_CALLOUT_PATH")?;
+    if !Path::new(&fragment).exists() {
+        return Err(format!("waiting for the ui to write {fragment}"));
     }
+    let roles = NatsRoles::read(&|user_key, password_key| {
+        Ok(NatsLogin {
+            user: env_opt(user_key).unwrap_or_default(),
+            password: Some(dns_secret(
+                password_key,
+                &shared_secret_file_name(password_key),
+                hex32,
+            )?),
+        })
+    })?;
+    let port = ctx.need("NATS_MONITOR_PORT")?;
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| format!("NATS_MONITOR_PORT={port} is no port"))?;
+    let body = render_nats_conf(&roles, &ctx.need("NATS_STORE_DIR")?, port, &conf, &fragment)?;
+    write_file(Path::new(&conf), body.as_bytes(), 0o600, Place::Replace)
+        .map_err(|e| format!("cannot write {conf}: {e}"))?;
     Ok(Run {
-        argv: vec![
-            "nats-server".into(),
-            "-c".into(),
-            conf.display().to_string(),
-        ],
-        watch: vec![conf, fragment],
+        argv: vec!["nats-server".into(), "-c".into(), conf.clone()],
+        watch: vec![PathBuf::from(conf), PathBuf::from(fragment)],
         ..Run::default()
     })
 }
 
 // What: nats-subscriber with resolved secrets and URLs.
-// Why: it flushes both recursors and writes the zones.
+// Why: it flushes every running recursor, writes zones.
 // From: Issue #1683
 fn nats_subscriber(ctx: &Ctx) -> Result<Run, String> {
     let mut env = vec![
@@ -2009,6 +2039,7 @@ fn nats_subscriber(ctx: &Ctx) -> Result<Run, String> {
             "PDNS_REC_API_URLS".to_string(),
             [&DNS_HTTP, &DNS_HTTPS]
                 .iter()
+                .filter(|r| r.runs())
                 .map(|r| api_root(r.api_port))
                 .collect::<Vec<_>>()
                 .join(" "),
@@ -2276,8 +2307,8 @@ async fn supervise() -> Result<(), String> {
     let kinds = kinds(&need("LANCACHE_PROCESSES")?)?;
     let ctx = Ctx {
         run_dir: PathBuf::from(need("SUPERVISE_RUN_DIR")?),
-        settings_file: PathBuf::from(need("UI_SETTINGS_FILE")?),
-        desired_file: PathBuf::from(need("DESIRED_STATE_FILE")?),
+        settings_file: env_opt("UI_SETTINGS_FILE").map(PathBuf::from),
+        desired_file: env_opt("DESIRED_STATE_FILE").map(PathBuf::from),
     };
     let status_file = ctx.run_dir.join("supervise.json");
     fs::create_dir_all(&ctx.run_dir)
@@ -2726,16 +2757,16 @@ mod tests {
         let root = scratch();
         let ctx = Ctx {
             run_dir: root.join(gen_name()),
-            settings_file: root.join(gen_name()),
-            desired_file: root.join(gen_name()),
+            settings_file: Some(root.join(gen_name())),
+            desired_file: Some(root.join(gen_name())),
         };
         let set = |on: bool, desired: &str| {
             fs::write(
-                &ctx.settings_file,
+                ctx.settings_file.as_ref().expect("settings path"),
                 format!("NTP_ENABLED={}\n", u8::from(on)),
             )
             .expect("settings");
-            fs::write(&ctx.desired_file, desired).expect("desired");
+            fs::write(ctx.desired_file.as_ref().expect("desired path"), desired).expect("desired");
             Kind::Chronyd.wanted(&ctx)
         };
         assert!(set(true, "{}"));
