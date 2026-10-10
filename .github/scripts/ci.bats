@@ -128,6 +128,17 @@ _registry() {
     [ -z "${failed}" ] || { echo "registry image ${ref}:${failed} failed"; cat "${d}/push.log"; return 1; }
 }
 
+# What: TCP listeners on port 80 of each given address
+# Why: setup.sh's health gate makes a real TCP connect
+# From: Issue #1683 | PR #1858
+_listen80() {
+    local p
+    for p in "$@"; do
+        timeout 600 busybox nc -lk -s "${p}" -p 80 -e true 0<&- > "${BATS_TEST_TMPDIR}/nc-${p}.log" 2>&1 3>&- &
+        printf '%s %s\n' "$!" "${p}" >> "${BATS_TEST_TMPDIR}/listeners" || return 1
+    done
+}
+
 # What: drop runner cache inputs, then run the args.
 # Why: one list keeps tests off the real runner caches.
 # From: Issue #1683 | PR #1858
@@ -165,10 +176,6 @@ _load_setup_sh() {
     export DOCKER_HOST="${SETUP_SH_DOCKER_HOST}"
     # shellcheck source=setup.sh
     source "${helper_file}"
-    # What: setup.sh's own seam for the raw TCP probe
-    # Why: no LAN address is reachable inside the test box
-    # From: Issue #1683 | PR #1858
-    export SETUP_SH_SEAMS='_tcp_port_reachable() { [ ! -e "${DS}/fail-tcp" ]; }'
 }
 
 # What: runs a snippet on loaded setup.sh fns, setup.sh opts
@@ -244,11 +251,18 @@ _fill() {
     printf '%s' "${s}"
 }
 
-# What: remove the test's containers; on failure raw values
-# Why: no container outlives its test; raw values stay shown
+# What: stop listeners, remove containers; raw on failure
+# Why: nothing outlives its test; raw values stay shown
 # From: Issue #1683 | PR #1858
 teardown() {
-    local rc=0 f="${BATS_TEST_TMPDIR}/containers" bin h id
+    local rc=0 f="${BATS_TEST_TMPDIR}/containers" l="${BATS_TEST_TMPDIR}/listeners" bin h id pid ip err
+    if [ -s "${l}" ]; then
+        while read -r pid ip; do
+            err="$(kill "${pid}" 2>&1)" && continue
+            echo "listener ${ip}:80 gone before teardown: ${err}; nc: $(cat "${BATS_TEST_TMPDIR}/nc-${ip}.log")"
+            rc=1
+        done < "${l}"
+    fi
     if [ -s "${f}" ]; then
         while read -r bin h id; do
             if [ "${h}" = - ]; then env -u DOCKER_HOST "${bin}" rm -f "${id}"; else DOCKER_HOST="${h}" "${bin}" rm -f "${id}"; fi \
@@ -2349,59 +2363,54 @@ none|LANCACHE_STATE_DIR}|all|has no LANCACHE_STATE_DIR default
 ROWS
 }
 
+# What: state, settings and CA move to deploy/prod once
+# Why: AG-OP-007: a quickstart user loses nothing
+# From: Issue #1683 | PR #1858
 @test "setup quickstart install moves into deploy/prod once" {
     _stand_ins || return 1
-    # What: state, settings and CA move to deploy/prod
-    # Why: AG-OP-007: a quickstart user loses nothing
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" project svc keys key want vol dir absent copies f el
+    local root t="${BATS_TEST_TMPDIR}" cfg project svc keys key want vol dir absent copies f el lo prof
+    local -a profiles=()
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    require_helper_image
+    _load_setup_sh "${root}" || return 1
+    require_helper_image || return 1
     export ROOT="${root}" CO="${t}/co" QS="${t}/qs" BK="${t}/bk"
-    _prod_install "${CO}/deploy/prod"
-    project="$(_prod_compose config --format json | jq -r .name)"
-    svc="$(_prod_compose config --services | awk 'NR == 1')"
-    # What: quickstart input from setup.sh's own lists
-    # Why: volume, path and bundle sets have one owner
-    # From: Issue #1683 | PR #1858
-    keys="$(declare -f migrate_quickstart_install | sed -n 's/^ *local path_keys="\([^"]*\)".*/\1/p')"
-    copies="$(declare -f migrate_quickstart_install | grep -o '"\$old_dir/scripts/[^"]*"' | sed 's|^"\$old_dir/||; s|"$||')"
-    [ -n "${keys}" ] && [ -n "${copies}" ] || { echo "migration lists: ${keys} | ${copies}"; return 1; }
-    mkdir -p "${QS}/certs"
-    cp "${root}/deploy/prod/.env" "${QS}/.env"
-    remove_env_key LANCACHE_STATE_DIR "${QS}/.env"
-    for key in ${keys}; do set_env_key "${key}" "./${key,,}" "${QS}/.env"; done
-    want="$(get_env_var CACHE_MAX_SIZE "${QS}/.env")"
-    set_env_key CACHE_MAX_SIZE "$(( ${want%%[!0-9]*} * 2 ))${want##*[0-9]}" "${QS}/.env"
-    cp "${QS}/.env" "${t}/qs.env"
+    _prod_install "${CO}/deploy/prod" || return 1
+    cfg="$(_prod_compose config --format json)" && project="$(jq -r .name <<< "${cfg}")" \
+        && svc="$(jq -r '.services | keys[0]' <<< "${cfg}")" || { echo "prod compose: ${cfg}"; return 1; }
+    keys="$(quickstart_path_keys)" && keys="${keys//$'\n'/ }" && copies="$(quickstart_bundle_copies)" \
+        && [ -n "${keys}" ] && [ -n "${copies}" ] || { echo "migration lists: ${keys} | ${copies}"; return 1; }
+    lo="127.$(_val int 1 254).$(_val int 1 254)"
+    mkdir -p "${QS}/certs" && cp "${root}/deploy/prod/.env" "${QS}/.env" && remove_env_key LANCACHE_STATE_DIR "${QS}/.env" \
+        && set_env_key IP_STANDARD "${lo}.1" "${QS}/.env" && set_env_key IP_SSL "${lo}.2" "${QS}/.env" || return 1
+    for key in ${keys}; do set_env_key "${key}" "./${key,,}" "${QS}/.env" || return 1; done
+    want="$(get_env_var CACHE_MAX_SIZE "${QS}/.env")" \
+        && set_env_key CACHE_MAX_SIZE "$(( ${want%%[!0-9]*} * 2 ))${want##*[0-9]}" "${QS}/.env" \
+        && cp "${QS}/.env" "${t}/qs.env" || return 1
     while IFS= read -r f; do
-        mkdir -p "$(dirname "${QS}/${f}")" && printf '%s\n' "${f}" > "${QS}/${f}"
+        mkdir -p "$(dirname "${QS}/${f}")" && printf '%s\n' "${f}" > "${QS}/${f}" || return 1
     done <<< "${copies}"
-    printf '%s\n' "${QS}" > "${QS}/certs/ca.crt"; printf '%s\n' "${t}" > "${QS}/certs/ca.key"
+    printf '%s\n' "${QS}" > "${QS}/certs/ca.crt" && printf '%s\n' "${t}" > "${QS}/certs/ca.key" || return 1
     {
         printf 'name: %s\nservices:\n  %s:\n    image: %s\n    volumes:\n' "${project}" "${svc}" "${LANCACHE_HELPER_IMAGE}"
         quickstart_volume_keys | awk '{ printf "      - %s:/%s\n", $1, $1 }'
         printf 'volumes:\n'
         quickstart_volume_keys | awk '{ printf "  %s: {}\n", $1 }'
-    } > "${QS}/docker-compose.yml"
+    } > "${QS}/docker-compose.yml" || return 1
     absent="$(quickstart_volume_keys | awk 'END { print $1 }')"
     while read -r vol key; do
         [ "${vol}" != "${absent}" ] || continue
-        mkdir -p "${DS}/volumes/${project}_${vol}"
-        printf '%s\n' "${vol}" > "${DS}/volumes/${project}_${vol}/${vol}"
-        printf '%s\n' "${key}" > "${DS}/volumes/${project}_${vol}/.${key}"
+        mkdir -p "${DS}/volumes/${project}_${vol}" && printf '%s\n' "${vol}" > "${DS}/volumes/${project}_${vol}/${vol}" \
+            && printf '%s\n' "${key}" > "${DS}/volumes/${project}_${vol}/.${key}" || return 1
     done <<< "$(quickstart_volume_keys)"
-    : > "${DS}/running"
-    _setup_sh_run 'PATH="${BIN}:${PATH}"; eval "${SETUP_SH_SEAMS}"; SCRIPT_DIR="${CO}" BACKUP_ROOT="${BK}"
-        PROD_COMPOSE="${CO}/${PROD_COMPOSE#"${ROOT}/"}"
+    : > "${DS}/running" && _listen80 "${lo}.1" "${lo}.2" || return 1
+    _setup_sh_run 'SCRIPT_DIR="${CO}" BACKUP_ROOT="${BK}" PROD_COMPOSE="${CO}/${PROD_COMPOSE#"${ROOT}/"}"
         is_quickstart_install "${QS}" && migrate_quickstart_install "${QS}"'
     [ "${status}" -eq 0 ] || { echo "migrate: ${output}"; return 1; }
-    el="$(runtime_env_file_for_install_dir "${CO}/deploy/prod")"
+    el="$(runtime_env_file_for_install_dir "${CO}/deploy/prod")" || return 1
     [ "${el}" != "${CO}/deploy/prod/.env" ] && [ "$(stat -c %a "${el}")" = 600 ] || { echo "env: ${el}"; return 1; }
     [ "$(get_env_var LANCACHE_STATE_DIR "${el}")" = "${QS}" ] || { echo "state root"; return 1; }
     while IFS= read -r key; do
-        want="$(get_env_assignment_value_raw "${key}" "${t}/qs.env")"
+        want="$(get_env_assignment_value_raw "${key}" "${t}/qs.env")" || return 1
         [[ " ${keys} " != *" ${key} "* ]] || want="$(realpath -m "${QS}/${want}")"
         [ "$(get_env_assignment_value_raw "${key}" "${el}")" = "${want}" ] || { echo "value of ${key}"; return 1; }
     done <<< "$(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ { print $1 }' "${t}/qs.env")"
@@ -2417,9 +2426,6 @@ ROWS
     [ ! -e "${QS}/docker-compose.yml" ] && [ ! -e "${QS}/.env" ] || { echo "quickstart files"; return 1; }
     grep -q '^completed|' "${QS}/.quickstart-migration" || { echo "record"; return 1; }
     [ "$(find "${BK}" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ] || { echo "backups: $(ls -A "${BK}")"; return 1; }
-    # What: quickstart stops for good before prod starts
-    # Why: two stacks must never share the IPs at once
-    # From: Issue #1683 | PR #1858
     awk -v q="compose --env-file ${QS}/.env " -v p="compose --env-file ${el} " '
         index($0, q) == 1 && / stop$/ { st = NR }
         index($0, q) == 1 && / up -d$/ { su = NR }
@@ -2428,19 +2434,15 @@ ROWS
     ! is_quickstart_install "${QS}" || { echo "still quickstart"; return 1; }
     [ "$(resolve_stack_dir "${CO}")" = "${CO}/deploy/prod" ] && [ "$(resolve_stack_dir "${QS}")" = "${QS}" ] \
         || { echo "stack dirs"; return 1; }
-    # What: the prod stack reads every migrated value
-    # Why: a copied but unread key is silent value loss
-    # From: Issue #1683 | PR #1858
-    local cfg prof
-    local -a profiles=()
-    prof="$(docker compose --env-file "${el}" -f "${CO}/deploy/prod/docker-compose.yml" config --profiles)"
+    prof="$(docker compose --env-file "${el}" -f "${CO}/deploy/prod/docker-compose.yml" config --profiles)" || return 1
     while IFS= read -r f; do [ -z "${f}" ] || profiles+=(--profile "${f}"); done <<< "${prof}"
-    cfg="$(docker compose --env-file "${el}" -f "${CO}/deploy/prod/docker-compose.yml" "${profiles[@]}" config --format json)"
-    want="$(get_env_var CACHE_MAX_SIZE "${t}/qs.env")"
-    jq -e --arg v "${want}" '[.services[].environment.CACHE_MAX_SIZE?] | index($v) != null' <<< "${cfg}" >/dev/null \
+    cfg="$(docker compose --env-file "${el}" -f "${CO}/deploy/prod/docker-compose.yml" "${profiles[@]}" config --format json)" \
+        || { echo "prod config: ${cfg}"; return 1; }
+    want="$(get_env_var CACHE_MAX_SIZE "${t}/qs.env")" || return 1
+    jq -e --arg v "${want}" '[.services[].environment.CACHE_MAX_SIZE?] | index($v) != null' <<< "${cfg}" > "${t}/jq.out" \
         || { echo "CACHE_MAX_SIZE ${want} not in the prod stack"; return 1; }
     for key in ${keys}; do
-        want="$(get_env_var "${key}" "${el}")"
+        want="$(get_env_var "${key}" "${el}")" || return 1
         grep -qF "\"${want}\"" <<< "${cfg}" || { echo "${key}=${want} not in the prod stack"; return 1; }
     done
 }
@@ -2451,8 +2453,7 @@ ROWS
 @test "setup update pulls the checkout and continues on its setup.sh" {
     _registry || return 1
     _stand_ins || return 1
-    local root t="${BATS_TEST_TMPDIR}" main lo std ssl svc mark em line out c2 c3 p
-    local -a pids=() ips=()
+    local root t="${BATS_TEST_TMPDIR}" main lo std ssl svc mark em line out c2 c3
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}" || return 1
     require_helper_image || return 1
@@ -2478,19 +2479,7 @@ ROWS
         && cat "${t}/s.sh" > "${t}/src/setup.sh" && g -C "${t}/src" commit -q -am c2 \
         && g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}" && c2="$(g -C "${t}/src" rev-parse HEAD)" \
         || { echo "revision 2 not published"; return 1; }
-    for p in "${std}" "${ssl}"; do
-        timeout 600 busybox nc -lk -s "${p}" -p 80 -e true 0<&- > "${t}/nc-${p}.log" 2>&1 3>&- &
-        pids+=("$!") ips+=("${p}")
-    done
-    _stop() {
-        local i err rc=0
-        for i in "${!pids[@]}"; do
-            err="$(kill "${pids[i]}" 2>&1)" && continue
-            echo "listener ${ips[i]}:80 gone before cleanup: ${err}; nc: $(cat "${t}/nc-${ips[i]}.log")"
-            rc=1
-        done
-        return "${rc}"
-    }
+    _listen80 "${std}" "${ssl}" || return 1
     FAULT="$(_val name)" CO="${t}/co"
     export FAULT CO
     _update() {
@@ -2501,19 +2490,18 @@ ROWS
         && [ "$(grep -cxF -- "${mark}" <<< "${output}")" -eq 1 ] \
         && [ "$(grep -c "Continuing the update with" <<< "${output}")" -eq 1 ] \
         && grep -qE "^compose .* up -d --remove-orphans .*\b${svc}\b" "${DS}/docker.log" \
-        || { _stop; echo "update: ${output}"; return 1; }
+        || { echo "update: ${output}"; return 1; }
     g -C "${t}/src" commit -q --allow-empty -m c3 && g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}" \
         && c3="$(g -C "${t}/src" rev-parse HEAD)" && cp "${t}/co/deploy/prod/.env.local" "${t}/env.before" \
-        && : > "${DS}/fail-apply" || { _stop; echo "revision 3 not published"; return 1; }
+        && : > "${DS}/fail-apply" || { echo "revision 3 not published"; return 1; }
     _update
-    rm -f "${DS}/fail-apply" || { _stop; return 1; }
+    rm -f "${DS}/fail-apply" || return 1
     [ "${status}" -eq 1 ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${c2}" ] \
         && [[ "${output}" == *"Returned ${t}/co to ${c2}"* && "${output}" == *"rolled back"* ]] \
         && cmp -s "${t}/env.before" "${t}/co/deploy/prod/.env.local" \
-        || { _stop; echo "rollback to ${c2} from ${c3}: ${output}"; return 1; }
-    g -C "${t}/co" checkout -q --detach || { _stop; return 1; }
+        || { echo "rollback to ${c2} from ${c3}: ${output}"; return 1; }
+    g -C "${t}/co" checkout -q --detach || return 1
     _update
-    _stop || return 1
     [ "${status}" -eq 0 ] && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${c2}" ] && [[ "${output}" == *"pinned commit"* ]] \
         && [[ "${output}" != *"Continuing the update with"* ]] || { echo "pinned: ${output}"; return 1; }
 }

@@ -1950,6 +1950,20 @@ prod_state_keys() {
     sed -E 's/^\$\{([A-Z0-9_]+):-.*/\1/' <<< "$keys" | sort -u
 }
 
+# What: quickstart .env keys that may hold relative paths
+# Why: migration and its test read the same key list
+# From: Issue #1683 | PR #1858
+quickstart_path_keys() {
+    printf '%s\n' CACHE_DIR KEA_DATA_DIR NTP_DATA_DIR CACHEHAMSTER_DATA_DIR
+}
+
+# What: files a quickstart dir carries below its root
+# Why: migration removes them last; the test plants them
+# From: Issue #1683 | PR #1858
+quickstart_bundle_copies() {
+    printf '%s\n' scripts/shared-secret-bootstrap.sh scripts/untracked/docker-socket-proxy.sh
+}
+
 # What: quickstart volume and the prod state-dir key per row
 # Why: prod binds these as dirs, not as named volumes
 # From: Issue #1683 | PR #1858
@@ -2012,9 +2026,11 @@ is_quickstart_install() {
 # From: Issue #1683 | PR #1858
 migrate_quickstart_install() (
     local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" env_local old_env record project key value volume dir copy f
-    local services old_volumes prod_volumes rows missing copies keys old_raw new_raw old_value line
-    local path_keys="CACHE_DIR KEA_DATA_DIR NTP_DATA_DIR CACHEHAMSTER_DATA_DIR"
+    local services old_volumes prod_volumes rows missing copies keys old_raw new_raw old_value line path_keys bundle
     local -a service_list copy_lines
+    path_keys=$(quickstart_path_keys) || exit $?
+    path_keys="${path_keys//$'\n'/ }"
+    bundle=$(quickstart_bundle_copies) || exit $?
     env_local="$stack_dir/.env.local"
     old_env="$old_dir/.env"
     record="$old_dir/.quickstart-migration"
@@ -2126,9 +2142,9 @@ migrate_quickstart_install() (
     # What: bundle removed last; its absence marks done
     # Why: an interrupted run resumes on the next update
     # From: Issue #1683 | PR #1858
-    for copy in "$old_dir/scripts/shared-secret-bootstrap.sh" "$old_dir/scripts/untracked/docker-socket-proxy.sh"; do
-        rm -f "$copy" || die "Failed to remove the quickstart copy $copy."
-    done
+    while IFS= read -r copy; do
+        rm -f "$old_dir/$copy" || die "Failed to remove the quickstart copy $old_dir/$copy."
+    done <<< "$bundle"
     rm -f "$old_dir/docker-compose.yml" "$old_env" || die "Failed to remove the quickstart files in $old_dir."
     trap - EXIT
     resume_lancache_convergence_after_update
@@ -4984,7 +5000,7 @@ require_functional_check_tool() {
 # identity heuristic for either.
 
 # What: bare TCP connect to ip:port, no HTTP request sent
-# Why: the one network seam tests replace (SETUP_SH_SEAMS)
+# Why: reachability alone, apart from the /healthz answer
 # From: Issue #1683 | PR #1858
 _tcp_port_reachable() {
     local ip="$1" port="$2" err rc=0
