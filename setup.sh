@@ -1326,10 +1326,8 @@ migrate_proxy_security_mode_for_update() {
     proxy_security_mode=$(get_env_var PROXY_SECURITY_MODE "$env_file") || exit $?
     proxy_allowed_client_cidrs=$(get_env_var PROXY_ALLOWED_CLIENT_CIDRS "$env_file") || exit $?
 
-    # Early setup versions generated strict mode before lazy was restored as
-    # the default. Without an allowlist there is no usable strict policy to
-    # preserve, so update those legacy defaults back to lazy while leaving
-    # explicit strict+allowlist operator configurations intact.
+    # What: resets strict to lazy when no allowlist is set
+    # Why: no allowlist means no strict policy to preserve
     if [[ "$proxy_security_mode" = "strict" && -z "$proxy_allowed_client_cidrs" ]]; then
         set_env_key PROXY_SECURITY_MODE "lazy" "$env_file"
         print_ok "Migrated legacy PROXY_SECURITY_MODE=strict without PROXY_ALLOWED_CLIENT_CIDRS to lazy"
@@ -1339,9 +1337,8 @@ migrate_proxy_security_mode_for_update() {
 readonly LEGACY_STATE_ROOT="/srv/lancache"
 readonly -a LEGACY_STATE_CHILDREN=(cache pdns-standard pdns-ssl pdns-filter-state kea nats nats-conf)
 
-# These paths are fixed compatibility anchors for pre-v0.1 production installs.
-# They are not active defaults anymore; setup.sh only touches them when it must
-# preserve real legacy state during backup, update, or restore.
+# What: fixed pre-v0.1 state paths, used for migration
+# Why: backup, update and restore must find legacy data
 legacy_state_path() {
     local child="${1:-}"
 
@@ -1352,9 +1349,8 @@ legacy_state_path() {
     fi
 }
 
-# True if any of the known pre-v0.1 state subdirectories actually exist under
-# LEGACY_STATE_ROOT, i.e. this host has real legacy state to migrate rather
-# than just an unrelated /srv/lancache directory.
+# What: true if a known pre-v0.1 state subdirectory exists
+# Why: an unrelated /srv/lancache dir is not legacy state
 legacy_state_root_has_known_children() {
     local child
 
@@ -1364,8 +1360,8 @@ legacy_state_root_has_known_children() {
     return 1
 }
 
-# Picks the legacy state root only when it actually has legacy children on
-# disk; otherwise falls back to the given (new-style) default directory.
+# What: legacy root if it has children, else the default
+# Why: new-style default applies without legacy state
 legacy_state_root_or_default() {
     local default_dir="$1"
 
@@ -1376,8 +1372,8 @@ legacy_state_root_or_default() {
     fi
 }
 
-# Generic version of legacy_state_root_or_default for a single directory:
-# use it if it exists on disk, otherwise use the new-style default.
+# What: legacy dir if it exists, else the default
+# Why: a single directory needs no child-directory check
 legacy_dir_or_default() {
     local legacy_dir="$1" default_dir="$2"
 
@@ -1388,11 +1384,8 @@ legacy_dir_or_default() {
     fi
 }
 
-# Reconciles a per-service directory override (e.g. CACHE_DIR_STANDARD) against
-# the one-root state-dir contract: drops the key entirely when it already
-# matches the derived default (see comment inside for why), keeps templated or
-# absolute-path overrides verbatim, and repairs anything else that is clearly
-# broken (a stray number, a single letter, etc.).
+# What: reconciles a per-service directory override
+# Why: overrides matching the derived default are dropped
 set_optional_env_path_override_if_needed() {
     local key="$1" desired_path="$2" derived_path="$3" env_file="$4"
     local existing_assignment
@@ -1475,10 +1468,8 @@ is_deploy_prod_install_dir() {
     [[ "$(basename "$install_dir")" = "prod" && "$(basename "$(dirname "$install_dir")")" = "deploy" ]]
 }
 
-# Picks which .env file actually drives Compose for this install: manual
-# deploy/prod checkouts use .env.local (an untracked override) when present,
-# so a git pull during update never clobbers the operator's real production
-# values that live in the tracked .env template.
+# What: picks .env.local for prod checkouts when it exists
+# Why: git pull keeps operator production values
 runtime_env_file_for_install_dir() {
     local install_dir="$1"
 
@@ -1489,26 +1480,8 @@ runtime_env_file_for_install_dir() {
     fi
 }
 
-# True if this install currently relies on the remote-secondary NATS
-# host-binding override (docker-compose.nats-secondary.yml) being active, so
-# update/validate must keep passing it on every subsequent compose invocation
-# instead of silently reverting to the base compose file's NATS wiring (which
-# only `expose`s 4222 internally, dropping the host port publish remote
-# secondary DNS nodes depend on). NATS_BIND_IP has exactly one purpose in
-# this codebase: it is the value the override's `ports:` mapping requires via
-# `${NATS_BIND_IP:?...}` (see docker-compose.nats-secondary.yml), so a
-# non-empty NATS_BIND_IP is used as the activation signal instead of
-# inventing a separate marker file. The override file's own header comment
-# documents its PRIMARY activation example as a shell-exported
-# `NATS_BIND_IP=<ip> docker compose ... up -d`, not a persisted .env.local
-# assignment, so the process environment is checked first -- mirroring
-# Compose's own variable-interpolation precedence, where a shell variable
-# always wins over an --env-file value. Only if the shell has nothing set do
-# we fall back to the runtime env file, covering operators who persisted
-# NATS_BIND_IP into .env.local so the override keeps working across shell
-# sessions (the file's documented secondary activation path). Either path
-# means the operator has, by construction, committed to running with the
-# override active.
+# What: true if the NATS-secondary override is active
+# Why: shell or env file NATS_BIND_IP activates it
 nats_secondary_override_active_for_install_dir() {
     local install_dir="$1" env_file="$2" bind_ip
 
@@ -1521,19 +1494,8 @@ nats_secondary_override_active_for_install_dir() {
     [[ -n "$bind_ip" ]]
 }
 
-# Builds the -f argument list a compose invocation for install_dir needs:
-# the base file, an operator-provided docker-compose.override.yml/.yaml when
-# present, and the NATS-secondary override when
-# nats_secondary_override_active_for_install_dir() says it is active. The
-# base file must always be passed explicitly the moment any -f is added at
-# all: Compose disables its cwd auto-discovery of docker-compose.yml (and,
-# with it, the auto-discovery/merge of a sibling docker-compose.override.yml)
-# as soon as one -f is given, so a call site that appended only the
-# NATS-secondary override would both (a) run the stack from that
-# partial-services fragment alone and (b) silently drop any operator
-# override customizations that Compose would otherwise have auto-merged.
-# Detecting and re-adding the override file here keeps that auto-merge
-# behavior intact even though this function must pass -f explicitly.
+# What: builds -f args for base, override, NATS
+# Why: any -f disables auto-discovery; base is listed
 compose_file_args_for_install_dir() {
     local install_dir="$1" env_file="$2" override_file
     local -a args=(-f "$install_dir/docker-compose.yml")
@@ -2110,23 +2072,14 @@ sync_repo_to_default_branch() {
         || die "Failed to reset $repo_dir to origin/$default_branch."
 }
 
-# Resolves which git ref the standalone bootstrap (the self-clone path used by
-# the documented `curl | bash` one-liner) should check out. An operator-supplied
-# LANCACHE_SETUP_GIT_REF (mirroring the existing LANCACHE_IMAGE_CHANNEL env-var
-# override pattern) takes priority; unset/empty means "keep today's behavior"
-# (resolve and track origin's default branch) so existing installs, docs, and
-# automation are unaffected by this being introduced (#814).
+# What: returns LANCACHE_SETUP_GIT_REF, empty if unset
+# Why: unset keeps the default branch behavior
 resolve_setup_bootstrap_ref() {
     printf '%s\n' "${LANCACHE_SETUP_GIT_REF:-}"
 }
 
-# Hard-resets a repo checkout to a specific, operator-pinned ref (branch, tag,
-# or commit-ish). Fetches the ref explicitly by name rather than relying on a
-# bare `git fetch --prune origin` (which only guarantees branches land under
-# refs/remotes/origin/* -- tag-following is a local clone/config detail this
-# function should not have to assume) so this works uniformly whether "ref" is
-# a branch or a release tag such as v0.2.0. Refuses to run on a dirty tree,
-# matching sync_repo_to_default_branch's safety behavior above.
+# What: hard-resets a checkout to a pinned ref
+# Why: fetches the named ref explicitly; dirty trees refused
 sync_repo_to_ref() {
     local repo_dir="$1" ref="$2"
 
@@ -2358,10 +2311,8 @@ require_separate_lan_ips() {
     [[ "$1" != "$2" ]] || die "Standard IP and SSL IP must be different."
 }
 
-# Generates and stores a secret for key only if it doesn't already hold a
-# usable (non-placeholder) value — a thin wrapper combining
-# env_key_has_usable_secret + generate_secret_value for the common
-# "fill in this secret if needed" call sites in migrate_env_for_update.
+# What: sets a secret only if no usable value exists
+# Why: an operator's real secret is never overwritten
 ensure_secret_env_key() {
     local key="$1" env_file="$2" kind="$3" value
     if env_key_has_usable_secret "$key" "$env_file"; then
@@ -2409,23 +2360,8 @@ host_image_platform() {
     esac
 }
 
-# assert_prebuilt_image_platform_supported only checks that this host's
-# architecture is one setup.sh understands at all; it says nothing about
-# whether the specific tag/channel this install actually resolved to
-# (LANCACHE_IMAGE_TAG) has a manifest published for that architecture. A host
-# pinned to a pre-arm64 tag, or to a channel whose current pointer is missing
-# an arm64 leg, would otherwise sail past that earlier guard and only fail
-# deep inside `docker compose pull`, after setup.sh has already written
-# .env/compose state for this install (#665). Call this once the tag is fully
-# resolved and before the first state-mutating write for that install/update.
-#
-# Mirrors scripts/untracked/require-image-platforms.sh's `docker buildx imagetools
-# inspect` approach, but inlined rather than shelled out to that script:
-# setup.sh is documented (see README.md) to run standalone via `curl | bash`,
-# so it cannot assume a full repository checkout with scripts/ present on
-# disk. Checks the "dns" image only -- release/stack-images.yml declares an
-# identical platform list for every runtime service and the stack pointer, so
-# one lookup is representative and avoids one registry round-trip per service.
+# What: checks the resolved tag publishes this platform
+# Why: a failure would surface only after .env was written
 assert_resolved_image_tag_platform_supported() {
     local registry="$1" prefix="$2" tag="$3"
     local arch platform image single_platform inspect_text discovered_platforms buildx_out
@@ -2463,23 +2399,14 @@ assert_resolved_image_tag_platform_supported() {
         || die "Image tag '${tag}' does not publish a ${platform} image for this ${arch} host (published: $(printf '%s' "$discovered_platforms" | tr '\n' ',' | sed 's/,$//')). Choose a tag or channel that publishes ${platform}, then rerun setup.sh."
 }
 
-# True if a real systemd instance is actually managing this host as PID 1, not
-# merely if the `systemctl` binary happens to be present. A present binary
-# with no real init process behind it (e.g. inside a plain Docker container,
-# or certain LXC/chroot environments) still fails every systemctl call
-# ("Failed to connect to system scope bus... Host is down"), so `command -v
-# systemctl` alone is not sufficient to gate an unconditional systemctl call.
-# /run/systemd/system is the standard, side-effect-free way to check for a
-# real running systemd instance (the same check systemd's own tooling and
-# many other init-detection scripts use) without attempting a bus call that
-# could itself fail and abort the caller under set -e.
+# What: true if systemctl exists and systemd runs as init
+# Why: a systemctl binary alone fails without an init
 systemd_available() {
     command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]
 }
 
-# True if systemctl is present AND the given unit file is known to it. Used to
-# make all convergence-timer handling a no-op on hosts without systemd or
-# without the lancache-converge units installed, instead of erroring out.
+# What: true if systemctl knows the unit file
+# Why: timer handling is a no-op without the units
 systemd_unit_exists() {
     local unit="$1" out rc=0
     systemd_available || return 1
@@ -2494,9 +2421,8 @@ CONVERGENCE_SERVICE_WAS_ACTIVE=0
 UPDATE_CONVERGENCE_PAUSED=0
 UPDATE_CONVERGENCE_COMPLETED=0
 
-# The convergence timer may start `docker compose up` while update is migrating
-# files. Pause and remember exact state so update can restore the previous timer
-# behavior after success or pre-mutation failure.
+# What: pauses the convergence timer and service for update
+# Why: a running timer could start compose during migration
 pause_lancache_convergence_for_update() {
     CONVERGENCE_TIMER_WAS_ACTIVE=0
     CONVERGENCE_TIMER_WAS_ENABLED=0
@@ -2533,9 +2459,8 @@ pause_lancache_convergence_for_update() {
     fi
 }
 
-# Resume only what was active/enabled before the update. This keeps manual
-# operator choices intact and avoids enabling convergence on systems that did
-# not use it before.
+# What: restores units that were active or enabled
+# Why: keeps manual operator choices intact
 resume_lancache_convergence_after_update() {
     local restart_service="${1:-false}"
 
@@ -2561,14 +2486,8 @@ resume_lancache_convergence_after_update() {
     fi
 }
 
-# EXIT trap installed by cmd_update for the whole update run. This is the
-# failure-path counterpart to resume_lancache_convergence_after_update: it
-# fires on ANY exit (success or error) via the trap, but only actually acts
-# if convergence was paused and the update never reached its completed
-# marker — so a successful update (which clears the trap itself) never
-# double-resumes, while a die() partway through still restores the timer
-# instead of leaving it stopped forever. Preserves and re-exits with the
-# original exit code so the process's final status is unchanged.
+# What: EXIT trap resumes convergence after a failed update
+# Why: a failed run must not leave the timer stopped
 resume_lancache_convergence_after_failed_update() {
     local exit_code=$?
 
@@ -2592,9 +2511,8 @@ die_convergence_kept_paused() {
     die "$1 Manual recovery required.${resume:+ Convergence stays paused; after recovery run: $resume}"
 }
 
-# Image selection is part of the release safety contract: mutable channels such
-# as latest/nightly must resolve to one immutable stack tag before the compose
-# pull, so one installation cannot accidentally mix image versions.
+# What: validates the image tag before any compose pull
+# Why: mutable channels must resolve to one immutable tag
 validate_lancache_image_tag() {
     local tag="$1"
 
@@ -2605,16 +2523,8 @@ validate_lancache_image_tag() {
             return 0
             ;;
         pr-*)
-            # CI-only immutable staging-tag format pr-<N>-sha-<full>, pushed by
-            # build-push.yml (and back-filled by scripts/untracked/ensure-pr-staging-images.sh)
-            # for a same-repo PR's merge commit. It is keyed on that commit's sha
-            # and never re-pointed, so it is a legitimate PINNED target that lets
-            # the full-setup deep-validate suite's setup.sh CLI simulation install
-            # the PR's OWN images instead of a mutable, possibly-stale channel.
-            # Deliberately NOT surfaced in the operator-facing pinned/derive error
-            # messages below (which still name only sha-*/vX.Y.Z): these tags are
-            # ephemeral CI build artifacts, not a release channel operators should
-            # pin production installs to.
+            # What: pr-<N>-sha-<full> CI tags are accepted
+            # Why: CI simulation installs a pinned PR build
             [[ "$tag" =~ ^pr-[0-9]+-sha-[0-9a-fA-F]{7,}$ ]] \
                 || die "LANCACHE_IMAGE_TAG pr-* staging tags must match pr-<number>-sha-<commit>."
             return 0
@@ -2625,36 +2535,8 @@ validate_lancache_image_tag() {
         || die "LANCACHE_IMAGE_TAG must be an immutable sha-* tag or a vX.Y.Z / vX.Y.Z-rc.N release tag."
 }
 
-# Enumerates the supported LANCACHE_IMAGE_CHANNEL values.
-#
-# "stable" is the operator-facing name setup.sh's interactive channel picker
-# writes (#819); "latest" is the original, still-accepted name for the exact
-# same underlying stack:latest pointer -- kept valid (not deprecated/rejected)
-# so existing installs' .env files and any external tooling/docs that already
-# say LANCACHE_IMAGE_CHANNEL=latest keep working unchanged. The two are
-# resolved identically; see lancache_channel_image_refs below.
-#
-# "edge" was the OLD name of the "nightly" channel (renamed in v0.3.0, #1056).
-# It is a HARD CUT, not an alias: an install still carrying
-# LANCACHE_IMAGE_CHANNEL=edge is rejected with a clear, actionable error telling
-# the operator to switch to "nightly", rather than being silently accepted as a
-# synonym. This is an intentional v0.3.0 breaking change.
-#
-# "dev" was RETIRED (not renamed) in v0.3.0 (#825/#1141): it used to publish
-# automatically from whichever vX.Y.Z branch was the active pre-release
-# integration branch of the time. Since current_dev became the permanent
-# active-development branch, that role was never re-pointed to it -- the
-# maintainer's decision (#825, 2026-07-23: "master = stable, current_dev =
-# nightly, vY.X.Z = archived release") formally retired dev instead, because
-# archived vY.X.Z branches are frozen release history now, not an active
-# integration branch, so there is nothing left for a dev channel to mean.
-# This is the same HARD CUT treatment as edge, for the same reason: silently
-# keeping dev valid would mean install/update against an increasingly stale,
-# unmaintained image with no warning. dev was never offered by setup.sh's
-# interactive picker or the Admin UI's channel control (see
-# lancache_ui_channel_override_is_valid), so this only affects operators who
-# set LANCACHE_IMAGE_CHANNEL=dev explicitly via .env/shell env or the
-# secondary-node registration flow.
+# What: accepts stable, latest, nightly and pinned channels
+# Why: edge and dev are hard cuts, not aliases
 validate_lancache_image_channel() {
     local channel="$1"
     case "$channel" in
@@ -2671,23 +2553,14 @@ validate_lancache_image_channel() {
     die "LANCACHE_IMAGE_CHANNEL must be stable, latest, nightly, or pinned."
 }
 
-# Derives a release tag (vX.Y.Z[-rc.N]) for a checkout/archive that has no
-# explicit LANCACHE_IMAGE_TAG/CHANNEL configured: prefers an exact git tag on
-# HEAD when run from a git checkout, otherwise falls back to the VERSION file
-# shipped in release archives/tarballs. Returns 1 (no tag available, caller
-# should fall back further) vs. 2 (a tag/version WAS found but is malformed,
-# caller should die) so callers can tell "nothing to derive from" apart from
-# "found something invalid."
+# What: derives vX.Y.Z[-rc.N] from git tag or VERSION file
+# Why: rc 1 means no tag; rc 2 means found but malformed
 derive_release_archive_image_tag() {
     local version tag tags git_stderr git_status
     local -a safe_dir_opt=()
 
-    # A .git entry (dir, or a file for worktrees) means this is a genuine git
-    # checkout, not a release archive -- even if git itself goes on to refuse
-    # to touch it below. Checking this directly (rather than relying solely on
-    # `git rev-parse --is-inside-work-tree`'s exit code as a proxy for "is
-    # this a git checkout") is what lets the branches below tell "no .git at
-    # all" apart from "git rejected a .git that does exist".
+    # What: a .git entry means a real git checkout
+    # Why: git errors must not read as no checkout
     if [[ -e "$SCRIPT_DIR/.git" ]]; then
         if git_stderr=$(git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree 2>&1 1>/dev/null); then
             git_status=0
