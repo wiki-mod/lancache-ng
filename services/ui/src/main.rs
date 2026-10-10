@@ -12134,4 +12134,404 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&sdir);
     }
+
+    // What: the state of a stand-in Kea control agent.
+    // Why: tests read the commands sent and the config.
+    struct FakeKea {
+        config: Value,
+        replies: HashMap<String, Value>,
+        log: Vec<Value>,
+    }
+
+    // What: answer one Kea command from the fake's state.
+    // Why: config-set must change what config-get returns.
+    async fn fake_kea_answer(
+        State(kea): State<Arc<Mutex<FakeKea>>>,
+        Json(request): Json<Value>,
+    ) -> Json<Value> {
+        let mut kea = kea.lock().unwrap();
+        kea.log.push(request.clone());
+        let command = request["command"].as_str().unwrap_or_default().to_string();
+        if let Some(reply) = kea.replies.get(&command) {
+            return Json(reply.clone());
+        }
+        Json(match command.as_str() {
+            "config-get" => json!([{"result": 0, "arguments": kea.config.clone()}]),
+            "config-set" => {
+                kea.config = request["arguments"].clone();
+                json!([{"result": 0}])
+            }
+            _ => json!([{"result": 0}]),
+        })
+    }
+
+    // What: a Kea config with one subnet, no reservations.
+    // Why: the handlers edit it; the fake keeps the result.
+    fn kea_config_sample() -> Value {
+        json!({"Dhcp4": {
+            "host-reservation-identifiers": ["hw-address"],
+            "subnet4": [{
+                "id": 1, "subnet": "198.51.100.0/24",
+                "pools": [{"pool": "198.51.100.10 - 198.51.100.200"}],
+                "option-data": [], "reservations": []
+            }]
+        }})
+    }
+
+    // What: a ui in Kea mode in front of a stand-in Kea.
+    // Why: DHCP handlers run their whole Kea command chain.
+    async fn kea_test_server(
+        config: Value,
+        replies: Vec<(&str, Value)>,
+    ) -> (
+        String,
+        Arc<AppState>,
+        Arc<Mutex<FakeKea>>,
+        std::path::PathBuf,
+    ) {
+        let kea = Arc::new(Mutex::new(FakeKea {
+            config,
+            replies: replies
+                .into_iter()
+                .map(|(command, reply)| (command.to_string(), reply))
+                .collect(),
+            log: Vec::new(),
+        }));
+        let app = Router::new()
+            .route("/", post(fake_kea_answer))
+            .with_state(kea.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(axum::serve(listener, app).into_future());
+        let dir = unique_temp_dir("kea-ui");
+        let (snapshots, settings) = (dir.join("snapshots"), dir.join("ui.conf"));
+        fs::write(&settings, "DHCP_MODE=kea\n").unwrap();
+        let (base, state, sdir) = test_server(move |cfg| {
+            cfg.dhcp_api_url = url;
+            cfg.kea_config_snapshot_dir = snapshots.to_string_lossy().to_string();
+            cfg.ui_settings_file = settings.to_string_lossy().to_string();
+        })
+        .await;
+        let _ = fs::remove_dir_all(&sdir);
+        (base, state, kea, dir)
+    }
+
+    // What: the commands a stand-in Kea received, in order.
+    // Why: the chain order is part of the contract.
+    fn kea_commands(kea: &Arc<Mutex<FakeKea>>) -> Vec<String> {
+        let kea = kea.lock().unwrap();
+        let name = |r: &Value| r["command"].as_str().unwrap().to_string();
+        kea.log.iter().map(name).collect()
+    }
+
+    fn subnet_body() -> String {
+        subnet_form()
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&")
+    }
+
+    // What: adding a subnet runs get, test, set and write.
+    // Why: the new subnet gets the next id and a snapshot.
+    #[tokio::test]
+    async fn adding_a_subnet_runs_the_whole_kea_chain() {
+        let (base, state, kea, dir) = kea_test_server(kea_config_sample(), vec![]).await;
+        let session = open_session(&base, &state).await;
+        let bad = post_form(&base, &session, "/dhcp/subnet/add", "subnet=x").await;
+        assert_eq!(bad.status(), 400);
+        assert!(kea_commands(&kea).is_empty());
+        let ok = post_form(&base, &session, "/dhcp/subnet/add", &subnet_body()).await;
+        assert_eq!(ok.status(), 303);
+        assert_eq!(ok.headers()[header::LOCATION], "/dhcp");
+        assert_eq!(
+            kea_commands(&kea),
+            ["config-get", "config-test", "config-set", "config-write"]
+        );
+        let config = kea.lock().unwrap().config.clone();
+        let subnets = config["Dhcp4"]["subnet4"].as_array().unwrap();
+        assert_eq!(subnets.len(), 2);
+        assert_eq!(subnets[1]["id"], 2);
+        assert_eq!(subnets[1]["subnet"], "198.51.100.0/24");
+        assert_eq!(kea_store(&state.config).ids().unwrap().len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: Kea changes need Kea mode and its API URL.
+    // Why: a clear 409 beats an obscure Kea API failure.
+    #[tokio::test]
+    async fn kea_changes_are_refused_outside_kea_mode() {
+        let (base, state, kea, dir) = kea_test_server(kea_config_sample(), vec![]).await;
+        let session = open_session(&base, &state).await;
+        assert!(kea_available(&state));
+        fs::write(&state.config.ui_settings_file, "DHCP_MODE=disabled\n").unwrap();
+        assert!(!kea_available(&state));
+        let off = post_form(&base, &session, "/dhcp/subnet/remove", "id=1").await;
+        assert_eq!(off.status(), 409);
+        assert!(kea_commands(&kea).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+
+        let settings = dir.join("kea.conf");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&settings, "DHCP_MODE=kea\n").unwrap();
+        let path = settings.to_string_lossy().to_string();
+        let (base, state, sdir) = test_server(move |cfg| {
+            cfg.ui_settings_file = path;
+            cfg.dhcp_api_url = String::new();
+        })
+        .await;
+        assert!(!kea_available(&state));
+        let session = open_session(&base, &state).await;
+        let none = post_form(&base, &session, "/dhcp/subnet/remove", "id=1").await;
+        assert_eq!(none.status(), 409);
+        let _ = fs::remove_dir_all(&sdir);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: removing a subnet keeps the others.
+    // Why: only the chosen id may leave the config.
+    #[tokio::test]
+    async fn removing_a_subnet_drops_only_that_id() {
+        let mut config = kea_config_sample();
+        let second = json!({"id": 2, "subnet": "203.0.113.0/24"});
+        config["Dhcp4"]["subnet4"]
+            .as_array_mut()
+            .unwrap()
+            .push(second);
+        let (base, state, kea, dir) = kea_test_server(config, vec![]).await;
+        let session = open_session(&base, &state).await;
+        let missing = post_form(&base, &session, "/dhcp/subnet/remove", "x=1").await;
+        assert_eq!(missing.status(), 400);
+        let ok = post_form(&base, &session, "/dhcp/subnet/remove", "id=1").await;
+        assert_eq!(ok.status(), 303);
+        let config = kea.lock().unwrap().config.clone();
+        let ids: Vec<u64> = config["Dhcp4"]["subnet4"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, [2]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: static reservations are added, edited, removed.
+    // Why: a repeated submit must edit, never duplicate.
+    #[tokio::test]
+    async fn reservations_are_upserted_and_removed_by_mac() {
+        let (base, state, kea, dir) = kea_test_server(kea_config_sample(), vec![]).await;
+        let session = open_session(&base, &state).await;
+        let add = |extra: &str| {
+            let body = format!("subnet_id=1&{extra}");
+            let (base, session) = (base.clone(), session.clone());
+            async move { post_form(&base, &session, "/dhcp/static/add", &body).await }
+        };
+        for bad in [
+            "mac=zz&ip=198.51.100.50",
+            "mac=aa:bb:cc:dd:ee:ff&ip=nope",
+            "mac=aa:bb:cc:dd:ee:ff&ip=198.51.100.50&hostname=bad_host!",
+        ] {
+            assert_eq!(add(bad).await.status(), 400, "{bad}");
+        }
+        let nosubnet = post_form(
+            &base,
+            &session,
+            "/dhcp/static/add",
+            "mac=aa:bb:cc:dd:ee:ff&ip=198.51.100.50",
+        )
+        .await;
+        assert_eq!(nosubnet.status(), 400);
+        assert!(kea_commands(&kea).is_empty());
+        let unknown = post_form(
+            &base,
+            &session,
+            "/dhcp/static/add",
+            "subnet_id=9&mac=aa:bb:cc:dd:ee:ff&ip=198.51.100.50",
+        )
+        .await;
+        assert_eq!(unknown.status(), 404);
+        let first = add("mac=AA-BB-CC-DD-EE-FF&ip=198.51.100.50&hostname=pc1").await;
+        assert_eq!(first.status(), 303);
+        let second = add("mac=aa:bb:cc:dd:ee:ff&ip=198.51.100.51").await;
+        assert_eq!(second.status(), 303);
+        let list = kea.lock().unwrap().config["Dhcp4"]["subnet4"][0]["reservations"].clone();
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        assert_eq!(list[0]["hw-address"], "aa:bb:cc:dd:ee:ff");
+        assert_eq!(list[0]["ip-address"], "198.51.100.51");
+        assert_eq!(list[0]["hostname"], "");
+        let remove = |body: &str| {
+            let (base, session, body) = (base.clone(), session.clone(), body.to_string());
+            async move { post_form(&base, &session, "/dhcp/static/remove", &body).await }
+        };
+        assert_eq!(remove("subnet_id=1&mac=zz").await.status(), 400);
+        assert_eq!(remove("mac=aa:bb:cc:dd:ee:ff").await.status(), 400);
+        assert_eq!(
+            remove("subnet_id=1&mac=11:22:33:44:55:66").await.status(),
+            303
+        );
+        let kept = kea.lock().unwrap().config["Dhcp4"]["subnet4"][0]["reservations"].clone();
+        assert_eq!(kept.as_array().unwrap().len(), 1);
+        assert_eq!(
+            remove("subnet_id=1&mac=AA-BB-CC-DD-EE-FF").await.status(),
+            303
+        );
+        let gone = kea.lock().unwrap().config["Dhcp4"]["subnet4"][0]["reservations"].clone();
+        assert!(gone.as_array().unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+
+        let mut config = kea_config_sample();
+        config["Dhcp4"]["host-reservation-identifiers"] = json!(["duid"]);
+        let (base, state, _kea, dir) = kea_test_server(config, vec![]).await;
+        let session = open_session(&base, &state).await;
+        let refused = post_form(
+            &base,
+            &session,
+            "/dhcp/static/add",
+            "subnet_id=1&mac=aa:bb:cc:dd:ee:ff&ip=198.51.100.50",
+        )
+        .await;
+        assert_eq!(refused.status(), 500);
+        assert!(
+            refused
+                .text()
+                .await
+                .unwrap()
+                .contains("host-reservation-identifiers")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: a refused Kea step stops the chain.
+    // Why: a failed step must not leave a half edit.
+    #[tokio::test]
+    async fn kea_failures_stop_or_roll_back_the_change() {
+        let refuse = json!([{"result": 1, "text": "boom"}]);
+        let (base, state, kea, dir) =
+            kea_test_server(kea_config_sample(), vec![("config-test", refuse.clone())]).await;
+        let session = open_session(&base, &state).await;
+        let failed = post_form(&base, &session, "/dhcp/subnet/remove", "id=1").await;
+        assert_eq!(failed.status(), 500);
+        assert!(failed.text().await.unwrap().contains("boom"));
+        assert_eq!(kea_commands(&kea), ["config-get", "config-test"]);
+        assert!(kea_store(&state.config).ids().unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+
+        let (base, state, kea, dir) =
+            kea_test_server(kea_config_sample(), vec![("config-write", refuse)]).await;
+        let session = open_session(&base, &state).await;
+        let failed = post_form(&base, &session, "/dhcp/subnet/remove", "id=1").await;
+        assert_eq!(failed.status(), 500);
+        assert!(failed.text().await.unwrap().contains("rolled back"));
+        assert_eq!(
+            kea_commands(&kea),
+            [
+                "config-get",
+                "config-test",
+                "config-set",
+                "config-write",
+                "config-set"
+            ]
+        );
+        let restored = kea.lock().unwrap().config.clone();
+        assert_eq!(restored["Dhcp4"]["subnet4"].as_array().unwrap().len(), 1);
+        assert!(kea_store(&state.config).ids().unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: a lease release maps Kea's result codes.
+    // Why: an expired lease is a race, not a failure.
+    #[tokio::test]
+    async fn lease_release_maps_kea_result_codes() {
+        let (base, state, kea, dir) = kea_test_server(kea_config_sample(), vec![]).await;
+        let session = open_session(&base, &state).await;
+        let bad = post_form(&base, &session, "/dhcp/lease/release", "ip=nope").await;
+        assert_eq!(bad.status(), 400);
+        assert!(kea_commands(&kea).is_empty());
+        let ok = post_form(&base, &session, "/dhcp/lease/release", "ip=198.51.100.20").await;
+        assert_eq!(ok.status(), 303);
+        assert_eq!(kea_commands(&kea), ["lease4-get", "lease4-del"]);
+        assert_eq!(
+            kea.lock().unwrap().log[1]["arguments"],
+            json!({"ip-address": "198.51.100.20"})
+        );
+        let _ = fs::remove_dir_all(&dir);
+
+        let gone = json!([{"result": 3, "text": "no lease"}]);
+        let (base, state, _kea, dir) =
+            kea_test_server(kea_config_sample(), vec![("lease4-del", gone)]).await;
+        let session = open_session(&base, &state).await;
+        let missing = post_form(&base, &session, "/dhcp/lease/release", "ip=198.51.100.20").await;
+        assert_eq!(missing.status(), 404);
+        assert!(missing.text().await.unwrap().contains("No active lease"));
+        let _ = fs::remove_dir_all(&dir);
+
+        let broken = json!([{"result": 1, "text": "kea broke"}]);
+        let (base, state, _kea, dir) =
+            kea_test_server(kea_config_sample(), vec![("lease4-del", broken)]).await;
+        let session = open_session(&base, &state).await;
+        let failed = post_form(&base, &session, "/dhcp/lease/release", "ip=198.51.100.20").await;
+        assert_eq!(failed.status(), 500);
+        assert!(failed.text().await.unwrap().contains("kea broke"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: leases are read with their expiry time.
+    // Why: the page shows an absolute expiry.
+    #[tokio::test]
+    async fn leases_and_the_dhcp_page_come_from_kea() {
+        let leases = json!([{"result": 0, "arguments": {"leases": [{
+            "ip-address": "198.51.100.20", "hw-address": "aa:bb:cc:dd:ee:ff",
+            "hostname": "pc1", "subnet-id": 1, "cltt": 1000, "valid-lft": 3600
+        }]}}]);
+        let (base, state, kea, dir) =
+            kea_test_server(kea_config_sample(), vec![("lease4-get-all", leases)]).await;
+        let found = kea_leases(&state).await.unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].subnet_id, 1);
+        assert_eq!(found[0].ip, "198.51.100.20");
+        assert_eq!(found[0].mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(found[0].hostname, "pc1");
+        assert_eq!(found[0].expires, "4600");
+        let page = reqwest::get(format!("{base}/dhcp")).await.unwrap();
+        assert_eq!(page.status(), 200);
+        let html = page.text().await.unwrap();
+        assert!(html.contains("198.51.100.20"));
+        assert!(html.contains("198.51.100.0/24"));
+        assert!(kea_commands(&kea).contains(&"config-get".to_string()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let (base, _state, kea, dir) = kea_test_server(kea_config_sample(), vec![]).await;
+        fs::write(dir.join("ui.conf"), "DHCP_MODE=disabled\n").unwrap();
+        let page = reqwest::get(format!("{base}/dhcp")).await.unwrap();
+        assert_eq!(page.status(), 200);
+        assert!(!page.text().await.unwrap().contains("198.51.100.0/24"));
+        assert!(kea_commands(&kea).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // What: a rollback applies a stored snapshot.
+    // Why: only ids found on disk are accepted.
+    #[tokio::test]
+    async fn a_kea_rollback_applies_a_stored_snapshot() {
+        let (base, state, kea, dir) = kea_test_server(kea_config_sample(), vec![]).await;
+        let session = open_session(&base, &state).await;
+        let snapshot = json!({"Dhcp4": {"subnet4": []}});
+        let store = kea_store(&state.config);
+        store.create(&snapshot, 3).unwrap();
+        let id = store.ids().unwrap().remove(0);
+        let unknown = post_form(
+            &base,
+            &session,
+            "/dhcp/snapshot/rollback",
+            "snapshot_id=nope",
+        )
+        .await;
+        assert_eq!(unknown.status(), 409);
+        assert!(kea_commands(&kea).is_empty());
+        let body = format!("snapshot_id={id}");
+        let ok = post_form(&base, &session, "/dhcp/snapshot/rollback", &body).await;
+        assert_eq!(ok.status(), 303);
+        assert_eq!(kea.lock().unwrap().config, snapshot);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
