@@ -1252,7 +1252,13 @@ env_key_has_usable_secret() {
 # Secret generation must fail closed. setup.sh must never write empty secrets
 # after a missing openssl binary, broken RNG, or interrupted generator command.
 generate_secret_value() {
-    local name="$1" kind="$2" value chunk
+    local name="$1" kind="$2" value chunk managed
+    # What: only a key on managed_secret_env_keys is made
+    # Why: an unlisted key would ship unredacted in bundles
+    # From: Issue #1683 | PR #1858
+    managed=$(managed_secret_env_keys)
+    grep -qxF -- "$name" <<< "$managed" \
+        || die "Secret $name is not in managed_secret_env_keys; add it there so log bundles redact it."
 
     case "$kind" in
         hex32)
@@ -5994,14 +6000,10 @@ cmd_debug() {
 # every credential-shaped variable, on top of (not instead of) the
 # name-based, line-level redaction applied to the .env copy itself.
 
-# The explicit floor for "credential-shaped variable name": every key this
-# script itself generates/manages via ensure_secret_env_key/
-# get_or_generate_secret/generate_secret_value (grepped fresh against this
-# file for #762, not assumed from memory — see the PR body for the exact
-# `grep` used). logbundle_key_looks_like_secret below extends this with a
-# name-pattern safety net, so a future credential-shaped variable added
-# without also updating this explicit list is still redacted.
-logbundle_secret_env_keys() {
+# What: every secret env key setup.sh makes and redacts
+# Why: one list; generation refuses a key not on it
+# From: Issue #762 | PR #1858
+managed_secret_env_keys() {
     printf '%s\n' \
         KEA_CTRL_TOKEN \
         DDNS_TSIG_KEY \
@@ -6016,19 +6018,16 @@ logbundle_secret_env_keys() {
         UI_AUTH_PASSWORD
 }
 
-# Pattern-based safety net on top of logbundle_secret_env_keys above: matches
-# any env var KEY containing PASSWORD/SECRET/TOKEN/TSIG/CREDENTIAL, or ending
-# in _KEY. Deliberately broad (per #762's "when in doubt, over-redact"
-# instruction) so a future secret-shaped variable this list forgets to
-# enumerate — or a variable an operator adds to their own .env by hand — is
-# still caught instead of silently shipped in the archive.
+# What: name-pattern net for secret-shaped env keys
+# Why: an operator's own secret key is redacted too
+# From: Issue #762
 logbundle_key_looks_like_secret() {
     local key="$1"
     [[ "$key" =~ (PASSWORD|SECRET|TOKEN|TSIG|CREDENTIAL|_KEY) ]]
 }
 
-# What: prints one non-empty, non-placeholder secret VALUE per line, longest first.
-# Why: gathers every value for every key in logbundle_secret_env_keys or matching logbundle_key_looks_like_secret.
+# What: each set secret value, one per line, longest first
+# Why: values also leak in compose config and logs
 # From: Issue #782
 logbundle_collect_secret_values() {
     local -a env_files=("$@")
@@ -6036,7 +6035,7 @@ logbundle_collect_secret_values() {
     local key env_file value
 
     local keys rc
-    keys=$(logbundle_secret_env_keys) || die "Cannot list the secret env keys (exit $?)."
+    keys=$(managed_secret_env_keys) || die "Cannot list the secret env keys (exit $?)."
     while IFS= read -r key; do
         [[ -n "$key" ]] && key_set["$key"]=1
     done <<< "$keys"

@@ -4170,7 +4170,7 @@ CASES
             image_prefix) v="${pre}" ;;
             image_channel) v="" ;;
             image_tag) v="${tag}" ;;
-            *) v="$(generate_secret_value "${f^^}" hex32)" ;;
+            *) v="$(_val sha)" ;;
         esac
         body="$(jq -c --arg k "${f}" --arg v "${v}" '.[$k] = $v' <<< "${body}")"
     done <<< "${fields}"
@@ -4354,26 +4354,31 @@ CASES
         && _state_matches "${D}" && diff -r "${t}/v.first" "${v}" || { echo "fresh host state"; return 1; }
 }
 
+# What: only listed secrets are made; each is redacted
+# Why: a secret missed by the bundle is a credential leak
+# From: Issue #762 | PR #1858
 @test "setup log bundle finds every managed secret and redacts it" {
-    # What: secret keys, values, mid-line, .env redaction
-    # Why: a missed secret in a bundle is a credential leak
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" keys list plain k long short custom ph marker
+    local root t="${BATS_TEST_TMPDIR}" list plain k kind long short custom ph marker
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    _load_setup_sh "${root}"
-    keys="$(grep -oE '(ensure_secret_env_key|generate_secret_value) [A-Z_]+' "${root}/setup.sh" | awk '{ print $2 }' | sort -u)"
-    list="$(logbundle_secret_env_keys)"
-    [ -n "${keys}" ] && [ -n "${list}" ] || { echo "no managed secrets found"; return 1; }
+    _load_setup_sh "${root}" || return 1
+    list="$(managed_secret_env_keys)" || return 1
+    [ -n "${list}" ] || { echo "no managed secrets"; return 1; }
     while IFS= read -r k; do
-        grep -qx -- "${k}" <<< "${list}" || logbundle_key_looks_like_secret "${k}" || { echo "unredacted ${k}"; return 1; }
-    done <<< "${keys}"
-    plain="$(awk -F= '/^[A-Z_][A-Z0-9_]*=/ { print $1 }' "${root}/deploy/prod/.env" | grep -vxF -f <(printf '%s\n' "${keys}"))"
+        for kind in hex32 base64_32 alnum20; do
+            run generate_secret_value "${k}" "${kind}"
+            [ "${status}" -eq 0 ] && [ -n "${output}" ] || { echo "listed ${k} ${kind}: rc ${status}"; return 1; }
+        done
+    done <<< "${list}"
+    custom="$(_val var)_TOKEN"
+    run generate_secret_value "${custom}" hex32
+    _expect unlisted 1 "Secret ${custom} is not in managed_secret_env_keys" || return 1
+    plain="$(awk -F= '/^[A-Z_][A-Z0-9_]*=/ { print $1 }' "${root}/deploy/prod/.env" | grep -vxF -f <(printf '%s\n' "${list}"))"
     while IFS= read -r k; do
         ! logbundle_key_looks_like_secret "${k}" || { echo "plain prod key ${k} flagged as secret"; return 1; }
     done <<< "${plain}"
     k="$(awk 'NR == 1' <<< "${list}")"
-    long="$(generate_secret_value "${k}" hex32)"; short="$(generate_secret_value "${k}" alnum20)"
-    custom="BATS${BATS_TEST_NUMBER}_${k##*_}"; ph="CHANGE_ME_${k}"
+    long="$(generate_secret_value "${k}" hex32)" && short="$(generate_secret_value "${k}" alnum20)" || return 1
+    custom="$(_val var)_${k##*_}"; ph="CHANGE_ME_${k}"
     ! grep -qx -- "${custom}" <<< "${list}" && logbundle_key_looks_like_secret "${custom}" && secret_value_is_placeholder "${ph}" \
         || { echo "probe inputs invalid: ${custom} ${ph}"; return 1; }
     { printf '%s=%s\n' "${k}" "${short}" "${custom}" "${long}" "$(awk 'NR == 2' <<< "${list}")" "${ph}"
