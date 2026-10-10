@@ -3565,6 +3565,7 @@ compose_volume_names() {
 
 # What: true if any named volume carries this project label
 # Why: label survives docker compose down on the volume
+# From: Issue #456 | PR #1673
 compose_project_has_named_volumes() {
     local project="$1"
     local volume_names
@@ -3630,6 +3631,7 @@ restore_compose_volumes() {
 
 # What: blocks restore if other installs share the volumes
 # Why: project name is fixed, so volumes are shared
+# From: Issue #456 | PR #1673
 guard_restore_shared_project_volumes() {
     local install_dir="$1" archived_install_dir="$2" project="$3" container working_dir containers
     command -v docker >/dev/null 2>&1 || return 0
@@ -4348,8 +4350,9 @@ verify_stack_functional_health() {
         _verify_healthz_endpoint "$ip_ssl" || return 1
     fi
 
-    # What: dig queries a fixed host on the DNS container
-    # Why: real answer needed; ping and ss prove nothing
+    # What: dig an exact, non-wildcard cdn-domains.txt host
+    # Why: wildcard-only RPZ entries never match their apex
+    # From: Issue #1149 | PR #1150
     test_fqdn="content1.steampowered.com"
     if [[ -n "$ip_standard" ]]; then
         require_functional_check_tool dig "the DNS resolution probe" || return 1
@@ -5494,7 +5497,7 @@ kea_ctrl_post() {
 
     # What: passes the Basic-Auth token to curl via -K stdin
     # Why: -u would expose the token in process argv
-    # From: PR #1550
+    # From: Issue #1304 | PR #1550
     local kea_ctrl_token_escaped
     kea_ctrl_token_escaped=$(printf '%s' "$kea_ctrl_token" | sed 's/\\/\\\\/g; s/"/\\"/g')
     if ! out=$(printf 'user = "admin:%s"\n' "$kea_ctrl_token_escaped" | curl -sS -w '\n%{http_code}' -X POST \
@@ -5896,6 +5899,7 @@ cmd_update_ip() {
 
     # What: rewrites UI_BIND_IP while it equals old IP
     # Why: an empty or explicit value stays untouched
+    # From: Issue #666 | PR #745
     if [[ -n "$current_ui_bind_ip" && "$current_ui_bind_ip" = "$current_ip_standard" ]]; then
         set_env_key UI_BIND_IP "$new_ip_standard" "$deploy_env"
         print_ok "Updated: $deploy_env (UI_BIND_IP)"
@@ -6252,6 +6256,7 @@ EOF
 
     # What: KEEP_KNOWN_GOOD_CONFIGS: env, .env, else 3
     # Why: a local per-node setting; the primary has no say
+    # From: Issue #615 | PR #625
     keep_known_good_configs="${KEEP_KNOWN_GOOD_CONFIGS:-}"
     if [[ -z "$keep_known_good_configs" && -n "$existing_env_file" ]]; then
         keep_known_good_configs=$(get_env_var KEEP_KNOWN_GOOD_CONFIGS "$existing_env_file") || exit $?
