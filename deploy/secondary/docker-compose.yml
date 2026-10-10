@@ -1,59 +1,55 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: secondary DNS node; setup.sh secondary installs it
-# Why: --rotate reinstalls it; local edits get overwritten
-# From: Issue #1683 | PR #1858
+#
+# What: remote secondary DNS node; setup.sh secondary owns it.
+# Why: --rotate rewrites this file; local edits are lost.
+# From: Issue #1683
 
 services:
+  # What: the primary's dns image as a read-only replica.
+  # Why: zones come by AXFR; NATS only flushes the cache.
+  # From: Issue #1683
   dns:
     container_name: LanCache-NG-dns
     image: ${LANCACHE_IMAGE_REF_DNS:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}}
     environment:
-      - PROXY_IP=${PROXY_IP}
+      - PROXY_IP=${PROXY_IP:?PROXY_IP is required}
       - PDNS_API_KEY=${PDNS_API_KEY}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
-      - NATS_URL=${NATS_URL}
-      - NATS_USER=${NATS_USER}
-      - NATS_PASSWORD=${NATS_PASSWORD}
-      - NATS_CONSUMER=${NATS_CONSUMER}
       - DDNS_ALLOW_FROM=127.0.0.1
-      - NATS_RECORD_WRITES=0
       - DNS_REPLICATION_ROLE=secondary
-      - DNS_XFR_PRIMARY=${DNS_XFR_PRIMARY:-}
-      # What: KEEP_KNOWN_GOOD_CONFIGS default, same as primary
-      # Why: Retains known-good config snapshots for rollback
-      # From: Issue #615
+      - DNS_XFR_PRIMARY=${DNS_XFR_PRIMARY:?DNS_XFR_PRIMARY is required}
+      - NATS_URL=${NATS_URL:?NATS_URL is required}
+      - NATS_USER=${NATS_USER:?NATS_USER is required}
+      - NATS_PASSWORD=${NATS_PASSWORD}
+      - NATS_CONSUMER=${NATS_CONSUMER:?NATS_CONSUMER is required}
+      - NATS_RECORD_WRITES=0
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
     volumes:
       - pdns-data:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
-      # What: volume for known-good pdns/recursor snapshots
-      # Why: without it, image updates lose the rollback base
-      # From: Issue #615
-      - pdns-config-snapshots:/var/lib/lancache-dns
+      - dns-config-snapshots:/var/lib/lancache-dns
+    # What: dns-http only; a secondary has one LAN IP.
+    # Why: LISTEN_IP is the address setup.sh registered.
+    # From: Issue #1683
     ports:
-      - "${LISTEN_IP:?Set LISTEN_IP to the secondary host LAN IP}:53:53/udp"
-      - "${LISTEN_IP:?Set LISTEN_IP to the secondary host LAN IP}:53:53/tcp"
+      - "${LISTEN_IP:?LISTEN_IP is required}:53:53/udp"
+      - "${LISTEN_IP:?LISTEN_IP is required}:53:53/tcp"
     healthcheck:
-      # What: real queries against every running recursor.
-      # Why: the dns image supervisor owns its health probe.
-      # From: Issue #1683
       test: ["CMD", "/usr/local/bin/lancache-watchdog", "healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
     restart: always
-    # What: Caps json-file logs at 5MB per file, 2 rotated files
-    # Why: Bounds log disk growth; no Docker daemon-level rotation
+    # What: Docker's local driver; it rotates by itself.
+    # Why: no services container, so no syslog-ng here.
+    # From: Issue #1683
     logging:
-      driver: json-file
-      options:
-        max-size: "5m"
-        max-file: "2"
+      driver: local
 
 volumes:
   pdns-data:
   pdns-filter-state:
-  pdns-config-snapshots:
+  dns-config-snapshots:
