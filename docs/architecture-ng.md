@@ -471,7 +471,7 @@ against an expected mount-root prefix (`CACHE_DIR_ALLOWED_PREFIX`/
 defaulting to `/var/cache`/`/var/log`/`/var/lib`) before any `find`/`rm` runs
 against it, fail-closed (loud rejection, no deletion, no stamp write) on any
 value resolving outside that prefix.
-- Remove cache entries older than `CACHE_VALID_DAYS` (`config/prod/watchdog.env`, `find -mtime`) — not `CACHE_VALID_HIT`, which is the unrelated nginx/proxy cache-validity variable in `deploy/prod/.env` (both happen to default to `365`, which previously masked this doc citing the wrong one)
+- Remove cache entries older than `CACHE_VALID_DAYS` (`deploy/prod/.env`) — not `CACHE_VALID_HIT`, which is the unrelated nginx/proxy cache-validity variable in `deploy/prod/.env` (both happen to default to `365`, which previously masked this doc citing the wrong one)
 - Complements nginx `inactive` (which works by access time)
 - Syslog retention (opt-in, `SYSLOG_ENABLED=true`): storage-budget pruning under `SYSLOG_LOG_ROOT` — see the syslog-ng section below for the exact age-then-size ordering
 
