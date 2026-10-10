@@ -3516,17 +3516,8 @@ validate_compose_config() {
     print_ok "Docker Compose configuration is valid"
 }
 
-# Resolves the effective Docker Compose project name for a compose directory.
-# Compose itself resolves this, in priority order, from: the
-# COMPOSE_PROJECT_NAME environment variable, a COMPOSE_PROJECT_NAME entry in
-# the env file, the top-level `name:` key in docker-compose.yml, and finally
-# the containing directory's basename. Both of this repo's compose files
-# (deploy/quickstart, deploy/prod) pin `name: lancache-ng`, so the
-# yaml fallback is what actually resolves today for every install — but
-# honoring an operator override first keeps this correct if that ever
-# changes. Reads the yaml directly (rather than shelling out to `docker
-# compose config`) so it also works against an archived, not-yet-restored
-# compose directory that has no running containers.
+# What: resolves the Compose project name from yaml or env
+# Why: archived compose dirs have no running containers
 compose_project_name() {
     local compose_dir="$1" env_file="$2" name
     name="${COMPOSE_PROJECT_NAME:-}"
@@ -3560,16 +3551,8 @@ compose_cache_volume_name() {
     printf '%s_%s\n' "$project" "$volume"
 }
 
-# Lists the distinct Docker named-volume names belonging to this compose
-# project, as the union of two discovery methods:
-#   1. Mounts of any container in the project (including stopped ones, via
-#      `ps --all`) — picks up volumes attached to containers that predate the
-#      current compose file.
-#   2. `docker volume ls` filtered by the compose project label — needed
-#      because `lancache.service`'s `ExecStop=docker compose down` REMOVES
-#      containers (not just stops them), so after `systemctl stop
-#      lancache.service` method 1 alone finds nothing even though the named
-#      volumes (NATS/PowerDNS state, etc.) still exist on disk (#669 #5).
+# What: lists volumes of containers and the project label
+# Why: compose down removes containers but keeps volumes
 compose_volume_names() {
     local install_dir="$1" container env_file project containers mounts volumes names=""
     compose_stack_available "$install_dir" || return 0
@@ -3629,12 +3612,8 @@ backup_compose_volumes() {
     done <<< "$volumes"
 }
 
-# Counterpart to backup_compose_volumes: recreates each volume (if missing)
-# and replaces its full contents from the matching archive, wiping existing
-# volume content first (including dotfiles) so a restore is a clean
-# replacement rather than a merge with whatever was already in the volume.
-# Dies (rather than skipping) if the backup has volume payloads but Docker
-# is unavailable, since silently skipping would restore an incomplete stack.
+# What: wipes each volume and replaces it from its archive
+# Why: skipping would restore an incomplete stack
 restore_compose_volumes() {
     local install_dir="$1" volume_root="$2" volume archive archives
     [[ -d "$volume_root" ]] || return 0
@@ -3684,10 +3663,8 @@ guard_restore_shared_project_volumes() {
     fi
 }
 
-# Snapshots the exact image references/digests in use at backup time (JSON
-# preferred, falling back to plain `docker compose images` text on older
-# Compose versions that lack --format json), purely as rollback/debugging
-# reference — never restored automatically, only warns on failure.
+# What: records image digests as a rollback reference
+# Why: informational only; failures warn, never restore
 record_image_revisions() {
     local install_dir="$1" output="$2" env_file revisions
     compose_stack_available "$install_dir" || return 0
@@ -3761,29 +3738,11 @@ cmd_backup() (
     trap backup_cleanup EXIT
     mkdir -p "$dest/rootfs" || die "Failed to create $dest/rootfs (exit $?)."
 
-    # Only pause the convergence timer ourselves if it isn't already paused by
-    # an enclosing cmd_update run: cmd_update pauses before calling
-    # `cmd_backup --config` for its pre-update rollback backup, and pausing a
-    # second time here would overwrite CONVERGENCE_TIMER_WAS_* with "already
-    # stopped", so cmd_update's own resume at the end would never re-enable
-    # the timer. A STANDALONE `setup.sh backup` (dispatched directly, no
-    # cmd_update wrapper) has nothing pausing it otherwise, so
-    # lancache-converge.timer could fire `docker compose up -d
-    # --remove-orphans` mid-backup and restart the stack we just stopped for
-    # a consistent copy (#669 #2).
+    # What: pauses convergence unless cmd_update did
+    # Why: a second pause would overwrite saved timer state
     if [[ "${UPDATE_CONVERGENCE_PAUSED:-0}" != "1" ]]; then
-        # Set the cleanup flag BEFORE calling the mutating pause helper, not
-        # after: pause_lancache_convergence_for_update can `die` partway
-        # through (e.g. it stops lancache-converge.timer successfully but
-        # then fails to `systemctl disable` it), and `die` exits, which
-        # fires backup_cleanup via the EXIT trap above immediately. If the
-        # flag were only set on a successful return from the helper, that
-        # trap would see backup_paused_convergence=0 and skip resume
-        # entirely, leaving convergence disabled after a failed backup
-        # attempt. cmd_update's own UPDATE_CONVERGENCE_PAUSED=1 (set before
-        # its call to the same helper) already establishes this
-        # set-before-call ordering as the pattern for this script (PR #748
-        # review).
+        # What: sets the cleanup flag before the pause call
+        # Why: a die inside pause still triggers the resume
         backup_paused_convergence=1
         pause_lancache_convergence_for_update
     fi
@@ -3845,45 +3804,8 @@ EOF
     backup_cleanup
 )
 
-# Restores a setup.sh backup archive into install_dir, remapping paths when
-# install_dir differs from the directory the archive was originally taken
-# from (both the install tree itself and, for deploy/prod archives, the
-# separate repo-root inputs from deploy_prod_repo_input_paths). Manifest paths
-# under the archived install directory are skipped in the generic copy loop
-# and handled separately first, since they need the path-remap/sed rewrite
-# rather than a literal restore to their original absolute path.
-#
-# A restored archive can carry a legacy or otherwise unconverged .env (older
-# split cache keys, a stale strict security mode, keys a later release added)
-# because it was captured verbatim at backup time -- unlike cmd_update, which
-# always runs migrate_env_for_update + validate_compose_config before it lets
-# the stack come back up. Issue #639: after files/volumes are restored, this
-# function runs that same convergence path so a restore never leaves an
-# install silently un-migrated, requiring an undocumented manual
-# `setup.sh update` afterward. Following AG-OP-010 (validate before restart
-# when a failed validation would leave the install worse off), a migration or
-# validation failure here is fail-closed: stack_stopped is cleared before
-# die() runs so the already-stopped stack is left stopped instead of being
-# started against a config that failed to converge or validate. The restored
-# files/volumes and whatever migrate_env_for_update managed to write to .env
-# before failing are left on disk either way; rerun `setup.sh update` once the
-# reported problem is fixed.
-#
-# If the archived install tree has no .env.local (a backup that predates the
-# .env.local split, or a deploy/prod backup taken before an operator ever
-# created one), moves any .env.local currently sitting at install_dir out of
-# the way instead of leaving it in place. Without this, rsync (deliberately
-# run without --delete, see cmd_restore's own comment below) leaves a
-# pre-restore .env.local completely untouched, and
-# runtime_env_file_for_install_dir() prefers .env.local over .env whenever it
-# exists -- so every subsequent compose/update/debug call would keep reading
-# the stale pre-restore override instead of the archive's just-restored
-# .env, silently defeating the point of a rollback restore. The stale file is
-# renamed rather than deleted outright, so it stays available for manual
-# recovery instead of being silently lost. Idempotent: a second restore of
-# the same archive against the same target finds no .env.local left to move
-# and is a no-op.
-
+# What: moves stale .env.local aside when archive lacks one
+# Why: prefers .env.local over .env, so it must go
 restore_clear_stale_env_local_if_unarchived() {
     local archived_install_root="$1" install_dir="$2" stale_target
 
@@ -3905,12 +3827,8 @@ cmd_restore() (
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
     [[ -n "$archive" ]] || die "Usage: $0 restore <backup.tar.gz> [install-dir]"
     [[ -f "$archive" ]] || die "Backup archive not found: $archive"
-    # openssl is required here (not just tar/rsync) because the .env
-    # convergence step below can call ensure_secret_env_key() for a legacy or
-    # incomplete backup with missing/placeholder service tokens, and that
-    # generator shells out to `openssl rand`. Installing it upfront means a
-    # minimal disaster-recovery host fails before any restore mutation
-    # instead of after files/volumes are already restored.
+    # What: requires openssl for the convergence step
+    # Why: fails before restore mutations on minimal hosts
     install_missing_tools tar rsync openssl
 
     stack_stopped=0
@@ -3920,9 +3838,8 @@ cmd_restore() (
         local status=$?
         if [[ "$stack_stopped" = "1" ]]; then
             if [[ "$status" -eq 0 ]]; then
-                # Success: restart only if the stack was actually running
-                # before this restore, instead of unconditionally bringing it
-                # up (#669 #4's "was already stopped" half).
+                # What: restarts only if it was running
+                # Why: a stopped stack must stay stopped
                 [[ "$stack_was_running" = "1" ]] && compose_stack_start "$install_dir"
             else
                 # What: failure keeps the stack stopped
@@ -3960,26 +3877,14 @@ cmd_restore() (
         new_repo_root=$(deploy_prod_repo_root "$install_dir") || exit $?
     fi
 
-    # Read the project name from the ARCHIVED compose file (the one that
-    # actually owns the volumes about to be wiped/reloaded), not the restore
-    # target — the target's own docker-compose.yml may not exist yet on a
-    # fresh install-dir, and either way it is only relevant here as a name
-    # lookup, not as the thing being restored. See
-    # guard_restore_shared_project_volumes's own comment for why this matters
-    # (#669 #6). Resolved via runtime_env_file_for_install_dir rather than a
-    # hardcoded ".env": a manual deploy/prod archive whose active runtime
-    # config was .env.local (backup_manifest archives that file separately
-    # from the tracked .env template, so it lands at this same extracted
-    # path) can carry its own COMPOSE_PROJECT_NAME override. Reading only
-    # .env would silently fall back to the tracked template's name and make
-    # the guard check the wrong project's running containers (PR #748 review).
+    # What: resolves project name from archived compose
+    # Why: the guard must check the archive's own project
     archived_project=$(compose_project_name "$root/$rel_install" "$(runtime_env_file_for_install_dir "$root/$rel_install")") \
         || exit $?
     guard_restore_shared_project_volumes "$install_dir" "$archived_install" "$archived_project"
 
-    # Captured before compose_stack_stop so restore_cleanup only restarts the
-    # stack on a successful restore if it was actually running beforehand
-    # (#669 #3/#4 pattern).
+    # What: records whether the stack was running
+    # Why: restore restarts only a stack that was running
     compose_stack_running "$install_dir" && stack_was_running=1
     stack_stopped=1
     compose_stack_stop "$install_dir"
@@ -3989,9 +3894,8 @@ cmd_restore() (
         mkdir -p "$install_dir" || die "Failed to create $install_dir (exit $?)."
         rsync -aH --numeric-ids "$root/$rel_install/" "$install_dir/" \
             || die "Failed to restore $install_dir (exit $?)."
-        # Must run before the path rewrite below: a stale .env.local
-        # that the archive doesn't account for should be moved aside, not
-        # rewritten in place as if it were part of the restored config.
+        # What: moves a stale .env.local aside first
+        # Why: the rewrite must not treat it as archived
         restore_clear_stale_env_local_if_unarchived "$root/$rel_install" "$install_dir"
         if [[ "$archived_install" != "$install_dir" ]]; then
             # What: old path becomes new path, literally
@@ -4039,20 +3943,8 @@ cmd_restore() (
         install_dir="${PROD_COMPOSE%/*}"
     fi
 
-    # Run in a subshell so a die() inside either helper is caught here instead
-    # of unwinding straight past the stack_stopped=0 line below -- both
-    # helpers already wrote whatever they could to the on-disk .env before
-    # die()ing, and that partial progress is intentionally left in place for
-    # the operator to inspect/finish via setup.sh update. migrate_env_for_update
-    # is called with preserve_image_tag=1 so a rollback restore keeps the
-    # archived immutable image tag instead of re-resolving a channel back to
-    # its current (possibly still-bad) pointer -- see the function's own
-    # preserve_image_tag comment. validate_compose_config only runs when
-    # Docker/compose is actually available: backup/restore intentionally
-    # support config-only archives on hosts without Docker (see
-    # compose_stack_available and restore_compose_volumes above), and
-    # `docker compose config` would otherwise fail that offline restore path
-    # even though nothing here actually needs Docker to converge .env.
+    # What: runs migration and config check in a subshell
+    # Why: a die must not skip the stack_stopped reset
     if ! (
         migrate_env_for_update "$install_dir" 1
         if compose_stack_available "$install_dir"; then
@@ -4333,36 +4225,16 @@ EOF
 }
 
 # ── update / auto-update shared internals ─────────────────────────────────────
-# Internal shared state for the current stack-update flow (set once near the
-# top of perform_stack_update_flow, read by every helper below it). This is
-# deliberately plain globals rather than threading the env-file/stack-dir
-# values through several layers of function parameters: bash nameref
-# parameters (`local -n`) become fragile once nested more than one call deep
-# (name collisions between an outer and inner nameref are a real footgun), and
-# this flow never runs two updates concurrently in the same process, so there
-# is no real downside to shared state scoped to "the update currently in
-# progress." Not meant to be read outside of the functions in this section.
+# What: plain globals hold the current update flow state
+# Why: nested namerefs are fragile; no concurrent updates
 _UPDATE_ENV_FILE=""
 _UPDATE_STACK_DIR=""
-# Pre-update per-service health snapshot (service name -> "1" healthy / "0"
-# unhealthy), populated once by capture_stack_health_baseline near the very
-# top of perform_stack_update_flow -- before sync_repo_to_default_branch,
-# install_quickstart_compose_assets, or cmd_backup run, since all three can
-# already mutate a running container before apply_stack_update_ordered is
-# ever reached (see capture_stack_health_baseline's own header comment for
-# why that specific placement matters) -- and read by wait_for_stack_health
-# afterward so the post-update gate can fail on a real regression (healthy
-# -> unhealthy) instead of on any currently-unhealthy service regardless of
-# whether the update caused it. See both functions' own header comments for
-# the full rationale (issue #1391).
+# What: per-service health baseline, filled before the update
+# Why: gate fails only on healthy-to-unhealthy regressions
 declare -gA _UPDATE_HEALTH_BASELINE=()
 
-# Shared container-id lookup for the current update flow's compose project.
-# Factored out of service_container_is_healthy so capture_stack_health_baseline
-# can reuse the exact same -a/--all lookup (see that function's own comment
-# for why --all matters) without duplicating it -- two independent copies of
-# this lookup drifting apart across a future edit would be exactly the kind
-# of same-class bug AG-WF-011 asks callers to guard against.
+# What: container-id lookup for the update project
+# Why: one shared lookup keeps the -a semantics
 service_container_id() {
     local service="$1"
     stack_compose "$_UPDATE_STACK_DIR" "$_UPDATE_ENV_FILE" ps -a -q "$service" || {
@@ -4371,38 +4243,14 @@ service_container_id() {
     }
 }
 
-# Real per-container status probe, not just "the process started". If the
-# container declares a Docker HEALTHCHECK, this requires it to report
-# "healthy" -- Docker leaves `.State.Health` empty for a container with no
-# healthcheck defined, which is how this tells "no healthcheck declared" apart
-# from "starting"/"unhealthy" rather than guessing. For a container with no
-# healthcheck at all, the best available signal is that it is actually in the
-# "running" state (weaker, but honestly the most this project can assert for
-# those services today) -- EXCEPT for a deliberately one-shot utility
-# container (Compose `restart: "no"`, e.g. `dhcp-probe`, the #377 broadcast
-# conflict-discovery probe): that class of service is *expected* to exit on
-# its own once its job is done, so requiring "running" for it can never
-# succeed once it finishes normally. Confirmed as a real, 100%-reproducible
-# bug (issue #1155): every real `setup.sh update` run against deploy/quickstart
-# recreates dhcp-probe as part of "Starting non-UI services", and once it
-# exits 0 (as designed, usually well under a minute), this check kept
-# requiring "running" forever, so wait_for_stack_health always burned its
-# full 180s budget and declared the whole non-UI set unhealthy -- even though
-# every real long-running service (proxy, dns-standard, nats, watchdog,
-# netdata, docker-socket-proxy) was already healthy the entire time. A
-# one-shot container is therefore treated as satisfying this check once it
-# has exited cleanly (exit code 0); a non-zero exit still fails closed, since
-# that is a real probe failure, not a normal one-shot completion.
+# What: probes health; one-shot containers pass on exit 0
+# Why: running state never holds for one-shot services
 service_container_is_healthy() {
     local service="$1"
     local container_id health status restart_policy exit_code
 
-    # -a/--all: without it, `docker compose ps -q` only lists currently
-    # RUNNING containers, so a one-shot service (dhcp-probe) that already
-    # exited would look up as "no container id at all" and return 1 here
-    # before the one-shot-exit-0 handling below is ever reached -- confirmed
-    # directly while validating the issue #1155 fix (the fix below alone was
-    # not sufficient; this lookup itself was the second half of the bug).
+    # What: lookup includes stopped containers
+    # Why: an exited one-shot service must still be found
     container_id=$(service_container_id "$service") || return 1
     [[ -n "$container_id" ]] || return 1
 
@@ -4429,12 +4277,8 @@ service_container_is_healthy() {
     return 1
 }
 
-# A missing tool must never look identical to "the thing it would have
-# probed is actually healthy" -- a functional check that silently skips when
-# its tool is absent is indistinguishable from a check that never ran at
-# all, so callers cannot tell "verified healthy" apart from "never verified".
-# Every tool-gated functional probe below routes through this instead of its
-# own ad hoc `command -v` skip so that shape can't recur one probe at a time.
+# What: fails when a required probe tool is missing
+# Why: a skipped check must not look like a pass
 require_functional_check_tool() {
     local tool="$1" probe_description="$2"
     if ! command -v "$tool" >/dev/null 2>&1; then
@@ -4444,46 +4288,8 @@ require_functional_check_tool() {
     return 0
 }
 
-# Probes one published proxy IP in three separate steps rather than a single
-# `curl http://$ip/healthz`, because that single combined call conflates
-# three different properties and a fix for one host-networking mode broke it
-# for another:
-#
-#   1. A bare TCP connect to port 80 proves Docker's port-publishing actually
-#      forwards SOMEWHERE at all -- this is what a removed port mapping
-#      fails on. It does not prove that "somewhere" is this project's own
-#      proxy: any listener that accepts the connection satisfies it,
-#      including one of this stack's OTHER services if a broken compose
-#      update remapped port 80 onto it instead.
-#   2. Docker's own port-binding table for the 'proxy' container is checked
-#      directly (`docker port`), not an HTTP-level identity probe: an HTTP
-#      response can only ever prove "an nginx answered", never "the intended
-#      container specifically" -- any other nginx reachable on the same
-#      address (this stack's own services are not nginx-based, but nothing
-#      stops an operator from running an unrelated one on the same host)
-#      would satisfy an HTTP-level check just as well as a broken mapping
-#      would fail to. Docker's binding table has no such ambiguity: it is
-#      the authoritative record of which container a published host
-#      address/port actually forwards to, checked without any network round
-#      trip and independent of the /healthz ACL entirely.
-#   3. The /healthz content itself is fetched via `docker exec` against the
-#      proxy container's OWN loopback (127.0.0.1) instead of the externally
-#      published address. This is exactly the caller /healthz's ACL already
-#      allows (127.0.0.1/32), and it no longer depends on Docker's
-#      userland-proxy setting: with userland-proxy disabled, a host-
-#      originated connection to a published port is NAT'd straight through
-#      with the real host IP preserved rather than rewritten to the docker0
-#      gateway address the ACL's 172.16.0.0/12 allowance assumes. On such a
-#      host, a single external curl call that also required a 2xx status
-#      would fail this gate (and roll back an otherwise-healthy update)
-#      purely because the ACL rejected that specific caller, not because the
-#      proxy was unhealthy.
-#
-# Together the three steps still prove what a single 2xx-or-fail call used
-# to assume (Docker forwards the port to THIS proxy specifically, AND the
-# service behind it actually answers /healthz) without depending on a
-# specific userland-proxy setting, ACL-source-IP outcome, or an HTTP-level
-# identity heuristic for either.
+# What: three-step check: TCP, port binding, loopback
+# Why: one curl call conflates ports and ACL source IPs
 
 # What: bare TCP connect to ip:port, no HTTP request sent
 # Why: reachability alone, apart from the /healthz answer
@@ -4497,13 +4303,8 @@ _tcp_port_reachable() {
     fi
 }
 
-# Confirms Docker itself considers this specific container the owner of the
-# published address/port, split into its own function for the same
-# testability reason as _tcp_port_reachable above. `docker port` lists every
-# host binding for the given container port, one per line (e.g. dual-stack
-# IPv4+IPv6, or this project's own IP_STANDARD/IP_SSL each separately
-# publishing container port 80 -- see deploy/prod/docker-compose.yml); any
-# one of them matching is sufficient.
+# What: true if docker port lists the given host binding
+# Why: the binding must belong to this proxy container
 _proxy_container_publishes_port() {
     local container_id="$1" ip="$2" port="$3" binding bindings
     bindings=$(docker port "$container_id" "${port}/tcp") || return 1
@@ -4542,24 +4343,8 @@ _verify_healthz_endpoint() {
     return 0
 }
 
-# Functional confirmation on top of per-container health: a container
-# reporting "healthy" only proves ITS OWN internal check passed, not that it
-# actually serves what a real client needs. Reuses this project's own
-# established real-probe idioms rather than inventing new ones: the proxy
-# /healthz check already used by cmd_debug's "Health checks" step (now split
-# into a reachability + Docker-binding-identity + loopback-content trio, see
-# _verify_healthz_endpoint above), and a real dig-based DNS query in the same style
-# scripts/untracked/simulations/dns-zone-rollback-simulation.sh already uses. `ping`/`ss` are
-# deliberately not used here -- neither proves the service actually answers a
-# real request.
-#
-# Every probe below fails closed (require_functional_check_tool) when curl or
-# dig is missing rather than silently skipping that half of the check: a
-# skipped check and a passed check must never produce the same "healthy"
-# verdict, or a broken update can sail through purely because a probe
-# dependency was never installed. perform_stack_update_flow installs both
-# tools up front specifically so this fail-closed path is the rare exception,
-# not the normal case, on a real update run.
+# What: functional checks: proxy /healthz and DNS query
+# Why: healthy alone does not prove a real answer
 verify_stack_functional_health() {
     local ip_standard ip_ssl ssl_enabled test_fqdn resolved
 
@@ -4574,14 +4359,8 @@ verify_stack_functional_health() {
         _verify_healthz_endpoint "$ip_ssl" || return 1
     fi
 
-    # A fixed, always-in-cdn-domains.txt hostname: this only proves the DNS
-    # container answers a real query at all (AGENTS.md requires a real
-    # query/response probe here, not ping/ss), not that every domain resolves.
-    # Must be a bare-apex cdn-domains.txt entry, not a wildcard-only one
-    # (leading-dot, e.g. ".steamcontent.com" since #1073): RPZ wildcard-only
-    # entries never match the bare apex itself, so probing steamcontent.com
-    # directly always came back empty after #1073 and permanently failed this
-    # gate even on a perfectly healthy stack (issue #1149).
+    # What: dig queries a fixed host on the DNS container
+    # Why: real answer needed; ping and ss prove nothing
     test_fqdn="content1.steampowered.com"
     if [[ -n "$ip_standard" ]]; then
         require_functional_check_tool dig "the DNS resolution probe" || return 1
@@ -4595,40 +4374,13 @@ verify_stack_functional_health() {
     return 0
 }
 
-# How many consecutive healthy reads capture_stack_health_baseline requires
-# before trusting a service as genuinely, stably healthy pre-update, and how
-# many seconds apart each read is taken.
+# What: sample count and interval for the health baseline
+# Why: one healthy read can hit a crash-loop window
 _UPDATE_HEALTH_BASELINE_SAMPLES=3
 _UPDATE_HEALTH_BASELINE_SAMPLE_INTERVAL=2
 
-# Snapshots each named service's PRE-update container health into the global
-# _UPDATE_HEALTH_BASELINE map (service -> "1" healthy / "0" unhealthy), read
-# afterward by wait_for_stack_health so the post-update gate can fail only on
-# a real regression (a service that WAS healthy going in) instead of on any
-# service that was already broken before the update touched anything.
-#
-# Must be called from apply_stack_update_ordered BEFORE it recreates any
-# container (i.e. while the OLD, pre-update containers are still the ones
-# running) -- images may already be pulled at that point, but nothing has
-# been applied yet, so this is the last moment "current state" still means
-# "pre-update state".
-#
-# A single sample is not reliable against a genuinely crash-looping
-# container: Docker's reported state can transiently read "running" (or, for
-# a container whose healthcheck hasn't failed often enough yet to flip to
-# "unhealthy", even "starting"/"healthy") for a brief instant between one
-# restart attempt and the next crash a few seconds later. A single lucky
-# sample landing in that window would wrongly record the service as
-# baseline-healthy, and the gate below would then treat its post-update
-# unhealthiness as a "regression" -- recreating the exact permanent-update
-# -block bug this baseline exists to fix, just intermittently instead of
-# always (concretely: issue #1391's reproduced ntp crash loop under this
-# project's LXC-hosted runners' CAP_SYS_TIME limitation, issue #1296).
-# Requiring _UPDATE_HEALTH_BASELINE_SAMPLES consecutive healthy reads, a few
-# seconds apart, filters that out: a service that has been genuinely stable
-# for the (typically hours or days) lifetime of an existing install before an
-# update starts trivially passes every sample, while a crash-looping one does
-# not survive even one retry.
+# What: records pre-update health of each named service
+# Why: gate fails only on regressions; 3 stable reads
 capture_stack_health_baseline() {
     local -a services=("$@")
     local svc container_id sample healthy_streak
@@ -4638,14 +4390,8 @@ capture_stack_health_baseline() {
         container_id=$(service_container_id "$svc") \
             || die "Cannot capture the health baseline of $svc (exit $?); nothing was changed."
         if [[ -z "$container_id" ]]; then
-            # No pre-existing container for this service at all -- e.g. a
-            # brand-new service this very update introduces to the compose
-            # file. There is no "already broken" precedent to forgive here,
-            # so deliberately leave it out of the baseline map entirely:
-            # wait_for_stack_health's own missing-key default (treat as
-            # previously healthy) then requires it to become healthy like
-            # any other freshly deployed service, same as before this
-            # baseline logic existed.
+            # What: no old container; left out of baseline
+            # Why: new services must become healthy like any other
             continue
         fi
 
@@ -4662,35 +4408,16 @@ capture_stack_health_baseline() {
     done
 }
 
-# docker logs is a known, documented blind spot for a small set of services:
-# dhcp-proxy (dnsmasq) and nats (nats-server) each support only one log
-# destination at a time, and once LOGGING_ENABLED (default "1") activates the
-# `logging` profile, that one destination is a file, not stdout -- so
-# `docker logs` on those containers, and on `syslog`'s own fluent-bit process
-# specifically, goes quiet (see docs/architecture-ng.md's logging matrix for
-# the full per-service breakdown). Unlike the per-service source volumes
-# (Docker-managed, not directly host-readable), syslog-ng's own aggregated
-# output tree IS a host bind mount
-# (${SYSLOG_NG_LOG_DIR:-$LANCACHE_STATE_DIR/syslog-ng}, see setup.sh's own
-# pre-creation step for that same path), organized as
-# "<root>/<syslog-ng $HOST>/<YYYYMMDD>.log" per services/syslog/syslog-ng.conf's
-# destination template -- so it can be read directly here, without starting
-# any extra container. Keyed by service name (as wait_for_stack_health's
-# caller names it), value is the exact "host" field
-# services/syslog/fluent-bit.conf's record_modifier filter stamps onto that
-# service's forwarded lines.
+# What: maps file-logged services to syslog hosts
+# Why: docker logs is blind for these services
 declare -gA _REGRESSED_SERVICE_SYSLOG_HOST=(
     [dhcp-proxy]="lancache-dhcp-proxy"
     [nats]="lancache-nats"
     [syslog]="lancache-syslog"
 )
 
-# Tails today's forwarded syslog-ng log file for one of the three services
-# above, as a supplement to (never a replacement for) the plain `docker logs`
-# dump in wait_for_stack_health below -- called only when that service is one
-# of _REGRESSED_SERVICE_SYSLOG_HOST's known-quiet keys AND central logging is
-# actually active, since neither the bind mount nor any forwarded content
-# exists otherwise.
+# What: tails the forwarded syslog-ng log of one service
+# Why: supplements docker logs; needs logging active
 dump_service_syslog_ng_tail() {
     local svc="$1" syslog_host="$2"
     local syslog_ng_log_dir today_file
@@ -5260,18 +4987,14 @@ lancache_read_ui_settings_override() {
     raw=$(docker run --rm -v "${volume}:/volume:ro" "$LANCACHE_HELPER_IMAGE" \
         sh -c 'if [ -e /volume/lancache-ui-settings.env ]; then cat /volume/lancache-ui-settings.env; fi') \
         || die "Failed to read the UI settings from Docker volume $volume (exit $?)."
-    # What: feeds sed via a here-string, not a live pipe from $raw.
-    # Why: avoids a SIGPIPE if $raw ever has more than one matching line.
+    # What: sed reads $raw via a here-string
+    # Why: avoids SIGPIPE under pipefail
     # From: Issue #1377
     sed -n "s/^${key}=//p" <<<"$raw" | tail -1
 }
 
-# Makes lancache-auto-update.timer's actual systemctl enabled/active state
-# match .env's current AUTO_UPDATE_ENABLED, regardless of how that value got
-# there (an Admin UI override just folded in below, or a direct manual .env
-# edit) -- this is the one place that keeps the timer's real state honest,
-# called on every convergence tick. A no-op if the unit was never installed
-# (systemd unavailable, or "Installing systemd watchdog" never ran).
+# What: syncs auto-update timer with AUTO_UPDATE_ENABLED
+# Why: the .env value is the source of truth
 reconcile_auto_update_timer_state() {
     local env_file="$1" desired out
     systemd_unit_exists "$AUTO_UPDATE_TIMER_UNIT" || return 0
@@ -5565,28 +5288,20 @@ logbundle_collect_secret_values() {
             value=$(get_env_var_nonempty "$key" "$env_file") \
                 || die "Cannot read $key from $env_file (exit $?); no log bundle was written."
             [[ -n "$value" ]] || continue
-            # What: skips a still-default CHANGE_ME_*/lancache-*-secret placeholder.
-            # Why: redacting it would clutter every log line containing it with a confusing [REDACTED].
+            # What: skips default placeholder secrets
+            # Why: redacting placeholders clutters every log
             # From: Issue #782
             secret_value_is_placeholder "$value" && continue
             printf '%s\n' "$value"
         done
-    # What: sorts output longest-value-first.
-    # Why: logbundle_redact_stream substitutes sequentially; a shorter value
-    #   replaced first would corrupt a longer value's un-redacted tail.
+    # What: sorts secrets longest first
+    # Why: a shorter value would corrupt a longer one
     # From: Issue #782
     done | sort -u | awk '{ print length, $0 }' | sort -k1,1nr | cut -d' ' -f2-
 }
 
-# Reads all of stdin, replaces every literal secret VALUE listed in
-# secrets_file with "[REDACTED]" (plain string substitution, not regex, so
-# no escaping concerns for values containing base64 punctuation like +/=),
-# and writes the result to stdout. Used on every collected artifact —
-# compose config/ps output, per-service logs, and the redacted .env copy —
-# so a credential is scrubbed everywhere it could appear, not just in the
-# one file it is "supposed" to live in. `read -d ''` slurps stdin verbatim
-# (including embedded blank lines) since these artifacts are always text
-# with no NUL bytes.
+# What: replaces every secret value with [REDACTED]
+# Why: plain substitution; base64 punctuation is safe
 logbundle_redact_stream() {
     local secrets_file="$1"
     local content="" secret
