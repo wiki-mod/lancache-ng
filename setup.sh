@@ -2038,7 +2038,8 @@ git_default_branch_name() {
     printf '%s\n' "$default_branch"
 }
 
-# True if the working tree has no uncommitted changes (`git status --porcelain` is empty).
+# What: true if git status shows no uncommitted changes
+# Why: a dirty tree must not be reset by an update
 git_repo_is_clean() {
     local repo_dir="$1" out
 
@@ -2047,9 +2048,8 @@ git_repo_is_clean() {
     [[ -z "$out" ]]
 }
 
-# Hard-resets a repo checkout to origin's current default branch. Refuses to
-# run on a dirty tree so an update can never silently discard local edits;
-# the operator must clean or remove the checkout first.
+# What: hard-resets a checkout to origin's default branch
+# Why: refuses dirty trees, so local edits survive
 sync_repo_to_default_branch() {
     local repo_dir="$1" default_branch
 
@@ -2085,9 +2085,8 @@ sync_repo_to_ref() {
         || die "Failed to reset $repo_dir to ref '$ref'."
 }
 
-# Resolves the git repo root two levels above a deploy/prod install_dir
-# (deploy/prod -> repo root), used to locate the manual production repo's
-# other runtime inputs (certs/, config/prod/, cdn-domains.txt).
+# What: repo root two levels above a deploy/prod dir
+# Why: locates certs, config/prod and cdn-domains.txt
 deploy_prod_repo_root() {
     local install_dir="$1"
     realpath -m "$install_dir/../.."
@@ -2286,9 +2285,8 @@ replace_literal_in_file() {
         || die "Failed to rewrite $file (exit $?)."
 }
 
-# Update-time guard: dies with a clear remediation message if a required key
-# is missing or empty, instead of letting `setup.sh update` silently proceed
-# with an unusable runtime configuration.
+# What: dies if a required key is missing or empty
+# Why: update must not run with an unusable configuration
 require_env_value_for_update() {
     local key="$1" env_file="$2"
     env_key_has_value "$key" "$env_file" \
@@ -2617,23 +2615,24 @@ derive_release_archive_image_tag() {
     printf '%s\n' "$tag"
 }
 
-# Rejects anything that isn't a plausible registry hostname[:port].
+# What: rejects a value that is not a registry host[:port]
+# Why: a bad host would break every image pull
 validate_lancache_image_registry() {
     local registry="$1"
     [[ "$registry" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?$ ]] \
         || die "LANCACHE_IMAGE_REGISTRY must be a registry hostname with an optional port."
 }
 
-# Rejects anything that isn't a plausible slash-separated image namespace.
+# What: rejects a non-namespace prefix value
+# Why: a bad prefix would break every image pull
 validate_lancache_image_prefix() {
     local prefix="$1"
     [[ "$prefix" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] \
         || die "LANCACHE_IMAGE_PREFIX must be a slash-separated image namespace."
 }
 
-# Resolves the registry host to use for pulling images: explicit shell env var
-# wins, then the value already in .env, then the ghcr.io default. Always
-# validated so a typo'd override fails fast instead of producing a broken pull.
+# What: resolves the registry: shell env, .env, then ghcr.io
+# Why: an override is validated and fails fast
 resolve_lancache_image_registry() {
     local env_file="${1:-}" registry="${LANCACHE_IMAGE_REGISTRY:-}"
 
@@ -2646,8 +2645,8 @@ resolve_lancache_image_registry() {
     printf '%s\n' "$registry"
 }
 
-# Same precedence as resolve_lancache_image_registry (shell env > .env >
-# default), but for the image namespace/prefix.
+# What: resolves the prefix: shell env, .env, then default
+# Why: same precedence as the registry resolver
 resolve_lancache_image_prefix() {
     local env_file="${1:-}" prefix="${LANCACHE_IMAGE_PREFIX:-}"
 
@@ -3156,8 +3155,8 @@ migrate_env_for_update() (
     ip_standard=$(get_env_var IP_STANDARD "$env_file") || die "Cannot read IP_STANDARD from $env_file (exit $?)."
     append_env_migrated_assignment_if_missing UI_BIND_IP IP_STANDARD "$ip_standard" "$env_file"
 
-    # DHCP/Kea can stay disabled, but the keys must exist so Compose and the UI
-    # read one complete runtime configuration.
+    # What: keys for DHCP and Kea always exist
+    # Why: Compose and the UI read one full config
     append_env_key_if_missing DHCP_ENABLED "0" "$env_file"
     append_env_defaults_if_missing "$env_file" DHCP_SUBNET DHCP_GATEWAY DHCP_RANGE_START DHCP_RANGE_END
 
@@ -3236,8 +3235,8 @@ migrate_env_for_update() (
             fi
             is_valid_ipv4 "$upstream_dhcp_ip" \
                 || die "DHCP_MODE=dnsmasq-proxy requires the real router DHCP IP in UPSTREAM_DHCP_IP in $env_file. Set it, then rerun setup.sh update."
-            # Optional fields: only validated when non-empty, since leaving
-            # them empty is the supported "not using this option" state.
+            # What: optional fields are checked when set
+            # Why: empty means the option is not used
             [[ -z "$dhcp_proxy_interface" ]] || is_valid_dhcp_proxy_interface "$dhcp_proxy_interface" \
                 || die "DHCP_PROXY_INTERFACE in $env_file must be a valid interface name (letters, digits, '.', '-', '_') or empty."
             [[ -z "$dhcp_proxy_router" ]] || is_valid_ipv4 "$dhcp_proxy_router" \
@@ -3369,8 +3368,8 @@ package_name_for_tool() {
     esac
 }
 
-# Backup/restore may run on minimal hosts. Install only the missing tools needed
-# for the requested operation instead of expanding the base installer footprint.
+# What: installs only the missing tools for an operation
+# Why: keeps minimal hosts able to back up and restore
 install_missing_tools() {
     local -a missing=() packages=() tools=("$@")
     local tool package
@@ -3483,9 +3482,8 @@ compose_stack_stop() {
         || die "Failed to stop the stack in $install_dir (exit $?); nothing was copied."
 }
 
-# Counterpart to compose_stack_stop, used by backup/restore cleanup traps to
-# bring the stack back up. Also only warns on failure so the trap always
-# finishes cleanup instead of getting stuck mid-exit.
+# What: starts the stack for backup or restore cleanup
+# Why: a start failure only warns, so cleanup finishes
 compose_stack_start() {
     local install_dir="$1"
     local env_file
@@ -3496,9 +3494,8 @@ compose_stack_start() {
         || print_warn "docker compose up failed (exit $?); start it with: $SCRIPT_DIR/setup.sh compose $install_dir up -d"
 }
 
-# Runs `docker compose config` as a dry-run check. Called both before and
-# after pulling images during update, so a migration or pull that produced an
-# invalid compose config is caught before containers are actually restarted.
+# What: runs docker compose config as a dry-run check
+# Why: catches invalid config before containers restart
 validate_compose_config() {
     local install_dir="$1"
     local env_file
@@ -3753,9 +3750,8 @@ cmd_backup() (
     done < "$dest/manifest.txt"
 
     record_image_revisions "$install_dir" "$dest/image-revisions.txt"
-    # Captured before compose_stack_stop so backup_cleanup only restarts the
-    # stack if it was actually running beforehand, instead of unconditionally
-    # undoing a deliberate prior stop (#669 #3).
+    # What: records whether the stack was running
+    # Why: cleanup restarts only a stack that was running
     compose_stack_running "$install_dir" && stack_was_running=1
     stack_stopped=1
     compose_stack_stop "$install_dir"
@@ -3954,8 +3950,8 @@ cmd_restore() (
     restore_cleanup
 )
 
-# Keep user-facing help compact. Detailed behavior should live in command help
-# blocks and comments near the implementation, not in the top-level output.
+# What: keeps the top-level usage text compact
+# Why: per-command detail lives in its own help block
 print_usage() {
     cat <<EOF
 LanCache-NG setup
@@ -4007,9 +4003,8 @@ Tip:
 EOF
 }
 
-# Prints the detailed usage block for one subcommand (invoked via
-# `./setup.sh <command> --help`), keeping the verbose per-command docs out of
-# the compact top-level print_usage output above.
+# What: prints one subcommand's detailed usage
+# Why: the compact top-level usage stays short
 print_command_help() {
     local command="$1"
 
@@ -4961,9 +4956,8 @@ cmd_converge_reconcile() {
         fi
     fi
 
-    # Reconciles the timer against .env's CURRENT value regardless of whether
-    # the block above just changed it or it was already correct -- covers a
-    # direct manual .env edit too, not only the Admin UI path.
+    # What: reconciles the timer with .env's value
+    # Why: a manual .env edit must also take effect
     reconcile_auto_update_timer_state "$env_file"
 
     # What: UI cache size -> CACHE_MAX_SIZE and CACHE_MAX_GB
@@ -4983,8 +4977,8 @@ cmd_converge_reconcile() {
 }
 
 # ── debug subcommand ──────────────────────────────────────────────────────────
-# Debug is read-only diagnostics. It must not repair, update, or rewrite config;
-# operators use it when the stack is already in an unknown state.
+# What: read-only diagnostics that never repair
+# Why: they run when the stack state is unknown
 cmd_debug() {
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
     local env_file
@@ -5955,9 +5949,8 @@ secondary_compose_text() {
 }
 
 # ── secondary subcommand ──────────────────────────────────────────────────────
-# Secondary setup is intentionally separate from primary install: it consumes
-# credentials returned by the primary UI/API, writes a small DNS-only compose
-# directory, and must not modify the primary host configuration.
+# What: secondary setup consumes primary credentials
+# Why: it must not modify the primary host
 cmd_secondary() {
     local primary="" token="" name="" proxy_ip="" listen_ip="" rotate=0
     local out http_status response secondary_dir cmd ddns_tsig_key dns_xfr_primary tag_input
