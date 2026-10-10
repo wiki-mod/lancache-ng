@@ -3806,6 +3806,7 @@ EOF
 
 # What: moves stale .env.local aside when archive lacks one
 # Why: prefers .env.local over .env, so it must go
+
 restore_clear_stale_env_local_if_unarchived() {
     local archived_install_root="$1" install_dir="$2" stale_target
 
@@ -4229,7 +4230,7 @@ EOF
 # Why: nested namerefs are fragile; no concurrent updates
 _UPDATE_ENV_FILE=""
 _UPDATE_STACK_DIR=""
-# What: per-service health baseline, filled before the update
+# What: per-service health baseline, filled before update
 # Why: gate fails only on healthy-to-unhealthy regressions
 declare -gA _UPDATE_HEALTH_BASELINE=()
 
@@ -4391,7 +4392,7 @@ capture_stack_health_baseline() {
             || die "Cannot capture the health baseline of $svc (exit $?); nothing was changed."
         if [[ -z "$container_id" ]]; then
             # What: no old container; left out of baseline
-            # Why: new services must become healthy like any other
+            # Why: new services must become healthy
             continue
         fi
 
@@ -4439,27 +4440,8 @@ dump_service_syslog_ng_tail() {
     fi
 }
 
-# Polls every named service until each is container-healthy (see
-# service_container_is_healthy) AND the whole set passes the functional probe,
-# or the timeout elapses. This is the real decision point the removed
-# Watchtower helper never had: a real wait with a real pass/fail outcome, not
-# "log a warning and continue anyway" (its actual documented behavior even in
-# its one health-aware mode, confirmed on #819 -- see the mechanics research
-# there for the primary-source citations).
-#
-# A service still unhealthy is only treated as a gate FAILURE when
-# _UPDATE_HEALTH_BASELINE (see capture_stack_health_baseline) says it was
-# healthy before this update started -- a real regression. A service that was
-# already unhealthy pre-update (baseline "0") is not blocked on here, since
-# whatever is wrong with it predates and is unrelated to this update (issue
-# #1391: a permanently crash-looping opt-in service, e.g. ntp under this
-# project's LXC CAP_SYS_TIME limitation from issue #1296, must not
-# permanently block every future update including unrelated security fixes).
-# A service with no baseline entry at all (missing-key default below reads
-# "1") is treated exactly like a previously-healthy one -- i.e. it must
-# become healthy -- which preserves this function's original, stricter
-# behavior for a fresh install or a brand-new service with no prior state to
-# compare against.
+# What: polls health and functional probe until timeout
+# Why: pre-update unhealthy services do not block the update
 wait_for_stack_health() {
     local timeout_seconds="$1"
     shift
@@ -4494,25 +4476,12 @@ wait_for_stack_health() {
 
     if (( ${#regressed_services[@]} > 0 )); then
         print_error "Service(s) regressed from healthy to unhealthy during this update: ${regressed_services[*]}"
-        # Diagnosing this gate's own failure previously required a live SSH
-        # session against a still-running (or already-recreated-and-gone)
-        # container, since neither this script nor CI's use of it captured
-        # any container output on this exact path -- a real incident traced
-        # a silent entrypoint crash back to this gap. Dump each regressed
-        # service's own recent log output here, once, right where the
-        # failure is detected, so both a real operator and CI's own captured
-        # output have the actual cause without needing separate live access.
+        # What: dumps each regressed service's recent logs
+        # Why: CI and operators need the cause
         for svc in "${regressed_services[@]}"; do
             local container_id
-            # Guarded as an `if` condition, not a bare assignment (Rule-Ref:
-            # AG-VAL-030 -- a `$(...)` whose failure the caller relies on;
-            # this is a command-substitution-under-set--e concern, not
-            # AG-VAL-032's pipefail/early-exiting-consumer one, since there
-            # is no pipeline here at all): service_container_id's own
-            # `docker compose ps` call can exit non-zero, and this script
-            # runs under set -e -- a bare `container_id=$(...)` here would
-            # abort the whole update instead of just skipping the log dump
-            # for this one service.
+            # What: container id lookup is an if condition
+            # Why: set -e would abort the update
             if container_id=$(service_container_id "$svc") && [[ -n "$container_id" ]]; then
                 print_warn "Last 50 log lines for regressed service '$svc' (container $container_id):"
                 docker logs --tail 50 "$container_id" 2>&1 | sed 's/^/    /' || print_warn "Could not retrieve logs for '$svc' (container may already be gone)."
@@ -4534,14 +4503,8 @@ wait_for_stack_health() {
     return 1
 }
 
-# Rolls the whole stack back to the pre-update backup perform_stack_update_flow
-# just took, found by its deterministic filename (the newest
-# lancache-ng-config-*.tar.gz under the default backup root is always that
-# exact archive: perform_stack_update_flow only reaches the point where this
-# can be called after successfully creating one moments earlier, and archive
-# timestamps are UTC and lexically sortable). Reuses the existing cmd_restore
-# path rather than reimplementing rollback -- restore already stops the stack,
-# replaces state, and re-converges .env correctly.
+# What: restores the newest pre-update config backup
+# Why: reuses cmd_restore instead of a second rollback path
 rollback_stack_update() {
     local install_dir="$1"
     local backup_root="$BACKUP_ROOT"
@@ -4593,24 +4556,13 @@ apply_stack_update_ordered() {
         [[ "$svc" = "ui" ]] && continue
         non_ui_services+=("$svc")
     done
-    # This project's compose files always define several non-ui services
-    # (proxy, dns, nats, ...), so non_ui_services is never actually empty --
-    # important because an empty array here would expand to zero arguments,
-    # and `docker compose up -d` with no explicit service names means "bring
-    # up everything", silently starting the Admin UI too and defeating the
-    # UI-last ordering this function exists to guarantee. Fail closed instead
-    # of silently falling into that behavior if this assumption is ever wrong.
+    # What: fails closed if no non-UI service exists
+    # Why: empty args would make compose start the UI too
     (( ${#non_ui_services[@]} > 0 )) \
         || die "No non-UI services found in this compose configuration; refusing to apply an update that cannot guarantee UI-last ordering."
 
-    # _UPDATE_HEALTH_BASELINE is already populated by this point --
-    # perform_stack_update_flow calls capture_stack_health_baseline itself,
-    # before this function ever runs (see that call site's own comment for
-    # why it must happen that early: cmd_backup --config's own stack
-    # stop/restart cycle, a few steps before this function is reached, can
-    # already apply a compose-level regression to a real running container,
-    # so capturing the baseline here -- merely before THIS function's own
-    # first recreate -- would be too late to see the true pre-update state).
+    # What: baseline is captured earlier by the caller
+    # Why: earlier steps may already change containers
     if stack_update_step "Starting non-UI services" "Failed to start non-UI services." \
             stack_compose "$install_dir" "$_UPDATE_ENV_FILE" up -d --remove-orphans "${non_ui_services[@]}" \
         && stack_update_step "Verifying non-UI services are healthy" "Non-UI services did not become healthy in time." \
@@ -4706,13 +4658,8 @@ update_resume_handoff() {
     print_ok "Continuing the update with $LANCACHE_UPDATE_REPO/setup.sh"
 }
 
-# The shared flow both `setup.sh update` (manual) and `setup.sh auto-update`
-# (scheduled, #819) run once they've decided an update should happen. Order is
-# deliberate: pause convergence, create a rollback backup, sync the checkout
-# and continue on its setup.sh, migrate/validate config, pull images, validate
-# again, apply ordered+health-gated (rolling back to the backup just taken on
-# a failed health check), then resume convergence. Reordering can leave a
-# half-migrated stack running.
+# What: runs update steps in fixed order, with rollback
+# Why: reordering can leave a half-migrated stack running
 perform_stack_update_flow() {
     local install_dir="$1"
     if is_quickstart_install "$install_dir"; then
@@ -4848,10 +4795,8 @@ lancache_auto_update_should_proceed() {
 }
 
 # ── auto-update subcommand ────────────────────────────────────────────────────
-# Scheduled entry point (#819): invoked by lancache-auto-update.timer on the
-# host, not normally run directly. Detect-then-act, not unconditional
-# pull-and-restart -- a scheduled tick where the channel hasn't moved must be a
-# true no-op, or every tick would restart the whole stack for nothing.
+# What: scheduled update tick; detects a channel move first
+# Why: an unchanged channel must not restart the stack
 cmd_auto_update() {
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
     local env_file auto_update_enabled current_channel current_tag deployed_tag decision
@@ -4862,12 +4807,8 @@ cmd_auto_update() {
         || die_no_stack_found "$install_dir"
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
 
-    # Re-checked here, not just trusted from whatever gated the systemd timer
-    # itself: an operator can flip AUTO_UPDATE_ENABLED=0 in .env directly
-    # without re-running setup.sh, which would not by itself disable an
-    # already-enabled timer unit. This is the cheap, fail-closed belt-and-
-    # braces check that keeps a stale enabled timer from ever actually acting
-    # once the operator's intent in .env says otherwise.
+    # What: re-checks AUTO_UPDATE_ENABLED before acting
+    # Why: a timer may stay enabled after .env is edited
     auto_update_enabled=$(get_env_var AUTO_UPDATE_ENABLED "$env_file") || exit $?
     current_channel=$(resolve_lancache_image_channel "$env_file") || exit $?
     # What: stacks compared by image-pin fingerprint
@@ -4877,9 +4818,8 @@ cmd_auto_update() {
         || die "Failed to read the image pins from $env_file (exit $?)."
     deployed_tag=$(lancache_image_refs_fingerprint "$deployed_refs") \
         || die "Cannot fingerprint the deployed image pins of $env_file (exit $?)."
-    # Only actually resolve the channel through the registry once the cheap,
-    # local checks above haven't already ruled the tick out -- avoids a
-    # pointless registry round-trip on a disabled or pinned install.
+    # What: resolves the channel after local checks
+    # Why: disabled or pinned installs skip the registry
     if [[ "$auto_update_enabled" = "1" && "$current_channel" != "pinned" ]]; then
         current_refs=$(lancache_channel_image_refs "$env_file" "$current_channel") \
             || die "Cannot resolve channel ${current_channel}; auto-update skipped this tick (exit $?)."
@@ -5742,17 +5682,9 @@ kea_ctrl_post() {
     local kea_ctrl_url="$1" kea_ctrl_token="$2" body="$3"
     local out http_status response result_code result_text
 
-    # What: the Basic-Auth credential is passed to curl via -K (config read
-    # from stdin) with the token escaped for curl's own quoted-value syntax,
-    # not via -u/--user on the command line -- kept identical to
-    # deploy/*/docker-compose.yml's Kea healthcheck.
-    # Why: -u puts the secret in plain argv, visible to any other host
-    # process for curl's whole lifetime (ps aux, /proc/<pid>/cmdline), and a
-    # manually-set KEA_CTRL_TOKEN isn't guaranteed hex-only the way the
-    # auto-generated default is (ensure_secret_env_key never rewrites an
-    # already-usable operator-supplied value), so an unescaped token could
-    # still corrupt curl's -K quoted-value parsing on a literal '"' or '\'.
-    # From: Issue #1304 | PR #1550
+    # What: passes the Basic-Auth token to curl via -K stdin
+    # Why: -u would expose the token in process argv
+    # From: PR #1550
     local kea_ctrl_token_escaped
     kea_ctrl_token_escaped=$(printf '%s' "$kea_ctrl_token" | sed 's/\\/\\\\/g; s/"/\\"/g')
     if ! out=$(printf 'user = "admin:%s"\n' "$kea_ctrl_token_escaped" | curl -sS -w '\n%{http_code}' -X POST \
