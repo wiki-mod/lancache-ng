@@ -1200,23 +1200,19 @@ _ci_identity_pins() {
 # From: Issue #1683
 _ci_identity_for() {
     local service="$1" platform="$2" ref="${3:-}"
-    local build_type context ctx ctx_path ctxs pins part buf
+    local build_type paths p pins part buf
     build_type="$(_ci_required_field "${service}" build_type)" || return 2
-    context="$(_ci_required_field "${service}" context)" || return 2
+    paths="$(_ci_target_paths "${service}")" || return 2
     # What: every id input is captured and checked first.
     # Why: a failed part in a hash pipe mints a wrong id.
     # From: Issue #1683 | PR #1858
     pins="$(_ci_identity_pins "${service}" "${build_type}" "${platform}")" || return "$?"
     buf="$(printf 'service=%s\nbuild_type=%s\nplatform=%s' "${service}" "${build_type}" "${platform}")"$'\n'
-    part="$(_ci_tracked_content_ids "${context}" "${ref}")" || return 2
-    [ -z "${part}" ] || buf+="${part}"$'\n'
-    ctxs="$(ci_service_contexts "${service}")" || return 2
-    for ctx in ${ctxs}; do
-        ctx_path="$(ci_context_path "${ctx}")" || return 2
-        [ -n "${ctx_path}" ] || continue
-        part="$(_ci_tracked_content_ids "${ctx_path}" "${ref}")" || return 2
+    while IFS= read -r p; do
+        [ -n "${p}" ] || continue
+        part="$(_ci_tracked_content_ids "${p}" "${ref}")" || return 2
         [ -z "${part}" ] || buf+="${part}"$'\n'
-    done
+    done <<< "${paths}"
     buf+="${pins}"$'\n'
     printf '%s' "${buf}" | sha256sum | cut -d' ' -f1
 }
