@@ -29,9 +29,8 @@ AUTO_UPDATE_TIMER_UNIT="lancache-auto-update.timer"
 DEFAULT_INSTALL_DIR="/opt/lancache-ng"
 BACKUP_ROOT="${LANCACHE_BACKUP_ROOT:-/var/backups/lancache-ng}"
 LANCACHE_REPO_URL="https://github.com/wiki-mod/lancache-ng"
-# What: UI session TTL default and its one-year cap
+# What: UI session TTL one-year cap
 # Why: setup.sh refuses a TTL the ui would reject
-DEFAULT_UI_SESSION_TTL_SECONDS=86400
 MAX_UI_SESSION_TTL_SECONDS=31536000
 # What: Docker's repo root and Docker CE package names
 # Why: apt, rpm, conflict guard and prompts share them
@@ -1447,24 +1446,20 @@ remove_env_key() {
 }
 
 # What: default LANCACHE_STATE_DIR for an install dir
-# Why: deploy/prod reads the compose file's default
+# Why: deploy/prod takes the SOT runtime default
 production_state_root_default() {
-    local install_dir="$1" compose roots
+    local install_dir="$1" root
 
     # What: prod runs keep state outside the checkout
     # Why: state must not live in the Git checkout
     if is_deploy_prod_install_dir "$install_dir"; then
-        # What: the root the prod compose falls back to
-        # Why: the compose file owns the state default
-        # From: Issue #1683 | PR #1858
-        compose="$install_dir/docker-compose.yml"
-        roots=$(grep -o 'LANCACHE_STATE_DIR:-[^}]*}' "$compose") \
-            || die "$compose has no LANCACHE_STATE_DIR default (exit $?)."
-        roots=$(sort -u <<< "$roots")
-        [[ "$roots" =~ ^LANCACHE_STATE_DIR:-/[^[:space:]]*\}$ ]] \
-            || die "$compose gives no single LANCACHE_STATE_DIR default: ${roots//$'\n'/ }"
-        roots="${roots#LANCACHE_STATE_DIR:-}"
-        printf '%s\n' "${roots%\}}"
+        # What: the root the SOT names for prod state
+        # Why: the SOT owns it; compose and setup read it
+        # From: Issue #1683 | PR #1912
+        root=$(prod_env_default LANCACHE_STATE_DIR) || exit $?
+        [[ "$root" =~ ^/[^[:space:]]*$ ]] \
+            || die "The SOT runtime default LANCACHE_STATE_DIR is no absolute path: ${root}"
+        printf '%s\n' "$root"
     else
         printf '%s\n' "$install_dir"
     fi
@@ -1671,7 +1666,7 @@ copy_volume_to_dir() {
 prod_state_subdir() {
     local key="$1" subs
     subs=$(awk -v k="$key" '{
-        p = "${" k ":-${LANCACHE_STATE_DIR:-"
+        p = "${" k ":-${LANCACHE_STATE_DIR:?"
         i = index($0, p)
         if (!i) next
         rest = substr($0, i + length(p))
@@ -1691,7 +1686,7 @@ prod_state_subdir() {
 # From: Issue #1683 | PR #1858
 prod_state_keys() {
     local keys
-    keys=$(grep -oE '\$\{[A-Z0-9_]+:-\$\{LANCACHE_STATE_DIR:-' "$PROD_COMPOSE") \
+    keys=$(grep -oE '\$\{[A-Z0-9_]+:-\$\{LANCACHE_STATE_DIR:\?' "$PROD_COMPOSE") \
         || die "$PROD_COMPOSE mounts no state directory (exit $?)."
     sed -E 's/^\$\{([A-Z0-9_]+):-.*/\1/' <<< "$keys" | sort -u
 }
@@ -1799,24 +1794,6 @@ migrate_quickstart_install() (
         || die "Pre-migration backup of $old_dir failed; nothing was changed."
     project=$(compose_project_name "$old_dir" "$old_env") \
         || die "Cannot resolve the compose project of $old_dir (exit $?); nothing was changed."
-    # What: every quickstart volume has a home in prod
-    # Why: data without a target would be left behind
-    # From: Issue #1683 | PR #1858
-    old_volumes=$(stack_compose "$old_dir" "$old_env" config --volumes) \
-        || die "Cannot list the volumes of $old_dir (exit $?); nothing was changed."
-    prod_volumes=$(stack_compose "$stack_dir" "$old_env" config --volumes) \
-        || die "Cannot list the volumes of $PROD_COMPOSE (exit $?); nothing was changed."
-    rows=$(quickstart_volume_keys) || exit $?
-    missing=""
-    while IFS= read -r volume; do
-        [[ -n "$volume" ]] || continue
-        grep -qxF -- "$volume" <<< "$prod_volumes" && continue
-        awk -v v="$volume" '$1 == v { f = 1 } END { exit !f }' <<< "$rows" && continue
-        missing+=" $volume"
-    done <<< "$old_volumes"
-    [[ -z "$missing" ]] || die "Quickstart volume(s)${missing} have no home in $PROD_COMPOSE; nothing was changed."
-    stack_compose "$old_dir" "$old_env" stop \
-        || die "Failed to stop the quickstart stack in $old_dir (exit $?); nothing was changed."
     if [[ ! -f "$env_local" ]]; then
         install -m 0600 "$old_env" "$env_local" || die "Failed to create $env_local from $old_env."
     fi
@@ -1831,25 +1808,6 @@ migrate_quickstart_install() (
         [[ -n "$value" && "$value" != /* ]] || continue
         set_env_key "$key" "$(realpath -m "$old_dir/$value")" "$env_local"
     done
-    copies=$(quickstart_volume_dirs "$env_local") \
-        || die "Cannot resolve the state directories of $env_local (exit $?)."
-    mapfile -t copy_lines <<< "$copies"
-    for line in "${copy_lines[@]}"; do
-        copy_volume_to_dir "${project}_${line%% *}" "${line#* }" "$record"
-    done
-    # What: prod uses the CA the quickstart clients trust
-    # Why: another CA would break every client's TLS trust
-    # From: Issue #1683 | PR #1858
-    if [[ -f "$old_dir/certs/ca.crt" ]]; then
-        if [[ ! -f "$SCRIPT_DIR/certs/ca.crt" ]]; then
-            mkdir -p "$SCRIPT_DIR/certs" && cp -p "$old_dir/certs/ca."* "$SCRIPT_DIR/certs/" \
-                || die "Failed to copy the CA from $old_dir/certs to $SCRIPT_DIR/certs."
-        fi
-        for f in "$old_dir/certs/ca."*; do
-            cmp -- "$f" "$SCRIPT_DIR/certs/${f##*/}" \
-                || die "Postcondition failed: $SCRIPT_DIR/certs/${f##*/} is not the CA file of $old_dir; nothing counts as migrated."
-        done
-    fi
     # What: every quickstart setting reaches .env.local
     # Why: changed secrets or IPs break running clients
     # From: Issue #1683 | PR #1858
@@ -1869,6 +1827,48 @@ migrate_quickstart_install() (
         fi
         die "Postcondition failed: $key in $env_local differs from $old_env; nothing counts as migrated."
     done <<< "$keys"
+    # What: .env.local gets its image pins and keys now
+    # Why: the prod compose has no default; render pre-stop
+    # From: Issue #1683 | PR #1912
+    migrate_env_for_update "$stack_dir" \
+        || die "Cannot prepare $env_local for the prod stack (exit $?); the quickstart stack in $old_dir was not stopped."
+    # What: every quickstart volume has a home in prod
+    # Why: data without a target would be left behind
+    # From: Issue #1683 | PR #1858
+    old_volumes=$(stack_compose "$old_dir" "$old_env" config --volumes) \
+        || die "Cannot list the volumes of $old_dir (exit $?); the quickstart stack was not touched."
+    prod_volumes=$(stack_compose "$stack_dir" "$env_local" config --volumes) \
+        || die "Cannot list the volumes of $PROD_COMPOSE (exit $?); the quickstart stack was not touched."
+    rows=$(quickstart_volume_keys) || exit $?
+    missing=""
+    while IFS= read -r volume; do
+        [[ -n "$volume" ]] || continue
+        grep -qxF -- "$volume" <<< "$prod_volumes" && continue
+        awk -v v="$volume" '$1 == v { f = 1 } END { exit !f }' <<< "$rows" && continue
+        missing+=" $volume"
+    done <<< "$old_volumes"
+    [[ -z "$missing" ]] || die "Quickstart volume(s)${missing} have no home in $PROD_COMPOSE; the quickstart stack was not touched."
+    stack_compose "$old_dir" "$old_env" stop \
+        || die "Failed to stop the quickstart stack in $old_dir (exit $?); the quickstart stack was not touched."
+    copies=$(quickstart_volume_dirs "$env_local") \
+        || die "Cannot resolve the state directories of $env_local (exit $?)."
+    mapfile -t copy_lines <<< "$copies"
+    for line in "${copy_lines[@]}"; do
+        copy_volume_to_dir "${project}_${line%% *}" "${line#* }" "$record"
+    done
+    # What: prod uses the CA the quickstart clients trust
+    # Why: another CA would break every client's TLS trust
+    # From: Issue #1683 | PR #1858
+    if [[ -f "$old_dir/certs/ca.crt" ]]; then
+        if [[ ! -f "$SCRIPT_DIR/certs/ca.crt" ]]; then
+            mkdir -p "$SCRIPT_DIR/certs" && cp -p "$old_dir/certs/ca."* "$SCRIPT_DIR/certs/" \
+                || die "Failed to copy the CA from $old_dir/certs to $SCRIPT_DIR/certs."
+        fi
+        for f in "$old_dir/certs/ca."*; do
+            cmp -- "$f" "$SCRIPT_DIR/certs/${f##*/}" \
+                || die "Postcondition failed: $SCRIPT_DIR/certs/${f##*/} is not the CA file of $old_dir; nothing counts as migrated."
+        done
+    fi
     _UPDATE_ENV_FILE="$env_local" _UPDATE_STACK_DIR="$stack_dir"
     validate_compose_config "$stack_dir"
     local apply_rc=0
@@ -2136,19 +2136,27 @@ ensure_ui_password_hash() {
 prod_env_default() {
     local list
     list=$(lancache_sot_value defaults runtime) || exit $?
-    tr '|' '\n' <<< "$list" | awk -v p="$1=" 'index($0, p) == 1 && !f { print substr($0, length(p) + 1); f = 1 } END { exit !f }' \
-        || die "The SOT runtime.defaults holds no default for $1."
+    runtime_default_in "$list" "$1"
 }
 
-# What: docker compose with the SOT compose_keys as SOT_<KEY>
+# What: one key's value in a runtime.defaults list
+# Why: sot_compose reads the list once, not once per key
+# From: Issue #1683 | PR #1912
+runtime_default_in() {
+    awk -v RS='|' -v p="$2=" '{ sub(/\n$/, "") } index($0, p) == 1 && !f { print substr($0, length(p) + 1); f = 1 } END { exit !f }' <<< "$1" \
+        || die "The SOT runtime.defaults holds no default for $2."
+}
+
+# What: docker compose with compose_keys as SOT_<KEY>
 # Why: compose names no path, port or default of its own
 # From: Issue #1683 | PR #1912
 sot_compose() {
-    local keys key value
+    local keys key value list
     local -a sot_env=()
     keys=$(lancache_sot_value compose_keys runtime) || exit $?
+    list=$(lancache_sot_value defaults runtime) || exit $?
     for key in $keys; do
-        value=$(prod_env_default "$key") || exit $?
+        value=$(runtime_default_in "$list" "$key") || exit $?
         sot_env+=("SOT_${key}=${value}")
     done
     env "${sot_env[@]}" docker compose "$@"
@@ -2667,7 +2675,7 @@ validate_lancache_image_prefix() {
         || die "LANCACHE_IMAGE_PREFIX must be a slash-separated image namespace."
 }
 
-# What: resolves the registry: shell env, .env, then ghcr.io
+# What: resolves the registry: shell env, .env, then the SOT
 # Why: an override is validated and fails fast
 resolve_lancache_image_registry() {
     local env_file="${1:-}" registry="${LANCACHE_IMAGE_REGISTRY:-}"
@@ -2676,12 +2684,14 @@ resolve_lancache_image_registry() {
         registry=$(get_env_var LANCACHE_IMAGE_REGISTRY "$env_file") || exit $?
     fi
 
-    registry="${registry:-ghcr.io}"
+    if [[ -z "$registry" ]]; then
+        registry=$(lancache_sot_value registry release) || exit $?
+    fi
     validate_lancache_image_registry "$registry"
     printf '%s\n' "$registry"
 }
 
-# What: resolves the prefix: shell env, .env, then default
+# What: resolves the prefix: shell env, .env, then the repo
 # Why: same precedence as the registry resolver
 resolve_lancache_image_prefix() {
     local env_file="${1:-}" prefix="${LANCACHE_IMAGE_PREFIX:-}"
@@ -2690,7 +2700,7 @@ resolve_lancache_image_prefix() {
         prefix=$(get_env_var LANCACHE_IMAGE_PREFIX "$env_file") || exit $?
     fi
 
-    prefix="${prefix:-wiki-mod/lancache-ng}"
+    prefix="${prefix:-${LANCACHE_REPO_URL#https://github.com/}}"
     validate_lancache_image_prefix "$prefix"
     printf '%s\n' "$prefix"
 }
@@ -2742,11 +2752,12 @@ lancache_stack_pointer_channel_for() {
 }
 
 # What: ref variable and slug of each first-party image
-# Why: the prod compose owns the service-to-image mapping
+# Why: the prod compose names the ref; the slug is its name
 # From: Issue #1683 | PR #1858
 lancache_image_ref_vars() {
     local vars
-    vars=$(sed -nE 's/^ *image: \$\{(LANCACHE_IMAGE_REF_[A-Z_]+):-.*\/([a-z0-9-]+):\$\{LANCACHE_IMAGE_TAG.*$/\1 \2/p' "$PROD_COMPOSE" | sort -u) \
+    vars=$(sed -nE 's/^ *image: \$\{(LANCACHE_IMAGE_REF_([A-Z_]+)):\?.*$/\1 \2/p' "$PROD_COMPOSE" \
+        | awk '{ print $1, tolower($2) }' | sort -u) \
         || die "Failed to read the first-party image refs from $PROD_COMPOSE."
     [[ -n "$vars" ]] || die "$PROD_COMPOSE declares no LANCACHE_IMAGE_REF_* image; cannot pin a channel."
     printf '%s\n' "$vars"
@@ -2756,14 +2767,15 @@ lancache_image_ref_vars() {
 # Why: installer reads CI-owned values, never copies
 # From: Issue #1683 | PR #1858
 lancache_sot_value() {
-    local key="$1" block="${2:-ci_variables}" sot="$SCRIPT_DIR/.github/yaml/build-manifest.yml" value
+    local key="$1" block="${2:-ci_variables}" sot=.github/yaml/build-manifest.yml text value
+    text=$(lancache_repo_file_text "$sot") || exit $?
     value=$(awk -v b="${block}:" -v k="  ${key}:" '
         $0 == b { f = 1; next }
         f && /^[^ #]/ { exit }
         f && index($0, k) == 1 {
             v = substr($0, length(k) + 1); sub(/^ +/, "", v); sub(/^"/, "", v); sub(/"$/, "", v)
             print v; exit
-        }' "$sot") \
+        }' <<< "$text") \
         || die "Failed to read ${block}.${key} from ${sot}."
     [[ -n "$value" ]] || die "${sot} defines no ${block}.${key}."
     printf '%s\n' "$value"
@@ -2902,15 +2914,22 @@ lancache_image_refs_fingerprint() {
     printf 'refs-%s\n' "${sum:0:12}"
 }
 
-# What: image pins for a resolved tag; none for a fixed tag
-# Why: resolve before writing; a failure changes nothing
+# What: image pins for a tag; a channel resolves to digests
+# Why: the prod compose has no image default; resolve first
 # From: Issue #1683 | PR #1858
 lancache_image_refs_for_tag() {
-    local env_file="$1" tag="$2" channels
+    local env_file="$1" tag="$2" channels registry prefix vars var slug
     channels=$(lancache_release_rows channel) || exit $?
     if grep -qxF -- "$tag" <<< "$channels"; then
         lancache_channel_image_refs "$env_file" "$tag"
+        return
     fi
+    registry=$(resolve_lancache_image_registry "$env_file") || exit $?
+    prefix=$(resolve_lancache_image_prefix "$env_file") || exit $?
+    vars=$(lancache_image_ref_vars) || exit $?
+    while read -r var slug; do
+        printf '%s=%s/%s/%s:%s\n' "$var" "$registry" "$prefix" "$slug" "$tag"
+    done <<< "$vars"
 }
 
 # What: replaces all image pins in an env file
@@ -3033,7 +3052,7 @@ migrate_env_for_update() (
     # What: declares every temporary as function-local
     # Why: undeclared names leaked as globals
     local dhcp_proxy_pxe_boot_server dhcp_proxy_pxe_boot_filename_bios dhcp_proxy_pxe_boot_filename_uefi
-    local default_cache_size default_cache_gb
+    local default_cache_size default_cache_gb ntp_default https_default
     local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_https ui_generated_password ui_password ui_password_hash ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_http upstream_dhcp_ip
     local state_keys state_key state_sub state_sub_dir legacy_path
@@ -3107,6 +3126,8 @@ migrate_env_for_update() (
         # Why: re-resolving would pull the bad channel image
         validate_lancache_image_tag "$existing_image_tag"
         lancache_image_tag="$existing_image_tag"
+        lancache_image_refs=$(lancache_image_refs_for_tag "$env_file" "$lancache_image_tag") \
+            || die "Cannot name the images of ${lancache_image_tag} for ${env_file}; it stays unchanged (exit $?)."
     elif [[ "$preserve_image_tag" = "1" && -n "$existing_image_tag" && -n "$archived_refs" ]] \
         && grep -qxF -- "$existing_image_tag" <<< "$stack_channels"; then
         # What: a restore keeps archived channel pins
@@ -3135,15 +3156,17 @@ migrate_env_for_update() (
     append_env_migrated_assignment_if_missing HTTPS_ENABLED SSL_ENABLED "" "$env_file"
     remove_env_key SSL_ENABLED "$env_file"
 
+    # What: validates an operator TTL; default is the SOT
+    # Why: .env.local never repeats a runtime.defaults value
+    # From: Issue #1683 | PR #1912
     ui_session_ttl=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file") || exit $?
-    ui_session_ttl="${ui_session_ttl:-$DEFAULT_UI_SESSION_TTL_SECONDS}"
-    validate_ui_session_ttl_seconds "$ui_session_ttl" "$env_file"
-    set_env_key_if_empty_or_missing UI_SESSION_TTL_SECONDS "$ui_session_ttl" "$env_file"
+    [[ -z "$ui_session_ttl" ]] || validate_ui_session_ttl_seconds "$ui_session_ttl" "$env_file"
 
-    # What: an empty HTTPS_ENABLED becomes 1
+    # What: an empty HTTPS_ENABLED takes the SOT default
     # Why: prod always runs dns-https on IP_HTTPS
     # From: Issue #1683 | PR #1912
-    set_env_key_if_empty_or_missing HTTPS_ENABLED 1 "$env_file"
+    https_default=$(prod_env_default HTTPS_ENABLED) || exit $?
+    set_env_key_if_empty_or_missing HTTPS_ENABLED "$https_default" "$env_file"
 
     # What: missing AUTO_UPDATE_ENABLED defaults to 0
     # Why: migration never turns auto-update on
@@ -3224,7 +3247,8 @@ migrate_env_for_update() (
     # What: NTP can stay disabled; its key must still exist
     # Why: Compose and the UI read one complete config
     # From: Issue #1683 | PR #1858
-    append_env_key_if_missing NTP_ENABLED "0" "$env_file"
+    ntp_default=$(prod_env_default NTP_ENABLED) || exit $?
+    append_env_key_if_missing NTP_ENABLED "$ntp_default" "$env_file"
 
     # What: drops the retired global logging switch
     # Why: the Admin UI holds one switch per service
@@ -6270,20 +6294,19 @@ EOF
         LANCACHE_IMAGE_CHANNEL="$lancache_image_channel" \
         LANCACHE_IMAGE_TAG="$tag_input" \
         resolve_lancache_image_tag)
-    # What: a channel secondary pins dns to its digest
-    # Why: same consistent stack read as the primary install
+    # What: the secondary pins dns to a digest or the tag
+    # Why: the secondary compose has no image default
     # From: Issue #1683 | PR #1858
-    local secondary_refs="" secondary_dns_ref="" stack_channels
-    stack_channels=$(lancache_release_rows channel) || exit $?
-    if [[ -n "$lancache_image_tag" ]] && grep -qxF -- "$lancache_image_tag" <<< "$stack_channels"; then
+    local secondary_refs="" secondary_dns_ref=""
+    if [[ -n "$lancache_image_tag" ]]; then
         secondary_refs=$(LANCACHE_IMAGE_REGISTRY="$lancache_image_registry" \
             LANCACHE_IMAGE_PREFIX="$lancache_image_prefix" \
             lancache_image_refs_for_tag "" "$lancache_image_tag") \
-            || die "Cannot pin the dns image of channel ${lancache_image_tag} for the secondary (exit $?)."
+            || die "Cannot pin the dns image of ${lancache_image_tag} for the secondary (exit $?)."
         secondary_dns_ref=$(awk -F= '$1 == "LANCACHE_IMAGE_REF_DNS" { print substr($0, length($1) + 2) }' <<< "$secondary_refs") \
-            || die "Failed to read LANCACHE_IMAGE_REF_DNS from the channel pins (exit $?)."
+            || die "Failed to read LANCACHE_IMAGE_REF_DNS from the image pins (exit $?)."
         [[ -n "$secondary_dns_ref" ]] \
-            || die "Channel ${lancache_image_tag} resolved no LANCACHE_IMAGE_REF_DNS pin for the secondary."
+            || die "${lancache_image_tag} resolved no LANCACHE_IMAGE_REF_DNS pin for the secondary."
     fi
 
     # What: verifies tag platform before secondary writes
@@ -7016,7 +7039,7 @@ printf "  upstream server list are then configured from the Admin UI.\n"
 printf "  Default: disabled.\n\n"
 
 ask "Enable LanCache-NG-NTP? [y/N]" "N"
-NTP_ENABLED=0
+NTP_ENABLED=$(prod_env_default NTP_ENABLED) || exit $?
 NTP_DATA_DIR="$LANCACHE_STATE_DIR/ntp"
 if [[ "${REPLY,,}" = "y" ]]; then
     NTP_ENABLED=1
@@ -7124,9 +7147,11 @@ NATS_DNS_WRITER_PASSWORD=$(get_or_generate_secret NATS_DNS_WRITER_PASSWORD "$env
 NATS_CALLOUT_PASSWORD=$(get_or_generate_secret NATS_CALLOUT_PASSWORD "$env_file" hex32)
 NATS_SYS_PASSWORD=$(get_or_generate_secret NATS_SYS_PASSWORD "$env_file" hex32)
 SECONDARY_REGISTRATION_TOKEN=$(get_or_generate_secret SECONDARY_REGISTRATION_TOKEN "$env_file" hex32)
+# What: an empty TTL means the SOT default
+# Why: .env.local never repeats a runtime.defaults value
+# From: Issue #1683 | PR #1912
 UI_SESSION_TTL_SECONDS=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file")
-UI_SESSION_TTL_SECONDS="${UI_SESSION_TTL_SECONDS:-$DEFAULT_UI_SESSION_TTL_SECONDS}"
-validate_ui_session_ttl_seconds "$UI_SESSION_TTL_SECONDS" "$env_file"
+[[ -z "$UI_SESSION_TTL_SECONDS" ]] || validate_ui_session_ttl_seconds "$UI_SESSION_TTL_SECONDS" "$env_file"
 
 validate_env_values_for_initial_write \
     "IP_HTTP=${IP_HTTP}" \
@@ -7292,6 +7317,7 @@ AUTO_UPDATE_ENABLED=${AUTO_UPDATE_ENABLED}
 # Empty auth values are only allowed when ALLOW_INSECURE_UI=true is set explicitly.
 UI_AUTH_USER=${UI_AUTH_USER}
 UI_AUTH_PASSWORD_HASH=${UI_AUTH_PASSWORD_HASH}
+# Session lifetime in seconds; empty uses the default of the image.
 UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS}
 ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}
 
