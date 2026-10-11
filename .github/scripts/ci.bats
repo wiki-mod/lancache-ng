@@ -28,8 +28,8 @@ setup() {
     # Why: sourced readers look up, as under ci_main.
     # From: Issue #1683 | PR #1858
     _ci_sot_load || return 1
-    # What: export the SOT_ compose values every test shares.
-    # Why: compose interpolates mount and port targets from them.
+    # What: the SOT_ compose values every test shares.
+    # Why: compose takes mount and port targets from them.
     # From: Issue #1683 | PR #1912
     local fx kv
     fx="$(_ci_sot_compose_env)" || return 1
@@ -518,13 +518,13 @@ STUB
 }
 
 # What: an operator env file made from the SOT fixture
-# Why: no .env is tracked; tests need operator-shaped input
+# Why: no .env is tracked; setup() exports the SOT_ values
 # From: Issue #1683 | PR #1912
 _template_env() {
     local out="${BATS_TEST_TMPDIR}/operator.env" fx
     if [ ! -s "${out}" ]; then
         fx="$(_ci_validation_env)" || return 1
-        printf '%s\n' "${fx}" > "${out}"
+        grep -v '^SOT_' <<< "${fx}" > "${out}" || return 1
     fi
     printf '%s\n' "${out}"
 }
@@ -585,7 +585,7 @@ _checkout_copy() {
 # Why: §15: one name owner; prod pulls that registry too
 # From: Issue #1683 | PR #1858
 @test "image-ref builds the one registry service@digest form" {
-    local root reg envreg own repo name svc tool plats keys p s dig id
+    local root reg own repo name svc tool plats keys p s dig id
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     reg="$(_ci_block_entry_field release "" registry)" || { echo "registry: ${reg}"; return 1; }
     [ -n "${reg}" ] || { echo "no SOT release.registry"; return 1; }
@@ -1068,25 +1068,38 @@ ROWS
 # Why: AG-INT-002: a key_OLD line must not satisfy the key
 # From: Issue #1683 | PR #1912
 @test "prod state wiring: a renamed state key is missing, not matched" {
-    local root t="${BATS_TEST_TMPDIR}/repo" dep doc keys key file want
+    local root t="${BATS_TEST_TMPDIR}/repo" doc keys key
     local -a all
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     run _ci_check_prod_state_wiring "${root}"
     _expect real 0 "prod-state-wiring=clean" || return 1
-    dep="$(_ci_variable CI_COMPOSE_FILE)" && doc="$(_ci_variable CI_BACKUP_RESTORE_DOC)" || return 1
+    doc="$(_ci_variable CI_BACKUP_RESTORE_DOC)" || return 1
     keys="$(bash -c 'set -euo pipefail; . "$1"; prod_state_keys' _ "${root}/setup.sh")" || return 1
     mapfile -t all <<< "${keys}"
     [ "${#all[@]}" -gt 0 ] && [ -n "${all[0]}" ] || { echo "inputs: no state key"; return 1; }
     key="${all[$(( SRANDOM % ${#all[@]} ))]}"
-    while IFS='|' read -r file want; do
-        rm -rf "${t}" && _checkout_copy "${root}" "${t}" || return 1
-        sed -i -E "s/(^|[^A-Za-z0-9_])${key}([^A-Za-z0-9_]|$)/\\1${key}_OLD\\2/g" "${t}/${file}" || return 1
-        run _ci_check_prod_state_wiring "${t}"
-        _expect "${file}" 1 "[CI-ERROR-CHECK-0100];${want} ${key}" || return 1
-    done <<ROWS
-$(dirname "${dep}")/.env|does not document
-${doc}|does not mention
-ROWS
+    rm -rf "${t}" && _checkout_copy "${root}" "${t}" || return 1
+    sed -i -E "s/(^|[^A-Za-z0-9_])${key}([^A-Za-z0-9_]|$)/\\1${key}_OLD\\2/g" "${t}/${doc}" || return 1
+    run _ci_check_prod_state_wiring "${t}"
+    _expect doc 1 "[CI-ERROR-CHECK-0100];${doc} does not mention ${key}" || return 1
+}
+
+# What: each state key defaults under LANCACHE_STATE_DIR
+# Why: AG-SETUP-001: a literal host dir would leave the root
+# From: Issue #1683 | PR #1912
+@test "prod state wiring: a state key off the state root fails" {
+    local root t="${BATS_TEST_TMPDIR}/repo" dep keys key
+    local -a all
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 1
+    keys="$(bash -c 'set -euo pipefail; . "$1"; prod_state_keys' _ "${root}/setup.sh")" || return 1
+    mapfile -t all <<< "${keys}"
+    [ "${#all[@]}" -gt 0 ] && [ -n "${all[0]}" ] || { echo "inputs: no state key"; return 1; }
+    key="${all[$(( SRANDOM % ${#all[@]} ))]}"
+    rm -rf "${t}" && _checkout_copy "${root}" "${t}" || return 1
+    sed -i -E "s/\\$\\{${key}:-\\$\\{LANCACHE_STATE_DIR:\\?[^}]*\\}/\${${key}:-\/srv\/literal/" "${t}/${dep}" || return 1
+    run _ci_check_prod_state_wiring "${t}"
+    _expect off-root 1 "[CI-ERROR-CHECK-0100];${dep} has a mount default off LANCACHE_STATE_DIR;\${${key}:-/srv/literal" || return 1
 }
 
 # What: proxy constant reads Rust const forms or fails
@@ -1110,6 +1123,57 @@ ROWS
 visibility|    pub(crate) const NGINX_CERT_DIR : &'static str = "ssl/certs"; // certs|0|@WANT@
 macro|const NGINX_CERT_DIR: &str = concat!("ssl", "/certs");|2|[CI-ERROR-CORE-0129]
 ROWS
+}
+
+# What: the https health listener follows the SOT health URL
+# Why: the supervisor probes this port; keep the listen line
+# From: Issue #1683 | PR #1912
+@test "check proxy-nginx-policy: the https health port is the SOT's" {
+    local root t="${BATS_TEST_TMPDIR}/repo" port
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    run bash "${CI_SH}" check proxy-nginx-policy
+    _expect real 0 "proxy-nginx-policy=clean" || return 1
+    port="$(_ci_runtime_default PROXY_HEALTH_HTTPS_URL)" || return 1
+    port="${port##*:}" port="${port%%/*}"
+    _checkout_copy "${root}" "${t}" || return 1
+    sed -i -E "s/(listen[[:space:]]+127[.]0[.]0[.]1:)${port}([[:space:]]+ssl;)/\\1$(( port + 1 ))\\2/" "${t}/services/proxy/conf.d/https.conf" || return 1
+    run bash "${CI_SH}" check proxy-nginx-policy "${t}"
+    _expect moved 1 "[CI-ERROR-CHECK-0151];no loopback listen on ${port} ssl" || return 1
+}
+
+# What: image-setup builds the SOT accounts and directories
+# Why: the Dockerfiles run no inline RUN logic (AG-CI-023)
+# From: Issue #1683 | PR #1912
+@test "image-setup: IMAGE_SETUP steps run in order, a bad step stops coded" {
+    local t="${BATS_TEST_TMPDIR}" bin d grp usr uid c
+    bin="${t}/bin" d="${t}/$(_val name)" grp="$(_val name)" usr="$(_val name)" uid="$(_val int 2000 60000)"
+    mkdir -p "${bin}" || return 1
+    for c in addgroup adduser; do
+        printf '#!/bin/bash\necho "%s $*" >> "%s/calls"\n' "${c}" "${t}" > "${bin}/${c}" && chmod +x "${bin}/${c}" || return 1
+    done
+    PATH="${bin}:${PATH}" IMAGE_SETUP="group=${grp}:${uid} member=${usr}:${grp} user=${grp}:${uid}:${grp} dir=${d}/a dir=${d}/b:root" \
+        run bash "${CI_SH}" image-setup
+    _expect steps 0 "image-setup=ok steps=5" || return 1
+    [ -d "${d}/a" ] && [ -d "${d}/b" ] || { echo "dirs not made"; return 1; }
+    [ "$(cat "${t}/calls")" = "$(printf 'addgroup -g %s %s\naddgroup %s %s\nadduser -D -H -u %s -G %s -s /sbin/nologin %s' "${uid}" "${grp}" "${usr}" "${grp}" "${uid}" "${grp}" "${grp}")" ] \
+        || { echo "calls: $(cat "${t}/calls")"; return 1; }
+    IMAGE_SETUP="dir=${d}/c ${grp}=x" run bash "${CI_SH}" image-setup
+    _expect bad-kind 2 "[CI-ERROR-IMGSETUP-0001];token=\"${grp}=x\"" || return 1
+}
+
+# What: a service's setup tokens carry SOT values only
+# Why: the build-arg must not leave an unresolved @KEY@
+# From: Issue #1683 | PR #1912
+@test "service setup tokens: @KEY@ resolves from the SOT" {
+    local svc tokens want
+    for svc in $(ci_services); do
+        tokens="$(_ci_service_setup "${svc}")" || { echo "${svc}: rc $?"; return 1; }
+        [[ "${tokens}" != *@* ]] || { echo "${svc}: unresolved: ${tokens}"; return 1; }
+    done
+    want="dir=$(_ci_runtime_default NGINX_DIR)/ssl/ca"
+    [[ "$(_ci_service_setup proxy)" == "${want} "* ]] || { echo "proxy: $(_ci_service_setup proxy)"; return 1; }
+    want="group=$(_ci_runtime_default LOG_READER_GROUP):$(_ci_required_field runtime gid block)"
+    [[ "$(_ci_service_setup ui)" == "${want} "* ]] || { echo "ui: $(_ci_service_setup ui)"; return 1; }
 }
 
 # What: stubs let cargo load every member; undeclared stops
@@ -1277,6 +1341,7 @@ CASES
 @test "validate pin override: every first-party service pinned, gap fails" {
     local root cfg svcs cand="" s dig out k ks miss extra first
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _export_validation_env || return 1
     cfg="$(docker compose -f "${root}/$(_ci_variable CI_COMPOSE_FILE)" config --format json)" && svcs="$(ci_services)" \
         || { echo "inputs: compose config or services"; return 1; }
     first="$(jq -r --arg s "$(awk 'NR == 1' <<< "${svcs}")" '.services[$s].image // empty' <<< "${cfg}")"
@@ -1380,6 +1445,7 @@ CASES
 @test "validate net override isolates and resets services" {
     local slot cfg nx plain host out sub a b i j o1 o2 o3 o4 lo hi svc s
     local -a subs starts=() ends=()
+    _export_validation_env || return 1
     slot="$(_ci_validate_subnet "$(_val name)")" && cfg="$(_ci_validate_config_json)" || { echo "inputs: ${slot}"; return 1; }
     s="${slot#*/}"
     nx="$(jq '[.networks // {} | keys[] | select(. != "default")] | length' <<< "${cfg}")" \
@@ -1514,7 +1580,7 @@ CASES
     _export_validation_env || return 1
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     cfg="$(_ci_validate_config_json)" \
-        && url="$(jq -r '.services.ui.environment.DNS_URL // ""' <<<"${cfg}")" || { echo "compose: ${cfg}"; return 1; }
+        && url="$(_ci_runtime_default DNS_URL)" || { echo "compose: ${cfg}"; return 1; }
     url="${url#*://}"
     [ "${url%%:*}" = dns ] && jq -e '.services.dns' <<<"${cfg}" >/dev/null \
         || { echo "ui rollback host '${url%%:*}' is not the compose dns service"; return 1; }
@@ -1895,7 +1961,7 @@ CASES
         run bash "${CI_SH}" check stable-external-images "${d}"
         _expect "${case}" "${rc}" "${want}" || return 1
     done <<'CASES'
-own|${LANCACHE_IMAGE_REF_A:-ghcr.io/a/b/a:latest}|0|stable-external-images=clean
+own|${LANCACHE_IMAGE_REF_A:?LANCACHE_IMAGE_REF_A is required}|0|stable-external-images=clean
 sot-pin|@PIN@|0|stable-external-images=clean
 quoted-pin|"@PIN@"|0|stable-external-images=clean
 tag-only|@BARE@|1|[CI-ERROR-CHECK-0014];external not digest-pinned: @BARE@
@@ -2809,39 +2875,33 @@ invalid|${bad}|IP_HTTPS is not a valid IPv4 address: ${bad}
 ROWS
 }
 
-# What: deploy/prod state root is compose's one default
+# What: deploy/prod state root is the SOT default
 # Why: state stays off the checkout; compose and setup agree
-# From: Issue #1683 | PR #1858
+# From: Issue #1683 | PR #1912
 @test "production_state_root_default keeps deploy/prod state out of the checkout" {
-    local co="${BATS_TEST_TMPDIR}/co" dp cf root binds other name to scope msg
-    _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
-    dp="${co}/deploy/prod" cf="${co}/deploy/prod/docker-compose.yml"
+    local co="${BATS_TEST_TMPDIR}/co" dp root binds other name to msg want sot="${BATS_TEST_TMPDIR}/sot" text
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}" || return 1
+    dp="${co}/deploy/prod"
     _prod_install "${dp}" || return 1
-    remove_env_key LANCACHE_STATE_DIR "${dp}/.env"
+    want="$(_ci_runtime_default LANCACHE_STATE_DIR)" || return 1
     run production_state_root_default "${dp}"
-    root="${output}"
-    [ "${status}" -eq 0 ] && [[ "${root}" == /* && "${root}/" != "${co}/"* ]] || { echo "prod: rc ${status}: ${root}"; return 1; }
-    binds="$(docker compose --env-file "${dp}/.env" -f "${cf}" config --format json)" || { echo "prod: compose config failed"; return 1; }
+    _expect prod 0 "=${want}" || return 1
+    [[ "${want}" == /* && "${want}/" != "${co}/"* ]] || { echo "prod: root ${want} is inside the checkout"; return 1; }
+    binds="$(_prod_compose config --format json)" || { echo "prod: compose config failed"; return 1; }
     binds="$(jq -r '.services[].volumes[]? | select(.type == "bind") | .source' <<< "${binds}")"
-    grep -q "^${root}/" <<< "${binds}" || { echo "prod: no state bind under ${root}: ${binds}"; return 1; }
+    grep -q "^${want}/" <<< "${binds}" || { echo "prod: no state bind under ${want}: ${binds}"; return 1; }
     other="$(_val path)"
     run production_state_root_default "${other}"
     _expect other 0 "=${other}" || return 1
-    cp "${cf}" "${cf}.orig" || return 1
-    while IFS='|' read -r name to scope msg; do
-        if [ "${scope}" = first ]; then
-            awk -v a="LANCACHE_STATE_DIR:-${root}}" -v b="${to}" \
-                '!d && (i = index($0, a)) { $0 = substr($0, 1, i - 1) b substr($0, i + length(a)); d = 1 } { print }' \
-                "${cf}.orig" > "${cf}" || return 1
-        else
-            cp "${cf}.orig" "${cf}" && replace_literal_in_file "${cf}" "LANCACHE_STATE_DIR:-${root}}" "${to}" || return 1
-        fi
-        run production_state_root_default "${dp}"
+    mkdir -p "${sot}/.github/yaml" && text="$(<"${root}/.github/yaml/build-manifest.yml")" || return 1
+    while IFS='@' read -r name to msg; do
+        printf '%s\n' "${text/|LANCACHE_STATE_DIR=${want}/${to}}" > "${sot}/.github/yaml/build-manifest.yml" || return 1
+        SCRIPT_DIR="${sot}" run production_state_root_default "${dp}"
         _expect "${name}" 1 "${msg}" || return 1
     done <<ROWS
-two|LANCACHE_STATE_DIR:-${root}/$(_val name)}|first|gives no single LANCACHE_STATE_DIR default
-relative|LANCACHE_STATE_DIR:-$(_val name)}|all|gives no single LANCACHE_STATE_DIR default
-none|LANCACHE_STATE_DIR}|all|has no LANCACHE_STATE_DIR default
+relative@|LANCACHE_STATE_DIR=$(_val name)@no absolute path
+none@@holds no default for LANCACHE_STATE_DIR
 ROWS
 }
 
@@ -3130,16 +3190,16 @@ STUB
         printf '%s\n' "${d}" >> "${t}/extra-defaults"
     done <<< "${modes}"
     for v in DHCP_SUBNET DHCP_GATEWAY DHCP_RANGE_START DHCP_RANGE_END; do
-        d="$(get_env_var "${v}" "${tpl}")"
+        d="$(_ci_runtime_default "${v}")" || return 1
         grep -qxF -- "${d}" "${t}/extra-defaults" || { echo "${v} default not from the template"; return 1; }
     done
-    d="$(get_env_var DHCP_SUBNET "${tpl}")"
+    d="$(_ci_runtime_default DHCP_SUBNET)" || return 1
     grep -qxF -- "${d%/*}" "${t}/extra-defaults" || { echo "subnet start default not from the template"; return 1; }
     # What: no template DHCP default is literal in setup.sh
     # Why: one owner of the defaults; a copy passes above
     # From: Issue #1683 | PR #1858
     for v in DHCP_SUBNET DHCP_GATEWAY DHCP_RANGE_START DHCP_RANGE_END; do
-        d="$(get_env_var "${v}" "${tpl}")"
+        d="$(_ci_runtime_default "${v}")" || return 1
         for p in "${d}" "${d%/*}"; do
             if grep -qwF -- "${p}" "${SETUP}"; then echo "${v} default ${p} is a literal in setup.sh"; return 1; fi
         done
@@ -3181,6 +3241,10 @@ STUB
     for k in ${keys}; do
         v="$(_ci_runtime_default "${k}")" || return 1
         [ -n "${v}" ] || continue
+        # What: a wizard y is the on-value, not a default
+        # Why: the prompt default N is the operator's pick.
+        # From: Issue #1683 | PR #1912
+        [ "${k}" != HTTPS_ENABLED ] || { grep -qF -e "${k}:-${v}" "${repo}/setup.sh" && { echo "${k} default ${v} is a literal in setup.sh"; return 1; }; continue; }
         if grep -qF -e "${k}=${v}" -e "${k}:-${v}" "${repo}/setup.sh"; then
             echo "${k} default ${v} is a literal in setup.sh"
             return 1
@@ -3221,10 +3285,11 @@ STUB
     _setup_sh_run 'stack_compose "${REPO}/deploy/prod" "${ENVL}" config --quiet'
     [ "${status}" -eq 0 ] || { echo "compose config: ${output}"; return 1; }
     # What: no SOT default lands in .env.local
-    # Why: only the wizard's own answers belong there
+    # Why: wizard answers stay; SOT defaults are not copied
     # From: Issue #1683 | PR #1912
     for k in ${keys}; do
-        case " CACHE_MAX_SIZE CACHE_MEM_MB DHCP_SUBNET DHCP_GATEWAY DHCP_RANGE_START DHCP_RANGE_END ALLOW_INSECURE_UI " in *" ${k} "*) continue ;; esac
+        exempt=" CACHE_MAX_SIZE CACHE_MEM_MB DHCP_SUBNET DHCP_GATEWAY DHCP_RANGE_START DHCP_RANGE_END ALLOW_INSECURE_UI NTP_ENABLED HTTPS_ENABLED DHCP_MODE KEA_DATA_DIR LANCACHE_STATE_DIR CACHE_DIR "
+        case "${exempt}" in *" ${k} "*) continue ;; esac
         [ -z "$(get_env_var "${k}" "${env}")" ] || { echo "${k} was copied into .env.local: $(cat "${env}")"; return 1; }
     done
     [ "$(get_env_var IP_HTTP "${env}")" = "${http}" ] && ! env_key_exists UI_AUTH_PASSWORD "${env}" \
@@ -3248,8 +3313,7 @@ STUB
     _load_setup_sh "${root}" || return 1
     dp="${root}/deploy/prod"
     paths="$(deploy_prod_repo_input_paths "${dp}")" || { echo "owner rc $?"; return 1; }
-    json="$(NATS_BIND_IP="$(get_env_var IP_HTTP "${dp}/.env")" docker compose --env-file "${dp}/.env" \
-        -f "${dp}/docker-compose.yml" config --format json)" \
+    json="$(NATS_BIND_IP="$(get_env_var IP_HTTP "$(_template_env)")" _prod_compose config --format json)" \
         || { echo "compose config failed"; return 1; }
     inputs="$(jq -r --arg r "${root}/" '[.services[] | ((.volumes // [])[] | select(.type == "bind") | .source),
         ((.env_file // [])[] | if type == "object" then .path else . end)] | unique[] | select(startswith($r))' <<< "${json}")"
