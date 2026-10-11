@@ -283,7 +283,7 @@ impl Config {
             ("CACHE_MAX_GB", cache_max_gb.to_string()),
         ]);
         // What: the logging switches, from the strict env.
-        // Why: .env owns the default; a typo must not flip it.
+        // Why: .env owns the default; typos must not flip.
         // From: Issue #1683 | PR #1912
         let mut startup_settings = startup_settings;
         for (key, _) in config::LOG_SWITCHES {
@@ -422,7 +422,7 @@ fn bool_text(value: bool) -> String {
 }
 
 // What: the channel an image tag belongs to, for display.
-// Why: edge was renamed; it is deliberately not an alias.
+// Why: no aliases; an edge tag shows as latest.
 // From: Issue #1056
 fn derive_image_channel(tag: &str) -> String {
     let pinned = tag.starts_with("sha-")
@@ -1190,7 +1190,7 @@ struct LogEntry {
 }
 
 // What: totals over the parsed access-log lines.
-// Why: the stats page shows one aggregate per request.
+// Why: the dashboard reads these totals directly.
 #[derive(Debug, Serialize, Default, Clone)]
 struct LogStats {
     hits: u64,
@@ -1985,7 +1985,7 @@ fn encode_nats_jwt(mut claims: Value, signer: &KeyPair) -> Result<String, String
 }
 
 // What: the payload of a compact JWT, unverified.
-// Why: the request is trusted by subject, not signature.
+// Why: user and password decide; no signature check.
 fn decode_jwt_payload(token: &str) -> Result<Value, String> {
     let parts: Vec<&str> = token.split('.').collect();
     let [_, payload, _] = parts.as_slice() else {
@@ -2492,7 +2492,7 @@ async fn check_secondary_health(
         })));
     };
     // What: probe port 53, the secondary's own DNS.
-    // Why: 5300 is only the primary's AXFR listener.
+    // Why: 5300 is the primary's PowerDNS port.
     let result = probe_secondary_soa(addr, 53).await;
     if result.status == "ok" {
         let _ = with_db(&state, |db| {
@@ -2545,12 +2545,12 @@ async fn rotate_token(
 }
 
 // What: lease time limits in seconds.
-// Why: Kea needs a floor; seven days is the documented cap.
+// Why: the subnet form rejects leases outside these.
 const MIN_LEASE_TIME: u32 = 60;
 const MAX_LEASE_TIME: u32 = 604_800;
 
 // What: lease time shown when a subnet sets none, seconds.
-// Why: equals the dhcp image default of DHCP_LEASE_TIME.
+// Why: same value as deploy/prod/.env DHCP_LEASE_TIME.
 const DEFAULT_LEASE_TIME: u32 = 86_400;
 
 // What: Kea error texts that mean "not found".
@@ -5248,7 +5248,7 @@ fn ntp_upstream_servers(raw: &str) -> Result<String, String> {
 }
 
 // What: save the NTP settings and apply them.
-// Why: the container reads its settings only at start.
+// Why: the watchdog reads the saved NTP keys.
 // From: Issue #1486
 async fn update_ntp_settings(
     State(state): Shared,
@@ -5263,16 +5263,16 @@ async fn update_ntp_settings(
     let auto = !f.get("ntp_auto_dhcp").is_empty();
     let was_auto = cfg.flag("NTP_ENABLED") && cfg.flag("NTP_AUTO_DHCP");
 
-    // What: save only; chronyd follows the settings file.
-    // Why: the ui has no Docker; the supervisor converges.
+    // What: writes the NTP keys to the settings file.
+    // Why: the watchdog reads NTP_ENABLED from that file.
     cfg.save_settings(&[
         ("NTP_ENABLED", bool_text(enabled)),
         ("NTP_UPSTREAM_SERVERS", servers),
         ("NTP_AUTO_DHCP", bool_text(auto)),
     ])
     .map_err(|e| fail(e.to_string()))?;
-    // What: touch Kea's NTP option only when auto changes.
-    // Why: a save leaving auto alone keeps subnet edits.
+    // What: sets Kea's NTP option to LAN or default.
+    // Why: auto off before and after keeps subnet edits.
     if enabled && auto {
         sync_subnet_ntp(&state, true).await.map_err(fail)?;
     } else if was_auto {
@@ -5429,7 +5429,7 @@ fn ui_log_file() -> String {
 }
 
 // What: a real token as is, else a persisted random one.
-// Why: placeholders crash-looped the ui; no rotation.
+// Why: a generated token is stored and reused.
 fn registration_token(configured: &str, token_file: &str) -> Result<String, String> {
     let token = if is_placeholder(configured) {
         let path = Path::new(token_file);
@@ -5880,8 +5880,8 @@ fn main() -> anyhow::Result<()> {
     run()
 }
 
-// What: unit tests of pure rules; no files, sockets, mocks.
-// Why: these rules guard data and security, not wiring.
+// What: unit and handler tests; files and sockets used.
+// Why: the rules guard data and security.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7347,7 +7347,7 @@ mod tests {
         assert_eq!(delay, max);
     }
 
-    // What: a Config with the five NATS roles filled in.
+    // What: a Config with the four NATS roles filled in.
     // Why: nats.conf and the fragment render from it.
     fn nats_config() -> Config {
         load_from(&nats_env()).expect("a complete NATS env loads")
@@ -7371,7 +7371,7 @@ mod tests {
         env
     }
 
-    // What: a missing role password fails the whole set.
+    // What: an empty NATS UI user fails NATS validation.
     // Why: nats.conf and the ui connection fail closed.
     #[test]
     fn a_role_without_a_password_fails_validation() {
@@ -7426,7 +7426,7 @@ mod tests {
     }
 
     // What: a JWT payload decodes or fails with a reason.
-    // Why: the request is trusted by subject, no signature.
+    // Why: user and password decide; no signature check.
     #[test]
     fn jwt_payloads_decode_or_explain() {
         assert_eq!(decode_jwt_payload("a.e30.c"), Ok(json!({})));
@@ -7529,7 +7529,7 @@ mod tests {
     }
 
     // What: subnet4 is found, edited or missing by level.
-    // Why: each missing level gets its own debug message.
+    // Why: each missing level gets its own error text.
     #[test]
     fn subnet_lookup_names_the_missing_level() {
         let mut config = json!({"Dhcp4": {"subnet4": [{"id": 1}, {"id": 2, "subnet": "x"}]}});
@@ -8969,6 +8969,7 @@ mod tests {
         };
         assert_eq!(stored("sec-1").as_deref(), Some("192.168.1.9"));
         // What: a public address is dropped, old one stays.
+        // Why: stored probe targets must be private IPv4.
         let again = post("tok", "sec-1", Some("8.8.8.8")).await.unwrap();
         assert_eq!(again.status(), 200);
         assert_eq!(stored("sec-1").as_deref(), Some("192.168.1.9"));
@@ -9348,7 +9349,7 @@ mod tests {
     }
 
     // What: post a form with session cookie and CSRF token.
-    // Why: protected forms need both; redirects stay.
+    // Why: redirects are not followed; the 303 is checked.
     async fn post_form(
         base: &str,
         session: &(String, String),
