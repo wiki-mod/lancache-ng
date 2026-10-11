@@ -977,7 +977,7 @@ CASES
     df="$(_ci_service_path "${svc}" Dockerfile "${t}")" || return 1
     printf 'COPY --chown=0:0 %s \\\n    /x\n' "${src}" >> "${df}" || return 1
     run _ci_check_dockerfile_context_edges "${t}"
-    _expect uncovered 1 "[CI-ERROR-CHECK-0172];${svc}: ;copies ${src}, outside" || return 1
+    _expect uncovered 1 "[CI-ERROR-CHECK-0175];${svc}: ;copies ${src}, outside" || return 1
 }
 
 # What: container prefix is the compose name in any case

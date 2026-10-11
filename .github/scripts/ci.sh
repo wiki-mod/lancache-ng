@@ -11419,7 +11419,7 @@ _ci_check_prod_state_wiring() {
     su="$(_ci_installer "${repo_root}")" || return 2
     keys="$(_ci_capture 0 bash -c 'set -euo pipefail; . "$1"; prod_state_keys' _ "${su}")" || return 2
     if [ -z "${keys}" ]; then
-        ci_log "[CI-ERROR-CHECK-0171]" "path=\"${su}\" reason=\"prod_state_keys returned no state key\""
+        ci_log "[CI-ERROR-CHECK-0174]" "path=\"${su}\" reason=\"prod_state_keys returned no state key\""
         return 2
     fi
     # What: a key counts only as a whole word, not a prefix.
@@ -12434,7 +12434,7 @@ _ci_check_dockerfile_context_edges() {
         done <<< "${srcs}"
     done
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0172]" "targets=${n} reason=\"a COPY source is not in dependency_graph\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0175]" "targets=${n} reason=\"a COPY source is not in dependency_graph\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'dockerfile-context-edges=clean targets=%s\n' "${n}"
