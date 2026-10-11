@@ -2194,7 +2194,8 @@ set_env_defaults_if_empty_or_missing() {
 # From: Issue #1683 | PR #1858
 set_template_owned_env_defaults() {
     set_env_defaults_if_empty_or_missing "$1" CACHE_SLICE_SIZE CACHE_VALID_HIT CACHE_VALID_ANY \
-        CACHE_INACTIVE NGINX_UPSTREAM_RESOLVER PROXY_SECURITY_MODE KEA_CONFIG_SNAPSHOT_DIR
+        CACHE_INACTIVE NGINX_UPSTREAM_RESOLVER PROXY_SECURITY_MODE KEA_CONFIG_SNAPSHOT_DIR \
+        NATS_UI_USER NATS_DNS_WRITER_USER NATS_DNS_REPLICA_USER NATS_CALLOUT_USER NATS_SYS_USER
     append_env_defaults_if_missing "$1" PROXY_ALLOWED_CLIENT_CIDRS
 }
 
@@ -3387,17 +3388,10 @@ migrate_env_for_update() (
     # What: NETDATA_ALARM_TOKEN is generated proactively
     # Why: shared bootstrap only heals placeholders
     ensure_secret_env_key NETDATA_ALARM_TOKEN "$env_file" hex32
-    set_env_key_if_empty_or_missing NATS_UI_USER "lancache-ui" "$env_file"
     ensure_secret_env_key NATS_UI_PASSWORD "$env_file" hex32
-    set_env_key_if_empty_or_missing NATS_DNS_WRITER_USER "lancache-dns-writer" "$env_file"
     ensure_secret_env_key NATS_DNS_WRITER_PASSWORD "$env_file" hex32
-    set_env_key_if_empty_or_missing NATS_DNS_REPLICA_USER "lancache-dns-replica" "$env_file"
     ensure_secret_env_key NATS_DNS_REPLICA_PASSWORD "$env_file" hex32
-    set_env_key_if_empty_or_missing NATS_CALLOUT_USER "lancache-nats-callout" "$env_file"
     ensure_secret_env_key NATS_CALLOUT_PASSWORD "$env_file" hex32
-    # What: NATS_SYS_USER is set if missing
-    # Why: installed primary converges to new capability
-    set_env_key_if_empty_or_missing NATS_SYS_USER "lancache-nats-sys" "$env_file"
     ensure_secret_env_key NATS_SYS_PASSWORD "$env_file" hex32
     ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
 
@@ -7188,22 +7182,18 @@ PDNS_API_KEY=$(get_or_generate_secret PDNS_API_KEY "$env_file" hex32)
 # What: NETDATA_ALARM_TOKEN gates the netdata-alarm POST
 # Why: the netdata-alarms route needs a shared token
 NETDATA_ALARM_TOKEN=$(get_or_generate_secret NETDATA_ALARM_TOKEN "$env_file" hex32)
+# What: NATS role users: the kept value or empty
+# Why: the template owner fills them after the write
+# From: Issue #1683 | PR #1858
 NATS_UI_USER=$(get_env_var NATS_UI_USER "$env_file")
-NATS_UI_USER="${NATS_UI_USER:-lancache-ui}"
 NATS_UI_PASSWORD=$(get_or_generate_secret NATS_UI_PASSWORD "$env_file" hex32)
 NATS_DNS_WRITER_USER=$(get_env_var NATS_DNS_WRITER_USER "$env_file")
-NATS_DNS_WRITER_USER="${NATS_DNS_WRITER_USER:-lancache-dns-writer}"
 NATS_DNS_WRITER_PASSWORD=$(get_or_generate_secret NATS_DNS_WRITER_PASSWORD "$env_file" hex32)
 NATS_DNS_REPLICA_USER=$(get_env_var NATS_DNS_REPLICA_USER "$env_file")
-NATS_DNS_REPLICA_USER="${NATS_DNS_REPLICA_USER:-lancache-dns-replica}"
 NATS_DNS_REPLICA_PASSWORD=$(get_or_generate_secret NATS_DNS_REPLICA_PASSWORD "$env_file" hex32)
 NATS_CALLOUT_USER=$(get_env_var NATS_CALLOUT_USER "$env_file")
-NATS_CALLOUT_USER="${NATS_CALLOUT_USER:-lancache-nats-callout}"
 NATS_CALLOUT_PASSWORD=$(get_or_generate_secret NATS_CALLOUT_PASSWORD "$env_file" hex32)
-# What: NATS_SYS_USER is the Admin UI kicker identity
-# Why: force-disconnects a removed secondary session
 NATS_SYS_USER=$(get_env_var NATS_SYS_USER "$env_file")
-NATS_SYS_USER="${NATS_SYS_USER:-lancache-nats-sys}"
 NATS_SYS_PASSWORD=$(get_or_generate_secret NATS_SYS_PASSWORD "$env_file" hex32)
 SECONDARY_REGISTRATION_TOKEN=$(get_or_generate_secret SECONDARY_REGISTRATION_TOKEN "$env_file" hex32)
 UI_SESSION_TTL_SECONDS=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file")
