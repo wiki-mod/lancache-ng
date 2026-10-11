@@ -2334,18 +2334,26 @@ _ci_secret_env() {
     done < "${file}"
 }
 
+# What: sccache mode of this run; _ci_sccache_env sets it.
+# Why: a mid-build outage must honour required (AG-CI-011).
+# From: Issue #1683 | PR #1912
+_CI_SCCACHE_MODE=""
+
 # What: sccache as rustc wrapper on the policy chain.
 # Why: AG-CI-009 levels; required fails closed (AG-CI-011).
-# From: Issue #1683 | PR #1858
+# From: Issue #1683 | PR #1912
 _ci_sccache_env() {
-    local prefix="$1" wrapper="${2:-sccache}" url="${SCCACHE_REDIS_URL:-}" sf policy mode chain
-    # What: a build reads the runner policy; else compute.
-    # Why: the chain is decided once, on the runner.
-    # From: Issue #1683 | PR #1858
+    local service="$1" wrapper="${2:-sccache}" url="${SCCACHE_REDIS_URL:-}" sf policy mode chain prefix
+    prefix="$(_ci_variable CI_CACHE_KEY_PREFIX)" || return 2
+    prefix="${prefix}-${service}"
+    # What: the runner policy file if mounted, else compute.
+    # Why: a builder gets the file; rust-build requires it.
+    # From: Issue #1683 | PR #1912
     sf="$(_ci_secret_file sccache_policy)"
     if [ -s "${sf}" ]; then policy="$(<"${sf}")"; else policy="$(_ci_sccache_policy)" || return 2; fi
     read -r mode chain <<< "${policy}"
     [ "${chain}" != - ] || chain=""
+    _CI_SCCACHE_MODE="${mode}"
     export RUSTC_WRAPPER="${wrapper}" SCCACHE_DIR="${SCCACHE_DIR:-${CI_TMPDIR}/sccache}"
     export SCCACHE_REDIS_KEY_PREFIX="${prefix}"
     sf="$(_ci_secret_file sccache_redis_url)"
@@ -2367,6 +2375,9 @@ _ci_sccache_env() {
     [ "${prc}" -eq 0 ] && return 0
     if [ "${mode}" = required ]; then
         ci_error "[CI-ERROR-CACHE-0008]" "prefix=\"${prefix}\" chain=\"${chain:-local}\" rc=${prc} reason=\"required sccache cache did not start; fail closed\"" "${probe}"
+        unset RUSTC_WRAPPER
+        _ci_sccache_stop
+        unset SCCACHE_SERVER_UDS
         return 2
     fi
     # What: optional: drop redis, then remote, then local.
@@ -2375,6 +2386,7 @@ _ci_sccache_env() {
     while [ -n "${chain}" ]; do
         case "${chain}" in redis,*) next="${chain#redis,}" ;; *) next="" ;; esac
         ci_error "[CI-WARN-CACHE-0003]" "prefix=\"${prefix}\" chain=\"${chain}\" next=\"${next:-local}\" rc=${prc} reason=\"sccache cache level unavailable\"" "${probe}"
+        _ci_sccache_reap "${sock_dir}"
         chain="${next}"
         _ci_sccache_backend "${chain}" "${url}" "${mode}"
         step=$(( step + 1 ))
@@ -2385,6 +2397,8 @@ _ci_sccache_env() {
     done
     ci_error "[CI-WARN-CACHE-0004]" "prefix=\"${prefix}\" rc=${prc} reason=\"sccache unavailable; direct rustc\"" "${probe}"
     unset RUSTC_WRAPPER
+    _ci_sccache_stop
+    unset SCCACHE_SERVER_UDS
 }
 
 # What: args of the docker:// GHA runtime export step.
@@ -2425,9 +2439,12 @@ _ci_sccache_reap() {
     local dir="$1" p env_s out
     for p in /proc/[0-9]*; do
         [ -r "${p}/environ" ] && [ "$(cat "${p}/comm" 2>&1)" = sccache ] || continue
-        env_s="$(tr '\0' '\n' < "${p}/environ")" || continue
+        # What: a pid gone before read or kill is skipped.
+        # Why: a stopped server exits while the scan runs.
+        # From: Issue #1683 | PR #1912
+        env_s="$( { tr '\0' '\n' < "${p}/environ"; } 2>/dev/null)" || continue
         [[ $'\n'"${env_s}" == *$'\n'"SCCACHE_SERVER_UDS=${dir}/"* ]] || continue
-        out="$(kill "${p#/proc/}" 2>&1)" || ci_error "[CI-WARN-CACHE-0006]" "pid=${p#/proc/} reason=\"sccache server kill failed\"" "${out}"
+        out="$(kill "${p#/proc/}" 2>&1)" || [ ! -e "${p}" ] || ci_error "[CI-WARN-CACHE-0006]" "pid=${p#/proc/} reason=\"sccache server kill failed\"" "${out}"
     done
 }
 
@@ -2925,12 +2942,18 @@ _ci_apk_step() {
     return 2
 }
 
-# What: rust-build cleanup state; globals, not locals.
-# Why: an EXIT trap runs after locals are gone.
-# From: Issue #1683 | PR #1858
+# What: rust-build state; globals, not locals.
+# Why: the EXIT trap and the _ci_rb_* steps share it.
+# From: Issue #1683 | PR #1912
 _CI_RB_DISTCC=0
+_CI_RB_CCACHE=0
 _CI_RB_CA=0
 _CI_RB_CA_FILE=/usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt
+_CI_RB_ACC=""
+_CI_RB_REMOTE_ID=""
+_CI_RB_PAIRS=""
+_CI_RB_PATH=""
+declare -gA _CI_RB_DRIVER_PATH=()
 
 # What: stop the distcc pump if rust-build started it.
 # Why: a failed stop leaves a pump; raw output shown.
@@ -2944,14 +2967,17 @@ _ci_rust_stop_pump() {
     return 1
 }
 
-# What: EXIT trap: stop pump, drop proxy CA, keep status.
-# Why: the proxy CA must not outlive the build step.
-# From: Issue #1683 | PR #1858
+# What: EXIT trap: stop pump and sccache, drop CA, acc.
+# Why: no proxy CA, server or temp dir outlives the step.
+# From: Issue #1683 | PR #1912
 _ci_rust_build_cleanup() {
     local status=$?
     local out
     local failed=0
     if ! _ci_rust_stop_pump; then
+        failed=1
+    fi
+    if ! _ci_sccache_stop; then
         failed=1
     fi
     if [ "${_CI_RB_CA}" = 1 ]; then
@@ -2961,6 +2987,13 @@ _ci_rust_build_cleanup() {
             ci_error "[CI-ERROR-RUSTBUILD-0008]" "reason=\"proxy CA not removed from the trust store\"" "${out}"
             failed=1
         fi
+    fi
+    if [ -n "${_CI_RB_ACC}" ]; then
+        if ! out="$(rm -rf -- "${_CI_RB_ACC}" 2>&1)"; then
+            ci_error "[CI-ERROR-RUSTBUILD-0051]" "dir=\"${_CI_RB_ACC}\" reason=\"rust-build temp dir not removed\"" "${out}"
+            failed=1
+        fi
+        _CI_RB_ACC=""
     fi
     if [ "${failed}" -eq 0 ]; then
         return 0
@@ -2976,23 +3009,33 @@ _ci_rust_build_cleanup() {
 
 # What: cargo build; drop one accelerator per outage.
 # Why: a real build error fails at once, never degrades.
-# From: Issue #1683 | PR #1858
+# From: Issue #1683 | PR #1912
 _ci_rust_cargo_build() {
     local crates="$1" musl_target="$2" cargo_jobs="$3" crate
-    local cargo_log cargo_status_file cargo_status degraded=0
-    local -a layers=() picks=()
+    local cargo_log cargo_status degraded=0
+    local -a layers=() picks=() pst=()
     for crate in ${crates}; do picks+=(-p "${crate}"); done
-    # What: active layers from rust-build, dropped in order.
-    # Why: rust-build owns ccache_enabled and the disable_*.
-    [ "${ccache_enabled:-0}" = "1" ] && layers+=(ccache)
-    [ "${_CI_RB_DISTCC}" = "1" ] && layers+=(distcc)
+    # What: active layers of rust-build, dropped in order.
+    # Why: ccache wraps distcc; sccache is the rustc layer.
+    # From: Issue #1683 | PR #1912
+    [ "${_CI_RB_CCACHE}" = 1 ] && layers+=(ccache)
+    [ "${_CI_RB_DISTCC}" = 1 ] && layers+=(distcc)
     [ -n "${RUSTC_WRAPPER:-}" ] && layers+=(sccache)
     while :; do
         cargo_log="$(_ci_mktemp -p "${CI_TMPDIR}")" || return 2
-        cargo_status_file="$(_ci_mktemp -p "${CI_TMPDIR}")" || { rm -f "${cargo_log}"; return 2; }
-        { set +e; cargo build -j "${cargo_jobs}" --release --locked --target "${musl_target}" "${picks[@]}" 2>&1; echo "$?" >"${cargo_status_file}"; set -e; } | tee "${cargo_log}"
-        cargo_status="$(cat "${cargo_status_file}")"; rm -f "${cargo_status_file}"
-        if [ "${cargo_status}" = "0" ]; then
+        # What: PIPESTATUS splits cargo's rc from tee's rc.
+        # Why: the classifier needs the whole cargo log.
+        # From: Issue #1683 | PR #1912
+        pst=(0 0)
+        cargo build -j "${cargo_jobs}" --release --locked --target "${musl_target}" "${picks[@]}" 2>&1 \
+            | tee "${cargo_log}" || pst=("${PIPESTATUS[@]}")
+        if [ "${pst[1]}" -ne 0 ]; then
+            rm -f "${cargo_log}"
+            ci_log "[CI-ERROR-RUSTBUILD-0052]" "rc=${pst[1]} cargo_rc=${pst[0]} reason=\"cargo log not written by tee\""
+            return 2
+        fi
+        cargo_status="${pst[0]}"
+        if [ "${cargo_status}" -eq 0 ]; then
             rm -f "${cargo_log}"
             [ "${degraded}" -eq 0 ] || ci_log "[CI-INFO-RUSTBUILD-0009]" "reason=\"cargo build ok after an accelerator fallback\""
             return 0
@@ -3008,12 +3051,19 @@ _ci_rust_cargo_build() {
             ci_log "[CI-ERROR-RUSTBUILD-0014]" "rc=${cargo_status} reason=\"accelerator outage output but no accelerator left\""
             return "${cargo_status}"
         fi
+        # What: a required sccache never drops mid-build.
+        # Why: AG-CI-011: required mode fails closed.
+        # From: Issue #1683 | PR #1912
+        if [ "${layers[0]}" = sccache ] && [ "${_CI_SCCACHE_MODE}" = required ]; then
+            ci_log "[CI-ERROR-RUSTBUILD-0053]" "rc=${cargo_status} reason=\"sccache outage under SCCACHE_REDIS_MODE=required; fail closed\""
+            return 2
+        fi
         case "${layers[0]}" in
             ccache)
-                disable_ccache
+                _ci_rb_ccache_off
                 ci_log "[CI-WARN-RUSTBUILD-0011]" "reason=\"accelerator outage; retry without ccache\"" ;;
             distcc)
-                disable_distcc || return 2
+                _ci_rb_distcc_off || return 2
                 ci_log "[CI-WARN-RUSTBUILD-0012]" "reason=\"accelerator outage; retry without distcc\"" ;;
             sccache)
                 unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX
@@ -3024,8 +3074,8 @@ _ci_rust_cargo_build() {
 }
 
 # What: Print the distcc wrapper for paths and drivers.
-# Why: one generator; ci.bats runs it on fixture paths.
-# From: Issue #1533 | PR #1858
+# Why: one generator for the wrapper rust-build installs.
+# From: Issue #1533 | PR #1912
 _ci_rust_distcc_wrapper() {
     local d
     if [ "$#" -lt 4 ]; then
@@ -3060,7 +3110,21 @@ _ci_rust_distcc_wrapper() {
     printf '%s\n' \
       '    fi' \
       '    ;;' \
-      'esac' \
+      'esac'
+    # What: the wrapper drops its own dir from PATH.
+    # Why: distcc's local cc -E must not find the wrapper.
+    # From: Issue #1683 | PR #1912
+    printf '%s\n' \
+      'trimmed_path=""' \
+      'set -f' \
+      'old_ifs="$IFS"; IFS=:' \
+      'for path_dir in $PATH; do' \
+      '  [ "$path_dir" = "$wrapper_dir" ] || trimmed_path="${trimmed_path:+$trimmed_path:}$path_dir"' \
+      'done' \
+      'IFS="$old_ifs"' \
+      'set +f' \
+      'PATH="$trimmed_path"; export PATH'
+    printf '%s\n' \
       'normalize_argument() {' \
       '  arg="$1"' \
       '  case "$arg" in' \
@@ -3147,15 +3211,235 @@ _ci_rust_member_stubs() {
     done <<< "${members}"
 }
 
+# What: export each SOT compiler var as its driver name.
+# Why: the masquerade dir on PATH then serves each one.
+# From: Issue #1683 | PR #1858
+_ci_rb_export_drivers() {
+    local q
+    while IFS= read -r q; do export "${q?}"; done <<< "${_CI_RB_PAIRS}"
+}
+
+# What: sccache on the runner's policy and dist config.
+# Why: a running server never rereads SCCACHE_CONF.
+# From: Issue #1683 | PR #1912
+_ci_rb_sccache() {
+    local service="$1" dist
+    unset CARGO_MAKEFLAGS MAKEFLAGS
+    # What: a builder stops without the runner's policy.
+    # Why: the runner decides the chain once per run.
+    # From: Issue #1683 | PR #1912
+    if [ ! -s "$(_ci_secret_file sccache_policy)" ]; then
+        ci_log "[CI-ERROR-RUSTBUILD-0050]" "service=\"${service}\" reason=\"sccache_policy secret missing; the runner decides the chain\""
+        return 2
+    fi
+    dist="$(_ci_secret_file sccache_dist_config)"
+    if [ -s "${dist}" ]; then export SCCACHE_CONF="${dist}"; fi
+    _ci_sccache_env "${service}" "${_CI_RB_ACC}/rustc-wrapper" || return 2
+    if [ -n "${SCCACHE_CONF:-}" ]; then
+        _ci_run "[CI-ERROR-RUSTBUILD-0054]" "reason=\"sccache dist status failed\"" sccache --dist-status || return 2
+    fi
+}
+
+# What: drop distcc: pump off, env unset, PATH restored.
+# Why: the next cargo run compiles C on the local host.
+# From: Issue #1683 | PR #1912
+_ci_rb_distcc_off() {
+    _ci_rust_stop_pump || return 1
+    unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_HOSTS_NO_PUMP DISTCC_FALLBACK INCLUDE_SERVER_PORT INCLUDE_SERVER_PID "${!_CI_RB_DRIVER_PATH[@]}"
+    PATH="${_CI_RB_PATH}"; export PATH
+}
+
+# What: write the farm compiler identity of a probe .o.
+# Why: ccache content-check misses a remote toolchain bump.
+# From: Issue #1683 | PR #1912
+_ci_rb_remote_toolchain_id() {
+    local section
+    rm -f "${_CI_RB_REMOTE_ID}"
+    if command -v readelf >/dev/null 2>&1; then
+        if section="$(_ci_capture 0 readelf -p .comment "$1")"; then
+            sed -n 's/^ *\[[^]]*\] *//p' <<<"${section}" > "${_CI_RB_REMOTE_ID}"
+        fi
+    fi
+}
+
+# What: split pump/non-pump hosts, set up distcc.
+# Why: aws-lc-sys generated headers must bypass pump.
+# From: Issue #1533 | PR #1912
+_ci_rb_distcc() {
+    local hosts_file masq="${_CI_RB_ACC}/masq"
+    hosts_file="$(_ci_secret_file distcc_potential_hosts)"
+    if [ -s "${hosts_file}" ]; then
+        local distcc_probe_dir
+        distcc_probe_dir="$(_ci_mktemp -d -p "${_CI_RB_ACC}")" || return 2
+        DISTCC_POTENTIAL_HOSTS="$(cat "${hosts_file}")"; export DISTCC_POTENTIAL_HOSTS
+        local -a distcc_host_specs; read -ra distcc_host_specs <<<"${DISTCC_POTENTIAL_HOSTS}"
+        local distcc_hosts="" distcc_hosts_with_pump="" distcc_hosts_without_pump="" distcc_host_spec distcc_host_base
+        for distcc_host_spec in "${distcc_host_specs[@]}"; do
+            distcc_host_base="${distcc_host_spec%%,*}"
+            if [ -n "${distcc_host_base}" ]; then distcc_hosts="${distcc_hosts:+${distcc_hosts} }${distcc_host_base}"; fi
+            case "${distcc_host_spec}" in
+                *,cpp*) distcc_hosts_with_pump="${distcc_hosts_with_pump:+${distcc_hosts_with_pump} }${distcc_host_base}" ;;
+                *) distcc_hosts_without_pump="${distcc_hosts_without_pump:+${distcc_hosts_without_pump} }${distcc_host_spec}" ;;
+            esac
+        done
+        if [ -z "${distcc_hosts}" ]; then
+            ci_log "[CI-ERROR-RUSTBUILD-0021]" "reason=\"DISTCC_POTENTIAL_HOSTS has no usable host\""; return 1
+        fi
+        local distcc_pump_hosts="${distcc_hosts_with_pump:-}"
+        distcc_hosts_without_pump="${distcc_hosts_without_pump:-${distcc_hosts}}"
+        ci_log "[CI-INFO-RUSTBUILD-0022]" "hosts=\"${distcc_hosts}\" reason=\"distcc on\""
+        export DISTCC_HOSTS_NO_PUMP="${distcc_hosts_without_pump}"
+        export PATH="${masq}:${PATH}" DISTCC_FALLBACK=0
+        _ci_rb_export_drivers
+        _CI_RB_DISTCC=1
+        if [ -n "${distcc_pump_hosts}" ]; then
+            export DISTCC_POTENTIAL_HOSTS="${distcc_pump_hosts}"
+            unset DISTCC_HOSTS
+            local distcc_pump_env
+            if ! distcc_pump_env="$(pump --startup 2>"${distcc_probe_dir}/distcc-pump.log")"; then
+                ci_error "[CI-WARN-RUSTBUILD-0023]" "reason=\"distcc pump unavailable; local C compiler\"" "$(cat "${distcc_probe_dir}/distcc-pump.log")"
+                _ci_rb_distcc_off; return 0
+            fi
+            eval "${distcc_pump_env}"
+            local -a distcc_hosts_arr; read -ra distcc_hosts_arr <<<"${DISTCC_HOSTS:-}"
+            local distcc_pump_real_hosts="" distcc_host_token
+            for distcc_host_token in "${distcc_hosts_arr[@]}"; do case "${distcc_host_token}" in --*) ;; *) distcc_pump_real_hosts=1 ;; esac; done
+            if [ -z "${distcc_pump_real_hosts}" ]; then unset DISTCC_HOSTS; fi
+            PATH="${masq}:${PATH}"
+            export PATH DISTCC_HOSTS_NO_PUMP
+            _ci_rb_export_drivers
+        else
+            export DISTCC_HOSTS="${distcc_hosts}"
+        fi
+        _ci_rb_write "${distcc_probe_dir}/distcc-probe.c" printf '%s\n' 'int main(void) { return 0; }' || return 2
+        if ! cc -c "${distcc_probe_dir}/distcc-probe.c" -o "${distcc_probe_dir}/distcc-probe.o" >"${distcc_probe_dir}/distcc-probe.log" 2>&1; then
+            ci_error "[CI-WARN-RUSTBUILD-0024]" "reason=\"distcc probe failed; local C compiler\"" "$(cat "${distcc_probe_dir}/distcc-probe.log")"
+            _ci_rb_distcc_off; return 0
+        fi
+        _ci_rb_remote_toolchain_id "${distcc_probe_dir}/distcc-probe.o"
+    else
+        ci_log "[CI-INFO-RUSTBUILD-0025]" "reason=\"distcc off; no distcc_potential_hosts secret\""
+    fi
+}
+
+# What: drop ccache: env unset, drivers exported plain.
+# Why: the next cargo run compiles through plain distcc.
+# From: Issue #1683 | PR #1912
+_ci_rb_ccache_off() {
+    _CI_RB_CCACHE=0
+    unset CCACHE_REMOTE_STORAGE CCACHE_DIR CCACHE_COMPILERCHECK CCACHE_PREFIX CCACHE_EXTRAFILES CCACHE_BASEDIR
+    _ci_rb_export_drivers
+}
+
+# What: wrap distcc with ccache (Redis) once distcc is up.
+# Why: content-check + remote id guard a stale toolchain.
+# From: Issue #1683 | PR #1912
+_ci_rb_ccache() {
+    local url_file local_id="${_CI_RB_ACC}/ccache-toolchain-id"
+    url_file="$(_ci_secret_file ccache_redis_url)"
+    if [ "${_CI_RB_DISTCC}" = "1" ] && [ -s "${url_file}" ]; then
+        if [ ! -s "${_CI_RB_REMOTE_ID}" ]; then
+            ci_log "[CI-INFO-RUSTBUILD-0026]" "reason=\"ccache off; no remote distcc toolchain identity\""; return 0
+        fi
+        local ccache_probe_dir
+        ccache_probe_dir="$(_ci_mktemp -d -p "${_CI_RB_ACC}")" || return 2
+        ci_log "[CI-INFO-RUSTBUILD-0027]" "reason=\"ccache on over distcc with redis storage\""
+        local ccache_redis_endpoint
+        ccache_redis_endpoint="$(cat "${url_file}")"
+        case "${ccache_redis_endpoint}" in
+            redis://*|redis+unix:*) ;;
+            *) ccache_redis_endpoint="redis://${ccache_redis_endpoint}" ;;
+        esac
+        export CCACHE_REMOTE_STORAGE="${ccache_redis_endpoint}"
+        export CCACHE_DIR="${_CI_RB_ACC}/ccache"
+        export CCACHE_PREFIX=distcc
+        export CCACHE_COMPILERCHECK=content
+        _ci_rb_write "${local_id}" printf '%s' "${BUILD_TOOLS_IMAGE:-}" || return 2
+        export CCACHE_EXTRAFILES="${local_id}:${_CI_RB_REMOTE_ID}"
+        export CCACHE_BASEDIR="${ccache_probe_dir}"
+        local k
+        for k in "${!_CI_RB_DRIVER_PATH[@]}"; do export "${k}=ccache ${_CI_RB_DRIVER_PATH[${k}]}"; done
+        _CI_RB_CCACHE=1
+        _ci_rb_write "${ccache_probe_dir}/ccache-probe.c" printf '%s\n' 'int main(void) { return 0; }' || return 2
+        # What: the probe compiles and counts in its dir.
+        # Why: keep real cache clean; its stats live there.
+        # From: Issue #1683 | PR #1912
+        local ccache_probe_cache_dir="${ccache_probe_dir}/probe-cache"
+        _ci_run "[CI-ERROR-RUSTBUILD-0065]" "dir=\"${ccache_probe_cache_dir}\" reason=\"ccache probe dir not created\"" mkdir -p "${ccache_probe_cache_dir}" || return 2
+        if ! ( cd "${ccache_probe_dir}" && CCACHE_DIR="${ccache_probe_cache_dir}" ccache "${_CI_RB_DRIVER_PATH[${_CI_RB_PAIRS%%=*}]}" -c ccache-probe.c -o ccache-probe.o ) >"${ccache_probe_dir}/ccache-probe.log" 2>&1; then
+            ci_error "[CI-WARN-RUSTBUILD-0028]" "reason=\"ccache probe failed; plain distcc\"" "$(cat "${ccache_probe_dir}/ccache-probe.log")"
+            _ci_rb_ccache_off; return 0
+        fi
+        local stats stat_err stat_ok
+        stats="$(CCACHE_DIR="${ccache_probe_cache_dir}" _ci_run "[CI-ERROR-RUSTBUILD-0057]" "reason=\"ccache probe stats not readable\"" ccache --print-stats)" || return 2
+        stat_err="$(_ci_capture 1 grep -E '^remote_storage_error[[:space:]]+[1-9]' <<< "${stats}")" || return 2
+        stat_ok="$(_ci_capture 1 grep -E '^remote_storage_(write|hit)[[:space:]]+[1-9]' <<< "${stats}")" || return 2
+        if [ -n "${stat_err}" ] || [ -z "${stat_ok}" ]; then
+            ci_error "[CI-WARN-RUSTBUILD-0029]" "reason=\"ccache redis round trip failed; plain distcc\"" "${stats}"
+            _ci_rb_ccache_off; return 0
+        fi
+    else
+        if [ "${_CI_RB_DISTCC}" != "1" ]; then
+            ci_log "[CI-INFO-RUSTBUILD-0030]" "reason=\"ccache off; distcc off\""
+        else
+            ci_log "[CI-INFO-RUSTBUILD-0031]" "reason=\"ccache off; no ccache_redis_url secret\""
+        fi
+    fi
+}
+
+# What: export release LTO/codegen vars, fail closed.
+# Why: no defaults; owner is PROJECT_CARGO_*.
+# From: Issue #1683 | PR #1858
+_ci_rb_cargo_profile() {
+    local lto="${PROJECT_CARGO_LTO:-}" cgu="${PROJECT_CARGO_CODEGENUNIT:-}"
+    [ -n "${lto}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0032]" "reason=\"PROJECT_CARGO_LTO missing; it has no default\""; return 1; }
+    case "${lto}" in off|thin|fat|true|false) ;; *) ci_log "[CI-ERROR-RUSTBUILD-0033]" "got=\"${lto}\" reason=\"PROJECT_CARGO_LTO not off/thin/fat/true/false\""; return 1;; esac
+    [ -n "${cgu}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0034]" "reason=\"PROJECT_CARGO_CODEGENUNIT missing; it has no default\""; return 1; }
+    case "${cgu}" in *[!0-9]*) ci_log "[CI-ERROR-RUSTBUILD-0035]" "got=\"${cgu}\" reason=\"PROJECT_CARGO_CODEGENUNIT not a number\""; return 1;; esac
+    [ "${cgu}" -gt 0 ] || { ci_log "[CI-ERROR-RUSTBUILD-0036]" "got=\"${cgu}\" reason=\"PROJECT_CARGO_CODEGENUNIT must be above zero\""; return 1; }
+    export CARGO_PROFILE_RELEASE_LTO="${lto}" CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${cgu}"
+    ci_log "[CI-INFO-RUSTBUILD-0037]" "lto=\"${lto}\" codegen_units=${cgu} reason=\"release profile\""
+}
+
+# What: CARGO_BUILD_JOBS or nproc-2 floored at 4.
+# Why: build parallelism owner (AG-CI-006).
+# From: Issue #1683 | PR #1858
+_ci_rb_cargo_jobs() {
+    local jobs="${CARGO_BUILD_JOBS:-}" jobs_source cores
+    if [ -z "${jobs}" ]; then
+        cores="$(_ci_capture 0 nproc)" || return 1
+        jobs=$((cores - 2)); [ "${jobs}" -lt 4 ] && jobs=4
+        jobs_source="auto-detected from ${cores} core(s)"
+    else
+        jobs_source="explicit CARGO_BUILD_JOBS"
+    fi
+    case "${jobs}" in ''|*[!0-9]*) ci_log "[CI-ERROR-RUSTBUILD-0038]" "got=\"${jobs}\" reason=\"CARGO_BUILD_JOBS not a number\""; return 1;; esac
+    [ "${jobs}" -gt 0 ] || { ci_log "[CI-ERROR-RUSTBUILD-0039]" "got=\"${jobs}\" reason=\"CARGO_BUILD_JOBS must be above zero\""; return 1; }
+    ci_log "[CI-INFO-RUSTBUILD-0040]" "jobs=${jobs} source=\"${jobs_source}\" reason=\"cargo jobs\""
+    printf '%s\n' "${jobs}"
+}
+
+# What: write one rust-build helper file from a command.
+# Why: a lost write must fail with the file, not silently.
+# From: Issue #1683 | PR #1912
+_ci_rb_write() {
+    local file="$1"
+    shift
+    "$@" > "${file}" && return 0
+    ci_log "[CI-ERROR-RUSTBUILD-0055]" "file=\"${file}\" cmd=\"$1\" reason=\"rust-build helper file not written\""
+    return 2
+}
+
 # What: In-image rust builder; sccache, opt-in distcc.
-# Why: one owner for dns/ui/watchdog builders (was 3x).
-# From: Issue #1683
+# Why: one owner for every rust builder stage.
+# From: Issue #1683 | PR #1912
 ci_cmd_rust_build() {
     local service="${1:-}" crates="${2:-}" mode="${3:-build}" crate
     [ -n "${service}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0001]" "reason=\"service arg required\""; return 2; }
-    [ -n "${crates}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0002]" "reason=\"crate arg required\""; return 2; }
+    [ -n "${crates}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0002]" "reason=\"crates arg required\""; return 2; }
     # What: mode build (real+cp) or deps (pre-cache, no cp).
     # Why: services with stub-src dep-cache stage call deps.
+    # From: Issue #1683 | PR #1858
     case "${mode}" in build|deps) ;; *) ci_log "[CI-ERROR-RUSTBUILD-0005]" "mode=\"${mode}\" reason=\"mode must be build or deps\""; return 2 ;; esac
     local musl_target="${MUSL_TARGET:-}"
     [ -n "${musl_target}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0003]" "reason=\"MUSL_TARGET env required\""; return 2; }
@@ -3165,246 +3449,63 @@ ci_cmd_rust_build() {
     local rustc_info
     rustc_info="$(rustc -vV)" || { ci_log "[CI-ERROR-RUSTBUILD-0004]" "reason=\"rustc -vV failed in build-tools\""; return 2; }
     grep -qx "host: ${musl_target}" <<<"${rustc_info}" || { ci_error "[CI-ERROR-RUSTBUILD-0006]" "target=\"${musl_target}\" reason=\"MUSL_TARGET is not the build-tools rustc host\"" "${rustc_info}"; return 2; }
-    local key_prefix="lancache-${service}" ccache_dir="${CI_TMPDIR}/ccache-${service}"
-    # What: distcc bypasses pump for aws-lc headers.
-    # Why: pump can't see generated headers; would fail.
-    # From: Issue #1533
-    local acc masq pairs p distcc_bin sccache_bin
+    local masq p distcc_bin sccache_bin
     local -a drivers=()
-    local -A driver_path=()
-    acc="$(_ci_mktemp -d -p "${CI_TMPDIR}")" || return 2
-    masq="${acc}/masq"
-    mkdir -p "${masq}"
-    pairs="$(_ci_build_tools_compilers)" || return 2
+    _CI_RB_DISTCC=0 _CI_RB_CCACHE=0 _CI_RB_CA=0 _CI_RB_PATH="${PATH}"
+    _CI_RB_DRIVER_PATH=()
+    trap _ci_rust_build_cleanup EXIT
+    _CI_RB_ACC="$(_ci_mktemp -d -p "${CI_TMPDIR}")" || return 2
+    masq="${_CI_RB_ACC}/masq" _CI_RB_REMOTE_ID="${_CI_RB_ACC}/ccache-remote-toolchain-id"
+    _ci_run "[CI-ERROR-RUSTBUILD-0056]" "dir=\"${masq}\" reason=\"masquerade dir not created\"" mkdir -p "${masq}" || return 2
+    _CI_RB_PAIRS="$(_ci_build_tools_compilers)" || return 2
     # What: resolve the real tools before any masquerade.
     # Why: wrapper and ccache call the real compiler paths.
     # From: Issue #1683 | PR #1858
     while IFS= read -r p; do
-        if ! driver_path["${p%%=*}"]="$(command -v "${p#*=}")"; then
+        if ! _CI_RB_DRIVER_PATH["${p%%=*}"]="$(command -v "${p#*=}")"; then
             ci_error "[CI-ERROR-RUSTBUILD-0046]" "driver=\"${p#*=}\" reason=\"compiler driver not on PATH\"" "PATH=${PATH}"
             return 2
         fi
-        drivers+=("${p#*=}=${driver_path[${p%%=*}]}")
-    done <<< "${pairs}"
+        drivers+=("${p#*=}=${_CI_RB_DRIVER_PATH[${p%%=*}]}")
+    done <<< "${_CI_RB_PAIRS}"
     distcc_bin="$(command -v distcc)" || { ci_error "[CI-ERROR-RUSTBUILD-0047]" "reason=\"distcc not on PATH\"" "PATH=${PATH}"; return 2; }
     sccache_bin="$(command -v sccache)" || { ci_error "[CI-ERROR-RUSTBUILD-0048]" "reason=\"sccache not on PATH\"" "PATH=${PATH}"; return 2; }
-    cp "${distcc_bin}" "${acc}/distcc-real"
-    _ci_rust_distcc_wrapper "${acc}/distcc-real" "${acc}/distcc-wrapper" "${masq}" "${drivers[@]}" > "${acc}/distcc-wrapper" || return 2
-    chmod +x "${acc}/distcc-wrapper"
-    for p in "${drivers[@]}"; do ln -sf "${acc}/distcc-wrapper" "${masq}/${p%%=*}"; done
-    ln -sf "${acc}/distcc-wrapper" "${distcc_bin}"
+    # What: masq links each driver and distcc to the wrapper
+    # Why: masq is on PATH only while distcc is on.
+    # From: Issue #1533 | PR #1912
+    _ci_rb_write "${_CI_RB_ACC}/distcc-wrapper" _ci_rust_distcc_wrapper "${distcc_bin}" "${_CI_RB_ACC}/distcc-wrapper" "${masq}" "${drivers[@]}" || return 2
+    _ci_run "[CI-ERROR-RUSTBUILD-0061]" "reason=\"distcc wrapper not made executable\"" chmod +x "${_CI_RB_ACC}/distcc-wrapper" || return 2
+    for p in "${drivers[@]%%=*}" distcc; do
+        _ci_run "[CI-ERROR-RUSTBUILD-0062]" "link=\"${masq}/${p}\" reason=\"masquerade link not created\"" ln -sf "${_CI_RB_ACC}/distcc-wrapper" "${masq}/${p}" || return 2
+    done
     # What: rustc wrapper: distcc passthrough, else sccache.
-    # Why: distcc bypasses sccache masquerade wrapping.
-    printf '%s\n' '#!/bin/sh' 'case "${1:-}" in' '  distcc|*/distcc) exec "$@" ;;' "  *) exec \"${sccache_bin}\" \"\$@\" ;;" 'esac' > "${acc}/rustc-wrapper"
-    chmod +x "${acc}/rustc-wrapper"
-    local ccache_enabled=0 original_path="${PATH}"
-    _CI_RB_DISTCC=0
-    _CI_RB_CA=0
-    trap _ci_rust_build_cleanup EXIT
+    # Why: a distcc call must never pass through sccache.
+    # From: Issue #1683 | PR #1912
+    _ci_rb_write "${_CI_RB_ACC}/rustc-wrapper" printf '%s\n' '#!/bin/sh' 'case "${1:-}" in' '  distcc|*/distcc) exec "$@" ;;' "  *) exec \"${sccache_bin}\" \"\$@\" ;;" 'esac' || return 2
+    _ci_run "[CI-ERROR-RUSTBUILD-0063]" "reason=\"rustc wrapper not made executable\"" chmod +x "${_CI_RB_ACC}/rustc-wrapper" || return 2
     # What: trust proxy CA for cargo's crates.io fetch.
     # Why: cleanup trap removes it; never persisted.
+    # From: Issue #1683 | PR #1912
     local ca_src
     ca_src="$(_ci_secret_file project_selfhosted_proxy_ca)"
     if [ -s "${ca_src}" ]; then
-        cp "${ca_src}" "${_CI_RB_CA_FILE}"
-        update-ca-certificates >/dev/null
+        _ci_run "[CI-ERROR-RUSTBUILD-0064]" "reason=\"proxy CA not copied to the trust dir\"" cp "${ca_src}" "${_CI_RB_CA_FILE}" || return 2
         _CI_RB_CA=1
+        _ci_run "[CI-ERROR-RUSTBUILD-0058]" "reason=\"proxy CA not added to the trust store\"" update-ca-certificates || return 2
     fi
-    # What: export each SOT compiler var as its driver name.
-    # Why: the masquerade dir on PATH then serves each one.
-    # From: Issue #1683 | PR #1858
-    export_drivers() {
-        local q
-        while IFS= read -r q; do export "${q?}"; done <<< "${pairs}"
-    }
-    configure_sccache() {
-        unset CARGO_MAKEFLAGS MAKEFLAGS
-        # What: dist config before the server starts.
-        # Why: a running server never rereads SCCACHE_CONF.
-        # From: Issue #1683 | PR #1858
-        local dist
-        dist="$(_ci_secret_file sccache_dist_config)"
-        if [ -s "${dist}" ]; then export SCCACHE_CONF="${dist}"; fi
-        _ci_sccache_env "${key_prefix}" "${acc}/rustc-wrapper" || return 2
-        if [ -n "${SCCACHE_CONF:-}" ]; then sccache --dist-status; fi
-    }
-    disable_distcc() {
-        _ci_rust_stop_pump || return 1
-        unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_HOSTS_NO_PUMP DISTCC_FALLBACK INCLUDE_SERVER_PORT INCLUDE_SERVER_PID "${!driver_path[@]}"
-        PATH="${original_path}"; export PATH
-    }
-    # What: read farm host's real compiler identity.
-    # Why: ccache content-check misses remote bump.
-    extract_remote_toolchain_id() {
-        rm -f "${CI_TMPDIR}/ccache-remote-toolchain-id"
-        if command -v readelf >/dev/null 2>&1; then
-            local readelf_comment_section
-            if readelf_comment_section="$(_ci_capture 0 readelf -p .comment "$1")"; then
-                sed -n 's/^ *\[[^]]*\] *//p' <<<"${readelf_comment_section}" > "${CI_TMPDIR}/ccache-remote-toolchain-id"
-            fi
-        fi
-    }
-    # What: split pump/non-pump hosts, set up distcc.
-    # Why: aws-lc-sys generated headers must bypass pump.
-    # From: Issue #1533
-    configure_distcc() {
-        local hosts_file
-        hosts_file="$(_ci_secret_file distcc_potential_hosts)"
-        if [ -s "${hosts_file}" ]; then
-            local distcc_probe_dir
-            distcc_probe_dir="$(_ci_mktemp -d -p "${CI_TMPDIR}")" || return 2
-            DISTCC_POTENTIAL_HOSTS="$(cat "${hosts_file}")"; export DISTCC_POTENTIAL_HOSTS
-            local -a distcc_host_specs; read -ra distcc_host_specs <<<"${DISTCC_POTENTIAL_HOSTS}"
-            local distcc_hosts="" distcc_hosts_with_pump="" distcc_hosts_without_pump="" distcc_host_spec distcc_host_base
-            for distcc_host_spec in "${distcc_host_specs[@]}"; do
-                distcc_host_base="${distcc_host_spec%%,*}"
-                if [ -n "${distcc_host_base}" ]; then distcc_hosts="${distcc_hosts:+${distcc_hosts} }${distcc_host_base}"; fi
-                case "${distcc_host_spec}" in
-                    *,cpp*) distcc_hosts_with_pump="${distcc_hosts_with_pump:+${distcc_hosts_with_pump} }${distcc_host_base}" ;;
-                    *) distcc_hosts_without_pump="${distcc_hosts_without_pump:+${distcc_hosts_without_pump} }${distcc_host_spec}" ;;
-                esac
-            done
-            if [ -z "${distcc_hosts}" ]; then
-                rm -rf "${distcc_probe_dir}"
-                ci_log "[CI-ERROR-RUSTBUILD-0021]" "reason=\"DISTCC_POTENTIAL_HOSTS has no usable host\""; return 1
-            fi
-            local distcc_pump_hosts="${distcc_hosts_with_pump:-}"
-            distcc_hosts_without_pump="${distcc_hosts_without_pump:-${distcc_hosts}}"
-            ci_log "[CI-INFO-RUSTBUILD-0022]" "hosts=\"${distcc_hosts}\" reason=\"distcc on\""
-            export DISTCC_HOSTS_NO_PUMP="${distcc_hosts_without_pump}"
-            export PATH="${masq}:${PATH}" DISTCC_FALLBACK=0
-            export_drivers
-            _CI_RB_DISTCC=1
-            if [ -n "${distcc_pump_hosts}" ]; then
-                export DISTCC_POTENTIAL_HOSTS="${distcc_pump_hosts}"
-                unset DISTCC_HOSTS
-                local distcc_pump_env
-                if ! distcc_pump_env="$(pump --startup 2>"${distcc_probe_dir}/distcc-pump.log")"; then
-                    ci_error "[CI-WARN-RUSTBUILD-0023]" "reason=\"distcc pump unavailable; local C compiler\"" "$(cat "${distcc_probe_dir}/distcc-pump.log")"
-                    disable_distcc; rm -rf "${distcc_probe_dir}"; return 0
-                fi
-                eval "${distcc_pump_env}"
-                local -a distcc_hosts_arr; read -ra distcc_hosts_arr <<<"${DISTCC_HOSTS:-}"
-                local distcc_pump_real_hosts="" distcc_host_token
-                for distcc_host_token in "${distcc_hosts_arr[@]}"; do case "${distcc_host_token}" in --*) ;; *) distcc_pump_real_hosts=1 ;; esac; done
-                if [ -z "${distcc_pump_real_hosts}" ]; then unset DISTCC_HOSTS; fi
-                PATH="${masq}:${PATH}"
-                export PATH DISTCC_HOSTS_NO_PUMP
-                export_drivers
-            else
-                export DISTCC_HOSTS="${distcc_hosts}"
-            fi
-            printf '%s\n' 'int main(void) { return 0; }' > "${distcc_probe_dir}/distcc-probe.c"
-            if ! cc -c "${distcc_probe_dir}/distcc-probe.c" -o "${distcc_probe_dir}/distcc-probe.o" >"${distcc_probe_dir}/distcc-probe.log" 2>&1; then
-                ci_error "[CI-WARN-RUSTBUILD-0024]" "reason=\"distcc probe failed; local C compiler\"" "$(cat "${distcc_probe_dir}/distcc-probe.log")"
-                disable_distcc; rm -rf "${distcc_probe_dir}"; return 0
-            fi
-            extract_remote_toolchain_id "${distcc_probe_dir}/distcc-probe.o"
-            rm -rf "${distcc_probe_dir}"
-        else
-            ci_log "[CI-INFO-RUSTBUILD-0025]" "reason=\"distcc off; no distcc_potential_hosts secret\""
-        fi
-    }
-    disable_ccache() {
-        ccache_enabled=0
-        unset CCACHE_REMOTE_STORAGE CCACHE_DIR CCACHE_COMPILERCHECK CCACHE_PREFIX CCACHE_EXTRAFILES CCACHE_BASEDIR
-        rm -f "${CI_TMPDIR}/ccache-toolchain-id" "${CI_TMPDIR}/ccache-remote-toolchain-id"
-        export_drivers
-    }
-    # What: wrap distcc with ccache (Redis) once distcc up.
-    # Why: content-check + remote-id guard stale toolchain.
-    configure_ccache() {
-        local url_file
-        url_file="$(_ci_secret_file ccache_redis_url)"
-        if [ "${_CI_RB_DISTCC}" = "1" ] && [ -s "${url_file}" ]; then
-            if [ ! -s "${CI_TMPDIR}/ccache-remote-toolchain-id" ]; then
-                ci_log "[CI-INFO-RUSTBUILD-0026]" "reason=\"ccache off; no remote distcc toolchain identity\""; return 0
-            fi
-            local ccache_probe_dir
-            ccache_probe_dir="$(_ci_mktemp -d -p "${CI_TMPDIR}")" || return 2
-            ci_log "[CI-INFO-RUSTBUILD-0027]" "reason=\"ccache on over distcc with redis storage\""
-            local ccache_redis_endpoint
-            ccache_redis_endpoint="$(cat "${url_file}")"
-            case "${ccache_redis_endpoint}" in
-                redis://*|redis+unix:*) ;;
-                *) ccache_redis_endpoint="redis://${ccache_redis_endpoint}" ;;
-            esac
-            export CCACHE_REMOTE_STORAGE="${ccache_redis_endpoint}"
-            export CCACHE_DIR="${ccache_dir}"
-            export CCACHE_PREFIX=distcc
-            export CCACHE_COMPILERCHECK=content
-            printf '%s' "${BUILD_TOOLS_IMAGE:-}" > "${CI_TMPDIR}/ccache-toolchain-id"
-            export CCACHE_EXTRAFILES="${CI_TMPDIR}/ccache-toolchain-id:${CI_TMPDIR}/ccache-remote-toolchain-id"
-            export CCACHE_BASEDIR="${ccache_probe_dir}"
-            local k
-            for k in "${!driver_path[@]}"; do export "${k}=ccache ${driver_path[${k}]}"; done
-            ccache_enabled=1
-            printf '%s\n' 'int main(void) { return 0; }' > "${ccache_probe_dir}/ccache-probe.c"
-            # What: probe compiles in isolated ccache dir.
-            # Why: keep real cache clean; word-split-safe.
-            local ccache_probe_cache_dir="${ccache_probe_dir}/probe-cache"
-            mkdir -p "${ccache_probe_cache_dir}"
-            if ! ( cd "${ccache_probe_dir}" && CCACHE_DIR="${ccache_probe_cache_dir}" ccache "${driver_path[${pairs%%=*}]}" -c ccache-probe.c -o ccache-probe.o ) >"${ccache_probe_dir}/ccache-probe.log" 2>&1; then
-                ci_error "[CI-WARN-RUSTBUILD-0028]" "reason=\"ccache probe failed; plain distcc\"" "$(cat "${ccache_probe_dir}/ccache-probe.log")"
-                disable_ccache; rm -rf "${ccache_probe_dir}"; return 0
-            fi
-            local ccache_probe_stats="${ccache_probe_dir}/ccache-probe-stats.log"
-            ccache --print-stats > "${ccache_probe_stats}"
-            local stat_err stat_ok
-            stat_err="$(_ci_capture 1 grep -E '^remote_storage_error[[:space:]]+[1-9]' "${ccache_probe_stats}")" || return 2
-            stat_ok="$(_ci_capture 1 grep -E '^remote_storage_(write|hit)[[:space:]]+[1-9]' "${ccache_probe_stats}")" || return 2
-            if [ -n "${stat_err}" ] || [ -z "${stat_ok}" ]; then
-                ci_error "[CI-WARN-RUSTBUILD-0029]" "reason=\"ccache redis round trip failed; plain distcc\"" "$(cat "${ccache_probe_stats}")"
-                disable_ccache; rm -rf "${ccache_probe_dir}"; return 0
-            fi
-            rm -rf "${ccache_probe_dir}"
-        else
-            if [ "${_CI_RB_DISTCC}" != "1" ]; then
-                ci_log "[CI-INFO-RUSTBUILD-0030]" "reason=\"ccache off; distcc off\""
-            else
-                ci_log "[CI-INFO-RUSTBUILD-0031]" "reason=\"ccache off; no ccache_redis_url secret\""
-            fi
-        fi
-    }
-    # What: export release LTO/codegen vars, fail closed.
-    # Why: no defaults; owner is PROJECT_CARGO_*.
-    resolve_cargo_profile_overrides() {
-        local lto="${PROJECT_CARGO_LTO:-}" cgu="${PROJECT_CARGO_CODEGENUNIT:-}"
-        [ -n "${lto}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0032]" "reason=\"PROJECT_CARGO_LTO missing; it has no default\""; return 1; }
-        case "${lto}" in off|thin|fat|true|false) ;; *) ci_log "[CI-ERROR-RUSTBUILD-0033]" "got=\"${lto}\" reason=\"PROJECT_CARGO_LTO not off/thin/fat/true/false\""; return 1;; esac
-        [ -n "${cgu}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0034]" "reason=\"PROJECT_CARGO_CODEGENUNIT missing; it has no default\""; return 1; }
-        case "${cgu}" in *[!0-9]*) ci_log "[CI-ERROR-RUSTBUILD-0035]" "got=\"${cgu}\" reason=\"PROJECT_CARGO_CODEGENUNIT not a number\""; return 1;; esac
-        [ "${cgu}" -gt 0 ] || { ci_log "[CI-ERROR-RUSTBUILD-0036]" "got=\"${cgu}\" reason=\"PROJECT_CARGO_CODEGENUNIT must be above zero\""; return 1; }
-        export CARGO_PROFILE_RELEASE_LTO="${lto}" CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${cgu}"
-        ci_log "[CI-INFO-RUSTBUILD-0037]" "lto=\"${lto}\" codegen_units=${cgu} reason=\"release profile\""
-    }
-    # What: CARGO_BUILD_JOBS or nproc-2 floored at 4.
-    # Why: build parallelism owner (AG-CI-006).
-    resolve_cargo_jobs() {
-        local jobs="${CARGO_BUILD_JOBS:-}" jobs_source cores
-        if [ -z "${jobs}" ]; then
-            cores="$(_ci_capture 0 nproc)" || return 1
-            jobs=$((cores - 2)); [ "${jobs}" -lt 4 ] && jobs=4
-            jobs_source="auto-detected from ${cores} core(s)"
-        else
-            jobs_source="explicit CARGO_BUILD_JOBS"
-        fi
-        case "${jobs}" in ''|*[!0-9]*) ci_log "[CI-ERROR-RUSTBUILD-0038]" "got=\"${jobs}\" reason=\"CARGO_BUILD_JOBS not a number\""; return 1;; esac
-        [ "${jobs}" -gt 0 ] || { ci_log "[CI-ERROR-RUSTBUILD-0039]" "got=\"${jobs}\" reason=\"CARGO_BUILD_JOBS must be above zero\""; return 1; }
-        ci_log "[CI-INFO-RUSTBUILD-0040]" "jobs=${jobs} source=\"${jobs_source}\" reason=\"cargo jobs\""
-        printf '%s\n' "${jobs}"
-    }
-    configure_sccache
-    configure_distcc
-    configure_ccache
-    resolve_cargo_profile_overrides
+    _ci_rb_sccache "${service}"
+    _ci_rb_distcc
+    _ci_rb_ccache
+    _ci_rb_cargo_profile || return 2
     local cargo_jobs
-    cargo_jobs="$(resolve_cargo_jobs)"
+    cargo_jobs="$(_ci_rb_cargo_jobs)" || return 2
     # What: drop each crate's stale artifact first.
     # Why: dep pre-cache stub rlib outdates COPYed src.
+    # From: Issue #1683 | PR #1858
     if [ "${mode}" = "build" ]; then
         for crate in ${crates}; do
-            cargo clean -p "${crate}" --release --target "${musl_target}"
+            _ci_run "[CI-ERROR-RUSTBUILD-0059]" "crate=\"${crate}\" reason=\"cargo clean failed\"" \
+                cargo clean -p "${crate}" --release --target "${musl_target}" || return 2
         done
     fi
     local stubs s
@@ -3417,25 +3518,25 @@ ci_cmd_rust_build() {
         [ -z "${s}" ] || _ci_run "[CI-ERROR-RUSTBUILD-0044]" "file=\"${s}\" reason=\"stub not removed\"" rm -f -- "${s}" \
             > /dev/null || return 2
     done <<< "${stubs}"
-    # What: dump ccache stats; mid-build Redis error OK.
+    # What: show ccache stats; a Redis error only warns.
     # Why: binary correct; only cache reuse degraded.
-    if [ "${ccache_enabled:-0}" = "1" ]; then
-        ccache -s
-        local ccache_final_stats
-        ccache_final_stats="$(_ci_mktemp -p "${CI_TMPDIR}")" || return 2
-        ccache --print-stats > "${ccache_final_stats}"
-        local final_err
-        final_err="$(_ci_capture 1 grep -E '^remote_storage_error[[:space:]]+[1-9]' "${ccache_final_stats}")" || return 2
+    # From: Issue #1683 | PR #1912
+    if [ "${_CI_RB_CCACHE}" = 1 ]; then
+        local stats final_err
+        stats="$(_ci_run "[CI-ERROR-RUSTBUILD-0066]" "reason=\"ccache build stats not readable\"" ccache --print-stats)" || return 2
+        printf '%s\n' "${stats}"
+        final_err="$(_ci_capture 1 grep -E '^remote_storage_error[[:space:]]+[1-9]' <<< "${stats}")" || return 2
         if [ -n "${final_err}" ]; then
-            ci_error "[CI-WARN-RUSTBUILD-0041]" "reason=\"ccache redis error during the build; binary unaffected\"" "$(cat "${ccache_final_stats}")"
+            ci_error "[CI-WARN-RUSTBUILD-0041]" "reason=\"ccache redis error during the build; binary unaffected\"" "${stats}"
         fi
-        rm -f "${ccache_final_stats}"
     fi
-    # What: copy built binaries out only for real build.
-    # Why: deps pre-cache pass produces no shippable binary.
+    # What: copy each binary to <crate>-out in the WORKDIR.
+    # Why: the final stage COPYs it; deps builds ship none.
+    # From: Issue #1683 | PR #1912
     if [ "${mode}" = "build" ]; then
         for crate in ${crates}; do
-            cp "target/${musl_target}/release/${crate}" "/build/${crate}-out"
+            _ci_run "[CI-ERROR-RUSTBUILD-0060]" "crate=\"${crate}\" reason=\"built binary not copied out\"" \
+                cp "target/${musl_target}/release/${crate}" "${PWD}/${crate}-out" || return 2
         done
     fi
 }
@@ -3988,23 +4089,23 @@ _ci_test_rust() {
     fi
     # What: workspace-root cargo on the service's crates.
     # Why: build context is no crate; AG-VAL-008 per crate.
-    # From: PR #1858
-    local trc=0 c
+    # From: Issue #1683 | PR #1858
+    local trc=0 c setup_rc=200
     local -a picks=()
     for c in ${ctx}; do picks+=(-p "${c}"); done
     ctx="${ctx//$'\n'/ }"
-    ( _ci_sccache_env "lancache-${service}" || exit 200
+    ( _ci_sccache_env "${service}" || exit "${setup_rc}"
         trap _ci_sccache_stop EXIT
         cd "${CI_REPO_ROOT:-.}" \
             && cargo fmt --check "${picks[@]}" \
             && cargo clippy --locked --all-targets "${picks[@]}" -- -D warnings \
             && cargo test --locked "${picks[@]}" ) || trc=$?
-    # What: 200 = sccache setup error -> rc 2, not FAIL.
+    # What: setup_rc: sccache setup error, rc 2, not FAIL.
     # Why: §72: infra UNKNOWN never reads as a test FAIL.
-    # From: Issue #1683 | PR #1858
+    # From: Issue #1683 | PR #1912
     case "${trc}" in
         0) ;;
-        200) ci_log "[CI-ERROR-TEST-0009]" "service=\"${service}\" crate=\"${ctx}\" reason=\"sccache setup failed (raw above); not a test result\""; return 2 ;;
+        "${setup_rc}") ci_log "[CI-ERROR-TEST-0009]" "service=\"${service}\" crate=\"${ctx}\" reason=\"sccache setup failed (raw above); not a test result\""; return 2 ;;
         *) ci_log "[CI-ERROR-TEST-0010]" "service=\"${service}\" crate=\"${ctx}\" rc=${trc} reason=\"cargo fmt/clippy/test failed (cargo output above)\""; return 1 ;;
     esac
     printf 'service=%s tested=ok\n' "${service}"

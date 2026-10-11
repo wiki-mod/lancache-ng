@@ -639,6 +639,10 @@ ci_variables:
   # Why: AG-CI-004 mode; required fails closed (AG-CI-011).
   # From: Issue #1683 | PR #1858
   SCCACHE_REDIS_MODE: required
+  # What: sccache Redis key prefix; ci.sh adds -<service>.
+  # Why: one owner for the project's shared cache namespace.
+  # From: Issue #1683 | PR #1912
+  CI_CACHE_KEY_PREFIX: lancache-ng
   # What: sccache dist toolchain cache size in bytes.
   # Why: AG-CI-006: no size literal in the dist config.
   # From: Issue #1683 | PR #1858
@@ -771,7 +775,7 @@ file_headers:
 # Why: builders read repo/org vars; no YAML or literal copy.
 # From: Issue #1683 | PR #1858
 build_variables:
-  rust: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT, CI_TOOLCHAIN_COMPILERS]
+  rust: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT, CI_TOOLCHAIN_COMPILERS, CI_CACHE_KEY_PREFIX]
 
 # What: CI variables every ci.sh build stage reads
 # Why: a stage has no SOT; these never key an identity

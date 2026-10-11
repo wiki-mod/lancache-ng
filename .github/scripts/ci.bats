@@ -1007,6 +1007,55 @@ CASES
     _expect undeclared 2 "[CI-ERROR-RUSTBUILD-0049] member=\"${pick}\"" || return 1
 }
 
+# What: the distcc wrapper runs distcc without its own dir
+# Why: distcc's local cc -E found the wrapper and recursed
+# From: Issue #1683 | PR #1912
+@test "rust distcc wrapper: distcc runs without the masq dir on PATH" {
+    local d masq log drv
+    local -a out
+    d="$(_val path)" drv="$(_val name)"
+    masq="${d}/masq" log="${d}/argv"
+    mkdir -p "${masq}" || return 1
+    printf '#!/bin/sh\nprintf "%%s\\n" "$PATH" "$*" > "%s"\n' "${log}" > "${d}/distcc" && chmod +x "${d}/distcc" || return 1
+    _ci_rust_distcc_wrapper "${d}/distcc" "${d}/wrapper" "${masq}" "${drv}=/bin/true" > "${d}/wrapper" \
+        && chmod +x "${d}/wrapper" && ln -s "${d}/wrapper" "${masq}/${drv}" || return 1
+    run env PATH="${masq}:${PATH}" "${drv}" -c x.c
+    [ "${status}" -eq 0 ] || { echo "wrapper: rc ${status}: ${output}"; return 1; }
+    mapfile -t out < "${log}"
+    [[ ":${out[0]}:" != *":${masq}:"* ]] || { echo "masq dir still on PATH: ${out[0]}"; return 1; }
+    [ "${out[1]}" = "${drv} -c x.c" ] || { echo "argv: ${out[1]}"; return 1; }
+}
+
+# What: the cargo cascade per outcome, under ci.sh options
+# Why: AG-VAL-030: PIPESTATUS and fail-closed need a run
+# From: Issue #1683 | PR #1912
+@test "rust cargo cascade: rc, fallback and required sccache per row" {
+    local d case mode plan tee_rc rc want calls n
+    d="$(_val path)"
+    mkdir -p "${d}/bin" || return 1
+    printf '%s\n' '#!/bin/sh' 'n=$(( $(cat "$CNT" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$CNT"' \
+        'step=$(printf "%s" "$PLAN" | cut -d, -f"$n")' 'printf "%s\n" "${step#*:}"; exit "${step%%:*}"' > "${d}/bin/cargo" \
+        && chmod +x "${d}/bin/cargo" || return 1
+    while IFS='|' read -r case mode plan tee_rc rc want calls; do
+        rm -f "${d}/cnt" "${d}/bin/tee"
+        if [ "${tee_rc}" != 0 ]; then
+            printf '#!/bin/sh\ncat > /dev/null\nexit %s\n' "${tee_rc}" > "${d}/bin/tee" && chmod +x "${d}/bin/tee" || return 1
+        fi
+        run env PATH="${d}/bin:${PATH}" CNT="${d}/cnt" PLAN="${plan}" bash -c \
+            'source "$1"; CI_TMPDIR="$2" _CI_SCCACHE_MODE="$3" RUSTC_WRAPPER=sccache; _ci_rust_cargo_build c t 1; echo "wrapper=${RUSTC_WRAPPER:-unset}"' \
+            _ "${CI_SH}" "${d}" "${mode}"
+        _expect "${case}" "${rc}" "${want}" || return 1
+        n="$(cat "${d}/cnt")"
+        [ "${n}" = "${calls}" ] || { echo "${case}: cargo ran ${n} times, want ${calls}"; return 1; }
+    done <<ROWS
+ok|required|0:built|0|0|built;wrapper=sccache|1
+real-error|optional|101:error[E0308]: mismatched types|0|101|[CI-ERROR-RUSTBUILD-0010] rc=101|1
+required|required|1:sccache: error: server gone,0:built|0|2|[CI-ERROR-RUSTBUILD-0053] rc=1|1
+optional|optional|1:sccache: error: server gone,0:built|0|0|[CI-WARN-RUSTBUILD-0013];built;[CI-INFO-RUSTBUILD-0009];wrapper=unset|2
+tee-lost|optional|0:built|3|2|[CI-ERROR-RUSTBUILD-0052] rc=3 cargo_rc=0|1
+ROWS
+}
+
 # What: per row: runner env -> proxy env, names, CA bundle.
 # Why: AG-CI-009: self-hosted proxy only, CA job-local.
 # From: Issue #1683 | PR #1858

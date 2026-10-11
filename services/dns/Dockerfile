@@ -39,10 +39,11 @@ ARG PROJECT_CARGO_CODEGENUNIT=
 # Why: ci.sh rust-build folds it into the ccache key.
 # From: Issue #1683
 ARG BUILD_TOOLS_IMAGE
-# What: compiler VAR=driver pairs, supplied by ci.sh.
+# What: compiler pairs and cache key prefix, from ci.sh.
 # Why: the builder has no SOT; rust-build reads the env.
-# From: Issue #1683 | PR #1858
+# From: Issue #1683 | PR #1912
 ARG CI_TOOLCHAIN_COMPILERS
+ARG CI_CACHE_KEY_PREFIX
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -117,7 +118,7 @@ COPY --from=dns-builder /build/lancache-watchdog-out /usr/local/bin/lancache-wat
 
 # What: static inputs and the env names that point at them.
 # Why: the COPY and its path have one owner: this file.
-# From: Issue #815 | Issue #1683
+# From: Issue #1683 | PR #1912
 COPY services/dns/filter-aaaa.lua /etc/pdns/filter-aaaa.lua
 COPY services/dns/cdn-domains.txt /etc/pdns/cdn-domains.txt
 COPY services/dns/schema.sqlite3.sql /usr/share/lancache-ng/schema.sqlite3.sql

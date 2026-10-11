@@ -39,10 +39,11 @@ ARG PROJECT_CARGO_CODEGENUNIT=
 # Why: ci.sh rust-build folds it into the ccache key.
 # From: Issue #1683
 ARG BUILD_TOOLS_IMAGE
-# What: compiler VAR=driver pairs, supplied by ci.sh.
+# What: compiler pairs and cache key prefix, from ci.sh.
 # Why: the builder has no SOT; rust-build reads the env.
-# From: Issue #1683 | PR #1858
+# From: Issue #1683 | PR #1912
 ARG CI_TOOLCHAIN_COMPILERS
+ARG CI_CACHE_KEY_PREFIX
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./

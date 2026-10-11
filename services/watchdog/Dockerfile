@@ -39,10 +39,11 @@ ARG PROJECT_CARGO_CODEGENUNIT=
 # Why: ci.sh rust-build folds it into the ccache key.
 # From: Issue #1683
 ARG BUILD_TOOLS_IMAGE
-# What: compiler VAR=driver pairs, supplied by ci.sh.
+# What: compiler pairs and cache key prefix, from ci.sh.
 # Why: the builder has no SOT; rust-build reads the env.
-# From: Issue #1683 | PR #1858
+# From: Issue #1683 | PR #1912
 ARG CI_TOOLCHAIN_COMPILERS
+ARG CI_CACHE_KEY_PREFIX
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -109,7 +110,7 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
 
 # What: syslog-ng files belong to this reader group.
 # Why: the ui (gid 10001) and netdata web_log read them.
-# From: Issue #1246 | Issue #1683
+# From: Issue #1683 | PR #1912
 ENV LOG_READER_GROUP=lancache
 RUN addgroup -g 10001 "${LOG_READER_GROUP}" && addgroup netdata "${LOG_READER_GROUP}"
 
