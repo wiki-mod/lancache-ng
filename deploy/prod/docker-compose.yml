@@ -20,7 +20,7 @@ services:
   # From: Issue #1683
   services:
     container_name: LanCache-NG-services
-    image: ${LANCACHE_IMAGE_REF_SERVICES:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/services:${LANCACHE_IMAGE_TAG:-latest}}
+    image: ${LANCACHE_IMAGE_REF_SERVICES:-${LANCACHE_IMAGE_REGISTRY:?LANCACHE_IMAGE_REGISTRY is required}/${LANCACHE_IMAGE_PREFIX:?LANCACHE_IMAGE_PREFIX is required}/services:${LANCACHE_IMAGE_TAG:?LANCACHE_IMAGE_TAG is required}}
     # What: tini as PID 1 reaps the supervisor's children.
     # Why: lancache-watchdog supervise is no init process.
     # From: Issue #1683
@@ -131,7 +131,7 @@ services:
   # Why: :8443 passes SNI through, :443 intercepts TLS.
   proxy:
     container_name: LanCache-NG-proxy
-    image: ${LANCACHE_IMAGE_REF_PROXY:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/proxy:${LANCACHE_IMAGE_TAG:-latest}}
+    image: ${LANCACHE_IMAGE_REF_PROXY:-${LANCACHE_IMAGE_REGISTRY:?LANCACHE_IMAGE_REGISTRY is required}/${LANCACHE_IMAGE_PREFIX:?LANCACHE_IMAGE_PREFIX is required}/proxy:${LANCACHE_IMAGE_TAG:?LANCACHE_IMAGE_TAG is required}}
     init: true
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:?KEEP_KNOWN_GOOD_CONFIGS is required}
@@ -181,7 +181,7 @@ services:
   # From: Issue #1683
   dns:
     container_name: LanCache-NG-dns
-    image: ${LANCACHE_IMAGE_REF_DNS:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}}
+    image: ${LANCACHE_IMAGE_REF_DNS:-${LANCACHE_IMAGE_REGISTRY:?LANCACHE_IMAGE_REGISTRY is required}/${LANCACHE_IMAGE_PREFIX:?LANCACHE_IMAGE_PREFIX is required}/dns:${LANCACHE_IMAGE_TAG:?LANCACHE_IMAGE_TAG is required}}
     init: true
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:?KEEP_KNOWN_GOOD_CONFIGS is required}
@@ -268,7 +268,7 @@ services:
   # From: Issue #1683
   dhcp:
     container_name: LanCache-NG-dhcp
-    image: ${LANCACHE_IMAGE_REF_DHCP:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp:${LANCACHE_IMAGE_TAG:-latest}}
+    image: ${LANCACHE_IMAGE_REF_DHCP:-${LANCACHE_IMAGE_REGISTRY:?LANCACHE_IMAGE_REGISTRY is required}/${LANCACHE_IMAGE_PREFIX:?LANCACHE_IMAGE_PREFIX is required}/dhcp:${LANCACHE_IMAGE_TAG:?LANCACHE_IMAGE_TAG is required}}
     init: true
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:?KEEP_KNOWN_GOOD_CONFIGS is required}
@@ -335,7 +335,7 @@ services:
   # From: Issue #1683
   ui:
     container_name: LanCache-NG-ui
-    image: ${LANCACHE_IMAGE_REF_UI:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}}
+    image: ${LANCACHE_IMAGE_REF_UI:-${LANCACHE_IMAGE_REGISTRY:?LANCACHE_IMAGE_REGISTRY is required}/${LANCACHE_IMAGE_PREFIX:?LANCACHE_IMAGE_PREFIX is required}/ui:${LANCACHE_IMAGE_TAG:?LANCACHE_IMAGE_TAG is required}}
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:?KEEP_KNOWN_GOOD_CONFIGS is required}
       - NTP_UPSTREAM_SERVERS=${NTP_UPSTREAM_SERVERS:?NTP_UPSTREAM_SERVERS is required}
@@ -364,10 +364,10 @@ services:
       - IP_HTTP=${IP_HTTP}
       - IP_HTTPS=${IP_HTTPS}
       - DNS_STATE_DIR=/var/lib/powerdns-state
-      - LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY:-ghcr.io}
-      - LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}
+      - LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY:?LANCACHE_IMAGE_REGISTRY is required}
+      - LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX:?LANCACHE_IMAGE_PREFIX is required}
       - LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL:-}
-      - LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG:-latest}
+      - LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG:?LANCACHE_IMAGE_TAG is required}
       - UI_AUTH_USER=${UI_AUTH_USER:-}
       - UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD:-}
       - ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI:-false}

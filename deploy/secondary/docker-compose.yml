@@ -11,7 +11,7 @@ services:
   # From: Issue #1683
   dns:
     container_name: LanCache-NG-dns
-    image: ${LANCACHE_IMAGE_REF_DNS:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}}
+    image: ${LANCACHE_IMAGE_REF_DNS:-${LANCACHE_IMAGE_REGISTRY:?LANCACHE_IMAGE_REGISTRY is required}/${LANCACHE_IMAGE_PREFIX:?LANCACHE_IMAGE_PREFIX is required}/dns:${LANCACHE_IMAGE_TAG:?LANCACHE_IMAGE_TAG is required}}
     init: true
     environment:
       - PROXY_IP=${PROXY_IP:?PROXY_IP is required}
