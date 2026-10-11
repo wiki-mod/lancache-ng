@@ -3959,18 +3959,21 @@ CASES
         || { echo "non-prod moved: ${output}"; return 1; }
 }
 
+# What: server plus a filename; filename char rules
+# Why: a half answer or bad name breaks dnsmasq.conf
+# From: Issue #1683 | PR #1858
 @test "setup pxe wizard answers and boot filename per input" {
-    # What: server plus a filename; filename char rules
-    # Why: a half answer or bad name breaks dnsmasq.conf
-    # From: Issue #1683 | PR #1858
     local root t="${BATS_TEST_TMPDIR}" ip bios uefi max code c
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
     require_helper_image
     ip="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")"
-    bios="b${BATS_TEST_NUMBER}.0" uefi="images/u${BATS_TEST_NUMBER}.efi"
-    max="$(declare -f is_valid_dhcp_proxy_boot_filename | grep -oE -- '-le [0-9]+' | awk '{ print $2 }')"
-    [ -n "${ip}" ] && [ -n "${max}" ] || { echo "inputs: ${ip} ${max}"; return 1; }
+    bios="$(_val name)" uefi="$(_val name)/$(_val name)"
+    # What: the longest name one DHCP option can carry
+    # Why: RFC 2132: an option length is a single octet
+    # From: Issue #1683 | PR #1858
+    max=$(( (1 << 8) - 1 ))
+    [ -n "${ip}" ] || { echo "template sets no IP_STANDARD"; return 1; }
     # What: a boot pointer needs the server and a filename
     # Why: dnsmasq renders nothing useful from half of it
     # From: Issue #1683 | PR #1858
