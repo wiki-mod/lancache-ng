@@ -4066,7 +4066,7 @@ CASES
     _sec "${t}/ok" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${STD}" --listen-ip "${LIP}" --rotate
     [ "${status}" -eq 0 ] && cmp "${t}/env.first" "${env}" && cmp "${t}/compose.first" "${dir}/docker-compose.yml" \
         || { echo "rotate: ${output}"; return 1; }
-    # What: the https side needs both flags and its own bind IP
+    # What: https side needs both flags and its own bind IP
     # Why: one dns container, a second bind, never half-set
     # From: Issue #1683 | PR #1912
     [ -z "$(get_env_var IP_HTTPS "${env}")" ] && [ -z "$(get_env_var LISTEN_IP_HTTPS "${env}")" ] \

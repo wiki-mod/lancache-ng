@@ -42,8 +42,8 @@ services:
       - dns-config-snapshots:/var/lib/lancache-dns
     tmpfs:
       - /run/lancache
-    # What: https side binds only when LISTEN_IP_HTTPS is set.
-    # Why: without it the port maps to loopback, ephemeral port.
+    # What: https binds only if LISTEN_IP_HTTPS is set.
+    # Why: otherwise loopback with an ephemeral port.
     # From: Issue #1683 | PR #1912
     ports:
       - "${LISTEN_IP:?LISTEN_IP is required}:53:53/udp"
