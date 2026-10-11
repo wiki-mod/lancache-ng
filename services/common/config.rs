@@ -197,6 +197,11 @@ impl DhcpMode {
     }
 }
 
+// What: one proxy access line as syslog-ng stores it.
+// Why: the ui and netdata web_log parse it; one owner.
+// From: Issue #1246 | Issue #1683
+pub const PROXY_ACCESS_LOG_PATTERN: &str = r#"^\S+ \S+ \S+: (?P<remote_addr>\S+) - \[(?P<time_local>[^\]]+)\] "(?P<request_method>\S+) (?P<request_uri>\S+) [^"]*" (?P<status>\d+) (?P<body_bytes_sent>\d+) "([^"]*)" "(?P<host>[^"]*)""#;
+
 // What: marker file of the unsigned-DDNS switch.
 // Why: the ui writes it; the dns supervisor restarts pdns.
 // From: Issue #815

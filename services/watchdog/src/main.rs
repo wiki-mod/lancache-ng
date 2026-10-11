@@ -17,8 +17,8 @@ use dhcproto::v4::{DhcpOption, Flags, Message, MessageType, OptionCode};
 use dhcproto::{Decodable, Decoder, Encodable, Encoder};
 
 use lancache_ng::config::{
-    self, DhcpMode, NatsLogin, NatsRoles, OutOfRange, PDNS_AUTH_PORT, Uint, env_opt,
-    render_nats_conf,
+    self, DhcpMode, NatsLogin, NatsRoles, OutOfRange, PDNS_AUTH_PORT, PROXY_ACCESS_LOG_PATTERN,
+    Uint, env_opt, render_nats_conf,
 };
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
@@ -1144,18 +1144,22 @@ fn fingerprint(files: &[PathBuf]) -> Vec<Option<(u64, i64, i64)>> {
 }
 
 // What: syslog-ng.conf for the Docker syslog input.
-// Why: one file per container and day; xz comes later.
+// Why: one file per container and day; the group reads.
 // From: Issue #1683
-fn syslog_ng_conf(port: &str, root: &str) -> Result<String, String> {
+fn syslog_ng_conf(port: &str, root: &str, group: &str) -> Result<String, String> {
     if port.parse::<u16>().map_or(true, |p| p == 0) {
         return Err(format!("LANCACHE_LOG_PORT={port} is no port"));
     }
     if !root.starts_with('/') || root.contains(['"', '\n', '\r', '$']) {
         return Err(format!("SYSLOG_LOG_ROOT={root} is no plain absolute path"));
     }
+    let name = |c: char| c.is_ascii_alphanumeric() || "_-".contains(c);
+    if group.is_empty() || !group.chars().all(name) {
+        return Err(format!("LOG_READER_GROUP={group} is no group name"));
+    }
     Ok(format!(
         r#"@version: current
-options {{ create-dirs(yes); dir-perm(0750); perm(0640); keep-hostname(yes); time-reap(30); }};
+options {{ create-dirs(yes); dir-group("{group}"); dir-perm(0750); group("{group}"); perm(0640); keep-hostname(yes); time-reap(30); }};
 source s_docker {{ network(transport("udp") port({port}) flags(syslog-protocol)); }};
 filter f_named {{ program("^[A-Za-z0-9_-]+$" type(pcre)); }};
 destination d_store {{ file("{root}/${{PROGRAM}}/${{YEAR}}${{MONTH}}${{DAY}}.log" template("${{ISODATE}} ${{HOST}} ${{PROGRAM}}: ${{MSGONLY}}\n")); }};
@@ -1170,6 +1174,7 @@ fn syslog_ng(ctx: &Ctx) -> Result<Run, String> {
     let conf = syslog_ng_conf(
         &ctx.need("LANCACHE_LOG_PORT")?,
         &ctx.need("SYSLOG_LOG_ROOT")?,
+        &ctx.need("LOG_READER_GROUP")?,
     )?;
     let conf = ctx.render("syslog-ng.conf", &conf)?;
     let run = |file: &str| ctx.run_dir.join(file).display().to_string();
@@ -1203,11 +1208,6 @@ const NETDATA_ALARM_RECIPIENT: &str = "lancache-ui";
 // From: Issue #1683
 const NETDATA_CONF: &str =
     "[logs]\n    daemon = stderr\n    health = stderr\n    collector = off\n    access = off\n";
-
-// What: fields of the nginx cache log_format.
-// Why: go.d web_log has no built-in parser for it.
-// From: Issue #1246
-const NGINX_CACHE_LOG_PATTERN: &str = r#"^(?P<remote_addr>\S+) - \[(?P<time_local>[^\]]+)\] "(?P<request>[^"]*)" (?P<status>\d+) (?P<body_bytes_sent>\d+) "[^"]*" "(?P<host>[^"]*)""#;
 
 // What: netdata custom_sender that POSTs alarms to the ui.
 // Why: fields come from NetdataAlarm; no second list.
@@ -1253,8 +1253,8 @@ custom_sender() {{
     ))
 }
 
-// What: go.d web_log job for the nginx access log.
-// Why: live request charts; netdata reads it by group.
+// What: go.d web_log job over the proxy's syslog files.
+// Why: live request charts; the glob follows the day.
 // From: Issue #1246
 fn web_log_conf(path: &str) -> Result<String, String> {
     if !path.starts_with('/') || path.contains(['\'', '"', '\n', '\r', ' ', '#']) {
@@ -1262,7 +1262,7 @@ fn web_log_conf(path: &str) -> Result<String, String> {
     }
     Ok(format!(
         "jobs:\n  - name: nginx_proxy\n    path: {path}\n    log_type: regexp\n    \
-         regexp_config:\n      pattern: '{NGINX_CACHE_LOG_PATTERN}'\n"
+         regexp_config:\n      pattern: '{PROXY_ACCESS_LOG_PATTERN}'\n"
     ))
 }
 
@@ -3503,23 +3503,6 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         &|old| old.to_string(),
         !hosts.skipped,
     )?;
-    // What: the log dir is setgid to the log reader gid.
-    // Why: the ui reads access.log through that group.
-    // From: Issue #1427
-    let logs = PathBuf::from(ctx.need("PROXY_LOG_DIR")?);
-    let reader: u32 = ctx
-        .need("PROXY_LOG_GID")?
-        .parse()
-        .map_err(|e| format!("PROXY_LOG_GID: {e}"))?;
-    let worker_uid = account_id("passwd", &worker)?;
-    fs::create_dir_all(&logs).map_err(|e| format!("cannot create {}: {e}", logs.display()))?;
-    own(&logs, Some(worker_uid), reader, 0o2750)?;
-    for entry in fs::read_dir(&logs).map_err(|e| format!("cannot list {}: {e}", logs.display()))? {
-        let file = entry.map_err(|e| e.to_string())?.path();
-        if file.is_file() {
-            own(&file, Some(worker_uid), reader, 0o640)?;
-        }
-    }
     Ok(Run {
         argv: vec!["nginx".into(), "-g".into(), "daemon off;".into()],
         watch: vec![domains_file],
@@ -4506,17 +4489,21 @@ mod tests {
     // From: Issue #1683
     #[test]
     fn syslog_ng_conf_takes_a_port_and_a_root() {
-        let (port, root) = (rnd(1, u16::MAX.into()).to_string(), gen_path());
-        let conf = syslog_ng_conf(&port, &root).expect("conf");
+        let (port, root, group) = (rnd(1, u16::MAX.into()).to_string(), gen_path(), gen_name());
+        let conf = syslog_ng_conf(&port, &root, &group).expect("conf");
         assert!(conf.contains(&format!("port({port})")), "{conf}");
         assert!(
             conf.contains(&format!("file(\"{root}/${{PROGRAM}}/")),
             "{conf}"
         );
-        assert!(syslog_ng_conf("0", &root).is_err());
-        assert!(syslog_ng_conf(&gen_name(), &root).is_err());
-        assert!(syslog_ng_conf(&port, &gen_name()).is_err());
-        assert!(syslog_ng_conf(&port, &format!("{root}\"")).is_err());
+        assert!(conf.contains(&format!("dir-group(\"{group}\")")), "{conf}");
+        assert!(conf.contains(&format!(" group(\"{group}\")")), "{conf}");
+        assert!(syslog_ng_conf("0", &root, &group).is_err());
+        assert!(syslog_ng_conf(&gen_name(), &root, &group).is_err());
+        assert!(syslog_ng_conf(&port, &gen_name(), &group).is_err());
+        assert!(syslog_ng_conf(&port, &format!("{root}\""), &group).is_err());
+        assert!(syslog_ng_conf(&port, &root, "").is_err());
+        assert!(syslog_ng_conf(&port, &root, "a\"b").is_err());
     }
 
     // What: chronyd follows the saved flag and the dock.
@@ -4574,21 +4561,24 @@ mod tests {
         }
     }
 
-    // What: the web_log job parses the cache log_format.
+    // What: the web_log job parses the proxy's syslog lines.
     // Why: a wrong pattern collects nothing and fails quiet.
     // From: Issue #1246
     #[test]
-    fn web_log_job_reads_the_cache_log_format() {
-        let path = format!("/{}/{}.log", gen_name(), gen_name());
+    fn web_log_job_reads_the_proxy_syslog_files() {
+        let path = format!("/{}/{}/*.log", gen_name(), gen_name());
         let conf = web_log_conf(&path).expect("conf");
         assert!(conf.contains(&format!("    path: {path}\n    log_type: regexp\n")));
-        assert!(conf.contains(&format!("      pattern: '{NGINX_CACHE_LOG_PATTERN}'\n")));
+        assert!(conf.contains(&format!("      pattern: '{PROXY_ACCESS_LOG_PATTERN}'\n")));
         let nginx =
             fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../proxy/nginx.conf"))
                 .expect("nginx.conf");
         assert!(nginx.contains(
             "log_format cache '$remote_addr - [$time_local] \"$request\" '\n                     '$status $body_bytes_sent '\n                     '\"$upstream_cache_status\" \"$host\"';"
         ));
+        assert!(nginx.contains("access_log /dev/stdout cache;"));
+        let syslog = syslog_ng_conf("514", "/r", "g").expect("conf");
+        assert!(syslog.contains(r#"template("${ISODATE} ${HOST} ${PROGRAM}: ${MSGONLY}\n")"#));
         for bad in ["relative.log", "/a b", "/a'b", "/a\nb"] {
             assert!(web_log_conf(bad).is_err(), "{bad:?}");
         }
