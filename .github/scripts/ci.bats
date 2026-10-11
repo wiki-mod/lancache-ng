@@ -1527,7 +1527,7 @@ CASES
 # Why: SOT owns every value; build-args only maps it.
 # From: Issue #1683 | PR #1858
 @test "build-args: real SOT targets give pinned, filled arguments" {
-    local tool pc sp verify w case target fmt plat pre want absent
+    local tool pc sp verify w case target fmt plat pre want absent s
     local -A N=()
     tool="$(_ci_block_keys build_toolchain)" && pc="$(_pin_consumer)" && sp="$(_ci_build_matrix_platforms)" \
         || { echo "SOT readers failed"; return 1; }
@@ -1560,6 +1560,12 @@ toolchain-bare|@TOOL@|--bare||APK_PACKAGES=.+|BUILD_TOOLS_IMAGE
 pin-no-platform|@PC@|||@VER@=.+|@ARCH@
 pin-platform|@PC@||@SP@|@ARCH@=.+ @SHA@=[0-9a-f]{64}$|-
 CASES
+    s="$(ci_services | awk 'NR == 1')"
+    run _ci_service_build_args "${s}" --bare "${sp}" no
+    _expect no-toolchain 0 "RUST_CRATES=" || return 1
+    [[ "${output}" != *BUILD_TOOLS_IMAGE=* ]] || { echo "no-toolchain: image arg emitted: ${output}"; return 1; }
+    run _ci_service_build_args "${s}" --bare "${sp}" "$(_val name)"
+    _expect bad-toolchain-flag 2 "[CI-ERROR-BUILDARGS-0020] service=\"${s}\"" || return 1
 }
 
 # What: OCI labels from the SOT, the env and the checkout

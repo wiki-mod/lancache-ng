@@ -7838,22 +7838,16 @@ _ci_build_tools_build_args() {
 # From: Issue #1683
 _ci_service_build_args() {
     local service="$1" fmt="${2:-}" platform="${3:-}" with_toolchain="${4:-yes}"
-    local prefix="--build-arg " out="" val ext ext_argname
+    local prefix="--build-arg " out="" val
+    # What: with_toolchain is yes or no; else a coded stop.
+    # Why: a wrong caller value must not drop the image arg.
+    # From: Issue #1683 | PR #1912
+    case "${with_toolchain}" in
+        yes|no) ;;
+        *) ci_log "[CI-ERROR-BUILDARGS-0020]" "service=\"${service}\" with_toolchain=\"${with_toolchain}\" reason=\"must be yes or no\""; return 2 ;;
+    esac
     [ "${fmt}" = "--bare" ] && prefix=""
     out="$(_ci_alpine_build_arg "${prefix}")"$'\n' || return 2
-    # What: external_image field adds one more build-arg.
-    # Why: the SOT maps the image; the Dockerfile pins none.
-    # From: Issue #1683
-    ext="$(_ci_block_entry_field services "${service}" external_image)" || return 2
-    if [ -n "${ext}" ]; then
-        ext_argname="${ext^^}_IMAGE"
-        val="$(_ci_block_entry_field base_images "" "${ext}")" || return 2
-        if [ -z "${val}" ]; then
-            ci_log "[CI-ERROR-BUILDARGS-0007]" "arg=\"${ext_argname}\" service=\"${service}\" key=\"base_images.${ext}\" reason=\"missing central external image; FAIL CLOSED\""
-            return 2
-        fi
-        out="${out}${prefix}${ext_argname}=${val}"$'\n'
-    fi
     # What: Rust builders use build-tools image ref
     # Why: SOT owns ref; Dockerfile keeps none
     # From: Issue #1683
