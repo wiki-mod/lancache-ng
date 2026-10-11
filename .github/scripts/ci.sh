@@ -7154,6 +7154,22 @@ _ci_validate_rollback_base() {
     printf 'http://%s:%s' "${ip}" "${port}"
 }
 
+# What: writes a deploy/prod install's .env.local, mode 600.
+# Why: setup.sh reads that file; validate never overwrites one.
+# From: Issue #763 | PR #1912
+_ci_validate_env_local() {
+    local inst="$1" content="$2"
+    if [ -e "${inst}/.env.local" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0113]" "path=\"${inst}/.env.local\" reason=\"an .env.local exists; validate never overwrites it\""
+        return 2
+    fi
+    if ! (umask 077 && printf '%s' "${content:+${content}$'\n'}" > "${inst}/.env.local"); then
+        ci_log "[CI-ERROR-VALIDATE-0093]" "dir=\"${inst}\" reason=\"setup.sh .env.local not written\""
+        rm -f "${inst}/.env.local"
+        return 2
+    fi
+}
+
 # What: DNS known-good snapshot/rollback round-trip.
 # Why: Real listener HTTP + PATCH + cache flush.
 # From: Issue #1683
@@ -7223,17 +7239,7 @@ _ci_validate_dns_rollback() {
     compose="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     su="$(_ci_installer)" || return 2
     inst="$(dirname "${compose}")"
-    if [ -e "${inst}/.env.local" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0113]" "path=\"${inst}/.env.local\" reason=\"an .env.local exists; validate never overwrites it\""
-        return 2
-    fi
-    # What: an empty .env.local for the rollback run.
-    # Why: setup.sh needs the file; compose reads the env.
-    # From: Issue #836 | PR #1912
-    if ! (umask 077 && : > "${inst}/.env.local"); then
-        ci_log "[CI-ERROR-VALIDATE-0093]" "dir=\"${inst}\" reason=\"setup.sh .env.local not written\""
-        return 2
-    fi
+    _ci_validate_env_local "${inst}" "" || return 2
     # What: setup.sh rollback, wrong host PDNS_API_KEY.
     # Why: the key must be resolved inside the container.
     # From: Issue #836
@@ -7397,19 +7403,11 @@ _ci_validate_kea_round_trip() {
     compose="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     su="$(_ci_installer)" || return 2
     inst="$(dirname "${compose}")"
-    if [ -e "${inst}/.env.local" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0113]" "path=\"${inst}/.env.local\" reason=\"an .env.local exists; validate never overwrites it\""
-        return 2
-    fi
     # What: .env.local holds only this run's KEA_* values
     # Why: setup.sh reads a deploy/prod install's .env.local
     # From: Issue #763 | PR #1912
-    if ! (umask 077 && printf 'KEA_CTRL_TOKEN=%s\nKEA_CTRL_HOST=%s\nKEA_DATA_DIR=%s\n' \
-            "${token}" "${kip}" "${dir}" > "${inst}/.env.local"); then
-        ci_log "[CI-ERROR-VALIDATE-0093]" "dir=\"${inst}\" reason=\"setup.sh .env.local not written\""
-        rm -f "${inst}/.env.local"
-        return 2
-    fi
+    _ci_validate_env_local "${inst}" "$(printf 'KEA_CTRL_TOKEN=%s\nKEA_CTRL_HOST=%s\nKEA_DATA_DIR=%s\n' \
+        "${token}" "${kip}" "${dir}")" || return 2
     resp="$(bash "${su}" reset-to-last-known-good-config kea "${inst}" "${snap}" --yes 2>&1)" || rc=$?
     rm -f "${inst}/.env.local"
     case "${rc}:${resp}" in
@@ -11623,7 +11621,7 @@ _ci_check_prod_state_wiring() {
     # Why: AG-SETUP-001: keys come from the compose itself.
     # From: Issue #1683 | PR #1912
     local off
-    off="$(grep -E '^[[:space:]]*- \$\{[A-Z0-9_]+:-' "${compose}" | grep -Fv -- ':-${LANCACHE_STATE_DIR:?' || true)"
+    off="$(grep -E '^[[:space:]]*(- |device: )\$\{[A-Z0-9_]+:-' "${compose}" | grep -Fv -- ':-${LANCACHE_STATE_DIR:?' || true)"
     [ -z "${off}" ] || viol+=("${dep} has a mount default off LANCACHE_STATE_DIR:${off}")
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0100]" "reason=\"prod state wiring not LANCACHE_STATE_DIR-derived or undocumented\"" "$(printf '%s\n' "${viol[@]}")"
@@ -12424,7 +12422,7 @@ _ci_logging_matrix_canonical() {
             name = parts[1]
             sub(/[[:space:]]+$/, "", name)
             if (match(name, /`[a-z0-9-]+`/)) name = substr(name, RSTART + 1, RLENGTH - 2)
-            print name
+            print "row=" name
             next
         }
         seen_marker && rows_seen && !/^\|/ { exit }
@@ -12474,6 +12472,10 @@ _ci_check_logging_matrix() {
         return 2
     fi
     mapfile -t canonical <<< "${rows}"
+    # What: drops the row= prefix of each parsed name.
+    # Why: $(...) would eat a last row with an empty name.
+    # From: Issue #1683 | PR #1912
+    canonical=("${canonical[@]#row=}")
     # What: only the primary stack compose is matched.
     # Why: the secondary dns logs locally (driver: local).
     # From: Issue #1683 | PR #1912
