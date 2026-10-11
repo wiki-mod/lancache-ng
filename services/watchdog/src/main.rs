@@ -708,9 +708,9 @@ fn prune_syslog(r: &Retention, now: u64) {
 // From: Issue #1683
 const XZ_SUFFIX: &str = ".xz";
 
-// What: xz preset 6, the xz command line default.
-// Why: the maintainer set xz as the default compression.
-// From: Issue #1683
+// What: xz compression preset 6 for closed log files.
+// Why: fixed constant, not a configured knob.
+// From: Issue #1683 | PR #1912
 const XZ_PRESET: u32 = 6;
 
 // What: xz-compress one closed log file, then drop it.
@@ -812,8 +812,8 @@ async fn retention() -> Result<(), String> {
 }
 
 // What: the stack's compose project, from this container.
-// Why: the watchdog checks what compose started; no list.
-// From: Issue #1683
+// Why: no project name is configured; the label names it.
+// From: Issue #1683 | PR #1912
 async fn own_project(docker: &DockerApi, s: &Settings) -> Result<(String, String), String> {
     let body = docker
         .inspect(&s.own_id, s.api_timeout)
@@ -873,8 +873,9 @@ async fn watch() -> Result<(), String> {
                 Some(body) => Reading::from_inspect(&body),
                 None => Reading::Unreachable,
             };
-            // What: the watchdog's own container is alert-only.
-            // Why: restarting itself would end the restart call.
+            // What: own container only alerts.
+            // Why: a self-restart ends this restart call.
+            // From: Issue #1683 | PR #1912
             let restart = name != own_name;
             let counter = counters.entry(name.clone()).or_default();
             let event = if restart {
@@ -951,8 +952,8 @@ const STOP_GRACE: Duration = Duration::from_secs(8);
 const STATUS_MAX_AGE: u64 = 30;
 
 // What: inputs every program reads at render time.
-// Why: settings file beats env; a secondary has no ui files.
-// From: Issue #1683
+// Why: a saved setting beats the env; the file is optional.
+// From: Issue #1683 | PR #1912
 struct Ctx {
     run_dir: PathBuf,
     settings_file: Option<PathBuf>,
@@ -989,8 +990,8 @@ impl Ctx {
 }
 
 // What: one program or task the supervisor keeps alive.
-// Why: LANCACHE_PROCESSES names them; the SOT owns it.
-// From: Issue #1683
+// Why: one list; build-manifest.yml owns the names.
+// From: Issue #1683 | PR #1912
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Watch,
@@ -1014,7 +1015,8 @@ enum Kind {
 
 impl Kind {
     // What: the kind of one LANCACHE_PROCESSES entry.
-    // Why: an unknown name is a build error; fail closed.
+    // Why: an unknown name is a config error; fail closed.
+    // From: Issue #1683 | PR #1912
     fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "watch" => Self::Watch,
@@ -1176,7 +1178,7 @@ log {{ source(s_docker); filter(f_named); destination(d_store); }};
     ))
 }
 
-// What: the programs whose logging the operator switched off.
+// What: programs whose logging is switched off.
 // Why: the services container itself always logs.
 // From: Issue #1683 | PR #1912
 fn logging_off(ctx: &Ctx) -> Result<Vec<&'static str>, String> {
@@ -1333,14 +1335,15 @@ fn netdata(ctx: &Ctx) -> Result<Run, String> {
 }
 
 // What: an IP literal (server) or a name (pool).
-// Why: chrony needs pool for names, server for IPs.
+// Why: a name may resolve to many hosts; pool covers them.
+// From: Issue #1683 | PR #1912
 fn is_ip_literal(entry: &str) -> bool {
     entry.parse::<std::net::IpAddr>().is_ok()
 }
 
 // What: chrony.conf from upstreams and client CIDRs.
-// Why: NTP never runs alone; no CIDR serves everyone.
-// From: Issue #1683
+// Why: no upstream means no NTP; empty CIDRs allow all.
+// From: Issue #1683 | PR #1912
 fn chrony_conf(upstreams: &str, cidrs: &str, drift: &str) -> Result<String, String> {
     let plain = |v: &str| {
         v.chars()
@@ -1430,15 +1433,16 @@ struct Recursor {
 
 impl Recursor {
     // What: a recursor runs only when its answer IP is set.
-    // Why: a secondary has one LAN IP and no dns-https.
+    // Why: presence of the IP env decides, not the role.
+    // From: Issue #1683 | PR #1912
     fn runs(&self) -> bool {
         env_opt(self.ip_key).is_some()
     }
 }
 
-// What: dns-http answers IP_HTTP, dns-https IP_HTTPS.
+// What: dns-http uses PROXY_IP, dns-https PROXY_HTTPS_IP.
 // Why: one cache per proxy IP keeps the answers apart.
-// From: Issue #1683
+// From: Issue #1683 | PR #1912
 const DNS_HTTP: Recursor = Recursor {
     name: "dns-http",
     ip_key: "PROXY_IP",
