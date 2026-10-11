@@ -27,7 +27,7 @@ use lancache_ng::config::{
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, DesiredRunState, DesiredState, DnsRecord, FlushRequest,
     NetdataAlarm, Place, PowerDns, ProbeAnswer, ProbeReport, SnapshotStore, WatchdogStatus, ct_eq,
-    df, die, hex32, http_client, is_placeholder, load_or_create, load_or_create_hex,
+    df, die, hex32, http_client, is_placeholder, load_or_create, load_or_create_hex, probe_health,
     resolve_shared_secret, shared_secret, shared_secret_file_name, shared_secret_is_placeholder,
     snapshot_created_unix, unix_secs, write_file, write_if_changed,
 };
@@ -5944,10 +5944,22 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+// What: Ok when the local server answers its health page.
+// Why: the healthcheck runs this binary; no curl, no shell.
+// From: Issue #1683 | PR #1912
+#[tokio::main]
+async fn healthcheck() -> Result<(), String> {
+    let port = config::need(&config::process_env, "UI_LISTEN_PORT")?;
+    probe_health(&format!("http://127.0.0.1:{port}/health")).await
+}
+
 // What: drop root, then run the server.
 // Why: the server must not run as root.
 // From: Issue #1288 | PR #1858
 fn main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        return healthcheck().map_err(anyhow::Error::msg);
+    }
     if std::env::args().nth(1).as_deref() == Some("hash-password") {
         let phc = hash_password_from_stdin().map_err(anyhow::Error::msg)?;
         println!(

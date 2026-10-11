@@ -264,6 +264,35 @@ pub fn http_client() -> reqwest::Result<reqwest::Client> {
         .build()
 }
 
+// What: how long one healthcheck probe may take.
+// Why: it must end before Docker's healthcheck timeout.
+// From: Issue #1683 | PR #1912
+const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+// What: Ok when a loopback health URL answers 2xx.
+// Why: healthchecks run in the binary; no curl, no shell.
+// From: Issue #1683 | PR #1912
+pub async fn probe_health(url: &str) -> Result<(), String> {
+    // What: the certificate is not checked here.
+    // Why: the URL is our loopback listener (self-signed).
+    let client = reqwest::Client::builder()
+        .timeout(HEALTH_PROBE_TIMEOUT)
+        .danger_accept_invalid_certs(true)
+        .build()
+        .map_err(|e| format!("health client: {e}"))?;
+    let status = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("{url}: {e}"))?
+        .status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(format!("{url}: HTTP {status}"))
+    }
+}
+
 // What: one lancache.dns.record message on NATS.
 // Why: ui and subscriber publish it; subscriber reads it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1720,5 +1749,18 @@ mod tests {
         assert_eq!(report.overall(), "unavailable");
         assert_eq!(report.page()["status"], "unavailable");
         assert_eq!(report.page()["client"]["reason"], "why");
+    }
+
+    // What: only a 2xx answer counts as healthy.
+    // Why: a 5xx or a dead listener means unhealthy.
+    // From: Issue #1683 | PR #1912
+    #[tokio::test]
+    async fn probe_health_accepts_2xx_only() {
+        let (base, _server) = serve_canned(vec![(200, b"ok".to_vec()), (503, vec![])]);
+        assert!(probe_health(&format!("{base}/healthz")).await.is_ok());
+        let failed = probe_health(&format!("{base}/healthz")).await;
+        assert!(failed.is_err_and(|e| e.contains("503")));
+        let closed = probe_health(&format!("{base}/healthz")).await;
+        assert!(closed.is_err());
     }
 }

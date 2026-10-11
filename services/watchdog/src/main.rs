@@ -24,7 +24,7 @@ use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
     ClientCheck, ConflictCheck, DesiredRunState, DesiredState, Detail, DiskHealth, DiskInfo,
     DockerApi, NetdataAlarm, Place, ProbeAnswer, ProbeReport, ServiceHealth, WatchdogStatus, df,
-    hex32, resolve_shared_secret, sha256_hex, shared_secret_file_name,
+    hex32, probe_health, resolve_shared_secret, sha256_hex, shared_secret_file_name,
     shared_secret_is_placeholder, unix_secs, write_file, write_if_changed,
 };
 use serde::{Deserialize, Serialize};
@@ -980,8 +980,8 @@ impl Ctx {
         config::need(&config::process_env, key)
     }
 
-    // What: a DHCP DNS IP from the env, else its LAN address.
-    // Why: compose derives no fallback; the rule lives in config.
+    // What: a DHCP DNS IP from env, else its LAN address.
+    // Why: compose derives no fallback; config owns it.
     fn need_dns(&self, key: &str) -> Result<String, String> {
         env_opt(key)
             .or_else(|| config::dhcp_dns_fallback(&config::process_env, key))
@@ -1995,8 +1995,8 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
         log_err(&format!("WARNING: DDNS TSIG is off: {e}"));
         String::new()
     });
-    // What: no key or a replica means DDNS only from loopback.
-    // Why: unsigned or replica updates from the LAN are refused.
+    // What: no key or a replica: DDNS only from loopback.
+    // Why: unsigned or replica LAN updates are refused.
     let allow_from = if tsig.is_empty() || role == DnsRole::Secondary {
         "127.0.0.1".to_string()
     } else {
@@ -4230,13 +4230,29 @@ async fn supervise() -> Result<(), String> {
 // What: healthy when the supervisor is fresh and all up.
 // Why: Docker health then covers every program inside.
 // From: Issue #1683
-fn healthcheck() -> Result<(), String> {
-    let dir = config::need(&config::process_env, "SUPERVISE_RUN_DIR")?;
+async fn healthcheck() -> Result<(), String> {
+    let need = |key: &str| config::need(&config::process_env, key);
+    let dir = need("SUPERVISE_RUN_DIR")?;
     let path = Path::new(&dir).join("supervise.json");
     let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let status: SuperviseStatus =
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-    health_verdict(&status, unix_secs())
+    health_verdict(&status, unix_secs())?;
+    // What: nginx must answer its health page as well.
+    // Why: a running nginx process can still serve nothing.
+    // From: Issue #1683 | PR #1912
+    if kinds(&need("LANCACHE_PROCESSES")?)?.contains(&Kind::Nginx) {
+        let https = config::need_flag(&config::process_env, "HTTPS_ENABLED")?;
+        let http_url = need("PROXY_HEALTH_URL")?;
+        if !https {
+            return probe_health(&http_url).await;
+        }
+        let https_url = need("PROXY_HEALTH_HTTPS_URL")?;
+        let (http, tls) = tokio::join!(probe_health(&http_url), probe_health(&https_url));
+        http?;
+        tls?;
+    }
+    Ok(())
 }
 
 // What: the verdict for one status at one time.
@@ -4273,7 +4289,7 @@ async fn main() {
         .as_slice()
     {
         [] | ["supervise"] => TAG.scope("supervise", supervise()).await,
-        ["healthcheck"] => healthcheck(),
+        ["healthcheck"] => healthcheck().await,
         ["probe"] => probe_print(),
         ["get", key] => config::need(&config::process_env, key).map(|v| println!("{v}")),
         _ => Err("usage: lancache-watchdog [supervise|healthcheck|probe|get KEY]".to_string()),
