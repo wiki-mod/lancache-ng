@@ -47,6 +47,14 @@ CI_DIGEST_RE='sha256:[0-9a-f]{64}'
 # From: Issue #1683 | PR #1858
 CI_SYSTEM_CA_PATH="/etc/ssl/certs/ca-certificates.crt"
 
+# What: Dockerfile ARG names ci.sh supplies and reads.
+# Why: a rust-build stage has no SOT; one ci.sh owner.
+# From: Issue #1683 | PR #1912
+CI_ARG_TOOLCHAIN_IMAGE=BUILD_TOOLS_IMAGE
+CI_ARG_CRATES=RUST_CRATES
+CI_ARG_TARGET=MUSL_TARGET
+CI_ARG_PROCESSES=LANCACHE_PROCESSES
+
 # What: The ci.sh subcommand dispatch table.
 # Why: One table is membership, dispatch and error text.
 # From: Issue #1683
@@ -3392,7 +3400,7 @@ _ci_rb_ccache() {
         export CCACHE_DIR="${_CI_RB_ACC}/ccache"
         export CCACHE_PREFIX=distcc
         export CCACHE_COMPILERCHECK=content
-        _ci_rb_write "${local_id}" printf '%s' "${BUILD_TOOLS_IMAGE:-}" || return 2
+        _ci_rb_write "${local_id}" printf '%s' "${!CI_ARG_TOOLCHAIN_IMAGE:-}" || return 2
         export CCACHE_EXTRAFILES="${local_id}:${_CI_RB_REMOTE_ID}"
         export CCACHE_BASEDIR="${ccache_probe_dir}"
         local k
@@ -3484,14 +3492,14 @@ ci_cmd_rust_build() {
     # Why: services with stub-src dep-cache stage call deps.
     # From: Issue #1683 | PR #1858
     case "${mode}" in build|deps) ;; *) ci_log "[CI-ERROR-RUSTBUILD-0005]" "mode=\"${mode}\" reason=\"mode must be build or deps\""; return 2 ;; esac
-    local musl_target="${MUSL_TARGET:-}"
-    [ -n "${musl_target}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0003]" "reason=\"MUSL_TARGET env required\""; return 2; }
-    # What: MUSL_TARGET must be the build-tools rustc host.
+    local musl_target="${!CI_ARG_TARGET:-}"
+    [ -n "${musl_target}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0003]" "arg=\"${CI_ARG_TARGET}\" reason=\"build arg env required\""; return 2; }
+    # What: the target must be the build-tools rustc host.
     # Why: apk Rust has no rustup; host std is the only one.
     # From: Issue #1683 | PR #1858
     local rustc_info
     rustc_info="$(rustc -vV)" || { ci_log "[CI-ERROR-RUSTBUILD-0004]" "reason=\"rustc -vV failed in build-tools\""; return 2; }
-    grep -qx "host: ${musl_target}" <<<"${rustc_info}" || { ci_error "[CI-ERROR-RUSTBUILD-0006]" "target=\"${musl_target}\" reason=\"MUSL_TARGET is not the build-tools rustc host\"" "${rustc_info}"; return 2; }
+    grep -qx "host: ${musl_target}" <<<"${rustc_info}" || { ci_error "[CI-ERROR-RUSTBUILD-0006]" "target=\"${musl_target}\" arg=\"${CI_ARG_TARGET}\" reason=\"target is not the build-tools rustc host\"" "${rustc_info}"; return 2; }
     local masq p distcc_bin sccache_bin
     local -a drivers=()
     _CI_RB_DISTCC=0 _CI_RB_CCACHE=0 _CI_RB_CA=0 _CI_RB_PATH="${PATH}"
@@ -7890,28 +7898,28 @@ _ci_service_build_args() {
         # From: Issue #1683 | PR #1858
         if [ "${with_toolchain}" = yes ]; then
             val="$(_ci_build_tools_resolve_image)" || return 2
-            [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0009]" "arg=\"BUILD_TOOLS_IMAGE\" service=\"${service}\" reason=\"empty resolved build-tools image; FAIL CLOSED\""; return 2; }
-            out="${out}${prefix}BUILD_TOOLS_IMAGE=${val}"$'\n'
+            [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0009]" "arg=\"${CI_ARG_TOOLCHAIN_IMAGE}\" service=\"${service}\" reason=\"empty resolved build-tools image; FAIL CLOSED\""; return 2; }
+            out="${out}${prefix}${CI_ARG_TOOLCHAIN_IMAGE}=${val}"$'\n'
         fi
         # What: emit SOT workspace crates for rust-build.
         # Why: one crate owner; the Dockerfile names none.
         # From: Issue #1683 | PR #1858
         val="$(_ci_required_field "${service}" crates list)" || return 2
-        out="${out}${prefix}RUST_CRATES=${val//$'\n'/ }"$'\n'
+        out="${out}${prefix}${CI_ARG_CRATES}=${val//$'\n'/ }"$'\n'
         # What: emit the platform's SOT rust target triple.
         # Why: apk Rust ships only its host std, no rustup.
         # From: Issue #1683 | PR #1858
         if [ -n "${platform}" ]; then
             local triple
             triple="$(_ci_platform_field "${platform}" rust_target "[CI-ERROR-BUILDARGS-0010]" "service=\"${service}\" reason=\"no rust target for platform; FAIL CLOSED\"")" || return 2
-            out="${out}${prefix}MUSL_TARGET=${triple}"$'\n'
+            out="${out}${prefix}${CI_ARG_TARGET}=${triple}"$'\n'
         fi
     fi
     # What: the SOT process list of a supervised image.
-    # Why: the Dockerfile bakes it as LANCACHE_PROCESSES.
+    # Why: the Dockerfile bakes it into the image env.
     # From: Issue #1683
     val="$(_ci_target_list "${service}" processes)" || return 2
-    [ -z "${val}" ] || out="${out}${prefix}LANCACHE_PROCESSES=${val//$'\n'/ }"$'\n'
+    [ -z "${val}" ] || out="${out}${prefix}${CI_ARG_PROCESSES}=${val//$'\n'/ }"$'\n'
     # What: SOT-pinned external inputs of this Dockerfile.
     # Why: one pin->ARG owner shared with version-drift.
     # From: Issue #1683 | PR #1858
@@ -9547,8 +9555,8 @@ _ci_check_mutable_refs() {
                 # What: grep pattern in ARG not ref.
                 # Why: PROMOTE_TAGS greps ARG :latest.
                 # From: Issue #1683 | PR #1858
-                out="$(_ci_capture 1 grep -nE 'BUILD_TOOLS_IMAGE=[^[:space:]]*:latest' "${path}")" || return 2
-                out="$(_ci_capture 1 grep -vF 'ARG BUILD_TOOLS_IMAGE=' <<< "${out}")" || return 2
+                out="$(_ci_capture 1 grep -nE "${CI_ARG_TOOLCHAIN_IMAGE}=[^[:space:]]*:latest" "${path}")" || return 2
+                out="$(_ci_capture 1 grep -vF "ARG ${CI_ARG_TOOLCHAIN_IMAGE}=" <<< "${out}")" || return 2
                 if [ -n "${out}" ]; then
                     viol+=("${path} img-default-latest: ${out}")
                 fi
@@ -12508,8 +12516,8 @@ _ci_check_dockerfile_build_tools() {
         if [ ! -f "${df}" ]; then
             viol+=("${service}: no Dockerfile at ${df#"${repo_root}/"}"); continue
         fi
-        grep -q 'ARG BUILD_TOOLS_IMAGE' "${df}" \
-            || viol+=("${service}: Dockerfile must declare ARG BUILD_TOOLS_IMAGE")
+        grep -q "ARG ${CI_ARG_TOOLCHAIN_IMAGE}" "${df}" \
+            || viol+=("${service}: Dockerfile must declare ARG ${CI_ARG_TOOLCHAIN_IMAGE}")
         # What: rust-build stages declare every build var.
         # Why: ARG scope is per stage; else none reaches it.
         # From: Issue #1683 | PR #1858
@@ -12519,15 +12527,15 @@ _ci_check_dockerfile_build_tools() {
             [ -n "${bv}" ] || continue
             viol+=("${service}: Dockerfile stage ${bst} runs ci.sh rust-build without ARG ${bv} (SOT build_variables.rust)")
         done <<< "${missing}"
-        grep -Eq '^FROM \$\{BUILD_TOOLS_IMAGE(:-scratch)?\}([[:space:]]|$)' "${df}" \
-            || viol+=("${service}: Dockerfile must build FROM \${BUILD_TOOLS_IMAGE}")
+        grep -Eq "^FROM \\$\\{${CI_ARG_TOOLCHAIN_IMAGE}(:-scratch)?\\}([[:space:]]|$)" "${df}" \
+            || viol+=("${service}: Dockerfile must build FROM \${${CI_ARG_TOOLCHAIN_IMAGE}}")
         # What: forbid a mutable default on the ARG.
         # Why: ci.sh supplies the immutable ref (AG-CI-008).
         # From: Issue #1683
         local hit
-        hit="$(_ci_capture 1 grep -E '^ARG BUILD_TOOLS_IMAGE=' "${df}")" || return 2
+        hit="$(_ci_capture 1 grep -E "^ARG ${CI_ARG_TOOLCHAIN_IMAGE}=" "${df}")" || return 2
         if [ -n "${hit}" ]; then
-            viol+=("${service}: ARG BUILD_TOOLS_IMAGE must carry no default; ci.sh supplies it")
+            viol+=("${service}: ARG ${CI_ARG_TOOLCHAIN_IMAGE} must carry no default; ci.sh supplies it")
         fi
         local hit
         hit="$(_ci_capture 1 grep -F 'cargo install' "${df}")" || return 2
