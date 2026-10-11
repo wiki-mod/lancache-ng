@@ -123,10 +123,10 @@ COPY --from=proxy-builder /build/lancache-watchdog-out /usr/local/bin/lancache-w
 # What: static nginx inputs and the dir that holds them.
 # Why: the COPY and its path have one owner: this file.
 # From: Issue #1095 | Issue #1683
-COPY nginx.conf /etc/nginx/nginx.conf.template
-COPY conf.d/ /etc/nginx/conf.d/
-COPY proxy-params.conf /etc/nginx/proxy-params.conf.template
-COPY public_suffix_list.dat /etc/nginx/public_suffix_list.dat
+COPY services/proxy/nginx.conf /etc/nginx/nginx.conf.template
+COPY services/proxy/conf.d/ /etc/nginx/conf.d/
+COPY services/proxy/proxy-params.conf /etc/nginx/proxy-params.conf.template
+COPY services/proxy/public_suffix_list.dat /etc/nginx/public_suffix_list.dat
 ENV NGINX_DIR=/etc/nginx
 
 VOLUME ["/etc/nginx/ssl", "/var/cache/nginx/lancache"]
