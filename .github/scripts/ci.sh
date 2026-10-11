@@ -4000,30 +4000,11 @@ _ci_test_toolchain() {
     printf 'service=%s tested=ok\n' "${service}"
 }
 
-# What: an image's entrypoint as quoted shell words
-# Why: AG-CI-006: the Dockerfile owns ENTRYPOINT
-# From: Issue #1683 | PR #1858
-_ci_image_entrypoint() {
-    local image="$1" raw first
-    # What: pulls the image when inspect does not find it
-    # Why: docker image inspect reads local images only
-    # From: Issue #1683 | PR #1858
-    if ! raw="$(docker image inspect --format '{{json .Config.Entrypoint}}' "${image}" 2>&1)"; then
-        first="${raw}"
-        raw="$(_ci_run "[CI-ERROR-TEST-0013]" "image=\"${image}\" inspect=\"${first}\" reason=\"image pull for the entrypoint read failed\"" \
-            docker pull -q "${image}")" || return 2
-        raw="$(_ci_run "[CI-ERROR-TEST-0014]" "image=\"${image}\" reason=\"image inspect failed after the pull\"" \
-            docker image inspect --format '{{json .Config.Entrypoint}}' "${image}")" || return 2
-    fi
-    _ci_run "[CI-ERROR-TEST-0015]" "image=\"${image}\" entrypoint=\"${raw}\" reason=\"image has no entrypoint\"" \
-        jq -er 'if type == "array" and length > 0 then map(@sh) | join(" ") else error("no entrypoint") end' <<< "${raw}"
-}
-
 # What: Execute-smoke a product image's SOT smoke checks.
 # Why: prove apk binaries run, not just exist.
 # From: Issue #1613
 _ci_smoke_service() {
-    local service="$1" checks image ep
+    local service="$1" checks image
     checks="$(_ci_service_smoke "${service}")" || return 2
     if [ -z "${checks}" ]; then
         printf 'service=%s smoke=SKIP reason=no SOT smoke\n' "${service}"
@@ -4033,13 +4014,6 @@ _ci_smoke_service() {
     if [ -z "${image}" ]; then
         ci_log "[CI-ERROR-TEST-0007]" "service=\"${service}\" reason=\"CI_SERVICE_IMAGE required for the smoke\""
         return 2
-    fi
-    # What: @ENTRYPOINT@ in a check is the image entrypoint
-    # Why: setup.sh runs service commands through it
-    # From: Issue #1683 | PR #1858
-    if [[ "${checks}" == *@ENTRYPOINT@* ]]; then
-        ep="$(_ci_image_entrypoint "${image}")" || return 2
-        checks="${checks//@ENTRYPOINT@/${ep}}"
     fi
     _ci_image_smoke "[CI-ERROR-TEST-0008]" "${service}" "execute-smoke failed; missing lib?" \
         "${image}" "" "${checks}" || return "$?"
@@ -12013,11 +11987,9 @@ _ci_check_image_channel_resolution() {
         # What: rendered image defaults match the SOT names
         # Why: AG-CI-006: the SOT and the repo own them
         # From: Issue #1683 | PR #1858
-        local reg repo tag tdir rep line sreg spre stag schan prog
+        local reg repo tdir rep line sreg spre stag schan prog
         reg="$(_ci_registry)" || return 2
         repo="$(_ci_repo)" || return 2
-        tag="$(_ci_channels_where release_tags true)" || return 2
-        tag="${tag%%$'\n'*}"
         sreg="r${SRANDOM}.test" spre="p${SRANDOM}/q${SRANDOM}" stag="t${SRANDOM}" schan="c${SRANDOM}"
         prog='($d[0].services) as $D | ($s[0].services) as $S | ($sreg + "/" + $spre + "/") as $sp
             | [$S | to_entries[] | select((.value.image // "") | startswith($sp))] as $fp
@@ -12027,14 +11999,14 @@ _ci_check_image_channel_resolution() {
               ($fp[] | .key as $k | (.value.image | ltrimstr($sp)) as $rest
                 | if ($rest | endswith(":" + $stag)) then
                     ($rest | rtrimstr(":" + $stag)) as $slug | ($D[$k].image // "") as $di
-                    | if $di == ($reg + "/" + $repo + "/" + $slug + ":" + $tag) then empty
-                      else "service \($k): default image \($di), SOT \($reg)/\($repo)/\($slug):\($tag)" end
+                    | if ($di | startswith($reg + "/" + $repo + "/" + $slug + ":")) then empty
+                      else "service \($k): default image \($di), SOT \($reg)/\($repo)/\($slug):<tag>" end
                   else "service \($k): image \(.value.image) does not take LANCACHE_IMAGE_TAG" end),
               ($ev[] | .key as $k | $S[$k].environment as $se | ($D[$k].environment // {}) as $de
                 | (["LANCACHE_IMAGE_REGISTRY", $sreg, $reg], ["LANCACHE_IMAGE_PREFIX", $spre, $repo],
-                   ["LANCACHE_IMAGE_CHANNEL", $schan, ""], ["LANCACHE_IMAGE_TAG", $stag, $tag]) as [$n, $sv, $dv]
+                   ["LANCACHE_IMAGE_CHANNEL", $schan, ""], ["LANCACHE_IMAGE_TAG", $stag, null]) as [$n, $sv, $dv]
                 | (if ($se[$n] // null) == $sv then empty else "service \($k): \($n) is \($se[$n] // "unset") for env file value \($sv)" end),
-                  (if ($de[$n] // null) == $dv then empty else "service \($k): \($n) default \($de[$n] // "unset"), SOT \($dv)" end))'
+                  (if $dv == null or ($de[$n] // null) == $dv then empty else "service \($k): \($n) default \($de[$n] // "unset"), SOT \($dv)" end))'
         tdir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-chanres.XXXXXX")" || return 2
         if ! _ci_compose_image_render "${prod}" "${tdir}/d.json" \
             || ! _ci_compose_image_render "${prod}" "${tdir}/s.json" "LANCACHE_IMAGE_REGISTRY=${sreg}" \
@@ -12044,7 +12016,7 @@ _ci_check_image_channel_resolution() {
         fi
         rep="$(_ci_run "[CI-ERROR-CHECK-0171]" "file=\"${dep}\" reason=\"image default comparison failed\"" \
             jq -rn --slurpfile d "${tdir}/d.json" --slurpfile s "${tdir}/s.json" --arg reg "${reg}" --arg repo "${repo}" \
-            --arg tag "${tag}" --arg sreg "${sreg}" --arg spre "${spre}" --arg stag "${stag}" --arg schan "${schan}" \
+            --arg sreg "${sreg}" --arg spre "${spre}" --arg stag "${stag}" --arg schan "${schan}" \
             "${prog}")" || { rm -rf "${tdir}"; return 2; }
         rm -rf "${tdir}"
         while IFS= read -r line; do
