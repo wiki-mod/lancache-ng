@@ -591,6 +591,13 @@ pub fn hex32() -> String {
     hex::encode(rand::random::<[u8; 32]>())
 }
 
+// What: lowercase hex SHA-256 of a text.
+// Why: bounded, stable file names from long host names.
+// From: Issue #1683
+pub fn sha256_hex(text: &str) -> String {
+    hex::encode(Sha256::digest(text.as_bytes()))
+}
+
 // What: first-writer-wins read-or-create of a secret file.
 // Why: independent starters must not split-brain a secret.
 // From: Issue #858
