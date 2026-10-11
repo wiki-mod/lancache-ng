@@ -21,10 +21,11 @@ use lancache_ng::config::{
     render_nats_conf,
 };
 use lancache_ng::{
-    COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL, ClientCheck, ConflictCheck, DesiredRunState,
-    DesiredState, Detail, DiskHealth, DiskInfo, DockerApi, Place, ProbeAnswer, ProbeReport,
-    ServiceHealth, WatchdogStatus, df, hex32, resolve_shared_secret, sha256_hex,
-    shared_secret_file_name, shared_secret_is_placeholder, unix_secs, write_file,
+    ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
+    ClientCheck, ConflictCheck, DesiredRunState, DesiredState, Detail, DiskHealth, DiskInfo,
+    DockerApi, NetdataAlarm, Place, ProbeAnswer, ProbeReport, ServiceHealth, WatchdogStatus, df,
+    hex32, resolve_shared_secret, sha256_hex, shared_secret_file_name,
+    shared_secret_is_placeholder, unix_secs, write_file, write_if_changed,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1107,10 +1108,7 @@ impl Kind {
             ),
             Self::SyslogNg => syslog_ng(ctx),
             Self::Chronyd => chronyd(ctx),
-            Self::Netdata => Ok(Run {
-                argv: vec!["netdata".into(), "-D".into()],
-                ..Run::default()
-            }),
+            Self::Netdata => netdata(ctx),
             Self::Pdns => pdns_auth(ctx),
             Self::DnsHttp => recursor(ctx, &DNS_HTTP),
             Self::DnsHttps => recursor(ctx, &DNS_HTTPS),
@@ -1190,6 +1188,118 @@ fn syslog_ng(ctx: &Ctx) -> Result<Run, String> {
     ];
     Ok(Run {
         argv,
+        ..Run::default()
+    })
+}
+
+// What: wait limit and recipient of the alarm POST.
+// Why: an unreachable ui must not stall netdata's health.
+// From: Issue #858
+const NETDATA_ALARM_MAX_TIME: u32 = 15;
+const NETDATA_ALARM_RECIPIENT: &str = "lancache-ui";
+
+// What: daemon and health log to stderr, the rest off.
+// Why: Docker hands stderr to the one syslog-ng.
+// From: Issue #1683
+const NETDATA_CONF: &str =
+    "[logs]\n    daemon = stderr\n    health = stderr\n    collector = off\n    access = off\n";
+
+// What: fields of the nginx cache log_format.
+// Why: go.d web_log has no built-in parser for it.
+// From: Issue #1246
+const NGINX_CACHE_LOG_PATTERN: &str = r#"^(?P<remote_addr>\S+) - \[(?P<time_local>[^\]]+)\] "(?P<request>[^"]*)" (?P<status>\d+) (?P<body_bytes_sent>\d+) "[^"]*" "(?P<host>[^"]*)""#;
+
+// What: netdata custom_sender that POSTs alarms to the ui.
+// Why: fields come from NetdataAlarm; no second list.
+// From: Issue #858
+fn alarm_notify_conf(ui_url: &str, token_file: &str) -> Result<String, String> {
+    for value in [ui_url, token_file] {
+        let plain = |c: char| c.is_ascii_alphanumeric() || "-._:/".contains(c);
+        if value.is_empty() || !value.chars().all(plain) {
+            return Err(format!("{value:?} is no plain URL or path"));
+        }
+    }
+    let sample = serde_json::to_value(NetdataAlarm::default()).map_err(|e| e.to_string())?;
+    let fields = sample.as_object().ok_or("alarm is no JSON object")?;
+    let json: Vec<String> = fields
+        .iter()
+        .map(|(key, value)| {
+            if value.is_string() {
+                format!("\\\"{key}\\\":\\\"$(_lancache_json_escape \"${{{key}}}\")\\\"")
+            } else {
+                format!("\\\"{key}\\\":${{{key}}}")
+            }
+        })
+        .collect();
+    let json = json.join(",");
+    Ok(format!(
+        r#"SEND_CUSTOM="YES"
+DEFAULT_RECIPIENT_CUSTOM="{NETDATA_ALARM_RECIPIENT}"
+_lancache_json_escape() {{
+  printf '%s' "$1" | tr -d '\n' | sed 's/\\/\\\\/g; s/"/\\"/g'
+}}
+custom_sender() {{
+  local token httpcode
+  token="$(cat "{token_file}")" || return 1
+  httpcode="$(docurl --max-time {NETDATA_ALARM_MAX_TIME} -X POST -H "Content-Type: application/json" -H "{ALARM_TOKEN_HEADER}: ${{token}}" -d "{{{json}}}" "{ui_url}{ALARM_INGEST_PATH}")" || {{
+    error "lancache-ui alarm POST failed: HTTP ${{httpcode}}"
+    return 1
+  }}
+  case "${{httpcode}}" in 2??) return 0 ;; esac
+  error "lancache-ui alarm POST returned HTTP ${{httpcode}}"
+  return 1
+}}
+"#
+    ))
+}
+
+// What: go.d web_log job for the nginx access log.
+// Why: live request charts; netdata reads it by group.
+// From: Issue #1246
+fn web_log_conf(path: &str) -> Result<String, String> {
+    if !path.starts_with('/') || path.contains(['\'', '"', '\n', '\r', ' ', '#']) {
+        return Err(format!("NETDATA_WEB_LOG={path} is no plain absolute path"));
+    }
+    Ok(format!(
+        "jobs:\n  - name: nginx_proxy\n    path: {path}\n    log_type: regexp\n    \
+         regexp_config:\n      pattern: '{NGINX_CACHE_LOG_PATTERN}'\n"
+    ))
+}
+
+// What: alarm token, sender, logs, web_log; then netdata.
+// Why: netdata has no hook of ours; it drops root itself.
+// From: Issue #1683
+fn netdata(ctx: &Ctx) -> Result<Run, String> {
+    let dir = PathBuf::from(ctx.need("NETDATA_CONFIG_DIR")?);
+    let token_file = dir.join(".netdata-alarm-token");
+    let sender = alarm_notify_conf(
+        &ctx.need("NETDATA_ALARM_UI_URL")?,
+        &token_file.display().to_string(),
+    )?;
+    let web_log = web_log_conf(&ctx.need("NETDATA_WEB_LOG")?)?;
+    let token = stack_secret(
+        "NETDATA_ALARM_TOKEN",
+        &shared_secret_file_name("NETDATA_ALARM_TOKEN"),
+        hex32,
+    )?;
+    let put = |file: &str, body: &str, mode: u32| {
+        let path = dir.join(file);
+        write_if_changed(&path, body.as_bytes(), mode, None)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))
+            .map(|_| path)
+    };
+    let token_file = put(".netdata-alarm-token", &token, 0o600)?;
+    own(
+        &token_file,
+        Some(account_id("passwd", "netdata")?),
+        account_id("group", "netdata")?,
+        0o600,
+    )?;
+    put("health_alarm_notify.conf", &sender, 0o644)?;
+    put("netdata.conf", NETDATA_CONF, 0o644)?;
+    put("go.d/web_log.conf", &web_log, 0o644)?;
+    Ok(Run {
+        argv: vec!["netdata".into(), "-D".into()],
         ..Run::default()
     })
 }
@@ -1339,9 +1449,9 @@ fn base64_32() -> String {
 }
 
 // What: a configured secret, else the shared file.
-// Why: dns, ui and dhcp must agree on one value.
+// Why: every container and the ui agree on one value.
 // From: Issue #858
-fn dns_secret(var: &str, file: &str, make: fn() -> String) -> Result<String, String> {
+fn stack_secret(var: &str, file: &str, make: fn() -> String) -> Result<String, String> {
     let need = |key: &str| config::need(&config::process_env, key);
     let dir = need("LANCACHE_SHARED_SECRET_DIR")?;
     let gid = need("LANCACHE_SHARED_SECRET_GID")?
@@ -1361,7 +1471,7 @@ fn dns_secret(var: &str, file: &str, make: fn() -> String) -> Result<String, Str
 // Why: it guards the zone and cache APIs of the stack.
 // From: Issue #858
 fn pdns_api_key() -> Result<String, String> {
-    let key = dns_secret(
+    let key = stack_secret(
         "PDNS_API_KEY",
         &shared_secret_file_name("PDNS_API_KEY"),
         hex32,
@@ -2108,7 +2218,7 @@ fn nats_server(ctx: &Ctx) -> Result<Run, String> {
     let roles = NatsRoles::read(&|user_key, password_key| {
         Ok(NatsLogin {
             user: env_opt(user_key).unwrap_or_default(),
-            password: Some(dns_secret(
+            password: Some(stack_secret(
                 password_key,
                 &shared_secret_file_name(password_key),
                 hex32,
@@ -2159,7 +2269,7 @@ fn nats_subscriber(ctx: &Ctx) -> Result<Run, String> {
     if let Some(file) = env_opt("NATS_PASSWORD_SHARED_SECRET") {
         env.push((
             "NATS_PASSWORD".to_string(),
-            dns_secret("NATS_PASSWORD", &file, hex32)?,
+            stack_secret("NATS_PASSWORD", &file, hex32)?,
         ));
     }
     Ok(Run {
@@ -2261,7 +2371,7 @@ const KEA_CTRL_CHAIN: &str = "LANCACHE_KEA_CTRL";
 // Why: dns signs zones with it, Kea signs updates.
 // From: Issue #815 | Issue #858
 fn ddns_tsig_key() -> Result<String, String> {
-    dns_secret(
+    stack_secret(
         "DDNS_TSIG_KEY",
         &shared_secret_file_name("DDNS_TSIG_KEY"),
         base64_32,
@@ -2504,7 +2614,7 @@ fn kea_ctrl_fence(port: &str) -> Result<(), String> {
 // From: Issue #815 | Issue #1683
 fn kea_ctrl_agent(ctx: &Ctx) -> Result<Run, String> {
     kea_socket_dir()?;
-    let token = dns_secret(
+    let token = stack_secret(
         "KEA_CTRL_TOKEN",
         &shared_secret_file_name("KEA_CTRL_TOKEN"),
         hex32,
@@ -4434,6 +4544,54 @@ mod tests {
         assert!(!set(true, r#"{"ntp":"stopped"}"#));
         assert!(!set(false, r#"{"ntp":"running"}"#));
         assert!(Kind::SyslogNg.wanted(&ctx) && Kind::Netdata.wanted(&ctx));
+    }
+
+    // What: the netdata sender script comes from fields.
+    // Why: netdata and the ui must agree on the payload.
+    // From: Issue #858
+    #[test]
+    fn alarm_sender_script_names_every_field() {
+        let script = alarm_notify_conf("http://ui:8080", "/t/token").unwrap();
+        assert!(script.starts_with(&format!(
+            "SEND_CUSTOM=\"YES\"\nDEFAULT_RECIPIENT_CUSTOM=\"{NETDATA_ALARM_RECIPIENT}\"\n"
+        )));
+        assert!(script.contains("token=\"$(cat \"/t/token\")\" || return 1"));
+        assert!(script.contains(&format!(
+            "docurl --max-time {NETDATA_ALARM_MAX_TIME} -X POST"
+        )));
+        assert!(script.contains(&format!("-H \"{ALARM_TOKEN_HEADER}: ${{token}}\"")));
+        assert!(script.contains(&format!("\"http://ui:8080{ALARM_INGEST_PATH}\")\" || {{")));
+        assert!(script.contains("case \"${httpcode}\" in 2??) return 0 ;; esac"));
+        let fields = r#"-d "{\"alarm_id\":${alarm_id},\"chart\":\"$(_lancache_json_escape "${chart}")\",\"duration\":${duration},\"event_id\":${event_id},\"host\":\"$(_lancache_json_escape "${host}")\",\"info\":\"$(_lancache_json_escape "${info}")\",\"name\":\"$(_lancache_json_escape "${name}")\",\"old_status\":\"$(_lancache_json_escape "${old_status}")\",\"status\":\"$(_lancache_json_escape "${status}")\",\"unique_id\":${unique_id},\"units\":\"$(_lancache_json_escape "${units}")\",\"value_string\":\"$(_lancache_json_escape "${value_string}")\",\"when\":${when}}""#;
+        assert!(script.contains(fields), "{script}");
+        for (url, file) in [
+            ("", "/t"),
+            ("http://ui", ""),
+            ("http://ui", "/t y"),
+            ("http://u\"i", "/t"),
+        ] {
+            assert!(alarm_notify_conf(url, file).is_err());
+        }
+    }
+
+    // What: the web_log job parses the cache log_format.
+    // Why: a wrong pattern collects nothing and fails quiet.
+    // From: Issue #1246
+    #[test]
+    fn web_log_job_reads_the_cache_log_format() {
+        let path = format!("/{}/{}.log", gen_name(), gen_name());
+        let conf = web_log_conf(&path).expect("conf");
+        assert!(conf.contains(&format!("    path: {path}\n    log_type: regexp\n")));
+        assert!(conf.contains(&format!("      pattern: '{NGINX_CACHE_LOG_PATTERN}'\n")));
+        let nginx =
+            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../proxy/nginx.conf"))
+                .expect("nginx.conf");
+        assert!(nginx.contains(
+            "log_format cache '$remote_addr - [$time_local] \"$request\" '\n                     '$status $body_bytes_sent '\n                     '\"$upstream_cache_status\" \"$host\"';"
+        ));
+        for bad in ["relative.log", "/a b", "/a'b", "/a\nb"] {
+            assert!(web_log_conf(bad).is_err(), "{bad:?}");
+        }
     }
 
     // What: health is red when stale or a program is down.

@@ -64,6 +64,11 @@ services:
       - SYSLOG_PRUNE_STAMP=/var/lib/lancache-retention-state/syslog-prune.stamp
       - NTP_DRIFT_FILE=/var/lib/chrony/drift
       - CACHEHAMSTER_DATA_DIR=/var/lib/lancache-cachehamster
+      - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
+      - LANCACHE_SHARED_SECRET_GID=10001
+      - NETDATA_CONFIG_DIR=/etc/netdata
+      - NETDATA_WEB_LOG=/var/log/nginx/access.log
+      - NETDATA_ALARM_UI_URL=http://ui:8080
     # What: rendered syslog-ng, chrony and status files.
     # Why: each start renders fresh; nothing survives.
     # From: Issue #1683

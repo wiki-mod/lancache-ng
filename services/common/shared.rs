@@ -598,6 +598,32 @@ pub fn sha256_hex(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
 }
 
+// What: header and path of the netdata alarm webhook.
+// Why: the sender and the ui must spell both the same way.
+// From: Issue #858
+pub const ALARM_TOKEN_HEADER: &str = "X-Netdata-Alarm-Token";
+pub const ALARM_INGEST_PATH: &str = "/api/netdata-alarms";
+
+// What: one alarm; the names are custom_sender's variables.
+// Why: the sender script is rendered from these fields.
+// From: Issue #849
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct NetdataAlarm {
+    pub unique_id: i64,
+    pub alarm_id: i64,
+    pub event_id: i64,
+    pub when: i64,
+    pub name: String,
+    pub chart: String,
+    pub host: String,
+    pub status: String,
+    pub old_status: String,
+    pub value_string: String,
+    pub units: String,
+    pub info: String,
+    pub duration: i64,
+}
+
 // What: first-writer-wins read-or-create of a secret file.
 // Why: independent starters must not split-brain a secret.
 // From: Issue #858
