@@ -107,13 +107,18 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
-# What: syslog-ng files belong to this reader group.
-# Why: the ui (shared gid) and netdata web_log read them.
+# What: accounts and dirs of this image, from the SOT.
+# Why: ci.sh creates them; the Dockerfile names none.
+# From: Issue #1683 | PR #1912
+ARG IMAGE_SETUP
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    bash /usr/local/bin/ci.sh image-setup
+
+# What: the shared gid of the stack's secret files.
+# Why: ci.sh passes it from the SOT; compose names none.
 # From: Issue #1683 | PR #1912
 ARG LANCACHE_RUNTIME_GID
-ARG LOG_READER_GROUP
 ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID}
-RUN addgroup -g "${LANCACHE_RUNTIME_GID}" "${LOG_READER_GROUP}" && addgroup netdata "${LOG_READER_GROUP}"
 
 # What: the SOT default values, one pipe-joined list.
 # Why: ci.sh passes the list; binaries read it as env.

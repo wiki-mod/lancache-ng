@@ -108,33 +108,29 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
-# What: nginx cache, ssl and tmp dirs pre-created.
-# Why: nginx workers cannot create them later.
-# From: Issue #1428 | PR #1431
-RUN mkdir -p \
-    /etc/nginx/ssl/ca \
-    /etc/nginx/ssl/certs \
-    /var/cache/nginx/lancache \
-    /var/cache/nginx/tmp
+# What: accounts and dirs of this image, from the SOT.
+# Why: ci.sh creates them; the Dockerfile names none.
+# From: Issue #1683 | PR #1912
+ARG IMAGE_SETUP
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    bash /usr/local/bin/ci.sh image-setup
 
 COPY --from=proxy-builder /build/lancache-watchdog-out /usr/local/bin/lancache-watchdog
 
-# What: static nginx inputs and the dir that holds them.
-# Why: the COPY and its path have one owner: this file.
+# What: static nginx inputs in the dir the SOT names.
+# Why: the supervisor renders from the same NGINX_DIR.
 # From: Issue #1683 | PR #1912
-COPY services/proxy/nginx.conf /etc/nginx/nginx.conf.template
-COPY services/proxy/conf.d/ /etc/nginx/conf.d/
-COPY services/proxy/proxy-params.conf /etc/nginx/proxy-params.conf.template
-COPY services/proxy/public_suffix_list.dat /etc/nginx/public_suffix_list.dat
-ENV NGINX_DIR=/etc/nginx
+ARG NGINX_DIR
+COPY services/proxy/nginx.conf ${NGINX_DIR}/nginx.conf.template
+COPY services/proxy/conf.d/ ${NGINX_DIR}/conf.d/
+COPY services/proxy/proxy-params.conf ${NGINX_DIR}/proxy-params.conf.template
+COPY services/proxy/public_suffix_list.dat ${NGINX_DIR}/public_suffix_list.dat
 
 # What: the SOT default values, one pipe-joined list.
 # Why: ci.sh passes the list; binaries read it as env.
 # From: Issue #1683 | PR #1912
 ARG LANCACHE_RUNTIME_DEFAULTS
 ENV LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS}
-
-VOLUME ["/etc/nginx/ssl", "/var/cache/nginx/lancache"]
 
 # What: processes the supervisor runs, from the SOT.
 # Why: ci.sh passes the list; the image holds no copy.

@@ -117,22 +117,25 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
-COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
-COPY services/ui/src/templates /templates
-
-# What: the templates dir the COPY above fills.
-# Why: image-local; the binary finds its templates here.
+# What: accounts and dirs of this image, from the SOT.
+# Why: ci.sh creates them; the Dockerfile names none.
 # From: Issue #1683 | PR #1912
-ENV TEMPLATE_DIR=/templates
+ARG IMAGE_SETUP
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    bash /usr/local/bin/ci.sh image-setup
+
+COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
+# What: the templates dir, from the SOT.
+# Why: the COPY fills it; the binary reads the same value.
+# From: Issue #1683 | PR #1912
+ARG TEMPLATE_DIR
+COPY services/ui/src/templates ${TEMPLATE_DIR}
 
 # What: one runtime uid/gid for the user and the binary.
 # Why: nginx logs share it; the root start drops to it.
 # From: Issue #1427 | PR #1912
 ARG LANCACHE_RUNTIME_GID
-ARG LOG_READER_GROUP
 ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID}
-RUN addgroup -g "${LANCACHE_RUNTIME_GID}" "${LOG_READER_GROUP}" \
-    && adduser -D -H -u "${LANCACHE_RUNTIME_GID}" -G "${LOG_READER_GROUP}" -s /sbin/nologin "${LOG_READER_GROUP}"
 
 # What: the SOT default values, one pipe-joined list.
 # Why: ci.sh passes the list; binaries read it as env.

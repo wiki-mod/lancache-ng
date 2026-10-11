@@ -107,22 +107,23 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
-# What: pdns user/group comes from the package pre-install.
-# Why: no separate useradd step is needed on Alpine.
-# From: Issue #815
-RUN mkdir -p /etc/pdns/auth /var/lib/powerdns /var/run/pdns \
-    && chown -R pdns:pdns /var/lib/powerdns /var/run/pdns
+# What: accounts and dirs of this image, from the SOT.
+# Why: ci.sh creates them; the Dockerfile names none.
+# From: Issue #1683 | PR #1912
+ARG IMAGE_SETUP
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    bash /usr/local/bin/ci.sh image-setup
 
 COPY --from=dns-builder /build/nats-subscriber-out /usr/local/bin/nats-subscriber
 COPY --from=dns-builder /build/lancache-watchdog-out /usr/local/bin/lancache-watchdog
 
-# What: static inputs and the env names that point at them.
-# Why: the COPY and its path have one owner: this file.
+# What: static inputs at the paths the SOT names.
+# Why: the supervisor reads the same paths.
 # From: Issue #1683 | PR #1912
-COPY services/dns/filter-aaaa.lua /etc/pdns/filter-aaaa.lua
-COPY services/dns/schema.sqlite3.sql /usr/share/lancache-ng/schema.sqlite3.sql
-ENV PDNS_LUA_DNS_SCRIPT=/etc/pdns/filter-aaaa.lua \
-    PDNS_SCHEMA_FILE=/usr/share/lancache-ng/schema.sqlite3.sql
+ARG PDNS_LUA_DNS_SCRIPT
+ARG PDNS_SCHEMA_FILE
+COPY services/dns/filter-aaaa.lua ${PDNS_LUA_DNS_SCRIPT}
+COPY services/dns/schema.sqlite3.sql ${PDNS_SCHEMA_FILE}
 
 # What: the CDN domain list at the path the SOT names.
 # Why: a replica has no bind mount; the image carries it.
