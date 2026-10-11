@@ -12133,7 +12133,7 @@ _ci_check_changelog_direct_edit() {
 }
 
 # What: print each logging-matrix row's service, dupes kept.
-# Why: the check itself finds missing, extra and double rows.
+# Why: the check finds missing, extra and double rows.
 # From: Issue #1683 | PR #1912
 _ci_logging_matrix_canonical() {
     local doc="$1"
