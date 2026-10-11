@@ -1369,8 +1369,8 @@ readonly -a LEGACY_STATE_CHILDREN=(cache pdns pdns-ssl pdns-filter-state kea nat
 legacy_state_path() {
     local child="${1:-}"
 
-    # What: the old layout named the PowerDNS dir pdns-standard
-    # Why: the dir is pdns now; old data must still be found
+    # What: old installs keep PowerDNS data in pdns-standard
+    # Why: the dir is pdns now; the old data must be found
     # From: Issue #1683 | PR #1912
     [[ "$child" != pdns ]] || child=pdns-standard
     if [[ -n "$child" ]]; then
@@ -3141,7 +3141,7 @@ migrate_env_for_update() (
     [[ "$keep_image_refs" = "1" ]] || write_lancache_image_refs "$env_file" "$lancache_image_refs"
     adopt_moved_config_prod_keys "$install_dir" "$env_file" copy
     # What: moves SSL_ENABLED to HTTPS_ENABLED.
-    # Why: older installs and config/prod files carry the old key.
+    # Why: old installs and config/prod keep the old key.
     # From: Issue #1683 | PR #1912
     append_env_migrated_assignment_if_missing HTTPS_ENABLED SSL_ENABLED "" "$env_file"
     remove_env_key SSL_ENABLED "$env_file"
@@ -3181,8 +3181,8 @@ migrate_env_for_update() (
     remove_env_key CACHE_DIR_STANDARD "$env_file"
     remove_env_key CACHE_DIR_SSL "$env_file"
 
-    # What: moves PDNS_STANDARD_DIR to PDNS_DIR, keeps the data
-    # Why: the default dir is pdns now; the zones must not move
+    # What: moves PDNS_STANDARD_DIR to PDNS_DIR, data stays
+    # Why: the default dir is pdns now; zones must not move
     # From: Issue #1683 | PR #1912
     append_env_migrated_assignment_if_missing PDNS_DIR PDNS_STANDARD_DIR "" "$env_file"
     remove_env_key PDNS_STANDARD_DIR "$env_file"
