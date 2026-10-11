@@ -3856,27 +3856,26 @@ CASES
     [ "${status}" -eq 0 ] && [ -z "${output}" ] || { echo "${output}"; return 1; }
 }
 
+# What: enabled flag, pinned channel, moved tag, text
+# Why: auto-update never touches a pinned or idle stack
+# From: Issue #1683 | PR #1858
 @test "setup auto-update gate decides exactly per input" {
-    # What: enabled flag, pinned channel, moved tag, text
-    # Why: auto-update never touches a pinned or idle stack
-    # From: Issue #1683 | PR #1858
-    local root mut first second pin new old
+    local root mut first second pin new old word
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
     mut="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_mutable_channels)"
     first="$(awk 'NR == 1' <<< "${mut}")" second="$(awk 'NR == 2' <<< "${mut}")"
     pin="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_field release "" pinned_channel)"
-    new="sha-$(sha256sum <<< "new${BATS_TEST_NUMBER}" | cut -c1-40)"
-    old="sha-$(sha256sum <<< "old${BATS_TEST_NUMBER}" | cut -c1-40)"
+    new="sha-$(_val sha)" old="sha-$(_val sha)" word="$(_val name)"
     [ -n "${first}" ] && [ -n "${second}" ] && [ "$(wc -l <<< "${pin}")" -eq 1 ] && [ -n "${pin}" ] \
-        || { echo "inputs: ${mut} | ${pin}"; return 1; }
+        && [ "${new}" != "${old}" ] || { echo "inputs: ${mut} | ${pin} | ${new} | ${old}"; return 1; }
     # What: one decision per row, under setup.sh options
     # Why: the gate output is the auto-update log line
     # From: Issue #1683 | PR #1858
     cat > "${BATS_TEST_TMPDIR}/rows" <<CASES
 off|0|${first}|${new}|${old}|1|skip: AUTO_UPDATE_ENABLED is not 1
 empty||${first}|${new}|${old}|1|skip: AUTO_UPDATE_ENABLED is not 1
-word|x${BATS_TEST_NUMBER}|${first}|${new}|${old}|1|skip: AUTO_UPDATE_ENABLED is not 1
+word|${word}|${first}|${new}|${old}|1|skip: AUTO_UPDATE_ENABLED is not 1
 offpinned|0|${pin}|${new}|${old}|1|skip: AUTO_UPDATE_ENABLED is not 1
 pinned|1|${pin}|${new}|${old}|1|skip: LANCACHE_IMAGE_CHANNEL=${pin} tracks one fixed tag, not a moving channel; nothing to detect
 idle|1|${first}|${old}|${old}|1|skip: channel ${first} is already at ${old}
