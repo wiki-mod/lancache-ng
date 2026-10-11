@@ -7155,7 +7155,7 @@ _ci_validate_rollback_base() {
 }
 
 # What: writes a deploy/prod install's .env.local, mode 600.
-# Why: setup.sh reads that file; validate never overwrites one.
+# Why: setup.sh reads it; validate never overwrites one.
 # From: Issue #763 | PR #1912
 _ci_validate_env_local() {
     local inst="$1" content="$2"
