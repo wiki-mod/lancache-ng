@@ -7565,7 +7565,6 @@ _ci_validate_stack() {
     # Why: isolate runs; never touch a host's real state.
     # From: Issue #1683
     shared="$(_ci_validate_shared_dir)" || { _ci_validate_release "${holder}"; return 2; }
-    export LANCACHE_STATE_DIR="${shared}/state/${project}"
     # What: the SOT fixture env for every compose call.
     # Why: no .env exists; compose reads the process env.
     # From: Issue #1683 | PR #1912
@@ -7574,6 +7573,10 @@ _ci_validate_stack() {
     vfx="$(_ci_validation_env)" || { _ci_validate_release "${holder}"; return 2; }
     mapfile -t venv <<< "${vfx}"
     export "${venv[@]}"
+    # What: the per-run root wins over the fixture default.
+    # Why: the fixture carries the SOT root, a host path.
+    # From: Issue #1683 | PR #1912
+    export LANCACHE_STATE_DIR="${shared}/state/${project}"
     if ! up_out="$(mkdir -p "${LANCACHE_STATE_DIR}/cache" 2>&1)"; then
         ci_error "[CI-ERROR-VALIDATE-0052]" "dir=\"${LANCACHE_STATE_DIR}/cache\" project=\"${project}\" reason=\"per-run state root not creatable\"" "${up_out}"
         _ci_validate_release "${holder}"
