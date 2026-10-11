@@ -2080,7 +2080,7 @@ sync_repo_to_ref() {
 }
 
 # What: repo root two levels above a deploy/prod dir
-# Why: locates certs, config/prod and cdn-domains.txt
+# Why: locates certs and cdn-domains.txt
 deploy_prod_repo_root() {
     local install_dir="$1"
     realpath -m "$install_dir/../.."
