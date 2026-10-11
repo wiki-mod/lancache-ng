@@ -63,6 +63,37 @@ declare -A CI_DISPATCH=(
     [welcome]=ci_cmd_welcome [version]=ci_cmd_version
 )
 
+# What: check name -> "scope function" for ci.sh check.
+# Why: one table is membership, run scope and dispatch.
+# From: Issue #1683 | PR #1912
+declare -gA CI_CHECKS=(
+    [line-endings]="diff _ci_check_line_endings" [comment-length]="diff _ci_check_comment_length"
+    [deny-short-sha]="diff _ci_check_deny_short_sha" [language-policy]="diff _ci_check_language_policy"
+    [mutable-refs]="diff _ci_check_mutable_refs" [executable-bits]="diff _ci_check_executable_bits"
+    [pipefail-early-exit]="diff _ci_check_pipefail_early_exit" [if-without-else-status]="diff _ci_check_if_without_else_status"
+    [bats-and-chain]="diff _ci_check_bats_and_chain" [exit-evidence]="diff _ci_check_exit_evidence"
+    [ci-bats]="diff _ci_check_ci_bats" [review-chronology]="diff _ci_check_review_chronology"
+    [governance-guards]="diff _ci_check_governance_guards" [changelog-direct-edit]="diff _ci_check_changelog_direct_edit"
+    [file-headers]="repo _ci_check_file_headers" [action-node-versions]="repo _ci_check_action_node_versions"
+    [naming-consistency]="repo _ci_check_naming_consistency" [workflow-line-limit]="repo _ci_check_workflow_line_limit"
+    [stable-external-images]="repo _ci_check_stable_external_images" [compose-healthchecks]="repo _ci_check_compose_healthchecks"
+    [proxy-cache-env-doc-drift]="repo _ci_check_proxy_cache_env_doc_drift" [prebuilt-prod]="repo _ci_check_prebuilt_prod"
+    [prod-state-wiring]="repo _ci_check_prod_state_wiring" [compose-config]="repo _ci_check_compose_config"
+    [netdata-isolation]="repo _ci_check_netdata_isolation" [proxy-cert-volume]="repo _ci_check_proxy_cert_volume"
+    [proxy-nginx-policy]="repo _ci_check_proxy_nginx_policy" [setup-kea-preflight]="repo _ci_check_setup_kea_preflight"
+    [setup-update-safety]="repo _ci_check_setup_update_safety" [image-channel-resolution]="repo _ci_check_image_channel_resolution"
+    [vex-drift]="repo _ci_check_vex_drift" [logging-matrix]="repo _ci_check_logging_matrix"
+    [dockerfile-build-tools]="repo _ci_check_dockerfile_build_tools" [dockerfile-stage-variables]="repo _ci_check_dockerfile_stage_variables"
+    [dockerfile-secret-ids]="repo _ci_check_dockerfile_secret_ids" [dockerfile-context-edges]="repo _ci_check_dockerfile_context_edges"
+    [sot-identity-inputs]="repo _ci_check_sot_identity_inputs" [workflow-ci-variables]="repo _ci_check_workflow_ci_variables"
+    [workflow-job-settings]="repo _ci_check_workflow_job_settings" [cargo-profile-tuning]="repo _ci_check_cargo_profile_tuning"
+    [no-source-compiled-tools]="repo _ci_check_no_source_compiled_tools" [codeql-coverage]="repo _ci_check_codeql_coverage"
+    [version-drift]="repo _ci_version_verify"
+    [pr-title]="pr _ci_check_pr_title" [pr-template]="pr _ci_check_pr_template" [pr-tracking-metadata]="pr _ci_check_pr_tracking_metadata"
+    [cargo-audit]="job _ci_check_cargo_audit" [shellcheck]="job _ci_check_shellcheck"
+    [actionlint]="job _ci_check_actionlint" [orphaned-branches]="job _ci_check_orphaned_branches"
+)
+
 # =========================================================
 # LOGGING
 # =========================================================
@@ -7882,7 +7913,7 @@ _ci_service_build_args() {
     val="$(_ci_target_list "${service}" processes)" || return 2
     [ -z "${val}" ] || out="${out}${prefix}LANCACHE_PROCESSES=${val//$'\n'/ }"$'\n'
     # What: SOT-pinned external inputs of this Dockerfile.
-    # Why: one pin->ARG owner shared with version verify.
+    # Why: one pin->ARG owner shared with version-drift.
     # From: Issue #1683 | PR #1858
     local pins
     pins="$(_ci_target_pin_args "${service}" "${platform}" "${prefix}")" || return 2
@@ -8605,7 +8636,7 @@ _ci_version_release() {
     return "${rc}"
 }
 
-# What: version verify: default, read-only, fails on drift.
+# What: check version-drift: read-only, fails on drift.
 # Why: The one CI gate for SOT-vs-repo version drift.
 # From: Issue #1683 | PR #1858
 _ci_version_verify() {
@@ -8624,17 +8655,16 @@ _ci_version_sync() {
     _ci_version_release_sync
 }
 
-# What: version verify/audit/sync for SOT external_versions.
-# Why: pin consumers must not silently drift from the SOT.
-# From: Issue #1683 | PR #1858
+# What: version sync writes the SOT version into copies.
+# Why: the read-only gate is check version-drift alone.
+# From: Issue #1683 | PR #1912
 ci_cmd_version() {
-    local sub="${1:-verify}"
+    local sub="${1:-}"
     if [ "$#" -gt 0 ]; then shift; fi
     case "${sub}" in
-        verify|audit) _ci_version_verify ;;
-        sync)   _ci_version_sync ;;
+        sync) _ci_version_sync ;;
         *)
-            ci_log "[CI-ERROR-VERSION-0014]" "sub=\"${sub}\" reason=\"unknown version subcommand\""
+            ci_log "[CI-ERROR-VERSION-0014]" "sub=\"${sub}\" reason=\"unknown version subcommand\" known=\"sync\""
             return 2
             ;;
     esac
@@ -12789,111 +12819,49 @@ _ci_check_cargo_audit() {
     printf 'cargo-audit=clean\n'
 }
 
-# What: Run all checks, aggregate failures (§98).
-# Why: one owner; per-check scope fixed.
-# From: Issue #1683
+# What: run CI_CHECKS by scope, keep the worst exit (§98).
+# Why: a stop (2) must not read as a finding (1) (§68).
+# From: Issue #1683 | PR #1912
 ci_cmd_check_all() {
-    local -a changed=()
+    local -a changed=() names=()
     _ci_collect_changed changed "$@" || return 2
-    local sub rc=0
-    # What: diff-scoped checks see changed files.
-    # Why: PR check doesn't re-scan whole repo.
-    # From: Issue #1683
-    local -a diff_scoped=(line-endings comment-length \
-        deny-short-sha language-policy mutable-refs executable-bits \
-        pipefail-early-exit if-without-else-status \
-        bats-and-chain exit-evidence ci-bats review-chronology governance-guards \
-        changelog-direct-edit)
-    for sub in "${diff_scoped[@]}"; do
-        CI_SCAN_SCOPE_FILTER=1 ci_cmd_check "${sub}" "${changed[@]}" || rc=1
+    local raw sub r rc=0
+    raw="$(printf '%s\n' "${!CI_CHECKS[@]}" | LC_ALL=C sort)" || return 2
+    mapfile -t names <<< "${raw}"
+    for sub in "${names[@]}"; do
+        r=0
+        # What: diff sees changed files; pr needs a real PR.
+        # Why: no PR context on push; job has its own step.
+        # From: Issue #1683 | PR #1912
+        case "${CI_CHECKS[${sub}]%% *}" in
+            diff) CI_SCAN_SCOPE_FILTER=1 ci_cmd_check "${sub}" "${changed[@]}" || r=$? ;;
+            repo) ci_cmd_check "${sub}" || r=$? ;;
+            pr) [ -z "${PR_NUMBER:-}" ] || ci_cmd_check "${sub}" || r=$? ;;
+            job) ;;
+            *) ci_log "[CI-ERROR-CHECK-0173]" "sub=\"${sub}\" entry=\"${CI_CHECKS[${sub}]}\" reason=\"scope must be diff, repo, pr or job\""; r=2 ;;
+        esac
+        [ "${r}" -le "${rc}" ] || rc="${r}"
     done
-    # What: repo-wide invariants diff can't answer.
-    # Why: cross-file/state consistency every run.
-    # From: Issue #1683
-    local -a repo_wide=(file-headers action-node-versions naming-consistency \
-        workflow-line-limit stable-external-images compose-healthchecks \
-        proxy-cache-env-doc-drift \
-        prebuilt-prod prod-state-wiring compose-config \
-        netdata-isolation proxy-cert-volume proxy-nginx-policy \
-        setup-kea-preflight setup-update-safety image-channel-resolution \
-        vex-drift logging-matrix \
-        dockerfile-build-tools dockerfile-stage-variables \
-        dockerfile-secret-ids dockerfile-context-edges sot-identity-inputs workflow-ci-variables workflow-job-settings cargo-profile-tuning no-source-compiled-tools codeql-coverage version-drift)
-    for sub in "${repo_wide[@]}"; do
-        ci_cmd_check "${sub}" || rc=1
-    done
-    # What: PR-metadata checks on real PR.
-    # Why: no PR context on push.
-    # From: Issue #1683
-    if [ -n "${PR_NUMBER:-}" ]; then
-        for sub in pr-title pr-template; do
-            ci_cmd_check "${sub}" || rc=1
-        done
-    fi
     [ "${rc}" -eq 0 ] && printf 'check-all=clean\n'
     return "${rc}"
 }
 
+# What: run one CI_CHECKS entry by name; all runs every one.
+# Why: an unknown name is a coded stop, never a pass.
+# From: Issue #1683 | PR #1912
 ci_cmd_check() {
-    local sub="${1:-}"
+    local sub="${1:-}" entry
     if [ "$#" -gt 0 ]; then shift; fi
-    case "${sub}" in
-        all) ci_cmd_check_all "$@" ;;
-        cargo-audit) _ci_check_cargo_audit "$@" ;;
-        dockerfile-build-tools) _ci_check_dockerfile_build_tools "$@" ;;
-        dockerfile-stage-variables) _ci_check_dockerfile_stage_variables "$@" ;;
-        dockerfile-secret-ids) _ci_check_dockerfile_secret_ids "$@" ;;
-        sot-identity-inputs) _ci_check_sot_identity_inputs ;;
-        dockerfile-context-edges) _ci_check_dockerfile_context_edges "$@" ;;
-        workflow-ci-variables) _ci_check_workflow_ci_variables "$@" ;;
-        workflow-job-settings) _ci_check_workflow_job_settings "$@" ;;
-        cargo-profile-tuning) _ci_check_cargo_profile_tuning "$@" ;;
-        no-source-compiled-tools) _ci_check_no_source_compiled_tools "$@" ;;
-        codeql-coverage) _ci_check_codeql_coverage "$@" ;;
-        version-drift) _ci_version_verify ;;
-        shellcheck) _ci_check_shellcheck "$@" ;;
-        actionlint) _ci_check_actionlint "$@" ;;
-        line-endings) _ci_check_line_endings "$@" ;;
-        file-headers) _ci_check_file_headers "$@" ;;
-        comment-length) _ci_check_comment_length "$@" ;;
-        deny-short-sha) _ci_check_deny_short_sha "$@" ;;
-        language-policy) _ci_check_language_policy "$@" ;;
-        mutable-refs) _ci_check_mutable_refs "$@" ;;
-        executable-bits) _ci_check_executable_bits "$@" ;;
-        review-chronology) _ci_check_review_chronology "$@" ;;
-        pipefail-early-exit) _ci_check_pipefail_early_exit "$@" ;;
-        bats-and-chain) _ci_check_bats_and_chain "$@" ;;
-        if-without-else-status) _ci_check_if_without_else_status "$@" ;;
-        exit-evidence) _ci_check_exit_evidence "$@" ;;
-        ci-bats) _ci_check_ci_bats "$@" ;;
-        pr-title) _ci_check_pr_title "$@" ;;
-        stable-external-images) _ci_check_stable_external_images "$@" ;;
-        pr-template) _ci_check_pr_template "$@" ;;
-        workflow-line-limit) _ci_check_workflow_line_limit "$@" ;;
-        pr-tracking-metadata) _ci_check_pr_tracking_metadata "$@" ;;
-        orphaned-branches) _ci_check_orphaned_branches "$@" ;;
-        action-node-versions) _ci_check_action_node_versions "$@" ;;
-        governance-guards) _ci_check_governance_guards "$@" ;;
-        naming-consistency) _ci_check_naming_consistency "$@" ;;
-        compose-healthchecks) _ci_check_compose_healthchecks "$@" ;;
-        proxy-cache-env-doc-drift) _ci_check_proxy_cache_env_doc_drift "$@" ;;
-        changelog-direct-edit) _ci_check_changelog_direct_edit "$@" ;;
-        prebuilt-prod) _ci_check_prebuilt_prod "$@" ;;
-        prod-state-wiring) _ci_check_prod_state_wiring "$@" ;;
-        compose-config) _ci_check_compose_config "$@" ;;
-        netdata-isolation) _ci_check_netdata_isolation "$@" ;;
-        proxy-cert-volume) _ci_check_proxy_cert_volume "$@" ;;
-        proxy-nginx-policy) _ci_check_proxy_nginx_policy "$@" ;;
-        setup-kea-preflight) _ci_check_setup_kea_preflight "$@" ;;
-        setup-update-safety) _ci_check_setup_update_safety "$@" ;;
-        image-channel-resolution) _ci_check_image_channel_resolution "$@" ;;
-        vex-drift) _ci_check_vex_drift "$@" ;;
-        logging-matrix) _ci_check_logging_matrix "$@" ;;
-        *)
-            ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
-            return 2
-            ;;
-    esac
+    if [ "${sub}" = all ]; then
+        ci_cmd_check_all "$@"
+        return
+    fi
+    entry="${CI_CHECKS[${sub}]:-}"
+    if [ -z "${entry}" ]; then
+        ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\" known=\"all ${!CI_CHECKS[*]}\""
+        return 2
+    fi
+    "${entry#* }" "$@"
 }
 
 # What: Run the dispatcher only on direct execution.

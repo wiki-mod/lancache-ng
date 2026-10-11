@@ -1533,8 +1533,8 @@ CASES
         || { echo "SOT readers failed"; return 1; }
     tool="${tool%%$'\n'*}" sp="${sp%%$'\n'*}"
     [ -n "${tool}" ] && [ -n "${pc}" ] && [ -n "${sp}" ] || { echo "inputs: ${tool} ${pc} ${sp}"; return 1; }
-    run --separate-stderr bash "${CI_SH}" version verify
-    [ "${status}" -eq 0 ] || { echo "version verify rc ${status}: ${output} ${stderr}"; return 1; }
+    run --separate-stderr bash "${CI_SH}" check version-drift
+    [ "${status}" -eq 0 ] || { echo "version-drift rc ${status}: ${output} ${stderr}"; return 1; }
     verify="${output}"
     for w in VERSION ARCH SHA256; do
         N[${w}]="$(sed -n "s/^key=$(_pin_dep)\.consumer\.\([A-Z0-9_]*_${w}\) shape=bare\$/\1/p" <<< "${verify}" | awk 'NR == 1')"
@@ -1679,6 +1679,37 @@ foreign-digest|@BARE@@@DIG@|1|[CI-ERROR-CHECK-0014];external pin is not a SOT pi
 CASES
     run bash "${CI_SH}" check stable-external-images "${d}/$(_val name)"
     _expect no-dir 1 "[CI-ERROR-CHECK-0014];compose dir missing" || return 1
+}
+
+# What: every check has a function; check all keeps worst rc
+# Why: a stop (2) read as a finding (1) or a skip hides it
+# From: Issue #1683 | PR #1912
+@test "check: one table dispatches, check all keeps the worst exit" {
+    local k fn row tab pr rc want stubs
+    for k in "${!CI_CHECKS[@]}"; do
+        fn="${CI_CHECKS[${k}]#* }"
+        declare -F "${fn}" > /dev/null || { echo "${k}: no function ${fn}"; return 1; }
+    done
+    run bash "${CI_SH}" check "$(_val name)"
+    _expect unknown 2 "[CI-ERROR-CHECK-0001]" || return 1
+    stubs='_t_arg() { echo "arg:$*"; }; _t_find() { return 1; }; _t_stop() { return 2; }; _t_job() { echo job-ran; }'
+    while IFS='|' read -r row tab pr rc want; do
+        CI_SH="${CI_SH}" STUBS="${stubs}" TAB="${tab}" PR_NUMBER="${pr}" run env -u CHANGED_FILES bash -c \
+            'source "${CI_SH}"; eval "${STUBS}"; eval "CI_CHECKS=(${TAB})"; ci_cmd_check_all x.sh'
+        _expect "${row}" "${rc}" "${want}" || return 1
+        [[ "${output}" != *job-ran* ]] || { echo "${row}: job scope ran in check all"; return 1; }
+    done <<'CASES'
+clean|[a]="diff _t_arg" [c]="job _t_job"||0|arg:x.sh;check-all=clean
+finding|[a]="diff _t_arg" [b]="repo _t_find"||1|arg:x.sh
+stop-wins|[b]="repo _t_find" [e]="repo _t_stop"||2|-
+stop-kept|[a]="repo _t_stop" [b]="repo _t_find"||2|-
+pr-off|[d]="pr _t_find"||0|check-all=clean
+pr-on|[d]="pr _t_find"|7|1|-
+bad-scope|[f]="bogus _t_job"||2|[CI-ERROR-CHECK-0173]
+CASES
+    CI_SH="${CI_SH}" STUBS="${stubs}" run bash -c \
+        'source "${CI_SH}"; eval "${STUBS}"; CI_CHECKS=([c]="job _t_job"); ci_cmd_check c'
+    _expect job-by-name 0 job-ran
 }
 
 # What: per row: PR body on the real template -> verdict
@@ -2110,15 +2141,13 @@ _version_fixture_repo() {
 
 # What: real repo clean; one drift per row fails coded
 # Why: SOT owns versions; a copy or baked pin must not drift
-# From: Issue #1683 | PR #1858
-@test "version verify: real repo clean, each drift fails with its code" {
-    local real want sub out dep df keys arg lock vf ws mem pkg sv row verb f e want_rc code fx
+# From: Issue #1683 | PR #1912
+@test "check version-drift: real repo clean, each drift fails with its code" {
+    local real want out dep df keys arg lock vf ws mem pkg sv row f e want_rc code fx
     real="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     want="$(_ci_release_value version)" || return 1
-    for sub in "" audit; do
-        CI_REPO_ROOT="${real}" run bash "${CI_SH}" version ${sub:+"${sub}"}
-        _expect "clean${sub:+-${sub}}" 0 "release-version=${want} consumers=clean" || return 1
-    done
+    CI_REPO_ROOT="${real}" run bash "${CI_SH}" check version-drift
+    _expect clean 0 "release-version=${want} consumers=clean" || return 1
     out="${output}"
     dep="$(_ci_version_consumers)" || { echo "consumers unreadable: ${dep}"; return 1; }
     IFS='|' read -r dep df keys <<< "${dep%%$'\n'*}"
@@ -2131,10 +2160,10 @@ _version_fixture_repo() {
     [ -n "${df}" ] && [ -n "${keys}" ] && [ -n "${arg}" ] && [ -n "${mem}" ] && [ -n "${pkg}" ] \
         || { echo "inputs: ${dep}|${df}|${keys}|${arg}|${mem}|${pkg}"; return 1; }
     sv="$(_val semver)"
-    for row in version-file ws-version ws-license lock-entry member-owns arg-baked arg-missing audit-version-file; do
-        verb=verify want_rc=1
+    for row in version-file ws-version ws-license lock-entry member-owns arg-baked arg-missing; do
+        want_rc=1
         case "${row}" in
-            version-file|audit-version-file) f="${vf}" e="s/.*/${sv}/" code=0024 ;;
+            version-file) f="${vf}" e="s/.*/${sv}/" code=0024 ;;
             ws-version) f="${ws}" e="/^\[workspace\.package\]/,/^\[/ s/^version = .*/version = \"${sv}\"/" code=0021 ;;
             ws-license) f="${ws}" e="/^\[workspace\.package\]/,/^\[/ s/^license = .*/license = \"$(_val name)\"/" code=0028 ;;
             lock-entry) f="${lock}" e="/^name = \"${pkg}\"\$/,/^version = / s/^version = .*/version = \"${sv}\"/" code=0025 ;;
@@ -2142,10 +2171,9 @@ _version_fixture_repo() {
             arg-baked) f="${df}" e="s/^([[:space:]]*ARG[[:space:]]+${arg})[[:space:]]*\$/\1=$(_val name)/" want_rc=2 code=0009 ;;
             arg-missing) f="${df}" e="/^[[:space:]]*ARG[[:space:]]+${arg}[[:space:]]*\$/d" want_rc=2 code=0008 ;;
         esac
-        [ "${row}" != audit-version-file ] || verb=audit
         fx="$(_version_fixture_repo)" && sed -i -E "${e}" "${fx}/${f}" || { echo "${row}: copy not edited"; return 1; }
         ! cmp -s "${real}/${f}" "${fx}/${f}" || { echo "${row}: edit changed nothing in ${f}"; return 1; }
-        CI_MANIFEST="${CI_MANIFEST_SOURCE}" CI_REPO_ROOT="${fx}" run bash "${CI_SH}" version "${verb}"
+        CI_MANIFEST="${CI_MANIFEST_SOURCE}" CI_REPO_ROOT="${fx}" run bash "${CI_SH}" check version-drift
         _expect "${row}" "${want_rc}" "[CI-ERROR-VERSION-${code}]" || return 1
     done
 }

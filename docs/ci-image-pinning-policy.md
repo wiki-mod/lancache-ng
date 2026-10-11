@@ -84,7 +84,7 @@ inside the `build-tools` container (AG-VAL-016):
 bash .github/scripts/ci.sh check mutable-refs            # tags, branches, short SHAs, unpinned images
 bash .github/scripts/ci.sh check action-node-versions    # pinned actions: runtime and reference shape
 bash .github/scripts/ci.sh check stable-external-images  # digest-less external images
-bash .github/scripts/ci.sh version verify                # external_versions consumers
+bash .github/scripts/ci.sh check version-drift           # external_versions consumers
 ```
 
 ## Drift is part of the build identity
