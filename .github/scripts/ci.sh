@@ -459,7 +459,7 @@ _ci_required_field() {
     case "${3:-}" in
         "") v="$(ci_service_field "$1" "$2")" || return 2 ;;
         list) v="$(_ci_target_list "$1" "$2")" || return 2 ;;
-        *) ci_log "[CI-ERROR-CORE-0145]" "target=\"$1\" field=\"$2\" kind=\"$3\" reason=\"kind must be empty or list\""; return 2 ;;
+        *) ci_log "[CI-ERROR-CORE-0146]" "target=\"$1\" field=\"$2\" kind=\"$3\" reason=\"kind must be empty or list\""; return 2 ;;
     esac
     if [ -z "${v}" ]; then
         ci_log "[CI-ERROR-CORE-0009]" \
@@ -11568,7 +11568,7 @@ _ci_proxy_constant() {
     rel="${BASH_REMATCH[2]}"
     df="$(_ci_service_path proxy Dockerfile "${root}")" || return 2
     if ! dir="$(_ci_file_value "${df}" 's/^ENV NGINX_DIR=([^[:space:]]+)$/\1/p')"; then
-        ci_error "[CI-ERROR-CORE-0144]" "path=\"${df}\" name=\"NGINX_DIR\" reason=\"need exactly one ENV line\"" "${dir}"
+        ci_error "[CI-ERROR-CORE-0147]" "path=\"${df}\" name=\"NGINX_DIR\" reason=\"need exactly one ENV line\"" "${dir}"
         return 2
     fi
     printf '%s/%s\n' "${dir%/}" "${rel}"
