@@ -4621,3 +4621,41 @@ CASES
         [[ "${output}" != *"has no container image platform"* ]] || { echo "${flow} refused ${ARCH}: ${output}"; return 1; }
     done
 }
+
+# What: Kea preflight probes; asks when a server answers
+# Why: a second DHCP server needs the operator's yes
+# From: Issue #1683 | PR #1858
+@test "setup kea preflight asks before a second dhcp server" {
+    local root p env mode id want
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}" || return 1
+    export CALLS ANS DOUT DRC
+    CALLS="$(_val path)" ANS="$(_val path)" env="$(_val path)" mode="$(_val name)" id="$(_val name)"
+    p="$(_pm_path)" || return 1
+    _tool_stub "${p}" docker <<< 'printf "docker %s\n" "$*" >> "${CALLS:?}"; printf "%s\n" "${DOUT:-}"; exit "${DRC:-0}"' || return 1
+    ln -s "$(type -P sed)" "${p}/sed" || return 1
+    want="docker compose --env-file ${env} -f ${root}/deploy/prod/docker-compose.yml --profile dhcp-kea run --rm --no-deps dhcp"
+    want+=" nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5"
+    # What: runs one row: mode, docker reply, answer
+    # Why: each row checks rc, text and the docker call
+    _kea_try() {
+        DOUT="$3" DRC="$4"
+        printf '%s\n' "$2" > "${ANS}" && : > "${CALLS}" || return 1
+        _pm_run "${p}" "DHCP_MODE=$1; run_kea_dhcp_activation_preflight ${env}"
+    }
+    _kea_try "${mode}" y "" 0 || return 1
+    [ "${status}" -eq 0 ] && [ ! -s "${CALLS}" ] || { echo "non-kea mode probed: $(cat "${CALLS}") ${output}"; return 1; }
+    _kea_try kea n "| broadcast-dhcp-discover:"$'\n'"|     Server Identifier: ${id}" 0 || return 1
+    [ "${status}" -eq 1 ] && [ "$(cat "${CALLS}")" = "${want}" ] \
+        && [[ "${output}" == *"An existing DHCP server answered before Kea activation: ${id}"*"Cancelled DHCP activation."* ]] \
+        || { echo "server, no: rc ${status} calls [$(cat "${CALLS}")] ${output}"; return 1; }
+    _kea_try kea y "|     Server Identifier: ${id}" 0 || return 1
+    [ "${status}" -eq 0 ] && [[ "${output}" == *"answered before Kea activation: ${id}"* ]] \
+        || { echo "server, yes: rc ${status} ${output}"; return 1; }
+    _kea_try kea n "| broadcast-dhcp-discover:" 0 || return 1
+    [ "${status}" -eq 0 ] && [[ "${output}" == *"No DHCP server answer was detected before Kea activation."* ]] \
+        && [[ "${output}" != *PROMPT* ]] || { echo "no server: rc ${status} ${output}"; return 1; }
+    _kea_try kea n "${id}" 1 || return 1
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"could not be executed inside the Kea image."*"Cancelled DHCP activation."* ]] \
+        || { echo "probe failed, no: rc ${status} ${output}"; return 1; }
+}

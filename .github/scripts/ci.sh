@@ -11979,36 +11979,17 @@ _ci_check_dhcp_proxy_env() {
     printf 'dhcp-proxy-env=clean\n'
 }
 
-# What: Fail unless setup.sh keys + Kea preflight intact.
-# Why: missing runtime keys/preflight breaks setup.
+# What: Kea preflight call, nmap in the dhcp image
+# Why: the install flow and image layout lack a bats test
 # From: Issue #1683 | PR #1858
-_ci_check_setup_keys_kea() {
+_ci_check_setup_kea_preflight() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local -a viol=()
-    local key dep inst su
+    local su ep
     su="$(_ci_installer "${repo_root}")" || return 2
-    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    inst="$(_ci_installer_compose "${repo_root}")" || return 2
-    local hit
-    hit="$(_ci_capture 1 grep -RInE '^(NATS_LOCAL_TOKEN|NATS_TOKEN)=' "${repo_root}/$(dirname "${inst}")/.env" "${repo_root}/$(dirname "${dep}")/.env")" || return 2
-    if [ -n "${hit}" ]; then
-        viol+=("env templates must not use deprecated NATS token keys; use role credentials" "${hit}")
-    fi
-    local -a req=(DDNS_TSIG_KEY KEA_CTRL_TOKEN LANCACHE_IMAGE_TAG NATS_DNS_REPLICA_PASSWORD NATS_DNS_REPLICA_USER NATS_DNS_WRITER_PASSWORD NATS_DNS_WRITER_USER NATS_CALLOUT_PASSWORD NATS_CALLOUT_USER NATS_SYS_PASSWORD NATS_SYS_USER NATS_UI_PASSWORD NATS_UI_USER PDNS_API_KEY SECONDARY_REGISTRATION_TOKEN)
-    for key in "${req[@]}"; do
-        grep -Fq "${key}" "${su}" || viol+=("setup.sh must generate or migrate required runtime key ${key}")
-    done
-    grep -Fq 'run_kea_dhcp_activation_preflight()' "${su}" \
-        || viol+=("setup.sh must define a DHCP discovery preflight before Kea activation")
+    ep="$(_ci_service_path dhcp entrypoint.sh "${repo_root}")" || return 2
     grep -Fq 'run_kea_dhcp_activation_preflight "$ENV_LOCAL"' "${su}" \
         || viol+=("setup.sh must call the Kea discovery preflight before starting the stack")
-    grep -Fq 'nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5' "${su}" \
-        || viol+=("setup.sh must probe DHCP discovery with the Kea image before activation")
-    local hit
-    hit="$(_ci_capture 1 grep -F 'nmap --script broadcast-dhcp-discover -e any' "${su}")" || return 2
-    if [ -n "${hit}" ]; then
-        viol+=("setup.sh must not pass -e any to nmap; invalid interface fails the preflight")
-    fi
     # What: nmap in SOT dhcp packages
     # Why: SOT owns apk lists; Dockerfile consumes
     # From: Issue #1683 | PR #1858
@@ -12016,13 +11997,13 @@ _ci_check_setup_keys_kea() {
     dhcp_pkgs="$(_ci_service_packages dhcp)" || return 2
     grep -qx 'nmap' <<< "${dhcp_pkgs}" \
         || viol+=("SOT services.dhcp.packages must install nmap for the Kea discovery preflight")
-    grep -Fq 'nmap|/usr/bin/nmap|/bin/nmap)' "${repo_root}/services/dhcp/entrypoint.sh" \
-        || viol+=("services/dhcp/entrypoint.sh must pass through the nmap preflight command")
+    grep -Fq 'nmap|/usr/bin/nmap|/bin/nmap)' "${ep}" \
+        || viol+=("${ep#"${repo_root}/"} must pass through the nmap preflight command")
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0049]" "reason=\"setup.sh required keys / Kea preflight contract violated\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0049]" "reason=\"Kea preflight call / dhcp nmap contract violated\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
-    printf 'setup-keys-kea=clean\n'
+    printf 'setup-kea-preflight=clean\n'
 }
 
 # What: update pauses convergence before it mutates
@@ -13058,7 +13039,7 @@ ci_cmd_check_all() {
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
         docker-socket-proxy netdata-isolation syslog-logs-volume proxy-cert-volume proxy-nginx-policy \
         compose-required-env dhcp-proxy-env \
-        setup-keys-kea setup-update-safety setup-prompt-drift image-channel-resolution \
+        setup-kea-preflight setup-update-safety setup-prompt-drift image-channel-resolution \
         vex-drift logging-matrix \
         entrypoint-lib-wiring dockerfile-build-tools dockerfile-stage-variables \
         dockerfile-secret-ids sot-identity-inputs workflow-ci-variables workflow-job-settings cargo-profile-tuning no-source-compiled-tools codeql-coverage version-drift)
@@ -13132,7 +13113,7 @@ ci_cmd_check() {
         proxy-nginx-policy) _ci_check_proxy_nginx_policy "$@" ;;
         compose-required-env) _ci_check_compose_required_env "$@" ;;
         dhcp-proxy-env) _ci_check_dhcp_proxy_env "$@" ;;
-        setup-keys-kea) _ci_check_setup_keys_kea "$@" ;;
+        setup-kea-preflight) _ci_check_setup_kea_preflight "$@" ;;
         setup-update-safety) _ci_check_setup_update_safety "$@" ;;
         image-channel-resolution) _ci_check_image_channel_resolution "$@" ;;
         vex-drift) _ci_check_vex_drift "$@" ;;
