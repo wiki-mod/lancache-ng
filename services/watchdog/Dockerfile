@@ -104,9 +104,6 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
-ENV EDITOR=nano
-ENV VISUAL=$EDITOR
-
 COPY --from=watchdog-builder /build/lancache-watchdog-out /usr/local/bin/lancache-watchdog
 COPY services/watchdog/healthcheck.sh /healthcheck.sh
 COPY services/watchdog/retention.sh /retention.sh

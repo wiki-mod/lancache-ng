@@ -44,9 +44,6 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
-ENV EDITOR=nano
-ENV VISUAL=$EDITOR
-
 # What: nginx cache, ssl and tmp dirs pre-created.
 # Why: entrypoint drops privileges; dirs must pre-exist.
 # From: Issue #1428 | PR #1431

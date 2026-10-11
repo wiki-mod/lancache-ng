@@ -41,9 +41,6 @@ ARG CI_RETRY_BACKOFF_BASE_SECONDS
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
-ENV EDITOR=nano
-ENV VISUAL=$EDITOR
-
 # What: dnsmasq relay/proxy config templates.
 # Why: entrypoint renders the active one on first boot.
 # From: Issue #815

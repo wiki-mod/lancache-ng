@@ -41,9 +41,6 @@ ARG CI_RETRY_BACKOFF_BASE_SECONDS
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
-ENV EDITOR=nano
-ENV VISUAL=$EDITOR
-
 # What: Kea config templates, expanded on first boot.
 # Why: entrypoint renders /var/lib/kea from these.
 # From: Issue #815

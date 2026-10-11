@@ -7,53 +7,30 @@
 # From: Issue #1683
 schema: build-manifest/v1
 
-# What: apk packages and smoke runs every image gets first.
-# Why: one shared base; images list only their extras.
+# What: runtime apk packages and smoke every image gets
+# Why: CI tools belong to build-tools, not product images
 # From: Issue #1683 | PR #1858
 image_base:
   packages:
     - bash
-    - bc
     - ca-certificates
     - coreutils
     - curl
-    - docker-cli
-    - expect
     - findutils
-    - gettext
     - gettext-envsubst
-    - git
-    - github-cli
-    - gnupg
     - grep
     - jq
-    - lsof
-    - nano
-    - parallel
-    - ripgrep
     - sed
     - util-linux
-    - xz
     - zstd
   smoke:
     - bash --version
-    - bc --version
     - curl --version
-    - docker --version
     - envsubst --version
-    - expect -v
     - find --version
-    - gettext --version
-    - gh --version
-    - git --version
-    - gpg --version
     - grep --version
     - jq --version
-    - lsof -v
-    - parallel --version
-    - rg --version
     - sed --version
-    - xz --version
     - zstd --version
 
 # What: The product services this repository builds.
@@ -245,6 +222,7 @@ build_toolchain:
     packages:
       - actionlint
       - bats
+      - bc
       - bind-tools
       - build-base
       - cargo
@@ -254,24 +232,34 @@ build_toolchain:
       - cmake
       - distcc
       - distcc-pump
+      - docker-cli
       - docker-cli-buildx
       - docker-cli-compose
+      - expect
       - gawk
       - gcompat
+      - gettext
+      - git
+      - github-cli
+      - gnupg
       - iproute2
       - lld22
+      - lsof
       - make
       - musl-dev
+      - nano
       - nodejs
       - npm
       - openjdk21-jre-headless
       - openssl
       - openssl-dev
       - openssl-libs-static
+      - parallel
       - perl
       - pkgconf
       - procps-ng
       - python3
+      - ripgrep
       - rsync
       - run-parts
       - rust
@@ -284,6 +272,7 @@ build_toolchain:
       - tcpdump
       - trivy@testing=0.74.0-r0
       - tzdata
+      - xz
       - yq-go
       - zlib-dev
       - zlib-static
@@ -374,6 +363,17 @@ build_toolchain:
       - 'c="$(rustc --print cfg)" && grep -qx target_env=.musl. <<< "${c}"'
       - sccache --version
       - ccache --version
+      - bc --version
+      - docker --version
+      - expect -v
+      - gettext --version
+      - gh --version
+      - git --version
+      - gpg --version
+      - lsof -v
+      - parallel --version
+      - rg --version
+      - xz --version
       - actionlint --version
       - bats --version
       - shellcheck --version
