@@ -58,6 +58,7 @@ jobs:
       image: ${{ steps.resolve.outputs.image }}
       runner: ${{ steps.jobs.outputs.runner }}
       timeouts: ${{ steps.jobs.outputs.timeouts }}
+      validate-dir: ${{ steps.jobs.outputs.validate-dir }}
     # What: one mutable entry: the current_dev channel.
     # Why: ci.sh needs a container before steps run
     # From: Issue #1683 | PR #1858
@@ -94,13 +95,18 @@ jobs:
         run: bash .github/scripts/ci.sh job-settings
 
   # What: validate full stack of accepted candidate
-  # Why: runner host: compose binds need host paths.
-  # From: Issue #1683
+  # Why: AG-VAL-016; the shared dir keeps host paths.
+  # From: Issue #1683 | PR #1912
   validate:
     name: validate
     needs: platform
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['validate'] }}
+    container:
+      image: ${{ needs.platform.outputs.image }}
+      credentials: *ghcr_credentials
+      volumes:
+        - ${{ needs.platform.outputs.validate-dir }}:${{ needs.platform.outputs.validate-dir }}
     steps:
       - *bootstrap
       # What: check out the commit the platform job resolved

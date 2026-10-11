@@ -368,6 +368,10 @@ base_images:
 # From: Issue #1683 | PR #1912
 runtime:
   gid: 10001
+  # What: values equal on every install, KEY=value list.
+  # Why: images bake them; deploy/prod/.env holds none.
+  # From: Issue #1683 | PR #1912
+  defaults: PDNS_AUTH_API_PORT=8081 PDNS_HTTP_API_PORT=8082 PDNS_HTTPS_API_PORT=8084 DNS_ROLLBACK_PORT=8083 PDNS_SOA_REFRESH=30 PDNS_SOA_RETRY=10 PDNS_SOA_RESYNC_INTERVAL=3600 CHECK_INTERVAL=30 RESTART_AFTER=3 DISK_WARN_PCT=85 DISK_ALARM_PCT=95 DOCKER_API_TIMEOUT=5 DOCKER_RESTART_TIMEOUT=30 SYSLOG_PRUNE_RETRY_COOLDOWN=3600 CACHEHAMSTER_CONCURRENCY=4 DHCP_LEASE_TIME=86400 CACHE_SLICE_SIZE=8m CACHE_VALID_HIT=365d CACHE_VALID_ANY=1m CACHE_INACTIVE=365d CACHE_MIN_FREE=1g CACHE_VALID_DAYS=365 SYSLOG_MAX_GB=10 SYSLOG_RETENTION_DAYS=30 LOG_QUERIES=0 ROOT_ZONE_MIRROR=1 DHCP_DOMAIN=lan DHCP_DDNS_ENABLED=false
 
 # What: Pinned external tool/asset versions and checksums.
 # Why: Central version owner; consumers never re-pin.
@@ -716,6 +720,10 @@ ci_variables:
   # From: Issue #1683 | PR #1858
   CI_VALIDATE_SUBNET_POOL: 172.16.0.0/12
   CI_VALIDATE_SLOT_PREFIX: 27
+  # What: host dir shared with the validate job container
+  # Why: same path both sides; the daemon binds host paths
+  # From: Issue #1683 | PR #1912
+  CI_VALIDATE_SHARED_DIR: /var/tmp/ci-validate
   # What: DNS probe label, TEST-NET net, TTL, waits, polls
   # Why: AG-CI-006: probe values and waits have one owner.
   # From: Issue #1683 | PR #1858
@@ -858,7 +866,7 @@ branch_policy:
 # Why: One SOT for check inputs; logic stays in ci.sh.
 # From: Issue #1683 | PR #1858
 validation:
-  # What: host tools validate needs on the runner host.
+  # What: tools validate needs inside the build-tools job.
   # Why: AG-CI-001: verified fail-closed, never assumed.
   # From: Issue #1683
   host_tools: [bash, docker, jq, curl, dig, git, awk, sed, find, flock, openssl, getent]
@@ -877,7 +885,7 @@ validation:
   # What: placeholder env for targets without .env
   # Why: operator keys are :?-required
   # From: Issue #1683 | PR #1858
-  compose_validation_env: CACHE_VALID_ANY=1h CACHE_VALID_HIT=30d DNS_XFR_PRIMARY=192.0.2.10:5300 IP_HTTPS=127.0.0.2 IP_HTTP=127.0.0.1 LANCACHE_LOG_PORT=5514 LISTEN_IP=127.0.0.3 LOGGING_DHCP_ENABLED=1 LOGGING_DNS_ENABLED=1 LOGGING_PROXY_ENABLED=1 LOGGING_UI_ENABLED=1 ALLOW_INSECURE_UI=true NATS_CONSUMER=ci-secondary NATS_DNS_WRITER_USER=ci-nats-dns-writer NATS_CALLOUT_USER=ci-nats-callout NATS_SYS_USER=ci-nats-sys NATS_UI_USER=ci-nats-ui NATS_USER=ci-nats-user NATS_ADVERTISE_URL=nats://192.0.2.10:4222 NATS_URL=nats://127.0.0.1:4222 NGINX_UPSTREAM_RESOLVER=1.1.1.1 SYSLOG_MAX_GB=10 SYSLOG_RETENTION_DAYS=30
+  compose_validation_env: CACHE_VALID_ANY=1h CACHE_VALID_HIT=30d DNS_XFR_PRIMARY=192.0.2.10:5300 IP_HTTPS=127.0.0.2 IP_HTTP=127.0.0.1 LISTEN_IP=127.0.0.3 ALLOW_INSECURE_UI=true NATS_CONSUMER=ci-secondary NATS_DNS_WRITER_USER=ci-nats-dns-writer NATS_CALLOUT_USER=ci-nats-callout NATS_SYS_USER=ci-nats-sys NATS_UI_USER=ci-nats-ui NATS_USER=ci-nats-user NATS_ADVERTISE_URL=nats://192.0.2.10:4222 NATS_URL=nats://127.0.0.1:4222 NGINX_UPSTREAM_RESOLVER=1.1.1.1
   # What: secret keys of the render env, by value format.
   # Why: no secret value in the SOT; ci.sh makes each run.
   # From: Issue #1683 | PR #1858
@@ -891,4 +899,4 @@ validation:
   # What: required keys setup.sh repairs
   # Why: empty required key breaks the stack
   # From: Issue #1683 | PR #1858
-  setup_required_repairs: CACHE_INACTIVE CACHE_MAX_GB CACHE_MAX_SIZE CACHE_MEM_MB CACHE_SLICE_SIZE CACHE_VALID_ANY CACHE_VALID_HIT DDNS_TSIG_KEY KEA_CONFIG_SNAPSHOT_DIR KEA_CTRL_TOKEN LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_PREFIX LANCACHE_IMAGE_REGISTRY LANCACHE_IMAGE_TAG NATS_DNS_WRITER_PASSWORD NATS_DNS_WRITER_USER NATS_CALLOUT_PASSWORD NATS_CALLOUT_USER NATS_SYS_PASSWORD NATS_SYS_USER NATS_UI_PASSWORD NATS_UI_USER NGINX_UPSTREAM_RESOLVER PDNS_API_KEY PROXY_SECURITY_MODE HTTPS_ENABLED SECONDARY_REGISTRATION_TOKEN
+  setup_required_repairs: CACHE_MAX_GB CACHE_MAX_SIZE CACHE_MEM_MB DDNS_TSIG_KEY KEA_CONFIG_SNAPSHOT_DIR KEA_CTRL_TOKEN LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_PREFIX LANCACHE_IMAGE_REGISTRY LANCACHE_IMAGE_TAG NATS_DNS_WRITER_PASSWORD NATS_DNS_WRITER_USER NATS_CALLOUT_PASSWORD NATS_CALLOUT_USER NATS_SYS_PASSWORD NATS_SYS_USER NATS_UI_PASSWORD NATS_UI_USER NGINX_UPSTREAM_RESOLVER PDNS_API_KEY PROXY_SECURITY_MODE HTTPS_ENABLED SECONDARY_REGISTRATION_TOKEN

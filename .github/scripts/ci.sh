@@ -55,6 +55,7 @@ CI_ARG_CRATES=RUST_CRATES
 CI_ARG_TARGET=MUSL_TARGET
 CI_ARG_PROCESSES=LANCACHE_PROCESSES
 CI_ARG_GID=LANCACHE_RUNTIME_GID
+CI_ARG_DEFAULTS=LANCACHE_RUNTIME_DEFAULTS
 
 # What: The ci.sh subcommand dispatch table.
 # Why: One table is membership, dispatch and error text.
@@ -2624,7 +2625,7 @@ _ci_job_settings_read() {
 # Why: AG-CI-002/006/016: one owner, no YAML copies.
 # From: Issue #1683 | PR #1858
 ci_cmd_job_settings() {
-    local runner json job
+    local runner json job vdir
     local -a js_jobs=() js_pairs=()
     local -A js_min=()
     _ci_job_settings_read runner js_jobs js_min || return 2
@@ -2632,7 +2633,12 @@ ci_cmd_job_settings() {
     json="$(_ci_capture 0 jq -cn 'reduce range(0; $ARGS.positional | length; 2) as $i ({}; . + {($ARGS.positional[$i]): ($ARGS.positional[$i + 1] | tonumber)})' --args "${js_pairs[@]}")" || return 2
     _ci_step_output "[CI-ERROR-JOBS-0005]" runner "${runner}" || return 2
     _ci_step_output "[CI-ERROR-JOBS-0006]" timeouts "${json}" || return 2
-    printf 'runner=%s\ntimeouts=%s\n' "${runner}" "${json}"
+    # What: the validate shared dir, for the job's volume.
+    # Why: the workflow reads no SOT; this is the owner.
+    # From: Issue #1683 | PR #1912
+    vdir="$(_ci_variable CI_VALIDATE_SHARED_DIR)" || return 2
+    _ci_step_output "[CI-ERROR-JOBS-0007]" validate-dir "${vdir}" || return 2
+    printf 'runner=%s\ntimeouts=%s\nvalidate-dir=%s\n' "${runner}" "${json}" "${vdir}"
 }
 
 # What: Lowercased owner/repo for GHCR image refs.
@@ -6059,12 +6065,84 @@ _ci_validate_subnet() {
     printf '%s/%s' "$(_ci_int_to_ipv4 $(( base + (16#${h:0:8} % (1 << (slot - plen))) * (1 << (32 - slot)) )))" "${slot}"
 }
 
+# What: the host dir this job container shares, checked.
+# Why: the daemon binds host paths; unmounted is wrong.
+# From: Issue #1683 | PR #1912
+_ci_validate_shared_dir() {
+    local dir
+    dir="$(_ci_variable CI_VALIDATE_SHARED_DIR)" || return 2
+    if ! grep -qF -- " ${dir} " /proc/self/mountinfo; then
+        ci_log "[CI-ERROR-VALIDATE-0118]" "dir=\"${dir}\" reason=\"not a mount of this container; the job must mount it at the same path\""
+        return 2
+    fi
+    printf '%s' "${dir}"
+}
+
+# What: copy the compose dir and repo bind sources to a dir.
+# Why: relative binds must name host paths it has.
+# From: Issue #1683 | PR #1912
+_ci_validate_stage() {
+    local dest="$1" file cfg srcs rel out
+    file="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    cfg="$(_ci_validate_config_json)" || return 2
+    if ! srcs="$(jq -r --arg root "${CI_REPO_ROOT}/" \
+        '.services[].volumes[]? | select(.type == "bind") | .source | select(startswith($root)) | ltrimstr($root)' <<< "${cfg}" 2>&1)"; then
+        ci_error "[CI-ERROR-VALIDATE-0119]" "file=\"${file}\" reason=\"compose bind sources unreadable\"" "${srcs}"
+        return 2
+    fi
+    srcs="$(printf '%s\n%s\n' "$(dirname "${file}")" "${srcs}" | sort -u)"
+    while IFS= read -r rel; do
+        [ -n "${rel}" ] || continue
+        if [ -d "${CI_REPO_ROOT}/${rel}" ]; then
+            out="$(mkdir -p "${dest}/${rel}" && cp -a "${CI_REPO_ROOT}/${rel}/." "${dest}/${rel}/" 2>&1)" || {
+                ci_error "[CI-ERROR-VALIDATE-0121]" "path=\"${rel}\" reason=\"bind source dir not copied\"" "${out}"
+                return 2
+            }
+        elif [ -e "${CI_REPO_ROOT}/${rel}" ]; then
+            out="$(mkdir -p "${dest}/$(dirname "${rel}")" && cp -a "${CI_REPO_ROOT}/${rel}" "${dest}/${rel}" 2>&1)" || {
+                ci_error "[CI-ERROR-VALIDATE-0123]" "path=\"${rel}\" reason=\"bind source file not copied\"" "${out}"
+                return 2
+            }
+        else
+            out="$(mkdir -p "${dest}/${rel}" 2>&1)" || {
+                ci_error "[CI-ERROR-VALIDATE-0124]" "path=\"${rel}\" reason=\"missing bind source dir not created\"" "${out}"
+                return 2
+            }
+        fi
+    done <<< "${srcs}"
+}
+
+# What: join this job container to the stack's network.
+# Why: the checks dial container IPs of the /27 bridge.
+# From: Issue #1683 | PR #1912
+_ci_validate_attach() {
+    local project="$1" out
+    out="$(docker network connect "${project}_default" "$(hostname)" 2>&1)" || {
+        ci_error "[CI-ERROR-VALIDATE-0120]" "network=\"${project}_default\" reason=\"job container not joined to the stack network\"" "${out}"
+        return 2
+    }
+}
+
+# What: leave the stack's network; gone or left is fine.
+# Why: compose down cannot remove a network in use.
+# From: Issue #1683 | PR #1912
+_ci_validate_detach() {
+    local project="$1" out
+    out="$(docker network disconnect -f "${project}_default" "$(hostname)" 2>&1)" && return 0
+    case "${out}" in
+        *"not found"*|*"is not connected"*) return 0 ;;
+    esac
+    ci_error "[CI-ERROR-VALIDATE-0122]" "network=\"${project}_default\" reason=\"job container not removed from the stack network\"" "${out}"
+    return 2
+}
+
 # What: Host-lock one /27; print the holder pid.
 # Why: Per-slot flock; runs never share a /27.
 # From: Issue #1683
 _ci_validate_slot_lock() {
     local subnet="$1" root key holder out errf
-    root="${CI_TMPDIR}/ci-validate-locks"
+    root="$(_ci_validate_shared_dir)" || return 2
+    root="${root}/locks"
     key="$(printf '%s' "${subnet}" | tr './' '__')"
     if ! out="$(mkdir -p "${root}" 2>&1)"; then
         ci_error "[CI-ERROR-VALIDATE-0072]" "dir=\"${root}\" reason=\"slot lock dir not created\"" "${out}"
@@ -6373,6 +6451,7 @@ _ci_validate_network_gone() {
 _ci_validate_teardown() {
     local holder="$1" project="$2" net_id out rc=0 kind ids compose
     local label="label=com.docker.compose.project=${project}"
+    _ci_validate_detach "${project}" || rc=2
     # What: no compose file: skip down, sweep leftovers.
     # Why: the label sweep frees the slot without the file.
     # From: Issue #1683 | PR #1858
@@ -7024,18 +7103,27 @@ _ci_validate_shared_secret() {
     _ci_capture 0 docker exec "${cid}" cat "${dir}/${name}"
 }
 
-# What: http://<dns ip>:<port> of the rollback listener
-# Why: the port comes from the ui's DNS_ROLLBACK_URL env
-# From: Issue #628 | PR #1858
-_ci_validate_rollback_base() {
-    local ip="$1" ucid="$2" env url
-    env="$(_ci_capture 0 docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${ucid}")" || return 2
-    url="$(sed -n 's/^DNS_ROLLBACK_URL=//p' <<< "${env}")"
-    if [[ ! "${url}" =~ ^https?://[^/:]+:([0-9]+)/?$ ]]; then
-        ci_error "[CI-ERROR-VALIDATE-0108]" "container=\"${ucid}\" reason=\"no DNS_ROLLBACK_URL with a port in the ui env\"" "${url}"
+# What: one value of the SOT runtime.defaults list.
+# Why: ports and timings have one owner; checks read it.
+# From: Issue #1683 | PR #1912
+_ci_runtime_default() {
+    local key="$1" list val
+    list="$(_ci_required_field runtime defaults block)" || return 2
+    val="$(tr ' ' '\n' <<< "${list}" | sed -n "s/^${key}=//p")"
+    if [ -z "${val}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0125]" "key=\"${key}\" reason=\"not in the SOT runtime.defaults\""
         return 2
     fi
-    printf 'http://%s:%s' "${ip}" "${BASH_REMATCH[1]}"
+    printf '%s' "${val}"
+}
+
+# What: http://<dns ip>:<port> of the rollback listener
+# Why: the port is the SOT runtime default, not a ui env
+# From: Issue #628 | PR #1858
+_ci_validate_rollback_base() {
+    local ip="$1" port
+    port="$(_ci_runtime_default DNS_ROLLBACK_PORT)" || return 2
+    printf 'http://%s:%s' "${ip}" "${port}"
 }
 
 # What: DNS known-good snapshot/rollback round-trip.
@@ -7060,7 +7148,7 @@ _ci_validate_dns_rollback() {
         return 2
     fi
     ucid="$(_ci_validate_cid "${project}" ui)" || return 2
-    lbase="$(_ci_validate_rollback_base "${ip}" "${ucid}")" || return 2
+    lbase="$(_ci_validate_rollback_base "${ip}")" || return 2
     tries="$(_ci_variable CI_VALIDATE_LISTENER_POLL_ATTEMPTS)" || return 2
     pause="$(_ci_variable CI_VALIDATE_LISTENER_POLL_PAUSE)" || return 2
     # What: poll until the rollback listener accepts.
@@ -7443,7 +7531,7 @@ _ci_validate_probes() {
 # From: Issue #1683 | PR #1858
 _ci_validate_stack() {
     local candidate="$1" reservation subnet holder project rc=0 up_out
-    local net_ovr pin_ovr
+    local net_ovr pin_ovr shared compose_rel
     reservation="$(_ci_validate_reserve)" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         [ "${rc}" -eq 2 ] || ci_log "[CI-ERROR-VALIDATE-0015]" "reason=\"no free validation /27 after slot retries\""
@@ -7455,7 +7543,8 @@ _ci_validate_stack() {
     # What: per-run state root; prod .env names the host's.
     # Why: isolate runs; never touch a host's real state.
     # From: Issue #1683
-    export LANCACHE_STATE_DIR="${CI_REPO_ROOT}/.ci-validate-state/${project}"
+    shared="$(_ci_validate_shared_dir)" || { _ci_validate_release "${holder}"; return 2; }
+    export LANCACHE_STATE_DIR="${shared}/state/${project}"
     # What: configured values over the .env template blanks.
     # Why: the template leaves required keys empty.
     # From: Issue #1683
@@ -7469,6 +7558,15 @@ _ci_validate_stack() {
         _ci_validate_release "${holder}"
         return 2
     fi
+    # What: compose runs on a copy in the shared dir.
+    # Why: relative binds then name paths the daemon has.
+    # From: Issue #1683 | PR #1912
+    compose_rel="$(_ci_variable CI_COMPOSE_FILE)" || { _ci_validate_teardown "${holder}" "${project}"; return 2; }
+    if ! _ci_validate_stage "${LANCACHE_STATE_DIR}/repo"; then
+        _ci_validate_teardown "${holder}" "${project}"
+        return 2
+    fi
+    export CI_COMPOSE_FILE="${LANCACHE_STATE_DIR}/repo/${compose_rel}"
     if ! net_ovr="$(_ci_mktemp "${CI_TMPDIR}/ci-validate-net.XXXXXX.yml")" \
         || ! pin_ovr="$(_ci_mktemp "${CI_TMPDIR}/ci-validate-pin.XXXXXX.yml")"; then
         rm -f "${net_ovr:-}"
@@ -7478,7 +7576,8 @@ _ci_validate_stack() {
     if _ci_validate_net_override "${subnet}" > "${net_ovr}" \
         && _ci_validate_pin_override "${candidate}" > "${pin_ovr}"; then
         if up_out="$(_ci_validate_up "${project}" "${net_ovr}" "${pin_ovr}" 2>&1)"; then
-            _ci_validate_wait_healthy "${project}" || rc=$?
+            _ci_validate_attach "${project}" || rc=$?
+            [ "${rc}" -ne 0 ] || _ci_validate_wait_healthy "${project}" || rc=$?
             [ "${rc}" -eq 0 ] && { _ci_validate_probes "${project}" "${net_ovr}" "${pin_ovr}" || rc=$?; }
         elif [ "$(_ci_classify_failure "${up_out}" validate-net)" = collision ]; then
             ci_error "[CI-ERROR-VALIDATE-0016]" "reason=\"subnet/port collision after slot reservation\"" "${up_out}"
@@ -7514,6 +7613,7 @@ _ci_validate_run() {
 ci_cmd_validate() {
     local cand
     _ci_validate_host_tools || return 2
+    _ci_validate_shared_dir > /dev/null || return 2
     if ! cand="$(_ci_stack_candidate)"; then
         ci_log "[CI-ERROR-VALIDATE-0001]" "reason=\"no stack candidate (candidate read failed)\""
         return 2
@@ -7963,6 +8063,11 @@ _ci_service_build_args() {
     # From: Issue #1683 | PR #1912
     val="$(_ci_required_field runtime gid block)" || return 2
     out="${out}${prefix}${CI_ARG_GID}=${val}"$'\n'
+    # What: the SOT values equal on every install.
+    # Why: the Dockerfiles bake them; compose names none.
+    # From: Issue #1683 | PR #1912
+    val="$(_ci_required_field runtime defaults block)" || return 2
+    out="${out}${prefix}${CI_ARG_DEFAULTS}=${val}"$'\n'
     # What: SOT-pinned external inputs of this Dockerfile.
     # Why: one pin->ARG owner shared with version-drift.
     # From: Issue #1683 | PR #1858
@@ -11298,7 +11403,7 @@ _ci_check_proxy_cache_env_doc_drift() {
         _ci_producer_ok "${produced_rc}" 1 || return 2
     else
         # What: values compose gives proxy, own-dir .env
-        # Why: env_file and environment both feed proxy
+        # Why: an empty one falls back to runtime.defaults
         # From: Issue #1683 | PR #1858
         dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
         if ! raw="$(_ci_compose_query "${CI_REPO_ROOT}/${dep}" "${CI_REPO_ROOT}/$(dirname "${dep}")/.env" config --format json 2>&1)"; then
@@ -11314,6 +11419,7 @@ _ci_check_proxy_cache_env_doc_drift() {
         doc_row="$(_ci_capture 1 grep -E "^\| \`${key}\` \|" "${arch_doc}")" || return 2
         [ -n "${doc_row}" ] || continue
         checked=$((checked + 1))
+        if [ -z "${value}" ] && [ -z "${defaults}" ]; then value="$(_ci_runtime_default "${key}")" || return 2; fi
         documented="$(sed -E "s/^\| \`[A-Z_]+\` \| \`([^\`]*)\` \|.*/\1/" <<<"${doc_row}")"
         if [ "${documented}" != "${value}" ]; then
             viol+=("${key}: default=${value} vs doc=${documented}")
@@ -11457,7 +11563,7 @@ _ci_check_prod_state_wiring() {
 }
 
 # What: Fail unless every SOT host tool is present.
-# Why: validate runs on the runner host (AG-CI-001).
+# Why: validate runs in build-tools; verified (AG-CI-001).
 # From: Issue #1683
 _ci_validate_host_tools() {
     local tools t out

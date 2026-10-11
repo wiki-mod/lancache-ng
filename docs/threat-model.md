@@ -282,7 +282,7 @@ appliance spoofs.
   arbitrary clients.
 - **Zone/record rollback listener (issue #628, added since v0.2.0)**:
   `services/dns/nats-subscriber/src/main.rs` exposes a local HTTP
-  API (`DNS_ROLLBACK_LISTEN_ADDR`, default `0.0.0.0:8083`) the Admin UI calls to
+  API (`DNS_ROLLBACK_LISTEN_ADDR`, port `DNS_ROLLBACK_PORT` in `runtime.defaults`, 8083) the Admin UI calls to
   list known-good zone/record snapshots and trigger an operator-selected
   rollback — another path, besides NATS and the PowerDNS API, that can mutate
   live DNS record data. It is not published to the host/LAN (`deploy/*/

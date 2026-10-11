@@ -1415,11 +1415,18 @@ fn dns_role(raw: &str) -> Result<DnsRole, String> {
     }
 }
 
-// What: ports of the PowerDNS servers in this container.
+// What: a dns API port from the env, 1 to 65535.
+// Why: the .env owns the ports; compose passes them on.
+// From: Issue #1683 | PR #1912
+fn api_port(key: &str) -> Result<u16, String> {
+    bounded(key, 1, u16::MAX.into()).map(|p| p as u16)
+}
+
+// What: env keys of the PowerDNS API ports here.
 // Why: compose maps 53 and 1053; the APIs stay inside.
-// From: Issue #1683
-const AUTH_API_PORT: u16 = 8081;
-const ROLLBACK_LISTEN: &str = "0.0.0.0:8083";
+// From: Issue #1683 | PR #1912
+const AUTH_API_PORT_KEY: &str = "PDNS_AUTH_API_PORT";
+const ROLLBACK_PORT_KEY: &str = "DNS_ROLLBACK_PORT";
 
 // What: one recursor: name, answer IP, ports.
 // Why: dns-http and dns-https differ only in these.
@@ -1428,7 +1435,7 @@ struct Recursor {
     name: &'static str,
     ip_key: &'static str,
     port: u16,
-    api_port: u16,
+    api_port_key: &'static str,
 }
 
 impl Recursor {
@@ -1437,6 +1444,13 @@ impl Recursor {
     // From: Issue #1683 | PR #1912
     fn runs(&self) -> bool {
         env_opt(self.ip_key).is_some()
+    }
+
+    // What: the API port the .env names for this recursor.
+    // Why: the ui and the flush calls use the same key.
+    // From: Issue #1683 | PR #1912
+    fn api_port(&self) -> Result<u16, String> {
+        api_port(self.api_port_key)
     }
 }
 
@@ -1447,13 +1461,13 @@ const DNS_HTTP: Recursor = Recursor {
     name: "dns-http",
     ip_key: "PROXY_IP",
     port: 53,
-    api_port: 8082,
+    api_port_key: "PDNS_HTTP_API_PORT",
 };
 const DNS_HTTPS: Recursor = Recursor {
     name: "dns-https",
     ip_key: "PROXY_HTTPS_IP",
     port: 1053,
-    api_port: 8084,
+    api_port_key: "PDNS_HTTPS_API_PORT",
 };
 
 // What: secondary AXFR poll seconds and negative TTL.
@@ -1609,6 +1623,7 @@ struct AuthConf<'a> {
     seed_serial: &'a str,
     refresh: u64,
     retry: u64,
+    api_port: u16,
     api_key: &'a str,
 }
 
@@ -1622,7 +1637,7 @@ impl AuthConf<'_> {
              allow-axfr-ips={axfr}\ndnsupdate=yes\nallow-dnsupdate-from={allow}\n\
              dnsupdate-require-tsig=no\n\
              default-soa-content=localhost. admin.@ {seed} {refresh} {retry} 604800 3600\n\
-             webserver=yes\nwebserver-address=0.0.0.0\nwebserver-port={AUTH_API_PORT}\n\
+             webserver=yes\nwebserver-address=0.0.0.0\nwebserver-port={api_port}\n\
              webserver-allow-from=127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16\n\
              api=yes\napi-key={key}\nloglevel=3\nguardian=no\ndaemon=no\n",
             local = self.local,
@@ -1635,6 +1650,7 @@ impl AuthConf<'_> {
             seed = self.seed_serial,
             refresh = self.refresh,
             retry = self.retry,
+            api_port = self.api_port,
             key = self.api_key,
         )
     }
@@ -2005,6 +2021,7 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
         seed_serial: &seed,
         refresh,
         retry,
+        api_port: api_port(AUTH_API_PORT_KEY)?,
         api_key: &api_key,
     };
     let dir = ctx.run_dir.join("auth");
@@ -2209,7 +2226,7 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
     let lua_dns = ctx.need("PDNS_LUA_DNS_SCRIPT")?;
     let conf = RecursorConf {
         port: rec.port,
-        api_port: rec.api_port,
+        api_port: rec.api_port()?,
         api_key: &api_key,
         negative_ttl,
         loglevel,
@@ -2283,25 +2300,25 @@ fn nats_server(ctx: &Ctx) -> Result<Run, String> {
 // Why: it flushes every running recursor, writes zones.
 // From: Issue #1683
 fn nats_subscriber(ctx: &Ctx) -> Result<Run, String> {
+    let recursors = [&DNS_HTTP, &DNS_HTTPS]
+        .iter()
+        .filter(|r| r.runs())
+        .map(|r| r.api_port().map(api_root))
+        .collect::<Result<Vec<_>, _>>()?;
     let mut env = vec![
         ("PDNS_API_KEY".to_string(), pdns_api_key()?),
-        ("PDNS_AUTH_API_URL".to_string(), api_root(AUTH_API_PORT)),
         (
-            "PDNS_REC_API_URLS".to_string(),
-            [&DNS_HTTP, &DNS_HTTPS]
-                .iter()
-                .filter(|r| r.runs())
-                .map(|r| api_root(r.api_port))
-                .collect::<Vec<_>>()
-                .join(" "),
+            "PDNS_AUTH_API_URL".to_string(),
+            api_root(api_port(AUTH_API_PORT_KEY)?),
         ),
+        ("PDNS_REC_API_URLS".to_string(), recursors.join(" ")),
         (
             "PDNS_AUTH_CONFIG_DIR".to_string(),
             ctx.run_dir.join("auth").display().to_string(),
         ),
         (
             "DNS_ROLLBACK_LISTEN_ADDR".to_string(),
-            ROLLBACK_LISTEN.into(),
+            format!("0.0.0.0:{}", api_port(ROLLBACK_PORT_KEY)?),
         ),
     ];
     // What: writer's NATS password from the shared file.
@@ -2324,12 +2341,12 @@ fn nats_subscriber(ctx: &Ctx) -> Result<Run, String> {
 // From: Issue #1095
 async fn soa_bump(
     pdns: &lancache_ng::PowerDns,
+    root: &str,
     zone: &str,
     refresh: u64,
     retry: u64,
 ) -> Result<(), String> {
-    let root = api_root(AUTH_API_PORT);
-    let rrsets = pdns.zone_rrsets(&root, zone).await?;
+    let rrsets = pdns.zone_rrsets(root, zone).await?;
     let content = rrsets
         .iter()
         .find(|r| r.get("type").and_then(Value::as_str) == Some("SOA"))
@@ -2352,7 +2369,7 @@ async fn soa_bump(
         "records": [{"content": format!("{mname} {rname} {next} {refresh} {retry} {expire} {minimum}"),
                      "disabled": false}]
     }]});
-    let url = config::zone_url(&root, zone);
+    let url = config::zone_url(root, zone);
     let response = pdns
         .call(reqwest::Method::PATCH, &url, Some(body.to_string()))
         .await?;
@@ -2378,10 +2395,11 @@ async fn soa_upkeep() -> Result<(), String> {
     let (refresh, retry, resync) = soa_knobs()?;
     let http = lancache_ng::http_client().map_err(|e| format!("HTTP client: {e}"))?;
     let pdns = lancache_ng::PowerDns::new(http, pdns_api_key()?);
+    let root = api_root(api_port(AUTH_API_PORT_KEY)?);
     loop {
         let mut ok = 0;
         for zone in config::rollback_zones() {
-            match soa_bump(&pdns, &zone, refresh, retry).await {
+            match soa_bump(&pdns, &root, &zone, refresh, retry).await {
                 Ok(()) => ok += 1,
                 Err(e) => log_err(&format!("WARNING: {e}")),
             }
@@ -4244,7 +4262,8 @@ async fn main() {
         [] | ["supervise"] => TAG.scope("supervise", supervise()).await,
         ["healthcheck"] => healthcheck(),
         ["probe"] => probe_print(),
-        _ => Err("usage: lancache-watchdog [supervise|healthcheck|probe]".to_string()),
+        ["get", key] => config::need(&config::process_env, key).map(|v| println!("{v}")),
+        _ => Err("usage: lancache-watchdog [supervise|healthcheck|probe|get KEY]".to_string()),
     };
     if let Err(e) = result {
         log_err(&format!("FATAL: {e}"));
@@ -5344,10 +5363,11 @@ mod tests {
         let zones = config::rollback_zones();
         let (key, lua_c, lua_d) = (gen_name(), gen_path(), gen_path());
         let ttl = rnd(1, DAY);
+        let api = rnd(1, u16::MAX.into()) as u16;
         for rec in [&DNS_HTTP, &DNS_HTTPS] {
             let conf = RecursorConf {
                 port: rec.port,
-                api_port: rec.api_port,
+                api_port: api,
                 api_key: &key,
                 negative_ttl: ttl,
                 loglevel: 6,
@@ -5358,7 +5378,7 @@ mod tests {
             .render();
             for want in [
                 format!("  port: {}\n", rec.port),
-                format!("  port: {}\n", rec.api_port),
+                format!("  port: {api}\n"),
                 format!("  api_key: {key}\n"),
                 format!("  negative_ttl: {ttl}\n"),
                 format!("  lua_config_file: {lua_c}\n"),
@@ -5379,6 +5399,7 @@ mod tests {
         let (db, key, allow, seed) = (gen_path(), gen_name(), gen_name(), gen_name());
         let local = gen_ipv4();
         let refresh = rnd(10, DAY);
+        let api = rnd(1, u16::MAX.into()) as u16;
         for (role, primary, secondary) in [
             (DnsRole::Primary, "yes", "no"),
             (DnsRole::Secondary, "no", "yes"),
@@ -5393,6 +5414,7 @@ mod tests {
                 seed_serial: &seed,
                 refresh,
                 retry: refresh - 1,
+                api_port: api,
                 api_key: &key,
             }
             .render();
@@ -5403,6 +5425,7 @@ mod tests {
                 format!("allow-dnsupdate-from={allow}\n"),
                 format!("admin.@ {seed} {refresh} {} 604800", refresh - 1),
                 format!("api-key={key}\n"),
+                format!("webserver-port={api}\n"),
             ] {
                 assert!(conf.contains(&want), "{want:?} missing in {conf}");
             }

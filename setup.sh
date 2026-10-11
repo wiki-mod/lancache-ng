@@ -2149,14 +2149,9 @@ set_env_defaults_if_empty_or_missing() {
 # Why: install and update share one list; no value copies
 # From: Issue #1683 | PR #1858
 set_template_owned_env_defaults() {
-    set_env_defaults_if_empty_or_missing "$1" CACHE_SLICE_SIZE CACHE_VALID_HIT CACHE_VALID_ANY \
-        CACHE_INACTIVE NGINX_UPSTREAM_RESOLVER PROXY_SECURITY_MODE KEA_CONFIG_SNAPSHOT_DIR \
-        KEEP_KNOWN_GOOD_CONFIGS CACHE_MIN_FREE LANCACHE_LOG_PORT SYSLOG_MAX_GB SYSLOG_RETENTION_DAYS \
-        SYSLOG_PRUNE_RETRY_COOLDOWN DHCP_DOMAIN DHCP_LEASE_TIME DHCP_DDNS_ENABLED LOG_QUERIES \
-        ROOT_ZONE_MIRROR PDNS_SOA_REFRESH PDNS_SOA_RETRY PDNS_SOA_RESYNC_INTERVAL NTP_UPSTREAM_SERVERS \
-        CHECK_INTERVAL RESTART_AFTER DISK_WARN_PCT DISK_ALARM_PCT DOCKER_API_TIMEOUT \
-        DOCKER_RESTART_TIMEOUT CACHE_VALID_DAYS CACHEHAMSTER_CONCURRENCY KEA_CTRL_USER KEA_CTRL_PORT \
-        NATS_UI_USER NATS_DNS_WRITER_USER NATS_CALLOUT_USER NATS_SYS_USER
+    set_env_defaults_if_empty_or_missing "$1" NGINX_UPSTREAM_RESOLVER PROXY_SECURITY_MODE \
+        KEA_CONFIG_SNAPSHOT_DIR KEEP_KNOWN_GOOD_CONFIGS LANCACHE_LOG_PORT NTP_UPSTREAM_SERVERS \
+        KEA_CTRL_USER KEA_CTRL_PORT NATS_UI_USER NATS_DNS_WRITER_USER NATS_CALLOUT_USER NATS_SYS_USER
     append_env_defaults_if_missing "$1" PROXY_ALLOWED_CLIENT_CIDRS NTP_ALLOWED_CLIENT_CIDRS \
         DHCP_NTP_SERVERS CACHEHAMSTER_CREDENTIAL_PERSISTENCE CACHEHAMSTER_STEAM_CREDENTIAL \
         CACHEHAMSTER_URLS
@@ -2176,14 +2171,11 @@ config_prod_moved_keys() {
         'dhcp-proxy DHCP_NTP_SERVERS' 'dhcp-proxy DHCP_PROXY_DOMAIN' 'dhcp-proxy DHCP_PROXY_BOOT_FILENAME' \
         'dhcp-proxy DHCP_PROXY_BOOT_SERVER' 'dhcp-proxy DHCP_PROXY_CUSTOM_OPTIONS' \
         'dhcp-proxy DHCP_PROXY_PXE_BOOT_SERVER' 'dhcp-proxy DHCP_PROXY_PXE_BOOT_FILENAME_BIOS' \
-        'dhcp-proxy DHCP_PROXY_PXE_BOOT_FILENAME_UEFI' 'watchdog CHECK_INTERVAL' \
-        'watchdog RESTART_AFTER' 'watchdog DISK_WARN_PCT' 'watchdog DISK_ALARM_PCT' \
+        'dhcp-proxy DHCP_PROXY_PXE_BOOT_FILENAME_UEFI' \
         'watchdog CACHE_VALID_DAYS' 'ntp NTP_UPSTREAM_SERVERS' 'ntp NTP_ALLOWED_CLIENT_CIDRS' \
         'cachehamster CACHEHAMSTER_CREDENTIAL_PERSISTENCE' 'cachehamster CACHEHAMSTER_STEAM_CREDENTIAL' \
-        'cachehamster CACHEHAMSTER_URLS' 'cachehamster CACHEHAMSTER_CONCURRENCY' 'proxy CACHE_MIN_FREE' \
-        'dns-standard LOG_QUERIES' 'dns-standard ROOT_ZONE_MIRROR' 'dns-standard PDNS_SOA_REFRESH' \
-        'dns-standard PDNS_SOA_RETRY' 'dns-standard PDNS_SOA_RESYNC_INTERVAL' 'dhcp DHCP_DOMAIN' \
-        'dhcp DHCP_LEASE_TIME' 'dhcp DHCP_NTP_SERVERS' 'dhcp DHCP_DDNS_ENABLED'
+        'cachehamster CACHEHAMSTER_URLS' 'proxy CACHE_MIN_FREE' 'dns-standard LOG_QUERIES' \
+        'dns-standard ROOT_ZONE_MIRROR' 'dhcp DHCP_DOMAIN' 'dhcp DHCP_NTP_SERVERS' 'dhcp DHCP_DDNS_ENABLED'
 }
 
 # What: moves those keys from <svc>.local.env to the .env
@@ -5724,14 +5716,15 @@ dns_rollback_exec() (
                 echo "DNS_ROLLBACK_EXEC_NO_API_KEY"
                 exit 9
             fi
+            port=$(/usr/local/bin/lancache-watchdog get DNS_ROLLBACK_PORT) || exit 7
             m="$1"; p="$2"; b="$3"
             if [ "$m" = "POST" ]; then
                 curl -sS -w "\n%{http_code}" -X POST \
                     -H "X-API-Key: $key" -H "Content-Type: application/json" -d "$b" \
-                    "http://127.0.0.1:8083$p" || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
+                    "http://127.0.0.1:$port$p" || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
             else
                 curl -sS -w "\n%{http_code}" \
-                    -H "X-API-Key: $key" "http://127.0.0.1:8083$p" || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
+                    -H "X-API-Key: $key" "http://127.0.0.1:$port$p" || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
             fi
         ' sh "$method" "$path" "$body" 2>"$err_file") || rc=$?
     exec_err=$(cat "$err_file") || die "Cannot read $err_file (exit $?)."
@@ -5742,7 +5735,7 @@ dns_rollback_exec() (
                 die "PDNS_API_KEY could not be resolved inside the $container container (no usable value in its environment and nothing on the shared-secrets volume yet). Is the stack fully started?"
                 ;;
             *DNS_ROLLBACK_EXEC_CURL_FAILED*)
-                die "Failed to reach the rollback listener inside $container (curl could not connect to 127.0.0.1:8083). Is nats-subscriber running there?"
+                die "Failed to reach the rollback listener inside $container (curl could not connect to its rollback port). Is nats-subscriber running there?"
                 ;;
             *)
                 die "docker compose exec into $container failed (exit $rc): ${exec_err:-$stdout_val}"

@@ -77,6 +77,7 @@ jobs:
       image: ${{ steps.resolve.outputs.image }}
       runner: ${{ steps.jobs.outputs.runner }}
       timeouts: ${{ steps.jobs.outputs.timeouts }}
+      validate-dir: ${{ steps.jobs.outputs.validate-dir }}
     # What: one mutable entry: the current_dev channel.
     # Why: ci.sh needs a container before any steps run
     # From: Issue #1683 | PR #1858
@@ -315,11 +316,16 @@ jobs:
       contains(fromJSON('["success","skipped"]'), needs.build.result) &&
       (github.event_name == 'pull_request' || needs.plan.outputs.any-build == 'false' ||
       needs.assemble.result == 'success')
-    # What: runs on the runner host, not in a job container.
-    # Why: compose binds need host paths and the /27 net.
-    # From: Issue #1683
+    # What: build-tools container, one shared host dir.
+    # Why: AG-VAL-016; same path both sides for binds.
+    # From: Issue #1683 | PR #1912
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['validate'] }}
+    container:
+      image: ${{ needs.platform.outputs.image }}
+      credentials: *ghcr_credentials
+      volumes:
+        - ${{ needs.platform.outputs.validate-dir }}:${{ needs.platform.outputs.validate-dir }}
     permissions:
       contents: read
       packages: read

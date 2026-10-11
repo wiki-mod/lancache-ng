@@ -1315,6 +1315,7 @@ CASES
 @test "validate slot lock refuses a second holder of one slot" {
     local first s
     export TMPDIR="${BATS_TEST_TMPDIR}"
+    _ci_validate_shared_dir() { printf '%s' "${BATS_TEST_TMPDIR}"; }
     s="$(_ci_validate_subnet "$(_val name)")" || { echo "slot: ${s}"; return 1; }
     first="$(_ci_validate_slot_lock "${s}")" || { echo "first holder failed"; return 1; }
     run _ci_validate_slot_lock "${s}"
@@ -1483,7 +1484,7 @@ CASES
     local root cfg url
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     cfg="$(_ci_validate_config_json)" \
-        && url="$(jq -r '.services.ui.environment.DNS_ROLLBACK_URL // ""' <<<"${cfg}")" || { echo "compose: ${cfg}"; return 1; }
+        && url="$(jq -r '.services.ui.environment.DNS_URL // ""' <<<"${cfg}")" || { echo "compose: ${cfg}"; return 1; }
     url="${url#*://}"
     [ "${url%%:*}" = dns ] && jq -e '.services.dns' <<<"${cfg}" >/dev/null \
         || { echo "ui rollback host '${url%%:*}' is not the compose dns service"; return 1; }
@@ -1507,6 +1508,61 @@ CASES
     _expect success 0 "=" || return 1
     run _ci_validate_poll "$(_val int 2 4)" 0 bash -c 'echo "$1" >&2; exit 7' _ "${w}"
     _expect timeout 1 "${w}" || return 1
+}
+
+# What: a runtime default is read from the SOT list
+# Why: checks must not keep their own copy of a port
+# From: Issue #1683 | PR #1912
+@test "runtime default reads one key of the SOT list" {
+    local list key val miss
+    list="$(_ci_required_field runtime defaults block)" || { echo "no runtime.defaults: ${list}"; return 1; }
+    key="$(tr ' ' '\n' <<< "${list}" | head -1)"
+    run _ci_runtime_default "${key%%=*}"
+    _expect listed 0 "=${key#*=}" || return 1
+    miss="$(_val name)"
+    run _ci_runtime_default "${miss}"
+    _expect unlisted 2 "VALIDATE-0125" || return 1
+    run _ci_validate_rollback_base 192.0.2.1
+    val="$(tr ' ' '\n' <<< "${list}" | sed -n 's/^DNS_ROLLBACK_PORT=//p')"
+    _expect rollback-base 0 "=http://192.0.2.1:${val}" || return 1
+}
+
+# What: the shared dir must be a mount of this container
+# Why: an unmounted dir would give the daemon a wrong path
+# From: Issue #1683 | PR #1912
+@test "validate shared dir is refused unless it is a mount" {
+    local d
+    d="${BATS_TEST_TMPDIR}/$(_val name)"
+    mkdir -p "${d}"
+    CI_VALIDATE_SHARED_DIR="${d}" run _ci_validate_shared_dir
+    _expect plain-dir 2 "VALIDATE-0118" || return 1
+    CI_VALIDATE_SHARED_DIR=/proc run _ci_validate_shared_dir
+    _expect mount 0 "=/proc" || return 1
+}
+
+# What: stage copies the compose dir and repo bind sources
+# Why: relative binds must name paths the daemon also has
+# From: Issue #1683 | PR #1912
+@test "validate stage copies the compose dir and repo bind sources" {
+    local r d c f
+    r="${BATS_TEST_TMPDIR}/repo" d="${BATS_TEST_TMPDIR}/stage" c="$(_val name)" f="$(_val name)"
+    mkdir -p "${r}/deploy/x" "${r}/${c}" "${r}/lone"
+    printf 'A\n' > "${r}/deploy/x/compose.yml"
+    printf 'B\n' > "${r}/${c}/${f}"
+    printf 'C\n' > "${r}/lone/file.txt"
+    CI_REPO_ROOT="${r}" CI_COMPOSE_FILE=deploy/x/compose.yml
+    _ci_validate_config_json() {
+        jq -cn --arg a "${r}/${c}" --arg b "${r}/lone/file.txt" '{services: {s: {volumes: [
+            {type: "bind", source: $a}, {type: "bind", source: $b},
+            {type: "bind", source: "/var/run/docker.sock"}, {type: "bind", source: ($a + "/gone")}]}}}'
+    }
+    run _ci_validate_stage "${d}"
+    _expect stage 0 - || return 1
+    [ "$(cat "${d}/deploy/x/compose.yml")" = A ] || { echo "compose file not staged"; return 1; }
+    [ "$(cat "${d}/${c}/${f}")" = B ] || { echo "bind dir not staged"; return 1; }
+    [ "$(cat "${d}/lone/file.txt")" = C ] || { echo "bind file not staged"; return 1; }
+    [ -d "${d}/${c}/gone" ] || { echo "missing bind source not made"; return 1; }
+    [ ! -e "${d}/var" ] || { echo "a path outside the repo was staged"; return 1; }
 }
 
 # =========================================================

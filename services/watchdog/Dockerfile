@@ -116,6 +116,12 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
     LOG_READER_GROUP=lancache
 RUN addgroup -g "${LANCACHE_RUNTIME_GID}" "${LOG_READER_GROUP}" && addgroup netdata "${LOG_READER_GROUP}"
 
+# What: the SOT values equal on every install.
+# Why: ci.sh passes the list; binaries read it as env.
+# From: Issue #1683 | PR #1912
+ARG LANCACHE_RUNTIME_DEFAULTS
+ENV LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS}
+
 COPY --from=services-builder /build/lancache-watchdog-out /usr/local/bin/lancache-watchdog
 COPY --from=services-builder /build/lancache-cachehamster-out /usr/local/bin/lancache-cachehamster
 

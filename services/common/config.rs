@@ -19,11 +19,33 @@ pub fn opt(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<String> {
     non_empty(get(name).as_deref()).map(str::to_string)
 }
 
+// What: the env name of the image's baked SOT defaults.
+// Why: ci.sh passes runtime.defaults; images bake it.
+// From: Issue #1683 | PR #1912
+pub const RUNTIME_DEFAULTS_KEY: &str = "LANCACHE_RUNTIME_DEFAULTS";
+
+// What: one name's value in a KEY=value list, if listed.
+// Why: the SOT defaults travel as one space-separated list.
+// From: Issue #1683 | PR #1912
+pub fn default_in(list: &str, name: &str) -> Option<String> {
+    list.split_whitespace().find_map(|pair| {
+        pair.split_once('=')
+            .filter(|(key, _)| *key == name)
+            .map(|(_, value)| value.to_string())
+    })
+}
+
 // What: one variable of the process environment.
-// Why: the only live reader; tests pass their own instead.
+// Why: a set value wins; else the image's SOT default.
 // From: Issue #1683 | PR #1905
 pub fn process_env(name: &str) -> Option<String> {
-    std::env::var(name).ok()
+    match std::env::var(name) {
+        Ok(value) if !value.is_empty() => Some(value),
+        other => std::env::var(RUNTIME_DEFAULTS_KEY)
+            .ok()
+            .and_then(|list| default_in(&list, name))
+            .or(other.ok()),
+    }
 }
 
 // What: env var as a String; empty counts as unset.
@@ -643,6 +665,19 @@ mod tests {
         assert_eq!(non_empty(Some("")), None);
         assert_eq!(non_empty(None), None);
         assert_eq!(non_empty(Some("persistent")), Some("persistent"));
+    }
+
+    // What: a listed name gives its value; others none.
+    // Why: the image's SOT defaults are one KEY=value list.
+    // From: Issue #1683 | PR #1912
+    #[test]
+    fn default_in_finds_the_exact_name() {
+        let list = "A_PORT=81 B_PORT=82  C=x=y";
+        assert_eq!(default_in(list, "B_PORT"), Some("82".to_string()));
+        assert_eq!(default_in(list, "C"), Some("x=y".to_string()));
+        assert_eq!(default_in(list, "A"), None);
+        assert_eq!(default_in(list, "D"), None);
+        assert_eq!(default_in("", "A_PORT"), None);
     }
 
     // What: the documented true and false sets parse.

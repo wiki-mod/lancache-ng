@@ -37,21 +37,13 @@ services:
       - NTP_ENABLED=${NTP_ENABLED:-0}
       - NTP_UPSTREAM_SERVERS=${NTP_UPSTREAM_SERVERS:?NTP_UPSTREAM_SERVERS is required}
       - NTP_ALLOWED_CLIENT_CIDRS=${NTP_ALLOWED_CLIENT_CIDRS:-}
-      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:?SYSLOG_MAX_GB is required}
-      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:?SYSLOG_RETENTION_DAYS is required}
-      - SYSLOG_PRUNE_RETRY_COOLDOWN=${SYSLOG_PRUNE_RETRY_COOLDOWN:?SYSLOG_PRUNE_RETRY_COOLDOWN is required}
-      - CACHE_VALID_DAYS=${CACHE_VALID_DAYS:?CACHE_VALID_DAYS is required}
-      - CHECK_INTERVAL=${CHECK_INTERVAL:?CHECK_INTERVAL is required}
-      - RESTART_AFTER=${RESTART_AFTER:?RESTART_AFTER is required}
-      - DISK_WARN_PCT=${DISK_WARN_PCT:?DISK_WARN_PCT is required}
-      - DISK_ALARM_PCT=${DISK_ALARM_PCT:?DISK_ALARM_PCT is required}
-      - DOCKER_API_TIMEOUT=${DOCKER_API_TIMEOUT:?DOCKER_API_TIMEOUT is required}
-      - DOCKER_RESTART_TIMEOUT=${DOCKER_RESTART_TIMEOUT:?DOCKER_RESTART_TIMEOUT is required}
+      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-}
+      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-}
+      - CACHE_VALID_DAYS=${CACHE_VALID_DAYS:-}
       - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
       - CACHEHAMSTER_CREDENTIAL_PERSISTENCE=${CACHEHAMSTER_CREDENTIAL_PERSISTENCE:-}
       - CACHEHAMSTER_STEAM_CREDENTIAL=${CACHEHAMSTER_STEAM_CREDENTIAL:-}
       - CACHEHAMSTER_URLS=${CACHEHAMSTER_URLS:-}
-      - CACHEHAMSTER_CONCURRENCY=${CACHEHAMSTER_CONCURRENCY:?CACHEHAMSTER_CONCURRENCY is required}
       # What: paths inside the mounts listed below.
       # Why: the mount and its path have one owner here.
       # From: Issue #1683
@@ -143,13 +135,13 @@ services:
       # What: per-install values from the operator .env
       # Why: .env is the one owner of operator values.
       # From: Issue #1683
-      - CACHE_MIN_FREE=${CACHE_MIN_FREE:?CACHE_MIN_FREE is required}
+      - CACHE_MIN_FREE=${CACHE_MIN_FREE:-}
       - CACHE_MAX_SIZE=${CACHE_MAX_SIZE:?CACHE_MAX_SIZE is required}
       - CACHE_MEM_MB=${CACHE_MEM_MB:?CACHE_MEM_MB is required}
-      - CACHE_SLICE_SIZE=${CACHE_SLICE_SIZE:?CACHE_SLICE_SIZE is required}
-      - CACHE_VALID_HIT=${CACHE_VALID_HIT:?CACHE_VALID_HIT is required}
-      - CACHE_VALID_ANY=${CACHE_VALID_ANY:?CACHE_VALID_ANY is required}
-      - CACHE_INACTIVE=${CACHE_INACTIVE:?CACHE_INACTIVE is required}
+      - CACHE_SLICE_SIZE=${CACHE_SLICE_SIZE:-}
+      - CACHE_VALID_HIT=${CACHE_VALID_HIT:-}
+      - CACHE_VALID_ANY=${CACHE_VALID_ANY:-}
+      - CACHE_INACTIVE=${CACHE_INACTIVE:-}
       - NGINX_UPSTREAM_RESOLVER=${NGINX_UPSTREAM_RESOLVER:?NGINX_UPSTREAM_RESOLVER is required}
       - PROXY_SECURITY_MODE=${PROXY_SECURITY_MODE:?PROXY_SECURITY_MODE is required}
       - PROXY_ALLOWED_CLIENT_CIDRS=${PROXY_ALLOWED_CLIENT_CIDRS:-}
@@ -184,11 +176,8 @@ services:
     init: true
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:?KEEP_KNOWN_GOOD_CONFIGS is required}
-      - LOG_QUERIES=${LOG_QUERIES:?LOG_QUERIES is required}
-      - ROOT_ZONE_MIRROR=${ROOT_ZONE_MIRROR:?ROOT_ZONE_MIRROR is required}
-      - PDNS_SOA_REFRESH=${PDNS_SOA_REFRESH:?PDNS_SOA_REFRESH is required}
-      - PDNS_SOA_RETRY=${PDNS_SOA_RETRY:?PDNS_SOA_RETRY is required}
-      - PDNS_SOA_RESYNC_INTERVAL=${PDNS_SOA_RESYNC_INTERVAL:?PDNS_SOA_RESYNC_INTERVAL is required}
+      - LOG_QUERIES=${LOG_QUERIES:-}
+      - ROOT_ZONE_MIRROR=${ROOT_ZONE_MIRROR:-}
       - PROXY_IP=${IP_HTTP:?IP_HTTP is required}
       - PROXY_HTTPS_IP=${IP_HTTPS:?IP_HTTPS is required}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
@@ -245,13 +234,6 @@ services:
       # Why: NATS_BIND_IP opts in; no second compose file.
       # From: Issue #1683 | PR #1912
       - "${NATS_BIND_IP:-127.0.0.1}:4222:4222"
-    # What: dns API ports 8081-8083, not host-published.
-    # Why: the ui calls these on the compose network.
-    # From: Issue #1683 | PR #1912
-    expose:
-      - "8081"
-      - "8082"
-      - "8083"
     healthcheck:
       test: ["CMD", "/usr/local/bin/lancache-watchdog", "healthcheck"]
       interval: 30s
@@ -270,10 +252,9 @@ services:
     init: true
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:?KEEP_KNOWN_GOOD_CONFIGS is required}
-      - DHCP_DOMAIN=${DHCP_DOMAIN:?DHCP_DOMAIN is required}
-      - DHCP_LEASE_TIME=${DHCP_LEASE_TIME:?DHCP_LEASE_TIME is required}
+      - DHCP_DOMAIN=${DHCP_DOMAIN:-}
       - DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS:-}
-      - DHCP_DDNS_ENABLED=${DHCP_DDNS_ENABLED:?DHCP_DDNS_ENABLED is required}
+      - DHCP_DDNS_ENABLED=${DHCP_DDNS_ENABLED:-}
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SUPERVISE_RUN_DIR=/run/lancache
       - UI_SETTINGS_FILE=/data/lancache-ui-settings.env
@@ -358,6 +339,7 @@ services:
       - NETDATA_URL=http://services:19999
       - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
       - CACHE_MAX_GB=${CACHE_MAX_GB:-}
+      - CACHE_MAX_SIZE=${CACHE_MAX_SIZE:?CACHE_MAX_SIZE is required}
       - IP_HTTP=${IP_HTTP}
       - IP_HTTPS=${IP_HTTPS}
       - DNS_STATE_DIR=/var/lib/powerdns-state
@@ -386,9 +368,7 @@ services:
       - DHCP_API_USER=${KEA_CTRL_USER:?KEA_CTRL_USER is required}
       - DHCP_API_TOKEN=${KEA_CTRL_TOKEN}
       - UI_LOGS_MAX_ENTRIES=200
-      - PDNS_AUTH_URL=http://dns:8081
-      - PDNS_REC_URL=http://dns:8082
-      - DNS_ROLLBACK_URL=http://dns:8083
+      - DNS_URL=http://dns
       - PDNS_API_KEY=${PDNS_API_KEY}
       - NATS_URL=nats://dns:4222
       - NATS_BIND_IP=${NATS_BIND_IP:-}
@@ -403,8 +383,8 @@ services:
       - NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD:-}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
       - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
-      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:?SYSLOG_MAX_GB is required}
-      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:?SYSLOG_RETENTION_DAYS is required}
+      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-}
+      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-}
     volumes:
       - shared-secrets:/var/lib/lancache-secrets
       - ui-data:/data

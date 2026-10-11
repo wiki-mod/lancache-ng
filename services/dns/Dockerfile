@@ -138,6 +138,12 @@ ENV LANCACHE_PROCESSES=${LANCACHE_PROCESSES}
 ARG LANCACHE_RUNTIME_GID
 ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID}
 
+# What: the SOT values equal on every install.
+# Why: ci.sh passes the list; binaries read it as env.
+# From: Issue #1683 | PR #1912
+ARG LANCACHE_RUNTIME_DEFAULTS
+ENV LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS}
+
 # What: the supervisor binary; no argument means supervise.
 # Why: compose and setup.sh add healthcheck or probe.
 # From: Issue #1683 | PR #1912

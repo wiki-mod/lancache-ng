@@ -55,6 +55,8 @@ Retention & Cleanup" below for what the Admin UI actually lets an operator
 change after initial setup — currently only `CACHE_MAX_SIZE`, via the
 dashboard's resize control, issue #1069 part 3):**
 
+`CACHE_MAX_SIZE` and `CACHE_MEM_MB` live in `deploy/prod/.env` (per install). The other defaults below come from `runtime.defaults` in `build-manifest.yml`; an operator overrides one in `.env.local`.
+
 | Variable | Default | Description |
 |---|---|---|
 | `CACHE_MAX_SIZE` | `50g` | Max cache size — the Admin UI dashboard's resize control re-validates a requested size against real free disk space at `CACHE_DIR` (same buffer-scaled safety check as the setup-time prompt, issue #1069) before persisting it for the host convergence tick to apply |
@@ -173,9 +175,9 @@ real host:
 | `DNS_REPLICATION_ROLE` | `native` | Selects whether a DNS container owns local zones normally (`native`), acts as the transfer primary (`primary`), or creates the fixed LAN/reverse zones as PowerDNS secondaries (`secondary`). Shipped production and full-setup topology sets `dns` to `primary`; remote secondaries (`setup.sh secondary`) use `secondary`. |
 | `DNS_XFR_PRIMARY` | — | Required when `DNS_REPLICATION_ROLE=secondary`; host:port endpoint of the PowerDNS primary used for native AXFR/refresh polling. Remote secondaries receive this from the Admin UI registration response. |
 | `DNS_XFR_NOTIFY_TARGETS` | — | Comma/space-separated NOTIFY targets for a primary. Shipped local topology notifies no local target; remote secondaries can still converge through PowerDNS's refresh polling when they are not listed here. |
-| `PDNS_SOA_REFRESH` | `30` | Primary SOA `refresh` (seconds), seeded into `default-soa-content` and rewritten onto every zone by `run_soa_maintainer`. Short by design (issue #1095): it is the only convergence guarantee for a secondary that missed a single-shot UDP NOTIFY, replacing the old `10800`s (3h) drift window. |
-| `PDNS_SOA_RETRY` | `10` | Primary SOA `retry` (seconds); must be `< PDNS_SOA_REFRESH` (RFC 1912). |
-| `PDNS_SOA_RESYNC_INTERVAL` | `3600` | Primary-only cadence (seconds) at which `run_soa_maintainer` re-anchors the `YYMMDDxxx` date serial at day rollover and bumps + NOTIFYs as a generic force-resync safety net (issue #1095). |
+| `PDNS_SOA_REFRESH` | `30` (`build-manifest.yml` `runtime.defaults`) | Primary SOA `refresh` (seconds), seeded into `default-soa-content` and rewritten onto every zone by `run_soa_maintainer`. Short by design (issue #1095): it is the only convergence guarantee for a secondary that missed a single-shot UDP NOTIFY, replacing the old `10800`s (3h) drift window. |
+| `PDNS_SOA_RETRY` | `10` (`runtime.defaults`) | Primary SOA `retry` (seconds); must be `< PDNS_SOA_REFRESH` (RFC 1912). |
+| `PDNS_SOA_RESYNC_INTERVAL` | `3600` (`runtime.defaults`) | Primary-only cadence (seconds) at which `run_soa_maintainer` re-anchors the `YYMMDDxxx` date serial at day rollover and bumps + NOTIFYs as a generic force-resync safety net (issue #1095). |
 | `NATS_BIND_IP` | — | Trusted LAN/VPN interface for optional NATS host binding used by remote secondaries; intentionally required by the secondary NATS override file. Also drives the address the Admin UI hands out during secondary registration -- see below. |
 | `NATS_ADVERTISE_URL` | — | Explicit override for the NATS URL the Admin UI hands a remote secondary during registration (issue #866), for setups `NATS_BIND_IP` alone can't express (non-default port, `tls://` scheme, VPN hostname). Always wins over `NATS_BIND_IP` when set. |
 
@@ -450,7 +452,7 @@ against an expected mount-root prefix (`CACHE_DIR_ALLOWED_PREFIX`/
 defaulting to `/var/cache`/`/var/log`/`/var/lib`) before any `find`/`rm` runs
 against it, fail-closed (loud rejection, no deletion, no stamp write) on any
 value resolving outside that prefix.
-- Remove cache entries older than `CACHE_VALID_DAYS` (`deploy/prod/.env`) — not `CACHE_VALID_HIT`, which is the unrelated nginx/proxy cache-validity variable in `deploy/prod/.env` (both happen to default to `365`, which previously masked this doc citing the wrong one)
+- Remove cache entries older than `CACHE_VALID_DAYS` (`runtime.defaults`) — not `CACHE_VALID_HIT`, which is the unrelated nginx/proxy cache-validity variable (`runtime.defaults`) (both happen to default to `365`, which previously masked this doc citing the wrong one)
 - Complements nginx `inactive` (which works by access time)
 - Syslog retention (opt-in, `SYSLOG_ENABLED=true`): storage-budget pruning under `SYSLOG_LOG_ROOT` — see the syslog-ng section below for the exact age-then-size ordering
 

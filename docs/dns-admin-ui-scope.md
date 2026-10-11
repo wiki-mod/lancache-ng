@@ -267,8 +267,8 @@ snapshots the data rrsets (SOA/NS excluded) of `lan.`, `local.lan.`, and the
 private reverse zones after every NATS-applied write and on a 60-second
 periodic watcher (covering Kea's direct-to-PowerDNS DDNS writes, which bypass
 NATS entirely); a new `X-API-Key`-authenticated HTTP listener
-(`serve_rollback` in `main.rs`, `DNS_ROLLBACK_LISTEN_ADDR`, default
-`0.0.0.0:8083`) exposes `GET /snapshots` and `POST /rollback`;
+(`serve_rollback` in `main.rs`, `DNS_ROLLBACK_LISTEN_ADDR`, port
+`DNS_ROLLBACK_PORT` in `runtime.defaults`, 8083) exposes `GET /snapshots` and `POST /rollback`;
 `services/ui/src/main.rs` is a thin HTTP forwarder to that
 listener; and `/domains`' "Zone-Snapshots & Rollback" tab
 (`templates/domains.html`) is the operator-facing picker. This closed the

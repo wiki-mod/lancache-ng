@@ -18,7 +18,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use subtle::ConstantTimeEq;
+use subtle::{Choice, ConstantTimeEq};
 
 // What: health of one service in watchdog's status.json.
 // Why: watchdog writes it and the ui reads it; one schema.
@@ -142,10 +142,14 @@ fn parse_df(text: &str) -> Option<Df> {
 }
 
 // What: constant-time equality of two secrets.
-// Why: digests first, so a length difference leaks nothing.
-pub fn ct_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (Sha256::digest(a.as_bytes()), Sha256::digest(b.as_bytes()));
-    a.ct_eq(&b).into()
+// Why: no hash; the loop runs over the expected length.
+pub fn ct_eq(presented: &str, expected: &str) -> bool {
+    let (presented, expected) = (presented.as_bytes(), expected.as_bytes());
+    let mut same = Choice::from(1);
+    for (i, want) in expected.iter().enumerate() {
+        same &= presented.get(i).copied().unwrap_or(!want).ct_eq(want);
+    }
+    bool::from(same & (presented.len() as u64).ct_eq(&(expected.len() as u64)))
 }
 
 // What: nanoseconds since the epoch; 0 for a broken clock.
@@ -1266,6 +1270,9 @@ mod tests {
         assert!(ct_eq("secret-key", "secret-key") && ct_eq("", ""));
         assert!(!ct_eq("secret-key", "different-key"));
         assert!(!ct_eq("short", "muchlongerkey") && !ct_eq("", "x"));
+        // a presented value that extends or truncates the secret never matches
+        assert!(!ct_eq("secret-keyX", "secret-key") && !ct_eq("secret-ke", "secret-key"));
+        assert!(!ct_eq("x", ""));
     }
 
     // What: record and flush messages keep the wire shape.

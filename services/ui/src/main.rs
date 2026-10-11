@@ -127,6 +127,9 @@ struct Config {
     netdata_url: String,
     https_enabled: bool,
     cache_max_gb: f64,
+    // What: the lease seconds a subnet without one shows.
+    // Why: .env owns DHCP_LEASE_TIME; Rust keeps no copy.
+    dhcp_lease_time: u32,
     http_ip: String,
     https_ip: String,
     dhcp_api_url: String,
@@ -202,6 +205,12 @@ impl Config {
         // What: a compose bool; junk stops startup.
         // Why: as for need; a typo must not flip a gate.
         let need_flag = |key: &str| config::need_flag(env, key);
+        // What: the dns container's URL plus one SOT port.
+        // Why: compose names the host; the SOT owns ports.
+        // From: Issue #1683 | PR #1912
+        let dns_api = |port_key: &str| -> Result<String, String> {
+            Ok(format!("{}:{}", need("DNS_URL")?, need(port_key)?))
+        };
         let flag =
             |key: &str, default: bool| env(key).and_then(|v| parse_bool(&v)).unwrap_or(default);
         let read = |spec: Uint| -> Result<u64, String> {
@@ -245,6 +254,13 @@ impl Config {
             Some(v) if !shared_secret_is_placeholder(&v) => v,
             _ => secret("KEA_CTRL_TOKEN")?,
         };
+        let dhcp_lease_time = read(Uint {
+            name: "DHCP_LEASE_TIME",
+            min: MIN_LEASE_TIME.into(),
+            max: MAX_LEASE_TIME.into(),
+            below: OutOfRange::Reject,
+            above: OutOfRange::Reject,
+        })? as u32;
         let ttl = knob(
             "UI_SESSION_TTL_SECONDS",
             MAX_UI_SESSION_TTL_SECONDS,
@@ -302,6 +318,7 @@ impl Config {
             netdata_url: need("NETDATA_URL")?,
             https_enabled: need_flag("HTTPS_ENABLED")?,
             cache_max_gb,
+            dhcp_lease_time,
             http_ip,
             https_ip,
             dhcp_api_url: need("DHCP_API_URL")?,
@@ -327,9 +344,9 @@ impl Config {
             hsts_mode: hsts_mode_from(&text("UI_HSTS_MODE", "")),
             ui_logs_max_entries: knob("UI_LOGS_MAX_ENTRIES", u64::MAX, OutOfRange::Reject)?
                 as usize,
-            pdns_auth_api: format!("{}{PDNS_API_PATH}", need("PDNS_AUTH_URL")?),
-            pdns_rec_api: format!("{}{PDNS_API_PATH}", need("PDNS_REC_URL")?),
-            dns_rollback_url: need("DNS_ROLLBACK_URL")?,
+            pdns_auth_api: format!("{}{PDNS_API_PATH}", dns_api("PDNS_AUTH_API_PORT")?),
+            pdns_rec_api: format!("{}{PDNS_API_PATH}", dns_api("PDNS_HTTP_API_PORT")?),
+            dns_rollback_url: dns_api("DNS_ROLLBACK_PORT")?,
             pdns_api_key: secret("PDNS_API_KEY")?,
             netdata_alarm_token: secret("NETDATA_ALARM_TOKEN")?,
             netdata_alarms_file: need("NETDATA_ALARMS_FILE")?,
@@ -451,19 +468,38 @@ fn hsts_mode_from(raw: &str) -> HstsMode {
     }
 }
 
-// What: CACHE_MAX_GB, or 50 when unset.
-// Why: a malformed value must fail, not fall back.
+// What: CACHE_MAX_GB, else CACHE_MAX_SIZE (50g) in GB.
+// Why: .env owns the size; a malformed value must fail.
 fn cache_max_gb_from(env: &dyn Fn(&str) -> Option<String>) -> Result<f64, String> {
-    config::opt(env, "CACHE_MAX_GB")
-        .map(|raw| {
-            raw.trim()
+    match config::opt(env, "CACHE_MAX_GB") {
+        Some(raw) => raw
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|gb| gb.is_finite() && *gb >= 0.0)
+            .ok_or_else(|| format!("CACHE_MAX_GB must be a number of gigabytes, got {raw:?}")),
+        None => {
+            let size = config::need(env, "CACHE_MAX_SIZE")?;
+            let size = size.trim();
+            let (digits, per_gb) = if let Some(n) = size.strip_suffix(['g', 'G']) {
+                (n, 1.0)
+            } else if let Some(n) = size.strip_suffix(['m', 'M']) {
+                (n, 1024.0)
+            } else if let Some(n) = size.strip_suffix(['t', 'T']) {
+                (n, 1.0 / 1024.0)
+            } else {
+                return Err(format!(
+                    "CACHE_MAX_SIZE must end in m, g or t, got {size:?}"
+                ));
+            };
+            digits
                 .parse::<f64>()
                 .ok()
-                .filter(|gb| gb.is_finite() && *gb >= 0.0)
-                .ok_or_else(|| format!("CACHE_MAX_GB must be a number of gigabytes, got {raw:?}"))
-        })
-        .transpose()
-        .map(|value| value.unwrap_or(50.0))
+                .filter(|n| n.is_finite() && *n >= 0.0)
+                .map(|n| n / per_gb)
+                .ok_or_else(|| format!("CACHE_MAX_SIZE must be a number and a unit, got {size:?}"))
+        }
+    }
 }
 
 // What: the NATS URL a remote secondary can dial, or None.
@@ -779,7 +815,7 @@ async fn basic_auth(State(state): Shared, mut req: Request, next: Next) -> Respo
                         form_urlencoded::parse(&bytes)
                             .find_map(|(k, v)| (k == CSRF_FORM_FIELD).then(|| v.into_owned()))
                     });
-                if submitted.is_some_and(|token| ct_eq(&session.csrf_token, &token)) {
+                if submitted.is_some_and(|token| ct_eq(&token, &session.csrf_token)) {
                     next.run(Request::from_parts(parts, Body::from(bytes)))
                         .await
                 } else {
@@ -2543,10 +2579,6 @@ async fn rotate_token(
 const MIN_LEASE_TIME: u32 = 60;
 const MAX_LEASE_TIME: u32 = 604_800;
 
-// What: lease time shown when a subnet sets none, seconds.
-// Why: same value as deploy/prod/.env DHCP_LEASE_TIME.
-const DEFAULT_LEASE_TIME: u32 = 86_400;
-
 // What: Kea error texts that mean "not found".
 // Why: kea_modify maps exactly these to a 404.
 const KEA_SUBNET_MISSING: &str = "subnet not found";
@@ -2954,7 +2986,7 @@ fn split_list(raw: &str) -> Vec<String> {
 
 // What: a subnet4 entry as the page read-model.
 // Why: options are found by name or code; both are legal.
-fn read_subnet(subnet: &Value) -> Subnet {
+fn read_subnet(subnet: &Value, default_lease: u32) -> Subnet {
     let pool = subnet
         .get("pools")
         .and_then(|p| p.get(0))
@@ -2997,12 +3029,12 @@ fn read_subnet(subnet: &Value) -> Subnet {
         dns_primary: dns.first().cloned().unwrap_or_default(),
         dns_secondary: dns.get(1).cloned().unwrap_or_default(),
         ntp_servers: option("ntp-servers", 42),
-        // What: the default if the subnet sets no lifetime.
-        // Why: the page shows the dhcp image default.
+        // What: .env lease time if the subnet sets none.
+        // Why: the page shows what dhcp would hand out.
         lease_time: subnet
             .get("valid-lifetime")
             .and_then(Value::as_u64)
-            .unwrap_or(DEFAULT_LEASE_TIME.into()) as u32,
+            .unwrap_or(default_lease.into()) as u32,
         domain: option("domain-name", 15),
         custom_options,
     }
@@ -3093,7 +3125,10 @@ async fn dhcp_page(State(state): Shared, headers: HeaderMap) -> Response {
         let (config, found) = tokio::join!(kea_config(&state), kea_leases(&state));
         match config {
             Ok(config) => {
-                subnets = subnets_in(&config).iter().map(read_subnet).collect();
+                subnets = subnets_in(&config)
+                    .iter()
+                    .map(|subnet| read_subnet(subnet, state.config.dhcp_lease_time))
+                    .collect();
                 ddns = config["Dhcp4"]["dhcp-ddns"]["enable-updates"]
                     .as_bool()
                     .unwrap_or(false);
@@ -5965,11 +6000,11 @@ mod tests {
         }
     }
 
-    // What: cache size from CACHE_MAX_GB only.
+    // What: cache GB from CACHE_MAX_GB or CACHE_MAX_SIZE.
     // Why: a bad value must fail; NaN would break the bar.
     // From: Issue #1069
     #[test]
-    fn cache_size_reads_one_key() {
+    fn cache_size_reads_gb_then_size() {
         fn from(pairs: &[(&str, &str)]) -> Result<f64, String> {
             cache_max_gb_from(&|key: &str| {
                 pairs
@@ -5978,9 +6013,21 @@ mod tests {
                     .map(|(_, value)| value.to_string())
             })
         }
-        assert_eq!(from(&[]), Ok(50.0));
+        assert!(from(&[]).is_err());
+        assert_eq!(from(&[("CACHE_MAX_SIZE", "50g")]), Ok(50.0));
+        assert_eq!(from(&[("CACHE_MAX_SIZE", "2T")]), Ok(2048.0));
+        assert_eq!(from(&[("CACHE_MAX_SIZE", "512m")]), Ok(0.5));
         assert_eq!(from(&[("CACHE_MAX_GB", "120")]), Ok(120.0));
-        assert_eq!(from(&[("CACHE_MAX_GB", "")]), Ok(50.0));
+        assert_eq!(
+            from(&[("CACHE_MAX_GB", ""), ("CACHE_MAX_SIZE", "30g")]),
+            Ok(30.0)
+        );
+        for bad in ["50", "g", "xg", "-1g"] {
+            assert!(
+                from(&[("CACHE_MAX_SIZE", bad)]).is_err(),
+                "{bad:?} must fail"
+            );
+        }
         for bad in ["NaN", "inf", "-1", "abc"] {
             assert!(from(&[("CACHE_MAX_GB", bad)]).is_err(), "{bad:?} must fail");
         }
@@ -6367,7 +6414,7 @@ mod tests {
         assert_eq!(fields.number::<u32>("none"), None);
     }
 
-    const TEXT_KEYS: [&str; 35] = [
+    const TEXT_KEYS: [&str; 33] = [
         "PROXY_LOG_DIR",
         "PROXY_HTTP_URL",
         "IP_HTTP",
@@ -6387,9 +6434,7 @@ mod tests {
         "KEA_CONFIG_SNAPSHOT_DIR",
         "DHCP_PROBE_REQUEST_FILE",
         "DHCP_PROBE_RESULT_FILE",
-        "PDNS_AUTH_URL",
-        "PDNS_REC_URL",
-        "DNS_ROLLBACK_URL",
+        "DNS_URL",
         "NETDATA_ALARMS_FILE",
         "NATS_ISSUER_SEED_PATH",
         "NATS_XKEY_SEED_PATH",
@@ -6405,7 +6450,11 @@ mod tests {
         "LANCACHE_SHARED_SECRET_DIR",
     ];
 
-    const NUMBER_KEYS: [(&str, &str); 5] = [
+    const NUMBER_KEYS: [(&str, &str); 9] = [
+        ("PDNS_AUTH_API_PORT", "8081"),
+        ("PDNS_HTTP_API_PORT", "8082"),
+        ("DNS_ROLLBACK_PORT", "8083"),
+        ("DHCP_LEASE_TIME", "86400"),
         ("UI_SESSION_TTL_SECONDS", "3600"),
         ("KEEP_KNOWN_GOOD_CONFIGS", "7"),
         ("UI_LOGS_MAX_ENTRIES", "250"),
@@ -6435,6 +6484,7 @@ mod tests {
         for key in FLAG_KEYS {
             env.insert(key.to_string(), "true".to_string());
         }
+        env.insert("CACHE_MAX_SIZE".to_string(), "50g".to_string());
         env
     }
 
@@ -6464,12 +6514,9 @@ mod tests {
         assert_eq!(cfg.kea_config_snapshot_dir, "v-KEA_CONFIG_SNAPSHOT_DIR");
         assert_eq!(cfg.dhcp_probe_request_file, "v-DHCP_PROBE_REQUEST_FILE");
         assert_eq!(cfg.dhcp_probe_result_file, "v-DHCP_PROBE_RESULT_FILE");
-        assert_eq!(
-            cfg.pdns_auth_api,
-            "v-PDNS_AUTH_URL/api/v1/servers/localhost"
-        );
-        assert_eq!(cfg.pdns_rec_api, "v-PDNS_REC_URL/api/v1/servers/localhost");
-        assert_eq!(cfg.dns_rollback_url, "v-DNS_ROLLBACK_URL");
+        assert_eq!(cfg.pdns_auth_api, "v-DNS_URL:8081/api/v1/servers/localhost");
+        assert_eq!(cfg.pdns_rec_api, "v-DNS_URL:8082/api/v1/servers/localhost");
+        assert_eq!(cfg.dns_rollback_url, "v-DNS_URL:8083");
         assert_eq!(cfg.netdata_alarms_file, "v-NETDATA_ALARMS_FILE");
         assert_eq!(cfg.nats_issuer_seed_path, "v-NATS_ISSUER_SEED_PATH");
         assert_eq!(cfg.nats_xkey_seed_path, "v-NATS_XKEY_SEED_PATH");
@@ -6611,6 +6658,9 @@ mod tests {
             ("UI_SESSION_TTL_SECONDS", "31536001"),
             ("UI_LISTEN_PORT", "65536"),
             ("KEEP_KNOWN_GOOD_CONFIGS", "0"),
+            ("DHCP_LEASE_TIME", "59"),
+            ("DHCP_LEASE_TIME", "604801"),
+            ("CACHE_MAX_SIZE", "50"),
         ] {
             let mut env = full_env();
             env.insert(key.to_string(), junk.to_string());
@@ -7617,7 +7667,7 @@ mod tests {
                 {"space": "vendor", "name": "routers", "data": "wrong"}
             ]
         });
-        let row = serde_json::to_value(read_subnet(&subnet)).unwrap();
+        let row = serde_json::to_value(read_subnet(&subnet, 86_400)).unwrap();
         assert_eq!(
             row,
             json!({"id": 4, "subnet": "198.51.100.0/24", "pool_start": "198.51.100.10",
@@ -7626,15 +7676,15 @@ mod tests {
                    "ntp_servers": "198.51.100.4", "lease_time": 7200, "domain": "lan.example",
                    "custom_options": [{"code": 66, "data": "tftp"}]})
         );
-        let bare = serde_json::to_value(read_subnet(&json!({}))).unwrap();
+        let bare = serde_json::to_value(read_subnet(&json!({}), 43_200)).unwrap();
         assert_eq!(
             bare,
             json!({"id": 0, "subnet": "", "pool_start": "", "pool_end": "", "gateway": "",
                    "dns_primary": "", "dns_secondary": "", "ntp_servers": "",
-                   "lease_time": 86400, "domain": "", "custom_options": []})
+                   "lease_time": 43200, "domain": "", "custom_options": []})
         );
         let single = json!({"pools": [{"pool": " 10.0.0.1 "}]});
-        let one = read_subnet(&single);
+        let one = read_subnet(&single, 86_400);
         assert_eq!(
             (one.pool_start.as_str(), one.pool_end.as_str()),
             ("10.0.0.1", "")

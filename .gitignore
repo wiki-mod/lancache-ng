@@ -29,12 +29,8 @@ services/dhcp/keys/
 
 # Environment files with secrets (root-level only)
 /.env
-/.env.dev
-/.env.prod
 deploy/prod/.env.local
 config/prod/*.local.env
-
-# config/*.env files are committed (no secrets, just operational config)
 
 # Claude Code project settings
 .claude/
