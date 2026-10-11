@@ -21,6 +21,10 @@ setup() {
     SETUP_SH_DOCKER_HOST="unix://${BATS_TEST_TMPDIR}/$(_val name)"
     CI_SH="${BATS_TEST_DIRNAME}/ci.sh"
     unset CI_MANIFEST
+    # What: a repository name when the suite runs env -i.
+    # Why: image refs need one; a test may unset it.
+    # From: Issue #1683 | PR #1912
+    export GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-$(_val name)/$(_val name)}"
     # shellcheck source=.github/scripts/ci.sh
     source "${CI_SH}"
     CI_MANIFEST_SOURCE="${CI_MANIFEST}"
@@ -1100,6 +1104,19 @@ ROWS
     sed -i -E "s/\\$\\{${key}:-\\$\\{LANCACHE_STATE_DIR:\\?[^}]*\\}/\${${key}:-\/srv\/literal/" "${t}/${dep}" || return 1
     run _ci_check_prod_state_wiring "${t}"
     _expect off-root 1 "[CI-ERROR-CHECK-0100];${dep} has a mount default off LANCACHE_STATE_DIR;\${${key}:-/srv/literal" || return 1
+}
+
+# What: the fixture carries the SOT state root, a host path.
+# Why: validate exports its per-run root after it.
+# From: Issue #1683 | PR #1912
+@test "validate exports its per-run state root after the fixture env" {
+    local fx fixture_line root_line
+    fx="$(_ci_validation_env)" || return 1
+    grep -qx 'LANCACHE_STATE_DIR=.*' <<< "${fx}" || { echo "fixture lost the state root: ${fx}"; return 1; }
+    fixture_line="$(grep -n 'export "\${venv\[@\]}"' "${CI_SH}" | head -1 | cut -d: -f1)"
+    root_line="$(grep -n 'export LANCACHE_STATE_DIR="\${shared}/state/\${project}"' "${CI_SH}" | head -1 | cut -d: -f1)"
+    [ -n "${fixture_line}" ] && [ -n "${root_line}" ] && [ "${root_line}" -gt "${fixture_line}" ] \
+        || { echo "root export line ${root_line:-none} is not after fixture export line ${fixture_line:-none}"; return 1; }
 }
 
 # What: proxy constant reads Rust const forms or fails
