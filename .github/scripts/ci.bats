@@ -2433,11 +2433,13 @@ _legacy_env() {
     _expect split-cache 1 "CACHE_DIR_STANDARD and CACHE_DIR_SSL point to different paths" || return 1
     _legacy_row base || return 1
     std="$(get_env_var IP_STANDARD "${t}/.env")" ssl="$(get_env_var IP_SSL "${t}/.env")"
+    set_env_key NATS_DNS_REPLICA_USER "$(_val name)" "${t}/.env" && set_env_key NATS_DNS_REPLICA_PASSWORD "$(_val name)" "${t}/.env"
     _setup_sh_run 'migrate_env_for_update "${CONV}"'
     [ "${status}" -eq 0 ] && ! env_key_exists CACHE_DIR_STANDARD "${t}/.env" && ! env_key_exists CACHE_DIR_SSL "${t}/.env" \
         && [ "$(get_env_var CACHE_DIR "${t}/.env")" = "${t}/cache" ] && [ "$(get_env_var PROXY_SECURITY_MODE "${t}/.env")" = lazy ] \
         && [[ "$(get_env_var LANCACHE_STATE_DIR "${t}/.env")" == /* ]] && [ -n "${std}" ] && [ "$(get_env_var IP_HTTP "${t}/.env")" = "${std}" ] \
         && [ "$(get_env_var IP_HTTPS "${t}/.env")" = "${ssl}" ] && ! env_key_exists IP_STANDARD "${t}/.env" && ! env_key_exists IP_SSL "${t}/.env" \
+        && ! env_key_exists NATS_DNS_REPLICA_USER "${t}/.env" && ! env_key_exists NATS_DNS_REPLICA_PASSWORD "${t}/.env" \
         || { echo "legacy: ${output}"; cat "${t}/.env"; return 1; }
     before="$(cat "${t}/.env")"
     _setup_sh_run 'migrate_env_for_update "${CONV}"'
