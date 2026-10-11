@@ -2691,7 +2691,7 @@ CASES
     while IFS='|' read -r name val msg; do
         t="${BATS_TEST_TMPDIR}/${name}"
         mkdir -p "${t}" && _legacy_env "${t}/.env" || return 1
-        [ "${val}" != @STD@ ] || val="$(get_env_var IP_STANDARD "${t}/.env")"
+        [ "${val}" != @HTTP_IP@ ] || val="$(get_env_var IP_STANDARD "${t}/.env")"
         set_env_key IP_SSL "${val}" "${t}/.env"
         cp "${t}/.env" "${t}/.env.before"
         export CONV="${t}"
@@ -2700,7 +2700,7 @@ CASES
             && cmp -s "${t}/.env.before" "${t}/.env" || { echo "${name}: rc ${status}: ${output}"; return 1; }
     done <<ROWS
 empty||IP_HTTPS is missing or empty in ${BATS_TEST_TMPDIR}/empty/.env
-equal|@STD@|IP_HTTP and IP_HTTPS must be different.
+equal|@HTTP_IP@|IP_HTTP and IP_HTTPS must be different.
 invalid|${bad}|IP_HTTPS is not a valid IPv4 address: ${bad}
 ROWS
 }
@@ -3966,7 +3966,7 @@ _pm_run() {
     done <<< "${fields}"
     first="$(awk 'NR == 1' <<< "${required}")"
     rest="$(awk 'NR > 1' <<< "${required}" | paste -sd' ')"
-    export PRIMARY="http://${http}:${ui}" TOKEN="${token}" NAME="${name}" STD="${http}" LIP="${lip}"
+    export PRIMARY="http://${http}:${ui}" TOKEN="${token}" NAME="${name}" HTTP_IP="${http}" LIP="${lip}"
     export JQ_REAL
     JQ_REAL="$(type -P jq)"
     _tool_stub "${BIN}" ss <<<'[ ! -e "${DS}/listeners" ] || cat "${DS}/listeners"'
@@ -4011,7 +4011,7 @@ STUB
             port) printf 'udp UNCONN 0 0 %s:53 0.0.0.0:*\n' "${lip}" > "${DS}/listeners" ;;
         esac
         rm -f "${DS}/jq.argv"
-        _sec "${t}/${case}" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${STD}" --listen-ip "${LIP}"
+        _sec "${t}/${case}" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${HTTP_IP}" --listen-ip "${LIP}"
         [ "${status}" -eq 1 ] && [[ "${output}" == *"${want}"* ]] && [ ! -e "${t}/${case}/${name}" ] \
             && ! grep -qF -- "$(jq -r .nats_password <<< "${body}")" <<< "${output}" \
             || { echo "${case}: rc ${status}: ${output}"; return 1; }
@@ -4032,7 +4032,7 @@ CASES
     rm -f "${DS}/listeners" "${DS}/curl.argv"
     printf '200' > "${DS}/reply.status"; printf '%s' "${body}" > "${DS}/reply.body"
     rm -f "${DS}/jq.argv"
-    _sec "${t}/ok" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${STD}" --listen-ip "${LIP}"
+    _sec "${t}/ok" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${HTTP_IP}" --listen-ip "${LIP}"
     [ "${status}" -eq 0 ] || { echo "register: ${output}"; return 1; }
     ! grep -qF -- "${token}" "${DS}/jq.argv" "${DS}/curl.argv" || { echo "token in argv"; return 1; }
     jq -e --arg tok "${token}" --arg n "${name}" --arg a "${lip}" '. == {token: $tok, name: $n, address: $a}' "${DS}/curl.body" \
@@ -4061,10 +4061,10 @@ CASES
         || { echo "compose drift or image: ${gen}"; return 1; }
     cp "${env}" "${t}/env.first"; cp "${dir}/docker-compose.yml" "${t}/compose.first"
     rm -f "${DS}/curl.argv"
-    _sec "${t}/ok" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${STD}" --listen-ip "${LIP}"
+    _sec "${t}/ok" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${HTTP_IP}" --listen-ip "${LIP}"
     [ "${status}" -eq 1 ] && [[ "${output}" == *"already exists; rerun with --rotate"* ]] && [ ! -e "${DS}/curl.argv" ] \
         || { echo "existing: ${output}"; return 1; }
-    _sec "${t}/ok" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${STD}" --listen-ip "${LIP}" --rotate
+    _sec "${t}/ok" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${HTTP_IP}" --listen-ip "${LIP}" --rotate
     [ "${status}" -eq 0 ] && cmp "${t}/env.first" "${env}" && cmp "${t}/compose.first" "${dir}/docker-compose.yml" \
         || { echo "rotate: ${output}"; return 1; }
     # What: https side needs both flags and its own bind IP
@@ -4074,7 +4074,7 @@ CASES
         || { echo "https keys set without flags: $(cat "${env}")"; return 1; }
     while IFS='|' read -r case want args; do
         # shellcheck disable=SC2086
-        _sec "${t}/${case}" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${STD}" --listen-ip "${LIP}" ${args}
+        _sec "${t}/${case}" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${HTTP_IP}" --listen-ip "${LIP}" ${args}
         [ "${status}" -eq 1 ] && [[ "${output}" == *"${want}"* ]] && [ ! -e "${t}/${case}/${name}" ] \
             || { echo "${case}: rc ${status}: ${output}"; return 1; }
     done <<CASES
@@ -4082,7 +4082,7 @@ https-one|must be given together|--ip-https 192.0.2.2
 https-bad|--ip-https must be a valid IPv4 address|--ip-https x --listen-ip-https 192.0.2.6
 https-same|must differ from the http bind IP|--ip-https 192.0.2.2 --listen-ip-https ${LIP}
 CASES
-    _sec "${t}/https" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${STD}" --listen-ip "${LIP}" --ip-https 192.0.2.2 --listen-ip-https 192.0.2.6
+    _sec "${t}/https" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${HTTP_IP}" --listen-ip "${LIP}" --ip-https 192.0.2.2 --listen-ip-https 192.0.2.6
     [ "${status}" -eq 0 ] || { echo "https register: ${output}"; return 1; }
     env="${t}/https/${name}/.env"
     [ "$(get_env_var IP_HTTPS "${env}")" = "192.0.2.2" ] && [ "$(get_env_var LISTEN_IP_HTTPS "${env}")" = "192.0.2.6" ] \
@@ -4100,12 +4100,12 @@ CASES
     export SEC_SCRIPT_DIR="${t}/nocheckout"
     mkdir -p "${SEC_SCRIPT_DIR}"
     rm -f "${DS}/curl.argv"
-    _sec "${t}/raw" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${STD}" --listen-ip "${LIP}"
+    _sec "${t}/raw" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${HTTP_IP}" --listen-ip "${LIP}"
     [ "${status}" -eq 0 ] && cmp "${root}/deploy/secondary/docker-compose.yml" "${t}/raw/${NAME}/docker-compose.yml" \
         && grep -q '/HEAD/deploy/secondary/docker-compose\.yml$' "${DS}/curl.argv" || { echo "download: ${output}"; return 1; }
     : > "${DS}/fail-raw"
     rm -f "${DS}/curl.argv"
-    _sec "${t}/rawfail" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${STD}" --listen-ip "${LIP}"
+    _sec "${t}/rawfail" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${HTTP_IP}" --listen-ip "${LIP}"
     [ "${status}" -eq 1 ] && [[ "${output}" == *"Failed to download deploy/secondary/docker-compose.yml"* ]] \
         && [ "$(wc -l < "${DS}/curl.argv")" -eq 1 ] && [ ! -e "${t}/rawfail/${NAME}" ] \
         || { echo "download failure: ${output}"; return 1; }
