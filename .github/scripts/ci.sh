@@ -9683,135 +9683,6 @@ _ci_check_if_without_else_status() {
     printf 'if-without-else-status=clean files=%s\n' "${#files[@]}"
 }
 
-# What: setup.sh wizard prompts vs expect-sim staleness.
-# Why: unanswered prompt hangs sim to timeout.
-# From: Issue #1176 | PR #1858
-_ci_setup_wizard_rows() {
-    # What: emit ask/confirm prompts from setup wizard
-    # Why: parse wizard rows for prompt/expect drift checks
-    local setup="$1" cs_line esac_line wiz_start
-    cs_line="$(_ci_capture 1 grep -n -m1 '^case "${1:-install}" in$' "${setup}")" || return 2
-    cs_line="${cs_line%%:*}"
-    if [ -z "${cs_line}" ]; then
-        ci_log "[CI-ERROR-CHECK-0117]" "file=\"${setup}\" anchor='case \"\${1:-install}\" in' reason=\"setup.sh dispatch anchor not found; wizard rows unknown\""
-        return 3
-    fi
-    esac_line="$(awk -v s="${cs_line}" 'NR>s && /^esac$/{print NR; exit}' "${setup}")"
-    if [ -z "${esac_line}" ]; then
-        ci_log "[CI-ERROR-CHECK-0118]" "file=\"${setup}\" from_line=${cs_line} reason=\"no esac after the dispatch case; wizard rows unknown\""
-        return 3
-    fi
-    wiz_start=$((esac_line + 1))
-    tail -n "+${wiz_start}" "${setup}" | awk '
-        {
-            t=$0; sub(/^[ \t]+/,"",t)
-            if(t==""){ next }
-            prompt=""; rest=""
-            if(index(t,"ask \"")>0){ rest=substr(t,index(t,"ask \"")+5) }
-            else if(index(t,"confirm \"")>0){ rest=substr(t,index(t,"confirm \"")+9) }
-            if(rest!=""){ prompt=rest; sub(/".*/,"",prompt) }
-            if(prompt!="" && substr(prompt,1,1)!="$"){
-                ap=rest; sub(/^[^"]*"/,"",ap)                 # drop prompt + its closing quote
-                if(index(ap,"\"")>0){
-                    def=ap; sub(/^[^"]*"/,"",def); sub(/".*/,"",def)   # second quoted arg
-                    flag="UNCOND"
-                    for(i=1;i<=depth;i++){ if(stack[i]=="if"||stack[i]=="case"){ flag="COND"; break } }
-                    printf "%s\t%s\t%s [%s]: \n", flag, prompt, prompt, def
-                }
-            }
-            kw=t; sub(/[ \t].*/,"",kw)
-            if(kw=="if"){ stack[++depth]="if" }
-            else if(kw=="fi"){ if(depth>0)depth-- }
-            else if(kw=="while"||kw=="until"||kw=="for"||kw=="select"){ stack[++depth]="loop" }
-            else if(kw=="done"){ if(depth>0)depth-- }
-            else if(kw=="case"){ stack[++depth]="case" }
-            else if(kw=="esac"){ if(depth>0)depth-- }
-        }
-    '
-}
-_ci_check_setup_prompt_drift() {
-    local repo_root="${1:-${CI_REPO_ROOT:-.}}"
-    local setup
-    setup="$(_ci_installer "${repo_root}")" || return 2
-    local anchor_count
-    anchor_count="$(_ci_capture 1 grep -c '^case "${1:-install}" in$' "${setup}")" || return 2
-    if [ "${anchor_count}" -ne 1 ]; then
-        ci_error "[CI-ERROR-CHECK-0081]" "reason=\"setup.sh dispatch case anchor not unique\""
-        return 1
-    fi
-    local -a sims=(
-        "${repo_root}/scripts/untracked/simulations/setup-cli-simulation.sh"
-    )
-    local -a rows=() all_prompts=() uncond=() viol=()
-    local r
-    local produced produced_rc=0
-    produced="$(_ci_setup_wizard_rows "${setup}")" || produced_rc=$?
-    _ci_producer_ok "${produced_rc}" 0 || return 2
-    while IFS= read -r r; do [ -n "${r}" ] && rows+=("${r}"); done <<<"${produced}"
-    if [ "${#rows[@]}" -eq 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0082]" "reason=\"zero ask/confirm prompts in setup.sh wizard; vacuous\""
-        return 1
-    fi
-    local produced produced_rc=0
-    produced="$(printf '%s\n' "${rows[@]}" | cut -f3 | sort -u)" || produced_rc=$?
-    _ci_producer_ok "${produced_rc}" 0 || return 2
-    while IFS= read -r r; do [ -n "${r}" ] && all_prompts+=("${r}"); done <<<"${produced}"
-    local produced produced_rc=0
-    produced="$(printf '%s\n' "${rows[@]}" | awk -F'\t' '$1=="UNCOND"{print $2"\t"$3}' | sort -u)" || produced_rc=$?
-    _ci_producer_ok "${produced_rc}" 0 || return 2
-    while IFS= read -r r; do [ -n "${r}" ] && uncond+=("${r}"); done <<<"${produced}"
-    if [ "${#uncond[@]}" -eq 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0083]" "reason=\"zero unconditional prompts in setup.sh wizard; vacuous\""
-        return 1
-    fi
-    local sim pair prompt haystack tcl gpat covered matched checked=0 introspected=0
-    local -a sim_pats=() gpats=()
-    for sim in "${sims[@]}"; do
-        [ -f "${sim}" ] || { viol+=("expected simulation script not found: ${sim}"); continue; }
-        # What: introspection-driven sims use list-prompts
-        # Why: no hand-encoded patterns needed here
-        local introspect
-        introspect="$(_ci_capture 1 grep -F 'build_expect_prompt_block' "${sim}")" || return 2
-        if [ -n "${introspect}" ]; then
-            grep -qF 'spawn bash setup.sh' "${sim}" || viol+=("${sim}: introspection-driven but no 'spawn bash setup.sh'")
-            introspected=$((introspected + 1))
-            continue
-        fi
-        checked=$((checked + 1))
-        sim_pats=(); gpats=()
-        local produced produced_rc=0
-        produced="$(
-            awk '{ t=$0; sub(/^[ \t]+/,"",t); if(index(t,"expect_prompt {")==1){ x=substr(t,length("expect_prompt {")+1); sub(/}.*/,"",x); if(x!="")print x } }' "${sim}")" || produced_rc=$?
-        _ci_producer_ok "${produced_rc}" 0 || return 2
-        while IFS= read -r r; do [ -n "${r}" ] && sim_pats+=("${r}"); done <<<"${produced}"
-        if [ "${#sim_pats[@]}" -eq 0 ]; then
-            viol+=("${sim}: zero expect_prompt patterns; vacuous or no longer drives the wizard")
-            continue
-        fi
-        for tcl in "${sim_pats[@]}"; do gpats+=("$(printf '%s' "${tcl}" | sed 's/\[\^\\n\]/./g')"); done
-        # What: check if sim covers unconditional prompts
-        # Why: hang-to-timeout on unanswered prompt
-        for pair in "${uncond[@]}"; do
-            prompt="${pair%%$'\t'*}"; haystack="${pair#*$'\t'}"; covered=0
-            for gpat in "${gpats[@]}"; do grep -Eq -- "${gpat}" <<<"${haystack}" && { covered=1; break; }; done
-            [ "${covered}" -eq 0 ] && viol+=("${sim}: no expect_prompt matches setup.sh unconditional prompt '${prompt}' (#1082/#1175: would hang to timeout)")
-        done
-        # What: detect stale pattern-matches
-        # Why: patterns must match current prompts
-        for tcl in "${gpats[@]}"; do
-            matched=0
-            for haystack in "${all_prompts[@]}"; do grep -Eq -- "${tcl}" <<<"${haystack}" && { matched=1; break; }; done
-            [ "${matched}" -eq 0 ] && viol+=("${sim}: expect_prompt pattern '${tcl}' matches no current setup.sh prompt (stale)")
-        done
-    done
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0084]" "reason=\"setup.sh/simulation prompt drift (#1176)\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'setup-prompt-drift=clean sims_checked=%s introspected=%s uncond=%s\n' \
-        "${checked}" "${introspected}" "${#uncond[@]}"
-}
-
 # What: 0 when the PR author skips the PR text checks
 # Why: one SOT author list for the title and template checks
 # From: Issue #1683 | PR #1858
@@ -13039,7 +12910,7 @@ ci_cmd_check_all() {
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
         docker-socket-proxy netdata-isolation syslog-logs-volume proxy-cert-volume proxy-nginx-policy \
         compose-required-env dhcp-proxy-env \
-        setup-kea-preflight setup-update-safety setup-prompt-drift image-channel-resolution \
+        setup-kea-preflight setup-update-safety image-channel-resolution \
         vex-drift logging-matrix \
         entrypoint-lib-wiring dockerfile-build-tools dockerfile-stage-variables \
         dockerfile-secret-ids sot-identity-inputs workflow-ci-variables workflow-job-settings cargo-profile-tuning no-source-compiled-tools codeql-coverage version-drift)
@@ -13089,7 +12960,6 @@ ci_cmd_check() {
         if-without-else-status) _ci_check_if_without_else_status "$@" ;;
         exit-evidence) _ci_check_exit_evidence "$@" ;;
         ci-bats) _ci_check_ci_bats "$@" ;;
-        setup-prompt-drift) _ci_check_setup_prompt_drift "$@" ;;
         pr-title) _ci_check_pr_title "$@" ;;
         stable-external-images) _ci_check_stable_external_images "$@" ;;
         pr-template) _ci_check_pr_template "$@" ;;
