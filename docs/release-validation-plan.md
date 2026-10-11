@@ -439,9 +439,9 @@ triggered the removal/rotation/restart returned success.
 
 ### 10. NTP — clock discipline
 
-`ntp` is profile-gated and runs with host networking; `ci.sh validate` does not start
-it. Its config render is in CI (ci.bats "ntp config renders and validates exactly per
-input"); clock discipline is live only.
+`ntp` is profile-gated and runs on the bridge network; `ci.sh validate` enables every
+profile, so it starts `ntp` and waits for it. Its config render is in CI (ci.bats "ntp
+config renders and validates exactly per input"); clock discipline is live only.
 
 - On a host that grants `CAP_SYS_TIME`, force a clock skew and confirm that
   `chronyc tracking` inside the `ntp` container returns to a `Leap status` of `Normal` with
@@ -518,7 +518,7 @@ a stated reason it has none (AG-VAL-029).
 | `/healthz` ACL bypassed by `return` | `check proxy-nginx-policy` |
 | Documented `CACHE_*` default drifting from the shipped one | `check proxy-cache-env-doc-drift` |
 | Cache not serving a HIT | `_ci_validate_proxy` |
-| A service crash-looping after `docker compose up` exits 0 | the health and stability wait of `ci.sh validate` |
+| A service crash-looping after `docker compose up` exits 0 | the health and stability wait of `ci.sh validate`, for every service it starts (all but the host-network ones, see Scope Boundaries) |
 | `.env` migration not idempotent, rotating a secret or duplicating a key | ci.bats `migrate_env_for_update` tests |
 | An update continuing on the old `setup.sh` after a pull | ci.bats "setup update pulls the checkout and continues on its setup.sh" |
 | Image revision label or index tag naming another commit than the built tree | `_ci_head_commit`; ci.bats "oci labels: provenance from the SOT, the env and the checkout" |
@@ -555,6 +555,8 @@ a stated reason it has none (AG-VAL-029).
 - **Comment claims drifting from code**: `check comment-length` checks structure; the
   truth of a claim is manual review.
 - **Third-party reviewer output language** (AG-CC-004): manual review.
+- **GHCR GC reachability** (`ci.sh gc`, run by `gc.yml` with `--apply`): ci.bats tests
+  only its argument guard, not the classification into kept and deleted versions.
 
 ### Retired with their mechanism
 
@@ -569,10 +571,11 @@ guard, and the skip branches of the Dockerfile acceleration functions.
 
 ## Scope Boundaries
 
-`ci.sh validate` starts the bridge-network services of `deploy/prod` with every compose
-profile enabled; host-network
-services (`retention`, `dhcp`, `dhcp-proxy`, `ntp`, `dhcp-probe`) cannot be isolated in
-its /27 network and are not started. Covered only live in Part B:
+`ci.sh validate` enables every compose profile of `deploy/prod` and starts every service
+that does not use host networking. The host-network services `dhcp`, `dhcp-proxy` and
+`dhcp-probe` cannot be isolated in its /27 network and are not started; their checks
+are the Kea leg of `ci.sh validate` (Kea on its own containers), the dnsmasq render
+tests of Part A, and the live scenarios of §3. Covered only live in Part B:
 
 - wire-level DHCP in all three modes, the lease effect of an Admin UI reservation and
   the dnsmasq sub-mode switch (§3);
@@ -585,8 +588,7 @@ its /27 network and are not started. Covered only live in Part B:
 - NTP clock discipline (§10);
 - `setup.sh install` and `setup.sh update` on a running stack (§1, §11, §12).
 
-Outside this plan: GHCR retention and GC policy are maintainer-owned; `gc.yml` runs
-`ci.sh gc --apply`. The Rust checks of Part A are off by default (AG-VAL-008).
+The Rust checks of Part A are off by default (AG-VAL-008).
 
 ---
 
