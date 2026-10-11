@@ -479,7 +479,7 @@ fn rrset_matches_expected(
     let (Some(rrset), Some(expected)) = (found, expected) else {
         return found.is_none() && expected.is_none();
     };
-    // What: a TTL-only replace keeps content, changes TTL.
+    // What: false if the TTL differs from expected_ttl.
     // Why: content alone confirms before AXFR lands it.
     if let Some(ttl) = expected_ttl
         && rrset.get("ttl").and_then(Value::as_i64) != Some(i64::from(ttl))
@@ -554,8 +554,8 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
         }
     }
     // What: flush every recursor; one failure retries all.
-    // Why: each recursor caches apart; a flush repeats safely.
-    // From: Issue #1683
+    // Why: each recursor caches apart; retries are safe.
+    // From: Issue #1683 | PR #1912
     let mut outcome = Outcome::Ack;
     for rec_url in &ctx.pdns_rec_urls {
         let url = match flush_url(rec_url, domain) {
@@ -1040,7 +1040,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    // What: build one rrset with a single record content.
+    // What: builds an rrset with the given contents.
     // Why: most tests need a small literal rrset.
     fn rrset(name: &str, kind: &str, ttl: i64, contents: &[&str]) -> Value {
         let records: Vec<Value> = contents
@@ -1088,7 +1088,7 @@ mod tests {
         }
     }
 
-    // What: a replace message with the TTL and records.
+    // What: builds an A record message for host.lan.
     // Why: patch_body tests share the same record literal.
     fn message(
         action: &str,
