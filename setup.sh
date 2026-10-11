@@ -1719,7 +1719,7 @@ quickstart_bundle_copies() {
 # Why: prod binds these as dirs, not as named volumes
 # From: Issue #1683 | PR #1858
 quickstart_volume_keys() {
-    printf '%s\n' 'pdns-data-standard PDNS_DIR' 'pdns-data-ssl PDNS_SSL_DIR' \
+    printf '%s\n' 'pdns-data-standard PDNS_DIR' \
         'pdns-filter-state PDNS_FILTER_STATE_DIR' 'nats-data NATS_DATA_DIR' \
         'nats-conf NATS_CONF_DIR' 'logs-syslog-ng SYSLOG_NG_LOG_DIR'
 }
