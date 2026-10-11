@@ -3927,7 +3927,7 @@ _pm_run() {
     body='{}'
     while IFS= read -r f; do
         case "${f}" in
-            proxy_ip) v="${http}" ;;
+            ip_http) v="${http}" ;;
             dns_xfr_primary) v="${http}${xfr}" ;;
             image_registry) v="${reg}" ;;
             image_prefix) v="${pre}" ;;
@@ -3984,7 +3984,7 @@ STUB
             port) printf 'udp UNCONN 0 0 %s:53 0.0.0.0:*\n' "${lip}" > "${DS}/listeners" ;;
         esac
         rm -f "${DS}/jq.argv"
-        _sec "${t}/${case}" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --proxy-ip "${STD}" --listen-ip "${LIP}"
+        _sec "${t}/${case}" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${STD}" --listen-ip "${LIP}"
         [ "${status}" -eq 1 ] && [[ "${output}" == *"${want}"* ]] && [ ! -e "${t}/${case}/${name}" ] \
             && ! grep -qF -- "$(jq -r .nats_password <<< "${body}")" <<< "${output}" \
             || { echo "${case}: rc ${status}: ${output}"; return 1; }
@@ -4000,12 +4000,12 @@ fields|missing field(s): ${rest}
 port|No usable secondary bind IP on port 53
 CASES
     _sec "${t}/args" --name "${NAME}"
-    [ "${status}" -eq 1 ] && [[ "${output}" == *"Required argument(s) missing: --primary --token --proxy-ip"* ]] \
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"Required argument(s) missing: --primary --token --ip-http"* ]] \
         || { echo "missing args: ${output}"; return 1; }
     rm -f "${DS}/listeners" "${DS}/curl.argv"
     printf '200' > "${DS}/reply.status"; printf '%s' "${body}" > "${DS}/reply.body"
     rm -f "${DS}/jq.argv"
-    _sec "${t}/ok" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --proxy-ip "${STD}" --listen-ip "${LIP}"
+    _sec "${t}/ok" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${STD}" --listen-ip "${LIP}"
     [ "${status}" -eq 0 ] || { echo "register: ${output}"; return 1; }
     ! grep -qF -- "${token}" "${DS}/jq.argv" "${DS}/curl.argv" || { echo "token in argv"; return 1; }
     jq -e --arg tok "${token}" --arg n "${name}" --arg a "${lip}" '. == {token: $tok, name: $n, address: $a}' "${DS}/curl.body" \
@@ -4015,12 +4015,12 @@ CASES
     # Why: the secondary runs on what the primary handed out
     # From: Issue #1683 | PR #1858
     while IFS= read -r f; do
-        case "${f}" in proxy_ip|image_*) continue ;; esac
+        case "${f}" in ip_http|image_*) continue ;; esac
         v="$(jq -r --arg k "${f}" '.[$k]' <<< "${body}")"
         awk -v v="${v}" 'substr($0, index($0, "=") + 1) == v { f = 1 } END { exit !f }' "${env}" \
             || { echo "${f} not in .env"; return 1; }
     done <<< "${fields}"
-    [ "$(get_env_var PROXY_IP "${env}")" = "${http}" ] && [ "$(get_env_var LISTEN_IP "${env}")" = "${lip}" ] \
+    [ "$(get_env_var IP_HTTP "${env}")" = "${http}" ] && [ "$(get_env_var LISTEN_IP "${env}")" = "${lip}" ] \
         || { echo "ips: $(cat "${env}")"; return 1; }
     want="compose --env-file ${env} $(compose_file_args_for_install_dir "${dir}" | paste -sd' ') up -d"
     grep -qxF -- "${want}" "${DS}/docker.log" || { echo "start: $(cat "${DS}/docker.log")"; return 1; }
@@ -4034,10 +4034,10 @@ CASES
         || { echo "compose drift or image: ${gen}"; return 1; }
     cp "${env}" "${t}/env.first"; cp "${dir}/docker-compose.yml" "${t}/compose.first"
     rm -f "${DS}/curl.argv"
-    _sec "${t}/ok" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --proxy-ip "${STD}" --listen-ip "${LIP}"
+    _sec "${t}/ok" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${STD}" --listen-ip "${LIP}"
     [ "${status}" -eq 1 ] && [[ "${output}" == *"already exists; rerun with --rotate"* ]] && [ ! -e "${DS}/curl.argv" ] \
         || { echo "existing: ${output}"; return 1; }
-    _sec "${t}/ok" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --proxy-ip "${STD}" --listen-ip "${LIP}" --rotate
+    _sec "${t}/ok" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${STD}" --listen-ip "${LIP}" --rotate
     [ "${status}" -eq 0 ] && cmp "${t}/env.first" "${env}" && cmp "${t}/compose.first" "${dir}/docker-compose.yml" \
         || { echo "rotate: ${output}"; return 1; }
     # What: without a checkout the owner file is downloaded
@@ -4049,12 +4049,12 @@ CASES
     export SEC_SCRIPT_DIR="${t}/nocheckout"
     mkdir -p "${SEC_SCRIPT_DIR}"
     rm -f "${DS}/curl.argv"
-    _sec "${t}/raw" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --proxy-ip "${STD}" --listen-ip "${LIP}"
+    _sec "${t}/raw" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${STD}" --listen-ip "${LIP}"
     [ "${status}" -eq 0 ] && cmp "${root}/deploy/secondary/docker-compose.yml" "${t}/raw/${NAME}/docker-compose.yml" \
         && grep -q '/HEAD/deploy/secondary/docker-compose\.yml$' "${DS}/curl.argv" || { echo "download: ${output}"; return 1; }
     : > "${DS}/fail-raw"
     rm -f "${DS}/curl.argv"
-    _sec "${t}/rawfail" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --proxy-ip "${STD}" --listen-ip "${LIP}"
+    _sec "${t}/rawfail" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${STD}" --listen-ip "${LIP}"
     [ "${status}" -eq 1 ] && [[ "${output}" == *"Failed to download deploy/secondary/docker-compose.yml"* ]] \
         && [ "$(wc -l < "${DS}/curl.argv")" -eq 1 ] && [ ! -e "${t}/rawfail/${NAME}" ] \
         || { echo "download failure: ${output}"; return 1; }

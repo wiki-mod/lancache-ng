@@ -977,7 +977,7 @@ cmd_install_requirements_primary() {
 
 cmd_install_requirements_secondary() {
     ensure_stack_requirements_installed
-    print_ok "Secondary node requirements installed (curl, jq, Docker, Docker Compose v2). Run ./setup.sh secondary --primary <url> --token <token> --name <name> --proxy-ip <ip> next."
+    print_ok "Secondary node requirements installed (curl, jq, Docker, Docker Compose v2). Run ./setup.sh secondary --primary <url> --token <token> --name <name> --ip-http <ip> next."
 }
 
 # What: strips quotes and unquoted inline comments
@@ -4209,7 +4209,7 @@ EOF
             ;;
         secondary)
             cat <<EOF
-Usage: ./setup.sh secondary --primary <url> --token <token> --name <name> --proxy-ip <ip> [--listen-ip <ip>] [--rotate]
+Usage: ./setup.sh secondary --primary <url> --token <token> --name <name> --ip-http <ip> [--listen-ip <ip>] [--rotate]
 
 Registers and starts a secondary DNS node on a remote host. The command
 creates a local compose directory, writes the secondary .env file, and starts
@@ -5898,7 +5898,7 @@ cmd_update_ip() {
     print_step "Reading current configuration"
 
     # What: only the runtime .env holds IPs; compose derives
-    # Why: PROXY_IP and binds come from IP_HTTP/IP_HTTPS
+    # Why: the dns container gets its IPs from IP_HTTP/IP_HTTPS
     # From: Issue #1683 | PR #1858
     local deploy_env
     deploy_env=$(runtime_env_file_for_install_dir "$install_dir")
@@ -6016,7 +6016,7 @@ lancache_repo_file_text() {
 # What: secondary setup consumes primary credentials
 # Why: it must not modify the primary host
 cmd_secondary() {
-    local primary="" token="" name="" proxy_ip="" listen_ip="" rotate=0
+    local primary="" token="" name="" ip_http="" listen_ip="" rotate=0
     local out http_status response secondary_dir cmd ddns_tsig_key dns_xfr_primary tag_input
     local -a missing_args
     local nats_url nats_user nats_password consumer_name pdns_api_key
@@ -6030,13 +6030,13 @@ cmd_secondary() {
 
     usage_secondary() {
         cat <<EOF
-Usage: $0 secondary --primary <url> --token <token> --name <name> --proxy-ip <ip> [--listen-ip <ip>] [--rotate]
+Usage: $0 secondary --primary <url> --token <token> --name <name> --ip-http <ip> [--listen-ip <ip>] [--rotate]
 
 Required arguments:
   --primary <url>    Primary LanCache UI/API URL, for example http://<primary-ip>:<ui-port>
   --token <token>    Secondary registration token from the primary server
   --name <name>      Secondary node name, using letters, numbers, and dashes only
-  --proxy-ip <ip>    Primary proxy IP address clients should use for cached traffic
+  --ip-http <ip>     Primary proxy IP address clients should use for cached traffic
 
 Optional arguments:
   --listen-ip <ip>   Bind IP for the secondary DNS container (default: detected host LAN IP)
@@ -6061,9 +6061,9 @@ EOF
                 name="$2"
                 shift 2
                 ;;
-            --proxy-ip)
+            --ip-http)
                 require_value "$1" "${2:-}"
-                proxy_ip="$2"
+                ip_http="$2"
                 shift 2
                 ;;
             --listen-ip)
@@ -6090,7 +6090,7 @@ EOF
     [[ -n "$primary" ]] || missing_args+=("--primary")
     [[ -n "$token" ]] || missing_args+=("--token")
     [[ -n "$name" ]] || missing_args+=("--name")
-    [[ -n "$proxy_ip" ]] || missing_args+=("--proxy-ip")
+    [[ -n "$ip_http" ]] || missing_args+=("--ip-http")
     if [[ ${#missing_args[@]} -gt 0 ]]; then
         die "Required argument(s) missing: ${missing_args[*]}"
     fi
@@ -6105,8 +6105,8 @@ EOF
 
     [[ "$name" =~ ^[a-zA-Z0-9-]+$ ]] \
         || die "--name must contain only alphanumeric characters and dashes"
-    is_valid_ipv4 "$proxy_ip" \
-        || die "--proxy-ip must be a valid IPv4 address"
+    is_valid_ipv4 "$ip_http" \
+        || die "--ip-http must be a valid IPv4 address"
     if [[ -n "$listen_ip" ]]; then
         is_valid_ipv4 "$listen_ip" \
             || die "--listen-ip must be a valid IPv4 address"
@@ -6336,7 +6336,7 @@ EOF
     secondary_env_file="$(realpath -m "${secondary_dir}/.env")"
 
     write_file_atomically "${secondary_dir}/.env" <<EOF
-PROXY_IP=${proxy_ip}
+IP_HTTP=${ip_http}
 LISTEN_IP=${listen_ip}
 PDNS_API_KEY=${pdns_api_key}
 DDNS_TSIG_KEY=${ddns_tsig_key}

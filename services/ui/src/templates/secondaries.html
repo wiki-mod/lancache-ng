@@ -40,7 +40,7 @@
   --primary {{ primary_url }} \
   --token {{ registration_token }} \
   --name myname \
-  --proxy-ip {{ primary_url | replace(from="http://", to="") | replace(from=":8080", to="") }}</div>
+  --ip-http {{ primary_url | replace(from="http://", to="") | replace(from=":8080", to="") }}</div>
       <button onclick="copyCmd(this)"
               class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white transition-colors opacity-0 group-hover:opacity-100">
         Kopieren

@@ -14,7 +14,7 @@ services:
     image: ${LANCACHE_IMAGE_REF_DNS:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}}
     init: true
     environment:
-      - PROXY_IP=${PROXY_IP:?PROXY_IP is required}
+      - PROXY_IP=${IP_HTTP:?IP_HTTP is required}
       - PDNS_API_KEY=${PDNS_API_KEY}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       # What: DDNS updates accepted from loopback only.

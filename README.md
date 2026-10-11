@@ -655,7 +655,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/
   --primary http://192.168.1.10:8080 \
   --token <SECONDARY_REGISTRATION_TOKEN> \
   --name my-secondary \
-  --proxy-ip 192.168.1.10
+  --ip-http 192.168.1.10
 ```
 
 The registration token is generated during primary setup and stored in `.env`.

@@ -2262,7 +2262,7 @@ struct RegisterResponse {
     nats_user: String,
     nats_password: String,
     consumer_name: String,
-    proxy_ip: String,
+    ip_http: String,
     pdns_api_key: String,
     ddns_tsig_key: String,
     dns_xfr_primary: String,
@@ -2413,7 +2413,7 @@ async fn register_secondary(
         nats_user: form.name.clone(),
         nats_password,
         consumer_name: form.name,
-        proxy_ip: state.config.http_ip.clone(),
+        ip_http: state.config.http_ip.clone(),
         pdns_api_key: state.config.pdns_api_key.clone(),
         ddns_tsig_key,
         dns_xfr_primary: format!("{}:{PDNS_AUTH_PORT}", state.config.http_ip),
@@ -8944,7 +8944,7 @@ mod tests {
         assert_eq!(body["nats_user"], "sec-1");
         assert_eq!(body["consumer_name"], "sec-1");
         assert_eq!(body["ddns_tsig_key"], "tsigkey");
-        assert_eq!(body["proxy_ip"], "v-IP_HTTP");
+        assert_eq!(body["ip_http"], "v-IP_HTTP");
         assert_eq!(body["dns_xfr_primary"], "v-IP_HTTP:5300");
         assert_eq!(body["pdns_api_key"], state.config.pdns_api_key.as_str());
         assert_eq!(body["image_registry"], "v-LANCACHE_IMAGE_REGISTRY");
