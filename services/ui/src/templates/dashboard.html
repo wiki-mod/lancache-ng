@@ -296,12 +296,12 @@
     <p class="text-xs text-slate-500 mt-2">Storage-budget retention is watchdog's responsibility, not this page's.</p>
   </div>
 
-  <!-- Recent requests: newest lines of the nginx access
-       log(s), merged by time; syslog-ng is on /logs. -->
+  <!-- Recent requests: newest proxy access lines from
+       today's syslog-ng file; all logs are on /logs. -->
   <div class="card">
     <div class="flex items-center justify-between mb-3">
       <h2 class="font-semibold text-slate-200">Recent requests (proxy)</h2>
-      <span class="text-xs text-slate-500" title="This tile reads nginx's own access log. The central syslog-ng view of every container is on the Logs page.">direct nginx log · see <a href="/logs" class="underline hover:text-slate-300">Logs</a> for the syslog-ng view</span>
+      <span class="text-xs text-slate-500" title="This tile reads the proxy's access lines from syslog-ng. The view of every container is on the Logs page.">proxy access log · see <a href="/logs" class="underline hover:text-slate-300">Logs</a> for the syslog-ng view</span>
     </div>
     {% if recent_logs %}
     <div class="overflow-x-auto">

@@ -20,9 +20,9 @@ use futures_util::StreamExt as _;
 use lancache_ng::config::{
     self, DDNS_UNSIGNED_MARKER, DEFAULT_RECORD_TTL, DhcpMode, LAN_ZONE, NATS_SUBJECT_FLUSH,
     NATS_SUBJECT_RECORD, NatsLogin, NatsRoles, OPTION_CODE_MAX, OPTION_CODE_MIN, OutOfRange,
-    PDNS_API_PATH, PDNS_AUTH_PORT, Uint, canonical_zone, dns_reader_publish, dns_subscribe,
-    is_dns_name, option_code, option_data, parse_bool, parse_custom_options, rollback_zones,
-    zone_url,
+    PDNS_API_PATH, PDNS_AUTH_PORT, PROXY_ACCESS_LOG_PATTERN, Uint, canonical_zone,
+    dns_reader_publish, dns_subscribe, is_dns_name, option_code, option_data, parse_bool,
+    parse_custom_options, rollback_zones, zone_url,
 };
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, DesiredRunState, DesiredState, DnsRecord, FlushRequest,
@@ -117,8 +117,9 @@ impl HstsMode {
 struct Config {
     template_dir: String,
     cdn_domains_file: String,
-    standard_log: String,
-    ssl_log: String,
+    // What: the proxy's syslog-ng directory.
+    // Why: nginx logs to stdout; syslog-ng stores it.
+    proxy_log_dir: String,
     cache_dir: String,
     dns_state_dir: String,
     shared_secret_dir: String,
@@ -221,7 +222,6 @@ impl Config {
             })
         };
 
-        let standard_log = need("STANDARD_LOG")?;
         let proxy_standard_url = need("PROXY_STANDARD_URL")?;
         // What: both proxy addresses come from compose.
         // Why: no LAN address is hardcoded (AG-SEC-007).
@@ -288,8 +288,7 @@ impl Config {
             template_dir: need("TEMPLATE_DIR")?,
             shared_secret_dir: secret_dir.clone(),
             cdn_domains_file: need("CDN_DOMAINS_FILE")?,
-            ssl_log: need("SSL_LOG")?,
-            standard_log,
+            proxy_log_dir: need("PROXY_LOG_DIR")?,
             cache_dir: need("CACHE_DIR")?,
             dns_state_dir: need("DNS_STATE_DIR")?,
             proxy_ssl_url: need("PROXY_SSL_URL")?,
@@ -1190,7 +1189,6 @@ struct LogEntry {
     status: u16,
     bytes_human: String,
     cache_status: String,
-    source: String,
 }
 
 // What: totals over the parsed access-log lines.
@@ -1206,14 +1204,25 @@ struct LogStats {
     hit_pct: f64,
 }
 
-// What: the access-log line pattern of nginx.conf.
+// What: the proxy access line pattern from common.
 // Why: groups: ip time method path status bytes cache host
 fn log_regex() -> &'static Regex {
     static LOG_REGEX: OnceLock<Regex> = OnceLock::new();
-    LOG_REGEX.get_or_init(|| {
-        Regex::new(r#"^(\S+) - \[([^\]]+)\] "(\S+) (\S+) [^"]+" (\d+) (\d+) "([^"]*)" "([^"]*)""#)
-            .expect("log regex is valid")
-    })
+    LOG_REGEX.get_or_init(|| Regex::new(PROXY_ACCESS_LOG_PATTERN).expect("log regex is valid"))
+}
+
+// What: the proxy's plain day files, oldest first.
+// Why: closed days are xz; the open ones are read.
+fn proxy_log_files(dir: &str) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "log") && p.is_file())
+        .collect();
+    files.sort();
+    files
 }
 
 // What: the last `limit` lines of a file, oldest first.
@@ -1252,8 +1261,11 @@ fn tail_lines(path: &str, limit: usize) -> Vec<String> {
 
 // What: the last `limit` parsed access-log entries.
 // Why: oldest first, so callers reverse for newest-first.
-fn parse_log_tail(path: &str, limit: usize) -> Vec<LogEntry> {
-    tail_lines(path, limit)
+fn parse_log_tail(dir: &str, limit: usize) -> Vec<LogEntry> {
+    let Some(newest) = proxy_log_files(dir).pop() else {
+        return vec![];
+    };
+    tail_lines(&newest.to_string_lossy(), limit)
         .iter()
         .filter_map(|line| {
             let caps = log_regex().captures(line)?;
@@ -1266,53 +1278,17 @@ fn parse_log_tail(path: &str, limit: usize) -> Vec<LogEntry> {
                 status: caps[5].parse().unwrap_or(0),
                 bytes_human: format_bytes(caps[6].parse().unwrap_or(0)),
                 cache_status: caps[7].to_string(),
-                source: String::new(),
             })
         })
         .collect()
 }
 
-// What: nginx $time_local as epoch seconds.
-// Why: entries of two logs must order by real time.
-fn log_time_epoch(time_local: &str) -> i64 {
-    const FORMAT: &[time::format_description::BorrowedFormatItem<'static>] = time::macros::format_description!(
-        "[day]/[month repr:short]/[year]:[hour]:[minute]:[second] [offset_hour sign:mandatory][offset_minute]"
-    );
-    time::OffsetDateTime::parse(time_local, FORMAT)
-        .map(|t| t.unix_timestamp())
-        .unwrap_or(0)
-}
-
-// What: tail of the standard and ssl log, merged by time.
-// Why: each source is read in full; the cap applies after.
-fn merged_log_tail(standard: &str, ssl: &str, limit: usize) -> Vec<LogEntry> {
-    let label = |mut entries: Vec<LogEntry>, source: &str| {
-        entries
-            .iter_mut()
-            .for_each(|e| e.source = source.to_string());
-        entries
-    };
-    if standard == ssl {
-        return label(parse_log_tail(standard, limit), "Shared");
-    }
-    let mut merged = label(parse_log_tail(standard, limit), "Standard");
-    merged.extend(label(parse_log_tail(ssl, limit), "SSL"));
-    merged.sort_by_key(|entry| log_time_epoch(&entry.time));
-    let excess = merged.len().saturating_sub(limit);
-    merged.drain(..excess);
-    merged
-}
-
-// What: hit, miss and byte totals over both access logs.
-// Why: an identical path is counted once, not twice.
-fn log_stats(standard: &str, ssl: &str) -> LogStats {
+// What: hit, miss and byte totals over the open days.
+// Why: closed days are xz; the dashboard stays cheap.
+fn log_stats(dir: &str) -> LogStats {
     let mut stats = LogStats::default();
     let mut total_bytes: u64 = 0;
-    let mut paths = vec![standard];
-    if ssl != standard {
-        paths.push(ssl);
-    }
-    for path in paths {
+    for path in proxy_log_files(dir) {
         let Ok(file) = File::open(path) else { continue };
         // What: read raw lines, decode each lossily.
         // Why: a non-UTF-8 byte must not hide later lines.
@@ -5057,13 +5033,11 @@ async fn dashboard(State(state): Shared, headers: HeaderMap) -> Response {
     let (proxy, cache_used_gb, stats, recent, syslog_gb, syslog, alarms) = tokio::join!(
         proxy_statuses(&state),
         blocking(&state, |s| du_gb(&s.config.cache_dir)),
-        blocking(&state, |s| log_stats(
-            &s.config.standard_log,
-            &s.config.ssl_log
+        blocking(&state, |s| log_stats(&s.config.proxy_log_dir)),
+        blocking(&state, |s| parse_log_tail(
+            &s.config.proxy_log_dir,
+            RECENT_LOGS
         )),
-        blocking(&state, |s| {
-            merged_log_tail(&s.config.standard_log, &s.config.ssl_log, RECENT_LOGS)
-        }),
         blocking(&state, |s| du_gb(&s.config.syslog_log_root)),
         blocking(&state, |s| syslog_stats(&s.config.syslog_log_root)),
         blocking(&state, |s| read_alarms(&s.config.netdata_alarms_file)),
@@ -6376,8 +6350,8 @@ mod tests {
         assert_eq!(fields.number::<u32>("none"), None);
     }
 
-    const TEXT_KEYS: [&str; 36] = [
-        "STANDARD_LOG",
+    const TEXT_KEYS: [&str; 35] = [
+        "PROXY_LOG_DIR",
         "PROXY_STANDARD_URL",
         "STANDARD_IP",
         "SSL_IP",
@@ -6386,7 +6360,6 @@ mod tests {
         "NTP_UPSTREAM_SERVERS",
         "TEMPLATE_DIR",
         "CDN_DOMAINS_FILE",
-        "SSL_LOG",
         "CACHE_DIR",
         "DNS_STATE_DIR",
         "PROXY_SSL_URL",
@@ -6450,8 +6423,7 @@ mod tests {
     #[test]
     fn config_load_maps_every_key_to_its_field() {
         let cfg = load_from(&full_env()).expect("a complete env loads");
-        assert_eq!(cfg.standard_log, "v-STANDARD_LOG");
-        assert_eq!(cfg.ssl_log, "v-SSL_LOG");
+        assert_eq!(cfg.proxy_log_dir, "v-PROXY_LOG_DIR");
         assert_eq!(cfg.proxy_standard_url, "v-PROXY_STANDARD_URL");
         assert_eq!(cfg.proxy_ssl_url, "v-PROXY_SSL_URL");
         assert_eq!(cfg.standard_ip, "v-STANDARD_IP");
@@ -6863,83 +6835,42 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    const HIT_LINE: &str = "192.0.2.1 - [10/Oct/2026:12:00:05 +0000] \"GET /a/b HTTP/1.1\" 200 2048 \"HIT\" \"steam.example\"";
+    // What: one access line as syslog-ng stores it.
+    // Why: ISODATE HOST PROGRAM: then the nginx line.
+    const HIT_LINE: &str = "2026-10-10T12:00:05+00:00 host LanCache-NG-proxy: 192.0.2.1 - [10/Oct/2026:12:00:05 +0000] \"GET /a/b HTTP/1.1\" 200 2048 \"HIT\" \"steam.example\"";
 
     // What: an access-log line becomes a typed entry.
     // Why: the logs page renders fields, not raw text.
     #[test]
     fn access_log_lines_become_entries() {
         let dir = unique_temp_dir("parse-log");
-        let file = dir.join("access.log");
-        let path = file.to_string_lossy().into_owned();
-        fs::write(&file, format!("garbage\n{HIT_LINE}\n")).unwrap();
+        let path = dir.to_string_lossy().into_owned();
+        assert!(parse_log_tail(&path, 10).is_empty());
+        fs::write(dir.join("20261009.log"), log_line(1, "MISS", 1)).unwrap();
+        fs::write(dir.join("20261010.log"), format!("garbage\n{HIT_LINE}\n")).unwrap();
         let entries = parse_log_tail(&path, 10);
         assert_eq!(entries.len(), 1);
         assert_eq!(
             serde_json::to_value(&entries[0]).unwrap(),
             json!({"ip": "192.0.2.1", "time": "10/Oct/2026:12:00:05 +0000", "method": "GET",
                    "path": "/a/b", "host": "steam.example", "status": 200,
-                   "bytes_human": "2.0 KB", "cache_status": "HIT", "source": ""})
+                   "bytes_human": "2.0 KB", "cache_status": "HIT"})
         );
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    // What: nginx $time_local becomes epoch seconds.
-    // Why: entries of two logs must order by real time.
-    #[test]
-    fn log_times_become_epoch_seconds() {
-        assert_eq!(log_time_epoch("10/Oct/2026:12:00:00 +0000"), 1_791_633_600);
-        assert_eq!(log_time_epoch("10/Oct/2026:12:00:00 +0200"), 1_791_626_400);
-        assert_eq!(log_time_epoch("10/Oct/2026:12:00:00 -0130"), 1_791_639_000);
-        assert_eq!(log_time_epoch("not a time"), 0);
     }
 
     fn log_line(second: u32, cache: &str, bytes: u64) -> String {
         format!(
-            "192.0.2.1 - [10/Oct/2026:12:00:{second:02} +0000] \"GET /p{second} HTTP/1.1\" 200 {bytes} \"{cache}\" \"h\"\n"
+            "2026-10-10T12:00:{second:02}+00:00 host LanCache-NG-proxy: 192.0.2.1 - [10/Oct/2026:12:00:{second:02} +0000] \"GET /p{second} HTTP/1.1\" 200 {bytes} \"{cache}\" \"h\"\n"
         )
     }
 
-    // What: two logs merge by time and carry their source.
-    // Why: the cap applies after the merge.
-    #[test]
-    fn two_logs_merge_by_time_with_a_source_label() {
-        let dir = unique_temp_dir("merge");
-        let (standard, ssl) = (dir.join("std.log"), dir.join("ssl.log"));
-        fs::write(
-            &standard,
-            format!("{}{}", log_line(5, "HIT", 1), log_line(1, "HIT", 1)),
-        )
-        .unwrap();
-        fs::write(&ssl, log_line(3, "MISS", 1)).unwrap();
-        let (std_path, ssl_path) = (
-            standard.to_string_lossy().into_owned(),
-            ssl.to_string_lossy().into_owned(),
-        );
-        let merged = merged_log_tail(&std_path, &ssl_path, 10);
-        let seen: Vec<(&str, &str)> = merged
-            .iter()
-            .map(|e| (e.path.as_str(), e.source.as_str()))
-            .collect();
-        assert_eq!(
-            seen,
-            [("/p1", "Standard"), ("/p3", "SSL"), ("/p5", "Standard")]
-        );
-        let capped = merged_log_tail(&std_path, &ssl_path, 2);
-        let paths: Vec<&str> = capped.iter().map(|e| e.path.as_str()).collect();
-        assert_eq!(paths, ["/p3", "/p5"]);
-        let shared = merged_log_tail(&std_path, &std_path, 10);
-        assert_eq!(shared.len(), 2);
-        assert!(shared.iter().all(|e| e.source == "Shared"));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    // What: log totals count each line once per file.
-    // Why: an identical path is counted once, not twice.
+    // What: log totals count the open day files only.
+    // Why: closed days are xz; the dashboard stays cheap.
     #[test]
     fn log_stats_count_hits_and_bytes() {
         let dir = unique_temp_dir("stats");
-        let (standard, ssl) = (dir.join("std.log"), dir.join("ssl.log"));
+        let (standard, ssl) = (dir.join("20261009.log"), dir.join("20261010.log"));
         let gib = 1_073_741_824;
         let mut text = String::new();
         text += &log_line(1, "HIT", gib);
@@ -6952,19 +6883,14 @@ mod tests {
         bytes.extend_from_slice(log_line(6, "HIT", 0).as_bytes());
         fs::write(&standard, &bytes).unwrap();
         fs::write(&ssl, log_line(7, "MISS", 0)).unwrap();
-        let (std_path, ssl_path) = (
-            standard.to_string_lossy().into_owned(),
-            ssl.to_string_lossy().into_owned(),
-        );
-        let stats = log_stats(&std_path, &ssl_path);
+        fs::write(dir.join("20261008.log.xz"), log_line(8, "HIT", 0)).unwrap();
+        let stats = log_stats(&dir.to_string_lossy());
         assert_eq!(
             serde_json::to_value(&stats).unwrap(),
             json!({"hits": 2, "misses": 2, "expired": 1, "other": 1,
                    "total_bytes_gb": 2.0, "total_requests": 6, "hit_pct": 2.0 / 6.0 * 100.0})
         );
-        let once = log_stats(&std_path, &std_path);
-        assert_eq!(once.total_requests, 5);
-        let none = log_stats("/no/such/log", "/no/such/log");
+        let none = log_stats("/no/such/dir");
         assert_eq!((none.total_requests, none.hit_pct), (0, 0.0));
         let _ = fs::remove_dir_all(&dir);
     }

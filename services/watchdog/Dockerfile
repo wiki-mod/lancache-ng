@@ -109,10 +109,11 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 
-# What: netdata joins the group of the proxy log files.
-# Why: go.d web_log reads the nginx access log as netdata.
-# From: Issue #1246
-RUN addgroup -g 10001 lancache && addgroup netdata lancache
+# What: syslog-ng files belong to this reader group.
+# Why: the ui (gid 10001) and netdata web_log read them.
+# From: Issue #1246 | Issue #1683
+ENV LOG_READER_GROUP=lancache
+RUN addgroup -g 10001 "${LOG_READER_GROUP}" && addgroup netdata "${LOG_READER_GROUP}"
 
 COPY --from=services-builder /build/lancache-watchdog-out /usr/local/bin/lancache-watchdog
 COPY --from=services-builder /build/lancache-cachehamster-out /usr/local/bin/lancache-cachehamster
