@@ -2578,6 +2578,17 @@ fn kea_socket_dir() -> Result<(), String> {
         .map_err(|e| format!("cannot prepare {KEA_SOCKET_DIR}: {e}"))
 }
 
+// What: the Kea snapshot dir, group-writable for the ui.
+// Why: the ui records a snapshot per write; it must exist.
+// From: Issue #614 | PR #1912
+fn kea_snapshot_dir(dir: &Path) -> Result<(), String> {
+    let gid = config::need(&config::process_env, "LANCACHE_SHARED_SECRET_GID")?
+        .parse::<u32>()
+        .map_err(|_| "LANCACHE_SHARED_SECRET_GID is no group id".to_string())?;
+    fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    own(dir, None, gid, 0o770)
+}
+
 // What: kea-dhcp4 on its checked config, else a snapshot.
 // Why: no good config means rescue, never a stop.
 // From: Issue #815 | PR #1912
@@ -2601,11 +2612,9 @@ fn kea_dhcp4(ctx: &Ctx) -> Result<Run, String> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Some(kea_dhcp4_first(ctx, &dir)?),
         Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
     };
-    let store = lancache_ng::SnapshotStore::new(
-        PathBuf::from(ctx.need("KEA_CONFIG_SNAPSHOT_DIR")?),
-        "dhcp4.json",
-        "kea",
-    );
+    let snap_dir = PathBuf::from(ctx.need("KEA_CONFIG_SNAPSHOT_DIR")?);
+    kea_snapshot_dir(&snap_dir)?;
+    let store = lancache_ng::SnapshotStore::new(snap_dir, "dhcp4.json", "kea");
     let fresh = current
         .and_then(owned)
         .map(|text| ("current".to_string(), text));
