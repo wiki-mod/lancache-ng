@@ -6626,7 +6626,7 @@ _ci_validate_dns() {
             ci_log "[CI-ERROR-VALIDATE-0011]" "domain=\"${domain}\" side=\"${side}\" reason=\"no DNS answer from a resolver side\""
             return 1
         fi
-        # What: the http and https sides resolve distinct IPs.
+        # What: http and https sides resolve distinct IPs.
         # Why: each side answers with its own proxy IP.
         # From: Issue #668
         if [ "${side}" = PROXY_IP ]; then

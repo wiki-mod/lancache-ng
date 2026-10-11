@@ -3123,8 +3123,8 @@ migrate_env_for_update() (
     set_env_key_if_empty_or_missing UI_SESSION_TTL_SECONDS "$ui_session_ttl" "$env_file"
 
     # What: an empty SSL_ENABLED becomes 1
-    # Why: prod always runs dns-ssl on the required IP_HTTPS
-    # From: Issue #1683 | PR #1858
+    # Why: prod always runs dns-https on IP_HTTPS
+    # From: Issue #1683 | PR #1912
     set_env_key_if_empty_or_missing SSL_ENABLED 1 "$env_file"
 
     # What: missing AUTO_UPDATE_ENABLED defaults to 0
@@ -6533,8 +6533,8 @@ done
 printf "\n"
 printf "  ${BOLD}Second LAN IP${RESET}: the SSL DNS/proxy address, always required.\n\n"
 # What: the second LAN address is always asked and checked
-# Why: AG-SETUP-001; prod runs dns-ssl on IP_HTTPS always
-# From: Issue #1683 | PR #1858
+# Why: AG-SETUP-001; prod runs dns-https on IP_HTTPS always
+# From: Issue #1683 | PR #1912
 suggested_ssl="${IP_HTTP%.*}.$((10#${IP_HTTP##*.} + 1))"
 while true; do
     ask "Second LAN IP (SSL mode)" "$suggested_ssl"
