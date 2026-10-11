@@ -1113,8 +1113,8 @@ ROWS
     local fx fixture_line root_line
     fx="$(_ci_validation_env)" || return 1
     grep -qx 'LANCACHE_STATE_DIR=.*' <<< "${fx}" || { echo "fixture lost the state root: ${fx}"; return 1; }
-    fixture_line="$(grep -n 'export "\${venv\[@\]}"' "${CI_SH}" | head -1 | cut -d: -f1)"
-    root_line="$(grep -n 'export LANCACHE_STATE_DIR="\${shared}/state/\${project}"' "${CI_SH}" | head -1 | cut -d: -f1)"
+    fixture_line="$(grep -n -m 1 -F -e 'export "${venv[@]}"' "${CI_SH}")"; fixture_line="${fixture_line%%:*}"
+    root_line="$(grep -n -m 1 -F -e 'export LANCACHE_STATE_DIR="${shared}/state/${project}"' "${CI_SH}")"; root_line="${root_line%%:*}"
     [ -n "${fixture_line}" ] && [ -n "${root_line}" ] && [ "${root_line}" -gt "${fixture_line}" ] \
         || { echo "root export line ${root_line:-none} is not after fixture export line ${fixture_line:-none}"; return 1; }
 }
@@ -2926,6 +2926,7 @@ ROWS
 # Why: AG-OP-007: a quickstart user loses nothing
 # From: Issue #1683 | PR #1858
 @test "setup quickstart install moves into deploy/prod once" {
+    _registry || return 1
     _stand_ins || return 1
     local root t="${BATS_TEST_TMPDIR}" cfg project svc keys key want vol dir absent copies f el lo prof
     local -a profiles=()
