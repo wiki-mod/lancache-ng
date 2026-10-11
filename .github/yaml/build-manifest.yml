@@ -44,7 +44,7 @@ services:
     context: services/watchdog
     labels: [services, watchdog, syslog, ntp, netdata]
     build_type: rust
-    # What: workspace crates (cargo -p) built for this image.
+    # What: workspace crates (cargo -p) this image builds.
     # Why: supervisor and cachehamster run in one container.
     # From: Issue #1683
     crates: [lancache-watchdog, lancache-cachehamster]
@@ -73,7 +73,7 @@ services:
     context: services/proxy
     labels: [proxy, nginx]
     build_type: rust
-    # What: workspace crates (cargo -p) built for this image.
+    # What: workspace crates (cargo -p) this image builds.
     # Why: the supervisor renders, certifies and runs nginx.
     # From: Issue #1683
     crates: [lancache-watchdog]
@@ -107,7 +107,7 @@ services:
     context: services/dns
     labels: [dns, pdns, nats]
     build_type: rust
-    # What: workspace crates (cargo -p) built for this image.
+    # What: workspace crates (cargo -p) this image builds.
     # Why: subscriber and supervisor run in one container.
     # From: Issue #1683
     crates: [nats-subscriber, lancache-watchdog]
@@ -136,7 +136,7 @@ services:
     context: services/dhcp
     labels: [dhcp, kea, dnsmasq]
     build_type: rust
-    # What: workspace crates (cargo -p) built for this image.
+    # What: workspace crates (cargo -p) this image builds.
     # Why: the supervisor switches Kea and dnsmasq modes.
     # From: Issue #1683
     crates: [lancache-watchdog]
@@ -167,7 +167,7 @@ services:
     context: services/ui
     labels: [admin-ui]
     build_type: rust
-    # What: workspace crates (cargo -p) built for this image.
+    # What: workspace crates (cargo -p) this image builds.
     # Why: rust checks target crates, not the build context
     # From: Issue #1683 | PR #1858
     crates: [lancache-ui]
@@ -465,20 +465,43 @@ build_runtime:
     smoke:
       - ldd /usr/local/bin/@CRATE@
 
+# What: repo paths Dockerfiles copy from outside a context.
+# Why: a change there must reach every image built from it.
+# From: Issue #1683 | PR #1912
+named_contexts:
+  cargo-workspace:
+    path: Cargo.toml
+  cargo-lock:
+    path: Cargo.lock
+  rust-common:
+    path: services/common
+  supervisor-src:
+    path: services/watchdog/src
+  supervisor-manifest:
+    path: services/watchdog/Cargo.toml
+  ui-manifest:
+    path: services/ui/Cargo.toml
+  cachehamster-manifest:
+    path: services/cachehamster/Cargo.toml
+  cachehamster-src:
+    path: services/cachehamster/src
+  subscriber-manifest:
+    path: services/dns/nats-subscriber/Cargo.toml
+
 # What: Per-service rebuild edges beyond its own context.
 # Why: plan picks candidates, identity decides the build.
-# From: Issue #1683
+# From: Issue #1683 | PR #1912
 dependency_graph:
   services:
-    contexts: []
+    contexts: [cargo-workspace, cargo-lock, rust-common, ui-manifest, cachehamster-manifest, cachehamster-src, subscriber-manifest]
   proxy:
-    contexts: []
+    contexts: [cargo-workspace, cargo-lock, rust-common, supervisor-src, supervisor-manifest, ui-manifest, cachehamster-manifest, subscriber-manifest]
   dns:
-    contexts: []
+    contexts: [cargo-workspace, cargo-lock, rust-common, supervisor-src, supervisor-manifest, ui-manifest, cachehamster-manifest]
   dhcp:
-    contexts: []
+    contexts: [cargo-workspace, cargo-lock, rust-common, supervisor-src, supervisor-manifest, ui-manifest, cachehamster-manifest, subscriber-manifest]
   ui:
-    contexts: []
+    contexts: [cargo-workspace, cargo-lock, rust-common, supervisor-manifest, cachehamster-manifest, subscriber-manifest]
 
 # What: CodeQL query suites and ignored paths.
 # Why: One SOT owner; codeql.yml/ci.sh derive, no dup.

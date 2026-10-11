@@ -2370,7 +2370,7 @@ _ci_sccache_env() {
         return 2
     fi
     # What: optional: drop redis, then remote, then local.
-    # Why: §42: a cache outage costs speed, never the build.
+    # Why: §42: a cache outage costs speed, not the build.
     # From: Issue #1683 | PR #1858
     while [ -n "${chain}" ]; do
         case "${chain}" in redis,*) next="${chain#redis,}" ;; *) next="" ;; esac
@@ -7760,7 +7760,7 @@ _ci_service_build_args() {
             [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0009]" "arg=\"BUILD_TOOLS_IMAGE\" service=\"${service}\" reason=\"empty resolved build-tools image; FAIL CLOSED\""; return 2; }
             out="${out}${prefix}BUILD_TOOLS_IMAGE=${val}"$'\n'
         fi
-        # What: emit the SOT workspace crates for rust-build.
+        # What: emit SOT workspace crates for rust-build.
         # Why: one crate owner; the Dockerfile names none.
         # From: Issue #1683 | PR #1858
         val="$(_ci_target_list "${service}" crates)" || return 2
@@ -11250,8 +11250,8 @@ _ci_check_prod_state_wiring() {
     for f in "${compose}" "${env_file}" "${doc}"; do
         [ -f "${f}" ] || { ci_error "[CI-ERROR-CHECK-0043]" "path=\"${f}\" reason=\"required prod-state-wiring input missing\"" "missing prod-state-wiring input: ${f}"; return 2; }
     done
-    # What: the state keys come from setup.sh prod_state_keys.
-    # Why: one owner of the key list; a fixed copy goes stale.
+    # What: state keys come from setup.sh prod_state_keys.
+    # Why: one key list owner; a fixed copy goes stale.
     # From: Issue #1683
     su="$(_ci_installer "${repo_root}")" || return 2
     keys="$(_ci_capture 0 bash -c 'set -euo pipefail; . "$1"; prod_state_keys' _ "${su}")" || return 2
@@ -12469,6 +12469,48 @@ _ci_check_sot_identity_inputs() {
     printf 'sot-identity-inputs=clean types=%s\n' "${n}"
 }
 
+# What: each local COPY source is the context or an edge.
+# Why: an uncovered source keeps a stale image identity.
+# From: Issue #1683 | PR #1912
+_ci_check_dockerfile_context_edges() {
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}" targets t df ctxs c p srcs src ok n=0
+    local -a viol=() roots=()
+    targets="$(ci_build_targets)" || return 2
+    for t in ${targets}; do
+        df="$(_ci_service_path "${t}" Dockerfile "${repo_root}")" || return 2
+        c="$(_ci_required_field "${t}" context)" || return 2
+        roots=("${c}")
+        ctxs="$(ci_service_contexts "${t}")" || return 2
+        for c in ${ctxs}; do
+            p="$(ci_context_path "${c}")" || return 2
+            roots+=("${p}")
+        done
+        n=$(( n + 1 ))
+        # What: joins \ lines, skips --from, drops the dest.
+        # Why: only build-context sources feed the identity.
+        srcs="$(_ci_capture 0 awk '
+            /\\$/ { buf = buf substr($0, 1, length($0) - 1) " "; next }
+            { line = buf $0; buf = "" }
+            toupper(line) !~ /^[[:space:]]*COPY[[:space:]]/ || line ~ /--from=/ { next }
+            { k = 0; nw = split(line, w, /[[:space:]]+/)
+              for (i = 2; i <= nw; i++) if (w[i] != "" && w[i] !~ /^--/) a[++k] = w[i]
+              for (i = 1; i < k; i++) print a[i] }' "${df}")" || return 2
+        while IFS= read -r src; do
+            [ -n "${src}" ] || continue
+            ok=""
+            for p in "${roots[@]}"; do
+                case "${src%/}" in "${p}" | "${p}"/*) ok=1; break ;; esac
+            done
+            [ -n "${ok}" ] || viol+=("${t}: ${df#"${repo_root}/"} copies ${src}, outside its context and SOT edges")
+        done <<< "${srcs}"
+    done
+    if [ "${#viol[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0170]" "targets=${n} reason=\"a COPY source is not in dependency_graph\"" "$(printf '%s\n' "${viol[@]}")"
+        return 1
+    fi
+    printf 'dockerfile-context-edges=clean targets=%s\n' "${n}"
+}
+
 # What: each Dockerfile secret mount id is a central id.
 # Why: set-runtime writes only listed ids; one source.
 # From: Issue #1683 | PR #1858
@@ -12887,7 +12929,7 @@ ci_cmd_check_all() {
         setup-kea-preflight setup-update-safety image-channel-resolution \
         vex-drift logging-matrix \
         entrypoint-lib-wiring dockerfile-build-tools dockerfile-stage-variables \
-        dockerfile-secret-ids sot-identity-inputs workflow-ci-variables workflow-job-settings cargo-profile-tuning no-source-compiled-tools codeql-coverage version-drift)
+        dockerfile-secret-ids dockerfile-context-edges sot-identity-inputs workflow-ci-variables workflow-job-settings cargo-profile-tuning no-source-compiled-tools codeql-coverage version-drift)
     for sub in "${repo_wide[@]}"; do
         ci_cmd_check "${sub}" || rc=1
     done
@@ -12913,6 +12955,7 @@ ci_cmd_check() {
         dockerfile-stage-variables) _ci_check_dockerfile_stage_variables "$@" ;;
         dockerfile-secret-ids) _ci_check_dockerfile_secret_ids "$@" ;;
         sot-identity-inputs) _ci_check_sot_identity_inputs ;;
+        dockerfile-context-edges) _ci_check_dockerfile_context_edges "$@" ;;
         workflow-ci-variables) _ci_check_workflow_ci_variables "$@" ;;
         workflow-job-settings) _ci_check_workflow_job_settings "$@" ;;
         cargo-profile-tuning) _ci_check_cargo_profile_tuning "$@" ;;

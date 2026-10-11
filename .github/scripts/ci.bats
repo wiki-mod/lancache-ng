@@ -968,6 +968,26 @@ CASES
     _expect dropped 1 "[CI-ERROR-CHECK-0169];${svc}: Dockerfile stage;without ARG ${var}" || return 1
 }
 
+# What: a COPY source outside context and edges fails
+# Why: an uncovered source keeps a stale image identity
+# From: Issue #1683 | PR #1912
+@test "dockerfile context edges: every COPY source feeds the identity" {
+    local root t="${BATS_TEST_TMPDIR}/repo" out svc df src
+    local -a tg
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    run _ci_check_dockerfile_context_edges "${root}"
+    _expect real 0 "dockerfile-context-edges=clean" || return 1
+    out="$(ci_build_targets)" || return 1
+    mapfile -t tg <<< "${out}"
+    [ "${#tg[@]}" -gt 0 ] || { echo "inputs: no build targets"; return 1; }
+    svc="${tg[$(( SRANDOM % ${#tg[@]} ))]}" src="$(_val name)/$(_val name)"
+    _checkout_copy "${root}" "${t}" || return 1
+    df="$(_ci_service_path "${svc}" Dockerfile "${t}")" || return 1
+    printf 'COPY --chown=0:0 %s \\\n    /x\n' "${src}" >> "${df}" || return 1
+    run _ci_check_dockerfile_context_edges "${t}"
+    _expect uncovered 1 "[CI-ERROR-CHECK-0170];${svc}: ;copies ${src}, outside" || return 1
+}
+
 # What: stubs let cargo load every member; undeclared stops
 # Why: rust builder stages copy only the members' manifests
 # From: Issue #1683 | PR #1905
