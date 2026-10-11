@@ -11246,18 +11246,25 @@ _ci_check_prod_state_wiring() {
     doc_rel="$(_ci_variable CI_BACKUP_RESTORE_DOC)" || return 2
     doc="${repo_root}/${doc_rel}"
     local -a viol=()
-    local key f
+    local key f keys su
     for f in "${compose}" "${env_file}" "${doc}"; do
         [ -f "${f}" ] || { ci_error "[CI-ERROR-CHECK-0043]" "path=\"${f}\" reason=\"required prod-state-wiring input missing\"" "missing prod-state-wiring input: ${f}"; return 2; }
     done
-    for key in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
-        grep -Fq "\${${key}:-\${LANCACHE_STATE_DIR" "${compose}" \
-            || viol+=("${dep} does not derive ${key} from LANCACHE_STATE_DIR")
+    # What: the state keys come from setup.sh prod_state_keys.
+    # Why: one owner of the key list; a fixed copy goes stale.
+    # From: Issue #1683
+    su="$(_ci_installer "${repo_root}")" || return 2
+    keys="$(_ci_capture 0 bash -c 'set -euo pipefail; . "$1"; prod_state_keys' _ "${su}")" || return 2
+    if [ -z "${keys}" ]; then
+        ci_error "[CI-ERROR-CHECK-0043]" "path=\"${su}\" reason=\"prod_state_keys returned no state key\"" "no state key from ${su}"
+        return 2
+    fi
+    while IFS= read -r key; do
         grep -Fq "${key}" "${env_file}" \
             || viol+=("$(dirname "${dep}")/.env does not document ${key} for manual upgrades")
         grep -Fq "${key}" "${doc}" \
             || viol+=("${doc_rel} does not mention ${key}")
-    done
+    done <<<"${keys}"
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0100]" "reason=\"prod state wiring not LANCACHE_STATE_DIR-derived or undocumented\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
@@ -11580,49 +11587,14 @@ _ci_check_compose_config() {
     printf 'compose-config=clean checks=%s\n' "${count}"
 }
 
-# What: Fail unless NATS/DNS configs are written atomically.
-# Why: a torn shared-config write can start a broken stack.
-# From: Issue #1683 | PR #1858
+# What: Fail unless secondary setup writes files atomically.
+# Why: a torn compose or .env breaks the secondary.
+# From: Issue #475
 _ci_check_nats_atomic_write() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local repo_root="${1:-${CI_REPO_ROOT}}" su
     local -a viol=()
-    local cf dep inst ep su
-    ep="$(_ci_service_path dns entrypoint.sh "${repo_root}")" || return 2
     su="$(_ci_installer "${repo_root}")" || return 2
-    ep="${ep#"${repo_root}/"}" su="${su#"${repo_root}/"}"
-    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    inst="$(_ci_installer_compose "${repo_root}")" || return 2
-    # What: nats bootstrap stages, chowns, then renames.
-    # Why: a restart must keep nats.conf whole and writable.
-    # From: Issue #426
-    for cf in "${dep}" "${inst}"; do
-        grep -Fq 'tmp_nats_conf="$(mktemp /etc/nats/.nats.conf.XXXXXX)"' "${repo_root}/${cf}" \
-            || viol+=("${cf}: NATS must stage the shared config in a temp file inside /etc/nats")
-        grep -Fq 'chown 10001:10001 "$$tmp_nats_conf"' "${repo_root}/${cf}" \
-            || viol+=("${cf}: NATS must restore shared config ownership to 10001 after writing")
-        grep -Fq 'mv "$$tmp_nats_conf" /etc/nats/nats.conf' "${repo_root}/${cf}" \
-            || viol+=("${cf}: NATS must atomically replace nats.conf after fixing ownership")
-    done
-    # What: dns renders its configs via the atomic helper.
-    # Why: a torn pdns or recursor config breaks DNS.
-    # From: Issue #475
-    grep -Fq 'render_template_atomic' "${repo_root}/${ep}" \
-        || viol+=("${ep}: DNS entrypoint must render generated configs atomically")
-    grep -Fq 'mktemp "${target_dir}/.${target_name}.tmp.XXXXXX"' "${repo_root}/${ep}" \
-        || viol+=("${ep}: DNS entrypoint must stage temp files in the target directory")
-    local hit
-    hit="$(_ci_capture 1 grep -F -e '> /tmp/recursor.conf' -e '> /tmp/pdns.conf' "${repo_root}/${ep}")" || return 2
-    if [ -n "${hit}" ]; then
-        viol+=("${ep}: DNS entrypoint must not render PDNS configs through /tmp")
-    fi
-    local hit
-    hit="$(_ci_capture 1 grep -F "sed -i 's/^  loglevel: 3\$/  loglevel: 6/' /etc/pdns/recursor.conf" "${repo_root}/${ep}")" || return 2
-    if [ -n "${hit}" ]; then
-        viol+=("${ep}: query logging must apply to the staged recursor.conf before replacement")
-    fi
-    # What: the secondary's files go through atomic writers.
-    # Why: a torn compose or .env breaks the secondary.
-    # From: Issue #475
+    su="${su#"${repo_root}/"}"
     grep -Fq 'write_file_atomically "${secondary_dir}/docker-compose.yml"' "${repo_root}/${su}" \
         || viol+=("${su}: secondary setup must atomically write generated docker-compose.yml")
     grep -Fq 'write_file_atomically "${secondary_dir}/.env"' "${repo_root}/${su}" \

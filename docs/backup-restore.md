@@ -51,6 +51,7 @@ The automated manifest includes these paths when they exist:
 - an `image-revisions.txt` file with the image revisions present before an update pulls new tags
 - PowerDNS state from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, optional `PDNS_STANDARD_DIR`, `PDNS_SSL_DIR`, `PDNS_FILTER_STATE_DIR`, and legacy `/srv/lancache/pdns-standard`, `/srv/lancache/pdns-ssl`, `/srv/lancache/pdns-filter-state` when present
 - Kea data from the production state root `LANCACHE_STATE_DIR`, optional `KEA_DATA_DIR`, and legacy `/srv/lancache/kea` when present
+- chrony and CacheHamster data from the production state root `LANCACHE_STATE_DIR`, optional `NTP_DATA_DIR`, `CACHEHAMSTER_DATA_DIR`, and legacy `/srv/lancache/ntp`, `/srv/lancache/cachehamster` when present
 - NATS state and generated config from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, optional `NATS_DATA_DIR`, `NATS_CONF_DIR`, and legacy `/srv/lancache/nats`, `/srv/lancache/nats-conf` when present
 - in `--full` mode only, the cache directory from `CACHE_DIR` (or the production state root `LANCACHE_STATE_DIR`), plus legacy split cache directories (`CACHE_DIR_STANDARD`, `CACHE_DIR_SSL`) and `/srv/lancache/cache` when present
 
