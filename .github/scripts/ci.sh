@@ -55,6 +55,7 @@ CI_ARG_CRATES=RUST_CRATES
 CI_ARG_TARGET=MUSL_TARGET
 CI_ARG_PROCESSES=LANCACHE_PROCESSES
 CI_ARG_GID=LANCACHE_RUNTIME_GID
+CI_ARG_IMAGE_SETUP=IMAGE_SETUP
 CI_ARG_DEFAULTS=LANCACHE_RUNTIME_DEFAULTS
 
 # What: The ci.sh subcommand dispatch table.
@@ -62,7 +63,7 @@ CI_ARG_DEFAULTS=LANCACHE_RUNTIME_DEFAULTS
 # From: Issue #1683
 declare -A CI_DISPATCH=(
     [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-config]=ci_cmd_codeql_config [codeql-analyze]=ci_cmd_codeql_analyze [identity]=ci_cmd_identity
-    [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [apk-pin-install]=ci_cmd_apk_pin_install
+    [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [image-setup]=ci_cmd_image_setup [apk-pin-install]=ci_cmd_apk_pin_install
     [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [gha-runtime-args]=ci_cmd_gha_runtime_args
     [test]=ci_cmd_test [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
     [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
@@ -2963,6 +2964,33 @@ ci_cmd_apk_setup() {
     _ci_apk_step update || return 2
     [ "${#tagged_pkgs[@]}" -eq 0 ] || _ci_apk_step add "${tagged_pkgs[@]}" || return 2
     [ -z "${bundle}" ] || rm -f "${bundle}"
+}
+
+# What: In-image accounts and directories from IMAGE_SETUP.
+# Why: the Dockerfile runs this one command, no RUN logic.
+# From: Issue #1683 | PR #1912
+ci_cmd_image_setup() {
+    local tok kind a b c out rc
+    for tok in ${IMAGE_SETUP:-}; do
+        kind="${tok%%=*}"
+        IFS=: read -r a b c <<< "${tok#*=}"
+        rc=0
+        case "${kind}" in
+            group) out="$(addgroup -g "${b}" "${a}" 2>&1)" || rc=$? ;;
+            member) out="$(addgroup "${a}" "${b}" 2>&1)" || rc=$? ;;
+            user) out="$(adduser -D -H -u "${b}" -G "${c}" -s /sbin/nologin "${a}" 2>&1)" || rc=$? ;;
+            dir)
+                out="$(mkdir -p "${a}" 2>&1)" || rc=$?
+                if [ "${rc}" -eq 0 ] && [ -n "${b}" ]; then out="$(chown -R "${b}:${b}" "${a}" 2>&1)" || rc=$?; fi
+                ;;
+            *) out="unknown setup kind"; rc=2 ;;
+        esac
+        if [ "${rc}" -ne 0 ]; then
+            ci_error "[CI-ERROR-IMGSETUP-0001]" "token=\"${tok}\" rc=${rc} reason=\"image setup step failed\"" "${out}"
+            return 2
+        fi
+    done
+    printf 'image-setup=ok steps=%s\n' "$(wc -w <<< "${IMAGE_SETUP:-}")"
 }
 
 # What: fetch, verify and unpack one SOT-pinned apk file.
@@ -8003,6 +8031,22 @@ _ci_build_tools_build_args() {
     printf '%s' "${out}"
 }
 
+# What: a service's setup tokens with SOT values filled in.
+# Why: @KEY@ is a runtime default; @GID@ the runtime gid.
+# From: Issue #1683 | PR #1912
+_ci_service_setup() {
+    local tokens tok key val
+    tokens="$(_ci_target_list "$1" setup)" || return 2
+    tokens="${tokens//$'\n'/ }"
+    while [[ "${tokens}" =~ @([A-Z_]+)@ ]]; do
+        key="${BASH_REMATCH[1]}"
+        if [ "${key}" = GID ]; then val="$(_ci_required_field runtime gid block)" || return 2
+        else val="$(_ci_runtime_default "${key}")" || return 2; fi
+        tokens="${tokens//@${key}@/${val}}"
+    done
+    printf '%s' "${tokens}"
+}
+
 # What: Emit SOT build-args for one product service.
 # Why: single base-image owner; Dockerfiles pin none.
 # From: Issue #1683
@@ -8061,7 +8105,7 @@ _ci_service_build_args() {
     # From: Issue #1683 | PR #1912
     val="$(_ci_required_field runtime defaults block)" || return 2
     out="${out}${prefix}${CI_ARG_DEFAULTS}=${val}"$'\n'
-    # What: SOT defaults this Dockerfile takes as build-args.
+    # What: SOT defaults this Dockerfile takes as args.
     # Why: the image builds with the value; it names none.
     # From: Issue #1683 | PR #1912
     local key keys
@@ -8071,6 +8115,11 @@ _ci_service_build_args() {
         val="$(_ci_runtime_default "${key}")" || return 2
         out="${out}${prefix}${key}=${val}"$'\n'
     done <<<"${keys}"
+    # What: the SOT accounts and directories of this image.
+    # Why: ci.sh image-setup creates them, not the file.
+    # From: Issue #1683 | PR #1912
+    val="$(_ci_service_setup "${service}")" || return 2
+    [ -z "${val}" ] || out="${out}${prefix}${CI_ARG_IMAGE_SETUP}=${val}"$'\n'
     # What: SOT-pinned external inputs of this Dockerfile.
     # Why: one pin->ARG owner shared with version-drift.
     # From: Issue #1683 | PR #1858
@@ -8849,7 +8898,7 @@ ci_main() {
     # What: skip manifest for build-only commands
     # Why: bind-mounted stage has no SOT present
     # From: Issue #1683
-    case "${command}" in check|rust-build|apk-setup) ;; *) ci_require_manifest || return "$?" ;; esac
+    case "${command}" in check|rust-build|apk-setup|image-setup) ;; *) ci_require_manifest || return "$?" ;; esac
     # What: index a present SOT once for this command.
     # Why: readers then look fields up instead of rereading.
     # From: Issue #1683 | PR #1858
@@ -11554,6 +11603,12 @@ _ci_check_prod_state_wiring() {
         grep -Fqw -- "${key}" "${doc}" \
             || viol+=("${doc_rel} does not mention ${key}")
     done <<<"${keys}"
+    # What: a mount default off the state root fails.
+    # Why: AG-SETUP-001: keys come from the compose itself.
+    # From: Issue #1683 | PR #1912
+    local off
+    off="$(grep -E '^[[:space:]]*- \$\{[A-Z0-9_]+:-' "${compose}" | grep -Fv -- ':-${LANCACHE_STATE_DIR:?' || true)"
+    [ -z "${off}" ] || viol+=("${dep} has a mount default off LANCACHE_STATE_DIR:${off}")
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0100]" "reason=\"prod state wiring not LANCACHE_STATE_DIR-derived or undocumented\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
@@ -11597,6 +11652,22 @@ _ci_sot_compose_env() {
     done
 }
 
+# What: image coordinates of the compose images, KEY=VALUE.
+# Why: compose has no image default; SOT and repo own them.
+# From: Issue #1683 | PR #1912
+_ci_validation_images() {
+    local reg repo tag svc names
+    reg="$(_ci_registry)" || return 2
+    repo="$(_ci_repo)" || return 2
+    tag="$(_ci_release_value version)" || return 2
+    names="$(ci_services)" || return 2
+    printf 'LANCACHE_IMAGE_REGISTRY=%s\nLANCACHE_IMAGE_PREFIX=%s\nLANCACHE_IMAGE_TAG=v%s\n' "${reg}" "${repo}" "${tag}"
+    while IFS= read -r svc; do
+        [ -n "${svc}" ] || continue
+        printf 'LANCACHE_IMAGE_REF_%s=%s/%s/%s:v%s\n' "${svc^^}" "${reg}" "${repo}" "${svc}" "${tag}"
+    done <<<"${names}"
+}
+
 # What: SOT validation env plus fresh secrets, KEY=VALUE.
 # Why: config check and live validate share one owner.
 # From: Issue #1683 | PR #1858
@@ -11618,6 +11689,7 @@ _ci_validation_env() {
         printf '%s=%s\n' "${k}" "${v}"
     done
     _ci_sot_compose_env || return 2
+    _ci_validation_images || return 2
     # What: a fresh value per secret key, setup.sh format.
     # Why: a fixed key in the SOT is a hardcoded credential.
     # From: Issue #1683 | PR #1858
@@ -11679,10 +11751,10 @@ _ci_file_value() {
 }
 
 # What: a proxy path or port the supervisor renders
-# Why: main.rs owns them; the proxy image owns NGINX_DIR
+# Why: main.rs owns them; the SOT owns NGINX_DIR
 # From: Issue #1683 | PR #1912
 _ci_proxy_constant() {
-    local name="$1" root="${2-${CI_REPO_ROOT:-.}}" src df raw rel dir re='^("([^"$]+)"|([0-9]+))$'
+    local name="$1" root="${2-${CI_REPO_ROOT:-.}}" src raw rel dir re='^("([^"$]+)"|([0-9]+))$'
     src="$(_ci_service_path services src/main.rs "${root}")" || return 2
     # What: Rust const item; other value forms fail closed.
     # Why: visibility and spacing are valid Rust grammar.
@@ -11698,11 +11770,7 @@ _ci_proxy_constant() {
         return 0
     fi
     rel="${BASH_REMATCH[2]}"
-    df="$(_ci_service_path proxy Dockerfile "${root}")" || return 2
-    if ! dir="$(_ci_file_value "${df}" 's/^ENV NGINX_DIR=([^[:space:]]+)$/\1/p')"; then
-        ci_error "[CI-ERROR-CORE-0147]" "path=\"${df}\" name=\"NGINX_DIR\" reason=\"need exactly one ENV line\"" "${dir}"
-        return 2
-    fi
+    dir="$(_ci_runtime_default NGINX_DIR)" || return 2
     printf '%s/%s\n' "${dir%/}" "${rel}"
 }
 
@@ -11970,6 +12038,13 @@ _ci_check_proxy_nginx_policy() {
     while IFS= read -r h; do
         [ -z "${h}" ] || viol+=("${pp#"${repo_root}/"}: ${h}")
     done <<<"${out}"
+    # What: the https health port is the SOT URL port.
+    # Why: the supervisor probes it; nginx owns the listen.
+    # From: Issue #1683 | PR #1912
+    h="$(_ci_runtime_default PROXY_HEALTH_HTTPS_URL)" || return 2
+    h="${h##*:}" h="${h%%/*}"
+    grep -Eq "^[[:space:]]*listen[[:space:]]+127[.]0[.]0[.]1:${h}[[:space:]]+ssl;" "${px}/conf.d/https.conf" \
+        || viol+=("${px#"${repo_root}/"}/conf.d/https.conf: no loopback listen on ${h} ssl (SOT PROXY_HEALTH_HTTPS_URL)")
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0151]" "reason=\"proxy nginx policy violated\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
@@ -12060,14 +12135,14 @@ _ci_check_setup_update_safety() {
     printf 'setup-update-safety=clean\n'
 }
 
-# What: compose JSON on the fixture env, no IMAGE vars
-# Why: only then do the compose image defaults render
+# What: compose JSON on the fixture env, own IMAGE vars
+# Why: only then do the images show which var they take
 # From: Issue #1683 | PR #1912
 _ci_compose_image_render() {
     local file="$1" out="$2" env body
     shift 2
     env="$(_ci_mktemp "${CI_TMPDIR}/ci-image-env.XXXXXX")" || return 2
-    body="$(_ci_validation_env)" || { rm -f "${env}"; return 2; }
+    body="$(_ci_validation_env | grep -v '^LANCACHE_IMAGE_')" || { rm -f "${env}"; return 2; }
     if ! printf '%s\n' "${body}" "$@" > "${env}"; then
         ci_log "[CI-ERROR-CHECK-0172]" "file=\"${env}\" reason=\"render env file not writable\""
         rm -f "${env}"
@@ -12128,38 +12203,38 @@ _ci_check_image_channel_resolution() {
     if [ ! -f "${prod}" ]; then
         viol+=("prod compose missing: ${prod}")
     else
-        # What: rendered image defaults match the SOT names
-        # Why: AG-CI-006: the SOT and the repo own them
-        # From: Issue #1683 | PR #1858
-        local reg repo tdir rep line sreg spre stag schan prog
-        reg="$(_ci_registry)" || return 2
-        repo="$(_ci_repo)" || return 2
+        # What: each compose image has one ref var
+        # Why: AG-CI-006: the SOT owns the image coordinates
+        # From: Issue #1683 | PR #1912
+        local tdir rep line sreg spre stag schan prog svc names refs
+        while IFS= read -r line; do
+            [ -z "${line}" ] || viol+=("compose gives an image coordinate a default: ${line}")
+        done <<< "$(grep -nE 'LANCACHE_IMAGE_(REF_[A-Z_]+|REGISTRY|PREFIX|TAG):-[^}]' "${prod}" || true)"
+        names="$(ci_services)" || return 2
         sreg="r${SRANDOM}.test" spre="p${SRANDOM}/q${SRANDOM}" stag="t${SRANDOM}" schan="c${SRANDOM}"
-        prog='($d[0].services) as $D | ($s[0].services) as $S | ($sreg + "/" + $spre + "/") as $sp
-            | [$S | to_entries[] | select((.value.image // "") | startswith($sp))] as $fp
+        refs=()
+        while IFS= read -r svc; do
+            [ -z "${svc}" ] || refs+=("LANCACHE_IMAGE_REF_${svc^^}=${sreg}/${spre}/${svc}:${stag}")
+        done <<< "${names}"
+        prog='($s[0].services) as $S | ($sreg + "/" + $spre + "/") as $sp
+            | [$names | split("\n")[] | select(. != "")] as $N
             | [$S | to_entries[] | select((.value.environment // {}) | type == "object" and has("LANCACHE_IMAGE_REGISTRY"))] as $ev
-            | (if ($fp | length) == 0 then "no compose image takes LANCACHE_IMAGE_REGISTRY and LANCACHE_IMAGE_PREFIX" else empty end),
-              (if ($ev | length) == 0 then "no compose service receives LANCACHE_IMAGE_REGISTRY" else empty end),
-              ($fp[] | .key as $k | (.value.image | ltrimstr($sp)) as $rest
-                | if ($rest | endswith(":" + $stag)) then
-                    ($rest | rtrimstr(":" + $stag)) as $slug | ($D[$k].image // "") as $di
-                    | if ($di | startswith($reg + "/" + $repo + "/" + $slug + ":")) then empty
-                      else "service \($k): default image \($di), SOT \($reg)/\($repo)/\($slug):<tag>" end
-                  else "service \($k): image \(.value.image) does not take LANCACHE_IMAGE_TAG" end),
-              ($ev[] | .key as $k | $S[$k].environment as $se | ($D[$k].environment // {}) as $de
-                | (["LANCACHE_IMAGE_REGISTRY", $sreg, $reg], ["LANCACHE_IMAGE_PREFIX", $spre, $repo],
-                   ["LANCACHE_IMAGE_CHANNEL", $schan, ""], ["LANCACHE_IMAGE_TAG", $stag, null]) as [$n, $sv, $dv]
-                | (if ($se[$n] // null) == $sv then empty else "service \($k): \($n) is \($se[$n] // "unset") for env file value \($sv)" end),
-                  (if $dv == null or ($de[$n] // null) == $dv then empty else "service \($k): \($n) default \($de[$n] // "unset"), SOT \($dv)" end))'
+            | (if ($ev | length) == 0 then "no compose service receives LANCACHE_IMAGE_REGISTRY" else empty end),
+              ($N[] | . as $k | ($S[$k].image // "") as $im
+                | if $im == ($sp + $k + ":" + $stag) then empty
+                  else "service \($k): image \($im) does not take LANCACHE_IMAGE_REF_\($k | ascii_upcase)" end),
+              ($ev[] | .key as $k | $S[$k].environment as $se
+                | (["LANCACHE_IMAGE_REGISTRY", $sreg], ["LANCACHE_IMAGE_PREFIX", $spre],
+                   ["LANCACHE_IMAGE_CHANNEL", $schan], ["LANCACHE_IMAGE_TAG", $stag]) as [$n, $sv]
+                | if ($se[$n] // null) == $sv then empty else "service \($k): \($n) is \($se[$n] // "unset") for env file value \($sv)" end)'
         tdir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-chanres.XXXXXX")" || return 2
-        if ! _ci_compose_image_render "${prod}" "${tdir}/d.json" \
-            || ! _ci_compose_image_render "${prod}" "${tdir}/s.json" "LANCACHE_IMAGE_REGISTRY=${sreg}" \
-                "LANCACHE_IMAGE_PREFIX=${spre}" "LANCACHE_IMAGE_TAG=${stag}" "LANCACHE_IMAGE_CHANNEL=${schan}"; then
+        if ! _ci_compose_image_render "${prod}" "${tdir}/s.json" "LANCACHE_IMAGE_REGISTRY=${sreg}" \
+                "LANCACHE_IMAGE_PREFIX=${spre}" "LANCACHE_IMAGE_TAG=${stag}" "LANCACHE_IMAGE_CHANNEL=${schan}" "${refs[@]}"; then
             rm -rf "${tdir}"
             return 2
         fi
-        rep="$(_ci_run "[CI-ERROR-CHECK-0171]" "file=\"${dep}\" reason=\"image default comparison failed\"" \
-            jq -rn --slurpfile d "${tdir}/d.json" --slurpfile s "${tdir}/s.json" --arg reg "${reg}" --arg repo "${repo}" \
+        rep="$(_ci_run "[CI-ERROR-CHECK-0171]" "file=\"${dep}\" reason=\"image coordinate comparison failed\"" \
+            jq -rn --slurpfile s "${tdir}/s.json" --arg names "${names}" \
             --arg sreg "${sreg}" --arg spre "${spre}" --arg stag "${stag}" --arg schan "${schan}" \
             "${prog}")" || { rm -rf "${tdir}"; return 2; }
         rm -rf "${tdir}"
