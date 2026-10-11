@@ -7158,7 +7158,7 @@ _ci_validate_rollback_base() {
 # Why: Real listener HTTP + PATCH + cache flush.
 # From: Issue #1683
 _ci_validate_dns_rollback() {
-    local project="$1" ip cid key jar csrf snap resp code rc=0 compose last
+    local project="$1" ip cid key jar csrf snap resp code rc=0 compose last inst
     local zone label old new dns_wait ucid base lbase tries pause su
     ip="$(_ci_validate_container_ip "${project}" dns)"
     cid="$(_ci_validate_cid "${project}" dns)" || return 2
@@ -7222,12 +7222,25 @@ _ci_validate_dns_rollback() {
     last="$(_ci_capture 0 jq -r --arg z "${zone}" '.zones[$z][0].id // empty' <<<"${resp}")" || return 2
     compose="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     su="$(_ci_installer)" || return 2
+    inst="$(dirname "${compose}")"
+    if [ -e "${inst}/.env.local" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0113]" "path=\"${inst}/.env.local\" reason=\"an .env.local exists; validate never overwrites it\""
+        return 2
+    fi
+    # What: an empty .env.local for the rollback run.
+    # Why: setup.sh needs the file; compose reads the env.
+    # From: Issue #836 | PR #1912
+    if ! (umask 077 && : > "${inst}/.env.local"); then
+        ci_log "[CI-ERROR-VALIDATE-0093]" "dir=\"${inst}\" reason=\"setup.sh .env.local not written\""
+        return 2
+    fi
     # What: setup.sh rollback, wrong host PDNS_API_KEY.
     # Why: the key must be resolved inside the container.
     # From: Issue #836
     resp="$(COMPOSE_PROJECT_NAME="${project}" PDNS_API_KEY=CHANGE_ME_host_side_key_never_used \
-        bash "${su}" reset-to-last-known-good-config dns "$(dirname "${compose}")" \
+        bash "${su}" reset-to-last-known-good-config dns "${inst}" \
         "${zone}" "${snap}" --yes 2>&1)" || rc=$?
+    rm -f "${inst}/.env.local"
     case "${rc}:${resp}" in
         *"cache-flush publishes failed"*) rc=1 ;;
         0:*"rolled back to known-good snapshot ${snap}"*"${label}.${zone}"*) ;;
