@@ -561,8 +561,6 @@ struct AppState {
     db: Mutex<Connection>,
     ui_session_secret: [u8; 32],
     ui_session_ttl: Duration,
-    nats_issuer_public_key: String,
-    nats_callout_xkey_public_key: String,
 }
 
 // What: handler state extractor over the shared AppState.
@@ -1940,17 +1938,13 @@ fn render_auth_callout_fragment(cfg: &Config, issuer: &str, xkey: &str) -> Strin
 }
 
 // What: write the auth_callout fragment when it changed.
-// Why: the dns supervisor restarts nats-server on a change.
+// Why: nats-server starts only after this file exists.
 // From: Issue #811 | PR #1912
-fn write_callout_fragment(state: &AppState) -> Result<(), String> {
-    state.config.nats.validate()?;
-    let fragment = render_auth_callout_fragment(
-        &state.config,
-        &state.nats_issuer_public_key,
-        &state.nats_callout_xkey_public_key,
-    );
+fn write_callout_fragment(cfg: &Config, issuer: &str, xkey: &str) -> Result<(), String> {
+    cfg.nats.validate()?;
+    let fragment = render_auth_callout_fragment(cfg, issuer, xkey);
     write_if_changed(
-        Path::new(&state.config.nats_auth_callout_path),
+        Path::new(&cfg.nats_auth_callout_path),
         fragment.as_bytes(),
         0o644,
         None,
@@ -5841,6 +5835,12 @@ async fn run() -> anyhow::Result<()> {
     .unwrap_or_else(|e| container_start_fatal(&e));
     let issuer = issuer_keypair(&cfg).unwrap_or_else(|e| container_start_fatal(&e));
     let xkey = callout_xkey(&cfg).unwrap_or_else(|e| container_start_fatal(&e));
+    // What: the fragment is written before the NATS connect.
+    // Why: the dns nats-server waits for it; no start deadlock.
+    // From: Issue #811 | PR #1912
+    if let Err(e) = write_callout_fragment(&cfg, &issuer.public_key(), &xkey.public_key()) {
+        tracing::error!("Failed to write the auth_callout fragment: {e}");
+    }
     let nats = connect_nats_with_retry(&cfg).await;
     let http = http_client()?;
     let state = Arc::new(AppState {
@@ -5855,13 +5855,8 @@ async fn run() -> anyhow::Result<()> {
         db: Mutex::new(open_database(&cfg.database_file)?),
         ui_session_secret: load_or_create_hex::<32>(Path::new(&cfg.session_secret_file))?,
         ui_session_ttl,
-        nats_issuer_public_key: issuer.public_key(),
-        nats_callout_xkey_public_key: xkey.public_key(),
         config: cfg,
     });
-    if let Err(e) = write_callout_fragment(&state) {
-        tracing::error!("Failed to write the auth_callout fragment: {e}");
-    }
     // What: answer auth-callout requests while running.
     // Why: secondaries are checked per connect; no reload.
     tokio::spawn(run_auth_callout(state.clone(), issuer, xkey));
@@ -7385,6 +7380,19 @@ mod tests {
         );
     }
 
+    // What: the fragment is written from config and keys alone.
+    // Why: it must exist before the ui connects to NATS.
+    #[test]
+    fn callout_fragment_is_written_without_a_nats_client() {
+        let path = std::env::temp_dir().join(format!("callout-{}.conf", std::process::id()));
+        let mut cfg = nats_config();
+        cfg.nats_auth_callout_path = path.to_string_lossy().into_owned();
+        write_callout_fragment(&cfg, "ISS", "XK").expect("the fragment is written");
+        let written = std::fs::read_to_string(&path).expect("the fragment exists");
+        std::fs::remove_file(&path).expect("the test file is removed");
+        assert_eq!(written, render_auth_callout_fragment(&cfg, "ISS", "XK"));
+    }
+
     // What: the auth_callout stanza lists the static users.
     // Why: static roles skip the callout; others use it.
     #[test]
@@ -8702,8 +8710,6 @@ mod tests {
             db: Mutex::new(open_database(&dir.join("ui.db").to_string_lossy()).unwrap()),
             ui_session_secret: [9u8; 32],
             ui_session_ttl: Duration::from_secs(3600),
-            nats_issuer_public_key: String::new(),
-            nats_callout_xkey_public_key: String::new(),
             config: cfg,
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
