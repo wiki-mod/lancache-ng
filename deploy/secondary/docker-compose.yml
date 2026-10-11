@@ -1,10 +1,9 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# What: remote secondary DNS node; setup.sh secondary owns it.
+# What: secondary DNS node; setup.sh secondary writes it.
 # Why: --rotate rewrites this file; local edits are lost.
-# From: Issue #1683
+# From: Issue #1683 | PR #1912
 
 services:
   # What: the primary's dns image as a read-only replica.
@@ -18,6 +17,8 @@ services:
       - PROXY_IP=${PROXY_IP:?PROXY_IP is required}
       - PDNS_API_KEY=${PDNS_API_KEY}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+      # What: DDNS updates accepted from loopback only.
+      # Why: a replica takes zones by AXFR, not LAN updates.
       - DDNS_ALLOW_FROM=127.0.0.1
       - DNS_REPLICATION_ROLE=secondary
       - DNS_XFR_PRIMARY=${DNS_XFR_PRIMARY:?DNS_XFR_PRIMARY is required}
