@@ -1916,7 +1916,7 @@ CASES
 }
 
 # What: each scan status gets its own code and exit code
-# Why: a run, DB or setup failure never reads as a finding
+# Why: a run or setup failure never reads as a finding
 # From: Issue #1683 | PR #1858
 @test "scan outcome: every trivy scan status has its own code" {
     local svc raw st rc want odd
@@ -1927,7 +1927,7 @@ CASES
     done <<ROWS
 0|0|=
 1|2|[CI-ERROR-SCAN-0005] service="${svc}" reason="scan reported findings";${raw}
-3|3|[CI-ERROR-SCAN-0006] service="${svc}";${raw}
+3|2|[CI-ERROR-SCAN-0022] service="${svc}" rc=3;${raw}
 4|3|[CI-ERROR-SCAN-0021] service="${svc}" reason="trivy run failed without a report;${raw}
 2|2|[CI-ERROR-SCAN-0022] service="${svc}" rc=2;${raw}
 ${odd}|2|[CI-ERROR-SCAN-0022] service="${svc}" rc=${odd};${raw}
@@ -4658,4 +4658,101 @@ CASES
     _kea_try kea n "${id}" 1 || return 1
     [ "${status}" -eq 1 ] && [[ "${output}" == *"could not be executed inside the Kea image."*"Cancelled DHCP activation."* ]] \
         || { echo "probe failed, no: rc ${status} ${output}"; return 1; }
+}
+
+# What: a missing record key fails each reader closed
+# Why: a guessed field hid UNKNOWN or skipped a step
+# From: Issue #1683 | PR #1858
+@test "record field: a missing key fails every reader closed" {
+    local k pre v w svc plat rec mark rel pid
+    k="$(_val name)" pre="$(_val name)" v="$(_val name)" w="$(_val name)" svc="$(_val name)"
+    plat="$(_val platform)" mark="$(_val path)" rel="$(_val path)" pid="$(_val int 2 99999)"
+    run _ci_record_field "${pre}${k}=${w} ${k}=${v} ${pre}=${w}" "${k}"
+    _expect own-key 0 "=${v}" || return 1
+    run _ci_record_field "${k}=${v} ${pre}=${w}" "${k}"
+    _expect first-key 0 "=${v}" || return 1
+    run _ci_record_field "${k}= ${pre}=${w}" "${k}"
+    _expect empty-value 0 "=" || return 1
+    run _ci_record_field "${pre}${k}=${w}" "${k}"
+    _expect absent 2 "[CI-ERROR-CORE-0143] key=\"${k}\" record=\"${pre}${k}=${w}\"" || return 1
+    # What: stand-in for the step after the field read
+    # Why: it runs only if a caller ignored the failure
+    _next() { printf '[CI-NEXT] %s\n' "${FUNCNAME[1]}" >&2; return 2; }
+    # What: one row: rc 2, the key, then no later step
+    # Why: a later coded line means the caller went on
+    _closed() {
+        local case="$1" key="$2" after; shift 2
+        run "$@"
+        _expect "${case}" 2 "[CI-ERROR-CORE-0143] key=\"${key}\"" || return 1
+        after="$(sed -n '/\[CI-ERROR-CORE-0143\]/,$p' <<< "${output}" | tail -n +2)"
+        [[ "${after}" != *"[CI-"* ]] || { echo "${case}: went on after the read: ${output}"; return 1; }
+    }
+    export GITHUB_OUTPUT="${mark}"
+    _ci_require_ghcr_auth() { return 0; }
+    _ci_platforms() { printf '%s\n' "${plat}"; }
+    _ci_resolve_one() { printf 'service=%s platform=%s %s\n' "$1" "$2" "${rec}"; }
+    _ci_semantic_impact() { _next; }
+    rec="state=${w} identity=${w}"
+    _closed plan-action action ci_cmd_plan_matrix "${CI_MANIFEST_REL}" || return 1
+    rec="action=build state=${w}"
+    _closed plan-identity identity ci_cmd_plan_matrix "${CI_MANIFEST_REL}" || return 1
+    rec="action=build identity=${w}"
+    _ci_semantic_impact() { return 3; }
+    run ci_cmd_plan_matrix "${CI_MANIFEST_REL}"
+    _expect plan-impact 2 - || return 1
+    [ ! -s "${mark}" ] || { echo "plan-impact wrote a matrix: $(cat "${mark}")"; return 1; }
+    _ci_trivy_cache_dir() { printf 'source=%s\n' "${w}"; }
+    _ci_trivy_db_ensure_fresh() { _next; }
+    _closed scan-dir dir _ci_trivy_scan "${svc}" "${w}" || return 1
+    _ci_trivy_cache_dir() { printf 'dir=%s\n' "${mark}"; }
+    run _ci_trivy_scan "${svc}" "${w}"
+    _expect scan-db-setup 2 "[CI-NEXT] _ci_trivy_db_ensure_fresh" || return 1
+    _ci_trivy_db_ensure_fresh() { printf 'fresh=%s\n' "${w}"; }
+    _ci_image_ref() { _next; }
+    _closed scan-present present _ci_trivy_scan "${svc}" "${w}" || return 1
+    _ci_trivy_cache_dir() { _next; }
+    run _ci_trivy_scan "${svc}" "${w}"
+    _expect scan-cache-setup 2 "[CI-NEXT] _ci_trivy_cache_dir" || return 1
+    _ci_image_ref() { printf '%s\n' "${w}"; }
+    _ci_trivy_cache_dir() { printf 'source=%s\n' "${w}"; }
+    trivy() { _next; }
+    _closed sbom-dir dir _ci_trivy_sbom "${svc}" "${w}" "${mark}" || return 1
+    rec="action=${w} identity=${w}"
+    _ci_accepted_digest() { _next; }
+    _closed assemble-state state _ci_collect_accepted_digests "${svc}" || return 1
+    _ci_block_keys() { printf '%s\n' "${svc}"; }
+    _ci_candidate_index() { _next; }
+    _closed toolchain-state state _ci_toolchain_candidate || return 1
+    ci_service_field() { _next; }
+    rec="state=${w} identity=${w}"
+    _closed build-action action _ci_build_one "${svc}" "${plat}" || return 1
+    rec="action=build state=${w}"
+    _closed build-identity identity _ci_build_one "${svc}" "${plat}" || return 1
+    rec="action=build identity=${w}"
+    _closed build-state state _ci_build_one "${svc}" "${plat}" || return 1
+    rec="action=build identity=${w} state=${w}"
+    ci_service_field() { printf '%s\n' "${w}"; }
+    _ci_semantic_impact() { return 3; }
+    run _ci_build_one "${svc}" "${plat}"
+    _expect build-impact 2 "=" || return 1
+    _ci_image_tag() { _next; }
+    ci_cmd_build() { printf 'service=%s platform=%s identity=%s\n' "$1" "$2" "${w}"; }
+    _closed ship-result result ci_cmd_ship "${svc}" "${plat}" || return 1
+    ci_cmd_build() { printf 'service=%s platform=%s result=built\n' "$1" "$2"; }
+    _closed ship-identity identity ci_cmd_ship "${svc}" "${plat}" || return 1
+    ci_cmd_build() { printf 'service=%s platform=%s result=built identity=%s\n' "$1" "$2" "${w}"; }
+    _ci_image_tag() { printf '%s\n' "${w}"; }
+    _ci_bake_check() { return 0; }
+    ci_cmd_publish() { printf 'service=%s identity=%s\n' "$1" "${w}"; }
+    ci_cmd_verify() { _next; }
+    _closed ship-published published ci_cmd_ship "${svc}" "${plat}" || return 1
+    _ci_validate_release() { printf '%s\n' "$1" > "${rel}"; }
+    _ci_validate_project() { _next; }
+    _ci_validate_reserve() { printf 'holder=%s\n' "${pid}"; }
+    _closed validate-subnet subnet _ci_validate_stack "${w}" || return 1
+    [ "$(cat "${rel}")" = "${pid}" ] || { echo "validate-subnet: slot not released"; return 1; }
+    rm -f "${rel}"
+    _ci_validate_reserve() { printf 'subnet=%s\n' "${w}"; }
+    _closed validate-holder holder _ci_validate_stack "${w}" || return 1
+    [ ! -e "${rel}" ] || { echo "validate-holder: released without a holder"; return 1; }
 }

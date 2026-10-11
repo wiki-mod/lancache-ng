@@ -861,7 +861,7 @@ ci_cmd_plan_matrix() {
     local docs_only=false drc=0
     _ci_docs_only "${changed[@]}" || drc=$?
     case "${drc}" in 0) docs_only=true ;; 1) ;; *) return 2 ;; esac
-    local service platform include='[]' any=false resolved paction runner authed=false test_services=''
+    local service platform include='[]' any=false resolved paction pident pimpact runner authed=false test_services=''
     local sot_changed=false f path_cand rc plats
     # What: SOT change makes every target id candidate.
     # Why: pins live in SOT; identity decides BUILD.
@@ -900,12 +900,14 @@ ci_cmd_plan_matrix() {
         while IFS= read -r platform; do
             [ -n "${platform}" ] || continue
             resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
-            paction="$(_ci_record_field "${resolved}" action)"
+            paction="$(_ci_record_field "${resolved}" action)" || return 2
             [ "${paction}" = "build" ] || continue
             # What: matrix holds targets with proven impact.
             # Why: MISSING_CONFIRMED must not build alone.
             # From: Issue #1683 | PR #1858
-            [ "$(_ci_semantic_impact "${service}" "${platform}" "$(_ci_record_field "${resolved}" identity)")" = BUILD ] || continue
+            pident="$(_ci_record_field "${resolved}" identity)" || return 2
+            pimpact="$(_ci_semantic_impact "${service}" "${platform}" "${pident}")" || return 2
+            [ "${pimpact}" = BUILD ] || continue
             runner="$(_ci_platform_field "${platform}" runner "[CI-ERROR-PLAN-0002]" "service=\"${service}\" reason=\"no runner label for platform\"")" || return 2
             include="$(_ci_matrix_append "${include}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}")" || return 2
             any=true
@@ -1393,12 +1395,19 @@ _ci_resolve_action() {
     esac
 }
 
-# What: Read one key=value field from a record line.
-# Why: One owner of the resolve record format.
-# From: Issue #1683
+# What: one key=value field of a record; absent key fails
+# Why: a missing key is UNKNOWN, never a guessed value
+# From: Issue #1683 | PR #1858
 _ci_record_field() {
-    local rec="$1" key="$2"
-    rec="${rec#*"${key}"=}"
+    local rec=" $1" key="$2"
+    case "${rec}" in
+        *" ${key}="*) ;;
+        *)
+            ci_log "[CI-ERROR-CORE-0143]" "key=\"${key}\" record=\"$1\" reason=\"record has no such field\""
+            return 2
+            ;;
+    esac
+    rec="${rec#*" ${key}="}"
     printf '%s' "${rec%% *}"
 }
 
@@ -3639,17 +3648,18 @@ _ci_trivy_args() {
     [ -z "${CI_TRIVY_TIMEOUT:-}" ] || printf '%s\n' --timeout "${CI_TRIVY_TIMEOUT}"
 }
 
-# What: Scan an image digest; rc 1 finding, 3 DB, 4 run
-# Why: a failed run or a DB gap is never read as a finding
+# What: Scan an image digest; rc 1 finding, 2 setup, 4 run
+# Why: a failed run or setup is never read as a finding
 # From: Issue #1683 | PR #1858
 _ci_trivy_scan() {
     local service="$1" digest="$2" ref report rc=0 out
-    local cache_rec cache_dir fresh_rec skip_db=0
+    local cache_rec cache_dir fresh_rec present skip_db=0
     local -a targs
-    cache_rec="$(_ci_trivy_cache_dir)" || return 3
-    cache_dir="$(_ci_record_field "${cache_rec}" dir)"
-    fresh_rec="$(_ci_trivy_db_ensure_fresh "${cache_dir}")" || return 3
-    [ "$(_ci_record_field "${fresh_rec}" present)" = "true" ] && skip_db=1
+    cache_rec="$(_ci_trivy_cache_dir)" || return 2
+    cache_dir="$(_ci_record_field "${cache_rec}" dir)" || return 2
+    fresh_rec="$(_ci_trivy_db_ensure_fresh "${cache_dir}")" || return 2
+    present="$(_ci_record_field "${fresh_rec}" present)" || return 2
+    [ "${present}" = "true" ] && skip_db=1
     ref="$(_ci_image_ref "${service}" "${digest}")" || return 2
     out="$(_ci_trivy_args "${cache_dir}" "${skip_db}")" || return 2
     mapfile -t targs <<< "${out}"
@@ -3739,9 +3749,9 @@ _ci_build_one() {
     # From: Issue #1683 | PR #1858
     _ci_require_ghcr_auth || return "$?"
     resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
-    action="$(_ci_record_field "${resolved}" action)"
-    identity="$(_ci_record_field "${resolved}" identity)"
-    state="$(_ci_record_field "${resolved}" state)"
+    action="$(_ci_record_field "${resolved}" action)" || return 2
+    identity="$(_ci_record_field "${resolved}" identity)" || return 2
+    state="$(_ci_record_field "${resolved}" state)" || return 2
     build_type="$(ci_service_field "${service}" build_type)" || return 2
 
     case "${action}" in
@@ -3772,7 +3782,7 @@ _ci_build_one() {
     # What: Prove semantic build impact before admission.
     # Why: MISSING_CONFIRMED alone MUST NOT build.
     # From: Issue #1683
-    impact="$(_ci_semantic_impact "${service}" "${platform}" "${identity}")"
+    impact="$(_ci_semantic_impact "${service}" "${platform}" "${identity}")" || return 2
     case "${impact}" in
         NOOP)
             ci_log "[CI-INFO-BUILD-0007]" "service=\"${service}\" platform=\"${platform}\" note=\"no semantic impact; not building despite MISSING_CONFIRMED\""
@@ -3855,26 +3865,28 @@ ci_cmd_publish() {
 # Why: one owner for the chain; a reuse has nothing to push.
 # From: Issue #1683 | PR #1858
 ci_cmd_ship() {
-    local service="${1:-}" platform="${2:-}" out digest
+    local service="${1:-}" platform="${2:-}" out digest result
     if [ -z "${service}" ] || [ -z "${platform}" ]; then
         ci_log "[CI-ERROR-SHIP-0001]" "reason=\"service and platform args required\""
         return 2
     fi
     out="$(ci_cmd_build "${service}" "${platform}")" || return "$?"
     printf '%s\n' "${out}"
-    case "${out}" in *" result=built "*) ;; *) return 0 ;; esac
+    result="$(_ci_record_field "${out}" result)" || return 2
+    [ "${result}" = built ] || return 0
     # What: bake guard on the local image before publish.
     # Why: a leaked CA or build var must never reach GHCR.
     # From: Issue #1781 | PR #1858
-    local tag
-    if ! tag="$(_ci_image_tag "${service}" "${platform}" "$(_ci_record_field "${out}" identity)" 2>&1)"; then
+    local tag ident
+    ident="$(_ci_record_field "${out}" identity)" || return 2
+    if ! tag="$(_ci_image_tag "${service}" "${platform}" "${ident}" 2>&1)"; then
         ci_error "[CI-ERROR-SHIP-0003]" "service=\"${service}\" platform=\"${platform}\" reason=\"built image tag not derivable; no bake check, no publish\"" "${tag}"
         return 2
     fi
     _ci_bake_check "${tag}" || return "$?"
     out="$(ci_cmd_publish "${service}" "${platform}")" || return "$?"
     printf '%s\n' "${out}"
-    digest="$(_ci_record_field "${out}" published)"
+    digest="$(_ci_record_field "${out}" published)" || return 2
     if [ -z "${digest}" ]; then
         ci_error "[CI-ERROR-SHIP-0002]" "service=\"${service}\" platform=\"${platform}\" reason=\"publish reported no digest\"" "${out}"
         return 2
@@ -4068,7 +4080,7 @@ _ci_trivy_sbom() {
     local service="$1" digest="$2" out="$3" ref cache_rec cache_dir raw rc=0
     ref="$(_ci_image_ref "${service}" "${digest}")" || return 2
     cache_rec="$(_ci_trivy_cache_dir)" || return 2
-    cache_dir="$(_ci_record_field "${cache_rec}" dir)"
+    cache_dir="$(_ci_record_field "${cache_rec}" dir)" || return 2
     raw="$(trivy image --format cyclonedx --cache-dir "${cache_dir}" --output "${out}" "${ref}" 2>&1)" || rc=$?
     { [ "${rc}" -eq 0 ] && [ -s "${out}" ]; } && return 0
     printf '%s\n' "${raw}" >&2
@@ -4076,14 +4088,13 @@ _ci_trivy_sbom() {
 }
 
 # What: one coded line per _ci_trivy_scan status; rc
-# Why: a run, DB or setup failure never reads as a finding
+# Why: a run or setup failure never reads as a finding
 # From: Issue #1683 | PR #1858
 _ci_scan_outcome() {
     local service="$1" status="$2" raw="$3"
     case "${status}" in
         0) return 0 ;;
         1) ci_error "[CI-ERROR-SCAN-0005]" "service=\"${service}\" reason=\"scan reported findings\"" "${raw}"; return 2 ;;
-        3) ci_error "[CI-ERROR-SCAN-0006]" "service=\"${service}\" reason=\"scan DB unavailable after retries; not a finding, escalate\"" "${raw}"; return 3 ;;
         4) ci_error "[CI-ERROR-SCAN-0021]" "service=\"${service}\" reason=\"trivy run failed without a report; not a finding, escalate\"" "${raw}"; return 3 ;;
         *) ci_error "[CI-ERROR-SCAN-0022]" "service=\"${service}\" rc=${status} reason=\"scan setup failed; not a finding\"" "${raw}"; return 2 ;;
     esac
@@ -4172,7 +4183,7 @@ _ci_collect_accepted_digests() {
     while IFS= read -r p; do
         [ -n "${p}" ] || continue
         line="$(_ci_resolve_one "${service}" "${p}")" || return "$?"
-        state="${line#*state=}"; state="${state%% *}"
+        state="$(_ci_record_field "${line}" state)" || return 2
         if [ "${state}" != "PRESENT_ACCEPTED" ]; then
             ci_error "[CI-ERROR-ASSEMBLE-0002]" "service=\"${service}\" platform=\"${p}\" reason=\"platform not ACCEPTED; not assembling, not rebuilding\" state=\"${state}\"" "resolve: ${line}"
             return 2
@@ -4370,7 +4381,7 @@ _ci_toolchain_candidate() {
         while IFS= read -r p; do
             [ -n "${p}" ] || continue
             st="$(_ci_resolve_one "${service}" "${p}")" || return "$?"
-            st="$(_ci_record_field "${st}" state)"
+            st="$(_ci_record_field "${st}" state)" || return 2
             case "${st}" in
                 PRESENT_ACCEPTED) ;;
                 UNKNOWN|MISMATCH)
@@ -7134,8 +7145,8 @@ _ci_validate_stack() {
         [ "${rc}" -eq 2 ] || ci_log "[CI-ERROR-VALIDATE-0015]" "reason=\"no free validation /27 after slot retries\""
         return 2
     fi
-    subnet="$(_ci_record_field "${reservation}" subnet)"
-    holder="$(_ci_record_field "${reservation}" holder)"
+    holder="$(_ci_record_field "${reservation}" holder)" || return 2
+    subnet="$(_ci_record_field "${reservation}" subnet)" || { _ci_validate_release "${holder}"; return 2; }
     project="$(_ci_validate_project "${subnet}")" || { _ci_validate_release "${holder}"; return 2; }
     # What: per-run state root; prod .env names the host's.
     # Why: isolate runs; never touch a host's real state.
