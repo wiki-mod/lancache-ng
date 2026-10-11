@@ -1195,6 +1195,19 @@ vulnerabilities:
 
       From: Issue #1683 | PR #1906
 
+  - id: CVE-2026-78669
+    statement: >-
+      What: Accepts CVE-2026-78669 (HTTP/2 SETTINGS denial of service
+      in Go net/http) as a tracked risk for `docker-cli` in
+      `tools/build-tools`.
+
+      Why: Trivy reports `docker-cli` 29.8.2-r0 as vulnerable and
+      29.9.0-r0 as the fix (build-tools arm64 scan, Alpine 3.24.2).
+      `docker-cli` is a client and serves no HTTP/2 connections. The
+      entry records the finding until a rebuild ships 29.9.0-r0.
+
+      From: Issue #1913 | PR #1912
+
   # CVE-2026-32316/CVE-2026-40164 (jq, utilities image) removed here per
   # their own accepting entries' explicit self-description ("remove once
   # PR #1783 lands and its rebuilds propagate", Issue #1802/#1803,
