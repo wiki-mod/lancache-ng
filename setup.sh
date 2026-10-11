@@ -175,6 +175,16 @@ is_valid_dhcp_proxy_domain() {
     done
 }
 
+# What: true for one DHCP NTP entry: an IPv4 or a DNS name
+# Why: the watchdog and Admin UI resolve names; digits stay IPv4
+# From: Issue #1683 | PR #1912
+is_valid_dhcp_ntp_server() {
+    local entry="${1:-}"
+    is_valid_ipv4 "$entry" && return 0
+    [[ "$entry" =~ ^[0-9.]+$ ]] && return 1
+    is_valid_dhcp_proxy_domain "$entry"
+}
+
 is_valid_dhcp_proxy_boot_filename() {
     local filename="${1:-}"
     [[ -n "$filename" && "${#filename}" -le 255 ]] || return 1
@@ -3300,8 +3310,8 @@ migrate_env_for_update() (
                 IFS=',' read -r -a _dhcp_ntp_check <<< "$dhcp_ntp_servers"
                 for _dhcp_ntp_ip in "${_dhcp_ntp_check[@]}"; do
                     _dhcp_ntp_ip="${_dhcp_ntp_ip//[[:space:]]/}"
-                    [[ -z "$_dhcp_ntp_ip" ]] || is_valid_ipv4 "$_dhcp_ntp_ip" \
-                        || die "DHCP_NTP_SERVERS in $env_file must be a comma-separated list of valid IPv4 addresses."
+                    [[ -z "$_dhcp_ntp_ip" ]] || is_valid_dhcp_ntp_server "$_dhcp_ntp_ip" \
+                        || die "DHCP_NTP_SERVERS in $env_file must be a comma-separated list of IPv4 addresses or host names."
                 done
             fi
             [[ -z "$dhcp_proxy_domain" ]] || is_valid_dhcp_proxy_domain "$dhcp_proxy_domain" \
@@ -6892,10 +6902,10 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
             for _dhcp_ntp_ip in "${_dhcp_ntp_check[@]}"; do
                 _dhcp_ntp_ip="${_dhcp_ntp_ip//[[:space:]]/}"
                 [[ -z "$_dhcp_ntp_ip" ]] && continue
-                is_valid_ipv4 "$_dhcp_ntp_ip" || _dhcp_ntp_ok=0
+                is_valid_dhcp_ntp_server "$_dhcp_ntp_ip" || _dhcp_ntp_ok=0
             done
             [[ "$_dhcp_ntp_ok" = "1" ]] && break
-            print_error "Invalid NTP servers list (must be comma-separated IPv4 addresses): $DHCP_NTP_SERVERS"
+            print_error "Invalid NTP servers list (must be comma-separated IPv4 addresses or host names): $DHCP_NTP_SERVERS"
             ask "NTP servers, PXE-scoped, comma-separated (blank = skip)" ""
         done
 

@@ -2454,6 +2454,28 @@ _legacy_env() {
     [ "${status}" -eq 0 ] && [ "$(cat "${t}/.env")" = "${before}" ] || { echo "second run changed .env"; return 1; }
 }
 
+# What: a DHCP NTP entry is an IPv4 or a DNS name
+# Why: the prod .env lists host names; digits stay IPv4
+# From: Issue #1683 | PR #1912
+@test "setup.sh accepts DHCP NTP host names and rejects look-alikes" {
+    local root row entry rc
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}" || return 1
+    while IFS='|' read -r row entry rc; do
+        _setup_sh_run "is_valid_dhcp_ntp_server '${entry}'"
+        [ "${status}" -eq "${rc}" ] || { echo "${row}: rc ${status} want ${rc}: ${output}"; return 1; }
+    done <<'CASES'
+ipv4|192.0.2.7|0
+pool-name|debian.pool.ntp.org|0
+short-name|ntp|0
+bad-octet|256.1.1.1|1
+three-octets|1.2.3|1
+underscore|a_b.example|1
+empty-label|a..b|1
+semicolon|a;b|1
+CASES
+}
+
 # What: a UI user without a usable password gets one, once
 # Why: AG-OP-006: stable secrets never rotate on reruns
 # From: Issue #1683 | PR #1858
