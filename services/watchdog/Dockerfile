@@ -109,10 +109,12 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
 
 
 # What: syslog-ng files belong to this reader group.
-# Why: the ui (gid 10001) and netdata web_log read them.
+# Why: the ui (shared gid) and netdata web_log read them.
 # From: Issue #1683 | PR #1912
-ENV LOG_READER_GROUP=lancache
-RUN addgroup -g 10001 "${LOG_READER_GROUP}" && addgroup netdata "${LOG_READER_GROUP}"
+ARG LANCACHE_SHARED_SECRET_GID
+ENV LANCACHE_SHARED_SECRET_GID=${LANCACHE_SHARED_SECRET_GID} \
+    LOG_READER_GROUP=lancache
+RUN addgroup -g "${LANCACHE_SHARED_SECRET_GID}" "${LOG_READER_GROUP}" && addgroup netdata "${LOG_READER_GROUP}"
 
 COPY --from=services-builder /build/lancache-watchdog-out /usr/local/bin/lancache-watchdog
 COPY --from=services-builder /build/lancache-cachehamster-out /usr/local/bin/lancache-cachehamster

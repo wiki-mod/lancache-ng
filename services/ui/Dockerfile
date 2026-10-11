@@ -136,11 +136,11 @@ ENV TEMPLATE_DIR=/templates \
 # What: one ui runtime uid/gid for user and binary.
 # Why: nginx logs share it; the root start drops to it.
 # From: Issue #1427 | PR #1858
-ARG UI_RUNTIME_ID=10001
-ENV UI_RUNTIME_UID=${UI_RUNTIME_ID} \
-    UI_RUNTIME_GID=${UI_RUNTIME_ID}
-RUN addgroup -g "${UI_RUNTIME_ID}" lancache \
-    && adduser -D -H -u "${UI_RUNTIME_ID}" -G lancache -s /sbin/nologin lancache \
+ARG LANCACHE_SHARED_SECRET_GID
+ENV UI_RUNTIME_UID=${LANCACHE_SHARED_SECRET_GID} \
+    UI_RUNTIME_GID=${LANCACHE_SHARED_SECRET_GID}
+RUN addgroup -g "${LANCACHE_SHARED_SECRET_GID}" lancache \
+    && adduser -D -H -u "${LANCACHE_SHARED_SECRET_GID}" -G lancache -s /sbin/nologin lancache \
     && mkdir -p /data /etc/nats \
     && chown -R lancache:lancache /data /etc/nats
 

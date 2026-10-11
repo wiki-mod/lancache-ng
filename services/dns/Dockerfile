@@ -132,6 +132,12 @@ ENV PDNS_LUA_DNS_SCRIPT=/etc/pdns/filter-aaaa.lua \
 ARG LANCACHE_PROCESSES
 ENV LANCACHE_PROCESSES=${LANCACHE_PROCESSES}
 
+# What: the shared gid of the stack's secret files.
+# Why: ci.sh passes it from the SOT; compose names none.
+# From: Issue #1683 | PR #1912
+ARG LANCACHE_SHARED_SECRET_GID
+ENV LANCACHE_SHARED_SECRET_GID=${LANCACHE_SHARED_SECRET_GID}
+
 # What: the supervisor binary; no argument means supervise.
 # Why: compose and setup.sh add healthcheck or probe.
 # From: Issue #1683 | PR #1912

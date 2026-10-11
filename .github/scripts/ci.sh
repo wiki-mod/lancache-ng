@@ -54,6 +54,7 @@ CI_ARG_TOOLCHAIN_IMAGE=BUILD_TOOLS_IMAGE
 CI_ARG_CRATES=RUST_CRATES
 CI_ARG_TARGET=MUSL_TARGET
 CI_ARG_PROCESSES=LANCACHE_PROCESSES
+CI_ARG_GID=LANCACHE_SHARED_SECRET_GID
 
 # What: The ci.sh subcommand dispatch table.
 # Why: One table is membership, dispatch and error text.
@@ -453,13 +454,14 @@ ci_service_field() {
 # From: Issue #1683
 _ci_required_field() {
     local v
-    # What: kind list reads a list field, one item per line.
+    # What: list reads a list; block a top-level value.
     # Why: one owner for a missing required SOT field.
     # From: Issue #1683 | PR #1912
     case "${3:-}" in
         "") v="$(ci_service_field "$1" "$2")" || return 2 ;;
         list) v="$(_ci_target_list "$1" "$2")" || return 2 ;;
-        *) ci_log "[CI-ERROR-CORE-0146]" "target=\"$1\" field=\"$2\" kind=\"$3\" reason=\"kind must be empty or list\""; return 2 ;;
+        block) v="$(_ci_block_entry_field "$1" "" "$2")" || return 2 ;;
+        *) ci_log "[CI-ERROR-CORE-0146]" "target=\"$1\" field=\"$2\" kind=\"$3\" reason=\"kind must be empty, list or block\""; return 2 ;;
     esac
     if [ -z "${v}" ]; then
         ci_log "[CI-ERROR-CORE-0009]" \
@@ -7956,6 +7958,11 @@ _ci_service_build_args() {
     # From: Issue #1683
     val="$(_ci_target_list "${service}" processes)" || return 2
     [ -z "${val}" ] || out="${out}${prefix}${CI_ARG_PROCESSES}=${val//$'\n'/ }"$'\n'
+    # What: the SOT runtime gid the images share.
+    # Why: the Dockerfiles bake it; compose names none.
+    # From: Issue #1683 | PR #1912
+    val="$(_ci_required_field runtime gid block)" || return 2
+    out="${out}${prefix}${CI_ARG_GID}=${val}"$'\n'
     # What: SOT-pinned external inputs of this Dockerfile.
     # Why: one pin->ARG owner shared with version-drift.
     # From: Issue #1683 | PR #1858

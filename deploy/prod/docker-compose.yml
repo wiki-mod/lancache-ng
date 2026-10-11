@@ -69,7 +69,6 @@ services:
       - NTP_DRIFT_FILE=/var/lib/chrony/drift
       - CACHEHAMSTER_DATA_DIR=/var/lib/lancache-cachehamster
       - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
-      - LANCACHE_SHARED_SECRET_GID=10001
       - NETDATA_CONFIG_DIR=/etc/netdata
       - NETDATA_WEB_LOG=/var/log/lancache-syslog-ng/LanCache-NG-proxy/*.log
       - NETDATA_ALARM_UI_URL=http://ui:8080
@@ -198,7 +197,6 @@ services:
       - DNS_REPLICATION_ROLE=primary
       - SUPERVISE_RUN_DIR=/run/lancache
       - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
-      - LANCACHE_SHARED_SECRET_GID=10001
       - PDNS_DATA_DIR=/var/lib/powerdns
       - DNS_STATE_DIR=/var/lib/powerdns-state
       - DNS_CONFIG_SNAPSHOT_DIR=/var/lib/lancache-dns/config-snapshots
@@ -281,7 +279,6 @@ services:
       - UI_SETTINGS_FILE=/data/lancache-ui-settings.env
       - DESIRED_STATE_FILE=/data/desired-state.json
       - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
-      - LANCACHE_SHARED_SECRET_GID=10001
       - KEA_DATA_DIR=/var/lib/kea
       - DHCP_CONFIG_SNAPSHOT_DIR=/var/lib/lancache-dhcp/config-snapshots
       - DHCP_PROBE_REQUEST_FILE=/data/dhcp-probe-request

@@ -1700,6 +1700,7 @@ CASES
     s="$(ci_services | awk 'NR == 1')"
     run _ci_service_build_args "${s}" --bare "${sp}" no
     _expect no-toolchain 0 "RUST_CRATES=" || return 1
+    _expect runtime-gid 0 "LANCACHE_SHARED_SECRET_GID=$(_ci_required_field runtime gid block)" || return 1
     [[ "${output}" != *BUILD_TOOLS_IMAGE=* ]] || { echo "no-toolchain: image arg emitted: ${output}"; return 1; }
     run _ci_service_build_args "${s}" --bare "${sp}" "$(_val name)"
     _expect bad-toolchain-flag 2 "[CI-ERROR-BUILDARGS-0020] service=\"${s}\"" || return 1
