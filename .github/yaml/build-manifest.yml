@@ -642,7 +642,7 @@ release:
 # Why: service/toolchain labels apply under their context.
 # From: Issue #1683 | PR #1858
 pr_labels:
-  setup: [setup.sh, "deploy/**", "config/**"]
+  setup: [setup.sh, "deploy/**"]
   docker: ["deploy/**", "**/Dockerfile"]
   rust: ["**/*.rs"]
   ci: [".github/workflows/**", ".github/scripts/**", ".github/yaml/**"]
