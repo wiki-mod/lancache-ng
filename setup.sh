@@ -4224,9 +4224,7 @@ Supported services:
                      diff -> PATCH -> check-zone -> flush -> re-publish),
                      reached by execing curl inside the target container
                      (its port is Compose-internal only, never published to
-                     the host). Defaults to the dns-standard container,
-                     matching the Admin UI's own current single-primary
-                     scope; dns-standard/dns-ssl select one explicitly.
+                     the host). The dns container runs the one listener.
                      Unlike Kea, PowerDNS tracks snapshots per zone (lan.,
                      local.lan., and the private reverse zones), so a <zone>
                      argument is required -- omit it to list which zones
@@ -5432,7 +5430,7 @@ cmd_reset_to_last_known_good_config() {
     # What: positional[2] is zone (DNS) or snapshot (Kea)
     # Why: DNS snapshots are per zone; Kea has one file
     case "$service" in
-        dns|pdns|dns-standard|dns-ssl)
+        dns|pdns)
             zone="${positional[2]:-}"
             snapshot_id="${positional[3]:-}"
             ;;
@@ -5446,14 +5444,10 @@ cmd_reset_to_last_known_good_config() {
             reset_kea_to_last_known_good_config "$install_dir" "$snapshot_id" "$assume_yes"
             ;;
         dns|pdns)
-            # What: dns and pdns both target dns-standard
-            # Why: matches the UI's single-primary scope
-            reset_dns_to_last_known_good_config "dns-standard" "$install_dir" "$zone" "$snapshot_id" "$assume_yes"
-            ;;
-        dns-standard|dns-ssl)
-            # What: explicit DNS target is passed through
-            # Why: rollback listener runs in both containers
-            reset_dns_to_last_known_good_config "$service" "$install_dir" "$zone" "$snapshot_id" "$assume_yes"
+            # What: dns and pdns both target the dns service
+            # Why: one container runs the rollback listener
+            # From: Issue #1683 | PR #1912
+            reset_dns_to_last_known_good_config "dns" "$install_dir" "$zone" "$snapshot_id" "$assume_yes"
             ;;
         "")
             die "Usage: ./setup.sh reset-to-last-known-good-config <service> [install-dir] [snapshot-id]\nSupported services: kea, dns. Run './setup.sh reset-to-last-known-good-config --help' for details."
