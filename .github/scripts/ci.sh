@@ -6444,16 +6444,16 @@ _ci_validate_service_evidence() {
 # Why: Real dig; standard/ssl MUST differ, not ping.
 # From: Issue #1683 | PR #1858
 _ci_validate_dns() {
-    local project="$1" ip_std ip_ssl domain a_std a_ssl
+    local project="$1" ip_std ip_https domain a_std a_ssl
     ip_std="$(_ci_validate_container_ip "${project}" dns-standard)"
-    ip_ssl="$(_ci_validate_container_ip "${project}" dns-ssl)"
+    ip_https="$(_ci_validate_container_ip "${project}" dns-ssl)"
     domain="$(_ci_validation_dns_domain)"
-    if [ -z "${ip_std}" ] || [ -z "${ip_ssl}" ] || [ -z "${domain}" ]; then
+    if [ -z "${ip_std}" ] || [ -z "${ip_https}" ] || [ -z "${domain}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0010]" "reason=\"missing dns container IP or test domain\""
         return 2
     fi
     a_std="$(dig +short "@${ip_std}" A "${domain}" | sort -u)"
-    a_ssl="$(dig +short "@${ip_ssl}" A "${domain}" | sort -u)"
+    a_ssl="$(dig +short "@${ip_https}" A "${domain}" | sort -u)"
     if [ -z "${a_std}" ] || [ -z "${a_ssl}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0011]" "domain=\"${domain}\" reason=\"no DNS answer from a resolver mode\""
         return 1

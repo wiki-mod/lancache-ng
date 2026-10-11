@@ -2017,7 +2017,7 @@ _legacy_env() {
     local file="$1" user="${2:-}" root tpl
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     tpl="${root}/deploy/prod/.env"
-    printf '%s\n' "IP_STANDARD=$(get_env_var IP_STANDARD "${tpl}")" "IP_SSL=$(get_env_var IP_SSL "${tpl}")" \
+    printf '%s\n' "IP_STANDARD=$(get_env_var IP_HTTP "${tpl}")" "IP_SSL=$(get_env_var IP_HTTPS "${tpl}")" \
         "CACHE_DIR_STANDARD=${file%/*}/cache" "CACHE_DIR_SSL=${file%/*}/cache" 'PROXY_SECURITY_MODE=strict' \
         'PROXY_ALLOWED_CLIENT_CIDRS=' "LANCACHE_IMAGE_TAG=$(_release_tag)" \
         "UI_AUTH_USER=${user}" 'UI_AUTH_PASSWORD=' > "${file}"
@@ -2045,7 +2045,7 @@ _legacy_env() {
 # From: Issue #1683 | PR #1858
 @test "migrate_env_for_update converges a legacy .env and is stable on rerun" {
     _registry || return 1
-    local t before
+    local t before std ssl
     _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
     _legacy_row() {
         t="${BATS_TEST_TMPDIR}/legacy-$1"
@@ -2062,10 +2062,13 @@ _legacy_env() {
     _setup_sh_run 'migrate_env_for_update "${CONV}"'
     _expect split-cache 1 "CACHE_DIR_STANDARD and CACHE_DIR_SSL point to different paths" || return 1
     _legacy_row base || return 1
+    std="$(get_env_var IP_STANDARD "${t}/.env")" ssl="$(get_env_var IP_SSL "${t}/.env")"
     _setup_sh_run 'migrate_env_for_update "${CONV}"'
     [ "${status}" -eq 0 ] && ! env_key_exists CACHE_DIR_STANDARD "${t}/.env" && ! env_key_exists CACHE_DIR_SSL "${t}/.env" \
         && [ "$(get_env_var CACHE_DIR "${t}/.env")" = "${t}/cache" ] && [ "$(get_env_var PROXY_SECURITY_MODE "${t}/.env")" = lazy ] \
-        && [[ "$(get_env_var LANCACHE_STATE_DIR "${t}/.env")" == /* ]] || { echo "legacy: ${output}"; cat "${t}/.env"; return 1; }
+        && [[ "$(get_env_var LANCACHE_STATE_DIR "${t}/.env")" == /* ]] && [ -n "${std}" ] && [ "$(get_env_var IP_HTTP "${t}/.env")" = "${std}" ] \
+        && [ "$(get_env_var IP_HTTPS "${t}/.env")" = "${ssl}" ] && ! env_key_exists IP_STANDARD "${t}/.env" && ! env_key_exists IP_SSL "${t}/.env" \
+        || { echo "legacy: ${output}"; cat "${t}/.env"; return 1; }
     before="$(cat "${t}/.env")"
     _setup_sh_run 'migrate_env_for_update "${CONV}"'
     [ "${status}" -eq 0 ] && [ "$(cat "${t}/.env")" = "${before}" ] || { echo "second run changed .env"; return 1; }
@@ -2129,7 +2132,7 @@ _legacy_env() {
     local -a kvs
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}" || return 1
-    ip="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")" net="${ip%.*}"
+    ip="$(get_env_var IP_HTTP "${root}/deploy/prod/.env")" net="${ip%.*}"
     srv="${net}.$(( (${ip##*.} + 1) % 255 ))" srv2="${net}.$(( (${ip##*.} + 2) % 255 ))"
     bios="$(_val name).0" bad="$(_val host)"
     [ -n "${ip}" ] && is_valid_dhcp_mode "${mode}" || { echo "inputs: ip '${ip}', mode ${mode}"; return 1; }
@@ -2246,10 +2249,10 @@ CASES
     cmp -s "${d}/env.run1" "${d}/.env" || { echo "broken: run 2 changed .env"; return 1; }
 }
 
-# What: an unusable IP_SSL stops the update; .env untouched
-# Why: dns-ssl binds IP_SSL apart (AG-SETUP-001, AG-OP-010)
+# What: a bad IP_HTTPS stops the update; .env untouched
+# Why: dns-https needs it (AG-SETUP-001, AG-OP-010)
 # From: Issue #1683 | PR #1858
-@test "migrate_env_for_update refuses an unusable IP_SSL before any write" {
+@test "migrate_env_for_update refuses an unusable IP_HTTPS before any write" {
     local t name val msg bad
     _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
     bad="$(_val host)"
@@ -2264,9 +2267,9 @@ CASES
         [ "${status}" -eq 1 ] && [[ "${output}" == *"${msg}"* && "${output}" != *unreached* ]] \
             && cmp -s "${t}/.env.before" "${t}/.env" || { echo "${name}: rc ${status}: ${output}"; return 1; }
     done <<ROWS
-empty||IP_SSL is missing or empty in ${BATS_TEST_TMPDIR}/empty/.env
-equal|@STD@|Standard IP and SSL IP must be different.
-invalid|${bad}|IP_SSL is not a valid IPv4 address: ${bad}
+empty||IP_HTTPS is missing or empty in ${BATS_TEST_TMPDIR}/empty/.env
+equal|@STD@|IP_HTTP and IP_HTTPS must be different.
+invalid|${bad}|IP_HTTPS is not a valid IPv4 address: ${bad}
 ROWS
 }
 
@@ -2324,7 +2327,7 @@ ROWS
         && [ -n "${keys}" ] && [ -n "${copies}" ] || { echo "migration lists: ${keys} | ${copies}"; return 1; }
     lo="127.$(_val int 1 254).$(_val int 1 254)"
     mkdir -p "${QS}/certs" && cp "${root}/deploy/prod/.env" "${QS}/.env" && remove_env_key LANCACHE_STATE_DIR "${QS}/.env" \
-        && set_env_key IP_STANDARD "${lo}.1" "${QS}/.env" && set_env_key IP_SSL "${lo}.2" "${QS}/.env" || return 1
+        && set_env_key IP_HTTP "${lo}.1" "${QS}/.env" && set_env_key IP_HTTPS "${lo}.2" "${QS}/.env" || return 1
     for key in ${keys}; do set_env_key "${key}" "./${key,,}" "${QS}/.env" || return 1; done
     want="$(get_env_var CACHE_MAX_SIZE "${QS}/.env")" \
         && set_env_key CACHE_MAX_SIZE "$(( ${want%%[!0-9]*} * 2 ))${want##*[0-9]}" "${QS}/.env" \
@@ -2409,8 +2412,8 @@ ROWS
         && g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}" && g clone -q "${t}/origin.git" "${t}/co" \
         && cp "${t}/co/deploy/prod/.env" "${t}/co/deploy/prod/.env.local" || { echo "origin setup failed"; return 1; }
     set_env_key LANCACHE_STATE_DIR "${t}/state" "${t}/co/deploy/prod/.env.local" \
-        && set_env_key IP_STANDARD "${std}" "${t}/co/deploy/prod/.env.local" \
-        && set_env_key IP_SSL "${ssl}" "${t}/co/deploy/prod/.env.local" \
+        && set_env_key IP_HTTP "${std}" "${t}/co/deploy/prod/.env.local" \
+        && set_env_key IP_HTTPS "${ssl}" "${t}/co/deploy/prod/.env.local" \
         && set_env_key LANCACHE_IMAGE_TAG "$(_release_tag)" "${t}/co/deploy/prod/.env.local" || return 1
     out="$(g -C "${t}/co" status --porcelain)" && [ -z "${out}" ] || { echo "fixture checkout is dirty: ${out}"; return 1; }
     line="printf '%s\n' ${mark} >&2"
@@ -2488,7 +2491,7 @@ STUB
     std="10.$(_val int 0 127).$(_val int 0 255).$(_val int 1 254)" dev="$(_val name)" pfx="$(_val int 16 30)"
     other="10.$(_val int 128 255).$(_val int 0 255).$(_val int 1 254)"
     lo="127.$(_val int 0 255).$(_val int 0 255).$(_val int 1 254)"
-    [ "${std}" != "$(get_env_var IP_STANDARD "${tpl}")" ] || { echo "host address equals the template's"; return 1; }
+    [ "${std}" != "$(get_env_var IP_HTTP "${tpl}")" ] || { echo "host address equals the template's"; return 1; }
     export IPDS="${t}/ipds" SETUP="${t}/repo/setup.sh" ANS="${t}/answers" PRESET=""
     mkdir -p "${IPDS}"
     _ip_stub "${t}/ipbin"
@@ -2533,7 +2536,7 @@ STUB
     printf '%s' "${std}" > "${ANS}"
     _lp "${ANS}"
     [ "${status}" -eq 0 ] || { echo "unterminated last answer lost: ${output}"; return 1; }
-    # What: assigned IP_SSL: no offer; foreign IP: none
+    # What: assigned IP_HTTPS: no offer; foreign IP: none
     # Why: the add offer exists only for a known device
     # From: Issue #1683 | PR #1858
     _host "${std} ${pfx} ${dev}" "${ssl} ${pfx} ${dev}"
@@ -2650,7 +2653,7 @@ STUB
     done
     std="10.$(_val int 0 127).$(_val int 0 255).$(_val int 1 254)" dev="$(_val name)" pfx="$(_val int 16 30)"
     other="10.$(_val int 128 255).$(_val int 0 255).$(_val int 1 254)"
-    [ "${std}" != "$(get_env_var IP_STANDARD "${tpl}")" ] || { echo "host address equals the template's"; return 1; }
+    [ "${std}" != "$(get_env_var IP_HTTP "${tpl}")" ] || { echo "host address equals the template's"; return 1; }
     ID_REAL="$(type -P id)" || return 1
     export IPDS="${t}/ipds" REPO="${repo}" ENVL="${env}" ID_REAL
     mkdir -p "${IPDS}" && _ip_stub "${BIN}" \
@@ -2685,7 +2688,7 @@ STUB
     for k in ${keys}; do
         [ "$(get_env_var "${k}" "${env}")" = "$(get_env_var "${k}" "${tpl}")" ] || { echo "${k}: $(cat "${env}")"; return 1; }
     done
-    [ "$(get_env_var IP_STANDARD "${env}")" = "${std}" ] && [ "$(get_env_var LOGGING_ENABLED "${env}")" = 1 ] \
+    [ "$(get_env_var IP_HTTP "${env}")" = "${std}" ] && [ "$(get_env_var LOGGING_ENABLED "${env}")" = 1 ] \
         && [[ ",$(get_env_var COMPOSE_PROFILES "${env}")," == *,logging,* ]] || { echo "values: $(cat "${env}")"; return 1; }
     _checkout_copy "${root}" "${t}/repo2" && rm -f "${DS}/running" && : > "${DS}/fail-config-after-up" \
         || { echo "second copy failed"; return 1; }
@@ -2705,7 +2708,7 @@ STUB
     _load_setup_sh "${root}" || return 1
     dp="${root}/deploy/prod"
     paths="$(deploy_prod_repo_input_paths "${dp}")" || { echo "owner rc $?"; return 1; }
-    json="$(NATS_BIND_IP="$(get_env_var IP_STANDARD "${dp}/.env")" docker compose --env-file "${dp}/.env" \
+    json="$(NATS_BIND_IP="$(get_env_var IP_HTTP "${dp}/.env")" docker compose --env-file "${dp}/.env" \
         -f "${dp}/docker-compose.yml" -f "${dp}/docker-compose.nats-secondary.yml" config --format json)" \
         || { echo "compose config failed"; return 1; }
     inputs="$(jq -r --arg r "${root}/" '[.services[] | ((.volumes // [])[] | select(.type == "bind") | .source),
@@ -3415,11 +3418,11 @@ JSON
         IFS='|' read -r case at now san want <<< "$(_fill "${row}")"
         rm -f "${CERT_DIR}/default.crt" "${CERT_DIR}/default.key"
         if [ "${san}" != none ]; then
-            IP_SSL="${at}" _sign_cert "${dn}" "${CERT_DIR}/default.key" "${CERT_DIR}/default.crt" \
+            IP_HTTPS="${at}" _sign_cert "${dn}" "${CERT_DIR}/default.key" "${CERT_DIR}/default.crt" \
                 "${san:+subjectAltName=${san}}"
         fi
         [ "${case}" != nokey ] || rm -f "${CERT_DIR}/default.key"
-        IP_SSL="${now}" run _default_cert_needs_regen
+        IP_HTTPS="${now}" run _default_cert_needs_regen
         [ "${status}" -eq "${want}" ] || { echo "${case}: rc ${status}"; return 1; }
     done <<'CASES'
 missing|||none|0
@@ -3612,31 +3615,31 @@ CASES
         && [ "$(g -C "${t}/co" rev-parse HEAD)" = "${mainsha}" ] || { echo "dirty: ${output}"; return 1; }
 }
 
-# What: UI_BIND_IP follows IP_STANDARD; one tag on stdout
+# What: UI_BIND_IP follows IP_HTTP; one tag on stdout
 # Why: an update keeps operator values and pins one tag
 # From: Issue #1683 | PR #1858
 @test "setup env migration and release image tag per input" {
     local root t="${BATS_TEST_TMPDIR}" ip v raw case lines want err rc tags tag bad sot PIN REL CH ALIAS
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}" || return 1
-    ip="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")"
+    ip="$(get_env_var IP_HTTP "${root}/deploy/prod/.env")"
     v="$(tr -d '[:space:]' < "${root}/VERSION")"
     raw="\"$(_val path) $(_val name)\" # $(_val name)" bad="$(_val name)"
     [ -n "${ip}" ] && [ -n "${v}" ] || { echo "inputs: ${ip} ${v}"; return 1; }
     export E="${t}/.env" IP="${ip}" ERR="${t}/stderr"
     while IFS='|' read -r case lines want; do
         printf '%b' "${lines}" > "${E}"
-        _setup_sh_run 'append_env_migrated_assignment_if_missing UI_BIND_IP IP_STANDARD "${IP}" "${E}"'
+        _setup_sh_run 'append_env_migrated_assignment_if_missing UI_BIND_IP IP_HTTP "${IP}" "${E}"'
         [ "${status}" -eq 0 ] && [ "$(paste -sd'#' "${E}")" = "${want}" ] || { echo "${case}: $(paste -sd'#' "${E}")"; return 1; }
     done <<CASES
-emptytarget|IP_STANDARD=${ip}\nUI_BIND_IP=\n|IP_STANDARD=${ip}#UI_BIND_IP=
-copysyntax|IP_STANDARD=${raw}\n|IP_STANDARD=${raw}#UI_BIND_IP=${raw}
-keep|IP_STANDARD=${ip}\nUI_BIND_IP=${t}\n|IP_STANDARD=${ip}#UI_BIND_IP=${t}
-fallback|IP_STANDARD=\n|IP_STANDARD=#UI_BIND_IP=${ip}
+emptytarget|IP_HTTP=${ip}\nUI_BIND_IP=\n|IP_HTTP=${ip}#UI_BIND_IP=
+copysyntax|IP_HTTP=${raw}\n|IP_HTTP=${raw}#UI_BIND_IP=${raw}
+keep|IP_HTTP=${ip}\nUI_BIND_IP=${t}\n|IP_HTTP=${ip}#UI_BIND_IP=${t}
+fallback|IP_HTTP=\n|IP_HTTP=#UI_BIND_IP=${ip}
 CASES
-    printf '%s\n' "IP_STANDARD=" > "${E}"
-    _setup_sh_run 'append_env_migrated_assignment_if_missing UI_BIND_IP IP_STANDARD "" "${E}"'
-    [ "${status}" -eq 0 ] && [ "$(cat "${E}")" = "IP_STANDARD=" ] || { echo "nothing: $(cat "${E}")"; return 1; }
+    printf '%s\n' "IP_HTTP=" > "${E}"
+    _setup_sh_run 'append_env_migrated_assignment_if_missing UI_BIND_IP IP_HTTP "" "${E}"'
+    [ "${status}" -eq 0 ] && [ "$(cat "${E}")" = "IP_HTTP=" ] || { echo "nothing: $(cat "${E}")"; return 1; }
     export SD="${t}/archive"
     sot="${CI_MANIFEST_SOURCE#"${root}"/}"
     [ "${sot}" != "${CI_MANIFEST_SOURCE}" ] && mkdir -p "${SD}/${sot%/*}" && cp "${CI_MANIFEST_SOURCE}" "${SD}/${sot}" \
@@ -3968,13 +3971,13 @@ CASES
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
     require_helper_image
-    ip="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")"
+    ip="$(get_env_var IP_HTTP "${root}/deploy/prod/.env")"
     bios="$(_val name)" uefi="$(_val name)/$(_val name)"
     # What: the longest name one DHCP option can carry
     # Why: RFC 2132: an option length is a single octet
     # From: Issue #1683 | PR #1858
     max=$(( (1 << 8) - 1 ))
-    [ -n "${ip}" ] || { echo "template sets no IP_STANDARD"; return 1; }
+    [ -n "${ip}" ] || { echo "template sets no IP_HTTP"; return 1; }
     # What: a boot pointer needs the server and a filename
     # Why: dnsmasq renders nothing useful from half of it
     # From: Issue #1683 | PR #1858
@@ -4212,7 +4215,7 @@ _pm_run() {
     modes="$(_rust_dhcp_modes "${root}")" || return 1
     off="$(awk 'NR == 1' <<< "${modes}")"
     cprof="$(_prod_compose config --profiles)"
-    ip="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")" net="${ip%.*}.0"
+    ip="$(get_env_var IP_HTTP "${root}/deploy/prod/.env")" net="${ip%.*}.0"
     [ "$(wc -l <<< "${modes}")" -ge 3 ] && [ -n "${cprof}" ] && [ -n "${ip}" ] || { echo "inputs: ${modes} | ${cprof}"; return 1; }
     while IFS= read -r m; do
         is_valid_dhcp_mode "${m}" && ! is_valid_dhcp_mode "${m^^}" && ! is_valid_dhcp_mode "${m}x" || { echo "mode ${m}"; return 1; }
@@ -4269,8 +4272,8 @@ _pm_run() {
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
     rs="${root}/services/ui/src/main.rs"
-    std="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")"
-    lip="$(get_env_var IP_SSL "${root}/deploy/prod/.env")"
+    std="$(get_env_var IP_HTTP "${root}/deploy/prod/.env")"
+    lip="$(get_env_var IP_HTTPS "${root}/deploy/prod/.env")"
     ui="$(_prod_compose config --format json | jq -r '.services.ui.ports[0].published')"
     name="$(_prod_compose config --format json | jq -r .name)"
     xfr=""

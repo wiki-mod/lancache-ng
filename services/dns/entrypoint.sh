@@ -44,7 +44,7 @@ DDNS_TSIG_ALGORITHM="${DDNS_TSIG_ALGORITHM:-hmac-sha256}"
 
 # Fail closed when no real TSIG key is configured (PR #769 review follow-up).
 # deploy/prod/docker-compose.yml's DDNS_ALLOW_FROM override sets this to the
-# host's real LAN IP(s) (IP_STANDARD/IP_SSL) unconditionally, for the case
+# host's real LAN IP(s) (IP_HTTP/IP_HTTPS) unconditionally, for the case
 # DDNS_TSIG_KEY *is* set. But PowerDNS's own documented default is
 # dnsupdate-require-tsig=no (confirmed against the upstream docs), which
 # means "zones without TSIG keys can be updated by unauthenticated agents

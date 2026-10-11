@@ -405,11 +405,11 @@ adapter) is:
    ```
 
 6. Once the UI container is healthy (`docker compose ps ui` shows `(healthy)`), try accessing it:
-   - On a production host, open `http://<IP_STANDARD>:8080/admin/` in your browser
+   - On a production host, open `http://<IP_HTTP>:8080/admin/` in your browser
    - On a dev host, open `http://localhost:3000/admin/`
 
 7. **If the UI still doesn't respond** after the container is healthy, check:
-   - Network connectivity: `ping <IP_STANDARD>` from your client
+   - Network connectivity: `ping <IP_HTTP>` from your client
    - Firewall rules: check if port 8080 (or 3000 for dev) is blocked
    - Proxy/nginx health: `docker compose ps proxy` and `docker compose logs proxy`
 

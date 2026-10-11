@@ -79,7 +79,7 @@ test_missing_key_added() {
 
 # What: an intentionally-empty value stays empty, not replac
 # Why: e.g. UI_BIND_IP= deliberately triggers the
-#   ${UI_BIND_IP:-${IP_STANDARD}} compose fallback to IP_STANDARD.
+#   ${UI_BIND_IP:-${IP_HTTP}} compose fallback to IP_HTTP.
 # From: PR #1546
 test_empty_value_preserved() {
     local env_file="$1"

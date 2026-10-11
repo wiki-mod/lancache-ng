@@ -1408,7 +1408,7 @@ impl Recursor {
     }
 }
 
-// What: dns-http answers with IP_STANDARD, dns-https SSL.
+// What: dns-http answers with IP_HTTP, dns-https SSL.
 // Why: one cache per proxy IP keeps the answers apart.
 // From: Issue #1683
 const DNS_HTTP: Recursor = Recursor {
@@ -3234,7 +3234,7 @@ fn nginx_certs(
     nginx: &Path,
     run: &Path,
     hosts: &CdnHosts,
-    ip_ssl: &str,
+    ip_https: &str,
     gid: u32,
 ) -> Result<(), String> {
     let (ca, certs) = (nginx.join("ssl/ca"), nginx.join("ssl/certs"));
@@ -3326,14 +3326,14 @@ fn nginx_certs(
         ],
     )
     .unwrap_or_default();
-    let has_ip = ip_ssl.is_empty()
+    let has_ip = ip_https.is_empty()
         || san
             .split([',', '\n'])
-            .any(|entry| entry.trim() == format!("IP Address:{ip_ssl}"));
+            .any(|entry| entry.trim() == format!("IP Address:{ip_https}"));
     if !default_key.is_file() || !san.contains("DNS:") || !has_ip {
         let mut names = "DNS:lancache-default".to_string();
-        if !ip_ssl.is_empty() {
-            names.push_str(&format!(",IP:{ip_ssl}"));
+        if !ip_https.is_empty() {
+            names.push_str(&format!(",IP:{ip_https}"));
         }
         sign_leaf(&ca, run, &default_key, &default_crt, &names)?;
     }
@@ -3385,14 +3385,14 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     let read = |path: &Path| {
         fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
     };
-    let ip_standard = ctx.need("IP_STANDARD")?;
-    let ip_ssl = env_opt("IP_SSL").unwrap_or_default();
+    let ip_http = ctx.need("IP_HTTP")?;
+    let ip_https = env_opt("IP_HTTPS").unwrap_or_default();
     let ssl = config::parse_bool(&ctx.need("SSL_ENABLED")?).ok_or("SSL_ENABLED is no boolean")?;
     let resolver = ctx.need("NGINX_UPSTREAM_RESOLVER")?;
     // What: the upstream resolver must not be LanCache.
     // Why: the LanCache DNS would loop back (AG-OP-002).
     for token in resolver.split_whitespace().map(resolver_host) {
-        if token == ip_standard || (!ip_ssl.is_empty() && token == ip_ssl) {
+        if token == ip_http || (!ip_https.is_empty() && token == ip_https) {
             return Err(format!(
                 "NGINX_UPSTREAM_RESOLVER must not point to a LanCache IP ({token})"
             ));
@@ -3426,10 +3426,10 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     );
     let https = dir.join("conf.d/https.conf");
     if ssl {
-        if ip_ssl.is_empty() {
-            return Err("SSL_ENABLED needs IP_SSL".into());
+        if ip_https.is_empty() {
+            return Err("SSL_ENABLED needs IP_HTTPS".into());
         }
-        nginx_certs(&dir, &ctx.run_dir, &hosts, &ip_ssl, worker_gid)?;
+        nginx_certs(&dir, &ctx.run_dir, &hosts, &ip_https, worker_gid)?;
     } else if https.exists() {
         fs::remove_file(&https).map_err(|e| format!("cannot remove {}: {e}", https.display()))?;
     }

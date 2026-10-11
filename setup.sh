@@ -2190,7 +2190,7 @@ set_template_owned_env_defaults() {
 # Why: config/prod is gone; .env is the one value owner
 # From: Issue #1683 | PR #1858
 config_prod_moved_keys() {
-    printf '%s\n' 'dns-standard PROXY_IP IP_STANDARD' 'dns-ssl PROXY_IP IP_SSL' 'watchdog SSL_ENABLED' \
+    printf '%s\n' 'dns-standard PROXY_IP IP_HTTP' 'dns-ssl PROXY_IP IP_HTTPS' 'watchdog SSL_ENABLED' \
         'proxy CACHE_MAX_SIZE' 'proxy CACHE_MEM_MB' 'proxy CACHE_SLICE_SIZE' 'proxy CACHE_VALID_HIT' \
         'proxy CACHE_VALID_ANY' 'proxy CACHE_INACTIVE' 'proxy NGINX_UPSTREAM_RESOLVER' \
         'proxy PROXY_SECURITY_MODE' 'proxy PROXY_ALLOWED_CLIENT_CIDRS' 'dhcp DHCP_SUBNET' \
@@ -2331,13 +2331,13 @@ require_env_value_for_update() {
         || die "$key is missing or empty in $env_file. Set it before running setup.sh update."
 }
 
-# What: IP_STANDARD and IP_SSL are two valid, distinct IPv4s
-# Why: dns-standard and dns-ssl bind apart (AG-SETUP-001)
+# What: IP_HTTP and IP_HTTPS are two valid, distinct IPv4s
+# Why: dns-http and dns-https bind apart (AG-SETUP-001)
 # From: Issue #1683 | PR #1858
 require_separate_lan_ips() {
-    is_valid_ipv4 "$1" || die "IP_STANDARD is not a valid IPv4 address: $1"
-    is_valid_ipv4 "$2" || die "IP_SSL is not a valid IPv4 address: $2"
-    [[ "$1" != "$2" ]] || die "Standard IP and SSL IP must be different."
+    is_valid_ipv4 "$1" || die "IP_HTTP is not a valid IPv4 address: $1"
+    is_valid_ipv4 "$2" || die "IP_HTTPS is not a valid IPv4 address: $2"
+    [[ "$1" != "$2" ]] || die "IP_HTTP and IP_HTTPS must be different."
 }
 
 # What: sets a secret only if no usable value exists
@@ -3070,8 +3070,8 @@ migrate_env_for_update() (
     # Why: undeclared names leaked as globals
     local dhcp_proxy_pxe_boot_server dhcp_proxy_pxe_boot_filename_bios dhcp_proxy_pxe_boot_filename_uefi
     local default_cache_size default_cache_gb
-    local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ui_generated_password ui_password ui_user
-    local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
+    local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_https ui_generated_password ui_password ui_user
+    local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_http upstream_dhcp_ip
     local state_keys state_key state_sub state_sub_dir legacy_path ntp_enabled logging_enabled
     local state_dir ui_session_ttl
     local legacy_cache_std legacy_cache_ssl existing_image_tag
@@ -3103,14 +3103,21 @@ migrate_env_for_update() (
 
     print_step "Checking runtime .env"
 
-    require_env_value_for_update IP_STANDARD "$env_file"
+    # What: moves IP_STANDARD/IP_SSL to IP_HTTP/IP_HTTPS.
+    # Why: older installs still carry the old key names.
+    # From: Issue #1683 | PR #1912
+    append_env_migrated_assignment_if_missing IP_HTTP IP_STANDARD "" "$env_file"
+    append_env_migrated_assignment_if_missing IP_HTTPS IP_SSL "" "$env_file"
+    remove_env_key IP_STANDARD "$env_file"
+    remove_env_key IP_SSL "$env_file"
+    require_env_value_for_update IP_HTTP "$env_file"
     # What: the second LAN IP must be set before any write
-    # Why: prod always runs dns-ssl on it (AG-SETUP-001)
+    # Why: prod always runs dns-https on it (AG-SETUP-001)
     # From: Issue #1683 | PR #1858
-    require_env_value_for_update IP_SSL "$env_file"
-    ip_standard=$(get_env_var IP_STANDARD "$env_file") || exit $?
-    ip_ssl=$(get_env_var IP_SSL "$env_file") || exit $?
-    require_separate_lan_ips "$ip_standard" "$ip_ssl"
+    require_env_value_for_update IP_HTTPS "$env_file"
+    ip_http=$(get_env_var IP_HTTP "$env_file") || exit $?
+    ip_https=$(get_env_var IP_HTTPS "$env_file") || exit $?
+    require_separate_lan_ips "$ip_http" "$ip_https"
 
     # What: resolves and checks the image tag first
     # Why: a platform failure leaves other keys untouched
@@ -3160,7 +3167,7 @@ migrate_env_for_update() (
     set_env_key_if_empty_or_missing UI_SESSION_TTL_SECONDS "$ui_session_ttl" "$env_file"
 
     # What: an empty SSL_ENABLED becomes 1
-    # Why: prod always runs dns-ssl on the required IP_SSL
+    # Why: prod always runs dns-ssl on the required IP_HTTPS
     # From: Issue #1683 | PR #1858
     set_env_key_if_empty_or_missing SSL_ENABLED 1 "$env_file"
 
@@ -3225,8 +3232,8 @@ migrate_env_for_update() (
     # Why: the platform check runs before migration writes
 
     set_env_key_if_empty_or_missing CACHE_MAX_GB "$cache_gb" "$env_file"
-    ip_standard=$(get_env_var IP_STANDARD "$env_file") || die "Cannot read IP_STANDARD from $env_file (exit $?)."
-    append_env_migrated_assignment_if_missing UI_BIND_IP IP_STANDARD "$ip_standard" "$env_file"
+    ip_http=$(get_env_var IP_HTTP "$env_file") || die "Cannot read IP_HTTP from $env_file (exit $?)."
+    append_env_migrated_assignment_if_missing UI_BIND_IP IP_HTTP "$ip_http" "$env_file"
 
     # What: keys for DHCP and Kea always exist
     # Why: Compose and the UI read one full config
@@ -3270,8 +3277,8 @@ migrate_env_for_update() (
 
     append_env_key_if_missing DHCP_MODE "disabled" "$env_file"
     set_env_key DHCP_MODE "$dhcp_mode" "$env_file"
-    ip_standard=$(get_env_var IP_STANDARD "$env_file") || exit $?
-    ip_ssl=$(get_env_var IP_SSL "$env_file") || exit $?
+    ip_http=$(get_env_var IP_HTTP "$env_file") || exit $?
+    ip_https=$(get_env_var IP_HTTPS "$env_file") || exit $?
     dhcp_subnet_start=$(get_env_var DHCP_SUBNET_START "$env_file") || exit $?
     dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$env_file") || exit $?
     dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file") || exit $?
@@ -3353,8 +3360,8 @@ migrate_env_for_update() (
             ;;
         *)
             is_valid_ipv4 "$dhcp_subnet_start" || dhcp_subnet_start=""
-            is_valid_ipv4 "$dhcp_dns_primary" || dhcp_dns_primary="$ip_standard"
-            is_valid_ipv4 "$dhcp_dns_secondary" || dhcp_dns_secondary="${ip_ssl:-$ip_standard}"
+            is_valid_ipv4 "$dhcp_dns_primary" || dhcp_dns_primary="$ip_http"
+            is_valid_ipv4 "$dhcp_dns_secondary" || dhcp_dns_secondary="${ip_https:-$ip_http}"
             is_valid_ipv4 "$upstream_dhcp_ip" || upstream_dhcp_ip=""
             ;;
     esac
@@ -4403,28 +4410,28 @@ _verify_healthz_endpoint() {
 # What: functional checks: proxy /healthz and DNS query
 # Why: healthy alone does not prove a real answer
 verify_stack_functional_health() {
-    local ip_standard ip_ssl ssl_enabled test_fqdn resolved
+    local ip_http ip_https ssl_enabled test_fqdn resolved
 
-    ip_standard=$(get_env_var IP_STANDARD "$_UPDATE_ENV_FILE") || exit $?
-    ip_ssl=$(get_env_var IP_SSL "$_UPDATE_ENV_FILE") || exit $?
+    ip_http=$(get_env_var IP_HTTP "$_UPDATE_ENV_FILE") || exit $?
+    ip_https=$(get_env_var IP_HTTPS "$_UPDATE_ENV_FILE") || exit $?
     ssl_enabled=$(get_env_var SSL_ENABLED "$_UPDATE_ENV_FILE") || exit $?
 
-    if [[ -n "$ip_standard" ]]; then
-        _verify_healthz_endpoint "$ip_standard" || return 1
+    if [[ -n "$ip_http" ]]; then
+        _verify_healthz_endpoint "$ip_http" || return 1
     fi
-    if [[ "${ssl_enabled:-0}" = "1" && -n "$ip_ssl" ]]; then
-        _verify_healthz_endpoint "$ip_ssl" || return 1
+    if [[ "${ssl_enabled:-0}" = "1" && -n "$ip_https" ]]; then
+        _verify_healthz_endpoint "$ip_https" || return 1
     fi
 
     # What: dig an exact, non-wildcard cdn-domains.txt host
     # Why: wildcard-only RPZ entries never match their apex
     # From: Issue #1149 | PR #1150
     test_fqdn="content1.steampowered.com"
-    if [[ -n "$ip_standard" ]]; then
+    if [[ -n "$ip_http" ]]; then
         require_functional_check_tool dig "the DNS resolution probe" || return 1
-        if ! resolved=$(dig +time=2 +tries=1 +short @"$ip_standard" A "$test_fqdn" 2>&1) \
+        if ! resolved=$(dig +time=2 +tries=1 +short @"$ip_http" A "$test_fqdn" 2>&1) \
             || [[ -z "$resolved" || "$resolved" == *";;"* ]]; then
-            print_error "Functional check failed: DNS did not resolve ${test_fqdn} via ${ip_standard}: ${resolved:-empty answer}"
+            print_error "Functional check failed: DNS did not resolve ${test_fqdn} via ${ip_http}: ${resolved:-empty answer}"
             return 1
         fi
     fi
@@ -5066,9 +5073,9 @@ cmd_debug() {
         || die_no_stack_found "$install_dir"
 
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    local ip_standard ip_ssl cache_dir cache_std cache_ssl
-    ip_standard=$(get_env_var IP_STANDARD "$env_file") || exit $?
-    ip_ssl=$(get_env_var IP_SSL "$env_file") || exit $?
+    local ip_http ip_https cache_dir cache_std cache_ssl
+    ip_http=$(get_env_var IP_HTTP "$env_file") || exit $?
+    ip_https=$(get_env_var IP_HTTPS "$env_file") || exit $?
     cache_dir=$(get_env_var CACHE_DIR "$env_file") || exit $?
     cache_std=$(get_env_var CACHE_DIR_STANDARD "$env_file") || exit $?
     cache_ssl=$(get_env_var CACHE_DIR_SSL "$env_file") || exit $?
@@ -5121,7 +5128,7 @@ cmd_debug() {
         print_warn "curl not found — health checks skipped"
     else
         local ip probe
-        for ip in "$ip_standard" "$ip_ssl"; do
+        for ip in "$ip_http" "$ip_https"; do
             [[ -z "$ip" ]] && continue
             if probe=$(curl -sS -f -o /dev/null "http://$ip/healthz" 2>&1); then
                 print_ok "http://$ip/healthz — OK"
@@ -5915,16 +5922,16 @@ cmd_update_ip() {
     print_step "Reading current configuration"
 
     # What: only the runtime .env holds IPs; compose derives
-    # Why: PROXY_IP and binds come from IP_STANDARD/IP_SSL
+    # Why: PROXY_IP and binds come from IP_HTTP/IP_HTTPS
     # From: Issue #1683 | PR #1858
     local deploy_env
     deploy_env=$(runtime_env_file_for_install_dir "$install_dir")
     [[ -f "$deploy_env" ]] || die "Configuration not found: $deploy_env"
 
-    local current_ip_standard current_ip_ssl
-    local new_ip_standard new_ip_ssl
-    current_ip_standard=$(get_env_var IP_STANDARD "$deploy_env") || exit $?
-    current_ip_ssl=$(get_env_var IP_SSL "$deploy_env") || exit $?
+    local current_ip_http current_ip_https
+    local new_ip_http new_ip_https
+    current_ip_http=$(get_env_var IP_HTTP "$deploy_env") || exit $?
+    current_ip_https=$(get_env_var IP_HTTPS "$deploy_env") || exit $?
 
     # What: defaults for UI_BIND_IP and DHCP DNS follow IP_*
     # Why: only install-time default values may be rewritten
@@ -5936,33 +5943,33 @@ cmd_update_ip() {
     current_dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$deploy_env") || exit $?
 
     printf "\n  ${BOLD}Current configuration:${RESET}\n"
-    printf "    Standard IP: %s\n" "$current_ip_standard"
-    printf "    SSL IP:      %s\n" "$current_ip_ssl"
+    printf "    HTTP IP:     %s\n" "$current_ip_http"
+    printf "    HTTPS IP:    %s\n" "$current_ip_https"
     printf "\n"
 
     print_step "Prompt for new IPs"
 
     while true; do
-        ask "New standard mode IP" "$current_ip_standard"
-        new_ip_standard="$REPLY"
-        is_valid_ipv4 "$new_ip_standard" && break
-        print_error "Invalid IPv4 address: $new_ip_standard"
+        ask "New standard mode IP" "$current_ip_http"
+        new_ip_http="$REPLY"
+        is_valid_ipv4 "$new_ip_http" && break
+        print_error "Invalid IPv4 address: $new_ip_http"
     done
 
     printf "\n"
     while true; do
-        ask "New SSL mode IP" "$current_ip_ssl"
-        new_ip_ssl="$REPLY"
-        is_valid_ipv4 "$new_ip_ssl" && break
-        print_error "Invalid IPv4 address: $new_ip_ssl"
+        ask "New SSL mode IP" "$current_ip_https"
+        new_ip_https="$REPLY"
+        is_valid_ipv4 "$new_ip_https" && break
+        print_error "Invalid IPv4 address: $new_ip_https"
     done
 
-    require_separate_lan_ips "$new_ip_standard" "$new_ip_ssl"
+    require_separate_lan_ips "$new_ip_http" "$new_ip_https"
 
     printf "\n"
     printf "  ${BOLD}New configuration:${RESET}\n"
-    printf "    Standard IP: %s\n" "$new_ip_standard"
-    printf "    SSL IP:      %s\n" "$new_ip_ssl"
+    printf "    HTTP IP:     %s\n" "$new_ip_http"
+    printf "    HTTPS IP:    %s\n" "$new_ip_https"
     printf "\n"
 
     ask "Apply changes? [y/N]" "N"
@@ -5970,27 +5977,27 @@ cmd_update_ip() {
 
     print_step "Updating configuration files"
 
-    set_env_key IP_STANDARD "$new_ip_standard" "$deploy_env"
-    set_env_key IP_SSL "$new_ip_ssl" "$deploy_env"
-    print_ok "Updated: $deploy_env (IP_STANDARD, IP_SSL)"
+    set_env_key IP_HTTP "$new_ip_http" "$deploy_env"
+    set_env_key IP_HTTPS "$new_ip_https" "$deploy_env"
+    print_ok "Updated: $deploy_env (IP_HTTP, IP_HTTPS)"
 
     # What: rewrites UI_BIND_IP while it equals old IP
     # Why: an empty or explicit value stays untouched
     # From: Issue #666 | PR #745
-    if [[ -n "$current_ui_bind_ip" && "$current_ui_bind_ip" = "$current_ip_standard" ]]; then
-        set_env_key UI_BIND_IP "$new_ip_standard" "$deploy_env"
+    if [[ -n "$current_ui_bind_ip" && "$current_ui_bind_ip" = "$current_ip_http" ]]; then
+        set_env_key UI_BIND_IP "$new_ip_http" "$deploy_env"
         print_ok "Updated: $deploy_env (UI_BIND_IP)"
     fi
 
     # What: rewrites DHCP DNS while it equals old IP
     # Why: dnsmasq-proxy reads these; Kea derives its own
     if [[ "$current_dhcp_mode" = "dnsmasq-proxy" ]]; then
-        if [[ -n "$current_dhcp_dns_primary" && "$current_dhcp_dns_primary" = "$current_ip_standard" ]]; then
-            set_env_key DHCP_DNS_PRIMARY "$new_ip_standard" "$deploy_env"
+        if [[ -n "$current_dhcp_dns_primary" && "$current_dhcp_dns_primary" = "$current_ip_http" ]]; then
+            set_env_key DHCP_DNS_PRIMARY "$new_ip_http" "$deploy_env"
             print_ok "Updated: $deploy_env (DHCP_DNS_PRIMARY)"
         fi
-        if [[ -n "$current_dhcp_dns_secondary" && "$current_dhcp_dns_secondary" = "$current_ip_ssl" ]]; then
-            set_env_key DHCP_DNS_SECONDARY "$new_ip_ssl" "$deploy_env"
+        if [[ -n "$current_dhcp_dns_secondary" && "$current_dhcp_dns_secondary" = "$current_ip_https" ]]; then
+            set_env_key DHCP_DNS_SECONDARY "$new_ip_https" "$deploy_env"
             print_ok "Updated: $deploy_env (DHCP_DNS_SECONDARY)"
         fi
     fi
@@ -6585,56 +6592,56 @@ printf "\n"
 
 while true; do
     ask "Server IP (Standard mode)" "$detected_ip"
-    IP_STANDARD="$REPLY"
-    is_valid_ipv4 "$IP_STANDARD" && break
-    print_error "Invalid IPv4 address: $IP_STANDARD"
+    IP_HTTP="$REPLY"
+    is_valid_ipv4 "$IP_HTTP" && break
+    print_error "Invalid IPv4 address: $IP_HTTP"
 done
 
 printf "\n"
 printf "  ${BOLD}Second LAN IP${RESET}: the SSL DNS/proxy address, always required.\n\n"
 # What: the second LAN address is always asked and checked
-# Why: AG-SETUP-001; prod runs dns-ssl on IP_SSL always
+# Why: AG-SETUP-001; prod runs dns-ssl on IP_HTTPS always
 # From: Issue #1683 | PR #1858
-suggested_ssl="${IP_STANDARD%.*}.$((10#${IP_STANDARD##*.} + 1))"
+suggested_ssl="${IP_HTTP%.*}.$((10#${IP_HTTP##*.} + 1))"
 while true; do
     ask "Second LAN IP (SSL mode)" "$suggested_ssl"
-    IP_SSL="$REPLY"
-    is_valid_ipv4 "$IP_SSL" && break
-    print_error "Invalid IPv4 address: $IP_SSL"
+    IP_HTTPS="$REPLY"
+    is_valid_ipv4 "$IP_HTTPS" && break
+    print_error "Invalid IPv4 address: $IP_HTTPS"
 done
-require_separate_lan_ips "$IP_STANDARD" "$IP_SSL"
-# What: IP_SSL goes on IP_STANDARD's device and prefix
+require_separate_lan_ips "$IP_HTTP" "$IP_HTTPS"
+# What: IP_HTTPS goes on IP_HTTP's device and prefix
 # Why: same link and subnet; no guessed device or mask
 # From: Issue #1683 | PR #1858
 ssl_assigned=0 standard_link=""
 if host_addresses=$(host_ipv4_addresses); then
-    awk -v ip="$IP_SSL" '$1 == ip { found = 1 } END { exit !found }' <<< "$host_addresses" \
+    awk -v ip="$IP_HTTPS" '$1 == ip { found = 1 } END { exit !found }' <<< "$host_addresses" \
         && ssl_assigned=1
-    standard_link=$(awk -v ip="$IP_STANDARD" '$1 == ip { print $2, $3; exit }' <<< "$host_addresses")
+    standard_link=$(awk -v ip="$IP_HTTP" '$1 == ip { print $2, $3; exit }' <<< "$host_addresses")
 else
     print_warn "Cannot list this host's IPv4 addresses (exit $?)."
 fi
 if [[ "$ssl_assigned" = 1 ]]; then
-    print_ok "$IP_SSL already assigned"
+    print_ok "$IP_HTTPS already assigned"
 else
-    print_warn "$IP_SSL not yet assigned to an interface"
+    print_warn "$IP_HTTPS not yet assigned to an interface"
     if [[ -n "$standard_link" ]]; then
         read -r standard_prefix standard_dev <<< "$standard_link"
-        ask "Add now? (ip addr add $IP_SSL/$standard_prefix dev $standard_dev) [y/N]" "N"
+        ask "Add now? (ip addr add $IP_HTTPS/$standard_prefix dev $standard_dev) [y/N]" "N"
         if [[ "${REPLY,,}" = "y" ]]; then
             if [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
                 # What: introspection skips ip addr add
                 # Why: list-prompts only walks the prompts
                 # From: Issue #1176
-                print_ok "$IP_SSL would be added (skipped: introspection mode)"
-            elif ip addr add "$IP_SSL/$standard_prefix" dev "$standard_dev"; then
-                print_ok "$IP_SSL added (not persistent)"
+                print_ok "$IP_HTTPS would be added (skipped: introspection mode)"
+            elif ip addr add "$IP_HTTPS/$standard_prefix" dev "$standard_dev"; then
+                print_ok "$IP_HTTPS added (not persistent)"
             else
                 print_warn "Adding failed (exit $?) — please add manually"
             fi
         fi
     else
-        print_warn "Add $IP_SSL to the interface that carries $IP_STANDARD."
+        print_warn "Add $IP_HTTPS to the interface that carries $IP_HTTP."
     fi
     printf "\n"
     print_warn "For persistent configuration after reboot:"
@@ -6648,7 +6655,7 @@ printf "  Requires a CA certificate on clients.\n\n"
 ask "Enable SSL mode? [y/N]" "N"
 SSL_ENABLED=0
 [[ "${REPLY,,}" = "y" ]] && SSL_ENABLED=1
-print_ok "SSL mode $([[ "$SSL_ENABLED" = 1 ]] && echo enabled || echo disabled) (second IP $IP_SSL)"
+print_ok "SSL mode $([[ "$SSL_ENABLED" = 1 ]] && echo enabled || echo disabled) (second IP $IP_HTTPS)"
 
 # ── 3. Data directory ─────────────────────────────────────────────────────────
 print_step "Data directory"
@@ -6802,8 +6809,8 @@ DHCP_GATEWAY="$DHCP_GATEWAY_DEFAULT"
 DHCP_RANGE_START=""
 DHCP_RANGE_END=""
 DHCP_SUBNET_START=""
-DHCP_DNS_PRIMARY="$IP_STANDARD"
-DHCP_DNS_SECONDARY="${IP_SSL:-$IP_STANDARD}"
+DHCP_DNS_PRIMARY="$IP_HTTP"
+DHCP_DNS_SECONDARY="${IP_HTTPS:-$IP_HTTP}"
 UPSTREAM_DHCP_IP="$DHCP_GATEWAY"
 # What: relay-mode local address, empty by default
 # Why: only dnsmasq-relay uses it
@@ -7094,7 +7101,7 @@ COMPOSE_PROFILES="$(compose_profiles_for_runtime "$COMPOSE_PROFILES" "$DHCP_MODE
 # ── 8. Admin-UI access control ────────────────────────────────────────────────
 print_step "Admin-UI access control"
 
-printf "  Admin-UI runs on %s — reachable from your LAN by default.\n" "$IP_STANDARD"
+printf "  Admin-UI runs on %s — reachable from your LAN by default.\n" "$IP_HTTP"
 printf "  Password protection is optional, but recommended on shared or untrusted networks.\n"
 printf "  To restrict the UI to this host later, set UI_BIND_IP=127.0.0.1 in .env.\n\n"
 
@@ -7136,7 +7143,7 @@ else
     ask "Allow Admin-UI without authentication? [y/N]" "N"
     if [[ "${REPLY,,}" = "y" ]]; then
         ALLOW_INSECURE_UI=true
-        print_warn "No password protection — Admin-UI will be reachable on $IP_STANDARD"
+        print_warn "No password protection — Admin-UI will be reachable on $IP_HTTP"
         print_warn "This is explicitly allowed by ALLOW_INSECURE_UI=true"
     else
         die "Admin-UI authentication is required. Re-run setup and enable password protection, or explicitly allow insecure access."
@@ -7195,8 +7202,8 @@ UI_SESSION_TTL_SECONDS="${UI_SESSION_TTL_SECONDS:-$DEFAULT_UI_SESSION_TTL_SECOND
 validate_ui_session_ttl_seconds "$UI_SESSION_TTL_SECONDS" "$env_file"
 
 validate_env_values_for_initial_write \
-    "IP_STANDARD=${IP_STANDARD}" \
-    "IP_SSL=${IP_SSL}" \
+    "IP_HTTP=${IP_HTTP}" \
+    "IP_HTTPS=${IP_HTTPS}" \
     "SSL_ENABLED=${SSL_ENABLED}" \
     "CACHE_DIR=${CACHE_DIR}" \
     "CACHE_MAX_SIZE=${cache_gb}g" \
@@ -7250,15 +7257,15 @@ validate_env_values_for_initial_write \
     "UI_AUTH_USER=${UI_AUTH_USER}" \
     "UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}" \
     "ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}" \
-    "UI_BIND_IP=${IP_STANDARD}"
+    "UI_BIND_IP=${IP_HTTP}"
 
 write_file_atomically "$ENV_LOCAL" <<EOF
 # ── LAN IPs ────────────────────────────────────────────────────────────────────
 # Standard mode (no CA certificate needed): HTTP cached, HTTPS passthrough
-IP_STANDARD=${IP_STANDARD}
+IP_HTTP=${IP_HTTP}
 
 # Second LAN IP for the SSL DNS/proxy, always required (AG-SETUP-001)
-IP_SSL=${IP_SSL}
+IP_HTTPS=${IP_HTTPS}
 
 # Root of all persistent state (cache, DNS, DHCP, NTP)
 LANCACHE_STATE_DIR=${LANCACHE_STATE_DIR}
@@ -7400,7 +7407,7 @@ ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}
 
 # Bind address for Admin-UI. Default keeps it reachable on the LAN.
 # Set to 127.0.0.1 to restrict access to this host.
-UI_BIND_IP=${IP_STANDARD}
+UI_BIND_IP=${IP_HTTP}
 EOF
 set_template_owned_env_defaults "$ENV_LOCAL"
 print_ok ".env.local written: $ENV_LOCAL"
@@ -7454,9 +7461,9 @@ printf "\n"
 printf "${BOLD}┌──────────────────────────────────────────────┐${RESET}\n"
 printf "${BOLD}│              Configuration                   │${RESET}\n"
 printf "${BOLD}├──────────────────────────────────────────────┤${RESET}\n"
-printf "  %-26s %s\n"    "Standard IP:"              "$IP_STANDARD"
+printf "  %-26s %s\n"    "HTTP IP:"                  "$IP_HTTP"
 if [[ "$SSL_ENABLED" = "1" ]]; then
-    printf "  %-26s %s\n" "SSL IP:"                  "$IP_SSL"
+    printf "  %-26s %s\n" "HTTPS IP:"                "$IP_HTTPS"
 else
     printf "  %-26s %s\n" "SSL mode:"                "disabled"
 fi
@@ -7575,9 +7582,9 @@ if [[ "$SSL_ENABLED" = "1" ]]; then
     printf "\n"
 fi
 printf "  ${BOLD}Configure DNS on clients:${RESET}\n"
-printf "    Standard mode (no certificate): %s\n" "$IP_STANDARD"
+printf "    Standard mode (no certificate): %s\n" "$IP_HTTP"
 if [[ "$SSL_ENABLED" = "1" ]]; then
-    printf "    SSL mode (with certificate):    %s\n" "$IP_SSL"
+    printf "    SSL mode (with certificate):    %s\n" "$IP_HTTPS"
 fi
 printf "\n"
 printf "  ${BOLD}Commands:${RESET}\n"

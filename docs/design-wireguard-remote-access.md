@@ -103,11 +103,11 @@ Largely orthogonal, by design, but worth stating explicitly since a WireGuard
 tunnel changes what a client can reach at L3:
 
 - WireGuard operates at L3 (routing) — it gets a remote client's packets
-  into the home LAN. It has no opinion about which of `IP_STANDARD` /
-  `IP_SSL` the client's DNS resolver points at; that's a client-side
+  into the home LAN. It has no opinion about which of `IP_HTTP` /
+  `IP_HTTPS` the client's DNS resolver points at; that's a client-side
   network config choice exactly like it is for a LAN-local client today.
 - A remote client tunneled in via WireGuard should be able to point its
-  DNS at either `IP_STANDARD` or `IP_SSL` (whichever mode it wants) and get
+  DNS at either `IP_HTTP` or `IP_HTTPS` (whichever mode it wants) and get
   the same cached-download experience a LAN-local client gets — nothing in
   the standard/SSL split assumes L2-LAN-only clients, it assumes clients
   that can reach the proxy's IP at all, which a routed WireGuard tunnel

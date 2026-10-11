@@ -14,11 +14,11 @@ services:
   proxy:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/proxy:${LANCACHE_IMAGE_TAG:-latest}"
     environment:
-      - IP_STANDARD=${VALIDATION_PROXY_IP:-172.30.99.2}
-      # What: IP_SSL is logical only, never reachable here.
-      # Why: prod binds IP_SSL to a real NIC; harness has no equivalent.
+      - IP_HTTP=${VALIDATION_PROXY_IP:-172.30.99.2}
+      # What: IP_HTTPS is logical only, never reachable here.
+      # Why: prod binds IP_HTTPS to a real NIC; harness has no equivalent.
       # From: Issue #668 | PR #747
-      - IP_SSL=${VALIDATION_PROXY_SSL_IP:-172.30.99.4}
+      - IP_HTTPS=${VALIDATION_PROXY_SSL_IP:-172.30.99.4}
       - SSL_ENABLED=1
       - CACHE_MEM_MB=64
       - CACHE_MAX_SIZE=1g
@@ -39,7 +39,7 @@ services:
       retries: 2
       start_period: 10s
 
-  # What: socat shim for IP_STANDARD:443 -> proxy:8443 forward.
+  # What: socat shim for IP_HTTP:443 -> proxy:8443 forward.
   # Why: harness lacks per-host-IP publish; DNSs resolved equally.
   # From: Issue #668 | PR #795
   #

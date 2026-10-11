@@ -256,7 +256,7 @@ untrusted network · **Impact**: High
 **Residual risk**: Low, and entirely operator-controlled: it exists only if the
 operator sets `ALLOW_INSECURE_UI=true` *and* exposes the UI beyond the trusted
 LAN. `deploy/prod` binds the UI to `UI_BIND_IP`, which defaults to
-`IP_STANDARD`; `UI_BIND_IP=127.0.0.1` restricts it further. Separately, `POST
+`IP_HTTP`; `UI_BIND_IP=127.0.0.1` restricts it further. Separately, `POST
 /api/netdata-alarms`'s token check is scoped to *this* endpoint only — it does
 not change finding #20's underlying fact that Netdata's own API (port 19999,
 reachable from containers on the `netdata-net` bridge and from every service

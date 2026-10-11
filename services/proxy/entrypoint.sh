@@ -20,8 +20,8 @@ LOG_READER_GID=10001
 # ────────────────────────────────────────────────────────────────────────────
 # 0. Validate required environment variables
 # ────────────────────────────────────────────────────────────────────────────
-IP_STANDARD="${IP_STANDARD:?IP_STANDARD is required}"
-IP_SSL="${IP_SSL:-}"
+IP_HTTP="${IP_HTTP:?IP_HTTP is required}"
+IP_HTTPS="${IP_HTTPS:-}"
 SSL_ENABLED="${SSL_ENABLED:-0}"
 # Last-resort fallback if the container is run without an env_file at all
 # (normal installs always set this via config/{dev,prod}/proxy.env or
@@ -407,7 +407,7 @@ _collect_domain_rows
 set -f
 for resolver in ${NGINX_UPSTREAM_RESOLVER}; do
     resolver="$(_normalize_resolver_token "$resolver")"
-    if [ "$resolver" = "$IP_STANDARD" ] || { [ -n "$IP_SSL" ] && [ "$resolver" = "$IP_SSL" ]; }; then
+    if [ "$resolver" = "$IP_HTTP" ] || { [ -n "$IP_HTTPS" ] && [ "$resolver" = "$IP_HTTPS" ]; }; then
         echo "[lancache] ERROR: NGINX_UPSTREAM_RESOLVER must not point to a LanCache DNS/proxy IP ($resolver)." >&2
         echo "[lancache] Use a real upstream resolver such as 8.8.8.8, 8.8.4.4, 1.1.1.1, or your upstream/corporate DNS." >&2
         exit 1
@@ -473,8 +473,8 @@ _regex_escape_domain() {
 # 1. SSL mode: Generate CA and certs if needed
 # ────────────────────────────────────────────────────────────────────────────
 if [ "${SSL_ENABLED}" = "1" ]; then
-    if [ -z "${IP_SSL}" ]; then
-        echo "[lancache] ERROR: SSL_ENABLED=1 but IP_SSL is not set" >&2
+    if [ -z "${IP_HTTPS}" ]; then
+        echo "[lancache] ERROR: SSL_ENABLED=1 but IP_HTTPS is not set" >&2
         exit 1
     fi
 
@@ -620,7 +620,7 @@ if [ "${SSL_ENABLED}" = "1" ]; then
     #   - is missing (#72)
     #   - has no matching key (partial generation state)
     #   - has no SAN at all (CN-only cert from old deployments, #72)
-    #   - has an IP SAN that does not match the current IP_SSL (operator changed IP)
+    #   - has an IP SAN that does not match the current IP_HTTPS (operator changed IP)
     _default_cert_needs_regen() {
         if [ ! -f "$CERT_DIR/default.crt" ] || [ ! -f "$CERT_DIR/default.key" ]; then
             return 0
@@ -630,15 +630,15 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         # What: match SAN via a here-string, not a live pipe.
         # Why: a live pipe could SIGPIPE under pipefail (AG-VAL-032).
         grep -q "DNS:" <<< "$san" || return 0
-        if [ -n "${IP_SSL}" ]; then
-            # `grep -q "IP Address:${IP_SSL}"` would be an unanchored substring
-            # match: if IP_SSL migrates from 192.168.1.11 to 192.168.1.1, the
+        if [ -n "${IP_HTTPS}" ]; then
+            # `grep -q "IP Address:${IP_HTTPS}"` would be an unanchored substring
+            # match: if IP_HTTPS migrates from 192.168.1.11 to 192.168.1.1, the
             # search string is still found inside the old SAN, so a stale cert
             # for the old IP would be kept (#655). Anchor on the trailing edge
             # (dots escaped so they match literally, and the char right after
             # the address must not be another digit/dot) so only an exact IP
             # match counts; a comma, whitespace, or end of string may follow.
-            local ip_pattern="${IP_SSL//./\\.}"
+            local ip_pattern="${IP_HTTPS//./\\.}"
             [[ "$san" =~ IP\ Address:${ip_pattern}([^0-9.]|$) ]] || return 0
         fi
         return 1
@@ -646,9 +646,9 @@ if [ "${SSL_ENABLED}" = "1" ]; then
 
     if _default_cert_needs_regen; then
         # Generate or regenerate the fallback cert with a proper SAN (#72).
-        # Include IP_SSL in the SAN so clients connecting to that IP also pass validation.
+        # Include IP_HTTPS in the SAN so clients connecting to that IP also pass validation.
         _default_san="DNS:lancache-default"
-        [ -n "${IP_SSL}" ] && _default_san="${_default_san},IP:${IP_SSL}"
+        [ -n "${IP_HTTPS}" ] && _default_san="${_default_san},IP:${IP_HTTPS}"
         if ! _sign_cert "lancache-default" "$CERT_DIR/default.key" "$CERT_DIR/default.crt" \
             "subjectAltName=${_default_san}"; then
             echo "[lancache] ERROR: Failed to generate default certificate" >&2
@@ -1097,9 +1097,9 @@ fi
 
 # ────────────────────────────────────────────────────────────────────────────
 # 3. Remove https.conf when SSL mode is disabled
-#    (Docker routes IP_SSL:443→container:443 and IP_STANDARD:443→container:8443,
+#    (Docker routes IP_HTTPS:443→container:443 and IP_HTTP:443→container:8443,
 #    so https.conf can safely listen on 0.0.0.0:443 — only SSL clients reach it)
-#    Since #1276/#1322: IP_SSL:443 now reaches the stream-level SNI dispatch
+#    Since #1276/#1322: IP_HTTPS:443 now reaches the stream-level SNI dispatch
 #    listener above instead, which itself only exists when SSL_ENABLED=1 --
 #    see "2a." above.
 # ────────────────────────────────────────────────────────────────────────────
@@ -1251,6 +1251,6 @@ _migrate_legacy_proxy_snapshots_for_stream_acl "$PROXY_CONFIG_SNAPSHOT_DIR"
 PROXY_CANDIDATE_FILES=(/etc/nginx/nginx.conf /etc/nginx/proxy-params.conf "$SSL_MAP_FILE" "$STREAM_TARGET_FILE" "$STREAM_CLIENT_ACL_FILE")
 _proxy_validate_snapshot_or_rollback "${PROXY_CANDIDATE_FILES[@]}" || exit 1
 
-echo "[lancache] Starting nginx (IP_STANDARD=${IP_STANDARD}, SSL_ENABLED=${SSL_ENABLED})..."
+echo "[lancache] Starting nginx (IP_HTTP=${IP_HTTP}, SSL_ENABLED=${SSL_ENABLED})..."
 prepare_proxy_log_dir_for_syslog
 exec nginx -g "daemon off;"

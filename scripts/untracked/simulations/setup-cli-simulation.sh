@@ -143,11 +143,11 @@ sim_container_name_suffix() {
 }
 
 # Issue #1415 (maintainer decision, option b): this script used to hardcode
-# IP_STANDARD=127.0.0.2 (comment below this function's old location
+# IP_HTTP=127.0.0.2 (comment below this function's old location
 # explained THAT choice was itself a fix for 127.0.0.1 contention -- see the
 # preserved history in the retry loop's own comment further down) and never
-# set IP_SSL at all, falling back to deploy/quickstart/docker-compose.yml's
-# own shared `${IP_SSL:-127.0.0.1}` default. Both are fixed, shared values:
+# set IP_HTTPS at all, falling back to deploy/quickstart/docker-compose.yml's
+# own shared `${IP_HTTPS:-127.0.0.1}` default. Both are fixed, shared values:
 # two concurrent runs of this same script on the same physical runner host
 # (already established as a real scenario for this compose file -- see the
 # LANCACHE_CONTAINER_SUFFIX comments above) would still collide binding the
@@ -202,26 +202,26 @@ if ! ip_octet="$(sim_ip_octet "$install_dir")"; then
     echo "::error::Could not derive a unique IP octet from install_dir ($install_dir)." >&2
     exit 1
 fi
-ip_standard="127.0.${ip_octet}.2"
-ip_ssl="127.0.${ip_octet}.3"
+ip_http="127.0.${ip_octet}.2"
+ip_https="127.0.${ip_octet}.3"
 # Exported (not only typed into the wizard reply below): deploy/quickstart/
 # docker-compose.yml's `proxy` service is not profile-gated and always
-# publishes ports bound to BOTH ${IP_STANDARD} and ${IP_SSL:-127.0.0.1} --
+# publishes ports bound to BOTH ${IP_HTTP} and ${IP_HTTPS:-127.0.0.1} --
 # the latter unconditionally, even when this script's own fresh-install
 # reply sequence leaves SSL mode disabled (so setup.sh's wizard never asks
 # for or writes an SSL IP into .env at all).
 #
 # CORRECTED (issue #1415 follow-up, real CI failure confirmed 2026-08-07,
 # five identical `Bind for 127.0.0.1:80` failures across all five retry
-# attempts on PR #1463's run): exporting IP_SSL here does NOT, by itself,
-# close the IP_SSL collision axis the way the paragraph above used to claim.
-# setup.sh's own fresh-install wizard unconditionally does `IP_SSL=""` the
+# attempts on PR #1463's run): exporting IP_HTTPS here does NOT, by itself,
+# close the IP_HTTPS collision axis the way the paragraph above used to claim.
+# setup.sh's own fresh-install wizard unconditionally does `IP_HTTPS=""` the
 # moment SSL mode is declined (setup.sh's own "Enable SSL mode?" handling),
 # and that reassignment keeps the shell's export attribute (verified: an
 # inherited-exported variable stays exported across a plain reassignment),
 # so the `docker compose up` setup.sh itself runs internally a few dozen
-# lines later inherits IP_SSL="" -- overwriting this export from inside the
-# very process tree docker-compose.yml's `${IP_SSL:-127.0.0.1}` fallback then
+# lines later inherits IP_HTTPS="" -- overwriting this export from inside the
+# very process tree docker-compose.yml's `${IP_HTTPS:-127.0.0.1}` fallback then
 # sees. Even if that overwrite did not happen, the .env file setup.sh writes
 # would carry the identical empty value for the same declined-SSL reason, so
 # Compose's `--env-file` fallback would resolve to the shared literal anyway
@@ -229,22 +229,22 @@ ip_ssl="127.0.${ip_octet}.3"
 # declined" has exactly one blank value today, and Compose's `:-` treats
 # blank and unset identically. IP_SSL_BIND_FALLBACK below is a SEPARATE
 # variable name setup.sh's wizard never assigns and never writes to .env, so
-# it survives untouched through the wizard's blanking of IP_SSL --
+# it survives untouched through the wizard's blanking of IP_HTTPS --
 # deploy/quickstart/docker-compose.yml's ports: entries now read
-# `${IP_SSL:-${IP_SSL_BIND_FALLBACK:-127.0.0.1}}`, so a real install (which
+# `${IP_HTTPS:-${IP_SSL_BIND_FALLBACK:-127.0.0.1}}`, so a real install (which
 # never sets this variable) is completely unaffected, while this script's own
 # run gets its own already-derived, per-run-unique address instead of the
 # shared 127.0.0.1 every concurrent SSL-declined run on the host would
 # otherwise collide on. Confirmed on a real runner host via `docker compose
 # config` (not just static YAML reading, per AG-CI-015/AG-CI-017) that this
 # project's pinned Compose version resolves the nested `${A:-${B:-literal}}`
-# form correctly, including when $IP_SSL is set-but-empty rather than unset.
-export IP_STANDARD="$ip_standard"
-export IP_SSL="$ip_ssl"
+# form correctly, including when $IP_HTTPS is set-but-empty rather than unset.
+export IP_HTTP="$ip_http"
+export IP_HTTPS="$ip_https"
 # See the long comment above -- this is the variable that actually survives
-# setup.sh's wizard blanking IP_SSL when SSL mode is declined, which is what
+# setup.sh's wizard blanking IP_HTTPS when SSL mode is declined, which is what
 # this script's fresh-install reply sequence always does.
-export IP_SSL_BIND_FALLBACK="$ip_ssl"
+export IP_SSL_BIND_FALLBACK="$ip_https"
 
 cleanup() {
     local status=$?
@@ -364,7 +364,7 @@ run_fresh_install_expect() {
         LANCACHE_IMAGE_CHANNEL="$fresh_install_image_channel" \
         LANCACHE_IMAGE_TAG="$fresh_install_image_tag" \
         build_expect_prompt_block "$repo_root/setup.sh" "$answers_file" \
-            "$ip_standard" "" "$install_dir" "" "" "" "" "" "" "" "" "" ""
+            "$ip_http" "" "$install_dir" "" "" "" "" "" "" "" "" "" ""
     )"; then
         echo "::error::Could not derive the fresh-install expect_prompt sequence from 'setup.sh list-prompts' (issue #1176). See the error above for which prompt/reply count mismatched." >&2
         return 1
@@ -435,7 +435,7 @@ EXPECT_SCRIPT
 # visible on the runner moments later -- not a stuck leftover from one
 # specific job, just contention over the one address every other host-bound
 # stack on this runner also defaults to. The original fix moved off the
-# shared 127.0.0.1 onto a fixed IP_STANDARD=127.0.0.2 (loopback range
+# shared 127.0.0.1 onto a fixed IP_HTTP=127.0.0.2 (loopback range
 # 127.0.0.0/8 routes locally without needing a real interface); issue #1415
 # (option b) found that fixed replacement address was itself still shared
 # across every concurrent run of this same script, so it is now this run's
@@ -495,17 +495,17 @@ while true; do
             echo "::error::Could not derive a unique IP octet from install_dir ($install_dir) for retry attempt $attempt." >&2
             exit 1
         fi
-        ip_standard="127.0.${ip_octet}.2"
-        ip_ssl="127.0.${ip_octet}.3"
-        export IP_STANDARD="$ip_standard"
-        export IP_SSL="$ip_ssl"
-        # Issue #1415 (follow-up): must move in lockstep with ip_ssl above --
+        ip_http="127.0.${ip_octet}.2"
+        ip_https="127.0.${ip_octet}.3"
+        export IP_HTTP="$ip_http"
+        export IP_HTTPS="$ip_https"
+        # Issue #1415 (follow-up): must move in lockstep with ip_https above --
         # see the long comment on this variable's first export, further up
-        # this file, for why IP_SSL alone (re-exported just above) does not
+        # this file, for why IP_HTTPS alone (re-exported just above) does not
         # survive setup.sh's wizard blanking it once SSL mode is declined,
         # and why this separate name is what actually reaches
         # deploy/quickstart/docker-compose.yml's port-fallback expression.
-        export IP_SSL_BIND_FALLBACK="$ip_ssl"
+        export IP_SSL_BIND_FALLBACK="$ip_https"
         fresh_install_log="$repo_root/.setup-cli-simulation-tmp/fresh-install-attempt.log"
         attempt=$((attempt + 1))
         sleep 10
@@ -519,9 +519,9 @@ done
     || { echo "::error::Fresh install did not produce $install_dir/.env." >&2; exit 1; }
 # Issue #1415 (option b): asserts against this run's own derived address,
 # not a hardcoded 127.0.0.2 -- a leftover literal here would always fail
-# once IP_STANDARD stopped being a fixed value.
-grep -qF "IP_STANDARD=${ip_standard}" "$install_dir/.env" \
-    || { echo "::error::.env is missing the expected IP_STANDARD value ($ip_standard)." >&2; exit 1; }
+# once IP_HTTP stopped being a fixed value.
+grep -qF "IP_HTTP=${ip_http}" "$install_dir/.env" \
+    || { echo "::error::.env is missing the expected IP_HTTP value ($ip_http)." >&2; exit 1; }
 grep -qF 'UI_AUTH_USER=admin' "$install_dir/.env" \
     || { echo "::error::.env is missing the expected UI_AUTH_USER value." >&2; exit 1; }
 wait_for_stack_healthy

@@ -148,7 +148,7 @@ stack itself.
      `LANCACHE_IMAGE_CHANNEL`/`LANCACHE_IMAGE_TAG` only as a per-command env prefix on this
      one invocation, never exported process-wide, so it cannot leak into a later
      update/migration phase that should read the channel back from the written runtime env.
-     Prefer a dedicated loopback alias for `IP_STANDARD` (e.g. `127.0.0.2`) to avoid port contention with
+     Prefer a dedicated loopback alias for `IP_HTTP` (e.g. `127.0.0.2`) to avoid port contention with
      other work on a shared runner (the same reasoning `scripts/untracked/simulations/setup-cli-simulation.sh`
      already documents for itself).
   3. Expect `Stack started` as the success marker (`Failed to pull required container
@@ -184,7 +184,7 @@ stack itself.
   different entry from the same file (`download.epicgames.com` and `deb.debian.org`
   answered publicly) before concluding anything is
   broken.
-- **Standard mode**: `dig @<IP_STANDARD> steamcontent.com` (or any
+- **Standard mode**: `dig @<IP_HTTP> steamcontent.com` (or any
   configured CDN domain) resolves to the proxy's IP. Confirm the TLS handshake for
   that domain is **passthrough** (no interception) — `openssl s_client -connect
   <proxy>:443 -servername steamcontent.com` and confirm the presented certificate is
@@ -192,7 +192,7 @@ stack itself.
   issue #1391):** a prior version of this document named `:8443` here — that is
   only the container-**internal** listener port; every real deployment profile maps
   it to the standard HTTPS port externally (`deploy/prod/docker-compose.yml` publishes
-  `${IP_STANDARD}:443:8443`) — `:443` is what an operator or
+  `${IP_HTTP}:443:8443`) — `:443` is what an operator or
   validator actually connects to from outside the container.
 - **SSL/MITM mode**: same `dig` against the SSL DNS instance; `openssl s_client
   -connect <proxy>:443 -servername steamcontent.com -CAfile <ca.crt>` and confirm the

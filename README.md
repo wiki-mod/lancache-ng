@@ -694,8 +694,8 @@ nano deploy/prod/.env.local
 Set at least:
 
 ```env
-IP_STANDARD=192.168.1.10
-IP_SSL=192.168.1.11
+IP_HTTP=192.168.1.10
+IP_HTTPS=192.168.1.11
 
 SSL_ENABLED=1
 
@@ -725,7 +725,7 @@ LANCACHE_IMAGE_CHANNEL=stable
 LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
 ```
 
-`NGINX_UPSTREAM_RESOLVER` is what nginx uses to resolve the *real* CDN hostnames it proxies to. Its default lives in `deploy/prod/.env`; put your own value in `deploy/prod/.env.local`, which `deploy/prod/docker-compose.yml` passes to the `proxy` service, then recreate that container from the repository root (`sudo ./setup.sh compose deploy/prod up -d proxy`). The default — `8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]` (Google Public DNS, both IPv4 and IPv6; IPv6 entries are bracketed because nginx's `resolver` directive requires that) — is a convenience default, not a requirement. Set it to whatever real upstream DNS servers you prefer: your ISP's resolvers, a corporate DNS server, 1.1.1.1, or anything else. The actual requirement is that the chosen resolver returns the CDN's *real* origin address for these hostnames — not merely that its own server IP differs from the LanCache DNS/proxy IP. Setup rejects the obvious case (setting this directly to `IP_STANDARD`/`IP_SSL`) automatically, but it cannot detect an indirect loop: for example, a split-DNS or conditional-forwarding resolver that itself forwards the CDN's zone back to the LanCache DNS server would still hand nginx the LanCache proxy IP, at which point nginx loops even though the configured resolver's own IP isn't the cache's. If you use split-DNS or conditional forwarding upstream of this resolver, make sure CDN zones aren't among the forwarded ones.
+`NGINX_UPSTREAM_RESOLVER` is what nginx uses to resolve the *real* CDN hostnames it proxies to. Its default lives in `deploy/prod/.env`; put your own value in `deploy/prod/.env.local`, which `deploy/prod/docker-compose.yml` passes to the `proxy` service, then recreate that container from the repository root (`sudo ./setup.sh compose deploy/prod up -d proxy`). The default — `8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]` (Google Public DNS, both IPv4 and IPv6; IPv6 entries are bracketed because nginx's `resolver` directive requires that) — is a convenience default, not a requirement. Set it to whatever real upstream DNS servers you prefer: your ISP's resolvers, a corporate DNS server, 1.1.1.1, or anything else. The actual requirement is that the chosen resolver returns the CDN's *real* origin address for these hostnames — not merely that its own server IP differs from the LanCache DNS/proxy IP. Setup rejects the obvious case (setting this directly to `IP_HTTP`/`IP_HTTPS`) automatically, but it cannot detect an indirect loop: for example, a split-DNS or conditional-forwarding resolver that itself forwards the CDN's zone back to the LanCache DNS server would still hand nginx the LanCache proxy IP, at which point nginx loops even though the configured resolver's own IP isn't the cache's. If you use split-DNS or conditional forwarding upstream of this resolver, make sure CDN zones aren't among the forwarded ones.
 
 `PROXY_SECURITY_MODE` controls how defensive the proxy is at request time:
 
@@ -974,7 +974,7 @@ Common causes:
 - blocked port `8080`
 - UI container not running
 - firewall blocks access
-- `UI_BIND_IP` binds the UI to another address than `IP_STANDARD`
+- `UI_BIND_IP` binds the UI to another address than `IP_HTTP`
 
 ### Cache hit rate is low
 

@@ -87,7 +87,7 @@ is worth testing for this project specifically, beyond generic "less
 overhead" advice.
 
 **Confirmed live** (`deploy/prod/docker-compose.yml`): the `proxy` service
-publishes ports via `ports: ["${IP_STANDARD}:80:80", ...]` on Docker's
+publishes ports via `ports: ["${IP_HTTP}:80:80", ...]` on Docker's
 default bridge network -- it does **not** use `network_mode: host` and
 does not use macvlan/ipvlan. Every published port on that service goes
 through whichever port-publishing path `userland-proxy` selects.
@@ -267,14 +267,14 @@ container or bare metal.
 
 On macvlan/ipvlan vs. the current default bridge networking: the `proxy`
 service's current bridge-mode setup (published ports bound to
-`IP_STANDARD`/`IP_SSL`) matches this project's documented architecture
+`IP_HTTP`/`IP_HTTPS`) matches this project's documented architecture
 rationale (Rule-Ref: AG-KD-004 -- nginx reads `Host`/SNI directly rather
 than needing a DNAT-preserved original destination, which is exactly what
 macvlan/ipvlan would otherwise be useful for in a Squid-style
 transparent-proxy design this project deliberately does not use). Moving
 to macvlan/ipvlan or `network_mode: host` for the proxy service would be a
 non-trivial architecture change (different IP/MAC exposure on the LAN,
-different interaction with the existing two-IP `IP_STANDARD`/`IP_SSL`
+different interaction with the existing two-IP `IP_HTTP`/`IP_HTTPS`
 design, broadcast/multicast handling differences) with real security and
 operational tradeoffs that were not evaluated in depth here -- this is
 flagged as an open question for the maintainer rather than a recommendation

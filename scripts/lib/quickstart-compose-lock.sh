@@ -27,7 +27,7 @@
 # while verifying the above:
 #   1. Each script derives its own per-run "uniqueness" from a
 #      `cksum ... % 200` hash of a run-scoped string -- setup-cli-simulation.sh
-#      for its `IP_STANDARD`/`IP_SSL` loopback pair, syslog-forwarding-simulation.sh
+#      for its `IP_HTTP`/`IP_HTTPS` loopback pair, syslog-forwarding-simulation.sh
 #      (independently) for its `172.29.<octet>.0/25` DHCP bridge subnets in
 #      its own dhcp-test-override.yml. Each is a ~200-value space on its own.
 #      With the double-digit-concurrency levels this repo's runner-host

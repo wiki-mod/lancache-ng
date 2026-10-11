@@ -134,8 +134,8 @@ services:
       - SUPERVISE_RUN_DIR=/run/lancache
       - CDN_DOMAINS_FILE=/etc/nginx/cdn-domains.txt
       - PROXY_CONFIG_SNAPSHOT_DIR=/var/lib/lancache-proxy/config-snapshots
-      - IP_STANDARD=${IP_STANDARD}
-      - IP_SSL=${IP_SSL}
+      - IP_HTTP=${IP_HTTP}
+      - IP_HTTPS=${IP_HTTPS}
       - SSL_ENABLED=${SSL_ENABLED:-1}
       # What: per-install values from the operator .env
       # Why: one owner; no config/prod defaults any more
@@ -159,10 +159,10 @@ services:
     tmpfs:
       - /run/lancache
     ports:
-      - "${IP_STANDARD}:80:80"
-      - "${IP_STANDARD}:443:8443"
-      - "${IP_SSL}:80:80"
-      - "${IP_SSL}:443:443"
+      - "${IP_HTTP}:80:80"
+      - "${IP_HTTP}:443:8443"
+      - "${IP_HTTPS}:80:80"
+      - "${IP_HTTPS}:443:443"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null && { [ \"$${SSL_ENABLED:-0}\" != \"1\" ] || curl -ksf https://127.0.0.1:8445/healthz >/dev/null; }"]
       interval: 30s
@@ -173,7 +173,7 @@ services:
     logging: *logging
 
   # What: PowerDNS auth, dns-http, dns-https, NATS.
-  # Why: one container answers on IP_STANDARD and IP_SSL.
+  # Why: one container answers on IP_HTTP and IP_HTTPS.
   # From: Issue #1683
   dns:
     container_name: LanCache-NG-dns
@@ -186,11 +186,11 @@ services:
       - PDNS_SOA_REFRESH=${PDNS_SOA_REFRESH:?PDNS_SOA_REFRESH is required}
       - PDNS_SOA_RETRY=${PDNS_SOA_RETRY:?PDNS_SOA_RETRY is required}
       - PDNS_SOA_RESYNC_INTERVAL=${PDNS_SOA_RESYNC_INTERVAL:?PDNS_SOA_RESYNC_INTERVAL is required}
-      - PROXY_IP=${IP_STANDARD:?IP_STANDARD is required}
-      - PROXY_HTTPS_IP=${IP_SSL:?IP_SSL is required}
+      - PROXY_IP=${IP_HTTP:?IP_HTTP is required}
+      - PROXY_HTTPS_IP=${IP_HTTPS:?IP_HTTPS is required}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - PDNS_API_KEY=${PDNS_API_KEY}
-      - DDNS_ALLOW_FROM=${IP_STANDARD},${IP_SSL}
+      - DDNS_ALLOW_FROM=${IP_HTTP},${IP_HTTPS}
       - DNS_REPLICATION_ROLE=primary
       - SUPERVISE_RUN_DIR=/run/lancache
       - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
@@ -228,16 +228,16 @@ services:
       - dns-config-snapshots:/var/lib/lancache-dns
     tmpfs:
       - /run/lancache
-    # What: dns-http on IP_STANDARD, dns-https on IP_SSL.
+    # What: dns-http on IP_HTTP, dns-https on IP_HTTPS.
     # Why: one container port each keeps the caches apart.
     # From: Issue #1683
     ports:
-      - "${IP_STANDARD}:53:53/udp"
-      - "${IP_STANDARD}:53:53/tcp"
-      - "${IP_SSL}:53:1053/udp"
-      - "${IP_SSL}:53:1053/tcp"
-      - "${IP_STANDARD}:5300:5300/udp"
-      - "${IP_STANDARD}:5300:5300/tcp"
+      - "${IP_HTTP}:53:53/udp"
+      - "${IP_HTTP}:53:53/tcp"
+      - "${IP_HTTPS}:53:1053/udp"
+      - "${IP_HTTPS}:53:1053/tcp"
+      - "${IP_HTTP}:5300:5300/udp"
+      - "${IP_HTTP}:5300:5300/tcp"
       # What: NATS for remote secondaries; loopback unless set.
       # Why: NATS_BIND_IP opts in; no second compose file.
       # From: Issue #1683
@@ -278,7 +278,7 @@ services:
       - DHCP_CONFIG_SNAPSHOT_DIR=/var/lib/lancache-dhcp/config-snapshots
       - DHCP_PROBE_REQUEST_FILE=/data/dhcp-probe-request
       - DHCP_PROBE_RESULT_FILE=/var/lib/kea/dhcp-probe-result.json
-      - DHCP_DNS_SERVER_IP=${IP_STANDARD}
+      - DHCP_DNS_SERVER_IP=${IP_HTTP}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
       - KEA_CTRL_USER=${KEA_CTRL_USER:?KEA_CTRL_USER is required}
@@ -289,8 +289,8 @@ services:
       - DHCP_RANGE_END=${DHCP_RANGE_END:-}
       - DHCP_GATEWAY=${DHCP_GATEWAY:-}
       - DHCP_SUBNET_START=${DHCP_SUBNET_START:-}
-      - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-${IP_STANDARD}}
-      - DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-${IP_SSL}}
+      - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-${IP_HTTP}}
+      - DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-${IP_HTTPS}}
       - UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP:-}
       - DHCP_RELAY_LOCAL_ADDR=${DHCP_RELAY_LOCAL_ADDR:-}
       - DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE:-}
@@ -349,8 +349,8 @@ services:
       - NETDATA_URL=http://services:19999
       - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
       - CACHE_MAX_GB=${CACHE_MAX_GB:-${STANDARD_CACHE_MAX_GB:-${SSL_CACHE_MAX_GB:-}}}
-      - STANDARD_IP=${IP_STANDARD}
-      - SSL_IP=${IP_SSL}
+      - STANDARD_IP=${IP_HTTP}
+      - SSL_IP=${IP_HTTPS}
       - DNS_STATE_DIR=/var/lib/powerdns-state
       - LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY:-ghcr.io}
       - LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}
@@ -363,8 +363,8 @@ services:
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS:-}
       - DHCP_SUBNET_START=${DHCP_SUBNET_START:-}
-      - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-${IP_STANDARD}}
-      - DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-${IP_SSL}}
+      - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-${IP_HTTP}}
+      - DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-${IP_HTTPS}}
       - UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP:-}
       - DHCP_RELAY_LOCAL_ADDR=${DHCP_RELAY_LOCAL_ADDR:-}
       - DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE:-}
@@ -409,7 +409,7 @@ services:
       - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng:ro
       - watchdog-status:/var/run/watchdog:ro
     ports:
-      - "${UI_BIND_IP:-${IP_STANDARD}}:8080:8080"
+      - "${UI_BIND_IP:-${IP_HTTP}}:8080:8080"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
