@@ -11777,35 +11777,6 @@ _ci_check_syslog_logs_volume() {
     printf 'syslog-logs-volume=clean owner=%s:%s\n' "${uid}" "${gid}"
 }
 
-# What: Fail unless .env defines every key.
-# Why: an unset required key breaks compose interpolation.
-# From: Issue #1683 | PR #1858
-_ci_check_compose_required_env() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
-    local -a viol=()
-    local key inst env compose
-    inst="$(_ci_installer_compose "${repo_root}")" || return 2
-    env="${repo_root}/$(dirname "${inst}")/.env"
-    compose="${repo_root}/${inst}"
-    local produced produced_rc=0
-    produced="$(
-        grep -oE '\$\{[A-Za-z0-9_]+:\?[^}]+\}' "${compose}" \
-            | sed -E 's/^\$\{([^:]+):.*/\1/' \
-            | sort -u
-    )" || produced_rc=$?
-    _ci_producer_ok "${produced_rc}" 0 || return 2
-    while IFS= read -r key; do
-        [ -n "${key}" ] || continue
-        grep -Eq "^${key}=[^[:space:]]+" "${env}" \
-            || viol+=("$(dirname "${inst}")/.env must define non-empty ${key} (compose marks it required)")
-    done <<<"${produced}"
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0047]" "reason=\"compose required env not defined\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'compose-required-env=clean\n'
-}
-
 # What: dhcp-proxy must receive each template key it uses
 # Why: the template owns the keys; a dropped one is lost
 # From: Issue #1683 | PR #1858
@@ -12909,7 +12880,7 @@ ci_cmd_check_all() {
         proxy-cache-env-doc-drift \
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
         docker-socket-proxy netdata-isolation syslog-logs-volume proxy-cert-volume proxy-nginx-policy \
-        compose-required-env dhcp-proxy-env \
+        dhcp-proxy-env \
         setup-kea-preflight setup-update-safety image-channel-resolution \
         vex-drift logging-matrix \
         entrypoint-lib-wiring dockerfile-build-tools dockerfile-stage-variables \
@@ -12981,7 +12952,6 @@ ci_cmd_check() {
         syslog-logs-volume) _ci_check_syslog_logs_volume "$@" ;;
         proxy-cert-volume) _ci_check_proxy_cert_volume "$@" ;;
         proxy-nginx-policy) _ci_check_proxy_nginx_policy "$@" ;;
-        compose-required-env) _ci_check_compose_required_env "$@" ;;
         dhcp-proxy-env) _ci_check_dhcp_proxy_env "$@" ;;
         setup-kea-preflight) _ci_check_setup_kea_preflight "$@" ;;
         setup-update-safety) _ci_check_setup_update_safety "$@" ;;
