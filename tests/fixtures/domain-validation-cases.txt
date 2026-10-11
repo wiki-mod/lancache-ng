@@ -1,17 +1,12 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
 # What: valid and invalid cdn-domains entries.
-# Why: common cdn_entry is the one rule for ui, dns, proxy;
-# its test cdn_entry_matches_the_fixture_and_the_list reads this.
-# From: Issue #822 | Issue #1683
-#
-# Format: one case per line, "valid <domain>" or "invalid <domain>". Blank
-# lines and lines starting with "#" are ignored by both readers. Dynamically
-# generated length-boundary cases (a 64-char label, a >253-char total domain)
-# are intentionally NOT here -- they can't be expressed as static fixture
-# lines -- and instead live in that same Rust test.
+# Why: cdn_entry is the one rule for ui, dns and proxy.
+# From: Issue #822 | PR #1912
+
+# Format: "valid <domain>" or "invalid <domain>" per line.
+# Length edge cases live in cdn_entry_matches_the_fixture.
 
 valid example.com
 valid cdn1.sub.example.com

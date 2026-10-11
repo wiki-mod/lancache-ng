@@ -3,7 +3,7 @@
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //! What: supervisor of every program in one container.
 //! Why: one Rust supervisor starts every image's programs.
-//! From: Issue #842 | Issue #1683
+//! From: Issue #842 | PR #1912
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -84,7 +84,7 @@ fn read_knob(
 
 // What: settings from an env reader, plus startup warnings.
 // Why: Err is fatal; a reader arg keeps tests env-free.
-// From: Issue #849 | Issue #1683
+// From: Issue #849 | PR #1912
 fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<String>), String> {
     let get = |name: &str| config::opt(&env, name);
     let mut warnings = Vec::new();
@@ -794,7 +794,7 @@ async fn run_retention(r: &Retention, stop: impl std::future::Future<Output = ()
 
 // What: retention settings, then the loop until stop.
 // Why: a bad setting must stop the task before deletes.
-// From: Issue #842 | Issue #1683
+// From: Issue #842 | PR #1912
 async fn retention() -> Result<(), String> {
     let (r, warnings) = load_retention(config::process_env)?;
     warnings.iter().for_each(|w| log(w));
@@ -844,7 +844,7 @@ fn listed(entry: &Value) -> Option<(String, String)> {
 
 // What: check every stack container; restart failures.
 // Why: one actor with the socket; its own box only alerts.
-// From: Issue #842 | Issue #1683
+// From: Issue #842 | PR #1912
 async fn watch() -> Result<(), String> {
     let (s, warnings) = load_settings(config::process_env)?;
     warnings.iter().for_each(|w| log(w));
@@ -1066,7 +1066,7 @@ impl Kind {
 
     // What: whether this kind should run right now.
     // Why: NTP and DHCP follow the ui; NATS a primary only.
-    // From: Issue #1437 | Issue #1683
+    // From: Issue #1437 | PR #1912
     fn wanted(self, ctx: &Ctx) -> bool {
         let secondary = || env_opt("DNS_REPLICATION_ROLE").as_deref() == Some("secondary");
         let dhcp = || DhcpMode::parse(&ctx.setting("DHCP_MODE").unwrap_or_default());
@@ -1666,7 +1666,7 @@ fn keep_known_good() -> Result<u32, String> {
 
 // What: write candidate sets; keep the first that checks.
 // Why: a bad render falls back to the newest good set.
-// From: Issue #415 | Issue #1683
+// From: Issue #415 | PR #1912
 fn first_good(
     what: &str,
     candidates: impl IntoIterator<Item = (String, Vec<(PathBuf, String)>)>,
@@ -1704,7 +1704,7 @@ fn snapshots<T>(
 
 // What: write rendered files; record the set if it checks.
 // Why: the newest good render is the next rollback target.
-// From: Issue #415 | Issue #615 | Issue #1683
+// From: Issue #1683 | PR #1912
 fn checked_files(
     files: &[(PathBuf, String)],
     check: &[String],
@@ -1849,7 +1849,7 @@ fn run_ok(argv: &[&str]) -> Result<(), String> {
 
 // What: TSIG rights for DDNS on every LAN zone.
 // Why: an empty key revokes; the ui marker relaxes.
-// From: Issue #815 | Issue #858
+// From: Issue #1683 | PR #1912
 fn ddns_tsig(dir: &Path, zones: &[String], tsig: &str, unsigned: &Path) -> Result<(), String> {
     if tsig.is_empty() {
         for zone in zones {
@@ -1934,7 +1934,7 @@ fn dns_zones(
 
 // What: the ui's unsigned-DDNS marker in the state dir.
 // Why: pdns watches it; a toggle restarts and re-keys.
-// From: Issue #815 | Issue #1683
+// From: Issue #815 | PR #1912
 fn ddns_unsigned_marker() -> Result<PathBuf, String> {
     let state = config::need(&config::process_env, "DNS_STATE_DIR")?;
     Ok(Path::new(&state).join(config::DDNS_UNSIGNED_MARKER))
@@ -2046,7 +2046,7 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
 
 // What: RPZ zone mapping each CDN name to the proxy.
 // Why: "." marks a wildcard-only row, "!" a disabled one.
-// From: Issue #1072 | Issue #1073
+// From: Issue #1683 | PR #1912
 fn rpz_zone(domains: &str, proxy: std::net::Ipv4Addr, serial: u64) -> (String, usize) {
     let mut zone = format!(
         "$ORIGIN rpz.\n$TTL 60\n@ SOA localhost. admin.rpz. {serial} 3600 900 604800 60\n\
@@ -2069,7 +2069,7 @@ fn rpz_zone(domains: &str, proxy: std::net::Ipv4Addr, serial: u64) -> (String, u
 
 // What: valid cdn-domains rows as (name, wildcard-only).
 // Why: dns and proxy read one file with one rule set.
-// From: Issue #1072 | Issue #1683
+// From: Issue #1072 | PR #1912
 fn cdn_rows(domains: &str) -> (Vec<(String, bool)>, Vec<String>) {
     let (mut rows, mut invalid) = (Vec::new(), Vec::new());
     for row in domains.lines().map(str::trim) {
@@ -2241,7 +2241,7 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
 
 // What: nats.conf from the roles, then nats-server.
 // Why: the ui writes only the callout; a change restarts.
-// From: Issue #811 | Issue #1683
+// From: Issue #811 | PR #1912
 fn nats_server(ctx: &Ctx) -> Result<Run, String> {
     let conf = ctx.need("NATS_CONF_PATH")?;
     let fragment = ctx.need("NATS_AUTH_CALLOUT_PATH")?;
@@ -2402,7 +2402,7 @@ const KEA_CTRL_CHAIN: &str = "LANCACHE_KEA_CTRL";
 
 // What: the shared DDNS TSIG key; empty when it fails.
 // Why: dns signs zones with it, Kea signs updates.
-// From: Issue #815 | Issue #858
+// From: Issue #1683 | PR #1912
 fn ddns_tsig_key() -> Result<String, String> {
     stack_secret(
         "DDNS_TSIG_KEY",
@@ -2469,7 +2469,7 @@ fn kea_loggers(loggers: &[(&str, &str)]) -> Value {
 
 // What: kea-dhcp4.conf of a first start, from the env.
 // Why: afterwards the ui edits Kea through its API only.
-// From: Issue #815 | Issue #1683
+// From: Issue #815 | PR #1912
 fn kea_dhcp4_first(ctx: &Ctx, dir: &Path) -> Result<Value, String> {
     let lease: u64 = ctx
         .need("DHCP_LEASE_TIME")?
@@ -2512,7 +2512,7 @@ fn kea_dhcp4_first(ctx: &Ctx, dir: &Path) -> Result<Value, String> {
 
 // What: set the keys the stack owns in a kea-dhcp4 config.
 // Why: socket, hook, DDNS, logs must match the image.
-// From: Issue #815 | Issue #1683
+// From: Issue #815 | PR #1912
 fn kea_dhcp4_own(conf: &mut Value, hook: &Path, domain: &str, ddns: bool) -> Result<(), String> {
     let dhcp4 = conf
         .get_mut("Dhcp4")
@@ -2580,7 +2580,7 @@ fn kea_socket_dir() -> Result<(), String> {
 
 // What: kea-dhcp4 on its checked config, else a snapshot.
 // Why: no good config means rescue, never a stop.
-// From: Issue #815 | Issue #1683
+// From: Issue #815 | PR #1912
 fn kea_dhcp4(ctx: &Ctx) -> Result<Run, String> {
     kea_socket_dir()?;
     let dir = PathBuf::from(ctx.need("KEA_DATA_DIR")?);
@@ -2644,7 +2644,7 @@ fn kea_ctrl_fence(port: &str) -> Result<(), String> {
 
 // What: the Kea Control Agent behind its token and fence.
 // Why: the ui manages Kea through this API alone.
-// From: Issue #815 | Issue #1683
+// From: Issue #815 | PR #1912
 fn kea_ctrl_agent(ctx: &Ctx) -> Result<Run, String> {
     kea_socket_dir()?;
     let token = stack_secret(
@@ -2681,7 +2681,7 @@ fn kea_ctrl_agent(ctx: &Ctx) -> Result<Run, String> {
 
 // What: kea-dhcp-ddns signing A and PTR updates for leases.
 // Why: dns accepts them only with the shared TSIG key.
-// From: Issue #1076 | Issue #1683
+// From: Issue #1076 | PR #1912
 fn kea_dhcp_ddns(ctx: &Ctx) -> Result<Run, String> {
     kea_socket_dir()?;
     let tsig = ddns_tsig_key()?;
@@ -2731,7 +2731,7 @@ fn dnsmasq_line(lines: &mut String, key: &str, values: &[&str], line: String) {
 
 // What: dnsmasq.conf of proxy or relay mode.
 // Why: values come from the ui settings, then the env.
-// From: Issue #450 | Issue #705 | Issue #844 | Issue #1683
+// From: Issue #1683 | PR #1912
 fn dnsmasq_conf(set: &dyn Fn(&str) -> String, relay: bool) -> String {
     let mut conf = String::from("port=0\nno-resolv\nno-poll\nlog-dhcp\nlog-facility=-\n");
     let upstream = set("UPSTREAM_DHCP_IP");
@@ -2829,7 +2829,7 @@ fn dnsmasq_conf(set: &dyn Fn(&str) -> String, relay: bool) -> String {
 
 // What: dnsmasq proxy or relay on its checked config.
 // Why: a saved ui setting restarts it with the new file.
-// From: Issue #450 | Issue #844 | Issue #1683
+// From: Issue #1683 | PR #1912
 fn dnsmasq(ctx: &Ctx, relay: bool) -> Result<Run, String> {
     let set = |key: &str| ctx.setting(key).unwrap_or_default();
     let body = dnsmasq_conf(&set, relay);
@@ -3010,7 +3010,7 @@ const NGINX_REFUSE: &str = "127.0.0.1:9";
 
 // What: loopback relays of the :443 SNI dispatcher.
 // Why: MITM goes to 8444 (https.conf); else passthrough.
-// From: Issue #1276 | Issue #1322
+// From: Issue #1683 | PR #1912
 const NGINX_MITM_RELAY: u16 = 9445;
 const NGINX_PASSTHROUGH_RELAY: u16 = 9446;
 const NGINX_MITM_PORT: u16 = 8444;
@@ -3103,7 +3103,7 @@ fn nginx_client_acl(cidrs: &[String]) -> String {
 
 // What: the :443 dispatcher: MITM, passthrough, refuse.
 // Why: a cert covers one label; deeper names pass through.
-// From: Issue #1276 | Issue #1322 | Issue #1683
+// From: Issue #1683 | PR #1912
 fn nginx_https_dispatch(hosts: &CdnHosts, strict: bool, acl: &Path) -> String {
     let mitm = format!("127.0.0.1:{NGINX_MITM_RELAY}");
     let passthrough = format!("127.0.0.1:{NGINX_PASSTHROUGH_RELAY}");
@@ -3906,7 +3906,7 @@ fn run_probe() -> ProbeReport {
 
 // What: answer each new probe request with one probe run.
 // Why: the ui has no Docker; the dhcp container probes.
-// From: Issue #947 | Issue #1683
+// From: Issue #947 | PR #1912
 async fn probe_upkeep() -> Result<(), String> {
     let need = |key: &str| config::need(&config::process_env, key);
     let request = PathBuf::from(need("DHCP_PROBE_REQUEST_FILE")?);
@@ -4607,7 +4607,7 @@ mod tests {
 
     // What: chronyd follows the saved flag and the dock.
     // Why: the ui is dumb; the supervisor converges NTP.
-    // From: Issue #1437 | Issue #1683
+    // From: Issue #1437 | PR #1912
     #[test]
     fn chronyd_follows_the_setting_and_desired_state() {
         let root = scratch();
@@ -5123,7 +5123,7 @@ mod tests {
 
     // What: plain, wildcard, disabled and junk RPZ rows.
     // Why: a bare TLD or "!" row must never redirect.
-    // From: Issue #1072 | Issue #1073
+    // From: Issue #1683 | PR #1912
     #[test]
     fn rpz_zone_maps_valid_rows_to_the_proxy() {
         let (host, wild, off) = (gen_name(), gen_name(), gen_name());
@@ -5235,7 +5235,7 @@ mod tests {
 
     // What: deeper names pass through, longest base first.
     // Why: a cert covers one label; regex order decides.
-    // From: Issue #1276 | Issue #1683
+    // From: Issue #1276 | PR #1912
     #[test]
     fn nginx_dispatch_orders_bases_longest_first() {
         let [root, short, long] = std::array::from_fn(|_| gen_name());
@@ -5282,7 +5282,7 @@ mod tests {
 
     // What: a failing set rolls back to the last snapshot.
     // Why: nginx must start from a set that passed -t.
-    // From: Issue #415 | Issue #1683
+    // From: Issue #415 | PR #1912
     #[test]
     fn checked_files_roll_back_a_failing_set() {
         let root = scratch();

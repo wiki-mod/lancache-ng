@@ -1067,7 +1067,7 @@ impl ProbeReport {
 
 // What: one probe answer, keyed by the request it answers.
 // Why: the ui waits for its own id, never an older run.
-// From: Issue #947 | Issue #1683
+// From: Issue #947 | PR #1912
 #[derive(Deserialize, Serialize)]
 pub struct ProbeAnswer {
     pub id: String,
