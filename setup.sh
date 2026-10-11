@@ -6771,11 +6771,11 @@ UPSTREAM_DHCP_IP="$DHCP_GATEWAY"
 # Why: only dnsmasq-relay uses it
 DHCP_RELAY_LOCAL_ADDR=""
 # What: optional dnsmasq fields, empty unless opted in
-# Why: the operator opts in below
-# From: Issue #450
+# Why: the operator opts in below; NTP starts at the .env default
+# From: Issue #450 | PR #1912
 DHCP_PROXY_INTERFACE=""
 DHCP_PROXY_ROUTER=""
-DHCP_NTP_SERVERS=""
+DHCP_NTP_SERVERS=$(prod_env_default DHCP_NTP_SERVERS) || die "Cannot read the default of DHCP_NTP_SERVERS (exit $?)."
 DHCP_PROXY_DOMAIN=""
 DHCP_PROXY_BOOT_FILENAME=""
 DHCP_PROXY_BOOT_SERVER=""
