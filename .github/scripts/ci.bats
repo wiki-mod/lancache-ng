@@ -2541,9 +2541,9 @@ CASES
     _cp_install() {
         base="${BATS_TEST_TMPDIR}/${1}" pd="${BATS_TEST_TMPDIR}/${1}/deploy/prod" cpe="${BATS_TEST_TMPDIR}/${1}/config/prod/dhcp-proxy.env"
         _prod_install "${pd}" || return 1
-        # What: empty tracked config/prod template
+        # What: old tracked config/prod template, one key
         # Why: old checkouts carry it; update moves edits
-        mkdir -p "${cpe%/*}" && : > "${cpe}" || return 1
+        mkdir -p "${cpe%/*}" && printf 'DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=\n' > "${cpe}" || return 1
         [ "${2:-}" = nogit ] || { git -C "${base}" init -q && git -C "${base}" add config \
             && git -C "${base}" -c user.email=t@t -c user.name=t commit -qm template; } || return 1
         _legacy_env "${pd}/.env"
