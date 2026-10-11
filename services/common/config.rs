@@ -14,12 +14,14 @@ pub fn non_empty(raw: Option<&str>) -> Option<&str> {
 
 // What: a variable from any reader; empty counts as unset.
 // Why: ui, watchdog and tests read through one rule.
+// From: Issue #1683 | PR #1905
 pub fn opt(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<String> {
     non_empty(get(name).as_deref()).map(str::to_string)
 }
 
 // What: one variable of the process environment.
 // Why: the only live reader; tests pass their own instead.
+// From: Issue #1683 | PR #1905
 pub fn process_env(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
@@ -33,18 +35,21 @@ pub fn env_opt(name: &str) -> Option<String> {
 
 // What: the error text of a variable nobody set.
 // Why: one wording for need, Uint and the ui field checks.
+// From: Issue #1683 | PR #1905
 pub fn not_set(name: &str) -> String {
     format!("{name} is not set")
 }
 
 // What: a variable its owner must set; unset is an error.
 // Why: owners hold every value; no service keeps a default.
+// From: Issue #1683 | PR #1905
 pub fn need(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Result<String, String> {
     opt(get, name).ok_or_else(|| not_set(name))
 }
 
 // What: a boolean its owner must set; junk is an error.
 // Why: a typo must not flip a gate to either side.
+// From: Issue #1683 | PR #1905
 pub fn need_flag(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Result<bool, String> {
     let raw = need(get, name)?;
     parse_bool(&raw).ok_or_else(|| format!("{name} must be a boolean, got {raw:?}"))
@@ -64,6 +69,7 @@ pub fn saved_setting(path: &std::path::Path, key: &str) -> Option<String> {
 
 // What: 1/true/yes/on or 0/false/no/off, trimmed, any case.
 // Why: one boolean grammar for ui, watchdog, retention.sh.
+// From: Issue #1683 | PR #1905
 pub fn parse_bool(raw: &str) -> Option<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -74,6 +80,7 @@ pub fn parse_bool(raw: &str) -> Option<bool> {
 
 // What: how a value outside [min, max] is resolved.
 // Why: limits differ per knob, parsing does not.
+// From: Issue #1683 | PR #1905
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutOfRange {
     Clamp,
@@ -82,6 +89,7 @@ pub enum OutOfRange {
 
 // What: one unsigned decimal knob and its limits.
 // Why: the owner sets the number; Rust holds only limits.
+// From: Issue #1683 | PR #1905
 #[derive(Clone, Copy, Debug)]
 pub struct Uint {
     pub name: &'static str,
@@ -94,11 +102,13 @@ pub struct Uint {
 impl Uint {
     // What: value of the knob, plus a warning if clamped.
     // Why: unset, junk or rejected values stop the start.
+    // From: Issue #1683 | PR #1905
     pub fn parse(&self, raw: Option<&str>) -> Result<(u64, Option<String>), String> {
         let name = self.name;
         let raw = non_empty(raw.map(str::trim)).ok_or_else(|| not_set(name))?;
         // What: accept ASCII digits only.
         // Why: u64 parsing alone accepts a leading plus.
+        // From: Issue #1683 | PR #1905
         if !raw.bytes().all(|b| b.is_ascii_digit()) {
             return Err(format!("{name}={raw} is not an unsigned decimal number"));
         }
@@ -147,6 +157,7 @@ pub enum DhcpMode {
 impl DhcpMode {
     // What: every mode, the one list of valid mode names.
     // Why: ui validation and parse must not keep own lists.
+    // From: Issue #1683 | PR #1905
     pub const ALL: [Self; 4] = [
         Self::Disabled,
         Self::Kea,
@@ -156,6 +167,7 @@ impl DhcpMode {
 
     // What: the mode whose text is exactly raw, or None.
     // Why: a form value is valid only as a known mode name.
+    // From: Issue #1683 | PR #1905
     pub fn from_name(raw: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|mode| mode.as_str() == raw)
     }
@@ -169,6 +181,7 @@ impl DhcpMode {
 
     // What: the mode's text form, as DHCP_MODE spells it.
     // Why: the settings file and the ui use this text.
+    // From: Issue #1683 | PR #1905
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
@@ -180,18 +193,21 @@ impl DhcpMode {
 
     // What: true only for the Kea backend.
     // Why: Kea alone has a control API to manage.
+    // From: Issue #1683 | PR #1905
     pub fn is_kea(self) -> bool {
         matches!(self, Self::Kea)
     }
 
     // What: true for proxy and relay (one dnsmasq).
     // Why: both run dnsmasq with one config surface.
+    // From: Issue #1683 | PR #1912
     pub fn is_dnsmasq(self) -> bool {
         matches!(self, Self::DnsmasqProxy | Self::DnsmasqRelay)
     }
 
     // What: true only for the relay variant of dnsmasq.
     // Why: relay has its own two settings, proxy has more.
+    // From: Issue #1683 | PR #1905
     pub fn is_dnsmasq_relay(self) -> bool {
         matches!(self, Self::DnsmasqRelay)
     }
@@ -199,7 +215,7 @@ impl DhcpMode {
 
 // What: one proxy access line as syslog-ng stores it.
 // Why: the ui and netdata web_log parse it; one owner.
-// From: Issue #1246 | Issue #1683
+// From: Issue #1683 | PR #1912
 pub const PROXY_ACCESS_LOG_PATTERN: &str = r#"^\S+ \S+ \S+: (?P<remote_addr>\S+) - \[(?P<time_local>[^\]]+)\] "(?P<request_method>\S+) (?P<request_uri>\S+) [^"]*" (?P<status>\d+) (?P<body_bytes_sent>\d+) "([^"]*)" "(?P<host>[^"]*)""#;
 
 // What: marker file of the unsigned-DDNS switch.
@@ -209,6 +225,7 @@ pub const DDNS_UNSIGNED_MARKER: &str = "ddns-allow-unsigned-updates";
 
 // What: the DNS stream and its subjects on NATS.
 // Why: ui publishes, subscriber consumes; one spelling.
+// From: Issue #1683 | PR #1905
 pub const NATS_STREAM_DNS: &str = "LANCACHE_DNS";
 pub const NATS_SUBJECT_DNS: &str = "lancache.dns.>";
 pub const NATS_SUBJECT_RECORD: &str = "lancache.dns.record";
@@ -216,6 +233,7 @@ pub const NATS_SUBJECT_FLUSH: &str = "lancache.dns.flush";
 
 // What: user and password of one static NATS role.
 // Why: the password is Option so unset fails validation.
+// From: Issue #1683 | PR #1912
 pub struct NatsLogin {
     pub user: String,
     pub password: Option<String>,
@@ -235,6 +253,7 @@ pub struct NatsRoles {
 impl NatsRoles {
     // What: every role from its user and password keys.
     // Why: ui and dns read the same keys by their own rule.
+    // From: Issue #1683 | PR #1912
     pub fn read(
         load: &dyn Fn(&str, &str) -> Result<NatsLogin, String>,
     ) -> Result<NatsRoles, String> {
@@ -248,7 +267,8 @@ impl NatsRoles {
     }
 
     // What: the five roles with their display labels.
-    // Why: validation and the callout user list iterate them.
+    // Why: validation and callout user list iterate them.
+    // From: Issue #1683 | PR #1912
     pub fn labelled(&self) -> [(&'static str, &NatsLogin); 5] {
         [
             ("NATS UI", &self.ui),
@@ -261,6 +281,7 @@ impl NatsRoles {
 
     // What: every static role has valid credentials.
     // Why: nats.conf and the ui connection fail closed.
+    // From: Issue #1683 | PR #1912
     pub fn validate(&self) -> Result<(), String> {
         self.labelled()
             .iter()
@@ -270,6 +291,7 @@ impl NatsRoles {
 
 // What: why a value cannot sit in a quoted NATS string.
 // Why: a quote, backslash or control char breaks nats.conf.
+// From: Issue #1683 | PR #1912
 fn nats_text_problem(label: &str, value: &str) -> Option<String> {
     if value.is_empty() {
         Some(format!("{label} cannot be empty"))
@@ -286,6 +308,7 @@ fn nats_text_problem(label: &str, value: &str) -> Option<String> {
 
 // What: check one role's user name and password.
 // Why: bad values must fail before nats.conf is written.
+// From: Issue #1683 | PR #1912
 fn validate_nats_login(label: &str, login: &NatsLogin) -> Result<(), String> {
     let problem = nats_text_problem("NATS username", &login.user)
         .or_else(|| {
@@ -306,6 +329,7 @@ fn validate_nats_login(label: &str, login: &NatsLogin) -> Result<(), String> {
 
 // What: publish rights of every reader of the DNS stream.
 // Why: static DNS roles and secondaries must grant alike.
+// From: Issue #1683 | PR #1912
 pub fn dns_reader_publish() -> Vec<String> {
     let stream = NATS_STREAM_DNS;
     [
@@ -321,12 +345,14 @@ pub fn dns_reader_publish() -> Vec<String> {
 
 // What: subjects every reader of the DNS stream receives.
 // Why: static DNS roles and secondaries must grant alike.
+// From: Issue #1683 | PR #1912
 pub fn dns_subscribe() -> [&'static str; 2] {
     [NATS_SUBJECT_DNS, "_INBOX.>"]
 }
 
 // What: a NATS list of double-quoted strings.
 // Why: every subject list in nats.conf uses one syntax.
+// From: Issue #1683 | PR #1912
 fn nats_list<S: AsRef<str>>(items: &[S]) -> String {
     let quoted: Vec<String> = items
         .iter()
@@ -337,6 +363,7 @@ fn nats_list<S: AsRef<str>>(items: &[S]) -> String {
 
 // What: one static user block, rights only when given.
 // Why: the callout user must have no subject rights.
+// From: Issue #1683 | PR #1912
 fn nats_role_block<P: AsRef<str>, S: AsRef<str>>(
     login: &NatsLogin,
     publish: &[P],
@@ -415,14 +442,17 @@ pub fn render_nats_conf(
 
 // What: TTL of a record written without one, in seconds.
 // Why: ui forms and the subscriber must default alike.
+// From: Issue #1683 | PR #1905
 pub const DEFAULT_RECORD_TTL: i32 = 300;
 
 // What: the local zone, as publishers spell it.
 // Why: subscriber and the zone list share one spelling.
+// From: Issue #1683 | PR #1905
 pub const LAN_ZONE: &str = "lan";
 
 // What: zones with snapshots and rollbacks, dotted form.
 // Why: equals DDNS_UPDATE_ZONES in dns/entrypoint.sh.
+// From: Issue #1683 | PR #1905
 pub fn rollback_zones() -> Vec<String> {
     let lan = canonical_zone(LAN_ZONE);
     let fixed = [
@@ -441,12 +471,14 @@ pub fn rollback_zones() -> Vec<String> {
 
 // What: true for a zone with snapshots and rollback.
 // Why: rpz and unknown zones must never be rolled back.
+// From: Issue #1683 | PR #1905
 pub fn is_rollback_zone(zone: &str) -> bool {
     rollback_zones().iter().any(|z| z == zone)
 }
 
 // What: zone name in dotted form, as snapshot paths use it.
 // Why: publishers send "lan", pdnsutil and arrays "lan.".
+// From: Issue #1683 | PR #1905
 pub fn canonical_zone(zone: &str) -> String {
     if zone.ends_with('.') {
         zone.to_string()
@@ -457,6 +489,7 @@ pub fn canonical_zone(zone: &str) -> String {
 
 // What: DNS name syntax without a trailing dot.
 // Why: one rule for CDN, DHCP, LAN names and API zone ids.
+// From: Issue #1683 | PR #1905
 pub fn is_dns_name(name: &str, underscore: bool, wildcard: bool) -> bool {
     !name.is_empty()
         && name.len() <= 253
@@ -474,7 +507,7 @@ pub fn is_dns_name(name: &str, underscore: bool, wildcard: bool) -> bool {
 
 // What: a cdn-domains entry as (name, wildcard-only).
 // Why: ui, dns and proxy share one rule; "." = wildcard.
-// From: Issue #822 | Issue #1683
+// From: Issue #1683 | PR #1912
 pub fn cdn_entry(text: &str) -> Option<(String, bool)> {
     let lower = text.trim().to_ascii_lowercase();
     let (wildcard, name) = match lower.strip_prefix('.') {
@@ -486,35 +519,42 @@ pub fn cdn_entry(text: &str) -> Option<(String, bool)> {
 
 // What: the path of PowerDNS's API below a server address.
 // Why: ui and dns/entrypoint.sh append the same fixed path.
+// From: Issue #1683 | PR #1905
 pub const PDNS_API_PATH: &str = "/api/v1/servers/localhost";
 
 // What: URL of one zone below a PowerDNS API root.
 // Why: a trailing dot in the path is a silent 404.
+// From: Issue #1683 | PR #1905
 pub fn zone_url(api_root: &str, zone: &str) -> String {
     format!("{api_root}/zones/{}", zone_api_id(zone))
 }
 
 // What: zone name as PowerDNS's HTTP API path spells it.
 // Why: the API id has no trailing root dot.
+// From: Issue #1683 | PR #1905
 pub fn zone_api_id(zone: &str) -> &str {
     zone.trim_end_matches('.')
 }
 
 // What: the port of the primary's authoritative PowerDNS.
 // Why: dns renders it; AXFR, DDNS and recursors use it.
+// From: Issue #1683 | PR #1912
 pub const PDNS_AUTH_PORT: u16 = 5300;
 
 // What: option codes dnsmasq-proxy renders itself.
 // Why: router, DNS, domain and NTP; search stays custom.
+// From: Issue #1683 | PR #1912
 pub const DNSMASQ_MANAGED_CODES: [u16; 4] = [3, 6, 15, 42];
 
 // What: lowest and highest code an operator may add.
 // Why: 0 is padding and 255 is the end marker.
+// From: Issue #1683 | PR #1912
 pub const OPTION_CODE_MIN: u16 = 1;
 pub const OPTION_CODE_MAX: u16 = 254;
 
 // What: an option code from form text, range checked.
 // Why: Kea and dnsmasq forms share one number rule.
+// From: Issue #1683 | PR #1912
 pub fn option_code(raw: &str) -> Result<u16, &'static str> {
     let code = raw
         .trim()
@@ -528,10 +568,12 @@ pub fn option_code(raw: &str) -> Result<u16, &'static str> {
 
 // What: longest custom option value in bytes.
 // Why: one form must not write unbounded data into Kea.
+// From: Issue #1683 | PR #1912
 pub const CUSTOM_OPTION_DATA_MAX: usize = 1024;
 
 // What: one-line option data within the length limit.
 // Why: values are opaque strings; only the shape counts.
+// From: Issue #1683 | PR #1912
 pub fn option_data(raw: &str) -> Result<String, &'static str> {
     let data = raw.trim();
     if data.is_empty() {
@@ -548,6 +590,7 @@ pub fn option_data(raw: &str) -> Result<String, &'static str> {
 
 // What: parse "CODE:VALUE" lines into the stored form.
 // Why: the file keeps one line; entries join by semicolon.
+// From: Issue #1683 | PR #1912
 pub fn parse_custom_options(raw: &str) -> Result<String, String> {
     let mut entries = Vec::new();
     for (index, line) in raw.lines().enumerate() {
@@ -561,6 +604,7 @@ pub fn parse_custom_options(raw: &str) -> Result<String, String> {
             .ok_or_else(|| at("expected CODE:VALUE"))?;
         // What: refuse the four codes dnsmasq-proxy owns.
         // Why: dnsmasq renders router, DNS, domain, NTP.
+        // From: Issue #1683 | PR #1912
         let code = option_code(code).map_err(at)?;
         if DNSMASQ_MANAGED_CODES.contains(&code) {
             return Err(at(
@@ -570,6 +614,7 @@ pub fn parse_custom_options(raw: &str) -> Result<String, String> {
         let data = option_data(data).map_err(at)?;
         // What: refuse a semicolon inside option data.
         // Why: it is the entry separator on the shell side.
+        // From: Issue #1683 | PR #1912
         if data.contains(';') {
             return Err(at(
                 "option data must not contain ';' (used as the entry separator)",
@@ -596,6 +641,7 @@ mod tests {
 
     // What: the documented true and false sets parse.
     // Why: ui and watchdog must agree on what is on or off.
+    // From: Issue #1683 | PR #1905
     #[test]
     fn parse_bool_matches_documented_sets() {
         for v in ["1", "true", "TRUE", "yes", "on", " on ", "\ttrue\n"] {
@@ -611,6 +657,7 @@ mod tests {
 
     // What: limits resolve by policy; unset and junk fail.
     // Why: one parser serves floors and ceilings alike.
+    // From: Issue #1683 | PR #1905
     #[test]
     fn uint_knob_resolves_by_policy() {
         let knob = |below, above| Uint {
@@ -653,7 +700,7 @@ mod tests {
 
     // What: the CDN entry rule agrees with the fixture.
     // Why: ui, dns and proxy must accept the same rows.
-    // From: Issue #822 | Issue #1683
+    // From: Issue #1683 | PR #1912
     #[test]
     fn cdn_entry_matches_the_fixture_and_the_list() {
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
@@ -687,6 +734,7 @@ mod tests {
 
     // What: the mode list holds the four names, none twice.
     // Why: ui validation reads it; a gap rejects a mode.
+    // From: Issue #1683 | PR #1905
     #[test]
     fn dhcp_mode_names_are_the_four_known_ones() {
         let names: Vec<&str> = DhcpMode::ALL.iter().map(|m| m.as_str()).collect();
@@ -698,6 +746,7 @@ mod tests {
 
     // What: zone forms convert both ways, no doubled dots.
     // Why: a doubled or missing dot misses the API path.
+    // From: Issue #1683 | PR #1905
     #[test]
     fn zone_names_convert_between_dotted_and_api_form() {
         assert_eq!(canonical_zone("lan"), "lan.");
@@ -713,6 +762,7 @@ mod tests {
 
     // What: the zone list equals the entrypoint.sh arrays.
     // Why: no check ties the shell list to this one.
+    // From: Issue #1683 | PR #1905
     #[test]
     fn rollback_zones_match_the_entrypoint_arrays() {
         let path = format!("{}/../dns/entrypoint.sh", env!("CARGO_MANIFEST_DIR"));
@@ -732,6 +782,7 @@ mod tests {
 
     // What: need and need_flag reject unset, empty, junk.
     // Why: no service runs on a value its owner never set.
+    // From: Issue #1683 | PR #1905
     #[test]
     fn need_rejects_unset_empty_and_junk() {
         let get = |key: &str| match key {
@@ -749,6 +800,7 @@ mod tests {
 
     // What: DNS names pass or fail by label rules.
     // Why: a zone name is spliced into an API URL path.
+    // From: Issue #1683 | PR #1905
     #[test]
     fn dns_names_follow_the_label_rules() {
         assert!(is_dns_name("lan", false, false));
@@ -770,6 +822,7 @@ mod tests {
 
     // What: zone_url drops the trailing dot of the zone.
     // Why: a dotted zone in the API path is a silent 404.
+    // From: Issue #1683 | PR #1905
     #[test]
     fn zone_url_uses_the_undotted_id() {
         assert_eq!(
@@ -784,6 +837,7 @@ mod tests {
 
     // What: the API path equals the entrypoint's path.
     // Why: ui and the dns script append the same path.
+    // From: Issue #1683 | PR #1905
     #[test]
     fn pdns_api_path_matches_the_entrypoint() {
         let path = format!("{}/../dns/entrypoint.sh", env!("CARGO_MANIFEST_DIR"));
@@ -807,6 +861,7 @@ mod tests {
 
     // What: limits are inclusive; one outside fails.
     // Why: an off-by-one would accept a forbidden value.
+    // From: Issue #1683 | PR #1905
     #[test]
     fn uint_limits_are_inclusive() {
         let knob = Uint {
@@ -824,6 +879,7 @@ mod tests {
 
     // What: each DHCP mode answers the backend questions.
     // Why: services pick containers from these answers.
+    // From: Issue #1683 | PR #1905
     #[test]
     fn dhcp_modes_answer_the_backend_questions() {
         let table = [
@@ -848,6 +904,7 @@ mod tests {
 
     // What: the five roles, each with password pw-<user>.
     // Why: nats.conf and the callout list render from it.
+    // From: Issue #1683 | PR #1912
     fn roles() -> NatsRoles {
         let users = [
             ("NATS_UI_USER", "ui"),
@@ -865,6 +922,7 @@ mod tests {
 
     // What: unsafe NATS strings are named by their problem.
     // Why: a quote or control char breaks nats.conf.
+    // From: Issue #1683 | PR #1912
     #[test]
     fn nats_text_problems_are_named() {
         assert_eq!(
@@ -885,6 +943,7 @@ mod tests {
 
     // What: a role needs a plain user and a safe password.
     // Why: bad values must fail before nats.conf is made.
+    // From: Issue #1683 | PR #1912
     #[test]
     fn nats_logins_are_validated_with_a_role_label() {
         assert_eq!(
@@ -931,6 +990,7 @@ mod tests {
 
     // What: lists and role blocks use the nats.conf syntax.
     // Why: the callout user must have no subject rights.
+    // From: Issue #1683 | PR #1912
     #[test]
     fn nats_role_blocks_grant_rights_only_when_given() {
         assert_eq!(nats_list(&["a", "b.>"]), "[\"a\", \"b.>\"]");
@@ -957,6 +1017,7 @@ mod tests {
 
     // What: DNS readers get fixed publish and subscribe.
     // Why: static DNS roles and secondaries grant alike.
+    // From: Issue #1683 | PR #1912
     #[test]
     fn dns_reader_rights_are_fixed() {
         assert_eq!(
@@ -975,6 +1036,7 @@ mod tests {
 
     // What: the static nats.conf for the fixed roles.
     // Why: one owner of NATS users, rights and the include.
+    // From: Issue #1683 | PR #1912
     #[test]
     fn nats_conf_renders_roles_and_the_include() {
         let writer = "[\"lancache.dns.record\", \"lancache.dns.flush\", \"$JS.API.STREAM.CREATE.LANCACHE_DNS\", \"$JS.API.STREAM.INFO.LANCACHE_DNS\", \"$JS.API.CONSUMER.INFO.LANCACHE_DNS.>\", \"$JS.API.CONSUMER.CREATE.LANCACHE_DNS.>\", \"$JS.API.CONSUMER.DURABLE.CREATE.LANCACHE_DNS.>\", \"$JS.API.CONSUMER.MSG.NEXT.LANCACHE_DNS.>\", \"$JS.ACK.LANCACHE_DNS.>\"]";
@@ -1005,8 +1067,9 @@ mod tests {
         assert_eq!(got, Ok(want));
     }
 
-    // What: nats.conf is refused for unsafe or misplaced input.
+    // What: unsafe or misplaced nats.conf input is refused.
     // Why: a bad file would stop the broker on restart.
+    // From: Issue #1683 | PR #1912
     #[test]
     fn nats_conf_refuses_bad_input() {
         let conf = "/etc/nats/nats.conf";
@@ -1032,6 +1095,7 @@ mod tests {
 
     // What: option lines become the stored one-line form.
     // Why: the file keeps one line; entries join by ';'.
+    // From: Issue #1683 | PR #1912
     #[test]
     fn proxy_option_lines_join_or_name_the_line() {
         assert_eq!(
