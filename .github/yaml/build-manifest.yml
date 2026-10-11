@@ -204,7 +204,7 @@ services:
     # What: runtime defaults the Dockerfile takes as args.
     # Why: the image builds with the value; it names none.
     # From: Issue #1683 | PR #1912
-    default_args: [TEMPLATE_DIR]
+    default_args: [TEMPLATE_DIR, UI_LISTEN_PORT]
     # What: accounts and dirs ci.sh image-setup creates.
     # Why: no RUN logic in the Dockerfile; @KEY@ = default.
     # From: Issue #1683 | PR #1912

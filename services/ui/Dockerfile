@@ -143,6 +143,12 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID}
 ARG LANCACHE_RUNTIME_DEFAULTS
 ENV LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS}
 
+# What: the UI listen port, from the SOT.
+# Why: the validate step needs one exposed TCP port.
+# From: Issue #1683 | PR #1912
+ARG UI_LISTEN_PORT
+EXPOSE ${UI_LISTEN_PORT}
+
 # What: the binary, via PATH; it does the root start itself.
 # Why: no wrapper; secrets, chown and uid drop are in Rust.
 # From: Issue #858 | PR #1858
