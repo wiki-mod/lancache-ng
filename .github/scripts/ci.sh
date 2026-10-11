@@ -1978,17 +1978,17 @@ ci_cmd_scan_stack() {
     done <<< "${pairs}"
 }
 
-# What: load the history a diff needs, once per checkout.
+# What: load the history a diff needs, plus refs named
 # Why: workflows check out one commit; ci.sh owns the diff.
 # From: Issue #1683 | PR #1858
 _ci_diff_history() {
     local shallow have="" remote head
-    local -a deep=() need=()
+    local -a deep=() need=("$@")
     shallow="$(cd -- "${CI_REPO_ROOT}" && _ci_capture 0 git rev-parse --is-shallow-repository)" || return 2
     [ "${shallow}" = true ] && deep=(--unshallow)
     if [ "${GITHUB_EVENT_NAME:-}" = pull_request ] && [ -n "${BASE_SHA:-}" ]; then
         have="$(cd -- "${CI_REPO_ROOT}" && _ci_capture 1 git rev-parse -q --verify "${BASE_SHA}^{commit}")" || return 2
-        [ -n "${have}" ] || need=("${BASE_SHA}")
+        [ -n "${have}" ] || need+=("${BASE_SHA}")
     fi
     [ "${#deep[@]}" -gt 0 ] || [ "${#need[@]}" -gt 0 ] || return 0
     head="$(_ci_head_commit)" || return 2
@@ -4943,7 +4943,7 @@ _ci_release_marker() {
 # Why: notes come from PR sections, no manual step.
 # From: Issue #894 | PR #1858
 _ci_release_changes() {
-    local tag="$1" prev repo shallow raw subjects nums
+    local tag="$1" prev repo subjects nums
     repo="$(_ci_repo)" || return 2
     prev="$(_ci_last_release_tag "${tag}")" || return 2
     if [ -z "${prev}" ]; then
@@ -4953,14 +4953,8 @@ _ci_release_changes() {
     # What: fetch both tags with full history for the range.
     # Why: CI checkouts are depth 1; log needs both ends.
     # From: Issue #894 | PR #1858
-    shallow="$(_ci_capture 0 git rev-parse --is-shallow-repository)" || return 2
-    local -a deepen=()
-    local remote
-    [ "${shallow}" != true ] || deepen=(--unshallow)
-    remote="$(_ci_git_remote)" || return 2
-    raw="$(_ci_retry git-fetch git fetch -q --no-tags "${deepen[@]}" "${remote}" \
-        "+refs/tags/${prev}:refs/tags/${prev}" "+refs/tags/${tag}:refs/tags/${tag}")" || return 2
-    subjects="$(_ci_capture 0 git log --format=%s "${prev}..${tag}")" || return 2
+    _ci_diff_history "+refs/tags/${prev}:refs/tags/${prev}" "+refs/tags/${tag}:refs/tags/${tag}" || return 2
+    subjects="$(_ci_capture 0 git -C "${CI_REPO_ROOT}" log --format=%s "${prev}..${tag}")" || return 2
     # What: "Merge pull request #N ..." and "... (#N)".
     # Why: GitHub's merge and squash default subjects.
     # From: Issue #894 | PR #1858
