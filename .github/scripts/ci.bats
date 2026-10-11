@@ -1747,6 +1747,49 @@ no-compose#rm#2#[CI-ERROR-CHECK-0034]
 CASES
 }
 
+# What: each short-SHA form fails coded; look-alikes pass
+# Why: AG-REL-015 tags need all 40 hex digits of the SHA
+# From: Issue #1683 | PR #1912
+@test "check deny-short-sha: substring, git and Rust forms fail, look-alikes pass" {
+    local d row file line rc want
+    run bash "${CI_SH}" check deny-short-sha
+    _expect real 0 "deny-short-sha=clean" || return 1
+    while IFS='|' read -r row file line rc; do
+        d="$(_val path)"
+        mkdir -p "${d}"
+        line="${line//@D@/\$}" line="${line//@K@/sha}" line="${line//@S@/--short}"
+        line="${line//@A@/--abbrev}" line="${line//@P@/%}"
+        printf '%s\n' "${line}" > "${d}/${file}"
+        want="deny-short-sha=clean files=1"
+        [ "${rc}" -eq 0 ] || want="[CI-ERROR-CHECK-0005];${d}/${file}:1:"
+        run bash "${CI_SH}" check deny-short-sha "${d}/${file}"
+        _expect "${row}" "${rc}" "${want}" || return 1
+    done <<'CASES'
+sh-slice|a.sh|x=@D@{GIT_@K@:0:7}|1
+sh-empty-offset|a.sh|x=@D@{@K@::7}|1
+sh-neg-offset|a.sh|x=@D@{@K@: -7}|1
+sh-neg-length|a.sh|x=@D@{@K@:0:-33}|1
+sh-var-length|a.sh|x=@D@{commit_id:0:@D@n}|1
+sh-paren-offset|a.sh|x=@D@{revision:(0):7}|1
+sh-array|a.sh|x=@D@{@K@[0]:0:7}|1
+sh-default|a.sh|x=@D@{@K@:-none}|0
+sh-assign|a.sh|x=@D@{@K@:=none}|0
+sh-error|a.sh|x=@D@{@K@:?unset}|0
+sh-alt|a.sh|x=@D@{@K@:+set}|0
+sh-shared|a.sh|x=@D@{shared_dir:0:3}|0
+git-short|a.sh|v=@D@(git rev-parse @S@ HEAD)|1
+git-abbrev|a.sh|git log -1 @A@-commit|1
+git-format|a.sh|git log -1 --format=@P@h|1
+git-full|a.sh|git log -1 --format=@P@H|0
+git-branch|a.sh|git symbolic-ref @S@ HEAD|0
+dockerfile|Dockerfile|RUN t=@D@{@K@:0:7}|1
+workflow|w.yml|run: t=@D@{@K@:0:7}|1
+rust-slice|a.rs|let s = &head_@K@[..7];|1
+rust-get|a.rs|let s = commit.get(0..12);|1
+rust-shape|a.rs|let s = &shape[..2];|0
+CASES
+}
+
 # What: per row: PR body on the real template -> verdict
 # Why: AG-GH-010: every real template section is filled
 # From: Issue #1683 | PR #1858
