@@ -378,7 +378,7 @@ impl Config {
             dev_mode: flag("LANCACHE_DEV_MODE", false),
             syslog_log_root: need("SYSLOG_LOG_ROOT")?,
             syslog_max_gb: read(config::SYSLOG_MAX_GB)? as u32,
-            watchdog_status_file: need("WATCHDOG_STATUS_FILE")?,
+            watchdog_status_file: need("STATUS_FILE")?,
             desired_state_file: need("DESIRED_STATE_FILE")?,
         })
     }
@@ -5685,8 +5685,8 @@ fn container_root_start() {
     if euid != 0 {
         return;
     }
-    let uid = required_env_id("UI_RUNTIME_UID");
-    let gid = required_env_id("UI_RUNTIME_GID");
+    let uid = required_env_id("LANCACHE_RUNTIME_GID");
+    let gid = required_env_id("LANCACHE_RUNTIME_GID");
     let cfg = Config::from_env().unwrap_or_else(|e| container_start_fatal(&e));
     if let Err(e) = ensure_shared_secrets(&cfg.shared_secret_dir, gid, "") {
         container_start_fatal(&format!(
@@ -6510,7 +6510,7 @@ mod tests {
         "UI_DATABASE_FILE",
         "SECONDARY_REGISTRATION_TOKEN_FILE",
         "SYSLOG_LOG_ROOT",
-        "WATCHDOG_STATUS_FILE",
+        "STATUS_FILE",
         "DESIRED_STATE_FILE",
         "LANCACHE_SHARED_SECRET_DIR",
     ];
@@ -6596,7 +6596,7 @@ mod tests {
             "v-SECONDARY_REGISTRATION_TOKEN_FILE"
         );
         assert_eq!(cfg.syslog_log_root, "v-SYSLOG_LOG_ROOT");
-        assert_eq!(cfg.watchdog_status_file, "v-WATCHDOG_STATUS_FILE");
+        assert_eq!(cfg.watchdog_status_file, "v-STATUS_FILE");
         assert_eq!(cfg.desired_state_file, "v-DESIRED_STATE_FILE");
         assert_eq!(cfg.shared_secret_dir, "v-LANCACHE_SHARED_SECRET_DIR");
         assert_eq!(cfg.ui_session_ttl_seconds, 3600);

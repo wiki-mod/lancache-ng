@@ -109,7 +109,7 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
     )?;
     let need = |name: &str| config::need(&env, name).map_err(|e| format!("FATAL: {e}."));
     let settings = Settings {
-        docker_host: need("DOCKER_HOST")?,
+        docker_host: format!("unix://{}", need("DOCKER_SOCKET")?),
         check_interval: Duration::from_secs(check_interval),
         restart_after: restart_after as u32,
         api_timeout: api,
@@ -971,12 +971,21 @@ impl Ctx {
         config::non_empty(saved.as_deref())
             .map(str::to_string)
             .or_else(|| env_opt(key))
+            .or_else(|| config::dhcp_dns_fallback(&config::process_env, key))
     }
 
     // What: a required value from the env.
     // Why: no defaults in Rust; the env files own them.
     fn need(&self, key: &str) -> Result<String, String> {
         config::need(&config::process_env, key)
+    }
+
+    // What: a DHCP DNS IP from the env, else its LAN address.
+    // Why: compose derives no fallback; the rule lives in config.
+    fn need_dns(&self, key: &str) -> Result<String, String> {
+        env_opt(key)
+            .or_else(|| config::dhcp_dns_fallback(&config::process_env, key))
+            .ok_or_else(|| config::not_set(key))
     }
 
     // What: a file in the run dir, written fresh.
@@ -1454,18 +1463,18 @@ impl Recursor {
     }
 }
 
-// What: dns-http uses PROXY_IP, dns-https PROXY_HTTPS_IP.
+// What: dns-http uses IP_HTTP, dns-https IP_HTTPS.
 // Why: one cache per proxy IP keeps the answers apart.
 // From: Issue #1683 | PR #1912
 const DNS_HTTP: Recursor = Recursor {
     name: "dns-http",
-    ip_key: "PROXY_IP",
+    ip_key: "IP_HTTP",
     port: 53,
     api_port_key: "PDNS_HTTP_API_PORT",
 };
 const DNS_HTTPS: Recursor = Recursor {
     name: "dns-https",
-    ip_key: "PROXY_HTTPS_IP",
+    ip_key: "IP_HTTPS",
     port: 1053,
     api_port_key: "PDNS_HTTPS_API_PORT",
 };
@@ -1986,12 +1995,16 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
         log_err(&format!("WARNING: DDNS TSIG is off: {e}"));
         String::new()
     });
-    // What: no key means DDNS only from loopback.
-    // Why: unsigned updates from the LAN must be refused.
-    let allow_from = if tsig.is_empty() {
+    // What: no key or a replica means DDNS only from loopback.
+    // Why: unsigned or replica updates from the LAN are refused.
+    let allow_from = if tsig.is_empty() || role == DnsRole::Secondary {
         "127.0.0.1".to_string()
     } else {
-        ctx.need("DDNS_ALLOW_FROM")?
+        [Some(ctx.need("IP_HTTP")?), env_opt("IP_HTTPS")]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(",")
     };
     let (refresh, retry, _) = soa_knobs()?;
     let local = own_address()?;
@@ -2505,7 +2518,7 @@ fn kea_dhcp4_first(ctx: &Ctx, dir: &Path) -> Result<Value, String> {
         serde_json::json!({"name": "routers", "data": ctx.need("DHCP_GATEWAY")?}),
         serde_json::json!({
             "name": "domain-name-servers",
-            "data": format!("{}, {}", ctx.need("DHCP_DNS_PRIMARY")?, ctx.need("DHCP_DNS_SECONDARY")?)
+            "data": format!("{}, {}", ctx.need_dns("DHCP_DNS_PRIMARY")?, ctx.need_dns("DHCP_DNS_SECONDARY")?)
         }),
         serde_json::json!({"name": "domain-name", "data": domain}),
         serde_json::json!({"name": "domain-search", "data": domain}),
@@ -2718,7 +2731,7 @@ fn kea_dhcp_ddns(ctx: &Ctx) -> Result<Run, String> {
     kea_socket_dir()?;
     let tsig = ddns_tsig_key()?;
     let server = serde_json::json!([{
-        "ip-address": ctx.need("DHCP_DNS_SERVER_IP")?,
+        "ip-address": ctx.need_dns("DHCP_DNS_SERVER_IP")?,
         "port": PDNS_AUTH_PORT
     }]);
     let domain = |name: String| serde_json::json!({"name": name, "key-name": TSIG_NAME, "dns-servers": server});
@@ -4330,7 +4343,7 @@ mod tests {
     fn base_env() -> Vec<(&'static str, String)> {
         let warn = rnd(0, u64::from(u32::MAX) - 1);
         vec![
-            ("DOCKER_HOST", format!("unix://{}", gen_path())),
+            ("DOCKER_SOCKET", gen_path()),
             ("CHECK_INTERVAL", rnd(1, DAY).to_string()),
             ("RESTART_AFTER", rnd(1, u32::MAX.into()).to_string()),
             ("DISK_WARN_PCT", warn.to_string()),
@@ -4378,7 +4391,10 @@ mod tests {
             )
         );
         assert_eq!(s.cache_dir, PathBuf::from(value(&env, "CACHE_DIR")));
-        assert_eq!(s.docker_host, value(&env, "DOCKER_HOST"));
+        assert_eq!(
+            s.docker_host,
+            format!("unix://{}", value(&env, "DOCKER_SOCKET"))
+        );
         assert_eq!(s.own_id, value(&env, "HOSTNAME"));
 
         let interval = "0".repeat(rnd(1, u8::MAX.into()) as usize);

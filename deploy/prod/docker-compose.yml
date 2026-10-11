@@ -10,7 +10,7 @@ name: lancache-ng
 x-logging: &logging
   driver: syslog
   options:
-    syslog-address: "udp://127.0.0.1:${LANCACHE_LOG_PORT:?LANCACHE_LOG_PORT is required}"
+    syslog-address: "udp://127.0.0.1:${SOT_LANCACHE_LOG_PORT:?SOT_LANCACHE_LOG_PORT is required}"
     syslog-format: rfc5424
     tag: "{{.Name}}"
 
@@ -29,60 +29,37 @@ services:
       # What: operator values; the defaults are baked in.
       # Why: the SOT owns each default; no value copy here.
       # From: Issue #1683
-      - LANCACHE_LOG_PORT=${LANCACHE_LOG_PORT:?LANCACHE_LOG_PORT is required}
-      - NTP_ENABLED=${NTP_ENABLED:-0}
+      - NTP_ENABLED=${NTP_ENABLED:-}
       - NTP_ALLOWED_CLIENT_CIDRS=${NTP_ALLOWED_CLIENT_CIDRS:-}
       - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
       - CACHEHAMSTER_URLS=${CACHEHAMSTER_URLS:-}
-      # What: paths inside the mounts listed below.
-      # Why: the mount and its path have one owner here.
-      # From: Issue #1683
-      - DOCKER_HOST=unix:///var/run/docker.sock
-      - SUPERVISE_RUN_DIR=/run/lancache
-      - STATUS_FILE=/var/run/watchdog/status.json
-      - DESIRED_STATE_FILE=/data/desired-state.json
-      - UI_SETTINGS_FILE=/data/lancache-ui-settings.env
-      - CACHE_DIR=/var/cache/lancache
-      - CACHE_DIR_ALLOWED_PREFIX=/var/cache
-      - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
-      - SYSLOG_LOG_ROOT_ALLOWED_PREFIX=/var/log
-      - PURGE_STAMP=/var/lib/lancache-retention-state/purge.stamp
-      - SYSLOG_PRUNE_STAMP=/var/lib/lancache-retention-state/syslog-prune.stamp
-      - NTP_DRIFT_FILE=/var/lib/chrony/drift
-      - CACHEHAMSTER_DATA_DIR=/var/lib/lancache-cachehamster
-      - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
-      - NETDATA_CONFIG_DIR=/etc/netdata
-      - NETDATA_WEB_LOG=/var/log/lancache-syslog-ng/LanCache-NG-proxy/*.log
-      - NETDATA_ALARM_UI_URL=http://ui:8080
     # What: rendered syslog-ng, chrony and status files.
     # Why: each start renders fresh; nothing survives.
     # From: Issue #1683
     tmpfs:
-      - /run/lancache
+      - ${SOT_SUPERVISE_RUN_DIR}
     # What: the log input on loopback; NTP for the LAN.
     # Why: only the local Docker daemon may send log lines.
     # From: Issue #1683
     ports:
-      - "127.0.0.1:${LANCACHE_LOG_PORT}:${LANCACHE_LOG_PORT}/udp"
+      - "127.0.0.1:${SOT_LANCACHE_LOG_PORT}:${SOT_LANCACHE_LOG_PORT}/udp"
       - "123:123/udp"
     volumes:
       # What: the Docker API for the watchdog process only.
       # Why: no socket proxy; the supervisor drops the rest.
       # From: Issue #1683
-      - /var/run/docker.sock:/var/run/docker.sock
-      - shared-secrets:/var/lib/lancache-secrets
-      - ui-data:/data:ro
-      - watchdog-status:/var/run/watchdog
-      - proxy-cache:/var/cache/lancache
-      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng
-      - retention-state:/var/lib/lancache-retention-state
-      - ${NTP_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/ntp}:/var/lib/chrony
-      - ${CACHEHAMSTER_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/cachehamster}:/var/lib/lancache-cachehamster
-      - netdataconfig:/etc/netdata
-      - netdatalib:/var/lib/netdata
-      - netdatacache:/var/cache/netdata
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
+      - ${SOT_DOCKER_SOCKET}:${SOT_DOCKER_SOCKET}
+      - shared-secrets:${SOT_LANCACHE_SHARED_SECRET_DIR}
+      - ui-data:${SOT_UI_DATA_DIR}:ro
+      - watchdog-status:${SOT_STATUS_DIR}
+      - proxy-cache:${SOT_CACHE_DIR}
+      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:${SOT_SYSLOG_LOG_ROOT}
+      - retention-state:${SOT_RETENTION_STATE_DIR}
+      - ${NTP_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/ntp}:${SOT_NTP_STATE_DIR}
+      - ${CACHEHAMSTER_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/cachehamster}:${SOT_CACHEHAMSTER_DATA_DIR}
+      - netdataconfig:${SOT_NETDATA_CONFIG_DIR}
+      - netdatalib:${SOT_NETDATA_LIB_DIR}
+      - netdatacache:${SOT_NETDATA_CACHE_DIR}
     cap_drop:
       - ALL
     # What: capabilities the supervised processes need.
@@ -116,12 +93,9 @@ services:
     init: true
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
-      - SUPERVISE_RUN_DIR=/run/lancache
-      - CDN_DOMAINS_FILE=/etc/nginx/cdn-domains.txt
-      - PROXY_CONFIG_SNAPSHOT_DIR=/var/lib/lancache-proxy/config-snapshots
       - IP_HTTP=${IP_HTTP}
       - IP_HTTPS=${IP_HTTPS}
-      - HTTPS_ENABLED=${HTTPS_ENABLED:-1}
+      - HTTPS_ENABLED=${HTTPS_ENABLED:-}
       # What: per-install values from the operator .env
       # Why: .env is the one owner of operator values.
       # From: Issue #1683
@@ -132,12 +106,12 @@ services:
       - PROXY_ALLOWED_CLIENT_CIDRS=${PROXY_ALLOWED_CLIENT_CIDRS:-}
     volumes:
       - ../../certs:/etc/nginx/ssl/ca
-      - ../../services/dns/cdn-domains.txt:/etc/nginx/cdn-domains.txt
+      - ../../services/dns/cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}
       - proxy-cache:/var/cache/nginx/lancache
       - proxy-certs:/etc/nginx/ssl/certs
-      - proxy-config-snapshots:/var/lib/lancache-proxy
+      - proxy-config-snapshots:${SOT_PROXY_SNAPSHOT_MOUNT}
     tmpfs:
-      - /run/lancache
+      - ${SOT_SUPERVISE_RUN_DIR}
     ports:
       - "${IP_HTTP}:80:80"
       - "${IP_HTTP}:443:8443"
@@ -161,40 +135,25 @@ services:
     init: true
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
-      - PROXY_IP=${IP_HTTP:?IP_HTTP is required}
-      - PROXY_HTTPS_IP=${IP_HTTPS:?IP_HTTPS is required}
+      - IP_HTTP=${IP_HTTP:?IP_HTTP is required}
+      - IP_HTTPS=${IP_HTTPS:?IP_HTTPS is required}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - PDNS_API_KEY=${PDNS_API_KEY}
-      - DDNS_ALLOW_FROM=${IP_HTTP},${IP_HTTPS}
-      - DNS_REPLICATION_ROLE=primary
-      - SUPERVISE_RUN_DIR=/run/lancache
-      - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
-      - PDNS_DATA_DIR=/var/lib/powerdns
-      - DNS_STATE_DIR=/var/lib/powerdns-state
-      - DNS_CONFIG_SNAPSHOT_DIR=/var/lib/lancache-dns/config-snapshots
-      - NATS_CONF_PATH=/etc/nats/nats.conf
-      - NATS_AUTH_CALLOUT_PATH=/etc/nats/auth_callout.conf
-      - NATS_STORE_DIR=/var/lib/nats
-      - NATS_MONITOR_PORT=8222
-      - NATS_URL=nats://127.0.0.1:4222
       - NATS_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-}
-      - NATS_PASSWORD_SHARED_SECRET=nats-dns-writer-password
-      - NATS_CONSUMER=dns
-      - NATS_RECONCILER=1
       - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:-}
       - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-}
       - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-}
       - NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD:-}
     volumes:
-      - shared-secrets:/var/lib/lancache-secrets
-      - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
-      - ${PDNS_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns}:/var/lib/powerdns
-      - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
-      - ${NATS_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats}:/var/lib/nats
-      - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf}:/etc/nats
-      - dns-config-snapshots:/var/lib/lancache-dns
+      - shared-secrets:${SOT_LANCACHE_SHARED_SECRET_DIR}
+      - ../../services/dns/cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}
+      - ${PDNS_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns}:${SOT_PDNS_DATA_DIR}
+      - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:${SOT_DNS_STATE_DIR}
+      - ${NATS_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats}:${SOT_NATS_STORE_DIR}
+      - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf}:${SOT_NATS_CONF_MOUNT}
+      - dns-config-snapshots:${SOT_DNS_SNAPSHOT_MOUNT}
     tmpfs:
-      - /run/lancache
+      - ${SOT_SUPERVISE_RUN_DIR}
     # What: dns-http on IP_HTTP, dns-https on IP_HTTPS.
     # Why: one container port each keeps the caches apart.
     # From: Issue #1683
@@ -211,7 +170,7 @@ services:
       # What: NATS for secondaries; loopback by default.
       # Why: NATS_BIND_IP opts in; no second compose file.
       # From: Issue #1683 | PR #1912
-      - "${NATS_BIND_IP:-127.0.0.1}:4222:4222"
+      - "${NATS_BIND_IP:-127.0.0.1}:${SOT_NATS_PORT}:${SOT_NATS_PORT}"
     healthcheck:
       test: ["CMD", "/usr/local/bin/lancache-watchdog", "healthcheck"]
       interval: 30s
@@ -231,16 +190,9 @@ services:
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
       - DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS:-}
-      - DHCP_MODE=${DHCP_MODE:-disabled}
-      - SUPERVISE_RUN_DIR=/run/lancache
-      - UI_SETTINGS_FILE=/data/lancache-ui-settings.env
-      - DESIRED_STATE_FILE=/data/desired-state.json
-      - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
-      - KEA_DATA_DIR=/var/lib/kea
-      - DHCP_CONFIG_SNAPSHOT_DIR=/var/lib/lancache-dhcp/config-snapshots
-      - DHCP_PROBE_REQUEST_FILE=/data/dhcp-probe-request
-      - DHCP_PROBE_RESULT_FILE=/var/lib/kea/dhcp-probe-result.json
-      - DHCP_DNS_SERVER_IP=${IP_HTTP}
+      - DHCP_MODE=${DHCP_MODE:-}
+      - IP_HTTP=${IP_HTTP}
+      - IP_HTTPS=${IP_HTTPS}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
       - DHCP_SUBNET=${DHCP_SUBNET:-}
@@ -248,8 +200,8 @@ services:
       - DHCP_RANGE_END=${DHCP_RANGE_END:-}
       - DHCP_GATEWAY=${DHCP_GATEWAY:-}
       - DHCP_SUBNET_START=${DHCP_SUBNET_START:-}
-      - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-${IP_HTTP}}
-      - DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-${IP_HTTPS}}
+      - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-}
+      - DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-}
       - UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP:-}
       - DHCP_RELAY_LOCAL_ADDR=${DHCP_RELAY_LOCAL_ADDR:-}
       - DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE:-}
@@ -262,12 +214,12 @@ services:
       - DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS:-}
       - DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI:-}
     volumes:
-      - shared-secrets:/var/lib/lancache-secrets
-      - ui-data:/data:ro
-      - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/kea}:/var/lib/kea
-      - dhcp-config-snapshots:/var/lib/lancache-dhcp
+      - shared-secrets:${SOT_LANCACHE_SHARED_SECRET_DIR}
+      - ui-data:${SOT_UI_DATA_DIR}:ro
+      - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/kea}:${SOT_KEA_DATA_DIR}
+      - dhcp-config-snapshots:${SOT_DHCP_SNAPSHOT_MOUNT}
     tmpfs:
-      - /run/lancache
+      - ${SOT_SUPERVISE_RUN_DIR}
     network_mode: host
     cap_add:
       - NET_BIND_SERVICE
@@ -290,26 +242,12 @@ services:
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
       - NTP_ALLOWED_CLIENT_CIDRS=${NTP_ALLOWED_CLIENT_CIDRS:-}
-      - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
-      - WATCHDOG_STATUS_FILE=/var/run/watchdog/status.json
-      - DESIRED_STATE_FILE=/data/desired-state.json
-      - NATS_AUTH_CALLOUT_PATH=/etc/nats/auth_callout.conf
-      - UI_SESSION_SECRET_FILE=/data/lancache-ui-session.secret
-      - SECONDARY_REGISTRATION_TOKEN_FILE=/data/lancache-secondary-registration.token
-      - DHCP_PROBE_REQUEST_FILE=/data/dhcp-probe-request
-      - DHCP_PROBE_RESULT_FILE=/var/lib/kea/dhcp-probe-result.json
-      - HTTPS_ENABLED=${HTTPS_ENABLED:-1}
-      - PROXY_HTTP_URL=http://proxy
-      - PROXY_HTTPS_URL=http://proxy
-      - PROXY_LOG_DIR=/var/log/lancache-syslog-ng/LanCache-NG-proxy
-      - CACHE_DIR=/var/cache/proxy
-      - NETDATA_URL=http://services:19999
+      - HTTPS_ENABLED=${HTTPS_ENABLED:-}
       - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
       - CACHE_MAX_GB=${CACHE_MAX_GB:-}
       - CACHE_MAX_SIZE=${CACHE_MAX_SIZE:?CACHE_MAX_SIZE is required}
       - IP_HTTP=${IP_HTTP}
       - IP_HTTPS=${IP_HTTPS}
-      - DNS_STATE_DIR=/var/lib/powerdns-state
       - LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY:-ghcr.io}
       - LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}
       - LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL:-}
@@ -317,12 +255,12 @@ services:
       - UI_AUTH_USER=${UI_AUTH_USER:-}
       - UI_AUTH_PASSWORD_HASH=${UI_AUTH_PASSWORD_HASH:-}
       - ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI:-}
-      - UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS:-86400}
-      - DHCP_MODE=${DHCP_MODE:-disabled}
+      - UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS:-}
+      - DHCP_MODE=${DHCP_MODE:-}
       - DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS:-}
       - DHCP_SUBNET_START=${DHCP_SUBNET_START:-}
-      - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-${IP_HTTP}}
-      - DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-${IP_HTTPS}}
+      - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-}
+      - DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-}
       - UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP:-}
       - DHCP_RELAY_LOCAL_ADDR=${DHCP_RELAY_LOCAL_ADDR:-}
       - DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE:-}
@@ -331,12 +269,8 @@ services:
       - DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME:-}
       - DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER:-}
       - DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}
-      - DHCP_API_URL=http://host.docker.internal
       - DHCP_API_TOKEN=${KEA_CTRL_TOKEN}
-      - UI_LOGS_MAX_ENTRIES=200
-      - DNS_URL=http://dns
       - PDNS_API_KEY=${PDNS_API_KEY}
-      - NATS_URL=nats://dns:4222
       - NATS_BIND_IP=${NATS_BIND_IP:-}
       - NATS_ADVERTISE_URL=${NATS_ADVERTISE_URL:-}
       - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:-}
@@ -344,22 +278,21 @@ services:
       - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-}
       - NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD:-}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
-      - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
     volumes:
-      - shared-secrets:/var/lib/lancache-secrets
-      - ui-data:/data
-      - ../../services/dns/cdn-domains.txt:/data/cdn-domains.txt
-      - proxy-cache:/var/cache/proxy:ro
-      - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
-      - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf}:/etc/nats
-      - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/kea}:/var/lib/kea
-      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng:ro
-      - watchdog-status:/var/run/watchdog:ro
+      - shared-secrets:${SOT_LANCACHE_SHARED_SECRET_DIR}
+      - ui-data:${SOT_UI_DATA_DIR}
+      - ../../services/dns/cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}
+      - proxy-cache:${SOT_CACHE_DIR}:ro
+      - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:${SOT_DNS_STATE_DIR}
+      - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf}:${SOT_NATS_CONF_MOUNT}
+      - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/kea}:${SOT_KEA_DATA_DIR}
+      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:${SOT_SYSLOG_LOG_ROOT}:ro
+      - watchdog-status:${SOT_STATUS_DIR}:ro
     # What: Admin UI on UI_BIND_IP, default IP_HTTP.
     # Why: UI_BIND_IP narrows the LAN exposure of the UI.
     # From: Issue #1683 | PR #1912
     ports:
-      - "${UI_BIND_IP:-${IP_HTTP}}:8080:8080"
+      - "${UI_BIND_IP:-${IP_HTTP}}:${SOT_UI_LISTEN_PORT}:${SOT_UI_LISTEN_PORT}"
     # What: host.docker.internal maps to the Docker host.
     # Why: the ui reaches Kea on the host network.
     # From: Issue #1683 | PR #1912

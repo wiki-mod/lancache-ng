@@ -28,6 +28,14 @@ setup() {
     # Why: sourced readers look up, as under ci_main.
     # From: Issue #1683 | PR #1858
     _ci_sot_load || return 1
+    # What: export the SOT_ compose values every test shares.
+    # Why: compose interpolates mount and port targets from them.
+    # From: Issue #1683 | PR #1912
+    local fx kv
+    fx="$(_ci_sot_compose_env)" || return 1
+    while IFS= read -r kv; do
+        export "${kv?}"
+    done <<<"${fx}"
 }
 
 # What: docker and dig stand-ins first on PATH, state in DS
@@ -1414,10 +1422,10 @@ CASES
 @test "validate dns port: real compose splits the sides, drift fails coded" {
     local http https a b pa pb row env ports side rc want
     _export_validation_env || return 1
-    run _ci_validate_dns_port PROXY_IP
+    run _ci_validate_dns_port IP_HTTP
     _expect real-http 0 - || return 1
     http="${output}"
-    run _ci_validate_dns_port PROXY_HTTPS_IP
+    run _ci_validate_dns_port IP_HTTPS
     _expect real-https 0 - || return 1
     https="${output}"
     [[ "${http}" =~ ^[0-9]+$ && "${https}" =~ ^[0-9]+$ && "${http}" != "${https}" ]] \
@@ -1433,12 +1441,12 @@ CASES
         run _ci_validate_dns_port "${side}"
         _expect "${row}" "${rc}" "${want}" || return 1
     done <<'CASES'
-match#{"PROXY_IP":"@A@"}#[{"host_ip":"@A@","published":"53","protocol":"udp","target":@PA@},{"host_ip":"@B@","published":"53","protocol":"udp","target":@PB@}]#PROXY_IP#0#=@PA@
-tcp-only#{"PROXY_IP":"@A@"}#[{"host_ip":"@A@","published":"53","protocol":"tcp","target":@PA@}]#PROXY_IP#2#[CI-ERROR-VALIDATE-0116];side="PROXY_IP"
-other-ip#{"PROXY_IP":"@A@"}#[{"host_ip":"@B@","published":"53","protocol":"udp","target":@PB@}]#PROXY_IP#2#[CI-ERROR-VALIDATE-0116]
-other-published#{"PROXY_IP":"@A@"}#[{"host_ip":"@A@","published":"5300","protocol":"udp","target":@PA@}]#PROXY_IP#2#[CI-ERROR-VALIDATE-0116]
-two-targets#{"PROXY_IP":"@A@"}#[{"host_ip":"@A@","published":"53","protocol":"udp","target":@PA@},{"host_ip":"@A@","published":"53","protocol":"udp","target":@PB@}]#PROXY_IP#2#[CI-ERROR-VALIDATE-0116]
-no-env#{}#[{"host_ip":"","published":"53","protocol":"udp","target":@PA@}]#PROXY_HTTPS_IP#2#[CI-ERROR-VALIDATE-0116];side="PROXY_HTTPS_IP"
+match#{"IP_HTTP":"@A@"}#[{"host_ip":"@A@","published":"53","protocol":"udp","target":@PA@},{"host_ip":"@B@","published":"53","protocol":"udp","target":@PB@}]#IP_HTTP#0#=@PA@
+tcp-only#{"IP_HTTP":"@A@"}#[{"host_ip":"@A@","published":"53","protocol":"tcp","target":@PA@}]#IP_HTTP#2#[CI-ERROR-VALIDATE-0116];side="IP_HTTP"
+other-ip#{"IP_HTTP":"@A@"}#[{"host_ip":"@B@","published":"53","protocol":"udp","target":@PB@}]#IP_HTTP#2#[CI-ERROR-VALIDATE-0116]
+other-published#{"IP_HTTP":"@A@"}#[{"host_ip":"@A@","published":"5300","protocol":"udp","target":@PA@}]#IP_HTTP#2#[CI-ERROR-VALIDATE-0116]
+two-targets#{"IP_HTTP":"@A@"}#[{"host_ip":"@A@","published":"53","protocol":"udp","target":@PA@},{"host_ip":"@A@","published":"53","protocol":"udp","target":@PB@}]#IP_HTTP#2#[CI-ERROR-VALIDATE-0116]
+no-env#{}#[{"host_ip":"","published":"53","protocol":"udp","target":@PA@}]#IP_HTTPS#2#[CI-ERROR-VALIDATE-0116];side="IP_HTTPS"
 CASES
 }
 
@@ -1449,7 +1457,7 @@ CASES
     local row a1 a2 r1 e1 rc want
     IP="198.51.100.$(_val int 1 254)"
     _ci_validate_container_ip() { [ "$2" = dns ] && printf '%s' "${IP}"; }
-    _ci_validate_dns_port() { case "$1" in PROXY_IP) echo 11 ;; PROXY_HTTPS_IP) echo 12 ;; *) return 2 ;; esac; }
+    _ci_validate_dns_port() { case "$1" in IP_HTTP) echo 11 ;; IP_HTTPS) echo 12 ;; *) return 2 ;; esac; }
     # What: dig stub answering by -p; @IP is required
     # Why: proves the side port and the dns IP reach dig
     # From: Issue #1683 | PR #1912
@@ -1474,8 +1482,8 @@ CASES
     done <<'CASES'
 split#192.0.2.1#192.0.2.2#0##0#=
 same#192.0.2.1#192.0.2.1#0##1#[CI-ERROR-VALIDATE-0021]
-empty-https#192.0.2.1##0##1#[CI-ERROR-VALIDATE-0011];side="PROXY_HTTPS_IP"
-dig-fail#192.0.2.1#192.0.2.2#9##2#[CI-ERROR-VALIDATE-0117];side="PROXY_IP";rc=9
+empty-https#192.0.2.1##0##1#[CI-ERROR-VALIDATE-0011];side="IP_HTTPS"
+dig-fail#192.0.2.1#192.0.2.2#9##2#[CI-ERROR-VALIDATE-0117];side="IP_HTTP";rc=9
 dig-warn#192.0.2.1#192.0.2.2#0#;; warning#2#[CI-ERROR-VALIDATE-0117];warning
 CASES
     IP=""
@@ -1489,13 +1497,13 @@ CASES
 @test "validate dns resolves: polls the side's port, a miss fails coded" {
     IP="198.51.100.$(_val int 1 254)"
     _ci_validate_container_ip() { [ "$2" = dns ] && printf '%s' "${IP}"; }
-    _ci_validate_dns_port() { case "$1" in PROXY_HTTPS_IP) echo 12 ;; *) echo 11 ;; esac; }
+    _ci_validate_dns_port() { case "$1" in IP_HTTPS) echo 12 ;; *) echo 11 ;; esac; }
     _ci_validate_service_evidence() { printf 'evidence %s\n' "$2"; }
     dig() { [[ " $* " == *" -p 12 @${IP} "* ]] && printf '192.0.2.7\n'; return 0; }
-    run _ci_validate_dns_resolves x PROXY_HTTPS_IP probe.lan 192.0.2.7 1
+    run _ci_validate_dns_resolves x IP_HTTPS probe.lan 192.0.2.7 1
     _expect https-hit 0 "=" || return 1
-    run _ci_validate_dns_resolves x PROXY_IP probe.lan 192.0.2.7 1
-    _expect http-miss 1 "[CI-ERROR-VALIDATE-0036];side=\"PROXY_IP\";evidence dns" || return 1
+    run _ci_validate_dns_resolves x IP_HTTP probe.lan 192.0.2.7 1
+    _expect http-miss 1 "[CI-ERROR-VALIDATE-0036];side=\"IP_HTTP\";evidence dns" || return 1
 }
 
 # What: setup.sh rolls DNS back in the real dns service
@@ -4188,7 +4196,7 @@ CASES
     [ "$(get_env_var IP_HTTPS "${env}")" = "192.0.2.2" ] && [ "$(get_env_var LISTEN_IP_HTTPS "${env}")" = "192.0.2.6" ] \
         || { echo "https keys: $(cat "${env}")"; return 1; }
     docker compose -p "${name}" --env-file "${env}" -f "${root}/deploy/secondary/docker-compose.yml" config --format json \
-        | jq -e '.services.dns | .environment.PROXY_HTTPS_IP == "192.0.2.2" and ([.ports[] | select(.target == 1053 and .host_ip == "192.0.2.6" and .published == "53")] | length == 2)' >/dev/null \
+        | jq -e '.services.dns | .environment.IP_HTTPS == "192.0.2.2" and ([.ports[] | select(.target == 1053 and .host_ip == "192.0.2.6" and .published == "53")] | length == 2)' >/dev/null \
         || { echo "https compose ports"; return 1; }
     env="${t}/ok/${name}/.env"
     # What: without a checkout the owner file is downloaded

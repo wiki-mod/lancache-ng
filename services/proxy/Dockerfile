@@ -136,8 +136,6 @@ ENV LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS}
 
 VOLUME ["/etc/nginx/ssl", "/var/cache/nginx/lancache"]
 
-EXPOSE 80 443
-
 # What: processes the supervisor runs, from the SOT.
 # Why: ci.sh passes the list; the image holds no copy.
 # From: Issue #1683

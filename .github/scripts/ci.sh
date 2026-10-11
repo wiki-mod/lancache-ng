@@ -6709,7 +6709,7 @@ _ci_validate_dns() {
         ci_log "[CI-ERROR-VALIDATE-0010]" "reason=\"missing dns container IP or test domain\""
         return 2
     fi
-    for side in PROXY_IP PROXY_HTTPS_IP; do
+    for side in IP_HTTP IP_HTTPS; do
         port="$(_ci_validate_dns_port "${side}")" || return 2
         out="$(_ci_run -s "[CI-ERROR-VALIDATE-0117]" "domain=\"${domain}\" side=\"${side}\" reason=\"dig failed\"" \
             dig +time=2 +tries=1 +short -p "${port}" "@${ip}" A "${domain}")" || return 2
@@ -6721,7 +6721,7 @@ _ci_validate_dns() {
         # What: http and https sides resolve distinct IPs.
         # Why: each side answers with its own proxy IP.
         # From: Issue #668
-        if [ "${side}" = PROXY_IP ]; then
+        if [ "${side}" = IP_HTTP ]; then
             a_http="${out}"
         elif [ "${out}" = "${a_http}" ]; then
             ci_log "[CI-ERROR-VALIDATE-0021]" "domain=\"${domain}\" reason=\"http and https DNS returned the same answer (#668 split routing lost)\""
@@ -7074,7 +7074,7 @@ _ci_validate_ui_nats_dns() {
     _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${zone}" "${label}" "${ip}" || rc=$?
     rm -f "${jar}"
     [ "${rc}" -eq 0 ] || return "${rc}"
-    for side in PROXY_IP PROXY_HTTPS_IP; do
+    for side in IP_HTTP IP_HTTPS; do
         _ci_validate_dns_resolves "${project}" "${side}" "${label}.${zone}" "${ip}" "${dns_wait}" || return $?
     done
 }
@@ -7176,7 +7176,7 @@ _ci_validate_dns_rollback() {
     jar="$(_ci_mktemp "${CI_TMPDIR}/ci-rb-jar.XXXXXX")" || return 2
     csrf="$(_ci_validate_ui_session "${jar}" "${base}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${zone}" "${label}" "${old}" || { rm -f "${jar}"; return 1; }
-    _ci_validate_dns_resolves "${project}" PROXY_IP "${label}.${zone}" "${old}" "${dns_wait}" || { rm -f "${jar}"; return 1; }
+    _ci_validate_dns_resolves "${project}" IP_HTTP "${label}.${zone}" "${old}" "${dns_wait}" || { rm -f "${jar}"; return 1; }
     # What: capture the zone's newest snapshot (pre-change).
     # Why: target this test rolls back to after 2nd write.
     # From: Issue #628
@@ -7188,7 +7188,7 @@ _ci_validate_dns_rollback() {
         return 1
     fi
     _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${zone}" "${label}" "${new}" || { rm -f "${jar}"; return 1; }
-    _ci_validate_dns_resolves "${project}" PROXY_IP "${label}.${zone}" "${new}" "${dns_wait}" || { rm -f "${jar}"; return 1; }
+    _ci_validate_dns_resolves "${project}" IP_HTTP "${label}.${zone}" "${new}" "${dns_wait}" || { rm -f "${jar}"; return 1; }
     rm -f "${jar}"
     resp="$(_ci_capture 0 _ci_curl_secret header "X-API-Key: ${key}" -sS "${lbase}/snapshots")" || return 2
     last="$(_ci_capture 0 jq -r --arg z "${zone}" '.zones[$z][0].id // empty' <<<"${resp}")" || return 2
@@ -7212,7 +7212,7 @@ _ci_validate_dns_rollback() {
     # What: post-rollback dig must return the OLD content.
     # Why: proves recursor cache flush reached it.
     # From: Issue #628
-    _ci_validate_dns_resolves "${project}" PROXY_IP "${label}.${zone}" "${old}" "${dns_wait}" || return $?
+    _ci_validate_dns_resolves "${project}" IP_HTTP "${label}.${zone}" "${old}" "${dns_wait}" || return $?
     tries="$(_ci_variable CI_VALIDATE_SNAPSHOT_POLL_ATTEMPTS)" || return 2
     pause="$(_ci_variable CI_VALIDATE_SNAPSHOT_POLL_PAUSE)" || return 2
     if ! resp="$(_ci_validate_poll "${tries}" "${pause}" _ci_validate_new_snapshot "${lbase}" "${key}" "${last}" "${zone}")"; then
@@ -7314,7 +7314,7 @@ _ci_validate_kea_round_trip() {
     pause="$(_ci_variable CI_VALIDATE_KEA_POLL_PAUSE)" || return 2
     cfg="$(_ci_validate_config_json)" || return 2
     token="$(_ci_capture 0 jq -r '.services.dhcp.environment.KEA_CTRL_TOKEN // empty' <<< "${cfg}")" || return 2
-    snapdir="$(_ci_capture 0 jq -r '.services.dhcp.environment.KEA_CONFIG_SNAPSHOT_DIR // empty' <<< "${cfg}")" || return 2
+    snapdir="$(_ci_runtime_default KEA_CONFIG_SNAPSHOT_DIR)" || return 2
     # What: the dhcp mount holding KEA_CONFIG_SNAPSHOT_DIR
     # Why: its source is the Kea data dir on the host
     # From: Issue #763 | PR #1858
@@ -8061,6 +8061,16 @@ _ci_service_build_args() {
     # From: Issue #1683 | PR #1912
     val="$(_ci_required_field runtime defaults block)" || return 2
     out="${out}${prefix}${CI_ARG_DEFAULTS}=${val}"$'\n'
+    # What: SOT defaults this Dockerfile takes as build-args.
+    # Why: the image builds with the value; it names none.
+    # From: Issue #1683 | PR #1912
+    local key keys
+    keys="$(_ci_target_list "${service}" default_args)" || return 2
+    while IFS= read -r key; do
+        [ -n "${key}" ] || continue
+        val="$(_ci_runtime_default "${key}")" || return 2
+        out="${out}${prefix}${key}=${val}"$'\n'
+    done <<<"${keys}"
     # What: SOT-pinned external inputs of this Dockerfile.
     # Why: one pin->ARG owner shared with version-drift.
     # From: Issue #1683 | PR #1858
@@ -11575,6 +11585,18 @@ _ci_validate_host_tools() {
     fi
 }
 
+# What: SOT_<KEY>=value for each runtime.compose_keys key.
+# Why: compose interpolates the SOT paths and ports.
+# From: Issue #1683 | PR #1912
+_ci_sot_compose_env() {
+    local keys k v
+    keys="$(_ci_required_field runtime compose_keys block)" || return 2
+    for k in ${keys}; do
+        v="$(_ci_runtime_default "${k}")" || return 2
+        printf 'SOT_%s=%s\n' "${k}" "${v}"
+    done
+}
+
 # What: SOT validation env plus fresh secrets, KEY=VALUE.
 # Why: config check and live validate share one owner.
 # From: Issue #1683 | PR #1858
@@ -11595,6 +11617,7 @@ _ci_validation_env() {
         v="$(_ci_runtime_default "${k}")" || return 2
         printf '%s=%s\n' "${k}" "${v}"
     done
+    _ci_sot_compose_env || return 2
     # What: a fresh value per secret key, setup.sh format.
     # Why: a fixed key in the SOT is a hardcoded credential.
     # From: Issue #1683 | PR #1858
@@ -11740,8 +11763,13 @@ _ci_compose_run() {
         names="$(_ci_run "[CI-ERROR-CORE-0145]" "env_file=\"${env_file}\" reason=\"compose variable names unreadable\"" \
             jq -r 'keys[]' <<< "${vars}")" || return 2
         [ -z "${names}" ] || mapfile -t unsetv <<< "${names}"
+        fx="$(_ci_sot_compose_env)" || return 2
+        mapfile -t fixture <<< "${fx}"
         (
             [ "${#unsetv[@]}" -eq 0 ] || unset "${unsetv[@]}"
+            for kv in "${fixture[@]}"; do
+                export "${kv?}"
+            done
             docker compose --env-file "${env_file}" "$@"
         )
         return "$?"
@@ -11874,15 +11902,15 @@ _ci_check_compose_config() {
 # Why: only stack peers may reach it; the ui proxies it.
 # From: Issue #1683 | PR #1858
 _ci_check_netdata_isolation() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" cf dep inst cfg out line
+    local repo_root="${1:-${CI_REPO_ROOT}}" cf dep inst cfg out line nd_url
     local -a viol=()
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     inst="$(_ci_installer_compose "${repo_root}")" || return 2
+    nd_url="$(_ci_runtime_default NETDATA_URL)" || return 2
     for cf in "${dep}" "${inst}"; do
         cfg="$(_ci_compose_json "${repo_root}/${cf}")" || return 2
-        out="$(_ci_capture 0 jq -r '
-            (.services.ui.environment.NETDATA_URL // "") as $url
-            | if ($url | test(":[0-9]+$") | not)
+        out="$(_ci_capture 0 jq -r --arg url "${nd_url}" '
+            if ($url | test(":[0-9]+$") | not)
                 then "ui NETDATA_URL has no port (got: \($url))"
               else ($url | sub(".*:"; "") | tonumber) as $port
                 | .services | to_entries[]

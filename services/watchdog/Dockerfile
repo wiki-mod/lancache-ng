@@ -107,13 +107,12 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
-
 # What: syslog-ng files belong to this reader group.
 # Why: the ui (shared gid) and netdata web_log read them.
 # From: Issue #1683 | PR #1912
 ARG LANCACHE_RUNTIME_GID
-ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
-    LOG_READER_GROUP=lancache
+ARG LOG_READER_GROUP
+ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID}
 RUN addgroup -g "${LANCACHE_RUNTIME_GID}" "${LOG_READER_GROUP}" && addgroup netdata "${LOG_READER_GROUP}"
 
 # What: the SOT default values, one pipe-joined list.

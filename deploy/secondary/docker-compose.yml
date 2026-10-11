@@ -14,22 +14,17 @@ services:
     image: ${LANCACHE_IMAGE_REF_DNS:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}}
     init: true
     environment:
-      - PROXY_IP=${IP_HTTP:?IP_HTTP is required}
-      - PROXY_HTTPS_IP=${IP_HTTPS:-}
+      - IP_HTTP=${IP_HTTP:?IP_HTTP is required}
+      - IP_HTTPS=${IP_HTTPS:-}
       - PDNS_API_KEY=${PDNS_API_KEY}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
-      # What: DDNS updates accepted from loopback only.
-      # Why: a replica takes zones by AXFR, not LAN updates.
-      # From: Issue #1683 | PR #1912
-      - DDNS_ALLOW_FROM=127.0.0.1
       - DNS_REPLICATION_ROLE=secondary
       - DNS_XFR_PRIMARY=${DNS_XFR_PRIMARY:?DNS_XFR_PRIMARY is required}
-      - SUPERVISE_RUN_DIR=/run/lancache
-      - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-dns/secrets
+      # What: a replica keeps its secrets in its own volume.
+      # Why: no shared-secrets volume and no ui; it runs as root.
+      # From: Issue #1683 | PR #1912
+      - LANCACHE_SHARED_SECRET_DIR=${SOT_DNS_SNAPSHOT_MOUNT}/secrets
       - LANCACHE_RUNTIME_GID=0
-      - PDNS_DATA_DIR=/var/lib/powerdns
-      - DNS_STATE_DIR=/var/lib/powerdns-state
-      - DNS_CONFIG_SNAPSHOT_DIR=/var/lib/lancache-dns/config-snapshots
       - NATS_URL=${NATS_URL:?NATS_URL is required}
       - NATS_USER=${NATS_USER:?NATS_USER is required}
       - NATS_PASSWORD=${NATS_PASSWORD}
@@ -37,11 +32,11 @@ services:
       - NATS_RECORD_WRITES=0
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
     volumes:
-      - pdns-data:/var/lib/powerdns
-      - pdns-filter-state:/var/lib/powerdns-state
-      - dns-config-snapshots:/var/lib/lancache-dns
+      - pdns-data:${SOT_PDNS_DATA_DIR}
+      - pdns-filter-state:${SOT_DNS_STATE_DIR}
+      - dns-config-snapshots:${SOT_DNS_SNAPSHOT_MOUNT}
     tmpfs:
-      - /run/lancache
+      - ${SOT_SUPERVISE_RUN_DIR}
     # What: https binds only if LISTEN_IP_HTTPS is set.
     # Why: otherwise loopback with an ephemeral port.
     # From: Issue #1683 | PR #1912

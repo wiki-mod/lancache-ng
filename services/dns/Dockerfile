@@ -120,11 +120,15 @@ COPY --from=dns-builder /build/lancache-watchdog-out /usr/local/bin/lancache-wat
 # Why: the COPY and its path have one owner: this file.
 # From: Issue #1683 | PR #1912
 COPY services/dns/filter-aaaa.lua /etc/pdns/filter-aaaa.lua
-COPY services/dns/cdn-domains.txt /etc/pdns/cdn-domains.txt
 COPY services/dns/schema.sqlite3.sql /usr/share/lancache-ng/schema.sqlite3.sql
 ENV PDNS_LUA_DNS_SCRIPT=/etc/pdns/filter-aaaa.lua \
-    CDN_DOMAINS_FILE=/etc/pdns/cdn-domains.txt \
     PDNS_SCHEMA_FILE=/usr/share/lancache-ng/schema.sqlite3.sql
+
+# What: the CDN domain list at the path the SOT names.
+# Why: a replica has no bind mount; the image carries it.
+# From: Issue #1683 | PR #1912
+ARG CDN_DOMAINS_FILE
+COPY services/dns/cdn-domains.txt ${CDN_DOMAINS_FILE}
 
 # What: processes the supervisor runs, from the SOT.
 # Why: ci.sh passes the list; the image holds no copy.

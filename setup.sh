@@ -423,7 +423,7 @@ confirm() {
 # What: runs a broadcast DHCP probe before Kea activation
 # Why: stops or warns before a second DHCP server exists
 run_kea_dhcp_activation_preflight() {
-    local env_file="$1" output status log_port server_identifier=""
+    local env_file="$1" output status server_identifier=""
 
     [[ "$DHCP_MODE" = "kea" ]] || return 0
 
@@ -433,8 +433,7 @@ run_kea_dhcp_activation_preflight() {
     # What: one supervisor probe run in the dhcp image
     # Why: the same probe as the Admin UI; no extra package
     # From: Issue #1683 | PR #1912
-    log_port=$(prod_env_default LANCACHE_LOG_PORT) || exit $?
-    if ! output=$(LANCACHE_LOG_PORT="$log_port" docker compose --env-file "$env_file" -f "$PROD_COMPOSE" run --rm --no-deps dhcp \
+    if ! output=$(sot_compose --env-file "$env_file" -f "$PROD_COMPOSE" run --rm --no-deps dhcp \
         probe) || ! status=$(json_value .status "$output") || [[ "$status" = unavailable || -z "$status" ]]; then
         print_warn "DHCP discovery preflight could not be executed inside the dhcp image."
         print_warn "Kea activation will require an explicit confirmation because the safety check did not complete."
@@ -1552,9 +1551,7 @@ stack_compose() {
     local -a stack_files
     shift 2
     compose_files_into stack_files "$install_dir"
-    local log_port
-    log_port=$(prod_env_default LANCACHE_LOG_PORT) || exit $?
-    LANCACHE_LOG_PORT="$log_port" docker compose --env-file "$env_file" "${stack_files[@]}" "$@"
+    sot_compose --env-file "$env_file" "${stack_files[@]}" "$@"
 }
 
 # What: sorted entries of a volume/dir: mode, owner, hash
@@ -2141,6 +2138,20 @@ prod_env_default() {
     list=$(lancache_sot_value defaults runtime) || exit $?
     tr '|' '\n' <<< "$list" | awk -v p="$1=" 'index($0, p) == 1 && !f { print substr($0, length(p) + 1); f = 1 } END { exit !f }' \
         || die "The SOT runtime.defaults holds no default for $1."
+}
+
+# What: docker compose with the SOT compose_keys as SOT_<KEY>
+# Why: compose names no path, port or default of its own
+# From: Issue #1683 | PR #1912
+sot_compose() {
+    local keys key value
+    local -a sot_env=()
+    keys=$(lancache_sot_value compose_keys runtime) || exit $?
+    for key in $keys; do
+        value=$(prod_env_default "$key") || exit $?
+        sot_env+=("SOT_${key}=${value}")
+    done
+    env "${sot_env[@]}" docker compose "$@"
 }
 
 # What: "svc KEY [TARGET]" rows moved out of config/prod

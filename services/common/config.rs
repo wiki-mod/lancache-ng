@@ -55,6 +55,18 @@ pub fn env_opt(name: &str) -> Option<String> {
     opt(&process_env, name)
 }
 
+// What: the LAN address a DHCP DNS key falls back to.
+// Why: ui and dhcp share one rule; compose derives none.
+// From: Issue #1683 | PR #1912
+pub fn dhcp_dns_fallback(get: &dyn Fn(&str) -> Option<String>, key: &str) -> Option<String> {
+    let lan = match key {
+        "DHCP_DNS_PRIMARY" | "DHCP_DNS_SERVER_IP" => "IP_HTTP",
+        "DHCP_DNS_SECONDARY" => "IP_HTTPS",
+        _ => return None,
+    };
+    opt(get, lan)
+}
+
 // What: the error text of a variable nobody set.
 // Why: one wording for need, Uint and the ui field checks.
 // From: Issue #1683 | PR #1905
@@ -679,6 +691,28 @@ mod tests {
         assert_eq!(default_in(list, "A"), None);
         assert_eq!(default_in(list, "D"), None);
         assert_eq!(default_in("", "A_PORT"), None);
+    }
+
+    // What: a DHCP DNS key falls back to its LAN address.
+    // Why: compose derives no fallback; the rule is here.
+    // From: Issue #1683 | PR #1912
+    #[test]
+    fn dhcp_dns_keys_fall_back_to_the_lan_addresses() {
+        let get = |name: &str| match name {
+            "IP_HTTP" => Some("10.0.0.2".to_string()),
+            "IP_HTTPS" => Some(String::new()),
+            _ => None,
+        };
+        assert_eq!(
+            dhcp_dns_fallback(&get, "DHCP_DNS_PRIMARY"),
+            Some("10.0.0.2".to_string())
+        );
+        assert_eq!(
+            dhcp_dns_fallback(&get, "DHCP_DNS_SERVER_IP"),
+            Some("10.0.0.2".to_string())
+        );
+        assert_eq!(dhcp_dns_fallback(&get, "DHCP_DNS_SECONDARY"), None);
+        assert_eq!(dhcp_dns_fallback(&get, "DHCP_GATEWAY"), None);
     }
 
     // What: the documented true and false sets parse.
