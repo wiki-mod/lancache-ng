@@ -26,7 +26,7 @@ ARG MUSL_TARGET
 # What: workspace crate, supplied by ci.sh from the SOT.
 # Why: the SOT owns the crate; rust-build receives it.
 # From: Issue #1683 | PR #1858
-ARG RUST_CRATE
+ARG RUST_CRATES
 
 # What: cargo tuning args, consumed by ci.sh rust-build.
 # Why: PROJECT_CARGO_*/CARGO_BUILD_JOBS own these.
@@ -70,7 +70,7 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
-    bash /usr/local/bin/ci.sh rust-build ui "${RUST_CRATE}" deps
+    bash /usr/local/bin/ci.sh rust-build ui "${RUST_CRATES}" deps
 COPY services/ui/src ./services/ui/src
 # What: ci.sh owns the rust build accel policy (one owner).
 # Why: AG-CI-005/022/023; bind-mounted, never baked in.
@@ -83,7 +83,7 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
-    bash /usr/local/bin/ci.sh rust-build ui "${RUST_CRATE}"
+    bash /usr/local/bin/ci.sh rust-build ui "${RUST_CRATES}"
 
 # What: scratch only when ci.sh passed no image arg.
 # Why: no baked image; a missing arg fails the build.
