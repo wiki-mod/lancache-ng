@@ -86,7 +86,7 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      # What: shallow checkout with persistent auth
+      # What: shallow auth checkout of the event commit
       # Why: no SHA pin outside SOT; git is in build-tools.
       # From: Issue #1683
       - &bootstrap
@@ -97,7 +97,7 @@ jobs:
           git init -q .
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
-          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_SHA}"
           git checkout -q FETCH_HEAD
       - name: Resolve the build-tools image
         id: resolve

@@ -68,7 +68,7 @@ jobs:
       runner: ${{ steps.jobs.outputs.runner }}
       timeouts: ${{ steps.jobs.outputs.timeouts }}
     steps:
-      # What: shallow checkout with persistent auth
+      # What: shallow auth checkout of the event commit
       # Why: ci.sh loads the diff history it needs itself.
       # From: Issue #1683 | PR #1858
       - &bootstrap
@@ -79,7 +79,7 @@ jobs:
           git init -q .
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
-          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_SHA}"
           git checkout -q FETCH_HEAD
       - name: Collect changed files
         id: changed

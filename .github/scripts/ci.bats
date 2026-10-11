@@ -1440,12 +1440,16 @@ pin-platform|@PC@||@SP@|@ARCH@=.+ @SHA@=[0-9a-f]{64}$|-
 CASES
 }
 
-# What: OCI labels of a real service from SOT and run env
+# What: OCI labels from the SOT, the env and the checkout
 # Why: build provenance is set once per image by ci.sh
 # From: Issue #1683 | PR #1858
-@test "oci labels: provenance from the SOT and the run env" {
-    local want got fb base
-    local -A V=(["@OWN@"]="$(_val name)" ["@REPO@"]="$(_val name)" ["@SRV@"]="$(_val url)" ["@SHA@"]="$(_val sha)")
+@test "oci labels: provenance from the SOT, the env and the checkout" {
+    local want got fb base r u
+    local -A V=(["@OWN@"]="$(_val name)" ["@REPO@"]="$(_val name)" ["@SRV@"]="$(_val url)")
+    r="$(_val path)" u="$(_val path)"
+    git init -q "${r}" && git init -q "${u}" || return 1
+    git -C "${r}" -c user.email="$(_val name)@$(_val host)" -c user.name="$(_val name)" commit -q --allow-empty -m "$(_val name)" \
+        && V["@SHA@"]="$(git -C "${r}" rev-parse HEAD)" || return 1
     V["@S@"]="$(ci_services | awk 'NR == 1')"
     fb="$(_ci_required_field "${V["@S@"]}" final_base)" && base="$(_ci_block_entry_field base_images "" "${fb}")" \
         && V["@LIC@"]="$(_ci_release_value license)" || { echo "SOT inputs: ${V[*]} ${fb} ${base}"; return 1; }
@@ -1454,17 +1458,16 @@ CASES
     want="$(_fill "$(printf 'org.opencontainers.image.%s\n' 'revision=@SHA@' 'version=@SHA@' \
         'source=@SRV@/@OWN@/@REPO@' 'url=@SRV@/@OWN@/@REPO@' 'documentation=@SRV@/@OWN@/@REPO@' 'licenses=@LIC@' \
         'vendor=@OWN@' 'title=@S@' 'description=@REPO@ @S@ image' 'base.name=@BIMG@' 'base.digest=@BDIG@')")"
-    GITHUB_SHA="${V["@SHA@"]}" GITHUB_SERVER_URL="${V["@SRV@"]}" GITHUB_REPOSITORY="${V["@OWN@"]}/${V["@REPO@"]}" \
-        run _ci_oci_labels "${V["@S@"]}"
+    CI_REPO_ROOT="${r}" GITHUB_SHA="$(_val sha)" GITHUB_SERVER_URL="${V["@SRV@"]}" \
+        GITHUB_REPOSITORY="${V["@OWN@"]}/${V["@REPO@"]}" run _ci_oci_labels "${V["@S@"]}"
     _expect labels 0 - || return 1
     [[ "${output%%$'\n'*}" =~ ^org\.opencontainers\.image\.created=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
         || { echo "created: ${output}"; return 1; }
     got="${output#*$'\n'}"
     [ "${got}" = "${want}" ] || { echo "labels: ${got}"; echo "want: ${want}"; return 1; }
-    GITHUB_SHA='' GITHUB_SERVER_URL="${V["@SRV@"]}" GITHUB_REPOSITORY="${V["@OWN@"]}/${V["@REPO@"]}" \
+    CI_REPO_ROOT="${u}" GITHUB_SERVER_URL="${V["@SRV@"]}" GITHUB_REPOSITORY="${V["@OWN@"]}/${V["@REPO@"]}" \
         run _ci_oci_labels "${V["@S@"]}"
-    _expect no-sha 0 - || return 1
-    [[ "${output}" != *"image.revision="* && "${output}" != *"image.version="* ]] || { echo "no-sha: ${output}"; return 1; }
+    _expect no-commit 2 '[CI-ERROR-CORE-0106]' || return 1
 }
 
 # What: no repo fails coded and a gone path is noted
@@ -1616,7 +1619,7 @@ CASES
 # Why: arch doc Test B/C/D; unproven changes run it.
 # From: Issue #1683 | PR #1858
 @test "ci-bats gate: only a shell comment change skips the suite" {
-    local r base head case path body want id
+    local r base case path body want id
     local -A V=(
         ["@B@"]="$(_val name).bats" ["@L@"]="$(_val name).sh" ["@N@"]="$(_val name).md" ["@NEW@"]="$(_val name).sh"
         ["@Y@"]="$(_val name).yml" ["@RS@"]="$(_val name).rs" ["@C1@"]="$(_val name)" ["@C2@"]="$(_val name)"
@@ -1644,8 +1647,7 @@ CASES
         printf '%b' "$(_fill "${body}")" > "${r}/$(_fill "${path}")"
         git -C "${r}" add -A
         git -C "${r}" -c user.email="${V["@MAIL@"]}" -c user.name="${V["@WHO@"]}" commit -qm "${case}"
-        head="$(git -C "${r}" rev-parse HEAD)"
-        CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push BEFORE_SHA="${base}" GITHUB_SHA="${head}" \
+        CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push BEFORE_SHA="${base}" \
             run _ci_test_identity_gate "$(_fill "${path}")"
         _expect "${case}" 0 "${id}" || return 1
         [ "${lines[${#lines[@]}-1]}" = "${want}" ] || { echo "${case} want ${want}: ${output}"; return 1; }
@@ -1661,7 +1663,7 @@ new-file|@NEW@|echo @E1@\n|run|[CI-INFO-TESTID-0002]
 other-file|@Y@|@C1@: @E1@\n|run|[CI-INFO-TESTID-0006]
 rust-comment|@RS@|// @C2@\nfn main() {}\n|run|[CI-INFO-TESTID-0006]
 CASES
-    CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push BEFORE_SHA='' GITHUB_SHA="${head}" run _ci_test_identity_gate "${V["@B@"]}"
+    CI_REPO_ROOT="${r}" GITHUB_EVENT_NAME=push BEFORE_SHA='' run _ci_test_identity_gate "${V["@B@"]}"
     _expect no-base 0 '[CI-INFO-TESTID-0004]' || return 1
     [ "${lines[${#lines[@]}-1]}" = run ] || { echo "no-base: ${output}"; return 1; }
     run _ci_test_identity_gate
@@ -4755,4 +4757,41 @@ CASES
     _ci_validate_reserve() { printf 'subnet=%s\n' "${w}"; }
     _closed validate-holder holder _ci_validate_stack "${w}" || return 1
     [ ! -e "${rel}" ] || { echo "validate-holder: released without a holder"; return 1; }
+}
+
+# What: a channel run checks out its SOT source or a pin
+# Why: a schedule run starts on the default branch tip
+# From: Issue #1683 | PR #1858
+@test "channel checkout: SOT source ref, pinned commit, coded misuse" {
+    local o s w rows ch ref other src next
+    local -a commit
+    local -x CI_GIT_REMOTE GITHUB_OUTPUT
+    o="$(_val path)" s="$(_val path)" w="$(_val path)" other="$(_val name)"
+    CI_GIT_REMOTE="$(_val name)" GITHUB_OUTPUT="$(_val path)"
+    rows="$(_ci_channel_field source_ref)" || { echo "SOT source_ref rows: ${rows}"; return 1; }
+    ch="$(awk 'NR == 1 { print $1 }' <<< "${rows}")" ref="$(awk 'NR == 1 { print $2 }' <<< "${rows}")"
+    [ -n "${ch}" ] && [[ "${ref}" == refs/heads/?* ]] || { echo "SOT source_ref rows: ${rows}"; return 1; }
+    commit=(git -C "${s}" -c user.email="$(_val name)@$(_val host)" -c user.name="$(_val name)" commit -q --allow-empty -m)
+    git init -q --bare "${o}" && git -C "${o}" config uploadpack.allowReachableSHA1InWant true && git init -q "${s}" || return 1
+    "${commit[@]}" "${other}" && git -C "${s}" push -q "${o}" "HEAD:refs/heads/${other}" || return 1
+    "${commit[@]}" "${ch}" && git -C "${s}" push -q "${o}" "HEAD:${ref}" && src="$(git -C "${s}" rev-parse HEAD)" || return 1
+    git init -q "${w}" && git -C "${w}" remote add "${CI_GIT_REMOTE}" "${o}" || return 1
+    git -C "${w}" fetch -q --depth=1 "${CI_GIT_REMOTE}" "refs/heads/${other}" && git -C "${w}" checkout -q FETCH_HEAD || return 1
+    CI_MANIFEST="${CI_MANIFEST_SOURCE}" CI_REPO_ROOT="${w}" run bash "${CI_SH}" channel-checkout
+    _expect no-channel 2 '[CI-ERROR-PROMOTE-0017]' || return 1
+    CI_REPO_ROOT="${w}" run ci_cmd_channel_checkout "$(_val name)"
+    _expect no-source-ref 2 '[CI-ERROR-PROMOTE-0018]' || return 1
+    CI_REPO_ROOT="${w}" run ci_cmd_channel_checkout "${ch}" "$(_val name)"
+    _expect bad-pin 2 '[CI-ERROR-PROMOTE-0020]' || return 1
+    : > "${GITHUB_OUTPUT}"
+    CI_REPO_ROOT="${w}" run ci_cmd_channel_checkout "${ch}"
+    _expect source-ref 0 "channel=${ch} source_ref=${ref} commit=${src}" || return 1
+    [ "$(git -C "${w}" rev-parse HEAD)" = "${src}" ] && [ "$(< "${GITHUB_OUTPUT}")" = "commit=${src}" ] \
+        || { echo "source-ref: HEAD $(git -C "${w}" rev-parse HEAD) output $(< "${GITHUB_OUTPUT}") want ${src}"; return 1; }
+    "${commit[@]}" "${other}" && git -C "${s}" push -q "${o}" "HEAD:${ref}" && next="$(git -C "${s}" rev-parse HEAD)" || return 1
+    git -C "${w}" fetch -q --depth=1 "${CI_GIT_REMOTE}" "refs/heads/${other}" && git -C "${w}" checkout -q FETCH_HEAD || return 1
+    CI_REPO_ROOT="${w}" run ci_cmd_channel_checkout "${ch}" "${src}"
+    _expect pinned 0 "commit=${src}" || return 1
+    [ "$(git -C "${w}" rev-parse HEAD)" = "${src}" ] && [ "${next}" != "${src}" ] \
+        || { echo "pinned: HEAD $(git -C "${w}" rev-parse HEAD) want ${src}, ref tip ${next}"; return 1; }
 }

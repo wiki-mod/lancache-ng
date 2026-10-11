@@ -57,7 +57,7 @@ declare -A CI_DISPATCH=(
     [test]=ci_cmd_test [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
     [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-status]=ci_cmd_nightly_status
-    [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
+    [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
     [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog
     [gc]=ci_cmd_gc [variables]=ci_cmd_variables [socket-proxy-config]=ci_cmd_socket_proxy_config [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
     [welcome]=ci_cmd_welcome [version]=ci_cmd_version
@@ -1731,6 +1731,13 @@ _ci_git_remote() {
     _ci_variable CI_GIT_REMOTE
 }
 
+# What: the commit this run checked out and builds
+# Why: tags, labels, diffs name the tree, not the event
+# From: Issue #1683 | PR #1858
+_ci_head_commit() {
+    _ci_capture 0 git -C "${CI_REPO_ROOT}" rev-parse --verify HEAD
+}
+
 # What: Print the ledger blob text; 1 empty, 2 unknown.
 # Why: A failed read is UNKNOWN, never "no records".
 # From: Issue #1683
@@ -1964,7 +1971,7 @@ ci_cmd_scan_stack() {
 # Why: workflows check out one commit; ci.sh owns the diff.
 # From: Issue #1683 | PR #1858
 _ci_diff_history() {
-    local shallow have="" remote
+    local shallow have="" remote head
     local -a deep=() need=()
     shallow="$(cd -- "${CI_REPO_ROOT}" && _ci_capture 0 git rev-parse --is-shallow-repository)" || return 2
     [ "${shallow}" = true ] && deep=(--unshallow)
@@ -1973,10 +1980,9 @@ _ci_diff_history() {
         [ -n "${have}" ] || need=("${BASE_SHA}")
     fi
     [ "${#deep[@]}" -gt 0 ] || [ "${#need[@]}" -gt 0 ] || return 0
-    _ci_env_required GITHUB_REF "[CI-ERROR-CORE-0124]" \
-        "shallow=\"${shallow}\" base=\"${BASE_SHA:-}\" reason=\"diff history missing and no GITHUB_REF to fetch\"" > /dev/null || return 2
+    head="$(_ci_head_commit)" || return 2
     remote="$(_ci_git_remote)" || return 2
-    (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch -q --no-tags "${deep[@]}" "${remote}" "${GITHUB_REF}" "${need[@]}") \
+    (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch -q --no-tags "${deep[@]}" "${remote}" "${head}" "${need[@]}") \
         > /dev/null || return 2
 }
 
@@ -1984,11 +1990,12 @@ _ci_diff_history() {
 # Why: one owner; changed-files and codeql share the refs.
 # From: Issue #1683
 _ci_diff_refs() {
-    local mb before
+    local mb before head
     _ci_diff_history || return 2
+    head="$(_ci_head_commit)" || return 2
     if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
-        mb="$(cd -- "${CI_REPO_ROOT}" && _ci_capture 0 git merge-base "${BASE_SHA:-}" FETCH_HEAD)" || return 2
-        printf '%s %s\n' "${mb}" FETCH_HEAD
+        mb="$(cd -- "${CI_REPO_ROOT}" && _ci_capture 0 git merge-base "${BASE_SHA:-}" "${head}")" || return 2
+        printf '%s %s\n' "${mb}" "${head}"
         return 0
     fi
     if [ -z "${BEFORE_SHA:-}" ] || [ "${BEFORE_SHA}" = 0000000000000000000000000000000000000000 ]; then
@@ -1999,7 +2006,7 @@ _ci_diff_refs() {
     # From: Issue #1683 | PR #1858
     before="$(cd -- "${CI_REPO_ROOT}" && _ci_capture 1 git rev-parse -q --verify "${BEFORE_SHA}^{commit}")" || return 2
     if [ -n "${before}" ]; then
-        printf '%s %s\n' "${BEFORE_SHA}" "${GITHUB_SHA}"
+        printf '%s %s\n' "${BEFORE_SHA}" "${head}"
     fi
 }
 
@@ -2636,21 +2643,22 @@ _ci_build_tools_image() {
     _ci_image_ref "${tool}"
 }
 
-# What: OCI image labels from the SOT and env.
+# What: OCI labels from the SOT, the env and the checkout
 # Why: Provenance labels set once, not per Dockerfile.
 # From: Issue #1683
 _ci_oci_labels() {
-    local service="$1" repo source base final created lic
+    local service="$1" repo source base final created lic head
     repo="$(_ci_repo)" || return 2
     lic="$(_ci_release_value license)" || return 2
     source="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
     source="${source}/${repo}"
     final="$(_ci_required_field "${service}" final_base)" || return 2
     base="$(_ci_block_entry_field base_images "" "${final}")" || return 2
+    head="$(_ci_head_commit)" || return 2
     created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'org.opencontainers.image.created=%s\n' "${created}"
-    [ -n "${GITHUB_SHA:-}" ] && printf 'org.opencontainers.image.revision=%s\n' "${GITHUB_SHA}"
-    [ -n "${GITHUB_SHA:-}" ] && printf 'org.opencontainers.image.version=%s\n' "${GITHUB_SHA}"
+    printf 'org.opencontainers.image.revision=%s\n' "${head}"
+    printf 'org.opencontainers.image.version=%s\n' "${head}"
     printf 'org.opencontainers.image.source=%s\n' "${source}"
     printf 'org.opencontainers.image.url=%s\n' "${source}"
     printf 'org.opencontainers.image.documentation=%s\n' "${source}"
@@ -4162,7 +4170,7 @@ _ci_index_lookup() {
     local service="$1"
     local name sha tag idx grc=0 raw plats
     name="$(_ci_image_ref "${service}")" || return 2
-    sha="$(_ci_env_required GITHUB_SHA)" || return 2
+    sha="$(_ci_head_commit)" || return 2
     tag="${name}:sha-${sha}"
     idx="$(_ci_registry_probe "${tag}")" || grc=$?
     [ "${grc}" -eq 0 ] || return "${grc}"
@@ -4228,7 +4236,7 @@ _ci_docker_assemble() {
     local service="$1"; shift
     local name sha target kv
     name="$(_ci_image_ref "${service}")" || return 2
-    sha="$(_ci_env_required GITHUB_SHA)" || return 2
+    sha="$(_ci_head_commit)" || return 2
     target="${name}:sha-${sha}"
     local -a srcs=()
     for kv; do
@@ -4314,6 +4322,41 @@ _ci_release_ref() {
         return 2
     fi
     printf '%s\n' "${ref}"
+}
+
+# What: check out a channel source_ref or a pinned commit
+# Why: a schedule run starts on the default branch
+# From: Issue #1683 | PR #1858
+ci_cmd_channel_checkout() {
+    local channel="${1:-}" pin="${2:-}" rows ref remote want sha
+    if [ -z "${channel}" ]; then
+        ci_log "[CI-ERROR-PROMOTE-0017]" "reason=\"channel arg required\""
+        return 2
+    fi
+    rows="$(_ci_channel_field source_ref)" || return 2
+    ref="$(awk -v c="${channel}" '$1 == c { print $2 }' <<< "${rows}")"
+    if [ -z "${ref}" ]; then
+        ci_log "[CI-ERROR-PROMOTE-0018]" "channel=\"${channel}\" reason=\"SOT release.channels has no source_ref for this channel\""
+        return 2
+    fi
+    # What: a later job checks out the first job's commit
+    # Why: all jobs of one run validate and promote one tree
+    # From: Issue #1683 | PR #1858
+    want="${ref}"
+    if [ -n "${pin}" ]; then
+        if [[ ! "${pin}" =~ ^[0-9a-f]{40}$ ]]; then
+            ci_log "[CI-ERROR-PROMOTE-0020]" "channel=\"${channel}\" commit=\"${pin}\" reason=\"pinned commit is not a full 40-hex SHA\""
+            return 2
+        fi
+        want="${pin}"
+    fi
+    remote="$(_ci_git_remote)" || return 2
+    (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch -q --no-tags --depth=1 "${remote}" "${want}") || return 2
+    _ci_run "[CI-ERROR-PROMOTE-0019]" "channel=\"${channel}\" ref=\"${want}\" reason=\"checkout of the fetched source failed\"" \
+        git -C "${CI_REPO_ROOT}" checkout -q FETCH_HEAD || return 2
+    sha="$(_ci_head_commit)" || return 2
+    _ci_step_output "[CI-ERROR-PROMOTE-0021]" commit "${sha}" || return 2
+    printf 'channel=%s source_ref=%s commit=%s\n' "${channel}" "${ref}" "${sha}"
 }
 
 # What: True if a channel is a known mutable channel.
@@ -4667,7 +4710,7 @@ _ci_ref_tip() {
 # Why: one ref entry, supersede-safe, single policy owner.
 # From: Issue #1683
 ci_cmd_promote_ref() {
-    local ref="${GITHUB_REF:-}" tip targets t
+    local ref="${GITHUB_REF:-}" tip targets t head
     targets="$(_ci_promote_targets_for_ref)" || return "$?"
     if [ -z "${targets}" ]; then
         printf 'promote=noop reason=no-targets ref=%s\n' "${ref}"
@@ -4682,13 +4725,15 @@ ci_cmd_promote_ref() {
     fi
     # What: moved branch tip means newer run supersedes.
     # Why: determinism (§4); never promote stale blind.
+    # From: Issue #1683 | PR #1858
     if [[ "${ref}" == refs/heads/* ]]; then
         if ! tip="$(_ci_ref_tip "${ref}")"; then
             ci_log "[CI-ERROR-PROMOTE-0013]" "ref=\"${ref}\" reason=\"could not resolve ref tip; refusing blind promote\""
             return 2
         fi
-        if [ -n "${tip}" ] && [ "${tip}" != "${GITHUB_SHA:-}" ]; then
-            printf 'promote=superseded ref=%s tip=%s sha=%s\n' "${ref}" "${tip}" "${GITHUB_SHA:-}"
+        head="$(_ci_head_commit)" || return 2
+        if [ -n "${tip}" ] && [ "${tip}" != "${head}" ]; then
+            printf 'promote=superseded ref=%s tip=%s sha=%s\n' "${ref}" "${tip}" "${head}"
             return 0
         fi
     fi
@@ -4749,7 +4794,7 @@ _ci_release_validation_valid() {
     local rel gov state target layer sub commit paths rows stale="" out
     rel="$(_ci_block_entry_field release "" validation_state)" || return 2
     gov="$(_ci_block_entry_list release "" governance_paths)" || return 2
-    target="$(_ci_env_required GITHUB_SHA)" || return 2
+    target="$(_ci_head_commit)" || return 2
     state="${CI_REPO_ROOT}/${rel}"
     if [ -z "${rel}" ] || [ -z "${gov}" ] || ! jq -e '.subsystem_validation' "${state}" >/dev/null; then
         ci_log "[CI-ERROR-RELEASE-0014]" "state=\"${state}\" reason=\"no readable SOT validation record\""
@@ -4993,13 +5038,14 @@ ci_cmd_release_changelog() {
 # Why: Records every shipped digest; SOT list, no hardcode.
 # From: Issue #1683
 _ci_release_notes_block() {
-    local tag="$1" base target img dig
+    local tag="$1" base target img dig head
     base="$(_ci_image_ref)" || return 2
+    head="$(_ci_head_commit)" || return 2
     _ci_release_marker start || return 2
     printf '## Changes\n\n'
     _ci_release_changes "${tag}" || return 2
     printf '\n## Images\n\n'
-    printf 'Images published for %s (commit %s):\n\n' "${tag}" "${GITHUB_SHA:-unknown}"
+    printf 'Images published for %s (commit %s):\n\n' "${tag}" "${head}"
     local targets
     targets="$(ci_build_targets)" || return 2
     for target in ${targets} stack; do
@@ -5073,7 +5119,7 @@ ci_cmd_release_publish() {
     local repo sha pre want state found body_file err mode=unchanged rc=0
     local -a create=()
     repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
-    sha="$(_ci_env_required GITHUB_SHA)" || return 2
+    sha="$(_ci_head_commit)" || return 2
     pre="$(_ci_release_prerelease "${tag}")" || return "$?"
     _ci_require_ghcr_auth || return "$?"
     want="$(_ci_release_notes_block "${tag}")" || return "$?"
@@ -5289,7 +5335,7 @@ ci_cmd_cut_release_tag() {
         ci_log "[CI-ERROR-RELEASE-0040]" "ref=\"${GITHUB_REF:-}\" release_ref=\"${rel_ref}\" reason=\"not the release ref; not cutting\""
         return 2
     fi
-    head="$(_ci_env_required GITHUB_SHA)" || return 2
+    head="$(_ci_head_commit)" || return 2
     base_tag="$(_ci_last_release_tag)" || return 2
     if [ -z "${base_tag}" ]; then
         ci_log "[CI-ERROR-RELEASE-0041]" "reason=\"no previous release to bump; the first release tag is cut by hand\""
@@ -9352,8 +9398,8 @@ _ci_check_executable_bits() {
 # From: Issue #1683 | PR #1686
 _ci_review_chronology_diff_files() {
     _ci_env_required CHRONOLOGY_DIFF_BASE_REF > /dev/null || return 2
-    _ci_env_required GITHUB_SHA > /dev/null || return 2
-    local remote
+    local remote head
+    head="$(_ci_head_commit)" || return 2
     remote="$(_ci_git_remote)" || return 2
     _ci_retry "git-fetch-chronology-base-ref" git fetch --no-tags --depth=1 "${remote}" \
         "+refs/heads/${CHRONOLOGY_DIFF_BASE_REF}:refs/remotes/${remote}/${CHRONOLOGY_DIFF_BASE_REF}" >/dev/null || return 2
@@ -9362,13 +9408,11 @@ _ci_review_chronology_diff_files() {
     local out
     out="$(git cat-file -e "${CHRONOLOGY_DIFF_BASE_SHA}^{commit}" 2>&1)" || {
         ci_error "[CI-ERROR-CHECK-0010]" "sha=\"${CHRONOLOGY_DIFF_BASE_SHA}\" reason=\"diff base sha unreachable\"" "${out}"; return 2; }
-    out="$(git cat-file -e "${GITHUB_SHA}^{commit}" 2>&1)" || {
-        ci_error "[CI-ERROR-CHECK-0076]" "sha=\"${GITHUB_SHA}\" reason=\"GITHUB_SHA unreachable\"" "${out}"; return 2; }
     local diff_file
     diff_file="$(_ci_mktemp -p "${CI_TMPDIR}")" || return 2
     if ! out="$(git diff -z --name-only --diff-filter=ACMRTUXB \
-        "${CHRONOLOGY_DIFF_BASE_SHA}" "${GITHUB_SHA}" 2>&1 > "${diff_file}")"; then
-        ci_error "[CI-ERROR-CHECK-0077]" "base=\"${CHRONOLOGY_DIFF_BASE_SHA}\" head=\"${GITHUB_SHA}\" reason=\"git diff itself failed; not treating as a clean pass\"" "${out}"
+        "${CHRONOLOGY_DIFF_BASE_SHA}" "${head}" 2>&1 > "${diff_file}")"; then
+        ci_error "[CI-ERROR-CHECK-0077]" "base=\"${CHRONOLOGY_DIFF_BASE_SHA}\" head=\"${head}\" reason=\"git diff itself failed; not treating as a clean pass\"" "${out}"
         rm -f "${diff_file}"
         return 2
     fi
@@ -10188,7 +10232,7 @@ _ci_unreferenced_names() {
 # Why: repo-wide by nature (docs §98); a finding is rc 1.
 # From: Issue #1683 | PR #1858
 _ci_check_orphaned_branches() {
-    local repo min_age now exact regexes raw rows rc=0
+    local repo min_age now exact regexes raw src rows rc=0
     repo="$(_ci_repo)" || return 2
     if [ -z "${GH_TOKEN:-}" ]; then
         ci_log "[CI-ERROR-CHECK-0130]" "repo=\"${repo}\" reason=\"GH_TOKEN is required\""
@@ -10200,10 +10244,11 @@ _ci_check_orphaned_branches() {
         return 2
     fi
     # What: long-lived = channel refs + branch_policy lists.
-    # Why: release.channels owns master; no second literal.
+    # Why: release.channels owns master and current_dev.
     # From: Issue #1683 | PR #1858
     raw="$(_ci_channel_field ref)" || return 2
-    exact="$(awk '$2 ~ /^refs\/heads\// { sub(/^refs\/heads\//, "", $2); print $2 }' <<< "${raw}")"
+    src="$(_ci_channel_field source_ref)" || return 2
+    exact="$(awk '$2 ~ /^refs\/heads\// { sub(/^refs\/heads\//, "", $2); print $2 }' <<< "${raw}"$'\n'"${src}")"
     raw="$(_ci_block_entry_list branch_policy "" long_lived)" || return 2
     exact+=$'\n'"${raw}"
     regexes="$(_ci_block_entry_list branch_policy "" long_lived_regex)" || return 2

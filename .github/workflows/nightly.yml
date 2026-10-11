@@ -54,6 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
+      commit: ${{ steps.source.outputs.commit }}
       image: ${{ steps.resolve.outputs.image }}
       runner: ${{ steps.jobs.outputs.runner }}
       timeouts: ${{ steps.jobs.outputs.timeouts }}
@@ -66,7 +67,7 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      # What: shallow checkout with persistent auth
+      # What: shallow auth checkout of the event commit
       # Why: no SHA pin outside SOT; git is in build-tools.
       # From: Issue #1683
       - &bootstrap
@@ -77,8 +78,14 @@ jobs:
           git init -q .
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
-          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_SHA}"
           git checkout -q FETCH_HEAD
+      # What: switch to the nightly source ref from the SOT
+      # Why: a schedule run checks out the default branch
+      # From: Issue #1683 | PR #1858
+      - name: Check out the nightly source ref
+        id: source
+        run: bash .github/scripts/ci.sh channel-checkout nightly
       - name: Resolve the build-tools image
         id: resolve
         run: bash .github/scripts/ci.sh build-tools resolve-image
@@ -96,6 +103,14 @@ jobs:
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['validate'] }}
     steps:
       - *bootstrap
+      # What: check out the commit the platform job resolved
+      # Why: validate and promote must see one tree
+      # From: Issue #1683 | PR #1858
+      - &channel_pin
+        name: Check out the resolved nightly commit
+        env:
+          SOURCE_COMMIT: ${{ needs.platform.outputs.commit }}
+        run: bash .github/scripts/ci.sh channel-checkout nightly "${SOURCE_COMMIT}"
       - name: Validate the accepted stack candidate
         run: bash .github/scripts/ci.sh validate
 
@@ -112,6 +127,7 @@ jobs:
       credentials: *ghcr_credentials
     steps:
       - *bootstrap
+      - *channel_pin
       - name: Audit rust dependencies
         id: audit
         run: bash .github/scripts/ci.sh check cargo-audit
@@ -135,6 +151,7 @@ jobs:
       credentials: *ghcr_credentials
     steps:
       - *bootstrap
+      - *channel_pin
       # What: promote nightly channel to validated stack
       # Why: only after validate passed; moves refs only
       # From: Issue #1683

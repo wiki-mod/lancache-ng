@@ -608,6 +608,10 @@ release:
   channels:
     nightly:
       mutable: true
+      # What: the ref a nightly run checks out and builds
+      # Why: AG-REL-009: nightly comes from current_dev only
+      # From: Issue #1683 | PR #1858
+      source_ref: refs/heads/current_dev
     latest:
       mutable: true
       # What: pushes to this ref move the channel.
@@ -896,9 +900,9 @@ pr_policy:
 branch_policy:
   orphan_min_age_seconds: 3600
   # What: long-lived refs besides the channel refs.
-  # Why: release.channels already owns the master ref.
+  # Why: release.channels owns master and current_dev.
   # From: Issue #1683 | PR #1858
-  long_lived: [current_dev, badges]
+  long_lived: [badges]
   # What: POSIX ERE for long-lived ref families.
   # Why: release branches and the VEX automation branch.
   # From: Issue #1683 | PR #1858

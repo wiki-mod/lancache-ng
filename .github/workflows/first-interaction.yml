@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      # What: fetch GITHUB_REF only (the base for a PR).
+      # What: fetch GITHUB_SHA only: the default branch tip
       # Why: pull_request_target must never run PR code.
       # From: Issue #1683 | PR #1858
       - name: Bootstrap the base tree
@@ -44,7 +44,7 @@ jobs:
           git init -q .
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)"
-          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_SHA}"
           git checkout -q FETCH_HEAD
       - name: Welcome a first issue or pull request
         run: bash .github/scripts/ci.sh welcome
