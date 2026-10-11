@@ -2928,7 +2928,7 @@ ROWS
 @test "setup quickstart install moves into deploy/prod once" {
     _registry || return 1
     _stand_ins || return 1
-    local root t="${BATS_TEST_TMPDIR}" cfg project svc keys key want vol dir absent copies f el lo prof
+    local root t="${BATS_TEST_TMPDIR}" cfg project svc keys key want vol dir absent copies f el lo prof old
     local -a profiles=()
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}" || return 1
@@ -2943,6 +2943,10 @@ ROWS
     mkdir -p "${QS}/certs" && cp "$(_template_env)" "${QS}/.env" && remove_env_key LANCACHE_STATE_DIR "${QS}/.env" \
         && set_env_key IP_HTTP "${lo}.1" "${QS}/.env" && set_env_key IP_HTTPS "${lo}.2" "${QS}/.env" || return 1
     for key in ${keys}; do set_env_key "${key}" "./${key,,}" "${QS}/.env" || return 1; done
+    old="$(get_env_var LANCACHE_IMAGE_REGISTRY "${QS}/.env")/$(get_env_var LANCACHE_IMAGE_PREFIX "${QS}/.env")/" \
+        && sed -i "s#^\(LANCACHE_IMAGE_REF_[A-Z_]*=\)${old}#\1${LANCACHE_IMAGE_REGISTRY}/${LANCACHE_IMAGE_PREFIX}/#" "${QS}/.env" \
+        && set_env_key LANCACHE_IMAGE_REGISTRY "${LANCACHE_IMAGE_REGISTRY}" "${QS}/.env" \
+        && set_env_key LANCACHE_IMAGE_PREFIX "${LANCACHE_IMAGE_PREFIX}" "${QS}/.env" || return 1
     want="$(get_env_var CACHE_MAX_SIZE "${QS}/.env")" \
         && set_env_key CACHE_MAX_SIZE "$(( ${want%%[!0-9]*} * 2 ))${want##*[0-9]}" "${QS}/.env" \
         && cp "${QS}/.env" "${t}/qs.env" || return 1
@@ -2972,7 +2976,8 @@ ROWS
     while IFS= read -r key; do
         want="$(get_env_assignment_value_raw "${key}" "${t}/qs.env")" || return 1
         [[ " ${keys} " != *" ${key} "* ]] || want="$(realpath -m "${QS}/${want}")"
-        [ "$(get_env_assignment_value_raw "${key}" "${el}")" = "${want}" ] || { echo "value of ${key}"; return 1; }
+        [ "$(get_env_assignment_value_raw "${key}" "${el}")" = "${want}" ] \
+            || { echo "value of ${key}: want ${want} got $(get_env_assignment_value_raw "${key}" "${el}")"; return 1; }
     done <<< "$(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ { print $1 }' "${t}/qs.env")"
     while read -r vol dir; do
         if [ "${vol}" = "${absent}" ]; then
