@@ -2363,7 +2363,6 @@ assert_resolved_image_tag_platform_supported() {
 
     image="${registry}/${prefix}/dns:${tag}"
 
-    # shellcheck disable=SC2016 # Go template is evaluated by Docker, not the shell.
     single_platform=$(docker buildx imagetools inspect "$image" --format '{{if .Image}}{{.Image.OS}}/{{.Image.Architecture}}{{end}}' 2>&1) \
         || die "Failed to inspect ${image} to verify it publishes a ${platform} image (${single_platform}). Check network access and registry reachability, then rerun setup.sh."
 
