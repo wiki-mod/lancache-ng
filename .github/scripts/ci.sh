@@ -11345,15 +11345,34 @@ _ci_installer_compose() {
 # Why: .env if given, else SOT fixture; one env owner.
 # From: Issue #1683 | PR #1858
 _ci_compose_run() {
-    local env_file="$1" fx kv
+    local env_file="$1" fx kv vars names i
     shift
-    local -a pre=() fixture=()
+    local -a fixture=() args=("$@") files=() unsetv=()
     if [ -n "${env_file}" ]; then
-        pre=(--env-file "${env_file}")
-    else
-        fx="$(_ci_validation_env)" || return 2
-        mapfile -t fixture <<< "${fx}"
+        # What: compose variables lose their shell values
+        # Why: a shell value would win over the env file
+        # From: Issue #1683 | PR #1858
+        for (( i = 0; i < ${#args[@]}; i++ )); do
+            case "${args[i]}" in
+                -f|--file) files+=(-f "${args[i + 1]}"); i=$(( i + 1 )) ;;
+                --profile|-p|--project-name|--project-directory|--env-file) i=$(( i + 1 )) ;;
+                -*) ;;
+                *) break ;;
+            esac
+        done
+        vars="$(_ci_run "[CI-ERROR-CORE-0144]" "env_file=\"${env_file}\" reason=\"compose variable list failed\"" \
+            docker compose --env-file "${env_file}" "${files[@]}" config --variables --format json)" || return 2
+        names="$(_ci_run "[CI-ERROR-CORE-0145]" "env_file=\"${env_file}\" reason=\"compose variable names unreadable\"" \
+            jq -r 'keys[]' <<< "${vars}")" || return 2
+        [ -z "${names}" ] || mapfile -t unsetv <<< "${names}"
+        (
+            [ "${#unsetv[@]}" -eq 0 ] || unset "${unsetv[@]}"
+            docker compose --env-file "${env_file}" "$@"
+        )
+        return "$?"
     fi
+    fx="$(_ci_validation_env)" || return 2
+    mapfile -t fixture <<< "${fx}"
     # What: export each KEY=VALUE fixture pair.
     # Why: ${kv?} is ShellCheck's pair form (SC2163).
     # From: Issue #1683 | PR #1858
@@ -11361,7 +11380,7 @@ _ci_compose_run() {
         for kv in "${fixture[@]}"; do
             export "${kv?}"
         done
-        docker compose "${pre[@]}" "$@"
+        docker compose "$@"
     )
 }
 
@@ -11936,10 +11955,7 @@ _ci_compose_image_render() {
         rm -f "${env}"
         return 2
     fi
-    # What: drops LANCACHE_IMAGE_* from the shell env too
-    # Why: compose takes a shell value over the env file
-    # From: Issue #1683 | PR #1858
-    if ! ( unset "${!LANCACHE_IMAGE_@}"; _ci_compose_json "${file}" "${env}" ) > "${out}"; then
+    if ! _ci_compose_json "${file}" "${env}" > "${out}"; then
         rm -f "${env}"
         return 2
     fi
