@@ -30,6 +30,10 @@ services:
       # Why: .env is the one owner of operator values.
       # From: Issue #1683
       - LANCACHE_LOG_PORT=${LANCACHE_LOG_PORT:?LANCACHE_LOG_PORT is required}
+      - LOGGING_PROXY_ENABLED=${LOGGING_PROXY_ENABLED:?LOGGING_PROXY_ENABLED is required}
+      - LOGGING_DNS_ENABLED=${LOGGING_DNS_ENABLED:?LOGGING_DNS_ENABLED is required}
+      - LOGGING_DHCP_ENABLED=${LOGGING_DHCP_ENABLED:?LOGGING_DHCP_ENABLED is required}
+      - LOGGING_UI_ENABLED=${LOGGING_UI_ENABLED:?LOGGING_UI_ENABLED is required}
       - NTP_ENABLED=${NTP_ENABLED:-0}
       - NTP_UPSTREAM_SERVERS=${NTP_UPSTREAM_SERVERS:?NTP_UPSTREAM_SERVERS is required}
       - NTP_ALLOWED_CLIENT_CIDRS=${NTP_ALLOWED_CLIENT_CIDRS:-}
@@ -346,6 +350,10 @@ services:
       - DHCP_PROBE_REQUEST_FILE=/data/dhcp-probe-request
       - DHCP_PROBE_RESULT_FILE=/var/lib/kea/dhcp-probe-result.json
       - SSL_ENABLED=${SSL_ENABLED:-1}
+      - LOGGING_PROXY_ENABLED=${LOGGING_PROXY_ENABLED:?LOGGING_PROXY_ENABLED is required}
+      - LOGGING_DNS_ENABLED=${LOGGING_DNS_ENABLED:?LOGGING_DNS_ENABLED is required}
+      - LOGGING_DHCP_ENABLED=${LOGGING_DHCP_ENABLED:?LOGGING_DHCP_ENABLED is required}
+      - LOGGING_UI_ENABLED=${LOGGING_UI_ENABLED:?LOGGING_UI_ENABLED is required}
       - PROXY_STANDARD_URL=http://proxy
       - PROXY_SSL_URL=http://proxy
       - PROXY_LOG_DIR=/var/log/lancache-syslog-ng/LanCache-NG-proxy

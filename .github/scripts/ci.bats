@@ -2442,6 +2442,13 @@ _legacy_env() {
         && [ "$(get_env_var IP_HTTPS "${t}/.env")" = "${ssl}" ] && ! env_key_exists IP_STANDARD "${t}/.env" && ! env_key_exists IP_SSL "${t}/.env" \
         && ! env_key_exists NATS_DNS_REPLICA_USER "${t}/.env" && ! env_key_exists NATS_DNS_REPLICA_PASSWORD "${t}/.env" \
         || { echo "legacy: ${output}"; cat "${t}/.env"; return 1; }
+    _legacy_row logging-off || return 1
+    set_env_key LOGGING_ENABLED 0 "${t}/.env" && set_env_key LOGGING_DNS_ENABLED 1 "${t}/.env"
+    _setup_sh_run 'migrate_env_for_update "${CONV}"'
+    [ "${status}" -eq 0 ] && ! env_key_exists LOGGING_ENABLED "${t}/.env" \
+        && [ "$(get_env_var LOGGING_PROXY_ENABLED "${t}/.env")$(get_env_var LOGGING_DNS_ENABLED "${t}/.env")" = 01 ] \
+        && [ "$(get_env_var LOGGING_DHCP_ENABLED "${t}/.env")$(get_env_var LOGGING_UI_ENABLED "${t}/.env")" = 00 ] \
+        || { echo "logging: ${output}"; cat "${t}/.env"; return 1; }
     before="$(cat "${t}/.env")"
     _setup_sh_run 'migrate_env_for_update "${CONV}"'
     [ "${status}" -eq 0 ] && [ "$(cat "${t}/.env")" = "${before}" ] || { echo "second run changed .env"; return 1; }
@@ -3064,7 +3071,7 @@ STUB
     for k in ${keys}; do
         [ "$(get_env_var "${k}" "${env}")" = "$(get_env_var "${k}" "${tpl}")" ] || { echo "${k}: $(cat "${env}")"; return 1; }
     done
-    [ "$(get_env_var IP_HTTP "${env}")" = "${std}" ] && [ "$(get_env_var LOGGING_ENABLED "${env}")" = 1 ] \
+    [ "$(get_env_var IP_HTTP "${env}")" = "${std}" ] && [ "$(get_env_var LOGGING_PROXY_ENABLED "${env}")$(get_env_var LOGGING_DNS_ENABLED "${env}")$(get_env_var LOGGING_DHCP_ENABLED "${env}")$(get_env_var LOGGING_UI_ENABLED "${env}")" = 1111 ] \
         && ! env_key_exists COMPOSE_PROFILES "${env}" || { echo "values: $(cat "${env}")"; return 1; }
     _checkout_copy "${root}" "${t}/repo2" && rm -f "${DS}/running" && : > "${DS}/fail-config-after-up" \
         || { echo "second copy failed"; return 1; }
@@ -4177,7 +4184,7 @@ CASES
     size="$(get_env_var CACHE_MAX_SIZE "${root}/deploy/prod/.env")" && unit="${size//[0-9]/}" || return 1
     gb=$(( ${size%"${unit}"} * 2 ))
     [ -n "${mode}" ] && lancache_ui_cache_max_gb_override_is_valid "${gb}" || { echo "no UI inputs: ${mode} ${gb}"; return 1; }
-    printf '%s\n' "LANCACHE_IMAGE_CHANNEL=${channel}" AUTO_UPDATE_ENABLED=1 "DHCP_MODE=${mode}" LOGGING_ENABLED=1 \
+    printf '%s\n' "LANCACHE_IMAGE_CHANNEL=${channel}" AUTO_UPDATE_ENABLED=1 "DHCP_MODE=${mode}" LOGGING_DNS_ENABLED=0 \
         "CACHE_MAX_GB=${gb}" > "${DS}/volumes/${vsuffix}/${sfile}" || return 1
     _setup_sh_run 'cmd_converge_reconcile "${I}" && cp "${I}/.env" "${T}/env.first" && cmd_converge_reconcile "${I}"'
     [ "${status}" -eq 0 ] && cmp "${t}/env.first" "${I}/.env" || { echo "converge: ${output}"; return 1; }

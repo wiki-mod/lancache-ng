@@ -53,6 +53,11 @@ APT_BUILDX_PACKAGES=("$DOCKER_BUILDX_PLUGIN" docker-buildx)
 PACMAN_COMPOSE="docker-compose"
 PACMAN_DOCKER_PACKAGES=(docker "$PACMAN_COMPOSE" docker-buildx)
 
+# What: the per-service central logging switches
+# Why: .env, the Admin UI and the watchdog share them
+# From: Issue #1683 | PR #1912
+LOGGING_SWITCH_KEYS=(LOGGING_PROXY_ENABLED LOGGING_DNS_ENABLED LOGGING_DHCP_ENABLED LOGGING_UI_ENABLED)
+
 # ── Colors (only when connected to a terminal) ────────────────────────────────
 if [[ -t 1 ]]; then
     BOLD="\033[1m"; GREEN="\033[0;32m"; YELLOW="\033[0;33m"
@@ -3206,9 +3211,18 @@ migrate_env_for_update() (
     # From: Issue #1683 | PR #1858
     append_env_key_if_missing NTP_ENABLED "0" "$env_file"
 
-    # What: logging defaults to 1 when the key is absent
-    # Why: existing LOGGING_ENABLED values are kept
-    append_env_key_if_missing LOGGING_ENABLED "1" "$env_file"
+    # What: per-service logging; an old LOGGING_ENABLED seeds it
+    # Why: the old all-or-nothing choice must survive the update
+    # From: Issue #1683 | PR #1912
+    local old_logging="1" logging_key
+    if env_key_exists LOGGING_ENABLED "$env_file"; then
+        old_logging=$(get_env_var LOGGING_ENABLED "$env_file") || exit $?
+        [[ "$old_logging" = "0" ]] || old_logging="1"
+    fi
+    for logging_key in "${LOGGING_SWITCH_KEYS[@]}"; do
+        append_env_key_if_missing "$logging_key" "$old_logging" "$env_file"
+    done
+    remove_env_key LOGGING_ENABLED "$env_file"
 
     compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file") || exit $?
     dhcp_enabled=$(get_env_var DHCP_ENABLED "$env_file") || exit $?
@@ -4511,14 +4525,10 @@ wait_for_stack_health() {
                 print_warn "No container found for regressed service '$svc'; cannot dump its logs."
             fi
             if [[ -n "${_REGRESSED_SERVICE_SYSLOG_HOST[$svc]-}" ]]; then
-                local logging_enabled
-                logging_enabled=$(get_env_var LOGGING_ENABLED "$_UPDATE_ENV_FILE") || {
-                    print_warn "Cannot read LOGGING_ENABLED (exit $?); skipping the syslog-ng tail of $svc."
-                    logging_enabled=0
-                }
-                if [[ "${logging_enabled:-1}" = "1" ]]; then
-                    dump_service_syslog_ng_tail "$svc" "${_REGRESSED_SERVICE_SYSLOG_HOST[$svc]}"
-                fi
+                # What: the tail reports a missing file itself
+                # Why: a switched-off service has no log file
+                # From: Issue #1683 | PR #1912
+                dump_service_syslog_ng_tail "$svc" "${_REGRESSED_SERVICE_SYSLOG_HOST[$svc]}"
             fi
         done
     fi
@@ -4928,7 +4938,7 @@ cmd_converge_reconcile() {
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}" env_file
     local ui_channel ui_auto_update current_channel current_auto_update
     local ui_cache_max_gb current_cache_max_gb
-    local ui_dhcp_mode current_dhcp_mode ui_logging_enabled current_logging_enabled
+    local ui_dhcp_mode current_dhcp_mode ui_logging_enabled current_logging_enabled logging_key
 
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
     # What: a tick before the first install does nothing
@@ -4971,18 +4981,20 @@ cmd_converge_reconcile() {
         fi
     fi
 
-    # What: folds the Admin UI logging toggle into .env
-    # Why: .env is the one owner of LOGGING_ENABLED
+    # What: folds the Admin UI logging switches into .env
+    # Why: .env is the one owner of each LOGGING_*_ENABLED
     # From: Issue #1683 | PR #1912
-    ui_logging_enabled=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "LOGGING_ENABLED") \
-        || die "Cannot read the UI setting LOGGING_ENABLED (exit $?)."
-    if [[ "$ui_logging_enabled" = "0" || "$ui_logging_enabled" = "1" ]]; then
-        current_logging_enabled=$(get_env_var LOGGING_ENABLED "$env_file") || exit $?
-        if [[ "$ui_logging_enabled" != "$current_logging_enabled" ]]; then
-            set_env_key LOGGING_ENABLED "$ui_logging_enabled" "$env_file"
-            print_ok "Central logging updated from Admin UI: ${current_logging_enabled:-<unset>} -> $ui_logging_enabled"
+    for logging_key in "${LOGGING_SWITCH_KEYS[@]}"; do
+        ui_logging_enabled=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "$logging_key") \
+            || die "Cannot read the UI setting $logging_key (exit $?)."
+        if [[ "$ui_logging_enabled" = "0" || "$ui_logging_enabled" = "1" ]]; then
+            current_logging_enabled=$(get_env_var "$logging_key" "$env_file") || exit $?
+            if [[ "$ui_logging_enabled" != "$current_logging_enabled" ]]; then
+                set_env_key "$logging_key" "$ui_logging_enabled" "$env_file"
+                print_ok "$logging_key updated from Admin UI: ${current_logging_enabled:-<unset>} -> $ui_logging_enabled"
+            fi
         fi
-    fi
+    done
 
     # What: reconciles the timer with .env's value
     # Why: a manual .env edit must also take effect
@@ -7011,23 +7023,15 @@ else
 fi
 
 # ── 7c. Central logging ───────────────────────────────────────────────────────
-# What: central logging is on by default; opt-out exists
-# Why: per-service severity filtering is not built
+# What: central logging starts on for every service
+# Why: the operator switches each service in the Admin UI
+# From: Issue #1683 | PR #1912
 print_step "Central logging"
 
-printf "  Central logging (syslog-ng + Fluent Bit) collects and forwards logs from\n"
-printf "  every service into one place for easier troubleshooting -- a core,\n"
-printf "  on-by-default feature. Disable only for genuinely storage-constrained\n"
-printf "  installs.\n"
-printf "  Default: enabled.\n\n"
-
-if confirm "Enable central logging? [Y/n]" "Y"; then
-    LOGGING_ENABLED=1
-    print_ok "Central logging enabled — adjust verbosity from the Admin UI's logging settings"
-else
-    LOGGING_ENABLED=0
-    print_warn "Central logging disabled — re-enable later via LOGGING_ENABLED=1 in .env (or the Admin UI) and rerun setup.sh update"
-fi
+for logging_key in "${LOGGING_SWITCH_KEYS[@]}"; do
+    printf -v "$logging_key" '%s' 1
+done
+print_ok "Central logging enabled for proxy, dns, dhcp and ui -- switch each in the Admin UI (Logs)"
 
 # ── 8. Admin-UI access control ────────────────────────────────────────────────
 print_step "Admin-UI access control"
@@ -7166,7 +7170,10 @@ validate_env_values_for_initial_write \
     "DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI}" \
     "NTP_ENABLED=${NTP_ENABLED}" \
     "NTP_DATA_DIR=${NTP_DATA_DIR}" \
-    "LOGGING_ENABLED=${LOGGING_ENABLED}" \
+    "LOGGING_PROXY_ENABLED=${LOGGING_PROXY_ENABLED}" \
+    "LOGGING_DNS_ENABLED=${LOGGING_DNS_ENABLED}" \
+    "LOGGING_DHCP_ENABLED=${LOGGING_DHCP_ENABLED}" \
+    "LOGGING_UI_ENABLED=${LOGGING_UI_ENABLED}" \
     "KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}" \
     "DDNS_TSIG_KEY=${DDNS_TSIG_KEY}" \
     "PDNS_API_KEY=${PDNS_API_KEY}" \
@@ -7258,12 +7265,12 @@ NTP_ENABLED=${NTP_ENABLED}
 NTP_DATA_DIR=${NTP_DATA_DIR}
 
 # ── Central logging ────────────────────────────────────────────────────────────
-# Issue #1343: on by default (unlike SSL/DHCP/NTP above) -- central logging
-# was always meant to be a core, always-available feature. Set to 0 here for
-# a genuinely storage-constrained install; this controls whether the
-# syslog-ng/fluent-bit containers are created at all (see the \`logging\`
-# Compose profile).
-LOGGING_ENABLED=${LOGGING_ENABLED}
+# Per-service central logging: 1 on, 0 off. On by default; the Admin UI
+# switches each service. The services container always logs.
+LOGGING_PROXY_ENABLED=${LOGGING_PROXY_ENABLED}
+LOGGING_DNS_ENABLED=${LOGGING_DNS_ENABLED}
+LOGGING_DHCP_ENABLED=${LOGGING_DHCP_ENABLED}
+LOGGING_UI_ENABLED=${LOGGING_UI_ENABLED}
 
 # Kea Control Agent/API token shared by DHCP and Admin UI. Keep secret.
 KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
@@ -7334,18 +7341,16 @@ if [[ "$NTP_ENABLED" = "1" && -n "$NTP_DATA_DIR" ]]; then
     mkdir -p "$NTP_DATA_DIR"
     print_ok "NTP data:       $NTP_DATA_DIR"
 fi
-if [[ "$LOGGING_ENABLED" = "1" ]]; then
-    # What: pre-creates syslog log root as uid 10001
-    # Why: Docker would create it root-owned, unwritable
-    syslog_ng_log_dir="${SYSLOG_NG_LOG_DIR:-$LANCACHE_STATE_DIR/syslog-ng}"
-    mkdir -p "$syslog_ng_log_dir" || die "Failed to create $syslog_ng_log_dir (exit $?)."
-    if chown_err=$(chown 10001:10001 "$syslog_ng_log_dir" 2>&1); then
-        print_ok "Syslog-ng log root: $syslog_ng_log_dir (owned by uid 10001)"
-    else
-        # What: a failed chown is only a warning
-        # Why: the container detector catches write loss
-        print_warn "Could not chown $syslog_ng_log_dir to uid 10001 ($chown_err) -- the combined syslog container may not be able to write logs there. See docs/architecture-ng.md's syslog-ng section, or chown it manually before starting the stack."
-    fi
+# What: pre-creates syslog log root as uid 10001
+# Why: Docker would create it root-owned, unwritable
+syslog_ng_log_dir="${SYSLOG_NG_LOG_DIR:-$LANCACHE_STATE_DIR/syslog-ng}"
+mkdir -p "$syslog_ng_log_dir" || die "Failed to create $syslog_ng_log_dir (exit $?)."
+if chown_err=$(chown 10001:10001 "$syslog_ng_log_dir" 2>&1); then
+    print_ok "Syslog-ng log root: $syslog_ng_log_dir (owned by uid 10001)"
+else
+    # What: a failed chown is only a warning
+    # Why: the container detector catches write loss
+    print_warn "Could not chown $syslog_ng_log_dir to uid 10001 ($chown_err) -- the services container may not be able to write logs there. See docs/architecture-ng.md's syslog-ng section, or chown it manually before starting the stack."
 fi
 
 # ── 11. Installing systemd watchdog ───────────────────────────────────────────
@@ -7406,11 +7411,7 @@ if [[ "$NTP_ENABLED" = "1" ]]; then
 else
     printf "  %-26s %s\n" "LanCache-NG-NTP:" "disabled"
 fi
-if [[ "$LOGGING_ENABLED" = "1" ]]; then
-    printf "  %-26s %s\n" "Central logging:" "enabled"
-else
-    printf "  %-26s %s\n" "Central logging:" "disabled"
-fi
+printf "  %-26s %s\n" "Central logging:" "proxy=${LOGGING_PROXY_ENABLED} dns=${LOGGING_DNS_ENABLED} dhcp=${LOGGING_DHCP_ENABLED} ui=${LOGGING_UI_ENABLED} (1 on, 0 off)"
 if [[ "$AUTO_UPDATE_ENABLED" = "1" ]]; then
     printf "  %-26s %s\n" "Scheduled updates:"        "enabled (ordered, health-gated, daily)"
 else
