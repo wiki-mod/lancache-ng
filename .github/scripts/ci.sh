@@ -6587,31 +6587,55 @@ _ci_validate_service_evidence() {
     docker compose -p "${project}" logs --no-color "${svc}" 2>&1
 }
 
+# What: dns container port of one side, from compose.
+# Why: one dns container; each side is its own port.
+# From: Issue #1683 | PR #1912
+_ci_validate_dns_port() {
+    local side="$1" cfg dport port
+    cfg="$(_ci_validate_config_json)" || return 2
+    dport="$(_ci_service_port domain)" || return 2
+    port="$(_ci_capture 0 jq -r --arg v "${side}" --arg p "${dport}" '
+        .services.dns as $s | ($s.environment[$v] // "") as $ip
+        | [$s.ports[]? | select($ip != "" and .host_ip == $ip
+            and .published == $p and .protocol == "udp") | .target]
+        | unique[]' <<<"${cfg}")" || return 2
+    if [[ ! "${port}" =~ ^[0-9]+$ ]]; then
+        ci_error "[CI-ERROR-VALIDATE-0116]" "side=\"${side}\" reason=\"not one dns udp port for this side\"" "${port}"
+        return 2
+    fi
+    printf '%s\n' "${port}"
+}
+
 # What: Prove DNS resolves a CDN domain and split-routes.
-# Why: Real dig; standard/ssl MUST differ, not ping.
-# From: Issue #1683 | PR #1858
+# Why: Real dig on both sides; the answers MUST differ.
+# From: Issue #1683 | PR #1912
 _ci_validate_dns() {
-    local project="$1" ip_std ip_https domain a_std a_ssl
-    ip_std="$(_ci_validate_container_ip "${project}" dns-standard)"
-    ip_https="$(_ci_validate_container_ip "${project}" dns-ssl)"
+    local project="$1" ip domain side port out a_http=""
+    ip="$(_ci_validate_container_ip "${project}" dns)"
     domain="$(_ci_validation_dns_domain)"
-    if [ -z "${ip_std}" ] || [ -z "${ip_https}" ] || [ -z "${domain}" ]; then
+    if [ -z "${ip}" ] || [ -z "${domain}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0010]" "reason=\"missing dns container IP or test domain\""
         return 2
     fi
-    a_std="$(dig +short "@${ip_std}" A "${domain}" | sort -u)"
-    a_ssl="$(dig +short "@${ip_https}" A "${domain}" | sort -u)"
-    if [ -z "${a_std}" ] || [ -z "${a_ssl}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0011]" "domain=\"${domain}\" reason=\"no DNS answer from a resolver mode\""
-        return 1
-    fi
-    # What: standard and ssl modes resolve distinct IPs.
-    # Why: split routing proof (.10 vs .11).
-    # From: Issue #668
-    if [ "${a_std}" = "${a_ssl}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0021]" "domain=\"${domain}\" reason=\"standard and ssl DNS returned the same answer (#668 split routing lost)\""
-        return 1
-    fi
+    for side in PROXY_IP PROXY_HTTPS_IP; do
+        port="$(_ci_validate_dns_port "${side}")" || return 2
+        out="$(_ci_run -s "[CI-ERROR-VALIDATE-0117]" "domain=\"${domain}\" side=\"${side}\" reason=\"dig failed\"" \
+            dig +time=2 +tries=1 +short -p "${port}" "@${ip}" A "${domain}")" || return 2
+        out="$(sort -u <<<"${out}")"
+        if [ -z "${out}" ]; then
+            ci_log "[CI-ERROR-VALIDATE-0011]" "domain=\"${domain}\" side=\"${side}\" reason=\"no DNS answer from a resolver side\""
+            return 1
+        fi
+        # What: the http and https sides resolve distinct IPs.
+        # Why: each side answers with its own proxy IP.
+        # From: Issue #668
+        if [ "${side}" = PROXY_IP ]; then
+            a_http="${out}"
+        elif [ "${out}" = "${a_http}" ]; then
+            ci_log "[CI-ERROR-VALIDATE-0021]" "domain=\"${domain}\" reason=\"http and https DNS returned the same answer (#668 split routing lost)\""
+            return 1
+        fi
+    done
 }
 
 # What: Prove the proxy caches: real MISS then HIT.
@@ -6900,16 +6924,17 @@ _ci_validate_probe_mac() {
     printf '%s:%02x' "${mac%:*}" "${n}"
 }
 
-# What: Poll dig until <fqdn> resolves to <expected>.
-# Why: NATS->PowerDNS (AXFR to ssl) async; prove it.
-# From: Issue #1683
+# What: Poll one dns side until <fqdn> is <expected>.
+# Why: the NATS->PowerDNS write is async; prove it.
+# From: Issue #1683 | PR #1912
 _ci_validate_dns_resolves() {
-    local project="$1" svc="$2" fqdn="$3" expected="$4" attempts="$5" ip got i
-    ip="$(_ci_validate_container_ip "${project}" "${svc}")"
+    local project="$1" side="$2" fqdn="$3" expected="$4" attempts="$5" ip port got i
+    ip="$(_ci_validate_container_ip "${project}" dns)"
     if [ -z "${ip}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0035]" "svc=\"${svc}\" reason=\"no dns IP for resolve check\""
+        ci_log "[CI-ERROR-VALIDATE-0035]" "side=\"${side}\" reason=\"no dns IP for resolve check\""
         return 2
     fi
+    port="$(_ci_validate_dns_port "${side}")" || return 2
     local out="" dig_err
     # What: dig stderr kept apart from the compared answer.
     # Why: a warning must not turn a match into a mismatch.
@@ -6917,7 +6942,7 @@ _ci_validate_dns_resolves() {
     dig_err="$(_ci_mktemp "${CI_TMPDIR}/ci-dig-err.XXXXXX")" || return 2
     for (( i = 1; i <= attempts; i++ )); do
         got=""
-        if out="$(dig +time=2 +tries=1 +short "@${ip}" A "${fqdn}" 2>"${dig_err}")"; then
+        if out="$(dig +time=2 +tries=1 +short -p "${port}" "@${ip}" A "${fqdn}" 2>"${dig_err}")"; then
             got="$(sort -u <<<"${out}")"
         fi
         if [ "${got}" = "${expected}" ]; then
@@ -6929,37 +6954,37 @@ _ci_validate_dns_resolves() {
     # What: full answer, zone SOA and the service's logs.
     # Why: +short hides NXDOMAIN vs empty vs SERVFAIL.
     # From: Issue #1683 | PR #1858
-    ci_error "[CI-ERROR-VALIDATE-0036]" "svc=\"${svc}\" fqdn=\"${fqdn}\" expected=\"${expected}\" got=\"${got:-}\" reason=\"record did not resolve as expected\"" \
+    ci_error "[CI-ERROR-VALIDATE-0036]" "side=\"${side}\" fqdn=\"${fqdn}\" expected=\"${expected}\" got=\"${got:-}\" reason=\"record did not resolve as expected\"" \
         "${out}$(cat "${dig_err}")
 full answer:
-$(dig +time=2 +tries=1 "@${ip}" A "${fqdn}" 2>&1)
+$(dig +time=2 +tries=1 -p "${port}" "@${ip}" A "${fqdn}" 2>&1)
 zone SOA:
-$(dig +time=2 +tries=1 +short "@${ip}" SOA "${fqdn#*.}" 2>&1)
+$(dig +time=2 +tries=1 +short -p "${port}" "@${ip}" SOA "${fqdn#*.}" 2>&1)
 service:
-$(_ci_validate_service_evidence "${project}" "${svc}")"
+$(_ci_validate_service_evidence "${project}" dns)"
     rm -f "${dig_err}"
     return 1
 }
 
-# What: UI->NATS->PowerDNS writes reach both dns modes.
-# Why: Real end-to-end NATS ingest + AXFR, not mock.
-# From: Issue #1683
+# What: UI->NATS->PowerDNS writes reach both dns sides.
+# Why: Real end-to-end NATS ingest, not a mock.
+# From: Issue #1683 | PR #1912
 _ci_validate_ui_nats_dns() {
-    local project="$1" jar csrf cid base zone label ip dns_wait axfr_wait rc=0
+    local project="$1" jar csrf cid base zone label ip dns_wait side rc=0
     cid="$(_ci_validate_cid "${project}" ui)" || return 2
     base="$(_ci_validate_ui_base "${project}" "${cid}")" || return $?
     zone="$(_ci_validate_lan_zone)" || return 2
     label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
     ip="$(_ci_validate_probe_ip 1)" || return 2
     dns_wait="$(_ci_variable CI_VALIDATE_DNS_WAIT)" || return 2
-    axfr_wait="$(_ci_variable CI_VALIDATE_AXFR_WAIT)" || return 2
     jar="$(_ci_mktemp "${CI_TMPDIR}/ci-ui-jar.XXXXXX")" || return 2
     csrf="$(_ci_validate_ui_session "${jar}" "${base}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${zone}" "${label}" "${ip}" || rc=$?
     rm -f "${jar}"
     [ "${rc}" -eq 0 ] || return "${rc}"
-    _ci_validate_dns_resolves "${project}" dns-standard "${label}.${zone}" "${ip}" "${dns_wait}" || return $?
-    _ci_validate_dns_resolves "${project}" dns-ssl "${label}.${zone}" "${ip}" "${axfr_wait}" || return $?
+    for side in PROXY_IP PROXY_HTTPS_IP; do
+        _ci_validate_dns_resolves "${project}" "${side}" "${label}.${zone}" "${ip}" "${dns_wait}" || return $?
+    done
 }
 
 # What: curl with one header, user or data line from stdin
@@ -7006,14 +7031,14 @@ _ci_validate_rollback_base() {
 _ci_validate_dns_rollback() {
     local project="$1" ip cid key jar csrf snap resp code rc=0 compose last
     local zone label old new dns_wait ucid base lbase tries pause su
-    ip="$(_ci_validate_container_ip "${project}" dns-standard)"
-    cid="$(_ci_validate_cid "${project}" dns-standard)" || return 2
+    ip="$(_ci_validate_container_ip "${project}" dns)"
+    cid="$(_ci_validate_cid "${project}" dns)" || return 2
     if [ -z "${ip}" ] || [ -z "${cid}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0037]" "reason=\"no dns-standard container/IP for rollback check\""
+        ci_log "[CI-ERROR-VALIDATE-0037]" "reason=\"no dns container/IP for rollback check\""
         return 2
     fi
     # What: read PDNS_API_KEY from the shared-secrets mount.
-    # Why: entrypoint resolves it at runtime, not env.
+    # Why: watchdog resolves it at runtime, not env.
     # From: Issue #858
     key="$(_ci_validate_shared_secret "${project}" "${cid}" pdns-api-key)" || return 2
     key="${key//$'\n'/}"
@@ -7050,7 +7075,7 @@ _ci_validate_dns_rollback() {
     jar="$(_ci_mktemp "${CI_TMPDIR}/ci-rb-jar.XXXXXX")" || return 2
     csrf="$(_ci_validate_ui_session "${jar}" "${base}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${zone}" "${label}" "${old}" || { rm -f "${jar}"; return 1; }
-    _ci_validate_dns_resolves "${project}" dns-standard "${label}.${zone}" "${old}" "${dns_wait}" || { rm -f "${jar}"; return 1; }
+    _ci_validate_dns_resolves "${project}" PROXY_IP "${label}.${zone}" "${old}" "${dns_wait}" || { rm -f "${jar}"; return 1; }
     # What: capture the zone's newest snapshot (pre-change).
     # Why: target this test rolls back to after 2nd write.
     # From: Issue #628
@@ -7062,7 +7087,7 @@ _ci_validate_dns_rollback() {
         return 1
     fi
     _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${zone}" "${label}" "${new}" || { rm -f "${jar}"; return 1; }
-    _ci_validate_dns_resolves "${project}" dns-standard "${label}.${zone}" "${new}" "${dns_wait}" || { rm -f "${jar}"; return 1; }
+    _ci_validate_dns_resolves "${project}" PROXY_IP "${label}.${zone}" "${new}" "${dns_wait}" || { rm -f "${jar}"; return 1; }
     rm -f "${jar}"
     resp="$(_ci_capture 0 _ci_curl_secret header "X-API-Key: ${key}" -sS "${lbase}/snapshots")" || return 2
     last="$(_ci_capture 0 jq -r --arg z "${zone}" '.zones[$z][0].id // empty' <<<"${resp}")" || return 2
@@ -7086,7 +7111,7 @@ _ci_validate_dns_rollback() {
     # What: post-rollback dig must return the OLD content.
     # Why: proves recursor cache flush reached it.
     # From: Issue #628
-    _ci_validate_dns_resolves "${project}" dns-standard "${label}.${zone}" "${old}" "${dns_wait}" || return $?
+    _ci_validate_dns_resolves "${project}" PROXY_IP "${label}.${zone}" "${old}" "${dns_wait}" || return $?
     tries="$(_ci_variable CI_VALIDATE_SNAPSHOT_POLL_ATTEMPTS)" || return 2
     pause="$(_ci_variable CI_VALIDATE_SNAPSHOT_POLL_PAUSE)" || return 2
     if ! resp="$(_ci_validate_poll "${tries}" "${pause}" _ci_validate_new_snapshot "${lbase}" "${key}" "${last}" "${zone}")"; then
