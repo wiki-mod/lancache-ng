@@ -1527,7 +1527,7 @@ CASES
 # Why: SOT owns every value; build-args only maps it.
 # From: Issue #1683 | PR #1858
 @test "build-args: real SOT targets give pinned, filled arguments" {
-    local tool pc sp verify w case target fmt plat pre want absent s
+    local tool pc sp verify w case target fmt plat pre want absent s stderr=""
     local -A N=()
     tool="$(_ci_block_keys build_toolchain)" && pc="$(_pin_consumer)" && sp="$(_ci_build_matrix_platforms)" \
         || { echo "SOT readers failed"; return 1; }
