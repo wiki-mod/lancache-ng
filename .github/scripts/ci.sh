@@ -3013,8 +3013,9 @@ _ci_rust_build_cleanup() {
 _ci_rust_cargo_build() {
     local crates="$1" musl_target="$2" cargo_jobs="$3" crate
     local cargo_log cargo_status degraded=0
-    local -a layers=() picks=() pst=()
-    for crate in ${crates}; do picks+=(-p "${crate}"); done
+    local -a layers=() picks=() pst=() cl=()
+    read -ra cl <<< "${crates}"
+    for crate in "${cl[@]}"; do picks+=(-p "${crate}"); done
     # What: active layers of rust-build, dropped in order.
     # Why: ccache wraps distcc; sccache is the rustc layer.
     # From: Issue #1683 | PR #1912
@@ -3435,8 +3436,13 @@ _ci_rb_write() {
 # From: Issue #1683 | PR #1912
 ci_cmd_rust_build() {
     local service="${1:-}" crates="${2:-}" mode="${3:-build}" crate
+    local -a cl=()
     [ -n "${service}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0001]" "reason=\"service arg required\""; return 2; }
     [ -n "${crates}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0002]" "reason=\"crates arg required\""; return 2; }
+    # What: the crates arg is a space-separated list.
+    # Why: read -a splits words without glob expansion.
+    # From: Issue #1683 | PR #1912
+    read -ra cl <<< "${crates}"
     # What: mode build (real+cp) or deps (pre-cache, no cp).
     # Why: services with stub-src dep-cache stage call deps.
     # From: Issue #1683 | PR #1858
@@ -3503,7 +3509,7 @@ ci_cmd_rust_build() {
     # Why: dep pre-cache stub rlib outdates COPYed src.
     # From: Issue #1683 | PR #1858
     if [ "${mode}" = "build" ]; then
-        for crate in ${crates}; do
+        for crate in "${cl[@]}"; do
             _ci_run "[CI-ERROR-RUSTBUILD-0059]" "crate=\"${crate}\" reason=\"cargo clean failed\"" \
                 cargo clean -p "${crate}" --release --target "${musl_target}" || return 2
         done
@@ -3534,7 +3540,7 @@ ci_cmd_rust_build() {
     # Why: the final stage COPYs it; deps builds ship none.
     # From: Issue #1683 | PR #1912
     if [ "${mode}" = "build" ]; then
-        for crate in ${crates}; do
+        for crate in "${cl[@]}"; do
             _ci_run "[CI-ERROR-RUSTBUILD-0060]" "crate=\"${crate}\" reason=\"built binary not copied out\"" \
                 cp "target/${musl_target}/release/${crate}" "${PWD}/${crate}-out" || return 2
         done
@@ -11480,7 +11486,7 @@ _ci_proxy_constant() {
     local name="$1" root="${2-${CI_REPO_ROOT:-.}}" src df raw rel dir re='^("([^"$]+)"|([0-9]+))$'
     src="$(_ci_service_path services src/main.rs "${root}")" || return 2
     # What: Rust const item; other value forms fail closed.
-    # Why: visibility and spacing are valid Rust grammar too.
+    # Why: visibility and spacing are valid Rust grammar.
     # From: Issue #1683 | PR #1912
     raw="$(_ci_file_value "${src}" "s/^[[:space:]]*(pub(\\([a-z]+\\))?[[:space:]]+)?const[[:space:]]+${name}[[:space:]]*:[[:space:]]*(&('static[[:space:]]+)?str|u16)[[:space:]]*=[[:space:]]*(\"[^\"\\\\]+\"|[0-9]+)[[:space:]]*;([[:space:]]*\\/\\/.*)?\$/\\5/p")" \
         || [ "$?" -eq 1 ] || return 2
@@ -11645,7 +11651,7 @@ _ci_copy_if_changed() {
 # From: Issue #1683 | PR #1858
 _ci_check_compose_config() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
-    local -a viol=() pairs=() profiles=()
+    local -a viol=() pairs=() profiles=() tl=() el=()
     local deploy targets envtargets rel mode pair cf ef raw p label render msg count=0
     deploy="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     targets="$(_ci_block_entry_field validation "" compose_targets)" || return 2
@@ -11654,8 +11660,13 @@ _ci_check_compose_config() {
         return 1
     fi
     envtargets="$(_ci_block_entry_field validation "" compose_env_file_targets)" || return 2
-    for rel in "${deploy}" ${targets}; do pairs+=("${rel}|"); done
-    for rel in ${envtargets}; do pairs+=("${rel}|env"); done
+    # What: the SOT fields are space-separated path lists.
+    # Why: read -a splits words without glob expansion.
+    # From: Issue #1683 | PR #1912
+    read -ra tl <<< "${targets}"
+    read -ra el <<< "${envtargets}"
+    for rel in "${deploy}" "${tl[@]}"; do pairs+=("${rel}|"); done
+    for rel in "${el[@]}"; do pairs+=("${rel}|env"); done
     for pair in "${pairs[@]}"; do
         rel="${pair%|*}"
         mode="${pair#*|}"
@@ -11692,25 +11703,6 @@ _ci_check_compose_config() {
         return 1
     fi
     printf 'compose-config=clean checks=%s\n' "${count}"
-}
-
-# What: Fail unless secondary setup writes files atomically.
-# Why: a torn compose or .env breaks the secondary.
-# From: Issue #475
-_ci_check_nats_atomic_write() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" su
-    local -a viol=()
-    su="$(_ci_installer "${repo_root}")" || return 2
-    su="${su#"${repo_root}/"}"
-    grep -Fq 'write_file_atomically "${secondary_dir}/docker-compose.yml"' "${repo_root}/${su}" \
-        || viol+=("${su}: secondary setup must atomically write generated docker-compose.yml")
-    grep -Fq 'write_file_atomically "${secondary_dir}/.env"' "${repo_root}/${su}" \
-        || viol+=("${su}: secondary setup must atomically write generated .env")
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0045]" "reason=\"shared config write is not atomic\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'nats-atomic-write=clean\n'
 }
 
 # What: no service publishes the netdata API port.
@@ -11797,13 +11789,14 @@ _ci_check_proxy_nginx_policy() {
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_cert_volume() {
     local repo_root="${1:-${CI_REPO_ROOT}}" dir dep inst targets cf cfg out line
-    local -a viol=()
+    local -a viol=() tl=()
     local -A seen=()
     dir="$(_ci_proxy_constant NGINX_CERT_DIR "${repo_root}")" || return 2
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     inst="$(_ci_installer_compose "${repo_root}")" || return 2
     targets="$(_ci_block_entry_field validation "" compose_targets)" || return 2
-    for cf in "${dep}" "${inst}" ${targets}; do
+    read -ra tl <<< "${targets}"
+    for cf in "${dep}" "${inst}" "${tl[@]}"; do
         [ -z "${seen[${cf}]:-}" ] || continue
         seen["${cf}"]=1
         cfg="$(_ci_compose_json "${repo_root}/${cf}")" || return 2
@@ -12389,14 +12382,17 @@ _ci_check_sot_identity_inputs() {
 # From: Issue #1683 | PR #1912
 _ci_check_dockerfile_context_edges() {
     local repo_root="${1:-${CI_REPO_ROOT:-.}}" targets t df ctxs c p srcs src ok n=0
-    local -a viol=() roots=()
+    local -a viol=() roots=() tl=() cl=()
     targets="$(ci_build_targets)" || return 2
-    for t in ${targets}; do
+    [ -z "${targets}" ] || mapfile -t tl <<< "${targets}"
+    for t in "${tl[@]}"; do
         df="$(_ci_service_path "${t}" Dockerfile "${repo_root}")" || return 2
         c="$(_ci_required_field "${t}" context)" || return 2
         roots=("${c}")
         ctxs="$(ci_service_contexts "${t}")" || return 2
-        for c in ${ctxs}; do
+        cl=()
+        [ -z "${ctxs}" ] || mapfile -t cl <<< "${ctxs}"
+        for c in "${cl[@]}"; do
             p="$(ci_context_path "${c}")" || return 2
             roots+=("${p}")
         done
@@ -12838,7 +12834,7 @@ ci_cmd_check_all() {
     local -a repo_wide=(file-headers action-node-versions naming-consistency \
         workflow-line-limit stable-external-images compose-healthchecks \
         proxy-cache-env-doc-drift \
-        prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
+        prebuilt-prod prod-state-wiring compose-config \
         netdata-isolation proxy-cert-volume proxy-nginx-policy \
         setup-kea-preflight setup-update-safety image-channel-resolution \
         vex-drift logging-matrix \
@@ -12906,7 +12902,6 @@ ci_cmd_check() {
         prebuilt-prod) _ci_check_prebuilt_prod "$@" ;;
         prod-state-wiring) _ci_check_prod_state_wiring "$@" ;;
         compose-config) _ci_check_compose_config "$@" ;;
-        nats-atomic-write) _ci_check_nats_atomic_write "$@" ;;
         netdata-isolation) _ci_check_netdata_isolation "$@" ;;
         proxy-cert-volume) _ci_check_proxy_cert_volume "$@" ;;
         proxy-nginx-policy) _ci_check_proxy_nginx_policy "$@" ;;

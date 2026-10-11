@@ -3629,6 +3629,29 @@ _pm_run() {
     [ "${out}" = "x${BATS_TEST_NUMBER},${custom},${ntp},${logp}" ] || { echo "custom: ${out}"; return 1; }
 }
 
+# What: atomic write replaces whole, keeps old on failure
+# Why: secondary compose and .env must never be torn
+# From: Issue #1683 | PR #1912
+@test "setup write_file_atomically: replaces whole or keeps the old file" {
+    local root d f old new
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}"
+    d="$(_val path)" old="$(_val sha)" new="$(_val sha)"
+    f="${d}/$(_val name)"
+    mkdir -p "${d}" && printf '%s\n' "${old}" > "${f}" && chmod 0640 "${f}" || return 1
+    _setup_sh_run "write_file_atomically '${f}' <<< '${new}'"
+    _expect replaced 0 - || return 1
+    [ "$(cat "${f}")" = "${new}" ] && [ "$(stat -c %a "${f}")" = 640 ] \
+        || { echo "replaced: '$(cat "${f}")' mode $(stat -c %a "${f}")"; return 1; }
+    _setup_sh_run "write_file_atomically '${f}' < '${d}'"
+    [ "${status}" -ne 0 ] || { echo "unreadable stdin: rc 0: ${output}"; return 1; }
+    [ "$(cat "${f}")" = "${new}" ] || { echo "torn: '$(cat "${f}")'"; return 1; }
+    _setup_sh_run "write_file_atomically '${d}/fresh' <<< '${old}'"
+    _expect fresh 0 - || return 1
+    [ "$(stat -c %a "${d}/fresh")" = 600 ] || { echo "fresh mode $(stat -c %a "${d}/fresh")"; return 1; }
+    [ -z "$(find "${d}" -name '.*.tmp.*')" ] || { echo "temp left: $(find "${d}" -name '.*.tmp.*')"; return 1; }
+}
+
 @test "setup secondary registration end to end per primary answer" {
     _registry || return 1
     _stand_ins || return 1
