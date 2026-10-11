@@ -12132,9 +12132,9 @@ _ci_check_changelog_direct_edit() {
     printf 'changelog-direct-edit=warn\n'
 }
 
-# What: One awk pass over the logging-matrix table's rows.
-# Why: a per-row shell loop once fork-raced a real row away.
-# From: Issue #1683 | PR #1858
+# What: print each logging-matrix row's service, dupes kept.
+# Why: the check itself finds missing, extra and double rows.
+# From: Issue #1683 | PR #1912
 _ci_logging_matrix_canonical() {
     local doc="$1"
     awk '
@@ -12145,25 +12145,14 @@ _ci_logging_matrix_canonical() {
             if ($0 ~ /^\|[[:space:]]*-+[[:space:]]*\|/) next
             line = $0
             sub(/^\|[[:space:]]*/, "", line)
-            n = split(line, parts, "|")
-            cell = (n >= 1) ? parts[1] : ""
-            sub(/[[:space:]]+$/, "", cell)
-            name = cell
-            if (match(cell, /`[a-z0-9-]+`/)) {
-                name = substr(cell, RSTART + 1, RLENGTH - 2)
-            } else {
-                sub(/[[:space:]]*\([^)]*\)[[:space:]]*$/, "", name)
-            }
-            data_rows++
-            if (!(name in seen)) { seen[name] = 1; print name }
+            split(line, parts, "|")
+            name = parts[1]
+            sub(/[[:space:]]+$/, "", name)
+            if (match(name, /`[a-z0-9-]+`/)) name = substr(name, RSTART + 1, RLENGTH - 2)
+            print name
             next
         }
         seen_marker && rows_seen && !/^\|/ { exit }
-        END {
-            unique_count = 0
-            for (k in seen) unique_count++
-            print "##ROWS## " data_rows " " unique_count
-        }
     ' "${doc}"
 }
 
@@ -12192,77 +12181,51 @@ _ci_compose_profile_flags() {
     return 0
 }
 
-# What: Fail if logging-matrix row/service pair drifts.
-# Why: every service needs a declared row.
-# From: Issue #1683 | PR #1858
+# What: each Compose service has exactly one matrix row.
+# Why: a new, renamed or doubled service must not hide.
+# From: Issue #1683 | PR #1912
 _ci_check_logging_matrix() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" doc
+    local repo_root="${1:-${CI_REPO_ROOT}}" doc rows dep cf raw_services n
+    local -a canonical=() services=() viol=()
+    local -A in_doc=() in_compose=()
     doc="$(_ci_repo_path CI_ARCH_DOC "${repo_root}")" || return 2
     if [ ! -f "${doc}" ]; then
         ci_log "[CI-ERROR-CHECK-0035]" "path=\"${doc}\" reason=\"architecture doc not found\""
         return 2
     fi
-    local canonical_raw
-    canonical_raw="$(_ci_logging_matrix_canonical "${doc}")" || {
+    rows="$(_ci_logging_matrix_canonical "${doc}")" || {
         ci_log "[CI-ERROR-CHECK-0120]" "path=\"${doc}\" reason=\"logging matrix not readable (raw above)\""; return 2; }
-    local row_summary raw_row_count unique_row_count
-    row_summary="$(_ci_capture 1 grep -E '^##ROWS## ' <<<"${canonical_raw}")" || return 2
-    raw_row_count="$(awk '{print $2}' <<<"${row_summary}")"
-    unique_row_count="$(awk '{print $3}' <<<"${row_summary}")"
-    local -a canonical=()
-    local n
-    local produced produced_rc=0
-    produced="$(grep -vE '^##ROWS## ' <<<"${canonical_raw}")" || produced_rc=$?
-    _ci_producer_ok "${produced_rc}" 1 || return 2
-    while IFS= read -r n; do
-        [ -n "${n}" ] && canonical+=("${n}")
-    done <<<"${produced}"
-    if [ "${#canonical[@]}" -eq 0 ]; then
+    if [ -z "${rows}" ]; then
         ci_log "[CI-ERROR-CHECK-0036]" "path=\"${doc}\" reason=\"no logging-matrix rows parsed\""
         return 2
     fi
-    if [ -n "${raw_row_count}" ] && [ -n "${unique_row_count}" ] && [ "${unique_row_count}" -lt "${raw_row_count}" ]; then
-        ci_log "[CI-ERROR-CHECK-0037]" "reason=\"parsed ${unique_row_count} unique of ${raw_row_count} rows; a row was dropped or collapsed\""
-        return 2
-    fi
-    local dep
+    mapfile -t canonical <<< "${rows}"
+    # What: only the primary stack compose is matched.
+    # Why: the secondary dns logs locally (driver: local).
+    # From: Issue #1683 | PR #1912
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    local -a compose_files=("${repo_root}/${dep}")
-    local -a consumer=() viol=()
-    local cf svc
-    for cf in "${compose_files[@]}"; do
-        # What: capture the exit before splitting lines.
-        # Why: a while/process-sub loop can hide it.
-        local raw_services
-        if raw_services="$(_ci_compose_service_names "${cf}")"; then
-            :
-        else
-            ci_log "[CI-ERROR-CHECK-0034]" "path=\"${cf}\" reason=\"compose service lookup failed\""
-            return 2
-        fi
-        local -a file_services=()
-        while IFS= read -r svc; do
-            [ -n "${svc}" ] && file_services+=("${svc}")
-        done <<<"${raw_services}"
-        for svc in "${file_services[@]}"; do
-            case " ${canonical[*]} " in
-                *" ${svc} "*) ;;
-                *) viol+=("${cf}: service '${svc}' has no logging-matrix row") ;;
-            esac
-            consumer+=("${svc}")
-        done
+    cf="${repo_root}/${dep}"
+    raw_services="$(_ci_compose_service_names "${cf}")" || {
+        ci_log "[CI-ERROR-CHECK-0034]" "path=\"${cf}\" reason=\"compose service lookup failed (raw above)\""; return 2; }
+    mapfile -t services <<< "${raw_services}"
+    for n in "${canonical[@]}"; do
+        [ -n "${n}" ] || { viol+=("${doc}: a row has no service name"); continue; }
+        [ -z "${in_doc[${n}]:-}" ] || viol+=("${doc}: row '${n}' appears more than once")
+        in_doc[${n}]=1
+    done
+    for n in "${services[@]}"; do
+        [ -n "${n}" ] || continue
+        in_compose[${n}]=1
+        [ -n "${in_doc[${n}]:-}" ] || viol+=("${cf}: service '${n}' has no logging-matrix row")
     done
     for n in "${canonical[@]}"; do
-        case " ${consumer[*]:-} " in
-            *" ${n} "*) ;;
-            *) viol+=("${doc}: row '${n}' is not a real Compose service") ;;
-        esac
+        [ -z "${n}" ] || [ -n "${in_compose[${n}]:-}" ] || viol+=("${doc}: row '${n}' is not a real Compose service")
     done
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0038]" "reason=\"logging-matrix drift (issue #633)\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0038]" "reason=\"logging-matrix drift\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
-    printf 'logging-matrix=clean rows=%s services=%s\n' "${#canonical[@]}" "${#consumer[@]}"
+    printf 'logging-matrix=clean rows=%s services=%s\n' "${#canonical[@]}" "${#in_compose[@]}"
 }
 
 # What: each workflow calling ci.sh passes CI_VARIABLES.

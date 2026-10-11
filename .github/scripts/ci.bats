@@ -1712,6 +1712,41 @@ CASES
     _expect job-by-name 0 job-ran
 }
 
+# What: matrix vs compose: missing, extra, double row coded
+# Why: a service must not log unseen after a rename or fold
+# From: Issue #1683 | PR #1912
+@test "check logging-matrix: real repo clean, row drift fails coded" {
+    local real doc dep s g fx row edit rc want
+    real="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    doc="$(_ci_variable CI_ARCH_DOC)" && dep="$(_ci_variable CI_COMPOSE_FILE)" \
+        && s="$(_ci_compose_service_names "${real}/${dep}")" || { echo "inputs unreadable"; return 1; }
+    s="${s%%$'\n'*}" g="$(_val name)"
+    [ -n "${s}" ] || { echo "no compose service"; return 1; }
+    run bash "${CI_SH}" check logging-matrix "${real}"
+    _expect real 0 "logging-matrix=clean" || return 1
+    while IFS='#' read -r row edit rc want; do
+        fx="$(_val path)"
+        mkdir -p "${fx}/${doc%/*}" "${fx}/${dep%/*}" && cp "${real}/${doc}" "${fx}/${doc}" \
+            && cp -r "${real}/${dep%/*}/." "${fx}/${dep%/*}/" || { echo "${row}: fixture not copied"; return 1; }
+        edit="${edit//@S@/${s}}" want="${want//@S@/${s}}"
+        edit="${edit//@G@/${g}}" want="${want//@G@/${g}}"
+        if [ "${edit}" = rm ]; then
+            rm -- "${fx}/${dep}"
+        else
+            sed -i "${edit}" "${fx}/${doc}"
+            ! cmp -s "${real}/${doc}" "${fx}/${doc}" || { echo "${row}: edit changed nothing"; return 1; }
+        fi
+        run bash "${CI_SH}" check logging-matrix "${fx}"
+        _expect "${row}" "${rc}" "${want}" || return 1
+    done <<'CASES'
+drop#/^| `@S@` |/d#1#[CI-ERROR-CHECK-0038];service '@S@' has no logging-matrix row
+double#/^| `@S@` |/p#1#[CI-ERROR-CHECK-0038];row '@S@' appears more than once
+extra#/^| `@S@` |/{p;s/`@S@`/`@G@`/}#1#[CI-ERROR-CHECK-0038];row '@G@' is not a real Compose service
+noname#/^| `@S@` |/{p;s/`@S@`//}#1#[CI-ERROR-CHECK-0038];a row has no service name
+no-compose#rm#2#[CI-ERROR-CHECK-0034]
+CASES
+}
+
 # What: per row: PR body on the real template -> verdict
 # Why: AG-GH-010: every real template section is filled
 # From: Issue #1683 | PR #1858
