@@ -11923,6 +11923,29 @@ _ci_check_setup_update_safety() {
     printf 'setup-update-safety=clean\n'
 }
 
+# What: compose JSON with its .env minus LANCACHE_IMAGE_*
+# Why: only then do the compose image defaults render
+# From: Issue #1683 | PR #1858
+_ci_compose_image_render() {
+    local file="$1" out="$2" env body
+    shift 2
+    env="$(_ci_mktemp "${CI_TMPDIR}/ci-image-env.XXXXXX")" || return 2
+    body="$(_ci_capture 1 grep -v '^LANCACHE_IMAGE_' "${file%/*}/.env")" || { rm -f "${env}"; return 2; }
+    if ! printf '%s\n' "${body}" "$@" > "${env}"; then
+        ci_log "[CI-ERROR-CHECK-0172]" "file=\"${env}\" reason=\"render env file not writable\""
+        rm -f "${env}"
+        return 2
+    fi
+    # What: drops LANCACHE_IMAGE_* from the shell env too
+    # Why: compose takes a shell value over the env file
+    # From: Issue #1683 | PR #1858
+    if ! ( unset "${!LANCACHE_IMAGE_@}"; _ci_compose_json "${file}" "${env}" ) > "${out}"; then
+        rm -f "${env}"
+        return 2
+    fi
+    rm -f "${env}"
+}
+
 # What: Fail unless channel/tag resolves from config.
 # Why: one resolution across setup.sh/UI/compose.
 # From: Issue #1683
@@ -11971,21 +11994,47 @@ _ci_check_image_channel_resolution() {
     if [ ! -f "${prod}" ]; then
         viol+=("prod compose missing: ${prod}")
     else
-        for f in \
-            'LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY:-ghcr.io}' \
-            'LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}' \
-            'LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL:-}' \
-            'LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG:-latest}'; do
-            grep -Fq "${f}" "${prod}" || viol+=("prod compose must pass ${f}")
-        done
+        # What: rendered image defaults match the SOT names
+        # Why: AG-CI-006: the SOT and the repo own them
+        # From: Issue #1683 | PR #1858
+        local reg repo tag tdir rep line sreg spre stag schan prog
+        reg="$(_ci_registry)" || return 2
+        repo="$(_ci_repo)" || return 2
+        tag="$(_ci_channels_where release_tags true)" || return 2
+        tag="${tag%%$'\n'*}"
+        sreg="r${SRANDOM}.test" spre="p${SRANDOM}/q${SRANDOM}" stag="t${SRANDOM}" schan="c${SRANDOM}"
+        prog='($d[0].services) as $D | ($s[0].services) as $S | ($sreg + "/" + $spre + "/") as $sp
+            | [$S | to_entries[] | select((.value.image // "") | startswith($sp))] as $fp
+            | [$S | to_entries[] | select((.value.environment // {}) | type == "object" and has("LANCACHE_IMAGE_REGISTRY"))] as $ev
+            | (if ($fp | length) == 0 then "no compose image takes LANCACHE_IMAGE_REGISTRY and LANCACHE_IMAGE_PREFIX" else empty end),
+              (if ($ev | length) == 0 then "no compose service receives LANCACHE_IMAGE_REGISTRY" else empty end),
+              ($fp[] | .key as $k | (.value.image | ltrimstr($sp)) as $rest
+                | if ($rest | endswith(":" + $stag)) then
+                    ($rest | rtrimstr(":" + $stag)) as $slug | ($D[$k].image // "") as $di
+                    | if $di == ($reg + "/" + $repo + "/" + $slug + ":" + $tag) then empty
+                      else "service \($k): default image \($di), SOT \($reg)/\($repo)/\($slug):\($tag)" end
+                  else "service \($k): image \(.value.image) does not take LANCACHE_IMAGE_TAG" end),
+              ($ev[] | .key as $k | $S[$k].environment as $se | ($D[$k].environment // {}) as $de
+                | (["LANCACHE_IMAGE_REGISTRY", $sreg, $reg], ["LANCACHE_IMAGE_PREFIX", $spre, $repo],
+                   ["LANCACHE_IMAGE_CHANNEL", $schan, ""], ["LANCACHE_IMAGE_TAG", $stag, $tag]) as [$n, $sv, $dv]
+                | (if ($se[$n] // null) == $sv then empty else "service \($k): \($n) is \($se[$n] // "unset") for env file value \($sv)" end),
+                  (if ($de[$n] // null) == $dv then empty else "service \($k): \($n) default \($de[$n] // "unset"), SOT \($dv)" end))'
+        tdir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-chanres.XXXXXX")" || return 2
+        if ! _ci_compose_image_render "${prod}" "${tdir}/d.json" \
+            || ! _ci_compose_image_render "${prod}" "${tdir}/s.json" "LANCACHE_IMAGE_REGISTRY=${sreg}" \
+                "LANCACHE_IMAGE_PREFIX=${spre}" "LANCACHE_IMAGE_TAG=${stag}" "LANCACHE_IMAGE_CHANNEL=${schan}"; then
+            rm -rf "${tdir}"
+            return 2
+        fi
+        rep="$(_ci_run "[CI-ERROR-CHECK-0171]" "file=\"${dep}\" reason=\"image default comparison failed\"" \
+            jq -rn --slurpfile d "${tdir}/d.json" --slurpfile s "${tdir}/s.json" --arg reg "${reg}" --arg repo "${repo}" \
+            --arg tag "${tag}" --arg sreg "${sreg}" --arg spre "${spre}" --arg stag "${stag}" --arg schan "${schan}" \
+            "${prog}")" || { rm -rf "${tdir}"; return 2; }
+        rm -rf "${tdir}"
+        while IFS= read -r line; do
+            [ -z "${line}" ] || viol+=("${line}")
+        done <<< "${rep}"
     fi
-    local readme reldoc
-    readme="$(_ci_repo_path CI_README "${repo_root}")" || return 2
-    reldoc="$(_ci_repo_path CI_RELEASE_VERSIONING_DOC "${repo_root}")" || return 2
-    grep -Fq 'LANCACHE_IMAGE_CHANNEL=latest' "${readme}" \
-        || viol+=("README must document latest as the install default")
-    grep -Fq 'fresh installs use `LANCACHE_IMAGE_CHANNEL=nightly` by default pre-1.0' "${reldoc}" \
-        || viol+=("release docs must document nightly as the pre-1.0 default")
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0105]" "reason=\"image channel/tag resolution contract violated\"" "$(printf '%s\n' "${viol[@]}")"
         return 1

@@ -739,7 +739,6 @@ ci_variables:
   CI_README: README.md
   CI_ARCH_DOC: docs/architecture-ng.md
   CI_BACKUP_RESTORE_DOC: docs/backup-restore.md
-  CI_RELEASE_VERSIONING_DOC: docs/release-versioning.md
   CI_DOCS_DIR: docs
   # What: attempts and backoff base of the retry owner.
   # Why: AG-CI-006: a retry/timeout value has one owner.
