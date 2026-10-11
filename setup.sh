@@ -176,7 +176,7 @@ is_valid_dhcp_proxy_domain() {
 }
 
 # What: true for one DHCP NTP entry: an IPv4 or a DNS name
-# Why: the watchdog and Admin UI resolve names; digits stay IPv4
+# Why: watchdog and UI resolve names; digits stay IPv4
 # From: Issue #1683 | PR #1912
 is_valid_dhcp_ntp_server() {
     local entry="${1:-}"
@@ -3221,8 +3221,8 @@ migrate_env_for_update() (
     # From: Issue #1683 | PR #1858
     append_env_key_if_missing NTP_ENABLED "0" "$env_file"
 
-    # What: per-service logging; an old LOGGING_ENABLED seeds it
-    # Why: the old all-or-nothing choice must survive the update
+    # What: per-service logging; LOGGING_ENABLED seeds it
+    # Why: the old all-or-nothing choice survives the update
     # From: Issue #1683 | PR #1912
     local old_logging="1" logging_key
     if env_key_exists LOGGING_ENABLED "$env_file"; then
@@ -4535,8 +4535,8 @@ wait_for_stack_health() {
                 print_warn "No container found for regressed service '$svc'; cannot dump its logs."
             fi
             if [[ -n "${_REGRESSED_SERVICE_SYSLOG_HOST[$svc]-}" ]]; then
-                # What: the tail reports a missing file itself
-                # Why: a switched-off service has no log file
+                # What: the tail reports a missing file
+                # Why: an off service has no log file
                 # From: Issue #1683 | PR #1912
                 dump_service_syslog_ng_tail "$svc" "${_REGRESSED_SERVICE_SYSLOG_HOST[$svc]}"
             fi
@@ -6771,7 +6771,7 @@ UPSTREAM_DHCP_IP="$DHCP_GATEWAY"
 # Why: only dnsmasq-relay uses it
 DHCP_RELAY_LOCAL_ADDR=""
 # What: optional dnsmasq fields, empty unless opted in
-# Why: the operator opts in below; NTP starts at the .env default
+# Why: the operator opts in below; NTP starts at the default
 # From: Issue #450 | PR #1912
 DHCP_PROXY_INTERFACE=""
 DHCP_PROXY_ROUTER=""
