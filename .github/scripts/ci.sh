@@ -9146,8 +9146,8 @@ _CI_AWK_COMMENT_LEX='
 # From: Issue #1683
 _ci_check_comment_length() {
     local -a _ci_override=("$@") files=()
-    local file style exp arc=0
-    local -a bad_files=() no_lexer=()
+    local file style exp out arc=0
+    local -a bad_files=() no_lexer=() findings=()
     _ci_scan_files files _ci_override || return 2
     _ci_prose_exempt_load || return 2
     for file in "${files[@]}"; do
@@ -9156,7 +9156,10 @@ _ci_check_comment_length() {
             no_lexer+=("${file}"); continue
         fi
         exp="$(_ci_header_expected "${file}")" || return 2
-        awk -v style="${style}" -v h2="${exp%%$'\n'*}" -v h3="${exp#*$'\n'}" "${_CI_AWK_COMMENT_LEX}"'
+        # What: counts characters, not bytes, per line
+        # Why: AG-CODE-012 sets a character limit
+        # From: Issue #1683 | PR #1858
+        out="$(LC_ALL=C.UTF-8 awk -v style="${style}" -v h2="${exp%%$'\n'*}" -v h3="${exp#*$'\n'}" "${_CI_AWK_COMMENT_LEX}"'
             function flush1() {
                 if (bl > 3) { printf "%s:%d: block %d lines (max 3)\n", FILENAME, bs, bl; viol++ }
                 bl = 0
@@ -9181,8 +9184,8 @@ _ci_check_comment_length() {
                 flush2()
                 if (viol > 0) exit 1
             }
-        ' "${file}" || arc=$?
-        _ci_comment_length_rc "${file}" || return 2
+        ' "${file}" 2>&1)" || arc=$?
+        _ci_comment_length_rc "${file}" "${out}" || return 2
     done
     # What: a type with no comment grammar fails the check.
     # Why: an unread file must never be reported as clean.
@@ -9191,7 +9194,7 @@ _ci_check_comment_length() {
         ci_error "[CI-ERROR-CHECK-0153]" "files=${#no_lexer[@]} reason=\"no comment grammar for this file type\"" "$(printf '%s\n' "${no_lexer[@]}")"
     fi
     if [ "${#bad_files[@]}" -gt 0 ]; then
-        ci_log "[CI-ERROR-CHECK-0128]" "files=${#bad_files[@]} scanned=${#files[@]} reason=\"comment contract violations (list above)\""
+        ci_error "[CI-ERROR-CHECK-0128]" "files=${#bad_files[@]} scanned=${#files[@]} reason=\"comment contract violations\"" "$(printf '%s\n' "${findings[@]}")"
     fi
     [ "${#no_lexer[@]}" -eq 0 ] && [ "${#bad_files[@]}" -eq 0 ] || return 1
     printf 'comment-length=clean files=%s\n' "${#files[@]}"
@@ -9201,11 +9204,22 @@ _ci_check_comment_length() {
 # Why: a read error (rc 2+) must not count as a finding.
 # From: Issue #1683 | PR #1858
 _ci_comment_length_rc() {
-    local file="$1"
+    local file="$1" out="$2"
     case "${arc}" in
-        0) ;;
-        1) case " ${bad_files[*]} " in *" ${file} "*) ;; *) bad_files+=("${file}") ;; esac ;;
-        *) ci_log "[CI-ERROR-CHECK-0129]" "file=\"${file}\" rc=${arc} reason=\"comment scan failed (raw above)\""; return 2 ;;
+        # What: output without a finding fails the scan
+        # Why: AG-VAL-001: an awk warning is an error
+        # From: Issue #1683 | PR #1858
+        0)
+            if [ -n "${out}" ]; then
+                ci_error "[CI-ERROR-CHECK-0170]" "file=\"${file}\" rc=0 reason=\"comment scan wrote output without a finding\"" "${out}"
+                return 2
+            fi
+            ;;
+        1)
+            case " ${bad_files[*]} " in *" ${file} "*) ;; *) bad_files+=("${file}") ;; esac
+            findings+=("${out}")
+            ;;
+        *) ci_error "[CI-ERROR-CHECK-0129]" "file=\"${file}\" rc=${arc} reason=\"comment scan failed\"" "${out}"; return 2 ;;
     esac
     arc=0
 }
