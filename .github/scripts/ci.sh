@@ -4000,11 +4000,30 @@ _ci_test_toolchain() {
     printf 'service=%s tested=ok\n' "${service}"
 }
 
+# What: an image's entrypoint as quoted shell words
+# Why: AG-CI-006: the Dockerfile owns ENTRYPOINT
+# From: Issue #1683 | PR #1858
+_ci_image_entrypoint() {
+    local image="$1" raw first
+    # What: pulls the image when inspect does not find it
+    # Why: docker image inspect reads local images only
+    # From: Issue #1683 | PR #1858
+    if ! raw="$(docker image inspect --format '{{json .Config.Entrypoint}}' "${image}" 2>&1)"; then
+        first="${raw}"
+        raw="$(_ci_run "[CI-ERROR-TEST-0013]" "image=\"${image}\" inspect=\"${first}\" reason=\"image pull for the entrypoint read failed\"" \
+            docker pull -q "${image}")" || return 2
+        raw="$(_ci_run "[CI-ERROR-TEST-0014]" "image=\"${image}\" reason=\"image inspect failed after the pull\"" \
+            docker image inspect --format '{{json .Config.Entrypoint}}' "${image}")" || return 2
+    fi
+    _ci_run "[CI-ERROR-TEST-0015]" "image=\"${image}\" entrypoint=\"${raw}\" reason=\"image has no entrypoint\"" \
+        jq -er 'if type == "array" and length > 0 then map(@sh) | join(" ") else error("no entrypoint") end' <<< "${raw}"
+}
+
 # What: Execute-smoke a product image's SOT smoke checks.
 # Why: prove apk binaries run, not just exist.
 # From: Issue #1613
 _ci_smoke_service() {
-    local service="$1" checks image
+    local service="$1" checks image ep
     checks="$(_ci_service_smoke "${service}")" || return 2
     if [ -z "${checks}" ]; then
         printf 'service=%s smoke=SKIP reason=no SOT smoke\n' "${service}"
@@ -4014,6 +4033,13 @@ _ci_smoke_service() {
     if [ -z "${image}" ]; then
         ci_log "[CI-ERROR-TEST-0007]" "service=\"${service}\" reason=\"CI_SERVICE_IMAGE required for the smoke\""
         return 2
+    fi
+    # What: @ENTRYPOINT@ in a check is the image entrypoint
+    # Why: setup.sh runs service commands through it
+    # From: Issue #1683 | PR #1858
+    if [[ "${checks}" == *@ENTRYPOINT@* ]]; then
+        ep="$(_ci_image_entrypoint "${image}")" || return 2
+        checks="${checks//@ENTRYPOINT@/${ep}}"
     fi
     _ci_image_smoke "[CI-ERROR-TEST-0008]" "${service}" "execute-smoke failed; missing lib?" \
         "${image}" "" "${checks}" || return "$?"
@@ -11832,28 +11858,15 @@ _ci_check_dhcp_proxy_env() {
     printf 'dhcp-proxy-env=clean\n'
 }
 
-# What: Kea preflight call, nmap in the dhcp image
-# Why: the install flow and image layout lack a bats test
+# What: fails unless setup.sh calls the Kea preflight
+# Why: AG-OP-008: Kea starts only after the LAN probe
 # From: Issue #1683 | PR #1858
 _ci_check_setup_kea_preflight() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
-    local -a viol=()
-    local su ep
+    local repo_root="${1:-${CI_REPO_ROOT}}" su n
     su="$(_ci_installer "${repo_root}")" || return 2
-    ep="$(_ci_service_path dhcp entrypoint.sh "${repo_root}")" || return 2
-    grep -Fq 'run_kea_dhcp_activation_preflight "$ENV_LOCAL"' "${su}" \
-        || viol+=("setup.sh must call the Kea discovery preflight before starting the stack")
-    # What: nmap in SOT dhcp packages
-    # Why: SOT owns apk lists; Dockerfile consumes
-    # From: Issue #1683 | PR #1858
-    local dhcp_pkgs
-    dhcp_pkgs="$(_ci_service_packages dhcp)" || return 2
-    grep -qx 'nmap' <<< "${dhcp_pkgs}" \
-        || viol+=("SOT services.dhcp.packages must install nmap for the Kea discovery preflight")
-    grep -Fq 'nmap|/usr/bin/nmap|/bin/nmap)' "${ep}" \
-        || viol+=("${ep#"${repo_root}/"} must pass through the nmap preflight command")
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0049]" "reason=\"Kea preflight call / dhcp nmap contract violated\"" "$(printf '%s\n' "${viol[@]}")"
+    n="$(_ci_capture 1 grep -cF -- 'run_kea_dhcp_activation_preflight "$ENV_LOCAL"' "${su}")" || return 2
+    if [ "${n}" -eq 0 ]; then
+        ci_log "[CI-ERROR-CHECK-0049]" "file=\"${su#"${repo_root}/"}\" reason=\"install flow does not call run_kea_dhcp_activation_preflight\""
         return 1
     fi
     printf 'setup-kea-preflight=clean\n'

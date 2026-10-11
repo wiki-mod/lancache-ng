@@ -153,6 +153,7 @@ services:
     # From: Issue #1613
     smoke:
       - kea-dhcp4 -v
+      - '@ENTRYPOINT@ nmap --version'
   dhcp-proxy:
     context: services/dhcp-proxy
     labels: [dhcp-proxy, dnsmasq]
