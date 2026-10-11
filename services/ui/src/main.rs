@@ -25,11 +25,11 @@ use lancache_ng::config::{
     zone_url,
 };
 use lancache_ng::{
-    DesiredRunState, DesiredState, DnsRecord, FlushRequest, Place, PowerDns, ProbeAnswer,
-    ProbeReport, SnapshotStore, WatchdogStatus, ct_eq, df, die, hex32, http_client, is_placeholder,
-    load_or_create, load_or_create_hex, resolve_shared_secret, shared_secret,
-    shared_secret_file_name, shared_secret_is_placeholder, snapshot_created_unix, unix_secs,
-    write_file, write_if_changed,
+    ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, DesiredRunState, DesiredState, DnsRecord, FlushRequest,
+    NetdataAlarm, Place, PowerDns, ProbeAnswer, ProbeReport, SnapshotStore, WatchdogStatus, ct_eq,
+    df, die, hex32, http_client, is_placeholder, load_or_create, load_or_create_hex,
+    resolve_shared_secret, shared_secret, shared_secret_file_name, shared_secret_is_placeholder,
+    snapshot_created_unix, unix_secs, write_file, write_if_changed,
 };
 use nkeys::{KeyPair, XKey};
 use regex::Regex;
@@ -177,14 +177,6 @@ struct Config {
     // What: TCP port the server binds inside the container.
     // Why: Dockerfile owns it; the primary URL reuses it.
     listen_port: u16,
-    netdata_conf_file: Option<String>,
-    netdata_notify_file: Option<String>,
-    netdata_token_file: Option<String>,
-    netdata_daemon_log: Option<String>,
-    netdata_health_log: Option<String>,
-    netdata_alarm_ui_url: Option<String>,
-    netdata_alarm_max_time: Option<String>,
-    netdata_alarm_recipient: Option<String>,
     dev_mode: bool,
     syslog_log_root: String,
     syslog_max_gb: u32,
@@ -357,14 +349,6 @@ impl Config {
             database_file: need("UI_DATABASE_FILE")?,
             registration_token_file: need("SECONDARY_REGISTRATION_TOKEN_FILE")?,
             listen_port: knob("UI_LISTEN_PORT", u16::MAX.into(), OutOfRange::Reject)? as u16,
-            netdata_conf_file: set("NETDATA_CONF_FILE"),
-            netdata_notify_file: set("NETDATA_NOTIFY_FILE"),
-            netdata_token_file: set("NETDATA_TOKEN_FILE"),
-            netdata_daemon_log: set("NETDATA_DAEMON_LOG"),
-            netdata_health_log: set("NETDATA_HEALTH_LOG"),
-            netdata_alarm_ui_url: set("NETDATA_ALARM_UI_URL"),
-            netdata_alarm_max_time: set("NETDATA_ALARM_MAX_TIME"),
-            netdata_alarm_recipient: set("NETDATA_ALARM_RECIPIENT"),
             // What: dev mode is an optional switch, off.
             // Why: the ui gets none; prod stays off.
             dev_mode: flag("LANCACHE_DEV_MODE", false),
@@ -1587,34 +1571,9 @@ fn syslog_stats(root: &str) -> SyslogStats {
     stats
 }
 
-// What: header and path of the netdata alarm webhook.
-// Why: netdata and the ui must spell both the same way.
-const ALARM_TOKEN_HEADER: &str = "X-Netdata-Alarm-Token";
-const ALARM_INGEST_PATH: &str = "/api/netdata-alarms";
-
 // What: stored alarm history cap, newest kept.
 // Why: a burst of alarms must not grow the file unbounded.
 const MAX_ALARMS: usize = 50;
-
-// What: one alarm; the names are custom_sender's variables.
-// Why: the sender script is rendered from these fields.
-// From: Issue #849
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-struct NetdataAlarm {
-    unique_id: i64,
-    alarm_id: i64,
-    event_id: i64,
-    when: i64,
-    name: String,
-    chart: String,
-    host: String,
-    status: String,
-    old_status: String,
-    value_string: String,
-    units: String,
-    info: String,
-    duration: i64,
-}
 
 // What: stored alarms, newest first; any failure is empty.
 // Why: the dashboard must render even with a broken file.
@@ -1666,56 +1625,6 @@ fn alarm_views(alarms: &[NetdataAlarm]) -> Vec<Value> {
             })
         })
         .collect()
-}
-
-// What: netdata custom_sender that POSTs alarms to the ui.
-// Why: fields come from NetdataAlarm; no second list.
-// From: Issue #858
-fn render_alarm_notify_conf(
-    ui_url: &str,
-    token_file: &str,
-    max_time: &str,
-    recipient: &str,
-) -> Result<String, String> {
-    for value in [ui_url, token_file, max_time, recipient] {
-        let plain = |c: char| c.is_ascii_alphanumeric() || "-._:/".contains(c);
-        if value.is_empty() || !value.chars().all(plain) {
-            return Err(format!("{value:?} is no plain URL or path"));
-        }
-    }
-    let sample = serde_json::to_value(NetdataAlarm::default()).map_err(|e| e.to_string())?;
-    let fields = sample.as_object().ok_or("alarm is no JSON object")?;
-    let json: Vec<String> = fields
-        .iter()
-        .map(|(key, value)| {
-            if value.is_string() {
-                format!("\\\"{key}\\\":\\\"$(_lancache_json_escape \"${{{key}}}\")\\\"")
-            } else {
-                format!("\\\"{key}\\\":${{{key}}}")
-            }
-        })
-        .collect();
-    let json = json.join(",");
-    let ok = StatusCode::OK.as_u16();
-    Ok(format!(
-        r#"SEND_CUSTOM="YES"
-DEFAULT_RECIPIENT_CUSTOM="{recipient}"
-_lancache_json_escape() {{
-  printf '%s' "$1" | tr -d '\n' | sed 's/\\/\\\\/g; s/"/\\"/g'
-}}
-custom_sender() {{
-  local token httpcode
-  token="$(cat "{token_file}")" || return 1
-  httpcode="$(docurl --max-time {max_time} -X POST -H "Content-Type: application/json" -H "{ALARM_TOKEN_HEADER}: ${{token}}" -d "{{{json}}}" "{ui_url}{ALARM_INGEST_PATH}")" || {{
-    error "lancache-ui alarm POST failed: HTTP ${{httpcode}}"
-    return 1
-  }}
-  [ "${{httpcode}}" = "{ok}" ] && return 0
-  error "lancache-ui alarm POST returned HTTP ${{httpcode}}"
-  return 1
-}}
-"#
-    ))
 }
 
 // What: store an alarm sent by netdata's custom_sender.
@@ -5741,93 +5650,6 @@ fn container_root_start() {
     container_start_fatal(&format!("cannot exec as uid {uid}: {err}"));
 }
 
-// What: write a file when it differs; owner is (uid, gid).
-// Why: reruns on every start must write nothing.
-// From: Issue #1683 | PR #1858
-fn put(path: &Path, content: &str, mode: u32, owner: Option<(u32, u32)>) -> Result<(), String> {
-    let owner = owner.map(|(uid, gid)| (Some(uid), Some(gid)));
-    write_if_changed(path, content.as_bytes(), mode, owner)
-        .map(|_| ())
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))
-}
-
-// What: resolve one prefix's secrets, then load Config.
-// Why: Config reads a secret file only once it exists.
-// From: Issue #1683 | PR #1858
-fn prepared_config(gid: u32, prefix: &str) -> Result<Config, String> {
-    let cfg = Config::from_env()?;
-    ensure_shared_secrets(&cfg.shared_secret_dir, gid, prefix)?;
-    Config::from_env()
-}
-
-// What: alarm token, sender, log config and log dir.
-// Why: the upstream netdata image has no hook of ours.
-// From: Issue #1683 | PR #1858
-fn prepare_netdata(gid: u32) -> Result<(), String> {
-    let cfg = prepared_config(gid, "NETDATA_")?;
-    if cfg.netdata_alarm_token.is_empty() {
-        return Err("NETDATA_ALARM_TOKEN resolved to an empty value".to_string());
-    }
-    let need =
-        |value: &Option<String>, key: &str| value.clone().ok_or_else(|| config::not_set(key));
-    let token = need(&cfg.netdata_token_file, "NETDATA_TOKEN_FILE")?;
-    let notify = need(&cfg.netdata_notify_file, "NETDATA_NOTIFY_FILE")?;
-    let conf = need(&cfg.netdata_conf_file, "NETDATA_CONF_FILE")?;
-    let daemon_log = need(&cfg.netdata_daemon_log, "NETDATA_DAEMON_LOG")?;
-    let health_log = need(&cfg.netdata_health_log, "NETDATA_HEALTH_LOG")?;
-    let sender = render_alarm_notify_conf(
-        &need(&cfg.netdata_alarm_ui_url, "NETDATA_ALARM_UI_URL")?,
-        &token,
-        &need(&cfg.netdata_alarm_max_time, "NETDATA_ALARM_MAX_TIME")?,
-        &need(&cfg.netdata_alarm_recipient, "NETDATA_ALARM_RECIPIENT")?,
-    )?;
-    // What: refuse a log path with a line break.
-    // Why: it would inject a line into the netdata config.
-    if [&daemon_log, &health_log]
-        .iter()
-        .any(|p| p.contains(['\n', '\r']))
-    {
-        return Err("a netdata log path holds a line break".to_string());
-    }
-    let mut log_dirs: Vec<&Path> = [&daemon_log, &health_log]
-        .iter()
-        .map(|p| Path::new(p.as_str()).parent())
-        .collect::<Option<_>>()
-        .ok_or("a netdata log path has no directory")?;
-    log_dirs.dedup();
-    put(Path::new(&token), &cfg.netdata_alarm_token, 0o600, None)?;
-    put(Path::new(&notify), &sender, 0o644, None)?;
-    put(
-        Path::new(&conf),
-        &format!("[logs]\ndaemon = {daemon_log}\nhealth = {health_log}\n"),
-        0o644,
-        None,
-    )?;
-    log_dirs.iter().try_for_each(|dir| {
-        open_log_dir_to_group(dir, gid).map_err(|e| format!("{}: {e}", dir.display()))
-    })
-}
-
-// What: one-shot root prep for an image we do not build.
-// Why: compose holds no logic; the files are written here.
-// From: Issue #1683 | PR #1858
-fn prepare_runtime(args: &[String]) -> ! {
-    let gid = required_env_id("UI_RUNTIME_GID");
-    let done = match args {
-        [target] if target == "netdata" => prepare_netdata(gid),
-        [target, dirs @ ..] if target == "logs" && !dirs.is_empty() => {
-            dirs.iter().try_for_each(|d| {
-                open_log_dir_to_group(Path::new(d), gid).map_err(|e| format!("{d}: {e}"))
-            })
-        }
-        _ => Err("usage: --prepare netdata | logs <dir>...".to_string()),
-    };
-    match done {
-        Ok(()) => std::process::exit(0),
-        Err(e) => container_start_fatal(&e),
-    }
-}
-
 // What: open the secondaries DB and bring it up to date.
 // Why: old installs lack columns; additive changes only.
 // From: Issue #583
@@ -6049,14 +5871,11 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-// What: pick root prep or the server.
-// Why: one-shots run as root as is; the server drops root.
+// What: drop root, then run the server.
+// Why: the server must not run as root.
 // From: Issue #1288 | PR #1858
 fn main() -> anyhow::Result<()> {
-    match std::env::args().nth(1).as_deref() {
-        Some("--prepare") => prepare_runtime(&std::env::args().skip(2).collect::<Vec<_>>()),
-        _ => container_root_start(),
-    }
+    container_root_start();
     run()
 }
 
@@ -6734,14 +6553,6 @@ mod tests {
             ("AUTO_UPDATE_ENABLED", "yes"),
             ("NTP_ENABLED", "on"),
             ("CACHE_MAX_GB", "75"),
-            ("NETDATA_CONF_FILE", "/n/conf"),
-            ("NETDATA_NOTIFY_FILE", "/n/notify"),
-            ("NETDATA_TOKEN_FILE", "/n/token"),
-            ("NETDATA_DAEMON_LOG", "/n/daemon"),
-            ("NETDATA_HEALTH_LOG", "/n/health"),
-            ("NETDATA_ALARM_UI_URL", "https://ui"),
-            ("NETDATA_ALARM_MAX_TIME", "60"),
-            ("NETDATA_ALARM_RECIPIENT", "ops"),
             ("NATS_ISSUER_SEED", "issuer"),
             ("NATS_XKEY_SEED", "xkey"),
         ];
@@ -6770,14 +6581,6 @@ mod tests {
         assert_eq!(cfg.startup_settings["AUTO_UPDATE_ENABLED"], "1");
         assert_eq!(cfg.startup_settings["NTP_ENABLED"], "1");
         assert_eq!(cfg.cache_max_gb, 75.0);
-        assert_eq!(cfg.netdata_conf_file.as_deref(), Some("/n/conf"));
-        assert_eq!(cfg.netdata_notify_file.as_deref(), Some("/n/notify"));
-        assert_eq!(cfg.netdata_token_file.as_deref(), Some("/n/token"));
-        assert_eq!(cfg.netdata_daemon_log.as_deref(), Some("/n/daemon"));
-        assert_eq!(cfg.netdata_health_log.as_deref(), Some("/n/health"));
-        assert_eq!(cfg.netdata_alarm_ui_url.as_deref(), Some("https://ui"));
-        assert_eq!(cfg.netdata_alarm_max_time.as_deref(), Some("60"));
-        assert_eq!(cfg.netdata_alarm_recipient.as_deref(), Some("ops"));
         assert_eq!(cfg.nats_issuer_seed.as_deref(), Some("issuer"));
         assert_eq!(cfg.nats_xkey_seed.as_deref(), Some("xkey"));
         env.insert("NATS_URL".to_string(), "nats://nats:4222".to_string());
@@ -7404,32 +7207,6 @@ mod tests {
         );
         assert_eq!(views[1]["when_display"], "9223372036854775807");
         assert!(alarm_views(&[]).is_empty());
-    }
-
-    // What: the netdata sender script comes from fields.
-    // Why: netdata and the ui must agree on the payload.
-    // From: Issue #858
-    #[test]
-    fn alarm_sender_script_names_every_field() {
-        let script = render_alarm_notify_conf("http://ui:8080", "/t/token", "30", "ops").unwrap();
-        assert!(script.starts_with("SEND_CUSTOM=\"YES\"\nDEFAULT_RECIPIENT_CUSTOM=\"ops\"\n"));
-        assert!(script.contains("token=\"$(cat \"/t/token\")\" || return 1"));
-        assert!(script.contains("docurl --max-time 30 -X POST"));
-        assert!(script.contains("-H \"X-Netdata-Alarm-Token: ${token}\""));
-        assert!(script.contains("\"http://ui:8080/api/netdata-alarms\")\" || {"));
-        assert!(script.contains("[ \"${httpcode}\" = \"200\" ] && return 0"));
-        let fields = r#"-d "{\"alarm_id\":${alarm_id},\"chart\":\"$(_lancache_json_escape "${chart}")\",\"duration\":${duration},\"event_id\":${event_id},\"host\":\"$(_lancache_json_escape "${host}")\",\"info\":\"$(_lancache_json_escape "${info}")\",\"name\":\"$(_lancache_json_escape "${name}")\",\"old_status\":\"$(_lancache_json_escape "${old_status}")\",\"status\":\"$(_lancache_json_escape "${status}")\",\"unique_id\":${unique_id},\"units\":\"$(_lancache_json_escape "${units}")\",\"value_string\":\"$(_lancache_json_escape "${value_string}")\",\"when\":${when}}""#;
-        assert!(script.contains(fields), "{script}");
-        for (url, file, time, to) in [
-            ("", "/t", "30", "ops"),
-            ("http://ui", "", "30", "ops"),
-            ("http://ui", "/t", "", "ops"),
-            ("http://ui", "/t", "30", ""),
-            ("http://ui", "/t y", "30", "ops"),
-            ("http://ui", "/t", "30", "o\"ps"),
-        ] {
-            assert!(render_alarm_notify_conf(url, file, time, to).is_err());
-        }
     }
 
     // What: IPv4 addresses map to PTR names and zones.
@@ -8806,30 +8583,6 @@ mod tests {
             0o2775
         );
         assert!(open_log_dir_to_group(&dir.join("missing"), gid).is_err());
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    // What: files are written only when they differ.
-    // Why: reruns on every start must write nothing.
-    #[test]
-    fn prepared_files_are_written_once() {
-        let dir = unique_temp_dir("put");
-        let file = dir.join("conf");
-        put(&file, "one", 0o600, None).unwrap();
-        assert_eq!(fs::read_to_string(&file).unwrap(), "one");
-        assert_eq!(
-            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        put(&file, "two", 0o644, None).unwrap();
-        assert_eq!(fs::read_to_string(&file).unwrap(), "two");
-        assert_eq!(
-            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
-            0o644
-        );
-        fs::write(dir.join("plain"), "x").unwrap();
-        let blocked = put(&dir.join("plain/child"), "x", 0o644, None).unwrap_err();
-        assert!(blocked.starts_with("cannot write "), "{blocked}");
         let _ = fs::remove_dir_all(&dir);
     }
 

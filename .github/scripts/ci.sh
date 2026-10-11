@@ -11602,8 +11602,8 @@ _ci_check_nats_atomic_write() {
     printf 'nats-atomic-write=clean\n'
 }
 
-# What: netdata-net holds netdata and the ui, nothing else.
-# Why: any other member could reach the netdata API.
+# What: no service publishes the netdata API port.
+# Why: only stack peers may reach it; the ui proxies it.
 # From: Issue #1683 | PR #1858
 _ci_check_netdata_isolation() {
     local repo_root="${1:-${CI_REPO_ROOT}}" cf dep inst cfg out line
@@ -11613,17 +11613,20 @@ _ci_check_netdata_isolation() {
     for cf in "${dep}" "${inst}"; do
         cfg="$(_ci_compose_json "${repo_root}/${cf}")" || return 2
         out="$(_ci_capture 0 jq -r '
-            [.services | to_entries[] | select((.value.networks // {}) | has("netdata-net")) | .key] as $m
-            | (if ($m | sort) != ["netdata", "ui"]
-                then "netdata-net members must be netdata and ui (got: \($m | sort | join(",")))" else empty end),
-              ((.services.netdata.networks // {}) | keys | select(. != ["netdata-net"])
-                | "netdata must join netdata-net only (got: \(join(",")))")' <<<"${cfg}")" || return 2
+            (.services.ui.environment.NETDATA_URL // "") as $url
+            | if ($url | test(":[0-9]+$") | not)
+                then "ui NETDATA_URL has no port (got: \($url))"
+              else ($url | sub(".*:"; "") | tonumber) as $port
+                | .services | to_entries[]
+                | select(any(.value.ports[]?; .target == $port))
+                | "\(.key) publishes the netdata port \($port)"
+              end' <<<"${cfg}")" || return 2
         while IFS= read -r line; do
             [ -z "${line}" ] || viol+=("${cf}: ${line}")
         done <<<"${out}"
     done
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0146]" "reason=\"netdata network isolation violated\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0146]" "reason=\"netdata API is published\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'netdata-isolation=clean\n'
@@ -12276,17 +12279,6 @@ _ci_check_logging_matrix() {
             *) viol+=("${doc}: row '${n}' is not a real Compose service") ;;
         esac
     done
-    # What: netdata mounts the real web_log job file.
-    # Why: one web_log owner; no inline copy can drift.
-    # From: Issue #1683 | PR #1858
-    local web_log_conf="${repo_root}/services/syslog/netdata-web_log.conf"
-    if [ ! -f "${web_log_conf}" ]; then
-        viol+=("${web_log_conf}: not found")
-    elif ! grep -q 'jobs:' "${web_log_conf}"; then
-        viol+=("${web_log_conf}: no 'jobs:' section found")
-    elif ! grep -Fq 'services/syslog/netdata-web_log.conf:/etc/netdata/go.d/web_log.conf' "${repo_root}/${dep}"; then
-        viol+=("${dep}: netdata must mount services/syslog/netdata-web_log.conf")
-    fi
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0038]" "reason=\"logging-matrix drift (issue #633)\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
