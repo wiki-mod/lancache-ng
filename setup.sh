@@ -4209,7 +4209,7 @@ EOF
             ;;
         secondary)
             cat <<EOF
-Usage: ./setup.sh secondary --primary <url> --token <token> --name <name> --ip-http <ip> [--listen-ip <ip>] [--rotate]
+Usage: ./setup.sh secondary --primary <url> --token <token> --name <name> --ip-http <ip> [--listen-ip <ip>] [--ip-https <ip> --listen-ip-https <ip>] [--rotate]
 
 Registers and starts a secondary DNS node on a remote host. The command
 creates a local compose directory, writes the secondary .env file, and starts
@@ -6016,7 +6016,7 @@ lancache_repo_file_text() {
 # What: secondary setup consumes primary credentials
 # Why: it must not modify the primary host
 cmd_secondary() {
-    local primary="" token="" name="" ip_http="" listen_ip="" rotate=0
+    local primary="" token="" name="" ip_http="" listen_ip="" ip_https="" listen_ip_https="" rotate=0
     local out http_status response secondary_dir cmd ddns_tsig_key dns_xfr_primary tag_input
     local -a missing_args
     local nats_url nats_user nats_password consumer_name pdns_api_key
@@ -6030,7 +6030,7 @@ cmd_secondary() {
 
     usage_secondary() {
         cat <<EOF
-Usage: $0 secondary --primary <url> --token <token> --name <name> --ip-http <ip> [--listen-ip <ip>] [--rotate]
+Usage: $0 secondary --primary <url> --token <token> --name <name> --ip-http <ip> [--listen-ip <ip>] [--ip-https <ip> --listen-ip-https <ip>] [--rotate]
 
 Required arguments:
   --primary <url>    Primary LanCache UI/API URL, for example http://<primary-ip>:<ui-port>
@@ -6040,6 +6040,8 @@ Required arguments:
 
 Optional arguments:
   --listen-ip <ip>   Bind IP for the secondary DNS container (default: detected host LAN IP)
+  --ip-https <ip>    Primary https proxy IP; adds a second DNS bind (needs --listen-ip-https)
+  --listen-ip-https <ip>  Second bind IP for the https DNS (needs --ip-https; differs from --listen-ip)
   --rotate           Reuse an existing secondary directory and refresh credentials
 EOF
     }
@@ -6069,6 +6071,16 @@ EOF
             --listen-ip)
                 require_value "$1" "${2:-}"
                 listen_ip="$2"
+                shift 2
+                ;;
+            --ip-https)
+                require_value "$1" "${2:-}"
+                ip_https="$2"
+                shift 2
+                ;;
+            --listen-ip-https)
+                require_value "$1" "${2:-}"
+                listen_ip_https="$2"
                 shift 2
                 ;;
             --rotate)
@@ -6117,6 +6129,19 @@ EOF
     listen_ip=$(secondary_choose_listen_ip "$listen_ip") \
         || die "No usable secondary bind IP on port 53 (exit $?; see above). Re-run with --listen-ip <ip> after freeing the port."
     print_ok "Secondary DNS bind IP: ${listen_ip}"
+    if [[ -n "$ip_https" || -n "$listen_ip_https" ]]; then
+        [[ -n "$ip_https" && -n "$listen_ip_https" ]] \
+            || die "--ip-https and --listen-ip-https must be given together"
+        is_valid_ipv4 "$ip_https" \
+            || die "--ip-https must be a valid IPv4 address"
+        is_valid_ipv4 "$listen_ip_https" \
+            || die "--listen-ip-https must be a valid IPv4 address"
+        listen_ip_https=$(secondary_choose_listen_ip "$listen_ip_https") \
+            || die "No usable secondary https bind IP on port 53 (exit $?; see above). Re-run with --listen-ip-https <ip> after freeing the port."
+        [[ "$listen_ip_https" != "$listen_ip" ]] \
+            || die "the https bind IP must differ from the http bind IP ${listen_ip}"
+        print_ok "Secondary https DNS bind IP: ${listen_ip_https}"
+    fi
     assert_prebuilt_image_platform_supported
     # What: the compose file is fetched before registration
     # Why: a fetch failure must not follow a registration
@@ -6338,6 +6363,8 @@ EOF
     write_file_atomically "${secondary_dir}/.env" <<EOF
 IP_HTTP=${ip_http}
 LISTEN_IP=${listen_ip}
+IP_HTTPS=${ip_https}
+LISTEN_IP_HTTPS=${listen_ip_https}
 PDNS_API_KEY=${pdns_api_key}
 DDNS_TSIG_KEY=${ddns_tsig_key}
 DNS_XFR_PRIMARY=${dns_xfr_primary}

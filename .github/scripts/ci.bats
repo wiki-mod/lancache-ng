@@ -4066,6 +4066,30 @@ CASES
     _sec "${t}/ok" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${STD}" --listen-ip "${LIP}" --rotate
     [ "${status}" -eq 0 ] && cmp "${t}/env.first" "${env}" && cmp "${t}/compose.first" "${dir}/docker-compose.yml" \
         || { echo "rotate: ${output}"; return 1; }
+    # What: the https side needs both flags and its own bind IP
+    # Why: one dns container, a second bind, never half-set
+    # From: Issue #1683 | PR #1912
+    [ -z "$(get_env_var IP_HTTPS "${env}")" ] && [ -z "$(get_env_var LISTEN_IP_HTTPS "${env}")" ] \
+        || { echo "https keys set without flags: $(cat "${env}")"; return 1; }
+    while IFS='|' read -r case want args; do
+        # shellcheck disable=SC2086
+        _sec "${t}/${case}" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${STD}" --listen-ip "${LIP}" ${args}
+        [ "${status}" -eq 1 ] && [[ "${output}" == *"${want}"* ]] && [ ! -e "${t}/${case}/${name}" ] \
+            || { echo "${case}: rc ${status}: ${output}"; return 1; }
+    done <<CASES
+https-one|must be given together|--ip-https 192.0.2.2
+https-bad|--ip-https must be a valid IPv4 address|--ip-https x --listen-ip-https 192.0.2.6
+https-same|must differ from the http bind IP|--ip-https 192.0.2.2 --listen-ip-https ${LIP}
+CASES
+    _sec "${t}/https" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${STD}" --listen-ip "${LIP}" --ip-https 192.0.2.2 --listen-ip-https 192.0.2.6
+    [ "${status}" -eq 0 ] || { echo "https register: ${output}"; return 1; }
+    env="${t}/https/${name}/.env"
+    [ "$(get_env_var IP_HTTPS "${env}")" = "192.0.2.2" ] && [ "$(get_env_var LISTEN_IP_HTTPS "${env}")" = "192.0.2.6" ] \
+        || { echo "https keys: $(cat "${env}")"; return 1; }
+    docker compose -p "${name}" --env-file "${env}" -f "${root}/deploy/secondary/docker-compose.yml" config --format json \
+        | jq -e '.services.dns | .environment.PROXY_HTTPS_IP == "192.0.2.2" and ([.ports[] | select(.target == 1053 and .host_ip == "192.0.2.6" and .published == "53")] | length == 2)' >/dev/null \
+        || { echo "https compose ports"; return 1; }
+    env="${t}/ok/${name}/.env"
     # What: without a checkout the owner file is downloaded
     # Why: a curl|bash secondary uses the same single owner
     # From: Issue #1683 | PR #1858

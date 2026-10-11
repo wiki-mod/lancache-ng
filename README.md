@@ -660,6 +660,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/
 
 The registration token is generated during primary setup and stored in `.env`.
 
+Optional https side: add `--ip-https <primary https proxy ip> --listen-ip-https <second bind ip>`
+to the same command. The secondary's one dns container then also answers on the
+second bind IP; both flags are required together.
+
 You can also view a ready command inside the Admin UI under the secondary DNS section.
 
 If a secondary was created before scoped NATS user/password credentials existed,

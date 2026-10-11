@@ -15,6 +15,7 @@ services:
     init: true
     environment:
       - PROXY_IP=${IP_HTTP:?IP_HTTP is required}
+      - PROXY_HTTPS_IP=${IP_HTTPS:-}
       - PDNS_API_KEY=${PDNS_API_KEY}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       # What: DDNS updates accepted from loopback only.
@@ -41,12 +42,14 @@ services:
       - dns-config-snapshots:/var/lib/lancache-dns
     tmpfs:
       - /run/lancache
-    # What: dns-http only; a secondary has one LAN IP.
-    # Why: LISTEN_IP is the address setup.sh registered.
-    # From: Issue #1683
+    # What: https side binds only when LISTEN_IP_HTTPS is set.
+    # Why: without it the port maps to loopback, ephemeral port.
+    # From: Issue #1683 | PR #1912
     ports:
       - "${LISTEN_IP:?LISTEN_IP is required}:53:53/udp"
       - "${LISTEN_IP:?LISTEN_IP is required}:53:53/tcp"
+      - "${LISTEN_IP_HTTPS:-127.0.0.1}:${LISTEN_IP_HTTPS:+53}:1053/udp"
+      - "${LISTEN_IP_HTTPS:-127.0.0.1}:${LISTEN_IP_HTTPS:+53}:1053/tcp"
     healthcheck:
       test: ["CMD", "/usr/local/bin/lancache-watchdog", "healthcheck"]
       interval: 30s
