@@ -193,7 +193,7 @@
   </div>
 
   <!-- What: hit rate and totals from log_stats
-       Why: parsed from access log lines, not nginx status -->
+       Why: parsed from log lines, not nginx status -->
   <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
     <div class="card text-center">
       <p class="stat-num text-3xl font-bold text-emerald-400">{{ log_stats.hit_pct | round(precision=1) }}%</p>
