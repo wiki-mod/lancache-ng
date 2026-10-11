@@ -3615,7 +3615,7 @@ CASES
 # Why: an update keeps operator values and pins one tag
 # From: Issue #1683 | PR #1858
 @test "setup env migration and release image tag per input" {
-    local root t="${BATS_TEST_TMPDIR}" ip v raw case lines want err rc tags tag bad
+    local root t="${BATS_TEST_TMPDIR}" ip v raw case lines want err rc tags tag bad sot PIN REL CH ALIAS
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}" || return 1
     ip="$(get_env_var IP_STANDARD "${root}/deploy/prod/.env")"
@@ -3637,7 +3637,9 @@ CASES
     _setup_sh_run 'append_env_migrated_assignment_if_missing UI_BIND_IP IP_STANDARD "" "${E}"'
     [ "${status}" -eq 0 ] && [ "$(cat "${E}")" = "IP_STANDARD=" ] || { echo "nothing: $(cat "${E}")"; return 1; }
     export SD="${t}/archive"
-    mkdir -p "${SD}" || return 1
+    sot="${CI_MANIFEST_SOURCE#"${root}"/}"
+    [ "${sot}" != "${CI_MANIFEST_SOURCE}" ] && mkdir -p "${SD}/${sot%/*}" && cp "${CI_MANIFEST_SOURCE}" "${SD}/${sot}" \
+        || { echo "SOT ${CI_MANIFEST_SOURCE} not copied below ${SD}"; return 1; }
     while IFS='|' read -r case want err rc; do
         printf '%s\n' "${case}" > "${SD}/VERSION"
         [ "${case}" != - ] || : > "${SD}/VERSION"
@@ -3651,12 +3653,20 @@ ${v%.*}||Invalid release image tag derived from VERSION: v${v%.*}|2
 -||VERSION is empty; cannot derive a release image tag.|2
 CASES
     printf '%s\n' "${v}" > "${SD}/VERSION"
+    PIN="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_field release "" pinned_channel)"
+    REL="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_channels_where release_tags true)"
+    CH="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_keys release/channels)"
+    CH="$(awk -v r="${REL}" '$0 != r { print; exit }' <<< "${CH}")"
+    ALIAS="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_list release/channels "${REL}" aliases)"
+    ALIAS="${ALIAS%%$'\n'*}"
+    [ -n "${PIN}" ] && [ -n "${REL}" ] && [ -n "${CH}" ] && [ -n "${ALIAS}" ] || { echo "SOT: ${PIN}|${REL}|${CH}|${ALIAS}"; return 1; }
+    export PIN CH ALIAS
     _setup_sh_run 'unset LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_TAG; SCRIPT_DIR="${SD}"
         printf "%s|%s|%s|%s\n" "$(resolve_lancache_image_channel "${SD}/missing.env")" \
-            "$(LANCACHE_IMAGE_CHANNEL=pinned resolve_lancache_image_tag "${SD}/missing.env")" \
-            "$(LANCACHE_IMAGE_CHANNEL=nightly resolve_lancache_image_tag "${SD}/missing.env")" \
-            "$(LANCACHE_IMAGE_CHANNEL=stable resolve_lancache_image_tag "${SD}/missing.env")"'
-    [ "${status}" -eq 0 ] && [ "${output}" = "pinned|v${v#v}|nightly|latest" ] || { echo "channels: ${output}"; return 1; }
+            "$(LANCACHE_IMAGE_CHANNEL="${PIN}" resolve_lancache_image_tag "${SD}/missing.env")" \
+            "$(LANCACHE_IMAGE_CHANNEL="${CH}" resolve_lancache_image_tag "${SD}/missing.env")" \
+            "$(LANCACHE_IMAGE_CHANNEL="${ALIAS}" resolve_lancache_image_tag "${SD}/missing.env")"'
+    [ "${status}" -eq 0 ] && [ "${output}" = "${PIN}|v${v#v}|${CH}|${REL}" ] || { echo "channels: ${output}"; return 1; }
     g() { git -c user.email=t@example.test -c user.name=t "$@"; }
     _tags_reset() {
         g -C "${GD}" tag -l > "${t}/tags" || return 1
@@ -3689,51 +3699,87 @@ CASES
         || { echo "dubious: rc ${status}, stdout '${output}', stderr '$(cat "${ERR}")'"; return 1; }
 }
 
+# What: SOT channels, aliases, pinned; retired names fail
+# Why: AG-REL-010: setup.sh derives every channel name
+# From: Issue #1683 | PR #1858
 @test "setup image channel validation, resolution and pointer" {
-    # What: SOT channels valid; retired names give a hint
-    # Why: setup.sh and the SOT must name the same channels
-    # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" mut rel arms accepted retired alias pin="" first second v sha case line want
+    local root t="${BATS_TEST_TMPDIR}" mut rel pin aliases="" retired="" accepted kind want ch name reason
+    local first second v sha case line sot
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
-    mut="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_mutable_channels)"
-    rel="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_channel_field release_tags | awk '$2 == "true" { print $1 }')"
-    arms="$(declare -f validate_lancache_image_channel | sed -n 's/^ *\([a-z| ]*\))$/\1/p' | tr -d ' ')"
-    accepted="$(awk 'NR == 1' <<< "${arms}" | tr '|' '\n')"
-    retired="$(awk 'NR > 1' <<< "${arms}" | tr '|' '\n')"
+    mut="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_keys release/channels)"
+    rel="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_channels_where release_tags true)"
+    pin="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_field release "" pinned_channel)"
+    while IFS= read -r ch; do
+        while IFS= read -r name; do
+            [ -z "${name}" ] || aliases+="${name} ${ch}"$'\n'
+        done <<< "$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_list release/channels "${ch}" aliases)"
+    done <<< "${mut}"
+    while IFS= read -r name; do
+        [ -n "${name}" ] || continue
+        reason="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_field release retired_channels "${name}")"
+        retired+="${name} ${reason}"$'\n'
+    done <<< "$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_keys release/retired_channels all)"
+    aliases="${aliases%$'\n'}" retired="${retired%$'\n'}"
+    [ "$(wc -l <<< "${mut}")" -ge 2 ] && [ "$(wc -w <<< "${rel}")" -eq 1 ] && [ -n "${aliases}" ] \
+        && [ -n "${pin}" ] && [ -n "${retired}" ] || { echo "SOT: ${mut} | ${rel} | ${aliases} | ${pin} | ${retired}"; return 1; }
+    accepted="$(printf '%s\n%s\n%s\n' "${mut}" "$(cut -d' ' -f1 <<< "${aliases}")" "${pin}")"
     v="$(tr -d '[:space:]' < "${root}/VERSION")"
     sha="sha-$(sha256sum "${root}/VERSION" | cut -c1-40)"
-    [ "$(wc -l <<< "${mut}")" -ge 2 ] && [ "$(wc -w <<< "${rel}")" -eq 1 ] && [ -n "${retired}" ] \
-        || { echo "inputs: ${mut} | ${rel} | ${arms}"; return 1; }
     first="$(awk 'NR == 1' <<< "${mut}")" second="$(awk 'NR == 2' <<< "${mut}")"
     export C SD="${t}/plain" E="${t}/.env" SHELLC SHELLT
     mkdir -p "${SD}"
-    # What: each SOT channel is valid, points to itself
-    # Why: an alias points at the SOT release-tag channel
+    sot="${CI_MANIFEST_SOURCE#"${root}"/}"
+    [ "${sot}" != "${CI_MANIFEST_SOURCE}" ] && mkdir -p "${SD}/${sot%/*}" && cp "${CI_MANIFEST_SOURCE}" "${SD}/${sot}" \
+        || { echo "SOT ${CI_MANIFEST_SOURCE} not copied below ${SD}"; return 1; }
+    # What: setup.sh reads the release block as ci.sh does
+    # Why: two readers of one SOT must never disagree
+    # From: Issue #1683 | PR #1858
+    for kind in channel release alias pinned retired; do
+        case "${kind}" in
+            channel) want="${mut}" ;;
+            release) want="${rel}" ;;
+            alias) want="${aliases}" ;;
+            pinned) want="${pin}" ;;
+            retired) want="${retired}" ;;
+        esac
+        _setup_sh_run "lancache_release_rows ${kind}"
+        [ "${status}" -eq 0 ] && [ "$(sort <<< "${output}")" = "$(sort <<< "${want}")" ] \
+            || { echo "${kind}: setup.sh '${output}', ci.sh '${want}'"; return 1; }
+    done
+    # What: channels point to themselves, aliases to theirs
+    # Why: an alias has no stack tag of its own
     # From: Issue #1683 | PR #1858
     while IFS= read -r C; do
-        grep -qxF -- "${C}" <<< "${accepted}" || { echo "SOT channel ${C} not accepted by setup.sh"; return 1; }
         _setup_sh_run 'validate_lancache_image_channel "${C}" && lancache_stack_pointer_channel_for "${C}"'
         [ "${status}" -eq 0 ] && [ "${output}" = "${C}" ] || { echo "channel ${C}: ${output}"; return 1; }
     done <<< "${mut}"
-    while IFS= read -r alias; do
-        grep -qxF -- "${alias}" <<< "${mut}" && continue
-        C="${alias}"
+    while read -r C ch; do
         _setup_sh_run 'validate_lancache_image_channel "${C}" && lancache_stack_pointer_channel_for "${C}"'
-        [ "${output}" != "${alias}" ] || pin="${alias}"
-        [ "${status}" -eq 0 ] && { [ "${output}" = "${rel}" ] || [ "${output}" = "${alias}" ]; } \
-            || { echo "alias ${alias}: ${output}"; return 1; }
-    done <<< "${accepted}"
-    while IFS= read -r C; do
+        [ "${status}" -eq 0 ] && [ "${output}" = "${ch}" ] || { echo "alias ${C}: ${output}"; return 1; }
+    done <<< "${aliases}"
+    C="${pin}"
+    _setup_sh_run 'validate_lancache_image_channel "${C}"'
+    [ "${status}" -eq 0 ] || { echo "pinned ${C}: ${output}"; return 1; }
+    # What: retired and unknown names fail with the choices
+    # Why: release-versioning: a clear error, no fallback
+    # From: Issue #1683 | PR #1858
+    while read -r C reason; do
         _setup_sh_run 'validate_lancache_image_channel "${C}"; echo unreached'
-        [ "${status}" -eq 1 ] && [[ "${output}" != *unreached* ]] && grep -qF -f <(sed 's/^/LANCACHE_IMAGE_CHANNEL=/' <<< "${mut}") <<< "${output}" \
+        [ "${status}" -eq 1 ] && [[ "${output}" != *unreached* && "${output}" == *"${reason}"* ]] \
             || { echo "retired ${C}: ${output}"; return 1; }
+        while IFS= read -r name; do
+            [[ "${output}" == *"${name}"* ]] || { echo "retired ${C} does not name ${name}: ${output}"; return 1; }
+        done <<< "${accepted}"
     done <<< "${retired}"
-    for C in "x${BATS_TEST_NUMBER}" ""; do
+    for C in "$(_val name)" ""; do
         _setup_sh_run 'validate_lancache_image_channel "${C}"; echo unreached'
-        [ "${status}" -eq 1 ] && [[ "${output}" == *"must be"* && "${output}" != *unreached* ]] || { echo "unknown '${C}': ${output}"; return 1; }
+        [ "${status}" -eq 1 ] && [[ "${output}" == *"must be one of"* && "${output}" != *unreached* ]] \
+            || { echo "unknown '${C}': ${output}"; return 1; }
+        while IFS= read -r name; do
+            [[ "${output}" == *"${name}"* ]] || { echo "unknown '${C}' does not name ${name}: ${output}"; return 1; }
+        done <<< "${accepted}"
     done
-    [ -n "${pin}" ] || { echo "no self-pointing alias in setup.sh"; return 1; }
     # What: shell beats .env; a tag implies its channel
     # Why: one resolution order for every caller
     # From: Issue #1683 | PR #1858
@@ -3753,7 +3799,16 @@ envtagsha|||LANCACHE_IMAGE_TAG=${sha}\n|${pin}
 envtagv|||LANCACHE_IMAGE_TAG=v${v#v}\n|${pin}
 envtagchannel|||LANCACHE_IMAGE_TAG=${first}\n|${first}
 CASES
-    C="$(awk 'NR == 1' <<< "${retired}")"
+    # What: the pinned mode without any tag stops
+    # Why: pinned names one fixed tag; none must not pass
+    # From: Issue #1683 | PR #1858
+    : > "${E}"
+    C="${pin}"
+    _setup_sh_run 'SCRIPT_DIR="${SD}"; unset LANCACHE_IMAGE_TAG
+        LANCACHE_IMAGE_CHANNEL="${C}" resolve_lancache_image_tag "${E}"; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" != *unreached* && "${output}" == *"LANCACHE_IMAGE_CHANNEL=${pin} requires LANCACHE_IMAGE_TAG"* ]] \
+        || { echo "pinned without a tag: ${output}"; return 1; }
+    C="$(awk 'NR == 1 { print $1 }' <<< "${retired}")"
     _setup_sh_run 'SCRIPT_DIR="${SD}"; LANCACHE_IMAGE_CHANNEL="${C}" resolve_lancache_image_channel "${E}"; echo unreached'
     [ "${status}" -eq 1 ] && [[ "${output}" != *unreached* ]] || { echo "retired in shell: ${output}"; return 1; }
 }
@@ -3762,14 +3817,18 @@ CASES
     # What: setup accepts exactly what the UI can write
     # Why: a UI value must never be dropped or misread
     # From: Issue #1683 | PR #1858
-    local root ui chans modes other gb v
+    local root ui chans modes other gb v acc c
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
     ui="${root}/services/ui/src"
     chans="$(awk '/^fn is_valid_ui_channel/ { f = 1 } f && /matches!/ { print; exit }' "${ui}/main.rs" | grep -oE '"[a-z]+"' | tr -d '"')"
     modes="$(_rust_dhcp_modes "${root}")" || return 1
     other="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_mutable_channels | grep -vxF -f <(printf '%s\n' "${chans}"))"
-    other+=$'\n'"$(declare -f validate_lancache_image_channel | sed -n 's/^ *\([a-z| ]*\))$/\1/p' | tr -d ' ' | tr '|' '\n' | grep -vxF -f <(printf '%s\n' "${chans}"))"
+    acc="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_field release "" pinned_channel)"
+    while IFS= read -r c; do
+        acc+=$'\n'"${c}"$'\n'"$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_list release/channels "${c}" aliases)"
+    done <<< "$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_keys release/channels)"
+    other+=$'\n'"$(grep -v '^$' <<< "${acc}" | grep -vxF -f <(printf '%s\n' "${chans}"))"
     gb="$(cache_size_gb_from_env "$(get_env_var CACHE_MAX_SIZE "${root}/deploy/prod/.env")")"
     [ "$(wc -l <<< "${chans}")" -ge 2 ] && [ "$(wc -l <<< "${modes}")" -ge 2 ] && [ -n "${other}" ] && [ -n "${gb}" ] \
         || { echo "inputs: ${chans} | ${modes} | ${other} | ${gb}"; return 1; }
@@ -3806,9 +3865,7 @@ CASES
     _load_setup_sh "${root}"
     mut="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_mutable_channels)"
     first="$(awk 'NR == 1' <<< "${mut}")" second="$(awk 'NR == 2' <<< "${mut}")"
-    pin="$(declare -f validate_lancache_image_channel | sed -n 's/^ *\([a-z| ]*\))$/\1/p' | awk 'NR == 1' | tr -d ' ' | tr '|' '\n' \
-        | while IFS= read -r c; do [ "$(lancache_stack_pointer_channel_for "${c}")" != "${c}" ] || grep -qxF -- "${c}" <<< "${mut}" \
-            || printf '%s\n' "${c}"; done)"
+    pin="$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_field release "" pinned_channel)"
     new="sha-$(sha256sum <<< "new${BATS_TEST_NUMBER}" | cut -c1-40)"
     old="sha-$(sha256sum <<< "old${BATS_TEST_NUMBER}" | cut -c1-40)"
     [ -n "${first}" ] && [ -n "${second}" ] && [ "$(wc -l <<< "${pin}")" -eq 1 ] && [ -n "${pin}" ] \
@@ -4065,9 +4122,12 @@ CASES
     _tool_stub "${BIN}" jq <<<'printf "%s\n" "$*" >> "${DS}/jq.argv"; exec "${JQ_REAL:?}" "$@"'
     _tool_stub "${BIN}" curl <<'STUB'
 printf '%s\n' "$*" >> "${DS}/curl.argv"
-case "${!#}" in
-    */deploy/secondary/docker-compose.yml) [ ! -e "${DS}/fail-raw" ] || exit 22; cat "${DS}/raw.compose"; exit 0 ;;
-esac
+u="${!#}"
+while IFS= read -r f; do
+    case "${u}" in
+        */"${f#"${DS}/raw/"}") [ ! -e "${DS}/fail-raw" ] || exit 22; cat "${f}"; exit 0 ;;
+    esac
+done < <(find "${DS}/raw" -type f)
 cat > "${DS}/curl.body"
 [ ! -e "${DS}/fail-curl" ] || exit 7
 fmt=""
@@ -4076,6 +4136,7 @@ fmt="${fmt//\\n/$'\n'}"
 cat "${DS}/reply.body"
 printf '%s' "${fmt//"%{http_code}"/$(cat "${DS}/reply.status")}"
 STUB
+    mkdir -p "${DS}/raw" || return 1
     _sec() {
         export SD="$1"
         shift
@@ -4158,7 +4219,9 @@ CASES
     # What: without a checkout the owner file is downloaded
     # Why: a curl|bash secondary uses the same single owner
     # From: Issue #1683 | PR #1858
-    cp "${root}/deploy/secondary/docker-compose.yml" "${DS}/raw.compose"
+    for f in deploy/secondary/docker-compose.yml "${CI_MANIFEST_SOURCE#"${root}"/}"; do
+        mkdir -p "${DS}/raw/${f%/*}" && cp "${root}/${f}" "${DS}/raw/${f}" || { echo "raw copy ${f} failed"; return 1; }
+    done
     export SEC_SCRIPT_DIR="${t}/nocheckout"
     mkdir -p "${SEC_SCRIPT_DIR}"
     rm -f "${DS}/curl.argv"
@@ -4168,7 +4231,7 @@ CASES
     : > "${DS}/fail-raw"
     rm -f "${DS}/curl.argv"
     _sec "${t}/rawfail" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --proxy-ip "${STD}" --listen-ip "${LIP}"
-    [ "${status}" -eq 1 ] && [[ "${output}" == *"Failed to download the secondary compose file"* ]] \
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"Failed to download deploy/secondary/docker-compose.yml"* ]] \
         && [ "$(wc -l < "${DS}/curl.argv")" -eq 1 ] && [ ! -e "${t}/rawfail/${NAME}" ] \
         || { echo "download failure: ${output}"; return 1; }
     unset SEC_SCRIPT_DIR

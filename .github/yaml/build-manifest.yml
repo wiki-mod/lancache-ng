@@ -618,6 +618,20 @@ release:
       # Why: AG-REL-009 stable channel; read by ci.sh.
       # From: Issue #1683
       release_tags: true
+      # What: other names setup.sh accepts for it.
+      # Why: release-versioning names stable for it
+      # From: Issue #1683 | PR #1858
+      aliases: [stable]
+  # What: the install mode that pins one fixed tag.
+  # Why: release-versioning: pinned stays a channel value.
+  # From: Issue #1683 | PR #1858
+  pinned_channel: pinned
+  # What: refused channel names and why they went.
+  # Why: release-versioning: a clear error, no fallback.
+  # From: Issue #1683 | PR #1858
+  retired_channels:
+    edge: "renamed to nightly in v0.3.0 (#1056)"
+    dev: "retired in v0.3.0 (#825/#1141)"
   # What: channel a ref without its own channel uses.
   # Why: AG-REL-009 pre-stable default; no ci.sh literal.
   # From: Issue #1683

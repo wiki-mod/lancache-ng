@@ -2526,22 +2526,56 @@ validate_lancache_image_tag() {
         || die "LANCACHE_IMAGE_TAG must be an immutable sha-* tag or a vX.Y.Z / vX.Y.Z-rc.N release tag."
 }
 
-# What: accepts stable, latest, nightly and pinned channels
-# Why: edge and dev are hard cuts, not aliases
+# What: SOT release rows of one kind, fields after it
+# Why: AG-REL-010; hosts lack yq, so ci.sh cannot read it
+# From: Issue #1683 | PR #1858
+lancache_release_rows() {
+    local kind="$1" sot=.github/yaml/build-manifest.yml text rows
+    text=$(lancache_repo_file_text "$sot") || exit $?
+    rows=$(awk '
+        /^[^ #]/ { top = $0; sub(/:.*/, "", top); next }
+        top != "release" || /^ *#/ || /^ *$/ { next }
+        { depth = match($0, /[^ ]/) - 1; line = substr($0, depth + 1)
+          key = line; sub(/:.*/, "", key); val = line; sub(/^[^:]*: */, "", val) }
+        depth == 2 { sec = key; if (key == "pinned_channel") print "pinned", val; next }
+        depth == 4 && sec == "channels" { ch = key; print "channel", ch; next }
+        depth == 4 && sec == "retired_channels" { gsub(/^"|"$/, "", val); print "retired", key, val; next }
+        depth == 6 && sec == "channels" && key == "release_tags" && val == "true" { print "release", ch; next }
+        depth == 6 && sec == "channels" && key == "aliases" {
+            gsub(/^\[|\] *$/, "", val); n = split(val, list, / *, */)
+            for (i = 1; i <= n; i++) if (list[i] != "") print "alias", list[i], ch
+        }' <<< "$text") || die "Failed to read the release block of ${sot}."
+    [[ "$(grep -c '^channel ' <<< "$rows")" -ge 1 && "$(grep -c '^release ' <<< "$rows")" -eq 1 \
+        && "$(grep -c '^pinned ' <<< "$rows")" -eq 1 ]] \
+        || die "${sot} needs release channels, one release_tags channel and pinned_channel."
+    awk -v k="$kind" '$1 == k { sub(/^[^ ]+ /, ""); print }' <<< "$rows"
+}
+
+# What: the SOT channel names and their aliases
+# Why: a tag or channel word names a stack pointer
+lancache_channel_words() {
+    local channels aliases
+    channels=$(lancache_release_rows channel) || exit $?
+    aliases=$(lancache_release_rows alias) || exit $?
+    printf '%s\n' "$channels"
+    cut -d' ' -f1 <<< "$aliases"
+}
+
+# What: accepts SOT channels, their aliases, pinned
+# Why: retired names stop with their reason; no fallback
+# From: Issue #1683 | PR #1858
 validate_lancache_image_channel() {
-    local channel="$1"
-    case "$channel" in
-        stable|latest|nightly|pinned)
-            return 0
-            ;;
-        edge)
-            die "LANCACHE_IMAGE_CHANNEL=edge is no longer supported: the 'edge' channel was renamed to 'nightly' in v0.3.0 (#1056). Update your .env (or shell env) to LANCACHE_IMAGE_CHANNEL=nightly and re-run setup.sh."
-            ;;
-        dev)
-            die "LANCACHE_IMAGE_CHANNEL=dev is no longer supported: the 'dev' channel was retired in v0.3.0 (#825/#1141) -- archived vY.X.Z release branches no longer publish a live channel. Update your .env (or shell env) to LANCACHE_IMAGE_CHANNEL=nightly (tracks current_dev's ongoing development) or LANCACHE_IMAGE_CHANNEL=stable/latest (tracks the stable release), then re-run setup.sh."
-            ;;
-    esac
-    die "LANCACHE_IMAGE_CHANNEL must be stable, latest, nightly, or pinned."
+    local channel="$1" accepted pinned retired reason valid
+    accepted=$(lancache_channel_words) || exit $?
+    pinned=$(lancache_release_rows pinned) || exit $?
+    accepted=$(printf '%s\n%s\n' "$accepted" "$pinned")
+    [[ -z "$channel" ]] || ! grep -qxF -- "$channel" <<< "$accepted" || return 0
+    valid=$(paste -sd' ' <<< "$accepted")
+    retired=$(lancache_release_rows retired) || exit $?
+    reason=$(awk -v c="$channel" '$1 == c { sub(/^[^ ]+ /, ""); print; exit }' <<< "$retired")
+    [[ -z "$reason" ]] \
+        || die "LANCACHE_IMAGE_CHANNEL=$channel is no longer supported ($reason). Set LANCACHE_IMAGE_CHANNEL to one of: $valid; then re-run setup.sh."
+    die "LANCACHE_IMAGE_CHANNEL must be one of: $valid."
 }
 
 # What: derives vX.Y.Z[-rc.N] from git tag or VERSION file
@@ -2660,9 +2694,10 @@ resolve_lancache_image_prefix() {
 }
 
 # What: picks the channel from env, tag, or derived release
-# Why: untagged installs default to latest, never nightly
+# Why: an untagged install gets the release-tag channel
 resolve_lancache_image_channel() {
     local env_file="${1:-}" channel="${LANCACHE_IMAGE_CHANNEL:-}" tag="${LANCACHE_IMAGE_TAG:-}" release_tag=""
+    local words pinned release
 
     if [[ -z "$channel" && -n "$env_file" && -f "$env_file" ]]; then
         channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$env_file") || exit $?
@@ -2672,40 +2707,36 @@ resolve_lancache_image_channel() {
         tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file") || exit $?
     fi
 
-    case "$tag" in
-        stable|latest|nightly)
-            channel="${channel:-$tag}"
-            ;;
-        sha-*|v[0-9]*)
-            channel="${channel:-pinned}"
-            ;;
-    esac
+    words=$(lancache_channel_words) || exit $?
+    pinned=$(lancache_release_rows pinned) || exit $?
+    release=$(lancache_release_rows release) || exit $?
+    if [[ -n "$tag" ]] && grep -qxF -- "$tag" <<< "$words"; then
+        channel="${channel:-$tag}"
+    elif [[ "$tag" == sha-* || "$tag" == v[0-9]* ]]; then
+        channel="${channel:-$pinned}"
+    fi
 
     if [[ -z "$channel" ]]; then
         if release_tag=$(derive_release_archive_image_tag); then
-            channel="pinned"
+            channel="$pinned"
         elif [[ "$?" = "2" ]]; then
             die "Cannot derive a valid release image tag from this checkout/archive."
         fi
-        [[ -n "$release_tag" ]] && channel="pinned"
+        [[ -n "$release_tag" ]] && channel="$pinned"
     fi
 
-    # What: falls back to latest when nothing is configured
-    # Why: latest is the name that has always existed
-    channel="${channel:-latest}"
+    channel="${channel:-$release}"
     validate_lancache_image_channel "$channel"
     printf '%s\n' "$channel"
 }
 
-# What: maps stable to latest, other channels pass through
-# Why: no stack:stable tag exists; both names publish alike
+# What: maps an alias to its channel; others pass through
+# Why: an alias has no stack tag of its own
 lancache_stack_pointer_channel_for() {
-    local channel="$1"
-    if [[ "$channel" = "stable" ]]; then
-        printf 'latest\n'
-    else
-        printf '%s\n' "$channel"
-    fi
+    local channel="$1" aliases target
+    aliases=$(lancache_release_rows alias) || exit $?
+    target=$(awk -v a="$channel" '$1 == a { print $2; exit }' <<< "$aliases")
+    printf '%s\n' "${target:-$channel}"
 }
 
 # What: ref variable and slug of each first-party image
@@ -2750,9 +2781,10 @@ require_helper_image() {
 # Why: promote moves every channel tag inside this lock
 # From: Issue #1683 | PR #1858
 lancache_promote_lock_held() {
-    local lock_ref="$1" out
+    local lock_ref="$1" out pinned
+    pinned=$(lancache_release_rows pinned) || exit $?
     out=$(git -C "$SCRIPT_DIR" ls-remote origin "$lock_ref") \
-        || die "Failed to read the promote lock ${lock_ref} from origin (exit $?). A channel install needs the git checkout's origin; set LANCACHE_IMAGE_CHANNEL=pinned with a vX.Y.Z tag otherwise."
+        || die "Failed to read the promote lock ${lock_ref} from origin (exit $?). A channel install needs the git checkout's origin; set LANCACHE_IMAGE_CHANNEL=${pinned} with a vX.Y.Z tag otherwise."
     [[ -n "$out" ]]
 }
 
@@ -2761,23 +2793,29 @@ lancache_promote_lock_held() {
 # From: Issue #1683 | PR #1858
 lancache_channel_ref_pass() {
     local registry="$1" prefix="$2" pointer_channel="$3" vars="$4" var slug ref digest
+    local release alias testing
+    release=$(lancache_release_rows release) || exit $?
+    alias=$(lancache_release_rows alias) || exit $?
+    alias=$(awk -v c="$release" '$2 == c { print $1; exit }' <<< "$alias")
+    testing=$(lancache_release_rows channel) || exit $?
+    testing=$(awk -v r="$release" '$0 != r { print; exit }' <<< "$testing")
     while read -r var slug; do
         ref="${registry}/${prefix}/${slug}:${pointer_channel}"
         if ! digest=$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}' 2>&1); then
-            if [[ "$pointer_channel" = "latest" ]]; then
+            if [[ "$pointer_channel" = "$release" ]]; then
                 cat >&2 <<EOF
 
-${RED}✗${RESET} Cannot resolve the 'stable' release channel (published as the 'latest' pointer image).
+${RED}✗${RESET} Cannot resolve the '${alias:-$release}' release channel (published as the '${release}' pointer image).
 
 This project is currently in active development (pre-1.0). While images are published
-to the 'nightly' testing channel from current_dev (built once daily plus on-demand,
+to the '${testing}' testing channel from current_dev (built once daily plus on-demand,
 gated on a full green build+scan), a formal stable release with a published
-'latest'/'stable' channel tag has not yet been created.
+'${release}' channel tag has not yet been created.
 
 To proceed, choose one of these options:
 
-  1. Use the 'nightly' testing channel (pre-release, may change frequently):
-     LANCACHE_IMAGE_CHANNEL=nightly ./setup.sh install
+  1. Use the '${testing}' testing channel (pre-release, may change frequently):
+     LANCACHE_IMAGE_CHANNEL=${testing} ./setup.sh install
 
   2. Pin to a specific release version or commit (immutable):
      LANCACHE_IMAGE_TAG=vX.Y.Z ./setup.sh install        # once a stable release is tagged
@@ -2787,7 +2825,7 @@ For details on release channels and their stability, see:
   docs/release-versioning.md
 
 EOF
-                die "Cannot resolve the stable channel image ${ref} (${digest})."
+                die "Cannot resolve the ${alias:-$release} channel image ${ref} (${digest})."
             fi
             die "Failed to resolve ${ref} to a digest (${digest}). Check registry access or set LANCACHE_IMAGE_TAG to an immutable sha-* / vX.Y.Z tag."
         fi
@@ -2866,11 +2904,11 @@ lancache_image_refs_fingerprint() {
 # Why: resolve before writing; a failure changes nothing
 # From: Issue #1683 | PR #1858
 lancache_image_refs_for_tag() {
-    local env_file="$1" tag="$2"
-    case "$tag" in
-        latest|nightly) lancache_channel_image_refs "$env_file" "$tag" ;;
-        *) : ;;
-    esac
+    local env_file="$1" tag="$2" channels
+    channels=$(lancache_release_rows channel) || exit $?
+    if grep -qxF -- "$tag" <<< "$channels"; then
+        lancache_channel_image_refs "$env_file" "$tag"
+    fi
 }
 
 # What: replaces all image pins in an env file
@@ -2902,66 +2940,60 @@ write_lancache_image_refs() {
     done <<< "$vars"
 }
 
-# What: channel word (latest|nightly) or a fixed tag
+# What: a channel's pointer word or a fixed tag
 # Why: channel pins live in LANCACHE_IMAGE_REF_*, tags stay
 # From: Issue #1683 | PR #1858
 resolve_lancache_image_tag() {
-    local env_file="${1:-}" tag="${LANCACHE_IMAGE_TAG:-}" release_tag="" channel=""
+    local env_file="${1:-}" tag="${LANCACHE_IMAGE_TAG:-}" release_tag="" channel="" words pinned
 
-    if [[ -n "$tag" ]]; then
-        case "$tag" in
-            stable|latest|nightly)
-                lancache_stack_pointer_channel_for "$tag"
-                return 0
-                ;;
-            sha-*|v[0-9]*)
-                validate_lancache_image_tag "$tag"
-                printf '%s\n' "$tag"
-                return 0
-                ;;
-        esac
+    words=$(lancache_channel_words) || exit $?
+    pinned=$(lancache_release_rows pinned) || exit $?
+    if [[ -n "$tag" ]] && grep -qxF -- "$tag" <<< "$words"; then
+        lancache_stack_pointer_channel_for "$tag"
+        return 0
     fi
+    case "$tag" in
+        sha-*|v[0-9]*)
+            validate_lancache_image_tag "$tag"
+            printf '%s\n' "$tag"
+            return 0
+            ;;
+    esac
 
     channel="${LANCACHE_IMAGE_CHANNEL:-}"
     if [[ -z "$channel" && -n "$env_file" && -f "$env_file" ]]; then
         channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$env_file") || exit $?
     fi
 
-    case "$channel" in
-        stable|latest|nightly)
-            lancache_stack_pointer_channel_for "$channel"
-            return 0
-            ;;
-        pinned)
-            if [[ -z "$tag" && -n "$env_file" && -f "$env_file" ]]; then
-                tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file") || exit $?
+    if [[ -n "$channel" ]] && grep -qxF -- "$channel" <<< "$words"; then
+        lancache_stack_pointer_channel_for "$channel"
+        return 0
+    elif [[ -n "$channel" && "$channel" = "$pinned" ]]; then
+        if [[ -z "$tag" && -n "$env_file" && -f "$env_file" ]]; then
+            tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file") || exit $?
+        fi
+        if [[ -z "$tag" ]]; then
+            if release_tag=$(derive_release_archive_image_tag); then
+                tag="$release_tag"
+            elif [[ "$?" = "2" ]]; then
+                die "Cannot derive a valid release image tag from this checkout/archive."
             fi
-            if [[ -z "$tag" ]]; then
-                if release_tag=$(derive_release_archive_image_tag); then
-                    tag="$release_tag"
-                elif [[ "$?" = "2" ]]; then
-                    die "Cannot derive a valid release image tag from this checkout/archive."
-                fi
-            fi
-            [[ -n "$tag" ]] \
-                || die "LANCACHE_IMAGE_CHANNEL=pinned requires LANCACHE_IMAGE_TAG to be set to an immutable sha-* or vX.Y.Z tag."
-            ;;
-        "")
-            ;;
-        *)
-            validate_lancache_image_channel "$channel"
-            ;;
-    esac
+        fi
+        [[ -n "$tag" ]] \
+            || die "LANCACHE_IMAGE_CHANNEL=$pinned requires LANCACHE_IMAGE_TAG to be set to an immutable sha-* or vX.Y.Z tag."
+    elif [[ -n "$channel" ]]; then
+        validate_lancache_image_channel "$channel"
+    fi
 
     if [[ -z "$tag" && -n "$env_file" && -f "$env_file" ]]; then
         tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file") || exit $?
     fi
 
+    if [[ -n "$tag" ]] && grep -qxF -- "$tag" <<< "$words"; then
+        lancache_stack_pointer_channel_for "$tag"
+        return 0
+    fi
     case "$tag" in
-        stable|latest|nightly)
-            lancache_stack_pointer_channel_for "$tag"
-            return 0
-            ;;
         sha-*|v[0-9]*)
             validate_lancache_image_tag "$tag"
             printf '%s\n' "$tag"
@@ -3053,13 +3085,16 @@ migrate_env_for_update() (
     local lancache_image_refs="" keep_image_refs=0 archived_refs
     archived_refs=$(awk '/^LANCACHE_IMAGE_REF_[A-Z_]+=/' "$env_file") \
         || die "Failed to read the image pins from $env_file (exit $?)."
+    local stack_channels
+    stack_channels=$(lancache_release_rows channel) || exit $?
     if [[ "$preserve_image_tag" = "1" ]] \
         && [[ "$existing_image_tag" =~ ^(sha-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}|v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$ ]]; then
         # What: keeps the archived immutable tag as-is
         # Why: re-resolving would pull the bad channel image
         validate_lancache_image_tag "$existing_image_tag"
         lancache_image_tag="$existing_image_tag"
-    elif [[ "$preserve_image_tag" = "1" && "$existing_image_tag" =~ ^(latest|nightly)$ && -n "$archived_refs" ]]; then
+    elif [[ "$preserve_image_tag" = "1" && -n "$existing_image_tag" && -n "$archived_refs" ]] \
+        && grep -qxF -- "$existing_image_tag" <<< "$stack_channels"; then
         # What: a restore keeps archived channel pins
         # Why: re-resolving pulls the current stack
         # From: Issue #1683 | PR #1858
@@ -4764,14 +4799,15 @@ cmd_compose() {
 # Why: kept pure so the decision is testable without docker
 # From: Issue #819
 lancache_auto_update_should_proceed() {
-    local auto_update_enabled="$1" channel="$2" current_tag="$3" deployed_tag="$4"
+    local auto_update_enabled="$1" channel="$2" current_tag="$3" deployed_tag="$4" pinned
 
     if [[ "$auto_update_enabled" != "1" ]]; then
         printf 'skip: AUTO_UPDATE_ENABLED is not 1\n'
         return 1
     fi
-    if [[ "$channel" = "pinned" ]]; then
-        printf 'skip: LANCACHE_IMAGE_CHANNEL=pinned tracks one fixed tag, not a moving channel; nothing to detect\n'
+    pinned=$(lancache_release_rows pinned) || exit $?
+    if [[ "$channel" = "$pinned" ]]; then
+        printf 'skip: LANCACHE_IMAGE_CHANNEL=%s tracks one fixed tag, not a moving channel; nothing to detect\n' "$pinned"
         return 1
     fi
     if [[ "$current_tag" = "$deployed_tag" ]]; then
@@ -4788,7 +4824,7 @@ lancache_auto_update_should_proceed() {
 cmd_auto_update() {
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
     local env_file auto_update_enabled current_channel current_tag deployed_tag decision
-    local deployed_refs current_refs
+    local deployed_refs current_refs pinned
 
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
     [[ -f "$install_dir/docker-compose.yml" ]] \
@@ -4799,6 +4835,7 @@ cmd_auto_update() {
     # Why: a timer may stay enabled after .env is edited
     auto_update_enabled=$(get_env_var AUTO_UPDATE_ENABLED "$env_file") || exit $?
     current_channel=$(resolve_lancache_image_channel "$env_file") || exit $?
+    pinned=$(lancache_release_rows pinned) || exit $?
     # What: stacks compared by image-pin fingerprint
     # Why: the channel word stays while digests move
     # From: Issue #1683 | PR #1858
@@ -4808,7 +4845,7 @@ cmd_auto_update() {
         || die "Cannot fingerprint the deployed image pins of $env_file (exit $?)."
     # What: resolves the channel after local checks
     # Why: disabled or pinned installs skip the registry
-    if [[ "$auto_update_enabled" = "1" && "$current_channel" != "pinned" ]]; then
+    if [[ "$auto_update_enabled" = "1" && "$current_channel" != "$pinned" ]]; then
         current_refs=$(lancache_channel_image_refs "$env_file" "$current_channel") \
             || die "Cannot resolve channel ${current_channel}; auto-update skipped this tick (exit $?)."
         current_tag=$(lancache_image_refs_fingerprint "$current_refs") \
@@ -4828,19 +4865,24 @@ cmd_auto_update() {
 
 # ── converge-reconcile subcommand (#819) ──────────────────────────────────────
 # What: true if the UI channel is in the selectable list
-# Why: edge and dev are hard cuts; no-op, not die, on a tick
+# Why: a retired or unknown name is a no-op on a tick
 lancache_ui_channel_override_is_valid() {
-    local channel
-    for channel in "${LANCACHE_SELECTABLE_CHANNELS[@]}"; do
-        [[ "$1" = "$channel" ]] && return 0
-    done
-    return 1
+    local selectable
+    selectable=$(lancache_selectable_channels) || exit $?
+    grep -qxF -- "$1" <<< "$selectable"
 }
 
-# What: channels wizard and Admin UI offer; first = default
-# Why: one list; a secondary runs without the SOT checkout
+# What: channels the wizard offers; first = default
+# Why: the pre-stable channels, then the release name
 # From: Issue #1683 | PR #1858
-LANCACHE_SELECTABLE_CHANNELS=(nightly stable)
+lancache_selectable_channels() {
+    local channels release aliases
+    channels=$(lancache_release_rows channel) || exit $?
+    release=$(lancache_release_rows release) || exit $?
+    aliases=$(lancache_release_rows alias) || exit $?
+    awk -v r="$release" '$0 != r' <<< "$channels"
+    awk -v r="$release" '$2 == r { print $1; found = 1; exit } END { if (!found) print r }' <<< "$aliases"
+}
 
 # What: true for a positive whole number of GiB
 # Why: a leading 0 must parse as decimal, not octal
@@ -5938,18 +5980,18 @@ cmd_update_ip() {
     exit 0
 }
 
-# What: deploy/secondary compose text: checkout or same ref
+# What: a repo file's text: checkout or the same ref
 # Why: one owner; a curl|bash secondary has no checkout
 # From: Issue #1683 | PR #1858
-secondary_compose_text() {
-    local local_file="$SCRIPT_DIR/deploy/secondary/docker-compose.yml" ref raw
+lancache_repo_file_text() {
+    local path="$1" local_file="$SCRIPT_DIR/$1" ref raw
     if [[ -f "$local_file" ]]; then
         cat -- "$local_file" || die "Failed to read $local_file (exit $?)."
         return 0
     fi
     ref=$(resolve_setup_bootstrap_ref) || exit $?
-    raw="https://raw.githubusercontent.com/${LANCACHE_REPO_URL#https://github.com/}/${ref:-HEAD}/deploy/secondary/docker-compose.yml"
-    curl -fsSL "$raw" || die "Failed to download the secondary compose file from $raw (exit $?)."
+    raw="https://raw.githubusercontent.com/${LANCACHE_REPO_URL#https://github.com/}/${ref:-HEAD}/${path}"
+    curl -fsSL "$raw" || die "Failed to download ${path} from $raw (exit $?)."
 }
 
 # ── secondary subcommand ──────────────────────────────────────────────────────
@@ -5966,6 +6008,7 @@ cmd_secondary() {
     local preflight_dir preflight_env_file preflight_registry preflight_prefix preflight_channel preflight_env_tag
     local preflight_tag preflight_verified_registry="" preflight_verified_prefix="" preflight_verified_tag=""
     local missing_fields secondary_env_file compose_out bad_response secondary_compose
+    local channel_words pinned release
 
     usage_secondary() {
         cat <<EOF
@@ -6060,7 +6103,7 @@ EOF
     # What: the compose file is fetched before registration
     # Why: a fetch failure must not follow a registration
     # From: Issue #1683 | PR #1858
-    secondary_compose=$(secondary_compose_text) || exit $?
+    secondary_compose=$(lancache_repo_file_text deploy/secondary/docker-compose.yml) || exit $?
 
     secondary_dir="${name}"
     if [[ "$rotate" -eq 1 ]]; then
@@ -6103,10 +6146,11 @@ EOF
                 validate_lancache_image_registry "$preflight_registry"
                 validate_lancache_image_prefix "$preflight_prefix"
                 validate_lancache_image_channel "$preflight_channel"
+                pinned=$(lancache_release_rows pinned) || exit $?
 
                 # What: pinned channel needs a tag to check
                 # Why: only the primary can supply the tag
-                if [[ "$preflight_channel" != "pinned" || -n "$preflight_env_tag" ]]; then
+                if [[ "$preflight_channel" != "$pinned" || -n "$preflight_env_tag" ]]; then
                     preflight_tag=$(LANCACHE_IMAGE_REGISTRY="$preflight_registry" \
                         LANCACHE_IMAGE_PREFIX="$preflight_prefix" \
                         LANCACHE_IMAGE_CHANNEL="$preflight_channel" \
@@ -6194,6 +6238,9 @@ EOF
     lancache_image_prefix=$(LANCACHE_IMAGE_PREFIX="${lancache_image_prefix:-$response_image_prefix}" \
         resolve_lancache_image_prefix) || die "Cannot resolve the image prefix (exit $?)."
 
+    channel_words=$(lancache_channel_words) || exit $?
+    pinned=$(lancache_release_rows pinned) || exit $?
+    release=$(lancache_release_rows release) || exit $?
     lancache_image_channel="${LANCACHE_IMAGE_CHANNEL:-}"
     if [[ -z "$lancache_image_channel" && -n "$existing_env_file" ]]; then
         lancache_image_channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$existing_env_file") || exit $?
@@ -6201,24 +6248,26 @@ EOF
     if [[ -z "$lancache_image_channel" && -n "$response_image_channel" ]]; then
         lancache_image_channel="$response_image_channel"
     fi
-    if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(stable|latest|nightly)$ ]]; then
+    if [[ -z "$lancache_image_channel" && -n "${response_image_tag:-}" ]] \
+        && grep -qxF -- "$response_image_tag" <<< "$channel_words"; then
         lancache_image_channel="$response_image_tag"
     fi
     if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(sha-|v[0-9]) ]]; then
-        lancache_image_channel="pinned"
+        lancache_image_channel="$pinned"
     fi
-    lancache_image_channel="${lancache_image_channel:-latest}"
+    lancache_image_channel="${lancache_image_channel:-$release}"
     validate_lancache_image_channel "$lancache_image_channel"
 
     explicit_lancache_image_tag="${LANCACHE_IMAGE_TAG:-}"
     tag_input="$explicit_lancache_image_tag"
-    if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -n "$existing_env_file" ]]; then
+    if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "$pinned" && -n "$existing_env_file" ]]; then
         tag_input=$(get_env_var LANCACHE_IMAGE_TAG "$existing_env_file") || exit $?
     fi
-    if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "pinned" && -z "$tag_input" && -n "$response_image_tag" && ! "$response_image_tag" =~ ^(stable|latest|nightly)$ ]]; then
+    if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "$pinned" && -z "$tag_input" && -n "$response_image_tag" ]] \
+        && ! grep -qxF -- "$response_image_tag" <<< "$channel_words"; then
         tag_input="$response_image_tag"
     fi
-    if [[ "$lancache_image_channel" != "pinned" && -z "$explicit_lancache_image_tag" ]]; then
+    if [[ "$lancache_image_channel" != "$pinned" && -z "$explicit_lancache_image_tag" ]]; then
         if [[ -n "$response_image_tag" && "$response_image_tag" =~ ^sha- ]]; then
             tag_input="$response_image_tag"
         else
@@ -6233,8 +6282,9 @@ EOF
     # What: a channel secondary pins dns to its digest
     # Why: same consistent stack read as the primary install
     # From: Issue #1683 | PR #1858
-    local secondary_refs="" secondary_dns_ref=""
-    if [[ "$lancache_image_tag" =~ ^(latest|nightly)$ ]]; then
+    local secondary_refs="" secondary_dns_ref="" stack_channels
+    stack_channels=$(lancache_release_rows channel) || exit $?
+    if [[ -n "$lancache_image_tag" ]] && grep -qxF -- "$lancache_image_tag" <<< "$stack_channels"; then
         secondary_refs=$(LANCACHE_IMAGE_REGISTRY="$lancache_image_registry" \
             LANCACHE_IMAGE_PREFIX="$lancache_image_prefix" \
             lancache_image_refs_for_tag "" "$lancache_image_tag") \
@@ -6623,12 +6673,16 @@ if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
     validate_lancache_image_channel "$LANCACHE_IMAGE_CHANNEL"
     print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
 else
-    printf "  nightly — the most recently built channel from active development.\n"
+    selectable=$(lancache_selectable_channels) || exit $?
+    pre_stable=$(head -n 1 <<< "$selectable")
+    stable_name=$(tail -n 1 <<< "$selectable")
+    retired=$(lancache_release_rows retired) || exit $?
+    printf "  %s — the most recently built channel from active development.\n" "$pre_stable"
     printf "            Refreshes continuously from current_dev. Currently the\n"
     printf "            practical default: this project is pre-1.0 and has not cut\n"
     printf "            a stable release yet (see below), so this is what most new\n"
     printf "            installs should pick.\n"
-    printf "  stable — the channel promoted after the full release validation gate,\n"
+    printf "  %s — the channel promoted after the full release validation gate,\n" "$stable_name"
     printf "           once a stable release exists. NOT YET AVAILABLE: no stable\n"
     printf "           release has been cut for this project yet, so choosing it now\n"
     printf "           will fail during image pull with an explanation of how to\n"
@@ -6636,29 +6690,27 @@ else
     printf "           recommended default again.\n\n"
 
     # What: writes the prompt's LANCACHE_IMAGE_CHANNEL
-    # Why: nightly is the recommended pre-1.0 default
-    channel_hint=$(IFS=/; printf '%s' "${LANCACHE_SELECTABLE_CHANNELS[*]}")
+    # Why: the pre-stable channel is the pre-1.0 default
+    channel_hint=$(paste -sd/ <<< "$selectable")
     while true; do
-        ask "Release channel [$channel_hint]" "${LANCACHE_SELECTABLE_CHANNELS[0]}"
-        if lancache_ui_channel_override_is_valid "${REPLY,,}"; then
+        ask "Release channel [$channel_hint]" "$pre_stable"
+        if grep -qxF -- "${REPLY,,}" <<< "$selectable"; then
             LANCACHE_IMAGE_CHANNEL="${REPLY,,}"
-            if [[ "$LANCACHE_IMAGE_CHANNEL" = "${LANCACHE_SELECTABLE_CHANNELS[0]}" ]]; then
+            if [[ "$LANCACHE_IMAGE_CHANNEL" = "$pre_stable" ]]; then
                 print_ok "Using the $LANCACHE_IMAGE_CHANNEL channel (recommended pre-1.0)."
             else
                 print_warn "Using the $LANCACHE_IMAGE_CHANNEL channel -- this will fail during image pull unless a stable release already exists."
             fi
             break
         fi
-        case "${REPLY,,}" in
-            # What: edge is rejected, nightly is named
-            # Why: edge was renamed to nightly in v0.3.0
-            edge)
-                print_error "The 'edge' channel was renamed to 'nightly' in v0.3.0. Please answer 'nightly'."
-                ;;
-            *)
-                print_error "Please answer one of: $channel_hint."
-                ;;
-        esac
+        # What: a retired name shows why it went
+        # Why: release-versioning asks for a clear answer
+        reason=$(awk -v c="${REPLY,,}" '$1 == c { sub(/^[^ ]+ /, ""); print; exit }' <<< "$retired")
+        if [[ -n "$reason" ]]; then
+            print_error "The '${REPLY,,}' channel is no longer supported ($reason). Please answer one of: $channel_hint."
+        else
+            print_error "Please answer one of: $channel_hint."
+        fi
     done
 fi
 

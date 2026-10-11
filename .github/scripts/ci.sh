@@ -6519,7 +6519,7 @@ _ci_validate_ui_base() {
     printf 'http://%s:%s' "${ip}" "${tcp[0]}"
 }
 
-# What: open a ui session in <jar>; print the page CSRF token
+# What: open a ui session in <jar>; print its CSRF token
 # Why: posts send the token a browser reads from the form
 # From: Issue #1683 | PR #1858
 _ci_validate_ui_session() {
@@ -6964,7 +6964,7 @@ _ci_validate_kea_round_trip() {
         ci_log "[CI-ERROR-VALIDATE-0113]" "path=\"${inst}/.env.local\" reason=\"an .env.local exists; validate never overwrites it\""
         return 2
     fi
-    # What: .env.local: the deploy .env with this run's KEA_*
+    # What: .env.local: deploy .env plus this run's KEA_*
     # Why: setup.sh reads a deploy/prod install's .env.local
     # From: Issue #763 | PR #1858
     if ! out="$(grep -v -E '^(KEA_CTRL_TOKEN|KEA_CTRL_HOST|KEA_DATA_DIR)=' "${inst}/.env" 2>&1)" \
@@ -9380,7 +9380,7 @@ _ci_check_review_chronology() {
             viol+=("${out}")
         fi
         local produced="" produced_rc=0 style exp
-        # What: join adjacent comment lines per file grammar.
+        # What: join adjacent comment lines per grammar
         # Why: narration split over two lines must match.
         # From: Issue #1683 | PR #1858
         if style="$(_ci_comment_style "${path}")"; then
@@ -11349,7 +11349,7 @@ _ci_installer() {
     printf '%s\n' "${p}"
 }
 
-# What: the one sed -n match in a file; rc 1 if none or several
+# What: the one sed -n match in a file; rc 1 if not one
 # Why: one reader for values a product file owns
 # From: Issue #1683 | PR #1858
 _ci_file_value() {
@@ -11478,7 +11478,7 @@ _ci_compose_profiles() {
     _ci_compose_query "$1" "${2:-}" config --profiles
 }
 
-# What: one compose file as JSON, every profile, opt env file
+# What: a compose file as JSON, all profiles, opt env file
 # Why: a profiled service is checked like any other.
 # From: Issue #1683 | PR #1858
 _ci_compose_json() {
@@ -11575,7 +11575,7 @@ _ci_socket_proxy_target() {
         | if ($hits | length) == 1 then $hits[0] else fail("no single bind mount holds \($path)") end' <<<"$1"
 }
 
-# What: write the socket-proxy allowlist where compose mounts it
+# What: write the socket-proxy allowlist to its mount
 # Why: setup.sh and validate start the proxy on this file
 # From: Issue #1683 | PR #1858
 ci_cmd_socket_proxy_config() {
@@ -11740,8 +11740,8 @@ _ci_check_docker_socket_proxy() {
         while IFS= read -r line; do
             [ -z "${line}" ] || viol+=("${cf}: ${line}")
         done <<<"${deps}"
-        # What: haproxy runs the config the SOT policy renders
-        # Why: a missing service or mount stops the proxy start
+        # What: haproxy runs the SOT policy's config
+        # Why: a missing service or mount stops the start
         # From: Issue #1683 | PR #1858
         out="$(_ci_capture 0 jq -r '.services["docker-socket-proxy"].entrypoint[0] // ""' <<<"${cfg}")" || return 2
         [ "${out}" = haproxy ] || viol+=("${cf}: docker-socket-proxy entrypoint is '${out}', not haproxy")
@@ -12109,7 +12109,6 @@ _ci_check_image_channel_resolution() {
         'lancache_image_prefix=$(resolve_lancache_image_prefix "$env_file")' \
         'lancache_image_channel=$(resolve_lancache_image_channel "$env_file")' \
         'lancache_image_tag=$(resolve_lancache_image_tag "$env_file")' \
-        'LANCACHE_IMAGE_CHANNEL=pinned requires LANCACHE_IMAGE_TAG to be set to an immutable sha-* or vX.Y.Z tag.' \
         'lancache_channel_image_refs()' \
         'if [[ "$first" == "$second" ]]; then' \
         'response_image_tag=$(json_value .image_tag "$response")' \
@@ -12119,8 +12118,7 @@ _ci_check_image_channel_resolution() {
         'LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY}' \
         'LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX}' \
         'LANCACHE_IMAGE_CHANNEL=${lancache_image_channel}' \
-        'derive_release_archive_image_tag()' \
-        'channel="${channel:-latest}"'; do
+        'derive_release_archive_image_tag()'; do
         grep -Fq "${f}" "${su}" || viol+=("setup.sh must keep image-resolution: ${f}")
     done
     if [ ! -f "${sec}" ]; then
