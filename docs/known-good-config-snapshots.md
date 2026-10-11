@@ -428,26 +428,22 @@ because a compiled binary cannot source a shell library.
 
 ## nginx / proxy
 
-`services/proxy/entrypoint.sh` regenerates `nginx.conf`, `proxy-params.conf`,
-the SSL/security maps (`00-ssl-map.conf`), and the stream target map
-(`00-stream-targets.conf`) on every start from templates, env vars, and
-`cdn-domains.txt`. After generation:
+The supervisor in the `proxy` container (`lancache-watchdog supervise`,
+process `nginx`) renders `nginx.conf`, `proxy-params.conf`, the SSL/security
+maps (`00-ssl-map.conf`), the stream target map (`00-stream-targets.conf`),
+the stream client ACL and the SSL dispatch map from the image templates,
+`.env` values and `cdn-domains.txt`. It renders again whenever
+`cdn-domains.txt` changes. After each render:
 
-- `nginx -t` validates the live config in place (there is no way to validate
-  an isolated copy in a temp location, because `nginx.conf` includes
-  `/etc/nginx/conf.d/*.conf` and `/etc/nginx/stream.d/*.conf` via fixed
-  absolute paths, not relative ones — validation always checks the real,
-  currently-generated files).
-- If valid: the four generated files are snapshotted, oldest pruned beyond
-  `KEEP_KNOWN_GOOD_CONFIGS` (default 3), and nginx starts normally.
-- If invalid: the entrypoint tries every stored snapshot, newest to oldest,
-  copying each one's files onto the live config paths and re-running
-  `nginx -t` after each copy. The first snapshot that validates is kept in
-  place and nginx starts from it. If none validate (including "no snapshots
-  exist yet"), the container exits non-zero rather than starting nginx with
-  a config that failed validation.
+- `nginx -t` validates the live files in place.
+- If valid: the six generated files are saved as one snapshot, oldest pruned
+  beyond `KEEP_KNOWN_GOOD_CONFIGS`, and nginx starts. A render with skipped
+  `cdn-domains.txt` rows starts but is not saved.
+- If invalid: the supervisor writes each stored snapshot, newest first, and
+  re-runs `nginx -t`. The first one that validates starts. If none does,
+  nginx stays stopped and the supervisor retries with backoff.
 
-Static, non-templated files (`conf.d/http.conf`, `conf.d/https.conf`,
+Static files (`conf.d/http.conf`, `conf.d/https.conf`,
 `public_suffix_list.dat`) are not snapshotted; they are not runtime-managed
 and are already covered by the image build.
 

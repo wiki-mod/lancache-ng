@@ -5,7 +5,7 @@
 //! Why: it replaces the shell entrypoints of all images.
 //! From: Issue #842 | Issue #1683
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
@@ -23,8 +23,8 @@ use lancache_ng::config::{
 use lancache_ng::{
     COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL, ClientCheck, ConflictCheck, DesiredRunState,
     DesiredState, Detail, DiskHealth, DiskInfo, DockerApi, Place, ProbeAnswer, ProbeReport,
-    ServiceHealth, WatchdogStatus, df, hex32, resolve_shared_secret, shared_secret_file_name,
-    shared_secret_is_placeholder, unix_secs, write_file,
+    ServiceHealth, WatchdogStatus, df, hex32, resolve_shared_secret, sha256_hex,
+    shared_secret_file_name, shared_secret_is_placeholder, unix_secs, write_file,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1008,6 +1008,7 @@ enum Kind {
     KeaDhcpDdns,
     Dnsmasq,
     DhcpProbe,
+    Nginx,
 }
 
 impl Kind {
@@ -1031,6 +1032,7 @@ impl Kind {
             "kea-dhcp-ddns" => Self::KeaDhcpDdns,
             "dnsmasq" => Self::Dnsmasq,
             "dhcp-probe" => Self::DhcpProbe,
+            "nginx" => Self::Nginx,
             _ => return None,
         })
     }
@@ -1055,6 +1057,7 @@ impl Kind {
             Self::KeaDhcpDdns => "kea-dhcp-ddns",
             Self::Dnsmasq => "dnsmasq",
             Self::DhcpProbe => "dhcp-probe",
+            Self::Nginx => "nginx",
         }
     }
 
@@ -1097,6 +1100,7 @@ impl Kind {
             Self::KeaDhcp4 => kea_dhcp4(ctx),
             Self::KeaCtrlAgent => kea_ctrl_agent(ctx),
             Self::KeaDhcpDdns => kea_dhcp_ddns(ctx),
+            Self::Nginx => nginx(ctx),
             Self::Dnsmasq => dnsmasq(
                 ctx,
                 DhcpMode::parse(&ctx.setting("DHCP_MODE").unwrap_or_default()).is_dnsmasq_relay(),
@@ -1517,66 +1521,90 @@ fn keep_known_good() -> Result<u32, String> {
     bounded("KEEP_KNOWN_GOOD_CONFIGS", 1, u32::MAX.into()).map(|v| v as u32)
 }
 
-// What: write candidates in turn; keep the first that checks.
-// Why: a bad render must not serve; rescue is stopping.
-// From: Issue #415 | Issue #615
+// What: write candidate file sets; keep the first that checks.
+// Why: a bad render falls back to the newest good set.
+// From: Issue #415 | Issue #1683
 fn first_good(
-    path: &Path,
-    candidates: impl IntoIterator<Item = (String, String)>,
+    what: &str,
+    candidates: impl IntoIterator<Item = (String, Vec<(PathBuf, String)>)>,
     check: &[String],
 ) -> Result<String, String> {
-    for (label, text) in candidates {
-        write_file(path, text.as_bytes(), 0o640, Place::Replace)
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    for (label, files) in candidates {
+        for (path, text) in &files {
+            write_file(path, text.as_bytes(), 0o640, Place::Replace)
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        }
         if conf_ok(check) {
             return Ok(label);
         }
     }
     Err(format!(
-        "{} fails its check and no known-good snapshot passes",
-        path.display()
+        "{what} fails its check and no known-good snapshot passes"
     ))
 }
 
-// What: each snapshot as config text, newest first.
+// What: each readable snapshot, newest first.
 // Why: a restore re-applies what this start owns.
-fn snapshot_texts(
+fn snapshots<T>(
     store: &lancache_ng::SnapshotStore,
-    text: &dyn Fn(Value) -> Option<String>,
-) -> Vec<(String, String)> {
+    read: &dyn Fn(Value) -> Option<T>,
+) -> Vec<(String, T)> {
     let ids = store.ids().unwrap_or_else(|e| {
         log_err(&format!("WARNING: cannot list snapshots: {e}"));
         Vec::new()
     });
     ids.into_iter()
         .rev()
-        .filter_map(|id| Some((id.clone(), text(store.read(&id).ok()?)?)))
+        .filter_map(|id| Some((id.clone(), read(store.read(&id).ok()?)?)))
         .collect()
 }
 
-// What: write a rendered config; record it when it checks.
+// What: write rendered files; record the set when it checks.
 // Why: the newest good render is the next rollback target.
-// From: Issue #415 | Issue #615
-fn checked_conf(
-    path: &Path,
-    body: &str,
+// From: Issue #415 | Issue #615 | Issue #1683
+fn checked_files(
+    files: &[(PathBuf, String)],
     check: &[String],
     store: &lancache_ng::SnapshotStore,
     restamp: &dyn Fn(&str) -> String,
+    record: bool,
 ) -> Result<(), String> {
-    let fresh = ("new".to_string(), body.to_string());
-    let old = snapshot_texts(store, &|v| v.as_str().map(restamp));
-    let used = first_good(path, std::iter::once(fresh).chain(old), check)?;
+    let name = |path: &Path| path.file_name().map(|n| n.to_string_lossy().into_owned());
+    let what = files
+        .iter()
+        .map(|(path, _)| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let named = |set: Value| -> Option<Vec<(PathBuf, String)>> {
+        files
+            .iter()
+            .map(|(path, _)| Some((path.clone(), restamp(set.get(name(path)?)?.as_str()?))))
+            .collect()
+    };
+    let fresh = ("new".to_string(), files.to_vec());
+    let used = first_good(
+        &what,
+        std::iter::once(fresh).chain(snapshots(store, &named)),
+        check,
+    )?;
     if used != "new" {
         log_err(&format!(
-            "WARNING: {} runs from known-good snapshot {used}, not the new render",
-            path.display()
+            "WARNING: {what} runs from known-good snapshot {used}, not the new render"
         ));
-    } else if let Err(e) = store.create(&Value::String(body.to_string()), keep_known_good()?) {
+        return Ok(());
+    }
+    if !record {
         log_err(&format!(
-            "WARNING: {} not saved as known-good: {e:#}",
-            path.display()
+            "WARNING: {what} has skipped input rows; not saved as known-good"
         ));
+        return Ok(());
+    }
+    let set: serde_json::Map<String, Value> = files
+        .iter()
+        .filter_map(|(path, text)| Some((name(path)?, Value::String(text.clone()))))
+        .collect();
+    if let Err(e) = store.create(&Value::Object(set), keep_known_good()?) {
+        log_err(&format!("WARNING: {what} not saved as known-good: {e:#}"));
     }
     Ok(())
 }
@@ -1599,11 +1627,20 @@ fn restamp_lines(text: &str, lines: &[(&str, String)]) -> String {
 // What: run pdnsutil on the auth config; text or error.
 // Why: every zone and key change goes through one call.
 fn pdnsutil(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = std::process::Command::new("pdnsutil")
-        .arg(format!("--config-dir={}", dir.display()))
+    let config_dir = format!("--config-dir={}", dir.display());
+    let mut argv = vec![config_dir.as_str()];
+    argv.extend_from_slice(args);
+    tool("pdnsutil", &argv)
+}
+
+// What: run a tool; its stdout and stderr, or an error.
+// Why: setup tools fail the launch with their own words.
+// From: Issue #1683
+fn tool(program: &str, args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new(program)
         .args(args)
         .output()
-        .map_err(|e| format!("cannot run pdnsutil: {e}"))?;
+        .map_err(|e| format!("cannot run {program}: {e}"))?;
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -1612,7 +1649,7 @@ fn pdnsutil(dir: &Path, args: &[&str]) -> Result<String, String> {
     if out.status.success() {
         Ok(text)
     } else {
-        Err(format!("pdnsutil {}: {}", args.join(" "), text.trim()))
+        Err(format!("{program} {}: {}", args.join(" "), text.trim()))
     }
 }
 
@@ -1836,9 +1873,8 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
         )
     };
     let config_dir = format!("--config-dir={}", dir.display());
-    checked_conf(
-        &dir.join("pdns.conf"),
-        &conf.render(),
+    checked_files(
+        &[(dir.join("pdns.conf"), conf.render())],
         &[
             "pdns_server".into(),
             "--config=check".into(),
@@ -1846,6 +1882,7 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
         ],
         &store,
         &restamp,
+        true,
     )?;
     dns_zones(&dir, role, &tsig, primary, &notify)?;
     Ok(Run {
@@ -1872,25 +1909,36 @@ fn rpz_zone(domains: &str, proxy: std::net::Ipv4Addr, serial: u64) -> (String, u
         "$ORIGIN rpz.\n$TTL 60\n@ SOA localhost. admin.rpz. {serial} 3600 900 604800 60\n\
          @ NS localhost.\n\n"
     );
-    let mut count = 0;
+    let (rows, invalid) = cdn_rows(domains);
+    for row in invalid {
+        log_err(&format!("WARNING: skipping invalid RPZ entry {row:?}"));
+    }
+    for (name, wildcard) in &rows {
+        let owner = if *wildcard {
+            format!("*.{name}")
+        } else {
+            name.clone()
+        };
+        zone.push_str(&format!("{owner} 60 IN A {proxy}\n"));
+    }
+    (zone, rows.len())
+}
+
+// What: valid cdn-domains rows as (name, wildcard-only).
+// Why: dns and proxy read one file with one rule set.
+// From: Issue #1072 | Issue #1683
+fn cdn_rows(domains: &str) -> (Vec<(String, bool)>, Vec<String>) {
+    let (mut rows, mut invalid) = (Vec::new(), Vec::new());
     for row in domains.lines().map(str::trim) {
         if row.is_empty() || row.starts_with('#') || row.starts_with('!') {
             continue;
         }
-        let (wildcard, name) = match row.strip_prefix('.') {
-            Some(rest) => (true, rest),
-            None => (false, row),
-        };
-        let name = name.to_ascii_lowercase();
-        if !name.contains('.') || !config::is_dns_name(&name, false, false) {
-            log_err(&format!("WARNING: skipping invalid RPZ entry {row:?}"));
-            continue;
+        match config::cdn_entry(row) {
+            Some(entry) => rows.push(entry),
+            None => invalid.push(row.to_string()),
         }
-        let owner = if wildcard { format!("*.{name}") } else { name };
-        zone.push_str(&format!("{owner} 60 IN A {proxy}\n"));
-        count += 1;
     }
-    (zone, count)
+    (rows, invalid)
 }
 
 // What: recursor.lua: RPZ, LAN trust anchors, root copy.
@@ -2026,9 +2074,8 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
     );
     let restamp = |old: &str| restamp_lines(old, &[("api_key:", format!("  api_key: {api_key}"))]);
     let config_dir = format!("--config-dir={}", dir.display());
-    checked_conf(
-        &dir.join("recursor.conf"),
-        &conf.render(),
+    checked_files(
+        &[(dir.join("recursor.conf"), conf.render())],
         &[
             "pdns_recursor".into(),
             "--config=check".into(),
@@ -2036,6 +2083,7 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
         ],
         &store,
         &restamp,
+        true,
     )?;
     Ok(Run {
         argv: vec![
@@ -2418,9 +2466,10 @@ fn kea_dhcp4(ctx: &Ctx) -> Result<Run, String> {
     let fresh = current
         .and_then(owned)
         .map(|text| ("current".to_string(), text));
+    let set = |(label, text): (String, String)| (label, vec![(path.clone(), text)]);
     let used = first_good(
-        &path,
-        fresh.into_iter().chain(snapshot_texts(&store, &owned)),
+        &path.display().to_string(),
+        fresh.into_iter().chain(snapshots(&store, &owned)).map(set),
         &["kea-dhcp4".into(), "-t".into(), path.display().to_string()],
     )?;
     if used != "current" {
@@ -2653,7 +2702,13 @@ fn dnsmasq(ctx: &Ctx, relay: bool) -> Result<Run, String> {
         "-C".into(),
         path.display().to_string(),
     ];
-    checked_conf(&path, &body, &check, &store, &|old| old.to_string())?;
+    checked_files(
+        &[(path.clone(), body)],
+        &check,
+        &store,
+        &|old| old.to_string(),
+        true,
+    )?;
     Ok(Run {
         argv: vec![
             "dnsmasq".into(),
@@ -2662,6 +2717,702 @@ fn dnsmasq(ctx: &Ctx, relay: bool) -> Result<Run, String> {
             path.display().to_string(),
         ],
         watch: ctx.settings_file.iter().cloned().collect(),
+        ..Run::default()
+    })
+}
+
+// What: the ICANN part of the public suffix list.
+// Why: one wildcard cert per registrable CDN domain.
+// From: Issue #1683
+#[derive(Default)]
+struct Psl {
+    rules: HashSet<String>,
+    wildcards: HashSet<String>,
+    exceptions: HashSet<String>,
+}
+
+impl Psl {
+    // What: rules up to the private section, by kind.
+    // Why: a private CDN suffix must not split a platform.
+    fn parse(text: &str) -> Self {
+        let mut psl = Self::default();
+        for line in text.lines().map(str::trim) {
+            if line == "// ===BEGIN PRIVATE DOMAINS===" {
+                break;
+            }
+            if line.is_empty() || line.starts_with("//") {
+                continue;
+            }
+            if let Some(rule) = line.strip_prefix('!') {
+                psl.exceptions.insert(rule.to_string());
+            } else if let Some(rule) = line.strip_prefix("*.") {
+                psl.wildcards.insert(rule.to_string());
+            } else {
+                psl.rules.insert(line.to_string());
+            }
+        }
+        psl
+    }
+
+    // What: the public suffix plus one label.
+    // Why: None when the name is itself a public suffix.
+    fn root(&self, domain: &str) -> Option<String> {
+        let labels: Vec<&str> = domain.split('.').collect();
+        let n = labels.len();
+        let tail = |k: usize| labels[n - k..].join(".");
+        let mut suffix = 0;
+        for k in (1..=n).rev() {
+            if self.exceptions.contains(&tail(k)) {
+                suffix = k - 1;
+                break;
+            }
+            if self.rules.contains(&tail(k)) || (k >= 2 && self.wildcards.contains(&tail(k - 1))) {
+                suffix = k;
+                break;
+            }
+        }
+        let root = suffix.max(1) + 1;
+        (root <= n).then(|| tail(root))
+    }
+}
+
+// What: the names the proxy maps, certifies and allows.
+// Why: maps, certificates and ACLs cover one host set.
+// From: Issue #1683
+#[derive(Debug, Default, PartialEq)]
+struct CdnHosts {
+    // What: registrable roots; root and *.root.
+    roots: Vec<String>,
+    // What: wildcard-only rows below a root; *.base.
+    bases: Vec<String>,
+    // What: exact rows two or more labels below a root.
+    exact: Vec<String>,
+    // What: roots that are themselves a wildcard-only row.
+    root_wildcards: HashSet<String>,
+    // What: true when a row was invalid or had no root.
+    skipped: bool,
+}
+
+// What: append a name once, keeping the file order.
+// Why: maps and certificates list each name once.
+fn push_new(list: &mut Vec<String>, name: &str) {
+    if !list.iter().any(|known| known == name) {
+        list.push(name.to_string());
+    }
+}
+
+// What: sort cdn-domains rows into the proxy host set.
+// Why: one level below a root is covered by *.root.
+// From: Issue #1683
+fn cdn_hosts(domains: &str, psl: &Psl) -> CdnHosts {
+    let (rows, invalid) = cdn_rows(domains);
+    let mut hosts = CdnHosts {
+        skipped: !invalid.is_empty(),
+        ..CdnHosts::default()
+    };
+    for row in invalid {
+        log_err(&format!("WARNING: skipping invalid domain entry {row:?}"));
+    }
+    for (name, wildcard) in rows {
+        let Some(root) = psl.root(&name) else {
+            log_err(&format!("WARNING: no registrable root for {name}"));
+            hosts.skipped = true;
+            continue;
+        };
+        push_new(&mut hosts.roots, &root);
+        if wildcard && name == root {
+            hosts.root_wildcards.insert(root);
+        } else if wildcard {
+            push_new(&mut hosts.bases, &name);
+        } else if name != root && name.split_once('.').map(|(_, rest)| rest) != Some(&root) {
+            push_new(&mut hosts.exact, &name);
+        }
+    }
+    hosts
+}
+
+// What: a bounded certificate file name for one host.
+// Why: deep names would exceed file name limits.
+// From: Issue #1683
+fn cert_name(host: &str, kind: &str) -> String {
+    sha256_hex(&format!("{kind}:{host}"))[..32].to_string()
+}
+
+impl CdnHosts {
+    // What: (hostnames key, certificate name) pairs.
+    // Why: the cert, allow and stream maps share the keys.
+    fn keys(&self) -> Vec<(String, String)> {
+        let mut keys = Vec::new();
+        for root in &self.roots {
+            keys.push((format!("*.{root}"), root.clone()));
+            keys.push((root.clone(), root.clone()));
+        }
+        for base in &self.bases {
+            keys.push((format!("*.{base}"), cert_name(base, "wildcard")));
+        }
+        for host in &self.exact {
+            keys.push((host.clone(), cert_name(host, "exact")));
+        }
+        keys
+    }
+}
+
+// What: first line of every generated nginx file.
+// Why: an operator must not hand-edit a rendered file.
+const NGINX_GENERATED: &str = "# Generated by lancache-watchdog; do not edit\n";
+
+// What: the sink for SNI-less or refused TLS clients.
+// Why: the discard port closes the connection at once.
+const NGINX_REFUSE: &str = "127.0.0.1:9";
+
+// What: loopback relays of the :443 SNI dispatcher.
+// Why: MITM goes to 8444 (https.conf); else passthrough.
+// From: Issue #1276 | Issue #1322
+const NGINX_MITM_RELAY: u16 = 9445;
+const NGINX_PASSTHROUGH_RELAY: u16 = 9446;
+const NGINX_MITM_PORT: u16 = 8444;
+
+// What: one aligned "key value;" map line.
+// Why: rendered maps stay readable for operators.
+fn map_line(key: &str, value: &str) -> String {
+    format!("    {key:<45} {value};\n")
+}
+
+// What: cert map, host allow map and client geo.
+// Why: strict allows only listed hosts; CIDRs gate all.
+// From: Issue #1683
+fn nginx_ssl_map(hosts: &CdnHosts, strict: bool, cidrs: &[String]) -> String {
+    let keys = hosts.keys();
+    let mut out =
+        format!("{NGINX_GENERATED}map $ssl_server_name $ssl_cert_name {{\n    hostnames;\n");
+    for (key, cert) in &keys {
+        out.push_str(&map_line(key, cert));
+    }
+    out.push_str("    default default;\n}\n\nmap $host $cdn_host_allowed {\n    hostnames;\n");
+    if strict {
+        out.push_str("    default 0;\n");
+        for (key, _) in &keys {
+            out.push_str(&map_line(key, "1"));
+        }
+    } else {
+        out.push_str("    default 1;\n");
+    }
+    out.push_str("}\n\ngeo $lancache_client_allowed {\n");
+    if cidrs.is_empty() {
+        out.push_str("    default 1;\n");
+    } else {
+        out.push_str("    default 0;\n");
+        for cidr in cidrs {
+            out.push_str(&map_line(cidr, "1"));
+        }
+    }
+    out.push_str("}\n");
+    out
+}
+
+// What: the :8443 SNI passthrough backend map.
+// Why: lazy forwards any SNI; strict only listed hosts.
+// From: Issue #1683
+fn nginx_stream_targets(hosts: &CdnHosts, strict: bool) -> String {
+    let pass = "$ssl_preread_server_name:443";
+    let mut out = format!(
+        "{NGINX_GENERATED}map $ssl_preread_server_name $stream_backend {{\n    hostnames;\n{}",
+        map_line("\"\"", NGINX_REFUSE)
+    );
+    if strict {
+        out.push_str(&format!("    default {NGINX_REFUSE};\n"));
+        for (key, _) in hosts.keys() {
+            out.push_str(&map_line(&key, pass));
+        }
+    } else {
+        out.push_str(&format!("    default {pass};\n"));
+    }
+    out.push_str("}\n");
+    out
+}
+
+// What: stream allow lines; empty CIDRs allow all.
+// Why: the http geo cannot gate stream listeners.
+// From: Issue #1683
+fn nginx_client_acl(cidrs: &[String]) -> String {
+    let mut out = NGINX_GENERATED.to_string();
+    if !cidrs.is_empty() {
+        for cidr in cidrs {
+            out.push_str(&format!("allow {cidr};\n"));
+        }
+        out.push_str("deny all;\n");
+    }
+    out
+}
+
+// What: the :443 dispatcher: MITM, passthrough, refuse.
+// Why: a cert covers one label; deeper names pass through.
+// From: Issue #1276 | Issue #1322 | Issue #1683
+fn nginx_ssl_dispatch(hosts: &CdnHosts, strict: bool, acl: &Path) -> String {
+    let mitm = format!("127.0.0.1:{NGINX_MITM_RELAY}");
+    let passthrough = format!("127.0.0.1:{NGINX_PASSTHROUGH_RELAY}");
+    let escape = |name: &str| name.replace('.', "\\.");
+    let one_level = |name: &str| format!("\"~^[^.]+\\.{}$\"", escape(name));
+    let mut bases: Vec<&String> = hosts
+        .bases
+        .iter()
+        .chain(
+            hosts
+                .roots
+                .iter()
+                .filter(|r| hosts.root_wildcards.contains(*r)),
+        )
+        .collect();
+    bases.sort_by(|a, b| b.len().cmp(&a.len()).then(b.cmp(a)));
+    let mut out = format!(
+        "{NGINX_GENERATED}map $ssl_preread_server_name $ssl_dispatch_backend {{\n{}",
+        map_line("\"\"", NGINX_REFUSE)
+    );
+    for root in &hosts.roots {
+        out.push_str(&map_line(root, &mitm));
+        if !hosts.root_wildcards.contains(root) {
+            out.push_str(&map_line(&one_level(root), &mitm));
+        }
+    }
+    for host in &hosts.exact {
+        out.push_str(&map_line(host, &mitm));
+    }
+    for base in bases {
+        out.push_str(&map_line(&one_level(base), &mitm));
+        out.push_str(&map_line(
+            &format!("\"~^.+\\.{}$\"", escape(base)),
+            &passthrough,
+        ));
+    }
+    let default = if strict {
+        NGINX_REFUSE
+    } else {
+        passthrough.as_str()
+    };
+    out.push_str(&format!(
+        "    default {default};\n}}\n\n\
+         server {{\n    listen 443;\n    listen [::]:443;\n    include {acl};\n    \
+         ssl_preread on;\n    proxy_pass $ssl_dispatch_backend;\n    proxy_protocol on;\n    \
+         proxy_connect_timeout 30s;\n    proxy_timeout        3600s;\n}}\n\n\
+         server {{\n    listen {mitm} proxy_protocol;\n    set_real_ip_from 127.0.0.1;\n    \
+         proxy_protocol on;\n    proxy_pass 127.0.0.1:{NGINX_MITM_PORT};\n    \
+         proxy_connect_timeout 30s;\n    proxy_timeout        3600s;\n}}\n\n\
+         server {{\n    listen {passthrough} proxy_protocol;\n    set_real_ip_from 127.0.0.1;\n    \
+         ssl_preread on;\n    proxy_pass $ssl_preread_server_name:443;\n    \
+         proxy_connect_timeout 30s;\n    proxy_timeout        3600s;\n}}\n",
+        acl = acl.display()
+    ));
+    out
+}
+
+// What: replace each ${KEY} of a template with its value.
+// Why: the image templates name .env values; one filler.
+// From: Issue #1683
+fn fill(template: &str, values: &[(&str, String)]) -> String {
+    values
+        .iter()
+        .fold(template.to_string(), |text, (key, value)| {
+            text.replace(&format!("${{{key}}}"), value)
+        })
+}
+
+// What: a resolver token without brackets or port.
+// Why: nginx takes [v6] and ip:port; compare bare IPs.
+fn resolver_host(token: &str) -> &str {
+    if let Some(rest) = token.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else if token.matches(':').count() == 1 {
+        token.split(':').next().unwrap_or(token)
+    } else {
+        token
+    }
+}
+
+// What: the numeric id of a passwd or group entry.
+// Why: chown takes ids; the image names user and group.
+// From: Issue #1683
+fn account_id(db: &str, name: &str) -> Result<u32, String> {
+    let path = format!("/etc/{db}");
+    let text = fs::read_to_string(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    text.lines()
+        .map(|line| line.split(':').collect::<Vec<_>>())
+        .find(|fields| fields.first() == Some(&name))
+        .and_then(|fields| fields.get(2)?.parse().ok())
+        .ok_or_else(|| format!("{name} is not in {path}"))
+}
+
+// What: set owner ids and mode on one path.
+// Why: nginx workers read keys only through their group.
+fn own(path: &Path, uid: Option<u32>, gid: u32, mode: u32) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::os::unix::fs::chown(path, uid, Some(gid))
+        .and_then(|()| fs::set_permissions(path, fs::Permissions::from_mode(mode)))
+        .map_err(|e| format!("cannot set owner and mode of {}: {e}", path.display()))
+}
+
+// What: sign one leaf certificate with the stack CA.
+// Why: the proxy presents it for an intercepted host.
+// From: Issue #1683
+fn sign_leaf(ca: &Path, run: &Path, key: &Path, crt: &Path, san: &str) -> Result<(), String> {
+    let (csr, ext) = (run.join("leaf.csr"), run.join("leaf.ext"));
+    write_file(
+        &ext,
+        format!("subjectAltName={san}\n").as_bytes(),
+        0o600,
+        Place::Replace,
+    )
+    .map_err(|e| format!("cannot write {}: {e}", ext.display()))?;
+    let path = |p: &Path| p.display().to_string();
+    let (key_s, crt_s, csr_s, ext_s) = (path(key), path(crt), path(&csr), path(&ext));
+    let (ca_crt, ca_key, serial) = (
+        path(&ca.join("ca.crt")),
+        path(&ca.join("ca.key")),
+        path(&ca.join("ca.srl")),
+    );
+    let signed = tool(
+        "openssl",
+        &[
+            "req",
+            "-new",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-subj",
+            "/CN=lancache-ng",
+            "-keyout",
+            &key_s,
+            "-out",
+            &csr_s,
+        ],
+    )
+    .and_then(|_| {
+        tool(
+            "openssl",
+            &[
+                "x509",
+                "-req",
+                "-days",
+                "3650",
+                "-in",
+                &csr_s,
+                "-CA",
+                &ca_crt,
+                "-CAkey",
+                &ca_key,
+                "-CAserial",
+                &serial,
+                "-extfile",
+                &ext_s,
+                "-out",
+                &crt_s,
+            ],
+        )
+    });
+    let _ = fs::remove_file(&csr);
+    let _ = fs::remove_file(&ext);
+    if signed.is_err() {
+        let _ = fs::remove_file(key);
+        let _ = fs::remove_file(crt);
+    }
+    signed.map(|_| ())
+}
+
+// What: CA, default and per-host leaf certificates.
+// Why: SSL mode intercepts TLS for every proxied host.
+// From: Issue #1683
+fn nginx_certs(
+    nginx: &Path,
+    run: &Path,
+    hosts: &CdnHosts,
+    ip_ssl: &str,
+    gid: u32,
+) -> Result<(), String> {
+    let (ca, certs) = (nginx.join("ssl/ca"), nginx.join("ssl/certs"));
+    let (ca_crt, ca_key) = (ca.join("ca.crt"), ca.join("ca.key"));
+    let path = |p: &Path| p.display().to_string();
+    if !(ca_crt.is_file() && ca_key.is_file()) {
+        fs::create_dir_all(&ca).map_err(|e| format!("cannot create {}: {e}", ca.display()))?;
+        tool(
+            "openssl",
+            &[
+                "req",
+                "-new",
+                "-newkey",
+                "rsa:4096",
+                "-days",
+                "3650",
+                "-nodes",
+                "-x509",
+                "-subj",
+                "/CN=LanCache-NG CA/O=LanCache-NG/C=DE",
+                "-keyout",
+                &path(&ca_key),
+                "-out",
+                &path(&ca_crt),
+            ],
+        )?;
+        own(&ca_key, None, 0, 0o600)?;
+        log(
+            "ACTION REQUIRED: a new CA is in certs/ca.crt; every SSL client must install it \
+             once (docs/install-ca-cert.md)",
+        );
+    }
+    fs::create_dir_all(&certs).map_err(|e| format!("cannot create {}: {e}", certs.display()))?;
+    own(&certs, None, gid, 0o2750)?;
+    // What: drop every leaf when the CA changed.
+    // Why: leaves of an old CA would fail on every client.
+    let print = tool(
+        "openssl",
+        &[
+            "x509",
+            "-noout",
+            "-fingerprint",
+            "-sha256",
+            "-in",
+            &path(&ca_crt),
+        ],
+    )?;
+    let stamp = certs.join(".ca-fingerprint");
+    if fs::read_to_string(&stamp).ok().as_deref() != Some(print.as_str()) {
+        for entry in
+            fs::read_dir(&certs).map_err(|e| format!("cannot list {}: {e}", certs.display()))?
+        {
+            let file = entry.map_err(|e| e.to_string())?.path();
+            if matches!(
+                file.extension().and_then(|x| x.to_str()),
+                Some("crt" | "key")
+            ) {
+                fs::remove_file(&file)
+                    .map_err(|e| format!("cannot remove {}: {e}", file.display()))?;
+            }
+        }
+        write_file(&stamp, print.as_bytes(), 0o644, Place::Replace)
+            .map_err(|e| format!("cannot write {}: {e}", stamp.display()))?;
+    }
+    let serial = ca.join("ca.srl");
+    if !serial.is_file() {
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        write_file(
+            &serial,
+            format!("{nanos:016x}\n").as_bytes(),
+            0o600,
+            Place::Replace,
+        )
+        .map_err(|e| format!("cannot write {}: {e}", serial.display()))?;
+    }
+    let (default_key, default_crt) = (certs.join("default.key"), certs.join("default.crt"));
+    let san = tool(
+        "openssl",
+        &[
+            "x509",
+            "-noout",
+            "-ext",
+            "subjectAltName",
+            "-in",
+            &path(&default_crt),
+        ],
+    )
+    .unwrap_or_default();
+    let has_ip = ip_ssl.is_empty()
+        || san
+            .split([',', '\n'])
+            .any(|entry| entry.trim() == format!("IP Address:{ip_ssl}"));
+    if !default_key.is_file() || !san.contains("DNS:") || !has_ip {
+        let mut names = "DNS:lancache-default".to_string();
+        if !ip_ssl.is_empty() {
+            names.push_str(&format!(",IP:{ip_ssl}"));
+        }
+        sign_leaf(&ca, run, &default_key, &default_crt, &names)?;
+    }
+    let leaves = hosts
+        .roots
+        .iter()
+        .map(|root| (root.clone(), format!("DNS:{root},DNS:*.{root}")))
+        .chain(
+            hosts
+                .bases
+                .iter()
+                .map(|base| (cert_name(base, "wildcard"), format!("DNS:*.{base}"))),
+        )
+        .chain(
+            hosts
+                .exact
+                .iter()
+                .map(|host| (cert_name(host, "exact"), format!("DNS:{host}"))),
+        );
+    for (file, names) in leaves {
+        let (key, crt) = (
+            certs.join(format!("{file}.key")),
+            certs.join(format!("{file}.crt")),
+        );
+        if !(key.is_file() && crt.is_file()) {
+            log(&format!("Generating certificate {file} for {names}"));
+            sign_leaf(&ca, run, &key, &crt, &names)?;
+        }
+    }
+    for entry in
+        fs::read_dir(&certs).map_err(|e| format!("cannot list {}: {e}", certs.display()))?
+    {
+        let file = entry.map_err(|e| e.to_string())?.path();
+        match file.extension().and_then(|x| x.to_str()) {
+            Some("key") => own(&file, None, gid, 0o640)?,
+            Some("crt") => own(&file, None, gid, 0o644)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+// What: render, certify, check and start nginx.
+// Why: replaces proxy/entrypoint.sh; a domain edit restarts.
+// From: Issue #1683
+fn nginx(ctx: &Ctx) -> Result<Run, String> {
+    let dir = PathBuf::from(ctx.need("NGINX_DIR")?);
+    let domains_file = PathBuf::from(ctx.need("CDN_DOMAINS_FILE")?);
+    let read = |path: &Path| {
+        fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+    };
+    let ip_standard = ctx.need("IP_STANDARD")?;
+    let ip_ssl = env_opt("IP_SSL").unwrap_or_default();
+    let ssl = config::parse_bool(&ctx.need("SSL_ENABLED")?).ok_or("SSL_ENABLED is no boolean")?;
+    let resolver = ctx.need("NGINX_UPSTREAM_RESOLVER")?;
+    // What: the upstream resolver must not be LanCache.
+    // Why: the LanCache DNS would loop back (AG-OP-002).
+    for token in resolver.split_whitespace().map(resolver_host) {
+        if token == ip_standard || (!ip_ssl.is_empty() && token == ip_ssl) {
+            return Err(format!(
+                "NGINX_UPSTREAM_RESOLVER must not point to a LanCache IP ({token})"
+            ));
+        }
+    }
+    let strict = match ctx.need("PROXY_SECURITY_MODE")?.as_str() {
+        "strict" => true,
+        "lazy" => false,
+        other => {
+            return Err(format!(
+                "PROXY_SECURITY_MODE must be lazy or strict, not {other}"
+            ));
+        }
+    };
+    let cidrs: Vec<String> = env_opt("PROXY_ALLOWED_CLIENT_CIDRS")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(String::from)
+        .collect();
+    let template = read(&dir.join("nginx.conf.template"))?;
+    let worker = template
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("user ")?.strip_suffix(';'))
+        .ok_or("nginx.conf.template names no worker user")?
+        .trim()
+        .to_string();
+    let worker_gid = account_id("group", &worker)?;
+    let hosts = cdn_hosts(
+        &read(&domains_file)?,
+        &Psl::parse(&read(&dir.join("public_suffix_list.dat"))?),
+    );
+    let https = dir.join("conf.d/https.conf");
+    if ssl {
+        if ip_ssl.is_empty() {
+            return Err("SSL_ENABLED needs IP_SSL".into());
+        }
+        nginx_certs(&dir, &ctx.run_dir, &hosts, &ip_ssl, worker_gid)?;
+    } else if https.exists() {
+        fs::remove_file(&https).map_err(|e| format!("cannot remove {}: {e}", https.display()))?;
+    }
+    for sub in ["conf.d", "stream.d/access.d"] {
+        fs::create_dir_all(dir.join(sub))
+            .map_err(|e| format!("cannot create {}: {e}", dir.join(sub).display()))?;
+    }
+    let healthz = dir.join("lancache-healthz-body.txt");
+    write_file(&healthz, b"ok\n", 0o644, Place::Replace)
+        .map_err(|e| format!("cannot write {}: {e}", healthz.display()))?;
+    let value = |key: &'static str| ctx.need(key).map(|v| (key, v));
+    let acl = dir.join("stream.d/access.d/00-stream-client-acl.conf");
+    let conf = dir.join("nginx.conf");
+    let files = vec![
+        (
+            conf.clone(),
+            fill(
+                &template,
+                &[
+                    value("CACHE_MEM_MB")?,
+                    value("CACHE_MAX_SIZE")?,
+                    value("CACHE_MIN_FREE")?,
+                    value("CACHE_INACTIVE")?,
+                    ("NGINX_UPSTREAM_RESOLVER", resolver),
+                ],
+            ),
+        ),
+        (
+            dir.join("proxy-params.conf"),
+            fill(
+                &read(&dir.join("proxy-params.conf.template"))?,
+                &[
+                    value("CACHE_SLICE_SIZE")?,
+                    value("CACHE_VALID_HIT")?,
+                    value("CACHE_VALID_ANY")?,
+                ],
+            ),
+        ),
+        (
+            dir.join("conf.d/00-ssl-map.conf"),
+            nginx_ssl_map(&hosts, strict, &cidrs),
+        ),
+        (
+            dir.join("stream.d/00-stream-targets.conf"),
+            nginx_stream_targets(&hosts, strict),
+        ),
+        (acl.clone(), nginx_client_acl(&cidrs)),
+        (
+            dir.join("stream.d/01-ssl-dispatch.conf"),
+            if ssl {
+                nginx_ssl_dispatch(&hosts, strict, &acl)
+            } else {
+                NGINX_GENERATED.to_string()
+            },
+        ),
+    ];
+    let store = lancache_ng::SnapshotStore::new(
+        PathBuf::from(ctx.need("PROXY_CONFIG_SNAPSHOT_DIR")?),
+        "nginx.json",
+        "proxy",
+    );
+    checked_files(
+        &files,
+        &[
+            "nginx".into(),
+            "-t".into(),
+            "-c".into(),
+            conf.display().to_string(),
+        ],
+        &store,
+        &|old| old.to_string(),
+        !hosts.skipped,
+    )?;
+    // What: the log dir is setgid to the log reader gid.
+    // Why: the ui reads access.log through that group.
+    // From: Issue #1427
+    let logs = PathBuf::from(ctx.need("PROXY_LOG_DIR")?);
+    let reader: u32 = ctx
+        .need("PROXY_LOG_GID")?
+        .parse()
+        .map_err(|e| format!("PROXY_LOG_GID: {e}"))?;
+    let worker_uid = account_id("passwd", &worker)?;
+    fs::create_dir_all(&logs).map_err(|e| format!("cannot create {}: {e}", logs.display()))?;
+    own(&logs, Some(worker_uid), reader, 0o2750)?;
+    for entry in fs::read_dir(&logs).map_err(|e| format!("cannot list {}: {e}", logs.display()))? {
+        let file = entry.map_err(|e| e.to_string())?.path();
+        if file.is_file() {
+            own(&file, Some(worker_uid), reader, 0o640)?;
+        }
+    }
+    Ok(Run {
+        argv: vec!["nginx".into(), "-g".into(), "daemon off;".into()],
+        watch: vec![domains_file],
         ..Run::default()
     })
 }
@@ -4148,6 +4899,161 @@ mod tests {
             "{zone}"
         );
         assert!(!zone.contains(&off) && !zone.contains("\ncom ") && !zone.contains("b@d"));
+    }
+
+    // What: PSL rules, wildcards, exceptions, private end.
+    // Why: a wrong root splits or merges CDN certificates.
+    // From: Issue #1683
+    #[test]
+    fn psl_root_follows_rules_wildcards_and_exceptions() {
+        let [tld, sld, wild, except, private, a, b, c] = std::array::from_fn(|_| gen_name());
+        let psl = Psl::parse(&format!(
+            "// c\n{tld}\n{sld}.{tld}\n*.{wild}\n!{except}.{wild}\n\
+             // ===BEGIN PRIVATE DOMAINS===\n{private}.{tld}\n"
+        ));
+        assert_eq!(
+            psl.root(&format!("{a}.{b}.{tld}")),
+            Some(format!("{b}.{tld}"))
+        );
+        assert_eq!(
+            psl.root(&format!("{a}.{b}.{sld}.{tld}")),
+            Some(format!("{b}.{sld}.{tld}"))
+        );
+        assert_eq!(psl.root(&format!("{sld}.{tld}")), None);
+        assert_eq!(
+            psl.root(&format!("{a}.{b}.{c}.{wild}")),
+            Some(format!("{b}.{c}.{wild}"))
+        );
+        assert_eq!(
+            psl.root(&format!("{a}.{except}.{wild}")),
+            Some(format!("{except}.{wild}"))
+        );
+        assert_eq!(
+            psl.root(&format!("{a}.{private}.{tld}")),
+            Some(format!("{private}.{tld}"))
+        );
+        assert_eq!(psl.root(&format!("{a}.{b}")), Some(format!("{a}.{b}")));
+    }
+
+    // What: rows become roots, bases and exact hosts.
+    // Why: one label below a root is covered by *.root.
+    // From: Issue #1683
+    #[test]
+    fn cdn_hosts_sort_rows_by_cover() {
+        let [tld, r1, r2, r3, a, b, c] = std::array::from_fn(|_| gen_name());
+        let psl = Psl::parse(&format!("{tld}\n"));
+        let rows = format!(
+            "# c\n{a}.{r1}.{tld}\n.{r1}.{tld}\n.{b}.{r2}.{tld}\n{a}.{b}.{r3}.{tld}\n\
+             {r3}.{tld}\n!{c}.{tld}\n{tld}\n"
+        );
+        let hosts = cdn_hosts(&rows, &psl);
+        let names = |v: &[&str]| v.iter().map(|n| format!("{n}.{tld}")).collect::<Vec<_>>();
+        assert_eq!(hosts.roots, names(&[&r1, &r2, &r3]));
+        assert_eq!(hosts.bases, names(&[&format!("{b}.{r2}")]));
+        assert_eq!(hosts.exact, names(&[&format!("{a}.{b}.{r3}")]));
+        assert_eq!(hosts.root_wildcards, HashSet::from([format!("{r1}.{tld}")]));
+        assert!(hosts.skipped, "the bare TLD row must count as skipped");
+    }
+
+    // What: strict lists hosts; lazy and CIDR defaults.
+    // Why: strict must refuse every unlisted name.
+    // From: Issue #1683
+    #[test]
+    fn nginx_maps_follow_mode_and_cidrs() {
+        let [root, base, cidr] = std::array::from_fn(|_| gen_name());
+        let hosts = CdnHosts {
+            roots: vec![root.clone()],
+            bases: vec![base.clone()],
+            ..CdnHosts::default()
+        };
+        let strict = nginx_ssl_map(&hosts, true, std::slice::from_ref(&cidr));
+        assert!(strict.contains(&map_line(&format!("*.{root}"), &root)));
+        assert!(strict.contains(&map_line(
+            &format!("*.{base}"),
+            &cert_name(&base, "wildcard")
+        )));
+        assert!(strict.contains("    default 0;\n") && strict.contains(&map_line(&cidr, "1")));
+        let lazy = nginx_ssl_map(&hosts, false, &[]);
+        assert_eq!(lazy.matches("    default 1;\n").count(), 2, "{lazy}");
+        assert!(
+            nginx_stream_targets(&hosts, false).contains("default $ssl_preread_server_name:443;")
+        );
+        assert!(nginx_stream_targets(&hosts, true).contains(&format!("default {NGINX_REFUSE};")));
+        assert_eq!(nginx_client_acl(&[]), NGINX_GENERATED);
+        assert!(
+            nginx_client_acl(std::slice::from_ref(&cidr))
+                .ends_with(&format!("allow {cidr};\ndeny all;\n"))
+        );
+    }
+
+    // What: deeper names pass through, longest base first.
+    // Why: a cert covers one label; regex order decides.
+    // From: Issue #1276 | Issue #1683
+    #[test]
+    fn nginx_dispatch_orders_bases_longest_first() {
+        let [root, short, long] = std::array::from_fn(|_| gen_name());
+        let long = format!("{long}.{long}.{root}");
+        let hosts = CdnHosts {
+            roots: vec![root.clone()],
+            bases: vec![format!("{short}.{root}"), long.clone()],
+            ..CdnHosts::default()
+        };
+        let out = nginx_ssl_dispatch(&hosts, false, Path::new("/acl"));
+        let at = |name: &str| {
+            out.find(&format!("\"~^.+\\.{}$\"", name.replace('.', "\\.")))
+                .expect(name)
+        };
+        assert!(at(&long) < at(&format!("{short}.{root}")), "{out}");
+        assert!(out.contains(&format!(
+            "    default 127.0.0.1:{NGINX_PASSTHROUGH_RELAY};\n"
+        )));
+        assert!(out.contains("    include /acl;\n"));
+        let strict = nginx_ssl_dispatch(&hosts, true, Path::new("/acl"));
+        assert!(strict.contains(&format!("    default {NGINX_REFUSE};\n")));
+    }
+
+    // What: template keys, resolver tokens, account ids.
+    // Why: each feeds nginx or chown verbatim.
+    #[test]
+    fn nginx_helpers_fill_strip_and_look_up() {
+        let [key, value] = std::array::from_fn(|_| gen_name());
+        let key = key.to_uppercase();
+        assert_eq!(
+            fill(
+                &format!("a ${{{key}}} $host ${{{key}}}"),
+                &[(key.as_str(), value.clone())]
+            ),
+            format!("a {value} $host {value}")
+        );
+        let ip = gen_ipv4().to_string();
+        assert_eq!(resolver_host(&format!("{ip}:53")), ip);
+        assert_eq!(resolver_host("[2001:db8::1]:53"), "2001:db8::1");
+        assert_eq!(resolver_host("2001:db8::1"), "2001:db8::1");
+        assert_eq!(account_id("passwd", "root"), Ok(0));
+        assert!(account_id("group", &gen_name()).is_err());
+    }
+
+    // What: a failing set rolls back to the last snapshot.
+    // Why: nginx must start from a set that passed -t.
+    // From: Issue #415 | Issue #1683
+    #[test]
+    fn checked_files_roll_back_a_failing_set() {
+        let root = scratch();
+        let (one, two) = (root.join(gen_name()), root.join(gen_name()));
+        let [good, bad, other] = std::array::from_fn(|_| gen_name());
+        let store = lancache_ng::SnapshotStore::new(root.join("snap"), "set.json", "test");
+        let name = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
+        let set = serde_json::json!({ name(&one): good, name(&two): other });
+        store.create(&set, 3).expect("snapshot");
+        let check: Vec<String> = ["grep", "-q", good.as_str(), &one.display().to_string()]
+            .map(String::from)
+            .to_vec();
+        let files = [(one.clone(), bad), (two.clone(), gen_name())];
+        checked_files(&files, &check, &store, &|old| old.to_string(), false).expect("rollback");
+        assert_eq!(fs::read_to_string(&one).unwrap(), good);
+        assert_eq!(fs::read_to_string(&two).unwrap(), other);
+        let empty = lancache_ng::SnapshotStore::new(root.join("none"), "set.json", "test");
+        assert!(checked_files(&files, &check, &empty, &|old| old.to_string(), false).is_err());
     }
 
     // What: lua names the RPZ file, every zone, the root.

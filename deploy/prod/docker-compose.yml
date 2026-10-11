@@ -124,8 +124,14 @@ services:
   proxy:
     container_name: LanCache-NG-proxy
     image: ${LANCACHE_IMAGE_REF_PROXY:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/proxy:${LANCACHE_IMAGE_TAG:-latest}}
+    init: true
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:?KEEP_KNOWN_GOOD_CONFIGS is required}
+      - SUPERVISE_RUN_DIR=/run/lancache
+      - CDN_DOMAINS_FILE=/etc/nginx/cdn-domains.txt
+      - PROXY_CONFIG_SNAPSHOT_DIR=/var/lib/lancache-proxy/config-snapshots
+      - PROXY_LOG_DIR=/var/log/nginx
+      - PROXY_LOG_GID=10001
       - IP_STANDARD=${IP_STANDARD}
       - IP_SSL=${IP_SSL}
       - SSL_ENABLED=${SSL_ENABLED:-1}
@@ -149,6 +155,8 @@ services:
       - proxy-logs:/var/log/nginx
       - proxy-certs:/etc/nginx/ssl/certs
       - proxy-config-snapshots:/var/lib/lancache-proxy
+    tmpfs:
+      - /run/lancache
     ports:
       - "${IP_STANDARD}:80:80"
       - "${IP_STANDARD}:443:8443"

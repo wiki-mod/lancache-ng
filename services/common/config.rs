@@ -467,6 +467,18 @@ pub fn is_dns_name(name: &str, underscore: bool, wildcard: bool) -> bool {
         })
 }
 
+// What: a cdn-domains entry as (name, wildcard-only).
+// Why: ui, dns and proxy share one rule; "." = wildcard.
+// From: Issue #822 | Issue #1683
+pub fn cdn_entry(text: &str) -> Option<(String, bool)> {
+    let lower = text.trim().to_ascii_lowercase();
+    let (wildcard, name) = match lower.strip_prefix('.') {
+        Some(rest) => (true, rest),
+        None => (false, lower.as_str()),
+    };
+    (name.contains('.') && is_dns_name(name, false, false)).then(|| (name.to_string(), wildcard))
+}
+
 // What: the path of PowerDNS's API below a server address.
 // Why: ui and dns/entrypoint.sh append the same fixed path.
 pub const PDNS_API_PATH: &str = "/api/v1/servers/localhost";
@@ -632,6 +644,40 @@ mod tests {
         }
         assert_eq!(DhcpMode::parse("bogus"), DhcpMode::Disabled);
         assert_eq!(DhcpMode::parse(""), DhcpMode::Disabled);
+    }
+
+    // What: the CDN entry rule agrees with the fixture.
+    // Why: ui, dns and proxy must accept the same rows.
+    // From: Issue #822 | Issue #1683
+    #[test]
+    fn cdn_entry_matches_the_fixture_and_the_list() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+        let fixture =
+            std::fs::read_to_string(format!("{root}/tests/fixtures/domain-validation-cases.txt"))
+                .expect("shared fixture");
+        let mut cases = 0;
+        for line in fixture.lines().map(str::trim_end) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (verdict, domain) = line.split_once(' ').expect("verdict and domain");
+            assert_eq!(cdn_entry(domain).is_some(), verdict == "valid", "{line}");
+            cases += 1;
+        }
+        assert!(cases > 0, "the fixture holds no cases");
+        let list = std::fs::read_to_string(format!("{root}/services/dns/cdn-domains.txt"))
+            .expect("cdn list");
+        for line in list.lines().map(str::trim) {
+            let row = line.strip_prefix('!').unwrap_or(line);
+            if !row.is_empty() && !row.starts_with('#') {
+                assert!(cdn_entry(row).is_some(), "cdn-domains.txt rejects {line:?}");
+            }
+        }
+        let label = "a".repeat(63);
+        let long = format!("{label}.{label}.{label}.{}.com", "a".repeat(57));
+        assert_eq!(long.len(), 253);
+        assert!(cdn_entry(&long).is_some() && cdn_entry(&format!("a{long}")).is_none());
+        assert!(cdn_entry(&format!("{label}a.com")).is_none());
     }
 
     // What: the mode list holds the four names, none twice.

@@ -4298,14 +4298,9 @@ fn is_fqdn(name: &str, underscore: bool, wildcard: bool) -> bool {
 // What: a CDN entry from text, or None.
 // Why: two labels at least; a leading dot is wildcard-only
 fn parse_cdn_domain(text: &str) -> Option<CdnDomain> {
-    let lower = text.trim().to_lowercase();
-    let (wildcard_only, domain) = match lower.strip_prefix('.') {
-        Some(rest) => (true, rest),
-        None => (false, lower.as_str()),
-    };
-    (domain.contains('.') && is_valid_domain_name(domain)).then(|| CdnDomain {
+    config::cdn_entry(text).map(|(domain, wildcard_only)| CdnDomain {
         wildcard_only,
-        domain: domain.to_string(),
+        domain,
     })
 }
 
@@ -6071,32 +6066,6 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use lancache_ng::{serve_canned, unique_temp_dir};
-
-    // What: the domain rule agrees with the shared fixture.
-    // Why: the shell validator reads the same cases.
-    // From: Issue #822
-    #[test]
-    fn is_valid_domain_matches_shared_parity_fixture() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../tests/fixtures/domain-validation-cases.txt"
-        );
-        let fixture = fs::read_to_string(path).expect("shared fixture is readable");
-        let mut cases = 0;
-        for line in fixture.lines().map(str::trim_end) {
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let (verdict, domain) = line.split_once(' ').expect("verdict and domain");
-            assert_eq!(
-                parse_cdn_domain(domain).is_some(),
-                verdict == "valid",
-                "fixture case: {line}"
-            );
-            cases += 1;
-        }
-        assert!(cases > 0, "the fixture holds no cases");
-    }
 
     // What: list edits keep CRLF, markers, disabled lines.
     // Why: a wrong rewrite would change the proxy's list.

@@ -95,13 +95,15 @@ services:
   proxy:
     context: services/proxy
     labels: [proxy, nginx]
-    # What: named build contexts for COPY --from
-    # Why: proxy consumes dns' cdn-domains file
+    build_type: rust
+    # What: workspace crates (cargo -p) built for this image.
+    # Why: the supervisor renders, certifies and runs nginx.
     # From: Issue #1683
-    external_contexts:
-      - dns-domains=services/dns
-      - known-good=scripts/lib
-    build_type: apk
+    crates: [lancache-watchdog]
+    # What: processes lancache-watchdog supervise runs.
+    # Why: ci.sh bakes them as LANCACHE_PROCESSES; one list.
+    # From: Issue #1683
+    processes: [nginx]
     final_base: alpine
     # What: final-image apk packages; nginx from nginx.org.
     # Why: AG-KD-007: stream module only in nginx.org build.
@@ -440,15 +442,6 @@ ci_job_timeouts:
 ci_result_gate:
   required: [platform, plan, checks]
 
-# What: Named build contexts services COPY from at build.
-# Why: A change here rebuilds every consumer, not just self.
-# From: Issue #1683
-named_contexts:
-  known-good:
-    path: scripts/lib/known-good-snapshots.sh
-  dns-domains:
-    path: services/dns/cdn-domains.txt
-
 # What: Build-identity inputs per build type (§7).
 # Why: Impact is content-identity, never path-touched alone.
 # From: Issue #1683
@@ -479,7 +472,7 @@ dependency_graph:
   services:
     contexts: []
   proxy:
-    contexts: [known-good, dns-domains]
+    contexts: []
   dns:
     contexts: []
   dhcp:
