@@ -1,11 +1,8 @@
 
 {# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
-{#
-
-   LanCache-NG-NTP settings page: enable/disable the chrony-based NTP
-   container, edit its upstream public NTP server list, and toggle whether
-   its LAN address is auto-populated into Kea's DHCP ntp-servers option. #}
+{# What: NTP page: container toggle and upstream servers #}
+{# Why: the LAN address can be set as Kea's NTP server #}
 {% extends "base.html" %}
 {% block title %} – NTP{% endblock %}
 
