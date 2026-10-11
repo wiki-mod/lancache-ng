@@ -257,36 +257,33 @@ drivers.amd.com
 pat.downloads.amd.com
 
 # ---- Xbox / PlayStation ----
-# NOT listed here: consoles cannot install custom CAs.
-# If their CDN domains were redirected to our proxy, the TLS handshake
-# would fail and the console could not fall back (our DNS would keep
-# returning our proxy IP on retry). Omitting them means consoles get
-# real CDN IPs and everything works — just without caching.
-#
-# To enable Xbox PC (Game Pass for PC) caching on a LAN with no Xbox
-# consoles, add these manually:
+# What: consoles are left out; they cannot install our CA.
+# Why: a redirected handshake fails and has no fallback.
+
+# Xbox PC without consoles: add by hand.
 #   assets1.xboxlive.com
 #   xvcf1.xboxlive.com
+
 #   xvcf2.xboxlive.com
 
 # ---- Nintendo Switch ----
-# NOT listed here, for the same reason as Xbox / PlayStation above: consoles
-# cannot install custom CAs. If these CDN domains were redirected to our
-# proxy, the TLS handshake would fail and the console could not fall back
-# (our DNS would keep returning our proxy IP on retry). Omitting them means
-# a Switch gets real CDN IPs and everything works -- just without caching.
-#
-# To enable Nintendo Switch caching on a LAN with no Switch consoles,
-# add these manually:
+# What: the Switch is left out, same reason as consoles.
+# Why: it cannot install our CA either.
+
+# Switch without consoles: add by hand.
+
 #   .hac.lp1.d4c.nintendo.net
 #   .hac.lp1.eshop.nintendo.net
 #   .wup.eshop.nintendo.net
+
 #   .wup.shop.nintendo.net
 #   ccs.cdn.wup.shop.nintendo.net.edgesuite.net
 #   ecs-lp1.hac.shop.nintendo.net
+
 #   geisha-wup.cdn.nintendo.net
 #   geisha-wup.cdn.nintendo.net.edgekey.net
 #   idbe-wup.cdn.nintendo.net
+
 #   idbe-wup.cdn.nintendo.net.edgekey.net
 #   receive-lp1.dg.srv.nintendo.net
 
