@@ -5835,8 +5835,8 @@ async fn run() -> anyhow::Result<()> {
     .unwrap_or_else(|e| container_start_fatal(&e));
     let issuer = issuer_keypair(&cfg).unwrap_or_else(|e| container_start_fatal(&e));
     let xkey = callout_xkey(&cfg).unwrap_or_else(|e| container_start_fatal(&e));
-    // What: the fragment is written before the NATS connect.
-    // Why: the dns nats-server waits for it; no start deadlock.
+    // What: fragment written before the NATS connect.
+    // Why: dns nats-server waits for it; no deadlock.
     // From: Issue #811 | PR #1912
     if let Err(e) = write_callout_fragment(&cfg, &issuer.public_key(), &xkey.public_key()) {
         tracing::error!("Failed to write the auth_callout fragment: {e}");
@@ -7380,7 +7380,7 @@ mod tests {
         );
     }
 
-    // What: the fragment is written from config and keys alone.
+    // What: the fragment needs only config and keys.
     // Why: it must exist before the ui connects to NATS.
     #[test]
     fn callout_fragment_is_written_without_a_nats_client() {
