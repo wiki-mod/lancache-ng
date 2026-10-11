@@ -1,18 +1,19 @@
 #!/bin/bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Generates the LAN cache's root CA (ca.key/ca.crt) used to sign per-domain
-# wildcard certs for HTTPS interception (MITM) mode.
-#
-# Run this once to generate a CA certificate for HTTPS interception.
-# The proxy auto-generates one if this is missing (dev convenience).
-# In prod, use this to generate a dedicated CA and keep ca.key secret.
+# What: creates the root CA ca.key/ca.crt for HTTPS MITM.
+# Why: prod needs own CA; watchdog creates one if absent.
+# From: Issue #1683 | PR #1912
 
+# What: exits on error, unset variable or failed pipe.
+# Why: an openssl failure must not reach the Done output.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CA_KEY="$SCRIPT_DIR/ca.key"
 CA_CRT="$SCRIPT_DIR/ca.crt"
 
+# What: aborts if ca.crt and ca.key both exist.
+# Why: regeneration requires deleting both files first.
 if [ -f "$CA_CRT" ] && [ -f "$CA_KEY" ]; then
     echo "CA already exists. Delete ca.key and ca.crt first to regenerate."
     exit 1
@@ -24,6 +25,8 @@ openssl req -new -x509 -days 3650 \
     -subj "/CN=LanCache-NG CA/O=LanCache-NG/C=DE" \
     -out "$CA_CRT"
 
+# What: ca.key is mode 600, ca.crt mode 644.
+# Why: the key stays private; ca.crt goes to clients.
 chmod 600 "$CA_KEY"
 chmod 644 "$CA_CRT"
 
