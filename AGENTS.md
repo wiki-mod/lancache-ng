@@ -160,7 +160,7 @@
 * [AG-SEC-006] If sensitive data appears in a branch, normal work MUST stop and the sensitive data MUST be removed from the active branch before work continues.
 * [AG-SEC-007] LAN IP addresses MUST NOT be hardcoded in Dockerfiles or source files.
 ## AG-SETUP
-* [AG-SETUP-001] Production deployment MUST use separate `IP_STANDARD` and `IP_SSL` LAN addresses. `deploy/prod/.env`, `config/prod/dns-standard.env`, and `config/prod/dns-ssl.env` MUST remain consistent. First-time setup MUST configure the required second LAN address. A dedicated CA MAY be generated through the supported certificate-generation path before first start. The configured `LANCACHE_STATE_DIR` cache directory MUST exist before use. 
+* [AG-SETUP-001] Production deployment MUST use separate `IP_HTTP` and `IP_HTTPS` LAN addresses. First-time setup MUST configure the required second LAN address. A dedicated CA MAY be generated through the supported certificate-generation path before first start. The configured `LANCACHE_STATE_DIR` cache directory MUST exist before use. Rule-Ref: [AG-CODE-013] Per-service `.env` files, including `config/prod/*.env`, are LEGACY, MUST be deleted, and MUST NOT be reintroduced.
 ## AG-VAL
 * [AG-VAL-001] Repository warnings MUST be treated as errors except where an explicit rule defines a narrower exception. A check that emitted an applicable warning, failed setup, or used a broken fallback MUST NOT be reported as successful.
 * [AG-VAL-002] `command not found`, missing files, missing required environment variables, permission errors, malformed commands, empty required outputs, failed tool setup, and equivalent standard failures MUST be hard failures.
