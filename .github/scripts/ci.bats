@@ -4795,3 +4795,33 @@ CASES
     [ "$(git -C "${w}" rev-parse HEAD)" = "${src}" ] && [ "${next}" != "${src}" ] \
         || { echo "pinned: HEAD $(git -C "${w}" rev-parse HEAD) want ${src}, ref tip ${next}"; return 1; }
 }
+
+# What: channel and source_ref branches are never orphans
+# Why: release.channels owns master and current_dev
+# From: Issue #1683 | PR #1858
+@test "orphaned branches: channel ref and source_ref branches are long-lived" {
+    local refs srcs row old iso b
+    local -a live=()
+    local -x GH_TOKEN GITHUB_REPOSITORY
+    GH_TOKEN="$(_val name)" GITHUB_REPOSITORY="$(_val name)/$(_val name)" old="$(_val host)"
+    iso="$(date -u -d "@$(_val int 1 999999999)" +%Y-%m-%dT%H:%M:%SZ)" || return 1
+    refs="$(_ci_channel_field ref)" && srcs="$(_ci_channel_field source_ref)" || { echo "SOT: ${refs} ${srcs}"; return 1; }
+    [[ "${srcs}" == *" refs/heads/"?* ]] || { echo "SOT has no branch source_ref: ${srcs}"; return 1; }
+    while read -r _ row; do
+        if [[ "${row}" == refs/heads/?* ]]; then live+=("${row#refs/heads/}"); fi
+    done <<< "${refs}"$'\n'"${srcs}"
+    gh() {
+        case "$*" in
+            *'refs(refPrefix'*) jq -n --arg t "${iso}" --arg a "${old}" '{data: {repository: {refs: {nodes: [$ARGS.positional[]
+                | {name: ., target: {committedDate: $t, author: {name: $a}}, associatedPullRequests: {totalCount: 0}}],
+                pageInfo: {hasNextPage: false}}}}}' --args "${old}" "${live[@]}" ;;
+            *'issues(first'*) jq -n '{data: {repository: {issues: {nodes: [], pageInfo: {hasNextPage: false}}}}}' ;;
+            *) echo "gh stub: unexpected call: $*" >&2; return 1 ;;
+        esac
+    }
+    run _ci_check_orphaned_branches
+    _expect orphans 1 "[CI-ERROR-CHECK-0139];orphaned=1;branch=\"${old}\"" || return 1
+    for b in "${live[@]}"; do
+        [[ "${output}" != *"branch=\"${b}\""* ]] || { echo "long-lived ${b} reported: ${output}"; return 1; }
+    done
+}
