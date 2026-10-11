@@ -2578,15 +2578,15 @@ fn kea_socket_dir() -> Result<(), String> {
         .map_err(|e| format!("cannot prepare {KEA_SOCKET_DIR}: {e}"))
 }
 
-// What: the Kea snapshot dir, group-writable for the ui.
-// Why: the ui records a snapshot per write; it must exist.
+// What: the Kea snapshot dir, group-writable, others read.
+// Why: the ui writes snapshots here; setup.sh reads them.
 // From: Issue #614 | PR #1912
 fn kea_snapshot_dir(dir: &Path) -> Result<(), String> {
     let gid = config::need(&config::process_env, "LANCACHE_SHARED_SECRET_GID")?
         .parse::<u32>()
         .map_err(|_| "LANCACHE_SHARED_SECRET_GID is no group id".to_string())?;
     fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    own(dir, None, gid, 0o770)
+    own(dir, None, gid, 0o775)
 }
 
 // What: kea-dhcp4 on its checked config, else a snapshot.
