@@ -1927,10 +1927,10 @@ CASES
     done <<ROWS
 0|0|=
 1|2|[CI-ERROR-SCAN-0005] service="${svc}" reason="scan reported findings";${raw}
-3|2|[CI-ERROR-SCAN-0022] service="${svc}" rc=3;${raw}
+3|3|[CI-ERROR-SCAN-0023] service="${svc}" rc=3 reason="unexpected scan status;${raw}
 4|3|[CI-ERROR-SCAN-0021] service="${svc}" reason="trivy run failed without a report;${raw}
-2|2|[CI-ERROR-SCAN-0022] service="${svc}" rc=2;${raw}
-${odd}|2|[CI-ERROR-SCAN-0022] service="${svc}" rc=${odd};${raw}
+2|2|[CI-ERROR-SCAN-0022] service="${svc}" reason="scan setup failed;${raw}
+${odd}|3|[CI-ERROR-SCAN-0023] service="${svc}" rc=${odd};${raw}
 ROWS
 }
 

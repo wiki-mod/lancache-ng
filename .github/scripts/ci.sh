@@ -4121,8 +4121,9 @@ _ci_scan_outcome() {
     case "${status}" in
         0) return 0 ;;
         1) ci_error "[CI-ERROR-SCAN-0005]" "service=\"${service}\" reason=\"scan reported findings\"" "${raw}"; return 2 ;;
+        2) ci_error "[CI-ERROR-SCAN-0022]" "service=\"${service}\" reason=\"scan setup failed; not a finding\"" "${raw}"; return 2 ;;
         4) ci_error "[CI-ERROR-SCAN-0021]" "service=\"${service}\" reason=\"trivy run failed without a report; not a finding, escalate\"" "${raw}"; return 3 ;;
-        *) ci_error "[CI-ERROR-SCAN-0022]" "service=\"${service}\" rc=${status} reason=\"scan setup failed; not a finding\"" "${raw}"; return 2 ;;
+        *) ci_error "[CI-ERROR-SCAN-0023]" "service=\"${service}\" rc=${status} reason=\"unexpected scan status; not a finding, escalate\"" "${raw}"; return 3 ;;
     esac
 }
 
