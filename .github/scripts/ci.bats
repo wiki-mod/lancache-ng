@@ -982,7 +982,85 @@ CASES
     df="$(_ci_service_path "${svc}" Dockerfile "${t}")" || return 1
     printf 'COPY --chown=0:0 %s \\\n    /x\n' "${src}" >> "${df}" || return 1
     run _ci_check_dockerfile_context_edges "${t}"
-    _expect uncovered 1 "[CI-ERROR-CHECK-0170];${svc}: ;copies ${src}, outside" || return 1
+    _expect uncovered 1 "[CI-ERROR-CHECK-0172];${svc}: ;copies ${src}, outside" || return 1
+}
+
+# What: container prefix is the compose name in any case
+# Why: AG-INT-002: a changed guard needs a pass and a fail
+# From: Issue #1683 | PR #1912
+@test "naming consistency: container prefix is the compose project name" {
+    local root t="${BATS_TEST_TMPDIR}/repo" dep cfg p new case sedexpr want
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    run _ci_check_naming_consistency "${root}"
+    _expect real 0 "naming-consistency=clean" || return 1
+    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 1
+    cfg="$(_ci_compose_json "${root}/${dep}")" || return 1
+    p="$(jq -r '.services | to_entries[0] | .value.container_name[0:-(.key | length) - 1]' <<< "${cfg}")" || return 1
+    new="$(_val name)"
+    [ -n "${p}" ] || { echo "inputs: no container prefix in ${dep}"; return 1; }
+    while IFS='|' read -r case sedexpr want; do
+        rm -rf "${t}" && _checkout_copy "${root}" "${t}" || return 1
+        sed -i -E "${sedexpr}" "${t}/${dep}" || return 1
+        run _ci_check_naming_consistency "${t}"
+        if [ "${case}" = case-only ]; then
+            _expect "${case}" 0 "naming-consistency=clean" || return 1
+        else
+            _expect "${case}" 1 "[CI-ERROR-CHECK-0096];${want}" || return 1
+        fi
+    done <<ROWS
+case-only|s/container_name: ${p}-/container_name: ${p^^}-/|-
+all-renamed|s/container_name: ${p}-/container_name: ${new}-/|container prefix ${new} is not the project name
+one-renamed|0,/container_name: ${p}-/s//container_name: ${new}-/|container prefixes differ
+no-project|/^name:/d|is not the project name
+ROWS
+}
+
+# What: a state key counts only as a whole word
+# Why: AG-INT-002: a key_OLD line must not satisfy the key
+# From: Issue #1683 | PR #1912
+@test "prod state wiring: a renamed state key is missing, not matched" {
+    local root t="${BATS_TEST_TMPDIR}/repo" dep doc keys key file want
+    local -a all
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    run _ci_check_prod_state_wiring "${root}"
+    _expect real 0 "prod-state-wiring=clean" || return 1
+    dep="$(_ci_variable CI_COMPOSE_FILE)" && doc="$(_ci_variable CI_BACKUP_RESTORE_DOC)" || return 1
+    keys="$(bash -c 'set -euo pipefail; . "$1"; prod_state_keys' _ "${root}/setup.sh")" || return 1
+    mapfile -t all <<< "${keys}"
+    [ "${#all[@]}" -gt 0 ] && [ -n "${all[0]}" ] || { echo "inputs: no state key"; return 1; }
+    key="${all[$(( SRANDOM % ${#all[@]} ))]}"
+    while IFS='|' read -r file want; do
+        rm -rf "${t}" && _checkout_copy "${root}" "${t}" || return 1
+        sed -i -E "s/(^|[^A-Za-z0-9_])${key}([^A-Za-z0-9_]|$)/\\1${key}_OLD\\2/g" "${t}/${file}" || return 1
+        run _ci_check_prod_state_wiring "${t}"
+        _expect "${file}" 1 "[CI-ERROR-CHECK-0100];${want} ${key}" || return 1
+    done <<ROWS
+$(dirname "${dep}")/.env|does not document
+${doc}|does not mention
+ROWS
+}
+
+# What: proxy constant reads Rust const forms or fails
+# Why: AG-VAL-036: visibility and spacing are valid Rust
+# From: Issue #1683 | PR #1912
+@test "proxy constant: Rust const forms read, other values fail closed" {
+    local root t="${BATS_TEST_TMPDIR}/repo" src want case line rc exp
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    run _ci_proxy_constant NGINX_CERT_DIR "${root}"
+    [ "${status}" -eq 0 ] && [ -n "${output}" ] || { echo "real: rc ${status}: ${output}"; return 1; }
+    want="${output}"
+    while IFS='|' read -r case line rc exp; do
+        rm -rf "${t}" && _checkout_copy "${root}" "${t}" || return 1
+        src="$(_ci_service_path services src/main.rs "${t}")" || return 1
+        awk -v l="${line}" '/^const NGINX_CERT_DIR:/ { print l; next } { print }' "${src}" > "${src}.new" \
+            && mv "${src}.new" "${src}" || return 1
+        run _ci_proxy_constant NGINX_CERT_DIR "${t}"
+        [ "${exp}" != @WANT@ ] || exp="=${want}"
+        _expect "${case}" "${rc}" "${exp}" || return 1
+    done <<ROWS
+visibility|    pub(crate) const NGINX_CERT_DIR : &'static str = "ssl/certs"; // certs|0|@WANT@
+macro|const NGINX_CERT_DIR: &str = concat!("ssl", "/certs");|2|[CI-ERROR-CORE-0129]
+ROWS
 }
 
 # What: stubs let cargo load every member; undeclared stops

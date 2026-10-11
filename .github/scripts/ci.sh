@@ -11101,7 +11101,7 @@ _ci_check_naming_consistency() {
     local -a compose_files=("${root}/${dep}")
     [ "${inst}" = "${dep}" ] || compose_files+=("${root}/${inst}")
     local -a viol=()
-    local cf cfg project line
+    local cf cfg line msg
 
     for cf in "${compose_files[@]}"; do
         if [ ! -f "${cf}" ]; then
@@ -11109,19 +11109,20 @@ _ci_check_naming_consistency() {
             continue
         fi
         cfg="$(_ci_compose_json "${cf}")" || return 2
-        project="$(_ci_capture 0 jq -r '.name' <<<"${cfg}")" || return 2
-        [ "${project}" = lancache-ng ] || viol+=("${cf}: compose project name '${project}' is not lancache-ng")
-        # What: one prefix; each name ends in -<service>.
-        # Why: a second spelling splits logs and dashboards.
-        line="$(_ci_capture 0 jq -r '[.services | to_entries[]
-            | {s: .key, c: (.value.container_name // "")}] as $all
+        # What: prefix is the project name in any case.
+        # Why: compose name: owns the name; one spelling.
+        # From: Issue #1683 | PR #1912
+        line="$(_ci_capture 0 jq -r '.name as $p
+            | [.services | to_entries[] | {s: .key, c: (.value.container_name // "")}] as $all
             | ($all | map(select(.c == "")) | map("service \(.s) has no container_name")[]),
               ($all | map(select(.c != "" and (.s as $s | .c | endswith("-" + $s) | not)))
                 | map("container_name \(.c) does not end in -\(.s)")[]),
               ($all | map(select(.c != "") | .c[0:(.c | length) - (.s | length) - 1]) | unique
-                | select(length > 1) | "container prefixes differ: \(join(", "))")' <<<"${cfg}")" || return 2
-        while IFS= read -r project; do
-            [ -n "${project}" ] && viol+=("${cf}: ${project}")
+                | (select(length > 1) | "container prefixes differ: \(join(", "))"),
+                  (.[] | select(ascii_downcase != ($p | ascii_downcase))
+                    | "container prefix \(.) is not the project name \($p)"))' <<<"${cfg}")" || return 2
+        while IFS= read -r msg; do
+            [ -z "${msg}" ] || viol+=("${cf}: ${msg}")
         done <<<"${line}"
     done
 
@@ -11349,7 +11350,7 @@ _ci_check_prod_state_wiring() {
     local -a viol=()
     local key f keys su
     for f in "${compose}" "${env_file}" "${doc}"; do
-        [ -f "${f}" ] || { ci_error "[CI-ERROR-CHECK-0043]" "path=\"${f}\" reason=\"required prod-state-wiring input missing\"" "missing prod-state-wiring input: ${f}"; return 2; }
+        [ -f "${f}" ] || { ci_log "[CI-ERROR-CHECK-0043]" "path=\"${f}\" reason=\"required prod-state-wiring input missing\""; return 2; }
     done
     # What: state keys come from setup.sh prod_state_keys.
     # Why: one key list owner; a fixed copy goes stale.
@@ -11357,13 +11358,16 @@ _ci_check_prod_state_wiring() {
     su="$(_ci_installer "${repo_root}")" || return 2
     keys="$(_ci_capture 0 bash -c 'set -euo pipefail; . "$1"; prod_state_keys' _ "${su}")" || return 2
     if [ -z "${keys}" ]; then
-        ci_error "[CI-ERROR-CHECK-0043]" "path=\"${su}\" reason=\"prod_state_keys returned no state key\"" "no state key from ${su}"
+        ci_log "[CI-ERROR-CHECK-0171]" "path=\"${su}\" reason=\"prod_state_keys returned no state key\""
         return 2
     fi
+    # What: a key counts only as a whole word, not a prefix.
+    # Why: PDNS_SSL_DIR_OLD must not satisfy PDNS_SSL_DIR.
+    # From: Issue #1683 | PR #1912
     while IFS= read -r key; do
-        grep -Fq "${key}" "${env_file}" \
+        grep -Fqw -- "${key}" "${env_file}" \
             || viol+=("$(dirname "${dep}")/.env does not document ${key} for manual upgrades")
-        grep -Fq "${key}" "${doc}" \
+        grep -Fqw -- "${key}" "${doc}" \
             || viol+=("${doc_rel} does not mention ${key}")
     done <<<"${keys}"
     if [ "${#viol[@]}" -gt 0 ]; then
@@ -11475,7 +11479,10 @@ _ci_file_value() {
 _ci_proxy_constant() {
     local name="$1" root="${2-${CI_REPO_ROOT:-.}}" src df raw rel dir re='^("([^"$]+)"|([0-9]+))$'
     src="$(_ci_service_path services src/main.rs "${root}")" || return 2
-    raw="$(_ci_file_value "${src}" "s/^const ${name}: (&str|u16) = (\"[^\"]+\"|[0-9]+);\$/\\2/p")" \
+    # What: Rust const item; other value forms fail closed.
+    # Why: visibility and spacing are valid Rust grammar too.
+    # From: Issue #1683 | PR #1912
+    raw="$(_ci_file_value "${src}" "s/^[[:space:]]*(pub(\\([a-z]+\\))?[[:space:]]+)?const[[:space:]]+${name}[[:space:]]*:[[:space:]]*(&('static[[:space:]]+)?str|u16)[[:space:]]*=[[:space:]]*(\"[^\"\\\\]+\"|[0-9]+)[[:space:]]*;([[:space:]]*\\/\\/.*)?\$/\\5/p")" \
         || [ "$?" -eq 1 ] || return 2
     if [[ ! "${raw}" =~ ${re} ]]; then
         ci_error "[CI-ERROR-CORE-0129]" "path=\"${src}\" name=\"${name}\" reason=\"need exactly one literal const\"" "${raw}"
@@ -11488,7 +11495,7 @@ _ci_proxy_constant() {
     rel="${BASH_REMATCH[2]}"
     df="$(_ci_service_path proxy Dockerfile "${root}")" || return 2
     if ! dir="$(_ci_file_value "${df}" 's/^ENV NGINX_DIR=([^[:space:]]+)$/\1/p')"; then
-        ci_error "[CI-ERROR-CORE-0129]" "path=\"${df}\" name=\"NGINX_DIR\" reason=\"need exactly one ENV line\"" "${dir}"
+        ci_error "[CI-ERROR-CORE-0144]" "path=\"${df}\" name=\"NGINX_DIR\" reason=\"need exactly one ENV line\"" "${dir}"
         return 2
     fi
     printf '%s/%s\n' "${dir%/}" "${rel}"
@@ -12413,7 +12420,7 @@ _ci_check_dockerfile_context_edges() {
         done <<< "${srcs}"
     done
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0170]" "targets=${n} reason=\"a COPY source is not in dependency_graph\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0172]" "targets=${n} reason=\"a COPY source is not in dependency_graph\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'dockerfile-context-edges=clean targets=%s\n' "${n}"
