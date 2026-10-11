@@ -273,11 +273,20 @@ const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 // Why: healthchecks run in the binary; no curl, no shell.
 // From: Issue #1683 | PR #1912
 pub async fn probe_health(url: &str) -> Result<(), String> {
-    // What: the certificate is not checked here.
-    // Why: the URL is our loopback listener (self-signed).
+    // What: an https URL counts when its listener accepts.
+    // Why: loopback cert is self-signed; no check is off.
+    if let Some(rest) = url.strip_prefix("https://") {
+        let addr = rest.split('/').next().unwrap_or(rest);
+        let sock = std::net::ToSocketAddrs::to_socket_addrs(addr)
+            .map_err(|e| format!("{url}: {e}"))?
+            .next()
+            .ok_or_else(|| format!("{url}: no address"))?;
+        return std::net::TcpStream::connect_timeout(&sock, HEALTH_PROBE_TIMEOUT)
+            .map(|_| ())
+            .map_err(|e| format!("{url}: {e}"));
+    }
     let client = reqwest::Client::builder()
         .timeout(HEALTH_PROBE_TIMEOUT)
-        .danger_accept_invalid_certs(true)
         .build()
         .map_err(|e| format!("health client: {e}"))?;
     let status = client
@@ -1762,5 +1771,25 @@ mod tests {
         assert!(failed.is_err_and(|e| e.contains("503")));
         let closed = probe_health(&format!("{base}/healthz")).await;
         assert!(closed.is_err());
+    }
+
+    // What: https passes on a listener, fails on none.
+    // Why: only the port is probed; no TLS check is off.
+    // From: Issue #1683 | PR #1912
+    #[tokio::test]
+    async fn probe_health_https_needs_a_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free local port");
+        let addr = listener.local_addr().expect("local address");
+        assert!(
+            probe_health(&format!("https://{addr}/healthz"))
+                .await
+                .is_ok()
+        );
+        drop(listener);
+        assert!(
+            probe_health(&format!("https://{addr}/healthz"))
+                .await
+                .is_err()
+        );
     }
 }
