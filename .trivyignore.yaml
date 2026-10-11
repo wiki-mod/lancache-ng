@@ -1,16 +1,14 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# Trivy security scanner ignore list for accepted vulnerabilities.
-# Per-entry `statement:` convention (AG-CODE-012): What: (one line, what is
-# suppressed and for which artifact) / Why: (1-3 lines, sober
-# non-exploitability or accepted-risk reasoning) / From: (Issue/PR
-# reference, mandatory).
-# `status: not_affected` marks vulnerable code confirmed absent or
-# unreachable; an omitted `status` marks an accepted, tracked risk.
-# Trivy accepts entries without an exception expiry date; this file uses no
-# expiry field.
+
+# What: Trivy ignore list; one entry per accepted finding.
+# Why: each statement is What/Why/From; no expiry field.
+# From: Issue #1683 | PR #1912
+
+# What: `status: not_affected` marks code confirmed absent.
+# Why: an omitted `status` marks an accepted, tracked risk.
+# From: Issue #1683 | PR #1912
 vulnerabilities:
   - id: CVE-2026-14456
     statement: >-
@@ -1208,9 +1206,6 @@ vulnerabilities:
 
       From: Issue #1913 | PR #1912
 
-  # CVE-2026-32316/CVE-2026-40164 (jq, utilities image) removed here per
-  # their own accepting entries' explicit self-description ("remove once
-  # PR #1783 lands and its rebuilds propagate", Issue #1802/#1803,
-  # commit 6e3db411): PR #1783 has now removed services/utilities/Dockerfile
-  # entirely, so there is no more `utilities` image for these two interim,
-  # event-based exceptions to apply to.
+  # What: jq CVE-2026-32316 and -40164 entries removed.
+  # Why: the utilities image they covered is deleted.
+  # From: Issue #1802 | PR #1783

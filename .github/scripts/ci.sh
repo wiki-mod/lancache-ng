@@ -1382,8 +1382,7 @@ _ci_impact_classify() {
     # What: only absent base SOT fields make the target new.
     # Why: absent field is fact; other failures are UNKNOWN.
     # From: Issue #1683 | PR #1912
-    if [ "${rc}" -ne 0 ] && grep -q '^\[CI-ERROR-CORE-0009\]' "${errf}" \
-        && ! grep '^\[CI-' "${errf}" | grep -qv '^\[CI-ERROR-CORE-0009\]'; then
+    if [ "${rc}" -ne 0 ] && awk '/^\[CI-/ { if (index($0, "reason=\"required SOT field missing\"")) hit = 1; else other = 1 } END { exit !(hit && !other) }' "${errf}"; then
         rm -f "${errf}"
         ci_log "[CI-INFO-IMPACT-0013]" "service=\"${t}\" platform=\"${p}\" base=\"${base}\" reason=\"base SOT lacks a required field; target new at base; BUILD\""
         printf 'BUILD\n'; return 0
