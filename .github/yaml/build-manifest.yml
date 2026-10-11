@@ -162,7 +162,7 @@ services:
     # From: Issue #1613
     smoke:
       - kea-dhcp4 -v
-      - '@ENTRYPOINT@ probe'
+      - lancache-watchdog probe
       - dnsmasq --version
   ui:
     context: services/ui
