@@ -43,7 +43,7 @@ ARG BUILD_TOOLS_IMAGE
 # Why: the builder has no SOT; rust-build reads the env.
 # From: Issue #1683 | PR #1912
 ARG CI_TOOLCHAIN_COMPILERS
-ARG CI_CACHE_KEY_PREFIX
+ARG CI_CACHE_PREFIX
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./

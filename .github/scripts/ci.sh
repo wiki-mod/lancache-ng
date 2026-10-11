@@ -1581,7 +1581,7 @@ _ci_classify_failure() {
         *"http 401"*|*"unauthorized"*|*"denied: requested access"*) printf 'permanent\n'; return 0 ;;
         *"http 400"*|*"http 422"*|*"invalid reference format"*) printf 'permanent\n'; return 0 ;;
         *"pull access denied"*) printf 'permanent\n'; return 0 ;;
-        *"error: could not compile"*|*"dockerfile parse error"*|*"failed to solve"*"parse"*) printf 'permanent\n'; return 0 ;;
+        *"error: could not compile"*|*"dockerfile parse error"*|*"failed to solve"*"parse"*|*"lint violation found"*) printf 'permanent\n'; return 0 ;;
         *"couldn't find remote ref"*|*"fatal: repository"*"not found"*) printf 'permanent\n'; return 0 ;;
     esac
     # What: a local image that does not exist is permanent.
@@ -2389,7 +2389,7 @@ _CI_SCCACHE_MODE=""
 # From: Issue #1683 | PR #1912
 _ci_sccache_env() {
     local service="$1" wrapper="${2:-sccache}" url="${SCCACHE_REDIS_URL:-}" sf policy mode chain prefix
-    prefix="$(_ci_variable CI_CACHE_KEY_PREFIX)" || return 2
+    prefix="$(_ci_variable CI_CACHE_PREFIX)" || return 2
     prefix="${prefix}-${service}"
     # What: the runner policy file if mounted, else compute.
     # Why: a builder gets the file; rust-build requires it.

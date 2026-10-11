@@ -770,6 +770,7 @@ curl-503||curl: (22) The requested URL returned error: 503|transient
 curl-403||curl: (22) The requested URL returned error: 403|transient
 auth-401||HTTP 401 unauthorized|permanent
 compile||error: could not compile @CRATE@|permanent
+lint-buildx|buildx|ERROR: failed to build: failed to solve: lint violation found for rules: @SYM@|permanent
 pull-denied||pull access denied for @REF@|permanent
 curl-404||curl: (22) The requested URL returned error: 404|permanent
 apk-missing||ERROR: unable to select packages: @PKG@ (no such package)|permanent
