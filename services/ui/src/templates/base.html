@@ -1,16 +1,8 @@
 
 {# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
-{#
-
-   Root Tera layout every other template under this directory extends. Defines
-   the dock sidebar navigation (Dashboard/DHCP/NTP/DNS/Secondary/Statistiken/
-   Logs/Einrichtung, active-page highlighting via the `active_page` context
-   var), the beambar top status bar (live per-service health, polled from
-   GET /api/watchdog-status -- see the shared LancacheWatchdog script below),
-   runtime image metadata from Tera globals, links the compiled Tailwind
-   output (/static/admin.css), and declares the `title`, `content`, and
-   `scripts` blocks that child templates override. #}
+{# What: root layout: dock nav, beambar, admin.css #}
+{# Why: child templates extend it and override the blocks #}
 <!DOCTYPE html>
 <html lang="de" class="h-full">
 <head>
@@ -20,8 +12,8 @@
   <link rel="icon" type="image/x-icon" href="/favicon.ico">
   <link rel="stylesheet" href="/static/admin.css">
   <style>
-    /* What: palette/theme tokens for the visual redesign
-       Why: dark-first per mockup, explicit override + toggle
+    /* What: CSS tokens; dark values on :root
+       Why: dark is the default; light needs an override
        From: Issue #1437 */
     :root {
       --color-bg: #0b1220;
@@ -37,8 +29,8 @@
       --font-display: Georgia, Cambria, "Times New Roman", serif;
       --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
     }
-    /* What: light palette, only without an explicit override
-       Why: manual toggle below must always win over OS setting
+    /* What: light tokens if OS prefers light, no override
+       Why: the manual toggle must win over the OS setting
        From: Issue #1437 */
     @media (prefers-color-scheme: light) {
       :root:not([data-theme="dark"]) {
@@ -54,8 +46,8 @@
         --color-accent-coral-soft: rgba(200, 70, 47, 0.12);
       }
     }
-    /* What: explicit light override, wins over OS preference
-       Why: mockup wants an explicit toggle, not just OS setting
+    /* What: light tokens when data-theme is "light"
+       Why: lets the toggle force light over the OS setting
        From: Issue #1437 */
     :root[data-theme="light"] {
       --color-bg: #f6f4ec;
@@ -73,8 +65,8 @@
     main h1 { font-family: var(--font-display); }
     .stat-num { font-family: var(--font-display); }
 
-    /* What: keep light mode readable on pages not yet restyled
-       Why: admin.css is a static Tailwind build, colors are fixed
+    /* What: slate classes mapped to theme tokens in light
+       Why: admin.css colors are fixed, not theme variables
        From: Issue #1437 */
     :root[data-theme="light"] .text-white,
     :root[data-theme="light"] .text-slate-100,
@@ -139,7 +131,7 @@
     ::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
 
     /* What: slim top bar showing live per-service health
-       Why: was dashboard-only, now needed on every page
+       Why: rendered by base.html, so on every page
        From: Issue #1437 */
     .beambar {
       position: relative; overflow: hidden;
@@ -261,16 +253,16 @@
 
   <!-- Main -->
   <div class="flex-1 flex flex-col overflow-hidden">
-    <!-- What: per-service health bar + theme toggle
-         Why: dashboard-only health, no toggle, before this
+    <!-- What: health bar and theme toggle in the header
+         Why: base.html renders it on every page
          From: Issue #1437 -->
     <header class="beambar" id="beambar">
       <div class="beambar-services" id="beambar-services">
         <span style="color: var(--color-text-muted);">Service health: laden…</span>
       </div>
       <div class="flex items-center gap-2">
-        <!-- What: real ui restart control, from setup.html
-             Why: was buried on /setup, now reachable everywhere
+        <!-- What: UI restart form, asks for confirm() first
+             Why: the process exits; compose relaunches it
              From: Issue #1437 -->
         <form method="post" action="/setup/restart-ui"
               onsubmit="return confirm('Admin-UI wirklich neu starten? Die Seite ist danach kurz nicht erreichbar.')">
@@ -286,13 +278,13 @@
   </div>
 
   <script>
-    // What: shared token for every fetch()-driven POST below
-    // Why: base.html has no <form>, so no hidden csrf_token field
+    // What: CSRF token for the fetch()-based POSTs below
+    // Why: sent as X-CSRF-Token header, not a form field
     // From: Issue #1437
     const CSRF_TOKEN = "{{ csrf_token }}";
 
-    // What: persist/apply the explicit light/dark theme override
-    // Why: mockup wants prefers-color-scheme + manual override
+    // What: persists and applies the light/dark override
+    // Why: the OS setting applies while no override is set
     // From: Issue #1437
     (function () {
       const STORAGE_KEY = 'lancache-ui-theme';
@@ -309,7 +301,7 @@
         stored = localStorage.getItem(STORAGE_KEY);
       } catch (err) {
         // What: fall back silently when storage read fails
-        // Why: private browsing can block localStorage access
+        // Why: private browsing may block localStorage
         // From: Issue #1437
       }
       apply(stored);
@@ -361,8 +353,8 @@
       return { colorClass: colorClass, onUpdate: onUpdate, refresh: refresh };
     })();
 
-    // What: dock start/stop POST -- watchdog is the actor
-    // Why: shared by every controllable service's button below
+    // What: POSTs desired state; the watchdog applies it
+    // Why: shared by all dock start/stop buttons
     // From: Issue #1437
     async function setDockServiceState(service, state, button) {
       button.disabled = true;
@@ -376,22 +368,22 @@
           window.LancacheWatchdog.refresh();
         }
       } catch (err) {
-        // What: leave the button re-enabled below either way
-        // Why: a network hiccup must not strand a disabled button
+        // What: swallows fetch errors, re-enables button
+        // Why: a network hiccup must not strand the button
         // From: Issue #1437
       }
       button.disabled = false;
     }
 
-    // What: compose service name to its desired-state key
-    // Why: only the dhcp container has a start/stop route
-    // From: Issue #1437 | PR #1912
+    // What: dock start/stop map; only dhcp is listed
+    // Why: keys are the status.json (compose) service names
+    // From: Issue #1683 | PR #1912
     const DOCK_CONTROLLABLE_SERVICES = {
       'dhcp': 'dhcp',
     };
 
     // What: render beambar service entries via DOM nodes
-    // Why: avoids building HTML from server-supplied strings
+    // Why: no HTML is built from server-supplied strings
     // From: Issue #1437
     (function () {
       const container = document.getElementById('beambar-services');
@@ -404,8 +396,8 @@
         wrap.appendChild(document.createTextNode(svc.name));
         const dockService = DOCK_CONTROLLABLE_SERVICES[svc.name];
         if (dockService) {
-          // What: red/gray reads as "not running" for the button label
-          // Why: status.json has no separate running/stopped field
+          // What: Start for red or gray, otherwise Stopp
+          // Why: status.json has no running/stopped field
           // From: Issue #1437
           const running = svc.status !== 'red' && svc.status !== 'gray';
           const button = document.createElement('button');
