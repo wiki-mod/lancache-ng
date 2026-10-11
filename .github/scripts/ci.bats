@@ -4265,7 +4265,7 @@ CASES
     p="$(_pm_path)" || return 1
     _tool_stub "${p}" docker <<< 'printf "docker %s\n" "$*" >> "${CALLS:?}"; printf "%s\n" "${DOUT:-}"; exit "${DRC:-0}"' || return 1
     ln -s "$(type -P sed)" "${p}/sed" && ln -s "$(type -P jq)" "${p}/jq" || return 1
-    want="docker compose --env-file ${env} -f ${root}/deploy/prod/docker-compose.yml --profile dhcp-kea run --rm --no-deps dhcp probe"
+    want="docker compose --env-file ${env} -f ${root}/deploy/prod/docker-compose.yml run --rm --no-deps dhcp probe"
     found="{\"status\":\"conflict_found\",\"conflict\":{\"status\":\"found\",\"output\":\"${id}\",\"details\":[]}}"
     none='{"status":"client_failed","conflict":{"status":"not_found"},"client":{"status":"failed","output":"x"}}'
     # What: runs one row: mode, docker reply, answer
