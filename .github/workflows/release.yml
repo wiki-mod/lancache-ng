@@ -150,9 +150,12 @@ jobs:
     runs-on: ${{ needs.resolve-build-tools.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.resolve-build-tools.outputs.timeouts)['cut-release-tag'] }}
     container: *bt_container
-    env:
-      PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
     steps:
       - *bootstrap
+      # What: the PAT reaches the tag push step only
+      # Why: least privilege; the bootstrap needs no PAT
+      # From: Issue #1683 | PR #1858
       - name: Cut and push the next patch tag
+        env:
+          PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: bash .github/scripts/ci.sh cut-release-tag

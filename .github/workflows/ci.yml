@@ -388,10 +388,11 @@ jobs:
       packages: read
     env:
       ISSUE_NUMBER: ${{ github.event.issue.number }}
-      GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
     steps:
       - *bootstrap
       - name: Add the issue to the project board
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: bash .github/scripts/ci.sh board-add
 
   # What: run diff-scoped and repo-wide guards
@@ -407,7 +408,11 @@ jobs:
     permissions:
       contents: read
       packages: read
+      issues: read
       pull-requests: write
+    # What: the job token is GITHUB_TOKEN, never the PAT
+    # Why: least privilege: the PAT reaches two steps only
+    # From: Issue #1683 | PR #1858
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       PR_TITLE: ${{ github.event.pull_request.title }}
@@ -417,23 +422,31 @@ jobs:
       PR_MILESTONE_TITLE: ${{ github.event.pull_request.milestone.title }}
       PR_DRAFT: ${{ github.event.pull_request.draft }}
       PR_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
-      GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - *bootstrap
       - *collect_changed
-      # What: add path labels; GITHUB_TOKEN starts no rerun.
+      # What: add path labels with the job's GITHUB_TOKEN
       # Why: a PAT-made label event would restart this run.
       # From: Issue #1683 | PR #1858
       - name: Label the PR by changed paths
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/scripts/ci.sh pr-labels
-      # What: add the PR to the SOT project board (job PAT).
+      # What: add the PR to the project board (step PAT).
       # Why: GITHUB_TOKEN cannot write org Projects v2.
       # From: Issue #1683 | PR #1858
       - name: Add the PR to the project board
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: bash .github/scripts/ci.sh board-add
+      # What: PR labels, milestone and board placement
+      # Why: only the board read needs the PAT
+      # From: Issue #1683 | PR #1858
+      - name: Check the PR tracking metadata
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+        run: bash .github/scripts/ci.sh check pr-tracking-metadata
       - name: Run the PR/push check set
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}

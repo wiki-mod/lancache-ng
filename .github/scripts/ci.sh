@@ -10179,6 +10179,13 @@ _ci_check_workflow_line_limit() {
 # From: Issue #1683
 _ci_check_pr_tracking_metadata() {
     local pr_number="${PR_NUMBER:-}" repo project_number project_owner
+    # What: no pull request means no PR metadata to check
+    # Why: its own PAT step runs on every checks event
+    # From: Issue #1683 | PR #1858
+    if [ "${GITHUB_EVENT_NAME:-}" != pull_request ]; then
+        printf 'pr-tracking-metadata=NOT-RUN reason="not a pull request"\n'
+        return 0
+    fi
     if [ -z "${pr_number}" ]; then
         ci_log "[CI-ERROR-CHECK-0017]" "reason=\"PR_NUMBER is required\""
         return 2
@@ -13081,7 +13088,7 @@ ci_cmd_check_all() {
     # Why: no PR context on push.
     # From: Issue #1683
     if [ -n "${PR_NUMBER:-}" ]; then
-        for sub in pr-title pr-template pr-tracking-metadata; do
+        for sub in pr-title pr-template; do
             ci_cmd_check "${sub}" || rc=1
         done
     fi
