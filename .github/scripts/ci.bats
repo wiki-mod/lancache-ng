@@ -662,6 +662,32 @@ CASES
     [ "${status}" -eq 0 ] && [ -n "${output}" ] || { echo "loaded real SOT no longer answers: rc ${status}: ${output}"; return 1; }
 }
 
+# What: absent base field is BUILD, other base failures not
+# Why: a missing field is fact; UNKNOWN stays never BUILD
+# From: Issue #1683 | PR #1912
+@test "impact classifies a target new at base as BUILD and any other base failure as UNKNOWN" {
+    local miss other
+    miss='ci_log "[CI-ERROR-CORE-0009]" "target=\"x\" field=\"crates\" reason=\"required SOT field missing\""'
+    other='ci_log "[CI-ERROR-CORE-0106]" "reason=\"command failed or wrote stderr\""'
+    eval "_ci_identity_for() { ${miss}; return 2; }"
+    run _ci_impact_classify x linux/amd64 head base "${BATS_TEST_TMPDIR}/m"
+    _expect field-absent 0 "[CI-ERROR-CORE-0009];[CI-INFO-IMPACT-0013];BUILD" || return 1
+    [[ "${output}" != *"UNKNOWN"* ]] || { echo "absent field: ${output}"; return 1; }
+    eval "_ci_identity_for() { ${other}; return 2; }"
+    run _ci_impact_classify x linux/amd64 head base "${BATS_TEST_TMPDIR}/m"
+    _expect other-failure 0 "[CI-ERROR-CORE-0106];[CI-INFO-IMPACT-0010];UNKNOWN" || return 1
+    [[ "${output}" != *"[CI-INFO-IMPACT-0013]"* ]] || { echo "other failure took the absent path: ${output}"; return 1; }
+    eval "_ci_identity_for() { ${miss}; ${other}; return 2; }"
+    run _ci_impact_classify x linux/amd64 head base "${BATS_TEST_TMPDIR}/m"
+    _expect mixed 0 "[CI-INFO-IMPACT-0010];UNKNOWN" || return 1
+    _ci_identity_for() { printf 'head\n'; }
+    run _ci_impact_classify x linux/amd64 head base "${BATS_TEST_TMPDIR}/m"
+    _expect same 0 "=NOOP" || return 1
+    _ci_identity_for() { printf 'other\n'; }
+    run _ci_impact_classify x linux/amd64 head base "${BATS_TEST_TMPDIR}/m"
+    _expect changed 0 "=BUILD" || return 1
+}
+
 # =========================================================
 # SERVICE DEPENDENCIES
 # =========================================================
