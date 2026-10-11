@@ -122,7 +122,7 @@ COPY --from=services-builder /build/lancache-cachehamster-out /usr/local/bin/lan
 ARG LANCACHE_PROCESSES
 ENV LANCACHE_PROCESSES=${LANCACHE_PROCESSES}
 
-# What: the supervisor is the entrypoint; no shell script.
-# Why: entrypoint.sh is legacy; Rust starts every process.
-# From: Issue #1683
-ENTRYPOINT ["/usr/local/bin/lancache-watchdog", "supervise"]
+# What: the supervisor binary; no argument means supervise.
+# Why: compose and setup.sh add healthcheck or probe.
+# From: Issue #1683 | PR #1912
+ENTRYPOINT ["/usr/local/bin/lancache-watchdog"]

@@ -6518,7 +6518,7 @@ _ci_ssl_dispatch_violations() {
 # From: Issue #1683
 _ci_validate_proxy_stream_map() {
     local project="$1" cid map bad file port
-    file="$(_ci_proxy_constant STREAM_TARGET_FILE)" || return 2
+    file="$(_ci_proxy_constant NGINX_STREAM_TARGETS)" || return 2
     port="$(_ci_service_port https)" || return 2
     cid="$(_ci_validate_cid "${project}" proxy)" || return 2
     if [ -z "${cid}" ]; then
@@ -6541,7 +6541,7 @@ _ci_validate_proxy_stream_map() {
 # From: Issue #1683
 _ci_validate_ssl_mitm() {
     local project="$1" ip cid domain ca_subj issuer tmp out cert tls_err ca port
-    ca="$(_ci_proxy_constant CA_DIR)" || return 2
+    ca="$(_ci_proxy_constant NGINX_CA_DIR)" || return 2
     port="$(_ci_service_port https)" || return 2
     ip="$(_ci_validate_container_ip "${project}" proxy)"
     cid="$(_ci_validate_cid "${project}" proxy)" || return 2
@@ -6589,8 +6589,8 @@ _ci_validate_ssl_mitm() {
 # From: Issue #1683
 _ci_validate_ssl_dispatch_map() {
     local project="$1" cid map bad file relay
-    file="$(_ci_proxy_constant SSL_DISPATCH_MAP_FILE)" || return 2
-    relay="$(_ci_proxy_constant SSL_DISPATCH_PASSTHROUGH_RELAY_PORT)" || return 2
+    file="$(_ci_proxy_constant NGINX_SSL_DISPATCH)" || return 2
+    relay="$(_ci_proxy_constant NGINX_PASSTHROUGH_RELAY)" || return 2
     cid="$(_ci_validate_cid "${project}" proxy)" || return 2
     if [ -z "${cid}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0027]" "reason=\"no proxy container for ssl-dispatch-map check\""
@@ -6711,18 +6711,18 @@ _ci_validate_ui_post() {
     fi
 }
 
-# What: the first LAN zone the dns entrypoint creates
-# Why: probes write where dns serves; dns owns the zones
-# From: Issue #1683 | PR #1858
+# What: the LAN zone (dotted) the dns supervisor creates
+# Why: probes write where dns serves; config.rs owns it
+# From: Issue #1683 | PR #1912
 _ci_validate_lan_zone() {
-    local ep zones
-    ep="$(_ci_service_path dns entrypoint.sh)" || return 2
-    zones="$(_ci_shell_array "${ep}" LAN_ZONES)" || return 2
-    if [ -z "${zones}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0106]" "path=\"${ep}\" reason=\"no LAN_ZONES entry in the dns entrypoint\""
+    local src zone
+    src="$(ci_context_path rust-common)" || return 2
+    src="${CI_REPO_ROOT:-.}/${src}/config.rs"
+    if ! zone="$(_ci_file_value "${src}" 's/^pub const LAN_ZONE: &str = "([^"]+)";$/\1/p')"; then
+        ci_log "[CI-ERROR-VALIDATE-0106]" "path=\"${src}\" reason=\"need exactly one LAN_ZONE const\""
         return 2
     fi
-    printf '%s\n' "${zones%%$'\n'*}"
+    printf '%s.\n' "${zone%.}"
 }
 
 # What: host <n> of the SOT probe net (RFC 5737 TEST-NET)
@@ -11368,30 +11368,29 @@ _ci_file_value() {
     [[ -n "${out}" && "${out}" != *$'\n'* ]]
 }
 
-# What: elements of the one NAME=( ... ) array in a file
-# Why: product scripts own their lists; CI reads them
-# From: Issue #1683 | PR #1858
-_ci_shell_array() {
-    local file="$1" name="$2"
-    _ci_capture 0 awk -v n="${name}" '
-        $0 == n "=(" { on = 1; c++; next }
-        on && $0 == ")" { on = 0; next }
-        on { gsub(/^[[:space:]]+|[[:space:]]+$/, ""); if ($0 != "") print }
-        END { if (c != 1) exit 3 }' "${file}"
-}
-
-# What: literal NAME= value from the proxy entrypoint
-# Why: the entrypoint owns proxy paths and relay ports
-# From: Issue #1683 | PR #1858
+# What: a proxy path or port the supervisor renders
+# Why: main.rs owns them; the proxy image owns NGINX_DIR
+# From: Issue #1683 | PR #1912
 _ci_proxy_constant() {
-    local name="$1" ep="${2:-}" raw re='^"?([^"$[:space:]]+)"?$'
-    [ -n "${ep}" ] || ep="$(_ci_service_path proxy entrypoint.sh)" || return 2
-    raw="$(_ci_file_value "${ep}" "s/^${name}=//p")" || [ "$?" -eq 1 ] || return 2
+    local name="$1" root="${2-${CI_REPO_ROOT:-.}}" src df raw rel dir re='^("([^"$]+)"|([0-9]+))$'
+    src="$(_ci_service_path services src/main.rs "${root}")" || return 2
+    raw="$(_ci_file_value "${src}" "s/^const ${name}: (&str|u16) = (\"[^\"]+\"|[0-9]+);\$/\\2/p")" \
+        || [ "$?" -eq 1 ] || return 2
     if [[ ! "${raw}" =~ ${re} ]]; then
-        ci_error "[CI-ERROR-CORE-0129]" "path=\"${ep}\" name=\"${name}\" reason=\"need exactly one literal assignment\"" "${raw}"
+        ci_error "[CI-ERROR-CORE-0129]" "path=\"${src}\" name=\"${name}\" reason=\"need exactly one literal const\"" "${raw}"
         return 2
     fi
-    printf '%s\n' "${BASH_REMATCH[1]}"
+    if [ -n "${BASH_REMATCH[3]}" ]; then
+        printf '%s\n' "${BASH_REMATCH[3]}"
+        return 0
+    fi
+    rel="${BASH_REMATCH[2]}"
+    df="$(_ci_service_path proxy Dockerfile "${root}")" || return 2
+    if ! dir="$(_ci_file_value "${df}" 's/^ENV NGINX_DIR=([^[:space:]]+)$/\1/p')"; then
+        ci_error "[CI-ERROR-CORE-0129]" "path=\"${df}\" name=\"NGINX_DIR\" reason=\"need exactly one ENV line\"" "${dir}"
+        return 2
+    fi
+    printf '%s/%s\n' "${dir%/}" "${rel}"
 }
 
 # What: TCP port of a service name from the services db
@@ -11685,18 +11684,14 @@ _ci_check_proxy_nginx_policy() {
     printf 'proxy-nginx-policy=clean healthz_blocks=%s\n' "${blocks}"
 }
 
-# What: proxy CERT_DIR sits on a named volume.
+# What: proxy NGINX_CERT_DIR sits on a named volume.
 # Why: an anonymous volume loses leaf certs on recreate.
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_cert_volume() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" ep dir dep inst targets cf cfg out line
+    local repo_root="${1:-${CI_REPO_ROOT}}" dir dep inst targets cf cfg out line
     local -a viol=()
     local -A seen=()
-    ep="$(_ci_service_path proxy entrypoint.sh "${repo_root}")" || return 2
-    dir="$(_ci_proxy_constant CERT_DIR "${ep}")" || {
-        ci_log "[CI-ERROR-CHECK-0150]" "path=\"${ep}\" reason=\"need exactly one literal CERT_DIR= line\""
-        return 2
-    }
+    dir="$(_ci_proxy_constant NGINX_CERT_DIR "${repo_root}")" || return 2
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     inst="$(_ci_installer_compose "${repo_root}")" || return 2
     targets="$(_ci_block_entry_field validation "" compose_targets)" || return 2
@@ -11719,89 +11714,6 @@ _ci_check_proxy_cert_volume() {
         return 1
     fi
     printf 'proxy-cert-volume=clean cert_dir=%s files=%s\n' "${dir}" "${#seen[@]}"
-}
-
-# What: logs volume chowned to syslog's uid before start.
-# Why: syslog runs capability-free and cannot fix it.
-# From: Issue #1683 | PR #1858
-_ci_check_syslog_logs_volume() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" df cf dep inst cfg out line uid gid
-    local -a viol=()
-    df="$(_ci_service_path syslog Dockerfile "${repo_root}")" || return 2
-    uid="$(_ci_capture 1 sed -nE 's/.*adduser .*-u ([0-9]+)( .*|$)/\1/p' "${df}")" || return 2
-    gid="$(_ci_capture 1 sed -nE 's/.*addgroup .*-g ([0-9]+)( .*|$)/\1/p' "${df}")" || return 2
-    if ! [[ "${uid}" =~ ^[0-9]+$ && "${gid}" =~ ^[0-9]+$ ]]; then
-        ci_log "[CI-ERROR-CHECK-0148]" "path=\"${df}\" uid=\"${uid//$'\n'/,}\" gid=\"${gid//$'\n'/,}\" reason=\"need exactly one adduser -u and addgroup -g\""
-        return 2
-    fi
-    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    inst="$(_ci_installer_compose "${repo_root}")" || return 2
-    for cf in "${dep}" "${inst}"; do
-        cfg="$(_ci_compose_json "${repo_root}/${cf}")" || return 2
-        out="$(_ci_capture 0 jq -r --arg owner "${uid}:${gid}" '
-            (.services["syslog-logs-permissions"] // {}) as $i | (.services.syslog // {}) as $y
-            | ([["user", "0:0"], ["entrypoint", ["/bin/chown"]],
-                ["command", ["-R", $owner, "/var/log/lancache"]], ["network_mode", "none"],
-                ["cap_drop", ["ALL"]], ["cap_add", ["CHOWN"]], ["read_only", true], ["restart", "no"]][]
-                | . as [$k, $v] | select($i[$k] != $v)
-                | "syslog-logs-permissions \($k) must be \($v | tojson) (got \($i[$k] | tojson))"),
-              (if ($y.depends_on["syslog-logs-permissions"].condition // "none") != "service_completed_successfully"
-                then "syslog must wait for syslog-logs-permissions to complete" else empty end),
-              (if $y.cap_drop != ["ALL"] or ($y | has("cap_add"))
-                then "syslog must drop all capabilities and add none" else empty end)' <<<"${cfg}")" || return 2
-        while IFS= read -r line; do
-            [ -z "${line}" ] || viol+=("${cf}: ${line}")
-        done <<<"${out}"
-    done
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0147]" "reason=\"syslog logs volume ownership violated\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'syslog-logs-volume=clean owner=%s:%s\n' "${uid}" "${gid}"
-}
-
-# What: dhcp-proxy must receive each template key it uses
-# Why: the template owns the keys; a dropped one is lost
-# From: Issue #1683 | PR #1858
-_ci_check_dhcp_proxy_env() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
-    local -a viol=()
-    local -A in_env=() in_tpl=() seen=()
-    local dep tpl ep f json env used tkeys key
-    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    tpl="$(dirname "${dep}")/.env"
-    ep=services/dhcp-proxy/entrypoint.sh
-    for f in "${dep}" "${tpl}" "${ep}" services/dhcp-proxy/dnsmasq.conf.template; do
-        [ -f "${repo_root}/${f}" ] || { ci_error "[CI-ERROR-CHECK-0048]" "path=\"${f}\" reason=\"required dhcp-proxy input missing\"" "missing dhcp-proxy input: ${f}"; return 2; }
-    done
-    json="$(_ci_compose_json "${repo_root}/${dep}")" || return 2
-    env="$(_ci_capture 0 jq -r '.services["dhcp-proxy"].environment // {} | keys[]' <<< "${json}")" || return 2
-    tkeys="$(_ci_capture 1 grep -oE '^[A-Z][A-Z0-9_]*=' "${repo_root}/${tpl}")" || return 2
-    used="$(_ci_capture 1 grep -oE '\$\{?[A-Z][A-Z0-9_]*' "${repo_root}/${ep}")" || return 2
-    while IFS= read -r key; do [ -z "${key}" ] || in_env["${key}"]=1; done <<< "${env}"
-    while IFS= read -r key; do [ -z "${key}" ] || in_tpl["${key%=}"]=1; done <<< "${tkeys}"
-    while IFS= read -r key; do
-        key="${key#\$}"
-        key="${key#\{}"
-        [ -n "${key}" ] && [ -z "${seen[${key}]:-}" ] && [ -n "${in_tpl[${key}]:-}" ] || continue
-        seen["${key}"]=1
-        [ -n "${in_env[${key}]:-}" ] \
-            || viol+=("${dep}: dhcp-proxy never receives ${key} (read by ${ep}, owned by ${tpl})")
-    done <<< "${used}"
-    grep -Fq '_dhcp_proxy_render_optional_directives()' "${repo_root}/services/dhcp-proxy/entrypoint.sh" \
-        || viol+=("dhcp-proxy entrypoint must render optional dnsmasq directives (#450)")
-    grep -Fq '_dhcp_proxy_render_optional_directives /etc/dnsmasq.conf' "${repo_root}/services/dhcp-proxy/entrypoint.sh" \
-        || viol+=("dhcp-proxy entrypoint must render optional directives before validating dnsmasq.conf")
-    local hit
-    hit="$(_ci_capture 1 grep -F 'dhcp-proxy=${UPSTREAM_DHCP_IP}' "${repo_root}/services/dhcp-proxy/dnsmasq.conf.template")" || return 2
-    if [ -n "${hit}" ]; then
-        viol+=("dnsmasq.conf.template must not reintroduce the RFC 5107 dhcp-proxy flag")
-    fi
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0102]" "reason=\"dhcp-proxy env/PXE contract violated\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'dhcp-proxy-env=clean\n'
 }
 
 # What: fails unless setup.sh calls the Kea preflight
@@ -12241,111 +12153,6 @@ _ci_check_logging_matrix() {
         return 1
     fi
     printf 'logging-matrix=clean rows=%s services=%s\n' "${#canonical[@]}" "${#consumer[@]}"
-}
-
-# What: True if final stage COPYs to destination.
-# Why: Only runtime stage files exist at run time.
-# From: Issue #1683
-_ci_dockerfile_copies_to() {
-    local dockerfile="$1" want="$2" line lineno=0 last_from=0 dest from_val ctx_path
-    local -a words real
-    local -A aliases=()
-    local produced produced_rc=0
-    produced="$(_ci_dockerfile_logical_lines "${dockerfile}")" || produced_rc=$?
-    _ci_producer_ok "${produced_rc}" 0 || return 2
-    while IFS= read -r line; do
-        lineno=$((lineno + 1))
-        case "${line}" in [Ff][Rr][Oo][Mm]\ *) last_from=${lineno} ;; esac
-        if [[ "${line}" =~ [Aa][Ss][[:space:]]+([A-Za-z0-9_.-]+)[[:space:]]*$ ]]; then
-            aliases["${BASH_REMATCH[1],,}"]=1
-        fi
-    done <<<"${produced}"
-    lineno=0
-    local produced produced_rc=0
-    produced="$(_ci_dockerfile_logical_lines "${dockerfile}")" || produced_rc=$?
-    _ci_producer_ok "${produced_rc}" 0 || return 2
-    while IFS= read -r line; do
-        lineno=$((lineno + 1))
-        [ "${lineno}" -ge "${last_from}" ] || continue
-        case "${line}" in [Cc][Oo][Pp][Yy]\ *) : ;; *) continue ;; esac
-        read -ra words <<< "${line}"
-        real=(); from_val=""
-        local w
-        for w in "${words[@]:1}"; do
-            case "${w}" in
-                --from=*) from_val="${w#--from=}"; continue ;;
-                --*) continue ;;
-            esac
-            real+=("${w}")
-        done
-        if [ -n "${from_val}" ]; then
-            case "${from_val}" in
-                *[!0-9]*)
-                    case "${from_val,,}" in
-                        */*|*:*|*.*) : ;;
-                        *)
-                            if [ -z "${aliases[${from_val,,}]:-}" ]; then
-                                ctx_path="$(_ci_block_entry_field named_contexts "${from_val}" path)" || return 2
-                                [ -n "${ctx_path}" ] || continue
-                            fi
-                            ;;
-                    esac
-                    ;;
-            esac
-        fi
-        [ "${#real[@]}" -ge 2 ] || continue
-        dest="${real[$(( ${#real[@]} - 1 ))]}"
-        [ "${dest}" = "${want}" ] && return 0
-        case "${dest}" in */) [ "${dest}${want##*/}" = "${want}" ] && return 0 ;; esac
-    done <<<"${produced}"
-    return 1
-}
-
-# What: Sourced lib path must match a COPY destination.
-# Why: source-drift breaks silently only at runtime.
-# From: Issue #1683
-_ci_check_entrypoint_lib_wiring() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
-    local -a viol=()
-    local ep svc svcs ctx dir name dockerfile line lib_path n_ep=0 n_lib=0
-
-    # What: each SOT service context's entrypoint script.
-    # Why: the SOT owns services and paths; no glob/literal.
-    # From: Issue #1683
-    svcs="$(ci_services)" || return 2
-    for svc in ${svcs}; do
-        dir="$(_ci_service_path "${svc}" "" "${repo_root}")" || return 2
-        dir="${dir%/}" ctx="${dir#"${repo_root}/"}"
-        dockerfile="${dir}/Dockerfile"
-        for name in entrypoint.sh docker-entrypoint.sh; do
-            ep="${dir}/${name}"
-            [ -f "${ep}" ] || continue
-            n_ep=$((n_ep + 1))
-            while IFS= read -r line; do
-                [[ "${line}" =~ ^[[:space:]]*(\.|source)[[:space:]]+\"?(/[^\"[:space:]]+)\"?[[:space:]]*(\#.*)?$ ]] || continue
-                lib_path="${BASH_REMATCH[2]}"
-                n_lib=$((n_lib + 1))
-                if [ ! -f "${dockerfile}" ]; then
-                    viol+=("${ctx}: sources ${lib_path}, no Dockerfile found")
-                    continue
-                fi
-                _ci_dockerfile_copies_to "${dockerfile}" "${lib_path}" ||
-                    viol+=("${ctx}/${name} sources ${lib_path}: no matching final-stage COPY in ${dockerfile}")
-            done < "${ep}"
-        done
-    done
-    # What: no entrypoint found at all fails closed
-    # Why: a guard that checks nothing must not pass
-    # From: Issue #1683 | PR #1858
-    if [ "${n_ep}" -eq 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0168]" "reason=\"no service entrypoint found; nothing was checked\"" "${svcs}"
-        return 2
-    fi
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0041]" "reason=\"entrypoint sources a lib its Dockerfile never COPYs\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'entrypoint-lib-wiring=clean entrypoints=%s libs=%s\n' "${n_ep}" "${n_lib}"
 }
 
 # What: each workflow calling ci.sh passes CI_VARIABLES.
@@ -12924,11 +12731,10 @@ ci_cmd_check_all() {
         workflow-line-limit stable-external-images compose-healthchecks \
         proxy-cache-env-doc-drift \
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
-        netdata-isolation syslog-logs-volume proxy-cert-volume proxy-nginx-policy \
-        dhcp-proxy-env \
+        netdata-isolation proxy-cert-volume proxy-nginx-policy \
         setup-kea-preflight setup-update-safety image-channel-resolution \
         vex-drift logging-matrix \
-        entrypoint-lib-wiring dockerfile-build-tools dockerfile-stage-variables \
+        dockerfile-build-tools dockerfile-stage-variables \
         dockerfile-secret-ids dockerfile-context-edges sot-identity-inputs workflow-ci-variables workflow-job-settings cargo-profile-tuning no-source-compiled-tools codeql-coverage version-drift)
     for sub in "${repo_wide[@]}"; do
         ci_cmd_check "${sub}" || rc=1
@@ -12994,16 +12800,13 @@ ci_cmd_check() {
         compose-config) _ci_check_compose_config "$@" ;;
         nats-atomic-write) _ci_check_nats_atomic_write "$@" ;;
         netdata-isolation) _ci_check_netdata_isolation "$@" ;;
-        syslog-logs-volume) _ci_check_syslog_logs_volume "$@" ;;
         proxy-cert-volume) _ci_check_proxy_cert_volume "$@" ;;
         proxy-nginx-policy) _ci_check_proxy_nginx_policy "$@" ;;
-        dhcp-proxy-env) _ci_check_dhcp_proxy_env "$@" ;;
         setup-kea-preflight) _ci_check_setup_kea_preflight "$@" ;;
         setup-update-safety) _ci_check_setup_update_safety "$@" ;;
         image-channel-resolution) _ci_check_image_channel_resolution "$@" ;;
         vex-drift) _ci_check_vex_drift "$@" ;;
         logging-matrix) _ci_check_logging_matrix "$@" ;;
-        entrypoint-lib-wiring) _ci_check_entrypoint_lib_wiring "$@" ;;
         *)
             ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\""
             return 2

@@ -68,7 +68,7 @@ pub fn saved_setting(path: &std::path::Path, key: &str) -> Option<String> {
 }
 
 // What: 1/true/yes/on or 0/false/no/off, trimmed, any case.
-// Why: one boolean grammar for ui, watchdog, retention.sh.
+// Why: one boolean grammar for ui, watchdog, retention.
 // From: Issue #1683 | PR #1905
 pub fn parse_bool(raw: &str) -> Option<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -451,7 +451,7 @@ pub const DEFAULT_RECORD_TTL: i32 = 300;
 pub const LAN_ZONE: &str = "lan";
 
 // What: zones with snapshots and rollbacks, dotted form.
-// Why: equals DDNS_UPDATE_ZONES in dns/entrypoint.sh.
+// Why: dns creates, snapshots and rolls back these.
 // From: Issue #1683 | PR #1905
 pub fn rollback_zones() -> Vec<String> {
     let lan = canonical_zone(LAN_ZONE);
@@ -518,7 +518,7 @@ pub fn cdn_entry(text: &str) -> Option<(String, bool)> {
 }
 
 // What: the path of PowerDNS's API below a server address.
-// Why: ui and dns/entrypoint.sh append the same fixed path.
+// Why: ui and the dns supervisor append the same path.
 // From: Issue #1683 | PR #1905
 pub const PDNS_API_PATH: &str = "/api/v1/servers/localhost";
 
@@ -760,25 +760,6 @@ mod tests {
         assert!(!is_rollback_zone("lan") && !is_rollback_zone("15.172.in-addr.arpa."));
     }
 
-    // What: the zone list equals the entrypoint.sh arrays.
-    // Why: no check ties the shell list to this one.
-    // From: Issue #1683 | PR #1905
-    #[test]
-    fn rollback_zones_match_the_entrypoint_arrays() {
-        let path = format!("{}/../dns/entrypoint.sh", env!("CARGO_MANIFEST_DIR"));
-        let script = std::fs::read_to_string(&path).expect("services/dns/entrypoint.sh");
-        let start = script.find("LAN_ZONES=(").expect("LAN_ZONES array");
-        let end = script
-            .find("DDNS_UPDATE_ZONES=")
-            .expect("DDNS_UPDATE_ZONES");
-        let in_script: Vec<&str> = script[start..end]
-            .lines()
-            .map(str::trim)
-            .filter(|l| l.ends_with('.') && !l.contains(['=', '(', ')', ' ']))
-            .collect();
-        assert_eq!(rollback_zones(), in_script);
-        assert!(!rollback_zones().contains(&"rpz.".to_string()));
-    }
 
     // What: need and need_flag reject unset, empty, junk.
     // Why: no service runs on a value its owner never set.
@@ -835,17 +816,6 @@ mod tests {
         );
     }
 
-    // What: the API path equals the entrypoint's path.
-    // Why: ui and the dns script append the same path.
-    // From: Issue #1683 | PR #1905
-    #[test]
-    fn pdns_api_path_matches_the_entrypoint() {
-        let path = format!("{}/../dns/entrypoint.sh", env!("CARGO_MANIFEST_DIR"));
-        let script = std::fs::read_to_string(&path).expect("services/dns/entrypoint.sh");
-        let auth = format!("PDNS_AUTH_API_URL=\"http://127.0.0.1:8081{PDNS_API_PATH}\"");
-        let rec = format!("PDNS_REC_API_URL=\"http://127.0.0.1:8082{PDNS_API_PATH}\"");
-        assert!(script.contains(&auth) && script.contains(&rec));
-    }
 
     // What: the live-env readers see the real environment.
     // Why: they are the only readers of the process env.

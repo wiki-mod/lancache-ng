@@ -5194,7 +5194,7 @@ async fn ntp_page(State(state): Shared, headers: HeaderMap) -> Response {
 }
 
 // What: normalize the upstream NTP list to spaces.
-// Why: entrypoint.sh must get at least one valid server.
+// Why: chrony must get at least one valid server.
 fn ntp_upstream_servers(raw: &str) -> Result<String, String> {
     let entries: Vec<&str> = raw
         .split([',', ' ', '\n', '\t'])
@@ -5916,7 +5916,7 @@ mod tests {
     }
 
     // What: the upstream NTP list is cleaned or refused.
-    // Why: entrypoint.sh needs at least one valid server.
+    // Why: chrony needs at least one valid server.
     #[test]
     fn ntp_upstream_list_is_cleaned_or_refused() {
         assert_eq!(

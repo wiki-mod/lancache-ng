@@ -439,31 +439,31 @@ confirm() {
 # What: runs a broadcast DHCP probe before Kea activation
 # Why: stops or warns before a second DHCP server exists
 run_kea_dhcp_activation_preflight() {
-    local env_file="$1" output server_identifier=""
+    local env_file="$1" output status server_identifier=""
 
     [[ "$DHCP_MODE" = "kea" ]] || return 0
 
     print_step "DHCP activation preflight"
-    printf "  Discovery-only check: the Kea image will run nmap and exit without starting Kea.\n"
+    printf "  Probe-only check: the dhcp image runs its DHCP probe and exits without starting Kea.\n"
 
-    # What: runs nmap DHCP discovery in the dhcp (Kea) image
-    # Why: nmap has no 'any' interface, so no -e is passed
+    # What: one lancache-watchdog probe run in the dhcp image
+    # Why: the same probe as the Admin UI; no extra package
+    # From: Issue #1683 | PR #1912
     if ! output=$(docker compose --env-file "$env_file" -f "$PROD_COMPOSE" --profile dhcp-kea run --rm --no-deps dhcp \
-        nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5 2>&1); then
-        print_warn "DHCP discovery preflight could not be executed inside the Kea image."
+        probe) || ! status=$(json_value .status "$output") || [[ "$status" = unavailable || -z "$status" ]]; then
+        print_warn "DHCP discovery preflight could not be executed inside the dhcp image."
         print_warn "Kea activation will require an explicit confirmation because the safety check did not complete."
         confirm "Continue with Kea activation anyway? [y/N]" "N" \
             || die "Cancelled DHCP activation."
         return 0
     fi
 
-    # What: first Server Identifier line of the nmap output
-    # Why: here-strings avoid a live pipe under pipefail
-    # From: Issue #1377
-    server_identifier="$(sed -n '1p' <<<"$(sed -n 's/^[|_[:space:]]*Server Identifier:[[:space:]]*//p' <<<"$output")")"
-
-    if [[ -n "$server_identifier" ]]; then
-        print_warn "An existing DHCP server answered before Kea activation: $server_identifier"
+    # What: the server address of the first DHCP offer
+    # Why: names the existing server in the warning
+    # From: Issue #1683 | PR #1912
+    if [[ "$status" = conflict_found ]]; then
+        server_identifier=$(json_value .conflict.output "$output") || die "Cannot read the probe answer (exit $?)."
+        print_warn "An existing DHCP server answered before Kea activation: ${server_identifier:-unknown}"
         print_warn "Kea would become a second active DHCP server if you continue."
         confirm "Continue with Kea activation anyway? [y/N]" "N" \
             || die "Cancelled DHCP activation."

@@ -2,7 +2,7 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //! What: supervisor of every program in one container.
-//! Why: it replaces the shell entrypoints of all images.
+//! Why: one Rust supervisor starts every image's programs.
 //! From: Issue #842 | Issue #1683
 
 use std::collections::{HashMap, HashSet};
@@ -1919,7 +1919,7 @@ fn date_serial() -> u64 {
 }
 
 // What: render, check and key the authoritative server.
-// Why: replaces dns/entrypoint.sh; any error waits a retry.
+// Why: pdns serves only a checked config; errors retry.
 // From: Issue #1683
 fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
     let role = dns_role(&ctx.need("DNS_REPLICATION_ROLE")?)?;
@@ -2546,7 +2546,7 @@ fn kea_socket_dir() -> Result<(), String> {
 }
 
 // What: kea-dhcp4 on its checked config, else a snapshot.
-// Why: replaces dhcp/entrypoint.sh; no good config = rescue.
+// Why: no good config means rescue, never a stop.
 // From: Issue #815 | Issue #1683
 fn kea_dhcp4(ctx: &Ctx) -> Result<Run, String> {
     kea_socket_dir()?;
@@ -2795,7 +2795,7 @@ fn dnsmasq_conf(set: &dyn Fn(&str) -> String, relay: bool) -> String {
 }
 
 // What: dnsmasq proxy or relay on its checked config.
-// Why: replaces dhcp-proxy/entrypoint.sh; ui saves restart.
+// Why: a saved ui setting restarts it with the new file.
 // From: Issue #450 | Issue #844 | Issue #1683
 fn dnsmasq(ctx: &Ctx, relay: bool) -> Result<Run, String> {
     let set = |key: &str| ctx.setting(key).unwrap_or_default();
@@ -2981,6 +2981,14 @@ const NGINX_REFUSE: &str = "127.0.0.1:9";
 const NGINX_MITM_RELAY: u16 = 9445;
 const NGINX_PASSTHROUGH_RELAY: u16 = 9446;
 const NGINX_MITM_PORT: u16 = 8444;
+
+// What: rendered nginx paths below NGINX_DIR.
+// Why: ci.sh validate reads these names; one path owner.
+// From: Issue #1683 | PR #1912
+const NGINX_CA_DIR: &str = "ssl/ca";
+const NGINX_CERT_DIR: &str = "ssl/certs";
+const NGINX_STREAM_TARGETS: &str = "stream.d/00-stream-targets.conf";
+const NGINX_SSL_DISPATCH: &str = "stream.d/01-ssl-dispatch.conf";
 
 // What: one aligned "key value;" map line.
 // Why: rendered maps stay readable for operators.
@@ -3237,7 +3245,7 @@ fn nginx_certs(
     ip_https: &str,
     gid: u32,
 ) -> Result<(), String> {
-    let (ca, certs) = (nginx.join("ssl/ca"), nginx.join("ssl/certs"));
+    let (ca, certs) = (nginx.join(NGINX_CA_DIR), nginx.join(NGINX_CERT_DIR));
     let (ca_crt, ca_key) = (ca.join("ca.crt"), ca.join("ca.key"));
     let path = |p: &Path| p.display().to_string();
     if !(ca_crt.is_file() && ca_key.is_file()) {
@@ -3377,7 +3385,7 @@ fn nginx_certs(
 }
 
 // What: render, certify, check and start nginx.
-// Why: replaces proxy/entrypoint.sh; a domain edit restarts.
+// Why: a domain edit re-renders and restarts nginx.
 // From: Issue #1683
 fn nginx(ctx: &Ctx) -> Result<Run, String> {
     let dir = PathBuf::from(ctx.need("NGINX_DIR")?);
@@ -3473,12 +3481,12 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
             nginx_ssl_map(&hosts, strict, &cidrs),
         ),
         (
-            dir.join("stream.d/00-stream-targets.conf"),
+            dir.join(NGINX_STREAM_TARGETS),
             nginx_stream_targets(&hosts, strict),
         ),
         (acl.clone(), nginx_client_acl(&cidrs)),
         (
-            dir.join("stream.d/01-ssl-dispatch.conf"),
+            dir.join(NGINX_SSL_DISPATCH),
             if ssl {
                 nginx_ssl_dispatch(&hosts, strict, &acl)
             } else {
@@ -4051,7 +4059,7 @@ fn kinds(raw: &str) -> Result<Vec<Kind>, String> {
 }
 
 // What: keep every wanted program running until TERM.
-// Why: one supervisor per container replaces entrypoints.
+// Why: one supervisor per container starts every program.
 // From: Issue #1683
 async fn supervise() -> Result<(), String> {
     use tokio::signal::unix::{SignalKind, signal};
@@ -4154,9 +4162,17 @@ fn health_verdict(status: &SuperviseStatus, now: u64) -> Result<(), String> {
     Ok(())
 }
 
-// What: supervise (default) or healthcheck.
-// Why: one binary per container, two entry points.
-// From: Issue #1683
+// What: one probe run, printed as the page JSON.
+// Why: setup.sh looks for a DHCP server before Kea starts.
+// From: Issue #1683 | PR #1912
+fn probe_print() -> Result<(), String> {
+    println!("{}", run_probe().page());
+    Ok(())
+}
+
+// What: supervise (default), healthcheck or probe.
+// Why: one binary per container, three entry points.
+// From: Issue #1683 | PR #1912
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -4168,7 +4184,8 @@ async fn main() {
     {
         [] | ["supervise"] => TAG.scope("supervise", supervise()).await,
         ["healthcheck"] => healthcheck(),
-        _ => Err("usage: lancache-watchdog [supervise|healthcheck]".to_string()),
+        ["probe"] => probe_print(),
+        _ => Err("usage: lancache-watchdog [supervise|healthcheck|probe]".to_string()),
     };
     if let Err(e) = result {
         log_err(&format!("FATAL: {e}"));
@@ -5720,8 +5737,8 @@ mod tests {
     }
 
     // What: dnsmasq proxy and relay configs from settings.
-    // Why: one line per set value; a line break is dropped.
-    // From: Issue #450 | Issue #705 | Issue #844
+    // Why: one line per set value; no RFC 5107 dhcp-proxy.
+    // From: Issue #1683 | PR #1912
     #[test]
     fn dnsmasq_conf_renders_proxy_and_relay() {
         let values: HashMap<&str, String> = [
@@ -5757,5 +5774,8 @@ mod tests {
         }
         assert!(!proxy.contains("bad"), "{proxy}");
         assert!(!proxy.contains("dhcp-relay"));
+        for conf in [&proxy, &relay] {
+            assert!(!conf.lines().any(|l| l.starts_with("dhcp-proxy")), "{conf}");
+        }
     }
 }

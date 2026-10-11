@@ -4648,18 +4648,19 @@ CASES
 
 # What: Kea preflight probes; asks when a server answers
 # Why: a second DHCP server needs the operator's yes
-# From: Issue #1683 | PR #1858
+# From: Issue #1683 | PR #1912
 @test "setup kea preflight asks before a second dhcp server" {
-    local root p env mode id want
+    local root p env mode id want found none row
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}" || return 1
     export CALLS ANS DOUT DRC
     CALLS="$(_val path)" ANS="$(_val path)" env="$(_val path)" mode="$(_val name)" id="$(_val name)"
     p="$(_pm_path)" || return 1
     _tool_stub "${p}" docker <<< 'printf "docker %s\n" "$*" >> "${CALLS:?}"; printf "%s\n" "${DOUT:-}"; exit "${DRC:-0}"' || return 1
-    ln -s "$(type -P sed)" "${p}/sed" || return 1
-    want="docker compose --env-file ${env} -f ${root}/deploy/prod/docker-compose.yml --profile dhcp-kea run --rm --no-deps dhcp"
-    want+=" nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5"
+    ln -s "$(type -P sed)" "${p}/sed" && ln -s "$(type -P jq)" "${p}/jq" || return 1
+    want="docker compose --env-file ${env} -f ${root}/deploy/prod/docker-compose.yml --profile dhcp-kea run --rm --no-deps dhcp probe"
+    found="{\"status\":\"conflict_found\",\"conflict\":{\"status\":\"found\",\"output\":\"${id}\",\"details\":[]}}"
+    none='{"status":"client_failed","conflict":{"status":"not_found"},"client":{"status":"failed","output":"x"}}'
     # What: runs one row: mode, docker reply, answer
     # Why: each row checks rc, text and the docker call
     _kea_try() {
@@ -4669,19 +4670,21 @@ CASES
     }
     _kea_try "${mode}" y "" 0 || return 1
     [ "${status}" -eq 0 ] && [ ! -s "${CALLS}" ] || { echo "non-kea mode probed: $(cat "${CALLS}") ${output}"; return 1; }
-    _kea_try kea n "| broadcast-dhcp-discover:"$'\n'"|     Server Identifier: ${id}" 0 || return 1
+    _kea_try kea n "${found}" 0 || return 1
     [ "${status}" -eq 1 ] && [ "$(cat "${CALLS}")" = "${want}" ] \
         && [[ "${output}" == *"An existing DHCP server answered before Kea activation: ${id}"*"Cancelled DHCP activation."* ]] \
         || { echo "server, no: rc ${status} calls [$(cat "${CALLS}")] ${output}"; return 1; }
-    _kea_try kea y "|     Server Identifier: ${id}" 0 || return 1
+    _kea_try kea y "${found}" 0 || return 1
     [ "${status}" -eq 0 ] && [[ "${output}" == *"answered before Kea activation: ${id}"* ]] \
         || { echo "server, yes: rc ${status} ${output}"; return 1; }
-    _kea_try kea n "| broadcast-dhcp-discover:" 0 || return 1
+    _kea_try kea n "${none}" 0 || return 1
     [ "${status}" -eq 0 ] && [[ "${output}" == *"No DHCP server answer was detected before Kea activation."* ]] \
         && [[ "${output}" != *PROMPT* ]] || { echo "no server: rc ${status} ${output}"; return 1; }
-    _kea_try kea n "${id}" 1 || return 1
-    [ "${status}" -eq 1 ] && [[ "${output}" == *"could not be executed inside the Kea image."*"Cancelled DHCP activation."* ]] \
-        || { echo "probe failed, no: rc ${status} ${output}"; return 1; }
+    for row in "${id}|1" "${id}|0" '{"status":"unavailable"}|0'; do
+        _kea_try kea n "${row%|*}" "${row##*|}" || return 1
+        [ "${status}" -eq 1 ] && [[ "${output}" == *"could not be executed inside the dhcp image."*"Cancelled DHCP activation."* ]] \
+            || { echo "probe not run (${row}), no: rc ${status} ${output}"; return 1; }
+    done
 }
 
 # What: a missing record key fails each reader closed
