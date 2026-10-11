@@ -239,10 +239,10 @@ authors could resolve unilaterally.** Two honest framings were possible:
    project's decision to make at all: whether an operator's own
    lancache-ng instance persists a Steam credential across restarts, or
    never writes it to disk (re-entered every run), is that operator's own
-   choice, configurable per instance (`services/cachehamster`'s
-   `CACHEHAMSTER_CREDENTIAL_PERSISTENCE=none|persistent`). If an operator
-   chooses persistence, the credential is never stored in a
-   plaintext-readable form: `services/cachehamster/src/main.rs`
+   choice. An operator who stores it runs
+   `docker compose exec -T services lancache-cachehamster seal` with the
+   credential on stdin: no env file, env variable or argument ever holds it.
+   The credential is never stored in a plaintext-readable form: `services/cachehamster/src/main.rs`
    derives a symmetric key from a locally-generated master secret via
    Argon2id (already an established project dependency, issue #680 —
    reused here as a raw KDF rather than its one-way password-hash form)
@@ -250,8 +250,8 @@ authors could resolve unilaterally.** Two honest framings were possible:
    XChaCha20-Poly1305 (AEAD, random 192-bit nonce per encryption). At
    rest, only salt + nonce + ciphertext exist; the plaintext is
    recoverable only by the running process, for internal use, and is
-   never returned by any Admin-UI/API surface (mirrors how
-   `UI_AUTH_PASSWORD` is compared but never echoed back).
+   never returned by any Admin-UI/API surface (the Admin UI password is
+   likewise kept only as an Argon2id hash in `UI_AUTH_PASSWORD_HASH`).
 2. ~~**Which service houses the engine**~~ — resolved 2026-08-29: a new
    `services/cachehamster` service, not a `services/ui` module.
    Maintainer's stated reasoning: the service must be independently,

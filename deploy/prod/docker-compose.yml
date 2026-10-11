@@ -26,23 +26,13 @@ services:
     # From: Issue #1683
     init: true
     environment:
-      # What: operator values from the one .env file.
-      # Why: .env is the one owner of operator values.
+      # What: operator values; the defaults are baked in.
+      # Why: the SOT owns each default; no value copy here.
       # From: Issue #1683
       - LANCACHE_LOG_PORT=${LANCACHE_LOG_PORT:?LANCACHE_LOG_PORT is required}
-      - LOGGING_PROXY_ENABLED=${LOGGING_PROXY_ENABLED:?LOGGING_PROXY_ENABLED is required}
-      - LOGGING_DNS_ENABLED=${LOGGING_DNS_ENABLED:?LOGGING_DNS_ENABLED is required}
-      - LOGGING_DHCP_ENABLED=${LOGGING_DHCP_ENABLED:?LOGGING_DHCP_ENABLED is required}
-      - LOGGING_UI_ENABLED=${LOGGING_UI_ENABLED:?LOGGING_UI_ENABLED is required}
       - NTP_ENABLED=${NTP_ENABLED:-0}
-      - NTP_UPSTREAM_SERVERS=${NTP_UPSTREAM_SERVERS:?NTP_UPSTREAM_SERVERS is required}
       - NTP_ALLOWED_CLIENT_CIDRS=${NTP_ALLOWED_CLIENT_CIDRS:-}
-      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-}
-      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-}
-      - CACHE_VALID_DAYS=${CACHE_VALID_DAYS:-}
       - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
-      - CACHEHAMSTER_CREDENTIAL_PERSISTENCE=${CACHEHAMSTER_CREDENTIAL_PERSISTENCE:-}
-      - CACHEHAMSTER_STEAM_CREDENTIAL=${CACHEHAMSTER_STEAM_CREDENTIAL:-}
       - CACHEHAMSTER_URLS=${CACHEHAMSTER_URLS:-}
       # What: paths inside the mounts listed below.
       # Why: the mount and its path have one owner here.
@@ -125,7 +115,7 @@ services:
     image: ${LANCACHE_IMAGE_REF_PROXY:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/proxy:${LANCACHE_IMAGE_TAG:-latest}}
     init: true
     environment:
-      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:?KEEP_KNOWN_GOOD_CONFIGS is required}
+      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
       - SUPERVISE_RUN_DIR=/run/lancache
       - CDN_DOMAINS_FILE=/etc/nginx/cdn-domains.txt
       - PROXY_CONFIG_SNAPSHOT_DIR=/var/lib/lancache-proxy/config-snapshots
@@ -135,15 +125,10 @@ services:
       # What: per-install values from the operator .env
       # Why: .env is the one owner of operator values.
       # From: Issue #1683
-      - CACHE_MIN_FREE=${CACHE_MIN_FREE:-}
       - CACHE_MAX_SIZE=${CACHE_MAX_SIZE:?CACHE_MAX_SIZE is required}
       - CACHE_MEM_MB=${CACHE_MEM_MB:?CACHE_MEM_MB is required}
-      - CACHE_SLICE_SIZE=${CACHE_SLICE_SIZE:-}
-      - CACHE_VALID_HIT=${CACHE_VALID_HIT:-}
-      - CACHE_VALID_ANY=${CACHE_VALID_ANY:-}
-      - CACHE_INACTIVE=${CACHE_INACTIVE:-}
-      - NGINX_UPSTREAM_RESOLVER=${NGINX_UPSTREAM_RESOLVER:?NGINX_UPSTREAM_RESOLVER is required}
-      - PROXY_SECURITY_MODE=${PROXY_SECURITY_MODE:?PROXY_SECURITY_MODE is required}
+      - NGINX_UPSTREAM_RESOLVER=${NGINX_UPSTREAM_RESOLVER:-}
+      - PROXY_SECURITY_MODE=${PROXY_SECURITY_MODE:-}
       - PROXY_ALLOWED_CLIENT_CIDRS=${PROXY_ALLOWED_CLIENT_CIDRS:-}
     volumes:
       - ../../certs:/etc/nginx/ssl/ca
@@ -175,9 +160,7 @@ services:
     image: ${LANCACHE_IMAGE_REF_DNS:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}}
     init: true
     environment:
-      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:?KEEP_KNOWN_GOOD_CONFIGS is required}
-      - LOG_QUERIES=${LOG_QUERIES:-}
-      - ROOT_ZONE_MIRROR=${ROOT_ZONE_MIRROR:-}
+      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
       - PROXY_IP=${IP_HTTP:?IP_HTTP is required}
       - PROXY_HTTPS_IP=${IP_HTTPS:?IP_HTTPS is required}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
@@ -194,18 +177,13 @@ services:
       - NATS_STORE_DIR=/var/lib/nats
       - NATS_MONITOR_PORT=8222
       - NATS_URL=nats://127.0.0.1:4222
-      - NATS_USER=${NATS_DNS_WRITER_USER:?NATS_DNS_WRITER_USER is required}
       - NATS_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-}
       - NATS_PASSWORD_SHARED_SECRET=nats-dns-writer-password
       - NATS_CONSUMER=dns
       - NATS_RECONCILER=1
-      - NATS_UI_USER=${NATS_UI_USER:?NATS_UI_USER is required}
       - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:-}
-      - NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER:?NATS_DNS_WRITER_USER is required}
       - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-}
-      - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:?NATS_CALLOUT_USER is required}
       - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-}
-      - NATS_SYS_USER=${NATS_SYS_USER:?NATS_SYS_USER is required}
       - NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD:-}
     volumes:
       - shared-secrets:/var/lib/lancache-secrets
@@ -251,10 +229,8 @@ services:
     image: ${LANCACHE_IMAGE_REF_DHCP:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp:${LANCACHE_IMAGE_TAG:-latest}}
     init: true
     environment:
-      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:?KEEP_KNOWN_GOOD_CONFIGS is required}
-      - DHCP_DOMAIN=${DHCP_DOMAIN:-}
+      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
       - DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS:-}
-      - DHCP_DDNS_ENABLED=${DHCP_DDNS_ENABLED:-}
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SUPERVISE_RUN_DIR=/run/lancache
       - UI_SETTINGS_FILE=/data/lancache-ui-settings.env
@@ -267,9 +243,6 @@ services:
       - DHCP_DNS_SERVER_IP=${IP_HTTP}
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
-      - KEA_CTRL_USER=${KEA_CTRL_USER:?KEA_CTRL_USER is required}
-      - KEA_CTRL_PORT=${KEA_CTRL_PORT:?KEA_CTRL_PORT is required}
-      - KEA_CONFIG_SNAPSHOT_DIR=${KEA_CONFIG_SNAPSHOT_DIR:?KEA_CONFIG_SNAPSHOT_DIR is required}
       - DHCP_SUBNET=${DHCP_SUBNET:-}
       - DHCP_RANGE_START=${DHCP_RANGE_START:-}
       - DHCP_RANGE_END=${DHCP_RANGE_END:-}
@@ -315,8 +288,7 @@ services:
     container_name: LanCache-NG-ui
     image: ${LANCACHE_IMAGE_REF_UI:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}}
     environment:
-      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:?KEEP_KNOWN_GOOD_CONFIGS is required}
-      - NTP_UPSTREAM_SERVERS=${NTP_UPSTREAM_SERVERS:?NTP_UPSTREAM_SERVERS is required}
+      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
       - NTP_ALLOWED_CLIENT_CIDRS=${NTP_ALLOWED_CLIENT_CIDRS:-}
       - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
       - WATCHDOG_STATUS_FILE=/var/run/watchdog/status.json
@@ -324,14 +296,9 @@ services:
       - NATS_AUTH_CALLOUT_PATH=/etc/nats/auth_callout.conf
       - UI_SESSION_SECRET_FILE=/data/lancache-ui-session.secret
       - SECONDARY_REGISTRATION_TOKEN_FILE=/data/lancache-secondary-registration.token
-      - KEA_CONFIG_SNAPSHOT_DIR=${KEA_CONFIG_SNAPSHOT_DIR:?KEA_CONFIG_SNAPSHOT_DIR is required}
       - DHCP_PROBE_REQUEST_FILE=/data/dhcp-probe-request
       - DHCP_PROBE_RESULT_FILE=/var/lib/kea/dhcp-probe-result.json
       - HTTPS_ENABLED=${HTTPS_ENABLED:-1}
-      - LOGGING_PROXY_ENABLED=${LOGGING_PROXY_ENABLED:?LOGGING_PROXY_ENABLED is required}
-      - LOGGING_DNS_ENABLED=${LOGGING_DNS_ENABLED:?LOGGING_DNS_ENABLED is required}
-      - LOGGING_DHCP_ENABLED=${LOGGING_DHCP_ENABLED:?LOGGING_DHCP_ENABLED is required}
-      - LOGGING_UI_ENABLED=${LOGGING_UI_ENABLED:?LOGGING_UI_ENABLED is required}
       - PROXY_HTTP_URL=http://proxy
       - PROXY_HTTPS_URL=http://proxy
       - PROXY_LOG_DIR=/var/log/lancache-syslog-ng/LanCache-NG-proxy
@@ -348,8 +315,8 @@ services:
       - LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL:-}
       - LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG:-latest}
       - UI_AUTH_USER=${UI_AUTH_USER:-}
-      - UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD:-}
-      - ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI:-false}
+      - UI_AUTH_PASSWORD_HASH=${UI_AUTH_PASSWORD_HASH:-}
+      - ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI:-}
       - UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS:-86400}
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS:-}
@@ -364,8 +331,7 @@ services:
       - DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME:-}
       - DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER:-}
       - DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}
-      - DHCP_API_URL=http://host.docker.internal:${KEA_CTRL_PORT:?KEA_CTRL_PORT is required}
-      - DHCP_API_USER=${KEA_CTRL_USER:?KEA_CTRL_USER is required}
+      - DHCP_API_URL=http://host.docker.internal
       - DHCP_API_TOKEN=${KEA_CTRL_TOKEN}
       - UI_LOGS_MAX_ENTRIES=200
       - DNS_URL=http://dns
@@ -373,18 +339,12 @@ services:
       - NATS_URL=nats://dns:4222
       - NATS_BIND_IP=${NATS_BIND_IP:-}
       - NATS_ADVERTISE_URL=${NATS_ADVERTISE_URL:-}
-      - NATS_UI_USER=${NATS_UI_USER:?NATS_UI_USER is required}
       - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:-}
-      - NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER:?NATS_DNS_WRITER_USER is required}
       - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-}
-      - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:?NATS_CALLOUT_USER is required}
       - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-}
-      - NATS_SYS_USER=${NATS_SYS_USER:?NATS_SYS_USER is required}
       - NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD:-}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
       - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
-      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-}
-      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-}
     volumes:
       - shared-secrets:/var/lib/lancache-secrets
       - ui-data:/data

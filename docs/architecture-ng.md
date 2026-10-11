@@ -60,7 +60,7 @@ dashboard's resize control, issue #1069 part 3):**
 | Variable | Default | Description |
 |---|---|---|
 | `CACHE_MAX_SIZE` | `50g` | Max cache size — the Admin UI dashboard's resize control re-validates a requested size against real free disk space at `CACHE_DIR` (same buffer-scaled safety check as the setup-time prompt, issue #1069) before persisting it for the host convergence tick to apply |
-| `CACHE_MEM_MB` | `512` | keys_zone size (1MB ≈ 8,000 keys, nginx's own documented rule of thumb — see "Cache tuning review" below for the sizing math; previously documented here as `200`, which never matched the real shipped default `512` in `deploy/prod/.env`) |
+| `CACHE_MEM_MB` | `512` | keys_zone size (1MB ≈ 8,000 keys, nginx's own documented rule of thumb — see "Cache tuning review" below for the sizing math; previously documented here as `200`, which never matched the real shipped default `512` in `runtime.defaults` of the SOT) |
 | `CACHE_MIN_FREE` | `1g` | Free-disk-space floor (bug-hunt #849 item 11) — the cache manager evicts LRU entries once free space at `CACHE_DIR`'s filesystem drops below this, independent of and in addition to `CACHE_MAX_SIZE` |
 | `CACHE_SLICE_SIZE` | `8m` | Slice size: `4m/8m/16m/32m/64m/128m/256m/512m` |
 | `CACHE_VALID_HIT` | `365d` | Validity duration for 200/206/301/302 |

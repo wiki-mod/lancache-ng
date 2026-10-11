@@ -142,7 +142,7 @@ struct Config {
     dhcp_probe_result_file: String,
     kea_keep_known_good_configs: u32,
     auth_user: Option<String>,
-    auth_password: Option<String>,
+    auth_password_hash: Option<String>,
     allow_insecure_ui: bool,
     ui_session_ttl_seconds: u64,
     security_headers_enabled: bool,
@@ -321,9 +321,9 @@ impl Config {
             dhcp_lease_time,
             http_ip,
             https_ip,
-            dhcp_api_url: need("DHCP_API_URL")?,
+            dhcp_api_url: format!("{}:{}", need("DHCP_API_URL")?, need("KEA_CTRL_PORT")?),
             dhcp_api_token,
-            dhcp_api_user: need("DHCP_API_USER")?,
+            dhcp_api_user: need("KEA_CTRL_USER")?,
             ui_settings_file: need("UI_SETTINGS_FILE")?,
             startup_settings,
             kea_config_snapshot_dir: need("KEA_CONFIG_SNAPSHOT_DIR")?,
@@ -335,7 +335,9 @@ impl Config {
                 OutOfRange::Reject,
             )? as u32,
             auth_user: set("UI_AUTH_USER"),
-            auth_password: set("UI_AUTH_PASSWORD"),
+            auth_password_hash: set("UI_AUTH_PASSWORD_HASH")
+                .map(|v| decode_password_hash(&v))
+                .transpose()?,
             allow_insecure_ui: need_flag("ALLOW_INSECURE_UI")?,
             ui_session_ttl_seconds: ttl,
             // What: security headers are on unless off.
@@ -760,8 +762,8 @@ async fn security_headers(State(state): Shared, req: Request, next: Next) -> Res
 // What: Basic auth, session cookie and CSRF in one layer.
 // Why: auth is checked per request; the cookie binds CSRF.
 async fn basic_auth(State(state): Shared, mut req: Request, next: Next) -> Response {
-    if let (Some(user), Some(pass)) = (&state.config.auth_user, &state.config.auth_password) {
-        let valid = req
+    if let (Some(user), Some(hash)) = (&state.config.auth_user, &state.config.auth_password_hash) {
+        let presented = req
             .headers()
             .get(header::AUTHORIZATION)
             .and_then(|h| h.to_str().ok())
@@ -770,9 +772,21 @@ async fn basic_auth(State(state): Shared, mut req: Request, next: Next) -> Respo
             .and_then(|dec| String::from_utf8(dec).ok())
             .and_then(|creds| {
                 let (u, p) = creds.split_once(':')?;
-                Some(ct_eq(u, user) & ct_eq(p, pass))
-            })
-            .unwrap_or(false);
+                Some((u.to_owned(), p.to_owned()))
+            });
+        // What: the Argon2id check runs off the async pool.
+        // Why: it is CPU and memory heavy by design.
+        let valid = match presented {
+            Some((u, p)) => {
+                let hash = hash.clone();
+                let user_ok = ct_eq(&u, user);
+                tokio::task::spawn_blocking(move || password_matches(&hash, &p))
+                    .await
+                    .unwrap_or(false)
+                    & user_ok
+            }
+            None => false,
+        };
         if !valid {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -2027,13 +2041,33 @@ fn decode_jwt_payload(token: &str) -> Result<Value, String> {
     serde_json::from_slice(&bytes).map_err(|e| format!("failed to parse JWT payload: {e}"))
 }
 
-// What: Argon2id PHC hash of a secondary's NATS password.
+// What: Argon2id PHC hash of one password.
 // Why: only the hash is stored; plaintext is shown once.
-fn hash_nats_password(password: &str) -> Result<String, String> {
+fn hash_password(password: &str) -> Result<String, String> {
     Argon2::default()
         .hash_password(password.as_bytes())
         .map(|hash| hash.to_string())
-        .map_err(|e| format!("failed to hash secondary password with Argon2id: {e}"))
+        .map_err(|e| format!("failed to hash the password with Argon2id: {e}"))
+}
+
+// What: the PHC hash from its base64url env form.
+// Why: a PHC string holds dollar signs; .env must not.
+fn decode_password_hash(value: &str) -> Result<String, String> {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .ok_or_else(|| "UI_AUTH_PASSWORD_HASH is no base64url value".to_string())
+}
+
+// What: true when the password matches the Argon2id hash.
+// Why: the login compares against a hash only.
+fn password_matches(stored_hash: &str, password: &str) -> bool {
+    PasswordHash::new(stored_hash).is_ok_and(|hash| {
+        Argon2::default()
+            .verify_password(password.as_bytes(), &hash)
+            .is_ok()
+    })
 }
 
 // What: the secondary a user and password belong to.
@@ -2420,7 +2454,7 @@ async fn register_secondary(
             StatusCode::SERVICE_UNAVAILABLE
         })?;
     let nats_password = new_nats_password();
-    let hash = hash_nats_password(&nats_password).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let hash = hash_password(&nats_password).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let reported = form
         .address
         .as_deref()
@@ -2558,7 +2592,7 @@ async fn rotate_token(
         return Err(StatusCode::UNAUTHORIZED);
     }
     let nats_password = new_nats_password();
-    let hash = hash_nats_password(&nats_password).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let hash = hash_password(&nats_password).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let changed = with_db(&state, |db| {
         db.execute(
             "UPDATE secondaries SET nats_password_hash = ? WHERE name = ?",
@@ -5505,20 +5539,28 @@ fn preflight(cfg: &Config) -> Result<Duration, String> {
     cfg.nats.validate()?;
     // What: auth must be fully set, or insecure chosen.
     // Why: a half-set pair would run without a login.
-    match (&cfg.auth_user, &cfg.auth_password) {
-        (Some(_), Some(_)) => {}
+    match (&cfg.auth_user, &cfg.auth_password_hash) {
+        (Some(_), Some(hash)) => {
+            // What: the stored value is an Argon2id hash.
+            // Why: anything else fails closed.
+            let parsed = PasswordHash::new(hash)
+                .map_err(|e| format!("UI_AUTH_PASSWORD_HASH is no PHC hash: {e}"))?;
+            if parsed.algorithm.as_str() != "argon2id" {
+                return Err("UI_AUTH_PASSWORD_HASH must be an Argon2id hash.".to_string());
+            }
+        }
         (None, None) if cfg.allow_insecure_ui => {
             tracing::warn!("ALLOW_INSECURE_UI=true: starting Admin-UI without authentication");
         }
         (None, None) => {
             return Err("Admin-UI authentication is required. Set UI_AUTH_USER and \
-                        UI_AUTH_PASSWORD, or explicitly set ALLOW_INSECURE_UI=true if you \
+                        UI_AUTH_PASSWORD_HASH, or explicitly set ALLOW_INSECURE_UI=true if you \
                         understand the risk."
                 .to_string());
         }
         _ => {
             return Err(
-                "UI_AUTH_USER and UI_AUTH_PASSWORD must either both be set or both be \
+                "UI_AUTH_USER and UI_AUTH_PASSWORD_HASH must either both be set or both be \
                         empty."
                     .to_string(),
             );
@@ -5906,8 +5948,31 @@ async fn run() -> anyhow::Result<()> {
 // Why: the server must not run as root.
 // From: Issue #1288 | PR #1858
 fn main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("hash-password") {
+        let phc = hash_password_from_stdin().map_err(anyhow::Error::msg)?;
+        println!(
+            "{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(phc)
+        );
+        return Ok(());
+    }
     container_root_start();
     run()
+}
+
+// What: Argon2id hash of the first stdin line (PHC form).
+// Why: setup.sh stores only this hash, never the password.
+// From: Issue #1683 | PR #1912
+fn hash_password_from_stdin() -> Result<String, String> {
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| format!("cannot read the password: {e}"))?;
+    let password = line.trim_end_matches(['\r', '\n']);
+    if password.is_empty() {
+        return Err("the password on stdin is empty".to_string());
+    }
+    hash_password(password)
 }
 
 // What: unit and handler tests; files and sockets used.
@@ -6429,7 +6494,7 @@ mod tests {
         "PROXY_HTTPS_URL",
         "NETDATA_URL",
         "DHCP_API_URL",
-        "DHCP_API_USER",
+        "KEA_CTRL_USER",
         "UI_SETTINGS_FILE",
         "KEA_CONFIG_SNAPSHOT_DIR",
         "DHCP_PROBE_REQUEST_FILE",
@@ -6450,10 +6515,11 @@ mod tests {
         "LANCACHE_SHARED_SECRET_DIR",
     ];
 
-    const NUMBER_KEYS: [(&str, &str); 9] = [
+    const NUMBER_KEYS: [(&str, &str); 10] = [
         ("PDNS_AUTH_API_PORT", "8081"),
         ("PDNS_HTTP_API_PORT", "8082"),
         ("DNS_ROLLBACK_PORT", "8083"),
+        ("KEA_CTRL_PORT", "8000"),
         ("DHCP_LEASE_TIME", "86400"),
         ("UI_SESSION_TTL_SECONDS", "3600"),
         ("KEEP_KNOWN_GOOD_CONFIGS", "7"),
@@ -6509,7 +6575,7 @@ mod tests {
         assert_eq!(cfg.cache_dir, "v-CACHE_DIR");
         assert_eq!(cfg.dns_state_dir, "v-DNS_STATE_DIR");
         assert_eq!(cfg.netdata_url, "v-NETDATA_URL");
-        assert_eq!(cfg.dhcp_api_url, "v-DHCP_API_URL");
+        assert_eq!(cfg.dhcp_api_url, "v-DHCP_API_URL:8000");
         assert_eq!(cfg.ui_settings_file, "v-UI_SETTINGS_FILE");
         assert_eq!(cfg.kea_config_snapshot_dir, "v-KEA_CONFIG_SNAPSHOT_DIR");
         assert_eq!(cfg.dhcp_probe_request_file, "v-DHCP_PROBE_REQUEST_FILE");
@@ -6548,7 +6614,7 @@ mod tests {
     fn config_load_defaults_for_optional_keys() {
         let cfg = load_from(&full_env()).unwrap();
         assert_eq!(cfg.auth_user, None);
-        assert_eq!(cfg.auth_password, None);
+        assert_eq!(cfg.auth_password_hash, None);
         assert!(cfg.security_headers_enabled);
         assert_eq!(cfg.hsts_mode, HstsMode::Auto);
         assert!(!cfg.dev_mode);
@@ -6580,7 +6646,7 @@ mod tests {
         let mut env = full_env();
         let extra = [
             ("UI_AUTH_USER", "admin"),
-            ("UI_AUTH_PASSWORD", "pw"),
+            ("UI_AUTH_PASSWORD_HASH", "aA"),
             ("UI_SECURITY_HEADERS", "false"),
             ("UI_HSTS_MODE", "always"),
             ("LANCACHE_DEV_MODE", "1"),
@@ -6604,7 +6670,7 @@ mod tests {
         }
         let cfg = load_from(&env).unwrap();
         assert_eq!(cfg.auth_user.as_deref(), Some("admin"));
-        assert_eq!(cfg.auth_password.as_deref(), Some("pw"));
+        assert_eq!(cfg.auth_password_hash.as_deref(), Some("h"));
         assert!(!cfg.security_headers_enabled);
         assert_eq!(cfg.hsts_mode, HstsMode::Always);
         assert!(cfg.dev_mode);
@@ -7505,9 +7571,9 @@ mod tests {
     fn nats_passwords_hash_to_argon2id() {
         let password = new_nats_password();
         let other = new_nats_password();
-        let hash = hash_nats_password(&password).unwrap();
+        let hash = hash_password(&password).unwrap();
         assert!(hash.starts_with("$argon2id$"), "{hash}");
-        assert_ne!(hash, hash_nats_password(&password).unwrap());
+        assert_ne!(hash, hash_password(&password).unwrap());
         let parsed = PasswordHash::new(&hash).unwrap();
         assert!(
             Argon2::default()
@@ -8502,8 +8568,24 @@ mod tests {
             }
             preflight(&load_from(&env).unwrap())
         };
-        let both = [("UI_AUTH_USER", "admin"), ("UI_AUTH_PASSWORD", "pw")];
+        let b64 = |v: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+        let phc = b64(&hash_password("pw").unwrap());
+        let both = [
+            ("UI_AUTH_USER", "admin"),
+            ("UI_AUTH_PASSWORD_HASH", phc.as_str()),
+        ];
         assert_eq!(with(&both), Ok(Duration::from_secs(3600)));
+        for bad in [
+            b64("pw"),
+            b64("$argon2i$v=19$m=16,t=2,p=1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNo"),
+        ] {
+            let err = with(&[
+                ("UI_AUTH_USER", "admin"),
+                ("UI_AUTH_PASSWORD_HASH", bad.as_str()),
+            ])
+            .unwrap_err();
+            assert!(err.starts_with("UI_AUTH_PASSWORD_HASH"), "{err}");
+        }
         assert_eq!(
             with(&[("ALLOW_INSECURE_UI", "true")]),
             Ok(Duration::from_secs(3600))
@@ -8513,10 +8595,13 @@ mod tests {
             missing.starts_with("Admin-UI authentication is required. Set UI_AUTH_USER"),
             "{missing}"
         );
-        for half in [("UI_AUTH_USER", "admin"), ("UI_AUTH_PASSWORD", "pw")] {
+        for half in [
+            ("UI_AUTH_USER", "admin"),
+            ("UI_AUTH_PASSWORD_HASH", phc.as_str()),
+        ] {
             let err = with(&[half, ("ALLOW_INSECURE_UI", "true")]).unwrap_err();
             assert!(
-                err.starts_with("UI_AUTH_USER and UI_AUTH_PASSWORD must either both be set"),
+                err.starts_with("UI_AUTH_USER and UI_AUTH_PASSWORD_HASH must either both be set"),
                 "{err}"
             );
         }
@@ -8845,13 +8930,24 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    // What: a password matches only its own Argon2id hash.
+    // Why: a wrong or broken hash never logs in.
+    #[test]
+    fn password_matches_only_its_argon2id_hash() {
+        let phc = hash_password("pw").unwrap();
+        assert!(phc.starts_with("$argon2id$"));
+        assert!(password_matches(&phc, "pw"));
+        assert!(!password_matches(&phc, "pW"));
+        assert!(!password_matches("pw", "pw"));
+    }
+
     // What: Basic auth needs both parts to match.
     // Why: one correct half must never open the admin UI.
     #[tokio::test]
     async fn basic_auth_needs_user_and_password() {
         let (base, _state, dir) = test_server(|cfg| {
             cfg.auth_user = Some("op".to_string());
-            cfg.auth_password = Some("pw".to_string());
+            cfg.auth_password_hash = Some(hash_password("pw").unwrap());
         })
         .await;
         let client = reqwest::Client::new();

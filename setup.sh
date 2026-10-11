@@ -53,11 +53,6 @@ APT_BUILDX_PACKAGES=("$DOCKER_BUILDX_PLUGIN" docker-buildx)
 PACMAN_COMPOSE="docker-compose"
 PACMAN_DOCKER_PACKAGES=(docker "$PACMAN_COMPOSE" docker-buildx)
 
-# What: the per-service central logging switches
-# Why: .env, the Admin UI and the watchdog share them
-# From: Issue #1683 | PR #1912
-LOGGING_SWITCH_KEYS=(LOGGING_PROXY_ENABLED LOGGING_DNS_ENABLED LOGGING_DHCP_ENABLED LOGGING_UI_ENABLED)
-
 # ── Colors (only when connected to a terminal) ────────────────────────────────
 if [[ -t 1 ]]; then
     BOLD="\033[1m"; GREEN="\033[0;32m"; YELLOW="\033[0;33m"
@@ -428,7 +423,7 @@ confirm() {
 # What: runs a broadcast DHCP probe before Kea activation
 # Why: stops or warns before a second DHCP server exists
 run_kea_dhcp_activation_preflight() {
-    local env_file="$1" output status server_identifier=""
+    local env_file="$1" output status log_port server_identifier=""
 
     [[ "$DHCP_MODE" = "kea" ]] || return 0
 
@@ -438,7 +433,8 @@ run_kea_dhcp_activation_preflight() {
     # What: one supervisor probe run in the dhcp image
     # Why: the same probe as the Admin UI; no extra package
     # From: Issue #1683 | PR #1912
-    if ! output=$(docker compose --env-file "$env_file" -f "$PROD_COMPOSE" run --rm --no-deps dhcp \
+    log_port=$(prod_env_default LANCACHE_LOG_PORT) || exit $?
+    if ! output=$(LANCACHE_LOG_PORT="$log_port" docker compose --env-file "$env_file" -f "$PROD_COMPOSE" run --rm --no-deps dhcp \
         probe) || ! status=$(json_value .status "$output") || [[ "$status" = unavailable || -z "$status" ]]; then
         print_warn "DHCP discovery preflight could not be executed inside the dhcp image."
         print_warn "Kea activation will require an explicit confirmation because the safety check did not complete."
@@ -1556,7 +1552,9 @@ stack_compose() {
     local -a stack_files
     shift 2
     compose_files_into stack_files "$install_dir"
-    docker compose --env-file "$env_file" "${stack_files[@]}" "$@"
+    local log_port
+    log_port=$(prod_env_default LANCACHE_LOG_PORT) || exit $?
+    LANCACHE_LOG_PORT="$log_port" docker compose --env-file "$env_file" "${stack_files[@]}" "$@"
 }
 
 # What: sorted entries of a volume/dir: mode, owner, hash
@@ -2112,49 +2110,37 @@ deploy_prod_repo_input_paths() {
 }
 
 
-# What: default of a key, read from deploy/prod/.env
-# Why: one owner for the defaults compose maps
-# From: Issue #1683 | PR #1858
+# What: stores the Argon2id hash of an Admin UI password
+# Why: only the hash is kept; a hash cannot be read back
+# From: Issue #1683 | PR #1912
+set_ui_password_hash() {
+    local install_dir="$1" env_file="$2" password="$3" hash
+    hash=$(printf '%s' "$password" | stack_compose "$install_dir" "$env_file" run --rm --no-deps -T ui hash-password) \
+        || die "Failed to hash the Admin UI password in the ui image (exit $?); ${env_file} holds no password hash."
+    [[ "$hash" =~ ^[A-Za-z0-9_-]+$ ]] || die "The ui image returned no usable password hash."
+    set_env_key UI_AUTH_PASSWORD_HASH "$hash" "$env_file"
+}
+
+# What: replaces a plaintext Admin UI password by its hash
+# Why: no plaintext password stays on disk (AG-SEC-003)
+# From: Issue #1683 | PR #1912
+ensure_ui_password_hash() {
+    local install_dir="$1" env_file="$2" password
+    password=$(get_env_var UI_AUTH_PASSWORD "$env_file") || exit $?
+    [[ -n "$password" ]] || return 0
+    set_ui_password_hash "$install_dir" "$env_file" "$password"
+    remove_env_key UI_AUTH_PASSWORD "$env_file"
+    print_ok "Admin UI password stored as an Argon2id hash; the plaintext value was removed"
+}
+
+# What: default of a key, read from the SOT runtime.defaults
+# Why: build-manifest.yml is the one owner; no .env copy
+# From: Issue #1683 | PR #1912
 prod_env_default() {
-    local template="${PROD_COMPOSE%/*}/.env"
-    env_key_exists "$1" "$template" || die "$template defines no default for $1."
-    get_env_var "$1" "$template"
-}
-
-# What: adds each missing KEY with the deploy/prod default
-# Why: an existing value stays, even an intentional empty
-# From: Issue #1683 | PR #1858
-append_env_defaults_if_missing() {
-    local env_file="$1" key default
-    shift
-    for key in "$@"; do
-        default=$(prod_env_default "$key") || die "Cannot read the default of $key (exit $?)."
-        append_env_key_if_missing "$key" "$default" "$env_file"
-    done
-}
-
-# What: fills each empty or missing KEY from deploy/prod
-# Why: compose requires these keys to be non-empty
-# From: Issue #1683 | PR #1858
-set_env_defaults_if_empty_or_missing() {
-    local env_file="$1" key default
-    shift
-    for key in "$@"; do
-        default=$(prod_env_default "$key") || die "Cannot read the default of $key (exit $?)."
-        set_env_key_if_empty_or_missing "$key" "$default" "$env_file"
-    done
-}
-
-# What: fills keys whose only value owner is deploy/prod
-# Why: install and update share one list; no value copies
-# From: Issue #1683 | PR #1858
-set_template_owned_env_defaults() {
-    set_env_defaults_if_empty_or_missing "$1" NGINX_UPSTREAM_RESOLVER PROXY_SECURITY_MODE \
-        KEA_CONFIG_SNAPSHOT_DIR KEEP_KNOWN_GOOD_CONFIGS LANCACHE_LOG_PORT NTP_UPSTREAM_SERVERS \
-        KEA_CTRL_USER KEA_CTRL_PORT NATS_UI_USER NATS_DNS_WRITER_USER NATS_CALLOUT_USER NATS_SYS_USER
-    append_env_defaults_if_missing "$1" PROXY_ALLOWED_CLIENT_CIDRS NTP_ALLOWED_CLIENT_CIDRS \
-        DHCP_NTP_SERVERS CACHEHAMSTER_CREDENTIAL_PERSISTENCE CACHEHAMSTER_STEAM_CREDENTIAL \
-        CACHEHAMSTER_URLS
+    local list
+    list=$(lancache_sot_value defaults runtime) || exit $?
+    tr '|' '\n' <<< "$list" | awk -v p="$1=" 'index($0, p) == 1 && !f { print substr($0, length(p) + 1); f = 1 } END { exit !f }' \
+        || die "The SOT runtime.defaults holds no default for $1."
 }
 
 # What: "svc KEY [TARGET]" rows moved out of config/prod
@@ -2322,7 +2308,7 @@ ensure_secret_env_key() {
 }
 
 # What: "50g"/"50G"/"50" as bare GB; rc 1 if not a number
-# Why: callers pick the fallback from deploy/prod/.env
+# Why: callers pick the fallback from the SOT defaults
 # From: Issue #1683 | PR #1858
 cache_size_gb_from_env() {
     local cache_max_size="$1"
@@ -3037,7 +3023,7 @@ migrate_env_for_update() (
     # Why: undeclared names leaked as globals
     local dhcp_proxy_pxe_boot_server dhcp_proxy_pxe_boot_filename_bios dhcp_proxy_pxe_boot_filename_uefi
     local default_cache_size default_cache_gb
-    local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_https ui_generated_password ui_password ui_user
+    local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_https ui_generated_password ui_password ui_password_hash ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_http upstream_dhcp_ip
     local state_keys state_key state_sub state_sub_dir legacy_path
     local state_dir ui_session_ttl
@@ -3213,7 +3199,6 @@ migrate_env_for_update() (
     fi
     set_env_key CACHE_MEM_MB "$cache_mem_mb" "$env_file"
     migrate_proxy_security_mode_for_update "$env_file"
-    set_template_owned_env_defaults "$env_file"
     # What: image keys were resolved at the top
     # Why: the platform check runs before migration writes
 
@@ -3224,24 +3209,15 @@ migrate_env_for_update() (
     # What: keys for DHCP and Kea always exist
     # Why: Compose and the UI read one full config
     append_env_key_if_missing DHCP_ENABLED "0" "$env_file"
-    append_env_defaults_if_missing "$env_file" DHCP_SUBNET DHCP_GATEWAY DHCP_RANGE_START DHCP_RANGE_END
 
     # What: NTP can stay disabled; its key must still exist
     # Why: Compose and the UI read one complete config
     # From: Issue #1683 | PR #1858
     append_env_key_if_missing NTP_ENABLED "0" "$env_file"
 
-    # What: per-service logging; LOGGING_ENABLED seeds it
-    # Why: the old all-or-nothing choice survives the update
+    # What: drops the retired global logging switch
+    # Why: the Admin UI holds one switch per service
     # From: Issue #1683 | PR #1912
-    local old_logging="1" logging_key
-    if env_key_exists LOGGING_ENABLED "$env_file"; then
-        old_logging=$(get_env_var LOGGING_ENABLED "$env_file") || exit $?
-        [[ "$old_logging" = "0" ]] || old_logging="1"
-    fi
-    for logging_key in "${LOGGING_SWITCH_KEYS[@]}"; do
-        append_env_key_if_missing "$logging_key" "$old_logging" "$env_file"
-    done
     remove_env_key LOGGING_ENABLED "$env_file"
 
     compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file") || exit $?
@@ -3278,13 +3254,6 @@ migrate_env_for_update() (
     dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$env_file") || exit $?
     dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file") || exit $?
     upstream_dhcp_ip=$(get_env_var UPSTREAM_DHCP_IP "$env_file") || exit $?
-    # What: dnsmasq keys exist even while DHCP is off
-    # Why: the .env lists every option an operator can set
-    # From: Issue #1683 | PR #1858
-    append_env_defaults_if_missing "$env_file" DHCP_RELAY_LOCAL_ADDR DHCP_PROXY_INTERFACE \
-        DHCP_PROXY_ROUTER DHCP_NTP_SERVERS DHCP_PROXY_DOMAIN DHCP_PROXY_BOOT_FILENAME \
-        DHCP_PROXY_BOOT_SERVER DHCP_PROXY_CUSTOM_OPTIONS DHCP_PROXY_PXE_BOOT_SERVER \
-        DHCP_PROXY_PXE_BOOT_FILENAME_BIOS DHCP_PROXY_PXE_BOOT_FILENAME_UEFI
     dhcp_relay_local_addr=$(get_env_var DHCP_RELAY_LOCAL_ADDR "$env_file") || exit $?
     dhcp_proxy_interface=$(get_env_var DHCP_PROXY_INTERFACE "$env_file") || exit $?
     dhcp_proxy_router=$(get_env_var DHCP_PROXY_ROUTER "$env_file") || exit $?
@@ -3400,17 +3369,20 @@ migrate_env_for_update() (
     # What: UI auth is user-chosen; user needs a password
     # Why: unset user and password mean insecure UI
     append_env_key_if_missing UI_AUTH_USER "" "$env_file"
-    append_env_key_if_missing UI_AUTH_PASSWORD "" "$env_file"
+    append_env_key_if_missing UI_AUTH_PASSWORD_HASH "" "$env_file"
     ui_user=$(get_env_var UI_AUTH_USER "$env_file") || exit $?
     ui_password=$(get_env_var UI_AUTH_PASSWORD "$env_file") || exit $?
-    if [[ -n "$ui_user" ]] && ! env_key_has_usable_secret UI_AUTH_PASSWORD "$env_file"; then
+    ui_password_hash=$(get_env_var UI_AUTH_PASSWORD_HASH "$env_file") || exit $?
+    if [[ -n "$ui_user" && -z "$ui_password_hash" ]] && ! env_key_has_usable_secret UI_AUTH_PASSWORD "$env_file"; then
         ui_generated_password=$(generate_secret_value UI_AUTH_PASSWORD alnum20) || exit $?
         set_env_key UI_AUTH_PASSWORD "$ui_generated_password" "$env_file"
         print_ok "Generated missing Admin UI password because UI_AUTH_USER is set"
+        print_ok "Admin UI user $ui_user, password: ${BOLD}${ui_generated_password}${RESET}"
+        print_warn "Note the password now; only its hash is stored."
     fi
 
     allow_insecure_ui=false
-    [[ -z "$ui_user" && -z "$ui_password" ]] && allow_insecure_ui=true
+    [[ -z "$ui_user" && -z "$ui_password" && -z "$ui_password_hash" ]] && allow_insecure_ui=true
     append_env_key_if_missing ALLOW_INSECURE_UI "$allow_insecure_ui" "$env_file"
 
     print_ok ".env is complete for the current deploy/prod template"
@@ -4778,6 +4750,7 @@ perform_stack_update_flow() {
     stack_compose "$install_dir" "$_UPDATE_ENV_FILE" pull \
         || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh update."
 
+    ensure_ui_password_hash "$install_dir" "$_UPDATE_ENV_FILE"
     validate_compose_config "$install_dir"
 
     local apply_rc=0
@@ -4953,7 +4926,7 @@ cmd_converge_reconcile() {
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}" env_file
     local ui_channel ui_auto_update current_channel current_auto_update
     local ui_cache_max_gb current_cache_max_gb
-    local ui_dhcp_mode current_dhcp_mode ui_logging_enabled current_logging_enabled logging_key
+    local ui_dhcp_mode current_dhcp_mode
 
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
     # What: a tick before the first install does nothing
@@ -4995,21 +4968,6 @@ cmd_converge_reconcile() {
             print_ok "DHCP mode updated from Admin UI: ${current_dhcp_mode:-<unset>} -> $ui_dhcp_mode"
         fi
     fi
-
-    # What: folds the Admin UI logging switches into .env
-    # Why: .env is the one owner of each LOGGING_*_ENABLED
-    # From: Issue #1683 | PR #1912
-    for logging_key in "${LOGGING_SWITCH_KEYS[@]}"; do
-        ui_logging_enabled=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "$logging_key") \
-            || die "Cannot read the UI setting $logging_key (exit $?)."
-        if [[ "$ui_logging_enabled" = "0" || "$ui_logging_enabled" = "1" ]]; then
-            current_logging_enabled=$(get_env_var "$logging_key" "$env_file") || exit $?
-            if [[ "$ui_logging_enabled" != "$current_logging_enabled" ]]; then
-                set_env_key "$logging_key" "$ui_logging_enabled" "$env_file"
-                print_ok "$logging_key updated from Admin UI: ${current_logging_enabled:-<unset>} -> $ui_logging_enabled"
-            fi
-        fi
-    done
 
     # What: reconciles the timer with .env's value
     # Why: a manual .env edit must also take effect
@@ -5117,7 +5075,8 @@ managed_secret_env_keys() {
         NATS_CALLOUT_PASSWORD \
         NATS_SYS_PASSWORD \
         SECONDARY_REGISTRATION_TOKEN \
-        UI_AUTH_PASSWORD
+        UI_AUTH_PASSWORD \
+        UI_AUTH_PASSWORD_HASH
 }
 
 # What: name-pattern net for secret-shaped env keys
@@ -5604,13 +5563,12 @@ reset_kea_to_last_known_good_config() {
     # What: maps a 0.0.0.0 Control Agent host to 127.0.0.1
     # Why: dhcp uses host networking; 0.0.0.0 is no target
     [[ "$kea_ctrl_host" = "0.0.0.0" ]] && kea_ctrl_host="127.0.0.1"
-    # What: Control Agent user and port from the .env
-    # Why: .env owns both; dhcp, ui and this read them
-    # From: Issue #1683 | PR #1858
-    kea_ctrl_user=$(get_env_var KEA_CTRL_USER "$env_file") || exit $?
-    kea_ctrl_port=$(get_env_var KEA_CTRL_PORT "$env_file") || exit $?
-    [[ -n "$kea_ctrl_user" && "$kea_ctrl_port" =~ ^[0-9]+$ ]] \
-        || die "KEA_CTRL_USER or KEA_CTRL_PORT is missing in $env_file."
+    # What: Control Agent user and port from the SOT
+    # Why: the SOT owns both; dhcp, ui and this read them
+    # From: Issue #1683 | PR #1912
+    kea_ctrl_user=$(prod_env_default KEA_CTRL_USER) || exit $?
+    kea_ctrl_port=$(prod_env_default KEA_CTRL_PORT) || exit $?
+    [[ "$kea_ctrl_port" =~ ^[0-9]+$ ]] || die "The SOT KEA_CTRL_PORT is not a port number."
     kea_ctrl_url="http://${kea_ctrl_host}:${kea_ctrl_port}/"
 
     state_dir=$(install_state_root "$install_dir" "$env_file") \
@@ -6774,13 +6732,13 @@ while true; do
     print_error "Invalid DHCP mode: $DHCP_MODE"
 done
 
-# What: DHCP defaults come from the deploy/prod template
-# Why: AG-SEC-007; the template owns these values
-# From: Issue #1683 | PR #1858
-DHCP_SUBNET_DEFAULT=$(get_env_var DHCP_SUBNET "$INSTALL_DIR/.env") || exit $?
-DHCP_GATEWAY_DEFAULT=$(get_env_var DHCP_GATEWAY "$INSTALL_DIR/.env") || exit $?
-DHCP_RANGE_START_DEFAULT=$(get_env_var DHCP_RANGE_START "$INSTALL_DIR/.env") || exit $?
-DHCP_RANGE_END_DEFAULT=$(get_env_var DHCP_RANGE_END "$INSTALL_DIR/.env") || exit $?
+# What: DHCP defaults come from the SOT runtime.defaults
+# Why: AG-SEC-007; the SOT owns these values
+# From: Issue #1683 | PR #1912
+DHCP_SUBNET_DEFAULT=$(prod_env_default DHCP_SUBNET) || exit $?
+DHCP_GATEWAY_DEFAULT=$(prod_env_default DHCP_GATEWAY) || exit $?
+DHCP_RANGE_START_DEFAULT=$(prod_env_default DHCP_RANGE_START) || exit $?
+DHCP_RANGE_END_DEFAULT=$(prod_env_default DHCP_RANGE_END) || exit $?
 DHCP_ENABLED=0
 KEA_DATA_DIR=""
 DHCP_SUBNET=""
@@ -6799,7 +6757,7 @@ DHCP_RELAY_LOCAL_ADDR=""
 # From: Issue #450 | PR #1912
 DHCP_PROXY_INTERFACE=""
 DHCP_PROXY_ROUTER=""
-DHCP_NTP_SERVERS=$(prod_env_default DHCP_NTP_SERVERS) || die "Cannot read the default of DHCP_NTP_SERVERS (exit $?)."
+DHCP_NTP_SERVERS=""
 DHCP_PROXY_DOMAIN=""
 DHCP_PROXY_BOOT_FILENAME=""
 DHCP_PROXY_BOOT_SERVER=""
@@ -7056,17 +7014,6 @@ else
     print_ok "LanCache-NG-NTP skipped — can be enabled later from the Admin UI"
 fi
 
-# ── 7c. Central logging ───────────────────────────────────────────────────────
-# What: central logging starts on for every service
-# Why: the operator switches each service in the Admin UI
-# From: Issue #1683 | PR #1912
-print_step "Central logging"
-
-for logging_key in "${LOGGING_SWITCH_KEYS[@]}"; do
-    printf -v "$logging_key" '%s' 1
-done
-print_ok "Central logging enabled for proxy, dns, dhcp and ui -- switch each in the Admin UI (Logs)"
-
 # ── 8. Admin-UI access control ────────────────────────────────────────────────
 print_step "Admin-UI access control"
 
@@ -7077,7 +7024,8 @@ printf "  To restrict the UI to this host later, set UI_BIND_IP=127.0.0.1 in .en
 ask "Protect Admin-UI with password? [Y/n]" "Y"
 UI_AUTH_USER=""
 UI_AUTH_PASSWORD=""
-ALLOW_INSECURE_UI=false
+UI_AUTH_PASSWORD_HASH=""
+ALLOW_INSECURE_UI=$(prod_env_default ALLOW_INSECURE_UI) || exit $?
 if [[ "${REPLY,,}" = "y" ]]; then
     ask "Username" "admin"
     UI_AUTH_USER="$REPLY"
@@ -7091,9 +7039,14 @@ if [[ "${REPLY,,}" = "y" ]]; then
     fi
     if [[ -f "$ENV_LOCAL" ]] \
         && [[ "$existing_ui_user" = "$UI_AUTH_USER" ]] \
+        && env_key_has_usable_secret UI_AUTH_PASSWORD_HASH "$ENV_LOCAL"; then
+        UI_AUTH_PASSWORD_HASH=$(get_env_var UI_AUTH_PASSWORD_HASH "$ENV_LOCAL") || exit $?
+        print_ok "Existing Admin-UI password preserved"
+    elif [[ -f "$ENV_LOCAL" ]] \
+        && [[ "$existing_ui_user" = "$UI_AUTH_USER" ]] \
         && env_key_has_usable_secret UI_AUTH_PASSWORD "$ENV_LOCAL"; then
         UI_AUTH_PASSWORD=$(get_env_var UI_AUTH_PASSWORD "$ENV_LOCAL") || exit $?
-        print_ok "Existing Admin-UI password preserved"
+        print_ok "Existing Admin-UI password preserved; it is stored as a hash after the image pull"
     elif [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
         # What: introspection mode prints no real secret
         # Why: repeat runs must stay deterministic
@@ -7105,7 +7058,7 @@ if [[ "${REPLY,,}" = "y" ]]; then
         print_ok "Credentials:"
         printf "    User:     ${BOLD}%s${RESET}\n" "$UI_AUTH_USER"
         printf "    Password: ${BOLD}%s${RESET}\n" "$UI_AUTH_PASSWORD"
-        print_warn "Note the password now — it will also appear in $ENV_LOCAL"
+        print_warn "Note the password now; only its hash is stored in $ENV_LOCAL"
         printf "\n"
     fi
 else
@@ -7152,16 +7105,12 @@ PDNS_API_KEY=$(get_or_generate_secret PDNS_API_KEY "$env_file" hex32)
 # What: NETDATA_ALARM_TOKEN gates the netdata-alarm POST
 # Why: the netdata-alarms route needs a shared token
 NETDATA_ALARM_TOKEN=$(get_or_generate_secret NETDATA_ALARM_TOKEN "$env_file" hex32)
-# What: NATS role users: the kept value or empty
-# Why: the template owner fills them after the write
-# From: Issue #1683 | PR #1858
-NATS_UI_USER=$(get_env_var NATS_UI_USER "$env_file")
+# What: NATS role passwords: the kept value or generated
+# Why: the role users come from the SOT, not from .env.local
+# From: Issue #1683 | PR #1912
 NATS_UI_PASSWORD=$(get_or_generate_secret NATS_UI_PASSWORD "$env_file" hex32)
-NATS_DNS_WRITER_USER=$(get_env_var NATS_DNS_WRITER_USER "$env_file")
 NATS_DNS_WRITER_PASSWORD=$(get_or_generate_secret NATS_DNS_WRITER_PASSWORD "$env_file" hex32)
-NATS_CALLOUT_USER=$(get_env_var NATS_CALLOUT_USER "$env_file")
 NATS_CALLOUT_PASSWORD=$(get_or_generate_secret NATS_CALLOUT_PASSWORD "$env_file" hex32)
-NATS_SYS_USER=$(get_env_var NATS_SYS_USER "$env_file")
 NATS_SYS_PASSWORD=$(get_or_generate_secret NATS_SYS_PASSWORD "$env_file" hex32)
 SECONDARY_REGISTRATION_TOKEN=$(get_or_generate_secret SECONDARY_REGISTRATION_TOKEN "$env_file" hex32)
 UI_SESSION_TTL_SECONDS=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file")
@@ -7204,25 +7153,17 @@ validate_env_values_for_initial_write \
     "DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI}" \
     "NTP_ENABLED=${NTP_ENABLED}" \
     "NTP_DATA_DIR=${NTP_DATA_DIR}" \
-    "LOGGING_PROXY_ENABLED=${LOGGING_PROXY_ENABLED}" \
-    "LOGGING_DNS_ENABLED=${LOGGING_DNS_ENABLED}" \
-    "LOGGING_DHCP_ENABLED=${LOGGING_DHCP_ENABLED}" \
-    "LOGGING_UI_ENABLED=${LOGGING_UI_ENABLED}" \
     "KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}" \
     "DDNS_TSIG_KEY=${DDNS_TSIG_KEY}" \
     "PDNS_API_KEY=${PDNS_API_KEY}" \
-    "NATS_UI_USER=${NATS_UI_USER}" \
     "NATS_UI_PASSWORD=${NATS_UI_PASSWORD}" \
-    "NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER}" \
     "NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD}" \
-    "NATS_CALLOUT_USER=${NATS_CALLOUT_USER}" \
     "NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD}" \
-    "NATS_SYS_USER=${NATS_SYS_USER}" \
     "NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD}" \
     "SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}" \
     "UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS}" \
     "UI_AUTH_USER=${UI_AUTH_USER}" \
-    "UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}" \
+    "UI_AUTH_PASSWORD_HASH=${UI_AUTH_PASSWORD_HASH}" \
     "ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}" \
     "UI_BIND_IP=${IP_HTTP}"
 
@@ -7298,14 +7239,6 @@ DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI}
 NTP_ENABLED=${NTP_ENABLED}
 NTP_DATA_DIR=${NTP_DATA_DIR}
 
-# ── Central logging ────────────────────────────────────────────────────────────
-# Per-service central logging: 1 on, 0 off. On by default; the Admin UI
-# switches each service. The services container always logs.
-LOGGING_PROXY_ENABLED=${LOGGING_PROXY_ENABLED}
-LOGGING_DNS_ENABLED=${LOGGING_DNS_ENABLED}
-LOGGING_DHCP_ENABLED=${LOGGING_DHCP_ENABLED}
-LOGGING_UI_ENABLED=${LOGGING_UI_ENABLED}
-
 # Kea Control Agent/API token shared by DHCP and Admin UI. Keep secret.
 KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
 
@@ -7324,19 +7257,15 @@ NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
 
 # ── NATS (DNS-record sync bus) ─────────────────────────────────────────────────
 # UI NATS role (generated, do not change)
-NATS_UI_USER=${NATS_UI_USER}
 NATS_UI_PASSWORD=${NATS_UI_PASSWORD}
 # DNS writer role for primary DNS containers (generated, do not change)
-NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER}
 NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD}
 # Admin UI's own NATS identity for answering auth-callout requests for
 # registered secondaries (generated, do not change)
-NATS_CALLOUT_USER=${NATS_CALLOUT_USER}
 NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD}
 # System-account identity (generated, do not change). Used only by the Admin
 # UI's kicker connection (nats_kick.rs) to look up and force-disconnect a
 # removed/rotated secondary's live NATS connection (issue #681).
-NATS_SYS_USER=${NATS_SYS_USER}
 NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD}
 # Token for setup.sh secondary — anyone who knows this can register a secondary
 SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
@@ -7351,7 +7280,7 @@ AUTO_UPDATE_ENABLED=${AUTO_UPDATE_ENABLED}
 # ── Admin-UI ───────────────────────────────────────────────────────────────────
 # Empty auth values are only allowed when ALLOW_INSECURE_UI=true is set explicitly.
 UI_AUTH_USER=${UI_AUTH_USER}
-UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}
+UI_AUTH_PASSWORD_HASH=${UI_AUTH_PASSWORD_HASH}
 UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS}
 ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}
 
@@ -7359,7 +7288,6 @@ ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}
 # Set to 127.0.0.1 to restrict access to this host.
 UI_BIND_IP=${IP_HTTP}
 EOF
-set_template_owned_env_defaults "$ENV_LOCAL"
 print_ok ".env.local written: $ENV_LOCAL"
 write_lancache_image_refs "$ENV_LOCAL" "$LANCACHE_IMAGE_REFS"
 
@@ -7447,7 +7375,7 @@ if [[ "$NTP_ENABLED" = "1" ]]; then
 else
     printf "  %-26s %s\n" "LanCache-NG-NTP:" "disabled"
 fi
-printf "  %-26s %s\n" "Central logging:" "proxy=${LOGGING_PROXY_ENABLED} dns=${LOGGING_DNS_ENABLED} dhcp=${LOGGING_DHCP_ENABLED} ui=${LOGGING_UI_ENABLED} (1 on, 0 off)"
+printf "  %-26s %s\n" "Central logging:" "on for every service; switch each in the Admin UI (Logs)"
 if [[ "$AUTO_UPDATE_ENABLED" = "1" ]]; then
     printf "  %-26s %s\n" "Scheduled updates:"        "enabled (ordered, health-gated, daily)"
 else
@@ -7477,6 +7405,13 @@ print_step "Pulling images"
 cd "$INSTALL_DIR"
 stack_compose "$INSTALL_DIR" "$ENV_LOCAL" pull \
     || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh."
+
+# What: hashes the chosen Admin UI password via the ui image
+# Why: the plaintext never reaches .env.local
+# From: Issue #1683 | PR #1912
+if [[ -n "$UI_AUTH_PASSWORD" ]]; then
+    set_ui_password_hash "$INSTALL_DIR" "$ENV_LOCAL" "$UI_AUTH_PASSWORD"
+fi
 
 run_kea_dhcp_activation_preflight "$ENV_LOCAL"
 

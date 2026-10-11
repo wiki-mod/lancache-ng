@@ -7109,7 +7109,7 @@ _ci_validate_shared_secret() {
 _ci_runtime_default() {
     local key="$1" list val
     list="$(_ci_required_field runtime defaults block)" || return 2
-    val="$(tr ' ' '\n' <<< "${list}" | sed -n "s/^${key}=//p")"
+    val="$(tr '|' '\n' <<< "${list}" | sed -n "s/^${key}=//p")"
     if [ -z "${val}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0125]" "key=\"${key}\" reason=\"not in the SOT runtime.defaults\""
         return 2
@@ -7230,21 +7230,15 @@ _ci_validate_new_snapshot() {
 }
 
 # What: http-port or user of the Kea control agent
-# Why: the deploy .env owns both; dhcp renders from them
-# From: Issue #763 | PR #1858
+# Why: the SOT runtime.defaults owns both; dhcp renders them
+# From: Issue #763 | PR #1912
 _ci_validate_kea_agent() {
-    local field="$1" compose key out
+    local field="$1"
     case "${field}" in
-        http-port) key=KEA_CTRL_PORT ;;
-        user) key=KEA_CTRL_USER ;;
+        http-port) _ci_runtime_default KEA_CTRL_PORT ;;
+        user) _ci_runtime_default KEA_CTRL_USER ;;
         *) ci_log "[CI-ERROR-VALIDATE-0109]" "field=\"${field}\" reason=\"unknown Kea agent field\""; return 2 ;;
     esac
-    compose="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    out="$(_ci_file_value "$(dirname "${compose}")/.env" "s/^${key}=([^[:space:]\$]+)$/\\1/p")" || {
-        [ "$?" -eq 2 ] || ci_error "[CI-ERROR-VALIDATE-0110]" "file=\"$(dirname "${compose}")/.env\" field=\"${field}\" reason=\"need exactly one literal value\"" "${out}"
-        return 2
-    }
-    printf '%s\n' "${out}"
 }
 
 # What: One Kea Control Agent command; prints the reply.
@@ -7366,13 +7360,12 @@ _ci_validate_kea_round_trip() {
         ci_log "[CI-ERROR-VALIDATE-0113]" "path=\"${inst}/.env.local\" reason=\"an .env.local exists; validate never overwrites it\""
         return 2
     fi
-    # What: .env.local: deploy .env plus this run's KEA_*
+    # What: .env.local holds only this run's KEA_* values
     # Why: setup.sh reads a deploy/prod install's .env.local
-    # From: Issue #763 | PR #1858
-    if ! out="$(grep -v -E '^(KEA_CTRL_TOKEN|KEA_CTRL_HOST|KEA_DATA_DIR)=' "${inst}/.env" 2>&1)" \
-        || ! (umask 077 && printf '%s\nKEA_CTRL_TOKEN=%s\nKEA_CTRL_HOST=%s\nKEA_DATA_DIR=%s\n' \
-            "${out}" "${token}" "${kip}" "${dir}" > "${inst}/.env.local"); then
-        ci_error "[CI-ERROR-VALIDATE-0093]" "dir=\"${inst}\" reason=\"setup.sh .env.local not written\"" "${out}"
+    # From: Issue #763 | PR #1912
+    if ! (umask 077 && printf 'KEA_CTRL_TOKEN=%s\nKEA_CTRL_HOST=%s\nKEA_DATA_DIR=%s\n' \
+            "${token}" "${kip}" "${dir}" > "${inst}/.env.local"); then
+        ci_log "[CI-ERROR-VALIDATE-0093]" "dir=\"${inst}\" reason=\"setup.sh .env.local not written\""
         rm -f "${inst}/.env.local"
         return 2
     fi
@@ -7540,14 +7533,14 @@ _ci_validate_stack() {
     holder="$(_ci_record_field "${reservation}" holder)" || return 2
     subnet="$(_ci_record_field "${reservation}" subnet)" || { _ci_validate_release "${holder}"; return 2; }
     project="$(_ci_validate_project "${subnet}")" || { _ci_validate_release "${holder}"; return 2; }
-    # What: per-run state root; prod .env names the host's.
+    # What: per-run state root; no host path is used.
     # Why: isolate runs; never touch a host's real state.
     # From: Issue #1683
     shared="$(_ci_validate_shared_dir)" || { _ci_validate_release "${holder}"; return 2; }
     export LANCACHE_STATE_DIR="${shared}/state/${project}"
-    # What: configured values over the .env template blanks.
-    # Why: the template leaves required keys empty.
-    # From: Issue #1683
+    # What: the SOT fixture env for every compose call.
+    # Why: no .env exists; compose reads the process env.
+    # From: Issue #1683 | PR #1912
     local -a venv=()
     local vfx
     vfx="$(_ci_validation_env)" || { _ci_validate_release "${holder}"; return 2; }
@@ -11402,12 +11395,12 @@ _ci_check_proxy_cache_env_doc_drift() {
         produced="$(grep -E '^CACHE_[A-Z_]+=' "${defaults}")" || produced_rc=$?
         _ci_producer_ok "${produced_rc}" 1 || return 2
     else
-        # What: values compose gives proxy, own-dir .env
+        # What: values compose gives proxy, SOT fixture env
         # Why: an empty one falls back to runtime.defaults
-        # From: Issue #1683 | PR #1858
+        # From: Issue #1683 | PR #1912
         dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-        if ! raw="$(_ci_compose_query "${CI_REPO_ROOT}/${dep}" "${CI_REPO_ROOT}/$(dirname "${dep}")/.env" config --format json 2>&1)"; then
-            ci_error "[CI-ERROR-CHECK-0110]" "file=\"${dep}\" reason=\"deploy compose not renderable with its .env\"" "${raw}"
+        if ! raw="$(_ci_compose_query "${CI_REPO_ROOT}/${dep}" "" config --format json 2>&1)"; then
+            ci_error "[CI-ERROR-CHECK-0110]" "file=\"${dep}\" reason=\"deploy compose not renderable with the SOT fixture env\"" "${raw}"
             return 2
         fi
         produced="$(_ci_capture 0 jq -r '.services.proxy.environment // {} | to_entries[]
@@ -11527,14 +11520,12 @@ _ci_check_prod_state_wiring() {
     local repo_root="${1:-${CI_REPO_ROOT}}" dep
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     local compose="${repo_root}/${dep}"
-    local env_file
-    env_file="${repo_root}/$(dirname "${dep}")/.env"
     local doc doc_rel
     doc_rel="$(_ci_variable CI_BACKUP_RESTORE_DOC)" || return 2
     doc="${repo_root}/${doc_rel}"
     local -a viol=()
     local key f keys su
-    for f in "${compose}" "${env_file}" "${doc}"; do
+    for f in "${compose}" "${doc}"; do
         [ -f "${f}" ] || { ci_log "[CI-ERROR-CHECK-0043]" "path=\"${f}\" reason=\"required prod-state-wiring input missing\""; return 2; }
     done
     # What: state keys come from setup.sh prod_state_keys.
@@ -11550,8 +11541,6 @@ _ci_check_prod_state_wiring() {
     # Why: PDNS_DIR_OLD must not satisfy PDNS_DIR.
     # From: Issue #1683 | PR #1912
     while IFS= read -r key; do
-        grep -Fqw -- "${key}" "${env_file}" \
-            || viol+=("$(dirname "${dep}")/.env does not document ${key} for manual upgrades")
         grep -Fqw -- "${key}" "${doc}" \
             || viol+=("${doc_rel} does not mention ${key}")
     done <<<"${keys}"
@@ -11598,6 +11587,14 @@ _ci_validation_env() {
     fi
     tr ' ' '
 ' <<< "${fx}" | grep -v '^$'
+    # What: runtime defaults compose interpolates itself.
+    # Why: the SOT runtime.defaults owns each value.
+    # From: Issue #1683 | PR #1912
+    keys="$(_ci_block_entry_field validation "" compose_validation_defaults)" || return 2
+    for k in ${keys}; do
+        v="$(_ci_runtime_default "${k}")" || return 2
+        printf '%s=%s\n' "${k}" "${v}"
+    done
     # What: a fresh value per secret key, setup.sh format.
     # Why: a fixed key in the SOT is a hardcoded credential.
     # From: Issue #1683 | PR #1858
@@ -11830,37 +11827,26 @@ _ci_copy_if_changed() {
 # From: Issue #1683 | PR #1858
 _ci_check_compose_config() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
-    local -a viol=() pairs=() profiles=() tl=() el=()
-    local deploy targets envtargets rel mode pair cf ef raw p label render msg count=0
+    local -a viol=() profiles=() tl=()
+    local deploy targets rel cf raw p label render msg count=0
     deploy="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     targets="$(_ci_block_entry_field validation "" compose_targets)" || return 2
     if [ -z "${targets}" ]; then
         ci_error "[CI-ERROR-CHECK-0044]" "reason=\"no compose_targets in SOT\"" "manifest=${CI_MANIFEST}"
         return 1
     fi
-    envtargets="$(_ci_block_entry_field validation "" compose_env_file_targets)" || return 2
-    # What: the SOT fields are space-separated path lists.
+    # What: the SOT field is a space-separated path list.
     # Why: read -a splits words without glob expansion.
     # From: Issue #1683 | PR #1912
     read -ra tl <<< "${targets}"
-    read -ra el <<< "${envtargets}"
-    for rel in "${deploy}" "${tl[@]}"; do pairs+=("${rel}|"); done
-    for rel in "${el[@]}"; do pairs+=("${rel}|env"); done
-    for pair in "${pairs[@]}"; do
-        rel="${pair%|*}"
-        mode="${pair#*|}"
+    for rel in "${deploy}" "${tl[@]}"; do
         cf="${repo_root}/${rel}"
         label="${rel}"
-        ef=""
-        if [ -n "${mode}" ]; then
-            label="(env-file) ${rel}"
-            ef="$(dirname "${cf}")/.env"
-        fi
         if [ ! -f "${cf}" ]; then
             viol+=("${label}: compose target missing")
             continue
         fi
-        if ! raw="$(_ci_compose_profiles "${cf}" "${ef}" 2>&1)"; then
+        if ! raw="$(_ci_compose_profiles "${cf}" "" 2>&1)"; then
             viol+=("${label}: profiles unreadable"$'\n'"${raw}")
             continue
         fi
@@ -11872,7 +11858,7 @@ _ci_check_compose_config() {
             if [ -n "${p}" ]; then
                 render="${label}:${p}"
             fi
-            if ! msg="$(_ci_compose_config_ok "${cf}" "${p}" "${ef}")"; then
+            if ! msg="$(_ci_compose_config_ok "${cf}" "${p}" "")"; then
                 viol+=("${render}: config invalid" "${msg}")
             fi
         done
@@ -12046,14 +12032,14 @@ _ci_check_setup_update_safety() {
     printf 'setup-update-safety=clean\n'
 }
 
-# What: compose JSON with its .env minus LANCACHE_IMAGE_*
+# What: compose JSON on the fixture env, no IMAGE vars
 # Why: only then do the compose image defaults render
-# From: Issue #1683 | PR #1858
+# From: Issue #1683 | PR #1912
 _ci_compose_image_render() {
     local file="$1" out="$2" env body
     shift 2
     env="$(_ci_mktemp "${CI_TMPDIR}/ci-image-env.XXXXXX")" || return 2
-    body="$(_ci_capture 1 grep -v '^LANCACHE_IMAGE_' "${file%/*}/.env")" || { rm -f "${env}"; return 2; }
+    body="$(_ci_validation_env)" || { rm -f "${env}"; return 2; }
     if ! printf '%s\n' "${body}" "$@" > "${env}"; then
         ci_log "[CI-ERROR-CHECK-0172]" "file=\"${env}\" reason=\"render env file not writable\""
         rm -f "${env}"
@@ -12335,8 +12321,7 @@ _ci_compose_service_names() {
     local -a profile_flags=()
     flags="$(_ci_compose_profile_flags "${file}")" || return 2
     [ -z "${flags}" ] || mapfile -t profile_flags <<< "${flags}"
-    _ci_run "[CI-ERROR-CHECK-0119]" "file=\"${file}\" profiles=\"${flags//$'\n'/ }\" reason=\"docker compose service list failed\"" \
-        docker compose -f "${file}" "${profile_flags[@]}" config --services
+    _ci_compose_query "${file}" "" "${profile_flags[@]}" config --services
 }
 
 # What: --profile flag pairs for every compose profile.

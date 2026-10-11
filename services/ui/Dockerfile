@@ -144,7 +144,7 @@ RUN addgroup -g "${LANCACHE_RUNTIME_GID}" lancache \
     && mkdir -p /data /etc/nats \
     && chown -R lancache:lancache /data /etc/nats
 
-# What: the SOT values equal on every install.
+# What: the SOT default values, one pipe-joined list.
 # Why: ci.sh passes the list; binaries read it as env.
 # From: Issue #1683 | PR #1912
 ARG LANCACHE_RUNTIME_DEFAULTS

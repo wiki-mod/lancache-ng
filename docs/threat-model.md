@@ -228,7 +228,8 @@ untrusted network · **Impact**: High
 
 **Mitigations** (verified in `services/ui/src/main.rs` / `config.rs`):
 - **Authentication is fail-closed by default.** `resolve_admin_ui_auth_mode`
-  requires *both* `UI_AUTH_USER` and `UI_AUTH_PASSWORD`. If both are unset the UI
+  requires *both* `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH` (an Argon2id hash;
+  the password itself is never stored). If both are unset the UI
   **refuses to start** unless the operator has *explicitly* set
   `ALLOW_INSECURE_UI=true`. A partial config (only one of the two) is a hard
   startup error. There is no silent unauthenticated default.
@@ -754,7 +755,7 @@ The following are **not** addressed by lancache-ng:
 ### Low risk
 - Private, firewalled LAN; control-plane ports unreachable from untrusted
   segments.
-- Admin UI authenticated (`UI_AUTH_USER`/`UI_AUTH_PASSWORD` set — the default
+- Admin UI authenticated (`UI_AUTH_USER`/`UI_AUTH_PASSWORD_HASH` set — the default
   posture) or bound to `127.0.0.1`.
 - NATS unpublished (default) or its optional secondary binding firewalled.
 - Kea Control Agent reachable only on Docker-internal ranges (default).

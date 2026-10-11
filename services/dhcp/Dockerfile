@@ -121,7 +121,7 @@ ENV LANCACHE_PROCESSES=${LANCACHE_PROCESSES}
 ARG LANCACHE_RUNTIME_GID
 ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID}
 
-# What: the SOT values equal on every install.
+# What: the SOT default values, one pipe-joined list.
 # Why: ci.sh passes the list; binaries read it as env.
 # From: Issue #1683 | PR #1912
 ARG LANCACHE_RUNTIME_DEFAULTS

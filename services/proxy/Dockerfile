@@ -128,6 +128,12 @@ COPY services/proxy/proxy-params.conf /etc/nginx/proxy-params.conf.template
 COPY services/proxy/public_suffix_list.dat /etc/nginx/public_suffix_list.dat
 ENV NGINX_DIR=/etc/nginx
 
+# What: the SOT default values, one pipe-joined list.
+# Why: ci.sh passes the list; binaries read it as env.
+# From: Issue #1683 | PR #1912
+ARG LANCACHE_RUNTIME_DEFAULTS
+ENV LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS}
+
 VOLUME ["/etc/nginx/ssl", "/var/cache/nginx/lancache"]
 
 EXPOSE 80 443

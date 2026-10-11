@@ -277,7 +277,7 @@ argument explicitly instead of relying on that default).
 update safety" below) and does not build images from source. To run a
 locally-built image in a production-shaped deployment, build the image
 as shown above, tag it to match `LANCACHE_IMAGE_REGISTRY`/
-`LANCACHE_IMAGE_PREFIX`/`LANCACHE_IMAGE_TAG` in `deploy/prod/.env`, and
+`LANCACHE_IMAGE_PREFIX`/`LANCACHE_IMAGE_TAG` in `deploy/prod/.env.local`, and
 push it to a registry the deployment can pull from (or load it directly
 into the target Docker daemon) before running `setup.sh`/`docker compose
 up`.

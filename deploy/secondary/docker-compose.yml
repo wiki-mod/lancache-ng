@@ -35,7 +35,7 @@ services:
       - NATS_PASSWORD=${NATS_PASSWORD}
       - NATS_CONSUMER=${NATS_CONSUMER:?NATS_CONSUMER is required}
       - NATS_RECORD_WRITES=0
-      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
+      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
     volumes:
       - pdns-data:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state

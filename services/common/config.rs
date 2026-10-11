@@ -25,10 +25,10 @@ pub fn opt(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<String> {
 pub const RUNTIME_DEFAULTS_KEY: &str = "LANCACHE_RUNTIME_DEFAULTS";
 
 // What: one name's value in a KEY=value list, if listed.
-// Why: the SOT defaults travel as one space-separated list.
+// Why: the SOT defaults travel as one pipe-joined list.
 // From: Issue #1683 | PR #1912
 pub fn default_in(list: &str, name: &str) -> Option<String> {
-    list.split_whitespace().find_map(|pair| {
+    list.split('|').find_map(|pair| {
         pair.split_once('=')
             .filter(|(key, _)| *key == name)
             .map(|(_, value)| value.to_string())
@@ -672,9 +672,10 @@ mod tests {
     // From: Issue #1683 | PR #1912
     #[test]
     fn default_in_finds_the_exact_name() {
-        let list = "A_PORT=81 B_PORT=82  C=x=y";
+        let list = "A_PORT=81|B_PORT=82|C=x=y|R=a b [c]";
         assert_eq!(default_in(list, "B_PORT"), Some("82".to_string()));
         assert_eq!(default_in(list, "C"), Some("x=y".to_string()));
+        assert_eq!(default_in(list, "R"), Some("a b [c]".to_string()));
         assert_eq!(default_in(list, "A"), None);
         assert_eq!(default_in(list, "D"), None);
         assert_eq!(default_in("", "A_PORT"), None);

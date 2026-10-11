@@ -687,15 +687,12 @@ git clone https://github.com/wiki-mod/lancache-ng.git
 cd lancache-ng
 ```
 
-Copy the checked-in production template to an untracked runtime env file and
-edit that file:
-
-```bash
-cp deploy/prod/.env deploy/prod/.env.local
-nano deploy/prod/.env.local
-```
-
-Set at least:
+No `.env` file is tracked. `setup.sh install` writes the untracked runtime env
+file `deploy/prod/.env.local` with the values of your installation. Every
+default value lives in `.github/yaml/build-manifest.yml` (`runtime.defaults`)
+and is baked into the images, so `.env.local` never repeats a default. To set
+the installation values by hand, create `deploy/prod/.env.local` and set at
+least:
 
 ```env
 IP_HTTP=192.168.1.10
@@ -729,7 +726,7 @@ LANCACHE_IMAGE_CHANNEL=stable
 LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
 ```
 
-`NGINX_UPSTREAM_RESOLVER` is what nginx uses to resolve the *real* CDN hostnames it proxies to. Its default lives in `deploy/prod/.env`; put your own value in `deploy/prod/.env.local`, which `deploy/prod/docker-compose.yml` passes to the `proxy` service, then recreate that container from the repository root (`sudo ./setup.sh compose deploy/prod up -d proxy`). The default — `8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]` (Google Public DNS, both IPv4 and IPv6; IPv6 entries are bracketed because nginx's `resolver` directive requires that) — is a convenience default, not a requirement. Set it to whatever real upstream DNS servers you prefer: your ISP's resolvers, a corporate DNS server, 1.1.1.1, or anything else. The actual requirement is that the chosen resolver returns the CDN's *real* origin address for these hostnames — not merely that its own server IP differs from the LanCache DNS/proxy IP. Setup rejects the obvious case (setting this directly to `IP_HTTP`/`IP_HTTPS`) automatically, but it cannot detect an indirect loop: for example, a split-DNS or conditional-forwarding resolver that itself forwards the CDN's zone back to the LanCache DNS server would still hand nginx the LanCache proxy IP, at which point nginx loops even though the configured resolver's own IP isn't the cache's. If you use split-DNS or conditional forwarding upstream of this resolver, make sure CDN zones aren't among the forwarded ones.
+`NGINX_UPSTREAM_RESOLVER` is what nginx uses to resolve the *real* CDN hostnames it proxies to. Its default lives in `runtime.defaults` of `.github/yaml/build-manifest.yml`; put your own value in `deploy/prod/.env.local` (an empty value keeps the default), which `deploy/prod/docker-compose.yml` passes to the `proxy` service, then recreate that container from the repository root (`sudo ./setup.sh compose deploy/prod up -d proxy`). The default — `8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]` (Google Public DNS, both IPv4 and IPv6; IPv6 entries are bracketed because nginx's `resolver` directive requires that) — is a convenience default, not a requirement. Set it to whatever real upstream DNS servers you prefer: your ISP's resolvers, a corporate DNS server, 1.1.1.1, or anything else. The actual requirement is that the chosen resolver returns the CDN's *real* origin address for these hostnames — not merely that its own server IP differs from the LanCache DNS/proxy IP. Setup rejects the obvious case (setting this directly to `IP_HTTP`/`IP_HTTPS`) automatically, but it cannot detect an indirect loop: for example, a split-DNS or conditional-forwarding resolver that itself forwards the CDN's zone back to the LanCache DNS server would still hand nginx the LanCache proxy IP, at which point nginx loops even though the configured resolver's own IP isn't the cache's. If you use split-DNS or conditional forwarding upstream of this resolver, make sure CDN zones aren't among the forwarded ones.
 
 `PROXY_SECURITY_MODE` controls how defensive the proxy is at request time:
 
@@ -760,8 +757,7 @@ Current prebuilt first-party images are published for both `linux/amd64` and `li
 
 Release channels and package rules are documented in `docs/release-versioning.md`. External image handling is documented in `docs/release-external-images.md`.
 
-Keep `deploy/prod/.env` as the checked-in template. Manual production changes
-belong in `deploy/prod/.env.local`, which is ignored by git and preferred by
+Manual production changes belong in `deploy/prod/.env.local`, which is ignored by git and preferred by
 `setup.sh update`, `setup.sh auto-update`, `setup.sh backup`, `setup.sh restore`,
 `setup.sh update-ip`, and `setup.sh create-logs-for-issue` when present.
 
@@ -802,7 +798,7 @@ Secret formats vary by key, not by naming suffix — despite the `*_KEY`/`*_PASS
 
 - 64 hex characters (`openssl rand -hex 32`): `KEA_CTRL_TOKEN`, `PDNS_API_KEY`, `NATS_UI_PASSWORD`, `NATS_DNS_WRITER_PASSWORD`, `NATS_CALLOUT_PASSWORD`, `NATS_SYS_PASSWORD`, `SECONDARY_REGISTRATION_TOKEN`
 - 44 base64 characters (`openssl rand -base64 32`): `DDNS_TSIG_KEY`
-- 20 alphanumeric characters: `UI_AUTH_PASSWORD`
+- 20 alphanumeric characters: the Admin UI password. It is shown once; only its Argon2id hash is stored as `UI_AUTH_PASSWORD_HASH`.
 
 Store your actual secret values securely if you need to rotate them manually. The setup script will not regenerate them unless you explicitly delete or clear the `.env` entry.
 

@@ -226,8 +226,8 @@ this section or the "Optional (issue #450)" one above changes.
 > the runtime env `deploy/prod/.env.local` and restarting: the dhcp-proxy
 > service in `deploy/prod/docker-compose.yml` wires each of these keys as
 > `environment: - KEY=${KEY:-}`, so the running container reads the value the
-> runtime env holds at `docker compose up` time. `deploy/prod/.env` is the
-> committed template and keeps every key with an empty default. A value an
+> runtime env holds at `docker compose up` time. No `.env` is tracked;
+> an empty value falls back to the default in `runtime.defaults` of the SOT. A value an
 > older install set in `config/prod/dhcp-proxy.local.env` moves into the
 > runtime env on the next `setup.sh update`: it is copied during the update and
 > removed from the local file only after the update succeeded. The

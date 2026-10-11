@@ -921,7 +921,11 @@ async fn main() {
     let mut options = async_nats::ConnectOptions::new()
         .max_reconnects(None)
         .reconnect_delay_callback(|_| RECONNECT_DELAY);
-    if let (Some(user), Some(password)) = (env_opt("NATS_USER"), env_opt("NATS_PASSWORD")) {
+    // What: the secondary login, else the dns writer login.
+    // Why: the writer name has one owner, the SOT default.
+    // From: Issue #1683 | PR #1912
+    let user = env_opt("NATS_USER").or_else(|| env_opt("NATS_DNS_WRITER_USER"));
+    if let (Some(user), Some(password)) = (user, env_opt("NATS_PASSWORD")) {
         options = options.user_and_password(user, password);
     } else if let Some(token) = env_opt("NATS_TOKEN") {
         options = options.token(token);

@@ -443,6 +443,8 @@ case "$1" in
                 esac
                 printf '%s\n' "${all[@]:0:${#all[@]}-$#}" > "${DS}/running" ;;
             pull) ;;
+            run) [ "${!#}" = hash-password ] || { echo "unexpected docker compose call: $*" >&2; exit 97; }
+                sha256sum | cut -c1-43 ;;
             images) echo '[]' ;;
             logs) echo "${!#}" ;;
             version) echo 'docker compose (test stub)' ;;
@@ -507,13 +509,33 @@ echo "${server:?the dig stub needs @server}"
 STUB
 }
 
+# What: an operator env file made from the SOT fixture
+# Why: no .env is tracked; tests need operator-shaped input
+# From: Issue #1683 | PR #1912
+_template_env() {
+    local out="${BATS_TEST_TMPDIR}/operator.env" fx
+    if [ ! -s "${out}" ]; then
+        fx="$(_ci_validation_env)" || return 1
+        printf '%s\n' "${fx}" > "${out}"
+    fi
+    printf '%s\n' "${out}"
+}
+
+# What: exports the SOT fixture env, like the validate stack
+# Why: no .env exists; compose reads the process environment
+# From: Issue #1683 | PR #1912
+_export_validation_env() {
+    local -a kv=()
+    mapfile -t kv <<< "$(_ci_validation_env)" && export "${kv[@]}"
+}
+
 # What: docker compose on the real deploy/prod files
 # Why: tests take names, volumes, profiles from their owner
 # From: Issue #1683 | PR #1858
 _prod_compose() {
     local root
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    docker compose --env-file "${root}/deploy/prod/.env" -f "${root}/deploy/prod/docker-compose.yml" "$@"
+    docker compose --env-file "$(_template_env)" -f "${root}/deploy/prod/docker-compose.yml" "$@"
 }
 
 # What: a prod volume config backups carry, sorted first
@@ -523,7 +545,7 @@ _backup_volume() {
     local root project cache
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     project="$(_prod_compose config --format json | jq -r .name)" || return 1
-    cache="$(compose_cache_volume_name "${root}/deploy/prod" "${root}/deploy/prod/.env")" || return 1
+    cache="$(compose_cache_volume_name "${root}/deploy/prod" "$(_template_env)")" || return 1
     _prod_compose config --volumes | sort | grep -vxF -- "${cache#"${project}_"}" | awk 'NR == 1'
 }
 
@@ -534,7 +556,7 @@ _prod_install() {
     local root dir="$1"
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     mkdir -p "${dir}" "${dir}/../../.github/yaml" "${dir}/../../.github/scripts" || return 1
-    cp "${root}/deploy/prod/docker-compose.yml" "${root}/deploy/prod/.env" "${dir}/" || return 1
+    cp "${root}/deploy/prod/docker-compose.yml" "${dir}/" && cp "$(_template_env)" "${dir}/.env" || return 1
     cp "${root}/.github/yaml/build-manifest.yml" "${dir}/../../.github/yaml/" || return 1
     cp "${root}/.github/scripts/ci.sh" "${dir}/../../.github/scripts/" || return 1
     set_env_key LANCACHE_STATE_DIR "${dir}/state" "${dir}/.env"
@@ -588,8 +610,6 @@ _checkout_copy() {
     _norepo() { unset GITHUB_REPOSITORY; _ci_image_ref "$@"; }
     run _norepo "${svc}" "${dig}"
     _expect no-owner 2 '[CI-ERROR-CORE-0128] name="GITHUB_REPOSITORY"' || return 1
-    envreg="$(awk -F= '$1 == "LANCACHE_IMAGE_REGISTRY" { print $2; exit }' "${root}/deploy/prod/.env")"
-    [ "${envreg}" = "${reg}" ] || { echo "deploy/prod/.env registry '${envreg}' is not the SOT registry '${reg}'"; return 1; }
 }
 
 # =========================================================
@@ -1393,6 +1413,7 @@ CASES
 # From: Issue #1683 | PR #1912
 @test "validate dns port: real compose splits the sides, drift fails coded" {
     local http https a b pa pb row env ports side rc want
+    _export_validation_env || return 1
     run _ci_validate_dns_port PROXY_IP
     _expect real-http 0 - || return 1
     http="${output}"
@@ -1482,6 +1503,7 @@ CASES
 # From: Issue #1683 | PR #1912
 @test "setup.sh dns rollback targets the compose dns service" {
     local root cfg url
+    _export_validation_env || return 1
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     cfg="$(_ci_validate_config_json)" \
         && url="$(jq -r '.services.ui.environment.DNS_URL // ""' <<<"${cfg}")" || { echo "compose: ${cfg}"; return 1; }
@@ -1516,14 +1538,14 @@ CASES
 @test "runtime default reads one key of the SOT list" {
     local list key val miss
     list="$(_ci_required_field runtime defaults block)" || { echo "no runtime.defaults: ${list}"; return 1; }
-    key="$(tr ' ' '\n' <<< "${list}" | head -1)"
+    key="${list%%|*}"
     run _ci_runtime_default "${key%%=*}"
     _expect listed 0 "=${key#*=}" || return 1
     miss="$(_val name)"
     run _ci_runtime_default "${miss}"
     _expect unlisted 2 "VALIDATE-0125" || return 1
     run _ci_validate_rollback_base 192.0.2.1
-    val="$(tr ' ' '\n' <<< "${list}" | sed -n 's/^DNS_ROLLBACK_PORT=//p')"
+    val="$(tr '|' '\n' <<< "${list}" | sed -n 's/^DNS_ROLLBACK_PORT=//p')"
     _expect rollback-base 0 "=http://192.0.2.1:${val}" || return 1
 }
 
@@ -1550,7 +1572,7 @@ CASES
     printf 'A\n' > "${r}/deploy/x/compose.yml"
     printf 'B\n' > "${r}/${c}/${f}"
     printf 'C\n' > "${r}/lone/file.txt"
-    CI_REPO_ROOT="${r}" CI_COMPOSE_FILE=deploy/x/compose.yml
+    export CI_REPO_ROOT="${r}" CI_COMPOSE_FILE=deploy/x/compose.yml
     _ci_validate_config_json() {
         jq -cn --arg a "${r}/${c}" --arg b "${r}/lone/file.txt" '{services: {s: {volumes: [
             {type: "bind", source: $a}, {type: "bind", source: $b},
@@ -2470,7 +2492,7 @@ _converged_install() {
 _legacy_env() {
     local file="$1" user="${2:-}" root tpl
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    tpl="${root}/deploy/prod/.env"
+    tpl="$(_template_env)"
     printf '%s\n' "IP_STANDARD=$(get_env_var IP_HTTP "${tpl}")" "IP_SSL=$(get_env_var IP_HTTPS "${tpl}")" \
         "CACHE_DIR_STANDARD=${file%/*}/cache" "CACHE_DIR_SSL=${file%/*}/cache" 'PROXY_SECURITY_MODE=strict' \
         'PROXY_ALLOWED_CLIENT_CIDRS=' "LANCACHE_IMAGE_TAG=$(_release_tag)" \
@@ -2526,11 +2548,9 @@ _legacy_env() {
         && ! env_key_exists NATS_DNS_REPLICA_USER "${t}/.env" && ! env_key_exists NATS_DNS_REPLICA_PASSWORD "${t}/.env" \
         || { echo "legacy: ${output}"; cat "${t}/.env"; return 1; }
     _legacy_row logging-off || return 1
-    set_env_key LOGGING_ENABLED 0 "${t}/.env" && set_env_key LOGGING_DNS_ENABLED 1 "${t}/.env"
+    set_env_key LOGGING_ENABLED 0 "${t}/.env"
     _setup_sh_run 'migrate_env_for_update "${CONV}"'
-    [ "${status}" -eq 0 ] && ! env_key_exists LOGGING_ENABLED "${t}/.env" \
-        && [ "$(get_env_var LOGGING_PROXY_ENABLED "${t}/.env")$(get_env_var LOGGING_DNS_ENABLED "${t}/.env")" = 01 ] \
-        && [ "$(get_env_var LOGGING_DHCP_ENABLED "${t}/.env")$(get_env_var LOGGING_UI_ENABLED "${t}/.env")" = 00 ] \
+    [ "${status}" -eq 0 ] && ! env_key_exists LOGGING_ENABLED "${t}/.env" && ! env_key_exists LOGGING_PROXY_ENABLED "${t}/.env" \
         || { echo "logging: ${output}"; cat "${t}/.env"; return 1; }
     before="$(cat "${t}/.env")"
     _setup_sh_run 'migrate_env_for_update "${CONV}"'
@@ -2590,6 +2610,26 @@ CASES
     [ "$(get_env_var UI_AUTH_PASSWORD "${t}/.env")" = "${real}" ] || { echo "kept: the operator password changed"; return 1; }
 }
 
+# What: a plaintext Admin UI password becomes its hash
+# Why: no plaintext password stays on disk (AG-SEC-003)
+# From: Issue #1683 | PR #1912
+@test "ensure_ui_password_hash stores the hash and removes the plaintext" {
+    _stand_ins || return 1
+    local root d pw
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}" || return 1
+    d="${BATS_TEST_TMPDIR}/hash/deploy/prod"
+    _prod_install "${d}" || return 1
+    pw="$(_val name)"
+    set_env_key UI_AUTH_PASSWORD "${pw}" "${d}/.env" || return 1
+    export HD="${d}"
+    _setup_sh_run 'ensure_ui_password_hash "${HD}" "${HD}/.env"'
+    [ "${status}" -eq 0 ] || { echo "rc ${status}: ${output}"; return 1; }
+    [ "$(get_env_var UI_AUTH_PASSWORD_HASH "${d}/.env")" = "$(printf '%s' "${pw}" | sha256sum | cut -c1-43)" ] \
+        && ! env_key_exists UI_AUTH_PASSWORD "${d}/.env" && ! grep -qF -- "${pw}" "${d}/.env" "${DS}/docker.log" \
+        || { echo "hash not stored or plaintext left: $(paste -sd'#' "${d}/.env")"; return 1; }
+}
+
 # What: reruns add no duplicate; a written key collapses
 # Why: AG-OP-006: one canonical assignment per key
 # From: Issue #1683 | PR #1858
@@ -2617,7 +2657,7 @@ CASES
     local -a kvs
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}" || return 1
-    ip="$(get_env_var IP_HTTP "${root}/deploy/prod/.env")" net="${ip%.*}"
+    ip="$(get_env_var IP_HTTP "$(_template_env)")" net="${ip%.*}"
     srv="${net}.$(( (${ip##*.} + 1) % 255 ))" srv2="${net}.$(( (${ip##*.} + 2) % 255 ))"
     bios="$(_val name).0" bad="$(_val host)"
     [ -n "${ip}" ] && is_valid_dhcp_mode "${mode}" || { echo "inputs: ip '${ip}', mode ${mode}"; return 1; }
@@ -2814,7 +2854,7 @@ ROWS
     keys="$(quickstart_path_keys)" && keys="${keys//$'\n'/ }" && copies="$(quickstart_bundle_copies)" \
         && [ -n "${keys}" ] && [ -n "${copies}" ] || { echo "migration lists: ${keys} | ${copies}"; return 1; }
     lo="127.$(_val int 1 254).$(_val int 1 254)"
-    mkdir -p "${QS}/certs" && cp "${root}/deploy/prod/.env" "${QS}/.env" && remove_env_key LANCACHE_STATE_DIR "${QS}/.env" \
+    mkdir -p "${QS}/certs" && cp "$(_template_env)" "${QS}/.env" && remove_env_key LANCACHE_STATE_DIR "${QS}/.env" \
         && set_env_key IP_HTTP "${lo}.1" "${QS}/.env" && set_env_key IP_HTTPS "${lo}.2" "${QS}/.env" || return 1
     for key in ${keys}; do set_env_key "${key}" "./${key,,}" "${QS}/.env" || return 1; done
     want="$(get_env_var CACHE_MAX_SIZE "${QS}/.env")" \
@@ -2898,7 +2938,7 @@ ROWS
     g init -q --bare "${t}/origin.git" && _checkout_copy "${root}" "${t}/src" && g -C "${t}/src" init -q \
         && g -C "${t}/src" add -A && g -C "${t}/src" commit -q -m c1 \
         && g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}" && g clone -q "${t}/origin.git" "${t}/co" \
-        && cp "${t}/co/deploy/prod/.env" "${t}/co/deploy/prod/.env.local" || { echo "origin setup failed"; return 1; }
+        && cp "$(_template_env)" "${t}/co/deploy/prod/.env.local" || { echo "origin setup failed"; return 1; }
     set_env_key LANCACHE_STATE_DIR "${t}/state" "${t}/co/deploy/prod/.env.local" \
         && set_env_key IP_HTTP "${http}" "${t}/co/deploy/prod/.env.local" \
         && set_env_key IP_HTTPS "${https}" "${t}/co/deploy/prod/.env.local" \
@@ -2975,7 +3015,7 @@ STUB
     # Why: a side effect must not reach the real checkout
     # From: Issue #1683 | PR #1858
     _checkout_copy "${root}" "${t}/repo" || { echo "checkout copy failed"; return 1; }
-    tpl="${t}/repo/deploy/prod/.env"
+    tpl="$(_template_env)"
     http="10.$(_val int 0 127).$(_val int 0 255).$(_val int 1 254)" dev="$(_val name)" pfx="$(_val int 16 30)"
     other="10.$(_val int 128 255).$(_val int 0 255).$(_val int 1 254)"
     lo="127.$(_val int 0 255).$(_val int 0 255).$(_val int 1 254)"
@@ -3119,20 +3159,19 @@ STUB
     [ ! -d /run/systemd/system ] || { echo "systemd host: a real install would write /etc units"; return 1; }
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}" || return 1
-    repo="${t}/repo" env="${t}/repo/deploy/prod/.env.local" tpl="${t}/repo/deploy/prod/.env"
+    repo="${t}/repo" env="${t}/repo/deploy/prod/.env.local" tpl="$(_template_env)"
     _checkout_copy "${root}" "${repo}" || { echo "checkout copy failed"; return 1; }
     cfg="$(docker compose --env-file "${tpl}" -f "${repo}/deploy/prod/docker-compose.yml" config --format json)" \
         && port="$(jq -r '.services.ui.ports[0].published' <<< "${cfg}")" && [[ "${port}" =~ ^[0-9]+$ ]] \
         || { echo "prod compose config: ${cfg}"; return 1; }
-    : > "${t}/owned.env" && set_template_owned_env_defaults "${t}/owned.env" \
-        && keys="$(awk -F= '/^[A-Z]/ { print $1 }' "${t}/owned.env")" && [ -n "${keys}" ] \
-        || { echo "no template-owned keys: $(cat "${t}/owned.env")"; return 1; }
-    # What: setup.sh holds no template default or ui port
+    keys="$(_ci_required_field runtime defaults block | tr '|' '\n' | sed -n 's/=.*//p')" && [ -n "${keys}" ] \
+        || { echo "no SOT runtime.defaults keys: ${keys}"; return 1; }
+    # What: setup.sh holds no SOT default or ui port
     # Why: one owner each; a copy passes the checks below
-    # From: Issue #1683 | PR #1858
+    # From: Issue #1683 | PR #1912
     if grep -qw -- "${port}" "${repo}/setup.sh"; then echo "ui port ${port} is a literal in setup.sh"; return 1; fi
     for k in ${keys}; do
-        v="$(get_env_var "${k}" "${tpl}")"
+        v="$(_ci_runtime_default "${k}")" || return 1
         [ -n "${v}" ] || continue
         if grep -qF -e "${k}=${v}" -e "${k}:-${v}" "${repo}/setup.sh"; then
             echo "${k} default ${v} is a literal in setup.sh"
@@ -3173,10 +3212,15 @@ STUB
         "${DS}/docker.log")" -eq 2 ] || { echo "pull/up: $(cat "${DS}/docker.log")"; return 1; }
     _setup_sh_run 'stack_compose "${REPO}/deploy/prod" "${ENVL}" config --quiet'
     [ "${status}" -eq 0 ] || { echo "compose config: ${output}"; return 1; }
+    # What: no SOT default lands in .env.local
+    # Why: only the wizard's own answers belong there
+    # From: Issue #1683 | PR #1912
     for k in ${keys}; do
-        [ "$(get_env_var "${k}" "${env}")" = "$(get_env_var "${k}" "${tpl}")" ] || { echo "${k}: $(cat "${env}")"; return 1; }
+        case " CACHE_MAX_SIZE CACHE_MEM_MB DHCP_SUBNET DHCP_GATEWAY DHCP_RANGE_START DHCP_RANGE_END ALLOW_INSECURE_UI " in *" ${k} "*) continue ;; esac
+        [ -z "$(get_env_var "${k}" "${env}")" ] || { echo "${k} was copied into .env.local: $(cat "${env}")"; return 1; }
     done
-    [ "$(get_env_var IP_HTTP "${env}")" = "${http}" ] && [ "$(get_env_var LOGGING_PROXY_ENABLED "${env}")$(get_env_var LOGGING_DNS_ENABLED "${env}")$(get_env_var LOGGING_DHCP_ENABLED "${env}")$(get_env_var LOGGING_UI_ENABLED "${env}")" = 1111 ] \
+    [ "$(get_env_var IP_HTTP "${env}")" = "${http}" ] && ! env_key_exists UI_AUTH_PASSWORD "${env}" \
+        && [ -n "$(get_env_var UI_AUTH_PASSWORD_HASH "${env}")" ] \
         && ! env_key_exists COMPOSE_PROFILES "${env}" || { echo "values: $(cat "${env}")"; return 1; }
     _checkout_copy "${root}" "${t}/repo2" && rm -f "${DS}/running" && : > "${DS}/fail-config-after-up" \
         || { echo "second copy failed"; return 1; }
@@ -3344,7 +3388,7 @@ CASES
     local root t="${BATS_TEST_TMPDIR}" ip v raw case lines want err rc tags tag bad sot PIN REL CH ALIAS
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}" || return 1
-    ip="$(get_env_var IP_HTTP "${root}/deploy/prod/.env")"
+    ip="$(get_env_var IP_HTTP "$(_template_env)")"
     v="$(tr -d '[:space:]' < "${root}/VERSION")"
     raw="\"$(_val path) $(_val name)\" # $(_val name)" bad="$(_val name)"
     [ -n "${ip}" ] && [ -n "${v}" ] || { echo "inputs: ${ip} ${v}"; return 1; }
@@ -3555,7 +3599,7 @@ CASES
         acc+=$'\n'"${c}"$'\n'"$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_entry_list release/channels "${c}" aliases)"
     done <<< "$(CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_block_keys release/channels)"
     other+=$'\n'"$(grep -v '^$' <<< "${acc}" | grep -vxF -f <(printf '%s\n' "${chans}"))"
-    gb="$(cache_size_gb_from_env "$(get_env_var CACHE_MAX_SIZE "${root}/deploy/prod/.env")")"
+    gb="$(cache_size_gb_from_env "$(get_env_var CACHE_MAX_SIZE "$(_template_env)")")"
     [ "$(wc -l <<< "${chans}")" -ge 2 ] && [ "$(wc -l <<< "${modes}")" -ge 2 ] && [ -n "${other}" ] && [ -n "${gb}" ] \
         || { echo "inputs: ${chans} | ${modes} | ${other} | ${gb}"; return 1; }
     # What: one row per value: validator|value|ok or bad
@@ -3694,7 +3738,7 @@ CASES
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
     require_helper_image
-    ip="$(get_env_var IP_HTTP "${root}/deploy/prod/.env")"
+    ip="$(get_env_var IP_HTTP "$(_template_env)")"
     bios="$(_val name)" uefi="$(_val name)/$(_val name)"
     # What: the longest name one DHCP option can carry
     # Why: RFC 2132: an option length is a single octet
@@ -3935,7 +3979,7 @@ _pm_run() {
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
     modes="$(_rust_dhcp_modes "${root}")" || return 1
-    ip="$(get_env_var IP_HTTP "${root}/deploy/prod/.env")" net="${ip%.*}.0"
+    ip="$(get_env_var IP_HTTP "$(_template_env)")" net="${ip%.*}.0"
     [ "$(wc -l <<< "${modes}")" -ge 3 ] && [ -n "${ip}" ] || { echo "inputs: ${modes} | ${ip}"; return 1; }
     while IFS= read -r m; do
         is_valid_dhcp_mode "${m}" && ! is_valid_dhcp_mode "${m^^}" && ! is_valid_dhcp_mode "${m}x" || { echo "mode ${m}"; return 1; }
@@ -3988,16 +4032,16 @@ _pm_run() {
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
     rs="${root}/services/ui/src/main.rs"
-    http="$(get_env_var IP_HTTP "${root}/deploy/prod/.env")"
-    lip="$(get_env_var IP_HTTPS "${root}/deploy/prod/.env")"
+    http="$(get_env_var IP_HTTP "$(_template_env)")"
+    lip="$(get_env_var IP_HTTPS "$(_template_env)")"
     ui="$(_prod_compose config --format json | jq -r '.services.ui.ports[0].published')"
     name="$(_prod_compose config --format json | jq -r .name)"
     xfr=""
     ! grep -qF 'dns_xfr_primary: format!("{}:{PDNS_AUTH_PORT}", state.config.http_ip)' "${rs}" \
         || xfr="$(sed -n 's/^pub const PDNS_AUTH_PORT: u16 = \([0-9][0-9]*\);$/:\1/p' "${root}/services/common/config.rs")"
     fields="$(awk '/^struct RegisterResponse/,/^}/' "${rs}" | sed -n 's/^ *\([a-z_]*\): String,$/\1/p')"
-    reg="$(resolve_lancache_image_registry "${root}/deploy/prod/.env")"
-    pre="$(resolve_lancache_image_prefix "${root}/deploy/prod/.env")"
+    reg="$(resolve_lancache_image_registry "$(_template_env)")"
+    pre="$(resolve_lancache_image_prefix "$(_template_env)")"
     tag="v$(cat "${root}/VERSION")"
     token="$(generate_secret_value SECONDARY_REGISTRATION_TOKEN hex32)"
     token="${token}\"${token}\\"
@@ -4239,7 +4283,7 @@ CASES
 # Why: a secret missed by the bundle is a credential leak
 # From: Issue #762 | PR #1858
 @test "setup log bundle finds every managed secret and redacts it" {
-    local root t="${BATS_TEST_TMPDIR}" list plain k kind long short custom ph marker
+    local root t="${BATS_TEST_TMPDIR}" list plain k kind long short custom ph marker sec
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}" || return 1
     list="$(managed_secret_env_keys)" || return 1
@@ -4253,9 +4297,11 @@ CASES
     custom="$(_val var)_TOKEN"
     run generate_secret_value "${custom}" hex32
     _expect unlisted 1 "Secret ${custom} is not in managed_secret_env_keys" || return 1
-    plain="$(awk -F= '/^[A-Z_][A-Z0-9_]*=/ { print $1 }' "${root}/deploy/prod/.env" | grep -vxF -f <(printf '%s\n' "${list}"))"
+    sec="$(_ci_block_entry_list validation compose_validation_secrets hex32) $(_ci_block_entry_list validation compose_validation_secrets base64_32)" || return 1
+    sec="$(tr -s '[:space:]' '\n' <<< "${sec}")"
+    plain="$(awk -F= '/^[A-Z_][A-Z0-9_]*=/ { print $1 }' "$(_template_env)" | grep -vxF -f <(printf '%s\n' "${list}" "${sec}"))"
     while IFS= read -r k; do
-        ! logbundle_key_looks_like_secret "${k}" || [ -z "$(get_env_var "${k}" "${root}/deploy/prod/.env")" ] \
+        ! logbundle_key_looks_like_secret "${k}" || [ -z "$(get_env_var "${k}" "$(_template_env)")" ] \
             || { echo "plain prod key ${k} with a shipped value flagged as secret"; return 1; }
     done <<< "${plain}"
     custom="$(_val var)"
@@ -4267,7 +4313,7 @@ CASES
     ! grep -qx -- "${custom}" <<< "${list}" && logbundle_key_looks_like_secret "${custom}" && secret_value_is_placeholder "${ph}" \
         || { echo "probe inputs invalid: ${custom} ${ph}"; return 1; }
     { printf '%s=%s\n' "${k}" "${short}" "${custom}" "${long}" "$(awk 'NR == 2' <<< "${list}")" "${ph}"
-      awk -F= -v k="$(awk 'NR == 1' <<< "${plain}")" '$1 == k' "${root}/deploy/prod/.env"; } > "${t}/src.env"
+      awk -F= -v k="$(awk 'NR == 1' <<< "${plain}")" '$1 == k' "$(_template_env)"; } > "${t}/src.env"
     logbundle_collect_secret_values "${t}/src.env" > "${t}/secrets"
     [ "$(paste -sd, "${t}/secrets")" = "${long},${short}" ] || { echo "values: $(paste -sd, "${t}/secrets")"; return 1; }
     marker="$(logbundle_redact_stream "${t}/secrets" <<< "${long}")"
@@ -4310,10 +4356,10 @@ CASES
     channel="$(_ci_block_entry_field release "" default_channel)" || return 1
     lancache_ui_channel_override_is_valid "${channel}" || { echo "SOT channel ${channel} not UI-valid"; return 1; }
     mode="$(_rust_dhcp_modes "${root}" | awk 'NR == 2')" || return 1
-    size="$(get_env_var CACHE_MAX_SIZE "${root}/deploy/prod/.env")" && unit="${size//[0-9]/}" || return 1
+    size="$(get_env_var CACHE_MAX_SIZE "$(_template_env)")" && unit="${size//[0-9]/}" || return 1
     gb=$(( ${size%"${unit}"} * 2 ))
     [ -n "${mode}" ] && lancache_ui_cache_max_gb_override_is_valid "${gb}" || { echo "no UI inputs: ${mode} ${gb}"; return 1; }
-    printf '%s\n' "LANCACHE_IMAGE_CHANNEL=${channel}" AUTO_UPDATE_ENABLED=1 "DHCP_MODE=${mode}" LOGGING_DNS_ENABLED=0 \
+    printf '%s\n' "LANCACHE_IMAGE_CHANNEL=${channel}" AUTO_UPDATE_ENABLED=1 "DHCP_MODE=${mode}" \
         "CACHE_MAX_GB=${gb}" > "${DS}/volumes/${vsuffix}/${sfile}" || return 1
     _setup_sh_run 'cmd_converge_reconcile "${I}" && cp "${I}/.env" "${T}/env.first" && cmd_converge_reconcile "${I}"'
     [ "${status}" -eq 0 ] && cmp "${t}/env.first" "${I}/.env" || { echo "converge: ${output}"; return 1; }

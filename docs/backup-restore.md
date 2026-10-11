@@ -2,8 +2,8 @@
 
 LanCache NG stores mutable state outside container images. Back up that state before upgrades, after configuration changes, and before enabling scheduled automatic updates.
 
-For manual production checkouts, keep `deploy/prod/.env` as the checked-in
-template and put real runtime settings in `deploy/prod/.env.local`. `setup.sh`
+For manual production checkouts, no `.env` is tracked: put the runtime
+settings of the installation in `deploy/prod/.env.local`. `setup.sh`
 prefers that untracked file automatically for backup, update, restore, and
 `update-ip` when it exists. `restore` is the one exception worth calling out:
 if the archive being restored has no `.env.local` (older backups, or

@@ -531,9 +531,9 @@ documented contract, in `services/ui/src/main.rs`:
   `kea_config_modify()` chain, which also verifies persisted state through
   its existing `config-write` confirmation and records a fresh snapshot of
   the restored config).
-- `KEA_CONFIG_SNAPSHOT_DIR` is owned by `deploy/prod/.env`
-  (`/var/lib/kea/config-snapshots`, inside the Kea data mount) and passed to
-  both the `ui` and the `dhcp` service: the Admin UI writes snapshots there,
+- `KEA_CONFIG_SNAPSHOT_DIR` is owned by `runtime.defaults` in the SOT
+  (`/var/lib/kea/config-snapshots`, inside the Kea data mount) and baked into
+  both the `ui` and the `dhcp` image: the Admin UI writes snapshots there,
   the `dhcp` supervisor reads it when `kea-dhcp4 -t` rejects the live
   config, and
   `setup.sh reset-to-last-known-good-config kea` maps it to the host path
