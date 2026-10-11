@@ -1941,7 +1941,7 @@ fn render_auth_callout_fragment(cfg: &Config, issuer: &str, xkey: &str) -> Strin
 
 // What: write the auth_callout fragment when it changed.
 // Why: the dns supervisor restarts nats-server on a change.
-// From: Issue #811 | Issue #1683
+// From: Issue #811 | PR #1912
 fn write_callout_fragment(state: &AppState) -> Result<(), String> {
     state.config.nats.validate()?;
     let fragment = render_auth_callout_fragment(
@@ -3855,7 +3855,7 @@ async fn sync_subnet_ntp(state: &AppState, auto: bool) -> Result<(), String> {
 
 // What: switch the stack between the DHCP backends.
 // Why: the ui saves; the dhcp supervisor starts the mode.
-// From: Issue #1486 | Issue #1683
+// From: Issue #1486 | PR #1912
 async fn update_dhcp_mode(
     State(state): Shared,
     Form(f): Form<Fields>,
@@ -4028,7 +4028,7 @@ const PROBE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 // What: ask the dhcp supervisor for one probe run.
 // Why: the ui has no Docker; a request file starts it.
-// From: Issue #947 | Issue #1683
+// From: Issue #947 | PR #1912
 async fn check_dhcp_conflict(State(state): Shared) -> Json<Value> {
     // What: one probe request at a time.
     // Why: a second request would replace the first id.
@@ -5102,7 +5102,7 @@ async fn stats_page(State(state): Shared, headers: HeaderMap) -> Response {
 
 // What: the log page, from the central syslog-ng store.
 // Why: every container logs there; one view covers all.
-// From: Issue #633 | Issue #1683
+// From: Issue #633 | PR #1912
 async fn logs_page(
     State(state): Shared,
     headers: HeaderMap,
@@ -5363,7 +5363,7 @@ setTimeout(pollHealth, 1500);
 
 // What: answer with the wait page, then end the ui.
 // Why: compose "restart: always" starts it; no Docker.
-// From: Issue #1486 | Issue #1683
+// From: Issue #1486 | PR #1912
 async fn restart_ui_service() -> Html<&'static str> {
     tokio::spawn(async {
         tokio::time::sleep(Duration::from_millis(750)).await;
@@ -10059,7 +10059,7 @@ mod tests {
 
     // What: a DHCP mode switch only saves the mode.
     // Why: the dhcp supervisor starts what the file names.
-    // From: Issue #1486 | Issue #1683
+    // From: Issue #1486 | PR #1912
     #[tokio::test]
     async fn dhcp_mode_switch_saves_the_mode() {
         let dir = unique_temp_dir("dhcp-mode");

@@ -1,15 +1,13 @@
 #!/bin/bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: verifies .env migration/update value-preservation se
-# Why: validates AGENTS.md guarantee "existing non-empty loc
-#   values must be preserved by default."
+# What: checks .env migration keeps non-empty values.
+# Why: AGENTS.md says existing local values are preserved.
 # From: PR #1546
 set -euo pipefail
 
-# What: would extract setup.sh's .env helpers by hardcoded l
-# Why: STATUS 2026-08-13 -- dead code (unused) with a stale
-#   for a maintainer decision on removal vs. a real extraction mechanism.
+# What: would extract setup.sh .env helpers by line range.
+# Why: dead code; open: remove it or extract it properly.
 # From: PR #1546
 setup_sh_helpers() {
     local setup_sh="$1"
@@ -39,27 +37,26 @@ run_test() {
 test_existing_value_preserved() {
     local env_file="$1"
 
-    printf 'STANDARD_CACHE_MAX_GB=100.0\n' > "$env_file"
+    printf 'CACHE_MAX_GB=100.0\n' > "$env_file"
 
     env_key_exists() {
         grep -q "^${1}=" "${2}" 2>/dev/null
     }
 
-    env_key_exists STANDARD_CACHE_MAX_GB "$env_file" || printf 'STANDARD_CACHE_MAX_GB=50.0\n' >> "$env_file"
+    env_key_exists CACHE_MAX_GB "$env_file" || printf 'CACHE_MAX_GB=50.0\n' >> "$env_file"
 
     local actual
-    actual=$(grep '^STANDARD_CACHE_MAX_GB=' "$env_file" | cut -d= -f2)
+    actual=$(grep '^CACHE_MAX_GB=' "$env_file" | cut -d= -f2)
     [ "$actual" = "100.0" ] || return 1
 
     # What: Only one copy of the key (no duplicate lines).
     local count
-    count=$(grep -c '^STANDARD_CACHE_MAX_GB=' "$env_file")
+    count=$(grep -c '^CACHE_MAX_GB=' "$env_file")
     [ "$count" = "1" ] || return 1
 }
 
 # What: a missing key is added on first run (install).
-# Why: setup logic must converge old/incomplete installation
-#   the current expected state.
+# Why: setup converges old installs to the expected state.
 # From: PR #1546
 test_missing_key_added() {
     local env_file="$1"
@@ -70,16 +67,15 @@ test_missing_key_added() {
         grep -q "^${1}=" "${2}" 2>/dev/null
     }
 
-    env_key_exists STANDARD_CACHE_MAX_GB "$env_file" || printf 'STANDARD_CACHE_MAX_GB=50.0\n' >> "$env_file"
+    env_key_exists CACHE_MAX_GB "$env_file" || printf 'CACHE_MAX_GB=50.0\n' >> "$env_file"
 
     local actual
-    actual=$(grep '^STANDARD_CACHE_MAX_GB=' "$env_file" | cut -d= -f2)
+    actual=$(grep '^CACHE_MAX_GB=' "$env_file" | cut -d= -f2)
     [ "$actual" = "50.0" ] || return 1
 }
 
-# What: an intentionally-empty value stays empty, not replac
-# Why: e.g. UI_BIND_IP= deliberately triggers the
-#   ${UI_BIND_IP:-${IP_HTTP}} compose fallback to IP_HTTP.
+# What: an intentionally empty value stays empty.
+# Why: UI_BIND_IP= selects the compose fallback to IP_HTTP.
 # From: PR #1546
 test_empty_value_preserved() {
     local env_file="$1"
