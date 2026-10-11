@@ -7476,6 +7476,12 @@ mod tests {
         load_from(&nats_env()).expect("a complete NATS env loads")
     }
 
+    // What: a fresh random password for one test.
+    // Why: no password literal sits in the source.
+    fn test_password() -> String {
+        hex::encode(rand::random::<[u8; 16]>())
+    }
+
     fn nats_env() -> HashMap<String, String> {
         let mut env = full_env();
         let extra = [
@@ -8581,14 +8587,14 @@ mod tests {
             preflight(&load_from(&env).unwrap())
         };
         let b64 = |v: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
-        let phc = b64(&hash_password("pw").unwrap());
+        let phc = b64(&hash_password(&test_password()).unwrap());
         let both = [
             ("UI_AUTH_USER", "admin"),
             ("UI_AUTH_PASSWORD_HASH", phc.as_str()),
         ];
         assert_eq!(with(&both), Ok(Duration::from_secs(3600)));
         for bad in [
-            b64("pw"),
+            b64(&test_password()),
             b64("$argon2i$v=19$m=16,t=2,p=1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNo"),
         ] {
             let err = with(&[
@@ -8946,20 +8952,22 @@ mod tests {
     // Why: a wrong or broken hash never logs in.
     #[test]
     fn password_matches_only_its_argon2id_hash() {
-        let phc = hash_password("pw").unwrap();
+        let pw = test_password();
+        let phc = hash_password(&pw).unwrap();
         assert!(phc.starts_with("$argon2id$"));
-        assert!(password_matches(&phc, "pw"));
-        assert!(!password_matches(&phc, "pW"));
-        assert!(!password_matches("pw", "pw"));
+        assert!(password_matches(&phc, &pw));
+        assert!(!password_matches(&phc, &format!("{pw}x")));
+        assert!(!password_matches(&pw, &pw));
     }
 
     // What: Basic auth needs both parts to match.
     // Why: one correct half must never open the admin UI.
     #[tokio::test]
     async fn basic_auth_needs_user_and_password() {
+        let pw = test_password();
         let (base, _state, dir) = test_server(|cfg| {
             cfg.auth_user = Some("op".to_string());
-            cfg.auth_password_hash = Some(hash_password("pw").unwrap());
+            cfg.auth_password_hash = Some(hash_password(&pw).unwrap());
         })
         .await;
         let client = reqwest::Client::new();
@@ -8970,7 +8978,7 @@ mod tests {
             denied.headers()[header::WWW_AUTHENTICATE],
             r#"Basic realm="LanCache Admin""#
         );
-        for (user, pass) in [("op", "bad"), ("bad", "pw"), ("bad", "bad")] {
+        for (user, pass) in [("op", "bad"), ("bad", pw.as_str()), ("bad", "bad")] {
             let wrong = client
                 .get(&url)
                 .basic_auth(user, Some(pass))
@@ -8988,7 +8996,7 @@ mod tests {
         assert_eq!(garbage.status(), 401);
         let ok = client
             .get(&url)
-            .basic_auth("op", Some("pw"))
+            .basic_auth("op", Some(&pw))
             .send()
             .await
             .unwrap();
