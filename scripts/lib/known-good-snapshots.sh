@@ -10,21 +10,11 @@
 # service adapter follows. It is intentionally pure functions with no
 # top-level executable code, so it can be sourced directly by tests.
 #
-# It is NOT copied into any container image via a shared Docker build
-# context: each service Dockerfile (services/proxy, services/dhcp-proxy)
-# builds from its own isolated directory with no shared-file context wired
-# up (unlike the cdn-domains.txt `dns-domains` build context, adding a
-# second shared context here would require the build-push.yml matrix to
-# support multiple --build-context values per image, which none of its
-# three job definitions do today). Instead, services/proxy/entrypoint.sh
-# and services/dhcp-proxy/entrypoint.sh each embed a byte-identical copy of
-# these functions between the marker comments
-#   # BEGIN known-good-snapshot library (scripts/lib/known-good-snapshots.sh)
-#   # END known-good-snapshot library
-# tests/bats/known_good_snapshots_sync.bats fails the build if either
-# embedded copy ever drifts from this file, so "generic" here means one
-# documented, behaviorally-verified contract, not necessarily one physical
-# file loaded at runtime.
+# The proxy, dns, and dhcp-proxy entrypoints source it at runtime from
+# /usr/local/lib/known-good-snapshots.sh; their Dockerfiles COPY it in from
+# the known-good named build context. It is one physical file with no
+# per-service copy. The nats-subscriber and ui Rust adapters reimplement the
+# same contract natively, since a compiled binary cannot source a shell lib.
 #
 # Snapshot layout on disk, rooted at <snapshot_root> (a service-owned
 # persistent volume, never an ephemeral container layer):

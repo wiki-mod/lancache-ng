@@ -170,6 +170,23 @@ services:
   # Watchdog for health monitoring
   watchdog:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}"
+    # What: every watchdog value, as config/prod sets it.
+    # Why: the watchdog has no defaults and will not start.
+    environment:
+      - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
+      - CHECK_INTERVAL=30
+      - RESTART_AFTER=3
+      - DISK_WARN_PCT=85
+      - DISK_ALARM_PCT=95
+      - CURL_MAX_TIME=5
+      - CURL_MAX_TIME_RESTART=30
+      - CACHE_DIR=/var/cache/lancache
+      - STATUS_FILE=/var/run/watchdog/status.json
+      - DESIRED_STATE_FILE=/data/desired-state.json
+      - SSL_ENABLED=1
+      - DHCP_MODE=disabled
+      - LOGGING_ENABLED=0
+      - NTP_ENABLED=0
     volumes:
       # What: cache mount is read-only (purge moved to retention).
       # Why: watchdog only reads; see deploy/prod's identical mount.
@@ -345,9 +362,34 @@ services:
       - "127.0.0.1:${VALIDATION_UI_PORT:-9090}:8080"
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
+      # What: every ui value, as deploy/prod sets it.
+      # Why: the ui has no defaults; absent services unused.
+      - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
+      - WATCHDOG_STATUS_FILE=/var/run/watchdog/status.json
+      - DESIRED_STATE_FILE=/data/desired-state.json
+      # What: paths below the /data and /etc/nats mounts.
+      # Why: the image ENV lint rejects these names.
+      # From: Issue #1683
+      - NATS_AUTH_CALLOUT_PATH=/etc/nats/auth_callout.conf
+      - UI_SESSION_SECRET_FILE=/data/lancache-ui-session.secret
+      - SECONDARY_REGISTRATION_TOKEN_FILE=/data/lancache-secondary-registration.token
+      - NATS_SERVICE=nats
+      - NATS_LOG_FILE=/var/log/lancache-nats/nats.log
+      - DNS_STANDARD_STATE_DIR=/var/lib/powerdns-state
+      - DNS_SSL_STATE_DIR=/var/lib/powerdns-state
+      - DNS_ROLLBACK_URL=http://dns-standard:8083
+      - NETDATA_URL=http://netdata:19999
+      - DHCP_API_URL=http://localhost:8000
+      - KEA_CONFIG_SNAPSHOT_DIR=/var/lib/kea/config-snapshots
+      - SYSLOG_ENABLED=false
+      - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
+      - SYSLOG_MAX_GB=10
+      - KEEP_KNOWN_GOOD_CONFIGS=3
+      - UI_LOGS_MAX_ENTRIES=200
+      - UI_SESSION_TTL_SECONDS=86400
+      - NTP_UPSTREAM_SERVERS=0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
-      - PROXY_SERVICE=proxy
       - SSL_ENABLED=1
       - PROXY_STANDARD_URL=http://proxy
       - PROXY_SSL_URL=http://proxy
@@ -370,7 +412,7 @@ services:
       - PDNS_REC_URL=http://dns-standard:8082
       - PDNS_API_KEY=validation-pdns-key
       # What: must match the netdata service's own NETDATA_ALARM_TOKEN.
-      # Why: see routes/netdata_alarms.rs for what this token gates.
+      # Why: see main.rs for what this token gates.
       # From: Issue #849 | PR #1444
       - NETDATA_ALARM_TOKEN=validation-netdata-alarm-token
       - NATS_URL=nats://nats:4222

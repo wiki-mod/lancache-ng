@@ -58,219 +58,10 @@ prepare_proxy_log_dir_for_syslog() {
 # ────────────────────────────────────────────────────────────────────────────
 # 0a. Known-good configuration snapshot library (#415)
 #
-# See docs/known-good-config-snapshots.md for the full contract. This block
-# is a byte-identical copy of scripts/lib/known-good-snapshots.sh's function
-# definitions (verified by tests/bats/known_good_snapshots_sync.bats) rather
-# than a sourced file, because this Dockerfile builds from services/proxy/
-# alone with no shared-file build context wired up for it.
-# ────────────────────────────────────────────────────────────────────────────
-# BEGIN known-good-snapshot library (scripts/lib/known-good-snapshots.sh)
-# kgs_log <level> <label> <message...>
-# Emits one explicit, greppable log line for every snapshot lifecycle event
-# (create, prune, rollback-select, reject) per the issue's acceptance
-# criteria. level is a short tag: CREATE/PRUNE/SELECT/REJECT/FATAL.
-kgs_log() {
-    local level="$1" label="$2"
-    shift 2
-    echo "[known-good-snapshot][${label}][${level}] $*" >&2
-}
-
-# kgs_new_snapshot_id
-# Prints a new, sortable, practically collision-free snapshot id.
-kgs_new_snapshot_id() {
-    date -u +%Y%m%dT%H%M%S.%N
-}
-
-# kgs_list_snapshots <snapshot_root>
-# Prints existing snapshot ids, oldest first, one per line. Empty output
-# (no error) when <snapshot_root> does not exist yet or holds no snapshots.
-# Excludes .staging.* entries: kgs_snapshot_create assembles a new snapshot
-# in such a directory before the final atomic `mv` into its real <id> name,
-# so a container killed mid-copy can leave one behind. Without this
-# exclusion, a leftover .staging.* directory would be listed and treated as
-# a real (but only partially-written) snapshot by callers of this function.
-kgs_list_snapshots() {
-    local snapshot_root="$1"
-    [ -d "$snapshot_root" ] || return 0
-    find "$snapshot_root" -mindepth 1 -maxdepth 1 -type d -not -name '.staging.*' -printf '%f\n' 2>/dev/null | sort
-}
-
-# kgs_snapshot_create <snapshot_root> <keep_n> <label> <file...>
-# Copies <file...> into a new snapshot directory, then prunes anything
-# beyond the newest <keep_n>. Creation is atomic-enough: files are
-# assembled in a temporary sibling directory on the same filesystem and only
-# `mv`-ed into their final <id> name once complete, so a crash mid-copy
-# never leaves a partially-written snapshot directory visible to
-# kgs_list_snapshots/kgs_snapshot_apply.
-kgs_snapshot_create() {
-    local snapshot_root="$1" keep_n="$2" label="$3"
-    shift 3
-    local -a files=("$@")
-    local id staging f base
-
-    mkdir -p "$snapshot_root" || {
-        kgs_log FATAL "$label" "cannot create snapshot root $snapshot_root"
-        return 1
-    }
-
-    id="$(kgs_new_snapshot_id)"
-    staging="$(mktemp -d "${snapshot_root}/.staging.XXXXXX")" || {
-        kgs_log FATAL "$label" "cannot create staging directory under $snapshot_root"
-        return 1
-    }
-
-    for f in "${files[@]}"; do
-        if [ ! -f "$f" ]; then
-            kgs_log FATAL "$label" "candidate file missing, refusing snapshot: $f"
-            rm -rf "$staging"
-            return 1
-        fi
-        base="$(basename "$f")"
-        if ! cp -p "$f" "$staging/$base"; then
-            kgs_log FATAL "$label" "failed to copy $f into snapshot staging"
-            rm -rf "$staging"
-            return 1
-        fi
-    done
-
-    if ! mv "$staging" "${snapshot_root}/${id}"; then
-        kgs_log FATAL "$label" "failed to finalize snapshot $id"
-        rm -rf "$staging"
-        return 1
-    fi
-
-    kgs_log CREATE "$label" "created known-good snapshot $id (${files[*]})"
-    kgs_snapshot_prune "$snapshot_root" "$keep_n" "$label"
-}
-
-# kgs_snapshot_prune <snapshot_root> <keep_n> <label>
-# Deletes the oldest snapshots beyond <keep_n>. A missing/non-numeric/
-# non-positive keep_n is clamped to the documented default of 3 rather than
-# trusted as-is, so a misconfigured KEEP_KNOWN_GOOD_CONFIGS (e.g. "0" or
-# empty) can never silently disable retention or prune away every snapshot,
-# including the one just created by kgs_snapshot_create.
-kgs_snapshot_prune() {
-    local snapshot_root="$1" keep_n="$2" label="$3"
-    case "$keep_n" in
-        '' | *[!0-9]*) keep_n=3 ;;
-    esac
-    [ "$keep_n" -ge 1 ] || keep_n=3
-
-    local -a ids=()
-    while IFS= read -r id; do
-        [ -n "$id" ] && ids+=("$id")
-    done < <(kgs_list_snapshots "$snapshot_root")
-
-    local total=${#ids[@]}
-    local excess=$((total - keep_n))
-    [ "$excess" -gt 0 ] || return 0
-
-    local i id
-    for ((i = 0; i < excess; i++)); do
-        id="${ids[$i]}"
-        if rm -rf "${snapshot_root:?}/${id}"; then
-            kgs_log PRUNE "$label" "pruned known-good snapshot $id (retention=${keep_n})"
-        else
-            kgs_log FATAL "$label" "failed to prune snapshot $id"
-        fi
-    done
-}
-
-# kgs_snapshot_apply <snapshot_root> <label> <validator_cmd> <dest...>
-# Attempts to roll the live config at <dest...> back to the newest snapshot
-# that passes <validator_cmd> (a command string evaluated with no arguments
-# after the snapshot's files have been copied onto <dest...>; it must exit 0
-# for a valid config, e.g. "nginx -t" or "dnsmasq --test -C /etc/dnsmasq.conf").
-# Tries snapshots newest-to-oldest, logging a REJECT line for each one that
-# fails validation, and never applies one that doesn't pass. Prints the
-# selected snapshot id and returns 0 on success. If no snapshot validates (or
-# none exist), <dest...> is restored to exactly what was live before this
-# function was called, so a failed rollback attempt never leaves <dest...>
-# in a half-applied state, and returns 1.
-kgs_snapshot_apply() {
-    local snapshot_root="$1" label="$2" validator_cmd="$3"
-    shift 3
-    local -a dest=("$@")
-    local -a ids=()
-    while IFS= read -r id; do
-        [ -n "$id" ] && ids+=("$id")
-    done < <(kgs_list_snapshots "$snapshot_root")
-
-    if [ "${#ids[@]}" -eq 0 ]; then
-        kgs_log FATAL "$label" "no known-good snapshots available to roll back to"
-        return 1
-    fi
-
-    local backup_dir
-    backup_dir="$(mktemp -d)" || {
-        kgs_log FATAL "$label" "cannot create rollback backup directory"
-        return 1
-    }
-    local d base
-    for d in "${dest[@]}"; do
-        base="$(basename "$d")"
-        [ -f "$d" ] && cp -p "$d" "$backup_dir/$base"
-    done
-
-    local i id snap_dir
-    for ((i = ${#ids[@]} - 1; i >= 0; i--)); do
-        id="${ids[$i]}"
-        snap_dir="${snapshot_root}/${id}"
-
-        # Require every requested basename to be present in this snapshot
-        # before touching any live file. A finalized-but-incomplete
-        # snapshot (e.g. taken before a new generated file was added to the
-        # candidate list) would otherwise leave that one dest untouched --
-        # silently validating a mix of this snapshot's files and whatever
-        # happened to already be live, a combination that was never itself
-        # actually validated together.
-        local snapshot_complete=1
-        for d in "${dest[@]}"; do
-            base="$(basename "$d")"
-            if [ ! -f "${snap_dir}/${base}" ]; then
-                snapshot_complete=0
-                break
-            fi
-        done
-        if [ "$snapshot_complete" -ne 1 ]; then
-            kgs_log REJECT "$label" "rejected known-good snapshot $id: incomplete (missing at least one candidate file)"
-            continue
-        fi
-
-        for d in "${dest[@]}"; do
-            base="$(basename "$d")"
-            cp -p "${snap_dir}/${base}" "$d"
-        done
-
-        # Redirect the validator's own stdout to stderr: this function's
-        # stdout is the caller's return channel (the selected snapshot id
-        # via command substitution), and a validator like "nginx -t" or
-        # "dnsmasq --test" may print its own diagnostic text to stdout,
-        # which would otherwise silently corrupt that return value.
-        if eval "$validator_cmd" 1>&2; then
-            kgs_log SELECT "$label" "selected known-good snapshot $id for rollback"
-            rm -rf "$backup_dir"
-            printf '%s\n' "$id"
-            return 0
-        fi
-        kgs_log REJECT "$label" "rejected known-good snapshot $id: failed validation"
-    done
-
-    # Nothing validated: restore exactly what was live before this call so a
-    # failed rollback attempt never leaves dest in a half-applied state.
-    for d in "${dest[@]}"; do
-        base="$(basename "$d")"
-        if [ -f "$backup_dir/$base" ]; then
-            cp -p "$backup_dir/$base" "$d"
-        else
-            rm -f "$d"
-        fi
-    done
-    rm -rf "$backup_dir"
-    kgs_log FATAL "$label" "no known-good snapshot passed validation; refusing rollback"
-    return 1
-}
-# END known-good-snapshot library
+# What: source the known-good-snapshot library.
+# Why: one owner in scripts/lib, no embedded copy (AG-CODE-011).
+# From: Issue #1683
+. /usr/local/lib/known-good-snapshots.sh
 
 _normalize_resolver_token() {
     local token="$1"
@@ -287,92 +78,10 @@ _normalize_resolver_token() {
     printf '%s' "$token"
 }
 
-# ────────────────────────────────────────────────────────────────────────────
-# Domain validation library (scripts/lib/domain-validation.sh)
-#
-# Mirrors the label-strict rules from Admin UI (domains.rs) to prevent
-# invalid domains from being used in nginx maps, cert generation, and stream
-# targets. This block is a byte-identical copy of
-# scripts/lib/domain-validation.sh's function definitions (verified by
-# tests/bats/domain_validation_sync.bats) rather than a sourced file, because
-# this Dockerfile builds from services/proxy/ alone with no shared-file
-# build context wired up for it -- see that file for the full rule
-# documentation and rationale.
-# ────────────────────────────────────────────────────────────────────────────
-# BEGIN domain-validation library (scripts/lib/domain-validation.sh)
-_is_valid_domain_label() {
-    local label="$1"
-
-    # Label must not be empty
-    [ -n "$label" ] || return 1
-
-    # Label must be <= 63 chars
-    [ ${#label} -le 63 ] || return 1
-
-    # Label must not start or end with hyphen
-    [[ "$label" != -* ]] && [[ "$label" != *- ]] || return 1
-
-    # Label must only contain lowercase ASCII a-z, digits 0-9, or hyphen
-    [[ "$label" =~ ^[a-z0-9-]+$ ]] || return 1
-
-    return 0
-}
-
-# Prints the normalized form (trimmed, lowercased, leading dot stripped) of a
-# domain to stdout. Callers must capture this and use it instead of the raw
-# input for anything written to disk/config — _is_valid_domain() only reports
-# whether a value validates, it does not mutate the caller's variable.
-_normalize_domain() {
-    local domain="$1"
-    # Trim whitespace via pure parameter expansion, not xargs — xargs applies
-    # shell-style unquoting/escaping first, which would let malformed manual
-    # entries like a quoted "Example.COM" slip through as a clean example.com.
-    domain="${domain#"${domain%%[![:space:]]*}"}"
-    domain="${domain%"${domain##*[![:space:]]}"}"
-    domain="${domain,,}"
-    domain="${domain#.}"
-    printf '%s' "$domain"
-}
-
-_is_valid_domain() {
-    local domain
-    domain="$(_normalize_domain "$1")"
-
-    # Must not be empty after normalization
-    [ -n "$domain" ] || return 1
-
-    # Must be <= 253 chars total (RFC 1035 domain name length limit)
-    [ ${#domain} -le 253 ] || return 1
-
-    # Check for trailing dot (RFC 1035 allows it, but we reject it like the Rust validator does)
-    [[ "$domain" != *. ]] || return 1
-
-    # Validate each label using a loop to properly handle empty labels
-    # (bash word splitting would silently drop trailing empty labels,
-    # but we want to reject domains like "example.com." explicitly)
-    local label
-    local remaining="$domain"
-
-    while [ -n "$remaining" ]; do
-        # Extract label up to next dot
-        if [[ "$remaining" == *.* ]]; then
-            label="${remaining%%.*}"
-            remaining="${remaining#*.}"
-        else
-            label="$remaining"
-            remaining=""
-        fi
-
-        _is_valid_domain_label "$label" || return 1
-    done
-
-    # Must have at least 2 labels (so the loop must execute at least twice)
-    # We can check this by ensuring the domain contains at least one dot
-    [[ "$domain" == *.* ]] || return 1
-
-    return 0
-}
-# END domain-validation library
+# What: sources the domain-validation library.
+# Why: no more embedded byte-identical copy needed.
+# From: Issue #1683
+. /usr/local/lib/domain-validation.sh
 
 # ────────────────────────────────────────────────────────────────────────────
 # Public-suffix-aware root domain derivation
@@ -772,7 +481,7 @@ if [ "${SSL_ENABLED}" = "1" ]; then
     # _ensure_ca_cert: generates the CA on first boot only (idempotent --
     # does nothing once $CA_DIR/ca.crt and ca.key both already exist).
     # Factored into its own function (rather than inline top-level script
-    # code) specifically so tests/bats/proxy_cert_dir_permissions.bats can
+    # code) specifically so .github/scripts/ci.bats can
     # drive the real chmod hardening below through a real `openssl req`
     # call, without needing to run the rest of this entrypoint: ca.key's
     # and CERT_DIR's file modes are security-relevant
@@ -918,12 +627,8 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         fi
         local san
         san=$(openssl x509 -noout -ext subjectAltName -in "$CERT_DIR/default.crt" 2>/dev/null)
-        # Matched via a here-string, not `echo ... | grep -q` (AG-VAL-032):
-        # this script runs under `set -o pipefail`, and a multi-line $san
-        # could let grep exit after an early match while echo is still
-        # writing, which pipefail would report as failure even though grep
-        # matched -- the general SIGPIPE-under-pipefail hazard that
-        # scripts/untracked/check-pipefail-early-exit-grep.sh guards against repo-wide.
+        # What: match SAN via a here-string, not a live pipe.
+        # Why: a live pipe could SIGPIPE under pipefail (AG-VAL-032).
         grep -q "DNS:" <<< "$san" || return 0
         if [ -n "${IP_SSL}" ]; then
             # `grep -q "IP Address:${IP_SSL}"` would be an unanchored substring
@@ -1016,7 +721,7 @@ fi
 #    strict = only proxy hosts derived from cdn-domains.txt (see above)
 # ────────────────────────────────────────────────────────────────────────────
 # Factored into its own function (rather than inline top-level script code)
-# so tests/bats/proxy_ssl_map_generation.bats can drive the real
+# so .github/scripts/ci.bats can drive the real
 # $cdn_host_allowed (strict/lazy) and $lancache_client_allowed
 # (PROXY_ALLOWED_CLIENT_CIDRS) map generation directly -- both the
 # strict-mode 403 code path and the CIDR-allowlist 403 code path are
@@ -1102,7 +807,7 @@ mkdir -p /etc/nginx/stream.d
 STREAM_EMPTY_SNI_BACKEND="127.0.0.1:9"
 
 # Factored into its own function (rather than inline top-level script code)
-# so tests/bats/proxy_stream_backend_map.bats can drive both
+# so .github/scripts/ci.bats can drive both
 # PROXY_SECURITY_MODE branches directly.
 _render_stream_backend_map() {
     echo "# Auto-generated by entrypoint — do not edit"

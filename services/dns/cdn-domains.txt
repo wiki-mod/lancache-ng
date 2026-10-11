@@ -13,7 +13,7 @@
 # or "!.steamcontent.com") -- both DNS RPZ generation (services/dns/entrypoint.sh)
 # and proxy cert/nginx-map generation (services/proxy/entrypoint.sh) skip a
 # disabled entry entirely. Remove the "!" to re-enable it. The Admin UI's
-# per-domain toggle (services/ui/src/routes/domains.rs) manages this marker
+# per-domain toggle (services/ui/src/main.rs) manages this marker
 # for the pre-shipped entries below; do not hand-edit the "====" marker line
 # further down this file, it tells the Admin UI where operator-added entries
 # start.

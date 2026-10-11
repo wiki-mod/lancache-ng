@@ -156,10 +156,12 @@ Use this as an opt-in setting:
 - keep `pump` enabled only for builders that do not generate C headers during
   the build; otherwise use normal distcc hosts from the same host list
 
-Rust service builder images consume the host list through a BuildKit secret,
-discover either `/usr/local/lib/distcc` or `/usr/lib/distcc`, put the discovered
-wrapper directory first in `PATH`, export `CC=distcc`, `GCC=distcc`,
-`CXX=distcc`, and `GXX=distcc`. Builders without generated C headers may start
+Rust service builds (`ci.sh rust-build`) consume the host list through a
+BuildKit secret, link every compiler driver of the SOT variable
+`ci_variables.CI_TOOLCHAIN_COMPILERS` (passed to the builder as a build-arg)
+into a per-run masquerade directory, put that directory first in `PATH`, and
+export each compiler variable of the list (`CC=cc`, `CXX=c++`, ...) as its
+driver name. Builders without generated C headers may start
 with `eval \`distcc-pump --startup\`` before `cargo build` and shut it down
 after the build with `distcc-pump --shutdown`. Builders with generated C
 headers, such as the UI build through `aws-lc-sys`, must use normal distcc mode
@@ -202,8 +204,8 @@ unclear from this PR's scope whether `build-tools.yml`'s and
 `build-push.yml`'s own `ccache_redis_url`/`distcc_potential_hosts` secret
 provisioning for the `build-tools` matrix entry, and the "for all four
 services" claim below, were ever accurate or are simply dead as a result
--- flagged separately, not resolved here. `services/ui/Dockerfile`'s
-custom `lancache-distcc-wrapper` now understands both distcc calling
+-- flagged separately, not resolved here. The distcc wrapper that
+`ci.sh` generates (`_ci_rust_distcc_wrapper`) understands both distcc calling
 conventions -- the original `$0`-basename masquerade dispatch, and
 ccache's `CCACHE_PREFIX` convention (invoked as `distcc
 <real-compiler-path> <args>`, real compiler is `$1`) -- disambiguated by

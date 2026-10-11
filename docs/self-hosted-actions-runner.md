@@ -1,5 +1,18 @@
 # Self-hosted GitHub Actions runner
 
+## Current state (CI 2.0, Issue #1683)
+
+CI jobs run on GitHub-hosted runners; self-hosted CI runners are retired. The
+runner label and the timeout of every job come from the SOT
+(`.github/yaml/build-manifest.yml`: `platform_arch.<arch>.runner`,
+`ci_job_timeouts`) through `ci.sh job-settings`, which the first job of each
+workflow runs; only that job carries a literal runner and timeout, and the
+`workflow-job-settings` check rejects any other. Every job runs in the
+build-tools container, CodeQL included. The sections below describe the CI 1.x
+self-hosted setup and are historical.
+
+## CI 1.x setup (historical)
+
 The repository workflows are configured to run the build, container checks and CodeQL jobs on self-hosted Linux runners with these labels:
 
 - `self-hosted`

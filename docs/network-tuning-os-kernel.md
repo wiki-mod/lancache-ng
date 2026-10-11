@@ -316,7 +316,8 @@ rather than guessed:
 - Netdata's `proc.plugin` conntrack collector
   (`proc_net_stat_conntrack.c`) is **enabled by default**
   (`inicfg_get_boolean(..., CONFIG_BOOLEAN_YES)`), and this project's
-  `services/netdata/entrypoint.sh` does not disable or override it (it
+  netdata configuration (the `netdata` service command in
+  `deploy/prod/docker-compose.yml`) does not disable or override it (it
   only overrides the `[logs]` section).
 - The collector **gracefully degrades**: if `/proc/net/stat/nf_conntrack`
   fails to open (exactly the case measured above -- it does not exist in

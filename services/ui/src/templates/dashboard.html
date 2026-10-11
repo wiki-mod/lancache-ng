@@ -34,7 +34,7 @@
        cache-disk usage color it also computes into status.json. This card
        is what docs/architecture-ng.md's "traffic light bar" and
        docs/threat-model.md's T9 disk-usage mitigation both describe --
-       neither existed until this card was added (see routes/dashboard.rs's
+       neither existed until this card was added (see main.rs's
        watchdog_status handling and watchdog_status.rs). Server-rendered on
        first load from `watchdog_status`; kept live afterward by
        refreshWatchdogStatus() below, which polls GET /api/watchdog-status
@@ -85,7 +85,7 @@
        have no notification integration or Admin UI surface at all -- see
        docs/threat-model.md's T9 section. The netdata container's
        custom_sender() integration (deploy/*/docker-compose.yml's netdata
-       service) now POSTs every alarm event to routes/netdata_alarms.rs,
+       service) now POSTs every alarm event to main.rs,
        which stores the most recent ones for this card. Server-rendered only
        (no live polling like the Service health card above): an alarm is an
        event, not a continuously-changing gauge, so a fresh value only
@@ -140,14 +140,14 @@
     </div>
 
     <!-- Resize control (issue #1069 part 3). Re-validates the request
-         against real free disk space at cache_dir (routes/cache.rs's
+         against real free disk space at cache_dir (main.rs's
          resize_cache), the same buffer-scaled safety check setup.sh's
          initial "Cache size in GiB" prompt already enforces at install
          time. This never takes effect synchronously: the request is
          persisted for setup.sh's host-side lancache-converge.service (every
          ~5 minutes) to fold into the real .env and let the existing
          `docker compose up -d` convergence step recreate the proxy
-         container -- see routes/cache.rs's module doc comment for the full
+         container -- see main.rs's module doc comment for the full
          mechanism and why a live nginx reload isn't wired up yet. -->
     {% if cache_resize_pending %}
     <div class="bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 text-xs text-amber-300 mb-3">
@@ -174,13 +174,13 @@
        interception) are both served by the single unified services/proxy
        container/nginx process (services/proxy-standard was retired and
        merged into it in the v0.2.0 refactor).
-       PROXY_STANDARD_URL/PROXY_SSL_URL (routes/dashboard.rs) default to the
+       PROXY_STANDARD_URL/PROXY_SSL_URL (main.rs) default to the
        same stub_status endpoint on that one process and only diverge for an
        operator's own advanced multi-instance deployment -- see that file's
        own comment for the full explanation. The `id` attributes on the
        numbers below are updated live by the auto-refresh script at the
        bottom of this template, which polls GET /api/metrics
-       (routes/dashboard.rs::metrics_api) every few seconds. -->
+       (main.rs::metrics_api) every few seconds. -->
   <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
     <div class="card">
       <div class="flex items-center justify-between mb-3">
@@ -259,7 +259,7 @@
   <!-- Central syslog store (#633 PR4): only rendered once an install opts
        into `docker compose --profile logging` (SYSLOG_ENABLED=true) --
        syslog_size_gb/syslog_stats come from syslog_client::get_syslog_size_gb
-       / get_syslog_stats (routes/dashboard.rs), both no-ops otherwise. -->
+       / get_syslog_stats (main.rs), both no-ops otherwise. -->
   {% if syslog_enabled %}
   <div class="card">
     <div class="flex items-center justify-between mb-3">
@@ -271,7 +271,7 @@
     </div>
     <!-- #849 bug-hunt finding observability.md#13: syslog_client::get_syslog_stats
          already computes a per-host breakdown (files/size/distinct days) on
-         every render (routes/dashboard.rs); this table exposes it instead of
+         every render (main.rs); this table exposes it instead of
          discarding it down to the two aggregate numbers above. -->
     {% if syslog_stats.hosts %}
     <div class="overflow-x-auto">
@@ -302,7 +302,7 @@
   {% endif %}
 
   <!-- Recent requests: the most recent entries across the proxy's access
-       log(s) (recent_logs_task, routes/dashboard.rs). When standard_log and
+       log(s) (recent_logs_task, main.rs). When standard_log and
        ssl_log are the same file, this is simply that file's tail
        (nginx_client::parse_log_tail). When they differ, each source is read
        up to the same limit and merged chronologically by parsed timestamp
@@ -374,7 +374,7 @@
 
 </div>
 <script>
-  // Polls GET /api/metrics (routes/dashboard.rs::metrics_api) every 10s and
+  // Polls GET /api/metrics (main.rs::metrics_api) every 10s and
   // patches just the connection-count numbers in place, so the dashboard's
   // live connection counters stay current without re-running the much
   // heavier cache-size/log-tail work behind a full page reload. If a

@@ -42,11 +42,11 @@ Responsibility: determine reachability -> protected artifacts -> unreferenced ar
 ## 7. Central service list
 There is exactly one authoritative product-service list, owned by `.github/yaml/build-manifest.yml`. Current members:
 ```bash
-CI_SERVICES=( proxy dns watchdog dhcp dhcp-proxy ntp syslog ui cachehamster netdata )
+CI_SERVICES=( proxy dns watchdog dhcp dhcp-proxy ntp syslog ui cachehamster )
 ```
 `build-tools` is not a product service; it is the separately owned CI build toolchain under `build_toolchain:` in the same SOT. No workflow contains a second product-service list. No scan contains a second list. No release contains a second list. No GC contains a second list. No multi-arch job contains a second list. No full-setup job contains a second list.
 
-`services/netdata/Dockerfile` is part of the CI 2.0 artifact pipeline. `netdata` is a first-party product service and follows the same build, verify, scan, acceptance, assembly, and promotion lifecycle as the other product images.
+`netdata` is not a product service: by maintainer decision (PR #1858 decision record, 2026-10-01) the stack runs the upstream image `netdata/netdata:latest`, declared in `external_services` of the SOT with `policy: tag-latest`. There is no first-party netdata build.
 ## 8. Central service metadata
 `build-manifest.yml` has exactly one product-service definition and a separate `build_toolchain` definition. `ci.sh` consumes this metadata; it does not maintain a second inventory. Conceptually: ```text service: name build context external build contexts platforms runner class compiler class build dependencies runtime dependencies test domains validation domains artifact repository ``` Example: ```text proxy: context = services/proxy external-context = services/dns platforms = amd64,arm64 runner = light dns: context = services/dns platforms = amd64,arm64 runner = heavy rust = true build_toolchain/build-tools: context = tools/build-tools platforms = amd64,arm64 runner = toolchain ``` GitHub matrices are derived from the SOT. Not the other way around.
 ## 9. Central CLI contract
@@ -488,7 +488,7 @@ ACCEPTED
 ```
 A missing platform does not trigger a rebuild of the successful platform.
 ## 46. Service failure domains
-Each product service is its own failure domain. ```text proxy ACCEPTED dns ACCEPTED watchdog FAILED dhcp ACCEPTED dhcp-proxy ACCEPTED ntp ACCEPTED syslog ACCEPTED ui ACCEPTED cachehamster ACCEPTED netdata ACCEPTED ``` Result: watchdog's candidate failed; the other nine product-service results stay valid, stay ACCEPTED, and may be reused on the next run.
+Each product service is its own failure domain. ```text proxy ACCEPTED dns ACCEPTED watchdog FAILED dhcp ACCEPTED dhcp-proxy ACCEPTED ntp ACCEPTED syslog ACCEPTED ui ACCEPTED cachehamster ACCEPTED ``` Result: watchdog's candidate failed; every other product-service result stays valid, stay ACCEPTED, and may be reused on the next run.
 ## 47. Stack assembly
 A complete stack consists exclusively of ACCEPTED digests.
 ```text
@@ -501,7 +501,6 @@ ntp digest
 syslog digest
 ui digest
 cachehamster digest
-netdata digest
         |
         v
 STACK CANDIDATE
@@ -534,14 +533,14 @@ STACK ACCEPTED
 ## 50. Promotion stays atomic
 Builds are per-service independent. Promotion is stack-atomic.
 ```text
-10/10 product-service digests ACCEPTED
+every product-service digest ACCEPTED
 +
 stack validation SUCCESS
         |
         v
 PROMOTE
 ```
-At `9/10`: `NO PROMOTION`. The nine successful product-service artifacts stay ACCEPTED regardless.
+With one product service not ACCEPTED: `NO PROMOTION`. The successful product-service artifacts stay ACCEPTED regardless.
 ## 51. Promotion never builds
 `promote` may exclusively move references. Forbidden: `PROMOTE -> build`. Allowed: ```text PROMOTE -> verify candidate digests -> acquire lock -> move channel refs -> verify readback -> release lock ```
 ## 52. Promotion Lock
