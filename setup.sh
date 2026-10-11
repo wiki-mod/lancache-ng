@@ -42,6 +42,16 @@ DOCKER_BUILDX_PLUGIN="docker-buildx-plugin"
 DOCKER_CE_CLI="docker-ce-cli"
 DOCKER_CE_PACKAGES=(docker-ce "$DOCKER_CE_CLI" containerd.io)
 DOCKER_RPM_PACKAGES=("${DOCKER_CE_PACKAGES[@]}" "$DOCKER_BUILDX_PLUGIN" "$DOCKER_COMPOSE_PLUGIN")
+# What: distro Docker package names per package manager
+# Why: lookups, install sets, hints and prompts share them
+# From: Issue #1683 | PR #1858
+APT_DOCKER_ENGINE="docker.io"
+APT_DOCKER_CLI="docker-cli"
+APT_LEGACY_COMPOSE="docker-compose"
+APT_COMPOSE_PACKAGES=("$DOCKER_COMPOSE_PLUGIN" docker-compose-v2 "$APT_LEGACY_COMPOSE")
+APT_BUILDX_PACKAGES=("$DOCKER_BUILDX_PLUGIN" docker-buildx)
+PACMAN_COMPOSE="docker-compose"
+PACMAN_DOCKER_PACKAGES=(docker "$PACMAN_COMPOSE" docker-buildx)
 
 # ── Colors (only when connected to a terminal) ────────────────────────────────
 if [[ -t 1 ]]; then
@@ -462,10 +472,30 @@ run_kea_dhcp_activation_preflight() {
     fi
 }
 
+# What: the host package manager; empty when none is known
+# Why: one detection order for every install path
+# From: Issue #1683 | PR #1858
+host_package_manager() {
+    local manager
+    for manager in apt-get dnf yum pacman; do
+        if [[ -n "$(command -v "$manager")" ]]; then
+            printf '%s\n' "$manager"
+            return 0
+        fi
+    done
+}
+
+# What: apt-get install without recommends, no prompt
+# Why: one flag set for every apt install in this script
+# From: Issue #1683 | PR #1858
+apt_install() {
+    apt-get install -y --no-install-recommends "$@"
+}
+
 # What: installs packages via apt, dnf, yum or pacman
 # Why: host changes need confirmation; unknown PM fails
 install_packages() {
-    local reason="$1"
+    local reason="$1" manager
     shift
     local packages=("$@")
 
@@ -475,18 +505,13 @@ install_packages() {
         die "Aborted. Please install these packages manually, then rerun setup.sh: ${packages[*]}"
     fi
 
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -y \
-            && apt-get install -y --no-install-recommends "${packages[@]}"
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y "${packages[@]}"
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y "${packages[@]}"
-    elif command -v pacman >/dev/null 2>&1; then
-        pacman -Syu --noconfirm "${packages[@]}"
-    else
-        die "No supported package manager found. Please install these packages manually, then rerun setup.sh: ${packages[*]}"
-    fi
+    manager=$(host_package_manager)
+    case "$manager" in
+        apt-get) apt-get update -y && apt_install "${packages[@]}" ;;
+        dnf|yum) "$manager" install -y "${packages[@]}" ;;
+        pacman) pacman -Syu --noconfirm "${packages[@]}" ;;
+        *) die "No supported package manager found. Please install these packages manually, then rerun setup.sh: ${packages[*]}" ;;
+    esac
 }
 
 # What: package installs ask first; unknown managers fail
@@ -534,8 +559,8 @@ apt_package_candidate_version() {
 apt_docker_compose_is_v2() {
     local version=""
 
-    version=$(apt_package_candidate_version docker-compose) \
-        || die "Cannot read the apt candidate of docker-compose (exit $?)."
+    version=$(apt_package_candidate_version "$APT_LEGACY_COMPOSE") \
+        || die "Cannot read the apt candidate of $APT_LEGACY_COMPOSE (exit $?)."
     [[ "$version" =~ ^2[.:-] ]]
 }
 
@@ -543,26 +568,30 @@ apt_docker_compose_is_v2() {
 # Why: rc != 0 is a lookup error, never "not found"
 # From: Issue #1683 | PR #1858
 apt_compose_package() {
-    if apt_package_available "$DOCKER_COMPOSE_PLUGIN"; then
-        printf '%s\n' "$DOCKER_COMPOSE_PLUGIN"
-    elif apt_package_available docker-compose-v2; then
-        printf '%s\n' docker-compose-v2
-    elif apt_package_available docker-compose && apt_docker_compose_is_v2; then
-        # What: Trixie docker-compose package is Compose v2
-        # Why: gives the docker compose CLI plugin
-        printf '%s\n' docker-compose
-    fi
+    local package
+    for package in "${APT_COMPOSE_PACKAGES[@]}"; do
+        apt_package_available "$package" || continue
+        # What: the legacy name counts only as Compose v2
+        # Why: Trixie ships Compose v2 under that name
+        if [[ "$package" = "$APT_LEGACY_COMPOSE" ]] && ! apt_docker_compose_is_v2; then
+            continue
+        fi
+        printf '%s\n' "$package"
+        return 0
+    done
 }
 
 # What: the Buildx apt package; empty when none exists
 # Why: Buildx is optional here; a lookup error still dies
 # From: Issue #1683 | PR #1858
 apt_buildx_package() {
-    if apt_package_available "$DOCKER_BUILDX_PLUGIN"; then
-        printf '%s\n' "$DOCKER_BUILDX_PLUGIN"
-    elif apt_package_available docker-buildx; then
-        printf '%s\n' docker-buildx
-    fi
+    local package
+    for package in "${APT_BUILDX_PACKAGES[@]}"; do
+        if apt_package_available "$package"; then
+            printf '%s\n' "$package"
+            return 0
+        fi
+    done
 }
 
 # What: Docker install is a first-install convenience only
@@ -583,14 +612,13 @@ ensure_apt_docker_client() {
         return 0
     fi
 
-    if apt_package_available docker-cli; then
-        print_warn "docker.io did not provide /usr/bin/docker; installing docker-cli for the Docker client."
-        apt-get install -y --no-install-recommends docker-cli \
-            || die "Failed to install docker-cli (exit $?)."
+    if apt_package_available "$APT_DOCKER_CLI"; then
+        print_warn "$APT_DOCKER_ENGINE did not provide /usr/bin/docker; installing $APT_DOCKER_CLI for the Docker client."
+        apt_install "$APT_DOCKER_CLI" || die "Failed to install $APT_DOCKER_CLI (exit $?)."
     fi
 
     command -v docker >/dev/null 2>&1 \
-        || die "Docker client binary is missing after installation. Install docker-cli or ${DOCKER_CE_CLI} manually, then rerun setup.sh."
+        || die "Docker client binary is missing after installation. Install ${APT_DOCKER_CLI} or ${DOCKER_CE_CLI} manually, then rerun setup.sh."
 }
 
 # What: one /etc/os-release field, empty if absent
@@ -631,7 +659,7 @@ install_docker_apt_repo() {
     # Why: set -e is off under the caller's || die
     # From: Issue #1683 | PR #1858
     apt-get update -y || die "apt-get update failed (exit $?); Docker's repository was not added."
-    apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+    apt_install ca-certificates curl gnupg \
         || die "Failed to install ca-certificates, curl and gnupg (exit $?)."
     install -m 0755 -d "$key_dir" || die "Failed to create $key_dir (exit $?)."
     curl -fsSL "$DOCKER_REPO_URL/$os_id/gpg" \
@@ -645,6 +673,22 @@ install_docker_apt_repo() {
     apt-get update -y || die "apt-get update failed after adding Docker's repository (exit $?)."
 }
 
+# What: sets the Compose v2 apt package; adds Docker's repo
+# Why: engine and Compose-only installs share one lookup
+# From: Issue #1683 | PR #1858
+resolve_apt_compose_package() {
+    local -n _compose_package_ref="$1"
+    local manual="$2"
+
+    _compose_package_ref=$(apt_compose_package) || die "Cannot look up the Compose v2 apt package (exit $?)."
+    [[ -z "$_compose_package_ref" ]] || return 0
+    print_warn "No Compose v2 package was found in the configured apt repositories. Adding Docker's official apt repository."
+    install_docker_apt_repo
+    _compose_package_ref=$(apt_compose_package) || die "Cannot look up the Compose v2 apt package (exit $?)."
+    [[ -n "$_compose_package_ref" ]] \
+        || die "No Docker Compose v2 package found. Please install $manual manually, then rerun setup.sh."
+}
+
 # What: installs Docker and Compose v2 on Debian/Ubuntu
 # Why: distro packages are preferred over Docker's own repo
 install_docker_apt() {
@@ -652,31 +696,23 @@ install_docker_apt() {
     local -a docker_packages=()
 
     apt-get update -y || die "apt-get update failed (exit $?); Docker was not installed."
-    compose_package=$(apt_compose_package) || die "Cannot look up the Compose v2 apt package (exit $?)."
-    if [[ -z "$compose_package" ]]; then
-        print_warn "No Compose v2 package was found in the configured apt repositories. Adding Docker's official apt repository."
-        install_docker_apt_repo
-        compose_package=$(apt_compose_package) || die "Cannot look up the Compose v2 apt package (exit $?)."
-        [[ -n "$compose_package" ]] \
-            || die "No Docker Compose v2 package found. Please install Docker and the Docker Compose plugin manually, then rerun setup.sh."
-    fi
+    resolve_apt_compose_package compose_package "Docker and the Docker Compose plugin"
 
     # What: installs buildx when the apt index has it
     # Why: docker buildx is needed before the first pull
     buildx_package=$(apt_buildx_package) || die "Cannot look up the Buildx apt package (exit $?)."
 
     if [[ "$compose_package" = "$DOCKER_COMPOSE_PLUGIN" ]]; then
-        docker_packages=("${DOCKER_CE_PACKAGES[@]}" "$compose_package")
-        [[ -n "$buildx_package" ]] && docker_packages+=("$buildx_package")
-        apt-get install -y --no-install-recommends "${docker_packages[@]}" \
-            || die "Failed to install ${docker_packages[*]} (exit $?)."
+        docker_packages=("${DOCKER_CE_PACKAGES[@]}")
     else
-        docker_packages=(docker.io "$compose_package")
-        [[ -n "$buildx_package" ]] && docker_packages+=("$buildx_package")
-        apt-get install -y --no-install-recommends "${docker_packages[@]}" \
-            || die "Failed to install ${docker_packages[*]} (exit $?)."
-        # What: falls back to docker-cli if needed
-        # Why: Trixie ships the client in docker-cli
+        docker_packages=("$APT_DOCKER_ENGINE")
+    fi
+    docker_packages+=("$compose_package")
+    [[ -n "$buildx_package" ]] && docker_packages+=("$buildx_package")
+    apt_install "${docker_packages[@]}" || die "Failed to install ${docker_packages[*]} (exit $?)."
+    # What: falls back to docker-cli for the distro engine
+    # Why: Trixie ships the client in docker-cli
+    if [[ "${docker_packages[0]}" = "$APT_DOCKER_ENGINE" ]]; then
         ensure_apt_docker_client
     fi
 
@@ -689,17 +725,8 @@ install_docker_compose_apt() {
     local compose_package=""
 
     apt-get update -y || die "apt-get update failed (exit $?); Docker Compose was not installed."
-    compose_package=$(apt_compose_package) || die "Cannot look up the Compose v2 apt package (exit $?)."
-    if [[ -z "$compose_package" ]]; then
-        print_warn "No Compose v2 package was found in the configured apt repositories. Adding Docker's official apt repository."
-        install_docker_apt_repo
-        compose_package=$(apt_compose_package) || die "Cannot look up the Compose v2 apt package (exit $?)."
-        [[ -n "$compose_package" ]] \
-            || die "No Docker Compose v2 package found. Please install the Docker Compose plugin manually, then rerun setup.sh."
-    fi
-
-    apt-get install -y --no-install-recommends "$compose_package" \
-        || die "Failed to install $compose_package (exit $?)."
+    resolve_apt_compose_package compose_package "the Docker Compose plugin"
+    apt_install "$compose_package" || die "Failed to install $compose_package (exit $?)."
     verify_docker_installation
 }
 
@@ -835,84 +862,80 @@ install_docker_rpm() {
     verify_docker_installation
 }
 
+# What: rpm install dialog; aborts without a yes
+# Why: engine and Compose-only installs share one dialog
+# From: Issue #1683 | PR #1858
+confirm_docker_rpm_packages() {
+    local warn="$1" question="$2" product="$3"
+    shift 3
+
+    print_warn "$warn"
+    printf "  Required packages: %s\n" "$*"
+    printf "  Docker's RPM repository will be configured before installation.\n"
+    if ! confirm "$question" "N"; then
+        die "Aborted. Please install $product from Docker's RPM repository manually, then rerun setup.sh: $*"
+    fi
+}
+
 # What: installs only the Compose v2 plugin
 # Why: each manager asks for confirmation before changes
 install_docker_compose() {
-    local packages=()
+    local manager
 
-    if command -v apt-get >/dev/null 2>&1; then
-        print_warn "Docker Compose plugin missing."
-        printf "  Required package: an available Compose v2 package (%s, docker-compose-v2, or docker-compose)\n" \
-            "$DOCKER_COMPOSE_PLUGIN"
-        if ! confirm "Install this package now? [y/N]" "N"; then
-            die "Aborted. Please install a Docker Compose v2 package manually, then rerun setup.sh."
-        fi
-        install_docker_compose_apt || die "Failed to install Docker Compose."
-    elif command -v dnf >/dev/null 2>&1; then
-        packages=("$DOCKER_COMPOSE_PLUGIN")
-        print_warn "Docker Compose plugin missing."
-        printf "  Required packages: %s\n" "${packages[*]}"
-        printf "  Docker's RPM repository will be configured before installation.\n"
-        if ! confirm "Install this package now? [y/N]" "N"; then
-            die "Aborted. Please install Docker Compose from Docker's RPM repository manually, then rerun setup.sh: ${packages[*]}"
-        fi
-        install_docker_rpm dnf "${packages[@]}" || die "Failed to install Docker Compose."
-    elif command -v yum >/dev/null 2>&1; then
-        packages=("$DOCKER_COMPOSE_PLUGIN")
-        print_warn "Docker Compose plugin missing."
-        printf "  Required packages: %s\n" "${packages[*]}"
-        printf "  Docker's RPM repository will be configured before installation.\n"
-        if ! confirm "Install this package now? [y/N]" "N"; then
-            die "Aborted. Please install Docker Compose from Docker's RPM repository manually, then rerun setup.sh: ${packages[*]}"
-        fi
-        install_docker_rpm yum "${packages[@]}" || die "Failed to install Docker Compose."
-    elif command -v pacman >/dev/null 2>&1; then
-        packages=(docker-compose)
-        install_packages "Docker Compose plugin missing." "${packages[@]}" \
-            || die "Failed to install Docker Compose."
-    else
-        die "No supported package manager found. Please install the Docker Compose plugin manually, then rerun setup.sh."
-    fi
+    manager=$(host_package_manager)
+    case "$manager" in
+        apt-get)
+            print_warn "Docker Compose plugin missing."
+            printf "  Required package: an available Compose v2 package (%s, %s, or %s)\n" "${APT_COMPOSE_PACKAGES[@]}"
+            if ! confirm "Install this package now? [y/N]" "N"; then
+                die "Aborted. Please install a Docker Compose v2 package manually, then rerun setup.sh."
+            fi
+            install_docker_compose_apt || die "Failed to install Docker Compose."
+            ;;
+        dnf|yum)
+            confirm_docker_rpm_packages "Docker Compose plugin missing." "Install this package now? [y/N]" \
+                "Docker Compose" "$DOCKER_COMPOSE_PLUGIN"
+            install_docker_rpm "$manager" "$DOCKER_COMPOSE_PLUGIN" || die "Failed to install Docker Compose."
+            ;;
+        pacman)
+            install_packages "Docker Compose plugin missing." "$PACMAN_COMPOSE" \
+                || die "Failed to install Docker Compose."
+            ;;
+        *)
+            die "No supported package manager found. Please install the Docker Compose plugin manually, then rerun setup.sh."
+            ;;
+    esac
 }
 
 # What: installs Docker engine and Compose v2 per manager
 # Why: each manager has its own confirmation and package set
 install_docker() {
-    local packages=()
+    local manager
 
-    if command -v apt-get >/dev/null 2>&1; then
-        print_warn "Docker is missing."
-        printf "  Required packages: docker.io, an available Compose v2 package (%s, docker-compose-v2, or docker-compose), and Buildx (%s or docker-buildx) when this apt index has one\n" \
-            "$DOCKER_COMPOSE_PLUGIN" "$DOCKER_BUILDX_PLUGIN"
-        if ! confirm "Install these packages now? [y/N]" "N"; then
-            die "Aborted. Please install Docker and a Docker Compose v2 package manually, then rerun setup.sh."
-        fi
-        install_docker_apt || die "Failed to install Docker."
-    elif command -v dnf >/dev/null 2>&1; then
-        packages=("${DOCKER_RPM_PACKAGES[@]}")
-        print_warn "Docker is missing."
-        printf "  Required packages: %s\n" "${packages[*]}"
-        printf "  Docker's RPM repository will be configured before installation.\n"
-        if ! confirm "Install these packages now? [y/N]" "N"; then
-            die "Aborted. Please install Docker from Docker's RPM repository manually, then rerun setup.sh: ${packages[*]}"
-        fi
-        install_docker_rpm dnf || die "Failed to install Docker."
-    elif command -v yum >/dev/null 2>&1; then
-        packages=("${DOCKER_RPM_PACKAGES[@]}")
-        print_warn "Docker is missing."
-        printf "  Required packages: %s\n" "${packages[*]}"
-        printf "  Docker's RPM repository will be configured before installation.\n"
-        if ! confirm "Install these packages now? [y/N]" "N"; then
-            die "Aborted. Please install Docker from Docker's RPM repository manually, then rerun setup.sh: ${packages[*]}"
-        fi
-        install_docker_rpm yum || die "Failed to install Docker."
-    elif command -v pacman >/dev/null 2>&1; then
-        packages=(docker docker-compose docker-buildx)
-        install_packages "Docker is missing." "${packages[@]}" \
-            || die "Failed to install Docker."
-    else
-        die "No supported package manager found. Please install Docker and the Docker Compose plugin manually, then rerun setup.sh."
-    fi
+    manager=$(host_package_manager)
+    case "$manager" in
+        apt-get)
+            print_warn "Docker is missing."
+            printf "  Required packages: %s, an available Compose v2 package (%s, %s, or %s), and Buildx (%s or %s) when this apt index has one\n" \
+                "$APT_DOCKER_ENGINE" "${APT_COMPOSE_PACKAGES[@]}" "${APT_BUILDX_PACKAGES[@]}"
+            if ! confirm "Install these packages now? [y/N]" "N"; then
+                die "Aborted. Please install Docker and a Docker Compose v2 package manually, then rerun setup.sh."
+            fi
+            install_docker_apt || die "Failed to install Docker."
+            ;;
+        dnf|yum)
+            confirm_docker_rpm_packages "Docker is missing." "Install these packages now? [y/N]" \
+                "Docker" "${DOCKER_RPM_PACKAGES[@]}"
+            install_docker_rpm "$manager" || die "Failed to install Docker."
+            ;;
+        pacman)
+            install_packages "Docker is missing." "${PACMAN_DOCKER_PACKAGES[@]}" \
+                || die "Failed to install Docker."
+            ;;
+        *)
+            die "No supported package manager found. Please install Docker and the Docker Compose plugin manually, then rerun setup.sh."
+            ;;
+    esac
 }
 
 # What: installs curl, Docker, Docker Compose v2 plugin
@@ -3423,20 +3446,20 @@ package_name_for_tool() {
 # Why: keeps minimal hosts able to back up and restore
 install_missing_tools() {
     local -a missing=() packages=() tools=("$@")
-    local tool package
+    local tool package manager
     for tool in "${tools[@]}"; do
         command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
     done
     (( ${#missing[@]} == 0 )) && return 0
     print_warn "Missing required tool(s): ${missing[*]} — installing now..."
-    command -v apt-get >/dev/null 2>&1 || die "Cannot install missing tools automatically; install: ${missing[*]}"
+    manager=$(host_package_manager)
+    [[ "$manager" = apt-get ]] || die "Cannot install missing tools automatically; install: ${missing[*]}"
     for tool in "${missing[@]}"; do
         package=$(package_name_for_tool "$tool") || die "Cannot resolve the package of $tool (exit $?)."
         packages+=("$package")
     done
     apt-get update -y || die "apt-get update failed (exit $?); nothing was installed."
-    apt-get install -y --no-install-recommends "${packages[@]}" \
-        || die "Failed to install required tool(s): ${missing[*]}"
+    apt_install "${packages[@]}" || die "Failed to install required tool(s): ${missing[*]}"
     for tool in "${missing[@]}"; do
         command -v "$tool" >/dev/null 2>&1 \
             || die "$tool is still missing after installing package(s): ${packages[*]}"

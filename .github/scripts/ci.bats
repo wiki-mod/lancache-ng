@@ -4088,6 +4088,111 @@ CASES
         || { echo "default set: $(cat "${DNFLOG}")"; return 1; }
 }
 
+# What: PATH of manager stand-ins plus bash, env, cat, awk
+# Why: a real package manager on the host is never reached
+# From: Issue #1683 | PR #1858
+_pm_path() {
+    local dir tool rec='printf "%s %s\n" "${0##*/}" "$*" >> "${CALLS:?}"'
+    dir="$(_val path)"
+    mkdir -p "${dir}" || return 1
+    for tool in bash env cat awk; do
+        ln -s "$(type -P "${tool}")" "${dir}/${tool}" || return 1
+    done
+    for tool in "$@"; do
+        _tool_stub "${dir}" "${tool}" <<< "${rec}" || return 1
+    done
+    _tool_stub "${dir}" apt-cache <<< 'case " ${AVAIL:-} " in *" $2 "*) echo "  Candidate: 2.${SRANDOM}" ;; *) echo "  Candidate: (none)" ;; esac' \
+        || return 1
+    _tool_stub "${dir}" rpm <<< 'cat "${RPMDB:?}"' || return 1
+    _tool_stub "${dir}" docker <<< '[ "$*" = "compose version" ]' || return 1
+    printf '%s\n' "${dir}"
+}
+
+# What: Docker installs per manager, answer and install set
+# Why: one detection order; nothing installs without a yes
+# From: Issue #1683 | PR #1858
+@test "setup docker install per package manager and answer" {
+    local root p calls tool ce rpmset repo="--add-repo <repo>"
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}" || return 1
+    export CALLS ANS RPMDB AVAIL=""
+    CALLS="$(_val path)" ANS="$(_val path)" RPMDB="$(_val path)" tool="$(_val name)"
+    : > "${RPMDB}"
+    ce="docker-ce docker-ce-cli containerd.io"
+    rpmset="${ce} docker-buildx-plugin docker-compose-plugin"
+    # What: runs a snippet on stand-ins with one answer
+    # Why: the real ask path reads answers from fd 9
+    _pm_try() {
+        p="$(_pm_path "${@:3}")" || return 1
+        printf '%s\n' "$1" > "${ANS}" && : > "${CALLS}" || return 1
+        _setup_sh_run "WIZARD_INTROSPECT_MODE=1; WIZARD_INTROSPECT_ANSWERS_FD=9; exec 9<\"\${ANS}\"; PATH='${p}'; $2"
+        calls="$(sed -E 's|--add-repo [^ ]+|--add-repo <repo>|' "${CALLS}")"
+    }
+    # What: checks rc and recorded calls of the last run
+    # Why: every row names its exact installs or none
+    _pm_calls() {
+        local label="$1" rc="$2" want=""
+        shift 2
+        [ "$#" -eq 0 ] || want="$(printf '%s\n' "$@")"
+        [ "${status}" -eq "${rc}" ] && [ "${calls}" = "${want}" ] \
+            || { echo "${label}: rc ${status} want ${rc}; calls [${calls}] want [${want}]; ${output}"; return 1; }
+    }
+    AVAIL="docker-compose-plugin docker-buildx-plugin"
+    _pm_try y install_docker apt-get || return 1
+    _pm_calls apt-ce 0 "apt-get update -y" \
+        "apt-get install -y --no-install-recommends ${ce} docker-compose-plugin docker-buildx-plugin" || return 1
+    [[ "${output}" == *"Required packages: docker.io, an available Compose v2 package (docker-compose-plugin, docker-compose-v2, or docker-compose), and Buildx (docker-buildx-plugin or docker-buildx) when this apt index has one"* ]] \
+        || { echo "apt prompt: ${output}"; return 1; }
+    AVAIL="docker-compose-v2 docker-buildx"
+    _pm_try y install_docker apt-get || return 1
+    _pm_calls apt-distro 0 "apt-get update -y" "apt-get install -y --no-install-recommends docker.io docker-compose-v2 docker-buildx" \
+        || return 1
+    _pm_try n install_docker apt-get || return 1
+    _pm_calls apt-no 1 || return 1
+    [[ "${output}" == *"Aborted. Please install Docker and a Docker Compose v2 package manually, then rerun setup.sh."* ]] \
+        || { echo "apt abort: ${output}"; return 1; }
+    _pm_try y install_docker dnf || return 1
+    _pm_calls dnf 0 "dnf install -y dnf-plugins-core" "dnf config-manager ${repo}" "dnf install -y ${rpmset}" || return 1
+    [[ "${output}" == *"Required packages: ${rpmset}"*"Docker's RPM repository will be configured before installation."* ]] \
+        || { echo "dnf prompt: ${output}"; return 1; }
+    _pm_try y install_docker yum yum-config-manager || return 1
+    _pm_calls yum 0 "yum install -y yum-utils" "yum-config-manager ${repo}" "yum install -y ${rpmset}" || return 1
+    _pm_try y install_docker dnf yum yum-config-manager || return 1
+    _pm_calls dnf-first 0 "dnf install -y dnf-plugins-core" "dnf config-manager ${repo}" "dnf install -y ${rpmset}" || return 1
+    _pm_try n install_docker dnf || return 1
+    _pm_calls dnf-no 1 || return 1
+    [[ "${output}" == *"Aborted. Please install Docker from Docker's RPM repository manually, then rerun setup.sh: ${rpmset}"* ]] \
+        || { echo "dnf abort: ${output}"; return 1; }
+    _pm_try y install_docker pacman || return 1
+    _pm_calls pacman 0 "pacman -Syu --noconfirm docker docker-compose docker-buildx" || return 1
+    _pm_try y install_docker || return 1
+    _pm_calls none 1 || return 1
+    [[ "${output}" == *"No supported package manager found. Please install Docker and the Docker Compose plugin manually, then rerun setup.sh."* ]] \
+        || { echo "no manager: ${output}"; return 1; }
+    # What: Compose-only installs one package per manager
+    # Why: Docker is present; only Compose v2 is missing
+    AVAIL="docker-compose"
+    _pm_try y install_docker_compose apt-get || return 1
+    _pm_calls compose-apt 0 "apt-get update -y" "apt-get install -y --no-install-recommends docker-compose" || return 1
+    [[ "${output}" == *"Required package: an available Compose v2 package (docker-compose-plugin, docker-compose-v2, or docker-compose)"* ]] \
+        || { echo "compose apt prompt: ${output}"; return 1; }
+    _pm_try y install_docker_compose dnf || return 1
+    _pm_calls compose-dnf 0 "dnf install -y dnf-plugins-core" "dnf config-manager ${repo}" "dnf install -y docker-compose-plugin" \
+        || return 1
+    _pm_try n install_docker_compose yum yum-config-manager || return 1
+    _pm_calls compose-yum-no 1 || return 1
+    [[ "${output}" == *"Aborted. Please install Docker Compose from Docker's RPM repository manually, then rerun setup.sh: docker-compose-plugin"* ]] \
+        || { echo "compose yum abort: ${output}"; return 1; }
+    _pm_try y install_docker_compose pacman || return 1
+    _pm_calls compose-pacman 0 "pacman -Syu --noconfirm docker-compose" || return 1
+    # What: missing tools install only through apt
+    # Why: the tool-to-package map knows apt names only
+    _pm_try y "install_missing_tools ${tool}" dnf || return 1
+    _pm_calls tools-dnf 1 || return 1
+    [[ "${output}" == *"Cannot install missing tools automatically; install: ${tool}"* ]] \
+        || { echo "tools on dnf: ${output}"; return 1; }
+}
+
 @test "setup dhcp mode, compose profiles and dnsmasq templates" {
     # What: modes, subnet start, profiles, template vars
     # Why: one dhcp profile per mode; templates fully render
