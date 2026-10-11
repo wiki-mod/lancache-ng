@@ -1477,7 +1477,7 @@ CASES
 }
 
 # What: setup.sh rolls DNS back in the real dns service
-# Why: the old per-side containers no longer exist
+# Why: one dns service serves both sides.
 # From: Issue #1683 | PR #1912
 @test "setup.sh dns rollback targets the compose dns service" {
     local root cfg url
@@ -1700,7 +1700,7 @@ CASES
     s="$(ci_services | awk 'NR == 1')"
     run _ci_service_build_args "${s}" --bare "${sp}" no
     _expect no-toolchain 0 "RUST_CRATES=" || return 1
-    _expect runtime-gid 0 "LANCACHE_SHARED_SECRET_GID=$(_ci_required_field runtime gid block)" || return 1
+    _expect runtime-gid 0 "LANCACHE_RUNTIME_GID=$(_ci_required_field runtime gid block)" || return 1
     [[ "${output}" != *BUILD_TOOLS_IMAGE=* ]] || { echo "no-toolchain: image arg emitted: ${output}"; return 1; }
     run _ci_service_build_args "${s}" --bare "${sp}" "$(_val name)"
     _expect bad-toolchain-flag 2 "[CI-ERROR-BUILDARGS-0020] service=\"${s}\"" || return 1
@@ -3483,10 +3483,10 @@ CASES
     [ "${status}" -eq 1 ] && [[ "${output}" != *unreached* ]] || { echo "retired in shell: ${output}"; return 1; }
 }
 
+# What: setup accepts exactly what the UI can write
+# Why: a UI value must never be dropped or misread
+# From: Issue #1683 | PR #1858
 @test "setup ui override validators per value" {
-    # What: setup accepts exactly what the UI can write
-    # Why: a UI value must never be dropped or misread
-    # From: Issue #1683 | PR #1858
     local root ui chans modes other gb v acc c
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
@@ -3921,12 +3921,12 @@ _pm_run() {
     [ -z "$(find "${d}" -name '.*.tmp.*')" ] || { echo "temp left: $(find "${d}" -name '.*.tmp.*')"; return 1; }
 }
 
+# What: cmd_secondary against a stub primary per answer
+# Why: token never in argv; failures stop before writes
+# From: Issue #1683 | PR #1858
 @test "setup secondary registration end to end per primary answer" {
     _registry || return 1
     _stand_ins || return 1
-    # What: cmd_secondary against a stub primary per answer
-    # Why: token never in argv; failures stop before writes
-    # From: Issue #1683 | PR #1858
     local root t="${BATS_TEST_TMPDIR}" rs http lip ui name xfr fields reg pre tag token body f v case want dir
     local env gen canon required first rest
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"

@@ -38,7 +38,7 @@ image_base:
 # From: Issue #1683
 services:
   # What: one image for watchdog, syslog, NTP and netdata.
-  # Why: five-container decision; watchdog owns the image.
+  # Why: the watchdog owns the services image.
   # From: Issue #1683
   services:
     context: services/watchdog

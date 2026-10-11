@@ -1370,7 +1370,7 @@ legacy_state_path() {
     local child="${1:-}"
 
     # What: old installs keep PowerDNS data in pdns-standard
-    # Why: the dir is pdns now; the old data must be found
+    # Why: existing installs keep their data in that dir.
     # From: Issue #1683 | PR #1912
     [[ "$child" != pdns ]] || child=pdns-standard
     if [[ -n "$child" ]]; then
@@ -3182,7 +3182,7 @@ migrate_env_for_update() (
     remove_env_key CACHE_DIR_SSL "$env_file"
 
     # What: moves PDNS_STANDARD_DIR to PDNS_DIR, data stays
-    # Why: the default dir is pdns now; zones must not move
+    # Why: moving the key must not move the zone data.
     # From: Issue #1683 | PR #1912
     append_env_migrated_assignment_if_missing PDNS_DIR PDNS_STANDARD_DIR "" "$env_file"
     remove_env_key PDNS_STANDARD_DIR "$env_file"

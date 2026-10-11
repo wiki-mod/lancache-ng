@@ -1480,15 +1480,22 @@ fn base64_32() -> String {
     base64::engine::general_purpose::STANDARD.encode(rand::random::<[u8; 32]>())
 }
 
+// What: the stack's runtime gid, from the image env.
+// Why: secrets and snapshots share the ui's group.
+// From: Issue #1683 | PR #1912
+fn runtime_gid() -> Result<u32, String> {
+    config::need(&config::process_env, "LANCACHE_RUNTIME_GID")?
+        .parse::<u32>()
+        .map_err(|_| "LANCACHE_RUNTIME_GID is no group id".to_string())
+}
+
 // What: a configured secret, else the shared file.
 // Why: every container and the ui agree on one value.
 // From: Issue #858
 fn stack_secret(var: &str, file: &str, make: fn() -> String) -> Result<String, String> {
     let need = |key: &str| config::need(&config::process_env, key);
     let dir = need("LANCACHE_SHARED_SECRET_DIR")?;
-    let gid = need("LANCACHE_SHARED_SECRET_GID")?
-        .parse::<u32>()
-        .map_err(|_| "LANCACHE_SHARED_SECRET_GID is no group id".to_string())?;
+    let gid = runtime_gid()?;
     let configured = env_opt(var).unwrap_or_default();
     let current = if shared_secret_is_placeholder(&configured) {
         ""
@@ -1590,7 +1597,7 @@ fn notify_targets() -> Result<Vec<std::net::SocketAddrV4>, String> {
 }
 
 // What: pdns.conf for the authoritative server.
-// Why: one render replaces the envsubst template.
+// Why: values are filled in code; no template tool runs.
 // From: Issue #1683
 struct AuthConf<'a> {
     local: std::net::Ipv4Addr,
@@ -2582,9 +2589,7 @@ fn kea_socket_dir() -> Result<(), String> {
 // Why: the ui writes snapshots here; setup.sh reads them.
 // From: Issue #614 | PR #1912
 fn kea_snapshot_dir(dir: &Path) -> Result<(), String> {
-    let gid = config::need(&config::process_env, "LANCACHE_SHARED_SECRET_GID")?
-        .parse::<u32>()
-        .map_err(|_| "LANCACHE_SHARED_SECRET_GID is no group id".to_string())?;
+    let gid = runtime_gid()?;
     fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     own(dir, None, gid, 0o775)
 }
@@ -2934,14 +2939,19 @@ impl Psl {
 #[derive(Debug, Default, PartialEq)]
 struct CdnHosts {
     // What: registrable roots; root and *.root.
+    // Why: the cert, allow and stream maps start from them.
     roots: Vec<String>,
     // What: wildcard-only rows below a root; *.base.
+    // Why: one wildcard cert covers every host below.
     bases: Vec<String>,
     // What: exact rows two or more labels below a root.
+    // Why: a wildcard cannot cover them; each gets a cert.
     exact: Vec<String>,
     // What: roots that are themselves a wildcard-only row.
+    // Why: the https dispatch treats them like a base.
     root_wildcards: HashSet<String>,
     // What: true when a row was invalid or had no root.
+    // Why: a skipped row blocks the known-good save.
     skipped: bool,
 }
 

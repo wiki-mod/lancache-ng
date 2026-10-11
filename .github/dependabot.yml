@@ -5,7 +5,8 @@
 # Why: regular updates target current_dev; one group each.
 version: 2
 updates:
-  # GitHub Actions -- one grouped PR per target branch (single directory: /).
+  # What: one grouped actions PR per branch, root only.
+  # Why: the root directory covers every workflow.
   - package-ecosystem: github-actions
     directory: /
     target-branch: current_dev

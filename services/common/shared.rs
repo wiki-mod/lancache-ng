@@ -558,7 +558,7 @@ pub fn shared_secret_is_placeholder(value: &str) -> bool {
 }
 
 // What: shared-secret file name of a variable (A_B -> a-b).
-// Why: one naming rule replaces any per-secret name list.
+// Why: every secret name derives from its variable name.
 // From: Issue #858
 pub fn shared_secret_file_name(var: &str) -> String {
     var.to_ascii_lowercase().replace('_', "-")

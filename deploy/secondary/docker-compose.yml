@@ -26,7 +26,7 @@ services:
       - DNS_XFR_PRIMARY=${DNS_XFR_PRIMARY:?DNS_XFR_PRIMARY is required}
       - SUPERVISE_RUN_DIR=/run/lancache
       - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-dns/secrets
-      - LANCACHE_SHARED_SECRET_GID=0
+      - LANCACHE_RUNTIME_GID=0
       - PDNS_DATA_DIR=/var/lib/powerdns
       - DNS_STATE_DIR=/var/lib/powerdns-state
       - DNS_CONFIG_SNAPSHOT_DIR=/var/lib/lancache-dns/config-snapshots

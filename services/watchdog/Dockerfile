@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 # What: the services image; one supervisor runs it all.
-# Why: five-container decision; watchdog owns the image.
+# Why: the watchdog owns the services image.
 # From: Issue #1683
 
 # What: base image pin, supplied by ci.sh from the SOT.
@@ -111,10 +111,10 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
 # What: syslog-ng files belong to this reader group.
 # Why: the ui (shared gid) and netdata web_log read them.
 # From: Issue #1683 | PR #1912
-ARG LANCACHE_SHARED_SECRET_GID
-ENV LANCACHE_SHARED_SECRET_GID=${LANCACHE_SHARED_SECRET_GID} \
+ARG LANCACHE_RUNTIME_GID
+ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
     LOG_READER_GROUP=lancache
-RUN addgroup -g "${LANCACHE_SHARED_SECRET_GID}" "${LOG_READER_GROUP}" && addgroup netdata "${LOG_READER_GROUP}"
+RUN addgroup -g "${LANCACHE_RUNTIME_GID}" "${LOG_READER_GROUP}" && addgroup netdata "${LOG_READER_GROUP}"
 
 COPY --from=services-builder /build/lancache-watchdog-out /usr/local/bin/lancache-watchdog
 COPY --from=services-builder /build/lancache-cachehamster-out /usr/local/bin/lancache-cachehamster

@@ -1205,7 +1205,3 @@ vulnerabilities:
       entry records the finding until a rebuild ships 29.9.0-r0.
 
       From: Issue #1913 | PR #1912
-
-  # What: jq CVE-2026-32316 and -40164 entries removed.
-  # Why: the utilities image they covered is deleted.
-  # From: Issue #1802 | PR #1783

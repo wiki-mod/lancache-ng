@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 # What: PowerDNS auth, two recursors, NATS on Alpine.
-# Why: five-container decision; one supervisor runs it.
+# Why: one supervisor runs every program of the image.
 # From: Issue #1683
 
 # What: base image pin, supplied by ci.sh from the SOT.
@@ -135,8 +135,8 @@ ENV LANCACHE_PROCESSES=${LANCACHE_PROCESSES}
 # What: the shared gid of the stack's secret files.
 # Why: ci.sh passes it from the SOT; compose names none.
 # From: Issue #1683 | PR #1912
-ARG LANCACHE_SHARED_SECRET_GID
-ENV LANCACHE_SHARED_SECRET_GID=${LANCACHE_SHARED_SECRET_GID}
+ARG LANCACHE_RUNTIME_GID
+ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID}
 
 # What: the supervisor binary; no argument means supervise.
 # Why: compose and setup.sh add healthcheck or probe.

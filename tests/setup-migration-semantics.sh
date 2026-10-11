@@ -49,7 +49,8 @@ test_existing_value_preserved() {
     actual=$(grep '^CACHE_MAX_GB=' "$env_file" | cut -d= -f2)
     [ "$actual" = "100.0" ] || return 1
 
-    # What: Only one copy of the key (no duplicate lines).
+    # What: only one copy of the key (no duplicate lines).
+    # Why: an update must not append a second CACHE_MAX_GB.
     local count
     count=$(grep -c '^CACHE_MAX_GB=' "$env_file")
     [ "$count" = "1" ] || return 1

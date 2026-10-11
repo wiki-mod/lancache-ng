@@ -75,8 +75,6 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     bash /usr/local/bin/ci.sh rust-build proxy "${RUST_CRATES}"
 
 # What: scratch only when ci.sh passed no image arg.
-
-# What: scratch only when ci.sh passed no image arg.
 # Why: no baked image; a missing arg fails the build.
 # From: Issue #1683 | PR #1858
 FROM ${ALPINE_IMAGE:-scratch}
