@@ -3472,16 +3472,13 @@ install_missing_tools() {
 backup_manifest() {
     local install_dir="$1" mode="$2"
     local env_file cache_env_file
-    local cache_dir cache_http cache_https state_dir keys key dir sub
+    local cache_dir state_dir keys key dir sub
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     cache_env_file="$install_dir/.env"
     state_dir=$(install_state_root "$install_dir" "$env_file") \
         || die "Cannot resolve the state root of $install_dir (exit $?)."
     cache_dir=$(get_env_var CACHE_DIR "$env_file") || exit $?
-    cache_http=$(get_env_var CACHE_DIR_STANDARD "$env_file") || exit $?
-    cache_https=$(get_env_var CACHE_DIR_SSL "$env_file") || exit $?
-    cache_http="${cache_http:-$state_dir/cache}"
-    cache_https="${cache_https:-$cache_http}"
+    cache_dir="${cache_dir:-$state_dir/cache}"
 
     printf '%s\n' "$cache_env_file"
     [[ "$env_file" != "$cache_env_file" ]] && printf '%s\n' "$env_file"
@@ -3500,9 +3497,7 @@ backup_manifest() {
         [[ -d "$(legacy_state_path "$sub")" ]] && printf '%s\n' "$(legacy_state_path "$sub")"
     done <<< "$keys"
     if [[ "$mode" = "full" ]]; then
-        [[ -n "${cache_dir:-}" && -d "$cache_dir" ]] && printf '%s\n' "$cache_dir"
-        [[ -n "${cache_http:-}" && -d "$cache_http" ]] && printf '%s\n' "$cache_http"
-        [[ -n "${cache_https:-}" && "$cache_https" != "$cache_http" && -d "$cache_https" ]] && printf '%s\n' "$cache_https"
+        [[ -d "$cache_dir" ]] && printf '%s\n' "$cache_dir"
         [[ -d "$(legacy_state_path cache)" ]] && printf '%s\n' "$(legacy_state_path cache)"
     fi
     true
@@ -5055,19 +5050,10 @@ cmd_debug() {
         || die_no_stack_found "$install_dir"
 
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    local ip_http ip_https cache_dir cache_http cache_https
+    local ip_http ip_https cache_dir
     ip_http=$(get_env_var IP_HTTP "$env_file") || exit $?
     ip_https=$(get_env_var IP_HTTPS "$env_file") || exit $?
     cache_dir=$(get_env_var CACHE_DIR "$env_file") || exit $?
-    cache_http=$(get_env_var CACHE_DIR_STANDARD "$env_file") || exit $?
-    cache_https=$(get_env_var CACHE_DIR_SSL "$env_file") || exit $?
-    if [[ -z "$cache_dir" ]]; then
-        if [[ -n "$cache_http" && -n "$cache_https" && "$cache_http" != "$cache_https" ]]; then
-            print_error "Legacy cache paths differ; set CACHE_DIR before relying on cache debug output."
-        else
-            cache_dir="${cache_http:-$cache_https}"
-        fi
-    fi
 
     print_step "Container status"
     stack_compose "$install_dir" "$env_file" ps || print_error "docker compose ps failed (exit $?)."
