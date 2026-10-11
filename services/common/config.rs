@@ -760,7 +760,6 @@ mod tests {
         assert!(!is_rollback_zone("lan") && !is_rollback_zone("15.172.in-addr.arpa."));
     }
 
-
     // What: need and need_flag reject unset, empty, junk.
     // Why: no service runs on a value its owner never set.
     // From: Issue #1683 | PR #1905
@@ -815,7 +814,6 @@ mod tests {
             "http://pdns/api/zones/lan"
         );
     }
-
 
     // What: the live-env readers see the real environment.
     // Why: they are the only readers of the process env.

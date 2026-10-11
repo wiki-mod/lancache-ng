@@ -27,7 +27,7 @@ services:
     init: true
     environment:
       # What: operator values from the one .env file.
-      # Why: no config/prod defaults; .env is the one owner.
+      # Why: .env is the one owner of operator values.
       # From: Issue #1683
       - LANCACHE_LOG_PORT=${LANCACHE_LOG_PORT:?LANCACHE_LOG_PORT is required}
       - NTP_ENABLED=${NTP_ENABLED:-0}
@@ -138,7 +138,7 @@ services:
       - IP_HTTPS=${IP_HTTPS}
       - SSL_ENABLED=${SSL_ENABLED:-1}
       # What: per-install values from the operator .env
-      # Why: one owner; no config/prod defaults any more
+      # Why: .env is the one owner of operator values.
       # From: Issue #1683
       - CACHE_MIN_FREE=${CACHE_MIN_FREE:?CACHE_MIN_FREE is required}
       - CACHE_MAX_SIZE=${CACHE_MAX_SIZE:?CACHE_MAX_SIZE is required}

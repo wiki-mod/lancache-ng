@@ -2990,6 +2990,11 @@ const NGINX_CERT_DIR: &str = "ssl/certs";
 const NGINX_STREAM_TARGETS: &str = "stream.d/00-stream-targets.conf";
 const NGINX_SSL_DISPATCH: &str = "stream.d/01-ssl-dispatch.conf";
 
+// What: subject of the stack CA certificate.
+// Why: certs/generate-ca.sh must issue the same subject.
+// From: Issue #1683 | PR #1912
+const CA_SUBJECT: &str = "/CN=LanCache-NG CA/O=LanCache-NG/C=DE";
+
 // What: one aligned "key value;" map line.
 // Why: rendered maps stay readable for operators.
 fn map_line(key: &str, value: &str) -> String {
@@ -3262,7 +3267,7 @@ fn nginx_certs(
                 "-nodes",
                 "-x509",
                 "-subj",
-                "/CN=LanCache-NG CA/O=LanCache-NG/C=DE",
+                CA_SUBJECT,
                 "-keyout",
                 &path(&ca_key),
                 "-out",
@@ -5777,5 +5782,131 @@ mod tests {
         for conf in [&proxy, &relay] {
             assert!(!conf.lines().any(|l| l.starts_with("dhcp-proxy")), "{conf}");
         }
+    }
+
+    // What: openssl x509 output for one certificate.
+    // Why: cert tests read subject, SAN, serial the same way.
+    fn x509(crt: &Path, args: &[&str]) -> String {
+        let crt = crt.to_str().expect("utf8 path");
+        tool(
+            "openssl",
+            &[&["x509", "-noout"], args, &["-in", crt]].concat(),
+        )
+        .expect("x509")
+    }
+
+    // What: CA kept, default and leaves signed per state.
+    // Why: a rotated CA must never keep serving old leaves.
+    // From: Issue #1683 | PR #1912
+    #[test]
+    fn nginx_certs_keep_rotate_and_regen_per_state() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let root = scratch();
+        let (nginx, run) = (root.join("nginx"), root.join("run"));
+        fs::create_dir_all(&run).expect("run dir");
+        let gid = fs::metadata(&root).expect("root meta").gid();
+        let host = format!("{}.{}", gen_name(), gen_name());
+        let hosts = CdnHosts {
+            roots: vec![host.clone()],
+            ..CdnHosts::default()
+        };
+        let base = format!("{}.{}.{}", rnd(0, 255), rnd(0, 255), rnd(0, 255));
+        let octet = rnd(1, 25);
+        let (ip_a, ip_b) = (format!("{base}.{octet}"), format!("{base}.{octet}1"));
+        let (ca, certs) = (nginx.join(NGINX_CA_DIR), nginx.join(NGINX_CERT_DIR));
+        let (leaf, default) = (certs.join(format!("{host}.crt")), certs.join("default.crt"));
+        let mode = |p: &Path| fs::metadata(p).expect("meta").permissions().mode() & 0o7777;
+        let bytes = |p: &Path| fs::read(p).expect("read");
+        nginx_certs(&nginx, &run, &hosts, &ip_b, gid).expect("first run");
+        assert_eq!(mode(&ca.join("ca.key")), 0o600);
+        assert_eq!(mode(&certs), 0o2750);
+        assert_eq!(fs::metadata(&certs).expect("certs").gid(), gid);
+        let ca_crt = ca.join("ca.crt");
+        let verify = |crt: &Path| {
+            tool(
+                "openssl",
+                &[
+                    "verify",
+                    "-CAfile",
+                    ca_crt.to_str().expect("utf8"),
+                    crt.to_str().expect("utf8"),
+                ],
+            )
+        };
+        verify(&leaf).expect("leaf signed by the CA");
+        assert_eq!(
+            x509(&leaf, &["-subject", "-nameopt", "RFC2253"]).trim(),
+            "subject=CN=lancache-ng"
+        );
+        let san = x509(&leaf, &["-ext", "subjectAltName"]);
+        assert!(san.contains(&format!("DNS:{host}, DNS:*.{host}")), "{san}");
+        let san = x509(&default, &["-ext", "subjectAltName"]);
+        assert!(san.contains(&format!("IP Address:{ip_b}")), "{san}");
+        assert_eq!(
+            fs::read_dir(&run).expect("run").count(),
+            0,
+            "csr or ext left"
+        );
+        let (key_before, default_before, leaf_before) =
+            (bytes(&ca.join("ca.key")), bytes(&default), bytes(&leaf));
+        nginx_certs(&nginx, &run, &hosts, &ip_b, gid).expect("same state");
+        assert_eq!(bytes(&ca.join("ca.key")), key_before);
+        assert_eq!(bytes(&default), default_before);
+        assert_eq!(bytes(&leaf), leaf_before);
+        nginx_certs(&nginx, &run, &hosts, "", gid).expect("no ip");
+        assert_eq!(bytes(&default), default_before);
+        nginx_certs(&nginx, &run, &hosts, &ip_a, gid).expect("prefix ip");
+        assert_ne!(bytes(&default), default_before, "a prefix IP kept the cert");
+        let san = x509(&default, &["-ext", "subjectAltName"]);
+        assert!(san.contains(&format!("IP Address:{ip_a}")), "{san}");
+        let serial = |crt: &Path| {
+            let text = x509(crt, &["-serial"]);
+            u128::from_str_radix(text.trim().trim_start_matches("serial="), 16).expect("hex")
+        };
+        assert!(serial(&default) > serial(&leaf));
+        let marker = certs.join(format!(".{}", gen_name()));
+        fs::write(&marker, gen_name()).expect("marker");
+        let stamp = bytes(&certs.join(".ca-fingerprint"));
+        fs::remove_file(&ca_crt).expect("drop ca.crt");
+        fs::remove_file(ca.join("ca.key")).expect("drop ca.key");
+        nginx_certs(&nginx, &run, &hosts, &ip_a, gid).expect("rotation");
+        assert_ne!(bytes(&certs.join(".ca-fingerprint")), stamp);
+        assert_ne!(bytes(&leaf), leaf_before);
+        verify(&leaf).expect("leaf signed by the new CA");
+        verify(&default).expect("default signed by the new CA");
+        assert!(marker.is_file());
+        let generator = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../certs/generate-ca.sh");
+        let script = fs::read_to_string(&generator).expect("generate-ca.sh");
+        assert!(script.contains(&format!("-subj \"{CA_SUBJECT}\"")));
+    }
+
+    // What: a failed signing leaves no key or certificate.
+    // Why: nginx must never load half of a key pair.
+    // From: Issue #1683 | PR #1912
+    #[test]
+    fn sign_leaf_failures_leave_no_files() {
+        let root = scratch();
+        let (nginx, run) = (root.join("nginx"), root.join("run"));
+        fs::create_dir_all(&run).expect("run dir");
+        let gid = {
+            use std::os::unix::fs::MetadataExt as _;
+            fs::metadata(&root).expect("root meta").gid()
+        };
+        nginx_certs(&nginx, &run, &CdnHosts::default(), "", gid).expect("ca");
+        let ca = nginx.join(NGINX_CA_DIR);
+        let san = format!("DNS:{}", gen_name());
+        let (key, crt) = (root.join(gen_name()), root.join(gen_name()));
+        fs::create_dir(&key).expect("key dir");
+        assert!(sign_leaf(&ca, &run, &key, &crt, &san).is_err());
+        assert!(!crt.exists());
+        let (key, crt) = (root.join(gen_name()), root.join(gen_name()));
+        fs::write(&crt, gen_name()).expect("partial crt");
+        assert!(sign_leaf(&root.join(gen_name()), &run, &key, &crt, &san).is_err());
+        assert!(!key.exists() && !crt.exists());
+        assert_eq!(
+            fs::read_dir(&run).expect("run").count(),
+            0,
+            "csr or ext left"
+        );
     }
 }

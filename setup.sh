@@ -446,7 +446,7 @@ run_kea_dhcp_activation_preflight() {
     print_step "DHCP activation preflight"
     printf "  Probe-only check: the dhcp image runs its DHCP probe and exits without starting Kea.\n"
 
-    # What: one lancache-watchdog probe run in the dhcp image
+    # What: one supervisor probe run in the dhcp image
     # Why: the same probe as the Admin UI; no extra package
     # From: Issue #1683 | PR #1912
     if ! output=$(docker compose --env-file "$env_file" -f "$PROD_COMPOSE" --profile dhcp-kea run --rm --no-deps dhcp \
@@ -5418,15 +5418,10 @@ cmd_create_logs_for_issue() (
     print_step "Known-good-snapshot directory listings"
     logbundle_named_volume_listing "$install_dir" "$env_file" proxy-config-snapshots config-snapshots \
         "$dest/known-good-snapshots/proxy.txt"
-    logbundle_named_volume_listing "$install_dir" "$env_file" dhcp-proxy-config-snapshots config-snapshots \
-        "$dest/known-good-snapshots/dhcp-proxy.txt"
-    logbundle_named_volume_listing "$install_dir" "$env_file" pdns-config-snapshots-standard config-snapshots \
-        "$dest/known-good-snapshots/dns-standard.txt"
-    ssl_enabled=$(get_env_var SSL_ENABLED "$env_file") || die "Cannot read SSL_ENABLED from $env_file (exit $?)."
-    if [[ "$ssl_enabled" = "1" ]]; then
-        logbundle_named_volume_listing "$install_dir" "$env_file" pdns-config-snapshots-ssl config-snapshots \
-            "$dest/known-good-snapshots/dns-ssl.txt"
-    fi
+    logbundle_named_volume_listing "$install_dir" "$env_file" dhcp-config-snapshots config-snapshots \
+        "$dest/known-good-snapshots/dhcp.txt"
+    logbundle_named_volume_listing "$install_dir" "$env_file" dns-config-snapshots config-snapshots \
+        "$dest/known-good-snapshots/dns.txt"
     # What: Kea snapshots: host path, then named volume
     # Why: pre-v0.3.0 dev stacks used a named volume
     local kea_dir
@@ -6826,7 +6821,7 @@ DHCP_PROXY_BOOT_FILENAME=""
 DHCP_PROXY_BOOT_SERVER=""
 DHCP_PROXY_CUSTOM_OPTIONS=""
 # What: PXE boot-pointer fields set by the wizard or default
-# Why: the only other way is hand-editing dhcp-proxy.env
+# Why: .env is the one place an operator sets them
 DHCP_PROXY_PXE_BOOT_SERVER=""
 DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=""
 DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=""
@@ -7317,9 +7312,9 @@ DHCP_PROXY_DOMAIN=${DHCP_PROXY_DOMAIN}
 DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME}
 DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER}
 DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS}
-# Issue #705: PXE boot-pointer (\`pxe-service\`) fields, empty by default.
-# See docs/dhcp-modes.md and services/dhcp-proxy/entrypoint.sh's own
-# _dhcp_proxy_render_pxe_service_directives for the full opt-in rationale.
+# What: PXE boot-pointer fields; empty means no PXE
+# Why: dnsmasq-proxy points PXE clients only when set
+# From: Issue #705
 DHCP_PROXY_PXE_BOOT_SERVER=${DHCP_PROXY_PXE_BOOT_SERVER}
 DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS}
 DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI}

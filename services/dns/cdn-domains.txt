@@ -10,8 +10,8 @@
 
 # LanCache DNS — CDN domain list
 # Prefix a line with "!" to disable it without deleting it (e.g. "!steamcontent.com"
-# or "!.steamcontent.com") -- both DNS RPZ generation (services/dns/entrypoint.sh)
-# and proxy cert/nginx-map generation (services/proxy/entrypoint.sh) skip a
+# or "!.steamcontent.com") -- both DNS RPZ generation and proxy cert/nginx-map
+# generation (services/watchdog/src/main.rs) skip a
 # disabled entry entirely. Remove the "!" to re-enable it. The Admin UI's
 # per-domain toggle (services/ui/src/main.rs) manages this marker
 # for the pre-shipped entries below; do not hand-edit the "====" marker line

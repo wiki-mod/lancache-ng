@@ -1,39 +1,6 @@
--- Vendored third-party file (Rule-Ref: AG-HDR-004, same carve-out already
--- applied to services/proxy/public_suffix_list.dat): this is PowerDNS
--- Authoritative Server's own gsqlite3 backend schema
--- (modules/gsqlite3backend/schema.sqlite3.sql, PowerDNS/pdns upstream
--- project, GPL-licensed there -- not lancache-ng's own AGPL-licensed
--- source, so no SPDX-License-Identifier line is added here), fetched
--- byte-for-byte via the GitHub API from upstream tag auth-5.0.5
--- (https://github.com/PowerDNS/pdns/blob/auth-5.0.5/modules/gsqlite3backend/schema.sqlite3.sql)
--- and reproduced unmodified below except for this explanatory comment block,
--- which documents lancache-ng's own reason for vendoring it -- matching the
--- pdns-backend-sqlite3 package this image installs from Alpine (issue
--- #815's services/dns Alpine migration).
---
--- WHY this file exists in this repo at all: Debian's pdns-backend-sqlite3
--- package ships this same schema file under
--- /usr/share/pdns-backend-sqlite3/schema/schema.sqlite3.sql, and
--- entrypoint.sh's original bootstrap logic located it there generically via
--- `find /usr/share -name schema.sqlite3.sql`. Alpine's pdns-backend-sqlite3
--- package does NOT ship this file at all (confirmed empirically, 2026-08-05,
--- on a real Alpine 3.24 container: `apk info -L pdns-backend-sqlite3` lists
--- only usr/lib/pdns/pdns/libgsqlite3backend.so, no schema/doc files
--- whatsoever) -- so a first boot on the Alpine image would otherwise fail
--- closed with "sqlite schema not found in /usr/share" and never create a
--- usable database. Vendoring this file lets entrypoint.sh fall back to it
--- when the generic `find` comes up empty, on either base OS.
---
--- Confirmed unchanged across the 4.9->5.0 major-version jump this migration
--- makes: upstream's modules/gsqlite3backend/ directory carries a chain of
--- versioned migration files (e.g. 4.3.1_to_4.7.0_schema.sqlite3.sql) for
--- every schema revision, and the newest such migration file present at the
--- auth-5.0.5 tag is 4.3.1_to_4.7.0 -- there is no 4.7.0-or-later migration
--- file, meaning the base schema below is identical to whatever Debian
--- trixie's own pdns-backend-sqlite3 (4.9.16) already uses. Live-verified
--- further: `pdnsutil create-zone`, `import-tsig-key`, and `set-meta` (the
--- exact pdnsutil subcommands entrypoint.sh calls) all ran successfully
--- against a database initialized from this exact file on pdns-server 5.0.5.
+-- What: vendored PowerDNS gsqlite3 schema, tag auth-5.0.5
+-- Why: Alpine pdns-backend-sqlite3 ships no schema file
+-- From: Issue #815
 PRAGMA foreign_keys = 1;
 
 CREATE TABLE domains (

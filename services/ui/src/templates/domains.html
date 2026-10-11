@@ -332,22 +332,9 @@
       </p>
     </section>
 
-    {# ddns-allow-unsigned-updates toggle (issue #815 follow-up, SUPERSEDES an
-       earlier design that toggled PowerDNS's global dnsupdate-require-tsig
-       setting -- real testing found that a no-op in the common case, see
-       services/dns/pdns.conf.template's header comment for the full
-       history). Real, current behavior: TSIG is ALREADY REQUIRED by default
-       for DNS updates to this project's LAN/reverse zones, whenever a real
-       DDNS_TSIG_KEY exists (essentially always). This toggle lets an
-       operator explicitly RELAX that already-active enforcement -- checking
-       it makes DNS updates LESS secure, not more. Unlike the AAAA-filter
-       panel above, this is a static PowerDNS startup action (configure_ddns_
-       tsig() in entrypoint.sh), not a live hook -- saving it restarts both
-       dns-standard and dns-ssl for real. Default is off (TSIG stays
-       required, matching today's actual behavior unchanged), and the
-       checkbox is disabled when no real DDNS_TSIG_KEY is configured
-       (ddns_tsig_key_configured, computed server-side) since there would be
-       nothing to relax yet. #}
+    {# What: toggle that allows DNS updates without TSIG.
+       Why: TSIG is required by default; this relaxes it.
+       From: Issue #815 #}
     <section data-dns-panel="settings" class="card flex flex-col gap-4 hidden">
       <div>
         <h2 class="font-semibold text-slate-200">DNS-Updates: TSIG-Pflicht lockern</h2>

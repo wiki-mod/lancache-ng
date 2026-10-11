@@ -383,13 +383,11 @@
       button.disabled = false;
     }
 
-    // What: maps a watchdog container name to its dock service key
-    // Why: only dhcp/dhcp-proxy/ntp have a real start/stop route
-    // From: Issue #1437
+    // What: compose service name to its desired-state key
+    // Why: only the dhcp container has a start/stop route
+    // From: Issue #1437 | PR #1912
     const DOCK_CONTROLLABLE_SERVICES = {
-      'lancache-dhcp': 'dhcp',
-      'lancache-dhcp-proxy': 'dhcp',
-      'lancache-ntp': 'ntp',
+      'dhcp': 'dhcp',
     };
 
     // What: render beambar service entries via DOM nodes

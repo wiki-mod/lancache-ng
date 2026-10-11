@@ -52,7 +52,6 @@ updates:
       - /services/dns
       - /services/watchdog
       - /services/dhcp
-      - /services/dhcp-proxy
       - /services/ui
     target-branch: current_dev
     schedule:
