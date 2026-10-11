@@ -92,7 +92,7 @@ otherwise-anonymous depots — if so, real per-operator Steam credentials will
 likely be needed for anything beyond free-to-play test apps (see open
 decisions below).
 
-## HTTP vs HTTPS, and why this deploys via standard mode
+## HTTP vs HTTPS, and why this deploys via HTTP mode
 
 Steam depot/chunk/manifest downloads are served over **plain HTTP**
 (`http://<cdn-host>/depot/<depot-id>/chunk/<hash>` across Valve's own CDN
@@ -106,9 +106,9 @@ already work against real lancache/lancachenet deployments today, and
 lancachenet only caches HTTP.
 
 **Implication for this project**: prefill traffic lands in cache via
-**standard mode** (SNI-passthrough proxy path) — no CA cert trust needed on
+**HTTP mode** (SNI-passthrough proxy path) — no CA cert trust needed on
 whatever host runs the prefill tool, exactly like a real Steam client
-today. SSL mode would also work (it's a superset for HTTP) but standard
+today. HTTPS mode would also work (it's a superset for HTTP) but standard
 mode is sufficient and simpler to require.
 
 **Wiring check, verified against this repo's actual code as of this
@@ -291,7 +291,7 @@ authors could resolve unilaterally.** Two honest framings were possible:
    configurable list of AppIDs to prefill.
 6. Package per decision 2.
 7. Document operator usage: point the prefill host's DNS at the
-   standard-mode IP, no CA cert install required, expected AppID config
+   http-mode IP, no CA cert install required, expected AppID config
    format. No DNS changes are needed for the `lancache.steamcontent.com`
    sentinel (see above).
 8. Future/stretch, not v0.3.0 scope: generalize the "data-plane

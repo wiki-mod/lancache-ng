@@ -16,7 +16,7 @@ lancache-ng provides a Docker based LAN cache stack with:
 
 - DNS based cache routing
 - an nginx cache proxy
-- optional SSL caching with a locally trusted CA
+- optional HTTPS caching with a locally trusted CA
 - an Admin UI
 - optional DHCP and secondary DNS features
 - setup and update automation for first-time users

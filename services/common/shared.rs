@@ -50,7 +50,7 @@ pub struct DiskInfo {
 }
 
 // What: the whole status.json document.
-// Why: a map; its keys show whether SSL mode is off.
+// Why: a map; its keys show whether HTTPS mode is off.
 // From: Issue #870
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchdogStatus {

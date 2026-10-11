@@ -1436,7 +1436,7 @@ impl Recursor {
     }
 }
 
-// What: dns-http answers with IP_HTTP, dns-https SSL.
+// What: dns-http answers IP_HTTP, dns-https IP_HTTPS.
 // Why: one cache per proxy IP keeps the answers apart.
 // From: Issue #1683
 const DNS_HTTP: Recursor = Recursor {
@@ -3016,7 +3016,7 @@ const NGINX_MITM_PORT: u16 = 8444;
 const NGINX_CA_DIR: &str = "ssl/ca";
 const NGINX_CERT_DIR: &str = "ssl/certs";
 const NGINX_STREAM_TARGETS: &str = "stream.d/00-stream-targets.conf";
-const NGINX_SSL_DISPATCH: &str = "stream.d/01-ssl-dispatch.conf";
+const NGINX_HTTPS_DISPATCH: &str = "stream.d/01-https-dispatch.conf";
 
 // What: subject of the stack CA certificate.
 // Why: certs/generate-ca.sh must issue the same subject.
@@ -3032,10 +3032,10 @@ fn map_line(key: &str, value: &str) -> String {
 // What: cert map, host allow map and client geo.
 // Why: strict allows only listed hosts; CIDRs gate all.
 // From: Issue #1683
-fn nginx_ssl_map(hosts: &CdnHosts, strict: bool, cidrs: &[String]) -> String {
+fn nginx_https_map(hosts: &CdnHosts, strict: bool, cidrs: &[String]) -> String {
     let keys = hosts.keys();
     let mut out =
-        format!("{NGINX_GENERATED}map $ssl_server_name $ssl_cert_name {{\n    hostnames;\n");
+        format!("{NGINX_GENERATED}map $ssl_server_name $https_cert_name {{\n    hostnames;\n");
     for (key, cert) in &keys {
         out.push_str(&map_line(key, cert));
     }
@@ -3099,7 +3099,7 @@ fn nginx_client_acl(cidrs: &[String]) -> String {
 // What: the :443 dispatcher: MITM, passthrough, refuse.
 // Why: a cert covers one label; deeper names pass through.
 // From: Issue #1276 | Issue #1322 | Issue #1683
-fn nginx_ssl_dispatch(hosts: &CdnHosts, strict: bool, acl: &Path) -> String {
+fn nginx_https_dispatch(hosts: &CdnHosts, strict: bool, acl: &Path) -> String {
     let mitm = format!("127.0.0.1:{NGINX_MITM_RELAY}");
     let passthrough = format!("127.0.0.1:{NGINX_PASSTHROUGH_RELAY}");
     let escape = |name: &str| name.replace('.', "\\.");
@@ -3116,7 +3116,7 @@ fn nginx_ssl_dispatch(hosts: &CdnHosts, strict: bool, acl: &Path) -> String {
         .collect();
     bases.sort_by(|a, b| b.len().cmp(&a.len()).then(b.cmp(a)));
     let mut out = format!(
-        "{NGINX_GENERATED}map $ssl_preread_server_name $ssl_dispatch_backend {{\n{}",
+        "{NGINX_GENERATED}map $ssl_preread_server_name $https_dispatch_backend {{\n{}",
         map_line("\"\"", NGINX_REFUSE)
     );
     for root in &hosts.roots {
@@ -3143,7 +3143,7 @@ fn nginx_ssl_dispatch(hosts: &CdnHosts, strict: bool, acl: &Path) -> String {
     out.push_str(&format!(
         "    default {default};\n}}\n\n\
          server {{\n    listen 443;\n    listen [::]:443;\n    include {acl};\n    \
-         ssl_preread on;\n    proxy_pass $ssl_dispatch_backend;\n    proxy_protocol on;\n    \
+         ssl_preread on;\n    proxy_pass $https_dispatch_backend;\n    proxy_protocol on;\n    \
          proxy_connect_timeout 30s;\n    proxy_timeout        3600s;\n}}\n\n\
          server {{\n    listen {mitm} proxy_protocol;\n    set_real_ip_from 127.0.0.1;\n    \
          proxy_protocol on;\n    proxy_pass 127.0.0.1:{NGINX_MITM_PORT};\n    \
@@ -3269,7 +3269,7 @@ fn sign_leaf(ca: &Path, run: &Path, key: &Path, crt: &Path, san: &str) -> Result
 }
 
 // What: CA, default and per-host leaf certificates.
-// Why: SSL mode intercepts TLS for every proxied host.
+// Why: HTTPS mode intercepts TLS for every proxied host.
 // From: Issue #1683
 fn nginx_certs(
     nginx: &Path,
@@ -3304,7 +3304,7 @@ fn nginx_certs(
         )?;
         own(&ca_key, None, 0, 0o600)?;
         log(
-            "ACTION REQUIRED: a new CA is in certs/ca.crt; every SSL client must install it \
+            "ACTION REQUIRED: a new CA is in certs/ca.crt; every HTTPS client must install it \
              once (docs/install-ca-cert.md)",
         );
     }
@@ -3428,7 +3428,8 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     };
     let ip_http = ctx.need("IP_HTTP")?;
     let ip_https = env_opt("IP_HTTPS").unwrap_or_default();
-    let ssl = config::parse_bool(&ctx.need("SSL_ENABLED")?).ok_or("SSL_ENABLED is no boolean")?;
+    let https_on =
+        config::parse_bool(&ctx.need("HTTPS_ENABLED")?).ok_or("HTTPS_ENABLED is no boolean")?;
     let resolver = ctx.need("NGINX_UPSTREAM_RESOLVER")?;
     // What: the upstream resolver must not be LanCache.
     // Why: the LanCache DNS would loop back (AG-OP-002).
@@ -3466,9 +3467,9 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         &Psl::parse(&read(&dir.join("public_suffix_list.dat"))?),
     );
     let https = dir.join("conf.d/https.conf");
-    if ssl {
+    if https_on {
         if ip_https.is_empty() {
-            return Err("SSL_ENABLED needs IP_HTTPS".into());
+            return Err("HTTPS_ENABLED needs IP_HTTPS".into());
         }
         nginx_certs(&dir, &ctx.run_dir, &hosts, &ip_https, worker_gid)?;
     } else if https.exists() {
@@ -3510,8 +3511,8 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
             ),
         ),
         (
-            dir.join("conf.d/00-ssl-map.conf"),
-            nginx_ssl_map(&hosts, strict, &cidrs),
+            dir.join("conf.d/00-https-map.conf"),
+            nginx_https_map(&hosts, strict, &cidrs),
         ),
         (
             dir.join(NGINX_STREAM_TARGETS),
@@ -3519,9 +3520,9 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         ),
         (acl.clone(), nginx_client_acl(&cidrs)),
         (
-            dir.join(NGINX_SSL_DISPATCH),
-            if ssl {
-                nginx_ssl_dispatch(&hosts, strict, &acl)
+            dir.join(NGINX_HTTPS_DISPATCH),
+            if https_on {
+                nginx_https_dispatch(&hosts, strict, &acl)
             } else {
                 NGINX_GENERATED.to_string()
             },
@@ -5206,14 +5207,14 @@ mod tests {
             bases: vec![base.clone()],
             ..CdnHosts::default()
         };
-        let strict = nginx_ssl_map(&hosts, true, std::slice::from_ref(&cidr));
+        let strict = nginx_https_map(&hosts, true, std::slice::from_ref(&cidr));
         assert!(strict.contains(&map_line(&format!("*.{root}"), &root)));
         assert!(strict.contains(&map_line(
             &format!("*.{base}"),
             &cert_name(&base, "wildcard")
         )));
         assert!(strict.contains("    default 0;\n") && strict.contains(&map_line(&cidr, "1")));
-        let lazy = nginx_ssl_map(&hosts, false, &[]);
+        let lazy = nginx_https_map(&hosts, false, &[]);
         assert_eq!(lazy.matches("    default 1;\n").count(), 2, "{lazy}");
         assert!(
             nginx_stream_targets(&hosts, false).contains("default $ssl_preread_server_name:443;")
@@ -5238,7 +5239,7 @@ mod tests {
             bases: vec![format!("{short}.{root}"), long.clone()],
             ..CdnHosts::default()
         };
-        let out = nginx_ssl_dispatch(&hosts, false, Path::new("/acl"));
+        let out = nginx_https_dispatch(&hosts, false, Path::new("/acl"));
         let at = |name: &str| {
             out.find(&format!("\"~^.+\\.{}$\"", name.replace('.', "\\.")))
                 .expect(name)
@@ -5248,7 +5249,7 @@ mod tests {
             "    default 127.0.0.1:{NGINX_PASSTHROUGH_RELAY};\n"
         )));
         assert!(out.contains("    include /acl;\n"));
-        let strict = nginx_ssl_dispatch(&hosts, true, Path::new("/acl"));
+        let strict = nginx_https_dispatch(&hosts, true, Path::new("/acl"));
         assert!(strict.contains(&format!("    default {NGINX_REFUSE};\n")));
     }
 

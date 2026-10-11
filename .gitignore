@@ -9,8 +9,7 @@ data/
 /kea/
 /nats/
 /nats-conf/
-/pdns-standard/
-/pdns-ssl/
+/pdns/
 /pdns-filter-state/
 /ntp/
 /syslog-ng/

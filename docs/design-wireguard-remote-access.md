@@ -116,7 +116,7 @@ tunnel changes what a client can reach at L3:
   `NGINX_UPSTREAM_RESOLVER` / DNS-spoofing design (Rule-Ref: AG-OP-002)
   depends on the *proxy's own* upstream DNS resolution never
   looping back through the LAN's PowerDNS. A remote WireGuard client's own
-  DNS queries still need to go to `dns-standard`/`dns-ssl` over the tunnel
+  DNS queries still need to go to `dns` over the tunnel
   (or the client needs to be configured to use them) for the DNS-spoofing
   half of the caching mechanism to apply to it at all — a client that
   keeps using its own home/mobile-carrier DNS while only routing HTTP(S)
@@ -124,10 +124,10 @@ tunnel changes what a client can reach at L3:
   caching benefit, same as any device not pointed at this project's DNS
   today. This is existing behavior the WireGuard feature doesn't change,
   but it should be called out in operator-facing docs once this ships:
-  "point your WireGuard client's DNS at the LAN's standard/SSL DNS IP over
+  "point your WireGuard client's DNS at the LAN's standard/HTTPS DNS IP over
   the tunnel," not assumed automatic.
 - No changes to the DNS services themselves are anticipated by this
-  design. `dns-standard`/`dns-ssl` and their IP bindings are unaffected;
+  design. `dns` and their IP bindings are unaffected;
   WireGuard adds a new path *into* the LAN, not a new DNS mode.
 
 ## Key management / rotation

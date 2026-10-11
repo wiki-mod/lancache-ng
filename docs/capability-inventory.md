@@ -51,7 +51,7 @@ The proxy provides:
 
 * HTTP content caching.
 * Standard-mode HTTPS forwarding through nginx stream and SNI inspection.
-* SSL-mode TLS interception using the LanCache-NG local certificate authority.
+* HTTPS-mode TLS interception using the LanCache-NG local certificate authority.
 * Automatic certificate generation for configured cache domains.
 * Cache-domain matching based on `services/dns/cdn-domains.txt`.
 * Public-suffix-aware certificate and domain handling.
@@ -66,12 +66,12 @@ The proxy provides:
 * Admin UI visibility for cache status, requests and cache utilization.
 
 The current image uses Alpine and nginx.org's mainline nginx package. The
-stream and SSL preread modules required by standard mode are compiled directly
+stream and SSL preread modules required by HTTP mode are compiled directly
 into that nginx build.
 
-### Standard mode
+### HTTP mode
 
-Standard mode does not terminate the client TLS connection.
+HTTP mode does not terminate the client TLS connection.
 
 nginx inspects the requested SNI name and forwards the encrypted connection to
 the requested upstream host. No locally generated certificate is presented to
@@ -81,9 +81,9 @@ This mode avoids installing the LanCache-NG CA on clients but can only cache
 traffic that is available through non-intercepted HTTP paths or other supported
 cache flows.
 
-### SSL mode
+### HTTPS mode
 
-SSL mode terminates client TLS using certificates generated from the local
+HTTPS mode terminates client TLS using certificates generated from the local
 LanCache-NG CA.
 
 The client must trust that CA.
@@ -127,12 +127,12 @@ The service combines:
 
 The normal deployment contains two logical DNS instances:
 
-* `dns-standard`
-* `dns-ssl`
+* `dns`
+* `dns`
 
-`dns-standard` is the writable authoritative primary.
+`dns` is the writable authoritative primary.
 
-`dns-ssl` operates as a PowerDNS secondary for replicated authoritative data.
+`dns` operates as a PowerDNS secondary for replicated authoritative data.
 
 This replaces the older model where both instances independently received and
 applied the same record mutations.
@@ -145,8 +145,8 @@ operation.
 The implementation includes:
 
 * TSIG-protected AXFR and NOTIFY.
-* `dns-standard` as the single writable primary.
-* `dns-ssl` as a secondary.
+* `dns` as the single writable primary.
+* `dns` as a secondary.
 * Kea DDNS writes directed to the primary.
 * Secondary-side NATS record writes disabled to maintain the single-writer
   model.
@@ -789,9 +789,9 @@ upstream source and stores eligible content.
 Client
   -> Kea DHCPv4
   -> Kea DDNS
-  -> dns-standard
+  -> dns
   -> PowerDNS native replication
-  -> dns-ssl / secondary DNS nodes
+  -> dns / secondary DNS nodes
 ```
 
 The writable DNS primary is the single authority for replicated zone changes.
@@ -802,7 +802,7 @@ The writable DNS primary is the single authority for replicated zone changes.
 Operator
   -> Admin UI
   -> DNS control plane
-  -> dns-standard
+  -> dns
   -> PowerDNS replication
   -> DNS secondaries
 ```

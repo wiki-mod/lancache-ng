@@ -116,11 +116,11 @@ catch-all caused NOTAUTH rejections).
   template uses `DHCP_DDNS_ENABLED`, `services/dhcp/entrypoint.sh` normalizes
   the first-boot default and preserves the live persisted value, and
   `services/ui/src/main.rs` exposes the live toggle.
-- **#770/#1164 — DDNS updates deliberately reach `dns-standard` only.** Each
+- **#770/#1164 — DDNS updates deliberately reach `dns` only.** Each
   `forward-ddns`/`reverse-ddns` domain's `dns-servers` list is a **failover**
   list (D2 tries the first server, falls back only on failure), **not** a
   fan-out. The resolved design is therefore a single DDNS writer:
-  `dns-standard` accepts the update, while `dns-ssl` and remote DNS
+  `dns` accepts the update, while `dns` and remote DNS
   secondaries receive the resulting zone state through native PowerDNS
   AXFR/NOTIFY.
 - **#1083 — lease release DDNS cleanup.** Implemented as a best-effort
@@ -207,7 +207,7 @@ ordering.
 | DHCP conflict pre-check ("DHCP-Precheck") | Admin UI, implemented | `dhcp.rs::check_dhcp_conflict` |
 | Kea config snapshot rollback | Admin UI, implemented | `dhcp.rs::rollback_kea_snapshot`, #614 |
 | "Enable DDNS Updates" toggle (independent of DHCP-Server) | Admin UI, implemented | #1076 |
-| DDNS convergence to dns-standard + dns-ssl | Implemented via single-writer DDNS plus native PowerDNS AXFR/NOTIFY | #770/#1164 |
+| DDNS convergence to dns | Implemented via single-writer DDNS plus native PowerDNS AXFR/NOTIFY | #770/#1164 |
 | Snapshot-rollback status indicator | Not built (log-only) | Planned, v0.3.0, not Kea-specific |
 | UI i18n / localization | Not built (no infra at all) | Prerequisite for localized tooltips, §6 |
 | General Kea JSON config editor | Not planned | Deliberately out of scope |

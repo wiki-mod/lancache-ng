@@ -122,13 +122,13 @@ struct Config {
     cache_dir: String,
     dns_state_dir: String,
     shared_secret_dir: String,
-    proxy_standard_url: String,
-    proxy_ssl_url: String,
+    proxy_http_url: String,
+    proxy_https_url: String,
     netdata_url: String,
-    ssl_enabled: bool,
+    https_enabled: bool,
     cache_max_gb: f64,
-    standard_ip: String,
-    ssl_ip: String,
+    http_ip: String,
+    https_ip: String,
     dhcp_api_url: String,
     dhcp_api_token: String,
     dhcp_api_user: String,
@@ -221,11 +221,11 @@ impl Config {
             })
         };
 
-        let proxy_standard_url = need("PROXY_STANDARD_URL")?;
+        let proxy_http_url = need("PROXY_HTTP_URL")?;
         // What: both proxy addresses come from compose.
         // Why: no LAN address is hardcoded (AG-SEC-007).
-        let standard_ip = need("STANDARD_IP")?;
-        let ssl_ip = need("SSL_IP")?;
+        let http_ip = need("IP_HTTP")?;
+        let https_ip = need("IP_HTTPS")?;
         let nats_url = need("NATS_URL")?;
         let tag = need("LANCACHE_IMAGE_TAG")?;
         let channel = set("LANCACHE_IMAGE_CHANNEL")
@@ -253,8 +253,8 @@ impl Config {
         let startup_settings = HashMap::from([
             ("DHCP_MODE", dhcp_mode.as_str().to_string()),
             ("DHCP_SUBNET_START", text("DHCP_SUBNET_START", "")),
-            ("DHCP_DNS_PRIMARY", text("DHCP_DNS_PRIMARY", &standard_ip)),
-            ("DHCP_DNS_SECONDARY", text("DHCP_DNS_SECONDARY", &ssl_ip)),
+            ("DHCP_DNS_PRIMARY", text("DHCP_DNS_PRIMARY", &http_ip)),
+            ("DHCP_DNS_SECONDARY", text("DHCP_DNS_SECONDARY", &https_ip)),
             ("UPSTREAM_DHCP_IP", text("UPSTREAM_DHCP_IP", "")),
             ("DHCP_RELAY_LOCAL_ADDR", text("DHCP_RELAY_LOCAL_ADDR", "")),
             ("DHCP_NTP_SERVERS", text("DHCP_NTP_SERVERS", "")),
@@ -297,13 +297,13 @@ impl Config {
             proxy_log_dir: need("PROXY_LOG_DIR")?,
             cache_dir: need("CACHE_DIR")?,
             dns_state_dir: need("DNS_STATE_DIR")?,
-            proxy_ssl_url: need("PROXY_SSL_URL")?,
-            proxy_standard_url,
+            proxy_https_url: need("PROXY_HTTPS_URL")?,
+            proxy_http_url,
             netdata_url: need("NETDATA_URL")?,
-            ssl_enabled: need_flag("SSL_ENABLED")?,
+            https_enabled: need_flag("HTTPS_ENABLED")?,
             cache_max_gb,
-            standard_ip,
-            ssl_ip,
+            http_ip,
+            https_ip,
             dhcp_api_url: need("DHCP_API_URL")?,
             dhcp_api_token,
             dhcp_api_user: need("DHCP_API_USER")?,
@@ -451,33 +451,19 @@ fn hsts_mode_from(raw: &str) -> HstsMode {
     }
 }
 
-// What: CACHE_MAX_GB, or the matching legacy pair, or 50.
+// What: CACHE_MAX_GB, or 50 when unset.
 // Why: a malformed value must fail, not fall back.
 fn cache_max_gb_from(env: &dyn Fn(&str) -> Option<String>) -> Result<f64, String> {
-    let parse = |key: &str| -> Result<Option<f64>, String> {
-        config::opt(env, key)
-            .map(|raw| {
-                raw.trim()
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|gb| gb.is_finite() && *gb >= 0.0)
-                    .ok_or_else(|| format!("{key} must be a number of gigabytes, got {raw:?}"))
-            })
-            .transpose()
-    };
-    if let Some(value) = parse("CACHE_MAX_GB")? {
-        return Ok(value);
-    }
-    let (standard, ssl) = (parse("STANDARD_CACHE_MAX_GB")?, parse("SSL_CACHE_MAX_GB")?);
-    if let (Some(standard), Some(ssl)) = (standard, ssl)
-        && (standard - ssl).abs() > f64::EPSILON
-    {
-        return Err(format!(
-            "STANDARD_CACHE_MAX_GB ({standard}) and SSL_CACHE_MAX_GB ({ssl}) differ \
-             without CACHE_MAX_GB; set CACHE_MAX_GB to one shared cache size."
-        ));
-    }
-    Ok(standard.or(ssl).unwrap_or(50.0))
+    config::opt(env, "CACHE_MAX_GB")
+        .map(|raw| {
+            raw.trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|gb| gb.is_finite() && *gb >= 0.0)
+                .ok_or_else(|| format!("CACHE_MAX_GB must be a number of gigabytes, got {raw:?}"))
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(50.0))
 }
 
 // What: the NATS URL a remote secondary can dial, or None.
@@ -2355,7 +2341,7 @@ async fn secondaries_page(
         "primary_url",
         &format!(
             "http://{}:{}",
-            state.config.standard_ip, state.config.listen_port
+            state.config.http_ip, state.config.listen_port
         ),
     );
     ctx.insert(
@@ -2427,10 +2413,10 @@ async fn register_secondary(
         nats_user: form.name.clone(),
         nats_password,
         consumer_name: form.name,
-        proxy_ip: state.config.standard_ip.clone(),
+        proxy_ip: state.config.http_ip.clone(),
         pdns_api_key: state.config.pdns_api_key.clone(),
         ddns_tsig_key,
-        dns_xfr_primary: format!("{}:{PDNS_AUTH_PORT}", state.config.standard_ip),
+        dns_xfr_primary: format!("{}:{PDNS_AUTH_PORT}", state.config.http_ip),
         image_registry: state.config.lancache_image_registry.clone(),
         image_prefix: state.config.lancache_image_prefix.clone(),
         image_channel: state.config.lancache_image_channel.clone(),
@@ -3849,7 +3835,7 @@ async fn sync_subnet_ntp(state: &AppState, auto: bool) -> Result<(), String> {
     // What: the LAN address if auto, else the default.
     // Why: auto off hands the option back to one value.
     let servers = if auto {
-        state.config.standard_ip.clone()
+        state.config.http_ip.clone()
     } else {
         resolve_ntp_servers(&state.config.setting("DHCP_NTP_SERVERS"))
             .await
@@ -5015,27 +5001,27 @@ async fn blocking<T: Default + Send + 'static>(
     }
 }
 
-// What: nginx counters of the standard and ssl proxy.
-// Why: an ssl proxy sharing the standard URL is read once.
+// What: nginx counters of the http and https side.
+// Why: an https side sharing the http URL is read once.
 async fn proxy_statuses(state: &AppState) -> (Option<NginxStatus>, Option<NginxStatus>) {
     let cfg = &state.config;
-    let distinct = cfg.ssl_enabled && cfg.proxy_standard_url != cfg.proxy_ssl_url;
-    let (standard, ssl) = tokio::join!(
-        nginx_status(&state.http_client, &cfg.proxy_standard_url),
+    let distinct = cfg.https_enabled && cfg.proxy_http_url != cfg.proxy_https_url;
+    let (http, https) = tokio::join!(
+        nginx_status(&state.http_client, &cfg.proxy_http_url),
         async {
             if distinct {
-                nginx_status(&state.http_client, &cfg.proxy_ssl_url).await
+                nginx_status(&state.http_client, &cfg.proxy_https_url).await
             } else {
                 None
             }
         }
     );
-    let ssl = match (cfg.ssl_enabled, distinct) {
+    let https = match (cfg.https_enabled, distinct) {
         (false, _) => None,
-        (true, true) => ssl,
-        (true, false) => standard.clone(),
+        (true, true) => https,
+        (true, false) => http.clone(),
     };
-    (standard, ssl)
+    (http, https)
 }
 
 // What: the dashboard page.
@@ -5064,11 +5050,11 @@ async fn dashboard(State(state): Shared, headers: HeaderMap) -> Response {
     };
     let mode = cfg.dhcp_mode();
     let mut ctx = page_ctx(&headers, "dashboard");
-    ctx.insert("ssl_enabled", &cfg.ssl_enabled);
+    ctx.insert("https_enabled", &cfg.https_enabled);
     ctx.insert("dhcp_mode", mode.as_str());
     ctx.insert("dhcp_mode_has_kea", &mode.is_kea());
-    ctx.insert("standard_status", &proxy.0);
-    ctx.insert("ssl_status", &proxy.1);
+    ctx.insert("http_status", &proxy.0);
+    ctx.insert("https_status", &proxy.1);
     ctx.insert("cache_dir", &cfg.cache_dir);
     ctx.insert("cache_used_gb", &format!("{cache_used_gb:.1}"));
     ctx.insert("cache_max_gb", &cfg.cache_max_gb);
@@ -5093,11 +5079,11 @@ async fn dashboard(State(state): Shared, headers: HeaderMap) -> Response {
 // What: the connection counters alone, as JSON.
 // Why: the dashboard polls this without costly collectors.
 async fn metrics_api(State(state): Shared) -> Json<Value> {
-    let (standard, ssl) = proxy_statuses(&state).await;
+    let (http, https) = proxy_statuses(&state).await;
     Json(json!({
-        "standard": standard,
-        "ssl_enabled": state.config.ssl_enabled,
-        "ssl": ssl,
+        "http": http,
+        "https_enabled": state.config.https_enabled,
+        "https": https,
     }))
 }
 
@@ -5232,7 +5218,7 @@ async fn ntp_page(State(state): Shared, headers: HeaderMap) -> Response {
     ctx.insert("ntp_enabled", &cfg.flag("NTP_ENABLED"));
     ctx.insert("ntp_upstream_servers", &cfg.setting("NTP_UPSTREAM_SERVERS"));
     ctx.insert("ntp_auto_dhcp", &cfg.flag("NTP_AUTO_DHCP"));
-    ctx.insert("standard_ip", &cfg.standard_ip);
+    ctx.insert("http_ip", &cfg.http_ip);
     ctx.insert("dhcp_has_kea", &cfg.dhcp_mode().is_kea());
     render(&state, "ntp.html", &ctx)
 }
@@ -5304,8 +5290,8 @@ async fn update_ntp_settings(
 async fn setup_page(State(state): Shared, headers: HeaderMap) -> Response {
     let cfg = &state.config;
     let mut ctx = page_ctx(&headers, "setup");
-    ctx.insert("standard_ip", &cfg.standard_ip);
-    ctx.insert("ssl_ip", &cfg.ssl_ip);
+    ctx.insert("http_ip", &cfg.http_ip);
+    ctx.insert("https_ip", &cfg.https_ip);
     ctx.insert(
         "lancache_image_channel",
         &cfg.setting("LANCACHE_IMAGE_CHANNEL"),
@@ -5988,11 +5974,11 @@ mod tests {
         }
     }
 
-    // What: cache size from the new key or the legacy pair.
+    // What: cache size from CACHE_MAX_GB only.
     // Why: a bad value must fail; NaN would break the bar.
     // From: Issue #1069
     #[test]
-    fn cache_size_reads_new_and_legacy_keys() {
+    fn cache_size_reads_one_key() {
         fn from(pairs: &[(&str, &str)]) -> Result<f64, String> {
             cache_max_gb_from(&|key: &str| {
                 pairs
@@ -6003,12 +5989,7 @@ mod tests {
         }
         assert_eq!(from(&[]), Ok(50.0));
         assert_eq!(from(&[("CACHE_MAX_GB", "120")]), Ok(120.0));
-        let legacy = [("CACHE_MAX_GB", ""), ("SSL_CACHE_MAX_GB", "80")];
-        assert_eq!(from(&legacy), Ok(80.0));
-        let same = [("STANDARD_CACHE_MAX_GB", "70"), ("SSL_CACHE_MAX_GB", "70")];
-        assert_eq!(from(&same), Ok(70.0));
-        let split = [("STANDARD_CACHE_MAX_GB", "70"), ("SSL_CACHE_MAX_GB", "60")];
-        assert!(from(&split).is_err());
+        assert_eq!(from(&[("CACHE_MAX_GB", "")]), Ok(50.0));
         for bad in ["NaN", "inf", "-1", "abc"] {
             assert!(from(&[("CACHE_MAX_GB", bad)]).is_err(), "{bad:?} must fail");
         }
@@ -6397,9 +6378,9 @@ mod tests {
 
     const TEXT_KEYS: [&str; 35] = [
         "PROXY_LOG_DIR",
-        "PROXY_STANDARD_URL",
-        "STANDARD_IP",
-        "SSL_IP",
+        "PROXY_HTTP_URL",
+        "IP_HTTP",
+        "IP_HTTPS",
         "NATS_URL",
         "LANCACHE_IMAGE_TAG",
         "NTP_UPSTREAM_SERVERS",
@@ -6407,7 +6388,7 @@ mod tests {
         "CDN_DOMAINS_FILE",
         "CACHE_DIR",
         "DNS_STATE_DIR",
-        "PROXY_SSL_URL",
+        "PROXY_HTTPS_URL",
         "NETDATA_URL",
         "DHCP_API_URL",
         "DHCP_API_USER",
@@ -6442,7 +6423,7 @@ mod tests {
     ];
 
     const FLAG_KEYS: [&str; 6] = [
-        "SSL_ENABLED",
+        "HTTPS_ENABLED",
         "ALLOW_INSECURE_UI",
         "LOGGING_PROXY_ENABLED",
         "LOGGING_DNS_ENABLED",
@@ -6476,10 +6457,10 @@ mod tests {
     fn config_load_maps_every_key_to_its_field() {
         let cfg = load_from(&full_env()).expect("a complete env loads");
         assert_eq!(cfg.proxy_log_dir, "v-PROXY_LOG_DIR");
-        assert_eq!(cfg.proxy_standard_url, "v-PROXY_STANDARD_URL");
-        assert_eq!(cfg.proxy_ssl_url, "v-PROXY_SSL_URL");
-        assert_eq!(cfg.standard_ip, "v-STANDARD_IP");
-        assert_eq!(cfg.ssl_ip, "v-SSL_IP");
+        assert_eq!(cfg.proxy_http_url, "v-PROXY_HTTP_URL");
+        assert_eq!(cfg.proxy_https_url, "v-PROXY_HTTPS_URL");
+        assert_eq!(cfg.http_ip, "v-IP_HTTP");
+        assert_eq!(cfg.https_ip, "v-IP_HTTPS");
         assert_eq!(cfg.nats_url, "v-NATS_URL");
         assert_eq!(cfg.lancache_image_tag, "v-LANCACHE_IMAGE_TAG");
         assert_eq!(cfg.template_dir, "v-TEMPLATE_DIR");
@@ -6519,7 +6500,7 @@ mod tests {
         assert_eq!(cfg.ui_logs_max_entries, 250);
         assert_eq!(cfg.listen_port, 8081);
         assert_eq!(cfg.syslog_max_gb, 3);
-        assert!(cfg.ssl_enabled && cfg.allow_insecure_ui);
+        assert!(cfg.https_enabled && cfg.allow_insecure_ui);
         assert_eq!(cfg.cache_max_gb, 50.0);
     }
 
@@ -6543,8 +6524,8 @@ mod tests {
         assert_eq!(cfg.dhcp_mode(), DhcpMode::Disabled);
         let start = |key: &str| cfg.startup_settings[key].as_str();
         assert_eq!(start("DHCP_MODE"), "disabled");
-        assert_eq!(start("DHCP_DNS_PRIMARY"), "v-STANDARD_IP");
-        assert_eq!(start("DHCP_DNS_SECONDARY"), "v-SSL_IP");
+        assert_eq!(start("DHCP_DNS_PRIMARY"), "v-IP_HTTP");
+        assert_eq!(start("DHCP_DNS_SECONDARY"), "v-IP_HTTPS");
         assert_eq!(start("NTP_UPSTREAM_SERVERS"), "v-NTP_UPSTREAM_SERVERS");
         assert_eq!(start("AUTO_UPDATE_ENABLED"), "0");
         assert_eq!(start("NTP_ENABLED"), "0");
@@ -6707,7 +6688,7 @@ mod tests {
         assert_eq!(mode & 0o777, 0o644);
         assert_eq!(
             saved,
-            "DHCP_MODE=kea\nDHCP_DNS_PRIMARY=v-STANDARD_IP\nDHCP_DNS_SECONDARY=v-SSL_IP\n\
+            "DHCP_MODE=kea\nDHCP_DNS_PRIMARY=v-IP_HTTP\nDHCP_DNS_SECONDARY=v-IP_HTTPS\n\
              LANCACHE_IMAGE_CHANNEL=latest\nAUTO_UPDATE_ENABLED=0\nNTP_ENABLED=1\n\
              NTP_UPSTREAM_SERVERS=v-NTP_UPSTREAM_SERVERS\nNTP_AUTO_DHCP=0\nCACHE_MAX_GB=50\n\
              LOGGING_PROXY_ENABLED=1\nLOGGING_DNS_ENABLED=1\nLOGGING_DHCP_ENABLED=1\nLOGGING_UI_ENABLED=1\n"
@@ -6923,7 +6904,7 @@ mod tests {
     #[test]
     fn log_stats_count_hits_and_bytes() {
         let dir = unique_temp_dir("stats");
-        let (standard, ssl) = (dir.join("20261009.log"), dir.join("20261010.log"));
+        let (first, second) = (dir.join("20261009.log"), dir.join("20261010.log"));
         let gib = 1_073_741_824;
         let mut text = String::new();
         text += &log_line(1, "HIT", gib);
@@ -6934,8 +6915,8 @@ mod tests {
         let mut bytes = text.into_bytes();
         bytes.extend_from_slice(b"\xff\xfe broken\n");
         bytes.extend_from_slice(log_line(6, "HIT", 0).as_bytes());
-        fs::write(&standard, &bytes).unwrap();
-        fs::write(&ssl, log_line(7, "MISS", 0)).unwrap();
+        fs::write(&first, &bytes).unwrap();
+        fs::write(&second, log_line(7, "MISS", 0)).unwrap();
         fs::write(dir.join("20261008.log.xz"), log_line(8, "HIT", 0)).unwrap();
         let stats = log_stats(&dir.to_string_lossy());
         assert_eq!(
@@ -8967,8 +8948,8 @@ mod tests {
         assert_eq!(body["nats_user"], "sec-1");
         assert_eq!(body["consumer_name"], "sec-1");
         assert_eq!(body["ddns_tsig_key"], "tsigkey");
-        assert_eq!(body["proxy_ip"], "v-STANDARD_IP");
-        assert_eq!(body["dns_xfr_primary"], "v-STANDARD_IP:5300");
+        assert_eq!(body["proxy_ip"], "v-IP_HTTP");
+        assert_eq!(body["dns_xfr_primary"], "v-IP_HTTP:5300");
         assert_eq!(body["pdns_api_key"], state.config.pdns_api_key.as_str());
         assert_eq!(body["image_registry"], "v-LANCACHE_IMAGE_REGISTRY");
         assert_eq!(body["image_prefix"], "v-LANCACHE_IMAGE_PREFIX");

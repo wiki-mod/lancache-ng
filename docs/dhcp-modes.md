@@ -399,9 +399,9 @@ every asserted value explicitly (to the job log and, in CI,
 **What the Kea lease-flow simulation does NOT verify** (documented here per
 its own design -- see the script's header comment for the full rationale):
 
-- Native PowerDNS AXFR/NOTIFY convergence from `dns-standard` to `dns-ssl`
-  or remote DNS secondaries. The simulation proves Kea's D2 daemon sends
-  TSIG-signed DDNS updates to the single intended writer (`dns-standard`);
+- Native PowerDNS AXFR/NOTIFY convergence from `dns` to remote DNS
+  secondaries. The simulation proves Kea's D2 daemon sends
+  TSIG-signed DDNS updates to the single intended writer (`dns`);
   #1164's replication path is a separate PowerDNS primary/secondary concern
   and needs its own live transfer/convergence proof.
 - The `dnsmasq-proxy` DHCP mode -- entirely different code path

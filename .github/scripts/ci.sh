@@ -6679,7 +6679,7 @@ _ci_stream_map_violations() {
 # What: print depth>=2 dispatch entries off the relay port
 # Why: deeper SNI has no wildcard cert; it must passthrough
 # From: Issue #1322 | PR #1858
-_ci_ssl_dispatch_violations() {
+_ci_https_dispatch_violations() {
     local port="$1"
     awk -v want=":${port};" 'index($0, "~^.+\\.") > 0 && substr($NF, length($NF) - length(want) + 1) != want { print }'
 }
@@ -6707,10 +6707,10 @@ _ci_validate_proxy_stream_map() {
     fi
 }
 
-# What: Prove ssl mode intercepts (MITM) with our LAN CA.
+# What: Prove https mode intercepts (MITM) with our LAN CA.
 # Why: the proxy https port must show a cert we signed
 # From: Issue #1683
-_ci_validate_ssl_mitm() {
+_ci_validate_https_mitm() {
     local project="$1" ip cid domain ca_subj issuer tmp out cert tls_err ca port
     ca="$(_ci_proxy_constant NGINX_CA_DIR)" || return 2
     port="$(_ci_service_port https)" || return 2
@@ -6718,12 +6718,12 @@ _ci_validate_ssl_mitm() {
     cid="$(_ci_validate_cid "${project}" proxy)" || return 2
     domain="$(_ci_validation_dns_domain)"
     if [ -z "${ip}" ] || [ -z "${cid}" ] || [ -z "${domain}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0023]" "reason=\"no proxy container/IP or test domain for ssl-mitm check\""
+        ci_log "[CI-ERROR-VALIDATE-0023]" "reason=\"no proxy container/IP or test domain for https-mitm check\""
         return 2
     fi
     tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-proxy-ca.XXXXXX")" || return 2
     if ! out="$(docker cp "${cid}:${ca}/ca.crt" "${tmp}" 2>&1)"; then
-        ci_error "[CI-ERROR-VALIDATE-0024]" "reason=\"could not read proxy LAN CA for ssl-mitm check\"" "${out}"
+        ci_error "[CI-ERROR-VALIDATE-0024]" "reason=\"could not read proxy LAN CA for https-mitm check\"" "${out}"
         rm -f "${tmp}"
         return 2
     fi
@@ -6741,7 +6741,7 @@ _ci_validate_ssl_mitm() {
         issuer="${issuer#issuer=}"
     fi
     if [ -z "${ca_subj}" ] || [ -z "${issuer}" ]; then
-        ci_error "[CI-ERROR-VALIDATE-0025]" "domain=\"${domain}\" reason=\"no TLS issuer or CA subject for ssl-mitm check\"" "$(cat "${tls_err}")"
+        ci_error "[CI-ERROR-VALIDATE-0025]" "domain=\"${domain}\" reason=\"no TLS issuer or CA subject for https-mitm check\"" "$(cat "${tls_err}")"
         rm -f "${tls_err}"
         return 1
     fi
@@ -6750,28 +6750,28 @@ _ci_validate_ssl_mitm() {
     # Why: proves interception, not passthrough.
     # From: Issue #668
     if [ "${issuer}" != "${ca_subj}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0026]" "issuer=\"${issuer}\" ca=\"${ca_subj}\" reason=\"ssl mode :${port} cert not issued by our LAN CA (not intercepting, #668)\""
+        ci_log "[CI-ERROR-VALIDATE-0026]" "issuer=\"${issuer}\" ca=\"${ca_subj}\" reason=\"https mode :${port} cert not issued by our LAN CA (not intercepting, #668)\""
         return 1
     fi
 }
 
-# What: ssl-mode depth-dispatch routes deeper SNI right.
+# What: https-mode depth-dispatch routes deeper SNI right.
 # Why: depth>=2 SNI takes the passthrough relay, not MITM
 # From: Issue #1683
-_ci_validate_ssl_dispatch_map() {
+_ci_validate_https_dispatch_map() {
     local project="$1" cid map bad file relay
-    file="$(_ci_proxy_constant NGINX_SSL_DISPATCH)" || return 2
+    file="$(_ci_proxy_constant NGINX_HTTPS_DISPATCH)" || return 2
     relay="$(_ci_proxy_constant NGINX_PASSTHROUGH_RELAY)" || return 2
     cid="$(_ci_validate_cid "${project}" proxy)" || return 2
     if [ -z "${cid}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0027]" "reason=\"no proxy container for ssl-dispatch-map check\""
+        ci_log "[CI-ERROR-VALIDATE-0027]" "reason=\"no proxy container for https-dispatch-map check\""
         return 2
     fi
     if ! map="$(_ci_capture 0 docker exec "${cid}" cat "${file}")"; then
-        ci_log "[CI-ERROR-VALIDATE-0028]" "reason=\"could not read proxy ssl-dispatch map (SSL_ENABLED=0?)\""
+        ci_log "[CI-ERROR-VALIDATE-0028]" "reason=\"could not read proxy https-dispatch map (HTTPS_ENABLED=0?)\""
         return 2
     fi
-    bad="$(printf '%s\n' "${map}" | _ci_ssl_dispatch_violations "${relay}")"
+    bad="$(printf '%s\n' "${map}" | _ci_https_dispatch_violations "${relay}")"
     if [ -n "${bad}" ]; then
         ci_error "[CI-ERROR-VALIDATE-0029]" "reason=\"depth>=2 SNI dispatch entry routes to MITM, not passthrough relay :${relay} (#1276/#1322)\"" "${bad}"
         return 1
@@ -7416,8 +7416,8 @@ _ci_validate_probes() {
     _ci_validate_dns "${project}" || rc=$?
     [ "${rc}" -eq 0 ] && { _ci_validate_proxy "${project}" || rc=$?; }
     [ "${rc}" -eq 0 ] && { _ci_validate_proxy_stream_map "${project}" || rc=$?; }
-    [ "${rc}" -eq 0 ] && { _ci_validate_ssl_mitm "${project}" || rc=$?; }
-    [ "${rc}" -eq 0 ] && { _ci_validate_ssl_dispatch_map "${project}" || rc=$?; }
+    [ "${rc}" -eq 0 ] && { _ci_validate_https_mitm "${project}" || rc=$?; }
+    [ "${rc}" -eq 0 ] && { _ci_validate_https_dispatch_map "${project}" || rc=$?; }
     [ "${rc}" -eq 0 ] && { _ci_validate_ui_nats_dns "${project}" || rc=$?; }
     [ "${rc}" -eq 0 ] && { _ci_validate_dns_rollback "${project}" || rc=$?; }
     [ "${rc}" -eq 0 ] && { _ci_validate_kea_rollback "${project}" "${net}" "${pin}" || rc=$?; }
@@ -11423,7 +11423,7 @@ _ci_check_prod_state_wiring() {
         return 2
     fi
     # What: a key counts only as a whole word, not a prefix.
-    # Why: PDNS_SSL_DIR_OLD must not satisfy PDNS_SSL_DIR.
+    # Why: PDNS_DIR_OLD must not satisfy PDNS_DIR.
     # From: Issue #1683 | PR #1912
     while IFS= read -r key; do
         grep -Fqw -- "${key}" "${env_file}" \

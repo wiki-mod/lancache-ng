@@ -118,8 +118,8 @@
   </div>
 
   <!-- Cache overview: cache_dir/cache_used_gb/cache_pct come from a single
-       shared CACHE_DIR (see config.rs), used by both standard and SSL mode.
-       There is no separate standard-mode/SSL-mode cache size to show here. -->
+       shared CACHE_DIR (see config.rs), used by the http and https side.
+       There is no separate per-side cache size to show here. -->
   <div class="card">
     <div class="flex items-center justify-between mb-3">
       <div>
@@ -169,36 +169,33 @@
       </button>
     </form>
   </div>
-  <!-- Per-mode connection metrics: standard mode (HTTP caching + HTTPS SNI
-       passthrough, no CA cert needed) and SSL mode (HTTP + HTTPS with TLS
-       interception) are both served by the single unified services/proxy
-       container/nginx process (services/proxy-standard was retired and
-       merged into it in the v0.2.0 refactor).
-       PROXY_STANDARD_URL/PROXY_SSL_URL (main.rs) default to the
-       same stub_status endpoint on that one process and only diverge for an
-       operator's own advanced multi-instance deployment -- see that file's
-       own comment for the full explanation. The `id` attributes on the
-       numbers below are updated live by the auto-refresh script at the
-       bottom of this template, which polls GET /api/metrics
+  <!-- Per-side connection metrics: the http side (HTTP caching, HTTPS SNI
+       passthrough) and the https side (HTTP + HTTPS with TLS interception)
+       are both served by the one proxy nginx process.
+       PROXY_HTTP_URL/PROXY_HTTPS_URL (main.rs) point to the same
+       stub_status endpoint unless an operator splits them. The `id`
+       attributes on the numbers below are updated live by the script at
+       the bottom of this template, which polls GET /api/metrics
+       (main.rs::metrics_api) every few seconds. -->
        (main.rs::metrics_api) every few seconds. -->
   <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
     <div class="card">
       <div class="flex items-center justify-between mb-3">
-        <h2 class="font-semibold text-slate-200">Standard mode</h2>
+        <h2 class="font-semibold text-slate-200">HTTP mode</h2>
         <span class="text-xs text-slate-500">HTTP · SNI passthrough</span>
       </div>
-      {% if standard_status %}
-      <div class="grid grid-cols-3 gap-2 text-center mt-3" id="standard-metrics">
+      {% if http_status %}
+      <div class="grid grid-cols-3 gap-2 text-center mt-3" id="http-metrics">
         <div>
-          <p class="stat-num text-2xl font-bold text-white" id="standard-active">{{ standard_status.active }}</p>
+          <p class="stat-num text-2xl font-bold text-white" id="http-active">{{ http_status.active }}</p>
           <p class="text-xs text-slate-400">Connections</p>
         </div>
         <div>
-          <p class="stat-num text-2xl font-bold text-white" id="standard-requests">{{ standard_status.requests }}</p>
+          <p class="stat-num text-2xl font-bold text-white" id="http-requests">{{ http_status.requests }}</p>
           <p class="text-xs text-slate-400">Requests</p>
         </div>
         <div>
-          <p class="stat-num text-2xl font-bold text-white" id="standard-waiting">{{ standard_status.waiting }}</p>
+          <p class="stat-num text-2xl font-bold text-white" id="http-waiting">{{ http_status.waiting }}</p>
           <p class="text-xs text-slate-400">Waiting</p>
         </div>
       </div>
@@ -209,23 +206,23 @@
 
     <div class="card">
       <div class="flex items-center justify-between mb-3">
-        <h2 class="font-semibold text-slate-200">SSL mode</h2>
+        <h2 class="font-semibold text-slate-200">HTTPS mode</h2>
         <span class="text-xs text-slate-500">HTTP + HTTPS · MITM</span>
       </div>
-      {% if not ssl_enabled %}
-      <p class="text-sm text-slate-500 mt-3">SSL mode disabled</p>
-      {% elif ssl_status %}
-      <div class="grid grid-cols-3 gap-2 text-center mt-3" id="ssl-metrics">
+      {% if not https_enabled %}
+      <p class="text-sm text-slate-500 mt-3">HTTPS mode disabled</p>
+      {% elif https_status %}
+      <div class="grid grid-cols-3 gap-2 text-center mt-3" id="https-metrics">
         <div>
-          <p class="stat-num text-2xl font-bold text-white" id="ssl-active">{{ ssl_status.active }}</p>
+          <p class="stat-num text-2xl font-bold text-white" id="https-active">{{ https_status.active }}</p>
           <p class="text-xs text-slate-400">Connections</p>
         </div>
         <div>
-          <p class="stat-num text-2xl font-bold text-white" id="ssl-requests">{{ ssl_status.requests }}</p>
+          <p class="stat-num text-2xl font-bold text-white" id="https-requests">{{ https_status.requests }}</p>
           <p class="text-xs text-slate-400">Requests</p>
         </div>
         <div>
-          <p class="stat-num text-2xl font-bold text-white" id="ssl-waiting">{{ ssl_status.waiting }}</p>
+          <p class="stat-num text-2xl font-bold text-white" id="https-waiting">{{ https_status.waiting }}</p>
           <p class="text-xs text-slate-400">Waiting</p>
         </div>
       </div>
@@ -353,7 +350,7 @@
   // patches just the connection-count numbers in place, so the dashboard's
   // live connection counters stay current without re-running the much
   // heavier cache-size/log-tail work behind a full page reload. If a
-  // section isn't present (e.g. SSL mode disabled, or the proxy was
+  // section isn't present (e.g. HTTPS mode disabled, or the proxy was
   // unreachable on initial page load so the numbered elements were never
   // rendered), its update is silently skipped.
   function updateMetricsSection(prefix, status) {
@@ -375,9 +372,9 @@
         return;
       }
       const data = await response.json();
-      updateMetricsSection('standard', data.standard);
-      if (data.ssl_enabled) {
-        updateMetricsSection('ssl', data.ssl);
+      updateMetricsSection('http', data.http);
+      if (data.https_enabled) {
+        updateMetricsSection('https', data.https);
       }
     } catch (err) {
       // Network hiccup or proxy unreachable — leave the last known values

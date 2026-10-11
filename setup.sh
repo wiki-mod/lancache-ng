@@ -1362,13 +1362,17 @@ migrate_proxy_security_mode_for_update() {
 }
 
 readonly LEGACY_STATE_ROOT="/srv/lancache"
-readonly -a LEGACY_STATE_CHILDREN=(cache pdns-standard pdns-ssl pdns-filter-state kea nats nats-conf)
+readonly -a LEGACY_STATE_CHILDREN=(cache pdns pdns-ssl pdns-filter-state kea nats nats-conf)
 
 # What: fixed pre-v0.1 state paths, used for migration
 # Why: backup, update and restore must find legacy data
 legacy_state_path() {
     local child="${1:-}"
 
+    # What: the old layout named the PowerDNS dir pdns-standard
+    # Why: the dir is pdns now; old data must still be found
+    # From: Issue #1683 | PR #1912
+    [[ "$child" != pdns ]] || child=pdns-standard
     if [[ -n "$child" ]]; then
         printf '%s/%s\n' "$LEGACY_STATE_ROOT" "$child"
     else
@@ -1715,7 +1719,7 @@ quickstart_bundle_copies() {
 # Why: prod binds these as dirs, not as named volumes
 # From: Issue #1683 | PR #1858
 quickstart_volume_keys() {
-    printf '%s\n' 'pdns-data-standard PDNS_STANDARD_DIR' 'pdns-data-ssl PDNS_SSL_DIR' \
+    printf '%s\n' 'pdns-data-standard PDNS_DIR' 'pdns-data-ssl PDNS_SSL_DIR' \
         'pdns-filter-state PDNS_FILTER_STATE_DIR' 'nats-data NATS_DATA_DIR' \
         'nats-conf NATS_CONF_DIR' 'logs-syslog-ng SYSLOG_NG_LOG_DIR'
 }
@@ -3045,7 +3049,7 @@ migrate_env_for_update() (
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_http upstream_dhcp_ip
     local state_keys state_key state_sub state_sub_dir legacy_path
     local state_dir ui_session_ttl
-    local legacy_cache_std legacy_cache_ssl existing_image_tag
+    local legacy_cache_http legacy_cache_https existing_image_tag
     local lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
 
@@ -3136,16 +3140,21 @@ migrate_env_for_update() (
     set_env_key LANCACHE_IMAGE_TAG "$lancache_image_tag" "$env_file"
     [[ "$keep_image_refs" = "1" ]] || write_lancache_image_refs "$env_file" "$lancache_image_refs"
     adopt_moved_config_prod_keys "$install_dir" "$env_file" copy
+    # What: moves SSL_ENABLED to HTTPS_ENABLED.
+    # Why: older installs and config/prod files carry the old key.
+    # From: Issue #1683 | PR #1912
+    append_env_migrated_assignment_if_missing HTTPS_ENABLED SSL_ENABLED "" "$env_file"
+    remove_env_key SSL_ENABLED "$env_file"
 
     ui_session_ttl=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file") || exit $?
     ui_session_ttl="${ui_session_ttl:-$DEFAULT_UI_SESSION_TTL_SECONDS}"
     validate_ui_session_ttl_seconds "$ui_session_ttl" "$env_file"
     set_env_key_if_empty_or_missing UI_SESSION_TTL_SECONDS "$ui_session_ttl" "$env_file"
 
-    # What: an empty SSL_ENABLED becomes 1
+    # What: an empty HTTPS_ENABLED becomes 1
     # Why: prod always runs dns-https on IP_HTTPS
     # From: Issue #1683 | PR #1912
-    set_env_key_if_empty_or_missing SSL_ENABLED 1 "$env_file"
+    set_env_key_if_empty_or_missing HTTPS_ENABLED 1 "$env_file"
 
     # What: missing AUTO_UPDATE_ENABLED defaults to 0
     # Why: migration never turns auto-update on
@@ -3158,19 +3167,28 @@ migrate_env_for_update() (
     # What: CACHE_DIR is the canonical cache path
     # Why: legacy split cache keys must collapse into it
     cache_dir=$(get_env_var CACHE_DIR "$env_file") || exit $?
-    legacy_cache_std=$(get_env_var CACHE_DIR_STANDARD "$env_file") || exit $?
-    legacy_cache_ssl=$(get_env_var CACHE_DIR_SSL "$env_file") || exit $?
+    legacy_cache_http=$(get_env_var CACHE_DIR_STANDARD "$env_file") || exit $?
+    legacy_cache_https=$(get_env_var CACHE_DIR_SSL "$env_file") || exit $?
     if [[ -z "$cache_dir" ]]; then
-        if [[ -n "$legacy_cache_std" && -n "$legacy_cache_ssl" && "$legacy_cache_std" != "$legacy_cache_ssl" ]]; then
+        if [[ -n "$legacy_cache_http" && -n "$legacy_cache_https" && "$legacy_cache_http" != "$legacy_cache_https" ]]; then
             die "CACHE_DIR_STANDARD and CACHE_DIR_SSL point to different paths in $env_file. Set CACHE_DIR to one shared cache directory before rerunning setup.sh update. The update will not keep two cache directories."
         fi
 
-        cache_dir="${legacy_cache_std:-$legacy_cache_ssl}"
+        cache_dir="${legacy_cache_http:-$legacy_cache_https}"
     fi
     [[ -n "$cache_dir" ]] || cache_dir=$(legacy_dir_or_default "$(legacy_state_path cache)" "$state_dir/cache")
     set_env_key CACHE_DIR "$cache_dir" "$env_file"
     remove_env_key CACHE_DIR_STANDARD "$env_file"
     remove_env_key CACHE_DIR_SSL "$env_file"
+
+    # What: moves PDNS_STANDARD_DIR to PDNS_DIR, keeps the data
+    # Why: the default dir is pdns now; the zones must not move
+    # From: Issue #1683 | PR #1912
+    append_env_migrated_assignment_if_missing PDNS_DIR PDNS_STANDARD_DIR "" "$env_file"
+    remove_env_key PDNS_STANDARD_DIR "$env_file"
+    if [[ -z "$(get_env_var_nonempty PDNS_DIR "$env_file")" && -d "$state_dir/pdns-standard" && ! -d "$state_dir/pdns" ]]; then
+        set_env_key PDNS_DIR "$state_dir/pdns-standard" "$env_file"
+    fi
 
     # What: derives state dirs from the legacy root
     # Why: one state contract for update and upgrades
@@ -3454,16 +3472,16 @@ install_missing_tools() {
 backup_manifest() {
     local install_dir="$1" mode="$2"
     local env_file cache_env_file
-    local cache_dir cache_std cache_ssl state_dir keys key dir sub
+    local cache_dir cache_http cache_https state_dir keys key dir sub
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     cache_env_file="$install_dir/.env"
     state_dir=$(install_state_root "$install_dir" "$env_file") \
         || die "Cannot resolve the state root of $install_dir (exit $?)."
     cache_dir=$(get_env_var CACHE_DIR "$env_file") || exit $?
-    cache_std=$(get_env_var CACHE_DIR_STANDARD "$env_file") || exit $?
-    cache_ssl=$(get_env_var CACHE_DIR_SSL "$env_file") || exit $?
-    cache_std="${cache_std:-$state_dir/cache}"
-    cache_ssl="${cache_ssl:-$cache_std}"
+    cache_http=$(get_env_var CACHE_DIR_STANDARD "$env_file") || exit $?
+    cache_https=$(get_env_var CACHE_DIR_SSL "$env_file") || exit $?
+    cache_http="${cache_http:-$state_dir/cache}"
+    cache_https="${cache_https:-$cache_http}"
 
     printf '%s\n' "$cache_env_file"
     [[ "$env_file" != "$cache_env_file" ]] && printf '%s\n' "$env_file"
@@ -3483,8 +3501,8 @@ backup_manifest() {
     done <<< "$keys"
     if [[ "$mode" = "full" ]]; then
         [[ -n "${cache_dir:-}" && -d "$cache_dir" ]] && printf '%s\n' "$cache_dir"
-        [[ -n "${cache_std:-}" && -d "$cache_std" ]] && printf '%s\n' "$cache_std"
-        [[ -n "${cache_ssl:-}" && "$cache_ssl" != "$cache_std" && -d "$cache_ssl" ]] && printf '%s\n' "$cache_ssl"
+        [[ -n "${cache_http:-}" && -d "$cache_http" ]] && printf '%s\n' "$cache_http"
+        [[ -n "${cache_https:-}" && "$cache_https" != "$cache_http" && -d "$cache_https" ]] && printf '%s\n' "$cache_https"
         [[ -d "$(legacy_state_path cache)" ]] && printf '%s\n' "$(legacy_state_path cache)"
     fi
     true
@@ -4036,7 +4054,7 @@ Commands:
                        or Docker. See './setup.sh list-prompts --help'.
   update [install-dir] Update an existing stack. Default dir: ${DEFAULT_INSTALL_DIR}
   update-ip [install-dir]
-                       Change the configured standard and SSL listener IPs.
+                       Change the configured HTTP and HTTPS listener IPs.
                        Default dir: ${DEFAULT_INSTALL_DIR}
   debug [install-dir]  Print diagnostic information for an existing stack.
   create-logs-for-issue [install-dir]
@@ -4156,7 +4174,7 @@ EOF
             cat <<EOF
 Usage: ./setup.sh update-ip [install-dir]
 
-Interactively changes the standard and SSL listener IP addresses for an
+Interactively changes the HTTP and HTTPS listener IP addresses for an
 existing installation, then restarts its stack. If [install-dir] is omitted,
 ${DEFAULT_INSTALL_DIR} is used.
 
@@ -4392,16 +4410,16 @@ _verify_healthz_endpoint() {
 # What: functional checks: proxy /healthz and DNS query
 # Why: healthy alone does not prove a real answer
 verify_stack_functional_health() {
-    local ip_http ip_https ssl_enabled test_fqdn resolved
+    local ip_http ip_https https_enabled test_fqdn resolved
 
     ip_http=$(get_env_var IP_HTTP "$_UPDATE_ENV_FILE") || exit $?
     ip_https=$(get_env_var IP_HTTPS "$_UPDATE_ENV_FILE") || exit $?
-    ssl_enabled=$(get_env_var SSL_ENABLED "$_UPDATE_ENV_FILE") || exit $?
+    https_enabled=$(get_env_var HTTPS_ENABLED "$_UPDATE_ENV_FILE") || exit $?
 
     if [[ -n "$ip_http" ]]; then
         _verify_healthz_endpoint "$ip_http" || return 1
     fi
-    if [[ "${ssl_enabled:-0}" = "1" && -n "$ip_https" ]]; then
+    if [[ "${https_enabled:-0}" = "1" && -n "$ip_https" ]]; then
         _verify_healthz_endpoint "$ip_https" || return 1
     fi
 
@@ -5037,17 +5055,17 @@ cmd_debug() {
         || die_no_stack_found "$install_dir"
 
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    local ip_http ip_https cache_dir cache_std cache_ssl
+    local ip_http ip_https cache_dir cache_http cache_https
     ip_http=$(get_env_var IP_HTTP "$env_file") || exit $?
     ip_https=$(get_env_var IP_HTTPS "$env_file") || exit $?
     cache_dir=$(get_env_var CACHE_DIR "$env_file") || exit $?
-    cache_std=$(get_env_var CACHE_DIR_STANDARD "$env_file") || exit $?
-    cache_ssl=$(get_env_var CACHE_DIR_SSL "$env_file") || exit $?
+    cache_http=$(get_env_var CACHE_DIR_STANDARD "$env_file") || exit $?
+    cache_https=$(get_env_var CACHE_DIR_SSL "$env_file") || exit $?
     if [[ -z "$cache_dir" ]]; then
-        if [[ -n "$cache_std" && -n "$cache_ssl" && "$cache_std" != "$cache_ssl" ]]; then
+        if [[ -n "$cache_http" && -n "$cache_https" && "$cache_http" != "$cache_https" ]]; then
             print_error "Legacy cache paths differ; set CACHE_DIR before relying on cache debug output."
         else
-            cache_dir="${cache_std:-$cache_ssl}"
+            cache_dir="${cache_http:-$cache_https}"
         fi
     fi
 
@@ -5908,7 +5926,7 @@ cmd_update_ip() {
     print_step "Prompt for new IPs"
 
     while true; do
-        ask "New standard mode IP" "$current_ip_http"
+        ask "New HTTP mode IP" "$current_ip_http"
         new_ip_http="$REPLY"
         is_valid_ipv4 "$new_ip_http" && break
         print_error "Invalid IPv4 address: $new_ip_http"
@@ -5916,7 +5934,7 @@ cmd_update_ip() {
 
     printf "\n"
     while true; do
-        ask "New SSL mode IP" "$current_ip_https"
+        ask "New HTTPS mode IP" "$current_ip_https"
         new_ip_https="$REPLY"
         is_valid_ipv4 "$new_ip_https" && break
         print_error "Invalid IPv4 address: $new_ip_https"
@@ -6549,20 +6567,20 @@ fi
 printf "\n"
 
 while true; do
-    ask "Server IP (Standard mode)" "$detected_ip"
+    ask "Server IP (HTTP mode)" "$detected_ip"
     IP_HTTP="$REPLY"
     is_valid_ipv4 "$IP_HTTP" && break
     print_error "Invalid IPv4 address: $IP_HTTP"
 done
 
 printf "\n"
-printf "  ${BOLD}Second LAN IP${RESET}: the SSL DNS/proxy address, always required.\n\n"
+printf "  ${BOLD}Second LAN IP${RESET}: the HTTPS DNS/proxy address, always required.\n\n"
 # What: the second LAN address is always asked and checked
 # Why: AG-SETUP-001; prod runs dns-https on IP_HTTPS always
 # From: Issue #1683 | PR #1912
-suggested_ssl="${IP_HTTP%.*}.$((10#${IP_HTTP##*.} + 1))"
+suggested_https="${IP_HTTP%.*}.$((10#${IP_HTTP##*.} + 1))"
 while true; do
-    ask "Second LAN IP (SSL mode)" "$suggested_ssl"
+    ask "Second LAN IP (HTTPS mode)" "$suggested_https"
     IP_HTTPS="$REPLY"
     is_valid_ipv4 "$IP_HTTPS" && break
     print_error "Invalid IPv4 address: $IP_HTTPS"
@@ -6571,28 +6589,28 @@ require_separate_lan_ips "$IP_HTTP" "$IP_HTTPS"
 # What: IP_HTTPS goes on IP_HTTP's device and prefix
 # Why: same link and subnet; no guessed device or mask
 # From: Issue #1683 | PR #1858
-ssl_assigned=0 standard_link=""
+https_assigned=0 http_link=""
 if host_addresses=$(host_ipv4_addresses); then
     awk -v ip="$IP_HTTPS" '$1 == ip { found = 1 } END { exit !found }' <<< "$host_addresses" \
-        && ssl_assigned=1
-    standard_link=$(awk -v ip="$IP_HTTP" '$1 == ip { print $2, $3; exit }' <<< "$host_addresses")
+        && https_assigned=1
+    http_link=$(awk -v ip="$IP_HTTP" '$1 == ip { print $2, $3; exit }' <<< "$host_addresses")
 else
     print_warn "Cannot list this host's IPv4 addresses (exit $?)."
 fi
-if [[ "$ssl_assigned" = 1 ]]; then
+if [[ "$https_assigned" = 1 ]]; then
     print_ok "$IP_HTTPS already assigned"
 else
     print_warn "$IP_HTTPS not yet assigned to an interface"
-    if [[ -n "$standard_link" ]]; then
-        read -r standard_prefix standard_dev <<< "$standard_link"
-        ask "Add now? (ip addr add $IP_HTTPS/$standard_prefix dev $standard_dev) [y/N]" "N"
+    if [[ -n "$http_link" ]]; then
+        read -r http_prefix http_dev <<< "$http_link"
+        ask "Add now? (ip addr add $IP_HTTPS/$http_prefix dev $http_dev) [y/N]" "N"
         if [[ "${REPLY,,}" = "y" ]]; then
             if [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
                 # What: introspection skips ip addr add
                 # Why: list-prompts only walks the prompts
                 # From: Issue #1176
                 print_ok "$IP_HTTPS would be added (skipped: introspection mode)"
-            elif ip addr add "$IP_HTTPS/$standard_prefix" dev "$standard_dev"; then
+            elif ip addr add "$IP_HTTPS/$http_prefix" dev "$http_dev"; then
                 print_ok "$IP_HTTPS added (not persistent)"
             else
                 print_warn "Adding failed (exit $?) — please add manually"
@@ -6608,12 +6626,12 @@ else
 fi
 
 printf "\n"
-printf "  ${BOLD}SSL mode${RESET}: also caches HTTPS downloads (Epic, EA, Blizzard…)\n"
+printf "  ${BOLD}HTTPS mode${RESET}: also caches HTTPS downloads (Epic, EA, Blizzard…)\n"
 printf "  Requires a CA certificate on clients.\n\n"
-ask "Enable SSL mode? [y/N]" "N"
-SSL_ENABLED=0
-[[ "${REPLY,,}" = "y" ]] && SSL_ENABLED=1
-print_ok "SSL mode $([[ "$SSL_ENABLED" = 1 ]] && echo enabled || echo disabled) (second IP $IP_HTTPS)"
+ask "Enable HTTPS mode? [y/N]" "N"
+HTTPS_ENABLED=0
+[[ "${REPLY,,}" = "y" ]] && HTTPS_ENABLED=1
+print_ok "HTTPS mode $([[ "$HTTPS_ENABLED" = 1 ]] && echo enabled || echo disabled) (second IP $IP_HTTPS)"
 
 # ── 3. Data directory ─────────────────────────────────────────────────────────
 print_step "Data directory"
@@ -7147,7 +7165,7 @@ validate_ui_session_ttl_seconds "$UI_SESSION_TTL_SECONDS" "$env_file"
 validate_env_values_for_initial_write \
     "IP_HTTP=${IP_HTTP}" \
     "IP_HTTPS=${IP_HTTPS}" \
-    "SSL_ENABLED=${SSL_ENABLED}" \
+    "HTTPS_ENABLED=${HTTPS_ENABLED}" \
     "CACHE_DIR=${CACHE_DIR}" \
     "CACHE_MAX_SIZE=${cache_gb}g" \
     "CACHE_MEM_MB=${CACHE_MEM_MB}" \
@@ -7204,17 +7222,17 @@ validate_env_values_for_initial_write \
 
 write_file_atomically "$ENV_LOCAL" <<EOF
 # ── LAN IPs ────────────────────────────────────────────────────────────────────
-# Standard mode (no CA certificate needed): HTTP cached, HTTPS passthrough
+# HTTP mode (no CA certificate needed): HTTP cached, HTTPS passthrough
 IP_HTTP=${IP_HTTP}
 
-# Second LAN IP for the SSL DNS/proxy, always required (AG-SETUP-001)
+# Second LAN IP for the HTTPS DNS/proxy, always required (AG-SETUP-001)
 IP_HTTPS=${IP_HTTPS}
 
 # Root of all persistent state (cache, DNS, DHCP, NTP)
 LANCACHE_STATE_DIR=${LANCACHE_STATE_DIR}
 
-# ── SSL ────────────────────────────────────────────────────────────────────────
-SSL_ENABLED=${SSL_ENABLED}
+# ── HTTPS ────────────────────────────────────────────────────────────────────────
+HTTPS_ENABLED=${HTTPS_ENABLED}
 
 # ── Cache ──────────────────────────────────────────────────────────────────────
 CACHE_DIR=${CACHE_DIR}
@@ -7386,10 +7404,10 @@ printf "${BOLD}┌────────────────────�
 printf "${BOLD}│              Configuration                   │${RESET}\n"
 printf "${BOLD}├──────────────────────────────────────────────┤${RESET}\n"
 printf "  %-26s %s\n"    "HTTP IP:"                  "$IP_HTTP"
-if [[ "$SSL_ENABLED" = "1" ]]; then
+if [[ "$HTTPS_ENABLED" = "1" ]]; then
     printf "  %-26s %s\n" "HTTPS IP:"                "$IP_HTTPS"
 else
-    printf "  %-26s %s\n" "SSL mode:"                "disabled"
+    printf "  %-26s %s\n" "HTTPS mode:"                "disabled"
 fi
 printf "  %-26s %s\n"    "Stack directory:"         "$INSTALL_DIR"
 printf "  %-26s %s\n"    "Data directory:"          "$LANCACHE_STATE_DIR"
@@ -7494,17 +7512,17 @@ else
     printf "  ${BOLD}Admin-UI:${RESET}    %s\n" "$ui_url"
 fi
 printf "\n"
-if [[ "$SSL_ENABLED" = "1" ]]; then
+if [[ "$HTTPS_ENABLED" = "1" ]]; then
     printf "  ${BOLD}CA certificate${RESET} (available after first start):\n"
     printf "    %s/certs/ca.crt\n" "$SCRIPT_DIR"
-    printf "    → install on clients for SSL mode\n"
+    printf "    → install on clients for HTTPS mode\n"
     printf '    → guide: %s/wiki\n' "$LANCACHE_REPO_URL"
     printf "\n"
 fi
 printf "  ${BOLD}Configure DNS on clients:${RESET}\n"
-printf "    Standard mode (no certificate): %s\n" "$IP_HTTP"
-if [[ "$SSL_ENABLED" = "1" ]]; then
-    printf "    SSL mode (with certificate):    %s\n" "$IP_HTTPS"
+printf "    HTTP mode (no certificate): %s\n" "$IP_HTTP"
+if [[ "$HTTPS_ENABLED" = "1" ]]; then
+    printf "    HTTPS mode (with certificate):   %s\n" "$IP_HTTPS"
 fi
 printf "\n"
 printf "  ${BOLD}Commands:${RESET}\n"

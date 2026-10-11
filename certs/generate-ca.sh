@@ -2,9 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Generates the LAN cache's root CA (ca.key/ca.crt) used to sign per-domain
-# wildcard certs for SSL interception (MITM) mode.
+# wildcard certs for HTTPS interception (MITM) mode.
 #
-# Run this once to generate a CA certificate for SSL interception.
+# Run this once to generate a CA certificate for HTTPS interception.
 # The proxy auto-generates one if this is missing (dev convenience).
 # In prod, use this to generate a dedicated CA and keep ca.key secret.
 

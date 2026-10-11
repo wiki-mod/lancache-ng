@@ -3,7 +3,7 @@
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
 {#
 
-   DNS management page: manage CDN domains, SSL scope, LAN records, and the
+   DNS management page: manage CDN domains, HTTPS scope, LAN records, and the
    IPv4-only setting via content tabs, with the secondary registration view
    exposed from the shared DNS section. #}
 {% extends "base.html" %}
@@ -67,7 +67,7 @@
     <section data-dns-panel="cdn" class="card flex flex-col gap-4">
       <div>
         <h2 class="font-semibold text-slate-200">CDN-Domains</h2>
-        <p class="text-xs text-slate-500 mt-0.5">cdn-domains.txt · Hosts die auf den Cache-DNS zeigen. SSL-Zertifikate für passende Root-Domains werden automatisch abgeleitet, kein separater Eintrag nötig.</p>
+        <p class="text-xs text-slate-500 mt-0.5">cdn-domains.txt · Hosts die auf den Cache-DNS zeigen. HTTPS-Zertifikate für passende Root-Domains werden automatisch abgeleitet, kein separater Eintrag nötig.</p>
         <p class="text-xs text-slate-500 mt-0.5">
           Vorkonfigurierte Standard-Domains lassen sich über den Schalter aktivieren/deaktivieren, ohne aus der Liste zu verschwinden.
           Selbst hinzugefügte Domains werden weiterhin über "Entfernen" verwaltet.
@@ -129,7 +129,7 @@
                deterministic even when display sorting/filtering changes later. #}
             <input type="hidden" name="domain" value="{{ domain.raw }}">
             <button type="submit"
-                    onclick="return confirm('{{ domain.display }} aus der Domain-Liste entfernen?\nDer SSL-Proxy wird ggf. neu gestartet, falls SSL-Modus aktiv ist.')"
+                    onclick="return confirm('{{ domain.display }} aus der Domain-Liste entfernen?\nDer Proxy wird ggf. neu gestartet, falls der HTTPS-Modus aktiv ist.')"
                     class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
               Entfernen
             </button>
@@ -348,7 +348,7 @@
           <strong class="text-amber-400">Das ist eine echte Verringerung der Sicherheit, kein
           rein kosmetischer Schalter</strong> -- nur aktivieren, wenn es einen konkreten Grund
           dafür gibt (z. B. ein Update-Client, der keine TSIG-Signatur unterstützt).
-          <strong>Löst einen Neustart von dns-standard und dns-ssl aus</strong> (kein Live-Reload,
+          <strong>Löst einen Neustart des dns-Containers aus</strong> (kein Live-Reload,
           PowerDNS liest diese Einstellung nur beim Start).
           <strong class="text-amber-400">Während dieses Neustarts beantworten beide DNS-Instanzen
           kurzzeitig keine Anfragen</strong> -- für alle Geräte im LAN, nicht nur für DNS-Updates,

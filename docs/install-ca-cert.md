@@ -63,7 +63,7 @@ sudo trust anchor --store ca.crt
 
 Consoles (PS5, Xbox, Nintendo Switch) have no way to install a custom CA
 certificate — the capability simply does not exist on those platforms. So they
-can never trust the LAN cache's CA, and SSL-mode interception can never work for
+can never trust the LAN cache's CA, and HTTPS-mode interception can never work for
 them.
 
 **You do not need to do anything, and you should not point consoles somewhere

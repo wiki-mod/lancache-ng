@@ -81,7 +81,7 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
 # From: Issue #1683 | PR #1858
 FROM ${ALPINE_IMAGE:-scratch}
 
-LABEL org.opencontainers.image.description="LanCache-NG proxy: nginx cache for standard and TLS-interception traffic."
+LABEL org.opencontainers.image.description="LanCache-NG proxy: nginx cache for HTTP and TLS-interception traffic."
 
 # What: build identity keys the cache of later layers.
 # Why: a new package set must not reuse a stale apk layer.

@@ -49,11 +49,11 @@ The automated manifest includes these paths when they exist:
 - install configuration: the active runtime env file (`.env` or `deploy/prod/.env.local`), `docker-compose.yml`, and `certs/`; manual `deploy/prod` backups also include the repository-root runtime inputs reached via `../../` (`certs/`, `config/prod/`, `services/dns/cdn-domains.txt`, and `scripts/untracked/docker-socket-proxy.sh`) because production compose mounts or reads those tracked files outside `deploy/prod/`
 - Docker named volumes discovered from the compose project, including stopped containers so PowerDNS and NATS volumes are included; the cache volume (`<project>_proxy-cache`) is skipped in `--config` mode and only archived in `--full` mode, matching the cache-directory scope described above, since Docker reports that volume's mount type as "volume" even though it is bind-backed under the hood
 - an `image-revisions.txt` file with the image revisions present before an update pulls new tags
-- PowerDNS state from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, optional `PDNS_STANDARD_DIR`, `PDNS_SSL_DIR`, `PDNS_FILTER_STATE_DIR`, and legacy `/srv/lancache/pdns-standard`, `/srv/lancache/pdns-ssl`, `/srv/lancache/pdns-filter-state` when present
+- PowerDNS state from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, optional `PDNS_DIR` and `PDNS_FILTER_STATE_DIR`, and the legacy PowerDNS and filter-state directories below `/srv/lancache` when present
 - Kea data from the production state root `LANCACHE_STATE_DIR`, optional `KEA_DATA_DIR`, and legacy `/srv/lancache/kea` when present
 - chrony and CacheHamster data from the production state root `LANCACHE_STATE_DIR`, optional `NTP_DATA_DIR`, `CACHEHAMSTER_DATA_DIR`, and legacy `/srv/lancache/ntp`, `/srv/lancache/cachehamster` when present
 - NATS state and generated config from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, optional `NATS_DATA_DIR`, `NATS_CONF_DIR`, and legacy `/srv/lancache/nats`, `/srv/lancache/nats-conf` when present
-- in `--full` mode only, the cache directory from `CACHE_DIR` (or the production state root `LANCACHE_STATE_DIR`), plus legacy split cache directories (`CACHE_DIR_STANDARD`, `CACHE_DIR_SSL`) and `/srv/lancache/cache` when present
+- in `--full` mode only, the cache directory from `CACHE_DIR` (or the production state root `LANCACHE_STATE_DIR`), plus the legacy split cache directories of old installs and `/srv/lancache/cache` when present
 
 Central logging's own log path (`SYSLOG_NG_LOG_DIR`, or the production state root `LANCACHE_STATE_DIR/syslog-ng`; see #453 -- on by default since #1343 for `setup.sh`-managed installs, not an opt-in feature there; a from-scratch manual `deploy/prod` install that never runs `setup.sh` still starts with it off, like its `dhcp-kea`/`dhcp-proxy`/`ntp` sibling profiles) is **not** part of the automated backup manifest yet. Like cache content, it is rotated/compressed application output rather than configuration or operational state, so losing it does not affect the running stack. Back it up manually if you need log retention across a host migration.
 
@@ -86,7 +86,7 @@ If a scheduled automatic update caused the failure, disable it first (set `AUTO_
 
 `restore` restores exactly what a backup archive captured, including whatever
 shape `.env` had at backup time. A backup taken from an older install can
-therefore carry legacy keys (split `CACHE_DIR_STANDARD`/`CACHE_DIR_SSL`, a
+therefore carry legacy keys (a split cache directory pair, a
 stale `PROXY_SECURITY_MODE=strict` with no allowlist), a placeholder secret,
 or keys a later release added that the archived install never had. After
 restoring files and Docker volumes, `restore` migrates an archived quickstart
@@ -150,14 +150,14 @@ Test restores periodically on a spare host or VM:
 3. Confirm DNS replies on port 53.
 4. Confirm Admin UI access on port 8080.
 5. Confirm HTTP cache traffic on port 80.
-6. If SSL mode is enabled, confirm clients still trust the restored `ca.crt`.
+6. If HTTPS mode is enabled, confirm clients still trust the restored `ca.crt`.
 7. If DHCP is enabled, confirm Kea leases/config are restored before enabling DHCP on a production network.
 
 ## Secret and CA handling
 
 Backups contain secrets such as `.env`, `DDNS_TSIG_KEY`, `PDNS_API_KEY`, `NATS_UI_PASSWORD`, `NATS_DNS_WRITER_PASSWORD`, `NATS_CALLOUT_PASSWORD`, `NATS_SYS_PASSWORD` (the NATS system-account credential used only to look up and force-disconnect a removed/rotated secondary's live connection, issue #681 -- treat it as at least as sensitive as the other NATS static-role passwords, since it grants read access to every live connection's metadata network-wide via NATS's `$SYS.REQ.SERVER.*` API, not just the ability to disconnect one), the auth-callout issuer NKey seed file (`NATS_ISSUER_SEED_PATH`, default `/data/lancache-nats-issuer.seed` inside the Admin UI's data volume), `SECONDARY_REGISTRATION_TOKEN`, optional Admin UI credentials, and possibly `certs/ca.key`. Store backups off-host and encrypt them when they leave the server. Losing the issuer seed is self-healing, not a durability risk: the Admin UI generates a fresh one on next start and rewrites `nats.conf`'s `auth_callout.issuer` to match before accepting any connections, so already-registered secondaries keep working unchanged (their credential is verified against the `secondaries` table, not tied to any particular issuer key).
 
-Treat `certs/ca.key` as highly sensitive. Anyone with that private key can issue certificates trusted by SSL-mode clients. Distribute `ca.crt` to clients, but never distribute `ca.key`. If the CA key is exposed, generate a new CA, remove the old CA from clients, install the new `ca.crt`, and restart the proxy stack.
+Treat `certs/ca.key` as highly sensitive. Anyone with that private key can issue certificates trusted by HTTPS-mode clients. Distribute `ca.crt` to clients, but never distribute `ca.key`. If the CA key is exposed, generate a new CA, remove the old CA from clients, install the new `ca.crt`, and restart the proxy stack.
 
 ## Future improvements to consider
 

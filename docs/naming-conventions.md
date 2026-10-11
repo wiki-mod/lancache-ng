@@ -41,12 +41,12 @@ failure mode security review already assumed, not a novel one.
 There are two genuinely different kinds of "name a service" in this stack,
 and they intentionally use different literal values:
 
-1. **Compose service name** (e.g. `proxy`, `dns-standard`, `dns-ssl`,
+1. **Compose service name** (e.g. `proxy`, `dns`,
    `nats`). This is the DNS alias Docker's embedded resolver gives every
    container on a Compose network. Code that builds an HTTP URL to reach
    another container in the same stack (e.g. the Admin UI calling
-   `http://dns-standard:8081`) uses this name.
-2. **Container name** (e.g. `lancache-proxy`, `lancache-dns-standard`).
+   `http://dns:8081`) uses this name.
+2. **Container name** (e.g. `lancache-proxy`, `lancache-dns`).
    This is the literal Docker Engine object name, used wherever code talks
    to the **Docker Engine API** — `GET /containers/<name>/json`,
    `POST /containers/<name>/restart`, etc. The Docker Engine API has no
@@ -96,7 +96,7 @@ Documented exceptions:
 ### Compose service names
 
 Rule: lowercase, hyphen-separated, one word per logical responsibility —
-`proxy`, `dns-standard`, `dns-ssl`, `dhcp`, `dhcp-proxy`, `dhcp-probe`,
+`proxy`, `dns`, `dhcp`, `dhcp-proxy`, `dhcp-probe`,
 `ntp`, `nats`, `docker-socket-proxy`, `watchdog`, `ui`, `netdata`, `syslog`,
 `cachehamster`.
 This list never carried a separate `syslog-ng` entry even while a real
@@ -109,15 +109,15 @@ this list is now accurate again by construction, since there is only one
 logical central-logging service left to name. These names are also the DNS aliases used for
 service-to-service HTTP calls inside a Compose network (see "Two separate
 name namespaces" above). They must stay identical everywhere the same
-logical service is named — a service must not be called `dns-standard` in
-one file and `dns_standard` or `standard-dns` in another.
+logical service is named — a service must not be called `dns` in
+one file and `dns` or `standard-dns` in another.
 
 ### Container names (`container_name:`)
 
 Rule: every service defined in `deploy/prod` gets an explicit
 `container_name: lancache-<service>`
-(the Compose service name, prefixed with `lancache-`; `dns-standard`
-becomes `lancache-dns-standard`, not `lancache-dnsstandard` or
+(the Compose service name, prefixed with `lancache-`; `dns`
+becomes `lancache-dns`, not `lancache-dnsstandard` or
 `lancache_dns_standard`). Do not leave `container_name:` unset and rely on
 Compose's auto-generated `<project>-<service>-<n>` name.
 
@@ -129,7 +129,7 @@ the Docker socket proxy currently allowlists:
    `scripts/untracked/docker-socket-proxy.sh` must have a name that exactly matches
    the allowlist regex, or the request is denied (fails closed, but that's
    still a bug). Today that set is `lancache-proxy`,
-   `lancache-dns-standard`, `lancache-dns-ssl`, `lancache-dhcp`,
+   `lancache-dns`, `lancache-dns`, `lancache-dhcp`,
    `lancache-dhcp-proxy`, `lancache-dhcp-probe`, `lancache-nats` — all of
    which already had explicit `container_name:` values before this change.
 2. **Operator-visible consistency.** At the time this rule was written,
@@ -195,10 +195,10 @@ explicitly scoped change adds the volume migration logic.
 
 Rule: everything under the shared `LANCACHE_STATE_DIR` (default
 `/opt/lancache-ng`) uses lowercase, hyphen-separated subdirectory names that
-match the service that owns them: `cache`, `pdns-standard`, `pdns-ssl`,
+match the service that owns them: `cache`, `pdns`, `pdns`,
 `pdns-filter-state`, `nats`, `nats-conf`, `kea`, `ntp`. See `docs/backup-restore.md`
 and `docs/how-to-change-ip.md` for the full `LANCACHE_STATE_DIR` contract
-and its override variables (`PDNS_STANDARD_DIR`, `PDNS_SSL_DIR`,
+and its override variables (`PDNS_DIR`, `PDNS_DIR`,
 `PDNS_FILTER_STATE_DIR`, `NATS_DATA_DIR`, `NATS_CONF_DIR`, `KEA_DATA_DIR`,
 `NTP_DATA_DIR`).
 This document does not duplicate that contract; it only asserts that new
@@ -291,8 +291,8 @@ the same kind of one-time recreation any `container_name:`/image-tag change
 already causes, not a new class of behavior. No named volume is renamed,
 removed, or recreated; a container recreation does not touch volume
 contents. Expect a few seconds of downtime for these four/six containers
-during the update, same as any other rolling update. `proxy`, `dns-standard`,
-`dns-ssl`, `dhcp`, `dhcp-proxy`, `dhcp-probe`, and `nats` already had
+during the update, same as any other rolling update. `proxy`, `dns`,
+`dns`, `dhcp`, `dhcp-proxy`, `dhcp-probe`, and `nats` already had
 explicit `container_name:` values and are unaffected by this change.
 
 The deleted `x-docker-socket-proxy-command` YAML anchors were dead

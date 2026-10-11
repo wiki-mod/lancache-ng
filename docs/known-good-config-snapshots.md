@@ -39,7 +39,7 @@ adapter) is:
    |---|---|---|
    | proxy (nginx) | `/var/lib/lancache-proxy/config-snapshots` | `proxy-config-snapshots` |
    | dhcp-proxy (dnsmasq) | `/var/lib/lancache-dhcp-proxy/config-snapshots` | `dhcp-proxy-config-snapshots` |
-   | dns-standard, dns-ssl (PowerDNS recursor + auth) | `/var/lib/lancache-dns/config-snapshots/{recursor,auth}` | `pdns-config-snapshots-standard`, `pdns-config-snapshots-ssl` |
+   | dns (PowerDNS recursor + auth) | `/var/lib/lancache-dns/config-snapshots/{recursor,auth}` | `pdns-config-snapshots` |
    | dns-secondary (remote secondary node, same image/entrypoint) | `/var/lib/lancache-dns/config-snapshots/{recursor,auth}` | `pdns-config-snapshots` |
    | dhcp (Kea) | `/var/lib/kea/config-snapshots` — see "Kea" below | `kea-data` (shared with the `dhcp` service) |
 
@@ -204,9 +204,9 @@ adapter) is:
 
 5. **If the container still fails to start or stays unhealthy after rollback**, or if `setup.sh reset-to-last-known-good-config kea` reports no snapshots exist: the snapshot history is exhausted. See "Exhaustion: no valid snapshots remain" below.
 
-### PowerDNS — Static config (`dns-standard`, `dns-ssl` services) — Configuration validation failure
+### PowerDNS — Static config (`dns` service) — Configuration validation failure
 
-**Symptoms:** `dns-standard` or `dns-ssl` container exits with a log like:
+**Symptoms:** `dns` container exits with a log like:
 ```
 [lancache-dns] ERROR: generated recursor.conf/pdns.conf failed validation.
 [lancache-dns] ERROR: attempting rollback to the newest known-good snapshot instead.
@@ -219,8 +219,8 @@ adapter) is:
 1. Identify which file failed by checking logs:
    ```bash
    cd /opt/lancache-ng
-   docker compose -f deploy/prod/docker-compose.yml logs --tail=50 dns-standard
-   # or: docker compose -f deploy/prod/docker-compose.yml logs --tail=50 dns-ssl
+   docker compose -f deploy/prod/docker-compose.yml logs --tail=50 dns
+   # or: docker compose -f deploy/prod/docker-compose.yml logs --tail=50 dns
    ```
    
    Look for which validation failed:
@@ -243,14 +243,14 @@ adapter) is:
 
 4. Restart the DNS container:
    ```bash
-   docker compose -f deploy/prod/docker-compose.yml up -d dns-standard
-   # or dns-ssl, or both
-   docker compose -f deploy/prod/docker-compose.yml logs dns-standard
+   docker compose -f deploy/prod/docker-compose.yml up -d dns
+   # or dns, or both
+   docker compose -f deploy/prod/docker-compose.yml logs dns
    ```
 
 5. Verify rollback happened:
    ```bash
-   docker compose -f deploy/prod/docker-compose.yml logs dns-standard | grep "\[known-good-snapshot\]"
+   docker compose -f deploy/prod/docker-compose.yml logs dns | grep "\[known-good-snapshot\]"
    # Look for [SELECT] lines showing a snapshot was chosen
    ```
 
@@ -258,7 +258,7 @@ adapter) is:
 
 **Note for secondary DNS nodes:** If running a secondary DNS node (from `setup.sh secondary`), it uses the same `dns` image and entrypoint, so the same procedure applies. Secondary nodes have their own independent `pdns-config-snapshots` volume.
 
-### PowerDNS — Zone/record rollback (`dns-standard`, `dns-ssl` services) — Incorrect zone data
+### PowerDNS — Zone/record rollback (`dns` service) — Incorrect zone data
 
 **Symptoms:** DNS queries return wrong answers, or zones contain stale/incorrect records. You did NOT recently change the zone manually — this is data corruption or an erroneous NATS message.
 
@@ -278,7 +278,7 @@ adapter) is:
    # Replace "/opt/lancache-ng" with your install directory if different -- this
    # argument is REQUIRED here even if you're using the default, because the
    # zone argument that follows it is positional (there is no way to skip it)
-   # Replace "dns" with "dns-standard" or "dns-ssl" to target a specific container
+   # Replace "dns" with "dns" or "dns" to target a specific container
    # Replace "lan" with the zone you want to fix (with or without a trailing dot -- both work)
    ```
    
@@ -290,15 +290,15 @@ adapter) is:
 
 3. Verify the zone is fixed:
    ```bash
-   # From inside the dns-standard container, check one record:
-   docker compose -f deploy/prod/docker-compose.yml exec dns-standard sh -c \
+   # From inside the dns container, check one record:
+   docker compose -f deploy/prod/docker-compose.yml exec dns sh -c \
      'dig @127.0.0.1 <hostname>.<zone> +short'
    # Example: dig @127.0.0.1 mydevice.lan +short
    ```
 
 4. Check logs:
    ```bash
-   docker compose -f deploy/prod/docker-compose.yml logs dns-standard | grep -E "\[known-good-snapshot\]|rollback"
+   docker compose -f deploy/prod/docker-compose.yml logs dns | grep -E "\[known-good-snapshot\]|rollback"
    ```
 
 5. **If the rollback command fails because no snapshots exist for that zone**: zone snapshots have never been taken (the zone has no NATS-driven updates yet, or automatic snapshotting is not enabled). Manual fixes in this case require direct database inspection; see "Exhaustion: no valid snapshots remain" below.
@@ -351,7 +351,7 @@ adapter) is:
      # List snapshot directories per service:
      # nginx/proxy: docker run --rm -v proxy-config-snapshots:/data busybox ls -la /data
      # dnsmasq: docker run --rm -v dhcp-proxy-config-snapshots:/data busybox ls -la /data
-     # PowerDNS: docker run --rm -v pdns-config-snapshots-standard:/data busybox ls -la /data/recursor
+     # PowerDNS: docker run --rm -v pdns-config-snapshots:/data busybox ls -la /data/recursor
      # Kea: docker run --rm -v kea-data:/data busybox ls -la /data/config-snapshots
      ```
 
@@ -395,7 +395,7 @@ adapter) is:
 4. Check that core services are running:
    ```bash
    docker compose -f deploy/prod/docker-compose.yml ps
-   # Required for UI to work: proxy, dns-standard (or dns-ssl), nats, ui
+   # Required for UI to work: proxy, dns (or dns), nats, ui
    # (dhcp/dhcp-proxy/ntp only required if their profiles are enabled)
    ```
 
@@ -583,8 +583,8 @@ install or once snapshot history is exhausted, that call returns 1 and the
 container exits before ever reaching `pdns.conf` generation/validation — so
 on those two occasions a broken `recursor.conf` genuinely does prevent the
 authoritative server from starting too. Both live
-under one persistent volume per `dns-standard`/`dns-ssl` container
-(`pdns-config-snapshots-standard`, `pdns-config-snapshots-ssl`, mounted at
+under one persistent volume for the `dns` container
+(`pdns-config-snapshots`, mounted at
 `/var/lib/lancache-dns`), in separate `recursor/` and `auth/` subdirectories
 so the two independent snapshot histories never collide. A remote secondary
 DNS node (`setup.sh secondary`, `deploy/secondary/docker-compose.yml`) runs
@@ -735,7 +735,7 @@ does on every start narrows the problem a lot:
   `local.lan.` and the private reverse zones have no NATS reconciliation
   path at all: Kea's `forward-ddns`/`reverse-ddns` config
   (`services/dhcp/kea-dhcp-ddns.conf`) sends DDNS updates only to the
-  primary `dns-standard`/`dns-ssl` instances' own DDNS ports, never to
+  primary `dns` instance's own DDNS ports, never to
   `dns-secondary` nodes and never through NATS. So today, a `dns-secondary`
   node never receives `local.lan.`/reverse-zone records at all, regardless
   of rollback — this is a pre-existing replication gap this design does not
@@ -751,8 +751,8 @@ zones** — not the zone list, not TSIG, not RPZ.
 can't reach it.** An earlier draft of this design routed every step through
 `pdnsutil list-zone` / `check-zone` / `load-zone`. That does not work as a
 whole: `pdnsutil` operates directly on the local `pdns.sqlite3` backend, so
-every one of those commands can only run *inside* the `dns-standard`/
-`dns-ssl` container, with `--config-dir=/etc/pdns/auth` (the config
+every one of those commands can only run *inside* the `dns`/
+`dns` container, with `--config-dir=/etc/pdns/auth` (the config
 directory the authoritative server is actually generated into by
 `services/dns/entrypoint.sh` — the default `/etc/pdns` is empty in this
 image; every existing `pdnsutil` call in the entrypoint, e.g.
@@ -766,7 +766,7 @@ already has open is not a safe way to read or mutate it.
 
 What the Admin UI *does* already reach is PowerDNS's Authoritative HTTP API
 on port 8081 (`services/ui/src/main.rs`'s `pdns_auth_url`, default
-`http://dns-standard:8081`) — the same API `services/dns/nats-subscriber`
+`http://dns:8081`) — the same API `services/dns/nats-subscriber`
 already uses for `GET`/`PATCH /zones/lan` (`handle_dns_record`, the
 `reconciler`) and the same API family whose recursor sibling on 8082 the UI
 already calls for cache flushes (`flush_recursor_cache` in
@@ -787,7 +787,7 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
   JSON shape the reconciler and `handle_dns_record` already speak avoids
   that problem entirely and keeps one rrset representation across the whole
   adapter. `services/dns/nats-subscriber` — which already runs inside the
-  `dns-standard`/`dns-ssl` container and already speaks this API — issues
+  `dns` container and already speaks this API — issues
   this call and writes the result under
   `${DNS_CONFIG_SNAPSHOT_DIR}/zones/<zone>`, one `snapshot_root` per zone,
   applying the same `KEEP_KNOWN_GOOD_CONFIGS` retention default as every
@@ -874,8 +874,8 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
   described: `check-zone` validates the zone already loaded into the
   backend, not an arbitrary file, so it cannot pre-validate an export before
   accepting it as a snapshot. `pdnsutil check-zone --config-dir=/etc/pdns/auth
-  <zone>` (run locally by `nats-subscriber` inside the `dns-standard`/
-  `dns-ssl` container, where `pdnsutil` and the live backend both already
+  <zone>` (run locally by `nats-subscriber` inside the `dns`/
+  `dns` container, where `pdnsutil` and the live backend both already
   exist) remains useful as a *secondary structural sanity check* — SOA
   serial sanity, dangling CNAME targets, delegation consistency, none of
   which the API's per-RR validation catches — but only as a check against
@@ -891,7 +891,7 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
   an operator picks a specific timestamped snapshot for a specific zone.
   Execution needs a DNS-side path the Admin UI can actually reach, since (as
   established above) the UI cannot run `pdnsutil` itself: `nats-subscriber`
-  — already resident in the `dns-standard`/`dns-ssl` container, already
+  — already resident in the `dns` container, already
   holding the snapshot files it wrote, and already speaking the PowerDNS API
   — is the natural place for a small local HTTP listener (a new port,
   alongside PowerDNS's own 8081/8082) that the Admin UI calls to list
@@ -945,12 +945,12 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
   serving from cache. The rollback path must enumerate every name whose
   rrset changed (available directly from the diff computed in the point
   above) and flush each one against every recursor instance (both
-  `dns-standard` and `dns-ssl`, matching the two-mode/two-IP architecture),
+  `dns`, matching the two-mode/two-IP architecture),
   not rely on a single whole-zone or root flush call.
   - **NATS permission dependency (#867).** This flush is a
     `lancache.dns.flush` JetStream publish sent under whichever
     container's own identity runs `rollback_handler` (`NATS_DNS_WRITER_USER`
-    on `dns-standard`, `NATS_DNS_REPLICA_USER` on `dns-ssl`) -- it only
+    on `dns`, `NATS_DNS_REPLICA_USER` on `dns`) -- it only
     works if that identity's `publish` allow-list in `nats.conf` (and its
     generator in `deploy/prod/docker-compose.yml`) actually includes that
     subject.
@@ -993,17 +993,17 @@ things follow from that:
   - **NATS permission dependency (#906, follow-up to #867's flush-permission
     fix above).** Like the flush, this republish is a `lancache.dns.record`
     JetStream publish sent under whichever container's own identity runs
-    `rollback_handler` (`NATS_DNS_WRITER_USER` on `dns-standard`,
-    `NATS_DNS_REPLICA_USER` on `dns-ssl`) -- it only works if that
+    `rollback_handler` (`NATS_DNS_WRITER_USER` on `dns`,
+    `NATS_DNS_REPLICA_USER` on `dns`) -- it only works if that
     identity's `publish` allow-list actually includes that subject. The
     writer identity already held it (it needs it for the reconciler too);
     the replica identity did not, and was silently denied when publishing
     would have been attempted. Not reachable on the default
-    `DNS_ROLLBACK_URL` (`dns-standard:8083` everywhere), but the identity's
+    `DNS_ROLLBACK_URL` (`dns:8083` everywhere), but the identity's
     permissions must be correct independent of which URL an operator
     configures. Fixed by granting `NATS_DNS_REPLICA_USER` `publish` on
     `lancache.dns.record` too, accepting a real security-surface tradeoff:
-    a compromised dns-ssl NATS credential can now forge or replicate `lan.`
+    a compromised dns NATS credential can now forge or replicate `lan.`
     DNS records, not just signal a cache-flush. The alternative considered
     was making the rollback listener itself detect and reject a
     permission-denied record republish for `lan.` (fail loud instead of
@@ -1024,7 +1024,7 @@ things follow from that:
 
 **Container reachability during crash-loops:** Everything described above — the Admin UI listing zone snapshots, an
 operator picking one, `nats-subscriber`'s local admin listener applying the
-diffed `PATCH` inside the `dns-standard`/`dns-ssl` container — depends on an
+diffed `PATCH` inside the `dns` container — depends on an
 operator (or the Admin UI acting on their behalf) actually being able to
 reach that container's listener. This assumption is most at risk in exactly
 the scenario this mechanism exists for: if PowerDNS is crash-looping because
@@ -1071,8 +1071,8 @@ sequence the Admin UI itself uses) -- or, since #794, automated with
 fallback too.** The gap this section used to describe here -- "no equivalent
 manual-CLI fallback documented here yet" -- is closed:
 `./setup.sh reset-to-last-known-good-config dns [install-dir] <zone>
-[snapshot-id] [--yes]` (aliases: `pdns`; `dns-standard`/`dns-ssl` select an
-explicit target container, defaulting to `dns-standard` to match the Admin
+[snapshot-id] [--yes]` (aliases: `pdns`; `dns` select an
+explicit target container, defaulting to `dns` to match the Admin
 UI's own current single-primary scope) lists this install's known-good
 snapshots for the given zone and applies one via nats-subscriber's real
 rollback listener -- the same list/diff/PATCH/check-zone/flush/republish
@@ -1086,7 +1086,7 @@ the *snapshot id* to the newest within an already-chosen zone) risks
 mutating the wrong zone's data.
 
 This command reaches the rollback listener (port 8083) by running
-`docker compose exec` into the target `dns-standard`/`dns-ssl` container and
+`docker compose exec` into the target `dns` container and
 calling `curl` from inside it, rather than calling the listener directly from
 the host: unlike Kea's Control Agent (reachable via `network_mode: host`),
 the rollback listener's port is deliberately only `expose`d to the Compose

@@ -21,7 +21,7 @@ It can reduce internet traffic, save bandwidth and make repeated downloads much 
 
 LanCache NG is still actively changing.
 
-The current setup already provides the main stack, guided installation, Admin UI, DNS based cache routing, optional SSL caching, optional DHCP, optional LanCache-NG-NTP server, optional scheduled automatic updates, and secondary DNS support.
+The current setup already provides the main stack, guided installation, Admin UI, DNS based cache routing, optional HTTPS caching, optional DHCP, optional LanCache-NG-NTP server, optional scheduled automatic updates, and secondary DNS support.
 
 Some internal paths, root elements and service details may still change while the project grows.
 
@@ -31,8 +31,8 @@ LanCache NG combines several services into one Docker based stack:
 
 - DNS service
   - for redirecting known CDN domains to your local cache
-- Nginx cache proxy for standard HTTP caching
-  - optional SSL cache proxy for HTTPS capable clients
+- Nginx cache proxy for plain HTTP caching
+  - optional HTTPS cache proxy for HTTPS capable clients
 - Admin UI for cache status, domains, DNS records, DHCP leases and settings
   - optional Kea DHCP server
   - optional DHCP-Dnsmasq-based proxy helper
@@ -67,7 +67,7 @@ It can:
 - ask before installing missing dependencies such as Docker, curl or git
 - clone the repository to `/opt/lancache-ng`
 - ask for the cache server IP
-- optionally enable SSL caching with a second IP
+- optionally enable HTTPS caching with a second IP
 - ask for cache directory and cache size
 - optionally enable scheduled automatic updates (a host systemd timer)
 - create pre-update rollback backups
@@ -102,15 +102,15 @@ http://192.168.1.10:8080
 
 LanCache NG can run in two modes.
 
-### Standard mode
+### HTTP mode
 
-Standard mode is the safest and easiest mode.
+HTTP mode is the safest and easiest mode.
 
 It does not need a certificate on the clients.
 
 Use this mode if you want maximum compatibility.
 
-Standard mode:
+HTTP mode:
 
 - caches HTTP downloads
 - passes HTTPS traffic through normally
@@ -124,15 +124,15 @@ Example DNS target:
 192.168.1.10
 ```
 
-### SSL mode
+### HTTPS mode
 
-SSL mode is optional.
+HTTPS mode is optional.
 
-It can cache HTTP and HTTPS downloads, but it needs a locally generated Root CA certificate on every client that should use SSL caching.
+It can cache HTTP and HTTPS downloads, but it needs a locally generated Root CA certificate on every client that should use HTTPS caching.
 
 Use this mode only for devices you own and trust.
 
-SSL mode:
+HTTPS mode:
 
 - needs a second LAN IP
 - needs the generated CA certificate installed on each client
@@ -154,13 +154,13 @@ Example:
 
 | Mode | Client setup | DNS server |
 |---|---|---|
-| Standard mode | no certificate needed | `192.168.1.10` |
-| SSL mode | CA certificate installed | `192.168.1.11` |
+| HTTP mode | no certificate needed | `192.168.1.10` |
+| HTTPS mode | CA certificate installed | `192.168.1.11` |
 
 This lets you decide per client.
 
-A console can use standard mode.  
-A gaming PC with the certificate installed can use SSL mode.
+A console can use HTTP mode.  
+A gaming PC with the certificate installed can use HTTPS mode.
 
 ## What can be cached
 
@@ -189,7 +189,7 @@ Important:
 
 Not every platform behaves the same.  
 Some services change their CDN domains.  
-Some downloads use HTTPS in a way that only works with SSL mode.  
+Some downloads use HTTPS in a way that only works with HTTPS mode.  
 Some clients may bypass the cache completely.
 
 The first download is normally a cache miss.  
@@ -212,12 +212,12 @@ to cache.
 
 ## Console support
 
-Xbox, PlayStation and similar consoles should usually use standard mode.
+Xbox, PlayStation and similar consoles should usually use HTTP mode.
 
 They normally cannot install a custom Root CA certificate in a useful way.  
-Because of that, SSL caching is not recommended for consoles.
+Because of that, HTTPS caching is not recommended for consoles.
 
-Consoles should continue to work normally through standard mode.  
+Consoles should continue to work normally through HTTP mode.  
 HTTPS traffic that cannot be cached is passed through to the original CDN.
 
 
@@ -231,9 +231,9 @@ You need:
 - enough disk space for the cache
 - port `53` free for DNS
 - port `80` free for HTTP cache traffic
-- port `443` free if SSL mode is enabled
+- port `443` free if HTTPS mode is enabled
 - port `8080` for the Admin UI
-- optional second LAN IP for SSL mode
+- optional second LAN IP for HTTPS mode
 - optional port `67/udp` if using the built in DHCP server
 
 Recommended storage:
@@ -261,8 +261,8 @@ Example values:
 
 | Setting | Example |
 |---|---|
-| Standard mode IP | `192.168.1.10` |
-| SSL mode IP | `192.168.1.11` |
+| HTTP mode IP | `192.168.1.10` |
+| HTTPS mode IP | `192.168.1.11` |
 | install directory | `/opt/lancache-ng` |
 | cache directory (shared) | `/opt/lancache-ng/cache` |
 | cache size | `500` GiB |
@@ -278,7 +278,7 @@ docker compose ps
 Open the Admin UI:
 
 ```text
-http://<standard-ip>:8080
+http://<http-ip>:8080
 ```
 
 ## Updating
@@ -442,12 +442,12 @@ Example:
 | Client type | DNS server |
 |---|---|
 | normal client without certificate | `192.168.1.10` |
-| SSL client with certificate installed | `192.168.1.11` |
+| HTTPS client with certificate installed | `192.168.1.11` |
 
 On many routers you can set the DNS server handed out by DHCP.  
-Set it to the LanCache NG standard IP if you want all clients to use standard mode.
+Set it to the LanCache NG HTTP IP if you want all clients to use HTTP mode.
 
-For SSL mode, only point clients to the SSL IP after the CA certificate was installed.
+For HTTPS mode, only point clients to the HTTPS IP after the CA certificate was installed.
 
 ## Optional DHCP
 
@@ -531,11 +531,11 @@ If the setup asks whether the Admin UI should be password protected, using a pas
 
 Do not expose the Admin UI to the internet.
 
-## SSL mode certificate
+## HTTPS mode certificate
 
-SSL mode generates a local CA certificate.
+HTTPS mode generates a local CA certificate.
 
-Clients using SSL mode must trust this certificate.
+Clients using HTTPS mode must trust this certificate.
 
 After the first start, the certificate is available here:
 
@@ -563,7 +563,7 @@ If HTTPS caching does not work in Firefox, import the certificate into Firefox t
 ### Steam Deck note
 
 Steam Deck can require extra handling because the system is more locked down than a normal Linux desktop.  
-See the certificate documentation before using SSL mode on it.
+See the certificate documentation before using HTTPS mode on it.
 
 ## Testing DNS
 
@@ -608,7 +608,7 @@ services/dns/cdn-domains.txt
 ```
 
 One list drives everything: DNS based cache routing, and (as of v0.2.0)
-SSL mode certificate coverage too. The proxy derives each entry's
+HTTPS mode certificate coverage too. The proxy derives each entry's
 registrable root domain automatically at startup and generates a wildcard
 cert for it — there is no separate SSL domain file to keep in sync by hand.
 
@@ -617,7 +617,7 @@ services so they reload the mounted files:
 
 ```bash
 cd /opt/lancache-ng
-docker compose restart dns-standard dns-ssl proxy
+docker compose restart dns proxy
 ```
 
 Only add domains you understand.  
@@ -697,7 +697,7 @@ Set at least:
 IP_HTTP=192.168.1.10
 IP_HTTPS=192.168.1.11
 
-SSL_ENABLED=1
+HTTPS_ENABLED=1
 
 LANCACHE_STATE_DIR=/opt/lancache-ng
 
@@ -807,8 +807,8 @@ Create directories:
 ```bash
 mkdir -p /opt/lancache-ng/cache
 mkdir -p /opt/lancache-ng/kea
-mkdir -p /opt/lancache-ng/pdns-standard
-mkdir -p /opt/lancache-ng/pdns-ssl
+mkdir -p /opt/lancache-ng/pdns
+mkdir -p /opt/lancache-ng/pdns
 mkdir -p /opt/lancache-ng/pdns-filter-state
 mkdir -p /opt/lancache-ng/nats
 mkdir -p /opt/lancache-ng/nats-conf
@@ -854,7 +854,7 @@ Recommended:
 - enable nesting
 - keep the container inside your LAN
 - give the container a static IP
-- use a second IP if SSL mode is enabled
+- use a second IP if HTTPS mode is enabled
 
 Example LXC config on the Proxmox host:
 
@@ -870,8 +870,8 @@ echo 'net.ipv4.ip_unprivileged_port_start=53' >> /etc/sysctl.conf
 sysctl -p
 ```
 
-If SSL mode is enabled, the container requires a second usable LAN IPs.
-- The reason is, that you then be able to cache also SSL Downloads from the configured domain list.
+If HTTPS mode is enabled, the container requires a second usable LAN IPs.
+- The reason is, that you then be able to cache also HTTPS downloads from the configured domain list.
   - But you will need to install the CA-Certificate to let this happen.
 
 ## Ports
@@ -880,7 +880,7 @@ If SSL mode is enabled, the container requires a second usable LAN IPs.
 |---|---|---|
 | `53` | TCP and UDP | DNS |
 | `80` | TCP | HTTP cache |
-| `443` | TCP | SSL mode cache |
+| `443` | TCP | HTTPS mode cache |
 | `8080` | TCP | Admin UI |
 | `67` | UDP | optional DHCP server |
 | `8000` | TCP | optional Kea control agent |
@@ -899,7 +899,7 @@ deploy/secondary/        Secondary DNS compose files
 docs/                    Documentation
 scripts/                 Helper scripts
 services/dns/            DNS service
-services/proxy/          Unified proxy for HTTP mode and SSL mode
+services/proxy/          Unified proxy for HTTP mode and HTTPS mode
 services/ui/             Admin UI
 services/watchdog/       Watchdog service
 services/dhcp/           Kea DHCP service
@@ -943,19 +943,19 @@ Check:
 - is the client using the correct DNS server
 - is the domain part of the cache domain list
 - is the download using HTTPS
-- if SSL mode is needed, is the client using the SSL DNS IP
-- if SSL mode is needed, is the CA certificate installed
+- if HTTPS mode is needed, is the client using the HTTPS DNS IP
+- if HTTPS mode is needed, is the CA certificate installed
 
-### SSL mode does not work
+### HTTPS mode does not work
 
 Check:
 
-- the client uses the SSL mode DNS IP
+- the client uses the HTTPS mode DNS IP
 - the second IP is really assigned to the server
 - the CA certificate is installed
 - Firefox has the certificate if Firefox is used
-- the domain exists in the SSL domain list
-- the SSL proxy container is running
+- the domain exists in the HTTPS domain list
+- the HTTPS proxy container is running
 
 ### Admin UI does not open
 
@@ -997,15 +997,15 @@ Recommended:
 - keep generated tokens private
 - keep the CA private
 - install the CA certificate only on clients you own and trust
-- do not use SSL mode for unknown or guest devices
+- do not use HTTPS mode for unknown or guest devices
 - review the setup script before running it on important systems
 
 A local Root CA can inspect traffic for configured domains.  
-That is required for SSL caching, but it also means the CA must be handled carefully.
+That is required for HTTPS caching, but it also means the CA must be handled carefully.
 
 ## When to use which mode
 
-Use standard mode when:
+Use HTTP mode when:
 
 - you want the easiest setup
 - you use consoles
@@ -1013,7 +1013,7 @@ Use standard mode when:
 - you only want safe basic caching
 - you are testing the project for the first time
 
-Use SSL mode when:
+Use HTTPS mode when:
 
 - you control the client device
 - you can install the CA certificate

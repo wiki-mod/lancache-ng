@@ -1467,8 +1467,8 @@ CASES
         cmd_reset_to_last_known_good_config pdns /x lan. s1 --yes
         cmd_reset_to_last_known_good_config dns /x lan.'
     _expect dispatch 0 "target=dns zone=lan. snap=s1 yes=1;target=dns zone=lan. snap= yes=0" || return 1
-    _setup_sh_run 'cmd_reset_to_last_known_good_config dns-standard /x lan.'
-    _expect old-name 1 "Unknown service 'dns-standard'" || return 1
+    _setup_sh_run 'cmd_reset_to_last_known_good_config dns-http /x lan.'
+    _expect old-name 1 "Unknown service 'dns-http'" || return 1
 }
 
 # What: success is rc 0; a timeout prints the last error
@@ -2416,7 +2416,7 @@ _legacy_env() {
 # From: Issue #1683 | PR #1858
 @test "migrate_env_for_update converges a legacy .env and is stable on rerun" {
     _registry || return 1
-    local t before std ssl
+    local t before http https
     _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
     _legacy_row() {
         t="${BATS_TEST_TMPDIR}/legacy-$1"
@@ -2433,13 +2433,13 @@ _legacy_env() {
     _setup_sh_run 'migrate_env_for_update "${CONV}"'
     _expect split-cache 1 "CACHE_DIR_STANDARD and CACHE_DIR_SSL point to different paths" || return 1
     _legacy_row base || return 1
-    std="$(get_env_var IP_STANDARD "${t}/.env")" ssl="$(get_env_var IP_SSL "${t}/.env")"
+    http="$(get_env_var IP_STANDARD "${t}/.env")" https="$(get_env_var IP_SSL "${t}/.env")"
     set_env_key NATS_DNS_REPLICA_USER "$(_val name)" "${t}/.env" && set_env_key NATS_DNS_REPLICA_PASSWORD "$(_val name)" "${t}/.env"
     _setup_sh_run 'migrate_env_for_update "${CONV}"'
     [ "${status}" -eq 0 ] && ! env_key_exists CACHE_DIR_STANDARD "${t}/.env" && ! env_key_exists CACHE_DIR_SSL "${t}/.env" \
         && [ "$(get_env_var CACHE_DIR "${t}/.env")" = "${t}/cache" ] && [ "$(get_env_var PROXY_SECURITY_MODE "${t}/.env")" = lazy ] \
-        && [[ "$(get_env_var LANCACHE_STATE_DIR "${t}/.env")" == /* ]] && [ -n "${std}" ] && [ "$(get_env_var IP_HTTP "${t}/.env")" = "${std}" ] \
-        && [ "$(get_env_var IP_HTTPS "${t}/.env")" = "${ssl}" ] && ! env_key_exists IP_STANDARD "${t}/.env" && ! env_key_exists IP_SSL "${t}/.env" \
+        && [[ "$(get_env_var LANCACHE_STATE_DIR "${t}/.env")" == /* ]] && [ -n "${http}" ] && [ "$(get_env_var IP_HTTP "${t}/.env")" = "${http}" ] \
+        && [ "$(get_env_var IP_HTTPS "${t}/.env")" = "${https}" ] && ! env_key_exists IP_STANDARD "${t}/.env" && ! env_key_exists IP_SSL "${t}/.env" \
         && ! env_key_exists NATS_DNS_REPLICA_USER "${t}/.env" && ! env_key_exists NATS_DNS_REPLICA_PASSWORD "${t}/.env" \
         || { echo "legacy: ${output}"; cat "${t}/.env"; return 1; }
     _legacy_row logging-off || return 1
@@ -2804,21 +2804,21 @@ ROWS
 @test "setup update pulls the checkout and continues on its setup.sh" {
     _registry || return 1
     _stand_ins || return 1
-    local root t="${BATS_TEST_TMPDIR}" main lo std ssl svc mark em line out c2 c3
+    local root t="${BATS_TEST_TMPDIR}" main lo http https svc mark em line out c2 c3
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}" || return 1
     require_helper_image || return 1
     main="$(_val name)" svc="$(_val name)" mark="$(_val name)" em="$(_val name)@$(_val host)"
     lo="127.$(_val int 1 254).$(_val int 1 254)"
-    std="${lo}.1" ssl="${lo}.2"
+    http="${lo}.1" https="${lo}.2"
     g() { git -c user.email="${em}" -c user.name="${main}" -c init.defaultBranch="${main}" "$@"; }
     g init -q --bare "${t}/origin.git" && _checkout_copy "${root}" "${t}/src" && g -C "${t}/src" init -q \
         && g -C "${t}/src" add -A && g -C "${t}/src" commit -q -m c1 \
         && g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}" && g clone -q "${t}/origin.git" "${t}/co" \
         && cp "${t}/co/deploy/prod/.env" "${t}/co/deploy/prod/.env.local" || { echo "origin setup failed"; return 1; }
     set_env_key LANCACHE_STATE_DIR "${t}/state" "${t}/co/deploy/prod/.env.local" \
-        && set_env_key IP_HTTP "${std}" "${t}/co/deploy/prod/.env.local" \
-        && set_env_key IP_HTTPS "${ssl}" "${t}/co/deploy/prod/.env.local" \
+        && set_env_key IP_HTTP "${http}" "${t}/co/deploy/prod/.env.local" \
+        && set_env_key IP_HTTPS "${https}" "${t}/co/deploy/prod/.env.local" \
         && set_env_key LANCACHE_IMAGE_TAG "$(_release_tag)" "${t}/co/deploy/prod/.env.local" || return 1
     out="$(g -C "${t}/co" status --porcelain)" && [ -z "${out}" ] || { echo "fixture checkout is dirty: ${out}"; return 1; }
     line="printf '%s\n' ${mark} >&2"
@@ -2830,7 +2830,7 @@ ROWS
         && cat "${t}/s.sh" > "${t}/src/setup.sh" && g -C "${t}/src" commit -q -am c2 \
         && g -C "${t}/src" push -q "${t}/origin.git" "HEAD:refs/heads/${main}" && c2="$(g -C "${t}/src" rev-parse HEAD)" \
         || { echo "revision 2 not published"; return 1; }
-    _listen80 "${std}" "${ssl}" || return 1
+    _listen80 "${http}" "${https}" || return 1
     FAULT="$(_val name)" CO="${t}/co"
     export FAULT CO
     _update() {
@@ -2884,7 +2884,7 @@ STUB
 # Why: the release validation plan derives prompts from it
 # From: Issue #1683 | PR #1858
 @test "setup list-prompts walks the real wizard without side effects" {
-    local root t="${BATS_TEST_TMPDIR}" tpl std other dev pfx lo ssl k base preset modes m dhcp ddir add v d p try
+    local root t="${BATS_TEST_TMPDIR}" tpl http other dev pfx lo https k base preset modes m dhcp ddir add v d p try
     local -a ans=()
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
@@ -2893,17 +2893,17 @@ STUB
     # From: Issue #1683 | PR #1858
     _checkout_copy "${root}" "${t}/repo" || { echo "checkout copy failed"; return 1; }
     tpl="${t}/repo/deploy/prod/.env"
-    std="10.$(_val int 0 127).$(_val int 0 255).$(_val int 1 254)" dev="$(_val name)" pfx="$(_val int 16 30)"
+    http="10.$(_val int 0 127).$(_val int 0 255).$(_val int 1 254)" dev="$(_val name)" pfx="$(_val int 16 30)"
     other="10.$(_val int 128 255).$(_val int 0 255).$(_val int 1 254)"
     lo="127.$(_val int 0 255).$(_val int 0 255).$(_val int 1 254)"
-    [ "${std}" != "$(get_env_var IP_HTTP "${tpl}")" ] || { echo "host address equals the template's"; return 1; }
+    [ "${http}" != "$(get_env_var IP_HTTP "${tpl}")" ] || { echo "host address equals the template's"; return 1; }
     export IPDS="${t}/ipds" SETUP="${t}/repo/setup.sh" ANS="${t}/answers" PRESET=""
     mkdir -p "${IPDS}"
     _ip_stub "${t}/ipbin"
     _host() {
         rm -f "${IPDS}/fail-addr"
         printf '%s\n' "${lo} 8 lo" "$@" > "${IPDS}/addrs"
-        printf '%s %s\n' "${std}" "${dev}" > "${IPDS}/src"
+        printf '%s %s\n' "${http}" "${dev}" > "${IPDS}/src"
     }
     _lp() {
         run timeout -k 5 120 env -u LANCACHE_IMAGE_CHANNEL DOCKER_HOST="${SETUP_SH_DOCKER_HOST}" \
@@ -2918,19 +2918,19 @@ STUB
         : > "${ANS}"
         for ((i = 0; i <= last; i++)); do printf '%s\n' "${ans[${i}]-}" >> "${ANS}"; done
     }
-    _host "${std} ${pfx} ${dev}"
+    _host "${http} ${pfx} ${dev}"
     _lp
     [ "${status}" -eq 0 ] || { echo "defaults: ${output}"; return 1; }
     base="$(_prompts)"
     # What: default is the detected IP; offer uses its link
     # Why: AG-SEC-007; no guessed address, device or mask
     # From: Issue #1683 | PR #1858
-    k="$(awk -F'\t' -v ip="${std}" '$1 == "PROMPT" { n++; if ($3 == ip) { print n; exit } }' <<< "${output}")"
-    ssl="$(_default $(( k + 1 )))"
-    [ -n "${k}" ] && [ -n "${ssl}" ] && [ "${ssl}" != "${std}" ] \
-        && [[ "${output}" == *"${std}/${pfx} dev ${dev}"* && "${output}" != *"${lo}/8"* ]] \
-        && [[ "${base}" == *"${ssl}/${pfx} dev ${dev}"* ]] || { echo "detection: ${output}"; return 1; }
-    add="$(grep -nF -- "${ssl}/${pfx} dev ${dev}" <<< "${base}" | cut -d: -f1)"
+    k="$(awk -F'\t' -v ip="${http}" '$1 == "PROMPT" { n++; if ($3 == ip) { print n; exit } }' <<< "${output}")"
+    https="$(_default $(( k + 1 )))"
+    [ -n "${k}" ] && [ -n "${https}" ] && [ "${https}" != "${http}" ] \
+        && [[ "${output}" == *"${http}/${pfx} dev ${dev}"* && "${output}" != *"${lo}/8"* ]] \
+        && [[ "${base}" == *"${https}/${pfx} dev ${dev}"* ]] || { echo "detection: ${output}"; return 1; }
+    add="$(grep -nF -- "${https}/${pfx} dev ${dev}" <<< "${base}" | cut -d: -f1)"
     # What: no address: no default, and a fail, not a loop
     # Why: AG-OP-008; the operator must enter the address
     # From: Issue #1683 | PR #1858
@@ -2938,17 +2938,17 @@ STUB
     _lp
     [ "${status}" -ne 0 ] && [ "${status}" -ne 124 ] && [ -z "$(_default "${k}")" ] \
         && [[ "${output}" == *"rejected its answer"* ]] || { echo "no detection: rc ${status}: ${output}"; return 1; }
-    printf '%s' "${std}" > "${ANS}"
+    printf '%s' "${http}" > "${ANS}"
     _lp "${ANS}"
     [ "${status}" -eq 0 ] || { echo "unterminated last answer lost: ${output}"; return 1; }
     # What: assigned IP_HTTPS: no offer; foreign IP: none
     # Why: the add offer exists only for a known device
     # From: Issue #1683 | PR #1858
-    _host "${std} ${pfx} ${dev}" "${ssl} ${pfx} ${dev}"
+    _host "${http} ${pfx} ${dev}" "${https} ${pfx} ${dev}"
     _lp
-    [ "${status}" -eq 0 ] && [[ "$(_prompts)" != *"${ssl}/"* && "${output}" == *"${ssl} already assigned"* ]] \
+    [ "${status}" -eq 0 ] && [[ "$(_prompts)" != *"${https}/"* && "${output}" == *"${https} already assigned"* ]] \
         || { echo "assigned: ${output}"; return 1; }
-    _host "${std} ${pfx} ${dev}"
+    _host "${http} ${pfx} ${dev}"
     ans=(); ans[$(( k - 1 ))]="${other}"; _write_ans
     _lp "${ANS}"
     [ "${status}" -eq 0 ] && [[ "$(_prompts)" != *" dev "* && "${output}" == *"interface that carries ${other}"* ]] \
@@ -2990,7 +2990,7 @@ STUB
             [ "${status}" -ne 0 ] || break
             p="$(_prompts | wc -l)"
             [ "$(_prompts | awk -v n=$((p - 1)) 'NR == n')" != "$(_prompts | awk -v n="${p}" 'NR == n')" ] || p=$((p - 1))
-            if [ "$(_default "${p}")" = N ]; then ans[p-1]=y; else ans[p-1]="${std}"; fi
+            if [ "$(_default "${p}")" = N ]; then ans[p-1]=y; else ans[p-1]="${http}"; fi
         done
         d="$(awk -F'\t' 'NR == FNR { b[$0] = 1; next } $1 == "PROMPT" && !($2 in b) { print $3 }' "${t}/base-prompts" - <<< "${output}")"
         p="$(awk -F'\t' 'NR == FNR { b[$0] = 1; next } $1 == "PROMPT" && !($2 in b)' "${t}/base-prompts" - <<< "${output}" | wc -l)"
@@ -3032,7 +3032,7 @@ STUB
 @test "setup fresh install writes a config the prod compose takes" {
     _registry || return 1
     _stand_ins || return 1
-    local root t="${BATS_TEST_TMPDIR}" repo env tpl cfg port std other dev pfx keys k v ddir np i calls after fault
+    local root t="${BATS_TEST_TMPDIR}" repo env tpl cfg port http other dev pfx keys k v ddir np i calls after fault
     [ ! -d /run/systemd/system ] || { echo "systemd host: a real install would write /etc units"; return 1; }
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}" || return 1
@@ -3056,14 +3056,14 @@ STUB
             return 1
         fi
     done
-    std="10.$(_val int 0 127).$(_val int 0 255).$(_val int 1 254)" dev="$(_val name)" pfx="$(_val int 16 30)"
+    http="10.$(_val int 0 127).$(_val int 0 255).$(_val int 1 254)" dev="$(_val name)" pfx="$(_val int 16 30)"
     other="10.$(_val int 128 255).$(_val int 0 255).$(_val int 1 254)"
-    [ "${std}" != "$(get_env_var IP_HTTP "${tpl}")" ] || { echo "host address equals the template's"; return 1; }
+    [ "${http}" != "$(get_env_var IP_HTTP "${tpl}")" ] || { echo "host address equals the template's"; return 1; }
     ID_REAL="$(type -P id)" || return 1
     export IPDS="${t}/ipds" REPO="${repo}" ENVL="${env}" ID_REAL
     mkdir -p "${IPDS}" && _ip_stub "${BIN}" \
         && printf '%s\n' "127.$(_val int 0 255).$(_val int 0 255).$(_val int 1 254) 8 lo" "${other} ${pfx} ${dev}" \
-        "${std} ${pfx} ${dev}" > "${IPDS}/addrs" && printf '%s %s\n' "${std}" "${dev}" > "${IPDS}/src" || return 1
+        "${http} ${pfx} ${dev}" > "${IPDS}/addrs" && printf '%s %s\n' "${http}" "${dev}" > "${IPDS}/src" || return 1
     _tool_stub "${BIN}" id <<<'[ "$*" != -u ] || { echo 0; exit 0; }; exec "${ID_REAL:?}" "$@"' || return 1
     LANCACHE_IMAGE_TAG="$(_release_tag)" || return 1
     export LANCACHE_IMAGE_CHANNEL=pinned LANCACHE_IMAGE_TAG
@@ -3085,7 +3085,7 @@ STUB
         || { echo "no command: rc ${status} docker calls ${calls}->${after}: ${output}"; return 1; }
     run timeout -k 5 300 script -qec "bash ${repo}/setup.sh install" "${t}/typescript" < "${t}/answers"
     [ "${status}" -eq 0 ] && [[ "${output}" == *"Stack started"* ]] || { echo "install: rc ${status}: ${output}"; return 1; }
-    [[ "${output}" == *"http://${std}:${port}"* ]] || { echo "ui url: ${output}"; return 1; }
+    [[ "${output}" == *"http://${http}:${port}"* ]] || { echo "ui url: ${output}"; return 1; }
     [ "$(awk -v e="compose --env-file ${env} " 'index($0, e) == 1 && ($NF == "pull" || / up -d$/) { n++ } END { print n + 0 }' \
         "${DS}/docker.log")" -eq 2 ] || { echo "pull/up: $(cat "${DS}/docker.log")"; return 1; }
     _setup_sh_run 'stack_compose "${REPO}/deploy/prod" "${ENVL}" config --quiet'
@@ -3093,7 +3093,7 @@ STUB
     for k in ${keys}; do
         [ "$(get_env_var "${k}" "${env}")" = "$(get_env_var "${k}" "${tpl}")" ] || { echo "${k}: $(cat "${env}")"; return 1; }
     done
-    [ "$(get_env_var IP_HTTP "${env}")" = "${std}" ] && [ "$(get_env_var LOGGING_PROXY_ENABLED "${env}")$(get_env_var LOGGING_DNS_ENABLED "${env}")$(get_env_var LOGGING_DHCP_ENABLED "${env}")$(get_env_var LOGGING_UI_ENABLED "${env}")" = 1111 ] \
+    [ "$(get_env_var IP_HTTP "${env}")" = "${http}" ] && [ "$(get_env_var LOGGING_PROXY_ENABLED "${env}")$(get_env_var LOGGING_DNS_ENABLED "${env}")$(get_env_var LOGGING_DHCP_ENABLED "${env}")$(get_env_var LOGGING_UI_ENABLED "${env}")" = 1111 ] \
         && ! env_key_exists COMPOSE_PROFILES "${env}" || { echo "values: $(cat "${env}")"; return 1; }
     _checkout_copy "${root}" "${t}/repo2" && rm -f "${DS}/running" && : > "${DS}/fail-config-after-up" \
         || { echo "second copy failed"; return 1; }
@@ -3900,17 +3900,17 @@ _pm_run() {
     # What: cmd_secondary against a stub primary per answer
     # Why: token never in argv; failures stop before writes
     # From: Issue #1683 | PR #1858
-    local root t="${BATS_TEST_TMPDIR}" rs std lip ui name xfr fields reg pre tag token body f v case want dir
+    local root t="${BATS_TEST_TMPDIR}" rs http lip ui name xfr fields reg pre tag token body f v case want dir
     local env gen canon required first rest
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
     rs="${root}/services/ui/src/main.rs"
-    std="$(get_env_var IP_HTTP "${root}/deploy/prod/.env")"
+    http="$(get_env_var IP_HTTP "${root}/deploy/prod/.env")"
     lip="$(get_env_var IP_HTTPS "${root}/deploy/prod/.env")"
     ui="$(_prod_compose config --format json | jq -r '.services.ui.ports[0].published')"
     name="$(_prod_compose config --format json | jq -r .name)"
     xfr=""
-    ! grep -qF 'dns_xfr_primary: format!("{}:{PDNS_AUTH_PORT}", state.config.standard_ip)' "${rs}" \
+    ! grep -qF 'dns_xfr_primary: format!("{}:{PDNS_AUTH_PORT}", state.config.http_ip)' "${rs}" \
         || xfr="$(sed -n 's/^pub const PDNS_AUTH_PORT: u16 = \([0-9][0-9]*\);$/:\1/p' "${root}/services/common/config.rs")"
     fields="$(awk '/^struct RegisterResponse/,/^}/' "${rs}" | sed -n 's/^ *\([a-z_]*\): String,$/\1/p')"
     reg="$(resolve_lancache_image_registry "${root}/deploy/prod/.env")"
@@ -3919,16 +3919,16 @@ _pm_run() {
     token="$(generate_secret_value SECONDARY_REGISTRATION_TOKEN hex32)"
     token="${token}\"${token}\\"
     required="$(declare -f cmd_secondary | sed -n 's/.*missing_fields+=("\([a-z_]*\)").*/\1/p')"
-    [ -n "${std}" ] && [ -n "${lip}" ] && [ -n "${ui}" ] && [ -n "${xfr}" ] && [ -n "${fields}" ] \
-        && [ -n "${required}" ] || { echo "inputs: ${std} ${lip} ${ui} ${xfr}"; return 1; }
+    [ -n "${http}" ] && [ -n "${lip}" ] && [ -n "${ui}" ] && [ -n "${xfr}" ] && [ -n "${fields}" ] \
+        && [ -n "${required}" ] || { echo "inputs: ${http} ${lip} ${ui} ${xfr}"; return 1; }
     # What: the primary's answer, one value per struct field
     # Why: values are unique so each one is traced to .env
     # From: Issue #1683 | PR #1858
     body='{}'
     while IFS= read -r f; do
         case "${f}" in
-            proxy_ip) v="${std}" ;;
-            dns_xfr_primary) v="${std}${xfr}" ;;
+            proxy_ip) v="${http}" ;;
+            dns_xfr_primary) v="${http}${xfr}" ;;
             image_registry) v="${reg}" ;;
             image_prefix) v="${pre}" ;;
             image_channel) v="" ;;
@@ -3939,7 +3939,7 @@ _pm_run() {
     done <<< "${fields}"
     first="$(awk 'NR == 1' <<< "${required}")"
     rest="$(awk 'NR > 1' <<< "${required}" | paste -sd' ')"
-    export PRIMARY="http://${std}:${ui}" TOKEN="${token}" NAME="${name}" STD="${std}" LIP="${lip}"
+    export PRIMARY="http://${http}:${ui}" TOKEN="${token}" NAME="${name}" STD="${http}" LIP="${lip}"
     export JQ_REAL
     JQ_REAL="$(type -P jq)"
     _tool_stub "${BIN}" ss <<<'[ ! -e "${DS}/listeners" ] || cat "${DS}/listeners"'
@@ -4020,7 +4020,7 @@ CASES
         awk -v v="${v}" 'substr($0, index($0, "=") + 1) == v { f = 1 } END { exit !f }' "${env}" \
             || { echo "${f} not in .env"; return 1; }
     done <<< "${fields}"
-    [ "$(get_env_var PROXY_IP "${env}")" = "${std}" ] && [ "$(get_env_var LISTEN_IP "${env}")" = "${lip}" ] \
+    [ "$(get_env_var PROXY_IP "${env}")" = "${http}" ] && [ "$(get_env_var LISTEN_IP "${env}")" = "${lip}" ] \
         || { echo "ips: $(cat "${env}")"; return 1; }
     want="compose --env-file ${env} $(compose_file_args_for_install_dir "${dir}" | paste -sd' ') up -d"
     grep -qxF -- "${want}" "${DS}/docker.log" || { echo "start: $(cat "${DS}/docker.log")"; return 1; }

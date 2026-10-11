@@ -127,7 +127,7 @@ services:
     restart: always
     logging: *logging
 
-  # What: nginx cache; standard and SSL mode in one.
+  # What: nginx cache; the http and https side in one.
   # Why: :8443 passes SNI through, :443 intercepts TLS.
   proxy:
     container_name: LanCache-NG-proxy
@@ -140,7 +140,7 @@ services:
       - PROXY_CONFIG_SNAPSHOT_DIR=/var/lib/lancache-proxy/config-snapshots
       - IP_HTTP=${IP_HTTP}
       - IP_HTTPS=${IP_HTTPS}
-      - SSL_ENABLED=${SSL_ENABLED:-1}
+      - HTTPS_ENABLED=${HTTPS_ENABLED:-1}
       # What: per-install values from the operator .env
       # Why: .env is the one owner of operator values.
       # From: Issue #1683
@@ -168,7 +168,7 @@ services:
       - "${IP_HTTPS}:80:80"
       - "${IP_HTTPS}:443:443"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null && { [ \"$${SSL_ENABLED:-0}\" != \"1\" ] || curl -ksf https://127.0.0.1:8445/healthz >/dev/null; }"]
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null && { [ \"$${HTTPS_ENABLED:-0}\" != \"1\" ] || curl -ksf https://127.0.0.1:8445/healthz >/dev/null; }"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -223,7 +223,7 @@ services:
     volumes:
       - shared-secrets:/var/lib/lancache-secrets
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
-      - ${PDNS_STANDARD_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-standard}:/var/lib/powerdns
+      - ${PDNS_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns}:/var/lib/powerdns
       - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
       - ${NATS_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats}:/var/lib/nats
       - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf}:/etc/nats
@@ -349,20 +349,20 @@ services:
       - KEA_CONFIG_SNAPSHOT_DIR=${KEA_CONFIG_SNAPSHOT_DIR:?KEA_CONFIG_SNAPSHOT_DIR is required}
       - DHCP_PROBE_REQUEST_FILE=/data/dhcp-probe-request
       - DHCP_PROBE_RESULT_FILE=/var/lib/kea/dhcp-probe-result.json
-      - SSL_ENABLED=${SSL_ENABLED:-1}
+      - HTTPS_ENABLED=${HTTPS_ENABLED:-1}
       - LOGGING_PROXY_ENABLED=${LOGGING_PROXY_ENABLED:?LOGGING_PROXY_ENABLED is required}
       - LOGGING_DNS_ENABLED=${LOGGING_DNS_ENABLED:?LOGGING_DNS_ENABLED is required}
       - LOGGING_DHCP_ENABLED=${LOGGING_DHCP_ENABLED:?LOGGING_DHCP_ENABLED is required}
       - LOGGING_UI_ENABLED=${LOGGING_UI_ENABLED:?LOGGING_UI_ENABLED is required}
-      - PROXY_STANDARD_URL=http://proxy
-      - PROXY_SSL_URL=http://proxy
+      - PROXY_HTTP_URL=http://proxy
+      - PROXY_HTTPS_URL=http://proxy
       - PROXY_LOG_DIR=/var/log/lancache-syslog-ng/LanCache-NG-proxy
       - CACHE_DIR=/var/cache/proxy
       - NETDATA_URL=http://services:19999
       - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
-      - CACHE_MAX_GB=${CACHE_MAX_GB:-${STANDARD_CACHE_MAX_GB:-${SSL_CACHE_MAX_GB:-}}}
-      - STANDARD_IP=${IP_HTTP}
-      - SSL_IP=${IP_HTTPS}
+      - CACHE_MAX_GB=${CACHE_MAX_GB:-}
+      - IP_HTTP=${IP_HTTP}
+      - IP_HTTPS=${IP_HTTPS}
       - DNS_STATE_DIR=/var/lib/powerdns-state
       - LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY:-ghcr.io}
       - LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}
