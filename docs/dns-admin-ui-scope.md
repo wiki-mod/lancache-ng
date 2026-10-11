@@ -2,7 +2,7 @@
 
 This is the written decision issue #645 asked for: a single place that says
 what the Admin UI is intended to let an operator configure/manage for DNS
-(PowerDNS authoritative + recursor, both standard and HTTPS mode), so that code
+(PowerDNS authoritative + recursor, both http and https mode), so that code
 which looks unused or half-finished is not misread as dead/removable by a
 future contributor or agent. DNS/PowerDNS feature work has happened
 incrementally (domain list management, LAN records, DDNS, secondary
@@ -129,7 +129,7 @@ rejected with NOTAUTH — see #768 for the live-verified failure, root cause,
 and fix (one `ddns-domains` entry per real `PRIVATE_REVERSE_ZONES` subzone,
 instead of the one non-existent catch-all). Reverse/PTR DDNS updates now
 succeed against the correct per-octet zone. `dns` is the only DDNS
-write target; `dns` and remote DNS secondaries receive the same forward
+write target; remote DNS secondaries receive the same forward
 and reverse zone state through native PowerDNS AXFR/NOTIFY.
 
 **Intentionally out of scope (not planned):**
@@ -190,8 +190,8 @@ is the only writer for LAN/reverse zone data in the shipped production and
 validation topologies. `services/dns/entrypoint.sh` turns
 those zones into PowerDNS primary zones, enables SOA serial edits for
 DDNS/API writes, activates the shared TSIG key for transfer authorization,
-and configures `ALSO-NOTIFY` for configured local targets. `dns` and
-registered remote DNS nodes run the same image with `DNS_REPLICATION_ROLE=
+and configures `ALSO-NOTIFY` for configured local targets. Registered
+remote DNS nodes run the same image with `DNS_REPLICATION_ROLE=
 secondary`, create the fixed zones as PowerDNS secondaries of
 `DNS_XFR_PRIMARY`, and authenticate transfers with the same shared TSIG key.
 
@@ -299,14 +299,14 @@ UI-visible PowerDNS zone rollback" should eventually look like.
 | Area | State | Where |
 |---|---|---|
 | Static `pdns.conf`/`recursor.conf` settings (API key, TSIG, DDNS allow-from, query logging, root mirror) | Config-file-only, implemented | `services/dns/entrypoint.sh`, `docs/architecture-ng.md` |
-| CDN domain list (RPZ + SSL cert scope) | Admin UI, implemented; **DNS side requires a `dns` restart to take effect** (RPZ is regenerated only at container startup, no live reload) | `services/ui/src/main.rs`, `/domains` |
+| CDN domain list (RPZ + HTTPS cert scope) | Admin UI, implemented; **DNS side requires a `dns` restart to take effect** (RPZ is regenerated only at container startup, no live reload) | `services/ui/src/main.rs`, `/domains` |
 | `lan.` zone records (A/AAAA/CNAME/MX/TXT) | Admin UI, implemented | `services/ui/src/main.rs`, `/domains` |
 | `local.lan.` / reverse zone records | No Admin UI route | Planned, v0.3.0 candidate |
 | PTR checkbox on LAN A records | Not built (doc claimed it; code doesn't have it) | Planned, v0.3.0 candidate |
 | Global AAAA filter | Admin UI, implemented | `services/ui/src/main.rs`, `filter-aaaa.lua` |
 | Arbitrary zone create/delete | Not planned | Deliberately out of scope |
 | RPZ direct record editor | Not planned | Deliberately out of scope (edit via CDN domain list instead) |
-| PowerDNS-native secondary/AXFR | Implemented for local `dns` and registered remote DNS secondaries; `dns` remains the only zone writer | `services/dns/entrypoint.sh`, `deploy/*/docker-compose.yml`, `setup.sh secondary` |
+| PowerDNS-native secondary/AXFR | Implemented for registered remote DNS secondaries; `dns` remains the only zone writer | `services/dns/entrypoint.sh`, `deploy/*/docker-compose.yml`, `setup.sh secondary` |
 | NATS-based secondary registration/rotate/remove | Admin UI, implemented; registration now also returns AXFR endpoint and shared TSIG material for native zone transfer | `services/ui/src/main.rs`, `/secondaries` |
 | NATS secondary replication-health indicator | Not built | Planned, v0.3.0 candidate |
 | Static config snapshot/rollback status indicator | Not built (log-only today) | Planned, v0.3.0 candidate, not DNS-specific |

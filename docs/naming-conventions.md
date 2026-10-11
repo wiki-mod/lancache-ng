@@ -24,7 +24,7 @@ socket proxy in #377. The socket proxy's HAProxy allowlist (the
 `docker-socket-proxy-allowlist` config in `deploy/prod/docker-compose.yml`)
 only allows Docker API calls against a
 fixed list of container names. Every other layer that talks about "the proxy
-container" or "the DNS-standard container" — the Admin UI's Docker API
+container" or "the DNS container" — the Admin UI's Docker API
 client, the watchdog's health-check loop, each Compose file's
 `container_name:` — has to agree on the *exact same strings* for that
 allowlist to mean anything. Before this document, that agreement was
@@ -110,15 +110,15 @@ logical central-logging service left to name. These names are also the DNS alias
 service-to-service HTTP calls inside a Compose network (see "Two separate
 name namespaces" above). They must stay identical everywhere the same
 logical service is named — a service must not be called `dns` in
-one file and `dns` or `standard-dns` in another.
+one file and `dns_server` or `main-dns` in another.
 
 ### Container names (`container_name:`)
 
 Rule: every service defined in `deploy/prod` gets an explicit
 `container_name: lancache-<service>`
 (the Compose service name, prefixed with `lancache-`; `dns`
-becomes `lancache-dns`, not `lancache-dnsstandard` or
-`lancache_dns_standard`). Do not leave `container_name:` unset and rely on
+becomes `lancache-dns`, not `lancache-dnsserver` or
+`lancache_dns`). Do not leave `container_name:` unset and rely on
 Compose's auto-generated `<project>-<service>-<n>` name.
 
 Two reasons this must be explicit for **every** service, not only the ones
@@ -129,7 +129,7 @@ the Docker socket proxy currently allowlists:
    `scripts/untracked/docker-socket-proxy.sh` must have a name that exactly matches
    the allowlist regex, or the request is denied (fails closed, but that's
    still a bug). Today that set is `lancache-proxy`,
-   `lancache-dns`, `lancache-dns`, `lancache-dhcp`,
+   `lancache-dns`, `lancache-dhcp`,
    `lancache-dhcp-proxy`, `lancache-dhcp-probe`, `lancache-nats` — all of
    which already had explicit `container_name:` values before this change.
 2. **Operator-visible consistency.** At the time this rule was written,
@@ -195,10 +195,10 @@ explicitly scoped change adds the volume migration logic.
 
 Rule: everything under the shared `LANCACHE_STATE_DIR` (default
 `/opt/lancache-ng`) uses lowercase, hyphen-separated subdirectory names that
-match the service that owns them: `cache`, `pdns`, `pdns`,
+match the service that owns them: `cache`, `pdns`,
 `pdns-filter-state`, `nats`, `nats-conf`, `kea`, `ntp`. See `docs/backup-restore.md`
 and `docs/how-to-change-ip.md` for the full `LANCACHE_STATE_DIR` contract
-and its override variables (`PDNS_DIR`, `PDNS_DIR`,
+and its override variables (`PDNS_DIR`,
 `PDNS_FILTER_STATE_DIR`, `NATS_DATA_DIR`, `NATS_CONF_DIR`, `KEA_DATA_DIR`,
 `NTP_DATA_DIR`).
 This document does not duplicate that contract; it only asserts that new
@@ -292,7 +292,7 @@ already causes, not a new class of behavior. No named volume is renamed,
 removed, or recreated; a container recreation does not touch volume
 contents. Expect a few seconds of downtime for these four/six containers
 during the update, same as any other rolling update. `proxy`, `dns`,
-`dns`, `dhcp`, `dhcp-proxy`, `dhcp-probe`, and `nats` already had
+`dhcp`, `dhcp-proxy`, `dhcp-probe`, and `nats` already had
 explicit `container_name:` values and are unaffected by this change.
 
 The deleted `x-docker-socket-proxy-command` YAML anchors were dead

@@ -97,7 +97,7 @@ peers on top of maintaining the outbound site-to-site tunnel — both paths
 active at once, operator's choice, no conflict between them since they're
 just different peers on the same interface.
 
-## Interaction with the dual-IP/dual-mode (standard/SSL) DNS architecture
+## Interaction with the dual-IP/dual-mode (http/https) DNS architecture
 
 Largely orthogonal, by design, but worth stating explicitly since a WireGuard
 tunnel changes what a client can reach at L3:
@@ -109,7 +109,7 @@ tunnel changes what a client can reach at L3:
 - A remote client tunneled in via WireGuard should be able to point its
   DNS at either `IP_HTTP` or `IP_HTTPS` (whichever mode it wants) and get
   the same cached-download experience a LAN-local client gets — nothing in
-  the standard/SSL split assumes L2-LAN-only clients, it assumes clients
+  the http/https split assumes L2-LAN-only clients, it assumes clients
   that can reach the proxy's IP at all, which a routed WireGuard tunnel
   satisfies.
 - **One real interaction worth flagging**: this project's existing
@@ -124,7 +124,7 @@ tunnel changes what a client can reach at L3:
   caching benefit, same as any device not pointed at this project's DNS
   today. This is existing behavior the WireGuard feature doesn't change,
   but it should be called out in operator-facing docs once this ships:
-  "point your WireGuard client's DNS at the LAN's standard/HTTPS DNS IP over
+  "point your WireGuard client's DNS at the LAN's http/https DNS IP over
   the tunnel," not assumed automatic.
 - No changes to the DNS services themselves are anticipated by this
   design. `dns` and their IP bindings are unaffected;

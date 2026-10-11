@@ -108,7 +108,7 @@ lancachenet only caches HTTP.
 **Implication for this project**: prefill traffic lands in cache via
 **HTTP mode** (SNI-passthrough proxy path) — no CA cert trust needed on
 whatever host runs the prefill tool, exactly like a real Steam client
-today. HTTPS mode would also work (it's a superset for HTTP) but standard
+today. HTTPS mode would also work (it's a superset for HTTP) but http
 mode is sufficient and simpler to require.
 
 **Wiring check, verified against this repo's actual code as of this
@@ -283,7 +283,7 @@ authors could resolve unilaterally.** Two honest framings were possible:
    needed for this in-process design). Use bounded concurrent fetches
    (multiple chunks in flight), not a single serial stream, to have any
    realistic chance of approaching multi-Gbit/s line rates. Verify
-   end-to-end against a running dev `docker compose` stack in **standard
+   end-to-end against a running dev `docker compose` stack in **http
    mode**: first request MISS through lancache, second identical request
    HIT — confirming the proxy (not the prefill tool) holds the cached
    bytes.

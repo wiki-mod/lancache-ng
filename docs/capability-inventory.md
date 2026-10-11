@@ -30,7 +30,7 @@ is authoritative and this document should be corrected.
 | Admin UI           | Web control plane and configuration management                    | Rust                      | Production               |
 | Watchdog           | Service health monitoring and recovery                            | Rust                      | Production               |
 | Netdata            | Runtime metrics and system observability                          | Netdata                   | Production               |
-| Central Logging    | Log collection, normalization and retention                       | syslog-ng, Fluent Bit     | Production               |
+| Central Logging    | Log collection, normalization and retention                       | syslog-ng                | Production               |
 | NTP                | LAN time service and optional host clock discipline               | chrony                    | Optional production mode |
 | CacheHamster       | Future Steam cache-prefill engine                                 | Rust                      | Scaffold only            |
 | setup.sh           | Installation and lifecycle orchestration                          | Bash                      | Production               |
@@ -50,7 +50,7 @@ than being implemented as separate proxy images.
 The proxy provides:
 
 * HTTP content caching.
-* Standard-mode HTTPS forwarding through nginx stream and SNI inspection.
+* HTTP-mode HTTPS forwarding through nginx stream and SNI inspection.
 * HTTPS-mode TLS interception using the LanCache-NG local certificate authority.
 * Automatic certificate generation for configured cache domains.
 * Cache-domain matching based on `services/dns/cdn-domains.txt`.
@@ -125,14 +125,15 @@ The service combines:
 
 ### DNS instances
 
-The normal deployment contains two logical DNS instances:
+The normal deployment contains one DNS container:
 
 * `dns`
-* `dns`
 
-`dns` is the writable authoritative primary.
+`dns` is the writable authoritative primary. It serves the http and the https
+side from the same container.
 
-`dns` operates as a PowerDNS secondary for replicated authoritative data.
+Remote secondary nodes (`setup.sh secondary`) operate as PowerDNS secondaries
+for the replicated authoritative data.
 
 This replaces the older model where both instances independently received and
 applied the same record mutations.
@@ -146,7 +147,7 @@ The implementation includes:
 
 * TSIG-protected AXFR and NOTIFY.
 * `dns` as the single writable primary.
-* `dns` as a secondary.
+* Remote `dns` nodes as secondaries.
 * Kea DDNS writes directed to the primary.
 * Secondary-side NATS record writes disabled to maintain the single-writer
   model.
@@ -579,11 +580,9 @@ treated as a general public API.
 
 ### Purpose
 
-`services/syslog` provides centralized collection and processing of logs from
-LanCache-NG services.
-
-The service combines syslog-ng and Fluent Bit related functionality with
-health and data-loss detection.
+syslog-ng inside the `services` container provides centralized collection of
+logs from LanCache-NG services. The watchdog renders its configuration and
+supervises it.
 
 ### Current capabilities
 
@@ -594,9 +593,8 @@ The logging path provides:
 * Proxy request log processing.
 * Inputs used by the Admin UI log viewer.
 * Input for Netdata's nginx `web_log` collector.
-* Health checking.
-* Detection of logging-path data loss.
-* Log retention and compression support.
+* Logging switches per service (proxy, dns, dhcp, ui) in the Admin UI.
+* Log retention (age and size budget).
 
 Service logs remain useful through their normal container output as well. The
 central logging path is an additional consolidated operator view rather than a
@@ -791,7 +789,7 @@ Client
   -> Kea DDNS
   -> dns
   -> PowerDNS native replication
-  -> dns / secondary DNS nodes
+  -> remote secondary DNS nodes
 ```
 
 The writable DNS primary is the single authority for replicated zone changes.

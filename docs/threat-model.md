@@ -85,16 +85,16 @@ protects *from the operator*. It is called out again in "Out of scope".
 │  ┌──────────────── lancache-ng appliance (single Docker host) ──────┐ │
 │  │  DATA PLANE                          CONTROL PLANE                │ │
 │  │   - proxy (nginx): HTTP cache,        - Admin UI (auth-gated)     │ │
-│  │     HTTPS-mode MITM cache, standard-     - PowerDNS HTTP API        │ │
+│  │     HTTPS-mode MITM cache, HTTP-       - PowerDNS HTTP API        │ │
 │  │     mode SNI passthrough              - Kea Control Agent API     │ │
 │  │   - DNS (PowerDNS auth + recursor)      (port 8000, host-net)     │ │
 │  │   - DHCP (Kea) OR dnsmasq-proxy       - NATS event bus (4222)     │ │
 │  │                                       - docker-socket-proxy       │ │
-│  │  Local CA key (HTTPS mode) lives on       (HAProxy allowlist) ──────┼─┼─► Docker
+│  │  Local CA key (HTTPS mode) lives on     (HAProxy allowlist) ──────┼─┼─► Docker
 │  │  host: <install>/certs/ca.key                                    │ │   daemon
 │  └──────────────────────────────────────────────────────────────────┘ │
 │                                                                        │
-│  LAN clients: PCs, Steam Deck, phones (install CA for HTTPS mode)        │
+│  LAN clients: PCs, Steam Deck, phones (install CA for HTTPS mode)      │
 │  Consoles (PS5/Xbox/Switch): cannot install CA → excluded from spoof   │
 │    list → use appliance purely as an unrestricted DNS resolver         │
 └────────────────────────────────────────────────────────────────────────┘
@@ -330,42 +330,22 @@ record changes, or subscribes to read cache/DNS metadata.
 - Access is **credentialled and role-scoped**, not a single shared account.
   Four static identities exist with least-privilege permissions:
   - **UI writer** — may only `publish` `lancache.dns.record` / `lancache.dns.flush`.
-  - **DNS writer** (standard node / reconciler) — publish DNS records,
-    `lancache.dns.flush` (the same post-rollback cache-flush signal as the
-    DNS replica, above), and the specific JetStream stream/consumer subjects
-    it needs; subscribe to `lancache.dns.>`.
-  - **DNS replica** (the primary's own co-located dns container only —
-    there is always exactly one) — consume-only JetStream permissions, plus
-    three narrow exceptions on top: `publish` on `lancache.dns.flush`, so its
-    own `nats-subscriber` can signal a post-rollback recursor cache-flush;
-    (issue #906, a deliberate widening beyond the original least-
-    privilege scope) `publish` on `lancache.dns.record`, so the same
-    `main.rs`'s `publish_patch` can republish
-    restored `lan.` records if `DNS_ROLLBACK_URL` is ever pointed at
-    dns instead of its default `dns:8083` (not the case in any
-    shipped deployment today, but the identity's permissions must hold
-    regardless of which URL an operator configures); and (the earlier NATS
-    audit's Finding D) `publish` on `$JS.API.STREAM.CREATE.LANCACHE_DNS`,
-    so this identity's own `nats-subscriber` process can create the
-    `LANCACHE_DNS` stream itself if it is ever the first of the two
-    `nats-subscriber` processes (writer or replica) to connect after a cold
-    start — without it, that race silently denied the replica's
-    `create_stream` fallback and crash-looped the container until the
-    writer's own stream creation eventually succeeded (self-healing, but a
-    real, reproducible, previously-untested window). **Accepted tradeoff**:
-    unlike the narrower flush-only grant this replaces, a compromised
-    dns NATS credential can now forge or replicate `lan.` DNS record
-    changes too, not merely trigger a cache-flush signal, and can also
-    administratively create the shared `LANCACHE_DNS` stream — this was a
-    conscious maintainer decision (widen the permission) over the
-    alternative of making the rollback listener itself fail closed when it
-    lacks this permission, made explicitly to keep the rollback path
-    working correctly regardless of which DNS node runs it, rather than
-    depending on `DNS_ROLLBACK_URL`'s default never changing. The
-    stream-create grant carries no equivalent alternative: gating
-    `nats-subscriber`'s own startup on which of the two nodes boots first
-    would reintroduce the same ordering dependency this permission exists
-    to remove.
+  - **DNS writer** (the one `dns` container) — publish DNS records and
+    `lancache.dns.flush` (the post-rollback recursor cache-flush signal),
+    and the specific JetStream stream/consumer subjects it needs;
+    subscribe to `lancache.dns.>`. Two of these grants are deliberate
+    widenings beyond the original least-privilege scope: `publish` on
+    `lancache.dns.record` (issue #906), so `main.rs`'s `publish_patch` can
+    republish restored `lan.` records, and `publish` on
+    `$JS.API.STREAM.CREATE.LANCACHE_DNS`, so its own `nats-subscriber` can
+    create the `LANCACHE_DNS` stream on a cold start. **Accepted
+    tradeoff**: a compromised dns NATS credential can forge or replicate
+    `lan.` DNS record changes, not merely trigger a cache-flush signal, and
+    can administratively create the shared `LANCACHE_DNS` stream. This was a
+    conscious maintainer decision (widen the permission) over making the
+    rollback listener fail closed when it lacks the permission. The earlier
+    separate replica identity is gone: one `dns` container needs one
+    identity.
   - **Auth-callout responder** (the Admin UI itself) — no subject permissions
     of its own; only recognized by name so its own connection to answer
     `$SYS.REQ.USER.AUTH` doesn't recursively trigger the callout it exists to

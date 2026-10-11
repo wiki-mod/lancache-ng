@@ -21,7 +21,7 @@ depot-fetch capability.
 | Kea DHCP / DHCP modes | off | — | Configurable four-state: `disabled` / `kea` / `dnsmasq-proxy` / `dnsmasq-relay` (#844); requires PowerDNS (DDNS via nsupdate) in `kea` mode. The two dnsmasq modes share one `dhcp-proxy` container (config selected by DHCP_MODE): `dnsmasq-proxy` injects PXE options alongside an existing server, `dnsmasq-relay` forwards DHCP to an upstream server on another segment. See [docs/dhcp-modes.md](dhcp-modes.md). |
 | LanCache-NG-NTP | off (`ntp` Compose profile) | — | chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123; optional "auto-set as DHCP NTP server" toggle pushes its LAN address into Kea's `ntp-servers` option. See the "Kea DHCP" section below. |
 | Watchdog | on | — | Health checks, auto-restart, purge cron |
-| syslog (fluent-bit + syslog-ng, combined) | on (`logging` Compose profile, default-enabled since #1343; real opt-out via `LOGGING_ENABLED=0`) | — | Central log receiver; fluent-bit forwards logs from every wired service to syslog-ng inside the same container (#453, combined into one image 2026-08) — see the syslog-ng section's full logging matrix below, not just proxy access logs |
+| syslog-ng (inside `services`) | on; per-service switches `LOGGING_PROXY_ENABLED`, `LOGGING_DNS_ENABLED`, `LOGGING_DHCP_ENABLED`, `LOGGING_UI_ENABLED` (Admin UI `/logs`) | — | Central log receiver; every container logs to it through the Docker syslog driver — see the syslog-ng section's logging matrix below |
 | Admin UI | on | — | Axum/Rust, Tera, Tailwind, separate port |
 | CacheHamster (Cache-Prefill) | off (`cachehamster` Compose profile) | — | **Infra-wired, functionally still a scaffold**: `services/cachehamster` (issue #871) has a CI-built/published multi-arch image and an opt-in Compose profile since its infra integration (issue #871), but no real Steam depot-fetch capability yet -- credential-store + stream-fetch primitives only. Mechanism decided: stream-and-discard prefill, not SteamCMD; independently-switchable service (not a `services/ui` module). See [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, issue #871) for the current design plan and its one remaining open decision (credential strategy). Do not treat this row as a runnable feature until Steam control-plane/depot integration lands. |
 
@@ -170,9 +170,9 @@ real host:
 |---|---|---|
 | `ROOT_ZONE_MIRROR` | `1` (enabled) in `services/dns/entrypoint.sh`'s own fallback; this repo's shipped `config/prod/dns-*.env` explicitly set `1` | Root zone mirror (AXFR from root servers). Was previously documented here as `ENABLE_ROOT_MIRROR` — that name does not exist in code; `docs/dns-admin-ui-scope.md` already used the correct name. |
 | Global AAAA-response filter | off by default | Suppresses all AAAA answers for every client, regardless of address family. Not an env var/restart-time setting: toggled live via the Admin UI (`POST /domains/aaaa-filter`), which writes/removes a marker file on the shared `powerdns-state` volume, read live by `filter-aaaa.lua`'s recursor `preresolve` hook. (Previously documented here as two separate env vars, `FILTER_AAAA_V4`/`FILTER_AAAA_V6` — neither name appears anywhere in `services/dns/` or `services/ui/src`; see `docs/dns-admin-ui-scope.md` §1b for the real, shipped mechanism.) **Planned change, not yet implemented**: starting with v0.3.0, this filter is intended to default to **on** instead of off (maintainer decision recorded in issue #1068; no dedicated tracking issue exists yet for the code change itself). Current shipped behavior as of this writing is still off-by-default — do not treat this bullet as already-shipped. |
-| `DNS_REPLICATION_ROLE` | `native` | Selects whether a DNS container owns local zones normally (`native`), acts as the transfer primary (`primary`), or creates the fixed LAN/reverse zones as PowerDNS secondaries (`secondary`). Shipped production and full-setup topology sets `dns` to `primary` and `dns` to `secondary`. |
+| `DNS_REPLICATION_ROLE` | `native` | Selects whether a DNS container owns local zones normally (`native`), acts as the transfer primary (`primary`), or creates the fixed LAN/reverse zones as PowerDNS secondaries (`secondary`). Shipped production and full-setup topology sets `dns` to `primary`; remote secondaries (`setup.sh secondary`) use `secondary`. |
 | `DNS_XFR_PRIMARY` | — | Required when `DNS_REPLICATION_ROLE=secondary`; host:port endpoint of the PowerDNS primary used for native AXFR/refresh polling. Remote secondaries receive this from the Admin UI registration response. |
-| `DNS_XFR_NOTIFY_TARGETS` | — | Comma/space-separated NOTIFY targets for a primary. Shipped local topology notifies `dns:5300`; remote secondaries can still converge through PowerDNS's refresh polling when they are not listed here. |
+| `DNS_XFR_NOTIFY_TARGETS` | — | Comma/space-separated NOTIFY targets for a primary. Shipped local topology notifies no local target; remote secondaries can still converge through PowerDNS's refresh polling when they are not listed here. |
 | `PDNS_SOA_REFRESH` | `30` | Primary SOA `refresh` (seconds), seeded into `default-soa-content` and rewritten onto every zone by `run_soa_maintainer`. Short by design (issue #1095): it is the only convergence guarantee for a secondary that missed a single-shot UDP NOTIFY, replacing the old `10800`s (3h) drift window. |
 | `PDNS_SOA_RETRY` | `10` | Primary SOA `retry` (seconds); must be `< PDNS_SOA_REFRESH` (RFC 1912). |
 | `PDNS_SOA_RESYNC_INTERVAL` | `3600` | Primary-only cadence (seconds) at which `run_soa_maintainer` re-anchors the `YYMMDDxxx` date serial at day rollover and bumps + NOTIFYs as a generic force-resync safety net (issue #1095). |
@@ -261,7 +261,7 @@ recreated with it) to publish port 4222 on that address in the first place.
 `ui` only computes what to *advertise*; it does not control what `nats`
 itself publishes.
 
-**nsupdate (RFC 2136):** TSIG-secured dynamic DNS channel into PowerDNS authoritative. Kea DHCP sends lease add/update/delete events through `kea-dhcp-ddns` to `dns` only; PowerDNS accepts those updates only for the LAN and private reverse zones that are explicitly mapped to the shared `DDNS_TSIG_KEY`. `dns` and registered remote DNS secondaries consume those same zone changes through native PowerDNS AXFR/NOTIFY, so DHCP-driven records have one writer and do not depend on Kea's `dns-servers` failover list behaving like fan-out.
+**nsupdate (RFC 2136):** TSIG-secured dynamic DNS channel into PowerDNS authoritative. Kea DHCP sends lease add/update/delete events through `kea-dhcp-ddns` to `dns` only; PowerDNS accepts those updates only for the LAN and private reverse zones that are explicitly mapped to the shared `DDNS_TSIG_KEY`. Registered remote DNS secondaries consume those same zone changes through native PowerDNS AXFR/NOTIFY, so DHCP-driven records have one writer and do not depend on Kea's `dns-servers` failover list behaving like fan-out.
 
 ## Kea DHCP
 
@@ -313,7 +313,6 @@ restarted by the watchdog daemon.
 - Kea: REST API ping
 - nats: HTTP probe against nats-server's own monitor endpoint (`http_port: 8222` set in the compose-generated boot config, checked via `wget` against `/healthz` -- nats:2-alpine ships BusyBox's wget/nc but no curl, verified empirically)
 - ui: HTTP request on `/health` (`services/ui/src/main.rs`'s shallow liveness route, checked via `curl`, present in the image)
-- syslog (combined fluent-bit + syslog-ng, when the `logging` profile is active): `services/syslog/healthcheck.sh` checks BOTH processes independently -- `syslog-ng-ctl stats` against the real control socket for syslog-ng, `pgrep -f` against fluent-bit's own bundled-interpreter cmdline for fluent-bit (its `/proc/<pid>/comm` stays `ld-linux-x86-64` for its whole lifetime, confirmed live, since it is invoked through an explicit dynamic-linker interpreter argument rather than the kernel's normal PT_INTERP path -- `pgrep -x fluent-bit` would never match) -- and only reports healthy when both are, additionally writing a structured per-process status file
 - dhcp-proxy (dnsmasq): liveness + config-integrity, not a functional DHCP probe (#1169) -- dnsmasq has no REST/control-socket API and this config disables DNS entirely (`port=0`), so a query/response probe like PowerDNS's isn't possible, and synthesizing a real DHCPDISCOVER every interval would inject genuine broadcast LAN traffic as a healthcheck side effect. Checks that PID 1 is still `dnsmasq` (the entrypoint execs it directly, no wrapper shell) and that `dnsmasq --test` still validates the on-disk config
 - ntp (chrony): real query/response probe via `chronyc tracking` against chronyd's own command socket (#1169) -- a genuine round-trip, not a bare port-listen check, but deliberately does not require an already-synchronised stratum, since "alive but not yet synced" is a legitimate transient state during `start_period` or an upstream network blip
 - netdata: HTTP probe against its own REST API, `GET /api/v1/info` (#1169), matching the check `deploy/full-setup/docker-compose.yml`'s validation stack already used for the same pinned image
@@ -324,11 +323,8 @@ verified against the compiled `services/watchdog` Rust binary (the production
 `ENTRYPOINT` since issue #842's ENTRYPOINT swap -- see this file's own
 `services/watchdog/Dockerfile` and `deploy/*/docker-compose.yml`): `main()`'s
 own `monitored` list covers `proxy`, `dns`, `nats` (always
-monitored, not flag-gated), `netdata` (always monitored, added by #842's
-2026-08-07 restart-capability decision), and (when `HTTPS_ENABLED=1`)
-`dns` -- the container names it takes via
-`CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/`CONTAINER_NATS`/
-`CONTAINER_DNS`/`CONTAINER_NETDATA`. The binary writes this state to a
+monitored, not flag-gated) and `netdata` (always monitored, added by #842's
+2026-08-07 restart-capability decision). The binary writes this state to a
 `status.json` file every `CHECK_INTERVAL` seconds (default 30); see "Status"
 below for how the Admin UI renders it. The legacy `services/watchdog/watchdog.sh`
 bash implementation this replaced remains in the repository (with its own
@@ -349,8 +345,7 @@ multi-stack-per-host need.
 Beyond the five restart-capable services above, the watchdog binary has
 alert-only paths that never call `restart()`: it probes `docker-socket-proxy`
 every cycle through `/_ping`, monitors `ui` (always), the correct `dhcp`/
-`dhcp-proxy` container (per `DHCP_MODE`), `syslog` when `LOGGING_ENABLED` is
-truthy, and `ntp` when `NTP_ENABLED` is truthy. Alert-only coverage is
+`dhcp-proxy` container (per `DHCP_MODE`), and `ntp` when `NTP_ENABLED` is truthy. Alert-only coverage is
 deliberately distinct from restart permission: observing a service through
 the inspect allowlist does not grant or imply a Docker restart action for it.
 
@@ -398,30 +393,15 @@ the inspect allowlist does not grant or imply a Docker restart action for it.
   actual caller of that grant is watchdog's main loop, reconciling against
   `desired-state.json`, the same way as `dhcp` above -- see that entry for
   the full mechanism.
-- **`syslog` (combined fluent-bit + syslog-ng)**: alert-only monitored when
-  `LOGGING_ENABLED` is truthy. Its dual-process healthcheck
-  (`services/syslog/healthcheck.sh`) feeds the Docker health state consumed
-  here. `syslog` (and `watchdog` itself) must never gain a restart grant or
-  become user-disableable via the Admin UI -- an explicit, deliberate
-  maintainer decision (#1486's cross-reference on #842), not an
-  oversight.
 
 **Alert-only monitoring's own allowlist precondition (issue #842/#849,
 2026-08-05):** alert-only health reads require inspect-only Docker API access
 through `scripts/untracked/docker-socket-proxy.sh`'s allowlist. That inspection grant is
 separate from the `safe_service_restart` allowlist; alert-only monitoring does
 not call `restart_container()`, so observing a target never makes it
-restart-capable. **Watchdog's alert-only monitoring of `syslog` is gated by
-`LOGGING_ENABLED`** (`resolve_bool`, default `false`), matching the Compose
-`logging` profile that determines whether the combined syslog+fluent-bit
-container exists. The watchdog binary uses this same gate, so a normal logging-enabled installation includes the
-container in alert-only monitoring and in `status.json` without requiring the
-separate retention opt-in. `SYSLOG_ENABLED` remains an independent, narrower
-double opt-in for the storage-budget retention/pruning engine only; it does not
-control whether watchdog monitors the running logging service. Direct manual
-profile activation must set `LOGGING_ENABLED=1` as documented in the syslog-ng
-section below, because bypassing `setup.sh` otherwise leaves the profile and
-watchdog's deployment-state input inconsistent.
+restart-capable. syslog-ng runs inside the `services` container itself (the
+watchdog supervises it), so there is no separate logging container to monitor;
+the per-service logging switches are described in the syslog-ng section below.
 - **`docker-socket-proxy`**: this is watchdog's own gateway to the Docker
   API. If it is down or hung, watchdog cannot reach any container through
   it -- including this one -- so "restart docker-socket-proxy via
@@ -464,10 +444,9 @@ and launches the long-running retention loop with its own restricted mount,
 capability, filesystem, and network posture. Keeping destructive file
 retention in a separate container prevents a fault or compromise in that logic
 from sharing the watchdog's Docker API channel or status-writer process. Every
-env-derived target directory (`CACHE_DIR`, `SYSLOG_LOG_ROOT`,
-`FLUENT_BIT_SELFLOG_DIR`) is canonicalized via `realpath -m` and checked
+env-derived target directory (`CACHE_DIR`, `SYSLOG_LOG_ROOT`) is canonicalized via `realpath -m` and checked
 against an expected mount-root prefix (`CACHE_DIR_ALLOWED_PREFIX`/
-`SYSLOG_LOG_ROOT_ALLOWED_PREFIX`/`FLUENT_BIT_SELFLOG_DIR_ALLOWED_PREFIX`,
+`SYSLOG_LOG_ROOT_ALLOWED_PREFIX`,
 defaulting to `/var/cache`/`/var/log`/`/var/lib`) before any `find`/`rm` runs
 against it, fail-closed (loud rejection, no deletion, no stamp write) on any
 value resolving outside that prefix.
@@ -575,22 +554,16 @@ to their actual source -- collected here rather than left as unexplained
 
 ## syslog-ng
 
-Central log receiver for the stack (#453), opt-in via `docker compose --profile logging up -d` in `deploy/prod`. **Also set `LOGGING_ENABLED=1` in the deployment's `.env`** when activating this way directly (rather than through `setup.sh`, which sets both together): `LOGGING_ENABLED` is the flag `services/watchdog/watchdog.sh` reads to decide whether the syslog+fluent-bit container is part of this stack for alert-only health monitoring at all -- starting the `logging` profile without it still runs the container correctly, but watchdog silently omits it from monitoring and the Admin UI dashboard's service list, since a `LOGGING_ENABLED`-unset stack is indistinguishable from one that never opted into logging at all. Since the syslog+fluent-bit consolidation PR (2026-08), `syslog-ng` and `fluent-bit` (the `syslog` service) run as two supervised processes inside ONE container (`services/syslog/`) instead of two separate ones -- a deliberate maintainer decision to accept crash-coupling and a single Docker HEALTHCHECK slot (mitigated by the real dual-process check described below) in exchange for one image to build/scan/patch instead of two. `fluent-bit` tails every wired service's log file(s) (see the matrix below) and forwards each one to `syslog-ng` over `127.0.0.1:6601` (RFC 5424, plain LF framing, `network()` source with `flags(syslog-protocol)`) -- a loopback connection within the shared container network namespace, not a Compose service-to-service hop anymore; the proxy/nginx access log additionally gets a second, local plain-text copy (used by Netdata's `web_log` job). `syslog-ng` writes received logs per-source, per-day under `/var/log/lancache-syslog-ng/<host>/<YYYYMMDD>.log`. Port 6601 (not the original 601) is deliberate: 601 is a privileged port (confirmed live -- `/proc/sys/net/ipv4/ip_unprivileged_port_start` defaults to 1024 on a real runner) and this container's `syslog-ng` runs as a non-root uid with no `CAP_NET_BIND_SERVICE` grant; 601 was never published to the host or documented as an external contract, so the renumbering has no external impact.
+Central log receiver for the stack. One syslog-ng runs inside the `services` container; the watchdog starts it from a config it renders itself (`syslog_ng_conf` in `services/watchdog/src/main.rs`). There is no Fluent Bit and no separate syslog container.
 
 **Currently implemented:**
-- Size-bounded rotation: an active log file is rotated once it exceeds `SYSLOG_MAX_FILE_MB` (default 100), then `syslog-ng` is signaled (`SIGHUP`, same-uid so no added capability is needed) to reopen the (recreated) destination file. The rotation loop compares real file byte sizes via `stat -c%s`, not `find -size +100M` (GNU-only syntax that silently never matches on Alpine's `find`, confirmed live -- a real portability bug the consolidation PR's own POC caught and fixed).
-- Compression: rotated files are compressed with `zstd -T0` at `SYSLOG_COMPRESSION_LEVEL` (default 19); falls back to `gzip` if `zstd` cannot be installed at container start (e.g. no network egress).
-- Config for both fluent-bit and syslog-ng is a static file baked into the combined image at build time (`services/syslog/fluent-bit.conf`, `services/syslog/syslog-ng.conf`) -- nothing in either varies per deployment, so unlike the previous CLI-flag/inline-heredoc approach there is nothing to generate at container start.
-- Every service in the matrix below marked "Via fluent-bit → syslog-ng" is wired end to end; rows marked "Not applicable" (one-shot containers and the third-party socket proxy) have no log stream of their own, and the row marked "Not yet wired" names its remaining gap.
-- Per-service wiring mechanism varies by what the underlying daemon actually supports (#633): a native dual stdout+file option where one exists (Kea's `output-options` array), a `tee` of the daemon's own stdout into a file where no such option exists (PowerDNS has no file-log directive on Linux at all; nats-server and dnsmasq each support only one log destination at a time, not both simultaneously), or a second application-level logging layer (the Admin UI's `tracing-subscriber` setup). Every one of these choices is a documented, deliberate trade-off recorded in the matrix's Notes column, not an oversight.
-- Storage-budget retention: `services/watchdog/retention.sh`'s `maybe_prune_syslog()` (since #842; opt-in via `SYSLOG_ENABLED=true`, `--profile logging`) enforces an overall storage budget on top of syslog-ng's own fixed-threshold rotation above. Age-based deletion runs first (`SYSLOG_RETENTION_DAYS`, default 30); if the tree under `SYSLOG_LOG_ROOT` is still over `SYSLOG_MAX_GB` (default 10) afterward, the oldest remaining files are deleted next — regardless of age — until back under budget. Size budget takes priority over the retention-days floor. Rate-limited via its own stamp file (once per day), same pattern as the cache purge above; `SYSLOG_LOG_ROOT` is validated (`realpath -m` + expected-prefix check) before any scan, same as `CACHE_DIR`.
-- Fluent-bit self-log rotation (#1236): `services/watchdog/retention.sh`'s `maybe_rotate_fluent_bit_selflog()` (since #842) bounds `/data/fluent-bit.log` (the combined container's own `fluent-bit` operational log, see the logging matrix row below) on the `syslog-data` volume, which neither of the two mechanisms above touches.
-- **Least-privilege capability posture**: the combined container runs entirely as fixed non-root uid 10001 (not root, unlike the previous two separate images), with **no added Linux capabilities**. Every first-party producer log it tails is now created under a setgid log directory whose group is the same fixed gid 10001, and startup repairs existing files on upgraded volumes the same way, so plain Unix permissions are enough even after reopen/recreation of the log file.
-- **Existing `logs` volume ownership migration**: Docker copies an image path's uid/gid only when it initializes a new named volume; it does not update an already-populated volume after an image upgrade. The `syslog-logs-permissions` one-shot Compose service therefore runs before `syslog` in `deploy/prod`, recursively assigns the shared `/var/log/lancache` tree to uid/gid 10001, and must complete successfully before the non-root collector starts. The initializer has no network, a read-only root filesystem, and only `CAP_CHOWN`; repeated starts are intentionally idempotent. This keeps existing proxy-log copies writable without widening the long-running syslog container's capability set.
-- **Silent-data-loss detection** (new in the consolidation PR): a periodic detector compares syslog-ng's own "processed" stats counter (`syslog-ng-ctl stats`) against real bytes landing on disk under `SYSLOG_NG_LOG_ROOT`, alerting (and surfacing via a structured healthcheck status field) if syslog-ng believes it delivered messages that never actually reached disk -- e.g. a bind-mounted log-root directory left root-owned instead of chowned to uid 10001. `setup.sh` pre-creates and chowns this directory on fresh install specifically to avoid the condition; this detector is the defense-in-depth backstop for an installation that predates that fix or has its permissions changed later.
-- **Real dual-process healthcheck**: `services/syslog/healthcheck.sh` checks fluent-bit AND syslog-ng independently (not just "is the container running") and only reports healthy when both are, writing a structured per-process status file (including the data-loss alert flag above) for a future Admin UI/watchdog integration -- the granularity fix for the two-container era's single "one process, one Docker HEALTHCHECK slot" limitation.
-- `ci.sh check logging-matrix` (part of `ci.sh check all` in the CI checks job) fails if a Compose service has no row in the logging matrix table below, if a row names a service that no longer exists, or if a service has more than one row.
-- Admin UI log reading from the central path: `services/ui/src/main.rs` (opt-in via `SYSLOG_ENABLED=true`, same 4-variable contract watchdog's retention engine uses) reads `/logs` and a dashboard tile from `SYSLOG_LOG_ROOT` directly, transparently decompressing rotated `.zst`/`.gz` files, instead of the `STANDARD_LOG`/`SSL_LOG` direct-nginx-read path. Disabled installs keep the old direct-nginx-read behavior unchanged.
+- Every container logs through Docker's `syslog` driver (`x-logging` in `deploy/prod/docker-compose.yml`) to `udp://127.0.0.1:${LANCACHE_LOG_PORT}`; syslog-ng listens there.
+- Files land in `${SYSLOG_NG_LOG_DIR}/<program>/YYYYMMDD.log`, one file per container and day. The directory is group-readable for `LOG_READER_GROUP`, so the Admin UI reads it read-only.
+- Logging is switched per service, not globally: `LOGGING_PROXY_ENABLED`, `LOGGING_DNS_ENABLED`, `LOGGING_DHCP_ENABLED` and `LOGGING_UI_ENABLED` (default on). The Admin UI saves them on the `/logs` page into its settings file; it does not touch syslog-ng. The watchdog reads that file, re-renders the config with the switched-off programs filtered out and restarts syslog-ng (the settings file is watched). The `services` container (watchdog) always logs and has no switch.
+- With the proxy switch off, the proxy access log gets no new lines, so the Admin UI statistics and dashboard show no new traffic. The `/logs` page says so.
+- Retention (`SYSLOG_RETENTION_DAYS`, `SYSLOG_MAX_GB`) is done by the retention task of the watchdog.
+- The Admin UI reads `/logs` from the store directly (read-only mount).
+- `ci.sh check logging-matrix` (part of `ci.sh check all`) fails if a Compose service has no row in the logging matrix table below, if a row names a service that no longer exists, or if a service has more than one row.
 
 **Not implemented yet:**
 - Per-service log level configuration in the Admin UI.

@@ -5151,11 +5151,7 @@ async fn update_logging_settings(
         .map(|(key, _)| (*key, bool_text(!f.get(key).is_empty())))
         .collect();
     state.config.save_settings(&changes).map_err(|e| {
-        HtmlError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &LOGS_AREA,
-            e.to_string(),
-        )
+        HtmlError::new(StatusCode::INTERNAL_SERVER_ERROR, &LOGS_AREA, e.to_string())
     })?;
     Ok(Redirect::to("/logs"))
 }

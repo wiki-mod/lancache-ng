@@ -220,7 +220,6 @@ adapter) is:
    ```bash
    cd /opt/lancache-ng
    docker compose -f deploy/prod/docker-compose.yml logs --tail=50 dns
-   # or: docker compose -f deploy/prod/docker-compose.yml logs --tail=50 dns
    ```
    
    Look for which validation failed:
@@ -244,7 +243,6 @@ adapter) is:
 4. Restart the DNS container:
    ```bash
    docker compose -f deploy/prod/docker-compose.yml up -d dns
-   # or dns, or both
    docker compose -f deploy/prod/docker-compose.yml logs dns
    ```
 
@@ -278,7 +276,6 @@ adapter) is:
    # Replace "/opt/lancache-ng" with your install directory if different -- this
    # argument is REQUIRED here even if you're using the default, because the
    # zone argument that follows it is positional (there is no way to skip it)
-   # Replace "dns" with "dns" or "dns" to target a specific container
    # Replace "lan" with the zone you want to fix (with or without a trailing dot -- both work)
    ```
    
@@ -395,7 +392,7 @@ adapter) is:
 4. Check that core services are running:
    ```bash
    docker compose -f deploy/prod/docker-compose.yml ps
-   # Required for UI to work: proxy, dns (or dns), nats, ui
+   # Required for UI to work: proxy, dns, nats, ui
    # (dhcp/dhcp-proxy/ntp only required if their profiles are enabled)
    ```
 
@@ -430,8 +427,8 @@ because a compiled binary cannot source a shell library.
 
 The supervisor in the `proxy` container (`lancache-watchdog supervise`,
 process `nginx`) renders `nginx.conf`, `proxy-params.conf`, the SSL/security
-maps (`00-ssl-map.conf`), the stream target map (`00-stream-targets.conf`),
-the stream client ACL and the SSL dispatch map from the image templates,
+maps (`00-https-map.conf`), the stream target map (`00-stream-targets.conf`),
+the stream client ACL and the HTTPS dispatch map from the image templates,
 `.env` values and `cdn-domains.txt`. It renders again whenever
 `cdn-domains.txt` changes. After each render:
 
@@ -591,7 +588,7 @@ DNS node (`setup.sh secondary`, `deploy/secondary/docker-compose.yml`) runs
 the same `dns` image and entrypoint, so it gets the identical
 `/var/lib/lancache-dns/config-snapshots/{recursor,auth}` layout too — its own
 persistent volume there is named `pdns-config-snapshots` (one node, so no
-`-standard`/`-ssl` suffix is needed).
+per-mode suffix is needed).
 
 **recursor.conf: pure pre-start check, like `nginx -t`.** Debian Trixie's
 `pdns-recursor` package (5.2.x) ships a genuine, side-effect-free check-only
@@ -751,15 +748,14 @@ zones** — not the zone list, not TSIG, not RPZ.
 can't reach it.** An earlier draft of this design routed every step through
 `pdnsutil list-zone` / `check-zone` / `load-zone`. That does not work as a
 whole: `pdnsutil` operates directly on the local `pdns.sqlite3` backend, so
-every one of those commands can only run *inside* the `dns`/
-`dns` container, with `--config-dir=/etc/pdns/auth` (the config
+every one of those commands can only run *inside* the `dns` container, with `--config-dir=/etc/pdns/auth` (the config
 directory the authoritative server is actually generated into by
 `services/dns/entrypoint.sh` — the default `/etc/pdns` is empty in this
 image; every existing `pdnsutil` call in the entrypoint, e.g.
 `configure_ddns_tsig()`'s `import-tsig-key`/`set-meta` calls, already passes
 this flag). The Admin UI, which the design assigns the operator-facing
 rollback action to, cannot do that: `services/ui/Dockerfile` doesn't install
-`pdnsutil` and doesn't mount the `pdns-config-snapshots-{standard,ssl}`
+`pdnsutil` and doesn't mount the `pdns-config-snapshots`
 volumes, and even if it did, running `pdnsutil` from a second container
 against a `pdns.sqlite3` file that a live `pdns_server` in another container
 already has open is not a safe way to read or mutate it.
@@ -874,8 +870,8 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
   described: `check-zone` validates the zone already loaded into the
   backend, not an arbitrary file, so it cannot pre-validate an export before
   accepting it as a snapshot. `pdnsutil check-zone --config-dir=/etc/pdns/auth
-  <zone>` (run locally by `nats-subscriber` inside the `dns`/
-  `dns` container, where `pdnsutil` and the live backend both already
+  <zone>` (run locally by `nats-subscriber` inside the `dns`
+  container, where `pdnsutil` and the live backend both already
   exist) remains useful as a *secondary structural sanity check* — SOA
   serial sanity, dangling CNAME targets, delegation consistency, none of
   which the API's per-RR validation catches — but only as a check against
@@ -945,18 +941,18 @@ snapshot capture and rollback through that API instead of `pdnsutil`:
   serving from cache. The rollback path must enumerate every name whose
   rrset changed (available directly from the diff computed in the point
   above) and flush each one against every recursor instance (both
-  `dns`, matching the two-mode/two-IP architecture),
+  `dns` (one instance serves both the http and the https side),
   not rely on a single whole-zone or root flush call.
   - **NATS permission dependency (#867).** This flush is a
     `lancache.dns.flush` JetStream publish sent under whichever
     container's own identity runs `rollback_handler` (`NATS_DNS_WRITER_USER`
-    on `dns`, `NATS_DNS_REPLICA_USER` on `dns`) -- it only
+    on `dns`) -- it only
     works if that identity's `publish` allow-list in `nats.conf` (and its
     generator in `deploy/prod/docker-compose.yml`) actually includes that
     subject.
     It shipped without it: every rollback correctly patched PowerDNS but
     the flush was silently denied server-side, and the `POST /rollback`
-    response had no field reflecting that. Both identities now carry the
+    response had no field reflecting that. The identity now carries the
     permission, and any per-name flush publish/ack failure is surfaced in
     the response body as `flush_ok`/`flush_failed_names` rather than only
     logged, so a future permission regression (or a genuinely down
@@ -993,17 +989,12 @@ things follow from that:
   - **NATS permission dependency (#906, follow-up to #867's flush-permission
     fix above).** Like the flush, this republish is a `lancache.dns.record`
     JetStream publish sent under whichever container's own identity runs
-    `rollback_handler` (`NATS_DNS_WRITER_USER` on `dns`,
-    `NATS_DNS_REPLICA_USER` on `dns`) -- it only works if that
+    `rollback_handler` (`NATS_DNS_WRITER_USER` on `dns`) -- it only works if that
     identity's `publish` allow-list actually includes that subject. The
-    writer identity already held it (it needs it for the reconciler too);
-    the replica identity did not, and was silently denied when publishing
-    would have been attempted. Not reachable on the default
-    `DNS_ROLLBACK_URL` (`dns:8083` everywhere), but the identity's
-    permissions must be correct independent of which URL an operator
-    configures. Fixed by granting `NATS_DNS_REPLICA_USER` `publish` on
-    `lancache.dns.record` too, accepting a real security-surface tradeoff:
-    a compromised dns NATS credential can now forge or replicate `lan.`
+    writer identity holds it (it needs it for the reconciler too). The
+    consolidation to one `dns` container removed the separate replica
+    identity, so only this one remains. The security-surface tradeoff is
+    that a compromised dns NATS credential can forge or replicate `lan.`
     DNS records, not just signal a cache-flush. The alternative considered
     was making the rollback listener itself detect and reject a
     permission-denied record republish for `lan.` (fail loud instead of
@@ -1071,9 +1062,7 @@ sequence the Admin UI itself uses) -- or, since #794, automated with
 fallback too.** The gap this section used to describe here -- "no equivalent
 manual-CLI fallback documented here yet" -- is closed:
 `./setup.sh reset-to-last-known-good-config dns [install-dir] <zone>
-[snapshot-id] [--yes]` (aliases: `pdns`; `dns` select an
-explicit target container, defaulting to `dns` to match the Admin
-UI's own current single-primary scope) lists this install's known-good
+[snapshot-id] [--yes]` (`pdns` is an alias of `dns`, the single DNS container) lists this install's known-good
 snapshots for the given zone and applies one via nats-subscriber's real
 rollback listener -- the same list/diff/PATCH/check-zone/flush/republish
 chain `services/ui/src/main.rs` already forwards to when the

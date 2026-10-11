@@ -610,7 +610,7 @@ services/dns/cdn-domains.txt
 One list drives everything: DNS based cache routing, and (as of v0.2.0)
 HTTPS mode certificate coverage too. The proxy derives each entry's
 registrable root domain automatically at startup and generates a wildcard
-cert for it — there is no separate SSL domain file to keep in sync by hand.
+cert for it — there is no separate HTTPS domain file to keep in sync by hand.
 
 After manual file changes in a repository-based setup, restart the affected
 services so they reload the mounted files:
@@ -807,7 +807,6 @@ Create directories:
 ```bash
 mkdir -p /opt/lancache-ng/cache
 mkdir -p /opt/lancache-ng/kea
-mkdir -p /opt/lancache-ng/pdns
 mkdir -p /opt/lancache-ng/pdns
 mkdir -p /opt/lancache-ng/pdns-filter-state
 mkdir -p /opt/lancache-ng/nats
