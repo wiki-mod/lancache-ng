@@ -7382,16 +7382,18 @@ if [[ "$NTP_ENABLED" = "1" && -n "$NTP_DATA_DIR" ]]; then
     mkdir -p "$NTP_DATA_DIR"
     print_ok "NTP data:       $NTP_DATA_DIR"
 fi
-# What: pre-creates syslog log root as uid 10001
+# What: pre-creates syslog log root as the runtime uid
 # Why: Docker would create it root-owned, unwritable
+# From: Issue #1683 | PR #1912
 syslog_ng_log_dir="${SYSLOG_NG_LOG_DIR:-$LANCACHE_STATE_DIR/syslog-ng}"
 mkdir -p "$syslog_ng_log_dir" || die "Failed to create $syslog_ng_log_dir (exit $?)."
-if chown_err=$(chown 10001:10001 "$syslog_ng_log_dir" 2>&1); then
-    print_ok "Syslog-ng log root: $syslog_ng_log_dir (owned by uid 10001)"
+runtime_id=$(lancache_sot_value gid runtime) || exit $?
+if chown_err=$(chown "$runtime_id:$runtime_id" "$syslog_ng_log_dir" 2>&1); then
+    print_ok "Syslog-ng log root: $syslog_ng_log_dir (owned by uid $runtime_id)"
 else
     # What: a failed chown is only a warning
     # Why: the container detector catches write loss
-    print_warn "Could not chown $syslog_ng_log_dir to uid 10001 ($chown_err) -- the services container may not be able to write logs there. See docs/architecture-ng.md's syslog-ng section, or chown it manually before starting the stack."
+    print_warn "Could not chown $syslog_ng_log_dir to uid $runtime_id ($chown_err) -- the services container may not be able to write logs there. See docs/architecture-ng.md's syslog-ng section, or chown it manually before starting the stack."
 fi
 
 # ── 11. Installing systemd watchdog ───────────────────────────────────────────
