@@ -1457,7 +1457,7 @@ const DNS_HTTPS: Recursor = Recursor {
 };
 
 // What: secondary AXFR poll seconds and negative TTL.
-// Why: #1164 bounds a missed NOTIFY to this many seconds.
+// Why: bounds the delay after a missed NOTIFY.
 // From: Issue #1164
 const XFR_CYCLE_SECS: u64 = 15;
 
@@ -1634,7 +1634,8 @@ impl AuthConf<'_> {
 }
 
 // What: true when a config check command exits 0.
-// Why: pdns_server and pdns_recursor check side-effect free.
+// Why: the pdns config checks have no side effects.
+// From: Issue #1683 | PR #1912
 fn conf_ok(check: &[String]) -> bool {
     match std::process::Command::new(&check[0])
         .args(&check[1..])
@@ -1663,7 +1664,7 @@ fn keep_known_good() -> Result<u32, String> {
     bounded("KEEP_KNOWN_GOOD_CONFIGS", 1, u32::MAX.into()).map(|v| v as u32)
 }
 
-// What: write candidate file sets; keep the first that checks.
+// What: write candidate sets; keep the first that checks.
 // Why: a bad render falls back to the newest good set.
 // From: Issue #415 | Issue #1683
 fn first_good(
@@ -1701,7 +1702,7 @@ fn snapshots<T>(
         .collect()
 }
 
-// What: write rendered files; record the set when it checks.
+// What: write rendered files; record the set if it checks.
 // Why: the newest good render is the next rollback target.
 // From: Issue #415 | Issue #615 | Issue #1683
 fn checked_files(
@@ -2296,7 +2297,7 @@ fn nats_subscriber(ctx: &Ctx) -> Result<Run, String> {
             ROLLBACK_LISTEN.into(),
         ),
     ];
-    // What: the writer's NATS password from the shared file.
+    // What: writer's NATS password from the shared file.
     // Why: a remote secondary has its own; no file is used.
     if let Some(file) = env_opt("NATS_PASSWORD_SHARED_SECRET") {
         env.push((
@@ -2510,7 +2511,7 @@ fn kea_dhcp4_first(ctx: &Ctx, dir: &Path) -> Result<Value, String> {
 }
 
 // What: set the keys the stack owns in a kea-dhcp4 config.
-// Why: socket, hook, DDNS link and logs must match the image.
+// Why: socket, hook, DDNS, logs must match the image.
 // From: Issue #815 | Issue #1683
 fn kea_dhcp4_own(conf: &mut Value, hook: &Path, domain: &str, ddns: bool) -> Result<(), String> {
     let dhcp4 = conf
@@ -3015,7 +3016,7 @@ const NGINX_PASSTHROUGH_RELAY: u16 = 9446;
 const NGINX_MITM_PORT: u16 = 8444;
 
 // What: rendered nginx paths below NGINX_DIR.
-// Why: ci.sh validate reads these names; one path owner.
+// Why: the rendered nginx layout has one path owner.
 // From: Issue #1683 | PR #1912
 const NGINX_CA_DIR: &str = "ssl/ca";
 const NGINX_CERT_DIR: &str = "ssl/certs";
