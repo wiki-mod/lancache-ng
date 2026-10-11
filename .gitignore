@@ -43,9 +43,8 @@ config/prod/*.local.env
 .DS_Store
 Thumbs.db
 
-# Rust build artifacts
-# What: one root /target/, replacing 4 per-crate entries.
-# Why: a real workspace builds into one shared target dir.
+# What: ignores the one workspace build dir /target/.
+# Why: the Cargo workspace builds into one target dir.
 # From: Issue #1095
 /target/
 
