@@ -4014,14 +4014,15 @@ CASES
     [ "${status}" -eq 0 ] && [ "${output}" = "$(printf 'long-ok\ntoo-long\nempty')" ] || { echo "length: ${output}"; return 1; }
 }
 
-# What: rpm conflicts per distro; engine sets run the guard
-# Why: legacy Docker blocks Docker CE; Fedora keeps podman
+# What: rpm repo, conflicts and install set per distro
+# Why: Docker CE needs its repo; legacy Docker blocks it
 # From: PR #429
-@test "setup rpm docker conflicts per distro and install set" {
-    local root t="${BATS_TEST_TMPDIR}" p
+@test "setup rpm docker repo, conflicts and install set per distro" {
+    local root p
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}" || return 1
-    export RPMDB="${t}/rpmdb" RBIN="${t}/bin" OTHER OSID
+    export RPMDB RBIN DNFLOG OTHER OSID
+    RPMDB="$(_val path)" RBIN="$(_val path)" DNFLOG="$(_val path)"
     OTHER="$(_val name)" OSID="$(_val name)"
     printf '%s\n' docker docker-selinux docker-engine-selinux podman runc podman-docker "${OTHER}" > "${RPMDB}"
     _tool_stub "${RBIN}" rpm <<< 'cat "${RPMDB:?}"'
@@ -4059,6 +4060,32 @@ CASES
     _setup_sh_run 'PATH="${RBIN}:${PATH}"; install_docker_rpm dnf docker-compose-plugin; echo unreached'
     [ "${status}" -eq 1 ] && [[ "${output}" != *"conflict with these installed packages"* ]] \
         || { echo "no conflict reported as one: ${output}"; return 1; }
+    # What: https root; Fedora, RHEL own dirs, else CentOS
+    # Why: Docker publishes one .repo file per distro family
+    # From: PR #259
+    local id dir url base="" urls=""
+    for id in fedora rhel "${OSID}"; do
+        _setup_sh_run "docker_rpm_repo_url ${id}"
+        dir="${id}"; [ "${id}" != "${OSID}" ] || dir=centos
+        url="${output}"
+        [ "${status}" -eq 0 ] && [[ "${url}" == */"${dir}"/docker-ce.repo ]] \
+            || { echo "${id}: ${status} ${url} want .../${dir}/docker-ce.repo"; return 1; }
+        [ -n "${base}" ] || base="${url%/"${dir}"/docker-ce.repo}"
+        [ "${url}" = "${base}/${dir}/docker-ce.repo" ] || { echo "${id}: ${url} not under ${base}"; return 1; }
+        urls+="${url}"$'\n'
+    done
+    [[ "${base}" == https://?* ]] || { echo "repo root not https: ${base}"; return 1; }
+    # What: default set: engine, CLI, containerd, plugins
+    # Why: verify and the buildx check need all five
+    # From: PR #259
+    _tool_stub "${RBIN}" dnf <<< 'printf "%s\n" "$*" >> "${DNFLOG:?}"'
+    _tool_stub "${RBIN}" docker <<< '[ "$*" = "compose version" ]'
+    _setup_sh_run 'PATH="${RBIN}:${PATH}"; install_docker_rpm dnf'
+    [ "${status}" -eq 0 ] || { echo "default install: ${output}"; return 1; }
+    url="$(sed -n 's/^config-manager --add-repo //p' "${DNFLOG}")"
+    [ -n "${url}" ] && grep -qxF -- "${url}" <<< "${urls}" || { echo "repo ${url} not one of: ${urls}"; return 1; }
+    [ "$(sed -n '$p' "${DNFLOG}")" = "install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin" ] \
+        || { echo "default set: $(cat "${DNFLOG}")"; return 1; }
 }
 
 @test "setup dhcp mode, compose profiles and dnsmasq templates" {

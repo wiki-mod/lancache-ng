@@ -29,8 +29,19 @@ AUTO_UPDATE_TIMER_UNIT="lancache-auto-update.timer"
 DEFAULT_INSTALL_DIR="/opt/lancache-ng"
 BACKUP_ROOT="${LANCACHE_BACKUP_ROOT:-/var/backups/lancache-ng}"
 LANCACHE_REPO_URL="https://github.com/wiki-mod/lancache-ng"
+# What: UI session TTL default and its one-year cap
+# Why: setup.sh refuses a TTL the ui would reject
 DEFAULT_UI_SESSION_TTL_SECONDS=86400
 MAX_UI_SESSION_TTL_SECONDS=31536000
+# What: Docker's repo root and Docker CE package names
+# Why: apt, rpm, conflict guard and prompts share them
+# From: Issue #1683 | PR #1858
+DOCKER_REPO_URL="https://download.docker.com/linux"
+DOCKER_COMPOSE_PLUGIN="docker-compose-plugin"
+DOCKER_BUILDX_PLUGIN="docker-buildx-plugin"
+DOCKER_CE_CLI="docker-ce-cli"
+DOCKER_CE_PACKAGES=(docker-ce "$DOCKER_CE_CLI" containerd.io)
+DOCKER_RPM_PACKAGES=("${DOCKER_CE_PACKAGES[@]}" "$DOCKER_BUILDX_PLUGIN" "$DOCKER_COMPOSE_PLUGIN")
 
 # ── Colors (only when connected to a terminal) ────────────────────────────────
 if [[ -t 1 ]]; then
@@ -532,8 +543,8 @@ apt_docker_compose_is_v2() {
 # Why: rc != 0 is a lookup error, never "not found"
 # From: Issue #1683 | PR #1858
 apt_compose_package() {
-    if apt_package_available docker-compose-plugin; then
-        printf '%s\n' docker-compose-plugin
+    if apt_package_available "$DOCKER_COMPOSE_PLUGIN"; then
+        printf '%s\n' "$DOCKER_COMPOSE_PLUGIN"
     elif apt_package_available docker-compose-v2; then
         printf '%s\n' docker-compose-v2
     elif apt_package_available docker-compose && apt_docker_compose_is_v2; then
@@ -547,8 +558,8 @@ apt_compose_package() {
 # Why: Buildx is optional here; a lookup error still dies
 # From: Issue #1683 | PR #1858
 apt_buildx_package() {
-    if apt_package_available docker-buildx-plugin; then
-        printf '%s\n' docker-buildx-plugin
+    if apt_package_available "$DOCKER_BUILDX_PLUGIN"; then
+        printf '%s\n' "$DOCKER_BUILDX_PLUGIN"
     elif apt_package_available docker-buildx; then
         printf '%s\n' docker-buildx
     fi
@@ -579,7 +590,7 @@ ensure_apt_docker_client() {
     fi
 
     command -v docker >/dev/null 2>&1 \
-        || die "Docker client binary is missing after installation. Install docker-cli or docker-ce-cli manually, then rerun setup.sh."
+        || die "Docker client binary is missing after installation. Install docker-cli or ${DOCKER_CE_CLI} manually, then rerun setup.sh."
 }
 
 # What: one /etc/os-release field, empty if absent
@@ -595,7 +606,7 @@ os_release_field() {
 # What: adds Docker's apt repo when no Compose v2 package
 # Why: the distro index may lack a supported package
 install_docker_apt_repo() {
-    local os_id="" codename="" repo_file="" dpkg_arch=""
+    local os_id="" codename="" repo_file="" dpkg_arch="" key_dir="" key_file=""
 
     os_id=$(os_release_field ID) || exit $?
     codename=$(os_release_field VERSION_CODENAME) || exit $?
@@ -614,20 +625,23 @@ install_docker_apt_repo() {
         || die "Could not determine the apt distribution codename. Please install Docker and Docker Compose manually, then rerun setup.sh."
 
     repo_file="/etc/apt/sources.list.d/docker.list"
+    key_dir="/etc/apt/keyrings"
+    key_file="$key_dir/docker.gpg"
     # What: each repo setup step dies with its own cause
     # Why: set -e is off under the caller's || die
     # From: Issue #1683 | PR #1858
     apt-get update -y || die "apt-get update failed (exit $?); Docker's repository was not added."
     apt-get install -y --no-install-recommends ca-certificates curl gnupg \
         || die "Failed to install ca-certificates, curl and gnupg (exit $?)."
-    install -m 0755 -d /etc/apt/keyrings || die "Failed to create /etc/apt/keyrings (exit $?)."
-    curl -fsSL "https://download.docker.com/linux/${os_id}/gpg" \
-        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    install -m 0755 -d "$key_dir" || die "Failed to create $key_dir (exit $?)."
+    curl -fsSL "$DOCKER_REPO_URL/$os_id/gpg" \
+        | gpg --dearmor -o "$key_file" \
         || die "Failed to install Docker's apt signing key (exit $?)."
-    chmod a+r /etc/apt/keyrings/docker.gpg || die "Failed to make Docker's apt signing key readable (exit $?)."
+    chmod a+r "$key_file" || die "Failed to make Docker's apt signing key readable (exit $?)."
     dpkg_arch=$(dpkg --print-architecture) || die "dpkg --print-architecture failed (exit $?)."
-    printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/%s %s stable\n' \
-        "$dpkg_arch" "$os_id" "$codename" > "$repo_file" || die "Failed to write $repo_file (exit $?)."
+    printf 'deb [arch=%s signed-by=%s] %s/%s %s stable\n' \
+        "$dpkg_arch" "$key_file" "$DOCKER_REPO_URL" "$os_id" "$codename" > "$repo_file" \
+        || die "Failed to write $repo_file (exit $?)."
     apt-get update -y || die "apt-get update failed after adding Docker's repository (exit $?)."
 }
 
@@ -651,8 +665,8 @@ install_docker_apt() {
     # Why: docker buildx is needed before the first pull
     buildx_package=$(apt_buildx_package) || die "Cannot look up the Buildx apt package (exit $?)."
 
-    if [[ "$compose_package" = docker-compose-plugin ]]; then
-        docker_packages=(docker-ce docker-ce-cli containerd.io "$compose_package")
+    if [[ "$compose_package" = "$DOCKER_COMPOSE_PLUGIN" ]]; then
+        docker_packages=("${DOCKER_CE_PACKAGES[@]}" "$compose_package")
         [[ -n "$buildx_package" ]] && docker_packages+=("$buildx_package")
         apt-get install -y --no-install-recommends "${docker_packages[@]}" \
             || die "Failed to install ${docker_packages[*]} (exit $?)."
@@ -764,19 +778,16 @@ guard_rpm_docker_conflicts() {
     die "Docker's RPM packages conflict with these installed packages: ${conflicts[*]}. Remove them first (for example: dnf remove ${conflicts[*]}), then rerun setup.sh."
 }
 
-# What: picks Docker's rpm repo URL by os-release ID
+# What: Docker's rpm repo URL for one os-release ID
 # Why: Fedora, RHEL own repos; other RHEL use CentOS
+# From: PR #259
 docker_rpm_repo_url() {
-    local os_id
-    os_id=$(os_release_field ID) || exit $?
-
-    if [[ "$os_id" = fedora ]]; then
-        printf '%s\n' "https://download.docker.com/linux/fedora/docker-ce.repo"
-    elif [[ "$os_id" = rhel ]]; then
-        printf '%s\n' "https://download.docker.com/linux/rhel/docker-ce.repo"
-    else
-        printf '%s\n' "https://download.docker.com/linux/centos/docker-ce.repo"
-    fi
+    local dir
+    case "$1" in
+        fedora|rhel) dir="$1" ;;
+        *) dir=centos ;;
+    esac
+    printf '%s/%s/docker-ce.repo\n' "$DOCKER_REPO_URL" "$dir"
 }
 
 # What: installs Docker via Docker's own rpm repo
@@ -784,28 +795,28 @@ docker_rpm_repo_url() {
 install_docker_rpm() {
     local manager="$1"
     shift
-    local repo_url needs_engine=0 package
+    local repo_url os_id needs_engine=0 package docker_package
     local packages=("$@")
 
     if (( ${#packages[@]} == 0 )); then
         # What: default set adds buildx and compose plugins
         # Why: full install satisfies the buildx check
-        packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+        packages=("${DOCKER_RPM_PACKAGES[@]}")
     fi
 
     for package in "${packages[@]}"; do
-        case "$package" in
-            docker-ce|docker-ce-cli|containerd.io|docker-buildx-plugin|docker-compose-plugin)
+        for docker_package in "${DOCKER_RPM_PACKAGES[@]}"; do
+            if [[ "$package" = "$docker_package" ]]; then
                 needs_engine=1
-                break
-                ;;
-        esac
+            fi
+        done
     done
     if (( needs_engine )); then
         guard_rpm_docker_conflicts
     fi
 
-    repo_url=$(docker_rpm_repo_url) || die "Cannot resolve Docker's rpm repository (exit $?)."
+    os_id=$(os_release_field ID) || exit $?
+    repo_url=$(docker_rpm_repo_url "$os_id")
     # What: each package step dies with its own cause
     # Why: set -e is off under the caller's || die
     # From: Issue #1683 | PR #1858
@@ -831,13 +842,14 @@ install_docker_compose() {
 
     if command -v apt-get >/dev/null 2>&1; then
         print_warn "Docker Compose plugin missing."
-        printf "  Required package: an available Compose v2 package (docker-compose-plugin, docker-compose-v2, or docker-compose)\n"
+        printf "  Required package: an available Compose v2 package (%s, docker-compose-v2, or docker-compose)\n" \
+            "$DOCKER_COMPOSE_PLUGIN"
         if ! confirm "Install this package now? [y/N]" "N"; then
             die "Aborted. Please install a Docker Compose v2 package manually, then rerun setup.sh."
         fi
         install_docker_compose_apt || die "Failed to install Docker Compose."
     elif command -v dnf >/dev/null 2>&1; then
-        packages=(docker-compose-plugin)
+        packages=("$DOCKER_COMPOSE_PLUGIN")
         print_warn "Docker Compose plugin missing."
         printf "  Required packages: %s\n" "${packages[*]}"
         printf "  Docker's RPM repository will be configured before installation.\n"
@@ -846,7 +858,7 @@ install_docker_compose() {
         fi
         install_docker_rpm dnf "${packages[@]}" || die "Failed to install Docker Compose."
     elif command -v yum >/dev/null 2>&1; then
-        packages=(docker-compose-plugin)
+        packages=("$DOCKER_COMPOSE_PLUGIN")
         print_warn "Docker Compose plugin missing."
         printf "  Required packages: %s\n" "${packages[*]}"
         printf "  Docker's RPM repository will be configured before installation.\n"
@@ -870,13 +882,14 @@ install_docker() {
 
     if command -v apt-get >/dev/null 2>&1; then
         print_warn "Docker is missing."
-        printf "  Required packages: docker.io, an available Compose v2 package (docker-compose-plugin, docker-compose-v2, or docker-compose), and Buildx (docker-buildx-plugin or docker-buildx) when this apt index has one\n"
+        printf "  Required packages: docker.io, an available Compose v2 package (%s, docker-compose-v2, or docker-compose), and Buildx (%s or docker-buildx) when this apt index has one\n" \
+            "$DOCKER_COMPOSE_PLUGIN" "$DOCKER_BUILDX_PLUGIN"
         if ! confirm "Install these packages now? [y/N]" "N"; then
             die "Aborted. Please install Docker and a Docker Compose v2 package manually, then rerun setup.sh."
         fi
         install_docker_apt || die "Failed to install Docker."
     elif command -v dnf >/dev/null 2>&1; then
-        packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+        packages=("${DOCKER_RPM_PACKAGES[@]}")
         print_warn "Docker is missing."
         printf "  Required packages: %s\n" "${packages[*]}"
         printf "  Docker's RPM repository will be configured before installation.\n"
@@ -885,7 +898,7 @@ install_docker() {
         fi
         install_docker_rpm dnf || die "Failed to install Docker."
     elif command -v yum >/dev/null 2>&1; then
-        packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+        packages=("${DOCKER_RPM_PACKAGES[@]}")
         print_warn "Docker is missing."
         printf "  Required packages: %s\n" "${packages[*]}"
         printf "  Docker's RPM repository will be configured before installation.\n"
@@ -2367,7 +2380,7 @@ assert_resolved_image_tag_platform_supported() {
     command -v docker >/dev/null 2>&1 \
         || die "docker is required to verify that image tag '${tag}' publishes a ${platform} image before continuing."
     buildx_out=$(docker buildx version 2>&1) \
-        || die "docker buildx is required to verify that image tag '${tag}' publishes a ${platform} image before continuing (exit $?: ${buildx_out}). Install the docker-buildx-plugin package, then rerun setup.sh."
+        || die "docker buildx is required to verify that image tag '${tag}' publishes a ${platform} image before continuing (exit $?: ${buildx_out}). Install the ${DOCKER_BUILDX_PLUGIN} package, then rerun setup.sh."
 
     image="${registry}/${prefix}/dns:${tag}"
 
@@ -2862,7 +2875,7 @@ lancache_channel_image_refs() {
     command -v docker >/dev/null \
         || die "Docker is required to resolve LANCACHE_IMAGE_CHANNEL=${channel}."
     buildx_out=$(docker buildx version 2>&1) \
-        || die "docker buildx is required to resolve LANCACHE_IMAGE_CHANNEL=${channel} (exit $?: ${buildx_out}). Install the docker-buildx-plugin package, then rerun setup.sh."
+        || die "docker buildx is required to resolve LANCACHE_IMAGE_CHANNEL=${channel} (exit $?: ${buildx_out}). Install the ${DOCKER_BUILDX_PLUGIN} package, then rerun setup.sh."
 
     printf "\n${BOLD}${CYAN}▶ Resolving image channel %s${RESET}\n" "$channel" >&2
     while [[ "$n" -le "$max" ]]; do
