@@ -30,14 +30,26 @@ and a case that fails (AG-INT-002).
 `docs/validation-state.json` is the validation record. Its path and the
 governance paths come from the `release:` block of the SOT
 `.github/yaml/build-manifest.yml` (`validation_state`, `governance_paths`).
-It holds:
+It holds only records:
 
 - `last_stack_validation` and `last_ci_validation`: `commit`, `date`,
   `validator`, `scope`, `summary` and `evidence_ref` of the last completed
-  run per layer. A `null` commit means never validated.
-- `subsystem_validation.<name>`: `path_prefixes` (git pathspecs), `layer`
-  (`stack` or `ci`), `commit`, `date`, `validator`, `evidence_ref`.
-- `full_invalidation_triggers`: the cases that make every record stale.
+  run per layer.
+- `subsystem_validation.<build target>`: `commit`, `date`, `validator`,
+  `evidence_ref` per SOT build target (product service or toolchain).
+
+A missing record or a `null` commit means never validated. The scope of a
+record comes from the SOT, not from the record:
+
+- a build target: its `context` and the paths of its `dependency_graph`
+  contexts, the list `plan` uses (`_ci_target_paths`);
+- a layer: the `pr_labels` path class that `release.validation_layers` names
+  (`stack`: `setup`, `ci`: `ci`).
+
+A record is stale when content under its scope or a governance path changed
+since its commit, when its commit is not an ancestor of the commit under
+test, or when its key names no SOT target or layer. A scope path that matches
+no tracked file stops the gate with `[CI-ERROR-RELEASE-0051]`.
 
 The AG-REL-011 gate reports which records are stale for a commit:
 

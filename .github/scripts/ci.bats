@@ -4825,3 +4825,45 @@ CASES
         [[ "${output}" != *"branch=\"${b}\""* ]] || { echo "long-lived ${b} reported: ${output}"; return 1; }
     done
 }
+
+# What: release gate staleness per SOT target and layer
+# Why: AG-REL-011: a changed target or ci.sh must not ship
+# From: Issue #1683 | PR #1858
+@test "release gate: SOT scope per target and layer, dead path, unknown and missing record" {
+    local root r st layers targets svc ctx f doc x y extra
+    local -a commit
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" r="$(_val path)" extra="$(_val name)"
+    st="$(_ci_block_entry_field release "" validation_state)" && layers="$(_ci_block_keys release/validation_layers all)" \
+        && targets="$(ci_build_targets)" || { echo "SOT: ${st} ${layers} ${targets}"; return 1; }
+    svc="$(ci_services | awk 'NR == 1')" && ctx="$(_ci_required_field "${svc}" context)" || { echo "SOT ${svc}: ${ctx}"; return 1; }
+    _checkout_copy "${root}" "${r}" && git -C "${r}" init -q && git -C "${r}" add -A || return 1
+    commit=(git -C "${r}" -c user.email="$(_val name)@$(_val host)" -c user.name="$(_val name)" commit -q -a -m)
+    "${commit[@]}" X && x="$(git -C "${r}" rev-parse HEAD)" || return 1
+    jq -n --arg x "${x}" --arg l "${layers}" --arg t "${targets}" '
+        reduce ($l | split("\n")[] | select(length > 0)) as $n ({}; .["last_\($n)_validation"] = {commit: $x})
+        | .subsystem_validation = reduce ($t | split("\n")[] | select(length > 0)) as $n ({}; .[$n] = {commit: $x})' \
+        > "${r}/${st}" && git -C "${r}" add -A && "${commit[@]}" records && y="$(git -C "${r}" rev-parse HEAD)" || return 1
+    CI_REPO_ROOT="${r}" run _ci_release_validation_valid
+    _expect fresh 0 "release-validation=fresh target=${y}" || return 1
+    doc="$(git -C "${r}" ls-files -- 'docs/*.md' | awk 'NR == 1')" && f="$(git -C "${r}" ls-files -- "${ctx}" | awk 'NR == 1')" \
+        && [ -n "${doc}" ] && [ -n "${f}" ] || { echo "fixture files: ${doc} ${f}"; return 1; }
+    printf '%s\n' "$(_val name)" >> "${r}/${doc}" && "${commit[@]}" doc || return 1
+    CI_REPO_ROOT="${r}" run _ci_release_validation_valid
+    _expect docs-only 0 "release-validation=fresh" || return 1
+    git -C "${r}" reset -q --hard "${y}" && printf '%s\n' "$(_val name)" >> "${r}/${f}" && "${commit[@]}" target || return 1
+    CI_REPO_ROOT="${r}" run _ci_release_validation_valid
+    _expect target 1 "[CI-ERROR-RELEASE-0017];${svc}: ${ctx} changed since ${x}" || return 1
+    git -C "${r}" reset -q --hard "${y}" && printf 'true\n' >> "${r}/.github/scripts/ci.sh" && "${commit[@]}" ci || return 1
+    CI_REPO_ROOT="${r}" run _ci_release_validation_valid
+    _expect ci-layer 1 "[CI-ERROR-RELEASE-0017];.github/scripts/" || return 1
+    git -C "${r}" reset -q --hard "${y}" && git -C "${r}" rm -q -r -- "${ctx}" && "${commit[@]}" gone || return 1
+    CI_REPO_ROOT="${r}" run _ci_release_validation_valid
+    _expect dead-scope 2 "[CI-ERROR-RELEASE-0051];${ctx}" || return 1
+    git -C "${r}" reset -q --hard "${y}" || return 1
+    jq --arg e "${extra}" --arg s "${svc}" '.subsystem_validation[$e] = .subsystem_validation[$s] | del(.subsystem_validation[$s])' \
+        "${r}/${st}" > "${r}/${st}.new" && mv "${r}/${st}.new" "${r}/${st}" && "${commit[@]}" keys || return 1
+    CI_REPO_ROOT="${r}" run _ci_release_validation_valid
+    _expect keys 1 "[CI-ERROR-RELEASE-0017]" || return 1
+    [[ "${output}" == *"${extra}: no SOT target of that name"* && "${output}" == *"${svc}: never validated"* ]] \
+        || { echo "keys: ${output}"; return 1; }
+}

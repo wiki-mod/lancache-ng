@@ -556,20 +556,31 @@ _ci_paths_touch() {
     return 1
 }
 
+# What: the repo paths one build target is built from
+# Why: plan and the release gate read one path list
+# From: Issue #1683 | PR #1858
+_ci_target_paths() {
+    local target="$1" context ctx ctx_path ctxs
+    context="$(_ci_required_field "${target}" context)" || return 2
+    printf '%s\n' "${context}"
+    ctxs="$(ci_service_contexts "${target}")" || return 2
+    for ctx in ${ctxs}; do
+        ctx_path="$(ci_context_path "${ctx}")" || return 2
+        [ -z "${ctx_path}" ] || printf '%s\n' "${ctx_path}"
+    done
+}
+
 # What: True if a target's contexts touch changed paths.
 # Why: One candidate rule for plan and Base-CI matrix.
 # From: Issue #1683
 _ci_plan_candidate() {
-    local service="$1"; shift
-    local context ctx ctx_path ctxs
-    context="$(_ci_required_field "${service}" context)" || return 2
-    _ci_paths_touch "${context}" "$@" && return 0
-    ctxs="$(ci_service_contexts "${service}")" || return 2
-    for ctx in ${ctxs}; do
-        ctx_path="$(ci_context_path "${ctx}")" || return 2
-        [ -n "${ctx_path}" ] || continue
-        _ci_paths_touch "${ctx_path}" "$@" && return 0
-    done
+    local service="$1" paths p
+    shift
+    paths="$(_ci_target_paths "${service}")" || return 2
+    while IFS= read -r p; do
+        [ -n "${p}" ] || continue
+        _ci_paths_touch "${p}" "$@" && return 0
+    done <<< "${paths}"
     return 1
 }
 
@@ -4787,11 +4798,41 @@ _ci_release_record_stale() {
     done
 }
 
+# What: the scope paths of one validation record
+# Why: a layer owns a pr_labels class, a target its paths
+# From: Issue #1683 | PR #1858
+_ci_release_scope() {
+    local kind="$1" name="$2" class
+    if [ "${kind}" = target ]; then
+        _ci_target_paths "${name}"
+        return "$?"
+    fi
+    class="$(_ci_block_entry_field release validation_layers "${name}")" || return 2
+    if [ -z "${class}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0049]" "layer=\"${name}\" reason=\"SOT release.validation_layers names no pr_labels class\""
+        return 2
+    fi
+    _ci_block_entry_list pr_labels "" "${class}"
+}
+
+# What: scope paths that match no tracked file
+# Why: a gone path would read as unchanged forever
+# From: Issue #1683 | PR #1858
+_ci_release_dead_paths() {
+    local p hit
+    while IFS= read -r p; do
+        [ -n "${p}" ] || continue
+        hit="$(_ci_capture 0 git -C "${CI_REPO_ROOT}" ls-files -- "${p}")" || return 2
+        [ -n "${hit}" ] || printf '%s\n' "${p}"
+    done <<< "$1"
+}
+
 # What: AG-REL-011 verdict over the SOT validation record.
 # Why: a stale or invalidated record must never ship.
-# From: Issue #1683
+# From: Issue #1683 | PR #1858
 _ci_release_validation_valid() {
-    local rel gov state target layer sub commit paths rows stale="" out
+    local rel gov state target stale="" out dead="" rows layers targets name commit scope kind
+    local -A rec=()
     rel="$(_ci_block_entry_field release "" validation_state)" || return 2
     gov="$(_ci_block_entry_list release "" governance_paths)" || return 2
     target="$(_ci_head_commit)" || return 2
@@ -4800,26 +4841,55 @@ _ci_release_validation_valid() {
         ci_log "[CI-ERROR-RELEASE-0014]" "state=\"${state}\" reason=\"no readable SOT validation record\""
         return 2
     fi
-    gov="${gov//$'\n'/ }"
-    local lcommit
-    for layer in last_stack_validation last_ci_validation; do
-        if ! lcommit="$(jq -r --arg l "${layer}" '.[$l].commit' "${state}" 2>&1)"; then
-            ci_error "[CI-ERROR-RELEASE-0022]" "state=\"${state}\" layer=\"${layer}\" reason=\"validation layer commit unreadable\"" "${lcommit}"
-            return 2
-        fi
-        out="$(_ci_release_record_stale "${layer}" "${lcommit}" "${target}" "" "${gov}")" || return 2
-        stale+="${out:+${out}$'\n'}"
-    done
-    if ! rows="$(jq -r '.subsystem_validation | to_entries[] | select(.key | startswith("_") | not)
-        | [.key, (.value.commit // "null"), (.value.path_prefixes | join(" "))] | @tsv' "${state}" 2>&1)"; then
-        ci_error "[CI-ERROR-RELEASE-0023]" "state=\"${state}\" reason=\"subsystem validation rows unreadable\"" "${rows}"
+    layers="$(_ci_block_keys release/validation_layers all)" || return 2
+    if [ -z "${layers}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0052]" "reason=\"SOT release.validation_layers lists no layer\""
         return 2
     fi
-    while IFS=$'\t' read -r sub commit paths; do
-        [ -n "${sub}" ] || continue
-        out="$(_ci_release_record_stale "${sub}" "${commit}" "${target}" "${paths}" "${gov}")" || return 2
-        stale+="${out:+${out}$'\n'}"
+    targets="$(ci_build_targets)" || return 2
+    if ! rows="$(jq -r '(.subsystem_validation | to_entries[] | ["target", .key, (.value.commit // "null")]),
+        (to_entries[] | select(.key | test("^last_.+_validation$"))
+            | ["layer", (.key | sub("^last_"; "") | sub("_validation$"; "")), (.value.commit // "null")])
+        | @tsv' "${state}" 2>&1)"; then
+        ci_error "[CI-ERROR-RELEASE-0023]" "state=\"${state}\" reason=\"validation records unreadable\"" "${rows}"
+        return 2
+    fi
+    while IFS=$'\t' read -r kind name commit; do
+        [ -n "${kind}" ] && rec["${kind}/${name}"]="${commit}"
     done <<< "${rows}"
+    # What: a record whose key the SOT no longer knows
+    # Why: a removed target or layer must not stay silent
+    # From: Issue #1683 | PR #1858
+    for name in "${!rec[@]}"; do
+        kind="${name%%/*}"
+        local known="${layers}"
+        [ "${kind}" = layer ] || known="${targets}"
+        [[ $'\n'"${known}"$'\n' == *$'\n'"${name#*/}"$'\n'* ]] && continue
+        stale+="${name#*/}: no SOT ${kind} of that name"$'\n'
+    done
+    out="$(_ci_release_dead_paths "${gov}")" || return 2
+    dead+="${out:+${out}$'\n'}"
+    gov="${gov//$'\n'/ }"
+    for kind in layer target; do
+        local names="${layers}"
+        [ "${kind}" = layer ] || names="${targets}"
+        while IFS= read -r name; do
+            [ -n "${name}" ] || continue
+            scope="$(_ci_release_scope "${kind}" "${name}")" || return 2
+            if [ -z "${scope}" ]; then
+                ci_log "[CI-ERROR-RELEASE-0050]" "${kind}=\"${name}\" reason=\"empty validation scope\""
+                return 2
+            fi
+            out="$(_ci_release_dead_paths "${scope}")" || return 2
+            dead+="${out:+${out}$'\n'}"
+            out="$(_ci_release_record_stale "${name}" "${rec["${kind}/${name}"]:-null}" "${target}" "${scope//$'\n'/ }" "${gov}")" || return 2
+            stale+="${out:+${out}$'\n'}"
+        done <<< "${names}"
+    done
+    if [ -n "${dead}" ]; then
+        ci_error "[CI-ERROR-RELEASE-0051]" "target=\"${target}\" reason=\"validation scope path matches no tracked file\"" "${dead}"
+        return 2
+    fi
     if [ -n "${stale}" ]; then
         ci_error "[CI-ERROR-RELEASE-0017]" "reason=\"validation record stale (AG-REL-011)\"" "${stale}"
         return 1

@@ -605,6 +605,12 @@ release:
   # From: Issue #1683
   validation_state: docs/validation-state.json
   governance_paths: [AGENTS.md, .github/AGENTS.md]
+  # What: the pr_labels path class each layer record covers
+  # Why: setup.sh, deploy and ci.sh changes stale a layer
+  # From: Issue #1683 | PR #1858
+  validation_layers:
+    stack: setup
+    ci: ci
   channels:
     nightly:
       mutable: true
@@ -647,7 +653,7 @@ release:
     deletion_policy: manual-or-approved-automation-only
     unaggregated_grace_minutes: 1440
 
-# What: PR labels by changed path: area rules plus labels.
+# What: path classes for PR labels and validation layers
 # Why: service/toolchain labels apply under their context.
 # From: Issue #1683 | PR #1858
 pr_labels:
