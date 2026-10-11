@@ -12025,16 +12025,14 @@ _ci_check_setup_keys_kea() {
     printf 'setup-keys-kea=clean\n'
 }
 
-# What: Fail unless update pauses/guards before mutation.
-# Why: AG-OP-010 validation-before-mutation; prebuilt first.
+# What: update pauses convergence before it mutates
+# Why: AG-OP-010; systemd paths have no hermetic test
 # From: Issue #1683
 _ci_check_setup_update_safety() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local su pause_out
     local -a viol=()
     su="$(_ci_installer "${repo_root}")" || return 2
-    awk '/This script must be run as root/{r=1} r&&/assert_prebuilt_image_platform_supported/{g=1} r&&!g&&/(install_docker|systemctl enable --now docker)/{f=1} END{exit f?0:1}' "${su}" \
-        && viol+=("prebuilt platform guard must run before Docker install or daemon startup")
     # What: no flow mutates install state before its pause.
     # Why: per function; the cmd_update window went stale.
     # From: Issue #1683 | PR #1858
@@ -12056,8 +12054,6 @@ _ci_check_setup_update_safety() {
         || viol+=("update must stop the active convergence service before mutating install state")
     awk '/if ! \( cmd_backup --config "\$install_dir" \); then/{b=1;next} b&&/resume_lancache_convergence_after_update true/{r=1} b&&/die "Pre-update rollback backup failed/{d=1;b=0} END{exit r&&d?0:1}' "${su}" \
         || viol+=("update must restore the convergence timer when the rollback backup fails")
-    awk '/^cmd_update_ip\(\) \{/{u=1;g=0;next} /^# .*backup subcommand/{u=0} u&&/assert_prebuilt_image_platform_supported/{g=1} u&&!g&&/(sed -i|docker compose -f|stack_compose[[:space:]])/{f=1} END{exit f?0:1}' "${su}" \
-        && viol+=("update-ip must check prebuilt platform support before mutating config")
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0103]" "reason=\"setup.sh update-migration safety contract violated\"" "$(printf '%s\n' "${viol[@]}")"
         return 1

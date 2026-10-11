@@ -944,6 +944,10 @@ ensure_stack_requirements_installed() {
     local info out
     [[ "$(id -u)" = "0" ]] \
         || die "This command must be run as root (sudo ./setup.sh install-requirements-primary or install-requirements-secondary)."
+    # What: refuses an unsupported arch before any install
+    # Why: no host change on a host the stack cannot run on
+    # From: Issue #1683 | PR #1858
+    assert_prebuilt_image_platform_supported
 
     if ! command -v curl >/dev/null 2>&1; then
         install_curl
@@ -4727,6 +4731,10 @@ update_resume_handoff() {
 # Why: reordering can leave a half-migrated stack running
 perform_stack_update_flow() {
     local install_dir="$1"
+    # What: refuses an unsupported arch before any change
+    # Why: the quickstart migration below already mutates
+    # From: Issue #1683 | PR #1858
+    assert_prebuilt_image_platform_supported
     if is_quickstart_install "$install_dir"; then
         migrate_quickstart_install "$install_dir" || exit $?
         install_dir="${PROD_COMPOSE%/*}"
@@ -4734,7 +4742,6 @@ perform_stack_update_flow() {
     install_dir=$(resolve_stack_dir "$install_dir") || exit $?
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die_no_stack_found "$install_dir"
-    assert_prebuilt_image_platform_supported
     # What: installs curl, dig and jq before any mutation
     # Why: the functional health gate must not silently skip
     install_missing_tools curl dig jq
@@ -6529,8 +6536,6 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     [[ "$(id -u)" = "0" ]] \
         || die "This script must be run as root (sudo ./setup.sh install)."
 
-    assert_prebuilt_image_platform_supported
-
     ensure_stack_requirements_installed
 
     if [[ ! -f "$PROD_COMPOSE" ]]; then
@@ -7533,7 +7538,6 @@ ask "Start now? [Y/n]" "Y"
 # Why: failed first installs stay reversible
 print_step "Pulling images"
 cd "$INSTALL_DIR"
-assert_prebuilt_image_platform_supported
 stack_compose "$INSTALL_DIR" "$ENV_LOCAL" pull \
     || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh."
 

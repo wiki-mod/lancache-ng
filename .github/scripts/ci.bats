@@ -4108,6 +4108,13 @@ _pm_path() {
     printf '%s\n' "${dir}"
 }
 
+# What: runs a setup.sh snippet; answers come on fd 9
+# Why: the real ask path reads list-prompts answers there
+# From: Issue #1683 | PR #1858
+_pm_run() {
+    _setup_sh_run "WIZARD_INTROSPECT_MODE=1; WIZARD_INTROSPECT_ANSWERS_FD=9; exec 9<\"\${ANS:?}\"; PATH='$1'; $2"
+}
+
 # What: Docker installs per manager, answer and install set
 # Why: one detection order; nothing installs without a yes
 # From: Issue #1683 | PR #1858
@@ -4121,11 +4128,11 @@ _pm_path() {
     ce="docker-ce docker-ce-cli containerd.io"
     rpmset="${ce} docker-buildx-plugin docker-compose-plugin"
     # What: runs a snippet on stand-ins with one answer
-    # Why: the real ask path reads answers from fd 9
+    # Why: each row needs a fresh PATH, answer and call log
     _pm_try() {
         p="$(_pm_path "${@:3}")" || return 1
         printf '%s\n' "$1" > "${ANS}" && : > "${CALLS}" || return 1
-        _setup_sh_run "WIZARD_INTROSPECT_MODE=1; WIZARD_INTROSPECT_ANSWERS_FD=9; exec 9<\"\${ANS}\"; PATH='${p}'; $2"
+        _pm_run "${p}" "$2"
         calls="$(sed -E 's|--add-repo [^ ]+|--add-repo <repo>|' "${CALLS}")"
     }
     # What: checks rc and recorded calls of the last run
@@ -4579,3 +4586,38 @@ CASES
     done < <(tr ',' '\n' <<< "${profiles}" | awk 'NF')
 }
 
+
+# What: each flow checks the host arch before a change
+# Why: no change on a host the stack cannot run on
+# From: Issue #1683 | PR #1858
+@test "setup flows refuse an unsupported arch before any change" {
+    local root p dir flow tool
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}" || return 1
+    export CALLS ANS ARCH LANCACHE_BACKUP_ROOT
+    CALLS="$(_val path)" ANS="$(_val path)" LANCACHE_BACKUP_ROOT="$(_val path)" dir="$(_val path)"
+    : > "${ANS}"
+    mkdir -p "${dir}" && : > "${dir}/docker-compose.yml" && : > "${dir}/.env" || return 1
+    p="$(_pm_path systemctl)" || return 1
+    _tool_stub "${p}" docker <<< 'printf "docker %s\n" "$*" >> "${CALLS:?}"' || return 1
+    _tool_stub "${p}" uname <<< 'printf "%s\n" "${ARCH:?}"' || return 1
+    _tool_stub "${p}" id <<< 'echo 0' || return 1
+    for tool in realpath basename dirname; do
+        ln -s "$(type -P "${tool}")" "${p}/${tool}" || return 1
+    done
+    for flow in ensure_stack_requirements_installed "perform_stack_update_flow ${dir}" "cmd_update_ip ${dir}"; do
+        ARCH="$(_val name)"
+        : > "${CALLS}"
+        _pm_run "${p}" "${flow}"
+        [ "${status}" -eq 1 ] && [[ "${output}" == *"This host's architecture '${ARCH}' has no container image platform"* ]] \
+            && [ ! -s "${CALLS}" ] || { echo "${flow} ${ARCH}: rc ${status} calls [$(cat "${CALLS}")] ${output}"; return 1; }
+    done
+    # What: a supported arch passes on to the next step
+    # Why: proves the refusal comes from the arch check
+    ARCH=x86_64
+    for flow in ensure_stack_requirements_installed "perform_stack_update_flow ${root}/deploy/prod" "cmd_update_ip ${dir}"; do
+        : > "${CALLS}"
+        _pm_run "${p}" "${flow}"
+        [[ "${output}" != *"has no container image platform"* ]] || { echo "${flow} refused ${ARCH}: ${output}"; return 1; }
+    done
+}
