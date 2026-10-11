@@ -11,6 +11,17 @@ than only as inline workflow comments, and to give issue #491 ("Add
 GitHub-hosted CI fallback for non-LAN self-hosted assumptions") a real
 per-class status instead of a single yes/no answer.
 
+## Current state (CI 2.0, Issue #1683)
+
+`build-push.yml` and its runner anchors are gone. Every CI 2.0 job runs on a
+GitHub-hosted runner; self-hosted CI runners are retired, and LAN acceleration
+(Redis, distcc) stays an optional optimization. The runner label and the timeout
+of every job come from the SOT (`platform_arch.<arch>.runner`,
+`ci_job_timeouts`) through `ci.sh job-settings` in the first job of each
+workflow; the `workflow-job-settings` check rejects a literal runner or timeout
+anywhere else. `PROJECT_SELFHOSTED_RUNNER_USAGE_CI` is not read by CI 2.0. The
+sections below record the CI 1.x decisions.
+
 ## Update (issue #1095): cheap-lint class inverted -- GitHub-hosted is now primary, twins removed
 
 The "cheap lint" model described below has been inverted. Previously each

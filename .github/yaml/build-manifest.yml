@@ -1,0 +1,951 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# What: Single source of truth for CI 2.0 build inputs.
+# Why: One list ends the copied-in-many-places drift.
+# From: Issue #1683
+schema: build-manifest/v1
+
+# What: apk packages and smoke runs every image gets first.
+# Why: one shared base; images list only their extras.
+# From: Issue #1683 | PR #1858
+image_base:
+  packages:
+    - bash
+    - bc
+    - ca-certificates
+    - coreutils
+    - curl
+    - docker-cli
+    - expect
+    - findutils
+    - gettext
+    - gettext-envsubst
+    - git
+    - github-cli
+    - gnupg
+    - grep
+    - jq
+    - lsof
+    - nano
+    - parallel
+    - ripgrep
+    - sed
+    - util-linux
+    - xz
+    - zstd
+  smoke:
+    - bash --version
+    - bc --version
+    - curl --version
+    - docker --version
+    - envsubst --version
+    - expect -v
+    - find --version
+    - gettext --version
+    - gh --version
+    - git --version
+    - gpg --version
+    - grep --version
+    - jq --version
+    - lsof -v
+    - parallel --version
+    - rg --version
+    - sed --version
+    - xz --version
+    - zstd --version
+
+# What: The product services this repository builds.
+# Why: One list; matrices/scans/release derive from it.
+# From: Issue #1683
+services:
+  proxy:
+    context: services/proxy
+    labels: [proxy, nginx]
+    # What: named build contexts for COPY --from
+    # Why: proxy consumes dns' cdn-domains file
+    # From: Issue #1683
+    external_contexts:
+      - dns-domains=services/dns
+      - known-good=scripts/lib
+    build_type: apk
+    final_base: alpine
+    # What: final-image apk packages; nginx from nginx.org.
+    # Why: AG-KD-007: stream module only in nginx.org build.
+    # From: Issue #1683 | PR #1858
+    packages:
+      - openssl
+      - nginx@nginx
+    # What: nginx.org mainline repo for the base's branch.
+    # Why: ci.sh fills @ALPINE_BRANCH@ from the alpine pin.
+    # From: Issue #1683 | PR #1858
+    apk_repositories:
+      - nginx=http://nginx.org/packages/mainline/alpine/@ALPINE_BRANCH@/main
+    # What: the repo signing key and its sha256 pin.
+    # Why: the tagged repo is trusted only with this key.
+    # From: Issue #1683 | PR #1858
+    apk_keys:
+      - https://nginx.org/keys/nginx_signing.rsa.pub=ff7cf138acc09f2a5029300ab713fe6a1440605fca72e2bab76a4da9206fec87
+    # What: execute-smoke checks run post-build by ci.sh.
+    # Why: prove apk binaries run, not just exist
+    # From: Issue #1613
+    smoke:
+      - 'v="$(nginx -V 2>&1)" && grep -q -- --with-stream_ssl_preread_module <<< "${v}"'
+  dns:
+    context: services/dns
+    labels: [dns, pdns]
+    # What: named contexts for shared-secret and known-good
+    # Why: entrypoint sources scripts/lib, not embedded.
+    # From: Issue #858
+    external_contexts:
+      - shared-secret=scripts/lib
+      - known-good=scripts/lib
+    build_type: rust
+    # What: the workspace crate (cargo -p) of this service.
+    # Why: rust checks target crate not build context
+    # From: Issue #1683 | PR #1858
+    crate: nats-subscriber
+    final_base: alpine
+    # What: final-image apk packages; the SOT owns the list.
+    # Why: consumers derive; no hardcoding (AG-CI-006)
+    # From: Issue #1683
+    packages:
+      - pdns
+      - pdns-backend-sqlite3
+      - pdns-recursor-luajit
+      - bind-tools
+      - sqlite
+      - iproute2
+  watchdog:
+    context: services/watchdog
+    labels: [watchdog]
+    build_type: rust
+    # What: the workspace crate (cargo -p) of this service.
+    # Why: rust checks target crate not build context
+    # From: Issue #1683 | PR #1858
+    crate: lancache-watchdog
+    final_base: alpine
+  dhcp:
+    context: services/dhcp
+    labels: [dhcp, kea]
+    # What: named context for the shared-secret lib.
+    # Why: entrypoint sources scripts/lib, not embedded.
+    # From: Issue #858
+    external_contexts:
+      - shared-secret=scripts/lib
+    build_type: apk
+    final_base: alpine
+    # What: final-image apk packages; the SOT owns the list.
+    # Why: consumers derive; no hardcoding (AG-CI-006)
+    # From: Issue #1683
+    packages:
+      - kea-dhcp4
+      - kea-ctrl-agent
+      - kea-dhcp-ddns
+      - kea-admin
+      - kea-hook-lease-cmds
+      - nmap
+      - openssl
+      - iptables
+    # What: execute-smoke checks run post-build by ci.sh.
+    # Why: prove apk binaries run, not just exist
+    # From: Issue #1613
+    smoke:
+      - kea-dhcp4 -v
+  dhcp-proxy:
+    context: services/dhcp-proxy
+    labels: [dhcp-proxy, dnsmasq]
+    # What: named context for the known-good lib.
+    # Why: entrypoint sources scripts/lib, not embedded.
+    # From: Issue #1683
+    external_contexts:
+      - known-good=scripts/lib
+    build_type: apk
+    final_base: alpine
+    # What: final-image apk packages; the SOT owns the list.
+    # Why: consumers derive; no hardcoding (AG-CI-006)
+    # From: Issue #1683
+    packages:
+      - dnsmasq
+    # What: execute-smoke checks run post-build by ci.sh.
+    # Why: prove apk binaries run, not just exist
+    # From: Issue #1613
+    smoke:
+      - dnsmasq --version
+  ntp:
+    context: services/ntp
+    labels: [ntp]
+    build_type: apk
+    final_base: alpine
+    # What: final-image apk packages; the SOT owns the list.
+    # Why: consumers derive; no hardcoding (AG-CI-006)
+    # From: Issue #1683
+    packages:
+      - chrony-nts
+    # What: execute-smoke checks run post-build by ci.sh.
+    # Why: prove apk binaries run, not just exist
+    # From: Issue #1613
+    smoke:
+      - chronyd -v
+  syslog:
+    context: services/syslog
+    labels: [syslog]
+    # What: apk syslog-ng plus copied fluent-bit binary.
+    # Why: No compile, prebuilt binary -> light runner.
+    # From: Issue #1683
+    build_type: apk
+    external_image: fluent_bit
+    final_base: alpine
+    # What: final-image apk packages; the SOT owns the list.
+    # Why: consumers derive; no hardcoding (AG-CI-006)
+    # From: Issue #1683
+    packages:
+      - syslog-ng
+      - syslog-ng-json
+      - tzdata
+    # What: execute-smoke checks run post-build by ci.sh.
+    # Why: prove apk binaries run, not just exist
+    # From: Issue #1613
+    smoke:
+      - syslog-ng --version
+  ui:
+    context: services/ui
+    labels: [admin-ui]
+    build_type: rust
+    # What: the workspace crate (cargo -p) of this service.
+    # Why: rust checks target crate not build context
+    # From: Issue #1683 | PR #1858
+    crate: lancache-ui
+    final_base: alpine
+  cachehamster:
+    context: services/cachehamster
+    # What: Rust compile via BUILD_TOOLS_IMAGE stage.
+    # Why: Real compile step -> heavy runner per AG-CI-002.
+    # From: Issue #1683
+    build_type: rust
+    # What: the workspace crate (cargo -p) of this service.
+    # Why: rust checks target crate not build context
+    # From: Issue #1683 | PR #1858
+    crate: lancache-cachehamster
+    final_base: alpine
+
+# What: The toolchain image that builds the product stack.
+# Why: built by generic pipeline; not in stack
+# From: Issue #1683
+build_toolchain:
+  build-tools:
+    context: tools/build-tools
+    labels: [build-tools]
+    build_type: toolchain
+    final_base: alpine
+    # What: apk packages installed into the toolchain image.
+    # Why: SOT owns the one list; consumers read it.
+    # From: Issue #1683
+    packages:
+      - actionlint
+      - bats
+      - bind-tools
+      - build-base
+      - cargo
+      - cargo-audit
+      - ccache
+      - clang22
+      - cmake
+      - distcc
+      - distcc-pump
+      - docker-cli-buildx
+      - docker-cli-compose
+      - gawk
+      - gcompat
+      - iproute2
+      - lld22
+      - make
+      - musl-dev
+      - nodejs
+      - npm
+      - openjdk21-jre-headless
+      - openssl
+      - openssl-dev
+      - openssl-libs-static
+      - perl
+      - pkgconf
+      - procps-ng
+      - python3
+      - rsync
+      - run-parts
+      - rust
+      - rust-clippy
+      - rustfmt
+      - sccache
+      - shellcheck
+      - shfmt
+      - sqlite
+      - tcpdump
+      - trivy@testing=0.74.0-r0
+      - tzdata
+      - yq-go
+      - zlib-dev
+      - zlib-static
+    # What: apk repos (tag=url) added by build and resolver
+    # Why: trivy is only in edge/testing; @testing scopes it
+    # From: Issue #1683 | PR #1858
+    apk_repositories:
+      - testing=http://dl-cdn.alpinelinux.org/alpine/edge/testing
+    # What: Executables the toolchain smoke must find+run.
+    # Why: One owner of the smoke list; ci.sh reads it.
+    # From: Issue #1683
+    smoke_tools:
+      - actionlint
+      - ar
+      - awk
+      - basename
+      - bash
+      - bats
+      - cargo
+      - cargo-audit
+      - cat
+      - ccache
+      - chgrp
+      - chmod
+      - chown
+      - clang
+      - clippy-driver
+      - cmake
+      - cp
+      - curl
+      - dhclient
+      - dig
+      - dirname
+      - distcc
+      - docker
+      - envsubst
+      - expect
+      - find
+      - flock
+      - getent
+      - gh
+      - git
+      - gpg
+      - grep
+      - gzip
+      - install
+      - ip
+      - java
+      - jq
+      - ld.lld
+      - make
+      - mkdir
+      - mktemp
+      - mv
+      - node
+      - npm
+      - openssl
+      - parallel
+      - pkg-config
+      - ps
+      - pump
+      - rm
+      - rsync
+      - rustc
+      - rustfmt
+      - sccache
+      - sed
+      - sha256sum
+      - shellcheck
+      - shfmt
+      - sort
+      - tar
+      - tcpdump
+      - tee
+      - timeout
+      - trivy
+      - xargs
+      - xz
+      - yq
+    # What: Commands the toolchain smoke must run clean.
+    # Why: present is not runnable; one owner of the runs.
+    # From: Issue #1683 | PR #1858
+    smoke_runs:
+      - cargo --version
+      - cargo fmt --version
+      - cargo clippy --version
+      - cargo audit --version
+      - 'c="$(rustc --print cfg)" && grep -qx target_env=.musl. <<< "${c}"'
+      - sccache --version
+      - ccache --version
+      - actionlint --version
+      - bats --version
+      - shellcheck --version
+      - shfmt --version
+      - yq --version
+      - docker compose version
+      - docker buildx version
+      - dhclient --version
+      - 'm="$(gcc -dumpmachine)" && [[ "${m}" == *-musl ]]'
+      - trivy --version
+      - java -version
+
+# What: Runtime services not built by this project.
+# Why: Explicit out-of-build entry, no silent omission.
+# From: Issue #1683
+external_services:
+  nats:
+    image: "nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0"
+    role: runtime
+  docker-socket-proxy:
+    image: "tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476"
+    role: runtime
+    # What: Docker API calls of ui and watchdog per service
+    # Why: haproxy denies every call not granted here
+    # From: Issue #1683 | PR #1858
+    inspect: [proxy, dns-standard, dns-ssl, nats, netdata, ui, dhcp, dhcp-proxy, ntp, syslog]
+    restart: [proxy, dns-standard, dns-ssl, nats, netdata, ui]
+    start: [dhcp, dhcp-proxy, ntp, dhcp-probe]
+    stop: [dhcp, dhcp-proxy, ntp, dhcp-probe]
+    wait: [dhcp-probe]
+    logs: [dhcp-probe]
+    endpoints: [_ping]
+    # What: haproxy timeouts for the Docker API frontend
+    # Why: client/server outlast the ui's 120 s call limit
+    # From: Issue #1683 | PR #1858
+    timeouts:
+      - "http-request 10s"
+      - "connect 10s"
+      - "client 10m"
+      - "server 10m"
+  # What: upstream netdata, deliberately on its mutable tag.
+  # Why: maintainer decision; no first-party netdata build.
+  # From: Issue #1683 | PR #1858
+  netdata:
+    image: "netdata/netdata:latest"
+    role: runtime
+    policy: tag-latest
+
+# What: Pinned external base images by full digest.
+# Why: Single owner of the alpine pin, no per-file copies.
+# From: Issue #1683
+base_images:
+  alpine: "mirror.gcr.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6"
+  fluent_bit: "cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562"
+  # What: the registry ci.bats runs on the test daemon.
+  # Why: image lookups hit a real registry, no stub.
+  # From: Issue #1683 | PR #1858
+  registry: "mirror.gcr.io/library/registry:3.1.2@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8"
+
+# What: Pinned external tool/asset versions and checksums.
+# Why: Central version owner; consumers never re-pin.
+# From: Issue #1683
+external_versions:
+  # What: ISC dhclient reused from Alpine v3.20 pkg.
+  # Why: Alpine 3.21+ dropped it; musl build, both arches.
+  # From: Issue #1683
+  dhclient:
+    consumer: build-tools
+    build_args: [version, alpine_branch, url]
+    version: 4.4.3_p1-r4
+    alpine_branch: v3.20
+    url: "http://dl-cdn.alpinelinux.org/alpine/@BRANCH@/main/@ARCH@/dhclient-@VERSION@.apk"
+    sha256_x86_64: 068c97e534e9c8f03db9064296b1d3c21d957f328e40309278559a92f9a74557
+    sha256_aarch64: f1bd3a42210768b049f3157db09d68a399521db16f63122e7b6af28bf16fbea2
+  # What: CodeQL CLI bundle the codeql job downloads.
+  # Why: the only pin owner; codeql.yml carries no pin.
+  # From: Issue #1683 | PR #1858
+  codeql:
+    repository: github/codeql-action
+    release_tag: codeql-bundle-v2.27.1
+    asset: codeql-bundle-linux64.tar.gz
+    sha256: 1d380f79896ededc654c7b21fafb3360136f1aeb678ad4df4df9af3910c6b815
+
+# What: The one authoritative platform list for all targets.
+# Why: Platform is a parameter, not a twin/list.
+# From: Issue #1683
+build_matrix:
+  platforms: [linux/amd64, linux/arm64]
+
+# What: Per-arch apk arch, rust target and runner label.
+# Why: one SOT owner; no platform case dup in ci.sh.
+# From: Issue #1683
+platform_arch:
+  amd64:
+    apk: x86_64
+    runner: ubuntu-latest
+    rust_target: x86_64-alpine-linux-musl
+  arm64:
+    apk: aarch64
+    runner: ubuntu-24.04-arm
+    rust_target: aarch64-alpine-linux-musl
+
+# What: timeout minutes per workflow job id; one owner
+# Why: root jobs keep a literal the guard holds equal
+# From: Issue #1683 | PR #1858
+ci_job_timeouts:
+  aggregate: 30
+  analyze: 120
+  assemble: 30
+  build: 90
+  cargo-audit: 30
+  checks: 30
+  claude: 360
+  close-linked-issues: 15
+  cut-release-tag: 15
+  gc: 60
+  impact: 15
+  lint: 30
+  nightly: 30
+  orphaned-branches: 15
+  plan: 30
+  platform: 15
+  project-board: 15
+  promote: 30
+  release: 30
+  release-sbom: 60
+  resolve-build-tools: 15
+  result: 15
+  scan: 60
+  test: 45
+  validate: 60
+  welcome: 15
+
+# What: CI phases that must run and succeed on every run.
+# Why: §62: a skipped plan or checks would hide a red run.
+# From: Issue #1683 | PR #1858
+ci_result_gate:
+  required: [platform, plan, checks]
+
+# What: Named build contexts services COPY from at build.
+# Why: A change here rebuilds every consumer, not just self.
+# From: Issue #1683
+named_contexts:
+  shared-secret:
+    path: scripts/lib/shared-secret-bootstrap.sh
+  known-good:
+    path: scripts/lib/known-good-snapshots.sh
+  dns-domains:
+    path: services/dns/cdn-domains.txt
+
+# What: Build-identity inputs per build type (§7).
+# Why: Impact is content-identity, never path-touched alone.
+# From: Issue #1683
+build_identity:
+  rust:
+    inputs: [source_sha, toolchain_digest, base_digest, package_versions, build_variables]
+  apk:
+    inputs: [source_sha, package_versions, base_digest]
+  toolchain:
+    inputs: [toolchain_source_sha, base_digest]
+
+# What: apk packages every image of a build type needs.
+# Why: musl rust binaries link libgcc_s.so.1 dynamically.
+# From: Issue #1683 | PR #1858
+build_runtime:
+  rust:
+    packages: [libgcc]
+    # What: ldd the crate binary; the binary never runs.
+    # Why: a missing .so must fail verify, not validate.
+    # From: Issue #1683 | PR #1858
+    smoke:
+      - ldd /usr/local/bin/@CRATE@
+
+# What: Per-service rebuild edges beyond its own context.
+# Why: plan picks candidates, identity decides the build.
+# From: Issue #1683
+dependency_graph:
+  proxy:
+    contexts: [known-good, dns-domains]
+  dns:
+    contexts: [shared-secret, known-good]
+  watchdog:
+    contexts: []
+  ui:
+    contexts: []
+  dhcp:
+    contexts: [shared-secret]
+  dhcp-proxy:
+    contexts: [known-good]
+  ntp:
+    contexts: []
+  syslog:
+    contexts: []
+  cachehamster:
+    contexts: []
+
+# What: CodeQL query suites and ignored paths.
+# Why: One SOT owner; codeql.yml/ci.sh derive, no dup.
+# From: Issue #1683
+codeql:
+  queries: [security-extended, security-and-quality]
+  paths_ignore: ["**/target/**"]
+
+# What: Analyzed paths per CodeQL language (entry=language).
+# Why: read like services; generic block reader, no dup.
+# From: Issue #1683
+codeql_languages:
+  actions:
+    paths: [.github/workflows]
+  rust:
+    files: ["*.rs"]
+    paths: [services/cachehamster/src, services/common, services/dns/nats-subscriber/src, services/ui/src, services/watchdog/src]
+
+# What: release version, channels, validation and GC inputs
+# Why: AG-REL-010: one release and artifact inventory
+# From: Issue #1683 | PR #1858
+release:
+  registry: ghcr.io
+  # What: current release version of the whole project.
+  # Why: one owner; Cargo, lock, VERSION are synced from it.
+  # From: Issue #1683 | PR #1858
+  version: 0.3.0
+  # What: SPDX license of the whole project.
+  # Why: crates and image labels read it; no literal copies.
+  # From: Issue #1683 | PR #1858
+  license: AGPL-3.0-or-later
+  # What: validation record and its full-invalidation paths.
+  # Why: AG-REL-011 gate reads them; no ci.sh literal.
+  # From: Issue #1683
+  validation_state: docs/validation-state.json
+  governance_paths: [AGENTS.md, .github/AGENTS.md]
+  channels:
+    nightly:
+      mutable: true
+    latest:
+      mutable: true
+      # What: pushes to this ref move the channel.
+      # Why: one ref->channel owner; ci.sh has no literal.
+      # From: Issue #1683
+      ref: refs/heads/master
+      # What: final vX.Y.Z tags also move this channel.
+      # Why: AG-REL-009 stable channel; read by ci.sh.
+      # From: Issue #1683
+      release_tags: true
+      # What: other names setup.sh accepts for it.
+      # Why: release-versioning names stable for it
+      # From: Issue #1683 | PR #1858
+      aliases: [stable]
+  # What: the install mode that pins one fixed tag.
+  # Why: release-versioning: pinned stays a channel value.
+  # From: Issue #1683 | PR #1858
+  pinned_channel: pinned
+  # What: refused channel names and why they went.
+  # Why: release-versioning: a clear error, no fallback.
+  # From: Issue #1683 | PR #1858
+  retired_channels:
+    edge: "renamed to nightly in v0.3.0 (#1056)"
+    dev: "retired in v0.3.0 (#825/#1141)"
+  # What: channel a ref without its own channel uses.
+  # Why: AG-REL-009 pre-stable default; no ci.sh literal.
+  # From: Issue #1683
+  default_channel: nightly
+  # What: GC grace window and the delete policy gate
+  # Why: §76: unreachable versions go only after the grace
+  # From: Issue #1683 | PR #1858
+  retention:
+    deletion_policy: manual-or-approved-automation-only
+    unaggregated_grace_minutes: 1440
+
+# What: PR labels by changed path: area rules plus labels.
+# Why: service/toolchain labels apply under their context.
+# From: Issue #1683 | PR #1858
+pr_labels:
+  setup: [setup.sh, "deploy/**", "config/**"]
+  docker: ["deploy/**", "**/Dockerfile"]
+  rust: ["**/*.rs"]
+  ci: [".github/workflows/**", ".github/scripts/**", ".github/yaml/**"]
+  github_actions: [".github/workflows/**"]
+  documentation: ["docs/**", "**/*.md"]
+
+# What: Release notes: PR section, skip label, fallback.
+# Why: one owner for release-publish and CHANGELOG.md.
+# From: Issue #894 | PR #1858
+release_notes:
+  pr_section: Changelog
+  skip_label: skip-changelog
+  other_title: Other
+  # What: PR label that marks a deliberate CHANGELOG.md edit
+  # Why: the release flow owns the file; a label opts in
+  # From: Issue #1683 | PR #1858
+  changelog_edit_label: release
+
+# What: Release-notes groups: PR label -> heading.
+# Why: grouping is data; the first matching label wins.
+# From: Issue #894 | PR #1858
+release_notes_categories:
+  bug:
+    title: Fixed
+  enhancement:
+    title: Added
+  documentation:
+    title: Documentation
+  dependencies:
+    title: Dependencies
+  chore:
+    title: Chore / CI
+  ci:
+    title: Chore / CI
+
+# What: CI runtime variables with their fallback defaults.
+# Why: No hardcode, like CARGO_BUILD_JOBS (AG-CI-006).
+# From: Issue #1683
+ci_variables:
+  REPOSITORY_CI_LEDGER_RETENTION_DAYS: 30
+  # What: cargo fmt/clippy/test in CI; off unless "true".
+  # Why: AG-VAL-008: a variable, disabled by default.
+  # From: Issue #1683
+  CI_RUST_VALIDATION: "false"
+  # What: sccache cache mode: required, optional or off.
+  # Why: AG-CI-004 mode; required fails closed (AG-CI-011).
+  # From: Issue #1683 | PR #1858
+  SCCACHE_REDIS_MODE: required
+  # What: sccache dist toolchain cache size in bytes.
+  # Why: AG-CI-006: no size literal in the dist config.
+  # From: Issue #1683 | PR #1858
+  CI_SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE: 5368709120
+  # What: compiler VAR=driver pairs; the first is default.
+  # Why: distcc, ccache and smoke read one compiler list.
+  # From: Issue #1683 | PR #1858
+  CI_TOOLCHAIN_COMPILERS: CC=cc GCC=gcc CXX=c++ GXX=g++
+  # What: kill timeout (s) of the GHA runtime export step.
+  # Why: AG-CI-016: every container command is bounded.
+  # From: Issue #1683 | PR #1858
+  CI_GHA_RUNTIME_EXPORT_TIMEOUT: 30
+  # What: compose file validate starts (AG-KD-008).
+  # Why: one deploy profile; a repo var may override.
+  # From: Issue #1683 | PR #1858
+  CI_COMPOSE_FILE: deploy/prod/docker-compose.yml
+  # What: the workspace lockfile cargo-audit reads.
+  # Why: plan audits only when this file changed.
+  # From: Issue #1683 | PR #1858
+  CI_CARGO_LOCK: Cargo.lock
+  # What: plain version file setup.sh reads for archives.
+  # Why: it must equal release.version (version-drift).
+  # From: Issue #1683 | PR #1858
+  CI_VERSION_FILE: VERSION
+  # What: the installer script the stack checks read.
+  # Why: one path owner; ci.sh holds no installer literal.
+  # From: Issue #1683 | PR #1858
+  CI_INSTALLER: setup.sh
+  # What: the trivy ignore list scans and VEX read.
+  # Why: one path owner for scan, release VEX, vex-drift.
+  # From: Issue #1683 | PR #1858
+  CI_TRIVY_IGNORE: .trivyignore.yaml
+  # What: repo paths the checks read; one owner each.
+  # Why: ci.sh joins them via _ci_repo_path, no literals.
+  # From: Issue #1683 | PR #1858
+  CI_WORKFLOW_DIR: .github/workflows
+  CI_ACTIONS_DIR: .github/actions
+  CI_PR_TEMPLATE: .github/pull_request_template.md
+  CI_CHANGELOG: CHANGELOG.md
+  CI_README: README.md
+  CI_ARCH_DOC: docs/architecture-ng.md
+  CI_BACKUP_RESTORE_DOC: docs/backup-restore.md
+  CI_RELEASE_VERSIONING_DOC: docs/release-versioning.md
+  CI_DOCS_DIR: docs
+  # What: attempts and backoff base of the retry owner.
+  # Why: AG-CI-006: a retry/timeout value has one owner.
+  # From: Issue #1683 | PR #1858
+  CI_RETRY_MAX_ATTEMPTS: 4
+  CI_RETRY_BACKOFF_BASE_SECONDS: 1
+  # What: trivy scanners, DB dir and DB lock timing.
+  # Why: AG-CI-006: scan policy values have one owner.
+  # From: Issue #1683 | PR #1858
+  CI_TRIVY_SCANNERS: vuln,secret
+  CI_TRIVY_SHARED_DIR: /mnt/trivy-db
+  CI_TRIVY_LOCK_POLL: 5
+  CI_TRIVY_LOCK_TIMEOUT: 900
+  CI_TRIVY_LOCK_STALE: 1200
+  # What: validate slot count and timing, in seconds.
+  # Why: AG-CI-006: validate timeouts have one owner.
+  # From: Issue #1683 | PR #1858
+  CI_VALIDATE_MAX_SLOTS: 10
+  CI_VALIDATE_DETACH_TIMEOUT: 30
+  CI_VALIDATE_HEALTH_TIMEOUT: 180
+  CI_VALIDATE_STABLE_WINDOW: 20
+  # What: validation address pool and slot prefix length
+  # Why: AG-CI-006 one owner for the slot every run takes
+  # From: Issue #1683 | PR #1858
+  CI_VALIDATE_SUBNET_POOL: 172.16.0.0/12
+  CI_VALIDATE_SLOT_PREFIX: 27
+  # What: DNS probe label, TEST-NET net, TTL, waits, polls
+  # Why: AG-CI-006: probe values and waits have one owner.
+  # From: Issue #1683 | PR #1858
+  CI_VALIDATE_PROBE_LABEL: ci-probe
+  CI_VALIDATE_PROBE_NET: 203.0.113.0/24
+  CI_VALIDATE_PROBE_TTL: 60
+  CI_VALIDATE_DNS_WAIT: 15
+  CI_VALIDATE_AXFR_WAIT: 60
+  CI_VALIDATE_UI_POLL_ATTEMPTS: 30
+  CI_VALIDATE_UI_POLL_PAUSE: 2
+  CI_VALIDATE_LISTENER_POLL_ATTEMPTS: 30
+  CI_VALIDATE_LISTENER_POLL_PAUSE: 1
+  CI_VALIDATE_SNAPSHOT_POLL_ATTEMPTS: 15
+  CI_VALIDATE_SNAPSHOT_POLL_PAUSE: 1
+  CI_VALIDATE_KEA_POLL_ATTEMPTS: 30
+  CI_VALIDATE_KEA_POLL_PAUSE: 2
+  CI_VALIDATE_PROBE_MAC: "02:00:00:00:07:00"
+  # What: in-container limit of one image smoke and grace.
+  # Why: AG-CI-016 kill timeout; AG-CI-006 one owner.
+  # From: Issue #1683 | PR #1858
+  CI_SMOKE_TIMEOUT: 14m
+  CI_SMOKE_KILL_AFTER: 30s
+  # What: workflow file and run-block size ceilings.
+  # Why: AG-CI-006: the YAML-stays-thin limits, one owner.
+  # From: Issue #1683 | PR #1858
+  MAX_WORKFLOW_LINES: 8999
+  MAX_WORKFLOW_BYTES: 512000
+  MAX_RUN_BLOCK_BYTES: 74000
+  # What: ledger ref + file; the remote git ops use.
+  # Why: AG-CI-006: one owner for ledger ref, file, remote.
+  # From: Issue #1683 | PR #1858
+  CI_LEDGER_REF: refs/ci/acceptance/ledger
+  CI_LEDGER_FILE: records
+  CI_GIT_REMOTE: origin
+  # What: promote lock attempts, backoff and stale seconds.
+  # Why: AG-CI-006: lock timing has one owner.
+  # From: Issue #1683 | PR #1858
+  CI_PROMOTE_LOCK_MAX: 30
+  CI_PROMOTE_LOCK_BACKOFF: 10
+  CI_PROMOTE_LOCK_STALE: 900
+  # What: ref prefix of the per-channel promote lock.
+  # Why: promote and the installer read one lock location.
+  # From: Issue #1683 | PR #1858
+  CI_PROMOTE_LOCK_REF: refs/ci/promote-lock
+  # What: PR title lint mode (warn|block), chronology mode.
+  # Why: AG-CI-006: check modes are values with one owner.
+  # From: Issue #1683 | PR #1858
+  PR_TITLE_LINT_MODE: warn
+  CHRONOLOGY_WARN_ONLY: 0
+
+# What: files the header and prose checks skip, by path.
+# Why: vendored or generated content carries no header.
+# From: Issue #1683 | PR #1858
+file_headers:
+  exempt:
+    - services/dhcp/kea-dhcp4.conf
+    - services/dhcp/kea-ctrl-agent.conf
+    - services/dhcp/kea-dhcp-ddns.conf
+    - services/ui/src/static/chart.umd.min.js
+    - services/ui/src/static/admin.css
+    - services/proxy/public_suffix_list.dat
+    - services/dns/schema.sqlite3.sql
+
+# What: CI variables each build type passes as build-args.
+# Why: builders read repo/org vars; no YAML or literal copy.
+# From: Issue #1683 | PR #1858
+build_variables:
+  rust: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT, CI_TOOLCHAIN_COMPILERS]
+
+# What: CI variables every ci.sh build stage reads
+# Why: a stage has no SOT; these never key an identity
+# From: Issue #1683 | PR #1858
+stage_variables:
+  ci_sh: [CI_RETRY_MAX_ATTEMPTS, CI_RETRY_BACKOFF_BASE_SECONDS]
+
+# What: PR title taxonomy and project board for PR checks.
+# Why: AG-GH-018/008 name one CI policy owner for them.
+# From: Issue #1683 | PR #1858
+pr_policy:
+  title_types: [feat, fix, docs, refactor, perf, test, build, ci, chore, style, revert, security]
+  # What: scopes beyond build targets and external services.
+  # Why: cross-cutting areas own no image of their own.
+  # From: Issue #1683 | PR #1858
+  title_scopes_extra: [setup, ci, governance, docs, scripts, tests]
+  project_number: 6
+  # What: PR-template heading close-linked-issues reads.
+  # Why: the template heading is a contract, not a literal.
+  # From: Issue #1683 | PR #1858
+  linked_section: Linked Issues
+  # What: PR-template heading that needs a marked checkbox
+  # Why: the template heading is a contract, not a literal
+  # From: Issue #1683 | PR #1858
+  checkbox_section: Type of change
+  # What: PR authors the title and template checks skip
+  # Why: bot PRs carry generated titles and bodies
+  # From: Issue #1683 | PR #1858
+  check_exempt_authors:
+    - dependabot[bot]
+  # What: welcome text for a first issue, one line per item
+  # Why: ci.sh welcome posts it; the text is data, not code
+  # From: Issue #1683 | PR #1858
+  welcome_issue:
+    - Thanks for opening your first issue in lancache-ng.
+    - ""
+    - "Please make sure the issue includes:"
+    - "- expected behavior"
+    - "- actual behavior"
+    - "- logs or reproduction steps"
+    - "- relevant configuration without secrets"
+    - ""
+    - Do not post private keys, tokens, passwords, personal data, or private infrastructure details.
+    - Security-sensitive reports should use the project's private security reporting channel.
+  # What: welcome text for a first PR, one line per item
+  # Why: ci.sh welcome posts it; the text is data, not code
+  # From: Issue #1683 | PR #1858
+  welcome_pr:
+    - Thanks for opening your first pull request in lancache-ng.
+    - ""
+    - "Please make sure the pull request:"
+    - "- links the related issue"
+    - "- explains the user-visible behavior change"
+    - "- lists the validation that was run"
+    - "- does not include private keys, tokens, passwords, personal data, or private infrastructure details"
+    - ""
+    - Security-sensitive reports should use the project's private security reporting channel.
+
+# What: Orphan-branch sweep inputs (AG-GH-017).
+# Why: age gate and long-lived refs are data, not code.
+# From: Issue #1683 | PR #1858
+branch_policy:
+  orphan_min_age_seconds: 3600
+  # What: long-lived refs besides the channel refs.
+  # Why: release.channels already owns the master ref.
+  # From: Issue #1683 | PR #1858
+  long_lived: [current_dev, badges]
+  # What: POSIX ERE for long-lived ref families.
+  # Why: release branches and the VEX automation branch.
+  # From: Issue #1683 | PR #1858
+  long_lived_regex:
+    - "^v[0-9]"
+    - "^CI-Automation/"
+
+# What: Stack-validation check parameters (data, not logic).
+# Why: One SOT for check inputs; logic stays in ci.sh.
+# From: Issue #1683 | PR #1858
+validation:
+  # What: host tools validate needs on the runner host.
+  # Why: AG-CI-001: verified fail-closed, never assumed.
+  # From: Issue #1683
+  host_tools: [bash, docker, jq, curl, dig, git, awk, sed, find, flock, openssl, getent]
+  # What: compose services exempt from the healthcheck rule.
+  # Why: some services genuinely have none of their own.
+  # From: Issue #1683 | PR #1858
+  healthcheck_exempt: [dhcp-probe, syslog-logs-permissions, watchdog-prepare, retention, cachehamster]
+  # What: CDN domains that resolve from validation hosts.
+  # Why: Real dig targets; some Steam domains fail.
+  # From: Issue #1683 | PR #1858
+  dns_test_domains: [deb.debian.org, download.epicgames.com]
+  # What: Cacheable HTTP URL for the proxy MISS/HIT probe.
+  # Why: Only HTTP is cached; a real HIT proves the path.
+  # From: Issue #1683 | PR #1858
+  proxy_cache_probe_url: http://deb.debian.org/debian/dists/stable/InRelease
+  # What: compose files checked besides CI_COMPOSE_FILE.
+  # Why: each renders clean in all of its own profiles.
+  # From: Issue #1683 | PR #1858
+  compose_targets: deploy/secondary/docker-compose.yml
+  # What: placeholder env for targets without .env
+  # Why: operator keys are :?-required
+  # From: Issue #1683 | PR #1858
+  compose_validation_env: CACHE_VALID_ANY=1h CACHE_VALID_HIT=30d IP_SSL=127.0.0.2 IP_STANDARD=127.0.0.1 LISTEN_IP=127.0.0.3 ALLOW_INSECURE_UI=true NATS_CONSUMER=ci-secondary NATS_DNS_REPLICA_USER=ci-nats-dns-replica NATS_DNS_WRITER_USER=ci-nats-dns-writer NATS_CALLOUT_USER=ci-nats-callout NATS_SYS_USER=ci-nats-sys NATS_UI_USER=ci-nats-ui NATS_USER=ci-nats-user NATS_ADVERTISE_URL=nats://192.0.2.10:4222 NATS_URL=nats://127.0.0.1:4222 NGINX_UPSTREAM_RESOLVER=1.1.1.1 PROXY_IP=127.0.0.1 SSL_CACHE_MAX_GB=10 STANDARD_CACHE_MAX_GB=10
+  # What: secret keys of the render env, by value format.
+  # Why: no secret value in the SOT; ci.sh makes each run.
+  # From: Issue #1683 | PR #1858
+  compose_validation_secrets:
+    hex32: [KEA_CTRL_TOKEN, NATS_CALLOUT_PASSWORD, NATS_DNS_REPLICA_PASSWORD, NATS_DNS_WRITER_PASSWORD, NATS_PASSWORD, NATS_SYS_PASSWORD, NATS_TOKEN, NATS_UI_PASSWORD, PDNS_API_KEY, SECONDARY_REGISTRATION_TOKEN]
+    base64_32: [DDNS_TSIG_KEY]
+  # What: compose files also rendered with their .env.
+  # Why: AG-VAL-010: each renders with its own dir's .env
+  # From: Issue #1683 | PR #1858
+  compose_env_file_targets: deploy/prod/docker-compose.yml
+  # What: required keys setup.sh repairs
+  # Why: empty required key breaks the stack
+  # From: Issue #1683 | PR #1858
+  setup_required_repairs: CACHE_INACTIVE CACHE_MAX_GB CACHE_MAX_SIZE CACHE_MEM_MB CACHE_SLICE_SIZE CACHE_VALID_ANY CACHE_VALID_HIT DDNS_TSIG_KEY KEA_CONFIG_SNAPSHOT_DIR KEA_CTRL_TOKEN LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_PREFIX LANCACHE_IMAGE_REGISTRY LANCACHE_IMAGE_TAG NATS_DNS_REPLICA_PASSWORD NATS_DNS_REPLICA_USER NATS_DNS_WRITER_PASSWORD NATS_DNS_WRITER_USER NATS_CALLOUT_PASSWORD NATS_CALLOUT_USER NATS_SYS_PASSWORD NATS_SYS_USER NATS_UI_PASSWORD NATS_UI_USER NGINX_UPSTREAM_RESOLVER PDNS_API_KEY PROXY_SECURITY_MODE SSL_ENABLED SECONDARY_REGISTRATION_TOKEN

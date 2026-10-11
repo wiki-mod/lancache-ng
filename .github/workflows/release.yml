@@ -1,0 +1,155 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# What: GitHub release, OpenVEX and SBOM on a v-tag.
+# Why: separate release workflow (§6.3); ci.sh owns it.
+# From: Issue #1683
+name: CI 2.0 Release
+on:
+  push:
+    tags: ['v*']
+  # What: publish a tag, or cut the next patch tag.
+  # Why: AG-REL-013: a tag cut is its own dispatch.
+  # From: Issue #1683 | PR #1858
+  workflow_dispatch:
+    inputs:
+      action:
+        description: publish a release tag, or cut the next patch tag from the previous release
+        type: choice
+        options: [publish, cut-patch]
+        default: publish
+      tag:
+        description: Release tag to (re)publish (vX.Y.Z or vX.Y.Z-rc.N); empty for cut-patch.
+        required: false
+permissions:
+  contents: read
+concurrency:
+  group: ci-2.0-release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+# What: GHCR creds for ci.sh; one RELEASE_TAG for all jobs.
+# Why: auth is ci.sh policy; the workflow only sets env.
+# From: Issue #1683
+env:
+  GHCR_USERNAME: ${{ github.actor }}
+  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  # What: LAN proxy inputs; ci.sh applies them self-hosted.
+  # Why: AG-CI-009; ci.sh is the one proxy policy owner.
+  # From: Issue #1683 | PR #1858
+  PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+  PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+  PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
+  PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
+  # What: all repo/org variables once, as json, for ci.sh.
+  # Why: ci.sh reads vars by name; YAML lists none of them.
+  # From: Issue #1683 | PR #1858
+  CI_VARIABLES: ${{ toJSON(vars) }}
+jobs:
+  # What: resolve build-tools image for the SBOM scanner.
+  # Why: trivy lives in the toolchain image, not the runner.
+  # From: Issue #1683
+  resolve-build-tools:
+    name: resolve build-tools
+    # What: the one literal runner/timeout; emits the rest.
+    # Why: ci.sh can only pick a runner once one runs it.
+    # From: Issue #1683 | PR #1858
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # What: one mutable entry: the current_dev channel.
+    # Why: ci.sh cannot run before a container exists.
+    # From: Issue #1683 | PR #1858
+    container:
+      image: ghcr.io/${{ github.repository }}/build-tools:nightly
+      credentials: &ghcr_credentials
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+      runner: ${{ steps.jobs.outputs.runner }}
+      timeouts: ${{ steps.jobs.outputs.timeouts }}
+    steps:
+      - &bootstrap
+        name: Bootstrap the working tree
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "${PWD}"
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout -q FETCH_HEAD
+      - name: Resolve the build-tools image
+        id: resolve
+        run: bash .github/scripts/ci.sh build-tools resolve-image
+      - name: Resolve the job settings
+        id: jobs
+        run: bash .github/scripts/ci.sh job-settings
+
+  # What: publish the GitHub release notes and OpenVEX.
+  # Why: §6.3 release artifacts; ci.sh is idempotent.
+  # From: Issue #1683
+  release:
+    name: release
+    needs: resolve-build-tools
+    if: inputs.action != 'cut-patch'
+    runs-on: ${{ needs.resolve-build-tools.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.resolve-build-tools.outputs.timeouts)['release'] }}
+    container: &bt_container
+      image: ${{ needs.resolve-build-tools.outputs.image }}
+      credentials: *ghcr_credentials
+    # What: token may write releases and assets, read GHCR
+    # Why: the workflow default token is read-only
+    # From: Issue #1683 | PR #1858
+    permissions: &release_write
+      contents: write
+      packages: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CI_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - *bootstrap
+      - name: Publish the GitHub release and OpenVEX
+        run: |
+          set -euo pipefail
+          bash .github/scripts/ci.sh release-publish "${RELEASE_TAG}"
+          bash .github/scripts/ci.sh release-vex "${RELEASE_TAG}"
+      - name: Add the release to CHANGELOG.md
+        run: bash .github/scripts/ci.sh release-changelog "${RELEASE_TAG}"
+
+  # What: attach a CycloneDX SBOM per first-party image.
+  # Why: per-image provenance; SOT-driven walk, no matrix.
+  # From: Issue #1683
+  release-sbom:
+    name: release-sbom
+    needs: [resolve-build-tools, release]
+    runs-on: ${{ needs.resolve-build-tools.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.resolve-build-tools.outputs.timeouts)['release-sbom'] }}
+    container: *bt_container
+    permissions: *release_write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - *bootstrap
+      - name: Attach a CycloneDX SBOM per published image
+        run: bash .github/scripts/ci.sh release-sbom-stack "${RELEASE_TAG}"
+
+  # What: cut the next patch tag on an explicit dispatch.
+  # Why: the PAT tag push then starts the tag publish.
+  # From: Issue #1683 | PR #1858
+  cut-release-tag:
+    name: cut-release-tag
+    needs: resolve-build-tools
+    if: inputs.action == 'cut-patch'
+    runs-on: ${{ needs.resolve-build-tools.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.resolve-build-tools.outputs.timeouts)['cut-release-tag'] }}
+    container: *bt_container
+    env:
+      PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+    steps:
+      - *bootstrap
+      - name: Cut and push the next patch tag
+        run: bash .github/scripts/ci.sh cut-release-tag

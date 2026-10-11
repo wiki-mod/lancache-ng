@@ -1,0 +1,154 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# What: promote accepted current_dev to nightly
+# Why: nightly reuses; never rebuilds current_dev
+# From: Issue #1683
+name: CI 2.0 Nightly
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+  packages: write
+  issues: write
+concurrency:
+  group: ci-2.0-nightly
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+# What: supply GHCR token to ci.sh
+# Why: ci.sh owns auth; workflow only wires the env
+# From: Issue #1683
+env:
+  GHCR_USERNAME: ${{ github.actor }}
+  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # What: optional Docker Hub login for ci.sh pulls.
+  # Why: anonymous docker.io pulls hit the shared-IP limit.
+  # From: Issue #1095 | PR #1858
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+  # What: wire LAN proxy for self-hosted runners
+  # Why: AG-CI-009; ci.sh is the sole proxy policy owner.
+  # From: Issue #1683 | PR #1858
+  PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+  PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+  PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
+  PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
+  # What: all repo/org variables once, as json, for ci.sh.
+  # Why: ci.sh reads vars by name; YAML lists none of them.
+  # From: Issue #1683 | PR #1858
+  CI_VARIABLES: ${{ toJSON(vars) }}
+jobs:
+  # What: resolve build-tools digest for nightly job
+  # Why: nightly runs in build-tools, never on the runner.
+  # From: Issue #1683 | PR #1858
+  platform:
+    name: platform
+    # What: the one literal runner/timeout; emits the rest.
+    # Why: ci.sh can only pick a runner once one runs it.
+    # From: Issue #1683 | PR #1858
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+      runner: ${{ steps.jobs.outputs.runner }}
+      timeouts: ${{ steps.jobs.outputs.timeouts }}
+    # What: one mutable entry: the current_dev channel.
+    # Why: ci.sh needs a container before steps run
+    # From: Issue #1683 | PR #1858
+    container:
+      image: ghcr.io/${{ github.repository }}/build-tools:nightly
+      credentials: &ghcr_credentials
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      # What: shallow checkout with persistent auth
+      # Why: no SHA pin outside SOT; git is in build-tools.
+      # From: Issue #1683
+      - &bootstrap
+        name: Bootstrap the working tree
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "${PWD}"
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout -q FETCH_HEAD
+      - name: Resolve the build-tools image
+        id: resolve
+        run: bash .github/scripts/ci.sh build-tools resolve-image
+      - name: Resolve the job settings
+        id: jobs
+        run: bash .github/scripts/ci.sh job-settings
+
+  # What: validate full stack of accepted candidate
+  # Why: runner host: compose binds need host paths.
+  # From: Issue #1683
+  validate:
+    name: validate
+    needs: platform
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['validate'] }}
+    steps:
+      - *bootstrap
+      - name: Validate the accepted stack candidate
+        run: bash .github/scripts/ci.sh validate
+
+  # What: audit Cargo.lock against new advisories
+  # Why: advisory data moves daily; PRs audit lock changes
+  # From: Issue #1683 | PR #1858
+  cargo-audit:
+    name: cargo-audit
+    needs: platform
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['cargo-audit'] }}
+    container:
+      image: ${{ needs.platform.outputs.image }}
+      credentials: *ghcr_credentials
+    steps:
+      - *bootstrap
+      - name: Audit rust dependencies
+        id: audit
+        run: bash .github/scripts/ci.sh check cargo-audit
+      - name: Report the audit outcome
+        if: always()
+        env:
+          OUTCOME: ${{ steps.audit.outcome == 'success' && 'success' || 'failure' }}
+        run: bash .github/scripts/ci.sh nightly-status "${OUTCOME}" "nightly cargo-audit (current_dev)"
+
+  # What: promote validated current_dev, report outcome
+  # Why: nightly reuses; never rebuilds; always reports
+  # From: Issue #1683
+  nightly:
+    name: nightly
+    needs: [platform, validate]
+    if: ${{ !cancelled() && needs.platform.result == 'success' }}
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['nightly'] }}
+    container:
+      image: ${{ needs.platform.outputs.image }}
+      credentials: *ghcr_credentials
+    steps:
+      - *bootstrap
+      # What: promote nightly channel to validated stack
+      # Why: only after validate passed; moves refs only
+      # From: Issue #1683
+      - name: Promote the nightly channel
+        id: promote
+        if: needs.validate.result == 'success'
+        env:
+          CI_STACK_VALIDATED: SUCCESS
+        run: bash .github/scripts/ci.sh promote nightly
+      # What: report nightly outcome to tracking issue
+      # Why: nightly must be reported reliably; self-closing
+      # From: Issue #1683
+      - name: Report the nightly outcome
+        if: always()
+        env:
+          OUTCOME: ${{ (needs.validate.result == 'success' && steps.promote.outcome == 'success') && 'success' || 'failure' }}
+        run: bash .github/scripts/ci.sh nightly-status "${OUTCOME}" "nightly channel promote (current_dev)"

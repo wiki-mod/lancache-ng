@@ -26,17 +26,12 @@
 # volume, so whichever container boots first generates the value and every other
 # container reads that same value.
 #
-# It is not baked into the dns/dhcp/ui images through a shared Docker build
-# context (each of those Dockerfiles builds from its own service directory, the
-# same constraint documented for the known-good-snapshot library). Instead this
-# file is the single canonical copy, and services/dns/entrypoint.sh,
-# services/dhcp/entrypoint.sh, and services/ui/docker-entrypoint.sh each embed a
-# byte-identical copy of the function definitions below between
-# "# BEGIN shared-secret-bootstrap library" and "# END shared-secret-bootstrap
-# library" markers. tests/bats/shared_secret_bootstrap_sync.bats fails loudly if
-# any copy drifts. The nats service resolves the same way but inline in its
-# compose command (it has no service image/entrypoint of its own, and its
-# BusyBox shell escapes `$` as `$$` in YAML, so it cannot be byte-identical).
+# This file is the single canonical copy. services/dns/entrypoint.sh,
+# services/dhcp/entrypoint.sh, and services/ui/docker-entrypoint.sh source it
+# at runtime; their Dockerfiles COPY it in from the shared-secret named build
+# context. The nats service resolves the same way but inline in its compose
+# command (it has no service image/entrypoint of its own, and its BusyBox
+# shell escapes `$` as `$$` in YAML).
 
 # What: lancache_shared_secret_dir — shared secret location
 # Why: Cross-container alignment via shared-secrets volume
@@ -211,4 +206,15 @@ resolve_shared_secret() {
         return 0
     fi
     return 1
+}
+
+# What: keeps a log dir readable by the shared-reader gid.
+# Why: root-created files revert to root-only on volumes.
+# From: Issue #1427 | PR #1670
+prepare_log_dir_for_shared_reader() {
+    _pld_dir="$1"
+    mkdir -p "$_pld_dir"
+    chgrp "$(lancache_shared_secret_gid)" "$_pld_dir"
+    chmod 2750 "$_pld_dir"
+    find "$_pld_dir" -maxdepth 1 -type f -exec chgrp "$(lancache_shared_secret_gid)" {} + -exec chmod g+r {} +
 }

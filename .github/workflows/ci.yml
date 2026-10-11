@@ -1,0 +1,465 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# What: orchestrate plan, build, accept, promote flow
+# Why: ci.sh is sole owner; one canonical build manifest
+# From: Issue #1683
+name: CI 2.0
+on:
+  # What: also rerun on PR metadata and draft-state edits.
+  # Why: AG-GH-008 must re-check label/milestone changes.
+  # From: Issue #1683 | PR #1858
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft, labeled, unlabeled, milestoned, demilestoned]
+  push:
+    branches: [current_dev, master]
+    tags: ['v*']
+  # What: new issues only run the project-board job.
+  # Why: AG-GH-008 board placement; maintainer 2026-10-03.
+  # From: Issue #1683 | PR #1858
+  issues:
+    types: [opened]
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+# What: issue runs get their own group per issue.
+# Why: a default-branch group would drop a queued push run.
+# From: Issue #1683 | PR #1858
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number && format('issue-{0}', github.event.issue.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+defaults:
+  run:
+    shell: bash
+# What: supply GHCR token to ci.sh
+# Why: ci.sh owns auth; workflow only wires the env
+# From: Issue #1683
+env:
+  GHCR_USERNAME: ${{ github.actor }}
+  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # What: optional Docker Hub login for ci.sh pulls.
+  # Why: anonymous docker.io pulls hit the shared-IP limit.
+  # From: Issue #1095 | PR #1858
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+  # What: diff refs for every ci.sh step, set once.
+  # Why: a step without them saw no base (impact UNKNOWN).
+  # From: Issue #1683 | PR #1858
+  BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  BEFORE_SHA: ${{ github.event.before }}
+  # What: wire LAN proxy for self-hosted runners
+  # Why: AG-CI-009; ci.sh is the sole proxy policy owner.
+  # From: Issue #1683 | PR #1858
+  PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
+  PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
+  PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
+  PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
+  # What: all repo/org variables once, as json, for ci.sh.
+  # Why: ci.sh reads vars by name; YAML lists none of them.
+  # From: Issue #1683 | PR #1858
+  CI_VARIABLES: ${{ toJSON(vars) }}
+jobs:
+  # What: resolve build-tools digest for all jobs
+  # Why: later jobs run in build-tools, never on the runner.
+  # From: Issue #1683 | PR #1858
+  platform:
+    name: platform
+    # What: the one literal runner/timeout; emits the rest.
+    # Why: ci.sh can only pick a runner once one runs it.
+    # From: Issue #1683 | PR #1858
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+      runner: ${{ steps.jobs.outputs.runner }}
+      timeouts: ${{ steps.jobs.outputs.timeouts }}
+    # What: one mutable entry: the current_dev channel.
+    # Why: ci.sh needs a container before any steps run
+    # From: Issue #1683 | PR #1858
+    container:
+      image: ghcr.io/${{ github.repository }}/build-tools:nightly
+      credentials: &ghcr_credentials
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      # What: shallow checkout with persistent auth
+      # Why: no SHA pin outside SOT; git is in build-tools.
+      # From: Issue #1683
+      - &bootstrap
+        name: Bootstrap the working tree
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "${PWD}"
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout -q FETCH_HEAD
+      - name: Resolve the build-tools image
+        id: resolve
+        run: bash .github/scripts/ci.sh build-tools resolve-image
+      - name: Resolve the job settings
+        id: jobs
+        run: bash .github/scripts/ci.sh job-settings
+
+  # What: emit identity-filtered build matrices
+  # Why: path picks candidates; ci.sh resolves build
+  # From: Issue #1683
+  plan:
+    name: plan
+    needs: platform
+    if: github.event_name != 'issues'
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['plan'] }}
+    container: &bt_platform
+      image: ${{ needs.platform.outputs.image }}
+      credentials: *ghcr_credentials
+    outputs:
+      any-build: ${{ steps.plan.outputs.any-build }}
+      promote: ${{ steps.plan.outputs.promote }}
+      validate: ${{ steps.plan.outputs.validate }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      test-services: ${{ steps.plan.outputs.test-services }}
+      rust-validation: ${{ steps.plan.outputs.rust-validation }}
+      rust-audit: ${{ steps.plan.outputs.rust-audit }}
+      docs-only: ${{ steps.plan.outputs.docs-only }}
+    steps:
+      - *bootstrap
+      # What: collect changed-file list via ci.sh
+      # Why: ci.sh sole owner; reused by plan/lint/checks
+      # From: Issue #1683
+      - &collect_changed
+        name: Collect changed files
+        id: changed
+        run: bash .github/scripts/ci.sh changed-files
+      - name: Plan the build matrices
+        id: plan
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.file }}
+        run: bash .github/scripts/ci.sh plan-matrix
+
+  # What: build, publish, verify one target per platform
+  # Why: ci.sh owns identity, publish, readback lifecycle
+  # From: Issue #1683 | PR #1858
+  build:
+    name: build ${{ matrix.service }} ${{ matrix.arch }}
+    needs: [platform, plan]
+    if: needs.plan.outputs.any-build == 'true'
+    # What: each target and platform builds to its end
+    # Why: one red build must not cancel the other targets
+    # From: Issue #1683 | PR #1858
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['build'] }}
+    container: *bt_platform
+    # What: cache secrets the build's set-runtime needs.
+    # Why: secrets never reach ci.sh through CI_VARIABLES.
+    # From: Issue #1683 | PR #1858
+    env: &cache_secrets
+      SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
+      SCCACHE_DIST_AUTH_TOKEN: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+    steps:
+      # What: fetch base for impact assessment
+      # Why: build must prove semantic impact vs base
+      # From: Issue #1683 | PR #1858
+      - *bootstrap
+      # What: export args for the GHA cache runtime step.
+      # Why: ci.sh owns the kill timeout and the var list.
+      # From: Issue #1683 | PR #1858
+      - &gha_args
+        name: Prepare the GHA cache runtime export
+        id: gha-runtime
+        run: bash .github/scripts/ci.sh gha-runtime-args
+      # What: hand the GHA cache runtime to later steps.
+      # Why: only action steps get ACTIONS_RUNTIME_TOKEN
+      # From: Issue #1683 | PR #1858
+      - &gha_export
+        name: Export the GHA cache runtime
+        uses: docker://mirror.gcr.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+        with:
+          entrypoint: timeout
+          args: ${{ steps.gha-runtime.outputs.args }}
+      # What: build, then publish and verify result
+      # Why: publish != build; readback verifies digest
+      # From: Issue #1683 | PR #1858
+      - name: Build, publish and verify the platform image
+        run: bash .github/scripts/ci.sh ship "${{ matrix.service }}" "${{ matrix.platform }}"
+
+  # What: audit rust dependencies when Cargo.lock changed
+  # Why: lockfile is its input; nightly gets new advisories
+  # From: Issue #1683 | PR #1858
+  cargo-audit:
+    name: cargo-audit
+    needs: [platform, plan]
+    if: needs.plan.outputs.rust-audit == 'true'
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['cargo-audit'] }}
+    container: *bt_platform
+    steps:
+      - *bootstrap
+      - name: Audit rust dependencies
+        run: bash .github/scripts/ci.sh check cargo-audit
+
+  # What: test changed rust services via cargo
+  # Why: cargo is in build-tools; not on runner
+  # From: Issue #1683 | PR #1858
+  test:
+    name: test
+    needs: [platform, plan]
+    if: needs.plan.outputs.test-services != '' && needs.plan.outputs.rust-validation == 'true'
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['test'] }}
+    container: *bt_platform
+    env: *cache_secrets
+    steps:
+      - *bootstrap
+      - *gha_args
+      - *gha_export
+      - name: Test the changed rust services
+        env:
+          TEST_SERVICES: ${{ needs.plan.outputs.test-services }}
+        run: bash .github/scripts/ci.sh test-stack
+
+  # What: lint shell and workflow syntax
+  # Why: pinned linter versions in image, not runner
+  # From: Issue #1683
+  lint:
+    name: lint
+    needs: [platform, plan]
+    if: needs.plan.outputs.docs-only != 'true'
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['lint'] }}
+    container: *bt_platform
+    steps:
+      - *bootstrap
+      - *collect_changed
+      - name: shellcheck changed shell scripts
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.file }}
+        run: bash .github/scripts/ci.sh check shellcheck
+      - name: actionlint workflows
+        run: bash .github/scripts/ci.sh check actionlint
+
+  # What: scan all built images before ACCEPT
+  # Why: scanner lives in image; gates ACCEPT
+  # From: Issue #1683
+  scan:
+    name: scan
+    needs: [platform, plan, build]
+    if: needs.plan.outputs.any-build == 'true'
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['scan'] }}
+    container: *bt_platform
+    steps:
+      - *bootstrap
+      - name: Scan the built images by digest
+        env:
+          CI_BUILD_MATRIX: ${{ needs.plan.outputs.matrix }}
+        run: bash .github/scripts/ci.sh scan-stack
+
+  # What: aggregate acceptance to ledger
+  # Why: one aggregator, one CAS commit; push only
+  # From: Issue #1683
+  aggregate:
+    name: aggregate
+    needs: [platform, plan, scan]
+    if: >-
+      !cancelled() && needs.scan.result == 'success' &&
+      needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['aggregate'] }}
+    container: *bt_platform
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - *bootstrap
+      - name: Aggregate acceptance into the ledger
+        env:
+          CI_BUILD_MATRIX: ${{ needs.plan.outputs.matrix }}
+        run: bash .github/scripts/ci.sh aggregate-stack
+
+  # What: merge platform digests into multi-arch index
+  # Why: ci.sh owns merge; both-platforms-or-none
+  # From: Issue #1683
+  assemble:
+    name: assemble
+    needs: [platform, plan, aggregate]
+    if: >-
+      !cancelled() && needs.aggregate.result == 'success' &&
+      needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['assemble'] }}
+    container: *bt_platform
+    steps:
+      - *bootstrap
+      - name: Assemble multi-arch indexes
+        env:
+          CI_BUILD_MATRIX: ${{ needs.plan.outputs.matrix }}
+        run: bash .github/scripts/ci.sh assemble-stack
+
+  # What: validate full stack on exact candidate
+  # Why: STACK health+integration; push=accepted|PR=built
+  # From: Issue #1683
+  validate:
+    name: validate
+    needs: [platform, plan, build, aggregate, assemble]
+    if: >-
+      !cancelled() && needs.plan.outputs.validate == 'true' &&
+      contains(fromJSON('["success","skipped"]'), needs.build.result) &&
+      (github.event_name == 'pull_request' || needs.plan.outputs.any-build == 'false' ||
+      needs.assemble.result == 'success')
+    # What: runs on the runner host, not in a job container.
+    # Why: compose binds need host paths and the /27 net.
+    # From: Issue #1683
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['validate'] }}
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - *bootstrap
+      - name: Validate the accepted stack candidate
+        run: bash .github/scripts/ci.sh validate
+
+  # What: promote channels the ref maps to
+  # Why: ref-driven promote owner; moves refs only
+  # From: Issue #1683
+  promote:
+    name: promote
+    needs: [platform, plan, validate]
+    if: >-
+      !cancelled() && needs.validate.result == 'success' &&
+      needs.plan.outputs.promote == 'true' && github.event_name == 'push'
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['promote'] }}
+    container: *bt_platform
+    permissions:
+      contents: write
+      packages: write
+    env:
+      CI_STACK_VALIDATED: SUCCESS
+    steps:
+      - *bootstrap
+      - name: Promote the channels the ref maps to
+        run: bash .github/scripts/ci.sh promote-ref
+
+  # What: close issues a merged PR lists as Linked Issues.
+  # Why: GitHub auto-closes on default-branch merges only.
+  # From: Issue #1137 | PR #1858
+  close-linked-issues:
+    name: close-linked-issues
+    needs: platform
+    if: github.event_name == 'push'
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['close-linked-issues'] }}
+    container: *bt_platform
+    permissions:
+      contents: read
+      packages: read
+      issues: write
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CI_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - *bootstrap
+      - name: Close the issues the merged PR links
+        run: bash .github/scripts/ci.sh close-linked-issues
+
+  # What: put a new issue on the SOT project board.
+  # Why: GITHUB_TOKEN cannot write org Projects v2.
+  # From: Issue #1683 | PR #1858
+  project-board:
+    name: project-board
+    needs: platform
+    if: github.event_name == 'issues'
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['project-board'] }}
+    container: *bt_platform
+    permissions:
+      contents: read
+      packages: read
+    env:
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+    steps:
+      - *bootstrap
+      - name: Add the issue to the project board
+        run: bash .github/scripts/ci.sh board-add
+
+  # What: run diff-scoped and repo-wide guards
+  # Why: static checks; own failure domain
+  # From: Issue #1683
+  checks:
+    name: checks
+    needs: platform
+    if: github.event_name != 'issues'
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['checks'] }}
+    container: *bt_platform
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: write
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+      PR_BODY: ${{ github.event.pull_request.body }}
+      PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+      PR_MILESTONE_TITLE: ${{ github.event.pull_request.milestone.title }}
+      PR_DRAFT: ${{ github.event.pull_request.draft }}
+      PR_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+      GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+    steps:
+      - *bootstrap
+      - *collect_changed
+      # What: add path labels; GITHUB_TOKEN starts no rerun.
+      # Why: a PAT-made label event would restart this run.
+      # From: Issue #1683 | PR #1858
+      - name: Label the PR by changed paths
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.file }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/ci.sh pr-labels
+      # What: add the PR to the SOT project board (job PAT).
+      # Why: GITHUB_TOKEN cannot write org Projects v2.
+      # From: Issue #1683 | PR #1858
+      - name: Add the PR to the project board
+        run: bash .github/scripts/ci.sh board-add
+      - name: Run the PR/push check set
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.file }}
+        run: bash .github/scripts/ci.sh check all
+
+  # What: always-present required check (branch protection).
+  # Why: must appear always, even on NOOP
+  # From: Issue #1683
+  result:
+    name: result
+    needs: [platform, plan, build, test, cargo-audit, lint, scan, aggregate, assemble, validate, promote, checks]
+    if: always() && github.event_name != 'issues'
+    # What: platform's runner/timeout or the bootstrap pair.
+    # Why: the required check must run when platform failed.
+    # From: Issue #1683 | PR #1858
+    runs-on: ${{ needs.platform.outputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: ${{ needs.platform.outputs.timeouts && fromJSON(needs.platform.outputs.timeouts)['result'] || 15 }}
+    container:
+      image: ${{ needs.platform.outputs.image || format('ghcr.io/{0}/build-tools:nightly', github.repository) }}
+      credentials: *ghcr_credentials
+    steps:
+      - *bootstrap
+      # What: pass the native needs context to the gate
+      # Why: job ids live in needs only; ci.sh owns verdict
+      # From: Issue #1683 | PR #1858
+      - name: Aggregate the pipeline result
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: bash .github/scripts/ci.sh result-gate

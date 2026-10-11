@@ -242,7 +242,7 @@ authors could resolve unilaterally.** Two honest framings were possible:
    choice, configurable per instance (`services/cachehamster`'s
    `CACHEHAMSTER_CREDENTIAL_PERSISTENCE=none|persistent`). If an operator
    chooses persistence, the credential is never stored in a
-   plaintext-readable form: `services/cachehamster/src/credential_store.rs`
+   plaintext-readable form: `services/cachehamster/src/main.rs`
    derives a symmetric key from a locally-generated master secret via
    Argon2id (already an established project dependency, issue #680 —
    reused here as a raw KDF rather than its one-way password-hash form)
@@ -260,7 +260,7 @@ authors could resolve unilaterally.** Two honest framings were possible:
    clearly-bounded standalone service over an embedded module. The
    `services/ui` `reqwest`-streaming precedent named in the earlier
    version of this decision (`bytes_stream()` in
-   `services/ui/src/routes/netdata_proxy.rs`) was a real, considered
+   `services/ui/src/main.rs`) was a real, considered
    alternative — not dismissed for a technical reason, superseded by this
    operational one.
 3. ~~**#871 reconciliation**~~ — resolved 2026-08-29, see above.

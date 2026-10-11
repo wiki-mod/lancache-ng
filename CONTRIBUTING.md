@@ -69,9 +69,9 @@ The template now exposes visible `Linked Issues` and `Risk / Rollback /
 Follow-up` sections. Fill those in directly instead of relying on hidden
 comments so the rendered PR body always surfaces the tracking and risk
 context reviewers need. `Linked Issues`' exact casing matters: both
-`current-dev-auto-close.yml`'s closing-keyword scanner and
-`scripts/validate-pr-template.sh`'s required-section check match it
-case-sensitively (issue #1496).
+`ci.sh close-linked-issues` (the closing-keyword scanner) and
+`ci.sh check pr-template` (the required-section check) read sections
+through one parser that matches the heading exactly (issue #1496).
 - if the change touches build, CI, or release automation, whether any accelerator (`sccache`, `sccache-dist`, `distcc`, `distcc-pump`, or Buildx cache) is optional, preferred, or a gate
 - whether a GitHub-hosted fallback still works without LAN-only cache assumptions
 
@@ -92,7 +92,7 @@ Track related work explicitly in the PR body:
 - If the PR title or body says scaffold, partial, deferred, not covered, not implemented, or follow-up, keep the PR open-scoped: explain the remainder with `Refs #123` and avoid `Fixes #123` / `Closes #123` unless the full issue is actually complete.
 - When a PR is merged, completion claims must be checked against the merged code on the active development branch (`current_dev` as of #825, not a hardcoded `master`/`v0.2.0` assumption), not just the PR head or narrative.
 - If no issue exists, that's expected and fine per the "Before you start" guidance above for single, well-scoped work implemented immediately — no need to explain why in that case. If work that genuinely should have had an issue (multi-topic, backlog, needs-discussion) shipped without one, explain why in the PR body instead of leaving the relationship unclear.
-- **`Closes #123` is now automated on `current_dev` merges too** (`.github/workflows/current-dev-auto-close.yml`, issue #1137): GitHub's own built-in closing-keyword behavior still only fires on merges to the repository's default branch (`master`), but this project's own workflow now mechanizes the same relay-and-close pattern for `current_dev` merges -- it posts the merged PR's body verbatim as a comment on each referenced, still-open issue and closes it. `Refs #123` is deliberately never matched (non-closing references stay open, as intended). If this automation is ever down or a PR predates it, the manual fallback in the next section still applies.
+- **`Closes #123` is now automated on `current_dev` merges too** (`ci.sh close-linked-issues`, run by the `close-linked-issues` job in `.github/workflows/ci.yml` on every push to a non-default branch, issue #1137): GitHub's own built-in closing-keyword behavior still only fires on merges to the repository's default branch (`master`), but this project's own CI now mechanizes the same relay-and-close pattern for `current_dev` merges -- it posts the merged PR's body verbatim as a comment on each referenced, still-open issue listed under `## Linked Issues` and closes it. `Refs #123` is deliberately never matched (non-closing references stay open, as intended). If this automation is ever down or a PR predates it, the manual fallback in the next section still applies.
 
 ### Closing an issue manually (fallback, current_dev merges)
 
@@ -121,22 +121,22 @@ not by appending new comments each time something is fixed or added.
 lancache-ng maintains a `CHANGELOG.md` file at the repository root, following
 the [Keep a Changelog](https://keepachangelog.com/) format.
 
-As of #899, updating it is automatic and requires no manual collection step:
+Updating it is automatic and requires no manual collection step (#894):
 
-1. `.github/workflows/release-drafter.yml` drafts/updates a GitHub Release on
-   every push to `master`/`v0.2.0`, listing each merged PR as `#NUMBER | TITLE`
-   grouped by label (config: `.github/release-drafter.yml`).
-2. When that release is published (manually, or via a `workflow_dispatch` run
-   of the same workflow), `.github/workflows/update-changelog.yaml` fires and
-   writes the release's name and notes into `CHANGELOG.md`, committing the
-   result automatically.
+1. A `vX.Y.Z` or `vX.Y.Z-rc.N` tag runs `.github/workflows/release.yml`.
+   `ci.sh release-publish` writes the GitHub Release notes: every PR merged
+   since the previous `vX.Y.Z` tag, as `#NUMBER TITLE (URL)` followed by that
+   PR's own `## Changelog` section, grouped by label (grouping, fallback group
+   and skip label live in `.github/yaml/build-manifest.yml`, `release_notes`).
+2. For a stable `vX.Y.Z` tag, `ci.sh release-changelog` then adds the same
+   list to `CHANGELOG.md` as `## [X.Y.Z] - <date>` and commits it to the
+   default branch.
 
-Applying the `skip-changelog` label to a PR excludes it from the drafted
-release notes (e.g. a pure internal refactor with no user-visible effect).
+Applying the `skip-changelog` label to a PR excludes it from the release
+notes (e.g. a pure internal refactor with no user-visible effect).
 
-`scripts/untracked/collect-changelog-entries.sh` (added in #890) remains as a manual
-fallback -- useful for reconstructing history or if the automated pipeline is
-ever disabled -- but is no longer the primary path.
+`ci.sh release-notes <tag>` prints the same list without publishing anything
+-- useful for reconstructing history or checking notes before a release.
 
 Maintainers reviewing release PRs should verify that `CHANGELOG.md` accurately
 reflects user-visible behavior changes across all merged work for that release.
@@ -236,8 +236,8 @@ former `deploy/dev/` stack was retired in v0.3.0, #766 — see `AGENTS.md`'s `AG
 [`deploy/quickstart/`, `deploy/full-setup/`] as siblings in the very next sentence, and
 pointed at `CLAUDE.md`'s "No Separate Dev Environment" section, which no longer exists there
 — that content moved into `AGENTS.md`'s `## Architecture` section on 2026-07-31, per
-`CLAUDE.md`'s own current text). All three real profiles that exist today
-(`deploy/prod/`, `deploy/quickstart/`, `deploy/full-setup/`) reference every service by
+`CLAUDE.md`'s own current text). The profiles `deploy/prod/` and `deploy/full-setup/`
+reference every service by
 `image:` rather than `build:`, so there is no compose-level `--build` shortcut to rebuild every
 service from source in one command. This matches how CI itself builds first
 -party images: `docker buildx build` directly against each
@@ -350,7 +350,6 @@ docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS
 For Compose changes, you can validate locally (this does not depend on build-tools):
 
 ```bash
-docker compose -f deploy/quickstart/docker-compose.yml config
 docker compose -f deploy/prod/docker-compose.yml config
 ```
 
