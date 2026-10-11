@@ -101,7 +101,7 @@ commit (`_ci_head_commit`).
 |---|---|---|
 | DHCP — Kea | ci.bats "dhcp kea ipv4 and ntp helpers per input", "dhcp kea templates render complete valid json", "dhcp kea runtime config migration converges"; `ci.sh validate` Kea leg (`_ci_validate_kea_rollback`: two Admin UI reservations, `setup.sh` rollback to the first snapshot, live `config-get`); `check setup-kea-preflight` and ci.bats "setup kea preflight asks before a second dhcp server" | a render or migration differs, the rollback leaves the second reservation in Kea's running config, or `setup.sh` stops calling the preflight |
 | DHCP — dnsmasq (ProxyDHCP, relay) | ci.bats "dhcp-proxy optional and pxe directives render exactly per input", "setup dhcp mode, compose profiles and dnsmasq templates"; `check dhcp-proxy-env` | a rendered directive differs, or the compose file stops passing a template key |
-| DNS | `ci.sh validate` (`_ci_validate_dns`: a real `dig`, the standard and ssl answers differ; `_ci_validate_dns_rollback`: snapshot and rollback round trip through the rollback listener); ci.bats "domain validator matches the parity fixture and the cdn list" | no answer, identical answers in both modes, or a rollback that does not revert the record |
+| DNS | `ci.sh validate` (`_ci_validate_dns`: a real `dig`, the http and https answers differ; `_ci_validate_dns_rollback`: snapshot and rollback round trip through the rollback listener); ci.bats "domain validator matches the parity fixture and the cdn list" | no answer, identical answers in both modes, or a rollback that does not revert the record |
 | NATS | `ci.sh validate` (`_ci_validate_ui_nats_dns`: an Admin UI record resolves in both DNS modes through NATS and PowerDNS; `_ci_validate_secondary_identity`: two secondaries get distinct identities); ci.bats "setup secondary registration end to end per primary answer"; `check nats-atomic-write` | the record never resolves, two secondaries share an identity, or a shared config is written non-atomically |
 | Proxy cache | `ci.sh validate` (`_ci_validate_proxy`: a real MISS, then a HIT); `check proxy-cache-env-doc-drift`; `check proxy-cert-volume` | the second request is not a HIT, a documented `CACHE_*` default differs from the shipped one, or the cert dir is not a named volume |
 | Proxy routing and TLS | `ci.sh validate` (`_ci_validate_proxy_stream_map`: a wildcard SNI forwards to the requested name; `_ci_validate_ssl_mitm`: the ssl-mode certificate is issued by the LAN CA; `_ci_validate_ssl_dispatch_map`: a depth ≥ 2 SNI takes the passthrough relay); ci.bats "proxy ssl map, stream map and client acl render exactly per mode and input", "proxy CA, cert dir and CA rotation behave per state", "proxy leaf signing and default cert regen per input", "proxy registrable domain per public suffix rule"; `check proxy-nginx-policy` | a probe or render differs, or `/healthz` serves through `return` instead of `alias` |
@@ -126,7 +126,7 @@ stack itself.
 
 - **Real `setup.sh install` bring-up is the correct starting point, not a direct
   `docker compose up`.** `setup.sh` installs the checkout's `deploy/prod` (AG-KD-008), whose
-  compose file reaches the repository inputs it needs (`certs/`, `config/prod/`,
+  compose file reaches the repository inputs it needs (`certs/`,
   `scripts/lib/shared-secret-bootstrap.sh`, `services/dns/cdn-domains.txt`,
   `services/syslog/netdata-web_log.conf`) through `../../` paths that exist in every
   real checkout. **`docker compose up` itself exits 0 even when a container
@@ -184,17 +184,17 @@ stack itself.
   different entry from the same file (`download.epicgames.com` and `deb.debian.org`
   answered publicly) before concluding anything is
   broken.
-- **Standard mode**: `dig @<IP_HTTP> steamcontent.com` (or any
+- **HTTP mode**: `dig @<IP_HTTP> steamcontent.com` (or any
   configured CDN domain) resolves to the proxy's IP. Confirm the TLS handshake for
   that domain is **passthrough** (no interception) — `openssl s_client -connect
   <proxy>:443 -servername steamcontent.com` and confirm the presented certificate is
   the real CDN's own cert, not this project's CA. **Port correction (2026-08-05,
   issue #1391):** a prior version of this document named `:8443` here — that is
   only the container-**internal** listener port; every real deployment profile maps
-  it to the standard HTTPS port externally (`deploy/prod/docker-compose.yml` publishes
+  it to the usual HTTPS port 443 externally (`deploy/prod/docker-compose.yml` publishes
   `${IP_HTTP}:443:8443`) — `:443` is what an operator or
   validator actually connects to from outside the container.
-- **SSL/MITM mode**: same `dig` against the SSL DNS instance; `openssl s_client
+- **HTTPS/MITM mode**: same `dig` against the https side of the `dns` container; `openssl s_client
   -connect <proxy>:443 -servername steamcontent.com -CAfile <ca.crt>` and confirm the
   presented certificate **is** signed by the project's own CA (proves interception is
   actually happening, not merely configured). **CA path:** the CA lives in the
@@ -255,25 +255,25 @@ a real LAN.
   (`AG-OP-001`/`AG-OP-012`): request the same path with two different query strings,
   confirm both hit the same cache entry (second request is a HIT even though the
   query string differs).
-- **Correction (confirmed live, 2026-07-24, against v0.3.0/commit 88ddbf6a): standard-mode
+- **Correction (confirmed live, 2026-07-24, against v0.3.0/commit 88ddbf6a): HTTP-mode
   HTTPS is NOT cached, and this is not testable as a HIT/MISS check at all.** A prior
-  version of this document claimed standard-mode passthrough HTTPS "should still cache"
+  version of this document claimed HTTP-mode passthrough HTTPS "should still cache"
   because "SNI-routed connections still terminate at nginx's `stream` block only for the
-  TLS layer" — that premise is wrong. Per `CLAUDE.md`'s own architecture section, standard
+  TLS layer" — that premise is wrong. Per `CLAUDE.md`'s own architecture section, HTTP
   mode's `stream` block uses `ssl_preread` to read the ClientHello's SNI **without
   terminating TLS at all**; it then blindly forwards the still-encrypted bytes straight to
   the real origin (`proxy_pass` in the `stream` context). nginx never sees plaintext HTTP
   on this path, so it cannot apply `proxy_cache` and cannot add `X-Cache-Status` (confirmed
-  live: a real request through the standard-mode HTTPS port returns the origin's own
+  live: a real request through the HTTP-mode HTTPS port returns the origin's own
   `Server` header directly, e.g. `Server: Apache` for a real mirror, with no
   `X-Cache-Status` header at all — compare against the passthrough certificate proof two
   bullets above, which already demonstrates the same blind-forward behavior at the TLS
-  layer). Only **HTTP** is cached in standard mode. Do not attempt a HIT/MISS proof against
-  standard-mode HTTPS — there is nothing to observe.
-- SSL/MITM-mode intercepted HTTPS **is** cached (confirmed live: a real MISS-then-HIT with
+  layer). Only **HTTP** is cached in HTTP mode. Do not attempt a HIT/MISS proof against
+  HTTP-mode HTTPS — there is nothing to observe.
+- HTTPS/MITM-mode intercepted HTTPS **is** cached (confirmed live: a real MISS-then-HIT with
   byte-identical bodies, same as the HTTP case above) — nginx genuinely terminates TLS here,
   so the request reaches the normal HTTP proxy/cache layer. Confirmed also that the cache is
-  shared across all three reachable paths (standard-mode HTTP, SSL/MITM HTTP, SSL/MITM
+  shared across all three reachable paths (HTTP-mode HTTP, HTTPS/MITM HTTP, HTTPS/MITM
   HTTPS) since the cache key is `$host$uri` regardless of scheme or which mode's listener
   received the request — a request already cached via one path can come back as an
   immediate HIT via a different path for the same host+URI.
@@ -334,7 +334,7 @@ CI covers the Admin UI → NATS → `nats-subscriber` → PowerDNS write path
 
 - Confirm coverage matches the **documented, deliberate** per-service decision table
   from PR #1167 exactly (`docs/architecture-ng.md`'s Watchdog section): `proxy`,
-  `dns-standard`, `dns-ssl` (SSL-mode only), and `nats` (new) are monitored/restarted;
+  `dns` (http and https recursors), and `nats` (new) are monitored/restarted;
   `ui`, `dhcp` (Kea), `dhcp-proxy` (dnsmasq), `netdata`, `syslog`/`syslog-ng` are
   deliberately **not** — each for a distinct, documented reason (allowlist gaps for
   `ui`/`dhcp`, no meaningful healthcheck defined for `dhcp-proxy`/`netdata`, no fixed
@@ -360,7 +360,7 @@ CI covers the Admin UI → NATS → `nats-subscriber` → PowerDNS write path
 - For `nats`, the only single-process monitored service, hang it with
   `docker kill --signal=STOP lancache-nats` from the host (external `SIGSTOP`, not an
   in-container one) and confirm a genuine restart (new `StartedAt`).
-- **For `proxy`, `dns-standard`, and `dns-ssl` (multi-process containers), use
+- **For `proxy` and `dns` (multi-process containers), use
   `docker top <container> -o pid` then `kill -STOP` every listed PID from outside
   the container (root/`sudo`), instead of `--signal=STOP` on the container** — see
   the reason here. `docker kill --signal=STOP` signals only PID 1; in a multi-process
@@ -488,7 +488,7 @@ a stated reason it has none (AG-VAL-029).
 | Kea config render, migration or rollback drift | ci.bats "dhcp kea templates render complete valid json", "dhcp kea runtime config migration converges"; `_ci_validate_kea_rollback` |
 | Kea starting next to another DHCP server on the LAN | `check setup-kea-preflight`; ci.bats "setup kea preflight asks before a second dhcp server" |
 | dnsmasq directive or template-key drift | ci.bats "dhcp-proxy optional and pxe directives render exactly per input"; `check dhcp-proxy-env` |
-| DNS split routing lost (standard and ssl answer alike) | `_ci_validate_dns` |
+| DNS split routing lost (http and https answer alike) | `_ci_validate_dns` |
 | DNS rollback that does not revert, or does not snapshot the restored state | `_ci_validate_dns_rollback` |
 | Admin UI record not reaching PowerDNS in both modes | `_ci_validate_ui_nats_dns` |
 | Two secondaries sharing one NATS identity | `_ci_validate_secondary_identity` |
@@ -578,7 +578,7 @@ The Rust checks of Part A are off by default (AG-VAL-008).
 
 | Command | Proves |
 |---|---|
-| `bash .github/scripts/ci.sh validate` | the running-stack validation of Part A for the accepted stack candidate, on the runner host |
+| `bash .github/scripts/ci.sh validate` | the running-stack validation of Part A for the accepted stack candidate, inside the `build-tools` container (AG-VAL-016) |
 | `bash .github/scripts/ci.sh release-validation` | the AG-REL-011 gate over `docs/validation-state.json` for the checked-out commit |
 | `bash .github/scripts/ci.sh check all`, `check <name>` | every repository guard, or one |
 | `bats .github/scripts/ci.bats` in the `build-tools` image (AG-VAL-016) | the regression suite |
