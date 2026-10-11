@@ -582,17 +582,23 @@ ensure_apt_docker_client() {
         || die "Docker client binary is missing after installation. Install docker-cli or docker-ce-cli manually, then rerun setup.sh."
 }
 
+# What: one /etc/os-release field, empty if absent
+# Why: one reader; read as data, never run as shell
+# From: Issue #1683 | PR #1858
+os_release_field() {
+    [[ -r /etc/os-release ]] || return 0
+    awk -F= -v k="$1" '$1 == k {
+        v = substr($0, length(k) + 2); gsub(/^["\047]|["\047]$/, "", v); print v; exit
+    }' /etc/os-release || die "Failed to read $1 from /etc/os-release (exit $?)."
+}
+
 # What: adds Docker's apt repo when no Compose v2 package
 # Why: the distro index may lack a supported package
 install_docker_apt_repo() {
     local os_id="" codename="" repo_file="" dpkg_arch=""
 
-    if [[ -r /etc/os-release ]]; then
-        # shellcheck disable=SC1091
-        . /etc/os-release
-        os_id="${ID:-}"
-        codename="${VERSION_CODENAME:-}"
-    fi
+    os_id=$(os_release_field ID) || exit $?
+    codename=$(os_release_field VERSION_CODENAME) || exit $?
 
     case "$os_id" in
         debian|ubuntu) ;;
@@ -714,16 +720,18 @@ rpm_legacy_docker_package_list() {
 }
 
 # What: lists installed packages that block Docker CE
-# Why: podman and runc rules differ on Fedora and RHEL
+# Why: the host's os-release ID picks the conflict rules
 rpm_conflicting_docker_packages() {
-    local os_id=""
+    local os_id
+    os_id=$(os_release_field ID) || exit $?
+    rpm_conflicting_docker_packages_for "$os_id"
+}
 
-    if [[ -r /etc/os-release ]]; then
-        # shellcheck disable=SC1091
-        . /etc/os-release
-        os_id="${ID:-}"
-    fi
-
+# What: blocking packages for one os-release ID
+# Why: podman and runc rules differ on Fedora and RHEL
+# From: PR #429
+rpm_conflicting_docker_packages_for() {
+    local os_id="$1"
     if [[ "$os_id" = fedora ]]; then
         # What: Fedora: only Docker-family packages must go
         # Why: stock podman and runc stay allowed
@@ -759,13 +767,8 @@ guard_rpm_docker_conflicts() {
 # What: picks Docker's rpm repo URL by os-release ID
 # Why: Fedora, RHEL own repos; other RHEL use CentOS
 docker_rpm_repo_url() {
-    local os_id=""
-
-    if [[ -r /etc/os-release ]]; then
-        # shellcheck disable=SC1091
-        . /etc/os-release
-        os_id="${ID:-}"
-    fi
+    local os_id
+    os_id=$(os_release_field ID) || exit $?
 
     if [[ "$os_id" = fedora ]]; then
         printf '%s\n' "https://download.docker.com/linux/fedora/docker-ce.repo"
@@ -5333,7 +5336,8 @@ cmd_create_logs_for_issue() (
         printf 'Docker: %s\n' "$(docker --version 2>&1 || printf ' (exit %s)' "$?")"
         printf 'Docker Compose: %s\n' "$(docker compose version 2>&1 || printf ' (exit %s)' "$?")"
         printf 'Kernel: %s\n' "$(uname -srm 2>&1 || printf ' (exit %s)' "$?")"
-        printf 'OS: %s\n' "$(if [[ -r /etc/os-release ]]; then (. /etc/os-release; printf '%s' "${PRETTY_NAME:-$ID $VERSION_ID}"); else printf 'unknown'; fi)"
+        printf 'OS: %s\n' "$(n=$(os_release_field PRETTY_NAME); [[ -n "$n" ]] \
+            || n="$(os_release_field ID) $(os_release_field VERSION_ID)"; n="${n# }"; n="${n% }"; printf '%s' "${n:-unknown}")"
         printf '\nDisk usage:\n'
         df -h 2>&1 || printf '(df failed, exit %s)\n' "$?"
     } | logbundle_redact_stream "$secrets_file" > "$dest/host-facts.txt"

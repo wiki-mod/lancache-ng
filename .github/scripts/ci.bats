@@ -4014,6 +4014,53 @@ CASES
     [ "${status}" -eq 0 ] && [ "${output}" = "$(printf 'long-ok\ntoo-long\nempty')" ] || { echo "length: ${output}"; return 1; }
 }
 
+# What: rpm conflicts per distro; engine sets run the guard
+# Why: legacy Docker blocks Docker CE; Fedora keeps podman
+# From: PR #429
+@test "setup rpm docker conflicts per distro and install set" {
+    local root t="${BATS_TEST_TMPDIR}" p
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    _load_setup_sh "${root}" || return 1
+    export RPMDB="${t}/rpmdb" RBIN="${t}/bin" OTHER OSID
+    OTHER="$(_val name)" OSID="$(_val name)"
+    printf '%s\n' docker docker-selinux docker-engine-selinux podman runc podman-docker "${OTHER}" > "${RPMDB}"
+    _tool_stub "${RBIN}" rpm <<< 'cat "${RPMDB:?}"'
+    _tool_stub "${RBIN}" dnf <<< 'exit 1'
+    # What: Fedora drops only Docker-family packages
+    # Why: stock podman and runc must stay installable
+    # From: PR #429
+    _setup_sh_run 'PATH="${RBIN}:${PATH}"; rpm_conflicting_docker_packages_for fedora'
+    [ "${status}" -eq 0 ] || { echo "fedora: ${output}"; return 1; }
+    for p in docker docker-selinux docker-engine-selinux podman-docker; do
+        grep -qxF -- "${p}" <<< "${output}" || { echo "fedora misses ${p}: ${output}"; return 1; }
+    done
+    for p in podman runc "${OTHER}"; do
+        if grep -qxF -- "${p}" <<< "${output}"; then echo "fedora blocks ${p}: ${output}"; return 1; fi
+    done
+    # What: every other ID also blocks podman and runc
+    # Why: they conflict with Docker CE on the RHEL family
+    # From: PR #429
+    _setup_sh_run 'PATH="${RBIN}:${PATH}"; rpm_conflicting_docker_packages_for "${OSID}"'
+    [ "${status}" -eq 0 ] || { echo "${OSID}: ${output}"; return 1; }
+    for p in docker docker-selinux docker-engine-selinux podman runc; do
+        grep -qxF -- "${p}" <<< "${output}" || { echo "${OSID} misses ${p}: ${output}"; return 1; }
+    done
+    if grep -qxF -- "${OTHER}" <<< "${output}"; then echo "${OSID} blocks ${OTHER}"; return 1; fi
+    # What: an engine set stops on a conflict before dnf
+    # Why: a compose-plugin-only install must not skip it
+    # From: PR #429
+    _setup_sh_run 'PATH="${RBIN}:${PATH}"; install_docker_rpm dnf docker-compose-plugin; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"conflict with these installed packages"* && "${output}" != *unreached* ]] \
+        || { echo "compose plugin only: ${output}"; return 1; }
+    _setup_sh_run 'PATH="${RBIN}:${PATH}"; install_docker_rpm dnf "${OTHER}"; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" != *"conflict with these installed packages"* && "${output}" != *unreached* ]] \
+        || { echo "non-engine set ran the guard: ${output}"; return 1; }
+    : > "${RPMDB}"
+    _setup_sh_run 'PATH="${RBIN}:${PATH}"; install_docker_rpm dnf docker-compose-plugin; echo unreached'
+    [ "${status}" -eq 1 ] && [[ "${output}" != *"conflict with these installed packages"* ]] \
+        || { echo "no conflict reported as one: ${output}"; return 1; }
+}
+
 @test "setup dhcp mode, compose profiles and dnsmasq templates" {
     # What: modes, subnet start, profiles, template vars
     # Why: one dhcp profile per mode; templates fully render

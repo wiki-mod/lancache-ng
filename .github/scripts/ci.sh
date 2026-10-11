@@ -12065,30 +12065,6 @@ _ci_check_setup_update_safety() {
     printf 'setup-update-safety=clean\n'
 }
 
-# What: Fail unless Fedora/RHEL Docker RPM guarded.
-# Why: legacy docker RPMs conflict; podman/runc ok.
-# From: Issue #1683
-_ci_check_setup_docker_conflict() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
-    local su
-    local -a viol=()
-    su="$(_ci_installer "${repo_root}")" || return 2
-    grep -Fq 'rpm_legacy_docker_package_list()' "${su}" \
-        || viol+=("setup.sh must keep a shared legacy Docker RPM conflict list")
-    { grep -Fq 'docker-selinux' "${su}" && grep -Fq 'docker-engine-selinux' "${su}"; } \
-        || viol+=("Fedora/RHEL Docker RPM conflict guard must include legacy Docker selinux packages")
-    grep -Fq 'docker-ce|docker-ce-cli|containerd.io|docker-buildx-plugin|docker-compose-plugin)' "${su}" \
-        || viol+=("compose-plugin-only RPM install must still run the Docker/Podman conflict guard")
-    if awk '/\[\[ "\$os_id" = fedora \]\]/{f=1;next} /^    else$/{f=0} f&&/ (podman|runc)([[:space:]]|$)/{v=1} END{exit v?0:1}' "${su}"; then
-        viol+=("Fedora Docker conflict guard must not block stock podman or runc")
-    fi
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0104]" "reason=\"setup.sh Docker RPM conflict contract violated\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'setup-docker-conflict=clean\n'
-}
-
 # What: Fail unless channel/tag resolves from config.
 # Why: one resolution across setup.sh/UI/compose.
 # From: Issue #1683
@@ -13086,7 +13062,7 @@ ci_cmd_check_all() {
         prebuilt-prod prod-state-wiring compose-config nats-atomic-write \
         docker-socket-proxy netdata-isolation syslog-logs-volume proxy-cert-volume proxy-nginx-policy \
         compose-required-env dhcp-proxy-env \
-        setup-keys-kea setup-update-safety setup-docker-conflict setup-prompt-drift image-channel-resolution \
+        setup-keys-kea setup-update-safety setup-prompt-drift image-channel-resolution \
         vex-drift logging-matrix \
         entrypoint-lib-wiring dockerfile-build-tools dockerfile-stage-variables \
         dockerfile-secret-ids sot-identity-inputs workflow-ci-variables workflow-job-settings cargo-profile-tuning no-source-compiled-tools codeql-coverage version-drift)
@@ -13162,7 +13138,6 @@ ci_cmd_check() {
         dhcp-proxy-env) _ci_check_dhcp_proxy_env "$@" ;;
         setup-keys-kea) _ci_check_setup_keys_kea "$@" ;;
         setup-update-safety) _ci_check_setup_update_safety "$@" ;;
-        setup-docker-conflict) _ci_check_setup_docker_conflict "$@" ;;
         image-channel-resolution) _ci_check_image_channel_resolution "$@" ;;
         vex-drift) _ci_check_vex_drift "$@" ;;
         logging-matrix) _ci_check_logging_matrix "$@" ;;
