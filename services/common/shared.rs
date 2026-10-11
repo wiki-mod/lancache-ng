@@ -63,8 +63,8 @@ pub struct WatchdogStatus {
     pub interval_secs: u64,
 }
 
-// What: stale limit when the document names no interval.
-// Why: an older watchdog wrote none; 90 s was its limit.
+// What: 90 s stale limit when no interval is named.
+// Why: a missing field reads as 0, so it needs a limit.
 const STALE_FALLBACK: Duration = Duration::from_secs(90);
 
 // What: missed check cycles after which status is stale.
@@ -250,8 +250,8 @@ const HTTP_POOL_IDLE: Duration = Duration::from_secs(90);
 // Why: a silently dropped peer is noticed on a pooled link.
 const HTTP_KEEPALIVE: Duration = Duration::from_secs(60);
 
-// What: the general HTTP client of ui and nats-subscriber.
-// Why: one timeout and pool setting for both callers.
+// What: the general HTTP client of several services.
+// Why: one timeout and pool setting for all callers.
 pub fn http_client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
@@ -749,7 +749,7 @@ fn log_text(mut bytes: &[u8]) -> String {
 }
 
 // What: client of PowerDNS's HTTP API with the API key.
-// Why: ui and nats-subscriber call the API the same way.
+// Why: ui, watchdog and nats-subscriber share it.
 pub struct PowerDns {
     http: reqwest::Client,
     api_key: String,
@@ -833,8 +833,8 @@ pub struct DockerApi {
 
 impl DockerApi {
     // What: a client for unix:///socket or an http:// URL.
-    // Why: redirects and timeouts must stay under control.
-    // From: Issue #1683
+    // Why: redirects are refused; timeouts apply per call.
+    // From: Issue #1683 | PR #1912
     pub fn new(endpoint: &str) -> Self {
         let endpoint = endpoint.trim();
         // What: never follow a redirect.
@@ -1079,7 +1079,7 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    // What: log frames join; other streams, cut tails drop.
+    // What: stdout/stderr text joins; other frames drop.
     // Why: the probe result line must survive the headers.
     #[test]
     fn log_text_joins_stdout_and_stderr_frames() {
