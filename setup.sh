@@ -5898,7 +5898,7 @@ cmd_update_ip() {
     print_step "Reading current configuration"
 
     # What: only the runtime .env holds IPs; compose derives
-    # Why: the dns container gets its IPs from IP_HTTP/IP_HTTPS
+    # Why: dns gets its IPs from IP_HTTP and IP_HTTPS
     # From: Issue #1683 | PR #1858
     local deploy_env
     deploy_env=$(runtime_env_file_for_install_dir "$install_dir")

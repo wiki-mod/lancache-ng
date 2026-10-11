@@ -161,13 +161,9 @@
       btn.textContent = 'Kopiert!';
       setTimeout(() => { btn.textContent = 'Kopieren'; }, 1500);
     };
-    // navigator.clipboard exists only in a secure context (HTTPS or
-    // localhost). The Admin UI is commonly served over plain HTTP on a LAN
-    // IP, where navigator.clipboard is undefined and calling it throws --
-    // #1068 item 19's "Copy button non-functional". Fall back to selecting
-    // the command text and the legacy execCommand('copy') in that case, and
-    // pass the button element in explicitly (btn) rather than reading the
-    // global `event`, which is unreliable inside the async .then() callback.
+    // What: copy falls back to execCommand on plain HTTP.
+    // Why: navigator.clipboard needs a secure context.
+    // From: Issue #1068
     if (navigator.clipboard && window.isSecureContext) {
       navigator.clipboard.writeText(el.innerText).then(flash).catch(() => selectAndCopy(el, flash));
     } else {
