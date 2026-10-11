@@ -3654,7 +3654,8 @@ fn is_kind(msg: &Message, kind: MessageType) -> bool {
 }
 
 // What: build a DHCP message of one type.
-// Why: DISCOVER, REQUEST and RELEASE differ only in options
+// Why: one builder for all three; flags follow the type.
+// From: Issue #1683 | PR #1912
 fn dhcp_message(
     xid: u32,
     chaddr: &[u8; 6],
@@ -4142,8 +4143,8 @@ async fn supervise() -> Result<(), String> {
             if wanted && !slot.running() && std::time::Instant::now() >= slot.not_before {
                 slot.start(&ctx);
             } else if slot.running() && (!wanted || fingerprint(&slot.watch) != slot.seen) {
-                // What: a wanted program restarts next tick.
-                // Why: its input changed; it must read it anew.
+                // What: stop on changed input or unwanted.
+                // Why: a start reads its inputs anew.
                 if wanted {
                     log(&format!("{}: input changed; restarting", slot.kind.name()));
                 }
@@ -4502,8 +4503,8 @@ mod tests {
     }
 
     // What: LANCACHE_PROCESSES parses, refuses junk.
-    // Why: an unknown or doubled name is a build error.
-    // From: Issue #1683
+    // Why: an unknown or doubled name is a config error.
+    // From: Issue #1683 | PR #1912
     #[test]
     fn process_lists_parse_and_refuse_junk() {
         let all = [
@@ -4659,9 +4660,9 @@ mod tests {
         }
     }
 
-    // What: the web_log job parses the proxy's syslog lines.
-    // Why: a wrong pattern collects nothing and fails quiet.
-    // From: Issue #1246
+    // What: web_log job parses the proxy's syslog lines.
+    // Why: a wrong pattern collects nothing, fails quiet.
+    // From: Issue #1683 | PR #1912
     #[test]
     fn web_log_job_reads_the_proxy_syslog_files() {
         let path = format!("/{}/{}/*.log", gen_name(), gen_name());
@@ -4792,7 +4793,7 @@ mod tests {
     }
 
     // What: retention settings fail closed on unsafe input.
-    // Why: a zero budget would delete every log at once.
+    // Why: a zero budget would prune every closed log.
     #[test]
     fn retention_settings_load_and_reject_unsafe_values() {
         let env = retention_env();
@@ -5399,8 +5400,9 @@ mod tests {
         assert_eq!(out, format!("a={other}\n  api_key: {new}\nb=1\n"));
     }
 
-    // What: roles parse; others and IPv4 endpoints.
-    // Why: an unknown role or a bad endpoint must not start.
+    // What: roles and IPv4 endpoints parse; others fail.
+    // Why: an unknown role or bad endpoint must not start.
+    // From: Issue #1683 | PR #1912
     #[test]
     fn dns_role_and_endpoint_parse() {
         assert_eq!(dns_role("primary"), Ok(DnsRole::Primary));
@@ -5861,7 +5863,8 @@ mod tests {
     }
 
     // What: openssl x509 output for one certificate.
-    // Why: cert tests read subject, SAN, serial the same way.
+    // Why: cert tests read subject, SAN, serial alike.
+    // From: Issue #1683 | PR #1912
     fn x509(crt: &Path, args: &[&str]) -> String {
         let crt = crt.to_str().expect("utf8 path");
         tool(
