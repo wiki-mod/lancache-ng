@@ -11,7 +11,7 @@ services:
   # From: Issue #1683
   dns:
     container_name: LanCache-NG-dns
-    image: ${LANCACHE_IMAGE_REF_DNS:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}}
+    image: ${LANCACHE_IMAGE_REF_DNS:?LANCACHE_IMAGE_REF_DNS is required}
     init: true
     environment:
       - IP_HTTP=${IP_HTTP:?IP_HTTP is required}
@@ -21,7 +21,7 @@ services:
       - DNS_REPLICATION_ROLE=secondary
       - DNS_XFR_PRIMARY=${DNS_XFR_PRIMARY:?DNS_XFR_PRIMARY is required}
       # What: a replica keeps its secrets in its own volume.
-      # Why: no shared-secrets volume and no ui; it runs as root.
+      # Why: no shared-secrets volume, no ui; runs as root.
       # From: Issue #1683 | PR #1912
       - LANCACHE_SHARED_SECRET_DIR=${SOT_DNS_SNAPSHOT_MOUNT}/secrets
       - LANCACHE_RUNTIME_GID=0

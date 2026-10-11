@@ -20,7 +20,7 @@ services:
   # From: Issue #1683
   services:
     container_name: LanCache-NG-services
-    image: ${LANCACHE_IMAGE_REF_SERVICES:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/services:${LANCACHE_IMAGE_TAG:-latest}}
+    image: ${LANCACHE_IMAGE_REF_SERVICES:?LANCACHE_IMAGE_REF_SERVICES is required}
     # What: tini as PID 1 reaps the supervisor's children.
     # Why: lancache-watchdog supervise is no init process.
     # From: Issue #1683
@@ -53,10 +53,10 @@ services:
       - ui-data:${SOT_UI_DATA_DIR}:ro
       - watchdog-status:${SOT_STATUS_DIR}
       - proxy-cache:${SOT_CACHE_DIR}
-      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:${SOT_SYSLOG_LOG_ROOT}
+      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/syslog-ng}:${SOT_SYSLOG_LOG_ROOT}
       - retention-state:${SOT_RETENTION_STATE_DIR}
-      - ${NTP_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/ntp}:${SOT_NTP_STATE_DIR}
-      - ${CACHEHAMSTER_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/cachehamster}:${SOT_CACHEHAMSTER_DATA_DIR}
+      - ${NTP_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/ntp}:${SOT_NTP_STATE_DIR}
+      - ${CACHEHAMSTER_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/cachehamster}:${SOT_CACHEHAMSTER_DATA_DIR}
       - netdataconfig:${SOT_NETDATA_CONFIG_DIR}
       - netdatalib:${SOT_NETDATA_LIB_DIR}
       - netdatacache:${SOT_NETDATA_CACHE_DIR}
@@ -89,7 +89,7 @@ services:
   # Why: :8443 passes SNI through, :443 intercepts TLS.
   proxy:
     container_name: LanCache-NG-proxy
-    image: ${LANCACHE_IMAGE_REF_PROXY:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/proxy:${LANCACHE_IMAGE_TAG:-latest}}
+    image: ${LANCACHE_IMAGE_REF_PROXY:?LANCACHE_IMAGE_REF_PROXY is required}
     init: true
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
@@ -118,7 +118,7 @@ services:
       - "${IP_HTTPS}:80:80"
       - "${IP_HTTPS}:443:443"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null && { [ \"$${HTTPS_ENABLED:-0}\" != \"1\" ] || curl -ksf https://127.0.0.1:8445/healthz >/dev/null; }"]
+      test: ["CMD", "/usr/local/bin/lancache-watchdog", "healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -131,7 +131,7 @@ services:
   # From: Issue #1683
   dns:
     container_name: LanCache-NG-dns
-    image: ${LANCACHE_IMAGE_REF_DNS:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}}
+    image: ${LANCACHE_IMAGE_REF_DNS:?LANCACHE_IMAGE_REF_DNS is required}
     init: true
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
@@ -147,10 +147,10 @@ services:
     volumes:
       - shared-secrets:${SOT_LANCACHE_SHARED_SECRET_DIR}
       - ../../services/dns/cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}
-      - ${PDNS_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns}:${SOT_PDNS_DATA_DIR}
-      - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:${SOT_DNS_STATE_DIR}
-      - ${NATS_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats}:${SOT_NATS_STORE_DIR}
-      - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf}:${SOT_NATS_CONF_MOUNT}
+      - ${PDNS_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/pdns}:${SOT_PDNS_DATA_DIR}
+      - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/pdns-filter-state}:${SOT_DNS_STATE_DIR}
+      - ${NATS_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/nats}:${SOT_NATS_STORE_DIR}
+      - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/nats-conf}:${SOT_NATS_CONF_MOUNT}
       - dns-config-snapshots:${SOT_DNS_SNAPSHOT_MOUNT}
     tmpfs:
       - ${SOT_SUPERVISE_RUN_DIR}
@@ -185,7 +185,7 @@ services:
   # From: Issue #1683
   dhcp:
     container_name: LanCache-NG-dhcp
-    image: ${LANCACHE_IMAGE_REF_DHCP:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp:${LANCACHE_IMAGE_TAG:-latest}}
+    image: ${LANCACHE_IMAGE_REF_DHCP:?LANCACHE_IMAGE_REF_DHCP is required}
     init: true
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
@@ -216,7 +216,7 @@ services:
     volumes:
       - shared-secrets:${SOT_LANCACHE_SHARED_SECRET_DIR}
       - ui-data:${SOT_UI_DATA_DIR}:ro
-      - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/kea}:${SOT_KEA_DATA_DIR}
+      - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/kea}:${SOT_KEA_DATA_DIR}
       - dhcp-config-snapshots:${SOT_DHCP_SNAPSHOT_MOUNT}
     tmpfs:
       - ${SOT_SUPERVISE_RUN_DIR}
@@ -238,7 +238,7 @@ services:
   # From: Issue #1683
   ui:
     container_name: LanCache-NG-ui
-    image: ${LANCACHE_IMAGE_REF_UI:-${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}}
+    image: ${LANCACHE_IMAGE_REF_UI:?LANCACHE_IMAGE_REF_UI is required}
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
       - NTP_ALLOWED_CLIENT_CIDRS=${NTP_ALLOWED_CLIENT_CIDRS:-}
@@ -248,10 +248,10 @@ services:
       - CACHE_MAX_SIZE=${CACHE_MAX_SIZE:?CACHE_MAX_SIZE is required}
       - IP_HTTP=${IP_HTTP}
       - IP_HTTPS=${IP_HTTPS}
-      - LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY:-ghcr.io}
-      - LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}
+      - LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY:?LANCACHE_IMAGE_REGISTRY is required}
+      - LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX:?LANCACHE_IMAGE_PREFIX is required}
       - LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL:-}
-      - LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG:-latest}
+      - LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG:?LANCACHE_IMAGE_TAG is required}
       - UI_AUTH_USER=${UI_AUTH_USER:-}
       - UI_AUTH_PASSWORD_HASH=${UI_AUTH_PASSWORD_HASH:-}
       - ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI:-}
@@ -283,10 +283,10 @@ services:
       - ui-data:${SOT_UI_DATA_DIR}
       - ../../services/dns/cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}
       - proxy-cache:${SOT_CACHE_DIR}:ro
-      - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:${SOT_DNS_STATE_DIR}
-      - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf}:${SOT_NATS_CONF_MOUNT}
-      - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/kea}:${SOT_KEA_DATA_DIR}
-      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:${SOT_SYSLOG_LOG_ROOT}:ro
+      - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/pdns-filter-state}:${SOT_DNS_STATE_DIR}
+      - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/nats-conf}:${SOT_NATS_CONF_MOUNT}
+      - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/kea}:${SOT_KEA_DATA_DIR}
+      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/syslog-ng}:${SOT_SYSLOG_LOG_ROOT}:ro
       - watchdog-status:${SOT_STATUS_DIR}:ro
     # What: Admin UI on UI_BIND_IP, default IP_HTTP.
     # Why: UI_BIND_IP narrows the LAN exposure of the UI.
@@ -299,7 +299,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1 || exit 1"]
+      test: ["CMD", "lancache-ui", "healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -314,7 +314,7 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: ${CACHE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/cache}
+      device: ${CACHE_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/cache}
   proxy-certs:
   proxy-config-snapshots:
   dns-config-snapshots:
