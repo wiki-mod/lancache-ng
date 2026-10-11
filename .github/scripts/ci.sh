@@ -4841,6 +4841,10 @@ _ci_release_validation_valid() {
         ci_log "[CI-ERROR-RELEASE-0014]" "state=\"${state}\" reason=\"no readable SOT validation record\""
         return 2
     fi
+    # What: load the full history before any record check
+    # Why: a depth-1 checkout lacks every record commit
+    # From: Issue #1683 | PR #1858
+    _ci_diff_history || return 2
     layers="$(_ci_block_keys release/validation_layers all)" || return 2
     if [ -z "${layers}" ]; then
         ci_log "[CI-ERROR-RELEASE-0052]" "reason=\"SOT release.validation_layers lists no layer\""

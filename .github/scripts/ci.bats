@@ -4830,9 +4830,9 @@ CASES
 # Why: AG-REL-011: a changed target or ci.sh must not ship
 # From: Issue #1683 | PR #1858
 @test "release gate: SOT scope per target and layer, dead path, unknown and missing record" {
-    local root r st layers targets svc ctx f doc x y extra
+    local root r w st layers targets svc ctx f doc x y extra
     local -a commit
-    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" r="$(_val path)" extra="$(_val name)"
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" r="$(_val path)" w="$(_val path)" extra="$(_val name)"
     st="$(_ci_block_entry_field release "" validation_state)" && layers="$(_ci_block_keys release/validation_layers all)" \
         && targets="$(ci_build_targets)" || { echo "SOT: ${st} ${layers} ${targets}"; return 1; }
     svc="$(ci_services | awk 'NR == 1')" && ctx="$(_ci_required_field "${svc}" context)" || { echo "SOT ${svc}: ${ctx}"; return 1; }
@@ -4845,6 +4845,9 @@ CASES
         > "${r}/${st}" && git -C "${r}" add -A && "${commit[@]}" records && y="$(git -C "${r}" rev-parse HEAD)" || return 1
     CI_REPO_ROOT="${r}" run _ci_release_validation_valid
     _expect fresh 0 "release-validation=fresh target=${y}" || return 1
+    git clone -q --depth 1 "file://${r}" "${w}" || return 1
+    CI_REPO_ROOT="${w}" run _ci_release_validation_valid
+    _expect depth-1 0 "release-validation=fresh target=${y}" || return 1
     doc="$(git -C "${r}" ls-files -- 'docs/*.md' | awk 'NR == 1')" && f="$(git -C "${r}" ls-files -- "${ctx}" | awk 'NR == 1')" \
         && [ -n "${doc}" ] && [ -n "${f}" ] || { echo "fixture files: ${doc} ${f}"; return 1; }
     printf '%s\n' "$(_val name)" >> "${r}/${doc}" && "${commit[@]}" doc || return 1

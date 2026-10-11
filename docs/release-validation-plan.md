@@ -43,8 +43,10 @@ record comes from the SOT, not from the record:
 
 - a build target: its `context` and the paths of its `dependency_graph`
   contexts, the list `plan` uses (`_ci_target_paths`);
-- a layer: the `pr_labels` path class that `release.validation_layers` names
-  (`stack`: `setup`, `ci`: `ci`).
+- a layer: the `pr_labels` path class that `release.validation_layers` names.
+
+The gate loads the full history first, so it also works in the depth-1
+checkout of a CI job.
 
 A record is stale when content under its scope or a governance path changed
 since its commit, when its commit is not an ancestor of the commit under
