@@ -7445,18 +7445,20 @@ mod tests {
     // Why: only the hash is stored; plaintext shows once.
     #[test]
     fn nats_passwords_hash_to_argon2id() {
-        let hash = hash_nats_password("secret").unwrap();
+        let password = new_nats_password();
+        let other = new_nats_password();
+        let hash = hash_nats_password(&password).unwrap();
         assert!(hash.starts_with("$argon2id$"), "{hash}");
-        assert_ne!(hash, hash_nats_password("secret").unwrap());
+        assert_ne!(hash, hash_nats_password(&password).unwrap());
         let parsed = PasswordHash::new(&hash).unwrap();
         assert!(
             Argon2::default()
-                .verify_password(b"secret", &parsed)
+                .verify_password(password.as_bytes(), &parsed)
                 .is_ok()
         );
         assert!(
             Argon2::default()
-                .verify_password(b"other", &parsed)
+                .verify_password(other.as_bytes(), &parsed)
                 .is_err()
         );
         let fresh = new_nats_password();
