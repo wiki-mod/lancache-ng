@@ -414,7 +414,14 @@ ci_service_field() {
 # From: Issue #1683
 _ci_required_field() {
     local v
-    v="$(ci_service_field "$1" "$2")" || return 2
+    # What: kind list reads a list field, one item per line.
+    # Why: one owner for a missing required SOT field.
+    # From: Issue #1683 | PR #1912
+    case "${3:-}" in
+        "") v="$(ci_service_field "$1" "$2")" || return 2 ;;
+        list) v="$(_ci_target_list "$1" "$2")" || return 2 ;;
+        *) ci_log "[CI-ERROR-CORE-0145]" "target=\"$1\" field=\"$2\" kind=\"$3\" reason=\"kind must be empty or list\""; return 2 ;;
+    esac
     if [ -z "${v}" ]; then
         ci_log "[CI-ERROR-CORE-0009]" \
             "target=\"$1\" field=\"$2\" reason=\"required SOT field missing\""
@@ -1146,8 +1153,7 @@ _ci_service_smoke() {
     build_type="$(_ci_required_field "${service}" build_type)" || return 2
     runtime="$(_ci_block_entry_list build_runtime "${build_type}" smoke)" || return 2
     if [[ "${runtime}" == *@CRATE@* ]]; then
-        crates="$(_ci_target_list "${service}" crates)" || return 2
-        [ -n "${crates}" ] || { ci_log "[CI-ERROR-CORE-0009]" "target=\"${service}\" field=\"crates\" reason=\"required SOT field missing\""; return 2; }
+        crates="$(_ci_required_field "${service}" crates list)" || return 2
         while IFS= read -r crate; do
             each="${each}${runtime//@CRATE@/${crate}}"$'\n'
         done <<< "${crates}"
@@ -4088,11 +4094,7 @@ _ci_test_rust() {
         1) printf 'service=%s tested=SKIP reason="CI_RUST_VALIDATION is not true (AG-VAL-008)"\n' "${service}"; return 0 ;;
         *) return 2 ;;
     esac
-    ctx="$(_ci_target_list "${service}" crates)" || return 2
-    if [ -z "${ctx}" ]; then
-        ci_log "[CI-ERROR-TEST-0005]" "service=\"${service}\" reason=\"no crate in SOT\""
-        return 2
-    fi
+    ctx="$(_ci_required_field "${service}" crates list)" || return 2
     # What: workspace-root cargo on the service's crates.
     # Why: build context is no crate; AG-VAL-008 per crate.
     # From: Issue #1683 | PR #1858
@@ -4186,7 +4188,6 @@ _ci_default_test() {
     build_type="$(_ci_required_field "${service}" build_type)" || return 2
     case "${build_type}" in
         rust) _ci_test_rust "${service}" ;;
-        apk) printf 'service=%s tested=SKIP reason="no source tests; smoke runs at the built digest"\n' "${service}" ;;
         toolchain) _ci_test_toolchain "${service}" ;;
         *) ci_log "[CI-ERROR-TEST-0004]" "service=\"${service}\" build_type=\"${build_type}\" reason=\"unknown build_type\""; return 2 ;;
     esac
@@ -7870,8 +7871,7 @@ _ci_service_build_args() {
         # What: emit SOT workspace crates for rust-build.
         # Why: one crate owner; the Dockerfile names none.
         # From: Issue #1683 | PR #1858
-        val="$(_ci_target_list "${service}" crates)" || return 2
-        [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0014]" "arg=\"RUST_CRATES\" service=\"${service}\" reason=\"no crate in SOT; FAIL CLOSED\""; return 2; }
+        val="$(_ci_required_field "${service}" crates list)" || return 2
         out="${out}${prefix}RUST_CRATES=${val//$'\n'/ }"$'\n'
         # What: emit the platform's SOT rust target triple.
         # Why: apk Rust ships only its host std, no rustup.

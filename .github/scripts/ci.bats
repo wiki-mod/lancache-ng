@@ -675,15 +675,12 @@ CASES
 # Why: NOOP needs stable ids; an edit moves only its owner
 # From: Issue #1683 | PR #1858
 @test "identity is keyed, deterministic, per target and platform" {
-    local root svcs plats p1 p2 s bt a="" b="" ctx f idx a1 a2 b1 sot rc
+    local root svcs plats p1 p2 s a="" b="" ctx f idx a1 a2 b1 sot rc
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     svcs="$(ci_services)" && plats="$(_ci_build_matrix_platforms)" || { echo "SOT readers failed"; return 1; }
     p1="${plats%%$'\n'*}" p2="${plats#*$'\n'}" p2="${p2%%$'\n'*}"
     [ -n "${p1}" ] && [ "${p2}" != "${p1}" ] || { echo "the SOT build matrix needs two platforms: ${plats}"; return 1; }
-    for s in ${svcs}; do
-        bt="$(ci_service_field "${s}" build_type)" || { echo "build_type ${s}: ${bt}"; return 1; }
-        [ "${bt}" = apk ] && { a="${s}"; break; }
-    done
+    a="${svcs%%[[:space:]]*}"
     ctx="$(_ci_required_field "${a}" context)" && f="$(git -C "${root}" ls-files -- "${ctx}")" \
         || { echo "${a}: no context files"; return 1; }
     f="${f%%$'\n'*}"
@@ -854,14 +851,13 @@ CASES
 # What: test-stack per real SOT target: SKIP or coded stop.
 # Why: AG-VAL-008 off by default; §72 cache error no FAIL.
 # From: Issue #1683 | PR #1858
-@test "test-stack: rust off by default, apk skips, cache errors coded" {
-    local s bt rust="" apk="" sot bad
+@test "test-stack: rust off by default, cache errors coded" {
+    local s bt rust="" sot bad
     for s in $(_ci_block_keys services); do
         bt="$(_ci_block_entry_field services "${s}" build_type)" || { echo "build_type ${s}: ${bt}"; return 1; }
         [ "${bt}" != rust ] || rust="${rust:-${s}}"
-        [ "${bt}" != apk ] || apk="${apk:-${s}}"
     done
-    [ -n "${rust}" ] && [ -n "${apk}" ] || { echo "no rust '${rust}' or apk '${apk}' service in the SOT"; return 1; }
+    [ -n "${rust}" ] || { echo "no rust service in the SOT"; return 1; }
     _ts() { run _cache_env_clean env "$@" bash "${CI_SH}" test-stack; }
     _ts -u CI_RUST_VALIDATION TEST_SERVICES="${rust}"
     _expect rust-default 0 "service=${rust} tested=SKIP;AG-VAL-008" || return 1
@@ -875,13 +871,11 @@ CASES
     _ts CI_RUST_VALIDATION=true SCCACHE_REDIS_MODE=required RUNNER_ENVIRONMENT=github-hosted TEST_SERVICES="${rust}"
     _expect hosted-no-cache 2 "[CI-ERROR-TEST-0003] service=\"${rust}\";[CI-ERROR-CACHE-0007];[CI-ERROR-TEST-0009] service=\"${rust}\"" || return 1
     [[ "${output}" != *"tested="* ]] || { echo "hosted-no-cache read as a result: ${output}"; return 1; }
-    _ts TEST_SERVICES="${apk}"
-    _expect apk-skip 0 "service=${apk} tested=SKIP reason=\"no source tests" || return 1
     sot="${BATS_TEST_TMPDIR}/sot-edit.yml" bad="$(_val name)"
     sed "/^  ${rust}:\$/,/^  [a-z0-9-]*:\$/ { /^    crates:/d }" "${CI_MANIFEST_SOURCE}" > "${sot}" \
         && ! cmp -s "${sot}" "${CI_MANIFEST_SOURCE}" || { echo "no crate line of ${rust} removed"; return 1; }
     _ts CI_MANIFEST="${sot}" CI_RUST_VALIDATION=true TEST_SERVICES="${rust}"
-    _expect no-crate 2 "[CI-ERROR-TEST-0003] service=\"${rust}\";[CI-ERROR-TEST-0005] service=\"${rust}\"" || return 1
+    _expect no-crate 2 "[CI-ERROR-TEST-0003] service=\"${rust}\";[CI-ERROR-CORE-0009] target=\"${rust}\" field=\"crates\"" || return 1
     sed "/^  ${rust}:\$/,/^  [a-z0-9-]*:\$/ s/^    build_type: rust\$/    build_type: ${bad}/" "${CI_MANIFEST_SOURCE}" > "${sot}" \
         && ! cmp -s "${sot}" "${CI_MANIFEST_SOURCE}" || { echo "no build_type of ${rust} changed"; return 1; }
     _ts CI_MANIFEST="${sot}" TEST_SERVICES="${rust}"
@@ -1491,10 +1485,10 @@ CASES
     _expect write-fails 2 "[CI-ERROR-VARIABLES-0018];raw:" || return 1
     [[ "${output}" != *"--secret"* ]] || { echo "write-fails: a mount for an unwritten secret: ${output}"; return 1; }
     dir="$(_val path)"
-    RT_KIND=apk run _rt_probe "${dir}" required self-hosted "${V["@U@"]}" yes "${V["@S@"]}" "${V["@ST@"]}" \
+    RT_KIND=toolchain run _rt_probe "${dir}" required self-hosted "${V["@U@"]}" yes "${V["@S@"]}" "${V["@ST@"]}" \
         "${V["@H1@"]},cpp" "${V["@CA@"]}"
-    _expect apk-kind 0 "--secret id=project_selfhosted_proxy_ca,src=${dir}/project_selfhosted_proxy_ca" || return 1
-    [ "$(ls -A "${dir}")" = project_selfhosted_proxy_ca ] || { echo "apk-kind: cache secrets written: $(ls -A "${dir}")"; return 1; }
+    _expect toolchain-kind 0 "--secret id=project_selfhosted_proxy_ca,src=${dir}/project_selfhosted_proxy_ca" || return 1
+    [ "$(ls -A "${dir}")" = project_selfhosted_proxy_ca ] || { echo "toolchain-kind: cache secrets written: $(ls -A "${dir}")"; return 1; }
     dir="$(_val path)"
     mkdir -p "${dir}/sccache_dist_config"
     run _rt_probe "${dir}" optional github-hosted - no "${V["@S@"]}" "${V["@ST@"]}" - -
@@ -1542,17 +1536,12 @@ CASES
 # Why: SOT owns every value; build-args only maps it.
 # From: Issue #1683 | PR #1858
 @test "build-args: real SOT targets give pinned, filled arguments" {
-    local s svcs bt apk="" tool pc sp verify w case target fmt plat pre want absent
+    local tool pc sp verify w case target fmt plat pre want absent
     local -A N=()
-    svcs="$(ci_services)" || { echo "services unreadable: ${svcs}"; return 1; }
-    for s in ${svcs}; do
-        bt="$(ci_service_field "${s}" build_type)" || { echo "build_type ${s}: ${bt}"; return 1; }
-        [ "${bt}" != apk ] || { apk="${s}"; break; }
-    done
     tool="$(_ci_block_keys build_toolchain)" && pc="$(_pin_consumer)" && sp="$(_ci_build_matrix_platforms)" \
         || { echo "SOT readers failed"; return 1; }
     tool="${tool%%$'\n'*}" sp="${sp%%$'\n'*}"
-    [ -n "${apk}" ] && [ -n "${tool}" ] && [ -n "${pc}" ] && [ -n "${sp}" ] || { echo "inputs: ${apk} ${tool} ${pc} ${sp}"; return 1; }
+    [ -n "${tool}" ] && [ -n "${pc}" ] && [ -n "${sp}" ] || { echo "inputs: ${tool} ${pc} ${sp}"; return 1; }
     run --separate-stderr bash "${CI_SH}" version verify
     [ "${status}" -eq 0 ] || { echo "version verify rc ${status}: ${output} ${stderr}"; return 1; }
     verify="${output}"
@@ -1561,7 +1550,7 @@ CASES
         [ -n "${N[${w}]}" ] || { echo "no ${w} ARG in: ${verify}"; return 1; }
     done
     while IFS='|' read -r case target fmt plat want absent; do
-        target="${target/@APK@/${apk}}" target="${target/@TOOL@/${tool}}" target="${target/@PC@/${pc}}"
+        target="${target/@TOOL@/${tool}}" target="${target/@PC@/${pc}}"
         plat="${plat/@SP@/${sp}}"
         want="${want/@ARCH@/${N[ARCH]}}" want="${want/@SHA@/${N[SHA256]}}" want="${want/@VER@/${N[VERSION]}}"
         absent="${absent/@ARCH@/${N[ARCH]}}"
@@ -1575,9 +1564,8 @@ CASES
         [ "${absent}" = - ] && continue
         for w in ${absent}; do ! grep -q "^${pre}${w}=" <<< "${output}" || { echo "${case}: has ${w}: ${output}"; return 1; }; done
     done <<'CASES'
-apk-flags|@APK@|||APK_PACKAGES=.+|BUILD_TOOLS_IMAGE
-apk-bare|@APK@|--bare||APK_PACKAGES=.+|BUILD_TOOLS_IMAGE
 toolchain|@TOOL@|||APK_PACKAGES=.+|BUILD_TOOLS_IMAGE
+toolchain-bare|@TOOL@|--bare||APK_PACKAGES=.+|BUILD_TOOLS_IMAGE
 pin-no-platform|@PC@|||@VER@=.+|@ARCH@
 pin-platform|@PC@||@SP@|@ARCH@=.+ @SHA@=[0-9a-f]{64}$|-
 CASES

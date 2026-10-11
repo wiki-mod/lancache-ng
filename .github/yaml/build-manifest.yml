@@ -449,8 +449,6 @@ ci_result_gate:
 build_identity:
   rust:
     inputs: [source_sha, toolchain_digest, base_digest, package_versions, build_variables]
-  apk:
-    inputs: [source_sha, package_versions, base_digest]
   toolchain:
     inputs: [toolchain_source_sha, base_digest]
 
