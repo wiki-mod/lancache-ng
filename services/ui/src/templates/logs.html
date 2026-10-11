@@ -36,6 +36,33 @@
     </select>
   </div>
 
+  <!-- What: per-service logging switches.
+       Why: the ui saves them; the watchdog applies them to syslog-ng. -->
+  <form method="post" action="/logs/settings" class="card space-y-3">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div>
+      <h2 class="font-semibold text-slate-200">Protokollierung je Dienst</h2>
+      <p class="text-xs text-slate-400 mt-1">
+        Abgeschaltete Dienste schreiben nichts mehr in den zentralen Syslog. Der Watchdog
+        (Container „services“) protokolliert immer. Die Änderung gilt nach wenigen Sekunden.
+        Ohne Proxy-Protokoll zeigen Statistik und Dashboard keine neuen Zugriffe.
+      </p>
+    </div>
+    <div class="flex flex-wrap gap-x-6 gap-y-2">
+      {% for sw in log_switches %}
+      <label class="flex items-center gap-2 text-sm text-slate-300">
+        <input type="checkbox" name="{{ sw.key }}" value="1" {% if sw.on %}checked{% endif %}
+               class="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500">
+        {{ sw.program }}
+      </label>
+      {% endfor %}
+    </div>
+    <button type="submit"
+            class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+      Speichern
+    </button>
+  </form>
+
   <div class="card p-0 overflow-hidden">
     <div class="overflow-x-auto">
       <table class="w-full text-xs" id="syslog-table">

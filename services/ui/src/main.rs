@@ -282,6 +282,13 @@ impl Config {
             ("NTP_AUTO_DHCP", bool_text(flag("NTP_AUTO_DHCP", false))),
             ("CACHE_MAX_GB", cache_max_gb.to_string()),
         ]);
+        // What: the logging switches, from the strict env.
+        // Why: .env owns the default; a typo must not flip it.
+        // From: Issue #1683 | PR #1912
+        let mut startup_settings = startup_settings;
+        for (key, _) in config::LOG_SWITCHES {
+            startup_settings.insert(key, bool_text(need_flag(key)?));
+        }
 
         Ok(Self {
             template_dir: need("TEMPLATE_DIR")?,
@@ -389,7 +396,8 @@ impl Config {
     // Why: one whole-file writer keeps other keys intact.
     fn save_settings(&self, changes: &[(&str, String)]) -> io::Result<()> {
         let mut content = String::new();
-        for key in SETTING_KEYS {
+        let log_keys = config::LOG_SWITCHES.iter().map(|(key, _)| *key);
+        for key in SETTING_KEYS.into_iter().chain(log_keys) {
             let value = match changes.iter().find(|(name, _)| *name == key) {
                 Some((_, value)) => value.clone(),
                 None => self.setting(key),
@@ -882,6 +890,11 @@ const SETTINGS_AREA: ErrorArea = ErrorArea {
     title: "Settings Error",
     href: "/setup",
     back: "Return to setup",
+};
+const LOGS_AREA: ErrorArea = ErrorArea {
+    title: "Logging Settings Error",
+    href: "/logs",
+    back: "Return to logs",
 };
 
 // What: a failed form action shown as an HTML page.
@@ -5126,7 +5139,39 @@ async fn logs_page(
     ctx.insert("syslog_logs", &entries);
     ctx.insert("syslog_hosts", &hosts);
     ctx.insert("selected_host", &selected);
+    let switches: Vec<Value> = config::LOG_SWITCHES
+        .iter()
+        .map(|(key, program)| {
+            serde_json::json!({
+                "key": key,
+                "program": program,
+                "on": state.config.flag(key),
+            })
+        })
+        .collect();
+    ctx.insert("log_switches", &switches);
     render(&state, "logs.html", &ctx)
+}
+
+// What: save which services write to the central log.
+// Why: the ui only writes; the watchdog filters syslog-ng.
+// From: Issue #1683 | PR #1912
+async fn update_logging_settings(
+    State(state): Shared,
+    Form(f): Form<Fields>,
+) -> Result<Redirect, HtmlError> {
+    let changes: Vec<(&str, String)> = config::LOG_SWITCHES
+        .iter()
+        .map(|(key, _)| (*key, bool_text(!f.get(key).is_empty())))
+        .collect();
+    state.config.save_settings(&changes).map_err(|e| {
+        HtmlError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &LOGS_AREA,
+            e.to_string(),
+        )
+    })?;
+    Ok(Redirect::to("/logs"))
 }
 
 // What: the refusal text for a cache size that won't fit.
@@ -5761,6 +5806,7 @@ fn router(state: Arc<AppState>) -> Router {
         ("/domains/zones/rollback", post(rollback_zone_snapshot)),
         ("/stats", get(stats_page)),
         ("/logs", get(logs_page)),
+        ("/logs/settings", post(update_logging_settings)),
         ("/setup", get(setup_page)),
         ("/setup/update", post(update_stack_settings)),
         ("/setup/restart-ui", post(restart_ui_service)),
@@ -6395,7 +6441,14 @@ mod tests {
         ("SYSLOG_MAX_GB", "3"),
     ];
 
-    const FLAG_KEYS: [&str; 2] = ["SSL_ENABLED", "ALLOW_INSECURE_UI"];
+    const FLAG_KEYS: [&str; 6] = [
+        "SSL_ENABLED",
+        "ALLOW_INSECURE_UI",
+        "LOGGING_PROXY_ENABLED",
+        "LOGGING_DNS_ENABLED",
+        "LOGGING_DHCP_ENABLED",
+        "LOGGING_UI_ENABLED",
+    ];
 
     // What: a complete env; each text value names its key.
     // Why: a swapped field then shows in the value.
@@ -6656,7 +6709,8 @@ mod tests {
             saved,
             "DHCP_MODE=kea\nDHCP_DNS_PRIMARY=v-STANDARD_IP\nDHCP_DNS_SECONDARY=v-SSL_IP\n\
              LANCACHE_IMAGE_CHANNEL=latest\nAUTO_UPDATE_ENABLED=0\nNTP_ENABLED=1\n\
-             NTP_UPSTREAM_SERVERS=v-NTP_UPSTREAM_SERVERS\nNTP_AUTO_DHCP=0\nCACHE_MAX_GB=50\n"
+             NTP_UPSTREAM_SERVERS=v-NTP_UPSTREAM_SERVERS\nNTP_AUTO_DHCP=0\nCACHE_MAX_GB=50\n\
+             LOGGING_PROXY_ENABLED=1\nLOGGING_DNS_ENABLED=1\nLOGGING_DHCP_ENABLED=1\nLOGGING_UI_ENABLED=1\n"
         );
         cfg.save_settings(&[("NTP_AUTO_DHCP", "1".to_string())])
             .unwrap();
@@ -9468,6 +9522,37 @@ mod tests {
                 .unwrap()
                 .contains("AUTO_UPDATE_ENABLED=0\n")
         );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&sdir);
+    }
+
+    // What: each logging switch is saved on its own.
+    // Why: the watchdog filters syslog-ng by this file.
+    // From: Issue #1683 | PR #1912
+    #[tokio::test]
+    async fn logging_switches_are_saved_per_service() {
+        let dir = unique_temp_dir("logsw");
+        let conf = dir.join("ui.conf");
+        let settings = conf.to_string_lossy().to_string();
+        let (base, state, sdir) = test_server(move |cfg| cfg.ui_settings_file = settings).await;
+        let session = open_session(&base, &state).await;
+        let page = reqwest::get(format!("{base}/logs")).await.unwrap();
+        assert_eq!(page.status(), 200);
+        let page = page.text().await.unwrap();
+        assert!(page.contains("name=\"LOGGING_PROXY_ENABLED\""), "{page}");
+        let body = "LOGGING_DNS_ENABLED=1&LOGGING_UI_ENABLED=1";
+        let ok = post_form(&base, &session, "/logs/settings", body).await;
+        assert_eq!(ok.status(), 303);
+        assert_eq!(ok.headers()[header::LOCATION], "/logs");
+        let saved = fs::read_to_string(&conf).unwrap();
+        for row in [
+            "LOGGING_PROXY_ENABLED=0\n",
+            "LOGGING_DNS_ENABLED=1\n",
+            "LOGGING_DHCP_ENABLED=0\n",
+            "LOGGING_UI_ENABLED=1\n",
+        ] {
+            assert!(saved.contains(row), "{row}: {saved}");
+        }
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&sdir);
     }

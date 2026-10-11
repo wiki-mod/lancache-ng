@@ -1146,7 +1146,7 @@ fn fingerprint(files: &[PathBuf]) -> Vec<Option<(u64, i64, i64)>> {
 // What: syslog-ng.conf for the Docker syslog input.
 // Why: one file per container and day; the group reads.
 // From: Issue #1683
-fn syslog_ng_conf(port: &str, root: &str, group: &str) -> Result<String, String> {
+fn syslog_ng_conf(port: &str, root: &str, group: &str, off: &[&str]) -> Result<String, String> {
     if port.parse::<u16>().map_or(true, |p| p == 0) {
         return Err(format!("LANCACHE_LOG_PORT={port} is no port"));
     }
@@ -1157,15 +1157,41 @@ fn syslog_ng_conf(port: &str, root: &str, group: &str) -> Result<String, String>
     if group.is_empty() || !group.chars().all(name) {
         return Err(format!("LOG_READER_GROUP={group} is no group name"));
     }
+    if off.iter().any(|p| !p.chars().all(name)) {
+        return Err(format!("switched-off program {off:?} is no plain name"));
+    }
+    let skip = if off.is_empty() {
+        String::new()
+    } else {
+        format!(r#" and not program("^({})$" type(pcre))"#, off.join("|"))
+    };
     Ok(format!(
         r#"@version: current
 options {{ create-dirs(yes); dir-group("{group}"); dir-perm(0750); group("{group}"); perm(0640); keep-hostname(yes); time-reap(30); }};
 source s_docker {{ network(transport("udp") port({port}) flags(syslog-protocol)); }};
-filter f_named {{ program("^[A-Za-z0-9_-]+$" type(pcre)); }};
+filter f_named {{ program("^[A-Za-z0-9_-]+$" type(pcre)){skip}; }};
 destination d_store {{ file("{root}/${{PROGRAM}}/${{YEAR}}${{MONTH}}${{DAY}}.log" template("${{ISODATE}} ${{HOST}} ${{PROGRAM}}: ${{MSGONLY}}\n")); }};
 log {{ source(s_docker); filter(f_named); destination(d_store); }};
 "#
     ))
+}
+
+// What: the programs whose logging the operator switched off.
+// Why: the services container itself always logs.
+// From: Issue #1683 | PR #1912
+fn logging_off(ctx: &Ctx) -> Result<Vec<&'static str>, String> {
+    let mut off = Vec::new();
+    for (key, program) in config::LOG_SWITCHES {
+        let on = ctx
+            .setting(key)
+            .as_deref()
+            .and_then(config::parse_bool)
+            .ok_or_else(|| format!("{key} must be a boolean"))?;
+        if !on {
+            off.push(program);
+        }
+    }
+    Ok(off)
 }
 
 // What: render syslog-ng.conf; the syslog-ng command.
@@ -1175,6 +1201,7 @@ fn syslog_ng(ctx: &Ctx) -> Result<Run, String> {
         &ctx.need("LANCACHE_LOG_PORT")?,
         &ctx.need("SYSLOG_LOG_ROOT")?,
         &ctx.need("LOG_READER_GROUP")?,
+        &logging_off(ctx)?,
     )?;
     let conf = ctx.render("syslog-ng.conf", &conf)?;
     let run = |file: &str| ctx.run_dir.join(file).display().to_string();
@@ -1193,6 +1220,7 @@ fn syslog_ng(ctx: &Ctx) -> Result<Run, String> {
     ];
     Ok(Run {
         argv,
+        watch: ctx.settings_file.iter().cloned().collect(),
         ..Run::default()
     })
 }
@@ -4512,7 +4540,7 @@ mod tests {
     #[test]
     fn syslog_ng_conf_takes_a_port_and_a_root() {
         let (port, root, group) = (rnd(1, u16::MAX.into()).to_string(), gen_path(), gen_name());
-        let conf = syslog_ng_conf(&port, &root, &group).expect("conf");
+        let conf = syslog_ng_conf(&port, &root, &group, &[]).expect("conf");
         assert!(conf.contains(&format!("port({port})")), "{conf}");
         assert!(
             conf.contains(&format!("file(\"{root}/${{PROGRAM}}/")),
@@ -4520,12 +4548,54 @@ mod tests {
         );
         assert!(conf.contains(&format!("dir-group(\"{group}\")")), "{conf}");
         assert!(conf.contains(&format!(" group(\"{group}\")")), "{conf}");
-        assert!(syslog_ng_conf("0", &root, &group).is_err());
-        assert!(syslog_ng_conf(&gen_name(), &root, &group).is_err());
-        assert!(syslog_ng_conf(&port, &gen_name(), &group).is_err());
-        assert!(syslog_ng_conf(&port, &format!("{root}\""), &group).is_err());
-        assert!(syslog_ng_conf(&port, &root, "").is_err());
-        assert!(syslog_ng_conf(&port, &root, "a\"b").is_err());
+        assert!(syslog_ng_conf("0", &root, &group, &[]).is_err());
+        assert!(syslog_ng_conf(&gen_name(), &root, &group, &[]).is_err());
+        assert!(syslog_ng_conf(&port, &gen_name(), &group, &[]).is_err());
+        assert!(syslog_ng_conf(&port, &format!("{root}\""), &group, &[]).is_err());
+        assert!(syslog_ng_conf(&port, &root, "", &[]).is_err());
+        assert!(syslog_ng_conf(&port, &root, "a\"b", &[]).is_err());
+        assert!(syslog_ng_conf(&port, &root, &group, &["a|b"]).is_err());
+    }
+
+    // What: a logging switch drops only its own program.
+    // Why: the services container must always log.
+    // From: Issue #1683 | PR #1912
+    #[test]
+    fn logging_switches_filter_their_programs() {
+        let root = scratch();
+        let ctx = Ctx {
+            run_dir: root.join(gen_name()),
+            settings_file: Some(root.join(gen_name())),
+            desired_file: None,
+        };
+        let file = ctx.settings_file.as_ref().expect("settings path");
+        let save = |values: [&str; 4]| {
+            let rows: Vec<String> = config::LOG_SWITCHES
+                .iter()
+                .zip(values)
+                .map(|((key, _), value)| format!("{key}={value}\n"))
+                .collect();
+            fs::write(file, rows.concat()).expect("settings");
+        };
+        save(["1", "1", "1", "1"]);
+        assert!(logging_off(&ctx).expect("all on").is_empty());
+        save(["0", "1", "0", "1"]);
+        let off = logging_off(&ctx).expect("two off");
+        let (first, third) = (config::LOG_SWITCHES[0].1, config::LOG_SWITCHES[2].1);
+        assert_eq!(off, [first, third]);
+        let (port, path, group) = (rnd(1, u16::MAX.into()).to_string(), gen_path(), gen_name());
+        let conf = syslog_ng_conf(&port, &path, &group, &off).expect("conf");
+        assert!(
+            conf.contains(&format!("and not program(\"^({first}|{third})$\"")),
+            "{conf}"
+        );
+        for kept in [config::LOG_SWITCHES[1].1, config::LOG_SWITCHES[3].1] {
+            assert!(!conf.contains(kept), "{kept}: {conf}");
+        }
+        let all_on = syslog_ng_conf(&port, &path, &group, &[]).expect("conf");
+        assert!(!all_on.contains("not program"), "{all_on}");
+        save(["1", "x", "1", "1"]);
+        assert!(logging_off(&ctx).is_err());
     }
 
     // What: chronyd follows the saved flag and the dock.
@@ -4599,7 +4669,7 @@ mod tests {
             "log_format cache '$remote_addr - [$time_local] \"$request\" '\n                     '$status $body_bytes_sent '\n                     '\"$upstream_cache_status\" \"$host\"';"
         ));
         assert!(nginx.contains("access_log /dev/stdout cache;"));
-        let syslog = syslog_ng_conf("514", "/r", "g").expect("conf");
+        let syslog = syslog_ng_conf("514", "/r", "g", &[]).expect("conf");
         assert!(syslog.contains(r#"template("${ISODATE} ${HOST} ${PROGRAM}: ${MSGONLY}\n")"#));
         for bad in ["relative.log", "/a b", "/a'b", "/a\nb"] {
             assert!(web_log_conf(bad).is_err(), "{bad:?}");

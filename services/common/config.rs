@@ -143,6 +143,16 @@ pub const SYSLOG_MAX_GB: Uint = Uint {
     above: OutOfRange::Clamp,
 };
 
+// What: the logging switches, as (key, syslog program).
+// Why: the ui saves them; the watchdog filters by them.
+// From: Issue #1683 | PR #1912
+pub const LOG_SWITCHES: [(&str, &str); 4] = [
+    ("LOGGING_PROXY_ENABLED", "LanCache-NG-proxy"),
+    ("LOGGING_DNS_ENABLED", "LanCache-NG-dns"),
+    ("LOGGING_DHCP_ENABLED", "LanCache-NG-dhcp"),
+    ("LOGGING_UI_ENABLED", "LanCache-NG-ui"),
+];
+
 // What: the DHCP backend an install runs, or none.
 // Why: ui and watchdog must read DHCP_MODE the same way.
 // From: Issue #844
