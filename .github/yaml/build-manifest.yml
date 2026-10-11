@@ -787,7 +787,7 @@ stage_variables:
 # From: Issue #1683 | PR #1858
 pr_policy:
   title_types: [feat, fix, docs, refactor, perf, test, build, ci, chore, style, revert, security]
-  # What: scopes beyond build targets and external services.
+  # What: PR-title scopes beyond the build targets.
   # Why: cross-cutting areas own no image of their own.
   # From: Issue #1683 | PR #1858
   title_scopes_extra: [setup, ci, governance, docs, scripts, tests]

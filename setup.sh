@@ -379,16 +379,13 @@ validate_ui_session_ttl_seconds() {
     fi
 }
 
-# What: rebuilds COMPOSE_PROFILES; keeps unrelated profiles
-# Why: keeps install and update from drifting apart
+# What: COMPOSE_PROFILES without retired project profiles
+# Why: five fixed services; operator profiles stay
+# From: Issue #1683 | PR #1912
 compose_profiles_for_runtime() {
-    local existing="${1:-}" dhcp_mode="${2:-disabled}" ntp_enabled="${3:-0}" logging_enabled="${4:-1}"
-    local profile result="" trimmed
+    local existing="${1:-}" profile result="" trimmed
     local -a profiles
 
-    # What: managed profiles rebuilt; a stale ssl dropped
-    # Why: prod compose has no ssl profile; it was dead
-    # From: Issue #1683 | PR #1858
     IFS=',' read -r -a profiles <<< "$existing"
     for profile in "${profiles[@]}"; do
         trimmed="${profile#"${profile%%[![:space:]]*}"}"
@@ -401,29 +398,6 @@ compose_profiles_for_runtime() {
             *) [[ -n "$result" ]] && result+=","; result+="$trimmed" ;;
         esac
     done
-
-    case "$dhcp_mode" in
-        kea)
-            [[ -n "$result" ]] && result+=","
-            result+="dhcp-kea"
-            ;;
-        dnsmasq-proxy|dnsmasq-relay)
-            # What: dnsmasq modes share dhcp-proxy profile
-            # Why: container reads DHCP_MODE for its config
-            [[ -n "$result" ]] && result+=","
-            result+="dhcp-proxy"
-            ;;
-    esac
-
-    if [[ "$ntp_enabled" = "1" ]]; then
-        [[ -n "$result" ]] && result+=","
-        result+="ntp"
-    fi
-
-    if [[ "$logging_enabled" = "1" ]]; then
-        [[ -n "$result" ]] && result+=","
-        result+="logging"
-    fi
 
     printf '%s\n' "$result"
 }
@@ -449,7 +423,7 @@ run_kea_dhcp_activation_preflight() {
     # What: one supervisor probe run in the dhcp image
     # Why: the same probe as the Admin UI; no extra package
     # From: Issue #1683 | PR #1912
-    if ! output=$(docker compose --env-file "$env_file" -f "$PROD_COMPOSE" --profile dhcp-kea run --rm --no-deps dhcp \
+    if ! output=$(docker compose --env-file "$env_file" -f "$PROD_COMPOSE" run --rm --no-deps dhcp \
         probe) || ! status=$(json_value .status "$output") || [[ "$status" = unavailable || -z "$status" ]]; then
         print_warn "DHCP discovery preflight could not be executed inside the dhcp image."
         print_warn "Kea activation will require an explicit confirmation because the safety check did not complete."
@@ -1516,24 +1490,10 @@ runtime_env_file_for_install_dir() {
     fi
 }
 
-# What: true if the NATS-secondary override is active
-# Why: shell or env file NATS_BIND_IP activates it
-nats_secondary_override_active_for_install_dir() {
-    local install_dir="$1" env_file="$2" bind_ip
-
-    [[ -f "$install_dir/docker-compose.nats-secondary.yml" ]] || return 1
-    if [[ -n "${NATS_BIND_IP:-}" ]]; then
-        return 0
-    fi
-    bind_ip=$(get_env_var_nonempty NATS_BIND_IP "$env_file") \
-        || die "Cannot read NATS_BIND_IP from $env_file (exit $?)."
-    [[ -n "$bind_ip" ]]
-}
-
-# What: builds -f args for base, override, NATS
+# What: builds -f args for base and operator override
 # Why: any -f disables auto-discovery; base is listed
 compose_file_args_for_install_dir() {
-    local install_dir="$1" env_file="$2" override_file
+    local install_dir="$1" override_file
     local -a args=(-f "$install_dir/docker-compose.yml")
 
     for override_file in "$install_dir/docker-compose.override.yml" "$install_dir/docker-compose.override.yaml"; do
@@ -1543,9 +1503,6 @@ compose_file_args_for_install_dir() {
         fi
     done
 
-    if nats_secondary_override_active_for_install_dir "$install_dir" "$env_file"; then
-        args+=(-f "$install_dir/docker-compose.nats-secondary.yml")
-    fi
     printf '%s\n' "${args[@]}"
 }
 
@@ -1567,7 +1524,7 @@ docker_volume_exists() {
 compose_files_into() {
     local -n _compose_files_ref="$1"
     local files
-    files=$(compose_file_args_for_install_dir "$2" "$3") \
+    files=$(compose_file_args_for_install_dir "$2") \
         || die "Cannot build the compose file list for $2 (exit $?)."
     mapfile -t _compose_files_ref <<< "$files"
 }
@@ -1579,7 +1536,7 @@ stack_compose() {
     local install_dir="$1" env_file="$2"
     local -a stack_files
     shift 2
-    compose_files_into stack_files "$install_dir" "$env_file"
+    compose_files_into stack_files "$install_dir"
     docker compose --env-file "$env_file" "${stack_files[@]}" "$@"
 }
 
@@ -3072,7 +3029,7 @@ migrate_env_for_update() (
     local default_cache_size default_cache_gb
     local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_https ui_generated_password ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_http upstream_dhcp_ip
-    local state_keys state_key state_sub state_sub_dir legacy_path ntp_enabled logging_enabled
+    local state_keys state_key state_sub state_sub_dir legacy_path
     local state_dir ui_session_ttl
     local legacy_cache_std legacy_cache_ssl existing_image_tag
     local lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
@@ -3396,12 +3353,12 @@ migrate_env_for_update() (
     ensure_secret_env_key NATS_SYS_PASSWORD "$env_file" hex32
     ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
 
-    ntp_enabled=$(get_env_var NTP_ENABLED "$env_file") || exit $?
-    logging_enabled=$(get_env_var LOGGING_ENABLED "$env_file") || exit $?
-    append_env_key_if_missing COMPOSE_PROFILES "" "$env_file"
-    set_env_key COMPOSE_PROFILES \
-        "$(compose_profiles_for_runtime "$compose_profiles" "$dhcp_mode" "$ntp_enabled" "$logging_enabled")" \
-        "$env_file"
+    # What: strips retired project profiles from the env
+    # Why: an old install still lists dhcp-kea, ntp, logging
+    # From: Issue #1683 | PR #1912
+    if env_key_exists COMPOSE_PROFILES "$env_file"; then
+        set_env_key COMPOSE_PROFILES "$(compose_profiles_for_runtime "$compose_profiles")" "$env_file"
+    fi
 
     # What: UI auth is user-chosen; user needs a password
     # Why: unset user and password mean insecure UI
@@ -4665,7 +4622,7 @@ stack_update_step() {
 # Why: compose, templates and setup.sh must move together
 # From: Issue #1683 | PR #1858
 update_repo_and_resume() {
-    local install_dir="$1" repo_dir="$1" branch="" default changes old new baseline="" svc rc=0
+    local install_dir="$1" repo_dir="$1" branch="" default changes old new baseline="" svc rc=0 exec_rc
     is_deploy_prod_install_dir "$install_dir" && repo_dir=$(deploy_prod_repo_root "$install_dir")
     if [[ ! -e "$repo_dir/.git" ]]; then
         print_ok "$repo_dir is not a git checkout; its files stay as they are"
@@ -4699,12 +4656,16 @@ update_repo_and_resume() {
     export LANCACHE_UPDATE_RESUMED=1 LANCACHE_UPDATE_REPO="$repo_dir" LANCACHE_UPDATE_BRANCH="$branch" \
         LANCACHE_UPDATE_OLD_SHA="$old" LANCACHE_UPDATE_BASELINE="$baseline" LANCACHE_BACKUP_ROOT="$BACKUP_ROOT" \
         CONVERGENCE_TIMER_WAS_ACTIVE CONVERGENCE_TIMER_WAS_ENABLED CONVERGENCE_SERVICE_WAS_ACTIVE
-    # What: a failed exec returns here instead of exiting
-    # Why: bash skips the EXIT trap when exec itself fails
-    # From: Issue #1683 | PR #1858
+    # What: a failed exec returns to die, trap and all
+    # Why: errexit ends bash at a failed exec, skipping EXIT
+    # From: Issue #1683 | PR #1912
     shopt -s execfail
-    exec "$repo_dir/setup.sh" update "$install_dir"
-    die "Failed to start $repo_dir/setup.sh (exit $?); the stack was not changed."
+    set +e
+    exec "$repo_dir/setup.sh" update "$install_dir" || {
+        exec_rc=$?
+        set -e
+        die "Failed to start $repo_dir/setup.sh (exit $exec_rc); the stack was not changed."
+    }
 }
 
 # What: takes the paused state and baseline over after exec
@@ -4743,13 +4704,6 @@ perform_stack_update_flow() {
     cd "$install_dir"
     _UPDATE_ENV_FILE=$(runtime_env_file_for_install_dir "$install_dir")
     _UPDATE_STACK_DIR="$install_dir"
-    # What: tells the operator the NATS override is in use
-    # Why: it changes which compose files the update runs
-    # From: Issue #1683 | PR #1858
-    if nats_secondary_override_active_for_install_dir "$install_dir" "$_UPDATE_ENV_FILE"; then
-        print_ok "NATS_BIND_IP is set; keeping the remote-secondary NATS override active for this update"
-    fi
-
     UPDATE_CONVERGENCE_COMPLETED=0
     if [[ "${LANCACHE_UPDATE_RESUMED:-0}" = 1 ]]; then
         update_resume_handoff
@@ -4973,8 +4927,7 @@ cmd_converge_reconcile() {
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}" env_file
     local ui_channel ui_auto_update current_channel current_auto_update
     local ui_cache_max_gb current_cache_max_gb
-    local ui_dhcp_mode current_dhcp_mode current_compose_profiles new_compose_profiles
-    local current_ntp_enabled ui_logging_enabled current_logging_enabled
+    local ui_dhcp_mode current_dhcp_mode ui_logging_enabled current_logging_enabled
 
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
     # What: a tick before the first install does nothing
@@ -5004,41 +4957,29 @@ cmd_converge_reconcile() {
         fi
     fi
 
-    # What: folds the UI DHCP mode into .env profiles
-    # Why: UI cannot create containers, only start them
+    # What: folds the Admin UI DHCP mode into .env
+    # Why: the dhcp container reads DHCP_MODE at its start
+    # From: Issue #1683 | PR #1912
     ui_dhcp_mode=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "DHCP_MODE") \
         || die "Cannot read the UI setting DHCP_MODE (exit $?)."
     if [[ -n "$ui_dhcp_mode" ]] && is_valid_dhcp_mode "$ui_dhcp_mode"; then
         current_dhcp_mode=$(get_env_var DHCP_MODE "$env_file") || exit $?
         if [[ "$ui_dhcp_mode" != "$current_dhcp_mode" ]]; then
-            current_compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file") || exit $?
-            # What: keeps NTP and logging profiles
-            # Why: omitted flags would drop those profiles
-            current_ntp_enabled=$(get_env_var NTP_ENABLED "$env_file") || exit $?
-            current_logging_enabled=$(get_env_var LOGGING_ENABLED "$env_file") || exit $?
-            new_compose_profiles=$(compose_profiles_for_runtime \
-                "$current_compose_profiles" "$ui_dhcp_mode" "$current_ntp_enabled" "$current_logging_enabled")
             set_env_key DHCP_MODE "$ui_dhcp_mode" "$env_file"
-            set_env_key COMPOSE_PROFILES "$new_compose_profiles" "$env_file"
-            print_ok "DHCP mode updated from Admin UI: ${current_dhcp_mode:-<unset>} -> $ui_dhcp_mode (COMPOSE_PROFILES: ${current_compose_profiles:-<none>} -> ${new_compose_profiles:-<none>})"
+            print_ok "DHCP mode updated from Admin UI: ${current_dhcp_mode:-<unset>} -> $ui_dhcp_mode"
         fi
     fi
 
-    # What: folds the Admin UI logging toggle into profiles
-    # Why: the syslog services are profile-gated
+    # What: folds the Admin UI logging toggle into .env
+    # Why: .env is the one owner of LOGGING_ENABLED
+    # From: Issue #1683 | PR #1912
     ui_logging_enabled=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "LOGGING_ENABLED") \
         || die "Cannot read the UI setting LOGGING_ENABLED (exit $?)."
     if [[ "$ui_logging_enabled" = "0" || "$ui_logging_enabled" = "1" ]]; then
         current_logging_enabled=$(get_env_var LOGGING_ENABLED "$env_file") || exit $?
         if [[ "$ui_logging_enabled" != "$current_logging_enabled" ]]; then
-            current_compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file") || exit $?
-            current_dhcp_mode=$(get_env_var DHCP_MODE "$env_file") || exit $?
-            current_ntp_enabled=$(get_env_var NTP_ENABLED "$env_file") || exit $?
-            new_compose_profiles=$(compose_profiles_for_runtime \
-                "$current_compose_profiles" "$current_dhcp_mode" "$current_ntp_enabled" "$ui_logging_enabled")
             set_env_key LOGGING_ENABLED "$ui_logging_enabled" "$env_file"
-            set_env_key COMPOSE_PROFILES "$new_compose_profiles" "$env_file"
-            print_ok "Central logging updated from Admin UI: ${current_logging_enabled:-<unset>} -> $ui_logging_enabled (COMPOSE_PROFILES: ${current_compose_profiles:-<none>} -> ${new_compose_profiles:-<none>})"
+            print_ok "Central logging updated from Admin UI: ${current_logging_enabled:-<unset>} -> $ui_logging_enabled"
         fi
     fi
 
@@ -5166,6 +5107,10 @@ managed_secret_env_keys() {
 # From: Issue #762
 logbundle_key_looks_like_secret() {
     local key="$1"
+    # What: a key naming a property of a secret is plain
+    # Why: redacting a value like "none" garbles the bundle
+    # From: Issue #1683 | PR #1912
+    [[ "$key" =~ _(PERSISTENCE|MODE|POLICY|ENABLED|TTL|SECONDS)$ ]] && return 1
     [[ "$key" =~ (PASSWORD|SECRET|TOKEN|TSIG|CREDENTIAL|_KEY) ]]
 }
 
@@ -6222,8 +6167,8 @@ EOF
 
     if [[ "$http_status" = "503" ]]; then
         # What: 503 means primary lacks a reachable NATS URL
-        # Why: nats needs the secondary override too
-        die "Primary server at ${primary} is not configured to register remote secondaries (HTTP 503): it needs NATS_BIND_IP (or the more specific NATS_ADVERTISE_URL) set in its .env/.env.local to a NATS address this secondary can reach, AND its 'nats' service recreated with the docker-compose.nats-secondary.yml override included -- e.g. docker compose -f docker-compose.yml -f docker-compose.nats-secondary.yml up -d if the variable is in .env, or docker compose --env-file .env.local -f docker-compose.yml -f docker-compose.nats-secondary.yml up -d if it is in .env.local (Compose does not auto-load .env.local) -- so NATS actually publishes that address; restarting only the ui container is not enough. See docs/architecture-ng.md's \"Remote secondary NATS access\" section."
+        # Why: dns publishes NATS only with NATS_BIND_IP set
+        die "Primary server at ${primary} is not configured to register remote secondaries (HTTP 503): it needs NATS_BIND_IP (or the more specific NATS_ADVERTISE_URL) set in its .env/.env.local to a NATS address this secondary can reach, AND its 'dns' service recreated -- e.g. docker compose up -d dns if the variable is in .env, or docker compose --env-file .env.local up -d dns if it is in .env.local (Compose does not auto-load .env.local) -- so NATS actually publishes that address; restarting only the ui container is not enough. See docs/architecture-ng.md's \"Remote secondary NATS access\" section."
     elif [[ ! "$http_status" =~ ^2 ]]; then
         die "Primary server rejected the registration request with HTTP ${http_status}. Verify the registration token, secondary name, and primary server logs."
     fi
@@ -6770,9 +6715,6 @@ else
     print_warn "Scheduled automatic updates disabled — manual updates with: ./setup.sh update"
 fi
 
-COMPOSE_PROFILES=""
-[[ "$SSL_ENABLED" = "1" ]] && COMPOSE_PROFILES="ssl"
-
 # ── 7. DHCP mode ─────────────────────────────────────────────────────────────
 print_step "DHCP mode"
 
@@ -7091,8 +7033,6 @@ else
     print_warn "Central logging disabled — re-enable later via LOGGING_ENABLED=1 in .env (or the Admin UI) and rerun setup.sh update"
 fi
 
-COMPOSE_PROFILES="$(compose_profiles_for_runtime "$COMPOSE_PROFILES" "$DHCP_MODE" "$NTP_ENABLED" "$LOGGING_ENABLED")"
-
 # ── 8. Admin-UI access control ────────────────────────────────────────────────
 print_step "Admin-UI access control"
 
@@ -7248,7 +7188,6 @@ validate_env_values_for_initial_write \
     "NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD}" \
     "SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}" \
     "UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS}" \
-    "COMPOSE_PROFILES=${COMPOSE_PROFILES}" \
     "UI_AUTH_USER=${UI_AUTH_USER}" \
     "UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}" \
     "ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}" \
@@ -7374,17 +7313,6 @@ NATS_SYS_USER=${NATS_SYS_USER}
 NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD}
 # Token for setup.sh secondary — anyone who knows this can register a secondary
 SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
-
-# ── Profiles ───────────────────────────────────────────────────────────────────
-# Comma-separated Compose profiles, kept in sync by compose_profiles_for_runtime()
-# on every install/update/Admin-UI-driven change -- do not hand-edit without
-# also updating the matching *_ENABLED/DHCP_MODE key above, since the next
-# convergence tick recomputes this value from those keys, not the other way
-# around. Recognized values: ssl (SSL mode), dhcp-kea (Kea DHCP), dhcp-proxy
-# (dnsmasq ProxyDHCP/relay), ntp (LanCache-NG-NTP), logging (syslog-ng/
-# fluent-bit central logging, on by default per issue #1343). Empty = only the
-# always-on core services.
-COMPOSE_PROFILES=${COMPOSE_PROFILES}
 
 # ── Scheduled automatic updates ─────────────────────────────────────────────────
 # 1 = the host systemd timer (lancache-auto-update.timer) is enabled and will

@@ -5648,7 +5648,7 @@ _ci_gc_candidates() {
         [ -n "${svc}" ] || continue
         grc=0
         # What: A 404 package is skipped, not a failure.
-        # Why: External services (netdata) have no package.
+        # Why: a target never published has no package yet.
         # From: Issue #1683
         vers="$(_ci_gh_versions "${owner}" "${pkgbase}%2F${svc}")" || grc=$?
         [ "${grc}" -eq 2 ] && return 2
@@ -9965,8 +9965,6 @@ _ci_check_pr_title() {
         ci_log "[CI-ERROR-CHECK-0085]" "reason=\"no SOT pr_policy.title_types; FAIL CLOSED\""; return 2
     fi
     scopes="$(ci_build_targets)" || return 2
-    part="$(_ci_block_keys external_services)" || return 2
-    scopes+=$'\n'"${part}"
     part="$(_ci_block_entry_list pr_policy "" title_scopes_extra)" || return 2
     scopes+=$'\n'"${part}"
     types="${types//$'\n'/ }"
@@ -10014,27 +10012,17 @@ _ci_check_pr_title() {
 # From: Issue #1683
 _ci_check_stable_external_images() {
     local -a dirs=("$@")
-    local d line img k allowed=" " tagged=" " dep inst
+    local d line img k allowed=" " dep inst
     if [ "${#dirs[@]}" -eq 0 ]; then
         dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
         inst="$(_ci_installer_compose)" || return 2
         dirs=("${CI_REPO_ROOT}/$(dirname "${dep}")" "${CI_REPO_ROOT}/$(dirname "${inst}")")
     fi
     local -a viol=()
-    # What: the exact SOT pins (external services + bases).
+    # What: the exact SOT base image pins.
     # Why: compose must match them; other values are drift.
     # From: Issue #1683 | PR #1858
-    local keys policy val
-    keys="$(_ci_block_keys external_services)" || return 2
-    for k in ${keys}; do
-        img="$(_ci_block_entry_field external_services "${k}" image)" || return 2
-        allowed+="${img} "
-        # What: a SOT tag-latest entry may skip the digest.
-        # Why: only an explicit SOT policy, never a guess.
-        # From: Issue #1683 | PR #1858
-        policy="$(_ci_block_entry_field external_services "${k}" policy)" || return 2
-        [ "${policy}" = tag-latest ] && tagged+="${img} "
-    done
+    local keys val
     keys="$(_ci_block_keys base_images all)" || return 2
     for k in ${keys}; do
         val="$(_ci_block_entry_field base_images "" "${k}")" || return 2
@@ -10057,9 +10045,6 @@ _ci_check_stable_external_images() {
                 *'${LANCACHE'*|'') continue ;;
             esac
             img="${img%\"}"; img="${img#\"}"
-            case "${tagged}" in
-                *" ${img} "*) continue ;;
-            esac
             case "${img}" in
                 *@sha256:*) ;;
                 *) viol+=("${d}: external not digest-pinned: ${img}"); continue ;;

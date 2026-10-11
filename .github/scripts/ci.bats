@@ -111,12 +111,11 @@ _listen80() {
     done
 }
 
-# What: drop runner cache inputs, then run the args.
+# What: drop the runner cache inputs from this shell.
 # Why: one list keeps tests off the real runner caches.
 # From: Issue #1683 | PR #1858
 _cache_env_clean() {
     unset RUNNER_ENVIRONMENT SCCACHE_REDIS_URL SCCACHE_DIR ACTIONS_RESULTS_URL ACTIONS_RUNTIME_TOKEN
-    [ "$#" -eq 0 ] || "$@"
 }
 
 # What: sources setup.sh; its guard stops before the run
@@ -675,7 +674,7 @@ CASES
 # Why: NOOP needs stable ids; an edit moves only its owner
 # From: Issue #1683 | PR #1858
 @test "identity is keyed, deterministic, per target and platform" {
-    local root svcs plats p1 p2 s a="" b="" ctx f idx a1 a2 b1 sot rc
+    local root svcs plats p1 p2 s a="" b="" ctx f idx a1 a2 b1 sot rc stderr=""
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     svcs="$(ci_services)" && plats="$(_ci_build_matrix_platforms)" || { echo "SOT readers failed"; return 1; }
     p1="${plats%%$'\n'*}" p2="${plats#*$'\n'}" p2="${p2%%$'\n'*}"
@@ -695,7 +694,8 @@ CASES
     done
     [ -n "${a}" ] && [ -n "${f}" ] && [ -n "${b}" ] || { echo "inputs: a=${a} f=${f} b=${b}"; return 1; }
     _id() { run --separate-stderr bash "${CI_SH}" identity "$@"; [ "${status}" -eq 0 ] || { echo "identity $*: rc ${status} ${stderr}"; return 1; }; }
-    _id "${a}" "${p1}" && a1="${output}"
+    _id "${a}" "${p1}" || return 1
+    a1="${output}"
     [[ "${a1}" =~ ^platform=${p1}\ identity=[0-9a-f]{64}$ ]] || { echo "shape: ${a1}"; return 1; }
     _id "${a}" "${p1}" && [ "${output}" = "${a1}" ] || { echo "not deterministic: ${output}"; return 1; }
     _id "${b}" "${p1}" && b1="${output}" && [ "${b1#*identity=}" != "${a1#*identity=}" ] || { echo "per target"; return 1; }
@@ -858,7 +858,7 @@ CASES
         [ "${bt}" != rust ] || rust="${rust:-${s}}"
     done
     [ -n "${rust}" ] || { echo "no rust service in the SOT"; return 1; }
-    _ts() { run _cache_env_clean env "$@" bash "${CI_SH}" test-stack; }
+    _ts() { _cache_env_clean; run env "$@" bash "${CI_SH}" test-stack; }
     _ts -u CI_RUST_VALIDATION TEST_SERVICES="${rust}"
     _expect rust-default 0 "service=${rust} tested=SKIP;AG-VAL-008" || return 1
     _ts CI_RUST_VALIDATION=false TEST_SERVICES="${rust}"
@@ -1216,14 +1216,14 @@ CASES
 # VALIDATION
 # =========================================================
 
-# What: per image pin; third-party kept; a gap fails
+# What: each first-party service pinned; a gap fails
 # Why: §48: validate runs the candidate, not a mutable tag
 # From: Issue #1683 | PR #1858
-@test "validate pin override: per image, third-party kept, gap fails" {
-    local root cfg svcs exts cand="" s dig out ext img k ks miss extra shared first
+@test "validate pin override: every first-party service pinned, gap fails" {
+    local root cfg svcs cand="" s dig out k ks miss extra first
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     cfg="$(docker compose -f "${root}/$(_ci_variable CI_COMPOSE_FILE)" config --format json)" && svcs="$(ci_services)" \
-        && exts="$(_ci_block_keys external_services)" || { echo "inputs: compose config, services or external services"; return 1; }
+        || { echo "inputs: compose config or services"; return 1; }
     first="$(jq -r --arg s "$(awk 'NR == 1' <<< "${svcs}")" '.services[$s].image // empty' <<< "${cfg}")"
     first="${first#*/}" first="${first%/*}"
     [ -n "${first}" ] || { echo "no compose image for the first SOT service"; return 1; }
@@ -1235,20 +1235,11 @@ CASES
     out="${output}"
     [ -n "$(grep '^    image: ' <<< "${out}")" ] || { echo "nothing pinned: ${out}"; return 1; }
     [ -z "$(grep '^    image: ' <<< "${out}" | grep -v "@${dig}\$")" ] || { echo "pin without the digest: ${out}"; return 1; }
-    shared="$(jq -r '[.services | to_entries[] | {k: .key, i: .value.image}] | group_by(.i)
-        | map(select(length > 1)) | (.[0] // []) | .[].k' <<< "${cfg}")"
-    [ -n "${shared}" ] || { echo "no image shared by two compose services"; return 1; }
+    ks="$(jq -r --arg p "/${first}/" '.services | to_entries[] | select((.value.image // "") | contains($p)) | .key' <<< "${cfg}")"
+    [ -n "${ks}" ] || { echo "no first-party compose service"; return 1; }
     while IFS= read -r k; do
-        grep -qx "  ${k}:" <<< "${out}" || { echo "shared image not pinned on ${k}: ${out}"; return 1; }
-    done <<< "${shared}"
-    while IFS= read -r ext; do
-        img="$(_ci_block_entry_field external_services "${ext}" image)" \
-            && ks="$(jq -r --arg i "${img}" '.services | to_entries[] | select(.value.image == $i) | .key' <<< "${cfg}")" \
-            || { echo "${ext}: image unreadable"; return 1; }
-        while IFS= read -r k; do
-            [ -z "${k}" ] || ! grep -qx "  ${k}:" <<< "${out}" || { echo "third-party ${k} pinned: ${out}"; return 1; }
-        done <<< "${ks}"
-    done <<< "${exts}"
+        grep -qx "  ${k}:" <<< "${out}" || { echo "first-party ${k} not pinned: ${out}"; return 1; }
+    done <<< "${ks}"
     miss="$(grep -m1 '^    image: ' <<< "${out}")" && miss="${miss%@*}" && miss="${miss##*/}"
     run _ci_validate_pin_override "$(grep -v "^${miss}=" <<< "${cand}")"
     _expect gap 2 "[CI-ERROR-VALIDATE-0007]" || return 1
@@ -1631,10 +1622,9 @@ CASES
     local -A V=(["@BT@"]="$(_val name | tr '0-9' 'a-j')" ["@BS@"]="$(_val name)" ["@W@"]="$(_val name)")
     V["@T@"]="$(_ci_block_entry_list pr_policy "" title_types | awk 'NR == 1')"
     V["@S@"]="$(ci_build_targets | awk 'NR == 1')"
-    V["@E@"]="$(_ci_block_keys external_services | awk 'NR == 1')"
     V["@X@"]="$(_ci_block_entry_list pr_policy "" title_scopes_extra | awk 'NR == 1')"
     V["@A@"]="$(_ci_block_entry_list pr_policy "" check_exempt_authors | awk 'NR == 1')"
-    [ -n "${V["@T@"]}" ] && [ -n "${V["@S@"]}" ] && [ -n "${V["@E@"]}" ] && [ -n "${V["@X@"]}" ] && [ -n "${V["@A@"]}" ] \
+    [ -n "${V["@T@"]}" ] && [ -n "${V["@S@"]}" ] && [ -n "${V["@X@"]}" ] && [ -n "${V["@A@"]}" ] \
         || { echo "SOT inputs: ${V[*]}"; return 1; }
     while IFS='|' read -r case title envs rc want; do
         ev=()
@@ -1645,7 +1635,6 @@ CASES
     done <<'CASES'
 target|@T@(@S@): @W@|-|0|pr-title=ok
 target-breaking|@T@(@S@)!: @W@|-|0|pr-title=ok
-external|@T@(@E@): @W@|-|0|pr-title=ok
 extra|@T@(@X@): @W@|-|0|pr-title=ok
 no-scope|@T@: @W@|-|0|pr-title=ok
 no-scope-breaking|@T@!: @W@|-|0|pr-title=ok
@@ -1657,6 +1646,33 @@ grammar-block|@W@|PR_TITLE_LINT_MODE=block|1|[CI-ERROR-CHECK-0087];not a Convent
 empty-subject|@T@(@S@):  |PR_TITLE_LINT_MODE=block|1|[CI-ERROR-CHECK-0087];empty subject
 exempt|@W@|PR_TITLE_LINT_MODE=block PR_AUTHOR=@A@|0|pr-title=skip author="@A@"
 CASES
+}
+
+# What: compose image: own ref or SOT base pin, else coded
+# Why: a floating or foreign external image is unreviewed
+# From: Issue #1683 | PR #1912
+@test "check stable-external-images: own refs and SOT pins pass, others fail" {
+    local d pin case img rc want
+    run bash "${CI_SH}" check stable-external-images
+    _expect real 0 "stable-external-images=clean" || return 1
+    pin="$(_ci_block_keys base_images all | awk 'NR == 1')" && pin="$(_ci_block_entry_field base_images "" "${pin}")" \
+        && [[ "${pin}" == *@sha256:* ]] || { echo "no SOT base pin: ${pin}"; return 1; }
+    d="$(_val path)" && mkdir -p "${d}" || { echo "no compose dir"; return 1; }
+    while IFS='|' read -r case img rc want; do
+        img="${img/@PIN@/${pin}}" img="${img/@BARE@/${pin%@*}}" img="${img/@DIG@/$(_val digest)}"
+        want="${want/@BARE@/${pin%@*}}"
+        printf 'services:\n  a:\n    image: %s\n' "${img}" > "${d}/docker-compose.yml"
+        run bash "${CI_SH}" check stable-external-images "${d}"
+        _expect "${case}" "${rc}" "${want}" || return 1
+    done <<'CASES'
+own|${LANCACHE_IMAGE_REF_A:-ghcr.io/a/b/a:latest}|0|stable-external-images=clean
+sot-pin|@PIN@|0|stable-external-images=clean
+quoted-pin|"@PIN@"|0|stable-external-images=clean
+tag-only|@BARE@|1|[CI-ERROR-CHECK-0014];external not digest-pinned: @BARE@
+foreign-digest|@BARE@@@DIG@|1|[CI-ERROR-CHECK-0014];external pin is not a SOT pin
+CASES
+    run bash "${CI_SH}" check stable-external-images "${d}/$(_val name)"
+    _expect no-dir 1 "[CI-ERROR-CHECK-0014];compose dir missing" || return 1
 }
 
 # What: per row: PR body on the real template -> verdict
@@ -2824,7 +2840,7 @@ STUB
         [ "$(get_env_var "${k}" "${env}")" = "$(get_env_var "${k}" "${tpl}")" ] || { echo "${k}: $(cat "${env}")"; return 1; }
     done
     [ "$(get_env_var IP_HTTP "${env}")" = "${std}" ] && [ "$(get_env_var LOGGING_ENABLED "${env}")" = 1 ] \
-        && [[ ",$(get_env_var COMPOSE_PROFILES "${env}")," == *,logging,* ]] || { echo "values: $(cat "${env}")"; return 1; }
+        && ! env_key_exists COMPOSE_PROFILES "${env}" || { echo "values: $(cat "${env}")"; return 1; }
     _checkout_copy "${root}" "${t}/repo2" && rm -f "${DS}/running" && : > "${DS}/fail-config-after-up" \
         || { echo "second copy failed"; return 1; }
     fault="$(_val name)"
@@ -2844,7 +2860,7 @@ STUB
     dp="${root}/deploy/prod"
     paths="$(deploy_prod_repo_input_paths "${dp}")" || { echo "owner rc $?"; return 1; }
     json="$(NATS_BIND_IP="$(get_env_var IP_HTTP "${dp}/.env")" docker compose --env-file "${dp}/.env" \
-        -f "${dp}/docker-compose.yml" -f "${dp}/docker-compose.nats-secondary.yml" config --format json)" \
+        -f "${dp}/docker-compose.yml" config --format json)" \
         || { echo "compose config failed"; return 1; }
     inputs="$(jq -r --arg r "${root}/" '[.services[] | ((.volumes // [])[] | select(.type == "bind") | .source),
         ((.env_file // [])[] | if type == "object" then .path else . end)] | unique[] | select(startswith($r))' <<< "${json}")"
@@ -3574,18 +3590,16 @@ _pm_run() {
         || { echo "tools on dnf: ${output}"; return 1; }
 }
 
-# What: modes, subnet start and compose profiles
-# Why: one dhcp profile per mode, never two
+# What: modes, subnet start; retired profiles dropped
+# Why: five fixed services; operator profiles must stay
 # From: Issue #1683 | PR #1912
-@test "setup dhcp mode and compose profiles per mode" {
-    local root modes off cprof ip net m p v dhcp="" ntp logp custom out
+@test "setup dhcp modes, subnet start and retired compose profiles" {
+    local root modes ip net m v x out
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
     modes="$(_rust_dhcp_modes "${root}")" || return 1
-    off="$(awk 'NR == 1' <<< "${modes}")"
-    cprof="$(_prod_compose config --profiles)"
     ip="$(get_env_var IP_HTTP "${root}/deploy/prod/.env")" net="${ip%.*}.0"
-    [ "$(wc -l <<< "${modes}")" -ge 3 ] && [ -n "${cprof}" ] && [ -n "${ip}" ] || { echo "inputs: ${modes} | ${cprof}"; return 1; }
+    [ "$(wc -l <<< "${modes}")" -ge 3 ] && [ -n "${ip}" ] || { echo "inputs: ${modes} | ${ip}"; return 1; }
     while IFS= read -r m; do
         is_valid_dhcp_mode "${m}" && ! is_valid_dhcp_mode "${m^^}" && ! is_valid_dhcp_mode "${m}x" || { echo "mode ${m}"; return 1; }
     done <<< "${modes}"
@@ -3594,27 +3608,13 @@ _pm_run() {
     for v in "${ip%.*}.$(( ${ip##*.} | 1 ))" "x${BATS_TEST_NUMBER}" "256.${net#*.}"; do
         ! is_dnsmasq_subnet_start "${v}" || { echo "subnet ${v} accepted"; return 1; }
     done
-    # What: each mode gives one compose profile, never two
-    # Why: one dhcp server per stack; profiles are compose's
-    # From: Issue #1683 | PR #1858
-    [ -z "$(compose_profiles_for_runtime "" "${off}" 0 0)" ] || { echo "${off} enables a profile"; return 1; }
-    while IFS= read -r m; do
-        [ "${m}" != "${off}" ] || continue
-        p="$(compose_profiles_for_runtime "" "${m}" 0 0)"
-        [ "$(tr ',' '\n' <<< "${p}" | wc -l)" -eq 1 ] && grep -qxF -- "${p}" <<< "${cprof}" || { echo "mode ${m}: ${p}"; return 1; }
-        dhcp+="${dhcp:+,}${p}"
-    done <<< "${modes}"
-    while IFS= read -r m; do
-        p="$(compose_profiles_for_runtime "${dhcp}" "${m}" 0 0)"
-        [ "${p}" = "$(compose_profiles_for_runtime "" "${m}" 0 0)" ] || { echo "switch to ${m}: ${p}"; return 1; }
-    done <<< "${modes}"
-    ntp="$(compose_profiles_for_runtime "" "${off}" 1 0)" logp="$(compose_profiles_for_runtime "" "${off}" 0 1)"
-    grep -qxF -- "${ntp}" <<< "${cprof}" && grep -qxF -- "${logp}" <<< "${cprof}" && [ "${ntp}" != "${logp}" ] \
-        && [ "$(compose_profiles_for_runtime "" "${off}" 0)" = "${logp}" ] \
-        && [ -z "$(compose_profiles_for_runtime "${ntp},${logp},ssl" "${off}" 0 0)" ] || { echo "ntp/logging: ${ntp} ${logp}"; return 1; }
-    custom="$(grep -vxF -e "${ntp}" -e "${logp}" -f <(tr ',' '\n' <<< "${dhcp}") <<< "${cprof}" | awk 'NR == 1')"
-    out="$(compose_profiles_for_runtime " x${BATS_TEST_NUMBER} , ${custom} ,x${BATS_TEST_NUMBER}" "${off}" 1 1)"
-    [ "${out}" = "x${BATS_TEST_NUMBER},${custom},${ntp},${logp}" ] || { echo "custom: ${out}"; return 1; }
+    [ -z "$(_prod_compose config --profiles)" ] || { echo "prod compose has profiles again"; return 1; }
+    x="x${BATS_TEST_NUMBER}"
+    out="$(compose_profiles_for_runtime "ssl, dhcp-kea ,dhcp-proxy,ntp,logging")"
+    [ -z "${out}" ] || { echo "retired profiles kept: ${out}"; return 1; }
+    out="$(compose_profiles_for_runtime " ${x} ,logging, ${x}z ,${x},dhcp-kea")"
+    [ "${out}" = "${x},${x}z" ] || { echo "operator profiles: ${out}"; return 1; }
+    [ -z "$(compose_profiles_for_runtime "")" ] || { echo "empty input gave a value"; return 1; }
 }
 
 # What: atomic write replaces whole, keeps old on failure
@@ -3647,7 +3647,7 @@ _pm_run() {
     # Why: token never in argv; failures stop before writes
     # From: Issue #1683 | PR #1858
     local root t="${BATS_TEST_TMPDIR}" rs std lip ui name xfr fields reg pre tag token body f v case want dir
-    local env gen canon over required first rest
+    local env gen canon required first rest
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}"
     rs="${root}/services/ui/src/main.rs"
@@ -3657,17 +3657,16 @@ _pm_run() {
     name="$(_prod_compose config --format json | jq -r .name)"
     xfr=""
     ! grep -qF 'dns_xfr_primary: format!("{}:{PDNS_AUTH_PORT}", state.config.standard_ip)' "${rs}" \
-        || xfr="$(sed -n 's/^const PDNS_AUTH_PORT: u16 = \([0-9][0-9]*\);$/:\1/p' "${rs}")"
+        || xfr="$(sed -n 's/^pub const PDNS_AUTH_PORT: u16 = \([0-9][0-9]*\);$/:\1/p' "${root}/services/common/config.rs")"
     fields="$(awk '/^struct RegisterResponse/,/^}/' "${rs}" | sed -n 's/^ *\([a-z_]*\): String,$/\1/p')"
     reg="$(resolve_lancache_image_registry "${root}/deploy/prod/.env")"
     pre="$(resolve_lancache_image_prefix "${root}/deploy/prod/.env")"
     tag="v$(cat "${root}/VERSION")"
     token="$(generate_secret_value SECONDARY_REGISTRATION_TOKEN hex32)"
     token="${token}\"${token}\\"
-    over="$(declare -f compose_file_args_for_install_dir | grep -oE 'docker-compose\.[a-z-]+\.yml' | grep -v override | awk 'NR == 1')"
     required="$(declare -f cmd_secondary | sed -n 's/.*missing_fields+=("\([a-z_]*\)").*/\1/p')"
-    [ -n "${std}" ] && [ -n "${lip}" ] && [ -n "${ui}" ] && [ -n "${xfr}" ] && [ -n "${fields}" ] && [ -n "${over}" ] \
-        && [ -n "${required}" ] || { echo "inputs: ${std} ${lip} ${ui} ${xfr} ${over}"; return 1; }
+    [ -n "${std}" ] && [ -n "${lip}" ] && [ -n "${ui}" ] && [ -n "${xfr}" ] && [ -n "${fields}" ] \
+        && [ -n "${required}" ] || { echo "inputs: ${std} ${lip} ${ui} ${xfr}"; return 1; }
     # What: the primary's answer, one value per struct field
     # Why: values are unique so each one is traced to .env
     # From: Issue #1683 | PR #1858
@@ -3769,7 +3768,7 @@ CASES
     done <<< "${fields}"
     [ "$(get_env_var PROXY_IP "${env}")" = "${std}" ] && [ "$(get_env_var LISTEN_IP "${env}")" = "${lip}" ] \
         || { echo "ips: $(cat "${env}")"; return 1; }
-    want="compose --env-file ${env} $(compose_file_args_for_install_dir "${dir}" "${env}" | paste -sd' ') up -d"
+    want="compose --env-file ${env} $(compose_file_args_for_install_dir "${dir}" | paste -sd' ') up -d"
     grep -qxF -- "${want}" "${DS}/docker.log" || { echo "start: $(cat "${DS}/docker.log")"; return 1; }
     # What: the written compose equals deploy/secondary
     # Why: deploy/secondary is the one owner of this file
@@ -3895,8 +3894,12 @@ CASES
     _expect unlisted 1 "Secret ${custom} is not in managed_secret_env_keys" || return 1
     plain="$(awk -F= '/^[A-Z_][A-Z0-9_]*=/ { print $1 }' "${root}/deploy/prod/.env" | grep -vxF -f <(printf '%s\n' "${list}"))"
     while IFS= read -r k; do
-        ! logbundle_key_looks_like_secret "${k}" || { echo "plain prod key ${k} flagged as secret"; return 1; }
+        ! logbundle_key_looks_like_secret "${k}" || [ -z "$(get_env_var "${k}" "${root}/deploy/prod/.env")" ] \
+            || { echo "plain prod key ${k} with a shipped value flagged as secret"; return 1; }
     done <<< "${plain}"
+    custom="$(_val var)"
+    logbundle_key_looks_like_secret "${custom}_SECRET" && ! logbundle_key_looks_like_secret "${custom}_SECRET_MODE" \
+        || { echo "secret name net: ${custom}_SECRET or ${custom}_SECRET_MODE"; return 1; }
     k="$(awk 'NR == 1' <<< "${list}")"
     long="$(generate_secret_value "${k}" hex32)" && short="$(generate_secret_value "${k}" alnum20)" || return 1
     custom="$(_val var)_${k##*_}"; ph="CHANGE_ME_${k}"
@@ -3921,7 +3924,7 @@ CASES
 # From: Issue #1683 | PR #1858
 @test "setup debug stays read-only and converge folds UI settings once" {
     _stand_ins || return 1
-    local root t="${BATS_TEST_TMPDIR}" cfg project v reads vsuffix sfile channel mode size gb unit profiles kv p known
+    local root t="${BATS_TEST_TMPDIR}" cfg project v reads vsuffix sfile channel mode size gb unit kv p
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}" || return 1
     _tool_stub "${BIN}" curl <<<'exit 7' || return 1
@@ -3945,10 +3948,7 @@ CASES
         && grep -qx -- "${vsuffix#"${project}_"}" <<< "${v}" || { echo "ui settings at ${vsuffix}/${sfile}: ${reads}"; return 1; }
     channel="$(_ci_block_entry_field release "" default_channel)" || return 1
     lancache_ui_channel_override_is_valid "${channel}" || { echo "SOT channel ${channel} not UI-valid"; return 1; }
-    mode=""
-    while IFS= read -r p; do
-        is_valid_dhcp_mode "${p#dhcp-}" && [ "${p#dhcp-}" != "${p}" ] && { mode="${p#dhcp-}"; break; }
-    done < <(_prod_compose config --profiles)
+    mode="$(_rust_dhcp_modes "${root}" | awk 'NR == 2')" || return 1
     size="$(get_env_var CACHE_MAX_SIZE "${root}/deploy/prod/.env")" && unit="${size//[0-9]/}" || return 1
     gb=$(( ${size%"${unit}"} * 2 ))
     [ -n "${mode}" ] && lancache_ui_cache_max_gb_override_is_valid "${gb}" || { echo "no UI inputs: ${mode} ${gb}"; return 1; }
@@ -3960,13 +3960,7 @@ CASES
         grep -qxF -- "${kv}" "${I}/.env" || { echo "missing ${kv}: $(paste -sd'#' "${I}/.env")"; return 1; }
     done < "${DS}/volumes/${vsuffix}/${sfile}"
     [ "$(get_env_var CACHE_MAX_SIZE "${I}/.env")" = "${gb}${unit}" ] || { echo "cache size not derived from ${gb}"; return 1; }
-    profiles="$(compose_profiles_for_runtime "" "${mode}" "$(get_env_var NTP_ENABLED "${I}/.env")" 1)" || return 1
-    [ "$(get_env_var COMPOSE_PROFILES "${I}/.env")" = "${profiles}" ] \
-        || { echo "profiles: $(get_env_var COMPOSE_PROFILES "${I}/.env")"; return 1; }
-    known="$(_prod_compose config --profiles)" || return 1
-    while IFS= read -r p; do
-        grep -qx -- "${p}" <<< "${known}" || { echo "profile ${p} unknown to prod"; return 1; }
-    done < <(tr ',' '\n' <<< "${profiles}" | awk 'NF')
+    ! env_key_exists COMPOSE_PROFILES "${I}/.env" || { echo "converge wrote COMPOSE_PROFILES"; return 1; }
 }
 
 

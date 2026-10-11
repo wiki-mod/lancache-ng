@@ -34,9 +34,6 @@ defaults, decided as AGENTS.md AG-CI-008).
   `ci.sh` passes the digest-pinned SOT `base_images` entries from
   `.github/yaml/build-manifest.yml` and the build-tools image as a digest from
   `ci.sh build-tools resolve-image`.
-- **External images run by the stack**: SOT `external_services`. A digest-less
-  tag is allowed only for an explicit `policy: tag-latest` entry (netdata,
-  maintainer decision recorded on PR #1858, 2026-10-01).
 - **Pinned tool downloads**: SOT `external_versions` with their checksums.
 
 Docker Hub bases are pulled through `mirror.gcr.io/library/*`. The digest is the
