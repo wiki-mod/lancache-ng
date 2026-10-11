@@ -247,6 +247,7 @@ services:
       - "${NATS_BIND_IP:-127.0.0.1}:4222:4222"
     # What: dns API ports 8081-8083, not host-published.
     # Why: the ui calls these on the compose network.
+    # From: Issue #1683 | PR #1912
     expose:
       - "8081"
       - "8082"
@@ -420,6 +421,7 @@ services:
       - "${UI_BIND_IP:-${IP_HTTP}}:8080:8080"
     # What: host.docker.internal maps to the Docker host.
     # Why: the ui reaches Kea on the host network.
+    # From: Issue #1683 | PR #1912
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:

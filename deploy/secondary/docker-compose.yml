@@ -19,6 +19,7 @@ services:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       # What: DDNS updates accepted from loopback only.
       # Why: a replica takes zones by AXFR, not LAN updates.
+      # From: Issue #1683 | PR #1912
       - DDNS_ALLOW_FROM=127.0.0.1
       - DNS_REPLICATION_ROLE=secondary
       - DNS_XFR_PRIMARY=${DNS_XFR_PRIMARY:?DNS_XFR_PRIMARY is required}
