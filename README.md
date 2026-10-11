@@ -767,7 +767,6 @@ If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
 DDNS_TSIG_KEY=<generate-a-secret>
 NATS_UI_PASSWORD=<generate-a-secret>
 NATS_DNS_WRITER_PASSWORD=<generate-a-secret>
-NATS_DNS_REPLICA_PASSWORD=<generate-a-secret>
 NATS_CALLOUT_PASSWORD=<generate-a-secret>
 NATS_SYS_PASSWORD=<generate-a-secret>
 ```
@@ -797,7 +796,7 @@ Secrets in `.env` follow a simple rule: they are generated once on first install
 
 Secret formats vary by key, not by naming suffix — despite the `*_KEY`/`*_PASSWORD` names, generation kind is assigned per key in `setup.sh`, and the two families are not generated the same way as each other:
 
-- 64 hex characters (`openssl rand -hex 32`): `KEA_CTRL_TOKEN`, `PDNS_API_KEY`, `NATS_UI_PASSWORD`, `NATS_DNS_WRITER_PASSWORD`, `NATS_DNS_REPLICA_PASSWORD`, `NATS_CALLOUT_PASSWORD`, `NATS_SYS_PASSWORD`, `SECONDARY_REGISTRATION_TOKEN`
+- 64 hex characters (`openssl rand -hex 32`): `KEA_CTRL_TOKEN`, `PDNS_API_KEY`, `NATS_UI_PASSWORD`, `NATS_DNS_WRITER_PASSWORD`, `NATS_CALLOUT_PASSWORD`, `NATS_SYS_PASSWORD`, `SECONDARY_REGISTRATION_TOKEN`
 - 44 base64 characters (`openssl rand -base64 32`): `DDNS_TSIG_KEY`
 - 20 alphanumeric characters: `UI_AUTH_PASSWORD`
 

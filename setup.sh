@@ -2137,7 +2137,7 @@ set_template_owned_env_defaults() {
         ROOT_ZONE_MIRROR PDNS_SOA_REFRESH PDNS_SOA_RETRY PDNS_SOA_RESYNC_INTERVAL NTP_UPSTREAM_SERVERS \
         CHECK_INTERVAL RESTART_AFTER DISK_WARN_PCT DISK_ALARM_PCT DOCKER_API_TIMEOUT \
         DOCKER_RESTART_TIMEOUT CACHE_VALID_DAYS CACHEHAMSTER_CONCURRENCY KEA_CTRL_USER KEA_CTRL_PORT \
-        NATS_UI_USER NATS_DNS_WRITER_USER NATS_DNS_REPLICA_USER NATS_CALLOUT_USER NATS_SYS_USER
+        NATS_UI_USER NATS_DNS_WRITER_USER NATS_CALLOUT_USER NATS_SYS_USER
     append_env_defaults_if_missing "$1" PROXY_ALLOWED_CLIENT_CIDRS NTP_ALLOWED_CLIENT_CIDRS \
         DHCP_NTP_SERVERS CACHEHAMSTER_CREDENTIAL_PERSISTENCE CACHEHAMSTER_STEAM_CREDENTIAL \
         CACHEHAMSTER_URLS
@@ -3066,6 +3066,11 @@ migrate_env_for_update() (
     append_env_migrated_assignment_if_missing IP_HTTPS IP_SSL "" "$env_file"
     remove_env_key IP_STANDARD "$env_file"
     remove_env_key IP_SSL "$env_file"
+    # What: drops the unused NATS DNS replica login.
+    # Why: no client uses it; it held DNS publish rights.
+    # From: Issue #1683 | PR #1912
+    remove_env_key NATS_DNS_REPLICA_USER "$env_file"
+    remove_env_key NATS_DNS_REPLICA_PASSWORD "$env_file"
     require_env_value_for_update IP_HTTP "$env_file"
     # What: the second LAN IP must be set before any write
     # Why: prod always runs dns-https on it (AG-SETUP-001)
@@ -3347,7 +3352,6 @@ migrate_env_for_update() (
     ensure_secret_env_key NETDATA_ALARM_TOKEN "$env_file" hex32
     ensure_secret_env_key NATS_UI_PASSWORD "$env_file" hex32
     ensure_secret_env_key NATS_DNS_WRITER_PASSWORD "$env_file" hex32
-    ensure_secret_env_key NATS_DNS_REPLICA_PASSWORD "$env_file" hex32
     ensure_secret_env_key NATS_CALLOUT_PASSWORD "$env_file" hex32
     ensure_secret_env_key NATS_SYS_PASSWORD "$env_file" hex32
     ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
@@ -5092,7 +5096,6 @@ managed_secret_env_keys() {
         NETDATA_ALARM_TOKEN \
         NATS_UI_PASSWORD \
         NATS_DNS_WRITER_PASSWORD \
-        NATS_DNS_REPLICA_PASSWORD \
         NATS_CALLOUT_PASSWORD \
         NATS_SYS_PASSWORD \
         SECONDARY_REGISTRATION_TOKEN \
@@ -7118,8 +7121,6 @@ NATS_UI_USER=$(get_env_var NATS_UI_USER "$env_file")
 NATS_UI_PASSWORD=$(get_or_generate_secret NATS_UI_PASSWORD "$env_file" hex32)
 NATS_DNS_WRITER_USER=$(get_env_var NATS_DNS_WRITER_USER "$env_file")
 NATS_DNS_WRITER_PASSWORD=$(get_or_generate_secret NATS_DNS_WRITER_PASSWORD "$env_file" hex32)
-NATS_DNS_REPLICA_USER=$(get_env_var NATS_DNS_REPLICA_USER "$env_file")
-NATS_DNS_REPLICA_PASSWORD=$(get_or_generate_secret NATS_DNS_REPLICA_PASSWORD "$env_file" hex32)
 NATS_CALLOUT_USER=$(get_env_var NATS_CALLOUT_USER "$env_file")
 NATS_CALLOUT_PASSWORD=$(get_or_generate_secret NATS_CALLOUT_PASSWORD "$env_file" hex32)
 NATS_SYS_USER=$(get_env_var NATS_SYS_USER "$env_file")
@@ -7173,8 +7174,6 @@ validate_env_values_for_initial_write \
     "NATS_UI_PASSWORD=${NATS_UI_PASSWORD}" \
     "NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER}" \
     "NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD}" \
-    "NATS_DNS_REPLICA_USER=${NATS_DNS_REPLICA_USER}" \
-    "NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD}" \
     "NATS_CALLOUT_USER=${NATS_CALLOUT_USER}" \
     "NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD}" \
     "NATS_SYS_USER=${NATS_SYS_USER}" \
@@ -7289,12 +7288,6 @@ NATS_UI_PASSWORD=${NATS_UI_PASSWORD}
 # DNS writer role for primary DNS containers (generated, do not change)
 NATS_DNS_WRITER_USER=${NATS_DNS_WRITER_USER}
 NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD}
-# DNS replica role for the primary's own co-located dns-ssl container only
-# (generated, do not change). NOT used by registered secondaries -- each of
-# those gets its own per-instance NATS credential via auth callout at
-# registration time instead (issue #583).
-NATS_DNS_REPLICA_USER=${NATS_DNS_REPLICA_USER}
-NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD}
 # Admin UI's own NATS identity for answering auth-callout requests for
 # registered secondaries (generated, do not change)
 NATS_CALLOUT_USER=${NATS_CALLOUT_USER}

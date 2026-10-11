@@ -239,13 +239,12 @@ pub struct NatsLogin {
     pub password: Option<String>,
 }
 
-// What: the five static NATS roles of the stack.
+// What: the four static NATS roles of the stack.
 // Why: nats.conf, validation and callout share one list.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1912
 pub struct NatsRoles {
     pub ui: NatsLogin,
     pub dns_writer: NatsLogin,
-    pub dns_replica: NatsLogin,
     pub callout: NatsLogin,
     pub sys: NatsLogin,
 }
@@ -260,20 +259,18 @@ impl NatsRoles {
         Ok(NatsRoles {
             ui: load("NATS_UI_USER", "NATS_UI_PASSWORD")?,
             dns_writer: load("NATS_DNS_WRITER_USER", "NATS_DNS_WRITER_PASSWORD")?,
-            dns_replica: load("NATS_DNS_REPLICA_USER", "NATS_DNS_REPLICA_PASSWORD")?,
             callout: load("NATS_CALLOUT_USER", "NATS_CALLOUT_PASSWORD")?,
             sys: load("NATS_SYS_USER", "NATS_SYS_PASSWORD")?,
         })
     }
 
-    // What: the five roles with their display labels.
+    // What: the four roles with their display labels.
     // Why: validation and callout user list iterate them.
     // From: Issue #1683 | PR #1912
-    pub fn labelled(&self) -> [(&'static str, &NatsLogin); 5] {
+    pub fn labelled(&self) -> [(&'static str, &NatsLogin); 4] {
         [
             ("NATS UI", &self.ui),
             ("NATS DNS writer", &self.dns_writer),
-            ("NATS DNS replica", &self.dns_replica),
             ("NATS auth-callout", &self.callout),
             ("NATS system account", &self.sys),
         ]
@@ -423,7 +420,6 @@ pub fn render_nats_conf(
     let users = [
         nats_role_block(&roles.ui, &[NATS_SUBJECT_RECORD, NATS_SUBJECT_FLUSH], &none),
         nats_role_block(&roles.dns_writer, &writer_publish, &dns_subscribe()),
-        nats_role_block(&roles.dns_replica, &writer_publish, &dns_subscribe()),
         nats_role_block(&roles.callout, &none, &none),
     ]
     .concat();
@@ -870,14 +866,13 @@ mod tests {
         }
     }
 
-    // What: the five roles, each with password pw-<user>.
+    // What: the four roles, each with password pw-<user>.
     // Why: nats.conf and the callout list render from it.
     // From: Issue #1683 | PR #1912
     fn roles() -> NatsRoles {
         let users = [
             ("NATS_UI_USER", "ui"),
             ("NATS_DNS_WRITER_USER", "dnsw"),
-            ("NATS_DNS_REPLICA_USER", "dnsr"),
             ("NATS_CALLOUT_USER", "callout"),
             ("NATS_SYS_USER", "sys"),
         ];
@@ -943,7 +938,6 @@ mod tests {
             [
                 "NATS UI",
                 "NATS DNS writer",
-                "NATS DNS replica",
                 "NATS auth-callout",
                 "NATS system account"
             ]
@@ -1019,10 +1013,9 @@ mod tests {
             "      permissions = {{\n        publish = {writer}\n        subscribe = {reader}\n      }}\n"
         );
         let want = format!(
-            "jetstream {{\n  store_dir: \"/data\"\n}}\nhttp_port: 8222\nauthorization {{\n  users = [\n{}{}{}{}  ]\n  include \"auth.conf\"\n}}\naccounts {{\n  SYS: {{\n    users: [\n      {{ user: \"sys\", password: \"pw-sys\" }}\n    ]\n  }}\n}}\nsystem_account: SYS\n",
+            "jetstream {{\n  store_dir: \"/data\"\n}}\nhttp_port: 8222\nauthorization {{\n  users = [\n{}{}{}  ]\n  include \"auth.conf\"\n}}\naccounts {{\n  SYS: {{\n    users: [\n      {{ user: \"sys\", password: \"pw-sys\" }}\n    ]\n  }}\n}}\nsystem_account: SYS\n",
             role("ui", ui),
             role("dnsw", &dns),
-            role("dnsr", &dns),
             role("callout", ""),
         );
         let got = render_nats_conf(

@@ -80,13 +80,12 @@ const SETTING_KEYS: [&str; 19] = [
 // What: shared-secret variables the ui reads or creates.
 // Why: one inventory for the root start and the reader.
 // From: Issue #858
-const SHARED_SECRET_VARS: [&str; 8] = [
+const SHARED_SECRET_VARS: [&str; 7] = [
     "PDNS_API_KEY",
     "NETDATA_ALARM_TOKEN",
     "KEA_CTRL_TOKEN",
     "NATS_UI_PASSWORD",
     "NATS_DNS_WRITER_PASSWORD",
-    "NATS_DNS_REPLICA_PASSWORD",
     "NATS_CALLOUT_PASSWORD",
     "NATS_SYS_PASSWORD",
 ];
@@ -7330,8 +7329,6 @@ mod tests {
             ("NATS_UI_PASSWORD", "pw-ui"),
             ("NATS_DNS_WRITER_USER", "dnsw"),
             ("NATS_DNS_WRITER_PASSWORD", "pw-dnsw"),
-            ("NATS_DNS_REPLICA_USER", "dnsr"),
-            ("NATS_DNS_REPLICA_PASSWORD", "pw-dnsr"),
             ("NATS_CALLOUT_USER", "callout"),
             ("NATS_CALLOUT_PASSWORD", "pw-callout"),
             ("NATS_SYS_USER", "sys"),
@@ -7363,7 +7360,7 @@ mod tests {
     fn auth_callout_fragment_lists_every_static_user() {
         assert_eq!(
             render_auth_callout_fragment(&nats_config(), "ISS", "XK"),
-            "auth_callout {\n  issuer: \"ISS\"\n  xkey: \"XK\"\n  auth_users: [\"ui\", \"dnsw\", \"dnsr\", \"callout\", \"sys\"]\n}\n"
+            "auth_callout {\n  issuer: \"ISS\"\n  xkey: \"XK\"\n  auth_users: [\"ui\", \"dnsw\", \"callout\", \"sys\"]\n}\n"
         );
     }
 
