@@ -1063,7 +1063,7 @@ ci_cmd_plan_matrix() {
             # What: unverified artifacts join the matrix
             # Why: ship verifies, scan accepts; no rebuild
             # From: Issue #1683 | PR #1912
-            [ "${paction}" = build ] || [ "${paction}" = verify ] || continue
+            [ "${paction}" = build ] || [ "${paction}" = verify ] || [ "${paction}" = wait ] || continue
             # What: matrix holds targets with proven impact.
             # Why: MISSING_CONFIRMED must not build alone.
             # From: Issue #1683 | PR #1858
@@ -1074,7 +1074,7 @@ ci_cmd_plan_matrix() {
             fi
             [ "${pimpact}" = BUILD ] || continue
             runner="$(_ci_platform_field "${platform}" runner "[CI-ERROR-PLAN-0002]" "service=\"${service}\" reason=\"no runner label for platform\"")" || return 2
-            include="$(_ci_matrix_append "${include}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}" identity="${pident}")" || return 2
+            include="$(_ci_matrix_append "${include}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}")" || return 2
             any=true
         done <<< "${plats}"
     done
@@ -1537,7 +1537,19 @@ _ci_resolve_state() {
     gdig="$(_ci_registry_probe "${tag}")" || grc=$?
     [ "${grc}" -eq 2 ] && { printf 'UNKNOWN\n'; return 0; }
     if [ "${lrc}" -eq 1 ]; then
-        [ "${grc}" -eq 1 ] && { printf 'MISSING_CONFIRMED\n'; return 0; }
+        # What: MISSING while another run builds is a wait.
+        # Why: BUILD_IN_PROGRESS never builds a second time.
+        # From: Issue #1683 | PR #1912
+        if [ "${grc}" -eq 1 ]; then
+            local brc=0
+            _ci_build_lock_busy "${identity}" "${service}" "${platform}" || brc=$?
+            case "${brc}" in
+                0) printf 'BUILD_IN_PROGRESS\n' ;;
+                1) printf 'MISSING_CONFIRMED\n' ;;
+                *) printf 'UNKNOWN\n' ;;
+            esac
+            return 0
+        fi
         printf 'PRODUCED_UNVERIFIED\n'
         return 0
     fi
@@ -1814,10 +1826,10 @@ _ci_lock_try() {
         return "$?"
     fi
     [ "${rc}" -eq 0 ] || return 3
-    # What: not routed through _ci_retry (deliberate).
-    # Why: _ci_lock_acquire already wraps retry logic.
-    # From: Issue #1683
-    _ci_capture 0 git fetch --quiet --depth=1 "${remote}" "${ref}" || return 3
+    # What: no _ci_retry, full fetch; a lock has no parent.
+    # Why: acquire retries; shallow breaks the next push.
+    # From: Issue #1683 | PR #1912
+    _ci_capture 0 git fetch --quiet "${remote}" "${ref}" || return 3
     # What: unreadable lock age stops; never a takeover.
     # Why: age 0 would take over a live holder's lock.
     # From: Issue #1683 | PR #1858
@@ -1882,10 +1894,10 @@ _ci_lock_release() {
     # From: Issue #1683 | PR #1858
     [ "${rc}" -ne 1 ] || return 0
     [ "${rc}" -eq 0 ] || return 1
-    # What: retried here; release has no outer retry loop.
-    # Why: op=git uses shared transient-signature truth.
-    # From: Issue #1683
-    _ci_retry git git fetch --quiet --depth=1 "${remote}" "${ref}" >/dev/null || return 1
+    # What: retried here, full fetch; a lock has no parent.
+    # Why: no outer loop; shallow breaks the next push.
+    # From: Issue #1683 | PR #1912
+    _ci_retry git git fetch --quiet "${remote}" "${ref}" >/dev/null || return 1
     held="$(_ci_capture 0 git log -1 --format=%s FETCH_HEAD)" || return 1
     if [ "${held}" != "${note}" ]; then
         ci_log "[CI-INFO-CAS-0007]" "ref=\"${ref}\" holder=\"${held}\" mine=\"${note}\" reason=\"lock reassigned; not released\""
@@ -1893,6 +1905,134 @@ _ci_lock_release() {
     fi
     _ci_capture 0 git push --quiet --force-with-lease="${ref}:${cur}" "${remote}" ":${ref}" || return 1
     return 0
+}
+
+# What: build lock ref of one identity, service, platform.
+# Why: one lock key per image being built (§20).
+# From: Issue #1683 | PR #1912
+_ci_build_lock_ref() {
+    local prefix
+    prefix="$(_ci_variable CI_BUILD_LOCK_REF)" || return 2
+    printf '%s/%s-%s-%s' "${prefix}" "$1" "$2" "${3//\//-}"
+}
+
+# What: holder note of this run for one build lock.
+# Why: the resolver tells its own lock from a foreign one.
+# From: Issue #1683 | PR #1912
+_ci_build_lock_note() {
+    printf 'build %s %s run=%s attempt=%s' "$1" "$2" "${GITHUB_RUN_ID:-local}" "${GITHUB_RUN_ATTEMPT:-1}"
+}
+
+# What: take the build lock; wait while another run builds.
+# Why: the waiter then re-resolves and verifies, no rebuild.
+# From: Issue #1683 | PR #1912
+_ci_build_lock_take() {
+    local remote ref max backoff stale identity
+    remote="$(_ci_git_remote)" || return 2
+    identity="$(_ci_identity_for "$1" "$2")" || return 2
+    ref="$(_ci_build_lock_ref "${identity}" "$1" "$2")" || return 2
+    max="$(_ci_variable CI_BUILD_LOCK_MAX)" || return 2
+    backoff="$(_ci_variable CI_BUILD_LOCK_BACKOFF)" || return 2
+    stale="$(_ci_variable CI_BUILD_LOCK_STALE)" || return 2
+    _ci_lock_acquire "${remote}" "${ref}" "$(_ci_build_lock_note "$1" "$2")" "${max}" "${backoff}" "${stale}" || return 2
+}
+
+# What: free the build lock of this run.
+# Why: a finished pair must not make the next run wait.
+# From: Issue #1683 | PR #1912
+_ci_build_lock_drop() {
+    local remote ref identity
+    remote="$(_ci_git_remote)" || return 2
+    identity="$(_ci_identity_for "$1" "$2")" || return 2
+    ref="$(_ci_build_lock_ref "${identity}" "$1" "$2")" || return 2
+    _ci_lock_release "${remote}" "${ref}" "$(_ci_build_lock_note "$1" "$2")"
+}
+
+# What: rc 0 if another run holds the build lock fresh.
+# Why: BUILD_IN_PROGRESS, not MISSING, while it builds.
+# From: Issue #1683 | PR #1912
+_ci_build_lock_busy() {
+    local remote ref stale rc=0 committed holder
+    remote="$(_ci_git_remote)" || return 2
+    ref="$(_ci_build_lock_ref "$1" "$2" "$3")" || return 2
+    stale="$(_ci_variable CI_BUILD_LOCK_STALE)" || return 2
+    _ci_cas_ref_sha "${remote}" "${ref}" >/dev/null || rc=$?
+    [ "${rc}" -ne 1 ] || return 1
+    [ "${rc}" -eq 0 ] || return 2
+    # What: full fetch of a one-commit ref; no shallow repo.
+    # Why: a shallow repo makes the next ref push fail.
+    # From: Issue #1683 | PR #1912
+    _ci_capture 0 git fetch --quiet "${remote}" "${ref}" || return 2
+    committed="$(_ci_capture 0 git log -1 --format=%ct FETCH_HEAD)" || return 2
+    holder="$(_ci_capture 0 git log -1 --format=%s FETCH_HEAD)" || return 2
+    [ "${holder}" != "$(_ci_build_lock_note "$2" "$3")" ] || return 1
+    [ $(( $(date +%s) - committed )) -lt "${stale}" ]
+}
+
+# What: ref that holds the last verified digest of a pair.
+# Why: one ref per pair keeps the ref count bounded.
+# From: Issue #1683 | PR #1912
+_ci_verified_ref() {
+    local prefix
+    prefix="$(_ci_variable CI_VERIFIED_REF)" || return 2
+    printf '%s/%s-%s' "${prefix}" "$1" "${2//\//-}"
+}
+
+# What: note a verified mark carries for one digest.
+# Why: the mark commit subject is the verified digest.
+# From: Issue #1683 | PR #1912
+_ci_verified_note() {
+    printf 'verified %s %s %s' "$1" "$2" "$3"
+}
+
+# What: rc 0 if a build verified this digest, 1 if not.
+# Why: a pushed image is not an accepted image (B20).
+# From: Issue #1683 | PR #1912
+_ci_verified_has() {
+    local remote ref rc=0 subject
+    remote="$(_ci_git_remote)" || return 2
+    ref="$(_ci_verified_ref "$1" "$2")" || return 2
+    _ci_cas_ref_sha "${remote}" "${ref}" >/dev/null || rc=$?
+    [ "${rc}" -ne 1 ] || return 1
+    [ "${rc}" -eq 0 ] || return 2
+    _ci_capture 0 git fetch --quiet "${remote}" "${ref}" || return 2
+    subject="$(_ci_capture 0 git log -1 --format=%s FETCH_HEAD)" || return 2
+    [ "${subject}" = "$(_ci_verified_note "$1" "$2" "$3")" ] || return 1
+}
+
+# What: mark a digest verified after its smoke test.
+# Why: ship pushes before it verifies; only this accepts.
+# From: Issue #1683 | PR #1912
+_ci_verified_mark() {
+    local remote ref sha cur rc=0 raw
+    remote="$(_ci_git_remote)" || return 2
+    ref="$(_ci_verified_ref "$1" "$2")" || return 2
+    _ci_verified_has "$1" "$2" "$3" || rc=$?
+    [ "${rc}" -ne 0 ] || return 0
+    [ "${rc}" -eq 1 ] || return 2
+    sha="$(_ci_cas_note_commit "$(_ci_verified_note "$1" "$2" "$3")")" || return 2
+    rc=0; cur="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
+    case "${rc}" in
+        0) raw="$(git push --force-with-lease="${ref}:${cur}" "${remote}" "${sha}:${ref}" 2>&1)" || rc=$? ;;
+        1) rc=0; raw="$(git push "${remote}" "${sha}:${ref}" 2>&1)" || rc=$? ;;
+        *) return 2 ;;
+    esac
+    [ "${rc}" -ne 0 ] || return 0
+    # What: a lost push race with an equal mark is success.
+    # Why: both runs verified the same digest.
+    # From: Issue #1683 | PR #1912
+    rc=0; _ci_verified_has "$1" "$2" "$3" || rc=$?
+    [ "${rc}" -ne 0 ] || return 0
+    ci_error "[CI-ERROR-SHIP-0007]" "service=\"$1\" platform=\"$2\" digest=\"$3\" reason=\"verified mark not written\"" "${raw}"
+    return 2
+}
+
+# What: verify one digest and mark it on success.
+# Why: one owner for the verify-then-mark order (B20).
+# From: Issue #1683 | PR #1912
+_ci_verify_and_mark() {
+    ci_cmd_verify "$1" "$2" "$3" || return "$?"
+    _ci_verified_mark "$1" "$3" "$2"
 }
 
 # =========================================================
@@ -2169,6 +2309,20 @@ ci_cmd_scan_stack() {
         fi
         if [ "${drc}" -ne 0 ]; then
             ci_log "[CI-ERROR-SCAN-0017]" "service=\"${svc}\" platform=\"${plat}\" reason=\"no published digest to scan\""
+            failed="${failed} ${svc}/${plat}"
+            rc=2
+            continue
+        fi
+        # What: a digest no build verified is skipped
+        # Why: its readback or smoke test failed (B20)
+        # From: Issue #1683 | PR #1912
+        vrc=0; _ci_verified_has "${svc}" "${plat}" "${digest}" || vrc=$?
+        if [ "${vrc}" -eq 1 ]; then
+            ci_log "[CI-WARN-SCAN-0031]" "service=\"${svc}\" platform=\"${plat}\" digest=\"${digest}\" reason=\"no build verified this digest; not scanned\""
+            continue
+        fi
+        if [ "${vrc}" -ne 0 ]; then
+            ci_log "[CI-ERROR-SCAN-0032]" "service=\"${svc}\" platform=\"${plat}\" digest=\"${digest}\" reason=\"verified mark unreadable\""
             failed="${failed} ${svc}/${plat}"
             rc=2
             continue
@@ -4361,15 +4515,40 @@ ci_cmd_publish() {
     _ci_for_platforms "${service}" "${platform}" "[CI-ERROR-PUBLISH-0004]" _ci_publish_one
 }
 
-# What: build, then publish+verify only what was built.
-# Why: one owner for the chain; a reuse has nothing to push.
-# From: Issue #1683 | PR #1858
+# What: free the build lock on a cancel, then stop.
+# Why: a cancelled run must not make the next one wait.
+# From: Issue #1683 | PR #1912
+_ci_ship_abort() {
+    _ci_build_lock_drop "$1" "$2" || ci_log "[CI-ERROR-SHIP-0006]" "service=\"$1\" platform=\"$2\" reason=\"build lock not released on cancel\""
+    exit 130
+}
+
+# What: ship one pair under the build lock of its identity.
+# Why: one build per identity (§20); waiter re-resolves.
+# From: Issue #1683 | PR #1912
 ci_cmd_ship() {
-    local service="${1:-}" platform="${2:-}" out digest result
+    local service="${1:-}" platform="${2:-}" rc=0 lrc=0
     if [ -z "${service}" ] || [ -z "${platform}" ]; then
         ci_log "[CI-ERROR-SHIP-0001]" "reason=\"service and platform args required\""
         return 2
     fi
+    _ci_build_lock_take "${service}" "${platform}" || return "$?"
+    trap '_ci_ship_abort "${service}" "${platform}"' INT TERM
+    _ci_ship_chain "${service}" "${platform}" || rc=$?
+    trap - INT TERM
+    _ci_build_lock_drop "${service}" "${platform}" || lrc=$?
+    if [ "${lrc}" -ne 0 ]; then
+        ci_log "[CI-ERROR-SHIP-0005]" "service=\"${service}\" platform=\"${platform}\" rc=${lrc} reason=\"build lock not released\""
+        [ "${rc}" -ne 0 ] || rc=2
+    fi
+    return "${rc}"
+}
+
+# What: build, then publish+verify only what was built.
+# Why: one owner for the chain; a reuse has nothing to push.
+# From: Issue #1683 | PR #1858
+_ci_ship_chain() {
+    local service="${1:-}" platform="${2:-}" out digest result
     out="$(ci_cmd_build "${service}" "${platform}")" || return "$?"
     printf '%s\n' "${out}"
     result="$(_ci_record_field "${out}" result)" || return 2
@@ -4382,7 +4561,7 @@ ci_cmd_ship() {
             ci_log "[CI-ERROR-SHIP-0004]" "service=\"${service}\" platform=\"${platform}\" reason=\"no registry digest to verify\""
             return 2
         }
-        ci_cmd_verify "${service}" "${digest}" "${platform}"
+        _ci_verify_and_mark "${service}" "${digest}" "${platform}"
         return
     fi
     [ "${result}" = built ] || return 0
@@ -4403,7 +4582,7 @@ ci_cmd_ship() {
         ci_error "[CI-ERROR-SHIP-0002]" "service=\"${service}\" platform=\"${platform}\" reason=\"publish reported no digest\"" "${out}"
         return 2
     fi
-    ci_cmd_verify "${service}" "${digest}" "${platform}"
+    _ci_verify_and_mark "${service}" "${digest}" "${platform}"
 }
 
 # What: Read one platform image back; smoke it at digest.

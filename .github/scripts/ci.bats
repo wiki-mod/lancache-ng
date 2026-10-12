@@ -4853,15 +4853,15 @@ CASES
     _expect build-impact 2 "=" || return 1
     _ci_image_tag() { _next; }
     ci_cmd_build() { printf 'service=%s platform=%s identity=%s\n' "$1" "$2" "${w}"; }
-    _closed ship-result result ci_cmd_ship "${svc}" "${plat}" || return 1
+    _closed ship-result result _ci_ship_chain "${svc}" "${plat}" || return 1
     ci_cmd_build() { printf 'service=%s platform=%s result=built\n' "$1" "$2"; }
-    _closed ship-identity identity ci_cmd_ship "${svc}" "${plat}" || return 1
+    _closed ship-identity identity _ci_ship_chain "${svc}" "${plat}" || return 1
     ci_cmd_build() { printf 'service=%s platform=%s result=built identity=%s\n' "$1" "$2" "${w}"; }
     _ci_image_tag() { printf '%s\n' "${w}"; }
     _ci_bake_check() { return 0; }
     ci_cmd_publish() { printf 'service=%s identity=%s\n' "$1" "${w}"; }
     ci_cmd_verify() { _next; }
-    _closed ship-published published ci_cmd_ship "${svc}" "${plat}" || return 1
+    _closed ship-published published _ci_ship_chain "${svc}" "${plat}" || return 1
     _ci_validate_release() { printf '%s\n' "$1" > "${rel}"; }
     _ci_validate_project() { _next; }
     _ci_validate_reserve() { printf 'holder=%s\n' "${pid}"; }
@@ -4889,8 +4889,14 @@ CASES
     _ci_resolve_one() { printf 'service=%s platform=%s state=PRODUCED_UNVERIFIED action=verify identity=%s\n' "$1" "$2" "${w}"; }
     run ci_cmd_plan_matrix "${CI_MANIFEST_REL}"
     _expect plan-verify 0 - || return 1
-    [ "$(grep -c '^any-build=true$' "${mark}")" -eq 1 ] && grep -q "\"identity\":\"${w}\"" "${mark}" \
+    [ "$(grep -c '^any-build=true$' "${mark}")" -eq 1 ] \
         || { echo "verify pairs missing from the plan: $(cat "${mark}")"; return 1; }
+    : > "${mark}"
+    _ci_resolve_one() { printf 'service=%s platform=%s state=BUILD_IN_PROGRESS action=wait identity=%s\n' "$1" "$2" "${w}"; }
+    : > "${mark}"
+    run ci_cmd_plan_matrix "${CI_MANIFEST_REL}"
+    _expect plan-wait 0 - || return 1
+    [ "$(grep -c '^any-build=true$' "${mark}")" -eq 1 ] || { echo "wait pairs missing from the plan: $(cat "${mark}")"; return 1; }
     : > "${mark}"
     _ci_resolve_one() { printf 'service=%s platform=%s state=MISMATCH action=fail identity=%s\n' "$1" "$2" "${w}"; }
     run ci_cmd_plan_matrix "${CI_MANIFEST_REL}"
@@ -4899,12 +4905,14 @@ CASES
     ci_cmd_build() { printf 'service=%s platform=%s result=verify identity=%s\n' "$1" "$2" "${w}"; }
     ci_cmd_publish() { echo "publish ran for a verify pair" >&2; return 2; }
     ci_cmd_verify() { printf '%s %s %s\n' "$1" "$2" "$3" > "${calls}"; }
+    _ci_verified_mark() { printf '%s %s %s\n' "$1" "$2" "$3" > "${calls}.mark"; }
     _ci_published_digest() { printf '%s\n' "${d}"; }
-    run ci_cmd_ship "${w}" "${plat}"
+    run _ci_ship_chain "${w}" "${plat}"
     _expect ship-verify 0 - || return 1
     [ "$(cat "${calls}")" = "${w} ${d} ${plat}" ] || { echo "verify call: $(cat "${calls}")"; return 1; }
+    [ "$(cat "${calls}.mark")" = "${w} ${plat} ${d}" ] || { echo "verified mark call: $(cat "${calls}.mark")"; return 1; }
     _ci_published_digest() { return 2; }
-    run ci_cmd_ship "${w}" "${plat}"
+    run _ci_ship_chain "${w}" "${plat}"
     _expect ship-no-digest 2 "[CI-ERROR-SHIP-0004]" || return 1
 }
 
@@ -4948,6 +4956,7 @@ CASES
     a="$(_val name)" b="$(_val name)" c="$(_val name)" calls="$(_val path)" d="$(_val digest)"
     _ci_require_ghcr_auth() { return 0; }
     _ci_published_digest() { [ "$1" != "${c}" ] || return 2; printf '%s\n' "${d}"; }
+    _ci_verified_has() { return 0; }
     ci_cmd_scan() { echo "$1" >> "${calls}"; [ "$1" != "${a}" ] || return 1; }
     : > "${calls}"
     CI_BUILD_MATRIX="{\"include\":[{\"service\":\"${a}\",\"platform\":\"p/x\"},{\"service\":\"${b}\",\"platform\":\"p/x\"},{\"service\":\"${c}\",\"platform\":\"p/x\"}]}" \
@@ -4955,6 +4964,7 @@ CASES
     _expect scan-failures 2 "[CI-ERROR-SCAN-0017];[CI-ERROR-SCAN-0024];failed=\"${a}/p/x ${c}/p/x\"" || return 1
     [ "$(tr '\n' ' ' < "${calls}")" = "${a} ${b} " ] || { echo "scanned: $(tr '\n' ' ' < "${calls}")"; return 1; }
     ci_cmd_scan() { echo "$1" >> "${calls}"; [ "$1" != "${a}" ] || return 1; }
+    _ci_verified_has() { return 0; }
     _ci_published_digest() { printf '%s\n' "${d}"; }
     : > "${calls}"
     CI_BUILD_MATRIX="{\"include\":[{\"service\":\"${a}\",\"platform\":\"p/x\"},{\"service\":\"${b}\",\"platform\":\"p/x\"}]}" \
@@ -4967,17 +4977,24 @@ CASES
 # Why: Q7: a red service must not keep the others unaccepted
 # From: Issue #1683 | PR #1912
 @test "scan stack: clean pairs are the output, a pair without image is skipped" {
-    local a b c d out
-    a="$(_val name)" b="$(_val name)" c="$(_val name)" d="$(_val digest)" out="$(_val path)"
+    local a b c d out e
+    a="$(_val name)" b="$(_val name)" c="$(_val name)" d="$(_val digest)" out="$(_val path)" e="$(_val name)"
     : > "${out}"
     _ci_require_ghcr_auth() { return 0; }
     _ci_published_digest() { [ "$1" != "${c}" ] || return 1; printf '%s\n' "${d}"; }
+    _ci_verified_has() { [ "$1" != "${e}" ]; }
     ci_cmd_scan() { [ "$1" != "${a}" ] || return 1; }
-    GITHUB_OUTPUT="${out}" CI_BUILD_MATRIX="{\"include\":[{\"service\":\"${a}\",\"platform\":\"p/x\"},{\"service\":\"${b}\",\"platform\":\"p/x\"},{\"service\":\"${c}\",\"platform\":\"p/x\"}]}" \
+    GITHUB_OUTPUT="${out}" CI_BUILD_MATRIX="{\"include\":[{\"service\":\"${a}\",\"platform\":\"p/x\"},{\"service\":\"${b}\",\"platform\":\"p/x\"},{\"service\":\"${c}\",\"platform\":\"p/x\"},{\"service\":\"${e}\",\"platform\":\"p/x\"}]}" \
         run ci_cmd_scan_stack
-    _expect scan-partial 1 "[CI-WARN-SCAN-0025];[CI-ERROR-SCAN-0024];failed=\"${a}/p/x\"" || return 1
+    _expect scan-partial 1 "[CI-WARN-SCAN-0025];[CI-WARN-SCAN-0031];[CI-ERROR-SCAN-0024];failed=\"${a}/p/x\"" || return 1
     [ "$(cat "${out}")" = "passed={\"include\":[{\"service\":\"${b}\",\"platform\":\"p/x\"}]}" ] \
         || { echo "passed output: $(cat "${out}")"; return 1; }
+    : > "${out}"
+    _ci_verified_has() { return 2; }
+    GITHUB_OUTPUT="${out}" CI_BUILD_MATRIX="{\"include\":[{\"service\":\"${b}\",\"platform\":\"p/x\"}]}" \
+        run ci_cmd_scan_stack
+    _expect mark-unreadable 2 "[CI-ERROR-SCAN-0032] service=\"${b}\";[CI-ERROR-SCAN-0024];failed=\"${b}/p/x\"" || return 1
+    [ ! -s "${out}" ] || { echo "unreadable mark passed: $(cat "${out}")"; return 1; }
 }
 
 # What: a status issue per case: red files, green closes
@@ -5224,6 +5241,7 @@ ROWS
     _ci_image_tag() { printf 'x\n'; }
     _ci_ledger_read() { [ "${LRC}" -ne 0 ] && return "${LRC}"; printf '%s\t%s\n' "${LSTATE}" "${LDIG}"; }
     _ci_registry_probe() { [ "${PRC}" -ne 0 ] && return "${PRC}"; printf '%s\n' "${PDIG}"; }
+    _ci_build_lock_busy() { return "${BRC:-1}"; }
     # columns: ledger rc, ledger state, ledger digest, probe rc, probe digest, state, action
     for row in \
         "1 - - 1 - MISSING_CONFIRMED build" \
@@ -5241,6 +5259,13 @@ ROWS
         got="$(_ci_resolve_action "${got}")"
         [ "${got}" = "${act}" ] || { echo "row [${row}] action ${got}"; return 1; }
     done
+    LRC=1 PRC=1 BRC=0
+    got="$(_ci_resolve_state s i p/x)"
+    [ "${got}" = BUILD_IN_PROGRESS ] || { echo "busy lock gave ${got}"; return 1; }
+    [ "$(_ci_resolve_action "${got}")" = wait ] || { echo "busy lock action"; return 1; }
+    BRC=2
+    got="$(_ci_resolve_state s i p/x)"
+    [ "${got}" = UNKNOWN ] || { echo "lock read error gave ${got}"; return 1; }
 }
 
 # What: the lock is held, waited on, taken over, released
@@ -5267,6 +5292,82 @@ ROWS
     [ -z "$(git ls-remote origin "${ref}")" ] || { echo "own release left the lock"; return 1; }
     run _ci_lock_release origin "${ref}" "holder-b"
     _expect absent-release 0 - || return 1
+}
+
+# What: ship runs under the build lock of its identity
+# Why: a waiter sees BUILD_IN_PROGRESS and never rebuilds
+# From: Issue #1683 | PR #1912
+@test "build lock: ship holds it, a fresh foreign one blocks, a cancel frees it" {
+    local o w svc plat ref
+    o="$(_val path)" w="$(_val path)" svc="$(_val name)" plat="p/$(_val name)"
+    ref="refs/ci/t/bl/ident-${svc}-${plat//\//-}"
+    git init -q --bare "${o}" && git init -q "${w}" && git -C "${w}" remote add origin "${o}" || return 1
+    cd "${w}" || return 1
+    export GIT_CONFIG_GLOBAL=/dev/null
+    sleep() { :; }
+    _ci_git_remote() { printf 'origin\n'; }
+    _ci_identity_for() { printf 'ident\n'; }
+    _ci_variable() { case "$1" in CI_BUILD_LOCK_REF) printf 'refs/ci/t/bl\n' ;; CI_BUILD_LOCK_MAX) printf '1\n' ;; CI_BUILD_LOCK_BACKOFF) printf '0\n' ;; *) printf '900\n' ;; esac; }
+    run _ci_build_lock_busy ident "${svc}" "${plat}"
+    [ "${status}" -eq 1 ] || { echo "absent lock reported busy"; return 1; }
+    _ci_ship_chain() { [ -n "$(git ls-remote origin "${ref}")" ] || { echo "chain ran without the lock" >&2; return 3; }; }
+    run ci_cmd_ship "${svc}" "${plat}"
+    _expect ship-locked 0 - || return 1
+    [ -z "$(git ls-remote origin "${ref}")" ] || { echo "ship left the lock"; return 1; }
+    _ci_ship_chain() { return 2; }
+    run ci_cmd_ship "${svc}" "${plat}"
+    _expect ship-failed 2 - || return 1
+    [ -z "$(git ls-remote origin "${ref}")" ] || { echo "a failed ship left the lock"; return 1; }
+    _ci_lock_acquire origin "${ref}" "build other run=999 attempt=1" 1 0 900 || return 1
+    run _ci_build_lock_busy ident "${svc}" "${plat}"
+    [ "${status}" -eq 0 ] || { echo "foreign fresh lock not busy"; return 1; }
+    _ci_ship_chain() { echo "chain ran under a foreign lock" >&2; return 0; }
+    run ci_cmd_ship "${svc}" "${plat}"
+    _expect ship-blocked 2 "[CI-ERROR-CAS-0002]" || return 1
+    [ -n "$(git ls-remote origin "${ref}")" ] || { echo "a blocked ship freed the foreign lock"; return 1; }
+    _ci_lock_release origin "${ref}" "build other run=999 attempt=1" || return 1
+    _ci_lock_acquire origin "${ref}" "$(_ci_build_lock_note "${svc}" "${plat}")" 1 0 900 || return 1
+    run _ci_build_lock_busy ident "${svc}" "${plat}"
+    [ "${status}" -eq 1 ] || { echo "own lock reported busy"; return 1; }
+    run _ci_ship_abort "${svc}" "${plat}"
+    _expect ship-cancel 130 - || return 1
+    [ -z "$(git ls-remote origin "${ref}")" ] || { echo "a cancel left the lock"; return 1; }
+}
+
+# What: only a verified digest gets the mark scan reads
+# Why: B20: a pushed image whose smoke test failed stays out
+# From: Issue #1683 | PR #1912
+@test "verified mark: set after a passed verify, never after a failed one" {
+    local o w svc d d2
+    o="$(_val path)" w="$(_val path)" svc="$(_val name)" d="$(_val digest)"
+    git init -q --bare "${o}" && git init -q "${w}" && git -C "${w}" remote add origin "${o}" || return 1
+    cd "${w}" || return 1
+    export GIT_CONFIG_GLOBAL=/dev/null
+    _ci_git_remote() { printf 'origin\n'; }
+    _ci_variable() { printf 'refs/ci/t/ver\n'; }
+    run _ci_verified_has "${svc}" p/x "${d}"
+    [ "${status}" -eq 1 ] || { echo "unmarked digest reported verified"; return 1; }
+    ci_cmd_verify() { return 2; }
+    run _ci_verify_and_mark "${svc}" "${d}" p/x
+    _expect failed-verify 2 - || return 1
+    run _ci_verified_has "${svc}" p/x "${d}"
+    [ "${status}" -eq 1 ] || { echo "a failed verify left a mark"; return 1; }
+    ci_cmd_verify() { printf 'verified\n'; }
+    run _ci_verify_and_mark "${svc}" "${d}" p/x
+    _expect passed-verify 0 - || return 1
+    run _ci_verified_has "${svc}" p/x "${d}"
+    [ "${status}" -eq 0 ] || { echo "a passed verify left no mark"; return 1; }
+    run _ci_verify_and_mark "${svc}" "${d}" p/x
+    _expect repeat 0 - || return 1
+    run _ci_verified_has "${svc}" p/x "$(_val digest)"
+    [ "${status}" -eq 1 ] || { echo "another digest reported verified"; return 1; }
+    d2="$(_val digest)"
+    run _ci_verify_and_mark "${svc}" "${d2}" p/x
+    _expect newer-digest 0 - || return 1
+    run _ci_verified_has "${svc}" p/x "${d2}"
+    [ "${status}" -eq 0 ] || { echo "newer digest not marked"; return 1; }
+    run _ci_verified_has "${svc}" p/x "${d}"
+    [ "${status}" -eq 1 ] || { echo "an older digest still reported verified"; return 1; }
 }
 
 # What: verify compares the registry digest to the expected
