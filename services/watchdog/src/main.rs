@@ -3549,6 +3549,19 @@ fn sign_leaf(ca: &Path, run: &Path, key: &Path, crt: &Path, san: &str) -> Result
     signed.map(|_| ())
 }
 
+// What: drop the nginx package's stock default.conf.
+// Why: conf.d/*.conf would serve its page beside ours.
+// From: Issue #1683 | PR #1912
+fn remove_stock_server(nginx: &Path) -> Result<(), String> {
+    let stock = nginx.join("conf.d/default.conf");
+    match fs::remove_file(&stock) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("cannot remove {}: {e}", stock.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
 // What: CA, default and per-host leaf certificates.
 // Why: HTTPS mode intercepts TLS for every proxied host.
 // From: Issue #1683
@@ -3768,6 +3781,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         fs::create_dir_all(dir.join(sub))
             .map_err(|e| format!("cannot create {}: {e}", dir.join(sub).display()))?;
     }
+    remove_stock_server(&dir)?;
     // What: render the server confs from image templates.
     // Why: the paths come from the SOT, not from the text.
     // From: Issue #1683 | PR #1912
@@ -5802,6 +5816,26 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    // What: the stock server block goes; our files stay.
+    // Why: a package default.conf must not serve with ours.
+    // From: Issue #1683 | PR #1912
+    #[test]
+    fn stock_server_block_is_removed_alone() {
+        let root = scratch();
+        let (stock, ours) = (
+            root.join("conf.d/default.conf"),
+            root.join("conf.d/http.conf"),
+        );
+        fs::create_dir_all(root.join("conf.d")).expect("conf.d");
+        let (text_stock, text_ours) = (gen_name(), gen_name());
+        fs::write(&stock, &text_stock).expect("stock");
+        fs::write(&ours, &text_ours).expect("ours");
+        remove_stock_server(&root).expect("first");
+        remove_stock_server(&root).expect("again");
+        assert!(!stock.exists());
+        assert_eq!(fs::read_to_string(&ours).unwrap(), text_ours);
     }
 
     // What: only a wholly old snapshot gets stubs.
