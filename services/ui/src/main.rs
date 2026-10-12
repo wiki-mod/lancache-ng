@@ -2743,6 +2743,19 @@ fn save_dhcp_settings(state: &AppState, changes: &[(&str, String)]) -> Result<()
     })
 }
 
+// What: an error and every cause below it, as one text.
+// Why: reqwest shows only "builder error"; the cause tells.
+fn chain_text(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(inner) = cause {
+        text.push_str(": ");
+        text.push_str(&inner.to_string());
+        cause = inner.source();
+    }
+    text
+}
+
 // What: send one Kea command; transport errors become text.
 // Why: callers must tell a lost request from a Kea refusal.
 async fn kea_post(
@@ -2764,10 +2777,10 @@ async fn kea_post(
         .json(&body)
         .send()
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| chain_text(&e))?
         .json::<Value>()
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| chain_text(&e))
 }
 
 // What: the result code of Kea's first reply; 1 if absent.
@@ -7656,6 +7669,26 @@ mod tests {
                 .map(|(key, value)| (key.to_string(), value.to_string()))
                 .collect(),
         )
+    }
+
+    // What: chain_text joins an error with each cause.
+    // Why: a builder error alone hides its serde cause.
+    #[test]
+    fn chain_text_lists_every_cause() {
+        #[derive(Debug)]
+        struct Outer(std::io::Error);
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("builder error")
+            }
+        }
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let error = Outer(std::io::Error::other("key must be a string"));
+        assert_eq!(chain_text(&error), "builder error: key must be a string");
     }
 
     // What: Kea replies give a result code and text.
