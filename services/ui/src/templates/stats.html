@@ -124,23 +124,31 @@ async function fetchChart(path) {
   return res.json();
 }
 
+// What: newest non-null row of a netdata reply, or null.
+// Why: rows come newest first; the oldest rows can be null.
+function newestRow(reply) {
+  const rows = reply.data.filter(r => r.slice(1).some(v => v !== null));
+  return rows.length ? rows.reduce((a, b) => (b[0] > a[0] ? b : a)) : null;
+}
+
 let errorShown = false;
 
 async function refresh() {
   try {
-    // What: busy % = 100 minus idle (last column).
-    // Why: system.cpu returns idle time, not busy time.
+    // What: busy % = sum of the system.cpu state columns.
+    // Why: system.cpu has no idle column; last is iowait.
     const cpu = await fetchChart('data?chart=system.cpu');
-    const cpuRow = cpu.data[cpu.data.length - 1];
-    const cpuPct = cpuRow ? (100 - cpuRow[cpuRow.length - 1]).toFixed(1) : 0;
+    const cpuRow = newestRow(cpu);
+    const cpuPct = cpuRow
+      ? Math.min(100, cpuRow.slice(1).reduce((a, v) => a + (v ?? 0), 0)).toFixed(1) : 0;
     push(cpuChart, parseFloat(cpuPct));
     cpuChart.options.scales.y.max = 100;
 
-    // What: RAM in GB from the first column of system.ram.
-    // Why: system.ram values are MiB, so divide by 1024.
+    // What: used RAM in GB via the "used" label.
+    // Why: column 1 is free, not used; values are MiB.
     const ram = await fetchChart('data?chart=system.ram');
-    const ramRow = ram.data[ram.data.length - 1];
-    const usedGB = ramRow ? (ramRow[1] / 1024).toFixed(2) : 0;
+    const ramRow = newestRow(ram);
+    const usedGB = ramRow ? (ramRow[ram.labels.indexOf('used')] / 1024).toFixed(2) : 0;
     push(ramChart, parseFloat(usedGB));
 
     // What: net from net.eth0, falls back to net.eth1.
@@ -148,7 +156,7 @@ async function refresh() {
     let net;
     try { net = await fetchChart('data?chart=net.eth0'); }
     catch { net = await fetchChart('data?chart=net.eth1'); }
-    const netRow = net.data[net.data.length - 1];
+    const netRow = newestRow(net);
     const rxMB = netRow ? Math.abs(netRow[1] / 1000).toFixed(2) : 0;
     const txMB = netRow ? Math.abs(netRow[2] / 1000).toFixed(2) : 0;
     push(netChart, parseFloat(rxMB), parseFloat(txMB));
@@ -156,7 +164,7 @@ async function refresh() {
     // What: disk read/write MB/s from system.io.
     // Why: system.io is a host-wide total, not per disk.
     const disk = await fetchChart('data?chart=system.io');
-    const diskRow = disk.data[disk.data.length - 1];
+    const diskRow = newestRow(disk);
     const readMB  = diskRow ? Math.abs(diskRow[1] / 1000).toFixed(2) : 0;
     const writeMB = diskRow ? Math.abs(diskRow[2] / 1000).toFixed(2) : 0;
     push(diskChart, parseFloat(readMB), parseFloat(writeMB));
