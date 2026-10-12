@@ -29,9 +29,6 @@ AUTO_UPDATE_TIMER_UNIT="lancache-auto-update.timer"
 DEFAULT_INSTALL_DIR="/opt/lancache-ng"
 BACKUP_ROOT="${LANCACHE_BACKUP_ROOT:-/var/backups/lancache-ng}"
 LANCACHE_REPO_URL="https://github.com/wiki-mod/lancache-ng"
-# What: UI session TTL one-year cap
-# Why: setup.sh refuses a TTL the ui would reject
-MAX_UI_SESSION_TTL_SECONDS=31536000
 # What: Docker's repo root and Docker CE package names
 # Why: apt, rpm, conflict guard and prompts share them
 # From: Issue #1683 | PR #1858
@@ -382,9 +379,9 @@ validate_ui_session_ttl_seconds() {
     if [[ "$numeric" = "0" ]]; then
         die "UI_SESSION_TTL_SECONDS in ${source} must be greater than zero."
     fi
-    max="$MAX_UI_SESSION_TTL_SECONDS"
+    max=$(prod_env_default UI_SESSION_TTL_MAX_SECONDS) || exit $?
     if (( ${#numeric} > ${#max} )) || { (( ${#numeric} == ${#max} )) && (( 10#$numeric > 10#$max )); }; then
-        die "UI_SESSION_TTL_SECONDS in ${source} must be at most ${MAX_UI_SESSION_TTL_SECONDS} seconds (1 year)."
+        die "UI_SESSION_TTL_SECONDS in ${source} must be at most ${max} seconds."
     fi
 }
 

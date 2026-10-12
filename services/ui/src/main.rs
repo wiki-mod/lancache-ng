@@ -263,11 +263,10 @@ impl Config {
             below: OutOfRange::Reject,
             above: OutOfRange::Reject,
         })? as u32;
-        let ttl = knob(
-            "UI_SESSION_TTL_SECONDS",
-            MAX_UI_SESSION_TTL_SECONDS,
-            OutOfRange::Reject,
-        )?;
+        let ttl_max = need("UI_SESSION_TTL_MAX_SECONDS")?
+            .parse()
+            .map_err(|e| format!("UI_SESSION_TTL_MAX_SECONDS: {e}"))?;
+        let ttl = knob("UI_SESSION_TTL_SECONDS", ttl_max, OutOfRange::Reject)?;
         let startup_settings = HashMap::from([
             ("DHCP_MODE", dhcp_mode.as_str().to_string()),
             ("DHCP_SUBNET_START", text("DHCP_SUBNET_START", "")),
@@ -567,7 +566,6 @@ fn ensure_shared_secrets(dir: &str, gid: u32, prefix: &str) -> Result<(), String
 const CSRF_HEADER_NAME: &str = "X-CSRF-Token";
 const CSRF_FORM_FIELD: &str = "csrf_token";
 const MAX_CSRF_BODY_BYTES: usize = 1024 * 1024;
-const MAX_UI_SESSION_TTL_SECONDS: u64 = 365 * 24 * 60 * 60;
 const SESSION_COOKIE_NAME: &str = "lancache_ui_session";
 const INTERNAL_CSRF_HEADER: &str = "x-lancache-ui-csrf-token";
 
@@ -6548,7 +6546,7 @@ mod tests {
         "LANCACHE_SHARED_SECRET_DIR",
     ];
 
-    const NUMBER_KEYS: [(&str, &str); 12] = [
+    const NUMBER_KEYS: [(&str, &str); 13] = [
         ("PDNS_AUTH_PORT", "5300"),
         ("DNS_PORT", "53"),
         ("PDNS_AUTH_API_PORT", "8081"),
@@ -6557,6 +6555,7 @@ mod tests {
         ("KEA_CTRL_PORT", "8000"),
         ("DHCP_LEASE_TIME", "86400"),
         ("UI_SESSION_TTL_SECONDS", "3600"),
+        ("UI_SESSION_TTL_MAX_SECONDS", "31536000"),
         ("KEEP_KNOWN_GOOD_CONFIGS", "7"),
         ("UI_LOGS_MAX_ENTRIES", "250"),
         ("UI_LISTEN_PORT", "8081"),

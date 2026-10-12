@@ -2368,14 +2368,14 @@ CASES
     [ "$(get_env_var CACHE_MAX_SIZE "${d}/.env")" = "${def}" ] || { echo "bad-gb: $(get_env_var CACHE_MAX_SIZE "${d}/.env") want ${def}"; return 1; }
 }
 
-# What: TTL is a positive whole number up to setup.sh's max
+# What: TTL is a positive whole number up to the SOT max
 # Why: a bad TTL would be written or reused unchecked
 # From: Issue #1683 | PR #1858
 @test "validate_ui_session_ttl_seconds rejects invalid and accepts valid" {
     local max
     _load_setup_sh "$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)" || return 1
-    max="${MAX_UI_SESSION_TTL_SECONDS:-}"
-    [[ "${max}" =~ ^[1-9][0-9]*$ ]] || { echo "no MAX_UI_SESSION_TTL_SECONDS in setup.sh: '${max}'"; return 1; }
+    max="$(_ci_runtime_default UI_SESSION_TTL_MAX_SECONDS)" || return 1
+    [[ "${max}" =~ ^[1-9][0-9]*$ ]] || { echo "no UI_SESSION_TTL_MAX_SECONDS in the SOT: '${max}'"; return 1; }
     run validate_ui_session_ttl_seconds "$(_val name)" src
     _expect not-a-number 1 "unsigned integer" || return 1
     run validate_ui_session_ttl_seconds 0 src
