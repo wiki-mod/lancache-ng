@@ -12199,13 +12199,13 @@ _ci_check_proxy_nginx_policy() {
     while IFS= read -r h; do
         [ -z "${h}" ] || viol+=("${pp#"${repo_root}/"}: ${h}")
     done <<<"${out}"
-    # What: the https health port is the SOT URL port.
-    # Why: the supervisor probes it; nginx owns the listen.
+    # What: https.conf includes the generated listen file.
+    # Why: a literal listen would be a second port owner.
     # From: Issue #1683 | PR #1912
-    h="$(_ci_runtime_default PROXY_HEALTH_HTTPS_URL)" || return 2
-    h="${h##*:}" h="${h%%/*}"
-    grep -Eq "^[[:space:]]*listen[[:space:]]+127[.]0[.]0[.]1:${h}[[:space:]]+ssl;" "${px}/conf.d/https.conf" \
-        || viol+=("${px#"${repo_root}/"}/conf.d/https.conf: no loopback listen on ${h} ssl (SOT PROXY_HEALTH_HTTPS_URL)")
+    grep -Eq '^[[:space:]]*include[[:space:]]+/etc/nginx/conf.d/https-listen[.]inc;' "${px}/conf.d/https.conf" \
+        || viol+=("${px#"${repo_root}/"}/conf.d/https.conf: no include of the generated https-listen.inc")
+    grep -Eq '^[[:space:]]*listen[[:space:]]' "${px}/conf.d/https.conf" \
+        && viol+=("${px#"${repo_root}/"}/conf.d/https.conf: literal listen; the watchdog renders it")
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0151]" "reason=\"proxy nginx policy violated\"" "$(printf '%s\n' "${viol[@]}")"
         return 1

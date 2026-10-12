@@ -1159,20 +1159,18 @@ macro|const NGINX_CERT_DIR: &str = concat!("ssl", "/certs");|2|[CI-ERROR-CORE-01
 ROWS
 }
 
-# What: the https health listener follows the SOT health URL
-# Why: the supervisor probes this port; keep the listen line
+# What: https.conf holds no literal listen of its own
+# Why: the watchdog renders the ports from the SOT
 # From: Issue #1683 | PR #1912
-@test "check proxy-nginx-policy: the https health port is the SOT's" {
-    local root t="${BATS_TEST_TMPDIR}/repo" port
+@test "check proxy-nginx-policy: https.conf listens come from the generated file" {
+    local root t="${BATS_TEST_TMPDIR}/repo"
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     run bash "${CI_SH}" check proxy-nginx-policy
     _expect real 0 "proxy-nginx-policy=clean" || return 1
-    port="$(_ci_runtime_default PROXY_HEALTH_HTTPS_URL)" || return 1
-    port="${port##*:}" port="${port%%/*}"
     _checkout_copy "${root}" "${t}" || return 1
-    sed -i -E "s/(listen[[:space:]]+127[.]0[.]0[.]1:)${port}([[:space:]]+ssl;)/\\1$(( port + 1 ))\\2/" "${t}/services/proxy/conf.d/https.conf" || return 1
+    sed -i -E 's/^([[:space:]]*)include[[:space:]]+\/etc\/nginx\/conf.d\/https-listen[.]inc;/\1listen 127.0.0.1:8445 ssl;/' "${t}/services/proxy/conf.d/https.conf" || return 1
     run bash "${CI_SH}" check proxy-nginx-policy "${t}"
-    _expect moved 1 "[CI-ERROR-CHECK-0151];no loopback listen on ${port} ssl" || return 1
+    _expect moved 1 "[CI-ERROR-CHECK-0151];no include of the generated https-listen.inc;literal listen" || return 1
 }
 
 # What: image-setup builds the SOT accounts and directories
