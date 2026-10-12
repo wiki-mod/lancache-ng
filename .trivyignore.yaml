@@ -2,15 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Trivy security scanner ignore list for accepted vulnerabilities.
-# Per-entry `statement:` convention (AG-CODE-012): What: (one line, what is
-# suppressed and for which artifact) / Why: (1-3 lines, sober
-# non-exploitability or accepted-risk reasoning) / From: (Issue/PR
-# reference, mandatory).
-# `status: not_affected` marks vulnerable code confirmed absent or
-# unreachable; an omitted `status` marks an accepted, tracked risk.
-# Trivy accepts entries without an exception expiry date; this file uses no
-# expiry field.
+# What: Trivy ignore list; statements use What/Why/From.
+# Why: Omitted status = tracked risk; no expiry field used.
 vulnerabilities:
   - id: CVE-2026-14456
     statement: >-
@@ -1195,9 +1188,16 @@ vulnerabilities:
 
       From: Issue #1683 | PR #1906
 
-  # CVE-2026-32316/CVE-2026-40164 (jq, utilities image) removed here per
-  # their own accepting entries' explicit self-description ("remove once
-  # PR #1783 lands and its rebuilds propagate", Issue #1802/#1803,
-  # commit 6e3db411): PR #1783 has now removed services/utilities/Dockerfile
-  # entirely, so there is no more `utilities` image for these two interim,
-  # event-based exceptions to apply to.
+  - id: CVE-2026-78669
+    statement: >-
+      What: Accepts CVE-2026-78669 (HTTP/2 SETTINGS denial of service
+      in Go net/http) as a tracked risk for `docker-cli` in
+      `tools/build-tools`.
+
+      Why: Trivy reports `docker-cli` 29.8.2-r0 as vulnerable and
+      29.9.0-r0 as the fix (build-tools arm64 scan, Alpine 3.24.2).
+      Alpine 3.24 community still ships only 29.8.2-r0 for aarch64
+      and x86_64, so a rebuild cannot remove the finding yet. The
+      entry records the finding until a rebuild ships 29.9.0-r0.
+
+      From: Issue #1913 | PR #1915
