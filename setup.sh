@@ -14,19 +14,17 @@ PROD_COMPOSE="$SCRIPT_DIR/deploy/prod/docker-compose.yml"
 # Why: volume copy, restore and listing share one image
 # From: Issue #1683 | PR #1858
 LANCACHE_HELPER_IMAGE=""
-# What: systemd unit dir and the units this script manages
+# What: the units this script manages
 # Why: one owner for every unit file and systemctl call
 # From: Issue #1683 | PR #1858
-SYSTEMD_UNIT_DIR="/etc/systemd/system"
 STACK_UNIT="lancache.service"
 CONVERGE_SERVICE_UNIT="lancache-converge.service"
 CONVERGE_TIMER_UNIT="lancache-converge.timer"
 AUTO_UPDATE_SERVICE_UNIT="lancache-auto-update.service"
 AUTO_UPDATE_TIMER_UNIT="lancache-auto-update.timer"
-# What: default checkout, backup root and project repo
+# What: backup root and project repo
 # Why: one owner each; rollback must find the backups
 # From: Issue #1683 | PR #1858
-DEFAULT_INSTALL_DIR="/opt/lancache-ng"
 BACKUP_ROOT="${LANCACHE_BACKUP_ROOT:-/var/backups/lancache-ng}"
 LANCACHE_REPO_URL="https://github.com/wiki-mod/lancache-ng"
 # What: Docker's repo root and Docker CE package names
@@ -108,6 +106,26 @@ ask() {
     printf "  ${BOLD}%s${RESET} [%s]: " "$prompt" "$default"
     read -r REPLY < /dev/tty
     REPLY="${REPLY:-$default}"
+}
+
+# What: a SOT 0/1 default as the Y or N of a prompt
+# Why: the SOT owns each default; a prompt only shows it
+# From: Issue #1683 | PR #1912
+yn_default() {
+    local value
+    value=$(prod_env_default "$1") || exit $?
+    case "$value" in
+        1) printf 'Y\n' ;;
+        0) printf 'N\n' ;;
+        *) die "The SOT default of $1 is '$value', not 0 or 1." ;;
+    esac
+}
+
+# What: the [y/N] or [Y/n] hint of a prompt default
+# Why: the capital letter marks the default answer
+# From: Issue #1683 | PR #1912
+yn_hint() {
+    if [[ "$1" = "Y" ]]; then printf '[Y/n]\n'; else printf '[y/N]\n'; fi
 }
 
 # What: rejects a missing value or a flag as value
@@ -247,10 +265,11 @@ detect_lan_ip() {
 # What: lists port-53 holders on the chosen listen IP
 # Why: a busy port would fail silently at container start
 secondary_listen_ip_conflicts() {
-    local listen_ip="$1" sockets
+    local listen_ip="$1" sockets dns_port
 
-    sockets=$(ss -H -ltnup '( sport = :53 )') \
-        || die "Failed to list the port 53 listeners of this host (exit $?)."
+    dns_port=$(prod_env_default DNS_PORT) || exit $?
+    sockets=$(ss -H -ltnup "( sport = :${dns_port} )") \
+        || die "Failed to list the port ${dns_port} listeners of this host (exit $?)."
     awk -v ip="$listen_ip" '
         {
             local = $5
@@ -268,7 +287,7 @@ secondary_listen_ip_conflicts() {
 # Why: 1 = none free, 2 = listing failed; never swallowed
 # From: Issue #1683 | PR #1858
 secondary_suggest_alternate_listen_ip() {
-    local current="$1" candidate addrs conflicts
+    local current="$1" candidate addrs conflicts loopback_ip n
 
     addrs=$(host_lan_addresses) \
         || { print_error "Failed to list the IPv4 addresses of this host (exit $?)."; return 2; }
@@ -281,7 +300,9 @@ secondary_suggest_alternate_listen_ip() {
         return 0
     done <<< "$addrs"
 
-    for candidate in 127.0.0.1 127.0.0.2 127.0.0.3 127.0.0.4 127.0.0.5 127.0.0.6 127.0.0.7 127.0.0.8 127.0.0.9 127.0.0.10; do
+    loopback_ip=$(prod_env_default LOOPBACK_BIND_IP) || exit $?
+    for n in 1 2 3 4 5 6 7 8 9 10; do
+        candidate="${loopback_ip%.*}.${n}"
         [[ "$candidate" = "$current" ]] && continue
         conflicts=$(secondary_listen_ip_conflicts "$candidate") || return 2
         [[ -z "$conflicts" ]] || continue
@@ -295,8 +316,9 @@ secondary_suggest_alternate_listen_ip() {
 # What: port-53 holders shown; prompt for alternate IP
 # Why: fails closed without a terminal, no endless loop
 secondary_choose_listen_ip() {
-    local listen_ip="$1" conflicts suggestion
+    local listen_ip="$1" conflicts suggestion dns_port
 
+    dns_port=$(prod_env_default DNS_PORT) || exit $?
     while true; do
         conflicts="$(secondary_listen_ip_conflicts "$listen_ip")" || exit $?
         if [[ -z "$conflicts" ]]; then
@@ -304,17 +326,17 @@ secondary_choose_listen_ip() {
             return 0
         fi
 
-        print_warn "Port 53 is already in use for bind IP ${listen_ip}."
+        print_warn "Port ${dns_port} is already in use for bind IP ${listen_ip}."
         {
             printf '%s\n' "$conflicts" | sed 's/^/    /'
             # What: port-53 holder details, raw output
             # Why: diagnostics only; exit code is no result
             # From: Issue #1683 | PR #1858
             if command -v fuser >/dev/null 2>&1; then
-                fuser -v 53/tcp 53/udp 2>&1 | sed 's/^/    /' || printf '    (fuser exit %s)\n' "$?"
+                fuser -v "${dns_port}/tcp" "${dns_port}/udp" 2>&1 | sed 's/^/    /' || printf '    (fuser exit %s)\n' "$?"
             fi
             if command -v lsof >/dev/null 2>&1; then
-                lsof -nP -iTCP:53 -iUDP:53 -sTCP:LISTEN 2>&1 | sed 's/^/    /' || printf '    (lsof exit %s)\n' "$?"
+                lsof -nP "-iTCP:${dns_port}" "-iUDP:${dns_port}" -sTCP:LISTEN 2>&1 | sed 's/^/    /' || printf '    (lsof exit %s)\n' "$?"
             fi
         } >&2
 
@@ -1339,16 +1361,17 @@ append_required_env_migrated_assignment_if_empty_or_missing() {
 }
 
 migrate_proxy_security_mode_for_update() {
-    local env_file="$1" proxy_security_mode proxy_allowed_client_cidrs
+    local env_file="$1" proxy_security_mode proxy_allowed_client_cidrs default_mode
 
     proxy_security_mode=$(get_env_var PROXY_SECURITY_MODE "$env_file") || exit $?
+    default_mode=$(prod_env_default PROXY_SECURITY_MODE) || exit $?
     proxy_allowed_client_cidrs=$(get_env_var PROXY_ALLOWED_CLIENT_CIDRS "$env_file") || exit $?
 
-    # What: resets strict to lazy when no allowlist is set
+    # What: resets strict to the default with no allowlist
     # Why: no allowlist means no strict policy to preserve
     if [[ "$proxy_security_mode" = "strict" && -z "$proxy_allowed_client_cidrs" ]]; then
-        set_env_key PROXY_SECURITY_MODE "lazy" "$env_file"
-        print_ok "Migrated legacy PROXY_SECURITY_MODE=strict without PROXY_ALLOWED_CLIENT_CIDRS to lazy"
+        set_env_key PROXY_SECURITY_MODE "$default_mode" "$env_file"
+        print_ok "Migrated legacy PROXY_SECURITY_MODE=strict without PROXY_ALLOWED_CLIENT_CIDRS to $default_mode"
     fi
 }
 
@@ -1926,12 +1949,13 @@ rollback_quickstart_migration() {
 # Why: fresh install and migration share one unit definition
 # From: Issue #1683 | PR #1858
 write_lancache_systemd_units() {
-    local stack_dir="$1" setup_sh="$SCRIPT_DIR/setup.sh"
+    local stack_dir="$1" setup_sh="$SCRIPT_DIR/setup.sh" unit_dir
+    unit_dir=$(lancache_sot_value unit_dir runner_host) || exit $?
     # What: units run compose through setup.sh at run time
     # Why: overrides may change after the unit is written
     # From: Issue #1683 | PR #1858
     local compose="${setup_sh} compose ${stack_dir}"
-    cat > "$SYSTEMD_UNIT_DIR/$STACK_UNIT" <<EOF || die "Failed to write $STACK_UNIT."
+    cat > "$unit_dir/$STACK_UNIT" <<EOF || die "Failed to write $STACK_UNIT."
 [Unit]
 Description=LanCache-NG
 After=docker.service
@@ -1952,7 +1976,7 @@ EOF
     # What: reconcile (exit ignored), then converge
     # Why: a failed reconcile must not stop the drift repair
     # From: Issue #819
-    cat > "$SYSTEMD_UNIT_DIR/$CONVERGE_SERVICE_UNIT" <<EOF || die "Failed to write $CONVERGE_SERVICE_UNIT."
+    cat > "$unit_dir/$CONVERGE_SERVICE_UNIT" <<EOF || die "Failed to write $CONVERGE_SERVICE_UNIT."
 [Unit]
 Description=LanCache-NG Convergence Check
 After=docker.service
@@ -1963,7 +1987,7 @@ WorkingDirectory=${stack_dir}
 ExecStart=-${setup_sh} converge-reconcile ${stack_dir}
 ExecStart=${compose} up -d --remove-orphans
 EOF
-    cat > "$SYSTEMD_UNIT_DIR/$CONVERGE_TIMER_UNIT" <<EOF || die "Failed to write $CONVERGE_TIMER_UNIT."
+    cat > "$unit_dir/$CONVERGE_TIMER_UNIT" <<EOF || die "Failed to write $CONVERGE_TIMER_UNIT."
 [Unit]
 Description=LanCache-NG Convergence Timer
 
@@ -1978,7 +2002,7 @@ EOF
     # What: daily host-side update runs the on-disk setup.sh
     # Why: no container gets Docker socket write access
     # From: Issue #819
-    cat > "$SYSTEMD_UNIT_DIR/$AUTO_UPDATE_SERVICE_UNIT" <<EOF || die "Failed to write $AUTO_UPDATE_SERVICE_UNIT."
+    cat > "$unit_dir/$AUTO_UPDATE_SERVICE_UNIT" <<EOF || die "Failed to write $AUTO_UPDATE_SERVICE_UNIT."
 [Unit]
 Description=LanCache-NG Scheduled Automatic Update
 After=docker.service
@@ -1992,7 +2016,7 @@ EOF
     # What: daily, spread over 1h, missed runs caught up
     # Why: installs must not all hit GHCR at the same minute
     # From: Issue #819
-    cat > "$SYSTEMD_UNIT_DIR/$AUTO_UPDATE_TIMER_UNIT" <<EOF || die "Failed to write $AUTO_UPDATE_TIMER_UNIT."
+    cat > "$unit_dir/$AUTO_UPDATE_TIMER_UNIT" <<EOF || die "Failed to write $AUTO_UPDATE_TIMER_UNIT."
 [Unit]
 Description=LanCache-NG Scheduled Automatic Update Timer
 
@@ -2137,6 +2161,14 @@ prod_env_default() {
     local list
     list=$(lancache_sot_value defaults runtime) || exit $?
     runtime_default_in "$list" "$1"
+}
+
+# What: sets DEFAULT_INSTALL_DIR from the SOT, once
+# Why: LANCACHE_STATE_DIR owns the checkout dir.
+# From: Issue #1683 | PR #1912
+ensure_default_install_dir() {
+    [[ -n "${DEFAULT_INSTALL_DIR:-}" ]] && return 0
+    DEFAULT_INSTALL_DIR=$(prod_env_default LANCACHE_STATE_DIR) || exit $?
 }
 
 # What: one key's value in a runtime.defaults list
@@ -3762,6 +3794,7 @@ write_compressed_tar() {
 cmd_backup() (
     mode="config"
     backup_root="$BACKUP_ROOT"
+    ensure_default_install_dir
     install_dir="$DEFAULT_INSTALL_DIR"
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -3884,6 +3917,7 @@ restore_clear_stale_env_local_if_unarchived() {
 # From: Issue #1683 | PR #1858
 cmd_restore() (
     archive="${1:-}"
+    ensure_default_install_dir
     install_dir="${2:-$DEFAULT_INSTALL_DIR}"
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
     [[ -n "$archive" ]] || die "Usage: $0 restore <backup.tar.gz> [install-dir]"
@@ -3928,6 +3962,7 @@ cmd_restore() (
         archived_install=$(awk -F': ' '/^Install directory: / {print $2; exit}' "$backup_dir/README.txt") \
             || die "Failed to read $backup_dir/README.txt (exit $?)."
     fi
+    ensure_default_install_dir
     archived_install="${archived_install:-$DEFAULT_INSTALL_DIR}"
     archived_install=$(realpath -m "$archived_install")
     rel_install="${archived_install#/}"
@@ -4809,6 +4844,7 @@ perform_stack_update_flow() {
 
 # ── update subcommand ─────────────────────────────────────────────────────────
 cmd_update() {
+    ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
     perform_stack_update_flow "$install_dir"
@@ -4853,6 +4889,7 @@ lancache_auto_update_should_proceed() {
 # What: scheduled update tick; detects a channel move first
 # Why: an unchanged channel must not restart the stack
 cmd_auto_update() {
+    ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
     local env_file auto_update_enabled current_channel current_tag deployed_tag decision
     local deployed_refs current_refs pinned
@@ -4925,7 +4962,7 @@ lancache_ui_cache_max_gb_override_is_valid() {
 # What: reads one KEY from the ui-data settings file
 # Why: checks the volume exists; docker run would create it
 lancache_read_ui_settings_override() {
-    local install_dir="$1" env_file="$2" key="$3" project volume raw rc=0
+    local install_dir="$1" env_file="$2" key="$3" project volume raw rc=0 settings_file
     command -v docker >/dev/null 2>&1 || return 0
     require_helper_image
     project=$(compose_project_name "$install_dir" "$env_file") \
@@ -4934,8 +4971,10 @@ lancache_read_ui_settings_override() {
     docker_volume_exists "$volume" || rc=$?
     [[ "$rc" -ne 1 ]] || return 0
     [[ "$rc" -eq 0 ]] || die "Cannot check the Docker volume $volume; the UI settings were not read."
+    settings_file=$(prod_env_default UI_SETTINGS_FILE) || exit $?
+    settings_file="${settings_file##*/}"
     raw=$(docker run --rm -v "${volume}:/volume:ro" "$LANCACHE_HELPER_IMAGE" \
-        sh -c 'if [ -e /volume/lancache-ui-settings.env ]; then cat /volume/lancache-ui-settings.env; fi') \
+        sh -c "if [ -e /volume/${settings_file} ]; then cat /volume/${settings_file}; fi") \
         || die "Failed to read the UI settings from Docker volume $volume (exit $?)."
     # What: sed reads $raw via a here-string
     # Why: avoids SIGPIPE under pipefail
@@ -4960,6 +4999,7 @@ reconcile_auto_update_timer_state() {
 }
 
 cmd_converge_reconcile() {
+    ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}" env_file
     local ui_channel ui_auto_update current_channel current_auto_update
     local ui_cache_max_gb current_cache_max_gb
@@ -5030,6 +5070,7 @@ cmd_converge_reconcile() {
 # What: read-only diagnostics that never repair
 # Why: they run when the stack state is unknown
 cmd_debug() {
+    ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
     local env_file
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
@@ -5273,6 +5314,7 @@ logbundle_host_path_listing() {
 # Why: its EXIT trap reads the state; nothing leaks out
 # From: Issue #1683 | PR #1858
 cmd_create_logs_for_issue() (
+    ensure_default_install_dir
     local install_dir="$DEFAULT_INSTALL_DIR"
     local dest_root="$BACKUP_ROOT"
     while [[ $# -gt 0 ]]; do
@@ -5430,6 +5472,7 @@ EOF
 # What: rolls a Kea or DNS service back to a snapshot
 # Why: works when the Admin UI is unreachable
 cmd_reset_to_last_known_good_config() {
+    ensure_default_install_dir
     local service="" install_dir="$DEFAULT_INSTALL_DIR" snapshot_id="" zone="" assume_yes=0
     local -a positional=()
     while [[ $# -gt 0 ]]; do
@@ -5703,8 +5746,9 @@ dns_rollback_exec() (
             case "$key" in
                 ""|CHANGE_ME*|changeme*|change_me*|YOUR_*|*_HERE) key="" ;;
             esac
-            if [ -z "$key" ] && [ -s /var/lib/lancache-secrets/pdns-api-key ]; then
-                key=$(tr -d "\n" < /var/lib/lancache-secrets/pdns-api-key)
+            secrets=$(/usr/local/bin/lancache-watchdog get LANCACHE_SHARED_SECRET_DIR) || exit 7
+            if [ -z "$key" ] && [ -s "$secrets/pdns-api-key" ]; then
+                key=$(tr -d "\n" < "$secrets/pdns-api-key")
             fi
             if [ -z "$key" ]; then
                 echo "DNS_ROLLBACK_EXEC_NO_API_KEY"
@@ -5854,6 +5898,7 @@ reset_dns_to_last_known_good_config() {
 # What: reconfigures IPs of an existing install
 # Why: uses the install's directory, not the repo
 cmd_update_ip() {
+    ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
 
@@ -6000,7 +6045,7 @@ cmd_secondary() {
     local preflight_dir preflight_env_file preflight_registry preflight_prefix preflight_channel preflight_env_tag
     local preflight_tag preflight_verified_registry="" preflight_verified_prefix="" preflight_verified_tag=""
     local missing_fields secondary_env_file compose_out bad_response secondary_compose
-    local channel_words pinned release
+    local channel_words pinned release dns_port
 
     usage_secondary() {
         cat <<EOF
@@ -6100,8 +6145,9 @@ EOF
         listen_ip=$(detect_lan_ip) \
             || die "Could not auto-detect a secondary bind IP. Re-run with --listen-ip <ip>."
     fi
+    dns_port=$(prod_env_default DNS_PORT) || exit $?
     listen_ip=$(secondary_choose_listen_ip "$listen_ip") \
-        || die "No usable secondary bind IP on port 53 (exit $?; see above). Re-run with --listen-ip <ip> after freeing the port."
+        || die "No usable secondary bind IP on port ${dns_port} (exit $?; see above). Re-run with --listen-ip <ip> after freeing the port."
     print_ok "Secondary DNS bind IP: ${listen_ip}"
     if [[ -n "$ip_https" || -n "$listen_ip_https" ]]; then
         [[ -n "$ip_https" && -n "$listen_ip_https" ]] \
@@ -6111,7 +6157,7 @@ EOF
         is_valid_ipv4 "$listen_ip_https" \
             || die "--listen-ip-https must be a valid IPv4 address"
         listen_ip_https=$(secondary_choose_listen_ip "$listen_ip_https") \
-            || die "No usable secondary https bind IP on port 53 (exit $?; see above). Re-run with --listen-ip-https <ip> after freeing the port."
+            || die "No usable secondary https bind IP on port ${dns_port} (exit $?; see above). Re-run with --listen-ip-https <ip> after freeing the port."
         [[ "$listen_ip_https" != "$listen_ip" ]] \
             || die "the https bind IP must differ from the http bind IP ${listen_ip}"
         print_ok "Secondary https DNS bind IP: ${listen_ip_https}"
@@ -6379,6 +6425,8 @@ if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "$0" ]]; then
 fi
 
 # ── Dispatch subcommands ──────────────────────────────────────────────────────
+ensure_default_install_dir
+
 # What: no command prints the help and changes nothing
 # Why: only the explicit install command installs
 # From: Issue #1683 | PR #1858
@@ -6639,7 +6687,8 @@ fi
 printf "\n"
 printf "  ${BOLD}HTTPS mode${RESET}: also caches HTTPS downloads (Epic, EA, Blizzard…)\n"
 printf "  Requires a CA certificate on clients.\n\n"
-ask "Enable HTTPS mode? [y/N]" "N"
+https_yn=$(yn_default HTTPS_ENABLED) || exit $?
+ask "Enable HTTPS mode? $(yn_hint "$https_yn")" "$https_yn"
 HTTPS_ENABLED=0
 [[ "${REPLY,,}" = "y" ]] && HTTPS_ENABLED=1
 print_ok "HTTPS mode $([[ "$HTTPS_ENABLED" = 1 ]] && echo enabled || echo disabled) (second IP $IP_HTTPS)"
@@ -6677,15 +6726,18 @@ while true; do
     print_error "Please enter an absolute path (e.g. $LANCACHE_STATE_DIR/cache)."
 done
 
+default_cache_gb=$(cache_size_gb_from_env "$(prod_env_default CACHE_MAX_SIZE)") \
+    || die "The CACHE_MAX_SIZE default is not a GB size."
 while true; do
-    ask "Cache size in GiB" "50"
+    ask "Cache size in GiB" "$default_cache_gb"
     cache_gb="$REPLY"
     [[ "$cache_gb" =~ ^[0-9]+$ ]] && (( cache_gb > 0 )) && break
-    print_error "Please enter a positive integer (e.g. 50)."
+    print_error "Please enter a positive integer (e.g. ${default_cache_gb})."
 done
 
+default_cache_mem_mb=$(prod_env_default CACHE_MEM_MB) || exit $?
 while true; do
-    ask "Cache RAM buffer in MB (keys_zone)" "512"
+    ask "Cache RAM buffer in MB (keys_zone)" "$default_cache_mem_mb"
     CACHE_MEM_MB="$REPLY"
     is_positive_integer "$CACHE_MEM_MB" && break
     print_error "Please enter a positive integer (e.g. 512)."
@@ -6770,8 +6822,9 @@ printf "  dnsmasq-proxy: experimental proxy-DHCP helper; it does not reliably re
 printf "  dnsmasq-relay: forward DHCP to an upstream server on another segment (relay only; injects nothing of its own)\n"
 printf "  disabled: keep router DHCP and do nothing in LanCache\n\n"
 
+default_dhcp_mode=$(prod_env_default DHCP_MODE) || exit $?
 while true; do
-    ask "DHCP mode (disabled, kea, dnsmasq-proxy, dnsmasq-relay)" "disabled"
+    ask "DHCP mode (disabled, kea, dnsmasq-proxy, dnsmasq-relay)" "$default_dhcp_mode"
     DHCP_MODE="${REPLY,,}"
     if is_valid_dhcp_mode "$DHCP_MODE"; then
         break
@@ -7047,12 +7100,14 @@ fi
 print_step "LanCache-NG-NTP"
 
 printf "  A small, self-contained NTP server, disciplined against public NTP\n"
-printf "  servers, that serves time to LAN clients on UDP/123. Enable/disable and\n"
+ntp_yn=$(yn_default NTP_ENABLED) || exit $?
+ntp_port=$(prod_env_default NTP_PORT) || exit $?
+printf "  servers, that serves time to LAN clients on UDP/%s. Enable/disable and\n" "$ntp_port"
 printf "  upstream server list are then configured from the Admin UI.\n"
-printf "  Default: disabled.\n\n"
+printf "  Default: %s.\n\n" "$([[ "$ntp_yn" = "Y" ]] && echo enabled || echo disabled)"
 
-ask "Enable LanCache-NG-NTP? [y/N]" "N"
-NTP_ENABLED=$(prod_env_default NTP_ENABLED) || exit $?
+ask "Enable LanCache-NG-NTP? $(yn_hint "$ntp_yn")" "$ntp_yn"
+NTP_ENABLED=0
 ntp_subdir=$(prod_env_default STATE_SUBDIR_NTP) || exit $?
 NTP_DATA_DIR="$LANCACHE_STATE_DIR/$ntp_subdir"
 if [[ "${REPLY,,}" = "y" ]]; then
