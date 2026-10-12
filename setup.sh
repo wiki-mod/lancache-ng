@@ -4394,8 +4394,10 @@ _verify_healthz_endpoint() {
     fi
 
     require_functional_check_tool curl "the proxy-container-loopback /healthz probe" || return 1
-    if ! docker exec "$proxy_container_id" curl -sf "http://127.0.0.1/healthz" >/dev/null; then
-        print_error "Functional check failed: http://127.0.0.1/healthz inside the proxy container"
+    local health_url
+    health_url=$(prod_env_default PROXY_HEALTH_URL) || exit $?
+    if ! docker exec "$proxy_container_id" curl -sf "$health_url" >/dev/null; then
+        print_error "Functional check failed: $health_url inside the proxy container"
         return 1
     fi
     return 0
@@ -5576,7 +5578,7 @@ kea_snapshot_host_dir() {
 reset_kea_to_last_known_good_config() {
     local install_dir="$1" snapshot_id="$2" assume_yes="${3:-0}"
     local env_file state_dir kea_dir snapshot_root
-    local kea_ctrl_host kea_ctrl_user kea_ctrl_token kea_ctrl_url kea_ctrl_port
+    local kea_ctrl_host kea_ctrl_user kea_ctrl_token kea_ctrl_url kea_ctrl_port loopback_ip
     local -a snapshot_ids=()
     local sid config_json
 
@@ -5592,10 +5594,11 @@ reset_kea_to_last_known_good_config() {
         || die "KEA_CTRL_TOKEN is empty or missing in $env_file -- cannot authenticate to Kea's Control Agent."
 
     kea_ctrl_host=$(get_env_var KEA_CTRL_HOST "$env_file") || exit $?
-    kea_ctrl_host="${kea_ctrl_host:-127.0.0.1}"
-    # What: maps a 0.0.0.0 Control Agent host to 127.0.0.1
+    loopback_ip=$(prod_env_default LOOPBACK_BIND_IP) || exit $?
+    kea_ctrl_host="${kea_ctrl_host:-$loopback_ip}"
+    # What: maps a 0.0.0.0 Control Agent host to loopback
     # Why: dhcp uses host networking; 0.0.0.0 is no target
-    [[ "$kea_ctrl_host" = "0.0.0.0" ]] && kea_ctrl_host="127.0.0.1"
+    [[ "$kea_ctrl_host" = "0.0.0.0" ]] && kea_ctrl_host="$loopback_ip"
     # What: Control Agent user and port from the SOT
     # Why: the SOT owns both; dhcp, ui and this read them
     # From: Issue #1683 | PR #1912
@@ -5708,14 +5711,15 @@ dns_rollback_exec() (
                 exit 9
             fi
             port=$(/usr/local/bin/lancache-watchdog get DNS_ROLLBACK_PORT) || exit 7
+            lo=$(/usr/local/bin/lancache-watchdog get LOOPBACK_BIND_IP) || exit 7
             m="$1"; p="$2"; b="$3"
             if [ "$m" = "POST" ]; then
                 curl -sS -w "\n%{http_code}" -X POST \
                     -H "X-API-Key: $key" -H "Content-Type: application/json" -d "$b" \
-                    "http://127.0.0.1:$port$p" || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
+                    "http://$lo:$port$p" || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
             else
                 curl -sS -w "\n%{http_code}" \
-                    -H "X-API-Key: $key" "http://127.0.0.1:$port$p" || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
+                    -H "X-API-Key: $key" "http://$lo:$port$p" || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
             fi
         ' sh "$method" "$path" "$body" 2>"$err_file") || rc=$?
     exec_err=$(cat "$err_file") || die "Cannot read $err_file (exit $?)."

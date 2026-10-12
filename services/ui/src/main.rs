@@ -5969,7 +5969,8 @@ async fn run() -> anyhow::Result<()> {
 #[tokio::main]
 async fn healthcheck() -> Result<(), String> {
     let port = config::need(&config::process_env, "UI_LISTEN_PORT")?;
-    probe_health(&format!("http://127.0.0.1:{port}/health")).await
+    let loopback = config::loopback()?;
+    probe_health(&format!("http://{loopback}:{port}/health")).await
 }
 
 // What: drop root, then run the server.

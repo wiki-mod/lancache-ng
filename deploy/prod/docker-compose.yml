@@ -10,7 +10,7 @@ name: lancache-ng
 x-logging: &logging
   driver: syslog
   options:
-    syslog-address: "udp://127.0.0.1:${SOT_LANCACHE_LOG_PORT:?SOT_LANCACHE_LOG_PORT is required}"
+    syslog-address: "udp://${SOT_LOOPBACK_BIND_IP:?SOT_LOOPBACK_BIND_IP is required}:${SOT_LANCACHE_LOG_PORT:?SOT_LANCACHE_LOG_PORT is required}"
     syslog-format: rfc5424
     tag: "{{.Name}}"
 
@@ -42,7 +42,7 @@ services:
     # Why: only the local Docker daemon may send log lines.
     # From: Issue #1683
     ports:
-      - "127.0.0.1:${SOT_LANCACHE_LOG_PORT}:${SOT_LANCACHE_LOG_PORT}/udp"
+      - "${SOT_LOOPBACK_BIND_IP}:${SOT_LANCACHE_LOG_PORT}:${SOT_LANCACHE_LOG_PORT}/udp"
       - "${SOT_NTP_PORT}:${SOT_NTP_PORT}/udp"
     volumes:
       # What: the Docker API for the watchdog process only.

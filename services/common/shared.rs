@@ -269,37 +269,74 @@ pub fn http_client() -> reqwest::Result<reqwest::Client> {
 // From: Issue #1683 | PR #1912
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-// What: Ok when a loopback health URL answers 2xx.
-// Why: healthchecks run in the binary; no curl, no shell.
+// What: an error and every cause below it, one line.
+// Why: reqwest hides the TLS or socket cause in source().
 // From: Issue #1683 | PR #1912
-pub async fn probe_health(url: &str) -> Result<(), String> {
-    // What: an https URL counts when its listener accepts.
-    // Why: loopback cert is self-signed; no check is off.
-    if let Some(rest) = url.strip_prefix("https://") {
-        let addr = rest.split('/').next().unwrap_or(rest);
-        let sock = std::net::ToSocketAddrs::to_socket_addrs(addr)
-            .map_err(|e| format!("{url}: {e}"))?
-            .next()
-            .ok_or_else(|| format!("{url}: no address"))?;
-        return std::net::TcpStream::connect_timeout(&sock, HEALTH_PROBE_TIMEOUT)
-            .map(|_| ())
-            .map_err(|e| format!("{url}: {e}"));
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(inner) = cause {
+        text.push_str(": ");
+        text.push_str(&inner.to_string());
+        cause = inner.source();
     }
-    let client = reqwest::Client::builder()
-        .timeout(HEALTH_PROBE_TIMEOUT)
-        .build()
-        .map_err(|e| format!("health client: {e}"))?;
+    text
+}
+
+// What: Ok when a client's GET of a URL answers 2xx.
+// Why: http and https health probes judge the same way.
+// From: Issue #1683 | PR #1912
+async fn expect_success(client: &reqwest::Client, url: &str) -> Result<(), String> {
     let status = client
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("{url}: {e}"))?
+        .map_err(|e| format!("{url}: {}", error_chain(&e)))?
         .status();
     if status.is_success() {
         Ok(())
     } else {
         Err(format!("{url}: HTTP {status}"))
     }
+}
+
+// What: Ok when a loopback health URL answers 2xx.
+// Why: healthchecks run in the binary; no curl, no shell.
+// From: Issue #1683 | PR #1912
+pub async fn probe_health(url: &str) -> Result<(), String> {
+    if url.starts_with("https://") {
+        return Err(format!("{url}: an https health URL needs probe_health_tls"));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(HEALTH_PROBE_TIMEOUT)
+        .no_proxy()
+        .build()
+        .map_err(|e| format!("health client: {e}"))?;
+    expect_success(&client, url).await
+}
+
+// What: Ok when an https health URL answers 2xx.
+// Why: the stack CA is the only trust anchor.
+// From: Issue #1683 | PR #1912
+pub async fn probe_health_tls(url: &str, ca_pem: &[u8], name: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
+    let ip: std::net::IpAddr = parsed
+        .host_str()
+        .ok_or_else(|| format!("{url}: no host"))?
+        .parse()
+        .map_err(|e| format!("{url}: the host is no IP address: {e}"))?;
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| format!("{url}: no port"))?;
+    let ca = reqwest::Certificate::from_pem(ca_pem).map_err(|e| format!("CA certificate: {e}"))?;
+    let client = reqwest::Client::builder()
+        .timeout(HEALTH_PROBE_TIMEOUT)
+        .no_proxy()
+        .add_root_certificate(ca)
+        .resolve(name, std::net::SocketAddr::new(ip, port))
+        .build()
+        .map_err(|e| format!("health client: {e}"))?;
+    expect_success(&client, &format!("https://{name}:{port}{}", parsed.path())).await
 }
 
 // What: one lancache.dns.record message on NATS.
@@ -1933,23 +1970,111 @@ mod tests {
         assert!(closed.is_err());
     }
 
-    // What: https passes on a listener, fails on none.
-    // Why: only the port is probed; no TLS check is off.
+    // What: https passes with a trusted cert only.
+    // Why: the stack CA is the only anchor; no check off.
     // From: Issue #1683 | PR #1912
     #[tokio::test]
-    async fn probe_health_https_needs_a_listener() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free local port");
-        let addr = listener.local_addr().expect("local address");
-        assert!(
-            probe_health(&format!("https://{addr}/healthz"))
-                .await
-                .is_ok()
+    async fn probe_health_tls_checks_the_certificate() {
+        struct Server(std::process::Child);
+        impl Drop for Server {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("probe-tls-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let name = format!("n{nanos}");
+        let openssl = |args: &[&str]| {
+            let out = Command::new("openssl")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .expect("openssl runs");
+            assert!(out.status.success(), "{args:?}: {out:?}");
+        };
+        for ca in ["ca", "other"] {
+            openssl(&[
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=ca",
+                "-keyout",
+                &format!("{ca}.key"),
+                "-out",
+                &format!("{ca}.crt"),
+            ]);
+        }
+        openssl(&[
+            "req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=leaf", "-keyout", "leaf.key",
+            "-out", "leaf.csr",
+        ]);
+        std::fs::write(dir.join("ext"), format!("subjectAltName=DNS:{name}\n")).expect("ext");
+        openssl(&[
+            "x509",
+            "-req",
+            "-in",
+            "leaf.csr",
+            "-CA",
+            "ca.crt",
+            "-CAkey",
+            "ca.key",
+            "-CAcreateserial",
+            "-days",
+            "1",
+            "-extfile",
+            "ext",
+            "-out",
+            "leaf.crt",
+        ]);
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .expect("a free local port")
+            .port();
+        let server = Server(
+            Command::new("openssl")
+                .args(["s_server", "-www", "-accept", &format!("127.0.0.1:{port}")])
+                .args(["-cert", "leaf.crt", "-key", "leaf.key"])
+                .current_dir(&dir)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("openssl s_server starts"),
         );
-        drop(listener);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "s_server never listened"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let url = format!("https://127.0.0.1:{port}/healthz");
+        let pem = |file: &str| std::fs::read(dir.join(file)).expect("pem");
+        let trusted = probe_health_tls(&url, &pem("ca.crt"), &name).await;
+        assert!(trusted.is_ok(), "{trusted:?}");
         assert!(
-            probe_health(&format!("https://{addr}/healthz"))
+            probe_health_tls(&url, &pem("other.crt"), &name)
                 .await
                 .is_err()
         );
+        assert!(
+            probe_health_tls(&url, &pem("ca.crt"), "wrong-name")
+                .await
+                .is_err()
+        );
+        assert!(probe_health(&url).await.is_err());
+        drop(server);
+        assert!(probe_health_tls(&url, &pem("ca.crt"), &name).await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

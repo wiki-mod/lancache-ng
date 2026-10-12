@@ -48,6 +48,13 @@ pub fn process_env(name: &str) -> Option<String> {
     }
 }
 
+// What: the loopback address every local service binds.
+// Why: the SOT owns it as LOOPBACK_BIND_IP; no literal.
+// From: Issue #1683 | PR #1912
+pub fn loopback() -> Result<String, String> {
+    need(&process_env, "LOOPBACK_BIND_IP")
+}
+
 // What: env var as a String; empty counts as unset.
 // Why: the live-env reader of the non_empty rule.
 // From: Issue #871 | PR #1858

@@ -24,8 +24,8 @@ use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
     ClientCheck, ConflictCheck, DesiredRunState, DesiredState, Detail, DiskHealth, DiskInfo,
     DockerApi, NetdataAlarm, Place, ProbeAnswer, ProbeReport, ServiceHealth, WatchdogStatus, df,
-    hex32, probe_health, resolve_shared_secret, sha256_hex, shared_secret_file_name,
-    shared_secret_is_placeholder, unix_secs, write_file, write_if_changed,
+    hex32, probe_health, probe_health_tls, resolve_shared_secret, sha256_hex,
+    shared_secret_file_name, shared_secret_is_placeholder, unix_secs, write_file, write_if_changed,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1619,8 +1619,8 @@ const TSIG_ALGORITHM: &str = "hmac-sha256";
 
 // What: the local API root of a PowerDNS server.
 // Why: the supervisor and nats-subscriber share it.
-fn api_root(port: u16) -> String {
-    format!("http://127.0.0.1:{port}{}", config::PDNS_API_PATH)
+fn api_root(loopback: &str, port: u16) -> String {
+    format!("http://{loopback}:{port}{}", config::PDNS_API_PATH)
 }
 
 // What: 32 random bytes in base64, a TSIG secret.
@@ -1762,21 +1762,23 @@ struct AuthConf<'a> {
     auth_port: u16,
     api_port: u16,
     api_key: &'a str,
+    loopback: &'a str,
 }
 
 impl AuthConf<'_> {
     fn render(&self) -> String {
         let yes = |on: bool| if on { "yes" } else { "no" };
         format!(
-            "local-address=127.0.0.1,{local}\nlocal-port={auth_port}\nlaunch=gsqlite3\n\
+            "local-address={lo},{local}\nlocal-port={auth_port}\nlaunch=gsqlite3\n\
              gsqlite3-database={db}\nprimary={primary}\nsecondary={secondary}\n\
              xfr-cycle-interval={XFR_CYCLE_SECS}\nallow-notify-from={notify}\n\
              allow-axfr-ips={axfr}\ndnsupdate=yes\nallow-dnsupdate-from={allow}\n\
              dnsupdate-require-tsig=no\n\
              default-soa-content=localhost. admin.@ {seed} {refresh} {retry} 604800 3600\n\
              webserver=yes\nwebserver-address=0.0.0.0\nwebserver-port={api_port}\n\
-             webserver-allow-from=127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16\n\
+             webserver-allow-from={lo},10.0.0.0/8,172.16.0.0/12,192.168.0.0/16\n\
              api=yes\napi-key={key}\nloglevel=3\nguardian=no\ndaemon=no\n",
+            lo = self.loopback,
             local = self.local,
             db = self.database,
             primary = yes(self.role == DnsRole::Primary),
@@ -2178,8 +2180,9 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
     });
     // What: no key or a replica: DDNS only from loopback.
     // Why: unsigned or replica LAN updates are refused.
+    let loopback = config::loopback()?;
     let allow_from = if tsig.is_empty() || role == DnsRole::Secondary {
-        "127.0.0.1".to_string()
+        loopback.clone()
     } else {
         [Some(ctx.need("IP_HTTP")?), env_opt("IP_HTTPS")]
             .into_iter()
@@ -2212,6 +2215,7 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
         notify_from: &notify_from,
         axfr_ips: &axfr_ips,
         allow_from: &allow_from,
+        loopback: &loopback,
         seed_serial: &seed,
         refresh,
         retry,
@@ -2229,7 +2233,10 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
         restamp_lines(
             old,
             &[
-                ("local-address=", format!("local-address=127.0.0.1,{local}")),
+                (
+                    "local-address=",
+                    format!("local-address={loopback},{local}"),
+                ),
                 ("api-key=", format!("api-key={api_key}")),
             ],
         )
@@ -2338,6 +2345,7 @@ struct RecursorConf<'a> {
     lua_config: &'a str,
     lua_dns: &'a str,
     zones: &'a [String],
+    loopback: &'a str,
 }
 
 impl RecursorConf<'_> {
@@ -2347,8 +2355,9 @@ impl RecursorConf<'_> {
             .iter()
             .map(|z| {
                 format!(
-                    "    - zone: {}\n      forwarders: [127.0.0.1:{}]\n",
+                    "    - zone: {}\n      forwarders: [{}:{}]\n",
                     z.trim_end_matches('.'),
+                    self.loopback,
                     self.auth_port
                 )
             })
@@ -2422,7 +2431,9 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
     }
     log(&format!("{}: RPZ holds {count} records", rec.name));
     let lua_dns = ctx.need("PDNS_LUA_DNS_SCRIPT")?;
+    let loopback = config::loopback()?;
     let conf = RecursorConf {
+        loopback: &loopback,
         port: rec.port()?,
         auth_port: env_port(AUTH_PORT_KEY)?,
         api_port: rec.api_port()?,
@@ -2500,16 +2511,17 @@ fn nats_server(ctx: &Ctx) -> Result<Run, String> {
 // Why: it flushes every running recursor, writes zones.
 // From: Issue #1683
 fn nats_subscriber(ctx: &Ctx) -> Result<Run, String> {
+    let loopback = config::loopback()?;
     let recursors = [&DNS_HTTP, &DNS_HTTPS]
         .iter()
         .filter(|r| r.runs())
-        .map(|r| r.api_port().map(api_root))
+        .map(|r| r.api_port().map(|port| api_root(&loopback, port)))
         .collect::<Result<Vec<_>, _>>()?;
     let mut env = vec![
         ("PDNS_API_KEY".to_string(), pdns_api_key()?),
         (
             "PDNS_AUTH_API_URL".to_string(),
-            api_root(env_port(AUTH_API_PORT_KEY)?),
+            api_root(&loopback, env_port(AUTH_API_PORT_KEY)?),
         ),
         ("PDNS_REC_API_URLS".to_string(), recursors.join(" ")),
         (
@@ -2595,7 +2607,7 @@ async fn soa_upkeep() -> Result<(), String> {
     let (refresh, retry, resync) = soa_knobs()?;
     let http = lancache_ng::http_client().map_err(|e| format!("HTTP client: {e}"))?;
     let pdns = lancache_ng::PowerDns::new(http, pdns_api_key()?);
-    let root = api_root(env_port(AUTH_API_PORT_KEY)?);
+    let root = api_root(&config::loopback()?, env_port(AUTH_API_PORT_KEY)?);
     loop {
         let mut ok = 0;
         for zone in config::rollback_zones() {
@@ -2743,7 +2755,7 @@ fn kea_dhcp4_own(
     hook: &Path,
     domain: &str,
     ddns: bool,
-    ncr_port: u16,
+    ncr: (&str, u16),
 ) -> Result<(), String> {
     let dhcp4 = conf
         .get_mut("Dhcp4")
@@ -2775,9 +2787,9 @@ fn kea_dhcp4_own(
             "dhcp-ddns",
             serde_json::json!({
                 "enable-updates": ddns,
-                "server-ip": "127.0.0.1",
-                "server-port": ncr_port,
-                "sender-ip": "127.0.0.1",
+                "server-ip": ncr.0,
+                "server-port": ncr.1,
+                "sender-ip": ncr.0,
                 "max-queue-size": 1024,
                 "ncr-protocol": "UDP",
                 "ncr-format": "JSON"
@@ -2832,9 +2844,10 @@ fn kea_dhcp4(ctx: &Ctx) -> Result<Run, String> {
         .as_deref()
         .and_then(config::parse_bool)
         == Some(true);
+    let loopback = config::loopback()?;
     let ncr_port = env_port(KEA_NCR_PORT_KEY)?;
     let owned = |mut conf: Value| -> Option<String> {
-        kea_dhcp4_own(&mut conf, &hook, &domain, ddns, ncr_port).ok()?;
+        kea_dhcp4_own(&mut conf, &hook, &domain, ddns, (&loopback, ncr_port)).ok()?;
         serde_json::to_string_pretty(&conf).ok()
     };
     let current = match fs::read_to_string(&path) {
@@ -2936,7 +2949,7 @@ fn kea_dhcp_ddns(ctx: &Ctx) -> Result<Run, String> {
         .collect();
     let conf = serde_json::json!({
         "DhcpDdns": {
-            "ip-address": "127.0.0.1",
+            "ip-address": config::loopback()?,
             "port": env_port(KEA_NCR_PORT_KEY)?,
             "control-socket": {
                 "socket-type": "unix",
@@ -3251,7 +3264,13 @@ const NGINX_GENERATED: &str = "# Generated by lancache-watchdog; do not edit\n";
 
 // What: the sink for SNI-less or refused TLS clients.
 // Why: the discard port closes the connection at once.
-const NGINX_REFUSE: &str = "127.0.0.1:9";
+fn nginx_refuse(loopback: &str) -> String {
+    format!("{loopback}:{NGINX_DISCARD_PORT}")
+}
+
+// What: the discard service port (RFC 863).
+// Why: the protocol fixes it; it is no deployment value.
+const NGINX_DISCARD_PORT: u16 = 9;
 
 // What: loopback ports of the https server and relays.
 // Why: the SOT owns them; dispatch and listens use them.
@@ -3283,6 +3302,12 @@ const NGINX_HTTPS_DISPATCH: &str = "stream.d/01-https-dispatch.conf";
 // Why: the supervisor is the one owner of CA creation.
 // From: Issue #1683 | PR #1912
 const CA_SUBJECT: &str = "/CN=LanCache-NG CA/O=LanCache-NG/C=DE";
+
+// What: the CA file name and the default leaf's DNS name.
+// Why: the https health check trusts that CA and that name.
+// From: Issue #1683 | PR #1912
+const CA_CERT_FILE: &str = "ca.crt";
+const DEFAULT_CERT_DNS: &str = "lancache-default";
 
 // What: one aligned "key value;" map line.
 // Why: rendered maps stay readable for operators.
@@ -3325,14 +3350,15 @@ fn nginx_https_map(hosts: &CdnHosts, strict: bool, cidrs: &[String]) -> String {
 // What: the :8443 SNI passthrough backend map.
 // Why: lazy forwards any SNI; strict only listed hosts.
 // From: Issue #1683
-fn nginx_stream_targets(hosts: &CdnHosts, strict: bool) -> String {
+fn nginx_stream_targets(hosts: &CdnHosts, strict: bool, loopback: &str) -> String {
     let pass = "$ssl_preread_server_name:443";
+    let refuse = nginx_refuse(loopback);
     let mut out = format!(
         "{NGINX_GENERATED}map $ssl_preread_server_name $stream_backend {{\n    hostnames;\n{}",
-        map_line("\"\"", NGINX_REFUSE)
+        map_line("\"\"", &refuse)
     );
     if strict {
-        out.push_str(&format!("    default {NGINX_REFUSE};\n"));
+        out.push_str(&format!("    default {refuse};\n"));
         for (key, _) in hosts.keys() {
             out.push_str(&map_line(&key, pass));
         }
@@ -3369,19 +3395,26 @@ fn url_port(url: &str) -> Result<u16, String> {
 // What: the two loopback listens of the https server.
 // Why: ports come from the SOT; nginx.conf has no env.
 // From: Issue #1683 | PR #1912
-fn nginx_https_listen(mitm_port: u16, health_port: u16) -> String {
+fn nginx_https_listen(loopback: &str, mitm_port: u16, health_port: u16) -> String {
     format!(
-        "{NGINX_GENERATED}listen 127.0.0.1:{mitm_port} ssl proxy_protocol default_server;\n\
-         listen 127.0.0.1:{health_port} ssl;\n"
+        "{NGINX_GENERATED}listen {loopback}:{mitm_port} ssl proxy_protocol default_server;\n\
+         listen {loopback}:{health_port} ssl;\n"
     )
 }
 
 // What: the :443 dispatcher: MITM, passthrough, refuse.
 // Why: a cert covers one label; deeper names pass through.
 // From: Issue #1683 | PR #1912
-fn nginx_https_dispatch(hosts: &CdnHosts, strict: bool, acl: &Path, ports: NginxPorts) -> String {
-    let mitm = format!("127.0.0.1:{}", ports.mitm_relay);
-    let passthrough = format!("127.0.0.1:{}", ports.passthrough_relay);
+fn nginx_https_dispatch(
+    hosts: &CdnHosts,
+    strict: bool,
+    acl: &Path,
+    ports: NginxPorts,
+    loopback: &str,
+) -> String {
+    let refuse = nginx_refuse(loopback);
+    let mitm = format!("{loopback}:{}", ports.mitm_relay);
+    let passthrough = format!("{loopback}:{}", ports.passthrough_relay);
     let escape = |name: &str| name.replace('.', "\\.");
     let one_level = |name: &str| format!("\"~^[^.]+\\.{}$\"", escape(name));
     let mut bases: Vec<&String> = hosts
@@ -3397,7 +3430,7 @@ fn nginx_https_dispatch(hosts: &CdnHosts, strict: bool, acl: &Path, ports: Nginx
     bases.sort_by(|a, b| b.len().cmp(&a.len()).then(b.cmp(a)));
     let mut out = format!(
         "{NGINX_GENERATED}map $ssl_preread_server_name $https_dispatch_backend {{\n{}",
-        map_line("\"\"", NGINX_REFUSE)
+        map_line("\"\"", &refuse)
     );
     for root in &hosts.roots {
         out.push_str(&map_line(root, &mitm));
@@ -3416,7 +3449,7 @@ fn nginx_https_dispatch(hosts: &CdnHosts, strict: bool, acl: &Path, ports: Nginx
         ));
     }
     let default = if strict {
-        NGINX_REFUSE
+        refuse.as_str()
     } else {
         passthrough.as_str()
     };
@@ -3425,10 +3458,10 @@ fn nginx_https_dispatch(hosts: &CdnHosts, strict: bool, acl: &Path, ports: Nginx
          server {{\n    listen 443;\n    listen [::]:443;\n    include {acl};\n    \
          ssl_preread on;\n    proxy_pass $https_dispatch_backend;\n    proxy_protocol on;\n    \
          proxy_connect_timeout 30s;\n    proxy_timeout        3600s;\n}}\n\n\
-         server {{\n    listen {mitm} proxy_protocol;\n    set_real_ip_from 127.0.0.1;\n    \
-         proxy_protocol on;\n    proxy_pass 127.0.0.1:{mitm_port};\n    \
+         server {{\n    listen {mitm} proxy_protocol;\n    set_real_ip_from {loopback};\n    \
+         proxy_protocol on;\n    proxy_pass {loopback}:{mitm_port};\n    \
          proxy_connect_timeout 30s;\n    proxy_timeout        3600s;\n}}\n\n\
-         server {{\n    listen {passthrough} proxy_protocol;\n    set_real_ip_from 127.0.0.1;\n    \
+         server {{\n    listen {passthrough} proxy_protocol;\n    set_real_ip_from {loopback};\n    \
          ssl_preread on;\n    proxy_pass $ssl_preread_server_name:443;\n    \
          proxy_connect_timeout 30s;\n    proxy_timeout        3600s;\n}}\n",
         acl = acl.display(),
@@ -3497,7 +3530,7 @@ fn sign_leaf(ca: &Path, run: &Path, key: &Path, crt: &Path, san: &str) -> Result
     let path = |p: &Path| p.display().to_string();
     let (key_s, crt_s, csr_s, ext_s) = (path(key), path(crt), path(&csr), path(&ext));
     let (ca_crt, ca_key, serial) = (
-        path(&ca.join("ca.crt")),
+        path(&ca.join(CA_CERT_FILE)),
         path(&ca.join("ca.key")),
         path(&ca.join("ca.srl")),
     );
@@ -3573,7 +3606,7 @@ fn nginx_certs(
     ip_https: &str,
     gid: u32,
 ) -> Result<(), String> {
-    let (ca_crt, ca_key) = (ca.join("ca.crt"), ca.join("ca.key"));
+    let (ca_crt, ca_key) = (ca.join(CA_CERT_FILE), ca.join("ca.key"));
     let path = |p: &Path| p.display().to_string();
     if !(ca_crt.is_file() && ca_key.is_file()) {
         fs::create_dir_all(ca).map_err(|e| format!("cannot create {}: {e}", ca.display()))?;
@@ -3666,7 +3699,7 @@ fn nginx_certs(
             .split([',', '\n'])
             .any(|entry| entry.trim() == format!("IP Address:{ip_https}"));
     if !default_key.is_file() || !san.contains("DNS:") || !has_ip {
-        let mut names = "DNS:lancache-default".to_string();
+        let mut names = format!("DNS:{DEFAULT_CERT_DNS}");
         if !ip_https.is_empty() {
             names.push_str(&format!(",IP:{ip_https}"));
         }
@@ -3785,10 +3818,12 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     // What: render the server confs from image templates.
     // Why: the paths come from the SOT, not from the text.
     // From: Issue #1683 | PR #1912
+    let loopback = config::loopback()?;
     let server_values = [
         ("NGINX_DIR", dir.display().to_string()),
         ("NGINX_SUBDIR_CERTS", ctx.need("NGINX_SUBDIR_CERTS")?),
         ("NGINX_HTTPS_LISTEN_FILE", listen_file.clone()),
+        ("LOOPBACK_BIND_IP", loopback.clone()),
     ];
     for (template, out, on) in [
         ("http.conf.template", dir.join("conf.d/http.conf"), true),
@@ -3819,7 +3854,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     // Why: a rolled-back old set still needs the listener.
     // From: Issue #1683 | PR #1912
     let listen = if https_on {
-        nginx_https_listen(ports.mitm, health_port)
+        nginx_https_listen(&loopback, ports.mitm, health_port)
     } else {
         NGINX_GENERATED.to_string()
     };
@@ -3857,13 +3892,13 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         ),
         (
             dir.join(NGINX_STREAM_TARGETS),
-            nginx_stream_targets(&hosts, strict),
+            nginx_stream_targets(&hosts, strict, &loopback),
         ),
         (acl.clone(), nginx_client_acl(&cidrs)),
         (
             dir.join(NGINX_HTTPS_DISPATCH),
             if https_on {
-                nginx_https_dispatch(&hosts, strict, &acl, ports)
+                nginx_https_dispatch(&hosts, strict, &acl, ports, &loopback)
             } else {
                 NGINX_GENERATED.to_string()
             },
@@ -4556,7 +4591,14 @@ async fn healthcheck() -> Result<(), String> {
             return probe_health(&http_url).await;
         }
         let https_url = need("PROXY_HEALTH_HTTPS_URL")?;
-        let (http, tls) = tokio::join!(probe_health(&http_url), probe_health(&https_url));
+        let ca_file = Path::new(&need("NGINX_DIR")?)
+            .join(need("NGINX_SUBDIR_CA")?)
+            .join(CA_CERT_FILE);
+        let ca_pem = fs::read(&ca_file).map_err(|e| format!("{}: {e}", ca_file.display()))?;
+        let (http, tls) = tokio::join!(
+            probe_health(&http_url),
+            probe_health_tls(&https_url, &ca_pem, DEFAULT_CERT_DNS)
+        );
         http?;
         tls?;
     }
@@ -5690,10 +5732,15 @@ mod tests {
         assert!(strict.contains("    default 0;\n") && strict.contains(&map_line(&cidr, "1")));
         let lazy = nginx_https_map(&hosts, false, &[]);
         assert_eq!(lazy.matches("    default 1;\n").count(), 2, "{lazy}");
+        let lo = gen_ipv4().to_string();
         assert!(
-            nginx_stream_targets(&hosts, false).contains("default $ssl_preread_server_name:443;")
+            nginx_stream_targets(&hosts, false, &lo)
+                .contains("default $ssl_preread_server_name:443;")
         );
-        assert!(nginx_stream_targets(&hosts, true).contains(&format!("default {NGINX_REFUSE};")));
+        assert!(
+            nginx_stream_targets(&hosts, true, &lo)
+                .contains(&format!("default {};", nginx_refuse(&lo)))
+        );
         assert_eq!(nginx_client_acl(&[]), NGINX_GENERATED);
         assert!(
             nginx_client_acl(std::slice::from_ref(&cidr))
@@ -5720,21 +5767,19 @@ mod tests {
             mitm_relay,
             passthrough_relay,
         };
-        let out = nginx_https_dispatch(&hosts, false, Path::new("/acl"), ports);
-        assert!(
-            out.contains(&format!("proxy_pass 127.0.0.1:{mitm};")),
-            "{out}"
-        );
-        assert!(out.contains(&format!("listen 127.0.0.1:{mitm_relay} proxy_protocol;")));
+        let lo = gen_ipv4().to_string();
+        let out = nginx_https_dispatch(&hosts, false, Path::new("/acl"), ports, &lo);
+        assert!(out.contains(&format!("proxy_pass {lo}:{mitm};")), "{out}");
+        assert!(out.contains(&format!("listen {lo}:{mitm_relay} proxy_protocol;")));
         let at = |name: &str| {
             out.find(&format!("\"~^.+\\.{}$\"", name.replace('.', "\\.")))
                 .expect(name)
         };
         assert!(at(&long) < at(&format!("{short}.{root}")), "{out}");
-        assert!(out.contains(&format!("    default 127.0.0.1:{passthrough_relay};\n")));
+        assert!(out.contains(&format!("    default {lo}:{passthrough_relay};\n")));
         assert!(out.contains("    include /acl;\n"));
-        let strict = nginx_https_dispatch(&hosts, true, Path::new("/acl"), ports);
-        assert!(strict.contains(&format!("    default {NGINX_REFUSE};\n")));
+        let strict = nginx_https_dispatch(&hosts, true, Path::new("/acl"), ports, &lo);
+        assert!(strict.contains(&format!("    default {};\n", nginx_refuse(&lo))));
     }
 
     // What: the https listens carry the given ports.
@@ -5743,14 +5788,15 @@ mod tests {
     #[test]
     fn nginx_https_listen_follows_the_given_ports() {
         let [mitm, health] = std::array::from_fn(|_| u16::try_from(rnd(1024, 60_000)).unwrap());
-        let out = nginx_https_listen(mitm, health);
+        let lo = gen_ipv4().to_string();
+        let out = nginx_https_listen(&lo, mitm, health);
         assert!(out.starts_with(NGINX_GENERATED));
         assert!(out.contains(&format!(
-            "listen 127.0.0.1:{mitm} ssl proxy_protocol default_server;\n"
+            "listen {lo}:{mitm} ssl proxy_protocol default_server;\n"
         )));
-        assert!(out.contains(&format!("listen 127.0.0.1:{health} ssl;\n")));
+        assert!(out.contains(&format!("listen {lo}:{health} ssl;\n")));
         assert_eq!(
-            url_port(&format!("https://127.0.0.1:{health}/healthz")),
+            url_port(&format!("https://{lo}:{health}/healthz")),
             Ok(health)
         );
         assert!(url_port("https://localhost/healthz").is_err());
@@ -5908,7 +5954,9 @@ mod tests {
             rnd(1, u16::MAX.into()) as u16,
             rnd(1, u16::MAX.into()) as u16,
         );
+        let lo = gen_ipv4().to_string();
         let conf = RecursorConf {
+            loopback: &lo,
             port,
             auth_port: auth,
             api_port: api,
@@ -5927,7 +5975,7 @@ mod tests {
             format!("  negative_ttl: {ttl}\n"),
             format!("  lua_config_file: {lua_c}\n"),
             format!("  lua_dns_script: {lua_d}\n"),
-            format!("forwarders: [127.0.0.1:{auth}]"),
+            format!("forwarders: [{lo}:{auth}]"),
             "  loglevel: 6\n".to_string(),
         ] {
             assert!(conf.contains(&want), "{want:?} missing in {conf}");
@@ -5941,6 +5989,7 @@ mod tests {
     fn auth_conf_renders_role_and_inputs() {
         let (db, key, allow, seed) = (gen_path(), gen_name(), gen_name(), gen_name());
         let local = gen_ipv4();
+        let lo = gen_ipv4().to_string();
         let refresh = rnd(10, DAY);
         let api = rnd(1, u16::MAX.into()) as u16;
         let auth = rnd(1, u16::MAX.into()) as u16;
@@ -5949,6 +5998,7 @@ mod tests {
             (DnsRole::Secondary, "no", "yes"),
         ] {
             let conf = AuthConf {
+                loopback: &lo,
                 local,
                 database: &db,
                 role,
@@ -5964,7 +6014,7 @@ mod tests {
             }
             .render();
             for want in [
-                format!("local-address=127.0.0.1,{local}\n"),
+                format!("local-address={lo},{local}\n"),
                 format!("local-port={auth}\n"),
                 format!("gsqlite3-database={db}\n"),
                 format!("primary={primary}\nsecondary={secondary}\n"),
@@ -6362,7 +6412,14 @@ mod tests {
             "dhcp-ddns": {"enable-updates": true},
             "loggers": [{"name": "kea-dhcp4", "output-options": [{"output": "/f.log"}]}]
         }});
-        kea_dhcp4_own(&mut conf, &hook, "lan", false, ncr).expect("own");
+        kea_dhcp4_own(
+            &mut conf,
+            &hook,
+            "lan",
+            false,
+            (&gen_ipv4().to_string(), ncr),
+        )
+        .expect("own");
         let d = &conf["Dhcp4"];
         assert_eq!(d["subnet4"][0]["id"], 7);
         assert_eq!(d["control-socket"]["socket-name"], KEA4_SOCKET);
@@ -6377,9 +6434,25 @@ mod tests {
         assert_eq!(d["ddns-qualifying-suffix"], "lan");
         assert_eq!(d["loggers"][0]["output-options"][0]["output"], "stdout");
         assert_eq!(d["loggers"].as_array().map(Vec::len), Some(2));
-        assert!(kea_dhcp4_own(&mut serde_json::json!({}), &hook, "lan", false, ncr).is_err());
+        assert!(
+            kea_dhcp4_own(
+                &mut serde_json::json!({}),
+                &hook,
+                "lan",
+                false,
+                (&gen_ipv4().to_string(), ncr)
+            )
+            .is_err()
+        );
         let mut fresh = serde_json::json!({"Dhcp4": {}});
-        kea_dhcp4_own(&mut fresh, &hook, "lan", true, ncr).expect("own");
+        kea_dhcp4_own(
+            &mut fresh,
+            &hook,
+            "lan",
+            true,
+            (&gen_ipv4().to_string(), ncr),
+        )
+        .expect("own");
         assert_eq!(fresh["Dhcp4"]["dhcp-ddns"]["server-port"], ncr);
     }
 
