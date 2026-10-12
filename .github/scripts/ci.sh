@@ -7022,7 +7022,7 @@ _ci_validate_https_mitm() {
 _ci_validate_https_dispatch_map() {
     local project="$1" cid map bad file relay
     file="$(_ci_proxy_constant NGINX_HTTPS_DISPATCH)" || return 2
-    relay="$(_ci_proxy_constant NGINX_PASSTHROUGH_RELAY)" || return 2
+    relay="$(_ci_runtime_default NGINX_PASSTHROUGH_RELAY_PORT)" || return 2
     cid="$(_ci_validate_cid "${project}" proxy)" || return 2
     if [ -z "${cid}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0027]" "reason=\"no proxy container for https-dispatch-map check\""
