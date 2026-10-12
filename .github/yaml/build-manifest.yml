@@ -938,7 +938,7 @@ validation:
   # What: default keys compose needs in the render env.
   # Why: compose reads them; runtime.defaults owns them.
   # From: Issue #1683 | PR #1912
-  compose_validation_defaults: CACHE_MAX_SIZE CACHE_MEM_MB LANCACHE_STATE_DIR
+  compose_validation_defaults: CACHE_MAX_SIZE CACHE_MEM_MB DHCP_SUBNET LANCACHE_STATE_DIR
   # What: required keys setup.sh repairs
   # Why: empty required key breaks the stack
   # From: Issue #1683 | PR #1858
