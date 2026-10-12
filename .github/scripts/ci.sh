@@ -13302,7 +13302,7 @@ _ci_validation_images() {
 # Why: config check and live validate share one owner.
 # From: Issue #1683 | PR #1858
 _ci_validation_env() {
-    local fx kind keys k v n=0 flag
+    local fx kind keys k v n=0
     fx="$(_ci_block_entry_field validation "" compose_validation_env)" || return 2
     if [ -z "${fx}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0054]" "reason=\"no SOT validation.compose_validation_env\""
@@ -13323,18 +13323,17 @@ _ci_validation_env() {
     # What: a fresh value per secret key, setup.sh format.
     # Why: a fixed key in the SOT is a hardcoded credential.
     # From: Issue #1683 | PR #1858
-    for kind in hex32 base64_32; do
-        case "${kind}" in hex32) flag=-hex ;; base64_32) flag=-base64 ;; esac
-        keys="$(_ci_block_entry_list validation compose_validation_secrets "${kind}")" || return 2
+    for kind in hex32 base64_32 secondary_hex32; do
+        keys="$(_ci_required_field runtime "secrets_${kind}" block)" || return 2
         for k in ${keys}; do
             v="$(_ci_run "[CI-ERROR-VALIDATE-0100]" "key=\"${k}\" kind=\"${kind}\" reason=\"secret not generated\"" \
-                openssl rand "${flag}" 32)" || return 2
+                bash -c 'source "$1" && generate_secret_value "$2" "$3"' _ "${CI_REPO_ROOT}/setup.sh" "${k}" "${kind#secondary_}")" || return 2
             printf '%s=%s\n' "${k}" "${v//$'\n'/}"
             n=$((n + 1))
         done
     done
     if [ "${n}" -eq 0 ]; then
-        ci_log "[CI-ERROR-VALIDATE-0101]" "reason=\"no SOT validation.compose_validation_secrets\""
+        ci_log "[CI-ERROR-VALIDATE-0101]" "reason=\"no SOT runtime.secrets_* keys\""
         return 2
     fi
 }

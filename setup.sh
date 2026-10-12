@@ -3412,19 +3412,14 @@ migrate_env_for_update() (
     set_env_key DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$dhcp_proxy_pxe_boot_filename_bios" "$env_file"
     set_env_key DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$dhcp_proxy_pxe_boot_filename_uefi" "$env_file"
 
-    # What: generates empty or placeholder service tokens
+    # What: generates empty or placeholder SOT secrets
     # Why: real operator values are preserved
-    ensure_secret_env_key KEA_CTRL_TOKEN "$env_file" hex32
-    ensure_secret_env_key DDNS_TSIG_KEY "$env_file" base64_32
-    ensure_secret_env_key PDNS_API_KEY "$env_file" hex32
-    # What: NETDATA_ALARM_TOKEN is generated proactively
-    # Why: shared bootstrap only heals placeholders
-    ensure_secret_env_key NETDATA_ALARM_TOKEN "$env_file" hex32
-    ensure_secret_env_key NATS_UI_PASSWORD "$env_file" hex32
-    ensure_secret_env_key NATS_DNS_WRITER_PASSWORD "$env_file" hex32
-    ensure_secret_env_key NATS_CALLOUT_PASSWORD "$env_file" hex32
-    ensure_secret_env_key NATS_SYS_PASSWORD "$env_file" hex32
-    ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
+    for secret_kind in hex32 base64_32; do
+        secret_keys=$(lancache_sot_value "secrets_${secret_kind}" runtime) || exit $?
+        for secret_key in $secret_keys; do
+            ensure_secret_env_key "$secret_key" "$env_file" "$secret_kind"
+        done
+    done
 
     # What: strips retired project profiles from the env
     # Why: an old install still lists dhcp-kea, ntp, logging
@@ -3544,7 +3539,7 @@ path_is_inside() {
 }
 
 # What: fails with a secondary-directory hint
-# Why: a secondary stack lives outside /opt/lancache-ng
+# Why: a secondary stack lives outside the install dir
 die_no_stack_found() {
     local install_dir="$1"
     die "No stack found in ${install_dir}. If this is a fresh primary install, run ./setup.sh install. If this is a secondary DNS node, run this command from its own directory instead (the one named after --name when it was registered via ./setup.sh secondary), or pass that directory explicitly, e.g.: ./setup.sh <command> /path/to/that-directory"
@@ -5143,18 +5138,11 @@ cmd_debug() {
 # Why: one list; generation refuses a key not on it
 # From: Issue #762 | PR #1858
 managed_secret_env_keys() {
-    printf '%s\n' \
-        KEA_CTRL_TOKEN \
-        DDNS_TSIG_KEY \
-        PDNS_API_KEY \
-        NETDATA_ALARM_TOKEN \
-        NATS_UI_PASSWORD \
-        NATS_DNS_WRITER_PASSWORD \
-        NATS_CALLOUT_PASSWORD \
-        NATS_SYS_PASSWORD \
-        SECONDARY_REGISTRATION_TOKEN \
-        UI_AUTH_PASSWORD \
-        UI_AUTH_PASSWORD_HASH
+    local kind keys
+    for kind in hex32 base64_32 secondary_hex32 ui; do
+        keys=$(lancache_sot_value "secrets_${kind}" runtime) || exit $?
+        tr ' ' '\n' <<< "$keys"
+    done
 }
 
 # What: name-pattern net for secret-shaped env keys
@@ -5746,7 +5734,7 @@ dns_rollback_exec() (
             case "$key" in
                 ""|CHANGE_ME*|changeme*|change_me*|YOUR_*|*_HERE) key="" ;;
             esac
-            secrets=$(/usr/local/bin/lancache-watchdog get LANCACHE_SHARED_SECRET_DIR) || exit 7
+            secrets=$(lancache-watchdog get LANCACHE_SHARED_SECRET_DIR) || exit 7
             if [ -z "$key" ] && [ -s "$secrets/pdns-api-key" ]; then
                 key=$(tr -d "\n" < "$secrets/pdns-api-key")
             fi
@@ -5754,8 +5742,8 @@ dns_rollback_exec() (
                 echo "DNS_ROLLBACK_EXEC_NO_API_KEY"
                 exit 9
             fi
-            port=$(/usr/local/bin/lancache-watchdog get DNS_ROLLBACK_PORT) || exit 7
-            lo=$(/usr/local/bin/lancache-watchdog get LOOPBACK_BIND_IP) || exit 7
+            port=$(lancache-watchdog get DNS_ROLLBACK_PORT) || exit 7
+            lo=$(lancache-watchdog get LOOPBACK_BIND_IP) || exit 7
             m="$1"; p="$2"; b="$3"
             if [ "$m" = "POST" ]; then
                 curl -sS -w "\n%{http_code}" -X POST \
@@ -7202,20 +7190,16 @@ LANCACHE_IMAGE_REFS=$(lancache_image_refs_for_tag "$env_file" "$LANCACHE_IMAGE_T
 # Why: a platform failure must stop before state writes
 assert_resolved_image_tag_platform_supported "$LANCACHE_IMAGE_REGISTRY" "$LANCACHE_IMAGE_PREFIX" "$LANCACHE_IMAGE_TAG"
 
-KEA_CTRL_TOKEN=$(get_or_generate_secret KEA_CTRL_TOKEN "$env_file" hex32)
-DDNS_TSIG_KEY=$(get_or_generate_secret DDNS_TSIG_KEY "$env_file" base64_32)
-PDNS_API_KEY=$(get_or_generate_secret PDNS_API_KEY "$env_file" hex32)
-# What: NETDATA_ALARM_TOKEN gates the netdata-alarm POST
-# Why: the netdata-alarms route needs a shared token
-NETDATA_ALARM_TOKEN=$(get_or_generate_secret NETDATA_ALARM_TOKEN "$env_file" hex32)
-# What: NATS role passwords: the kept value or generated
-# Why: the role users come from the SOT, not from .env.local
+# What: every SOT secret: the kept value or a generated one
+# Why: the SOT lists the keys; setup.sh names none itself
 # From: Issue #1683 | PR #1912
-NATS_UI_PASSWORD=$(get_or_generate_secret NATS_UI_PASSWORD "$env_file" hex32)
-NATS_DNS_WRITER_PASSWORD=$(get_or_generate_secret NATS_DNS_WRITER_PASSWORD "$env_file" hex32)
-NATS_CALLOUT_PASSWORD=$(get_or_generate_secret NATS_CALLOUT_PASSWORD "$env_file" hex32)
-NATS_SYS_PASSWORD=$(get_or_generate_secret NATS_SYS_PASSWORD "$env_file" hex32)
-SECONDARY_REGISTRATION_TOKEN=$(get_or_generate_secret SECONDARY_REGISTRATION_TOKEN "$env_file" hex32)
+for secret_kind in hex32 base64_32; do
+    secret_keys=$(lancache_sot_value "secrets_${secret_kind}" runtime) || exit $?
+    for secret_key in $secret_keys; do
+        secret_value=$(get_or_generate_secret "$secret_key" "$env_file" "$secret_kind") || exit $?
+        printf -v "$secret_key" '%s' "$secret_value"
+    done
+done
 # What: an empty TTL means the SOT default
 # Why: .env.local never repeats a runtime.defaults value
 # From: Issue #1683 | PR #1912

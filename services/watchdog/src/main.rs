@@ -3380,7 +3380,7 @@ fn nginx_https_map(hosts: &CdnHosts, strict: bool, cidrs: &[String]) -> String {
     out
 }
 
-// What: the :8443 SNI passthrough backend map.
+// What: the SNI passthrough backend map.
 // Why: lazy forwards any SNI; strict only listed hosts.
 // From: Issue #1683
 fn nginx_stream_targets(hosts: &CdnHosts, strict: bool, loopback: &str) -> String {

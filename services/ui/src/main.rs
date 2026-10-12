@@ -507,7 +507,7 @@ fn hsts_mode_from(raw: &str) -> HstsMode {
     }
 }
 
-// What: CACHE_MAX_GB, else CACHE_MAX_SIZE (50g) in GB.
+// What: CACHE_MAX_GB, else CACHE_MAX_SIZE in GB.
 // Why: the SOT owns the size; a bad value must fail.
 fn cache_max_gb_from(env: &dyn Fn(&str) -> Option<String>) -> Result<f64, String> {
     match config::opt(env, "CACHE_MAX_GB") {

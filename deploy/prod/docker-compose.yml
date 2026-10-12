@@ -86,7 +86,7 @@ services:
     logging: *logging
 
   # What: nginx cache; the http and https side in one.
-  # Why: :8443 passes SNI through, :443 intercepts TLS.
+  # Why: the passthrough port relays SNI; 443 intercepts.
   proxy:
     container_name: ${SOT_CONTAINER_NAME_PROXY}
     image: ${LANCACHE_IMAGE_REF_PROXY:?LANCACHE_IMAGE_REF_PROXY is required}

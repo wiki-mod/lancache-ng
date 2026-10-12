@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 # What: Admin UI Rust binary plus Tera templates, Alpine.
-# Why: the binary reads its templates from /templates.
+# Why: the binary reads its templates from TEMPLATE_DIR.
 
 # What: base image pin, supplied by ci.sh from the SOT.
 # Why: SOT base_images.alpine is the sole owner (AG-CI-006).
