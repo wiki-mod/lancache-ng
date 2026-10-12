@@ -217,7 +217,7 @@ services:
 # From: Issue #1683
 build_toolchain:
   build-tools:
-    context: tools/build-tools
+    context: .github/build-tools
     labels: [build-tools]
     build_type: toolchain
     final_base: alpine

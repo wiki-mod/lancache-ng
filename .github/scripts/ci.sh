@@ -9913,7 +9913,7 @@ _ci_rh_agent() {
 # Why: review first; clean acts only on what check shows.
 # From: Issue #1622 | PR #1624
 _ci_rh_check() {
-    local root user hooks utim dir st agent svc archive size found=0 f groups rf sfile dgroup crc
+    local root user hooks utim dir st agent svc archive size found=0 f groups rf sfile dgroup crc hpre hpost
     root="$(_ci_rh_val opt_root)" || return 2
     user="$(_ci_rh_val user)" || return 2
     hooks="$(_ci_rh_val hooks_dir)" || return 2
@@ -9921,6 +9921,8 @@ _ci_rh_check() {
     rf="$(_ci_rh_val runner_file)" || return 2
     sfile="$(_ci_rh_sudoers_file "${user}")" || return 2
     dgroup="$(_ci_rh_val docker_group)" || return 2
+    hpre="$(_ci_rh_val hook_pre_name)" || return 2
+    hpost="$(_ci_rh_val hook_post_name)" || return 2
     printf 'Host: %s   own_host_token=%s\n\n--- Runner instance directories under %s ---\n' "$(_ci_capture 0 hostname)" "$(_ci_rh_host_token)" "${root}"
     while IFS= read -r dir; do
         [ -n "${dir}" ] || continue
@@ -9970,7 +9972,7 @@ _ci_rh_check() {
         printf '  %s in %s group: MISSING\n' "${user}" "${dgroup}"
     fi
     printf '\n--- Job hooks in %s ---\n' "${hooks}"
-    for f in "$(_ci_rh_val hook_pre_name)" "$(_ci_rh_val hook_post_name)"; do
+    for f in "${hpre}" "${hpost}"; do
         if [ -f "${hooks}/${f}" ]; then printf '  %s/%s: present\n' "${hooks}" "${f}"; else printf '  %s/%s: MISSING\n' "${hooks}" "${f}"; fi
     done
     printf '\n--- %s timer ---\n' "${utim}"
@@ -10699,10 +10701,13 @@ _ci_rh_retry() {
 # Why: one text for runner-fetch and runner-hook-env.
 # From: Issue #1622 | PR #1624
 _ci_rh_hook_env_lines() {
-    local dir
+    local dir hs hc pre post
     dir="$(_ci_rh_val hooks_dir)" || return 2
-    printf '%s=%s/%s\n%s=%s/%s\n' "$(_ci_rh_val hook_env_started)" "${dir}" "$(_ci_rh_val hook_pre_name)" \
-        "$(_ci_rh_val hook_env_completed)" "${dir}" "$(_ci_rh_val hook_post_name)"
+    hs="$(_ci_rh_val hook_env_started)" || return 2
+    hc="$(_ci_rh_val hook_env_completed)" || return 2
+    pre="$(_ci_rh_val hook_pre_name)" || return 2
+    post="$(_ci_rh_val hook_post_name)" || return 2
+    printf '%s=%s/%s\n%s=%s/%s\n' "${hs}" "${dir}" "${pre}" "${hc}" "${dir}" "${post}"
 }
 
 # What: download, verify and extract a runner release.

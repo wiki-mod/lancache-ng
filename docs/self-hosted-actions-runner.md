@@ -38,7 +38,7 @@ The dedicated `Build Tools Image` workflow runs on `lancache-heavy` because it
 builds and scans Docker images before publishing multi-architecture tags.
 
 Routine pull requests skip the `build-tools` image build when neither
-`tools/build-tools` nor the build workflow changed. Release tags always build the
+`.github/build-tools` nor the build workflow changed. Release tags always build the
 tag-scoped build-tools image because release jobs must not use mutable `latest`
 tooling.
 
@@ -374,13 +374,13 @@ distcc) can layer `ccache` in front of distcc when
 both a distcc host list and a ccache Redis endpoint are configured.
 
 **Correction (2026-09-01, Issue #1781):** this paragraph used to also claim
-`tools/build-tools/Dockerfile`'s "from-source curl/git compile" inherited
+`.github/build-tools/Dockerfile`'s "from-source curl/git compile" inherited
 this same ccache-over-distcc mechanism since issue #1304/PR #1661.
-`tools/build-tools/Dockerfile` has no such compile and never wired
+`.github/build-tools/Dockerfile` has no such compile and never wired
 `CC=distcc`/`CC="ccache ..."` for one -- curl and git are both plain
 `apk add`/`apt-get install` packages there (curl was `COPY`'d from the
 shared `services/utilities` image's own from-source build, not compiled
-in `tools/build-tools/Dockerfile` itself, until Issue #1781 replaced that
+in `.github/build-tools/Dockerfile` itself, until Issue #1781 replaced that
 `COPY` with this stage's own `apk add`/`apt-get install curl` too). The
 ccache/distcc-accelerated from-source build this correction refers to only
 ever existed in `services/utilities/Dockerfile`'s now-removed
