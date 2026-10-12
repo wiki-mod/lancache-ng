@@ -65,11 +65,11 @@ declare -A CI_DISPATCH=(
     [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-config]=ci_cmd_codeql_config [codeql-analyze]=ci_cmd_codeql_analyze [identity]=ci_cmd_identity
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [image-setup]=ci_cmd_image_setup [apk-pin-install]=ci_cmd_apk_pin_install
     [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [gha-runtime-args]=ci_cmd_gha_runtime_args
-    [test]=ci_cmd_test [scan]=ci_cmd_scan [assemble]=ci_cmd_assemble
+    [test]=ci_cmd_test [scan]=ci_cmd_scan [scan-channel]=ci_cmd_scan_channel [assemble]=ci_cmd_assemble
     [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
-    [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-status]=ci_cmd_nightly_status
+    [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
-    [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog
+    [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog
     [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
     [welcome]=ci_cmd_welcome [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
 )
@@ -2174,7 +2174,7 @@ ci_cmd_scan_stack() {
             continue
         fi
         crc=0
-        ci_cmd_scan "${svc}" "${digest}" || crc=$?
+        ci_cmd_scan "${svc}" "${digest}" "${plat}" || crc=$?
         if [ "${crc}" -ne 0 ]; then
             failed="${failed} ${svc}/${plat}"
             [ "${crc}" -le "${rc}" ] || rc="${crc}"
@@ -2458,43 +2458,130 @@ _ci_for_test_services() {
 }
 ci_cmd_test_stack() { _ci_for_test_services ci_cmd_test; }
 
-# What: file/update/close standing tracking issue for run.
-# Why: nightly reliability; self-closing, no action.
-# From: Issue #1683
-ci_cmd_nightly_status() {
-    local outcome="${1:-}" scope="${2:-}" label="${3:-nightly-broken}" failed="${CI_FAILED_JOBS:-}"
-    [ -n "${outcome}" ] || { ci_log "[CI-ERROR-STATUS-0001]" "reason=\"outcome arg required (success|failure)\""; return 2; }
-    [ -n "${scope}" ] || { ci_log "[CI-ERROR-STATUS-0002]" "reason=\"scope arg required\""; return 2; }
-    local repo srv
+# What: label and scope of one SOT status kind.
+# Why: the SOT owns both; service and arch are filled in.
+# From: Issue #1683 | PR #1912
+_ci_status_text() {
+    local kind="$1" svc="${2:-}" arch="${3:-}" label scope
+    label="$(_ci_block_entry_field status_reports "${kind}" label)" || return 2
+    scope="$(_ci_block_entry_field status_reports "${kind}" scope)" || return 2
+    if [ -z "${label}" ] || [ -z "${scope}" ]; then
+        ci_log "[CI-ERROR-STATUS-0010]" "kind=\"${kind}\" reason=\"no SOT status_reports label and scope\""
+        return 2
+    fi
+    scope="${scope//@SERVICE@/${svc}}"
+    printf '%s\n%s\n' "${label}${svc:+-${svc}-${arch}}" "${scope//@ARCH@/${arch}}"
+}
+
+# What: the issue body of one failing case.
+# Why: run, commit and raw evidence sit in the issue.
+# From: Issue #1683 | PR #1912
+_ci_status_body() {
+    local scope="$1" run_url="$2" sha="$3" evidence="$4" cap
+    printf '%s\n\nRun: %s\nCommit: %s\nEvent: %s\n' "${scope}" "${run_url}" "${sha}" "${GITHUB_EVENT_NAME}"
+    [ -z "${evidence}" ] && return 0
+    cap="$(_ci_variable CI_STATUS_EVIDENCE_BYTES)" || return 2
+    printf '\nEvidence (first %s of %s bytes; the run log holds all):\n```text\n%s\n```\n' \
+        "${cap}" "${#evidence}" "${evidence:0:${cap}}"
+}
+
+# What: set one standing issue: red files, green closes.
+# Why: one open issue per label; the label names the case.
+# From: Issue #1683 | PR #1912
+_ci_status_apply() {
+    local outcome="$1" label="$2" scope="$3" evidence="${4:-}" repo srv sha run_url open ctx body color
     repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
     srv="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
-    local run_url="${srv}/${repo}/actions/runs/${GITHUB_RUN_ID:-0}" existing
-    local ctx="repo=\"${repo}\" label=\"${label}\" scope=\"${scope}\" outcome=${outcome}"
-    existing="$(_ci_run "[CI-ERROR-STATUS-0003]" "${ctx} step=list" gh issue list --repo "${repo}" --label "${label}" --state open \
-        --json number --jq 'sort_by(.number) | .[0].number // empty')" || return 2
+    sha="$(_ci_env_required GITHUB_SHA)" || return 2
+    run_url="${srv}/${repo}/actions/runs/$(_ci_env_required GITHUB_RUN_ID)" || return 2
+    ctx="repo=\"${repo}\" label=\"${label}\" outcome=${outcome}"
+    open="$(_ci_run "[CI-ERROR-STATUS-0003]" "${ctx} step=list" gh issue list --repo "${repo}" --label "${label}" --state open \
+        --json number --jq 'map(.number) | min // empty')" || return 2
     if [ "${outcome}" = success ]; then
-        [ -n "${existing}" ] || { printf 'nightly-status=noop label=%s\n' "${label}"; return 0; }
-        _ci_run "[CI-ERROR-STATUS-0004]" "${ctx} step=comment issue=${existing}" gh issue comment "${existing}" --repo "${repo}" \
-            --body "Recovered: ${scope} succeeded in ${run_url}. Closing this standing issue; it re-opens if the check fails again." >/dev/null || return 2
-        _ci_run "[CI-ERROR-STATUS-0005]" "${ctx} step=close issue=${existing}" gh issue close "${existing}" --repo "${repo}" >/dev/null || return 2
-        printf 'nightly-status=closed issue=%s\n' "${existing}"
+        [ -n "${open}" ] || { printf 'status=noop label=%s\n' "${label}"; return 0; }
+        _ci_run "[CI-ERROR-STATUS-0004]" "${ctx} step=comment issue=${open}" gh issue comment "${open}" --repo "${repo}" \
+            --body "Green again in ${run_url} at ${sha}. Closing; a new issue opens with this label if the case turns red." >/dev/null || return 2
+        _ci_run "[CI-ERROR-STATUS-0005]" "${ctx} step=close issue=${open}" gh issue close "${open}" --repo "${repo}" >/dev/null || return 2
+        printf 'status=closed label=%s issue=%s\n' "${label}" "${open}"
         return 0
     fi
-    local detail="${scope} failed in ${run_url}"
-    [ -n "${failed}" ] && detail="${detail} (failed: ${failed})"
-    if [ -n "${existing}" ]; then
-        _ci_run "[CI-ERROR-STATUS-0006]" "${ctx} step=comment issue=${existing}" gh issue comment "${existing}" --repo "${repo}" --body "Still failing: ${detail}." >/dev/null || return 2
-        printf 'nightly-status=updated issue=%s\n' "${existing}"
-    else
-        # What: label create-or-update, then the issue.
-        # Why: --force makes an existing label no error.
-        # From: Issue #1683 | PR #1858
-        _ci_run "[CI-ERROR-STATUS-0007]" "${ctx} step=label" gh label create "${label}" --repo "${repo}" --color b60205 --force \
-            --description "Recurring self-closing tracking issue: ${scope}" >/dev/null || return 2
-        _ci_run "[CI-ERROR-STATUS-0008]" "${ctx} step=create" gh issue create --repo "${repo}" --label "${label}" --title "[${label}] ${scope}" \
-            --body "Standing issue, reused across failures and auto-closed on the next success. ${detail}." >/dev/null || return 2
-        printf 'nightly-status=opened label=%s\n' "${label}"
+    body="$(_ci_status_body "${scope}" "${run_url}" "${sha}" "${evidence}")" || return 2
+    if [ -n "${open}" ]; then
+        _ci_run "[CI-ERROR-STATUS-0006]" "${ctx} step=comment issue=${open}" gh issue comment "${open}" --repo "${repo}" \
+            --body "Still red.${body:+$'\n\n'}${body}" >/dev/null || return 2
+        printf 'status=updated label=%s issue=%s\n' "${label}" "${open}"
+        return 0
     fi
+    color="$(_ci_variable CI_STATUS_LABEL_COLOR)" || return 2
+    _ci_run "[CI-ERROR-STATUS-0007]" "${ctx} step=label" gh label create "${label}" --repo "${repo}" --color "${color}" --force \
+        --description "${scope:0:100}" >/dev/null || return 2
+    _ci_run "[CI-ERROR-STATUS-0008]" "${ctx} step=create" gh issue create --repo "${repo}" --label "${label}" \
+        --title "[${label}] ${scope}" --body "${body}" >/dev/null || return 2
+    printf 'status=opened label=%s\n' "${label}"
+}
+
+# What: file or close one case of a service and arch.
+# Why: scan and nightly share this one reporter.
+# From: Issue #1683 | PR #1912
+_ci_status_case() {
+    local kind="$1" outcome="$2" svc="$3" arch="$4" evidence="${5:-}" text label scope
+    text="$(_ci_status_text "${kind}" "${svc}" "${arch}")" || return 2
+    label="${text%%$'\n'*}" scope="${text#*$'\n'}"
+    _ci_status_apply "${outcome}" "${label}" "${scope}" "${evidence}"
+}
+
+# What: the jobs of the needs object that did not succeed.
+# Why: the issue names every red job, not the first.
+# From: Issue #1683 | PR #1912
+_ci_needs_not_green() {
+    _ci_run "[CI-ERROR-STATUS-0009]" "reason=\"CI_NEEDS is not a needs object\"" \
+        jq -r 'to_entries[] | select(.value.result != "success") | "\(.key)=\(.value.result)"' <<< "$1"
+}
+
+# What: report the nightly kinds from the needs results.
+# Why: runs in its own always-job; a red job still reports.
+# From: Issue #1683 | PR #1912
+ci_cmd_nightly_report() {
+    local needs="${CI_NEEDS:-}" kind jobs job state red="" rc=0 verdict states seen
+    if [ -z "${needs}" ]; then
+        ci_log "[CI-ERROR-STATUS-0001]" "reason=\"CI_NEEDS required\""
+        return 2
+    fi
+    red="$(_ci_needs_not_green "${needs}")" || return 2
+    while IFS= read -r kind; do
+        [ -n "${kind}" ] || continue
+        jobs="$(_ci_block_entry_list status_reports "${kind}" jobs)" || return 2
+        [ -n "${jobs}" ] || continue
+        verdict=success states=""
+        while IFS= read -r job; do
+            seen="$(_ci_run "[CI-ERROR-STATUS-0011]" "kind=\"${kind}\" job=\"${job}\" reason=\"job missing in needs\"" \
+                jq -er --arg j "${job}" '.[$j].result' <<< "${needs}")" || return 2
+            states+="${states:+ }${job}=${seen}"
+            case "${seen}" in
+                success) ;;
+                skipped) [ "${verdict}" = failure ] || verdict=unknown ;;
+                *) verdict=failure ;;
+            esac
+        done <<< "${jobs}"
+        # What: a skipped job proves neither green nor red.
+        # Why: AG-INT-002: NOT-RUN with reason, no verdict.
+        # From: Issue #1683 | PR #1912
+        if [ "${verdict}" = unknown ]; then
+            printf 'status=NOT-RUN kind=%s reason="a judged job was skipped" jobs="%s"\n' "${kind}" "${states}"
+            continue
+        fi
+        _ci_status_issue_kind "${kind}" "${verdict}" "${states}${red:+ | not green: ${red//$'\n'/ }}" || rc=2
+    done <<< "$(_ci_block_keys status_reports)"
+    return "${rc}"
+}
+
+# What: file or close a kind that has no service.
+# Why: nightly kinds are one issue per run source.
+# From: Issue #1683 | PR #1912
+_ci_status_issue_kind() {
+    local kind="$1" outcome="$2" evidence="$3" text
+    text="$(_ci_status_text "${kind}")" || return 2
+    _ci_status_apply "${outcome}" "${text%%$'\n'*}" "${text#*$'\n'}" "${evidence}"
 }
 
 # =========================================================
@@ -4057,7 +4144,7 @@ _ci_trivy_args() {
     [ -z "${CI_TRIVY_TIMEOUT:-}" ] || printf '%s\n' --timeout "${CI_TRIVY_TIMEOUT}"
 }
 
-# What: Scan an image digest; rc 1 finding, 2 setup, 4 run
+# What: Scan a digest; rc 1 finding, 2 setup, 4 run, 6 DB
 # Why: a failed run or setup is never read as a finding
 # From: Issue #1683 | PR #1858
 _ci_trivy_scan() {
@@ -4076,6 +4163,10 @@ _ci_trivy_scan() {
     _ci_retry trivy _ci_trivy_scan_once "${report}" "${ref}" "${targs[@]}" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         rm -f "${report}"
+        # What: a failed run, no fresh DB: a DB outage.
+        # Why: the status kind names the cause, not a guess.
+        # From: Issue #1683 | PR #1912
+        _ci_trivy_db_fresh "${cache_dir}" || return 6
         return 4
     fi
     # What: A written report means trivy scanned.
@@ -4516,22 +4607,87 @@ _ci_scan_outcome() {
         1) ci_error "[CI-ERROR-SCAN-0005]" "service=\"${service}\" reason=\"scan reported findings\"" "${raw}"; return 2 ;;
         2) ci_error "[CI-ERROR-SCAN-0022]" "service=\"${service}\" reason=\"scan setup failed; not a finding\"" "${raw}"; return 2 ;;
         4) ci_error "[CI-ERROR-SCAN-0021]" "service=\"${service}\" reason=\"trivy run failed without a report; not a finding, escalate\"" "${raw}"; return 3 ;;
+        6) ci_error "[CI-ERROR-SCAN-0028]" "service=\"${service}\" reason=\"trivy DB missing or stale after the run; not a finding, escalate\"" "${raw}"; return 3 ;;
         *) ci_error "[CI-ERROR-SCAN-0023]" "service=\"${service}\" rc=${status} reason=\"unexpected scan status; not a finding, escalate\"" "${raw}"; return 3 ;;
     esac
+}
+
+# What: why this run's token cannot write issues, or empty.
+# Why: a fork or bot PR gets NOT-RUN, never a failed write.
+# From: Issue #1683 | PR #1912
+_ci_status_readonly_reason() {
+    local actors
+    [ "${GITHUB_EVENT_NAME:-}" = pull_request ] || return 0
+    [ "${PR_IS_FORK:-false}" != true ] || { printf 'fork PR: the token cannot write issues\n'; return 0; }
+    actors="$(_ci_variable CI_READONLY_TOKEN_ACTORS)" || return 2
+    case " ${actors} " in
+        *" ${GITHUB_ACTOR:-} "*) printf 'bot PR: the token cannot write issues\n' ;;
+    esac
+}
+
+# What: file or close the Trivy cases one scan decided.
+# Why: finding, DB outage and scan error are own issues.
+# From: Issue #1683 | PR #1912
+_ci_scan_report() {
+    local svc="$1" plat="$2" status="$3" raw="$4" why plan kind outcome evidence rc=0
+    why="$(_ci_status_readonly_reason)" || return 2
+    if [ -n "${why}" ]; then
+        printf 'scan-report=NOT-RUN service=%s platform=%s reason="%s"\n' "${svc}" "${plat}" "${why}"
+        return 0
+    fi
+    # What: each status settles only the cases it proves.
+    # Why: an error proves no finding, an outage none.
+    # From: Issue #1683 | PR #1912
+    case "${status}" in
+        0) plan=$'trivy-finding success\ntrivy-scan-error success\ntrivy-db-unavailable success' ;;
+        1) plan=$'trivy-finding failure\ntrivy-scan-error success\ntrivy-db-unavailable success' ;;
+        4) plan=$'trivy-scan-error failure\ntrivy-db-unavailable success' ;;
+        6) plan='trivy-db-unavailable failure' ;;
+        *) plan='trivy-scan-error failure' ;;
+    esac
+    while read -r kind outcome; do
+        evidence=""
+        [ "${outcome}" != failure ] || evidence="${raw}"
+        _ci_status_case "${kind}" "${outcome}" "${svc}" "${plat#*/}" "${evidence}" || rc=2
+    done <<< "${plan}"
+    return "${rc}"
 }
 
 # What: Scan a published digest for vulnerabilities.
 # Why: /var/tmp staging (no tmpfs OOM), authed, fail-closed.
 # From: Issue #1683
 ci_cmd_scan() {
-    local service="${1:-}" digest="${2:-}"
+    local service="${1:-}" digest="${2:-}" platform="${3:-}"
     [ -n "${service}" ] || { ci_log "[CI-ERROR-SCAN-0001]" "reason=\"service arg required\""; return 2; }
     [ -n "${digest}" ] || { ci_log "[CI-ERROR-SCAN-0002]" "reason=\"digest arg required\""; return 2; }
+    [ -n "${platform}" ] || { ci_log "[CI-ERROR-SCAN-0029]" "reason=\"platform arg required\""; return 2; }
     _ci_require_ghcr_auth || return "$?"
-    local raw status
+    local raw status orc=0 rrc=0
     if raw="$(TMPDIR="${CI_TMPDIR}" _ci_trivy_scan "${service}" "${digest}" 2>&1)"; then status=0; else status=$?; fi
-    _ci_scan_outcome "${service}" "${status}" "${raw}" || return "$?"
+    _ci_scan_outcome "${service}" "${status}" "${raw}" || orc=$?
+    # What: the report follows the verdict, no more.
+    # Why: a failed write must not hide a finding.
+    # From: Issue #1683 | PR #1912
+    _ci_scan_report "${service}" "${platform}" "${status}" "${raw}" || rrc=$?
+    [ "${orc}" -eq 0 ] || return "${orc}"
+    [ "${rrc}" -eq 0 ] || return "${rrc}"
     printf 'service=%s scanned=clean digest=%s tmpdir=%s\n' "${service}" "${digest}" "${CI_TMPDIR}"
+}
+
+# What: scan every channel image, not only the built ones.
+# Why: a new CVE hits an unchanged image; §31 refreshes it.
+# From: Issue #1683 | PR #1912
+ci_cmd_scan_channel() {
+    local targets svc plat matrix="[]"
+    targets="$(ci_build_targets)" || return 2
+    for svc in ${targets}; do
+        while IFS= read -r plat; do
+            [ -n "${plat}" ] || continue
+            matrix="$(_ci_capture 0 jq -c --arg s "${svc}" --arg p "${plat}" '. + [{service:$s, platform:$p}]' <<< "${matrix}")" || return 2
+        done <<< "$(_ci_platforms "${svc}")"
+    done
+    matrix="$(_ci_capture 0 jq -c '{include: .}' <<< "${matrix}")" || return 2
+    CI_BUILD_MATRIX="${matrix}" ci_cmd_scan_stack
 }
 
 # =========================================================
@@ -5525,6 +5681,34 @@ ci_cmd_release_changelog() {
     printf 'release-changelog=written tag=%s branch=%s\n' "${tag}" "${branch}"
 }
 
+# What: every image a release names: targets and the stack.
+# Why: notes and provenance walk one list.
+# From: Issue #1683 | PR #1912
+_ci_release_image_names() {
+    ci_build_targets || return 2
+    printf 'stack\n'
+}
+
+# What: the released images with their digests, as a matrix.
+# Why: the workflow attests each digest; no list in YAML.
+# From: Issue #1683 | PR #1912
+ci_cmd_release_images() {
+    local tag="${1:-}" base name img dig matrix="[]"
+    [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0053]" "reason=\"tag arg required\""; return 2; }
+    _ci_require_ghcr_auth || return "$?"
+    base="$(_ci_image_ref)" || return 2
+    while IFS= read -r name; do
+        [ -n "${name}" ] || continue
+        img="${base}/${name}"
+        dig="$(_ci_registry_digest "${img}:${tag}")" || return "$?"
+        matrix="$(_ci_capture 0 jq -c --arg r "${img%%/*}" --arg n "${img}" --arg d "${dig}" \
+            '. + [{registry:$r, name:$n, digest:$d}]' <<< "${matrix}")" || return 2
+    done <<< "$(_ci_release_image_names)"
+    matrix="$(_ci_capture 0 jq -c '{include: .}' <<< "${matrix}")" || return 2
+    _ci_step_output "[CI-ERROR-RELEASE-0054]" matrix "${matrix}" || return 2
+    printf 'release-images=%s tag=%s\n' "$(jq -r '.include | length' <<< "${matrix}")" "${tag}"
+}
+
 # What: Render the marker-delimited image provenance block.
 # Why: Records every shipped digest; SOT list, no hardcode.
 # From: Issue #1683
@@ -5538,8 +5722,8 @@ _ci_release_notes_block() {
     printf '\n## Images\n\n'
     printf 'Images published for %s (commit %s):\n\n' "${tag}" "${head}"
     local targets
-    targets="$(ci_build_targets)" || return 2
-    for target in ${targets} stack; do
+    targets="$(_ci_release_image_names)" || return 2
+    for target in ${targets}; do
         img="${base}/${target}:${tag}"
         dig="$(_ci_registry_digest "${img}")" || return "$?"
         printf -- '- %s -> %s\n' "${img}" "${dig}"
@@ -7934,7 +8118,7 @@ ci_cmd_validate() {
 # Why: pass/fail classification is ci.sh, not YAML (§5).
 # From: Issue #1683 | PR #1858
 ci_cmd_result_gate() {
-    local needs="${CI_NEEDS:-}" pairs required results="" phase state
+    local needs="${CI_NEEDS:-}" pairs required results="" phase state not_run="" facts
     local -A result=()
     if [ -z "${needs}" ]; then
         ci_log "[CI-ERROR-CORE-0101]" "reason=\"CI_NEEDS empty\""
@@ -7972,13 +8156,24 @@ ci_cmd_result_gate() {
     while read -r phase state; do
         [ -n "${phase}" ] && [ -n "${result[${phase}]+set}" ] || continue
         case "${state}" in
-            success|skipped) ;;
+            success) ;;
+            skipped) not_run+="${not_run:+ }${phase}" ;;
             *)
                 ci_log "[CI-ERROR-CORE-0116]" "phase=\"${phase}\" result=\"${state}\" results=\"${results}\" reason=\"phase neither succeeded nor skipped\""
                 return 1
                 ;;
         esac
     done <<< "${pairs}"
+    # What: a skipped phase is NOT-RUN, not a pass.
+    # Why: AG-INT-002: name what did not run, and why.
+    # From: Issue #1683 | PR #1912
+    if [ -n "${not_run}" ]; then
+        facts="$(_ci_run "[CI-ERROR-CORE-0151]" "reason=\"plan outputs unreadable\"" \
+            jq -c '.plan.outputs // {}' <<< "${needs}")" || return 2
+        ci_log "[CI-INFO-CORE-0152]" "not-run=\"${not_run}\" event=\"${GITHUB_EVENT_NAME:-}\" plan=${facts} reason=\"skipped by the job condition; no phase failed\""
+        printf 'CI 2.0 result gate: %s -> SUCCESS (NOT-RUN: %s)\n' "${results}" "${not_run}"
+        return 0
+    fi
     printf 'CI 2.0 result gate: %s -> SUCCESS\n' "${results}"
 }
 

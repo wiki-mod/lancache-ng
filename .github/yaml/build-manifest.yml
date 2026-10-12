@@ -617,7 +617,6 @@ ci_job_timeouts:
   build: 90
   cargo-audit: 30
   checks: 30
-  close-linked-issues: 15
   cut-release-tag: 15
   gc: 60
   lint: 30
@@ -627,6 +626,7 @@ ci_job_timeouts:
   project-board: 15
   promote: 30
   release: 30
+  release-provenance: 30
   release-sbom: 60
   scan: 60
   test: 45
@@ -637,6 +637,34 @@ ci_job_timeouts:
 # From: Issue #1683 | PR #1858
 ci_result_gate:
   required: [platform, plan, checks]
+
+# What: standing tracking issues the CI files and closes.
+# Why: one owner for label, scope and the jobs a kind reads.
+# From: Issue #1683 | PR #1912
+status_reports:
+  # What: the trivy kinds get -<service>-<arch> appended.
+  # Why: one issue per service, architecture and cause.
+  # From: Issue #1683 | PR #1912
+  trivy-finding:
+    label: trivy-finding
+    scope: "Trivy HIGH/CRITICAL finding in @SERVICE@ (@ARCH@) not covered by @{ci_variables.CI_TRIVY_IGNORE}"
+  trivy-db-unavailable:
+    label: trivy-db-unavailable
+    scope: "Trivy vulnerability DB missing or stale for @SERVICE@ (@ARCH@) after every retry"
+  trivy-scan-error:
+    label: trivy-scan-error
+    scope: "Trivy scan of @SERVICE@ (@ARCH@) gave no report while its DB was present (pull, auth, config or scanner error)"
+  # What: the nightly kinds name the jobs they judge.
+  # Why: the report job reads the needs; no job id in code.
+  # From: Issue #1683 | PR #1912
+  nightly-cargo-audit:
+    label: nightly-cargo-audit
+    scope: "nightly cargo-audit of @{ci_variables.CI_CARGO_LOCK}"
+    jobs: [cargo-audit]
+  nightly-promote:
+    label: nightly-promote
+    scope: "nightly validate and promote of the accepted stack"
+    jobs: [platform, validate, nightly]
 
 # What: Build-identity inputs per build type (§7).
 # Why: Impact is content-identity, never path-touched alone.
@@ -834,6 +862,18 @@ ci_variables:
   # Why: one path owner for scan, release VEX, vex-drift.
   # From: Issue #1683 | PR #1858
   CI_TRIVY_IGNORE: .trivyignore.yaml
+  # What: color of a created status label.
+  # Why: one owner for the tracking labels' look.
+  # From: Issue #1683 | PR #1912
+  CI_STATUS_LABEL_COLOR: b60205
+  # What: raw evidence bytes one status issue carries.
+  # Why: GitHub caps a body; the run log holds the rest.
+  # From: Issue #1683 | PR #1912
+  CI_STATUS_EVIDENCE_BYTES: 20000
+  # What: PR actors whose token cannot write issues.
+  # Why: a status write would fail; the report says NOT-RUN.
+  # From: Issue #1683 | PR #1912
+  CI_READONLY_TOKEN_ACTORS: dependabot[bot]
   # What: repo paths the checks read; one owner each.
   # Why: ci.sh joins them via _ci_repo_path, no literals.
   # From: Issue #1683 | PR #1858

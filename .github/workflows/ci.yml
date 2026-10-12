@@ -24,8 +24,6 @@ on:
 permissions:
   contents: read
   packages: write
-  id-token: write
-  attestations: write
 # What: issue runs get their own group per issue.
 # Why: a default-branch group would drop a queued push run.
 # From: Issue #1683 | PR #1858
@@ -270,6 +268,15 @@ jobs:
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['scan'] }}
     container: *bt_platform
+    # What: the scan files and closes its status issues.
+    # Why: issues: write only here; packages stay read.
+    # From: Issue #1683 | PR #1912
+    permissions:
+      contents: read
+      packages: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     outputs:
       passed: ${{ steps.scan.outputs.passed }}
     steps:
@@ -378,10 +385,15 @@ jobs:
   close-linked-issues:
     name: close-linked-issues
     needs: platform
-    if: github.event_name == 'push'
-    runs-on: ${{ needs.platform.outputs.runner }}
-    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['close-linked-issues'] }}
-    container: *bt_platform
+    if: ${{ !cancelled() && github.event_name == 'push' }}
+    # What: platform's runner or the bootstrap pair.
+    # Why: a push closes its issues if platform failed.
+    # From: Issue #1683 | PR #1912
+    runs-on: ${{ needs.platform.outputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    container:
+      image: ${{ needs.platform.outputs.image || format('ghcr.io/{0}/build-tools:nightly', github.repository) }}
+      credentials: *ghcr_credentials
     permissions:
       contents: read
       packages: read
@@ -479,7 +491,7 @@ jobs:
   # From: Issue #1683
   result:
     name: result
-    needs: [platform, plan, build, test, cargo-audit, lint, scan, aggregate, assemble, validate, promote, checks]
+    needs: [platform, plan, build, test, cargo-audit, lint, scan, aggregate, assemble, validate, promote, checks, close-linked-issues]
     if: always() && github.event_name != 'issues'
     # What: platform's runner/timeout or the bootstrap pair.
     # Why: the required check must run when platform failed.

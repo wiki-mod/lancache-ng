@@ -135,16 +135,10 @@ jobs:
       - *bootstrap
       - *channel_pin
       - name: Audit rust dependencies
-        id: audit
         run: bash .github/scripts/ci.sh check cargo-audit
-      - name: Report the audit outcome
-        if: always()
-        env:
-          OUTCOME: ${{ steps.audit.outcome == 'success' && 'success' || 'failure' }}
-        run: bash .github/scripts/ci.sh nightly-status "${OUTCOME}" "nightly cargo-audit (current_dev)"
 
-  # What: promote validated current_dev, report outcome
-  # Why: nightly reuses; never rebuilds; always reports
+  # What: promote validated current_dev
+  # Why: nightly reuses; never rebuilds
   # From: Issue #1683
   nightly:
     name: nightly
@@ -162,16 +156,52 @@ jobs:
       # Why: only after validate passed; moves refs only
       # From: Issue #1683
       - name: Promote the nightly channel
-        id: promote
         if: needs.validate.result == 'success'
         env:
           CI_STACK_VALIDATED: SUCCESS
         run: bash .github/scripts/ci.sh promote nightly
-      # What: report nightly outcome to tracking issue
-      # Why: nightly must be reported reliably; self-closing
-      # From: Issue #1683
+
+  # What: scan every channel image against new advisories
+  # Why: §31: a new CVE hits an image no build scans
+  # From: Issue #1683 | PR #1912
+  scan:
+    name: scan
+    needs: platform
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['scan'] }}
+    container:
+      image: ${{ needs.platform.outputs.image }}
+      credentials: *ghcr_credentials
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - *bootstrap
+      - *channel_pin
+      - name: Scan every channel image
+        run: bash .github/scripts/ci.sh scan-channel
+
+  # What: report the nightly outcome to the tracking issues
+  # Why: own job; it runs when platform or a job failed
+  # From: Issue #1683 | PR #1912
+  report:
+    name: report
+    needs: [platform, validate, cargo-audit, scan, nightly]
+    if: ${{ !cancelled() }}
+    # What: platform's runner and image, else the pair.
+    # Why: the report must run when platform failed.
+    # From: Issue #1683 | PR #1912
+    runs-on: ${{ needs.platform.outputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    container:
+      image: ${{ needs.platform.outputs.image || format('ghcr.io/{0}/build-tools:nightly', github.repository) }}
+      credentials: *ghcr_credentials
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - *bootstrap
+      - name: Check out the nightly source ref
+        run: bash .github/scripts/ci.sh channel-checkout nightly
       - name: Report the nightly outcome
-        if: always()
         env:
-          OUTCOME: ${{ (needs.validate.result == 'success' && steps.promote.outcome == 'success') && 'success' || 'failure' }}
-        run: bash .github/scripts/ci.sh nightly-status "${OUTCOME}" "nightly channel promote (current_dev)"
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: bash .github/scripts/ci.sh nightly-report

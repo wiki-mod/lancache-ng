@@ -59,15 +59,15 @@ Current status:
   digest and the stack channel-pointer digest (see "Verifying Release
   Provenance" below).
 - **SBOMs** are generated per released first-party image digest by the
-  `release-sbom` job in `.github/workflows/build-push.yml`. That job runs on
-  release tags, resolves each `vX.Y.Z` image reference to its immutable digest,
-  runs the project's pinned Trivy action in CycloneDX SBOM mode against that
-  digest, and attaches the result to the GitHub release for the tag as a
-  `<service>.cdx.json` asset. The covered set is the Trivy-scanned first-party
-  images: `proxy`, `dns`, `watchdog`, `dhcp`, `dhcp-proxy`, `ntp`, `syslog`,
-  `ui`, and `build-tools`. The `stack` channel-pointer image is excluded on purpose: it is
-  a busybox pointer image, not a compiled software asset, and is not
-  vulnerability-scanned either.
+  `release-sbom` job in `.github/workflows/release.yml` (`ci.sh
+  release-sbom-stack`). That job runs on release tags, resolves each `vX.Y.Z`
+  image reference to its immutable digest, runs Trivy in CycloneDX SBOM mode
+  against that digest, and attaches the result to the GitHub release for the
+  tag as a `<service>.cdx.json` asset. The covered set is every build target of
+  the SOT (`services` plus `build_toolchain` in
+  `.github/yaml/build-manifest.yml`). The `stack` channel-pointer image is
+  excluded on purpose: it is a busybox pointer image, not a compiled software
+  asset, and is not vulnerability-scanned either.
 - **VEX** (vulnerability disposition) for accepted findings is published as the
   `vex.openvex.json` release asset, regenerated fresh from the tag's own
   `.trivyignore.yaml` at release time — see "Vulnerability Disposition (VEX)"
@@ -85,12 +85,12 @@ metadata must record the approved upstream digest.
 
 ## Verifying Release Provenance
 
-Every first-party image digest (`proxy`, `dns`, `watchdog`, `dhcp`,
-`dhcp-proxy`, `ntp`, `syslog`, `ui`, `build-tools`, and the `stack`
+Every first-party image digest (every build target of the SOT and the `stack`
 channel-pointer image) gets a
 [GitHub Artifact Attestation](https://docs.github.com/en/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds)
-pushed to GHCR alongside it (`.github/actions/ghcr-attest-retry`, wrapping
-`actions/attest`). This attestation is a signed, Sigstore-backed statement that
+pushed to GHCR alongside it (the `release-provenance` job in
+`.github/workflows/release.yml`, wrapping `actions/attest`; `ci.sh
+release-images` names the digests). This attestation is a signed, Sigstore-backed statement that
 cryptographically binds the exact image digest to the specific GitHub Actions
 workflow run (repository, workflow file, and commit) that built it, and does
 not depend on trusting GHCR itself as the source of truth.

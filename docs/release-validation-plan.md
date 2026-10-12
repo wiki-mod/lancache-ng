@@ -84,8 +84,8 @@ current for the same commit.
 | Workflow | Jobs and `ci.sh` commands | Trigger |
 |---|---|---|
 | `ci.yml` | `plan` (`changed-files`, `plan-matrix`), `lint` (`check shellcheck`, `check actionlint`), `checks` (`check all`, which runs `check ci-bats`), `cargo-audit`, `build` (`ship`), `test` (`test-stack`), `scan` (`scan-stack`), `aggregate`, `assemble`, `validate`, `promote` (`promote-ref`), `result` (`result-gate`) | pull request, push to `current_dev`/`master`, `v*` tag, dispatch |
-| `nightly.yml` | `platform` (`channel-checkout nightly`), `validate`, `cargo-audit`, `nightly` (`promote nightly`, `nightly-status`) | schedule, dispatch |
-| `release.yml` | `cut-release-tag`, `release-changelog`, `release-publish`, `release-vex`, `release-sbom-stack` | `v*` tag, dispatch |
+| `nightly.yml` | `platform` (`channel-checkout nightly`), `validate`, `cargo-audit`, `nightly` (`promote nightly`), `scan` (`scan-channel`), `report` (`nightly-report`) | schedule, dispatch |
+| `release.yml` | `cut-release-tag`, `release-changelog`, `release-publish`, `release-vex`, `release-sbom-stack`, `release-images` (matrix of `actions/attest` in `release-provenance`) | `v*` tag, dispatch |
 | `gc.yml` | `gc --apply`, `check orphaned-branches` | schedule, dispatch |
 | `codeql.yml` | `codeql-impact`, `codeql-analyze <language>` | pull request, push, schedule, dispatch |
 
@@ -515,6 +515,11 @@ a stated reason it has none (AG-VAL-029).
 | `$?` read from an `if` instead of the command | `check if-without-else-status` |
 | An exit path losing its code, context or raw output | `check exit-evidence` |
 | Mutable image or action reference | `check mutable-refs`; `check action-node-versions` |
+| A Trivy finding, DB outage or scan error that no issue reports, or that one case closes for another | ci.bats "status report: one issue per case, red files, green closes" and "scan report: each status settles only the cases it proves" |
+| An image no build rebuilds never scanned again | `scan-channel` in the `nightly.yml` job `scan`; ci.bats "scan channel: every target and platform is a matrix pair" |
+| A released image digest without a provenance attestation | `release-provenance` (one `actions/attest` per `release-images` entry); ci.bats "release images: one matrix entry per target and the stack" |
+| A report step that does not start because the job it judges failed | `nightly.yml` job `report` (own job, `!cancelled()`); ci.bats "nightly report: each kind reads its jobs, a skipped job is NOT-RUN" |
+| A required-check gate that passes a skipped phase without a reason | ci.bats "result-gate maps each phase-result set to its verdict" (skipped phases are listed with `reason`) |
 
 ### No durable check
 

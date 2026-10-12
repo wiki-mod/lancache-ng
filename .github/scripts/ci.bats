@@ -267,7 +267,9 @@ teardown() {
     }
     CI_NEEDS="$(_json "${all}")" run bash "${CI_SH}" result-gate
     _expect all-success-cli 0 "-> SUCCESS" || return 1
-    _row noop 0 "-> SUCCESS" "${noop}" || return 1
+    _row noop 0 "[CI-INFO-CORE-0152] not-run=\"${other};-> SUCCESS (NOT-RUN: ${other}" "${noop}" || return 1
+    _row all-ran 0 "-> SUCCESS" "${all}" || return 1
+    [[ "${output}" != *"NOT-RUN"* ]] || { echo "all-ran: a pass is called NOT-RUN: ${output}"; return 1; }
     for p in ${req}; do
         _row "${p}-skipped" 1 "[CI-ERROR-CORE-0100] phase=\"${p}\" result=\"skipped\"" "${all/ ${p}:success/ ${p}:skipped}" || return 1
         _row "${p}-missing" 1 "[CI-ERROR-CORE-0132] phase=\"${p}\"" "${all/ ${p}:success/}" || return 1
@@ -353,6 +355,7 @@ apk-pin-install|-|apk-pin-install|CI-ERROR-APKSETUP-0006|-
 publish|-|publish|CI-ERROR-PUBLISH-0001|-
 scan|-|scan|CI-ERROR-SCAN-0001|-
 scan-digest|-|scan @SVC@|CI-ERROR-SCAN-0002|-
+scan-platform|-|scan @SVC@ @DIGEST@|CI-ERROR-SCAN-0029|-
 aggregate|-|aggregate|CI-ERROR-AGGREGATE-0001|-
 aggregate-dir|-|aggregate @MISSING@|CI-ERROR-AGGREGATE-0002|-
 emit-result|-|emit-result|CI-ERROR-RESULT-0001|-
@@ -360,8 +363,7 @@ emit-result-platform|-|emit-result @SVC@|CI-ERROR-RESULT-0002|-
 assemble-stack|CI_BUILD_MATRIX=|assemble-stack|CI-ERROR-ASSEMBLE-0006|-
 aggregate-stack|CI_BUILD_MATRIX=|aggregate-stack|CI-ERROR-AGGREGATE-0005|-
 scan-stack|CI_BUILD_MATRIX=|scan-stack|CI-ERROR-SCAN-0016|-
-nightly-status|-|nightly-status|CI-ERROR-STATUS-0001|-
-nightly-status-scope|-|nightly-status @BAD@|CI-ERROR-STATUS-0002|-
+nightly-report|-|nightly-report|CI-ERROR-STATUS-0001|-
 release-publish|-|release-publish|CI-ERROR-RELEASE-0003|-
 release-sbom|-|release-sbom|CI-ERROR-RELEASE-0007|-
 release-sbom-tag|-|release-sbom @SVC@|CI-ERROR-RELEASE-0008|-
@@ -4968,6 +4970,189 @@ CASES
     _expect scan-partial 1 "[CI-WARN-SCAN-0025];[CI-ERROR-SCAN-0024];failed=\"${a}/p/x\"" || return 1
     [ "$(cat "${out}")" = "passed={\"include\":[{\"service\":\"${b}\",\"platform\":\"p/x\"}]}" ] \
         || { echo "passed output: $(cat "${out}")"; return 1; }
+}
+
+# What: a status issue per case: red files, green closes
+# Why: one label per case; no case closes another's issue
+# From: Issue #1683 | PR #1912
+@test "status report: one issue per case, red files, green closes" {
+    local calls listed="" kind lab labels="" svc arch scope
+    local -x GITHUB_REPOSITORY GITHUB_SERVER_URL GITHUB_SHA GITHUB_RUN_ID GITHUB_EVENT_NAME CI_MANIFEST_ENV
+    GITHUB_REPOSITORY="$(_val name)/$(_val name)" GITHUB_SERVER_URL="https://$(_val host)" GITHUB_SHA="$(_val digest)"
+    GITHUB_RUN_ID="$(_val int 1 99999)" GITHUB_EVENT_NAME="$(_val name)" svc="$(_val name)" arch="$(_val name)"
+    calls="$(_val path)" listed=""
+    gh() {
+        printf '%s\n' "$*" >> "${calls}"
+        case "$*" in
+            "issue list"*) printf '%s' "${listed}" ;;
+        esac
+    }
+    for kind in trivy-finding trivy-db-unavailable trivy-scan-error; do
+        lab="$(_ci_block_entry_field status_reports "${kind}" label)-${svc}-${arch}"
+        [[ " ${labels} " != *" ${lab} "* ]] || { echo "${kind}: label ${lab} is shared"; return 1; }
+        labels+=" ${lab}"
+        scope="$(_ci_block_entry_field status_reports "${kind}" scope)"
+        scope="${scope//@SERVICE@/${svc}}" scope="${scope//@ARCH@/${arch}}"
+        { : > "${calls}"; listed=""; }
+        run _ci_status_case "${kind}" failure "${svc}" "${arch}" "raw-$(_val name)"
+        _expect "${kind}-open-new" 0 "status=opened label=${lab}" || return 1
+        grep -qF -- "label create ${lab} " "${calls}" && grep -qF -- "issue create --repo ${GITHUB_REPOSITORY} --label ${lab} --title [${lab}] ${scope}" "${calls}" \
+            || { echo "${kind}: no label and issue create: $(cat "${calls}")"; return 1; }
+        { : > "${calls}"; listed="$(_val int 1 999)"; }
+        run _ci_status_case "${kind}" failure "${svc}" "${arch}"
+        _expect "${kind}-open-again" 0 "status=updated label=${lab} issue=${listed}" || return 1
+        ! grep -q "issue create\|issue close" "${calls}" || { echo "${kind}: a second issue or a close: $(cat "${calls}")"; return 1; }
+        : > "${calls}"
+        run _ci_status_case "${kind}" success "${svc}" "${arch}"
+        _expect "${kind}-green-closes" 0 "status=closed label=${lab} issue=${listed}" || return 1
+        grep -q "^issue comment ${listed} " "${calls}" && grep -q "^issue close ${listed} " "${calls}" || { echo "${kind}: no comment and close: $(cat "${calls}")"; return 1; }
+        { : > "${calls}"; listed=""; }
+        run _ci_status_case "${kind}" success "${svc}" "${arch}"
+        _expect "${kind}-green-none" 0 "status=noop label=${lab}" || return 1
+        [ "$(wc -l < "${calls}")" -eq 1 ] || { echo "${kind}: a green with no issue wrote: $(cat "${calls}")"; return 1; }
+    done
+    for kind in nightly-cargo-audit nightly-promote; do
+        lab="$(_ci_block_entry_field status_reports "${kind}" label)"
+        [[ " ${labels} " != *" ${lab} "* ]] || { echo "${kind}: label ${lab} is shared"; return 1; }
+        labels+=" ${lab}"
+    done
+    gh() { echo "gh: boom" >&2; return 1; }
+    run _ci_status_case trivy-finding failure "${svc}" "${arch}"
+    _expect gh-fails 2 "[CI-ERROR-STATUS-0003];gh: boom" || return 1
+}
+
+# What: each scan status settles only the cases it proves
+# Why: an error says nothing of findings, an outage none
+# From: Issue #1683 | PR #1912
+@test "scan report: each status settles only the cases it proves" {
+    local calls svc plat row st want got raw
+    local -x PR_IS_FORK=false GITHUB_EVENT_NAME=push GITHUB_ACTOR
+    svc="$(_val name)" plat="p/$(_val name)" calls="$(_val path)" raw="$(_val name)" GITHUB_ACTOR="$(_val name)"
+    _ci_status_case() { printf '%s %s %s %s [%s]\n' "$1" "$2" "$3" "$4" "$5" >> "${calls}"; }
+    while IFS='|' read -r st want; do
+        : > "${calls}"
+        run _ci_scan_report "${svc}" "${plat}" "${st}" "${raw}"
+        [ "${status}" -eq 0 ] || { echo "status ${st}: rc ${status}: ${output}"; return 1; }
+        got="$(sed "s|${svc} ${plat#*/}||; s|  *| |g" "${calls}" | paste -sd'|')"
+        [ "${got}" = "${want}" ] || { echo "status ${st}: got '${got}' want '${want}'"; return 1; }
+    done <<ROWS
+0|trivy-finding success []|trivy-scan-error success []|trivy-db-unavailable success []
+1|trivy-finding failure [${raw}]|trivy-scan-error success []|trivy-db-unavailable success []
+4|trivy-scan-error failure [${raw}]|trivy-db-unavailable success []
+6|trivy-db-unavailable failure [${raw}]
+2|trivy-scan-error failure [${raw}]
+$(_val int 7 99)|trivy-scan-error failure [${raw}]
+ROWS
+    : > "${calls}"
+    GITHUB_EVENT_NAME=pull_request PR_IS_FORK=true run _ci_scan_report "${svc}" "${plat}" 1 "${raw}"
+    _expect fork-not-run 0 "scan-report=NOT-RUN service=${svc};fork PR" || return 1
+    [ ! -s "${calls}" ] || { echo "a fork PR wrote: $(cat "${calls}")"; return 1; }
+    GITHUB_EVENT_NAME=pull_request GITHUB_ACTOR="$(_ci_variable CI_READONLY_TOKEN_ACTORS)" run _ci_scan_report "${svc}" "${plat}" 1 "${raw}"
+    _expect bot-not-run 0 "scan-report=NOT-RUN service=${svc};bot PR" || return 1
+    [ ! -s "${calls}" ] || { echo "a bot PR wrote: $(cat "${calls}")"; return 1; }
+    GITHUB_EVENT_NAME=pull_request run _ci_scan_report "${svc}" "${plat}" 0 ""
+    [ "${status}" -eq 0 ] && [ "$(wc -l < "${calls}")" -eq 3 ] || { echo "a same-repo PR did not report: ${output}"; return 1; }
+}
+
+# What: a failed run without a fresh DB is the DB cause
+# Why: DB outage and scan error are separate issues
+# From: Issue #1683 | PR #1912
+@test "scan: a failed trivy run reports the DB cause only without a fresh DB" {
+    local svc dir
+    svc="$(_val name)" dir="$(_val path)"
+    _ci_trivy_cache_dir() { printf 'dir=%s\n' "${dir}"; }
+    _ci_trivy_db_ensure_fresh() { printf 'present=false\n'; }
+    _ci_image_ref() { printf '%s\n' "$1"; }
+    _ci_trivy_args() { printf '%s\n' trivy; }
+    _ci_retry() { return 1; }
+    _ci_trivy_db_fresh() { return 1; }
+    run _ci_trivy_scan "${svc}" "$(_val digest)"
+    [ "${status}" -eq 6 ] || { echo "no fresh DB: rc ${status}: ${output}"; return 1; }
+    _ci_trivy_db_fresh() { return 0; }
+    run _ci_trivy_scan "${svc}" "$(_val digest)"
+    [ "${status}" -eq 4 ] || { echo "fresh DB: rc ${status}: ${output}"; return 1; }
+    run _ci_scan_outcome "${svc}" 6 "$(_val name)"
+    _expect db-outcome 3 "[CI-ERROR-SCAN-0028] service=\"${svc}\"" || return 1
+}
+
+# What: the scheduled scan covers every target and platform
+# Why: an unchanged image is never built, so never scanned
+# From: Issue #1683 | PR #1912
+@test "scan channel: every target and platform is a matrix pair" {
+    local out t p want=0 got
+    out="$(_val path)"
+    ci_cmd_scan_stack() { printf '%s' "${CI_BUILD_MATRIX}" > "${out}"; }
+    run ci_cmd_scan_channel
+    [ "${status}" -eq 0 ] || { echo "scan-channel: rc ${status}: ${output}"; return 1; }
+    for t in $(ci_build_targets); do
+        [ "$(jq -r --arg t "${t}" '[.include[] | select(.service == $t)] | length' "${out}")" -ge 1 ] || { echo "${t} is not scanned: $(cat "${out}")"; return 1; }
+    done
+    while read -r p; do
+        jq -e --arg p "${p}" '[.include[] | select(.platform == $p)] | length > 0' "${out}" >/dev/null || { echo "platform ${p} is not scanned"; return 1; }
+    done <<< "$(_ci_block_entry_list build_matrix "" platforms)"
+    got="$(jq -r '.include | length' "${out}")"
+    [ "${got}" -gt 0 ] || { echo "empty matrix"; return 1; }
+}
+
+# What: each nightly kind reads its jobs; skipped is NOT-RUN
+# Why: a red job still reports; kinds stay apart
+# From: Issue #1683 | PR #1912
+@test "nightly report: each kind reads its jobs, a skipped job is NOT-RUN" {
+    local calls kind jobs j needs all="" lab_a lab_p
+    calls="$(_val path)"
+    _ci_status_apply() { printf '%s|%s|%s\n' "$2" "$1" "$4" >> "${calls}"; }
+    lab_a="$(_ci_block_entry_field status_reports nightly-cargo-audit label)"
+    lab_p="$(_ci_block_entry_field status_reports nightly-promote label)"
+    [ "${lab_a}" != "${lab_p}" ] || { echo "both kinds share the label ${lab_a}"; return 1; }
+    jobs="$(_ci_block_entry_list status_reports nightly-cargo-audit jobs; echo; _ci_block_entry_list status_reports nightly-promote jobs)"
+    _needs() {
+        local out="" e
+        for e in "$@"; do out+="${out:+,}\"${e%%=*}\":{\"result\":\"${e#*=}\",\"outputs\":{}}"; done
+        printf '{%s}' "${out}"
+    }
+    for j in ${jobs}; do all+=" ${j}=success"; done
+    : > "${calls}"
+    CI_NEEDS="$(_needs ${all})" run ci_cmd_nightly_report
+    _expect all-green 0 - || return 1
+    [ "$(cut -d'|' -f1,2 "${calls}")" = "$(printf '%s|success\n%s|success\n' "${lab_a}" "${lab_p}")" ] || { echo "all green: $(cat "${calls}")"; return 1; }
+    kind="$(_ci_block_entry_list status_reports nightly-cargo-audit jobs | head -n 1)"
+    : > "${calls}"
+    CI_NEEDS="$(_needs ${all/ ${kind}=success/ ${kind}=failure})" run ci_cmd_nightly_report
+    _expect audit-red 0 - || return 1
+    grep -q "^${lab_a}|failure|" "${calls}" && grep -q "^${lab_p}|success|" "${calls}" || { echo "audit red: $(cat "${calls}")"; return 1; }
+    grep -q "${kind}=failure" "${calls}" || { echo "evidence misses the red job: $(cat "${calls}")"; return 1; }
+    kind="$(_ci_block_entry_list status_reports nightly-promote jobs | head -n 1)"
+    : > "${calls}"
+    CI_NEEDS="$(_needs ${all/ ${kind}=success/ ${kind}=failure})" run ci_cmd_nightly_report
+    grep -q "^${lab_p}|failure|" "${calls}" && grep -q "^${lab_a}|success|" "${calls}" || { echo "promote red: $(cat "${calls}")"; return 1; }
+    : > "${calls}"
+    CI_NEEDS="$(_needs ${all/ ${kind}=success/ ${kind}=skipped})" run ci_cmd_nightly_report
+    _expect skipped 0 "status=NOT-RUN kind=nightly-promote" || return 1
+    ! grep -q "^${lab_p}|" "${calls}" || { echo "a skipped job gave a verdict: $(cat "${calls}")"; return 1; }
+    : > "${calls}"
+    CI_NEEDS="$(_needs ${all/ ${kind}=success/ ${kind}=skipped} $(_val name)=failure)" run ci_cmd_nightly_report
+    CI_NEEDS="$(_needs ${all/ ${kind}=success/})" run ci_cmd_nightly_report
+    _expect job-missing 2 "[CI-ERROR-STATUS-0011] kind=\"nightly-promote\" job=\"${kind}\"" || return 1
+}
+
+# What: release images lists every target digest and stack
+# Why: the provenance matrix is the only attested set
+# From: Issue #1683 | PR #1912
+@test "release images: one matrix entry per target and the stack" {
+    local out t d n
+    out="$(_val path)" d="$(_val digest)"
+    _ci_require_ghcr_auth() { return 0; }
+    _ci_registry_digest() { printf '%s\n' "${d}"; }
+    GITHUB_OUTPUT="${out}" run ci_cmd_release_images "v$(_val int 1 9).$(_val int 1 9).$(_val int 1 9)"
+    [ "${status}" -eq 0 ] || { echo "release-images: rc ${status}: ${output}"; return 1; }
+    n="$(sed -n 's/^matrix=//p' "${out}")"
+    for t in $(ci_build_targets) stack; do
+        jq -e --arg t "${t}" --arg d "${d}" '[.include[] | . as $e | select(($e.name | endswith("/" + $t)) and $e.digest == $d and ($e.name | startswith($e.registry + "/")))] | length == 1' <<< "${n}" >/dev/null \
+            || { echo "${t}: not one entry with the digest: ${n}"; return 1; }
+    done
+    [ "$(jq '.include | length' <<< "${n}")" -eq $(( $(ci_build_targets | wc -l) + 1 )) ] || { echo "entry count: ${n}"; return 1; }
+    run ci_cmd_release_images
+    _expect release-images-tag 2 "[CI-ERROR-RELEASE-0053]" || return 1
 }
 
 # What: assemble goes on after a service that fails
