@@ -816,6 +816,7 @@ ci_variables:
   CI_BUILDER_GC_RESERVED_SPACE: 20GB
   CI_DAEMON_LOG_MAX_SIZE: 10m
   CI_DAEMON_LOG_MAX_FILE: 3
+  CI_RAW_CONTENT_URL: https://raw.githubusercontent.com
   # What: PR title lint mode (warn|block), chronology mode.
   # Why: AG-CI-006: check modes are values with one owner.
   # From: Issue #1683 | PR #1858

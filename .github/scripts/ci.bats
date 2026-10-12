@@ -2216,6 +2216,104 @@ own-name-prefix-repo|@O@/@R@@X@/@P@@@SHA@|0
 CASES
 }
 
+# What: raw GET -> body on 200, rc 1 with the http code else
+# Why: the retry layer classifies by the "http NNN" text
+# From: Issue #1860 | PR #1872
+@test "raw get returns the body on 200 and the http code otherwise" {
+    local body code
+    body="$(_val name)"
+    curl() { printf '%s\n%s' "${BODY}" "${CODE}"; }
+    BODY="${body}" CODE=200 run _ci_raw_get "$(_val url)"
+    _expect ok 0 "=${body}" || return 1
+    for code in 404 503; do
+        BODY="$(_val name)" CODE="${code}" run _ci_raw_get "$(_val url)"
+        _expect "http-${code}" 1 "http ${code}" || return 1
+    done
+    curl() { return 6; }
+    run _ci_raw_get "$(_val url)"
+    _expect curl-error 1 "http 000" || return 1
+}
+
+# What: manifest fetch -> OK body, NOTFOUND, or INFRA:<code>
+# Why: a missing manifest is a broken pin; rest fails closed
+# From: Issue #1860 | PR #1872
+@test "action manifest fetch separates ok, not found and infra" {
+    local own repo ref body
+    own="$(_val name)" repo="$(_val name)" ref="$(_val sha)" body="runs:
+  using: $(_val name)"
+    export CI_RETRY_MAX_ATTEMPTS=1 CI_RETRY_BACKOFF_BASE_SECONDS=0
+    _ci_raw_get() { case "$1" in *action.yml) printf 'http 404\n' >&2; return 1 ;; esac; printf '%s\n' "${BODY}"; }
+    BODY="${body}" run _ci_fetch_action_manifest "${own}" "${repo}" "" "${ref}"
+    _expect ok-after-yml-404 0 "OK;${body}" || return 1
+    _ci_raw_get() { printf 'raw GET x failed: http 404\n' >&2; return 1; }
+    run _ci_fetch_action_manifest "${own}" "${repo}" "" "${ref}"
+    _expect not-found 0 "=NOTFOUND" || return 1
+    _ci_raw_get() { printf 'raw GET x failed: http 503\n' >&2; return 1; }
+    run _ci_fetch_action_manifest "${own}" "${repo}" "" "${ref}"
+    _expect infra 0 "=INFRA:503" || return 1
+}
+
+# What: pin policy -> runtime, 40-hex SHA, own repo, infra
+# Why: one check owns the pin rules for hook and CI
+# From: Issue #1860 | PR #1872
+@test "action node versions check enforces runtime and ref hygiene" {
+    local own repo ext sha root case uses manifest rc want
+    own="$(_val name)" repo="$(_val name)" ext="$(_val name)/$(_val name)" sha="$(_val sha)"
+    root="$(_val path)"
+    mkdir -p "${root}/.github/workflows"
+    export GITHUB_REPOSITORY="${own}/${repo}"
+    while IFS='|' read -r case uses manifest rc want; do
+        uses="${uses//@EXT@/${ext}}" uses="${uses//@SHA@/${sha}}" uses="${uses//@OWN@/${own}/${repo}}"
+        printf 'jobs:\n  j:\n    steps:\n      - uses: %s\n' "${uses}" > "${root}/.github/workflows/w.yml"
+        _ci_fetch_action_manifest() { printf '%s\n' "${MANIFEST//\\n/$'\n'}"; }
+        MANIFEST="${manifest}" run _ci_check_action_node_versions "${root}"
+        _expect "${case}" "${rc}" "${want}" || return 1
+    done <<'CASES'
+node24|@EXT@@@SHA@|OK\nruns:\n  using: node24|0|action-node-versions=clean
+node20|@EXT@@@SHA@|OK\nruns:\n  using: node20|1|declares runs.using: node20
+no-using|@EXT@@@SHA@|OK\nname: x|1|has no parseable runs.using
+not-found|@EXT@@@SHA@|NOTFOUND|1|broken pin
+infra|@EXT@@@SHA@|INFRA:503|2|FAIL CLOSED
+tag-ref|@EXT@@v4|OK\nruns:\n  using: node24|1|must use a full 40-hex commit SHA
+own-no-ref|@OWN@/x|OK\nruns:\n  using: node24|1|must include an explicit ref
+CASES
+}
+
+# What: hook -> runs the ci.sh check on workflow changes
+# Why: the check lives in ci.sh; the hook gates the push
+# From: Issue #801 | PR #1912
+@test "pre-push hook runs ci.sh check action-node-versions on workflow changes" {
+    local repo hook before after zero
+    repo="$(_val path)" hook="${BATS_TEST_DIRNAME}/../../.githooks/pre-push"
+    zero="0000000000000000000000000000000000000000"
+    mkdir -p "${repo}/.github/scripts" "${repo}/.github/workflows"
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/calls"\nexit "$(cat "%s/rc")"\n' "${repo}" "${repo}" > "${repo}/.github/scripts/ci.sh"
+    printf '0' > "${repo}/rc"
+    git -C "${repo}" init -q
+    git -C "${repo}" remote add origin "https://github.com/$(_val name)/$(_val name).git"
+    git -C "${repo}" -c user.name=t -c user.email=t@t commit -q --allow-empty -m a
+    before="$(git -C "${repo}" rev-parse HEAD)"
+    printf 'x\n' > "${repo}/other.txt"
+    git -C "${repo}" add other.txt
+    git -C "${repo}" -c user.name=t -c user.email=t@t commit -q -m b
+    after="$(git -C "${repo}" rev-parse HEAD)"
+    cd "${repo}"
+    run bash "${hook}" origin "$(git remote get-url origin)" <<< "refs/heads/m ${after} refs/heads/m ${before}"
+    _expect no-workflow 0 - || return 1
+    [ ! -e "${repo}/calls" ] || { echo "check ran without a workflow change"; return 1; }
+    before="${after}"
+    printf 'on: push\n' > "${repo}/.github/workflows/w.yml"
+    git -C "${repo}" add .github/workflows/w.yml
+    git -C "${repo}" -c user.name=t -c user.email=t@t commit -q -m c
+    after="$(git -C "${repo}" rev-parse HEAD)"
+    run bash "${hook}" origin "$(git remote get-url origin)" <<< "refs/heads/m ${after} refs/heads/m ${before}"
+    _expect workflow-clean 0 - || return 1
+    [ "$(cat "${repo}/calls")" = "check action-node-versions" ] || { echo "calls: $(cat "${repo}/calls")"; return 1; }
+    printf '1' > "${repo}/rc"
+    run bash "${hook}" origin "$(git remote get-url origin)" <<< "refs/heads/m ${after} refs/heads/m ${zero}"
+    _expect workflow-violation 1 "push blocked" || return 1
+}
+
 # What: changed file -> skip only for a shell comment.
 # Why: arch doc Test B/C/D; unproven changes run it.
 # From: Issue #1683 | PR #1858

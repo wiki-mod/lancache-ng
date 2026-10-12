@@ -11390,6 +11390,9 @@ _ci_check_mutable_refs() {
 _ci_check_executable_bits() {
     local -a owned=(.github/scripts/ci.sh) paths=()
     local h path mode
+    local hooks
+    hooks="$(_ci_ls_files executable-bits . '.githooks/*')" || return 2
+    while IFS= read -r h; do [ -n "${h}" ] && owned+=("${h}"); done <<< "${hooks}"
     # What: a changed-file list only narrows the owned set.
     # Why: Dockerfile/Cargo.toml are no bare-path scripts.
     # From: Issue #1683 | PR #1858
@@ -12363,7 +12366,7 @@ _ci_check_orphaned_branches() {
 _ci_action_deprecated_runtimes=" node6 node10 node12 node16 node20 "
 
 # What: print top-level runs.using from an action manifest.
-# Why: one parser for local + API-fetched action.yml bodies.
+# Why: one parser for local + fetched action.yml bodies.
 # From: Issue #1683 | PR #1858
 _ci_action_runs_using() {
     awk '
@@ -12373,31 +12376,55 @@ _ci_action_runs_using() {
     ' | sed -E "s/.*using:[[:space:]]*//; s/[\"']//g; s/[[:space:]]*#.*\$//; s/[[:space:]]+\$//"
 }
 
-# What: resolve external action manifest for pin.
-# Why: one gh api + _ci_retry owner; no own HTTP client.
-# From: Issue #1683 | PR #1858
-_ci_fetch_action_manifest() {
-    local owner="$1" repo="$2" subpath="$3" ref="$4"
-    local dir="repos/${owner}/${repo}/contents${subpath:+/${subpath}}" names out file rc=0
-    # What: list the dir once, then fetch the manifest name.
-    # Why: a 404 on the dir is a broken pin, not infra.
-    # From: Issue #1683 | PR #1858
-    names="$(_ci_retry github-api gh api "${dir}?ref=${ref}" --jq '.[].name')" || rc=$?
-    if [ "${rc}" -ne 0 ]; then
-        case "${names,,}" in *"http 404"*) printf 'NOTFOUND\n' ;; *) printf 'INFRA\n' ;; esac
-        return 0
+# What: GET one raw-content URL; body on 200.
+# Why: public SHA reads need no token and no REST budget.
+# From: Issue #1860 | PR #1872
+_ci_raw_get() {
+    local url="$1" out code
+    if ! out="$(curl -sS --connect-timeout 10 --max-time 30 --location -w '\n%{http_code}' "${url}")"; then
+        printf 'raw GET %s failed: curl error (http 000)\n' "${url}" >&2
+        return 1
     fi
+    code="${out##*$'\n'}"
+    if [ "${code}" != 200 ]; then
+        printf 'raw GET %s failed: http %s\n' "${url}" "${code}" >&2
+        return 1
+    fi
+    printf '%s\n' "${out%$'\n'*}"
+}
+
+# What: resolve external action manifest for pin.
+# Why: raw SHA reads, one _ci_retry owner; HTTP code kept.
+# From: Issue #1860 | PR #1872
+_ci_fetch_action_manifest() {
+    local owner="$1" repo="$2" subpath="$3" ref="$4" file out rc code raw
+    raw="$(_ci_variable CI_RAW_CONTENT_URL)" || return 2
     for file in action.yml action.yaml; do
-        grep -qx -- "${file}" <<< "${names}" || continue
-        out="$(_ci_retry github-api gh api -H 'Accept: application/vnd.github.raw+json' \
-            "${dir}/${file}?ref=${ref}")" || { printf 'INFRA\n'; return 0; }
-        printf 'OK\n%s\n' "${out}"; return 0
+        rc=0
+        out="$(_ci_retry github-read _ci_raw_get "${raw}/${owner}/${repo}/${ref}/${subpath:+${subpath}/}${file}")" || rc=$?
+        case "${rc}" in
+            0) printf 'OK\n%s\n' "${out}"; return 0 ;;
+            1) continue ;;
+        esac
+        code=000
+        if [[ "${out,,}" =~ http\ ([0-9]{3}) ]]; then code="${BASH_REMATCH[1]}"; fi
+        printf 'INFRA:%s\n' "${code}"
+        return 0
     done
     printf 'NOTFOUND\n'
 }
 
+# What: true if a uses: ref names this repo's own action.
+# Why: owner/repo comes from the run, never hardcoded.
+# From: Issue #1860 | PR #1872
+_ci_action_ref_is_own() {
+    [ -n "${GITHUB_REPOSITORY:-}" ] || return 1
+    case "${1,,}" in "${GITHUB_REPOSITORY,,}"/*) return 0 ;; esac
+    return 1
+}
+
 # What: true if a uses: ref is an external pinned action.
-# Why: local, docker, and same-repo refs skip the API path.
+# Why: local, docker, own and unpinned refs skip the fetch.
 # From: Issue #1683 | PR #1858
 _ci_action_ref_is_external() {
     local v="$1"
@@ -12407,13 +12434,7 @@ _ci_action_ref_is_external() {
     case "${v}" in
         ./*|\$/*|docker://*) return 1 ;;
     esac
-    # What: this repo's own actions are no third-party pins.
-    # Why: owner/repo comes from the run, never hardcoded.
-    # From: Issue #1683 | PR #1858
-    if [ -n "${GITHUB_REPOSITORY:-}" ]; then
-        case "${v,,}" in "${GITHUB_REPOSITORY,,}"/*) return 1 ;; esac
-    fi
-    return 0
+    ! _ci_action_ref_is_own "${v}"
 }
 
 # What: enforce Node runtime + ref hygiene on pins.
@@ -12544,7 +12565,7 @@ _ci_check_action_node_versions() {
     done
 
     # What: check each pin's runs.using for dead runtime.
-    # Why: local reads disk; external via API.
+    # Why: local reads disk; external via raw SHA reads.
     # From: Issue #1683 | PR #1858
     local v using local_dir cand resolved_file owner repo subpath ref res marker meta
     for v in "${uses_values[@]}"; do
@@ -12580,8 +12601,25 @@ _ci_check_action_node_versions() {
             [ "${bhit}" -eq 1 ] || viol+=("docker step '${v}' (in: $(_ci_ando_reffiles "${v}")) is not a SOT base_images pin")
             continue
         fi
-        _ci_action_ref_is_external "${v}" || continue
+        # What: own repo needs a ref; others unsupported.
+        # Why: a mutable ref has no verifiable manifest.
+        # From: Issue #1860 | PR #1872
+        if _ci_action_ref_is_own "${v}"; then
+            case "${v}" in *@*) ;; *) viol+=("same-repository action '${v}' must include an explicit ref") ;; esac
+            continue
+        fi
+        if ! _ci_action_ref_is_external "${v}"; then
+            viol+=("unsupported action reference '${v}' (in: $(_ci_ando_reffiles "${v}"))")
+            continue
+        fi
         ref="${v##*@}"; key="${v%@*}"
+        # What: external pins must be a 40-hex commit SHA.
+        # Why: the raw read of a tag or branch could drift.
+        # From: Issue #1860 | PR #1872
+        if [[ ! "${ref}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            viol+=("external action '${v}' (in: $(_ci_ando_reffiles "${v}")) must use a full 40-hex commit SHA")
+            continue
+        fi
         owner="$(cut -d/ -f1 <<<"${key}")"; repo="$(cut -d/ -f2 <<<"${key}")"; subpath="$(cut -d/ -f3- <<<"${key}")"
         res="$(_ci_fetch_action_manifest "${owner}" "${repo}" "${subpath}" "${ref}")" || return 2
         marker="${res%%$'\n'*}"
@@ -12597,7 +12635,7 @@ _ci_check_action_node_versions() {
             NOTFOUND)
                 viol+=("no action.yml/action.yaml for '${v}' at ref '${ref}' (in: $(_ci_ando_reffiles "${v}")); broken pin") ;;
             *)
-                infra+=("${v}") ;;
+                infra+=("${v} (${marker})") ;;
         esac
     done
     unset -f _ci_ando_reffiles
