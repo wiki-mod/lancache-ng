@@ -1142,20 +1142,20 @@ ROWS
 @test "proxy constant: Rust const forms read, other values fail closed" {
     local root t="${BATS_TEST_TMPDIR}/repo" src want case line rc exp
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    run _ci_proxy_constant NGINX_CERT_DIR "${root}"
+    run _ci_proxy_constant NGINX_STREAM_TARGETS "${root}"
     [ "${status}" -eq 0 ] && [ -n "${output}" ] || { echo "real: rc ${status}: ${output}"; return 1; }
     want="${output}"
     while IFS='|' read -r case line rc exp; do
         rm -rf "${t}" && _checkout_copy "${root}" "${t}" || return 1
         src="$(_ci_service_path services src/main.rs "${t}")" || return 1
-        awk -v l="${line}" '/^const NGINX_CERT_DIR:/ { print l; next } { print }' "${src}" > "${src}.new" \
+        awk -v l="${line}" '/^const NGINX_STREAM_TARGETS:/ { print l; next } { print }' "${src}" > "${src}.new" \
             && mv "${src}.new" "${src}" || return 1
-        run _ci_proxy_constant NGINX_CERT_DIR "${t}"
+        run _ci_proxy_constant NGINX_STREAM_TARGETS "${t}"
         [ "${exp}" != @WANT@ ] || exp="=${want}"
         _expect "${case}" "${rc}" "${exp}" || return 1
     done <<ROWS
-visibility|    pub(crate) const NGINX_CERT_DIR : &'static str = "ssl/certs"; // certs|0|@WANT@
-macro|const NGINX_CERT_DIR: &str = concat!("ssl", "/certs");|2|[CI-ERROR-CORE-0129]
+visibility|    pub(crate) const NGINX_STREAM_TARGETS : &'static str = "stream.d/00-stream-targets.conf"; // targets|0|@WANT@
+macro|const NGINX_STREAM_TARGETS: &str = concat!("stream.d", "/00-stream-targets.conf");|2|[CI-ERROR-CORE-0129]
 ROWS
 }
 

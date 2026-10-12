@@ -6973,7 +6973,7 @@ _ci_validate_proxy_stream_map() {
 # From: Issue #1683
 _ci_validate_https_mitm() {
     local project="$1" ip cid domain ca_subj issuer tmp out cert tls_err ca port
-    ca="$(_ci_proxy_constant NGINX_CA_DIR)" || return 2
+    ca="$(_ci_runtime_default NGINX_DIR)/$(_ci_runtime_default NGINX_SUBDIR_CA)" || return 2
     port="$(_ci_service_port https)" || return 2
     ip="$(_ci_validate_container_ip "${project}" proxy)"
     cid="$(_ci_validate_cid "${project}" proxy)" || return 2
@@ -12217,25 +12217,20 @@ _ci_check_proxy_nginx_policy() {
     printf 'proxy-nginx-policy=clean healthz_blocks=%s\n' "${blocks}"
 }
 
-# What: proxy cert, CA and cache dirs agree in all owners.
-# Why: Rust, nginx.conf, Compose and the SOT each name them.
+# What: proxy cert, CA and cache dirs sit on the SOT mounts.
+# Why: the SOT owns them; Compose and nginx.conf use them.
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_cert_volume() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" dir ca cache dep inst targets cf cfg out line px setup d
+    local repo_root="${1:-${CI_REPO_ROOT}}" dir ca cache base dep inst targets cf cfg out line px
     local -a viol=() tl=()
     local -A seen=()
-    dir="$(_ci_proxy_constant NGINX_CERT_DIR "${repo_root}")" || return 2
-    ca="$(_ci_proxy_constant NGINX_CA_DIR "${repo_root}")" || return 2
+    base="$(_ci_runtime_default NGINX_DIR)" || return 2
+    dir="${base%/}/$(_ci_runtime_default NGINX_SUBDIR_CERTS)" || return 2
+    ca="${base%/}/$(_ci_runtime_default NGINX_SUBDIR_CA)" || return 2
+    cache="$(_ci_runtime_default NGINX_CACHE_DIR)" || return 2
     px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
-    cache="$(_ci_file_value "${px%/}/nginx.conf" 's/^[[:space:]]*proxy_cache_path[[:space:]]+([^[:space:];]+).*$/\1/p')" || {
-        [ "$?" -eq 1 ] || return 2
-        ci_error "[CI-ERROR-CORE-0147]" "path=\"${px}nginx.conf\" reason=\"proxy_cache_path missing or set twice\""
-        return 2
-    }
-    setup=" $(_ci_service_setup proxy) "
-    for d in "${ca}" "${dir}" "${cache}"; do
-        [[ "${setup}" == *" dir=${d} "* ]] || viol+=("SOT setup of proxy lacks dir=${d}")
-    done
+    grep -Eq '^[[:space:]]*proxy_cache_path[[:space:]]+\$\{NGINX_CACHE_DIR\}[[:space:]]*$' "${px%/}/nginx.conf" \
+        || viol+=("${px#"${repo_root}/"}nginx.conf: proxy_cache_path is not the SOT key NGINX_CACHE_DIR")
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     inst="$(_ci_installer_compose "${repo_root}")" || return 2
     targets="$(_ci_block_entry_field validation "" compose_targets)" || return 2
@@ -12256,7 +12251,7 @@ _ci_check_proxy_cert_volume() {
         done <<<"${out}"
     done
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0149]" "reason=\"proxy dirs disagree between Rust, nginx.conf, Compose and SOT\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0149]" "reason=\"proxy dirs differ from the SOT mounts\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'proxy-cert-volume=clean cert_dir=%s ca_dir=%s cache_dir=%s files=%s\n' "${dir}" "${ca}" "${cache}" "${#seen[@]}"

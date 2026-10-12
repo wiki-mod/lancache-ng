@@ -3274,10 +3274,8 @@ impl NginxPorts {
 }
 
 // What: rendered nginx paths below NGINX_DIR.
-// Why: the rendered nginx layout has one path owner.
+// Why: the CA and cert dirs come from the SOT.
 // From: Issue #1683 | PR #1912
-const NGINX_CA_DIR: &str = "ssl/ca";
-const NGINX_CERT_DIR: &str = "ssl/certs";
 const NGINX_STREAM_TARGETS: &str = "stream.d/00-stream-targets.conf";
 const NGINX_HTTPS_DISPATCH: &str = "stream.d/01-https-dispatch.conf";
 
@@ -3555,17 +3553,17 @@ fn sign_leaf(ca: &Path, run: &Path, key: &Path, crt: &Path, san: &str) -> Result
 // Why: HTTPS mode intercepts TLS for every proxied host.
 // From: Issue #1683
 fn nginx_certs(
-    nginx: &Path,
+    ca: &Path,
+    certs: &Path,
     run: &Path,
     hosts: &CdnHosts,
     ip_https: &str,
     gid: u32,
 ) -> Result<(), String> {
-    let (ca, certs) = (nginx.join(NGINX_CA_DIR), nginx.join(NGINX_CERT_DIR));
     let (ca_crt, ca_key) = (ca.join("ca.crt"), ca.join("ca.key"));
     let path = |p: &Path| p.display().to_string();
     if !(ca_crt.is_file() && ca_key.is_file()) {
-        fs::create_dir_all(&ca).map_err(|e| format!("cannot create {}: {e}", ca.display()))?;
+        fs::create_dir_all(ca).map_err(|e| format!("cannot create {}: {e}", ca.display()))?;
         tool(
             "openssl",
             &[
@@ -3591,8 +3589,8 @@ fn nginx_certs(
              once (docs/install-ca-cert.md)",
         );
     }
-    fs::create_dir_all(&certs).map_err(|e| format!("cannot create {}: {e}", certs.display()))?;
-    own(&certs, None, gid, 0o2750)?;
+    fs::create_dir_all(certs).map_err(|e| format!("cannot create {}: {e}", certs.display()))?;
+    own(certs, None, gid, 0o2750)?;
     // What: drop every leaf when the CA changed.
     // Why: leaves of an old CA would fail on every client.
     let print = tool(
@@ -3609,7 +3607,7 @@ fn nginx_certs(
     let stamp = certs.join(".ca-fingerprint");
     if fs::read_to_string(&stamp).ok().as_deref() != Some(print.as_str()) {
         for entry in
-            fs::read_dir(&certs).map_err(|e| format!("cannot list {}: {e}", certs.display()))?
+            fs::read_dir(certs).map_err(|e| format!("cannot list {}: {e}", certs.display()))?
         {
             let file = entry.map_err(|e| e.to_string())?.path();
             if matches!(
@@ -3659,7 +3657,7 @@ fn nginx_certs(
         if !ip_https.is_empty() {
             names.push_str(&format!(",IP:{ip_https}"));
         }
-        sign_leaf(&ca, run, &default_key, &default_crt, &names)?;
+        sign_leaf(ca, run, &default_key, &default_crt, &names)?;
     }
     let leaves = hosts
         .roots
@@ -3684,12 +3682,10 @@ fn nginx_certs(
         );
         if !(key.is_file() && crt.is_file()) {
             log(&format!("Generating certificate {file} for {names}"));
-            sign_leaf(&ca, run, &key, &crt, &names)?;
+            sign_leaf(ca, run, &key, &crt, &names)?;
         }
     }
-    for entry in
-        fs::read_dir(&certs).map_err(|e| format!("cannot list {}: {e}", certs.display()))?
-    {
+    for entry in fs::read_dir(certs).map_err(|e| format!("cannot list {}: {e}", certs.display()))? {
         let file = entry.map_err(|e| e.to_string())?.path();
         match file.extension().and_then(|x| x.to_str()) {
             Some("key") => own(&file, None, gid, 0o640)?,
@@ -3751,11 +3747,20 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     );
     let https = dir.join("conf.d/https.conf");
     let listen_file = ctx.need("NGINX_HTTPS_LISTEN_FILE")?;
+    let ca_dir = dir.join(ctx.need("NGINX_SUBDIR_CA")?);
+    let cert_dir = dir.join(ctx.need("NGINX_SUBDIR_CERTS")?);
     if https_on {
         if ip_https.is_empty() {
             return Err("HTTPS_ENABLED needs IP_HTTPS".into());
         }
-        nginx_certs(&dir, &ctx.run_dir, &hosts, &ip_https, worker_gid)?;
+        nginx_certs(
+            &ca_dir,
+            &cert_dir,
+            &ctx.run_dir,
+            &hosts,
+            &ip_https,
+            worker_gid,
+        )?;
     } else if https.exists() {
         fs::remove_file(&https).map_err(|e| format!("cannot remove {}: {e}", https.display()))?;
     }
@@ -3768,10 +3773,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     // From: Issue #1683 | PR #1912
     let server_values = [
         ("NGINX_DIR", dir.display().to_string()),
-        (
-            "NGINX_CERT_DIR",
-            dir.join(NGINX_CERT_DIR).display().to_string(),
-        ),
+        ("NGINX_CERT_DIR", cert_dir.display().to_string()),
         ("NGINX_HTTPS_LISTEN_FILE", listen_file.clone()),
     ];
     for (template, out, on) in [
@@ -3820,6 +3822,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
                     value("NGINX_PASSTHROUGH_PORT")?,
                     ("NGINX_UPSTREAM_RESOLVER", resolver),
                     ("NGINX_DIR", dir.display().to_string()),
+                    ("NGINX_CACHE_DIR", ctx.need("NGINX_CACHE_DIR")?),
                 ],
             ),
         ),
@@ -3865,12 +3868,14 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     .filter_map(|p| Path::new(p).file_name())
     .map(|n| n.to_string_lossy().into_owned())
     .collect();
-    let listen_name = new_files[2].as_str();
     let store = lancache_ng::SnapshotStore::new(
         PathBuf::from(ctx.need("PROXY_CONFIG_SNAPSHOT_DIR")?),
         "nginx.json",
         "proxy",
     );
+    // What: dispatch and listen come from this render.
+    // Why: the old shell wrote them anew each start.
+    // From: Issue #1683 | PR #1912
     checked_files(
         &files,
         &[
@@ -3882,11 +3887,10 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         &store,
         &|old| old.to_string(),
         &legacy_backfill(&new_files, (&new_files[0], LEGACY_PROXY_MAP), &|file| {
-            if file == listen_name {
-                listen.clone()
-            } else {
-                NGINX_GENERATED.to_string()
-            }
+            files
+                .iter()
+                .find(|(path, _)| path.file_name().is_some_and(|n| n == file))
+                .map_or_else(|| NGINX_GENERATED.to_string(), |(_, text)| text.clone())
         }),
         !hosts.skipped,
     )?;
@@ -6446,11 +6450,11 @@ mod tests {
         let base = format!("{}.{}.{}", rnd(0, 255), rnd(0, 255), rnd(0, 255));
         let octet = rnd(1, 25);
         let (ip_a, ip_b) = (format!("{base}.{octet}"), format!("{base}.{octet}1"));
-        let (ca, certs) = (nginx.join(NGINX_CA_DIR), nginx.join(NGINX_CERT_DIR));
+        let (ca, certs) = (nginx.join(gen_name()), nginx.join(gen_name()));
         let (leaf, default) = (certs.join(format!("{host}.crt")), certs.join("default.crt"));
         let mode = |p: &Path| fs::metadata(p).expect("meta").permissions().mode() & 0o7777;
         let bytes = |p: &Path| fs::read(p).expect("read");
-        nginx_certs(&nginx, &run, &hosts, &ip_b, gid).expect("first run");
+        nginx_certs(&ca, &certs, &run, &hosts, &ip_b, gid).expect("first run");
         assert_eq!(mode(&ca.join("ca.key")), 0o600);
         assert_eq!(mode(&certs), 0o2750);
         assert_eq!(fs::metadata(&certs).expect("certs").gid(), gid);
@@ -6482,13 +6486,13 @@ mod tests {
         );
         let (key_before, default_before, leaf_before) =
             (bytes(&ca.join("ca.key")), bytes(&default), bytes(&leaf));
-        nginx_certs(&nginx, &run, &hosts, &ip_b, gid).expect("same state");
+        nginx_certs(&ca, &certs, &run, &hosts, &ip_b, gid).expect("same state");
         assert_eq!(bytes(&ca.join("ca.key")), key_before);
         assert_eq!(bytes(&default), default_before);
         assert_eq!(bytes(&leaf), leaf_before);
-        nginx_certs(&nginx, &run, &hosts, "", gid).expect("no ip");
+        nginx_certs(&ca, &certs, &run, &hosts, "", gid).expect("no ip");
         assert_eq!(bytes(&default), default_before);
-        nginx_certs(&nginx, &run, &hosts, &ip_a, gid).expect("prefix ip");
+        nginx_certs(&ca, &certs, &run, &hosts, &ip_a, gid).expect("prefix ip");
         assert_ne!(bytes(&default), default_before, "a prefix IP kept the cert");
         let san = x509(&default, &["-ext", "subjectAltName"]);
         assert!(san.contains(&format!("IP Address:{ip_a}")), "{san}");
@@ -6502,7 +6506,7 @@ mod tests {
         let stamp = bytes(&certs.join(".ca-fingerprint"));
         fs::remove_file(&ca_crt).expect("drop ca.crt");
         fs::remove_file(ca.join("ca.key")).expect("drop ca.key");
-        nginx_certs(&nginx, &run, &hosts, &ip_a, gid).expect("rotation");
+        nginx_certs(&ca, &certs, &run, &hosts, &ip_a, gid).expect("rotation");
         assert_ne!(bytes(&certs.join(".ca-fingerprint")), stamp);
         assert_ne!(bytes(&leaf), leaf_before);
         verify(&leaf).expect("leaf signed by the new CA");
@@ -6522,8 +6526,8 @@ mod tests {
             use std::os::unix::fs::MetadataExt as _;
             fs::metadata(&root).expect("root meta").gid()
         };
-        nginx_certs(&nginx, &run, &CdnHosts::default(), "", gid).expect("ca");
-        let ca = nginx.join(NGINX_CA_DIR);
+        let (ca, certs) = (nginx.join(gen_name()), nginx.join(gen_name()));
+        nginx_certs(&ca, &certs, &run, &CdnHosts::default(), "", gid).expect("ca");
         let san = format!("DNS:{}", gen_name());
         let (key, crt) = (root.join(gen_name()), root.join(gen_name()));
         fs::create_dir(&key).expect("key dir");

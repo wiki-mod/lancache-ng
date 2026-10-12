@@ -105,10 +105,10 @@ services:
       - PROXY_SECURITY_MODE=${PROXY_SECURITY_MODE:-}
       - PROXY_ALLOWED_CLIENT_CIDRS=${PROXY_ALLOWED_CLIENT_CIDRS:-}
     volumes:
-      - ../../certs:${SOT_NGINX_DIR}/ssl/ca
+      - ../../certs:${SOT_NGINX_DIR}/${SOT_NGINX_SUBDIR_CA}
       - ../../services/dns/cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}
-      - proxy-cache:/var/cache/nginx/lancache
-      - proxy-certs:${SOT_NGINX_DIR}/ssl/certs
+      - proxy-cache:${SOT_NGINX_CACHE_DIR}
+      - proxy-certs:${SOT_NGINX_DIR}/${SOT_NGINX_SUBDIR_CERTS}
       - proxy-config-snapshots:${SOT_PROXY_SNAPSHOT_MOUNT}
     tmpfs:
       - ${SOT_SUPERVISE_RUN_DIR}
