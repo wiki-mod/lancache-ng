@@ -1211,13 +1211,14 @@ fn processed_count(stats: &str, destination: &str) -> Option<u64> {
     })
 }
 
-// What: newest file modification below root, in ns.
-// Why: a write moves it; retention deleting old files not.
+// What: newest plain-file modification below root, in ns.
+// Why: a write moves it; retention and packing do not.
 // From: Issue #1428 | PR #1912
 fn newest_write(root: &Path) -> u128 {
     files_under(root).map_or(0, |files| {
         files
             .iter()
+            .filter(|(path, _)| !path.to_string_lossy().ends_with(XZ_SUFFIX))
             .filter_map(|(_, meta)| meta.modified().ok())
             .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_nanos())
@@ -1874,10 +1875,16 @@ fn checked_files(
         .map(|(path, _)| path.display().to_string())
         .collect::<Vec<_>>()
         .join(", ");
+    // What: a file the snapshot lacks keeps this render.
+    // Why: older snapshots predate the https files.
+    // From: Issue #1683 | PR #1912
     let named = |set: Value| -> Option<Vec<(PathBuf, String)>> {
         files
             .iter()
-            .map(|(path, _)| Some((path.clone(), restamp(set.get(name(path)?)?.as_str()?))))
+            .map(|(path, fresh)| match set.get(name(path)?) {
+                Some(text) => Some((path.clone(), restamp(text.as_str()?))),
+                None => Some((path.clone(), fresh.clone())),
+            })
             .collect()
     };
     store.adopt_legacy();
@@ -3691,7 +3698,15 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         &Psl::parse(&read(&dir.join("public_suffix_list.dat"))?),
     );
     let https = dir.join("conf.d/https.conf");
+    let listen_file = ctx.need("NGINX_HTTPS_LISTEN_FILE")?;
     if https_on {
+        // What: https.conf must include the listen file.
+        // Why: a drifted path starts nginx with no listen.
+        // From: Issue #1683 | PR #1912
+        let want = format!("include     {}/{listen_file};", dir.display());
+        if !read(&https)?.lines().any(|line| line.trim() == want) {
+            return Err(format!("{} lacks `{want}`", https.display()));
+        }
         if ip_https.is_empty() {
             return Err("HTTPS_ENABLED needs IP_HTTPS".into());
         }
@@ -3761,7 +3776,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
             },
         ),
         (
-            dir.join(ctx.need("NGINX_HTTPS_LISTEN_FILE")?),
+            dir.join(&listen_file),
             if https_on {
                 nginx_https_listen(ports.mitm, health_port)
             } else {
@@ -4708,8 +4723,8 @@ mod tests {
         assert!(!log_lost(at(p, t), at(p, t + 1)));
     }
 
-    // What: retention deleting old logs is no loss.
-    // Why: the byte sum fell then and raised a false ALERT.
+    // What: deleting or packing old logs is no loss.
+    // Why: only a plain-file write clears the loss alarm.
     // From: Issue #1428 | PR #1912
     #[test]
     fn newest_write_ignores_deleted_old_files() {
@@ -4721,6 +4736,10 @@ mod tests {
         let before = newest_write(&root);
         assert!(before > 0);
         fs::remove_file(&old).unwrap();
+        assert_eq!(newest_write(&root), before);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let packed = root.join(format!("{}{XZ_SUFFIX}", gen_name()));
+        fs::write(&packed, gen_name()).unwrap();
         assert_eq!(newest_write(&root), before);
         std::thread::sleep(std::time::Duration::from_millis(20));
         fs::write(&new, gen_name()).unwrap();
@@ -5672,6 +5691,28 @@ mod tests {
         assert_eq!(fs::read_to_string(&two).unwrap(), other);
         let empty = lancache_ng::SnapshotStore::new(root.join("none"), "set.json", "test");
         assert!(checked_files(&files, &check, &empty, &|old| old.to_string(), false).is_err());
+    }
+
+    // What: a snapshot without a newer file still restores.
+    // Why: old shell snapshots hold fewer files than now.
+    // From: Issue #1683 | PR #1912
+    #[test]
+    fn checked_files_restore_a_snapshot_that_lacks_a_file() {
+        let root = scratch();
+        let (one, two) = (root.join(gen_name()), root.join(gen_name()));
+        let [good, bad, newer] = std::array::from_fn(|_| gen_name());
+        let store = lancache_ng::SnapshotStore::new(root.join("snap"), "set.json", "test");
+        let name = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
+        store
+            .create(&serde_json::json!({ name(&one): good }), 3)
+            .expect("snapshot");
+        let check: Vec<String> = ["grep", "-q", good.as_str(), &one.display().to_string()]
+            .map(String::from)
+            .to_vec();
+        let files = [(one.clone(), bad), (two.clone(), newer.clone())];
+        checked_files(&files, &check, &store, &|old| old.to_string(), false).expect("rollback");
+        assert_eq!(fs::read_to_string(&one).unwrap(), good);
+        assert_eq!(fs::read_to_string(&two).unwrap(), newer);
     }
 
     // What: lua names the RPZ file, every zone, the root.
