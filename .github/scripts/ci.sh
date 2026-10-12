@@ -12217,14 +12217,25 @@ _ci_check_proxy_nginx_policy() {
     printf 'proxy-nginx-policy=clean healthz_blocks=%s\n' "${blocks}"
 }
 
-# What: proxy NGINX_CERT_DIR sits on a named volume.
-# Why: an anonymous volume loses leaf certs on recreate.
+# What: proxy cert, CA and cache dirs agree in all owners.
+# Why: Rust, nginx.conf, Compose and the SOT each name them.
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_cert_volume() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" dir dep inst targets cf cfg out line
+    local repo_root="${1:-${CI_REPO_ROOT}}" dir ca cache dep inst targets cf cfg out line px setup d
     local -a viol=() tl=()
     local -A seen=()
     dir="$(_ci_proxy_constant NGINX_CERT_DIR "${repo_root}")" || return 2
+    ca="$(_ci_proxy_constant NGINX_CA_DIR "${repo_root}")" || return 2
+    px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
+    cache="$(_ci_file_value "${px%/}/nginx.conf" 's/^[[:space:]]*proxy_cache_path[[:space:]]+([^[:space:];]+).*$/\1/p')" || {
+        [ "$?" -eq 1 ] || return 2
+        ci_error "[CI-ERROR-CORE-0147]" "path=\"${px}nginx.conf\" reason=\"proxy_cache_path missing or set twice\""
+        return 2
+    }
+    setup=" $(_ci_service_setup proxy) "
+    for d in "${ca}" "${dir}" "${cache}"; do
+        [[ "${setup}" == *" dir=${d} "* ]] || viol+=("SOT setup of proxy lacks dir=${d}")
+    done
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     inst="$(_ci_installer_compose "${repo_root}")" || return 2
     targets="$(_ci_block_entry_field validation "" compose_targets)" || return 2
@@ -12233,21 +12244,22 @@ _ci_check_proxy_cert_volume() {
         [ -z "${seen[${cf}]:-}" ] || continue
         seen["${cf}"]=1
         cfg="$(_ci_compose_json "${repo_root}/${cf}")" || return 2
-        out="$(_ci_capture 0 jq -r --arg d "${dir}" '.services.proxy // empty
-            | [.volumes // [] | .[] | select(.target == $d)] as $m
-            | if ($m | length) != 1 then "proxy needs exactly one mount at \($d) (got \($m | length))"
-              elif $m[0].type != "volume" or ($m[0].source // "") == ""
-              then "proxy \($d) must be a named volume (got \($m[0].type) \($m[0].source // "anonymous"))"
-              else empty end' <<<"${cfg}")" || return 2
+        out="$(_ci_capture 0 jq -r --arg d "${dir}" --arg c "${ca}" --arg k "${cache}" '.services.proxy // empty
+            | def mount($t; $kind): [.volumes // [] | .[] | select(.target == $t)] as $m
+                | if ($m | length) != 1 then "proxy needs exactly one mount at \($t) (got \($m | length))"
+                  elif $m[0].type != $kind or ($m[0].source // "") == ""
+                  then "proxy \($t) must be a \($kind) mount (got \($m[0].type) \($m[0].source // "anonymous"))"
+                  else empty end;
+              mount($d; "volume"), mount($c; "bind"), mount($k; "volume")' <<<"${cfg}")" || return 2
         while IFS= read -r line; do
             [ -z "${line}" ] || viol+=("${cf}: ${line}")
         done <<<"${out}"
     done
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0149]" "reason=\"proxy cert dir not on a named volume\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0149]" "reason=\"proxy dirs disagree between Rust, nginx.conf, Compose and SOT\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
-    printf 'proxy-cert-volume=clean cert_dir=%s files=%s\n' "${dir}" "${#seen[@]}"
+    printf 'proxy-cert-volume=clean cert_dir=%s ca_dir=%s cache_dir=%s files=%s\n' "${dir}" "${ca}" "${cache}" "${#seen[@]}"
 }
 
 # What: fails unless setup.sh calls the Kea preflight

@@ -1886,7 +1886,7 @@ const LEGACY_CERT_VAR: (&str, &str) = ("$ssl_cert_name", "$https_cert_name");
 fn legacy_backfill<'a>(
     names: &'a [String],
     renamed: (&'a str, &'a str),
-    stub: &'a str,
+    stub: &'a dyn Fn(&str) -> String,
 ) -> impl Fn(&Value, &str) -> Option<String> + 'a {
     move |set, file| {
         if !names.iter().any(|n| n == file) || names.iter().any(|n| set.get(n).is_some()) {
@@ -1899,7 +1899,7 @@ fn legacy_backfill<'a>(
                 .as_str()
                 .map(|text| text.replace(old, new));
         }
-        Some(stub.to_string())
+        Some(stub(file))
     }
 }
 
@@ -3799,6 +3799,14 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     } else {
         (NginxPorts::default(), 0)
     };
+    // What: the https listen file text.
+    // Why: a rolled-back old set still needs the listener.
+    // From: Issue #1683 | PR #1912
+    let listen = if https_on {
+        nginx_https_listen(ports.mitm, health_port)
+    } else {
+        NGINX_GENERATED.to_string()
+    };
     let files = vec![
         (
             conf.clone(),
@@ -3843,14 +3851,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
                 NGINX_GENERATED.to_string()
             },
         ),
-        (
-            dir.join(&listen_file),
-            if https_on {
-                nginx_https_listen(ports.mitm, health_port)
-            } else {
-                NGINX_GENERATED.to_string()
-            },
-        ),
+        (dir.join(&listen_file), listen.clone()),
     ];
     // What: names of the files older snapshots lack.
     // Why: only a snapshot with none of them is old.
@@ -3864,6 +3865,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     .filter_map(|p| Path::new(p).file_name())
     .map(|n| n.to_string_lossy().into_owned())
     .collect();
+    let listen_name = new_files[2].as_str();
     let store = lancache_ng::SnapshotStore::new(
         PathBuf::from(ctx.need("PROXY_CONFIG_SNAPSHOT_DIR")?),
         "nginx.json",
@@ -3879,11 +3881,13 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         ],
         &store,
         &|old| old.to_string(),
-        &legacy_backfill(
-            &new_files,
-            (&new_files[0], LEGACY_PROXY_MAP),
-            NGINX_GENERATED,
-        ),
+        &legacy_backfill(&new_files, (&new_files[0], LEGACY_PROXY_MAP), &|file| {
+            if file == listen_name {
+                listen.clone()
+            } else {
+                NGINX_GENERATED.to_string()
+            }
+        }),
         !hosts.skipped,
     )?;
     Ok(Run {
@@ -5815,7 +5819,7 @@ mod tests {
         ];
         let news = [name(&two), name(&three)];
         let (legacy, map) = (gen_name(), format!("{} $ssl_cert_name", gen_name()));
-        let backfill = legacy_backfill(&news, (&news[0], &legacy), "stub");
+        let backfill = legacy_backfill(&news, (&news[0], &legacy), &|file| format!("stub {file}"));
         let old = lancache_ng::SnapshotStore::new(root.join("old"), "set.json", "test");
         old.create(&serde_json::json!({ name(&one): good, &legacy: map }), 3)
             .expect("snapshot");
@@ -5824,7 +5828,10 @@ mod tests {
         assert_eq!(fs::read_to_string(&one).unwrap(), good);
         let renamed = map.replace("$ssl_cert_name", "$https_cert_name");
         assert_eq!(fs::read_to_string(&two).unwrap(), renamed);
-        assert_eq!(fs::read_to_string(&three).unwrap(), "stub");
+        assert_eq!(
+            fs::read_to_string(&three).unwrap(),
+            format!("stub {}", name(&three))
+        );
         assert!(checked_files(&files, &check, &old, &same, &no_backfill, false).is_err());
         let bare = lancache_ng::SnapshotStore::new(root.join("bare"), "set.json", "test");
         bare.create(&serde_json::json!({ name(&one): good }), 3)
