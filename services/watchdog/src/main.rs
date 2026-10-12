@@ -1866,16 +1866,27 @@ fn no_backfill(_: &Value, _: &str) -> Option<String> {
     None
 }
 
-// What: stubs for files that only newer snapshots hold.
-// Why: older snapshots hold none of them; some is damage.
+// What: file name the old shell gave the proxy map.
+// Why: its snapshots hold the map under this name.
 // From: Issue #1683 | PR #1912
-fn stub_if_all_absent<'a>(
+const LEGACY_PROXY_MAP: &str = "00-ssl-map.conf";
+
+// What: backfill for a wholly old snapshot; None otherwise.
+// Why: old sets keep the map under an old name.
+// From: Issue #1683 | PR #1912
+fn legacy_backfill<'a>(
     names: &'a [String],
+    renamed: (&'a str, &'a str),
     stub: &'a str,
 ) -> impl Fn(&Value, &str) -> Option<String> + 'a {
     move |set, file| {
-        (names.iter().any(|n| n == file) && names.iter().all(|n| set.get(n).is_none()))
-            .then(|| stub.to_string())
+        if !names.iter().any(|n| n == file) || names.iter().any(|n| set.get(n).is_some()) {
+            return None;
+        }
+        if file == renamed.0 {
+            return set.get(renamed.1)?.as_str().map(String::from);
+        }
+        Some(stub.to_string())
     }
 }
 
@@ -3739,19 +3750,27 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         fs::create_dir_all(dir.join(sub))
             .map_err(|e| format!("cannot create {}: {e}", dir.join(sub).display()))?;
     }
-    if https_on {
-        // What: render https.conf from its image template.
-        // Why: the include path comes from the SOT.
-        // From: Issue #1683 | PR #1912
-        let text = fill(
-            &read(&dir.join("https.conf.template"))?,
-            &[
-                ("NGINX_DIR", dir.display().to_string()),
-                ("NGINX_HTTPS_LISTEN_FILE", listen_file.clone()),
-            ],
-        );
-        write_file(&https, text.as_bytes(), 0o640, Place::Replace)
-            .map_err(|e| format!("cannot write {}: {e}", https.display()))?;
+    // What: render the server confs from image templates.
+    // Why: the paths come from the SOT, not from the text.
+    // From: Issue #1683 | PR #1912
+    let server_values = [
+        ("NGINX_DIR", dir.display().to_string()),
+        (
+            "NGINX_CERT_DIR",
+            dir.join(NGINX_CERT_DIR).display().to_string(),
+        ),
+        ("NGINX_HTTPS_LISTEN_FILE", listen_file.clone()),
+    ];
+    for (template, out, on) in [
+        ("http.conf.template", dir.join("conf.d/http.conf"), true),
+        ("https.conf.template", https.clone(), https_on),
+    ] {
+        if !on {
+            continue;
+        }
+        let text = fill(&read(&dir.join(template))?, &server_values);
+        write_file(&out, text.as_bytes(), 0o640, Place::Replace)
+            .map_err(|e| format!("cannot write {}: {e}", out.display()))?;
     }
     let healthz = dir.join("lancache-healthz-body.txt");
     write_file(&healthz, b"ok\n", 0o644, Place::Replace)
@@ -3846,7 +3865,11 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         ],
         &store,
         &|old| old.to_string(),
-        &stub_if_all_absent(&new_files, NGINX_GENERATED),
+        &legacy_backfill(
+            &new_files,
+            (&new_files[0], LEGACY_PROXY_MAP),
+            NGINX_GENERATED,
+        ),
         !hosts.skipped,
     )?;
     Ok(Run {
@@ -5777,20 +5800,25 @@ mod tests {
             (three.clone(), gen_name()),
         ];
         let news = [name(&two), name(&three)];
+        let (legacy, map) = (gen_name(), gen_name());
+        let backfill = legacy_backfill(&news, (&news[0], &legacy), "stub");
         let old = lancache_ng::SnapshotStore::new(root.join("old"), "set.json", "test");
-        old.create(&serde_json::json!({ name(&one): good }), 3)
+        old.create(&serde_json::json!({ name(&one): good, &legacy: map }), 3)
             .expect("snapshot");
         let same = |old: &str| old.to_string();
-        let stub = stub_if_all_absent(&news, "stub");
-        checked_files(&files, &check, &old, &same, &stub, false).expect("rollback");
+        checked_files(&files, &check, &old, &same, &backfill, false).expect("rollback");
         assert_eq!(fs::read_to_string(&one).unwrap(), good);
-        assert_eq!(fs::read_to_string(&two).unwrap(), "stub");
+        assert_eq!(fs::read_to_string(&two).unwrap(), map);
         assert_eq!(fs::read_to_string(&three).unwrap(), "stub");
         assert!(checked_files(&files, &check, &old, &same, &no_backfill, false).is_err());
+        let bare = lancache_ng::SnapshotStore::new(root.join("bare"), "set.json", "test");
+        bare.create(&serde_json::json!({ name(&one): good }), 3)
+            .expect("snapshot");
+        assert!(checked_files(&files, &check, &bare, &same, &backfill, false).is_err());
         let torn = lancache_ng::SnapshotStore::new(root.join("torn"), "set.json", "test");
         torn.create(&serde_json::json!({ name(&one): good, name(&two): "x" }), 3)
             .expect("snapshot");
-        assert!(checked_files(&files, &check, &torn, &same, &stub, false).is_err());
+        assert!(checked_files(&files, &check, &torn, &same, &backfill, false).is_err());
     }
 
     // What: lua names the RPZ file, every zone, the root.
