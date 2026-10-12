@@ -4764,6 +4764,37 @@ CASES
     [ "$(wc -l < "${calls}")" -eq 2 ] || { echo "finding stopped the scan: $(cat "${calls}")"; return 1; }
 }
 
+# What: scan passes clean pairs on; an image-less pair skips
+# Why: Q7: a red service must not keep the others unaccepted
+# From: Issue #1683 | PR #1912
+@test "scan stack: clean pairs are the output, a pair without image is skipped" {
+    local a b c d out
+    a="$(_val name)" b="$(_val name)" c="$(_val name)" d="$(_val digest)" out="$(_val path)"
+    : > "${out}"
+    _ci_require_ghcr_auth() { return 0; }
+    _ci_published_digest() { [ "$1" != "${c}" ] || return 1; printf '%s\n' "${d}"; }
+    ci_cmd_scan() { [ "$1" != "${a}" ] || return 1; }
+    GITHUB_OUTPUT="${out}" CI_BUILD_MATRIX="{\"include\":[{\"service\":\"${a}\",\"platform\":\"p/x\"},{\"service\":\"${b}\",\"platform\":\"p/x\"},{\"service\":\"${c}\",\"platform\":\"p/x\"}]}" \
+        run ci_cmd_scan_stack
+    _expect scan-partial 1 "[CI-WARN-SCAN-0025];[CI-ERROR-SCAN-0024];failed=\"${a}/p/x\"" || return 1
+    [ "$(cat "${out}")" = "passed={\"include\":[{\"service\":\"${b}\",\"platform\":\"p/x\"}]}" ] \
+        || { echo "passed output: $(cat "${out}")"; return 1; }
+}
+
+# What: assemble goes on after a service that fails
+# Why: one service without both platforms blocks no other
+# From: Issue #1683 | PR #1912
+@test "assemble stack: a failing service does not stop the others" {
+    local a b calls
+    a="$(_val name)" b="$(_val name)" calls="$(_val path)"
+    : > "${calls}"
+    ci_cmd_assemble() { echo "$1" >> "${calls}"; [ "$1" != "${a}" ] || return 2; }
+    CI_BUILD_MATRIX="{\"include\":[{\"service\":\"${a}\",\"platform\":\"p/x\"},{\"service\":\"${b}\",\"platform\":\"p/x\"}]}" \
+        run ci_cmd_assemble_stack
+    _expect assemble-partial 2 "[CI-ERROR-ASSEMBLE-0012];failed=\"${a}\"" || return 1
+    [ "$(wc -l < "${calls}")" -eq 2 ] || { echo "assembled: $(cat "${calls}")"; return 1; }
+}
+
 # What: push digest must equal the registry digest
 # Why: a mismatch must never reach the ledger as accepted
 # From: Issue #1683 | PR #1912
