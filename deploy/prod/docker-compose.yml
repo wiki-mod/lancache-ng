@@ -53,10 +53,10 @@ services:
       - ui-data:${SOT_UI_DATA_DIR}:ro
       - watchdog-status:${SOT_STATUS_DIR}
       - proxy-cache:${SOT_CACHE_DIR}
-      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/syslog-ng}:${SOT_SYSLOG_LOG_ROOT}
+      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_SYSLOG_NG}}:${SOT_SYSLOG_LOG_ROOT}
       - retention-state:${SOT_RETENTION_STATE_DIR}
-      - ${NTP_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/ntp}:${SOT_NTP_STATE_DIR}
-      - ${CACHEHAMSTER_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/cachehamster}:${SOT_CACHEHAMSTER_DATA_DIR}
+      - ${NTP_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_NTP}}:${SOT_NTP_STATE_DIR}
+      - ${CACHEHAMSTER_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_CACHEHAMSTER}}:${SOT_CACHEHAMSTER_DATA_DIR}
       - netdataconfig:${SOT_NETDATA_CONFIG_DIR}
       - netdatalib:${SOT_NETDATA_LIB_DIR}
       - netdatacache:${SOT_NETDATA_CACHE_DIR}
@@ -147,10 +147,10 @@ services:
     volumes:
       - shared-secrets:${SOT_LANCACHE_SHARED_SECRET_DIR}
       - ../../services/dns/cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}
-      - ${PDNS_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/pdns}:${SOT_PDNS_DATA_DIR}
-      - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/pdns-filter-state}:${SOT_DNS_STATE_DIR}
-      - ${NATS_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/nats}:${SOT_NATS_STORE_DIR}
-      - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/nats-conf}:${SOT_NATS_CONF_MOUNT}
+      - ${PDNS_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_PDNS}}:${SOT_PDNS_DATA_DIR}
+      - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_PDNS_FILTER}}:${SOT_DNS_STATE_DIR}
+      - ${NATS_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_NATS}}:${SOT_NATS_STORE_DIR}
+      - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_NATS_CONF}}:${SOT_NATS_CONF_MOUNT}
       - dns-config-snapshots:${SOT_DNS_SNAPSHOT_MOUNT}
     tmpfs:
       - ${SOT_SUPERVISE_RUN_DIR}
@@ -216,7 +216,7 @@ services:
     volumes:
       - shared-secrets:${SOT_LANCACHE_SHARED_SECRET_DIR}
       - ui-data:${SOT_UI_DATA_DIR}:ro
-      - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/kea}:${SOT_KEA_DATA_DIR}
+      - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_KEA}}:${SOT_KEA_DATA_DIR}
       - dhcp-config-snapshots:${SOT_DHCP_SNAPSHOT_MOUNT}
     tmpfs:
       - ${SOT_SUPERVISE_RUN_DIR}
@@ -283,10 +283,10 @@ services:
       - ui-data:${SOT_UI_DATA_DIR}
       - ../../services/dns/cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}
       - proxy-cache:${SOT_CACHE_DIR}:ro
-      - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/pdns-filter-state}:${SOT_DNS_STATE_DIR}
-      - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/nats-conf}:${SOT_NATS_CONF_MOUNT}
-      - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/kea}:${SOT_KEA_DATA_DIR}
-      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/syslog-ng}:${SOT_SYSLOG_LOG_ROOT}:ro
+      - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_PDNS_FILTER}}:${SOT_DNS_STATE_DIR}
+      - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_NATS_CONF}}:${SOT_NATS_CONF_MOUNT}
+      - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_KEA}}:${SOT_KEA_DATA_DIR}
+      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_SYSLOG_NG}}:${SOT_SYSLOG_LOG_ROOT}:ro
       - watchdog-status:${SOT_STATUS_DIR}:ro
     # What: Admin UI on UI_BIND_IP, default IP_HTTP.
     # Why: UI_BIND_IP narrows the LAN exposure of the UI.
@@ -314,7 +314,7 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: ${CACHE_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/cache}
+      device: ${CACHE_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_CACHE}}
   proxy-certs:
   proxy-config-snapshots:
   dns-config-snapshots:

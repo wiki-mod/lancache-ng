@@ -7051,7 +7051,8 @@ printf "  Default: disabled.\n\n"
 
 ask "Enable LanCache-NG-NTP? [y/N]" "N"
 NTP_ENABLED=$(prod_env_default NTP_ENABLED) || exit $?
-NTP_DATA_DIR="$LANCACHE_STATE_DIR/ntp"
+ntp_subdir=$(prod_env_default STATE_SUBDIR_NTP) || exit $?
+NTP_DATA_DIR="$LANCACHE_STATE_DIR/$ntp_subdir"
 if [[ "${REPLY,,}" = "y" ]]; then
     NTP_ENABLED=1
     print_ok "LanCache-NG-NTP enabled — configure upstream servers and the DHCP auto-populate toggle from the Admin UI's NTP page"
@@ -7354,7 +7355,8 @@ fi
 # What: pre-creates syslog log root as the runtime uid
 # Why: Docker would create it root-owned, unwritable
 # From: Issue #1683 | PR #1912
-syslog_ng_log_dir="${SYSLOG_NG_LOG_DIR:-$LANCACHE_STATE_DIR/syslog-ng}"
+syslog_ng_subdir=$(prod_env_default STATE_SUBDIR_SYSLOG_NG) || exit $?
+syslog_ng_log_dir="${SYSLOG_NG_LOG_DIR:-$LANCACHE_STATE_DIR/$syslog_ng_subdir}"
 mkdir -p "$syslog_ng_log_dir" || die "Failed to create $syslog_ng_log_dir (exit $?)."
 runtime_id=$(lancache_sot_value gid runtime) || exit $?
 if chown_err=$(chown "$runtime_id:$runtime_id" "$syslog_ng_log_dir" 2>&1); then
