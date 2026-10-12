@@ -19,7 +19,7 @@ services:
   # Why: one container for every stack-wide support task.
   # From: Issue #1683
   services:
-    container_name: LanCache-NG-services
+    container_name: ${SOT_CONTAINER_NAME_SERVICES}
     image: ${LANCACHE_IMAGE_REF_SERVICES:?LANCACHE_IMAGE_REF_SERVICES is required}
     # What: tini as PID 1 reaps the supervisor's children.
     # Why: lancache-watchdog supervise is no init process.
@@ -77,7 +77,7 @@ services:
       - SYS_TIME
       - SYS_PTRACE
     healthcheck:
-      test: ["CMD", "/usr/local/bin/lancache-watchdog", "healthcheck"]
+      test: ["CMD", "lancache-watchdog", "healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -88,7 +88,7 @@ services:
   # What: nginx cache; the http and https side in one.
   # Why: :8443 passes SNI through, :443 intercepts TLS.
   proxy:
-    container_name: LanCache-NG-proxy
+    container_name: ${SOT_CONTAINER_NAME_PROXY}
     image: ${LANCACHE_IMAGE_REF_PROXY:?LANCACHE_IMAGE_REF_PROXY is required}
     init: true
     environment:
@@ -118,7 +118,7 @@ services:
       - "${IP_HTTPS}:80:80"
       - "${IP_HTTPS}:443:443"
     healthcheck:
-      test: ["CMD", "/usr/local/bin/lancache-watchdog", "healthcheck"]
+      test: ["CMD", "lancache-watchdog", "healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -130,7 +130,7 @@ services:
   # Why: one container answers on IP_HTTP and IP_HTTPS.
   # From: Issue #1683
   dns:
-    container_name: LanCache-NG-dns
+    container_name: ${SOT_CONTAINER_NAME_DNS}
     image: ${LANCACHE_IMAGE_REF_DNS:?LANCACHE_IMAGE_REF_DNS is required}
     init: true
     environment:
@@ -172,7 +172,7 @@ services:
       # From: Issue #1683 | PR #1912
       - "${NATS_BIND_IP:-${SOT_LOOPBACK_BIND_IP}}:${SOT_NATS_PORT}:${SOT_NATS_PORT}"
     healthcheck:
-      test: ["CMD", "/usr/local/bin/lancache-watchdog", "healthcheck"]
+      test: ["CMD", "lancache-watchdog", "healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -184,7 +184,7 @@ services:
   # Why: DHCP needs the host network for broadcasts.
   # From: Issue #1683
   dhcp:
-    container_name: LanCache-NG-dhcp
+    container_name: ${SOT_CONTAINER_NAME_DHCP}
     image: ${LANCACHE_IMAGE_REF_DHCP:?LANCACHE_IMAGE_REF_DHCP is required}
     init: true
     environment:
@@ -225,7 +225,7 @@ services:
       - NET_BIND_SERVICE
       - NET_ADMIN
     healthcheck:
-      test: ["CMD", "/usr/local/bin/lancache-watchdog", "healthcheck"]
+      test: ["CMD", "lancache-watchdog", "healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -237,7 +237,7 @@ services:
   # Why: the watchdog is the one control owner.
   # From: Issue #1683
   ui:
-    container_name: LanCache-NG-ui
+    container_name: ${SOT_CONTAINER_NAME_UI}
     image: ${LANCACHE_IMAGE_REF_UI:?LANCACHE_IMAGE_REF_UI is required}
     environment:
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
@@ -293,11 +293,11 @@ services:
     # From: Issue #1683 | PR #1912
     ports:
       - "${UI_BIND_IP:-${IP_HTTP}}:${SOT_UI_LISTEN_PORT}:${SOT_UI_LISTEN_PORT}"
-    # What: host.docker.internal maps to the Docker host.
+    # What: the SOT host name maps to the Docker host.
     # Why: the ui reaches Kea on the host network.
     # From: Issue #1683 | PR #1912
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "${SOT_DHCP_API_HOST}:host-gateway"
     healthcheck:
       test: ["CMD", "lancache-ui", "healthcheck"]
       interval: 30s

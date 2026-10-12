@@ -7594,7 +7594,7 @@ _ci_validate_kea_rollback() {
         rc=2
     elif _ci_run "[CI-ERROR-VALIDATE-0098]" "project=\"${project}\" service=\"ui\" reason=\"Kea ui run container not started\"" \
         _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${uname}" \
-        -e DHCP_MODE=kea -e "DHCP_API_URL=http://${kip}" ui >/dev/null; then
+        -e DHCP_MODE=kea -e "DHCP_API_HOST=${kip}" ui >/dev/null; then
         _ci_validate_kea_round_trip "${project}" "${kip}" "${kport}" "${uname}" || rc=$?
         # What: a failed round trip ships both run logs.
         # Why: the ui answer alone does not name the cause.
@@ -12398,7 +12398,7 @@ _ci_raw_get() {
 # From: Issue #1860 | PR #1872
 _ci_fetch_action_manifest() {
     local owner="$1" repo="$2" subpath="$3" ref="$4" file out rc code raw
-    raw="$(_ci_variable CI_RAW_CONTENT_URL)" || return 2
+    raw="$(_ci_runtime_default RAW_CONTENT_URL)" || return 2
     for file in action.yml action.yaml; do
         rc=0
         out="$(_ci_retry github-read _ci_raw_get "${raw}/${owner}/${repo}/${ref}/${subpath:+${subpath}/}${file}")" || rc=$?

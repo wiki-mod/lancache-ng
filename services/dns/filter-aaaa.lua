@@ -5,7 +5,7 @@
 -- What: AAAA: NOERROR, no records, if marker exists
 -- Why: marker file is the on/off switch the UI toggles
 
-local MARKER = "/var/lib/powerdns-state/aaaa-filter-enabled"
+local MARKER = assert(os.getenv("AAAA_FILTER_MARKER_PATH"), "AAAA_FILTER_MARKER_PATH is not set")
 
 -- What: counts suppressed AAAA answers in memory
 -- Why: per-query log lines would flood the recursor log

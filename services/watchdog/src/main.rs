@@ -1180,6 +1180,16 @@ fn fingerprint(files: &[PathBuf]) -> Vec<Option<(u64, i64, i64)>> {
 // From: Issue #1428 | PR #1912
 const SYSLOG_NG_DESTINATION: &str = "d_store";
 
+// What: env var that hands the AAAA marker path to the lua.
+// Why: filter-aaaa.lua cannot read the SOT; it reads this.
+// From: Issue #1683 | PR #1912
+const AAAA_FILTER_PATH_ENV: &str = "AAAA_FILTER_MARKER_PATH";
+
+// What: glob of the day files syslog-ng writes per program.
+// Why: syslog_ng_conf names them <day>.log; netdata reads.
+// From: Issue #1683 | PR #1912
+const SYSLOG_FILE_GLOB: &str = "*.log";
+
 // What: file name of the syslog-ng control socket.
 // Why: syslog-ng binds it and the log-loss check reads it.
 // From: Issue #1428 | PR #1912
@@ -1307,16 +1317,19 @@ log {{ source(s_docker); filter(f_named); destination({SYSLOG_NG_DESTINATION}); 
 // What: programs whose logging is switched off.
 // Why: the services container itself always logs.
 // From: Issue #1683 | PR #1912
-fn logging_off(ctx: &Ctx) -> Result<Vec<&'static str>, String> {
+fn logging_off(
+    ctx: &Ctx,
+    program_of: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<Vec<String>, String> {
     let mut off = Vec::new();
-    for (key, program) in config::LOG_SWITCHES {
+    for (key, program_key) in config::LOG_SWITCHES {
         let on = ctx
             .setting(key)
             .as_deref()
             .and_then(config::parse_bool)
             .ok_or_else(|| format!("{key} must be a boolean"))?;
         if !on {
-            off.push(program);
+            off.push(program_of(program_key)?);
         }
     }
     Ok(off)
@@ -1325,11 +1338,13 @@ fn logging_off(ctx: &Ctx) -> Result<Vec<&'static str>, String> {
 // What: render syslog-ng.conf; the syslog-ng command.
 // Why: state files live in the private run dir.
 fn syslog_ng(ctx: &Ctx) -> Result<Run, String> {
+    let off = logging_off(ctx, &|key| ctx.need(key))?;
+    let off: Vec<&str> = off.iter().map(String::as_str).collect();
     let conf = syslog_ng_conf(
         &ctx.need("LANCACHE_LOG_PORT")?,
         &ctx.need("SYSLOG_LOG_ROOT")?,
         &ctx.need("LOG_READER_GROUP")?,
-        &logging_off(ctx)?,
+        &off,
     )?;
     let conf = ctx.render("syslog-ng.conf", &conf)?;
     let run = |file: &str| ctx.run_dir.join(file).display().to_string();
@@ -1413,7 +1428,7 @@ custom_sender() {{
 // From: Issue #1246
 fn web_log_conf(path: &str) -> Result<String, String> {
     if !path.starts_with('/') || path.contains(['\'', '"', '\n', '\r', ' ', '#']) {
-        return Err(format!("NETDATA_WEB_LOG={path} is no plain absolute path"));
+        return Err(format!("web log path {path} is no plain absolute path"));
     }
     Ok(format!(
         "jobs:\n  - name: nginx_proxy\n    path: {path}\n    log_type: regexp\n    \
@@ -1433,7 +1448,11 @@ fn netdata(ctx: &Ctx) -> Result<Run, String> {
         bounded("NETDATA_ALARM_MAX_TIME", 1, 300)?,
         &ctx.need("NETDATA_ALARM_RECIPIENT")?,
     )?;
-    let web_log = web_log_conf(&ctx.need("NETDATA_WEB_LOG")?)?;
+    let web_log = web_log_conf(&format!(
+        "{}/{}/{SYSLOG_FILE_GLOB}",
+        ctx.need("SYSLOG_LOG_ROOT")?,
+        ctx.need("CONTAINER_NAME_PROXY")?
+    ))?;
     let token = stack_secret(
         "NETDATA_ALARM_TOKEN",
         &shared_secret_file_name("NETDATA_ALARM_TOKEN"),
@@ -2469,8 +2488,14 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
             config_dir,
             format!("--socket-dir={}", dir.display()),
         ],
+        env: vec![(
+            AAAA_FILTER_PATH_ENV.into(),
+            Path::new(&ctx.need("DNS_STATE_DIR")?)
+                .join(config::AAAA_FILTER_MARKER)
+                .display()
+                .to_string(),
+        )],
         watch: vec![domains_file],
-        ..Run::default()
     })
 }
 
@@ -2668,7 +2693,7 @@ fn find_file(dir: &Path, name: &str, depth: u32) -> Option<PathBuf> {
 // What: DHCP_NTP_SERVERS as IPv4 addresses; names resolve.
 // Why: DHCP option 42 carries addresses, never names.
 // From: Issue #1683
-fn dhcp_ntp_servers(raw: &str) -> Result<Vec<std::net::Ipv4Addr>, String> {
+fn dhcp_ntp_servers(raw: &str, port: u16) -> Result<Vec<std::net::Ipv4Addr>, String> {
     use std::net::ToSocketAddrs as _;
     raw.split([',', ' '])
         .filter(|s| !s.is_empty())
@@ -2676,7 +2701,7 @@ fn dhcp_ntp_servers(raw: &str) -> Result<Vec<std::net::Ipv4Addr>, String> {
             if let Ok(ip) = host.parse() {
                 return Ok(ip);
             }
-            (host, 123)
+            (host, port)
                 .to_socket_addrs()
                 .map_err(|e| format!("DHCP_NTP_SERVERS: cannot resolve {host}: {e}"))?
                 .find_map(|addr| match addr {
@@ -2722,7 +2747,10 @@ fn kea_dhcp4_first(ctx: &Ctx, dir: &Path) -> Result<Value, String> {
         serde_json::json!({"name": "domain-name", "data": domain}),
         serde_json::json!({"name": "domain-search", "data": domain}),
     ];
-    let ntp = dhcp_ntp_servers(&env_opt("DHCP_NTP_SERVERS").unwrap_or_default())?;
+    let ntp = dhcp_ntp_servers(
+        &env_opt("DHCP_NTP_SERVERS").unwrap_or_default(),
+        env_port("NTP_PORT")?,
+    )?;
     if !ntp.is_empty() {
         let list: Vec<String> = ntp.iter().map(ToString::to_string).collect();
         options.push(serde_json::json!({"name": "ntp-servers", "data": list.join(",")}));
@@ -5096,24 +5124,30 @@ mod tests {
             fs::write(file, rows.concat()).expect("settings");
         };
         save(["1", "1", "1", "1"]);
-        assert!(logging_off(&ctx).expect("all on").is_empty());
+        let names: Vec<String> = (0..4).map(|_| gen_name()).collect();
+        let program_of = |key: &str| {
+            let at = config::LOG_SWITCHES.iter().position(|(_, k)| *k == key);
+            Ok(names[at.expect("a switch key")].clone())
+        };
+        assert!(logging_off(&ctx, &program_of).expect("all on").is_empty());
         save(["0", "1", "0", "1"]);
-        let off = logging_off(&ctx).expect("two off");
-        let (first, third) = (config::LOG_SWITCHES[0].1, config::LOG_SWITCHES[2].1);
-        assert_eq!(off, [first, third]);
+        let off = logging_off(&ctx, &program_of).expect("two off");
+        let (first, third) = (&names[0], &names[2]);
+        assert_eq!(off, [first.clone(), third.clone()]);
         let (port, path, group) = (rnd(1, u16::MAX.into()).to_string(), gen_path(), gen_name());
+        let off: Vec<&str> = off.iter().map(String::as_str).collect();
         let conf = syslog_ng_conf(&port, &path, &group, &off).expect("conf");
         assert!(
             conf.contains(&format!("and not program(\"^({first}|{third})$\"")),
             "{conf}"
         );
-        for kept in [config::LOG_SWITCHES[1].1, config::LOG_SWITCHES[3].1] {
-            assert!(!conf.contains(kept), "{kept}: {conf}");
+        for kept in [&names[1], &names[3]] {
+            assert!(!conf.contains(kept.as_str()), "{kept}: {conf}");
         }
         let all_on = syslog_ng_conf(&port, &path, &group, &[]).expect("conf");
         assert!(!all_on.contains("not program"), "{all_on}");
         save(["1", "x", "1", "1"]);
-        assert!(logging_off(&ctx).is_err());
+        assert!(logging_off(&ctx, &program_of).is_err());
     }
 
     // What: chronyd follows the saved flag and the dock.
@@ -6462,11 +6496,12 @@ mod tests {
     fn dhcp_ntp_servers_are_ipv4_addresses() {
         let a = gen_ipv4();
         let b = gen_ipv4();
-        let got = dhcp_ntp_servers(&format!("{a}, {b}")).expect("ips");
+        let port = rnd(1, u16::MAX.into()) as u16;
+        let got = dhcp_ntp_servers(&format!("{a}, {b}"), port).expect("ips");
         assert_eq!(got, [a, b]);
-        assert!(dhcp_ntp_servers("").expect("empty").is_empty());
+        assert!(dhcp_ntp_servers("", port).expect("empty").is_empty());
         assert_eq!(
-            dhcp_ntp_servers("localhost").expect("local"),
+            dhcp_ntp_servers("localhost", port).expect("local"),
             [Ipv4Addr::LOCALHOST]
         );
     }

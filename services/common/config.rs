@@ -184,14 +184,14 @@ pub const SYSLOG_MAX_GB: Uint = Uint {
     above: OutOfRange::Clamp,
 };
 
-// What: the logging switches, as (key, syslog program).
-// Why: the ui saves them; the watchdog filters by them.
+// What: the logging switches, as (key, container name key).
+// Why: the SOT names the containers; syslog uses that name.
 // From: Issue #1683 | PR #1912
 pub const LOG_SWITCHES: [(&str, &str); 4] = [
-    ("LOGGING_PROXY_ENABLED", "LanCache-NG-proxy"),
-    ("LOGGING_DNS_ENABLED", "LanCache-NG-dns"),
-    ("LOGGING_DHCP_ENABLED", "LanCache-NG-dhcp"),
-    ("LOGGING_UI_ENABLED", "LanCache-NG-ui"),
+    ("LOGGING_PROXY_ENABLED", "CONTAINER_NAME_PROXY"),
+    ("LOGGING_DNS_ENABLED", "CONTAINER_NAME_DNS"),
+    ("LOGGING_DHCP_ENABLED", "CONTAINER_NAME_DHCP"),
+    ("LOGGING_UI_ENABLED", "CONTAINER_NAME_UI"),
 ];
 
 // What: the DHCP backend an install runs, or none.
@@ -273,6 +273,11 @@ pub const PROXY_ACCESS_LOG_PATTERN: &str = r#"^\S+ \S+ \S+: (?P<remote_addr>\S+)
 // Why: the ui writes it; the dns supervisor restarts pdns.
 // From: Issue #815
 pub const DDNS_UNSIGNED_MARKER: &str = "ddns-allow-unsigned-updates";
+
+// What: marker file of the AAAA filter switch.
+// Why: the ui writes it; the recursor lua reads its path.
+// From: Issue #1683 | PR #1912
+pub const AAAA_FILTER_MARKER: &str = "aaaa-filter-enabled";
 
 // What: the DNS stream and its subjects on NATS.
 // Why: ui publishes, subscriber consumes; one spelling.

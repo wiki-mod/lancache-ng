@@ -18,11 +18,11 @@ use axum::routing::{MethodRouter, delete, get, post};
 use base64::Engine as _;
 use futures_util::StreamExt as _;
 use lancache_ng::config::{
-    self, DDNS_UNSIGNED_MARKER, DEFAULT_RECORD_TTL, DhcpMode, LAN_ZONE, NATS_SUBJECT_FLUSH,
-    NATS_SUBJECT_RECORD, NatsLogin, NatsRoles, OPTION_CODE_MAX, OPTION_CODE_MIN, OutOfRange,
-    PDNS_API_PATH, PROXY_ACCESS_LOG_PATTERN, Uint, canonical_zone, dns_reader_publish,
-    dns_subscribe, is_dns_name, option_code, option_data, parse_bool, parse_custom_options,
-    rollback_zones, zone_url,
+    self, AAAA_FILTER_MARKER, DDNS_UNSIGNED_MARKER, DEFAULT_RECORD_TTL, DhcpMode, LAN_ZONE,
+    NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, NatsLogin, NatsRoles, OPTION_CODE_MAX,
+    OPTION_CODE_MIN, OutOfRange, PDNS_API_PATH, PROXY_ACCESS_LOG_PATTERN, Uint, canonical_zone,
+    dns_reader_publish, dns_subscribe, is_dns_name, option_code, option_data, parse_bool,
+    parse_custom_options, rollback_zones, zone_url,
 };
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, DesiredRunState, DesiredState, DnsRecord, FlushRequest,
@@ -119,6 +119,15 @@ struct Config {
     // What: the proxy's syslog-ng directory.
     // Why: nginx logs to stdout; syslog-ng stores it.
     proxy_log_dir: String,
+    // What: the UDP port the NTP server answers on.
+    // Why: the ntp page names it; the SOT owns it.
+    ntp_port: String,
+    // What: where a secondary host fetches setup.sh.
+    // Why: the SOT owns host and path; the page prints it.
+    setup_script_url: String,
+    // What: the syslog program of each logging switch.
+    // Why: same order as LOG_SWITCHES; the SOT names each.
+    log_programs: Vec<String>,
     cache_dir: String,
     dns_state_dir: String,
     shared_secret_dir: String,
@@ -303,15 +312,28 @@ impl Config {
         // Why: the SOT owns the default; no typo may flip.
         // From: Issue #1683 | PR #1912
         let mut startup_settings = startup_settings;
-        for (key, _) in config::LOG_SWITCHES {
+        let mut log_programs = Vec::new();
+        for (key, program_key) in config::LOG_SWITCHES {
             startup_settings.insert(key, bool_text(need_flag(key)?));
+            log_programs.push(need(program_key)?);
         }
+        let proxy_log_dir = Path::new(&need("SYSLOG_LOG_ROOT")?)
+            .join(need("CONTAINER_NAME_PROXY")?)
+            .display()
+            .to_string();
 
         Ok(Self {
             template_dir: need("TEMPLATE_DIR")?,
             shared_secret_dir: secret_dir.clone(),
             cdn_domains_file: need("CDN_DOMAINS_FILE")?,
-            proxy_log_dir: need("PROXY_LOG_DIR")?,
+            proxy_log_dir,
+            ntp_port: need("NTP_PORT")?,
+            setup_script_url: format!(
+                "{}/{}",
+                need("RAW_CONTENT_URL")?,
+                need("SETUP_SCRIPT_PATH")?
+            ),
+            log_programs,
             cache_dir: need("CACHE_DIR")?,
             dns_state_dir: need("DNS_STATE_DIR")?,
             proxy_https_url: need("PROXY_HTTPS_URL")?,
@@ -328,7 +350,11 @@ impl Config {
             dns_port: need("DNS_PORT")?
                 .parse()
                 .map_err(|e| format!("DNS_PORT: {e}"))?,
-            dhcp_api_url: format!("{}:{}", need("DHCP_API_URL")?, need("KEA_CTRL_PORT")?),
+            dhcp_api_url: format!(
+                "http://{}:{}",
+                need("DHCP_API_HOST")?,
+                need("KEA_CTRL_PORT")?
+            ),
             dhcp_api_token,
             dhcp_api_user: need("KEA_CTRL_USER")?,
             ui_settings_file: need("UI_SETTINGS_FILE")?,
@@ -2414,6 +2440,8 @@ async fn secondaries_page(
             state.config.http_ip, state.config.listen_port
         ),
     );
+    ctx.insert("primary_ip", &state.config.http_ip);
+    ctx.insert("setup_script_url", &state.config.setup_script_url);
     ctx.insert(
         "registration_token",
         &state.config.secondary_registration_token,
@@ -3152,6 +3180,7 @@ async fn dhcp_page(State(state): Shared, headers: HeaderMap) -> Response {
     ctx.insert("dhcp_mode", cfg.dhcp_mode().as_str());
     ctx.insert("dhcp_has_kea", &cfg.dhcp_mode().is_kea());
     ctx.insert("dhcp_api_url", &cfg.dhcp_api_url);
+    ctx.insert("default_lease_time", &cfg.dhcp_lease_time);
     for (name, key) in PAGE_SETTINGS {
         ctx.insert(name, &cfg.setting(key));
     }
@@ -4962,10 +4991,6 @@ async fn remove_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redir
     Redirect::to("/domains")
 }
 
-// What: marker file the dns recursor lua reads.
-// Why: the ui writes it; dns reads only its existence.
-const AAAA_FILTER_MARKER: &str = "aaaa-filter-enabled";
-
 // What: set or clear a marker file in the DNS state dir.
 // Why: the dns container reads the marker's existence.
 fn set_markers(state: &AppState, file: &str, enabled: bool) -> Result<(), StatusCode> {
@@ -5192,6 +5217,7 @@ async fn logs_page(
 ) -> Response {
     let max = state.config.ui_logs_max_entries;
     let mut ctx = page_ctx(&headers, "logs");
+    ctx.insert("logs_max_entries", &max);
     let requested = params.get("host").cloned().unwrap_or_default();
     let (mut entries, hosts, selected) = blocking(&state, move |s| {
         let root = &s.config.syslog_log_root;
@@ -5209,7 +5235,8 @@ async fn logs_page(
     ctx.insert("selected_host", &selected);
     let switches: Vec<Value> = config::LOG_SWITCHES
         .iter()
-        .map(|(key, program)| {
+        .zip(&state.config.log_programs)
+        .map(|((key, _), program)| {
             serde_json::json!({
                 "key": key,
                 "program": program,
@@ -5297,6 +5324,7 @@ async fn ntp_page(State(state): Shared, headers: HeaderMap) -> Response {
     ctx.insert("ntp_upstream_servers", &cfg.setting("NTP_UPSTREAM_SERVERS"));
     ctx.insert("ntp_auto_dhcp", &cfg.flag("NTP_AUTO_DHCP"));
     ctx.insert("http_ip", &cfg.http_ip);
+    ctx.insert("ntp_port", &cfg.ntp_port);
     ctx.insert("dhcp_has_kea", &cfg.dhcp_mode().is_kea());
     render(&state, "ntp.html", &ctx)
 }
@@ -6511,8 +6539,14 @@ mod tests {
         assert_eq!(fields.number::<u32>("none"), None);
     }
 
-    const TEXT_KEYS: [&str; 33] = [
-        "PROXY_LOG_DIR",
+    const TEXT_KEYS: [&str; 39] = [
+        "NTP_PORT",
+        "RAW_CONTENT_URL",
+        "SETUP_SCRIPT_PATH",
+        "CONTAINER_NAME_PROXY",
+        "CONTAINER_NAME_DNS",
+        "CONTAINER_NAME_DHCP",
+        "CONTAINER_NAME_UI",
         "PROXY_HTTP_URL",
         "IP_HTTP",
         "IP_HTTPS",
@@ -6525,7 +6559,7 @@ mod tests {
         "DNS_STATE_DIR",
         "PROXY_HTTPS_URL",
         "NETDATA_URL",
-        "DHCP_API_URL",
+        "DHCP_API_HOST",
         "KEA_CTRL_USER",
         "UI_SETTINGS_FILE",
         "KEA_CONFIG_SNAPSHOT_DIR",
@@ -6598,7 +6632,23 @@ mod tests {
     #[test]
     fn config_load_maps_every_key_to_its_field() {
         let cfg = load_from(&full_env()).expect("a complete env loads");
-        assert_eq!(cfg.proxy_log_dir, "v-PROXY_LOG_DIR");
+        assert_eq!(
+            cfg.proxy_log_dir,
+            "v-SYSLOG_LOG_ROOT/v-CONTAINER_NAME_PROXY"
+        );
+        assert_eq!(
+            cfg.log_programs,
+            [
+                "v-CONTAINER_NAME_PROXY",
+                "v-CONTAINER_NAME_DNS",
+                "v-CONTAINER_NAME_DHCP",
+                "v-CONTAINER_NAME_UI"
+            ]
+        );
+        assert_eq!(
+            cfg.setup_script_url,
+            "v-RAW_CONTENT_URL/v-SETUP_SCRIPT_PATH"
+        );
         assert_eq!(cfg.proxy_http_url, "v-PROXY_HTTP_URL");
         assert_eq!(cfg.proxy_https_url, "v-PROXY_HTTPS_URL");
         assert_eq!(cfg.http_ip, "v-IP_HTTP");
@@ -6610,7 +6660,7 @@ mod tests {
         assert_eq!(cfg.cache_dir, "v-CACHE_DIR");
         assert_eq!(cfg.dns_state_dir, "v-DNS_STATE_DIR");
         assert_eq!(cfg.netdata_url, "v-NETDATA_URL");
-        assert_eq!(cfg.dhcp_api_url, "v-DHCP_API_URL:8000");
+        assert_eq!(cfg.dhcp_api_url, "http://v-DHCP_API_HOST:8000");
         assert_eq!(cfg.ui_settings_file, "v-UI_SETTINGS_FILE");
         assert_eq!(cfg.kea_config_snapshot_dir, "v-KEA_CONFIG_SNAPSHOT_DIR");
         assert_eq!(cfg.dhcp_probe_request_file, "v-DHCP_PROBE_REQUEST_FILE");
@@ -9817,12 +9867,12 @@ mod tests {
         assert_eq!(on.status(), 303);
         assert_eq!(on.headers()[header::LOCATION], "/domains");
         assert_eq!(
-            fs::read_to_string(dir.join("aaaa-filter-enabled")).unwrap(),
+            fs::read_to_string(dir.join(AAAA_FILTER_MARKER)).unwrap(),
             "1"
         );
         let off = post_form(&base, &session, "/domains/aaaa-filter", "enabled=0").await;
         assert_eq!(off.status(), 303);
-        assert!(!dir.join("aaaa-filter-enabled").exists());
+        assert!(!dir.join(AAAA_FILTER_MARKER).exists());
         let again = post_form(&base, &session, "/domains/aaaa-filter", "enabled=0").await;
         assert_eq!(again.status(), 303);
 

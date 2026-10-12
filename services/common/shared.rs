@@ -379,9 +379,6 @@ pub struct SnapshotStore {
     service: &'static str,
 }
 
-// What: snapshots kept when the setting is 0.
-// Why: a bad setting must never disable retention.
-const DEFAULT_KEEP: u32 = 3;
 // What: marker prefix of a snapshot still being written.
 // Why: listing must never show a half-written snapshot.
 const STAGING: &str = ".staging.";
@@ -472,7 +469,12 @@ impl SnapshotStore {
     // What: delete the oldest snapshots beyond keep_n.
     // Why: a failed removal is logged, not a write failure.
     pub fn prune(&self, keep_n: u32) -> io::Result<()> {
-        let keep_n = if keep_n == 0 { DEFAULT_KEEP } else { keep_n };
+        if keep_n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "keep_n must be at least 1; the SOT owns the default",
+            ));
+        }
         let ids = self.ids()?;
         let excess = ids.len().saturating_sub(keep_n as usize);
         for id in ids.into_iter().take(excess) {
@@ -1594,17 +1596,20 @@ mod tests {
         }
     }
 
-    // What: keep_n 0 keeps three, never none.
+    // What: keep_n 0 is refused and erases no snapshot.
     // Why: a bad retention value must not erase snapshots.
     #[test]
-    fn snapshot_store_zero_retention_keeps_three() {
+    fn snapshot_store_zero_retention_is_refused() {
         let root = unique_temp_dir("keep");
         let store = SnapshotStore::new(root.join("store"), "data.json", "test");
         for _ in 0..5 {
             store.create(&serde_json::json!({}), 0).unwrap();
             std::thread::sleep(Duration::from_millis(2));
         }
-        assert_eq!(store.ids().unwrap().len(), 3);
+        assert_eq!(store.ids().unwrap().len(), 5);
+        let refused = store.prune(0).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(store.ids().unwrap().len(), 5);
         let _ = fs::remove_dir_all(&root);
     }
 

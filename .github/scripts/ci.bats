@@ -1042,7 +1042,7 @@ CASES
 # Why: AG-INT-002: a changed guard needs a pass and a fail
 # From: Issue #1683 | PR #1912
 @test "naming consistency: container prefix is the compose project name" {
-    local root t="${BATS_TEST_TMPDIR}/repo" dep cfg p new case sedexpr want
+    local root t="${BATS_TEST_TMPDIR}/repo" dep cfg p new case target sedexpr want
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     run _ci_check_naming_consistency "${root}"
     _expect real 0 "naming-consistency=clean" || return 1
@@ -1051,20 +1051,21 @@ CASES
     p="$(jq -r '.services | to_entries[0] | .value.container_name[0:-(.key | length) - 1]' <<< "${cfg}")" || return 1
     new="$(_val name)"
     [ -n "${p}" ] || { echo "inputs: no container prefix in ${dep}"; return 1; }
-    while IFS='|' read -r case sedexpr want; do
+    while IFS='|' read -r case target sedexpr want; do
         rm -rf "${t}" && _checkout_copy "${root}" "${t}" || return 1
-        sed -i -E "${sedexpr}" "${t}/${dep}" || return 1
-        run _ci_check_naming_consistency "${t}"
+        [ "${target}" = sot ] && target="${CI_MANIFEST_REL}" || target="${dep}"
+        sed -i -E "${sedexpr}" "${t}/${target}" || return 1
+        CI_MANIFEST="${t}/${CI_MANIFEST_REL}" run _ci_check_naming_consistency "${t}"
         if [ "${case}" = case-only ]; then
             _expect "${case}" 0 "naming-consistency=clean" || return 1
         else
             _expect "${case}" 1 "[CI-ERROR-CHECK-0096];${want}" || return 1
         fi
     done <<ROWS
-case-only|s/container_name: ${p}-/container_name: ${p^^}-/|-
-all-renamed|s/container_name: ${p}-/container_name: ${new}-/|container prefix ${new} is not the project name
-one-renamed|0,/container_name: ${p}-/s//container_name: ${new}-/|container prefixes differ
-no-project|/^name:/d|is not the project name
+case-only|sot|s/(CONTAINER_NAME_[A-Z]+)=${p}-/\\1=${p^^}-/g|-
+all-renamed|sot|s/(CONTAINER_NAME_[A-Z]+)=${p}-/\\1=${new}-/g|container prefix ${new} is not the project name
+one-renamed|sot|s/(CONTAINER_NAME_[A-Z]+)=${p}-/\\1=${new}-/|container prefixes differ
+no-project|compose|/^name:/d|is not the project name
 ROWS
 }
 
@@ -1173,10 +1174,10 @@ ROWS
     _expect moved 1 "[CI-ERROR-CHECK-0151];no include of;literal listen" || return 1
 }
 
-# What: the Kea ui run gets the host, the ui adds the port
-# Why: host:port made http://ip:8000:8000, a builder error
+# What: the Kea ui run gets the bare host; the ui adds more
+# Why: scheme and port came twice: http://ip:8000:8000
 # From: Issue #1683 | PR #1912
-@test "kea rollback: the ui run gets DHCP_API_URL without a port" {
+@test "kea rollback: the ui run gets DHCP_API_HOST bare" {
     local ip port log="${BATS_TEST_TMPDIR}/runs.log"
     ip="$(_val ipv4)" port="$(_val port)"
     _ci_validate_kea_agent() { printf '%s\n' "${port}"; }
@@ -1186,8 +1187,8 @@ ROWS
     _ci_validate_rm_run() { return 0; }
     run _ci_validate_kea_rollback "$(_val name)" "$(_val name)" "$(_val name)"
     _expect real 0 "-" || return 1
-    grep -qF -- "DHCP_API_URL=http://${ip} " "${log}" || { echo "ui run: $(cat "${log}")"; return 1; }
-    ! grep -qF -- "DHCP_API_URL=http://${ip}:" "${log}" || { echo "port in the url: $(cat "${log}")"; return 1; }
+    grep -qF -- "DHCP_API_HOST=${ip} " "${log}" || { echo "ui run: $(cat "${log}")"; return 1; }
+    ! grep -qF -- "DHCP_API_HOST=${ip}:" "${log}" || { echo "port in the host: $(cat "${log}")"; return 1; }
 }
 
 # What: image-setup builds the SOT accounts and directories
