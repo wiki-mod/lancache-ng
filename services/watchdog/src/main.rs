@@ -49,6 +49,10 @@ struct Settings {
     disk_alarm_pct: u32,
     status_file: PathBuf,
     cache_dir: PathBuf,
+    // What: log root and syslog-ng control socket.
+    // Why: the log-loss check compares both.
+    syslog_root: PathBuf,
+    syslog_ctl: PathBuf,
     // What: this container's id, Docker's default hostname.
     // Why: its compose project label names the stack.
     own_id: String,
@@ -118,6 +122,8 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
         disk_alarm_pct: disk_alarm_pct as u32,
         status_file: PathBuf::from(need("STATUS_FILE")?),
         cache_dir: PathBuf::from(need("CACHE_DIR")?),
+        syslog_root: PathBuf::from(need("SYSLOG_LOG_ROOT")?),
+        syslog_ctl: Path::new(&need("SUPERVISE_RUN_DIR")?).join(SYSLOG_NG_CTL),
         own_id: need("HOSTNAME")?,
     };
     Ok((settings, warnings))
@@ -859,8 +865,23 @@ async fn watch() -> Result<(), String> {
         s.cache_dir.display(),
     ));
     let mut counters: HashMap<String, Counter> = HashMap::new();
+    let mut last_sample: Option<LogSample> = None;
+    let mut loss_streak = 0;
     loop {
+        // What: log writing is one more status row.
+        // Why: a silent loss must not stay silent.
+        // From: Issue #1428 | PR #1912
+        let sample = log_sample(&s);
+        let (log_health, streak) = log_row(last_sample, sample, loss_streak);
+        if streak > loss_streak {
+            log_err(
+                "ALERT: silent log loss: syslog-ng processed messages but the log tree did not grow",
+            );
+        }
+        loss_streak = streak;
+        last_sample = sample.or(last_sample);
         let mut services: HashMap<String, ServiceHealth> = HashMap::new();
+        services.insert(LOG_ROW.to_string(), log_health);
         let listing = docker.project_containers(&project, s.api_timeout).await;
         let Some(listing) = listing else {
             log_err("WARNING: cannot list the stack containers");
@@ -1154,6 +1175,84 @@ fn fingerprint(files: &[PathBuf]) -> Vec<Option<(u64, i64, i64)>> {
         .collect()
 }
 
+// What: the syslog-ng destination id of the log files.
+// Why: the config and the log-loss check name one id.
+// From: Issue #1428 | PR #1912
+const SYSLOG_NG_DESTINATION: &str = "d_store";
+
+// What: file name of the syslog-ng control socket.
+// Why: syslog-ng binds it and the log-loss check reads it.
+// From: Issue #1428 | PR #1912
+const SYSLOG_NG_CTL: &str = "syslog-ng.ctl";
+
+// What: the status row name of syslog-ng log writing.
+// Why: the dashboard lists every row of the status file.
+// From: Issue #1428 | PR #1912
+const LOG_ROW: &str = "syslog-ng";
+
+// What: the processed counter and the log bytes now.
+// Why: a rising counter with flat bytes is a loss.
+// From: Issue #1428 | PR #1912
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LogSample {
+    processed: u64,
+    bytes: u64,
+}
+
+// What: the processed counter of one destination.
+// Why: a stats line is type;id;instance;state;kind;count.
+// From: Issue #1428 | PR #1912
+fn processed_count(stats: &str, destination: &str) -> Option<u64> {
+    stats.lines().find_map(|line| {
+        let f: Vec<&str> = line.split(';').collect();
+        let ours =
+            f.len() >= 6 && f[0] == "destination" && f[1] == destination && f[4] == "processed";
+        ours.then(|| f[5].trim().parse().ok()).flatten()
+    })
+}
+
+// What: syslog-ng's counter and the log tree bytes.
+// Why: a byte sum sees every write; None if no stats.
+// From: Issue #1428 | PR #1912
+fn log_sample(s: &Settings) -> Option<LogSample> {
+    let ctl = format!("--control={}", s.syslog_ctl.display());
+    let stats = tool("syslog-ng-ctl", &["stats", &ctl]).ok()?;
+    let bytes = files_under(&s.syslog_root)
+        .map_or(0, |files| files.iter().map(|(_, meta)| meta.len()).sum());
+    Some(LogSample {
+        processed: processed_count(&stats, SYSLOG_NG_DESTINATION)?,
+        bytes,
+    })
+}
+
+// What: true if messages were processed but no byte landed.
+// Why: a mount or permission fault swallows writes.
+// From: Issue #1428 | PR #1912
+fn log_lost(before: LogSample, after: LogSample) -> bool {
+    after.processed > before.processed && after.bytes <= before.bytes
+}
+
+// What: the status row for log writing, and the streak.
+// Why: a loss must show on the dashboard.
+// From: Issue #1428 | PR #1912
+fn log_row(
+    before: Option<LogSample>,
+    after: Option<LogSample>,
+    failures: u32,
+) -> (ServiceHealth, u32) {
+    let (status, health, failures) = match (before, after) {
+        (_, None) => ("yellow", "unreachable", 0),
+        (Some(b), Some(a)) if log_lost(b, a) => ("red", "silent log loss", failures + 1),
+        _ => ("green", "healthy", 0),
+    };
+    let row = ServiceHealth {
+        status: status.to_string(),
+        health: health.to_string(),
+        failures,
+    };
+    (row, failures)
+}
+
 // What: syslog-ng.conf for the Docker syslog input.
 // Why: one file per container and day; the group reads.
 // From: Issue #1683
@@ -1181,8 +1280,8 @@ fn syslog_ng_conf(port: &str, root: &str, group: &str, off: &[&str]) -> Result<S
 options {{ create-dirs(yes); dir-group("{group}"); dir-perm(0750); group("{group}"); perm(0640); keep-hostname(yes); time-reap(30); }};
 source s_docker {{ network(transport("udp") port({port}) flags(syslog-protocol)); }};
 filter f_named {{ program("^[A-Za-z0-9_-]+$" type(pcre)){skip}; }};
-destination d_store {{ file("{root}/${{PROGRAM}}/${{YEAR}}${{MONTH}}${{DAY}}.log" template("${{ISODATE}} ${{HOST}} ${{PROGRAM}}: ${{MSGONLY}}\n")); }};
-log {{ source(s_docker); filter(f_named); destination(d_store); }};
+destination {SYSLOG_NG_DESTINATION} {{ file("{root}/${{PROGRAM}}/${{YEAR}}${{MONTH}}${{DAY}}.log" template("${{ISODATE}} ${{HOST}} ${{PROGRAM}}: ${{MSGONLY}}\n")); }};
+log {{ source(s_docker); filter(f_named); destination({SYSLOG_NG_DESTINATION}); }};
 "#
     ))
 }
@@ -1227,7 +1326,7 @@ fn syslog_ng(ctx: &Ctx) -> Result<Run, String> {
         "-p".into(),
         run("syslog-ng.pid"),
         "-c".into(),
-        run("syslog-ng.ctl"),
+        run(SYSLOG_NG_CTL),
     ];
     Ok(Run {
         argv,
@@ -4368,6 +4467,8 @@ mod tests {
             ("DOCKER_RESTART_TIMEOUT", rnd(1, DAY).to_string()),
             ("CACHE_DIR", gen_path()),
             ("STATUS_FILE", gen_path()),
+            ("SYSLOG_LOG_ROOT", gen_path()),
+            ("SUPERVISE_RUN_DIR", gen_path()),
             ("HOSTNAME", gen_name()),
         ]
     }
@@ -4483,6 +4584,66 @@ mod tests {
                 .expect("fails");
             assert!(err.contains(var), "{var}: {err}");
         }
+    }
+
+    // What: the counter comes from the named destination.
+    // Why: other stats lines must never be mistaken for it.
+    // From: Issue #1428 | PR #1912
+    #[test]
+    fn processed_count_reads_only_the_named_destination() {
+        let (ours, other) = (gen_name(), gen_name());
+        let (n, m) = (rnd(1, DAY), rnd(1, DAY));
+        let stats = format!(
+            "SourceName;SourceId;SourceInstance;State;Type;Number\n\
+             destination;{other};;a;processed;{m}\n\
+             destination;{ours};;a;dropped;{m}\n\
+             source;{ours};;a;processed;{m}\n\
+             destination;{ours};;a;processed;{n}\n"
+        );
+        assert_eq!(processed_count(&stats, &ours), Some(n));
+        assert_eq!(processed_count(&stats, &gen_name()), None);
+        let junk = format!("destination;{ours};;a;processed;{}\n", gen_name());
+        assert_eq!(processed_count(&junk, &ours), None);
+        assert_eq!(processed_count("", &ours), None);
+    }
+
+    // What: a loss is more messages and no more bytes.
+    // Why: only that pair is a silent loss.
+    // From: Issue #1428 | PR #1912
+    #[test]
+    fn log_loss_is_messages_without_bytes() {
+        let at = |processed, bytes| LogSample { processed, bytes };
+        let (p, b) = (rnd(1, DAY), rnd(1, DAY));
+        assert!(log_lost(at(p, b), at(p + 1, b)));
+        assert!(log_lost(at(p, b), at(p + 1, b - 1)));
+        assert!(!log_lost(at(p, b), at(p + 1, b + 1)));
+        assert!(!log_lost(at(p, b), at(p, b)));
+        assert!(!log_lost(at(p, b), at(p, b + 1)));
+    }
+
+    // What: the status row follows the samples and counts.
+    // Why: the dashboard shows red until bytes land again.
+    // From: Issue #1428 | PR #1912
+    #[test]
+    fn log_row_turns_red_on_loss_and_recovers() {
+        let at = |processed, bytes| Some(LogSample { processed, bytes });
+        let (row, streak) = log_row(at(1, 5), at(2, 5), 0);
+        assert_eq!(
+            (row.status.as_str(), row.health.as_str()),
+            ("red", "silent log loss")
+        );
+        assert_eq!((row.failures, streak), (1, 1));
+        let (row, streak) = log_row(at(2, 5), at(3, 5), streak);
+        assert_eq!((row.failures, streak), (2, 2));
+        let (row, streak) = log_row(at(3, 5), at(4, 9), streak);
+        assert_eq!((row.status.as_str(), row.failures, streak), ("green", 0, 0));
+        let (row, _) = log_row(at(4, 9), None, 3);
+        assert_eq!(
+            (row.status.as_str(), row.health.as_str()),
+            ("yellow", "unreachable")
+        );
+        let (row, _) = log_row(None, at(1, 1), 0);
+        assert_eq!(row.status, "green");
     }
 
     // What: inspect bodies map to readings and colors.
