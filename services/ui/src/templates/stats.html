@@ -131,6 +131,14 @@ function newestRow(reply) {
   return rows.length ? rows.reduce((a, b) => (b[0] > a[0] ? b : a)) : null;
 }
 
+// What: the column of a netdata reply by its label.
+// Why: a position changes with the netdata version.
+function column(reply, label) {
+  const at = reply.labels.indexOf(label);
+  if (at < 1) throw new Error(`no ${label} column`);
+  return at;
+}
+
 let errorShown = false;
 
 async function refresh() {
@@ -148,7 +156,7 @@ async function refresh() {
     // Why: column 1 is free, not used; values are MiB.
     const ram = await fetchChart('data?chart=system.ram');
     const ramRow = newestRow(ram);
-    const usedGB = ramRow ? (ramRow[ram.labels.indexOf('used')] / 1024).toFixed(2) : 0;
+    const usedGB = ramRow ? (ramRow[column(ram, 'used')] / 1024).toFixed(2) : 0;
     push(ramChart, parseFloat(usedGB));
 
     // What: net from net.eth0, falls back to net.eth1.
@@ -159,16 +167,16 @@ async function refresh() {
     // What: net kilobits/s to MB/s: divide by 8000.
     // Why: net.* units are kilobits/s; sent is negative.
     const netRow = newestRow(net);
-    const rxMB = netRow ? Math.abs(netRow[1] / 8000).toFixed(2) : 0;
-    const txMB = netRow ? Math.abs(netRow[2] / 8000).toFixed(2) : 0;
+    const rxMB = netRow ? Math.abs(netRow[column(net, 'received')] / 8000).toFixed(2) : 0;
+    const txMB = netRow ? Math.abs(netRow[column(net, 'sent')] / 8000).toFixed(2) : 0;
     push(netChart, parseFloat(rxMB), parseFloat(txMB));
 
     // What: disk KiB/s to MB/s: times 1024, divide by 1e6.
     // Why: system.io units are KiB/s; writes are negative.
     const disk = await fetchChart('data?chart=system.io');
     const diskRow = newestRow(disk);
-    const readMB  = diskRow ? Math.abs(diskRow[1] * 1.024 / 1000).toFixed(2) : 0;
-    const writeMB = diskRow ? Math.abs(diskRow[2] * 1.024 / 1000).toFixed(2) : 0;
+    const readMB  = diskRow ? Math.abs(diskRow[column(disk, 'in')] * 1.024 / 1000).toFixed(2) : 0;
+    const writeMB = diskRow ? Math.abs(diskRow[column(disk, 'out')] * 1.024 / 1000).toFixed(2) : 0;
     push(diskChart, parseFloat(readMB), parseFloat(writeMB));
 
     document.getElementById('netdata-error').classList.add('hidden');
