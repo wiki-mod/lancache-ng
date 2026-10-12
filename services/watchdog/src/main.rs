@@ -1871,6 +1871,11 @@ fn no_backfill(_: &Value, _: &str) -> Option<String> {
 // From: Issue #1683 | PR #1912
 const LEGACY_PROXY_MAP: &str = "00-ssl-map.conf";
 
+// What: old cert variable name and its new name.
+// Why: https.conf reads the new name; old maps set the old.
+// From: Issue #1683 | PR #1912
+const LEGACY_CERT_VAR: (&str, &str) = ("$ssl_cert_name", "$https_cert_name");
+
 // What: backfill for a wholly old snapshot; None otherwise.
 // Why: old sets keep the map under an old name.
 // From: Issue #1683 | PR #1912
@@ -1884,7 +1889,11 @@ fn legacy_backfill<'a>(
             return None;
         }
         if file == renamed.0 {
-            return set.get(renamed.1)?.as_str().map(String::from);
+            let (old, new) = LEGACY_CERT_VAR;
+            return set
+                .get(renamed.1)?
+                .as_str()
+                .map(|text| text.replace(old, new));
         }
         Some(stub.to_string())
     }
@@ -3798,6 +3807,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
                     value("CACHE_INACTIVE")?,
                     value("NGINX_PASSTHROUGH_PORT")?,
                     ("NGINX_UPSTREAM_RESOLVER", resolver),
+                    ("NGINX_DIR", dir.display().to_string()),
                 ],
             ),
         ),
@@ -5800,7 +5810,7 @@ mod tests {
             (three.clone(), gen_name()),
         ];
         let news = [name(&two), name(&three)];
-        let (legacy, map) = (gen_name(), gen_name());
+        let (legacy, map) = (gen_name(), format!("{} $ssl_cert_name", gen_name()));
         let backfill = legacy_backfill(&news, (&news[0], &legacy), "stub");
         let old = lancache_ng::SnapshotStore::new(root.join("old"), "set.json", "test");
         old.create(&serde_json::json!({ name(&one): good, &legacy: map }), 3)
@@ -5808,7 +5818,8 @@ mod tests {
         let same = |old: &str| old.to_string();
         checked_files(&files, &check, &old, &same, &backfill, false).expect("rollback");
         assert_eq!(fs::read_to_string(&one).unwrap(), good);
-        assert_eq!(fs::read_to_string(&two).unwrap(), map);
+        let renamed = map.replace("$ssl_cert_name", "$https_cert_name");
+        assert_eq!(fs::read_to_string(&two).unwrap(), renamed);
         assert_eq!(fs::read_to_string(&three).unwrap(), "stub");
         assert!(checked_files(&files, &check, &old, &same, &no_backfill, false).is_err());
         let bare = lancache_ng::SnapshotStore::new(root.join("bare"), "set.json", "test");
