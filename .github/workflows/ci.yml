@@ -485,7 +485,7 @@ jobs:
     # Why: the required check must run when platform failed.
     # From: Issue #1683 | PR #1858
     runs-on: ${{ needs.platform.outputs.runner || 'ubuntu-latest' }}
-    timeout-minutes: ${{ needs.platform.outputs.timeouts && fromJSON(needs.platform.outputs.timeouts)['result'] || 15 }}
+    timeout-minutes: 15
     container:
       image: ${{ needs.platform.outputs.image || format('ghcr.io/{0}/build-tools:nightly', github.repository) }}
       credentials: *ghcr_credentials

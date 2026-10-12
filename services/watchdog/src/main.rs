@@ -4150,6 +4150,9 @@ fn listen(
                     return Ok(());
                 }
             }
+            // What: a signal only restarts the wait.
+            // Why: the loop recomputes the deadline.
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e)
                 if matches!(
                     e.kind(),

@@ -41,8 +41,8 @@ It holds only records:
 A missing record or a `null` commit means never validated. The scope of a
 record comes from the SOT, not from the record:
 
-- a build target: its `context` and the paths of its `dependency_graph`
-  contexts, the list `plan` uses (`_ci_target_paths`);
+- a build target: its `context` and the Rust workspace paths that ci.sh
+  derives from `Cargo.toml`, the list `plan` uses (`_ci_target_paths`);
 - a layer: the `pr_labels` path class that `release.validation_layers` names.
 
 The gate loads the full history first, so it also works in the depth-1

@@ -1062,9 +1062,9 @@ CASES
             _expect "${case}" 1 "[CI-ERROR-CHECK-0096];${want}" || return 1
         fi
     done <<ROWS
-case-only|sot|s/(CONTAINER_NAME_[A-Z]+)=${p}-/\\1=${p^^}-/g|-
-all-renamed|sot|s/(CONTAINER_NAME_[A-Z]+)=${p}-/\\1=${new}-/g|container prefix ${new} is not the project name
-one-renamed|sot|s/(CONTAINER_NAME_[A-Z]+)=${p}-/\\1=${new}-/|container prefixes differ
+case-only|sot|s/(CONTAINER_NAME_PREFIX)=${p}\$/\\1=${p^^}/|-
+all-renamed|sot|s/(CONTAINER_NAME_PREFIX)=${p}\$/\\1=${new}/|container prefix ${new} is not the project name
+one-renamed|sot|0,/(CONTAINER_NAME_[A-Z]+)=@CONTAINER_NAME_PREFIX@-/s//\\1=${new}-/|container prefixes differ
 no-project|compose|/^name:/d|is not the project name
 ROWS
 }
@@ -1424,13 +1424,13 @@ CASES
 @test "validation env: secrets generated per SOT kind, setup.sh lists none, NATS url set" {
     local root env fx kind kinds k v n LC_ALL=C
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    env="$(_ci_validation_env)" && fx="$(_ci_block_entry_field validation "" compose_validation_env)" \
+    env="$(_ci_validation_env)" && fx="$(_ci_block_entry_list validation "" compose_validation_env)" \
         || { echo "validation env: ${env}"; return 1; }
     for kind in hex32 base64_32 secondary_hex32; do
         kinds="$(_ci_required_field runtime "secrets_${kind}" block)" || { echo "${kind}: ${kinds}"; return 1; }
         [ -n "${kinds}" ] || { echo "no SOT ${kind} secret"; return 1; }
         for k in ${kinds}; do
-            [[ " ${fx} " != *" ${k}="* ]] || { echo "${k}: fixed value in the SOT validation env"; return 1; }
+            ! grep -q "^${k}\\(=\\|\$\\)" <<< "${fx}" || { echo "${k}: fixed value in the SOT validation env"; return 1; }
             v="$(sed -n "s/^${k}=//p" <<< "${env}")"
             case "${kind}" in
                 hex32|secondary_hex32) [[ "${v}" =~ ^[0-9a-f]{64}$ ]] || { echo "${k}: ${#v} chars, not 64 hex"; return 1; } ;;
@@ -1656,16 +1656,90 @@ CASES
 # From: Issue #1683 | PR #1912
 @test "runtime default reads one key of the SOT list" {
     local list key val miss
-    list="$(_ci_required_field runtime defaults block)" || { echo "no runtime.defaults: ${list}"; return 1; }
-    key="${list%%|*}"
+    list="$(_ci_runtime_defaults)" || { echo "no runtime.defaults: ${list}"; return 1; }
+    key="${list%%$'\n'*}"
     run _ci_runtime_default "${key%%=*}"
     _expect listed 0 "=${key#*=}" || return 1
     miss="$(_val name)"
     run _ci_runtime_default "${miss}"
     _expect unlisted 2 "VALIDATE-0125" || return 1
     run _ci_validate_rollback_base 192.0.2.1
-    val="$(tr '|' '\n' <<< "${list}" | sed -n 's/^DNS_ROLLBACK_PORT=//p')"
+    val="$(sed -n 's/^DNS_ROLLBACK_PORT=//p' <<< "${list}")"
     _expect rollback-base 0 "=http://192.0.2.1:${val}" || return 1
+}
+
+# What: @KEY@ in a default names another entry
+# Why: a path or port is written once; users name it
+# From: Issue #1683 | PR #1912
+@test "runtime defaults: @KEY@ resolves, unknown and cyclic references fail" {
+    local root a b c d rows
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    a="$(_val name)" b="$(_val name)" c="$(_val name)" d="$(_val name)"
+    rows="${a}=/${d}"$'\n'"${b}=@${a}@/sub"$'\n'"${c}=@${b}@:1"
+    run bash -c 'source "$1" && runtime_defaults_expand' _ "${root}/setup.sh" <<< "${rows}"
+    _expect chain 0 "=${a}=/${d}"$'\n'"${b}=/${d}/sub"$'\n'"${c}=/${d}/sub:1" || return 1
+    run bash -c 'source "$1" && runtime_defaults_expand' _ "${root}/setup.sh" <<< "${b}=@${a}@"
+    _expect unknown 1 "names @${a}@, which is no entry" || return 1
+    run bash -c 'source "$1" && runtime_defaults_expand' _ "${root}/setup.sh" <<< "${a}=@${b}@"$'\n'"${b}=@${a}@"
+    _expect cycle 1 "refers to itself" || return 1
+    rows="$(_ci_runtime_defaults)" || { echo "no expanded defaults: ${rows}"; return 1; }
+    [[ "${rows}" != *"@"*"@"* ]] || { echo "unresolved @KEY@ left: $(grep -F '@' <<< "${rows}")"; return 1; }
+}
+
+# What: @{block.key} in the SOT is that scalar
+# Why: a value naming another SOT value is not copied
+# From: Issue #1683 | PR #1912
+@test "SOT references: @{block.key} resolves, unknown and cyclic ones fail" {
+    local m="${BATS_TEST_TMPDIR}/ref.yml" a b v
+    a="$(_val name)" b="$(_val name)" v="$(_val name)"
+    printf '%s:\n  k: %s\n%s:\n  k: "@{%s.k}/x"\n' "${a}" "${v}" "${b}" "${a}" > "${m}"
+    CI_MANIFEST="${m}" run _ci_block_entry_field "${b}" "" k
+    _expect resolved 0 "=${v}/x" || return 1
+    printf '%s:\n  k: "@{%s.nope}"\n' "${a}" "${a}" > "${m}.2"
+    CI_MANIFEST="${m}.2" run _ci_block_entry_field "${a}" "" k
+    _expect unknown 2 "CORE-0150" || return 1
+    printf '%s:\n  k: "@{%s.j}"\n  j: "@{%s.k}"\n' "${a}" "${a}" "${a}" > "${m}.3"
+    CI_MANIFEST="${m}.3" run _ci_block_entry_field "${a}" "" k
+    _expect cycle 2 "SOT reference cycle" || return 1
+}
+
+# What: workspace members come from Cargo.toml
+# Why: no SOT list repeats them; bins and libs differ
+# From: Issue #1683 | PR #1912
+@test "workspace: members, bin source dirs and libraries are read from Cargo.toml" {
+    local root="${BATS_TEST_TMPDIR}/ws" bin lib sub
+    bin="$(_val name)" lib="$(_val name)" sub="$(_val name)"
+    mkdir -p "${root}/${bin}/${sub}" "${root}/${lib}"
+    printf '[workspace]\nmembers = ["%s", "%s"]\n' "${bin}" "${lib}" > "${root}/Cargo.toml"
+    printf '[package]\nname = "%s"\n[[bin]]\nname = "x"\npath = "%s/main.rs"\n' "${bin}" "${sub}" > "${root}/${bin}/Cargo.toml"
+    printf '[package]\nname = "%s"\n[lib]\npath = "shared.rs"\n' "${lib}" > "${root}/${lib}/Cargo.toml"
+    run _ci_workspace_rows "${root}"
+    _expect rows 0 "=${bin}|${sub}/main.rs|${bin}"$'\n'"${lib}||${lib}" || return 1
+    run ci_workspace_lib_dirs "${root}"
+    _expect libs 0 "=${lib}" || return 1
+    run ci_workspace_source_dirs "${root}"
+    _expect sources 0 "=${bin}/${sub}"$'\n'"${lib}" || return 1
+    run _ci_workspace_src_dir "${bin}" main.rs
+    _expect root-bin 0 "=${bin}" || return 1
+}
+
+# What: every moved config/prod key reaches a container
+# Why: a key .env.local holds but compose drops is lost
+# From: Issue #1683 | PR #1912
+@test "moved config/prod keys have a compose environment entry" {
+    local root rows compose svc key target
+    root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+    compose="${root}/$(_ci_variable CI_COMPOSE_FILE)" || return 1
+    rows="$(bash -c 'source "$1" && config_prod_moved_keys' _ "${root}/setup.sh")" \
+        && [ -n "${rows}" ] || { echo "no moved keys: ${rows}"; return 1; }
+    while read -r svc key target; do
+        key="${target:-${key}}"
+        # What: a renamed legacy key is migrated, not passed
+        # Why: setup.sh moves it to its new name's entry
+        grep -qE "^[[:space:]]+- ${key}=\\$\\{${key}[:}]" "${compose}" \
+            || grep -qE "append_env_migrated_assignment_if_missing [A-Z_]+ ${key} " "${root}/setup.sh" \
+            || { echo "${svc} ${key}: no environment entry in ${compose}"; return 1; }
+    done <<< "${rows}"
 }
 
 # What: the shared dir must be a mount of this container
@@ -3041,7 +3115,7 @@ ROWS
 # Why: state stays off the checkout; compose and setup agree
 # From: Issue #1683 | PR #1912
 @test "production_state_root_default keeps deploy/prod state out of the checkout" {
-    local co="${BATS_TEST_TMPDIR}/co" dp root binds other name to msg want sot="${BATS_TEST_TMPDIR}/sot" text
+    local co="${BATS_TEST_TMPDIR}/co" dp root binds other name expr msg want sot="${BATS_TEST_TMPDIR}/sot"
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}" || return 1
     dp="${co}/deploy/prod"
@@ -3056,14 +3130,14 @@ ROWS
     other="$(_val path)"
     run production_state_root_default "${other}"
     _expect other 0 "=${other}" || return 1
-    mkdir -p "${sot}/.github/yaml" && text="$(<"${root}/.github/yaml/build-manifest.yml")" || return 1
-    while IFS='@' read -r name to msg; do
-        printf '%s\n' "${text/|LANCACHE_STATE_DIR=${want}/${to}}" > "${sot}/.github/yaml/build-manifest.yml" || return 1
+    mkdir -p "${sot}/.github/yaml" || return 1
+    while IFS='@' read -r name expr msg; do
+        sed "${expr}" "${root}/.github/yaml/build-manifest.yml" > "${sot}/.github/yaml/build-manifest.yml" || return 1
         SCRIPT_DIR="${sot}" run production_state_root_default "${dp}"
         _expect "${name}" 1 "${msg}" || return 1
     done <<ROWS
-relative@|LANCACHE_STATE_DIR=$(_val name)@no absolute path
-none@@holds no default for LANCACHE_STATE_DIR
+relative@s|^    - LANCACHE_STATE_DIR=.*|    - LANCACHE_STATE_DIR=$(_val name)|@no absolute path
+none@/^    - LANCACHE_STATE_DIR=/d@holds no default for LANCACHE_STATE_DIR
 ROWS
 }
 
@@ -3400,7 +3474,7 @@ STUB
     cfg="$(docker compose --env-file "${tpl}" -f "${repo}/deploy/prod/docker-compose.yml" config --format json)" \
         && port="$(jq -r '.services.ui.ports[0].published' <<< "${cfg}")" && [[ "${port}" =~ ^[0-9]+$ ]] \
         || { echo "prod compose config: ${cfg}"; return 1; }
-    keys="$(_ci_required_field runtime defaults block | tr '|' '\n' | sed -n 's/=.*//p')" && [ -n "${keys}" ] \
+    keys="$(_ci_runtime_defaults | sed -n 's/=.*//p')" && [ -n "${keys}" ] \
         || { echo "no SOT runtime.defaults keys: ${keys}"; return 1; }
     # What: setup.sh holds no SOT default or ui port
     # Why: one owner each; a copy passes the checks below
@@ -4316,7 +4390,7 @@ printf '%s\n' "$*" >> "${DS}/curl.argv"
 u="${!#}"
 while IFS= read -r f; do
     case "${u}" in
-        */"${f#"${DS}/raw/"}") [ ! -e "${DS}/fail-raw" ] || exit 22; cat "${f}"; exit 0 ;;
+        */"${f#"${DS}/raw/"}") [ ! -e "${DS}/fail-raw" ] || [ "${f#"${DS}/raw/"}" != "$(cat "${DS}/fail-raw")" ] || exit 22; cat "${f}"; exit 0 ;;
     esac
 done < <(find "${DS}/raw" -type f)
 cat > "${DS}/curl.body"
@@ -4445,11 +4519,14 @@ CASES
     _sec "${t}/raw" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${HTTP_IP}" --listen-ip "${LIP}"
     [ "${status}" -eq 0 ] && cmp "${root}/deploy/secondary/docker-compose.yml" "${t}/raw/${NAME}/docker-compose.yml" \
         && grep -q '/HEAD/deploy/secondary/docker-compose\.yml$' "${DS}/curl.argv" || { echo "download: ${output}"; return 1; }
-    : > "${DS}/fail-raw"
+    # What: the failing download is the compose file only
+    # Why: the SOT answers first; the compose file fails.
+    # From: Issue #1683 | PR #1912
+    printf '%s' deploy/secondary/docker-compose.yml > "${DS}/fail-raw"
     rm -f "${DS}/curl.argv"
     _sec "${t}/rawfail" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${HTTP_IP}" --listen-ip "${LIP}"
     [ "${status}" -eq 1 ] && [[ "${output}" == *"Failed to download deploy/secondary/docker-compose.yml"* ]] \
-        && [ "$(wc -l < "${DS}/curl.argv")" -eq 1 ] && [ ! -e "${t}/rawfail/${NAME}" ] \
+        && [[ "$(tail -n 1 "${DS}/curl.argv")" == *"/HEAD/deploy/secondary/docker-compose.yml" ]] && [ ! -e "${t}/rawfail/${NAME}" ] \
         || { echo "download failure: ${output}"; return 1; }
     unset SEC_SCRIPT_DIR
 }

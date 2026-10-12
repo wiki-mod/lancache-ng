@@ -121,6 +121,13 @@ yn_default() {
     esac
 }
 
+# What: the 1/0 value of a y/n answer
+# Why: the wizard stores the answer, never a default
+# From: Issue #1683 | PR #1912
+yn_flag() {
+    if [[ "${1,,}" = "y" ]]; then printf '1\n'; else printf '0\n'; fi
+}
+
 # What: the [y/N] or [Y/n] hint of a prompt default
 # Why: the capital letter marks the default answer
 # From: Issue #1683 | PR #1912
@@ -2159,7 +2166,7 @@ ensure_ui_password_hash() {
 # From: Issue #1683 | PR #1912
 prod_env_default() {
     local list
-    list=$(lancache_sot_value defaults runtime) || exit $?
+    list=$(runtime_defaults_list) || exit $?
     runtime_default_in "$list" "$1"
 }
 
@@ -2171,11 +2178,44 @@ ensure_default_install_dir() {
     DEFAULT_INSTALL_DIR=$(prod_env_default LANCACHE_STATE_DIR) || exit $?
 }
 
-# What: one key's value in a runtime.defaults list
+# What: the SOT runtime.defaults rows, @KEY@ resolved.
+# Why: a value naming another entry has one owner.
+# From: Issue #1683 | PR #1912
+runtime_defaults_list() {
+    local rows
+    rows=$(lancache_sot_list defaults runtime) || exit $?
+    runtime_defaults_expand <<< "$rows"
+}
+
+# What: KEY=value rows on stdin, @KEY@ resolved.
+# Why: ci.sh bakes the same rows; one resolver, no copy.
+# From: Issue #1683 | PR #1912
+runtime_defaults_expand() {
+    awk '
+        function ex(k, d,   v, n, s, l) {
+            if (k in done) return val[k]
+            if (d > 16) { print "runtime.defaults: @" k "@ refers to itself" > "/dev/stderr"; bad = 1; return "" }
+            v = raw[k]
+            while (match(v, /@[A-Za-z0-9_]+@/)) {
+                s = RSTART; l = RLENGTH; n = substr(v, s + 1, l - 2)
+                if (!(n in raw)) { print "runtime.defaults: " k " names @" n "@, which is no entry" > "/dev/stderr"; bad = 1; return v }
+                v = substr(v, 1, s - 1) ex(n, d + 1) substr(v, s + l)
+            }
+            done[k] = 1; val[k] = v
+            return v
+        }
+        NF { i = index($0, "="); k = substr($0, 1, i - 1); raw[k] = substr($0, i + 1); ord[++c] = k }
+        END {
+            for (j = 1; j <= c; j++) print ord[j] "=" ex(ord[j], 0)
+            exit bad
+        }' || die "The SOT runtime.defaults holds an unresolved @KEY@ reference."
+}
+
+# What: one key's value in a runtime.defaults row list
 # Why: sot_compose reads the list once, not once per key
 # From: Issue #1683 | PR #1912
 runtime_default_in() {
-    awk -v RS='|' -v p="$2=" '{ sub(/\n$/, "") } index($0, p) == 1 && !f { print substr($0, length(p) + 1); f = 1 } END { exit !f }' <<< "$1" \
+    awk -v p="$2=" 'index($0, p) == 1 && !f { print substr($0, length(p) + 1); f = 1 } END { exit !f }' <<< "$1" \
         || die "The SOT runtime.defaults holds no default for $2."
 }
 
@@ -2186,7 +2226,7 @@ sot_compose() {
     local keys key value list
     local -a sot_env=()
     keys=$(lancache_sot_value compose_keys runtime) || exit $?
-    list=$(lancache_sot_value defaults runtime) || exit $?
+    list=$(runtime_defaults_list) || exit $?
     for key in $keys; do
         value=$(runtime_default_in "$list" "$key") || exit $?
         sot_env+=("SOT_${key}=${value}")
@@ -2210,7 +2250,6 @@ config_prod_moved_keys() {
         'dhcp-proxy DHCP_PROXY_PXE_BOOT_SERVER' 'dhcp-proxy DHCP_PROXY_PXE_BOOT_FILENAME_BIOS' \
         'dhcp-proxy DHCP_PROXY_PXE_BOOT_FILENAME_UEFI' \
         'watchdog CACHE_VALID_DAYS' 'ntp NTP_UPSTREAM_SERVERS' 'ntp NTP_ALLOWED_CLIENT_CIDRS' \
-        'cachehamster CACHEHAMSTER_CREDENTIAL_PERSISTENCE' 'cachehamster CACHEHAMSTER_STEAM_CREDENTIAL' \
         'cachehamster CACHEHAMSTER_URLS' 'proxy CACHE_MIN_FREE' 'dns-standard LOG_QUERIES' \
         'dns-standard ROOT_ZONE_MIRROR' 'dhcp DHCP_DOMAIN' 'dhcp DHCP_NTP_SERVERS' 'dhcp DHCP_DDNS_ENABLED'
 }
@@ -2813,6 +2852,24 @@ lancache_sot_value() {
     printf '%s\n' "$value"
 }
 
+# What: the entries of one SOT block list, one per line
+# Why: the installer reads lists too; yq is not on a host
+# From: Issue #1683 | PR #1912
+lancache_sot_list() {
+    local key="$1" block="$2" sot=.github/yaml/build-manifest.yml text value
+    text=$(lancache_repo_file_text "$sot") || exit $?
+    value=$(awk -v b="${block}:" -v k="  ${key}:" '
+        $0 == b { f = 1; next }
+        f && /^[^ #]/ { exit }
+        f && $0 == k { l = 1; next }
+        f && l && /^    - / { v = substr($0, 7); sub(/^"/, "", v); sub(/"$/, "", v); print v; next }
+        f && l && /^    #/ { next }
+        f && l { exit }' <<< "$text") \
+        || die "Failed to read ${block}.${key} from ${sot}."
+    [[ -n "$value" ]] || die "${sot} defines no ${block}.${key} list."
+    printf '%s\n' "$value"
+}
+
 # What: sets the helper image to the SOT's pinned alpine
 # Why: AG-CI-008: one owner, never a mutable alpine tag
 # From: Issue #1683 | PR #1858
@@ -3090,6 +3147,7 @@ migrate_env_for_update() (
     local state_keys state_key state_sub state_sub_dir legacy_path
     local state_dir ui_session_ttl
     local legacy_cache_http legacy_cache_https existing_image_tag
+    local required_keys required_key required_value
     local lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
 
@@ -3446,6 +3504,16 @@ migrate_env_for_update() (
     allow_insecure_ui=false
     [[ -z "$ui_user" && -z "$ui_password" && -z "$ui_password_hash" ]] && allow_insecure_ui=true
     append_env_key_if_missing ALLOW_INSECURE_UI "$allow_insecure_ui" "$env_file"
+
+    # What: every SOT-required key holds a value by now
+    # Why: an empty required key breaks the stack at up
+    # From: Issue #1683 | PR #1912
+    required_keys=$(lancache_sot_value setup_required_repairs validation) || exit $?
+    for required_key in $required_keys; do
+        required_value=$(get_env_var "$required_key" "$env_file") || exit $?
+        [[ -n "$required_value" ]] \
+            || die "Required key $required_key is still empty in $env_file after the update."
+    done
 
     print_ok ".env is complete for the current deploy/prod template"
     migrate_done=1
@@ -7095,11 +7163,10 @@ printf "  upstream server list are then configured from the Admin UI.\n"
 printf "  Default: %s.\n\n" "$([[ "$ntp_yn" = "Y" ]] && echo enabled || echo disabled)"
 
 ask "Enable LanCache-NG-NTP? $(yn_hint "$ntp_yn")" "$ntp_yn"
-NTP_ENABLED=0
+NTP_ENABLED=$(yn_flag "$REPLY")
 ntp_subdir=$(prod_env_default STATE_SUBDIR_NTP) || exit $?
 NTP_DATA_DIR="$LANCACHE_STATE_DIR/$ntp_subdir"
-if [[ "${REPLY,,}" = "y" ]]; then
-    NTP_ENABLED=1
+if [[ "$NTP_ENABLED" = "1" ]]; then
     print_ok "LanCache-NG-NTP enabled — configure upstream servers and the DHCP auto-populate toggle from the Admin UI's NTP page"
 else
     print_ok "LanCache-NG-NTP skipped — can be enabled later from the Admin UI"

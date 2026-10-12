@@ -140,9 +140,9 @@ services:
     # Why: no RUN logic in the Dockerfile; @KEY@ = default.
     # From: Issue #1683 | PR #1912
     setup:
-      - dir=/etc/pdns/auth
-      - dir=/var/lib/powerdns:pdns
-      - dir=/var/run/pdns:pdns
+      - dir=@PDNS_CONF_DIR@/auth
+      - dir=@PDNS_DATA_DIR@:pdns
+      - dir=@PDNS_RUN_DIR@:pdns
     final_base: alpine
     # What: final-image apk packages; the SOT owns the list.
     # Why: consumers derive; no hardcoding (AG-CI-006)
@@ -286,20 +286,15 @@ build_toolchain:
     # From: Issue #1683 | PR #1858
     apk_repositories:
       - testing=http://dl-cdn.alpinelinux.org/alpine/edge/testing
-    # What: Executables the toolchain smoke must find+run.
-    # Why: One owner of the smoke list; ci.sh reads it.
+    # What: tools only checked on PATH, with no run.
+    # Why: a tool has one smoke entry, here or in runs.
     # From: Issue #1683
     smoke_tools:
-      - actionlint
       - ar
       - awk
       - basename
-      - bash
-      - bats
-      - cargo
       - cargo-audit
       - cat
-      - ccache
       - chgrp
       - chmod
       - chown
@@ -307,26 +302,14 @@ build_toolchain:
       - clippy-driver
       - cmake
       - cp
-      - curl
-      - dhclient
       - dig
       - dirname
       - distcc
-      - docker
-      - envsubst
-      - expect
-      - find
       - flock
       - getent
-      - gh
-      - git
-      - gpg
-      - grep
       - gzip
       - install
       - ip
-      - java
-      - jq
       - ld.lld
       - make
       - mkdir
@@ -335,7 +318,6 @@ build_toolchain:
       - node
       - npm
       - openssl
-      - parallel
       - pkg-config
       - ps
       - pump
@@ -343,20 +325,13 @@ build_toolchain:
       - rsync
       - rustc
       - rustfmt
-      - sccache
-      - sed
       - sha256sum
-      - shellcheck
-      - shfmt
       - sort
       - tar
       - tcpdump
       - tee
       - timeout
-      - trivy
       - xargs
-      - xz
-      - yq
     # What: Commands the toolchain smoke must run clean.
     # Why: present is not runnable; one owner of the runs.
     # From: Issue #1683 | PR #1858
@@ -406,10 +381,171 @@ base_images:
 # From: Issue #1683 | PR #1912
 runtime:
   gid: 10001
-  # What: default values, KEY=value list joined by pipes.
+  # What: KEY=value defaults; @KEY@ names another entry.
   # Why: images bake them; no .env template holds any.
   # From: Issue #1683 | PR #1912
-  defaults: PDNS_AUTH_API_PORT=8081|PDNS_HTTP_API_PORT=8082|PDNS_HTTPS_API_PORT=8084|DNS_ROLLBACK_PORT=8083|PDNS_SOA_REFRESH=30|PDNS_SOA_RETRY=10|PDNS_SOA_RESYNC_INTERVAL=3600|CHECK_INTERVAL=30|RESTART_AFTER=3|DISK_WARN_PCT=85|DISK_ALARM_PCT=95|DOCKER_API_TIMEOUT=5|DOCKER_RESTART_TIMEOUT=30|SYSLOG_PRUNE_RETRY_COOLDOWN=3600|CACHEHAMSTER_CONCURRENCY=4|DHCP_LEASE_TIME=86400|CACHE_SLICE_SIZE=8m|CACHE_VALID_HIT=365d|CACHE_VALID_ANY=1m|CACHE_INACTIVE=365d|CACHE_MIN_FREE=1g|CACHE_VALID_DAYS=365|SYSLOG_MAX_GB=10|SYSLOG_RETENTION_DAYS=30|LOG_QUERIES=0|ROOT_ZONE_MIRROR=1|DHCP_DOMAIN=lan|DHCP_DDNS_ENABLED=false|KEA_CTRL_USER=admin|KEA_CTRL_PORT=8000|KEA_CONFIG_SNAPSHOT_DIR=/var/lib/kea/config-snapshots|KEEP_KNOWN_GOOD_CONFIGS=3|NATS_UI_USER=lancache-ui|NATS_DNS_WRITER_USER=lancache-dns-writer|NATS_CALLOUT_USER=lancache-nats-callout|NATS_SYS_USER=lancache-nats-sys|LANCACHE_LOG_PORT=5514|LOGGING_PROXY_ENABLED=1|LOGGING_DNS_ENABLED=1|LOGGING_DHCP_ENABLED=1|LOGGING_UI_ENABLED=1|NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]|PROXY_SECURITY_MODE=lazy|NTP_UPSTREAM_SERVERS=0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com|CACHE_MAX_SIZE=50g|CACHE_MEM_MB=512|DHCP_SUBNET=10.0.0.0/24|DHCP_RANGE_START=10.0.0.128|DHCP_RANGE_END=10.0.0.254|DHCP_GATEWAY=10.0.0.1|DHCP_NTP_SERVERS=debian.pool.ntp.org,time.nist.gov|ALLOW_INSECURE_UI=false|SUPERVISE_RUN_DIR=/run/lancache|LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets|UI_DATA_DIR=/data|DESIRED_STATE_FILE=/data/desired-state.json|UI_SETTINGS_FILE=/data/lancache-ui-settings.env|DHCP_PROBE_REQUEST_FILE=/data/dhcp-probe-request|DHCP_PROBE_RESULT_FILE=/var/lib/kea/dhcp-probe-result.json|UI_SESSION_SECRET_FILE=/data/lancache-ui-session.secret|SECONDARY_REGISTRATION_TOKEN_FILE=/data/lancache-secondary-registration.token|NETDATA_ALARMS_FILE=/data/netdata-alarms.json|NATS_ISSUER_SEED_PATH=/data/lancache-nats-issuer.seed|NATS_XKEY_SEED_PATH=/data/lancache-nats-xkey.seed|UI_DATABASE_FILE=/data/lancache-ui.db|UI_LOG_FILE=/var/log/lancache-ui/ui.log|UI_LISTEN_PORT=8080|UI_LOGS_MAX_ENTRIES=200|UI_SESSION_TTL_SECONDS=86400|KEA_DATA_DIR=/var/lib/kea|DHCP_SNAPSHOT_MOUNT=/var/lib/lancache-dhcp|DHCP_CONFIG_SNAPSHOT_DIR=/var/lib/lancache-dhcp/config-snapshots|DNS_SNAPSHOT_MOUNT=/var/lib/lancache-dns|DNS_CONFIG_SNAPSHOT_DIR=/var/lib/lancache-dns/config-snapshots|PROXY_SNAPSHOT_MOUNT=/var/lib/lancache-proxy|PROXY_CONFIG_SNAPSHOT_DIR=/var/lib/lancache-proxy/config-snapshots|DNS_STATE_DIR=/var/lib/powerdns-state|PDNS_DATA_DIR=/var/lib/powerdns|NATS_CONF_MOUNT=/etc/nats|NATS_CONF_PATH=/etc/nats/nats.conf|NATS_AUTH_CALLOUT_PATH=/etc/nats/auth_callout.conf|NATS_STORE_DIR=/var/lib/nats|NATS_PORT=4222|NATS_MONITOR_PORT=8222|NATS_URL=nats://dns:4222|NATS_CONSUMER=dns|NATS_RECONCILER=1|NATS_PASSWORD_SHARED_SECRET=nats-dns-writer-password|DNS_REPLICATION_ROLE=primary|RAW_CONTENT_URL=https://raw.githubusercontent.com|SETUP_SCRIPT_PATH=wiki-mod/lancache-ng/master/setup.sh|DNS_REPLICATION_ROLE_SECONDARY=secondary|SECONDARY_RUNTIME_GID=0|SECONDARY_SECRETS_SUBDIR=secrets|CONTAINER_NAME_SERVICES=LanCache-NG-services|CONTAINER_NAME_PROXY=LanCache-NG-proxy|CONTAINER_NAME_DNS=LanCache-NG-dns|CONTAINER_NAME_DHCP=LanCache-NG-dhcp|CONTAINER_NAME_UI=LanCache-NG-ui|CDN_DOMAINS_FILE=/etc/lancache/cdn-domains.txt|CACHEHAMSTER_DATA_DIR=/var/lib/lancache-cachehamster|CACHE_DIR=/var/cache/lancache|CACHE_DIR_ALLOWED_PREFIX=/var/cache|DOCKER_SOCKET=/var/run/docker.sock|NETDATA_CONFIG_DIR=/etc/netdata|NETDATA_LIB_DIR=/var/lib/netdata|NETDATA_CACHE_DIR=/var/cache/netdata|NETDATA_URL=http://services:19999|NETDATA_ALARM_UI_URL=http://ui:8080|NETDATA_ALARM_MAX_TIME=15|NETDATA_ALARM_RECIPIENT=lancache-ui|NTP_STATE_DIR=/var/lib/chrony|NTP_DRIFT_FILE=/var/lib/chrony/drift|NTP_ENABLED=0|RETENTION_STATE_DIR=/var/lib/lancache-retention-state|PURGE_STAMP=/var/lib/lancache-retention-state/purge.stamp|SYSLOG_PRUNE_STAMP=/var/lib/lancache-retention-state/syslog-prune.stamp|STATUS_DIR=/var/run/watchdog|STATUS_FILE=/var/run/watchdog/status.json|SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng|SYSLOG_LOG_ROOT_ALLOWED_PREFIX=/var/log|PROXY_HTTP_URL=http://proxy|PROXY_HTTPS_URL=http://proxy|DHCP_API_HOST=host.docker.internal|DNS_URL=http://dns|HTTPS_ENABLED=1|DHCP_MODE=disabled|LOG_READER_GROUP=lancache|LANCACHE_STATE_DIR=/opt/lancache-ng|TEMPLATE_DIR=/templates|PDNS_LUA_DNS_SCRIPT=/etc/pdns/filter-aaaa.lua|PDNS_SCHEMA_FILE=/usr/share/lancache-ng/schema.sqlite3.sql|NGINX_DIR=/etc/nginx|NGINX_SUBDIR_CA=ssl/ca|NGINX_SUBDIR_CERTS=ssl/certs|NGINX_CACHE_DIR=/var/cache/nginx/lancache|PROXY_HEALTH_URL=http://127.0.0.1/healthz|PROXY_HEALTH_HTTPS_URL=https://127.0.0.1:8445/healthz|NGINX_MITM_PORT=8444|NGINX_MITM_RELAY_PORT=9445|NGINX_PASSTHROUGH_RELAY_PORT=9446|NGINX_PASSTHROUGH_PORT=8443|KEA_NCR_PORT=53001|NGINX_HTTPS_LISTEN_FILE=conf.d/https-listen.inc|DNS_PORT=53|DNS_HTTPS_PORT=1053|PDNS_AUTH_PORT=5300|NTP_PORT=123|LOOPBACK_BIND_IP=127.0.0.1|UI_SESSION_TTL_MAX_SECONDS=31536000|STATE_SUBDIR_SYSLOG_NG=syslog-ng|STATE_SUBDIR_NTP=ntp|STATE_SUBDIR_CACHEHAMSTER=cachehamster|STATE_SUBDIR_PDNS=pdns|STATE_SUBDIR_PDNS_FILTER=pdns-filter-state|STATE_SUBDIR_NATS=nats|STATE_SUBDIR_NATS_CONF=nats-conf|STATE_SUBDIR_KEA=kea|STATE_SUBDIR_CACHE=cache
+  defaults:
+    - PDNS_AUTH_API_PORT=8081
+    - PDNS_HTTP_API_PORT=8082
+    - PDNS_HTTPS_API_PORT=8084
+    - DNS_ROLLBACK_PORT=8083
+    - PDNS_SOA_REFRESH=30
+    - PDNS_SOA_RETRY=10
+    - PDNS_SOA_RESYNC_INTERVAL=3600
+    - CHECK_INTERVAL=30
+    - RESTART_AFTER=3
+    - DISK_WARN_PCT=85
+    - DISK_ALARM_PCT=95
+    - DOCKER_API_TIMEOUT=5
+    - DOCKER_RESTART_TIMEOUT=30
+    - SYSLOG_PRUNE_RETRY_COOLDOWN=3600
+    - CACHEHAMSTER_CONCURRENCY=4
+    - DHCP_LEASE_TIME=86400
+    - CACHE_SLICE_SIZE=8m
+    - CACHE_VALID_HIT=@CACHE_VALID_DAYS@d
+    - CACHE_VALID_ANY=1m
+    - CACHE_INACTIVE=@CACHE_VALID_DAYS@d
+    - CACHE_MIN_FREE=1g
+    - CACHE_VALID_DAYS=365
+    - SYSLOG_MAX_GB=10
+    - SYSLOG_RETENTION_DAYS=30
+    - LOG_QUERIES=0
+    - ROOT_ZONE_MIRROR=1
+    - DHCP_DOMAIN=lan
+    - DHCP_DDNS_ENABLED=false
+    - KEA_CTRL_USER=admin
+    - KEA_CTRL_PORT=8000
+    - KEA_CONFIG_SNAPSHOT_DIR=@KEA_DATA_DIR@/config-snapshots
+    - KEEP_KNOWN_GOOD_CONFIGS=3
+    - NATS_UI_USER=lancache-ui
+    - NATS_DNS_WRITER_USER=lancache-dns-writer
+    - NATS_CALLOUT_USER=lancache-nats-callout
+    - NATS_SYS_USER=lancache-nats-sys
+    - LANCACHE_LOG_PORT=5514
+    - LOGGING_PROXY_ENABLED=1
+    - LOGGING_DNS_ENABLED=1
+    - LOGGING_DHCP_ENABLED=1
+    - LOGGING_UI_ENABLED=1
+    - NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]
+    - PROXY_SECURITY_MODE=lazy
+    - NTP_UPSTREAM_SERVERS=0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com
+    - CACHE_MAX_SIZE=50g
+    - CACHE_MEM_MB=512
+    - DHCP_SUBNET=10.0.0.0/24
+    - DHCP_RANGE_START=10.0.0.128
+    - DHCP_RANGE_END=10.0.0.254
+    - DHCP_GATEWAY=10.0.0.1
+    - DHCP_NTP_SERVERS=debian.pool.ntp.org,time.nist.gov
+    - ALLOW_INSECURE_UI=false
+    - SUPERVISE_RUN_DIR=/run/lancache
+    - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
+    - UI_DATA_DIR=/data
+    - DESIRED_STATE_FILE=@UI_DATA_DIR@/desired-state.json
+    - UI_SETTINGS_FILE=@UI_DATA_DIR@/lancache-ui-settings.env
+    - DHCP_PROBE_REQUEST_FILE=@UI_DATA_DIR@/dhcp-probe-request
+    - DHCP_PROBE_RESULT_FILE=@KEA_DATA_DIR@/dhcp-probe-result.json
+    - UI_SESSION_SECRET_FILE=@UI_DATA_DIR@/lancache-ui-session.secret
+    - SECONDARY_REGISTRATION_TOKEN_FILE=@UI_DATA_DIR@/lancache-secondary-registration.token
+    - NETDATA_ALARMS_FILE=@UI_DATA_DIR@/netdata-alarms.json
+    - NATS_ISSUER_SEED_PATH=@UI_DATA_DIR@/lancache-nats-issuer.seed
+    - NATS_XKEY_SEED_PATH=@UI_DATA_DIR@/lancache-nats-xkey.seed
+    - UI_DATABASE_FILE=@UI_DATA_DIR@/lancache-ui.db
+    - UI_LOG_FILE=/var/log/lancache-ui/ui.log
+    - UI_LISTEN_PORT=8080
+    - UI_LOGS_MAX_ENTRIES=200
+    - UI_SESSION_TTL_SECONDS=86400
+    - KEA_DATA_DIR=/var/lib/kea
+    - DHCP_SNAPSHOT_MOUNT=/var/lib/lancache-dhcp
+    - DHCP_CONFIG_SNAPSHOT_DIR=@DHCP_SNAPSHOT_MOUNT@/config-snapshots
+    - DNS_SNAPSHOT_MOUNT=/var/lib/lancache-dns
+    - DNS_CONFIG_SNAPSHOT_DIR=@DNS_SNAPSHOT_MOUNT@/config-snapshots
+    - PROXY_SNAPSHOT_MOUNT=/var/lib/lancache-proxy
+    - PROXY_CONFIG_SNAPSHOT_DIR=@PROXY_SNAPSHOT_MOUNT@/config-snapshots
+    - DNS_STATE_DIR=/var/lib/powerdns-state
+    - PDNS_DATA_DIR=/var/lib/powerdns
+    - NATS_CONF_MOUNT=/etc/nats
+    - NATS_CONF_PATH=@NATS_CONF_MOUNT@/nats.conf
+    - NATS_AUTH_CALLOUT_PATH=@NATS_CONF_MOUNT@/auth_callout.conf
+    - NATS_STORE_DIR=/var/lib/nats
+    - NATS_PORT=4222
+    - NATS_MONITOR_PORT=8222
+    - NATS_URL=nats://dns:@NATS_PORT@
+    - NATS_CONSUMER=dns
+    - NATS_RECONCILER=1
+    - NATS_PASSWORD_SHARED_SECRET=nats-dns-writer-password
+    - DNS_REPLICATION_ROLE=primary
+    - RAW_CONTENT_URL=https://raw.githubusercontent.com
+    - SETUP_SCRIPT_PATH=wiki-mod/lancache-ng/master/setup.sh
+    - DNS_REPLICATION_ROLE_SECONDARY=secondary
+    - SECONDARY_RUNTIME_GID=0
+    - SECONDARY_SECRETS_SUBDIR=secrets
+    - CONTAINER_NAME_PREFIX=LanCache-NG
+    - CONTAINER_NAME_SERVICES=@CONTAINER_NAME_PREFIX@-services
+    - CONTAINER_NAME_PROXY=@CONTAINER_NAME_PREFIX@-proxy
+    - CONTAINER_NAME_DNS=@CONTAINER_NAME_PREFIX@-dns
+    - CONTAINER_NAME_DHCP=@CONTAINER_NAME_PREFIX@-dhcp
+    - CONTAINER_NAME_UI=@CONTAINER_NAME_PREFIX@-ui
+    - CDN_DOMAINS_FILE=/etc/lancache/cdn-domains.txt
+    - CACHEHAMSTER_DATA_DIR=/var/lib/lancache-cachehamster
+    - CACHE_DIR=/var/cache/lancache
+    - CACHE_DIR_ALLOWED_PREFIX=/var/cache
+    - DOCKER_SOCKET=/var/run/docker.sock
+    - NETDATA_CONFIG_DIR=/etc/netdata
+    - NETDATA_LIB_DIR=/var/lib/netdata
+    - NETDATA_CACHE_DIR=/var/cache/netdata
+    - NETDATA_URL=http://services:19999
+    - NETDATA_ALARM_UI_URL=http://ui:@UI_LISTEN_PORT@
+    - NETDATA_ALARM_MAX_TIME=15
+    - NETDATA_ALARM_RECIPIENT=lancache-ui
+    - NTP_STATE_DIR=/var/lib/chrony
+    - NTP_DRIFT_FILE=@NTP_STATE_DIR@/drift
+    - NTP_ENABLED=0
+    - RETENTION_STATE_DIR=/var/lib/lancache-retention-state
+    - PURGE_STAMP=@RETENTION_STATE_DIR@/purge.stamp
+    - SYSLOG_PRUNE_STAMP=@RETENTION_STATE_DIR@/syslog-prune.stamp
+    - STATUS_DIR=/var/run/watchdog
+    - STATUS_FILE=@STATUS_DIR@/status.json
+    - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
+    - SYSLOG_LOG_ROOT_ALLOWED_PREFIX=/var/log
+    - PROXY_STATUS_URL=http://proxy
+    - DHCP_API_HOST=host.docker.internal
+    - DNS_URL=http://dns
+    - HTTPS_ENABLED=1
+    - DHCP_MODE=disabled
+    - LOG_READER_GROUP=lancache
+    - LANCACHE_STATE_DIR=/opt/lancache-ng
+    - TEMPLATE_DIR=/templates
+    - PDNS_CONF_DIR=/etc/pdns
+    - PDNS_RUN_DIR=/var/run/pdns
+    - PDNS_LUA_DNS_SCRIPT=@PDNS_CONF_DIR@/filter-aaaa.lua
+    - PDNS_SCHEMA_FILE=/usr/share/lancache-ng/schema.sqlite3.sql
+    - NGINX_DIR=/etc/nginx
+    - NGINX_SUBDIR_CA=ssl/ca
+    - NGINX_SUBDIR_CERTS=ssl/certs
+    - NGINX_CACHE_DIR=/var/cache/nginx/lancache
+    - PROXY_HEALTH_URL=http://@LOOPBACK_BIND_IP@/healthz
+    - PROXY_HEALTH_HTTPS_URL=https://@LOOPBACK_BIND_IP@:8445/healthz
+    - NGINX_MITM_PORT=8444
+    - NGINX_MITM_RELAY_PORT=9445
+    - NGINX_PASSTHROUGH_RELAY_PORT=9446
+    - NGINX_PASSTHROUGH_PORT=8443
+    - KEA_NCR_PORT=53001
+    - NGINX_HTTPS_LISTEN_FILE=conf.d/https-listen.inc
+    - DNS_PORT=53
+    - DNS_HTTPS_PORT=1053
+    - PDNS_AUTH_PORT=5300
+    - NTP_PORT=123
+    - LOOPBACK_BIND_IP=127.0.0.1
+    - UI_SESSION_TTL_MAX_SECONDS=31536000
+    - STATE_SUBDIR_SYSLOG_NG=syslog-ng
+    - STATE_SUBDIR_NTP=ntp
+    - STATE_SUBDIR_CACHEHAMSTER=cachehamster
+    - STATE_SUBDIR_PDNS=pdns
+    - STATE_SUBDIR_PDNS_FILTER=pdns-filter-state
+    - STATE_SUBDIR_NATS=nats
+    - STATE_SUBDIR_NATS_CONF=nats-conf
+    - STATE_SUBDIR_KEA=kea
+    - STATE_SUBDIR_CACHE=cache
   # What: defaults compose interpolates as SOT_<KEY>.
   # Why: setup.sh and ci.sh export them; no clash with .env.
   # From: Issue #1683 | PR #1912
@@ -472,7 +608,7 @@ platform_arch:
     rust_target: aarch64-alpine-linux-musl
 
 # What: timeout minutes per workflow job id; one owner
-# Why: root jobs keep a literal the guard holds equal
+# Why: jobs that run before platform keep their own literal
 # From: Issue #1683 | PR #1858
 ci_job_timeouts:
   aggregate: 30
@@ -481,26 +617,20 @@ ci_job_timeouts:
   build: 90
   cargo-audit: 30
   checks: 30
-  claude: 360
   close-linked-issues: 15
   cut-release-tag: 15
   gc: 60
-  impact: 15
   lint: 30
   nightly: 30
   orphaned-branches: 15
   plan: 30
-  platform: 15
   project-board: 15
   promote: 30
   release: 30
   release-sbom: 60
-  resolve-build-tools: 15
-  result: 15
   scan: 60
   test: 45
   validate: 60
-  welcome: 15
 
 # What: CI phases that must run and succeed on every run.
 # Why: §62: a skipped plan or checks would hide a red run.
@@ -529,44 +659,6 @@ build_runtime:
     smoke:
       - ldd /usr/local/bin/@CRATE@
 
-# What: repo paths Dockerfiles copy from outside a context.
-# Why: a change there must reach every image built from it.
-# From: Issue #1683 | PR #1912
-named_contexts:
-  cargo-workspace:
-    path: Cargo.toml
-  cargo-lock:
-    path: Cargo.lock
-  rust-common:
-    path: services/common
-  supervisor-src:
-    path: services/watchdog/src
-  supervisor-manifest:
-    path: services/watchdog/Cargo.toml
-  ui-manifest:
-    path: services/ui/Cargo.toml
-  cachehamster-manifest:
-    path: services/cachehamster/Cargo.toml
-  cachehamster-src:
-    path: services/cachehamster/src
-  subscriber-manifest:
-    path: services/dns/nats-subscriber/Cargo.toml
-
-# What: Per-service rebuild edges beyond its own context.
-# Why: plan picks candidates, identity decides the build.
-# From: Issue #1683 | PR #1912
-dependency_graph:
-  services:
-    contexts: [cargo-workspace, cargo-lock, rust-common, ui-manifest, cachehamster-manifest, cachehamster-src, subscriber-manifest]
-  proxy:
-    contexts: [cargo-workspace, cargo-lock, rust-common, supervisor-src, supervisor-manifest, ui-manifest, cachehamster-manifest, subscriber-manifest]
-  dns:
-    contexts: [cargo-workspace, cargo-lock, rust-common, supervisor-src, supervisor-manifest, ui-manifest, cachehamster-manifest]
-  dhcp:
-    contexts: [cargo-workspace, cargo-lock, rust-common, supervisor-src, supervisor-manifest, ui-manifest, cachehamster-manifest, subscriber-manifest]
-  ui:
-    contexts: [cargo-workspace, cargo-lock, rust-common, supervisor-manifest, cachehamster-manifest, subscriber-manifest]
-
 # What: CodeQL query suites and ignored paths.
 # Why: One SOT owner; codeql.yml/ci.sh derive, no dup.
 # From: Issue #1683
@@ -579,10 +671,13 @@ codeql:
 # From: Issue #1683
 codeql_languages:
   actions:
-    paths: [.github/workflows]
+    paths: ["@{ci_variables.CI_WORKFLOW_DIR}"]
   rust:
     files: ["*.rs"]
-    paths: [services/cachehamster/src, services/common, services/dns/nats-subscriber/src, services/ui/src, services/watchdog/src]
+    # What: @rust_workspace = the Cargo.toml member dirs.
+    # Why: the member list has one owner, Cargo.toml.
+    # From: Issue #1683 | PR #1912
+    paths: ["@rust_workspace"]
 
 # What: release version, channels, validation and GC inputs
 # Why: AG-REL-010: one release and artifact inventory
@@ -657,8 +752,8 @@ pr_labels:
   setup: [setup.sh, "deploy/**"]
   docker: ["deploy/**", "**/Dockerfile"]
   rust: ["**/*.rs"]
-  ci: [".github/workflows/**", ".github/scripts/**", ".github/yaml/**"]
-  github_actions: [".github/workflows/**"]
+  ci: ["@{ci_variables.CI_WORKFLOW_DIR}/**", ".github/scripts/**", ".github/yaml/**"]
+  github_actions: ["@{ci_variables.CI_WORKFLOW_DIR}/**"]
   documentation: ["docs/**", "**/*.md"]
 
 # What: Release notes: PR section, skip label, fallback.
@@ -694,7 +789,6 @@ release_notes_categories:
 # Why: No hardcode, like CARGO_BUILD_JOBS (AG-CI-006).
 # From: Issue #1683
 ci_variables:
-  REPOSITORY_CI_LEDGER_RETENTION_DAYS: 30
   # What: cargo fmt/clippy/test in CI; off unless "true".
   # Why: AG-VAL-008: a variable, disabled by default.
   # From: Issue #1683
@@ -726,6 +820,7 @@ ci_variables:
   # What: the workspace lockfile cargo-audit reads.
   # Why: plan audits only when this file changed.
   # From: Issue #1683 | PR #1858
+  CI_CARGO_MANIFEST: Cargo.toml
   CI_CARGO_LOCK: Cargo.lock
   # What: plain version file setup.sh reads for archives.
   # Why: it must equal release.version (version-drift).
@@ -843,7 +938,7 @@ runner_host:
   # Why: every runner host uses the same layout.
   # From: Issue #1622 | PR #1624
   opt_root: /opt
-  hooks_dir: /opt/lancache-ci-hooks
+  hooks_dir: "@{runner_host.opt_root}/lancache-ci-hooks"
   user: codex
   # What: archives from this size up are clone leftovers.
   # Why: confirmed leftovers were 6.7 GB and 14.3 GB.
@@ -981,7 +1076,7 @@ runner_host:
   # Why: ci.sh joins it with each name; no path copy.
   # From: Issue #1683 | PR #1912
   sccache_bin_dir: /usr/local/bin
-  sccache_dist_dir: /opt/sccache/dist-client
+  sccache_dist_dir: "@{runner_host.opt_root}/sccache/dist-client"
 
 # What: files the header and prose checks skip, by path.
 # Why: vendored or generated content carries no header.
@@ -1092,14 +1187,30 @@ validation:
   # Why: each renders clean in all of its own profiles.
   # From: Issue #1683 | PR #1858
   compose_targets: deploy/secondary/docker-compose.yml
-  # What: placeholder env for targets without .env
-  # Why: operator keys are :?-required
-  # From: Issue #1683 | PR #1858
-  compose_validation_env: DNS_XFR_PRIMARY=192.0.2.10:5300 IP_HTTPS=127.0.0.2 IP_HTTP=127.0.0.1 LISTEN_IP=127.0.0.3 LISTEN_IP_HTTPS=127.0.0.1 DNS_HTTPS_HOST_PORT= ALLOW_INSECURE_UI=true NATS_CONSUMER=ci-secondary NATS_USER=ci-nats-user NATS_ADVERTISE_URL=nats://192.0.2.10:4222 NATS_URL=nats://127.0.0.1:4222 NGINX_UPSTREAM_RESOLVER=1.1.1.1
-  # What: default keys compose needs in the render env.
-  # Why: compose reads them; runtime.defaults owns them.
+  # What: peer address of a secondary validation.
+  # Why: one RFC 5737 address; the env rows name it.
   # From: Issue #1683 | PR #1912
-  compose_validation_defaults: CACHE_MAX_SIZE CACHE_MEM_MB DHCP_SUBNET LANCACHE_STATE_DIR
+  peer_ip: 192.0.2.10
+  # What: compose env rows; a bare KEY takes its default.
+  # Why: operator keys are :?-required; one owner.
+  # From: Issue #1683 | PR #1858
+  compose_validation_env:
+    - DNS_XFR_PRIMARY=@{validation.peer_ip}:@PDNS_AUTH_PORT@
+    - IP_HTTPS=127.0.0.2
+    - IP_HTTP=@LOOPBACK_BIND_IP@
+    - LISTEN_IP=127.0.0.3
+    - LISTEN_IP_HTTPS=@LOOPBACK_BIND_IP@
+    - DNS_HTTPS_HOST_PORT=
+    - ALLOW_INSECURE_UI=true
+    - NATS_CONSUMER=ci-secondary
+    - NATS_USER=ci-nats-user
+    - NATS_ADVERTISE_URL=nats://@{validation.peer_ip}:@NATS_PORT@
+    - NATS_URL=nats://@LOOPBACK_BIND_IP@:@NATS_PORT@
+    - NGINX_UPSTREAM_RESOLVER
+    - CACHE_MAX_SIZE
+    - CACHE_MEM_MB
+    - DHCP_SUBNET
+    - LANCACHE_STATE_DIR
   # What: required keys setup.sh repairs
   # Why: empty required key breaks the stack
   # From: Issue #1683 | PR #1858

@@ -312,15 +312,29 @@ _CI_JQ_SOT_INDEX='
                 | .f[$a] //= $x.s | .a[$a] += $x.s + "\n"))
         | to_entries[] | .key as $t | .value | to_entries[] | select(keep(.key)) | put($t + ":" + .key; .value))'
 
+# What: jq pass: @{block.key} becomes that scalar.
+# Why: a value naming another SOT value is not copied.
+# From: Issue #1683 | PR #1912
+_CI_JQ_SOT_REFS='
+    . as $root
+    | def ex($d): if type != "string" then . elif $d > 8 then error("SOT reference cycle") else
+        gsub("@\\{(?<p>[A-Za-z0-9_.-]+)\\}"; (.p | split(".")) as $path
+            | ($root | getpath($path)) as $r
+            | if ($r | type) == "string" then $r | ex($d + 1)
+              elif ($r | type) == "number" then $r | tostring
+              else error("SOT reference @{" + ($path | join(".")) + "} is no scalar") end) end;
+    walk(ex(0))'
+
 # What: index a SOT file, or one subtree, under a prefix.
 # Why: one yq parse and one eval; raw logged by _ci_run.
 # From: Issue #1683 | PR #1858
 _ci_sot_index() {
     local json idx
     if ! json="$(_ci_run -s "[CI-ERROR-CORE-0139]" "file=\"$1\" reason=\"yq cannot read the SOT\"" yq -o=json '.' "$1")" \
+        || ! json="$(_ci_run -s "[CI-ERROR-CORE-0150]" "file=\"$1\" reason=\"SOT references not resolved\"" jq -c "${_CI_JQ_SOT_REFS}" <<< "${json}")" \
         || ! idx="$(_ci_run -s "[CI-ERROR-CORE-0141]" "file=\"$1\" reason=\"SOT index not built\"" \
             jq -r --arg want "$2" --arg kp "$3" "${_CI_JQ_SOT_INDEX}" <<< "${json}")"; then
-        _CI_SOT_RAW_ERR="raw in the CORE-0139/0141 line above"
+        _CI_SOT_RAW_ERR="raw in the CORE-0139/0141/0150 line above"
         return 2
     fi
     eval "_CI_SOT+=(${idx})"
@@ -456,14 +470,15 @@ ci_service_field() {
 # From: Issue #1683
 _ci_required_field() {
     local v
-    # What: list reads a list; block a top-level value.
+    # What: list; block/blocklist = a top-level value/list.
     # Why: one owner for a missing required SOT field.
     # From: Issue #1683 | PR #1912
     case "${3:-}" in
         "") v="$(ci_service_field "$1" "$2")" || return 2 ;;
         list) v="$(_ci_target_list "$1" "$2")" || return 2 ;;
         block) v="$(_ci_block_entry_field "$1" "" "$2")" || return 2 ;;
-        *) ci_log "[CI-ERROR-CORE-0146]" "target=\"$1\" field=\"$2\" kind=\"$3\" reason=\"kind must be empty, list or block\""; return 2 ;;
+        blocklist) v="$(_ci_block_entry_list "$1" "" "$2")" || return 2 ;;
+        *) ci_log "[CI-ERROR-CORE-0146]" "target=\"$1\" field=\"$2\" kind=\"$3\" reason=\"kind must be empty, list, block or blocklist\""; return 2 ;;
     esac
     if [ -z "${v}" ]; then
         ci_log "[CI-ERROR-CORE-0009]" \
@@ -473,18 +488,98 @@ _ci_required_field() {
     printf '%s\n' "${v}"
 }
 
-# What: Print the named contexts a service rebuilds on.
-# Why: dependency_graph is the SOT edge set (Finding 93).
-# From: Issue #1683
-ci_service_contexts() {
-    _ci_block_entry_list dependency_graph "$1" contexts
+# What: workspace rows: member dir|bin path|crate.
+# Why: Cargo.toml owns the members; the SOT copies none.
+# From: Issue #1683 | PR #1912
+_ci_workspace_rows() {
+    local root="${1:-${CI_REPO_ROOT:-.}}" manifest members m row
+    manifest="$(_ci_variable CI_CARGO_MANIFEST)" || return 2
+    members="$(_ci_capture 0 yq -p toml -oy '.workspace.members[]' "${root}/${manifest}")" || return 2
+    # What: a member without [[bin]] is a library.
+    # Why: a library counts with its whole dir.
+    # From: Issue #1683 | PR #1912
+    while IFS= read -r m; do
+        [ -n "${m}" ] || continue
+        # What: a member without a manifest stays a row.
+        # Why: the dir then fails the dead-path gate.
+        # From: Issue #1683 | PR #1912
+        if [ ! -f "${root}/${m}/${manifest}" ]; then
+            printf '%s||\n' "${m}"
+            continue
+        fi
+        row="$(_ci_capture 0 yq -p toml -oy '(.bin[0].path // "") + "|" + .package.name' "${root}/${m}/${manifest}")" || return 2
+        printf '%s|%s\n' "${m}" "${row}"
+    done <<< "${members}"
 }
 
-# What: Print a named context's path from named_contexts.
-# Why: Map a context name to the repo path it covers.
-# From: Issue #1683
-ci_context_path() {
-    _ci_block_entry_field named_contexts "$1" path
+# What: the source dir of a bin: its path's directory.
+# Why: a bin at the member root makes the member dir it.
+# From: Issue #1683 | PR #1912
+_ci_workspace_src_dir() {
+    case "$2" in
+        */*) printf '%s/%s\n' "$1" "${2%/*}" ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
+# What: the repo paths a Rust service builds from.
+# Why: plan and the context-edge check read one list.
+# From: Issue #1683 | PR #1912
+ci_service_context_paths() {
+    local svc="$1" root="${2:-${CI_REPO_ROOT:-.}}" own crates manifest lock rows dir bin crate type
+    type="$(_ci_block_entry_field services "${svc}" build_type)" || return 2
+    [ "${type}" = rust ] || return 0
+    own="$(_ci_required_field "${svc}" context)" || return 2
+    crates=" $(_ci_required_field "${svc}" crates list | tr '\n' ' ')"
+    manifest="$(_ci_variable CI_CARGO_MANIFEST)" || return 2
+    lock="$(_ci_variable CI_CARGO_LOCK)" || return 2
+    rows="$(_ci_workspace_rows "${root}")" || return 2
+    printf '%s\n%s\n' "${manifest}" "${lock}"
+    while IFS='|' read -r dir bin crate; do
+        case "${dir}" in "${own}" | "${own}"/*) continue ;; esac
+        if [ -z "${bin}" ]; then
+            printf '%s\n' "${dir}"
+            continue
+        fi
+        printf '%s/%s\n' "${dir}" "${manifest}"
+        if [[ "${crates}" == *" ${crate} "* ]]; then
+            _ci_workspace_src_dir "${dir}" "${bin}"
+        fi
+    done <<< "${rows}"
+}
+
+# What: the library crate dirs of the workspace.
+# Why: shared sources are read from the member, not a copy.
+# From: Issue #1683 | PR #1912
+ci_workspace_lib_dirs() {
+    local rows dir bin crate
+    rows="$(_ci_workspace_rows "$1")" || return 2
+    while IFS='|' read -r dir bin crate; do
+        [ -n "${bin}" ] || printf '%s\n' "${dir}"
+    done <<< "${rows}"
+}
+
+# What: every workspace source dir CodeQL analyzes.
+# Why: a bin's source dir or a library's whole dir.
+# From: Issue #1683 | PR #1912
+ci_workspace_source_dirs() {
+    local rows dir bin crate
+    rows="$(_ci_workspace_rows "$1")" || return 2
+    while IFS='|' read -r dir bin crate; do
+        if [ -z "${bin}" ]; then printf '%s\n' "${dir}"; else _ci_workspace_src_dir "${dir}" "${bin}"; fi
+    done <<< "${rows}"
+}
+
+# What: a CodeQL language's analyzed paths.
+# Why: "@rust_workspace" expands to the member source dirs.
+# From: Issue #1683 | PR #1912
+_ci_codeql_paths() {
+    local raw p
+    raw="$(_ci_block_entry_list codeql_languages "$1" paths)" || return 2
+    while IFS= read -r p; do
+        [ -n "${p}" ] || continue
+        if [ "${p}" = "@rust_workspace" ]; then ci_workspace_source_dirs "${CI_REPO_ROOT:-.}" || return 2; else printf '%s\n' "${p}"; fi
+    done <<< "${raw}"
 }
 
 # =========================================================
@@ -610,14 +705,10 @@ _ci_paths_touch() {
 # Why: plan and the release gate read one path list
 # From: Issue #1683 | PR #1858
 _ci_target_paths() {
-    local target="$1" context ctx ctx_path ctxs
+    local target="$1" context
     context="$(_ci_required_field "${target}" context)" || return 2
     printf '%s\n' "${context}"
-    ctxs="$(ci_service_contexts "${target}")" || return 2
-    for ctx in ${ctxs}; do
-        ctx_path="$(ci_context_path "${ctx}")" || return 2
-        [ -z "${ctx_path}" ] || printf '%s\n' "${ctx_path}"
-    done
+    ci_service_context_paths "${target}"
 }
 
 # What: True if a target's contexts touch changed paths.
@@ -684,7 +775,7 @@ ci_cmd_codeql_impact() {
     while IFS= read -r lang; do
         [ -n "${lang}" ] || continue
         hit=false
-        paths="$(_ci_block_entry_list codeql_languages "${lang}" paths)" || return 2
+        paths="$(_ci_codeql_paths "${lang}")" || return 2
         while IFS= read -r p; do
             [ -n "${p}" ] || continue
             _ci_paths_touch "${p}" "${changed[@]}" || continue
@@ -725,7 +816,7 @@ ci_cmd_codeql_config() {
     ignore="$(_ci_block_entry_list codeql "" paths_ignore)" || return 2
     while IFS= read -r lang; do
         [ -n "${lang}" ] || continue
-        paths="$(_ci_block_entry_list codeql_languages "${lang}" paths)" || return 2
+        paths="$(_ci_codeql_paths "${lang}")" || return 2
         all+="${paths}"$'\n'
     done <<< "${langs}"
     out="name: ${repo##*/}-codeql"$'\n'
@@ -7152,7 +7243,7 @@ _ci_validate_ui_post() {
 # From: Issue #1683 | PR #1912
 _ci_validate_lan_zone() {
     local src zone
-    src="$(ci_context_path rust-common)" || return 2
+    src="$(ci_workspace_lib_dirs "${CI_REPO_ROOT:-.}")" || return 2
     src="${CI_REPO_ROOT:-.}/${src}/config.rs"
     if ! zone="$(_ci_file_value "${src}" 's/^pub const LAN_ZONE: &str = "([^"]+)";$/\1/p')"; then
         ci_log "[CI-ERROR-VALIDATE-0106]" "path=\"${src}\" reason=\"need exactly one LAN_ZONE const\""
@@ -7276,18 +7367,49 @@ _ci_validate_shared_secret() {
     _ci_capture 0 docker exec "${cid}" cat "${dir}/${name}"
 }
 
+# What: the SOT runtime.defaults rows, @KEY@ resolved.
+# Why: setup.sh owns the resolver; ci.sh bakes its output.
+# From: Issue #1683 | PR #1912
+_ci_runtime_defaults() {
+    local rows
+    rows="$(_ci_required_field runtime defaults blocklist)" || return 2
+    _ci_run "[CI-ERROR-VALIDATE-0127]" "reason=\"runtime.defaults not resolved\"" \
+        bash -c 'source "$1" && runtime_defaults_expand' _ "${CI_REPO_ROOT}/setup.sh" <<< "${rows}"
+}
+
+# What: one key's value in a KEY=value row list.
+# Why: loops read the rows once, not once per key.
+# From: Issue #1683 | PR #1912
+_ci_default_in() {
+    local val
+    val="$(sed -n "s/^$2=//p" <<< "$1")"
+    if [ -z "${val}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0125]" "key=\"$2\" reason=\"not in the SOT runtime.defaults\""
+        return 2
+    fi
+    printf '%s' "${val}"
+}
+
 # What: one value of the SOT runtime.defaults list.
 # Why: ports and timings have one owner; checks read it.
 # From: Issue #1683 | PR #1912
 _ci_runtime_default() {
-    local key="$1" list val
-    list="$(_ci_required_field runtime defaults block)" || return 2
-    val="$(tr '|' '\n' <<< "${list}" | sed -n "s/^${key}=//p")"
-    if [ -z "${val}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0125]" "key=\"${key}\" reason=\"not in the SOT runtime.defaults\""
-        return 2
-    fi
-    printf '%s' "${val}"
+    local list
+    list="$(_ci_runtime_defaults)" || return 2
+    _ci_default_in "${list}" "$1"
+}
+
+# What: text with each @KEY@ replaced by a row's value.
+# Why: a value names a default; it does not copy it.
+# From: Issue #1683 | PR #1912
+_ci_fill_defaults() {
+    local text="$1" rows="$2" key val
+    while [[ "${text}" =~ @([A-Z][A-Z0-9_]*)@ ]]; do
+        key="${BASH_REMATCH[1]}"
+        val="$(_ci_default_in "${rows}" "${key}")" || return 2
+        text="${text//@${key}@/${val}}"
+    done
+    printf '%s' "${text}"
 }
 
 # What: http://<dns ip>:<port> of the rollback listener
@@ -8196,16 +8318,12 @@ _ci_build_tools_build_args() {
 # Why: @KEY@ is a runtime default; @GID@ the runtime gid.
 # From: Issue #1683 | PR #1912
 _ci_service_setup() {
-    local tokens tok key val
+    local tokens rows gid
     tokens="$(_ci_target_list "$1" setup)" || return 2
     tokens="${tokens//$'\n'/ }"
-    while [[ "${tokens}" =~ @([A-Z_]+)@ ]]; do
-        key="${BASH_REMATCH[1]}"
-        if [ "${key}" = GID ]; then val="$(_ci_required_field runtime gid block)" || return 2
-        else val="$(_ci_runtime_default "${key}")" || return 2; fi
-        tokens="${tokens//@${key}@/${val}}"
-    done
-    printf '%s' "${tokens}"
+    rows="$(_ci_runtime_defaults)" || return 2
+    gid="$(_ci_required_field runtime gid block)" || return 2
+    _ci_fill_defaults "${tokens}" "${rows}"$'\n'"GID=${gid}"
 }
 
 # What: Emit SOT build-args for one product service.
@@ -8264,8 +8382,8 @@ _ci_service_build_args() {
     # What: the SOT values equal on every install.
     # Why: the Dockerfiles bake them; compose names none.
     # From: Issue #1683 | PR #1912
-    val="$(_ci_required_field runtime defaults block)" || return 2
-    out="${out}${prefix}${CI_ARG_DEFAULTS}=${val}"$'\n'
+    val="$(_ci_runtime_defaults)" || return 2
+    out="${out}${prefix}${CI_ARG_DEFAULTS}=${val//$'\n'/|}"$'\n'
     # What: SOT defaults this Dockerfile takes as args.
     # Why: the image builds with the value; it names none.
     # From: Issue #1683 | PR #1912
@@ -11745,7 +11863,7 @@ _ci_check_exit_evidence() {
                     print FILENAME ":" NR ": for-in-substitution: " $0
                 if (s ~ /< <\(/)
                     print FILENAME ":" NR ": process-substitution-loop: " $0
-                if (s ~ /\[\[? +"\$\((_ci_block_entry_field|_ci_block_entry_list|_ci_block_keys|_ci_channel_field|ci_service_field|ci_services|ci_build_targets|ci_service_contexts|ci_context_path)[ )]/)
+                if (s ~ /\[\[? +"\$\((_ci_block_entry_field|_ci_block_entry_list|_ci_block_keys|_ci_channel_field|ci_service_field|ci_services|ci_build_targets|ci_service_context_paths)[ )]/)
                     print FILENAME ":" NR ": reader-in-test: " $0
                 if (s ~ /^[[:space:]]*(local +)?[A-Za-z_][A-Za-z0-9_]*="\$\((git|docker|jq|curl|gh|awk|sed|tar|cat|date|base64|sha256sum|openssl|dig|find|ls|wc|tr|cut|sort) [^)]*\)" *\|\| *return/)
                     print FILENAME ":" NR ": uncoded-external-return: " $0
@@ -13294,10 +13412,11 @@ _ci_validate_host_tools() {
 # Why: compose interpolates the SOT paths and ports.
 # From: Issue #1683 | PR #1912
 _ci_sot_compose_env() {
-    local keys k v
+    local keys k v rows
     keys="$(_ci_required_field runtime compose_keys block)" || return 2
+    rows="$(_ci_runtime_defaults)" || return 2
     for k in ${keys}; do
-        v="$(_ci_runtime_default "${k}")" || return 2
+        v="$(_ci_default_in "${rows}" "${k}")" || return 2
         printf 'SOT_%s=%s\n' "${k}" "${v}"
     done
 }
@@ -13322,22 +13441,24 @@ _ci_validation_images() {
 # Why: config check and live validate share one owner.
 # From: Issue #1683 | PR #1858
 _ci_validation_env() {
-    local fx kind keys k v n=0
-    fx="$(_ci_block_entry_field validation "" compose_validation_env)" || return 2
+    local fx kind keys k v n=0 rows
+    fx="$(_ci_block_entry_list validation "" compose_validation_env)" || return 2
     if [ -z "${fx}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0054]" "reason=\"no SOT validation.compose_validation_env\""
         return 2
     fi
-    tr ' ' '
-' <<< "${fx}" | grep -v '^$'
-    # What: runtime defaults compose interpolates itself.
-    # Why: the SOT runtime.defaults owns each value.
+    # What: a bare KEY is a default; rows fill @KEY@.
+    # Why: the SOT runtime.defaults owns each default value.
     # From: Issue #1683 | PR #1912
-    keys="$(_ci_block_entry_field validation "" compose_validation_defaults)" || return 2
-    for k in ${keys}; do
-        v="$(_ci_runtime_default "${k}")" || return 2
-        printf '%s=%s\n' "${k}" "${v}"
-    done
+    rows="$(_ci_runtime_defaults)" || return 2
+    while IFS= read -r k; do
+        [ -n "${k}" ] || continue
+        case "${k}" in
+            *=*) v="$(_ci_fill_defaults "${k}" "${rows}")" || return 2 ;;
+            *) v="$(_ci_default_in "${rows}" "${k}")" || return 2; v="${k}=${v}" ;;
+        esac
+        printf '%s\n' "${v}"
+    done <<< "${fx}"
     _ci_sot_compose_env || return 2
     _ci_validation_images || return 2
     # What: a fresh value per secret key, setup.sh format.
@@ -14175,7 +14296,7 @@ _ci_check_workflow_ci_variables() {
     printf 'workflow-ci-variables=clean scanned=%s callers=%s\n' "${#files[@]}" "${callers}"
 }
 
-# What: needs jobs read job-settings; root literals = SOT
+# What: SOT-owned jobs read job-settings, others a literal
 # Why: AG-CI-006/016: one owner; every job has a timeout
 # From: Issue #1683 | PR #1858
 _ci_check_workflow_job_settings() {
@@ -14194,25 +14315,18 @@ _ci_check_workflow_job_settings() {
             if (job == "" || uses) return
             njob++
             want = (job in T) ? T[job] : ""
-            shown = (want == "") ? "none" : want
             if (to == "") bad("no timeout-minutes")
+            else if (want != "" && lit(to)) bad("timeout-minutes " to " (SOT ci_job_timeouts." job " owns it)")
+            else if (want == "" && !lit(to)) bad("timeout-minutes reads job-settings, SOT ci_job_timeouts has no " job)
             if (nd) {
                 if (lit(ro)) bad("runs-on " ro " (a needs job reads job-settings)")
-                if (lit(to)) bad("timeout-minutes " to " (a needs job reads job-settings)")
-                else if (to != "" && want == "") bad("no SOT ci_job_timeouts." job)
-            } else {
-                if (lit(ro) && ro != runner) bad("runs-on " ro " (SOT runner " runner ")")
-                if (lit(to) && to != want) bad("timeout-minutes " to " (SOT ci_job_timeouts." job ": " shown ")")
-            }
+            } else if (lit(ro) && ro != runner) bad("runs-on " ro " (SOT runner " runner ")")
             k = ro
             while (match(k, q "[^" q "]*" q)) {
                 if (substr(k, RSTART + 1, RLENGTH - 2) != runner) bad("runs-on fallback " substr(k, RSTART, RLENGTH) " (SOT runner " runner ")")
                 k = substr(k, RSTART + RLENGTH)
             }
-            if (match(to, /\|\|[[:space:]]*[0-9]+/)) {
-                k = substr(to, RSTART + 2, RLENGTH - 2); gsub(/[[:space:]]/, "", k)
-                if (k != want) bad("timeout fallback " k " (SOT ci_job_timeouts." job ": " shown ")")
-            }
+            if (match(to, /\|\|[[:space:]]*[0-9]+/)) bad("timeout fallback " substr(to, RSTART, RLENGTH) " (a literal is a second owner)")
             if (match(to, "\\[" q "[^" q "]*" q "\\]")) {
                 k = substr(to, RSTART + 2, RLENGTH - 4)
                 if (k != job) bad("timeout-minutes reads key " k)
@@ -14281,13 +14395,10 @@ _ci_check_dockerfile_context_edges() {
         df="$(_ci_service_path "${t}" Dockerfile "${repo_root}")" || return 2
         c="$(_ci_required_field "${t}" context)" || return 2
         roots=("${c}")
-        ctxs="$(ci_service_contexts "${t}")" || return 2
+        ctxs="$(ci_service_context_paths "${t}" "${repo_root}")" || return 2
         cl=()
         [ -z "${ctxs}" ] || mapfile -t cl <<< "${ctxs}"
-        for c in "${cl[@]}"; do
-            p="$(ci_context_path "${c}")" || return 2
-            roots+=("${p}")
-        done
+        roots+=("${cl[@]}")
         n=$(( n + 1 ))
         # What: joins \ lines, skips --from, drops the dest.
         # Why: only build-context sources feed the identity.
@@ -14308,7 +14419,7 @@ _ci_check_dockerfile_context_edges() {
         done <<< "${srcs}"
     done
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0175]" "targets=${n} reason=\"a COPY source is not in dependency_graph\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0175]" "targets=${n} reason=\"a COPY source is outside the context paths\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'dockerfile-context-edges=clean targets=%s\n' "${n}"
@@ -14532,7 +14643,7 @@ _ci_check_codeql_coverage() {
         raw="$(_ci_block_entry_list codeql_languages "${lang}" files)" || return 2
         [ -n "${raw}" ] || continue
         mapfile -t globs <<< "${raw}"
-        raw="$(_ci_block_entry_list codeql_languages "${lang}" paths)" || return 2
+        raw="$(_ci_codeql_paths "${lang}")" || return 2
         mapfile -t paths <<< "${raw}"
         files="$(_ci_ls_files codeql-coverage "${repo_root}" "${globs[@]}")" || return 2
         while IFS= read -r f; do

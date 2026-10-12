@@ -134,8 +134,7 @@ struct Config {
     cache_dir: String,
     dns_state_dir: String,
     shared_secret_dir: String,
-    proxy_http_url: String,
-    proxy_https_url: String,
+    proxy_status_url: String,
     netdata_url: String,
     https_enabled: bool,
     cache_max_gb: f64,
@@ -244,7 +243,6 @@ impl Config {
             })
         };
 
-        let proxy_http_url = need("PROXY_HTTP_URL")?;
         // What: both proxy addresses come from compose.
         // Why: no LAN address is hardcoded (AG-SEC-007).
         let http_ip = need("IP_HTTP")?;
@@ -340,8 +338,7 @@ impl Config {
             log_programs,
             cache_dir: need("CACHE_DIR")?,
             dns_state_dir: need("DNS_STATE_DIR")?,
-            proxy_https_url: need("PROXY_HTTPS_URL")?,
-            proxy_http_url,
+            proxy_status_url: need("PROXY_STATUS_URL")?,
             netdata_url: need("NETDATA_URL")?,
             https_enabled: need_flag("HTTPS_ENABLED")?,
             cache_max_gb,
@@ -5116,24 +5113,14 @@ async fn blocking<T: Default + Send + 'static>(
 }
 
 // What: nginx counters of the http and https side.
-// Why: an https side sharing the http URL is read once.
+// Why: one nginx serves both sides; its page is read once.
 async fn proxy_statuses(state: &AppState) -> (Option<NginxStatus>, Option<NginxStatus>) {
     let cfg = &state.config;
-    let distinct = cfg.https_enabled && cfg.proxy_http_url != cfg.proxy_https_url;
-    let (http, https) = tokio::join!(
-        nginx_status(&state.http_client, &cfg.proxy_http_url),
-        async {
-            if distinct {
-                nginx_status(&state.http_client, &cfg.proxy_https_url).await
-            } else {
-                None
-            }
-        }
-    );
-    let https = match (cfg.https_enabled, distinct) {
-        (false, _) => None,
-        (true, true) => https,
-        (true, false) => http.clone(),
+    let http = nginx_status(&state.http_client, &cfg.proxy_status_url).await;
+    let https = if cfg.https_enabled {
+        http.clone()
+    } else {
+        None
     };
     (http, https)
 }
@@ -6553,7 +6540,7 @@ mod tests {
         assert_eq!(fields.number::<u32>("none"), None);
     }
 
-    const TEXT_KEYS: [&str; 40] = [
+    const TEXT_KEYS: [&str; 39] = [
         "NTP_PORT",
         "DHCP_DOMAIN",
         "RAW_CONTENT_URL",
@@ -6562,7 +6549,7 @@ mod tests {
         "CONTAINER_NAME_DNS",
         "CONTAINER_NAME_DHCP",
         "CONTAINER_NAME_UI",
-        "PROXY_HTTP_URL",
+        "PROXY_STATUS_URL",
         "IP_HTTP",
         "IP_HTTPS",
         "NATS_URL",
@@ -6572,7 +6559,6 @@ mod tests {
         "CDN_DOMAINS_FILE",
         "CACHE_DIR",
         "DNS_STATE_DIR",
-        "PROXY_HTTPS_URL",
         "NETDATA_URL",
         "DHCP_API_HOST",
         "KEA_CTRL_USER",
@@ -6664,8 +6650,7 @@ mod tests {
             cfg.setup_script_url,
             "v-RAW_CONTENT_URL/v-SETUP_SCRIPT_PATH"
         );
-        assert_eq!(cfg.proxy_http_url, "v-PROXY_HTTP_URL");
-        assert_eq!(cfg.proxy_https_url, "v-PROXY_HTTPS_URL");
+        assert_eq!(cfg.proxy_status_url, "v-PROXY_STATUS_URL");
         assert_eq!(cfg.http_ip, "v-IP_HTTP");
         assert_eq!(cfg.https_ip, "v-IP_HTTPS");
         assert_eq!(cfg.nats_url, "v-NATS_URL");
