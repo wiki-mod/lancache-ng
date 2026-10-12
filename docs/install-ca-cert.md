@@ -19,6 +19,12 @@ for how to distribute it to every device without server access.
 4. "Place all certificates in the following store" → "Browse"
 5. "Trusted root certification authorities" → OK → Next → Finish
 
+Or, in an elevated PowerShell next to `ca.crt`:
+
+```powershell
+Import-Certificate -FilePath .\ca.crt -CertStoreLocation Cert:\LocalMachine\Root
+```
+
 ---
 
 ## Linux (Ubuntu / Debian)
