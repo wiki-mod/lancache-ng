@@ -156,17 +156,19 @@ async function refresh() {
     let net;
     try { net = await fetchChart('data?chart=net.eth0'); }
     catch { net = await fetchChart('data?chart=net.eth1'); }
+    // What: net kilobits/s to MB/s: divide by 8000.
+    // Why: net.* units are kilobits/s; sent is negative.
     const netRow = newestRow(net);
-    const rxMB = netRow ? Math.abs(netRow[1] / 1000).toFixed(2) : 0;
-    const txMB = netRow ? Math.abs(netRow[2] / 1000).toFixed(2) : 0;
+    const rxMB = netRow ? Math.abs(netRow[1] / 8000).toFixed(2) : 0;
+    const txMB = netRow ? Math.abs(netRow[2] / 8000).toFixed(2) : 0;
     push(netChart, parseFloat(rxMB), parseFloat(txMB));
 
-    // What: disk read/write MB/s from system.io.
-    // Why: system.io is a host-wide total, not per disk.
+    // What: disk KiB/s to MB/s: times 1024, divide by 1e6.
+    // Why: system.io units are KiB/s; writes are negative.
     const disk = await fetchChart('data?chart=system.io');
     const diskRow = newestRow(disk);
-    const readMB  = diskRow ? Math.abs(diskRow[1] / 1000).toFixed(2) : 0;
-    const writeMB = diskRow ? Math.abs(diskRow[2] / 1000).toFixed(2) : 0;
+    const readMB  = diskRow ? Math.abs(diskRow[1] * 1.024 / 1000).toFixed(2) : 0;
+    const writeMB = diskRow ? Math.abs(diskRow[2] * 1.024 / 1000).toFixed(2) : 0;
     push(diskChart, parseFloat(readMB), parseFloat(writeMB));
 
     document.getElementById('netdata-error').classList.add('hidden');
