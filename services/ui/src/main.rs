@@ -3063,7 +3063,7 @@ fn read_subnet(subnet: &Value, default_lease: u32) -> Subnet {
         dns_primary: dns.first().cloned().unwrap_or_default(),
         dns_secondary: dns.get(1).cloned().unwrap_or_default(),
         ntp_servers: option("ntp-servers", 42),
-        // What: .env lease time if the subnet sets none.
+        // What: default lease time if the subnet sets none.
         // Why: the page shows what dhcp would hand out.
         lease_time: subnet
             .get("valid-lifetime")

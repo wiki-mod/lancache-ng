@@ -2089,7 +2089,10 @@ ci_cmd_scan_stack() {
             [ "${crc}" -le "${rc}" ] || rc="${crc}"
             continue
         fi
-        passed="$(jq -c --arg s "${svc}" --arg p "${plat}" '. + [{service:$s, platform:$p}]' <<< "${passed}")" || return 2
+        passed="$(jq -c --arg s "${svc}" --arg p "${plat}" '. + [{service:$s, platform:$p}]' <<< "${passed}" 2>&1)" || {
+            ci_log "[CI-ERROR-SCAN-0027]" "service=\"${svc}\" platform=\"${plat}\" reason=\"jq failed to add the pair\" raw=\"${passed}\""
+            return 2
+        }
     done <<< "${pairs}"
     # What: the clean pairs go to aggregate as its matrix.
     # Why: a red pair must not block the clean ones
