@@ -1,9 +1,9 @@
 
 {# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
-{#
 
-   DHCP management page: server status and conflict detection. #}
+{# What: DHCP page: mode, conflict check, subnets, leases #}
+{# Why: mode and Kea state are read on each request #}
 {% extends "base.html" %}
 
 {% block content %}
@@ -140,7 +140,9 @@
         </form>
       </div>
     {% elif dhcp_mode == "dnsmasq-relay" %}
-      {# Issue #844: real DHCP-relay mode -- distinct from ProxyDHCP above. #}
+      {# What: real DHCP relay to the upstream server #}
+      {# Why: client broadcasts cannot reach upstream #}
+      {# From: Issue #844 #}
       <div class="text-sm text-sky-300 space-y-2">
         <p>dnsmasq relay mode is active. dnsmasq forwards every client's DHCP request to the upstream DHCP server and relays the reply back, so the upstream server owns the whole lease and all options.</p>
         <ul class="list-disc pl-5 space-y-1 text-sky-200">
@@ -185,25 +187,20 @@
   </div>
 
   {% if dhcp_has_kea %}
-  <!-- DHCP Conflict Check -->
+  <!-- What: status card for the /api/dhcp/check probe -->
+  <!-- Why: element ids are read by checkDhcpConflict() -->
   <div id="dhcp-check" class="bg-slate-800 border border-slate-700 rounded-lg p-4">
     <div class="flex items-center justify-between">
       <div>
         <h3 class="text-sm font-medium text-white mb-1">DHCP Server Status</h3>
         <p id="check-status" class="text-sm text-slate-400">Prüfe Konfliktprobe und DHCP-Client-Dry-Run...</p>
         <p id="check-conflict-status" class="text-sm text-slate-400 mt-1">Konfliktprobe läuft noch nicht.</p>
-        {# Lists the extra nmap broadcast-dhcp-discover fields (Router, DNS, lease time, ...) for a
-           found conflicting server, alongside the address already shown above in check-conflict-status.
-           Hidden by default/on every re-check; only populated+shown by checkDhcpConflict() itself when
-           data.conflict.status === 'found' and details are present, see script below. #}
+        {# What: extra fields of the found DHCP server #}
+        {# Why: address above; hidden without details #}
         <ul id="check-conflict-details" class="text-xs text-slate-400 mt-1 ml-4 list-disc hidden"></ul>
         <p id="check-client-status" class="text-sm text-slate-400 mt-1">DHCP-Client-Dry-Run läuft noch nicht.</p>
-        {# Lists the lease fields (assigned IP, router, DNS, lease time, ...) dhclient actually
-           negotiated on a SUCCESSFUL dry-run, alongside the summary already shown above in
-           check-client-status -- same rendering pattern as check-conflict-details above, just for
-           the "it worked, here's what we got" case instead of "a rogue server answered". Hidden by
-           default/on every re-check; only populated+shown by checkDhcpConflict() itself when
-           data.client.status === 'passed' and details are present, see script below. #}
+        {# What: lease fields of a passed client dry-run #}
+        {# Why: summary above; hidden without details #}
         <ul id="check-client-details" class="text-xs text-slate-400 mt-1 ml-4 list-disc hidden"></ul>
       </div>
       <button onclick="checkDhcpConflict()" class="px-3 py-1 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded">
@@ -212,8 +209,9 @@
     </div>
   </div>
 
-  {# DDNS-Updates (issue #1076): eigener Schalter, unabhängig vom DHCP-Modus.
-     Steuert Keas dhcp-ddns.enable-updates live über die Kea-Control-API. #}
+  {# What: toggles Kea dhcp-ddns.enable-updates live #}
+  {# Why: DNS writes are a separate decision from DHCP #}
+  {# From: Issue #1076 #}
   <div class="bg-slate-800 border border-slate-700 rounded-lg p-4">
     <div class="flex items-center justify-between gap-4">
       <div>
@@ -245,7 +243,6 @@
     </form>
   </div>
 
-  <!-- Subnetze -->
   <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-lg font-semibold text-white">Subnetze</h2>
@@ -254,7 +251,6 @@
       </button>
     </div>
 
-    <!-- Add Subnet Form (hidden by default) -->
     <div id="add-subnet-form" class="hidden mb-6 p-4 bg-slate-700 rounded border border-slate-600">
       <h3 class="text-sm font-medium text-white mb-3">Neues Subnet</h3>
       <form method="POST" action="/dhcp/subnet/add" class="space-y-3">
@@ -321,7 +317,6 @@
       </form>
     </div>
 
-    <!-- Subnet List -->
     {% if subnets | length == 0 %}
     <p class="text-slate-500 text-sm py-4 text-center">Keine Subnetze konfiguriert</p>
     {% endif %}
@@ -351,7 +346,6 @@
         </div>
       </div>
 
-      <!-- Edit Subnet Form (hidden by default) -->
       <div id="edit-subnet-{{ subnet.id }}" class="hidden p-4 bg-slate-750 border-t border-slate-600">
         <form method="POST" action="/dhcp/subnet/update" class="space-y-3">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -475,7 +469,6 @@
     {% endfor %}
   </div>
 
-  <!-- Statische Reservierungen -->
   <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
     <h2 class="text-lg font-semibold text-white mb-4">Statische Reservierungen</h2>
 
@@ -539,7 +532,6 @@
     </div>
   </div>
 
-  <!-- Aktive Leases -->
   <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
     <h2 class="text-lg font-semibold text-white mb-4">Aktive DHCP-Leases</h2>
     <div class="overflow-x-auto">
@@ -586,7 +578,9 @@
     </div>
   </div>
 
-  <!-- Konfigurations-Snapshots (#614) -->
+  <!-- What: lists Kea config snapshots with rollback -->
+  <!-- Why: Kea rolls back only on operator selection -->
+  <!-- From: Issue #614 -->
   <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-lg font-semibold text-white">Konfigurations-Snapshots</h2>
@@ -656,20 +650,17 @@ async function checkDhcpConflict() {
   const clientDetailsEl = document.getElementById('check-client-details');
   statusEl.textContent = 'Prüfe...';
   conflictEl.textContent = 'Konfliktprobe läuft...';
-  // Reset both details lists on every run (button re-click or the
-  // DOMContentLoaded auto-run further down), not just when a conflict is
-  // found / a dry-run succeeds below -- otherwise a later re-check with a
-  // different outcome would still show a stale previous run's fields.
+  // What: clears both detail lists before each run
+  // Why: stale fields from an earlier run must not remain
   conflictDetailsEl.replaceChildren();
   conflictDetailsEl.classList.add('hidden');
   clientDetailsEl.replaceChildren();
   clientDetailsEl.classList.add('hidden');
   clientEl.textContent = 'DHCP-Client-Dry-Run läuft...';
   try {
-    // POST with an explicit CSRF header, not a plain GET: this endpoint has
-    // a real side effect (starts/stops the DHCP conflict-probe container on
-    // the server), and this app's CSRF protection only covers mutating
-    // methods -- see check_dhcp_conflict's own comment in dhcp.rs.
+    // What: POST with X-CSRF-Token header, not GET
+    // Why: starts/stops the probe; GET is CSRF-exempt
+    // From: Issue #947
     const res = await fetch('/api/dhcp/check', {
       method: 'POST',
       headers: {
@@ -694,10 +685,8 @@ async function checkDhcpConflict() {
     if (data.conflict?.status === 'found') {
       conflictEl.className = 'text-sm text-yellow-400';
       conflictEl.textContent = `Konfliktprobe: fremder DHCP-Server gefunden (${data.conflict.output ?? 'ohne Detail'})`;
-      // Label/value pairs come straight from the rogue DHCP server's
-      // own DHCPOFFER response (untrusted network input relayed via the
-      // probe container), so each row is built with textContent, never
-      // innerHTML -- a malicious value must never be interpreted as markup.
+      // What: rows built with textContent, never innerHTML
+      // Why: values are untrusted input from a DHCP server
       const details = data.conflict.details ?? [];
       for (const item of details) {
         const li = document.createElement('li');
@@ -717,11 +706,8 @@ async function checkDhcpConflict() {
     if (data.client?.status === 'passed') {
       clientEl.className = 'text-sm text-green-400';
       clientEl.textContent = `DHCP-Client-Dry-Run: erfolgreich (${data.client.output ?? 'ohne Detail'})`;
-      // Label/value pairs come from dhclient's own negotiated lease (a real
-      // response from whichever DHCP server answered -- our own or, if this
-      // dry-run happened to reach a foreign one, that server's), so each row
-      // is built with textContent, never innerHTML, same as the conflict
-      // details above.
+      // What: rows built with textContent, never innerHTML
+      // Why: values may come from a foreign DHCP server
       const clientDetails = data.client.details ?? [];
       for (const item of clientDetails) {
         const li = document.createElement('li');
