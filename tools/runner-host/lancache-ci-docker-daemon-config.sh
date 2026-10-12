@@ -1,90 +1,24 @@
 #!/bin/bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# CI runner host maintenance: safely apply the bounded-build-cache + log-
-# rotation additions to a self-hosted runner host's /etc/docker/daemon.json.
-#
-# Background (issue #1255, section 7 / PR #1251's own "Scope Boundaries"):
-# the 2026-07-25 runner-leak incident's root cause included an *unbounded*
-# BuildKit build cache -- one runner host had accumulated ~40 GB of
-# unreclaimed build cache before that incident's manual cleanup. AG-CI-016
-# ("CI resource lifecycle: bounded, self-reaping, versioned, and re-measured")
-# requires build caches to be size-bounded at the daemon level, never left
-# unbounded between scheduled `lancache-ci-cleanup.sh` runs (that script
-# prunes reclaimable cache on a timer; this script bounds how large the cache
-# is allowed to grow *between* those runs in the first place). Real on-host
-# investigation (issue #1255, 2026-07-25 comment) confirmed against the
-# authoritative dockerd documentation that neither `builder` nor
-# `log-driver`/`log-opts` is in dockerd's SIGHUP-reloadable config subset
-# (only `debug`, `labels`, `live-restore`, `max-concurrent-*`, `runtimes`,
-# `authorization-plugin`, registries, `shutdown-timeout`, and `features`
-# are) -- applying either one REQUIRES A FULL `dockerd` RESTART, which drops
-# every container currently running on that host, including in-flight CI
-# jobs. That restart is why this script never performs it implicitly: per
-# maintainer decision this is a go-gated, one-host-at-a-time, quiet-window
-# action, never an automatic side effect of running this script.
-#
-# What this script does NOT assume: three of this project's four runner
-# hosts (confirmed via direct SSH inspection, 2026-07-31) already carry a
-# real /etc/docker/daemon.json with `max-concurrent-downloads`/`-uploads`
-# and `storage-driver` set; one host (.243) has no daemon.json file at all
-# (pure Docker defaults). This script must merge its additions into
-# whatever is already there -- including a possible future `builder` block
-# with unrelated sub-keys -- never blindly overwrite the live file, which is
-# why the merge below uses jq's recursive `*` operator (deep-merges nested
-# objects such as `builder.gc` instead of replacing the whole `builder` key).
-#
-# Key name (AG-VAL-023 -- checked upstream before writing an assumption into
-# this rollout as fact): earlier drafts of this rollout (PR #1251,
-# tools/runner-host/README.md) used `builder.gc.defaultKeepStorage`, which
-# reads today's moby/moby documentation as a legacy name -- current docs and
-# the `BuilderGCConfig` Go struct (daemon/config/builder.go) show
-# `defaultReservedSpace`/`defaultMaxUsedSpace`/`defaultMinFreeSpace`
-# instead, with no field literally named `defaultKeepStorage` in the current
-# struct fields, which raised a real risk this rollout would be a silent
-# no-op on the pinned Docker 29.6.x runner-host fleet: dockerd's daemon.json
-# parser drops *any* unrecognized key without error (confirmed empirically,
-# 2026-07-31: `dockerd --validate` against a config containing a deliberately
-# nonsense key name also reports "configuration OK" -- validate cannot tell
-# a real key from a typo). Verified directly against moby's actual
-# `BuilderGCConfig.UnmarshalJSON` source AND against the literal compiled
-# `/usr/bin/dockerd` binary's own embedded struct-reflection strings on a
-# real runner host (`strings $(which dockerd) | grep -i keepstorage`, no
-# restart needed): `defaultKeepStorage` IS still read by an explicit,
-# deliberate backward-compatibility shim ("Deprecated option is now
-# equivalent to DefaultReservedSpace") that assigns it into
-# `DefaultReservedSpace` whenever the latter is empty -- so the original
-# key was never actually broken. This script nonetheless emits the current,
-# non-deprecated `defaultReservedSpace` key going forward rather than
-# perpetuating a documented-deprecated spelling in new tooling.
-#
-# Modes (see --help): the default is a safe, read-only `check` that only
-# prints the computed diff. Writing the live file (`apply`) never restarts
-# dockerd by itself; actually restarting dockerd (`restart`) is a separate,
-# explicitly-confirmed step so nobody can trigger the disruptive half of
-# this script by muscle memory or a copy-pasted one-liner.
-#
-# Usage (see README.md in this directory for the full per-host rollout
-# procedure): invoke with an explicit interpreter (`bash
-# lancache-ci-docker-daemon-config.sh ...`), not `./lancache-ci-docker-
-# daemon-config.sh` -- this repo's executable bit is unverifiable from a
-# Windows authoring host with `core.filemode=false` (AG-VAL-024), so this
-# script, like `lancache-ci-cleanup.sh`, must not depend on it being set.
+
+# What: merges build-cache GC/log limits into daemon.json
+# Why: AG-CI-016 requires bounded build caches on runners
+# From: Issue #1255 | PR #1349
+
+# What: aborts on errors, unset vars and pipe failures
+# Why: a failed jq or validate step must not pass silently
 set -euo pipefail
 
 DAEMON_JSON="${DAEMON_JSON:-/etc/docker/daemon.json}"
-# Tunables, overridable via env the same way lancache-ci-cleanup.sh's reap
-# thresholds are -- lets a specific host deviate from the project default
-# without forking the script.
+# What: env-overridable target file, GC and log limits
+# Why: hosts deviate by env var without forking the script
 BUILDER_GC_RESERVED_SPACE="${BUILDER_GC_RESERVED_SPACE:-20GB}"
 LOG_MAX_SIZE="${LOG_MAX_SIZE:-10m}"
 LOG_MAX_FILE="${LOG_MAX_FILE:-3}"
 
-# Emits the additions this rollout applies, as JSON on stdout. Kept as its
-# own function (rather than inlined at the call site) so a bats fixture can
-# source this file and call it directly to assert the exact additions
-# without re-deriving them.
+# What: prints the additions as JSON on stdout
+# Why: bats fixture calls this function after sourcing
 daemon_config_additions_json() {
     jq -n \
         --arg reserved_space "$BUILDER_GC_RESERVED_SPACE" \
@@ -97,23 +31,15 @@ daemon_config_additions_json() {
         }'
 }
 
-# Deep-merges the additions into an existing daemon.json's content (or `{}`
-# if the file does not exist -- confirmed a real case on host .243, not a
-# hypothetical). jq's `*` operator recursively merges nested objects, so an
-# existing `builder` key with unrelated sub-keys (or a future `ipv6`/
-# `authorization-plugin`/etc. key this rollout doesn't touch) survives
-# untouched -- only the specific leaves this script owns are added/updated.
-# Fails closed (via `set -euo pipefail` + jq's own non-zero exit) if the
-# existing file is not valid JSON, rather than silently discarding it.
+# What: deep-merges additions into daemon.json, or into {}
+# Why: jq * keeps unrelated keys; invalid JSON fails closed
 merge_daemon_config() {
     local existing_file="$1"
     local existing_json="{}"
     if [[ -f "$existing_file" ]]; then
         existing_json="$(cat "$existing_file")"
-        # Fail closed on a pre-existing daemon.json this script cannot parse
-        # -- merging blindly on top of unparseable content could silently
-        # produce an invalid config that fails dockerd startup after a
-        # restart the operator has no way to preview beforehand.
+        # What: rejects unparseable existing daemon.json
+        # Why: invalid config only fails at the next restart
         if ! jq empty <<<"$existing_json" 2>/dev/null; then
             echo "ERROR: existing $existing_file is not valid JSON -- refusing to merge. Fix or remove it manually first." >&2
             return 1
@@ -149,20 +75,9 @@ LOG_MAX_FILE (default 3).
 EOF
 }
 
-# Runs dockerd's own `--validate` mode against a candidate config -- a
-# read-only, no-restart-required static check dockerd itself provides
-# (confirmed empirically on a real runner host, 2026-07-31, both a good and
-# a deliberately bogus config exit identically fast with no daemon restart
-# or root privilege involved). IMPORTANT caveat, also confirmed empirically:
-# `--validate` only proves the file is syntactically valid JSON that dockerd
-# can parse -- it does NOT catch an unrecognized/misspelled key inside a
-# known object (a config with a deliberately nonsense builder.gc sub-key
-# also reports "configuration OK"), so a clean validate result here is
-# necessary but not sufficient proof the specific settings this script cares
-# about will actually take effect. That is exactly why this script's own
-# header documents having verified `defaultReservedSpace`/`defaultKeepStorage`
-# against moby's real source and the actual compiled dockerd binary, rather
-# than relying on `--validate` for that specific question.
+# What: runs dockerd --validate; warns and skips if absent
+# Why: a clean result does not prove key names are valid
+# From: Issue #1255 | PR #1349
 validate_with_dockerd() {
     local config_file="$1"
     if ! command -v dockerd >/dev/null 2>&1; then
@@ -189,11 +104,9 @@ cmd_check() {
     merge_daemon_config "$DAEMON_JSON" | tee /dev/stderr | jq '.' >/dev/null
     echo
     echo "--- Diff (current vs. merged) ---"
-    # `diff` exits 1 when it finds differences (the expected, normal case
-    # here -- that's the whole point of this preview) and only exits >1 on a
-    # real usage/read error; `|| true` absorbs the expected exit-1 so
-    # `set -e` doesn't abort this read-only preview over an outcome that
-    # isn't actually a failure.
+    # What: diffs current config against merged result
+    # Why: exit 1 means differences; set -e must not abort
+    # From: Issue #1255 | PR #1349
     diff <(if [[ -f "$DAEMON_JSON" ]]; then jq -S '.' "$DAEMON_JSON"; else echo '{}'; fi) \
          <(merge_daemon_config "$DAEMON_JSON" | jq -S '.') || true
     echo
@@ -218,19 +131,15 @@ cmd_stage() {
 cmd_apply() {
     local merged
     merged="$(merge_daemon_config "$DAEMON_JSON")"
-    # Validate before touching anything live -- fail closed rather than
-    # leaving the host with a half-written or invalid daemon.json.
+    # What: returns 1 unless merged JSON parses
+    # Why: fail closed; daemon.json is not touched on error
     if ! jq empty <<<"$merged" 2>/dev/null; then
         echo "ERROR: computed merged config is not valid JSON -- aborting, nothing written." >&2
         return 1
     fi
-    # Second, stronger preflight: ask dockerd itself whether it accepts this
-    # exact config, before it ever becomes the live file. This still cannot
-    # catch a misspelled key (see validate_with_dockerd's own comment), but
-    # it does catch a config dockerd rejects outright (e.g. a genuinely
-    # malformed value type) -- worth doing here since it costs nothing and
-    # this is the last checkpoint before the file that a later restart will
-    # actually load gets written.
+    # What: runs dockerd --validate on the merged config
+    # Why: last gate before the live file; key typos pass
+    # From: Issue #1255 | PR #1349
     local tmp_validate
     tmp_validate="$(mktemp)"
     jq '.' <<<"$merged" > "$tmp_validate"
@@ -245,10 +154,8 @@ cmd_apply() {
         cp "$DAEMON_JSON" "$backup"
         echo "Backed up existing config to: $backup"
     fi
-    # Write to a temp file in the same directory and rename atomically, so a
-    # crash or interrupted write mid-copy never leaves dockerd's config file
-    # half-written (AG-OP-010: validation/atomicity before a state-owning
-    # write that a later restart depends on).
+    # What: writes a same-dir temp file, then mv into place
+    # Why: same-dir rename is atomic; no half-written file
     local tmp
     tmp="$(mktemp "${DAEMON_JSON}.tmp.XXXXXX")"
     jq '.' <<<"$merged" > "$tmp"
@@ -270,9 +177,8 @@ cmd_restart() {
     fi
     echo "Restarting docker.service ..."
     systemctl restart docker
-    # docker.socket/service can report "active" briefly before the daemon has
-    # actually finished re-reading its own config; poll `docker info` instead
-    # of assuming the restart is complete the instant systemctl returns.
+    # What: polls docker info, fails after 30 tries of 1s
+    # Why: systemctl returns before dockerd responds
     local attempt=0
     until docker info >/dev/null 2>&1; do
         attempt=$((attempt + 1))
@@ -283,20 +189,9 @@ cmd_restart() {
         sleep 1
     done
     echo "dockerd is responsive. Verifying the new settings actually took effect ..."
-    # IMPORTANT (confirmed empirically, 2026-07-31): `docker info`'s own JSON
-    # output has NO `BuilderConfig`/builder-GC field at all in this Docker
-    # version -- an earlier draft of this check read a
-    # `.BuilderConfig.GC.DefaultKeepStorage` path that does not exist in the
-    # real `docker info --format '{{json .}}'` schema and would always have
-    # silently reported "<not reported>", giving false confidence that
-    # something had been checked. `LoggingDriver` IS a real top-level field
-    # (confirmed present in real `docker info` JSON output), so that part is
-    # genuinely verifiable this way; the builder GC policy is not exposed by
-    # `docker info` in this Docker version, so this step instead reports what
-    # is actually in the live config file dockerd just (re)loaded from, plus
-    # an explicit note that the GC bound itself can only be confirmed
-    # indirectly, over time, via lancache-ci-cleanup.sh's own disk-usage
-    # measurements no longer showing unbounded build-cache growth.
+    # What: checks LoggingDriver; prints builder from file
+    # Why: this Docker version has no builder GC field
+    # From: Issue #1255 | PR #1349
     local info_json
     info_json="$(docker info --format '{{json .}}')"
     local logging_driver
@@ -333,10 +228,8 @@ main() {
     esac
 }
 
-# Guard direct-execution-only behavior so a bats fixture can `source` this
-# file (to call daemon_config_additions_json/merge_daemon_config directly
-# against a fixture) without also triggering a real run of main() against
-# this process's actual argv/environment.
+# What: runs main only when executed, not when sourced
+# Why: bats tests source the file to call functions
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"
 fi
