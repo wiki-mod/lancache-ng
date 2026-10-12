@@ -23,7 +23,7 @@ services:
       # What: a replica keeps its secrets in its own volume.
       # Why: no shared-secrets volume, no ui; runs as root.
       # From: Issue #1683 | PR #1912
-      - LANCACHE_SHARED_SECRET_DIR=${SOT_DNS_SNAPSHOT_MOUNT}/${SOT_SECONDARY_SECRETS_SUBDIR}
+      - LANCACHE_SHARED_SECRET_DIR=${SOT_SECONDARY_SHARED_SECRET_DIR}
       - LANCACHE_RUNTIME_GID=${SOT_SECONDARY_RUNTIME_GID}
       - NATS_URL=${NATS_URL:?NATS_URL is required}
       - NATS_USER=${NATS_USER:?NATS_USER is required}

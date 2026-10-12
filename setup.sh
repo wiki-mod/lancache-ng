@@ -290,11 +290,11 @@ secondary_listen_ip_conflicts() {
     ' <<< "$sockets"
 }
 
-# What: a free port-53 IP: LAN first, then 127.0.0.1-10
+# What: a free DNS-port IP: LAN first, then loopback IPs
 # Why: 1 = none free, 2 = listing failed; never swallowed
 # From: Issue #1683 | PR #1858
 secondary_suggest_alternate_listen_ip() {
-    local current="$1" candidate addrs conflicts loopback_ip n
+    local current="$1" candidate addrs conflicts loopback_ip n count
 
     addrs=$(host_lan_addresses) \
         || { print_error "Failed to list the IPv4 addresses of this host (exit $?)."; return 2; }
@@ -308,7 +308,8 @@ secondary_suggest_alternate_listen_ip() {
     done <<< "$addrs"
 
     loopback_ip=$(prod_env_default LOOPBACK_BIND_IP) || exit $?
-    for n in 1 2 3 4 5 6 7 8 9 10; do
+    count=$(prod_env_default SECONDARY_LOOPBACK_CANDIDATES) || exit $?
+    for (( n = 1; n <= count; n++ )); do
         candidate="${loopback_ip%.*}.${n}"
         [[ "$candidate" = "$current" ]] && continue
         conflicts=$(secondary_listen_ip_conflicts "$candidate") || return 2
@@ -7177,7 +7178,8 @@ print_step "Admin-UI access control"
 
 printf "  Admin-UI runs on %s — reachable from your LAN by default.\n" "$IP_HTTP"
 printf "  Password protection is optional, but recommended on shared or untrusted networks.\n"
-printf "  To restrict the UI to this host later, set UI_BIND_IP=127.0.0.1 in .env.\n\n"
+UI_LOOPBACK_HINT=$(prod_env_default LOOPBACK_BIND_IP) || exit $?
+printf "  To restrict the UI to this host later, set UI_BIND_IP=%s in .env.\n\n" "$UI_LOOPBACK_HINT"
 
 ask "Protect Admin-UI with password? [Y/n]" "Y"
 UI_AUTH_USER=""
@@ -7442,7 +7444,7 @@ UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS}
 ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}
 
 # Bind address for Admin-UI. Default keeps it reachable on the LAN.
-# Set to 127.0.0.1 to restrict access to this host.
+# Set to ${UI_LOOPBACK_HINT} to restrict access to this host.
 UI_BIND_IP=${IP_HTTP}
 EOF
 print_ok ".env.local written: $ENV_LOCAL"
