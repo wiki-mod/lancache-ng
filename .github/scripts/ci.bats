@@ -2222,8 +2222,9 @@ CASES
     BODY="${body}" CODE=200 run _ci_raw_get "$(_val url)"
     _expect ok 0 "=${body}" || return 1
     for code in 404 503; do
-        BODY="$(_val name)" CODE="${code}" run _ci_raw_get "$(_val url)"
-        _expect "http-${code}" 1 "http ${code}" || return 1
+        body="$(_val name)"
+        BODY="${body}" CODE="${code}" run _ci_raw_get "$(_val url)"
+        _expect "http-${code}" 1 "http ${code};${body}" || return 1
     done
     curl() { return 6; }
     run _ci_raw_get "$(_val url)"
@@ -2244,9 +2245,9 @@ CASES
     _ci_raw_get() { printf 'raw GET x failed: http 404\n' >&2; return 1; }
     run _ci_fetch_action_manifest "${own}" "${repo}" "" "${ref}"
     _expect not-found 0 "=NOTFOUND" || return 1
-    _ci_raw_get() { printf 'raw GET x failed: http 503\n' >&2; return 1; }
+    _ci_raw_get() { printf 'raw GET x failed: http 503\n%s\n' "${body}" >&2; return 1; }
     run _ci_fetch_action_manifest "${own}" "${repo}" "" "${ref}"
-    _expect infra 0 "=INFRA:503" || return 1
+    _expect infra 0 "INFRA:503;http 503;${body}" || return 1
 }
 
 # What: pin policy -> runtime, 40-hex SHA, own repo, infra

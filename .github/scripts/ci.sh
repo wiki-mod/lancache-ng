@@ -12407,7 +12407,7 @@ _ci_raw_get() {
     fi
     code="${out##*$'\n'}"
     if [ "${code}" != 200 ]; then
-        printf 'raw GET %s failed: http %s\n' "${url}" "${code}" >&2
+        printf 'raw GET %s failed: http %s\n%s\n' "${url}" "${code}" "${out%$'\n'*}" >&2
         return 1
     fi
     printf '%s\n' "${out%$'\n'*}"
@@ -12428,7 +12428,7 @@ _ci_fetch_action_manifest() {
         esac
         code=000
         if [[ "${out,,}" =~ http\ ([0-9]{3}) ]]; then code="${BASH_REMATCH[1]}"; fi
-        printf 'INFRA:%s\n' "${code}"
+        printf 'INFRA:%s\n%s\n' "${code}" "${out}"
         return 0
     done
     printf 'NOTFOUND\n'
@@ -12655,7 +12655,7 @@ _ci_check_action_node_versions() {
             NOTFOUND)
                 viol+=("no action.yml/action.yaml for '${v}' at ref '${ref}' (in: $(_ci_ando_reffiles "${v}")); broken pin") ;;
             *)
-                infra+=("${v} (${marker})") ;;
+                infra+=("${v} (${marker})"$'\n'"${res#*$'\n'}") ;;
         esac
     done
     unset -f _ci_ando_reffiles
