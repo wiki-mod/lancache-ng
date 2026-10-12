@@ -349,6 +349,13 @@ const DEFAULT_KEEP: u32 = 3;
 // Why: listing must never show a half-written snapshot.
 const STAGING: &str = ".staging.";
 
+// What: true for a purely numeric snapshot id.
+// Why: old shell ids carry T and a dot; none is readable.
+// From: Issue #1683 | PR #1912
+fn is_snapshot_id(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit())
+}
+
 impl SnapshotStore {
     // What: a store of `file` payloads under `root`.
     // Why: `service` names the log line vocabulary.
@@ -377,7 +384,7 @@ impl SnapshotStore {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
             let complete = entry.file_type()?.is_dir()
-                && !name.starts_with(STAGING)
+                && is_snapshot_id(&name)
                 && entry.path().join(self.file).is_file();
             if complete {
                 ids.push(name);
@@ -391,7 +398,7 @@ impl SnapshotStore {
     // Why: the id joins onto a path, so it must be safe.
     pub fn read(&self, id: &str) -> anyhow::Result<Value> {
         anyhow::ensure!(
-            !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()),
+            is_snapshot_id(id),
             "rejected known-good snapshot id {id:?}: must be a purely numeric snapshot id"
         );
         let raw = fs::read_to_string(self.root.join(id).join(self.file))
@@ -440,7 +447,36 @@ impl SnapshotStore {
                 Err(e) => self.log("FATAL", &format!("failed to prune snapshot {id}: {e}")),
             }
         }
+        self.drop_legacy();
         Ok(())
+    }
+
+    // What: delete snapshot dirs of the old shell format.
+    // Why: only once a current snapshot exists (AG-OP-007).
+    // From: Issue #1683 | PR #1912
+    fn drop_legacy(&self) {
+        if !self.ids().is_ok_and(|ids| !ids.is_empty()) {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(&self.root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let old = entry.file_type().is_ok_and(|t| t.is_dir())
+                && !name.starts_with(STAGING)
+                && !is_snapshot_id(&name);
+            if !old {
+                continue;
+            }
+            match fs::remove_dir_all(entry.path()) {
+                Ok(()) => self.log("PRUNE", &format!("removed old-format snapshot {name}")),
+                Err(e) => self.log(
+                    "FATAL",
+                    &format!("failed to remove old snapshot {name}: {e}"),
+                ),
+            }
+        }
     }
 }
 
@@ -1394,6 +1430,25 @@ mod tests {
         for bad in ["", "../x", "12a", "1/2"] {
             assert!(store.read(bad).is_err(), "id {bad:?} must be refused");
         }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // What: old shell-format snapshots go after a new one.
+    // Why: the update must converge; nothing reads them.
+    // From: Issue #1683 | PR #1912
+    #[test]
+    fn snapshot_store_drops_old_format_after_the_first_new_snapshot() {
+        let root = unique_temp_dir("legacy");
+        let store = SnapshotStore::new(root.join("store"), "data.json", "test");
+        let old = root.join("store/20260101T120000.123456789");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("data.json"), "old").unwrap();
+        assert!(store.ids().unwrap().is_empty(), "an old id is no snapshot");
+        store.prune(3).unwrap();
+        assert!(old.is_dir(), "no current snapshot: the old one is kept");
+        let id = store.create(&serde_json::json!({}), 3).unwrap();
+        assert!(!old.exists(), "a current snapshot exists: the old one goes");
+        assert_eq!(store.ids().unwrap(), vec![id]);
         let _ = fs::remove_dir_all(&root);
     }
 
