@@ -71,7 +71,7 @@ declare -A CI_DISPATCH=(
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
     [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog
     [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
-    [welcome]=ci_cmd_welcome [version]=ci_cmd_version
+    [welcome]=ci_cmd_welcome [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config
 )
 
 # What: check name -> "scope function" for ci.sh check.
@@ -9039,6 +9039,151 @@ ci_cmd_version() {
         sync) _ci_version_sync ;;
         *)
             ci_log "[CI-ERROR-VERSION-0014]" "sub=\"${sub}\" reason=\"unknown version subcommand\" known=\"sync\""
+            return 2
+            ;;
+    esac
+}
+
+# =========================================================
+# RUNNER HOST: DOCKER DAEMON CONFIG
+# =========================================================
+
+# What: daemon.json keys that bound build cache and logs.
+# Why: AG-CI-016 requires bounded build caches on runners.
+# From: Issue #1255 | PR #1349
+_ci_daemon_additions() {
+    local reserved size files
+    reserved="$(_ci_variable CI_BUILDER_GC_RESERVED_SPACE)" || return 2
+    size="$(_ci_variable CI_DAEMON_LOG_MAX_SIZE)" || return 2
+    files="$(_ci_variable CI_DAEMON_LOG_MAX_FILE)" || return 2
+    _ci_capture 0 jq -n --arg reserved "${reserved}" --arg size "${size}" --arg files "${files}" '{
+        "builder": { "gc": { "enabled": true, "defaultReservedSpace": $reserved } },
+        "log-driver": "json-file",
+        "log-opts": { "max-size": $size, "max-file": $files }
+    }'
+}
+
+# What: deep-merge the additions into one daemon.json.
+# Why: jq * keeps unrelated keys; bad JSON fails closed.
+# From: Issue #1255 | PR #1349
+_ci_daemon_merge() {
+    local file="$1" existing="{}" additions
+    if [ -f "${file}" ]; then
+        existing="$(_ci_capture 0 cat "${file}")" || return 2
+        if ! jq empty <<<"${existing}" 2>/dev/null; then
+            ci_log "[CI-ERROR-DAEMON-0001]" "path=\"${file}\" reason=\"not valid JSON; fix or remove it first\""
+            return 1
+        fi
+        [ -n "${existing//[[:space:]]/}" ] || existing="{}"
+    fi
+    additions="$(_ci_daemon_additions)" || return 2
+    _ci_capture 0 jq -n --argjson old "${existing}" --argjson add "${additions}" '$old * $add'
+}
+
+# What: dockerd --validate on one config file.
+# Why: a clean merge does not prove the key names are valid.
+# From: Issue #1255 | PR #1349
+_ci_daemon_validate() {
+    local file="$1" out
+    if ! command -v dockerd >/dev/null 2>&1; then
+        ci_log "[CI-WARN-DAEMON-0002]" "reason=\"dockerd not on PATH; validate preflight skipped\""
+        return 0
+    fi
+    if ! out="$(dockerd --validate --config-file "${file}" 2>&1)"; then
+        ci_error "[CI-ERROR-DAEMON-0003]" "path=\"${file}\" reason=\"dockerd --validate rejected the config\"" "${out}"
+        return 1
+    fi
+}
+
+# What: print current, merged and diff; write nothing.
+# Why: the operator reviews before stage or apply.
+# From: Issue #1255 | PR #1349
+_ci_daemon_check() {
+    local file="$1" merged tmp
+    printf -- '--- Current %s ---\n' "${file}"
+    if [ -f "${file}" ]; then cat "${file}"; else printf '(none: docker runs on defaults)\n'; fi
+    merged="$(_ci_daemon_merge "${file}")" || return "$?"
+    printf -- '\n--- Computed merged result ---\n%s\n\n--- Diff (current vs merged) ---\n' "${merged}"
+    if [ -f "${file}" ]; then
+        _ci_capture 1 diff <(jq -S . "${file}") <(jq -S . <<<"${merged}") || return 2
+    else
+        _ci_capture 1 diff <(printf '{}\n') <(jq -S . <<<"${merged}") || return 2
+    fi
+    tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-daemon.XXXXXX")" || return 2
+    printf '%s\n' "${merged}" > "${tmp}"
+    _ci_daemon_validate "${tmp}" || { rm -f "${tmp}"; return 1; }
+    rm -f "${tmp}"
+    printf -- '\n--- No files written (check mode) ---\n'
+}
+
+# What: write the merged config next to the live file.
+# Why: manual review before apply; the live file stays.
+# From: Issue #1255 | PR #1349
+_ci_daemon_stage() {
+    local file="$1" merged
+    merged="$(_ci_daemon_merge "${file}")" || return "$?"
+    printf '%s\n' "${merged}" > "${file}.staged" || return 2
+    printf 'Staged merged config at: %s.staged\n' "${file}"
+}
+
+# What: back up the live file; install the merged config.
+# Why: validated and atomic; dockerd is not restarted here.
+# From: Issue #1255 | PR #1349
+_ci_daemon_apply() {
+    local file="$1" merged tmp backup
+    merged="$(_ci_daemon_merge "${file}")" || return "$?"
+    tmp="$(_ci_mktemp "${file}.tmp.XXXXXX")" || return 2
+    printf '%s\n' "${merged}" > "${tmp}"
+    _ci_daemon_validate "${tmp}" || { rm -f "${tmp}"; return 1; }
+    if [ -f "${file}" ]; then
+        backup="${file}.bak.$(date +%Y%m%dT%H%M%S)"
+        cp "${file}" "${backup}" || return 2
+        printf 'Backed up existing config to: %s\n' "${backup}"
+    fi
+    mv "${tmp}" "${file}" || return 2
+    printf 'Applied merged config to: %s\ndockerd is not restarted; run the restart mode in a quiet window.\n' "${file}"
+}
+
+# What: restart dockerd after an explicit confirmation.
+# Why: it stops every container, in-flight CI jobs included.
+# From: Issue #1255 | PR #1349
+_ci_daemon_restart() {
+    local file="$1" attempt=0 driver
+    if [ "${CONFIRM_DOCKERD_RESTART:-}" != "yes" ]; then
+        ci_log "[CI-ERROR-DAEMON-0004]" "reason=\"restart stops every container; set CONFIRM_DOCKERD_RESTART=yes\""
+        return 1
+    fi
+    _ci_capture 0 systemctl restart docker || return 2
+    until docker info >/dev/null 2>&1; do
+        attempt=$((attempt + 1))
+        if [ "${attempt}" -ge 30 ]; then
+            ci_log "[CI-ERROR-DAEMON-0005]" "reason=\"dockerd not responsive 30s after restart\""
+            return 1
+        fi
+        sleep 1
+    done
+    driver="$(_ci_capture 0 docker info --format '{{.LoggingDriver}}')" || return 2
+    printf 'LoggingDriver (docker info): %s\n' "${driver}"
+    if [ "${driver}" != "json-file" ]; then
+        ci_log "[CI-WARN-DAEMON-0006]" "driver=\"${driver}\" reason=\"LoggingDriver is not json-file; check the host\""
+    fi
+    printf 'builder section of %s (docker info does not report it):\n' "${file}"
+    _ci_capture 0 jq '.builder // "(no builder key)"' "${file}" || return 2
+}
+
+# What: daemon-config mode on the runner host's daemon.json.
+# Why: one entry for check, stage, apply and restart.
+# From: Issue #1255 | PR #1349
+ci_cmd_docker_daemon_config() {
+    local mode="${1:-check}" file="${2:-}"
+    [ -n "${file}" ] || file="$(_ci_variable CI_DAEMON_JSON)" || return 2
+    case "${mode}" in
+        check) _ci_daemon_check "${file}" ;;
+        stage) _ci_daemon_stage "${file}" ;;
+        apply) _ci_daemon_apply "${file}" ;;
+        restart) _ci_daemon_restart "${file}" ;;
+        *)
+            ci_log "[CI-ERROR-DAEMON-0007]" "mode=\"${mode}\" reason=\"unknown mode\" known=\"check stage apply restart\""
             return 2
             ;;
     esac

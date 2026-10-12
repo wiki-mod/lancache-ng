@@ -5161,3 +5161,63 @@ CASES
     [[ "${output}" == *"${extra}: no SOT target of that name"* && "${output}" == *"${svc}: never validated"* ]] \
         || { echo "keys: ${output}"; return 1; }
 }
+
+# What: daemon additions follow the SOT, or an env override.
+# Why: AG-CI-016: hosts deviate by variable, not by a fork.
+# From: Issue #1255 | PR #1349
+@test "docker-daemon-config: additions come from the SOT variables or their override" {
+    local reserved size files
+    run _ci_daemon_additions
+    [ "${status}" -eq 0 ] || { echo "rc ${status}: ${output}"; return 1; }
+    [ "$(jq -r '.builder.gc.enabled' <<<"${output}")" = true ] || { echo "gc: ${output}"; return 1; }
+    [ "$(jq -r '."log-driver"' <<<"${output}")" = json-file ] || { echo "driver: ${output}"; return 1; }
+    [ "$(jq -r '.builder.gc.defaultReservedSpace' <<<"${output}")" = "$(_ci_variable CI_BUILDER_GC_RESERVED_SPACE)" ] || return 1
+    [ "$(jq -r '."log-opts"."max-size"' <<<"${output}")" = "$(_ci_variable CI_DAEMON_LOG_MAX_SIZE)" ] || return 1
+    [ "$(jq -r '."log-opts"."max-file"' <<<"${output}")" = "$(_ci_variable CI_DAEMON_LOG_MAX_FILE)" ] || return 1
+    reserved="$(_val name)" size="$(_val name)" files="$(_val int 1 99)"
+    CI_BUILDER_GC_RESERVED_SPACE="${reserved}" CI_DAEMON_LOG_MAX_SIZE="${size}" CI_DAEMON_LOG_MAX_FILE="${files}" run _ci_daemon_additions
+    [ "${status}" -eq 0 ] || { echo "override rc ${status}: ${output}"; return 1; }
+    [ "$(jq -r '.builder.gc.defaultReservedSpace' <<<"${output}")" = "${reserved}" ] || { echo "reserved: ${output}"; return 1; }
+    [ "$(jq -r '."log-opts"."max-size"' <<<"${output}")" = "${size}" ] || { echo "size: ${output}"; return 1; }
+    [ "$(jq -r '."log-opts"."max-file"' <<<"${output}")" = "${files}" ] || { echo "files: ${output}"; return 1; }
+}
+
+# What: merge keeps host keys, a missing file, bad JSON.
+# Why: host settings must survive; bad input stops.
+# From: Issue #1255 | PR #1349
+@test "docker-daemon-config: merge keeps host keys, handles a missing file, stops on bad JSON" {
+    local f key val sub
+    f="$(_val path)" key="$(_val name)" val="$(_val name)" sub="$(_val name)"
+    jq -n --arg k "${key}" --arg v "${val}" --arg s "${sub}" '{($k): $v, builder: {cache: {($s): true}}}' > "${f}"
+    run _ci_daemon_merge "${f}"
+    [ "${status}" -eq 0 ] || { echo "rc ${status}: ${output}"; return 1; }
+    [ "$(jq -r --arg k "${key}" '.[$k]' <<<"${output}")" = "${val}" ] || { echo "host key lost: ${output}"; return 1; }
+    [ "$(jq -r --arg s "${sub}" '.builder.cache[$s]' <<<"${output}")" = true ] || { echo "builder replaced: ${output}"; return 1; }
+    [ "$(jq -r '.builder.gc.defaultReservedSpace' <<<"${output}")" = "$(_ci_variable CI_BUILDER_GC_RESERVED_SPACE)" ] || { echo "gc missing: ${output}"; return 1; }
+    run _ci_daemon_merge "$(_val path)"
+    [ "${status}" -eq 0 ] || { echo "missing rc ${status}: ${output}"; return 1; }
+    [ "$(jq -S . <<<"${output}")" = "$(_ci_daemon_additions | jq -S .)" ] || { echo "missing file: ${output}"; return 1; }
+    printf '{ %s' "$(_val name)" > "${f}"
+    run _ci_daemon_merge "${f}"
+    _expect bad-json 1 "[CI-ERROR-DAEMON-0001];${f}" || return 1
+}
+
+# What: apply backs up and installs; restart needs consent.
+# Why: dockerd restarts stop every running CI job.
+# From: Issue #1255 | PR #1349
+@test "docker-daemon-config: apply backs up and installs, restart refuses without consent" {
+    local f key=max-concurrent-downloads val
+    f="$(_val path)" val="$(_val int 1 99)"
+    jq -n --arg k "${key}" --argjson v "${val}" '{($k): $v}' > "${f}"
+    run ci_cmd_docker_daemon_config apply "${f}"
+    [ "${status}" -eq 0 ] || { echo "apply rc ${status}: ${output}"; return 1; }
+    [ "$(jq -r --arg k "${key}" '.[$k]' "${f}")" = "${val}" ] || { echo "host key lost"; return 1; }
+    [ "$(jq -r '."log-driver"' "${f}")" = json-file ] || { echo "no additions in ${f}"; return 1; }
+    [ "$(jq -r --arg k "${key}" '.[$k]' "${f}".bak.*)" = "${val}" ] || { echo "no backup of the old file"; return 1; }
+    run ci_cmd_docker_daemon_config stage "${f}"
+    [ "${status}" -eq 0 ] && [ -s "${f}.staged" ] || { echo "stage rc ${status}: ${output}"; return 1; }
+    CONFIRM_DOCKERD_RESTART="" run ci_cmd_docker_daemon_config restart "${f}"
+    _expect restart-guard 1 "[CI-ERROR-DAEMON-0004]" || return 1
+    run ci_cmd_docker_daemon_config "$(_val name)" "${f}"
+    _expect unknown-mode 2 "[CI-ERROR-DAEMON-0007]" || return 1
+}

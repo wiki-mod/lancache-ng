@@ -809,6 +809,13 @@ ci_variables:
   # Why: promote and the installer read one lock location.
   # From: Issue #1683 | PR #1858
   CI_PROMOTE_LOCK_REF: refs/ci/promote-lock
+  # What: runner daemon.json path, GC reserve, log caps.
+  # Why: AG-CI-016: one owner for the runner Docker limits.
+  # From: Issue #1255 | PR #1349
+  CI_DAEMON_JSON: /etc/docker/daemon.json
+  CI_BUILDER_GC_RESERVED_SPACE: 20GB
+  CI_DAEMON_LOG_MAX_SIZE: 10m
+  CI_DAEMON_LOG_MAX_FILE: 3
   # What: PR title lint mode (warn|block), chronology mode.
   # Why: AG-CI-006: check modes are values with one owner.
   # From: Issue #1683 | PR #1858
