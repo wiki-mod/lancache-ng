@@ -1335,12 +1335,6 @@ fn syslog_ng(ctx: &Ctx) -> Result<Run, String> {
     })
 }
 
-// What: wait limit and recipient of the alarm POST.
-// Why: an unreachable ui must not stall netdata's health.
-// From: Issue #858
-const NETDATA_ALARM_MAX_TIME: u32 = 15;
-const NETDATA_ALARM_RECIPIENT: &str = "lancache-ui";
-
 // What: daemon and health log to stderr, the rest off.
 // Why: Docker hands stderr to the one syslog-ng.
 // From: Issue #1683
@@ -1350,8 +1344,13 @@ const NETDATA_CONF: &str =
 // What: netdata custom_sender that POSTs alarms to the ui.
 // Why: fields come from NetdataAlarm; no second list.
 // From: Issue #858
-fn alarm_notify_conf(ui_url: &str, token_file: &str) -> Result<String, String> {
-    for value in [ui_url, token_file] {
+fn alarm_notify_conf(
+    ui_url: &str,
+    token_file: &str,
+    max_time: u64,
+    recipient: &str,
+) -> Result<String, String> {
+    for value in [ui_url, token_file, recipient] {
         let plain = |c: char| c.is_ascii_alphanumeric() || "-._:/".contains(c);
         if value.is_empty() || !value.chars().all(plain) {
             return Err(format!("{value:?} is no plain URL or path"));
@@ -1372,14 +1371,14 @@ fn alarm_notify_conf(ui_url: &str, token_file: &str) -> Result<String, String> {
     let json = json.join(",");
     Ok(format!(
         r#"SEND_CUSTOM="YES"
-DEFAULT_RECIPIENT_CUSTOM="{NETDATA_ALARM_RECIPIENT}"
+DEFAULT_RECIPIENT_CUSTOM="{recipient}"
 _lancache_json_escape() {{
   printf '%s' "$1" | tr -d '\n' | sed 's/\\/\\\\/g; s/"/\\"/g'
 }}
 custom_sender() {{
   local token httpcode
   token="$(cat "{token_file}")" || return 1
-  httpcode="$(docurl --max-time {NETDATA_ALARM_MAX_TIME} -X POST -H "Content-Type: application/json" -H "{ALARM_TOKEN_HEADER}: ${{token}}" -d "{{{json}}}" "{ui_url}{ALARM_INGEST_PATH}")" || {{
+  httpcode="$(docurl --max-time {max_time} -X POST -H "Content-Type: application/json" -H "{ALARM_TOKEN_HEADER}: ${{token}}" -d "{{{json}}}" "{ui_url}{ALARM_INGEST_PATH}")" || {{
     error "lancache-ui alarm POST failed: HTTP ${{httpcode}}"
     return 1
   }}
@@ -1413,6 +1412,8 @@ fn netdata(ctx: &Ctx) -> Result<Run, String> {
     let sender = alarm_notify_conf(
         &ctx.need("NETDATA_ALARM_UI_URL")?,
         &token_file.display().to_string(),
+        bounded("NETDATA_ALARM_MAX_TIME", 1, 300)?,
+        &ctx.need("NETDATA_ALARM_RECIPIENT")?,
     )?;
     let web_log = web_log_conf(&ctx.need("NETDATA_WEB_LOG")?)?;
     let token = stack_secret(
@@ -4868,14 +4869,12 @@ mod tests {
     // From: Issue #858
     #[test]
     fn alarm_sender_script_names_every_field() {
-        let script = alarm_notify_conf("http://ui:8080", "/t/token").unwrap();
-        assert!(script.starts_with(&format!(
-            "SEND_CUSTOM=\"YES\"\nDEFAULT_RECIPIENT_CUSTOM=\"{NETDATA_ALARM_RECIPIENT}\"\n"
-        )));
+        let script = alarm_notify_conf("http://ui:8080", "/t/token", 15, "lancache-ui").unwrap();
+        assert!(
+            script.starts_with("SEND_CUSTOM=\"YES\"\nDEFAULT_RECIPIENT_CUSTOM=\"lancache-ui\"\n")
+        );
         assert!(script.contains("token=\"$(cat \"/t/token\")\" || return 1"));
-        assert!(script.contains(&format!(
-            "docurl --max-time {NETDATA_ALARM_MAX_TIME} -X POST"
-        )));
+        assert!(script.contains("docurl --max-time 15 -X POST"));
         assert!(script.contains(&format!("-H \"{ALARM_TOKEN_HEADER}: ${{token}}\"")));
         assert!(script.contains(&format!("\"http://ui:8080{ALARM_INGEST_PATH}\")\" || {{")));
         assert!(script.contains("case \"${httpcode}\" in 2??) return 0 ;; esac"));
@@ -4887,8 +4886,9 @@ mod tests {
             ("http://ui", "/t y"),
             ("http://u\"i", "/t"),
         ] {
-            assert!(alarm_notify_conf(url, file).is_err());
+            assert!(alarm_notify_conf(url, file, 15, "lancache-ui").is_err());
         }
+        assert!(alarm_notify_conf("http://ui", "/t", 15, "a b").is_err());
     }
 
     // What: web_log job parses the proxy's syslog lines.
