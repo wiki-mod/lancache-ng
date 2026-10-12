@@ -4846,12 +4846,12 @@ CASES
     _expect held-fresh 1 "[CI-ERROR-CAS-0002]" || return 1
     run _ci_lock_release origin "${ref}" "holder-b"
     _expect foreign-release 0 "[CI-INFO-CAS-0007]" || return 1
-    git ls-remote origin "${ref}" | grep -q . || { echo "foreign release freed the lock"; return 1; }
+    [ -n "$(git ls-remote origin "${ref}")" ] || { echo "foreign release freed the lock"; return 1; }
     run _ci_lock_acquire origin "${ref}" "holder-b" 1 0 0
     _expect stale-takeover 0 "[CI-INFO-CAS-0001]" || return 1
     run _ci_lock_release origin "${ref}" "holder-b"
     _expect own-release 0 - || return 1
-    git ls-remote origin "${ref}" | grep -q . && { echo "own release left the lock"; return 1; }
+    [ -z "$(git ls-remote origin "${ref}")" ] || { echo "own release left the lock"; return 1; }
     run _ci_lock_release origin "${ref}" "holder-b"
     _expect absent-release 0 - || return 1
 }
