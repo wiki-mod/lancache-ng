@@ -1,14 +1,9 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-
-# What: Trivy ignore list; one entry per accepted finding.
-# Why: each statement is What/Why/From; no expiry field.
-# From: Issue #1683 | PR #1912
-
-# What: `status: not_affected` marks code confirmed absent.
-# Why: an omitted `status` marks an accepted, tracked risk.
-# From: Issue #1683 | PR #1912
+#
+# What: Trivy ignore list; statements use What/Why/From.
+# Why: Omitted status = tracked risk; no expiry field used.
 vulnerabilities:
   - id: CVE-2026-14456
     statement: >-
@@ -1201,7 +1196,8 @@ vulnerabilities:
 
       Why: Trivy reports `docker-cli` 29.8.2-r0 as vulnerable and
       29.9.0-r0 as the fix (build-tools arm64 scan, Alpine 3.24.2).
-      `docker-cli` is a client and serves no HTTP/2 connections. The
+      Alpine 3.24 community still ships only 29.8.2-r0 for aarch64
+      and x86_64, so a rebuild cannot remove the finding yet. The
       entry records the finding until a rebuild ships 29.9.0-r0.
 
-      From: Issue #1913 | PR #1912
+      From: Issue #1913 | PR #1915
