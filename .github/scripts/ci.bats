@@ -4674,6 +4674,321 @@ CASES
     [ ! -e "${rel}" ] || { echo "validate-holder: released without a holder"; return 1; }
 }
 
+# What: plan keeps verify pairs; a MISMATCH fails the plan
+# Why: a produced artifact needs acceptance, not a rebuild
+# From: Issue #1683 | PR #1912
+@test "plan and ship: unverified pairs verify without a build, a mismatch fails" {
+    local mark plat w d calls
+    mark="$(_val path)" plat="$(_val platform)" w="$(_val name)" d="$(_val digest)" calls="$(_val path)"
+    export GITHUB_OUTPUT="${mark}"
+    : > "${mark}"
+    _ci_require_ghcr_auth() { return 0; }
+    _ci_platforms() { printf '%s\n' "${plat}"; }
+    _ci_platform_field() { printf '%s\n' "${w}"; }
+    _ci_promote_targets_for_ref() { return 0; }
+    _ci_semantic_impact() { echo "impact asked for a non-build action" >&2; return 2; }
+    _ci_resolve_one() { printf 'service=%s platform=%s state=PRODUCED_UNVERIFIED action=verify identity=%s\n' "$1" "$2" "${w}"; }
+    run ci_cmd_plan_matrix "${CI_MANIFEST_REL}"
+    _expect plan-verify 0 - || return 1
+    [ "$(grep -c '^any-build=true$' "${mark}")" -eq 1 ] && grep -q "\"identity\":\"${w}\"" "${mark}" \
+        || { echo "verify pairs missing from the plan: $(cat "${mark}")"; return 1; }
+    : > "${mark}"
+    _ci_resolve_one() { printf 'service=%s platform=%s state=MISMATCH action=fail identity=%s\n' "$1" "$2" "${w}"; }
+    run ci_cmd_plan_matrix "${CI_MANIFEST_REL}"
+    _expect plan-mismatch 2 "[CI-ERROR-PLAN-0005];state=MISMATCH" || return 1
+    [ ! -s "${mark}" ] || { echo "plan-mismatch wrote a matrix: $(cat "${mark}")"; return 1; }
+    ci_cmd_build() { printf 'service=%s platform=%s result=verify identity=%s\n' "$1" "$2" "${w}"; }
+    ci_cmd_publish() { echo "publish ran for a verify pair" >&2; return 2; }
+    ci_cmd_verify() { printf '%s %s %s\n' "$1" "$2" "$3" > "${calls}"; }
+    _ci_published_digest() { printf '%s\n' "${d}"; }
+    run ci_cmd_ship "${w}" "${plat}"
+    _expect ship-verify 0 - || return 1
+    [ "$(cat "${calls}")" = "${w} ${d} ${plat}" ] || { echo "verify call: $(cat "${calls}")"; return 1; }
+    _ci_published_digest() { return 2; }
+    run ci_cmd_ship "${w}" "${plat}"
+    _expect ship-no-digest 2 "[CI-ERROR-SHIP-0004]" || return 1
+}
+
+# What: a failed promotion move restores the moved services
+# Why: the channel must never keep a mixed stack (§50)
+# From: Issue #1683 | PR #1912
+@test "promote move: a failed move or readback rolls the moved services back" {
+    local st a b c pa pb pc na nb nc cand bad
+    st="$(_val path)" a="$(_val name)" b="$(_val name)" c="$(_val name)"
+    pa="$(_val digest)" pb="$(_val digest)" pc="$(_val digest)"
+    na="$(_val digest)" nb="$(_val digest)" nc="$(_val digest)" bad="$(_val digest)"
+    cand="${a}=${na}"$'\n'"${b}=${nb}"$'\n'"${c}=${nc}"
+    mkdir -p "${st}" || return 1
+    _reset() { printf '%s\n' "${pa}" > "${st}/${a}"; printf '%s\n' "${pb}" > "${st}/${b}"; printf '%s\n' "${pc}" > "${st}/${c}"; }
+    _ci_channel_readback() { cat "${st}/$1"; }
+    _ci_promote_move() {
+        [ "$1" != "${FAIL_MOVE:-}" ] || return 1
+        if [ "$3" = "${BAD_DIGEST:-}" ]; then printf '%s\n' "${bad}" > "${st}/$1"; else printf '%s\n' "$3" > "${st}/$1"; fi
+    }
+    _reset
+    run _ci_promote_move_all stable "${cand}"
+    _expect all-moved 0 - || return 1
+    [ "$(cat "${st}/${a}")" = "${na}" ] && [ "$(cat "${st}/${c}")" = "${nc}" ] || { echo "not moved"; return 1; }
+    _reset
+    FAIL_MOVE="${c}" run _ci_promote_move_all stable "${cand}"
+    _expect move-failed 2 "[CI-ERROR-PROMOTE-0007]" || return 1
+    [ "$(cat "${st}/${a}")" = "${pa}" ] && [ "$(cat "${st}/${b}")" = "${pb}" ] && [ "$(cat "${st}/${c}")" = "${pc}" ] \
+        || { echo "move failure left a mixed channel"; return 1; }
+    _reset
+    BAD_DIGEST="${nb}" run _ci_promote_move_all stable "${cand}"
+    _expect readback-mismatch 2 "[CI-ERROR-PROMOTE-0009];rolling the moved services back" || return 1
+    [ "$(cat "${st}/${a}")" = "${pa}" ] && [ "$(cat "${st}/${b}")" = "${pb}" ] && [ "$(cat "${st}/${c}")" = "${pc}" ] \
+        || { echo "mismatch left a mixed channel"; return 1; }
+}
+
+# What: scan-stack scans every pair and lists the failures
+# Why: one finding must not hide the other pairs' results
+# From: Issue #1683 | PR #1912
+@test "scan stack: a failing pair does not stop the others, the code is kept" {
+    local a b c calls d
+    a="$(_val name)" b="$(_val name)" c="$(_val name)" calls="$(_val path)" d="$(_val digest)"
+    _ci_require_ghcr_auth() { return 0; }
+    _ci_published_digest() { [ "$1" != "${c}" ] || return 2; printf '%s\n' "${d}"; }
+    ci_cmd_scan() { echo "$1" >> "${calls}"; [ "$1" != "${a}" ] || return 1; }
+    : > "${calls}"
+    CI_BUILD_MATRIX="{\"include\":[{\"service\":\"${a}\",\"platform\":\"p/x\"},{\"service\":\"${b}\",\"platform\":\"p/x\"},{\"service\":\"${c}\",\"platform\":\"p/x\"}]}" \
+        run ci_cmd_scan_stack
+    _expect scan-failures 2 "[CI-ERROR-SCAN-0017];[CI-ERROR-SCAN-0024];failed=\"${a}/p/x ${c}/p/x\"" || return 1
+    [ "$(tr '\n' ' ' < "${calls}")" = "${a} ${b} " ] || { echo "scanned: $(tr '\n' ' ' < "${calls}")"; return 1; }
+    ci_cmd_scan() { echo "$1" >> "${calls}"; [ "$1" != "${a}" ] || return 1; }
+    _ci_published_digest() { printf '%s\n' "${d}"; }
+    : > "${calls}"
+    CI_BUILD_MATRIX="{\"include\":[{\"service\":\"${a}\",\"platform\":\"p/x\"},{\"service\":\"${b}\",\"platform\":\"p/x\"}]}" \
+        run ci_cmd_scan_stack
+    _expect scan-finding 1 "[CI-ERROR-SCAN-0024]" || return 1
+    [ "$(wc -l < "${calls}")" -eq 2 ] || { echo "finding stopped the scan: $(cat "${calls}")"; return 1; }
+}
+
+# What: push digest must equal the registry digest
+# Why: a mismatch must never reach the ledger as accepted
+# From: Issue #1683 | PR #1912
+@test "publish: the push digest must equal the registry digest" {
+    local svc d1 d2 ref
+    svc="$(_val name)" d1="$(_val digest)" d2="$(_val digest)" ref="$(_val name)"
+    _ci_image_tag() { printf '%s\n' "${ref}"; }
+    _ci_retry() { printf 'latest: digest: %s size: 401\n' "${PUSHED}"; }
+    _ci_registry_digest() { printf '%s\n' "${SEEN}"; }
+    PUSHED="${d1}" SEEN="${d1}" run _ci_docker_publish "${svc}" x p/x
+    _expect same 0 "${d1}" || return 1
+    PUSHED="${d1}" SEEN="${d2}" run _ci_docker_publish "${svc}" x p/x
+    _expect differ 2 "[CI-ERROR-PUBLISH-0006]" || return 1
+    _ci_retry() { printf 'no digest line\n'; }
+    PUSHED="" SEEN="${d1}" run _ci_docker_publish "${svc}" x p/x
+    _expect no-digest 2 "[CI-ERROR-PUBLISH-0006];pushed=\"none\"" || return 1
+}
+
+# What: GC delete counts a vanished version as deleted
+# Why: the goal is "version gone"; a 404 reached it
+# From: Issue #1683 | PR #1912
+@test "gc delete: a 404 on the delete is the goal reached, other errors fail" {
+    local cand
+    cand="$(printf 'n\t123\tt\ttags\tsvc')"
+    _ci_repo() { printf 'org/repo\n'; }
+    _ci_retry() {
+        if [ "$1" = github-api ]; then printf '%s\n' "${DELOUT}"; return "${DELRC}"; fi
+        printf '2026-01-01T00:00:00Z\n'
+    }
+    DELRC=0 DELOUT="" run _ci_gc_delete "${cand}"
+    _expect deleted 0 "" || return 1
+    DELRC=2 DELOUT="gh: Not Found (HTTP 404)" run _ci_gc_delete "${cand}"
+    _expect gone 0 "[CI-INFO-GC-0034]" || return 1
+    DELRC=2 DELOUT="gh: Forbidden (HTTP 403)" run _ci_gc_delete "${cand}"
+    [ "${status}" -eq 2 ] || { echo "403 rc=${status}"; return 1; }
+}
+
+# What: every ledger/registry pair maps to one state+action
+# Why: only MISSING builds; MISMATCH fails; UNKNOWN stops
+# From: Issue #1683 | PR #1912
+@test "resolver: each ledger and registry pair gives one state and action" {
+    local d1 d2 row lrc lstate prc want act got
+    d1="$(_val digest)" d2="$(_val digest)"
+    _ci_git_remote() { printf 'origin\n'; }
+    _ci_image_tag() { printf 'x\n'; }
+    _ci_ledger_read() { [ "${LRC}" -ne 0 ] && return "${LRC}"; printf '%s\t%s\n' "${LSTATE}" "${LDIG}"; }
+    _ci_registry_probe() { [ "${PRC}" -ne 0 ] && return "${PRC}"; printf '%s\n' "${PDIG}"; }
+    # columns: ledger rc, ledger state, ledger digest, probe rc, probe digest, state, action
+    for row in \
+        "1 - - 1 - MISSING_CONFIRMED build" \
+        "1 - - 0 ${d1} PRODUCED_UNVERIFIED verify" \
+        "0 ACCEPTED ${d1} 0 ${d1} PRESENT_ACCEPTED noop" \
+        "0 ACCEPTED ${d1} 0 ${d2} MISMATCH fail" \
+        "0 ACCEPTED ${d1} 1 - MISMATCH fail" \
+        "0 PRODUCED ${d1} 0 ${d1} PRODUCED_UNVERIFIED verify" \
+        "2 - - 1 - UNKNOWN escalate" \
+        "1 - - 2 - UNKNOWN escalate"; do
+        read -r lrc lstate LDIG prc PDIG want act <<< "${row}"
+        LRC="${lrc}" LSTATE="${lstate}" PRC="${prc}"
+        got="$(_ci_resolve_state s i p/x)"
+        [ "${got}" = "${want}" ] || { echo "row [${row}] state ${got}"; return 1; }
+        got="$(_ci_resolve_action "${got}")"
+        [ "${got}" = "${act}" ] || { echo "row [${row}] action ${got}"; return 1; }
+    done
+}
+
+# What: the lock is held, waited on, taken over, released
+# Why: a fresh lock is never taken or freed by others
+# From: Issue #1683 | PR #1912
+@test "lock: a fresh lock is held, a stale one taken over, only the holder frees it" {
+    local o w ref
+    o="$(_val path)" w="$(_val path)" ref="refs/ci/t/$(_val name)"
+    git init -q --bare "${o}" && git init -q "${w}" && git -C "${w}" remote add origin "${o}" || return 1
+    cd "${w}" || return 1
+    export GIT_CONFIG_GLOBAL=/dev/null
+    sleep() { :; }
+    run _ci_lock_acquire origin "${ref}" "holder-a" 1 0 900
+    _expect first-acquire 0 - || return 1
+    run _ci_lock_acquire origin "${ref}" "holder-b" 2 0 900
+    _expect held-fresh 1 "[CI-ERROR-CAS-0002]" || return 1
+    run _ci_lock_release origin "${ref}" "holder-b"
+    _expect foreign-release 0 "[CI-INFO-CAS-0007]" || return 1
+    git ls-remote origin "${ref}" | grep -q . || { echo "foreign release freed the lock"; return 1; }
+    run _ci_lock_acquire origin "${ref}" "holder-b" 1 0 0
+    _expect stale-takeover 0 "[CI-INFO-CAS-0001]" || return 1
+    run _ci_lock_release origin "${ref}" "holder-b"
+    _expect own-release 0 - || return 1
+    git ls-remote origin "${ref}" | grep -q . && { echo "own release left the lock"; return 1; }
+    run _ci_lock_release origin "${ref}" "holder-b"
+    _expect absent-release 0 - || return 1
+}
+
+# What: verify compares the registry digest to the expected
+# Why: produced != accepted must fail before any smoke test
+# From: Issue #1683 | PR #1912
+@test "verify: a readback mismatch and a failed readback both fail" {
+    local d1 d2
+    d1="$(_val digest)" d2="$(_val digest)"
+    _ci_require_ghcr_auth() { return 0; }
+    _ci_identity_for() { printf 'id\n'; }
+    _ci_image_tag() { printf 'x\n'; }
+    _ci_registry_digest() { printf '%s\n' "${d2}"; }
+    run _ci_verify_one svc p/x "${d1}"
+    _expect mismatch 2 "[CI-ERROR-VERIFY-0005]" || return 1
+    _ci_registry_digest() { return 2; }
+    run _ci_verify_one svc p/x "${d1}"
+    _expect readback 2 "[CI-ERROR-VERIFY-0006]" || return 1
+}
+
+# What: version sync twice in a row changes nothing
+# Why: Q2: the second run must report changed=0
+# From: Issue #1683 | PR #1912
+@test "version sync: the second run changes nothing" {
+    local dir
+    dir="$(_val path)"
+    mkdir -p "${dir}" || return 1
+    printf '[workspace.package]\nversion = "0.0.1"\nlicense = "X"\n\n[dependencies]\nversion = "9"\n' > "${dir}/Cargo.toml"
+    printf '[[package]]\nname = "own"\nversion = "0.0.1"\n\n[[package]]\nname = "dep"\nversion = "1.2.3"\n' > "${dir}/Cargo.lock"
+    printf '0.0.1\n' > "${dir}/VERSION"
+    _ci_release_value() { case "$1" in version) printf '2.0.0\n' ;; *) printf 'AGPL\n' ;; esac; }
+    _ci_repo_path() { case "$1" in CI_CARGO_LOCK) printf '%s/Cargo.lock\n' "${dir}" ;; *) printf '%s/VERSION\n' "${dir}" ;; esac; }
+    _ci_cargo_member_names() { printf 'own\n'; }
+    run _ci_version_release_sync
+    _expect first-run 0 "changed=3" || return 1
+    cp -r "${dir}" "${dir}.after" || return 1
+    run _ci_version_release_sync
+    _expect second-run 0 "changed=0" || return 1
+    diff -r "${dir}" "${dir}.after" || return 1
+    grep -q '^version = "1.2.3"$' "${dir}/Cargo.lock" || { echo "dependency version touched"; return 1; }
+}
+
+# What: GC run: dry-run deletes nothing, apply is repeatable
+# Why: a rerun finds nothing; the policy gates delete
+# From: Issue #1683 | PR #1912
+@test "gc run: dry-run keeps all, apply deletes, a rerun is a noop, policy gates" {
+    local calls
+    calls="$(_val path)"
+    : > "${calls}"
+    _ci_gc_candidates() { printf '%s' "${CANDS}"; }
+    _ci_gc_classify() { printf 'DELETE\n'; }
+    _ci_deletion_policy() { printf '%s\n' "${POLICY}"; }
+    _ci_require_ghcr_auth() { return 0; }
+    _ci_gc_delete() { echo "$1" >> "${calls}"; return "${DELRC}"; }
+    POLICY=manual-or-approved-automation-only DELRC=0 CANDS=$'a\t1\nb\t2\n'
+    run _ci_gc_run dry-run
+    _expect dry-run 0 "delete=2 deleted=0 mode=dry-run" || return 1
+    [ ! -s "${calls}" ] || { echo "dry-run deleted: $(cat "${calls}")"; return 1; }
+    run _ci_gc_run apply
+    _expect apply 0 "delete=2 deleted=2 mode=apply" || return 1
+    CANDS=""
+    run _ci_gc_run apply
+    _expect rerun 0 "result=noop candidates=0" || return 1
+    CANDS=$'a\t1\n'
+    POLICY="not-manual-or-approved-automation-only"
+    run _ci_gc_run apply
+    _expect policy 2 "[CI-ERROR-GC-0008]" || return 1
+    POLICY=manual-or-approved-automation-only DELRC=2
+    run _ci_gc_run apply
+    _expect delete-fail 2 "[CI-ERROR-GC-0009]" || return 1
+}
+
+# What: SBOM per digest is reused; a foreign SBOM fails
+# Why: a rerun makes no new SBOM; an unbound one fails
+# From: Issue #1683 | PR #1912
+@test "release sbom: a bound SBOM is reused, an unbound one fails, none is generated" {
+    local d1 d2
+    d1="$(_val digest)" d2="$(_val digest)"
+    _ci_require_ghcr_auth() { return 0; }
+    _ci_image_ref() { printf 'img\n'; }
+    _ci_registry_digest() { printf '%s\n' "${d1}"; }
+    _ci_release_asset_get() { printf '{"digest":"%s"}\n' "${ATT}" > "$3/$2"; }
+    _ci_trivy_sbom() { echo "generated" >&2; return 2; }
+    ATT="${d1}" run ci_cmd_release_sbom svc v1
+    _expect reused 0 "release=sbom-reused" || return 1
+    ATT="${d2}" run ci_cmd_release_sbom svc v1
+    _expect unbound 2 "[CI-ERROR-RELEASE-0046]" || return 1
+    [[ "${output}" != *generated* ]] || { echo "an SBOM was generated"; return 1; }
+}
+
+# What: promotion is current only if every channel matches
+# Why: a rerun after a full move must have nothing to do
+# From: Issue #1683 | PR #1912
+@test "promote: all-current is true only if every service matches" {
+    local d1 d2
+    d1="$(_val digest)" d2="$(_val digest)"
+    _ci_channel_readback() { case "$1" in a) printf '%s\n' "${d1}" ;; *) printf '%s\n' "${OTHER}" ;; esac; }
+    OTHER="${d1}" run _ci_promote_all_current ch $'a='"${d1}"$'\nb='"${d1}"
+    _expect all-current 0 - || return 1
+    OTHER="${d2}" run _ci_promote_all_current ch $'a='"${d1}"$'\nb='"${d1}"
+    _expect one-differs 1 - || return 1
+}
+
+# What: ledger keeps one record per identity; races re-read
+# Why: a conflict fails closed; a lost race must merge
+# From: Issue #1683 | PR #1912
+@test "ledger: same record is idempotent, a conflict fails, a lost race is retried" {
+    local o w id svc plat d1 d2 dir calls tries
+    o="$(_val path)" w="$(_val path)" id="$(_val sha)" svc="$(_val name)" plat="$(_val platform)"
+    d1="$(_val digest)" d2="$(_val digest)" dir="$(_val path)" calls="$(_val path)"
+    git init -q --bare "${o}" && git init -q "${w}" && git -C "${w}" remote add origin "${o}" || return 1
+    cd "${w}" || return 1
+    _put() { printf '%s\t%s\t%s\tACCEPTED\t%s\n' "${id}" "${svc}" "${plat}" "$1" | _ci_ledger_upsert origin; }
+    run _put "${d1}"
+    _expect first-write 0 "[CI-INFO-LEDGER-0004]" || return 1
+    run _put "${d1}"
+    _expect same-record 0 "[CI-INFO-LEDGER-0005]" || return 1
+    run _put "${d2}"
+    _expect conflict 3 "[CI-ERROR-LEDGER-0006]" || return 1
+    run _ci_ledger_read origin "${id}"
+    _expect kept-first 0 "=ACCEPTED"$'\t'"${d1}" || return 1
+    mkdir -p "${dir}" && jq -cn --arg s "${svc}" --arg p "${plat}" --arg i "${id}" --arg d "${d1}" \
+        '{service:$s, platform:$p, build_identity:$i, digest:$d, state:"ACCEPTED"}' > "${dir}/r.json" || return 1
+    tries="$(_ci_variable CI_RETRY_MAX_ATTEMPTS)" || return 1
+    : > "${calls}"
+    _ci_ledger_upsert() { cat > /dev/null; echo x >> "${calls}"; [ "$(wc -l < "${calls}")" -ge 2 ] || return 2; }
+    run ci_cmd_aggregate "${dir}"
+    _expect race-retried 0 "aggregate records=1" || return 1
+    [ "$(wc -l < "${calls}")" -eq 2 ] || { echo "race: $(wc -l < "${calls}") writes, want 2"; return 1; }
+    : > "${calls}"
+    _ci_ledger_upsert() { cat > /dev/null; echo x >> "${calls}"; return 2; }
+    run ci_cmd_aggregate "${dir}"
+    _expect race-lost 2 - || return 1
+    [ "$(wc -l < "${calls}")" -eq "${tries}" ] || { echo "race: $(wc -l < "${calls}") writes, want ${tries}"; return 1; }
+}
+
 # What: a channel run checks out its SOT source or a pin
 # Why: a schedule run starts on the default branch tip
 # From: Issue #1683 | PR #1858
