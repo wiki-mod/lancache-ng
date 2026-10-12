@@ -2089,8 +2089,8 @@ ci_cmd_scan_stack() {
             [ "${crc}" -le "${rc}" ] || rc="${crc}"
             continue
         fi
-        passed="$(jq -c --arg s "${svc}" --arg p "${plat}" '. + [{service:$s, platform:$p}]' <<< "${passed}" 2>&1)" || {
-            ci_log "[CI-ERROR-SCAN-0027]" "service=\"${svc}\" platform=\"${plat}\" reason=\"jq failed to add the pair\" raw=\"${passed}\""
+        passed="$(_ci_capture 0 jq -c --arg s "${svc}" --arg p "${plat}" '. + [{service:$s, platform:$p}]' <<< "${passed}")" || {
+            ci_log "[CI-ERROR-SCAN-0027]" "service=\"${svc}\" platform=\"${plat}\" reason=\"jq failed to add the pair\""
             return 2
         }
     done <<< "${pairs}"
@@ -2098,7 +2098,12 @@ ci_cmd_scan_stack() {
     # Why: a red pair must not block the clean ones
     # From: Issue #1683 | PR #1912
     if [ "${passed}" != '[]' ]; then
-        _ci_step_output "[CI-ERROR-SCAN-0026]" passed "$(jq -c '{include: .}' <<< "${passed}")" || return 2
+        local matrix
+        matrix="$(_ci_capture 0 jq -c '{include: .}' <<< "${passed}")" || {
+            ci_log "[CI-ERROR-SCAN-0030]" "reason=\"jq failed to build the aggregate matrix\""
+            return 2
+        }
+        _ci_step_output "[CI-ERROR-SCAN-0026]" passed "${matrix}" || return 2
     fi
     [ "${rc}" -eq 0 ] || ci_log "[CI-ERROR-SCAN-0024]" "failed=\"${failed# }\" reason=\"scan failed for these pairs; the others were scanned\""
     return "${rc}"
@@ -7589,7 +7594,7 @@ _ci_validate_kea_rollback() {
         rc=2
     elif _ci_run "[CI-ERROR-VALIDATE-0098]" "project=\"${project}\" service=\"ui\" reason=\"Kea ui run container not started\"" \
         _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${uname}" \
-        -e DHCP_MODE=kea -e "DHCP_API_URL=http://${kip}:${kport}" ui >/dev/null; then
+        -e DHCP_MODE=kea -e "DHCP_API_URL=http://${kip}" ui >/dev/null; then
         _ci_validate_kea_round_trip "${project}" "${kip}" "${kport}" "${uname}" || rc=$?
         # What: a failed round trip ships both run logs.
         # Why: the ui answer alone does not name the cause.

@@ -1173,6 +1173,23 @@ ROWS
     _expect moved 1 "[CI-ERROR-CHECK-0151];no include of the generated https-listen.inc;literal listen" || return 1
 }
 
+# What: the Kea ui run gets the host, the ui adds the port
+# Why: host:port made http://ip:8000:8000, a builder error
+# From: Issue #1683 | PR #1912
+@test "kea rollback: the ui run gets DHCP_API_URL without a port" {
+    local ip port log="${BATS_TEST_TMPDIR}/runs.log"
+    ip="$(_val ipv4)" port="$(_val port)"
+    _ci_validate_kea_agent() { printf '%s\n' "${port}"; }
+    _ci_validate_cid_ip() { printf '%s\n' "${ip}"; }
+    _ci_run() { shift 2; printf '%s\n' "$*" >> "${log}"; }
+    _ci_validate_kea_round_trip() { return 0; }
+    _ci_validate_rm_run() { return 0; }
+    run _ci_validate_kea_rollback "$(_val name)" "$(_val name)" "$(_val name)"
+    _expect real 0 "-" || return 1
+    grep -qF -- "DHCP_API_URL=http://${ip} " "${log}" || { echo "ui run: $(cat "${log}")"; return 1; }
+    ! grep -qF -- "DHCP_API_URL=http://${ip}:" "${log}" || { echo "port in the url: $(cat "${log}")"; return 1; }
+}
+
 # What: image-setup builds the SOT accounts and directories
 # Why: the Dockerfiles run no inline RUN logic (AG-CI-023)
 # From: Issue #1683 | PR #1912
