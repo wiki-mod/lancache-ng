@@ -1,9 +1,8 @@
 
 {# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
-{#
-
-   System statistics page: CPU, RAM, and network metrics. #}
+{# What: system stats page: CPU, RAM, network, disk I/O
+   Why: metrics are fetched from Netdata at /api/netdata #}
 {% extends "base.html" %}
 {% block title %} – Statistiken{% endblock %}
 
@@ -15,7 +14,8 @@
     <p class="text-sm text-slate-400 mt-1">Live-Daten via Netdata (automatisch aktualisiert)</p>
   </div>
 
-  <!-- Charts Grid -->
+  <!-- What: grid holding the four chart cards -->
+  <!-- Why: one column below lg, two columns from lg -->
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
 
     <div class="card">
@@ -52,8 +52,12 @@
 <script src="/static/chart.umd.min.js"></script>
 <script>
 const NETDATA = '/api/netdata';
-const POINTS  = 60;  // 1 Minute Historie
-const REFRESH  = 3000; // ms
+// What: sample count per chart and netdata request
+// Why: bounds chart array length and request size
+const POINTS  = 60;
+// What: refresh() interval in milliseconds
+// Why: each tick fetches every chart from netdata
+const REFRESH  = 3000;
 
 const chartDefaults = {
   type: 'line',
@@ -114,6 +118,8 @@ function push(chart, ...values) {
 
 async function fetchChart(path) {
   const res = await fetch(`${NETDATA}/${path}&points=${POINTS}&group=average&format=json`);
+  // What: throws on a non-2xx netdata response.
+  // Why: refresh() turns the throw into the error banner.
   if (!res.ok) throw new Error(res.status);
   return res.json();
 }
@@ -122,20 +128,23 @@ let errorShown = false;
 
 async function refresh() {
   try {
-    // CPU
+    // What: busy % = 100 minus idle (last column).
+    // Why: system.cpu returns idle time, not busy time.
     const cpu = await fetchChart('data?chart=system.cpu');
     const cpuRow = cpu.data[cpu.data.length - 1];
     const cpuPct = cpuRow ? (100 - cpuRow[cpuRow.length - 1]).toFixed(1) : 0;
     push(cpuChart, parseFloat(cpuPct));
     cpuChart.options.scales.y.max = 100;
 
-    // RAM
+    // What: RAM in GB from the first column of system.ram.
+    // Why: system.ram values are MiB, so divide by 1024.
     const ram = await fetchChart('data?chart=system.ram');
     const ramRow = ram.data[ram.data.length - 1];
     const usedGB = ramRow ? (ramRow[1] / 1024).toFixed(2) : 0;
     push(ramChart, parseFloat(usedGB));
 
-    // Network — try eth0, fallback to eth1
+    // What: net from net.eth0, falls back to net.eth1.
+    // Why: interface names differ between hosts.
     let net;
     try { net = await fetchChart('data?chart=net.eth0'); }
     catch { net = await fetchChart('data?chart=net.eth1'); }
@@ -144,7 +153,8 @@ async function refresh() {
     const txMB = netRow ? Math.abs(netRow[2] / 1000).toFixed(2) : 0;
     push(netChart, parseFloat(rxMB), parseFloat(txMB));
 
-    // Disk I/O
+    // What: disk read/write MB/s from system.io.
+    // Why: system.io is a host-wide total, not per disk.
     const disk = await fetchChart('data?chart=system.io');
     const diskRow = disk.data[disk.data.length - 1];
     const readMB  = diskRow ? Math.abs(diskRow[1] / 1000).toFixed(2) : 0;
@@ -152,12 +162,9 @@ async function refresh() {
     push(diskChart, parseFloat(readMB), parseFloat(writeMB));
 
     document.getElementById('netdata-error').classList.add('hidden');
-    // #849 bug-hunt finding observability.md#12: errorShown must reset once
-    // a refresh actually succeeds, otherwise a netdata outage that recovers
-    // and then fails again later in the same page load never shows the
-    // banner a second time (the `if (!errorShown)` guard below would stay
-    // permanently closed after the first failure) -- only a full page reload
-    // used to clear it.
+    // What: resets errorShown after a successful refresh.
+    // Why: otherwise the banner only shows once per page.
+    // From: Issue #849
     errorShown = false;
   } catch (e) {
     if (!errorShown) {
