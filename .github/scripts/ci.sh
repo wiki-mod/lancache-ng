@@ -3698,8 +3698,8 @@ _ci_docker_publish() {
 # From: Issue #1683 | PR #1912
 _CI_TRIVY_FINDING_RC=5
 
-# What: one trivy run; exit 0 clean, findings keep the report.
-# Why: a clean summary is no finding; an error is no verdict.
+# What: one trivy run; exit 0 clean, findings keep a report.
+# Why: a clean summary is no finding; an error no verdict.
 # From: Issue #1683 | PR #1912
 _ci_trivy_scan_once() {
     local report="$1" ref="$2" rc=0

@@ -2504,7 +2504,7 @@ CASES
 }
 
 # What: trivy's exit code tells clean, finding and error
-# Why: a clean summary is no finding; an error has no verdict
+# Why: a clean summary is no finding; an error no verdict
 # From: Issue #1683 | PR #1912
 @test "trivy scan once: the exit code decides, not the report text" {
     local rep
