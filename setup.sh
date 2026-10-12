@@ -6331,11 +6331,22 @@ EOF
 
     secondary_env_file="$(realpath -m "${secondary_dir}/.env")"
 
+    # What: https bind: given IP on DNS port, else loopback
+    # Why: compose derives nothing; the SOT owns both values
+    # From: Issue #1683 | PR #1912
+    dns_https_host_port=""
+    if [[ -n "$listen_ip_https" ]]; then
+        dns_https_host_port=$(prod_env_default DNS_PORT) || exit $?
+    else
+        listen_ip_https=$(prod_env_default LOOPBACK_BIND_IP) || exit $?
+    fi
+
     write_file_atomically "${secondary_dir}/.env" <<EOF
 IP_HTTP=${ip_http}
 LISTEN_IP=${listen_ip}
 IP_HTTPS=${ip_https}
 LISTEN_IP_HTTPS=${listen_ip_https}
+DNS_HTTPS_HOST_PORT=${dns_https_host_port}
 PDNS_API_KEY=${pdns_api_key}
 DDNS_TSIG_KEY=${ddns_tsig_key}
 DNS_XFR_PRIMARY=${dns_xfr_primary}

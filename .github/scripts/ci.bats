@@ -4298,7 +4298,8 @@ CASES
     # What: https side needs both flags and its own bind IP
     # Why: one dns container, a second bind, never half-set
     # From: Issue #1683 | PR #1912
-    [ -z "$(get_env_var IP_HTTPS "${env}")" ] && [ -z "$(get_env_var LISTEN_IP_HTTPS "${env}")" ] \
+    [ -z "$(get_env_var IP_HTTPS "${env}")" ] && [ -z "$(get_env_var DNS_HTTPS_HOST_PORT "${env}")" ] \
+        && [ "$(get_env_var LISTEN_IP_HTTPS "${env}")" = "$(_ci_runtime_default LOOPBACK_BIND_IP)" ] \
         || { echo "https keys set without flags: $(cat "${env}")"; return 1; }
     while IFS='|' read -r case want args; do
         # shellcheck disable=SC2086
@@ -4314,6 +4315,7 @@ CASES
     [ "${status}" -eq 0 ] || { echo "https register: ${output}"; return 1; }
     env="${t}/https/${name}/.env"
     [ "$(get_env_var IP_HTTPS "${env}")" = "192.0.2.2" ] && [ "$(get_env_var LISTEN_IP_HTTPS "${env}")" = "192.0.2.6" ] \
+        && [ "$(get_env_var DNS_HTTPS_HOST_PORT "${env}")" = "$(_ci_runtime_default DNS_PORT)" ] \
         || { echo "https keys: $(cat "${env}")"; return 1; }
     docker compose -p "${name}" --env-file "${env}" -f "${root}/deploy/secondary/docker-compose.yml" config --format json \
         | jq -e '.services.dns | .environment.IP_HTTPS == "192.0.2.2" and ([.ports[] | select(.target == 1053 and .host_ip == "192.0.2.6" and .published == "53")] | length == 2)' >/dev/null \

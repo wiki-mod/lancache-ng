@@ -20,9 +20,9 @@ use futures_util::StreamExt as _;
 use lancache_ng::config::{
     self, DDNS_UNSIGNED_MARKER, DEFAULT_RECORD_TTL, DhcpMode, LAN_ZONE, NATS_SUBJECT_FLUSH,
     NATS_SUBJECT_RECORD, NatsLogin, NatsRoles, OPTION_CODE_MAX, OPTION_CODE_MIN, OutOfRange,
-    PDNS_API_PATH, PDNS_AUTH_PORT, PROXY_ACCESS_LOG_PATTERN, Uint, canonical_zone,
-    dns_reader_publish, dns_subscribe, is_dns_name, option_code, option_data, parse_bool,
-    parse_custom_options, rollback_zones, zone_url,
+    PDNS_API_PATH, PROXY_ACCESS_LOG_PATTERN, Uint, canonical_zone, dns_reader_publish,
+    dns_subscribe, is_dns_name, option_code, option_data, parse_bool, parse_custom_options,
+    rollback_zones, zone_url,
 };
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, DesiredRunState, DesiredState, DnsRecord, FlushRequest,
@@ -132,6 +132,8 @@ struct Config {
     dhcp_lease_time: u32,
     http_ip: String,
     https_ip: String,
+    pdns_auth_port: u16,
+    dns_port: u16,
     dhcp_api_url: String,
     dhcp_api_token: String,
     dhcp_api_user: String,
@@ -321,6 +323,12 @@ impl Config {
             dhcp_lease_time,
             http_ip,
             https_ip,
+            pdns_auth_port: need("PDNS_AUTH_PORT")?
+                .parse()
+                .map_err(|e| format!("PDNS_AUTH_PORT: {e}"))?,
+            dns_port: need("DNS_PORT")?
+                .parse()
+                .map_err(|e| format!("DNS_PORT: {e}"))?,
             dhcp_api_url: format!("{}:{}", need("DHCP_API_URL")?, need("KEA_CTRL_PORT")?),
             dhcp_api_token,
             dhcp_api_user: need("KEA_CTRL_USER")?,
@@ -2480,7 +2488,7 @@ async fn register_secondary(
         ip_http: state.config.http_ip.clone(),
         pdns_api_key: state.config.pdns_api_key.clone(),
         ddns_tsig_key,
-        dns_xfr_primary: format!("{}:{PDNS_AUTH_PORT}", state.config.http_ip),
+        dns_xfr_primary: format!("{}:{}", state.config.http_ip, state.config.pdns_auth_port),
         image_registry: state.config.lancache_image_registry.clone(),
         image_prefix: state.config.lancache_image_prefix.clone(),
         image_channel: state.config.lancache_image_channel.clone(),
@@ -2555,9 +2563,9 @@ async fn check_secondary_health(
             "detail": "no reachable address on record for this secondary -- set one to enable the health check",
         })));
     };
-    // What: probe port 53, the secondary's own DNS.
-    // Why: 5300 is the primary's PowerDNS port.
-    let result = probe_secondary_soa(addr, 53).await;
+    // What: probe DNS_PORT, the secondary's own DNS.
+    // Why: PDNS_AUTH_PORT is the primary's PowerDNS port.
+    let result = probe_secondary_soa(addr, state.config.dns_port).await;
     if result.status == "ok" {
         let _ = with_db(&state, |db| {
             db.execute(
@@ -6540,7 +6548,9 @@ mod tests {
         "LANCACHE_SHARED_SECRET_DIR",
     ];
 
-    const NUMBER_KEYS: [(&str, &str); 10] = [
+    const NUMBER_KEYS: [(&str, &str); 12] = [
+        ("PDNS_AUTH_PORT", "5300"),
+        ("DNS_PORT", "53"),
         ("PDNS_AUTH_API_PORT", "8081"),
         ("PDNS_HTTP_API_PORT", "8082"),
         ("DNS_ROLLBACK_PORT", "8083"),

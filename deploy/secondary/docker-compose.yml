@@ -37,14 +37,14 @@ services:
       - dns-config-snapshots:${SOT_DNS_SNAPSHOT_MOUNT}
     tmpfs:
       - ${SOT_SUPERVISE_RUN_DIR}
-    # What: https binds only if LISTEN_IP_HTTPS is set.
-    # Why: otherwise loopback with an ephemeral port.
+    # What: dns-https binds its own IP and host port.
+    # Why: setup.sh writes both; compose derives none.
     # From: Issue #1683 | PR #1912
     ports:
-      - "${LISTEN_IP:?LISTEN_IP is required}:53:53/udp"
-      - "${LISTEN_IP:?LISTEN_IP is required}:53:53/tcp"
-      - "${LISTEN_IP_HTTPS:-127.0.0.1}:${LISTEN_IP_HTTPS:+53}:1053/udp"
-      - "${LISTEN_IP_HTTPS:-127.0.0.1}:${LISTEN_IP_HTTPS:+53}:1053/tcp"
+      - "${LISTEN_IP:?LISTEN_IP is required}:${SOT_DNS_PORT}:${SOT_DNS_PORT}/udp"
+      - "${LISTEN_IP:?LISTEN_IP is required}:${SOT_DNS_PORT}:${SOT_DNS_PORT}/tcp"
+      - "${LISTEN_IP_HTTPS:?LISTEN_IP_HTTPS is required}:${DNS_HTTPS_HOST_PORT}:${SOT_DNS_HTTPS_PORT}/udp"
+      - "${LISTEN_IP_HTTPS:?LISTEN_IP_HTTPS is required}:${DNS_HTTPS_HOST_PORT}:${SOT_DNS_HTTPS_PORT}/tcp"
     healthcheck:
       test: ["CMD", "/usr/local/bin/lancache-watchdog", "healthcheck"]
       interval: 30s

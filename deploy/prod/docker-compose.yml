@@ -43,7 +43,7 @@ services:
     # From: Issue #1683
     ports:
       - "127.0.0.1:${SOT_LANCACHE_LOG_PORT}:${SOT_LANCACHE_LOG_PORT}/udp"
-      - "123:123/udp"
+      - "${SOT_NTP_PORT}:${SOT_NTP_PORT}/udp"
     volumes:
       # What: the Docker API for the watchdog process only.
       # Why: no socket proxy; the supervisor drops the rest.
@@ -158,19 +158,19 @@ services:
     # Why: one container port each keeps the caches apart.
     # From: Issue #1683
     ports:
-      - "${IP_HTTP}:53:53/udp"
-      - "${IP_HTTP}:53:53/tcp"
-      - "${IP_HTTPS}:53:1053/udp"
-      - "${IP_HTTPS}:53:1053/tcp"
+      - "${IP_HTTP}:${SOT_DNS_PORT}:${SOT_DNS_PORT}/udp"
+      - "${IP_HTTP}:${SOT_DNS_PORT}:${SOT_DNS_PORT}/tcp"
+      - "${IP_HTTPS}:${SOT_DNS_PORT}:${SOT_DNS_HTTPS_PORT}/udp"
+      - "${IP_HTTPS}:${SOT_DNS_PORT}:${SOT_DNS_HTTPS_PORT}/tcp"
       # What: PowerDNS AXFR listener on IP_HTTP, UDP+TCP.
       # Why: secondaries pull zones from this port.
       # From: Issue #1683 | PR #1912
-      - "${IP_HTTP}:5300:5300/udp"
-      - "${IP_HTTP}:5300:5300/tcp"
+      - "${IP_HTTP}:${SOT_PDNS_AUTH_PORT}:${SOT_PDNS_AUTH_PORT}/udp"
+      - "${IP_HTTP}:${SOT_PDNS_AUTH_PORT}:${SOT_PDNS_AUTH_PORT}/tcp"
       # What: NATS for secondaries; loopback by default.
       # Why: NATS_BIND_IP opts in; no second compose file.
       # From: Issue #1683 | PR #1912
-      - "${NATS_BIND_IP:-127.0.0.1}:${SOT_NATS_PORT}:${SOT_NATS_PORT}"
+      - "${NATS_BIND_IP:-${SOT_LOOPBACK_BIND_IP}}:${SOT_NATS_PORT}:${SOT_NATS_PORT}"
     healthcheck:
       test: ["CMD", "/usr/local/bin/lancache-watchdog", "healthcheck"]
       interval: 30s

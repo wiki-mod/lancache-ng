@@ -576,11 +576,6 @@ pub fn zone_api_id(zone: &str) -> &str {
     zone.trim_end_matches('.')
 }
 
-// What: the port of the primary's authoritative PowerDNS.
-// Why: dns renders it; AXFR, DDNS and recursors use it.
-// From: Issue #1683 | PR #1912
-pub const PDNS_AUTH_PORT: u16 = 5300;
-
 // What: option codes dnsmasq-proxy renders itself.
 // Why: router, DNS, domain and NTP; search stays custom.
 // From: Issue #1683 | PR #1912
