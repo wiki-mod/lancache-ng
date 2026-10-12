@@ -3773,7 +3773,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     // From: Issue #1683 | PR #1912
     let server_values = [
         ("NGINX_DIR", dir.display().to_string()),
-        ("NGINX_CERT_DIR", cert_dir.display().to_string()),
+        ("NGINX_SUBDIR_CERTS", ctx.need("NGINX_SUBDIR_CERTS")?),
         ("NGINX_HTTPS_LISTEN_FILE", listen_file.clone()),
     ];
     for (template, out, on) in [

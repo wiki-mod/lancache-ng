@@ -98,7 +98,6 @@ services:
       - dir=@NGINX_DIR@/@NGINX_SUBDIR_CA@
       - dir=@NGINX_DIR@/@NGINX_SUBDIR_CERTS@
       - dir=@NGINX_CACHE_DIR@
-      - dir=/var/cache/nginx/tmp
     final_base: alpine
     # What: final-image apk packages; nginx from nginx.org.
     # Why: AG-KD-007: stream module only in nginx.org build.
