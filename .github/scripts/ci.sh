@@ -71,7 +71,7 @@ declare -A CI_DISPATCH=(
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
     [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog
     [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
-    [welcome]=ci_cmd_welcome [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config
+    [welcome]=ci_cmd_welcome [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
 )
 
 # What: check name -> "scope function" for ci.sh check.
@@ -7630,16 +7630,11 @@ _ci_register_secondary() {
     printf '%s' "${out%$'\n'*}"
 }
 
-# What: the ui's token file path from its running env
-# Why: the ui reads it from env; CI asks it, never copies
+# What: the ui's token file path, a SOT runtime default
+# Why: the ui reads it from the SOT list, not a process env
 # From: Issue #583 | PR #1905
 _ci_validate_ui_token_file() {
-    local cid="$1" tf
-    if ! tf="$(_ci_capture 0 docker exec "${cid}" printenv SECONDARY_REGISTRATION_TOKEN_FILE)" || [ -z "${tf//$'\n'/}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0112]" "container=\"${cid}\" reason=\"no SECONDARY_REGISTRATION_TOKEN_FILE value in the ui env (raw above if any)\""
-        return 2
-    fi
-    printf '%s\n' "${tf//$'\n'/}"
+    _ci_runtime_default SECONDARY_REGISTRATION_TOKEN_FILE
 }
 
 # What: Prove each secondary gets unique identity.
@@ -7653,7 +7648,7 @@ _ci_validate_secondary_identity() {
         ci_log "[CI-ERROR-VALIDATE-0045]" "reason=\"no ui container/IP for secondary-identity check\""
         return 2
     fi
-    tf="$(_ci_validate_ui_token_file "${cid}")" || return 2
+    tf="$(_ci_validate_ui_token_file)" || return 2
     # What: token as the ui resolves it: its file, else env.
     # Why: no file when the ui got a real token via env.
     # From: Issue #583 | PR #1858
@@ -9184,6 +9179,1295 @@ ci_cmd_docker_daemon_config() {
         restart) _ci_daemon_restart "${file}" ;;
         *)
             ci_log "[CI-ERROR-DAEMON-0007]" "mode=\"${mode}\" reason=\"unknown mode\" known=\"check stage apply restart\""
+            return 2
+            ;;
+    esac
+}
+
+# =========================================================
+# RUNNER HOST: CLEANUP AND UNITS (AG-CI-016)
+# =========================================================
+
+# What: run a command as root; sudo -n unless root already.
+# Why: runner hosts run ci.sh as the runner user.
+# From: Issue #1622 | PR #1624
+_ci_rh_root() {
+    if [ "${EUID}" -eq 0 ]; then
+        "$@"
+    else
+        sudo -n "$@"
+    fi
+}
+
+# What: epoch seconds of a docker timestamp; rc 1 if none.
+# Why: the age checks key on .Created, never on StartedAt.
+# From: Issue #1095 | PR #1426
+_ci_rh_epoch() {
+    local stamp="${1% UTC}" out
+    out="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0001]" "stamp=\"${stamp}\" reason=\"timestamp not parsed\"" date -d "${stamp}" +%s)" || return 2
+    [ -n "${out}" ] || return 1
+    printf '%s\n' "${out}"
+}
+
+# What: remove running containers of one kind past an age.
+# Why: .Created survives a daemon restart; StartedAt resets.
+# From: Issue #1095 | PR #1426
+_ci_rh_reap_containers() {
+    local label="$1" field="$2" pattern="$3" hours="$4"
+    local before ids rows id image name project created value epoch rc=0
+    local -a idl
+    before=$(( $(date +%s) - hours * 3600 ))
+    printf -- '--- reap orphaned %s containers older than %sh ---\n' "${label}" "${hours}"
+    ids="$(_ci_capture 0 docker ps -q)" || return 2
+    [ -n "${ids}" ] || return 0
+    mapfile -t idl <<< "${ids}"
+    rows="$(_ci_capture 0 docker inspect --format '{{.Id}}|{{.Config.Image}}|{{.Name}}|{{index .Config.Labels "com.docker.compose.project"}}|{{.Created}}' "${idl[@]}")" || return 2
+    while IFS='|' read -r id image name project created; do
+        case "${field}" in
+            image) value="${image}" ;;
+            name) value="${name#/}" ;;
+            project) value="${project}" ;;
+            *) return 2 ;;
+        esac
+        [[ "${value}" == *"${pattern}"* ]] || continue
+        epoch="$(_ci_rh_epoch "${created}")" || continue
+        [ "${epoch}" -lt "${before}" ] || continue
+        printf 'reaping hung %s container %s (%s=%s, created %s)\n' "${label}" "${id}" "${field}" "${value}" "${created}"
+        _ci_run "[CI-ERROR-RUNNER-0002]" "container=\"${id}\" reason=\"container not removed\"" docker rm -f "${id}" >/dev/null || rc=2
+    done <<< "${rows}"
+    return "${rc}"
+}
+
+# What: remove empty networks of a name past an age.
+# Why: an empty network may be mid-bringup, so age decides.
+# From: Issue #1095 | PR #1426
+_ci_rh_reap_networks() {
+    local match="$1" hours="$2" before names name row count created epoch rc=0
+    before=$(( $(date +%s) - hours * 3600 ))
+    printf -- '--- reap empty networks named %s older than %sh ---\n' "${match}" "${hours}"
+    names="$(_ci_capture 0 docker network ls --filter "name=${match}" --format '{{.Name}}')" || return 2
+    while IFS= read -r name; do
+        [ -n "${name}" ] || continue
+        row="$(_ci_capture 0 docker network inspect "${name}" --format '{{len .Containers}}|{{.Created}}')" || { rc=2; continue; }
+        count="${row%%|*}" created="${row#*|}"
+        [ "${count}" = 0 ] || continue
+        epoch="$(_ci_rh_epoch "${created}")" || continue
+        [ "${epoch}" -lt "${before}" ] || continue
+        printf 'reaping empty network %s (created %s)\n' "${name}" "${created}"
+        _ci_run "[CI-ERROR-RUNNER-0003]" "network=\"${name}\" reason=\"network not removed\"" docker network rm "${name}" >/dev/null || rc=2
+    done <<< "${names}"
+    return "${rc}"
+}
+
+# What: remove volumes that no container references.
+# Why: AG-CI-016: unreferenced volumes fill the runner disk.
+# From: Issue #1255 | PR #1349
+_ci_rh_prune_volumes() {
+    local vols vol users rc=0
+    printf -- '--- remove unreferenced volumes ---\n'
+    vols="$(_ci_capture 0 docker volume ls -q)" || return 2
+    while IFS= read -r vol; do
+        [ -n "${vol}" ] || continue
+        users="$(_ci_capture 0 docker ps -a --filter "volume=${vol}" -q)" || { rc=2; continue; }
+        [ -z "${users}" ] || continue
+        _ci_run "[CI-ERROR-RUNNER-0004]" "volume=\"${vol}\" reason=\"volume not removed\"" docker volume rm "${vol}" >/dev/null || rc=2
+    done <<< "${vols}"
+    return "${rc}"
+}
+
+# What: remove CI 1.x Trivy cache dirs past an age.
+# Why: they persist once their branch stops scanning.
+# From: Issue #1255 | PR #1334
+_ci_rh_reap_trivy() {
+    local root days dirs dir rc=0
+    root="$(_ci_rh_val trivy_leftover_root)" || return 2
+    days="$(_ci_rh_val trivy_leftover_days)" || return 2
+    printf -- '--- reap Trivy cache dirs under %s older than %sd ---\n' "${root}" "${days}"
+    [ -d "${root}" ] || { printf '(no %s on this host, skipping)\n' "${root}"; return 0; }
+    # What: -mmin, not -mtime; -mtime floors to whole days.
+    # Why: the age threshold must be exact.
+    # From: Issue #1255 | PR #1334
+    dirs="$(_ci_capture 0 find "${root}" -mindepth 1 -maxdepth 1 -type d -mmin "+$(( days * 1440 ))")" || return 2
+    while IFS= read -r dir; do
+        [ -n "${dir}" ] || continue
+        printf 'reaping stale Trivy cache dir %s\n' "${dir}"
+        _ci_run "[CI-ERROR-RUNNER-0111]" "dir=\"${dir}\" reason=\"cache dir not removed\"" _ci_rh_root rm -rf -- "${dir}" || rc=2
+    done <<< "${dirs}"
+    return "${rc}"
+}
+
+# What: the cleanup run: reap, prune, measure before/after.
+# Why: AG-CI-016: measure, clean, re-measure, verify.
+# From: Issue #1255 | PR #1349
+_ci_rh_cleanup_run() {
+    local prefix before after rc=0 kb
+    local bt_hours val_hours bx_hours bt_match bx_match
+    bt_hours="$(_ci_rh_val reap_build_tools_hours)" || return 2
+    bt_match="$(_ci_rh_val build_tools_match)" || return 2
+    val_hours="$(_ci_rh_val reap_validation_hours)" || return 2
+    bx_hours="$(_ci_rh_val reap_buildx_hours)" || return 2
+    bx_match="$(_ci_rh_val buildx_match)" || return 2
+    prefix="$(_ci_validate_project "")" || return 2
+    printf '=== %s runner-host cleanup start ===\n--- disk usage before cleanup ---\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    before="$(_ci_capture 0 df -P /)" || return 2
+    printf '%s\n' "${before}"
+    before="$(awk 'NR == 2 { print $3 }' <<<"${before}")"
+    _ci_rh_reap_containers build-tools image "${bt_match}" "${bt_hours}" || rc=2
+    _ci_rh_reap_containers validation project "${prefix}" "${val_hours}" || rc=2
+    _ci_rh_reap_networks "${prefix}" "${val_hours}" || rc=2
+    _ci_rh_reap_containers buildx-builder name "${bx_match}" "${bx_hours}" || rc=2
+    _ci_rh_reap_trivy || rc=2
+    printf -- '--- prune stopped containers, build cache, images ---\n'
+    _ci_run "[CI-ERROR-RUNNER-0005]" "reason=\"container prune failed\"" docker container prune -f || rc=2
+    _ci_run "[CI-ERROR-RUNNER-0006]" "reason=\"builder prune failed\"" docker builder prune -af || rc=2
+    _ci_run "[CI-ERROR-RUNNER-0007]" "reason=\"image prune failed\"" docker image prune -af || rc=2
+    _ci_rh_prune_volumes || rc=2
+    after="$(_ci_capture 0 df -P /)" || return 2
+    printf -- '--- disk usage after cleanup ---\n%s\n' "${after}"
+    after="$(awk 'NR == 2 { print $3 }' <<<"${after}")"
+    kb=$(( before - after ))
+    printf 'reclaimed: %s KiB (%s MiB) on /\n=== %s runner-host cleanup done rc=%s ===\n' "${kb}" "$(( kb / 1024 ))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${rc}"
+    return "${rc}"
+}
+
+# What: cleanup mode: rotate the log, run into the log.
+# Why: a timer run has no terminal; the log is its record.
+# From: Issue #1255 | PR #1349
+_ci_rh_cleanup() {
+    local log max size rc=0
+    log="$(_ci_rh_val cleanup_log)" || return 2
+    max="$(_ci_rh_val cleanup_log_max_bytes)" || return 2
+    if [ -f "${log}" ]; then
+        size="$(_ci_capture 0 stat -c%s "${log}")" || return 2
+        if [ "${size}" -gt "${max}" ]; then
+            _ci_capture 0 tail -c "${max}" "${log}" > "${log}.tmp" && mv "${log}.tmp" "${log}" || return 2
+        fi
+    fi
+    _ci_rh_cleanup_run >> "${log}" 2>&1 || rc=$?
+    [ "${rc}" -eq 0 ] || ci_log "[CI-ERROR-RUNNER-0008]" "log=\"${log}\" rc=${rc} reason=\"cleanup run reported failures; see the log\""
+    return "${rc}"
+}
+
+# What: the systemd service unit text of the cleanup run.
+# Why: units are generated from ci.sh, never copied by hand.
+# From: Issue #1255 | PR #1349
+_ci_rh_service_text() {
+    local repo
+    repo="$(_ci_repo)" || return 2
+    printf '[Unit]\nDescription=lancache-ng CI runner host docker cleanup\nAfter=docker.service\nRequires=docker.service\n\n[Service]\nType=oneshot\nEnvironment=GITHUB_REPOSITORY=%s\nExecStart=/usr/bin/env bash %s/ci.sh runner-host cleanup\n' "${repo}" "${CI_SCRIPT_DIR}"
+}
+
+# What: the systemd timer unit text of the cleanup run.
+# Why: schedule values come from the SOT variables.
+# From: Issue #1255 | PR #1349
+_ci_rh_timer_text() {
+    local calendar delay
+    calendar="$(_ci_rh_val timer_calendar)" || return 2
+    delay="$(_ci_rh_val timer_delay)" || return 2
+    printf '[Unit]\nDescription=Daily lancache-ng CI runner host docker cleanup\n\n[Timer]\nOnCalendar=%s\nRandomizedDelaySec=%s\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n' "${calendar}" "${delay}"
+}
+
+# What: install the cleanup service and timer, enable it.
+# Why: all runner hosts run the same versioned cleanup.
+# From: Issue #1255 | PR #1349
+_ci_rh_units() {
+    local dir name text
+    dir="$(_ci_rh_val unit_dir)" || return 2
+    name="$(_ci_rh_val unit_name)" || return 2
+    text="$(_ci_rh_service_text)" || return 2
+    printf '%s\n' "${text}" | _ci_rh_root tee "${dir}/${name}.service" >/dev/null || return 2
+    text="$(_ci_rh_timer_text)" || return 2
+    printf '%s\n' "${text}" | _ci_rh_root tee "${dir}/${name}.timer" >/dev/null || return 2
+    _ci_run "[CI-ERROR-RUNNER-0009]" "reason=\"systemctl daemon-reload failed\"" _ci_rh_root systemctl daemon-reload || return 2
+    _ci_run "[CI-ERROR-RUNNER-0010]" "timer=\"${name}.timer\" reason=\"timer not enabled\"" _ci_rh_root systemctl enable --now "${name}.timer" || return 2
+    printf 'Installed and enabled %s.timer in %s\n' "${name}" "${dir}"
+}
+
+# =========================================================
+# RUNNER HOST: IDENTITY, CLONE CLEAN, HOST PREP, RUNNER SETUP
+# =========================================================
+
+# What: one runner_host SOT value; an empty one is an error.
+# Why: no value lives in code; the SOT owns every one.
+# From: Issue #1622 | PR #1624
+_ci_rh_val() {
+    local v
+    v="$(_ci_block_entry_field runner_host "" "$1")" || return 2
+    if [ -z "${v}" ]; then
+        ci_log "[CI-ERROR-RUNNER-0011]" "key=\"$1\" reason=\"not in the SOT runner_host block\""
+        return 2
+    fi
+    printf '%s' "${v}"
+}
+
+# What: primary group of the runner account, else its name.
+# Why: a configured account may not share its group name.
+# From: Issue #1622 | PR #1624
+_ci_rh_group() {
+    local out
+    out="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0012]" "user=\"$1\" reason=\"group lookup failed\"" id -gn "$1")" || return 2
+    printf '%s' "${out:-$1}"
+}
+
+# What: last digit run of the hostname, or nothing.
+# Why: a clone keeps the old hostname; the IP octet differs.
+# From: Issue #1622 | PR #1624
+_ci_rh_host_token() {
+    local host
+    host="$(_ci_capture 0 hostname)" || return 2
+    [[ "${host}" =~ ([0-9]+)[^0-9]*$ ]] || return 0
+    printf '%s' "${BASH_REMATCH[1]}"
+}
+
+# What: the IPv4 that routes to 1.1.1.1, or nothing.
+# Why: no route is a normal answer on an isolated host.
+# From: Issue #1622 | PR #1624
+_ci_rh_ipv4() {
+    local out
+    out="$(_ci_run -m 2 "[CI-ERROR-RUNNER-0013]" "reason=\"route lookup failed\"" ip -4 route get 1.1.1.1)" || return 2
+    [[ "${out}" =~ src\ ([0-9.]+) ]] || return 0
+    printf '%s' "${BASH_REMATCH[1]}"
+}
+
+# What: the last octet of the primary IPv4, or nothing.
+# Why: a clone copies the hostname but not the live IP.
+# From: Issue #1622 | PR #1624
+_ci_rh_ip_token() {
+    local ip
+    ip="$(_ci_rh_ipv4)" || return 2
+    [ -z "${ip}" ] || printf '%s' "${ip##*.}"
+}
+
+# What: the fleet host number of a runner name, or nothing.
+# Why: a loose match could pick the instance suffix.
+# From: Issue #1622 | PR #1624
+_ci_rh_fleet_number() {
+    local pats pat
+    pats="$(_ci_block_entry_list runner_host "" fleet_name_patterns)" || return 2
+    while IFS= read -r pat; do
+        [ -n "${pat}" ] || continue
+        if [[ "$1" =~ ${pat} ]]; then
+            printf '%s' "${BASH_REMATCH[1]}"
+            return 0
+        fi
+    done <<< "${pats}"
+    return 0
+}
+
+# What: rc 0 foreign, 1 own or unregistered, 2 ambiguous.
+# Why: rc 2 must never be reported as own or removed.
+# From: Issue #1622 | PR #1624
+_ci_rh_foreign_dir() {
+    local dir="$1" agent found htok itok mine
+    if [ ! -f "${dir}/.runner" ]; then
+        # What: credentials but no .runner mean foreign.
+        # Why: fail closed; no private key material is left.
+        # From: Issue #1622 | PR #1624
+        if [ -f "${dir}/.credentials" ] || [ -f "${dir}/.credentials_rsaparams" ]; then
+            ci_log "[CI-NOTICE-RUNNER-0014]" "dir=\"${dir}\" reason=\"credentials but no .runner; treated as foreign\""
+            return 0
+        fi
+        return 1
+    fi
+    if ! command -v jq >/dev/null; then
+        ci_log "[CI-NOTICE-RUNNER-0015]" "dir=\"${dir}\" reason=\"jq missing; identity unprovable, treated as foreign\""
+        return 0
+    fi
+    agent="$(_ci_run -m 5 "[CI-ERROR-RUNNER-0016]" "file=\"${dir}/.runner\" reason=\"jq failed\"" jq -r '.agentName // empty' "${dir}/.runner")" || return 2
+    found=""
+    [ -z "${agent}" ] || found="$(_ci_rh_fleet_number "${agent}")" || return 2
+    if [ -z "${found}" ]; then
+        ci_log "[CI-NOTICE-RUNNER-0017]" "dir=\"${dir}\" agent=\"${agent}\" reason=\"no known fleet name; treated as foreign\""
+        return 0
+    fi
+    htok="$(_ci_rh_host_token)" || return 2
+    itok="$(_ci_rh_ip_token)" || return 2
+    if [ -z "${htok}" ] && [ -z "${itok}" ]; then
+        ci_log "[CI-NOTICE-RUNNER-0018]" "dir=\"${dir}\" reason=\"own identity unknown; treated as foreign\""
+        return 0
+    fi
+    if [ -n "${htok}" ] && [ -n "${itok}" ] && [ "${htok}" != "${itok}" ]; then
+        if [ "${found}" = "${htok}" ] || [ "${found}" = "${itok}" ]; then
+            ci_log "[CI-NOTICE-RUNNER-0019]" "dir=\"${dir}\" host=\"${htok}\" ip=\"${itok}\" reason=\"own identity ambiguous; not classified\""
+            return 2
+        fi
+        return 0
+    fi
+    mine="${itok:-${htok}}"
+    [ "${found}" != "${mine}" ]
+}
+
+# What: runner instance dirs below the opt root, sorted.
+# Why: each actions-runner* dir may be a clone leftover.
+# From: Issue #1622 | PR #1624
+_ci_rh_runner_dirs() {
+    local root out
+    root="$(_ci_rh_val opt_root)" || return 2
+    out="$(_ci_capture 0 find "${root}" -maxdepth 1 -type d -name 'actions-runner*')" || return 2
+    [ -z "${out}" ] || sort <<< "${out}"
+}
+
+# What: stray archives at or above the size threshold.
+# Why: leftovers of 6.7 and 14.3 GB were confirmed.
+# From: Issue #1622 | PR #1624
+_ci_rh_stray_archives() {
+    local root min out
+    root="$(_ci_rh_val opt_root)" || return 2
+    min="$(_ci_rh_val stray_archive_min_bytes)" || return 2
+    out="$(_ci_capture 0 find "${root}" -maxdepth 1 -type f '(' -name '*.tgz' -o -name '*.tar.gz' ')' -size "+${min}c")" || return 2
+    [ -z "${out}" ] || sort <<< "${out}"
+}
+
+# What: actions.runner units that run from one dir.
+# Why: a disk clone copies the source's enabled unit.
+# From: Issue #1622 | PR #1624
+_ci_rh_runner_units() {
+    local dir="$1" udir unit
+    udir="$(_ci_rh_val unit_dir)" || return 2
+    [ -d "${udir}" ] || return 0
+    for unit in "${udir}"/actions.runner.*.service; do
+        [ -e "${unit}" ] || continue
+        if _ci_run -m 1 "[CI-ERROR-RUNNER-0020]" "unit=\"${unit}\" reason=\"unit unreadable\"" grep -qE "^(WorkingDirectory|ExecStart)=${dir}(/|\$)" "${unit}"; then
+            printf '%s\n' "${unit##*/}"
+        fi
+    done
+}
+
+# What: stop and disable a unit; fail while it is active.
+# Why: a live process must not outlive its directory.
+# From: Issue #1622 | PR #1624
+_ci_rh_stop_unit() {
+    printf '  stopping and disabling inherited runner service %s\n' "$1"
+    _ci_run "[CI-ERROR-RUNNER-0021]" "unit=\"$1\" reason=\"stop failed\"" _ci_rh_root systemctl stop "$1" || return 2
+    _ci_run "[CI-ERROR-RUNNER-0022]" "unit=\"$1\" reason=\"disable failed\"" _ci_rh_root systemctl disable "$1" || return 2
+    if systemctl is-active --quiet "$1"; then
+        ci_log "[CI-ERROR-RUNNER-0023]" "unit=\"$1\" reason=\"still active; its directory stays\""
+        return 2
+    fi
+}
+
+# What: agentName of a runner dir, "?" if unreadable.
+# Why: the report names the identity a leftover belongs to.
+# From: Issue #1622 | PR #1624
+_ci_rh_agent() {
+    local out=""
+    [ ! -f "$1/.runner" ] || ! command -v jq >/dev/null || out="$(_ci_run -m 5 "[CI-ERROR-RUNNER-0024]" "file=\"$1/.runner\" reason=\"jq failed\"" jq -r '.agentName // empty' "$1/.runner")" || return 2
+    printf '%s' "${out:-?}"
+}
+
+# What: read-only report of clone leftovers and host setup.
+# Why: review first; clean acts only on what check shows.
+# From: Issue #1622 | PR #1624
+_ci_rh_check() {
+    local root user hooks utim dir st agent svc archive size found=0 f groups
+    root="$(_ci_rh_val opt_root)" || return 2
+    user="$(_ci_rh_val user)" || return 2
+    hooks="$(_ci_rh_val hooks_dir)" || return 2
+    utim="$(_ci_rh_val unit_name)" || return 2
+    printf 'Host: %s   own_host_token=%s\n\n--- Runner instance directories under %s ---\n' "$(_ci_capture 0 hostname)" "$(_ci_rh_host_token)" "${root}"
+    while IFS= read -r dir; do
+        [ -n "${dir}" ] || continue
+        found=1
+        st=0
+        _ci_rh_foreign_dir "${dir}" || st=$?
+        agent="$(_ci_rh_agent "${dir}")" || return 2
+        if [ "${st}" -eq 0 ]; then
+            printf '  FOREIGN CLONE ARTIFACT: %s (belongs to: %s)\n' "${dir}" "${agent}"
+            if [ -f "${dir}/.credentials" ] || [ -f "${dir}/.credentials_rsaparams" ]; then
+                printf '    -> carries credential material (private key for that identity)\n'
+            fi
+            while IFS= read -r svc; do
+                [ -z "${svc}" ] || printf '    -> inherited unit %s is stopped and disabled by clean first\n' "${svc}"
+            done <<< "$(_ci_rh_runner_units "${dir}")"
+        elif [ "${st}" -eq 2 ]; then
+            printf '  UNRESOLVED IDENTITY: %s (agentName: %s); hostname and IP disagree, clean skips it\n' "${dir}" "${agent}"
+        elif [ -f "${dir}/.runner" ]; then
+            printf '  own/registered: %s (agentName: %s)\n' "${dir}" "${agent}"
+        else
+            printf '  unregistered (no .runner yet): %s\n' "${dir}"
+        fi
+    done <<< "$(_ci_rh_runner_dirs)"
+    [ "${found}" -eq 1 ] || printf '  (none found)\n'
+    printf '\n--- Stray large archives under %s ---\n' "${root}"
+    found=0
+    while IFS= read -r archive; do
+        [ -n "${archive}" ] || continue
+        found=1
+        size="$(_ci_capture 0 du -h "${archive}")" || return 2
+        printf '  %s (%s)\n' "${archive}" "${size%%$'\t'*}"
+    done <<< "$(_ci_rh_stray_archives)"
+    [ "${found}" -eq 1 ] || printf '  (none found)\n'
+    printf '\n--- Sudoers and docker group for %s ---\n' "${user}"
+    if _ci_rh_root test -f "/etc/sudoers.d/${user}-nopasswd"; then
+        printf '  /etc/sudoers.d/%s-nopasswd: present\n' "${user}"
+    else
+        printf '  /etc/sudoers.d/%s-nopasswd: MISSING\n' "${user}"
+    fi
+    groups=" $(_ci_run -m 1 "[CI-ERROR-RUNNER-0025]" "user=\"${user}\" reason=\"groups lookup failed\"" id -nG "${user}") "
+    if [[ "${groups}" == *" docker "* ]]; then
+        printf '  %s in docker group: yes\n' "${user}"
+    else
+        printf '  %s in docker group: MISSING\n' "${user}"
+    fi
+    printf '\n--- lancache-ci-hooks ---\n'
+    for f in pre-job-cleanup.sh post-job-cleanup.sh; do
+        if [ -f "${hooks}/${f}" ]; then printf '  %s/%s: present\n' "${hooks}" "${f}"; else printf '  %s/%s: MISSING\n' "${hooks}" "${f}"; fi
+    done
+    printf '\n--- %s timer ---\n' "${utim}"
+    if systemctl is-enabled "${utim}.timer" >/dev/null; then
+        printf '  %s.timer: enabled/%s\n' "${utim}" "$(systemctl is-active "${utim}.timer")"
+    else
+        printf '  %s.timer: not installed\n' "${utim}"
+    fi
+    printf '\n--- Disk usage (%s) ---\n' "${root}"
+    _ci_capture 0 df -h "${root}" || return 2
+    printf '\nNo files were changed (check mode).\n'
+}
+
+# What: refuse a destructive mode without its CONFIRM value.
+# Why: read the report before anything is removed.
+# From: Issue #1622 | PR #1624
+_ci_rh_confirmed() {
+    [ "${!1:-}" = yes ] && return 0
+    ci_log "[CI-ERROR-RUNNER-0026]" "var=\"$1\" reason=\"refusing without $1=yes; run the matching check mode first\""
+    return 2
+}
+
+# What: stop units and remove foreign runner dirs.
+# Why: only identity-proven leftovers go; archives stay.
+# From: Issue #1622 | PR #1624
+_ci_rh_clean() {
+    local dir st svc all archive size removed=0 found=0
+    _ci_rh_confirmed CONFIRM_CLEAN || return 2
+    while IFS= read -r dir; do
+        [ -n "${dir}" ] || continue
+        # What: identity is re-checked right before removal.
+        # Why: a dir can change between check and clean.
+        # From: Issue #1622 | PR #1624
+        st=0
+        _ci_rh_foreign_dir "${dir}" || st=$?
+        if [ "${st}" -eq 2 ]; then
+            printf 'SKIPPING %s: identity unresolved; fix the hostname first\n' "${dir}"
+        elif [ "${st}" -eq 0 ]; then
+            all=1
+            while IFS= read -r svc; do
+                [ -z "${svc}" ] || _ci_rh_stop_unit "${svc}" || all=0
+            done <<< "$(_ci_rh_runner_units "${dir}")"
+            if [ "${all}" -eq 0 ]; then
+                printf 'SKIPPING %s: an inherited runner service is not confirmed stopped\n' "${dir}"
+                continue
+            fi
+            printf 'Removing foreign clone artifact: %s\n' "${dir}"
+            _ci_run "[CI-ERROR-RUNNER-0027]" "dir=\"${dir}\" reason=\"directory not removed\"" _ci_rh_root rm -rf -- "${dir}" || return 2
+            removed=1
+        fi
+    done <<< "$(_ci_rh_runner_dirs)"
+    while IFS= read -r archive; do
+        [ -n "${archive}" ] || continue
+        found=1
+        size="$(_ci_capture 0 du -h "${archive}")" || return 2
+        printf 'NOT removed (size and extension cannot prove origin): %s (%s)\n' "${archive}" "${size%%$'\t'*}"
+    done <<< "$(_ci_rh_stray_archives)"
+    [ "${found}" -eq 0 ] || printf 'Review the paths, then: ci.sh runner-host clean-archive <exact-path>...\n'
+    if [ "${removed}" -eq 0 ]; then printf 'Nothing removed by clean.\n'; else printf 'Clean complete. Re-run check to confirm.\n'; fi
+}
+
+# What: remove named stray archives the finder still lists.
+# Why: size and extension cannot prove clone origin.
+# From: Issue #1622 | PR #1624
+_ci_rh_clean_archive() {
+    local cands path removed=0
+    if [ "$#" -eq 0 ]; then
+        ci_log "[CI-ERROR-RUNNER-0028]" "reason=\"clean-archive needs exact paths; see check or clean\""
+        return 2
+    fi
+    cands="$(_ci_rh_stray_archives)" || return 2
+    for path in "$@"; do
+        if grep -qxF -- "${path}" <<< "${cands}"; then
+            printf 'Removing confirmed stray archive: %s\n' "${path}"
+            _ci_run "[CI-ERROR-RUNNER-0029]" "path=\"${path}\" reason=\"archive not removed\"" _ci_rh_root rm -f -- "${path}" || return 2
+            removed=1
+        else
+            printf 'SKIPPING %s: not a current stray archive (wrong path, gone, or below the threshold)\n' "${path}"
+        fi
+    done
+    if [ "${removed}" -eq 1 ]; then printf 'clean-archive complete.\n'; else printf 'Nothing removed.\n'; fi
+}
+
+# What: fail unless sudo works without a prompt.
+# Why: a denied read must not look like no artifacts.
+# From: Issue #1622 | PR #1624
+_ci_rh_need_sudo() {
+    [ "${EUID}" -eq 0 ] && return 0
+    _ci_run "[CI-ERROR-RUNNER-0030]" "reason=\"non-interactive sudo is required for protected paths\"" sudo -n true || return 2
+}
+
+# What: per-account paths of one file kind (root, runner).
+# Why: one list per file kind; check and clean share it.
+# From: Issue #1622 | PR #1624
+_ci_rh_user_paths() {
+    local user root
+    user="$(_ci_rh_val user)" || return 2
+    root="$(_ci_rh_val opt_root)" || return 2
+    printf '%s\n' "/root/$1" "/home/${user}/$1" "${root}/${user}/$1"
+}
+
+# What: history and known_hosts files of root and runner.
+# Why: check reports and clean truncates the same list.
+# From: Issue #1622 | PR #1624
+_ci_rh_state_files() {
+    _ci_rh_user_paths .bash_history || return 2
+    printf '%s\n' /root/.lesshst
+    _ci_rh_user_paths .ssh/known_hosts
+}
+
+# What: rc 0 if an authorized_keys line names another host.
+# Why: removal could lock out access, so it is report-only.
+# From: Issue #1622 | PR #1624
+_ci_rh_foreign_key_line() {
+    local mine found
+    mine="$(_ci_rh_host_token)" || return 2
+    [ -n "${mine}" ] || return 1
+    found="$(_ci_rh_fleet_number "$1")" || return 2
+    [ -n "${found}" ] && [ "${found}" != "${mine}" ]
+}
+
+# What: list the stale journal dirs, one path per line.
+# Why: an empty machine-id would select every journal dir.
+# From: Issue #1622 | PR #1624
+_ci_rh_stale_journals() {
+    local mid out
+    mid="$(_ci_capture 0 cat /etc/machine-id)" || return 2
+    if [ -z "${mid}" ]; then
+        ci_log "[CI-ERROR-RUNNER-0031]" "reason=\"machine-id unreadable; journal sweep skipped\""
+        return 0
+    fi
+    out="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0032]" "reason=\"journal search failed\"" _ci_rh_root find /var/log/journal -mindepth 1 -maxdepth 1 -type d ! -name "${mid}")" || return 2
+    [ -z "${out}" ] || printf '%s\n' "${out}"
+}
+
+# What: list /home dirs with no passwd entry, tagged.
+# Why: a mount or backup is data, not clone residue.
+# From: Issue #1622 | PR #1624
+_ci_rh_orphan_homes() {
+    local out hd
+    out="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0033]" "reason=\"/home search failed\"" _ci_rh_root find /home -mindepth 1 -maxdepth 1 -type d)" || return 2
+    while IFS= read -r hd; do
+        [ -n "${hd}" ] || continue
+        getent passwd "${hd##*/}" >/dev/null && continue
+        if mountpoint -q "${hd}"; then printf 'MOUNTPOINT %s\n' "${hd}"; else printf 'ORPHANED %s\n' "${hd}"; fi
+    done <<< "${out}"
+}
+
+# What: report the hostname against the primary IPv4.
+# Why: only the maintainer's inventory knows the right name.
+# From: Issue #1622 | PR #1624
+_ci_rh_hostname_report() {
+    local ip tok
+    ip="$(_ci_rh_ipv4)" || return 2
+    tok="$(_ci_rh_host_token)" || return 2
+    if [ -z "${ip}" ] || [ -z "${tok}" ]; then
+        printf '  (no primary IPv4 or no numeric hostname token; check skipped)\n'
+    elif [ "${ip##*.}" != "${tok}" ]; then
+        printf '  MISMATCH: hostname %s (token %s) vs primary IPv4 %s; confirm the name, then: ci.sh runner-host set-hostname <name>\n' "$(_ci_capture 0 hostname)" "${tok}" "${ip}"
+    else
+        printf '  OK: hostname token %s matches primary IPv4 %s\n' "${tok}" "${ip}"
+    fi
+}
+
+# What: check /etc/hosts resolves the hostname; fix appends.
+# Why: without it sudo fails: unable to resolve host.
+# From: Issue #1622 | PR #1624
+_ci_rh_hosts_self() {
+    local mode="$1" host active
+    host="$(_ci_capture 0 hostname)" || return 2
+    active="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0034]" "reason=\"/etc/hosts unreadable\"" _ci_rh_root grep -vE '^[[:space:]]*#' /etc/hosts)" || return 2
+    if grep -qE "\\b${host}\\b" <<< "${active}"; then
+        printf '  OK: /etc/hosts resolves hostname %s\n' "${host}"
+        return 0
+    fi
+    printf '  STALE: /etc/hosts has no line resolving hostname %s\n' "${host}"
+    [ "${mode}" = fix ] || return 0
+    # What: append a 127.0.1.1 line; edit no address line.
+    # Why: editing an address line would drop its aliases.
+    # From: Issue #1622 | PR #1624
+    printf '127.0.1.1\t%s\n' "${host}" | _ci_rh_root tee -a /etc/hosts >/dev/null || return 2
+    printf '    fixed: appended a 127.0.1.1 entry\n'
+}
+
+# What: read-only survey of what a disk clone copied.
+# Why: full-reset-clean acts only on what this lists.
+# From: Issue #1622 | PR #1624
+_ci_rh_full_reset_check() {
+    local f ck found mine out line hd mid list
+    _ci_rh_need_sudo || return 2
+    mine="$(_ci_rh_host_token)" || return 2
+    printf 'Host: %s   own_host_token=%s\n\n--- Shell history and known_hosts (size only) ---\n' "$(_ci_capture 0 hostname)" "${mine:-<none>}"
+    list="$(_ci_rh_state_files)" || return 2
+    while IFS= read -r f; do
+        if _ci_rh_root test -s "${f}"; then printf '  %s: truncated by full-reset-clean\n' "${f}"; fi
+    done <<< "${list}"
+    printf '\n--- Private SSH client keys (report only; rotate by hand) ---\n'
+    found=0
+    list="$(_ci_rh_user_paths .ssh)" || return 2
+    while IFS= read -r f; do
+        _ci_rh_root test -d "${f}" || continue
+        out="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0035]" "dir=\"${f}\" reason=\"key search failed\"" _ci_rh_root find "${f}" -maxdepth 1 -type f -name 'id_*' ! -name '*.pub')" || return 2
+        while IFS= read -r ck; do
+            [ -z "${ck}" ] || { found=1; printf '  %s: authenticates as the SOURCE host\n' "${ck}"; }
+        done <<< "${out}"
+    done <<< "${list}"
+    [ "${found}" -eq 1 ] || printf '  (none found)\n'
+    printf '\n--- authorized_keys naming a DIFFERENT fleet host (report only) ---\n'
+    found=0
+    list="$(_ci_rh_user_paths .ssh/authorized_keys)" || return 2
+    while IFS= read -r f; do
+        _ci_rh_root test -f "${f}" || continue
+        out="$(_ci_capture 0 _ci_rh_root cat "${f}")" || return 2
+        while IFS= read -r line; do
+            [ -n "${line}" ] || continue
+            if _ci_rh_foreign_key_line "${line}"; then found=1; printf '  FOREIGN (%s): %s\n' "${f}" "${line}"; fi
+        done <<< "${out}"
+    done <<< "${list}"
+    [ "${found}" -eq 1 ] || printf '  (none found)\n'
+    mid="$(_ci_capture 0 cat /etc/machine-id)" || return 2
+    printf '\n--- Stale journal machine-id dirs (current: %s) ---\n' "${mid:-UNKNOWN}"
+    out="$(_ci_rh_stale_journals)" || return 2
+    if [ -n "${out}" ]; then sed 's/^/  STALE: /' <<< "${out}"; else printf '  (none found)\n'; fi
+    printf '\n--- Orphaned /home directories (report only) ---\n'
+    out="$(_ci_rh_orphan_homes)" || return 2
+    if [ -n "${out}" ]; then sed 's/^/  /' <<< "${out}"; else printf '  (none found)\n'; fi
+    printf '\n--- Template scripts under /root ---\n'
+    found=0
+    list="$(_ci_block_entry_list runner_host "" template_scripts)" || return 2
+    while IFS= read -r f; do
+        if _ci_rh_root test -f "/root/${f}"; then found=1; printf '  /root/%s: removed by full-reset-clean\n' "${f}"; fi
+    done <<< "${list}"
+    [ "${found}" -eq 1 ] || printf '  (none found)\n'
+    printf '\n--- apt/dpkg history naming other fleet hosts (report only) ---\n'
+    out="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0036]" "reason=\"apt history search failed\"" _ci_rh_root bash -c "zgrep -hEo '[a-z]+-lancache-[A-Za-z0-9-]+' /var/log/apt/history.log* /var/log/dpkg.log*")" || return 2
+    found=0
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        hd="$(_ci_rh_fleet_number "${line}")" || return 2
+        if [ -n "${hd}" ] && [ "${hd}" != "${mine}" ]; then found=1; printf '  %s\n' "${line}"; fi
+    done <<< "${out}"
+    [ "${found}" -eq 1 ] || printf '  (none found)\n'
+    printf '\n--- Hostname against primary IPv4 and /etc/hosts ---\n'
+    _ci_rh_hostname_report || return 2
+    _ci_rh_hosts_self check || return 2
+    printf '\n--- Always regenerated by full-reset-clean ---\n  SSH host keys, hostid (%s), machine-id (%s)\n\nNo files were changed (full-reset-check mode).\n' "$(_ci_capture 0 hostid)" "${mid:-?}"
+}
+
+# What: new /etc/hostid and a fresh random machine-id.
+# Why: clones share both ids and cannot detect it.
+# From: Issue #1622 | PR #1624
+_ci_rh_dedupe_identity() {
+    local old new
+    command -v /usr/sbin/zgenhostid >/dev/null || { ci_log "[CI-ERROR-RUNNER-0037]" "reason=\"/usr/sbin/zgenhostid missing\""; return 2; }
+    old="$(_ci_capture 0 cat /etc/machine-id)" || return 2
+    _ci_run "[CI-ERROR-RUNNER-0038]" "reason=\"hostid not removed\"" _ci_rh_root rm -f /etc/hostid || return 2
+    _ci_run "[CI-ERROR-RUNNER-0039]" "reason=\"hostid not generated\"" _ci_rh_root /usr/sbin/zgenhostid -f || return 2
+    _ci_run "[CI-ERROR-RUNNER-0040]" "reason=\"hostid is missing or empty\"" _ci_rh_root test -s /etc/hostid || return 2
+    new="$(_ci_capture 0 od -An -N16 -tx1 /dev/urandom)" || return 2
+    new="${new//[$' \n']/}"
+    printf '%s\n' "${new}" | _ci_rh_root tee /etc/machine-id >/dev/null || return 2
+    _ci_run "[CI-ERROR-RUNNER-0041]" "reason=\"dbus machine-id not relinked\"" _ci_rh_root ln -sf /etc/machine-id /var/lib/dbus/machine-id || return 2
+    _ci_run "[CI-ERROR-RUNNER-0042]" "reason=\"journald not restarted\"" _ci_rh_root systemctl restart systemd-journald || return 2
+    printf '  hostid: %s\n  machine-id: %s -> %s\n' "$(_ci_capture 0 hostid)" "${old}" "${new}"
+}
+
+# What: new SSH host keys, then restart sshd.
+# Why: a disk clone copies the source's server identity.
+# From: Issue #1622 | PR #1624
+_ci_rh_ssh_host_keys() {
+    local pub
+    _ci_run "[CI-ERROR-RUNNER-0043]" "reason=\"old host keys not removed\"" _ci_rh_root bash -c 'rm -f /etc/ssh/ssh_host_*' || return 2
+    _ci_run "[CI-ERROR-RUNNER-0044]" "reason=\"ssh-keygen -A failed; sshd may refuse to start\"" _ci_rh_root ssh-keygen -A || return 2
+    if ! _ci_rh_root systemctl restart ssh && ! _ci_rh_root systemctl restart sshd; then
+        ci_log "[CI-ERROR-RUNNER-0045]" "reason=\"sshd not restarted (units ssh and sshd tried); it serves the OLD keys until restarted\""
+        return 2
+    fi
+    printf '  new host key fingerprints:\n'
+    for pub in /etc/ssh/ssh_host_*.pub; do
+        [ -e "${pub}" ] || continue
+        _ci_run "[CI-ERROR-RUNNER-0046]" "key=\"${pub}\" reason=\"fingerprint not read\"" _ci_rh_root ssh-keygen -lf "${pub}" | sed 's/^/    /'
+    done
+}
+
+# What: act on what full-reset-check marked removable.
+# Why: lockout and audit-trail items stay report-only.
+# From: Issue #1622 | PR #1624
+_ci_rh_full_reset_clean() {
+    local f out jd list
+    _ci_rh_confirmed CONFIRM_FULL_RESET || return 2
+    _ci_rh_need_sudo || return 2
+    list="$(_ci_rh_state_files)" || return 2
+    while IFS= read -r f; do
+        if _ci_rh_root test -f "${f}"; then
+            _ci_run "[CI-ERROR-RUNNER-0047]" "file=\"${f}\" reason=\"not truncated\"" _ci_rh_root truncate -s0 "${f}" || return 2
+            printf 'Truncated %s\n' "${f}"
+        fi
+    done <<< "${list}"
+    printf 'NOTE: an open login shell keeps its own history; run history -c there or reconnect.\n--- hostid and machine-id ---\n'
+    _ci_rh_dedupe_identity || return 2
+    printf '\n--- SSH host keys ---\n'
+    _ci_rh_ssh_host_keys || return 2
+    out="$(_ci_rh_stale_journals)" || return 2
+    while IFS= read -r jd; do
+        [ -n "${jd}" ] || continue
+        printf 'Removing stale journal dir: %s\n' "${jd}"
+        _ci_run "[CI-ERROR-RUNNER-0048]" "dir=\"${jd}\" reason=\"journal dir not removed\"" _ci_rh_root rm -rf -- "${jd}" || return 2
+    done <<< "${out}"
+    list="$(_ci_block_entry_list runner_host "" template_scripts)" || return 2
+    while IFS= read -r f; do
+        if _ci_rh_root test -f "/root/${f}"; then
+            printf 'Removing template-authoring script: /root/%s\n' "${f}"
+            _ci_run "[CI-ERROR-RUNNER-0049]" "file=\"/root/${f}\" reason=\"script not removed\"" _ci_rh_root rm -f -- "/root/${f}" || return 2
+        fi
+    done <<< "${list}"
+    printf -- '--- /etc/hosts self-reference ---\n'
+    _ci_rh_hosts_self fix || return 2
+    printf '\nfull-reset-clean complete. Report only, not touched: orphaned /home dirs, authorized_keys, id_* keys, apt/dpkg history.\n'
+}
+
+# What: set the hostname and its 127.0.1.1 line.
+# Why: the new name is maintainer input, never derived.
+# From: Issue #1622 | PR #1624
+_ci_rh_set_hostname() {
+    local new="${1:-}" old
+    if [ -z "${new}" ]; then
+        ci_log "[CI-ERROR-RUNNER-0050]" "reason=\"set-hostname needs the new hostname\""
+        return 2
+    fi
+    old="$(_ci_capture 0 hostname)" || return 2
+    # What: a retry repairs /etc/hosts, skips hostnamectl.
+    # Why: it must finish a half-applied rename.
+    # From: Issue #1622 | PR #1624
+    if [ "${new}" != "${old}" ]; then
+        printf "Renaming host: '%s' -> '%s'\n" "${old}" "${new}"
+        _ci_run "[CI-ERROR-RUNNER-0051]" "name=\"${new}\" reason=\"hostnamectl failed\"" _ci_rh_root hostnamectl set-hostname "${new}" || return 2
+    fi
+    if _ci_rh_root grep -q '127\.0\.1\.1' /etc/hosts; then
+        _ci_run "[CI-ERROR-RUNNER-0052]" "reason=\"127.0.1.1 line not updated\"" _ci_rh_root sed -i "s/^127\\.0\\.1\\.1[[:space:]].*/127.0.1.1\\t${new}/" /etc/hosts || return 2
+    elif _ci_rh_root grep -qE "^[0-9.]+[[:space:]].*\\b${old}\\b" /etc/hosts; then
+        _ci_run "[CI-ERROR-RUNNER-0053]" "reason=\"stale self line not replaced\"" _ci_rh_root sed -i "s/^[0-9.]\\+[[:space:]].*\\b${old}\\b.*/127.0.1.1\\t${new}/" /etc/hosts || return 2
+    else
+        printf '127.0.1.1\t%s\n' "${new}" | _ci_rh_root tee -a /etc/hosts >/dev/null || return 2
+    fi
+    printf 'Done. Hostname: %s (nothing was rebooted or restarted)\n' "$(_ci_capture 0 hostname)"
+}
+
+# What: the kernel/firmware name parts as one ERE.
+# Why: purge-pve must never touch the boot packages.
+# From: Issue #1622 | PR #1624
+_ci_rh_pve_keep_ere() {
+    local keep
+    keep="$(_ci_block_entry_list runner_host "" pve_keep)" || return 2
+    tr '\n' '|' <<< "${keep}" | sed 's/|$//'
+}
+
+# What: read-only inventory of the nested Proxmox stack.
+# Why: review it before purge-pve removes a live stack.
+# From: Issue #1622 | PR #1624
+_ci_rh_purge_pve_check() {
+    local keep pkgs sim
+    keep="$(_ci_rh_pve_keep_ere)" || return 2
+    mapfile -t pkgs <<< "$(_ci_block_entry_list runner_host "" pve_packages)"
+    printf -- '--- Installed pve/proxmox/corosync/pmxcfs packages ---\n'
+    dpkg -l | { grep -iE '^ii.*(pve-|proxmox-|pmxcfs|corosync)' || printf '  (none found; already clean)\n'; }
+    printf '\n--- Kept regardless (kernel, firmware) ---\n'
+    dpkg -l | { grep -iE "^ii.*(${keep})" || printf '  (none installed)\n'; }
+    printf '\n--- Active pve/proxmox/corosync units ---\n'
+    systemctl list-units --all --type=service,timer --no-pager | { grep -iE 'pve|corosync|proxmox|pmxcfs' | grep -i active || printf '  (none active)\n'; }
+    printf '\n--- /etc/pve mount, fstab and cron dependents ---\n'
+    mount | { grep -i pve || printf '  not currently mounted\n'; }
+    if _ci_rh_root grep -qi pve /etc/fstab; then printf '  FOUND: /etc/fstab references pve\n'; fi
+    printf '\n--- Simulated purge (no kernel or firmware must appear) ---\n'
+    sim="$(_ci_run -m 100 "[CI-ERROR-RUNNER-0054]" "reason=\"simulated purge failed\"" _ci_rh_root apt-get purge --simulate "${pkgs[@]}")" || return 2
+    tail -20 <<< "${sim}"
+    printf '\nNo files were changed (purge-pve-check mode).\n'
+}
+
+# What: stop and purge the nested Proxmox VE stack.
+# Why: a leftover stack from the template holds RAM and CPU.
+# From: Issue #1622 | PR #1624
+_ci_rh_purge_pve() {
+    local keep pkgs svcs sim rem procs bad
+    _ci_rh_confirmed CONFIRM_PURGE_PVE || return 2
+    keep="$(_ci_rh_pve_keep_ere)" || return 2
+    mapfile -t pkgs <<< "$(_ci_block_entry_list runner_host "" pve_packages)"
+    mapfile -t svcs <<< "$(_ci_block_entry_list runner_host "" pve_services)"
+    # What: re-simulate; refuse when a boot package is hit.
+    # Why: the package set can drift as host images change.
+    # From: Issue #1622 | PR #1624
+    sim="$(_ci_run -m 100 "[CI-ERROR-RUNNER-0055]" "reason=\"simulated purge failed\"" _ci_rh_root apt-get purge --simulate "${pkgs[@]}")" || return 2
+    if grep -qiE "${keep}" <<< "${sim}"; then
+        ci_log "[CI-ERROR-RUNNER-0056]" "reason=\"the simulated purge touches a kernel or firmware package; refusing\""
+        return 2
+    fi
+    printf 'Stopping pve/proxmox/corosync services...\n'
+    _ci_run -m 5 "[CI-ERROR-RUNNER-0057]" "reason=\"services not stopped\"" _ci_rh_root systemctl stop "${svcs[@]}" || return 2
+    # What: set the pve-apt-hook override; always remove it.
+    # Why: apt refuses to remove proxmox-ve otherwise.
+    # From: Issue #1622 | PR #1624
+    _ci_rh_root touch /please-remove-proxmox-ve || return 2
+    _ci_rh_pve_purge_run "${keep}" "${pkgs[@]}" || { _ci_rh_root rm -f /please-remove-proxmox-ve; return 2; }
+    _ci_rh_root rm -f /please-remove-proxmox-ve || return 2
+    rem="$(dpkg -l | { grep -iE '^ii.*(pve-|proxmox-|pmxcfs|corosync)' || true; })"
+    bad="$(grep -viE "${keep}" <<< "${rem}" || true)"
+    procs="$(ps -eo pid,args | { grep -E 'pve|pmxcfs|corosync|spiceproxy|qmeventd' || true; } | awk -v self="$$" '$1 != self && $0 !~ /grep|awk/')"
+    printf -- '--- Verification ---\nRemaining packages (kernel/firmware only expected):\n%s\nRemaining processes (none expected):\n%s\n' "${rem:-  (none)}" "${procs:-  (none)}"
+    if [ -n "${bad}" ] || [ -n "${procs}" ]; then
+        ci_log "[CI-ERROR-RUNNER-0058]" "reason=\"purge-pve did not remove the whole stack\""
+        return 2
+    fi
+    printf 'purge-pve complete. Next: check docker, network and the runner, then a real reboot test.\n'
+}
+
+# What: purge the packages, then a guarded autoremove.
+# Why: autoremove may hit PVE dependencies only.
+# From: Issue #1622 | PR #1624
+_ci_rh_pve_purge_run() {
+    local keep="$1" sim bad
+    shift
+    _ci_run "[CI-ERROR-RUNNER-0059]" "reason=\"apt-get purge failed\"" _ci_rh_root env DEBIAN_FRONTEND=noninteractive apt-get purge -y "$@" || return 2
+    sim="$(_ci_run "[CI-ERROR-RUNNER-0060]" "reason=\"simulated autoremove failed\"" _ci_rh_root env DEBIAN_FRONTEND=noninteractive apt-get autoremove --simulate)" || return 2
+    bad="$(grep -E '^Remv ' <<< "${sim}" | grep -viE 'pve-|proxmox-|libpve-|libproxmox-|pmxcfs|corosync|spice' || true)"
+    if [ -n "${bad}" ] || grep -qiE "${keep}" <<< "${sim}"; then
+        ci_log "[CI-ERROR-RUNNER-0061]" "reason=\"autoremove would remove packages outside the PVE set or a boot package; run it by hand if intended\""
+        printf '%s\n' "${sim}" >&2
+        return 2
+    fi
+    _ci_run "[CI-ERROR-RUNNER-0062]" "reason=\"apt-get autoremove failed\"" _ci_rh_root env DEBIAN_FRONTEND=noninteractive apt-get autoremove -y
+}
+
+# What: text of the job-started hook (owner reset).
+# Why: a killed job leaves files checkout cannot delete.
+# From: Issue #1622 | PR #1624
+_ci_rh_hook_pre_text() {
+    cat <<'EOF'
+#!/bin/bash
+# What: resets the workspace owner at job start.
+# Why: a killed job leaves files checkout cannot remove.
+set -euo pipefail
+if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "${GITHUB_WORKSPACE}" ]; then
+    if sudo -n chown -R "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}" 2>/dev/null; then
+        echo "[pre-job-hook] reset ownership of ${GITHUB_WORKSPACE}"
+    else
+        echo "[pre-job-hook] WARNING: ownership of ${GITHUB_WORKSPACE} not reset (sudo unavailable)"
+    fi
+fi
+EOF
+}
+
+# What: text of the job-done hook (net, owner reset).
+# Why: a cancelled job skips its own teardown step.
+# From: Issue #1622 | PR #1624
+_ci_rh_hook_post_text() {
+    local text
+    text="$(cat <<'EOF'
+#!/bin/bash
+# What: removes orphaned validate nets, resets the owner.
+# Why: a killed job leaves a network and foreign files.
+# Only networks with ZERO containers older than the grace
+# window go: a sibling runner may be bringing its own up now.
+set -euo pipefail
+MIN_AGE=@MIN_AGE@
+nets=$(docker network ls --filter name=@PREFIX@ --format '{{.Name}}')
+while IFS= read -r net; do
+    [ -n "$net" ] || continue
+    containers=$(docker network inspect "$net" --format '{{len .Containers}}' 2>/dev/null || echo "0")
+    if [ "$containers" -ne 0 ]; then
+        echo "[cleanup-hook] leaving $net alone, $containers container(s) attached"
+        continue
+    fi
+    created=$(docker network inspect "$net" --format '{{.Created}}' 2>/dev/null || echo "")
+    created_epoch=$(date -d "$created" +%s 2>/dev/null || echo "0")
+    age=$(( $(date +%s) - created_epoch ))
+    if [ "$created_epoch" -eq 0 ] || [ "$age" -lt "$MIN_AGE" ]; then
+        echo "[cleanup-hook] leaving $net alone, created ${age}s ago (grace ${MIN_AGE}s)"
+        continue
+    fi
+    echo "[cleanup-hook] removing orphaned validate network: $net"
+    docker network rm "$net" || echo "[cleanup-hook] WARNING: failed to remove $net"
+done <<< "$nets"
+# Scoped to this job's workspace only: sibling runners share
+# this host. Best effort; never fails the job it cleans up after.
+if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "${GITHUB_WORKSPACE}" ]; then
+    if sudo -n chown -R "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}" 2>/dev/null; then
+        echo "[cleanup-hook] reset ownership of ${GITHUB_WORKSPACE}"
+    else
+        echo "[cleanup-hook] WARNING: ownership of ${GITHUB_WORKSPACE} not reset (sudo unavailable)"
+    fi
+fi
+EOF
+)"
+    text="${text//@MIN_AGE@/$(_ci_rh_val hook_network_min_age)}"
+    text="${text//@PREFIX@/$(_ci_validate_project "")}"
+    printf '%s\n' "${text}"
+}
+
+# What: install both job hooks owned by the runner account.
+# Why: the runner env wires them to job start and finish.
+# From: Issue #1622 | PR #1624
+_ci_rh_hooks() {
+    local dir user group text
+    dir="$(_ci_rh_val hooks_dir)" || return 2
+    user="$(_ci_rh_val user)" || return 2
+    group="$(_ci_rh_group "${user}")" || return 2
+    _ci_run "[CI-ERROR-RUNNER-0063]" "dir=\"${dir}\" reason=\"hooks dir not created\"" _ci_rh_root mkdir -p "${dir}" || return 2
+    text="$(_ci_rh_hook_pre_text)" || return 2
+    printf '%s\n' "${text}" | _ci_rh_root tee "${dir}/pre-job-cleanup.sh" >/dev/null || return 2
+    text="$(_ci_rh_hook_post_text)" || return 2
+    printf '%s\n' "${text}" | _ci_rh_root tee "${dir}/post-job-cleanup.sh" >/dev/null || return 2
+    _ci_run "[CI-ERROR-RUNNER-0064]" "dir=\"${dir}\" reason=\"hooks not owned by the runner account\"" _ci_rh_root chown "${user}:${group}" "${dir}/pre-job-cleanup.sh" "${dir}/post-job-cleanup.sh" || return 2
+    _ci_run "[CI-ERROR-RUNNER-0065]" "dir=\"${dir}\" reason=\"hooks not executable\"" _ci_rh_root chmod 0755 "${dir}/pre-job-cleanup.sh" "${dir}/post-job-cleanup.sh" || return 2
+    printf 'Installed %s/{pre,post}-job-cleanup.sh\n' "${dir}"
+}
+
+# What: the sudoers rule and docker group of the runner.
+# Why: the hooks need the exact NOPASSWD grant and docker.
+# From: Issue #1622 | PR #1624
+_ci_rh_access() {
+    local user="$1" file rule groups cur
+    file="/etc/sudoers.d/${user}-nopasswd"
+    rule="${user} ALL=(ALL) NOPASSWD:ALL"
+    if _ci_rh_root test -f "${file}"; then
+        cur="$(_ci_capture 0 _ci_rh_root cat "${file}")" || return 2
+        if [ "${cur}" != "${rule}" ] || ! _ci_rh_root visudo -cf "${file}" >/dev/null; then
+            ci_log "[CI-ERROR-RUNNER-0066]" "file=\"${file}\" reason=\"exists without exactly the expected rule or fails visudo; fix it by hand\""
+            return 2
+        fi
+        printf '%s already holds the expected rule.\n' "${file}"
+    else
+        printf '%s\n' "${rule}" | _ci_rh_root tee "${file}" >/dev/null || return 2
+        _ci_run "[CI-ERROR-RUNNER-0067]" "file=\"${file}\" reason=\"mode not set\"" _ci_rh_root chmod 0440 "${file}" || return 2
+        if ! _ci_rh_root visudo -cf "${file}"; then
+            _ci_rh_root rm -f "${file}"
+            ci_log "[CI-ERROR-RUNNER-0068]" "file=\"${file}\" reason=\"visudo rejected the rule; removed\""
+            return 2
+        fi
+        printf 'Installed %s\n' "${file}"
+    fi
+    groups=" $(_ci_run -m 1 "[CI-ERROR-RUNNER-0069]" "user=\"${user}\" reason=\"groups lookup failed\"" id -nG "${user}") "
+    if [[ "${groups}" == *" docker "* ]]; then
+        printf '%s is already in the docker group.\n' "${user}"
+    else
+        _ci_run "[CI-ERROR-RUNNER-0070]" "user=\"${user}\" reason=\"docker group not granted\"" _ci_rh_root usermod -aG docker "${user}" || return 2
+        printf 'Added %s to the docker group (next login).\n' "${user}"
+    fi
+}
+
+# What: write trixie-backports files, then upgrade.
+# Why: the pin must use a=stable-backports, not a name.
+# From: Issue #1622 | PR #1624
+_ci_rh_backports() {
+    local suite code list pref want_list want_pref
+    suite="$(_ci_rh_val debian_suite)" || return 2
+    code="$(_ci_capture 0 bash -c '. /etc/os-release; printf %s "${VERSION_CODENAME:-}"')" || return 2
+    if [ "${code}" != "${suite}" ]; then
+        ci_log "[CI-ERROR-RUNNER-0071]" "codename=\"${code:-unknown}\" want=\"${suite}\" reason=\"backports only for the configured suite\""
+        return 2
+    fi
+    list="/etc/apt/sources.list.d/backports.list"
+    pref="/etc/apt/preferences.d/backports"
+    want_list="deb http://deb.debian.org/debian ${suite}-backports main"
+    want_pref=$'Package: *\nPin: release a=stable-backports\nPin-Priority: 500'
+    if [ "$(_ci_run -m 1 "[CI-ERROR-RUNNER-0072]" "file=\"${list}\" reason=\"unreadable\"" _ci_rh_root cat "${list}")" != "${want_list}" ]; then
+        printf '%s\n' "${want_list}" | _ci_rh_root tee "${list}" >/dev/null || return 2
+    fi
+    if [ "$(_ci_run -m 1 "[CI-ERROR-RUNNER-0073]" "file=\"${pref}\" reason=\"unreadable\"" _ci_rh_root cat "${pref}")" != "${want_pref}" ]; then
+        printf '%s\n' "${want_pref}" | _ci_rh_root tee "${pref}" >/dev/null || return 2
+    fi
+    printf 'Validated %s and %s (Pin-Priority 500, a=stable-backports).\n' "${list}" "${pref}"
+    _ci_run "[CI-ERROR-RUNNER-0074]" "reason=\"apt-get update failed\"" _ci_rh_root apt-get update | tail -10
+    _ci_run "[CI-ERROR-RUNNER-0075]" "reason=\"apt-get dist-upgrade failed\"" _ci_rh_root env DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y | tail -15
+    _ci_run "[CI-ERROR-RUNNER-0076]" "reason=\"apt-get full-upgrade failed\"" _ci_rh_root env DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y | tail -10
+}
+
+# What: purge apt-listchanges when installed.
+# Why: its prompts or mail hang unattended upgrades.
+# From: Issue #1622 | PR #1624
+_ci_rh_purge_listchanges() {
+    local st
+    st="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0077]" "reason=\"dpkg query failed\"" dpkg -l apt-listchanges)"
+    if grep -q '^ii' <<< "${st}"; then
+        _ci_run "[CI-ERROR-RUNNER-0078]" "reason=\"apt-listchanges not purged\"" _ci_rh_root env DEBIAN_FRONTEND=noninteractive apt-get purge -y apt-listchanges | tail -10
+        printf 'Purged apt-listchanges.\n'
+    else
+        printf 'apt-listchanges not installed.\n'
+    fi
+}
+
+# What: idempotent host setup for a cloned runner host.
+# Why: every runner host gets the same access, hooks, timer.
+# From: Issue #1622 | PR #1624
+_ci_rh_host_prep() {
+    local user root group
+    user="$(_ci_rh_val user)" || return 2
+    root="$(_ci_rh_val opt_root)" || return 2
+    if ! getent passwd "${user}" >/dev/null; then
+        ci_log "[CI-ERROR-RUNNER-0079]" "user=\"${user}\" reason=\"runner account does not exist\""
+        return 2
+    fi
+    _ci_rh_access "${user}" || return 2
+    group="$(_ci_rh_group "${user}")" || return 2
+    # What: converge the opt root to the runner, setgid.
+    # Why: base state for /opt; new files inherit the group.
+    # From: Issue #1622 | PR #1624
+    _ci_run "[CI-ERROR-RUNNER-0080]" "root=\"${root}\" reason=\"owner not converged\"" _ci_rh_root chown -R "${user}:${group}" "${root}" || return 2
+    _ci_run "[CI-ERROR-RUNNER-0081]" "root=\"${root}\" reason=\"setgid not set\"" _ci_rh_root chmod g+s "${root}" || return 2
+    printf 'Converged %s to %s:%s with setgid.\n' "${root}" "${user}" "${group}"
+    _ci_rh_hooks || return 2
+    _ci_rh_purge_listchanges || return 2
+    _ci_rh_backports || return 2
+    _ci_rh_units || return 2
+    printf '\nhost-prep complete. It does not touch %s (use docker-daemon-config), does not run config.sh and starts no runner.\n' "$(_ci_variable CI_DAEMON_JSON)"
+    if [[ "$(_ci_capture 0 hostname)" == *heavy* ]]; then
+        printf 'Heavy-tier host: run sccache-check; stage only the sccache binaries, then sccache-fetch <dir>.\n'
+    fi
+}
+
+# What: run a command with the SOT retry count and backoff.
+# Why: the repo scripts are absent on a fresh runner host.
+# From: Issue #1622 | PR #1624
+_ci_rh_retry() {
+    local max wait n=1 rc=0
+    max="$(_ci_rh_val fetch_attempts)" || return 2
+    wait="$(_ci_rh_val fetch_backoff)" || return 2
+    while :; do
+        rc=0
+        "$@" && return 0 || rc=$?
+        if [ "${n}" -ge "${max}" ]; then
+            ci_log "[CI-ERROR-RUNNER-0082]" "cmd=\"$1\" attempts=${max} rc=${rc} reason=\"retries exhausted\""
+            return 2
+        fi
+        ci_log "[CI-NOTICE-RUNNER-0083]" "cmd=\"$1\" attempt=${n}/${max} rc=${rc} retry_in=${wait}s"
+        sleep "${wait}"
+        n=$((n + 1))
+    done
+}
+
+# What: the runner .env hook wiring, two lines.
+# Why: one text for runner-fetch and runner-hook-env.
+# From: Issue #1622 | PR #1624
+_ci_rh_hook_env_lines() {
+    local dir
+    dir="$(_ci_rh_val hooks_dir)" || return 2
+    printf 'ACTIONS_RUNNER_HOOK_JOB_STARTED=%s/pre-job-cleanup.sh\nACTIONS_RUNNER_HOOK_JOB_COMPLETED=%s/post-job-cleanup.sh\n' "${dir}" "${dir}"
+}
+
+# What: download, verify and extract a runner release.
+# Why: a new host needs a runner that was checked first.
+# From: Issue #1622 | PR #1624
+_ci_rh_runner_fetch() {
+    local inst="${1:-}" ver="${2:-}" root user group tar url dir digest actual tmp
+    if [ -z "${inst}" ]; then
+        ci_log "[CI-ERROR-RUNNER-0084]" "reason=\"runner-fetch needs an instance dir\""
+        return 2
+    fi
+    [ -n "${ver}" ] || ver="$(_ci_rh_val runner_version)" || return 2
+    root="$(_ci_rh_val opt_root)" || return 2
+    user="$(_ci_rh_val user)" || return 2
+    group="$(_ci_rh_group "${user}")" || return 2
+    tar="actions-runner-linux-x64-${ver}.tar.gz"
+    url="https://github.com/actions/runner/releases/download/v${ver}/${tar}"
+    # What: accept only a new or empty dir under the root.
+    # Why: a typo such as /opt must not reach chown -R.
+    # From: Issue #1622 | PR #1624
+    dir="$(_ci_capture 0 readlink -m -- "${inst}")" || return 2
+    case "${dir}" in
+        "${root}"/*) ;;
+        *) ci_log "[CI-ERROR-RUNNER-0085]" "dir=\"${dir}\" root=\"${root}\" reason=\"only a new dir directly under the opt root\""; return 2 ;;
+    esac
+    if [ -e "${dir}" ] && { [ ! -d "${dir}" ] || [ -n "$(_ci_capture 0 find "${dir}" -mindepth 1 -maxdepth 1)" ]; }; then
+        ci_log "[CI-ERROR-RUNNER-0086]" "dir=\"${dir}\" reason=\"exists and is not empty; no extract over a runner\""
+        return 2
+    fi
+    tmp="$(_ci_mktemp "${CI_TMPDIR}/${tar}.XXXXXX")" || return 2
+    printf 'Fetching the expected checksum of v%s...\n' "${ver}"
+    digest="$(_ci_rh_retry curl -fsSL "https://api.github.com/repos/actions/runner/releases/tags/v${ver}")" || { rm -f "${tmp}"; return 2; }
+    digest="$(_ci_capture 0 jq -r --arg n "${tar}" '.assets[] | select(.name == $n) | .digest' <<< "${digest}")" || { rm -f "${tmp}"; return 2; }
+    digest="${digest#sha256:}"
+    if [ -z "${digest}" ]; then
+        rm -f "${tmp}"
+        ci_log "[CI-ERROR-RUNNER-0087]" "tarball=\"${tar}\" reason=\"no sha256 digest from the GitHub API; not installing unverified\""
+        return 2
+    fi
+    printf 'Downloading %s ...\n' "${url}"
+    _ci_rh_retry curl -fsSL -o "${tmp}" "${url}" || { rm -f "${tmp}"; return 2; }
+    actual="$(_ci_capture 0 sha256sum "${tmp}")" || { rm -f "${tmp}"; return 2; }
+    actual="${actual%% *}"
+    if [ "${actual}" != "${digest}" ]; then
+        rm -f "${tmp}"
+        ci_log "[CI-ERROR-RUNNER-0088]" "tarball=\"${tar}\" want=\"${digest}\" got=\"${actual}\" reason=\"checksum mismatch; not extracting\""
+        return 2
+    fi
+    printf 'Checksum verified: %s\n' "${actual}"
+    _ci_run "[CI-ERROR-RUNNER-0089]" "dir=\"${dir}\" reason=\"dir not created\"" _ci_rh_root mkdir -p "${dir}" || { rm -f "${tmp}"; return 2; }
+    _ci_run "[CI-ERROR-RUNNER-0090]" "dir=\"${dir}\" reason=\"extract failed\"" _ci_rh_root tar xzf "${tmp}" -C "${dir}" || { rm -f "${tmp}"; return 2; }
+    rm -f "${tmp}"
+    _ci_run "[CI-ERROR-RUNNER-0091]" "dir=\"${dir}\" reason=\"owner not set\"" _ci_rh_root chown -R "${user}:${group}" "${dir}" || return 2
+    # What: write LANG and both hook lines into the .env.
+    # Why: env.sh (run by config.sh) truncates it again.
+    # From: Issue #1622 | PR #1624
+    { printf 'LANG=C\n'; _ci_rh_hook_env_lines; } | _ci_rh_root tee "${dir}/.env" >/dev/null || return 2
+    _ci_run "[CI-ERROR-RUNNER-0092]" "dir=\"${dir}\" reason=\".env owner not set\"" _ci_rh_root chown "${user}:${group}" "${dir}/.env" || return 2
+    printf 'Extracted actions-runner v%s into %s and wrote its hook wiring. NOT registered.\n' "${ver}" "${dir}"
+    printf 'Next: config.sh by hand (token via stdin, --name $(hostname) exactly), then runner-hook-env %s,\nthen svc.sh install, then runner-restart-policy; start the service only after the go-ahead.\n' "${dir}"
+}
+
+# What: rewrite the .env hook lines only when they differ.
+# Why: config.sh truncates .env, so this runs after it.
+# From: Issue #1622 | PR #1624
+_ci_rh_runner_hook_env() {
+    local dir="${1:-}" want cur
+    if [ ! -d "${dir}" ] || [ ! -f "${dir}/.env" ]; then
+        ci_log "[CI-ERROR-RUNNER-0093]" "dir=\"${dir}\" reason=\"needs an instance dir whose .env exists; run it after config.sh\""
+        return 2
+    fi
+    want="$(_ci_rh_hook_env_lines)" || return 2
+    cur="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0094]" "dir=\"${dir}\" reason=\".env not read\"" grep -E '^ACTIONS_RUNNER_HOOK_JOB_(STARTED|COMPLETED)=' "${dir}/.env")" || return 2
+    if [ "${cur}" = "${want}" ]; then
+        printf '%s/.env already has the correct hook wiring.\n' "${dir}"
+        return 0
+    fi
+    # What: delete stale hook lines first, then append.
+    # Why: a stale copy must not coexist with the new pair.
+    # From: Issue #1622 | PR #1624
+    _ci_run "[CI-ERROR-RUNNER-0095]" "dir=\"${dir}\" reason=\"stale hook lines not removed\"" _ci_rh_root sed -i '/^ACTIONS_RUNNER_HOOK_JOB_STARTED=/d; /^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/d' "${dir}/.env" || return 2
+    printf '%s\n' "${want}" | _ci_rh_root tee -a "${dir}/.env" >/dev/null || return 2
+    printf 'Wrote the hook wiring to %s/.env.\n' "${dir}"
+}
+
+# What: Restart=on-failure drop-in on every runner unit.
+# Why: the installer unit never restarts a crashed runner.
+# From: Issue #1738
+_ci_rh_restart_policy() {
+    local udir sec unit name dropin seen=0 wrote=0
+    udir="$(_ci_rh_val unit_dir)" || return 2
+    sec="$(_ci_rh_val restart_sec)" || return 2
+    for unit in "${udir}"/actions.runner.*.service; do
+        [ -e "${unit}" ] || continue
+        seen=1
+        name="${unit##*/}"
+        dropin="${udir}/${name}.d/override.conf"
+        if [ -f "${dropin}" ] && grep -qx 'Restart=on-failure' "${dropin}" && grep -qx "RestartSec=${sec}" "${dropin}"; then
+            printf '  %s: drop-in already set\n' "${name}"
+            continue
+        fi
+        printf '  %s: writing %s\n' "${name}" "${dropin}"
+        _ci_run "[CI-ERROR-RUNNER-0096]" "unit=\"${name}\" reason=\"drop-in dir not created\"" _ci_rh_root mkdir -p "${dropin%/*}" || return 2
+        printf '[Service]\nRestart=on-failure\nRestartSec=%s\n' "${sec}" | _ci_rh_root tee "${dropin}" >/dev/null || return 2
+        wrote=1
+    done
+    if [ "${seen}" -eq 0 ]; then
+        printf 'No actions.runner.*.service units here; run this after svc.sh install.\n'
+        return 0
+    fi
+    if [ "${wrote}" -eq 1 ]; then
+        _ci_run "[CI-ERROR-RUNNER-0097]" "reason=\"systemctl daemon-reload failed\"" _ci_rh_root systemctl daemon-reload || return 2
+    fi
+    printf '\n--- Verification ---\n'
+    for unit in "${udir}"/actions.runner.*.service; do
+        [ -e "${unit}" ] || continue
+        printf '  %s: Restart=%s, RestartUSec=%s\n' "${unit##*/}" "$(systemctl show "${unit##*/}" -p Restart --value)" "$(systemctl show "${unit##*/}" -p RestartUSec --value)"
+    done
+}
+
+# What: check the sccache client tooling; change nothing.
+# Why: Rust CI on heavy hosts fails without the client.
+# From: Issue #1622 | PR #1624
+_ci_rh_sccache_check() {
+    local user root lack=0 f stale dist list
+    user="$(_ci_rh_val user)" || return 2
+    root="$(_ci_rh_val opt_root)" || return 2
+    dist="$(_ci_rh_val sccache_dist_dir)" || return 2
+    printf -- '--- sccache client binaries ---\n'
+    list="$(_ci_block_entry_list runner_host "" sccache_bins)" || return 2
+    while IFS= read -r f; do
+        if [ -x "${f}" ]; then printf '  %s: present\n' "${f}"; else printf '  %s: MISSING\n' "${f}"; lack=1; fi
+    done <<< "${list}"
+    printf '\n--- Runtime config: supplied per job through SCCACHE_CONF; no token on the host ---\n'
+    for stale in "${root}/${user}/.config/sccache/config" "${root}/${user}/sccache-dist/client.conf"; do
+        if _ci_rh_root test -f "${stale}"; then printf '  STALE: %s still present; sccache-fetch removes it\n' "${stale}"; fi
+    done
+    if _ci_rh_root test -d "${dist}"; then printf '  %s: present\n' "${dist}"; else printf '  %s: MISSING\n' "${dist}"; lack=1; fi
+    printf '\n--- Live check as %s ---\n' "${user}"
+    if [ -x /usr/local/bin/sccache ]; then
+        _ci_run "[CI-ERROR-RUNNER-0098]" "user=\"${user}\" reason=\"sccache --version failed\"" _ci_rh_root sudo -u "${user}" env HOME="${root}/${user}" /usr/local/bin/sccache --version || lack=1
+    else
+        printf '  (skipped; sccache binary lack)\n'
+    fi
+    if [ "${lack}" -eq 1 ]; then
+        ci_log "[CI-ERROR-RUNNER-0099]" "reason=\"sccache prerequisites lack; no files were wrote\""
+        return 2
+    fi
+    printf 'No files were wrote (sccache-check mode).\n'
+}
+
+# What: install staged sccache binaries, drop old creds.
+# Why: builds run on a heavy host; secrets are per job.
+# From: Issue #1622 | PR #1626
+_ci_rh_sccache_fetch() {
+    local src="${1:-}" user root group dist f
+    user="$(_ci_rh_val user)" || return 2
+    root="$(_ci_rh_val opt_root)" || return 2
+    dist="$(_ci_rh_val sccache_dist_dir)" || return 2
+    group="$(_ci_rh_group "${user}")" || return 2
+    for f in sccache sccache-dist; do
+        if [ ! -f "${src}/${f}" ]; then
+            ci_log "[CI-ERROR-RUNNER-0100]" "file=\"${src}/${f}\" reason=\"not staged; scp it from a working heavy host\""
+            return 2
+        fi
+    done
+    # What: run the staged binaries before any install.
+    # Why: a bad or foreign file must not replace tools.
+    # From: Issue #1622 | PR #1626
+    _ci_run "[CI-ERROR-RUNNER-0101]" "file=\"${src}/sccache\" reason=\"staged binary does not run\"" _ci_rh_root sudo -u "${user}" env HOME="${root}/${user}" "${src}/sccache" --version >/dev/null || return 2
+    _ci_run "[CI-ERROR-RUNNER-0102]" "file=\"${src}/sccache-dist\" reason=\"staged binary does not run\"" "${src}/sccache-dist" --help >/dev/null || return 2
+    for f in sccache sccache-dist; do
+        _ci_run "[CI-ERROR-RUNNER-0103]" "file=\"${f}\" reason=\"not installed\"" _ci_rh_root install -o root -g "${group}" -m 0755 "${src}/${f}" "/usr/local/bin/.${f}.new" || return 2
+        _ci_run "[CI-ERROR-RUNNER-0104]" "file=\"${f}\" reason=\"not moved in place\"" _ci_rh_root mv -f "/usr/local/bin/.${f}.new" "/usr/local/bin/${f}" || return 2
+    done
+    _ci_run "[CI-ERROR-RUNNER-0105]" "dir=\"${dist}\" reason=\"dist dir not created\"" _ci_rh_root mkdir -p "${dist}" || return 2
+    _ci_run "[CI-ERROR-RUNNER-0106]" "dir=\"${dist}\" reason=\"dist dir owner not set\"" _ci_rh_root chown "${user}:${group}" "${dist%/*}" "${dist}" || return 2
+    _ci_run "[CI-ERROR-RUNNER-0107]" "dir=\"${dist}\" reason=\"dist dir mode not set\"" _ci_rh_root chmod 2775 "${dist%/*}" "${dist}" || return 2
+    # What: remove credentials the old host-copy flow left.
+    # Why: leftover world-readable copies have no reader.
+    # From: Issue #1622 | PR #1624
+    _ci_run "[CI-ERROR-RUNNER-0108]" "reason=\"old credential copies not removed\"" _ci_rh_root rm -f "${root}/${user}/.config/sccache/config" "${root}/${user}/sccache-dist/client.conf" || return 2
+    _ci_run -m 1 "[CI-ERROR-RUNNER-0109]" "reason=\"old credential dirs not removed\"" _ci_rh_root rmdir --ignore-fail-on-non-empty "${root}/${user}/.config/sccache" "${root}/${user}/sccache-dist" || true
+    printf 'Installed the sccache client tooling. Run sccache-check to confirm.\n'
+}
+
+# What: runner-host mode on a runner host.
+# Why: one entry replaces the legacy runner-host scripts.
+# From: Issue #1622 | PR #1624
+ci_cmd_runner_host() {
+    local mode="${1:-check}"
+    if [ "$#" -gt 0 ]; then shift; fi
+    case "${mode}" in
+        cleanup) _ci_rh_cleanup ;;
+        units) _ci_rh_units ;;
+        hooks) _ci_rh_hooks ;;
+        check) _ci_rh_check ;;
+        clean) _ci_rh_clean ;;
+        clean-archive) _ci_rh_clean_archive "$@" ;;
+        host-prep) _ci_rh_host_prep ;;
+        runner-fetch) _ci_rh_runner_fetch "$@" ;;
+        runner-hook-env) _ci_rh_runner_hook_env "$@" ;;
+        runner-restart-policy) _ci_rh_restart_policy ;;
+        full-reset-check) _ci_rh_full_reset_check ;;
+        full-reset-clean) _ci_rh_full_reset_clean ;;
+        set-hostname) _ci_rh_set_hostname "$@" ;;
+        purge-pve-check) _ci_rh_purge_pve_check ;;
+        purge-pve) _ci_rh_purge_pve ;;
+        sccache-check) _ci_rh_sccache_check ;;
+        sccache-fetch) _ci_rh_sccache_fetch "$@" ;;
+        *)
+            ci_log "[CI-ERROR-RUNNER-0110]" "mode=\"${mode}\" reason=\"unknown mode\" known=\"cleanup units hooks check clean clean-archive host-prep runner-fetch runner-hook-env runner-restart-policy full-reset-check full-reset-clean set-hostname purge-pve-check purge-pve sccache-check sccache-fetch\""
             return 2
             ;;
     esac

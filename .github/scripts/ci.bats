@@ -5221,3 +5221,283 @@ CASES
     run ci_cmd_docker_daemon_config "$(_val name)" "${f}"
     _expect unknown-mode 2 "[CI-ERROR-DAEMON-0007]" || return 1
 }
+
+# What: runner-host fixtures: SOT values on a temp tree.
+# Why: the modes act on /opt and systemd; tests use temps.
+# From: Issue #1622 | PR #1624
+_rh_fixture() {
+    RH_ROOT="$(_val path)" RH_UNITS="$(_val path)" RH_HOOKS="$(_val path)" RH_MIN="$(_val int 1 9)"
+    RH_HTOK="$(_val int 100 499)" RH_ITOK="${RH_HTOK}"
+    mkdir -p "${RH_ROOT}" "${RH_UNITS}" "${RH_HOOKS}"
+    _ci_rh_root() { "$@"; }
+    _ci_rh_host_token() { printf '%s' "${RH_HTOK}"; }
+    _ci_rh_ip_token() { printf '%s' "${RH_ITOK}"; }
+    _ci_rh_val() {
+        case "$1" in
+            opt_root) printf '%s' "${RH_ROOT}" ;;
+            unit_dir) printf '%s' "${RH_UNITS}" ;;
+            hooks_dir) printf '%s' "${RH_HOOKS}" ;;
+            stray_archive_min_bytes) printf '%s' "${RH_MIN}" ;;
+            *) _ci_block_entry_field runner_host "" "$1" ;;
+        esac
+    }
+}
+
+# What: a runner dir whose .runner names an agent.
+# Why: identity checks read agentName only.
+# From: Issue #1622 | PR #1624
+_rh_runner_dir() {
+    mkdir -p "$1"
+    jq -n --arg a "$2" '{agentName: $a}' > "$1/.runner"
+}
+
+# What: fleet numbers and foreign key lines follow the SOT.
+# Why: a loose match could take the instance suffix.
+# From: Issue #1622 | PR #1624
+@test "runner-host: fleet numbers come from the SOT patterns, key lines compare to the host" {
+    local n m
+    _rh_fixture
+    n="$(_val int 500 999)"
+    [ "$(_ci_rh_fleet_number "gh-lancache-heavy-$(_val name)-${n}")" = "${n}" ] || return 1
+    [ "$(_ci_rh_fleet_number "a-lancache-runner-${n}")" = "${n}" ] || return 1
+    [ -z "$(_ci_rh_fleet_number "$(_val name)")" ] || return 1
+    RH_HTOK="${n}" run _ci_rh_foreign_key_line "ssh-ed25519 AAAA a-lancache-runner-${n}"
+    [ "${status}" -eq 1 ] || { echo "own key line rc ${status}"; return 1; }
+    m=$(( n + 1 ))
+    RH_HTOK="${m}" run _ci_rh_foreign_key_line "ssh-ed25519 AAAA a-lancache-runner-${n}"
+    [ "${status}" -eq 0 ] || { echo "foreign key line rc ${status}"; return 1; }
+}
+
+# What: runner dirs sort into own, foreign, ambiguous.
+# Why: rc 2 must never be reported as own or removed.
+# From: Issue #1622 | PR #1624
+@test "runner-host: a runner dir is own, foreign, ambiguous or unregistered" {
+    local own foreign other
+    _rh_fixture
+    own="a-lancache-runner-${RH_HTOK}" foreign="a-lancache-runner-$(( RH_HTOK + 1 ))"
+    mkdir -p "${RH_ROOT}/none" "${RH_ROOT}/creds"
+    : > "${RH_ROOT}/creds/.credentials"
+    _rh_runner_dir "${RH_ROOT}/own" "${own}"
+    _rh_runner_dir "${RH_ROOT}/foreign" "${foreign}"
+    _rh_runner_dir "${RH_ROOT}/unnamed" "$(_val name)"
+    run _ci_rh_foreign_dir "${RH_ROOT}/none"
+    [ "${status}" -eq 1 ] || { echo "unregistered rc ${status}"; return 1; }
+    run _ci_rh_foreign_dir "${RH_ROOT}/creds"
+    [ "${status}" -eq 0 ] || { echo "credentials-only rc ${status}"; return 1; }
+    run _ci_rh_foreign_dir "${RH_ROOT}/own"
+    [ "${status}" -eq 1 ] || { echo "own rc ${status}: ${output}"; return 1; }
+    run _ci_rh_foreign_dir "${RH_ROOT}/foreign"
+    [ "${status}" -eq 0 ] || { echo "foreign rc ${status}: ${output}"; return 1; }
+    run _ci_rh_foreign_dir "${RH_ROOT}/unnamed"
+    [ "${status}" -eq 0 ] || { echo "unknown name rc ${status}: ${output}"; return 1; }
+    RH_ITOK="$(( RH_HTOK + 7 ))"
+    run _ci_rh_foreign_dir "${RH_ROOT}/own"
+    [ "${status}" -eq 2 ] || { echo "ambiguous rc ${status}: ${output}"; return 1; }
+    other="a-lancache-runner-$(( RH_HTOK + 9 ))"
+    _rh_runner_dir "${RH_ROOT}/third" "${other}"
+    run _ci_rh_foreign_dir "${RH_ROOT}/third"
+    [ "${status}" -eq 0 ] || { echo "third host rc ${status}: ${output}"; return 1; }
+}
+
+# What: clean removes foreign dirs only, with consent.
+# Why: archives and own runners must survive a clean.
+# From: Issue #1622 | PR #1624
+@test "runner-host: clean needs consent and removes only foreign dirs, archives need clean-archive" {
+    local arc other
+    _rh_fixture
+    _rh_runner_dir "${RH_ROOT}/actions-runner-own" "a-lancache-runner-${RH_HTOK}"
+    _rh_runner_dir "${RH_ROOT}/actions-runner-foreign" "a-lancache-runner-$(( RH_HTOK + 1 ))"
+    arc="${RH_ROOT}/$(_val name).tar.gz" other="${RH_ROOT}/$(_val name).tar.gz"
+    truncate -s "$(( RH_MIN + 10 ))" "${arc}"
+    : > "${other}"
+    CONFIRM_CLEAN="" run _ci_rh_clean
+    _expect no-consent 2 "[CI-ERROR-RUNNER-0026];CONFIRM_CLEAN" || return 1
+    [ -d "${RH_ROOT}/actions-runner-foreign" ] || { echo "removed without consent"; return 1; }
+    CONFIRM_CLEAN=yes run _ci_rh_clean
+    _expect clean 0 "Removing foreign clone artifact: ${RH_ROOT}/actions-runner-foreign;NOT removed" || return 1
+    [ ! -d "${RH_ROOT}/actions-runner-foreign" ] && [ -d "${RH_ROOT}/actions-runner-own" ] && [ -f "${arc}" ] || { echo "wrong set removed"; return 1; }
+    run _ci_rh_clean_archive "${other}" "${arc}"
+    _expect clean-archive 0 "SKIPPING ${other};Removing confirmed stray archive: ${arc}" || return 1
+    [ ! -e "${arc}" ] && [ -e "${other}" ] || { echo "archive set wrong"; return 1; }
+    run _ci_rh_clean_archive
+    _expect no-paths 2 "[CI-ERROR-RUNNER-0028]" || return 1
+}
+
+# What: the hook wiring is rewritten once, then left alone.
+# Why: config.sh truncates .env; a rerun must not duplicate.
+# From: Issue #1622 | PR #1624
+@test "runner-host: runner-hook-env rewrites stale wiring and then stays idempotent" {
+    local inst
+    _rh_fixture
+    inst="${RH_ROOT}/$(_val name)"
+    mkdir -p "${inst}"
+    run _ci_rh_runner_hook_env "${inst}"
+    _expect no-env 2 "[CI-ERROR-RUNNER-0093]" || return 1
+    printf 'LANG=C\nACTIONS_RUNNER_HOOK_JOB_STARTED=%s\nOTHER=%s\n' "$(_val path)" "$(_val name)" > "${inst}/.env"
+    run _ci_rh_runner_hook_env "${inst}"
+    [ "${status}" -eq 0 ] || { echo "rewrite rc ${status}: ${output}"; return 1; }
+    [ "$(grep -c '^ACTIONS_RUNNER_HOOK_JOB_STARTED=' "${inst}/.env")" -eq 1 ] || { echo "started lines duplicated"; return 1; }
+    grep -qx "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${RH_HOOKS}/post-job-cleanup.sh" "${inst}/.env" || { echo "completed line missing"; return 1; }
+    grep -q '^OTHER=' "${inst}/.env" || { echo "foreign .env line lost"; return 1; }
+    run _ci_rh_runner_hook_env "${inst}"
+    _expect again 0 "already has the correct hook wiring" || return 1
+}
+
+# What: the restart policy lands once per runner unit.
+# Why: the installer unit never restarts a crashed runner.
+# From: Issue #1738
+@test "runner-host: runner-restart-policy writes a drop-in per unit and skips a set one" {
+    local unit
+    _rh_fixture
+    systemctl() { printf '%s\n' "$*" >> "${RH_UNITS}/systemctl.log"; [ "$1" != show ] || printf 'x'; }
+    run _ci_rh_restart_policy
+    _expect no-units 0 "No actions.runner" || return 1
+    unit="actions.runner.$(_val name).service"
+    : > "${RH_UNITS}/${unit}"
+    run _ci_rh_restart_policy
+    [ "${status}" -eq 0 ] || { echo "rc ${status}: ${output}"; return 1; }
+    grep -qx 'Restart=on-failure' "${RH_UNITS}/${unit}.d/override.conf" || { echo "no Restart line"; return 1; }
+    grep -qx "RestartSec=$(_ci_rh_val restart_sec)" "${RH_UNITS}/${unit}.d/override.conf" || { echo "no RestartSec line"; return 1; }
+    grep -qx 'daemon-reload' "${RH_UNITS}/systemctl.log" || { echo "no daemon-reload"; return 1; }
+    : > "${RH_UNITS}/systemctl.log"
+    run _ci_rh_restart_policy
+    _expect again 0 "drop-in already set" || return 1
+    ! grep -qx 'daemon-reload' "${RH_UNITS}/systemctl.log" || { echo "reloaded without a change"; return 1; }
+}
+
+# What: hook texts name the validate prefix and grace age.
+# Why: the post hook reaps this repo's validation networks.
+# From: Issue #1095 | PR #1426
+@test "runner-host: job hooks parse and carry the validate prefix and grace seconds from the SOT" {
+    local pre post
+    _rh_fixture
+    pre="$(_ci_rh_hook_pre_text)" post="$(_ci_rh_hook_post_text)"
+    bash -n <<< "${pre}" || return 1
+    bash -n <<< "${post}" || return 1
+    [[ "${post}" == *"name=$(_ci_validate_project "") "* ]] || { echo "no validate prefix in the post hook"; return 1; }
+    [[ "${post}" == *"MIN_AGE=$(_ci_rh_val hook_network_min_age)"$'\n'* ]] || { echo "no grace age in the post hook"; return 1; }
+    [[ "${post}" != *"@"* ]] || { echo "unfilled placeholder in the post hook"; return 1; }
+    [[ "${pre}" == *'GITHUB_WORKSPACE'* ]] || return 1
+}
+
+# What: cleanup units follow the SOT schedule and path.
+# Why: units are generated, never copied by hand.
+# From: Issue #1255 | PR #1349
+@test "runner-host: service and timer text come from the SOT and this script's path" {
+    local svc tim
+    svc="$(_ci_rh_service_text)" tim="$(_ci_rh_timer_text)"
+    [[ "${svc}" == *"ExecStart=/usr/bin/env bash ${CI_SCRIPT_DIR}/ci.sh runner-host cleanup"* ]] || { echo "${svc}"; return 1; }
+    [[ "${svc}" == *"Environment=GITHUB_REPOSITORY=${GITHUB_REPOSITORY}"* ]] || { echo "${svc}"; return 1; }
+    [[ "${tim}" == *"OnCalendar=$(_ci_rh_val timer_calendar)"$'\n'* ]] || { echo "${tim}"; return 1; }
+    [[ "${tim}" == *"RandomizedDelaySec=$(_ci_rh_val timer_delay)"$'\n'* ]] || { echo "${tim}"; return 1; }
+}
+
+# What: reaping keys on .Created and the match field.
+# Why: .Created survives a daemon restart; StartedAt resets.
+# From: Issue #1095 | PR #1426
+@test "runner-host: reaping removes old matching containers and old empty networks only" {
+    local old new pat hours
+    _rh_fixture
+    RH_LOG="$(_val path)"
+    old="$(date -u -d '-30 hours' +%Y-%m-%dT%H:%M:%S.123456789Z)" new="$(date -u -d '-1 minutes' +%Y-%m-%dT%H:%M:%S.123456789Z)"
+    pat="$(_val name)" hours="$(_val int 2 5)"
+    docker() {
+        case "$1 ${2:-}" in
+            "ps -q") printf 'c1\nc2\nc3\n' ;;
+            "inspect --format") printf 'c1|img|/n1|%s-a|%s\nc2|img|/n2|%s-b|%s\nc3|img|/n3|other|%s\n' "${pat}" "${old}" "${pat}" "${new}" "${old}" ;;
+            "network ls") printf '%s-1\n%s-2\n%s-3\n' "${pat}" "${pat}" "${pat}" ;;
+            "network inspect")
+                case "$3" in
+                    "${pat}-1") printf '0|%s\n' "${old}" ;;
+                    "${pat}-2") printf '0|%s\n' "${new}" ;;
+                    *) printf '2|%s\n' "${old}" ;;
+                esac ;;
+            "rm -f") printf 'rm %s\n' "$3" >> "${RH_LOG}" ;;
+            "network rm") printf 'netrm %s\n' "$3" >> "${RH_LOG}" ;;
+            *) echo "docker stub: $*" >&2; return 1 ;;
+        esac
+    }
+    run _ci_rh_reap_containers validation project "${pat}" "${hours}"
+    [ "${status}" -eq 0 ] || { echo "containers rc ${status}: ${output}"; return 1; }
+    run _ci_rh_reap_networks "${pat}" "${hours}"
+    [ "${status}" -eq 0 ] || { echo "networks rc ${status}: ${output}"; return 1; }
+    [ "$(cat "${RH_LOG}")" = "$(printf 'rm c1\nnetrm %s-1' "${pat}")" ] || { echo "reaped: $(cat "${RH_LOG}")"; return 1; }
+}
+
+# What: the cleanup log is trimmed to its cap, appended.
+# Why: a timer run has no terminal; the log stays bounded.
+# From: Issue #1255 | PR #1349
+@test "runner-host: cleanup trims an oversized log and appends the run" {
+    local rhlog
+    _rh_fixture
+    rhlog="$(_val path)"
+    _ci_rh_val() { case "$1" in cleanup_log) printf '%s' "${rhlog}" ;; cleanup_log_max_bytes) printf '10' ;; *) return 1 ;; esac; }
+    _ci_rh_cleanup_run() { printf 'ran\n'; }
+    printf '0123456789abcdefghij' > "${rhlog}"
+    run _ci_rh_cleanup
+    [ "${status}" -eq 0 ] || { echo "rc ${status}: ${output}"; return 1; }
+    [ "$(cat "${rhlog}")" = "$(printf 'abcdefghij\nran')" ] || { echo "log: $(cat "${rhlog}")"; return 1; }
+}
+
+# What: purge-pve stops before it removes foreign packages.
+# Why: autoremove may hit PVE dependencies only.
+# From: Issue #1622 | PR #1624
+@test "runner-host: the purge guard refuses an autoremove outside the PVE set or on a boot package" {
+    local keep
+    _rh_fixture
+    keep="$(_ci_rh_pve_keep_ere)"
+    [[ "${keep}" == *proxmox-kernel* && "${keep}" == *pve-firmware* ]] || { echo "keep: ${keep}"; return 1; }
+    env() { shift; "$@"; }
+    apt-get() { case "$*" in *--simulate*) printf 'Remv %s [1]\n' "${RH_REMV}" ;; *) printf 'apt-get %s\n' "$*" ;; esac; }
+    RH_REMV="libpve-$(_val name)" run _ci_rh_pve_purge_run "${keep}" pve-manager
+    _expect pve-only 0 "apt-get autoremove -y" || return 1
+    RH_REMV="$(_val name)" run _ci_rh_pve_purge_run "${keep}" pve-manager
+    _expect other-package 2 "[CI-ERROR-RUNNER-0061]" || return 1
+    RH_REMV="proxmox-kernel-$(_val name)" run _ci_rh_pve_purge_run "${keep}" pve-manager
+    _expect boot-package 2 "[CI-ERROR-RUNNER-0061]" || return 1
+}
+
+# What: guards stop before any host change.
+# Why: destructive modes need consent, input, a safe path.
+# From: Issue #1622 | PR #1624
+@test "runner-host: unknown mode, missing consent and unsafe runner-fetch targets stop first" {
+    local inst
+    _rh_fixture
+    run ci_cmd_runner_host "$(_val name)"
+    _expect unknown-mode 2 "[CI-ERROR-RUNNER-0110]" || return 1
+    CONFIRM_PURGE_PVE="" run ci_cmd_runner_host purge-pve
+    _expect purge-consent 2 "[CI-ERROR-RUNNER-0026];CONFIRM_PURGE_PVE" || return 1
+    CONFIRM_FULL_RESET="" run ci_cmd_runner_host full-reset-clean
+    _expect reset-consent 2 "[CI-ERROR-RUNNER-0026];CONFIRM_FULL_RESET" || return 1
+    run ci_cmd_runner_host set-hostname
+    _expect no-hostname 2 "[CI-ERROR-RUNNER-0050]" || return 1
+    run ci_cmd_runner_host runner-fetch
+    _expect no-dir 2 "[CI-ERROR-RUNNER-0084]" || return 1
+    run ci_cmd_runner_host runner-fetch "$(_val path)"
+    _expect outside-root 2 "[CI-ERROR-RUNNER-0085]" || return 1
+    inst="${RH_ROOT}/$(_val name)"
+    mkdir -p "${inst}" && : > "${inst}/$(_val name)"
+    run ci_cmd_runner_host runner-fetch "${inst}"
+    _expect not-empty 2 "[CI-ERROR-RUNNER-0086]" || return 1
+    run ci_cmd_runner_host sccache-fetch "$(_val path)"
+    _expect not-staged 2 "[CI-ERROR-RUNNER-0100]" || return 1
+}
+
+# What: the Trivy leftover reap uses an exact minute age.
+# Why: -mtime floors to days and would keep a 1.9 day dir.
+# From: Issue #1255 | PR #1334
+@test "runner-host: the Trivy leftover reap removes only dirs older than the SOT age" {
+    local trroot old new trdays
+    _rh_fixture
+    trroot="$(_val path)" trdays="$(_val int 1 3)"
+    _ci_rh_val() { case "$1" in trivy_leftover_root) printf '%s' "${trroot}" ;; trivy_leftover_days) printf '%s' "${trdays}" ;; *) return 1 ;; esac; }
+    run _ci_rh_reap_trivy
+    _expect no-root 0 "skipping" || return 1
+    old="${trroot}/$(_val name)" new="${trroot}/$(_val name)"
+    mkdir -p "${old}" "${new}"
+    touch -d "$(( trdays * 24 + 1 )) hours ago" "${old}"
+    touch -d "$(( trdays * 24 - 1 )) hours ago" "${new}"
+    run _ci_rh_reap_trivy
+    _expect reap 0 "reaping stale Trivy cache dir ${old}" || return 1
+    [ ! -e "${old}" ] && [ -d "${new}" ] || { echo "wrong dirs removed"; return 1; }
+}

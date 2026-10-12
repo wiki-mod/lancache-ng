@@ -822,6 +822,130 @@ ci_variables:
   PR_TITLE_LINT_MODE: warn
   CHRONOLOGY_WARN_ONLY: 0
 
+# What: runner host values: paths, ages, units, packages.
+# Why: AG-CI-016: ci.sh runner-host reads them; no copy.
+# From: Issue #1622 | PR #1624
+runner_host:
+  # What: runner install root, hooks dir, runner account.
+  # Why: every runner host uses the same layout.
+  # From: Issue #1622 | PR #1624
+  opt_root: /opt
+  hooks_dir: /opt/lancache-ci-hooks
+  user: codex
+  # What: archives from this size up are clone leftovers.
+  # Why: confirmed leftovers were 6.7 GB and 14.3 GB.
+  # From: Issue #1622
+  stray_archive_min_bytes: 1073741824
+  # What: cleanup log, its size cap, reap ages in hours.
+  # Why: AG-CI-016: a timer run has no terminal; bound all.
+  # From: Issue #1255 | PR #1349
+  cleanup_log: /var/log/lancache-ci-cleanup.log
+  cleanup_log_max_bytes: 5242880
+  reap_build_tools_hours: 2
+  reap_validation_hours: 2
+  reap_buildx_hours: 3
+  build_tools_match: build-tools
+  buildx_match: buildx_buildkit_builder-
+  # What: CI 1.x Trivy cache root and its max age.
+  # Why: dirs of dead branches are never reused.
+  # From: Issue #1255 | PR #1334
+  trivy_leftover_root: /var/tmp/lancache-ng-trivy-cache
+  trivy_leftover_days: 1
+  # What: grace seconds before an empty validate net goes.
+  # Why: a sibling job may not have attached a container.
+  # From: Issue #1095 | PR #1426
+  hook_network_min_age: 120
+  # What: cleanup timer schedule and systemd unit location.
+  # Why: units are generated from ci.sh with these values.
+  # From: Issue #1255 | PR #1349
+  timer_calendar: "*-*-* 04:00:00"
+  timer_delay: 900
+  unit_dir: /etc/systemd/system
+  unit_name: lancache-ci-cleanup
+  # What: runner release, fetch retries, restart policy.
+  # Why: new hosts get a verified runner; crashes recover.
+  # From: Issue #1622 | PR #1624
+  runner_version: 2.336.0
+  fetch_attempts: 4
+  fetch_backoff: 30
+  restart_sec: 10
+  # What: the Debian suite host-prep writes backports for.
+  # Why: a wrong suite would mix distribution archives.
+  # From: Issue #1622 | PR #1624
+  debian_suite: trixie
+  # What: ERE per naming scheme; group 1 = host number.
+  # Why: a loose match could take the instance suffix.
+  # From: Issue #1622 | PR #1624
+  fleet_name_patterns:
+    - "gh-lancache-[a-z]+-[A-Za-z0-9]+-([0-9]+)"
+    - "[a-z]-lancache-runner-([0-9]+)"
+  # What: /root template scripts that full-reset removes.
+  # Why: an allowlist; a glob would delete other scripts.
+  # From: Issue #1622 | PR #1624
+  template_scripts: [prepare-proxmox-template.sh]
+  # What: nested Proxmox VE packages purge-pve removes.
+  # Why: the kernel and firmware packages are never listed.
+  # From: Issue #1622 | PR #1624
+  pve_packages:
+    - corosync
+    - libcorosync-common4
+    - libproxmox-acme-perl
+    - libproxmox-acme-plugins
+    - libproxmox-backup-qemu0
+    - libproxmox-rs-perl
+    - libpve-access-control
+    - libpve-apiclient-perl
+    - libpve-cluster-api-perl
+    - libpve-cluster-perl
+    - libpve-common-perl
+    - libpve-guest-common-perl
+    - libpve-http-server-perl
+    - libpve-network-api-perl
+    - libpve-network-perl
+    - libpve-notify-perl
+    - libpve-rs-perl
+    - libpve-storage-perl
+    - proxmox-backup-client
+    - proxmox-backup-file-restore
+    - proxmox-backup-restore-image
+    - proxmox-firewall
+    - proxmox-mail-forward
+    - proxmox-mini-journalreader
+    - proxmox-offline-mirror-docs
+    - proxmox-offline-mirror-helper
+    - proxmox-termproxy
+    - proxmox-ve
+    - proxmox-websocket-tunnel
+    - proxmox-widget-toolkit
+    - pve-cluster
+    - pve-container
+    - pve-docs
+    - pve-esxi-import-tools
+    - pve-firewall
+    - pve-ha-manager
+    - pve-i18n
+    - pve-lxc-syscalld
+    - pve-manager
+    - pve-nvidia-vgpu-helper
+    - pve-qemu-kvm
+    - pve-xtermjs
+    - pve-yew-mobile-gui
+    - pve-yew-mobile-i18n
+    - proxmox-enterprise-support-keyring
+  # What: units purge-pve stops before the purge.
+  # Why: stop first so dpkg prerm does not race the daemons.
+  # From: Issue #1622 | PR #1624
+  pve_services: [pveproxy, pvedaemon, pvestatd, pvescheduler, spiceproxy, pve-ha-crm, pve-ha-lrm, pve-firewall, proxmox-firewall, pve-lxc-syscalld, qmeventd, pve-cluster, corosync, pvefw-logger, proxmox-firewall.timer, watchdog-mux]
+  # What: package name parts that must never be purged.
+  # Why: purging the only kernel leaves the host unbootable.
+  # From: Issue #1622 | PR #1624
+  pve_keep: [proxmox-kernel, proxmox-default-kernel, proxmox-kernel-helper, pve-firmware, pve-edk2-firmware]
+  # What: sccache client files required on heavy hosts.
+  # Why: Rust CI on heavy hosts fails without the client.
+  # From: Issue #1622 | PR #1624
+  sccache_bins: [/usr/local/bin/sccache, /usr/local/bin/sccache-dist]
+  sccache_dist_dir: /opt/sccache/dist-client
+
 # What: files the header and prose checks skip, by path.
 # Why: vendored or generated content carries no header.
 # From: Issue #1683 | PR #1858
