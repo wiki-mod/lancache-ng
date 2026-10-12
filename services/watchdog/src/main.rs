@@ -1180,6 +1180,15 @@ fn fingerprint(files: &[PathBuf]) -> Vec<Option<(u64, i64, i64)>> {
 // From: Issue #1428 | PR #1912
 const SYSLOG_NG_DESTINATION: &str = "d_store";
 
+// What: the zones with snapshots, for the SOT's local zone.
+// Why: DHCP_DOMAIN names the local zone; no literal here.
+// From: Issue #1683 | PR #1912
+fn rollback_zones() -> Result<Vec<String>, String> {
+    Ok(config::rollback_zones(&config::lan_zone(
+        &config::process_env,
+    )?))
+}
+
 // What: env var that hands the AAAA marker path to the lua.
 // Why: filter-aaaa.lua cannot read the SOT; it reads this.
 // From: Issue #1683 | PR #1912
@@ -2120,7 +2129,7 @@ fn dns_zones(
     primary: Option<std::net::SocketAddrV4>,
     notify: &[std::net::SocketAddrV4],
 ) -> Result<(), String> {
-    let zones = config::rollback_zones();
+    let zones = rollback_zones()?;
     if let (DnsRole::Secondary, Some(primary)) = (role, primary) {
         if tsig.is_empty() {
             return Err("DDNS_TSIG_KEY is required for AXFR from the primary".into());
@@ -2433,7 +2442,7 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
     let (rpz, count) = rpz_zone(&domains, proxy, unix_secs());
     let rpz_file = dir.join("rpz.zone");
     let lua_file = dir.join("recursor.lua");
-    let zones = config::rollback_zones();
+    let zones = rollback_zones()?;
     for (path, body) in [
         (&rpz_file, rpz),
         (
@@ -2635,7 +2644,7 @@ async fn soa_upkeep() -> Result<(), String> {
     let root = api_root(&config::loopback()?, env_port(AUTH_API_PORT_KEY)?);
     loop {
         let mut ok = 0;
-        for zone in config::rollback_zones() {
+        for zone in rollback_zones()? {
             match soa_bump(&pdns, &root, &zone, refresh, retry).await {
                 Ok(()) => ok += 1,
                 Err(e) => log_err(&format!("WARNING: {e}")),
@@ -2970,11 +2979,7 @@ fn kea_dhcp_ddns(ctx: &Ctx) -> Result<Run, String> {
         "port": env_port(AUTH_PORT_KEY)?
     }]);
     let domain = |name: String| serde_json::json!({"name": name, "key-name": TSIG_NAME, "dns-servers": server});
-    let reverse: Vec<Value> = config::rollback_zones()
-        .into_iter()
-        .filter(|zone| zone.ends_with(".in-addr.arpa."))
-        .map(domain)
-        .collect();
+    let reverse: Vec<Value> = config::reverse_zones().into_iter().map(domain).collect();
     let conf = serde_json::json!({
         "DhcpDdns": {
             "ip-address": config::loopback()?,
@@ -5966,7 +5971,7 @@ mod tests {
     #[test]
     fn recursor_lua_lists_rpz_zones_and_root_copy() {
         let rpz = gen_path();
-        let zones = config::rollback_zones();
+        let zones = config::rollback_zones(&gen_name());
         let lua = recursor_lua(&rpz, &zones, true);
         assert!(lua.starts_with(&format!("rpzFile(\"{rpz}\"")), "{lua}");
         for zone in &zones {
@@ -5980,7 +5985,7 @@ mod tests {
     // Why: dns-http and dns-https differ only in these.
     #[test]
     fn recursor_conf_renders_its_inputs() {
-        let zones = config::rollback_zones();
+        let zones = config::rollback_zones(&gen_name());
         let (key, lua_c, lua_d) = (gen_name(), gen_path(), gen_path());
         let ttl = rnd(1, DAY);
         let api = rnd(1, u16::MAX.into()) as u16;

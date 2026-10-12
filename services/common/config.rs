@@ -497,26 +497,32 @@ pub fn render_nats_conf(
 // From: Issue #1683 | PR #1905
 pub const DEFAULT_RECORD_TTL: i32 = 300;
 
-// What: the local zone, as publishers spell it.
-// Why: subscriber and the zone list share one spelling.
-// From: Issue #1683 | PR #1905
-pub const LAN_ZONE: &str = "lan";
+// What: the local zone name, as publishers spell it.
+// Why: DHCP_DOMAIN is the one SOT owner of the name.
+// From: Issue #1683 | PR #1912
+pub fn lan_zone(get: &dyn Fn(&str) -> Option<String>) -> Result<String, String> {
+    need(get, "DHCP_DOMAIN")
+}
+
+// What: the IPv4 reverse zones the stack provisions.
+// Why: PTR records live in these; no lan name is involved.
+// From: Issue #1683 | PR #1912
+pub fn reverse_zones() -> Vec<String> {
+    let fixed = ["10.in-addr.arpa.", "168.192.in-addr.arpa."].map(str::to_string);
+    let rfc1918 = (16..=31).map(|n| format!("{n}.172.in-addr.arpa."));
+    fixed.into_iter().chain(rfc1918).collect()
+}
 
 // What: zones with snapshots and rollbacks, dotted form.
 // Why: dns creates, snapshots and rolls back these.
 // From: Issue #1683 | PR #1905
-pub fn rollback_zones() -> Vec<String> {
-    let lan = canonical_zone(LAN_ZONE);
-    let fixed = [
-        format!("local.{lan}"),
-        "10.in-addr.arpa.".to_string(),
-        "168.192.in-addr.arpa.".to_string(),
-    ];
-    let rfc1918 = (16..=31).map(|n| format!("{n}.172.in-addr.arpa."));
+pub fn rollback_zones(lan_zone: &str) -> Vec<String> {
+    let lan = canonical_zone(lan_zone);
+    let local = format!("local.{lan}");
     let ipv6 = ["c.f.ip6.arpa.", "d.f.ip6.arpa."];
     std::iter::once(lan)
-        .chain(fixed)
-        .chain(rfc1918)
+        .chain(std::iter::once(local))
+        .chain(reverse_zones())
         .chain(ipv6.iter().map(|z| z.to_string()))
         .collect()
 }
@@ -524,8 +530,8 @@ pub fn rollback_zones() -> Vec<String> {
 // What: true for a zone with snapshots and rollback.
 // Why: rpz and unknown zones must never be rolled back.
 // From: Issue #1683 | PR #1905
-pub fn is_rollback_zone(zone: &str) -> bool {
-    rollback_zones().iter().any(|z| z == zone)
+pub fn is_rollback_zone(lan_zone: &str, zone: &str) -> bool {
+    rollback_zones(lan_zone).iter().any(|z| z == zone)
 }
 
 // What: zone name in dotted form, as snapshot paths use it.
@@ -839,8 +845,10 @@ mod tests {
             "1.168.192.in-addr.arpa"
         );
         assert_eq!(zone_api_id("lan"), "lan");
-        assert!(is_rollback_zone("31.172.in-addr.arpa.") && !is_rollback_zone("rpz."));
-        assert!(!is_rollback_zone("lan") && !is_rollback_zone("15.172.in-addr.arpa."));
+        let lan = "home-zone";
+        assert!(is_rollback_zone(lan, "31.172.in-addr.arpa.") && !is_rollback_zone(lan, "rpz."));
+        assert!(is_rollback_zone(lan, &canonical_zone(lan)));
+        assert!(!is_rollback_zone(lan, lan) && !is_rollback_zone(lan, "15.172.in-addr.arpa."));
     }
 
     // What: need and need_flag reject unset, empty, junk.

@@ -18,11 +18,11 @@ use axum::routing::{MethodRouter, delete, get, post};
 use base64::Engine as _;
 use futures_util::StreamExt as _;
 use lancache_ng::config::{
-    self, AAAA_FILTER_MARKER, DDNS_UNSIGNED_MARKER, DEFAULT_RECORD_TTL, DhcpMode, LAN_ZONE,
+    self, AAAA_FILTER_MARKER, DDNS_UNSIGNED_MARKER, DEFAULT_RECORD_TTL, DhcpMode,
     NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, NatsLogin, NatsRoles, OPTION_CODE_MAX,
     OPTION_CODE_MIN, OutOfRange, PDNS_API_PATH, PROXY_ACCESS_LOG_PATTERN, Uint, canonical_zone,
     dns_reader_publish, dns_subscribe, is_dns_name, option_code, option_data, parse_bool,
-    parse_custom_options, rollback_zones, zone_url,
+    parse_custom_options, reverse_zones, zone_url,
 };
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, DesiredRunState, DesiredState, DnsRecord, FlushRequest,
@@ -119,6 +119,9 @@ struct Config {
     // What: the proxy's syslog-ng directory.
     // Why: nginx logs to stdout; syslog-ng stores it.
     proxy_log_dir: String,
+    // What: the local DNS zone name, from DHCP_DOMAIN.
+    // Why: the SOT owns it; the ui holds no literal.
+    lan_zone: String,
     // What: the UDP port the NTP server answers on.
     // Why: the ntp page names it; the SOT owns it.
     ntp_port: String,
@@ -327,6 +330,7 @@ impl Config {
             shared_secret_dir: secret_dir.clone(),
             cdn_domains_file: need("CDN_DOMAINS_FILE")?,
             proxy_log_dir,
+            lan_zone: config::lan_zone(env)?,
             ntp_port: need("NTP_PORT")?,
             setup_script_url: format!(
                 "{}/{}",
@@ -1778,7 +1782,7 @@ async fn netdata_proxy(
 // Why: only zones the stack provisions may hold a PTR.
 fn reverse_zone_for_ipv4(ip: Ipv4Addr) -> Option<String> {
     let [a, b, _, _] = ip.octets();
-    let zones = rollback_zones();
+    let zones = reverse_zones();
     [
         format!("{a}.in-addr.arpa."),
         format!("{b}.{a}.in-addr.arpa."),
@@ -1926,10 +1930,10 @@ fn soa_query(id: u16, zone: &str) -> Vec<u8> {
 
 // What: ask addr:port for the lan. SOA over UDP.
 // Why: a silent host is a status, not an error.
-async fn probe_secondary_soa(addr: Ipv4Addr, port: u16) -> ProbeResult {
+async fn probe_secondary_soa(addr: Ipv4Addr, port: u16, lan_zone: &str) -> ProbeResult {
     const TIMEOUT: Duration = Duration::from_secs(4);
     let id: u16 = rand::random();
-    let query = soa_query(id, LAN_ZONE);
+    let query = soa_query(id, lan_zone);
     let exchange = async {
         let socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0))
             .await
@@ -2591,7 +2595,7 @@ async fn check_secondary_health(
     };
     // What: probe DNS_PORT, the secondary's own DNS.
     // Why: PDNS_AUTH_PORT is the primary's PowerDNS port.
-    let result = probe_secondary_soa(addr, state.config.dns_port).await;
+    let result = probe_secondary_soa(addr, state.config.dns_port, &state.config.lan_zone).await;
     if result.status == "ok" {
         let _ = with_db(&state, |db| {
             db.execute(
@@ -4521,21 +4525,21 @@ fn flush_name(domain: &str) -> FlushRequest {
 
 // What: a LAN record name as a dotted FQDN in zone lan.
 // Why: the bare name "lan" is the zone root, not lan.lan.
-fn normalize_lan_name(name: &str) -> String {
+fn normalize_lan_name(name: &str, lan_zone: &str) -> String {
     let name = name.trim().to_lowercase();
     if name.ends_with('.') {
         name
-    } else if name == LAN_ZONE || name.ends_with(&format!(".{LAN_ZONE}")) {
+    } else if name == lan_zone || name.ends_with(&format!(".{lan_zone}")) {
         format!("{name}.")
     } else {
-        format!("{name}.{LAN_ZONE}.")
+        format!("{name}.{lan_zone}.")
     }
 }
 
 // What: true for an FQDN inside the lan zone.
 // Why: the ui may only touch records of its own zone.
-fn is_lan_name(name: &str, underscore: bool) -> bool {
-    let zone = canonical_zone(LAN_ZONE);
+fn is_lan_name(name: &str, underscore: bool, lan_zone: &str) -> bool {
+    let zone = canonical_zone(lan_zone);
     is_fqdn(name, underscore, true) && (name == zone || name.ends_with(&format!(".{zone}")))
 }
 
@@ -4546,6 +4550,7 @@ fn validate_lan_record(
     record_type: &str,
     content: &str,
     ttl: u32,
+    lan_zone: &str,
 ) -> Option<(&'static str, String)> {
     if !(1..=MAX_TTL).contains(&ttl) {
         return None;
@@ -4558,21 +4563,21 @@ fn validate_lan_record(
         "TXT" => "TXT",
         _ => return None,
     };
-    if !is_lan_name(name, kind == "TXT") {
+    if !is_lan_name(name, kind == "TXT", lan_zone) {
         return None;
     }
     let content = content.trim();
     let valid = match kind {
         "A" => content.parse::<Ipv4Addr>().is_ok(),
         "AAAA" => content.parse::<Ipv6Addr>().is_ok(),
-        "CNAME" => is_fqdn(&normalize_lan_name(content), false, true),
+        "CNAME" => is_fqdn(&normalize_lan_name(content, lan_zone), false, true),
         "MX" => {
             let mut parts = content.split_whitespace();
             matches!(
                 (parts.next(), parts.next(), parts.next()),
                 (Some(priority), Some(exchange), None)
                     if priority.parse::<u16>().is_ok()
-                        && is_fqdn(&normalize_lan_name(exchange), false, true)
+                        && is_fqdn(&normalize_lan_name(exchange, lan_zone), false, true)
             )
         }
         _ => {
@@ -4669,9 +4674,7 @@ fn ptr_rows(rrsets: &[Value]) -> Vec<PtrRow> {
 // What: all PTR rows of the provisioned IPv4 reverse zones.
 // Why: up to 18 zones are read at once; one by one is slow.
 async fn fetch_ptr_records(state: &AppState) -> Vec<PtrRow> {
-    let zones = rollback_zones()
-        .into_iter()
-        .filter(|zone| zone.ends_with(".in-addr.arpa."));
+    let zones = reverse_zones().into_iter();
     let per_zone = futures_util::future::join_all(zones.map(|zone| async move {
         let rrsets = state
             .pdns
@@ -4819,7 +4822,7 @@ async fn domains_page(
         async {
             state
                 .pdns
-                .zone_rrsets(&state.config.pdns_auth_api, LAN_ZONE)
+                .zone_rrsets(&state.config.pdns_auth_api, &state.config.lan_zone)
                 .await
                 .map(|sets| {
                     sets.into_iter()
@@ -4927,17 +4930,21 @@ async fn toggle_default_domain(
 // What: add or replace a LAN record through NATS.
 // Why: the subscriber writes it on every DNS node.
 async fn add_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect {
-    let name = normalize_lan_name(f.get("name"));
+    let name = normalize_lan_name(f.get("name"), &state.config.lan_zone);
     let ttl = f.number::<u32>("ttl").unwrap_or(DEFAULT_RECORD_TTL as u32);
-    let Some((kind, content)) =
-        validate_lan_record(&name, f.get("record_type"), f.get("content"), ttl)
-    else {
+    let Some((kind, content)) = validate_lan_record(
+        &name,
+        f.get("record_type"),
+        f.get("content"),
+        ttl,
+        &state.config.lan_zone,
+    ) else {
         tracing::warn!(name = %f.get("name"), record_type = %f.get("record_type"), "Rejected invalid LAN record");
         return Redirect::to("/domains");
     };
     let record = DnsRecord {
         action: "replace".into(),
-        zone: LAN_ZONE.into(),
+        zone: state.config.lan_zone.clone(),
         name: name.clone(),
         record_type: kind.into(),
         ttl: Some(ttl as i32),
@@ -4950,7 +4957,7 @@ async fn add_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect
         tracing::error!("NATS publish failed: {e}");
     }
     let request = FlushRequest {
-        zone: Some(LAN_ZONE.into()),
+        zone: Some(state.config.lan_zone.clone()),
         record_type: Some(kind.into()),
         expected_content: Some(vec![content]),
         expected_ttl: Some(ttl as i32),
@@ -4963,17 +4970,17 @@ async fn add_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect
 // What: delete a LAN record set through NATS.
 // Why: any type may be deleted; the name must be in lan.
 async fn remove_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect {
-    let name = normalize_lan_name(f.get("name"));
+    let name = normalize_lan_name(f.get("name"), &state.config.lan_zone);
     let (Some(kind), true) = (
         delete_record_type(f.get("record_type")),
-        is_lan_name(&name, true),
+        is_lan_name(&name, true, &state.config.lan_zone),
     ) else {
         tracing::warn!(name = %f.get("name"), record_type = %f.get("record_type"), "Rejected invalid LAN record delete");
         return Redirect::to("/domains");
     };
     let record = DnsRecord {
         action: "delete".into(),
-        zone: LAN_ZONE.into(),
+        zone: state.config.lan_zone.clone(),
         name: name.clone(),
         record_type: kind.clone(),
         ttl: None,
@@ -4983,7 +4990,7 @@ async fn remove_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redir
         tracing::error!("NATS publish failed: {e}");
     }
     let request = FlushRequest {
-        zone: Some(LAN_ZONE.into()),
+        zone: Some(state.config.lan_zone.clone()),
         record_type: Some(kind),
         ..flush_name(&name)
     };
@@ -6039,6 +6046,10 @@ fn hash_password_from_stdin() -> Result<String, String> {
 // Why: the rules guard data and security.
 #[cfg(test)]
 mod tests {
+    // What: the LAN zone name the tests run under.
+    // Why: the SOT value is injected in production only.
+    const LAN: &str = "lan";
+
     use super::*;
     use lancache_ng::{serve_canned, unique_temp_dir};
 
@@ -6205,13 +6216,16 @@ mod tests {
     // Why: the bare name "lan" is the zone root.
     #[test]
     fn lan_names_are_normalized_into_the_zone() {
-        assert_eq!(normalize_lan_name("Host"), "host.lan.");
-        assert_eq!(normalize_lan_name(" HOST.Lan "), "host.lan.");
-        assert_eq!(normalize_lan_name("lan"), "lan.");
-        assert_eq!(normalize_lan_name("a.b.lan."), "a.b.lan.");
-        assert_eq!(normalize_lan_name("host.example.com."), "host.example.com.");
-        assert!(is_lan_name("host.lan.", false) && is_lan_name("lan.", false));
-        assert!(!is_lan_name("host.example.com.", false) && !is_lan_name("xlan.", false));
+        assert_eq!(normalize_lan_name("Host", LAN), "host.lan.");
+        assert_eq!(normalize_lan_name(" HOST.Lan ", LAN), "host.lan.");
+        assert_eq!(normalize_lan_name("lan", LAN), "lan.");
+        assert_eq!(normalize_lan_name("a.b.lan.", LAN), "a.b.lan.");
+        assert_eq!(
+            normalize_lan_name("host.example.com.", LAN),
+            "host.example.com."
+        );
+        assert!(is_lan_name("host.lan.", false, LAN) && is_lan_name("lan.", false, LAN));
+        assert!(!is_lan_name("host.example.com.", false, LAN) && !is_lan_name("xlan.", false, LAN));
     }
 
     // What: LAN records pass by type, content, name, TTL.
@@ -6219,7 +6233,7 @@ mod tests {
     #[test]
     fn lan_records_are_validated_by_type() {
         let ok = |name: &str, kind: &str, content: &str, ttl: u32| {
-            validate_lan_record(name, kind, content, ttl)
+            validate_lan_record(name, kind, content, ttl, LAN)
         };
         assert_eq!(
             ok("h.lan.", "a", " 192.0.2.1 ", 300),
@@ -6539,8 +6553,9 @@ mod tests {
         assert_eq!(fields.number::<u32>("none"), None);
     }
 
-    const TEXT_KEYS: [&str; 39] = [
+    const TEXT_KEYS: [&str; 40] = [
         "NTP_PORT",
+        "DHCP_DOMAIN",
         "RAW_CONTENT_URL",
         "SETUP_SCRIPT_PATH",
         "CONTAINER_NAME_PROXY",
@@ -7514,14 +7529,14 @@ mod tests {
                 .unwrap();
             buf[..n].to_vec()
         });
-        let result = probe_secondary_soa(Ipv4Addr::LOCALHOST, port).await;
+        let result = probe_secondary_soa(Ipv4Addr::LOCALHOST, port, LAN).await;
         assert_eq!((result.status, result.serial), ("ok", Some(77)));
         let query = handle.join().unwrap();
         assert_eq!(&query[2..], &soa_query(0, "lan")[2..]);
         let closed = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let free = closed.local_addr().unwrap().port();
         drop(closed);
-        let gone = probe_secondary_soa(Ipv4Addr::LOCALHOST, free).await;
+        let gone = probe_secondary_soa(Ipv4Addr::LOCALHOST, free, LAN).await;
         assert_eq!(gone.status, "unreachable");
         assert!(
             gone.detail
@@ -8538,15 +8553,15 @@ mod tests {
     // Why: the ui may only touch records of its own zone.
     #[test]
     fn lan_names_and_records_follow_zone_rules() {
-        assert_eq!(normalize_lan_name("xlan"), "xlan.lan.");
-        assert_eq!(normalize_lan_name("a.LAN"), "a.lan.");
-        assert!(is_lan_name("_k.lan.", true));
-        assert!(!is_lan_name("_k.lan.", false));
-        assert!(is_lan_name("*.lan.", false));
-        assert!(!is_lan_name("lan", false));
-        assert!(!is_lan_name("evil-lan.", false));
+        assert_eq!(normalize_lan_name("xlan", LAN), "xlan.lan.");
+        assert_eq!(normalize_lan_name("a.LAN", LAN), "a.lan.");
+        assert!(is_lan_name("_k.lan.", true, LAN));
+        assert!(!is_lan_name("_k.lan.", false, LAN));
+        assert!(is_lan_name("*.lan.", false, LAN));
+        assert!(!is_lan_name("lan", false, LAN));
+        assert!(!is_lan_name("evil-lan.", false, LAN));
         let ok = |name: &str, kind: &str, content: &str, ttl: u32| {
-            validate_lan_record(name, kind, content, ttl)
+            validate_lan_record(name, kind, content, ttl, LAN)
         };
         assert!(ok("h.lan.", "A", "10.0.0.1", 1).is_some());
         assert!(ok("h.lan.", "A", "10.0.0.1", 2_147_483_647).is_some());

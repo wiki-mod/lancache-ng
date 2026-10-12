@@ -20,9 +20,9 @@ use axum::{Json, Router};
 use futures::StreamExt;
 use futures::future::join_all;
 use lancache_ng::config::{
-    DEFAULT_RECORD_TTL, LAN_ZONE, NATS_STREAM_DNS, NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH,
-    NATS_SUBJECT_RECORD, OutOfRange, Uint, canonical_zone, env_opt, is_dns_name, is_rollback_zone,
-    need, parse_bool, process_env, rollback_zones, zone_url,
+    DEFAULT_RECORD_TTL, NATS_STREAM_DNS, NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD,
+    OutOfRange, Uint, canonical_zone, env_opt, is_dns_name, is_rollback_zone, lan_zone, need,
+    parse_bool, process_env, rollback_zones, zone_url,
 };
 use lancache_ng::{
     DnsRecord, FlushRequest, PowerDns, SnapshotStore, ct_eq, die, http_client,
@@ -71,6 +71,9 @@ struct Ctx {
     pdns_auth_config_dir: String,
     snapshot_dir: PathBuf,
     keep_n: u32,
+    // What: the local zone name, from DHCP_DOMAIN.
+    // Why: the SOT owns it; no literal in this crate.
+    lan_zone: String,
     lock: tokio::sync::Mutex<()>,
     js: jetstream::Context,
 }
@@ -250,7 +253,7 @@ fn changed_names(patch: &Value) -> Vec<String> {
 // Why: also covers Kea DDNS writes that bypass NATS.
 // From: Issue #628
 async fn snapshot_zone(ctx: &Ctx, zone: &str) {
-    if !is_rollback_zone(zone) {
+    if !is_rollback_zone(&ctx.lan_zone, zone) {
         return;
     }
     let store = ctx.store(zone);
@@ -279,7 +282,7 @@ async fn snapshot_watcher(ctx: Arc<Ctx>) {
     let mut interval = tokio::time::interval(TICK);
     loop {
         interval.tick().await;
-        for zone in rollback_zones() {
+        for zone in rollback_zones(&ctx.lan_zone) {
             snapshot_zone(&ctx, &zone).await;
         }
     }
@@ -291,7 +294,7 @@ async fn reconciler(ctx: Arc<Ctx>) {
     let mut interval = tokio::time::interval(TICK);
     loop {
         interval.tick().await;
-        let rrsets = match ctx.zone_rrsets(LAN_ZONE).await {
+        let rrsets = match ctx.zone_rrsets(&ctx.lan_zone).await {
             Ok(rrsets) => data_rrsets(&rrsets),
             Err(e) => {
                 eprintln!("Reconciler: cannot read the lan zone: {e}");
@@ -302,7 +305,7 @@ async fn reconciler(ctx: Arc<Ctx>) {
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|rrset| rrset_record("replace", LAN_ZONE, rrset))
+            .filter_map(|rrset| rrset_record("replace", &ctx.lan_zone, rrset))
             .collect();
         for record in &records {
             let name = record.name.trim_end_matches('.');
@@ -627,7 +630,7 @@ async fn list_snapshots(State(ctx): State<Arc<Ctx>>, headers: HeaderMap) -> Resp
         return failure(StatusCode::UNAUTHORIZED, "missing or invalid X-API-Key").into_response();
     }
     let mut zones = HashMap::new();
-    for zone in rollback_zones() {
+    for zone in rollback_zones(&ctx.lan_zone) {
         let ids = ctx.store(&zone).ids().unwrap_or_default();
         let list: Vec<Value> = ids
             .into_iter()
@@ -678,12 +681,12 @@ async fn check_zone(ctx: &Ctx, store: &SnapshotStore, zone: &str) -> bool {
 
 // What: republish a rollback patch for the lan zone.
 // Why: other nodes converge now, not at the next tick.
-async fn publish_patch(js: &jetstream::Context, patch: &Value) {
+async fn publish_patch(js: &jetstream::Context, lan_zone: &str, patch: &Value) {
     let stamp = unix_nanos();
     for rrset in patch["rrsets"].as_array().into_iter().flatten() {
         let delete = rrset.get("changetype").and_then(Value::as_str) == Some("DELETE");
         let action = if delete { "delete" } else { "replace" };
-        if let Some(record) = rrset_record(action, LAN_ZONE, rrset) {
+        if let Some(record) = rrset_record(action, lan_zone, rrset) {
             let name = record.name.trim_end_matches('.');
             // What: a fresh message id per republish.
             // Why: the dedup window absorbs a repeated id.
@@ -698,7 +701,7 @@ async fn publish_patch(js: &jetstream::Context, patch: &Value) {
 // From: Issue #628
 async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusCode, Json<Value>)> {
     let zone = canonical_zone(&request.zone);
-    if !is_rollback_zone(&zone) {
+    if !is_rollback_zone(&ctx.lan_zone, &zone) {
         let message = format!("zone {zone} is not managed by this rollback mechanism");
         return Err(failure(StatusCode::BAD_REQUEST, message));
     }
@@ -781,9 +784,9 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
 
     // What: records go out before any flush.
     // Why: else a flushed cache refills from stale data.
-    let republished = zone == canonical_zone(LAN_ZONE) && patch_len > 0;
+    let republished = zone == canonical_zone(&ctx.lan_zone) && patch_len > 0;
     if republished {
-        publish_patch(&ctx.js, &patch).await;
+        publish_patch(&ctx.js, &ctx.lan_zone, &patch).await;
     }
 
     // What: all flushes run at once, 3 s each.
@@ -975,6 +978,7 @@ async fn main() {
         pdns_auth_config_dir: required("PDNS_AUTH_CONFIG_DIR"),
         snapshot_dir: PathBuf::from(snapshot_dir),
         keep_n: keep_n as u32,
+        lan_zone: lan_zone(&process_env).unwrap_or_else(|e| die(TAG, &e)),
         lock: tokio::sync::Mutex::new(()),
         js,
     });
@@ -1300,6 +1304,7 @@ mod tests {
             pdns_auth_config_dir: "/no/such/config".to_string(),
             snapshot_dir: dir,
             keep_n: 3,
+            lan_zone: "lan".to_string(),
             lock: tokio::sync::Mutex::new(()),
             js,
         }
@@ -1461,7 +1466,7 @@ mod tests {
         assert_eq!(listed["zones"]["10.in-addr.arpa."], json!([]));
         assert_eq!(
             listed["zones"].as_object().unwrap().len(),
-            rollback_zones().len()
+            rollback_zones("lan").len()
         );
         let _ = fs::remove_dir_all(&dir);
     }
