@@ -5557,13 +5557,11 @@ kea_ctrl_post() {
 }
 
 # What: host dir of KEA_CONFIG_SNAPSHOT_DIR via the ui mount
-# Why: the UI writes snapshots there; setup reads the host
+# Why: the UI writes there; the dir is a SOT default
 # From: Issue #1683 | PR #1858
 kea_snapshot_host_dir() {
     local install_dir="$1" env_file="$2" kea_dir="$3" snapshot_dir target
-    snapshot_dir=$(get_env_var KEA_CONFIG_SNAPSHOT_DIR "$env_file") || exit $?
-    [[ -n "$snapshot_dir" ]] \
-        || die "KEA_CONFIG_SNAPSHOT_DIR is empty or missing in $env_file; run setup.sh update."
+    snapshot_dir=$(prod_env_default KEA_CONFIG_SNAPSHOT_DIR) || exit $?
     target=$(compose_config_value "$install_dir" "$env_file" \
         '[.services.ui.volumes[]? | select(.source == $src) | .target] | first' --arg src "$kea_dir") || exit $?
     [[ -n "$target" ]] || die "The ui service of $install_dir does not mount $kea_dir."
