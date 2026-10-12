@@ -157,6 +157,12 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
+    # What: one build per identity and platform at a time.
+    # Why: a waiting run re-resolves and verifies, no race.
+    # From: Issue #1683 | PR #1912
+    concurrency:
+      group: build-${{ matrix.service }}-${{ matrix.platform }}-${{ matrix.identity }}
+      cancel-in-progress: false
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['build'] }}
     container: *bt_platform
     # What: cache secrets the build's set-runtime needs.
