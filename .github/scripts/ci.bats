@@ -5564,7 +5564,20 @@ ROWS
     [ "$(jq -S . <<<"${output}")" = "$(_ci_daemon_additions | jq -S .)" ] || { echo "missing file: ${output}"; return 1; }
     printf '{ %s' "$(_val name)" > "${f}"
     run _ci_daemon_merge "${f}"
-    _expect bad-json 1 "[CI-ERROR-DAEMON-0001];${f}" || return 1
+    _expect bad-json 1 "[CI-ERROR-DAEMON-0001];${f};parse error" || return 1
+}
+
+# What: restart waits the SOT time, then shows docker's raw text.
+# Why: V-N3: a dead dockerd must not end in a bare message.
+# From: Issue #1255 | PR #1912
+@test "docker-daemon-config: a dockerd that never answers fails with its raw text" {
+    local msg wait
+    msg="$(_val name)" wait="$(_val int 2 4)"
+    systemctl() { return 0; }
+    sleep() { return 0; }
+    docker() { printf '%s\n' "${msg}" >&2; return 1; }
+    CONFIRM_DOCKERD_RESTART=yes CI_DAEMON_RESTART_WAIT="${wait}" run _ci_daemon_restart "$(_val path)"
+    _expect never-answers 1 "[CI-ERROR-DAEMON-0005];wait=${wait};${msg}" || return 1
 }
 
 # What: apply backs up and installs; restart needs consent.

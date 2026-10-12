@@ -9378,11 +9378,11 @@ _ci_daemon_additions() {
 # Why: jq * keeps unrelated keys; bad JSON fails closed.
 # From: Issue #1255 | PR #1349
 _ci_daemon_merge() {
-    local file="$1" existing="{}" additions
+    local file="$1" existing="{}" additions jerr
     if [ -f "${file}" ]; then
         existing="$(_ci_capture 0 cat "${file}")" || return 2
-        if ! jq empty <<<"${existing}" 2>/dev/null; then
-            ci_log "[CI-ERROR-DAEMON-0001]" "path=\"${file}\" reason=\"not valid JSON; fix or remove it first\""
+        if ! jerr="$(jq empty <<<"${existing}" 2>&1)"; then
+            ci_error "[CI-ERROR-DAEMON-0001]" "path=\"${file}\" reason=\"not valid JSON; fix or remove it first\"" "${jerr}"
             return 1
         fi
         [ -n "${existing//[[:space:]]/}" ] || existing="{}"
@@ -9459,16 +9459,17 @@ _ci_daemon_apply() {
 # Why: it stops every container, in-flight CI jobs included.
 # From: Issue #1255 | PR #1349
 _ci_daemon_restart() {
-    local file="$1" attempt=0 driver
+    local file="$1" attempt=0 driver wait_max probe
+    wait_max="$(_ci_variable CI_DAEMON_RESTART_WAIT)" || return 2
     if [ "${CONFIRM_DOCKERD_RESTART:-}" != "yes" ]; then
         ci_log "[CI-ERROR-DAEMON-0004]" "reason=\"restart stops every container; set CONFIRM_DOCKERD_RESTART=yes\""
         return 1
     fi
     _ci_capture 0 systemctl restart docker || return 2
-    until docker info >/dev/null 2>&1; do
+    until probe="$(docker info 2>&1)"; do
         attempt=$((attempt + 1))
-        if [ "${attempt}" -ge 30 ]; then
-            ci_log "[CI-ERROR-DAEMON-0005]" "reason=\"dockerd not responsive 30s after restart\""
+        if [ "${attempt}" -ge "${wait_max}" ]; then
+            ci_error "[CI-ERROR-DAEMON-0005]" "wait=${wait_max} reason=\"dockerd not responsive after restart\"" "${probe}"
             return 1
         fi
         sleep 1
