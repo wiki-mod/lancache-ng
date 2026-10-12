@@ -3074,7 +3074,7 @@ const NGINX_STREAM_TARGETS: &str = "stream.d/00-stream-targets.conf";
 const NGINX_HTTPS_DISPATCH: &str = "stream.d/01-https-dispatch.conf";
 
 // What: subject of the stack CA certificate.
-// Why: certs/generate-ca.sh must issue the same subject.
+// Why: the supervisor is the one owner of CA creation.
 // From: Issue #1683 | PR #1912
 const CA_SUBJECT: &str = "/CN=LanCache-NG CA/O=LanCache-NG/C=DE";
 
@@ -6028,9 +6028,6 @@ mod tests {
         verify(&leaf).expect("leaf signed by the new CA");
         verify(&default).expect("default signed by the new CA");
         assert!(marker.is_file());
-        let generator = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../certs/generate-ca.sh");
-        let script = fs::read_to_string(&generator).expect("generate-ca.sh");
-        assert!(script.contains(&format!("-subj \"{CA_SUBJECT}\"")));
     }
 
     // What: a failed signing leaves no key or certificate.
