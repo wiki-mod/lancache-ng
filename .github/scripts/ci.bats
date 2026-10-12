@@ -1119,6 +1119,23 @@ ROWS
         || { echo "root export line ${root_line:-none} is not after fixture export line ${fixture_line:-none}"; return 1; }
 }
 
+# What: the validate .env.local helper writes, 600, or fails
+# Why: dns and kea rollback share it; no .env exists
+# From: Issue #836 | PR #1912
+@test "validate env-local helper: mode 600, content kept, existing or unwritable refused" {
+    local d="${BATS_TEST_TMPDIR}/inst" f
+    f="${d}/.env.local"
+    mkdir -p "${d}" && _ci_validate_env_local "${d}" "" || return 1
+    [ -f "${f}" ] && [ ! -s "${f}" ] && [ "$(stat -c %a "${f}")" = 600 ] || { echo "empty file: $(stat -c '%a %s' "${f}")"; return 1; }
+    run _ci_validate_env_local "${d}" "A=1"
+    _expect existing 2 "[CI-ERROR-VALIDATE-0113]" || return 1
+    [ ! -s "${f}" ] || { echo "an existing file was overwritten"; return 1; }
+    rm -f "${f}" && _ci_validate_env_local "${d}" "KEA_CTRL_TOKEN=x" || return 1
+    [ "$(cat "${f}")" = "KEA_CTRL_TOKEN=x" ] && [ "$(stat -c %a "${f}")" = 600 ] || { echo "content: $(cat "${f}")"; return 1; }
+    run _ci_validate_env_local "${d}/missing" ""
+    _expect unwritable 2 "[CI-ERROR-VALIDATE-0093]" || return 1
+}
+
 # What: proxy constant reads Rust const forms or fails
 # Why: AG-VAL-036: visibility and spacing are valid Rust
 # From: Issue #1683 | PR #1912
