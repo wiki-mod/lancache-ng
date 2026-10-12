@@ -259,13 +259,17 @@ jobs:
   scan:
     name: scan
     needs: [platform, plan, build]
-    if: needs.plan.outputs.any-build == 'true'
+    if: >-
+      !cancelled() && needs.plan.outputs.any-build == 'true'
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['scan'] }}
     container: *bt_platform
+    outputs:
+      passed: ${{ steps.scan.outputs.passed }}
     steps:
       - *bootstrap
       - name: Scan the built images by digest
+        id: scan
         env:
           CI_BUILD_MATRIX: ${{ needs.plan.outputs.matrix }}
         run: bash .github/scripts/ci.sh scan-stack
@@ -277,7 +281,7 @@ jobs:
     name: aggregate
     needs: [platform, plan, scan]
     if: >-
-      !cancelled() && needs.scan.result == 'success' &&
+      !cancelled() && needs.scan.outputs.passed != '' &&
       needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['aggregate'] }}
@@ -289,7 +293,7 @@ jobs:
       - *bootstrap
       - name: Aggregate acceptance into the ledger
         env:
-          CI_BUILD_MATRIX: ${{ needs.plan.outputs.matrix }}
+          CI_BUILD_MATRIX: ${{ needs.scan.outputs.passed }}
         run: bash .github/scripts/ci.sh aggregate-stack
 
   # What: merge platform digests into multi-arch index
@@ -297,7 +301,7 @@ jobs:
   # From: Issue #1683
   assemble:
     name: assemble
-    needs: [platform, plan, aggregate]
+    needs: [platform, plan, scan, aggregate]
     if: >-
       !cancelled() && needs.aggregate.result == 'success' &&
       needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
@@ -308,7 +312,7 @@ jobs:
       - *bootstrap
       - name: Assemble multi-arch indexes
         env:
-          CI_BUILD_MATRIX: ${{ needs.plan.outputs.matrix }}
+          CI_BUILD_MATRIX: ${{ needs.scan.outputs.passed }}
         run: bash .github/scripts/ci.sh assemble-stack
 
   # What: validate full stack on exact candidate
@@ -316,12 +320,12 @@ jobs:
   # From: Issue #1683
   validate:
     name: validate
-    needs: [platform, plan, build, aggregate, assemble]
+    needs: [platform, plan, build, scan, aggregate, assemble]
     if: >-
       !cancelled() && needs.plan.outputs.validate == 'true' &&
       contains(fromJSON('["success","skipped"]'), needs.build.result) &&
       (github.event_name == 'pull_request' || needs.plan.outputs.any-build == 'false' ||
-      needs.assemble.result == 'success')
+      (needs.scan.result == 'success' && needs.assemble.result == 'success'))
     # What: build-tools container, one shared host dir.
     # Why: AG-VAL-016; same path both sides for binds.
     # From: Issue #1683 | PR #1912
