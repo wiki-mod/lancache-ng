@@ -962,15 +962,28 @@ ci_cmd_plan_matrix() {
             [ -n "${platform}" ] || continue
             resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
             paction="$(_ci_record_field "${resolved}" action)" || return 2
-            [ "${paction}" = "build" ] || continue
+            # What: MISMATCH state fails the plan
+            # Why: a contradiction must not look green
+            # From: Issue #1683 | PR #1912
+            if [ "${paction}" = fail ]; then
+                ci_error "[CI-ERROR-PLAN-0005]" "service=\"${service}\" platform=\"${platform}\" reason=\"ledger and registry digest disagree; no build, no accept\"" "${resolved}"
+                return 2
+            fi
+            # What: unverified artifacts join the matrix
+            # Why: ship verifies, scan accepts; no rebuild
+            # From: Issue #1683 | PR #1912
+            [ "${paction}" = build ] || [ "${paction}" = verify ] || continue
             # What: matrix holds targets with proven impact.
             # Why: MISSING_CONFIRMED must not build alone.
             # From: Issue #1683 | PR #1858
             pident="$(_ci_record_field "${resolved}" identity)" || return 2
-            pimpact="$(_ci_semantic_impact "${service}" "${platform}" "${pident}")" || return 2
+            pimpact=BUILD
+            if [ "${paction}" = build ]; then
+                pimpact="$(_ci_semantic_impact "${service}" "${platform}" "${pident}")" || return 2
+            fi
             [ "${pimpact}" = BUILD ] || continue
             runner="$(_ci_platform_field "${platform}" runner "[CI-ERROR-PLAN-0002]" "service=\"${service}\" reason=\"no runner label for platform\"")" || return 2
-            include="$(_ci_matrix_append "${include}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}")" || return 2
+            include="$(_ci_matrix_append "${include}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}" identity="${pident}")" || return 2
             any=true
         done <<< "${plats}"
     done
@@ -1869,6 +1882,15 @@ _ci_ledger_upsert() {
         ci_log "[CI-ERROR-LEDGER-0001]" "ref=\"${ledger_ref}\" remote=\"${remote}\" reason=\"ledger read UNKNOWN (raw above); refusing to write\""
         return 3
     fi
+    # What: two different records for one identity fail
+    # Why: conflicting records fail closed (§26.4)
+    # From: Issue #1683 | PR #1912
+    local conflict
+    conflict="$(printf '%s\n%s\n' "${blob}" "${new}" | awk -F'\t' 'NF > 0 { if (($1 in seen) && seen[$1] != $0) print $1; seen[$1] = $0 }')"
+    if [ -n "${conflict}" ]; then
+        ci_error "[CI-ERROR-LEDGER-0006]" "ref=\"${ledger_ref}\" reason=\"conflicting records for one identity; refusing to write\"" "${conflict}"
+        return 3
+    fi
     ids="$(printf '%s\n' "${new}" | awk -F'\t' '{print $1}')"
     if [ "${rc}" -eq 1 ]; then
         kept=""
@@ -1954,9 +1976,18 @@ ci_cmd_aggregate() {
         records="${records}${line}"$'\n'
     done
     [ -n "${records}" ] || { ci_log "[CI-ERROR-AGGREGATE-0003]" "reason=\"no result.json in dir\" dir=\"${dir}\""; return 2; }
-    local rc=0 remote
+    local rc=0 remote tries n=1
     remote="$(_ci_git_remote)" || return 2
-    printf '%s' "${records}" | _ci_ledger_upsert "${remote}" || rc=$?
+    tries="$(_ci_variable CI_RETRY_MAX_ATTEMPTS)" || return 2
+    # What: a lost CAS race re-reads the ledger, then writes
+    # Why: the other writer's records must be merged in
+    # From: Issue #1683 | PR #1912
+    while :; do
+        rc=0
+        printf '%s' "${records}" | _ci_ledger_upsert "${remote}" || rc=$?
+        [ "${rc}" -eq 2 ] && [ "${n}" -lt "${tries}" ] || break
+        n=$((n + 1))
+    done
     if [ "${rc}" -eq 0 ]; then
         printf 'aggregate records=%s\n' "$(printf '%s' "${records}" | grep -c .)"
         return 0
@@ -2024,18 +2055,30 @@ ci_cmd_aggregate_stack() {
 # Why: SCAN before ACCEPT; thin YAML, iteration in ci.sh.
 # From: Issue #1683
 ci_cmd_scan_stack() {
-    local matrix="${CI_BUILD_MATRIX:-}" svc plat digest pairs
+    local matrix="${CI_BUILD_MATRIX:-}" svc plat digest pairs rc=0 crc failed=""
     [ -n "${matrix}" ] || { ci_log "[CI-ERROR-SCAN-0016]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
     pairs="$(_ci_matrix_pairs "${matrix}")" || return 2
     _ci_require_ghcr_auth || return "$?"
+    # What: scans every pair, lists failures at the end
+    # Why: one finding must not hide the other results
+    # From: Issue #1683 | PR #1912
     while read -r svc plat; do
         [ -n "${svc}" ] || continue
         digest="$(_ci_published_digest "${svc}" "${plat}")" || {
             ci_log "[CI-ERROR-SCAN-0017]" "service=\"${svc}\" platform=\"${plat}\" reason=\"no published digest to scan\""
-            return 2
+            failed="${failed} ${svc}/${plat}"
+            rc=2
+            continue
         }
-        ci_cmd_scan "${svc}" "${digest}" || return "$?"
+        crc=0
+        ci_cmd_scan "${svc}" "${digest}" || crc=$?
+        if [ "${crc}" -ne 0 ]; then
+            failed="${failed} ${svc}/${plat}"
+            [ "${crc}" -le "${rc}" ] || rc="${crc}"
+        fi
     done <<< "${pairs}"
+    [ "${rc}" -eq 0 ] || ci_log "[CI-ERROR-SCAN-0024]" "failed=\"${failed# }\" reason=\"scan failed for these pairs; the others were scanned\""
+    return "${rc}"
 }
 
 # What: load the history a diff needs, plus refs named
@@ -3683,14 +3726,20 @@ _ci_imagetools_create() {
     _ci_retry registry docker buildx imagetools create --tag "${target}" "$@"
 }
 
-# What: Push a built tag, retrying transient push failures.
-# Why: publish retries the same digest (§22), no rebuild.
-# From: Issue #1683
+# What: Push a tag; the push digest must match the registry.
+# Why: a mismatch is no accepted image (convergence L5).
+# From: Issue #1683 | PR #1912
 _ci_docker_publish() {
-    local service="$1" identity="$2" platform="$3" tag
+    local service="$1" identity="$2" platform="$3" tag out pushed seen
     tag="$(_ci_image_tag "${service}" "${platform}" "${identity}")" || return 2
-    _ci_retry registry docker push "${tag}" >/dev/null || return "$?"
-    _ci_registry_digest "${tag}"
+    out="$(_ci_retry registry docker push "${tag}")" || return "$?"
+    pushed="$(sed -n 's/.*: digest: \(sha256:[0-9a-f]\{64\}\) size: .*/\1/p' <<< "${out}" | tail -n 1)"
+    seen="$(_ci_registry_digest "${tag}")" || return "$?"
+    if [ -z "${pushed}" ] || [ "${pushed}" != "${seen}" ]; then
+        ci_error "[CI-ERROR-PUBLISH-0006]" "service=\"${service}\" platform=\"${platform}\" pushed=\"${pushed:-none}\" registry=\"${seen}\" reason=\"push digest and registry digest differ\"" "${out}"
+        return 2
+    fi
+    printf '%s\n' "${seen}"
 }
 
 # What: the trivy exit code that means findings.
@@ -4105,6 +4154,18 @@ ci_cmd_ship() {
     out="$(ci_cmd_build "${service}" "${platform}")" || return "$?"
     printf '%s\n' "${out}"
     result="$(_ci_record_field "${out}" result)" || return 2
+    # What: smoke-tests an unverified artifact
+    # Why: PRODUCED_UNVERIFIED needs verify, no rebuild
+    # From: Issue #1683 | PR #1912
+    if [ "${result}" = verify ]; then
+        _ci_require_ghcr_auth || return "$?"
+        digest="$(_ci_published_digest "${service}" "${platform}")" || {
+            ci_log "[CI-ERROR-SHIP-0004]" "service=\"${service}\" platform=\"${platform}\" reason=\"no registry digest to verify\""
+            return 2
+        }
+        ci_cmd_verify "${service}" "${digest}" "${platform}"
+        return
+    fi
     [ "${result}" = built ] || return 0
     # What: bake guard on the local image before publish.
     # Why: a leaked CA or build var must never reach GHCR.
@@ -4811,24 +4872,47 @@ _ci_index_complete() {
 # Why: One locked section; the caller always unlocks.
 # From: Issue #1683
 _ci_promote_move_all() {
-    local channel="$1" cand="$2" line svc digest seen
+    local channel="$1" cand="$2" line svc digest seen prev moved=""
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
         svc="${line%%=*}"; digest="${line#*=}"
+        prev="$(_ci_channel_readback "${svc}" "${channel}")" || prev=""
         if ! _ci_promote_move "${svc}" "${channel}" "${digest}"; then
             ci_log "[CI-ERROR-PROMOTE-0007]" "service=\"${svc}\" channel=\"${channel}\" reason=\"channel ref move failed\""
+            _ci_promote_rollback "${channel}" "${moved}"
             return 2
         fi
+        moved="${moved}${svc}=${prev}"$'\n'
         seen="$(_ci_channel_readback "${svc}" "${channel}")" || seen=""
         if [ -z "${seen}" ]; then
             ci_log "[CI-ERROR-PROMOTE-0008]" "service=\"${svc}\" channel=\"${channel}\" reason=\"readback unknown; blocking\""
+            _ci_promote_rollback "${channel}" "${moved}"
             return 2
         fi
         if [ "${seen}" != "${digest}" ]; then
-            ci_error "[CI-ERROR-PROMOTE-0009]" "service=\"${svc}\" channel=\"${channel}\" reason=\"readback MISMATCH; failing closed, not rolling back\" expected=\"${digest}\"" "readback=${seen}"
+            ci_error "[CI-ERROR-PROMOTE-0009]" "service=\"${svc}\" channel=\"${channel}\" reason=\"readback MISMATCH; rolling the moved services back\" expected=\"${digest}\"" "readback=${seen}"
+            _ci_promote_rollback "${channel}" "${moved}"
             return 2
         fi
     done <<< "${cand}"
+}
+
+# What: Put moved services back on their earlier digests.
+# Why: a failed move must not leave a mixed channel (§50)
+# From: Issue #1683 | PR #1912
+_ci_promote_rollback() {
+    local channel="$1" moved="$2" line svc prev
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        svc="${line%%=*}"; prev="${line#*=}"
+        if [ -z "${prev}" ]; then
+            ci_log "[CI-WARN-PROMOTE-0022]" "service=\"${svc}\" channel=\"${channel}\" reason=\"no earlier digest to restore; ref stays\""
+            continue
+        fi
+        if ! _ci_promote_move "${svc}" "${channel}" "${prev}"; then
+            ci_log "[CI-ERROR-PROMOTE-0023]" "service=\"${svc}\" channel=\"${channel}\" earlier=\"${prev}\" reason=\"rollback move failed; channel is mixed\""
+        fi
+    done <<< "${moved}"
 }
 
 # What: True if the candidate holds every product service.
@@ -5781,7 +5865,18 @@ _ci_gc_delete() {
     # Why: destructive ops use shared classifier.
     # From: Issue #1683
     path="/orgs/${owner}/packages/container/${pkgbase}%2F${svc}/versions/${id}"
-    _ci_retry github-api gh api -X DELETE "${path}" >/dev/null || return 2
+    # What: a DELETE answered with 404 reached the goal.
+    # Why: the version vanished between listing and delete.
+    # From: Issue #1683 | PR #1912
+    rc=0; out="$(_ci_retry github-api gh api -X DELETE "${path}")" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        case "${out,,}" in
+            *"http 404"*)
+                ci_log "[CI-INFO-GC-0034]" "candidate=\"${candidate}\" reason=\"version already gone; goal reached\""
+                return 0 ;;
+        esac
+        return 2
+    fi
     # What: deleted = 404 or a set deleted_at on read back.
     # Why: AG-WF-031; GitHub keeps soft-deleted versions.
     # From: Issue #1683 | PR #1858
