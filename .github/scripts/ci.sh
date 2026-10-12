@@ -6584,7 +6584,7 @@ _ci_validate_detach() {
 # Why: Per-slot flock; runs never share a /27.
 # From: Issue #1683
 _ci_validate_slot_lock() {
-    local subnet="$1" root key holder out errf
+    local subnet="$1" root key holder out errf probe hrc=0
     root="$(_ci_validate_shared_dir)" || return 2
     root="${root}/locks"
     key="$(printf '%s' "${subnet}" | tr './' '__')"
@@ -6604,17 +6604,17 @@ _ci_validate_slot_lock() {
     ) &
     holder=$!
     sleep 0.3
-    if kill -0 "${holder}" 2>/dev/null; then
+    if probe="$(kill -0 "${holder}" 2>&1)"; then
         rm -f "${errf}"
         printf '%s\n' "${holder}"
         return 0
     fi
-    # What: reap the dead lock holder; its status is unused.
-    # Why: this path returns 1; its rc adds nothing.
+    # What: reap the dead lock holder; keep its exit status.
+    # Why: the status and the probe text join the error raw.
     # From: Issue #1683 | PR #1858
-    wait "${holder}" 2>/dev/null || true
+    wait "${holder}" || hrc=$?
     if [ -s "${errf}" ]; then
-        ci_error "[CI-ERROR-VALIDATE-0073]" "subnet=\"${subnet}\" lock=\"${root}/${key}.lock\" reason=\"slot lock holder failed\"" "$(cat "${errf}")"
+        ci_error "[CI-ERROR-VALIDATE-0073]" "subnet=\"${subnet}\" lock=\"${root}/${key}.lock\" holder_rc=${hrc} reason=\"slot lock holder failed\"" "$(cat "${errf}"; printf '%s\n' "${probe}")"
         rm -f "${errf}"
         return 2
     fi
@@ -6626,13 +6626,15 @@ _ci_validate_slot_lock() {
 # Why: Frees the mutex; safe if already gone.
 # From: Issue #1683
 _ci_validate_release() {
-    local holder="${1:-}"
+    local holder="${1:-}" out
     [ -n "${holder}" ] || return 0
-    # What: stop and reap the holder; it may be gone.
-    # Why: best effort; a gone holder is not an error.
+    # What: stop the holder; a gone holder is not an error.
+    # Why: only a holder still alive after a failed kill is.
     # From: Issue #1683 | PR #1858
-    kill "${holder}" 2>/dev/null || true
-    wait "${holder}" 2>/dev/null || true
+    if ! out="$(kill "${holder}" 2>&1)" && kill -0 "${holder}" >/dev/null 2>&1; then
+        ci_error "[CI-ERROR-VALIDATE-0128]" "pid=${holder} reason=\"slot lock holder not stopped\"" "${out}"
+        return 2
+    fi
 }
 
 # What: Convert an IPv4 address to an integer.
@@ -6863,15 +6865,16 @@ _ci_validate_await_detached() {
 # Why: Await detach; a stale net poisons reruns.
 # From: Issue #1683 | PR #1858
 _ci_validate_network_teardown() {
-    local net_id="$1" name out
+    local net_id="$1" name out arc=0
     if ! name="$(docker network inspect "${net_id}" --format '{{.Name}}' 2>&1)"; then
         _ci_validate_network_gone "${net_id}" "${name}"
         return "$?"
     fi
-    # What: wait for detach; a timeout is not fatal here.
+    # What: wait for detach; only a timeout (rc 1) goes on.
     # Why: the rm below fails with raw output if still busy.
     # From: Issue #1683 | PR #1858
-    _ci_validate_await_detached "${name}" || true
+    _ci_validate_await_detached "${name}" || arc=$?
+    [ "${arc}" -le 1 ] || return "${arc}"
     out="$(docker network rm "${name}" 2>&1)" && return 0
     ci_error "[CI-ERROR-VALIDATE-0053]" "network=\"${name}\" reason=\"network removal failed\"" "${out}"
     return 2
@@ -10316,7 +10319,7 @@ _ci_rh_purge_pve_check() {
 # Why: a leftover stack from the template holds RAM and CPU.
 # From: Issue #1622 | PR #1624
 _ci_rh_purge_pve() {
-    local keep pkgs svcs sim rem procs bad families proc_families override
+    local keep pkgs svcs sim rem procs bad families proc_families override dpkg_out ps_out
     _ci_rh_confirmed CONFIRM_PURGE_PVE || return 2
     keep="$(_ci_rh_pve_keep_ere)" || return 2
     families="$(_ci_rh_ere pve_package_families)" || return 2
@@ -10340,9 +10343,12 @@ _ci_rh_purge_pve() {
     _ci_rh_root touch "${override}" || return 2
     _ci_rh_pve_purge_run "${keep}" "${pkgs[@]}" || { _ci_rh_root rm -f "${override}"; return 2; }
     _ci_rh_root rm -f "${override}" || return 2
-    rem="$(dpkg -l | { grep -iE "^ii.*(${families})" || true; })"
-    bad="$(grep -viE "${keep}" <<< "${rem}" || true)"
-    procs="$(ps -eo pid,args | { grep -E "${proc_families}" || true; } | awk -v self="$$" '$1 != self && $0 !~ /grep|awk/')"
+    dpkg_out="$(_ci_run "[CI-ERROR-RUNNER-0112]" "reason=\"package list not read\"" dpkg -l)" || return 2
+    ps_out="$(_ci_run "[CI-ERROR-RUNNER-0113]" "reason=\"process list not read\"" ps -eo pid,args)" || return 2
+    rem="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0114]" "reason=\"remaining packages not scanned\"" grep -iE "^ii.*(${families})" <<< "${dpkg_out}")" || return 2
+    bad="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0115]" "reason=\"boot packages not filtered\"" grep -viE "${keep}" <<< "${rem}")" || return 2
+    procs="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0116]" "reason=\"remaining processes not scanned\"" grep -E "${proc_families}" <<< "${ps_out}")" || return 2
+    procs="$(awk -v self="$$" '$1 != self && $0 !~ /grep|awk/' <<< "${procs}")"
     printf -- '--- Verification ---\nRemaining packages (kernel/firmware only expected):\n%s\nRemaining processes (none expected):\n%s\n' "${rem:-  (none)}" "${procs:-  (none)}"
     if [ -n "${bad}" ] || [ -n "${procs}" ]; then
         ci_log "[CI-ERROR-RUNNER-0058]" "reason=\"purge-pve did not remove the whole stack\""
@@ -10360,7 +10366,8 @@ _ci_rh_pve_purge_run() {
     removable="$(_ci_rh_ere pve_autoremove_families)" || return 2
     _ci_run "[CI-ERROR-RUNNER-0059]" "reason=\"apt-get purge failed\"" _ci_rh_root env DEBIAN_FRONTEND=noninteractive apt-get purge -y "$@" || return 2
     sim="$(_ci_run "[CI-ERROR-RUNNER-0060]" "reason=\"simulated autoremove failed\"" _ci_rh_root env DEBIAN_FRONTEND=noninteractive apt-get autoremove --simulate)" || return 2
-    bad="$(grep -E '^Remv ' <<< "${sim}" | grep -viE "${removable}" || true)"
+    bad="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0117]" "reason=\"autoremove list not read\"" grep -E '^Remv ' <<< "${sim}")" || return 2
+    bad="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0118]" "reason=\"autoremove list not filtered\"" grep -viE "${removable}" <<< "${bad}")" || return 2
     if [ -n "${bad}" ] || grep -qiE "${keep}" <<< "${sim}"; then
         ci_log "[CI-ERROR-RUNNER-0061]" "reason=\"autoremove would remove packages outside the PVE set or a boot package; run it by hand if intended\""
         printf '%s\n' "${sim}" >&2
@@ -10377,12 +10384,13 @@ _ci_rh_hook_pre_text() {
 #!/bin/bash
 # What: resets the workspace owner at job start.
 # Why: a killed job leaves files checkout cannot remove.
+# From: Issue #1622 | PR #1912
 set -euo pipefail
 if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "${GITHUB_WORKSPACE}" ]; then
-    if sudo -n chown -R "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}" 2>/dev/null; then
+    if out=$(sudo -n chown -R "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}" 2>&1); then
         echo "[pre-job-hook] reset ownership of ${GITHUB_WORKSPACE}"
     else
-        echo "[pre-job-hook] WARNING: ownership of ${GITHUB_WORKSPACE} not reset (sudo unavailable)"
+        echo "[pre-job-hook] WARNING: ownership of ${GITHUB_WORKSPACE} not reset: ${out}"
     fi
 fi
 EOF
@@ -10399,33 +10407,45 @@ _ci_rh_hook_post_text() {
 # Why: a killed job leaves a network and foreign files.
 # Only networks with ZERO containers older than the grace
 # window go: a sibling runner may be bringing its own up now.
+# From: Issue #1622 | PR #1912
 set -euo pipefail
 MIN_AGE=@MIN_AGE@
 nets=$(docker network ls --filter name=@PREFIX@ --format '{{.Name}}')
 while IFS= read -r net; do
     [ -n "$net" ] || continue
-    containers=$(docker network inspect "$net" --format '{{len .Containers}}' 2>/dev/null || echo "0")
+    if ! containers=$(docker network inspect "$net" --format '{{len .Containers}}' 2>&1); then
+        echo "[cleanup-hook] leaving $net alone, not inspected: $containers"
+        continue
+    fi
     if [ "$containers" -ne 0 ]; then
         echo "[cleanup-hook] leaving $net alone, $containers container(s) attached"
         continue
     fi
-    created=$(docker network inspect "$net" --format '{{.Created}}' 2>/dev/null || echo "")
-    created_epoch=$(date -d "$created" +%s 2>/dev/null || echo "0")
+    if ! created=$(docker network inspect "$net" --format '{{.Created}}' 2>&1); then
+        echo "[cleanup-hook] leaving $net alone, not inspected: $created"
+        continue
+    fi
+    if ! created_epoch=$(date -d "$created" +%s 2>&1); then
+        echo "[cleanup-hook] leaving $net alone, bad creation time: $created_epoch"
+        continue
+    fi
     age=$(( $(date +%s) - created_epoch ))
-    if [ "$created_epoch" -eq 0 ] || [ "$age" -lt "$MIN_AGE" ]; then
+    if [ "$age" -lt "$MIN_AGE" ]; then
         echo "[cleanup-hook] leaving $net alone, created ${age}s ago (grace ${MIN_AGE}s)"
         continue
     fi
     echo "[cleanup-hook] removing orphaned validate network: $net"
-    docker network rm "$net" || echo "[cleanup-hook] WARNING: failed to remove $net"
+    if ! out=$(docker network rm "$net" 2>&1); then
+        echo "[cleanup-hook] WARNING: failed to remove $net: $out"
+    fi
 done <<< "$nets"
 # Scoped to this job's workspace only: sibling runners share
 # this host. Best effort; never fails the job it cleans up after.
 if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "${GITHUB_WORKSPACE}" ]; then
-    if sudo -n chown -R "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}" 2>/dev/null; then
+    if out=$(sudo -n chown -R "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}" 2>&1); then
         echo "[cleanup-hook] reset ownership of ${GITHUB_WORKSPACE}"
     else
-        echo "[cleanup-hook] WARNING: ownership of ${GITHUB_WORKSPACE} not reset (sudo unavailable)"
+        echo "[cleanup-hook] WARNING: ownership of ${GITHUB_WORKSPACE} not reset: ${out}"
     fi
 fi
 EOF
@@ -10741,7 +10761,7 @@ _ci_rh_sccache_check() {
 # Why: builds run on a heavy host; secrets are per job.
 # From: Issue #1622 | PR #1626
 _ci_rh_sccache_fetch() {
-    local src="${1:-}" user root group dist f bin_dir list main_name dist_name
+    local src="${1:-}" user root group dist f bin_dir list main_name dist_name old
     user="$(_ci_rh_val user)" || return 2
     bin_dir="$(_ci_rh_val sccache_bin_dir)" || return 2
     list="$(_ci_block_entry_list runner_host "" sccache_bins)" || return 2
@@ -10771,7 +10791,10 @@ _ci_rh_sccache_fetch() {
     # Why: leftover world-readable copies have no reader.
     # From: Issue #1622 | PR #1624
     _ci_run "[CI-ERROR-RUNNER-0108]" "reason=\"old credential copies not removed\"" _ci_rh_root rm -f "${root}/${user}/.config/sccache/config" "${root}/${user}/sccache-dist/client.conf" || return 2
-    _ci_run -m 1 "[CI-ERROR-RUNNER-0109]" "reason=\"old credential dirs not removed\"" _ci_rh_root rmdir --ignore-fail-on-non-empty "${root}/${user}/.config/sccache" "${root}/${user}/sccache-dist" || true
+    for old in "${root}/${user}/.config/sccache" "${root}/${user}/sccache-dist"; do
+        _ci_rh_root test -d "${old}" || continue
+        _ci_run "[CI-ERROR-RUNNER-0109]" "dir=\"${old}\" reason=\"old credential dir not removed\"" _ci_rh_root rmdir --ignore-fail-on-non-empty "${old}" || return 2
+    done
     printf 'Installed the sccache client tooling. Run sccache-check to confirm.\n'
 }
 
@@ -11098,7 +11121,7 @@ _ci_comment_style() {
         *.js) printf 'js\n' ;;
         *.css) printf 'css\n' ;;
         *.yml|*.yaml) printf 'yaml\n' ;;
-        *.sh|*.bats|*.toml|*.conf|*.template|*.txt|*.env|*.service|*.timer|*.ps1|*.dockerignore|Dockerfile|*/Dockerfile|.gitattributes|.gitignore|*/.gitignore|CODEOWNERS|*/CODEOWNERS|.githooks/*|*/.githooks/*) printf 'hash\n' ;;
+        *.sh|*.bats|*.toml|*.conf|*.template|*.txt|*.env|*.dockerignore|Dockerfile|*/Dockerfile|.gitattributes|.gitignore|*/.gitignore|CODEOWNERS|*/CODEOWNERS|.githooks/*|*/.githooks/*) printf 'hash\n' ;;
         *) return 1 ;;
     esac
 }
@@ -12713,8 +12736,10 @@ _ci_action_runs_using() {
 # Why: public SHA reads need no token and no REST budget.
 # From: Issue #1860 | PR #1872
 _ci_raw_get() {
-    local url="$1" out code
-    if ! out="$(curl -sS --connect-timeout 10 --max-time 30 --location -w '\n%{http_code}' "${url}")"; then
+    local url="$1" out code conn max
+    conn="$(_ci_variable CI_RAW_GET_CONNECT_TIMEOUT)" || return 2
+    max="$(_ci_variable CI_RAW_GET_MAX_TIME)" || return 2
+    if ! out="$(curl -sS --connect-timeout "${conn}" --max-time "${max}" --location -w '\n%{http_code}' "${url}")"; then
         printf 'raw GET %s failed: curl error (http 000)\n' "${url}" >&2
         return 1
     fi
@@ -13570,7 +13595,8 @@ _ci_check_prod_state_wiring() {
     # Why: AG-SETUP-001: keys come from the compose itself.
     # From: Issue #1683 | PR #1912
     local off
-    off="$(grep -E '^[[:space:]]*(- |device: )\$\{[A-Z0-9_]+:-' "${compose}" | grep -Fv -- ':-${LANCACHE_STATE_DIR:?' || true)"
+    off="$(_ci_run -m 1 "[CI-ERROR-CHECK-0176]" "file=\"${compose}\" reason=\"mount defaults not scanned\"" grep -E '^[[:space:]]*(- |device: )\$\{[A-Z0-9_]+:-' "${compose}")" || return 2
+    off="$(_ci_run -m 1 "[CI-ERROR-CHECK-0177]" "file=\"${compose}\" reason=\"state-dir defaults not filtered\"" grep -Fv -- ':-${LANCACHE_STATE_DIR:?' <<< "${off}")" || return 2
     [ -z "${off}" ] || viol+=("${dep} has a mount default off LANCACHE_STATE_DIR:${off}")
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0100]" "reason=\"prod state wiring not LANCACHE_STATE_DIR-derived or undocumented\"" "$(printf '%s\n' "${viol[@]}")"
@@ -14180,10 +14206,11 @@ _ci_check_image_channel_resolution() {
         # What: each compose image has one ref var
         # Why: AG-CI-006: the SOT owns the image coordinates
         # From: Issue #1683 | PR #1912
-        local tdir rep line sreg spre stag schan prog svc names refs
+        local tdir rep line sreg spre stag schan prog svc names refs hits
+        hits="$(_ci_run -m 1 "[CI-ERROR-CHECK-0178]" "file=\"${prod}\" reason=\"image defaults not scanned\"" grep -nE 'LANCACHE_IMAGE_(REF_[A-Z_]+|REGISTRY|PREFIX|TAG):-[^}]' "${prod}")" || return 2
         while IFS= read -r line; do
             [ -z "${line}" ] || viol+=("compose gives an image coordinate a default: ${line}")
-        done <<< "$(grep -nE 'LANCACHE_IMAGE_(REF_[A-Z_]+|REGISTRY|PREFIX|TAG):-[^}]' "${prod}" || true)"
+        done <<< "${hits}"
         names="$(ci_services)" || return 2
         sreg="r${SRANDOM}.test" spre="p${SRANDOM}/q${SRANDOM}" stag="t${SRANDOM}" schan="c${SRANDOM}"
         refs=()

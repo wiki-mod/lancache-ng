@@ -222,8 +222,8 @@ build_toolchain:
     build_type: toolchain
     final_base: alpine
     # What: apk packages installed into the toolchain image.
-    # Why: SOT owns the one list; consumers read it.
-    # From: Issue #1683
+    # Why: one list; gawk, parallel serve bats --jobs.
+    # From: Issue #1683 | PR #1912
     packages:
       - actionlint
       - bats
@@ -890,6 +890,11 @@ ci_variables:
   # From: Issue #1683 | PR #1858
   CI_RETRY_MAX_ATTEMPTS: 4
   CI_RETRY_BACKOFF_BASE_SECONDS: 1
+  # What: connect and total seconds of one raw content read.
+  # Why: AG-CI-006: a timeout value has one owner.
+  # From: Issue #1683 | PR #1912
+  CI_RAW_GET_CONNECT_TIMEOUT: 10
+  CI_RAW_GET_MAX_TIME: 30
   # What: trivy scanners, DB dir and DB lock timing.
   # Why: AG-CI-006: scan policy values have one owner.
   # From: Issue #1683 | PR #1858

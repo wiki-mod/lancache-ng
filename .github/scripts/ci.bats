@@ -2302,6 +2302,9 @@ CASES
         BODY="${body}" CODE="${code}" run _ci_raw_get "$(_val url)"
         _expect "http-${code}" 1 "http ${code};${body}" || return 1
     done
+    curl() { printf '%s\n200' "$*"; }
+    run _ci_raw_get "$(_val url)"
+    _expect timeouts-from-sot 0 "--connect-timeout $(_ci_variable CI_RAW_GET_CONNECT_TIMEOUT) --max-time $(_ci_variable CI_RAW_GET_MAX_TIME) " || return 1
     curl() { return 6; }
     run _ci_raw_get "$(_val url)"
     _expect curl-error 1 "http 000" || return 1
@@ -5740,6 +5743,21 @@ _rh_runner_dir() {
     [[ "${post}" == *"MIN_AGE=$(_ci_rh_val hook_network_min_age)"$'\n'* ]] || { echo "no grace age in the post hook"; return 1; }
     [[ "${post}" != *"@"* ]] || { echo "unfilled placeholder in the post hook"; return 1; }
     [[ "${pre}" == *'GITHUB_WORKSPACE'* ]] || return 1
+}
+
+# What: the post hook names a failed inspect and goes on.
+# Why: V-N2: no swallowed error; the raw text is in the log.
+# From: Issue #1622 | PR #1912
+@test "runner-host: the post hook keeps the raw text of a failed network inspect" {
+    local bin net msg
+    _rh_fixture
+    bin="$(_val path)" net="$(_val name)" msg="$(_val name)"
+    mkdir -p "${bin}"
+    printf '#!/bin/bash\ncase "$2" in\n  ls) echo "%s" ;;\n  inspect) echo "%s" >&2; exit 1 ;;\nesac\n' "${net}" "${msg}" > "${bin}/docker"
+    chmod +x "${bin}/docker"
+    _ci_rh_hook_post_text > "${bin}/post.sh"
+    PATH="${bin}:${PATH}" run bash "${bin}/post.sh"
+    _expect inspect-fails 0 "leaving ${net} alone, not inspected: ${msg}" || return 1
 }
 
 # What: cleanup units follow the SOT schedule and path.

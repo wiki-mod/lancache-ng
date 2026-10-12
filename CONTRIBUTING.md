@@ -168,8 +168,8 @@ A **major change** is any pull request that adds a new feature, changes
 existing runtime/setup/update behavior, or fixes a bug in code that did not
 already have a regression test covering that behavior. A major change must
 add or update an automated test in the relevant test suite (Rust `#[test]`
-functions for `services/ui`/`services/dns/nats-subscriber`, a `.bats` fixture
-under `tests/bats/` for shell/setup logic, or a real end-to-end simulation
+functions for `services/ui`/`services/dns/nats-subscriber`, a test in
+`.github/scripts/ci.bats` for shell/setup logic, or a real end-to-end simulation
 script wired into a CI workflow for full-stack behavior) that exercises the
 new or changed behavior. A pull request that changes behavior with no
 corresponding test change should explain why in the PR body (for example,
