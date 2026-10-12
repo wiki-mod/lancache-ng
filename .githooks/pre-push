@@ -10,8 +10,8 @@ set -uo pipefail
 remote_name="${1:-origin}"
 remote_url="${2:-}"
 
-repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
-  echo "pre-push (action-node-versions): could not determine repo root; skipping this local check (not blocking push)." >&2
+repo_root=$(git rev-parse --show-toplevel 2>&1) || {
+  echo "pre-push (action-node-versions): could not determine repo root ($repo_root); skipping this local check (not blocking push)." >&2
   exit 0
 }
 
@@ -31,7 +31,12 @@ done
 # What: derives owner/repo from the push remote URL
 # Why: ci.sh reads GITHUB_REPOSITORY; a local run has none
 if [ -z "${GITHUB_REPOSITORY:-}" ]; then
-  [ -n "$remote_url" ] || remote_url=$(git remote get-url "$remote_name" 2>/dev/null) || remote_url=""
+  if [ -z "$remote_url" ]; then
+    remote_url=$(git remote get-url "$remote_name" 2>&1) || {
+      echo "pre-push (action-node-versions): no URL for remote '$remote_name' ($remote_url); skipping this local check (not blocking push)." >&2
+      exit 0
+    }
+  fi
   github_repo="${remote_url%.git}"
   case "$github_repo" in
     *github.com[:/]*/*) GITHUB_REPOSITORY="${github_repo#*github.com[:/]}" ;;
@@ -43,6 +48,8 @@ if [ -z "${GITHUB_REPOSITORY:-}" ]; then
   export GITHUB_REPOSITORY
 fi
 
+# What: tells whether a sha is the all-zero null sha
+# Why: git sends 40 zeros for a deleted or a new ref
 is_zero_sha() {
   [ "$1" = "0000000000000000000000000000000000000000" ]
 }
@@ -63,9 +70,13 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   if is_zero_sha "${remote_sha:-}"; then
     # What: base is merge-base with remote branch or root
     # Why: a new remote ref has no remote sha to diff
-    base=$(git merge-base HEAD "${remote_name}/${remote_ref#refs/heads/}" 2>/dev/null) || base=""
-    if [ -z "$base" ]; then
-      base=$(git rev-list --max-parents=0 "$local_sha" 2>/dev/null | tail -n1) || base=""
+    if ! base=$(git merge-base HEAD "${remote_name}/${remote_ref#refs/heads/}" 2>&1); then
+      echo "pre-push: no merge-base with the remote branch ($base); using the root commit." >&2
+      roots=$(git rev-list --max-parents=0 "$local_sha" 2>&1) || {
+        echo "pre-push: git rev-list failed ($roots); running the check." >&2
+        roots=""
+      }
+      base=$(printf '%s\n' "$roots" | tail -n1)
     fi
   else
     base="$remote_sha"
@@ -74,8 +85,10 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   if [ -n "$base" ]; then
     # What: diff output goes to a variable, not a pipe
     # Why: [AG-VAL-032] grep -q can mask SIGPIPE status
-    changed_workflow_files=$(git diff --name-only "$base" "$local_sha" -- '.github/workflows/*.yml' '.github/workflows/*.yaml' 2>/dev/null) || changed_workflow_files=""
-    if [ -n "$changed_workflow_files" ]; then
+    if ! changed_workflow_files=$(git diff --name-only "$base" "$local_sha" -- '.github/workflows/*.yml' '.github/workflows/*.yaml' 2>&1); then
+      echo "pre-push: git diff failed ($changed_workflow_files); running the check." >&2
+      workflow_changed=1
+    elif [ -n "$changed_workflow_files" ]; then
       workflow_changed=1
     fi
   else

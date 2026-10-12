@@ -2385,6 +2385,11 @@ CASES
     printf '1' > "${repo}/rc"
     run bash "${hook}" origin "$(git remote get-url origin)" <<< "refs/heads/m ${after} refs/heads/m ${zero}"
     _expect workflow-violation 1 "push blocked" || return 1
+    printf '0' > "${repo}/rc"
+    rm -f "${repo}/calls"
+    run bash "${hook}" origin "$(git remote get-url origin)" <<< "refs/heads/m ${after} refs/heads/m $(_val sha)"
+    _expect git-diff-failure 0 "git diff failed (" || return 1
+    [ "$(cat "${repo}/calls")" = "check action-node-versions" ] || { echo "calls: $(cat "${repo}/calls")"; return 1; }
 }
 
 # What: changed file -> skip only for a shell comment.
