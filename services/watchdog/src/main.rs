@@ -1254,10 +1254,14 @@ fn log_row(
     after: Option<LogSample>,
     failures: u32,
 ) -> (ServiceHealth, u32) {
-    let (status, health, failures) = match (before, after) {
-        (_, None) => ("yellow", "unreachable", 0),
-        (Some(b), Some(a)) if log_lost(b, a) => ("red", "silent log loss", failures + 1),
-        _ => ("green", "healthy", 0),
+    let (status, health, failures) = if let Some(a) = after {
+        if before.is_some_and(|b| log_lost(b, a)) {
+            ("red", "silent log loss", failures + 1)
+        } else {
+            ("green", "healthy", 0)
+        }
+    } else {
+        ("yellow", "unreachable", 0)
     };
     let row = ServiceHealth {
         status: status.to_string(),
