@@ -114,7 +114,7 @@ services:
       - ${SOT_SUPERVISE_RUN_DIR}
     ports:
       - "${IP_HTTP}:80:80"
-      - "${IP_HTTP}:443:8443"
+      - "${IP_HTTP}:443:${SOT_NGINX_PASSTHROUGH_PORT}"
       - "${IP_HTTPS}:80:80"
       - "${IP_HTTPS}:443:443"
     healthcheck:

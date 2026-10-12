@@ -875,7 +875,7 @@ async fn watch() -> Result<(), String> {
         let (log_health, streak) = log_row(last_sample, sample, loss_streak);
         if streak > loss_streak {
             log_err(
-                "ALERT: silent log loss: syslog-ng processed messages but the log tree did not grow",
+                "ALERT: silent log loss: syslog-ng processed messages but no log file was written",
             );
         }
         loss_streak = streak;
@@ -1196,7 +1196,7 @@ const LOG_ROW: &str = "syslog-ng";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LogSample {
     processed: u64,
-    bytes: u64,
+    newest: u128,
 }
 
 // What: the processed counter of one destination.
@@ -1211,25 +1211,38 @@ fn processed_count(stats: &str, destination: &str) -> Option<u64> {
     })
 }
 
-// What: syslog-ng's counter and the log tree bytes.
-// Why: a byte sum sees every write; None if no stats.
+// What: newest file modification below root, in ns.
+// Why: a write moves it; retention deleting old files not.
+// From: Issue #1428 | PR #1912
+fn newest_write(root: &Path) -> u128 {
+    files_under(root).map_or(0, |files| {
+        files
+            .iter()
+            .filter_map(|(_, meta)| meta.modified().ok())
+            .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .max()
+            .unwrap_or(0)
+    })
+}
+
+// What: syslog-ng's counter and the newest log write.
+// Why: only a write moves it; None if no stats.
 // From: Issue #1428 | PR #1912
 fn log_sample(s: &Settings) -> Option<LogSample> {
     let ctl = format!("--control={}", s.syslog_ctl.display());
     let stats = tool("syslog-ng-ctl", &["stats", &ctl]).ok()?;
-    let bytes = files_under(&s.syslog_root)
-        .map_or(0, |files| files.iter().map(|(_, meta)| meta.len()).sum());
     Some(LogSample {
         processed: processed_count(&stats, SYSLOG_NG_DESTINATION)?,
-        bytes,
+        newest: newest_write(&s.syslog_root),
     })
 }
 
-// What: true if messages were processed but no byte landed.
+// What: true if messages came but nothing was written.
 // Why: a mount or permission fault swallows writes.
 // From: Issue #1428 | PR #1912
 fn log_lost(before: LogSample, after: LogSample) -> bool {
-    after.processed > before.processed && after.bytes <= before.bytes
+    after.processed > before.processed && after.newest <= before.newest
 }
 
 // What: the status row for log writing, and the streak.
@@ -1867,6 +1880,7 @@ fn checked_files(
             .map(|(path, _)| Some((path.clone(), restamp(set.get(name(path)?)?.as_str()?))))
             .collect()
     };
+    store.adopt_legacy();
     let fresh = ("new".to_string(), files.to_vec());
     let used = first_good(
         &what,
@@ -2544,9 +2558,9 @@ async fn soa_upkeep() -> Result<(), String> {
 const KEA_SOCKET_DIR: &str = "/run/kea";
 const KEA4_SOCKET: &str = "/run/kea/kea4.sock";
 
-// What: kea-dhcp-ddns listens here on loopback.
-// Why: kea-dhcp4 sends its name change requests to it.
-const KEA_NCR_PORT: u16 = 53001;
+// What: env key of the kea-dhcp-ddns loopback port.
+// Why: kea-dhcp4 sends its name change requests there.
+const KEA_NCR_PORT_KEY: &str = "KEA_NCR_PORT";
 
 // What: networks allowed to reach the Kea control port.
 // Why: the ui comes from a Docker bridge; LAN is refused.
@@ -2666,7 +2680,13 @@ fn kea_dhcp4_first(ctx: &Ctx, dir: &Path) -> Result<Value, String> {
 // What: set the keys the stack owns in a kea-dhcp4 config.
 // Why: socket, hook, DDNS, logs must match the image.
 // From: Issue #815 | PR #1912
-fn kea_dhcp4_own(conf: &mut Value, hook: &Path, domain: &str, ddns: bool) -> Result<(), String> {
+fn kea_dhcp4_own(
+    conf: &mut Value,
+    hook: &Path,
+    domain: &str,
+    ddns: bool,
+    ncr_port: u16,
+) -> Result<(), String> {
     let dhcp4 = conf
         .get_mut("Dhcp4")
         .and_then(Value::as_object_mut)
@@ -2698,7 +2718,7 @@ fn kea_dhcp4_own(conf: &mut Value, hook: &Path, domain: &str, ddns: bool) -> Res
             serde_json::json!({
                 "enable-updates": ddns,
                 "server-ip": "127.0.0.1",
-                "server-port": KEA_NCR_PORT,
+                "server-port": ncr_port,
                 "sender-ip": "127.0.0.1",
                 "max-queue-size": 1024,
                 "ncr-protocol": "UDP",
@@ -2754,8 +2774,9 @@ fn kea_dhcp4(ctx: &Ctx) -> Result<Run, String> {
         .as_deref()
         .and_then(config::parse_bool)
         == Some(true);
+    let ncr_port = env_port(KEA_NCR_PORT_KEY)?;
     let owned = |mut conf: Value| -> Option<String> {
-        kea_dhcp4_own(&mut conf, &hook, &domain, ddns).ok()?;
+        kea_dhcp4_own(&mut conf, &hook, &domain, ddns, ncr_port).ok()?;
         serde_json::to_string_pretty(&conf).ok()
     };
     let current = match fs::read_to_string(&path) {
@@ -2858,7 +2879,7 @@ fn kea_dhcp_ddns(ctx: &Ctx) -> Result<Run, String> {
     let conf = serde_json::json!({
         "DhcpDdns": {
             "ip-address": "127.0.0.1",
-            "port": KEA_NCR_PORT,
+            "port": env_port(KEA_NCR_PORT_KEY)?,
             "control-socket": {
                 "socket-type": "unix",
                 "socket-name": format!("{KEA_SOCKET_DIR}/kea-ddns.sock")
@@ -3173,11 +3194,25 @@ const NGINX_GENERATED: &str = "# Generated by lancache-watchdog; do not edit\n";
 // Why: the discard port closes the connection at once.
 const NGINX_REFUSE: &str = "127.0.0.1:9";
 
-// What: loopback relays of the :443 SNI dispatcher.
-// Why: MITM goes to the https listen; else passthrough.
+// What: loopback ports of the https server and relays.
+// Why: the SOT owns them; dispatch and listens use them.
 // From: Issue #1683 | PR #1912
-const NGINX_MITM_RELAY: u16 = 9445;
-const NGINX_PASSTHROUGH_RELAY: u16 = 9446;
+#[derive(Clone, Copy, Default)]
+struct NginxPorts {
+    mitm: u16,
+    mitm_relay: u16,
+    passthrough_relay: u16,
+}
+
+impl NginxPorts {
+    fn from_env() -> Result<Self, String> {
+        Ok(Self {
+            mitm: env_port("NGINX_MITM_PORT")?,
+            mitm_relay: env_port("NGINX_MITM_RELAY_PORT")?,
+            passthrough_relay: env_port("NGINX_PASSTHROUGH_RELAY_PORT")?,
+        })
+    }
+}
 
 // What: rendered nginx paths below NGINX_DIR.
 // Why: the rendered nginx layout has one path owner.
@@ -3186,7 +3221,6 @@ const NGINX_CA_DIR: &str = "ssl/ca";
 const NGINX_CERT_DIR: &str = "ssl/certs";
 const NGINX_STREAM_TARGETS: &str = "stream.d/00-stream-targets.conf";
 const NGINX_HTTPS_DISPATCH: &str = "stream.d/01-https-dispatch.conf";
-const NGINX_HTTPS_LISTEN: &str = "conf.d/https-listen.inc";
 
 // What: subject of the stack CA certificate.
 // Why: the supervisor is the one owner of CA creation.
@@ -3288,9 +3322,9 @@ fn nginx_https_listen(mitm_port: u16, health_port: u16) -> String {
 // What: the :443 dispatcher: MITM, passthrough, refuse.
 // Why: a cert covers one label; deeper names pass through.
 // From: Issue #1683 | PR #1912
-fn nginx_https_dispatch(hosts: &CdnHosts, strict: bool, acl: &Path, mitm_port: u16) -> String {
-    let mitm = format!("127.0.0.1:{NGINX_MITM_RELAY}");
-    let passthrough = format!("127.0.0.1:{NGINX_PASSTHROUGH_RELAY}");
+fn nginx_https_dispatch(hosts: &CdnHosts, strict: bool, acl: &Path, ports: NginxPorts) -> String {
+    let mitm = format!("127.0.0.1:{}", ports.mitm_relay);
+    let passthrough = format!("127.0.0.1:{}", ports.passthrough_relay);
     let escape = |name: &str| name.replace('.', "\\.");
     let one_level = |name: &str| format!("\"~^[^.]+\\.{}$\"", escape(name));
     let mut bases: Vec<&String> = hosts
@@ -3340,7 +3374,8 @@ fn nginx_https_dispatch(hosts: &CdnHosts, strict: bool, acl: &Path, mitm_port: u
          server {{\n    listen {passthrough} proxy_protocol;\n    set_real_ip_from 127.0.0.1;\n    \
          ssl_preread on;\n    proxy_pass $ssl_preread_server_name:443;\n    \
          proxy_connect_timeout 30s;\n    proxy_timeout        3600s;\n}}\n",
-        acl = acl.display()
+        acl = acl.display(),
+        mitm_port = ports.mitm
     ));
     out
 }
@@ -3674,13 +3709,13 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     let value = |key: &'static str| ctx.need(key).map(|v| (key, v));
     let acl = dir.join("stream.d/access.d/00-stream-client-acl.conf");
     let conf = dir.join("nginx.conf");
-    let (mitm_port, health_port) = if https_on {
+    let (ports, health_port) = if https_on {
         (
-            u16::try_from(bounded("NGINX_MITM_PORT", 1, 65_535)?).map_err(|e| e.to_string())?,
+            NginxPorts::from_env()?,
             url_port(&ctx.need("PROXY_HEALTH_HTTPS_URL")?)?,
         )
     } else {
-        (0, 0)
+        (NginxPorts::default(), 0)
     };
     let files = vec![
         (
@@ -3692,6 +3727,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
                     value("CACHE_MAX_SIZE")?,
                     value("CACHE_MIN_FREE")?,
                     value("CACHE_INACTIVE")?,
+                    value("NGINX_PASSTHROUGH_PORT")?,
                     ("NGINX_UPSTREAM_RESOLVER", resolver),
                 ],
             ),
@@ -3719,15 +3755,15 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         (
             dir.join(NGINX_HTTPS_DISPATCH),
             if https_on {
-                nginx_https_dispatch(&hosts, strict, &acl, mitm_port)
+                nginx_https_dispatch(&hosts, strict, &acl, ports)
             } else {
                 NGINX_GENERATED.to_string()
             },
         ),
         (
-            dir.join(NGINX_HTTPS_LISTEN),
+            dir.join(ctx.need("NGINX_HTTPS_LISTEN_FILE")?),
             if https_on {
-                nginx_https_listen(mitm_port, health_port)
+                nginx_https_listen(ports.mitm, health_port)
             } else {
                 NGINX_GENERATED.to_string()
             },
@@ -4658,26 +4694,47 @@ mod tests {
         assert_eq!(processed_count("", &ours), None);
     }
 
-    // What: a loss is more messages and no more bytes.
+    // What: a loss is more messages and no newer write.
     // Why: only that pair is a silent loss.
     // From: Issue #1428 | PR #1912
     #[test]
-    fn log_loss_is_messages_without_bytes() {
-        let at = |processed, bytes| LogSample { processed, bytes };
-        let (p, b) = (rnd(1, DAY), rnd(1, DAY));
-        assert!(log_lost(at(p, b), at(p + 1, b)));
-        assert!(log_lost(at(p, b), at(p + 1, b - 1)));
-        assert!(!log_lost(at(p, b), at(p + 1, b + 1)));
-        assert!(!log_lost(at(p, b), at(p, b)));
-        assert!(!log_lost(at(p, b), at(p, b + 1)));
+    fn log_loss_is_messages_without_a_newer_write() {
+        let at = |processed, newest| LogSample { processed, newest };
+        let (p, t) = (rnd(1, DAY), u128::from(rnd(1, DAY)));
+        assert!(log_lost(at(p, t), at(p + 1, t)));
+        assert!(log_lost(at(p, t), at(p + 1, t - 1)));
+        assert!(!log_lost(at(p, t), at(p + 1, t + 1)));
+        assert!(!log_lost(at(p, t), at(p, t)));
+        assert!(!log_lost(at(p, t), at(p, t + 1)));
+    }
+
+    // What: retention deleting old logs is no loss.
+    // Why: the byte sum fell then and raised a false ALERT.
+    // From: Issue #1428 | PR #1912
+    #[test]
+    fn newest_write_ignores_deleted_old_files() {
+        let root = scratch();
+        let (old, new) = (root.join(gen_name()), root.join(gen_name()));
+        fs::write(&old, gen_name()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&new, gen_name()).unwrap();
+        let before = newest_write(&root);
+        assert!(before > 0);
+        fs::remove_file(&old).unwrap();
+        assert_eq!(newest_write(&root), before);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&new, gen_name()).unwrap();
+        assert!(newest_write(&root) > before);
+        assert_eq!(newest_write(&root.join(gen_name())), 0);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     // What: the status row follows the samples and counts.
-    // Why: the dashboard shows red until bytes land again.
+    // Why: the dashboard shows red until a write lands.
     // From: Issue #1428 | PR #1912
     #[test]
     fn log_row_turns_red_on_loss_and_recovers() {
-        let at = |processed, bytes| Some(LogSample { processed, bytes });
+        let at = |processed, newest| Some(LogSample { processed, newest });
         let (row, streak) = log_row(at(1, 5), at(2, 5), 0);
         assert_eq!(
             (row.status.as_str(), row.health.as_str()),
@@ -5530,22 +5587,27 @@ mod tests {
             bases: vec![format!("{short}.{root}"), long.clone()],
             ..CdnHosts::default()
         };
-        let mitm = u16::try_from(rnd(1024, 60_000)).unwrap();
-        let out = nginx_https_dispatch(&hosts, false, Path::new("/acl"), mitm);
+        let [mitm, mitm_relay, passthrough_relay] =
+            std::array::from_fn(|_| u16::try_from(rnd(1024, 60_000)).unwrap());
+        let ports = NginxPorts {
+            mitm,
+            mitm_relay,
+            passthrough_relay,
+        };
+        let out = nginx_https_dispatch(&hosts, false, Path::new("/acl"), ports);
         assert!(
             out.contains(&format!("proxy_pass 127.0.0.1:{mitm};")),
             "{out}"
         );
+        assert!(out.contains(&format!("listen 127.0.0.1:{mitm_relay} proxy_protocol;")));
         let at = |name: &str| {
             out.find(&format!("\"~^.+\\.{}$\"", name.replace('.', "\\.")))
                 .expect(name)
         };
         assert!(at(&long) < at(&format!("{short}.{root}")), "{out}");
-        assert!(out.contains(&format!(
-            "    default 127.0.0.1:{NGINX_PASSTHROUGH_RELAY};\n"
-        )));
+        assert!(out.contains(&format!("    default 127.0.0.1:{passthrough_relay};\n")));
         assert!(out.contains("    include /acl;\n"));
-        let strict = nginx_https_dispatch(&hosts, true, Path::new("/acl"), mitm);
+        let strict = nginx_https_dispatch(&hosts, true, Path::new("/acl"), ports);
         assert!(strict.contains(&format!("    default {NGINX_REFUSE};\n")));
     }
 
@@ -6083,6 +6145,7 @@ mod tests {
     #[test]
     fn kea_config_gets_the_stack_keys_and_keeps_the_rest() {
         let hook = PathBuf::from(format!("/usr/lib/{}/libdhcp_lease_cmds.so", gen_name()));
+        let ncr = u16::try_from(rnd(1024, 60_000)).unwrap();
         let mut conf = serde_json::json!({"Dhcp4": {
             "subnet4": [{"id": 7}],
             "hooks-libraries": [
@@ -6092,7 +6155,7 @@ mod tests {
             "dhcp-ddns": {"enable-updates": true},
             "loggers": [{"name": "kea-dhcp4", "output-options": [{"output": "/f.log"}]}]
         }});
-        kea_dhcp4_own(&mut conf, &hook, "lan", false).expect("own");
+        kea_dhcp4_own(&mut conf, &hook, "lan", false, ncr).expect("own");
         let d = &conf["Dhcp4"];
         assert_eq!(d["subnet4"][0]["id"], 7);
         assert_eq!(d["control-socket"]["socket-name"], KEA4_SOCKET);
@@ -6107,7 +6170,10 @@ mod tests {
         assert_eq!(d["ddns-qualifying-suffix"], "lan");
         assert_eq!(d["loggers"][0]["output-options"][0]["output"], "stdout");
         assert_eq!(d["loggers"].as_array().map(Vec::len), Some(2));
-        assert!(kea_dhcp4_own(&mut serde_json::json!({}), &hook, "lan", false).is_err());
+        assert!(kea_dhcp4_own(&mut serde_json::json!({}), &hook, "lan", false, ncr).is_err());
+        let mut fresh = serde_json::json!({"Dhcp4": {}});
+        kea_dhcp4_own(&mut fresh, &hook, "lan", true, ncr).expect("own");
+        assert_eq!(fresh["Dhcp4"]["dhcp-ddns"]["server-port"], ncr);
     }
 
     // What: NTP names resolve; IPs pass; both separators.

@@ -1168,9 +1168,9 @@ ROWS
     run bash "${CI_SH}" check proxy-nginx-policy
     _expect real 0 "proxy-nginx-policy=clean" || return 1
     _checkout_copy "${root}" "${t}" || return 1
-    sed -i -E 's/^([[:space:]]*)include[[:space:]]+\/etc\/nginx\/conf.d\/https-listen[.]inc;/\1listen 127.0.0.1:8445 ssl;/' "${t}/services/proxy/conf.d/https.conf" || return 1
+    sed -i -E "s/^([[:space:]]*)include[[:space:]]+[^;]*https-listen[^;]*;/\\1listen $(_val ipv4):$(_val port) ssl;/" "${t}/services/proxy/conf.d/https.conf" || return 1
     run bash "${CI_SH}" check proxy-nginx-policy "${t}"
-    _expect moved 1 "[CI-ERROR-CHECK-0151];no include of the generated https-listen.inc;literal listen" || return 1
+    _expect moved 1 "[CI-ERROR-CHECK-0151];no include of;literal listen" || return 1
 }
 
 # What: the Kea ui run gets the host, the ui adds the port
@@ -4182,8 +4182,8 @@ _pm_run() {
     ui="$(_prod_compose config --format json | jq -r '.services.ui.ports[0].published')"
     name="$(_prod_compose config --format json | jq -r .name)"
     xfr=""
-    ! grep -qF 'dns_xfr_primary: format!("{}:{PDNS_AUTH_PORT}", state.config.http_ip)' "${rs}" \
-        || xfr="$(sed -n 's/^pub const PDNS_AUTH_PORT: u16 = \([0-9][0-9]*\);$/:\1/p' "${root}/services/common/config.rs")"
+    ! grep -qF 'dns_xfr_primary: format!("{}:{}", state.config.http_ip, state.config.pdns_auth_port)' "${rs}" \
+        || xfr=":$(_ci_runtime_default PDNS_AUTH_PORT)"
     fields="$(awk '/^struct RegisterResponse/,/^}/' "${rs}" | sed -n 's/^ *\([a-z_]*\): String,$/\1/p')"
     reg="$(resolve_lancache_image_registry "$(_template_env)")"
     pre="$(resolve_lancache_image_prefix "$(_template_env)")"

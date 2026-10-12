@@ -1657,12 +1657,12 @@ copy_volume_to_dir() {
     print_ok "Copied $volume into $dir (${#lines[@]} entries, verified)"
 }
 
-# What: default state subdir of a prod key, from compose
-# Why: deploy/prod owns these defaults; no second copy
+# What: default state subdir of a prod key: compose + SOT
+# Why: compose names the SOT key; the SOT owns the value
 # From: Issue #1683 | PR #1858
 prod_state_subdir() {
-    local key="$1" subs
-    subs=$(awk -v k="$key" '{
+    local key="$1" refs sub
+    refs=$(awk -v k="$key" '{
         p = "${" k ":-${LANCACHE_STATE_DIR:?"
         i = index($0, p)
         if (!i) next
@@ -1672,10 +1672,13 @@ prod_state_subdir() {
         rest = substr(rest, j + 2)
         print substr(rest, 1, index(rest, "}") - 1)
     }' "$PROD_COMPOSE") || die "Failed to read $PROD_COMPOSE (exit $?)."
-    subs=$(sort -u <<< "$subs")
-    [[ "$subs" =~ ^[a-z0-9-]+$ ]] \
-        || die "$PROD_COMPOSE gives no single default directory for $key: ${subs//$'\n'/ }"
-    printf '%s\n' "$subs"
+    refs=$(sort -u <<< "$refs")
+    [[ "$refs" =~ ^\$\{SOT_[A-Z0-9_]+$ ]] \
+        || die "$PROD_COMPOSE gives no single default directory for $key: ${refs//$'\n'/ }"
+    sub=$(prod_env_default "${refs#'${SOT_'}") || exit $?
+    [[ "$sub" =~ ^[a-z0-9-]+$ ]] \
+        || die "The SOT default of ${refs#'${'} is no directory name: $sub"
+    printf '%s\n' "$sub"
 }
 
 # What: every state key the prod compose mounts

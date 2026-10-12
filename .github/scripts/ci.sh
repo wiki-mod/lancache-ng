@@ -12207,8 +12207,11 @@ _ci_check_proxy_nginx_policy() {
     # What: https.conf includes the generated listen file.
     # Why: a literal listen would be a second port owner.
     # From: Issue #1683 | PR #1912
-    grep -Eq '^[[:space:]]*include[[:space:]]+/etc/nginx/conf.d/https-listen[.]inc;' "${px}/conf.d/https.conf" \
-        || viol+=("${px#"${repo_root}/"}/conf.d/https.conf: no include of the generated https-listen.inc")
+    local ngdir lfile
+    ngdir="$(_ci_runtime_default NGINX_DIR)" || return 2
+    lfile="$(_ci_runtime_default NGINX_HTTPS_LISTEN_FILE)" || return 2
+    grep -Fxq "    include     ${ngdir}/${lfile};" "${px}/conf.d/https.conf" \
+        || viol+=("${px#"${repo_root}/"}/conf.d/https.conf: no include of ${ngdir}/${lfile} (SOT NGINX_HTTPS_LISTEN_FILE)")
     grep -Eq '^[[:space:]]*listen[[:space:]]' "${px}/conf.d/https.conf" \
         && viol+=("${px#"${repo_root}/"}/conf.d/https.conf: literal listen; the watchdog renders it")
     if [ "${#viol[@]}" -gt 0 ]; then

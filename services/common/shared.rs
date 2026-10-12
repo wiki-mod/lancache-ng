@@ -447,17 +447,14 @@ impl SnapshotStore {
                 Err(e) => self.log("FATAL", &format!("failed to prune snapshot {id}: {e}")),
             }
         }
-        self.drop_legacy();
+        self.adopt_legacy();
         Ok(())
     }
 
-    // What: delete snapshot dirs of the old shell format.
-    // Why: only once a current snapshot exists (AG-OP-007).
+    // What: turn old shell-format snapshots into new ones.
+    // Why: an update keeps rollback targets (AG-OP-007).
     // From: Issue #1683 | PR #1912
-    fn drop_legacy(&self) {
-        if !self.ids().is_ok_and(|ids| !ids.is_empty()) {
-            return;
-        }
+    pub fn adopt_legacy(&self) {
         let Ok(entries) = fs::read_dir(&self.root) else {
             return;
         };
@@ -469,15 +466,88 @@ impl SnapshotStore {
             if !old {
                 continue;
             }
-            match fs::remove_dir_all(entry.path()) {
-                Ok(()) => self.log("PRUNE", &format!("removed old-format snapshot {name}")),
-                Err(e) => self.log(
-                    "FATAL",
-                    &format!("failed to remove old snapshot {name}: {e}"),
-                ),
+            match self.adopt_one(&entry.path(), &name) {
+                Ok(id) => self.log("ADOPT", &format!("old snapshot {name} is now {id}")),
+                Err(e) => self.log("FATAL", &format!("cannot adopt old snapshot {name}: {e:#}")),
             }
         }
     }
+
+    // What: one old snapshot dir as a new snapshot.
+    // Why: its files become the {name: text} payload.
+    // From: Issue #1683 | PR #1912
+    fn adopt_one(&self, dir: &Path, name: &str) -> anyhow::Result<String> {
+        let nanos = legacy_id_nanos(name)
+            .with_context(|| format!("{name} is no old snapshot id (YYYYmmddTHHMMSS.N)"))?;
+        let id = format!("{nanos:020}");
+        anyhow::ensure!(
+            !self.root.join(&id).exists(),
+            "a snapshot {id} exists already"
+        );
+        let mut set = serde_json::Map::new();
+        for file in fs::read_dir(dir)? {
+            let file = file?;
+            if file.file_type()?.is_file() {
+                let text = fs::read_to_string(file.path())
+                    .with_context(|| format!("cannot read {}", file.path().display()))?;
+                set.insert(
+                    file.file_name().to_string_lossy().into_owned(),
+                    Value::String(text),
+                );
+            }
+        }
+        anyhow::ensure!(!set.is_empty(), "{name} holds no file");
+        let staging = self.root.join(format!("{STAGING}{id}"));
+        fs::create_dir_all(&staging)?;
+        let finish = || -> anyhow::Result<()> {
+            fs::write(
+                staging.join(self.file),
+                serde_json::to_vec_pretty(&Value::Object(set))?,
+            )?;
+            fs::rename(&staging, self.root.join(&id))?;
+            Ok(fs::remove_dir_all(dir)?)
+        };
+        finish().inspect_err(|_| {
+            let _ = fs::remove_dir_all(&staging);
+        })?;
+        Ok(id)
+    }
+}
+
+// What: epoch nanoseconds of an old id (UTC).
+// Why: old ids are date +%Y%m%dT%H%M%S.%N output.
+// From: Issue #1683 | PR #1912
+fn legacy_id_nanos(name: &str) -> Option<u128> {
+    let (date, rest) = name.split_once('T')?;
+    let (time, frac) = rest.split_once('.')?;
+    let digits =
+        |t: &str, n: usize| (t.len() == n && is_snapshot_id(t)).then(|| t.parse::<i64>().ok())?;
+    let (y, m, d) = (
+        digits(&date[..4.min(date.len())], 4)?,
+        digits(date.get(4..6)?, 2)?,
+        digits(date.get(6..)?, 2)?,
+    );
+    let (hh, mm, ss) = (
+        digits(time.get(..2)?, 2)?,
+        digits(time.get(2..4)?, 2)?,
+        digits(time.get(4..)?, 2)?,
+    );
+    if date.len() != 8 || frac.is_empty() || frac.len() > 9 || !is_snapshot_id(frac) {
+        return None;
+    }
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    // days from civil (Howard Hinnant), proleptic Gregorian
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = u128::try_from(days * 86_400 + hh * 3600 + mm * 60 + ss).ok()?;
+    let nanos: u128 = format!("{frac:0<9}").parse().ok()?;
+    Some(secs * 1_000_000_000 + nanos)
 }
 
 // What: creation time (Unix seconds) encoded in an id.
@@ -1433,23 +1503,58 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    // What: old shell-format snapshots go after a new one.
-    // Why: the update must converge; nothing reads them.
+    // What: old shell-format snapshots become new ones.
+    // Why: an update must keep its rollback targets.
     // From: Issue #1683 | PR #1912
     #[test]
-    fn snapshot_store_drops_old_format_after_the_first_new_snapshot() {
+    fn snapshot_store_adopts_old_format_as_rollback_targets() {
         let root = unique_temp_dir("legacy");
         let store = SnapshotStore::new(root.join("store"), "data.json", "test");
-        let old = root.join("store/20260101T120000.123456789");
+        let old = root.join("store/20260101T120000.5");
         fs::create_dir_all(&old).unwrap();
-        fs::write(old.join("data.json"), "old").unwrap();
+        let (a, b) = (
+            format!("a{}", unix_nanos()),
+            format!("b{}", unix_nanos() + 1),
+        );
+        fs::write(old.join("data.json"), &a).unwrap();
+        fs::write(old.join("other.conf"), &b).unwrap();
+        fs::create_dir_all(root.join("store/not-an-id")).unwrap();
         assert!(store.ids().unwrap().is_empty(), "an old id is no snapshot");
-        store.prune(3).unwrap();
-        assert!(old.is_dir(), "no current snapshot: the old one is kept");
-        let id = store.create(&serde_json::json!({}), 3).unwrap();
-        assert!(!old.exists(), "a current snapshot exists: the old one goes");
-        assert_eq!(store.ids().unwrap(), vec![id]);
+        store.adopt_legacy();
+        assert!(!old.exists(), "the old dir is converted, not kept");
+        let ids = store.ids().unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], format!("{:020}", 1_767_268_800_500_000_000u128));
+        assert_eq!(snapshot_created_unix(&ids[0]), Some(1_767_268_800));
+        let set = store.read(&ids[0]).unwrap();
+        assert_eq!(set["data.json"], a.as_str());
+        assert_eq!(set["other.conf"], b.as_str());
+        assert!(root.join("store/not-an-id").is_dir(), "a foreign dir stays");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    // What: old ids parse to epoch nanoseconds, junk not.
+    // Why: a wrong id sorts a snapshot to the wrong end.
+    // From: Issue #1683 | PR #1912
+    #[test]
+    fn legacy_ids_parse_to_epoch_nanoseconds() {
+        assert_eq!(legacy_id_nanos("19700101T000000.0"), Some(0));
+        assert_eq!(
+            legacy_id_nanos("20240229T235959.123456789"),
+            Some(1_709_251_199_123_456_789)
+        );
+        for bad in [
+            "",
+            "x",
+            "20260101T120000",
+            "20261301T120000.1",
+            "20260101T250000.1",
+            "2026010T120000.1",
+            "20260101T120000.1234567890",
+            "20260101T120000.a",
+        ] {
+            assert_eq!(legacy_id_nanos(bad), None, "{bad}");
+        }
     }
 
     // What: keep_n 0 keeps three, never none.
