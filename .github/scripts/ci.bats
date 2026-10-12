@@ -696,29 +696,33 @@ CASES
     [ "${status}" -eq 0 ] && [ -n "${output}" ] || { echo "loaded real SOT no longer answers: rc ${status}: ${output}"; return 1; }
 }
 
-# What: absent base field is BUILD, other base failures not
-# Why: a missing field is fact; UNKNOWN stays never BUILD
+# What: every failed base identity is UNKNOWN, never BUILD
+# Why: UNKNOWN != BUILD; BUILD needs proven impact (2.3)
 # From: Issue #1683 | PR #1912
-@test "impact classifies a target new at base as BUILD and any other base failure as UNKNOWN" {
-    local miss other
-    miss='_ci_required_field no-such-target build_type'
+@test "impact never turns a failed or empty base identity into BUILD" {
+    local miss other t hid case
+    t="$(_val name)"
+    hid="$(_val name)"
+    miss="_ci_required_field ${t} build_type"
     other='ci_log "[CI-ERROR-CORE-0106]" "reason=\"command failed or wrote stderr\""'
-    eval "_ci_identity_for() { ${miss}; return 2; }"
-    run _ci_impact_classify x linux/amd64 head base "${CI_MANIFEST_SOURCE}"
-    _expect field-absent 0 "[CI-ERROR-CORE-0009];[CI-INFO-IMPACT-0013];BUILD" || return 1
-    [[ "${output}" != *"UNKNOWN"* ]] || { echo "absent field: ${output}"; return 1; }
-    eval "_ci_identity_for() { ${other}; return 2; }"
-    run _ci_impact_classify x linux/amd64 head base "${CI_MANIFEST_SOURCE}"
-    _expect other-failure 0 "[CI-ERROR-CORE-0106];[CI-INFO-IMPACT-0010];UNKNOWN" || return 1
-    [[ "${output}" != *"[CI-INFO-IMPACT-0013]"* ]] || { echo "other failure took the absent path: ${output}"; return 1; }
-    eval "_ci_identity_for() { ${miss}; ${other}; return 2; }"
-    run _ci_impact_classify x linux/amd64 head base "${CI_MANIFEST_SOURCE}"
-    _expect mixed 0 "[CI-INFO-IMPACT-0010];UNKNOWN" || return 1
-    _ci_identity_for() { printf 'head\n'; }
-    run _ci_impact_classify x linux/amd64 head base "${CI_MANIFEST_SOURCE}"
+    for case in miss other mixed empty; do
+        case "${case}" in
+            miss) eval "_ci_identity_for() { ${miss}; return 2; }" ;;
+            other) eval "_ci_identity_for() { ${other}; return 2; }" ;;
+            mixed) eval "_ci_identity_for() { ${miss}; ${other}; return 2; }" ;;
+            empty) _ci_identity_for() { printf ''; } ;;
+        esac
+        run _ci_impact_classify "${t}" linux/amd64 "${hid}" base "${CI_MANIFEST_SOURCE}"
+        _expect "${case}" 0 "[CI-INFO-IMPACT-0010];UNKNOWN" || return 1
+        [[ "${output}" != *BUILD* ]] || { echo "${case} gave BUILD: ${output}"; return 1; }
+    done
+    run _ci_impact_classify "${t}" linux/amd64 "" base "${CI_MANIFEST_SOURCE}"
+    _expect no-head 0 "[CI-INFO-IMPACT-0009];UNKNOWN" || return 1
+    eval "_ci_identity_for() { printf '%s\\n' '${hid}'; }"
+    run _ci_impact_classify "${t}" linux/amd64 "${hid}" base "${CI_MANIFEST_SOURCE}"
     _expect same 0 "=NOOP" || return 1
     _ci_identity_for() { printf 'other\n'; }
-    run _ci_impact_classify x linux/amd64 head base "${CI_MANIFEST_SOURCE}"
+    run _ci_impact_classify "${t}" linux/amd64 "${hid}" base "${CI_MANIFEST_SOURCE}"
     _expect changed 0 "=BUILD" || return 1
 }
 

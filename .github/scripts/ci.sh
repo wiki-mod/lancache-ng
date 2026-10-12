@@ -1476,26 +1476,15 @@ _ci_impact_run() {
 }
 
 # What: NOOP/BUILD for a head id vs its base id.
-# Why: failed base id is UNKNOWN; absent field is BUILD.
+# Why: any failed base id is UNKNOWN; UNKNOWN != BUILD.
 # From: Issue #1683 | PR #1912
 _ci_impact_classify() {
-    local t="$1" p="$2" hid="$3" base="$4" base_manifest="$5" bid errf rc=0
+    local t="$1" p="$2" hid="$3" base="$4" base_manifest="$5" bid rc=0
     if [ -z "${hid}" ]; then
         ci_log "[CI-INFO-IMPACT-0009]" "service=\"${t}\" platform=\"${p}\" reason=\"no head identity; UNKNOWN\""
         printf 'UNKNOWN\n'; return 0
     fi
-    errf="$(_ci_mktemp "${CI_TMPDIR}/ci-base-id.XXXXXX")" || { printf 'UNKNOWN\n'; return 0; }
-    bid="$(CI_MANIFEST="${base_manifest}" _ci_identity_for "${t}" "${p}" "${base}" 2>"${errf}")" || rc=$?
-    [ ! -s "${errf}" ] || cat "${errf}" >&2
-    # What: only absent base SOT fields make the target new.
-    # Why: absent field is fact; other failures are UNKNOWN.
-    # From: Issue #1683 | PR #1912
-    if [ "${rc}" -ne 0 ] && awk '/^\[CI-/ { if (index($0, "reason=\"required SOT field missing\"")) hit = 1; else other = 1 } END { exit !(hit && !other) }' "${errf}"; then
-        rm -f "${errf}"
-        ci_log "[CI-INFO-IMPACT-0013]" "service=\"${t}\" platform=\"${p}\" base=\"${base}\" reason=\"base SOT lacks a required field; target new at base; BUILD\""
-        printf 'BUILD\n'; return 0
-    fi
-    rm -f "${errf}"
+    bid="$(CI_MANIFEST="${base_manifest}" _ci_identity_for "${t}" "${p}" "${base}")" || rc=$?
     if [ "${rc}" -ne 0 ] || [ -z "${bid}" ]; then
         ci_log "[CI-INFO-IMPACT-0010]" "service=\"${t}\" platform=\"${p}\" base=\"${base}\" rc=${rc} reason=\"no base identity (error above if rc>0); UNKNOWN\""
         printf 'UNKNOWN\n'; return 0
