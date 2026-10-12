@@ -7089,21 +7089,25 @@ _ci_validate_ui_add_record() {
 # Why: one owner for the CSRF form post and its 303 check.
 # From: Issue #1683 | PR #1858
 _ci_validate_ui_post() {
-    local base="$1" jar="$2" path="$3" field code
+    local base="$1" jar="$2" path="$3" field code body
     shift 3
     local -a data=()
     for field in "$@"; do
         data+=(--data-urlencode "${field}")
     done
-    code="$(_ci_capture 0 curl -sS -b "${jar}" -o /dev/null -w '%{http_code}' \
+    body="$(_ci_mktemp "${CI_TMPDIR}/ci-ui-body.XXXXXX")" || return 2
+    code="$(_ci_capture 0 curl -sS -b "${jar}" -o "${body}" -w '%{http_code}' \
         "${data[@]}" "${base}${path}")" || {
+        rm -f "${body}"
         ci_log "[CI-ERROR-VALIDATE-0082]" "url=\"${base}${path}\" reason=\"ui form post failed (raw above)\""
         return 2
     }
     if [ "${code}" != "303" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0034]" "url=\"${base}${path}\" code=\"${code}\" reason=\"ui form post did not return 303\""
+        ci_error "[CI-ERROR-VALIDATE-0034]" "url=\"${base}${path}\" code=\"${code}\" reason=\"ui form post did not return 303; response body in raw\"" "$(head -c 2000 "${body}")"
+        rm -f "${body}"
         return 1
     fi
+    rm -f "${body}"
 }
 
 # What: the LAN zone (dotted) the dns supervisor creates
@@ -7555,6 +7559,13 @@ _ci_validate_kea_rollback() {
         _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${uname}" \
         -e DHCP_MODE=kea -e "DHCP_API_URL=http://${kip}:${kport}" ui >/dev/null; then
         _ci_validate_kea_round_trip "${project}" "${kip}" "${kport}" "${uname}" || rc=$?
+        # What: a failed round trip ships both run logs.
+        # Why: the ui answer alone does not name the cause.
+        # From: Issue #1683 | PR #1912
+        if [ "${rc}" -ne 0 ]; then
+            ci_error "[CI-ERROR-VALIDATE-0126]" "ui=\"${uname}\" kea=\"${kname}\" rc=${rc} reason=\"Kea round trip failed; run logs in raw\"" \
+                "$(docker logs --tail 80 "${uname}" 2>&1; docker logs --tail 80 "${kname}" 2>&1)"
+        fi
         _ci_validate_rm_run "${uname}" || { [ "${rc}" -ne 0 ] || rc=2; }
     else
         rc=2

@@ -4956,6 +4956,19 @@ CASES
     _expect one-differs 1 - || return 1
 }
 
+# What: a ui form post that is not a 303 shows the body
+# Why: a bare 500 does not name the cause of the failure
+# From: Issue #1683 | PR #1912
+@test "validate ui post: a non-303 answer logs the response body" {
+    local body
+    body="$(_val name)"
+    curl() { printf '%s' "${BODY}" > "$5"; printf '%s' "${CODE}"; }
+    BODY="${body}" CODE=500 run _ci_validate_ui_post http://x /tmp/jar /p a=b
+    _expect not-303 1 "[CI-ERROR-VALIDATE-0034];code=\"500\";${body}" || return 1
+    BODY="" CODE=303 run _ci_validate_ui_post http://x /tmp/jar /p a=b
+    _expect is-303 0 - || return 1
+}
+
 # What: ledger keeps one record per identity; races re-read
 # Why: a conflict fails closed; a lost race must merge
 # From: Issue #1683 | PR #1912
