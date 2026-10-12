@@ -128,7 +128,7 @@ struct Config {
     https_enabled: bool,
     cache_max_gb: f64,
     // What: the lease seconds a subnet without one shows.
-    // Why: .env owns DHCP_LEASE_TIME; Rust keeps no copy.
+    // Why: the SOT owns DHCP_LEASE_TIME; no copy in Rust.
     dhcp_lease_time: u32,
     http_ip: String,
     https_ip: String,
@@ -299,7 +299,7 @@ impl Config {
             ("CACHE_MAX_GB", cache_max_gb.to_string()),
         ]);
         // What: the logging switches, from the strict env.
-        // Why: .env owns the default; typos must not flip.
+        // Why: the SOT owns the default; no typo may flip.
         // From: Issue #1683 | PR #1912
         let mut startup_settings = startup_settings;
         for (key, _) in config::LOG_SWITCHES {
@@ -471,7 +471,7 @@ fn hsts_mode_from(raw: &str) -> HstsMode {
 }
 
 // What: CACHE_MAX_GB, else CACHE_MAX_SIZE (50g) in GB.
-// Why: .env owns the size; a malformed value must fail.
+// Why: the SOT owns the size; a bad value must fail.
 fn cache_max_gb_from(env: &dyn Fn(&str) -> Option<String>) -> Result<f64, String> {
     match config::opt(env, "CACHE_MAX_GB") {
         Some(raw) => raw

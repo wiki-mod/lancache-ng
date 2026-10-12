@@ -36,7 +36,7 @@ const CREDENTIAL_FILE: &str = "lancache-cachehamster-credential.json";
 const THROUGHPUT_EVERY: Duration = Duration::from_secs(10);
 
 // What: limits of the in-flight fetch count.
-// Why: cachehamster.env owns the number; Rust owns limits.
+// Why: the SOT owns the number; Rust owns limits.
 const CONCURRENCY: Uint = Uint {
     name: "CACHEHAMSTER_CONCURRENCY",
     min: 1,

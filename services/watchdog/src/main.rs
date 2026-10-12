@@ -975,7 +975,7 @@ impl Ctx {
     }
 
     // What: a required value from the env.
-    // Why: no defaults in Rust; the env files own them.
+    // Why: no defaults in Rust; the SOT bakes them in.
     fn need(&self, key: &str) -> Result<String, String> {
         config::need(&config::process_env, key)
     }
@@ -1425,7 +1425,7 @@ fn dns_role(raw: &str) -> Result<DnsRole, String> {
 }
 
 // What: a dns API port from the env, 1 to 65535.
-// Why: the .env owns the ports; compose passes them on.
+// Why: the SOT owns the ports; compose passes them on.
 // From: Issue #1683 | PR #1912
 fn api_port(key: &str) -> Result<u16, String> {
     bounded(key, 1, u16::MAX.into()).map(|p| p as u16)
@@ -1455,7 +1455,7 @@ impl Recursor {
         env_opt(self.ip_key).is_some()
     }
 
-    // What: the API port the .env names for this recursor.
+    // What: the API port the env names for this recursor.
     // Why: the ui and the flush calls use the same key.
     // From: Issue #1683 | PR #1912
     fn api_port(&self) -> Result<u16, String> {
