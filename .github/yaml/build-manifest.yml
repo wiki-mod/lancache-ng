@@ -1126,6 +1126,101 @@ runner_host:
   # From: Issue #1683 | PR #1912
   sccache_bin_dir: /usr/local/bin
   sccache_dist_dir: "@{runner_host.opt_root}/sccache/dist-client"
+  # What: unit file texts of the cleanup run, one line each.
+  # Why: AG-CI-006: unit text is data; ci.sh fills keys.
+  # From: Issue #1683 | PR #1912
+  service_unit:
+    - "[Unit]"
+    - Description=lancache-ng CI runner host docker cleanup
+    - After=docker.service
+    - Requires=docker.service
+    - "[Service]"
+    - Type=oneshot
+    - Environment=GITHUB_REPOSITORY=@REPO@
+    - ExecStart=/usr/bin/env bash @SCRIPT_DIR@/ci.sh runner-host cleanup
+  timer_unit:
+    - "[Unit]"
+    - Description=Daily lancache-ng CI runner host docker cleanup
+    - "[Timer]"
+    - OnCalendar=@CALENDAR@
+    - RandomizedDelaySec=@DELAY@
+    - Persistent=true
+    - "[Install]"
+    - WantedBy=timers.target
+  # What: route probe address, runner file, dir, unit names.
+  # Why: AG-CI-006: host names and globs have one owner.
+  # From: Issue #1683 | PR #1912
+  route_probe_ip: 1.1.1.1
+  runner_dir_glob: "actions-runner*"
+  runner_unit_glob: "actions.runner.*.service"
+  stray_archive_globs: ["*.tgz", "*.tar.gz"]
+  runner_file: .runner
+  runner_credential_files: [.credentials, .credentials_rsaparams]
+  runner_agent_field: agentName
+  runner_env_file: .env
+  runner_env_lang: LANG=C
+  # What: sudoers file, rule, mode, docker group, hooks.
+  # Why: AG-CI-006: the access contract has one owner.
+  # From: Issue #1683 | PR #1912
+  sudoers_dir: /etc/sudoers.d
+  sudoers_suffix: -nopasswd
+  sudoers_rule: "@USER@ ALL=(ALL) NOPASSWD:ALL"
+  sudoers_mode: "0440"
+  docker_group: docker
+  hook_pre_name: pre-job-cleanup.sh
+  hook_post_name: post-job-cleanup.sh
+  hook_mode: "0755"
+  hook_env_started: ACTIONS_RUNNER_HOOK_JOB_STARTED
+  hook_env_completed: ACTIONS_RUNNER_HOOK_JOB_COMPLETED
+  opt_root_mode: g+s
+  # What: clone identity files, journals, hosts, ssh, logs.
+  # Why: AG-CI-006: every host path has one owner.
+  # From: Issue #1683 | PR #1912
+  root_home: /root
+  home_root: /home
+  history_file: .bash_history
+  lesshst_file: /root/.lesshst
+  known_hosts_file: .ssh/known_hosts
+  ssh_dir: .ssh
+  authorized_keys_file: .ssh/authorized_keys
+  ssh_private_key_glob: "id_*"
+  ssh_public_key_glob: "*.pub"
+  ssh_host_key_glob: /etc/ssh/ssh_host_*
+  ssh_units: [ssh, sshd]
+  machine_id_file: /etc/machine-id
+  dbus_machine_id_file: /var/lib/dbus/machine-id
+  hostid_file: /etc/hostid
+  zgenhostid_bin: /usr/sbin/zgenhostid
+  journal_dir: /var/log/journal
+  journald_unit: systemd-journald
+  hosts_file: /etc/hosts
+  hosts_self_ip: 127.0.1.1
+  fstab_file: /etc/fstab
+  apt_log_globs: [/var/log/apt/history.log*, /var/log/dpkg.log*]
+  # What: Debian backports files and apt-listchanges.
+  # Why: AG-CI-006: the apt layout has one owner.
+  # From: Issue #1683 | PR #1912
+  os_release_file: /etc/os-release
+  backports_list: /etc/apt/sources.list.d/backports.list
+  backports_pref: /etc/apt/preferences.d/backports
+  backports_repo: "deb http://deb.debian.org/debian @SUITE@-backports main"
+  backports_pin: ["Package: *", "Pin: release a=stable-backports", "Pin-Priority: 500"]
+  apt_listchanges_pkg: apt-listchanges
+  heavy_host_pattern: heavy
+  # What: runner tarball and its release and digest URLs.
+  # Why: AG-CI-006: download coordinates have one owner.
+  # From: Issue #1683 | PR #1912
+  runner_tar: "actions-runner-linux-x64-@VERSION@.tar.gz"
+  runner_release_url: "https://github.com/actions/runner/releases/download/v@VERSION@/@TAR@"
+  runner_api_url: "https://api.github.com/repos/actions/runner/releases/tags/v@VERSION@"
+  # What: restart drop-in, sccache dist mode and leftovers.
+  # Why: AG-CI-006: unit and dir contracts have one owner.
+  # From: Issue #1683 | PR #1912
+  restart_policy: on-failure
+  restart_dropin: override.conf
+  sccache_dist_mode: "2775"
+  sccache_stale_files: [.config/sccache/config, sccache-dist/client.conf]
+  sccache_stale_dirs: [.config/sccache, sccache-dist]
 
 # What: files the header and prose checks skip, by path.
 # Why: vendored or generated content carries no header.

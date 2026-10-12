@@ -5567,7 +5567,7 @@ ROWS
     _expect bad-json 1 "[CI-ERROR-DAEMON-0001];${f};parse error" || return 1
 }
 
-# What: restart waits the SOT time, then shows docker's raw text.
+# What: restart waits the SOT time, then shows raw text.
 # Why: V-N3: a dead dockerd must not end in a bare message.
 # From: Issue #1255 | PR #1912
 @test "docker-daemon-config: a dockerd that never answers fails with its raw text" {
@@ -5606,27 +5606,64 @@ ROWS
 _rh_fixture() {
     RH_ROOT="$(_val path)" RH_UNITS="$(_val path)" RH_HOOKS="$(_val path)" RH_MIN="$(_val int 1 9)"
     RH_HTOK="$(_val int 100 499)" RH_ITOK="${RH_HTOK}"
+    RH_RF=".$(_val name)" RH_CRED=".$(_val name)" RH_ENV=".$(_val name)" RH_AGENT="$(_val name)"
+    RH_DGLOB="d$(_val name)-" RH_UGLOB="u$(_val name)" RH_POLICY="$(_val name)" RH_DROP="$(_val name).conf"
+    RH_HS="H$(_val var)" RH_HC="H$(_val var)" RH_PRE="$(_val name).sh" RH_POST="$(_val name).sh"
+    RH_SEC="$(_val int 1 99)" RH_ARCX="$(_val name)" RH_AGE="$(_val int 1 999)" RH_CAL="$(_val name)" RH_DELAY="$(_val int 1 999)"
+    RH_SVC1="$(_val name)" RH_SVC2="$(_val name)"
     mkdir -p "${RH_ROOT}" "${RH_UNITS}" "${RH_HOOKS}"
     _ci_rh_root() { "$@"; }
     _ci_rh_host_token() { printf '%s' "${RH_HTOK}"; }
     _ci_rh_ip_token() { printf '%s' "${RH_ITOK}"; }
+    # What: the real list reader, kept under another name.
+    # Why: the fixture overrides lists with its own values.
+    # From: Issue #1683 | PR #1912
+    if ! declare -F _rh_real_list >/dev/null; then
+        eval "_rh_real_list () $(declare -f _ci_block_entry_list | tail -n +2)"
+    fi
+    _ci_block_entry_list() {
+        if [ "$1" = runner_host ]; then
+            case "$3" in
+                runner_credential_files) printf '%s\n' "${RH_CRED}"; return 0 ;;
+                stray_archive_globs) printf '*.%s\n' "${RH_ARCX}"; return 0 ;;
+                service_unit) printf '%s\n' "${RH_SVC1}=@REPO@" "${RH_SVC2}=@SCRIPT_DIR@/x"; return 0 ;;
+                timer_unit) printf '%s\n' "OnCalendar=@CALENDAR@" "RandomizedDelaySec=@DELAY@"; return 0 ;;
+            esac
+        fi
+        _rh_real_list "$@"
+    }
     _ci_rh_val() {
         case "$1" in
             opt_root) printf '%s' "${RH_ROOT}" ;;
             unit_dir) printf '%s' "${RH_UNITS}" ;;
             hooks_dir) printf '%s' "${RH_HOOKS}" ;;
             stray_archive_min_bytes) printf '%s' "${RH_MIN}" ;;
+            runner_file) printf '%s' "${RH_RF}" ;;
+            runner_agent_field) printf '%s' "${RH_AGENT}" ;;
+            runner_env_file) printf '%s' "${RH_ENV}" ;;
+            runner_dir_glob) printf '%s*' "${RH_DGLOB}" ;;
+            runner_unit_glob) printf '%s.*.service' "${RH_UGLOB}" ;;
+            restart_policy) printf '%s' "${RH_POLICY}" ;;
+            restart_dropin) printf '%s' "${RH_DROP}" ;;
+            restart_sec) printf '%s' "${RH_SEC}" ;;
+            hook_env_started) printf '%s' "${RH_HS}" ;;
+            hook_env_completed) printf '%s' "${RH_HC}" ;;
+            hook_pre_name) printf '%s' "${RH_PRE}" ;;
+            hook_post_name) printf '%s' "${RH_POST}" ;;
+            hook_network_min_age) printf '%s' "${RH_AGE}" ;;
+            timer_calendar) printf '%s' "${RH_CAL}" ;;
+            timer_delay) printf '%s' "${RH_DELAY}" ;;
             *) _ci_block_entry_field runner_host "" "$1" ;;
         esac
     }
 }
 
-# What: a runner dir whose .runner names an agent.
+# What: a runner dir whose runner file names an agent.
 # Why: identity checks read agentName only.
 # From: Issue #1622 | PR #1624
 _rh_runner_dir() {
     mkdir -p "$1"
-    jq -n --arg a "$2" '{agentName: $a}' > "$1/.runner"
+    jq -n --arg a "$2" --arg k "${RH_AGENT}" '{($k): $a}' > "$1/${RH_RF}"
 }
 
 # What: fleet numbers and foreign key lines follow the SOT.
@@ -5654,7 +5691,7 @@ _rh_runner_dir() {
     _rh_fixture
     own="a-lancache-runner-${RH_HTOK}" foreign="a-lancache-runner-$(( RH_HTOK + 1 ))"
     mkdir -p "${RH_ROOT}/none" "${RH_ROOT}/creds"
-    : > "${RH_ROOT}/creds/.credentials"
+    : > "${RH_ROOT}/creds/${RH_CRED}"
     _rh_runner_dir "${RH_ROOT}/own" "${own}"
     _rh_runner_dir "${RH_ROOT}/foreign" "${foreign}"
     _rh_runner_dir "${RH_ROOT}/unnamed" "$(_val name)"
@@ -5683,17 +5720,17 @@ _rh_runner_dir() {
 @test "runner-host: clean needs consent and removes only foreign dirs, archives need clean-archive" {
     local arc other
     _rh_fixture
-    _rh_runner_dir "${RH_ROOT}/actions-runner-own" "a-lancache-runner-${RH_HTOK}"
-    _rh_runner_dir "${RH_ROOT}/actions-runner-foreign" "a-lancache-runner-$(( RH_HTOK + 1 ))"
-    arc="${RH_ROOT}/$(_val name).tar.gz" other="${RH_ROOT}/$(_val name).tar.gz"
+    _rh_runner_dir "${RH_ROOT}/${RH_DGLOB}own" "a-lancache-runner-${RH_HTOK}"
+    _rh_runner_dir "${RH_ROOT}/${RH_DGLOB}foreign" "a-lancache-runner-$(( RH_HTOK + 1 ))"
+    arc="${RH_ROOT}/$(_val name).${RH_ARCX}" other="${RH_ROOT}/$(_val name).${RH_ARCX}"
     truncate -s "$(( RH_MIN + 10 ))" "${arc}"
     : > "${other}"
     CONFIRM_CLEAN="" run _ci_rh_clean
     _expect no-consent 2 "[CI-ERROR-RUNNER-0026];CONFIRM_CLEAN" || return 1
-    [ -d "${RH_ROOT}/actions-runner-foreign" ] || { echo "removed without consent"; return 1; }
+    [ -d "${RH_ROOT}/${RH_DGLOB}foreign" ] || { echo "removed without consent"; return 1; }
     CONFIRM_CLEAN=yes run _ci_rh_clean
-    _expect clean 0 "Removing foreign clone artifact: ${RH_ROOT}/actions-runner-foreign;NOT removed" || return 1
-    [ ! -d "${RH_ROOT}/actions-runner-foreign" ] && [ -d "${RH_ROOT}/actions-runner-own" ] && [ -f "${arc}" ] || { echo "wrong set removed"; return 1; }
+    _expect clean 0 "Removing foreign clone artifact: ${RH_ROOT}/${RH_DGLOB}foreign;NOT removed" || return 1
+    [ ! -d "${RH_ROOT}/${RH_DGLOB}foreign" ] && [ -d "${RH_ROOT}/${RH_DGLOB}own" ] && [ -f "${arc}" ] || { echo "wrong set removed"; return 1; }
     run _ci_rh_clean_archive "${other}" "${arc}"
     _expect clean-archive 0 "SKIPPING ${other};Removing confirmed stray archive: ${arc}" || return 1
     [ ! -e "${arc}" ] && [ -e "${other}" ] || { echo "archive set wrong"; return 1; }
@@ -5711,12 +5748,13 @@ _rh_runner_dir() {
     mkdir -p "${inst}"
     run _ci_rh_runner_hook_env "${inst}"
     _expect no-env 2 "[CI-ERROR-RUNNER-0093]" || return 1
-    printf 'LANG=C\nACTIONS_RUNNER_HOOK_JOB_STARTED=%s\nOTHER=%s\n' "$(_val path)" "$(_val name)" > "${inst}/.env"
+    printf 'LANG=C\n%s=%s\nOTHER=%s\n' "${RH_HS}" "$(_val path)" "$(_val name)" > "${inst}/${RH_ENV}"
     run _ci_rh_runner_hook_env "${inst}"
     [ "${status}" -eq 0 ] || { echo "rewrite rc ${status}: ${output}"; return 1; }
-    [ "$(grep -c '^ACTIONS_RUNNER_HOOK_JOB_STARTED=' "${inst}/.env")" -eq 1 ] || { echo "started lines duplicated"; return 1; }
-    grep -qx "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${RH_HOOKS}/post-job-cleanup.sh" "${inst}/.env" || { echo "completed line missing"; return 1; }
-    grep -q '^OTHER=' "${inst}/.env" || { echo "foreign .env line lost"; return 1; }
+    [ "$(grep -c "^${RH_HS}=" "${inst}/${RH_ENV}")" -eq 1 ] || { echo "started lines duplicated"; return 1; }
+    grep -qx "${RH_HC}=${RH_HOOKS}/${RH_POST}" "${inst}/${RH_ENV}" || { echo "completed line missing"; return 1; }
+    grep -qx "${RH_HS}=${RH_HOOKS}/${RH_PRE}" "${inst}/${RH_ENV}" || { echo "started line missing"; return 1; }
+    grep -q '^OTHER=' "${inst}/${RH_ENV}" || { echo "foreign env line lost"; return 1; }
     run _ci_rh_runner_hook_env "${inst}"
     _expect again 0 "already has the correct hook wiring" || return 1
 }
@@ -5729,13 +5767,13 @@ _rh_runner_dir() {
     _rh_fixture
     systemctl() { printf '%s\n' "$*" >> "${RH_UNITS}/systemctl.log"; [ "$1" != show ] || printf 'x'; }
     run _ci_rh_restart_policy
-    _expect no-units 0 "No actions.runner" || return 1
-    unit="actions.runner.$(_val name).service"
+    _expect no-units 0 "No ${RH_UGLOB}.*.service units" || return 1
+    unit="${RH_UGLOB}.$(_val name).service"
     : > "${RH_UNITS}/${unit}"
     run _ci_rh_restart_policy
     [ "${status}" -eq 0 ] || { echo "rc ${status}: ${output}"; return 1; }
-    grep -qx 'Restart=on-failure' "${RH_UNITS}/${unit}.d/override.conf" || { echo "no Restart line"; return 1; }
-    grep -qx "RestartSec=$(_ci_rh_val restart_sec)" "${RH_UNITS}/${unit}.d/override.conf" || { echo "no RestartSec line"; return 1; }
+    grep -qx "Restart=${RH_POLICY}" "${RH_UNITS}/${unit}.d/${RH_DROP}" || { echo "no Restart line"; return 1; }
+    grep -qx "RestartSec=${RH_SEC}" "${RH_UNITS}/${unit}.d/${RH_DROP}" || { echo "no RestartSec line"; return 1; }
     grep -qx 'daemon-reload' "${RH_UNITS}/systemctl.log" || { echo "no daemon-reload"; return 1; }
     : > "${RH_UNITS}/systemctl.log"
     run _ci_rh_restart_policy
@@ -5753,7 +5791,7 @@ _rh_runner_dir() {
     bash -n <<< "${pre}" || return 1
     bash -n <<< "${post}" || return 1
     [[ "${post}" == *"name=$(_ci_validate_project "") "* ]] || { echo "no validate prefix in the post hook"; return 1; }
-    [[ "${post}" == *"MIN_AGE=$(_ci_rh_val hook_network_min_age)"$'\n'* ]] || { echo "no grace age in the post hook"; return 1; }
+    [[ "${post}" == *"MIN_AGE=${RH_AGE}"$'\n'* ]] || { echo "no grace age in the post hook"; return 1; }
     [[ "${post}" != *"@"* ]] || { echo "unfilled placeholder in the post hook"; return 1; }
     [[ "${pre}" == *'GITHUB_WORKSPACE'* ]] || return 1
 }
@@ -5778,11 +5816,12 @@ _rh_runner_dir() {
 # From: Issue #1255 | PR #1349
 @test "runner-host: service and timer text come from the SOT and this script's path" {
     local svc tim
+    _rh_fixture
     svc="$(_ci_rh_service_text)" tim="$(_ci_rh_timer_text)"
-    [[ "${svc}" == *"ExecStart=/usr/bin/env bash ${CI_SCRIPT_DIR}/ci.sh runner-host cleanup"* ]] || { echo "${svc}"; return 1; }
-    [[ "${svc}" == *"Environment=GITHUB_REPOSITORY=${GITHUB_REPOSITORY}"* ]] || { echo "${svc}"; return 1; }
-    [[ "${tim}" == *"OnCalendar=$(_ci_rh_val timer_calendar)"$'\n'* ]] || { echo "${tim}"; return 1; }
-    [[ "${tim}" == *"RandomizedDelaySec=$(_ci_rh_val timer_delay)"$'\n'* ]] || { echo "${tim}"; return 1; }
+    [[ "${svc}" == *"${RH_SVC2}=${CI_SCRIPT_DIR}/x"* ]] || { echo "${svc}"; return 1; }
+    [[ "${svc}" == *"${RH_SVC1}=${GITHUB_REPOSITORY}"* ]] || { echo "${svc}"; return 1; }
+    [[ "${tim}" == *"OnCalendar=${RH_CAL}"$'\n'* ]] || { echo "${tim}"; return 1; }
+    [[ "${tim}" == *"RandomizedDelaySec=${RH_DELAY}"* ]] || { echo "${tim}"; return 1; }
 }
 
 # What: reaping keys on .Created and the match field.
