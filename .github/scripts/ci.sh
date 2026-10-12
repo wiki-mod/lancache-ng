@@ -9799,7 +9799,7 @@ _ci_rh_hosts_self() {
 # Why: full-reset-clean acts only on what this lists.
 # From: Issue #1622 | PR #1624
 _ci_rh_full_reset_check() {
-    local f ck found mine out line hd mid list
+    local f ck found mine out line hd mid list fleet_ere
     _ci_rh_need_sudo || return 2
     mine="$(_ci_rh_host_token)" || return 2
     printf 'Host: %s   own_host_token=%s\n\n--- Shell history and known_hosts (size only) ---\n' "$(_ci_capture 0 hostname)" "${mine:-<none>}"
@@ -9845,7 +9845,8 @@ _ci_rh_full_reset_check() {
     done <<< "${list}"
     [ "${found}" -eq 1 ] || printf '  (none found)\n'
     printf '\n--- apt/dpkg history naming other fleet hosts (report only) ---\n'
-    out="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0036]" "reason=\"apt history search failed\"" _ci_rh_root bash -c "zgrep -hEo '[a-z]+-lancache-[A-Za-z0-9-]+' /var/log/apt/history.log* /var/log/dpkg.log*")" || return 2
+    fleet_ere="$(_ci_rh_ere fleet_name_patterns)" || return 2
+    out="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0036]" "reason=\"apt history search failed\"" _ci_rh_root bash -c "zgrep -hEo '${fleet_ere}' /var/log/apt/history.log* /var/log/dpkg.log*")" || return 2
     found=0
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
@@ -9958,31 +9959,40 @@ _ci_rh_set_hostname() {
     printf 'Done. Hostname: %s (nothing was rebooted or restarted)\n' "$(_ci_capture 0 hostname)"
 }
 
+# What: one runner_host list as a single ERE alternation.
+# Why: name families have one owner, the SOT; no regex copy.
+# From: Issue #1683 | PR #1912
+_ci_rh_ere() {
+    local list
+    list="$(_ci_block_entry_list runner_host "" "$1")" || return 2
+    tr '\n' '|' <<< "${list}" | sed 's/|$//'
+}
+
 # What: the kernel/firmware name parts as one ERE.
 # Why: purge-pve must never touch the boot packages.
 # From: Issue #1622 | PR #1624
 _ci_rh_pve_keep_ere() {
-    local keep
-    keep="$(_ci_block_entry_list runner_host "" pve_keep)" || return 2
-    tr '\n' '|' <<< "${keep}" | sed 's/|$//'
+    _ci_rh_ere pve_keep
 }
 
 # What: read-only inventory of the nested Proxmox stack.
 # Why: review it before purge-pve removes a live stack.
 # From: Issue #1622 | PR #1624
 _ci_rh_purge_pve_check() {
-    local keep pkgs sim
+    local keep pkgs sim families units
     keep="$(_ci_rh_pve_keep_ere)" || return 2
+    families="$(_ci_rh_ere pve_package_families)" || return 2
+    units="$(_ci_rh_ere pve_unit_families)" || return 2
     mapfile -t pkgs <<< "$(_ci_block_entry_list runner_host "" pve_packages)"
     printf -- '--- Installed pve/proxmox/corosync/pmxcfs packages ---\n'
-    dpkg -l | { grep -iE '^ii.*(pve-|proxmox-|pmxcfs|corosync)' || printf '  (none found; already clean)\n'; }
+    dpkg -l | { grep -iE "^ii.*(${families})" || printf '  (none found; already clean)\n'; }
     printf '\n--- Kept regardless (kernel, firmware) ---\n'
     dpkg -l | { grep -iE "^ii.*(${keep})" || printf '  (none installed)\n'; }
     printf '\n--- Active pve/proxmox/corosync units ---\n'
-    systemctl list-units --all --type=service,timer --no-pager | { grep -iE 'pve|corosync|proxmox|pmxcfs' | grep -i active || printf '  (none active)\n'; }
+    systemctl list-units --all --type=service,timer --no-pager | { grep -iE "${units}" | grep -i active || printf '  (none active)\n'; }
     printf '\n--- /etc/pve mount, fstab and cron dependents ---\n'
-    mount | { grep -i pve || printf '  not currently mounted\n'; }
-    if _ci_rh_root grep -qi pve /etc/fstab; then printf '  FOUND: /etc/fstab references pve\n'; fi
+    mount | { grep -iE "${units}" || printf '  not currently mounted\n'; }
+    if _ci_rh_root grep -qiE "${units}" /etc/fstab; then printf '  FOUND: /etc/fstab references the stack\n'; fi
     printf '\n--- Simulated purge (no kernel or firmware must appear) ---\n'
     sim="$(_ci_run -m 100 "[CI-ERROR-RUNNER-0054]" "reason=\"simulated purge failed\"" _ci_rh_root apt-get purge --simulate "${pkgs[@]}")" || return 2
     tail -20 <<< "${sim}"
@@ -9993,9 +10003,12 @@ _ci_rh_purge_pve_check() {
 # Why: a leftover stack from the template holds RAM and CPU.
 # From: Issue #1622 | PR #1624
 _ci_rh_purge_pve() {
-    local keep pkgs svcs sim rem procs bad
+    local keep pkgs svcs sim rem procs bad families proc_families override
     _ci_rh_confirmed CONFIRM_PURGE_PVE || return 2
     keep="$(_ci_rh_pve_keep_ere)" || return 2
+    families="$(_ci_rh_ere pve_package_families)" || return 2
+    proc_families="$(_ci_rh_ere pve_process_families)" || return 2
+    override="$(_ci_rh_val pve_apt_override)" || return 2
     mapfile -t pkgs <<< "$(_ci_block_entry_list runner_host "" pve_packages)"
     mapfile -t svcs <<< "$(_ci_block_entry_list runner_host "" pve_services)"
     # What: re-simulate; refuse when a boot package is hit.
@@ -10011,12 +10024,12 @@ _ci_rh_purge_pve() {
     # What: set the pve-apt-hook override; always remove it.
     # Why: apt refuses to remove proxmox-ve otherwise.
     # From: Issue #1622 | PR #1624
-    _ci_rh_root touch /please-remove-proxmox-ve || return 2
-    _ci_rh_pve_purge_run "${keep}" "${pkgs[@]}" || { _ci_rh_root rm -f /please-remove-proxmox-ve; return 2; }
-    _ci_rh_root rm -f /please-remove-proxmox-ve || return 2
-    rem="$(dpkg -l | { grep -iE '^ii.*(pve-|proxmox-|pmxcfs|corosync)' || true; })"
+    _ci_rh_root touch "${override}" || return 2
+    _ci_rh_pve_purge_run "${keep}" "${pkgs[@]}" || { _ci_rh_root rm -f "${override}"; return 2; }
+    _ci_rh_root rm -f "${override}" || return 2
+    rem="$(dpkg -l | { grep -iE "^ii.*(${families})" || true; })"
     bad="$(grep -viE "${keep}" <<< "${rem}" || true)"
-    procs="$(ps -eo pid,args | { grep -E 'pve|pmxcfs|corosync|spiceproxy|qmeventd' || true; } | awk -v self="$$" '$1 != self && $0 !~ /grep|awk/')"
+    procs="$(ps -eo pid,args | { grep -E "${proc_families}" || true; } | awk -v self="$$" '$1 != self && $0 !~ /grep|awk/')"
     printf -- '--- Verification ---\nRemaining packages (kernel/firmware only expected):\n%s\nRemaining processes (none expected):\n%s\n' "${rem:-  (none)}" "${procs:-  (none)}"
     if [ -n "${bad}" ] || [ -n "${procs}" ]; then
         ci_log "[CI-ERROR-RUNNER-0058]" "reason=\"purge-pve did not remove the whole stack\""
@@ -10029,11 +10042,12 @@ _ci_rh_purge_pve() {
 # Why: autoremove may hit PVE dependencies only.
 # From: Issue #1622 | PR #1624
 _ci_rh_pve_purge_run() {
-    local keep="$1" sim bad
+    local keep="$1" sim bad removable
     shift
+    removable="$(_ci_rh_ere pve_autoremove_families)" || return 2
     _ci_run "[CI-ERROR-RUNNER-0059]" "reason=\"apt-get purge failed\"" _ci_rh_root env DEBIAN_FRONTEND=noninteractive apt-get purge -y "$@" || return 2
     sim="$(_ci_run "[CI-ERROR-RUNNER-0060]" "reason=\"simulated autoremove failed\"" _ci_rh_root env DEBIAN_FRONTEND=noninteractive apt-get autoremove --simulate)" || return 2
-    bad="$(grep -E '^Remv ' <<< "${sim}" | grep -viE 'pve-|proxmox-|libpve-|libproxmox-|pmxcfs|corosync|spice' || true)"
+    bad="$(grep -E '^Remv ' <<< "${sim}" | grep -viE "${removable}" || true)"
     if [ -n "${bad}" ] || grep -qiE "${keep}" <<< "${sim}"; then
         ci_log "[CI-ERROR-RUNNER-0061]" "reason=\"autoremove would remove packages outside the PVE set or a boot package; run it by hand if intended\""
         printf '%s\n' "${sim}" >&2
@@ -10380,13 +10394,15 @@ _ci_rh_restart_policy() {
 # Why: Rust CI on heavy hosts fails without the client.
 # From: Issue #1622 | PR #1624
 _ci_rh_sccache_check() {
-    local user root lack=0 f stale dist list
+    local user root lack=0 f stale dist list bin_dir main_bin
     user="$(_ci_rh_val user)" || return 2
     root="$(_ci_rh_val opt_root)" || return 2
     dist="$(_ci_rh_val sccache_dist_dir)" || return 2
     printf -- '--- sccache client binaries ---\n'
+    bin_dir="$(_ci_rh_val sccache_bin_dir)" || return 2
     list="$(_ci_block_entry_list runner_host "" sccache_bins)" || return 2
     while IFS= read -r f; do
+        f="${bin_dir}/${f}"
         if [ -x "${f}" ]; then printf '  %s: present\n' "${f}"; else printf '  %s: MISSING\n' "${f}"; lack=1; fi
     done <<< "${list}"
     printf '\n--- Runtime config: supplied per job through SCCACHE_CONF; no token on the host ---\n'
@@ -10395,8 +10411,9 @@ _ci_rh_sccache_check() {
     done
     if _ci_rh_root test -d "${dist}"; then printf '  %s: present\n' "${dist}"; else printf '  %s: MISSING\n' "${dist}"; lack=1; fi
     printf '\n--- Live check as %s ---\n' "${user}"
-    if [ -x /usr/local/bin/sccache ]; then
-        _ci_run "[CI-ERROR-RUNNER-0098]" "user=\"${user}\" reason=\"sccache --version failed\"" _ci_rh_root sudo -u "${user}" env HOME="${root}/${user}" /usr/local/bin/sccache --version || lack=1
+    main_bin="${bin_dir}/$(head -n 1 <<< "${list}")"
+    if [ -x "${main_bin}" ]; then
+        _ci_run "[CI-ERROR-RUNNER-0098]" "user=\"${user}\" reason=\"sccache --version failed\"" _ci_rh_root sudo -u "${user}" env HOME="${root}/${user}" "${main_bin}" --version || lack=1
     else
         printf '  (skipped; sccache binary lack)\n'
     fi
@@ -10411,12 +10428,15 @@ _ci_rh_sccache_check() {
 # Why: builds run on a heavy host; secrets are per job.
 # From: Issue #1622 | PR #1626
 _ci_rh_sccache_fetch() {
-    local src="${1:-}" user root group dist f
+    local src="${1:-}" user root group dist f bin_dir list main_name dist_name
     user="$(_ci_rh_val user)" || return 2
+    bin_dir="$(_ci_rh_val sccache_bin_dir)" || return 2
+    list="$(_ci_block_entry_list runner_host "" sccache_bins)" || return 2
+    main_name="$(sed -n 1p <<< "${list}")" dist_name="$(sed -n 2p <<< "${list}")"
     root="$(_ci_rh_val opt_root)" || return 2
     dist="$(_ci_rh_val sccache_dist_dir)" || return 2
     group="$(_ci_rh_group "${user}")" || return 2
-    for f in sccache sccache-dist; do
+    for f in ${list}; do
         if [ ! -f "${src}/${f}" ]; then
             ci_log "[CI-ERROR-RUNNER-0100]" "file=\"${src}/${f}\" reason=\"not staged; scp it from a working heavy host\""
             return 2
@@ -10425,11 +10445,11 @@ _ci_rh_sccache_fetch() {
     # What: run the staged binaries before any install.
     # Why: a bad or foreign file must not replace tools.
     # From: Issue #1622 | PR #1626
-    _ci_run "[CI-ERROR-RUNNER-0101]" "file=\"${src}/sccache\" reason=\"staged binary does not run\"" _ci_rh_root sudo -u "${user}" env HOME="${root}/${user}" "${src}/sccache" --version >/dev/null || return 2
-    _ci_run "[CI-ERROR-RUNNER-0102]" "file=\"${src}/sccache-dist\" reason=\"staged binary does not run\"" "${src}/sccache-dist" --help >/dev/null || return 2
-    for f in sccache sccache-dist; do
-        _ci_run "[CI-ERROR-RUNNER-0103]" "file=\"${f}\" reason=\"not installed\"" _ci_rh_root install -o root -g "${group}" -m 0755 "${src}/${f}" "/usr/local/bin/.${f}.new" || return 2
-        _ci_run "[CI-ERROR-RUNNER-0104]" "file=\"${f}\" reason=\"not moved in place\"" _ci_rh_root mv -f "/usr/local/bin/.${f}.new" "/usr/local/bin/${f}" || return 2
+    _ci_run "[CI-ERROR-RUNNER-0101]" "file=\"${src}/${main_name}\" reason=\"staged binary does not run\"" _ci_rh_root sudo -u "${user}" env HOME="${root}/${user}" "${src}/${main_name}" --version >/dev/null || return 2
+    _ci_run "[CI-ERROR-RUNNER-0102]" "file=\"${src}/${dist_name}\" reason=\"staged binary does not run\"" "${src}/${dist_name}" --help >/dev/null || return 2
+    for f in ${list}; do
+        _ci_run "[CI-ERROR-RUNNER-0103]" "file=\"${f}\" reason=\"not installed\"" _ci_rh_root install -o root -g "${group}" -m 0755 "${src}/${f}" "${bin_dir}/.${f}.new" || return 2
+        _ci_run "[CI-ERROR-RUNNER-0104]" "file=\"${f}\" reason=\"not moved in place\"" _ci_rh_root mv -f "${bin_dir}/.${f}.new" "${bin_dir}/${f}" || return 2
     done
     _ci_run "[CI-ERROR-RUNNER-0105]" "dir=\"${dist}\" reason=\"dist dir not created\"" _ci_rh_root mkdir -p "${dist}" || return 2
     _ci_run "[CI-ERROR-RUNNER-0106]" "dir=\"${dist}\" reason=\"dist dir owner not set\"" _ci_rh_root chown "${user}:${group}" "${dist%/*}" "${dist}" || return 2
