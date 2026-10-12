@@ -3693,15 +3693,24 @@ _ci_docker_publish() {
     _ci_registry_digest "${tag}"
 }
 
-# What: one trivy run; a written report ends the retries.
-# Why: a finding is deterministic and never retried.
-# From: Issue #1683 | PR #1858
+# What: the trivy exit code that means findings.
+# Why: trivy's own errors exit 1; a finding must differ.
+# From: Issue #1683 | PR #1912
+_CI_TRIVY_FINDING_RC=5
+
+# What: one trivy run; exit 0 clean, findings keep the report.
+# Why: a clean summary is no finding; an error is no verdict.
+# From: Issue #1683 | PR #1912
 _ci_trivy_scan_once() {
-    local report="$1" ref="$2"
+    local report="$1" ref="$2" rc=0
     shift 2
     : > "${report}"
-    "$@" --output "${report}" "${ref}" && return 0
-    [ -s "${report}" ]
+    "$@" --output "${report}" "${ref}" || rc=$?
+    if [ "${rc}" -eq 0 ]; then
+        : > "${report}"
+        return 0
+    fi
+    [ "${rc}" -eq "${_CI_TRIVY_FINDING_RC}" ] && [ -s "${report}" ]
 }
 
 # What: Probe a dir with a real file+subdir write/read.
@@ -3864,7 +3873,7 @@ _ci_trivy_args() {
     local cache_dir="$1" skip_db="$2" scanners ignore
     scanners="$(_ci_variable CI_TRIVY_SCANNERS)" || return 2
     ignore="$(_ci_repo_path CI_TRIVY_IGNORE)" || return 2
-    printf '%s\n' trivy image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed \
+    printf '%s\n' trivy image --severity HIGH,CRITICAL --exit-code "${_CI_TRIVY_FINDING_RC}" --ignore-unfixed \
         --scanners "${scanners}" --cache-dir "${cache_dir}"
     [ "${skip_db}" -ne 1 ] || printf '%s\n' --skip-db-update
     [ ! -f "${ignore}" ] || printf '%s\n' --ignorefile "${ignore}"

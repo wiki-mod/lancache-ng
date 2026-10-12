@@ -2503,6 +2503,24 @@ CASES
         || { echo "argv lacks the ignore file or skip-db-update: ${a[*]}"; return 1; }
 }
 
+# What: trivy's exit code tells clean, finding and error
+# Why: a clean summary is no finding; an error has no verdict
+# From: Issue #1683 | PR #1912
+@test "trivy scan once: the exit code decides, not the report text" {
+    local rep
+    rep="${BATS_TEST_TMPDIR}/$(_val name)"
+    _stub_trivy() { printf '%s\n' "$(_val name)" > "$2"; return "${_stub_rc}"; }
+    _stub_rc=0
+    run _ci_trivy_scan_once "${rep}" "$(_val name)" _stub_trivy
+    [ "${status}" -eq 0 ] && [ ! -s "${rep}" ] || { echo "clean: rc ${status}, report kept"; return 1; }
+    _stub_rc="${_CI_TRIVY_FINDING_RC}"
+    run _ci_trivy_scan_once "${rep}" "$(_val name)" _stub_trivy
+    [ "${status}" -eq 0 ] && [ -s "${rep}" ] || { echo "finding: rc ${status}, report lost"; return 1; }
+    _stub_rc=1
+    run _ci_trivy_scan_once "${rep}" "$(_val name)" _stub_trivy
+    [ "${status}" -ne 0 ] || { echo "error with a partial report read as a verdict"; return 1; }
+}
+
 # What: each scan status gets its own code and exit code
 # Why: a run or setup failure never reads as a finding
 # From: Issue #1683 | PR #1858
