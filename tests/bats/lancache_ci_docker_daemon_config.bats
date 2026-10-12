@@ -1,51 +1,23 @@
 #!/usr/bin/env bats
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# Fixture coverage for tools/runner-host/lancache-ci-docker-daemon-config.sh's
-# pure merge logic (daemon_config_additions_json/merge_daemon_config) -- the
-# go-gated AG-CI-016 daemon.json rollout tracked in issue #1255 section 7 and
-# PR #1251's own "Scope Boundaries" (bounding the docker build cache +
-# log-driver at the daemon level; not done in that PR because it requires a
-# coordinated dockerd restart on the self-hosted runner hosts).
-#
-# What this suite proves without needing a real Docker daemon or root:
-#   - the additions this rollout applies are exactly what's documented in
-#     tools/runner-host/README.md and reproducible via env overrides;
-#   - merging onto an EXISTING daemon.json preserves its unrelated keys
-#     (verified against a fixture matching the real content confirmed on
-#     runner hosts .229/.240/.241 via direct SSH inspection, 2026-07-31:
-#     max-concurrent-downloads/-uploads + storage-driver);
-#   - merging onto a MISSING daemon.json (host .243's real, confirmed state)
-#     produces exactly the additions, not an error;
-#   - an existing daemon.json that is not valid JSON is a hard, fail-closed
-#     error -- this script must never silently discard or clobber content it
-#     cannot parse.
-# Uses `defaultReservedSpace` (not the earlier draft's `defaultKeepStorage`)
-# for `builder.gc`'s size-bound key -- verified against moby/moby's current
-# `BuilderGCConfig` struct and, empirically, against the real compiled
-# `/usr/bin/dockerd` binary on a runner host (`strings $(which dockerd) |
-# grep -i keepstorage`) that `defaultKeepStorage` is only a deprecated,
-# still-functional alias for `defaultReservedSpace`; this rollout emits the
-# current, non-deprecated key name going forward. See the script's own
-# header comment for the full finding.
-#
-# The disruptive `restart` mode and the file-writing `apply`/`stage` modes
-# are intentionally NOT covered here (they require root and a real dockerd);
-# those were instead verified manually against copies of the real per-host
-# daemon.json on a runner host, recorded in the introducing PR's validation
-# section, per this project's existing manual-review pattern for the sibling
-# lancache-ci-cleanup.sh (also untested by bats, for the same reason).
+# What: bats tests for daemon config defaults and merge
+# Why: restart/apply/stage need root and a real dockerd
+# From: Issue #1255 | PR #1349
 
 bats_require_minimum_version 1.5.0
 
 setup() {
+    # What: locates the script and sources it
+    # Why: main is guarded; sourcing only defines functions
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     script="$repo_root/tools/runner-host/lancache-ci-docker-daemon-config.sh"
     # shellcheck source=tools/runner-host/lancache-ci-docker-daemon-config.sh
     source "$script"
 }
 
+# What: asserts default additions emitted by the helper
+# Why: defaults must match the documented README rollout
 @test "daemon_config_additions_json: default values match documented README.md rollout" {
     run daemon_config_additions_json
     [ "$status" -eq 0 ]
@@ -61,6 +33,8 @@ setup() {
     [ "$max_file" = "3" ]
 }
 
+# What: asserts env overrides change the emitted values
+# Why: env overrides are a path separate from defaults
 @test "daemon_config_additions_json: env overrides change the emitted values" {
     BUILDER_GC_RESERVED_SPACE="5GB" LOG_MAX_SIZE="1m" LOG_MAX_FILE="1" run daemon_config_additions_json
     [ "$status" -eq 0 ]
@@ -72,6 +46,8 @@ setup() {
     [ "$max_file" = "1" ]
 }
 
+# What: asserts pre-existing keys survive the merge
+# Why: unrelated host settings must not be clobbered
 @test "merge_daemon_config: existing keys survive the merge (matches real .229/.240/.241 content)" {
     fixture="$BATS_TEST_TMPDIR/daemon.json"
     cat > "$fixture" <<'EOF'
@@ -83,15 +59,19 @@ setup() {
 EOF
     run merge_daemon_config "$fixture"
     [ "$status" -eq 0 ]
-    # Pre-existing keys must survive untouched.
+    # What: pre-existing keys keep their values
+    # Why: the merge must not overwrite host settings
     [ "$(jq -r '."max-concurrent-downloads"' <<<"$output")" = "20" ]
     [ "$(jq -r '."max-concurrent-uploads"' <<<"$output")" = "20" ]
     [ "$(jq -r '."storage-driver"' <<<"$output")" = "overlay2" ]
-    # And the new additions must be present alongside them.
+    # What: asserts builder.gc and log-driver are added
+    # Why: additions merge next to the existing keys
     [ "$(jq -r '.builder.gc.defaultReservedSpace' <<<"$output")" = "20GB" ]
     [ "$(jq -r '."log-driver"' <<<"$output")" = "json-file" ]
 }
 
+# What: asserts a missing daemon.json yields additions only
+# Why: a missing file must not be an error case
 @test "merge_daemon_config: a missing daemon.json (matches real .243 state) produces exactly the additions" {
     missing="$BATS_TEST_TMPDIR/does-not-exist.json"
     run merge_daemon_config "$missing"
@@ -101,6 +81,8 @@ EOF
     [ "$actual" = "$expected" ]
 }
 
+# What: asserts unparseable daemon.json fails the merge
+# Why: invalid input must not be silently discarded
 @test "merge_daemon_config: an unparseable existing daemon.json is a hard, fail-closed error" {
     fixture="$BATS_TEST_TMPDIR/daemon.json"
     printf '{ this is not valid json' > "$fixture"
@@ -109,6 +91,8 @@ EOF
     [[ "$output" == *"not valid JSON"* ]]
 }
 
+# What: asserts unrelated builder sub-keys are kept
+# Why: builder is deep-merged, not replaced
 @test "merge_daemon_config: an existing 'builder' key with unrelated sub-keys is deep-merged, not replaced" {
     fixture="$BATS_TEST_TMPDIR/daemon.json"
     cat > "$fixture" <<'EOF'
@@ -118,8 +102,10 @@ EOF
 EOF
     run merge_daemon_config "$fixture"
     [ "$status" -eq 0 ]
-    # The pre-existing unrelated builder.cache sub-key must survive ...
+    # What: builder.cache sub-keys survive the merge
+    # Why: builder is deep-merged, not replaced wholesale
     [ "$(jq -r '.builder.cache."something-unrelated"' <<<"$output")" = "true" ]
-    # ... alongside the new builder.gc this rollout adds.
+    # What: asserts builder.gc.defaultReservedSpace is added
+    # Why: deep merge keeps both builder sub-keys
     [ "$(jq -r '.builder.gc.defaultReservedSpace' <<<"$output")" = "20GB" ]
 }
