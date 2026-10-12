@@ -332,7 +332,7 @@ pub async fn probe_health_tls(url: &str, ca_pem: &[u8], name: &str) -> Result<()
     let client = reqwest::Client::builder()
         .timeout(HEALTH_PROBE_TIMEOUT)
         .no_proxy()
-        .add_root_certificate(ca)
+        .tls_certs_only([ca])
         .resolve(name, std::net::SocketAddr::new(ip, port))
         .build()
         .map_err(|e| format!("health client: {e}"))?;
@@ -1975,35 +1975,25 @@ mod tests {
         assert!(closed.is_err());
     }
 
-    // What: https passes with a trusted cert only.
-    // Why: the stack CA is the only anchor; no check off.
+    // What: openssl in a scratch dir; failure fails.
+    // Why: the tests build a real CA, leaf and server.
     // From: Issue #1683 | PR #1912
-    #[tokio::test]
-    async fn probe_health_tls_checks_the_certificate() {
-        struct Server(std::process::Child);
-        impl Drop for Server {
-            fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
-            }
-        }
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("probe-tls-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        let name = format!("n{nanos}");
-        let openssl = |args: &[&str]| {
-            let out = Command::new("openssl")
-                .args(args)
-                .current_dir(&dir)
-                .output()
-                .expect("openssl runs");
-            assert!(out.status.success(), "{args:?}: {out:?}");
-        };
-        for ca in ["ca", "other"] {
-            openssl(&[
+    fn openssl_in(dir: &Path, args: &[&str]) {
+        let out = Command::new("openssl")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("openssl runs");
+        assert!(out.status.success(), "{args:?}: {out:?}");
+    }
+
+    // What: a self-signed CA as <name>.crt and <name>.key.
+    // Why: one trust anchor per test CA.
+    // From: Issue #1683 | PR #1912
+    fn make_ca(dir: &Path, name: &str) {
+        openssl_in(
+            dir,
+            &[
                 "req",
                 "-x509",
                 "-newkey",
@@ -2014,57 +2004,140 @@ mod tests {
                 "-subj",
                 "/CN=ca",
                 "-keyout",
-                &format!("{ca}.key"),
+                &format!("{name}.key"),
                 "-out",
+                &format!("{name}.crt"),
+            ],
+        );
+    }
+
+    // What: a leaf for host signed by the CA.
+    // Why: the server sends a chain the CA vouches for.
+    // From: Issue #1683 | PR #1912
+    fn make_leaf(dir: &Path, ca: &str, host: &str) {
+        openssl_in(
+            dir,
+            &[
+                "req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=leaf", "-keyout", "leaf.key",
+                "-out", "leaf.csr",
+            ],
+        );
+        fs::write(dir.join("ext"), format!("subjectAltName=DNS:{host}\n")).expect("ext");
+        openssl_in(
+            dir,
+            &[
+                "x509",
+                "-req",
+                "-in",
+                "leaf.csr",
+                "-CA",
                 &format!("{ca}.crt"),
-            ]);
-        }
-        openssl(&[
-            "req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=leaf", "-keyout", "leaf.key",
-            "-out", "leaf.csr",
-        ]);
-        std::fs::write(dir.join("ext"), format!("subjectAltName=DNS:{name}\n")).expect("ext");
-        openssl(&[
-            "x509",
-            "-req",
-            "-in",
-            "leaf.csr",
-            "-CA",
-            "ca.crt",
-            "-CAkey",
-            "ca.key",
-            "-CAcreateserial",
-            "-days",
-            "1",
-            "-extfile",
-            "ext",
-            "-out",
-            "leaf.crt",
-        ]);
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .and_then(|l| l.local_addr())
-            .expect("a free local port")
-            .port();
-        let server = Server(
-            Command::new("openssl")
-                .args(["s_server", "-www", "-accept", &format!("127.0.0.1:{port}")])
+                "-CAkey",
+                &format!("{ca}.key"),
+                "-CAcreateserial",
+                "-days",
+                "1",
+                "-extfile",
+                "ext",
+                "-out",
+                "leaf.crt",
+            ],
+        );
+    }
+
+    // What: s_server on a free port; killed on drop.
+    // Why: the probe needs a real TLS peer.
+    // From: Issue #1683 | PR #1912
+    struct TlsServer {
+        child: std::process::Child,
+        port: u16,
+    }
+
+    impl TlsServer {
+        fn start(dir: &Path) -> TlsServer {
+            let port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .and_then(|l| l.local_addr())
+                .expect("a free local port")
+                .port();
+            let child = Command::new("openssl")
+                .args([
+                    "s_server",
+                    "-www",
+                    "-accept",
+                    &format!("{}:{port}", std::net::Ipv4Addr::LOCALHOST),
+                ])
                 .args(["-cert", "leaf.crt", "-key", "leaf.key"])
-                .current_dir(&dir)
+                .current_dir(dir)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn()
-                .expect("openssl s_server starts"),
-        );
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "s_server never listened"
-            );
-            std::thread::sleep(Duration::from_millis(50));
+                .expect("openssl s_server starts");
+            let server = TlsServer { child, port };
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).is_err() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "s_server never listened"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            server
         }
-        let url = format!("https://127.0.0.1:{port}/healthz");
-        let pem = |file: &str| std::fs::read(dir.join(file)).expect("pem");
+
+        fn url(&self) -> String {
+            format!(
+                "https://{}:{}/healthz",
+                std::net::Ipv4Addr::LOCALHOST,
+                self.port
+            )
+        }
+    }
+
+    impl Drop for TlsServer {
+        fn drop(&mut self) {
+            // What: a failed kill is reported.
+            // Why: a leaked server would hold the port.
+            // From: Issue #1683 | PR #1912
+            if let Err(e) = self
+                .child
+                .kill()
+                .and_then(|()| self.child.wait().map(|_| ()))
+            {
+                eprintln!("tls test server: {e}");
+            }
+        }
+    }
+
+    // What: a unique scratch dir under the temp dir.
+    // Why: parallel tests never share keys.
+    // From: Issue #1683 | PR #1912
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{tag}-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    // What: https passes with a cert of the given CA only.
+    // Why: the stack CA is the only trust anchor.
+    // From: Issue #1683 | PR #1912
+    #[tokio::test]
+    async fn probe_health_tls_checks_the_certificate() {
+        let dir = scratch_dir("probe-tls");
+        let name = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("dir name")
+            .replace('.', "-");
+        make_ca(&dir, "ca");
+        make_ca(&dir, "other");
+        make_leaf(&dir, "ca", &name);
+        let server = TlsServer::start(&dir);
+        let url = server.url();
+        let pem = |file: &str| fs::read(dir.join(file)).expect("pem");
         let trusted = probe_health_tls(&url, &pem("ca.crt"), &name).await;
         assert!(trusted.is_ok(), "{trusted:?}");
         assert!(
@@ -2080,6 +2153,80 @@ mod tests {
         assert!(probe_health(&url).await.is_err());
         drop(server);
         assert!(probe_health_tls(&url, &pem("ca.crt"), &name).await.is_err());
-        let _ = std::fs::remove_dir_all(&dir);
+        fs::remove_dir_all(&dir).expect("remove scratch dir");
+    }
+
+    // What: a cert of a platform-trusted CA is refused.
+    // Why: the platform roots must not widen the stack CA.
+    // From: Issue #1683 | PR #1912
+    #[tokio::test]
+    async fn probe_health_tls_ignores_the_platform_roots() {
+        const CHILD_DIR: &str = "PROBE_TLS_CHILD_DIR";
+        const CHILD_NAME: &str = "PROBE_TLS_CHILD_NAME";
+        const CHILD_URL: &str = "PROBE_TLS_CHILD_URL";
+        if let Ok(dir) = std::env::var(CHILD_DIR) {
+            // What: the child sees the platform CA.
+            // Why: SSL_CERT_FILE is read at first use.
+            // From: Issue #1683 | PR #1912
+            let url = std::env::var(CHILD_URL).expect("url");
+            let name = std::env::var(CHILD_NAME).expect("name");
+            let dir = PathBuf::from(dir);
+            let platform = reqwest::Client::builder()
+                .no_proxy()
+                .resolve(&name, {
+                    let parsed = reqwest::Url::parse(&url).expect("url");
+                    std::net::SocketAddr::new(
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                        parsed.port().expect("port"),
+                    )
+                })
+                .build()
+                .expect("client");
+            let control = platform
+                .get(url.replace(&std::net::Ipv4Addr::LOCALHOST.to_string(), &name))
+                .header(reqwest::header::CONNECTION, "close")
+                .send()
+                .await;
+            assert!(
+                control.is_ok(),
+                "the platform root is not trusted: {control:?}"
+            );
+            drop(control);
+            drop(platform);
+            let stack_ca = fs::read(dir.join("ca.crt")).expect("pem");
+            let probe = probe_health_tls(&url, &stack_ca, &name).await;
+            assert!(probe.is_err(), "a platform-trusted cert passed: {probe:?}");
+            return;
+        }
+        let dir = scratch_dir("probe-tls-roots");
+        let name = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("dir name")
+            .replace('.', "-");
+        make_ca(&dir, "ca");
+        make_ca(&dir, "platform");
+        make_leaf(&dir, "platform", &name);
+        let server = TlsServer::start(&dir);
+        let out = Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "tests::probe_health_tls_ignores_the_platform_roots",
+                "--nocapture",
+            ])
+            .env(CHILD_DIR, &dir)
+            .env(CHILD_NAME, &name)
+            .env(CHILD_URL, server.url())
+            .env("SSL_CERT_FILE", dir.join("platform.crt"))
+            .output()
+            .expect("the child test runs");
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        drop(server);
+        fs::remove_dir_all(&dir).expect("remove scratch dir");
     }
 }
