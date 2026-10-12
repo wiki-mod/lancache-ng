@@ -1200,4 +1200,4 @@ vulnerabilities:
       and x86_64, so a rebuild cannot remove the finding yet. The
       entry records the finding until a rebuild ships 29.9.0-r0.
 
-      From: Issue #1913
+      From: Issue #1913 | PR #1915
