@@ -12201,14 +12201,13 @@ _ci_check_proxy_nginx_policy() {
     while IFS= read -r h; do
         [ -z "${h}" ] || viol+=("${pp#"${repo_root}/"}: ${h}")
     done <<<"${out}"
-    # What: https.conf includes the generated listen file.
+    # What: the https.conf template includes the listen file
     # Why: a literal listen would be a second port owner.
     # From: Issue #1683 | PR #1912
-    local ngdir lfile
-    ngdir="$(_ci_runtime_default NGINX_DIR)" || return 2
-    lfile="$(_ci_runtime_default NGINX_HTTPS_LISTEN_FILE)" || return 2
-    grep -Fxq "    include     ${ngdir}/${lfile};" "${px}/conf.d/https.conf" \
-        || viol+=("${px#"${repo_root}/"}/conf.d/https.conf: no include of ${ngdir}/${lfile} (SOT NGINX_HTTPS_LISTEN_FILE)")
+    _ci_runtime_default NGINX_DIR >/dev/null || return 2
+    _ci_runtime_default NGINX_HTTPS_LISTEN_FILE >/dev/null || return 2
+    grep -Fxq "    include     \${NGINX_DIR}/\${NGINX_HTTPS_LISTEN_FILE};" "${px}/conf.d/https.conf" \
+        || viol+=("${px#"${repo_root}/"}/conf.d/https.conf: no include of the SOT keys NGINX_DIR and NGINX_HTTPS_LISTEN_FILE")
     grep -Eq '^[[:space:]]*listen[[:space:]]' "${px}/conf.d/https.conf" \
         && viol+=("${px#"${repo_root}/"}/conf.d/https.conf: literal listen; the watchdog renders it")
     if [ "${#viol[@]}" -gt 0 ]; then

@@ -1859,6 +1859,26 @@ fn snapshots<T>(
         .collect()
 }
 
+// What: no file may be missing from a snapshot.
+// Why: filling gaps from a failed render hides the damage.
+// From: Issue #1683 | PR #1912
+fn no_backfill(_: &Value, _: &str) -> Option<String> {
+    None
+}
+
+// What: stubs for files that only newer snapshots hold.
+// Why: older snapshots hold none of them; some is damage.
+// From: Issue #1683 | PR #1912
+fn stub_if_all_absent<'a>(
+    names: &'a [String],
+    stub: &'a str,
+) -> impl Fn(&Value, &str) -> Option<String> + 'a {
+    move |set, file| {
+        (names.iter().any(|n| n == file) && names.iter().all(|n| set.get(n).is_none()))
+            .then(|| stub.to_string())
+    }
+}
+
 // What: write rendered files; record the set if it checks.
 // Why: the newest good render is the next rollback target.
 // From: Issue #1683 | PR #1912
@@ -1867,6 +1887,7 @@ fn checked_files(
     check: &[String],
     store: &lancache_ng::SnapshotStore,
     restamp: &dyn Fn(&str) -> String,
+    backfill: &dyn Fn(&Value, &str) -> Option<String>,
     record: bool,
 ) -> Result<(), String> {
     let name = |path: &Path| path.file_name().map(|n| n.to_string_lossy().into_owned());
@@ -1875,15 +1896,19 @@ fn checked_files(
         .map(|(path, _)| path.display().to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    // What: a file the snapshot lacks keeps this render.
-    // Why: older snapshots predate the https files.
+    // What: a file the snapshot lacks comes from backfill.
+    // Why: an unlisted gap makes the snapshot incomplete.
     // From: Issue #1683 | PR #1912
     let named = |set: Value| -> Option<Vec<(PathBuf, String)>> {
         files
             .iter()
-            .map(|(path, fresh)| match set.get(name(path)?) {
-                Some(text) => Some((path.clone(), restamp(text.as_str()?))),
-                None => Some((path.clone(), fresh.clone())),
+            .map(|(path, _)| {
+                let file = name(path)?;
+                let text = match set.get(&file) {
+                    Some(text) => restamp(text.as_str()?),
+                    None => backfill(&set, &file)?,
+                };
+                Some((path.clone(), text))
             })
             .collect()
     };
@@ -2195,6 +2220,7 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
         ],
         &store,
         &restamp,
+        &no_backfill,
         true,
     )?;
     dns_zones(&dir, role, &tsig, primary, &notify)?;
@@ -2399,6 +2425,7 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
         ],
         &store,
         &restamp,
+        &no_backfill,
         true,
     )?;
     Ok(Run {
@@ -3038,6 +3065,7 @@ fn dnsmasq(ctx: &Ctx, relay: bool) -> Result<Run, String> {
         &check,
         &store,
         &|old| old.to_string(),
+        &no_backfill,
         true,
     )?;
     Ok(Run {
@@ -3700,13 +3728,6 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     let https = dir.join("conf.d/https.conf");
     let listen_file = ctx.need("NGINX_HTTPS_LISTEN_FILE")?;
     if https_on {
-        // What: https.conf must include the listen file.
-        // Why: a drifted path starts nginx with no listen.
-        // From: Issue #1683 | PR #1912
-        let want = format!("include     {}/{listen_file};", dir.display());
-        if !read(&https)?.lines().any(|line| line.trim() == want) {
-            return Err(format!("{} lacks `{want}`", https.display()));
-        }
         if ip_https.is_empty() {
             return Err("HTTPS_ENABLED needs IP_HTTPS".into());
         }
@@ -3717,6 +3738,20 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     for sub in ["conf.d", "stream.d/access.d"] {
         fs::create_dir_all(dir.join(sub))
             .map_err(|e| format!("cannot create {}: {e}", dir.join(sub).display()))?;
+    }
+    if https_on {
+        // What: render https.conf from its image template.
+        // Why: the include path comes from the SOT.
+        // From: Issue #1683 | PR #1912
+        let text = fill(
+            &read(&dir.join("https.conf.template"))?,
+            &[
+                ("NGINX_DIR", dir.display().to_string()),
+                ("NGINX_HTTPS_LISTEN_FILE", listen_file.clone()),
+            ],
+        );
+        write_file(&https, text.as_bytes(), 0o640, Place::Replace)
+            .map_err(|e| format!("cannot write {}: {e}", https.display()))?;
     }
     let healthz = dir.join("lancache-healthz-body.txt");
     write_file(&healthz, b"ok\n", 0o644, Place::Replace)
@@ -3784,6 +3819,18 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
             },
         ),
     ];
+    // What: names of the files older snapshots lack.
+    // Why: only a snapshot with none of them is old.
+    // From: Issue #1683 | PR #1912
+    let new_files: Vec<String> = [
+        "conf.d/00-https-map.conf",
+        NGINX_HTTPS_DISPATCH,
+        listen_file.as_str(),
+    ]
+    .iter()
+    .filter_map(|p| Path::new(p).file_name())
+    .map(|n| n.to_string_lossy().into_owned())
+    .collect();
     let store = lancache_ng::SnapshotStore::new(
         PathBuf::from(ctx.need("PROXY_CONFIG_SNAPSHOT_DIR")?),
         "nginx.json",
@@ -3799,6 +3846,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         ],
         &store,
         &|old| old.to_string(),
+        &stub_if_all_absent(&new_files, NGINX_GENERATED),
         !hosts.skipped,
     )?;
     Ok(Run {
@@ -5686,33 +5734,63 @@ mod tests {
             .map(String::from)
             .to_vec();
         let files = [(one.clone(), bad), (two.clone(), gen_name())];
-        checked_files(&files, &check, &store, &|old| old.to_string(), false).expect("rollback");
+        checked_files(
+            &files,
+            &check,
+            &store,
+            &|old| old.to_string(),
+            &no_backfill,
+            false,
+        )
+        .expect("rollback");
         assert_eq!(fs::read_to_string(&one).unwrap(), good);
         assert_eq!(fs::read_to_string(&two).unwrap(), other);
         let empty = lancache_ng::SnapshotStore::new(root.join("none"), "set.json", "test");
-        assert!(checked_files(&files, &check, &empty, &|old| old.to_string(), false).is_err());
+        assert!(
+            checked_files(
+                &files,
+                &check,
+                &empty,
+                &|old| old.to_string(),
+                &no_backfill,
+                false
+            )
+            .is_err()
+        );
     }
 
-    // What: a snapshot without a newer file still restores.
-    // Why: old shell snapshots hold fewer files than now.
+    // What: only a wholly old snapshot gets stubs.
+    // Why: a stub for a partial set would hide damage.
     // From: Issue #1683 | PR #1912
     #[test]
-    fn checked_files_restore_a_snapshot_that_lacks_a_file() {
+    fn checked_files_stub_only_wholly_old_snapshots() {
         let root = scratch();
-        let (one, two) = (root.join(gen_name()), root.join(gen_name()));
-        let [good, bad, newer] = std::array::from_fn(|_| gen_name());
-        let store = lancache_ng::SnapshotStore::new(root.join("snap"), "set.json", "test");
+        let [one, two, three] = std::array::from_fn(|_| root.join(gen_name()));
+        let [good, bad] = std::array::from_fn(|_| gen_name());
         let name = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
-        store
-            .create(&serde_json::json!({ name(&one): good }), 3)
-            .expect("snapshot");
         let check: Vec<String> = ["grep", "-q", good.as_str(), &one.display().to_string()]
             .map(String::from)
             .to_vec();
-        let files = [(one.clone(), bad), (two.clone(), newer.clone())];
-        checked_files(&files, &check, &store, &|old| old.to_string(), false).expect("rollback");
+        let files = [
+            (one.clone(), bad.clone()),
+            (two.clone(), gen_name()),
+            (three.clone(), gen_name()),
+        ];
+        let news = [name(&two), name(&three)];
+        let old = lancache_ng::SnapshotStore::new(root.join("old"), "set.json", "test");
+        old.create(&serde_json::json!({ name(&one): good }), 3)
+            .expect("snapshot");
+        let same = |old: &str| old.to_string();
+        let stub = stub_if_all_absent(&news, "stub");
+        checked_files(&files, &check, &old, &same, &stub, false).expect("rollback");
         assert_eq!(fs::read_to_string(&one).unwrap(), good);
-        assert_eq!(fs::read_to_string(&two).unwrap(), newer);
+        assert_eq!(fs::read_to_string(&two).unwrap(), "stub");
+        assert_eq!(fs::read_to_string(&three).unwrap(), "stub");
+        assert!(checked_files(&files, &check, &old, &same, &no_backfill, false).is_err());
+        let torn = lancache_ng::SnapshotStore::new(root.join("torn"), "set.json", "test");
+        torn.create(&serde_json::json!({ name(&one): good, name(&two): "x" }), 3)
+            .expect("snapshot");
+        assert!(checked_files(&files, &check, &torn, &same, &stub, false).is_err());
     }
 
     // What: lua names the RPZ file, every zone, the root.

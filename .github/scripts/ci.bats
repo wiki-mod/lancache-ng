@@ -1168,7 +1168,7 @@ ROWS
     run bash "${CI_SH}" check proxy-nginx-policy
     _expect real 0 "proxy-nginx-policy=clean" || return 1
     _checkout_copy "${root}" "${t}" || return 1
-    sed -i -E "s/^([[:space:]]*)include[[:space:]]+[^;]*https-listen[^;]*;/\\1listen $(_val ipv4):$(_val port) ssl;/" "${t}/services/proxy/conf.d/https.conf" || return 1
+    sed -i -E "s/^([[:space:]]*)include[[:space:]]+[^;]*NGINX_HTTPS_LISTEN_FILE[^;]*;/\\1listen $(_val ipv4):$(_val port) ssl;/" "${t}/services/proxy/conf.d/https.conf" || return 1
     run bash "${CI_SH}" check proxy-nginx-policy "${t}"
     _expect moved 1 "[CI-ERROR-CHECK-0151];no include of;literal listen" || return 1
 }
