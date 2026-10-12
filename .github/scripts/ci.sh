@@ -1999,10 +1999,14 @@ ci_cmd_aggregate() {
 # Why: emit-result and scan-stack resolve (AG-CODE-011).
 # From: Issue #1683
 _ci_published_digest() {
-    local svc="$1" plat="$2" identity tag
+    local svc="$1" plat="$2" absent="${3:-fail}" identity tag
     identity="$(_ci_identity_for "${svc}" "${plat}")" || return "$?"
     tag="$(_ci_image_tag "${svc}" "${plat}" "${identity}")" || return 2
-    _ci_registry_digest "${tag}"
+    if [ "${absent}" = ok ]; then
+        _ci_registry_probe "${tag}"
+    else
+        _ci_registry_digest "${tag}"
+    fi
 }
 
 # What: Emit service/platform acceptance result (§26.1).
@@ -2055,7 +2059,7 @@ ci_cmd_aggregate_stack() {
 # Why: SCAN before ACCEPT; thin YAML, iteration in ci.sh.
 # From: Issue #1683
 ci_cmd_scan_stack() {
-    local matrix="${CI_BUILD_MATRIX:-}" svc plat digest pairs rc=0 crc failed=""
+    local matrix="${CI_BUILD_MATRIX:-}" svc plat digest pairs rc=0 crc drc failed="" passed='[]'
     [ -n "${matrix}" ] || { ci_log "[CI-ERROR-SCAN-0016]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
     pairs="$(_ci_matrix_pairs "${matrix}")" || return 2
     _ci_require_ghcr_auth || return "$?"
@@ -2064,19 +2068,35 @@ ci_cmd_scan_stack() {
     # From: Issue #1683 | PR #1912
     while read -r svc plat; do
         [ -n "${svc}" ] || continue
-        digest="$(_ci_published_digest "${svc}" "${plat}")" || {
+        drc=0; digest="$(_ci_published_digest "${svc}" "${plat}" ok)" || drc=$?
+        # What: a pair without an image is skipped
+        # Why: its build is red; the others stay valid
+        # From: Issue #1683 | PR #1912
+        if [ "${drc}" -eq 1 ]; then
+            ci_log "[CI-WARN-SCAN-0025]" "service=\"${svc}\" platform=\"${plat}\" reason=\"no published image; its build failed, not scanned\""
+            continue
+        fi
+        if [ "${drc}" -ne 0 ]; then
             ci_log "[CI-ERROR-SCAN-0017]" "service=\"${svc}\" platform=\"${plat}\" reason=\"no published digest to scan\""
             failed="${failed} ${svc}/${plat}"
             rc=2
             continue
-        }
+        fi
         crc=0
         ci_cmd_scan "${svc}" "${digest}" || crc=$?
         if [ "${crc}" -ne 0 ]; then
             failed="${failed} ${svc}/${plat}"
             [ "${crc}" -le "${rc}" ] || rc="${crc}"
+            continue
         fi
+        passed="$(jq -c --arg s "${svc}" --arg p "${plat}" '. + [{service:$s, platform:$p}]' <<< "${passed}")" || return 2
     done <<< "${pairs}"
+    # What: the clean pairs go to aggregate as its matrix.
+    # Why: a red pair must not block the clean ones
+    # From: Issue #1683 | PR #1912
+    if [ "${passed}" != '[]' ]; then
+        _ci_step_output "[CI-ERROR-SCAN-0026]" passed "$(jq -c '{include: .}' <<< "${passed}")" || return 2
+    fi
     [ "${rc}" -eq 0 ] || ci_log "[CI-ERROR-SCAN-0024]" "failed=\"${failed# }\" reason=\"scan failed for these pairs; the others were scanned\""
     return "${rc}"
 }
@@ -2301,15 +2321,24 @@ ci_cmd_board_add() {
 # Why: one matrix walk; iteration in ci.sh (AG-CODE-011).
 # From: Issue #1683
 ci_cmd_assemble_stack() {
-    local matrix="${CI_BUILD_MATRIX:-}" svc svcs
+    local matrix="${CI_BUILD_MATRIX:-}" svc svcs rc=0 arc failed=""
     [ -n "${matrix}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0006]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
     if ! svcs="$(jq -r '[.include[].service] | unique | .[]' <<< "${matrix}" 2>&1)"; then
         ci_error "[CI-ERROR-ASSEMBLE-0011]" "reason=\"CI_BUILD_MATRIX unreadable; no service assembled\"" "${svcs}"$'\n'"matrix: ${matrix}"
         return 2
     fi
+    # What: assembles all services, lists failures last
+    # Why: a service lacking a platform blocks no other one
+    # From: Issue #1683 | PR #1912
     for svc in ${svcs}; do
-        ci_cmd_assemble "${svc}" || return "$?"
+        arc=0; ci_cmd_assemble "${svc}" || arc=$?
+        if [ "${arc}" -ne 0 ]; then
+            failed="${failed} ${svc}"
+            [ "${arc}" -le "${rc}" ] || rc="${arc}"
+        fi
     done
+    [ "${rc}" -eq 0 ] || ci_log "[CI-ERROR-ASSEMBLE-0012]" "failed=\"${failed# }\" reason=\"assemble failed for these services; the others were assembled\""
+    return "${rc}"
 }
 
 # What: run ci.sh op for each changed rust test service.
