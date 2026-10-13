@@ -6456,8 +6456,8 @@ _rh_runner_dir() {
     [[ "${output}" == *"STALE: ${ckstale} still present ($(stat -c '%a %U:%G' "${ckstale}"))"* ]] || { echo "stale: ${output}"; return 1; }
 }
 
-# What: host-prep runs its steps, stops on one, ends with hints.
-# Why: the last line names daemon.json and the proxies block.
+# What: host-prep runs its steps, stops on a failed one.
+# Why: the last line names daemon.json and proxies.
 # From: Issue #1622 | PR #1912
 @test "runner-host: host-prep stops at a failed step and ends with the daemon.json and proxies hint" {
     local hpjson hpheavy hpname hpfail=""
