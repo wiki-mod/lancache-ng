@@ -3317,10 +3317,6 @@ migrate_env_for_update() (
     ip_http=$(get_env_var IP_HTTP "$env_file") || die "Cannot read IP_HTTP from $env_file (exit $?)."
     append_env_migrated_assignment_if_missing UI_BIND_IP IP_HTTP "$ip_http" "$env_file"
 
-    # What: keys for DHCP and Kea always exist
-    # Why: Compose and the UI read one full config
-    append_env_key_if_missing DHCP_ENABLED "0" "$env_file"
-
     # What: NTP can stay disabled; its key must still exist
     # Why: Compose and the UI read one complete config
     # From: Issue #1683 | PR #1858
@@ -3360,6 +3356,10 @@ migrate_env_for_update() (
 
     append_env_key_if_missing DHCP_MODE "disabled" "$env_file"
     set_env_key DHCP_MODE "$dhcp_mode" "$env_file"
+    # What: drops the 1.x Kea switch after it was read
+    # Why: DHCP_MODE owns the choice; nothing reads the key
+    # From: Issue #1683 | PR #1912
+    remove_env_key DHCP_ENABLED "$env_file"
     ip_http=$(get_env_var IP_HTTP "$env_file") || exit $?
     ip_https=$(get_env_var IP_HTTPS "$env_file") || exit $?
     dhcp_subnet_start=$(get_env_var DHCP_SUBNET_START "$env_file") || exit $?
@@ -6856,7 +6856,6 @@ DHCP_SUBNET_DEFAULT=$(prod_env_default DHCP_SUBNET) || exit $?
 DHCP_GATEWAY_DEFAULT=$(prod_env_default DHCP_GATEWAY) || exit $?
 DHCP_RANGE_START_DEFAULT=$(prod_env_default DHCP_RANGE_START) || exit $?
 DHCP_RANGE_END_DEFAULT=$(prod_env_default DHCP_RANGE_END) || exit $?
-DHCP_ENABLED=0
 KEA_DATA_DIR=""
 DHCP_SUBNET=""
 DHCP_GATEWAY="$DHCP_GATEWAY_DEFAULT"
@@ -6886,8 +6885,6 @@ DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=""
 DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=""
 
 if [[ "$DHCP_MODE" = "kea" ]]; then
-    DHCP_ENABLED=1
-
     while true; do
         ask "Kea data directory (config + leases, absolute path)" "$LANCACHE_STATE_DIR/kea"
         KEA_DATA_DIR="$REPLY"
@@ -7245,7 +7242,6 @@ validate_env_values_for_initial_write \
     "LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX}" \
     "LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}" \
     "LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG}" \
-    "DHCP_ENABLED=${DHCP_ENABLED}" \
     "KEA_DATA_DIR=${KEA_DATA_DIR}" \
     "DHCP_MODE=${DHCP_MODE}" \
     "DHCP_SUBNET=${DHCP_SUBNET}" \
@@ -7316,7 +7312,6 @@ LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}
 LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG}
 
 # ── DHCP ───────────────────────────────────────────────────────────────────────
-DHCP_ENABLED=${DHCP_ENABLED}
 KEA_DATA_DIR=${KEA_DATA_DIR}
 DHCP_MODE=${DHCP_MODE}
 DHCP_SUBNET=${DHCP_SUBNET}
@@ -7412,7 +7407,7 @@ write_lancache_image_refs "$ENV_LOCAL" "$LANCACHE_IMAGE_REFS"
 print_step "Creating directories"
 mkdir -p "$CACHE_DIR"
 print_ok "Cache:          $CACHE_DIR"
-if [[ "$DHCP_ENABLED" = "1" && -n "$KEA_DATA_DIR" ]]; then
+if [[ -n "$KEA_DATA_DIR" ]]; then
     mkdir -p "$KEA_DATA_DIR"
     print_ok "Kea data:       $KEA_DATA_DIR"
 fi
@@ -7469,7 +7464,7 @@ printf "  %-26s %s\n"    "Cache:"                   "$CACHE_DIR"
 printf "  %-26s %s GiB\n" "Cache size:"              "$cache_gb"
 printf "  %-26s %s MB\n"  "Cache RAM:"               "$CACHE_MEM_MB"
 printf "  %-26s %s\n"    "DHCP mode:"               "$DHCP_MODE"
-if [[ "$DHCP_ENABLED" = "1" ]]; then
+if [[ "$DHCP_MODE" = "kea" ]]; then
     printf "  %-26s %s\n" "DHCP server:"             "$DHCP_SUBNET (Pool: $DHCP_RANGE_START–$DHCP_RANGE_END)"
 else
     printf "  %-26s %s\n" "DHCP server:"             "disabled"
