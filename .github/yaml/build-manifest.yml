@@ -1290,11 +1290,18 @@ runner_host:
   sccache_stale_files: [.config/sccache/config, sccache-dist/client.conf]
   sccache_stale_dirs: [.config/sccache, sccache-dist]
 
-# What: files the header and prose checks skip, by path.
-# Why: vendored or generated content carries no header.
-# From: Issue #1683 | PR #1858
+# What: header text and the globs the comment check skips.
+# Why: vendored, binary or prose files carry no header.
+# From: Issue #1683 | PR #1912
 file_headers:
+  project: "LanCache-NG (https://github.com/wiki-mod/lancache-ng)"
+  spdx: "SPDX-License-Identifier: AGPL-3.0-or-later"
   exempt:
+    - "*.md"
+    - "*.png"
+    - "*.ico"
+    - LICENSE
+    - Cargo.lock
     - services/ui/src/static/chart.umd.min.js
     - services/ui/src/static/admin.css
     - services/proxy/public_suffix_list.dat

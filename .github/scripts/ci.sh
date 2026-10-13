@@ -78,14 +78,14 @@ declare -A CI_DISPATCH=(
 # Why: one table is membership, run scope and dispatch.
 # From: Issue #1683 | PR #1912
 declare -gA CI_CHECKS=(
-    [line-endings]="diff _ci_check_line_endings" [comment-length]="diff _ci_check_comment_length"
+    [line-endings]="diff _ci_check_line_endings" [comments]="diff _ci_check_comments"
     [deny-short-sha]="diff _ci_check_deny_short_sha" [language-policy]="diff _ci_check_language_policy"
     [mutable-refs]="diff _ci_check_mutable_refs" [executable-bits]="diff _ci_check_executable_bits"
     [pipefail-early-exit]="diff _ci_check_pipefail_early_exit" [if-without-else-status]="diff _ci_check_if_without_else_status"
     [bats-and-chain]="diff _ci_check_bats_and_chain" [exit-evidence]="diff _ci_check_exit_evidence"
-    [ci-bats]="diff _ci_check_ci_bats" [review-chronology]="diff _ci_check_review_chronology"
+    [ci-bats]="diff _ci_check_ci_bats"
     [governance-guards]="diff _ci_check_governance_guards" [changelog-direct-edit]="diff _ci_check_changelog_direct_edit"
-    [file-headers]="repo _ci_check_file_headers" [action-node-versions]="repo _ci_check_action_node_versions"
+    [action-node-versions]="repo _ci_check_action_node_versions"
     [naming-consistency]="repo _ci_check_naming_consistency" [workflow-line-limit]="repo _ci_check_workflow_line_limit"
     [stable-external-images]="repo _ci_check_stable_external_images" [compose-healthchecks]="repo _ci_check_compose_healthchecks"
     [proxy-cache-env-doc-drift]="repo _ci_check_proxy_cache_env_doc_drift" [prebuilt-prod]="repo _ci_check_prebuilt_prod"
@@ -11794,125 +11794,218 @@ _ci_check_line_endings() {
     printf 'line-endings=clean files=%s\n' "${#files[@]}"
 }
 
-# What: load the path exemptions from the SOT, once.
+# What: load the exemption globs from the SOT, once.
 # Why: a failed read must fail the check, never pass it.
 # From: Issue #1683 | PR #1858
 _ci_prose_exempt_load() {
     local list state
     list="$(_ci_block_entry_list file_headers "" exempt)" || return 2
     state="$(_ci_block_entry_field release "" validation_state)" || return 2
-    _CI_PROSE_EXEMPT="${list}"$'\n'"${state}"
+    mapfile -t _CI_PROSE_EXEMPT <<<"${list}"$'\n'"${state}"
 }
 
-# What: True for a path exempt from prose-comment checks.
-# Why: One owner for header + review-chronology exclusions.
-# From: Issue #1683
+# What: true for a path a SOT exemption glob matches.
+# Why: one owner for every comment-check exemption.
+# From: Issue #1683 | PR #1912
 _ci_prose_excluded() {
-    case "$1" in
-        *.md|LICENSE|COPYING) return 0 ;;
-        .env|.env.example) return 0 ;;
-        Cargo.lock|*/Cargo.lock) return 0 ;;
-        */fuzz/corpus/*|fuzz/corpus/*) return 0 ;;
-        *.png|*.jpg|*.jpeg|*.gif|*.ico|*.svg|*.woff|*.woff2|*.ttf|*.eot|*.crt|*.key|*.pem) return 0 ;;
-    esac
     local e
-    while IFS= read -r e; do
+    for e in "${_CI_PROSE_EXEMPT[@]}"; do
         [ -n "${e}" ] || continue
-        [ "$1" = "${e}" ] || [[ "$1" == */"${e}" ]] && return 0
-    done <<<"${_CI_PROSE_EXEMPT:-}"
+        # shellcheck disable=SC2053
+        [[ "$1" == ${e} || "$1" == */${e} ]] && return 0
+    done
     return 1
 }
 
-# What: print the comment grammar of a path, else rc 1.
-# Why: header, length and chronology checks share one map.
-# From: Issue #1683 | PR #1858
-_ci_comment_style() {
-    case "$1" in
-        services/ui/src/templates/*.html|*/services/ui/src/templates/*.html) printf 'tera\n' ;;
-        *.html) printf 'html\n' ;;
-        *.rs) printf 'rust\n' ;;
-        *.lua) printf 'lua\n' ;;
-        *.js) printf 'js\n' ;;
-        *.css) printf 'css\n' ;;
-        *.yml|*.yaml) printf 'yaml\n' ;;
-        *.sh|*.bats|*.toml|*.conf|*.template|*.txt|*.env|*.dockerignore|Dockerfile|*/Dockerfile|.gitattributes|.gitignore|*/.gitignore|CODEOWNERS|*/CODEOWNERS|.githooks/*|*/.githooks/*) printf 'hash\n' ;;
-        *) return 1 ;;
-    esac
-}
+# What: per-file header, size and chronology rules.
+# Why: one awk run reads each file once, before the lexer.
+# From: Issue #1683 | PR #1912
+_CI_AWK_COMMENTS='
+    BEGIN {
+        v = "(caught|found|flagged|spotted|identified|discovered|noticed)"
+        b0 = "(^|[^a-z0-9_])"; b1 = "([^a-z0-9_]|$)"
+        rc = b0 v "[[:space:]]+(in|during)[[:space:]]+((a|the|this)[[:space:]]+)?"
+        rc = rc "(code[[:space:]]+|pr[[:space:]]+|peer[[:space:]]+)?(self-)?review" b1
+        rc = rc "|" b0 "review[^a-z0-9_.]([^a-z.]{0,18}[^a-z0-9_.])?" v b1
+        rc = rc "|" b0 "(before|prior to|until)[[:space:]]+this[[:space:]]+(fix|change|commit|patch)" b1
+        rc = rc "|" b0 "review[[:space:]]+finding" b1
+        lr = "[(](see[[:space:]]+)?line([[:space:]]+~?|~)[0-9]+"
+    }
+    # What: the comment grammar of a path; "" if none.
+    # Why: a type without a grammar must fail, never pass.
+    # From: Issue #1683 | PR #1858
+    function cm_style(p,  b) {
+        b = p; sub(/.*\//, "", b)
+        if (p ~ /(^|\/)services\/ui\/src\/templates\/[^\/]*\.html$/) return "tera"
+        if (b ~ /\.html$/) return "html"
+        if (b ~ /\.rs$/) return "rust"
+        if (b ~ /\.lua$/) return "lua"
+        if (b ~ /\.js$/) return "js"
+        if (b ~ /\.css$/) return "css"
+        if (b ~ /\.ya?ml$/) return "yaml"
+        if (b ~ /\.(sh|bats|toml|conf|txt|dockerignore)$/ || p ~ /(^|\/)\.githooks\//) return "hash"
+        if (b ~ /^(Dockerfile|\.gitattributes|\.gitignore|CODEOWNERS)$/) return "hash"
+        return ""
+    }
+    # What: a header line in the native comment syntax.
+    # Why: the SOT holds the text; the style the markers.
+    # From: Issue #1683 | PR #1912
+    function cm_hdr(t) {
+        if (style == "tera") return "{# " t " #}"
+        if (style == "html") return "<!-- " t " -->"
+        if (style == "rust") return "//! " t
+        if (style == "lua") return "-- " t
+        if (style == "js") return "// " t
+        if (style == "css") return "/* " t " */"
+        return "# " t
+    }
+    # What: true if a #N outside quotes is a From: number.
+    # Why: a ref belongs in From: only (AG-CODE-012).
+    # From: Issue #1683 | PR #1856
+    function cm_dup(s,  len, i, ch, q, pv, d) {
+        len = length(s); q = ""
+        for (i = 1; i <= len; i++) {
+            ch = substr(s, i, 1)
+            if (q == "") {
+                if (ch == "\"") { q = ch; continue }
+                pv = (i > 1) ? substr(s, i - 1, 1) : ""
+                if (ch == sq && pv !~ /[A-Za-z0-9_]/) { q = ch; continue }
+            } else if (ch == q) { q = ""; continue }
+            if (q != "" || ch != "#" || pv ~ /[0-9]/) continue
+            d = substr(s, i + 1)
+            if (match(d, /^[0-9]+/) && (substr(d, 1, RLENGTH) in fn)) return 1
+        }
+        return 0
+    }
+    # What: one finding row: kind, tab, text.
+    # Why: bash sorts the rows into one report per rule.
+    # From: Issue #1683 | PR #1912
+    function cm_out(k, t) { printf "%s\t%s\n", k, t }
+    # What: all rules for the file held in L[1..n].
+    # Why: the lexer runs once; every rule reads its arrays.
+    # From: Issue #1683 | PR #1912
+    function cm_file(  i, b, ok, leg, pc, sc, lc, bl, bs, rl, rs, t, k) {
+        cl_lex()
+        b = cur; sub(/.*\//, "", b)
+        if (style == "rust") ok = (L[1] == "//!")
+        else ok = (L[1] == "" || L[1] ~ /^#!/)
+        if (b == "Dockerfile" && tolower(L[1]) ~ /^#[[:space:]]*(syntax|escape|check)[[:space:]]*=[[:space:]]*.+$/) ok = 1
+        if (!ok) cm_out("H", cur ": bad line 1 marker")
+        if (L[2] != h2) cm_out("H", cur ": line 2 must be: " h2)
+        if (L[3] != h3) cm_out("H", cur ": line 3 must be: " h3)
+        leg = cm_hdr(tolower(hp)); pc = sc = lc = 0
+        for (i = 1; i <= n && i <= 20; i++) { pc += (L[i] == h2); sc += (L[i] == h3); lc += (L[i] == leg) }
+        if (pc != 1) cm_out("H", cur ": project header count " pc " not 1")
+        if (sc != 1) cm_out("H", cur ": SPDX count " sc " not 1")
+        if (lc != 0) cm_out("H", cur ": legacy lowercase header present")
+        bl = rl = rs = 0
+        for (i = 1; i <= n + 1; i++) {
+            if (i <= n && F[i] && T[i] ~ /^(What|Why|From):/) {
+                if (bl == 0) bs = i
+                bl++
+                if (length(L[i]) > 60) cm_out("C", cur ":" i ": " length(L[i]) " chars (max 60): " L[i])
+                if (T[i] ~ /^(What|Why):/ && T[i] ~ /#[0-9]/) cm_out("C", cur ":" i ": issue/PR ref in What/Why (use From:): " L[i])
+                if (T[i] ~ /^From:/ && T[i] !~ /^From: (Issue #[0-9]+|PR #[0-9]+|Issue #[0-9]+ \| PR #[0-9]+)$/) cm_out("C", cur ":" i ": From: allows one Issue and one PR only: " L[i])
+                continue
+            }
+            if (bl > 3) cm_out("C", cur ":" bs ": block " bl " lines (max 3)")
+            bl = 0
+        }
+        for (i = 1; i <= n + 1; i++) {
+            if (i <= n && C[i]) { if (!rs) rs = i; if (!D[i]) rl++; continue }
+            if (rl > 3) cm_out("C", cur ":" rs ": story-telling block (" rl " lines)")
+            rs = rl = 0
+        }
+        delete fn; k = 0
+        for (i = 1; i <= n; i++) {
+            t = tolower(L[i])
+            if (t ~ rc || t ~ lr) cm_out("R", cur ":" i ":" L[i])
+            if (i > 1 && F[i - 1] && F[i] && tolower(T[i - 1] " " T[i]) ~ rc) cm_out("R", cur ":" i - 1 ": " T[i - 1] " " T[i])
+            if (L[i] !~ /From:/) continue
+            t = L[i]
+            while (match(t, /#[0-9]+/)) { fn[substr(t, RSTART + 1, RLENGTH - 1)] = 1; k = 1; t = substr(t, RSTART + RLENGTH) }
+        }
+        if (k) for (i = 1; i <= n; i++) if (L[i] !~ /From:/ && cm_dup(L[i])) cm_out("W", cur ":" i ": " L[i])
+    }
+    # What: a new file ends the last one and resets state.
+    # Why: arrays of one file must not leak into the next.
+    # From: Issue #1683 | PR #1912
+    FNR == 1 {
+        if (cur != "") cm_file()
+        delete L; delete F; delete C; delete D; delete T; delete H; delete K; delete IB
+        cur = FILENAME; style = cm_style(cur)
+        if (style == "") { cm_out("G", cur); cur = ""; nextfile }
+        h2 = cm_hdr(hp); h3 = cm_hdr(hs)
+    }
+    END { if (cur != "") cm_file() }
+'
 
-# What: Print the native project+SPDX header for a path.
-# Why: Header uses the file format's own comment syntax.
-# From: Issue #1683
-_ci_header_expected() {
-    local h='LanCache-NG (https://github.com/wiki-mod/lancache-ng)'
-    local s='SPDX-License-Identifier: AGPL-3.0-or-later' style
-    style="$(_ci_comment_style "$1")" || return 1
-    case "${style}" in
-        tera) printf '{# %s #}\n{# %s #}\n' "${h}" "${s}" ;;
-        html) printf '<!-- %s -->\n<!-- %s -->\n' "${h}" "${s}" ;;
-        rust) printf '//! %s\n//! %s\n' "${h}" "${s}" ;;
-        lua) printf -- '-- %s\n-- %s\n' "${h}" "${s}" ;;
-        js) printf '// %s\n// %s\n' "${h}" "${s}" ;;
-        css) printf '/* %s */\n/* %s */\n' "${h}" "${s}" ;;
-        hash|yaml) printf '# %s\n# %s\n' "${h}" "${s}" ;;
-    esac
-}
-
-# What: True if line 1 is a valid marker for the path.
-# Why: shebang / Docker directive / Rust //! sit on line 1.
-# From: Issue #1683
-_ci_header_line1_ok() {
-    local path="$1" l1="$2"
-    if [ "$(_ci_comment_style "${path}")" = rust ]; then [ "${l1}" = "//!" ]; return "$?"; fi
-    [ -z "${l1}" ] && return 0
-    case "${l1}" in '#!'*) return 0 ;; esac
-    case "${path}" in
-        Dockerfile|*/Dockerfile)
-            [[ "${l1,,}" =~ ^#[[:space:]]*(syntax|escape|check)[[:space:]]*=[[:space:]]*.+$ ]] && return 0 ;;
-    esac
-    return 1
-}
-
-# What: Fail on any file missing the canonical header.
-# Why: AGENTS.md header contract, native syntax, line 2/3.
-# From: Issue #1683
-_ci_check_file_headers() {
-    local -a _ci_override=("$@") files=()
+# What: AG-HDR header, AG-CODE-012 size and chronology.
+# Why: one owner reads each file once (AG-CODE-011).
+# From: Issue #1683 | PR #1912
+_ci_check_comments() {
+    local -a _ci_override=("$@") files=() todo=() hdr=() size=() chron=() dup=() nogr=() bad=()
+    local path out line project spdx warn_only arc=0 rc=0
     _ci_scan_files files _ci_override || return 2
     _ci_prose_exempt_load || return 2
-    local path exp p_line s_line legacy line pc sc scnt lc
-    local -a fails=() scan=()
+    project="$(_ci_block_entry_field file_headers "" project)" || return 2
+    spdx="$(_ci_block_entry_field file_headers "" spdx)" || return 2
+    warn_only="$(_ci_variable CHRONOLOGY_WARN_ONLY)" || return 2
     for path in "${files[@]}"; do
         _ci_prose_excluded "${path}" && continue
-        if ! exp="$(_ci_header_expected "${path}")"; then
-            fails+=("${path}: no native header syntax"); continue
-        fi
-        p_line="$(printf '%s' "${exp}" | sed -n 1p)"
-        s_line="$(printf '%s' "${exp}" | sed -n 2p)"
-        legacy="${p_line/LanCache-NG/lancache-ng}"
-        local produced produced_rc=0
-        produced="$(head -n 20 -- "${path}")" || produced_rc=$?
-        _ci_producer_ok "${produced_rc}" 0 || return 2
-        mapfile -t scan <<<"${produced}"
-        _ci_header_line1_ok "${path}" "${scan[0]-}" || fails+=("${path}: bad line 1 marker")
-        [ "${scan[1]-}" = "${p_line}" ] || fails+=("${path}: line 2 must be: ${p_line}")
-        [ "${scan[2]-}" = "${s_line}" ] || fails+=("${path}: line 3 must be: ${s_line}")
-        pc=0; scnt=0; lc=0
-        for line in "${scan[@]}"; do
-            [ "${line}" = "${p_line}" ] && pc=$((pc + 1))
-            [ "${line}" = "${s_line}" ] && scnt=$((scnt + 1))
-            [ "${line}" = "${legacy}" ] && lc=$((lc + 1))
-        done
-        [ "${pc}" -eq 1 ] || fails+=("${path}: project header count ${pc} not 1")
-        [ "${scnt}" -eq 1 ] || fails+=("${path}: SPDX count ${scnt} not 1")
-        [ "${lc}" -eq 0 ] || fails+=("${path}: legacy lowercase header present")
+        if [ -s "${path}" ]; then todo+=("${path}"); else hdr+=("${path}: empty file has no header"); fi
     done
-    if [ "${#fails[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0003]" "reason=\"invalid file header layout\"" "$(printf '%s\n' "${fails[@]}")"
-        return 1
+    # What: counts characters, not bytes, per line
+    # Why: AG-CODE-012 sets a character limit
+    # From: Issue #1683 | PR #1858
+    if [ "${#todo[@]}" -gt 0 ]; then
+        out="$(LC_ALL=C.UTF-8 awk -v hp="${project}" -v hs="${spdx}" "${_CI_AWK_COMMENTS}${_CI_AWK_COMMENT_LEX}" "${todo[@]}" 2>&1)" || arc=$?
     fi
-    sc="${#files[@]}"
-    printf 'file-headers=clean files=%s\n' "${sc}"
+    while IFS= read -r line; do
+        case "${line%%$'\t'*}" in
+            H) hdr+=("${line#*$'\t'}") ;;
+            C) size+=("${line#*$'\t'}") ;;
+            R) chron+=("${line#*$'\t'}") ;;
+            W) dup+=("${line#*$'\t'}") ;;
+            G) nogr+=("${line#*$'\t'}") ;;
+            *) [ -z "${line}" ] || bad+=("${line}") ;;
+        esac
+    done <<<"${out:-}"
+    # What: an awk error or stray output stops the check
+    # Why: AG-VAL-001: an awk warning is an error
+    # From: Issue #1683 | PR #1858
+    if [ "${arc}" -ne 0 ] || [ "${#bad[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0129]" "rc=${arc} reason=\"comment scan failed\"" "${out}"
+        return 2
+    fi
+    if [ "${#nogr[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0153]" "files=${#nogr[@]} reason=\"no comment grammar for this file type\"" "$(printf '%s\n' "${nogr[@]}")"
+        rc=1
+    fi
+    if [ "${#hdr[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0003]" "reason=\"invalid file header layout\"" "$(printf '%s\n' "${hdr[@]}")"
+        rc=1
+    fi
+    if [ "${#size[@]}" -gt 0 ]; then
+        ci_error "[CI-ERROR-CHECK-0128]" "scanned=${#todo[@]} reason=\"comment contract violations\"" "$(printf '%s\n' "${size[@]}")"
+        rc=1
+    fi
+    # What: dup #N outside From: is warn-only in every mode.
+    # Why: a genuine duplicate must warn, never block.
+    # From: Issue #1683
+    if [ "${#dup[@]}" -gt 0 ]; then
+        ci_error "[CI-WARN-CHECK-0078]" "reason=\"bare #N duplicated outside From: (warn-only, PR #1856)\"" "$(printf '%s\n' "${dup[@]}")"
+    fi
+    if [ "${#chron[@]}" -gt 0 ]; then
+        if [ "${warn_only}" = 1 ]; then
+            ci_error "[CI-WARN-CHECK-0079]" "reason=\"review-chronology / stale line-ref (warn-only)\"" "$(printf '%s\n' "${chron[@]}")"
+        else
+            ci_error "[CI-ERROR-CHECK-0080]" "reason=\"review-chronology / stale line-ref\"" "$(printf '%s\n' "${chron[@]}")"
+            rc=1
+        fi
+    fi
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    printf 'comments=clean files=%s\n' "${#todo[@]}"
 }
 
 # What: awk lexer: F/C/D/T per line of L[1..n] for a style.
@@ -11923,7 +12016,7 @@ _CI_AWK_COMMENT_LEX='
         sq = sprintf("%c", 39)
         mb = (length("é") == 1); lead_re = "^[\300-\367]$"; cont_re = "^[\200-\277]$"
     }
-    { L[FNR] = $0; sub(/\r$/, "", L[FNR]) }
+    { L[FNR] = $0; sub(/\r$/, "", L[FNR]); n = FNR }
     # What: queue the heredoc delimiters a shell line opens.
     # Why: <<< , quoted or (( )) << open no here-document.
     # From: Issue #1683 | PR #1858
@@ -12226,7 +12319,7 @@ _CI_AWK_COMMENT_LEX='
     # Why: a style without a lexer must fail, never pass.
     # From: Issue #1683 | PR #1858
     function cl_lex(  i, t) {
-        n = FNR; hdr = (n >= 3 && L[2] == h2 && L[3] == h3) ? 3 : 0
+        hdr = (n >= 3 && L[2] == h2 && L[3] == h3) ? 3 : 0
         if (style == "hash") cl_hash(1)
         else if (style == "yaml") cl_hash(0)
         else if (style == "rust") cl_rust()
@@ -12242,89 +12335,6 @@ _CI_AWK_COMMENT_LEX='
         }
     }
 '
-
-# What: Enforce AG-CODE-012 comment size, block, ref rules.
-# Why: 1-1-1-60, story-run size, and refs go in From only.
-# From: Issue #1683
-_ci_check_comment_length() {
-    local -a _ci_override=("$@") files=()
-    local file style exp out arc=0
-    local -a bad_files=() no_lexer=() findings=()
-    _ci_scan_files files _ci_override || return 2
-    _ci_prose_exempt_load || return 2
-    for file in "${files[@]}"; do
-        _ci_prose_excluded "${file}" && continue
-        if ! style="$(_ci_comment_style "${file}")"; then
-            no_lexer+=("${file}"); continue
-        fi
-        exp="$(_ci_header_expected "${file}")" || return 2
-        # What: counts characters, not bytes, per line
-        # Why: AG-CODE-012 sets a character limit
-        # From: Issue #1683 | PR #1858
-        out="$(LC_ALL=C.UTF-8 awk -v style="${style}" -v h2="${exp%%$'\n'*}" -v h3="${exp#*$'\n'}" "${_CI_AWK_COMMENT_LEX}"'
-            function flush1() {
-                if (bl > 3) { printf "%s:%d: block %d lines (max 3)\n", FILENAME, bs, bl; viol++ }
-                bl = 0
-            }
-            function flush2() {
-                if (rl > 3) { printf "%s:%d: story-telling block (%d lines)\n", FILENAME, rs, rl; viol++ }
-                rs = 0; rl = 0
-            }
-            END {
-                cl_lex()
-                for (i = 1; i <= n; i++) {
-                    if (F[i] && T[i] ~ /^(What|Why|From):/) {
-                        if (bl == 0) bs = i
-                        bl++
-                        if (length(L[i]) > 60) { printf "%s:%d: %d chars (max 60): %s\n", FILENAME, i, length(L[i]), L[i]; viol++ }
-                        if (T[i] ~ /^(What|Why):/ && T[i] ~ /#[0-9]/) { printf "%s:%d: issue/PR ref in What/Why (use From:): %s\n", FILENAME, i, L[i]; viol++ }
-                        if (T[i] ~ /^From:/ && T[i] !~ /^From: (Issue #[0-9]+|PR #[0-9]+|Issue #[0-9]+ \| PR #[0-9]+)$/) { printf "%s:%d: From: allows one Issue and one PR only: %s\n", FILENAME, i, L[i]; viol++ }
-                    } else if (bl > 0) flush1()
-                }
-                if (bl > 0) flush1()
-                for (i = 1; i <= n; i++) if (C[i]) { if (!rs) rs = i; if (!D[i]) rl++ } else flush2()
-                flush2()
-                if (viol > 0) exit 1
-            }
-        ' "${file}" 2>&1)" || arc=$?
-        _ci_comment_length_rc "${file}" "${out}" || return 2
-    done
-    # What: a type with no comment grammar fails the check.
-    # Why: an unread file must never be reported as clean.
-    # From: Issue #1683 | PR #1858
-    if [ "${#no_lexer[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0153]" "files=${#no_lexer[@]} reason=\"no comment grammar for this file type\"" "$(printf '%s\n' "${no_lexer[@]}")"
-    fi
-    if [ "${#bad_files[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0128]" "files=${#bad_files[@]} scanned=${#files[@]} reason=\"comment contract violations\"" "$(printf '%s\n' "${findings[@]}")"
-    fi
-    [ "${#no_lexer[@]}" -eq 0 ] && [ "${#bad_files[@]}" -eq 0 ] || return 1
-    printf 'comment-length=clean files=%s\n' "${#files[@]}"
-}
-
-# What: classify one comment scan rc: 1 = violations.
-# Why: a read error (rc 2+) must not count as a finding.
-# From: Issue #1683 | PR #1858
-_ci_comment_length_rc() {
-    local file="$1" out="$2"
-    case "${arc}" in
-        # What: output without a finding fails the scan
-        # Why: AG-VAL-001: an awk warning is an error
-        # From: Issue #1683 | PR #1858
-        0)
-            if [ -n "${out}" ]; then
-                ci_error "[CI-ERROR-CHECK-0170]" "file=\"${file}\" rc=0 reason=\"comment scan wrote output without a finding\"" "${out}"
-                return 2
-            fi
-            ;;
-        1)
-            case " ${bad_files[*]} " in *" ${file} "*) ;; *) bad_files+=("${file}") ;; esac
-            findings+=("${out}")
-            ;;
-        *) ci_error "[CI-ERROR-CHECK-0129]" "file=\"${file}\" rc=${arc} reason=\"comment scan failed\"" "${out}"; return 2 ;;
-    esac
-    arc=0
-}
 
 # What: fail on code that shortens a commit SHA.
 # Why: AG-REL-015 SHA tags carry all 40 hex digits.
@@ -12485,121 +12495,6 @@ _ci_check_executable_bits() {
         return 1
     fi
     printf 'executable-bits=clean paths=%s\n' "${#paths[@]}"
-}
-
-# What: Sets caller's files array from a diff-scoped fetch.
-# Why: captures to a file; process subst. drops exit status.
-# From: Issue #1683 | PR #1686
-_ci_review_chronology_diff_files() {
-    _ci_env_required CHRONOLOGY_DIFF_BASE_REF > /dev/null || return 2
-    local remote head
-    head="$(_ci_head_commit)" || return 2
-    remote="$(_ci_git_remote)" || return 2
-    _ci_retry "git-fetch-chronology-base-ref" git fetch --no-tags --depth=1 "${remote}" \
-        "+refs/heads/${CHRONOLOGY_DIFF_BASE_REF}:refs/remotes/${remote}/${CHRONOLOGY_DIFF_BASE_REF}" >/dev/null || return 2
-    _ci_retry "git-fetch-chronology-base-sha" git fetch --no-tags --depth=1 "${remote}" \
-        "${CHRONOLOGY_DIFF_BASE_SHA}" >/dev/null || return 2
-    local out
-    out="$(git cat-file -e "${CHRONOLOGY_DIFF_BASE_SHA}^{commit}" 2>&1)" || {
-        ci_error "[CI-ERROR-CHECK-0010]" "sha=\"${CHRONOLOGY_DIFF_BASE_SHA}\" reason=\"diff base sha unreachable\"" "${out}"; return 2; }
-    local diff_file
-    diff_file="$(_ci_mktemp -p "${CI_TMPDIR}")" || return 2
-    if ! out="$(git diff -z --name-only --diff-filter=ACMRTUXB \
-        "${CHRONOLOGY_DIFF_BASE_SHA}" "${head}" 2>&1 > "${diff_file}")"; then
-        ci_error "[CI-ERROR-CHECK-0077]" "base=\"${CHRONOLOGY_DIFF_BASE_SHA}\" head=\"${head}\" reason=\"git diff itself failed; not treating as a clean pass\"" "${out}"
-        rm -f "${diff_file}"
-        return 2
-    fi
-    mapfile -d '' files < "${diff_file}"
-    rm -f "${diff_file}"
-}
-
-# What: flags review-chronology, stale line-refs, dup #N.
-# Why: comments must state current code only (AG-CODE-012).
-# From: Issue #1683
-_ci_check_review_chronology() {
-    local verbs='(caught|found|flagged|spotted|identified|discovered|noticed)'
-    local rc="(\\b${verbs}\\b[[:space:]]+(in|during)[[:space:]]+((a|the|this)[[:space:]]+)?(code[[:space:]]+|pr[[:space:]]+|peer[[:space:]]+)?(self-)?review\\b)"
-    rc="${rc}|(\\breview\\b[^a-zA-Z.]{0,20}\\b${verbs}\\b)"
-    rc="${rc}|(\\b(before|prior to|until)[[:space:]]+this[[:space:]]+(fix|change|commit|patch)\\b)"
-    rc="${rc}|(\\breview[[:space:]]+finding\\b)"
-    local lr='\(([Ss]ee[[:space:]]+)?\bline\b[[:space:]]*~?[0-9]+'
-    local -a _ci_override=("$@") files=()
-    if [ -n "${CHRONOLOGY_DIFF_BASE_SHA:-}" ]; then
-        _ci_review_chronology_diff_files || return 2
-    else
-        _ci_scan_files files _ci_override || return 2
-    fi
-    _ci_prose_exempt_load || return 2
-    local path out ln joined fnums num from_lines
-    local -a viol=() dup_viol=()
-    for path in "${files[@]}"; do
-        _ci_prose_excluded "${path}" && continue
-        out="$(_ci_capture 1 grep -EinIH "${rc}" "${path}")" || return 2
-        if [ -n "${out}" ]; then
-            viol+=("${out}")
-        fi
-        out="$(_ci_capture 1 grep -EinIH "${lr}" "${path}")" || return 2
-        if [ -n "${out}" ]; then
-            viol+=("${out}")
-        fi
-        local produced="" produced_rc=0 style exp
-        # What: join adjacent comment lines per grammar
-        # Why: narration split over two lines must match.
-        # From: Issue #1683 | PR #1858
-        if style="$(_ci_comment_style "${path}")"; then
-            exp="$(_ci_header_expected "${path}")" || return 2
-            produced="$(awk -v style="${style}" -v h2="${exp%%$'\n'*}" -v h3="${exp#*$'\n'}" "${_CI_AWK_COMMENT_LEX}"'
-                END { cl_lex(); for (i = 2; i <= n; i++) if (F[i - 1] && F[i]) printf "%d\t%s %s\n", i - 1, T[i - 1], T[i] }
-            ' "${path}")" || produced_rc=$?
-            _ci_producer_ok "${produced_rc}" 0 || return 2
-        fi
-        while IFS=$'\t' read -r ln joined; do
-            [ -n "${ln}" ] || continue
-            shopt -s nocasematch
-            [[ "${joined}" =~ ${rc} ]] && viol+=("${path}:${ln}: ${joined}")
-            shopt -u nocasematch
-        done <<<"${produced}"
-        from_lines="$(_ci_capture 1 grep -EI 'From:' "${path}")" || return 2
-        [ -n "${from_lines}" ] || continue
-        fnums="$(_ci_capture 1 grep -oEI '#[0-9]+' <<< "${from_lines}")" || return 2
-        fnums="$(tr -d '#' <<< "${fnums}" | sort -u)"
-        [ -z "${fnums}" ] && continue
-        while IFS= read -r num; do
-            [ -n "${num}" ] || continue
-            out="$(awk -v n="${num}" '
-                $0 ~ /From:/ { next }
-                { line=$0; inq=""; m=0; len=length(line)
-                  for (i=1;i<=len;i++) { ch=substr(line,i,1)
-                    if (inq=="") { if (ch=="\"") { inq=ch; continue }
-                      if (ch=="\x27") { pv=((i>1)?substr(line,i-1,1):""); if (pv !~ /[A-Za-z0-9_]/) { inq=ch; continue } } }
-                    else if (ch==inq) { inq=""; continue }
-                    if (inq=="" && ch=="#") { rest=substr(line,i+1,length(n))
-                      if (rest==n) { af=substr(line,i+1+length(n),1); bf=((i>1)?substr(line,i-1,1):"")
-                        if (af !~ /[0-9]/ && bf !~ /[0-9]/) m=1 } } }
-                  if (m) print FILENAME ":" FNR ": " line }
-            ' "${path}")"
-            [ -n "${out}" ] && dup_viol+=("${out}")
-        done <<< "${fnums}"
-    done
-    # What: dup #N outside From: is warn-only in every mode.
-    # Why: a genuine duplicate must warn, never block.
-    # From: Issue #1683
-    if [ "${#dup_viol[@]}" -gt 0 ]; then
-        ci_error "[CI-WARN-CHECK-0078]" "reason=\"bare #N duplicated outside From: (warn-only, PR #1856)\"" "$(printf '%s\n' "${dup_viol[@]}")"
-    fi
-    if [ "${#viol[@]}" -gt 0 ]; then
-        local warn_only
-        warn_only="$(_ci_variable CHRONOLOGY_WARN_ONLY)" || return 2
-        if [ "${warn_only}" = "1" ]; then
-            ci_error "[CI-WARN-CHECK-0079]" "reason=\"review-chronology / stale line-ref (warn-only)\"" "$(printf '%s\n' "${viol[@]}")"
-            printf 'review-chronology=warn files=%s\n' "${#files[@]}"
-            return 0
-        fi
-        ci_error "[CI-ERROR-CHECK-0080]" "reason=\"review-chronology / stale line-ref\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'review-chronology=clean files=%s\n' "${#files[@]}"
 }
 
 # What: Fail on a live pipe into an early-exiting consumer.

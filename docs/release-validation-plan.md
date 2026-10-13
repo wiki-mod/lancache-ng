@@ -508,7 +508,7 @@ a stated reason it has none (AG-VAL-029).
 | A `.trivyignore.yaml` entry not yielding a complete OpenVEX statement | `check vex-drift` |
 | Case-sensitive repository-name comparison | `_ci_repo` lowercases; ci.bats "action ref is external unless local, docker, or this repo" (upper-case owner case) |
 | Live pipe into an early-exit consumer under `pipefail` (exit 141) | `check pipefail-early-exit` |
-| Review chronology or stale line references in comments | `check review-chronology` |
+| Review chronology or stale line references in comments | `check comments` |
 | Closing keywords read outside the linked-issues section | `_ci_pr_section`; ci.bats "check pr-template: every real template section filled, one box marked", "pr markdown: comments strip, a section ends at any real heading" |
 | A bats `[ ] && [ ]` check that cannot fail | `check bats-and-chain` |
 | `$?` read from an `if` instead of the command | `check if-without-else-status` |
@@ -538,7 +538,7 @@ a stated reason it has none (AG-VAL-029).
   serialization in `ci.sh` (AG-CI-017).
 - **`check actionlint`**: no per-command kill bound; the `lint` job timeout from the
   SOT applies.
-- **Comment claims drifting from code**: `check comment-length` checks structure; the
+- **Comment claims drifting from code**: `check comments` checks structure; the
   truth of a claim is manual review.
 - **Third-party reviewer output language** (AG-CC-004): manual review.
 - **GHCR GC reachability** (`ci.sh gc`, run by `gc.yml` with `--apply`): ci.bats tests

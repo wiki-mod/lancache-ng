@@ -187,8 +187,8 @@ Because of this limitation, **a green CodeQL Rust job must not be read as full s
 
 These are required, not stylistic suggestions — a PR missing them will fail CI or get flagged in review.
 
-- **File headers.** Every file outside the exclusion list starts with the header that AGENTS.md `[AG-HDR-*]` defines: line 1 empty or the interpreter marker, then `LanCache-NG (https://github.com/wiki-mod/lancache-ng)` and `SPDX-License-Identifier: AGPL-3.0-or-later` in the file's own comment syntax. `ci.sh check file-headers` enforces it; the exclusion list lives in `ci.sh` (`_ci_prose_excluded`) and the SOT.
-- **Code comments.** Every comment block follows AGENTS.md `[AG-CODE-012]`: `What:` and `Why:` on one line each, at most 60 characters, and `From: Issue #N | PR #N` when a source is known. `ci.sh check comment-length` and `ci.sh check review-chronology` enforce it.
+- **File headers.** Every file outside the exclusion list starts with the header that AGENTS.md `[AG-HDR-*]` defines: line 1 empty or the interpreter marker, then `LanCache-NG (https://github.com/wiki-mod/lancache-ng)` and `SPDX-License-Identifier: AGPL-3.0-or-later` in the file's own comment syntax. `ci.sh check comments` enforces it; the header text and the exclusion globs live in the SOT `.github/yaml/build-manifest.yml` (`file_headers`).
+- **Code comments.** Every comment block follows AGENTS.md `[AG-CODE-012]`: `What:` and `Why:` on one line each, at most 60 characters, and `From: Issue #N | PR #N` when a source is known. `ci.sh check comments` enforces it.
 
 ## Building from source
 
