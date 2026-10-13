@@ -178,27 +178,26 @@ real host:
 | `PDNS_SOA_REFRESH` | `30` (`build-manifest.yml` `runtime.defaults`) | Primary SOA `refresh` (seconds), seeded into `default-soa-content` and rewritten onto every zone by `run_soa_maintainer`. Short by design (issue #1095): it is the only convergence guarantee for a secondary that missed a single-shot UDP NOTIFY, replacing the old `10800`s (3h) drift window. |
 | `PDNS_SOA_RETRY` | `10` (`runtime.defaults`) | Primary SOA `retry` (seconds); must be `< PDNS_SOA_REFRESH` (RFC 1912). |
 | `PDNS_SOA_RESYNC_INTERVAL` | `3600` (`runtime.defaults`) | Primary-only cadence (seconds) at which `run_soa_maintainer` re-anchors the `YYMMDDxxx` date serial at day rollover and bumps + NOTIFYs as a generic force-resync safety net (issue #1095). |
-| `NATS_BIND_IP` | — | Trusted LAN/VPN interface for optional NATS host binding used by remote secondaries; intentionally required by the secondary NATS override file. Also drives the address the Admin UI hands out during secondary registration -- see below. |
+| `NATS_BIND_IP` | — | Trusted LAN/VPN interface for optional NATS host binding used by remote secondaries; the `dns` service publishes NATS on it (loopback when unset). Also drives the address the Admin UI hands out during secondary registration -- see below. |
 | `NATS_ADVERTISE_URL` | — | Explicit override for the NATS URL the Admin UI hands a remote secondary during registration (issue #866), for setups `NATS_BIND_IP` alone can't express (non-default port, `tls://` scheme, VPN hostname). Always wins over `NATS_BIND_IP` when set. |
 
 **allow-query / allow-recursion:** open to all RFC-1918 + IPv6 ULA by default
 
 ### Remote secondary NATS access
 
-The production Compose file keeps NATS on the Docker network by default and does not publish port `4222` on the host. This keeps the event bus closed for installations that do not use remote secondaries.
+The production Compose file publishes the NATS port only on the SOT `LOOPBACK_BIND_IP` by default. This keeps the event bus closed for installations that do not use remote secondaries.
 
 Enable host binding for remote secondary DNS nodes only when you intentionally
 publish NATS to a trusted LAN or VPN interface. `ENABLE_SECONDARY` is not a
 runtime switch read by setup, Compose, DNS, or UI code; native zone replication
-is controlled by `DNS_REPLICATION_ROLE`/`DNS_XFR_PRIMARY`, while this override
+is controlled by `DNS_REPLICATION_ROLE`/`DNS_XFR_PRIMARY`, while `NATS_BIND_IP`
 only publishes the NATS registration/event path.
 
 Example:
 
 ```sh
 NATS_BIND_IP=192.168.1.5 \
-  docker compose --env-file deploy/prod/.env.local -f deploy/prod/docker-compose.yml \
-  -f deploy/prod/docker-compose.nats-secondary.yml up -d
+  docker compose --env-file deploy/prod/.env.local -f deploy/prod/docker-compose.yml up -d dns
 ```
 
 Do not bind NATS to `0.0.0.0` unless an external firewall or VPN policy restricts access to trusted secondary nodes.
@@ -257,11 +256,10 @@ tests for the exact precedence and rejection rules.
 
 Note that setting `NATS_BIND_IP`/`NATS_ADVERTISE_URL` on the primary and
 restarting only the `ui` container is not, on its own, enough to make a
-registration attempt actually succeed end-to-end: the `nats` service itself
-still needs `docker-compose.nats-secondary.yml` included (and the stack
-recreated with it) to publish port 4222 on that address in the first place.
-`ui` only computes what to *advertise*; it does not control what `nats`
-itself publishes.
+registration attempt actually succeed end-to-end: the `dns` service, which
+runs NATS, must be recreated with `NATS_BIND_IP` set to publish the NATS port
+on that address in the first place. `ui` only computes what to *advertise*;
+it does not control what `dns` publishes.
 
 **nsupdate (RFC 2136):** TSIG-secured dynamic DNS channel into PowerDNS authoritative. Kea DHCP sends lease add/update/delete events through `kea-dhcp-ddns` to `dns` only; PowerDNS accepts those updates only for the LAN and private reverse zones that are explicitly mapped to the shared `DDNS_TSIG_KEY`. Registered remote DNS secondaries consume those same zone changes through native PowerDNS AXFR/NOTIFY, so DHCP-driven records have one writer and do not depend on Kea's `dns-servers` failover list behaving like fan-out.
 

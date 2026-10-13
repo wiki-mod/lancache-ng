@@ -5768,7 +5768,7 @@ reset_kea_to_last_known_good_config() {
     print_ok "Snapshot persisted to kea-dhcp4.conf."
 
     print_ok "Kea rolled back to known-good snapshot $snapshot_id (validated, applied, and persisted)."
-    print_warn "This CLI fallback does not itself record a fresh known-good snapshot of the restored state (services/ui/src/routes/dhcp.rs's rollback_kea_snapshot does, when reached via the Admin UI) -- the next config change made through the Admin UI will."
+    print_warn "This CLI fallback does not itself record a fresh known-good snapshot of the restored state (services/ui/src/main.rs's rollback_kea_snapshot does, when reached via the Admin UI) -- the next config change made through the Admin UI will."
 }
 
 # What: adds the trailing dot to a zone name if missing
@@ -7429,7 +7429,7 @@ NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD}
 # registered secondaries (generated, do not change)
 NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD}
 # System-account identity (generated, do not change). Used only by the Admin
-# UI's kicker connection (nats_kick.rs) to look up and force-disconnect a
+# UI's kicker connection (kick_secondary in services/ui) to look up and force-disconnect a
 # removed/rotated secondary's live NATS connection (issue #681).
 NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD}
 # Token for setup.sh secondary — anyone who knows this can register a secondary
