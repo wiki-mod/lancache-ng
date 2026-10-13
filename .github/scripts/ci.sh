@@ -12885,17 +12885,17 @@ _ci_check_pr_template() {
     printf 'pr-template=ok\n'
 }
 
-# What: start line and byte size of each run: block
+# What: file, start line, byte size of each run: block
 # Why: awk length counts chars; LC_ALL=C makes it bytes
 # From: Issue #1683
 _ci_measure_run_blocks() {
-    local file="$1"
     LC_ALL=C awk '
         function leadspace(s) { match(s, /^[ \t]*/); return RLENGTH }
         function flush_block() {
-            if (started) printf "%d\t%d\n", block_start, block_bytes
+            if (started) printf "%s\t%d\t%d\n", fname, block_start, block_bytes
             in_block = 0; started = 0
         }
+        FNR == 1 { flush_block(); fname = FILENAME }
         {
             line = $0
             if (in_block) {
@@ -12916,13 +12916,13 @@ _ci_measure_run_blocks() {
                 match(line, /^[ ]*(- )?run:/); key_indent = RLENGTH - 4
                 match(line, /[|>][+-]?[0-9]?[+-]?/)
                 digit = substr(line, RSTART, RLENGTH); gsub(/[^0-9]/, "", digit)
-                in_block = 1; block_start = NR + 1; block_bytes = 0
+                in_block = 1; block_start = FNR + 1; block_bytes = 0
                 if (digit != "") { started = 1; content_indent = key_indent + digit }
                 else { started = 0; content_indent = 0 }
             }
         }
         END { flush_block() }
-    ' "${file}"
+    ' "$@"
 }
 
 # What: list workflow files, or with "actions" action files
@@ -12964,19 +12964,22 @@ _ci_check_workflow_line_limit() {
     local file counts lines bytes block_report block_line block_bytes
     local -a viol=() files=()
     _ci_workflow_files files "${dir}" || return 2
-    for file in "${files[@]}"; do
-        counts="$(_ci_capture 0 wc -lc "${file}")" || return 2
-        read -r lines bytes _ <<< "${counts}"
+    counts="$(_ci_capture 0 wc -lc "${files[@]}")" || return 2
+    # What: skip the wc total row; file rows carry the dir
+    # Why: a workflow path is never the bare word total
+    # From: Issue #1683 | PR #1912
+    while read -r lines bytes file; do
+        [ "${file}" != total ] || continue
         [ "${lines}" -gt "${max_lines}" ] && viol+=("${file}: ${lines} lines > ${max_lines}")
         [ "${bytes}" -gt "${max_bytes}" ] && viol+=("${file}: ${bytes} bytes > ${max_bytes}")
-        block_report="$(_ci_measure_run_blocks "${file}")" || {
-            ci_log "[CI-ERROR-CHECK-0122]" "file=\"${file}\" reason=\"run blocks not measurable (raw above)\""; return 2; }
-        while IFS=$'\t' read -r block_line block_bytes; do
-            [ -n "${block_line}" ] || continue
-            [ "${block_bytes}" -gt "${max_block}" ] && \
-                viol+=("${file}:${block_line}: run-block ${block_bytes} bytes > ${max_block}")
-        done <<<"${block_report}"
-    done
+    done <<< "${counts}"
+    block_report="$(_ci_measure_run_blocks "${files[@]}")" || {
+        ci_log "[CI-ERROR-CHECK-0122]" "dir=\"${dir}\" reason=\"run blocks not measurable (raw above)\""; return 2; }
+    while IFS=$'\t' read -r file block_line block_bytes; do
+        [ -n "${block_line}" ] || continue
+        [ "${block_bytes}" -gt "${max_block}" ] && \
+            viol+=("${file}:${block_line}: run-block ${block_bytes} bytes > ${max_block}")
+    done <<<"${block_report}"
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0090]" "reason=\"workflow size ceiling exceeded\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
