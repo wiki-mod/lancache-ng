@@ -9951,13 +9951,14 @@ ci_cmd_version() {
 # Why: AG-CI-016 requires bounded build caches on runners.
 # From: Issue #1255 | PR #1349
 _ci_daemon_additions() {
-    local reserved size files
+    local reserved size files driver
     reserved="$(_ci_variable CI_BUILDER_GC_RESERVED_SPACE)" || return 2
     size="$(_ci_variable CI_DAEMON_LOG_MAX_SIZE)" || return 2
     files="$(_ci_variable CI_DAEMON_LOG_MAX_FILE)" || return 2
-    _ci_capture 0 jq -n --arg reserved "${reserved}" --arg size "${size}" --arg files "${files}" '{
+    driver="$(_ci_variable CI_DAEMON_LOG_DRIVER)" || return 2
+    _ci_capture 0 jq -n --arg reserved "${reserved}" --arg size "${size}" --arg files "${files}" --arg driver "${driver}" '{
         "builder": { "gc": { "enabled": true, "defaultReservedSpace": $reserved } },
-        "log-driver": "json-file",
+        "log-driver": $driver,
         "log-opts": { "max-size": $size, "max-file": $files }
     }'
 }
@@ -10019,27 +10020,29 @@ _ci_daemon_check() {
 # Why: manual review before apply; the live file stays.
 # From: Issue #1255 | PR #1349
 _ci_daemon_stage() {
-    local file="$1" merged
+    local file="$1" merged suf
+    suf="$(_ci_variable CI_DAEMON_STAGED_SUFFIX)" || return 2
     merged="$(_ci_daemon_merge "${file}")" || return "$?"
-    printf '%s\n' "${merged}" > "${file}.staged" || return 2
-    printf 'Staged merged config at: %s.staged\n' "${file}"
+    printf '%s\n' "${merged}" > "${file}${suf}" || return 2
+    printf 'Staged merged config at: %s\n' "${file}${suf}"
 }
 
 # What: back up the live file; install the merged config.
 # Why: validated and atomic; dockerd is not restarted here.
 # From: Issue #1255 | PR #1349
 _ci_daemon_apply() {
-    local file="$1" merged tmp backup
+    local file="$1" merged tmp backup bsuf
+    bsuf="$(_ci_variable CI_DAEMON_BACKUP_SUFFIX)" || return 2
     merged="$(_ci_daemon_merge "${file}")" || return "$?"
-    tmp="$(_ci_mktemp "${file}.tmp.XXXXXX")" || return 2
-    printf '%s\n' "${merged}" > "${tmp}"
+    tmp="$(_ci_mktemp "${file}.XXXXXX")" || return 2
+    printf '%s\n' "${merged}" > "${tmp}" || { rm -f "${tmp}"; return 2; }
     _ci_daemon_validate "${tmp}" || { rm -f "${tmp}"; return 1; }
     if [ -f "${file}" ]; then
-        backup="${file}.bak.$(date +%Y%m%dT%H%M%S)"
-        cp "${file}" "${backup}" || return 2
+        backup="$(_ci_mktemp "${file}${bsuf}XXXXXX")" || { rm -f "${tmp}"; return 2; }
+        cp "${file}" "${backup}" || { rm -f "${tmp}"; return 2; }
         printf 'Backed up existing config to: %s\n' "${backup}"
     fi
-    mv "${tmp}" "${file}" || return 2
+    mv "${tmp}" "${file}" || { rm -f "${tmp}"; return 2; }
     printf 'Applied merged config to: %s\ndockerd is not restarted; run the restart mode in a quiet window.\n' "${file}"
 }
 
@@ -10047,25 +10050,27 @@ _ci_daemon_apply() {
 # Why: it stops every container, in-flight CI jobs included.
 # From: Issue #1255 | PR #1349
 _ci_daemon_restart() {
-    local file="$1" attempt=0 driver wait_max probe
+    local file="$1" waited=0 driver want wait_max poll probe
     wait_max="$(_ci_variable CI_DAEMON_RESTART_WAIT)" || return 2
+    poll="$(_ci_variable CI_DAEMON_RESTART_POLL)" || return 2
+    want="$(_ci_variable CI_DAEMON_LOG_DRIVER)" || return 2
     if [ "${CONFIRM_DOCKERD_RESTART:-}" != "yes" ]; then
         ci_log "[CI-ERROR-DAEMON-0004]" "reason=\"restart stops every container; set CONFIRM_DOCKERD_RESTART=yes\""
         return 1
     fi
     _ci_capture 0 systemctl restart docker || return 2
     until probe="$(docker info 2>&1)"; do
-        attempt=$((attempt + 1))
-        if [ "${attempt}" -ge "${wait_max}" ]; then
+        waited=$((waited + poll))
+        if [ "${waited}" -ge "${wait_max}" ]; then
             ci_error "[CI-ERROR-DAEMON-0005]" "wait=${wait_max} reason=\"dockerd not responsive after restart\"" "${probe}"
             return 1
         fi
-        sleep 1
+        sleep "${poll}"
     done
     driver="$(_ci_capture 0 docker info --format '{{.LoggingDriver}}')" || return 2
     printf 'LoggingDriver (docker info): %s\n' "${driver}"
-    if [ "${driver}" != "json-file" ]; then
-        ci_log "[CI-WARN-DAEMON-0006]" "driver=\"${driver}\" reason=\"LoggingDriver is not json-file; check the host\""
+    if [ "${driver}" != "${want}" ]; then
+        ci_log "[CI-WARN-DAEMON-0006]" "driver=\"${driver}\" want=\"${want}\" reason=\"LoggingDriver is not the SOT driver; check the host\""
     fi
     printf 'builder section of %s (docker info does not report it):\n' "${file}"
     _ci_capture 0 jq '.builder // "(no builder key)"' "${file}" || return 2
@@ -10205,16 +10210,17 @@ _ci_rh_reap_trivy() {
 # Why: AG-CI-016: measure, clean, re-measure, verify.
 # From: Issue #1255 | PR #1349
 _ci_rh_cleanup_run() {
-    local prefix before after rc=0 kb
+    local prefix before after rc=0 kb disk
     local bt_hours val_hours bx_hours bt_match bx_match
     bt_hours="$(_ci_rh_val reap_build_tools_hours)" || return 2
     bt_match="$(_ci_rh_val build_tools_match)" || return 2
     val_hours="$(_ci_rh_val reap_validation_hours)" || return 2
     bx_hours="$(_ci_rh_val reap_buildx_hours)" || return 2
     bx_match="$(_ci_rh_val buildx_match)" || return 2
+    disk="$(_ci_rh_val disk_path)" || return 2
     prefix="$(_ci_validate_project "")" || return 2
     printf '=== %s runner-host cleanup start ===\n--- disk usage before cleanup ---\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    before="$(_ci_capture 0 df -P /)" || return 2
+    before="$(_ci_capture 0 df -P "${disk}")" || return 2
     printf '%s\n' "${before}"
     before="$(awk 'NR == 2 { print $3 }' <<<"${before}")"
     _ci_rh_reap_containers build-tools image "${bt_match}" "${bt_hours}" || rc=2
@@ -10227,11 +10233,11 @@ _ci_rh_cleanup_run() {
     _ci_run "[CI-ERROR-RUNNER-0006]" "reason=\"builder prune failed\"" docker builder prune -af || rc=2
     _ci_run "[CI-ERROR-RUNNER-0007]" "reason=\"image prune failed\"" docker image prune -af || rc=2
     _ci_rh_prune_volumes || rc=2
-    after="$(_ci_capture 0 df -P /)" || return 2
+    after="$(_ci_capture 0 df -P "${disk}")" || return 2
     printf -- '--- disk usage after cleanup ---\n%s\n' "${after}"
     after="$(awk 'NR == 2 { print $3 }' <<<"${after}")"
     kb=$(( before - after ))
-    printf 'reclaimed: %s KiB (%s MiB) on /\n=== %s runner-host cleanup done rc=%s ===\n' "${kb}" "$(( kb / 1024 ))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${rc}"
+    printf 'reclaimed: %s KiB (%s MiB) on %s\n=== %s runner-host cleanup done rc=%s ===\n' "${kb}" "$(( kb / 1024 ))" "${disk}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${rc}"
     return "${rc}"
 }
 
@@ -10239,13 +10245,14 @@ _ci_rh_cleanup_run() {
 # Why: a timer run has no terminal; the log is its record.
 # From: Issue #1255 | PR #1349
 _ci_rh_cleanup() {
-    local log max size rc=0
+    local log max size rc=0 tmp
     log="$(_ci_rh_val cleanup_log)" || return 2
     max="$(_ci_rh_val cleanup_log_max_bytes)" || return 2
     if [ -f "${log}" ]; then
         size="$(_ci_capture 0 stat -c%s "${log}")" || return 2
         if [ "${size}" -gt "${max}" ]; then
-            _ci_capture 0 tail -c "${max}" "${log}" > "${log}.tmp" && mv "${log}.tmp" "${log}" || return 2
+            tmp="$(_ci_mktemp "${log}.XXXXXX")" || return 2
+            _ci_capture 0 tail -c "${max}" "${log}" > "${tmp}" && mv "${tmp}" "${log}" || { rm -f "${tmp}"; return 2; }
         fi
     fi
     _ci_rh_cleanup_run >> "${log}" 2>&1 || rc=$?
@@ -10972,7 +10979,7 @@ _ci_rh_purge_pve_check() {
     if _ci_rh_root grep -qiE "${units}" "${fstab}"; then printf '  FOUND: %s references the stack\n' "${fstab}"; fi
     printf '\n--- Simulated purge (no kernel or firmware must appear) ---\n'
     sim="$(_ci_run -m 100 "[CI-ERROR-RUNNER-0054]" "reason=\"simulated purge failed\"" _ci_rh_root apt-get purge --simulate "${pkgs[@]}")" || return 2
-    tail -20 <<< "${sim}"
+    printf '%s\n' "${sim}"
     printf '\nNo files were changed (purge-pve-check mode).\n'
 }
 
@@ -11022,11 +11029,12 @@ _ci_rh_purge_pve() {
 # Why: autoremove may hit PVE dependencies only.
 # From: Issue #1622 | PR #1624
 _ci_rh_pve_purge_run() {
-    local keep="$1" sim bad removable
+    local keep="$1" sim bad removable aenv
     shift
+    aenv="$(_ci_rh_val apt_env)" || return 2
     removable="$(_ci_rh_ere pve_autoremove_families)" || return 2
-    _ci_run "[CI-ERROR-RUNNER-0059]" "reason=\"apt-get purge failed\"" _ci_rh_root env DEBIAN_FRONTEND=noninteractive apt-get purge -y "$@" || return 2
-    sim="$(_ci_run "[CI-ERROR-RUNNER-0060]" "reason=\"simulated autoremove failed\"" _ci_rh_root env DEBIAN_FRONTEND=noninteractive apt-get autoremove --simulate)" || return 2
+    _ci_run "[CI-ERROR-RUNNER-0059]" "reason=\"apt-get purge failed\"" _ci_rh_root env "${aenv}" apt-get purge -y "$@" || return 2
+    sim="$(_ci_run "[CI-ERROR-RUNNER-0060]" "reason=\"simulated autoremove failed\"" _ci_rh_root env "${aenv}" apt-get autoremove --simulate)" || return 2
     bad="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0117]" "reason=\"autoremove list not read\"" grep -E '^Remv ' <<< "${sim}")" || return 2
     bad="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0118]" "reason=\"autoremove list not filtered\"" grep -viE "${removable}" <<< "${bad}")" || return 2
     if [ -n "${bad}" ] || grep -qiE "${keep}" <<< "${sim}"; then
@@ -11034,7 +11042,7 @@ _ci_rh_pve_purge_run() {
         printf '%s\n' "${sim}" >&2
         return 2
     fi
-    _ci_run "[CI-ERROR-RUNNER-0062]" "reason=\"apt-get autoremove failed\"" _ci_rh_root env DEBIAN_FRONTEND=noninteractive apt-get autoremove -y
+    _ci_run "[CI-ERROR-RUNNER-0062]" "reason=\"apt-get autoremove failed\"" _ci_rh_root env "${aenv}" apt-get autoremove -y
 }
 
 # What: text of the job-started hook (owner reset).
@@ -11187,8 +11195,9 @@ _ci_rh_access() {
 # Why: the pin must use a=stable-backports, not a name.
 # From: Issue #1622 | PR #1624
 _ci_rh_backports() {
-    local suite code list pref want_list want_pref osrel pin
+    local suite code list pref want_list want_pref osrel pin aenv
     suite="$(_ci_rh_val debian_suite)" || return 2
+    aenv="$(_ci_rh_val apt_env)" || return 2
     osrel="$(_ci_rh_val os_release_file)" || return 2
     code="$(_ci_capture 0 bash -c '. "$1"; printf %s "${VERSION_CODENAME:-}"' _ "${osrel}")" || return 2
     if [ "${code}" != "${suite}" ]; then
@@ -11208,20 +11217,21 @@ _ci_rh_backports() {
         printf '%s\n' "${want_pref}" | _ci_rh_root tee "${pref}" >/dev/null || return 2
     fi
     printf 'Validated %s and %s.\n' "${list}" "${pref}"
-    _ci_run "[CI-ERROR-RUNNER-0074]" "reason=\"apt-get update failed\"" _ci_rh_root apt-get update | tail -10
-    _ci_run "[CI-ERROR-RUNNER-0075]" "reason=\"apt-get dist-upgrade failed\"" _ci_rh_root env DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y | tail -15
-    _ci_run "[CI-ERROR-RUNNER-0076]" "reason=\"apt-get full-upgrade failed\"" _ci_rh_root env DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y | tail -10
+    _ci_run "[CI-ERROR-RUNNER-0074]" "reason=\"apt-get update failed\"" _ci_rh_root apt-get update || return 2
+    _ci_run "[CI-ERROR-RUNNER-0075]" "reason=\"apt-get dist-upgrade failed\"" _ci_rh_root env "${aenv}" apt-get dist-upgrade -y || return 2
+    _ci_run "[CI-ERROR-RUNNER-0076]" "reason=\"apt-get full-upgrade failed\"" _ci_rh_root env "${aenv}" apt-get full-upgrade -y
 }
 
 # What: purge the apt change-list package when installed.
 # Why: its prompts or mail hang unattended upgrades.
 # From: Issue #1622 | PR #1624
 _ci_rh_purge_listchanges() {
-    local st pkg
+    local st pkg aenv
     pkg="$(_ci_rh_val apt_listchanges_pkg)" || return 2
+    aenv="$(_ci_rh_val apt_env)" || return 2
     st="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0077]" "pkg=\"${pkg}\" reason=\"dpkg query failed\"" dpkg -l "${pkg}")"
     if grep -q '^ii' <<< "${st}"; then
-        _ci_run "[CI-ERROR-RUNNER-0078]" "pkg=\"${pkg}\" reason=\"package not purged\"" _ci_rh_root env DEBIAN_FRONTEND=noninteractive apt-get purge -y "${pkg}" | tail -10
+        _ci_run "[CI-ERROR-RUNNER-0078]" "pkg=\"${pkg}\" reason=\"package not purged\"" _ci_rh_root env "${aenv}" apt-get purge -y "${pkg}" || return 2
         printf 'Purged %s.\n' "${pkg}"
     else
         printf '%s not installed.\n' "${pkg}"
@@ -11436,8 +11446,10 @@ _ci_rh_sccache_check() {
 # Why: builds run on a heavy host; secrets are per job.
 # From: Issue #1622 | PR #1626
 _ci_rh_sccache_fetch() {
-    local src="${1:-}" user root group dist f bin_dir list main_name dist_name old dmode sfiles sdirs sf
+    local src="${1:-}" user root group dist f bin_dir list main_name dist_name old dmode sfiles sdirs sf bmode staged stmpl
     dmode="$(_ci_rh_val sccache_dist_mode)" || return 2
+    bmode="$(_ci_rh_val sccache_bin_mode)" || return 2
+    stmpl="$(_ci_rh_val sccache_staged_name)" || return 2
     sfiles="$(_ci_block_entry_list runner_host "" sccache_stale_files)" || return 2
     sdirs="$(_ci_block_entry_list runner_host "" sccache_stale_dirs)" || return 2
     user="$(_ci_rh_val user)" || return 2
@@ -11459,8 +11471,9 @@ _ci_rh_sccache_fetch() {
     _ci_run "[CI-ERROR-RUNNER-0101]" "file=\"${src}/${main_name}\" reason=\"staged binary does not run\"" _ci_rh_root sudo -u "${user}" env HOME="${root}/${user}" "${src}/${main_name}" --version >/dev/null || return 2
     _ci_run "[CI-ERROR-RUNNER-0102]" "file=\"${src}/${dist_name}\" reason=\"staged binary does not run\"" "${src}/${dist_name}" --help >/dev/null || return 2
     for f in ${list}; do
-        _ci_run "[CI-ERROR-RUNNER-0103]" "file=\"${f}\" reason=\"not installed\"" _ci_rh_root install -o root -g "${group}" -m 0755 "${src}/${f}" "${bin_dir}/.${f}.new" || return 2
-        _ci_run "[CI-ERROR-RUNNER-0104]" "file=\"${f}\" reason=\"not moved in place\"" _ci_rh_root mv -f "${bin_dir}/.${f}.new" "${bin_dir}/${f}" || return 2
+        staged="${bin_dir}/${stmpl//@FILE@/${f}}"
+        _ci_run "[CI-ERROR-RUNNER-0103]" "file=\"${f}\" reason=\"not installed\"" _ci_rh_root install -o root -g "${group}" -m "${bmode}" "${src}/${f}" "${staged}" || { _ci_rh_root rm -f "${staged}"; return 2; }
+        _ci_run "[CI-ERROR-RUNNER-0104]" "file=\"${f}\" reason=\"not moved in place\"" _ci_rh_root mv -f "${staged}" "${bin_dir}/${f}" || { _ci_rh_root rm -f "${staged}"; return 2; }
     done
     _ci_run "[CI-ERROR-RUNNER-0105]" "dir=\"${dist}\" reason=\"dist dir not created\"" _ci_rh_root mkdir -p "${dist}" || return 2
     _ci_run "[CI-ERROR-RUNNER-0106]" "dir=\"${dist}\" reason=\"dist dir owner not set\"" _ci_rh_root chown "${user}:${group}" "${dist%/*}" "${dist}" || return 2

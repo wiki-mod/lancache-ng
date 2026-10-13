@@ -5902,20 +5902,22 @@ ROWS
 # Why: AG-CI-016: hosts deviate by variable, not by a fork.
 # From: Issue #1255 | PR #1349
 @test "docker-daemon-config: additions come from the SOT variables or their override" {
-    local reserved size files
+    local reserved size files driver sot
+    sot="$(yq -r '.ci_variables.CI_DAEMON_LOG_DRIVER' "${CI_MANIFEST_SOURCE}")" && [ -n "${sot}" ] && [ "${sot}" != null ] || { echo "no SOT driver"; return 1; }
     run _ci_daemon_additions
     [ "${status}" -eq 0 ] || { echo "rc ${status}: ${output}"; return 1; }
     [ "$(jq -r '.builder.gc.enabled' <<<"${output}")" = true ] || { echo "gc: ${output}"; return 1; }
-    [ "$(jq -r '."log-driver"' <<<"${output}")" = json-file ] || { echo "driver: ${output}"; return 1; }
+    [ "$(jq -r '."log-driver"' <<<"${output}")" = "${sot}" ] || { echo "driver: ${output}"; return 1; }
     [ "$(jq -r '.builder.gc.defaultReservedSpace' <<<"${output}")" = "$(_ci_variable CI_BUILDER_GC_RESERVED_SPACE)" ] || return 1
     [ "$(jq -r '."log-opts"."max-size"' <<<"${output}")" = "$(_ci_variable CI_DAEMON_LOG_MAX_SIZE)" ] || return 1
     [ "$(jq -r '."log-opts"."max-file"' <<<"${output}")" = "$(_ci_variable CI_DAEMON_LOG_MAX_FILE)" ] || return 1
-    reserved="$(_val name)" size="$(_val name)" files="$(_val int 1 99)"
-    CI_BUILDER_GC_RESERVED_SPACE="${reserved}" CI_DAEMON_LOG_MAX_SIZE="${size}" CI_DAEMON_LOG_MAX_FILE="${files}" run _ci_daemon_additions
+    reserved="$(_val name)" size="$(_val name)" files="$(_val int 1 99)" driver="$(_val name)"
+    CI_BUILDER_GC_RESERVED_SPACE="${reserved}" CI_DAEMON_LOG_MAX_SIZE="${size}" CI_DAEMON_LOG_MAX_FILE="${files}" CI_DAEMON_LOG_DRIVER="${driver}" run _ci_daemon_additions
     [ "${status}" -eq 0 ] || { echo "override rc ${status}: ${output}"; return 1; }
     [ "$(jq -r '.builder.gc.defaultReservedSpace' <<<"${output}")" = "${reserved}" ] || { echo "reserved: ${output}"; return 1; }
     [ "$(jq -r '."log-opts"."max-size"' <<<"${output}")" = "${size}" ] || { echo "size: ${output}"; return 1; }
     [ "$(jq -r '."log-opts"."max-file"' <<<"${output}")" = "${files}" ] || { echo "files: ${output}"; return 1; }
+    [ "$(jq -r '."log-driver"' <<<"${output}")" = "${driver}" ] || { echo "driver override: ${output}"; return 1; }
 }
 
 # What: merge keeps host keys, a missing file, bad JSON.
@@ -5942,29 +5944,41 @@ ROWS
 # Why: V-N3: a dead dockerd must not end in a bare message.
 # From: Issue #1255 | PR #1912
 @test "docker-daemon-config: a dockerd that never answers fails with its raw text" {
-    local msg wait
-    msg="$(_val name)" wait="$(_val int 2 4)"
+    local msg wait poll steps slog
+    msg="$(_val name)" poll="$(_val int 2 4)" steps="$(_val int 2 4)" slog="$(_val path)"
+    wait=$((poll * steps))
     systemctl() { return 0; }
-    sleep() { return 0; }
+    sleep() { printf '%s\n' "$1" >> "${slog}"; }
     docker() { printf '%s\n' "${msg}" >&2; return 1; }
-    CONFIRM_DOCKERD_RESTART=yes CI_DAEMON_RESTART_WAIT="${wait}" run _ci_daemon_restart "$(_val path)"
+    CONFIRM_DOCKERD_RESTART=yes CI_DAEMON_RESTART_WAIT="${wait}" CI_DAEMON_RESTART_POLL="${poll}" run _ci_daemon_restart "$(_val path)"
     _expect never-answers 1 "[CI-ERROR-DAEMON-0005];wait=${wait};${msg}" || return 1
+    [ "$(sort -u "${slog}")" = "${poll}" ] && [ "$(wc -l < "${slog}")" -eq $((steps - 1)) ] \
+        || { echo "poll ${poll} steps ${steps}: $(cat "${slog}")"; return 1; }
 }
 
 # What: apply backs up and installs; restart needs consent.
 # Why: dockerd restarts stop every running CI job.
 # From: Issue #1255 | PR #1349
 @test "docker-daemon-config: apply backs up and installs, restart refuses without consent" {
-    local f key=max-concurrent-downloads val
+    local f key=max-concurrent-downloads val driver bsuf ssuf
+    driver="$(yq -r '.ci_variables.CI_DAEMON_LOG_DRIVER' "${CI_MANIFEST_SOURCE}")"
+    bsuf="$(yq -r '.ci_variables.CI_DAEMON_BACKUP_SUFFIX' "${CI_MANIFEST_SOURCE}")"
+    ssuf="$(yq -r '.ci_variables.CI_DAEMON_STAGED_SUFFIX' "${CI_MANIFEST_SOURCE}")"
+    [[ -n "${driver}${bsuf}${ssuf}" && "${driver}${bsuf}${ssuf}" != *null* ]] || { echo "no SOT daemon values"; return 1; }
     f="$(_val path)" val="$(_val int 1 99)"
     jq -n --arg k "${key}" --argjson v "${val}" '{($k): $v}' > "${f}"
     run ci_cmd_docker_daemon_config apply "${f}"
     [ "${status}" -eq 0 ] || { echo "apply rc ${status}: ${output}"; return 1; }
     [ "$(jq -r --arg k "${key}" '.[$k]' "${f}")" = "${val}" ] || { echo "host key lost"; return 1; }
-    [ "$(jq -r '."log-driver"' "${f}")" = json-file ] || { echo "no additions in ${f}"; return 1; }
-    [ "$(jq -r --arg k "${key}" '.[$k]' "${f}".bak.*)" = "${val}" ] || { echo "no backup of the old file"; return 1; }
+    [ "$(jq -r '."log-driver"' "${f}")" = "${driver}" ] || { echo "no additions in ${f}"; return 1; }
+    [ "$(jq -r --arg k "${key}" '.[$k]' "${f}${bsuf}"*)" = "${val}" ] || { echo "no backup of the old file"; return 1; }
     run ci_cmd_docker_daemon_config stage "${f}"
-    [ "${status}" -eq 0 ] && [ -s "${f}.staged" ] || { echo "stage rc ${status}: ${output}"; return 1; }
+    [ "${status}" -eq 0 ] && [ -s "${f}${ssuf}" ] || { echo "stage rc ${status}: ${output}"; return 1; }
+    ssuf=".$(_val name)" bsuf=".$(_val name)."
+    CI_DAEMON_STAGED_SUFFIX="${ssuf}" run ci_cmd_docker_daemon_config stage "${f}"
+    [ "${status}" -eq 0 ] && [ -s "${f}${ssuf}" ] || { echo "stage override rc ${status}: ${output}"; return 1; }
+    CI_DAEMON_BACKUP_SUFFIX="${bsuf}" run ci_cmd_docker_daemon_config apply "${f}"
+    [ "${status}" -eq 0 ] && compgen -G "${f}${bsuf}*" >/dev/null || { echo "backup override rc ${status}: ${output}"; return 1; }
     CONFIRM_DOCKERD_RESTART="" run ci_cmd_docker_daemon_config restart "${f}"
     _expect restart-guard 1 "[CI-ERROR-DAEMON-0004]" || return 1
     run ci_cmd_docker_daemon_config "$(_val name)" "${f}"
@@ -6246,18 +6260,133 @@ _rh_runner_dir() {
 # Why: autoremove may hit PVE dependencies only.
 # From: Issue #1622 | PR #1624
 @test "runner-host: the purge guard refuses an autoremove outside the PVE set or on a boot package" {
-    local keep
+    local keep aenv pgenv
     _rh_fixture
     keep="$(_ci_rh_pve_keep_ere)"
     [[ "${keep}" == *proxmox-kernel* && "${keep}" == *pve-firmware* ]] || { echo "keep: ${keep}"; return 1; }
-    env() { shift; "$@"; }
+    aenv="$(yq -r '.runner_host.apt_env' "${CI_MANIFEST_SOURCE}")" && [ -n "${aenv}" ] && [ "${aenv}" != null ] || { echo "no SOT apt_env"; return 1; }
+    env() { printf 'env %s\n' "$1"; shift; "$@"; }
     apt-get() { case "$*" in *--simulate*) printf 'Remv %s [1]\n' "${RH_REMV}" ;; *) printf 'apt-get %s\n' "$*" ;; esac; }
     RH_REMV="libpve-$(_val name)" run _ci_rh_pve_purge_run "${keep}" pve-manager
-    _expect pve-only 0 "apt-get autoremove -y" || return 1
+    _expect pve-only 0 "env ${aenv}"$'\n'"apt-get autoremove -y" || return 1
+    pgenv="$(_val var)=$(_val name)"
+    eval "_rh_pg_val () $(declare -f _ci_rh_val | tail -n +2)"
+    _ci_rh_val() { if [ "$1" = apt_env ]; then printf '%s' "${pgenv}"; else _rh_pg_val "$1"; fi; }
+    RH_REMV="libpve-$(_val name)" run _ci_rh_pve_purge_run "${keep}" pve-manager
+    _expect pve-env 0 "env ${pgenv}"$'\n'"apt-get autoremove -y" || return 1
     RH_REMV="$(_val name)" run _ci_rh_pve_purge_run "${keep}" pve-manager
     _expect other-package 2 "[CI-ERROR-RUNNER-0061]" || return 1
     RH_REMV="proxmox-kernel-$(_val name)" run _ci_rh_pve_purge_run "${keep}" pve-manager
     _expect boot-package 2 "[CI-ERROR-RUNNER-0061]" || return 1
+}
+
+# What: cleanup measures the SOT disk path before/after.
+# Why: AG-CI-006: the measured path has one owner.
+# From: Issue #1683 | PR #1912
+@test "runner-host: cleanup measures the SOT disk path or its override" {
+    local sot cdlog cdisk
+    _rh_fixture
+    sot="$(yq -r '.runner_host.disk_path' "${CI_MANIFEST_SOURCE}")" && [ -n "${sot}" ] && [ "${sot}" != null ] || { echo "no SOT disk_path"; return 1; }
+    cdlog="$(_val path)" cdisk=""
+    df() { printf '%s\n' "$*" >> "${cdlog}"; printf 'h\nd 1 1 1\n'; }
+    _ci_rh_reap_containers() { return 0; }
+    _ci_rh_reap_networks() { return 0; }
+    _ci_rh_reap_trivy() { return 0; }
+    _ci_rh_prune_volumes() { return 0; }
+    _ci_validate_project() { printf 'p'; }
+    docker() { return 0; }
+    eval "_rh_cd_val () $(declare -f _ci_rh_val | tail -n +2)"
+    _ci_rh_val() { if [ "$1" = disk_path ] && [ -n "${cdisk}" ]; then printf '%s' "${cdisk}"; else _rh_cd_val "$1"; fi; }
+    run _ci_rh_cleanup_run
+    _expect sot 0 "on ${sot}" || return 1
+    [ "$(sort -u "${cdlog}")" = "-P ${sot}" ] && [ "$(wc -l < "${cdlog}")" -eq 2 ] || { echo "df: $(cat "${cdlog}")"; return 1; }
+    cdisk="$(_val path)"
+    : > "${cdlog}"
+    run _ci_rh_cleanup_run
+    _expect override 0 "on ${cdisk}" || return 1
+    [ "$(sort -u "${cdlog}")" = "-P ${cdisk}" ] || { echo "df override: $(cat "${cdlog}")"; return 1; }
+}
+
+# What: sccache-fetch installs via a SOT staged name.
+# Why: mode from the SOT; a half copy never goes live.
+# From: Issue #1622 | PR #1912
+@test "runner-host: sccache-fetch installs through the SOT staged name with the SOT mode" {
+    local sot scsrc scbin scmode sclog scf sctmpl
+    _rh_fixture
+    sctmpl="$(yq -r '.runner_host.sccache_staged_name' "${CI_MANIFEST_SOURCE}")" && [[ "${sctmpl}" == *@FILE@* ]] || { echo "no SOT sccache_staged_name"; return 1; }
+    sot="$(yq -r '.runner_host.sccache_bin_mode' "${CI_MANIFEST_SOURCE}")" && [ -n "${sot}" ] && [ "${sot}" != null ] || { echo "no SOT sccache_bin_mode"; return 1; }
+    scsrc="$(_val path)" scbin="$(_val path)" sclog="$(_val path)" scmode=""
+    mkdir -p "${scsrc}" "${scbin}"
+    for scf in $(yq -r '.runner_host.sccache_bins[]' "${CI_MANIFEST_SOURCE}"); do
+        printf '#!/bin/sh\nexit 0\n' > "${scsrc}/${scf}" && chmod +x "${scsrc}/${scf}" || return 1
+    done
+    sudo() { shift 2; "$@"; }
+    chown() { return 0; }
+    install() { printf '%s\n' "$*" >> "${sclog}"; cp "${@: -2:1}" "${@: -1}" && chmod "${@: -3:1}" "${@: -1}"; }
+    eval "_rh_sc_val () $(declare -f _ci_rh_val | tail -n +2)"
+    _ci_rh_val() {
+        case "$1" in
+            sccache_bin_dir) printf '%s' "${scbin}" ;;
+            sccache_dist_dir) printf '%s/dist' "${RH_ROOT}" ;;
+            sccache_bin_mode) if [ -n "${scmode}" ]; then printf '%s' "${scmode}"; else _rh_sc_val "$1"; fi ;;
+            *) _rh_sc_val "$1" ;;
+        esac
+    }
+    run _ci_rh_sccache_fetch "${scsrc}"
+    [ "${status}" -eq 0 ] || { echo "rc ${status}: ${output}"; return 1; }
+    for scf in $(yq -r '.runner_host.sccache_bins[]' "${CI_MANIFEST_SOURCE}"); do
+        [ -x "${scbin}/${scf}" ] || { echo "${scf} not in place"; return 1; }
+        grep -qF -- "-m ${sot} ${scsrc}/${scf} ${scbin}/${sctmpl//@FILE@/${scf}}" "${sclog}" || { echo "install: $(cat "${sclog}")"; return 1; }
+    done
+    [ "$(ls -A "${scbin}" | wc -l)" -eq "$(yq -r '.runner_host.sccache_bins | length' "${CI_MANIFEST_SOURCE}")" ] || { echo "temp left: $(ls -a "${scbin}")"; return 1; }
+    scmode="0$(_val int 1 7)$(_val int 1 7)$(_val int 1 7)"
+    run _ci_rh_sccache_fetch "${scsrc}"
+    [ "${status}" -eq 0 ] && grep -q -- "-m ${scmode} " "${sclog}" || { echo "override: $(cat "${sclog}")"; return 1; }
+    install() { cp "${@: -2:1}" "${@: -1}"; return 1; }
+    run _ci_rh_sccache_fetch "${scsrc}"
+    _expect install-fails 2 "[CI-ERROR-RUNNER-0103]" || return 1
+    [ "$(ls -A "${scbin}" | wc -l)" -eq "$(yq -r '.runner_host.sccache_bins | length' "${CI_MANIFEST_SOURCE}")" ] || { echo "temp left after a failed install: $(ls -a "${scbin}")"; return 1; }
+}
+
+# What: a failed apt step stops backports and listchanges.
+# Why: a pipe into tail hid apt failures (AG-INT-002).
+# From: Issue #1622 | PR #1912
+@test "runner-host: backports and listchanges stop at the first failed apt step" {
+    local apenv aplog apfail aprel apover=""
+    _rh_fixture
+    apenv="$(yq -r '.runner_host.apt_env' "${CI_MANIFEST_SOURCE}")" && [ -n "${apenv}" ] && [ "${apenv}" != null ] || { echo "no SOT apt_env"; return 1; }
+    aplog="$(_val path)" aprel="$(_val path)" apfail=""
+    printf 'VERSION_CODENAME=%s\n' "$(_ci_rh_val debian_suite)" > "${aprel}" || return 1
+    eval "_rh_ap_val () $(declare -f _ci_rh_val | tail -n +2)"
+    _ci_rh_val() {
+        case "$1" in
+            os_release_file) printf '%s' "${aprel}" ;;
+            backports_list|backports_pref) printf '%s/%s' "${RH_ROOT}" "$1" ;;
+            apt_env) if [ -n "${apover}" ]; then printf '%s' "${apover}"; else _rh_ap_val "$1"; fi ;;
+            *) _rh_ap_val "$1" ;;
+        esac
+    }
+    env() { printf 'env %s\n' "$1" >> "${aplog}"; shift; "$@"; }
+    apt-get() { printf 'apt-get %s\n' "$*" >> "${aplog}"; [ -z "${apfail}" ] || [[ "$*" != *"${apfail}"* ]] || { echo "${apfail} broke" >&2; return 100; }; }
+    dpkg() { printf 'ii  %s\n' "$2"; }
+    run _ci_rh_backports
+    [ "${status}" -eq 0 ] || { echo "rc ${status}: ${output}"; return 1; }
+    [ "$(cat "${aplog}")" = "$(printf 'apt-get update\nenv %s\napt-get dist-upgrade -y\nenv %s\napt-get full-upgrade -y' "${apenv}" "${apenv}")" ] \
+        || { echo "calls: $(cat "${aplog}")"; return 1; }
+    apover="$(_val var)=$(_val name)"
+    : > "${aplog}"
+    run _ci_rh_backports
+    [ "${status}" -eq 0 ] && [ "$(grep -c "^env ${apover}\$" "${aplog}")" -eq 2 ] || { echo "override: $(cat "${aplog}")"; return 1; }
+    for apfail in update dist-upgrade; do
+        : > "${aplog}"
+        run _ci_rh_backports
+        _expect "${apfail}" 2 "${apfail} broke" || return 1
+        ! grep -q 'full-upgrade' "${aplog}" || { echo "${apfail}: ran on: $(cat "${aplog}")"; return 1; }
+    done
+    apfail=purge
+    run _ci_rh_purge_listchanges
+    _expect listchanges 2 "[CI-ERROR-RUNNER-0078];purge broke" || return 1
+    [[ "${output}" != *Purged* ]] || { echo "listchanges: ${output}"; return 1; }
 }
 
 # What: guards stop before any host change.

@@ -926,6 +926,10 @@ ci_variables:
   # Why: AG-CI-006: a wait value has one owner.
   # From: Issue #1683 | PR #1912
   CI_DAEMON_RESTART_WAIT: 30
+  # What: seconds between dockerd probes after a restart.
+  # Why: AG-CI-006: a poll interval has one owner.
+  # From: Issue #1683 | PR #1912
+  CI_DAEMON_RESTART_POLL: 1
   # What: exactly true moves CI jobs to runner_self_hosted.
   # Why: GitHub-hosted is the default; a repo var switches.
   # From: Issue #1683 | PR #1912
@@ -997,13 +1001,19 @@ ci_variables:
   # Why: promote and the installer read one lock location.
   # From: Issue #1683 | PR #1858
   CI_PROMOTE_LOCK_REF: refs/ci/promote-lock
-  # What: runner daemon.json path, GC reserve, log caps.
+  # What: runner daemon.json path, GC reserve, log policy.
   # Why: AG-CI-016: one owner for the runner Docker limits.
   # From: Issue #1255 | PR #1349
   CI_DAEMON_JSON: /etc/docker/daemon.json
   CI_BUILDER_GC_RESERVED_SPACE: 20GB
   CI_DAEMON_LOG_MAX_SIZE: 10m
   CI_DAEMON_LOG_MAX_FILE: 3
+  CI_DAEMON_LOG_DRIVER: json-file
+  # What: daemon-config stage and backup file suffixes.
+  # Why: AG-CI-006: file names have one owner.
+  # From: Issue #1683 | PR #1912
+  CI_DAEMON_STAGED_SUFFIX: .staged
+  CI_DAEMON_BACKUP_SUFFIX: .bak.
   # What: build lock ref prefix, tries, backoff, stale secs.
   # Why: one build per identity (§20); stale > job timeout.
   # From: Issue #1683 | PR #1912
@@ -1040,6 +1050,10 @@ runner_host:
   # From: Issue #1255 | PR #1349
   cleanup_log: /var/log/lancache-ci-cleanup.log
   cleanup_log_max_bytes: 5242880
+  # What: filesystem the cleanup measures before and after.
+  # Why: AG-CI-006: the measured path has one owner.
+  # From: Issue #1683 | PR #1912
+  disk_path: /
   reap_build_tools_hours: 2
   reap_validation_hours: 2
   reap_buildx_hours: 3
@@ -1165,6 +1179,14 @@ runner_host:
   # Why: ci.sh joins it with each name; no path copy.
   # From: Issue #1683 | PR #1912
   sccache_bin_dir: /usr/local/bin
+  # What: file mode of the installed sccache binaries.
+  # Why: AG-CI-006: no mode literal in ci.sh.
+  # From: Issue #1683 | PR #1912
+  sccache_bin_mode: "0755"
+  # What: staged name beside the live binary; @FILE@ = name.
+  # Why: mv in one dir is atomic; no name literal in ci.sh.
+  # From: Issue #1683 | PR #1912
+  sccache_staged_name: ".@FILE@.new"
   sccache_dist_dir: "@{runner_host.opt_root}/sccache/dist-client"
   # What: unit file texts of the cleanup run, one line each.
   # Why: AG-CI-006: unit text is data; ci.sh fills keys.
@@ -1246,6 +1268,10 @@ runner_host:
   backports_repo: "deb http://deb.debian.org/debian @SUITE@-backports main"
   backports_pin: ["Package: *", "Pin: release a=stable-backports", "Pin-Priority: 500"]
   apt_listchanges_pkg: apt-listchanges
+  # What: env every unattended apt-get call runs with.
+  # Why: no prompt may block a host run (AG-CI-006).
+  # From: Issue #1683 | PR #1912
+  apt_env: DEBIAN_FRONTEND=noninteractive
   heavy_host_pattern: heavy
   # What: runner tarball and its release and digest URLs.
   # Why: AG-CI-006: download coordinates have one owner.
