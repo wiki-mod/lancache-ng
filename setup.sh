@@ -6383,8 +6383,8 @@ EOF
         assert_resolved_image_tag_platform_supported "$lancache_image_registry" "$lancache_image_prefix" "$lancache_image_tag"
     fi
 
-    # What: KEEP_KNOWN_GOOD_CONFIGS: env, .env, else 3
-    # Why: a local per-node setting; the primary has no say
+    # What: KEEP_KNOWN_GOOD_CONFIGS: env, .env, else empty
+    # Why: per node; empty means the SOT runtime default
     # From: Issue #615 | PR #625
     keep_known_good_configs="${KEEP_KNOWN_GOOD_CONFIGS:-}"
     if [[ -z "$keep_known_good_configs" && -n "$existing_env_file" ]]; then
