@@ -4697,6 +4697,15 @@ CASES
     [ "${status}" -eq 1 ] && [[ "${output}" == *"Failed to download deploy/secondary/docker-compose.yml"* ]] \
         && [[ "$(tail -n 1 "${DS}/curl.argv")" == *"/HEAD/deploy/secondary/docker-compose.yml" ]] && [ ! -e "${t}/rawfail/${NAME}" ] \
         || { echo "download failure: ${output}"; return 1; }
+    # What: a failing SOT download stops before any compose.
+    # Why: no default may come from anywhere but the SOT.
+    # From: Issue #1683 | PR #1912
+    printf '%s' .github/yaml/build-manifest.yml > "${DS}/fail-raw"
+    rm -f "${DS}/curl.argv"
+    _sec "${t}/sotfail" --primary "${PRIMARY}" --token "${TOKEN}" --name "${NAME}" --ip-http "${HTTP_IP}" --listen-ip "${LIP}"
+    [ "${status}" -eq 1 ] && [[ "${output}" == *"Failed to download .github/yaml/build-manifest.yml"* ]] \
+        && [ "$(wc -l < "${DS}/curl.argv")" -eq 1 ] && grep -q '/HEAD/\.github/yaml/build-manifest\.yml$' "${DS}/curl.argv" \
+        && [ ! -e "${t}/sotfail/${NAME}" ] || { echo "SOT download failure: ${output}"; cat "${DS}/curl.argv"; return 1; }
     unset SEC_SCRIPT_DIR
 }
 
