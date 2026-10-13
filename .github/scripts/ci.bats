@@ -1040,7 +1040,7 @@ _pm_run() {
     fields="$(awk '/^struct RegisterResponse/,/^}/' "${rs}" | sed -n 's/^ *\([a-z_]*\): String,$/\1/p')"
     reg="$(resolve_lancache_image_registry "$(_template_env)")"
     pre="$(resolve_lancache_image_prefix "$(_template_env)")"
-    tag="v$(cat "${root}/VERSION")"
+    tag="v$(lancache_sot_value version release)"
     token="$(generate_secret_value SECONDARY_REGISTRATION_TOKEN hex32)"
     token="${token}\"${token}\\"
     required="$(declare -f cmd_secondary | sed -n 's/.*missing_fields+=("\([a-z_]*\)").*/\1/p')"
