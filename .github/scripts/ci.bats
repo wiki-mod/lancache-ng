@@ -1273,8 +1273,8 @@ CASES
     custom="$(_val var)_TOKEN"
     run generate_secret_value "${custom}" hex32
     _expect unlisted 1 "Secret ${custom} is not in managed_secret_env_keys" || return 1
-    sec="$(_ci_required_field runtime secrets_hex32 block) $(_ci_required_field runtime secrets_base64_32 block) $(_ci_required_field runtime secrets_secondary_hex32 block)" || return 1
-    sec="$(tr -s '[:space:]' '\n' <<< "${sec}")"
+    sec="$(_ci_required_field runtime managed_secrets blocklist)" || return 1
+    sec="$(awk '{ print $1 }' <<< "${sec}")"
     plain="$(awk -F= '/^[A-Z_][A-Z0-9_]*=/ { print $1 }' "$(_template_env)" | grep -vxF -f <(printf '%s\n' "${list}" "${sec}"))"
     while IFS= read -r k; do
         ! logbundle_key_looks_like_secret "${k}" || [ -z "$(get_env_var "${k}" "$(_template_env)")" ] \

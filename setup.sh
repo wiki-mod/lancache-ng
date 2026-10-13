@@ -3470,12 +3470,10 @@ migrate_env_for_update() (
 
     # What: generates empty or placeholder SOT secrets
     # Why: real operator values are preserved
-    for secret_kind in hex32 base64_32; do
-        secret_keys=$(lancache_sot_value "secrets_${secret_kind}" runtime) || exit $?
-        for secret_key in $secret_keys; do
-            ensure_secret_env_key "$secret_key" "$env_file" "$secret_kind"
-        done
-    done
+    secret_rows=$(managed_secret_rows stack) || exit $?
+    while read -r secret_key secret_kind; do
+        ensure_secret_env_key "$secret_key" "$env_file" "$secret_kind"
+    done <<< "$secret_rows"
 
     # What: strips retired project profiles from the env
     # Why: an old install still lists dhcp-kea, ntp, logging
@@ -3492,7 +3490,7 @@ migrate_env_for_update() (
     ui_password=$(get_env_var UI_AUTH_PASSWORD "$env_file") || exit $?
     ui_password_hash=$(get_env_var UI_AUTH_PASSWORD_HASH "$env_file") || exit $?
     if [[ -n "$ui_user" && -z "$ui_password_hash" ]] && ! env_key_has_usable_secret UI_AUTH_PASSWORD "$env_file"; then
-        ui_generated_password=$(generate_secret_value UI_AUTH_PASSWORD alnum20) || exit $?
+        ui_generated_password=$(generate_managed_secret UI_AUTH_PASSWORD ui) || exit $?
         set_env_key UI_AUTH_PASSWORD "$ui_generated_password" "$env_file"
         print_ok "Generated missing Admin UI password because UI_AUTH_USER is set"
         print_ok "Admin UI user $ui_user, password: ${BOLD}${ui_generated_password}${RESET}"
@@ -5177,13 +5175,29 @@ cmd_debug() {
 # Why: one list; generation refuses a key not on it
 # From: Issue #762 | PR #1858
 managed_secret_env_keys() {
-    local kind keys
-    local -a list
-    for kind in hex32 base64_32 secondary_hex32 ui; do
-        keys=$(lancache_sot_value "secrets_${kind}" runtime) || exit $?
-        read -ra list <<< "$keys"
-        printf '%s\n' "${list[@]}"
-    done
+    local rows
+    rows=$(lancache_sot_list managed_secrets runtime) || exit $?
+    awk '{ print $1 }' <<< "$rows"
+}
+
+# What: "KEY generator" rows of one owner, or a key's kind
+# Why: SOT runtime.managed_secrets; no kind list in code
+# From: Issue #1683 | PR #1912
+managed_secret_rows() {
+    local owner="$1" key="${2:-}" rows
+    rows=$(lancache_sot_list managed_secrets runtime) || exit $?
+    awk -v o="$owner" -v k="$key" '$3 == o && (k == "" || $1 == k) { print $1, $2 }' <<< "$rows"
+}
+
+# What: one managed secret, made by its SOT generator
+# Why: no generator name beside runtime.managed_secrets
+# From: Issue #1683 | PR #1912
+generate_managed_secret() {
+    local key="$1" owner="$2" row
+    row=$(managed_secret_rows "$owner" "$key") || exit $?
+    [[ "$row" == "$key "?* && "$row" != *$'\n'* ]] \
+        || die "SOT runtime.managed_secrets needs one $owner row for $key."
+    generate_secret_value "$key" "${row#"$key "}"
 }
 
 # What: name-pattern net for secret-shaped env keys
@@ -7146,7 +7160,7 @@ if confirm "Protect Admin-UI with password? [Y/n]" "Y"; then
         UI_AUTH_PASSWORD=""
         print_ok "Admin-UI password would be generated (skipped: introspection mode)"
     else
-        UI_AUTH_PASSWORD=$(generate_secret_value UI_AUTH_PASSWORD alnum20) || exit $?
+        UI_AUTH_PASSWORD=$(generate_managed_secret UI_AUTH_PASSWORD ui) || exit $?
         printf "\n"
         print_ok "Credentials:"
         printf "    User:     ${BOLD}%s${RESET}\n" "$UI_AUTH_USER"
@@ -7194,13 +7208,11 @@ assert_resolved_image_tag_platform_supported "$LANCACHE_IMAGE_REGISTRY" "$LANCAC
 # What: every SOT secret: the kept value or a generated one
 # Why: the SOT lists the keys; setup.sh names none itself
 # From: Issue #1683 | PR #1912
-for secret_kind in hex32 base64_32; do
-    secret_keys=$(lancache_sot_value "secrets_${secret_kind}" runtime) || exit $?
-    for secret_key in $secret_keys; do
-        secret_value=$(get_or_generate_secret "$secret_key" "$env_file" "$secret_kind") || exit $?
-        printf -v "$secret_key" '%s' "$secret_value"
-    done
-done
+secret_rows=$(managed_secret_rows stack) || exit $?
+while read -r secret_key secret_kind; do
+    secret_value=$(get_or_generate_secret "$secret_key" "$env_file" "$secret_kind") || exit $?
+    printf -v "$secret_key" '%s' "$secret_value"
+done <<< "$secret_rows"
 # What: an empty TTL means the SOT default
 # Why: .env.local never repeats a runtime.defaults value
 # From: Issue #1683 | PR #1912

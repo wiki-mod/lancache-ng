@@ -14222,7 +14222,7 @@ _ci_validation_images() {
 # Why: config check and live validate share one owner.
 # From: Issue #1683 | PR #1858
 _ci_validation_env() {
-    local fx kind keys k v n=0 rows
+    local fx kind owner secrets k v n=0 rows
     local -a pairs=()
     fx="$(_ci_block_entry_list validation "" compose_validation_env)" || return 2
     if [ -z "${fx}" ]; then
@@ -14246,13 +14246,12 @@ _ci_validation_env() {
     # What: a fresh value per secret key, setup.sh format.
     # Why: a fixed key in the SOT is a hardcoded credential.
     # From: Issue #1683 | PR #1858
-    for kind in hex32 base64_32 secondary_hex32; do
-        keys="$(_ci_required_field runtime "secrets_${kind}" block)" || return 2
-        for k in ${keys}; do
-            pairs+=("${k}" "${kind#secondary_}")
-            n=$((n + 1))
-        done
-    done
+    secrets="$(_ci_required_field runtime managed_secrets blocklist)" || return 2
+    while read -r k kind owner; do
+        case "${owner}" in stack|secondary) ;; *) continue ;; esac
+        pairs+=("${k}" "${kind}")
+        n=$((n + 1))
+    done <<< "${secrets}"
     # What: one setup.sh load makes every secret.
     # Why: a load per key cost 10 loads per env.
     # From: Issue #1683 | PR #1912
@@ -14264,7 +14263,7 @@ _ci_validation_env() {
                 shift 2
             done' _ "${CI_REPO_ROOT}/setup.sh" "${pairs[@]}" || return 2
     if [ "${n}" -eq 0 ]; then
-        ci_log "[CI-ERROR-VALIDATE-0101]" "reason=\"no SOT runtime.secrets_* keys\""
+        ci_log "[CI-ERROR-VALIDATE-0101]" "reason=\"no SOT runtime.managed_secrets stack or secondary row\""
         return 2
     fi
 }
