@@ -3830,14 +3830,13 @@ record_image_revisions() {
 # Why: bash waits for both ends; no half-written archive
 # From: Issue #1683 | PR #1858
 write_compressed_tar() {
-    local ext="$1" archive="$2" parent="$3" entry="$4"
-    local -a compressor
-    case "$ext" in
-        zst) compressor=(zstd -q -c) ;;
-        bz2) compressor=(bzip2 -c) ;;
-        gz) compressor=(gzip -c) ;;
-        *) die "No compressor for .$ext archives." ;;
-    esac
+    local ext="$1" archive="$2" parent="$3" entry="$4" rows
+    local -a row compressor=()
+    rows=$(lancache_sot_list archive_compressors runtime) || exit $?
+    while read -r -a row; do
+        [[ "${row[0]}" != "$ext" ]] || compressor=("${row[@]:1}")
+    done <<< "$rows"
+    [[ ${#compressor[@]} -gt 0 ]] || die "No compressor for .$ext archives in runtime.archive_compressors."
     tar -C "$parent" -cf - "$entry" | "${compressor[@]}" > "$archive"
 }
 
@@ -5300,16 +5299,20 @@ logbundle_redact_env_file() {
     done < "$src"
 }
 
-# What: prints the best available compressor: zst, bz2 or gz
-# Why: gzip is always present, so the chain terminates
+# What: prints the ext of the first present compressor
+# Why: runtime.archive_compressors lists them best first
+# From: Issue #1683 | PR #1912
 logbundle_select_compressor() {
-    if command -v zstd >/dev/null 2>&1; then
-        printf 'zst\n'
-    elif command -v bzip2 >/dev/null 2>&1; then
-        printf 'bz2\n'
-    else
-        printf 'gz\n'
-    fi
+    local rows
+    local -a row
+    rows=$(lancache_sot_list archive_compressors runtime) || exit $?
+    while read -r -a row; do
+        if command -v "${row[1]}" >/dev/null 2>&1; then
+            printf '%s\n' "${row[0]}"
+            return 0
+        fi
+    done <<< "$rows"
+    die "No compressor of runtime.archive_compressors is installed."
 }
 
 # What: lists known-good snapshot volumes with ls only
