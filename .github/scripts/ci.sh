@@ -7954,15 +7954,18 @@ _ci_validate_ui_post() {
     rm -f "${body}"
 }
 
-# What: the LAN zone (dotted) the dns supervisor creates
-# Why: probes write where dns serves; config.rs owns it
+# What: the LAN zone (dotted) the dns side serves.
+# Why: DHCP_DOMAIN of the stack env, else its SOT default.
 # From: Issue #1683 | PR #1912
 _ci_validate_lan_zone() {
-    local src zone
-    src="$(ci_workspace_lib_dirs "${CI_REPO_ROOT:-.}")" || return 2
-    src="${CI_REPO_ROOT:-.}/${src}/config.rs"
-    if ! zone="$(_ci_file_value "${src}" 's/^pub const LAN_ZONE: &str = "([^"]+)";$/\1/p')"; then
-        ci_log "[CI-ERROR-VALIDATE-0106]" "path=\"${src}\" reason=\"need exactly one LAN_ZONE const\""
+    local env zone
+    env="$(_ci_validation_env)" || return 2
+    zone="$(_ci_capture 0 awk 'index($0, "DHCP_DOMAIN=") == 1 { print substr($0, 13); exit }' <<< "${env}")" || return 2
+    if [ -z "${zone}" ]; then
+        zone="$(_ci_runtime_default DHCP_DOMAIN)" || return 2
+    fi
+    if [ -z "${zone}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0106]" "reason=\"no DHCP_DOMAIN in the stack env or the SOT runtime.defaults\""
         return 2
     fi
     printf '%s.\n' "${zone%.}"

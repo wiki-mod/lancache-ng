@@ -1296,6 +1296,24 @@ ROWS
     _expect unwritable 2 "[CI-ERROR-VALIDATE-0093]" || return 1
 }
 
+# What: validate probes the zone the dns side serves.
+# Why: DHCP_DOMAIN owns it; no Rust const is read.
+# From: Issue #1683 | PR #1912
+@test "validate LAN zone: stack DHCP_DOMAIN, else its SOT default" {
+    local d z want
+    d="${BATS_TEST_TMPDIR}" z="$(_val name)"
+    want="$(yq -r '.runtime.defaults[] | select(test("^DHCP_DOMAIN=")) | sub("^DHCP_DOMAIN="; "")' "${CI_MANIFEST_SOURCE}")" \
+        && [ -n "${want}" ] || { echo "no SOT DHCP_DOMAIN: ${want}"; return 1; }
+    run --separate-stderr _ci_validate_lan_zone
+    _expect default 0 "=${want%.}." || return 1
+    Z="${z}" yq '.validation.compose_validation_env += ["DHCP_DOMAIN=" + strenv(Z)]' "${CI_MANIFEST_SOURCE}" > "${d}/stack.yml" || return 1
+    CI_MANIFEST="${d}/stack.yml" run --separate-stderr _ci_validate_lan_zone
+    _expect stack 0 "=${z}." || return 1
+    Z="${z}" yq '.runtime.defaults |= map(select(test("^DHCP_DOMAIN=") | not)) + ["DHCP_DOMAIN=" + strenv(Z) + "."]' "${CI_MANIFEST_SOURCE}" > "${d}/dotted.yml" || return 1
+    CI_MANIFEST="${d}/dotted.yml" run --separate-stderr _ci_validate_lan_zone
+    _expect dotted 0 "=${z}." || return 1
+}
+
 # What: proxy constant reads Rust const forms or fails
 # Why: AG-VAL-036: visibility and spacing are valid Rust
 # From: Issue #1683 | PR #1912
