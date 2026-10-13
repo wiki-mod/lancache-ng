@@ -3351,9 +3351,12 @@ migrate_env_for_update() (
     dhcp_enabled=$(get_env_var DHCP_ENABLED "$env_file") || exit $?
     dhcp_mode=$(get_env_var DHCP_MODE "$env_file") || exit $?
     dhcp_mode=${dhcp_mode:-${DHCP_MODE:-}}
+    # What: 1.x "1", profiles or DHCP_ENABLED give the mode
+    # Why: an empty or unknown value must still converge
+    # From: Issue #1683 | PR #1912
     if [[ "${dhcp_mode}" = "1" ]]; then
         dhcp_mode=kea
-    elif [[ -z "${dhcp_mode}" ]]; then
+    elif ! is_valid_dhcp_mode "$dhcp_mode"; then
         if [[ ",$compose_profiles," = *,dhcp-proxy,* ]]; then
             dhcp_mode="dnsmasq-proxy"
         elif [[ ",$compose_profiles," = *,dhcp-kea,* || "$dhcp_enabled" = "1" ]]; then
@@ -3363,17 +3366,6 @@ migrate_env_for_update() (
         fi
     fi
 
-    if ! is_valid_dhcp_mode "$dhcp_mode"; then
-        if [[ ",$compose_profiles," = *,dhcp-proxy,* ]]; then
-            dhcp_mode="dnsmasq-proxy"
-        elif [[ ",$compose_profiles," = *,dhcp-kea,* || "$dhcp_enabled" = "1" ]]; then
-            dhcp_mode="kea"
-        else
-            dhcp_mode="disabled"
-        fi
-    fi
-
-    append_env_key_if_missing DHCP_MODE "disabled" "$env_file"
     set_env_key DHCP_MODE "$dhcp_mode" "$env_file"
     # What: drops the 1.x Kea switch after it was read
     # Why: DHCP_MODE owns the choice; nothing reads the key
