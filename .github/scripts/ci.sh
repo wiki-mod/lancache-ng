@@ -1526,7 +1526,7 @@ _ci_rust_content() {
         while IFS= read -r line; do
             [[ "${line%%$'\t'*}" == *.rs ]] || continue
             blob="$(_ci_listing_blob "${line}" "${ref}")" || return 2
-            items="$(_ci_rust_items "${blob}" drop)" || return 2
+            items="$(_ci_rust_items "${blob}" keep)" || return 2
             refs="$(_ci_capture 0 cut -f4 <<< "${items}")" || return 2
             roots+=" ${refs//$'\n'/ }"
             [ "${mode}" != text ] || printf '%s\n' "${items}"

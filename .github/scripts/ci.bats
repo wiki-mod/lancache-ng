@@ -626,40 +626,6 @@ _checkout_copy() {
     _expect no-owner 2 '[CI-ERROR-CORE-0128] name="GITHUB_REPOSITORY"' || return 1
 }
 
-# What: runner label per var value; only exactly true moves.
-# Why: GitHub-hosted default; the repo var moves all jobs.
-# From: Issue #1683 | PR #1912
-@test "runner label: GitHub-hosted by default, the variable true selects self-hosted" {
-    local d gh sh plat row val want out
-    d="$(mktemp -d)" gh="$(_val name)" sh="$(_val name)"
-    plat="$(_ci_block_entry_list build_matrix "" platforms)" || { echo "platforms: ${plat}"; return 1; }
-    plat="${plat%%$'\n'*}"
-    GH="${gh}" SH="${sh}" A="${plat##*/}" yq '.platform_arch[strenv(A)].runner = strenv(GH) | .platform_arch[strenv(A)].runner_self_hosted = strenv(SH)' "${CI_MANIFEST_SOURCE}" > "${d}/sot.yml"
-    unset PROJECT_SELFHOSTED_RUNNER_USAGE_CI CI_VARIABLES
-    CI_MANIFEST="${d}/sot.yml" run _ci_runner_label "${plat}" "[CI-ERROR-JOBS-0002]"
-    _expect default 0 "=${gh}" || return 1
-    while IFS='|' read -r row val want; do
-        case "${want}" in sh) want="${sh}" ;; *) want="${gh}" ;; esac
-        PROJECT_SELFHOSTED_RUNNER_USAGE_CI="${val}" CI_MANIFEST="${d}/sot.yml" run _ci_runner_label "${plat}" "[CI-ERROR-JOBS-0002]"
-        _expect "${row}" 0 "=${want}" || return 1
-    done <<EOF
-true|true|sh
-false|false|gh
-upper|TRUE|gh
-yes|yes|gh
-other|$(_val name)|gh
-EOF
-    CI_VARIABLES="{\"PROJECT_SELFHOSTED_RUNNER_USAGE_CI\":\"true\"}" CI_MANIFEST="${d}/sot.yml" run _ci_runner_label "${plat}" "[CI-ERROR-JOBS-0002]"
-    _expect repo-var 0 "=${sh}" || return 1
-    : > "${d}/out"
-    GITHUB_OUTPUT="${d}/out" CI_MANIFEST="${d}/sot.yml" run ci_cmd_job_settings
-    _expect settings-default 0 "runner=${gh}" || return 1
-    PROJECT_SELFHOSTED_RUNNER_USAGE_CI=true GITHUB_OUTPUT="${d}/out" CI_MANIFEST="${d}/sot.yml" run ci_cmd_job_settings
-    _expect settings-self 0 "runner=${sh}" || return 1
-    out="$(grep -c "^runner=" "${d}/out")"
-    [ "${out}" -eq 2 ] || { echo "runner outputs: ${out}"; cat "${d}/out"; return 1; }
-}
-
 # =========================================================
 # SEMANTIC IMPACT
 # =========================================================
@@ -728,12 +694,6 @@ CASES
     _expect cli 2 "[CI-ERROR-CORE-0003] manifest=\"${nosot}\"" || return 1
     run _ci_block_keys "${blk}" all
     [ "${status}" -eq 0 ] && [ -n "${output}" ] || { echo "loaded real SOT no longer answers: rc ${status}: ${output}"; return 1; }
-}
-
-# What: apk-pin-install runs in an image stage without SOT.
-# Why: build-tools Dockerfile calls it; CORE-0003 broke it.
-# From: Issue #1683 | PR #1912
-@test "apk-pin-install unpacks a pinned apk with no SOT file present" {
     local d ver name sha
     d="$(mktemp -d)" ver="$(_val int 1 99)" name="$(_val name)"
     mkdir -p "${d}/pkg/usr/bin" "${d}/root"
@@ -788,12 +748,6 @@ ROWS
     case=same
     run _ci_impact_classify "${t}" linux/amd64 "" "${base}" base-sot "${head}"
     _expect no-head 0 "[CI-INFO-IMPACT-0009];UNKNOWN" || return 1
-}
-
-# What: comments drop; strings, raw strings, chars stay
-# Why: 11.1: a comment edit keeps the Rust build id
-# From: Issue #1683 | PR #1912
-@test "rust reader: comments drop, strings stay, test items drop for a build" {
     local a b s one two out
     a="$(_val name)" b="$(_val name)" s="$(_val name)r"
     one="// $(_val name)
@@ -820,12 +774,6 @@ mod tests { fn ${b}() {} }"
     run _ci_rust_norm "fn ${a}() { let x = \"${s};
 " drop
     _expect unterminated 1 - || return 1
-}
-
-# What: a service id holds only the lib items it reaches
-# Why: 64.4: a shared lib edit is not every service
-# From: Issue #1683 | PR #1912
-@test "rust content: a library or lock edit moves only the services that reach it" {
     local d x y l a b c t dx dy before_x before_y
     d="$(_val path)" x="$(_val name)" y="$(_val name)" l="$(_val name)"
     a="$(_val name)" b="$(_val name)" c="$(_val name)" t="$(_val name)" dx="$(_val name)" dy="$(_val name)"
@@ -1311,24 +1259,6 @@ ROWS
     _expect unwritable 2 "[CI-ERROR-VALIDATE-0093]" || return 1
 }
 
-# What: validate probes the zone the dns side serves.
-# Why: DHCP_DOMAIN owns it; no Rust const is read.
-# From: Issue #1683 | PR #1912
-@test "validate LAN zone: stack DHCP_DOMAIN, else its SOT default" {
-    local d z want
-    d="${BATS_TEST_TMPDIR}" z="$(_val name)"
-    want="$(yq -r '.runtime.defaults[] | select(test("^DHCP_DOMAIN=")) | sub("^DHCP_DOMAIN="; "")' "${CI_MANIFEST_SOURCE}")" \
-        && [ -n "${want}" ] || { echo "no SOT DHCP_DOMAIN: ${want}"; return 1; }
-    run --separate-stderr _ci_validate_lan_zone
-    _expect default 0 "=${want%.}." || return 1
-    Z="${z}" yq '.validation.compose_validation_env += ["DHCP_DOMAIN=" + strenv(Z)]' "${CI_MANIFEST_SOURCE}" > "${d}/stack.yml" || return 1
-    CI_MANIFEST="${d}/stack.yml" run --separate-stderr _ci_validate_lan_zone
-    _expect stack 0 "=${z}." || return 1
-    Z="${z}" yq '.runtime.defaults |= map(select(test("^DHCP_DOMAIN=") | not)) + ["DHCP_DOMAIN=" + strenv(Z) + "."]' "${CI_MANIFEST_SOURCE}" > "${d}/dotted.yml" || return 1
-    CI_MANIFEST="${d}/dotted.yml" run --separate-stderr _ci_validate_lan_zone
-    _expect dotted 0 "=${z}." || return 1
-}
-
 # What: proxy constant reads Rust const forms or fails
 # Why: AG-VAL-036: visibility and spacing are valid Rust
 # From: Issue #1683 | PR #1912
@@ -1792,6 +1722,18 @@ CASES
     IP=""
     run _ci_validate_dns x
     _expect no-ip 2 "[CI-ERROR-VALIDATE-0010]" || return 1
+    local d z want
+    d="${BATS_TEST_TMPDIR}" z="$(_val name)"
+    want="$(yq -r '.runtime.defaults[] | select(test("^DHCP_DOMAIN=")) | sub("^DHCP_DOMAIN="; "")' "${CI_MANIFEST_SOURCE}")" \
+        && [ -n "${want}" ] || { echo "no SOT DHCP_DOMAIN: ${want}"; return 1; }
+    run --separate-stderr _ci_validate_lan_zone
+    _expect default 0 "=${want%.}." || return 1
+    Z="${z}" yq '.validation.compose_validation_env += ["DHCP_DOMAIN=" + strenv(Z)]' "${CI_MANIFEST_SOURCE}" > "${d}/stack.yml" || return 1
+    CI_MANIFEST="${d}/stack.yml" run --separate-stderr _ci_validate_lan_zone
+    _expect stack 0 "=${z}." || return 1
+    Z="${z}" yq '.runtime.defaults |= map(select(test("^DHCP_DOMAIN=") | not)) + ["DHCP_DOMAIN=" + strenv(Z) + "."]' "${CI_MANIFEST_SOURCE}" > "${d}/dotted.yml" || return 1
+    CI_MANIFEST="${d}/dotted.yml" run --separate-stderr _ci_validate_lan_zone
+    _expect dotted 0 "=${z}." || return 1
 }
 
 # What: the resolve poll asks the given side's port
@@ -1876,6 +1818,27 @@ CASES
     _expect cycle 1 "refers to itself" || return 1
     rows="$(_ci_runtime_defaults)" || { echo "no expanded defaults: ${rows}"; return 1; }
     [[ "${rows}" != *"@"*"@"* ]] || { echo "unresolved @KEY@ left: $(grep -F '@' <<< "${rows}")"; return 1; }
+    local d k v nk hits sp s base mut
+    d="${BATS_TEST_TMPDIR}" k=UI_SECURITY_HEADERS v="$(_val name)" nk="NK$(_val int 100000 999999)"
+    # What: the fixture key is named under services/ui only.
+    # Why: proves the key choice by git grep, not ci.sh.
+    # From: Issue #1683 | PR #1912
+    hits="$(git -C "${CI_REPO_ROOT}" grep -l -w -e "${k}" -- services | sort -u)"
+    [ "${hits}" = services/ui/src/main.rs ] || { echo "${k} named in: ${hits}"; return 1; }
+    ! git -C "${CI_REPO_ROOT}" grep -q -w -e "${nk}" || { echo "${nk} is named in the repo"; return 1; }
+    K="${k}" V="${v}" NK="${nk}" yq '.runtime.defaults |= map(select(test("^" + strenv(K) + "=") | not)) + [strenv(K) + "=" + strenv(V), strenv(NK) + "=1"]' \
+        "${CI_MANIFEST_SOURCE}" > "${d}/sot.yml" || return 1
+    sp="$(_ci_build_matrix_platforms)" && sp="${sp%%$'\n'*}" && [ -n "${sp}" ] || { echo "no platform: ${sp}"; return 1; }
+    for s in $(ci_services); do
+        base="$(_ci_service_build_args "${s}" --bare "${sp}" no)" || { echo "${s}: base args failed"; return 1; }
+        mut="$(CI_MANIFEST="${d}/sot.yml" _ci_service_build_args "${s}" --bare "${sp}" no)" || { echo "${s}: mutated args failed"; return 1; }
+        [[ "${mut}" != *"${nk}="* ]] || { echo "${s}: unread ${nk} baked: ${mut}"; return 1; }
+        if [ "${s}" = ui ]; then
+            [[ "${mut}" == *"${k}=${v}"* ]] && [ "${base}" != "${mut}" ] || { echo "ui: ${k}=${v} missing: ${mut}"; return 1; }
+        else
+            [ "${base}" = "${mut}" ] || { echo "${s}: args moved with a ui-only row: $(diff <(echo "${base}") <(echo "${mut}"))"; return 1; }
+        fi
+    done
 }
 
 # What: @{block.key} in the SOT is that scalar
@@ -2005,6 +1968,34 @@ env-over-json|@VAR@=@ENVV@ CI_VARIABLES={"@VAR@":"@JSONV@"}|@VAR@|0|=@ENVV@
 bad-json|CI_VARIABLES=@BAD@|@VAR@|2|[CI-ERROR-VARIABLES-0015] name="@VAR@"
 no-value|-|@NOVAR@|2|[CI-ERROR-VARIABLES-0001] name="@NOVAR@"
 CASES
+    local d gh sh plat row val want out
+    d="$(mktemp -d)" gh="$(_val name)" sh="$(_val name)"
+    plat="$(_ci_block_entry_list build_matrix "" platforms)" || { echo "platforms: ${plat}"; return 1; }
+    plat="${plat%%$'\n'*}"
+    GH="${gh}" SH="${sh}" A="${plat##*/}" yq '.platform_arch[strenv(A)].runner = strenv(GH) | .platform_arch[strenv(A)].runner_self_hosted = strenv(SH)' "${CI_MANIFEST_SOURCE}" > "${d}/sot.yml"
+    unset PROJECT_SELFHOSTED_RUNNER_USAGE_CI CI_VARIABLES
+    CI_MANIFEST="${d}/sot.yml" run _ci_runner_label "${plat}" "[CI-ERROR-JOBS-0002]"
+    _expect default 0 "=${gh}" || return 1
+    while IFS='|' read -r row val want; do
+        case "${want}" in sh) want="${sh}" ;; *) want="${gh}" ;; esac
+        PROJECT_SELFHOSTED_RUNNER_USAGE_CI="${val}" CI_MANIFEST="${d}/sot.yml" run _ci_runner_label "${plat}" "[CI-ERROR-JOBS-0002]"
+        _expect "${row}" 0 "=${want}" || return 1
+    done <<EOF
+true|true|sh
+false|false|gh
+upper|TRUE|gh
+yes|yes|gh
+other|$(_val name)|gh
+EOF
+    CI_VARIABLES="{\"PROJECT_SELFHOSTED_RUNNER_USAGE_CI\":\"true\"}" CI_MANIFEST="${d}/sot.yml" run _ci_runner_label "${plat}" "[CI-ERROR-JOBS-0002]"
+    _expect repo-var 0 "=${sh}" || return 1
+    : > "${d}/out"
+    GITHUB_OUTPUT="${d}/out" CI_MANIFEST="${d}/sot.yml" run ci_cmd_job_settings
+    _expect settings-default 0 "runner=${gh}" || return 1
+    PROJECT_SELFHOSTED_RUNNER_USAGE_CI=true GITHUB_OUTPUT="${d}/out" CI_MANIFEST="${d}/sot.yml" run ci_cmd_job_settings
+    _expect settings-self 0 "runner=${sh}" || return 1
+    out="$(grep -c "^runner=" "${d}/out")"
+    [ "${out}" -eq 2 ] || { echo "runner outputs: ${out}"; cat "${d}/out"; return 1; }
 }
 
 # What: set-runtime secrets per config; clear removes them.
@@ -2175,33 +2166,6 @@ CASES
     [[ "${output}" != *BUILD_TOOLS_IMAGE=* ]] || { echo "no-toolchain: image arg emitted: ${output}"; return 1; }
     run _ci_service_build_args "${s}" --bare "${sp}" "$(_val name)"
     _expect bad-toolchain-flag 2 "[CI-ERROR-BUILDARGS-0020] service=\"${s}\"" || return 1
-}
-
-# What: a default row moves only images that read it.
-# Why: 64.4: one changed default rebuilds no other image.
-# From: Issue #1683 | PR #1912
-@test "runtime default rows per image: a row change moves only its readers" {
-    local d k v nk hits sp s base mut
-    d="${BATS_TEST_TMPDIR}" k=UI_SECURITY_HEADERS v="$(_val name)" nk="NK$(_val int 100000 999999)"
-    # What: the fixture key is named under services/ui only.
-    # Why: proves the key choice by git grep, not ci.sh.
-    # From: Issue #1683 | PR #1912
-    hits="$(git -C "${CI_REPO_ROOT}" grep -l -w -e "${k}" -- services | sort -u)"
-    [ "${hits}" = services/ui/src/main.rs ] || { echo "${k} named in: ${hits}"; return 1; }
-    ! git -C "${CI_REPO_ROOT}" grep -q -w -e "${nk}" || { echo "${nk} is named in the repo"; return 1; }
-    K="${k}" V="${v}" NK="${nk}" yq '.runtime.defaults |= map(select(test("^" + strenv(K) + "=") | not)) + [strenv(K) + "=" + strenv(V), strenv(NK) + "=1"]' \
-        "${CI_MANIFEST_SOURCE}" > "${d}/sot.yml" || return 1
-    sp="$(_ci_build_matrix_platforms)" && sp="${sp%%$'\n'*}" && [ -n "${sp}" ] || { echo "no platform: ${sp}"; return 1; }
-    for s in $(ci_services); do
-        base="$(_ci_service_build_args "${s}" --bare "${sp}" no)" || { echo "${s}: base args failed"; return 1; }
-        mut="$(CI_MANIFEST="${d}/sot.yml" _ci_service_build_args "${s}" --bare "${sp}" no)" || { echo "${s}: mutated args failed"; return 1; }
-        [[ "${mut}" != *"${nk}="* ]] || { echo "${s}: unread ${nk} baked: ${mut}"; return 1; }
-        if [ "${s}" = ui ]; then
-            [[ "${mut}" == *"${k}=${v}"* ]] && [ "${base}" != "${mut}" ] || { echo "ui: ${k}=${v} missing: ${mut}"; return 1; }
-        else
-            [ "${base}" = "${mut}" ] || { echo "${s}: args moved with a ui-only row: $(diff <(echo "${base}") <(echo "${mut}"))"; return 1; }
-        fi
-    done
 }
 
 # What: OCI labels from the SOT, the env and the checkout
@@ -5130,6 +5094,38 @@ CASES
 # From: Issue #1683 | PR #1912
 @test "plan and ship: unverified pairs verify without a build, a mismatch or UNKNOWN fails" {
     local mark plat w d calls
+    local o svc d2
+    (
+        o="$(_val path)" w="$(_val path)" svc="$(_val name)" d="$(_val digest)"
+        git init -q --bare "${o}" && git init -q "${w}" && git -C "${w}" remote add origin "${o}" || return 1
+        cd "${w}" || return 1
+        export GIT_CONFIG_GLOBAL=/dev/null
+        _ci_git_remote() { printf 'origin\n'; }
+        _ci_variable() { printf 'refs/ci/t/ver\n'; }
+        run _ci_verified_has "${svc}" p/x "${d}"
+        [ "${status}" -eq 1 ] || { echo "unmarked digest reported verified"; return 1; }
+        ci_cmd_verify() { return 2; }
+        run _ci_verify_and_mark "${svc}" "${d}" p/x
+        _expect failed-verify 2 - || return 1
+        run _ci_verified_has "${svc}" p/x "${d}"
+        [ "${status}" -eq 1 ] || { echo "a failed verify left a mark"; return 1; }
+        ci_cmd_verify() { printf 'verified\n'; }
+        run _ci_verify_and_mark "${svc}" "${d}" p/x
+        _expect passed-verify 0 - || return 1
+        run _ci_verified_has "${svc}" p/x "${d}"
+        [ "${status}" -eq 0 ] || { echo "a passed verify left no mark"; return 1; }
+        run _ci_verify_and_mark "${svc}" "${d}" p/x
+        _expect repeat 0 - || return 1
+        run _ci_verified_has "${svc}" p/x "$(_val digest)"
+        [ "${status}" -eq 1 ] || { echo "another digest reported verified"; return 1; }
+        d2="$(_val digest)"
+        run _ci_verify_and_mark "${svc}" "${d2}" p/x
+        _expect newer-digest 0 - || return 1
+        run _ci_verified_has "${svc}" p/x "${d2}"
+        [ "${status}" -eq 0 ] || { echo "newer digest not marked"; return 1; }
+        run _ci_verified_has "${svc}" p/x "${d}"
+        [ "${status}" -eq 1 ] || { echo "an older digest still reported verified"; return 1; }
+    ) || return 1
     mark="$(_val path)" plat="$(_val platform)" w="$(_val name)" d="$(_val digest)" calls="$(_val path)"
     export GITHUB_OUTPUT="${mark}"
     : > "${mark}"
@@ -5562,12 +5558,6 @@ ROWS
     [ -z "$(git ls-remote origin "${ref}")" ] || { echo "own release left the lock"; return 1; }
     run _ci_lock_release origin "${ref}" "holder-b"
     _expect absent-release 0 - || return 1
-}
-
-# What: ship runs under the build lock of its identity
-# Why: a waiter sees BUILD_IN_PROGRESS and never rebuilds
-# From: Issue #1683 | PR #1912
-@test "build lock: ship holds it, a fresh foreign one blocks, a cancel frees it" {
     local o w svc plat ref
     o="$(_val path)" w="$(_val path)" svc="$(_val name)" plat="p/$(_val name)"
     ref="refs/ci/t/bl/ident-${svc}-${plat//\//-}"
@@ -5602,42 +5592,6 @@ ROWS
     run _ci_ship_abort "${svc}" "${plat}"
     _expect ship-cancel 130 - || return 1
     [ -z "$(git ls-remote origin "${ref}")" ] || { echo "a cancel left the lock"; return 1; }
-}
-
-# What: only a verified digest gets the mark scan reads
-# Why: B20: a pushed image whose smoke test failed stays out
-# From: Issue #1683 | PR #1912
-@test "verified mark: set after a passed verify, never after a failed one" {
-    local o w svc d d2
-    o="$(_val path)" w="$(_val path)" svc="$(_val name)" d="$(_val digest)"
-    git init -q --bare "${o}" && git init -q "${w}" && git -C "${w}" remote add origin "${o}" || return 1
-    cd "${w}" || return 1
-    export GIT_CONFIG_GLOBAL=/dev/null
-    _ci_git_remote() { printf 'origin\n'; }
-    _ci_variable() { printf 'refs/ci/t/ver\n'; }
-    run _ci_verified_has "${svc}" p/x "${d}"
-    [ "${status}" -eq 1 ] || { echo "unmarked digest reported verified"; return 1; }
-    ci_cmd_verify() { return 2; }
-    run _ci_verify_and_mark "${svc}" "${d}" p/x
-    _expect failed-verify 2 - || return 1
-    run _ci_verified_has "${svc}" p/x "${d}"
-    [ "${status}" -eq 1 ] || { echo "a failed verify left a mark"; return 1; }
-    ci_cmd_verify() { printf 'verified\n'; }
-    run _ci_verify_and_mark "${svc}" "${d}" p/x
-    _expect passed-verify 0 - || return 1
-    run _ci_verified_has "${svc}" p/x "${d}"
-    [ "${status}" -eq 0 ] || { echo "a passed verify left no mark"; return 1; }
-    run _ci_verify_and_mark "${svc}" "${d}" p/x
-    _expect repeat 0 - || return 1
-    run _ci_verified_has "${svc}" p/x "$(_val digest)"
-    [ "${status}" -eq 1 ] || { echo "another digest reported verified"; return 1; }
-    d2="$(_val digest)"
-    run _ci_verify_and_mark "${svc}" "${d2}" p/x
-    _expect newer-digest 0 - || return 1
-    run _ci_verified_has "${svc}" p/x "${d2}"
-    [ "${status}" -eq 0 ] || { echo "newer digest not marked"; return 1; }
-    run _ci_verified_has "${svc}" p/x "${d}"
-    [ "${status}" -eq 1 ] || { echo "an older digest still reported verified"; return 1; }
 }
 
 # What: verify compares the registry digest to the expected
@@ -5940,22 +5894,6 @@ ROWS
     _expect bad-json 1 "[CI-ERROR-DAEMON-0001];${f};parse error" || return 1
 }
 
-# What: restart waits the SOT time, then shows raw text.
-# Why: V-N3: a dead dockerd must not end in a bare message.
-# From: Issue #1255 | PR #1912
-@test "docker-daemon-config: a dockerd that never answers fails with its raw text" {
-    local msg wait poll steps slog
-    msg="$(_val name)" poll="$(_val int 2 4)" steps="$(_val int 2 4)" slog="$(_val path)"
-    wait=$((poll * steps))
-    systemctl() { return 0; }
-    sleep() { printf '%s\n' "$1" >> "${slog}"; }
-    docker() { printf '%s\n' "${msg}" >&2; return 1; }
-    CONFIRM_DOCKERD_RESTART=yes CI_DAEMON_RESTART_WAIT="${wait}" CI_DAEMON_RESTART_POLL="${poll}" run _ci_daemon_restart "$(_val path)"
-    _expect never-answers 1 "[CI-ERROR-DAEMON-0005];wait=${wait};${msg}" || return 1
-    [ "$(sort -u "${slog}")" = "${poll}" ] && [ "$(wc -l < "${slog}")" -eq $((steps - 1)) ] \
-        || { echo "poll ${poll} steps ${steps}: $(cat "${slog}")"; return 1; }
-}
-
 # What: apply backs up and installs; restart needs consent.
 # Why: dockerd restarts stop every running CI job.
 # From: Issue #1255 | PR #1349
@@ -5994,6 +5932,16 @@ ROWS
     [[ "${output}" != *WARN-DAEMON-0006* ]] || { echo "driver warning: ${output}"; return 1; }
     run ci_cmd_docker_daemon_config "$(_val name)" "${f}"
     _expect unknown-mode 2 "[CI-ERROR-DAEMON-0007]" || return 1
+    local msg wait poll steps slog
+    msg="$(_val name)" poll="$(_val int 2 4)" steps="$(_val int 2 4)" slog="$(_val path)"
+    wait=$((poll * steps))
+    systemctl() { return 0; }
+    sleep() { printf '%s\n' "$1" >> "${slog}"; }
+    docker() { printf '%s\n' "${msg}" >&2; return 1; }
+    CONFIRM_DOCKERD_RESTART=yes CI_DAEMON_RESTART_WAIT="${wait}" CI_DAEMON_RESTART_POLL="${poll}" run _ci_daemon_restart "$(_val path)"
+    _expect never-answers 1 "[CI-ERROR-DAEMON-0005];wait=${wait};${msg}" || return 1
+    [ "$(sort -u "${slog}")" = "${poll}" ] && [ "$(wc -l < "${slog}")" -eq $((steps - 1)) ] \
+        || { echo "poll ${poll} steps ${steps}: $(cat "${slog}")"; return 1; }
 }
 
 # What: runner-host fixtures: SOT values on a temp tree.
@@ -6190,12 +6138,6 @@ _rh_runner_dir() {
     [[ "${post}" == *"MIN_AGE=${RH_AGE}"$'\n'* ]] || { echo "no grace age in the post hook"; return 1; }
     [[ "${post}" != *"@"* ]] || { echo "unfilled placeholder in the post hook"; return 1; }
     [[ "${pre}" == *'GITHUB_WORKSPACE'* ]] || return 1
-}
-
-# What: the post hook names a failed inspect and goes on.
-# Why: V-N2: no swallowed error; the raw text is in the log.
-# From: Issue #1622 | PR #1912
-@test "runner-host: the post hook keeps the raw text of a failed network inspect" {
     local bin net msg
     _rh_fixture
     bin="$(_val path)" net="$(_val name)" msg="$(_val name)"
@@ -6256,7 +6198,27 @@ _rh_runner_dir() {
 # Why: a timer run has no terminal; the log stays bounded.
 # From: Issue #1255 | PR #1349
 @test "runner-host: cleanup trims an oversized log and appends the run" {
-    local rhlog
+    local rhlog sot cdlog cdisk
+    _rh_fixture
+    sot="$(yq -r '.runner_host.disk_path' "${CI_MANIFEST_SOURCE}")" && [ -n "${sot}" ] && [ "${sot}" != null ] || { echo "no SOT disk_path"; return 1; }
+    cdlog="$(_val path)" cdisk=""
+    df() { printf '%s\n' "$*" >> "${cdlog}"; printf 'h\nd 1 1 1\n'; }
+    _ci_rh_reap_containers() { return 0; }
+    _ci_rh_reap_networks() { return 0; }
+    _ci_rh_reap_trivy() { return 0; }
+    _ci_rh_prune_volumes() { return 0; }
+    _ci_validate_project() { printf 'p'; }
+    docker() { return 0; }
+    eval "_rh_cd_val () $(declare -f _ci_rh_val | tail -n +2)"
+    _ci_rh_val() { if [ "$1" = disk_path ] && [ -n "${cdisk}" ]; then printf '%s' "${cdisk}"; else _rh_cd_val "$1"; fi; }
+    run _ci_rh_cleanup_run
+    _expect sot 0 "on ${sot}" || return 1
+    [ "$(sort -u "${cdlog}")" = "-P ${sot}" ] && [ "$(wc -l < "${cdlog}")" -eq 2 ] || { echo "df: $(cat "${cdlog}")"; return 1; }
+    cdisk="$(_val path)"
+    : > "${cdlog}"
+    run _ci_rh_cleanup_run
+    _expect override 0 "on ${cdisk}" || return 1
+    [ "$(sort -u "${cdlog}")" = "-P ${cdisk}" ] || { echo "df override: $(cat "${cdlog}")"; return 1; }
     _rh_fixture
     rhlog="$(_val path)"
     _ci_rh_val() { case "$1" in cleanup_log) printf '%s' "${rhlog}" ;; cleanup_log_max_bytes) printf '10' ;; *) return 1 ;; esac; }
@@ -6289,84 +6251,6 @@ _rh_runner_dir() {
     _expect other-package 2 "[CI-ERROR-RUNNER-0061]" || return 1
     RH_REMV="proxmox-kernel-$(_val name)" run _ci_rh_pve_purge_run "${keep}" pve-manager
     _expect boot-package 2 "[CI-ERROR-RUNNER-0061]" || return 1
-}
-
-# What: cleanup measures the SOT disk path before/after.
-# Why: AG-CI-006: the measured path has one owner.
-# From: Issue #1683 | PR #1912
-@test "runner-host: cleanup measures the SOT disk path or its override" {
-    local sot cdlog cdisk
-    _rh_fixture
-    sot="$(yq -r '.runner_host.disk_path' "${CI_MANIFEST_SOURCE}")" && [ -n "${sot}" ] && [ "${sot}" != null ] || { echo "no SOT disk_path"; return 1; }
-    cdlog="$(_val path)" cdisk=""
-    df() { printf '%s\n' "$*" >> "${cdlog}"; printf 'h\nd 1 1 1\n'; }
-    _ci_rh_reap_containers() { return 0; }
-    _ci_rh_reap_networks() { return 0; }
-    _ci_rh_reap_trivy() { return 0; }
-    _ci_rh_prune_volumes() { return 0; }
-    _ci_validate_project() { printf 'p'; }
-    docker() { return 0; }
-    eval "_rh_cd_val () $(declare -f _ci_rh_val | tail -n +2)"
-    _ci_rh_val() { if [ "$1" = disk_path ] && [ -n "${cdisk}" ]; then printf '%s' "${cdisk}"; else _rh_cd_val "$1"; fi; }
-    run _ci_rh_cleanup_run
-    _expect sot 0 "on ${sot}" || return 1
-    [ "$(sort -u "${cdlog}")" = "-P ${sot}" ] && [ "$(wc -l < "${cdlog}")" -eq 2 ] || { echo "df: $(cat "${cdlog}")"; return 1; }
-    cdisk="$(_val path)"
-    : > "${cdlog}"
-    run _ci_rh_cleanup_run
-    _expect override 0 "on ${cdisk}" || return 1
-    [ "$(sort -u "${cdlog}")" = "-P ${cdisk}" ] || { echo "df override: $(cat "${cdlog}")"; return 1; }
-}
-
-# What: sccache-fetch installs via a SOT staged name.
-# Why: mode from the SOT; a half copy never goes live.
-# From: Issue #1622 | PR #1912
-@test "runner-host: sccache-fetch installs through the SOT staged name with the SOT mode" {
-    local sot scsrc scbin scmode sclog scf sctmpl
-    _rh_fixture
-    sctmpl="$(yq -r '.runner_host.sccache_staged_name' "${CI_MANIFEST_SOURCE}")" && [[ "${sctmpl}" == *@FILE@* ]] || { echo "no SOT sccache_staged_name"; return 1; }
-    sot="$(yq -r '.runner_host.sccache_bin_mode' "${CI_MANIFEST_SOURCE}")" && [ -n "${sot}" ] && [ "${sot}" != null ] || { echo "no SOT sccache_bin_mode"; return 1; }
-    scsrc="$(_val path)" scbin="$(_val path)" sclog="$(_val path)" scmode=""
-    mkdir -p "${scsrc}" "${scbin}"
-    for scf in $(yq -r '.runner_host.sccache_bins[]' "${CI_MANIFEST_SOURCE}"); do
-        printf '#!/bin/sh\nexit 0\n' > "${scsrc}/${scf}" && chmod +x "${scsrc}/${scf}" || return 1
-    done
-    sudo() { shift 2; "$@"; }
-    chown() { return 0; }
-    install() { printf '%s\n' "$*" >> "${sclog}"; cp "${@: -2:1}" "${@: -1}" && chmod "${@: -3:1}" "${@: -1}"; }
-    eval "_rh_sc_val () $(declare -f _ci_rh_val | tail -n +2)"
-    _ci_rh_val() {
-        case "$1" in
-            sccache_bin_dir) printf '%s' "${scbin}" ;;
-            sccache_dist_dir) printf '%s/dist' "${RH_ROOT}" ;;
-            sccache_bin_mode) if [ -n "${scmode}" ]; then printf '%s' "${scmode}"; else _rh_sc_val "$1"; fi ;;
-            *) _rh_sc_val "$1" ;;
-        esac
-    }
-    run _ci_rh_sccache_fetch "${scsrc}"
-    [ "${status}" -eq 0 ] || { echo "rc ${status}: ${output}"; return 1; }
-    for scf in $(yq -r '.runner_host.sccache_bins[]' "${CI_MANIFEST_SOURCE}"); do
-        [ -x "${scbin}/${scf}" ] || { echo "${scf} not in place"; return 1; }
-        grep -qF -- "-m ${sot} ${scsrc}/${scf} ${scbin}/${sctmpl//@FILE@/${scf}}" "${sclog}" || { echo "install: $(cat "${sclog}")"; return 1; }
-    done
-    [ "$(ls -A "${scbin}" | wc -l)" -eq "$(yq -r '.runner_host.sccache_bins | length' "${CI_MANIFEST_SOURCE}")" ] || { echo "temp left: $(ls -a "${scbin}")"; return 1; }
-    scmode="0$(_val int 1 7)$(_val int 1 7)$(_val int 1 7)"
-    run _ci_rh_sccache_fetch "${scsrc}"
-    [ "${status}" -eq 0 ] && grep -q -- "-m ${scmode} " "${sclog}" || { echo "override: $(cat "${sclog}")"; return 1; }
-    [[ "${output}" == *"Verifying:"* ]] || { echo "no post-install check: ${output}"; return 1; }
-    install() { printf '#!/bin/sh\nexit 3\n' > "${@: -1}" && chmod 755 "${@: -1}"; }
-    run _ci_rh_sccache_fetch "${scsrc}"
-    _expect installed-broken 2 "[CI-ERROR-RUNNER-0123]" || return 1
-    install() { cp "${@: -2:1}" "${@: -1}"; return 1; }
-    run _ci_rh_sccache_fetch "${scsrc}"
-    _expect install-fails 2 "[CI-ERROR-RUNNER-0103]" || return 1
-    [ "$(ls -A "${scbin}" | wc -l)" -eq "$(yq -r '.runner_host.sccache_bins | length' "${CI_MANIFEST_SOURCE}")" ] || { echo "temp left after a failed install: $(ls -a "${scbin}")"; return 1; }
-}
-
-# What: a failed apt step stops backports and listchanges.
-# Why: a pipe into tail hid apt failures (AG-INT-002).
-# From: Issue #1622 | PR #1912
-@test "runner-host: backports and listchanges stop at the first failed apt step" {
     local apenv aplog apfail aprel apover=""
     _rh_fixture
     apenv="$(yq -r '.runner_host.apt_env' "${CI_MANIFEST_SOURCE}")" && [ -n "${apenv}" ] && [ "${apenv}" != null ] || { echo "no SOT apt_env"; return 1; }
@@ -6402,12 +6286,6 @@ _rh_runner_dir() {
     run _ci_rh_purge_listchanges
     _expect listchanges 2 "[CI-ERROR-RUNNER-0078];purge broke" || return 1
     [[ "${output}" != *Purged* ]] || { echo "listchanges: ${output}"; return 1; }
-}
-
-# What: purge-pve-check shows open files, cron and RSS.
-# Why: a live stack or a cron job must show before a purge.
-# From: Issue #1622 | PR #1912
-@test "runner-host: purge-pve-check reports open files, cron entries and stack RSS" {
     local pcdir pccron pcfst pcproc pcunit pcopen pcf
     _rh_fixture
     [ "$(yq -r '.runner_host.pve_config_dir' "${CI_MANIFEST_SOURCE}")" != null ] && [ "$(yq -r '.runner_host.pve_cron_dirs | length' "${CI_MANIFEST_SOURCE}")" -gt 0 ] || { echo "no SOT pve_config_dir or pve_cron_dirs"; return 1; }
@@ -6431,35 +6309,6 @@ _rh_runner_dir() {
     pcopen="" && : > "${pccron}/${pcf}"
     run _ci_rh_purge_pve_check
     [ "${status}" -eq 0 ] && [[ "${output}" != *FOUND* ]] || { echo "clean host: ${output}"; return 1; }
-}
-
-# What: sccache-check shows sha256 and stale file owner.
-# Why: an operator compares hosts by the binary hash.
-# From: Issue #1622 | PR #1912
-@test "runner-host: sccache-check shows sha256 per binary and the mode and owner of a stale file" {
-    local ckbin ckf ckstale ckuser
-    _rh_fixture
-    ckbin="$(_val path)" ckuser="$(yq -r '.runner_host.user' "${CI_MANIFEST_SOURCE}")"
-    ckstale="${RH_ROOT}/${ckuser}/$(yq -r '.runner_host.sccache_stale_files[0]' "${CI_MANIFEST_SOURCE}")"
-    mkdir -p "${ckbin}" "${RH_ROOT}/dist" "${ckstale%/*}" && : > "${ckstale}" && chmod 640 "${ckstale}" || return 1
-    for ckf in $(yq -r '.runner_host.sccache_bins[]' "${CI_MANIFEST_SOURCE}"); do
-        printf '#!/bin/sh\necho %s\n' "$(_val name)" > "${ckbin}/${ckf}" && chmod +x "${ckbin}/${ckf}" || return 1
-    done
-    eval "_rh_ck_val () $(declare -f _ci_rh_val | tail -n +2)"
-    _ci_rh_val() { case "$1" in sccache_bin_dir) printf '%s' "${ckbin}" ;; sccache_dist_dir) printf '%s/dist' "${RH_ROOT}" ;; *) _rh_ck_val "$1" ;; esac; }
-    sudo() { shift 2; "$@"; }
-    run _ci_rh_sccache_check
-    [ "${status}" -eq 0 ] || { echo "rc ${status}: ${output}"; return 1; }
-    for ckf in $(yq -r '.runner_host.sccache_bins[]' "${CI_MANIFEST_SOURCE}"); do
-        [[ "${output}" == *"${ckbin}/${ckf}: present (sha256 $(sha256sum "${ckbin}/${ckf}" | cut -d' ' -f1))"* ]] || { echo "${ckf}: ${output}"; return 1; }
-    done
-    [[ "${output}" == *"STALE: ${ckstale} still present ($(stat -c '%a %U:%G' "${ckstale}"))"* ]] || { echo "stale: ${output}"; return 1; }
-}
-
-# What: host-prep runs its steps, stops on a failed one.
-# Why: the last line names daemon.json and proxies.
-# From: Issue #1622 | PR #1912
-@test "runner-host: host-prep stops at a failed step and ends with the daemon.json and proxies hint" {
     local hpjson hpheavy hpname hpfail=""
     _rh_fixture
     hpjson="$(yq -r '.ci_variables.CI_DAEMON_JSON' "${CI_MANIFEST_SOURCE}")" hpheavy="$(yq -r '.runner_host.heavy_host_pattern' "${CI_MANIFEST_SOURCE}")"
@@ -6510,12 +6359,6 @@ _rh_runner_dir() {
     _expect not-empty 2 "[CI-ERROR-RUNNER-0086]" || return 1
     run ci_cmd_runner_host sccache-fetch "$(_val path)"
     _expect not-staged 2 "[CI-ERROR-RUNNER-0100]" || return 1
-}
-
-# What: runner-fetch reads the digest, then fetch-verifies.
-# Why: one retry and one sha256 owner (AG-CI-013/006).
-# From: Issue #1683 | PR #1912
-@test "runner-host: runner-fetch extracts only a tarball that matches the API digest" {
     local rfd ver rftar sum inst fn
     _rh_fixture
     rfd="$(_val path)" ver="$(_val int 1 9).$(_val int 1 99)" rftar="$(_val name)-@VERSION@.tgz"
@@ -6548,6 +6391,62 @@ _rh_runner_dir() {
     run ci_cmd_runner_host runner-fetch "${inst}" "${ver}"
     _expect no-api 2 "[CI-ERROR-BUILD-0011] op=download" || return 1
     [ ! -e "${inst}" ] || { echo "no-api: extracted: $(ls -A "${inst}")"; return 1; }
+    local ckbin ckf ckstale ckuser
+    _rh_fixture
+    ckbin="$(_val path)" ckuser="$(yq -r '.runner_host.user' "${CI_MANIFEST_SOURCE}")"
+    ckstale="${RH_ROOT}/${ckuser}/$(yq -r '.runner_host.sccache_stale_files[0]' "${CI_MANIFEST_SOURCE}")"
+    mkdir -p "${ckbin}" "${RH_ROOT}/dist" "${ckstale%/*}" && : > "${ckstale}" && chmod 640 "${ckstale}" || return 1
+    for ckf in $(yq -r '.runner_host.sccache_bins[]' "${CI_MANIFEST_SOURCE}"); do
+        printf '#!/bin/sh\necho %s\n' "$(_val name)" > "${ckbin}/${ckf}" && chmod +x "${ckbin}/${ckf}" || return 1
+    done
+    eval "_rh_ck_val () $(declare -f _ci_rh_val | tail -n +2)"
+    _ci_rh_val() { case "$1" in sccache_bin_dir) printf '%s' "${ckbin}" ;; sccache_dist_dir) printf '%s/dist' "${RH_ROOT}" ;; *) _rh_ck_val "$1" ;; esac; }
+    sudo() { shift 2; "$@"; }
+    run _ci_rh_sccache_check
+    [ "${status}" -eq 0 ] || { echo "rc ${status}: ${output}"; return 1; }
+    for ckf in $(yq -r '.runner_host.sccache_bins[]' "${CI_MANIFEST_SOURCE}"); do
+        [[ "${output}" == *"${ckbin}/${ckf}: present (sha256 $(sha256sum "${ckbin}/${ckf}" | cut -d' ' -f1))"* ]] || { echo "${ckf}: ${output}"; return 1; }
+    done
+    [[ "${output}" == *"STALE: ${ckstale} still present ($(stat -c '%a %U:%G' "${ckstale}"))"* ]] || { echo "stale: ${output}"; return 1; }
+    local sot scsrc scbin scmode sclog scf sctmpl
+    _rh_fixture
+    sctmpl="$(yq -r '.runner_host.sccache_staged_name' "${CI_MANIFEST_SOURCE}")" && [[ "${sctmpl}" == *@FILE@* ]] || { echo "no SOT sccache_staged_name"; return 1; }
+    sot="$(yq -r '.runner_host.sccache_bin_mode' "${CI_MANIFEST_SOURCE}")" && [ -n "${sot}" ] && [ "${sot}" != null ] || { echo "no SOT sccache_bin_mode"; return 1; }
+    scsrc="$(_val path)" scbin="$(_val path)" sclog="$(_val path)" scmode=""
+    mkdir -p "${scsrc}" "${scbin}"
+    for scf in $(yq -r '.runner_host.sccache_bins[]' "${CI_MANIFEST_SOURCE}"); do
+        printf '#!/bin/sh\nexit 0\n' > "${scsrc}/${scf}" && chmod +x "${scsrc}/${scf}" || return 1
+    done
+    sudo() { shift 2; "$@"; }
+    chown() { return 0; }
+    install() { printf '%s\n' "$*" >> "${sclog}"; cp "${@: -2:1}" "${@: -1}" && chmod "${@: -3:1}" "${@: -1}"; }
+    eval "_rh_sc_val () $(declare -f _ci_rh_val | tail -n +2)"
+    _ci_rh_val() {
+        case "$1" in
+            sccache_bin_dir) printf '%s' "${scbin}" ;;
+            sccache_dist_dir) printf '%s/dist' "${RH_ROOT}" ;;
+            sccache_bin_mode) if [ -n "${scmode}" ]; then printf '%s' "${scmode}"; else _rh_sc_val "$1"; fi ;;
+            *) _rh_sc_val "$1" ;;
+        esac
+    }
+    run _ci_rh_sccache_fetch "${scsrc}"
+    [ "${status}" -eq 0 ] || { echo "rc ${status}: ${output}"; return 1; }
+    for scf in $(yq -r '.runner_host.sccache_bins[]' "${CI_MANIFEST_SOURCE}"); do
+        [ -x "${scbin}/${scf}" ] || { echo "${scf} not in place"; return 1; }
+        grep -qF -- "-m ${sot} ${scsrc}/${scf} ${scbin}/${sctmpl//@FILE@/${scf}}" "${sclog}" || { echo "install: $(cat "${sclog}")"; return 1; }
+    done
+    [ "$(ls -A "${scbin}" | wc -l)" -eq "$(yq -r '.runner_host.sccache_bins | length' "${CI_MANIFEST_SOURCE}")" ] || { echo "temp left: $(ls -a "${scbin}")"; return 1; }
+    scmode="0$(_val int 1 7)$(_val int 1 7)$(_val int 1 7)"
+    run _ci_rh_sccache_fetch "${scsrc}"
+    [ "${status}" -eq 0 ] && grep -q -- "-m ${scmode} " "${sclog}" || { echo "override: $(cat "${sclog}")"; return 1; }
+    [[ "${output}" == *"Verifying:"* ]] || { echo "no post-install check: ${output}"; return 1; }
+    install() { printf '#!/bin/sh\nexit 3\n' > "${@: -1}" && chmod 755 "${@: -1}"; }
+    run _ci_rh_sccache_fetch "${scsrc}"
+    _expect installed-broken 2 "[CI-ERROR-RUNNER-0123]" || return 1
+    install() { cp "${@: -2:1}" "${@: -1}"; return 1; }
+    run _ci_rh_sccache_fetch "${scsrc}"
+    _expect install-fails 2 "[CI-ERROR-RUNNER-0103]" || return 1
+    [ "$(ls -A "${scbin}" | wc -l)" -eq "$(yq -r '.runner_host.sccache_bins | length' "${CI_MANIFEST_SOURCE}")" ] || { echo "temp left after a failed install: $(ls -a "${scbin}")"; return 1; }
 }
 
 # What: the Trivy leftover reap uses an exact minute age.
