@@ -2685,7 +2685,7 @@ _ci_needs_not_green() {
 # Why: runs in its own always-job; a red job still reports.
 # From: Issue #1683 | PR #1912
 ci_cmd_nightly_report() {
-    local needs="${CI_NEEDS:-}" kind jobs job state red="" rc=0 verdict states seen
+    local needs="${CI_NEEDS:-}" kind jobs job red="" rc=0 verdict states seen
     if [ -z "${needs}" ]; then
         ci_log "[CI-ERROR-STATUS-0001]" "reason=\"CI_NEEDS required\""
         return 2

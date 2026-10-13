@@ -2724,7 +2724,7 @@ CASES
 # From: Issue #1683 | PR #1858
 @test "scan outcome: every trivy scan status has its own code" {
     local svc raw st rc want odd
-    svc="$(_val name)" raw="$(_val name)" odd="$(_val int 5 99)"
+    svc="$(_val name)" raw="$(_val name)" odd="$(_val int 7 99)"
     while IFS='|' read -r st rc want; do
         run _ci_scan_outcome "${svc}" "${st}" "${raw}"
         _expect "status-${st}" "${rc}" "${want}" || return 1
@@ -2734,6 +2734,8 @@ CASES
 3|3|[CI-ERROR-SCAN-0023] service="${svc}" rc=3 reason="unexpected scan status;${raw}
 4|3|[CI-ERROR-SCAN-0021] service="${svc}" reason="trivy run failed without a report;${raw}
 2|2|[CI-ERROR-SCAN-0022] service="${svc}" reason="scan setup failed;${raw}
+5|3|[CI-ERROR-SCAN-0023] service="${svc}" rc=5 reason="unexpected scan status;${raw}
+6|3|[CI-ERROR-SCAN-0028] service="${svc}" reason="trivy DB missing or stale after the run;${raw}
 ${odd}|3|[CI-ERROR-SCAN-0023] service="${svc}" rc=${odd};${raw}
 ROWS
 }
@@ -5054,7 +5056,7 @@ CASES
 # Why: an error says nothing of findings, an outage none
 # From: Issue #1683 | PR #1912
 @test "scan report: each status settles only the cases it proves" {
-    local calls svc plat row st want got raw
+    local calls svc plat st want got raw
     local -x PR_IS_FORK=false GITHUB_EVENT_NAME=push GITHUB_ACTOR
     svc="$(_val name)" plat="p/$(_val name)" calls="$(_val path)" raw="$(_val name)" GITHUB_ACTOR="$(_val name)"
     _ci_status_case() { printf '%s %s %s %s [%s]\n' "$1" "$2" "$3" "$4" "$5" >> "${calls}"; }
@@ -5127,7 +5129,7 @@ ROWS
 # Why: a red job still reports; kinds stay apart
 # From: Issue #1683 | PR #1912
 @test "nightly report: each kind reads its jobs, a skipped job is NOT-RUN" {
-    local calls kind jobs j needs all="" lab_a lab_p
+    local calls kind jobs j all="" lab_a lab_p extra
     calls="$(_val path)"
     _ci_status_apply() { printf '%s|%s|%s\n' "$2" "$1" "$4" >> "${calls}"; }
     lab_a="$(_ci_block_entry_field status_reports nightly-cargo-audit label)"
@@ -5144,13 +5146,15 @@ ROWS
     CI_NEEDS="$(_needs ${all})" run ci_cmd_nightly_report
     _expect all-green 0 - || return 1
     [ "$(cut -d'|' -f1,2 "${calls}")" = "$(printf '%s|success\n%s|success\n' "${lab_a}" "${lab_p}")" ] || { echo "all green: $(cat "${calls}")"; return 1; }
-    kind="$(_ci_block_entry_list status_reports nightly-cargo-audit jobs | head -n 1)"
+    kind="$(_ci_block_entry_list status_reports nightly-cargo-audit jobs)"
+    kind="${kind%%$'\n'*}"
     : > "${calls}"
     CI_NEEDS="$(_needs ${all/ ${kind}=success/ ${kind}=failure})" run ci_cmd_nightly_report
     _expect audit-red 0 - || return 1
     grep -q "^${lab_a}|failure|" "${calls}" && grep -q "^${lab_p}|success|" "${calls}" || { echo "audit red: $(cat "${calls}")"; return 1; }
     grep -q "${kind}=failure" "${calls}" || { echo "evidence misses the red job: $(cat "${calls}")"; return 1; }
-    kind="$(_ci_block_entry_list status_reports nightly-promote jobs | head -n 1)"
+    kind="$(_ci_block_entry_list status_reports nightly-promote jobs)"
+    kind="${kind%%$'\n'*}"
     : > "${calls}"
     CI_NEEDS="$(_needs ${all/ ${kind}=success/ ${kind}=failure})" run ci_cmd_nightly_report
     grep -q "^${lab_p}|failure|" "${calls}" && grep -q "^${lab_a}|success|" "${calls}" || { echo "promote red: $(cat "${calls}")"; return 1; }
@@ -5159,7 +5163,11 @@ ROWS
     _expect skipped 0 "status=NOT-RUN kind=nightly-promote" || return 1
     ! grep -q "^${lab_p}|" "${calls}" || { echo "a skipped job gave a verdict: $(cat "${calls}")"; return 1; }
     : > "${calls}"
-    CI_NEEDS="$(_needs ${all/ ${kind}=success/ ${kind}=skipped} $(_val name)=failure)" run ci_cmd_nightly_report
+    : > "${calls}"
+    extra="$(_val name)"
+    CI_NEEDS="$(_needs ${all/ ${kind}=success/ ${kind}=skipped} "${extra}=failure")" run ci_cmd_nightly_report
+    _expect extra-red 0 "status=NOT-RUN kind=nightly-promote" || return 1
+    grep -q "^${lab_a}|success|.*not green: .*${extra}=failure" "${calls}" || { echo "extra red job not in evidence: $(cat "${calls}")"; return 1; }
     CI_NEEDS="$(_needs ${all/ ${kind}=success/})" run ci_cmd_nightly_report
     _expect job-missing 2 "[CI-ERROR-STATUS-0011] kind=\"nightly-promote\" job=\"${kind}\"" || return 1
 }
