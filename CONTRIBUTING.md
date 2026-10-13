@@ -151,13 +151,9 @@ the remaining operator risk and any rollback or follow-up notes.
 All actionable static analysis warnings are treated as build failures under the warnings-as-errors rule:
 
 **Hard failures (block a PR):**
-- `cargo clippy` warnings — denied in the `dns_rust_quality` and `ui_rust_quality` jobs
-- `cargo clippy` warnings — enforced via `cargo clippy -- -D warnings` in the same jobs
-- `shellcheck` warnings — enforced via `shellcheck --severity=warning` in the `shellcheck` job
-- `actionlint` warnings — enforced via `actionlint .github/workflows/*.yml`
-- `docker compose config` warnings — enforce via pattern matching for `warn|warning` in `validate-compose` job
-- File header checks — enforced via `bash scripts/tracked/check-file-headers.sh`
-- SPDX license identifier — enforced for files a PR changes via `bash scripts/tracked/check-pr-diff-file-headers.sh`
+- `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` of each changed crate, run by `ci.sh test-stack` in the `test` job
+- `shellcheck` and `actionlint` findings, run by `ci.sh check shellcheck` and `ci.sh check actionlint` in the `lint` job
+- every repository check in `ci.sh check all` (file headers, comment contract, compose config and the rest of the `CI_CHECKS` table) in the `checks` job
 
 **Known exception (tracked in issue #394):**
 GitHub's CodeQL Rust extractor emits `macro expansion failed` warnings for ordinary macros (`format!`, `assert_eq!`, `vec!`, `json!`, `tracing::*`, etc.) as a documented upstream limitation, not due to code defects in this repository. This exception is **scoped to CodeQL Rust macro-expansion extraction warnings only** and does not extend to `cargo clippy` warnings, which remain hard failures. Every instance of a CodeQL macro-expansion warning must stay tracked in #394, and #394 must be periodically reevaluated to monitor upstream status rather than being left as a permanent blanket excuse.
@@ -191,9 +187,8 @@ Because of this limitation, **a green CodeQL Rust job must not be read as full s
 
 These are required, not stylistic suggestions — a PR missing them will fail CI or get flagged in review.
 
-- **File headers.** Every source/config file you add or touch (Rust, shell, YAML, Dockerfiles, `.conf`/template files, HTML/CSS/JS) must open with a short header: the project name and repo URL in the exact form `lancache-ng (https://github.com/wiki-mod/lancache-ng)`, followed by a purpose description of that specific file, using the comment syntax valid for that file's language (`//!` for Rust, `#` for shell/YAML/Dockerfiles, Tera's `{# ... #}` for HTML templates under `services/ui/src/templates/`, `/* ... */` for CSS, `//` for JS). `scripts/tracked/check-file-headers.sh` enforces this in CI (`file-headers` job in `build-push.yml`) — it fails a PR if any non-excluded tracked file is missing the exact header string. A short list of files are excluded (`.md` files, the root `.env`/`.env.example`, lockfiles, `.gitkeep`, the `VERSION` file, JSON-backed `.conf` files, vendored/generated build artifacts) — see `scripts/tracked/check-file-headers.sh`'s `is_excluded()` function for the exact list, and AGENTS.md's "File Headers" section for the full rationale (why each exclusion exists, how to scale header detail to a file's complexity, and what NOT to invent in a header).
-- **SPDX license identifier.** Every file in scope for the header above also carries a `SPDX-License-Identifier: AGPL-3.0-or-later` line, placed immediately after the shebang (if any) and before the `lancache-ng (...)` header line, in that file's own comment syntax. `scripts/tracked/check-pr-diff-file-headers.sh` enforces this in CI (same `file-headers` job) against every file a pull request actually changes; the repo-wide backfill for files a PR doesn't touch is tracked separately and not yet a hard failure. See AGENTS.md's Rule-Ref: AG-HDR-008.
-- **Code comments.** Comment only when the WHY would not be obvious from well-named identifiers and the surrounding code — not what the code does, which should be readable from the code itself. Do comment: complex logic, guards, fallbacks, security decisions, non-obvious side effects, a workaround for a specific bug, or a deliberate deviation from the obvious approach. A missing WHY-comment on code that clearly needs one is treated as a defect, whether or not it predates your change — if you're already touching that code, add the missing comment as part of your PR rather than leaving the gap. Do not reference the current task, PR number, or fix in a comment (e.g. "fixed for #123") — that belongs in the PR description, not in code that outlives the change. See AGENTS.md's "Comment Style" section for the full guidance, including how to document a deliberately deferred fix versus a straightforward WHY-comment.
+- **File headers.** Every file outside the exclusion list starts with the header that AGENTS.md `[AG-HDR-*]` defines: line 1 empty or the interpreter marker, then `LanCache-NG (https://github.com/wiki-mod/lancache-ng)` and `SPDX-License-Identifier: AGPL-3.0-or-later` in the file's own comment syntax. `ci.sh check file-headers` enforces it; the exclusion list lives in `ci.sh` (`_ci_prose_excluded`) and the SOT.
+- **Code comments.** Every comment block follows AGENTS.md `[AG-CODE-012]`: `What:` and `Why:` on one line each, at most 60 characters, and `From: Issue #N | PR #N` when a source is known. `ci.sh check comment-length` and `ci.sh check review-chronology` enforce it.
 
 ## Building from source
 
