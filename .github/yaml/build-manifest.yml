@@ -763,6 +763,15 @@ release:
   # Why: one owner; Cargo and its lock are synced from it.
   # From: Issue #1683 | PR #1858
   version: 0.3.0
+  # What: release tag grammar, final and prerelease.
+  # Why: setup.sh and ci.sh read it; no regex copies.
+  # From: Issue #1683 | PR #1912
+  tag_final: ^v[0-9]+\.[0-9]+\.[0-9]+$
+  tag_prerelease: ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$
+  # What: grammar of a commit image tag (sha-...).
+  # Why: setup.sh accepts only these as immutable pins.
+  # From: Issue #1683 | PR #1912
+  tag_commit: ^sha-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$
   # What: SPDX license of the whole project.
   # Why: crates and image labels read it; no literal copies.
   # From: Issue #1683 | PR #1858

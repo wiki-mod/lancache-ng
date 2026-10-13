@@ -6023,15 +6023,21 @@ _ci_release_prerelease() {
 }
 
 # What: true/false prerelease for a v-tag, else rc 1.
-# Why: one tag grammar; predicates need no error log.
-# From: Issue #1683 | PR #1858
+# Why: SOT release.tag_prerelease/tag_final own the grammar
+# From: Issue #1683 | PR #1912
 _ci_release_tag_kind() {
-    local tag="$1"
-    if [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+    local tag="$1" pre final
+    pre="$(_ci_block_entry_field release "" tag_prerelease)" || return 2
+    final="$(_ci_block_entry_field release "" tag_final)" || return 2
+    if [ -z "${pre}" ] || [ -z "${final}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0055]" "reason=\"no SOT release.tag_final or tag_prerelease; FAIL CLOSED\""
+        return 2
+    fi
+    if [[ "${tag}" =~ ${pre} ]]; then
         printf 'true\n'
         return 0
     fi
-    if [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if [[ "${tag}" =~ ${final} ]]; then
         printf 'false\n'
         return 0
     fi
@@ -6463,6 +6469,10 @@ _ci_last_release_tag() {
     local below="${1:-}" refs tags="" t remote
     remote="$(_ci_git_remote)" || return 2
     refs="$(_ci_capture 0 git ls-remote --tags --refs "${remote}")" || return 2
+    # What: loads the SOT once before the per-tag subshells
+    # Why: each subshell then reuses the parsed manifest
+    # From: Issue #1683 | PR #1912
+    _ci_block_entry_field release "" tag_final >/dev/null || return 2
     # What: keep plain release tags via the one tag grammar.
     # Why: no second tag pattern beside the kind owner.
     # From: Issue #1683 | PR #1858

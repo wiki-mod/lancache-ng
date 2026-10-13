@@ -2577,6 +2577,25 @@ die_convergence_kept_paused() {
     die "$1 Manual recovery required.${resume:+ Convergence stays paused; after recovery run: $resume}"
 }
 
+# What: true for a vX.Y.Z or vX.Y.Z-rc.N release tag
+# Why: SOT release.tag_final and tag_prerelease own it
+# From: Issue #1683 | PR #1912
+is_release_tag() {
+    local tag="$1" final pre
+    final=$(lancache_sot_value tag_final release) || exit $?
+    pre=$(lancache_sot_value tag_prerelease release) || exit $?
+    [[ "$tag" =~ $final || "$tag" =~ $pre ]]
+}
+
+# What: true for a sha-* commit image tag
+# Why: SOT release.tag_commit owns the grammar
+# From: Issue #1683 | PR #1912
+is_commit_image_tag() {
+    local tag="$1" commit
+    commit=$(lancache_sot_value tag_commit release) || exit $?
+    [[ "$tag" =~ $commit ]]
+}
+
 # What: validates the image tag before any compose pull
 # Why: mutable channels must resolve to one immutable tag
 validate_lancache_image_tag() {
@@ -2584,7 +2603,7 @@ validate_lancache_image_tag() {
 
     case "$tag" in
         sha-*)
-            [[ "$tag" =~ ^sha-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] \
+            is_commit_image_tag "$tag" \
                 || die "LANCACHE_IMAGE_TAG must be a valid sha-* image tag."
             return 0
             ;;
@@ -2597,7 +2616,7 @@ validate_lancache_image_tag() {
             ;;
     esac
 
-    [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] \
+    is_release_tag "$tag" \
         || die "LANCACHE_IMAGE_TAG must be an immutable sha-* tag or a vX.Y.Z / vX.Y.Z-rc.N release tag."
 }
 
@@ -2656,7 +2675,7 @@ validate_lancache_image_channel() {
 # Why: rc 1 means no tag; rc 2 means found but malformed
 # From: Issue #1683 | PR #1912
 derive_release_archive_image_tag() {
-    local version tag tags git_stderr git_status
+    local version tag tags line git_stderr git_status
     local -a safe_dir_opt=()
 
     # What: a .git entry means a real git checkout
@@ -2690,7 +2709,10 @@ derive_release_archive_image_tag() {
                 return 2
             fi
             [[ -n "$tags" ]] || return 1
-            tag=$(awk '/^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$/' <<< "$tags")
+            tag=""
+            while IFS= read -r line; do
+                is_release_tag "$line" && tag+="${tag:+$'\n'}$line"
+            done <<< "$tags"
             if [[ -z "$tag" ]]; then
                 printf 'Invalid release tag from git checkout: %s\n' "${tags//$'\n'/ }" >&2
                 return 2
@@ -2708,7 +2730,7 @@ derive_release_archive_image_tag() {
 
     version=$(lancache_sot_value version release) || exit $?
     tag="v${version#v}"
-    if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+    if ! is_release_tag "$tag"; then
         printf 'Invalid release image tag derived from release.version: %s\n' "$tag" >&2
         return 2
     fi
@@ -3194,7 +3216,7 @@ migrate_env_for_update() (
     local stack_channels
     stack_channels=$(lancache_release_rows channel) || exit $?
     if [[ "$preserve_image_tag" = "1" ]] \
-        && [[ "$existing_image_tag" =~ ^(sha-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}|v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$ ]]; then
+        && { is_commit_image_tag "$existing_image_tag" || is_release_tag "$existing_image_tag"; }; then
         # What: keeps the archived immutable tag as-is
         # Why: re-resolving would pull the bad channel image
         validate_lancache_image_tag "$existing_image_tag"
