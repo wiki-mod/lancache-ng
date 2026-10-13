@@ -12279,7 +12279,7 @@ _ci_check_deny_short_sha() {
     local sh_pat="\\\$\\{([A-Za-z0-9]*_)*${kw}[0-9]*(_[A-Za-z0-9_]*)?(\\[[^]]*\\])?:[^-=?+]"
     local git_pat='git[[:space:]][^|;&]*(rev-parse[^|;&]*--short|--abbrev|--(format|pretty)=[^[:space:]]*%h)'
     local rs_pat="(^|[^A-Za-z0-9_])([A-Za-z0-9]*_)*${kw}[0-9]*(_[A-Za-z0-9_]*)?(\\.as_str\\(\\)|\\.as_bytes\\(\\))?(\\[|\\.get\\()[[:space:]]*[A-Za-z0-9_]*[[:space:]]*\\.\\."
-    local -a _ci_override=("$@") files=() yml_rs=() viol=()
+    local -a _ci_override=("$@") files=() yml_rs=() viol=() rs=() other=()
     local -A seen=()
     local path out
     # What: shell set plus workflow, action, Rust files.
@@ -12290,12 +12290,19 @@ _ci_check_deny_short_sha() {
     for path in "${files[@]}" "${yml_rs[@]}"; do
         [ -z "${seen[${path}]:-}" ] || continue
         seen[${path}]=1
-        case "${path}" in
-            *.rs) out="$(_ci_capture 1 grep -EnH -e "${rs_pat}" "${path}")" || return 2 ;;
-            *) out="$(_ci_capture 1 grep -EnH -e "${sh_pat}" -e "${git_pat}" "${path}")" || return 2 ;;
-        esac
-        [ -z "${out}" ] || viol+=("${out}")
+        case "${path}" in *.rs) rs+=("${path}") ;; *) other+=("${path}") ;; esac
     done
+    # What: one grep per kind over all its files.
+    # Why: a grep per file cost a temp file and a fork each.
+    # From: Issue #1683 | PR #1912
+    if [ "${#other[@]}" -gt 0 ]; then
+        out="$(_ci_capture 1 grep -EnH -e "${sh_pat}" -e "${git_pat}" -- "${other[@]}")" || return 2
+        [ -z "${out}" ] || viol+=("${out}")
+    fi
+    if [ "${#rs[@]}" -gt 0 ]; then
+        out="$(_ci_capture 1 grep -EnH -e "${rs_pat}" -- "${rs[@]}")" || return 2
+        [ -z "${out}" ] || viol+=("${out}")
+    fi
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0005]" "reason=\"short commit SHA (AG-REL-015)\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
