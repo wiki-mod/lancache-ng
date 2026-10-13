@@ -64,7 +64,7 @@ CI_ARG_DEFAULTS=LANCACHE_RUNTIME_DEFAULTS
 declare -A CI_DISPATCH=(
     [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-analyze]=ci_cmd_codeql_analyze [identity]=ci_cmd_identity
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [image-setup]=ci_cmd_image_setup [apk-pin-install]=ci_cmd_apk_pin_install
-    [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [gha-runtime-args]=ci_cmd_gha_runtime_args
+    [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [ship-release]=ci_cmd_ship_release [gha-runtime-args]=ci_cmd_gha_runtime_args
     [test]=ci_cmd_test [scan-channel]=ci_cmd_scan_channel [assemble]=ci_cmd_assemble
     [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
@@ -4891,6 +4891,18 @@ ci_cmd_ship() {
         [ "${rc}" -ne 0 ] || rc=2
     fi
     return "${rc}"
+}
+
+# What: frees this run's build lock of one pair.
+# Why: a cancel stops the docker exec step; no trap runs
+# From: Issue #1683 | PR #1912
+ci_cmd_ship_release() {
+    local service="${1:-}" platform="${2:-}"
+    if [ -z "${service}" ] || [ -z "${platform}" ]; then
+        ci_log "[CI-ERROR-SHIP-0008]" "reason=\"service and platform args required\""
+        return 2
+    fi
+    _ci_build_lock_drop "${service}" "${platform}"
 }
 
 # What: build, then publish+verify only what was built.

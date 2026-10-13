@@ -201,6 +201,15 @@ jobs:
           SERVICE: ${{ matrix.service }}
           PLATFORM: ${{ matrix.platform }}
         run: bash .github/scripts/ci.sh ship "${SERVICE}" "${PLATFORM}"
+      # What: frees this run's build lock after a cancel.
+      # Why: a cancel stops the step; no signal reaches bash
+      # From: Issue #1683 | PR #1912
+      - name: Release the build lock after a cancel
+        if: cancelled()
+        env:
+          SERVICE: ${{ matrix.service }}
+          PLATFORM: ${{ matrix.platform }}
+        run: bash .github/scripts/ci.sh ship-release "${SERVICE}" "${PLATFORM}"
 
   # What: audit rust dependencies when Cargo.lock changed
   # Why: lockfile is its input; nightly gets new advisories
