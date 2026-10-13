@@ -997,7 +997,7 @@ cmd_install_requirements_primary() {
 
 cmd_install_requirements_secondary() {
     ensure_stack_requirements_installed
-    print_ok "Secondary node requirements installed (curl, jq, Docker, Docker Compose v2). Run ./setup.sh secondary --primary <url> --token <token> --name <name> --ip-http <ip> next."
+    print_ok "Secondary node requirements installed (curl, jq, Docker, Docker Compose v2). Next: ./setup.sh secondary --help shows the registration command."
 }
 
 # What: strips quotes and unquoted inline comments
@@ -4312,6 +4312,18 @@ creates a local compose directory, writes the secondary .env file, and starts
 the container after the primary server returns the required secrets.
 Use --rotate in an existing secondary directory to refresh credentials after
 the primary changes its NATS authentication model.
+
+Required arguments:
+  --primary <url>    Primary LanCache UI/API URL, for example http://<primary-ip>:<ui-port>
+  --token <token>    Secondary registration token from the primary server
+  --name <name>      Secondary node name, using letters, numbers, and dashes only
+  --ip-http <ip>     Primary proxy IP address clients should use for cached traffic
+
+Optional arguments:
+  --listen-ip <ip>   Bind IP for the secondary DNS container (default: detected host LAN IP)
+  --ip-https <ip>    Primary https proxy IP; adds a second DNS bind (needs --listen-ip-https)
+  --listen-ip-https <ip>  Second bind IP for the https DNS (needs --ip-https; differs from --listen-ip)
+  --rotate           Reuse an existing secondary directory and refresh credentials
 EOF
             ;;
         backup)
@@ -6089,24 +6101,6 @@ cmd_secondary() {
     local missing_fields secondary_env_file compose_out bad_response secondary_compose
     local channel_words pinned release dns_port
 
-    usage_secondary() {
-        cat <<EOF
-Usage: $0 secondary --primary <url> --token <token> --name <name> --ip-http <ip> [--listen-ip <ip>] [--ip-https <ip> --listen-ip-https <ip>] [--rotate]
-
-Required arguments:
-  --primary <url>    Primary LanCache UI/API URL, for example http://<primary-ip>:<ui-port>
-  --token <token>    Secondary registration token from the primary server
-  --name <name>      Secondary node name, using letters, numbers, and dashes only
-  --ip-http <ip>     Primary proxy IP address clients should use for cached traffic
-
-Optional arguments:
-  --listen-ip <ip>   Bind IP for the secondary DNS container (default: detected host LAN IP)
-  --ip-https <ip>    Primary https proxy IP; adds a second DNS bind (needs --listen-ip-https)
-  --listen-ip-https <ip>  Second bind IP for the https DNS (needs --ip-https; differs from --listen-ip)
-  --rotate           Reuse an existing secondary directory and refresh credentials
-EOF
-    }
-
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --primary)
@@ -6149,11 +6143,11 @@ EOF
                 shift
                 ;;
             -h|--help)
-                usage_secondary
+                print_command_help secondary
                 exit 0
                 ;;
             *)
-                usage_secondary >&2
+                print_command_help secondary >&2
                 die "Unknown argument: $1"
                 ;;
         esac
