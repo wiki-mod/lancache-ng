@@ -6353,6 +6353,10 @@ _rh_runner_dir() {
     scmode="0$(_val int 1 7)$(_val int 1 7)$(_val int 1 7)"
     run _ci_rh_sccache_fetch "${scsrc}"
     [ "${status}" -eq 0 ] && grep -q -- "-m ${scmode} " "${sclog}" || { echo "override: $(cat "${sclog}")"; return 1; }
+    [[ "${output}" == *"Verifying:"* ]] || { echo "no post-install check: ${output}"; return 1; }
+    install() { printf '#!/bin/sh\nexit 3\n' > "${@: -1}" && chmod 755 "${@: -1}"; }
+    run _ci_rh_sccache_fetch "${scsrc}"
+    _expect installed-broken 2 "[CI-ERROR-RUNNER-0123]" || return 1
     install() { cp "${@: -2:1}" "${@: -1}"; return 1; }
     run _ci_rh_sccache_fetch "${scsrc}"
     _expect install-fails 2 "[CI-ERROR-RUNNER-0103]" || return 1
@@ -6398,6 +6402,58 @@ _rh_runner_dir() {
     run _ci_rh_purge_listchanges
     _expect listchanges 2 "[CI-ERROR-RUNNER-0078];purge broke" || return 1
     [[ "${output}" != *Purged* ]] || { echo "listchanges: ${output}"; return 1; }
+}
+
+# What: purge-pve-check shows open files, cron and RSS.
+# Why: a live stack or a cron job must show before a purge.
+# From: Issue #1622 | PR #1912
+@test "runner-host: purge-pve-check reports open files, cron entries and stack RSS" {
+    local pcdir pccron pcfst pcproc pcunit pcopen pcf
+    _rh_fixture
+    [ "$(yq -r '.runner_host.pve_config_dir' "${CI_MANIFEST_SOURCE}")" != null ] && [ "$(yq -r '.runner_host.pve_cron_dirs | length' "${CI_MANIFEST_SOURCE}")" -gt 0 ] || { echo "no SOT pve_config_dir or pve_cron_dirs"; return 1; }
+    pcproc="$(yq -r '.runner_host.pve_process_families[0]' "${CI_MANIFEST_SOURCE}")" pcunit="$(yq -r '.runner_host.pve_unit_families[0]' "${CI_MANIFEST_SOURCE}")"
+    [[ -n "${pcproc}${pcunit}" && "${pcproc}${pcunit}" != *null* ]] || { echo "no SOT families"; return 1; }
+    pcdir="$(_val path)" pccron="$(_val path)" pcfst="$(_val path)" pcopen="$(_val name)" pcf="$(_val name)"
+    mkdir -p "${pcdir}" "${pccron}" && : > "${pcfst}" || return 1
+    printf 'x %s-%s\n' "${pcunit}" "$(_val name)" > "${pccron}/${pcf}" || return 1
+    eval "_rh_pc_val () $(declare -f _ci_rh_val | tail -n +2)"
+    _ci_rh_val() { case "$1" in pve_config_dir) printf '%s' "${pcdir}" ;; fstab_file) printf '%s' "${pcfst}" ;; *) _rh_pc_val "$1" ;; esac; }
+    eval "_rh_pc_list () $(declare -f _ci_block_entry_list | tail -n +2)"
+    _ci_block_entry_list() { if [ "$3" = pve_cron_dirs ]; then printf '%s\n' "${pccron}" "${pccron}.absent"; else _rh_pc_list "$@"; fi; }
+    dpkg() { :; }
+    systemctl() { :; }
+    mount() { :; }
+    apt-get() { :; }
+    lsof() { [ "$2" = "${pcdir}" ] && [ -n "${pcopen}" ] && printf '%s\n' "${pcopen}"; }
+    ps() { printf '%s %s\n' 2048 "${pcproc}d" 4096 "$(_val name)" 1024 "${pcproc}-x"; }
+    run _ci_rh_purge_pve_check
+    _expect found 0 "FOUND: open files under ${pcdir};${pcopen};FOUND: cron entries reference the stack;${pccron}/${pcf};RSS of the PVE stack processes;  3 MiB" || return 1
+    pcopen="" && : > "${pccron}/${pcf}"
+    run _ci_rh_purge_pve_check
+    [ "${status}" -eq 0 ] && [[ "${output}" != *FOUND* ]] || { echo "clean host: ${output}"; return 1; }
+}
+
+# What: sccache-check shows sha256 and stale file owner.
+# Why: an operator compares hosts by the binary hash.
+# From: Issue #1622 | PR #1912
+@test "runner-host: sccache-check shows sha256 per binary and the mode and owner of a stale file" {
+    local ckbin ckf ckstale ckuser
+    _rh_fixture
+    ckbin="$(_val path)" ckuser="$(yq -r '.runner_host.user' "${CI_MANIFEST_SOURCE}")"
+    ckstale="${RH_ROOT}/${ckuser}/$(yq -r '.runner_host.sccache_stale_files[0]' "${CI_MANIFEST_SOURCE}")"
+    mkdir -p "${ckbin}" "${RH_ROOT}/dist" "${ckstale%/*}" && : > "${ckstale}" && chmod 640 "${ckstale}" || return 1
+    for ckf in $(yq -r '.runner_host.sccache_bins[]' "${CI_MANIFEST_SOURCE}"); do
+        printf '#!/bin/sh\necho %s\n' "$(_val name)" > "${ckbin}/${ckf}" && chmod +x "${ckbin}/${ckf}" || return 1
+    done
+    eval "_rh_ck_val () $(declare -f _ci_rh_val | tail -n +2)"
+    _ci_rh_val() { case "$1" in sccache_bin_dir) printf '%s' "${ckbin}" ;; sccache_dist_dir) printf '%s/dist' "${RH_ROOT}" ;; *) _rh_ck_val "$1" ;; esac; }
+    sudo() { shift 2; "$@"; }
+    run _ci_rh_sccache_check
+    [ "${status}" -eq 0 ] || { echo "rc ${status}: ${output}"; return 1; }
+    for ckf in $(yq -r '.runner_host.sccache_bins[]' "${CI_MANIFEST_SOURCE}"); do
+        [[ "${output}" == *"${ckbin}/${ckf}: present (sha256 $(sha256sum "${ckbin}/${ckf}" | cut -d' ' -f1))"* ]] || { echo "${ckf}: ${output}"; return 1; }
+    done
+    [[ "${output}" == *"STALE: ${ckstale} still present ($(stat -c '%a %U:%G' "${ckstale}"))"* ]] || { echo "stale: ${output}"; return 1; }
 }
 
 # What: guards stop before any host change.

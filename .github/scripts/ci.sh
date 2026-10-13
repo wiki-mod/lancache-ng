@@ -10965,7 +10965,10 @@ _ci_rh_pve_keep_ere() {
 # Why: review it before purge-pve removes a live stack.
 # From: Issue #1622 | PR #1624
 _ci_rh_purge_pve_check() {
-    local keep pkgs sim families units fstab
+    local keep pkgs sim families units fstab pdir procs crons d open hits rss
+    pdir="$(_ci_rh_val pve_config_dir)" || return 2
+    procs="$(_ci_rh_ere pve_process_families)" || return 2
+    crons="$(_ci_block_entry_list runner_host "" pve_cron_dirs)" || return 2
     fstab="$(_ci_rh_val fstab_file)" || return 2
     keep="$(_ci_rh_pve_keep_ere)" || return 2
     families="$(_ci_rh_ere pve_package_families)" || return 2
@@ -10977,9 +10980,23 @@ _ci_rh_purge_pve_check() {
     dpkg -l | { grep -iE "^ii.*(${keep})" || printf '  (none installed)\n'; }
     printf '\n--- Active units of the PVE stack ---\n'
     systemctl list-units --all --type=service,timer --no-pager | { grep -iE "${units}" | grep -i active || printf '  (none active)\n'; }
-    printf '\n--- Mounts and fstab entries of the PVE stack ---\n'
+    printf '\n--- Mounts, fstab, open files and cron of the PVE stack ---\n'
     mount | { grep -iE "${units}" || printf '  not currently mounted\n'; }
     if _ci_rh_root grep -qiE "${units}" "${fstab}"; then printf '  FOUND: %s references the stack\n' "${fstab}"; fi
+    if ! command -v lsof >/dev/null 2>&1; then
+        ci_log "[CI-WARN-RUNNER-0119]" "dir=\"${pdir}\" reason=\"lsof not on PATH; open-file check skipped\""
+    elif _ci_rh_root test -d "${pdir}"; then
+        open="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0120]" "dir=\"${pdir}\" reason=\"lsof failed\"" _ci_rh_root lsof +D "${pdir}")" || return 2
+        [ -z "${open}" ] || printf '  FOUND: open files under %s:\n%s\n' "${pdir}" "${open}"
+    fi
+    while IFS= read -r d; do
+        [ -n "${d}" ] && _ci_rh_root test -d "${d}" || continue
+        hits="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0121]" "dir=\"${d}\" reason=\"cron scan failed\"" _ci_rh_root grep -rliE "${units}" "${d}")" || return 2
+        [ -z "${hits}" ] || printf '  FOUND: cron entries reference the stack:\n%s\n' "${hits}"
+    done <<< "${crons}"
+    printf '\n--- RSS of the PVE stack processes ---\n'
+    rss="$(_ci_capture 0 ps -eo rss=,comm=)" || return 2
+    awk -v re="${procs}" 'tolower($2) ~ re { kb += $1 } END { printf "  %d MiB\n", kb / 1024 }' <<< "${rss}"
     printf '\n--- Simulated purge (no kernel or firmware must appear) ---\n'
     sim="$(_ci_run -m 100 "[CI-ERROR-RUNNER-0054]" "reason=\"simulated purge failed\"" _ci_rh_root apt-get purge --simulate "${pkgs[@]}")" || return 2
     printf '%s\n' "${sim}"
@@ -11266,7 +11283,7 @@ _ci_rh_host_prep() {
     _ci_rh_purge_listchanges || return 2
     _ci_rh_backports || return 2
     _ci_rh_units || return 2
-    printf '\nhost-prep complete. It does not touch %s (use docker-daemon-config), does not run config.sh and starts no runner.\n' "$(_ci_variable CI_DAEMON_JSON)"
+    printf '\nhost-prep complete. It does not touch %s (use docker-daemon-config; add a "proxies" block by hand if this host needs the LAN proxy), does not run config.sh and starts no runner.\n' "$(_ci_variable CI_DAEMON_JSON)"
     if [[ "$(_ci_capture 0 hostname)" == *${heavy}* ]]; then
         printf 'Heavy-tier host: run sccache-check; stage only the sccache binaries, then sccache-fetch <dir>.\n'
     fi
@@ -11413,7 +11430,7 @@ _ci_rh_restart_policy() {
 # Why: Rust CI on heavy hosts fails without the client.
 # From: Issue #1622 | PR #1624
 _ci_rh_sccache_check() {
-    local user root lack=0 f stale dist list bin_dir main_bin stales
+    local user root lack=0 f stale dist list bin_dir main_bin stales sum st
     user="$(_ci_rh_val user)" || return 2
     root="$(_ci_rh_val opt_root)" || return 2
     dist="$(_ci_rh_val sccache_dist_dir)" || return 2
@@ -11422,13 +11439,21 @@ _ci_rh_sccache_check() {
     list="$(_ci_block_entry_list runner_host "" sccache_bins)" || return 2
     while IFS= read -r f; do
         f="${bin_dir}/${f}"
-        if [ -x "${f}" ]; then printf '  %s: present\n' "${f}"; else printf '  %s: MISSING\n' "${f}"; lack=1; fi
+        if [ -x "${f}" ]; then
+            sum="$(_ci_capture 0 sha256sum "${f}")" || return 2
+            printf '  %s: present (sha256 %s)\n' "${f}" "${sum%% *}"
+        else
+            printf '  %s: MISSING\n' "${f}"
+            lack=1
+        fi
     done <<< "${list}"
     printf '\n--- Runtime config: supplied per job through SCCACHE_CONF; no token on the host ---\n'
     stales="$(_ci_block_entry_list runner_host "" sccache_stale_files)" || return 2
     while IFS= read -r stale; do
         stale="${root}/${user}/${stale}"
-        if _ci_rh_root test -f "${stale}"; then printf '  STALE: %s still present; sccache-fetch removes it\n' "${stale}"; fi
+        _ci_rh_root test -f "${stale}" || continue
+        st="$(_ci_run "[CI-ERROR-RUNNER-0122]" "file=\"${stale}\" reason=\"stat failed\"" _ci_rh_root stat -c '%a %U:%G' "${stale}")" || return 2
+        printf '  STALE: %s still present (%s); sccache-fetch removes it\n' "${stale}" "${st}"
     done <<< "${stales}"
     if _ci_rh_root test -d "${dist}"; then printf '  %s: present\n' "${dist}"; else printf '  %s: MISSING\n' "${dist}"; lack=1; fi
     printf '\n--- Live check as %s ---\n' "${user}"
@@ -11493,7 +11518,9 @@ _ci_rh_sccache_fetch() {
         _ci_rh_root test -d "${old}" || continue
         _ci_run "[CI-ERROR-RUNNER-0109]" "dir=\"${old}\" reason=\"old credential dir not removed\"" _ci_rh_root rmdir --ignore-fail-on-non-empty "${old}" || return 2
     done <<< "${sdirs}"
-    printf 'Installed the sccache client tooling. Run sccache-check to confirm.\n'
+    printf 'Installed the sccache client tooling. Verifying:\n'
+    _ci_run "[CI-ERROR-RUNNER-0123]" "file=\"${bin_dir}/${main_name}\" reason=\"installed binary does not run\"" _ci_rh_root sudo -u "${user}" env HOME="${root}/${user}" "${bin_dir}/${main_name}" --version || return 2
+    printf 'Run sccache-check to confirm the full picture.\n'
 }
 
 # What: runner-host mode on a runner host.

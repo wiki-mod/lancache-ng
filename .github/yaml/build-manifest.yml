@@ -1159,6 +1159,11 @@ runner_host:
   # Why: the inventory greps units, mounts and fstab by it.
   # From: Issue #1683 | PR #1912
   pve_unit_families: [pve, corosync, proxmox, pmxcfs]
+  # What: PVE config and cron dirs the purge check scans.
+  # Why: open files or cron jobs on the stack block a purge.
+  # From: Issue #1622 | PR #1912
+  pve_config_dir: /etc/pve
+  pve_cron_dirs: [/etc/cron.d, /etc/cron.daily, /etc/cron.hourly]
   # What: process name families gone after the purge.
   # Why: a running daemon means the purge did not finish.
   # From: Issue #1683 | PR #1912
