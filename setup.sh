@@ -3553,7 +3553,7 @@ install_missing_tools() {
 backup_manifest() {
     local install_dir="$1" mode="$2"
     local env_file cache_env_file
-    local cache_dir state_dir keys key dir sub
+    local cache_dir state_dir keys key dir sub bundle copy
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     cache_env_file="$install_dir/.env"
     state_dir=$(install_state_root "$install_dir" "$env_file") \
@@ -3563,7 +3563,14 @@ backup_manifest() {
 
     printf '%s\n' "$cache_env_file"
     [[ "$env_file" != "$cache_env_file" ]] && printf '%s\n' "$env_file"
-    printf '%s\n' "$install_dir/docker-compose.yml" "$install_dir/scripts"
+    printf '%s\n' "$install_dir/docker-compose.yml"
+    # What: quickstart helper copies from the SOT list
+    # Why: restore brings back what a quickstart had
+    # From: Issue #1683 | PR #1912
+    bundle=$(lancache_sot_list quickstart_bundle_copies runtime) || exit $?
+    while IFS= read -r copy; do
+        [[ -n "$copy" ]] && printf '%s\n' "$install_dir/$copy"
+    done <<< "$bundle"
     deploy_prod_repo_input_paths "$install_dir"
     # What: every compose state dir but cache and logs
     # Why: cache: full mode only; logs are no rollback state
