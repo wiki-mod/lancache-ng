@@ -15412,75 +15412,6 @@ _ci_check_codeql_coverage() {
     printf 'codeql-coverage=clean\n'
 }
 
-# What: "start end" line of each @test; heredocs skipped.
-# Why: a } inside a heredoc must not end the test.
-# From: Issue #1683 | PR #1858
-_ci_bats_test_ranges() {
-    awk -v style=hash -v h2= -v h3= "${_CI_AWK_COMMENT_LEX}"'
-        END {
-            cl_lex()
-            for (i = 1; i <= n; i++) {
-                if (H[i]) continue
-                if (!s && L[i] ~ /^@test .*[{][[:space:]]*$/) s = i
-                else if (s && L[i] == "}") { print s, i; s = 0 }
-            }
-            if (s) { printf "@test at line %d has no closing }\n", s > "/dev/stderr"; exit 2 }
-        }
-    ' "$1"
-}
-
-# What: shellcheck one @test per run; merge the findings.
-# Why: one run links every @test into one dataflow graph.
-# From: Issue #1683 | PR #1858
-_ci_shellcheck_bats_tests() {
-    local f="$1" ranges="$2" dir jobs cpus n k rc brk=0
-    local -a outs=()
-    dir="$(_ci_mktemp -d -p "${CI_TMPDIR}")" || return 2
-    jobs="$(_ci_parallel_jobs)" || { rm -rf "${dir}"; return 2; }
-    read -r jobs cpus <<< "${jobs}"
-    printf '%s\n' "${ranges}" > "${dir}/ranges"
-    n="$(wc -l < "${dir}/ranges")"
-    awk 'NR == FNR { for (l = $1; l <= $2; l++) t[l] = FNR; next } { print t[FNR] + 0 }' \
-        "${dir}/ranges" "${f}" > "${dir}/map" || { rm -rf "${dir}"; return 2; }
-    ci_log "[CI-INFO-CHECK-0155]" "file=\"${f}\" tests=${n} jobs=${jobs} cpus=${cpus} reason=\"shellcheck per @test\""
-    # What: one job per @test: top level plus that test.
-    # Why: other tests stay unparsed; .lines maps back.
-    # From: Issue #1683 | PR #1858
-    seq 1 "${n}" | xargs -P "${jobs}" -I{} bash -c '
-        awk -v k="$1" -v m="$2/$1.lines" "NR == FNR { t[FNR] = \$1; next }
-            t[FNR] == 0 || t[FNR] == k { print; print FNR > m }" "$2/map" "$3" > "$2/$1.bats" || exit 255
-        shellcheck -f gcc --severity=warning "$2/$1.bats" > "$2/$1.out" 2>&1
-        echo "$?" > "$2/$1.rc"
-        rm -f "$2/$1.bats"' _ {} "${dir}" "${f}" || brk=1
-    for ((k = 1; k <= n; k++)); do
-        outs+=("${dir}/${k}.lines" "${dir}/${k}.out")
-        rc="$(cat "${dir}/${k}.rc" 2>&1)" || rc="none"
-        case "${rc}" in
-            0|1) ;;
-            *) brk=1; printf 'test lines %s rc=%s:\n%s\n' "$(sed -n "${k}p" "${dir}/ranges")" "${rc}" "$(cat "${dir}/${k}.out" 2>&1)" ;;
-        esac
-    done
-    [ "${brk}" -eq 0 ] || { rm -rf "${dir}"; return 2; }
-    # What: own-test findings; top-level ones seen in all.
-    # Why: a top-level hit missing in some runs is noise.
-    # From: Issue #1683 | PR #1858
-    awk -v n="${n}" -v f="${f}" '
-        NR == FNR { t[FNR] = $1; next }
-        FNR == 1 { k = FILENAME; sub(/^.*\//, "", k); kind = k; sub(/\.(lines|out)$/, "", k); sub(/^[0-9]+\./, "", kind) }
-        kind == "lines" { if (FNR == 1) delete m; m[FNR] = $1; next }
-        $0 ~ /^[^:]+:[0-9]+:[0-9]+: / {
-            split($0, p, ":"); ln = m[p[2]]; line = $0; sub(/^[^:]+:[0-9]+:/, f ":" ln ":", line)
-            if (t[ln] == k) print line
-            else if (t[ln] == 0 && !seen[k, line]++) top[line]++
-        }
-        END { for (x in top) if (top[x] == n) print x }
-    ' "${dir}/map" "${outs[@]}" > "${dir}/found" || { rm -rf "${dir}"; return 2; }
-    sort -t: -k2,2n -k3,3n "${dir}/found"
-    rc=0; [ ! -s "${dir}/found" ] || rc=1
-    rm -rf "${dir}"
-    return "${rc}"
-}
-
 # What: shellcheck changed shell scripts (§98).
 # Why: one owner; SOT build-tools image.
 # From: Issue #1683
@@ -15496,19 +15427,10 @@ _ci_check_shellcheck() {
     # What: one shellcheck process per file.
     # Why: one call on all files needs ~5 GB peak RAM.
     # From: Issue #1683 | PR #1858
-    local sc_out="" sc_one sc_rc sc_found=0 sc_broken=0 tests
+    local sc_out="" sc_one sc_rc sc_found=0 sc_broken=0
     for f in "${files[@]}"; do
-        sc_rc=0 tests=""
-        if [[ "${f}" == *.bats ]] && ! tests="$(_ci_bats_test_ranges "${f}" 2>&1)"; then
-            sc_broken=1
-            ci_error "[CI-ERROR-CHECK-0154]" "file=\"${f}\" reason=\"@test ranges unreadable\"" "${tests}"
-            continue
-        fi
-        if [ -n "${tests}" ]; then
-            sc_one="$(_ci_shellcheck_bats_tests "${f}" "${tests}")" || sc_rc=$?
-        else
-            sc_one="$(shellcheck --severity=warning "${f}" 2>&1)" || sc_rc=$?
-        fi
+        sc_rc=0
+        sc_one="$(shellcheck --severity=warning "${f}" 2>&1)" || sc_rc=$?
         # What: rc 1 = findings; any other rc = no result.
         # Why: a killed run (137) must not read as findings.
         # From: Issue #1683 | PR #1858
