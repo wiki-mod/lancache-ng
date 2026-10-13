@@ -38,6 +38,9 @@ jobs:
       id-token: write
       actions: read
     steps:
+      # What: uses: pins copy SOT github_actions entries.
+      # Why: uses: reads no SOT; ci.sh checks SHA and tag.
+      # From: Issue #1683 | PR #1912
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

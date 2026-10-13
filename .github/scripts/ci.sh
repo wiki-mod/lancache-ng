@@ -13385,6 +13385,18 @@ _ci_action_ref_is_external() {
     ! _ci_action_ref_is_own "${v}"
 }
 
+# What: SOT github_actions entry of an action, or empty.
+# Why: one lookup for the pin check and its dead-pin pass.
+# From: Issue #1683 | PR #1912
+_ci_action_sot_entry() {
+    local e u entries
+    entries="$(_ci_block_keys github_actions)" || return 2
+    for e in ${entries}; do
+        u="$(_ci_block_entry_field github_actions "${e}" uses)" || return 2
+        [ "${u}" != "$1" ] || { printf '%s\n' "${e}"; return 0; }
+    done
+}
+
 # What: enforce Node runtime + ref hygiene on pins.
 # Why: single owner of action-pin policy.
 # From: Issue #1683 | PR #1858
@@ -13517,6 +13529,7 @@ _ci_check_action_node_versions() {
     # Why: local reads disk; external via raw SHA reads.
     # From: Issue #1683 | PR #1858
     local v using local_dir cand resolved_file owner repo subpath ref res marker meta
+    local entry sha tag f files used_entries=" "
     for v in "${uses_values[@]}"; do
         [ -n "${v}" ] || continue
         if [[ "${v}" == ./* ]]; then
@@ -13569,6 +13582,23 @@ _ci_check_action_node_versions() {
             viol+=("external action '${v}' (in: $(_ci_ando_reffiles "${v}")) must use a full 40-hex commit SHA")
             continue
         fi
+        # What: an external pin must equal its SOT entry.
+        # Why: uses: reads no SOT; the SOT owns SHA and tag.
+        # From: Issue #1683 | PR #1912
+        entry="$(_ci_action_sot_entry "${key}")" || return 2
+        if [ -z "${entry}" ]; then
+            viol+=("external action '${key}' (in: $(_ci_ando_reffiles "${v}")) has no SOT github_actions entry")
+            continue
+        fi
+        used_entries+="${entry} "
+        sha="$(_ci_block_entry_field github_actions "${entry}" sha)" || return 2
+        tag="$(_ci_block_entry_field github_actions "${entry}" tag)" || return 2
+        [ "${ref}" = "${sha}" ] || viol+=("'${v}' (in: $(_ci_ando_reffiles "${v}")) differs from SOT github_actions.${entry}.sha ${sha}")
+        files="$(_ci_ando_reffiles "${v}")"
+        for f in ${files}; do
+            awk -v v="${v}" -v t="# ${tag}" 'index($0, v) && substr($0, length($0) - length(t) + 1) != t { bad = 1 } END { exit bad }' "${f}" \
+                || viol+=("${f}: '${v}' lacks the SOT tag comment '# ${tag}'")
+        done
         owner="${key%%/*}"; repo="${key#*/}"; subpath=""
         [[ "${repo}" != */* ]] || { subpath="${repo#*/}"; repo="${repo%%/*}"; }
         res="$(_ci_fetch_action_manifest "${owner}" "${repo}" "${subpath}" "${ref}")" || return 2
@@ -13596,6 +13626,18 @@ _ci_check_action_node_versions() {
         ci_error "[CI-ERROR-CHECK-0073]" "reason=\"action manifest unresolved after retries; FAIL CLOSED\"" "$(printf '%s\n' "${infra[@]}")"
         return 2
     fi
+
+    # What: every SOT action pin must be used.
+    # Why: a dead pin is an owner nobody checks.
+    # From: Issue #1683 | PR #1912
+    local entries
+    entries="$(_ci_block_keys github_actions)" || return 2
+    for entry in ${entries}; do
+        case "${used_entries}" in
+            *" ${entry} "*) ;;
+            *) viol+=("SOT github_actions.${entry} is used by no workflow") ;;
+        esac
+    done
 
     # What: extraction faults reported apart from pin.
     # Why: parse gap not deprecated-runtime fail.
