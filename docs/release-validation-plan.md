@@ -527,7 +527,7 @@ a stated reason it has none (AG-VAL-029).
 - **Dockerfile lint**: BuildKit's `docker buildx build --call check` (for example a
   trailing `\` that merges the next instruction into a `RUN`) runs in no job; such a
   Dockerfile fails only in `build`.
-- **`FROM ${VAR}` without a global `ARG`**: `check dockerfile-stage-variables` covers
+- **`FROM ${VAR}` without a global `ARG`**: `check dockerfiles` covers
   the stage `ARG`s of `ci.sh` stages only; the build fails.
 - **A bare `!` inside a bats loop body**: shellcheck does not report this shape; no
   check.

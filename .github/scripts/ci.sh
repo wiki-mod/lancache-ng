@@ -94,11 +94,10 @@ declare -gA CI_CHECKS=(
     [proxy-nginx-policy]="repo _ci_check_proxy_nginx_policy" [setup-kea-preflight]="repo _ci_check_setup_kea_preflight"
     [setup-update-safety]="repo _ci_check_setup_update_safety" [image-channel-resolution]="repo _ci_check_image_channel_resolution"
     [vex-drift]="repo _ci_check_vex_drift" [logging-matrix]="repo _ci_check_logging_matrix"
-    [dockerfile-build-tools]="repo _ci_check_dockerfile_build_tools" [dockerfile-stage-variables]="repo _ci_check_dockerfile_stage_variables"
-    [dockerfile-secret-ids]="repo _ci_check_dockerfile_secret_ids" [dockerfile-context-edges]="repo _ci_check_dockerfile_context_edges"
+    [dockerfiles]="repo _ci_check_dockerfiles"
     [sot-identity-inputs]="repo _ci_check_sot_identity_inputs" [workflow-ci-variables]="repo _ci_check_workflow_ci_variables"
     [workflow-job-settings]="repo _ci_check_workflow_job_settings" [cargo-profile-tuning]="repo _ci_check_cargo_profile_tuning"
-    [no-source-compiled-tools]="repo _ci_check_no_source_compiled_tools" [codeql-coverage]="repo _ci_check_codeql_coverage"
+    [codeql-coverage]="repo _ci_check_codeql_coverage"
     [version-drift]="repo _ci_version_verify"
     [pr-title]="pr _ci_check_pr_title" [pr-template]="pr _ci_check_pr_template" [pr-tracking-metadata]="job _ci_check_pr_tracking_metadata"
     [cargo-audit]="job _ci_check_cargo_audit" [shellcheck]="job _ci_check_shellcheck"
@@ -15112,25 +15111,64 @@ _ci_check_sot_identity_inputs() {
     printf 'sot-identity-inputs=clean types=%s\n' "${n}"
 }
 
-# What: each local COPY source is the context or an edge.
-# Why: an uncovered source keeps a stale image identity.
+# What: every build target's Dockerfile, one pass each.
+# Why: one owner for the rules a Dockerfile must meet.
 # From: Issue #1683 | PR #1912
-_ci_check_dockerfile_context_edges() {
-    local repo_root="${1:-${CI_REPO_ROOT:-.}}" targets t df ctxs c p srcs src ok n=0
-    local -a viol=() roots=() tl=() cl=()
+_ci_check_dockerfiles() {
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}" targets t df rel type svars bvars allow raw tok missing bst bv
+    local hits spec p id c ctxs srcs src ok n=0 rc=0
+    local -a tl=() cl=() roots=() parts=() e_bt=() e_tune=() e_stage=() e_secret=() e_ctx=() e_src=()
+    local -A kv=() is_pkg=()
+    svars="$(_ci_block_entry_list stage_variables "" ci_sh)" || return 2
+    [ -n "${svars}" ] || e_stage+=("SOT stage_variables.ci_sh lists no variable")
+    bvars="$(_ci_block_entry_list build_variables "" rust)" || return 2
+    allow="$(_ci_runtime_secret_ids)" || return 2
+    raw="$(_ci_build_tools_packages)" || return 2
+    while IFS= read -r tok; do [ -z "${tok}" ] || is_pkg["${tok}"]=1; done <<< "${raw}"
     targets="$(ci_build_targets)" || return 2
     [ -z "${targets}" ] || mapfile -t tl <<< "${targets}"
     for t in "${tl[@]}"; do
         df="$(_ci_service_path "${t}" Dockerfile "${repo_root}")" || return 2
+        rel="${df#"${repo_root}/"}"
+        if [ ! -f "${df}" ]; then
+            e_secret+=("${t}: no Dockerfile at ${rel}"); continue
+        fi
+        n=$(( n + 1 ))
+        type="$(ci_service_field "${t}" build_type)" || return 2
+        # What: each ci.sh stage declares every SOT stage var.
+        # Why: ARG scope is per stage; else ci.sh reads none.
+        # From: Issue #1683 | PR #1858
+        missing="$(_ci_dockerfile_stage_missing_args "${df}" "${svars}" 'ci[.]sh (apk-setup|rust-build)')" || return 2
+        while read -r bst bv; do
+            [ -z "${bv}" ] || e_stage+=("${t}: Dockerfile stage ${bst} runs ci.sh without ARG ${bv} (SOT stage_variables.ci_sh)")
+        done <<< "$(sort -u <<< "${missing}")"
+        # What: each secret mount id is a central id.
+        # Why: set-runtime writes only listed ids; one source.
+        # From: Issue #1683 | PR #1858
+        hits="$(_ci_capture 0 awk '/^[[:space:]]*#/ { next }
+            { s = $0; while (match(s, /--mount=[^[:space:]]+/)) { print substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH) } }' "${df}")" || return 2
+        while IFS= read -r spec; do
+            [ -n "${spec}" ] || continue
+            kv=()
+            IFS=',' read -r -a parts <<< "${spec#--mount=}"
+            for p in "${parts[@]}"; do kv["${p%%=*}"]="${p#*=}"; done
+            [ "${kv[type]:-bind}" = secret ] || continue
+            id="${kv[id]:-${kv[target]:-${kv[dst]:-${kv[destination]:-}}}}"
+            [ -n "${kv[id]:-}" ] || id="${id##*/}"
+            if [ -z "${id}" ]; then
+                e_secret+=("${t}: ${rel}: '${spec}' has no id or target"); continue
+            fi
+            grep -qx -- "${id}" <<< "${allow}" || e_secret+=("${t}: ${rel}: mount id '${id}' is not in the central list")
+        done <<< "${hits}"
+        # What: each local COPY source is the context or an edge.
+        # Why: an uncovered source keeps a stale image identity.
+        # From: Issue #1683 | PR #1912
         c="$(_ci_required_field "${t}" context)" || return 2
         roots=("${c}")
         ctxs="$(ci_service_context_paths "${t}" "${repo_root}")" || return 2
         cl=()
         [ -z "${ctxs}" ] || mapfile -t cl <<< "${ctxs}"
         roots+=("${cl[@]}")
-        n=$(( n + 1 ))
-        # What: joins \ lines, skips --from, drops the dest.
-        # Why: only build-context sources feed the identity.
         srcs="$(_ci_capture 0 awk '
             /\\$/ { buf = buf substr($0, 1, length($0) - 1) " "; next }
             { line = buf $0; buf = "" }
@@ -15144,52 +15182,54 @@ _ci_check_dockerfile_context_edges() {
             for p in "${roots[@]}"; do
                 case "${src%/}" in "${p}" | "${p}"/*) ok=1; break ;; esac
             done
-            [ -n "${ok}" ] || viol+=("${t}: ${df#"${repo_root}/"} copies ${src}, outside its context and SOT edges")
+            [ -n "${ok}" ] || e_ctx+=("${t}: ${rel} copies ${src}, outside its context and SOT edges")
         done <<< "${srcs}"
-    done
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0175]" "targets=${n} reason=\"a COPY source is outside the context paths\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'dockerfile-context-edges=clean targets=%s\n' "${n}"
-}
-
-# What: each Dockerfile secret mount id is a central id.
-# Why: set-runtime writes only listed ids; one source.
-# From: Issue #1683 | PR #1858
-_ci_check_dockerfile_secret_ids() {
-    local repo_root="${1:-${CI_REPO_ROOT:-.}}" targets t df allow hits spec p id n=0
-    local -a viol=() parts=()
-    local -A kv=()
-    targets="$(ci_build_targets)" || return 2
-    allow="$(_ci_runtime_secret_ids)" || return 2
-    for t in ${targets}; do
-        df="$(_ci_service_path "${t}" Dockerfile "${repo_root}")" || return 2
-        n=$(( n + 1 ))
-        if [ ! -f "${df}" ]; then
-            viol+=("${t}: no Dockerfile at ${df#"${repo_root}/"}"); continue
+        # What: cargo install tokens; rust: none at all.
+        # Why: build-tools owns the toolchain (AG-REL-002).
+        # From: Issue #1683 | PR #1912
+        raw="$(_ci_capture 0 awk '
+            match($0, /cargo[ \t]+install[ \t]+/) {
+                r = substr($0, RSTART + RLENGTH); sub(/[&|;].*/, "", r)
+                k = split(r, a, /[ \t]+/)
+                for (i = 1; i <= k; i++) if (a[i] != "" && a[i] !~ /^-/) print a[i]
+            }' "${df}")" || return 2
+        if [ "${type}" != rust ]; then
+            while IFS= read -r tok; do
+                [ -z "${tok}" ] || [ -z "${is_pkg[${tok}]:-}" ] || e_src+=("${rel}: cargo install ${tok}; SOT ships it prebuilt in build-tools")
+            done <<< "${raw}"
+            continue
         fi
-        hits="$(_ci_capture 0 awk '/^[[:space:]]*#/ { next }
-            { s = $0; while (match(s, /--mount=[^[:space:]]+/)) { print substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH) } }' "${df}")" || return 2
-        while IFS= read -r spec; do
-            [ -n "${spec}" ] || continue
-            kv=()
-            IFS=',' read -r -a parts <<< "${spec#--mount=}"
-            for p in "${parts[@]}"; do kv["${p%%=*}"]="${p#*=}"; done
-            [ "${kv[type]:-bind}" = secret ] || continue
-            id="${kv[id]:-${kv[target]:-${kv[dst]:-${kv[destination]:-}}}}"
-            [ -n "${kv[id]:-}" ] || id="${id##*/}"
-            if [ -z "${id}" ]; then
-                viol+=("${t}: ${df#"${repo_root}/"}: '${spec}' has no id or target"); continue
-            fi
-            grep -qx -- "${id}" <<< "${allow}" || viol+=("${t}: ${df#"${repo_root}/"}: mount id '${id}' is not in the central list")
-        done <<< "${hits}"
+        [ -z "${raw}" ] || e_bt+=("${t}: Dockerfile compiles a tool with cargo install; consume the build-tools image")
+        # What: rust stages: build vars, build-tools image.
+        # Why: one toolchain owner; no self-compile (AG-CI-008).
+        # From: Issue #1683
+        grep -q "ARG ${CI_ARG_TOOLCHAIN_IMAGE}" "${df}" \
+            || e_bt+=("${t}: Dockerfile must declare ARG ${CI_ARG_TOOLCHAIN_IMAGE}")
+        missing="$(_ci_dockerfile_stage_missing_args "${df}" "${bvars}" 'ci[.]sh rust-build')" || return 2
+        while read -r bst bv; do
+            [ -z "${bv}" ] || e_bt+=("${t}: Dockerfile stage ${bst} runs ci.sh rust-build without ARG ${bv} (SOT build_variables.rust)")
+        done <<< "$(sort -u <<< "${missing}")"
+        grep -Eq "^FROM \\$\\{${CI_ARG_TOOLCHAIN_IMAGE}(:-scratch)?\\}([[:space:]]|$)" "${df}" \
+            || e_bt+=("${t}: Dockerfile must build FROM \${${CI_ARG_TOOLCHAIN_IMAGE}}")
+        # What: forbid a mutable default on the ARG.
+        # Why: ci.sh supplies the immutable ref (AG-CI-008).
+        # From: Issue #1683
+        ! grep -Eq "^ARG ${CI_ARG_TOOLCHAIN_IMAGE}=" "${df}" \
+            || e_bt+=("${t}: ARG ${CI_ARG_TOOLCHAIN_IMAGE} must carry no default; ci.sh supplies it")
+        # What: reject Cargo tuning hardcode; empty ARG ok.
+        # Why: jobs/lto/codegen from CI vars (AG-CI-006).
+        # From: Issue #1683
+        ! grep -Eq '^[[:space:]]*(ARG[[:space:]]+SCCACHE_DIST_SCHEDULER_URL|ENV[[:space:]]+CARGO_BUILD_JOBS=|ARG[[:space:]]+PROJECT_CARGO_LTO=.+|ARG[[:space:]]+PROJECT_CARGO_CODEGENUNIT=.+|ENV[[:space:]]+PROJECT_CARGO_LTO=|ENV[[:space:]]+PROJECT_CARGO_CODEGENUNIT=)' "${df}" \
+            || e_tune+=("${t}: Dockerfile hardcodes a Cargo tuning value; source jobs/lto/codegen from CI vars")
     done
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0156]" "targets=${n} reason=\"Dockerfile missing or mount id not central\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'dockerfile-secret-ids=clean targets=%s\n' "${n}"
+    [ "${#e_stage[@]}" -eq 0 ] || { ci_error "[CI-ERROR-CHECK-0169]" "targets=${n} reason=\"a ci.sh build stage lacks an SOT stage variable ARG\"" "$(printf '%s\n' "${e_stage[@]}")"; rc=1; }
+    [ "${#e_secret[@]}" -eq 0 ] || { ci_error "[CI-ERROR-CHECK-0156]" "targets=${n} reason=\"Dockerfile missing or mount id not central\"" "$(printf '%s\n' "${e_secret[@]}")"; rc=1; }
+    [ "${#e_ctx[@]}" -eq 0 ] || { ci_error "[CI-ERROR-CHECK-0175]" "targets=${n} reason=\"a COPY source is outside the context paths\"" "$(printf '%s\n' "${e_ctx[@]}")"; rc=1; }
+    [ "${#e_src[@]}" -eq 0 ] || { ci_error "[CI-ERROR-CHECK-0061]" "targets=${n} reason=\"Dockerfile source-compiles a prebuilt SOT tool; consume the build-tools image\"" "$(printf '%s\n' "${e_src[@]}")"; rc=1; }
+    [ "${#e_bt[@]}" -eq 0 ] || { ci_error "[CI-ERROR-CHECK-0058]" "targets=${n} reason=\"rust Dockerfile does not consume the build-tools image (AG-CI-008/AG-REL-002)\"" "$(printf '%s\n' "${e_bt[@]}")"; rc=1; }
+    [ "${#e_tune[@]}" -eq 0 ] || { ci_error "[CI-ERROR-CHECK-0060]" "targets=${n} reason=\"rust Dockerfile hardcodes a Cargo tuning value (AG-CI-006)\"" "$(printf '%s\n' "${e_tune[@]}")"; rc=1; }
+    [ "${rc}" -ne 0 ] || printf 'dockerfiles=clean targets=%s\n' "${n}"
+    return "${rc}"
 }
 
 # What: "stage name" per stage that runs <ere> sans ARG
@@ -15209,97 +15249,6 @@ _ci_dockerfile_stage_missing_args() {
         toupper($1) == "ARG" { for (i = 2; i <= NF; i++) { a = $i; sub(/=.*/, "", a); decl[st] = decl[st] a "|" }; next }
         $0 ~ runs { for (j = 1; j <= n; j++) if (index(decl[st], "|" req[j] "|") == 0) print st " " req[j] }
     ' "${df}"
-}
-
-# What: each ci.sh stage declares every SOT stage variable
-# Why: ARG scope is per stage; else ci.sh reads no value
-# From: Issue #1683 | PR #1858
-_ci_check_dockerfile_stage_variables() {
-    local repo_root="${1:-${CI_REPO_ROOT:-.}}" service df svars targets missing bst bv n=0
-    local -a viol=()
-    svars="$(_ci_block_entry_list stage_variables "" ci_sh)" || return 2
-    [ -n "${svars}" ] || viol+=("SOT stage_variables.ci_sh lists no variable")
-    targets="$(ci_build_targets)" || return 2
-    for service in ${targets}; do
-        df="$(_ci_service_path "${service}" Dockerfile "${repo_root}")" || return 2
-        if [ ! -f "${df}" ]; then
-            viol+=("${service}: no Dockerfile at ${df#"${repo_root}/"}"); continue
-        fi
-        n=$(( n + 1 ))
-        missing="$(_ci_dockerfile_stage_missing_args "${df}" "${svars}" 'ci[.]sh (apk-setup|rust-build)')" || return 2
-        while read -r bst bv; do
-            [ -n "${bv}" ] || continue
-            viol+=("${service}: Dockerfile stage ${bst} runs ci.sh without ARG ${bv} (SOT stage_variables.ci_sh)")
-        done <<< "$(sort -u <<< "${missing}")"
-    done
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0169]" "dockerfiles=${n} reason=\"a ci.sh build stage lacks an SOT stage variable ARG\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'dockerfile-stage-variables=clean dockerfiles=%s\n' "${n}"
-}
-
-# What: rust Dockerfiles must use build-tools image.
-# Why: one toolchain owner; no self-compile (AG-CI-008).
-# From: Issue #1683
-_ci_check_dockerfile_build_tools() {
-    local repo_root="${1:-${CI_REPO_ROOT:-.}}" service df rc=0 bvars bv bst missing
-    local -a viol=() tuning=()
-    local services svc_type
-    services="$(ci_services)" || return 2
-    bvars="$(_ci_block_entry_list build_variables "" rust)" || return 2
-    for service in ${services}; do
-        svc_type="$(ci_service_field "${service}" build_type)" || return 2
-        [ "${svc_type}" = rust ] || continue
-        df="$(_ci_service_path "${service}" Dockerfile "${repo_root}")" || return 2
-        if [ ! -f "${df}" ]; then
-            viol+=("${service}: no Dockerfile at ${df#"${repo_root}/"}"); continue
-        fi
-        grep -q "ARG ${CI_ARG_TOOLCHAIN_IMAGE}" "${df}" \
-            || viol+=("${service}: Dockerfile must declare ARG ${CI_ARG_TOOLCHAIN_IMAGE}")
-        # What: rust-build stages declare every build var.
-        # Why: ARG scope is per stage; else none reaches it.
-        # From: Issue #1683 | PR #1858
-        missing="$(_ci_dockerfile_stage_missing_args "${df}" "${bvars}" 'ci[.]sh rust-build')" || return 2
-        missing="$(sort -u <<< "${missing}")"
-        while read -r bst bv; do
-            [ -n "${bv}" ] || continue
-            viol+=("${service}: Dockerfile stage ${bst} runs ci.sh rust-build without ARG ${bv} (SOT build_variables.rust)")
-        done <<< "${missing}"
-        grep -Eq "^FROM \\$\\{${CI_ARG_TOOLCHAIN_IMAGE}(:-scratch)?\\}([[:space:]]|$)" "${df}" \
-            || viol+=("${service}: Dockerfile must build FROM \${${CI_ARG_TOOLCHAIN_IMAGE}}")
-        # What: forbid a mutable default on the ARG.
-        # Why: ci.sh supplies the immutable ref (AG-CI-008).
-        # From: Issue #1683
-        local hit
-        hit="$(_ci_capture 1 grep -E "^ARG ${CI_ARG_TOOLCHAIN_IMAGE}=" "${df}")" || return 2
-        if [ -n "${hit}" ]; then
-            viol+=("${service}: ARG ${CI_ARG_TOOLCHAIN_IMAGE} must carry no default; ci.sh supplies it")
-        fi
-        local hit
-        hit="$(_ci_capture 1 grep -F 'cargo install' "${df}")" || return 2
-        if [ -n "${hit}" ]; then
-            viol+=("${service}: Dockerfile compiles a tool with cargo install; consume the build-tools image")
-        fi
-        # What: reject Cargo tuning hardcode; empty ARG ok.
-        # Why: jobs/lto/codegen from CI vars (AG-CI-006).
-        # From: Issue #1683
-        local hit
-        hit="$(_ci_capture 1 grep -E '^[[:space:]]*(ARG[[:space:]]+SCCACHE_DIST_SCHEDULER_URL|ENV[[:space:]]+CARGO_BUILD_JOBS=|ARG[[:space:]]+PROJECT_CARGO_LTO=.+|ARG[[:space:]]+PROJECT_CARGO_CODEGENUNIT=.+|ENV[[:space:]]+PROJECT_CARGO_LTO=|ENV[[:space:]]+PROJECT_CARGO_CODEGENUNIT=)' "${df}")" || return 2
-        if [ -n "${hit}" ]; then
-            tuning+=("${service}: Dockerfile hardcodes a Cargo tuning value; source jobs/lto/codegen from CI vars")
-        fi
-    done
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0058]" "reason=\"rust Dockerfile does not consume the build-tools image (AG-CI-008/AG-REL-002)\"" "$(printf '%s\n' "${viol[@]}")"
-        rc=1
-    fi
-    if [ "${#tuning[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0060]" "reason=\"rust Dockerfile hardcodes a Cargo tuning value (AG-CI-006)\"" "$(printf '%s\n' "${tuning[@]}")"
-        rc=1
-    fi
-    [ "${rc}" -eq 0 ] && printf 'dockerfile-build-tools=clean\n'
-    return "${rc}"
 }
 
 # What: no workspace Cargo.toml set [profile].
@@ -15323,42 +15272,6 @@ _ci_check_cargo_profile_tuning() {
         return 1
     fi
     printf 'cargo-profile-tuning=clean\n'
-}
-
-# What: no Dockerfile cargo-install prebuilt.
-# Why: build-tools one toolchain owner (AG-REL-002).
-# From: Issue #1683
-_ci_check_no_source_compiled_tools() {
-    local repo_root="${1:-${CI_REPO_ROOT:-.}}" df tok raw dfs
-    local -a viol=() pkgs=()
-    local -A is_pkg=()
-    raw="$(_ci_build_tools_packages)" || return 2
-    mapfile -t pkgs <<< "${raw}"
-    for tok in "${pkgs[@]}"; do [ -n "${tok}" ] && is_pkg["${tok}"]=1; done
-    dfs="$(_ci_ls_files no-source-compiled-tools "${repo_root}" '*Dockerfile')" || return 2
-    while IFS= read -r df; do
-        [ -n "${df}" ] || continue
-        local produced produced_rc=0
-        produced="$(awk '
-            match($0, /cargo[ \t]+install[ \t]+/) {
-                r = substr($0, RSTART + RLENGTH)
-                sub(/[&|;].*/, "", r)
-                n = split(r, a, /[ \t]+/)
-                for (i = 1; i <= n; i++)
-                    if (a[i] != "" && a[i] !~ /^-/) print a[i]
-            }
-        ' "${repo_root}/${df}")" || produced_rc=$?
-        _ci_producer_ok "${produced_rc}" 0 || return 2
-        while IFS= read -r tok; do
-            [ -n "${tok}" ] && [ -n "${is_pkg[${tok}]:-}" ] \
-                && viol+=("${df}: cargo install ${tok}; SOT ships it prebuilt in build-tools")
-        done <<<"${produced}"
-    done <<< "${dfs}"
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0061]" "reason=\"Dockerfile source-compiles a prebuilt SOT tool; consume the build-tools image\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'no-source-compiled-tools=clean\n'
 }
 
 # What: every tracked language file is in its CodeQL scope.
