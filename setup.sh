@@ -108,16 +108,16 @@ ask() {
     REPLY="${REPLY:-$default}"
 }
 
-# What: a SOT 0/1 default as the Y or N of a prompt
+# What: a SOT 0/1 or true/false default as Y or N
 # Why: the SOT owns each default; a prompt only shows it
 # From: Issue #1683 | PR #1912
 yn_default() {
     local value
     value=$(prod_env_default "$1") || exit $?
     case "$value" in
-        1) printf 'Y\n' ;;
-        0) printf 'N\n' ;;
-        *) die "The SOT default of $1 is '$value', not 0 or 1." ;;
+        1|true) printf 'Y\n' ;;
+        0|false) printf 'N\n' ;;
+        *) die "The SOT default of $1 is '$value', not 0/1 or true/false." ;;
     esac
 }
 
@@ -125,7 +125,7 @@ yn_default() {
 # Why: the wizard stores the answer, never a default
 # From: Issue #1683 | PR #1912
 yn_flag() {
-    if [[ "${1,,}" = "y" ]]; then printf '1\n'; else printf '0\n'; fi
+    case "${1,,}" in y|yes) printf '1\n' ;; *) printf '0\n' ;; esac
 }
 
 # What: the [y/N] or [Y/n] hint of a prompt default
@@ -443,7 +443,7 @@ compose_profiles_for_runtime() {
 confirm() {
     local prompt="$1" default="${2:-N}"
     ask "$prompt" "$default"
-    [[ "${REPLY,,}" = "y" || "${REPLY,,}" = "yes" ]]
+    [[ "$(yn_flag "$REPLY")" = 1 ]]
 }
 
 # What: runs a broadcast DHCP probe before Kea activation
@@ -3502,7 +3502,7 @@ migrate_env_for_update() (
         print_warn "Note the password now; only its hash is stored."
     fi
 
-    allow_insecure_ui=false
+    allow_insecure_ui=$(prod_env_default ALLOW_INSECURE_UI) || exit $?
     [[ -z "$ui_user" && -z "$ui_password" && -z "$ui_password_hash" ]] && allow_insecure_ui=true
     append_env_key_if_missing ALLOW_INSECURE_UI "$allow_insecure_ui" "$env_file"
 
@@ -6024,8 +6024,7 @@ cmd_update_ip() {
     printf "    HTTPS IP:    %s\n" "$new_ip_https"
     printf "\n"
 
-    ask "Apply changes? [y/N]" "N"
-    [[ "${REPLY,,}" = "y" ]] || { printf "\n  Cancelled.\n\n"; exit 0; }
+    confirm "Apply changes? [y/N]" "N" || { printf "\n  Cancelled.\n\n"; exit 0; }
 
     print_step "Updating configuration files"
 
@@ -6719,8 +6718,7 @@ else
     print_warn "$IP_HTTPS not yet assigned to an interface"
     if [[ -n "$http_link" ]]; then
         read -r http_prefix http_dev <<< "$http_link"
-        ask "Add now? (ip addr add $IP_HTTPS/$http_prefix dev $http_dev) [y/N]" "N"
-        if [[ "${REPLY,,}" = "y" ]]; then
+        if confirm "Add now? (ip addr add $IP_HTTPS/$http_prefix dev $http_dev) [y/N]" "N"; then
             if [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
                 # What: introspection skips ip addr add
                 # Why: list-prompts only walks the prompts
@@ -6746,8 +6744,7 @@ printf "  ${BOLD}HTTPS mode${RESET}: also caches HTTPS downloads (Epic, EA, Bliz
 printf "  Requires a CA certificate on clients.\n\n"
 https_yn=$(yn_default HTTPS_ENABLED) || exit $?
 ask "Enable HTTPS mode? $(yn_hint "$https_yn")" "$https_yn"
-HTTPS_ENABLED=0
-[[ "${REPLY,,}" = "y" ]] && HTTPS_ENABLED=1
+HTTPS_ENABLED=$(yn_flag "$REPLY")
 print_ok "HTTPS mode $([[ "$HTTPS_ENABLED" = 1 ]] && echo enabled || echo disabled) (second IP $IP_HTTPS)"
 
 # ── 3. Data directory ─────────────────────────────────────────────────────────
@@ -6765,8 +6762,7 @@ LANCACHE_STATE_DIR="$(realpath -m "$REPLY")"
 
 if [[ -f "$ENV_LOCAL" ]]; then
     print_warn "Existing configuration found: $ENV_LOCAL"
-    ask "Overwrite? [y/N]" "N"
-    [[ "${REPLY,,}" = "y" ]] || die "Cancelled."
+    confirm "Overwrite? [y/N]" "N" || die "Cancelled."
 fi
 
 if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
@@ -6860,12 +6856,13 @@ printf "  it only proceeds if the release channel actually moved to a new\n"
 printf "  immutable image set, brings every service except the Admin UI up first\n"
 printf "  and verifies it is healthy, updates the Admin UI last, and rolls back to\n"
 printf "  the pre-update backup automatically if a health check fails.\n"
-printf "  Default: disabled — update manually any time with: ./setup.sh update\n\n"
+auto_update_yn=$(yn_default AUTO_UPDATE_ENABLED) || exit $?
+printf "  Default: %s. Update manually any time with: ./setup.sh update\n\n" \
+    "$([[ "$auto_update_yn" = "Y" ]] && echo enabled || echo disabled)"
 
-ask "Enable scheduled automatic updates? [y/N]" "N"
-AUTO_UPDATE_ENABLED=0
-if [[ "${REPLY,,}" = "y" ]]; then
-    AUTO_UPDATE_ENABLED=1
+ask "Enable scheduled automatic updates? $(yn_hint "$auto_update_yn")" "$auto_update_yn"
+AUTO_UPDATE_ENABLED=$(yn_flag "$REPLY")
+if [[ "$AUTO_UPDATE_ENABLED" = 1 ]]; then
     print_ok "Scheduled automatic updates enabled (ordered, health-gated, daily)"
 else
     print_warn "Scheduled automatic updates disabled — manual updates with: ./setup.sh update"
@@ -7181,12 +7178,11 @@ printf "  Password protection is optional, but recommended on shared or untruste
 UI_LOOPBACK_HINT=$(prod_env_default LOOPBACK_BIND_IP) || exit $?
 printf "  To restrict the UI to this host later, set UI_BIND_IP=%s in .env.\n\n" "$UI_LOOPBACK_HINT"
 
-ask "Protect Admin-UI with password? [Y/n]" "Y"
 UI_AUTH_USER=""
 UI_AUTH_PASSWORD=""
 UI_AUTH_PASSWORD_HASH=""
 ALLOW_INSECURE_UI=$(prod_env_default ALLOW_INSECURE_UI) || exit $?
-if [[ "${REPLY,,}" = "y" ]]; then
+if confirm "Protect Admin-UI with password? [Y/n]" "Y"; then
     ask "Username" "admin"
     UI_AUTH_USER="$REPLY"
 
@@ -7222,8 +7218,8 @@ if [[ "${REPLY,,}" = "y" ]]; then
         printf "\n"
     fi
 else
-    ask "Allow Admin-UI without authentication? [y/N]" "N"
-    if [[ "${REPLY,,}" = "y" ]]; then
+    insecure_yn=$(yn_default ALLOW_INSECURE_UI) || exit $?
+    if confirm "Allow Admin-UI without authentication? $(yn_hint "$insecure_yn")" "$insecure_yn"; then
         ALLOW_INSECURE_UI=true
         print_warn "No password protection — Admin-UI will be reachable on $IP_HTTP"
         print_warn "This is explicitly allowed by ALLOW_INSECURE_UI=true"
@@ -7238,8 +7234,7 @@ print_step "Writing .env"
 env_file="$ENV_LOCAL"
 
 if [[ -f "$env_file" ]]; then
-    ask "Overwrite .env.local? [y/N]" "N"
-    [[ "${REPLY,,}" = "y" ]] || die "Cancelled."
+    confirm "Overwrite .env.local? [y/N]" "N" || die "Cancelled."
 fi
 
 # What: from here on, the real install mutations run

@@ -501,6 +501,7 @@ runtime:
     - NTP_STATE_DIR=/var/lib/chrony
     - NTP_DRIFT_FILE=@NTP_STATE_DIR@/drift
     - NTP_ENABLED=0
+    - AUTO_UPDATE_ENABLED=0
     - RETENTION_STATE_DIR=/var/lib/lancache-retention-state
     - PURGE_STAMP=@RETENTION_STATE_DIR@/purge.stamp
     - SYSLOG_PRUNE_STAMP=@RETENTION_STATE_DIR@/syslog-prune.stamp

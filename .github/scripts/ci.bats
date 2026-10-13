@@ -3635,6 +3635,8 @@ STUB
     _registry || return 1
     _stand_ins || return 1
     local root t="${BATS_TEST_TMPDIR}" repo env tpl cfg port http other dev pfx keys k v ddir np i calls after fault
+    local rows row r n answers
+    local -A sot=()
     [ ! -d /run/systemd/system ] || { echo "systemd host: a real install would write /etc units"; return 1; }
     root="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     _load_setup_sh "${root}" || return 1
@@ -3643,20 +3645,30 @@ STUB
     cfg="$(docker compose --env-file "${tpl}" -f "${repo}/deploy/prod/docker-compose.yml" config --format json)" \
         && port="$(jq -r '.services.ui.ports[0].published' <<< "${cfg}")" && [[ "${port}" =~ ^[0-9]+$ ]] \
         || { echo "prod compose config: ${cfg}"; return 1; }
-    keys="$(_ci_runtime_defaults | sed -n 's/=.*//p')" && [ -n "${keys}" ] \
-        || { echo "no SOT runtime.defaults keys: ${keys}"; return 1; }
+    # What: SOT defaults via yq; @KEY@ resolved here
+    # Why: no expectation from the resolver in setup.sh
+    # From: Issue #1683 | PR #1912
+    rows="$(yq -r '.runtime.defaults[]' "${CI_MANIFEST_SOURCE}")" && [ -n "${rows}" ] \
+        || { echo "no SOT runtime.defaults rows: ${rows}"; return 1; }
+    while IFS= read -r row; do sot["${row%%=*}"]="${row#*=}"; done <<< "${rows}"
+    keys="${!sot[*]}"
     # What: setup.sh holds no SOT default or ui port
     # Why: one owner each; a copy passes the checks below
     # From: Issue #1683 | PR #1912
     if grep -qw -- "${port}" "${repo}/setup.sh"; then echo "ui port ${port} is a literal in setup.sh"; return 1; fi
     for k in ${keys}; do
-        v="$(_ci_runtime_default "${k}")" || return 1
+        v="${sot[${k}]}" n=0
+        while [[ "${v}" =~ @([A-Za-z0-9_]+)@ ]] && [ "$((n += 1))" -le 16 ]; do
+            r="${BASH_REMATCH[1]}"
+            [ -n "${sot[${r}]+x}" ] || { echo "${k} names @${r}@, no SOT row"; return 1; }
+            v="${v//@${r}@/${sot[${r}]}}"
+        done
+        [[ ! "${v}" =~ @[A-Za-z0-9_]+@ ]] || { echo "${k} stays unresolved: ${v}"; return 1; }
         [ -n "${v}" ] || continue
-        # What: a wizard y is the on-value, not a default
-        # Why: the prompt default N is the operator's pick.
+        # What: any case; a lowercase copy is a copy too
+        # Why: allow_insecure_ui=false hid the SOT default
         # From: Issue #1683 | PR #1912
-        [ "${k}" != HTTPS_ENABLED ] || { grep -qF -e "${k}:-${v}" "${repo}/setup.sh" && { echo "${k} default ${v} is a literal in setup.sh"; return 1; }; continue; }
-        if grep -qF -e "${k}=${v}" -e "${k}:-${v}" "${repo}/setup.sh"; then
+        if grep -qiF -e "${k}=${v}" -e "${k}:-${v}" "${repo}/setup.sh"; then
             echo "${k} default ${v} is a literal in setup.sh"
             return 1
         fi
@@ -3695,13 +3707,15 @@ STUB
         "${DS}/docker.log")" -eq 2 ] || { echo "pull/up: $(cat "${DS}/docker.log")"; return 1; }
     _setup_sh_run 'stack_compose "${REPO}/deploy/prod" "${ENVL}" config --quiet'
     [ "${status}" -eq 0 ] || { echo "compose config: ${output}"; return 1; }
-    # What: no SOT default lands in .env.local
-    # Why: wizard answers stay; SOT defaults are not copied
+    # What: the wizard answers land; no other SOT key does
+    # Why: answers stay; SOT defaults are not copied
     # From: Issue #1683 | PR #1912
+    answers=" CACHE_MAX_SIZE CACHE_MEM_MB DHCP_SUBNET DHCP_GATEWAY DHCP_RANGE_START DHCP_RANGE_END ALLOW_INSECURE_UI NTP_ENABLED HTTPS_ENABLED AUTO_UPDATE_ENABLED DHCP_MODE KEA_DATA_DIR LANCACHE_STATE_DIR CACHE_DIR "
     for k in ${keys}; do
-        exempt=" CACHE_MAX_SIZE CACHE_MEM_MB DHCP_SUBNET DHCP_GATEWAY DHCP_RANGE_START DHCP_RANGE_END ALLOW_INSECURE_UI NTP_ENABLED HTTPS_ENABLED DHCP_MODE KEA_DATA_DIR LANCACHE_STATE_DIR CACHE_DIR "
-        case "${exempt}" in *" ${k} "*) continue ;; esac
-        [ -z "$(get_env_var "${k}" "${env}")" ] || { echo "${k} was copied into .env.local: $(cat "${env}")"; return 1; }
+        case "${answers}" in
+            *" ${k} "*) env_key_exists "${k}" "${env}" || { echo "answer ${k} missing in .env.local: $(cat "${env}")"; return 1; } ;;
+            *) [ -z "$(get_env_var "${k}" "${env}")" ] || { echo "${k} was copied into .env.local: $(cat "${env}")"; return 1; } ;;
+        esac
     done
     [ "$(get_env_var IP_HTTP "${env}")" = "${http}" ] && ! env_key_exists UI_AUTH_PASSWORD "${env}" \
         && [ -n "$(get_env_var UI_AUTH_PASSWORD_HASH "${env}")" ] \
