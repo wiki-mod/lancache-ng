@@ -224,8 +224,6 @@ impl Config {
         let dns_api = |port_key: &str| -> Result<String, String> {
             Ok(format!("{}:{}", need("DNS_URL")?, need(port_key)?))
         };
-        let flag =
-            |key: &str, default: bool| env(key).and_then(|v| parse_bool(&v)).unwrap_or(default);
         let read = |spec: Uint| -> Result<u64, String> {
             let (value, warning) = spec.parse(env(spec.name).as_deref())?;
             if let Some(warning) = warning {
@@ -298,15 +296,16 @@ impl Config {
                 text("DHCP_PROXY_CUSTOM_OPTIONS", ""),
             ),
             ("LANCACHE_IMAGE_CHANNEL", channel.clone()),
-            // What: optional switches, off when unset.
-            // Why: the ui gets none; the saved file sets.
+            // What: switches; SOT default is in the image.
+            // Why: no Rust fallback; no typo flips one.
+            // From: Issue #1683 | PR #1912
             (
                 "AUTO_UPDATE_ENABLED",
-                bool_text(flag("AUTO_UPDATE_ENABLED", false)),
+                bool_text(need_flag("AUTO_UPDATE_ENABLED")?),
             ),
-            ("NTP_ENABLED", bool_text(flag("NTP_ENABLED", false))),
+            ("NTP_ENABLED", bool_text(need_flag("NTP_ENABLED")?)),
             ("NTP_UPSTREAM_SERVERS", need("NTP_UPSTREAM_SERVERS")?),
-            ("NTP_AUTO_DHCP", bool_text(flag("NTP_AUTO_DHCP", false))),
+            ("NTP_AUTO_DHCP", bool_text(need_flag("NTP_AUTO_DHCP")?)),
             ("CACHE_MAX_GB", cache_max_gb.to_string()),
         ]);
         // What: the logging switches, from the strict env.
@@ -376,7 +375,7 @@ impl Config {
             ui_session_ttl_seconds: ttl,
             // What: security headers are on unless off.
             // Why: the ui gets none; safe is the default.
-            security_headers_enabled: flag("UI_SECURITY_HEADERS", true),
+            security_headers_enabled: need_flag("UI_SECURITY_HEADERS")?,
             hsts_mode: hsts_mode_from(&text("UI_HSTS_MODE", "")),
             ui_logs_max_entries: knob("UI_LOGS_MAX_ENTRIES", u64::MAX, OutOfRange::Reject)?
                 as usize,
@@ -409,7 +408,7 @@ impl Config {
             listen_port: knob("UI_LISTEN_PORT", u16::MAX.into(), OutOfRange::Reject)? as u16,
             // What: dev mode is an optional switch, off.
             // Why: the ui gets none; prod stays off.
-            dev_mode: flag("LANCACHE_DEV_MODE", false),
+            dev_mode: need_flag("LANCACHE_DEV_MODE")?,
             syslog_log_root: need("SYSLOG_LOG_ROOT")?,
             syslog_max_gb: read(config::SYSLOG_MAX_GB)? as u32,
             watchdog_status_file: need("STATUS_FILE")?,
@@ -6598,8 +6597,13 @@ mod tests {
         ("SYSLOG_MAX_GB", "3"),
     ];
 
-    const FLAG_KEYS: [&str; 6] = [
+    const FLAG_KEYS: [&str; 11] = [
         "HTTPS_ENABLED",
+        "UI_SECURITY_HEADERS",
+        "LANCACHE_DEV_MODE",
+        "AUTO_UPDATE_ENABLED",
+        "NTP_ENABLED",
+        "NTP_AUTO_DHCP",
         "ALLOW_INSECURE_UI",
         "LOGGING_PROXY_ENABLED",
         "LOGGING_DNS_ENABLED",
@@ -6690,6 +6694,7 @@ mod tests {
         assert_eq!(cfg.listen_port, 8081);
         assert_eq!(cfg.syslog_max_gb, 3);
         assert!(cfg.https_enabled && cfg.allow_insecure_ui);
+        assert!(cfg.security_headers_enabled && cfg.dev_mode);
         assert_eq!(cfg.cache_max_gb, 50.0);
     }
 
@@ -6700,9 +6705,7 @@ mod tests {
         let cfg = load_from(&full_env()).unwrap();
         assert_eq!(cfg.auth_user, None);
         assert_eq!(cfg.auth_password_hash, None);
-        assert!(cfg.security_headers_enabled);
         assert_eq!(cfg.hsts_mode, HstsMode::Auto);
-        assert!(!cfg.dev_mode);
         assert_eq!(cfg.secondary_registration_token, "");
         assert_eq!(cfg.advertised_nats_url, None);
         assert_eq!(cfg.nats.ui.user, "");
@@ -6716,9 +6719,6 @@ mod tests {
         assert_eq!(start("DHCP_DNS_PRIMARY"), "v-IP_HTTP");
         assert_eq!(start("DHCP_DNS_SECONDARY"), "v-IP_HTTPS");
         assert_eq!(start("NTP_UPSTREAM_SERVERS"), "v-NTP_UPSTREAM_SERVERS");
-        assert_eq!(start("AUTO_UPDATE_ENABLED"), "0");
-        assert_eq!(start("NTP_ENABLED"), "0");
-        assert_eq!(start("NTP_AUTO_DHCP"), "0");
         assert_eq!(start("CACHE_MAX_GB"), "50");
         assert_eq!(start("LANCACHE_IMAGE_CHANNEL"), "latest");
         assert_eq!(start("DHCP_SUBNET_START"), "");
@@ -6746,6 +6746,7 @@ mod tests {
             ("DHCP_MODE", "kea"),
             ("AUTO_UPDATE_ENABLED", "yes"),
             ("NTP_ENABLED", "on"),
+            ("NTP_AUTO_DHCP", "off"),
             ("CACHE_MAX_GB", "75"),
             ("NATS_ISSUER_SEED", "issuer"),
             ("NATS_XKEY_SEED", "xkey"),
@@ -6774,6 +6775,7 @@ mod tests {
         assert_eq!(cfg.dhcp_mode(), DhcpMode::Kea);
         assert_eq!(cfg.startup_settings["AUTO_UPDATE_ENABLED"], "1");
         assert_eq!(cfg.startup_settings["NTP_ENABLED"], "1");
+        assert_eq!(cfg.startup_settings["NTP_AUTO_DHCP"], "0");
         assert_eq!(cfg.cache_max_gb, 75.0);
         assert_eq!(cfg.nats_issuer_seed.as_deref(), Some("issuer"));
         assert_eq!(cfg.nats_xkey_seed.as_deref(), Some("xkey"));
@@ -6837,6 +6839,7 @@ mod tests {
             file.to_string_lossy().into_owned(),
         );
         env.insert("CACHE_MAX_GB".to_string(), "60".to_string());
+        env.insert("NTP_ENABLED".to_string(), "0".to_string());
         let cfg = load_from(&env).unwrap();
         assert_eq!(cfg.setting("DHCP_MODE"), "disabled");
         assert!(!cfg.flag("NTP_ENABLED"));
@@ -6868,6 +6871,9 @@ mod tests {
             "UI_SETTINGS_FILE".to_string(),
             file.to_string_lossy().into_owned(),
         );
+        for key in ["AUTO_UPDATE_ENABLED", "NTP_AUTO_DHCP"] {
+            env.insert(key.to_string(), "0".to_string());
+        }
         let cfg = load_from(&env).unwrap();
         cfg.save_settings(&[
             ("DHCP_MODE", " kea ".to_string()),
