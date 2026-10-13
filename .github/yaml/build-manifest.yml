@@ -869,8 +869,8 @@ ci_variables:
   # Why: AG-CI-016: every container command is bounded.
   # From: Issue #1683 | PR #1858
   CI_GHA_RUNTIME_EXPORT_TIMEOUT: 30
-  # What: compose file validate starts (AG-KD-008).
-  # Why: one deploy profile; a repo var may override.
+  # What: prod compose; setup.sh installs, CI checks it.
+  # Why: AG-KD-008 one deploy profile; one path owner.
   # From: Issue #1683 | PR #1858
   CI_COMPOSE_FILE: deploy/prod/docker-compose.yml
   # What: the workspace lockfile cargo-audit reads.
