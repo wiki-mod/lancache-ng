@@ -2660,8 +2660,9 @@ validate_lancache_image_channel() {
     die "LANCACHE_IMAGE_CHANNEL must be one of: $valid."
 }
 
-# What: derives vX.Y.Z[-rc.N] from git tag or VERSION file
+# What: vX.Y.Z[-rc.N] from git tag or SOT release.version
 # Why: rc 1 means no tag; rc 2 means found but malformed
+# From: Issue #1683 | PR #1912
 derive_release_archive_image_tag() {
     local version tag tags git_stderr git_status
     local -a safe_dir_opt=()
@@ -2687,7 +2688,7 @@ derive_release_archive_image_tag() {
                 safe_dir_opt=(-c "safe.directory=$dubious_path")
                 printf 'Note: %s has different file ownership than the current user; trusting it for this run only (see: git help safe.directory).\n' "$dubious_path" >&2
             else
-                printf 'Warning: %s contains a .git directory but git rejected it:\n%s\nFalling back to the VERSION file, which may be stale or unpublished. Set LANCACHE_IMAGE_TAG or LANCACHE_IMAGE_CHANNEL to override.\n' "$SCRIPT_DIR" "$git_stderr" >&2
+                printf 'Warning: %s contains a .git directory but git rejected it:\n%s\nFalling back to the SOT release.version, which may be unpublished. Set LANCACHE_IMAGE_TAG or LANCACHE_IMAGE_CHANNEL to override.\n' "$SCRIPT_DIR" "$git_stderr" >&2
             fi
         fi
 
@@ -2709,23 +2710,14 @@ derive_release_archive_image_tag() {
             printf '%s\n' "$tag"
             return 0
         fi
-        # What: falls through to the VERSION file
+        # What: falls through to the SOT release.version
         # Why: git still refuses the .git after the retry
     fi
 
-    [[ -f "$SCRIPT_DIR/VERSION" ]] || return 1
-    version=$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION") || die "Failed to read $SCRIPT_DIR/VERSION (exit $?)."
-    if [[ -z "$version" ]]; then
-        printf 'VERSION is empty; cannot derive a release image tag.\n' >&2
-        return 2
-    fi
-    if [[ "$version" = v* ]]; then
-        tag="$version"
-    else
-        tag="v$version"
-    fi
+    version=$(lancache_sot_value version release) || exit $?
+    tag="v${version#v}"
     if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
-        printf 'Invalid release image tag derived from VERSION: %s\n' "$tag" >&2
+        printf 'Invalid release image tag derived from release.version: %s\n' "$tag" >&2
         return 2
     fi
     printf '%s\n' "$tag"

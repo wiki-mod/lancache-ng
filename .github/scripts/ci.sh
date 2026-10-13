@@ -9829,14 +9829,13 @@ _ci_cargo_member_names() {
 # Why: copies are synced on demand, idempotent, not by hand.
 # From: Issue #1683 | PR #1858
 _ci_version_release_sync() {
-    local want lic lock cargo vfile names f tmp out wrote=0
+    local want lic lock cargo names f tmp out wrote=0
     want="$(_ci_release_value version)" || return 2
     lic="$(_ci_release_value license)" || return 2
     lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
     cargo="${lock%/*}/Cargo.toml"
-    vfile="$(_ci_repo_path CI_VERSION_FILE)" || return 2
     names="$(_ci_cargo_member_names "${cargo}")" || return 2
-    for f in "${cargo}" "${lock}" "${vfile}"; do
+    for f in "${cargo}" "${lock}"; do
         tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-vsync.XXXXXX")" || return 2
         case "${f}" in
             "${cargo}") out="$(awk -v v="${want}" -v l="${lic}" '/^\[workspace\.package\]/ { on = 1; print; next } /^\[/ { on = 0 }
@@ -9845,7 +9844,6 @@ _ci_version_release_sync() {
             "${lock}") out="$(awk -v v="${want}" -v names="${names//$'\n'/ }" 'BEGIN { split(names, a, " "); for (i in a) own[a[i]] = 1 }
                 /^name = / { x = $0; sub(/^name = "/, "", x); sub(/"$/, "", x); hit = (x in own) }
                 hit && /^version = / { print "version = \"" v "\""; hit = 0; next } { print }' "${f}" 2>&1 > "${tmp}")" ;;
-            *) out="$(printf '%s\n' "${want}" 2>&1 > "${tmp}")" ;;
         esac || { ci_error "[CI-ERROR-VERSION-0026]" "path=\"${f}\" reason=\"derived copy not rendered\"" "${out}"; rm -f "${tmp}"; return 2; }
         if ! out="$(_ci_copy_if_changed "${tmp}" "${f}")"; then
             ci_error "[CI-ERROR-VERSION-0027]" "path=\"${f}\" reason=\"derived copy not written\"" "${out}"
@@ -9858,11 +9856,11 @@ _ci_version_release_sync() {
     printf 'sync=release-version version=%s changed=%s\n' "${want}" "${wrote}"
 }
 
-# What: Cargo, members and VERSION equal release.version.
+# What: Cargo and its members equal release.version.
 # Why: one release version owner; consumers must not drift.
 # From: Issue #1683 | PR #1858
 _ci_version_release() {
-    local want lic got lock cargo vfile members m n k rc=0
+    local want lic got lock cargo members m n k rc=0
     want="$(_ci_release_value version)" || return 2
     lic="$(_ci_release_value license)" || return 2
     lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
@@ -9896,15 +9894,6 @@ _ci_version_release() {
             rc=1
         fi
     done <<< "${m}"
-    vfile="$(_ci_repo_path CI_VERSION_FILE)" || return 2
-    if ! got="$(cat "${vfile}" 2>&1)"; then
-        ci_error "[CI-ERROR-VERSION-0023]" "path=\"${vfile}\" reason=\"version file unreadable\"" "${got}"
-        return 2
-    fi
-    if [ "${got}" != "${want}" ]; then
-        ci_log "[CI-ERROR-VERSION-0024]" "path=\"${vfile}\" got=\"${got}\" want=\"${want}\" reason=\"version file is not SOT release.version\""
-        rc=1
-    fi
     [ "${rc}" -eq 0 ] && printf 'release-version=%s consumers=clean\n' "${want}"
     return "${rc}"
 }
@@ -11820,7 +11809,7 @@ _ci_prose_exempt_load() {
 # From: Issue #1683
 _ci_prose_excluded() {
     case "$1" in
-        *.md|VERSION|LICENSE|COPYING) return 0 ;;
+        *.md|LICENSE|COPYING) return 0 ;;
         .env|.env.example) return 0 ;;
         Cargo.lock|*/Cargo.lock|.gitkeep|*/.gitkeep) return 0 ;;
         */fuzz/corpus/*|fuzz/corpus/*) return 0 ;;
