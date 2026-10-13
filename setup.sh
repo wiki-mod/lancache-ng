@@ -4180,9 +4180,9 @@ Runs the guided LanCache-NG installer. setup.sh does nothing without a
 command, so the curl | bash one-liner passes it: ... | sudo bash -s -- install
 
 When no local repo is found (the standalone curl | bash path), this command
-self-clones to ${DEFAULT_INSTALL_DIR} from the remote's default branch (master) by
+self-clones to ${DEFAULT_INSTALL_DIR} from the remote's default branch by
 default. Set LANCACHE_SETUP_GIT_REF to a branch, tag, or commit-ish (e.g.
-LANCACHE_SETUP_GIT_REF=v0.2.0) to bootstrap from that ref instead -- useful
+LANCACHE_SETUP_GIT_REF=vX.Y.Z) to bootstrap from that ref instead -- useful
 for validating a pre-release branch the same documented one-liner way that
 LANCACHE_IMAGE_CHANNEL already selects a specific image channel (#814).
 EOF
@@ -7310,9 +7310,10 @@ CACHE_MEM_MB=${CACHE_MEM_MB}
 # For Admin UI (GB as number for progress bar)
 CACHE_MAX_GB=${cache_gb}
 
-# Image channel: stable (alias of latest, built from master) or
-# nightly (built from current_dev). setup.sh resolves the channel
-# to an immutable sha-* service tag before it pulls any image.
+# Image channel: stable (alias of latest) or nightly; the branch
+# of each is in release.channels of build-manifest.yml.
+# setup.sh resolves the channel to an immutable sha-* service
+# tag before it pulls any image.
 # Release archives should use their matching vX.Y.Z or vX.Y.Z-rc.N tag.
 LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY}
 LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX}
