@@ -11737,7 +11737,7 @@ _ci_prose_exempt_load() {
 }
 
 # What: true for a path a SOT exemption glob matches.
-# Why: one owner for every comment-check exemption.
+# Why: one owner for vendored, binary and prose skips.
 # From: Issue #1683 | PR #1912
 _ci_prose_excluded() {
     local e
@@ -12318,25 +12318,31 @@ _ci_check_language_policy() {
     local -A is_sh=()
     _ci_scan_files files _ci_override || return 2
     _ci_shell_sources shell _ci_override || return 2
-    local path
+    local path inline
     for path in "${shell[@]}"; do is_sh["${path}"]=1; done
-    local -a viol=()
+    local -a viol=() scan=()
+    _ci_prose_exempt_load || return 2
     for path in "${files[@]}"; do
-        # What: vendored minified UI asset, not authored.
+        # What: vendored files (SOT file_headers.exempt).
         # Why: AG-REL-001 governs authored, not vendored.
-        # From: Issue #1683 | PR #1858
-        case "${path}" in services/ui/src/static/*.min.js) continue ;; esac
+        # From: Issue #1683 | PR #1912
+        ! _ci_prose_excluded "${path}" || continue
         case "${path}" in
             *.py|*.pyc|*.pyw|*.rb|*.php|*.pl|*.pm|*.js|*.mjs|*.cjs|*.ts) viol+=("${path}: banned-language file"); continue ;;
         esac
         if [ -n "${is_sh[${path}]:-}" ] || [[ "${path}" == *.yml || "${path}" == *.yaml ]]; then
-            local inline
-            inline="$(_ci_capture 1 grep -E '(python3?|perl|ruby|node)[[:space:]]+-[eEc]|<<-?[[:space:]]*"?(PY|PYEOF|PYTHON|PERL|RUBY)' "${path}")" || return 2
-            if [ -n "${inline}" ]; then
-                viol+=("${path}: inline foreign-language interpreter")
-            fi
+            scan+=("${path}")
         fi
     done
+    # What: one grep -l over every shell and YAML file.
+    # Why: a grep per file cost a temp file and a fork each.
+    # From: Issue #1683 | PR #1912
+    if [ "${#scan[@]}" -gt 0 ]; then
+        inline="$(_ci_capture 1 grep -lE '(python3?|perl|ruby|node)[[:space:]]+-[eEc]|<<-?[[:space:]]*"?(PY|PYEOF|PYTHON|PERL|RUBY)' -- "${scan[@]}")" || return 2
+        while IFS= read -r path; do
+            [ -z "${path}" ] || viol+=("${path}: inline foreign-language interpreter")
+        done <<< "${inline}"
+    fi
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0007]" "reason=\"banned language (AG-REL-001)\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
