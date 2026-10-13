@@ -1194,20 +1194,6 @@ validate_env_value() {
     return 0
 }
 
-# What: validates each KEY=VALUE before the first .env write
-# Why: heredoc interpolates values unquoted
-validate_env_values_for_initial_write() {
-    local key value pair
-
-    # What: validates every value before the .env file opens
-    # Why: unquoted heredoc values could change parsing
-    for pair in "$@"; do
-        key="${pair%%=*}"
-        value="${pair#*=}"
-        validate_env_value "$key" "$value"
-    done
-}
-
 # What: rewrites KEY= lines of an env file (set or remove)
 # Why: a failed awk must never truncate or mangle the file
 # From: Issue #1683 | PR #1858
@@ -7213,56 +7199,11 @@ done <<< "$secret_rows"
 UI_SESSION_TTL_SECONDS=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file")
 [[ -z "$UI_SESSION_TTL_SECONDS" ]] || validate_ui_session_ttl_seconds "$UI_SESSION_TTL_SECONDS" "$env_file"
 
-validate_env_values_for_initial_write \
-    "IP_HTTP=${IP_HTTP}" \
-    "IP_HTTPS=${IP_HTTPS}" \
-    "HTTPS_ENABLED=${HTTPS_ENABLED}" \
-    "CACHE_DIR=${CACHE_DIR}" \
-    "CACHE_MAX_SIZE=${cache_gb}g" \
-    "CACHE_MEM_MB=${CACHE_MEM_MB}" \
-    "CACHE_MAX_GB=${cache_gb}" \
-    "LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY}" \
-    "LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX}" \
-    "LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}" \
-    "LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG}" \
-    "KEA_DATA_DIR=${KEA_DATA_DIR}" \
-    "DHCP_MODE=${DHCP_MODE}" \
-    "DHCP_SUBNET=${DHCP_SUBNET}" \
-    "DHCP_GATEWAY=${DHCP_GATEWAY}" \
-    "DHCP_RANGE_START=${DHCP_RANGE_START}" \
-    "DHCP_RANGE_END=${DHCP_RANGE_END}" \
-    "DHCP_SUBNET_START=${DHCP_SUBNET_START}" \
-    "DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY}" \
-    "DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY}" \
-    "UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP}" \
-    "DHCP_RELAY_LOCAL_ADDR=${DHCP_RELAY_LOCAL_ADDR}" \
-    "DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE}" \
-    "DHCP_PROXY_ROUTER=${DHCP_PROXY_ROUTER}" \
-    "DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS}" \
-    "DHCP_PROXY_DOMAIN=${DHCP_PROXY_DOMAIN}" \
-    "DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME}" \
-    "DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER}" \
-    "DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS}" \
-    "DHCP_PROXY_PXE_BOOT_SERVER=${DHCP_PROXY_PXE_BOOT_SERVER}" \
-    "DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS}" \
-    "DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI}" \
-    "NTP_ENABLED=${NTP_ENABLED}" \
-    "NTP_DATA_DIR=${NTP_DATA_DIR}" \
-    "KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}" \
-    "DDNS_TSIG_KEY=${DDNS_TSIG_KEY}" \
-    "PDNS_API_KEY=${PDNS_API_KEY}" \
-    "NATS_UI_PASSWORD=${NATS_UI_PASSWORD}" \
-    "NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD}" \
-    "NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD}" \
-    "NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD}" \
-    "SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}" \
-    "UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS}" \
-    "UI_AUTH_USER=${UI_AUTH_USER}" \
-    "UI_AUTH_PASSWORD_HASH=${UI_AUTH_PASSWORD_HASH}" \
-    "ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}" \
-    "UI_BIND_IP=${IP_HTTP}"
-
-write_file_atomically "$ENV_LOCAL" <<EOF
+# What: the first .env.local text; values are unquoted
+# Why: the one key list; the check below reads this body
+# From: Issue #1683 | PR #1912
+render_initial_env_local() {
+    cat <<EOF
 # ── LAN IPs ────────────────────────────────────────────────────────────────────
 # HTTP mode (no CA certificate needed): HTTP cached, HTTPS passthrough
 IP_HTTP=${IP_HTTP}
@@ -7384,6 +7325,29 @@ ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}
 # Set to ${UI_LOOPBACK_HINT} to restrict access to this host.
 UI_BIND_IP=${IP_HTTP}
 EOF
+}
+
+# What: checks every ${VAR} the text uses, before writing
+# Why: a value with a newline or quote would break .env
+# From: Issue #1683 | PR #1912
+validate_initial_env_local() {
+    local body line key ref
+    body=$(declare -f render_initial_env_local) \
+        || die "Cannot read render_initial_env_local (exit $?)."
+    while IFS= read -r line; do
+        key="${line%%=*}"
+        [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]] || key=""
+        while [[ "$line" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]]; do
+            ref="${BASH_REMATCH[1]}"
+            validate_env_value "${key:-$ref}" "${!ref-}"
+            line="${line/"${BASH_REMATCH[0]}"/}"
+        done
+    done <<< "$body"
+}
+
+validate_initial_env_local
+render_initial_env_local | write_file_atomically "$ENV_LOCAL" \
+    || die "Failed to write $ENV_LOCAL (exit $?)."
 print_ok ".env.local written: $ENV_LOCAL"
 write_lancache_image_refs "$ENV_LOCAL" "$LANCACHE_IMAGE_REFS"
 
