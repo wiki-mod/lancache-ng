@@ -62,15 +62,15 @@ CI_ARG_DEFAULTS=LANCACHE_RUNTIME_DEFAULTS
 # Why: One table is membership, dispatch and error text.
 # From: Issue #1683
 declare -A CI_DISPATCH=(
-    [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-config]=ci_cmd_codeql_config [codeql-analyze]=ci_cmd_codeql_analyze [identity]=ci_cmd_identity
-    [resolve]=ci_cmd_resolve [build]=ci_cmd_build [build-args]=ci_cmd_build_args [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [image-setup]=ci_cmd_image_setup [apk-pin-install]=ci_cmd_apk_pin_install
+    [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-analyze]=ci_cmd_codeql_analyze [identity]=ci_cmd_identity
+    [resolve]=ci_cmd_resolve [build]=ci_cmd_build [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [image-setup]=ci_cmd_image_setup [apk-pin-install]=ci_cmd_apk_pin_install
     [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [gha-runtime-args]=ci_cmd_gha_runtime_args
-    [test]=ci_cmd_test [scan]=ci_cmd_scan [scan-channel]=ci_cmd_scan_channel [assemble]=ci_cmd_assemble
-    [aggregate]=ci_cmd_aggregate [emit-result]=ci_cmd_emit_result [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
+    [test]=ci_cmd_test [scan-channel]=ci_cmd_scan_channel [assemble]=ci_cmd_assemble
+    [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
-    [release-publish]=ci_cmd_release_publish [release-sbom]=ci_cmd_release_sbom [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog
-    [gc]=ci_cmd_gc [variables]=ci_cmd_variables [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
+    [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog
+    [gc]=ci_cmd_gc [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
     [welcome]=ci_cmd_welcome [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
 )
 
@@ -100,7 +100,7 @@ declare -gA CI_CHECKS=(
     [workflow-job-settings]="repo _ci_check_workflow_job_settings" [cargo-profile-tuning]="repo _ci_check_cargo_profile_tuning"
     [no-source-compiled-tools]="repo _ci_check_no_source_compiled_tools" [codeql-coverage]="repo _ci_check_codeql_coverage"
     [version-drift]="repo _ci_version_verify"
-    [pr-title]="pr _ci_check_pr_title" [pr-template]="pr _ci_check_pr_template" [pr-tracking-metadata]="pr _ci_check_pr_tracking_metadata"
+    [pr-title]="pr _ci_check_pr_title" [pr-template]="pr _ci_check_pr_template" [pr-tracking-metadata]="job _ci_check_pr_tracking_metadata"
     [cargo-audit]="job _ci_check_cargo_audit" [shellcheck]="job _ci_check_shellcheck"
     [actionlint]="job _ci_check_actionlint" [orphaned-branches]="job _ci_check_orphaned_branches"
 )
@@ -545,17 +545,6 @@ ci_service_context_paths() {
         if [[ "${crates}" == *" ${crate} "* ]]; then
             _ci_workspace_src_dir "${dir}" "${bin}"
         fi
-    done <<< "${rows}"
-}
-
-# What: the library crate dirs of the workspace.
-# Why: shared sources are read from the member, not a copy.
-# From: Issue #1683 | PR #1912
-ci_workspace_lib_dirs() {
-    local rows dir bin crate
-    rows="$(_ci_workspace_rows "$1")" || return 2
-    while IFS='|' read -r dir bin crate; do
-        [ -n "${bin}" ] || printf '%s\n' "${dir}"
     done <<< "${rows}"
 }
 
@@ -2516,15 +2505,6 @@ _ci_ledger_upsert() {
         return 0
     fi
     _ci_cas_push_failed ledger "${ledger_ref}" "${rc}" "${raw}"
-}
-
-# What: Upsert a single record via the batch writer.
-# Why: One writer; convenience for one identity.
-# From: Issue #1683
-_ci_ledger_append() {
-    local remote="$1" identity="$2" service="$3" platform="$4" state="$5" digest="$6"
-    printf '%s\t%s\t%s\t%s\t%s\n' "${identity}" "${service}" "${platform}" "${state}" "${digest}" \
-        | _ci_ledger_upsert "${remote}"
 }
 
 # =========================================================
@@ -9007,24 +8987,6 @@ _ci_clear_runtime() {
     printf 'clear-runtime result=cleared dir=%s\n' "${dir}"
 }
 
-# What: Print one CI variable value for callers.
-# Why: Workflows read values via ci.sh, no second source.
-# From: Issue #1683
-ci_cmd_variables() {
-    local sub="${1:-}"
-    if [ "$#" -gt 0 ]; then shift; fi
-    case "${sub}" in
-        get) _ci_variable "${1:-}" ;;
-        set-runtime) _ci_set_runtime ;;
-        clear-runtime) _ci_clear_runtime ;;
-        bake-check) _ci_bake_check "${1:-}" ;;
-        *)
-            ci_log "[CI-ERROR-VARIABLES-0002]" "sub=\"${sub}\" reason=\"unknown variables subcommand\""
-            return 2
-            ;;
-    esac
-}
-
 # What: the SOT bootstrap apk list as one build-arg.
 # Why: each Dockerfile adds it before ci.sh can run.
 # From: Issue #1683 | PR #1912
@@ -9462,24 +9424,6 @@ _ci_matrix_append() {
         return 2
     fi
     printf '%s' "${out}"
-}
-
-# What: Format a multiline value as a GITHUB_OUTPUT block.
-# Why: Actions multiline outputs need a heredoc delimiter.
-# From: Issue #1683
-_ci_emit_multiline() {
-    local key="$1" value="$2"
-    local delim="__CI_EOF_${key}__"
-    # What: fail closed if the value contains the delimiter.
-    # Why: a delimiter collision would corrupt the output.
-    # From: Issue #1683
-    case "${value}" in
-        *"${delim}"*)
-            ci_log "[CI-ERROR-CORE-0004]" "key=\"${key}\" reason=\"value contains output delimiter; FAIL CLOSED\""
-            return 2
-            ;;
-    esac
-    printf '%s<<%s\n%s\n%s' "${key}" "${delim}" "${value}" "${delim}"
 }
 
 # What: resolve published build-tools to immutable ref.
