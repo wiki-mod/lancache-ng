@@ -1061,12 +1061,10 @@ runner_host:
   timer_delay: 900
   unit_dir: /etc/systemd/system
   unit_name: lancache-ci-cleanup
-  # What: runner release, fetch retries, restart policy.
+  # What: runner release and restart policy.
   # Why: new hosts get a verified runner; crashes recover.
   # From: Issue #1622 | PR #1624
   runner_version: 2.336.0
-  fetch_attempts: 4
-  fetch_backoff: 30
   restart_sec: 10
   # What: the Debian suite host-prep writes backports for.
   # Why: a wrong suite would mix distribution archives.

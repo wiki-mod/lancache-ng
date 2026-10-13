@@ -10300,13 +10300,7 @@ _ci_rh_units() {
 # Why: no value lives in code; the SOT owns every one.
 # From: Issue #1622 | PR #1624
 _ci_rh_val() {
-    local v
-    v="$(_ci_block_entry_field runner_host "" "$1")" || return 2
-    if [ -z "${v}" ]; then
-        ci_log "[CI-ERROR-RUNNER-0011]" "key=\"$1\" reason=\"not in the SOT runner_host block\""
-        return 2
-    fi
-    printf '%s' "${v}"
+    _ci_required_field runner_host "$1" block
 }
 
 # What: primary group of the runner account, else its name.
@@ -11265,26 +11259,6 @@ _ci_rh_host_prep() {
     fi
 }
 
-# What: run a command with the SOT retry count and backoff.
-# Why: the repo scripts are absent on a fresh runner host.
-# From: Issue #1622 | PR #1624
-_ci_rh_retry() {
-    local max wait n=1 rc=0
-    max="$(_ci_rh_val fetch_attempts)" || return 2
-    wait="$(_ci_rh_val fetch_backoff)" || return 2
-    while :; do
-        rc=0
-        "$@" && return 0 || rc=$?
-        if [ "${n}" -ge "${max}" ]; then
-            ci_log "[CI-ERROR-RUNNER-0082]" "cmd=\"$1\" attempts=${max} rc=${rc} reason=\"retries exhausted\""
-            return 2
-        fi
-        ci_log "[CI-NOTICE-RUNNER-0083]" "cmd=\"$1\" attempt=${n}/${max} rc=${rc} retry_in=${wait}s"
-        sleep "${wait}"
-        n=$((n + 1))
-    done
-}
-
 # What: the runner .env hook wiring, two lines.
 # Why: one text for runner-fetch and runner-hook-env.
 # From: Issue #1622 | PR #1624
@@ -11302,7 +11276,7 @@ _ci_rh_hook_env_lines() {
 # Why: a new host needs a runner that was checked first.
 # From: Issue #1622 | PR #1624
 _ci_rh_runner_fetch() {
-    local inst="${1:-}" ver="${2:-}" root user group tar url dir digest actual tmp api envf lang
+    local inst="${1:-}" ver="${2:-}" root user group tar url dir digest tmp api envf lang
     if [ -z "${inst}" ]; then
         ci_log "[CI-ERROR-RUNNER-0084]" "reason=\"runner-fetch needs an instance dir\""
         return 2
@@ -11334,7 +11308,7 @@ _ci_rh_runner_fetch() {
     fi
     tmp="$(_ci_mktemp "${CI_TMPDIR}/${tar}.XXXXXX")" || return 2
     printf 'Fetching the expected checksum of v%s...\n' "${ver}"
-    digest="$(_ci_rh_retry curl -fsSL "${api}")" || { rm -f "${tmp}"; return 2; }
+    digest="$(_ci_retry download curl -fsSL "${api}")" || { rm -f "${tmp}"; return 2; }
     digest="$(_ci_capture 0 jq -r --arg n "${tar}" '.assets[] | select(.name == $n) | .digest' <<< "${digest}")" || { rm -f "${tmp}"; return 2; }
     digest="${digest#sha256:}"
     if [ -z "${digest}" ]; then
@@ -11343,15 +11317,8 @@ _ci_rh_runner_fetch() {
         return 2
     fi
     printf 'Downloading %s ...\n' "${url}"
-    _ci_rh_retry curl -fsSL -o "${tmp}" "${url}" || { rm -f "${tmp}"; return 2; }
-    actual="$(_ci_capture 0 sha256sum "${tmp}")" || { rm -f "${tmp}"; return 2; }
-    actual="${actual%% *}"
-    if [ "${actual}" != "${digest}" ]; then
-        rm -f "${tmp}"
-        ci_log "[CI-ERROR-RUNNER-0088]" "tarball=\"${tar}\" want=\"${digest}\" got=\"${actual}\" reason=\"checksum mismatch; not extracting\""
-        return 2
-    fi
-    printf 'Checksum verified: %s\n' "${actual}"
+    _ci_fetch_verified "${url}" "${digest}" "${tmp}" || return 2
+    printf 'Checksum verified: %s\n' "${digest}"
     _ci_run "[CI-ERROR-RUNNER-0089]" "dir=\"${dir}\" reason=\"dir not created\"" _ci_rh_root mkdir -p "${dir}" || { rm -f "${tmp}"; return 2; }
     _ci_run "[CI-ERROR-RUNNER-0090]" "dir=\"${dir}\" reason=\"extract failed\"" _ci_rh_root tar xzf "${tmp}" -C "${dir}" || { rm -f "${tmp}"; return 2; }
     rm -f "${tmp}"

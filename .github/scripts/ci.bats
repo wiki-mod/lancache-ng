@@ -6286,6 +6286,44 @@ _rh_runner_dir() {
     _expect not-staged 2 "[CI-ERROR-RUNNER-0100]" || return 1
 }
 
+# What: runner-fetch reads the digest, then fetch-verifies.
+# Why: one retry and one sha256 owner (AG-CI-013/006).
+# From: Issue #1683 | PR #1912
+@test "runner-host: runner-fetch extracts only a tarball that matches the API digest" {
+    local rfd ver rftar sum inst fn
+    _rh_fixture
+    rfd="$(_val path)" ver="$(_val int 1 9).$(_val int 1 99)" rftar="$(_val name)-@VERSION@.tgz"
+    fn="$(_val name)"
+    mkdir -p "${rfd}/pkg" && printf '%s\n' "${ver}" > "${rfd}/pkg/${fn}" || return 1
+    tar -czf "${rfd}/${rftar//@VERSION@/${ver}}" -C "${rfd}/pkg" . || return 1
+    sum="$(sha256sum "${rfd}/${rftar//@VERSION@/${ver}}")" && sum="${sum%% *}" || return 1
+    eval "_rh_fx_val () $(declare -f _ci_rh_val | tail -n +2)"
+    _ci_rh_val() {
+        case "$1" in
+            runner_tar) printf '%s' "${rftar}" ;;
+            runner_release_url) printf 'file://%s/@TAR@' "${rfd}" ;;
+            runner_api_url) printf 'file://%s/api-@VERSION@.json' "${rfd}" ;;
+            user) id -un ;;
+            *) _rh_fx_val "$1" ;;
+        esac
+    }
+    export CI_RETRY_MAX_ATTEMPTS=1 CI_RETRY_BACKOFF_BASE_SECONDS=1
+    jq -n --arg n "${rftar//@VERSION@/${ver}}" --arg s "sha256:${sum}" '{assets: [{name: $n, digest: $s}]}' > "${rfd}/api-${ver}.json" || return 1
+    inst="${RH_ROOT}/$(_val name)"
+    run ci_cmd_runner_host runner-fetch "${inst}" "${ver}"
+    _expect match 0 "Checksum verified: ${sum}" || return 1
+    [ "$(cat "${inst}/${fn}")" = "${ver}" ] || { echo "match: tarball not extracted: $(ls -A "${inst}")"; return 1; }
+    inst="${RH_ROOT}/$(_val name)"
+    jq -n --arg n "${rftar//@VERSION@/${ver}}" --arg s "$(_val digest)" '{assets: [{name: $n, digest: $s}]}' > "${rfd}/api-${ver}.json" || return 1
+    run ci_cmd_runner_host runner-fetch "${inst}" "${ver}"
+    _expect mismatch 2 "[CI-ERROR-FETCH-0003]" || return 1
+    [ ! -e "${inst}" ] || { echo "mismatch: extracted: $(ls -A "${inst}")"; return 1; }
+    rm -f "${rfd}/api-${ver}.json"
+    run ci_cmd_runner_host runner-fetch "${inst}" "${ver}"
+    _expect no-api 2 "[CI-ERROR-BUILD-0011] op=download" || return 1
+    [ ! -e "${inst}" ] || { echo "no-api: extracted: $(ls -A "${inst}")"; return 1; }
+}
+
 # What: the Trivy leftover reap uses an exact minute age.
 # Why: -mtime floors to days and would keep a 1.9 day dir.
 # From: Issue #1255 | PR #1334
