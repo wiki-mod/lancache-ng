@@ -81,7 +81,7 @@ declare -gA CI_CHECKS=(
     [line-endings]="diff _ci_check_line_endings" [comments]="diff _ci_check_comments"
     [deny-short-sha]="diff _ci_check_deny_short_sha" [language-policy]="diff _ci_check_language_policy"
     [mutable-refs]="diff _ci_check_mutable_refs" [executable-bits]="diff _ci_check_executable_bits"
-    [pipefail-early-exit]="diff _ci_check_pipefail_early_exit" [if-without-else-status]="diff _ci_check_if_without_else_status"
+    [shell-guards]="diff _ci_check_shell_guards"
     [bats-and-chain]="diff _ci_check_bats_and_chain" [exit-evidence]="diff _ci_check_exit_evidence"
     [ci-bats]="diff _ci_check_ci_bats"
     [governance-guards]="diff _ci_check_governance_guards" [changelog-direct-edit]="diff _ci_check_changelog_direct_edit"
@@ -11693,24 +11693,13 @@ _CI_JQ_SHELL_FINDINGS='
         | "pipe\t\(.Pos.Line)\t\(.Y.Cmd | argv | join(" "))"
      else empty end)'
 
-# What: path -> shell findings, kept for this ci.sh process.
-# Why: check all runs both guards; each file is parsed once.
-# From: Issue #1683 | PR #1858
-declare -gA _CI_SHELL_FINDINGS=()
-
 # What: tagged shell findings of one source (status, pipe).
-# Why: one parse and one tree walk per file and process.
+# Why: one parse and one tree walk per file.
 # From: Issue #1683 | PR #1858
 _ci_shell_findings() {
-    local f="$1" ast out
-    if [ -n "${_CI_SHELL_FINDINGS["${f}"]+set}" ]; then
-        printf '%s' "${_CI_SHELL_FINDINGS["${f}"]}"
-        return 0
-    fi
+    local f="$1" ast
     ast="$(_ci_shell_ast "${f}")" || return 2
-    out="$(_ci_run "[CI-ERROR-CHECK-0167]" "file=\"${f}\" reason=\"syntax tree query failed\"" jq -r "${_CI_JQ_SHELL_FINDINGS}" <<< "${ast}")" || return 2
-    _CI_SHELL_FINDINGS["${f}"]="${out}"
-    printf '%s' "${out}"
+    _ci_run "[CI-ERROR-CHECK-0167]" "file=\"${f}\" reason=\"syntax tree query failed\"" jq -r "${_CI_JQ_SHELL_FINDINGS}" <<< "${ast}"
 }
 
 # What: Fail on any listed text file carrying CRLF.
@@ -12441,30 +12430,33 @@ _ci_check_executable_bits() {
     printf 'executable-bits=clean paths=%s\n' "${#paths[@]}"
 }
 
-# What: Fail on a live pipe into an early-exiting consumer.
-# Why: SIGPIPE under pipefail exits 141 (AG-VAL-032).
-# From: Issue #1683 | PR #1858
-_ci_check_pipefail_early_exit() {
-    local -a _ci_override=("$@") files=()
+# What: Fail on a $? that reads an if, or a SIGPIPE pipe.
+# Why: AG-VAL-029/030/032; one shfmt tree per file.
+# From: Issue #1683 | PR #1912
+_ci_check_shell_guards() {
+    local -a _ci_override=("$@") files=() status=() pipe=()
+    local path produced tag a b loc
     _ci_shell_sources files _ci_override dockerfiles || return 2
-    local path produced tag line cmd
-    local -a viol=()
     for path in "${files[@]}"; do
         produced="$(_ci_shell_findings "${path}")" || return 2
-        while IFS=$'\t' read -r tag line cmd; do
-            [ "${tag}" = pipe ] || continue
-            if [ "${path##*/}" = Dockerfile ]; then
-                viol+=("${path}: RUN text line ${line}: live pipe into '${cmd}' under pipefail")
-            else
-                viol+=("${path}:${line}: live pipe into '${cmd}' under pipefail")
-            fi
+        while IFS=$'\t' read -r tag a b; do
+            loc="${path}:"
+            [ "${path##*/}" != Dockerfile ] || loc="${path}: RUN text line "
+            case "${tag}" in
+                pipe) pipe+=("${loc}${a}: live pipe into '${b}' under pipefail") ;;
+                status)
+                    if [ "${a}" = neg ]; then
+                        status+=("${loc}${b}: first \$? under 'if ! CMD' is the negation's 0 -- use 'CMD || rc=\$?'")
+                    else
+                        status+=("${loc}${b}: \$? after an else-less if is the if's 0 -- use 'if CMD; then rc=0; else rc=\$?; fi'")
+                    fi ;;
+            esac
         done <<< "${produced}"
     done
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0011]" "reason=\"live pipe into early-exit consumer (SIGPIPE)\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'pipefail-early-exit=clean files=%s\n' "${#files[@]}"
+    [ "${#pipe[@]}" -eq 0 ] || ci_error "[CI-ERROR-CHECK-0011]" "reason=\"live pipe into early-exit consumer (SIGPIPE)\"" "$(printf '%s\n' "${pipe[@]}")"
+    [ "${#status[@]}" -eq 0 ] || ci_error "[CI-ERROR-CHECK-0065]" "reason=\"\$? reads an if's status, not the command's (AG-VAL-029)\"" "$(printf '%s\n' "${status[@]}")"
+    [ "$(( ${#pipe[@]} + ${#status[@]} ))" -eq 0 ] || return 1
+    printf 'shell-guards=clean files=%s\n' "${#files[@]}"
 }
 
 # What: Fail a bats [ ] && [ ] check with no || fallback.
@@ -12656,34 +12648,6 @@ _ci_check_exit_evidence() {
         return 1
     fi
     printf 'exit-evidence=clean files=%s\n' "${#files[@]}"
-}
-
-# What: Flag a $? that reads an if's status, not CMD's.
-# Why: else-less if and "if !" give 0 (AG-VAL-030).
-# From: Issue #1683 | PR #1858
-_ci_check_if_without_else_status() {
-    local -a _ci_override=("$@") files=()
-    local path produced tag kind line loc
-    _ci_shell_sources files _ci_override dockerfiles || return 2
-    local -a viol=()
-    for path in "${files[@]}"; do
-        produced="$(_ci_shell_findings "${path}")" || return 2
-        while IFS=$'\t' read -r tag kind line; do
-            [ "${tag}" = status ] || continue
-            loc="${path}:${line}"
-            [ "${path##*/}" != Dockerfile ] || loc="${path}: RUN text line ${line}"
-            if [ "${kind}" = neg ]; then
-                viol+=("${loc}: first \$? under 'if ! CMD' is the negation's 0 -- use 'CMD || rc=\$?'")
-            else
-                viol+=("${loc}: \$? after an else-less if is the if's 0 -- use 'if CMD; then rc=0; else rc=\$?; fi'")
-            fi
-        done <<< "${produced}"
-    done
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0065]" "reason=\"\$? reads an if's status, not the command's (AG-VAL-029)\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'if-without-else-status=clean files=%s\n' "${#files[@]}"
 }
 
 # What: 0 when the PR author skips the PR text checks

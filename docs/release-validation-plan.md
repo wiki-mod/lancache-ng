@@ -507,11 +507,11 @@ a stated reason it has none (AG-VAL-029).
 | A scan of another image than the published digest | `scan-stack` scans `_ci_published_digest`; ci.bats "scan outcome: every trivy scan status has its own code" |
 | A `.trivyignore.yaml` entry not yielding a complete OpenVEX statement | `check vex-drift` |
 | Case-sensitive repository-name comparison | `_ci_repo` lowercases; ci.bats "action ref is external unless local, docker, or this repo" (upper-case owner case) |
-| Live pipe into an early-exit consumer under `pipefail` (exit 141) | `check pipefail-early-exit` |
+| Live pipe into an early-exit consumer under `pipefail` (exit 141) | `check shell-guards` |
 | Review chronology or stale line references in comments | `check comments` |
 | Closing keywords read outside the linked-issues section | `_ci_pr_section`; ci.bats "check pr-template: every real template section filled, one box marked", "pr markdown: comments strip, a section ends at any real heading" |
 | A bats `[ ] && [ ]` check that cannot fail | `check bats-and-chain` |
-| `$?` read from an `if` instead of the command | `check if-without-else-status` |
+| `$?` read from an `if` instead of the command | `check shell-guards` |
 | An exit path losing its code, context or raw output | `check exit-evidence` |
 | Mutable image or action reference | `check mutable-refs`; `check action-node-versions` |
 | A Trivy finding, DB outage or scan error that no issue reports, or that one case closes for another | ci.bats "status report: one issue per case, red files, green closes" and "scan report: each status settles only the cases it proves" |
