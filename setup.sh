@@ -2129,16 +2129,27 @@ set_ui_password_hash() {
     set_env_key UI_AUTH_PASSWORD_HASH "$hash" "$env_file"
 }
 
-# What: replaces a plaintext Admin UI password by its hash
-# Why: no plaintext password stays on disk (AG-SEC-003)
+# What: hash a plaintext UI password, or make one per user
+# Why: no plaintext password is ever written (AG-SEC-003)
 # From: Issue #1683 | PR #1912
 ensure_ui_password_hash() {
-    local install_dir="$1" env_file="$2" password
-    password=$(get_env_var UI_AUTH_PASSWORD "$env_file") || exit $?
-    [[ -n "$password" ]] || return 0
-    set_ui_password_hash "$install_dir" "$env_file" "$password"
+    local install_dir="$1" env_file="$2" password user hash
+    if env_key_has_usable_secret UI_AUTH_PASSWORD "$env_file"; then
+        password=$(get_env_var UI_AUTH_PASSWORD "$env_file") || exit $?
+        set_ui_password_hash "$install_dir" "$env_file" "$password"
+        remove_env_key UI_AUTH_PASSWORD "$env_file"
+        print_ok "Admin UI password stored as an Argon2id hash; the plaintext value was removed"
+        return 0
+    fi
     remove_env_key UI_AUTH_PASSWORD "$env_file"
-    print_ok "Admin UI password stored as an Argon2id hash; the plaintext value was removed"
+    user=$(get_env_var UI_AUTH_USER "$env_file") || exit $?
+    hash=$(get_env_var UI_AUTH_PASSWORD_HASH "$env_file") || exit $?
+    [[ -n "$user" && -z "$hash" ]] || return 0
+    password=$(generate_managed_secret UI_AUTH_PASSWORD ui) || exit $?
+    set_ui_password_hash "$install_dir" "$env_file" "$password"
+    print_ok "Generated missing Admin UI password because UI_AUTH_USER is set"
+    print_ok "Admin UI user $user, password: ${BOLD}${password}${RESET}"
+    print_warn "Note the password now; only its hash is stored."
 }
 
 # What: default of a key, read from the SOT runtime.defaults
@@ -3131,7 +3142,7 @@ migrate_env_for_update() (
     # Why: undeclared names leaked as globals
     local dhcp_proxy_pxe_boot_server dhcp_proxy_pxe_boot_filename_bios dhcp_proxy_pxe_boot_filename_uefi
     local default_cache_size default_cache_gb ntp_default https_default
-    local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_https ui_generated_password ui_password ui_password_hash ui_user
+    local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_https ui_password ui_password_hash ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_http upstream_dhcp_ip
     local state_keys state_key state_sub state_sub_dir legacy_path
     local state_dir ui_session_ttl
@@ -3476,13 +3487,6 @@ migrate_env_for_update() (
     ui_user=$(get_env_var UI_AUTH_USER "$env_file") || exit $?
     ui_password=$(get_env_var UI_AUTH_PASSWORD "$env_file") || exit $?
     ui_password_hash=$(get_env_var UI_AUTH_PASSWORD_HASH "$env_file") || exit $?
-    if [[ -n "$ui_user" && -z "$ui_password_hash" ]] && ! env_key_has_usable_secret UI_AUTH_PASSWORD "$env_file"; then
-        ui_generated_password=$(generate_managed_secret UI_AUTH_PASSWORD ui) || exit $?
-        set_env_key UI_AUTH_PASSWORD "$ui_generated_password" "$env_file"
-        print_ok "Generated missing Admin UI password because UI_AUTH_USER is set"
-        print_ok "Admin UI user $ui_user, password: ${BOLD}${ui_generated_password}${RESET}"
-        print_warn "Note the password now; only its hash is stored."
-    fi
 
     allow_insecure_ui=$(prod_env_default ALLOW_INSECURE_UI) || exit $?
     [[ -z "$ui_user" && -z "$ui_password" && -z "$ui_password_hash" ]] && allow_insecure_ui=true
