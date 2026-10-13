@@ -5959,16 +5959,21 @@ ROWS
 # What: apply backs up and installs; restart needs consent.
 # Why: dockerd restarts stop every running CI job.
 # From: Issue #1255 | PR #1349
-@test "docker-daemon-config: apply backs up and installs, restart refuses without consent" {
-    local f key=max-concurrent-downloads val driver bsuf ssuf
+@test "docker-daemon-config: apply validates, backs up, installs; restart needs consent, prints next steps" {
+    local f key=max-concurrent-downloads val driver bsuf ssuf dddrv
     driver="$(yq -r '.ci_variables.CI_DAEMON_LOG_DRIVER' "${CI_MANIFEST_SOURCE}")"
     bsuf="$(yq -r '.ci_variables.CI_DAEMON_BACKUP_SUFFIX' "${CI_MANIFEST_SOURCE}")"
     ssuf="$(yq -r '.ci_variables.CI_DAEMON_STAGED_SUFFIX' "${CI_MANIFEST_SOURCE}")"
     [[ -n "${driver}${bsuf}${ssuf}" && "${driver}${bsuf}${ssuf}" != *null* ]] || { echo "no SOT daemon values"; return 1; }
     f="$(_val path)" val="$(_val int 1 99)"
     jq -n --arg k "${key}" --argjson v "${val}" '{($k): $v}' > "${f}"
+    dockerd() { printf '%s\n' "$(_val name)" >&2; return 1; }
     run ci_cmd_docker_daemon_config apply "${f}"
-    [ "${status}" -eq 0 ] || { echo "apply rc ${status}: ${output}"; return 1; }
+    _expect validate-rejects 1 "[CI-ERROR-DAEMON-0003]" || return 1
+    [[ "${output}" != *"configuration OK"* ]] || { echo "OK on a rejected config: ${output}"; return 1; }
+    dockerd() { return 0; }
+    run ci_cmd_docker_daemon_config apply "${f}"
+    _expect apply 0 "dockerd --validate: configuration OK;Applied merged config" || return 1
     [ "$(jq -r --arg k "${key}" '.[$k]' "${f}")" = "${val}" ] || { echo "host key lost"; return 1; }
     [ "$(jq -r '."log-driver"' "${f}")" = "${driver}" ] || { echo "no additions in ${f}"; return 1; }
     [ "$(jq -r --arg k "${key}" '.[$k]' "${f}${bsuf}"*)" = "${val}" ] || { echo "no backup of the old file"; return 1; }
@@ -5981,6 +5986,12 @@ ROWS
     [ "${status}" -eq 0 ] && compgen -G "${f}${bsuf}*" >/dev/null || { echo "backup override rc ${status}: ${output}"; return 1; }
     CONFIRM_DOCKERD_RESTART="" run ci_cmd_docker_daemon_config restart "${f}"
     _expect restart-guard 1 "[CI-ERROR-DAEMON-0004]" || return 1
+    systemctl() { return 0; }
+    dddrv="${driver}"
+    docker() { case "$*" in "info --format"*) printf '%s\n' "${dddrv}" ;; esac; }
+    CONFIRM_DOCKERD_RESTART=yes run ci_cmd_docker_daemon_config restart "${f}"
+    _expect restart "0" "LoggingDriver (docker info): ${driver};builder section;$(yq -r '.runner_host.cleanup_log' "${CI_MANIFEST_SOURCE}")" || return 1
+    [[ "${output}" != *WARN-DAEMON-0006* ]] || { echo "driver warning: ${output}"; return 1; }
     run ci_cmd_docker_daemon_config "$(_val name)" "${f}"
     _expect unknown-mode 2 "[CI-ERROR-DAEMON-0007]" || return 1
 }

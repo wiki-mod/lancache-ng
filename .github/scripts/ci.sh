@@ -9993,6 +9993,7 @@ _ci_daemon_validate() {
         ci_error "[CI-ERROR-DAEMON-0003]" "path=\"${file}\" reason=\"dockerd --validate rejected the config\"" "${out}"
         return 1
     fi
+    printf 'dockerd --validate: configuration OK\n'
 }
 
 # What: print current, merged and diff; write nothing.
@@ -10050,7 +10051,8 @@ _ci_daemon_apply() {
 # Why: it stops every container, in-flight CI jobs included.
 # From: Issue #1255 | PR #1349
 _ci_daemon_restart() {
-    local file="$1" waited=0 driver want wait_max poll probe
+    local file="$1" waited=0 driver want wait_max poll probe clog
+    clog="$(_ci_rh_val cleanup_log)" || return 2
     wait_max="$(_ci_variable CI_DAEMON_RESTART_WAIT)" || return 2
     poll="$(_ci_variable CI_DAEMON_RESTART_POLL)" || return 2
     want="$(_ci_variable CI_DAEMON_LOG_DRIVER)" || return 2
@@ -10074,6 +10076,7 @@ _ci_daemon_restart() {
     fi
     printf 'builder section of %s (docker info does not report it):\n' "${file}"
     _ci_capture 0 jq '.builder // "(no builder key)"' "${file}" || return 2
+    printf 'Next: confirm the runner takes jobs again, watch the\nbuild cache bound over the next days in %s, then\nmove on to the next host (one host at a time).\n' "${clog}"
 }
 
 # What: daemon-config mode on the runner host's daemon.json.
