@@ -994,14 +994,11 @@ ci_variables:
   # Why: GitHub-hosted is the default; a repo var switches.
   # From: Issue #1683 | PR #1912
   PROJECT_SELFHOSTED_RUNNER_USAGE_CI: "false"
-  # What: trivy scanners, DB dir and DB lock timing.
+  # What: trivy scanners and the shared DB dir.
   # Why: AG-CI-006: scan policy values have one owner.
   # From: Issue #1683 | PR #1858
   CI_TRIVY_SCANNERS: vuln,secret
   CI_TRIVY_SHARED_DIR: /mnt/trivy-db
-  CI_TRIVY_LOCK_POLL: 5
-  CI_TRIVY_LOCK_TIMEOUT: 900
-  CI_TRIVY_LOCK_STALE: 1200
   # What: validate slot count and timing, in seconds.
   # Why: AG-CI-006: validate timeouts have one owner.
   # From: Issue #1683 | PR #1858
