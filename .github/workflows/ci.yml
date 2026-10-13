@@ -21,7 +21,11 @@ on:
   issues:
     types: [opened]
   workflow_dispatch:
+# What: actions read: lock waits ask if a holder run ended.
+# Why: a lock frees when its run ends, not after an age.
+# From: Issue #1683 | PR #1912
 permissions:
+  actions: read
   contents: read
   packages: write
 # What: issue runs get their own group per issue.
@@ -139,6 +143,7 @@ jobs:
         id: plan
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/scripts/ci.sh plan-matrix
 
   # What: build, publish, verify one target per platform
@@ -159,6 +164,7 @@ jobs:
     # Why: the lock is a ci.sh git ref, no YAML group.
     # From: Issue #1683 | PR #1912
     permissions:
+      actions: read
       contents: write
       packages: write
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['build'] }}
@@ -200,6 +206,7 @@ jobs:
         env:
           SERVICE: ${{ matrix.service }}
           PLATFORM: ${{ matrix.platform }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/scripts/ci.sh ship "${SERVICE}" "${PLATFORM}"
       # What: frees this run's build lock after a cancel.
       # Why: a cancel stops the step; no signal reaches bash
@@ -379,10 +386,12 @@ jobs:
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['promote'] }}
     container: *bt_platform
     permissions:
+      actions: read
       contents: write
       packages: write
     env:
       CI_STACK_VALIDATED: SUCCESS
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - *bootstrap
       - name: Promote the channels the ref maps to

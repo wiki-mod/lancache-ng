@@ -1023,12 +1023,15 @@ ci_variables:
   CI_LEDGER_REF: refs/ci/acceptance/ledger
   CI_LEDGER_FILE: records
   CI_GIT_REMOTE: origin
-  # What: promote lock attempts, backoff and stale seconds.
+  # What: installer tries; poll secs of every lock wait.
   # Why: AG-CI-006: lock timing has one owner.
   # From: Issue #1683 | PR #1858
   CI_PROMOTE_LOCK_MAX: 30
-  CI_PROMOTE_LOCK_BACKOFF: 10
-  CI_PROMOTE_LOCK_STALE: 900
+  CI_LOCK_POLL_SECONDS: 10
+  # What: min seconds between two reads of a run's state.
+  # Why: AG-CI-020: GitHub Actions polls >= 300 s apart.
+  # From: Issue #1683 | PR #1912
+  CI_RUN_STATE_POLL_SECONDS: 300
   # What: ref prefix of the per-channel promote lock.
   # Why: promote and the installer read one lock location.
   # From: Issue #1683 | PR #1858
@@ -1046,13 +1049,10 @@ ci_variables:
   # From: Issue #1683 | PR #1912
   CI_DAEMON_STAGED_SUFFIX: .staged
   CI_DAEMON_BACKUP_SUFFIX: .bak.
-  # What: build lock ref prefix, tries, backoff, stale secs.
-  # Why: one build per identity (§20); stale > job timeout.
+  # What: ref prefix of the per-identity build lock.
+  # Why: one build per identity (§20); frees on run end.
   # From: Issue #1683 | PR #1912
   CI_BUILD_LOCK_REF: refs/ci/build-lock
-  CI_BUILD_LOCK_MAX: 120
-  CI_BUILD_LOCK_BACKOFF: 45
-  CI_BUILD_LOCK_STALE: 6000
   # What: ref prefix of the verified-digest marks.
   # Why: only a digest a build verified may be accepted.
   # From: Issue #1683 | PR #1912

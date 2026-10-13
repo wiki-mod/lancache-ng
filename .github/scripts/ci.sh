@@ -2168,12 +2168,28 @@ _ci_cas_note_commit() {
     _ci_capture 0 _ci_git_as_bot commit-tree "${CI_CAS_EMPTY_TREE}" -m "$1"
 }
 
+# What: rc 0 holder run ended, 1 still runs, 2 unknown.
+# Why: a lock frees when its holder ends; no age guess.
+# From: Issue #1683 | PR #1912
+_ci_lock_holder_ended() {
+    local note="$1" run attempt out
+    [[ "${note}" =~ run=([0-9]+)\ attempt=([0-9]+) ]] || return 2
+    run="${BASH_REMATCH[1]}"; attempt="${BASH_REMATCH[2]}"
+    [ -n "${GITHUB_REPOSITORY:-}" ] || return 2
+    out="$(_ci_retry github-read gh api --jq '"\(.status) \(.run_attempt)"' \
+        "repos/${GITHUB_REPOSITORY}/actions/runs/${run}")" || return 2
+    [[ "${out}" =~ ^([a-z_]+)\ ([0-9]+)$ ]] || return 2
+    [ "${BASH_REMATCH[1]}" = completed ] && return 0
+    [ "${BASH_REMATCH[2]}" -gt "${attempt}" ] && return 0
+    return 1
+}
+
 # What: One non-blocking lock acquisition attempt.
-# Why: Create or stale-takeover, both atomic server-side.
-# From: Issue #1683
+# Why: create, or take over the lock of an ended holder.
+# From: Issue #1683 | PR #1912
 _ci_lock_try() {
-    local remote="$1" ref="$2" note="$3" stale="$4"
-    local cur="" sha raw rc=0 committed prev now age
+    local remote="$1" ref="$2" note="$3" ask="$4"
+    local cur="" sha raw rc=0 prev
     cur="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
     if [ "${rc}" -eq 1 ]; then
         sha="$(_ci_cas_note_commit "${note}")" || return 3
@@ -2187,24 +2203,24 @@ _ci_lock_try() {
     # Why: acquire retries; shallow breaks the next push.
     # From: Issue #1683 | PR #1912
     _ci_capture 0 git fetch --quiet "${remote}" "${ref}" || return 3
-    # What: unreadable lock age stops; never a takeover.
-    # Why: age 0 would take over a live holder's lock.
-    # From: Issue #1683 | PR #1858
-    committed="$(_ci_capture 0 git log -1 --format=%ct FETCH_HEAD)" || return 3
-    if [ -z "${committed}" ]; then
-        ci_log "[CI-ERROR-CAS-0003]" "ref=\"${ref}\" reason=\"lock commit has no timestamp; not taking over\""
-        return 3
-    fi
     prev="$(_ci_capture 0 git log -1 --format=%s FETCH_HEAD)" || return 3
-    now="$(date +%s)"; age=$(( now - committed ))
-    if [ "${age}" -lt "${stale}" ]; then
-        ci_log "[CI-INFO-CAS-0006]" "ref=\"${ref}\" holder=\"${prev}\" age=${age}s stale_after=${stale}s reason=\"lock held; waiting\""
+    # What: run state only on ask; git-only polls between.
+    # Why: AG-CI-020: run state reads stay >= 300 s apart.
+    # From: Issue #1683 | PR #1912
+    [ "${ask}" -eq 1 ] || return 1
+    rc=0; _ci_lock_holder_ended "${prev}" || rc=$?
+    if [ "${rc}" -eq 1 ]; then
+        ci_log "[CI-INFO-CAS-0006]" "ref=\"${ref}\" holder=\"${prev}\" reason=\"holder run still running; waiting\""
         return 1
+    fi
+    if [ "${rc}" -ne 0 ]; then
+        ci_log "[CI-ERROR-CAS-0003]" "ref=\"${ref}\" holder=\"${prev}\" reason=\"holder run state unknown; not taking over\""
+        return 3
     fi
     sha="$(_ci_cas_note_commit "${note}")" || return 3
     rc=0; raw="$(git push --force-with-lease="${ref}:${cur}" "${remote}" "${sha}:${ref}" 2>&1)" || rc=$?
     if [ "${rc}" -eq 0 ]; then
-        ci_log "[CI-INFO-CAS-0001]" "ref=\"${ref}\" note=\"stale lock taken over\" age=\"${age}\" prev=\"${prev}\""
+        ci_log "[CI-INFO-CAS-0001]" "ref=\"${ref}\" note=\"lock of an ended run taken over\" prev=\"${prev}\""
         return 0
     fi
     _ci_cas_push_failed takeover "${ref}" "${rc}" "${raw}"
@@ -2223,20 +2239,28 @@ _ci_cas_push_failed() {
     return 3
 }
 
-# What: Retry lock acquisition; fail closed at the end.
-# Why: Proceeding unlocked would race the guarded section.
-# From: Issue #1683
+# What: wait while the holder runs; fail closed on errors.
+# Why: unlocked would race; the job timeout bounds the wait.
+# From: Issue #1683 | PR #1912
 _ci_lock_acquire() {
-    local remote="$1" ref="$2" note="$3" max="$4" backoff="$5" stale="$6"
-    local n=1 rc=0
-    while [ "${n}" -le "${max}" ]; do
-        rc=0; _ci_lock_try "${remote}" "${ref}" "${note}" "${stale}" || rc=$?
-        [ "${rc}" -eq 0 ] && return 0
-        [ "${n}" -ge "${max}" ] && break
-        if [ "${rc}" -eq 2 ]; then sleep 2; else sleep "${backoff}"; fi
-        n=$(( n + 1 ))
+    local remote="$1" ref="$2" note="$3" backoff="$4"
+    local fails=0 max gap asked=0 ask rc=0
+    max="$(_ci_variable CI_RETRY_MAX_ATTEMPTS)" || return 2
+    gap="$(_ci_variable CI_RUN_STATE_POLL_SECONDS)" || return 2
+    while :; do
+        ask=0
+        if [ $(( $(date +%s) - asked )) -ge "${gap}" ]; then ask=1; asked="$(date +%s)"; fi
+        rc=0; _ci_lock_try "${remote}" "${ref}" "${note}" "${ask}" || rc=$?
+        case "${rc}" in
+            0) return 0 ;;
+            1) [ "${ask}" -eq 0 ] || fails=0; sleep "${backoff}" ;;
+            2) ;;
+            *) fails=$(( fails + 1 ))
+               [ "${fails}" -lt "${max}" ] || break
+               sleep "${backoff}" ;;
+        esac
     done
-    ci_error "[CI-ERROR-CAS-0002]" "ref=\"${ref}\" reason=\"lock not acquired in ${max} attempts; fail closed\"" "note=${note} last_rc=${rc}"
+    ci_error "[CI-ERROR-CAS-0002]" "ref=\"${ref}\" reason=\"lock state unreadable ${fails} times; fail closed\"" "note=${note} last_rc=${rc}"
     return 1
 }
 
@@ -2273,25 +2297,23 @@ _ci_build_lock_ref() {
     printf '%s/%s-%s-%s' "${prefix}" "$1" "$2" "${3//\//-}"
 }
 
-# What: holder note of this run for one build lock.
-# Why: the resolver tells its own lock from a foreign one.
+# What: holder note: lock kind, its keys, run, attempt.
+# Why: _ci_lock_holder_ended reads the run and attempt.
 # From: Issue #1683 | PR #1912
-_ci_build_lock_note() {
-    printf 'build %s %s run=%s attempt=%s' "$1" "$2" "${GITHUB_RUN_ID:-local}" "${GITHUB_RUN_ATTEMPT:-1}"
+_ci_lock_note() {
+    printf '%s run=%s attempt=%s' "$*" "${GITHUB_RUN_ID:-local}" "${GITHUB_RUN_ATTEMPT:-1}"
 }
 
 # What: take the build lock; wait while another run builds.
 # Why: the waiter then re-resolves and verifies, no rebuild.
 # From: Issue #1683 | PR #1912
 _ci_build_lock_take() {
-    local remote ref max backoff stale identity
+    local remote ref backoff identity
     remote="$(_ci_git_remote)" || return 2
     identity="$(_ci_identity_for "$1" "$2")" || return 2
     ref="$(_ci_build_lock_ref "${identity}" "$1" "$2")" || return 2
-    max="$(_ci_variable CI_BUILD_LOCK_MAX)" || return 2
-    backoff="$(_ci_variable CI_BUILD_LOCK_BACKOFF)" || return 2
-    stale="$(_ci_variable CI_BUILD_LOCK_STALE)" || return 2
-    _ci_lock_acquire "${remote}" "${ref}" "$(_ci_build_lock_note "$1" "$2")" "${max}" "${backoff}" "${stale}" || return 2
+    backoff="$(_ci_variable CI_LOCK_POLL_SECONDS)" || return 2
+    _ci_lock_acquire "${remote}" "${ref}" "$(_ci_lock_note build "$1" "$2")" "${backoff}" || return 2
 }
 
 # What: free the build lock of this run.
@@ -2302,17 +2324,16 @@ _ci_build_lock_drop() {
     remote="$(_ci_git_remote)" || return 2
     identity="$(_ci_identity_for "$1" "$2")" || return 2
     ref="$(_ci_build_lock_ref "${identity}" "$1" "$2")" || return 2
-    _ci_lock_release "${remote}" "${ref}" "$(_ci_build_lock_note "$1" "$2")"
+    _ci_lock_release "${remote}" "${ref}" "$(_ci_lock_note build "$1" "$2")"
 }
 
-# What: rc 0 if another run holds the build lock fresh.
+# What: rc 0 if a running other run holds the build lock.
 # Why: BUILD_IN_PROGRESS, not MISSING, while it builds.
 # From: Issue #1683 | PR #1912
 _ci_build_lock_busy() {
-    local remote ref stale rc=0 committed holder
+    local remote ref rc=0 holder
     remote="$(_ci_git_remote)" || return 2
     ref="$(_ci_build_lock_ref "$1" "$2" "$3")" || return 2
-    stale="$(_ci_variable CI_BUILD_LOCK_STALE)" || return 2
     _ci_cas_ref_sha "${remote}" "${ref}" >/dev/null || rc=$?
     [ "${rc}" -ne 1 ] || return 1
     [ "${rc}" -eq 0 ] || return 2
@@ -2320,10 +2341,14 @@ _ci_build_lock_busy() {
     # Why: a shallow repo makes the next ref push fail.
     # From: Issue #1683 | PR #1912
     _ci_capture 0 git fetch --quiet "${remote}" "${ref}" || return 2
-    committed="$(_ci_capture 0 git log -1 --format=%ct FETCH_HEAD)" || return 2
     holder="$(_ci_capture 0 git log -1 --format=%s FETCH_HEAD)" || return 2
-    [ "${holder}" != "$(_ci_build_lock_note "$2" "$3")" ] || return 1
-    [ $(( $(date +%s) - committed )) -lt "${stale}" ]
+    [ "${holder}" != "$(_ci_lock_note build "$2" "$3")" ] || return 1
+    rc=0; _ci_lock_holder_ended "${holder}" || rc=$?
+    case "${rc}" in
+        0) return 1 ;;
+        1) return 0 ;;
+        *) return 2 ;;
+    esac
 }
 
 # What: ref that holds the last verified digest of a pair.
@@ -5625,14 +5650,11 @@ _ci_promote_lock_ref() {
 # Why: the cross-host CAS mutex, reused for promotion.
 # From: Issue #1683
 _ci_promote_lock() {
-    local remote max backoff stale ref
+    local remote backoff ref
     remote="$(_ci_git_remote)" || return 2
-    max="$(_ci_variable CI_PROMOTE_LOCK_MAX)" || return 2
-    backoff="$(_ci_variable CI_PROMOTE_LOCK_BACKOFF)" || return 2
-    stale="$(_ci_variable CI_PROMOTE_LOCK_STALE)" || return 2
+    backoff="$(_ci_variable CI_LOCK_POLL_SECONDS)" || return 2
     ref="$(_ci_promote_lock_ref "$1")" || return 2
-    _ci_lock_acquire "${remote}" "${ref}" "promote $1 run=${GITHUB_RUN_ID:-local}" \
-        "${max}" "${backoff}" "${stale}"
+    _ci_lock_acquire "${remote}" "${ref}" "$(_ci_lock_note promote "$1")" "${backoff}"
 }
 
 # What: Default promote unlock: free the channel lock.
@@ -5642,7 +5664,7 @@ _ci_promote_unlock() {
     local remote ref
     remote="$(_ci_git_remote)" || return 2
     ref="$(_ci_promote_lock_ref "$1")" || return 2
-    _ci_lock_release "${remote}" "${ref}" "promote $1 run=${GITHUB_RUN_ID:-local}"
+    _ci_lock_release "${remote}" "${ref}" "$(_ci_lock_note promote "$1")"
 }
 
 # What: Default channel move: point svc:channel at digest.

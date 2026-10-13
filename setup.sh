@@ -2944,8 +2944,8 @@ lancache_channel_image_refs() {
         || die "Cannot list the first-party images for channel ${channel} (exit $?)."
     max=$(lancache_sot_value CI_PROMOTE_LOCK_MAX) \
         || die "Cannot read CI_PROMOTE_LOCK_MAX (exit $?)."
-    backoff=$(lancache_sot_value CI_PROMOTE_LOCK_BACKOFF) \
-        || die "Cannot read CI_PROMOTE_LOCK_BACKOFF (exit $?)."
+    backoff=$(lancache_sot_value CI_LOCK_POLL_SECONDS) \
+        || die "Cannot read CI_LOCK_POLL_SECONDS (exit $?)."
     lock_ref=$(lancache_sot_value CI_PROMOTE_LOCK_REF) \
         || die "Cannot read CI_PROMOTE_LOCK_REF (exit $?)."
     lock_ref="${lock_ref}/${pointer_channel}"
