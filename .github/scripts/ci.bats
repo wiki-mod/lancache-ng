@@ -696,34 +696,44 @@ CASES
     [ "${status}" -eq 0 ] && [ -n "${output}" ] || { echo "loaded real SOT no longer answers: rc ${status}: ${output}"; return 1; }
 }
 
-# What: every failed base identity is UNKNOWN, never BUILD
-# Why: UNKNOWN != BUILD; BUILD needs proven impact (2.3)
+# What: BUILD needs a changed input; failures are UNKNOWN
+# Why: 2.2 BUILD needs proof; 2.3 UNKNOWN never builds
 # From: Issue #1683 | PR #1912
-@test "impact never turns a failed or empty base identity into BUILD" {
-    local miss other t hid case
-    t="$(_val name)"
-    hid="$(_val name)"
-    miss="_ci_required_field ${t} build_type"
-    other='ci_log "[CI-ERROR-CORE-0106]" "reason=\"command failed or wrote stderr\""'
-    for case in miss other mixed empty; do
-        case "${case}" in
-            miss) eval "_ci_identity_for() { ${miss}; return 2; }" ;;
-            other) eval "_ci_identity_for() { ${other}; return 2; }" ;;
-            mixed) eval "_ci_identity_for() { ${miss}; ${other}; return 2; }" ;;
-            empty) _ci_identity_for() { printf ''; } ;;
+@test "impact: BUILD only on a proven input change, any unreadable side is UNKNOWN" {
+    local t hid base head same other case want
+    t="$(_val name)" hid="$(_val name)" base="$(_val name)" head="$(_val name)"
+    same="$(_val name)" other="$(_val name)"
+    # What: content per ref; SOT per manifest; codes kept.
+    # Why: each case flips one side and nothing else.
+    # From: Issue #1683 | PR #1912
+    _ci_identity_content() {
+        case "${case}:$2" in
+            content-fail:"${base}") ci_log "[CI-ERROR-CORE-0106]" "reason=\"boom\""; return 2 ;;
+            content-differs:"${base}") printf '%s\n' "${other}" ;;
+            *) printf '%s\n' "${same}" ;;
         esac
-        run _ci_impact_classify "${t}" linux/amd64 "${hid}" base "${CI_MANIFEST_SOURCE}"
-        _expect "${case}" 0 "[CI-INFO-IMPACT-0010];UNKNOWN" || return 1
-        [[ "${output}" != *BUILD* ]] || { echo "${case} gave BUILD: ${output}"; return 1; }
-    done
-    run _ci_impact_classify "${t}" linux/amd64 "" base "${CI_MANIFEST_SOURCE}"
+    }
+    _ci_identity_sot() {
+        case "${case}:${CI_MANIFEST:-head}" in
+            sot-fail:base-sot) CI_MANIFEST="${CI_MANIFEST_SOURCE}" _ci_required_field "${t}" crates; return 2 ;;
+            sot-differs:base-sot) printf '%s\n' "${other}" ;;
+            *) printf '%s\n' "${same}" ;;
+        esac
+    }
+    while IFS='|' read -r case want; do
+        run _ci_impact_classify "${t}" linux/amd64 "${hid}" "${base}" base-sot "${head}"
+        _expect "${case}" 0 "${want}" || return 1
+        case "${want}" in *UNKNOWN) [[ "${output}" != *BUILD* ]] || { echo "${case} gave BUILD: ${output}"; return 1; } ;; esac
+    done <<ROWS
+content-fail|[CI-ERROR-CORE-0106];[CI-INFO-IMPACT-0014];UNKNOWN
+content-differs|[CI-INFO-IMPACT-0015];BUILD
+sot-fail|[CI-ERROR-CORE-0009];[CI-INFO-IMPACT-0010];UNKNOWN
+sot-differs|=BUILD
+same|=NOOP
+ROWS
+    case=same
+    run _ci_impact_classify "${t}" linux/amd64 "" "${base}" base-sot "${head}"
     _expect no-head 0 "[CI-INFO-IMPACT-0009];UNKNOWN" || return 1
-    eval "_ci_identity_for() { printf '%s\\n' '${hid}'; }"
-    run _ci_impact_classify "${t}" linux/amd64 "${hid}" base "${CI_MANIFEST_SOURCE}"
-    _expect same 0 "=NOOP" || return 1
-    _ci_identity_for() { printf 'other\n'; }
-    run _ci_impact_classify "${t}" linux/amd64 "${hid}" base "${CI_MANIFEST_SOURCE}"
-    _expect changed 0 "=BUILD" || return 1
 }
 
 # =========================================================
@@ -4879,10 +4889,10 @@ CASES
     [ ! -e "${rel}" ] || { echo "validate-holder: released without a holder"; return 1; }
 }
 
-# What: plan keeps verify pairs; a MISMATCH fails the plan
+# What: plan keeps verify pairs; MISMATCH, UNKNOWN fail it
 # Why: a produced artifact needs acceptance, not a rebuild
 # From: Issue #1683 | PR #1912
-@test "plan and ship: unverified pairs verify without a build, a mismatch fails" {
+@test "plan and ship: unverified pairs verify without a build, a mismatch or UNKNOWN fails" {
     local mark plat w d calls
     mark="$(_val path)" plat="$(_val platform)" w="$(_val name)" d="$(_val digest)" calls="$(_val path)"
     export GITHUB_OUTPUT="${mark}"
@@ -4908,6 +4918,18 @@ CASES
     run ci_cmd_plan_matrix "${CI_MANIFEST_REL}"
     _expect plan-mismatch 2 "[CI-ERROR-PLAN-0005];state=MISMATCH" || return 1
     [ ! -s "${mark}" ] || { echo "plan-mismatch wrote a matrix: $(cat "${mark}")"; return 1; }
+    : > "${mark}"
+    _ci_resolve_one() { printf 'service=%s platform=%s state=UNKNOWN action=escalate identity=%s\n' "$1" "$2" "${w}"; }
+    run ci_cmd_plan_matrix "${CI_MANIFEST_REL}"
+    _expect plan-escalate 3 "[CI-ERROR-PLAN-0008];/${plat} resolve" || return 1
+    grep -qx 'any-build=false' "${mark}" || { echo "an UNKNOWN pair joined the matrix: $(cat "${mark}")"; return 1; }
+    : > "${mark}"
+    _ci_resolve_one() { printf 'service=%s platform=%s state=MISSING_CONFIRMED action=build identity=%s\n' "$1" "$2" "${w}"; }
+    _ci_semantic_impact() { printf 'UNKNOWN\n'; }
+    run ci_cmd_plan_matrix "${CI_MANIFEST_REL}"
+    _expect plan-impact-unknown 3 "[CI-ERROR-PLAN-0008];/${plat} impact" || return 1
+    grep -qx 'any-build=false' "${mark}" || { echo "an UNKNOWN impact joined the matrix: $(cat "${mark}")"; return 1; }
+    _ci_semantic_impact() { echo "impact asked for a non-build action" >&2; return 2; }
     ci_cmd_build() { printf 'service=%s platform=%s result=verify identity=%s\n' "$1" "$2" "${w}"; }
     ci_cmd_publish() { echo "publish ran for a verify pair" >&2; return 2; }
     ci_cmd_verify() { printf '%s %s %s\n' "$1" "$2" "$3" > "${calls}"; }

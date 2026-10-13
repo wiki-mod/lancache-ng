@@ -1014,7 +1014,7 @@ ci_cmd_plan_matrix() {
     _ci_docs_only "${changed[@]}" || drc=$?
     case "${drc}" in 0) docs_only=true ;; 1) ;; *) return 2 ;; esac
     local service platform include='[]' any=false resolved paction pident pimpact runner authed=false test_services=''
-    local sot_changed=false f path_cand rc plats
+    local sot_changed=false f path_cand rc plats unknown=""
     # What: SOT change makes every target id candidate.
     # Why: pins live in SOT; identity decides BUILD.
     # From: Issue #1683 | PR #1858
@@ -1060,6 +1060,13 @@ ci_cmd_plan_matrix() {
                 ci_error "[CI-ERROR-PLAN-0005]" "service=\"${service}\" platform=\"${platform}\" reason=\"ledger and registry digest disagree; no build, no accept\"" "${resolved}"
                 return 2
             fi
+            # What: UNKNOWN pairs are kept for escalation.
+            # Why: 2.3: UNKNOWN never builds, never silent.
+            # From: Issue #1683 | PR #1912
+            if [ "${paction}" = escalate ]; then
+                unknown+="${service}/${platform} resolve"$'\n'
+                continue
+            fi
             # What: unverified artifacts join the matrix
             # Why: ship verifies, scan accepts; no rebuild
             # From: Issue #1683 | PR #1912
@@ -1072,6 +1079,7 @@ ci_cmd_plan_matrix() {
             if [ "${paction}" = build ]; then
                 pimpact="$(_ci_semantic_impact "${service}" "${platform}" "${pident}")" || return 2
             fi
+            [ "${pimpact}" != UNKNOWN ] || unknown+="${service}/${platform} impact"$'\n'
             [ "${pimpact}" = BUILD ] || continue
             runner="$(_ci_platform_field "${platform}" runner "[CI-ERROR-PLAN-0002]" "service=\"${service}\" reason=\"no runner label for platform\"")" || return 2
             include="$(_ci_matrix_append "${include}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}")" || return 2
@@ -1117,6 +1125,10 @@ ci_cmd_plan_matrix() {
         printf 'rust-audit=%s\n' "${rust_audit}"
         printf 'docs-only=%s\n' "${docs_only}"
     } >> "${out}"
+    if [ -n "${unknown}" ]; then
+        ci_error "[CI-ERROR-PLAN-0008]" "reason=\"UNKNOWN pairs: no build, escalate (2.3)\"" "${unknown}"
+        return 3
+    fi
 }
 
 # =========================================================
@@ -1352,24 +1364,43 @@ _ci_identity_pins() {
     done
 }
 
-# What: Print the bare id of one target+platform.
-# Why: Platform mixed in so arches never collide.
-# From: Issue #1683
-_ci_identity_for() {
-    local service="$1" platform="$2" ref="${3:-}"
-    local build_type paths p pins part buf
-    build_type="$(_ci_required_field "${service}" build_type)" || return 2
+# What: normalized content ids of a target's SOT paths.
+# Why: one reader for the id and the base impact proof.
+# From: Issue #1683 | PR #1912
+_ci_identity_content() {
+    local service="$1" ref="${2:-}" paths p part buf=""
     paths="$(_ci_target_paths "${service}")" || return 2
-    # What: every id input is captured and checked first.
-    # Why: a failed part in a hash pipe mints a wrong id.
-    # From: Issue #1683 | PR #1858
-    pins="$(_ci_identity_pins "${service}" "${build_type}" "${platform}")" || return "$?"
-    buf="$(printf 'service=%s\nbuild_type=%s\nplatform=%s' "${service}" "${build_type}" "${platform}")"$'\n'
     while IFS= read -r p; do
         [ -n "${p}" ] || continue
         part="$(_ci_tracked_content_ids "${p}" "${ref}")" || return 2
         [ -z "${part}" ] || buf+="${part}"$'\n'
     done <<< "${paths}"
+    printf '%s' "${buf}"
+}
+
+# What: build_type and SOT pins of one target+platform.
+# Why: the SOT half of the id; compared alone at base.
+# From: Issue #1683 | PR #1912
+_ci_identity_sot() {
+    local service="$1" platform="$2" build_type pins
+    build_type="$(_ci_required_field "${service}" build_type)" || return 2
+    pins="$(_ci_identity_pins "${service}" "${build_type}" "${platform}")" || return "$?"
+    printf 'build_type=%s\n%s\n' "${build_type}" "${pins}"
+}
+
+# What: Print the bare id of one target+platform.
+# Why: Platform mixed in so arches never collide.
+# From: Issue #1683
+_ci_identity_for() {
+    local service="$1" platform="$2" ref="${3:-}" build_type pins content buf
+    build_type="$(_ci_required_field "${service}" build_type)" || return 2
+    # What: every id input is captured and checked first.
+    # Why: a failed part in a hash pipe mints a wrong id.
+    # From: Issue #1683 | PR #1858
+    pins="$(_ci_identity_pins "${service}" "${build_type}" "${platform}")" || return "$?"
+    content="$(_ci_identity_content "${service}" "${ref}")" || return 2
+    buf="$(printf 'service=%s\nbuild_type=%s\nplatform=%s' "${service}" "${build_type}" "${platform}")"$'\n'
+    [ -z "${content}" ] || buf+="${content}"$'\n'
     buf+="${pins}"$'\n'
     printf '%s' "${buf}" | sha256sum | cut -d' ' -f1
 }
@@ -1458,7 +1489,7 @@ _ci_impact_run() {
                 continue
             fi
             hid="$(_ci_identity_for "${t}" "${p}" "${head}")" || hid=""
-            v="$(_ci_impact_classify "${t}" "${p}" "${hid}" "${base}" "${base_manifest}")"
+            v="$(_ci_impact_classify "${t}" "${p}" "${hid}" "${base}" "${base_manifest}" "${head}")"
             printf 'target=%s platform=%s impact=%s\n' "${t}" "${p}" "${v}"
             case "${v}" in
                 NOOP) noop=$((noop+1)) ;;
@@ -1475,21 +1506,34 @@ _ci_impact_run() {
     return 0
 }
 
-# What: NOOP/BUILD for a head id vs its base id.
-# Why: any failed base id is UNKNOWN; UNKNOWN != BUILD.
+# What: BUILD only on a proven input change.
+# Why: 2.2 BUILD needs proof; 2.3 UNKNOWN != BUILD.
 # From: Issue #1683 | PR #1912
 _ci_impact_classify() {
-    local t="$1" p="$2" hid="$3" base="$4" base_manifest="$5" bid rc=0
+    local t="$1" p="$2" hid="$3" base="$4" base_manifest="$5" head="${6:-}" hc bc hs bs
     if [ -z "${hid}" ]; then
         ci_log "[CI-INFO-IMPACT-0009]" "service=\"${t}\" platform=\"${p}\" reason=\"no head identity; UNKNOWN\""
         printf 'UNKNOWN\n'; return 0
     fi
-    bid="$(CI_MANIFEST="${base_manifest}" _ci_identity_for "${t}" "${p}" "${base}")" || rc=$?
-    if [ "${rc}" -ne 0 ] || [ -z "${bid}" ]; then
-        ci_log "[CI-INFO-IMPACT-0010]" "service=\"${t}\" platform=\"${p}\" base=\"${base}\" rc=${rc} reason=\"no base identity (error above if rc>0); UNKNOWN\""
+    # What: head SOT paths, read in the head and base tree.
+    # Why: a changed normalized input file proves impact.
+    # From: Issue #1683 | PR #1912
+    if ! hc="$(_ci_identity_content "${t}" "${head}")" || ! bc="$(_ci_identity_content "${t}" "${base}")"; then
+        ci_log "[CI-INFO-IMPACT-0014]" "service=\"${t}\" platform=\"${p}\" base=\"${base}\" reason=\"input content unreadable (error above); UNKNOWN\""
         printf 'UNKNOWN\n'; return 0
     fi
-    [ "${hid}" = "${bid}" ] && { printf 'NOOP\n'; return 0; }
+    if [ "${hc}" != "${bc}" ]; then
+        ci_log "[CI-INFO-IMPACT-0015]" "service=\"${t}\" platform=\"${p}\" base=\"${base}\" reason=\"normalized build input differs from base; BUILD\""
+        printf 'BUILD\n'; return 0
+    fi
+    # What: same inputs: only an SOT pin change is impact.
+    # Why: an unreadable base SOT proves nothing; UNKNOWN.
+    # From: Issue #1683 | PR #1912
+    if ! hs="$(_ci_identity_sot "${t}" "${p}")" || ! bs="$(CI_MANIFEST="${base_manifest}" _ci_identity_sot "${t}" "${p}")"; then
+        ci_log "[CI-INFO-IMPACT-0010]" "service=\"${t}\" platform=\"${p}\" base=\"${base}\" reason=\"SOT pins unreadable (error above); UNKNOWN\""
+        printf 'UNKNOWN\n'; return 0
+    fi
+    [ "${hs}" = "${bs}" ] && { printf 'NOOP\n'; return 0; }
     printf 'BUILD\n'
 }
 
