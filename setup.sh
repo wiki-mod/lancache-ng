@@ -4350,7 +4350,8 @@ run when they ARE reachable.
 Supported services:
   kea, dhcp          Rolls back Kea's DHCP config via its Control Agent API
                      (config-test -> config-set -> config-write), reading
-                     snapshots from the shared kea-data volume.
+                     snapshots from KEA_CONFIG_SNAPSHOT_DIR in the
+                     KEA_DATA_DIR state dir.
   dns, pdns          Rolls back a PowerDNS zone's record data via
                      nats-subscriber's rollback listener (list snapshots ->
                      diff -> PATCH -> check-zone -> flush -> re-publish),
