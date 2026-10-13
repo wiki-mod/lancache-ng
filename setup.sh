@@ -4221,9 +4221,9 @@ the order prompts are expected to be asked. A blank line (or running out of
 lines) falls back to that prompt's own default, the same as an operator
 pressing Enter. Omitting the file entirely walks the all-defaults path.
 
-Intended consumer: .github/scripts/ci.bats derives the answers of its real
-install run from this output instead of hand-encoding them, so a new prompt
-cannot silently drift out of sync with the tested install.
+Intended consumer: docs/release-validation-plan.md reads the real prompt
+sequence from this output instead of hand-encoding it, so a new prompt
+cannot silently drift out of sync with the validated install.
 EOF
             ;;
         update)

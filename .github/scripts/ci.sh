@@ -12618,9 +12618,17 @@ _ci_parallel_jobs() {
 # Why: tests that never run in CI enforce nothing.
 # From: Issue #1683 | PR #1858
 _ci_check_ci_bats() {
-    local suite="${CI_SCRIPT_DIR}/ci.bats" jobs cpus rc=0 gate
+    local suite="${CI_SCRIPT_DIR}/ci.bats" jobs cpus rc=0 gate tests
     if [ -n "${BATS_TEST_FILENAME:-}" ]; then
         printf 'ci-bats=NOT-RUN reason="already inside a bats run; no nested suite"\n'
+        return 0
+    fi
+    # What: no @test, no bats start; tests need a PR ACK
+    # Why: an empty suite passes and only costs a start
+    # From: Issue #1683 | PR #1912
+    tests="$(_ci_capture 1 grep -c '^@test ' "${suite}")" || return 2
+    if [ "${tests}" -eq 0 ]; then
+        printf 'ci-bats=NOT-RUN reason="suite holds no test"\n'
         return 0
     fi
     if [ "${CI_SCAN_SCOPE_FILTER:-0}" = 1 ] && [ "$#" -gt 0 ]; then
