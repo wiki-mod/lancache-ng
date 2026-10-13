@@ -11710,18 +11710,15 @@ _ci_shell_findings() {
 _ci_check_line_endings() {
     local -a _ci_override=("$@") files=()
     _ci_scan_files files _ci_override || return 2
-    local path
+    local eol row
     local -a offenders=()
-    for path in "${files[@]}"; do
-        case "${path}" in
-            *.png|*.jpg|*.jpeg|*.gif|*.ico|*.woff|*.woff2|*.ttf|*.eot|*.crt|*.key|*.pem) continue ;;
-        esac
-        local crlf
-        crlf="$(_ci_capture 1 grep -a -m1 -n $'\r' "${path}")" || return 2
-        if [ -n "${crlf}" ]; then
-            offenders+=("${path}")
-        fi
-    done
+    # What: git's eol view; w/crlf or w/mixed is CRLF.
+    # Why: git tells text from binary; no extension list.
+    # From: Issue #1683 | PR #1912
+    [ "${#files[@]}" -eq 0 ] || eol="$(_ci_capture 0 git ls-files --eol -- "${files[@]}")" || return 2
+    while IFS= read -r row; do
+        case "${row}" in *" w/crlf "*|*" w/mixed "*) offenders+=("${row#*$'\t'}") ;; esac
+    done <<< "${eol:-}"
     if [ "${#offenders[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0002]" "reason=\"CRLF found; repo requires LF\"" "$(printf '%s\n' "${offenders[@]}")"
         return 1
