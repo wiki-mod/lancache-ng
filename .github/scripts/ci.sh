@@ -15135,15 +15135,15 @@ _ci_check_dockerfiles() {
         fi
         n=$(( n + 1 ))
         type="$(ci_service_field "${t}" build_type)" || return 2
-        # What: each ci.sh stage declares every SOT stage var.
-        # Why: ARG scope is per stage; else ci.sh reads none.
+        # What: ci.sh stages declare each SOT stage var.
+        # Why: ARG scope is per stage; else no value.
         # From: Issue #1683 | PR #1858
         missing="$(_ci_dockerfile_stage_missing_args "${df}" "${svars}" 'ci[.]sh (apk-setup|rust-build)')" || return 2
         while read -r bst bv; do
             [ -z "${bv}" ] || e_stage+=("${t}: Dockerfile stage ${bst} runs ci.sh without ARG ${bv} (SOT stage_variables.ci_sh)")
         done <<< "$(sort -u <<< "${missing}")"
         # What: each secret mount id is a central id.
-        # Why: set-runtime writes only listed ids; one source.
+        # Why: set-runtime writes only listed ids.
         # From: Issue #1683 | PR #1858
         hits="$(_ci_capture 0 awk '/^[[:space:]]*#/ { next }
             { s = $0; while (match(s, /--mount=[^[:space:]]+/)) { print substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH) } }' "${df}")" || return 2
@@ -15160,8 +15160,8 @@ _ci_check_dockerfiles() {
             fi
             grep -qx -- "${id}" <<< "${allow}" || e_secret+=("${t}: ${rel}: mount id '${id}' is not in the central list")
         done <<< "${hits}"
-        # What: each local COPY source is the context or an edge.
-        # Why: an uncovered source keeps a stale image identity.
+        # What: COPY sources: the context or an edge.
+        # Why: else the image identity goes stale.
         # From: Issue #1683 | PR #1912
         c="$(_ci_required_field "${t}" context)" || return 2
         roots=("${c}")
@@ -15201,7 +15201,7 @@ _ci_check_dockerfiles() {
         fi
         [ -z "${raw}" ] || e_bt+=("${t}: Dockerfile compiles a tool with cargo install; consume the build-tools image")
         # What: rust stages: build vars, build-tools image.
-        # Why: one toolchain owner; no self-compile (AG-CI-008).
+        # Why: one toolchain owner (AG-CI-008).
         # From: Issue #1683
         grep -q "ARG ${CI_ARG_TOOLCHAIN_IMAGE}" "${df}" \
             || e_bt+=("${t}: Dockerfile must declare ARG ${CI_ARG_TOOLCHAIN_IMAGE}")
