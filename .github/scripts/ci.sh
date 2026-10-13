@@ -12354,54 +12354,51 @@ _ci_check_language_policy() {
 # Why: SHA/digest-pinned only, no :latest, tag or branch.
 # From: Issue #1683
 _ci_check_mutable_refs() {
-    local -a _ci_override=("$@") files=()
+    local -a _ci_override=("$@") files=() yml=() dock=() viol=()
     _ci_scan_files files _ci_override '.github/workflows/*.yml' '.github/actions/**/action.yml' "${CI_DOCKERFILE_SPECS[@]}" || return 2
-    local path out line v
-    local -a viol=()
+    local path out row v
+    local re='^([^:]+):([0-9]+):[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*(&[A-Za-z0-9_-]+[[:space:]]+)?([^[:space:]]+)'
     for path in "${files[@]}"; do
         case "${path}" in
-            *.yml|*.yaml)
-                # What: external ref needs a 40-hex SHA.
-                # Why: tags, branches, short SHAs move.
-                # From: Issue #1683 | PR #1858
-                out="$(_ci_capture 1 grep -nE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]*]' "${path}")" || return 2
-                while IFS= read -r line; do
-                    [ -n "${line}" ] || continue
-                    v="$(sed -E 's/^[0-9]+:[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*(&[A-Za-z0-9_-]+[[:space:]]+)?//; s/[[:space:]]+#.*$//; s/[[:space:]]+$//' <<<"${line}")"
-                    v="${v#[\"\']}"; v="${v%[\"\']}"
-                    _ci_action_ref_is_external "${v}" || continue
-                    [[ "${v##*@}" =~ ^[0-9a-fA-F]{40}$ ]] || viol+=("${path} action-not-full-sha: ${line}")
-                done <<<"${out}"
-                # What: grep pattern in ARG not ref.
-                # Why: PROMOTE_TAGS greps ARG :latest.
-                # From: Issue #1683 | PR #1858
-                out="$(_ci_capture 1 grep -nE "${CI_ARG_TOOLCHAIN_IMAGE}=[^[:space:]]*:latest" "${path}")" || return 2
-                out="$(_ci_capture 1 grep -vF "ARG ${CI_ARG_TOOLCHAIN_IMAGE}=" <<< "${out}")" || return 2
-                if [ -n "${out}" ]; then
-                    viol+=("${path} img-default-latest: ${out}")
-                fi
-                ;;
-            */Dockerfile|Dockerfile)
-                out="$(_ci_capture 1 grep -nE '^FROM .+:latest' "${path}")" || return 2
-                out="$(_ci_capture 1 grep -vE 'sccache-ng|ccache-ng' <<< "${out}")" || return 2
-                if [ -n "${out}" ]; then
-                    viol+=("${path} FROM-latest: ${out}")
-                fi
-                out="$(_ci_capture 1 grep -nE '^FROM [a-z0-9./]+$' "${path}")" || return 2
-                if [ -n "${out}" ]; then
-                    viol+=("${path} FROM-untagged: ${out}")
-                fi
-                # What: # syntax= needs an @sha256 pin.
-                # Why: unpinned is pulled anew each build.
-                # From: Issue #1683 | PR #1858
-                out="$(_ci_capture 1 grep -niE '^#[[:space:]]*syntax[[:space:]]*=' "${path}")" || return 2
-                out="$(_ci_capture 1 grep -vE "@${CI_DIGEST_RE}" <<< "${out}")" || return 2
-                if [ -n "${out}" ]; then
-                    viol+=("${path} syntax-unpinned: ${out}")
-                fi
-                ;;
+            *.yml|*.yaml) yml+=("${path}") ;;
+            */Dockerfile|Dockerfile) dock+=("${path}") ;;
         esac
     done
+    # What: one grep per pattern over all files of a kind.
+    # Why: a grep or sed per file or line cost a fork each.
+    # From: Issue #1683 | PR #1912
+    if [ "${#yml[@]}" -gt 0 ]; then
+        # What: external ref needs a 40-hex SHA.
+        # Why: tags, branches, short SHAs move.
+        # From: Issue #1683 | PR #1858
+        out="$(_ci_capture 1 grep -nHE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]*]' -- "${yml[@]}")" || return 2
+        while IFS= read -r row; do
+            [[ "${row}" =~ ${re} ]] || continue
+            v="${BASH_REMATCH[5]}"; v="${v#[\"\']}"; v="${v%[\"\']}"
+            _ci_action_ref_is_external "${v}" || continue
+            [[ "${v##*@}" =~ ^[0-9a-fA-F]{40}$ ]] || viol+=("${row%%:*} action-not-full-sha: ${row#*:}")
+        done <<< "${out}"
+        # What: grep pattern in ARG not ref.
+        # Why: PROMOTE_TAGS greps ARG :latest.
+        # From: Issue #1683 | PR #1858
+        out="$(_ci_capture 1 grep -nHE "${CI_ARG_TOOLCHAIN_IMAGE}=[^[:space:]]*:latest" -- "${yml[@]}")" || return 2
+        while IFS= read -r row; do
+            [[ -z "${row}" || "${row}" == *"ARG ${CI_ARG_TOOLCHAIN_IMAGE}="* ]] || viol+=("${row%%:*} img-default-latest: ${row#*:}")
+        done <<< "${out}"
+    fi
+    if [ "${#dock[@]}" -gt 0 ]; then
+        out="$(_ci_capture 1 grep -nHE '^FROM .+:latest' -- "${dock[@]}")" || return 2
+        while IFS= read -r row; do [ -z "${row}" ] || viol+=("${row%%:*} FROM-latest: ${row#*:}"); done <<< "${out}"
+        out="$(_ci_capture 1 grep -nHE '^FROM [a-z0-9./]+$' -- "${dock[@]}")" || return 2
+        while IFS= read -r row; do [ -z "${row}" ] || viol+=("${row%%:*} FROM-untagged: ${row#*:}"); done <<< "${out}"
+        # What: # syntax= needs an @sha256 pin.
+        # Why: unpinned is pulled anew each build.
+        # From: Issue #1683 | PR #1858
+        out="$(_ci_capture 1 grep -niHE '^#[[:space:]]*syntax[[:space:]]*=' -- "${dock[@]}")" || return 2
+        while IFS= read -r row; do
+            [[ -z "${row}" || "${row}" =~ @${CI_DIGEST_RE} ]] || viol+=("${row%%:*} syntax-unpinned: ${row#*:}")
+        done <<< "${out}"
+    fi
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0008]" "reason=\"mutable image/action reference\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
