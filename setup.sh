@@ -4554,37 +4554,6 @@ capture_stack_health_baseline() {
     done
 }
 
-# What: maps file-logged services to syslog hosts
-# Why: docker logs is blind for these services
-declare -gA _REGRESSED_SERVICE_SYSLOG_HOST=(
-    [dhcp-proxy]="lancache-dhcp-proxy"
-    [nats]="lancache-nats"
-    [syslog]="lancache-syslog"
-)
-
-# What: tails the forwarded syslog-ng log of one service
-# Why: supplements docker logs; needs logging active
-dump_service_syslog_ng_tail() {
-    local svc="$1" syslog_host="$2"
-    local syslog_ng_log_dir today_file
-
-    # What: a failed lookup skips only this diagnostic
-    # Why: it runs in the rollback path, which must go on
-    # From: Issue #1683 | PR #1858
-    if ! syslog_ng_log_dir=$(prod_state_dir_for_key SYSLOG_NG_LOG_DIR "$_UPDATE_ENV_FILE"); then
-        print_warn "Cannot resolve SYSLOG_NG_LOG_DIR; skipping the forwarded logs of '$svc'."
-        return 0
-    fi
-    today_file="$syslog_ng_log_dir/$syslog_host/$(date -u +%Y%m%d).log"
-
-    if [[ -r "$today_file" ]]; then
-        print_warn "Last 50 forwarded log lines for '$svc' (docker logs is empty for this service while central logging is active -- see $today_file):"
-        tail -n 50 "$today_file" 2>&1 | sed 's/^/    /' || print_warn "Could not read $today_file (may have rotated mid-read)."
-    else
-        print_warn "No forwarded syslog-ng log file found for '$svc' yet at $today_file."
-    fi
-}
-
 # What: polls health and functional probe until timeout
 # Why: pre-update unhealthy services do not block the update
 wait_for_stack_health() {
@@ -4632,12 +4601,6 @@ wait_for_stack_health() {
                 docker logs --tail 50 "$container_id" 2>&1 | sed 's/^/    /' || print_warn "Could not retrieve logs for '$svc' (container may already be gone)."
             else
                 print_warn "No container found for regressed service '$svc'; cannot dump its logs."
-            fi
-            if [[ -n "${_REGRESSED_SERVICE_SYSLOG_HOST[$svc]-}" ]]; then
-                # What: the tail reports a missing file
-                # Why: an off service has no log file
-                # From: Issue #1683 | PR #1912
-                dump_service_syslog_ng_tail "$svc" "${_REGRESSED_SERVICE_SYSLOG_HOST[$svc]}"
             fi
         done
     fi
