@@ -11687,7 +11687,9 @@ _CI_JQ_SHELL_FINDINGS='
         elif $c == "sed" then any($a[]; (startswith("-") | not) and test("(^|[;{}[:space:]0-9$/])[qQ]([0-9[:space:];}]|$)"))
         elif $c == "awk" then any($a[]; (startswith("-") | not) and test("(^|[^A-Za-z_])exit([^A-Za-z_]|$)"))
         else false end;
-    [.. | if type == "array" then
+    ($pipes[0] | [.. | objects | select(.Type == "BinaryCmd") | .Op]) as $ops
+    | if ($ops | length) != 2 then error("pipe probe Op codes: \($ops)") else . end
+    | [.. | if type == "array" then
             select(length > 1 and (.[0] | type == "object" and has("Cmd"))) as $l
             | range(0; ($l | length) - 1) as $i
             | select($l[$i].Cmd.Type? == "IfClause" and ($l[$i].Cmd | elseless))
@@ -11697,7 +11699,7 @@ _CI_JQ_SHELL_FINDINGS='
             (.Then[0] // empty) | reads | "status\tneg\t\(.)"
         elif .Type == "CallExpr" then
             argv | select(.[0] == "set" and any(.[1:][]; test("pipefail"))) | "pipefail"
-        elif .Type == "BinaryCmd" and (.Op == 13 or .Op == 14) then
+        elif .Type == "BinaryCmd" and (.Op | IN($ops[])) then
             select(.Y.Cmd.Type? == "CallExpr" and (.Y.Cmd | argv | early))
             | "pipe\t\(.Pos.Line)\t\(.Y.Cmd | argv | join(" "))"
         else empty end] as $r
@@ -11705,12 +11707,13 @@ _CI_JQ_SHELL_FINDINGS='
     | $r[] | select(. != "pipefail" and ($pf or (startswith("pipe\t") | not)))'
 
 # What: tagged shell findings of one source (status, pipe).
-# Why: one parse and one tree walk per file; $2 holds it.
+# Why: one parse, one walk; $2 tree file, $3 pipe probe.
 # From: Issue #1683 | PR #1858
 _ci_shell_findings() {
-    local f="$1" ast="$2"
+    local f="$1" ast="$2" probe="$3"
     _ci_shell_ast "${f}" "${ast}" || return 2
-    _ci_run "[CI-ERROR-CHECK-0167]" "file=\"${f}\" reason=\"syntax tree query failed\"" jq -r "${_CI_JQ_SHELL_FINDINGS}" "${ast}"
+    _ci_run "[CI-ERROR-CHECK-0167]" "file=\"${f}\" reason=\"syntax tree query failed\"" \
+        jq -r --slurpfile pipes "${probe}" "${_CI_JQ_SHELL_FINDINGS}" "${ast}"
 }
 
 # What: Fail on any listed text file carrying CRLF.
@@ -12442,11 +12445,17 @@ _ci_check_executable_bits() {
 # From: Issue #1683 | PR #1912
 _ci_check_shell_guards() {
     local -a _ci_override=("$@") files=() status=() pipe=()
-    local path produced tag a b loc ast
+    local path produced tag a b loc ast probe
     _ci_shell_sources files _ci_override dockerfiles || return 2
     ast="$(_ci_mktemp "${CI_TMPDIR}/ci-ast.XXXXXX")" || return 2
+    probe="$(_ci_mktemp "${CI_TMPDIR}/ci-pipe.XXXXXX")" || { rm -f "${ast}"; return 2; }
+    # What: this shfmt parses | and |& for their Op codes
+    # Why: Op numbers move between shfmt versions
+    # From: Issue #1683 | PR #1912
+    printf 'a | b\na |& b\n' > "${ast}"
+    _ci_shell_ast "${ast}" "${probe}" || { rm -f "${ast}" "${probe}"; return 2; }
     for path in "${files[@]}"; do
-        produced="$(_ci_shell_findings "${path}" "${ast}")" || { rm -f "${ast}"; return 2; }
+        produced="$(_ci_shell_findings "${path}" "${ast}" "${probe}")" || { rm -f "${ast}" "${probe}"; return 2; }
         while IFS=$'\t' read -r tag a b; do
             loc="${path}:"
             [ "${path##*/}" != Dockerfile ] || loc="${path}: RUN text line "
@@ -12461,7 +12470,7 @@ _ci_check_shell_guards() {
             esac
         done <<< "${produced}"
     done
-    rm -f "${ast}"
+    rm -f "${ast}" "${probe}"
     [ "${#pipe[@]}" -eq 0 ] || ci_error "[CI-ERROR-CHECK-0011]" "reason=\"live pipe into early-exit consumer (SIGPIPE)\"" "$(printf '%s\n' "${pipe[@]}")"
     [ "${#status[@]}" -eq 0 ] || ci_error "[CI-ERROR-CHECK-0065]" "reason=\"\$? reads an if's status, not the command's (AG-VAL-029)\"" "$(printf '%s\n' "${status[@]}")"
     [ "$(( ${#pipe[@]} + ${#status[@]} ))" -eq 0 ] || return 1
