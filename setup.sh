@@ -3055,14 +3055,11 @@ write_lancache_image_refs() {
     done <<< "$vars"
 }
 
-# What: a channel's pointer word or a fixed tag
-# Why: channel pins live in LANCACHE_IMAGE_REF_*, tags stay
-# From: Issue #1683 | PR #1858
-resolve_lancache_image_tag() {
-    local env_file="${1:-}" tag="${LANCACHE_IMAGE_TAG:-}" release_tag="" channel="" words pinned
-
-    words=$(lancache_channel_words) || exit $?
-    pinned=$(lancache_release_rows pinned) || exit $?
+# What: pointer for a channel word, else a checked fixed tag
+# Why: the env tag and the .env tag follow one rule
+# From: Issue #1683 | PR #1912
+lancache_direct_image_tag() {
+    local tag="$1" words="$2"
     if [[ -n "$tag" ]] && grep -qxF -- "$tag" <<< "$words"; then
         lancache_stack_pointer_channel_for "$tag"
         return 0
@@ -3074,6 +3071,31 @@ resolve_lancache_image_tag() {
             return 0
             ;;
     esac
+    return 1
+}
+
+# What: release tag of this checkout, empty if it has none
+# Why: a malformed tag stops; no tag lets the channel decide
+# From: Issue #1683 | PR #1912
+lancache_release_archive_tag_or_empty() {
+    local tag
+    if tag=$(derive_release_archive_image_tag); then
+        printf '%s\n' "$tag"
+    elif [[ "$?" = "2" ]]; then
+        die "Cannot derive a valid release image tag from this checkout/archive."
+    fi
+    true
+}
+
+# What: a channel's pointer word or a fixed tag
+# Why: channel pins live in LANCACHE_IMAGE_REF_*, tags stay
+# From: Issue #1683 | PR #1858
+resolve_lancache_image_tag() {
+    local env_file="${1:-}" tag="${LANCACHE_IMAGE_TAG:-}" channel="" words pinned
+
+    words=$(lancache_channel_words) || exit $?
+    pinned=$(lancache_release_rows pinned) || exit $?
+    lancache_direct_image_tag "$tag" "$words" && return 0
 
     channel="${LANCACHE_IMAGE_CHANNEL:-}"
     if [[ -z "$channel" && -n "$env_file" && -f "$env_file" ]]; then
@@ -3087,13 +3109,7 @@ resolve_lancache_image_tag() {
         if [[ -z "$tag" && -n "$env_file" && -f "$env_file" ]]; then
             tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file") || exit $?
         fi
-        if [[ -z "$tag" ]]; then
-            if release_tag=$(derive_release_archive_image_tag); then
-                tag="$release_tag"
-            elif [[ "$?" = "2" ]]; then
-                die "Cannot derive a valid release image tag from this checkout/archive."
-            fi
-        fi
+        [[ -n "$tag" ]] || tag=$(lancache_release_archive_tag_or_empty) || exit $?
         [[ -n "$tag" ]] \
             || die "LANCACHE_IMAGE_CHANNEL=$pinned requires LANCACHE_IMAGE_TAG to be set to an immutable sha-* or vX.Y.Z tag."
     elif [[ -n "$channel" ]]; then
@@ -3103,28 +3119,9 @@ resolve_lancache_image_tag() {
     if [[ -z "$tag" && -n "$env_file" && -f "$env_file" ]]; then
         tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file") || exit $?
     fi
+    lancache_direct_image_tag "$tag" "$words" && return 0
 
-    if [[ -n "$tag" ]] && grep -qxF -- "$tag" <<< "$words"; then
-        lancache_stack_pointer_channel_for "$tag"
-        return 0
-    fi
-    case "$tag" in
-        sha-*|v[0-9]*)
-            validate_lancache_image_tag "$tag"
-            printf '%s\n' "$tag"
-            return 0
-            ;;
-    esac
-
-    if [[ -z "$tag" ]]; then
-        if release_tag=$(derive_release_archive_image_tag); then
-            tag="$release_tag"
-        elif [[ "$?" = "2" ]]; then
-            die "Cannot derive a valid release image tag from this checkout/archive."
-        fi
-        [[ -n "$release_tag" ]] && tag="$release_tag"
-    fi
-
+    [[ -n "$tag" ]] || tag=$(lancache_release_archive_tag_or_empty) || exit $?
     if [[ -z "$tag" ]]; then
         channel=$(resolve_lancache_image_channel "$env_file") || exit $?
         lancache_stack_pointer_channel_for "$channel"
