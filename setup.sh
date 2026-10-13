@@ -1510,8 +1510,9 @@ install_state_root() {
 # What: true for the manual checkout path deploy/prod
 # Why: quickstart installs live elsewhere
 is_deploy_prod_install_dir() {
-    local install_dir="$1"
-    [[ "$(basename "$install_dir")" = "prod" && "$(basename "$(dirname "$install_dir")")" = "deploy" ]]
+    local dir="${1%/}" rel="${PROD_COMPOSE#"$SCRIPT_DIR/"}"
+    rel="${rel%/*}"
+    [[ "$dir" = "$rel" || "$dir" = */"$rel" ]]
 }
 
 # What: picks .env.local for prod checkouts when it exists
@@ -1721,35 +1722,12 @@ prod_state_keys() {
     sed -E 's/^\$\{([A-Z0-9_]+):-.*/\1/' <<< "$keys" | sort -u
 }
 
-# What: quickstart .env keys that may hold relative paths
-# Why: migration and its test read the same key list
-# From: Issue #1683 | PR #1858
-quickstart_path_keys() {
-    printf '%s\n' CACHE_DIR KEA_DATA_DIR NTP_DATA_DIR CACHEHAMSTER_DATA_DIR
-}
-
-# What: files a quickstart dir carries below its root
-# Why: migration removes them last; the test plants them
-# From: Issue #1683 | PR #1858
-quickstart_bundle_copies() {
-    printf '%s\n' scripts/shared-secret-bootstrap.sh scripts/untracked/docker-socket-proxy.sh
-}
-
-# What: quickstart volume and the prod state-dir key per row
-# Why: prod binds these as dirs, not as named volumes
-# From: Issue #1683 | PR #1858
-quickstart_volume_keys() {
-    printf '%s\n' 'pdns-data-standard PDNS_DIR' \
-        'pdns-filter-state PDNS_FILTER_STATE_DIR' 'nats-data NATS_DATA_DIR' \
-        'nats-conf NATS_CONF_DIR' 'logs-syslog-ng SYSLOG_NG_LOG_DIR'
-}
-
 # What: "volume dir" per row of quickstart_volume_keys
 # Why: copy and postcondition read the same mapping
 # From: Issue #1683 | PR #1858
 quickstart_volume_dirs() {
     local env_file="$1" rows volume key dir
-    rows=$(quickstart_volume_keys) || exit $?
+    rows=$(lancache_sot_list quickstart_volume_keys runtime) || exit $?
     while read -r volume key; do
         dir=$(prod_state_dir_for_key "$key" "$env_file") || die "Cannot resolve the directory of $key (exit $?)."
         printf '%s %s\n' "$volume" "$dir"
@@ -1824,9 +1802,9 @@ migrate_quickstart_install() (
     local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" env_local old_env record project key value volume dir copy f
     local services old_volumes prod_volumes rows missing copies keys old_raw new_raw old_value line path_keys bundle
     local -a service_list copy_lines
-    path_keys=$(quickstart_path_keys) || exit $?
+    path_keys=$(lancache_sot_list quickstart_path_keys runtime) || exit $?
     path_keys="${path_keys//$'\n'/ }"
-    bundle=$(quickstart_bundle_copies) || exit $?
+    bundle=$(lancache_sot_list quickstart_bundle_copies runtime) || exit $?
     env_local="$stack_dir/.env.local"
     old_env="$old_dir/.env"
     record="$old_dir/.quickstart-migration"
@@ -1894,7 +1872,7 @@ migrate_quickstart_install() (
         || die "Cannot list the volumes of $old_dir (exit $?); the quickstart stack was not touched."
     prod_volumes=$(stack_compose "$stack_dir" "$env_local" config --volumes) \
         || die "Cannot list the volumes of $PROD_COMPOSE (exit $?); the quickstart stack was not touched."
-    rows=$(quickstart_volume_keys) || exit $?
+    rows=$(lancache_sot_list quickstart_volume_keys runtime) || exit $?
     missing=""
     while IFS= read -r volume; do
         [[ -n "$volume" ]] || continue

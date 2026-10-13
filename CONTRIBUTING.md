@@ -224,21 +224,13 @@ images.
 
 ### Building the full stack
 
-There is only one *production* deployment profile, `deploy/prod/docker-compose.yml` (the
-former `deploy/dev/` stack was retired in v0.3.0, #766 — see `AGENTS.md`'s `AG-KD-008`;
-**corrected 2026-08-05, issue #1391 doc-sweep audit** — a prior version of this section said
-"there is only one deployment profile" outright, then immediately named two more
-[`deploy/quickstart/`, `deploy/full-setup/`] as siblings in the very next sentence, and
-pointed at `CLAUDE.md`'s "No Separate Dev Environment" section, which no longer exists there
-— that content moved into `AGENTS.md`'s `## Architecture` section on 2026-07-31, per
-`CLAUDE.md`'s own current text). The profiles `deploy/prod/` and `deploy/full-setup/`
-reference every service by
-`image:` rather than `build:`, so there is no compose-level `--build` shortcut to rebuild every
-service from source in one command. This matches how CI itself builds first
--party images: `docker buildx build` directly against each
-`services/<name>/Dockerfile` (see `.github/workflows/build-push.yml`), then
-whatever compose file is in use pulls (or, if a matching tag already exists
-locally, simply reuses) the resulting image.
+There is one deployment profile, `deploy/prod/docker-compose.yml` (`AGENTS.md`
+`AG-KD-008`). It references every service by `image:` rather than `build:`, so
+there is no compose-level `--build` shortcut to rebuild every service from
+source in one command. This matches how CI builds first-party images:
+`ci.sh build` runs `docker buildx build` against each
+`services/<name>/Dockerfile`, then compose pulls (or, if a matching tag already
+exists locally, simply reuses) the resulting image.
 
 To exercise the full stack against local source changes, build and tag each
 service you changed the same way (see "Building a single service image"
