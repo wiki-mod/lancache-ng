@@ -1021,6 +1021,10 @@ go-panic|buildx|panic: methodref has no signature\nprocess "/bin/sh -c @SYM@" di
 buildx-compile|buildx|error: could not compile @CRATE@|permanent
 run-missing-var|buildx|@SYM@ is required (no default)\nprocess "/bin/sh -c @SYM@" did not complete successfully: exit code: 1|permanent
 run-network|buildx|connection reset by peer\nprocess "/bin/sh -c @SYM@" did not complete successfully: exit code: 1|transient
+run-apk-temp|buildx|ERROR: http://@HOST@/@SYM@: temporary error (try again later)\nprocess "/bin/sh -c @SYM@" did not complete successfully: exit code: 1|transient
+run-apk-net|buildx|ERROR: http://@HOST@/@SYM@: network error (check Internet connection and firewall)\nprocess "/bin/sh -c @SYM@" did not complete successfully: exit code: 1|transient
+run-apk-dns|buildx|ERROR: http://@HOST@/@SYM@: DNS lookup error\nprocess "/bin/sh -c @SYM@" did not complete successfully: exit code: 1|transient
+run-apk-select|buildx|ERROR: unable to select packages:\n  @SYM@ (no such package)\nprocess "/bin/sh -c @SYM@" did not complete successfully: exit code: 1|permanent
 run-registry|registry|@SYM@ is required\nprocess "/bin/sh -c @SYM@" did not complete successfully: exit code: 1|transient
 git-sideband||unexpected disconnect while reading sideband packet|transient
 git-hung-up||The remote end hung up unexpectedly|transient
@@ -1098,6 +1102,17 @@ CASES
         && ! cmp -s "${sot}" "${CI_MANIFEST_SOURCE}" || { echo "no build_type of ${rust} changed"; return 1; }
     _ts CI_MANIFEST="${sot}" TEST_SERVICES="${rust}"
     _expect unknown-type 2 "[CI-ERROR-TEST-0003] service=\"${rust}\";[CI-ERROR-TEST-0004] service=\"${rust}\" build_type=\"${bad}\"" || return 1
+    # What: cargo test runs with the SOT RUST_BACKTRACE.
+    # Why: the value left the build-tools image (AG-CI-023).
+    # From: Issue #1683 | PR #1912
+    local stub="${BATS_TEST_TMPDIR}/bin" want
+    want="$(yq -r '.ci_variables.RUST_BACKTRACE' "${CI_MANIFEST_SOURCE}")" && [ -n "${want}" ] && [ "${want}" != null ] \
+        || { echo "no SOT RUST_BACKTRACE"; return 1; }
+    mkdir -p "${stub}" && printf '#!/bin/bash\n' > "${stub}/sccache" \
+        && printf '#!/bin/bash\n[ "$1" != test ] || echo "bt=${RUST_BACKTRACE-unset}"\n' > "${stub}/cargo" \
+        && chmod +x "${stub}/sccache" "${stub}/cargo" || return 1
+    _ts -u RUST_BACKTRACE PATH="${stub}:${PATH}" CI_RUST_VALIDATION=true SCCACHE_REDIS_MODE=off TEST_SERVICES="${rust}"
+    _expect backtrace 0 "bt=${want};service=${rust} tested=ok" || return 1
 }
 
 # What: export step args: SOT kill timeout, cache pair only.
@@ -2112,7 +2127,7 @@ CASES
 # Why: SOT owns every value; build-args only maps it.
 # From: Issue #1683 | PR #1858
 @test "build-args: real SOT targets give pinned, filled arguments" {
-    local tool pc sp verify w case target fmt plat pre want absent s stderr=""
+    local tool pc sp verify w case target fmt plat pre want absent s boot stderr=""
     local -A N=()
     tool="$(_ci_block_keys build_toolchain)" && pc="$(_pin_consumer)" && sp="$(_ci_build_matrix_platforms)" \
         || { echo "SOT readers failed"; return 1; }
@@ -2140,8 +2155,8 @@ CASES
         [ "${absent}" = - ] && continue
         for w in ${absent}; do ! grep -q "^${pre}${w}=" <<< "${output}" || { echo "${case}: has ${w}: ${output}"; return 1; }; done
     done <<'CASES'
-toolchain|@TOOL@|||APK_PACKAGES=.+|BUILD_TOOLS_IMAGE
-toolchain-bare|@TOOL@|--bare||APK_PACKAGES=.+|BUILD_TOOLS_IMAGE
+toolchain|@TOOL@|||APK_PACKAGES=.+ APK_BOOTSTRAP=.+|BUILD_TOOLS_IMAGE
+toolchain-bare|@TOOL@|--bare||APK_PACKAGES=.+ APK_BOOTSTRAP=.+|BUILD_TOOLS_IMAGE
 pin-no-platform|@PC@|||@VER@=.+|@ARCH@
 pin-platform|@PC@||@SP@|@ARCH@=.+ @SHA@=[0-9a-f]{64}$|-
 CASES
@@ -2149,6 +2164,14 @@ CASES
     run _ci_service_build_args "${s}" --bare "${sp}" no
     _expect no-toolchain 0 "RUST_CRATES=" || return 1
     _expect runtime-gid 0 "LANCACHE_RUNTIME_GID=$(_ci_required_field runtime gid block)" || return 1
+    # What: the bootstrap list as the SOT holds it.
+    # Why: read by yq, not by the ci.sh reader under test.
+    # From: Issue #1683 | PR #1912
+    boot="$(yq -r '.image_base.bootstrap | join(" ")' "${CI_MANIFEST_SOURCE}")" && [ -n "${boot}" ] || { echo "no SOT bootstrap"; return 1; }
+    grep -qxF "APK_BOOTSTRAP=${boot}" <<< "${output}" || { echo "bootstrap: no APK_BOOTSTRAP=${boot}: ${output}"; return 1; }
+    for w in ${boot}; do
+        grep -qE "^APK_PACKAGES=(.* )?${w}( |\$)" <<< "${output}" || { echo "bootstrap ${w} not in APK_PACKAGES: ${output}"; return 1; }
+    done
     [[ "${output}" != *BUILD_TOOLS_IMAGE=* ]] || { echo "no-toolchain: image arg emitted: ${output}"; return 1; }
     run _ci_service_build_args "${s}" --bare "${sp}" "$(_val name)"
     _expect bad-toolchain-flag 2 "[CI-ERROR-BUILDARGS-0020] service=\"${s}\"" || return 1
@@ -2196,9 +2219,11 @@ CASES
         && V["@LIC@"]="$(_ci_release_value license)" || { echo "SOT inputs: ${V[*]} ${fb} ${base}"; return 1; }
     [ -n "${V["@S@"]}" ] && [ -n "${base}" ] && [ -n "${V["@LIC@"]}" ] || { echo "SOT inputs: ${V[*]} ${base}"; return 1; }
     V["@BIMG@"]="${base%@*}" V["@BDIG@"]="${base#*@}"
+    V["@DESC@"]="$(yq -r ".services.\"${V["@S@"]}\".description" "${CI_MANIFEST_SOURCE}")"
+    [ -n "${V["@DESC@"]}" ] && [ "${V["@DESC@"]}" != null ] || { echo "no SOT description: ${V[*]}"; return 1; }
     want="$(_fill "$(printf 'org.opencontainers.image.%s\n' 'revision=@SHA@' 'version=@SHA@' \
         'source=@SRV@/@OWN@/@REPO@' 'url=@SRV@/@OWN@/@REPO@' 'documentation=@SRV@/@OWN@/@REPO@' 'licenses=@LIC@' \
-        'vendor=@OWN@' 'title=@S@' 'description=@REPO@ @S@ image' 'base.name=@BIMG@' 'base.digest=@BDIG@')")"
+        'vendor=@OWN@' 'title=@S@' 'description=@DESC@' 'base.name=@BIMG@' 'base.digest=@BDIG@')")"
     CI_REPO_ROOT="${r}" GITHUB_SHA="$(_val sha)" GITHUB_SERVER_URL="${V["@SRV@"]}" \
         GITHUB_REPOSITORY="${V["@OWN@"]}/${V["@REPO@"]}" run _ci_oci_labels "${V["@S@"]}"
     _expect labels 0 - || return 1

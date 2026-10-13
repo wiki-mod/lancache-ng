@@ -1576,15 +1576,16 @@ _ci_image_base_plus() {
     printf '%s\n%s\n' "${base}" "${own}" | awk 'NF && !seen[$0]++'
 }
 
-# What: base, a service's own and its type's apk lists.
+# What: bootstrap, base, own and build-type apk lists.
 # Why: image and identity must see one and the same list.
 # From: Issue #1683 | PR #1858
 _ci_service_packages() {
-    local service="$1" own build_type runtime
+    local service="$1" own build_type runtime boot
+    boot="$(_ci_required_field image_base bootstrap blocklist)" || return 2
     own="$(_ci_target_list "${service}" packages)" || return 2
     build_type="$(_ci_required_field "${service}" build_type)" || return 2
     runtime="$(_ci_block_entry_list build_runtime "${build_type}" packages)" || return 2
-    _ci_image_base_plus packages "${own}"$'\n'"${runtime}"
+    _ci_image_base_plus packages "${boot}"$'\n'"${own}"$'\n'"${runtime}"
 }
 
 # What: base, own and build-type smoke checks of a service.
@@ -2117,6 +2118,10 @@ _ci_failure_is_network() {
         *"unexpected disconnect"*|*"remote end hung up"*|*"connection timed out"*) return 0 ;;
         *"could not resolve host"*|*"could not connect to server"*) return 0 ;;
         *"rpc failed; curl 92"*|*"rpc failed; curl 5"*) return 0 ;;
+        # What: apk-tools fetch errors that may heal.
+        # Why: a bootstrap apk RUN retries via buildx too.
+        # From: Issue #1683 | PR #1912
+        *"temporary error (try again later)"*|*"network error (check internet"*|*"dns lookup error"*) return 0 ;;
         *"gnutls recv error"*|*"tls connection"*"closed"*) return 0 ;;
     esac
     return 1
@@ -3510,6 +3515,7 @@ _ci_oci_labels() {
     final="$(_ci_required_field "${service}" final_base)" || return 2
     base="$(_ci_block_entry_field base_images "" "${final}")" || return 2
     head="$(_ci_head_commit)" || return 2
+    desc="$(_ci_required_field "${service}" description)" || return 2
     created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'org.opencontainers.image.created=%s\n' "${created}"
     printf 'org.opencontainers.image.revision=%s\n' "${head}"
@@ -3520,7 +3526,7 @@ _ci_oci_labels() {
     printf 'org.opencontainers.image.licenses=%s\n' "${lic}"
     printf 'org.opencontainers.image.vendor=%s\n' "${repo%%/*}"
     printf 'org.opencontainers.image.title=%s\n' "${service}"
-    printf 'org.opencontainers.image.description=%s\n' "${repo##*/} ${service} image"
+    printf 'org.opencontainers.image.description=%s\n' "${desc}"
     if [ -z "${base}" ]; then
         ci_log "[CI-ERROR-BUILD-0014]" "service=\"${service}\" key=\"base_images.${final}\" reason=\"final base not pinned in SOT\""
         return 2
@@ -4991,7 +4997,7 @@ _ci_rust_validation_enabled() {
 # Why: CI never runs cargo check; the variable gates rest.
 # From: Issue #1683 | PR #1858
 _ci_test_rust() {
-    local service="$1" ctx rc=0
+    local service="$1" ctx rc=0 bt
     _ci_rust_validation_enabled || rc=$?
     case "${rc}" in
         0) ;;
@@ -4999,6 +5005,7 @@ _ci_test_rust() {
         *) return 2 ;;
     esac
     ctx="$(_ci_required_field "${service}" crates list)" || return 2
+    bt="$(_ci_variable RUST_BACKTRACE)" || return 2
     # What: workspace-root cargo on the service's crates.
     # Why: build context is no crate; AG-VAL-008 per crate.
     # From: Issue #1683 | PR #1858
@@ -5011,7 +5018,7 @@ _ci_test_rust() {
         cd "${CI_REPO_ROOT:-.}" \
             && cargo fmt --check "${picks[@]}" \
             && cargo clippy --locked --all-targets "${picks[@]}" -- -D warnings \
-            && cargo test --locked "${picks[@]}" ) || trc=$?
+            && RUST_BACKTRACE="${bt}" cargo test --locked "${picks[@]}" ) || trc=$?
     # What: setup_rc: sccache setup error, rc 2, not FAIL.
     # Why: §72: infra UNKNOWN never reads as a test FAIL.
     # From: Issue #1683 | PR #1912
@@ -9018,6 +9025,16 @@ ci_cmd_variables() {
     esac
 }
 
+# What: the SOT bootstrap apk list as one build-arg.
+# Why: each Dockerfile adds it before ci.sh can run.
+# From: Issue #1683 | PR #1912
+_ci_apk_bootstrap_arg() {
+    local boot
+    boot="$(_ci_required_field image_base bootstrap blocklist)" || return 2
+    boot="$(tr '\n' ' ' <<< "${boot}")"
+    printf '%sAPK_BOOTSTRAP=%s\n' "$1" "${boot% }"
+}
+
 # What: Emit build-tools base + dhclient + apk build-args.
 # Why: SOT owns them; the Dockerfile pins nothing itself.
 # From: Issue #1683
@@ -9034,6 +9051,8 @@ _ci_build_tools_build_args() {
     pkgs="$(_ci_build_tools_packages | tr '\n' ' ')" || return 2
     pkgs="${pkgs% }"
     out="${out}${prefix}APK_PACKAGES=${pkgs}"$'\n'
+    pkgs="$(_ci_apk_bootstrap_arg "${prefix}")" || return 2
+    out="${out}${pkgs}"$'\n'
     # What: add SOT tagged repos as build-arg
     # Why: Dockerfile adds them; never owns URL
     # From: Issue #1683 | PR #1858
@@ -9180,6 +9199,8 @@ _ci_service_build_args() {
     if [ -n "${apk_pkgs}" ]; then
         out="${out}${prefix}APK_PACKAGES=${apk_pkgs}"$'\n'
     fi
+    apk_pkgs="$(_ci_apk_bootstrap_arg "${prefix}")" || return 2
+    out="${out}${apk_pkgs}"$'\n'
     # What: the service's tagged repos and repo keys.
     # Why: apk-setup adds them; the Dockerfile owns none.
     # From: Issue #1683 | PR #1858

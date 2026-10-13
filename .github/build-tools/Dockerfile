@@ -25,8 +25,6 @@ ARG DHCLIENT_SHA256
 # From: Issue #1683 | PR #1858
 FROM ${ALPINE_IMAGE:-scratch}
 
-LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image (Alpine)."
-
 # What: re-declare SOT build-args for use in this stage.
 # Why: pre-FROM ARGs are not visible after FROM in Docker.
 # From: Issue #1683
@@ -35,14 +33,6 @@ ARG DHCLIENT_ALPINE_BRANCH
 ARG DHCLIENT_URL
 ARG DHCLIENT_ARCH
 ARG DHCLIENT_SHA256
-
-# What: uses plain /bin/sh for the apk-install step only.
-# Why: the alpine base has no bash until apk installs it.
-# From: Issue #1095
-SHELL ["/bin/sh", "-c"]
-
-ENV PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    RUST_BACKTRACE=1
 
 # What: build identity keys the cache of later layers.
 # Why: a new package set must not reuse a stale apk layer.
@@ -60,10 +50,11 @@ ARG APK_PACKAGES
 ARG APK_TAGGED_REPOS
 ARG APK_KEYS
 
-# What: bootstrap bash for ci.sh apk-setup.
-# Why: the alpine base has no bash; ci.sh needs it.
-# From: Issue #1683 | PR #1858
-RUN apk add --no-cache bash
+# What: bootstrap apk list, supplied from the SOT.
+# Why: AG-REL-001 forbids ash; ci.sh apk-setup needs bash.
+# From: Issue #1683 | PR #1912
+ARG APK_BOOTSTRAP
+RUN apk add --no-cache ${APK_BOOTSTRAP}
 
 # What: retry policy for ci.sh, from SOT stage_variables
 # Why: this stage has no SOT; ci.sh reads them from env
@@ -83,7 +74,3 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     bash /usr/local/bin/ci.sh apk-pin-install "${DHCLIENT_URL}" "${DHCLIENT_VERSION}" \
       "${DHCLIENT_ALPINE_BRANCH}" "${DHCLIENT_ARCH}" "${DHCLIENT_SHA256}"
-
-WORKDIR /workspace
-
-CMD ["bash"]

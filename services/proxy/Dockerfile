@@ -79,8 +79,6 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
 # From: Issue #1683 | PR #1858
 FROM ${ALPINE_IMAGE:-scratch}
 
-LABEL org.opencontainers.image.description="LanCache-NG proxy: nginx cache for HTTP and TLS-interception traffic."
-
 # What: build identity keys the cache of later layers.
 # Why: a new package set must not reuse a stale apk layer.
 # From: Issue #1683 | PR #1858
@@ -91,10 +89,11 @@ ARG BUILD_IDENTITY
 ARG APK_PACKAGES
 ARG APK_TAGGED_REPOS
 ARG APK_KEYS
-# What: bootstrap bash for SHELL compatibility.
+# What: bootstrap apk list, supplied from the SOT.
 # Why: AG-REL-001 forbids ash; ci.sh apk-setup needs bash.
-# From: Issue #1683 | PR #1858
-RUN apk add --no-cache bash
+# From: Issue #1683 | PR #1912
+ARG APK_BOOTSTRAP
+RUN apk add --no-cache ${APK_BOOTSTRAP}
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # What: retry policy for ci.sh, from SOT stage_variables
 # Why: this stage has no SOT; ci.sh reads them from env
