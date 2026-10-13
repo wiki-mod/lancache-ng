@@ -234,7 +234,7 @@ volumes generically by inspecting the running containers, so they do not
 hardcode volume names — a new volume that follows the naming rule above is
 automatically included without a `setup.sh` change. The one place names are
 hardcoded is the `deploy_prod_repo_input_paths()` allowlist of repo-root
-paths reached via `../../` from `deploy/prod` (certs, `config/prod`,
+paths reached via `../../` from `deploy/prod` (`config/prod`,
 `services/dns/cdn-domains.txt`, `scripts/untracked/docker-socket-proxy.sh`) — any new
 repo-root file a production Compose service reads via a relative bind mount
 must be added there too, or a config-mode backup/restore silently misses

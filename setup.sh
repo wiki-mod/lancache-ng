@@ -1773,6 +1773,30 @@ prod_state_dir_for_key() {
     printf '%s\n' "$dir"
 }
 
+# What: copies a legacy ca.* set into the CA state dir
+# Why: a new CA would break every client's TLS trust
+# From: Issue #1683 | PR #1912
+migrate_legacy_ca() {
+    local src env_file="$2" remove="${3:-0}" dest f
+    src=$(realpath -m "$1")
+    [[ -f "$src/ca.crt" ]] || return 0
+    dest=$(prod_state_dir_for_key CA_DIR "$env_file") || exit $?
+    if [[ ! -f "$dest/ca.crt" ]]; then
+        mkdir -p "$dest" && cp -p "$src/ca."* "$dest/" \
+            || die "Failed to copy the CA from $src to $dest."
+    fi
+    for f in "$src/ca."*; do
+        cmp -- "$f" "$dest/${f##*/}" \
+            || die "Postcondition failed: $dest/${f##*/} is not the CA file of $src; nothing counts as migrated."
+    done
+    # What: the source goes only after a good update
+    # Why: a rollback to the old checkout still mounts it
+    [[ "$remove" = 1 ]] || return 0
+    rm -f -- "$src/ca."* && rmdir --ignore-fail-on-non-empty -- "$src" \
+        || die "Failed to remove the legacy CA in $src (exit $?)."
+    print_ok "CA moved from $src to $dest"
+}
+
 # What: a checkout root resolves to deploy/prod
 # Why: commands default to the checkout root
 # From: Issue #1683 | PR #1858
@@ -1890,16 +1914,7 @@ migrate_quickstart_install() (
     # What: prod uses the CA the quickstart clients trust
     # Why: another CA would break every client's TLS trust
     # From: Issue #1683 | PR #1858
-    if [[ -f "$old_dir/certs/ca.crt" ]]; then
-        if [[ ! -f "$SCRIPT_DIR/certs/ca.crt" ]]; then
-            mkdir -p "$SCRIPT_DIR/certs" && cp -p "$old_dir/certs/ca."* "$SCRIPT_DIR/certs/" \
-                || die "Failed to copy the CA from $old_dir/certs to $SCRIPT_DIR/certs."
-        fi
-        for f in "$old_dir/certs/ca."*; do
-            cmp -- "$f" "$SCRIPT_DIR/certs/${f##*/}" \
-                || die "Postcondition failed: $SCRIPT_DIR/certs/${f##*/} is not the CA file of $old_dir; nothing counts as migrated."
-        done
-    fi
+    migrate_legacy_ca "$old_dir/certs" "$env_local"
     _UPDATE_ENV_FILE="$env_local" _UPDATE_STACK_DIR="$stack_dir"
     validate_compose_config "$stack_dir"
     local apply_rc=0
@@ -3299,6 +3314,10 @@ migrate_env_for_update() (
         fi
         set_optional_env_path_override_if_needed "$state_key" "$state_sub_dir" "$state_dir/$state_sub" "$env_file"
     done <<< "$state_keys"
+    # What: the checkout CA becomes the CA state dir
+    # Why: the old compose mounted ../../certs
+    # From: Issue #1683 | PR #1912
+    migrate_legacy_ca "$install_dir/../../certs" "$env_file"
 
     cache_max_size=$(get_env_var_nonempty CACHE_MAX_SIZE "$env_file") || exit $?
     cache_max_gb=$(get_env_var_nonempty CACHE_MAX_GB "$env_file") || exit $?
@@ -3569,7 +3588,7 @@ backup_manifest() {
 
     printf '%s\n' "$cache_env_file"
     [[ "$env_file" != "$cache_env_file" ]] && printf '%s\n' "$env_file"
-    printf '%s\n' "$install_dir/docker-compose.yml" "$install_dir/certs" "$install_dir/scripts"
+    printf '%s\n' "$install_dir/docker-compose.yml" "$install_dir/scripts"
     deploy_prod_repo_input_paths "$install_dir"
     # What: every compose state dir but cache and logs
     # Why: cache: full mode only; logs are no rollback state
@@ -4892,6 +4911,7 @@ perform_stack_update_flow() {
         die "Update failed its post-update health gate and was rolled back to the pre-update backup. Investigate before retrying."
     fi
 
+    migrate_legacy_ca "$install_dir/../../certs" "$_UPDATE_ENV_FILE" 1
     trap - EXIT
     resume_lancache_convergence_after_update
     UPDATE_CONVERGENCE_COMPLETED=1
@@ -6758,7 +6778,7 @@ if [[ -f "$ENV_LOCAL" ]]; then
 fi
 
 if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
-    mkdir -p "$LANCACHE_STATE_DIR" "$SCRIPT_DIR/certs"
+    mkdir -p "$LANCACHE_STATE_DIR"
 fi
 
 # ── 4. Cache configuration ───────────────────────────────────────────────────
@@ -7604,7 +7624,7 @@ fi
 printf "\n"
 if [[ "$HTTPS_ENABLED" = "1" ]]; then
     printf "  ${BOLD}CA certificate${RESET} (available after first start):\n"
-    printf "    %s/certs/ca.crt\n" "$SCRIPT_DIR"
+    printf "    %s/ca.crt\n" "$(prod_state_dir_for_key CA_DIR "$ENV_LOCAL")"
     printf "    → install on clients for HTTPS mode\n"
     printf '    → guide: %s/wiki\n' "$LANCACHE_REPO_URL"
     printf "\n"

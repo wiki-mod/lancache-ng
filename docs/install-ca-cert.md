@@ -3,9 +3,9 @@
 The LAN cache intercepts HTTPS connections to cache content.
 A custom CA certificate must be installed once on each device.
 
-The file `ca.crt` is located in the `certs/` directory of the project after the
-first start (for a standard `/opt/lancache-ng` install:
-`/opt/lancache-ng/certs/ca.crt`). See
+The file `ca.crt` is in the CA state directory after the first start:
+`CA_DIR`, by default the `STATE_SUBDIR_CA` folder of `build-manifest.yml`
+below `LANCACHE_STATE_DIR`. `setup.sh` prints the full path. See
 [Getting the `ca.crt` onto client devices](#getting-the-cacrt-onto-client-devices)
 for how to distribute it to every device without server access.
 
@@ -102,26 +102,21 @@ they get full functionality, just without the caching benefit.
 ## Getting the `ca.crt` onto client devices
 
 `ca.crt` is a **public** certificate (only the matching `ca.key` is secret, and
-that never leaves the server). For a standard production install under
-`/opt/lancache-ng`, the file lives on the host at:
-
-```
-/opt/lancache-ng/certs/ca.crt
-```
-
-`setup.sh` prints this exact path after the first start. The open question this
+that never leaves the server). The file lives on the host in the CA state
+directory (`$CA_DIR` in the commands below); `setup.sh` prints this exact path after the first
+start. The open question this
 section addresses is how to get that file onto **every** client device — phones,
 laptops, Steam Decks — without SSH-ing into the server for each one.
 
 ### Manual distribution
 
 The admin serves the file ad hoc — but **never** point `python3 -m http.server`
-at the `certs/` directory itself: it serves the entire current directory, and
-`certs/` also holds `ca.key`, the private CA key. Copy just `ca.crt` into a
+at the CA state directory itself: it serves the entire current directory, and
+that directory also holds `ca.key`, the private CA key. Copy just `ca.crt` into a
 freshly created throwaway directory first, then serve *that*:
 
 ```bash
-( serve_dir="$(mktemp -d)" && trap 'rm -rf "$serve_dir"' EXIT && cp /opt/lancache-ng/certs/ca.crt "$serve_dir/" && cd "$serve_dir" && python3 -m http.server 8000 )
+( serve_dir="$(mktemp -d)" && trap 'rm -rf "$serve_dir"' EXIT && cp "$CA_DIR/ca.crt" "$serve_dir/" && cd "$serve_dir" && python3 -m http.server 8000 )
 # clients then browse to http://<lancache-lan-ip>:8000/ca.crt, then Ctrl-C when done --
 # the throwaway directory is removed automatically, no separate cleanup step needed
 ```
@@ -151,7 +146,7 @@ not a secret, so this is a tidiness gap, not a security one.
 or copies it off with `scp`:
 
 ```bash
-scp user@<lancache-lan-ip>:/opt/lancache-ng/certs/ca.crt .
+scp "user@<lancache-lan-ip>:$CA_DIR/ca.crt" .
 ```
 
 - **Pro:** zero code, works today.

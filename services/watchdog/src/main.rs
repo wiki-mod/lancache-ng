@@ -3663,10 +3663,11 @@ fn nginx_certs(
             ],
         )?;
         own(&ca_key, None, 0, 0o600)?;
-        log(
-            "ACTION REQUIRED: a new CA is in certs/ca.crt; every HTTPS client must install it \
+        log(&format!(
+            "ACTION REQUIRED: a new CA is in {}; every HTTPS client must install it \
              once (docs/install-ca-cert.md)",
-        );
+            path(&ca_crt)
+        ));
     }
     fs::create_dir_all(certs).map_err(|e| format!("cannot create {}: {e}", certs.display()))?;
     own(certs, None, gid, 0o2750)?;

@@ -175,8 +175,8 @@ lancache-ng install -- the local CA key, `PDNS_API_KEY`, `KEA_CTRL_TOKEN`,
 - **Storing**: written to the operator's own `.env` file (gitignored) or, for
   values shared across containers, a shared-secrets Docker volume (see
   `docs/threat-model.md` T4/T5/T12 for the exact mechanism per secret).
-  `ca.key` lives under `<install>/certs/` and is gitignored (`AGENTS.md`
-  `AG-KD-002`).
+  `ca.key` lives in the CA state directory (`CA_DIR`), outside the
+  checkout (`AGENTS.md` `AG-KD-002`).
 - **Accessing**: each service's entrypoint resolves only the specific
   secret(s) it needs from `.env`/the shared-secrets volume at startup; no
   service is handed a shared "all secrets" credential set.

@@ -91,7 +91,7 @@ protects *from the operator*. It is called out again in "Out of scope".
 │  │   - DHCP (Kea) OR dnsmasq-proxy       - NATS event bus (4222)     │ │
 │  │                                       - docker-socket-proxy       │ │
 │  │  Local CA key (HTTPS mode) lives on     (HAProxy allowlist) ──────┼─┼─► Docker
-│  │  host: <install>/certs/ca.key                                    │ │   daemon
+│  │  host: <CA_DIR>/ca.key                                           │ │   daemon
 │  └──────────────────────────────────────────────────────────────────┘ │
 │                                                                        │
 │  LAN clients: PCs, Steam Deck, phones (install CA for HTTPS mode)      │
@@ -129,7 +129,8 @@ architecture content as of 2026-07-31 — that content moved into `AGENTS.md`).
   wildcard cert signed by the local CA, caches, then re-fetches from the origin
   over verified TLS.
 - **Local CA (HTTPS mode)** — generated on first start (RSA-4096, 10-year) into
-  `<install>/certs/`. `ca.key` is the crown jewel and is gitignored; `ca.crt` is
+  the CA state directory (`CA_DIR`). `ca.key` is the crown jewel and stays
+  outside the checkout; `ca.crt` is
   a public certificate distributed to clients.
 - **Proxy request policy** — `PROXY_SECURITY_MODE` (`lazy` default / `strict`)
   controls whether only listed CDN hosts may be proxied; `PROXY_ALLOWED_CLIENT_CIDRS`
@@ -844,7 +845,7 @@ The operator remains responsible for:
 2. Leaving auth enabled (never `ALLOW_INSECURE_UI=true` on anything reachable).
 3. Choosing `strict` proxy mode and client CIDR limits when the LAN is not fully
    trusted.
-4. Protecting the local CA private key (`<install>/certs/ca.key`) in HTTPS mode.
+4. Protecting the local CA private key (`<CA_DIR>/ca.key`) in HTTPS mode.
 5. Monitoring disk and activity, and keeping images updated.
 
 For security concerns, use the project's private security reporting channel

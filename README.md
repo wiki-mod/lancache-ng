@@ -537,13 +537,8 @@ HTTPS mode generates a local CA certificate.
 
 Clients using HTTPS mode must trust this certificate.
 
-After the first start, the certificate is available here:
-
-```text
-/opt/lancache-ng/certs/ca.crt
-```
-
-Depending on your installation path, the file may be inside your selected install directory.
+After the first start, the certificate is in the CA state directory
+(`CA_DIR`, by default below `LANCACHE_STATE_DIR`). `setup.sh` prints its path.
 
 ### Install on clients
 
@@ -905,7 +900,6 @@ services/dhcp/           Kea DHCP service
 services/dhcp-proxy/     DHCP proxy service
 services/ntp/            LanCache-NG-NTP (chrony) service
 services/nats/           NATS sync service
-certs/                   Generated or mounted certificates
 ```
 
 ## Common problems

@@ -126,8 +126,7 @@ stack itself.
 
 - **Real `setup.sh install` bring-up is the correct starting point, not a direct
   `docker compose up`.** `setup.sh` installs the checkout's `deploy/prod` (AG-KD-008), whose
-  compose file reaches the repository inputs it needs (`certs/`,
-  `scripts/lib/shared-secret-bootstrap.sh`, `services/dns/cdn-domains.txt`,
+  compose file reaches the repository inputs it needs (`scripts/lib/shared-secret-bootstrap.sh`, `services/dns/cdn-domains.txt`,
   `services/syslog/netdata-web_log.conf`) through `../../` paths that exist in every
   real checkout. **`docker compose up` itself exits 0 even when a container
   later crash-loops**, so a validator relying on the `up` exit code alone will not see it;
@@ -201,8 +200,8 @@ stack itself.
   directory the proxy service mounts at `/etc/nginx/ssl/ca`, resolved relative to that
   profile's own `docker-compose.yml` (this document's `AG-VAL-010` note on Compose
   path resolution). `deploy/prod/docker-compose.yml` mounts
-  `../../certs:/etc/nginx/ssl/ca`, so for `deploy/prod` the path, run from the repo
-  root, is `certs/ca.crt`; for any other profile read its own mount. Using the wrong
+  `CA_DIR` (default: the `STATE_SUBDIR_CA` folder below `LANCACHE_STATE_DIR`), so for
+  `deploy/prod` the path is `$CA_DIR/ca.crt`; for any other profile read its own mount. Using the wrong
   path fails `openssl verify`/`s_client` with a misleading error that looks like broken
   interception but is only a wrong path.
 - `ping`/`ss` alone are not acceptable substitutes for either check (AG-VAL-013) — a

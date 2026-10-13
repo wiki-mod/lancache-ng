@@ -15,12 +15,6 @@ data/
 /syslog-ng/
 /cachehamster/
 
-# Generated certificates (keep only the CA template, not issued certs)
-certs/*.crt
-certs/*.key
-certs/*.pem
-!certs/.gitkeep
-
 # Generated BIND9 keys (auto-created at container startup)
 services/dns/keys/
 

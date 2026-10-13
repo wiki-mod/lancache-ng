@@ -112,7 +112,7 @@ services:
       - CACHE_INACTIVE=${CACHE_INACTIVE:-}
       - CACHE_MIN_FREE=${CACHE_MIN_FREE:-}
     volumes:
-      - ../../certs:${SOT_NGINX_DIR}/${SOT_NGINX_SUBDIR_CA}
+      - ${CA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_CA}}:${SOT_NGINX_DIR}/${SOT_NGINX_SUBDIR_CA}
       - ../../services/dns/cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}
       - proxy-cache:${SOT_NGINX_CACHE_DIR}
       - proxy-certs:${SOT_NGINX_DIR}/${SOT_NGINX_SUBDIR_CERTS}
