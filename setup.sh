@@ -4166,8 +4166,9 @@ Tip:
 EOF
 }
 
-# What: prints one subcommand's detailed usage
-# Why: the compact top-level usage stays short
+# What: prints one subcommand's usage; returns 1 if none
+# Why: the dispatcher then reports the unknown command
+# From: Issue #1683 | PR #1912
 print_command_help() {
     local command="$1"
 
@@ -4256,7 +4257,7 @@ exact same ordered, health-gated update as ./setup.sh update. If
 [install-dir] is omitted, ${DEFAULT_INSTALL_DIR} is used.
 EOF
             ;;
-        update-ip|--reconfigure|reconfigure)
+        update-ip)
             cat <<EOF
 Usage: ./setup.sh update-ip [install-dir]
 
@@ -4370,7 +4371,7 @@ If [install-dir] is omitted, ${DEFAULT_INSTALL_DIR} is used.
 EOF
             ;;
         *)
-            die "Unknown command for help: $command"
+            return 1
             ;;
     esac
 }
@@ -5527,7 +5528,7 @@ cmd_reset_to_last_known_good_config() {
             reset_dns_to_last_known_good_config "dns" "$install_dir" "$zone" "$snapshot_id" "$assume_yes"
             ;;
         "")
-            die "Usage: ./setup.sh reset-to-last-known-good-config <service> [install-dir] [snapshot-id]\nSupported services: kea, dns. Run './setup.sh reset-to-last-known-good-config --help' for details."
+            die "Usage: ./setup.sh reset-to-last-known-good-config <service> [install-dir] [snapshot-id]. Supported services: kea, dns. Run './setup.sh reset-to-last-known-good-config --help' for details."
             ;;
         *)
             die "Unknown service '$service' for reset-to-last-known-good-config. Supported: kea, dns. Run './setup.sh reset-to-last-known-good-config --help' for details."
@@ -6461,20 +6462,26 @@ if [[ -z "${1:-}" ]]; then
     print_usage
     exit 0
 fi
-case "${1:-install}" in
-    install)
-        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
-            print_command_help install
-            exit 0
-        fi
-        ;;
+# What: maps old command spellings to their names
+# Why: docs/how-to-change-ip.md still uses --reconfigure
+# From: Issue #1683 | PR #1912
+setup_command="$1"
+case "$setup_command" in
+    --secondary) setup_command=secondary ;;
+    --reconfigure|reconfigure) setup_command=update-ip ;;
+esac
+# What: "<command> --help" asks print_command_help
+# Why: one check; that function owns the help list
+# From: Issue #1683 | PR #1912
+if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]] \
+    && [[ ! "$setup_command" =~ ^(compose|converge-reconcile|help|--help|-h)$ ]]; then
+    print_command_help "$setup_command" && exit 0
+fi
+case "$setup_command" in
+    install) ;;
     list-prompts)
         # What: list-prompts records, then falls through
         # Why: the walk uses the real wizard branch logic
-        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
-            print_command_help list-prompts
-            exit 0
-        fi
         WIZARD_INTROSPECT_MODE=1
         if [[ -n "${2:-}" ]]; then
             [[ -f "$2" ]] || die "Answers file not found: $2"
@@ -6485,28 +6492,12 @@ case "${1:-install}" in
         fi
         ;;
     install-requirements-primary)
-        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
-            print_command_help install-requirements-primary
-            exit 0
-        fi
         cmd_install_requirements_primary; exit 0 ;;
     install-requirements-secondary)
-        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
-            print_command_help install-requirements-secondary
-            exit 0
-        fi
         cmd_install_requirements_secondary; exit 0 ;;
     update)
-        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
-            print_command_help update
-            exit 0
-        fi
         cmd_update "${2:-$DEFAULT_INSTALL_DIR}"; exit 0 ;;
     auto-update)
-        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
-            print_command_help auto-update
-            exit 0
-        fi
         cmd_auto_update "${2:-$DEFAULT_INSTALL_DIR}"; exit 0 ;;
     converge-reconcile)
         # What: internal-only; not in the usage text
@@ -6518,55 +6509,21 @@ case "${1:-install}" in
         # From: Issue #1683 | PR #1858
         shift; cmd_compose "$@"; exit 0 ;;
     debug)
-        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
-            print_command_help debug
-            exit 0
-        fi
         cmd_debug  "${2:-$DEFAULT_INSTALL_DIR}"; exit 0 ;;
     create-logs-for-issue)
-        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
-            print_command_help create-logs-for-issue
-            exit 0
-        fi
         shift; cmd_create_logs_for_issue "$@"; exit 0 ;;
     backup)
-        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
-            print_command_help backup
-            exit 0
-        fi
         shift; cmd_backup "$@"; exit 0 ;;
     restore)
-        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
-            print_command_help restore
-            exit 0
-        fi
         shift; cmd_restore "$@"; exit 0 ;;
     secondary)
-        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
-            print_command_help secondary
-            exit 0
-        fi
         shift; cmd_secondary "$@"; exit 0 ;;
-    --secondary)
-        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
-            print_command_help secondary
-            exit 0
-        fi
-        shift; cmd_secondary "$@"; exit 0 ;;
-    update-ip|--reconfigure|reconfigure)
-        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
-            print_command_help update-ip
-            exit 0
-        fi
+    update-ip)
         cmd_update_ip "${2:-$DEFAULT_INSTALL_DIR}"; exit 0 ;;
     reset-to-last-known-good-config)
-        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
-            print_command_help reset-to-last-known-good-config
-            exit 0
-        fi
         shift; cmd_reset_to_last_known_good_config "$@"; exit 0 ;;
     help|--help|-h) print_usage; exit 0 ;;
-    *)           die "Unknown command: $1\nRun './setup.sh --help' for available commands." ;;
+    *)           die "Unknown command: $1. Run './setup.sh --help' for available commands." ;;
 esac
 
 # ══════════════════════════════════════════════════════════════════════════════
