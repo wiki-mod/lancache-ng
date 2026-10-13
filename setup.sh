@@ -2605,8 +2605,7 @@ validate_lancache_image_tag() {
 # Why: AG-REL-010; hosts lack yq, so ci.sh cannot read it
 # From: Issue #1683 | PR #1858
 lancache_release_rows() {
-    local kind="$1" sot=.github/yaml/build-manifest.yml text rows
-    text=$(lancache_repo_file_text "$sot") || exit $?
+    local kind="$1" sot="$LANCACHE_SOT" text="$LANCACHE_SOT_TEXT" rows
     rows=$(awk '
         /^[^ #]/ { top = $0; sub(/:.*/, "", top); next }
         top != "release" || /^ *#/ || /^ *$/ { next }
@@ -2824,8 +2823,7 @@ lancache_image_ref_vars() {
 # Why: installer reads CI-owned values, never copies
 # From: Issue #1683 | PR #1858
 lancache_sot_value() {
-    local key="$1" block="${2:-ci_variables}" sot=.github/yaml/build-manifest.yml text value
-    text=$(lancache_repo_file_text "$sot") || exit $?
+    local key="$1" block="${2:-ci_variables}" sot="$LANCACHE_SOT" text="$LANCACHE_SOT_TEXT" value
     value=$(awk -v b="${block}:" -v k="  ${key}:" '
         $0 == b { f = 1; next }
         f && /^[^ #]/ { exit }
@@ -2842,8 +2840,7 @@ lancache_sot_value() {
 # Why: the installer reads lists too; yq is not on a host
 # From: Issue #1683 | PR #1912
 lancache_sot_list() {
-    local key="$1" block="$2" sot=.github/yaml/build-manifest.yml text value
-    text=$(lancache_repo_file_text "$sot") || exit $?
+    local key="$1" block="$2" sot="$LANCACHE_SOT" text="$LANCACHE_SOT_TEXT" value
     value=$(awk -v b="${block}:" -v k="  ${key}:" '
         $0 == b { f = 1; next }
         f && /^[^ #]/ { exit }
@@ -6462,6 +6459,12 @@ EOF
 
     print_ok "Secondary DNS '${name}' is running. Configure this host's IP as DNS on your clients."
 }
+
+# What: the SOT text, read once per setup.sh process
+# Why: each SOT read was its own cat or curl of it
+# From: Issue #1683 | PR #1912
+LANCACHE_SOT=.github/yaml/build-manifest.yml
+LANCACHE_SOT_TEXT=$(lancache_repo_file_text "$LANCACHE_SOT") || exit $?
 
 # What: the prod compose file, SOT CI_COMPOSE_FILE
 # Why: one owner; setup.sh and CI name the same file
