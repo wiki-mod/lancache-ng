@@ -1509,11 +1509,11 @@ _ci_listing_blob() {
     _ci_identity_git "${line%%$'\t'*}" "${ref}" cat-file blob "${line#*$'\t'}"
 }
 
-# What: Rust id lines: lock closure, reached lib items.
+# What: Rust id lines; $3 text: the reached item texts.
 # Why: 64.4: only what the service reaches is input.
 # From: Issue #1683 | PR #1912
 _ci_rust_content() {
-    local service="$1" ref="${2:-}" crates rows lock dir bin crate src listing line blob items
+    local service="$1" ref="${2:-}" mode="${3:-id}" crates rows lock dir bin crate src listing line blob items
     local roots="" pkgs lib sel h refs
     crates="$(_ci_required_field "${service}" crates list)" || return 2
     crates=" ${crates//$'\n'/ } "
@@ -1529,6 +1529,7 @@ _ci_rust_content() {
             items="$(_ci_rust_items "${blob}" drop)" || return 2
             refs="$(_ci_capture 0 cut -f4 <<< "${items}")" || return 2
             roots+=" ${refs//$'\n'/ }"
+            [ "${mode}" != text ] || printf '%s\n' "${items}"
         done <<< "${listing}"
     done <<< "${rows}"
     listing="$(_ci_tracked_listing "${lock}" "${ref}")" || return 2
@@ -1538,8 +1539,10 @@ _ci_rust_content() {
     fi
     blob="$(_ci_listing_blob "${listing}" "${ref}")" || return 2
     pkgs="$(_ci_run "[CI-ERROR-IDENTITY-0011]" "path=\"${lock}\" reason=\"lock closure not read\"" awk -v roots="${crates}" "${_CI_AWK_LOCK_CLOSURE}" <<< "${blob}")" || return 2
-    h="$(_ci_capture 0 sha256sum <<< "${pkgs}")" || return 2
-    printf '%s\t%s\n' "${lock}" "${h%% *}"
+    if [ "${mode}" != text ]; then
+        h="$(_ci_capture 0 sha256sum <<< "${pkgs}")" || return 2
+        printf '%s\t%s\n' "${lock}" "${h%% *}"
+    fi
     while IFS='|' read -r dir bin crate; do
         [ -z "${bin}" ] && [[ $'\n'"${pkgs}" == *$'\n'"${crate} "* ]] || continue
         listing="$(_ci_tracked_listing "${dir}" "${ref}")" || return 2
@@ -1547,7 +1550,7 @@ _ci_rust_content() {
         while IFS= read -r line; do
             [ -n "${line}" ] || continue
             if [[ "${line%%$'\t'*}" != *.rs ]]; then
-                printf '%s\n' "${line}"
+                [ "${mode}" = text ] || printf '%s\n' "${line}"
                 continue
             fi
             blob="$(_ci_listing_blob "${line}" "${ref}")" || return 2
@@ -1555,6 +1558,10 @@ _ci_rust_content() {
             lib+="${items}"$'\n'
         done <<< "${listing}"
         sel="$(_ci_run "[CI-ERROR-IDENTITY-0012]" "dir=\"${dir}\" reason=\"library closure not read\"" awk -v roots="${roots}" "${_CI_AWK_RUST_CLOSURE}" <<< "${lib}")" || return 2
+        if [ "${mode}" = text ]; then
+            printf '%s\n' "${sel}"
+            continue
+        fi
         h="$(_ci_capture 0 sha256sum <<< "${sel}")" || return 2
         printf '%s\t%s\n' "${dir}" "${h%% *}"
     done <<< "${rows}"
@@ -9046,6 +9053,41 @@ _ci_service_setup() {
     _ci_fill_defaults "${tokens}" "${rows}"$'\n'"GID=${gid}"
 }
 
+# What: runtime.defaults rows a service image reads.
+# Why: 64.4: a default rebuilds only images that read it.
+# From: Issue #1683 | PR #1912
+_ci_service_default_rows() {
+    local service="$1" rows type skip=" " text="" paths p part field
+    local -a specs=()
+    rows="$(_ci_runtime_defaults)" || return 2
+    type="$(_ci_required_field "${service}" build_type)" || return 2
+    if [ "${type}" = rust ]; then
+        skip="$(_ci_rust_skip_paths "${service}")" || return 2
+        text="$(_ci_rust_content "${service}" "" text)" || return 2
+    fi
+    # What: non-Rust files and SOT lists of the image.
+    # Why: templates and processes name keys too.
+    # From: Issue #1683 | PR #1912
+    paths="$(_ci_target_paths "${service}")" || return 2
+    while IFS= read -r p; do
+        [ -n "${p}" ] && [[ "${skip}" != *" ${p} "* ]] || continue
+        specs+=("${p}")
+    done <<< "${paths}"
+    part="$(_ci_run -m 1 "[CI-ERROR-BUILDARGS-0022]" "service=\"${service}\" reason=\"tracked files not read\"" \
+        git -C "${CI_REPO_ROOT}" grep --cached -I -h -o -E '[A-Z][A-Z0-9_]*' -- "${specs[@]}" ':!*.rs')" || return 2
+    text+=$'\n'"${part}"
+    for field in processes setup default_args; do
+        part="$(_ci_target_list "${service}" "${field}")" || return 2
+        text+=$'\n'"${part}"
+    done
+    _ci_run "[CI-ERROR-BUILDARGS-0021]" "service=\"${service}\" reason=\"read default keys not found\"" \
+        awk 'sep { s = $0; while (match(s, /[A-Z][A-Z0-9_]*/)) { t[substr(s, RSTART, RLENGTH)] = 1; s = substr(s, RSTART + RLENGTH) }; next }
+            $0 == "\001" { sep = 1; next }
+            { r[++n] = $0 }
+            END { for (i = 1; i <= n; i++) if (substr(r[i], 1, index(r[i], "=") - 1) in t) print r[i] }' \
+        <<< "${rows}"$'\n\001\n'"${text}"
+}
+
 # What: Emit SOT build-args for one product service.
 # Why: single base-image owner; Dockerfiles pin none.
 # From: Issue #1683
@@ -9099,10 +9141,10 @@ _ci_service_build_args() {
     # From: Issue #1683 | PR #1912
     val="$(_ci_required_field runtime gid block)" || return 2
     out="${out}${prefix}${CI_ARG_GID}=${val}"$'\n'
-    # What: the SOT values equal on every install.
+    # What: the SOT defaults this image reads.
     # Why: the Dockerfiles bake them; compose names none.
     # From: Issue #1683 | PR #1912
-    val="$(_ci_runtime_defaults)" || return 2
+    val="$(_ci_service_default_rows "${service}")" || return 2
     out="${out}${prefix}${CI_ARG_DEFAULTS}=${val//$'\n'/|}"$'\n'
     # What: SOT defaults this Dockerfile takes as args.
     # Why: the image builds with the value; it names none.

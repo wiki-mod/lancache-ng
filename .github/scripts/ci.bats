@@ -2136,6 +2136,33 @@ CASES
     _expect bad-toolchain-flag 2 "[CI-ERROR-BUILDARGS-0020] service=\"${s}\"" || return 1
 }
 
+# What: a default row moves only images that read it.
+# Why: 64.4: one changed default rebuilds no other image.
+# From: Issue #1683 | PR #1912
+@test "runtime default rows per image: a row change moves only its readers" {
+    local d k v nk hits sp s base mut
+    d="${BATS_TEST_TMPDIR}" k=UI_SECURITY_HEADERS v="$(_val name)" nk="NK$(_val int 100000 999999)"
+    # What: the fixture key is named under services/ui only.
+    # Why: proves the key choice by git grep, not ci.sh.
+    # From: Issue #1683 | PR #1912
+    hits="$(git -C "${CI_REPO_ROOT}" grep -l -w -e "${k}" -- services | sort -u)"
+    [ "${hits}" = services/ui/src/main.rs ] || { echo "${k} named in: ${hits}"; return 1; }
+    ! git -C "${CI_REPO_ROOT}" grep -q -w -e "${nk}" || { echo "${nk} is named in the repo"; return 1; }
+    K="${k}" V="${v}" NK="${nk}" yq '.runtime.defaults |= map(select(test("^" + strenv(K) + "=") | not)) + [strenv(K) + "=" + strenv(V), strenv(NK) + "=1"]' \
+        "${CI_MANIFEST_SOURCE}" > "${d}/sot.yml" || return 1
+    sp="$(_ci_build_matrix_platforms)" && sp="${sp%%$'\n'*}" && [ -n "${sp}" ] || { echo "no platform: ${sp}"; return 1; }
+    for s in $(ci_services); do
+        base="$(_ci_service_build_args "${s}" --bare "${sp}" no)" || { echo "${s}: base args failed"; return 1; }
+        mut="$(CI_MANIFEST="${d}/sot.yml" _ci_service_build_args "${s}" --bare "${sp}" no)" || { echo "${s}: mutated args failed"; return 1; }
+        [[ "${mut}" != *"${nk}="* ]] || { echo "${s}: unread ${nk} baked: ${mut}"; return 1; }
+        if [ "${s}" = ui ]; then
+            [[ "${mut}" == *"${k}=${v}"* ]] && [ "${base}" != "${mut}" ] || { echo "ui: ${k}=${v} missing: ${mut}"; return 1; }
+        else
+            [ "${base}" = "${mut}" ] || { echo "${s}: args moved with a ui-only row: $(diff <(echo "${base}") <(echo "${mut}"))"; return 1; }
+        fi
+    done
+}
+
 # What: OCI labels from the SOT, the env and the checkout
 # Why: build provenance is set once per image by ci.sh
 # From: Issue #1683 | PR #1858
