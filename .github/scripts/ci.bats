@@ -36,7 +36,7 @@ setup() {
     # Why: compose takes mount and port targets from them.
     # From: Issue #1683 | PR #1912
     local fx kv
-    fx="$(_ci_sot_compose_env)" || return 1
+    fx="$(_ci_runtime_defaults)" && fx="$(_ci_sot_compose_env "${fx}")" || return 1
     while IFS= read -r kv; do
         export "${kv?}"
     done <<<"${fx}"
