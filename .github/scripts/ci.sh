@@ -8084,11 +8084,13 @@ _ci_runtime_defaults() {
 }
 
 # What: one key's value in a KEY=value row list.
-# Why: loops read the rows once, not once per key.
+# Why: a bash read; no sed fork per key in env loops.
 # From: Issue #1683 | PR #1912
 _ci_default_in() {
-    local val
-    val="$(sed -n "s/^$2=//p" <<< "$1")"
+    local row val=""
+    while IFS= read -r row; do
+        [[ "${row}" != "$2="* ]] || { val="${row#*=}"; break; }
+    done <<< "$1"
     if [ -z "${val}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0125]" "key=\"$2\" reason=\"not in the SOT runtime.defaults\""
         return 2
@@ -14146,13 +14148,12 @@ _ci_validate_host_tools() {
     fi
 }
 
-# What: SOT_<KEY>=value for each runtime.compose_keys key.
+# What: SOT_<KEY>=value per compose key; $1 = defaults.
 # Why: compose interpolates the SOT paths and ports.
 # From: Issue #1683 | PR #1912
 _ci_sot_compose_env() {
-    local keys k v rows
+    local keys k v rows="$1"
     keys="$(_ci_required_field runtime compose_keys block)" || return 2
-    rows="$(_ci_runtime_defaults)" || return 2
     for k in ${keys}; do
         v="$(_ci_default_in "${rows}" "${k}")" || return 2
         printf 'SOT_%s=%s\n' "${k}" "${v}"
@@ -14180,6 +14181,7 @@ _ci_validation_images() {
 # From: Issue #1683 | PR #1858
 _ci_validation_env() {
     local fx kind keys k v n=0 rows
+    local -a pairs=()
     fx="$(_ci_block_entry_list validation "" compose_validation_env)" || return 2
     if [ -z "${fx}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0054]" "reason=\"no SOT validation.compose_validation_env\""
@@ -14197,7 +14199,7 @@ _ci_validation_env() {
         esac
         printf '%s\n' "${v}"
     done <<< "${fx}"
-    _ci_sot_compose_env || return 2
+    _ci_sot_compose_env "${rows}" || return 2
     _ci_validation_images || return 2
     # What: a fresh value per secret key, setup.sh format.
     # Why: a fixed key in the SOT is a hardcoded credential.
@@ -14205,12 +14207,20 @@ _ci_validation_env() {
     for kind in hex32 base64_32 secondary_hex32; do
         keys="$(_ci_required_field runtime "secrets_${kind}" block)" || return 2
         for k in ${keys}; do
-            v="$(_ci_run "[CI-ERROR-VALIDATE-0100]" "key=\"${k}\" kind=\"${kind}\" reason=\"secret not generated\"" \
-                bash -c 'source "$1" && generate_secret_value "$2" "$3"' _ "${CI_REPO_ROOT}/setup.sh" "${k}" "${kind#secondary_}")" || return 2
-            printf '%s=%s\n' "${k}" "${v//$'\n'/}"
+            pairs+=("${k}" "${kind#secondary_}")
             n=$((n + 1))
         done
     done
+    # What: one setup.sh load makes every secret.
+    # Why: a load per key cost 10 loads per env.
+    # From: Issue #1683 | PR #1912
+    [ "${n}" -eq 0 ] || _ci_run "[CI-ERROR-VALIDATE-0100]" "keys=${n} reason=\"secret not generated\"" \
+        bash -c 'source "$1" || exit 2; shift
+            while [ "$#" -gt 1 ]; do
+                v="$(generate_secret_value "$1" "$2")" || exit 2
+                printf "%s=%s\n" "$1" "${v}"
+                shift 2
+            done' _ "${CI_REPO_ROOT}/setup.sh" "${pairs[@]}" || return 2
     if [ "${n}" -eq 0 ]; then
         ci_log "[CI-ERROR-VALIDATE-0101]" "reason=\"no SOT runtime.secrets_* keys\""
         return 2
@@ -14339,7 +14349,8 @@ _ci_compose_run() {
         names="$(_ci_run "[CI-ERROR-CORE-0145]" "env_file=\"${env_file}\" reason=\"compose variable names unreadable\"" \
             jq -r 'keys[]' <<< "${vars}")" || return 2
         [ -z "${names}" ] || mapfile -t unsetv <<< "${names}"
-        fx="$(_ci_sot_compose_env)" || return 2
+        fx="$(_ci_runtime_defaults)" || return 2
+        fx="$(_ci_sot_compose_env "${fx}")" || return 2
         mapfile -t fixture <<< "${fx}"
         (
             [ "${#unsetv[@]}" -eq 0 ] || unset "${unsetv[@]}"
