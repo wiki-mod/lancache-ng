@@ -658,6 +658,16 @@ _ci_platform_field() {
     printf '%s\n' "${val}"
 }
 
+# What: runner label of a platform; true picks self-hosted.
+# Why: GitHub-hosted default; one repo var moves all jobs.
+# From: Issue #1683 | PR #1912
+_ci_runner_label() {
+    local platform="$1" id="$2" ctx="${3:-}" use field=runner
+    use="$(_ci_variable PROJECT_SELFHOSTED_RUNNER_USAGE_CI)" || return 2
+    [ "${use}" != true ] || field=runner_self_hosted
+    _ci_platform_field "${platform}" "${field}" "${id}" "${ctx}"
+}
+
 # =========================================================
 # IMPACT ENGINE
 # =========================================================
@@ -1081,7 +1091,7 @@ ci_cmd_plan_matrix() {
             fi
             [ "${pimpact}" != UNKNOWN ] || unknown+="${service}/${platform} impact"$'\n'
             [ "${pimpact}" = BUILD ] || continue
-            runner="$(_ci_platform_field "${platform}" runner "[CI-ERROR-PLAN-0002]" "service=\"${service}\" reason=\"no runner label for platform\"")" || return 2
+            runner="$(_ci_runner_label "${platform}" "[CI-ERROR-PLAN-0002]" "service=\"${service}\" reason=\"no runner label for platform\"")" || return 2
             include="$(_ci_matrix_append "${include}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}")" || return 2
             any=true
         done <<< "${plats}"
@@ -3349,7 +3359,7 @@ _ci_job_settings_read() {
         ci_log "[CI-ERROR-JOBS-0001]" "reason=\"no SOT build_matrix platform to take the runner from\""
         return 2
     fi
-    _ci_js_runner="$(_ci_platform_field "${_ci_js_plat}" runner "[CI-ERROR-JOBS-0002]" "reason=\"no runner label for the first build_matrix platform\"")" || return 2
+    _ci_js_runner="$(_ci_runner_label "${_ci_js_plat}" "[CI-ERROR-JOBS-0002]" "reason=\"no runner label for the first build_matrix platform\"")" || return 2
     _ci_js_keys="$(_ci_block_keys ci_job_timeouts all)" || return 2
     if [ -z "${_ci_js_keys}" ]; then
         ci_log "[CI-ERROR-JOBS-0003]" "reason=\"no SOT ci_job_timeouts entries\""

@@ -626,6 +626,40 @@ _checkout_copy() {
     _expect no-owner 2 '[CI-ERROR-CORE-0128] name="GITHUB_REPOSITORY"' || return 1
 }
 
+# What: runner label per var value; only exactly true moves.
+# Why: GitHub-hosted default; the repo var moves all jobs.
+# From: Issue #1683 | PR #1912
+@test "runner label: GitHub-hosted by default, the variable true selects self-hosted" {
+    local d gh sh plat row val want out
+    d="$(mktemp -d)" gh="$(_val name)" sh="$(_val name)"
+    plat="$(_ci_block_entry_list build_matrix "" platforms)" || { echo "platforms: ${plat}"; return 1; }
+    plat="${plat%%$'\n'*}"
+    GH="${gh}" SH="${sh}" A="${plat##*/}" yq '.platform_arch[strenv(A)].runner = strenv(GH) | .platform_arch[strenv(A)].runner_self_hosted = strenv(SH)' "${CI_MANIFEST_SOURCE}" > "${d}/sot.yml"
+    unset PROJECT_SELFHOSTED_RUNNER_USAGE_CI CI_VARIABLES
+    CI_MANIFEST="${d}/sot.yml" run _ci_runner_label "${plat}" "[CI-ERROR-JOBS-0002]"
+    _expect default 0 "=${gh}" || return 1
+    while IFS='|' read -r row val want; do
+        case "${want}" in sh) want="${sh}" ;; *) want="${gh}" ;; esac
+        PROJECT_SELFHOSTED_RUNNER_USAGE_CI="${val}" CI_MANIFEST="${d}/sot.yml" run _ci_runner_label "${plat}" "[CI-ERROR-JOBS-0002]"
+        _expect "${row}" 0 "=${want}" || return 1
+    done <<EOF
+true|true|sh
+false|false|gh
+upper|TRUE|gh
+yes|yes|gh
+other|$(_val name)|gh
+EOF
+    CI_VARIABLES="{\"PROJECT_SELFHOSTED_RUNNER_USAGE_CI\":\"true\"}" CI_MANIFEST="${d}/sot.yml" run _ci_runner_label "${plat}" "[CI-ERROR-JOBS-0002]"
+    _expect repo-var 0 "=${sh}" || return 1
+    : > "${d}/out"
+    GITHUB_OUTPUT="${d}/out" CI_MANIFEST="${d}/sot.yml" run ci_cmd_job_settings
+    _expect settings-default 0 "runner=${gh}" || return 1
+    PROJECT_SELFHOSTED_RUNNER_USAGE_CI=true GITHUB_OUTPUT="${d}/out" CI_MANIFEST="${d}/sot.yml" run ci_cmd_job_settings
+    _expect settings-self 0 "runner=${sh}" || return 1
+    out="$(grep -c "^runner=" "${d}/out")"
+    [ "${out}" -eq 2 ] || { echo "runner outputs: ${out}"; cat "${d}/out"; return 1; }
+}
+
 # =========================================================
 # SEMANTIC IMPACT
 # =========================================================

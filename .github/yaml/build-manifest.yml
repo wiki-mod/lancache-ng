@@ -595,17 +595,22 @@ external_versions:
 build_matrix:
   platforms: [linux/amd64, linux/arm64]
 
-# What: Per-arch apk arch, rust target and runner label.
+# What: per-arch apk arch, rust target, both runner labels.
 # Why: one SOT owner; no platform case dup in ci.sh.
-# From: Issue #1683
+# From: Issue #1683 | PR #1912
 platform_arch:
+  # What: runner = GitHub-hosted; runner_self_hosted = fleet
+  # Why: the fleet builds on lancache-heavy; no arm64 host.
+  # From: Issue #1683 | PR #1912
   amd64:
     apk: x86_64
     runner: ubuntu-latest
+    runner_self_hosted: lancache-heavy
     rust_target: x86_64-alpine-linux-musl
   arm64:
     apk: aarch64
     runner: ubuntu-24.04-arm
+    runner_self_hosted: ubuntu-24.04-arm
     rust_target: aarch64-alpine-linux-musl
 
 # What: timeout minutes per workflow job id; one owner
@@ -900,6 +905,10 @@ ci_variables:
   # Why: AG-CI-006: a wait value has one owner.
   # From: Issue #1683 | PR #1912
   CI_DAEMON_RESTART_WAIT: 30
+  # What: exactly true moves CI jobs to runner_self_hosted.
+  # Why: GitHub-hosted is the default; a repo var switches.
+  # From: Issue #1683 | PR #1912
+  PROJECT_SELFHOSTED_RUNNER_USAGE_CI: "false"
   # What: trivy scanners, DB dir and DB lock timing.
   # Why: AG-CI-006: scan policy values have one owner.
   # From: Issue #1683 | PR #1858
