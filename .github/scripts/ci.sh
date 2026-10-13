@@ -13784,26 +13784,33 @@ ci_cmd_close_linked_issues() {
 _ci_check_governance_guards() {
     local -a _ci_override=("$@") changed=()
     local title="${PR_TITLE:-}" body="${PR_BODY:-}"
-    local -a viol=()
-    local path line marker issue state hits grc
+    local -a viol=() scan=()
+    local -A st=()
+    local path line marker issue hits=""
     if [ "$#" -gt 0 ]; then
         _ci_scan_files changed _ci_override || return 2
     fi
     for path in "${changed[@]}"; do
         case "${path}" in *.md|*.mdx|*.rst|*.txt) continue ;; esac
-        # What: grep rc 1 means no marker; rc 2 is an error.
-        # Why: a read error must not pass as a clean file.
-        # From: Issue #1683
-        hits="$(_ci_capture 1 grep -nEo '(TODO|FIXME)\(#([0-9]+)\)' "${path}")" || return 2
-        while IFS= read -r marker; do
-            [ -n "${marker}" ] || continue
-            line="${marker%%:*}"; marker="${marker#*:}"
-            issue="${marker##*#}"; issue="${issue%)*}"
-            [[ "${issue}" =~ ^[0-9]+$ ]] || continue
-            state="$(_ci_issue_meta "${issue}")" || return 2
-            [ "${state#*$'\t'}" = "closed" ] && viol+=("${path}:${line}: stale TODO/FIXME references closed #${issue}")
-        done <<< "${hits}"
+        scan+=("${path}")
     done
+    # What: grep rc 1 means no marker; rc 2 is an error.
+    # Why: a read error must not pass as a clean file.
+    # From: Issue #1683
+    if [ "${#scan[@]}" -gt 0 ]; then
+        hits="$(_ci_capture 1 grep -nEoH '(TODO|FIXME)\(#([0-9]+)\)' "${scan[@]}")" || return 2
+    fi
+    # What: st[N] holds each issue state, one API call.
+    # Why: a number named twice must not cost a second call.
+    # From: Issue #1683 | PR #1912
+    while IFS= read -r marker; do
+        [ -n "${marker}" ] || continue
+        issue="${marker##*#}"; issue="${issue%)*}"
+        marker="${marker%:*}"; line="${marker##*:}"; path="${marker%:*}"
+        [[ "${issue}" =~ ^[0-9]+$ ]] || continue
+        [ -n "${st[${issue}]:-}" ] || st["${issue}"]="$(_ci_issue_meta "${issue}")" || return 2
+        [ "${st[${issue}]#*$'\t'}" = "closed" ] && viol+=("${path}:${line}: stale TODO/FIXME references closed #${issue}")
+    done <<< "${hits}"
     local combined="${title}"
     [ -n "${combined}" ] && [ -n "${body}" ] && combined+=$'\n'
     combined+="${body}"
@@ -13819,8 +13826,8 @@ _ci_check_governance_guards() {
             local open_found=0 rest="${combined}"
             while [[ "${rest}" =~ Refs[[:space:]]+#([0-9]+) ]]; do
                 issue="${BASH_REMATCH[1]}"; rest="${rest#*"${BASH_REMATCH[0]}"}"
-                state="$(_ci_issue_meta "${issue}")" || return 2
-                [ "${state#*$'\t'}" = "open" ] && { open_found=1; break; }
+                [ -n "${st[${issue}]:-}" ] || st["${issue}"]="$(_ci_issue_meta "${issue}")" || return 2
+                [ "${st[${issue}]#*$'\t'}" = "open" ] && { open_found=1; break; }
             done
             [ "${open_found}" -eq 1 ] || \
                 viol+=("PR title/body: partial-scope language without an open Refs #... remainder issue")
