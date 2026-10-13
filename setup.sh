@@ -2827,38 +2827,39 @@ lancache_image_ref_vars() {
     printf '%s\n' "$vars"
 }
 
+# What: one SOT key of a block: a scalar or its - items
+# Why: one awk reader for both; yq is not on a host
+# From: Issue #1683 | PR #1912
+lancache_sot_read() {
+    local kind="$1" key="$2" block="$3" sot="$LANCACHE_SOT" text="$LANCACHE_SOT_TEXT" value
+    value=$(awk -v b="${block}:" -v k="  ${key}:" -v kind="$kind" '
+        function unq(s) { sub(/^"/, "", s); sub(/"$/, "", s); return s }
+        $0 == b { f = 1; next }
+        f && /^[^ #]/ { exit }
+        f && !l && kind == "value" && index($0, k) == 1 {
+            v = substr($0, length(k) + 1); sub(/^ +/, "", v); print unq(v); exit
+        }
+        f && !l && kind == "list" && $0 == k { l = 1; next }
+        l && /^    - / { print unq(substr($0, 7)); next }
+        l && /^    #/ { next }
+        l { exit }' <<< "$text") \
+        || die "Failed to read ${block}.${key} from ${sot}."
+    [[ -n "$value" ]] || die "${sot} defines no ${block}.${key} ${kind}."
+    printf '%s\n' "$value"
+}
+
 # What: one value of a CI SOT block (default ci_variables)
 # Why: installer reads CI-owned values, never copies
 # From: Issue #1683 | PR #1858
 lancache_sot_value() {
-    local key="$1" block="${2:-ci_variables}" sot="$LANCACHE_SOT" text="$LANCACHE_SOT_TEXT" value
-    value=$(awk -v b="${block}:" -v k="  ${key}:" '
-        $0 == b { f = 1; next }
-        f && /^[^ #]/ { exit }
-        f && index($0, k) == 1 {
-            v = substr($0, length(k) + 1); sub(/^ +/, "", v); sub(/^"/, "", v); sub(/"$/, "", v)
-            print v; exit
-        }' <<< "$text") \
-        || die "Failed to read ${block}.${key} from ${sot}."
-    [[ -n "$value" ]] || die "${sot} defines no ${block}.${key}."
-    printf '%s\n' "$value"
+    lancache_sot_read value "$1" "${2:-ci_variables}"
 }
 
 # What: the entries of one SOT block list, one per line
 # Why: the installer reads lists too; yq is not on a host
 # From: Issue #1683 | PR #1912
 lancache_sot_list() {
-    local key="$1" block="$2" sot="$LANCACHE_SOT" text="$LANCACHE_SOT_TEXT" value
-    value=$(awk -v b="${block}:" -v k="  ${key}:" '
-        $0 == b { f = 1; next }
-        f && /^[^ #]/ { exit }
-        f && $0 == k { l = 1; next }
-        f && l && /^    - / { v = substr($0, 7); sub(/^"/, "", v); sub(/"$/, "", v); print v; next }
-        f && l && /^    #/ { next }
-        f && l { exit }' <<< "$text") \
-        || die "Failed to read ${block}.${key} from ${sot}."
-    [[ -n "$value" ]] || die "${sot} defines no ${block}.${key} list."
-    printf '%s\n' "$value"
+    lancache_sot_read list "$1" "$2"
 }
 
 # What: sets the helper image to the SOT's pinned alpine
