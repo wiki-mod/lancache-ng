@@ -12727,11 +12727,10 @@ _ci_check_pr_title() {
 # From: Issue #1683
 _ci_check_stable_external_images() {
     local -a dirs=("$@")
-    local d line img k allowed=" " dep inst
+    local d line img k allowed=" " dep
     if [ "${#dirs[@]}" -eq 0 ]; then
         dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-        inst="$(_ci_installer_compose)" || return 2
-        dirs=("${CI_REPO_ROOT}/$(dirname "${dep}")" "${CI_REPO_ROOT}/$(dirname "${inst}")")
+        dirs=("${CI_REPO_ROOT}/$(dirname "${dep}")")
     fi
     local -a viol=()
     # What: the exact SOT base image pins.
@@ -13838,11 +13837,9 @@ _ci_check_governance_guards() {
 # Why: operators find a container by its service name.
 # From: Issue #1683 | PR #1858
 _ci_check_naming_consistency() {
-    local root="${1:-${CI_REPO_ROOT}}" dep inst
+    local root="${1:-${CI_REPO_ROOT}}" dep
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    inst="$(_ci_installer_compose "${root}")" || return 2
     local -a compose_files=("${root}/${dep}")
-    [ "${inst}" = "${dep}" ] || compose_files+=("${root}/${inst}")
     local -a viol=()
     local cf cfg line msg
 
@@ -14054,21 +14051,19 @@ _ci_dockerfile_logical_lines() {
 # Why: docs/release-versioning: prod runs prebuilt images.
 # From: Issue #1683 | PR #1858
 _ci_check_prebuilt_prod() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" dep inst
+    local repo_root="${1:-${CI_REPO_ROOT}}" dep
     local -a viol=()
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    inst="$(_ci_installer_compose "${repo_root}")" || return 2
     dep="${repo_root}/$(dirname "${dep}")"
-    inst="${repo_root}/$(dirname "${inst}")"
     local hit
-    hit="$(_ci_capture 1 grep -RInE '^[[:space:]]+build:' "${dep}" "${inst}")" || return 2
+    hit="$(_ci_capture 1 grep -RInE '^[[:space:]]+build:' "${dep}")" || return 2
     if [ -n "${hit}" ]; then
         viol+=("a stack compose declares build:; prod must run prebuilt images only" "${hit}")
     fi
     local hit su readme
     su="$(_ci_installer "${repo_root}")" || return 2
     readme="$(_ci_repo_path CI_README "${repo_root}")" || return 2
-    hit="$(_ci_capture 1 grep -RIn -- '--build' "${readme}" "${dep}" "${inst}" "${su}")" || return 2
+    hit="$(_ci_capture 1 grep -RIn -- '--build' "${readme}" "${dep}" "${su}")" || return 2
     if [ -n "${hit}" ]; then
         viol+=("a user-facing install path instructs --build; prod must run from prebuilt images, not a local build" "${hit}")
     fi
@@ -14306,25 +14301,6 @@ _ci_service_port() {
     printf '%s\n' "${BASH_REMATCH[1]}"
 }
 
-# What: compose file setup.sh installs, read from setup.sh.
-# Why: the installer owns its compose; CI only derives it.
-# From: Issue #1683 | PR #1858
-_ci_installer_compose() {
-    local root="${1:-${CI_REPO_ROOT}}" su line
-    local re='^"\$SCRIPT_DIR/([^"$]+)"$'
-    su="$(_ci_installer "${root}")" || return 2
-    line="$(_ci_file_value "${su}" 's/^PROD_COMPOSE=//p')" || {
-        [ "$?" -eq 1 ] || return 2
-        ci_error "[CI-ERROR-CORE-0104]" "path=\"${su}\" reason=\"PROD_COMPOSE missing or assigned twice\"" "${line}"
-        return 2
-    }
-    if [[ ! "${line}" =~ ${re} ]]; then
-        ci_error "[CI-ERROR-CORE-0105]" "path=\"${su}\" reason=\"PROD_COMPOSE is not SCRIPT_DIR-relative\"" "${line}"
-        return 2
-    fi
-    printf '%s\n' "${BASH_REMATCH[1]}"
-}
-
 # What: docker compose with the env the file renders under.
 # Why: .env if given, else SOT fixture; one env owner.
 # From: Issue #1683 | PR #1858
@@ -14489,25 +14465,22 @@ _ci_check_compose_config() {
 # Why: only stack peers may reach it; the ui proxies it.
 # From: Issue #1683 | PR #1858
 _ci_check_netdata_isolation() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" cf dep inst cfg out line nd_url
+    local repo_root="${1:-${CI_REPO_ROOT}}" dep cfg out line nd_url
     local -a viol=()
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    inst="$(_ci_installer_compose "${repo_root}")" || return 2
     nd_url="$(_ci_runtime_default NETDATA_URL)" || return 2
-    for cf in "${dep}" "${inst}"; do
-        cfg="$(_ci_compose_json "${repo_root}/${cf}")" || return 2
-        out="$(_ci_capture 0 jq -r --arg url "${nd_url}" '
-            if ($url | test(":[0-9]+$") | not)
-                then "ui NETDATA_URL has no port (got: \($url))"
-              else ($url | sub(".*:"; "") | tonumber) as $port
-                | .services | to_entries[]
-                | select(any(.value.ports[]?; .target == $port))
-                | "\(.key) publishes the netdata port \($port)"
-              end' <<<"${cfg}")" || return 2
-        while IFS= read -r line; do
-            [ -z "${line}" ] || viol+=("${cf}: ${line}")
-        done <<<"${out}"
-    done
+    cfg="$(_ci_compose_json "${repo_root}/${dep}")" || return 2
+    out="$(_ci_capture 0 jq -r --arg url "${nd_url}" '
+        if ($url | test(":[0-9]+$") | not)
+            then "ui NETDATA_URL has no port (got: \($url))"
+          else ($url | sub(".*:"; "") | tonumber) as $port
+            | .services | to_entries[]
+            | select(any(.value.ports[]?; .target == $port))
+            | "\(.key) publishes the netdata port \($port)"
+          end' <<<"${cfg}")" || return 2
+    while IFS= read -r line; do
+        [ -z "${line}" ] || viol+=("${dep}: ${line}")
+    done <<<"${out}"
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0146]" "reason=\"netdata API is published\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
@@ -14577,7 +14550,7 @@ _ci_check_proxy_nginx_policy() {
 # Why: the SOT owns them; Compose and nginx.conf use them.
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_cert_volume() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" dir ca cache base dep inst targets cf cfg out line px
+    local repo_root="${1:-${CI_REPO_ROOT}}" dir ca cache base dep targets cf cfg out line px
     local -a viol=() tl=()
     local -A seen=()
     base="$(_ci_runtime_default NGINX_DIR)" || return 2
@@ -14588,10 +14561,9 @@ _ci_check_proxy_cert_volume() {
     grep -Eq '^[[:space:]]*proxy_cache_path[[:space:]]+\$\{NGINX_CACHE_DIR\}[[:space:]]*$' "${px%/}/nginx.conf" \
         || viol+=("${px#"${repo_root}/"}nginx.conf: proxy_cache_path is not the SOT key NGINX_CACHE_DIR")
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    inst="$(_ci_installer_compose "${repo_root}")" || return 2
     targets="$(_ci_block_entry_field validation "" compose_targets)" || return 2
     read -ra tl <<< "${targets}"
-    for cf in "${dep}" "${inst}" "${tl[@]}"; do
+    for cf in "${dep}" "${tl[@]}"; do
         [ -z "${seen[${cf}]:-}" ] || continue
         seen["${cf}"]=1
         cfg="$(_ci_compose_json "${repo_root}/${cf}")" || return 2

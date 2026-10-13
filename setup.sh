@@ -9,7 +9,6 @@ export LANG=C LC_ALL=C
 # What: normal install path is the production profile
 # Why: development-only behaviour needs an explicit opt-in
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
-PROD_COMPOSE="$SCRIPT_DIR/deploy/prod/docker-compose.yml"
 # What: helper container image; require_helper_image sets it
 # Why: volume copy, restore and listing share one image
 # From: Issue #1683 | PR #1858
@@ -1802,8 +1801,9 @@ migrate_legacy_ca() {
 # From: Issue #1683 | PR #1858
 resolve_stack_dir() {
     local dir="$1"
-    if [[ ! -f "$dir/docker-compose.yml" && -f "$dir/deploy/prod/docker-compose.yml" ]]; then
-        printf '%s\n' "$dir/deploy/prod"
+    local rel="${PROD_COMPOSE#"$SCRIPT_DIR/"}"
+    if [[ ! -f "$dir/docker-compose.yml" && -f "$dir/$rel" ]]; then
+        printf '%s\n' "$dir/${rel%/*}"
     else
         printf '%s\n' "$dir"
     fi
@@ -6485,6 +6485,11 @@ EOF
     print_ok "Secondary DNS '${name}' is running. Configure this host's IP as DNS on your clients."
 }
 
+# What: the prod compose file, SOT CI_COMPOSE_FILE
+# Why: one owner; setup.sh and CI name the same file
+# From: Issue #1683 | PR #1912
+PROD_COMPOSE="$SCRIPT_DIR/$(lancache_sot_value CI_COMPOSE_FILE)" || exit $?
+
 # What: a sourced setup.sh stops here: functions, no run
 # Why: tests load every function from the real file
 # From: Issue #1683 | PR #1858
@@ -6765,7 +6770,7 @@ print_step "Data directory"
 # What: the stack runs from this checkout's deploy/prod
 # Why: AG-KD-008: deploy/prod is the only deployment profile
 # From: Issue #1683 | PR #1858
-INSTALL_DIR="$SCRIPT_DIR/deploy/prod"
+INSTALL_DIR="${PROD_COMPOSE%/*}"
 ENV_LOCAL="$INSTALL_DIR/.env.local"
 STATE_ROOT_DEFAULT=$(production_state_root_default "$INSTALL_DIR") \
     || die "Cannot read the default state root from $INSTALL_DIR (exit $?)."
