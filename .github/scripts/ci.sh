@@ -12349,14 +12349,13 @@ _ci_check_language_policy() {
     printf 'language-policy=clean files=%s\n' "${#files[@]}"
 }
 
-# What: Fail on a mutable image or action reference.
-# Why: SHA/digest-pinned only, no :latest, tag or branch.
+# What: Fail on a mutable image reference (actions: 0095).
+# Why: digest or tag pinned only, no :latest, no bare image.
 # From: Issue #1683
 _ci_check_mutable_refs() {
     local -a _ci_override=("$@") files=() yml=() dock=() viol=()
     _ci_scan_files files _ci_override '.github/workflows/*.yml' '.github/actions/**/action.yml' "${CI_DOCKERFILE_SPECS[@]}" || return 2
-    local path out row v
-    local re='^([^:]+):([0-9]+):[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*(&[A-Za-z0-9_-]+[[:space:]]+)?([^[:space:]]+)'
+    local path out row
     for path in "${files[@]}"; do
         case "${path}" in
             *.yml|*.yaml) yml+=("${path}") ;;
@@ -12367,16 +12366,6 @@ _ci_check_mutable_refs() {
     # Why: a grep or sed per file or line cost a fork each.
     # From: Issue #1683 | PR #1912
     if [ "${#yml[@]}" -gt 0 ]; then
-        # What: external ref needs a 40-hex SHA.
-        # Why: tags, branches, short SHAs move.
-        # From: Issue #1683 | PR #1858
-        out="$(_ci_capture 1 grep -nHE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]*]' -- "${yml[@]}")" || return 2
-        while IFS= read -r row; do
-            [[ "${row}" =~ ${re} ]] || continue
-            v="${BASH_REMATCH[5]}"; v="${v#[\"\']}"; v="${v%[\"\']}"
-            _ci_action_ref_is_external "${v}" || continue
-            [[ "${v##*@}" =~ ^[0-9a-fA-F]{40}$ ]] || viol+=("${row%%:*} action-not-full-sha: ${row#*:}")
-        done <<< "${out}"
         # What: grep pattern in ARG not ref.
         # Why: PROMOTE_TAGS greps ARG :latest.
         # From: Issue #1683 | PR #1858
@@ -13345,7 +13334,8 @@ _ci_check_action_node_versions() {
         _ci_producer_ok "${produced_rc}" 1 || return 2
         while IFS= read -r line; do
             [ -n "${line}" ] || continue
-            raw="$(sed -E 's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*//; s/[[:space:]]*#.*$//; s/[[:space:]]+$//' <<<"${line}")"
+            raw="${line#*uses:}"; raw="${raw%%#*}"
+            raw="${raw#"${raw%%[![:space:]]*}"}"; raw="${raw%"${raw##*[![:space:]]}"}"
             resolved="${raw}"
             if [[ "${raw}" =~ ^\&([A-Za-z0-9_-]+)[[:space:]]+(.+)$ ]]; then
                 anchor="${BASH_REMATCH[1]}"; resolved="${BASH_REMATCH[2]}"
@@ -13502,7 +13492,8 @@ _ci_check_action_node_versions() {
             viol+=("external action '${v}' (in: $(_ci_ando_reffiles "${v}")) must use a full 40-hex commit SHA")
             continue
         fi
-        owner="$(cut -d/ -f1 <<<"${key}")"; repo="$(cut -d/ -f2 <<<"${key}")"; subpath="$(cut -d/ -f3- <<<"${key}")"
+        owner="${key%%/*}"; repo="${key#*/}"; subpath=""
+        [[ "${repo}" != */* ]] || { subpath="${repo#*/}"; repo="${repo%%/*}"; }
         res="$(_ci_fetch_action_manifest "${owner}" "${repo}" "${subpath}" "${ref}")" || return 2
         marker="${res%%$'\n'*}"
         case "${marker}" in
