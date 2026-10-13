@@ -7109,8 +7109,9 @@ else
 fi
 
 # ── 7b. LanCache-NG-NTP ───────────────────────────────────────────────────────
-# What: NTP only decides whether the container is created
-# Why: upstream servers are configured in the Admin UI
+# What: asks for the NTP start value (NTP_ENABLED)
+# Why: the watchdog runs chronyd in the services container
+# From: Issue #1683 | PR #1912
 print_step "LanCache-NG-NTP"
 
 printf "  A small, self-contained NTP server, disciplined against public NTP\n"
@@ -7344,9 +7345,9 @@ DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS}
 DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI}
 
 # ── LanCache-NG-NTP ────────────────────────────────────────────────────────────
-# Enable/disable, upstream server list, and the DHCP auto-populate toggle are
-# configured from the Admin UI's NTP page; this only controls whether the
-# container is created at all (see the \`ntp\` Compose profile).
+# What: start value; the Admin UI NTP page changes it later
+# Why: the watchdog runs chronyd in services only when 1
+# From: Issue #1683 | PR #1912
 NTP_ENABLED=${NTP_ENABLED}
 NTP_DATA_DIR=${NTP_DATA_DIR}
 
