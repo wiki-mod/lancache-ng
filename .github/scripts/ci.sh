@@ -11811,7 +11811,7 @@ _ci_prose_excluded() {
     case "$1" in
         *.md|LICENSE|COPYING) return 0 ;;
         .env|.env.example) return 0 ;;
-        Cargo.lock|*/Cargo.lock|.gitkeep|*/.gitkeep) return 0 ;;
+        Cargo.lock|*/Cargo.lock) return 0 ;;
         */fuzz/corpus/*|fuzz/corpus/*) return 0 ;;
         *.png|*.jpg|*.jpeg|*.gif|*.ico|*.svg|*.woff|*.woff2|*.ttf|*.eot|*.crt|*.key|*.pem) return 0 ;;
     esac
