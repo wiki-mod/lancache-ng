@@ -696,6 +696,26 @@ CASES
     [ "${status}" -eq 0 ] && [ -n "${output}" ] || { echo "loaded real SOT no longer answers: rc ${status}: ${output}"; return 1; }
 }
 
+# What: apk-pin-install runs in an image stage without SOT.
+# Why: build-tools Dockerfile calls it; CORE-0003 broke it.
+# From: Issue #1683 | PR #1912
+@test "apk-pin-install unpacks a pinned apk with no SOT file present" {
+    local d ver name sha
+    d="$(mktemp -d)" ver="$(_val int 1 99)" name="$(_val name)"
+    mkdir -p "${d}/pkg/usr/bin" "${d}/root"
+    printf '%s\n' "${name}" > "${d}/pkg/usr/bin/${name}"
+    printf 'pkgname = %s\n' "${name}" > "${d}/pkg/.PKGINFO"
+    tar -czf "${d}/${name}-${ver}.apk" -C "${d}/pkg" .PKGINFO usr
+    sha="$(sha256sum "${d}/${name}-${ver}.apk")"
+    CI_MANIFEST="${d}/none.yml" CI_APK_ROOT="${d}/root" CI_RETRY_MAX_ATTEMPTS=1 CI_RETRY_BACKOFF_BASE_SECONDS=1 \
+        run bash "${CI_SH}" apk-pin-install "file://${d}/${name}-@VERSION@.apk" "${ver}" "$(_val name)" "$(_val name)" "${sha%% *}"
+    [ "${status}" -eq 0 ] || { echo "rc ${status}: ${output}"; return 1; }
+    [[ "${output}" != *CI-ERROR-CORE-0003* ]] || { echo "SOT required: ${output}"; return 1; }
+    [ "$(cat "${d}/root/usr/bin/${name}")" = "${name}" ] || { echo "file not unpacked: ${output}"; return 1; }
+    [ ! -e "${d}/root/.PKGINFO" ] || { echo ".PKGINFO left in root"; return 1; }
+    [ ! -e "${d}/none.yml" ] || { echo "SOT file created"; return 1; }
+}
+
 # What: BUILD needs a changed input; failures are UNKNOWN
 # Why: 2.2 BUILD needs proof; 2.3 UNKNOWN never builds
 # From: Issue #1683 | PR #1912
