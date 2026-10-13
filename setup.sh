@@ -5195,9 +5195,11 @@ cmd_debug() {
 # From: Issue #762 | PR #1858
 managed_secret_env_keys() {
     local kind keys
+    local -a list
     for kind in hex32 base64_32 secondary_hex32 ui; do
         keys=$(lancache_sot_value "secrets_${kind}" runtime) || exit $?
-        tr ' ' '\n' <<< "$keys"
+        read -ra list <<< "$keys"
+        printf '%s\n' "${list[@]}"
     done
 }
 
