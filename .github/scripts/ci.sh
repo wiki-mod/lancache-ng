@@ -7388,38 +7388,15 @@ _ci_validate_cid_ip() {
     esac
 }
 
-# What: Wait until a network has no containers.
-# Why: rm before detach hits 'active endpoints'.
-# From: Issue #1683 | PR #1858
-_ci_validate_await_detached() {
-    local name="$1" deadline count timeout
-    timeout="$(_ci_variable CI_VALIDATE_DETACH_TIMEOUT)" || return 2
-    deadline=$(( SECONDS + timeout ))
-    while [ "${SECONDS}" -lt "${deadline}" ]; do
-        if ! count="$(docker network inspect "${name}" --format '{{len .Containers}}' 2>&1)"; then
-            _ci_validate_network_gone "${name}" "${count}"
-            return "$?"
-        fi
-        [ "${count}" = "0" ] && return 0
-        sleep 1
-    done
-    return 1
-}
-
 # What: Remove one validation network safely.
-# Why: Await detach; a stale net poisons reruns.
+# Why: Containers go first; a stale net poisons reruns.
 # From: Issue #1683 | PR #1858
 _ci_validate_network_teardown() {
-    local net_id="$1" name out arc=0
+    local net_id="$1" name out
     if ! name="$(docker network inspect "${net_id}" --format '{{.Name}}' 2>&1)"; then
         _ci_validate_network_gone "${net_id}" "${name}"
         return "$?"
     fi
-    # What: wait for detach; only a timeout (rc 1) goes on.
-    # Why: the rm below fails with raw output if still busy.
-    # From: Issue #1683 | PR #1858
-    _ci_validate_await_detached "${name}" || arc=$?
-    [ "${arc}" -le 1 ] || return "${arc}"
     out="$(docker network rm "${name}" 2>&1)" && return 0
     ci_error "[CI-ERROR-VALIDATE-0053]" "network=\"${name}\" reason=\"network removal failed\"" "${out}"
     return 2
