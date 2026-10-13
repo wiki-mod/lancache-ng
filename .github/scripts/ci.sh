@@ -139,21 +139,26 @@ _ci_capture() {
 # Why: one owner for coded command errors and their raw.
 # From: Issue #1683 | PR #1858
 _ci_run() {
-    local okmax=0 strict="" id ctx err out rc=0
-    # What: -m N passes rc up to N; -s fails on any stderr.
-    # Why: grep rc 1 is a miss; strict: warnings are errors.
+    local okmax=0 strict="" ofile="" id ctx err out="" rc=0
+    # What: -m N: rc to N ok; -s: stderr fails; -o F: to F
+    # Why: grep rc 1 is a miss; big trees skip bash strings
     # From: Issue #1683 | PR #1858
     while :; do
         case "${1:-}" in
             -m) okmax="$2"; shift 2 ;;
             -s) strict=1; shift ;;
+            -o) ofile="$2"; shift 2 ;;
             *) break ;;
         esac
     done
     id="$1" ctx="$2"
     shift 2
     err="$(_ci_mktemp "${CI_TMPDIR}/ci-run.XXXXXX")" || return 2
-    out="$("$@" 2>"${err}")" || rc=$?
+    if [ -n "${ofile}" ]; then
+        "$@" > "${ofile}" 2>"${err}" || rc=$?
+    else
+        out="$("$@" 2>"${err}")" || rc=$?
+    fi
     if [ "${rc}" -gt "${okmax}" ] || { [ -n "${strict}" ] && [ -s "${err}" ]; }; then
         ci_error "${id}" "${ctx} cmd=\"$1\" rc=${rc}" "$(cat "${err}"; [ -z "${out}" ] || printf 'stdout:\n%s\n' "${out}")"
         rm -f "${err}"
@@ -11627,11 +11632,11 @@ _ci_shell_sources() {
     done
 }
 
-# What: shfmt's JSON syntax tree of one shell source.
+# What: shfmt's JSON syntax tree of one source into $2.
 # Why: shell checks read the parser's tree, not raw text.
 # From: Issue #1683 | PR #1858
 _ci_shell_ast() {
-    local f="$1" src lang=bash
+    local f="$1" ast="$2" src lang=bash
     case "${f##*/}" in
         Dockerfile)
             src="$(_ci_run "[CI-ERROR-CHECK-0165]" "file=\"${f}\" reason=\"Dockerfile lines unreadable\"" _ci_dockerfile_logical_lines "${f}")" || return 2
@@ -11652,12 +11657,12 @@ _ci_shell_ast() {
             [[ "${f##*/}" != *.bats ]] || lang=bats
             src="$(_ci_run "[CI-ERROR-CHECK-0166]" "file=\"${f}\" reason=\"source unreadable\"" cat -- "${f}")" || return 2 ;;
     esac
-    _ci_run -s "[CI-ERROR-CHECK-0162]" "file=\"${f}\" lang=\"${lang}\" reason=\"shfmt cannot parse the source\"" \
+    _ci_run -s -o "${ast}" "[CI-ERROR-CHECK-0162]" "file=\"${f}\" lang=\"${lang}\" reason=\"shfmt cannot parse the source\"" \
         shfmt -ln "${lang}" --to-json <<< "${src}"
 }
 
 # What: jq over a shfmt tree: status-read and pipe findings.
-# Why: one pass per file feeds both shell guards.
+# Why: one walk per file feeds both shell guards.
 # From: Issue #1683 | PR #1858
 _CI_JQ_SHELL_FINDINGS='
     def reads:
@@ -11682,25 +11687,30 @@ _CI_JQ_SHELL_FINDINGS='
         elif $c == "sed" then any($a[]; (startswith("-") | not) and test("(^|[;{}[:space:]0-9$/])[qQ]([0-9[:space:];}]|$)"))
         elif $c == "awk" then any($a[]; (startswith("-") | not) and test("(^|[^A-Za-z_])exit([^A-Za-z_]|$)"))
         else false end;
-    (.. | arrays | select(length > 1 and (.[0] | type == "object" and has("Cmd"))) as $l
-        | range(0; ($l | length) - 1) as $i
-        | select($l[$i].Cmd.Type? == "IfClause" and ($l[$i].Cmd | elseless))
-        | $l[$i + 1] | reads | "status\tfi\t\(.)"),
-    (.. | objects | select(has("Cond") and has("Then") and (.Cond | length) > 0 and .Cond[-1].Negated == true)
-        | (.Then[0] // empty) | reads | "status\tneg\t\(.)"),
-    (if any(.. | objects | select(.Type == "CallExpr") | argv; .[0] == "set" and any(.[1:][]; test("pipefail")))
-     then .. | objects | select(.Type == "BinaryCmd" and (.Op == 13 or .Op == 14))
-        | select(.Y.Cmd.Type? == "CallExpr" and (.Y.Cmd | argv | early))
-        | "pipe\t\(.Pos.Line)\t\(.Y.Cmd | argv | join(" "))"
-     else empty end)'
+    [.. | if type == "array" then
+            select(length > 1 and (.[0] | type == "object" and has("Cmd"))) as $l
+            | range(0; ($l | length) - 1) as $i
+            | select($l[$i].Cmd.Type? == "IfClause" and ($l[$i].Cmd | elseless))
+            | $l[$i + 1] | reads | "status\tfi\t\(.)"
+        elif type != "object" then empty
+        elif has("Cond") and has("Then") and (.Cond | length) > 0 and .Cond[-1].Negated == true then
+            (.Then[0] // empty) | reads | "status\tneg\t\(.)"
+        elif .Type == "CallExpr" then
+            argv | select(.[0] == "set" and any(.[1:][]; test("pipefail"))) | "pipefail"
+        elif .Type == "BinaryCmd" and (.Op == 13 or .Op == 14) then
+            select(.Y.Cmd.Type? == "CallExpr" and (.Y.Cmd | argv | early))
+            | "pipe\t\(.Pos.Line)\t\(.Y.Cmd | argv | join(" "))"
+        else empty end] as $r
+    | any($r[]; . == "pipefail") as $pf
+    | $r[] | select(. != "pipefail" and ($pf or (startswith("pipe\t") | not)))'
 
 # What: tagged shell findings of one source (status, pipe).
-# Why: one parse and one tree walk per file.
+# Why: one parse and one tree walk per file; $2 holds it.
 # From: Issue #1683 | PR #1858
 _ci_shell_findings() {
-    local f="$1" ast
-    ast="$(_ci_shell_ast "${f}")" || return 2
-    _ci_run "[CI-ERROR-CHECK-0167]" "file=\"${f}\" reason=\"syntax tree query failed\"" jq -r "${_CI_JQ_SHELL_FINDINGS}" <<< "${ast}"
+    local f="$1" ast="$2"
+    _ci_shell_ast "${f}" "${ast}" || return 2
+    _ci_run "[CI-ERROR-CHECK-0167]" "file=\"${f}\" reason=\"syntax tree query failed\"" jq -r "${_CI_JQ_SHELL_FINDINGS}" "${ast}"
 }
 
 # What: Fail on any listed text file carrying CRLF.
@@ -12432,10 +12442,11 @@ _ci_check_executable_bits() {
 # From: Issue #1683 | PR #1912
 _ci_check_shell_guards() {
     local -a _ci_override=("$@") files=() status=() pipe=()
-    local path produced tag a b loc
+    local path produced tag a b loc ast
     _ci_shell_sources files _ci_override dockerfiles || return 2
+    ast="$(_ci_mktemp "${CI_TMPDIR}/ci-ast.XXXXXX")" || return 2
     for path in "${files[@]}"; do
-        produced="$(_ci_shell_findings "${path}")" || return 2
+        produced="$(_ci_shell_findings "${path}" "${ast}")" || { rm -f "${ast}"; return 2; }
         while IFS=$'\t' read -r tag a b; do
             loc="${path}:"
             [ "${path##*/}" != Dockerfile ] || loc="${path}: RUN text line "
@@ -12450,6 +12461,7 @@ _ci_check_shell_guards() {
             esac
         done <<< "${produced}"
     done
+    rm -f "${ast}"
     [ "${#pipe[@]}" -eq 0 ] || ci_error "[CI-ERROR-CHECK-0011]" "reason=\"live pipe into early-exit consumer (SIGPIPE)\"" "$(printf '%s\n' "${pipe[@]}")"
     [ "${#status[@]}" -eq 0 ] || ci_error "[CI-ERROR-CHECK-0065]" "reason=\"\$? reads an if's status, not the command's (AG-VAL-029)\"" "$(printf '%s\n' "${status[@]}")"
     [ "$(( ${#pipe[@]} + ${#status[@]} ))" -eq 0 ] || return 1
