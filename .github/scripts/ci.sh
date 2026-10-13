@@ -1135,6 +1135,201 @@ ci_cmd_plan_matrix() {
 # IDENTITY ENGINE
 # =========================================================
 
+# What: Rust source to top-level item records (TSV).
+# Why: one Rust lexer for norm, build id and lib closure.
+# From: Issue #1683 | PR #1912
+readonly _CI_AWK_RUST_ITEMS='
+function flush(   h, kind, name, attach, t, refs, seen, w, n, i, a) {
+    t = cur
+    sub(/^ +/, "", t); sub(/ +$/, "", t)
+    cur = ""; hdr = ""; need_semi = 0
+    if (t == "") return
+    h = t
+    attrs = ""
+    while (h ~ /^#!?\[/) {
+        n = length(h); d = 0
+        for (i = 1; i <= n; i++) {
+            c = substr(h, i, 1)
+            if (c == "[") d++
+            else if (c == "]") { d--; if (d == 0) break }
+        }
+        attrs = attrs substr(h, 1, i)
+        h = substr(h, i + 1); sub(/^ +/, "", h)
+    }
+    if (tests == "drop" && (attrs ~ /cfg\(test\)/ || attrs ~ /#\[test\]/)) return
+    head = h; gsub(/pub\([^)]*\)/, "pub", head)
+    sub(/[{;=(].*$/, "", head)
+    kind = "header"; name = ""; attach = ""
+    if (match(head, /(^| )macro_rules! *[A-Za-z_][A-Za-z0-9_]*/)) {
+        kind = "item"; name = substr(head, RSTART, RLENGTH); sub(/.*macro_rules! */, "", name)
+    } else if (head ~ /(^| )impl( |<|$)/) {
+        kind = "impl"
+        a = head; sub(/.*(^| )impl/, "", a)
+        attach = idents(a)
+    } else if (match(head, /(^| )(fn|struct|enum|union|trait|type|mod|static|const) +(mut +)?[A-Za-z_][A-Za-z0-9_]*/)) {
+        name = substr(head, RSTART, RLENGTH)
+        sub(/^ /, "", name); n = split(name, w, " "); name = w[n]
+        kind = (head ~ /(^| )mod / && t ~ /;$/) ? "header" : "item"
+    }
+    refs = idents(t)
+    gsub(/\\/, "\\\\", t); gsub(/\n/, "\\n", t); gsub(/\t/, "\\t", t)
+    printf "%s\t%s\t%s\t%s\t%s\n", kind, name, attach, refs, t
+}
+function idents(s,   out, seen, tok) {
+    out = ""
+    while (match(s, /[A-Za-z_][A-Za-z0-9_]*/)) {
+        tok = substr(s, RSTART, RLENGTH)
+        s = substr(s, RSTART + RLENGTH)
+        if (!(tok in seen)) { seen[tok] = 1; out = out (out == "" ? "" : " ") tok }
+    }
+    return out
+}
+function emit(c) {
+    if (c == " ") { if (cur != "" && substr(cur, length(cur), 1) != " ") cur = cur " "; return }
+    cur = cur c
+}
+{ src = src $0 "\n" }
+END {
+    n = length(src); st = "code"; depth = 0; cur = ""; bdepth = 0
+    for (i = 1; i <= n; i++) {
+        c = substr(src, i, 1)
+        if (st == "line") { if (c == "\n") { st = "code"; emit(" ") } continue }
+        if (st == "block") {
+            if (c == "/" && substr(src, i + 1, 1) == "*") { bdepth++; i++ }
+            else if (c == "*" && substr(src, i + 1, 1) == "/") { bdepth--; i++; if (bdepth == 0) { st = "code"; emit(" ") } }
+            continue
+        }
+        if (st == "str") {
+            cur = cur c
+            if (c == "\\") { i++; cur = cur substr(src, i, 1); continue }
+            if (c == "\"") st = "code"
+            continue
+        }
+        if (st == "raw") {
+            cur = cur c
+            if (c == "\"" && substr(src, i + 1, hashes) == rawend) { cur = cur rawend; i += hashes; st = "code" }
+            continue
+        }
+        if (c == "/" && substr(src, i + 1, 1) == "/") { st = "line"; i++; continue }
+        if (c == "/" && substr(src, i + 1, 1) == "*") { st = "block"; bdepth = 1; i++; continue }
+        p = (i > 1) ? substr(src, i - 1, 1) : " "
+        if ((c == "r" || (c == "b" && substr(src, i + 1, 1) == "r")) && p !~ /[A-Za-z0-9_]/) {
+            j = i + (c == "b" ? 2 : 1); hashes = 0
+            while (substr(src, j, 1) == "#") { hashes++; j++ }
+            if (substr(src, j, 1) == "\"" && (hashes > 0 || c == "r" || c == "b")) {
+                rawend = ""; for (k = 0; k < hashes; k++) rawend = rawend "#"
+                cur = cur substr(src, i, j - i + 1); i = j; st = "raw"; continue
+            }
+        }
+        if (c == "\"") { cur = cur c; st = "str"; continue }
+        if (c == "\047") {
+            if (substr(src, i + 1, 1) == "\\") {
+                j = i + 2
+                while (j <= n && substr(src, j, 1) != "\047") j++
+                cur = cur substr(src, i, j - i + 1); i = j; continue
+            }
+            if (substr(src, i + 2, 1) == "\047") { cur = cur substr(src, i, 3); i += 2; continue }
+            cur = cur c; continue
+        }
+        if (c ~ /[ \t\r\n]/) { emit(" "); continue }
+        cur = cur c
+        if (c == "(" || c == "[") pdepth++
+        else if (c == ")" || c == "]") pdepth--
+        if (c == "{") depth++
+        else if (c == "}") {
+            depth--
+            if (depth == 0) {
+                h0 = cur; gsub(/#!?\[[^]]*\]/, "", h0); sub(/[{].*$/, "", h0)
+                if (h0 ~ /(^| )fn( |$)/ || h0 !~ /(^| )(const|static|let|type|use)( |$)/) flush()
+            }
+        } else if (c == ";" && depth == 0 && pdepth == 0) flush()
+    }
+    if ((st != "code" && st != "line") || depth != 0) exit 1
+    flush()
+}
+'
+
+# What: library items reached from a service's refs.
+# Why: an unreached item cannot change its artifact (64.4).
+# From: Issue #1683 | PR #1912
+readonly _CI_AWK_RUST_CLOSURE='
+BEGIN { FS = "\t" }
+{ kind[NR] = $1; name[NR] = $2; attach[NR] = $3; refs[NR] = $4; text[NR] = $5; if ($2 != "") defined[$2] = 1; n = NR }
+END {
+    m = split(roots, r, " "); for (i = 1; i <= m; i++) want[r[i]] = 1
+    changed = 1
+    while (changed) {
+        changed = 0
+        for (i = 1; i <= n; i++) {
+            if (sel[i]) continue
+            take = (kind[i] == "header") || (kind[i] == "item" && (name[i] in want))
+            if (kind[i] == "impl") {
+                m = split(attach[i], a, " ")
+                for (j = 1; j <= m; j++) if ((a[j] in defined) && (a[j] in want)) take = 1
+            }
+            if (!take) continue
+            sel[i] = 1; changed = 1
+            m = split(refs[i], a, " "); for (j = 1; j <= m; j++) want[a[j]] = 1
+        }
+    }
+    for (i = 1; i <= n; i++) if (sel[i]) printf "%s\t%s\t%s\n", kind[i], name[i], text[i]
+}
+'
+
+# What: Cargo.lock packages reached from root crates.
+# Why: a lock entry outside the closure is not built.
+# From: Issue #1683 | PR #1912
+readonly _CI_AWK_LOCK_CLOSURE='
+function val(l) { sub(/^[^=]*= *"/, "", l); sub(/" *$/, "", l); return l }
+/^\[\[package\]\]/ { p++; indeps = 0; next }
+indeps { if ($0 ~ /^\]/) { indeps = 0; next } d = $0; gsub(/[ ",]/, "", d); sub(/\(.*$/, "", d); deps[p] = deps[p] " " d; next }
+/^name = / { nm[p] = val($0); next }
+/^version = / { vr[p] = val($0); next }
+/^source = / { sr[p] = val($0); next }
+/^checksum = / { ck[p] = val($0); next }
+/^dependencies = \[/ { indeps = 1; next }
+END {
+    for (i = 1; i <= p; i++) { byname[nm[i]] = byname[nm[i]] " " i; key[nm[i] vr[i]] = i }
+    m = split(roots, r, " ")
+    for (i = 1; i <= m; i++) { k = split(byname[r[i]], a, " "); for (j = 1; j <= k; j++) q[++qn] = a[j] }
+    for (h = 1; h <= qn; h++) {
+        i = q[h]; if (i in sel) continue; sel[i] = 1
+        k = split(deps[i], a, " ")
+        for (j = 1; j <= k; j++) {
+            d = a[j]
+            if (d in byname && split(byname[d], b, " ") == 1) { q[++qn] = b[1]; continue }
+            for (x = 1; x <= p; x++) if (nm[x] vr[x] == d || nm[x] == d) q[++qn] = x
+        }
+    }
+    for (i = 1; i <= p; i++) if (i in sel) printf "%s %s %s %s\n", nm[i], vr[i], sr[i], ck[i]
+}
+'
+
+# What: item records of Rust text $1; $2 keep|drop tests.
+# Why: rc 1 = unterminated text; the caller keeps raw.
+# From: Issue #1683 | PR #1912
+_ci_rust_items() {
+    local out rc=0
+    out="$(awk -v tests="$2" "${_CI_AWK_RUST_ITEMS}" <<< "$1" 2>&1)" || rc=$?
+    case "${rc}" in
+        0) printf '%s\n' "${out}" ;;
+        1) return 1 ;;
+        *)
+            ci_error "[CI-ERROR-IDENTITY-0010]" "rc=${rc} reason=\"rust item reader failed\"" "${out}"
+            return 2
+            ;;
+    esac
+}
+
+# What: normalized Rust text: kind, name, text per item.
+# Why: refs and attach lists derive from the text.
+# From: Issue #1683 | PR #1912
+_ci_rust_norm() {
+    local items
+    items="$(_ci_rust_items "$1" "$2")" || return "$?"
+    _ci_capture 0 cut -f1,2,5 <<< "${items}"
+}
+
 # What: the v1 normalizer grammar of a path; rc 1 = raw.
 # Why: A§12.5 v1 drops comment and blank lines (Test B/C).
 # From: Issue #1683 | PR #1858
@@ -1152,6 +1347,10 @@ _ci_norm_grammar() {
 # From: Issue #1683 | PR #1858
 _ci_norm_content() {
     local out rc=0
+    if [ "$1" = rust ]; then
+        _ci_rust_norm "$2" keep
+        return "$?"
+    fi
     out="$(awk -v g="$1" '
         function heredoc(l,   w, pre) {
             while (match(l, /<<-?[[:space:]]*[\047"]?[A-Za-z_][A-Za-z0-9_]*[\047"]?/)) {
@@ -1189,12 +1388,6 @@ _ci_norm_content() {
             if (tab) sub(/^\t+/, "", t)
             print
             if (t == hd) hd = ""
-            next
-        }
-        g == "rust" {
-            s = $0
-            if ($0 ~ /r#*"/ || gsub(/"/, "", s) % 2 == 1) exit 1
-            if ($0 !~ /^[[:space:]]*(\/\/|$)/) print
             next
         }
         g == "dockerfile" {
@@ -1243,11 +1436,11 @@ _ci_identity_git() {
     printf '%s' "${out}"
 }
 
-# What: Emit path-keyed content ids of tracked files.
-# Why: Content, not raw bytes or order, is the input.
+# What: path TAB blob id of tracked files under a root.
+# Why: one listing for content ids and the Rust reader.
 # From: Issue #1683
-_ci_tracked_content_ids() {
-    local root="$1" ref="${2:-}" raw listing line path oid blob norm empty g nrc
+_ci_tracked_listing() {
+    local root="$1" ref="${2:-}" raw listing empty
     # What: git pathspec selects files in both modes alike.
     # Why: ls-tree ignores globs; diff-tree honours them.
     # From: Issue #1683
@@ -1259,7 +1452,15 @@ _ci_tracked_content_ids() {
         raw="$(_ci_identity_git "${root}" "" ls-files -s -- "${root}")" || return 2
         listing="$(_ci_capture 0 awk -F'\t' 'NF { split($1, a, " "); print $2 "\t" a[2] }' <<< "${raw}")" || return 2
     fi
-    listing="$(LC_ALL=C _ci_capture 0 sort <<< "${listing}")" || return 2
+    LC_ALL=C _ci_capture 0 sort <<< "${listing}"
+}
+
+# What: Emit path-keyed content ids of tracked files.
+# Why: Content, not raw bytes or order, is the input.
+# From: Issue #1683
+_ci_tracked_content_ids() {
+    local root="$1" ref="${2:-}" mode="${3:-}" listing line path oid blob norm g nrc
+    listing="$(_ci_tracked_listing "${root}" "${ref}")" || return 2
     [ -n "${listing}" ] || return 0
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
@@ -1268,7 +1469,14 @@ _ci_tracked_content_ids() {
         if g="$(_ci_norm_grammar "${path}")"; then
             blob="$(_ci_identity_git "${path}" "${ref}" cat-file blob "${oid}")" || return 2
             nrc=0
-            norm="$(_ci_norm_content "${g}" "${blob}")" || nrc=$?
+            # What: a build id drops Rust cfg(test) items.
+            # Why: 11.4: a test change builds no container.
+            # From: Issue #1683 | PR #1912
+            if [ "${g}" = rust ] && [ "${mode}" = build ]; then
+                norm="$(_ci_rust_norm "${blob}" drop)" || nrc=$?
+            else
+                norm="$(_ci_norm_content "${g}" "${blob}")" || nrc=$?
+            fi
             case "${nrc}" in
                 0)
                     norm="$(_ci_capture 0 sha256sum <<< "${norm}")" || return 2
@@ -1281,6 +1489,65 @@ _ci_tracked_content_ids() {
         fi
         printf '%s\t%s\n' "${path}" "${oid}"
     done <<< "${listing}"
+}
+
+# What: one blob of a listing row at a ref.
+# Why: the Rust reader reads files the listing named.
+# From: Issue #1683 | PR #1912
+_ci_listing_blob() {
+    local line="$1" ref="$2"
+    _ci_identity_git "${line%%$'\t'*}" "${ref}" cat-file blob "${line#*$'\t'}"
+}
+
+# What: Rust id lines: lock closure, reached lib items.
+# Why: 64.4: only what the service reaches is input.
+# From: Issue #1683 | PR #1912
+_ci_rust_content() {
+    local service="$1" ref="${2:-}" crates rows lock dir bin crate src listing line blob items
+    local roots="" pkgs lib sel h refs
+    crates="$(_ci_required_field "${service}" crates list)" || return 2
+    crates=" ${crates//$'\n'/ } "
+    lock="$(_ci_variable CI_CARGO_LOCK)" || return 2
+    rows="$(_ci_workspace_rows "${CI_REPO_ROOT:-.}")" || return 2
+    while IFS='|' read -r dir bin crate; do
+        [ -n "${bin}" ] && [[ "${crates}" == *" ${crate} "* ]] || continue
+        src="$(_ci_workspace_src_dir "${dir}" "${bin}")"
+        listing="$(_ci_tracked_listing "${src}" "${ref}")" || return 2
+        while IFS= read -r line; do
+            [[ "${line%%$'\t'*}" == *.rs ]] || continue
+            blob="$(_ci_listing_blob "${line}" "${ref}")" || return 2
+            items="$(_ci_rust_items "${blob}" drop)" || return 2
+            refs="$(_ci_capture 0 cut -f4 <<< "${items}")" || return 2
+            roots+=" ${refs//$'\n'/ }"
+        done <<< "${listing}"
+    done <<< "${rows}"
+    listing="$(_ci_tracked_listing "${lock}" "${ref}")" || return 2
+    if [ -z "${listing}" ]; then
+        ci_log "[CI-ERROR-IDENTITY-0013]" "path=\"${lock}\" ref=\"${ref}\" reason=\"no tracked lock file\""
+        return 2
+    fi
+    blob="$(_ci_listing_blob "${listing}" "${ref}")" || return 2
+    pkgs="$(_ci_run "[CI-ERROR-IDENTITY-0011]" "path=\"${lock}\" reason=\"lock closure not read\"" awk -v roots="${crates}" "${_CI_AWK_LOCK_CLOSURE}" <<< "${blob}")" || return 2
+    h="$(_ci_capture 0 sha256sum <<< "${pkgs}")" || return 2
+    printf '%s\t%s\n' "${lock}" "${h%% *}"
+    while IFS='|' read -r dir bin crate; do
+        [ -z "${bin}" ] && [[ $'\n'"${pkgs}" == *$'\n'"${crate} "* ]] || continue
+        listing="$(_ci_tracked_listing "${dir}" "${ref}")" || return 2
+        lib=""
+        while IFS= read -r line; do
+            [ -n "${line}" ] || continue
+            if [[ "${line%%$'\t'*}" != *.rs ]]; then
+                printf '%s\n' "${line}"
+                continue
+            fi
+            blob="$(_ci_listing_blob "${line}" "${ref}")" || return 2
+            items="$(_ci_rust_items "${blob}" drop)" || return 2
+            lib+="${items}"$'\n'
+        done <<< "${listing}"
+        sel="$(_ci_run "[CI-ERROR-IDENTITY-0012]" "dir=\"${dir}\" reason=\"library closure not read\"" awk -v roots="${roots}" "${_CI_AWK_RUST_CLOSURE}" <<< "${lib}")" || return 2
+        h="$(_ci_capture 0 sha256sum <<< "${sel}")" || return 2
+        printf '%s\t%s\n' "${dir}" "${h%% *}"
+    done <<< "${rows}"
 }
 
 # What: print the image_base list of a field, then $2.
@@ -1368,14 +1635,47 @@ _ci_identity_pins() {
 # Why: one reader for the id and the base impact proof.
 # From: Issue #1683 | PR #1912
 _ci_identity_content() {
-    local service="$1" ref="${2:-}" paths p part buf=""
+    local service="$1" ref="${2:-}" paths p part buf="" skip=" " type
     paths="$(_ci_target_paths "${service}")" || return 2
+    type="$(_ci_required_field "${service}" build_type)" || return 2
+    # What: lock, libs, foreign manifests come from Rust.
+    # Why: only the reached part of each is an input.
+    # From: Issue #1683 | PR #1912
+    if [ "${type}" = rust ]; then
+        skip="$(_ci_rust_skip_paths "${service}")" || return 2
+    fi
     while IFS= read -r p; do
         [ -n "${p}" ] || continue
-        part="$(_ci_tracked_content_ids "${p}" "${ref}")" || return 2
+        [[ "${skip}" != *" ${p} "* ]] || continue
+        part="$(_ci_tracked_content_ids "${p}" "${ref}" build)" || return 2
         [ -z "${part}" ] || buf+="${part}"$'\n'
     done <<< "${paths}"
+    if [ "${type}" = rust ]; then
+        part="$(_ci_rust_content "${service}" "${ref}")" || return 2
+        buf+="${part}"$'\n'
+    fi
     printf '%s' "${buf}"
+}
+
+# What: context paths the Rust reader owns, space-framed.
+# Why: lock, library dirs, other crates' manifests.
+# From: Issue #1683 | PR #1912
+_ci_rust_skip_paths() {
+    local crates rows manifest dir bin crate lock out
+    crates="$(_ci_required_field "$1" crates list)" || return 2
+    crates=" ${crates//$'\n'/ } "
+    manifest="$(_ci_variable CI_CARGO_MANIFEST)" || return 2
+    lock="$(_ci_variable CI_CARGO_LOCK)" || return 2
+    out=" ${lock} "
+    rows="$(_ci_workspace_rows "${CI_REPO_ROOT:-.}")" || return 2
+    while IFS='|' read -r dir bin crate; do
+        if [ -z "${bin}" ]; then
+            out+="${dir} "
+        elif [[ "${crates}" != *" ${crate} "* ]]; then
+            out+="${dir}/${manifest} "
+        fi
+    done <<< "${rows}"
+    printf '%s' "${out}"
 }
 
 # What: build_type and SOT pins of one target+platform.

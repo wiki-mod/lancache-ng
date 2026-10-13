@@ -736,6 +736,95 @@ ROWS
     _expect no-head 0 "[CI-INFO-IMPACT-0009];UNKNOWN" || return 1
 }
 
+# What: comments drop; strings, raw strings, chars stay
+# Why: 11.1: a comment edit keeps the Rust build id
+# From: Issue #1683 | PR #1912
+@test "rust reader: comments drop, strings stay, test items drop for a build" {
+    local a b s one two out
+    a="$(_val name)" b="$(_val name)" s="$(_val name)r"
+    one="// $(_val name)
+fn ${a}() -> (&'static str, char, &'static str) { (\"${s}\", '{', r#\"}\"# ) } /* $(_val name) */
+#[cfg(test)]
+mod tests { fn ${b}() {} }"
+    two="/// $(_val name)
+fn   ${a}() -> (&'static str, char, &'static str) {
+    (\"${s}\", '{', r#\"}\"# ) // $(_val name)
+}
+#[cfg(test)]
+mod tests { fn ${b}() {} }"
+    run _ci_rust_norm "${one}" drop
+    _expect one 0 "item	${a}	" || return 1
+    out="${output}"
+    [[ "${out}" != *"${b}"* ]] || { echo "a cfg(test) item stayed in a build form: ${out}"; return 1; }
+    [ "$(grep -c . <<< "${out}")" -eq 1 ] || { echo "a string, char or raw string split the item: ${out}"; return 1; }
+    run _ci_rust_norm "${two}" drop
+    _expect two 0 "=${out}" || return 1
+    run _ci_rust_norm "${one/${s}/${s}x}" drop
+    [ "${status}" -eq 0 ] && [ "${output}" != "${out}" ] || { echo "a string change kept the form: ${output}"; return 1; }
+    run _ci_rust_norm "${one}" keep
+    _expect keep 0 "item	${a}	;item	tests	;fn ${b}()" || return 1
+    run _ci_rust_norm "fn ${a}() { let x = \"${s};
+" drop
+    _expect unterminated 1 - || return 1
+}
+
+# What: a service id holds only the lib items it reaches
+# Why: 64.4: a shared lib edit is not every service
+# From: Issue #1683 | PR #1912
+@test "rust content: a library or lock edit moves only the services that reach it" {
+    local d x y l a b c t dx dy before_x before_y
+    d="$(_val path)" x="$(_val name)" y="$(_val name)" l="$(_val name)"
+    a="$(_val name)" b="$(_val name)" c="$(_val name)" t="$(_val name)" dx="$(_val name)" dy="$(_val name)"
+    mkdir -p "${d}/${l}" "${d}/${x}/src" "${d}/${y}/src" || return 1
+    printf '[workspace]\nmembers = ["%s", "%s", "%s"]\n' "${l}" "${x}" "${y}" > "${d}/Cargo.toml"
+    printf '[package]\nname = "%s"\n[lib]\npath = "lib.rs"\n' "${l}" > "${d}/${l}/Cargo.toml"
+    printf '[package]\nname = "%s"\n[[bin]]\nname = "%s"\npath = "src/main.rs"\n' "${x}" "${x}" > "${d}/${x}/Cargo.toml"
+    printf '[package]\nname = "%s"\n[[bin]]\nname = "%s"\npath = "src/main.rs"\n' "${y}" "${y}" > "${d}/${y}/Cargo.toml"
+    _lock() {
+        printf '[[package]]\nname = "%s"\nversion = "1.0.0"\nsource = "registry+%s"\nchecksum = "%s"\n\n' "${dx}" "${d}" "$1" "${dy}" "${d}" "$2"
+        printf '[[package]]\nname = "%s"\nversion = "0.1.0"\ndependencies = [\n "%s",\n]\n\n' "${l}" "${dx}" "${x}" "${l}"
+        printf '[[package]]\nname = "%s"\nversion = "0.1.0"\ndependencies = [\n "%s",\n "%s",\n]\n' "${y}" "${l}" "${dy}"
+    }
+    _lock 1 1 > "${d}/Cargo.lock"
+    _lib() {
+        printf 'use std::fmt;\npub fn %s() -> u8 { %s }\npub fn %s() -> u8 { %s }\npub struct %s;\nimpl %s { pub fn n(&self) -> u8 { %s() } }\nfn %s() -> u8 { %s }\n' \
+            "${a}" "$1" "${b}" "$2" "${t}" "${t}" "${c}" "${c}" "$3"
+    }
+    _lib 1 2 3 > "${d}/${l}/lib.rs"
+    printf 'fn main() { %s::%s(); }\n' "${l}" "${a}" > "${d}/${x}/src/main.rs"
+    printf 'fn main() { let v = %s::%s; v.n(); %s::%s(); }\n' "${l}" "${t}" "${l}" "${b}" > "${d}/${y}/src/main.rs"
+    git -C "${d}" init -q && git -C "${d}" add -A || return 1
+    _ci_required_field() {
+        case "$1:$2" in
+            X:crates) printf '%s\n' "${x}" ;;
+            Y:crates) printf '%s\n' "${y}" ;;
+            *) echo "unexpected field $*" >&2; return 2 ;;
+        esac
+    }
+    _ids() {
+        hx="$(CI_REPO_ROOT="${d}" _ci_rust_content X)" && hy="$(CI_REPO_ROOT="${d}" _ci_rust_content Y)" || { echo "rust content failed" >&2; return 1; }
+    }
+    _same() { [ "$1" = "$2" ] || { echo "$3 moved: $1 -> $2"; return 1; }; }
+    _moved() { [ "$1" != "$2" ] || { echo "$3 kept its id: $1"; return 1; }; }
+    local hx hy
+    _ids || return 1
+    [[ "${hx}" == *"${l}	"* ]] && [[ "${hy}" == *"${l}	"* ]] || { echo "the library is no input: ${hx} / ${hy}"; return 1; }
+    before_x="${hx}" before_y="${hy}"
+    _lib 1 9 3 > "${d}/${l}/lib.rs" && git -C "${d}" add -A && _ids || return 1
+    _same "${before_x}" "${hx}" "x on an item only y reaches" && _moved "${before_y}" "${hy}" "y on its own item" || return 1
+    before_x="${hx}" before_y="${hy}"
+    _lib 1 9 7 > "${d}/${l}/lib.rs" && git -C "${d}" add -A && _ids || return 1
+    _same "${before_x}" "${hx}" "x on an item behind y's impl" && _moved "${before_y}" "${hy}" "y through impl and call" || return 1
+    before_x="${hx}" before_y="${hy}"
+    _lib 5 9 7 > "${d}/${l}/lib.rs" && git -C "${d}" add -A && _ids || return 1
+    _moved "${before_x}" "${hx}" "x on its own item" && _same "${before_y}" "${hy}" "y on an item only x reaches" || return 1
+    before_x="${hx}" before_y="${hy}"
+    { _lib 5 9 7; printf '// %s\n#[cfg(test)]\nmod tests { fn z() {} }\n' "$(_val name)"; } > "${d}/${l}/lib.rs" && git -C "${d}" add -A && _ids || return 1
+    _same "${before_x}" "${hx}" "x on a comment and a test item" && _same "${before_y}" "${hy}" "y on a comment and a test item" || return 1
+    _lock 1 2 > "${d}/Cargo.lock" && git -C "${d}" add -A && _ids || return 1
+    _same "${before_x}" "${hx}" "x on a lock entry only y reaches" && _moved "${before_y}" "${hy}" "y on its lock entry" || return 1
+}
+
 # =========================================================
 # SERVICE DEPENDENCIES
 # =========================================================
