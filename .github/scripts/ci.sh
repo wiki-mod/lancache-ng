@@ -7124,7 +7124,7 @@ _ci_validate_detach() {
 # Why: Per-slot flock; runs never share a /27.
 # From: Issue #1683
 _ci_validate_slot_lock() {
-    local subnet="$1" root key holder out errf probe hrc=0
+    local subnet="$1" root key holder out errf ack="" rfd wfd hrc=0
     root="$(_ci_validate_shared_dir)" || return 2
     root="${root}/locks"
     key="$(printf '%s' "${subnet}" | tr './' '__')"
@@ -7133,28 +7133,33 @@ _ci_validate_slot_lock() {
         return 2
     fi
     errf="${root}/${key}.err"
-    # What: holder stderr goes to a file, not /dev/null.
-    # Why: a missing flock must not read as "slot held".
-    # From: Issue #1683 | PR #1858
-    (
-        exec >/dev/null 2>"${errf}"
+    # What: holder says "held" after flock; stderr to file
+    # Why: read waits for it or its exit; no guessed pause
+    # From: Issue #1683 | PR #1912
+    coproc HOLDER {
+        exec 2>"${errf}"
         exec 9>"${root}/${key}.lock"
         flock -n 9 || exit 1
-        exec sleep infinity
-    ) &
-    holder=$!
-    sleep 0.3
-    if probe="$(kill -0 "${holder}" 2>&1)"; then
+        printf 'held\n'
+        exec sleep infinity >/dev/null
+    }
+    holder="${HOLDER_PID}" rfd="${HOLDER[0]}" wfd="${HOLDER[1]}"
+    exec {wfd}>&-
+    if ! read -r -u "${rfd}" ack; then
+        ack=""
+    fi
+    exec {rfd}<&-
+    if [ "${ack}" = held ]; then
         rm -f "${errf}"
         printf '%s\n' "${holder}"
         return 0
     fi
     # What: reap the dead lock holder; keep its exit status.
-    # Why: the status and the probe text join the error raw.
+    # Why: the status and its stderr join the error raw.
     # From: Issue #1683 | PR #1858
     wait "${holder}" || hrc=$?
     if [ -s "${errf}" ]; then
-        ci_error "[CI-ERROR-VALIDATE-0073]" "subnet=\"${subnet}\" lock=\"${root}/${key}.lock\" holder_rc=${hrc} reason=\"slot lock holder failed\"" "$(cat "${errf}"; printf '%s\n' "${probe}")"
+        ci_error "[CI-ERROR-VALIDATE-0073]" "subnet=\"${subnet}\" lock=\"${root}/${key}.lock\" holder_rc=${hrc} reason=\"slot lock holder failed\"" "$(cat "${errf}")"
         rm -f "${errf}"
         return 2
     fi
