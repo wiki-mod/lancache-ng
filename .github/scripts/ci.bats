@@ -6456,6 +6456,36 @@ _rh_runner_dir() {
     [[ "${output}" == *"STALE: ${ckstale} still present ($(stat -c '%a %U:%G' "${ckstale}"))"* ]] || { echo "stale: ${output}"; return 1; }
 }
 
+# What: host-prep runs its steps, stops on one, ends with hints.
+# Why: the last line names daemon.json and the proxies block.
+# From: Issue #1622 | PR #1912
+@test "runner-host: host-prep stops at a failed step and ends with the daemon.json and proxies hint" {
+    local hpjson hpheavy hpname hpfail=""
+    _rh_fixture
+    hpjson="$(yq -r '.ci_variables.CI_DAEMON_JSON' "${CI_MANIFEST_SOURCE}")" hpheavy="$(yq -r '.runner_host.heavy_host_pattern' "${CI_MANIFEST_SOURCE}")"
+    [[ -n "${hpjson}${hpheavy}" && "${hpjson}${hpheavy}" != *null* ]] || { echo "no SOT daemon json or heavy pattern"; return 1; }
+    hpname="$(_val name)"
+    getent() { return 0; }
+    _ci_rh_access() { return 0; }
+    _ci_rh_group() { printf 'g'; }
+    chown() { return 0; }
+    chmod() { return 0; }
+    _ci_rh_hooks() { printf 'step hooks\n'; }
+    _ci_rh_purge_listchanges() { printf 'step listchanges\n'; }
+    _ci_rh_backports() { printf 'step backports\n'; [ "${hpfail}" != backports ] || return 2; }
+    _ci_rh_units() { printf 'step units\n'; }
+    hostname() { printf '%s\n' "${hpname}"; }
+    run _ci_rh_host_prep
+    _expect light 0 "Converged;step hooks;step listchanges;step backports;step units;host-prep complete. It does not touch ${hpjson};\"proxies\" block" || return 1
+    [[ "${output}" != *Heavy-tier* ]] || { echo "light host got the heavy hint: ${output}"; return 1; }
+    hpname="$(_val name)${hpheavy}$(_val name)"
+    run _ci_rh_host_prep
+    _expect heavy 0 "host-prep complete;Heavy-tier host" || return 1
+    hpfail=backports
+    run _ci_rh_host_prep
+    [ "${status}" -eq 2 ] && [[ "${output}" != *"step units"* && "${output}" != *"host-prep complete"* ]] || { echo "rc ${status} after a failed step: ${output}"; return 1; }
+}
+
 # What: guards stop before any host change.
 # Why: destructive modes need consent, input, a safe path.
 # From: Issue #1622 | PR #1624
