@@ -12930,10 +12930,10 @@ _ci_check_pr_template() {
     done
     if [ "${#missing[@]}" -gt 0 ]; then
         if [ "${PR_DRAFT:-false}" = "true" ]; then
-            ci_log "[CI-ERROR-CHECK-0088]" "reason=\"draft, non-blocking\" detail=\"$(printf '%s; ' "${missing[@]}")\""
+            ci_log "[CI-ERROR-CHECK-0088]" "template=\"${template#"${CI_REPO_ROOT:-.}/"}\" reason=\"draft, non-blocking; the PR body must use the PR template, own layouts are refused\" detail=\"$(printf '%s; ' "${missing[@]}")\""
             printf 'pr-template=warn-draft\n'; return 0
         fi
-        ci_error "[CI-ERROR-CHECK-0089]" "reason=\"missing/empty required section(s)\"" "$(printf '%s\n' "${missing[@]}")"
+        ci_error "[CI-ERROR-CHECK-0089]" "template=\"${template#"${CI_REPO_ROOT:-.}/"}\" reason=\"the PR body must use the PR template, own layouts are refused; missing/empty required section(s)\"" "$(printf '%s\n' "${missing[@]}")"
         return 1
     fi
     printf 'pr-template=ok\n'
