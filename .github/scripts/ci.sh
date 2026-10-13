@@ -1138,14 +1138,14 @@ ci_cmd_plan_matrix() {
 # IDENTITY ENGINE
 # =========================================================
 
-# What: Rust source to top-level item records (TSV).
+# What: Rust item records (TSV); refs: code, {name} only.
 # Why: one Rust lexer for norm, build id and lib closure.
 # From: Issue #1683 | PR #1912
 readonly _CI_AWK_RUST_ITEMS='
 function flush(   h, kind, name, attach, t, refs, seen, w, n, i, a) {
-    t = cur
+    t = cur; r = code
     sub(/^ +/, "", t); sub(/ +$/, "", t)
-    cur = ""; hdr = ""; need_semi = 0
+    cur = ""; code = ""; hdr = ""; need_semi = 0
     if (t == "") return
     h = t
     attrs = ""
@@ -1174,7 +1174,7 @@ function flush(   h, kind, name, attach, t, refs, seen, w, n, i, a) {
         sub(/^ /, "", name); n = split(name, w, " "); name = w[n]
         kind = (head ~ /(^| )mod / && t ~ /;$/) ? "header" : "item"
     }
-    refs = idents(t)
+    refs = idents(r)
     gsub(/\\/, "\\\\", t); gsub(/\n/, "\\n", t); gsub(/\t/, "\\t", t)
     printf "%s\t%s\t%s\t%s\t%s\n", kind, name, attach, refs, t
 }
@@ -1188,8 +1188,17 @@ function idents(s,   out, seen, tok) {
     return out
 }
 function emit(c) {
+    code = code " "
     if (c == " ") { if (cur != "" && substr(cur, length(cur), 1) != " ") cur = cur " "; return }
     cur = cur c
+}
+function captures(s,   out) {
+    out = " "; gsub(/\{\{/, "", s)
+    while (match(s, /\{[A-Za-z_][A-Za-z0-9_]*/)) {
+        out = out substr(s, RSTART + 1, RLENGTH - 1) " "
+        s = substr(s, RSTART + RLENGTH)
+    }
+    return out
 }
 { src = src $0 "\n" }
 END {
@@ -1203,14 +1212,14 @@ END {
             continue
         }
         if (st == "str") {
-            cur = cur c
-            if (c == "\\") { i++; cur = cur substr(src, i, 1); continue }
-            if (c == "\"") st = "code"
+            cur = cur c; lit = lit c
+            if (c == "\\") { i++; cur = cur substr(src, i, 1); lit = lit substr(src, i, 1); continue }
+            if (c == "\"") { st = "code"; code = code captures(lit) }
             continue
         }
         if (st == "raw") {
-            cur = cur c
-            if (c == "\"" && substr(src, i + 1, hashes) == rawend) { cur = cur rawend; i += hashes; st = "code" }
+            cur = cur c; lit = lit c
+            if (c == "\"" && substr(src, i + 1, hashes) == rawend) { cur = cur rawend; i += hashes; st = "code"; code = code captures(lit) }
             continue
         }
         if (c == "/" && substr(src, i + 1, 1) == "/") { st = "line"; i++; continue }
@@ -1221,10 +1230,10 @@ END {
             while (substr(src, j, 1) == "#") { hashes++; j++ }
             if (substr(src, j, 1) == "\"" && (hashes > 0 || c == "r" || c == "b")) {
                 rawend = ""; for (k = 0; k < hashes; k++) rawend = rawend "#"
-                cur = cur substr(src, i, j - i + 1); i = j; st = "raw"; continue
+                cur = cur substr(src, i, j - i + 1); i = j; st = "raw"; lit = ""; continue
             }
         }
-        if (c == "\"") { cur = cur c; st = "str"; continue }
+        if (c == "\"") { cur = cur c; st = "str"; lit = ""; continue }
         if (c == "\047") {
             if (substr(src, i + 1, 1) == "\\") {
                 j = i + 2
@@ -1235,7 +1244,7 @@ END {
             cur = cur c; continue
         }
         if (c ~ /[ \t\r\n]/) { emit(" "); continue }
-        cur = cur c
+        cur = cur c; code = code c
         if (c == "(" || c == "[") pdepth++
         else if (c == ")" || c == "]") pdepth--
         if (c == "{") depth++
