@@ -80,10 +80,10 @@ services:
       - SYS_PTRACE
     healthcheck:
       test: ["CMD", "lancache-watchdog", "healthcheck"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
+      interval: ${SOT_HEALTHCHECK_INTERVAL:?SOT_HEALTHCHECK_INTERVAL is required}
+      timeout: ${SOT_HEALTHCHECK_TIMEOUT:?SOT_HEALTHCHECK_TIMEOUT is required}
+      retries: ${SOT_HEALTHCHECK_RETRIES:?SOT_HEALTHCHECK_RETRIES is required}
+      start_period: ${SOT_HEALTHCHECK_START_PERIOD:?SOT_HEALTHCHECK_START_PERIOD is required}
     restart: always
     logging: *logging
 
@@ -126,10 +126,10 @@ services:
       - "${IP_HTTPS}:443:443"
     healthcheck:
       test: ["CMD", "lancache-watchdog", "healthcheck"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
+      interval: ${SOT_HEALTHCHECK_INTERVAL:?SOT_HEALTHCHECK_INTERVAL is required}
+      timeout: ${SOT_HEALTHCHECK_TIMEOUT:?SOT_HEALTHCHECK_TIMEOUT is required}
+      retries: ${SOT_HEALTHCHECK_RETRIES:?SOT_HEALTHCHECK_RETRIES is required}
+      start_period: ${SOT_HEALTHCHECK_START_PERIOD:?SOT_HEALTHCHECK_START_PERIOD is required}
     restart: always
     logging: *logging
 
@@ -183,10 +183,10 @@ services:
       - "${NATS_BIND_IP:-${SOT_LOOPBACK_BIND_IP}}:${SOT_NATS_PORT}:${SOT_NATS_PORT}"
     healthcheck:
       test: ["CMD", "lancache-watchdog", "healthcheck"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
+      interval: ${SOT_HEALTHCHECK_INTERVAL:?SOT_HEALTHCHECK_INTERVAL is required}
+      timeout: ${SOT_HEALTHCHECK_TIMEOUT:?SOT_HEALTHCHECK_TIMEOUT is required}
+      retries: ${SOT_HEALTHCHECK_RETRIES:?SOT_HEALTHCHECK_RETRIES is required}
+      start_period: ${SOT_HEALTHCHECK_START_PERIOD:?SOT_HEALTHCHECK_START_PERIOD is required}
     restart: always
     logging: *logging
 
@@ -238,10 +238,10 @@ services:
       - NET_ADMIN
     healthcheck:
       test: ["CMD", "lancache-watchdog", "healthcheck"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
+      interval: ${SOT_HEALTHCHECK_INTERVAL:?SOT_HEALTHCHECK_INTERVAL is required}
+      timeout: ${SOT_HEALTHCHECK_TIMEOUT:?SOT_HEALTHCHECK_TIMEOUT is required}
+      retries: ${SOT_HEALTHCHECK_RETRIES:?SOT_HEALTHCHECK_RETRIES is required}
+      start_period: ${SOT_HEALTHCHECK_START_PERIOD:?SOT_HEALTHCHECK_START_PERIOD is required}
     restart: always
     logging: *logging
 
@@ -313,10 +313,10 @@ services:
       - "${SOT_DHCP_API_HOST}:host-gateway"
     healthcheck:
       test: ["CMD", "lancache-ui", "healthcheck"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
+      interval: ${SOT_HEALTHCHECK_INTERVAL:?SOT_HEALTHCHECK_INTERVAL is required}
+      timeout: ${SOT_HEALTHCHECK_TIMEOUT:?SOT_HEALTHCHECK_TIMEOUT is required}
+      retries: ${SOT_HEALTHCHECK_RETRIES:?SOT_HEALTHCHECK_RETRIES is required}
+      start_period: ${SOT_HEALTHCHECK_START_PERIOD:?SOT_HEALTHCHECK_START_PERIOD is required}
     restart: always
     logging: *logging
 

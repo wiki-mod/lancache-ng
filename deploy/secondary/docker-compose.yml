@@ -47,10 +47,10 @@ services:
       - "${LISTEN_IP_HTTPS:?LISTEN_IP_HTTPS is required}:${DNS_HTTPS_HOST_PORT}:${SOT_DNS_HTTPS_PORT}/tcp"
     healthcheck:
       test: ["CMD", "lancache-watchdog", "healthcheck"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
+      interval: ${SOT_HEALTHCHECK_INTERVAL:?SOT_HEALTHCHECK_INTERVAL is required}
+      timeout: ${SOT_HEALTHCHECK_TIMEOUT:?SOT_HEALTHCHECK_TIMEOUT is required}
+      retries: ${SOT_HEALTHCHECK_RETRIES:?SOT_HEALTHCHECK_RETRIES is required}
+      start_period: ${SOT_HEALTHCHECK_START_PERIOD:?SOT_HEALTHCHECK_START_PERIOD is required}
     restart: always
     # What: Docker's local driver; it rotates by itself.
     # Why: no services container, so no syslog-ng here.
