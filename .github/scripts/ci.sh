@@ -3301,7 +3301,10 @@ _ci_sccache_reap() {
         # What: a pid gone before read or kill is skipped.
         # Why: a stopped server exits while the scan runs.
         # From: Issue #1683 | PR #1912
-        env_s="$( { tr '\0' '\n' < "${p}/environ"; } 2>/dev/null)" || continue
+        if ! env_s="$( { tr '\0' '\n' < "${p}/environ"; } 2>&1)"; then
+            [ ! -e "${p}" ] || ci_error "[CI-WARN-CACHE-0011]" "pid=${p#/proc/} reason=\"sccache server environ unreadable\"" "${env_s}"
+            continue
+        fi
         [[ $'\n'"${env_s}" == *$'\n'"SCCACHE_SERVER_UDS=${dir}/"* ]] || continue
         out="$(kill "${p#/proc/}" 2>&1)" || [ ! -e "${p}" ] || ci_error "[CI-WARN-CACHE-0006]" "pid=${p#/proc/} reason=\"sccache server kill failed\"" "${out}"
     done
@@ -4158,7 +4161,7 @@ _ci_rb_distcc_off() {
 _ci_rb_remote_toolchain_id() {
     local section
     rm -f "${_CI_RB_REMOTE_ID}"
-    if command -v readelf >/dev/null 2>&1; then
+    if command -v readelf >/dev/null; then
         if section="$(_ci_capture 0 readelf -p .comment "$1")"; then
             sed -n 's/^ *\[[^]]*\] *//p' <<<"${section}" > "${_CI_RB_REMOTE_ID}"
         fi
@@ -7204,7 +7207,7 @@ _ci_validate_release() {
     # What: stop the holder; a gone holder is not an error.
     # Why: only a holder still alive after a failed kill is.
     # From: Issue #1683 | PR #1858
-    if ! out="$(kill "${holder}" 2>&1)" && kill -0 "${holder}" >/dev/null 2>&1; then
+    if ! out="$(kill "${holder}" 2>&1)" && [ -e "/proc/${holder}" ]; then
         ci_error "[CI-ERROR-VALIDATE-0128]" "pid=${holder} reason=\"slot lock holder not stopped\"" "${out}"
         return 2
     fi
@@ -9943,7 +9946,7 @@ _ci_daemon_merge() {
 # From: Issue #1255 | PR #1349
 _ci_daemon_validate() {
     local file="$1" out
-    if ! command -v dockerd >/dev/null 2>&1; then
+    if ! command -v dockerd >/dev/null; then
         ci_log "[CI-WARN-DAEMON-0002]" "reason=\"dockerd not on PATH; validate preflight skipped\""
         return 0
     fi
@@ -10938,7 +10941,7 @@ _ci_rh_purge_pve_check() {
     printf '\n--- Mounts, fstab, open files and cron of the PVE stack ---\n'
     mount | { grep -iE "${units}" || printf '  not currently mounted\n'; }
     if _ci_rh_root grep -qiE "${units}" "${fstab}"; then printf '  FOUND: %s references the stack\n' "${fstab}"; fi
-    if ! command -v lsof >/dev/null 2>&1; then
+    if ! command -v lsof >/dev/null; then
         ci_log "[CI-WARN-RUNNER-0119]" "dir=\"${pdir}\" reason=\"lsof not on PATH; open-file check skipped\""
     elif _ci_rh_root test -d "${pdir}"; then
         open="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0120]" "dir=\"${pdir}\" reason=\"lsof failed\"" _ci_rh_root lsof +D "${pdir}")" || return 2
@@ -14236,7 +14239,7 @@ _ci_validate_host_tools() {
         return 2
     fi
     while IFS= read -r t; do
-        [ -n "${t}" ] && ! command -v "${t}" >/dev/null 2>&1 && missing+=("${t}")
+        [ -n "${t}" ] && ! command -v "${t}" >/dev/null && missing+=("${t}")
     done <<< "${tools}"
     if [ "${#missing[@]}" -gt 0 ]; then
         ci_log "[CI-ERROR-VALIDATE-0062]" "missing=\"${missing[*]}\" reason=\"host tool missing\""
