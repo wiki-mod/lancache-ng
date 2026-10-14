@@ -101,8 +101,8 @@ services:
       # What: per-install values from the operator .env
       # Why: .env is the one owner of operator values.
       # From: Issue #1683
-      - CACHE_MAX_SIZE=${CACHE_MAX_SIZE:?CACHE_MAX_SIZE is required}
-      - CACHE_MEM_MB=${CACHE_MEM_MB:?CACHE_MEM_MB is required}
+      - CACHE_MAX_SIZE=${CACHE_MAX_SIZE:-}
+      - CACHE_MEM_MB=${CACHE_MEM_MB:-}
       - NGINX_UPSTREAM_RESOLVER=${NGINX_UPSTREAM_RESOLVER:-}
       - PROXY_SECURITY_MODE=${PROXY_SECURITY_MODE:-}
       - PROXY_ALLOWED_CLIENT_CIDRS=${PROXY_ALLOWED_CLIENT_CIDRS:-}
@@ -257,7 +257,7 @@ services:
       - HTTPS_ENABLED=${HTTPS_ENABLED:-}
       - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
       - CACHE_MAX_GB=${CACHE_MAX_GB:-}
-      - CACHE_MAX_SIZE=${CACHE_MAX_SIZE:?CACHE_MAX_SIZE is required}
+      - CACHE_MAX_SIZE=${CACHE_MAX_SIZE:-}
       - IP_HTTP=${IP_HTTP}
       - IP_HTTPS=${IP_HTTPS}
       - LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY:?LANCACHE_IMAGE_REGISTRY is required}

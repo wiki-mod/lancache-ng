@@ -2161,6 +2161,16 @@ prod_env_default() {
     runtime_default_in "$list" "$1"
 }
 
+# What: a key's .env value, else its SOT default
+# Why: .env holds only user values; no guessed default
+# From: Issue #1683 | PR #1912
+env_or_sot_default() {
+    local value
+    value=$(get_env_var "$1" "$2") || exit $?
+    [[ -n "$value" ]] || value=$(prod_env_default "$1") || exit $?
+    printf '%s\n' "$value"
+}
+
 # What: sets DEFAULT_INSTALL_DIR from the SOT, once
 # Why: LANCACHE_STATE_DIR owns the checkout dir.
 # From: Issue #1683 | PR #1912
@@ -3141,8 +3151,7 @@ migrate_env_for_update() (
     # What: declares every temporary as function-local
     # Why: undeclared names leaked as globals
     local dhcp_proxy_pxe_boot_server dhcp_proxy_pxe_boot_filename_bios dhcp_proxy_pxe_boot_filename_uefi
-    local default_cache_size default_cache_gb ntp_default https_default
-    local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_https ui_password ui_password_hash ui_user
+    local cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_https ui_password ui_password_hash ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_http upstream_dhcp_ip
     local state_keys state_key state_sub state_sub_dir legacy_path
     local state_dir ui_session_ttl
@@ -3252,14 +3261,9 @@ migrate_env_for_update() (
     ui_session_ttl=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file") || exit $?
     [[ -z "$ui_session_ttl" ]] || validate_ui_session_ttl_seconds "$ui_session_ttl" "$env_file"
 
-    # What: an empty HTTPS_ENABLED takes the SOT default
-    # Why: prod always runs dns-https on IP_HTTPS
+    # What: an install without the key gets auto-update off
+    # Why: the user never agreed; a SOT change must not
     # From: Issue #1683 | PR #1912
-    https_default=$(prod_env_default HTTPS_ENABLED) || exit $?
-    set_env_key_if_empty_or_missing HTTPS_ENABLED "$https_default" "$env_file"
-
-    # What: missing AUTO_UPDATE_ENABLED defaults to 0
-    # Why: migration never turns auto-update on
     set_env_key_if_empty_or_missing AUTO_UPDATE_ENABLED "0" "$env_file"
 
     state_dir=$(install_state_root "$install_dir" "$env_file") \
@@ -3311,34 +3315,29 @@ migrate_env_for_update() (
     # From: Issue #1683 | PR #1912
     migrate_legacy_ca "$install_dir/../../certs" "$env_file"
 
+    # What: a user cache size fills its missing partner key
+    # Why: no size set means the SOT default; none is copied
+    # From: Issue #1683 | PR #1912
     cache_max_size=$(get_env_var_nonempty CACHE_MAX_SIZE "$env_file") || exit $?
     cache_max_gb=$(get_env_var_nonempty CACHE_MAX_GB "$env_file") || exit $?
-    default_cache_size=$(prod_env_default CACHE_MAX_SIZE) \
-        || die "Cannot read the default of CACHE_MAX_SIZE (exit $?)."
-    default_cache_gb=$(cache_size_gb_from_env "$default_cache_size") \
-        || die "The CACHE_MAX_SIZE default '$default_cache_size' is not a GB size."
-    cache_gb=$(cache_size_gb_from_env "${cache_max_size:-$cache_max_gb}") || cache_gb="$default_cache_gb"
-
-    set_env_key_if_empty_or_missing CACHE_MAX_SIZE "${cache_gb}g" "$env_file"
-    cache_mem_mb=$(get_env_var CACHE_MEM_MB "$env_file") || exit $?
-    if ! is_positive_integer "$cache_mem_mb"; then
-        cache_mem_mb=$(prod_env_default CACHE_MEM_MB) \
-            || die "Cannot read the default of CACHE_MEM_MB (exit $?)."
+    if cache_gb=$(cache_size_gb_from_env "${cache_max_size:-$cache_max_gb}"); then
+        set_env_key_if_empty_or_missing CACHE_MAX_SIZE "${cache_gb}g" "$env_file"
+        set_env_key_if_empty_or_missing CACHE_MAX_GB "$cache_gb" "$env_file"
     fi
-    set_env_key CACHE_MEM_MB "$cache_mem_mb" "$env_file"
+    # What: a broken CACHE_MEM_MB is removed, not replaced
+    # Why: the image then takes the SOT default itself
+    # From: Issue #1683 | PR #1912
+    cache_mem_mb=$(get_env_var CACHE_MEM_MB "$env_file") || exit $?
+    if [[ -n "$cache_mem_mb" ]] && ! is_positive_integer "$cache_mem_mb"; then
+        remove_env_key CACHE_MEM_MB "$env_file"
+        print_warn "CACHE_MEM_MB '$cache_mem_mb' is no positive integer; removed, the build-manifest.yml default applies"
+    fi
     migrate_proxy_security_mode_for_update "$env_file"
     # What: image keys were resolved at the top
     # Why: the platform check runs before migration writes
 
-    set_env_key_if_empty_or_missing CACHE_MAX_GB "$cache_gb" "$env_file"
     ip_http=$(get_env_var IP_HTTP "$env_file") || die "Cannot read IP_HTTP from $env_file (exit $?)."
     append_env_migrated_assignment_if_missing UI_BIND_IP IP_HTTP "$ip_http" "$env_file"
-
-    # What: NTP can stay disabled; its key must still exist
-    # Why: Compose and the UI read one complete config
-    # From: Issue #1683 | PR #1858
-    ntp_default=$(prod_env_default NTP_ENABLED) || exit $?
-    append_env_key_if_missing NTP_ENABLED "$ntp_default" "$env_file"
 
     # What: drops the retired global logging switch
     # Why: the Admin UI holds one switch per service
@@ -3488,9 +3487,12 @@ migrate_env_for_update() (
     ui_password=$(get_env_var UI_AUTH_PASSWORD "$env_file") || exit $?
     ui_password_hash=$(get_env_var UI_AUTH_PASSWORD_HASH "$env_file") || exit $?
 
-    allow_insecure_ui=$(prod_env_default ALLOW_INSECURE_UI) || exit $?
-    [[ -z "$ui_user" && -z "$ui_password" && -z "$ui_password_hash" ]] && allow_insecure_ui=true
-    append_env_key_if_missing ALLOW_INSECURE_UI "$allow_insecure_ui" "$env_file"
+    # What: an install without UI login keeps running open
+    # Why: it ran so before; others take the SOT value
+    # From: Issue #1683 | PR #1912
+    if [[ -z "$ui_user" && -z "$ui_password" && -z "$ui_password_hash" ]]; then
+        append_env_key_if_missing ALLOW_INSECURE_UI true "$env_file"
+    fi
 
     # What: every SOT-required key holds a value by now
     # Why: an empty required key breaks the stack at up
@@ -4515,12 +4517,12 @@ verify_stack_functional_health() {
 
     ip_http=$(get_env_var IP_HTTP "$_UPDATE_ENV_FILE") || exit $?
     ip_https=$(get_env_var IP_HTTPS "$_UPDATE_ENV_FILE") || exit $?
-    https_enabled=$(get_env_var HTTPS_ENABLED "$_UPDATE_ENV_FILE") || exit $?
+    https_enabled=$(env_or_sot_default HTTPS_ENABLED "$_UPDATE_ENV_FILE") || exit $?
 
     if [[ -n "$ip_http" ]]; then
         _verify_healthz_endpoint "$ip_http" || return 1
     fi
-    if [[ "${https_enabled:-0}" = "1" && -n "$ip_https" ]]; then
+    if [[ "$https_enabled" = "1" && -n "$ip_https" ]]; then
         _verify_healthz_endpoint "$ip_https" || return 1
     fi
 
@@ -4935,7 +4937,7 @@ cmd_auto_update() {
 
     # What: re-checks AUTO_UPDATE_ENABLED before acting
     # Why: a timer may stay enabled after .env is edited
-    auto_update_enabled=$(get_env_var AUTO_UPDATE_ENABLED "$env_file") || exit $?
+    auto_update_enabled=$(env_or_sot_default AUTO_UPDATE_ENABLED "$env_file") || exit $?
     current_channel=$(resolve_lancache_image_channel "$env_file") || exit $?
     pinned=$(lancache_release_rows pinned) || exit $?
     # What: stacks compared by image-pin fingerprint
@@ -5021,7 +5023,7 @@ lancache_read_ui_settings_override() {
 reconcile_auto_update_timer_state() {
     local env_file="$1" desired out
     systemd_unit_exists "$AUTO_UPDATE_TIMER_UNIT" || return 0
-    desired=$(get_env_var AUTO_UPDATE_ENABLED "$env_file") \
+    desired=$(env_or_sot_default AUTO_UPDATE_ENABLED "$env_file") \
         || die "Cannot read AUTO_UPDATE_ENABLED from $env_file (exit $?)."
     if [[ "$desired" = "1" ]]; then
         out=$(systemctl enable --now "$AUTO_UPDATE_TIMER_UNIT" 2>&1) \
@@ -5060,10 +5062,10 @@ cmd_converge_reconcile() {
     ui_auto_update=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "AUTO_UPDATE_ENABLED") \
         || die "Cannot read the UI setting AUTO_UPDATE_ENABLED (exit $?)."
     if [[ "$ui_auto_update" = "0" || "$ui_auto_update" = "1" ]]; then
-        current_auto_update=$(get_env_var AUTO_UPDATE_ENABLED "$env_file") || exit $?
+        current_auto_update=$(env_or_sot_default AUTO_UPDATE_ENABLED "$env_file") || exit $?
         if [[ "$ui_auto_update" != "$current_auto_update" ]]; then
             set_env_key AUTO_UPDATE_ENABLED "$ui_auto_update" "$env_file"
-            print_ok "Scheduled automatic updates setting updated from Admin UI: ${ui_auto_update} (was ${current_auto_update:-0})"
+            print_ok "Scheduled automatic updates setting updated from Admin UI: ${ui_auto_update} (was ${current_auto_update})"
         fi
     fi
 
@@ -7120,7 +7122,7 @@ printf "  To restrict the UI to this host later, set UI_BIND_IP=%s in .env.\n\n"
 UI_AUTH_USER=""
 UI_AUTH_PASSWORD=""
 UI_AUTH_PASSWORD_HASH=""
-ALLOW_INSECURE_UI=$(prod_env_default ALLOW_INSECURE_UI) || exit $?
+ALLOW_INSECURE_UI=""
 if confirm "Protect Admin-UI with password? [Y/n]" "Y"; then
     ask "Username" "admin"
     UI_AUTH_USER="$REPLY"
