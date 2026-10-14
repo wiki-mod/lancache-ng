@@ -9992,25 +9992,21 @@ _ci_daemon_apply() {
 # Why: it stops every container, in-flight CI jobs included.
 # From: Issue #1255 | PR #1349
 _ci_daemon_restart() {
-    local file="$1" waited=0 driver want wait_max poll probe clog
+    local file="$1" driver want clog
     clog="$(_ci_rh_val cleanup_log)" || return 2
-    wait_max="$(_ci_variable CI_DAEMON_RESTART_WAIT)" || return 2
-    poll="$(_ci_variable CI_DAEMON_RESTART_POLL)" || return 2
     want="$(_ci_variable CI_DAEMON_LOG_DRIVER)" || return 2
     if [ "${CONFIRM_DOCKERD_RESTART:-}" != "yes" ]; then
         ci_log "[CI-ERROR-DAEMON-0004]" "reason=\"restart stops every container; set CONFIRM_DOCKERD_RESTART=yes\""
         return 1
     fi
     _ci_capture 0 systemctl restart docker || return 2
-    until probe="$(docker info 2>&1)"; do
-        waited=$((waited + poll))
-        if [ "${waited}" -ge "${wait_max}" ]; then
-            ci_error "[CI-ERROR-DAEMON-0005]" "wait=${wait_max} reason=\"dockerd not responsive after restart\"" "${probe}"
-            return 1
-        fi
-        sleep "${poll}"
-    done
-    driver="$(_ci_capture 0 docker info --format '{{.LoggingDriver}}')" || return 2
+    # What: one probe; restart returns once dockerd is up
+    # Why: docker.service is Type=notify; no guessed wait
+    # From: Issue #1683 | PR #1912
+    if ! driver="$(docker info --format '{{.LoggingDriver}}' 2>&1)"; then
+        ci_error "[CI-ERROR-DAEMON-0005]" "reason=\"dockerd not responsive after restart\"" "${driver}"
+        return 1
+    fi
     printf 'LoggingDriver (docker info): %s\n' "${driver}"
     if [ "${driver}" != "${want}" ]; then
         ci_log "[CI-WARN-DAEMON-0006]" "driver=\"${driver}\" want=\"${want}\" reason=\"LoggingDriver is not the SOT driver; check the host\""

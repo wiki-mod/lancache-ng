@@ -978,14 +978,6 @@ ci_variables:
   # From: Issue #1683 | PR #1912
   CI_RAW_GET_CONNECT_TIMEOUT: 10
   CI_RAW_GET_MAX_TIME: 30
-  # What: seconds to wait for dockerd after its restart.
-  # Why: AG-CI-006: a wait value has one owner.
-  # From: Issue #1683 | PR #1912
-  CI_DAEMON_RESTART_WAIT: 30
-  # What: seconds between dockerd probes after a restart.
-  # Why: AG-CI-006: a poll interval has one owner.
-  # From: Issue #1683 | PR #1912
-  CI_DAEMON_RESTART_POLL: 1
   # What: exactly true moves CI jobs to runner_self_hosted.
   # Why: GitHub-hosted is the default; a repo var switches.
   # From: Issue #1683 | PR #1912
