@@ -4027,6 +4027,24 @@ _ci_rust_build_cleanup() {
     exit 1
 }
 
+# What: log sccache requests, hits, misses of a build.
+# Why: AG-CI-011: required mode must prove real use.
+# From: Issue #1683 | PR #1912
+_ci_sccache_report() {
+    local stats req hits miss
+    stats="$(_ci_run "[CI-ERROR-CACHE-0012]" "reason=\"sccache stats not readable\"" sccache --show-stats)" || return 2
+    req="$(awk '$1 == "Compile" && $2 == "requests" && NF == 3 { print $3 }' <<< "${stats}")"
+    hits="$(awk '$1 == "Cache" && $2 == "hits" && NF == 3 { print $3 }' <<< "${stats}")"
+    miss="$(awk '$1 == "Cache" && $2 == "misses" && NF == 3 { print $3 }' <<< "${stats}")"
+    ci_log "[CI-INFO-CACHE-0013]" "mode=${_CI_SCCACHE_MODE} requests=${req:-none} hits=${hits:-none} misses=${miss:-none}"
+    [[ "${req}" =~ ^[1-9][0-9]*$ ]] && return 0
+    if [ "${_CI_SCCACHE_MODE}" = required ]; then
+        ci_error "[CI-ERROR-CACHE-0014]" "reason=\"required sccache saw no compile request; unused\"" "${stats}"
+        return 2
+    fi
+    ci_error "[CI-WARN-CACHE-0015]" "mode=${_CI_SCCACHE_MODE} reason=\"sccache saw no compile request\"" "${stats}"
+}
+
 # What: cargo build; drop one accelerator per outage.
 # Why: a real build error fails at once, never degrades.
 # From: Issue #1683 | PR #1912
@@ -4059,6 +4077,7 @@ _ci_rust_cargo_build() {
         if [ "${cargo_status}" -eq 0 ]; then
             rm -f "${cargo_log}"
             [ "${degraded}" -eq 0 ] || ci_log "[CI-INFO-RUSTBUILD-0009]" "reason=\"cargo build ok after an accelerator fallback\""
+            [ -z "${RUSTC_WRAPPER:-}" ] || _ci_sccache_report || return 2
             return 0
         fi
         if [ "$(_ci_classify_failure "$(cat "${cargo_log}")" accel)" != transient ]; then
