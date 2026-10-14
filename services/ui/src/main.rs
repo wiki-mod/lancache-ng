@@ -444,26 +444,23 @@ impl Config {
             .unwrap_or(self.cache_max_gb)
     }
 
-    // What: save the settings file with changed values.
-    // Why: one whole-file writer keeps other keys intact.
+    // What: save changed values; keep other saved keys.
+    // Why: no env value or SOT default enters the file.
+    // From: Issue #1683 | PR #1912
     fn save_settings(&self, changes: &[(&str, String)]) -> io::Result<()> {
         let mut content = String::new();
+        let file = Path::new(&self.ui_settings_file);
         let log_keys = config::LOG_SWITCHES.iter().map(|(key, _)| *key);
         for key in SETTING_KEYS.into_iter().chain(log_keys) {
             let value = match changes.iter().find(|(name, _)| *name == key) {
                 Some((_, value)) => value.clone(),
-                None => self.setting(key),
+                None => config::saved_setting(file, key).unwrap_or_default(),
             };
             if !value.trim().is_empty() {
                 content.push_str(&format!("{key}={}\n", value.trim()));
             }
         }
-        write_file(
-            Path::new(&self.ui_settings_file),
-            content.as_bytes(),
-            0o644,
-            Place::Replace,
-        )
+        write_file(file, content.as_bytes(), 0o644, Place::Replace)
     }
 }
 
@@ -6860,10 +6857,11 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // What: saving rewrites known keys, keeps the others.
-    // Why: one whole-file writer must not lose a setting.
+    // What: the file holds only keys saved in the ui.
+    // Why: an env value or SOT default must not enter it.
+    // From: Issue #1683 | PR #1912
     #[test]
-    fn save_settings_rewrites_the_whole_file() {
+    fn save_settings_keeps_only_saved_keys() {
         let dir = unique_temp_dir("save");
         let file = dir.join("ui.conf");
         let mut env = full_env();
@@ -6884,17 +6882,11 @@ mod tests {
         let saved = fs::read_to_string(&file).unwrap();
         let mode = fs::metadata(&file).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o644);
-        assert_eq!(
-            saved,
-            "DHCP_MODE=kea\nDHCP_DNS_PRIMARY=v-IP_HTTP\nDHCP_DNS_SECONDARY=v-IP_HTTPS\n\
-             LANCACHE_IMAGE_CHANNEL=latest\nAUTO_UPDATE_ENABLED=0\nNTP_ENABLED=1\n\
-             NTP_UPSTREAM_SERVERS=v-NTP_UPSTREAM_SERVERS\nNTP_AUTO_DHCP=0\nCACHE_MAX_GB=50\n\
-             LOGGING_PROXY_ENABLED=1\nLOGGING_DNS_ENABLED=1\nLOGGING_DHCP_ENABLED=1\nLOGGING_UI_ENABLED=1\n"
-        );
+        assert_eq!(saved, "DHCP_MODE=kea\nNTP_ENABLED=1\n");
         cfg.save_settings(&[("NTP_AUTO_DHCP", "1".to_string())])
             .unwrap();
         let again = fs::read_to_string(&file).unwrap();
-        assert!(again.contains("DHCP_MODE=kea\n") && again.contains("NTP_AUTO_DHCP=1\n"));
+        assert_eq!(again, "DHCP_MODE=kea\nNTP_ENABLED=1\nNTP_AUTO_DHCP=1\n");
         let _ = fs::remove_dir_all(&dir);
     }
 
