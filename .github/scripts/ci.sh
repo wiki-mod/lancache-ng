@@ -4068,7 +4068,10 @@ _ci_sccache_report() {
     req="$(awk '$1 == "Compile" && $2 == "requests" && NF == 3 { print $3 }' <<< "${stats}")"
     hits="$(awk '$1 == "Cache" && $2 == "hits" && NF == 3 { print $3 }' <<< "${stats}")"
     miss="$(awk '$1 == "Cache" && $2 == "misses" && NF == 3 { print $3 }' <<< "${stats}")"
-    ci_log "[CI-INFO-CACHE-0013]" "mode=${_CI_SCCACHE_MODE} requests=${req:-none} hits=${hits:-none} misses=${miss:-none}"
+    # What: the full stats follow the counts as raw.
+    # Why: hits=0 needs the error and non-cacheable rows.
+    # From: Issue #1683 | PR #1912
+    ci_error "[CI-INFO-CACHE-0013]" "mode=${_CI_SCCACHE_MODE} requests=${req:-none} hits=${hits:-none} misses=${miss:-none}" "${stats}"
     [[ "${req}" =~ ^[1-9][0-9]*$ ]] && return 0
     if [ "${_CI_SCCACHE_MODE}" = required ]; then
         ci_error "[CI-ERROR-CACHE-0014]" "reason=\"required sccache saw no compile request; unused\"" "${stats}"
