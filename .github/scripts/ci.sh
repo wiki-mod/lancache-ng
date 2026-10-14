@@ -840,7 +840,7 @@ _ci_path_content_changed() {
 ci_cmd_codeql_impact() {
     local -a changed=()
     _ci_collect_changed changed "$@" || return 2
-    local include='[]' lang p hit langs paths rc
+    local include='[]' lang p hit langs paths rc n
     langs="$(_ci_block_keys codeql_languages)" || return 2
     while IFS= read -r lang; do
         [ -n "${lang}" ] || continue
@@ -855,7 +855,8 @@ ci_cmd_codeql_impact() {
         [ "${hit}" = true ] && { include="$(_ci_matrix_append "${include}" language="${lang}")" || return 2; }
     done <<< "${langs}"
     printf 'codeql-matrix=%s\n' "$(_ci_matrix_doc "${include}")"
-    ci_log "[CI-INFO-CODEQL-0001]" "phase=codeql-impact langs=$(printf '%s' "${include}" | jq -r 'length') changed=${#changed[@]}"
+    n="$(_ci_capture 0 jq -r 'length' <<< "${include}")" || return 2
+    ci_log "[CI-INFO-CODEQL-0001]" "phase=codeql-impact langs=${n} changed=${#changed[@]}"
 }
 
 # What: print "key:" and each line as a quoted YAML item.
@@ -6429,7 +6430,7 @@ _ci_release_image_names() {
 # Why: the workflow attests each digest; no list in YAML.
 # From: Issue #1683 | PR #1912
 ci_cmd_release_images() {
-    local tag="${1:-}" base name names img dig include="[]"
+    local tag="${1:-}" base name names img dig n include="[]"
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0053]" "reason=\"tag arg required\""; return 2; }
     _ci_require_ghcr_auth || return "$?"
     base="$(_ci_image_ref)" || return 2
@@ -6441,7 +6442,8 @@ ci_cmd_release_images() {
         include="$(_ci_matrix_append "${include}" registry="${img%%/*}" name="${img}" digest="${dig}")" || return 2
     done <<< "${names}"
     _ci_step_output "[CI-ERROR-RELEASE-0054]" matrix "$(_ci_matrix_doc "${include}")" || return 2
-    printf 'release-images=%s tag=%s\n' "$(jq -r 'length' <<< "${include}")" "${tag}"
+    n="$(_ci_capture 0 jq -r 'length' <<< "${include}")" || return 2
+    printf 'release-images=%s tag=%s\n' "${n}" "${tag}"
 }
 
 # What: Render the marker-delimited image provenance block.
@@ -10604,19 +10606,40 @@ _ci_rh_stray_archives() {
     [ -z "${out}" ] || sort <<< "${out}"
 }
 
+# What: file match: rc 0 hit, 1 no hit, 2 unreadable.
+# Why: a tolerant wrapper rates "no hit" as a hit (grep 1).
+# From: Issue #1683 | PR #1912
+_ci_file_match() {
+    local id="$1" ctx="$2" file="$3" ere="$4" rc=0 err
+    err="$(_ci_mktemp "${CI_TMPDIR}/ci-match.XXXXXX")" || return 2
+    grep -qE -- "${ere}" "${file}" 2>"${err}" || rc=$?
+    if [ "${rc}" -gt 1 ]; then
+        ci_error "${id}" "${ctx} file=\"${file}\" rc=${rc}" "$(cat "${err}")"
+        rm -f "${err}"
+        return 2
+    fi
+    rm -f "${err}"
+    return "${rc}"
+}
+
 # What: runner units that run from one dir.
 # Why: a disk clone copies the source's enabled unit.
 # From: Issue #1622 | PR #1624
 _ci_rh_runner_units() {
-    local dir="$1" udir unit glob
+    local dir="$1" udir unit glob rc
     udir="$(_ci_rh_val unit_dir)" || return 2
     glob="$(_ci_rh_val runner_unit_glob)" || return 2
     [ -d "${udir}" ] || return 0
     for unit in "${udir}"/${glob}; do
         [ -e "${unit}" ] || continue
-        if _ci_run -m 1 "[CI-ERROR-RUNNER-0020]" "unit=\"${unit}\" reason=\"unit unreadable\"" grep -qE "^(WorkingDirectory|ExecStart)=${dir}(/|\$)" "${unit}"; then
-            printf '%s\n' "${unit##*/}"
-        fi
+        rc=0
+        _ci_file_match "[CI-ERROR-RUNNER-0020]" "dir=\"${dir}\" reason=\"unit unreadable\"" \
+            "${unit}" "^(WorkingDirectory|ExecStart)=${dir}(/|\$)" || rc=$?
+        case "${rc}" in
+            0) printf '%s\n' "${unit##*/}" ;;
+            1) ;;
+            *) return 2 ;;
+        esac
     done
 }
 
@@ -11113,7 +11136,7 @@ _ci_rh_pve_keep_ere() {
 # Why: review it before purge-pve removes a live stack.
 # From: Issue #1622 | PR #1624
 _ci_rh_purge_pve_check() {
-    local keep pkgs sim families units fstab pdir procs crons d open hits rss
+    local keep pkgs pkg_raw sim families units fstab pdir procs crons d open hits rss
     pdir="$(_ci_rh_val pve_config_dir)" || return 2
     procs="$(_ci_rh_ere pve_process_families)" || return 2
     crons="$(_ci_block_entry_list runner_host "" pve_cron_dirs)" || return 2
@@ -11121,7 +11144,11 @@ _ci_rh_purge_pve_check() {
     keep="$(_ci_rh_pve_keep_ere)" || return 2
     families="$(_ci_rh_ere pve_package_families)" || return 2
     units="$(_ci_rh_ere pve_unit_families)" || return 2
-    mapfile -t pkgs <<< "$(_ci_block_entry_list runner_host "" pve_packages)"
+    # What: the list is captured and checked, then split.
+    # Why: a lost read code purges with an empty name list.
+    # From: Issue #1683 | PR #1912
+    pkg_raw="$(_ci_required_field runner_host pve_packages blocklist)" || return 2
+    mapfile -t pkgs <<< "${pkg_raw}"
     printf -- '--- Installed packages of the PVE stack ---\n'
     dpkg -l | { grep -iE "^ii.*(${families})" || printf '  (none found; already clean)\n'; }
     printf '\n--- Kept regardless (kernel, firmware) ---\n'
@@ -11156,14 +11183,19 @@ _ci_rh_purge_pve_check() {
 # Why: a leftover stack from the template holds RAM and CPU.
 # From: Issue #1622 | PR #1624
 _ci_rh_purge_pve() {
-    local keep pkgs svcs sim rem procs bad families proc_families override dpkg_out ps_out
+    local keep pkgs pkg_raw svcs svc_raw sim rem procs bad families proc_families override dpkg_out ps_out
     _ci_rh_confirmed CONFIRM_PURGE_PVE || return 2
     keep="$(_ci_rh_pve_keep_ere)" || return 2
     families="$(_ci_rh_ere pve_package_families)" || return 2
     proc_families="$(_ci_rh_ere pve_process_families)" || return 2
     override="$(_ci_rh_val pve_apt_override)" || return 2
-    mapfile -t pkgs <<< "$(_ci_block_entry_list runner_host "" pve_packages)"
-    mapfile -t svcs <<< "$(_ci_block_entry_list runner_host "" pve_services)"
+    # What: both lists are captured, checked, then split.
+    # Why: a lost read code purges and stops empty names.
+    # From: Issue #1683 | PR #1912
+    pkg_raw="$(_ci_required_field runner_host pve_packages blocklist)" || return 2
+    svc_raw="$(_ci_required_field runner_host pve_services blocklist)" || return 2
+    mapfile -t pkgs <<< "${pkg_raw}"
+    mapfile -t svcs <<< "${svc_raw}"
     # What: re-simulate; refuse when a boot package is hit.
     # Why: the package set can drift as host images change.
     # From: Issue #1622 | PR #1624
