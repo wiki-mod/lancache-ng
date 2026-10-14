@@ -208,7 +208,7 @@ jobs:
           SERVICE: ${{ matrix.service }}
           PLATFORM: ${{ matrix.platform }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # What: every job reads the plan's id per pair.
+          # What: jobs that read ids use the plan's record.
           # Why: one run, one id; ci.sh fails on a gap.
           # From: Issue #1683 | PR #1912
           CI_RUN_IDENTITIES: &run_ids ${{ needs.plan.outputs.identities }}

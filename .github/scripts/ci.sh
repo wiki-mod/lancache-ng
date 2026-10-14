@@ -1125,8 +1125,7 @@ ci_cmd_plan_matrix() {
             # What: one id per pair, fixed once per run.
             # Why: a later index read can mint another.
             # From: Issue #1683 | PR #1912
-            pident="$(_ci_identity_for "${service}" "${platform}")" || return "$?"
-            _ci_plan_ids+=" ${service}@${platform}=${pident}"
+            _ci_plan_record "${service}" "${platform}" || return "$?"
             resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
             paction="$(_ci_record_field "${resolved}" action)" || return 2
             # What: MISMATCH state fails the plan
@@ -1168,11 +1167,17 @@ ci_cmd_plan_matrix() {
     local rust_validation=true
     rc=0; _ci_rust_validation_enabled || rc=$?
     case "${rc}" in 0) ;; 1) rust_validation=false ;; *) return 2 ;; esac
+    local promote=false validate ptargets t cand
+    ptargets="$(_ci_promote_targets_for_ref)" || return 2
+    # What: the run record covers every target pair.
+    # Why: promote check, validate, promote read all pairs.
+    # From: Issue #1683 | PR #1912
+    if [ "${any}" = true ] || [ -n "${ptargets}" ]; then
+        _ci_record_all || return "$?"
+    fi
     # What: promote a ref target not yet on the candidate
     # Why: §50 needs no build; §8: no retag when current
     # From: Issue #1683 | PR #1858
-    local promote=false validate ptargets t cand
-    ptargets="$(_ci_promote_targets_for_ref)" || return 2
     if [ -n "${ptargets}" ]; then
         promote=true
         if [ "${any}" = false ]; then
@@ -1191,20 +1196,6 @@ ci_cmd_plan_matrix() {
     fi
     validate="${any}"
     [ "${promote}" = false ] || validate=true
-    # What: the run record covers every target pair.
-    # Why: scan, validate, assemble read unbuilt pairs too.
-    # From: Issue #1683 | PR #1912
-    if [ "${validate}" = true ]; then
-        for service in ${targets}; do
-            plats="$(_ci_platforms "${service}")" || return "$?"
-            while IFS= read -r platform; do
-                [ -n "${platform}" ] || continue
-                [[ " ${_ci_plan_ids} " != *" ${service}@${platform}="* ]] || continue
-                pident="$(_ci_identity_for "${service}" "${platform}")" || return "$?"
-                _ci_plan_ids+=" ${service}@${platform}=${pident}"
-            done <<< "${plats}"
-        done
-    fi
     {
         printf 'any-build=%s\n' "${any}"
         printf 'promote=%s\n' "${promote}"
@@ -1804,7 +1795,7 @@ _ci_identity_sot() {
     printf 'build_type=%s\n%s\n' "${build_type}" "${pins}"
 }
 
-# What: print a pair's id from a run record, else rc 1.
+# What: pair id from a run record; rc 1 absent, 2 bad.
 # Why: one parser for the plan output and the plan itself.
 # From: Issue #1683 | PR #1912
 _ci_identity_recorded() {
@@ -1886,12 +1877,48 @@ _ci_identity_one() {
     printf 'platform=%s identity=%s\n' "$2" "${id}"
 }
 
+# What: add a pair's id to the run record once.
+# Why: one writer; a pair keeps its first id per run.
+# From: Issue #1683 | PR #1912
+_ci_plan_record() {
+    local id rc=0
+    id="$(_ci_identity_recorded "${_ci_plan_ids}" "$1" "$2")" || rc=$?
+    case "${rc}" in
+        0) return 0 ;;
+        1) ;;
+        *) return 2 ;;
+    esac
+    id="$(_ci_identity_for "$1" "$2")" || return "$?"
+    _ci_plan_ids+=" $1@$2=${id}"
+}
+
+# What: put every target pair into the run record.
+# Why: validate and promote read unbuilt pairs too.
+# From: Issue #1683 | PR #1912
+_ci_record_all() {
+    local targets service
+    targets="$(ci_build_targets)" || return 2
+    for service in ${targets}; do
+        _ci_for_platforms "${service}" "" "[CI-ERROR-IDENTITY-0017]" _ci_plan_record || return "$?"
+    done
+}
+
 # What: Print a target's id per platform, keyed.
 # Why: Default = all platforms; one selectable.
 # From: Issue #1683
 ci_cmd_identity() {
     local service="${1:-}" platform="${2:-}"
     [ -n "${service}" ] || { ci_log "[CI-ERROR-IDENTITY-0001]" "reason=\"service arg required\""; return 2; }
+    # What: --run-record outputs every pair's id once.
+    # Why: nightly jobs read it as ci.yml jobs read plan's.
+    # From: Issue #1683 | PR #1912
+    if [ "${service}" = --run-record ]; then
+        local _ci_plan_ids=""
+        _ci_record_all || return "$?"
+        _ci_step_output "[CI-ERROR-IDENTITY-0016]" identities "${_ci_plan_ids# }" || return 2
+        printf 'identities=%s\n' "${_ci_plan_ids# }"
+        return 0
+    fi
     _ci_for_platforms "${service}" "${platform}" "[CI-ERROR-IDENTITY-0002]" _ci_identity_one
 }
 

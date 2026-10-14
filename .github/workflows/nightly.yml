@@ -59,6 +59,7 @@ jobs:
       runner: ${{ steps.jobs.outputs.runner }}
       timeouts: ${{ steps.jobs.outputs.timeouts }}
       validate-dir: ${{ steps.jobs.outputs.validate-dir }}
+      identities: ${{ steps.ids.outputs.identities }}
     # What: one mutable entry: the current_dev channel.
     # Why: ci.sh needs a container before steps run
     # From: Issue #1683 | PR #1858
@@ -93,6 +94,12 @@ jobs:
       - name: Resolve the job settings
         id: jobs
         run: bash .github/scripts/ci.sh job-settings
+      # What: record each pair's id once for this run.
+      # Why: validate, promote, scan use one id per pair.
+      # From: Issue #1683 | PR #1912
+      - name: Record the run identities
+        id: ids
+        run: bash .github/scripts/ci.sh identity --run-record
 
   # What: validate full stack of accepted candidate
   # Why: AG-VAL-016; the shared dir keeps host paths.
@@ -118,6 +125,11 @@ jobs:
           SOURCE_COMMIT: ${{ needs.platform.outputs.commit }}
         run: bash .github/scripts/ci.sh channel-checkout nightly "${SOURCE_COMMIT}"
       - name: Validate the accepted stack candidate
+        env:
+          # What: the platform job's pair ids for this run.
+          # Why: a live re-read can differ; a gap fails.
+          # From: Issue #1683 | PR #1912
+          CI_RUN_IDENTITIES: &run_ids ${{ needs.platform.outputs.identities }}
         run: bash .github/scripts/ci.sh validate
 
   # What: audit Cargo.lock against new advisories
@@ -159,6 +171,7 @@ jobs:
         if: needs.validate.result == 'success'
         env:
           CI_STACK_VALIDATED: SUCCESS
+          CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh promote nightly
 
   # What: scan every channel image against new advisories
@@ -178,6 +191,8 @@ jobs:
       - *bootstrap
       - *channel_pin
       - name: Scan every channel image
+        env:
+          CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh scan-channel
 
   # What: report the nightly outcome to the tracking issues

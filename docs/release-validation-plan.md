@@ -517,8 +517,10 @@ recurrence:
 - **A scan of another image than the published digest**: `scan-stack` scans
   `_ci_published_digest`.
 - **Two jobs of one run computing two identities for one target and platform**
-  (live package indexes read again later): `plan-matrix` records each pair's
-  identity once; `_ci_identity_for` reads `CI_RUN_IDENTITIES` in later jobs.
+  (live package indexes read again later): `plan-matrix` (ci.yml) and
+  `identity --run-record` (nightly.yml) record each pair's identity once, before
+  any decision reads it; `_ci_identity_for` reads `CI_RUN_IDENTITIES` in later
+  jobs and fails closed on a pair missing from it.
 - **Case-sensitive repository-name comparison**: `_ci_repo` lowercases.
 - **Closing keywords read outside the linked-issues section**: `_ci_pr_section`.
 - **A Trivy finding, DB outage or scan error that no issue reports, or that one case
