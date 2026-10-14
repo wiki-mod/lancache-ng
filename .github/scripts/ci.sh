@@ -3717,19 +3717,35 @@ _ci_oci_labels() {
     printf 'org.opencontainers.image.base.digest=%s\n' "${base#*@}"
 }
 
-# What: adds ignore-error to a cache-to spec (§35).
-# Why: never corrupt a bare shorthand ref; warn instead.
-# From: Issue #1683
-_ci_cache_to_spec() {
-    local val="$1"
-    case "${val}" in
-        *ignore-error=*) printf '%s\n' "${val}" ;;
-        type=*) printf '%s,ignore-error=true\n' "${val}" ;;
-        *)
-            ci_log "[CI-WARN-BUILD-0012]" "value=\"${val}\" reason=\"shorthand cache-to has no ignore-error; use type=registry,ref=...\""
-            printf '%s\n' "${val}"
-            ;;
-    esac
+# What: registry layer cache ref of a target and arch.
+# Why: §35: one cache per service and arch; GC reads it.
+# From: Issue #1683 | PR #1912
+_ci_build_cache_ref() {
+    local name tag
+    name="$(_ci_image_ref "$1")" || return 2
+    tag="$(_ci_variable CI_BUILD_CACHE_TAG)" || return 2
+    printf '%s:%s-%s' "${name}" "${tag}" "${2##*/}"
+}
+
+# What: start a docker-container BuildKit for one build.
+# Why: the docker driver cannot export a cache (§35).
+# From: Issue #1683 | PR #1912
+_ci_buildx_start() {
+    local name="$1" img
+    img="$(_ci_block_entry_field base_images "" buildkit)" || return 2
+    if [ -z "${img}" ]; then
+        ci_log "[CI-ERROR-BUILD-0024]" "key=\"base_images.buildkit\" reason=\"no BuildKit pin in SOT\""
+        return 2
+    fi
+    _ci_retry buildx docker buildx create --name "${name}" --driver docker-container \
+        --driver-opt "image=${img}" --bootstrap >&2
+}
+
+# What: remove a builder and its state after the build.
+# Why: AG-CI-016: no container or volume outlives a job.
+# From: Issue #1683 | PR #1912
+_ci_buildx_stop() {
+    _ci_run "[CI-ERROR-BUILD-0025]" "builder=\"$1\" reason=\"BuildKit builder not removed\"" docker buildx rm "$1" >&2
 }
 
 # What: NAME=value of the set variables of one SOT list.
@@ -3857,22 +3873,31 @@ _ci_docker_build() {
     while IFS= read -r line; do
         [ -n "${line}" ] && args+=(--secret "${line#--secret }")
     done <<< "${rt}"
-    # What: per-service registry cache-from/to (§35).
-    # Why: caller scopes ref per service; a miss is fine.
-    # From: Issue #1683
-    [ -n "${CI_BUILD_CACHE_FROM:-}" ] && args+=(--cache-from "${CI_BUILD_CACHE_FROM}")
-    [ -n "${CI_BUILD_CACHE_TO:-}" ] && args+=(--cache-to "$(_ci_cache_to_spec "${CI_BUILD_CACHE_TO}")")
+    # What: registry layer cache, always read (§35).
+    # Why: one writer: only non-PR runs export layers.
+    # From: Issue #1683 | PR #1912
+    local cref builder
+    cref="$(_ci_build_cache_ref "${service}" "${platform}")" || { _ci_clear_runtime >&2; return 2; }
+    args+=(--cache-from "type=registry,ref=${cref}")
+    case "${GITHUB_EVENT_NAME:-}" in
+        ''|pull_request) ;;
+        *) args+=(--cache-to "type=registry,ref=${cref},mode=max,ignore-error=true") ;;
+    esac
+    builder="$(_ci_variable CI_BUILDX_BUILDER)-$$" || { _ci_clear_runtime >&2; return 2; }
+    _ci_buildx_start "${builder}" || { _ci_clear_runtime >&2; return 2; }
     # What: retry buildx and capture its output once.
     # Why: ci_error already shows raw; avoid double output.
     # From: Issue #1683
-    local buildlog rc=0 crc=0
-    buildlog="$(_ci_retry buildx docker buildx build --load --platform "${platform}" --tag "${tag}" "${args[@]}" "${context}")" || rc=$?
+    local buildlog rc=0 crc=0 brc=0
+    buildlog="$(_ci_retry buildx docker buildx build --builder "${builder}" --load --platform "${platform}" --tag "${tag}" "${args[@]}" "${context}")" || rc=$?
+    _ci_buildx_stop "${builder}" || brc=$?
     _ci_clear_runtime >&2 || crc=$?
     if [ "${rc}" -ne 0 ]; then
         ci_log "[CI-ERROR-BUILD-0019]" "service=\"${service}\" platform=\"${platform}\" tag=\"${tag}\" context=\"${context}\" rc=${rc} reason=\"docker buildx build failed (raw above)\""
         return "${rc}"
     fi
     [ "${crc}" -eq 0 ] || return 2
+    [ "${brc}" -eq 0 ] || return 2
     printf '%s\n' "${buildlog}" >&2
     printf '%s\n' "${tag}"
 }
@@ -6825,6 +6850,19 @@ _ci_gc_roots() {
             [ "${prc}" -eq 2 ] && { ci_log "[CI-ERROR-GC-0013]" "service=\"${svc}\" channel=\"${channel}\" reason=\"channel probe UNKNOWN; refusing roots\""; return 2; }
             [ "${prc}" -eq 0 ] && pairs="${pairs}"$'\n'"${svc}"$'\t'"${dig}"
         done <<<"${produced}"
+        # What: each layer cache tag of a target is a root.
+        # Why: §35 cache is live; §77 owns its separate GC.
+        # From: Issue #1683 | PR #1912
+        local plats plat cref
+        plats="$(_ci_platforms "${svc}")" || return 2
+        while IFS= read -r plat; do
+            [ -n "${plat}" ] || continue
+            cref="$(_ci_build_cache_ref "${svc}" "${plat}")" || return 2
+            prc=0
+            dig="$(_ci_registry_probe "${cref}")" || prc=$?
+            [ "${prc}" -eq 2 ] && { ci_log "[CI-ERROR-GC-0035]" "ref=\"${cref}\" reason=\"cache probe UNKNOWN; refusing roots\""; return 2; }
+            [ "${prc}" -eq 0 ] && pairs="${pairs}"$'\n'"${svc}"$'\t'"${dig}"
+        done <<<"${plats}"
     done <<<"${targets}"
     pairs="$(printf '%s\n' "${pairs}" | awk 'NF>0' | LC_ALL=C sort -u)"
     while IFS=$'\t' read -r s d; do

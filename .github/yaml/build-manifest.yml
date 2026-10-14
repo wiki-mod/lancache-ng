@@ -383,6 +383,10 @@ build_toolchain:
 # From: Issue #1683
 base_images:
   alpine: "mirror.gcr.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6"
+  # What: BuildKit daemon image of the image builds.
+  # Why: §35 cache export needs a docker-container builder.
+  # From: Issue #1683 | PR #1912
+  buildkit: "mirror.gcr.io/moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea"
 
 # What: pinned external actions: uses, commit SHA, tag.
 # Why: uses: reads no SOT; ci.sh checks each workflow pin.
@@ -1108,6 +1112,14 @@ ci_variables:
   CI_LEDGER_REF: refs/ci/acceptance/ledger
   CI_LEDGER_FILE: records
   CI_GIT_REMOTE: origin
+  # What: layer cache tag stem; ci.sh appends -<arch>.
+  # Why: §35: one registry cache per service and arch.
+  # From: Issue #1683 | PR #1912
+  CI_BUILD_CACHE_TAG: buildcache
+  # What: name stem of the per-build BuildKit builder.
+  # Why: ci.sh appends the shell pid; one owner of the name.
+  # From: Issue #1683 | PR #1912
+  CI_BUILDX_BUILDER: lancache-ci
   # What: installer tries; poll secs of every lock wait.
   # Why: AG-CI-006: lock timing has one owner.
   # From: Issue #1683 | PR #1858
