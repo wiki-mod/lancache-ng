@@ -105,6 +105,11 @@ jobs:
     container:
       image: ${{ needs.platform.outputs.image }}
       credentials: *ghcr_credentials
+      # What: the build-tools ref this job runs in.
+      # Why: ids and Rust builds read the platform resolve.
+      # From: Issue #1683 | PR #1912
+      env:
+        CI_BUILD_TOOLS_IMAGE: ${{ needs.platform.outputs.image }}
     outputs:
       identities: ${{ steps.plan.outputs.identities }}
       matrix: ${{ steps.plan.outputs.matrix }}
@@ -153,6 +158,11 @@ jobs:
     container:
       image: ${{ needs.platform.outputs.image }}
       credentials: *ghcr_credentials
+      # What: the build-tools ref this job runs in.
+      # Why: ids and Rust builds read the platform resolve.
+      # From: Issue #1683 | PR #1912
+      env:
+        CI_BUILD_TOOLS_IMAGE: ${{ needs.platform.outputs.image }}
     # What: cache secrets the build's set-runtime needs.
     # Why: secrets never reach ci.sh through CI_VARIABLES.
     # From: Issue #1683 | PR #1912

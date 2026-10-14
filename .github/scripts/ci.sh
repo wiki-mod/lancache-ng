@@ -1700,7 +1700,7 @@ _ci_service_smoke() {
 # Why: SOT names the inputs; the build must match the id.
 # From: Issue #1683 | PR #1858
 _ci_identity_pins() {
-    local service="$1" build_type="$2" platform="$3" inputs input
+    local service="$1" build_type="$2" platform="$3" inputs input tref
     inputs="$(_ci_block_entry_list build_identity "${build_type}" inputs)" || return 2
     if [ -z "${inputs}" ]; then
         ci_log "[CI-ERROR-IDENTITY-0004]" "build_type=\"${build_type}\" reason=\"no SOT build_identity inputs; FAIL CLOSED\""
@@ -1711,7 +1711,14 @@ _ci_identity_pins() {
         case "${input}" in
             source_sha) : ;;
             build_variables) _ci_build_variable_args "${build_type}" || return 2 ;;
-            toolchain_digest|toolchain_source_sha) _ci_build_tools_signature || return 2 ;;
+            toolchain_source_sha) _ci_build_tools_signature || return 2 ;;
+            toolchain_digest)
+                # What: digest of the build-tools image run.
+                # Why: §16/§17: id names the compiler.
+                # From: Issue #1683 | PR #1912
+                tref="$(_ci_build_tools_run_image)" || return 2
+                printf '%s\n' "${tref##*@}"
+                ;;
             base_digest)
                 if [ "${build_type}" = toolchain ]; then
                     _ci_build_tools_build_args --bare || return 2
@@ -9332,11 +9339,11 @@ _ci_service_build_args() {
     local own_type
     own_type="$(_ci_block_entry_field services "${service}" build_type)" || return 2
     if [ "${own_type}" = rust ]; then
-        # What: identity omits the registry-resolved ref.
-        # Why: toolchain_digest keys it; no network in id.
-        # From: Issue #1683 | PR #1858
+        # What: identity omits the ref; it keys the digest.
+        # Why: toolchain_digest is this ref's digest.
+        # From: Issue #1683 | PR #1912
         if [ "${with_toolchain}" = yes ]; then
-            val="$(_ci_build_tools_resolve_image)" || return 2
+            val="$(_ci_build_tools_run_image)" || return 2
             [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0009]" "arg=\"${CI_ARG_TOOLCHAIN_IMAGE}\" service=\"${service}\" reason=\"empty resolved build-tools image; FAIL CLOSED\""; return 2; }
             out="${out}${prefix}${CI_ARG_TOOLCHAIN_IMAGE}=${val}"$'\n'
         fi
@@ -9587,6 +9594,19 @@ _ci_build_tools_resolve_image() {
     image="${image}@${digest}"
     _ci_step_output "[CI-ERROR-BUILDTOOLS-0023]" image "${image}" || return 2
     printf '%s\n' "${image}"
+}
+
+# What: the build-tools ref the platform job resolved.
+# Why: one resolver per run; ids and builds read it.
+# From: Issue #1683 | PR #1912
+_ci_build_tools_run_image() {
+    local ref="${CI_BUILD_TOOLS_IMAGE:-}" image
+    image="$(_ci_build_tools_image)" || return 2
+    if [[ "${ref}" != "${image}@sha256:"* ]] || [[ ! "${ref##*@sha256:}" =~ ^[0-9a-f]{64}$ ]]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0026]" "got=\"${ref}\" want=\"${image}@sha256:<64 hex>\" reason=\"CI_BUILD_TOOLS_IMAGE unset or no digest ref; FAIL CLOSED\""
+        return 2
+    fi
+    printf '%s\n' "${ref}"
 }
 
 # What: build-tools lifecycle helpers for the workflow.
