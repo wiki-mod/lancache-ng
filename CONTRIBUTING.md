@@ -332,7 +332,7 @@ For shell scripts, run the checks inside the build-tools container:
 ```bash
 BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
-  bash -lc 'set -euo pipefail; find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning'
+  bash -lc 'set -euo pipefail; find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --norc'
 ```
 
 For Compose changes, you can validate locally (this does not depend on build-tools):

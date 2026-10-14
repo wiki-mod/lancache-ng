@@ -102,7 +102,7 @@ ask() {
         wizard_introspect_record_prompt "$prompt" "$default"
         return
     fi
-    printf "  ${BOLD}%s${RESET} [%s]: " "$prompt" "$default"
+    printf '  %s%s%s [%s]: ' "${BOLD}" "$prompt" "${RESET}" "$default"
     read -r REPLY < /dev/tty
     REPLY="${REPLY:-$default}"
 }
@@ -207,7 +207,7 @@ is_valid_dhcp_proxy_boot_filename() {
     # What: rejects newline and shell or .env metachars
     # Why: a later .env write fails after earlier steps ran
     case "$filename" in
-        *$'\n'* | *'$'* | *'`'* | *'"'* | *"'"* | *'\'* | *'#'* )
+        *$'\n'* | *'$'* | *'`'* | *'"'* | *"'"* | *\\* | *'#'* )
             return 1
             ;;
     esac
@@ -1186,7 +1186,7 @@ validate_env_value() {
     # What: rejects newline and shell or .env metachars
     # Why: Compose .env parsing would change the value
     case "$value" in
-        *$'\n'* | *'$'* | *'`'* | *'"'* | *"'"* | *'\'* | *'#'* )
+        *$'\n'* | *'$'* | *'`'* | *'"'* | *"'"* | *\\* | *'#'* )
             die "$key contains unsafe characters for .env. Cannot proceed. Value: $value"
             ;;
     esac
@@ -1692,9 +1692,9 @@ prod_state_subdir() {
     refs=$(sort -u <<< "$refs")
     [[ "$refs" =~ ^\$\{SOT_[A-Z0-9_]+$ ]] \
         || die "$PROD_COMPOSE gives no single default directory for $key: ${refs//$'\n'/ }"
-    sub=$(prod_env_default "${refs#'${SOT_'}") || exit $?
+    sub=$(prod_env_default "${refs#"\${SOT_"}") || exit $?
     [[ "$sub" =~ ^[a-z0-9-]+$ ]] \
-        || die "The SOT default of ${refs#'${'} is no directory name: $sub"
+        || die "The SOT default of ${refs#"\${"} is no directory name: $sub"
     printf '%s\n' "$sub"
 }
 
@@ -1765,7 +1765,8 @@ migrate_legacy_ca() {
     # What: the source goes only after a good update
     # Why: a rollback to the old checkout still mounts it
     [[ "$remove" = 1 ]] || return 0
-    rm -f -- "$src/ca."* && rmdir --ignore-fail-on-non-empty -- "$src" \
+    rm -f -- "$src/ca."* || die "Failed to remove the legacy CA in $src (exit $?)."
+    rmdir --ignore-fail-on-non-empty -- "$src" \
         || die "Failed to remove the legacy CA in $src (exit $?)."
     print_ok "CA moved from $src to $dest"
 }
@@ -1892,7 +1893,7 @@ migrate_quickstart_install() (
     _UPDATE_ENV_FILE="$env_local" _UPDATE_STACK_DIR="$stack_dir"
     validate_compose_config "$stack_dir"
     local apply_rc=0
-    apply_stack_update_ordered "$stack_dir" rollback_quickstart_migration "$old_dir" "$record" || apply_rc=$?
+    apply_stack_update_ordered "$stack_dir" rollback_quickstart_migration "$old_dir" "$record" "$stack_dir" "$env_local" || apply_rc=$?
     if [[ "$apply_rc" -eq 2 ]]; then
         trap - EXIT
         UPDATE_CONVERGENCE_COMPLETED=1
@@ -1922,9 +1923,9 @@ migrate_quickstart_install() (
 # Why: a failed migration must leave the old install running
 # From: Issue #1683 | PR #1858
 rollback_quickstart_migration() {
-    local old_dir="$1" record="$2" stamp copies dir
+    local old_dir="$1" record="$2" stack_dir="$3" env_file="$4" stamp copies dir
     print_warn "Rolling back the migration; restarting the quickstart stack in $old_dir"
-    stack_compose "$_UPDATE_STACK_DIR" "$_UPDATE_ENV_FILE" stop \
+    stack_compose "$stack_dir" "$env_file" stop \
         || { print_error "Failed to stop the migrated stack (exit $?). Manual recovery required."; return 1; }
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
     copies=$(awk -F'|' '$1 == "rolledback" { delete c } $1 == "copied" { c[$3] = 1 } END { for (d in c) print d }' "$record") \
@@ -2987,7 +2988,7 @@ lancache_channel_image_refs() {
     buildx_out=$(docker buildx version 2>&1) \
         || die "docker buildx is required to resolve LANCACHE_IMAGE_CHANNEL=${channel} (exit $?: ${buildx_out}). Install the ${DOCKER_BUILDX_PLUGIN} package, then rerun setup.sh."
 
-    printf "\n${BOLD}${CYAN}▶ Resolving image channel %s${RESET}\n" "$channel" >&2
+    printf '\n%s%s▶ Resolving image channel %s%s\n' "${BOLD}" "${CYAN}" "$channel" "${RESET}" >&2
     while [[ "$n" -le "$max" ]]; do
         reason="promote lock ${lock_ref} is held"
         if ! lancache_promote_lock_held "$lock_ref"; then
@@ -3150,6 +3151,20 @@ resolve_lancache_image_tag() {
     printf '%s\n' "$tag"
 }
 
+# What: puts the .env snapshot back unless the run finished
+# Why: EXIT trap of migrate_env_for_update
+# From: Issue #1683 | PR #1912
+migrate_env_restore() {
+    if [[ "$migrate_done" != 1 && "$migrate_snapshot_ok" = 1 ]]; then
+        write_file_atomically "$migrate_target" < "$migrate_snapshot" || {
+            print_error "Could not restore $migrate_target; its snapshot stays at $migrate_snapshot."
+            return
+        }
+        print_warn "Restored $migrate_target to its state before the update"
+    fi
+    rm -f -- "$migrate_snapshot" || print_error "Failed to remove the snapshot $migrate_snapshot (exit $?)."
+}
+
 # What: adds missing keys and normalizes legacy .env state
 # Why: updates must be idempotent and keep operator secrets
 migrate_env_for_update() (
@@ -3177,16 +3192,6 @@ migrate_env_for_update() (
     # Why: no failed check may leave .env half-written
     # From: Issue #1683 | PR #1858
     migrate_target="$env_file" migrate_done=0 migrate_snapshot_ok=0
-    migrate_env_restore() {
-        if [[ "$migrate_done" != 1 && "$migrate_snapshot_ok" = 1 ]]; then
-            write_file_atomically "$migrate_target" < "$migrate_snapshot" || {
-                print_error "Could not restore $migrate_target; its snapshot stays at $migrate_snapshot."
-                return
-            }
-            print_warn "Restored $migrate_target to its state before the update"
-        fi
-        rm -f -- "$migrate_snapshot" || print_error "Failed to remove the snapshot $migrate_snapshot (exit $?)."
-    }
     migrate_snapshot=$(mktemp "$(dirname "$env_file")/.$(basename "$env_file").before.XXXXXX") \
         || die "Cannot snapshot $env_file before the update (exit $?)."
     trap migrate_env_restore EXIT
@@ -3816,12 +3821,10 @@ guard_restore_shared_project_volumes() {
         working_dir=$(realpath -m "$working_dir")
         if [[ "$working_dir" != "$install_dir" ]]; then
             die "Refusing to restore: compose project '$project' still has containers at $working_dir, which is not the restore target ($install_dir). Both installs share the same Docker-managed volumes because the compose project name is not per-install-dir (see #669). Remove the other install's containers first (cd \"$working_dir\" && docker compose down), or restore into $working_dir instead."
-            return 1
         fi
     done <<< "$containers"
     if [[ "$install_dir" != "$archived_install_dir" ]] && compose_project_has_named_volumes "$project"; then
         die "Refusing to restore: compose project '$project' still has named Docker volumes on this host, but the backup is being restored into a different install directory ($install_dir instead of $archived_install_dir). After docker compose down, Docker keeps the project label on the volumes but no longer retains a reliable install-dir owner marker, so same-host cross-directory restore would be ownership-ambiguous. Restore into $archived_install_dir instead, or remove the existing '$project' volumes first if they are no longer needed."
-        return 1
     fi
 }
 
@@ -4471,7 +4474,7 @@ require_functional_check_tool() {
 # From: Issue #1683 | PR #1858
 _tcp_port_reachable() {
     local ip="$1" port="$2" err rc=0
-    err=$(timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$ip" "$port" 2>&1) || rc=$?
+    err=$(timeout 5 bash -c "exec 3<>\"/dev/tcp/\$1/\$2\"" _ "$ip" "$port" 2>&1) || rc=$?
     if [[ "$rc" -ne 0 ]]; then
         printf 'TCP connect to %s:%s failed (exit %s): %s\n' "$ip" "$port" "$rc" "$err" >&2
         return 1
@@ -5140,7 +5143,7 @@ cmd_debug() {
     if services=$(stack_compose "$install_dir" "$env_file" config --services); then
         while IFS= read -r svc; do
             [[ -n "$svc" ]] || continue
-            printf "\n${BOLD}--- %s ---${RESET}\n" "$svc"
+            printf '\n%s--- %s ---%s\n' "${BOLD}" "$svc" "${RESET}"
             stack_compose "$install_dir" "$env_file" logs --tail=30 "$svc" 2>&1 \
                 || print_error "Logs of $svc failed (exit $?)."
         done <<< "$services"
@@ -5530,7 +5533,7 @@ EOF
 
     logbundle_cleanup
     print_ok "Diagnostic bundle written: $archive"
-    printf "\n${BOLD}Attach this file to your GitHub issue:${RESET} %s\n\n" "$archive"
+    printf '\n%sAttach this file to your GitHub issue:%s %s\n\n' "${BOLD}" "${RESET}" "$archive"
 )
 
 # ── reset-to-last-known-good-config subcommand ────────────────────────────────
@@ -5673,7 +5676,7 @@ kea_snapshot_host_dir() {
     local install_dir="$1" env_file="$2" kea_dir="$3" snapshot_dir target
     snapshot_dir=$(prod_env_default KEA_CONFIG_SNAPSHOT_DIR) || exit $?
     target=$(compose_config_value "$install_dir" "$env_file" \
-        '[.services.ui.volumes[]? | select(.source == $src) | .target] | first' --arg src "$kea_dir") || exit $?
+        "[.services.ui.volumes[]? | select(.source == \$src) | .target] | first" --arg src "$kea_dir") || exit $?
     [[ -n "$target" ]] || die "The ui service of $install_dir does not mount $kea_dir."
     case "$snapshot_dir" in
         "$target"/*) printf '%s/%s\n' "$kea_dir" "${snapshot_dir#"$target"/}" ;;
@@ -5789,7 +5792,7 @@ list_dns_zones_with_snapshots() {
 # Why: the listener's order; one line per mapfile entry
 # From: Issue #1683 | PR #1858
 dns_zone_snapshot_entries() {
-    json_value '.zones[$zone][]? | "\(.id) \(.created_unix)"' "$1" --arg zone "$2"
+    json_value ".zones[\$zone][]? | \"\(.id) \(.created_unix)\"" "$1" --arg zone "$2"
 }
 
 # What: runs one listener request inside the DNS container
@@ -5806,7 +5809,8 @@ dns_rollback_exec() (
     # From: Issue #1683 | PR #1858
     trap 'rm -f -- "$err_file"' EXIT
 
-    stdout_val=$(stack_compose "$install_dir" "$env_file" -p "$project" exec -T "$container" sh -c '
+    local exec_script
+    exec_script=$(cat <<'SCRIPT'
             key="$PDNS_API_KEY"
             case "$key" in
                 ""|CHANGE_ME*|changeme*|change_me*|YOUR_*|*_HERE) key="" ;;
@@ -5830,7 +5834,9 @@ dns_rollback_exec() (
                 curl -sS -w "\n%{http_code}" \
                     -H "X-API-Key: $key" "http://$lo:$port$p" || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
             fi
-        ' sh "$method" "$path" "$body" 2>"$err_file") || rc=$?
+SCRIPT
+    ) || die "Cannot build the listener request script (exit $?)."
+    stdout_val=$(stack_compose "$install_dir" "$env_file" -p "$project" exec -T "$container" sh -c "$exec_script" sh "$method" "$path" "$body" 2>"$err_file") || rc=$?
     exec_err=$(cat "$err_file") || die "Cannot read $err_file (exit $?)."
 
     if [[ $rc -ne 0 ]]; then
@@ -5968,9 +5974,9 @@ cmd_update_ip() {
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
 
     printf "\n"
-    printf "${BOLD}╔═══════════════════════════════════════╗${RESET}\n"
-    printf "${BOLD}║  LanCache-NG — Reconfigure IPs        ║${RESET}\n"
-    printf "${BOLD}╚═══════════════════════════════════════╝${RESET}\n"
+    printf '%s╔═══════════════════════════════════════╗%s\n' "${BOLD}" "${RESET}"
+    printf '%s║  LanCache-NG — Reconfigure IPs        ║%s\n' "${BOLD}" "${RESET}"
+    printf '%s╚═══════════════════════════════════════╝%s\n' "${BOLD}" "${RESET}"
     printf "\n"
 
     [[ "$(id -u)" = "0" ]] \
@@ -6002,7 +6008,7 @@ cmd_update_ip() {
     current_dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$deploy_env") || exit $?
     current_dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$deploy_env") || exit $?
 
-    printf "\n  ${BOLD}Current configuration:${RESET}\n"
+    printf '\n  %sCurrent configuration:%s\n' "${BOLD}" "${RESET}"
     printf "    HTTP IP:     %s\n" "$current_ip_http"
     printf "    HTTPS IP:    %s\n" "$current_ip_https"
     printf "\n"
@@ -6027,7 +6033,7 @@ cmd_update_ip() {
     require_separate_lan_ips "$new_ip_http" "$new_ip_https"
 
     printf "\n"
-    printf "  ${BOLD}New configuration:${RESET}\n"
+    printf '  %sNew configuration:%s\n' "${BOLD}" "${RESET}"
     printf "    HTTP IP:     %s\n" "$new_ip_http"
     printf "    HTTPS IP:    %s\n" "$new_ip_https"
     printf "\n"
@@ -6072,13 +6078,11 @@ cmd_update_ip() {
     fi
 
     printf "\n"
-    printf "${BOLD}${GREEN}════════════════════════════════════════${RESET}\n"
-    printf "${BOLD}${GREEN}  Reconfiguration complete!${RESET}\n"
-    printf "${BOLD}${GREEN}════════════════════════════════════════${RESET}\n"
+    printf '%s%s════════════════════════════════════════%s\n' "${BOLD}" "${GREEN}" "${RESET}"
+    printf '%s%s  Reconfiguration complete!%s\n' "${BOLD}" "${GREEN}" "${RESET}"
+    printf '%s%s════════════════════════════════════════%s\n' "${BOLD}" "${GREEN}" "${RESET}"
     printf "\n"
     printf "  Done. Update your clients to use the new DNS IP.\n\n"
-
-    exit 0
 }
 
 # What: a repo file's text: checkout or the same ref
@@ -6562,9 +6566,9 @@ esac
 # Why: prompt, write config once, then start containers
 
 printf "\n"
-printf "${BOLD}╔══════════════════════════════════════════╗${RESET}\n"
-printf "${BOLD}║      LanCache-NG — Initial Setup        ║${RESET}\n"
-printf "${BOLD}╚══════════════════════════════════════════╝${RESET}\n"
+printf '%s╔══════════════════════════════════════════╗%s\n' "${BOLD}" "${RESET}"
+printf '%s║      LanCache-NG — Initial Setup        ║%s\n' "${BOLD}" "${RESET}"
+printf '%s╚══════════════════════════════════════════╝%s\n' "${BOLD}" "${RESET}"
 printf "\n"
 printf "  This script sets up LanCache-NG and starts all containers.\n"
 printf "  After: ./setup.sh update  |  ./setup.sh debug  |  ./setup.sh update-ip\n"
@@ -6646,7 +6650,7 @@ while true; do
 done
 
 printf "\n"
-printf "  ${BOLD}Second LAN IP${RESET}: the HTTPS DNS/proxy address, always required.\n\n"
+printf '  %sSecond LAN IP%s: the HTTPS DNS/proxy address, always required.\n\n' "${BOLD}" "${RESET}"
 # What: the second LAN address is always asked and checked
 # Why: AG-SETUP-001; prod runs dns-https on IP_HTTPS always
 # From: Issue #1683 | PR #1912
@@ -6697,7 +6701,7 @@ else
 fi
 
 printf "\n"
-printf "  ${BOLD}HTTPS mode${RESET}: also caches HTTPS downloads (Epic, EA, Blizzard…)\n"
+printf '  %sHTTPS mode%s: also caches HTTPS downloads (Epic, EA, Blizzard…)\n' "${BOLD}" "${RESET}"
 printf "  Requires a CA certificate on clients.\n\n"
 https_yn=$(yn_default HTTPS_ENABLED) || exit $?
 ask "Enable HTTPS mode? $(yn_hint "$https_yn")" "$https_yn"
@@ -7167,8 +7171,8 @@ if confirm "Protect Admin-UI with password? [Y/n]" "Y"; then
         UI_AUTH_PASSWORD=$(generate_managed_secret UI_AUTH_PASSWORD ui) || exit $?
         printf "\n"
         print_ok "Credentials:"
-        printf "    User:     ${BOLD}%s${RESET}\n" "$UI_AUTH_USER"
-        printf "    Password: ${BOLD}%s${RESET}\n" "$UI_AUTH_PASSWORD"
+        printf '    User:     %s%s%s\n' "${BOLD}" "$UI_AUTH_USER" "${RESET}"
+        printf '    Password: %s%s%s\n' "${BOLD}" "$UI_AUTH_PASSWORD" "${RESET}"
         print_warn "Note the password now; only its hash is stored in $ENV_LOCAL"
         printf "\n"
     fi
@@ -7300,14 +7304,14 @@ NTP_ENABLED=${NTP_ENABLED}
 NTP_DATA_DIR=${NTP_DATA_DIR}
 
 # Kea Control Agent/API token shared by DHCP and Admin UI. Keep secret.
-KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
+KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN?}
 
 # Shared TSIG key for Kea DDNS → PowerDNS updates. Keep secret.
-DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
+DDNS_TSIG_KEY=${DDNS_TSIG_KEY?}
 
 # ── PowerDNS API ───────────────────────────────────────────────────────────────
 # API key for PowerDNS Authoritative + Recursor (generated, do not change)
-PDNS_API_KEY=${PDNS_API_KEY}
+PDNS_API_KEY=${PDNS_API_KEY?}
 
 # ── Netdata alarm forwarding ────────────────────────────────────────────────────
 # Shared token for Netdata's alarm-notify.sh to authenticate to the Admin
@@ -7421,9 +7425,9 @@ fi # WIZARD_INTROSPECT_MODE guard opened before "Writing .env" above
 
 # ── 12. Summary and confirmation ──────────────────────────────────────────────
 printf "\n"
-printf "${BOLD}┌──────────────────────────────────────────────┐${RESET}\n"
-printf "${BOLD}│              Configuration                   │${RESET}\n"
-printf "${BOLD}├──────────────────────────────────────────────┤${RESET}\n"
+printf '%s┌──────────────────────────────────────────────┐%s\n' "${BOLD}" "${RESET}"
+printf '%s│              Configuration                   │%s\n' "${BOLD}" "${RESET}"
+printf '%s├──────────────────────────────────────────────┤%s\n' "${BOLD}" "${RESET}"
 printf "  %-26s %s\n"    "HTTP IP:"                  "$IP_HTTP"
 if [[ "$HTTPS_ENABLED" = "1" ]]; then
     printf "  %-26s %s\n" "HTTPS IP:"                "$IP_HTTPS"
@@ -7475,7 +7479,7 @@ else
         printf "  %-26s %s\n" "Admin-UI auth:"           "disabled"
     fi
 fi
-printf "${BOLD}└──────────────────────────────────────────────┘${RESET}\n\n"
+printf '%s└──────────────────────────────────────────────┘%s\n\n' "${BOLD}" "${RESET}"
 
 ask "Start now? [Y/n]" "Y"
 # What: skips the real start when introspection mode is on
@@ -7530,30 +7534,30 @@ if [[ "$ui_url_rc" -ne 0 || -z "$ui_url" ]]; then
     ui_url="(see the ui ports in $INSTALL_DIR/docker-compose.yml)"
 fi
 printf "\n"
-printf "${BOLD}${GREEN}══════════════════════════════════════════════════${RESET}\n"
-printf "${BOLD}${GREEN}  LanCache-NG is running!${RESET}\n"
-printf "${BOLD}${GREEN}══════════════════════════════════════════════════${RESET}\n"
+printf '%s%s══════════════════════════════════════════════════%s\n' "${BOLD}" "${GREEN}" "${RESET}"
+printf '%s%s  LanCache-NG is running!%s\n' "${BOLD}" "${GREEN}" "${RESET}"
+printf '%s%s══════════════════════════════════════════════════%s\n' "${BOLD}" "${GREEN}" "${RESET}"
 printf "\n"
 if [[ -n "$UI_AUTH_USER" ]]; then
-    printf "  ${BOLD}Admin-UI:${RESET}    %s  (User: %s)\n" "$ui_url" "$UI_AUTH_USER"
+    printf '  %sAdmin-UI:%s    %s  (User: %s)\n' "${BOLD}" "${RESET}" "$ui_url" "$UI_AUTH_USER"
 else
-    printf "  ${BOLD}Admin-UI:${RESET}    %s\n" "$ui_url"
+    printf '  %sAdmin-UI:%s    %s\n' "${BOLD}" "${RESET}" "$ui_url"
 fi
 printf "\n"
 if [[ "$HTTPS_ENABLED" = "1" ]]; then
-    printf "  ${BOLD}CA certificate${RESET} (available after first start):\n"
+    printf '  %sCA certificate%s (available after first start):\n' "${BOLD}" "${RESET}"
     printf "    %s/%s\n" "$(prod_state_dir_for_key CA_DIR "$ENV_LOCAL")" "$(prod_env_default CA_CERT_FILE)"
     printf "    → install on clients for HTTPS mode\n"
     printf '    → guide: %s/wiki\n' "$LANCACHE_REPO_URL"
     printf "\n"
 fi
-printf "  ${BOLD}Configure DNS on clients:${RESET}\n"
+printf '  %sConfigure DNS on clients:%s\n' "${BOLD}" "${RESET}"
 printf "    HTTP mode (no certificate): %s\n" "$IP_HTTP"
 if [[ "$HTTPS_ENABLED" = "1" ]]; then
     printf "    HTTPS mode (with certificate):   %s\n" "$IP_HTTPS"
 fi
 printf "\n"
-printf "  ${BOLD}Commands:${RESET}\n"
+printf '  %sCommands:%s\n' "${BOLD}" "${RESET}"
 printf "    Status:  %s/setup.sh debug\n"  "$SCRIPT_DIR"
 printf "    Update:  %s/setup.sh update\n" "$SCRIPT_DIR"
 printf "\n"
