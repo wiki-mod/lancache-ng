@@ -18,7 +18,7 @@ use axum::routing::{MethodRouter, delete, get, post};
 use base64::Engine as _;
 use futures_util::StreamExt as _;
 use lancache_ng::config::{
-    self, AAAA_FILTER_MARKER, DDNS_UNSIGNED_MARKER, DEFAULT_RECORD_TTL, DhcpMode,
+    self, AAAA_FILTER_MARKER, DDNS_UNSIGNED_MARKER, DEFAULT_RECORD_TTL, DhcpMode, LeaseLimits,
     NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, NatsLogin, NatsRoles, OPTION_CODE_MAX,
     OPTION_CODE_MIN, OutOfRange, PDNS_API_PATH, PROXY_ACCESS_LOG_PATTERN, Uint, canonical_zone,
     dns_reader_publish, dns_subscribe, is_dns_name, option_code, option_data, parse_bool,
@@ -141,6 +141,9 @@ struct Config {
     // What: the lease seconds a subnet without one shows.
     // Why: the SOT owns DHCP_LEASE_TIME; no copy in Rust.
     dhcp_lease_time: u32,
+    // What: lease limits of the subnet form and Kea.
+    // Why: the SOT owns them; watchdog applies the same.
+    dhcp_lease_limits: LeaseLimits,
     http_ip: String,
     https_ip: String,
     pdns_auth_port: u16,
@@ -267,10 +270,11 @@ impl Config {
             Some(v) if !shared_secret_is_placeholder(&v) => v,
             _ => secret("KEA_CTRL_TOKEN")?,
         };
+        let dhcp_lease_limits = LeaseLimits::load(env)?;
         let dhcp_lease_time = read(Uint {
             name: "DHCP_LEASE_TIME",
-            min: MIN_LEASE_TIME.into(),
-            max: MAX_LEASE_TIME.into(),
+            min: dhcp_lease_limits.min.into(),
+            max: dhcp_lease_limits.max.into(),
             below: OutOfRange::Reject,
             above: OutOfRange::Reject,
         })? as u32;
@@ -345,6 +349,7 @@ impl Config {
             https_enabled: need_flag("HTTPS_ENABLED")?,
             cache_max_gb,
             dhcp_lease_time,
+            dhcp_lease_limits,
             http_ip,
             https_ip,
             pdns_auth_port: need("PDNS_AUTH_PORT")?
@@ -2649,11 +2654,6 @@ async fn rotate_token(
     ))
 }
 
-// What: lease time limits in seconds.
-// Why: the subnet form rejects leases outside these.
-const MIN_LEASE_TIME: u32 = 60;
-const MAX_LEASE_TIME: u32 = 604_800;
-
 // What: Kea error texts that mean "not found".
 // Why: kea_modify maps exactly these to a 404.
 const KEA_SUBNET_MISSING: &str = "subnet not found";
@@ -3320,7 +3320,7 @@ fn is_valid_boot_filename(raw: &str) -> bool {
 
 // What: check the subnet form; return lease time and CIDR.
 // Why: pool, gateway and subnet depend on each other.
-fn validate_subnet(f: &Fields) -> Result<(u32, (u32, u32)), &'static str> {
+fn validate_subnet(f: &Fields, limits: &LeaseLimits) -> Result<(u32, (u32, u32)), String> {
     let cidr = parse_cidr(f.get("subnet"))
         .ok_or("Invalid subnet: use a network such as 198.51.100.0/24 with host bits zero.")?;
     let address = |key: &str, message: &'static str| ipv4(f.get(key)).ok_or(message);
@@ -3334,21 +3334,29 @@ fn validate_subnet(f: &Fields) -> Result<(u32, (u32, u32)), &'static str> {
     let inside = |ip: Ipv4Addr| u32::from(ip) & cidr.1 == cidr.0;
     if !(inside(start) && inside(end) && inside(gateway)) || u32::from(start) > u32::from(end) {
         return Err(
-            "Pool and gateway must lie inside the subnet, and the pool start must not follow its end.",
+            "Pool and gateway must lie inside the subnet, and the pool start must not follow its end."
+                .into(),
         );
     }
     let ntp = f.get("ntp_servers");
     if !ntp.is_empty() && split_list(ntp).is_empty() {
-        return Err("Invalid NTP servers: use a list of addresses or host names.");
+        return Err("Invalid NTP servers: use a list of addresses or host names.".into());
     }
     let domain = f.get("domain");
     if !domain.is_empty() && !is_valid_domain_name(domain) {
-        return Err("Invalid domain: use a plain DNS domain name (letters, digits, '-', '.').");
+        return Err(
+            "Invalid domain: use a plain DNS domain name (letters, digits, '-', '.').".into(),
+        );
     }
     let lease = f
         .number::<u32>("lease_time")
-        .filter(|t| (MIN_LEASE_TIME..=MAX_LEASE_TIME).contains(t))
-        .ok_or("Lease time must be between 60 and 604800 seconds.")?;
+        .and_then(|t| limits.check(t))
+        .ok_or_else(|| {
+            format!(
+                "Lease time must be between {} and {} seconds.",
+                limits.min, limits.max
+            )
+        })?;
     Ok((lease, cidr))
 }
 
@@ -3390,13 +3398,9 @@ fn apply_subnet(
     lease: u32,
     ntp: &str,
     cidr: (u32, u32),
+    limits: &LeaseLimits,
 ) -> Result<(), &'static str> {
-    // What: cap the maximum lifetime at seven days.
-    // Why: doubling a seven-day lease would exceed the cap.
-    let max_lifetime = lease
-        .checked_mul(2)
-        .ok_or("lease_time too large")?
-        .min(MAX_LEASE_TIME);
+    let max_lifetime = limits.max_lifetime(lease);
     let mut options: Vec<Value> = entry
         .get("option-data")
         .and_then(Value::as_array)
@@ -3626,7 +3630,8 @@ fn upsert_reservation(
 // Why: ids need only be unique; max plus one never clashes.
 async fn add_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Redirect, HtmlError> {
     require_kea(&state)?;
-    let (lease, cidr) = validate_subnet(&f).map_err(invalid)?;
+    let limits = state.config.dhcp_lease_limits;
+    let (lease, cidr) = validate_subnet(&f, &limits).map_err(invalid)?;
     // What: resolve NTP names before the synchronous edit.
     // Why: the edit closure cannot await; bad name = 400.
     let ntp = resolve_ntp_servers(f.get("ntp_servers"))
@@ -3640,7 +3645,7 @@ async fn add_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Redir
             .max()
             .map_or(1, |max| max + 1) as u32;
         let mut entry = json!({});
-        apply_subnet(&mut entry, &f, id, lease, &ntp, cidr)?;
+        apply_subnet(&mut entry, &f, id, lease, &ntp, cidr, &limits)?;
         subnets.push(entry);
         Ok(())
     })
@@ -3655,12 +3660,21 @@ async fn update_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
     let id = f
         .number::<u32>("id")
         .ok_or_else(|| invalid("Missing subnet id."))?;
-    let (lease, cidr) = validate_subnet(&f).map_err(invalid)?;
+    let limits = state.config.dhcp_lease_limits;
+    let (lease, cidr) = validate_subnet(&f, &limits).map_err(invalid)?;
     let ntp = resolve_ntp_servers(f.get("ntp_servers"))
         .await
         .map_err(invalid)?;
     kea_modify(&state, move |config| {
-        apply_subnet(find_subnet_mut(config, id)?, &f, id, lease, &ntp, cidr)
+        apply_subnet(
+            find_subnet_mut(config, id)?,
+            &f,
+            id,
+            lease,
+            &ntp,
+            cidr,
+            &limits,
+        )
     })
     .await?;
     Ok(Redirect::to("/dhcp"))
@@ -6590,7 +6604,10 @@ mod tests {
         "LANCACHE_SHARED_SECRET_DIR",
     ];
 
-    const NUMBER_KEYS: [(&str, &str); 13] = [
+    const NUMBER_KEYS: [(&str, &str); 16] = [
+        ("DHCP_LEASE_TIME_MIN", "60"),
+        ("DHCP_LEASE_TIME_MAX", "604800"),
+        ("DHCP_MAX_LEASE_FACTOR", "2"),
         ("PDNS_AUTH_PORT", "5300"),
         ("DNS_PORT", "53"),
         ("PDNS_AUTH_API_PORT", "8081"),
@@ -7983,33 +8000,40 @@ mod tests {
         fields(&pairs)
     }
 
+    // What: the lease limits of the subnet tests.
+    // Why: the form message names min and max.
+    fn limits() -> LeaseLimits {
+        LeaseLimits {
+            min: 60,
+            max: 604_800,
+            factor: 2,
+        }
+    }
+
+    // What: validate_subnet with the test limits.
+    // Why: the cases differ only in the form.
+    fn vs(f: &Fields) -> Result<(u32, (u32, u32)), String> {
+        validate_subnet(f, &limits())
+    }
+
     // What: the subnet form is checked field by field.
     // Why: pool, gateway and subnet depend on each other.
     #[test]
     fn subnet_form_is_validated_field_by_field() {
-        let ok = validate_subnet(&fields(&subnet_form()));
+        let ok = vs(&fields(&subnet_form()));
         assert_eq!(ok, Ok((3600, (0xC633_6400, 0xFFFF_FF00))));
-        let edge = validate_subnet(&form_with("lease_time", "60"));
+        let edge = vs(&form_with("lease_time", "60"));
         assert_eq!(edge.unwrap().0, 60);
-        assert_eq!(
-            validate_subnet(&form_with("lease_time", "604800"))
-                .unwrap()
-                .0,
-            604_800
-        );
-        let lease_msg = Err("Lease time must be between 60 and 604800 seconds.");
+        assert_eq!(vs(&form_with("lease_time", "604800")).unwrap().0, 604_800);
+        let lease_msg = Err("Lease time must be between 60 and 604800 seconds.".to_string());
         for bad in ["59", "604801", "x", ""] {
-            assert_eq!(
-                validate_subnet(&form_with("lease_time", bad)),
-                lease_msg,
-                "{bad:?}"
-            );
+            assert_eq!(vs(&form_with("lease_time", bad)), lease_msg, "{bad:?}");
         }
         let cidr_msg = "Invalid subnet: use a network such as 198.51.100.0/24 with host bits zero.";
         for bad in ["198.51.100.5/24", "x", ""] {
             assert_eq!(
-                validate_subnet(&form_with("subnet", bad)),
-                Err(cidr_msg),
+                vs(&form_with("subnet", bad)),
+                Err(cidr_msg.to_string()),
                 "{bad:?}"
             );
         }
@@ -8019,11 +8043,11 @@ mod tests {
             ("gateway", "Invalid gateway address."),
             ("dns_primary", "Invalid primary DNS address."),
         ] {
-            assert_eq!(validate_subnet(&form_with(key, "nope")), Err(msg), "{key}");
+            assert_eq!(vs(&form_with(key, "nope")), Err(msg.to_string()), "{key}");
         }
-        let secondary = validate_subnet(&form_with("dns_secondary", "nope"));
-        assert_eq!(secondary, Err("Invalid secondary DNS address."));
-        assert!(validate_subnet(&form_with("dns_secondary", "198.51.100.3")).is_ok());
+        let secondary = vs(&form_with("dns_secondary", "nope"));
+        assert_eq!(secondary, Err("Invalid secondary DNS address.".to_string()));
+        assert!(vs(&form_with("dns_secondary", "198.51.100.3")).is_ok());
         let range = "Pool and gateway must lie inside the subnet, and the pool start must not follow its end.";
         for (key, value) in [
             ("pool_start", "198.51.101.10"),
@@ -8032,8 +8056,8 @@ mod tests {
             ("pool_start", "198.51.100.201"),
         ] {
             assert_eq!(
-                validate_subnet(&form_with(key, value)),
-                Err(range),
+                vs(&form_with(key, value)),
+                Err(range.to_string()),
                 "{key}={value}"
             );
         }
@@ -8045,19 +8069,22 @@ mod tests {
             ("dns_primary", "198.51.100.2"),
             ("lease_time", "60"),
         ]);
-        assert!(validate_subnet(&one).is_ok());
-        let ntp = validate_subnet(&form_with("ntp_servers", " , "));
+        assert!(vs(&one).is_ok());
+        let ntp = vs(&form_with("ntp_servers", " , "));
         assert_eq!(
             ntp,
-            Err("Invalid NTP servers: use a list of addresses or host names.")
+            Err("Invalid NTP servers: use a list of addresses or host names.".to_string())
         );
-        assert!(validate_subnet(&form_with("ntp_servers", "198.51.100.4, pool.ntp.org")).is_ok());
-        let domain = validate_subnet(&form_with("domain", "bad domain!"));
+        assert!(vs(&form_with("ntp_servers", "198.51.100.4, pool.ntp.org")).is_ok());
+        let domain = vs(&form_with("domain", "bad domain!"));
         assert_eq!(
             domain,
-            Err("Invalid domain: use a plain DNS domain name (letters, digits, '-', '.').")
+            Err(
+                "Invalid domain: use a plain DNS domain name (letters, digits, '-', '.')."
+                    .to_string()
+            )
         );
-        assert!(validate_subnet(&form_with("domain", "lan.example")).is_ok());
+        assert!(vs(&form_with("domain", "lan.example")).is_ok());
     }
 
     // What: the form values land in one subnet4 entry.
@@ -8083,7 +8110,7 @@ mod tests {
             "reservations": [
                 {"ip-address": "198.51.100.50"}, {"ip-address": "192.0.2.5"}, {"hw-address": "x"}]
         });
-        apply_subnet(&mut entry, &form, 7, 3600, "198.51.100.4", cidr).unwrap();
+        apply_subnet(&mut entry, &form, 7, 3600, "198.51.100.4", cidr, &limits()).unwrap();
         assert_eq!(
             entry,
             json!({
@@ -8101,7 +8128,7 @@ mod tests {
             })
         );
         let mut plain = json!({});
-        apply_subnet(&mut plain, &form, 1, 604_800, "", cidr).unwrap();
+        apply_subnet(&mut plain, &form, 1, 604_800, "", cidr, &limits()).unwrap();
         assert_eq!(plain["max-valid-lifetime"], 604_800);
         assert!(plain.get("reservations").is_none());
         let names: Vec<&str> = plain["option-data"]
@@ -8124,13 +8151,13 @@ mod tests {
             ("dns_secondary", "198.51.100.2"),
         ]);
         let mut dup = json!({});
-        apply_subnet(&mut dup, &same, 1, 60, "", cidr).unwrap();
+        apply_subnet(&mut dup, &same, 1, 60, "", cidr, &limits()).unwrap();
         assert_eq!(dup["option-data"][1]["data"], "198.51.100.2");
         let mut huge = json!({});
-        let too_large = apply_subnet(&mut huge, &form, 1, u32::MAX, "", cidr);
-        assert_eq!(too_large, Err("lease_time too large"));
+        apply_subnet(&mut huge, &form, 1, u32::MAX, "", cidr, &limits()).unwrap();
+        assert_eq!(huge["max-valid-lifetime"], limits().max);
         let mut scalar = json!(5);
-        let not_object = apply_subnet(&mut scalar, &form, 1, 60, "", cidr);
+        let not_object = apply_subnet(&mut scalar, &form, 1, 60, "", cidr, &limits());
         assert_eq!(not_object, Err("subnet not an object"));
     }
 

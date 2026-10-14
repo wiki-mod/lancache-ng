@@ -180,6 +180,49 @@ impl Uint {
     }
 }
 
+// What: DHCP lease limits and the max-lifetime factor.
+// Why: ui and watchdog apply one lease rule.
+// From: Issue #1683 | PR #1912
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LeaseLimits {
+    pub min: u32,
+    pub max: u32,
+    pub factor: u32,
+}
+
+impl LeaseLimits {
+    // What: the three limits; junk or min above max fails.
+    // Why: a lease rule that cannot hold stops the start.
+    pub fn load(get: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let num = |name: &str| -> Result<u32, String> {
+            let raw = need(get, name)?;
+            raw.parse()
+                .map_err(|_| format!("{name}={raw} is no whole number"))
+        };
+        let limits = Self {
+            min: num("DHCP_LEASE_TIME_MIN")?,
+            max: num("DHCP_LEASE_TIME_MAX")?,
+            factor: num("DHCP_MAX_LEASE_FACTOR")?,
+        };
+        if limits.min > limits.max || limits.factor == 0 {
+            return Err(format!("DHCP lease limits do not fit: {limits:?}"));
+        }
+        Ok(limits)
+    }
+
+    // What: the lease if inside the limits, else none.
+    // Why: ui form and watchdog render reject the same.
+    pub fn check(&self, lease: u32) -> Option<u32> {
+        Some(lease).filter(|t| (self.min..=self.max).contains(t))
+    }
+
+    // What: Kea max-valid-lifetime of one lease.
+    // Why: factor times the lease, capped at the maximum.
+    pub fn max_lifetime(&self, lease: u32) -> u32 {
+        lease.saturating_mul(self.factor).min(self.max)
+    }
+}
+
 // What: SYSLOG_MAX_GB, the syslog store budget in GiB.
 // Why: the ui shows and retention enforces one limit.
 // From: Issue #633 | PR #1858
@@ -941,6 +984,34 @@ mod tests {
         assert_eq!(knob.parse(Some("10")), Ok((10, None)));
         assert!(knob.parse(Some("4")).is_err());
         assert!(knob.parse(Some("11")).is_err());
+    }
+
+    // What: lease limits load, bound and cap one rule.
+    // Why: ui and watchdog wrote Kea lifetimes apart.
+    // From: Issue #1683 | PR #1912
+    #[test]
+    fn lease_limits_bound_and_cap_the_lifetime() {
+        let env = |min: &'static str, max: &'static str, factor: &'static str| {
+            move |key: &str| match key {
+                "DHCP_LEASE_TIME_MIN" => Some(min.to_string()),
+                "DHCP_LEASE_TIME_MAX" => Some(max.to_string()),
+                "DHCP_MAX_LEASE_FACTOR" => Some(factor.to_string()),
+                _ => None,
+            }
+        };
+        let limits = LeaseLimits::load(&env("10", "100", "3")).expect("limits");
+        assert_eq!((limits.check(10), limits.check(100)), (Some(10), Some(100)));
+        assert_eq!((limits.check(9), limits.check(101)), (None, None));
+        assert_eq!(limits.max_lifetime(20), 60);
+        assert_eq!(limits.max_lifetime(50), 100);
+        assert_eq!(limits.max_lifetime(u32::MAX), 100);
+        for bad in [
+            env("100", "10", "3"),
+            env("10", "100", "0"),
+            env("x", "100", "3"),
+        ] {
+            assert!(LeaseLimits::load(&bad).is_err());
+        }
     }
 
     // What: each DHCP mode answers the backend questions.

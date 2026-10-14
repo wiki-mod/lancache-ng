@@ -2910,10 +2910,18 @@ fn kea_loggers(loggers: &[(&str, &str)], debuglevel: u64) -> Value {
 // Why: afterwards the ui edits Kea through its API only.
 // From: Issue #815 | PR #1912
 fn kea_dhcp4_first(ctx: &Ctx, kea: &KeaKnobs) -> Result<Value, String> {
-    let lease: u64 = ctx
-        .need("DHCP_LEASE_TIME")?
+    let limits = config::LeaseLimits::load(&config::process_env)?;
+    let raw = ctx.need("DHCP_LEASE_TIME")?;
+    let lease = raw
         .parse()
-        .map_err(|_| "DHCP_LEASE_TIME is no number of seconds".to_string())?;
+        .ok()
+        .and_then(|t| limits.check(t))
+        .ok_or_else(|| {
+            format!(
+                "DHCP_LEASE_TIME={raw} is outside {}..={} seconds",
+                limits.min, limits.max
+            )
+        })?;
     let domain = ctx.need("DHCP_DOMAIN")?;
     let mut options = vec![
         serde_json::json!({"name": "routers", "data": ctx.need("DHCP_GATEWAY")?}),
@@ -2946,7 +2954,7 @@ fn kea_dhcp4_first(ctx: &Ctx, kea: &KeaKnobs) -> Result<Value, String> {
                 "pools": [{"pool": format!("{} - {}", ctx.need("DHCP_RANGE_START")?, ctx.need("DHCP_RANGE_END")?)}],
                 "option-data": options,
                 "valid-lifetime": lease,
-                "max-valid-lifetime": lease * 2
+                "max-valid-lifetime": limits.max_lifetime(lease)
             }]
         }
     }))
