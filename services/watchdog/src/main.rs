@@ -4507,6 +4507,10 @@ struct SuperviseStatus {
     // What: wanted programs that are not running now.
     // Why: one red entry makes the container unhealthy.
     down: Vec<String>,
+    // What: programs running now.
+    // Why: the healthcheck probes their listeners.
+    // From: Issue #1683 | PR #1912
+    running: Vec<String>,
     restarts: HashMap<String, u32>,
 }
 
@@ -4583,6 +4587,9 @@ async fn supervise() -> Result<(), String> {
             if wanted && !slot.running() {
                 status.down.push(slot.kind.name().to_string());
             }
+            if slot.running() {
+                status.running.push(slot.kind.name().to_string());
+            }
             status
                 .restarts
                 .insert(slot.kind.name().to_string(), slot.restarts);
@@ -4618,6 +4625,32 @@ async fn healthcheck() -> Result<(), String> {
     let status: SuperviseStatus =
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     health_verdict(&status, unix_secs())?;
+    // What: a running listener program must accept.
+    // Why: running is not bound; clients use it at once.
+    // From: Issue #1683 | PR #1912
+    for (kind, key) in [
+        (Kind::NatsSubscriber, ROLLBACK_PORT_KEY),
+        (Kind::KeaCtrlAgent, "KEA_CTRL_PORT"),
+    ] {
+        if status.running.iter().any(|name| name == kind.name()) {
+            let addr = format!("{}:{}", config::loopback()?, env_port(key)?);
+            tokio::net::TcpStream::connect(&addr)
+                .await
+                .map_err(|e| format!("{} at {addr}: {e}", kind.name()))?;
+        }
+    }
+    // What: kea-dhcp4 must accept on its control socket.
+    // Why: the agent forwards every command through it.
+    // From: Issue #1683 | PR #1912
+    if status
+        .running
+        .iter()
+        .any(|name| name == Kind::KeaDhcp4.name())
+    {
+        tokio::net::UnixStream::connect(KEA4_SOCKET)
+            .await
+            .map_err(|e| format!("{} at {KEA4_SOCKET}: {e}", Kind::KeaDhcp4.name()))?;
+    }
     // What: nginx must answer its health page as well.
     // Why: a running nginx process can still serve nothing.
     // From: Issue #1683 | PR #1912

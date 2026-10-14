@@ -7536,12 +7536,20 @@ _ci_validate_no_health_services() {
 # Why: Docker events end the wait; no guessed deadline.
 # From: Issue #1683 | PR #1912
 _ci_validate_wait_one() {
-    local project="$1" svc="$2" cid created action pid raw=""
+    local project="$1" svc="$2" cid
     cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
     if [ -z "${cid}" ]; then
         ci_log "[CI-INFO-VALIDATE-0078]" "service=\"${svc}\" reason=\"no running container after up\""
         return 1
     fi
+    _ci_validate_wait_cid "${svc}" "${cid}"
+}
+
+# What: Health verdict of one container id or name.
+# Why: run containers are not in wait_healthy's list.
+# From: Issue #1683 | PR #1912
+_ci_validate_wait_cid() (
+    local svc="$1" cid="$2" created action pid raw=""
     created="$(_ci_capture 0 docker inspect --format '{{.Created}}' "${cid}")" || return 2
     # What: replay from creation, then follow live.
     # Why: a verdict before the subscribe is not lost.
@@ -7565,7 +7573,7 @@ _ci_validate_wait_one() {
     done
     ci_error "[CI-ERROR-VALIDATE-0079]" "service=\"${svc}\" container=\"${cid}\" reason=\"docker events ended without a verdict\"" "${raw}"
     return 2
-}
+)
 
 # What: Wait for every started service's health verdict.
 # Why: A service without healthcheck has no crash proof.
@@ -8138,13 +8146,11 @@ _ci_validate_dns_rollback() {
     fi
     ucid="$(_ci_validate_cid "${project}" ui)" || return 2
     lbase="$(_ci_validate_rollback_base "${ip}")" || return 2
-    tries="$(_ci_variable CI_VALIDATE_LISTENER_POLL_ATTEMPTS)" || return 2
-    pause="$(_ci_variable CI_VALIDATE_LISTENER_POLL_PAUSE)" || return 2
-    # What: poll until the rollback listener accepts.
-    # Why: healthy != bound; nats-subscriber binds late.
-    # From: Issue #628
-    if ! last="$(_ci_validate_poll "${tries}" "${pause}" _ci_curl_secret header "X-API-Key: ${key}" -fsS -o /dev/null "${lbase}/snapshots")"; then
-        ci_error "[CI-ERROR-VALIDATE-0039]" "url=\"${lbase}\" reason=\"rollback listener never accepted a connection\"" "${last}"
+    # What: one try; dns healthy means the listener accepts.
+    # Why: the healthcheck connects to it; no poll.
+    # From: Issue #1683 | PR #1912
+    if ! last="$(_ci_curl_secret header "X-API-Key: ${key}" -fsS -o /dev/null "${lbase}/snapshots" 2>&1)"; then
+        ci_error "[CI-ERROR-VALIDATE-0039]" "url=\"${lbase}\" reason=\"rollback listener did not accept\"" "${last}"
         return 1
     fi
     code="$(_ci_capture 0 curl -sS -o /dev/null -w '%{http_code}' "${lbase}/snapshots")" || return 2
@@ -8240,14 +8246,6 @@ _ci_validate_kea_cmd() {
     _ci_curl_secret user "$2:$3" -fsS -H 'Content-Type: application/json' -d "$4" "$1/"
 }
 
-# What: True once Kea answers config-get with result 0.
-# Why: run -d returns before kea-dhcp4 and the agent bind.
-# From: Issue #763 | PR #1858
-_ci_validate_kea_ready() {
-    _ci_validate_kea_cmd "$1" "$2" "$3" '{"command":"config-get","service":["dhcp4"]}' \
-        | jq -e '.[0].result == 0' >/dev/null
-}
-
 # What: Kea snapshot ids under <snapshot dir>, oldest first.
 # Why: the rollback target is the id a ui write added.
 # From: Issue #763 | PR #1858
@@ -8297,13 +8295,11 @@ _ci_validate_kea_add() {
 # From: Issue #763 | PR #1858
 _ci_validate_kea_round_trip() {
     local project="$1" kip="$2" kport="$3" uname="$4" cfg token dir subnet resp sid ubase
-    local jar csrf base snap inst out n_a n_b rc=0 kbase kuser label mac_a mac_b tries pause su snapdir mount snaps compose
+    local jar csrf base snap inst out n_a n_b rc=0 kbase kuser label mac_a mac_b su snapdir mount snaps compose
     kbase="http://${kip}:${kport}"
     kuser="$(_ci_validate_kea_agent user)" || return 2
     label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
     mac_a="$(_ci_validate_probe_mac 1)" && mac_b="$(_ci_validate_probe_mac 2)" || return 2
-    tries="$(_ci_variable CI_VALIDATE_KEA_POLL_ATTEMPTS)" || return 2
-    pause="$(_ci_variable CI_VALIDATE_KEA_POLL_PAUSE)" || return 2
     cfg="$(_ci_validate_config_json)" || return 2
     token="$(_ci_capture 0 jq -r '.services.dhcp.environment.KEA_CTRL_TOKEN // empty' <<< "${cfg}")" || return 2
     snapdir="$(_ci_runtime_default KEA_CONFIG_SNAPSHOT_DIR)" || return 2
@@ -8319,11 +8315,14 @@ _ci_validate_kea_round_trip() {
     fi
     dir="${mount%%$'\t'*}"
     snaps="${dir}${mount#*$'\t'}"
-    if ! out="$(_ci_validate_poll "${tries}" "${pause}" _ci_validate_kea_ready "${kbase}" "${kuser}" "${token}")"; then
-        ci_error "[CI-ERROR-VALIDATE-0090]" "ip=\"${kip}\" reason=\"Kea control agent never answered config-get\"" "${out}"
+    # What: one config-get; healthy dhcp means it accepts.
+    # Why: the healthcheck connects to it; no poll.
+    # From: Issue #1683 | PR #1912
+    resp="$(_ci_capture 0 _ci_validate_kea_cmd "${kbase}" "${kuser}" "${token}" '{"command":"config-get","service":["dhcp4"]}')" || return 2
+    if ! jq -e '.[0].result == 0' <<< "${resp}" >/dev/null; then
+        ci_error "[CI-ERROR-VALIDATE-0090]" "ip=\"${kip}\" reason=\"Kea control agent config-get did not return result 0\"" "${resp}"
         return 1
     fi
-    resp="$(_ci_capture 0 _ci_validate_kea_cmd "${kbase}" "${kuser}" "${token}" '{"command":"config-get","service":["dhcp4"]}')" || return 2
     sid="$(_ci_capture 0 jq -r --arg s "${subnet}" '.[0].arguments.Dhcp4.subnet4[]? | select(.subnet == $s) | .id' <<< "${resp}")" || return 2
     if [ -z "${sid}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0091]" "subnet=\"${subnet}\" reason=\"no Kea subnet4 entry for DHCP_SUBNET\""
@@ -8389,13 +8388,21 @@ _ci_validate_kea_rollback() {
     _ci_run "[CI-ERROR-VALIDATE-0096]" "project=\"${project}\" service=\"dhcp\" reason=\"Kea run container not started\"" \
         _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${kname}" \
             -e DHCP_MODE=kea dhcp >/dev/null || return $?
-    if ! kip="$(_ci_validate_cid_ip "${project}" "${kname}")"; then
+    # What: both run containers must be healthy first.
+    # Why: healthy means the Kea agent and ui accept.
+    # From: Issue #1683 | PR #1912
+    if ! _ci_validate_wait_cid dhcp "${kname}"; then
+        ci_error "[CI-ERROR-VALIDATE-0129]" "service=\"dhcp\" container=\"${kname}\" reason=\"Kea run container not healthy (cause above)\"" \
+            "$(docker logs --tail 80 "${kname}" 2>&1)"
+        rc=1
+    elif ! kip="$(_ci_validate_cid_ip "${project}" "${kname}")"; then
         ci_log "[CI-ERROR-VALIDATE-0097]" "container=\"${kname}\" reason=\"no /27 IP for the Kea run container\""
         rc=2
     elif _ci_run "[CI-ERROR-VALIDATE-0098]" "project=\"${project}\" service=\"ui\" reason=\"Kea ui run container not started\"" \
         _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${uname}" \
         -e DHCP_MODE=kea -e "DHCP_API_HOST=${kip}" ui >/dev/null; then
-        _ci_validate_kea_round_trip "${project}" "${kip}" "${kport}" "${uname}" || rc=$?
+        _ci_validate_wait_cid ui "${uname}" || rc=$?
+        [ "${rc}" -ne 0 ] || _ci_validate_kea_round_trip "${project}" "${kip}" "${kport}" "${uname}" || rc=$?
         # What: a failed round trip ships both run logs.
         # Why: the ui answer alone does not name the cause.
         # From: Issue #1683 | PR #1912
