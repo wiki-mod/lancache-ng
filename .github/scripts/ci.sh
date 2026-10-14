@@ -1084,6 +1084,7 @@ ci_cmd_plan_matrix() {
     _ci_docs_only "${changed[@]}" || drc=$?
     case "${drc}" in 0) docs_only=true ;; 1) ;; *) return 2 ;; esac
     local service platform include='[]' any=false resolved paction pident pimpact runner authed=false test_services=''
+    local _ci_plan_ids=""
     local sot_changed=false f path_cand rc plats unknown=""
     # What: SOT change makes every target id candidate.
     # Why: pins live in SOT; identity decides BUILD.
@@ -1121,6 +1122,11 @@ ci_cmd_plan_matrix() {
         plats="$(_ci_platforms "${service}")" || return "$?"
         while IFS= read -r platform; do
             [ -n "${platform}" ] || continue
+            # What: one id per pair, fixed once per run.
+            # Why: a later index read can mint another.
+            # From: Issue #1683 | PR #1912
+            pident="$(_ci_identity_for "${service}" "${platform}")" || return "$?"
+            _ci_plan_ids+=" ${service}@${platform}=${pident}"
             resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
             paction="$(_ci_record_field "${resolved}" action)" || return 2
             # What: MISMATCH state fails the plan
@@ -1185,6 +1191,20 @@ ci_cmd_plan_matrix() {
     fi
     validate="${any}"
     [ "${promote}" = false ] || validate=true
+    # What: the run record covers every target pair.
+    # Why: scan, validate, assemble read unbuilt pairs too.
+    # From: Issue #1683 | PR #1912
+    if [ "${validate}" = true ]; then
+        for service in ${targets}; do
+            plats="$(_ci_platforms "${service}")" || return "$?"
+            while IFS= read -r platform; do
+                [ -n "${platform}" ] || continue
+                [[ " ${_ci_plan_ids} " != *" ${service}@${platform}="* ]] || continue
+                pident="$(_ci_identity_for "${service}" "${platform}")" || return "$?"
+                _ci_plan_ids+=" ${service}@${platform}=${pident}"
+            done <<< "${plats}"
+        done
+    fi
     {
         printf 'any-build=%s\n' "${any}"
         printf 'promote=%s\n' "${promote}"
@@ -1194,6 +1214,7 @@ ci_cmd_plan_matrix() {
         printf 'rust-validation=%s\n' "${rust_validation}"
         printf 'rust-audit=%s\n' "${rust_audit}"
         printf 'docs-only=%s\n' "${docs_only}"
+        printf 'identities=%s\n' "${_ci_plan_ids# }"
     } >> "${out}"
     if [ -n "${unknown}" ]; then
         ci_error "[CI-ERROR-PLAN-0008]" "reason=\"UNKNOWN pairs: no build, escalate (2.3)\"" "${unknown}"
@@ -1783,11 +1804,43 @@ _ci_identity_sot() {
     printf 'build_type=%s\n%s\n' "${build_type}" "${pins}"
 }
 
+# What: print a pair's id from a run record, else rc 1.
+# Why: one parser for the plan output and the plan itself.
+# From: Issue #1683 | PR #1912
+_ci_identity_recorded() {
+    local rec=" $1 " key="$2@$3=" id
+    [[ "${rec}" == *" ${key}"* ]] || return 1
+    id="${rec#*" ${key}"}"
+    id="${id%% *}"
+    if [[ ! "${id}" =~ ^[0-9a-f]{64}$ ]]; then
+        ci_log "[CI-ERROR-IDENTITY-0014]" "pair=\"$2@$3\" got=\"${id}\" reason=\"run record holds no 64-hex id\""
+        return 2
+    fi
+    printf '%s\n' "${id}"
+}
+
 # What: Print the bare id of one target+platform.
 # Why: Platform mixed in so arches never collide.
 # From: Issue #1683
 _ci_identity_for() {
-    local service="$1" platform="$2" ref="${3:-}" build_type pins content buf
+    local service="$1" platform="$2" ref="${3:-}" build_type pins content buf rec rrc=0
+    # What: a planned run reads its recorded pair id.
+    # Why: a live apk re-read in a later job can differ.
+    # From: Issue #1683 | PR #1912
+    rec="${CI_RUN_IDENTITIES:-${_ci_plan_ids:-}}"
+    if [ -z "${ref}" ] && [ -n "${rec}" ]; then
+        _ci_identity_recorded "${rec}" "${service}" "${platform}" || rrc=$?
+        case "${rrc}" in
+            0) return 0 ;;
+            1)
+                if [ -n "${CI_RUN_IDENTITIES:-}" ]; then
+                    ci_log "[CI-ERROR-IDENTITY-0015]" "service=\"${service}\" platform=\"${platform}\" reason=\"pair not in the plan's run record; FAIL CLOSED\""
+                    return 2
+                fi
+                ;;
+            *) return 2 ;;
+        esac
+    fi
     build_type="$(_ci_required_field "${service}" build_type)" || return 2
     # What: every id input is captured and checked first.
     # Why: a failed part in a hash pipe mints a wrong id.

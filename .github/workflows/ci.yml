@@ -130,6 +130,7 @@ jobs:
       rust-validation: ${{ steps.plan.outputs.rust-validation }}
       rust-audit: ${{ steps.plan.outputs.rust-audit }}
       docs-only: ${{ steps.plan.outputs.docs-only }}
+      identities: ${{ steps.plan.outputs.identities }}
     steps:
       - *bootstrap
       # What: collect changed-file list via ci.sh
@@ -207,6 +208,10 @@ jobs:
           SERVICE: ${{ matrix.service }}
           PLATFORM: ${{ matrix.platform }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # What: every job reads the plan's id per pair.
+          # Why: one run, one id; ci.sh fails on a gap.
+          # From: Issue #1683 | PR #1912
+          CI_RUN_IDENTITIES: &run_ids ${{ needs.plan.outputs.identities }}
         run: bash .github/scripts/ci.sh ship "${SERVICE}" "${PLATFORM}"
       # What: frees this run's build lock after a cancel.
       # Why: a cancel stops the step; no signal reaches bash
@@ -216,6 +221,7 @@ jobs:
         env:
           SERVICE: ${{ matrix.service }}
           PLATFORM: ${{ matrix.platform }}
+          CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh ship-release "${SERVICE}" "${PLATFORM}"
 
   # What: audit rust dependencies when Cargo.lock changed
@@ -301,6 +307,7 @@ jobs:
         id: scan
         env:
           CI_BUILD_MATRIX: ${{ needs.plan.outputs.matrix }}
+          CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh scan-stack
 
   # What: aggregate acceptance to ledger
@@ -323,6 +330,7 @@ jobs:
       - name: Aggregate acceptance into the ledger
         env:
           CI_BUILD_MATRIX: ${{ needs.scan.outputs.passed }}
+          CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh aggregate-stack
 
   # What: merge platform digests into multi-arch index
@@ -342,6 +350,7 @@ jobs:
       - name: Assemble multi-arch indexes
         env:
           CI_BUILD_MATRIX: ${{ needs.scan.outputs.passed }}
+          CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh assemble-stack
 
   # What: validate full stack on exact candidate
@@ -371,6 +380,8 @@ jobs:
     steps:
       - *bootstrap
       - name: Validate the accepted stack candidate
+        env:
+          CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh validate
 
   # What: promote channels the ref maps to
@@ -392,6 +403,7 @@ jobs:
     env:
       CI_STACK_VALIDATED: SUCCESS
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CI_RUN_IDENTITIES: *run_ids
     steps:
       - *bootstrap
       - name: Promote the channels the ref maps to
