@@ -16,7 +16,7 @@ use argon2::Argon2;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use futures_util::{StreamExt, stream};
-use lancache_ng::config::{OutOfRange, Uint, env_opt, need, process_env};
+use lancache_ng::config::{env_opt, need, process_env, uint};
 use lancache_ng::{Place, is_placeholder, load_or_create_hex, write_file};
 use serde::{Deserialize, Serialize};
 
@@ -34,16 +34,6 @@ const CREDENTIAL_FILE: &str = "lancache-cachehamster-credential.json";
 // What: throughput log period, 10 s; a justified literal.
 // Why: no config owner exists; it only paces a readout.
 const THROUGHPUT_EVERY: Duration = Duration::from_secs(10);
-
-// What: limits of the in-flight fetch count.
-// Why: the SOT owns the number; Rust owns limits.
-const CONCURRENCY: Uint = Uint {
-    name: "CACHEHAMSTER_CONCURRENCY",
-    min: 1,
-    max: u32::MAX as u64,
-    below: OutOfRange::Reject,
-    above: OutOfRange::Reject,
-};
 
 // What: a credential as stored: salt, nonce, ciphertext.
 // Why: the plaintext must never reach the disk.
@@ -188,12 +178,11 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let (limit, warning) = CONCURRENCY
-        .parse(env_opt("CACHEHAMSTER_CONCURRENCY").as_deref())
+    // What: the in-flight fetch count, 1 to u32::MAX.
+    // Why: the SOT owns the number; Rust owns limits.
+    // From: Issue #1683 | PR #1912
+    let limit = uint(&process_env, "CACHEHAMSTER_CONCURRENCY", 1, u32::MAX.into())
         .map_err(anyhow::Error::msg)?;
-    if let Some(warning) = warning {
-        tracing::warn!("{warning}");
-    }
     let total = Arc::new(AtomicU64::new(0));
     // What: a client without a total request timeout.
     // Why: a large body streams longer than a 10 s limit.

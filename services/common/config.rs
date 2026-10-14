@@ -148,6 +148,19 @@ pub struct Uint {
 }
 
 impl Uint {
+    // What: a knob that rejects values on both sides.
+    // Why: knobs fail closed unless one side clamps.
+    // From: Issue #1683 | PR #1912
+    pub const fn strict(name: &'static str, min: u64, max: u64) -> Self {
+        Self {
+            name,
+            min,
+            max,
+            below: OutOfRange::Reject,
+            above: OutOfRange::Reject,
+        }
+    }
+
     // What: value of the knob, plus a warning if clamped.
     // Why: unset, junk or rejected values stop the start.
     // From: Issue #1683 | PR #1905
@@ -180,6 +193,33 @@ impl Uint {
     }
 }
 
+// What: a whole env number in min..=max, else an error.
+// Why: every numeric env value takes the one Uint rule.
+// From: Issue #1683 | PR #1912
+pub fn uint(
+    get: &dyn Fn(&str) -> Option<String>,
+    name: &'static str,
+    min: u64,
+    max: u64,
+) -> Result<u64, String> {
+    let rule = Uint::strict(name, min, max);
+    rule.parse(get(name).as_deref()).map(|(value, _)| value)
+}
+
+// What: the runtime uid/gid from LANCACHE_RUNTIME_GID.
+// Why: ui and watchdog set shared files to one image id.
+// From: Issue #1427 | PR #1912
+pub fn runtime_gid() -> Result<u32, String> {
+    uint(&process_env, "LANCACHE_RUNTIME_GID", 0, u32::MAX.into()).map(|g| g as u32)
+}
+
+// What: a port number 1 to 65535 from the env.
+// Why: ui and watchdog read the SOT ports by one rule.
+// From: Issue #1683 | PR #1912
+pub fn port(get: &dyn Fn(&str) -> Option<String>, name: &'static str) -> Result<u16, String> {
+    uint(get, name, 1, u16::MAX.into()).map(|p| p as u16)
+}
+
 // What: DHCP lease limits and the max-lifetime factor.
 // Why: ui and watchdog apply one lease rule.
 // From: Issue #1683 | PR #1912
@@ -193,12 +233,9 @@ pub struct LeaseLimits {
 impl LeaseLimits {
     // What: the three limits; junk or min above max fails.
     // Why: a lease rule that cannot hold stops the start.
+    // From: Issue #1683 | PR #1912
     pub fn load(get: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
-        let num = |name: &str| -> Result<u32, String> {
-            let raw = need(get, name)?;
-            raw.parse()
-                .map_err(|_| format!("{name}={raw} is no whole number"))
-        };
+        let num = |name| uint(get, name, 0, u32::MAX.into()).map(|v| v as u32);
         let limits = Self {
             min: num("DHCP_LEASE_TIME_MIN")?,
             max: num("DHCP_LEASE_TIME_MAX")?,
@@ -210,14 +247,20 @@ impl LeaseLimits {
         Ok(limits)
     }
 
-    // What: the lease if inside the limits, else none.
-    // Why: ui form and watchdog render reject the same.
-    pub fn check(&self, lease: u32) -> Option<u32> {
-        Some(lease).filter(|t| (self.min..=self.max).contains(t))
+    // What: a lease from a reader, inside the limits.
+    // Why: ui form, ui start and watchdog take one rule.
+    // From: Issue #1683 | PR #1912
+    pub fn lease(
+        &self,
+        get: &dyn Fn(&str) -> Option<String>,
+        name: &'static str,
+    ) -> Result<u32, String> {
+        uint(get, name, self.min.into(), self.max.into()).map(|v| v as u32)
     }
 
     // What: Kea max-valid-lifetime of one lease.
     // Why: factor times the lease, capped at the maximum.
+    // From: Issue #1683 | PR #1912
     pub fn max_lifetime(&self, lease: u32) -> u32 {
         lease.saturating_mul(self.factor).min(self.max)
     }
@@ -1000,8 +1043,9 @@ mod tests {
             }
         };
         let limits = LeaseLimits::load(&env("10", "100", "3")).expect("limits");
-        assert_eq!((limits.check(10), limits.check(100)), (Some(10), Some(100)));
-        assert_eq!((limits.check(9), limits.check(101)), (None, None));
+        let lease = |raw: &'static str| limits.lease(&move |_| Some(raw.into()), "DHCP_LEASE_TIME");
+        assert_eq!((lease("10"), lease("100")), (Ok(10), Ok(100)));
+        assert!(lease("9").is_err() && lease("101").is_err());
         assert_eq!(limits.max_lifetime(20), 60);
         assert_eq!(limits.max_lifetime(50), 100);
         assert_eq!(limits.max_lifetime(u32::MAX), 100);

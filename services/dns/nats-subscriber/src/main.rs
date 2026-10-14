@@ -21,8 +21,8 @@ use futures::StreamExt;
 use futures::future::join_all;
 use lancache_ng::config::{
     DEFAULT_RECORD_TTL, NATS_STREAM_DNS, NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD,
-    OutOfRange, Uint, canonical_zone, env_opt, is_dns_name, is_rollback_zone, lan_zone, need,
-    parse_bool, process_env, rollback_zones, zone_url,
+    canonical_zone, env_opt, is_dns_name, is_rollback_zone, lan_zone, need, parse_bool,
+    process_env, rollback_zones, uint, zone_url,
 };
 use lancache_ng::{
     DnsRecord, FlushRequest, PowerDns, SnapshotStore, ct_eq, die, http_client,
@@ -905,19 +905,8 @@ async fn main() {
     // Why: an unknown spelling must keep replication on.
     let record_writes = env_opt("NATS_RECORD_WRITES").is_none_or(|v| parse_bool(&v) != Some(false));
     let reconcile = env_opt("NATS_RECONCILER").is_some_and(|v| parse_bool(&v) == Some(true));
-    let keep = Uint {
-        name: "KEEP_KNOWN_GOOD_CONFIGS",
-        min: 1,
-        max: u32::MAX.into(),
-        below: OutOfRange::Reject,
-        above: OutOfRange::Reject,
-    };
-    let (keep_n, warning) = keep
-        .parse(env_opt("KEEP_KNOWN_GOOD_CONFIGS").as_deref())
+    let keep_n = uint(&process_env, "KEEP_KNOWN_GOOD_CONFIGS", 1, u32::MAX.into())
         .unwrap_or_else(|error| die(TAG, &error));
-    if let Some(warning) = warning {
-        eprintln!("{warning}");
-    }
     let snapshot_dir = required("DNS_CONFIG_SNAPSHOT_DIR");
     let rollback_addr = required("DNS_ROLLBACK_LISTEN_ADDR");
 

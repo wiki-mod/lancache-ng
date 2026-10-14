@@ -275,16 +275,8 @@ impl Config {
             _ => secret("KEA_CTRL_TOKEN")?,
         };
         let dhcp_lease_limits = LeaseLimits::load(env)?;
-        let dhcp_lease_time = read(Uint {
-            name: "DHCP_LEASE_TIME",
-            min: dhcp_lease_limits.min.into(),
-            max: dhcp_lease_limits.max.into(),
-            below: OutOfRange::Reject,
-            above: OutOfRange::Reject,
-        })? as u32;
-        let ttl_max = need("UI_SESSION_TTL_MAX_SECONDS")?
-            .parse()
-            .map_err(|e| format!("UI_SESSION_TTL_MAX_SECONDS: {e}"))?;
+        let dhcp_lease_time = dhcp_lease_limits.lease(env, "DHCP_LEASE_TIME")?;
+        let ttl_max = config::uint(env, "UI_SESSION_TTL_MAX_SECONDS", 1, u64::MAX)?;
         let ttl = knob("UI_SESSION_TTL_SECONDS", ttl_max, OutOfRange::Reject)?;
         let startup_settings = HashMap::from([
             ("DHCP_MODE", dhcp_mode.as_str().to_string()),
@@ -356,12 +348,8 @@ impl Config {
             dhcp_lease_limits,
             http_ip,
             https_ip,
-            pdns_auth_port: need("PDNS_AUTH_PORT")?
-                .parse()
-                .map_err(|e| format!("PDNS_AUTH_PORT: {e}"))?,
-            dns_port: need("DNS_PORT")?
-                .parse()
-                .map_err(|e| format!("DNS_PORT: {e}"))?,
+            pdns_auth_port: config::port(env, "PDNS_AUTH_PORT")?,
+            dns_port: config::port(env, "DNS_PORT")?,
             dhcp_api_url: format!(
                 "http://{}:{}",
                 need("DHCP_API_HOST")?,
@@ -3356,10 +3344,9 @@ fn validate_subnet(f: &Fields, limits: &LeaseLimits) -> Result<(u32, (u32, u32))
             "Invalid domain: use a plain DNS domain name (letters, digits, '-', '.').".into(),
         );
     }
-    let lease = f
-        .number::<u32>("lease_time")
-        .and_then(|t| limits.check(t))
-        .ok_or_else(|| {
+    let lease = limits
+        .lease(&|_| Some(f.get("lease_time").to_string()), "lease_time")
+        .map_err(|_| {
             format!(
                 "Lease time must be between {} and {} seconds.",
                 limits.min, limits.max
@@ -5677,23 +5664,6 @@ fn container_start_fatal(message: &str) -> ! {
     die("lancache-ui", message)
 }
 
-// What: a required numeric id from the image environment.
-// Why: the Dockerfile owns the runtime uid/gid, not code.
-// From: Issue #1427 | PR #1858
-fn required_env_id(key: &'static str) -> u32 {
-    let id = Uint {
-        name: key,
-        min: 0,
-        max: u32::MAX.into(),
-        below: OutOfRange::Reject,
-        above: OutOfRange::Reject,
-    };
-    match id.parse(config::env_opt(key).as_deref()) {
-        Ok((value, _)) => value as u32,
-        Err(e) => container_start_fatal(&e),
-    }
-}
-
 // What: dirs the ui writes, derived from its own config.
 // Why: chown follows the configured paths, no second list.
 // From: Issue #1427 | PR #1858
@@ -5761,8 +5731,11 @@ fn container_root_start() {
     if euid != 0 {
         return;
     }
-    let uid = required_env_id("LANCACHE_RUNTIME_GID");
-    let gid = required_env_id("LANCACHE_RUNTIME_GID");
+    // What: the runtime uid equals the one runtime gid.
+    // Why: the image gives user and group the same one id.
+    // From: Issue #1427 | PR #1912
+    let gid = config::runtime_gid().unwrap_or_else(|e| container_start_fatal(&e));
+    let uid = gid;
     let cfg = Config::from_env().unwrap_or_else(|e| container_start_fatal(&e));
     if let Err(e) = ensure_shared_secrets(&cfg.shared_secret_dir, gid, "") {
         container_start_fatal(&format!(

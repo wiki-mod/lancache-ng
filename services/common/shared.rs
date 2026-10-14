@@ -231,17 +231,14 @@ pub fn die(tag: &str, message: &str) -> ! {
     std::process::exit(1);
 }
 
-// What: whole seconds of one key from a reader.
-// Why: HTTP and probe times share one parse rule.
+// What: whole seconds above 0 of one key from a reader.
+// Why: a zero wait would end every call at once.
 // From: Issue #1683 | PR #1912
-pub fn need_secs(get: &dyn Fn(&str) -> Option<String>, key: &str) -> Result<Duration, String> {
-    let raw = config::need(get, key)?;
-    match raw.parse::<u64>() {
-        Ok(secs) if secs > 0 && raw.bytes().all(|b| b.is_ascii_digit()) => {
-            Ok(Duration::from_secs(secs))
-        }
-        _ => Err(format!("{key}={raw} is no whole number of seconds above 0")),
-    }
+pub fn need_secs(
+    get: &dyn Fn(&str) -> Option<String>,
+    key: &'static str,
+) -> Result<Duration, String> {
+    config::uint(get, key, 1, u64::MAX).map(Duration::from_secs)
 }
 
 // What: the general HTTP client of several services.

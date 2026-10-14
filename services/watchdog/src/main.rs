@@ -377,23 +377,16 @@ fn load_retention(
     };
     let mut warnings = Vec::new();
     let mut knob = |spec: Uint| read_knob(&get, spec, &mut warnings);
-    let at_least = |name: &'static str, min: u64, max: u64| Uint {
-        name,
-        min,
-        max,
-        below: OutOfRange::Reject,
-        above: OutOfRange::Reject,
-    };
     let interval = knob(Uint {
         below: OutOfRange::Clamp,
-        ..at_least("CHECK_INTERVAL", 1, u64::MAX)
+        ..Uint::strict("CHECK_INTERVAL", 1, u64::MAX)
     })?;
-    let cache_valid_days = knob(at_least("CACHE_VALID_DAYS", 0, u64::MAX))?;
-    let syslog_days = knob(at_least("SYSLOG_RETENTION_DAYS", 0, u64::MAX))?;
+    let cache_valid_days = knob(Uint::strict("CACHE_VALID_DAYS", 0, u64::MAX))?;
+    let syslog_days = knob(Uint::strict("SYSLOG_RETENTION_DAYS", 0, u64::MAX))?;
     let syslog_gb = knob(config::SYSLOG_MAX_GB)?;
     let syslog_cooldown = knob(Uint {
         above: OutOfRange::Clamp,
-        ..at_least("SYSLOG_PRUNE_RETRY_COOLDOWN", 0, DAY)
+        ..Uint::strict("SYSLOG_PRUNE_RETRY_COOLDOWN", 0, DAY)
     })?;
     let retention = Retention {
         interval: Duration::from_secs(interval),
@@ -973,7 +966,7 @@ impl Timing {
     // What: every supervisor time from the env, seconds.
     // Why: a missing or junk value stops the supervisor.
     fn load() -> Result<Self, String> {
-        let secs = |key: &str| bounded(key, 1, u32::MAX.into()).map(Duration::from_secs);
+        let secs = |key| bounded(key, 1, u32::MAX.into()).map(Duration::from_secs);
         Ok(Self {
             tick: secs("SUPERVISE_TICK")?,
             backoff_start: secs("SUPERVISE_BACKOFF_START")?,
@@ -1306,15 +1299,12 @@ fn log_row(
 // Why: one file per container and day; the group reads.
 // From: Issue #1683
 fn syslog_ng_conf(
-    port: &str,
+    port: u16,
     root: &str,
     group: &str,
     off: &[&str],
     reap: u64,
 ) -> Result<String, String> {
-    if port.parse::<u16>().map_or(true, |p| p == 0) {
-        return Err(format!("LANCACHE_LOG_PORT={port} is no port"));
-    }
     if !root.starts_with('/') || root.contains(['"', '\n', '\r', '$']) {
         return Err(format!("SYSLOG_LOG_ROOT={root} is no plain absolute path"));
     }
@@ -1368,7 +1358,7 @@ fn syslog_ng(ctx: &Ctx) -> Result<Run, String> {
     let off = logging_off(ctx, &|key| ctx.need(key))?;
     let off: Vec<&str> = off.iter().map(String::as_str).collect();
     let conf = syslog_ng_conf(
-        &ctx.need("LANCACHE_LOG_PORT")?,
+        env_port("LANCACHE_LOG_PORT")?,
         &ctx.need("SYSLOG_LOG_ROOT")?,
         &ctx.need("LOG_READER_GROUP")?,
         &off,
@@ -1593,8 +1583,8 @@ fn dns_role(raw: &str) -> Result<DnsRole, String> {
 // What: a port from the env, 1 to 65535.
 // Why: the SOT owns the ports; compose passes them on.
 // From: Issue #1683 | PR #1912
-fn env_port(key: &str) -> Result<u16, String> {
-    bounded(key, 1, u16::MAX.into()).map(|p| p as u16)
+fn env_port(key: &'static str) -> Result<u16, String> {
+    config::port(&config::process_env, key)
 }
 
 // What: env keys of the PowerDNS ports here.
@@ -1689,9 +1679,9 @@ impl DnsKnobs {
     // What: every DNS render value from the env.
     // Why: a missing or junk value stops the render.
     fn load() -> Result<Self, String> {
-        let secs = |key: &str| bounded(key, 0, u32::MAX.into());
-        let count = |key: &str| bounded(key, 1, u32::MAX.into());
-        let level = |key: &str| bounded(key, 0, 9);
+        let secs = |key| bounded(key, 0, u32::MAX.into());
+        let count = |key| bounded(key, 1, u32::MAX.into());
+        let level = |key| bounded(key, 0, 9);
         let words = |key: &str| {
             config::need(&config::process_env, key)
                 .map(|v| v.split_whitespace().map(str::to_string).collect())
@@ -1753,22 +1743,13 @@ fn base64_32() -> String {
     base64::engine::general_purpose::STANDARD.encode(rand::random::<[u8; 32]>())
 }
 
-// What: the stack's runtime gid, from the image env.
-// Why: secrets and snapshots share the ui's group.
-// From: Issue #1683 | PR #1912
-fn runtime_gid() -> Result<u32, String> {
-    config::need(&config::process_env, "LANCACHE_RUNTIME_GID")?
-        .parse::<u32>()
-        .map_err(|_| "LANCACHE_RUNTIME_GID is no group id".to_string())
-}
-
 // What: a configured secret, else the shared file.
 // Why: every container and the ui agree on one value.
 // From: Issue #858
 fn stack_secret(var: &str, file: &str, make: fn() -> String) -> Result<String, String> {
     let need = |key: &str| config::need(&config::process_env, key);
     let dir = need("LANCACHE_SHARED_SECRET_DIR")?;
-    let gid = runtime_gid()?;
+    let gid = config::runtime_gid()?;
     let configured = env_opt(var).unwrap_or_default();
     let current = if shared_secret_is_placeholder(&configured) {
         ""
@@ -1797,16 +1778,11 @@ fn pdns_api_key() -> Result<String, String> {
     Ok(key)
 }
 
-// What: one whole-number knob inside [min, max].
-// Why: a bad SOA value would render an invalid zone.
-fn bounded(key: &str, min: u64, max: u64) -> Result<u64, String> {
-    let raw = config::need(&config::process_env, key)?;
-    match raw.parse::<u64>() {
-        Ok(v) if (min..=max).contains(&v) => Ok(v),
-        _ => Err(format!(
-            "{key}={raw} must be a whole number in {min}..={max}"
-        )),
-    }
+// What: one whole-number process env knob in [min, max].
+// Why: out-of-range knobs would render invalid configs.
+// From: Issue #1683 | PR #1912
+fn bounded(key: &'static str, min: u64, max: u64) -> Result<u64, String> {
+    config::uint(&config::process_env, key, min, max)
 }
 
 // What: SOA refresh, retry and resync seconds.
@@ -1841,15 +1817,14 @@ fn own_address() -> Result<std::net::Ipv4Addr, String> {
 // What: host:port with the host resolved to IPv4.
 // Why: PowerDNS needs IP:port, not a name; retry later.
 // From: Issue #1164 | PR #1775
-fn endpoint(raw: &str, key: &str) -> Result<std::net::SocketAddrV4, String> {
+fn endpoint(raw: &str, key: &'static str) -> Result<std::net::SocketAddrV4, String> {
     use std::net::ToSocketAddrs as _;
     let (host, port) = raw
         .rsplit_once(':')
         .filter(|(h, p)| !h.is_empty() && !p.is_empty())
         .ok_or_else(|| format!("{key}={raw} is not host:port"))?;
-    let port: u16 = port
-        .parse()
-        .map_err(|_| format!("{key}={raw} has no valid port"))?;
+    let port = config::port(&|_| Some(port.to_string()), key)
+        .map_err(|e| format!("{key}={raw} has no valid port: {e}"))?;
     (host, port)
         .to_socket_addrs()
         .map_err(|e| format!("{key} host {host} does not resolve: {e}"))?
@@ -2424,7 +2399,6 @@ fn rpz_zone(
 ) -> (String, usize) {
     // What: locals feed the template as plain captures.
     // Why: CodeQL misses captures beside named args.
-
     let (ttl, mname, rname) = (knobs.rpz_ttl, &knobs.soa_mname, &knobs.rpz_rname);
     let (refresh, retry, expire) = (knobs.rpz_refresh, knobs.rpz_retry, knobs.soa_expire);
     let mut zone = format!(
@@ -2520,7 +2494,6 @@ impl RecursorConf<'_> {
             .collect();
         // What: locals feed the template as plain captures.
         // Why: CodeQL misses captures beside named args.
-
         let RecursorConf {
             port,
             api_port,
@@ -2671,10 +2644,7 @@ fn nats_server(ctx: &Ctx) -> Result<Run, String> {
             )?),
         })
     })?;
-    let port = ctx.need("NATS_MONITOR_PORT")?;
-    let port = port
-        .parse::<u16>()
-        .map_err(|_| format!("NATS_MONITOR_PORT={port} is no port"))?;
+    let port = env_port("NATS_MONITOR_PORT")?;
     let body = render_nats_conf(&roles, &ctx.need("NATS_STORE_DIR")?, port, &conf, &fragment)?;
     write_file(Path::new(&conf), body.as_bytes(), 0o600, Place::Replace)
         .map_err(|e| format!("cannot write {conf}: {e}"))?;
@@ -2933,17 +2903,7 @@ fn kea_loggers(loggers: &[(&str, &str)], debuglevel: u64) -> Value {
 // From: Issue #815 | PR #1912
 fn kea_dhcp4_first(ctx: &Ctx, kea: &KeaKnobs) -> Result<Value, String> {
     let limits = config::LeaseLimits::load(&config::process_env)?;
-    let raw = ctx.need("DHCP_LEASE_TIME")?;
-    let lease = raw
-        .parse()
-        .ok()
-        .and_then(|t| limits.check(t))
-        .ok_or_else(|| {
-            format!(
-                "DHCP_LEASE_TIME={raw} is outside {}..={} seconds",
-                limits.min, limits.max
-            )
-        })?;
+    let lease = limits.lease(&config::process_env, "DHCP_LEASE_TIME")?;
     let domain = ctx.need("DHCP_DOMAIN")?;
     let mut options = vec![
         serde_json::json!({"name": "routers", "data": ctx.need("DHCP_GATEWAY")?}),
@@ -3074,7 +3034,7 @@ fn kea_socket_dir(kea: &KeaKnobs) -> Result<(), String> {
 // Why: the ui writes snapshots here; setup.sh reads them.
 // From: Issue #614 | PR #1912
 fn kea_snapshot_dir(dir: &Path) -> Result<(), String> {
-    let gid = runtime_gid()?;
+    let gid = config::runtime_gid()?;
     fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     own(dir, None, gid, 0o775)
 }
@@ -3165,10 +3125,8 @@ fn kea_ctrl_agent(ctx: &Ctx) -> Result<Run, String> {
         &shared_secret_file_name("KEA_CTRL_TOKEN"),
         hex32,
     )?;
-    let port = ctx.need("KEA_CTRL_PORT")?;
-    let port_number: u16 = port
-        .parse()
-        .map_err(|_| format!("KEA_CTRL_PORT={port} is no port"))?;
+    let port_number = env_port("KEA_CTRL_PORT")?;
+    let port = port_number.to_string();
     kea_ctrl_fence(&port, &kea)?;
     let conf = serde_json::json!({
         "Control-agent": {
@@ -3578,7 +3536,7 @@ impl CertKnobs {
     // Why: a missing or junk value stops the render.
     fn load() -> Result<Self, String> {
         let text = |key: &str| config::need(&config::process_env, key);
-        let days = |key: &str| bounded(key, 1, u32::MAX.into()).map(|d| d.to_string());
+        let days = |key| bounded(key, 1, u32::MAX.into()).map(|d| d.to_string());
         Ok(Self {
             ca_cert_file: text("CA_CERT_FILE")?,
             ca_key_file: text("CA_KEY_FILE")?,
@@ -3743,7 +3701,6 @@ fn nginx_https_dispatch(
     };
     // What: locals feed the template as plain captures.
     // Why: CodeQL misses captures beside named args.
-
     let (acl, mitm_port) = (acl.display(), ports.mitm);
     out.push_str(&format!(
         "    default {default};\n}}\n\n\
@@ -4272,7 +4229,7 @@ impl ProbeTiming {
     // What: the probe times from the env, seconds.
     // Why: a missing or junk value makes the probe fail.
     fn load() -> Result<Self, String> {
-        let secs = |key: &str| bounded(key, 1, u32::MAX.into()).map(Duration::from_secs);
+        let secs = |key| bounded(key, 1, u32::MAX.into()).map(Duration::from_secs);
         Ok(Self {
             window: secs("DHCP_PROBE_WINDOW")?,
             request_timeout: secs("DHCP_PROBE_REQUEST_TIMEOUT")?,
@@ -5438,8 +5395,8 @@ mod tests {
     // From: Issue #1683
     #[test]
     fn syslog_ng_conf_takes_a_port_and_a_root() {
-        let (port, root, group) = (rnd(1, u16::MAX.into()).to_string(), gen_path(), gen_name());
-        let conf = syslog_ng_conf(&port, &root, &group, &[], REAP).expect("conf");
+        let (port, root, group) = (rnd(1, u16::MAX.into()) as u16, gen_path(), gen_name());
+        let conf = syslog_ng_conf(port, &root, &group, &[], REAP).expect("conf");
         assert!(conf.contains(&format!("port({port})")), "{conf}");
         assert!(
             conf.contains(&format!("file(\"{root}/${{PROGRAM}}/")),
@@ -5447,13 +5404,13 @@ mod tests {
         );
         assert!(conf.contains(&format!("dir-group(\"{group}\")")), "{conf}");
         assert!(conf.contains(&format!(" group(\"{group}\")")), "{conf}");
-        assert!(syslog_ng_conf("0", &root, &group, &[], REAP).is_err());
-        assert!(syslog_ng_conf(&gen_name(), &root, &group, &[], REAP).is_err());
-        assert!(syslog_ng_conf(&port, &gen_name(), &group, &[], REAP).is_err());
-        assert!(syslog_ng_conf(&port, &format!("{root}\""), &group, &[], REAP).is_err());
-        assert!(syslog_ng_conf(&port, &root, "", &[], REAP).is_err());
-        assert!(syslog_ng_conf(&port, &root, "a\"b", &[], REAP).is_err());
-        assert!(syslog_ng_conf(&port, &root, &group, &["a|b"], REAP).is_err());
+        let port_of = |raw: String| config::port(&move |_| Some(raw.clone()), "LANCACHE_LOG_PORT");
+        assert!(port_of("0".into()).is_err() && port_of(gen_name()).is_err());
+        assert!(syslog_ng_conf(port, &gen_name(), &group, &[], REAP).is_err());
+        assert!(syslog_ng_conf(port, &format!("{root}\""), &group, &[], REAP).is_err());
+        assert!(syslog_ng_conf(port, &root, "", &[], REAP).is_err());
+        assert!(syslog_ng_conf(port, &root, "a\"b", &[], REAP).is_err());
+        assert!(syslog_ng_conf(port, &root, &group, &["a|b"], REAP).is_err());
     }
 
     // What: a logging switch drops only its own program.
@@ -5487,9 +5444,9 @@ mod tests {
         let off = logging_off(&ctx, &program_of).expect("two off");
         let (first, third) = (&names[0], &names[2]);
         assert_eq!(off, [first.clone(), third.clone()]);
-        let (port, path, group) = (rnd(1, u16::MAX.into()).to_string(), gen_path(), gen_name());
+        let (port, path, group) = (rnd(1, u16::MAX.into()) as u16, gen_path(), gen_name());
         let off: Vec<&str> = off.iter().map(String::as_str).collect();
-        let conf = syslog_ng_conf(&port, &path, &group, &off, REAP).expect("conf");
+        let conf = syslog_ng_conf(port, &path, &group, &off, REAP).expect("conf");
         assert!(
             conf.contains(&format!("and not program(\"^({first}|{third})$\"")),
             "{conf}"
@@ -5497,7 +5454,7 @@ mod tests {
         for kept in [&names[1], &names[3]] {
             assert!(!conf.contains(kept.as_str()), "{kept}: {conf}");
         }
-        let all_on = syslog_ng_conf(&port, &path, &group, &[], REAP).expect("conf");
+        let all_on = syslog_ng_conf(port, &path, &group, &[], REAP).expect("conf");
         assert!(!all_on.contains("not program"), "{all_on}");
         save(["1", "x", "1", "1"]);
         assert!(logging_off(&ctx, &program_of).is_err());
@@ -5573,7 +5530,7 @@ mod tests {
             "log_format cache '$remote_addr - [$time_local] \"$request\" '\n                     '$status $body_bytes_sent '\n                     '\"$upstream_cache_status\" \"$host\"';"
         ));
         assert!(nginx.contains("access_log /dev/stdout cache;"));
-        let syslog = syslog_ng_conf("514", "/r", "g", &[], REAP).expect("conf");
+        let syslog = syslog_ng_conf(514, "/r", "g", &[], REAP).expect("conf");
         assert!(syslog.contains(r#"template("${ISODATE} ${HOST} ${PROGRAM}: ${MSGONLY}\n")"#));
         for bad in ["relative.log", "/a b", "/a'b", "/a\nb"] {
             assert!(web_log_conf(bad).is_err(), "{bad:?}");
