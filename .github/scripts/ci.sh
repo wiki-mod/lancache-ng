@@ -1085,7 +1085,7 @@ ci_cmd_plan_matrix() {
     _ci_docs_only "${changed[@]}" || drc=$?
     case "${drc}" in 0) docs_only=true ;; 1) ;; *) return 2 ;; esac
     local service platform include='[]' any=false resolved paction pident pimpact runner authed=false test_services=''
-    local _ci_plan_ids="" _ci_run_sig=""
+    local _ci_plan_ids=""
     local sot_changed=false f path_cand rc plats unknown=""
     # What: SOT change makes every target id candidate.
     # Why: pins live in SOT; identity decides BUILD.
@@ -1893,6 +1893,11 @@ _ci_identity_one() {
     printf 'platform=%s identity=%s\n' "$2" "${id}"
 }
 
+# What: this run's toolchain apk state, one owner below.
+# Why: a build job needs it outside a planner scope.
+# From: Issue #1683 | PR #1912
+_ci_run_sig=""
+
 # What: toolchain apk state, resolved once per run.
 # Why: one state per run; x keeps its last newline.
 # From: Issue #1683 | PR #1912
@@ -1940,7 +1945,7 @@ _ci_for_all_pairs() {
 # Why: the call is a planner scope; its record is local.
 # From: Issue #1683 | PR #1912
 ci_cmd_identity() {
-    local service="${1:-}" platform="${2:-}" _ci_plan_ids="" _ci_run_sig=""
+    local service="${1:-}" platform="${2:-}" _ci_plan_ids=""
     [ -n "${service}" ] || { ci_log "[CI-ERROR-IDENTITY-0001]" "reason=\"service arg required\""; return 2; }
     if [ "${service}" = --run-record ]; then
         _ci_for_all_pairs _ci_plan_record || return "$?"
@@ -2051,7 +2056,7 @@ ci_cmd_impact() {
     # What: this command is a planner scope.
     # Why: head ids at a ref are computed live, never read.
     # From: Issue #1683 | PR #1912
-    local _ci_plan_ids="" _ci_run_sig=""
+    local _ci_plan_ids=""
     if [ -z "${base}" ]; then
         ci_log "[CI-ERROR-IMPACT-0001]" "reason=\"base ref arg required\""
         return 2
@@ -4995,6 +5000,11 @@ _ci_build_one() {
             return 2
             ;;
     esac
+
+    # What: resolve the package state before the impact.
+    # Why: a build job is no planner scope; read once.
+    # From: Issue #1683 | PR #1912
+    _ci_run_sig_once || return 2
 
     # What: Prove semantic build impact before admission.
     # Why: MISSING_CONFIRMED alone MUST NOT build.

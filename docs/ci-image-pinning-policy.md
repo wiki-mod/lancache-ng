@@ -93,10 +93,11 @@ CI 2.0 decides reuse the same way for every trigger
 (docs/ci-2.0-architecture.md sections 6, 27 and 54): a target is rebuilt only
 when its build identity changed and no accepted digest exists for it. The base
 image enters the identity as its SOT-pinned digest (`base_digest`) and apk
-package versions are resolved live once per run, where the plan fixes every
-pair's identity (`package_versions`, `CI_RUN_IDENTITIES`), so a new pin or a
-newer package changes the identity and requires a build; an unchanged one
-reuses the accepted digest.
+package versions are resolved live from the package index
+(`package_versions`); the planner run record (`CI_RUN_IDENTITIES`) then fixes
+every pair's identity for the rest of the run, so a new pin or a newer
+package changes the identity and requires a build; an unchanged one reuses
+the accepted digest.
 
 A run started by one of the events the SOT lists in
 `build_admission.refresh_events` has no base commit to compare against. Section
