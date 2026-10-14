@@ -1810,27 +1810,38 @@ _ci_identity_recorded() {
     printf '%s\n' "${id}"
 }
 
-# What: Print the bare id of one target+platform.
-# Why: Platform mixed in so arches never collide.
-# From: Issue #1683
+# What: pair id read only from the planner's run record.
+# Why: no consumer can mint a second id in one run (§17).
+# From: Issue #1683 | PR #1912
 _ci_identity_for() {
-    local service="$1" platform="$2" ref="${3:-}" build_type pins content buf rec rrc=0
-    # What: a given run record is the only id source.
-    # Why: a live apk re-read in a later job can differ.
-    # From: Issue #1683 | PR #1912
-    rec="${CI_RUN_IDENTITIES-${_ci_plan_ids:-}}"
-    if [ -z "${ref}" ] && { [ -n "${CI_RUN_IDENTITIES+x}" ] || [ -n "${rec}" ]; }; then
-        _ci_identity_recorded "${rec}" "${service}" "${platform}" || rrc=$?
-        case "${rrc}" in
-            0) return 0 ;;
-            1)
-                if [ -n "${CI_RUN_IDENTITIES+x}" ]; then
-                    ci_log "[CI-ERROR-IDENTITY-0015]" "service=\"${service}\" platform=\"${platform}\" reason=\"pair not in the given run record; FAIL CLOSED\""
-                    return 2
-                fi
-                ;;
-            *) return 2 ;;
-        esac
+    local service="$1" platform="$2" rec rc=0
+    if [ -n "${CI_RUN_IDENTITIES+x}" ]; then
+        rec="${CI_RUN_IDENTITIES}"
+    elif [ -n "${_ci_plan_ids+x}" ]; then
+        rec="${_ci_plan_ids}"
+    else
+        ci_log "[CI-ERROR-IDENTITY-0017]" "service=\"${service}\" platform=\"${platform}\" reason=\"no run record; only plan-matrix or identity --run-record fixes ids; FAIL CLOSED\""
+        return 2
+    fi
+    _ci_identity_recorded "${rec}" "${service}" "${platform}" || rc=$?
+    case "${rc}" in
+        0) return 0 ;;
+        1)
+            ci_log "[CI-ERROR-IDENTITY-0015]" "service=\"${service}\" platform=\"${platform}\" reason=\"pair not in the run record; FAIL CLOSED\""
+            return 2
+            ;;
+        *) return 2 ;;
+    esac
+}
+
+# What: compute a pair id live from SOT, apk and inputs.
+# Why: only a planner scope may; a given record forbids it.
+# From: Issue #1683 | PR #1912
+_ci_identity_compute() {
+    local service="$1" platform="$2" ref="${3:-}" build_type pins content buf
+    if [ -n "${CI_RUN_IDENTITIES+x}" ] || [ -z "${_ci_plan_ids+x}" ]; then
+        ci_log "[CI-ERROR-IDENTITY-0018]" "service=\"${service}\" platform=\"${platform}\" reason=\"live id outside a planner scope or beside a given run record; FAIL CLOSED\""
+        return 2
     fi
     build_type="$(_ci_required_field "${service}" build_type)" || return 2
     # What: every id input is captured and checked first.
@@ -1873,8 +1884,20 @@ _ci_for_platforms() {
 # From: Issue #1683
 _ci_identity_one() {
     local id
+    # What: record the pair first unless a record is given.
+    # Why: the CLI reads its own record, never a second id.
+    # From: Issue #1683 | PR #1912
+    [ -n "${CI_RUN_IDENTITIES+x}" ] || _ci_plan_record "$1" "$2" || return "$?"
     id="$(_ci_identity_for "$1" "$2")" || return "$?"
     printf 'platform=%s identity=%s\n' "$2" "${id}"
+}
+
+# What: toolchain apk state, resolved once per run.
+# Why: one state per run; x keeps its last newline.
+# From: Issue #1683 | PR #1912
+_ci_run_sig_once() {
+    [ -z "${_ci_run_sig}" ] || return 0
+    _ci_run_sig="$(_ci_build_tools_resolve_signature && printf x)" || return 2
 }
 
 # What: add a pair's id to the run record once.
@@ -1888,13 +1911,8 @@ _ci_plan_record() {
         1) ;;
         *) return 2 ;;
     esac
-    # What: toolchain apk state resolved once per record.
-    # Why: every pair of one run embeds the same state.
-    # From: Issue #1683 | PR #1912
-    if [ -z "${_ci_run_sig}" ]; then
-        _ci_run_sig="$(_ci_build_tools_resolve_signature && printf x)" || return 2
-    fi
-    id="$(_ci_identity_for "$1" "$2")" || return "$?"
+    _ci_run_sig_once || return 2
+    id="$(_ci_identity_compute "$1" "$2")" || return "$?"
     _ci_plan_ids+=" $1@$2=${id}"
 }
 
@@ -1918,13 +1936,12 @@ _ci_for_all_pairs() {
 }
 
 # What: a target's ids per platform, or the run record.
-# Why: --run-record gives nightly jobs one id per pair.
+# Why: the call is a planner scope; its record is local.
 # From: Issue #1683 | PR #1912
 ci_cmd_identity() {
-    local service="${1:-}" platform="${2:-}"
+    local service="${1:-}" platform="${2:-}" _ci_plan_ids="" _ci_run_sig=""
     [ -n "${service}" ] || { ci_log "[CI-ERROR-IDENTITY-0001]" "reason=\"service arg required\""; return 2; }
     if [ "${service}" = --run-record ]; then
-        local _ci_plan_ids="" _ci_run_sig=""
         _ci_for_all_pairs _ci_plan_record || return "$?"
         _ci_record_emit
         return "$?"
@@ -1949,40 +1966,43 @@ _ci_manifest_at() {
     _ci_sot_load "${dest}"
 }
 
+# What: classify one pair base vs head and count it.
+# Why: writes the caller's counters (dynamic scope).
+# From: Issue #1683 | PR #1912
+_ci_impact_pair() {
+    local t="$1" p="$2" hid v
+    if [ "${base_missing}" -eq 1 ]; then
+        # What: no base SOT -> UNKNOWN, escalate.
+        # Why: no base truth -> no BUILD.
+        # From: Issue #1683
+        printf 'target=%s platform=%s impact=UNKNOWN\n' "${t}" "${p}"
+        unknown=$((unknown+1))
+        return 0
+    fi
+    hid="$(_ci_identity_compute "${t}" "${p}" "${head}")" || hid=""
+    v="$(_ci_impact_classify "${t}" "${p}" "${hid}" "${base}" "${base_manifest}" "${head}")"
+    printf 'target=%s platform=%s impact=%s\n' "${t}" "${p}" "${v}"
+    case "${v}" in
+        NOOP) noop=$((noop+1)) ;;
+        BUILD) build=$((build+1)) ;;
+        *) unknown=$((unknown+1)) ;;
+    esac
+}
+
 # What: Emit NOOP or BUILD per target and platform.
 # Why: Equal identity base-vs-head is the no-build rule.
 # From: Issue #1683
 _ci_impact_run() {
     local base="$1" head="$2" base_manifest="$3"
-    local base_missing=0 t p plats hid v build=0 noop=0 unknown=0 targets
-    targets="$(ci_build_targets)" || return 2
+    local base_missing=0 build=0 noop=0 unknown=0
     if ! _ci_manifest_at "${base}" "${base_manifest}" || [ ! -s "${base_manifest}" ]; then
         base_missing=1
         ci_log "[CI-INFO-IMPACT-0002]" "base=\"${base}\" reason=\"no SOT at base; UNKNOWN, escalate, BUILD DISACK\""
     fi
-    while IFS= read -r t; do
-        [ -n "${t}" ] || continue
-        plats="$(_ci_platforms "${t}")" || return "$?"
-        while IFS= read -r p; do
-            [ -n "${p}" ] || continue
-            if [ "${base_missing}" -eq 1 ]; then
-                # What: no base SOT -> UNKNOWN, escalate.
-                # Why: no base truth -> no BUILD.
-                # From: Issue #1683
-                printf 'target=%s platform=%s impact=UNKNOWN\n' "${t}" "${p}"
-                unknown=$((unknown+1))
-                continue
-            fi
-            hid="$(_ci_identity_for "${t}" "${p}" "${head}")" || hid=""
-            v="$(_ci_impact_classify "${t}" "${p}" "${hid}" "${base}" "${base_manifest}" "${head}")"
-            printf 'target=%s platform=%s impact=%s\n' "${t}" "${p}" "${v}"
-            case "${v}" in
-                NOOP) noop=$((noop+1)) ;;
-                BUILD) build=$((build+1)) ;;
-                *) unknown=$((unknown+1)) ;;
-            esac
-        done <<< "${plats}"
-    done <<< "${targets}"
+    if [ "${base_missing}" -eq 0 ]; then
+        _ci_run_sig_once || return 2
+    fi
+    _ci_for_all_pairs _ci_impact_pair || return "$?"
     printf 'impact result=classified build=%s noop=%s unknown=%s base=%s\n' "${build}" "${noop}" "${unknown}" "${base}"
     # What: base-missing escalates; UNKNOWN never builds.
     # Why: base-SOT-unavailable stays DISACK, escalates.
@@ -2027,6 +2047,10 @@ _ci_impact_classify() {
 # From: Issue #1683
 ci_cmd_impact() {
     local base="${1:-}" head="${2:-HEAD}" base_manifest rc=0
+    # What: this command is a planner scope.
+    # Why: head ids at a ref are computed live, never read.
+    # From: Issue #1683 | PR #1912
+    local _ci_plan_ids="" _ci_run_sig=""
     if [ -z "${base}" ]; then
         ci_log "[CI-ERROR-IMPACT-0001]" "reason=\"base ref arg required\""
         return 2

@@ -85,7 +85,7 @@ current for the same commit.
 | Workflow | Jobs and `ci.sh` commands | Trigger |
 |---|---|---|
 | `ci.yml` | `plan` (`changed-files`, `plan-matrix`), `lint` (`check shellcheck`, `check actionlint`), `checks` (`check all`, which runs `check ci-bats`), `cargo-audit`, `build` (`ship`), `test` (`test-stack`), `scan` (`scan-stack`), `aggregate`, `assemble`, `validate`, `promote` (`promote-ref`), `result` (`result-gate`) | pull request, push to `current_dev`/`master`, `v*` tag, dispatch |
-| `nightly.yml` | `platform` (`channel-checkout nightly`), `validate`, `cargo-audit`, `nightly` (`promote nightly`), `scan` (`scan-channel`), `report` (`nightly-report`) | schedule, dispatch |
+| `nightly.yml` | `platform` (`channel-checkout nightly`), `plan` (`identity --run-record`), `validate`, `cargo-audit`, `nightly` (`promote nightly`), `scan` (`scan-channel`), `report` (`nightly-report`) | schedule, dispatch |
 | `release.yml` | `cut-release-tag`, `release-changelog`, `release-publish`, `release-vex`, `release-sbom-stack`, `release-images` (matrix of `actions/attest` in `release-provenance`) | `v*` tag, dispatch |
 | `gc.yml` | `gc --apply`, `check orphaned-branches` | schedule, dispatch |
 | `codeql.yml` | `codeql-impact`, `codeql-analyze <language>` | pull request, push, schedule, dispatch |
@@ -495,6 +495,7 @@ a stated reason it has none (AG-VAL-029).
 | `$?` read from an `if` instead of the command | `check shell-guards` |
 | An exit path losing its code, context or raw output | `check exit-evidence` |
 | Mutable image or action reference | `check mutable-refs`; `check action-node-versions` |
+| Two jobs of one run computing two identities for one target and platform | `_ci_identity_compute` runs only in a planner scope (`plan-matrix`, `identity`, `impact`) and fails closed beside a given `CI_RUN_IDENTITIES` (IDENTITY-0018); every other reader goes through `_ci_identity_for`, which reads only the run record and fails closed without it or without the pair (IDENTITY-0017, IDENTITY-0015) |
 
 ### No durable check
 
@@ -516,12 +517,6 @@ recurrence:
   `channel-checkout`.
 - **A scan of another image than the published digest**: `scan-stack` scans
   `_ci_published_digest`.
-- **Two jobs of one run computing two identities for one target and platform**
-  (live package indexes read again later): `plan-matrix` (ci.yml) and
-  `identity --run-record` (nightly.yml plan job) record each pair's identity
-  once, before any decision reads it, with one toolchain package state per run;
-  `_ci_identity_for` reads `CI_RUN_IDENTITIES` in later jobs and fails closed on
-  a pair missing from it, also when the record is empty.
 - **Case-sensitive repository-name comparison**: `_ci_repo` lowercases.
 - **Closing keywords read outside the linked-issues section**: `_ci_pr_section`.
 - **A Trivy finding, DB outage or scan error that no issue reports, or that one case
