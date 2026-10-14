@@ -26,7 +26,7 @@ use lancache_ng::config::{
 };
 use lancache_ng::{
     Backoff, DnsRecord, FlushRequest, PowerDns, SnapshotStore, ct_eq, die, http_client,
-    snapshot_created_unix, unix_nanos,
+    need_millis, need_secs, snapshot_created_unix, unix_nanos,
 };
 use reqwest::Method;
 use serde::Deserialize;
@@ -35,22 +35,9 @@ use serde_json::{Value, json};
 // What: log tag of start errors.
 // Why: the log shows which service refused to start.
 const TAG: &str = "nats-subscriber";
-// What: wait between NATS reconnect attempts.
-// Why: a restarting server is retried without a busy loop.
-const RECONNECT_DELAY: Duration = Duration::from_secs(3);
-// What: delay before a Nak'd message is redelivered.
-// Why: a retry must not spin at full speed.
-const NAK_DELAY: Duration = Duration::from_millis(100);
-// What: pause between two confirmation reads of a zone.
-// Why: AXFR needs a moment to land on this node.
-const CONFIRM_PAUSE: Duration = Duration::from_millis(100);
-// What: messages per fetch, and how long a fetch waits.
-// Why: bounds a batch; an idle fetch ends after the wait.
+// What: messages per fetch.
+// Why: bounds a batch; NATS_FETCH_WAIT ends an idle fetch.
 const FETCH_BATCH: usize = 10;
-const FETCH_WAIT: Duration = Duration::from_secs(5);
-// What: period of the snapshot watcher and the reconciler.
-// Why: a missed message converges within a minute.
-const TICK: Duration = Duration::from_secs(60);
 // What: in-process confirmation tries before a Nak.
 // Why: a longer sleep holds the message past ack_wait.
 // From: Issue #1095
@@ -60,10 +47,68 @@ const CONFIRM_TRIES: u32 = 3;
 // From: Issue #1095
 const CONFIRM_MAX_DELIVERIES: i64 = 100;
 
+// What: the subscriber's waits, from the SOT defaults.
+// Why: no wait is a literal; the image bakes each value.
+// From: Issue #1683 | PR #1912
+#[derive(Clone, Copy, Debug)]
+struct Times {
+    // What: pause between two NATS reconnect attempts.
+    // Why: a restarting server is retried, no busy loop.
+    // From: Issue #1683 | PR #1912
+    reconnect: Duration,
+    // What: delay before a Nak'd message is redelivered.
+    // Why: a retry must not spin at full speed.
+    // From: Issue #1683 | PR #1912
+    nak: Duration,
+    // What: pause between two confirmation reads of a zone.
+    // Why: AXFR needs a moment to land on this node.
+    // From: Issue #1683 | PR #1912
+    confirm_pause: Duration,
+    // What: how long one fetch waits for messages.
+    // Why: an idle fetch ends after the wait.
+    // From: Issue #1683 | PR #1912
+    fetch_wait: Duration,
+    // What: period of the snapshot watcher and reconciler.
+    // Why: a missed message converges on the next tick.
+    // From: Issue #1683 | PR #1912
+    tick: Duration,
+    // What: limit of one pdnsutil check-zone run.
+    // Why: a hung pdnsutil must not stall the subscriber.
+    // From: Issue #1683 | PR #1912
+    zone_check: Duration,
+    // What: limit of one cache-flush publish.
+    // Why: serial acks would exceed the ui's HTTP timeout.
+    // From: Issue #1683 | PR #1912
+    flush: Duration,
+    // What: age after which the DNS stream drops messages.
+    // Why: messages survive a restart; the oldest go first.
+    // From: Issue #1683 | PR #1912
+    stream_max_age: Duration,
+}
+
+impl Times {
+    // What: every subscriber wait from a reader.
+    // Why: a missing or junk value stops the start.
+    // From: Issue #1683 | PR #1912
+    fn load(get: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
+        Ok(Self {
+            reconnect: need_secs(get, "NATS_RECONNECT_DELAY")?,
+            nak: need_millis(get, "NATS_NAK_DELAY_MS")?,
+            confirm_pause: need_millis(get, "DNS_CONFIRM_PAUSE_MS")?,
+            fetch_wait: need_secs(get, "NATS_FETCH_WAIT")?,
+            tick: need_secs(get, "DNS_SYNC_TICK")?,
+            zone_check: need_secs(get, "PDNS_ZONE_CHECK_TIMEOUT")?,
+            flush: need_secs(get, "DNS_FLUSH_TIMEOUT")?,
+            stream_max_age: need_secs(get, "NATS_DNS_STREAM_MAX_AGE")?,
+        })
+    }
+}
+
 // What: state shared by the consumer and the helper tasks.
 // Why: one lock orders zone writes, snapshots, rollbacks.
 struct Ctx {
     pdns: PowerDns,
+    times: Times,
     // What: auth and recursor API roots, auth config dir.
     // Why: the dns supervisor owns the layout, passes it.
     pdns_auth_url: String,
@@ -276,10 +321,10 @@ async fn snapshot_zone(ctx: &Ctx, zone: &str) {
     }
 }
 
-// What: every minute, snapshot all managed zones.
+// What: every DNS_SYNC_TICK, snapshot all managed zones.
 // Why: runs on every node, unlike the NATS reconciler.
 async fn snapshot_watcher(ctx: Arc<Ctx>) {
-    let mut interval = tokio::time::interval(TICK);
+    let mut interval = tokio::time::interval(ctx.times.tick);
     loop {
         interval.tick().await;
         for zone in rollback_zones(&ctx.lan_zone) {
@@ -288,10 +333,10 @@ async fn snapshot_watcher(ctx: Arc<Ctx>) {
     }
 }
 
-// What: every minute, republish the lan zone to NATS.
+// What: every DNS_SYNC_TICK, republish the lan zone.
 // Why: a node that missed messages converges again.
 async fn reconciler(ctx: Arc<Ctx>) {
-    let mut interval = tokio::time::interval(TICK);
+    let mut interval = tokio::time::interval(ctx.times.tick);
     loop {
         interval.tick().await;
         let rrsets = match ctx.zone_rrsets(&ctx.lan_zone).await {
@@ -541,7 +586,7 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
             if confirmed {
                 break;
             }
-            tokio::time::sleep(CONFIRM_PAUSE).await;
+            tokio::time::sleep(ctx.times.confirm_pause).await;
         }
         if !confirmed {
             let delivered = msg.info().map_or(0, |info| info.delivered);
@@ -660,7 +705,7 @@ async fn check_zone(ctx: &Ctx, store: &SnapshotStore, zone: &str) -> bool {
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .status();
-    match tokio::time::timeout(Duration::from_secs(10), status).await {
+    match tokio::time::timeout(ctx.times.zone_check, status).await {
         Ok(Ok(status)) => status.success(),
         Ok(Err(e)) => {
             store.log(
@@ -789,13 +834,13 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
         publish_patch(&ctx.js, &ctx.lan_zone, &patch).await;
     }
 
-    // What: all flushes run at once, 3 s each.
-    // Why: serial acks would exceed the ui's 10 s timeout.
+    // What: all flushes at once, each DNS_FLUSH_TIMEOUT.
+    // Why: serial acks would exceed the ui's HTTP timeout.
     let logger = &store;
     let flushes = changed.iter().map(|name| async move {
         let payload = json!({"domain": name}).to_string().into_bytes();
         let sent = publish(&ctx.js, NATS_SUBJECT_FLUSH, None, payload);
-        match tokio::time::timeout(Duration::from_secs(3), sent).await {
+        match tokio::time::timeout(ctx.times.flush, sent).await {
             Ok(Ok(())) => None,
             Ok(Err(e)) => {
                 logger.log(
@@ -807,7 +852,10 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
             Err(_) => {
                 logger.log(
                     "WARNING",
-                    &format!("cache-flush for {name} did not complete within 3s"),
+                    &format!(
+                        "cache-flush for {name} did not complete within {:?}",
+                        ctx.times.flush
+                    ),
                 );
                 Some(name.clone())
             }
@@ -901,12 +949,13 @@ async fn main() {
     let reconcile = env_opt("NATS_RECONCILER").is_some_and(|v| parse_bool(&v) == Some(true));
     let keep_n = uint(&process_env, "KEEP_KNOWN_GOOD_CONFIGS", 1, u32::MAX.into())
         .unwrap_or_else(|error| die(TAG, &error));
+    let times = Times::load(&process_env).unwrap_or_else(|error| die(TAG, &error));
     let snapshot_dir = required("DNS_CONFIG_SNAPSHOT_DIR");
     let rollback_addr = required("DNS_ROLLBACK_LISTEN_ADDR");
 
     let mut options = async_nats::ConnectOptions::new()
         .max_reconnects(None)
-        .reconnect_delay_callback(|_| RECONNECT_DELAY);
+        .reconnect_delay_callback(move |_| times.reconnect);
     // What: the secondary login, else the dns writer login.
     // Why: the writer name has one owner, the SOT default.
     // From: Issue #1683 | PR #1912
@@ -923,13 +972,13 @@ async fn main() {
     println!("Connected to NATS at {nats_url}");
     let js = jetstream::new(client);
 
-    // What: a file-backed stream keeping messages 7 days.
+    // What: a file-backed stream, NATS_DNS_STREAM_MAX_AGE.
     // Why: messages survive a restart; the oldest go first.
     let stream_config = jetstream::stream::Config {
         name: NATS_STREAM_DNS.to_string(),
         subjects: vec![NATS_SUBJECT_DNS.to_string()],
         storage: jetstream::stream::StorageType::File,
-        max_age: Duration::from_secs(7 * 24 * 60 * 60),
+        max_age: times.stream_max_age,
         discard: jetstream::stream::DiscardPolicy::Old,
         ..Default::default()
     };
@@ -952,6 +1001,7 @@ async fn main() {
     let http = http_client(&process_env).unwrap_or_else(|e| die(TAG, &e));
     let ctx = Arc::new(Ctx {
         pdns: PowerDns::new(http, api_key),
+        times,
         pdns_auth_url: required("PDNS_AUTH_API_URL"),
         pdns_rec_urls: required("PDNS_REC_API_URLS")
             .split_whitespace()
@@ -979,7 +1029,7 @@ async fn main() {
         let fetched = consumer
             .fetch()
             .max_messages(FETCH_BATCH)
-            .expires(FETCH_WAIT)
+            .expires(times.fetch_wait)
             .messages()
             .await;
         let mut messages = match fetched {
@@ -1004,7 +1054,7 @@ async fn main() {
             let outcome = handle(&ctx, &msg, &mut applied, record_writes).await;
             let settled = match outcome {
                 Outcome::Ack => msg.ack().await,
-                _ => msg.ack_with(jetstream::AckKind::Nak(Some(NAK_DELAY))).await,
+                _ => msg.ack_with(jetstream::AckKind::Nak(Some(times.nak))).await,
             };
             if let Err(e) = settled {
                 eprintln!("Error settling message: {e}");
@@ -1274,6 +1324,7 @@ mod tests {
                 http_client(&lancache_ng::test_http_env).unwrap(),
                 "k3y".to_string(),
             ),
+            times: Times::load(&|_| Some("1".to_string())).expect("times"),
             pdns_auth_url: format!("{pdns_base}/api/v1/servers/localhost"),
             pdns_rec_urls: vec![format!("{pdns_base}/rec")],
             pdns_auth_config_dir: "/no/such/config".to_string(),

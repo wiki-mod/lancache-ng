@@ -489,7 +489,7 @@ to their actual source -- collected here rather than left as unexplained
 "is this a problem?" notes:
 
 - **`Reconciler: published 0 records`** (`services/dns/nats-subscriber/src/main.rs`'s
-  `reconciler()`): a periodic (every 60s) full-resync pass that queries
+  `reconciler()`): a periodic (every `DNS_SYNC_TICK`, SOT runtime.defaults) full-resync pass that queries
   PowerDNS's `lan.` zone via its REST API and re-publishes every non-SOA/NS
   record over NATS, independent of the event-driven immediate-publish path
   used when a record actually changes. **Expected** whenever the `lan.` zone

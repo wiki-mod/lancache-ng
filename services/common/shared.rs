@@ -254,6 +254,16 @@ pub fn need_secs(
     config::uint(get, key, 1, u64::MAX).map(Duration::from_secs)
 }
 
+// What: whole milliseconds above 0 of one _MS key.
+// Why: sub-second waits take the same Uint rule.
+// From: Issue #1683 | PR #1912
+pub fn need_millis(
+    get: &dyn Fn(&str) -> Option<String>,
+    key: &'static str,
+) -> Result<Duration, String> {
+    config::uint(get, key, 1, u64::MAX).map(Duration::from_millis)
+}
+
 // What: retry delays: start, then doubled up to max.
 // Why: ui, nats-subscriber and watchdog back off alike.
 // From: Issue #1683 | PR #1912
