@@ -31,10 +31,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 
-// What: seconds Docker waits for SIGTERM before SIGKILL.
-// Why: stays inside the restart call's own API budget.
-const RESTART_GRACE_SECS: u32 = 2;
-
 // What: central-control settings, read once at start.
 // Why: a deployment change recreates this container.
 struct Settings {
@@ -45,6 +41,9 @@ struct Settings {
     // Why: ZERO would mean "instant" to the HTTP client.
     api_timeout: Option<Duration>,
     restart_timeout: Option<Duration>,
+    // What: seconds Docker waits for TERM before KILL.
+    // Why: stays inside the restart call's own API budget.
+    restart_grace: u32,
     disk_warn_pct: u32,
     disk_alarm_pct: u32,
     status_file: PathBuf,
@@ -104,6 +103,7 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
     };
     let check_interval = knob("CHECK_INTERVAL", 1, u64::MAX)?;
     let restart_after = knob("RESTART_AFTER", 1, u32::MAX.into())?;
+    let restart_grace = knob("DOCKER_RESTART_GRACE", 0, u32::MAX.into())?;
     let disk_warn_pct = knob("DISK_WARN_PCT", 0, u32::MAX.into())?;
     let disk_alarm_pct = knob("DISK_ALARM_PCT", 0, u32::MAX.into())?;
     let api = api_timeout(get("DOCKER_API_TIMEOUT").as_deref(), "DOCKER_API_TIMEOUT")?;
@@ -118,6 +118,7 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
         restart_after: restart_after as u32,
         api_timeout: api,
         restart_timeout: restart,
+        restart_grace: restart_grace as u32,
         disk_warn_pct: disk_warn_pct as u32,
         disk_alarm_pct: disk_alarm_pct as u32,
         status_file: PathBuf::from(need("STATUS_FILE")?),
@@ -913,7 +914,7 @@ async fn watch() -> Result<(), String> {
                 Event::Restart => {
                     log(&format!("RESTARTING {name}"));
                     if let Err(e) = docker
-                        .restart(&name, RESTART_GRACE_SECS, s.restart_timeout)
+                        .restart(&name, s.restart_grace, s.restart_timeout)
                         .await
                     {
                         log_err(&format!("WARNING: restart of {name} failed: {e}"));
@@ -952,25 +953,36 @@ fn write_status(s: &Settings, services: HashMap<String, ServiceHealth>) -> Resul
         .map_err(|e| format!("cannot write {}: {e}", s.status_file.display()))
 }
 
-// What: pause before a program or task starts again.
-// Why: a crash loop must not spin; it caps at 30 s.
-const BACKOFF_MAX: Duration = Duration::from_secs(30);
+// What: supervisor times: tick, backoff, stop grace.
+// Why: the SOT owns each value; Rust names only keys.
+// From: Issue #1683 | PR #1912
+#[derive(Clone, Copy)]
+struct Timing {
+    // What: how often the supervisor converges.
+    tick: Duration,
+    // What: first and largest pause before a restart.
+    backoff_start: Duration,
+    backoff_max: Duration,
+    // What: a run this long resets the restart backoff.
+    backoff_reset: Duration,
+    // What: wait for a stopped program before SIGKILL.
+    stop_grace: Duration,
+}
 
-// What: a run this long resets the restart backoff.
-// Why: a crash after a good run is a fresh failure.
-const BACKOFF_RESET: Duration = Duration::from_secs(60);
-
-// What: how often the supervisor converges.
-// Why: a settings change applies within one tick.
-const TICK: Duration = Duration::from_secs(2);
-
-// What: wait for a stopped program before SIGKILL.
-// Why: Docker's own stop grace is 10 s; stay inside it.
-const STOP_GRACE: Duration = Duration::from_secs(8);
-
-// What: oldest supervisor status the healthcheck accepts.
-// Why: a hung supervisor stops writing; that is red.
-const STATUS_MAX_AGE: u64 = 30;
+impl Timing {
+    // What: every supervisor time from the env, seconds.
+    // Why: a missing or junk value stops the supervisor.
+    fn load() -> Result<Self, String> {
+        let secs = |key: &str| bounded(key, 1, u32::MAX.into()).map(Duration::from_secs);
+        Ok(Self {
+            tick: secs("SUPERVISE_TICK")?,
+            backoff_start: secs("SUPERVISE_BACKOFF_START")?,
+            backoff_max: secs("SUPERVISE_BACKOFF_MAX")?,
+            backoff_reset: secs("SUPERVISE_BACKOFF_RESET")?,
+            stop_grace: secs("SUPERVISE_STOP_GRACE")?,
+        })
+    }
+}
 
 // What: inputs every program reads at render time.
 // Why: a saved setting beats the env; the file is optional.
@@ -1293,7 +1305,13 @@ fn log_row(
 // What: syslog-ng.conf for the Docker syslog input.
 // Why: one file per container and day; the group reads.
 // From: Issue #1683
-fn syslog_ng_conf(port: &str, root: &str, group: &str, off: &[&str]) -> Result<String, String> {
+fn syslog_ng_conf(
+    port: &str,
+    root: &str,
+    group: &str,
+    off: &[&str],
+    reap: u64,
+) -> Result<String, String> {
     if port.parse::<u16>().map_or(true, |p| p == 0) {
         return Err(format!("LANCACHE_LOG_PORT={port} is no port"));
     }
@@ -1314,7 +1332,7 @@ fn syslog_ng_conf(port: &str, root: &str, group: &str, off: &[&str]) -> Result<S
     };
     Ok(format!(
         r#"@version: current
-options {{ create-dirs(yes); dir-group("{group}"); dir-perm(0750); group("{group}"); perm(0640); keep-hostname(yes); time-reap(30); }};
+options {{ create-dirs(yes); dir-group("{group}"); dir-perm(0750); group("{group}"); perm(0640); keep-hostname(yes); time-reap({reap}); }};
 source s_docker {{ network(transport("udp") port({port}) flags(syslog-protocol)); }};
 filter f_named {{ program("^[A-Za-z0-9_-]+$" type(pcre)){skip}; }};
 destination {SYSLOG_NG_DESTINATION} {{ file("{root}/${{PROGRAM}}/${{YEAR}}${{MONTH}}${{DAY}}.log" template("${{ISODATE}} ${{HOST}} ${{PROGRAM}}: ${{MSGONLY}}\n")); }};
@@ -1354,6 +1372,7 @@ fn syslog_ng(ctx: &Ctx) -> Result<Run, String> {
         &ctx.need("SYSLOG_LOG_ROOT")?,
         &ctx.need("LOG_READER_GROUP")?,
         &off,
+        bounded("SYSLOG_TIME_REAP", 1, u32::MAX.into())?,
     )?;
     let conf = ctx.render("syslog-ng.conf", &conf)?;
     let run = |file: &str| ctx.run_dir.join(file).display().to_string();
@@ -2762,6 +2781,7 @@ async fn soa_bump(
 // From: Issue #1095
 async fn soa_upkeep() -> Result<(), String> {
     let (refresh, retry, resync) = soa_knobs()?;
+    let cold = bounded("PDNS_SOA_COLD_RETRY", 1, u32::MAX.into())?;
     let http = lancache_ng::http_client().map_err(|e| format!("HTTP client: {e}"))?;
     let pdns = lancache_ng::PowerDns::new(http, pdns_api_key()?);
     let root = api_root(&config::loopback()?, env_port(AUTH_API_PORT_KEY)?);
@@ -2775,7 +2795,7 @@ async fn soa_upkeep() -> Result<(), String> {
         }
         // What: retry soon while no zone could be written.
         // Why: a cold auth server must not wait an hour.
-        let pause = if ok == 0 { 5 } else { resync };
+        let pause = if ok == 0 { cold } else { resync };
         tokio::time::sleep(Duration::from_secs(pause)).await;
     }
 }
@@ -4232,17 +4252,30 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
 const DHCP_CLIENT_PORT: u16 = 68;
 const DHCP_SERVER_PORT: u16 = 67;
 
-// What: how long offers are collected after a DISCOVER.
-// Why: every offering server counts, so the window runs out
-const DISCOVER_WINDOW: Duration = Duration::from_secs(5);
+// What: DHCP probe times: offer window, ACK wait, sends.
+// Why: the SOT owns each value; Rust names only keys.
+// From: Issue #1683 | PR #1912
+struct ProbeTiming {
+    // What: how long offers are collected after a DISCOVER.
+    window: Duration,
+    // What: how long the REQUEST waits for an ACK or NAK.
+    request_timeout: Duration,
+    // What: DISCOVER sends in one window, spread evenly.
+    retransmits: u32,
+}
 
-// What: how long the REQUEST waits for an ACK or NAK.
-// Why: a server that just offered should answer at once.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
-
-// What: DISCOVER sends within one window, spread evenly.
-// Why: one dropped broadcast must not read as a clear LAN.
-const DISCOVER_RETRANSMITS: u32 = 3;
+impl ProbeTiming {
+    // What: the probe times from the env, seconds.
+    // Why: a missing or junk value makes the probe fail.
+    fn load() -> Result<Self, String> {
+        let secs = |key: &str| bounded(key, 1, u32::MAX.into()).map(Duration::from_secs);
+        Ok(Self {
+            window: secs("DHCP_PROBE_WINDOW")?,
+            request_timeout: secs("DHCP_PROBE_REQUEST_TIMEOUT")?,
+            retransmits: bounded("DHCP_PROBE_RETRANSMITS", 1, u8::MAX.into())? as u32,
+        })
+    }
+}
 
 // What: option fields shown per offer, as (label, code).
 // Why: None is the offered address; the rest are options.
@@ -4418,6 +4451,7 @@ fn dry_run(
     chaddr: &[u8; 6],
     offer: &Offer,
     destination: SocketAddrV4,
+    timeout: Duration,
 ) -> ClientCheck {
     let (Some(address), Some(server)) = (offer.address, offer.server) else {
         return ClientCheck::Failed {
@@ -4443,7 +4477,7 @@ fn dry_run(
         };
     }
     let mut verdict: Result<Offer, &str> = Err("no ACK received before the timeout");
-    let heard = listen(socket, xid, Instant::now() + REQUEST_TIMEOUT, |msg| {
+    let heard = listen(socket, xid, Instant::now() + timeout, |msg| {
         if is_kind(msg, MessageType::Ack) {
             let ack = read_offer(msg);
             if ack.server == Some(server) {
@@ -4498,6 +4532,10 @@ fn dry_run(
 // What: one broadcast round answering both checks.
 // Why: offers expose rogue servers; first one dry-runs.
 fn run_probe() -> ProbeReport {
+    let timing = match ProbeTiming::load() {
+        Ok(timing) => timing,
+        Err(e) => return ProbeReport::unavailable(e),
+    };
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, DHCP_CLIENT_PORT)).and_then(|socket| {
         socket.set_broadcast(true)?;
         Ok(socket)
@@ -4526,14 +4564,14 @@ fn run_probe() -> ProbeReport {
         MessageType::Discover,
         vec![request_list()],
     );
-    let end = Instant::now() + DISCOVER_WINDOW;
+    let end = Instant::now() + timing.window;
     let mut offers: Vec<Offer> = Vec::new();
-    for attempt in 1..=DISCOVER_RETRANSMITS {
+    for attempt in 1..=timing.retransmits {
         if let Err(e) = send_dhcp(&socket, &discover, destination) {
             return ProbeReport::unavailable(format!("failed to broadcast DHCPDISCOVER: {e}"));
         }
-        let slice = Instant::now() + DISCOVER_WINDOW / DISCOVER_RETRANSMITS;
-        let until = if attempt == DISCOVER_RETRANSMITS {
+        let slice = Instant::now() + timing.window / timing.retransmits;
+        let until = if attempt == timing.retransmits {
             end
         } else {
             slice.min(end)
@@ -4569,10 +4607,17 @@ fn run_probe() -> ProbeReport {
         None => ClientCheck::Failed {
             output: format!(
                 "no DHCPOFFER received within {:.0}s",
-                DISCOVER_WINDOW.as_secs_f64()
+                timing.window.as_secs_f64()
             ),
         },
-        Some(first) => dry_run(&socket, xid, &chaddr, first, destination),
+        Some(first) => dry_run(
+            &socket,
+            xid,
+            &chaddr,
+            first,
+            destination,
+            timing.request_timeout,
+        ),
     };
     ProbeReport { conflict, client }
 }
@@ -4590,9 +4635,10 @@ async fn probe_upkeep() -> Result<(), String> {
             .and_then(|raw| serde_json::from_str::<ProbeAnswer>(&raw).ok())
             .map(|a| a.id)
     };
+    let tick = bounded("SUPERVISE_TICK", 1, u32::MAX.into()).map(Duration::from_secs)?;
     let mut answered = read_id();
     loop {
-        tokio::time::sleep(TICK).await;
+        tokio::time::sleep(tick).await;
         let Ok(id) = fs::read_to_string(&request) else {
             continue;
         };
@@ -4628,6 +4674,7 @@ struct Slot {
     not_before: std::time::Instant,
     backoff: Duration,
     restarts: u32,
+    timing: Timing,
 }
 
 impl Slot {
@@ -4670,14 +4717,14 @@ impl Slot {
     }
 
     // What: log a failure and schedule the next start.
-    // Why: the delay doubles up to BACKOFF_MAX.
+    // Why: the delay doubles up to the backoff maximum.
     fn failed(&mut self, why: &str) {
         log_err(&format!(
             "ERROR: {why}; next start in {}s",
             self.backoff.as_secs()
         ));
         self.not_before = std::time::Instant::now() + self.backoff;
-        self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
+        self.backoff = (self.backoff * 2).min(self.timing.backoff_max);
         self.restarts = self.restarts.saturating_add(1);
     }
 
@@ -4685,7 +4732,9 @@ impl Slot {
     // Why: an exit is a failure; a long run resets backoff.
     async fn reap(&mut self) {
         let name = self.kind.name();
-        let ran_long = self.started.is_some_and(|at| at.elapsed() >= BACKOFF_RESET);
+        let ran_long = self
+            .started
+            .is_some_and(|at| at.elapsed() >= self.timing.backoff_reset);
         let exit = if let Some(child) = &mut self.child {
             match child.try_wait() {
                 Ok(Some(status)) => Some(format!("{name} exited: {status}")),
@@ -4704,7 +4753,7 @@ impl Slot {
         if let Some(why) = exit {
             self.child = None;
             if ran_long {
-                self.backoff = Duration::from_secs(1);
+                self.backoff = self.timing.backoff_start;
             }
             self.failed(&why);
         }
@@ -4726,7 +4775,7 @@ impl Slot {
                 .await
                 .inspect_err(|e| log_err(&format!("WARNING: kill -TERM {pid}: {e}")));
         }
-        if tokio::time::timeout(STOP_GRACE, child.wait())
+        if tokio::time::timeout(self.timing.stop_grace, child.wait())
             .await
             .is_err()
         {
@@ -4782,6 +4831,7 @@ async fn supervise() -> Result<(), String> {
     use tokio::signal::unix::{SignalKind, signal};
     let need = |key: &str| config::need(&config::process_env, key);
     let kinds = kinds(&need("LANCACHE_PROCESSES")?)?;
+    let timing = Timing::load()?;
     let ctx = Ctx {
         run_dir: PathBuf::from(need("SUPERVISE_RUN_DIR")?),
         settings_file: env_opt("UI_SETTINGS_FILE").map(PathBuf::from),
@@ -4803,8 +4853,9 @@ async fn supervise() -> Result<(), String> {
             task: None,
             started: None,
             not_before: now,
-            backoff: Duration::from_secs(1),
+            backoff: timing.backoff_start,
             restarts: 0,
+            timing,
         })
         .collect();
     let names: Vec<&str> = slots.iter().map(|s| s.kind.name()).collect();
@@ -4847,7 +4898,7 @@ async fn supervise() -> Result<(), String> {
         tokio::select! {
             _ = term.recv() => break,
             _ = int.recv() => break,
-            () = tokio::time::sleep(TICK) => {}
+            () = tokio::time::sleep(timing.tick) => {}
         }
     }
     log("TERM received; stopping all programs");
@@ -4867,7 +4918,8 @@ async fn healthcheck() -> Result<(), String> {
     let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let status: SuperviseStatus =
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-    health_verdict(&status, unix_secs())?;
+    let max_age = bounded("SUPERVISE_STATUS_MAX_AGE", 1, u32::MAX.into())?;
+    health_verdict(&status, unix_secs(), max_age)?;
     // What: a running listener program must accept.
     // Why: running is not bound; clients use it at once.
     // From: Issue #1683 | PR #1912
@@ -4922,9 +4974,9 @@ async fn healthcheck() -> Result<(), String> {
 
 // What: the verdict for one status at one time.
 // Why: pure, so tests feed it any status and clock.
-fn health_verdict(status: &SuperviseStatus, now: u64) -> Result<(), String> {
+fn health_verdict(status: &SuperviseStatus, now: u64, max_age: u64) -> Result<(), String> {
     let age = now.saturating_sub(status.updated);
-    if age > STATUS_MAX_AGE {
+    if age > max_age {
         return Err(format!("supervisor status is {age}s old"));
     }
     if !status.down.is_empty() {
@@ -4968,6 +5020,14 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // What: syslog-ng time-reap seconds of the tests.
+    // Why: the render copies it; any value does.
+    const REAP: u64 = 7;
+
+    // What: ACK wait of the DHCP dry-run tests.
+    // Why: the test servers answer at once or never.
+    const ACK_WAIT: Duration = Duration::from_secs(3);
     use std::net::SocketAddr;
 
     // What: a fresh random number in [lo, hi].
@@ -5031,6 +5091,7 @@ mod tests {
             ("DISK_ALARM_PCT", rnd(warn + 1, u32::MAX.into()).to_string()),
             ("DOCKER_API_TIMEOUT", rnd(1, DAY).to_string()),
             ("DOCKER_RESTART_TIMEOUT", rnd(1, DAY).to_string()),
+            ("DOCKER_RESTART_GRACE", rnd(0, DAY).to_string()),
             ("CACHE_DIR", gen_path()),
             ("STATUS_FILE", gen_path()),
             ("SYSLOG_LOG_ROOT", gen_path()),
@@ -5373,7 +5434,7 @@ mod tests {
     #[test]
     fn syslog_ng_conf_takes_a_port_and_a_root() {
         let (port, root, group) = (rnd(1, u16::MAX.into()).to_string(), gen_path(), gen_name());
-        let conf = syslog_ng_conf(&port, &root, &group, &[]).expect("conf");
+        let conf = syslog_ng_conf(&port, &root, &group, &[], REAP).expect("conf");
         assert!(conf.contains(&format!("port({port})")), "{conf}");
         assert!(
             conf.contains(&format!("file(\"{root}/${{PROGRAM}}/")),
@@ -5381,13 +5442,13 @@ mod tests {
         );
         assert!(conf.contains(&format!("dir-group(\"{group}\")")), "{conf}");
         assert!(conf.contains(&format!(" group(\"{group}\")")), "{conf}");
-        assert!(syslog_ng_conf("0", &root, &group, &[]).is_err());
-        assert!(syslog_ng_conf(&gen_name(), &root, &group, &[]).is_err());
-        assert!(syslog_ng_conf(&port, &gen_name(), &group, &[]).is_err());
-        assert!(syslog_ng_conf(&port, &format!("{root}\""), &group, &[]).is_err());
-        assert!(syslog_ng_conf(&port, &root, "", &[]).is_err());
-        assert!(syslog_ng_conf(&port, &root, "a\"b", &[]).is_err());
-        assert!(syslog_ng_conf(&port, &root, &group, &["a|b"]).is_err());
+        assert!(syslog_ng_conf("0", &root, &group, &[], REAP).is_err());
+        assert!(syslog_ng_conf(&gen_name(), &root, &group, &[], REAP).is_err());
+        assert!(syslog_ng_conf(&port, &gen_name(), &group, &[], REAP).is_err());
+        assert!(syslog_ng_conf(&port, &format!("{root}\""), &group, &[], REAP).is_err());
+        assert!(syslog_ng_conf(&port, &root, "", &[], REAP).is_err());
+        assert!(syslog_ng_conf(&port, &root, "a\"b", &[], REAP).is_err());
+        assert!(syslog_ng_conf(&port, &root, &group, &["a|b"], REAP).is_err());
     }
 
     // What: a logging switch drops only its own program.
@@ -5423,7 +5484,7 @@ mod tests {
         assert_eq!(off, [first.clone(), third.clone()]);
         let (port, path, group) = (rnd(1, u16::MAX.into()).to_string(), gen_path(), gen_name());
         let off: Vec<&str> = off.iter().map(String::as_str).collect();
-        let conf = syslog_ng_conf(&port, &path, &group, &off).expect("conf");
+        let conf = syslog_ng_conf(&port, &path, &group, &off, REAP).expect("conf");
         assert!(
             conf.contains(&format!("and not program(\"^({first}|{third})$\"")),
             "{conf}"
@@ -5431,7 +5492,7 @@ mod tests {
         for kept in [&names[1], &names[3]] {
             assert!(!conf.contains(kept.as_str()), "{kept}: {conf}");
         }
-        let all_on = syslog_ng_conf(&port, &path, &group, &[]).expect("conf");
+        let all_on = syslog_ng_conf(&port, &path, &group, &[], REAP).expect("conf");
         assert!(!all_on.contains("not program"), "{all_on}");
         save(["1", "x", "1", "1"]);
         assert!(logging_off(&ctx, &program_of).is_err());
@@ -5507,7 +5568,7 @@ mod tests {
             "log_format cache '$remote_addr - [$time_local] \"$request\" '\n                     '$status $body_bytes_sent '\n                     '\"$upstream_cache_status\" \"$host\"';"
         ));
         assert!(nginx.contains("access_log /dev/stdout cache;"));
-        let syslog = syslog_ng_conf("514", "/r", "g", &[]).expect("conf");
+        let syslog = syslog_ng_conf("514", "/r", "g", &[], REAP).expect("conf");
         assert!(syslog.contains(r#"template("${ISODATE} ${HOST} ${PROGRAM}: ${MSGONLY}\n")"#));
         for bad in ["relative.log", "/a b", "/a'b", "/a\nb"] {
             assert!(web_log_conf(bad).is_err(), "{bad:?}");
@@ -5519,24 +5580,25 @@ mod tests {
     // From: Issue #1683
     #[test]
     fn health_needs_a_fresh_status_and_no_program_down() {
-        let now = rnd(STATUS_MAX_AGE + 1, DAY);
+        let max_age = rnd(1, DAY);
+        let now = rnd(max_age + 1, DAY + max_age);
         let fresh = SuperviseStatus {
-            updated: now - rnd(0, STATUS_MAX_AGE),
+            updated: now - rnd(0, max_age),
             ..SuperviseStatus::default()
         };
-        assert!(health_verdict(&fresh, now).is_ok());
+        assert!(health_verdict(&fresh, now, max_age).is_ok());
         let stale = SuperviseStatus {
-            updated: now - STATUS_MAX_AGE - 1,
+            updated: now - max_age - 1,
             ..SuperviseStatus::default()
         };
-        assert!(health_verdict(&stale, now).is_err());
+        assert!(health_verdict(&stale, now, max_age).is_err());
         let name = gen_name();
         let down = SuperviseStatus {
             down: vec![name.clone()],
             ..fresh
         };
         assert!(
-            health_verdict(&down, now)
+            health_verdict(&down, now, max_age)
                 .expect_err("down")
                 .contains(&name)
         );
@@ -6693,7 +6755,7 @@ mod tests {
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
         let server_ip = Ipv4Addr::new(10, 0, 0, 9);
         let (addr, handle) = dry_run_server(Some((MessageType::Ack, server_ip)));
-        let check = dry_run(&client, 77, &[2; 6], &offer_for(server_ip), addr);
+        let check = dry_run(&client, 77, &[2; 6], &offer_for(server_ip), addr, ACK_WAIT);
         let ClientCheck::Passed { output, details } = check else {
             panic!("passed")
         };
@@ -6725,7 +6787,7 @@ mod tests {
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
         let server_ip = Ipv4Addr::new(10, 0, 0, 9);
         let (addr, _handle) = dry_run_server(Some((MessageType::Nak, server_ip)));
-        let nak = dry_run(&client, 5, &[2; 6], &offer_for(server_ip), addr);
+        let nak = dry_run(&client, 5, &[2; 6], &offer_for(server_ip), addr, ACK_WAIT);
         let ClientCheck::Failed { output } = nak else {
             panic!("failed")
         };
@@ -6736,7 +6798,8 @@ mod tests {
             details: vec![],
         };
         let (addr, _handle) = dry_run_server(None);
-        let ClientCheck::Failed { output } = dry_run(&client, 5, &[2; 6], &missing, addr) else {
+        let ClientCheck::Failed { output } = dry_run(&client, 5, &[2; 6], &missing, addr, ACK_WAIT)
+        else {
             panic!("failed")
         };
         assert!(
@@ -6748,7 +6811,7 @@ mod tests {
             details: vec![],
         };
         assert!(matches!(
-            dry_run(&client, 5, &[2; 6], &no_server, addr),
+            dry_run(&client, 5, &[2; 6], &no_server, addr, ACK_WAIT),
             ClientCheck::Failed { .. }
         ));
     }
@@ -6761,7 +6824,7 @@ mod tests {
         let server_ip = Ipv4Addr::new(10, 0, 0, 9);
         let (addr, _handle) = dry_run_server(Some((MessageType::Ack, Ipv4Addr::new(10, 0, 0, 77))));
         let ClientCheck::Failed { output } =
-            dry_run(&client, 5, &[2; 6], &offer_for(server_ip), addr)
+            dry_run(&client, 5, &[2; 6], &offer_for(server_ip), addr, ACK_WAIT)
         else {
             panic!("failed")
         };
@@ -6771,7 +6834,7 @@ mod tests {
         );
         let (addr, _handle) = dry_run_server(None);
         let ClientCheck::Failed { output } =
-            dry_run(&client, 6, &[2; 6], &offer_for(server_ip), addr)
+            dry_run(&client, 6, &[2; 6], &offer_for(server_ip), addr, ACK_WAIT)
         else {
             panic!("failed")
         };
