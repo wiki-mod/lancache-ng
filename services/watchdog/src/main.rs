@@ -2422,15 +2422,15 @@ fn rpz_zone(
     serial: u64,
     knobs: &DnsKnobs,
 ) -> (String, usize) {
-    let (ttl, mname) = (knobs.rpz_ttl, &knobs.soa_mname);
+    // What: locals feed the template as plain captures.
+    // Why: CodeQL misses captures beside named args.
+
+    let (ttl, mname, rname) = (knobs.rpz_ttl, &knobs.soa_mname, &knobs.rpz_rname);
+    let (refresh, retry, expire) = (knobs.rpz_refresh, knobs.rpz_retry, knobs.soa_expire);
     let mut zone = format!(
         "$ORIGIN rpz.\n$TTL {ttl}\n\
          @ SOA {mname} {rname} {serial} {refresh} {retry} {expire} {ttl}\n\
-         @ NS {mname}\n\n",
-        rname = knobs.rpz_rname,
-        refresh = knobs.rpz_refresh,
-        retry = knobs.rpz_retry,
-        expire = knobs.soa_expire,
+         @ NS {mname}\n\n"
     );
     let (rows, invalid) = cdn_rows(domains);
     for row in invalid {
@@ -2518,7 +2518,26 @@ impl RecursorConf<'_> {
                 )
             })
             .collect();
-        let k = self.knobs;
+        // What: locals feed the template as plain captures.
+        // Why: CodeQL misses captures beside named args.
+
+        let RecursorConf {
+            port,
+            api_port,
+            api_key: key,
+            negative_ttl: ttl,
+            loglevel,
+            lua_config,
+            lua_dns,
+            any,
+            knobs: k,
+            ..
+        } = *self;
+        let (query, api) = (yaml_rows(&k.query_allow), yaml_rows(&k.api_allow));
+        let (min_ttl, rc_max) = (k.minimum_ttl_override, k.recordcache_max);
+        let (perc, stale) = (k.refresh_on_ttl_perc, k.serve_stale_extensions);
+        let (pc_max, pc_ttl) = (k.packetcache_max, k.packetcache_ttl);
+        let servfail = k.servfail_ttl;
         format!(
             "incoming:\n  listen:\n    - {any}\n  port: {port}\n  allow_from:\n{query}\
              recursor:\n  forward_zones:\n{forwards}  lua_config_file: {lua_config}\n\
@@ -2529,24 +2548,7 @@ impl RecursorConf<'_> {
              \x20 servfail_ttl: {servfail}\n\
              webservice:\n  webserver: true\n  address: {any}\n  port: {api_port}\n\
              \x20 allow_from:\n{api}  api_key: {key}\n\
-             logging:\n  loglevel: {loglevel}\n",
-            query = yaml_rows(&k.query_allow),
-            api = yaml_rows(&k.api_allow),
-            min_ttl = k.minimum_ttl_override,
-            rc_max = k.recordcache_max,
-            perc = k.refresh_on_ttl_perc,
-            stale = k.serve_stale_extensions,
-            pc_max = k.packetcache_max,
-            pc_ttl = k.packetcache_ttl,
-            servfail = k.servfail_ttl,
-            port = self.port,
-            lua_config = self.lua_config,
-            any = self.any,
-            lua_dns = self.lua_dns,
-            ttl = self.negative_ttl,
-            api_port = self.api_port,
-            key = self.api_key,
-            loglevel = self.loglevel,
+             logging:\n  loglevel: {loglevel}\n"
         )
     }
 }
@@ -3739,6 +3741,10 @@ fn nginx_https_dispatch(
     } else {
         passthrough.as_str()
     };
+    // What: locals feed the template as plain captures.
+    // Why: CodeQL misses captures beside named args.
+
+    let (acl, mitm_port) = (acl.display(), ports.mitm);
     out.push_str(&format!(
         "    default {default};\n}}\n\n\
          server {{\n    listen 443;\n    listen [::]:443;\n    include {acl};\n    \
@@ -3749,9 +3755,7 @@ fn nginx_https_dispatch(
          proxy_connect_timeout 30s;\n    proxy_timeout        3600s;\n}}\n\n\
          server {{\n    listen {passthrough} proxy_protocol;\n    set_real_ip_from {loopback};\n    \
          ssl_preread on;\n    proxy_pass $ssl_preread_server_name:443;\n    \
-         proxy_connect_timeout 30s;\n    proxy_timeout        3600s;\n}}\n",
-        acl = acl.display(),
-        mitm_port = ports.mitm
+         proxy_connect_timeout 30s;\n    proxy_timeout        3600s;\n}}\n"
     ));
     out
 }
