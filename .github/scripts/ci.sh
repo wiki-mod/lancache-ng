@@ -3792,10 +3792,16 @@ _ci_docker_build() {
     # What: the Dockerfile must declare ARG BUILD_IDENTITY.
     # Why: else a stale cached apk layer ships silently.
     # From: Issue #1683 | PR #1858
-    if ! grep -qx 'ARG BUILD_IDENTITY' "${df}"; then
-        ci_log "[CI-ERROR-BUILD-0013]" "service=\"${service}\" path=\"${df}\" reason=\"no ARG BUILD_IDENTITY; layer cache could ship stale packages\""
-        return 2
-    fi
+    local arc=0
+    _ci_file_match "[CI-ERROR-BUILD-0023]" "service=\"${service}\"" "${df}" '^ARG BUILD_IDENTITY$' || arc=$?
+    case "${arc}" in
+        0) ;;
+        1)
+            ci_log "[CI-ERROR-BUILD-0013]" "service=\"${service}\" path=\"${df}\" reason=\"no ARG BUILD_IDENTITY; layer cache could ship stale packages\""
+            return 2
+            ;;
+        *) return 2 ;;
+    esac
     local -a args=()
     # What: rust builds from repo-root, not service dir.
     # Why: bind-mount + workspace COPYs need the tree.
@@ -6626,11 +6632,17 @@ ci_cmd_release_sbom() {
     # From: Issue #1683 | PR #1858
     _ci_release_asset_get "${tag}" "${out##*/}" "${dir}" || rc=$?
     if [ "${rc}" -eq 0 ]; then
-        if grep -qF -- "${digest}" "${out}"; then
-            rm -rf "${dir}"
-            printf 'release=sbom-reused service=%s tag=%s digest=%s\n' "${service}" "${tag}" "${digest}"
-            return 0
-        fi
+        local mrc=0
+        _ci_file_match "[CI-ERROR-RELEASE-0056]" "service=\"${service}\" tag=\"${tag}\"" "${out}" "${digest}" -qF || mrc=$?
+        case "${mrc}" in
+            0)
+                rm -rf "${dir}"
+                printf 'release=sbom-reused service=%s tag=%s digest=%s\n' "${service}" "${tag}" "${digest}"
+                return 0
+                ;;
+            1) ;;
+            *) rm -rf "${dir}"; return 2 ;;
+        esac
         ci_error "[CI-ERROR-RELEASE-0046]" "service=\"${service}\" tag=\"${tag}\" digest=\"${digest}\" reason=\"attached SBOM is not bound to this digest\"" "digests the attached SBOM names: $(grep -o -E "${CI_DIGEST_RE}" "${out}" 2>&1 | LC_ALL=C sort -u | awk '{ printf "%s ", $0; n++ } END { if (!n) printf "none" }')"
         rm -rf "${dir}"
         return 2
@@ -7291,10 +7303,16 @@ _ci_validate_subnet() {
 _ci_validate_shared_dir() {
     local dir
     dir="$(_ci_variable CI_VALIDATE_SHARED_DIR)" || return 2
-    if ! grep -qF -- " ${dir} " /proc/self/mountinfo; then
-        ci_log "[CI-ERROR-VALIDATE-0118]" "dir=\"${dir}\" reason=\"not a mount of this container; the job must mount it at the same path\""
-        return 2
-    fi
+    local mrc=0
+    _ci_file_match "[CI-ERROR-VALIDATE-0130]" "dir=\"${dir}\"" /proc/self/mountinfo " ${dir} " -qF || mrc=$?
+    case "${mrc}" in
+        0) ;;
+        1)
+            ci_log "[CI-ERROR-VALIDATE-0118]" "dir=\"${dir}\" reason=\"not a mount of this container; the job must mount it at the same path\""
+            return 2
+            ;;
+        *) return 2 ;;
+    esac
     printf '%s' "${dir}"
 }
 
@@ -10068,10 +10086,16 @@ _ci_version_release() {
     while IFS= read -r m; do
         [ -n "${m}" ] || continue
         for k in version edition license; do
-            if ! grep -Eq "^${k}\.workspace *= *true$" "${lock%/*}/${m}/Cargo.toml"; then
-                ci_log "[CI-ERROR-VERSION-0022]" "member=\"${m}\" key=\"${k}\" reason=\"member owns its ${k}; use ${k}.workspace = true\""
-                rc=1
-            fi
+            local mrc=0
+            _ci_file_match "[CI-ERROR-VERSION-0029]" "member=\"${m}\" key=\"${k}\"" "${lock%/*}/${m}/Cargo.toml" "^${k}\.workspace *= *true$" || mrc=$?
+            case "${mrc}" in
+                0) ;;
+                1)
+                    ci_log "[CI-ERROR-VERSION-0022]" "member=\"${m}\" key=\"${k}\" reason=\"member owns its ${k}; use ${k}.workspace = true\""
+                    rc=1
+                    ;;
+                *) return 2 ;;
+            esac
         done
     done <<< "${members}"
     m="$(_ci_cargo_member_names "${cargo}")" || return 2
@@ -10644,9 +10668,9 @@ _ci_rh_stray_archives() {
 # Why: a tolerant wrapper rates "no hit" as a hit (grep 1).
 # From: Issue #1683 | PR #1912
 _ci_file_match() {
-    local id="$1" ctx="$2" file="$3" ere="$4" rc=0 err
+    local id="$1" ctx="$2" file="$3" pat="$4" flags="${5:--qE}" rc=0 err
     err="$(_ci_mktemp "${CI_TMPDIR}/ci-match.XXXXXX")" || return 2
-    grep -qE -- "${ere}" "${file}" 2>"${err}" || rc=$?
+    grep "${flags}" -- "${pat}" "${file}" 2>"${err}" || rc=$?
     if [ "${rc}" -gt 1 ]; then
         ci_error "${id}" "${ctx} file=\"${file}\" rc=${rc}" "$(cat "${err}")"
         rm -f "${err}"
@@ -11140,9 +11164,16 @@ _ci_rh_set_hostname() {
         printf "Renaming host: '%s' -> '%s'\n" "${old}" "${new}"
         _ci_run "[CI-ERROR-RUNNER-0051]" "name=\"${new}\" reason=\"hostnamectl failed\"" _ci_rh_root hostnamectl set-hostname "${new}" || return 2
     fi
-    if _ci_rh_root grep -q "${self_re}" "${hosts}"; then
+    local h1=0 h2=0
+    _ci_file_match "[CI-ERROR-RUNNER-0124]" "host=\"${new}\"" "${hosts}" "${self_re}" || h1=$?
+    [ "${h1}" -le 1 ] || return 2
+    if [ "${h1}" -eq 1 ]; then
+        _ci_file_match "[CI-ERROR-RUNNER-0127]" "host=\"${new}\"" "${hosts}" "^[0-9.]+[[:space:]].*\\b${old}\\b" || h2=$?
+        [ "${h2}" -le 1 ] || return 2
+    fi
+    if [ "${h1}" -eq 0 ]; then
         _ci_run "[CI-ERROR-RUNNER-0052]" "file=\"${hosts}\" reason=\"self-address line not updated\"" _ci_rh_root sed -i "s/^${self_re}[[:space:]].*/${self}\\t${new}/" "${hosts}" || return 2
-    elif _ci_rh_root grep -qE "^[0-9.]+[[:space:]].*\\b${old}\\b" "${hosts}"; then
+    elif [ "${h2}" -eq 0 ]; then
         _ci_run "[CI-ERROR-RUNNER-0053]" "file=\"${hosts}\" reason=\"stale self line not replaced\"" _ci_rh_root sed -i "s/^[0-9.]\\+[[:space:]].*\\b${old}\\b.*/${self}\\t${new}/" "${hosts}" || return 2
     else
         printf '%s\t%s\n' "${self}" "${new}" | _ci_rh_root tee -a "${hosts}" >/dev/null || return 2
@@ -11191,7 +11222,13 @@ _ci_rh_purge_pve_check() {
     systemctl list-units --all --type=service,timer --no-pager | { grep -iE "${units}" | grep -i active || printf '  (none active)\n'; }
     printf '\n--- Mounts, fstab, open files and cron of the PVE stack ---\n'
     mount | { grep -iE "${units}" || printf '  not currently mounted\n'; }
-    if _ci_rh_root grep -qiE "${units}" "${fstab}"; then printf '  FOUND: %s references the stack\n' "${fstab}"; fi
+    local frc=0
+    _ci_file_match "[CI-ERROR-RUNNER-0125]" "file=\"${fstab}\"" "${fstab}" "${units}" -qiE || frc=$?
+    case "${frc}" in
+        0) printf '  FOUND: %s references the stack\n' "${fstab}" ;;
+        1) ;;
+        *) return 2 ;;
+    esac
     if ! command -v lsof >/dev/null; then
         ci_log "[CI-WARN-RUNNER-0119]" "dir=\"${pdir}\" reason=\"lsof not on PATH; open-file check skipped\""
     elif _ci_rh_root test -d "${pdir}"; then
@@ -11618,10 +11655,25 @@ _ci_rh_restart_policy() {
         seen=1
         name="${unit##*/}"
         dropin="${udir}/${name}.d/${dname}"
-        if [ -f "${dropin}" ] && grep -qx "Restart=${policy}" "${dropin}" && grep -qx "RestartSec=${sec}" "${dropin}"; then
-            printf '  %s: drop-in already set\n' "${name}"
-            continue
+        # What: a read error is not "drop-in not set".
+        # Why: AG-INT-002: an unreadable file is reported.
+        # From: Issue #1683 | PR #1912
+        local drc=1
+        if [ -f "${dropin}" ]; then
+            drc=0
+            _ci_file_match "[CI-ERROR-RUNNER-0126]" "unit=\"${name}\"" "${dropin}" "^Restart=${policy}$" || drc=$?
+            if [ "${drc}" -eq 0 ]; then
+                _ci_file_match "[CI-ERROR-RUNNER-0128]" "unit=\"${name}\"" "${dropin}" "^RestartSec=${sec}$" || drc=$?
+            fi
         fi
+        case "${drc}" in
+            0)
+                printf '  %s: drop-in already set\n' "${name}"
+                continue
+                ;;
+            1) ;;
+            *) return 2 ;;
+        esac
         printf '  %s: writing %s\n' "${name}" "${dropin}"
         _ci_run "[CI-ERROR-RUNNER-0096]" "unit=\"${name}\" reason=\"drop-in dir not created\"" _ci_rh_root mkdir -p "${dropin%/*}" || return 2
         printf '[Service]\nRestart=%s\nRestartSec=%s\n' "${policy}" "${sec}" | _ci_rh_root tee "${dropin}" >/dev/null || return 2
