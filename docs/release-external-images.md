@@ -174,8 +174,8 @@ exact class of bug it was meant to prevent. Instead:
   belong to the release channel.
 - `ci.sh check vex-drift` runs the generator on the checked-out
   `.trivyignore.yaml` and requires one statement per entry, failing a change
-  that feeds it an unsupported shape, status or justification. The generator
-  and this check are covered by `ci.bats`.
+  that feeds it an unsupported shape, status or justification. No test
+  covers the generator or this check (`ci.bats` holds no test).
 
 This complements the Vulnerability Management Policy documentation in
 `SECURITY.md` (refs #1130 / #1185).

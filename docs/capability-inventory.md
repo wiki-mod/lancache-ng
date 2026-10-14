@@ -878,7 +878,6 @@ alone is not sufficient evidence that a network service works.
 Representative validation includes:
 
 * Rust unit and integration tests.
-* Bats tests for shell and configuration behavior.
 * Compose configuration validation.
 * Real nginx configuration validation.
 * Real HTTP cache simulations.

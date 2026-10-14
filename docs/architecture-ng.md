@@ -326,12 +326,8 @@ own `monitored` list covers `proxy`, `dns`, `nats` (always
 monitored, not flag-gated) and `netdata` (always monitored, added by #842's
 2026-08-07 restart-capability decision). The binary writes this state to a
 `status.json` file every `CHECK_INTERVAL` seconds (default 30); see "Status"
-below for how the Admin UI renders it. The legacy `services/watchdog/watchdog.sh`
-bash implementation this replaced remains in the repository (with its own
-bats coverage still passing) as a historical reference and manual-rollback
-source, but is no longer copied into the production image or executed --
-see #842's own PR for why full removal is a deliberate follow-up, not part
-of the ENTRYPOINT swap itself.
+below for how the Admin UI renders it. The former bash implementation
+`services/watchdog/watchdog.sh` is no longer in the repository.
 
 These five `CONTAINER_*` variables exist only as a fail-loud consistency
 check, not a real renaming mechanism: the binary rejects any value that
