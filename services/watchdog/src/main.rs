@@ -2780,19 +2780,64 @@ async fn soa_upkeep() -> Result<(), String> {
     }
 }
 
-// What: Kea's socket dir and the kea-dhcp4 control socket.
-// Why: Kea accepts control sockets only below /run/kea.
-const KEA_SOCKET_DIR: &str = "/run/kea";
-const KEA4_SOCKET: &str = "/run/kea/kea4.sock";
+// What: env key of the kea-dhcp4 control socket path.
+// Why: the healthcheck and the configs name one socket.
+const KEA4_SOCKET_KEY: &str = "KEA4_SOCKET";
+
+// What: Kea render values: sockets, hook, fence, logs.
+// Why: the SOT owns each value; Rust names only keys.
+// From: Issue #1683 | PR #1912
+struct KeaKnobs {
+    socket_dir: String,
+    dhcp4_socket: String,
+    ddns_socket: String,
+    ctrl_allow: Vec<String>,
+    ctrl_chain: String,
+    ctrl_realm: String,
+    hooks_root: String,
+    lease_cmds_hook: String,
+    hooks_depth: u32,
+    lease_file: String,
+    ncr_max_queue: u64,
+    generated_prefix: String,
+    replace_client_name: String,
+    log_severity: String,
+    packet_log_severity: String,
+    log_debuglevel: u64,
+}
+
+impl KeaKnobs {
+    // What: every Kea render value from the env.
+    // Why: a missing or junk value stops the render.
+    fn load() -> Result<Self, String> {
+        let text = |key: &str| config::need(&config::process_env, key);
+        Ok(Self {
+            socket_dir: text("KEA_SOCKET_DIR")?,
+            dhcp4_socket: text(KEA4_SOCKET_KEY)?,
+            ddns_socket: text("KEA_DDNS_SOCKET")?,
+            ctrl_allow: text("KEA_CTRL_ALLOW_FROM")?
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+            ctrl_chain: text("KEA_CTRL_CHAIN")?,
+            ctrl_realm: text("KEA_CTRL_REALM")?,
+            hooks_root: text("KEA_HOOKS_ROOT")?,
+            lease_cmds_hook: text("KEA_LEASE_CMDS_HOOK")?,
+            hooks_depth: bounded("KEA_HOOKS_SEARCH_DEPTH", 1, u8::MAX.into())? as u32,
+            lease_file: text("KEA_LEASE_FILE")?,
+            ncr_max_queue: bounded("KEA_NCR_MAX_QUEUE", 1, u32::MAX.into())?,
+            generated_prefix: text("KEA_DDNS_GENERATED_PREFIX")?,
+            replace_client_name: text("KEA_DDNS_REPLACE_CLIENT_NAME")?,
+            log_severity: text("KEA_LOG_SEVERITY")?,
+            packet_log_severity: text("KEA_DHCP4_PACKET_LOG_SEVERITY")?,
+            log_debuglevel: bounded("KEA_LOG_DEBUGLEVEL", 0, 99)?,
+        })
+    }
+}
 
 // What: env key of the kea-dhcp-ddns loopback port.
 // Why: kea-dhcp4 sends its name change requests there.
 const KEA_NCR_PORT_KEY: &str = "KEA_NCR_PORT";
-
-// What: networks allowed to reach the Kea control port.
-// Why: the ui comes from a Docker bridge; LAN is refused.
-const KEA_CTRL_ALLOWED: [&str; 2] = ["172.16.0.0/12", "127.0.0.0/8"];
-const KEA_CTRL_CHAIN: &str = "LANCACHE_KEA_CTRL";
 
 // What: the shared DDNS TSIG key; empty when it fails.
 // Why: dns signs zones with it, Kea signs updates.
@@ -2847,7 +2892,7 @@ fn dhcp_ntp_servers(raw: &str, port: u16) -> Result<Vec<std::net::Ipv4Addr>, Str
 
 // What: Kea loggers that write to stdout only.
 // Why: Docker hands stdout to the one syslog-ng.
-fn kea_loggers(loggers: &[(&str, &str)]) -> Value {
+fn kea_loggers(loggers: &[(&str, &str)], debuglevel: u64) -> Value {
     loggers
         .iter()
         .map(|(name, severity)| {
@@ -2855,7 +2900,7 @@ fn kea_loggers(loggers: &[(&str, &str)]) -> Value {
                 "name": name,
                 "output-options": [{"output": "stdout"}],
                 "severity": severity,
-                "debuglevel": 0
+                "debuglevel": debuglevel
             })
         })
         .collect()
@@ -2864,7 +2909,7 @@ fn kea_loggers(loggers: &[(&str, &str)]) -> Value {
 // What: kea-dhcp4.conf of a first start, from the env.
 // Why: afterwards the ui edits Kea through its API only.
 // From: Issue #815 | PR #1912
-fn kea_dhcp4_first(ctx: &Ctx, dir: &Path) -> Result<Value, String> {
+fn kea_dhcp4_first(ctx: &Ctx, kea: &KeaKnobs) -> Result<Value, String> {
     let lease: u64 = ctx
         .need("DHCP_LEASE_TIME")?
         .parse()
@@ -2893,7 +2938,7 @@ fn kea_dhcp4_first(ctx: &Ctx, dir: &Path) -> Result<Value, String> {
             "lease-database": {
                 "type": "memfile",
                 "persist": true,
-                "name": dir.join("kea-leases4.csv").display().to_string()
+                "name": kea.lease_file
             },
             "subnet4": [{
                 "id": 1,
@@ -2916,6 +2961,7 @@ fn kea_dhcp4_own(
     domain: &str,
     ddns: bool,
     ncr: (&str, u16),
+    kea: &KeaKnobs,
 ) -> Result<(), String> {
     let dhcp4 = conf
         .get_mut("Dhcp4")
@@ -2923,9 +2969,9 @@ fn kea_dhcp4_own(
         .ok_or("the Kea config has no Dhcp4 object")?;
     dhcp4.insert(
         "control-socket".into(),
-        serde_json::json!({"socket-type": "unix", "socket-name": KEA4_SOCKET}),
+        serde_json::json!({"socket-type": "unix", "socket-name": kea.dhcp4_socket}),
     );
-    let lease_cmds = std::ffi::OsStr::new("libdhcp_lease_cmds.so");
+    let lease_cmds = std::ffi::OsStr::new(&kea.lease_cmds_hook);
     let mut hooks: Vec<Value> = dhcp4
         .get("hooks-libraries")
         .and_then(Value::as_array)
@@ -2950,7 +2996,7 @@ fn kea_dhcp4_own(
                 "server-ip": ncr.0,
                 "server-port": ncr.1,
                 "sender-ip": ncr.0,
-                "max-queue-size": 1024,
+                "max-queue-size": kea.ncr_max_queue,
                 "ncr-protocol": "UDP",
                 "ncr-format": "JSON"
             }),
@@ -2958,8 +3004,14 @@ fn kea_dhcp4_own(
         ("ddns-send-updates", Value::Bool(true)),
         ("ddns-override-no-update", Value::Bool(true)),
         ("ddns-override-client-update", Value::Bool(true)),
-        ("ddns-replace-client-name", "when-present".into()),
-        ("ddns-generated-prefix", "dhcp".into()),
+        (
+            "ddns-replace-client-name",
+            kea.replace_client_name.as_str().into(),
+        ),
+        (
+            "ddns-generated-prefix",
+            kea.generated_prefix.as_str().into(),
+        ),
         ("ddns-qualifying-suffix", domain.into()),
     ];
     for (key, value) in defaults {
@@ -2967,18 +3019,25 @@ fn kea_dhcp4_own(
     }
     dhcp4.insert(
         "loggers".into(),
-        kea_loggers(&[("kea-dhcp4", "INFO"), ("kea-dhcp4.dhcp4", "ERROR")]),
+        kea_loggers(
+            &[
+                ("kea-dhcp4", &kea.log_severity),
+                ("kea-dhcp4.dhcp4", &kea.packet_log_severity),
+            ],
+            kea.log_debuglevel,
+        ),
     );
     Ok(())
 }
 
 // What: the Kea socket dir, private to Kea.
 // Why: Kea refuses a socket dir others can enter.
-fn kea_socket_dir() -> Result<(), String> {
+fn kea_socket_dir(kea: &KeaKnobs) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt as _;
-    fs::create_dir_all(KEA_SOCKET_DIR)
-        .and_then(|()| fs::set_permissions(KEA_SOCKET_DIR, fs::Permissions::from_mode(0o750)))
-        .map_err(|e| format!("cannot prepare {KEA_SOCKET_DIR}: {e}"))
+    let dir = &kea.socket_dir;
+    fs::create_dir_all(dir)
+        .and_then(|()| fs::set_permissions(dir, fs::Permissions::from_mode(0o750)))
+        .map_err(|e| format!("cannot prepare {dir}: {e}"))
 }
 
 // What: the Kea snapshot dir, group-writable, others read.
@@ -2994,11 +3053,21 @@ fn kea_snapshot_dir(dir: &Path) -> Result<(), String> {
 // Why: no good config means rescue, never a stop.
 // From: Issue #815 | PR #1912
 fn kea_dhcp4(ctx: &Ctx) -> Result<Run, String> {
-    kea_socket_dir()?;
+    let kea = KeaKnobs::load()?;
+    kea_socket_dir(&kea)?;
     let dir = PathBuf::from(ctx.need("KEA_DATA_DIR")?);
     let path = dir.join("kea-dhcp4.conf");
-    let hook = find_file(Path::new("/usr/lib"), "libdhcp_lease_cmds.so", 5)
-        .ok_or("libdhcp_lease_cmds.so is missing under /usr/lib")?;
+    let hook = find_file(
+        Path::new(&kea.hooks_root),
+        &kea.lease_cmds_hook,
+        kea.hooks_depth,
+    )
+    .ok_or_else(|| {
+        format!(
+            "{} is missing under {}",
+            kea.lease_cmds_hook, kea.hooks_root
+        )
+    })?;
     let domain = ctx.need("DHCP_DOMAIN")?;
     let ddns = env_opt("DHCP_DDNS_ENABLED")
         .as_deref()
@@ -3007,12 +3076,12 @@ fn kea_dhcp4(ctx: &Ctx) -> Result<Run, String> {
     let loopback = config::loopback()?;
     let ncr_port = env_port(KEA_NCR_PORT_KEY)?;
     let owned = |mut conf: Value| -> Option<String> {
-        kea_dhcp4_own(&mut conf, &hook, &domain, ddns, (&loopback, ncr_port)).ok()?;
+        kea_dhcp4_own(&mut conf, &hook, &domain, ddns, (&loopback, ncr_port), &kea).ok()?;
         serde_json::to_string_pretty(&conf).ok()
     };
     let current = match fs::read_to_string(&path) {
         Ok(raw) => serde_json::from_str(&raw).ok(),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Some(kea_dhcp4_first(ctx, &dir)?),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Some(kea_dhcp4_first(ctx, &kea)?),
         Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
     };
     let snap_dir = PathBuf::from(ctx.need("KEA_CONFIG_SNAPSHOT_DIR")?);
@@ -3041,24 +3110,26 @@ fn kea_dhcp4(ctx: &Ctx) -> Result<Run, String> {
 // What: fence the Kea control port with one iptables chain.
 // Why: host networking would expose the API to the LAN.
 // From: Issue #1683
-fn kea_ctrl_fence(port: &str) -> Result<(), String> {
-    let jump = ["-p", "tcp", "--dport", port, "-j", KEA_CTRL_CHAIN];
-    if run_ok(&["iptables", "-N", KEA_CTRL_CHAIN]).is_err() {
-        run_ok(&["iptables", "-F", KEA_CTRL_CHAIN])?;
+fn kea_ctrl_fence(port: &str, kea: &KeaKnobs) -> Result<(), String> {
+    let chain = kea.ctrl_chain.as_str();
+    let jump = ["-p", "tcp", "--dport", port, "-j", chain];
+    if run_ok(&["iptables", "-N", chain]).is_err() {
+        run_ok(&["iptables", "-F", chain])?;
     }
     while run_ok(&[&["iptables", "-D", "INPUT"][..], &jump].concat()).is_ok() {}
     run_ok(&[&["iptables", "-I", "INPUT", "1"][..], &jump].concat())?;
-    for net in KEA_CTRL_ALLOWED {
-        run_ok(&["iptables", "-A", KEA_CTRL_CHAIN, "-s", net, "-j", "ACCEPT"])?;
+    for net in &kea.ctrl_allow {
+        run_ok(&["iptables", "-A", chain, "-s", net, "-j", "ACCEPT"])?;
     }
-    run_ok(&["iptables", "-A", KEA_CTRL_CHAIN, "-j", "DROP"])
+    run_ok(&["iptables", "-A", chain, "-j", "DROP"])
 }
 
 // What: the Kea Control Agent behind its token and fence.
 // Why: the ui manages Kea through this API alone.
 // From: Issue #815 | PR #1912
 fn kea_ctrl_agent(ctx: &Ctx) -> Result<Run, String> {
-    kea_socket_dir()?;
+    let kea = KeaKnobs::load()?;
+    kea_socket_dir(&kea)?;
     let token = stack_secret(
         "KEA_CTRL_TOKEN",
         &shared_secret_file_name("KEA_CTRL_TOKEN"),
@@ -3068,20 +3139,20 @@ fn kea_ctrl_agent(ctx: &Ctx) -> Result<Run, String> {
     let port_number: u16 = port
         .parse()
         .map_err(|_| format!("KEA_CTRL_PORT={port} is no port"))?;
-    kea_ctrl_fence(&port)?;
+    kea_ctrl_fence(&port, &kea)?;
     let conf = serde_json::json!({
         "Control-agent": {
             "http-host": config::any_bind()?,
             "http-port": port_number,
             "authentication": {
                 "type": "basic",
-                "realm": "kea-control",
+                "realm": kea.ctrl_realm,
                 "clients": [{"user": ctx.need("KEA_CTRL_USER")?, "password": token}]
             },
             "control-sockets": {
-                "dhcp4": {"socket-type": "unix", "socket-name": KEA4_SOCKET}
+                "dhcp4": {"socket-type": "unix", "socket-name": kea.dhcp4_socket}
             },
-            "loggers": kea_loggers(&[("kea-ctrl-agent", "INFO")])
+            "loggers": kea_loggers(&[("kea-ctrl-agent", &kea.log_severity)], kea.log_debuglevel)
         }
     });
     let path = ctx.render("kea-ctrl-agent.conf", &conf.to_string())?;
@@ -3095,7 +3166,8 @@ fn kea_ctrl_agent(ctx: &Ctx) -> Result<Run, String> {
 // Why: dns accepts them only with the shared TSIG key.
 // From: Issue #1076 | PR #1912
 fn kea_dhcp_ddns(ctx: &Ctx) -> Result<Run, String> {
-    kea_socket_dir()?;
+    let kea = KeaKnobs::load()?;
+    kea_socket_dir(&kea)?;
     let tsig = ddns_tsig_key()?;
     let server = serde_json::json!([{
         "ip-address": ctx.need_dns("DHCP_DNS_SERVER_IP")?,
@@ -3109,14 +3181,14 @@ fn kea_dhcp_ddns(ctx: &Ctx) -> Result<Run, String> {
             "port": env_port(KEA_NCR_PORT_KEY)?,
             "control-socket": {
                 "socket-type": "unix",
-                "socket-name": format!("{KEA_SOCKET_DIR}/kea-ddns.sock")
+                "socket-name": kea.ddns_socket
             },
             "tsig-keys": [{"name": TSIG_NAME, "algorithm": TSIG_ALGORITHM, "secret": tsig}],
             "forward-ddns": {
                 "ddns-domains": [domain(config::canonical_zone(&ctx.need("DHCP_DOMAIN")?))]
             },
             "reverse-ddns": {"ddns-domains": reverse},
-            "loggers": kea_loggers(&[("kea-dhcp-ddns", "INFO")])
+            "loggers": kea_loggers(&[("kea-dhcp-ddns", &kea.log_severity)], kea.log_debuglevel)
         }
     });
     let path = ctx.render("kea-dhcp-ddns.conf", &conf.to_string())?;
@@ -4770,9 +4842,10 @@ async fn healthcheck() -> Result<(), String> {
         .iter()
         .any(|name| name == Kind::KeaDhcp4.name())
     {
-        tokio::net::UnixStream::connect(KEA4_SOCKET)
+        let socket = config::need(&config::process_env, KEA4_SOCKET_KEY)?;
+        tokio::net::UnixStream::connect(&socket)
             .await
-            .map_err(|e| format!("{} at {KEA4_SOCKET}: {e}", Kind::KeaDhcp4.name()))?;
+            .map_err(|e| format!("{} at {socket}: {e}", Kind::KeaDhcp4.name()))?;
     }
     // What: nginx must answer its health page as well.
     // Why: a running nginx process can still serve nothing.
@@ -6679,12 +6752,13 @@ mod tests {
     // From: Issue #1683
     #[test]
     fn kea_config_gets_the_stack_keys_and_keeps_the_rest() {
-        let hook = PathBuf::from(format!("/usr/lib/{}/libdhcp_lease_cmds.so", gen_name()));
+        let kea = gen_kea();
+        let hook = PathBuf::from(format!("/{}/{}", gen_name(), kea.lease_cmds_hook));
         let ncr = u16::try_from(rnd(1024, 60_000)).unwrap();
         let mut conf = serde_json::json!({"Dhcp4": {
             "subnet4": [{"id": 7}],
             "hooks-libraries": [
-                {"library": "/old/libdhcp_lease_cmds.so"},
+                {"library": format!("/old/{}", kea.lease_cmds_hook)},
                 {"library": "/x/other.so"}
             ],
             "dhcp-ddns": {"enable-updates": true},
@@ -6696,11 +6770,12 @@ mod tests {
             "lan",
             false,
             (&gen_ipv4().to_string(), ncr),
+            &kea,
         )
         .expect("own");
         let d = &conf["Dhcp4"];
         assert_eq!(d["subnet4"][0]["id"], 7);
-        assert_eq!(d["control-socket"]["socket-name"], KEA4_SOCKET);
+        assert_eq!(d["control-socket"]["socket-name"], kea.dhcp4_socket);
         let libs: Vec<&str> = d["hooks-libraries"]
             .as_array()
             .expect("hooks")
@@ -6712,13 +6787,19 @@ mod tests {
         assert_eq!(d["ddns-qualifying-suffix"], "lan");
         assert_eq!(d["loggers"][0]["output-options"][0]["output"], "stdout");
         assert_eq!(d["loggers"].as_array().map(Vec::len), Some(2));
+        assert_eq!(d["loggers"][0]["severity"], kea.log_severity);
+        assert_eq!(d["loggers"][1]["severity"], kea.packet_log_severity);
+        assert_eq!(d["loggers"][0]["debuglevel"], kea.log_debuglevel);
+        assert_eq!(d["ddns-generated-prefix"], kea.generated_prefix);
+        assert_eq!(d["ddns-replace-client-name"], kea.replace_client_name);
         assert!(
             kea_dhcp4_own(
                 &mut serde_json::json!({}),
                 &hook,
                 "lan",
                 false,
-                (&gen_ipv4().to_string(), ncr)
+                (&gen_ipv4().to_string(), ncr),
+                &kea,
             )
             .is_err()
         );
@@ -6729,9 +6810,37 @@ mod tests {
             "lan",
             true,
             (&gen_ipv4().to_string(), ncr),
+            &kea,
         )
         .expect("own");
         assert_eq!(fresh["Dhcp4"]["dhcp-ddns"]["server-port"], ncr);
+        assert_eq!(
+            fresh["Dhcp4"]["dhcp-ddns"]["max-queue-size"],
+            kea.ncr_max_queue
+        );
+    }
+
+    // What: Kea render values, each one random.
+    // Why: a render must copy each value, not a literal.
+    fn gen_kea() -> KeaKnobs {
+        KeaKnobs {
+            socket_dir: gen_path(),
+            dhcp4_socket: gen_path(),
+            ddns_socket: gen_path(),
+            ctrl_allow: vec![format!("{}/12", gen_ipv4())],
+            ctrl_chain: gen_name(),
+            ctrl_realm: gen_name(),
+            hooks_root: gen_path(),
+            lease_cmds_hook: format!("{}.so", gen_name()),
+            hooks_depth: rnd(1, 9) as u32,
+            lease_file: gen_path(),
+            ncr_max_queue: rnd(1, u32::MAX.into()),
+            generated_prefix: gen_name(),
+            replace_client_name: gen_name(),
+            log_severity: gen_name(),
+            packet_log_severity: gen_name(),
+            log_debuglevel: rnd(0, 99),
+        }
     }
 
     // What: NTP names resolve; IPs pass; both separators.
