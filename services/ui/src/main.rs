@@ -196,6 +196,9 @@ struct Config {
     // What: TCP port the server binds inside the container.
     // Why: Dockerfile owns it; the primary URL reuses it.
     listen_port: u16,
+    // What: the stack CA file name shown for clients.
+    // Why: the SOT owns it; the setup page names it.
+    ca_cert_file: String,
     // What: the server's bind address, every interface.
     // Why: the SOT owns it as ANY_BIND_IP; no literal.
     any_bind: String,
@@ -415,6 +418,7 @@ impl Config {
             registration_token_file: need("SECONDARY_REGISTRATION_TOKEN_FILE")?,
             listen_port: knob("UI_LISTEN_PORT", u16::MAX.into(), OutOfRange::Reject)? as u16,
             any_bind: need("ANY_BIND_IP")?,
+            ca_cert_file: need("CA_CERT_FILE")?,
             // What: dev mode is an optional switch, off.
             // Why: the ui gets none; prod stays off.
             dev_mode: need_flag("LANCACHE_DEV_MODE")?,
@@ -5412,6 +5416,7 @@ async fn setup_page(State(state): Shared, headers: HeaderMap) -> Response {
     let mut ctx = page_ctx(&headers, "setup");
     ctx.insert("http_ip", &cfg.http_ip);
     ctx.insert("https_ip", &cfg.https_ip);
+    ctx.insert("ca_cert_file", &cfg.ca_cert_file);
     ctx.insert(
         "lancache_image_channel",
         &cfg.setting("LANCACHE_IMAGE_CHANNEL"),
@@ -6561,8 +6566,9 @@ mod tests {
         assert_eq!(fields.number::<u32>("none"), None);
     }
 
-    const TEXT_KEYS: [&str; 40] = [
+    const TEXT_KEYS: [&str; 41] = [
         "ANY_BIND_IP",
+        "CA_CERT_FILE",
         "NTP_PORT",
         "DHCP_DOMAIN",
         "RAW_CONTENT_URL",

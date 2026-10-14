@@ -1740,17 +1740,27 @@ prod_state_dir_for_key() {
 # Why: a new CA would break every client's TLS trust
 # From: Issue #1683 | PR #1912
 migrate_legacy_ca() {
-    local src env_file="$2" remove="${3:-0}" dest f
+    local src env_file="$2" remove="${3:-0}" dest f to ca_file
     src=$(realpath -m "$1")
     [[ -f "$src/ca.crt" ]] || return 0
     dest=$(prod_state_dir_for_key CA_DIR "$env_file") || exit $?
-    if [[ ! -f "$dest/ca.crt" ]]; then
-        mkdir -p "$dest" && cp -p "$src/ca."* "$dest/" \
-            || die "Failed to copy the CA from $src to $dest."
-    fi
+    ca_file=$(prod_env_default CA_CERT_FILE) || exit $?
+    mkdir -p "$dest" || die "Failed to create the CA state dir $dest (exit $?)."
     for f in "$src/ca."*; do
-        cmp -- "$f" "$dest/${f##*/}" \
-            || die "Postcondition failed: $dest/${f##*/} is not the CA file of $src; nothing counts as migrated."
+        # What: a legacy CA file's name in the SOT layout
+        # Why: legacy names are fixed; the SOT owns the new
+        case "${f##*/}" in
+            ca.crt) to=$ca_file ;;
+            ca.key) to=$(prod_env_default CA_KEY_FILE) || exit $? ;;
+            ca.srl) to=$(prod_env_default CA_SERIAL_FILE) || exit $? ;;
+            *) to=${f##*/} ;;
+        esac
+        if [[ ! -f "$dest/$ca_file" ]] || [[ ! -e "$dest/$to" ]]; then
+            cp -p -- "$f" "$dest/$to" \
+                || die "Failed to copy $f to $dest/$to (exit $?)."
+        fi
+        cmp -- "$f" "$dest/$to" \
+            || die "Postcondition failed: $dest/$to is not the CA file $f; nothing counts as migrated."
     done
     # What: the source goes only after a good update
     # Why: a rollback to the old checkout still mounts it
@@ -7532,7 +7542,7 @@ fi
 printf "\n"
 if [[ "$HTTPS_ENABLED" = "1" ]]; then
     printf "  ${BOLD}CA certificate${RESET} (available after first start):\n"
-    printf "    %s/ca.crt\n" "$(prod_state_dir_for_key CA_DIR "$ENV_LOCAL")"
+    printf "    %s/%s\n" "$(prod_state_dir_for_key CA_DIR "$ENV_LOCAL")" "$(prod_env_default CA_CERT_FILE)"
     printf "    → install on clients for HTTPS mode\n"
     printf '    → guide: %s/wiki\n' "$LANCACHE_REPO_URL"
     printf "\n"

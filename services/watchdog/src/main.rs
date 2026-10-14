@@ -3534,16 +3534,44 @@ impl NginxPorts {
 const NGINX_STREAM_TARGETS: &str = "stream.d/00-stream-targets.conf";
 const NGINX_HTTPS_DISPATCH: &str = "stream.d/01-https-dispatch.conf";
 
-// What: subject of the stack CA certificate.
-// Why: the supervisor is the one owner of CA creation.
+// What: CA and leaf certificate values.
+// Why: the SOT owns each value; Rust names only keys.
 // From: Issue #1683 | PR #1912
-const CA_SUBJECT: &str = "/CN=LanCache-NG CA/O=LanCache-NG/C=DE";
+struct CertKnobs {
+    ca_cert_file: String,
+    ca_key_file: String,
+    ca_serial_file: String,
+    ca_subject: String,
+    ca_key_type: String,
+    ca_days: String,
+    leaf_key_type: String,
+    leaf_subject: String,
+    leaf_days: String,
+    default_cert_name: String,
+    default_cert_dns: String,
+}
 
-// What: the CA file name and the default leaf's DNS name.
-// Why: the https health check trusts that CA and that name.
-// From: Issue #1683 | PR #1912
-const CA_CERT_FILE: &str = "ca.crt";
-const DEFAULT_CERT_DNS: &str = "lancache-default";
+impl CertKnobs {
+    // What: every certificate value from the env.
+    // Why: a missing or junk value stops the render.
+    fn load() -> Result<Self, String> {
+        let text = |key: &str| config::need(&config::process_env, key);
+        let days = |key: &str| bounded(key, 1, u32::MAX.into()).map(|d| d.to_string());
+        Ok(Self {
+            ca_cert_file: text("CA_CERT_FILE")?,
+            ca_key_file: text("CA_KEY_FILE")?,
+            ca_serial_file: text("CA_SERIAL_FILE")?,
+            ca_subject: text("CA_SUBJECT")?,
+            ca_key_type: text("CA_KEY_TYPE")?,
+            ca_days: days("CA_DAYS")?,
+            leaf_key_type: text("LEAF_KEY_TYPE")?,
+            leaf_subject: text("LEAF_SUBJECT")?,
+            leaf_days: days("LEAF_DAYS")?,
+            default_cert_name: text("DEFAULT_CERT_NAME")?,
+            default_cert_dns: text("DEFAULT_CERT_DNS")?,
+        })
+    }
+}
 
 // What: one aligned "key value;" map line.
 // Why: rendered maps stay readable for operators.
@@ -3554,14 +3582,16 @@ fn map_line(key: &str, value: &str) -> String {
 // What: cert map, host allow map and client geo.
 // Why: strict allows only listed hosts; CIDRs gate all.
 // From: Issue #1683
-fn nginx_https_map(hosts: &CdnHosts, strict: bool, cidrs: &[String]) -> String {
+fn nginx_https_map(hosts: &CdnHosts, strict: bool, cidrs: &[String], default_cert: &str) -> String {
     let keys = hosts.keys();
     let mut out =
         format!("{NGINX_GENERATED}map $ssl_server_name $https_cert_name {{\n    hostnames;\n");
     for (key, cert) in &keys {
         out.push_str(&map_line(key, cert));
     }
-    out.push_str("    default default;\n}\n\nmap $host $cdn_host_allowed {\n    hostnames;\n");
+    out.push_str(&format!(
+        "    default {default_cert};\n}}\n\nmap $host $cdn_host_allowed {{\n    hostnames;\n"
+    ));
     if strict {
         out.push_str("    default 0;\n");
         for (key, _) in &keys {
@@ -3754,7 +3784,13 @@ fn own(path: &Path, uid: Option<u32>, gid: u32, mode: u32) -> Result<(), String>
 // What: sign one leaf certificate with the stack CA.
 // Why: the proxy presents it for an intercepted host.
 // From: Issue #1683
-fn sign_leaf(ca: &Path, run: &Path, key: &Path, crt: &Path, san: &str) -> Result<(), String> {
+fn sign_leaf(
+    ca: &Path,
+    run: &Path,
+    (key, crt): (&Path, &Path),
+    san: &str,
+    cert: &CertKnobs,
+) -> Result<(), String> {
     let (csr, ext) = (run.join("leaf.csr"), run.join("leaf.ext"));
     write_file(
         &ext,
@@ -3766,9 +3802,9 @@ fn sign_leaf(ca: &Path, run: &Path, key: &Path, crt: &Path, san: &str) -> Result
     let path = |p: &Path| p.display().to_string();
     let (key_s, crt_s, csr_s, ext_s) = (path(key), path(crt), path(&csr), path(&ext));
     let (ca_crt, ca_key, serial) = (
-        path(&ca.join(CA_CERT_FILE)),
-        path(&ca.join("ca.key")),
-        path(&ca.join("ca.srl")),
+        path(&ca.join(&cert.ca_cert_file)),
+        path(&ca.join(&cert.ca_key_file)),
+        path(&ca.join(&cert.ca_serial_file)),
     );
     let signed = tool(
         "openssl",
@@ -3776,10 +3812,10 @@ fn sign_leaf(ca: &Path, run: &Path, key: &Path, crt: &Path, san: &str) -> Result
             "req",
             "-new",
             "-newkey",
-            "rsa:2048",
+            &cert.leaf_key_type,
             "-nodes",
             "-subj",
-            "/CN=lancache-ng",
+            &cert.leaf_subject,
             "-keyout",
             &key_s,
             "-out",
@@ -3793,7 +3829,7 @@ fn sign_leaf(ca: &Path, run: &Path, key: &Path, crt: &Path, san: &str) -> Result
                 "x509",
                 "-req",
                 "-days",
-                "3650",
+                &cert.leaf_days,
                 "-in",
                 &csr_s,
                 "-CA",
@@ -3841,8 +3877,9 @@ fn nginx_certs(
     hosts: &CdnHosts,
     ip_https: &str,
     gid: u32,
+    cert: &CertKnobs,
 ) -> Result<(), String> {
-    let (ca_crt, ca_key) = (ca.join(CA_CERT_FILE), ca.join("ca.key"));
+    let (ca_crt, ca_key) = (ca.join(&cert.ca_cert_file), ca.join(&cert.ca_key_file));
     let path = |p: &Path| p.display().to_string();
     if !(ca_crt.is_file() && ca_key.is_file()) {
         fs::create_dir_all(ca).map_err(|e| format!("cannot create {}: {e}", ca.display()))?;
@@ -3852,13 +3889,13 @@ fn nginx_certs(
                 "req",
                 "-new",
                 "-newkey",
-                "rsa:4096",
+                &cert.ca_key_type,
                 "-days",
-                "3650",
+                &cert.ca_days,
                 "-nodes",
                 "-x509",
                 "-subj",
-                CA_SUBJECT,
+                &cert.ca_subject,
                 "-keyout",
                 &path(&ca_key),
                 "-out",
@@ -3904,7 +3941,7 @@ fn nginx_certs(
         write_file(&stamp, print.as_bytes(), 0o644, Place::Replace)
             .map_err(|e| format!("cannot write {}: {e}", stamp.display()))?;
     }
-    let serial = ca.join("ca.srl");
+    let serial = ca.join(&cert.ca_serial_file);
     if !serial.is_file() {
         let nanos = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -3918,7 +3955,8 @@ fn nginx_certs(
         )
         .map_err(|e| format!("cannot write {}: {e}", serial.display()))?;
     }
-    let (default_key, default_crt) = (certs.join("default.key"), certs.join("default.crt"));
+    let default_key = certs.join(format!("{}.key", cert.default_cert_name));
+    let default_crt = certs.join(format!("{}.crt", cert.default_cert_name));
     let san = tool(
         "openssl",
         &[
@@ -3936,11 +3974,11 @@ fn nginx_certs(
             .split([',', '\n'])
             .any(|entry| entry.trim() == format!("IP Address:{ip_https}"));
     if !default_key.is_file() || !san.contains("DNS:") || !has_ip {
-        let mut names = format!("DNS:{DEFAULT_CERT_DNS}");
+        let mut names = format!("DNS:{}", cert.default_cert_dns);
         if !ip_https.is_empty() {
             names.push_str(&format!(",IP:{ip_https}"));
         }
-        sign_leaf(ca, run, &default_key, &default_crt, &names)?;
+        sign_leaf(ca, run, (&default_key, &default_crt), &names, cert)?;
     }
     let leaves = hosts
         .roots
@@ -3965,7 +4003,7 @@ fn nginx_certs(
         );
         if !(key.is_file() && crt.is_file()) {
             log(&format!("Generating certificate {file} for {names}"));
-            sign_leaf(ca, run, &key, &crt, &names)?;
+            sign_leaf(ca, run, (&key, &crt), &names, cert)?;
         }
     }
     for entry in fs::read_dir(certs).map_err(|e| format!("cannot list {}: {e}", certs.display()))? {
@@ -3983,6 +4021,7 @@ fn nginx_certs(
 // Why: a domain edit re-renders and restarts nginx.
 // From: Issue #1683
 fn nginx(ctx: &Ctx) -> Result<Run, String> {
+    let cert = CertKnobs::load()?;
     let dir = PathBuf::from(ctx.need("NGINX_DIR")?);
     let domains_file = PathBuf::from(ctx.need("CDN_DOMAINS_FILE")?);
     let read = |path: &Path| {
@@ -4043,6 +4082,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
             &hosts,
             &ip_https,
             worker_gid,
+            &cert,
         )?;
     } else if https.exists() {
         fs::remove_file(&https).map_err(|e| format!("cannot remove {}: {e}", https.display()))?;
@@ -4125,7 +4165,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         ),
         (
             dir.join("conf.d/00-https-map.conf"),
-            nginx_https_map(&hosts, strict, &cidrs),
+            nginx_https_map(&hosts, strict, &cidrs, &cert.default_cert_name),
         ),
         (
             dir.join(NGINX_STREAM_TARGETS),
@@ -4867,11 +4907,12 @@ async fn healthcheck() -> Result<(), String> {
         let https_url = need("PROXY_HEALTH_HTTPS_URL")?;
         let ca_file = Path::new(&need("NGINX_DIR")?)
             .join(need("NGINX_SUBDIR_CA")?)
-            .join(CA_CERT_FILE);
+            .join(need("CA_CERT_FILE")?);
         let ca_pem = fs::read(&ca_file).map_err(|e| format!("{}: {e}", ca_file.display()))?;
+        let cert_dns = need("DEFAULT_CERT_DNS")?;
         let (http, tls) = tokio::join!(
             probe_health(&http_url),
-            probe_health_tls(&https_url, &ca_pem, DEFAULT_CERT_DNS)
+            probe_health_tls(&https_url, &ca_pem, &cert_dns)
         );
         http?;
         tls?;
@@ -6042,14 +6083,16 @@ mod tests {
             bases: vec![base.clone()],
             ..CdnHosts::default()
         };
-        let strict = nginx_https_map(&hosts, true, std::slice::from_ref(&cidr));
+        let dc = gen_name();
+        let strict = nginx_https_map(&hosts, true, std::slice::from_ref(&cidr), &dc);
+        assert!(strict.contains(&format!("    default {dc};\n")), "{strict}");
         assert!(strict.contains(&map_line(&format!("*.{root}"), &root)));
         assert!(strict.contains(&map_line(
             &format!("*.{base}"),
             &cert_name(&base, "wildcard")
         )));
         assert!(strict.contains("    default 0;\n") && strict.contains(&map_line(&cidr, "1")));
-        let lazy = nginx_https_map(&hosts, false, &[]);
+        let lazy = nginx_https_map(&hosts, false, &[], &dc);
         assert_eq!(lazy.matches("    default 1;\n").count(), 2, "{lazy}");
         let lo = gen_ipv4().to_string();
         assert!(
@@ -6935,6 +6978,24 @@ mod tests {
         .expect("x509")
     }
 
+    // What: certificate values, names random, keys valid.
+    // Why: a render must copy each value, not a literal.
+    fn gen_cert() -> CertKnobs {
+        CertKnobs {
+            ca_cert_file: format!("{}.pem", gen_name()),
+            ca_key_file: format!("{}.pem", gen_name()),
+            ca_serial_file: gen_name(),
+            ca_subject: format!("/CN={}", gen_name()),
+            ca_key_type: "rsa:2048".to_string(),
+            ca_days: rnd(1, 3650).to_string(),
+            leaf_key_type: "rsa:2048".to_string(),
+            leaf_subject: format!("/CN={}", gen_name()),
+            leaf_days: rnd(1, 3650).to_string(),
+            default_cert_name: gen_name(),
+            default_cert_dns: gen_name(),
+        }
+    }
+
     // What: CA kept, default and leaves signed per state.
     // Why: a rotated CA must never keep serving old leaves.
     // From: Issue #1683 | PR #1912
@@ -6953,15 +7014,19 @@ mod tests {
         let base = format!("{}.{}.{}", rnd(0, 255), rnd(0, 255), rnd(0, 255));
         let octet = rnd(1, 25);
         let (ip_a, ip_b) = (format!("{base}.{octet}"), format!("{base}.{octet}1"));
+        let cert = gen_cert();
         let (ca, certs) = (nginx.join(gen_name()), nginx.join(gen_name()));
-        let (leaf, default) = (certs.join(format!("{host}.crt")), certs.join("default.crt"));
+        let (leaf, default) = (
+            certs.join(format!("{host}.crt")),
+            certs.join(format!("{}.crt", cert.default_cert_name)),
+        );
         let mode = |p: &Path| fs::metadata(p).expect("meta").permissions().mode() & 0o7777;
         let bytes = |p: &Path| fs::read(p).expect("read");
-        nginx_certs(&ca, &certs, &run, &hosts, &ip_b, gid).expect("first run");
-        assert_eq!(mode(&ca.join("ca.key")), 0o600);
+        nginx_certs(&ca, &certs, &run, &hosts, &ip_b, gid, &cert).expect("first run");
+        assert_eq!(mode(&ca.join(&cert.ca_key_file)), 0o600);
         assert_eq!(mode(&certs), 0o2750);
         assert_eq!(fs::metadata(&certs).expect("certs").gid(), gid);
-        let ca_crt = ca.join("ca.crt");
+        let ca_crt = ca.join(&cert.ca_cert_file);
         let verify = |crt: &Path| {
             tool(
                 "openssl",
@@ -6976,7 +7041,7 @@ mod tests {
         verify(&leaf).expect("leaf signed by the CA");
         assert_eq!(
             x509(&leaf, &["-subject", "-nameopt", "RFC2253"]).trim(),
-            "subject=CN=lancache-ng"
+            format!("subject={}", cert.leaf_subject.trim_start_matches('/'))
         );
         let san = x509(&leaf, &["-ext", "subjectAltName"]);
         assert!(san.contains(&format!("DNS:{host}, DNS:*.{host}")), "{san}");
@@ -6987,15 +7052,18 @@ mod tests {
             0,
             "csr or ext left"
         );
-        let (key_before, default_before, leaf_before) =
-            (bytes(&ca.join("ca.key")), bytes(&default), bytes(&leaf));
-        nginx_certs(&ca, &certs, &run, &hosts, &ip_b, gid).expect("same state");
-        assert_eq!(bytes(&ca.join("ca.key")), key_before);
+        let (key_before, default_before, leaf_before) = (
+            bytes(&ca.join(&cert.ca_key_file)),
+            bytes(&default),
+            bytes(&leaf),
+        );
+        nginx_certs(&ca, &certs, &run, &hosts, &ip_b, gid, &cert).expect("same state");
+        assert_eq!(bytes(&ca.join(&cert.ca_key_file)), key_before);
         assert_eq!(bytes(&default), default_before);
         assert_eq!(bytes(&leaf), leaf_before);
-        nginx_certs(&ca, &certs, &run, &hosts, "", gid).expect("no ip");
+        nginx_certs(&ca, &certs, &run, &hosts, "", gid, &cert).expect("no ip");
         assert_eq!(bytes(&default), default_before);
-        nginx_certs(&ca, &certs, &run, &hosts, &ip_a, gid).expect("prefix ip");
+        nginx_certs(&ca, &certs, &run, &hosts, &ip_a, gid, &cert).expect("prefix ip");
         assert_ne!(bytes(&default), default_before, "a prefix IP kept the cert");
         let san = x509(&default, &["-ext", "subjectAltName"]);
         assert!(san.contains(&format!("IP Address:{ip_a}")), "{san}");
@@ -7008,8 +7076,8 @@ mod tests {
         fs::write(&marker, gen_name()).expect("marker");
         let stamp = bytes(&certs.join(".ca-fingerprint"));
         fs::remove_file(&ca_crt).expect("drop ca.crt");
-        fs::remove_file(ca.join("ca.key")).expect("drop ca.key");
-        nginx_certs(&ca, &certs, &run, &hosts, &ip_a, gid).expect("rotation");
+        fs::remove_file(ca.join(&cert.ca_key_file)).expect("drop ca.key");
+        nginx_certs(&ca, &certs, &run, &hosts, &ip_a, gid, &cert).expect("rotation");
         assert_ne!(bytes(&certs.join(".ca-fingerprint")), stamp);
         assert_ne!(bytes(&leaf), leaf_before);
         verify(&leaf).expect("leaf signed by the new CA");
@@ -7029,16 +7097,17 @@ mod tests {
             use std::os::unix::fs::MetadataExt as _;
             fs::metadata(&root).expect("root meta").gid()
         };
+        let cert = gen_cert();
         let (ca, certs) = (nginx.join(gen_name()), nginx.join(gen_name()));
-        nginx_certs(&ca, &certs, &run, &CdnHosts::default(), "", gid).expect("ca");
+        nginx_certs(&ca, &certs, &run, &CdnHosts::default(), "", gid, &cert).expect("ca");
         let san = format!("DNS:{}", gen_name());
         let (key, crt) = (root.join(gen_name()), root.join(gen_name()));
         fs::create_dir(&key).expect("key dir");
-        assert!(sign_leaf(&ca, &run, &key, &crt, &san).is_err());
+        assert!(sign_leaf(&ca, &run, (&key, &crt), &san, &cert).is_err());
         assert!(!crt.exists());
         let (key, crt) = (root.join(gen_name()), root.join(gen_name()));
         fs::write(&crt, gen_name()).expect("partial crt");
-        assert!(sign_leaf(&root.join(gen_name()), &run, &key, &crt, &san).is_err());
+        assert!(sign_leaf(&root.join(gen_name()), &run, (&key, &crt), &san, &cert).is_err());
         assert!(!key.exists() && !crt.exists());
         assert_eq!(
             fs::read_dir(&run).expect("run").count(),

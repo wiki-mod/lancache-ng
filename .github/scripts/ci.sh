@@ -7746,8 +7746,9 @@ _ci_validate_proxy_stream_map() {
 # Why: the proxy https port must show a cert we signed
 # From: Issue #1683
 _ci_validate_https_mitm() {
-    local project="$1" ip cid domain ca_subj issuer tmp out cert tls_err ca port
+    local project="$1" ip cid domain ca_subj issuer tmp out cert tls_err ca ca_file port
     ca="$(_ci_runtime_default NGINX_DIR)/$(_ci_runtime_default NGINX_SUBDIR_CA)" || return 2
+    ca_file="$(_ci_runtime_default CA_CERT_FILE)" || return 2
     port="$(_ci_service_port https)" || return 2
     ip="$(_ci_validate_container_ip "${project}" proxy)"
     cid="$(_ci_validate_cid "${project}" proxy)" || return 2
@@ -7757,7 +7758,7 @@ _ci_validate_https_mitm() {
         return 2
     fi
     tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-proxy-ca.XXXXXX")" || return 2
-    if ! out="$(docker cp "${cid}:${ca}/ca.crt" "${tmp}" 2>&1)"; then
+    if ! out="$(docker cp "${cid}:${ca}/${ca_file}" "${tmp}" 2>&1)"; then
         ci_error "[CI-ERROR-VALIDATE-0024]" "reason=\"could not read proxy LAN CA for https-mitm check\"" "${out}"
         rm -f "${tmp}"
         return 2

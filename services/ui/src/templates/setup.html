@@ -220,11 +220,11 @@ echo 'https_proxy=http://{{ http_ip }}' | sudo tee -a /etc/environment</pre>
       <p class="text-xs font-medium text-slate-400 mb-2">CA-Zertifikat installieren</p>
       <div class="relative">
         <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono overflow-x-auto leading-relaxed" id="cmd-ca-linux"># Linux (systemweit)
-sudo cp ca.crt /usr/local/share/ca-certificates/lancache-ca.crt
+sudo cp {{ ca_cert_file }} /usr/local/share/ca-certificates/lancache-{{ ca_cert_file }}
 sudo update-ca-certificates
 
 # Arch / CachyOS / Garuda (trust-store)
-sudo trust anchor --store ca.crt</pre>
+sudo trust anchor --store {{ ca_cert_file }}</pre>
         <button onclick="copyEl('cmd-ca-linux', this)"
                 class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
           Kopieren

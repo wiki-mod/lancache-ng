@@ -607,6 +607,17 @@ runtime:
     - NGINX_DIR=/etc/nginx
     - NGINX_SUBDIR_CA=ssl/ca
     - NGINX_SUBDIR_CERTS=ssl/certs
+    - CA_CERT_FILE=ca.crt
+    - CA_KEY_FILE=ca.key
+    - CA_SERIAL_FILE=ca.srl
+    - CA_SUBJECT=/CN=LanCache-NG CA/O=LanCache-NG/C=DE
+    - CA_KEY_TYPE=rsa:4096
+    - CA_DAYS=3650
+    - LEAF_KEY_TYPE=rsa:2048
+    - LEAF_SUBJECT=/CN=lancache-ng
+    - LEAF_DAYS=3650
+    - DEFAULT_CERT_NAME=default
+    - DEFAULT_CERT_DNS=lancache-default
     - NGINX_CACHE_DIR=/var/cache/nginx/lancache
     - PROXY_HEALTH_URL=http://@LOOPBACK_BIND_IP@/healthz
     - PROXY_HEALTH_HTTPS_URL=https://@LOOPBACK_BIND_IP@:8445/healthz
