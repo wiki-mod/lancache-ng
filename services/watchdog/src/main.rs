@@ -1634,10 +1634,86 @@ const DNS_HTTPS: Recursor = Recursor {
     api_port_key: "PDNS_HTTPS_API_PORT",
 };
 
-// What: secondary AXFR poll seconds and negative TTL.
-// Why: bounds the delay after a missed NOTIFY.
-// From: Issue #1164
-const XFR_CYCLE_SECS: u64 = 15;
+// What: DNS render values: SOA, RPZ, recursor, nets.
+// Why: the SOT owns each value; Rust names only keys.
+// From: Issue #1683 | PR #1912
+struct DnsKnobs {
+    xfr_cycle: u64,
+    soa_mname: String,
+    soa_rname: String,
+    soa_expire: u64,
+    soa_minimum: u64,
+    auth_loglevel: u64,
+    api_allow: Vec<String>,
+    query_allow: Vec<String>,
+    loopback_nets: Vec<String>,
+    rpz_rname: String,
+    rpz_ttl: u64,
+    rpz_refresh: u64,
+    rpz_retry: u64,
+    root_servers: Vec<String>,
+    root_refresh: u64,
+    root_retry: u64,
+    minimum_ttl_override: u64,
+    recordcache_max: u64,
+    refresh_on_ttl_perc: u64,
+    serve_stale_extensions: u64,
+    negative_ttl: u64,
+    packetcache_max: u64,
+    packetcache_ttl: u64,
+    servfail_ttl: u64,
+    loglevel: u64,
+    loglevel_queries: u64,
+}
+
+impl DnsKnobs {
+    // What: every DNS render value from the env.
+    // Why: a missing or junk value stops the render.
+    fn load() -> Result<Self, String> {
+        let secs = |key: &str| bounded(key, 0, u32::MAX.into());
+        let count = |key: &str| bounded(key, 1, u32::MAX.into());
+        let level = |key: &str| bounded(key, 0, 9);
+        let words = |key: &str| {
+            config::need(&config::process_env, key)
+                .map(|v| v.split_whitespace().map(str::to_string).collect())
+        };
+        let text = |key: &str| config::need(&config::process_env, key);
+        Ok(Self {
+            xfr_cycle: bounded("PDNS_XFR_CYCLE_INTERVAL", 1, u32::MAX.into())?,
+            soa_mname: text("PDNS_SOA_MNAME")?,
+            soa_rname: text("PDNS_SOA_RNAME")?,
+            soa_expire: secs("PDNS_SOA_EXPIRE")?,
+            soa_minimum: secs("PDNS_SOA_MINIMUM")?,
+            auth_loglevel: level("PDNS_AUTH_LOGLEVEL")?,
+            api_allow: words("DNS_API_ALLOW_FROM")?,
+            query_allow: words("DNS_QUERY_ALLOW_FROM")?,
+            loopback_nets: words("LOOPBACK_NETS")?,
+            rpz_rname: text("RPZ_SOA_RNAME")?,
+            rpz_ttl: secs("RPZ_TTL")?,
+            rpz_refresh: secs("RPZ_SOA_REFRESH")?,
+            rpz_retry: secs("RPZ_SOA_RETRY")?,
+            root_servers: words("ROOT_ZONE_MIRROR_SERVERS")?,
+            root_refresh: secs("ROOT_ZONE_MIRROR_REFRESH")?,
+            root_retry: secs("ROOT_ZONE_MIRROR_RETRY")?,
+            minimum_ttl_override: secs("RECURSOR_MINIMUM_TTL_OVERRIDE")?,
+            recordcache_max: count("RECURSOR_RECORDCACHE_MAX_ENTRIES")?,
+            refresh_on_ttl_perc: bounded("RECURSOR_REFRESH_ON_TTL_PERC", 0, 100)?,
+            serve_stale_extensions: secs("RECURSOR_SERVE_STALE_EXTENSIONS")?,
+            negative_ttl: secs("RECURSOR_MAX_NEGATIVE_TTL")?,
+            packetcache_max: count("RECURSOR_PACKETCACHE_MAX_ENTRIES")?,
+            packetcache_ttl: secs("RECURSOR_PACKETCACHE_TTL")?,
+            servfail_ttl: secs("RECURSOR_SERVFAIL_TTL")?,
+            loglevel: level("RECURSOR_LOGLEVEL")?,
+            loglevel_queries: level("RECURSOR_LOGLEVEL_QUERIES")?,
+        })
+    }
+}
+
+// What: YAML list rows of one value list.
+// Why: recursor.conf lists nets one per row.
+fn yaml_rows(items: &[String]) -> String {
+    items.iter().map(|i| format!("    - {i}\n")).collect()
+}
 
 // What: TSIG key name and algorithm of DDNS and AXFR.
 // Why: Kea signs with the same name; one spelling.
@@ -1794,6 +1870,7 @@ struct AuthConf<'a> {
     api_key: &'a str,
     loopback: &'a str,
     any: &'a str,
+    knobs: &'a DnsKnobs,
 }
 
 impl AuthConf<'_> {
@@ -1802,13 +1879,13 @@ impl AuthConf<'_> {
         format!(
             "local-address={lo},{local}\nlocal-port={auth_port}\nlaunch=gsqlite3\n\
              gsqlite3-database={db}\nprimary={primary}\nsecondary={secondary}\n\
-             xfr-cycle-interval={XFR_CYCLE_SECS}\nallow-notify-from={notify}\n\
+             xfr-cycle-interval={xfr}\nallow-notify-from={notify}\n\
              allow-axfr-ips={axfr}\ndnsupdate=yes\nallow-dnsupdate-from={allow}\n\
              dnsupdate-require-tsig=no\n\
-             default-soa-content=localhost. admin.@ {seed} {refresh} {retry} 604800 3600\n\
+             default-soa-content={mname} {rname} {seed} {refresh} {retry} {expire} {minimum}\n\
              webserver=yes\nwebserver-address={any}\nwebserver-port={api_port}\n\
-             webserver-allow-from={lo},10.0.0.0/8,172.16.0.0/12,192.168.0.0/16\n\
-             api=yes\napi-key={key}\nloglevel=3\nguardian=no\ndaemon=no\n",
+             webserver-allow-from={api_allow}\n\
+             api=yes\napi-key={key}\nloglevel={loglevel}\nguardian=no\ndaemon=no\n",
             lo = self.loopback,
             local = self.local,
             any = self.any,
@@ -1824,6 +1901,13 @@ impl AuthConf<'_> {
             auth_port = self.auth_port,
             api_port = self.api_port,
             key = self.api_key,
+            xfr = self.knobs.xfr_cycle,
+            mname = self.knobs.soa_mname,
+            rname = self.knobs.soa_rname,
+            expire = self.knobs.soa_expire,
+            minimum = self.knobs.soa_minimum,
+            api_allow = self.knobs.api_allow.join(","),
+            loglevel = self.knobs.auth_loglevel,
         )
     }
 }
@@ -2232,7 +2316,11 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
         DnsRole::Primary => (None, notify_targets()?),
     };
     let notify_from = primary.map(|p| p.ip().to_string()).unwrap_or_default();
-    let axfr_ips = std::iter::once("127.0.0.0/8,::1".to_string())
+    let knobs = DnsKnobs::load()?;
+    let axfr_ips = knobs
+        .loopback_nets
+        .iter()
+        .cloned()
         .chain(notify.iter().map(|t| t.ip().to_string()))
         .collect::<Vec<_>>()
         .join(",");
@@ -2243,6 +2331,7 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
     let seed = date_serial().to_string();
     let conf = AuthConf {
         any: &any,
+        knobs: &knobs,
         local,
         database: &database,
         role,
@@ -2308,10 +2397,21 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
 // What: RPZ zone mapping each CDN name to the proxy.
 // Why: "." marks a wildcard-only row, "!" a disabled one.
 // From: Issue #1683 | PR #1912
-fn rpz_zone(domains: &str, proxy: std::net::Ipv4Addr, serial: u64) -> (String, usize) {
+fn rpz_zone(
+    domains: &str,
+    proxy: std::net::Ipv4Addr,
+    serial: u64,
+    knobs: &DnsKnobs,
+) -> (String, usize) {
+    let (ttl, mname) = (knobs.rpz_ttl, &knobs.soa_mname);
     let mut zone = format!(
-        "$ORIGIN rpz.\n$TTL 60\n@ SOA localhost. admin.rpz. {serial} 3600 900 604800 60\n\
-         @ NS localhost.\n\n"
+        "$ORIGIN rpz.\n$TTL {ttl}\n\
+         @ SOA {mname} {rname} {serial} {refresh} {retry} {expire} {ttl}\n\
+         @ NS {mname}\n\n",
+        rname = knobs.rpz_rname,
+        refresh = knobs.rpz_refresh,
+        retry = knobs.rpz_retry,
+        expire = knobs.soa_expire,
     );
     let (rows, invalid) = cdn_rows(domains);
     for row in invalid {
@@ -2323,7 +2423,7 @@ fn rpz_zone(domains: &str, proxy: std::net::Ipv4Addr, serial: u64) -> (String, u
         } else {
             name.clone()
         };
-        zone.push_str(&format!("{owner} 60 IN A {proxy}\n"));
+        zone.push_str(&format!("{owner} {ttl} IN A {proxy}\n"));
     }
     (zone, rows.len())
 }
@@ -2348,7 +2448,7 @@ fn cdn_rows(domains: &str) -> (Vec<(String, bool)>, Vec<String>) {
 // What: recursor.lua: RPZ, LAN trust anchors, root copy.
 // Why: one render per recursor; the RPZ path differs.
 // From: Issue #1683
-fn recursor_lua(rpz: &str, zones: &[String], root_mirror: bool) -> String {
+fn recursor_lua(rpz: &str, zones: &[String], root_mirror: bool, knobs: &DnsKnobs) -> String {
     let mut lua = format!("rpzFile(\"{rpz}\", {{ policyName=\"lancache-rpz\" }})\n");
     for zone in zones {
         lua.push_str(&format!(
@@ -2357,9 +2457,10 @@ fn recursor_lua(rpz: &str, zones: &[String], root_mirror: bool) -> String {
         ));
     }
     if root_mirror {
-        for ip in ["199.9.14.201", "192.33.4.12", "192.5.5.241"] {
+        for ip in &knobs.root_servers {
             lua.push_str(&format!(
-                "zoneToCache(\".\", \"axfr\", \"{ip}\", {{ refreshPeriod=3600, retryOnError=3600 }})\n"
+                "zoneToCache(\".\", \"axfr\", \"{ip}\", {{ refreshPeriod={}, retryOnError={} }})\n",
+                knobs.root_refresh, knobs.root_retry
             ));
         }
     }
@@ -2375,12 +2476,13 @@ struct RecursorConf<'a> {
     api_port: u16,
     api_key: &'a str,
     negative_ttl: u64,
-    loglevel: u8,
+    loglevel: u64,
     lua_config: &'a str,
     lua_dns: &'a str,
     zones: &'a [String],
     loopback: &'a str,
     any: &'a str,
+    knobs: &'a DnsKnobs,
 }
 
 impl RecursorConf<'_> {
@@ -2397,19 +2499,27 @@ impl RecursorConf<'_> {
                 )
             })
             .collect();
-        let lan =
-            "    - 10.0.0.0/8\n    - 172.16.0.0/12\n    - 192.168.0.0/16\n    - 127.0.0.0/8\n";
+        let k = self.knobs;
         format!(
-            "incoming:\n  listen:\n    - {any}\n  port: {port}\n  allow_from:\n{lan}    - fc00::/7\n\
+            "incoming:\n  listen:\n    - {any}\n  port: {port}\n  allow_from:\n{query}\
              recursor:\n  forward_zones:\n{forwards}  lua_config_file: {lua_config}\n\
-             \x20 lua_dns_script: {lua_dns}\n  minimum_ttl_override: 60\n\
-             recordcache:\n  max_entries: 1000000\n  refresh_on_ttl_perc: 10\n\
-             \x20 serve_stale_extensions: 120\n  max_negative_ttl: {ttl}\n\
-             packetcache:\n  max_entries: 500000\n  ttl: 3600\n  negative_ttl: {ttl}\n\
-             \x20 servfail_ttl: 30\n\
+             \x20 lua_dns_script: {lua_dns}\n  minimum_ttl_override: {min_ttl}\n\
+             recordcache:\n  max_entries: {rc_max}\n  refresh_on_ttl_perc: {perc}\n\
+             \x20 serve_stale_extensions: {stale}\n  max_negative_ttl: {ttl}\n\
+             packetcache:\n  max_entries: {pc_max}\n  ttl: {pc_ttl}\n  negative_ttl: {ttl}\n\
+             \x20 servfail_ttl: {servfail}\n\
              webservice:\n  webserver: true\n  address: {any}\n  port: {api_port}\n\
-             \x20 allow_from:\n{lan}  api_key: {key}\n\
+             \x20 allow_from:\n{api}  api_key: {key}\n\
              logging:\n  loglevel: {loglevel}\n",
+            query = yaml_rows(&k.query_allow),
+            api = yaml_rows(&k.api_allow),
+            min_ttl = k.minimum_ttl_override,
+            rc_max = k.recordcache_max,
+            perc = k.refresh_on_ttl_perc,
+            stale = k.serve_stale_extensions,
+            pc_max = k.packetcache_max,
+            pc_ttl = k.packetcache_ttl,
+            servfail = k.servfail_ttl,
             port = self.port,
             lua_config = self.lua_config,
             any = self.any,
@@ -2432,22 +2542,23 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
         .parse()
         .map_err(|_| format!("{}={ip} is no IPv4 address", rec.ip_key))?;
     let role = dns_role(&ctx.need("DNS_REPLICATION_ROLE")?)?;
+    let knobs = DnsKnobs::load()?;
     let negative_ttl = if role == DnsRole::Secondary {
-        XFR_CYCLE_SECS
+        knobs.xfr_cycle
     } else {
-        120
+        knobs.negative_ttl
     };
     let flag = |key: &str| env_opt(key).as_deref().and_then(config::parse_bool);
     let loglevel = if flag("LOG_QUERIES") == Some(true) {
-        6
+        knobs.loglevel_queries
     } else {
-        3
+        knobs.loglevel
     };
     let domains_file = PathBuf::from(ctx.need("CDN_DOMAINS_FILE")?);
     let domains = fs::read_to_string(&domains_file)
         .map_err(|e| format!("cannot read {}: {e}", domains_file.display()))?;
     let dir = ctx.run_dir.join(rec.name);
-    let (rpz, count) = rpz_zone(&domains, proxy, unix_secs());
+    let (rpz, count) = rpz_zone(&domains, proxy, unix_secs(), &knobs);
     let rpz_file = dir.join("rpz.zone");
     let lua_file = dir.join("recursor.lua");
     let zones = rollback_zones()?;
@@ -2459,6 +2570,7 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
                 &rpz_file.display().to_string(),
                 &zones,
                 flag("ROOT_ZONE_MIRROR") != Some(false),
+                &knobs,
             ),
         ),
     ] {
@@ -2481,6 +2593,7 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
         lua_config: &lua_file.display().to_string(),
         lua_dns: &lua_dns,
         zones: &zones,
+        knobs: &knobs,
     };
     let store = lancache_ng::SnapshotStore::new(
         PathBuf::from(ctx.need("DNS_CONFIG_SNAPSHOT_DIR")?).join(rec.name),
@@ -5717,6 +5830,41 @@ mod tests {
         std::net::Ipv4Addr::from(rnd(1, u32::MAX.into()) as u32)
     }
 
+    // What: DNS render values, each one random.
+    // Why: a render must copy each value, not a literal.
+    fn gen_knobs() -> DnsKnobs {
+        let n = || rnd(1, u32::MAX.into());
+        let nets = || vec![format!("{}/8", gen_ipv4()), format!("{}/16", gen_ipv4())];
+        DnsKnobs {
+            xfr_cycle: n(),
+            soa_mname: format!("{}.", gen_name()),
+            soa_rname: format!("{}.@", gen_name()),
+            soa_expire: n(),
+            soa_minimum: n(),
+            auth_loglevel: rnd(0, 9),
+            api_allow: nets(),
+            query_allow: nets(),
+            loopback_nets: nets(),
+            rpz_rname: format!("{}.rpz.", gen_name()),
+            rpz_ttl: n(),
+            rpz_refresh: n(),
+            rpz_retry: n(),
+            root_servers: vec![gen_ipv4().to_string(), gen_ipv4().to_string()],
+            root_refresh: n(),
+            root_retry: n(),
+            minimum_ttl_override: n(),
+            recordcache_max: n(),
+            refresh_on_ttl_perc: rnd(0, 100),
+            serve_stale_extensions: n(),
+            negative_ttl: n(),
+            packetcache_max: n(),
+            packetcache_ttl: n(),
+            servfail_ttl: n(),
+            loglevel: rnd(0, 9),
+            loglevel_queries: rnd(0, 9),
+        }
+    }
+
     // What: plain, wildcard, disabled and junk RPZ rows.
     // Why: a bare TLD or "!" row must never redirect.
     // From: Issue #1683 | PR #1912
@@ -5727,20 +5875,24 @@ mod tests {
         let serial = rnd(1, u32::MAX.into());
         let rows =
             format!("# c\n\n{host}.example\n .{wild}.EXAMPLE \n!{off}.example\ncom\nb@d.example\n");
-        let (zone, count) = rpz_zone(&rows, ip, serial);
+        let k = gen_knobs();
+        let (zone, count) = rpz_zone(&rows, ip, serial, &k);
+        let ttl = k.rpz_ttl;
         assert_eq!(count, 2, "{zone}");
         assert!(
-            zone.contains(&format!("\n{host}.example 60 IN A {ip}\n")),
+            zone.contains(&format!("\n{host}.example {ttl} IN A {ip}\n")),
             "{zone}"
         );
         assert!(
-            zone.contains(&format!("\n*.{wild}.example 60 IN A {ip}\n")),
+            zone.contains(&format!("\n*.{wild}.example {ttl} IN A {ip}\n")),
             "{zone}"
         );
-        assert!(
-            zone.contains(&format!(" {serial} 3600 900 604800 60\n")),
-            "{zone}"
+        let soa = format!(
+            "@ SOA {} {} {serial} {} {} {} {ttl}\n@ NS {}\n",
+            k.soa_mname, k.rpz_rname, k.rpz_refresh, k.rpz_retry, k.soa_expire, k.soa_mname
         );
+        assert!(zone.contains(&soa), "{zone}");
+        assert!(zone.starts_with(&format!("$ORIGIN rpz.\n$TTL {ttl}\n")));
         assert!(!zone.contains(&off) && !zone.contains("\ncom ") && !zone.contains("b@d"));
     }
 
@@ -6019,13 +6171,21 @@ mod tests {
     fn recursor_lua_lists_rpz_zones_and_root_copy() {
         let rpz = gen_path();
         let zones = config::rollback_zones(&gen_name());
-        let lua = recursor_lua(&rpz, &zones, true);
+        let k = gen_knobs();
+        let lua = recursor_lua(&rpz, &zones, true, &k);
         assert!(lua.starts_with(&format!("rpzFile(\"{rpz}\"")), "{lua}");
         for zone in &zones {
             assert!(lua.contains(&format!("addNTA(\"{}\"", zone.trim_end_matches('.'))));
         }
-        assert_eq!(lua.matches("zoneToCache").count(), 3);
-        assert!(!recursor_lua(&rpz, &zones, false).contains("zoneToCache"));
+        assert_eq!(lua.matches("zoneToCache").count(), k.root_servers.len());
+        for ip in &k.root_servers {
+            let row = format!(
+                "\"{ip}\", {{ refreshPeriod={}, retryOnError={} }})\n",
+                k.root_refresh, k.root_retry
+            );
+            assert!(lua.contains(&row), "{row:?} missing in {lua}");
+        }
+        assert!(!recursor_lua(&rpz, &zones, false, &k).contains("zoneToCache"));
     }
 
     // What: recursor.conf carries ports, key, TTL, zones.
@@ -6042,7 +6202,10 @@ mod tests {
         );
         let any = gen_ipv4().to_string();
         let lo = gen_ipv4().to_string();
+        let k = gen_knobs();
+        let level = rnd(0, 9);
         let conf = RecursorConf {
+            knobs: &k,
             loopback: &lo,
             any: &any,
             port,
@@ -6050,7 +6213,7 @@ mod tests {
             api_port: api,
             api_key: &key,
             negative_ttl: ttl,
-            loglevel: 6,
+            loglevel: level,
             lua_config: &lua_c,
             lua_dns: &lua_d,
             zones: &zones,
@@ -6066,7 +6229,17 @@ mod tests {
             format!("forwarders: [{lo}:{auth}]"),
             format!("  listen:\n    - {any}\n"),
             format!("  address: {any}\n"),
-            "  loglevel: 6\n".to_string(),
+            format!("  loglevel: {level}\n"),
+            format!("  allow_from:\n{}", yaml_rows(&k.query_allow)),
+            format!("  allow_from:\n{}  api_key", yaml_rows(&k.api_allow)),
+            format!("  minimum_ttl_override: {}\n", k.minimum_ttl_override),
+            format!("  max_entries: {}\n", k.recordcache_max),
+            format!("  refresh_on_ttl_perc: {}\n", k.refresh_on_ttl_perc),
+            format!("  serve_stale_extensions: {}\n", k.serve_stale_extensions),
+            format!("  max_negative_ttl: {ttl}\n"),
+            format!("  max_entries: {}\n", k.packetcache_max),
+            format!("  ttl: {}\n", k.packetcache_ttl),
+            format!("  servfail_ttl: {}\n", k.servfail_ttl),
         ] {
             assert!(conf.contains(&want), "{want:?} missing in {conf}");
         }
@@ -6082,6 +6255,7 @@ mod tests {
         let lo = gen_ipv4().to_string();
         let refresh = rnd(10, DAY);
         let any = gen_ipv4().to_string();
+        let k = gen_knobs();
         let api = rnd(1, u16::MAX.into()) as u16;
         let auth = rnd(1, u16::MAX.into()) as u16;
         for (role, primary, secondary) in [
@@ -6089,6 +6263,7 @@ mod tests {
             (DnsRole::Secondary, "no", "yes"),
         ] {
             let conf = AuthConf {
+                knobs: &k,
                 loopback: &lo,
                 any: &any,
                 local,
@@ -6111,7 +6286,17 @@ mod tests {
                 format!("gsqlite3-database={db}\n"),
                 format!("primary={primary}\nsecondary={secondary}\n"),
                 format!("allow-dnsupdate-from={allow}\n"),
-                format!("admin.@ {seed} {refresh} {} 604800", refresh - 1),
+                format!(
+                    "default-soa-content={} {} {seed} {refresh} {} {} {}\n",
+                    k.soa_mname,
+                    k.soa_rname,
+                    refresh - 1,
+                    k.soa_expire,
+                    k.soa_minimum
+                ),
+                format!("xfr-cycle-interval={}\n", k.xfr_cycle),
+                format!("webserver-allow-from={}\n", k.api_allow.join(",")),
+                format!("loglevel={}\n", k.auth_loglevel),
                 format!("api-key={key}\n"),
                 format!("webserver-port={api}\n"),
                 format!("webserver-address={any}\n"),
