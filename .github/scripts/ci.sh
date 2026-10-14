@@ -3738,14 +3738,56 @@ _ci_build_cache_ref() {
 # Why: the docker driver cannot export a cache (§35).
 # From: Issue #1683 | PR #1912
 _ci_buildx_start() {
-    local name="$1" img
+    local name="$1" img names n v conf
+    local -a opts=()
     img="$(_ci_block_entry_field base_images "" buildkit)" || return 2
     if [ -z "${img}" ]; then
         ci_log "[CI-ERROR-BUILD-0024]" "key=\"base_images.buildkit\" reason=\"no BuildKit pin in SOT\""
         return 2
     fi
+    opts+=(--driver-opt "image=${img}")
+    # What: the job proxy reaches the BuildKit daemon.
+    # Why: AG-CI-009; the daemon pulls and caches itself.
+    # From: Issue #1683 | PR #1912
+    names="$(_ci_proxy_names)" || return 2
+    while IFS= read -r n; do
+        [ -n "${n}" ] || continue
+        v="${!n//\"/\"\"}"
+        opts+=(--driver-opt "\"env.${n}=${v}\"")
+    done <<< "${names}"
+    if [ -n "${HTTP_PROXY:-}" ] && [ -n "${PROJECT_SELFHOSTED_PROXY_CA:-}" ]; then
+        conf="$(_ci_buildkitd_config)" || return 2
+        opts+=(--buildkitd-config "${conf}")
+    fi
     _ci_retry buildx docker buildx create --name "${name}" --driver docker-container \
-        --driver-opt "image=${img}" --bootstrap >&2
+        "${opts[@]}" --bootstrap >&2
+}
+
+# What: buildkitd config trusting the job CA bundle.
+# Why: the daemon talks TLS through the self-hosted proxy.
+# From: Issue #1683 | PR #1912
+_ci_buildkitd_config() {
+    local bundle="${CURL_CA_BUNDLE:-}" reg keys k img hosts host conf body=""
+    if [ ! -s "${bundle}" ]; then
+        ci_log "[CI-ERROR-BUILD-0026]" "bundle=\"${bundle}\" reason=\"proxy CA set but no job CA bundle\""
+        return 2
+    fi
+    reg="$(_ci_registry)" || return 2
+    hosts="${reg%%/*}"
+    keys="$(_ci_block_keys base_images all)" || return 2
+    while IFS= read -r k; do
+        [ -n "${k}" ] || continue
+        img="$(_ci_block_entry_field base_images "" "${k}")" || return 2
+        hosts+=$'\n'"${img%%/*}"
+    done <<< "${keys}"
+    hosts="$(_ci_capture 0 sort -u <<< "${hosts}")" || return 2
+    while IFS= read -r host; do
+        [ -n "${host}" ] || continue
+        body+="[registry.\"${host}\"]"$'\n'"  ca = [\"${bundle}\"]"$'\n'
+    done <<< "${hosts}"
+    conf="$(_ci_mktemp "${CI_TMPDIR}/buildkitd.XXXXXX")" || return 2
+    _ci_write_secret "${conf}" "${body}" || return 2
+    printf '%s\n' "${conf}"
 }
 
 # What: remove a builder and its state after the build.
