@@ -25,7 +25,7 @@ use lancache_ng::config::{
     process_env, rollback_zones, uint, zone_url,
 };
 use lancache_ng::{
-    DnsRecord, FlushRequest, PowerDns, SnapshotStore, ct_eq, die, http_client,
+    Backoff, DnsRecord, FlushRequest, PowerDns, SnapshotStore, ct_eq, die, http_client,
     snapshot_created_unix, unix_nanos,
 };
 use reqwest::Method;
@@ -882,12 +882,6 @@ async fn serve_rollback(ctx: Arc<Ctx>, addr: String) {
     }
 }
 
-// What: next retry delay, doubled, at most 30 seconds.
-// Why: a failing fetch must neither spin nor wait forever.
-fn grow(backoff: u64) -> u64 {
-    (backoff * 2).min(30)
-}
-
 // What: a required env value, or exit with a message.
 // Why: an empty key or consumer name would start unsafely.
 fn required(name: &str) -> String {
@@ -979,7 +973,8 @@ async fn main() {
     // What: this loop alone applies records.
     // Why: so `applied` needs no lock.
     let mut applied = AppliedSequences::default();
-    let mut backoff = 1u64;
+    let policy = Backoff::load(&process_env).unwrap_or_else(|error| die(TAG, &error));
+    let mut backoff = policy.start;
     loop {
         let fetched = consumer
             .fetch()
@@ -990,9 +985,9 @@ async fn main() {
         let mut messages = match fetched {
             Ok(messages) => messages,
             Err(e) => {
-                eprintln!("Fetch error: {e} (backing off for {backoff} second(s))");
-                tokio::time::sleep(Duration::from_secs(backoff)).await;
-                backoff = grow(backoff);
+                eprintln!("Fetch error: {e} (backing off for {backoff:?})");
+                tokio::time::sleep(backoff).await;
+                backoff = policy.next(backoff);
                 continue;
             }
         };
@@ -1020,13 +1015,11 @@ async fn main() {
             }
         }
         if failed {
-            eprintln!(
-                "Stream error or retryable PDNS failure; backing off for {backoff} second(s)"
-            );
-            tokio::time::sleep(Duration::from_secs(backoff)).await;
-            backoff = grow(backoff);
+            eprintln!("Stream error or retryable PDNS failure; backing off for {backoff:?}");
+            tokio::time::sleep(backoff).await;
+            backoff = policy.next(backoff);
         } else {
-            backoff = 1;
+            backoff = policy.start;
         }
     }
 }
@@ -1275,15 +1268,6 @@ mod tests {
         .unwrap();
         assert!(delete.ttl.is_none() && delete.records.is_none());
         assert!(rrset_record("replace", "lan", &json!({"name": "h.lan."})).is_none());
-    }
-
-    // What: the retry delay doubles up to 30 seconds.
-    // Why: bounded backoff stops a dead stream spinning.
-    #[test]
-    fn backoff_doubles_and_caps() {
-        assert_eq!(grow(1), 2);
-        assert_eq!(grow(16), 30);
-        assert_eq!(grow(30), 30);
     }
 
     // What: a Ctx with an offline NATS client.
@@ -1667,16 +1651,5 @@ mod tests {
         let store = ctx.store("lan.");
         assert!(!check_zone(&ctx, &store, "lan.").await);
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    // What: the retry delay doubles and stops at 30.
-    // Why: a down server must not be hammered or ignored.
-    #[test]
-    fn retry_delay_grows_to_the_cap() {
-        assert_eq!(grow(0), 0);
-        assert_eq!(grow(1), 2);
-        assert_eq!(grow(14), 28);
-        assert_eq!(grow(15), 30);
-        assert_eq!(grow(16), 30);
     }
 }

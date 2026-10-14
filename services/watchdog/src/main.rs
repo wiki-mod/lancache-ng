@@ -21,7 +21,7 @@ use lancache_ng::config::{
     render_nats_conf,
 };
 use lancache_ng::{
-    ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
+    ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
     ClientCheck, ConflictCheck, DesiredRunState, DesiredState, Detail, DiskHealth, DiskInfo,
     DockerApi, NetdataAlarm, Place, ProbeAnswer, ProbeReport, ServiceHealth, WatchdogStatus, df,
     hex32, need_secs, probe_health, probe_health_tls, resolve_shared_secret, sha256_hex,
@@ -953,9 +953,8 @@ fn write_status(s: &Settings, services: HashMap<String, ServiceHealth>) -> Resul
 struct Timing {
     // What: how often the supervisor converges.
     tick: Duration,
-    // What: first and largest pause before a restart.
-    backoff_start: Duration,
-    backoff_max: Duration,
+    // What: restart pauses, RETRY_BACKOFF_START up to _MAX.
+    backoff: Backoff,
     // What: a run this long resets the restart backoff.
     backoff_reset: Duration,
     // What: wait for a stopped program before SIGKILL.
@@ -969,8 +968,7 @@ impl Timing {
         let secs = |key| bounded(key, 1, u32::MAX.into()).map(Duration::from_secs);
         Ok(Self {
             tick: secs("SUPERVISE_TICK")?,
-            backoff_start: secs("SUPERVISE_BACKOFF_START")?,
-            backoff_max: secs("SUPERVISE_BACKOFF_MAX")?,
+            backoff: Backoff::load(&config::process_env)?,
             backoff_reset: secs("SUPERVISE_BACKOFF_RESET")?,
             stop_grace: secs("SUPERVISE_STOP_GRACE")?,
         })
@@ -4685,7 +4683,7 @@ impl Slot {
             self.backoff.as_secs()
         ));
         self.not_before = std::time::Instant::now() + self.backoff;
-        self.backoff = (self.backoff * 2).min(self.timing.backoff_max);
+        self.backoff = self.timing.backoff.next(self.backoff);
         self.restarts = self.restarts.saturating_add(1);
     }
 
@@ -4714,7 +4712,7 @@ impl Slot {
         if let Some(why) = exit {
             self.child = None;
             if ran_long {
-                self.backoff = self.timing.backoff_start;
+                self.backoff = self.timing.backoff.start;
             }
             self.failed(&why);
         }
@@ -4814,7 +4812,7 @@ async fn supervise() -> Result<(), String> {
             task: None,
             started: None,
             not_before: now,
-            backoff: timing.backoff_start,
+            backoff: timing.backoff.start,
             restarts: 0,
             timing,
         })

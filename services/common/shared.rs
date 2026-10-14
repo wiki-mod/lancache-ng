@@ -241,6 +241,38 @@ pub fn need_secs(
     config::uint(get, key, 1, u64::MAX).map(Duration::from_secs)
 }
 
+// What: retry delays: start, then doubled up to max.
+// Why: ui, nats-subscriber and watchdog back off alike.
+// From: Issue #1683 | PR #1912
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Backoff {
+    pub start: Duration,
+    pub max: Duration,
+}
+
+impl Backoff {
+    // What: RETRY_BACKOFF_START and _MAX from a reader.
+    // Why: the SOT owns both; a start above max fails.
+    // From: Issue #1683 | PR #1912
+    pub fn load(get: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let start = need_secs(get, "RETRY_BACKOFF_START")?;
+        let max = need_secs(get, "RETRY_BACKOFF_MAX")?;
+        if start > max {
+            return Err(format!(
+                "RETRY_BACKOFF_START {start:?} is above RETRY_BACKOFF_MAX {max:?}"
+            ));
+        }
+        Ok(Self { start, max })
+    }
+
+    // What: the delay after this one: doubled, at most max.
+    // Why: a failing call must not spin nor wait forever.
+    // From: Issue #1683 | PR #1912
+    pub fn next(&self, delay: Duration) -> Duration {
+        delay.saturating_mul(2).min(self.max)
+    }
+}
+
 // What: the general HTTP client of several services.
 // Why: one timeout and pool setting, from the SOT.
 pub fn http_client(get: &dyn Fn(&str) -> Option<String>) -> Result<reqwest::Client, String> {

@@ -25,11 +25,12 @@ use lancache_ng::config::{
     parse_custom_options, reverse_zones, zone_url,
 };
 use lancache_ng::{
-    ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, DesiredRunState, DesiredState, DnsRecord, FlushRequest,
-    NetdataAlarm, Place, PowerDns, ProbeAnswer, ProbeReport, SnapshotStore, WatchdogStatus, ct_eq,
-    df, die, hex32, http_client, is_placeholder, load_or_create, load_or_create_hex, need_secs,
-    probe_health, resolve_shared_secret, shared_secret, shared_secret_file_name,
-    shared_secret_is_placeholder, snapshot_created_unix, unix_secs, write_file, write_if_changed,
+    ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, DesiredRunState, DesiredState, DnsRecord,
+    FlushRequest, NetdataAlarm, Place, PowerDns, ProbeAnswer, ProbeReport, SnapshotStore,
+    WatchdogStatus, ct_eq, df, die, hex32, http_client, is_placeholder, load_or_create,
+    load_or_create_hex, need_secs, probe_health, resolve_shared_secret, shared_secret,
+    shared_secret_file_name, shared_secret_is_placeholder, snapshot_created_unix, unix_secs,
+    write_file, write_if_changed,
 };
 use nkeys::{KeyPair, XKey};
 use regex::Regex;
@@ -147,6 +148,7 @@ struct Config {
     http_ip: String,
     https_ip: String,
     pdns_auth_port: u16,
+    retry_backoff: Backoff,
     dns_port: u16,
     dhcp_api_url: String,
     dhcp_api_token: String,
@@ -349,6 +351,7 @@ impl Config {
             http_ip,
             https_ip,
             pdns_auth_port: config::port(env, "PDNS_AUTH_PORT")?,
+            retry_backoff: Backoff::load(env)?,
             dns_port: config::port(env, "DNS_PORT")?,
             dhcp_api_url: format!(
                 "http://{}:{}",
@@ -1964,12 +1967,12 @@ const TARGET_ACCOUNT: &str = "$G";
 // Why: revocation is the per-connect DB check, not expiry.
 const USER_JWT_TTL_SECS: i64 = 90 * 24 * 60 * 60;
 
-// What: sleep, then double the delay up to a cap.
+// What: sleep, then take the next Backoff delay.
 // Why: one backoff step for every NATS retry loop.
-// From: Issue #849
-async fn backoff(delay: &mut Duration, max: Duration) {
+// From: Issue #849 | PR #1912
+async fn backoff(delay: &mut Duration, policy: &Backoff) {
     tokio::time::sleep(*delay).await;
-    *delay = (*delay * 2).min(max);
+    *delay = policy.next(*delay);
 }
 
 // What: connect to NATS as one static role.
@@ -1987,7 +1990,7 @@ async fn nats_connect(url: &str, login: &NatsLogin) -> Result<async_nats::Client
 // What: connect as the ui role, retrying without end.
 // Why: the ui is useless until NATS is up; retry, not exit.
 async fn connect_nats_with_retry(cfg: &Config) -> async_nats::Client {
-    let mut delay = Duration::from_secs(1);
+    let mut delay = cfg.retry_backoff.start;
     loop {
         match nats_connect(&cfg.nats_url, &cfg.nats.ui).await {
             Ok(client) => {
@@ -1999,7 +2002,7 @@ async fn connect_nats_with_retry(cfg: &Config) -> async_nats::Client {
                     "Cannot connect to NATS at {}: {err}. Retrying in {delay:?}",
                     cfg.nats_url
                 );
-                backoff(&mut delay, Duration::from_secs(30)).await;
+                backoff(&mut delay, &cfg.retry_backoff).await;
             }
         }
     }
@@ -2231,18 +2234,19 @@ async fn answer_auth_callout(
 // Why: the row is checked per connect; removal is instant.
 // From: Issue #583
 async fn run_auth_callout(state: Arc<AppState>, issuer: KeyPair, xkey: XKey) {
-    let mut delay = Duration::from_secs(1);
+    let policy = state.config.retry_backoff;
+    let mut delay = policy.start;
     loop {
         let client = match nats_connect(&state.config.nats_url, &state.config.nats.callout).await {
             Ok(client) => {
-                delay = Duration::from_secs(1);
+                delay = policy.start;
                 client
             }
             Err(err) => {
                 tracing::warn!(
                     "auth-callout: cannot connect to NATS: {err}. Retrying in {delay:?}"
                 );
-                backoff(&mut delay, Duration::from_secs(30)).await;
+                backoff(&mut delay, &policy).await;
                 continue;
             }
         };
@@ -2250,7 +2254,7 @@ async fn run_auth_callout(state: Arc<AppState>, issuer: KeyPair, xkey: XKey) {
             Ok(sub) => sub,
             Err(err) => {
                 tracing::error!("auth-callout: failed to subscribe: {err}");
-                backoff(&mut delay, Duration::from_secs(30)).await;
+                backoff(&mut delay, &policy).await;
                 continue;
             }
         };
@@ -6594,7 +6598,7 @@ mod tests {
         "LANCACHE_SHARED_SECRET_DIR",
     ];
 
-    const NUMBER_KEYS: [(&str, &str); 17] = [
+    const NUMBER_KEYS: [(&str, &str); 19] = [
         ("RESTART_AFTER", "3"),
         ("DHCP_LEASE_TIME_MIN", "60"),
         ("DHCP_LEASE_TIME_MAX", "604800"),
@@ -6608,6 +6612,8 @@ mod tests {
         ("DHCP_LEASE_TIME", "86400"),
         ("UI_SESSION_TTL_SECONDS", "3600"),
         ("UI_SESSION_TTL_MAX_SECONDS", "31536000"),
+        ("RETRY_BACKOFF_START", "1"),
+        ("RETRY_BACKOFF_MAX", "30"),
         ("KEEP_KNOWN_GOOD_CONFIGS", "7"),
         ("UI_LOGS_MAX_ENTRIES", "250"),
         ("UI_LISTEN_PORT", "8081"),
@@ -7563,14 +7569,17 @@ mod tests {
     // Why: one step serves every NATS retry loop.
     #[tokio::test(start_paused = true)]
     async fn backoff_doubles_up_to_the_cap() {
-        let mut delay = Duration::from_secs(1);
-        let max = Duration::from_secs(5);
-        backoff(&mut delay, max).await;
+        let policy = Backoff {
+            start: Duration::from_secs(1),
+            max: Duration::from_secs(5),
+        };
+        let mut delay = policy.start;
+        backoff(&mut delay, &policy).await;
         assert_eq!(delay, Duration::from_secs(2));
-        backoff(&mut delay, max).await;
+        backoff(&mut delay, &policy).await;
         assert_eq!(delay, Duration::from_secs(4));
-        backoff(&mut delay, max).await;
-        assert_eq!(delay, max);
+        backoff(&mut delay, &policy).await;
+        assert_eq!(delay, policy.max);
     }
 
     // What: a Config with the four NATS roles filled in.
