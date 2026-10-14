@@ -825,7 +825,7 @@ status_reports:
   nightly-promote:
     label: nightly-promote
     scope: "nightly validate and promote of the accepted stack"
-    jobs: [platform, validate, nightly]
+    jobs: [platform, plan, validate, nightly]
 
 # What: Build-identity inputs per build type (§7).
 # Why: Impact is content-identity, never path-touched alone.

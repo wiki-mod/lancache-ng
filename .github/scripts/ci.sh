@@ -854,7 +854,7 @@ ci_cmd_codeql_impact() {
         done <<< "${paths}"
         [ "${hit}" = true ] && { include="$(_ci_matrix_append "${include}" language="${lang}")" || return 2; }
     done <<< "${langs}"
-    printf 'codeql-matrix={"include":%s}\n' "${include}"
+    printf 'codeql-matrix=%s\n' "$(_ci_matrix_doc "${include}")"
     ci_log "[CI-INFO-CODEQL-0001]" "phase=codeql-impact langs=$(printf '%s' "${include}" | jq -r 'length') changed=${#changed[@]}"
 }
 
@@ -1084,7 +1084,7 @@ ci_cmd_plan_matrix() {
     _ci_docs_only "${changed[@]}" || drc=$?
     case "${drc}" in 0) docs_only=true ;; 1) ;; *) return 2 ;; esac
     local service platform include='[]' any=false resolved paction pident pimpact runner authed=false test_services=''
-    local _ci_plan_ids=""
+    local _ci_plan_ids="" _ci_run_sig=""
     local sot_changed=false f path_cand rc plats unknown=""
     # What: SOT change makes every target id candidate.
     # Why: pins live in SOT; identity decides BUILD.
@@ -1173,7 +1173,7 @@ ci_cmd_plan_matrix() {
     # Why: promote check, validate, promote read all pairs.
     # From: Issue #1683 | PR #1912
     if [ "${any}" = true ] || [ -n "${ptargets}" ]; then
-        _ci_record_all || return "$?"
+        _ci_for_all_pairs _ci_plan_record || return "$?"
     fi
     # What: promote a ref target not yet on the candidate
     # Why: §50 needs no build; §8: no retag when current
@@ -1200,13 +1200,13 @@ ci_cmd_plan_matrix() {
         printf 'any-build=%s\n' "${any}"
         printf 'promote=%s\n' "${promote}"
         printf 'validate=%s\n' "${validate}"
-        printf 'matrix={"include":%s}\n' "${include}"
+        printf 'matrix=%s\n' "$(_ci_matrix_doc "${include}")"
         printf 'test-services=%s\n' "${test_services# }"
         printf 'rust-validation=%s\n' "${rust_validation}"
         printf 'rust-audit=%s\n' "${rust_audit}"
         printf 'docs-only=%s\n' "${docs_only}"
-        printf 'identities=%s\n' "${_ci_plan_ids# }"
     } >> "${out}"
+    _ci_record_emit || return 2
     if [ -n "${unknown}" ]; then
         ci_error "[CI-ERROR-PLAN-0008]" "reason=\"UNKNOWN pairs: no build, escalate (2.3)\"" "${unknown}"
         return 3
@@ -1815,17 +1815,17 @@ _ci_identity_recorded() {
 # From: Issue #1683
 _ci_identity_for() {
     local service="$1" platform="$2" ref="${3:-}" build_type pins content buf rec rrc=0
-    # What: a planned run reads its recorded pair id.
+    # What: a given run record is the only id source.
     # Why: a live apk re-read in a later job can differ.
     # From: Issue #1683 | PR #1912
-    rec="${CI_RUN_IDENTITIES:-${_ci_plan_ids:-}}"
-    if [ -z "${ref}" ] && [ -n "${rec}" ]; then
+    rec="${CI_RUN_IDENTITIES-${_ci_plan_ids:-}}"
+    if [ -z "${ref}" ] && { [ -n "${CI_RUN_IDENTITIES+x}" ] || [ -n "${rec}" ]; }; then
         _ci_identity_recorded "${rec}" "${service}" "${platform}" || rrc=$?
         case "${rrc}" in
             0) return 0 ;;
             1)
-                if [ -n "${CI_RUN_IDENTITIES:-}" ]; then
-                    ci_log "[CI-ERROR-IDENTITY-0015]" "service=\"${service}\" platform=\"${platform}\" reason=\"pair not in the plan's run record; FAIL CLOSED\""
+                if [ -n "${CI_RUN_IDENTITIES+x}" ]; then
+                    ci_log "[CI-ERROR-IDENTITY-0015]" "service=\"${service}\" platform=\"${platform}\" reason=\"pair not in the given run record; FAIL CLOSED\""
                     return 2
                 fi
                 ;;
@@ -1888,36 +1888,46 @@ _ci_plan_record() {
         1) ;;
         *) return 2 ;;
     esac
+    # What: toolchain apk state resolved once per record.
+    # Why: every pair of one run embeds the same state.
+    # From: Issue #1683 | PR #1912
+    if [ -z "${_ci_run_sig}" ]; then
+        _ci_run_sig="$(_ci_build_tools_resolve_signature && printf x)" || return 2
+    fi
     id="$(_ci_identity_for "$1" "$2")" || return "$?"
     _ci_plan_ids+=" $1@$2=${id}"
 }
 
-# What: put every target pair into the run record.
-# Why: validate and promote read unbuilt pairs too.
+# What: write the run record to the log and step output.
+# Why: plan and --run-record emit one format, one writer.
 # From: Issue #1683 | PR #1912
-_ci_record_all() {
-    local targets service
+_ci_record_emit() {
+    _ci_step_output "[CI-ERROR-IDENTITY-0016]" identities "${_ci_plan_ids# }" || return 2
+    printf 'identities=%s\n' "${_ci_plan_ids# }"
+}
+
+# What: run one_fn service platform for every target pair.
+# Why: one pair enumerator for the run record and scans.
+# From: Issue #1683 | PR #1912
+_ci_for_all_pairs() {
+    local one_fn="$1" targets service
     targets="$(ci_build_targets)" || return 2
     for service in ${targets}; do
-        _ci_for_platforms "${service}" "" "[CI-ERROR-IDENTITY-0017]" _ci_plan_record || return "$?"
+        _ci_for_platforms "${service}" "" "[CI-ERROR-PAIRS-0001]" "${one_fn}" || return "$?"
     done
 }
 
-# What: Print a target's id per platform, keyed.
-# Why: Default = all platforms; one selectable.
-# From: Issue #1683
+# What: a target's ids per platform, or the run record.
+# Why: --run-record gives nightly jobs one id per pair.
+# From: Issue #1683 | PR #1912
 ci_cmd_identity() {
     local service="${1:-}" platform="${2:-}"
     [ -n "${service}" ] || { ci_log "[CI-ERROR-IDENTITY-0001]" "reason=\"service arg required\""; return 2; }
-    # What: --run-record outputs every pair's id once.
-    # Why: nightly jobs read it as ci.yml jobs read plan's.
-    # From: Issue #1683 | PR #1912
     if [ "${service}" = --run-record ]; then
-        local _ci_plan_ids=""
-        _ci_record_all || return "$?"
-        _ci_step_output "[CI-ERROR-IDENTITY-0016]" identities "${_ci_plan_ids# }" || return 2
-        printf 'identities=%s\n' "${_ci_plan_ids# }"
-        return 0
+        local _ci_plan_ids="" _ci_run_sig=""
+        _ci_for_all_pairs _ci_plan_record || return "$?"
+        _ci_record_emit
+        return "$?"
     fi
     _ci_for_platforms "${service}" "${platform}" "[CI-ERROR-IDENTITY-0002]" _ci_identity_one
 }
@@ -2863,21 +2873,13 @@ ci_cmd_scan_stack() {
             [ "${crc}" -le "${rc}" ] || rc="${crc}"
             continue
         fi
-        passed="$(_ci_capture 0 jq -c --arg s "${svc}" --arg p "${plat}" ". + [{service:\$s, platform:\$p}]" <<< "${passed}")" || {
-            ci_log "[CI-ERROR-SCAN-0027]" "service=\"${svc}\" platform=\"${plat}\" reason=\"jq failed to add the pair\""
-            return 2
-        }
+        passed="$(_ci_matrix_append "${passed}" service="${svc}" platform="${plat}")" || return 2
     done <<< "${pairs}"
     # What: the clean pairs go to aggregate as its matrix.
     # Why: a red pair must not block the clean ones
     # From: Issue #1683 | PR #1912
     if [ "${passed}" != '[]' ]; then
-        local matrix
-        matrix="$(_ci_capture 0 jq -c '{include: .}' <<< "${passed}")" || {
-            ci_log "[CI-ERROR-SCAN-0030]" "reason=\"jq failed to build the aggregate matrix\""
-            return 2
-        }
-        _ci_step_output "[CI-ERROR-SCAN-0026]" passed "${matrix}" || return 2
+        _ci_step_output "[CI-ERROR-SCAN-0026]" passed "$(_ci_matrix_doc "${passed}")" || return 2
     fi
     [ "${rc}" -eq 0 ] || ci_log "[CI-ERROR-SCAN-0024]" "failed=\"${failed# }\" reason=\"scan failed for these pairs; the others were scanned\""
     return "${rc}"
@@ -3225,12 +3227,13 @@ _ci_needs_not_green() {
 # Why: runs in its own always-job; a red job still reports.
 # From: Issue #1683 | PR #1912
 ci_cmd_nightly_report() {
-    local needs="${CI_NEEDS:-}" kind jobs job red="" rc=0 verdict states seen
+    local needs="${CI_NEEDS:-}" kind kinds jobs job red="" rc=0 verdict states seen
     if [ -z "${needs}" ]; then
         ci_log "[CI-ERROR-STATUS-0001]" "reason=\"CI_NEEDS required\""
         return 2
     fi
     red="$(_ci_needs_not_green "${needs}")" || return 2
+    kinds="$(_ci_block_keys status_reports)" || return 2
     while IFS= read -r kind; do
         [ -n "${kind}" ] || continue
         jobs="$(_ci_block_entry_list status_reports "${kind}" jobs)" || return 2
@@ -3254,7 +3257,7 @@ ci_cmd_nightly_report() {
             continue
         fi
         _ci_status_issue_kind "${kind}" "${verdict}" "${states}${red:+ | not green: ${red//$'\n'/ }}" || rc=2
-    done <<< "$(_ci_block_keys status_reports)"
+    done <<< "${kinds}"
     return "${rc}"
 }
 
@@ -5381,16 +5384,16 @@ ci_cmd_scan() {
 # Why: a new CVE hits an unchanged image; §31 refreshes it.
 # From: Issue #1683 | PR #1912
 ci_cmd_scan_channel() {
-    local targets svc plat matrix="[]"
-    targets="$(ci_build_targets)" || return 2
-    for svc in ${targets}; do
-        while IFS= read -r plat; do
-            [ -n "${plat}" ] || continue
-            matrix="$(_ci_capture 0 jq -c --arg s "${svc}" --arg p "${plat}" ". + [{service:\$s, platform:\$p}]" <<< "${matrix}")" || return 2
-        done <<< "$(_ci_platforms "${svc}")"
-    done
-    matrix="$(_ci_capture 0 jq -c '{include: .}' <<< "${matrix}")" || return 2
-    CI_BUILD_MATRIX="${matrix}" ci_cmd_scan_stack
+    local include='[]'
+    _ci_for_all_pairs _ci_scan_channel_pair || return "$?"
+    CI_BUILD_MATRIX="$(_ci_matrix_doc "${include}")" ci_cmd_scan_stack
+}
+
+# What: add one pair to the scan-channel matrix.
+# Why: the per-pair unit _ci_for_all_pairs calls.
+# From: Issue #1683 | PR #1912
+_ci_scan_channel_pair() {
+    include="$(_ci_matrix_append "${include}" service="$1" platform="$2")" || return 2
 }
 
 # =========================================================
@@ -6402,20 +6405,19 @@ _ci_release_image_names() {
 # Why: the workflow attests each digest; no list in YAML.
 # From: Issue #1683 | PR #1912
 ci_cmd_release_images() {
-    local tag="${1:-}" base name img dig matrix="[]"
+    local tag="${1:-}" base name names img dig include="[]"
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0053]" "reason=\"tag arg required\""; return 2; }
     _ci_require_ghcr_auth || return "$?"
     base="$(_ci_image_ref)" || return 2
+    names="$(_ci_release_image_names)" || return 2
     while IFS= read -r name; do
         [ -n "${name}" ] || continue
         img="${base}/${name}"
         dig="$(_ci_registry_digest "${img}:${tag}")" || return "$?"
-        matrix="$(_ci_capture 0 jq -c --arg r "${img%%/*}" --arg n "${img}" --arg d "${dig}" \
-            ". + [{registry:\$r, name:\$n, digest:\$d}]" <<< "${matrix}")" || return 2
-    done <<< "$(_ci_release_image_names)"
-    matrix="$(_ci_capture 0 jq -c '{include: .}' <<< "${matrix}")" || return 2
-    _ci_step_output "[CI-ERROR-RELEASE-0054]" matrix "${matrix}" || return 2
-    printf 'release-images=%s tag=%s\n' "$(jq -r '.include | length' <<< "${matrix}")" "${tag}"
+        include="$(_ci_matrix_append "${include}" registry="${img%%/*}" name="${img}" digest="${dig}")" || return 2
+    done <<< "${names}"
+    _ci_step_output "[CI-ERROR-RELEASE-0054]" matrix "$(_ci_matrix_doc "${include}")" || return 2
+    printf 'release-images=%s tag=%s\n' "$(jq -r 'length' <<< "${include}")" "${tag}"
 }
 
 # What: Render the marker-delimited image provenance block.
@@ -6952,7 +6954,7 @@ _ci_gc_reachable() {
                     fi
                     ;;
             esac
-        done <<< "$(printf '%s' "${tags}" | tr ',' '\n')"
+        done <<< "${tags//,/$'\n'}"
     fi
     # What: Fail closed unless grace is a positive integer.
     # Why: Empty grace makes floor=now and deletes all.
@@ -7844,7 +7846,7 @@ _ci_validate_dns() {
         if [ "${side}" = IP_HTTP ]; then
             a_http="${out}"
         elif [ "${out}" = "${a_http}" ]; then
-            ci_log "[CI-ERROR-VALIDATE-0021]" "domain=\"${domain}\" reason=\"http and https DNS returned the same answer (#668 split routing lost)\""
+            ci_log "[CI-ERROR-VALIDATE-0021]" "domain=\"${domain}\" reason=\"http and https DNS returned the same answer (split routing lost)\""
             return 1
         fi
     done
@@ -7914,7 +7916,7 @@ _ci_validate_proxy_stream_map() {
     fi
     bad="$(printf '%s\n' "${map}" | _ci_stream_map_violations "${port}")"
     if [ -n "${bad}" ]; then
-        ci_error "[CI-ERROR-VALIDATE-0020]" "reason=\"stream-target wildcard forwards to a hardcoded root, not the requested SNI (#1297)\"" "${bad}"
+        ci_error "[CI-ERROR-VALIDATE-0020]" "reason=\"stream-target wildcard forwards to a hardcoded root, not the requested SNI\"" "${bad}"
         return 1
     fi
 }
@@ -7963,7 +7965,7 @@ _ci_validate_https_mitm() {
     # Why: proves interception, not passthrough.
     # From: Issue #668
     if [ "${issuer}" != "${ca_subj}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0026]" "issuer=\"${issuer}\" ca=\"${ca_subj}\" reason=\"https mode :${port} cert not issued by our LAN CA (not intercepting, #668)\""
+        ci_log "[CI-ERROR-VALIDATE-0026]" "issuer=\"${issuer}\" ca=\"${ca_subj}\" reason=\"https mode :${port} cert not issued by our LAN CA (not intercepting)\""
         return 1
     fi
 }
@@ -7986,7 +7988,7 @@ _ci_validate_https_dispatch_map() {
     fi
     bad="$(printf '%s\n' "${map}" | _ci_https_dispatch_violations "${relay}")"
     if [ -n "${bad}" ]; then
-        ci_error "[CI-ERROR-VALIDATE-0029]" "reason=\"depth>=2 SNI dispatch entry routes to MITM, not passthrough relay :${relay} (#1276/#1322)\"" "${bad}"
+        ci_error "[CI-ERROR-VALIDATE-0029]" "reason=\"depth>=2 SNI dispatch entry routes to MITM, not passthrough relay :${relay}\"" "${bad}"
         return 1
     fi
 }
@@ -8670,7 +8672,7 @@ _ci_validate_secondary_identity() {
         return 1
     fi
     if [ "${au}" = "${bu}" ] || [ "${ap}" = "${bp}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0049]" "reason=\"two secondaries got the same NATS identity (#583 per-secondary identity lost)\""
+        ci_log "[CI-ERROR-VALIDATE-0049]" "reason=\"two secondaries got the same NATS identity (per-secondary identity lost)\""
         return 1
     fi
 }
@@ -8941,12 +8943,13 @@ _ci_bake_inspect() {
 # Why: A baked CA/proxy/accel var leaks and breaks runtime.
 # From: Issue #1683
 _ci_bake_check() {
-    local image="$1" raw status line kind rest key patt bad=0
+    local image="$1" raw status line kind rest key patt patts bad=0
     if [ -z "${image}" ]; then
         ci_log "[CI-ERROR-VARIABLES-0008]" "reason=\"no image ref given\""
         return 2
     fi
     _ci_require_ghcr_auth || return 2
+    patts="$(_ci_bake_env_patterns)" || return 2
     if raw="$(_ci_bake_inspect "${image}" 2>&1)"; then status=0; else status=$?; fi
     if [ "${status}" -ne 0 ]; then
         ci_error "[CI-ERROR-VARIABLES-0005]" "image=\"${image}\" reason=\"image inspect failed\"" "${raw}"
@@ -8966,7 +8969,7 @@ _ci_bake_check() {
                             bad=1
                             ;;
                     esac
-                done <<< "$(_ci_bake_env_patterns)"
+                done <<< "${patts}"
                 ;;
             extra_ca)
                 case "${rest}" in
@@ -9557,6 +9560,13 @@ PROG
 # From: Issue #1683
 _ci_build_tools_resolve_signature() {
     local base packages arches arch av versions="" tool repos keys
+    # What: inside a run record, reuse its one signature.
+    # Why: a second index read can return another state.
+    # From: Issue #1683 | PR #1912
+    if [ -n "${_ci_run_sig:-}" ]; then
+        printf '%s' "${_ci_run_sig%x}"
+        return 0
+    fi
     base="$(_ci_alpine_image "[CI-ERROR-BUILDTOOLS-0009]" "key=\"base_images.alpine\" reason=\"no alpine base for the build-tools apk resolve; FAIL CLOSED\"")" || return 2
     packages="$(_ci_build_tools_packages | tr '\n' ' ')" || return 2
     arches="$(_ci_build_tools_arches)" || return 2
@@ -9591,6 +9601,13 @@ _ci_matrix_append() {
         return 2
     fi
     printf '%s' "${out}"
+}
+
+# What: wrap a matrix array as a workflow matrix document.
+# Why: one format for every matrix output.
+# From: Issue #1683 | PR #1912
+_ci_matrix_doc() {
+    printf '{"include":%s}' "$1"
 }
 
 # What: resolve published build-tools to immutable ref.
@@ -10606,7 +10623,7 @@ _ci_rh_agent() {
 # Why: review first; clean acts only on what check shows.
 # From: Issue #1622 | PR #1624
 _ci_rh_check() {
-    local root user hooks utim dir st agent svc archive size found=0 f groups rf sfile dgroup crc hpre hpost
+    local root user hooks utim dir dirs st agent svc units archive archives size found=0 f groups rf sfile dgroup crc hpre hpost
     root="$(_ci_rh_val opt_root)" || return 2
     user="$(_ci_rh_val user)" || return 2
     hooks="$(_ci_rh_val hooks_dir)" || return 2
@@ -10617,6 +10634,7 @@ _ci_rh_check() {
     hpre="$(_ci_rh_val hook_pre_name)" || return 2
     hpost="$(_ci_rh_val hook_post_name)" || return 2
     printf 'Host: %s   own_host_token=%s\n\n--- Runner instance directories under %s ---\n' "$(_ci_capture 0 hostname)" "$(_ci_rh_host_token)" "${root}"
+    dirs="$(_ci_rh_runner_dirs)" || return 2
     while IFS= read -r dir; do
         [ -n "${dir}" ] || continue
         found=1
@@ -10631,9 +10649,10 @@ _ci_rh_check() {
             if [ "${crc}" -eq 0 ]; then
                 printf '    -> carries credential material (private key for that identity)\n'
             fi
+            units="$(_ci_rh_runner_units "${dir}")" || return 2
             while IFS= read -r svc; do
                 [ -z "${svc}" ] || printf '    -> inherited unit %s is stopped and disabled by clean first\n' "${svc}"
-            done <<< "$(_ci_rh_runner_units "${dir}")"
+            done <<< "${units}"
         elif [ "${st}" -eq 2 ]; then
             printf '  UNRESOLVED IDENTITY: %s (agentName: %s); hostname and IP disagree, clean skips it\n' "${dir}" "${agent}"
         elif [ -f "${dir}/${rf}" ]; then
@@ -10641,16 +10660,17 @@ _ci_rh_check() {
         else
             printf '  unregistered (no %s yet): %s\n' "${rf}" "${dir}"
         fi
-    done <<< "$(_ci_rh_runner_dirs)"
+    done <<< "${dirs}"
     [ "${found}" -eq 1 ] || printf '  (none found)\n'
     printf '\n--- Stray large archives under %s ---\n' "${root}"
     found=0
+    archives="$(_ci_rh_stray_archives)" || return 2
     while IFS= read -r archive; do
         [ -n "${archive}" ] || continue
         found=1
         size="$(_ci_capture 0 du -h "${archive}")" || return 2
         printf '  %s (%s)\n' "${archive}" "${size%%$'\t'*}"
-    done <<< "$(_ci_rh_stray_archives)"
+    done <<< "${archives}"
     [ "${found}" -eq 1 ] || printf '  (none found)\n'
     printf '\n--- Sudoers and docker group for %s ---\n' "${user}"
     if _ci_rh_root test -f "${sfile}"; then
@@ -10692,8 +10712,9 @@ _ci_rh_confirmed() {
 # Why: only identity-proven leftovers go; archives stay.
 # From: Issue #1622 | PR #1624
 _ci_rh_clean() {
-    local dir st svc all archive size removed=0 found=0
+    local dir dirs st svc units all archive archives size removed=0 found=0
     _ci_rh_confirmed CONFIRM_CLEAN || return 2
+    dirs="$(_ci_rh_runner_dirs)" || return 2
     while IFS= read -r dir; do
         [ -n "${dir}" ] || continue
         # What: identity is re-checked right before removal.
@@ -10705,9 +10726,10 @@ _ci_rh_clean() {
             printf 'SKIPPING %s: identity unresolved; fix the hostname first\n' "${dir}"
         elif [ "${st}" -eq 0 ]; then
             all=1
+            units="$(_ci_rh_runner_units "${dir}")" || return 2
             while IFS= read -r svc; do
                 [ -z "${svc}" ] || _ci_rh_stop_unit "${svc}" || all=0
-            done <<< "$(_ci_rh_runner_units "${dir}")"
+            done <<< "${units}"
             if [ "${all}" -eq 0 ]; then
                 printf 'SKIPPING %s: an inherited runner service is not confirmed stopped\n' "${dir}"
                 continue
@@ -10716,13 +10738,14 @@ _ci_rh_clean() {
             _ci_run "[CI-ERROR-RUNNER-0027]" "dir=\"${dir}\" reason=\"directory not removed\"" _ci_rh_root rm -rf -- "${dir}" || return 2
             removed=1
         fi
-    done <<< "$(_ci_rh_runner_dirs)"
+    done <<< "${dirs}"
+    archives="$(_ci_rh_stray_archives)" || return 2
     while IFS= read -r archive; do
         [ -n "${archive}" ] || continue
         found=1
         size="$(_ci_capture 0 du -h "${archive}")" || return 2
         printf 'NOT removed (size and extension cannot prove origin): %s (%s)\n' "${archive}" "${size%%$'\t'*}"
-    done <<< "$(_ci_rh_stray_archives)"
+    done <<< "${archives}"
     [ "${found}" -eq 0 ] || printf 'Review the paths, then: ci.sh runner-host clean-archive <exact-path>...\n'
     if [ "${removed}" -eq 0 ]; then printf 'Nothing removed by clean.\n'; else printf 'Clean complete. Re-run check to confirm.\n'; fi
 }
@@ -13771,7 +13794,7 @@ _ci_check_action_node_versions() {
         ci_error "[CI-ERROR-CHECK-0054]" "reason=\"uses: extraction failure (unresolved alias / unparseable step)\"" "$(printf '%s\n' "${xv[@]}")"
     fi
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0095]" "reason=\"deprecated runtime / ref drift / description expression (issue #799/#1095)\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0095]" "reason=\"deprecated runtime / ref drift / description expression\"" "$(printf '%s\n' "${viol[@]}")"
     fi
     if [ "${#xv[@]}" -gt 0 ] || [ "${#viol[@]}" -gt 0 ]; then
         return 1
@@ -15150,7 +15173,7 @@ _ci_check_changelog_direct_edit() {
     label_err="$(jq -e --arg l "${label}" 'index($l) != null' <<<"${PR_LABELS_JSON:-[]}" 2>&1 >/dev/null)" || label_rc=$?
     case "${label_rc}" in
         0) ci_log "[CI-INFO-CHECK-0115]" "file=\"${file}\" label=\"${label}\" reason=\"changelog edited with the label; expected\"" ;;
-        1) ci_log "[CI-INFO-CHECK-0116]" "file=\"${file}\" reason=\"changelog edited directly outside the release flow (issue #893); warn-only\"" ;;
+        1) ci_log "[CI-INFO-CHECK-0116]" "file=\"${file}\" reason=\"changelog edited directly outside the release flow; warn-only\"" ;;
         *)
             ci_error "[CI-ERROR-CHECK-0112]" "reason=\"PR_LABELS_JSON unreadable\"" "${label_err}"
             return 2
@@ -15404,9 +15427,10 @@ _ci_check_dockerfiles() {
         # Why: ARG scope is per stage; else no value.
         # From: Issue #1683 | PR #1858
         missing="$(_ci_dockerfile_stage_missing_args "${df}" "${svars}" 'ci[.]sh (apk-setup|rust-build)')" || return 2
+        missing="$(_ci_capture 0 sort -u <<< "${missing}")" || return 2
         while read -r bst bv; do
             [ -z "${bv}" ] || e_stage+=("${t}: Dockerfile stage ${bst} runs ci.sh without ARG ${bv} (SOT stage_variables.ci_sh)")
-        done <<< "$(sort -u <<< "${missing}")"
+        done <<< "${missing}"
         # What: each secret mount id is a central id.
         # Why: set-runtime writes only listed ids.
         # From: Issue #1683 | PR #1858
@@ -15478,9 +15502,10 @@ PROG
         grep -q "ARG ${CI_ARG_TOOLCHAIN_IMAGE}" "${df}" \
             || e_bt+=("${t}: Dockerfile must declare ARG ${CI_ARG_TOOLCHAIN_IMAGE}")
         missing="$(_ci_dockerfile_stage_missing_args "${df}" "${bvars}" 'ci[.]sh rust-build')" || return 2
+        missing="$(_ci_capture 0 sort -u <<< "${missing}")" || return 2
         while read -r bst bv; do
             [ -z "${bv}" ] || e_bt+=("${t}: Dockerfile stage ${bst} runs ci.sh rust-build without ARG ${bv} (SOT build_variables.rust)")
-        done <<< "$(sort -u <<< "${missing}")"
+        done <<< "${missing}"
         grep -Eq "^FROM \\$\\{${CI_ARG_TOOLCHAIN_IMAGE}(:-scratch)?\\}([[:space:]]|$)" "${df}" \
             || e_bt+=("${t}: Dockerfile must build FROM \${${CI_ARG_TOOLCHAIN_IMAGE}}")
         # What: forbid a mutable default on the ARG.
