@@ -92,10 +92,23 @@ still cached as usual. In short: leave consoles pointed at the LanCache NG DNS â
 they get full functionality, just without the caching benefit.
 
 > If you run a LAN with **no** consoles and want to cache Xbox-on-PC (Game Pass
-> for PC) downloads, you can opt in by adding the Xbox CDN domains manually â€” see
-> the note at the bottom of `services/dns/cdn-domains.txt`. Do **not** do this if
-> any real Xbox console shares the network, or that console's downloads will
-> break.
+> for PC) downloads, you can opt in by adding the Xbox CDN domains below to
+> `services/dns/cdn-domains.txt` or through the Admin UI's CDN domain list. Do
+> **not** do this if any real Xbox console shares the network, or that console's
+> downloads will break.
+>
+> - Xbox on PC: `assets1.xboxlive.com`, `xvcf1.xboxlive.com`,
+>   `xvcf2.xboxlive.com`
+>
+> The same applies to Nintendo Switch caching on a LAN with **no** Switch
+> consoles:
+>
+> - Nintendo: `.hac.lp1.d4c.nintendo.net`, `.hac.lp1.eshop.nintendo.net`,
+>   `.wup.eshop.nintendo.net`, `.wup.shop.nintendo.net`,
+>   `ccs.cdn.wup.shop.nintendo.net.edgesuite.net`,
+>   `ecs-lp1.hac.shop.nintendo.net`, `geisha-wup.cdn.nintendo.net`,
+>   `geisha-wup.cdn.nintendo.net.edgekey.net`, `idbe-wup.cdn.nintendo.net`,
+>   `idbe-wup.cdn.nintendo.net.edgekey.net`, `receive-lp1.dg.srv.nintendo.net`
 
 ---
 

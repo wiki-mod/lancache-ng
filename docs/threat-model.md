@@ -602,8 +602,9 @@ unaffected, only HTTP gets cached).
   from `cdn-domains.txt`, with an in-file explanation. Consoles keep using the
   appliance as an ordinary, unrestricted DNS resolver; their CDN names resolve to
   the real internet and work normally (no caching benefit, no breakage).
-- The file documents how to *opt in* to Xbox-PC (Game Pass) caching only on a LAN
-  known to have no consoles.
+- `docs/install-ca-cert.md` (named in the in-file explanation) lists the
+  hosts to *opt in* to Xbox-PC (Game Pass) or Nintendo caching only on a LAN
+  known to have no such consoles.
 
 **Residual risk**: Low — safe by default; only an explicit operator opt-in, and
 even then only https-mode DNS carries real breakage risk. Opting into Xbox-PC

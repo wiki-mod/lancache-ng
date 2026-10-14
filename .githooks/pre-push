@@ -58,10 +58,8 @@ is_zero_sha() {
 # Why: the check needs network; most pushes skip it
 workflow_changed=0
 # What: reads the 4 pre-push stdin fields per ref
-# Why: local_ref is unused; naming it keeps the slots
-
-# shellcheck disable=SC2034
-while read -r local_ref local_sha remote_ref remote_sha; do
+# Why: "_" holds the unused local ref; the slots stay right
+while read -r _ local_sha remote_ref remote_sha; do
   [ -n "${local_sha:-}" ] || continue
   # What: skips deleted refs (all-zero local sha)
   # Why: a deleted ref has no commits to scan

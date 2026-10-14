@@ -256,35 +256,8 @@ download.nvidia.com
 drivers.amd.com
 pat.downloads.amd.com
 
-# ---- Xbox / PlayStation ----
-# What: consoles are left out; they cannot install our CA.
-# Why: a redirected handshake fails and has no fallback.
-
-# Xbox PC without consoles: add by hand.
-#   assets1.xboxlive.com
-#   xvcf1.xboxlive.com
-
-#   xvcf2.xboxlive.com
-
-# ---- Nintendo Switch ----
-# What: the Switch is left out, same reason as consoles.
-# Why: it cannot install our CA either.
-
-# Switch without consoles: add by hand.
-
-#   .hac.lp1.d4c.nintendo.net
-#   .hac.lp1.eshop.nintendo.net
-#   .wup.eshop.nintendo.net
-
-#   .wup.shop.nintendo.net
-#   ccs.cdn.wup.shop.nintendo.net.edgesuite.net
-#   ecs-lp1.hac.shop.nintendo.net
-
-#   geisha-wup.cdn.nintendo.net
-#   geisha-wup.cdn.nintendo.net.edgekey.net
-#   idbe-wup.cdn.nintendo.net
-
-#   idbe-wup.cdn.nintendo.net.edgekey.net
-#   receive-lp1.dg.srv.nintendo.net
+# What: no console CDN hosts; consoles cannot use our CA.
+# Why: docs/install-ca-cert.md lists hosts to add by hand.
+# From: Issue #1683 | PR #1912
 
 # ==== lancache-ng: entries added via the Admin UI are appended below this exact line ====

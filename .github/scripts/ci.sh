@@ -11708,25 +11708,26 @@ _ci_check_line_endings() {
     printf 'line-endings=clean files=%s\n' "${#files[@]}"
 }
 
-# What: load the exemption globs from the SOT, once.
-# Why: a failed read must fail the check, never pass it.
-# From: Issue #1683 | PR #1858
+# What: the SOT exemption globs as EREs, loaded once.
+# Why: _ci_glob_ere owns glob syntax; a read error fails.
+# From: Issue #1683 | PR #1912
 _ci_prose_exempt_load() {
-    local list state
+    local list state g
     list="$(_ci_block_entry_list file_headers "" exempt)" || return 2
     state="$(_ci_block_entry_field release "" validation_state)" || return 2
-    mapfile -t _CI_PROSE_EXEMPT <<<"${list}"$'\n'"${state}"
+    _CI_PROSE_EXEMPT=()
+    while IFS= read -r g; do
+        [ -z "${g}" ] || _CI_PROSE_EXEMPT+=("$(_ci_glob_ere "**/${g}")")
+    done <<<"${list}"$'\n'"${state}"
 }
 
 # What: true for a path a SOT exemption glob matches.
 # Why: one owner for vendored, binary and prose skips.
 # From: Issue #1683 | PR #1912
 _ci_prose_excluded() {
-    local e
-    for e in "${_CI_PROSE_EXEMPT[@]}"; do
-        [ -n "${e}" ] || continue
-        # shellcheck disable=SC2053
-        [[ "$1" == ${e} || "$1" == */${e} ]] && return 0
+    local re
+    for re in "${_CI_PROSE_EXEMPT[@]}"; do
+        [[ "$1" =~ ${re} ]] && return 0
     done
     return 1
 }

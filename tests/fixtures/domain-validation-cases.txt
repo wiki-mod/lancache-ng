@@ -1,12 +1,9 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: valid and invalid cdn-domains entries.
+# What: "valid <domain>" or "invalid <domain>" per row.
 # Why: cdn_entry is the one rule for ui, dns and proxy.
 # From: Issue #822 | PR #1912
-
-# Format: "valid <domain>" or "invalid <domain>" per line.
-# Length edge cases live in cdn_entry_matches_the_fixture.
 
 valid example.com
 valid cdn1.sub.example.com
