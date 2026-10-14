@@ -288,7 +288,7 @@ build_toolchain:
       - shfmt
       - sqlite
       - tcpdump
-      - trivy@testing=0.74.0-r0
+      - trivy@testing
       - tzdata
       - xz
       - yq-go
