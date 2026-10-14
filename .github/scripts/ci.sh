@@ -292,60 +292,123 @@ ci_require_manifest() {
 declare -gA _CI_SOT=() _CI_SOT_LOADED=()
 _CI_SOT_SEQ=0
 
-# What: jq over yq's SOT JSON: index lines for one eval.
-# Why: one YAML parser (yq); readers then only look up.
-# From: Issue #1683 | PR #1858
-_CI_JQ_SOT_INDEX="$(cat <<'PROG'
-    def nodes($pre): to_entries[] | ($pre + [.key]) as $p
-        | {p: $p, v: .value}, (if (.value | type) == "object" then .value | nodes($p) else empty end);
-    def scal: if type == "string" then . elif . == null then "" else tojson end;
-    def sq: @sh;
-    def keep($s): $want == "" or $s == $want or ($s | startswith($want + "/"));
-    def put($k; $v): "[" + (($kp + $k) | sq) + "]=" + ($v | sq);
-    [nodes([]) | .s = (.p | join("/")) | .par = (.p[:-1] | join("/")) | .last = .p[-1]
-        | .kind = (if (.v | type) == "object" then "c" elif (.v | type) == "array" then "l" else "s" end)] as $n
-    | ($n[] | select(keep(.s)) | (if .kind == "s" then (.v | scal) else "" end) as $val
-        | put("k:" + .s; .kind), put("r:" + .s; $val), put("v:" + .s; $val)),
-      (reduce $n[] as $x ({};
-            .c[$x.par] += $x.last + "\n"
-            | (if $x.kind == "c" then .b[$x.par] += $x.last + "\n" else . end)
-            | (if ($x.v | type) == "array" and ($x.v | length) > 0
-                then .i[$x.s] = ($x.v | map(scal + "\n") | add) else . end)
-            | reduce range(2; [4, ($x.p | length)] | min) as $d (.;
-                (($x.p[:$d] | join("/")) + "/" + $x.last) as $a
-                | .f[$a] //= $x.s | .a[$a] += $x.s + "\n"))
-        | to_entries[] | .key as $t | .value | to_entries[] | select(keep(.key)) | put($t + ":" + .key; .value))
-PROG
-        )"
-
-# What: jq pass: @{block.key} becomes that scalar.
-# Why: a value naming another SOT value is not copied.
+# What: yq rows: bad value first, tag, text; T is a tab.
+# Why: yq reads the YAML; a "\t" literal stays 2 chars.
 # From: Issue #1683 | PR #1912
-_CI_JQ_SOT_REFS="$(cat <<'PROG'
-    . as $root
-    | def ex($d): if type != "string" then . elif $d > 8 then error("SOT reference cycle") else
-        gsub("@\\{(?<p>[A-Za-z0-9_.-]+)\\}"; (.p | split(".")) as $path
-            | ($root | getpath($path)) as $r
-            | if ($r | type) == "string" then $r | ex($d + 1)
-              elif ($r | type) == "number" then $r | tostring
-              else error("SOT reference @{" + ($path | join(".")) + "} is no scalar") end) end;
-    walk(ex(0))
+_CI_YQ_SOT_ROWS="$(cat <<'PROG'
+(.. | select(tag == "!!str") | select(test("[\n\t]")) | "x" + strenv(T) + (path | join("/")) + strenv(T) + "value holds a newline or tab"),
+(.. | select(tag == "!!map") | keys | .[] | select(test("[/\n\t]")) | "x" + strenv(T) + . + strenv(T) + "key holds a slash, newline or tab"),
+(.. | select(tag == "!!seq") | .[] | select(tag == "!!map" or tag == "!!seq") | "x" + strenv(T) + (path | join("/")) + strenv(T) + "list item is no scalar"),
+(.. | select((path | length) > 0) | "t" + strenv(T) + (path | join("/")) + strenv(T) + tag),
+(.. | select(tag != "!!map" and tag != "!!seq") | "v" + strenv(T) + (path | join("/")) + strenv(T) + tostring)
 PROG
     )"
 
+# What: expand each @{block.key} of $1 into REPLY.
+# Why: a value naming another SOT value is not copied.
+# From: Issue #1683 | PR #1912
+_ci_sot_expand() {
+    local rest="$1" out="" t m why
+    # What: _ci_sc, _ci_res, _ci_busy: _ci_sot_index locals.
+    # Why: bash scope is dynamic; one table per index run.
+    # From: Issue #1683 | PR #1912
+    while [[ "${rest}" =~ @\{([A-Za-z0-9_.-]+)\} ]]; do
+        m="${BASH_REMATCH[0]}" t="${BASH_REMATCH[1]//./\/}" why=""
+        out+="${rest%%"${m}"*}"
+        rest="${rest#*"${m}"}"
+        if [ -z "${_ci_res[${t}]+set}" ]; then
+            if [ -z "${_ci_sc[${t}]+set}" ]; then
+                why="SOT reference is no string or number"
+            elif [ -n "${_ci_busy[${t}]+set}" ]; then
+                why="SOT reference cycle"
+            fi
+            if [ -n "${why}" ]; then
+                ci_log "[CI-ERROR-CORE-0150]" "ref=\"${m}\" reason=\"${why}\""
+                return 2
+            fi
+            _ci_busy["${t}"]=1
+            _ci_sot_expand "${_ci_sc[${t}]}" || return 2
+            _ci_res["${t}"]="${REPLY}"
+            unset '_ci_busy[$t]'
+        fi
+        out+="${_ci_res[${t}]}"
+    done
+    REPLY="${out}${rest}"
+}
+
 # What: index a SOT file, or one subtree, under a prefix.
-# Why: one yq parse and one eval; raw logged by _ci_run.
-# From: Issue #1683 | PR #1858
+# Why: one yq parse; bash fills the store, no eval.
+# From: Issue #1683 | PR #1912
 _ci_sot_index() {
-    local json idx
-    if ! json="$(_ci_run -s "[CI-ERROR-CORE-0139]" "file=\"$1\" reason=\"yq cannot read the SOT\"" yq -o=json '.' "$1")" \
-        || ! json="$(_ci_run -s "[CI-ERROR-CORE-0150]" "file=\"$1\" reason=\"SOT references not resolved\"" jq -c "${_CI_JQ_SOT_REFS}" <<< "${json}")" \
-        || ! idx="$(_ci_run -s "[CI-ERROR-CORE-0141]" "file=\"$1\" reason=\"SOT index not built\"" \
-            jq -r --arg want "$2" --arg kp "$3" "${_CI_JQ_SOT_INDEX}" <<< "${json}")"; then
-        _CI_SOT_RAW_ERR="raw in the CORE-0139/0141/0150 line above"
-        return 2
-    fi
-    eval "_CI_SOT+=(${idx})"
+    local file="$1" want="$2" kp="$3" rows f p v par last kind val pre rest d key
+    local -a order=()
+    local -A tg=() txt=() lists=() acc=() _ci_sc=() _ci_res=() _ci_busy=()
+    _CI_SOT_RAW_ERR="raw in the CORE-0139/0150/0153 line above"
+    rows="$(_ci_run -s "[CI-ERROR-CORE-0139]" "file=\"${file}\" reason=\"yq cannot read the SOT\"" \
+        env T=$'\t' yq -r "${_CI_YQ_SOT_ROWS}" "${file}")" || return 2
+    while IFS=$'\t' read -r f p v; do
+        case "${f}" in
+            t) order+=("${p}"); tg["${p}"]="${v}" ;;
+            v) txt["${p}"]="${v}" ;;
+            *)
+                ci_log "[CI-ERROR-CORE-0153]" "file=\"${file}\" path=\"${p}\" reason=\"SOT row unusable: ${v}\""
+                return 2
+                ;;
+        esac
+    done <<< "${rows}"
+    # What: null is ""; a string or number is a ref target.
+    # Why: same scalar rules as the readers always had.
+    # From: Issue #1683 | PR #1912
+    for p in "${!txt[@]}"; do
+        case "${tg[${p}]}" in
+            '!!null') txt["${p}"]="" ;;
+            '!!bool') ;;
+            *) _ci_sc["${p}"]="${txt[${p}]}" ;;
+        esac
+    done
+    for p in "${order[@]}"; do
+        par="${p%/*}"
+        [ "${par}" != "${p}" ] || par=""
+        # What: a list item joins its list's i: entry.
+        # Why: readers take a list one item per line.
+        # From: Issue #1683 | PR #1912
+        if [ -n "${par}" ] && [ "${tg[${par}]}" = '!!seq' ]; then
+            _ci_sot_expand "${txt[${p}]}" || return 2
+            lists["${par}"]+="${REPLY}"$'\n'
+            continue
+        fi
+        case "${tg[${p}]}" in
+            '!!map') kind=c val="" ;;
+            '!!seq') kind=l val="" ;;
+            *) kind=s; _ci_sot_expand "${txt[${p}]}" || return 2; val="${REPLY}" ;;
+        esac
+        last="${p##*/}"
+        acc["c:${par}"]+="${last}"$'\n'
+        [ "${kind}" != c ] || acc["b:${par}"]+="${last}"$'\n'
+        acc["k:${p}"]="${kind}" acc["v:${p}"]="${val}"
+        # What: f:, a: map <2 or 3 parts>/<last> to paths.
+        # Why: an entry field may sit one block deeper.
+        # From: Issue #1683 | PR #1858
+        rest="${p}" pre="" d=0
+        while [ "${rest}" != "${rest#*/}" ] && [ "${d}" -lt 3 ]; do
+            pre+="${pre:+/}${rest%%/*}" rest="${rest#*/}" d=$((d + 1))
+            [ "${d}" -ge 2 ] || continue
+            key="${pre}/${last}"
+            [ -n "${acc["f:${key}"]+set}" ] || acc["f:${key}"]="${p}"
+            acc["a:${key}"]+="${p}"$'\n'
+        done
+    done
+    for p in "${!lists[@]}"; do
+        acc["i:${p}"]="${lists[${p}]}"
+    done
+    # What: keep only keys inside the wanted subtree.
+    # Why: a view holds what its reader asked for.
+    # From: Issue #1683 | PR #1858
+    for key in "${!acc[@]}"; do
+        p="${key#?:}"
+        [ -z "${want}" ] || [ "${p}" = "${want}" ] || [[ "${p}" == "${want}/"* ]] || continue
+        _CI_SOT["${kp}${key}"]="${acc[${key}]}"
+    done
 }
 
 # What: index the SOT into the shared store of this shell.
@@ -5417,7 +5480,7 @@ _ci_channel_field() {
     while IFS= read -r ch; do
         [ -n "${ch}" ] || continue
         while IFS= read -r p; do
-            [ -z "${p}" ] || printf '%s %s\n' "${ch}" "${_CI_SOT["${kp}r:${p}"]}"
+            [ -z "${p}" ] || printf '%s %s\n' "${ch}" "${_CI_SOT["${kp}v:${p}"]}"
         done <<< "${_CI_SOT["${kp}a:${root}/${ch}/$1"]:-}"
     done <<< "${_CI_SOT["${kp}b:${root}"]:-}"
 }
