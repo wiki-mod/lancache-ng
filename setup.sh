@@ -5264,7 +5264,11 @@ logbundle_collect_secret_values() {
 logbundle_redact_stream() {
     local secrets_file="$1"
     local content="" secret
-    IFS= read -r -d '' content || true
+    # What: reads all input; the dot keeps trailing newlines
+    # Why: a failed read must stop the bundle, not cut it
+    # From: Issue #1683 | PR #1912
+    content=$(cat && printf .) || die "Cannot read the log bundle input for redaction (exit $?)."
+    content="${content%.}"
     if [[ -f "$secrets_file" ]]; then
         while IFS= read -r secret; do
             [[ -n "$secret" ]] || continue
@@ -5410,7 +5414,7 @@ cmd_create_logs_for_issue() (
     trap logbundle_cleanup EXIT
     mkdir -p "$dest_root" "$dest/logs" "$dest/env" "$dest/known-good-snapshots" \
         || die "Failed to create the bundle directories under $dest_root (exit $?)."
-    secrets_file=$(mktemp) || die "Could not create a temporary file for secret redaction."
+    secrets_file=$(mktemp) || die "Could not create a temporary file for secret redaction (exit $?)."
     chmod 600 "$secrets_file" || die "Failed to restrict $secrets_file (exit $?)."
 
     print_step "Collecting diagnostic bundle for issue report"
