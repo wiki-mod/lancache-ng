@@ -193,6 +193,9 @@ struct Config {
     // What: TCP port the server binds inside the container.
     // Why: Dockerfile owns it; the primary URL reuses it.
     listen_port: u16,
+    // What: the server's bind address, every interface.
+    // Why: the SOT owns it as ANY_BIND_IP; no literal.
+    any_bind: String,
     dev_mode: bool,
     syslog_log_root: String,
     syslog_max_gb: u32,
@@ -406,6 +409,7 @@ impl Config {
             database_file: need("UI_DATABASE_FILE")?,
             registration_token_file: need("SECONDARY_REGISTRATION_TOKEN_FILE")?,
             listen_port: knob("UI_LISTEN_PORT", u16::MAX.into(), OutOfRange::Reject)? as u16,
+            any_bind: need("ANY_BIND_IP")?,
             // What: dev mode is an optional switch, off.
             // Why: the ui gets none; prod stays off.
             dev_mode: need_flag("LANCACHE_DEV_MODE")?,
@@ -1923,12 +1927,12 @@ fn soa_query(id: u16, zone: &str) -> Vec<u8> {
 
 // What: ask addr:port for the lan. SOA over UDP.
 // Why: a silent host is a status, not an error.
-async fn probe_secondary_soa(addr: Ipv4Addr, port: u16, lan_zone: &str) -> ProbeResult {
+async fn probe_secondary_soa(any: &str, addr: Ipv4Addr, port: u16, lan_zone: &str) -> ProbeResult {
     const TIMEOUT: Duration = Duration::from_secs(4);
     let id: u16 = rand::random();
     let query = soa_query(id, lan_zone);
     let exchange = async {
-        let socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0))
+        let socket = tokio::net::UdpSocket::bind((any, 0))
             .await
             .map_err(|e| e.to_string())?;
         socket
@@ -2588,7 +2592,13 @@ async fn check_secondary_health(
     };
     // What: probe DNS_PORT, the secondary's own DNS.
     // Why: PDNS_AUTH_PORT is the primary's PowerDNS port.
-    let result = probe_secondary_soa(addr, state.config.dns_port, &state.config.lan_zone).await;
+    let result = probe_secondary_soa(
+        &state.config.any_bind,
+        addr,
+        state.config.dns_port,
+        &state.config.lan_zone,
+    )
+    .await;
     if result.status == "ok" {
         let _ = with_db(&state, |db| {
             db.execute(
@@ -5975,8 +5985,9 @@ async fn run() -> anyhow::Result<()> {
     // Why: secondaries are checked per connect; no reload.
     tokio::spawn(run_auth_callout(state.clone(), issuer, xkey));
     let port = state.config.listen_port;
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-    tracing::info!("LanCache Admin UI running on http://0.0.0.0:{port}");
+    let any = state.config.any_bind.clone();
+    let listener = tokio::net::TcpListener::bind((any.as_str(), port)).await?;
+    tracing::info!("LanCache Admin UI running on http://{any}:{port}");
     axum::serve(listener, router(state)).await?;
     Ok(())
 }
@@ -6536,7 +6547,8 @@ mod tests {
         assert_eq!(fields.number::<u32>("none"), None);
     }
 
-    const TEXT_KEYS: [&str; 39] = [
+    const TEXT_KEYS: [&str; 40] = [
+        "ANY_BIND_IP",
         "NTP_PORT",
         "DHCP_DOMAIN",
         "RAW_CONTENT_URL",
@@ -7512,14 +7524,14 @@ mod tests {
                 .unwrap();
             buf[..n].to_vec()
         });
-        let result = probe_secondary_soa(Ipv4Addr::LOCALHOST, port, LAN).await;
+        let result = probe_secondary_soa("127.0.0.1", Ipv4Addr::LOCALHOST, port, LAN).await;
         assert_eq!((result.status, result.serial), ("ok", Some(77)));
         let query = handle.join().unwrap();
         assert_eq!(&query[2..], &soa_query(0, "lan")[2..]);
         let closed = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let free = closed.local_addr().unwrap().port();
         drop(closed);
-        let gone = probe_secondary_soa(Ipv4Addr::LOCALHOST, free, LAN).await;
+        let gone = probe_secondary_soa("127.0.0.1", Ipv4Addr::LOCALHOST, free, LAN).await;
         assert_eq!(gone.status, "unreachable");
         assert!(
             gone.detail

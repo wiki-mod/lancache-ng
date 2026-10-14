@@ -1730,8 +1730,10 @@ fn soa_knobs() -> Result<(u64, u64, u64), String> {
 fn own_address() -> Result<std::net::Ipv4Addr, String> {
     // What: a connected UDP socket names the route source.
     // Why: connect() sends no packet; no ip tool needed.
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0")
-        .and_then(|s| s.connect("1.1.1.1:53").map(|()| s))
+    let any = config::any_bind()?;
+    let target = config::need(&config::process_env, "ROUTE_PROBE_TARGET")?;
+    let socket = std::net::UdpSocket::bind((any.as_str(), 0))
+        .and_then(|s| s.connect(target.as_str()).map(|()| s))
         .map_err(|e| format!("no route to find the own address: {e}"))?;
     match socket.local_addr() {
         Ok(std::net::SocketAddr::V4(a)) if !a.ip().is_loopback() && !a.ip().is_unspecified() => {
@@ -1791,6 +1793,7 @@ struct AuthConf<'a> {
     api_port: u16,
     api_key: &'a str,
     loopback: &'a str,
+    any: &'a str,
 }
 
 impl AuthConf<'_> {
@@ -1803,11 +1806,12 @@ impl AuthConf<'_> {
              allow-axfr-ips={axfr}\ndnsupdate=yes\nallow-dnsupdate-from={allow}\n\
              dnsupdate-require-tsig=no\n\
              default-soa-content=localhost. admin.@ {seed} {refresh} {retry} 604800 3600\n\
-             webserver=yes\nwebserver-address=0.0.0.0\nwebserver-port={api_port}\n\
+             webserver=yes\nwebserver-address={any}\nwebserver-port={api_port}\n\
              webserver-allow-from={lo},10.0.0.0/8,172.16.0.0/12,192.168.0.0/16\n\
              api=yes\napi-key={key}\nloglevel=3\nguardian=no\ndaemon=no\n",
             lo = self.loopback,
             local = self.local,
+            any = self.any,
             db = self.database,
             primary = yes(self.role == DnsRole::Primary),
             secondary = yes(self.role == DnsRole::Secondary),
@@ -2235,8 +2239,10 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
     let data_dir = PathBuf::from(ctx.need("PDNS_DATA_DIR")?);
     let database = pdns_database(&data_dir)?;
     let database = database.display().to_string();
+    let any = config::any_bind()?;
     let seed = date_serial().to_string();
     let conf = AuthConf {
+        any: &any,
         local,
         database: &database,
         role,
@@ -2374,6 +2380,7 @@ struct RecursorConf<'a> {
     lua_dns: &'a str,
     zones: &'a [String],
     loopback: &'a str,
+    any: &'a str,
 }
 
 impl RecursorConf<'_> {
@@ -2393,18 +2400,19 @@ impl RecursorConf<'_> {
         let lan =
             "    - 10.0.0.0/8\n    - 172.16.0.0/12\n    - 192.168.0.0/16\n    - 127.0.0.0/8\n";
         format!(
-            "incoming:\n  listen:\n    - 0.0.0.0\n  port: {port}\n  allow_from:\n{lan}    - fc00::/7\n\
+            "incoming:\n  listen:\n    - {any}\n  port: {port}\n  allow_from:\n{lan}    - fc00::/7\n\
              recursor:\n  forward_zones:\n{forwards}  lua_config_file: {lua_config}\n\
              \x20 lua_dns_script: {lua_dns}\n  minimum_ttl_override: 60\n\
              recordcache:\n  max_entries: 1000000\n  refresh_on_ttl_perc: 10\n\
              \x20 serve_stale_extensions: 120\n  max_negative_ttl: {ttl}\n\
              packetcache:\n  max_entries: 500000\n  ttl: 3600\n  negative_ttl: {ttl}\n\
              \x20 servfail_ttl: 30\n\
-             webservice:\n  webserver: true\n  address: 0.0.0.0\n  port: {api_port}\n\
+             webservice:\n  webserver: true\n  address: {any}\n  port: {api_port}\n\
              \x20 allow_from:\n{lan}  api_key: {key}\n\
              logging:\n  loglevel: {loglevel}\n",
             port = self.port,
             lua_config = self.lua_config,
+            any = self.any,
             lua_dns = self.lua_dns,
             ttl = self.negative_ttl,
             api_port = self.api_port,
@@ -2459,9 +2467,11 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
     }
     log(&format!("{}: RPZ holds {count} records", rec.name));
     let lua_dns = ctx.need("PDNS_LUA_DNS_SCRIPT")?;
+    let any = config::any_bind()?;
     let loopback = config::loopback()?;
     let conf = RecursorConf {
         loopback: &loopback,
+        any: &any,
         port: rec.port()?,
         auth_port: env_port(AUTH_PORT_KEY)?,
         api_port: rec.api_port()?,
@@ -2564,7 +2574,7 @@ fn nats_subscriber(ctx: &Ctx) -> Result<Run, String> {
         ),
         (
             "DNS_ROLLBACK_LISTEN_ADDR".to_string(),
-            format!("0.0.0.0:{}", env_port(ROLLBACK_PORT_KEY)?),
+            format!("{}:{}", config::any_bind()?, env_port(ROLLBACK_PORT_KEY)?),
         ),
     ];
     // What: writer's NATS password from the shared file.
@@ -2948,7 +2958,7 @@ fn kea_ctrl_agent(ctx: &Ctx) -> Result<Run, String> {
     kea_ctrl_fence(&port)?;
     let conf = serde_json::json!({
         "Control-agent": {
-            "http-host": "0.0.0.0",
+            "http-host": config::any_bind()?,
             "http-port": port_number,
             "authentication": {
                 "type": "basic",
@@ -6030,9 +6040,11 @@ mod tests {
             rnd(1, u16::MAX.into()) as u16,
             rnd(1, u16::MAX.into()) as u16,
         );
+        let any = gen_ipv4().to_string();
         let lo = gen_ipv4().to_string();
         let conf = RecursorConf {
             loopback: &lo,
+            any: &any,
             port,
             auth_port: auth,
             api_port: api,
@@ -6052,6 +6064,8 @@ mod tests {
             format!("  lua_config_file: {lua_c}\n"),
             format!("  lua_dns_script: {lua_d}\n"),
             format!("forwarders: [{lo}:{auth}]"),
+            format!("  listen:\n    - {any}\n"),
+            format!("  address: {any}\n"),
             "  loglevel: 6\n".to_string(),
         ] {
             assert!(conf.contains(&want), "{want:?} missing in {conf}");
@@ -6067,6 +6081,7 @@ mod tests {
         let local = gen_ipv4();
         let lo = gen_ipv4().to_string();
         let refresh = rnd(10, DAY);
+        let any = gen_ipv4().to_string();
         let api = rnd(1, u16::MAX.into()) as u16;
         let auth = rnd(1, u16::MAX.into()) as u16;
         for (role, primary, secondary) in [
@@ -6075,6 +6090,7 @@ mod tests {
         ] {
             let conf = AuthConf {
                 loopback: &lo,
+                any: &any,
                 local,
                 database: &db,
                 role,
@@ -6098,6 +6114,7 @@ mod tests {
                 format!("admin.@ {seed} {refresh} {} 604800", refresh - 1),
                 format!("api-key={key}\n"),
                 format!("webserver-port={api}\n"),
+                format!("webserver-address={any}\n"),
             ] {
                 assert!(conf.contains(&want), "{want:?} missing in {conf}");
             }

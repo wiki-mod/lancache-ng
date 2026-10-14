@@ -861,7 +861,7 @@ async fn rollback_handler(
 }
 
 // What: the rollback listener on DNS_ROLLBACK_LISTEN_ADDR.
-// Why: 0.0.0.0, as the ui is in another network namespace.
+// Why: ANY_BIND_IP, as the ui is in another namespace.
 async fn serve_rollback(ctx: Arc<Ctx>, addr: String) {
     let router = Router::new()
         .route("/snapshots", get(list_snapshots))
