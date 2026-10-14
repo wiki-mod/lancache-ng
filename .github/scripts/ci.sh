@@ -7850,18 +7850,16 @@ _ci_validate_ui_base() {
 # Why: posts send the token a browser reads from the form
 # From: Issue #1683 | PR #1858
 _ci_validate_ui_session() {
-    local jar="$1" base="$2" attempts pause page csrf last
+    local jar="$1" base="$2" page csrf last
     if [ -z "${base}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0030]" "reason=\"no ui container IP for session check\""
         return 2
     fi
-    attempts="$(_ci_variable CI_VALIDATE_UI_POLL_ATTEMPTS)" || return 2
-    pause="$(_ci_variable CI_VALIDATE_UI_POLL_PAUSE)" || return 2
-    # What: ui has no compose healthcheck; poll /domains.
-    # Why: wait_healthy misses ui; prove it answers first.
-    # From: Issue #1683
-    if ! last="$(_ci_validate_poll "${attempts}" "${pause}" curl -fsS -c "${jar}" -o /dev/null "${base}/domains")"; then
-        ci_error "[CI-ERROR-VALIDATE-0031]" "reason=\"ui /domains never answered\"" "${last}"
+    # What: one try; wait_healthy already saw ui healthy.
+    # Why: its healthcheck asks the same server; no poll.
+    # From: Issue #1683 | PR #1912
+    if ! last="$(curl -fsS -c "${jar}" -o /dev/null "${base}/domains" 2>&1)"; then
+        ci_error "[CI-ERROR-VALIDATE-0031]" "reason=\"ui /domains did not answer\"" "${last}"
         return 1
     fi
     page="$(_ci_capture 0 curl -fsS -b "${jar}" -c "${jar}" "${base}/domains")" || return 2
