@@ -7532,104 +7532,70 @@ _ci_validate_no_health_services() {
         '.value.network_mode != "host" and .value.healthcheck == null'
 }
 
-# What: Wait for one container to report healthy.
-# Why: A crash-loop only shows after up exits 0.
-# From: Issue #1683 | PR #1858
+# What: Wait for one container's health verdict or death.
+# Why: Docker events end the wait; no guessed deadline.
+# From: Issue #1683 | PR #1912
 _ci_validate_wait_one() {
-    local project="$1" svc="$2" deadline cid="" status="none" timeout
-    timeout="$(_ci_variable CI_VALIDATE_HEALTH_TIMEOUT)" || return 2
-    deadline=$(( SECONDS + timeout ))
-    while [ "${SECONDS}" -lt "${deadline}" ]; do
-        cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
-        if [ -n "${cid}" ]; then
-            status="$(_ci_capture 0 docker inspect --format '{{.State.Health.Status}}' "${cid}")" || return 2
-            [ "${status}" = "healthy" ] && return 0
-            if [ "${status}" = "unhealthy" ]; then
-                ci_log "[CI-INFO-VALIDATE-0077]" "service=\"${svc}\" container=\"${cid}\" health=unhealthy reason=\"healthcheck reported unhealthy\""
+    local project="$1" svc="$2" cid created action pid raw=""
+    cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
+    if [ -z "${cid}" ]; then
+        ci_log "[CI-INFO-VALIDATE-0078]" "service=\"${svc}\" reason=\"no running container after up\""
+        return 1
+    fi
+    created="$(_ci_capture 0 docker inspect --format '{{.Created}}' "${cid}")" || return 2
+    # What: replay from creation, then follow live.
+    # Why: a verdict before the subscribe is not lost.
+    # From: Issue #1683 | PR #1912
+    coproc EVENTS { exec docker events --since "${created}" --filter "container=${cid}" \
+        --filter event=health_status --filter event=die --format '{{.Action}}' 2>&1; }
+    pid="${EVENTS_PID}"
+    while IFS= read -r action <&"${EVENTS[0]}"; do
+        case "${action}" in
+            "health_status: healthy")
+                kill "${pid}"
+                return 0
+                ;;
+            "health_status: unhealthy" | die)
+                kill "${pid}"
+                ci_log "[CI-INFO-VALIDATE-0077]" "service=\"${svc}\" container=\"${cid}\" event=\"${action}\" reason=\"unhealthy or exited before healthy\""
                 return 1
-            fi
-        fi
-        sleep 2
+                ;;
+            *) raw+="${action}"$'\n' ;;
+        esac
     done
-    ci_log "[CI-INFO-VALIDATE-0078]" "service=\"${svc}\" container=\"${cid:-none}\" last_health=\"${status}\" timeout=${timeout}s reason=\"not healthy before the deadline\""
-    return 1
+    ci_error "[CI-ERROR-VALIDATE-0079]" "service=\"${svc}\" container=\"${cid}\" reason=\"docker events ended without a verdict\"" "${raw}"
+    return 2
 }
 
-# What: Wait for a no-healthcheck service to settle.
-# Why: Crash-loop signal is Status, never RestartCount.
-# From: Issue #1683
-_ci_validate_wait_stable() {
-    local project="$1" svc="$2" deadline cid status started exitcode
-    local prev_started="" stable_since=-1
-    local window timeout
-    window="$(_ci_variable CI_VALIDATE_STABLE_WINDOW)" || return 2
-    timeout="$(_ci_variable CI_VALIDATE_HEALTH_TIMEOUT)" || return 2
-    deadline=$(( SECONDS + timeout ))
-    while [ "${SECONDS}" -lt "${deadline}" ]; do
-        cid="$(_ci_validate_cid "${project}" "${svc}" -aq)" || return 2
-        if [ -z "${cid}" ]; then
-            stable_since=-1
-            sleep 2
-            continue
-        fi
-        status="$(_ci_capture 0 docker inspect --format '{{.State.Status}}' "${cid}")" || return 2
-        # What: exit is terminal, not a crash-loop.
-        # Why: restart:no exits 0 by design (AG-VAL-027).
-        # From: Issue #1683
-        if [ "${status}" = "exited" ]; then
-            exitcode="$(_ci_capture 0 docker inspect --format '{{.State.ExitCode}}' "${cid}")" || return 2
-            [ "${exitcode}" = "0" ] && return 0
-            ci_log "[CI-INFO-VALIDATE-0079]" "service=\"${svc}\" container=\"${cid}\" exit_code=${exitcode} reason=\"exited non-zero\""
-            return 1
-        fi
-        started="$(_ci_capture 0 docker inspect --format '{{.State.StartedAt}}' "${cid}")" || return 2
-        if [ "${status}" != "running" ]; then
-            stable_since=-1
-        elif [ "${started}" != "${prev_started}" ]; then
-            # What: StartedAt changed; it restarted.
-            # Why: the window must restart from this start.
-            # From: Issue #1683
-            stable_since="${SECONDS}"
-        elif [ "${stable_since}" -ge 0 ] && [ $(( SECONDS - stable_since )) -ge "${window}" ]; then
-            return 0
-        fi
-        prev_started="${started}"
-        sleep 2
-    done
-    ci_log "[CI-INFO-VALIDATE-0080]" "service=\"${svc}\" container=\"${cid:-none}\" last_status=\"${status:-none}\" started=\"${prev_started}\" window=${window}s reason=\"not stable for the window before the deadline\""
-    return 1
-}
-
-# What: Poll healthcheck and no-healthcheck services.
-# Why: No-healthcheck services still need crash-loop proof.
-# From: Issue #1683
+# What: Wait for every started service's health verdict.
+# Why: A service without healthcheck has no crash proof.
+# From: Issue #1683 | PR #1912
 _ci_validate_wait_healthy() {
     local project="$1" services no_health svc rc=0 i
     services="$(_ci_validate_health_services)" || return 2
     no_health="$(_ci_validate_no_health_services)" || return 2
-    local -a pids=() names=() kinds=()
+    if [ -n "${no_health}" ]; then
+        ci_error "[CI-ERROR-VALIDATE-0080]" "reason=\"started service(s) without healthcheck (AG-VAL-027)\"" "${no_health}"
+        return 1
+    fi
+    local -a pids=() names=()
     while IFS= read -r svc; do
         [ -n "${svc}" ] || continue
         _ci_validate_wait_one "${project}" "${svc}" &
-        pids+=("$!"); names+=("${svc}"); kinds+=("healthcheck")
+        pids+=("$!"); names+=("${svc}")
     done <<< "${services}"
-    while IFS= read -r svc; do
-        [ -n "${svc}" ] || continue
-        _ci_validate_wait_stable "${project}" "${svc}" &
-        pids+=("$!"); names+=("${svc}"); kinds+=("stability")
-    done <<< "${no_health}"
     local wrc
     for i in "${!pids[@]}"; do
         wrc=0; wait "${pids[$i]}" || wrc=$?
         case "${wrc}" in
             0) ;;
             1)
-                ci_error "[CI-ERROR-VALIDATE-0009]" "service=\"${names[$i]}\" check=\"${kinds[$i]}\" reason=\"not stable/healthy (cause above)\"" \
+                ci_error "[CI-ERROR-VALIDATE-0009]" "service=\"${names[$i]}\" reason=\"not healthy (cause above)\"" \
                     "$(_ci_validate_service_evidence "${project}" "${names[$i]}")"
                 rc=1
                 ;;
             *)
-                ci_log "[CI-ERROR-VALIDATE-0081]" "service=\"${names[$i]}\" check=\"${kinds[$i]}\" rc=${wrc} reason=\"health state unknown (docker error above)\""
+                ci_log "[CI-ERROR-VALIDATE-0081]" "service=\"${names[$i]}\" rc=${wrc} reason=\"health state unknown (docker error above)\""
                 [ "${rc}" -eq 1 ] || rc=2
                 ;;
         esac

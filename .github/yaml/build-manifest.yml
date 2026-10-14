@@ -987,12 +987,10 @@ ci_variables:
   # From: Issue #1683 | PR #1858
   CI_TRIVY_SCANNERS: vuln,secret
   CI_TRIVY_SHARED_DIR: /mnt/trivy-db
-  # What: validate slot count and timing, in seconds.
-  # Why: AG-CI-006: validate timeouts have one owner.
+  # What: the validate slot count.
+  # Why: AG-CI-006: the slot limit has one owner.
   # From: Issue #1683 | PR #1858
   CI_VALIDATE_MAX_SLOTS: 10
-  CI_VALIDATE_HEALTH_TIMEOUT: 180
-  CI_VALIDATE_STABLE_WINDOW: 20
   # What: validation address pool and slot prefix length
   # Why: AG-CI-006 one owner for the slot every run takes
   # From: Issue #1683 | PR #1858
