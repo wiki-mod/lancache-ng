@@ -1029,18 +1029,6 @@ mod tests {
     use super::*;
     use std::fs;
 
-    // What: HTTP client times of the tests.
-    // Why: http_client reads them from a reader.
-    fn http_env(key: &str) -> Option<String> {
-        [
-            "HTTP_CLIENT_TIMEOUT",
-            "HTTP_POOL_IDLE_TIMEOUT",
-            "HTTP_TCP_KEEPALIVE",
-        ]
-        .contains(&key)
-        .then(|| "10".to_string())
-    }
-
     // What: builds an rrset with the given contents.
     // Why: most tests need a small literal rrset.
     fn rrset(name: &str, kind: &str, ttl: i64, contents: &[&str]) -> Value {
@@ -1282,7 +1270,10 @@ mod tests {
             .timeout(Duration::from_millis(200))
             .build(client);
         Ctx {
-            pdns: PowerDns::new(http_client(&http_env).unwrap(), "k3y".to_string()),
+            pdns: PowerDns::new(
+                http_client(&lancache_ng::test_http_env).unwrap(),
+                "k3y".to_string(),
+            ),
             pdns_auth_url: format!("{pdns_base}/api/v1/servers/localhost"),
             pdns_rec_urls: vec![format!("{pdns_base}/rec")],
             pdns_auth_config_dir: "/no/such/config".to_string(),

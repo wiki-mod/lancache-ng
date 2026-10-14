@@ -6651,18 +6651,6 @@ mod tests {
         env
     }
 
-    // What: HTTP client times of the ui tests.
-    // Why: http_client reads them from a reader.
-    fn http_env(key: &str) -> Option<String> {
-        [
-            "HTTP_CLIENT_TIMEOUT",
-            "HTTP_POOL_IDLE_TIMEOUT",
-            "HTTP_TCP_KEEPALIVE",
-        ]
-        .contains(&key)
-        .then(|| "10".to_string())
-    }
-
     fn load_from(env: &HashMap<String, String>) -> Result<Config, String> {
         Config::load(&|key: &str| env.get(key).cloned())
     }
@@ -7054,7 +7042,7 @@ mod tests {
         let page = "Active connections: 291 \nserver accepts handled requests\n \
                     16630948 16630947 31070465 \nReading: 6 Writing: 179 Waiting: 106 \n";
         let (base, server) = serve_canned(vec![(200, page.as_bytes().to_vec())]);
-        let client = http_client(&http_env).unwrap();
+        let client = http_client(&lancache_ng::test_http_env).unwrap();
         let status = nginx_status(&client, &base).await.expect("an answer");
         assert_eq!(
             serde_json::to_value(&status).unwrap(),
@@ -8987,7 +8975,7 @@ mod tests {
         cfg.hsts_mode = HstsMode::Auto;
         cfg.template_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/templates").to_string();
         tweak(&mut cfg);
-        let http = lancache_ng::http_client(&http_env).unwrap();
+        let http = lancache_ng::http_client(&lancache_ng::test_http_env).unwrap();
         let nats = async_nats::ConnectOptions::new()
             .retry_on_initial_connect()
             .connect("nats://127.0.0.1:1")
