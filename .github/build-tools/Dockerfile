@@ -11,28 +11,10 @@
 # From: Issue #1683
 ARG ALPINE_IMAGE
 
-# What: Reused ISC dhclient pin, from the version SOT.
-# Why: Version, branch and per-arch digests owned centrally.
-# From: Issue #1683
-ARG DHCLIENT_VERSION
-ARG DHCLIENT_ALPINE_BRANCH
-ARG DHCLIENT_URL
-ARG DHCLIENT_ARCH
-ARG DHCLIENT_SHA256
-
 # What: Alpine toolchain stage; scratch if no image arg.
 # Why: no baked image; a missing arg fails the build.
 # From: Issue #1683 | PR #1858
 FROM ${ALPINE_IMAGE:-scratch}
-
-# What: re-declare SOT build-args for use in this stage.
-# Why: pre-FROM ARGs are not visible after FROM in Docker.
-# From: Issue #1683
-ARG DHCLIENT_VERSION
-ARG DHCLIENT_ALPINE_BRANCH
-ARG DHCLIENT_URL
-ARG DHCLIENT_ARCH
-ARG DHCLIENT_SHA256
 
 # What: build identity keys the cache of later layers.
 # Why: a new package set must not reuse a stale apk layer.
@@ -67,10 +49,3 @@ ARG CI_RETRY_BACKOFF_BASE_SECONDS
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
-
-# What: install the SOT-pinned ISC dhclient apk via ci.sh.
-# Why: newer Alpine dropped it; ci.sh owns fetch + verify.
-# From: Issue #1683 | PR #1858
-RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
-    bash /usr/local/bin/ci.sh apk-pin-install "${DHCLIENT_URL}" "${DHCLIENT_VERSION}" \
-      "${DHCLIENT_ALPINE_BRANCH}" "${DHCLIENT_ARCH}" "${DHCLIENT_SHA256}"

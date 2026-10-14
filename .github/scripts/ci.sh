@@ -63,7 +63,7 @@ CI_ARG_DEFAULTS=LANCACHE_RUNTIME_DEFAULTS
 # From: Issue #1683
 declare -A CI_DISPATCH=(
     [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-analyze]=ci_cmd_codeql_analyze [identity]=ci_cmd_identity
-    [resolve]=ci_cmd_resolve [build]=ci_cmd_build [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [image-setup]=ci_cmd_image_setup [apk-pin-install]=ci_cmd_apk_pin_install
+    [resolve]=ci_cmd_resolve [build]=ci_cmd_build [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [image-setup]=ci_cmd_image_setup
     [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [ship-release]=ci_cmd_ship_release [gha-runtime-args]=ci_cmd_gha_runtime_args
     [test]=ci_cmd_test [scan-channel]=ci_cmd_scan_channel [assemble]=ci_cmd_assemble
     [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
@@ -98,7 +98,7 @@ declare -gA CI_CHECKS=(
     [sot-identity-inputs]="repo _ci_check_sot_identity_inputs" [workflow-ci-variables]="repo _ci_check_workflow_ci_variables"
     [workflow-job-settings]="repo _ci_check_workflow_job_settings" [cargo-profile-tuning]="repo _ci_check_cargo_profile_tuning"
     [codeql-coverage]="repo _ci_check_codeql_coverage"
-    [version-drift]="repo _ci_version_verify"
+    [version-drift]="repo _ci_version_release"
     [pr-title]="pr _ci_check_pr_title" [pr-template]="pr _ci_check_pr_template" [pr-tracking-metadata]="job _ci_check_pr_tracking_metadata"
     [cargo-audit]="job _ci_check_cargo_audit" [shellcheck]="job _ci_check_shellcheck"
     [actionlint]="job _ci_check_actionlint" [orphaned-branches]="job _ci_check_orphaned_branches"
@@ -1714,7 +1714,7 @@ _ci_identity_pins() {
             toolchain_digest|toolchain_source_sha) _ci_build_tools_resolve_signature || return 2 ;;
             base_digest)
                 if [ "${build_type}" = toolchain ]; then
-                    _ci_build_tools_build_args --bare "${platform}" || return 2
+                    _ci_build_tools_build_args --bare || return 2
                 else
                     _ci_service_build_args "${service}" --bare "${platform}" no || return 2
                 fi
@@ -3976,34 +3976,6 @@ ci_cmd_image_setup() {
         fi
     done
     printf 'image-setup=ok steps=%s\n' "$(wc -w <<< "${IMAGE_SETUP:-}")"
-}
-
-# What: fetch, verify and unpack one SOT-pinned apk file.
-# Why: a package no current repo has; the SOT owns the pin.
-# From: Issue #1683 | PR #1858
-ci_cmd_apk_pin_install() {
-    local tpl="${1:-}" version="${2:-}" branch="${3:-}" arch="${4:-}" sha="${5:-}" root="${CI_APK_ROOT:-}" url dir out
-    if [ -z "${tpl}" ] || [ -z "${version}" ] || [ -z "${branch}" ] || [ -z "${arch}" ]; then
-        ci_log "[CI-ERROR-APKSETUP-0006]" "url=\"${tpl}\" version=\"${version}\" branch=\"${branch}\" arch=\"${arch}\" reason=\"url template, version, branch and arch required\""
-        return 2
-    fi
-    url="${tpl//@VERSION@/${version}}"; url="${url//@BRANCH@/${branch}}"; url="${url//@ARCH@/${arch}}"
-    dir="$(_ci_mktemp -d -p "${CI_TMPDIR}")" || return 2
-    _ci_fetch_verified "${url}" "${sha}" "${dir}/pkg.apk" || { rm -rf "${dir}"; return 2; }
-    if ! out="$(tar -xzf "${dir}/pkg.apk" -C "${root:-/}" 2>&1)"; then
-        ci_error "[CI-ERROR-APKSETUP-0007]" "url=\"${url}\" root=\"${root:-/}\" reason=\"apk not unpacked\"" "${out}"
-        rm -rf "${dir}"
-        return 2
-    fi
-    rm -rf "${dir}"
-    # What: drop apk metadata files the unpack left in root.
-    # Why: they are package-db input, not image content.
-    # From: Issue #1683 | PR #1858
-    if ! out="$(cd -- "${root:-/}" && rm -f .PKGINFO .SIGN.* .pre-install .post-install .trigger 2>&1)"; then
-        ci_error "[CI-ERROR-APKSETUP-0008]" "root=\"${root:-/}\" reason=\"apk metadata not removed\"" "${out}"
-        return 2
-    fi
-    printf 'apk-pin-install=ok url=%s\n' "${url}"
 }
 
 # What: one apk step, output shown, coded error with raw.
@@ -9239,16 +9211,14 @@ _ci_apk_bootstrap_arg() {
     printf '%sAPK_BOOTSTRAP=%s\n' "$1" "${boot% }"
 }
 
-# What: Emit build-tools base + dhclient + apk build-args.
+# What: Emit build-tools base + apk build-args.
 # Why: SOT owns them; the Dockerfile pins nothing itself.
 # From: Issue #1683
 _ci_build_tools_build_args() {
-    local fmt="${1:-}" platform="${2:-}" prefix="--build-arg " out="" pkgs pins tool
+    local fmt="${1:-}" prefix="--build-arg " out="" pkgs tool
     [ "${fmt}" = "--bare" ] && prefix=""
     tool="$(_ci_toolchain_target)" || return 2
     out="$(_ci_alpine_build_arg "${prefix}")"$'\n' || return 2
-    pins="$(_ci_target_pin_args "${tool}" "${platform}" "${prefix}")" || return 2
-    [ -z "${pins}" ] || out="${out}${pins}"$'\n'
     # What: append the SOT apk list as a build-arg.
     # Why: Dockerfile consumes it; it never owns the list.
     # From: Issue #1683
@@ -9391,12 +9361,6 @@ _ci_service_build_args() {
     # From: Issue #1683 | PR #1912
     val="$(_ci_service_setup "${service}")" || return 2
     [ -z "${val}" ] || out="${out}${prefix}${CI_ARG_IMAGE_SETUP}=${val}"$'\n'
-    # What: SOT-pinned external inputs of this Dockerfile.
-    # Why: one pin->ARG owner shared with version-drift.
-    # From: Issue #1683 | PR #1858
-    local pins
-    pins="$(_ci_target_pin_args "${service}" "${platform}" "${prefix}")" || return 2
-    [ -z "${pins}" ] || out="${out}${pins}"$'\n'
     # What: add service's apk packages from SOT
     # Why: SOT owns list; Dockerfile derives it
     # From: Issue #1683
@@ -9436,7 +9400,7 @@ ci_cmd_build_args() {
     if grep -qxF -- "${service}" <<< "${svc_list}"; then
         _ci_service_build_args "${service}" "${fmt}" "${platform}"
     elif grep -qxF -- "${service}" <<< "${tools}"; then
-        _ci_build_tools_build_args "${fmt}" "${platform}"
+        _ci_build_tools_build_args "${fmt}"
     else
         ci_log "[CI-ERROR-BUILDARGS-0002]" "service=\"${service}\" reason=\"not a SOT build target\""
         return 2
@@ -9544,7 +9508,7 @@ _ci_build_tools_signature() {
         return 2
     fi
     # What: every emitted build-arg feeds the signature.
-    # Why: a base/dhclient change must move the sig.
+    # Why: a base or apk change must move the sig.
     # From: Issue #1683
     args="$(_ci_build_tools_build_args --bare)" || return 2
     tool="$(_ci_toolchain_target)" || return 2
@@ -9739,191 +9703,6 @@ ci_cmd_build_tools() {
 # VERSION MANAGEMENT
 # =========================================================
 
-# What: Parse one ARG NAME[=VALUE] Dockerfile declaration.
-# Why: AG-VAL-036: grammar reader, not ad-hoc regex guess.
-# From: Issue #1683 | PR #1858
-_ci_dockerfile_arg_default() {
-    local path="$1" name="$2"
-    if [ ! -f "${path}" ]; then
-        ci_log "[CI-ERROR-VERSION-0001]" "path=\"${path}\" reason=\"file not found\""
-        return 2
-    fi
-    local -a hits=()
-    local raw
-    local produced produced_rc=0
-    produced="$(awk -v n="${name}" '
-        {
-            line = $0
-            sub(/^[[:space:]]+/, "", line)
-            if (line !~ /^[Aa][Rr][Gg][[:space:]]+/) next
-            sub(/^[Aa][Rr][Gg][[:space:]]+/, "", line)
-            if (!match(line, /^[A-Za-z_][A-Za-z0-9_]*/)) next
-            decl = substr(line, RSTART, RLENGTH)
-            if (decl != n) next
-            rest = substr(line, RLENGTH + 1)
-            sub(/^[[:space:]]+/, "", rest)
-            sub(/[[:space:]]+$/, "", rest)
-            print "|" rest
-        }
-    ' "${path}")" || produced_rc=$?
-    _ci_producer_ok "${produced_rc}" 0 || return 2
-    while IFS= read -r raw; do
-        [ -n "${raw}" ] || continue
-        hits+=("${raw#|}")
-    done <<<"${produced}"
-    if [ "${#hits[@]}" -eq 0 ]; then
-        printf 'ABSENT\n'
-        return 0
-    fi
-    if [ "${#hits[@]}" -gt 1 ]; then
-        # What: Allow ARG re-declares only when identical.
-        # Why: Bare-after-valued would silently guess wrong.
-        # From: Issue #1683 | PR #1858
-        local h uniq="" mixed=0
-        for h in "${hits[@]}"; do
-            if [ -z "${uniq}" ]; then
-                uniq="${h}"
-            elif [ "${h}" != "${uniq}" ]; then
-                mixed=1
-            fi
-        done
-        if [ "${mixed}" -eq 1 ]; then
-            ci_log "[CI-ERROR-VERSION-0002]" "path=\"${path}\" name=\"${name}\" reason=\"conflicting ARG re-declarations; ambiguous default\""
-            return 2
-        fi
-    fi
-    local rest="${hits[0]}"
-    if [ -z "${rest}" ]; then
-        printf 'BARE\n'
-        return 0
-    fi
-    case "${rest}" in
-        =*)
-            local val="${rest#=}"
-            case "${val}" in
-                *\\)
-                    ci_log "[CI-ERROR-VERSION-0003]" "path=\"${path}\" name=\"${name}\" reason=\"line continuation unsupported\""
-                    return 2
-                    ;;
-            esac
-            case "${val}" in
-                \"*\")
-                    val="${val#\"}"; val="${val%\"}"
-                    case "${val}" in
-                        *\"*)
-                            ci_log "[CI-ERROR-VERSION-0004]" "path=\"${path}\" name=\"${name}\" reason=\"embedded double-quote unsupported\""
-                            return 2
-                            ;;
-                    esac
-                    ;;
-                \'*\')
-                    val="${val#\'}"; val="${val%\'}"
-                    case "${val}" in
-                        *\'*)
-                            ci_log "[CI-ERROR-VERSION-0015]" "path=\"${path}\" name=\"${name}\" reason=\"embedded single-quote unsupported\""
-                            return 2
-                            ;;
-                    esac
-                    ;;
-                *)
-                    case "${val}" in
-                        *[\ \"\']*)
-                            ci_log "[CI-ERROR-VERSION-0005]" "path=\"${path}\" name=\"${name}\" reason=\"unquoted value has space/quote\""
-                            return 2
-                            ;;
-                    esac
-                    ;;
-            esac
-            printf 'FOUND:%s\n' "${val}"
-            ;;
-        *)
-            ci_log "[CI-ERROR-VERSION-0006]" "path=\"${path}\" name=\"${name}\" reason=\"unexpected token after ARG name\""
-            return 2
-            ;;
-    esac
-}
-
-# What: SOT pin consumers: dep|dockerfile|build_args keys.
-# Why: SOT consumer field owns it; no engine-side list.
-# From: Issue #1683 | PR #1858
-_ci_version_consumers() {
-    local deps dep target keys df
-    deps="$(_ci_block_keys external_versions)" || return 2
-    for dep in ${deps}; do
-        target="$(_ci_block_entry_field external_versions "${dep}" consumer)" || return 2
-        [ -n "${target}" ] || continue
-        keys="$(_ci_block_entry_list external_versions "${dep}" build_args)" || return 2
-        if [ -z "${keys}" ]; then
-            ci_log "[CI-ERROR-VERSION-0010]" "dep=\"${dep}\" reason=\"consumer without SOT build_args\""
-            return 2
-        fi
-        df="$(_ci_service_path "${target}" Dockerfile "")" || return 2
-        printf '%s|%s|%s\n' "${dep}" "${df}" "${keys//$'\n'/ }"
-    done
-}
-
-# What: One pin's sha256 for an apk arch, fail-closed.
-# Why: a missing or garbled checksum must never pass.
-# From: Issue #1683 | PR #1858
-_ci_pin_sha() {
-    local dep="$1" apk="$2" val
-    val="$(_ci_block_entry_field external_versions "${dep}" "sha256_${apk}")" || return 2
-    if [ -z "${val}" ]; then
-        ci_log "[CI-ERROR-BUILDARGS-0004]" "key=\"external_versions.${dep}.sha256_${apk}\" reason=\"missing central pin; FAIL CLOSED\""
-        return 2
-    fi
-    if [[ ! "${val}" =~ ^[0-9a-f]{64}$ ]]; then
-        ci_log "[CI-ERROR-BUILDARGS-0015]" "key=\"external_versions.${dep}.sha256_${apk}\" reason=\"not 64 hex chars; FAIL CLOSED\""
-        return 2
-    fi
-    printf '%s\n' "${val}"
-}
-
-# What: emit pin args for dep, arch, and sha256
-# Why: one pin->ARG convention for every arch
-# From: Issue #1683 | PR #1858
-_ci_pin_args() {
-    local dep="$1" keys="$2" platform="$3" prefix="$4" up key val apk p out=""
-    up="${dep^^}"; up="${up//-/_}"
-    for key in ${keys}; do
-        val="$(_ci_block_entry_field external_versions "${dep}" "${key}")" || return 2
-        if [ -z "${val}" ]; then
-            ci_log "[CI-ERROR-BUILDARGS-0017]" "key=\"external_versions.${dep}.${key}\" platform=\"${platform}\" reason=\"missing central pin; FAIL CLOSED\""
-            return 2
-        fi
-        out="${out}${prefix}${up}_${key^^}=${val}"$'\n'
-    done
-    if [ -n "${platform}" ]; then
-        apk="$(_ci_platform_field "${platform}" apk "[CI-ERROR-BUILDARGS-0006]" "dep=\"${dep}\" reason=\"no apk arch mapping; FAIL CLOSED\"")" || return 2
-        val="$(_ci_pin_sha "${dep}" "${apk}")" || return 2
-        out="${out}${prefix}${up}_ARCH=${apk}"$'\n'"${prefix}${up}_SHA256=${val}"$'\n'
-    else
-        local plats
-        plats="$(_ci_build_matrix_platforms)" || return 2
-        while IFS= read -r p; do
-            [ -n "${p}" ] || continue
-            apk="$(_ci_platform_field "${p}" apk "[CI-ERROR-BUILDARGS-0018]" "dep=\"${dep}\" reason=\"no apk arch mapping for a build_matrix platform; FAIL CLOSED\"")" || return 2
-            val="$(_ci_pin_sha "${dep}" "${apk}")" || return 2
-            out="${out}${prefix}${up}_SHA256_${apk^^}=${val}"$'\n'
-        done <<< "${plats}"
-    fi
-    printf '%s' "${out}"
-}
-
-# What: pin build-args for target's Dockerfile
-# Why: build-args derive from verify check list
-# From: Issue #1683 | PR #1858
-_ci_target_pin_args() {
-    local target="$1" platform="$2" prefix="$3" want dep df keys consumers
-    want="$(_ci_service_path "${target}" Dockerfile "")" || return 2
-    consumers="$(_ci_version_consumers)" || return 2
-    while IFS='|' read -r dep df keys; do
-        [ -n "${dep}" ] || continue
-        [ "${df}" = "${want}" ] || continue
-        _ci_pin_args "${dep}" "${keys}" "${platform}" "${prefix}" || return 2
-    done <<< "${consumers}"
-}
-
 # What: SOT alpine base ref; empty logs caller id + text.
 # Why: one pin for every alpine consumer; each own id.
 # From: Issue #1683 | PR #1858
@@ -9944,57 +9723,6 @@ _ci_alpine_build_arg() {
     local prefix="$1" val
     val="$(_ci_alpine_image "[CI-ERROR-BUILDARGS-0003]" "arg=\"ALPINE_IMAGE\" key=\"base_images.alpine\" reason=\"missing central base image; FAIL CLOSED\"")" || return 2
     printf '%sALPINE_IMAGE=%s\n' "${prefix}" "${val}"
-}
-
-# What: check consumer's SOT pins vs Dockerfile
-# Why: SOT owns pin; baked ARG default is 2nd owner
-# From: Issue #1683 | PR #1858
-_ci_version_diff() {
-    local dep="$1" dockerfile="${CI_REPO_ROOT}/$2" keys="$3" p args name want out="" plats
-    plats="$(_ci_build_matrix_platforms)" || return 2
-    while IFS= read -r p; do
-        [ -n "${p}" ] || continue
-        args="$(_ci_pin_args "${dep}" "${keys}" "${p}" "")" || return 2
-        out="${out}${args}"$'\n'
-    done <<< "${plats}"
-    local line
-    local -A argseen=()
-    out="$(LC_ALL=C sort -u <<< "${out}")"
-    while IFS= read -r line; do
-        [ -n "${line}" ] && printf 'key=%s.sot %s\n' "${dep}" "${line}"
-    done <<< "${out}"
-    while IFS= read -r line; do
-        name="${line%%=*}"
-        { [ -n "${name}" ] && [ -z "${argseen[${name}]:-}" ]; } || continue
-        argseen["${name}"]=1
-        want="$(_ci_dockerfile_arg_default "${dockerfile}" "${name}")" || return 2
-        case "${want}" in
-            ABSENT)
-                ci_log "[CI-ERROR-VERSION-0008]" "path=\"${dockerfile}\" name=\"${name}\" reason=\"expected ARG declaration missing\""
-                return 2
-                ;;
-            BARE) printf 'key=%s.consumer.%s shape=bare\n' "${dep}" "${name}" ;;
-            FOUND:*)
-                ci_log "[CI-ERROR-VERSION-0009]" "path=\"${dockerfile}\" name=\"${name}\" reason=\"unexpected baked default; must stay SOT-driven\""
-                return 2
-                ;;
-        esac
-    done <<< "${out}"
-}
-
-# What: Run _ci_version_diff for every SOT-pinned consumer.
-# Why: verify/audit/sync differ only in how they report.
-# From: Issue #1683 | PR #1858
-_ci_version_walk() {
-    local fn="$1" dep df keys rc=0 r consumers
-    consumers="$(_ci_version_consumers)" || return 2
-    while IFS='|' read -r dep df keys; do
-        [ -n "${dep}" ] || continue
-        r=0
-        "${fn}" "${dep}" "${df}" "${keys}" || r=$?
-        [ "${r}" -eq 0 ] || [ "${rc}" -ne 0 ] || rc="${r}"
-    done <<< "${consumers}"
-    return "${rc}"
 }
 
 
@@ -10111,25 +9839,6 @@ _ci_version_release() {
     return "${rc}"
 }
 
-# What: check version-drift: read-only, fails on drift.
-# Why: The one CI gate for SOT-vs-repo version drift.
-# From: Issue #1683 | PR #1858
-_ci_version_verify() {
-    local rc=0 r=0
-    _ci_version_walk _ci_version_diff || rc=$?
-    _ci_version_release || r=$?
-    [ "${r}" -gt "${rc}" ] && rc="${r}"
-    return "${rc}"
-}
-
-# What: sync: pins checked as verify does; copies written.
-# Why: pins are SOT-driven bare ARGs; only copies write.
-# From: Issue #1683 | PR #1858
-_ci_version_sync() {
-    _ci_version_walk _ci_version_diff || return "$?"
-    _ci_version_release_sync
-}
-
 # What: version sync writes the SOT version into copies.
 # Why: the read-only gate is check version-drift alone.
 # From: Issue #1683 | PR #1912
@@ -10137,7 +9846,7 @@ ci_cmd_version() {
     local sub="${1:-}"
     if [ "$#" -gt 0 ]; then shift; fi
     case "${sub}" in
-        sync) _ci_version_sync ;;
+        sync) _ci_version_release_sync ;;
         *)
             ci_log "[CI-ERROR-VERSION-0014]" "sub=\"${sub}\" reason=\"unknown version subcommand\" known=\"sync\""
             return 2
@@ -11841,7 +11550,7 @@ ci_main() {
     # What: skip manifest for build-only commands
     # Why: bind-mounted stage has no SOT present
     # From: Issue #1683
-    case "${command}" in check|rust-build|apk-setup|image-setup|apk-pin-install) ;; *) ci_require_manifest || return "$?" ;; esac
+    case "${command}" in check|rust-build|apk-setup|image-setup) ;; *) ci_require_manifest || return "$?" ;; esac
     # What: index a present SOT once for this command.
     # Why: readers then look fields up instead of rereading.
     # From: Issue #1683 | PR #1858
