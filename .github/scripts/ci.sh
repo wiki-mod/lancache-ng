@@ -1124,7 +1124,7 @@ ci_cmd_plan_matrix() {
         while IFS= read -r platform; do
             [ -n "${platform}" ] || continue
             # What: one id per pair, fixed once per run.
-            # Why: a later index read can mint another.
+            # Why: later jobs read it; none recomputes.
             # From: Issue #1683 | PR #1912
             _ci_plan_record "${service}" "${platform}" || return "$?"
             resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
@@ -1700,7 +1700,7 @@ _ci_service_smoke() {
 # Why: SOT names the inputs; the build must match the id.
 # From: Issue #1683 | PR #1858
 _ci_identity_pins() {
-    local service="$1" build_type="$2" platform="$3" inputs input pkgs base arch
+    local service="$1" build_type="$2" platform="$3" inputs input
     inputs="$(_ci_block_entry_list build_identity "${build_type}" inputs)" || return 2
     if [ -z "${inputs}" ]; then
         ci_log "[CI-ERROR-IDENTITY-0004]" "build_type=\"${build_type}\" reason=\"no SOT build_identity inputs; FAIL CLOSED\""
@@ -1711,25 +1711,13 @@ _ci_identity_pins() {
         case "${input}" in
             source_sha) : ;;
             build_variables) _ci_build_variable_args "${build_type}" || return 2 ;;
-            toolchain_digest|toolchain_source_sha) _ci_build_tools_resolve_signature || return 2 ;;
+            toolchain_digest|toolchain_source_sha) _ci_build_tools_signature || return 2 ;;
             base_digest)
                 if [ "${build_type}" = toolchain ]; then
                     _ci_build_tools_build_args --bare || return 2
                 else
                     _ci_service_build_args "${service}" --bare "${platform}" no || return 2
                 fi
-                ;;
-            package_versions)
-                pkgs="$(_ci_service_packages "${service}")" || return 2
-                pkgs="$(tr '\n' ' ' <<<"${pkgs}")"
-                [ -n "${pkgs// /}" ] || continue
-                base="$(_ci_alpine_image "[CI-ERROR-IDENTITY-0009]" "service=\"${service}\" key=\"base_images.alpine\" reason=\"no alpine base to resolve package versions; FAIL CLOSED\"")" || return 2
-                arch="$(_ci_platform_field "${platform}" apk "[CI-ERROR-IDENTITY-0005]" "service=\"${service}\" reason=\"no apk arch; FAIL CLOSED\"")" || return 2
-                local repos keys
-                repos="$(_ci_apk_repositories "${service}")" || return 2
-                keys="$(_ci_apk_keys "${service}")" || return 2
-                _ci_apk_resolve "${base}" "${arch}" "${pkgs% }" "${repos}" "${keys}" || return 2
-                printf '\n'
                 ;;
             *)
                 ci_log "[CI-ERROR-IDENTITY-0006]" "input=\"${input}\" reason=\"unknown build_identity input; FAIL CLOSED\""
@@ -1835,7 +1823,7 @@ _ci_identity_for() {
     esac
 }
 
-# What: compute a pair id live from SOT, apk and inputs.
+# What: compute a pair id from SOT and tracked inputs.
 # Why: only a planner scope may; a given record forbids it.
 # From: Issue #1683 | PR #1912
 _ci_identity_compute() {
@@ -1893,19 +1881,6 @@ _ci_identity_one() {
     printf 'platform=%s identity=%s\n' "$2" "${id}"
 }
 
-# What: this run's toolchain apk state, one owner below.
-# Why: a build job needs it outside a planner scope.
-# From: Issue #1683 | PR #1912
-_ci_run_sig=""
-
-# What: toolchain apk state, resolved once per run.
-# Why: one state per run; x keeps its last newline.
-# From: Issue #1683 | PR #1912
-_ci_run_sig_once() {
-    [ -z "${_ci_run_sig}" ] || return 0
-    _ci_run_sig="$(_ci_build_tools_resolve_signature && printf x)" || return 2
-}
-
 # What: add a pair's id to the run record once.
 # Why: one writer; a pair keeps its first id per run.
 # From: Issue #1683 | PR #1912
@@ -1917,7 +1892,6 @@ _ci_plan_record() {
         1) ;;
         *) return 2 ;;
     esac
-    _ci_run_sig_once || return 2
     id="$(_ci_identity_compute "$1" "$2")" || return "$?"
     _ci_plan_ids+=" $1@$2=${id}"
 }
@@ -2004,9 +1978,6 @@ _ci_impact_run() {
     if ! _ci_manifest_at "${base}" "${base_manifest}" || [ ! -s "${base_manifest}" ]; then
         base_missing=1
         ci_log "[CI-INFO-IMPACT-0002]" "base=\"${base}\" reason=\"no SOT at base; UNKNOWN, escalate, BUILD DISACK\""
-    fi
-    if [ "${base_missing}" -eq 0 ]; then
-        _ci_run_sig_once || return 2
     fi
     _ci_for_all_pairs _ci_impact_pair || return "$?"
     printf 'impact result=classified build=%s noop=%s unknown=%s base=%s\n' "${build}" "${noop}" "${unknown}" "${base}"
@@ -4978,11 +4949,6 @@ _ci_build_one() {
             return 2
             ;;
     esac
-
-    # What: resolve the package state before the impact.
-    # Why: a build job is no planner scope; read once.
-    # From: Issue #1683 | PR #1912
-    _ci_run_sig_once || return 2
 
     # What: Prove semantic build impact before admission.
     # Why: MISSING_CONFIRMED alone MUST NOT build.
@@ -9494,19 +9460,11 @@ _ci_build_tools_compilers() {
     printf '%s\n' "${items}"
 }
 
-# What: Print the build-tools input signature.
-# Why: Weekly check rebuilds only on a changed input.
-# From: Issue #1683
+# What: build-tools signature from declared inputs only.
+# Why: §17, AG-CI-010: no live apk read in a routine id.
+# From: Issue #1683 | PR #1912
 _ci_build_tools_signature() {
-    local versions="$1" args ids trimmed tool ctx
-    # What: fail closed on an empty apk version state.
-    # Why: a blank scan must never mint a stable signature.
-    # From: Issue #1683
-    trimmed="$(printf '%s' "${versions}" | tr -d '[:space:]')"
-    if [ -z "${trimmed}" ]; then
-        ci_log "[CI-ERROR-BUILDTOOLS-0004]" "reason=\"empty apk version state; FAIL CLOSED\""
-        return 2
-    fi
+    local args ids tool ctx
     # What: every emitted build-arg feeds the signature.
     # Why: a base or apk change must move the sig.
     # From: Issue #1683
@@ -9518,112 +9476,7 @@ _ci_build_tools_signature() {
         ci_log "[CI-ERROR-BUILDTOOLS-0005]" "reason=\"no tracked build-tools source; FAIL CLOSED\""
         return 2
     fi
-    printf 'args<<\n%s\nids<<\n%s\nversions<<\n%s\n' "${args}" "${ids}" "${versions}" \
-        | sha256sum | cut -d' ' -f1
-}
-
-# What: Print the apk arch for each build_matrix platform.
-# Why: the lifecycle signature must cover every arch.
-# From: Issue #1683
-_ci_build_tools_arches() {
-    local platform out="" apk plats
-    plats="$(_ci_build_matrix_platforms)" || return 2
-    while IFS= read -r platform; do
-        [ -n "${platform}" ] || continue
-        # What: map via the one platform->apk-arch owner.
-        # Why: no second arch table; fail-closed on unknown.
-        # From: Issue #1683
-        apk="$(_ci_platform_field "${platform}" apk "[CI-ERROR-BUILDTOOLS-0007]" "reason=\"no apk arch mapping; FAIL CLOSED\"")" || return 2
-        out="${out}${apk}"$'\n'
-    done <<< "${plats}"
-    if [ -z "${out}" ]; then
-        ci_log "[CI-ERROR-BUILDTOOLS-0008]" "reason=\"no build matrix platforms; FAIL CLOSED\""
-        return 2
-    fi
-    printf '%s' "${out}" | LC_ALL=C sort -u
-}
-
-# What: Resolve one arch's apk versions (injectable).
-# Why: real apk runs in a container; tests inject it.
-# From: Issue #1683
-_ci_apk_resolve() {
-    local base="$1" arch="$2" packages="$3" repos="${4:-}" keys="${5:-}" raw n kv kdir b64 kenv=""
-    local -a penv=()
-    local produced produced_rc=0
-    produced="$(_ci_proxy_names)" || produced_rc=$?
-    _ci_producer_ok "${produced_rc}" 0 || return 2
-    while IFS= read -r n; do [ -n "${n}" ] && penv+=(-e "${n}"); done <<<"${produced}"
-    if [ -n "${CI_APK_RESOLVE_CMD:-}" ]; then
-        "${CI_APK_RESOLVE_CMD}" "${base}" "${arch}" "${packages}"
-        return "$?"
-    fi
-    # What: SOT repo keys fetched here, passed in as base64.
-    # Why: the tagged repo needs its key; one fetch owner.
-    # From: Issue #1683 | PR #1858
-    if [ -n "${keys}" ]; then
-        kdir="$(_ci_mktemp -d -p "${CI_TMPDIR}")" || return 2
-        for kv in ${keys}; do
-            n="${kv%=*}"; n="${n##*/}"
-            _ci_fetch_verified "${kv%=*}" "${kv##*=}" "${kdir}/${n}" || { rm -rf "${kdir}"; return 2; }
-            if ! b64="$(base64 -w0 "${kdir}/${n}" 2>&1)"; then
-                ci_error "[CI-ERROR-BUILDTOOLS-0022]" "key=\"${n}\" reason=\"repo key not encodable for the resolver\"" "${b64}"
-                rm -rf "${kdir}"
-                return 2
-            fi
-            kenv="${kenv:+${kenv} }${n}=${b64}"
-        done
-        rm -rf "${kdir}"
-    fi
-    # What: per-arch clean root with the build's repos.
-    # Why: a foreign arch needs its own db and keys.
-    # From: Issue #1683 | PR #1858
-    if ! raw="$(_ci_retry apk docker run --rm "${penv[@]}" -e ARCH="${arch}" -e PKGS="${packages}" \
-            -e REPOS="${repos}" -e KEYS="${kenv}" "${base}" sh -c "$(cat <<'PROG'
-        set -e
-        r=/var/tmp/apk-root; k="/usr/share/apk/keys/${ARCH}"
-        mkdir -p "${r}/etc/apk"
-        for kv in ${KEYS}; do printf "%s" "${kv#*=}" | base64 -d > "${k}/${kv%%=*}"; done
-        sed "s|^https://|http://|" /etc/apk/repositories > "${r}/etc/apk/repositories"
-        for kv in ${REPOS}; do echo "@${kv%%=*} ${kv#*=}" >> "${r}/etc/apk/repositories"; done
-        apk --root "${r}" --arch "${ARCH}" --keys-dir "${k}" --initdb add
-        apk --root "${r}" --arch "${ARCH}" --keys-dir "${k}" update
-        apk --root "${r}" --arch "${ARCH}" --keys-dir "${k}" add --simulate ${PKGS}
-PROG
-        )" 2>&1)"; then
-        ci_error "[CI-ERROR-BUILDTOOLS-0020]" "arch=\"${arch}\" reason=\"apk resolve failed\"" "${raw}"
-        return 2
-    fi
-    printf '%s\n' "${raw}" | sed -n 's/^.*Installing \([^ ]*\) (\([^)]*\)).*/\1-\2/p' \
-        | LC_ALL=C sort | tr '\n' ' '
-}
-
-# What: Resolve every arch's apk state, then sign it.
-# Why: the whole signature is computed here, not in YAML.
-# From: Issue #1683
-_ci_build_tools_resolve_signature() {
-    local base packages arches arch av versions="" tool repos keys
-    # What: inside a run record, reuse its one signature.
-    # Why: a second index read can return another state.
-    # From: Issue #1683 | PR #1912
-    if [ -n "${_ci_run_sig:-}" ]; then
-        printf '%s' "${_ci_run_sig%x}"
-        return 0
-    fi
-    base="$(_ci_alpine_image "[CI-ERROR-BUILDTOOLS-0009]" "key=\"base_images.alpine\" reason=\"no alpine base for the build-tools apk resolve; FAIL CLOSED\"")" || return 2
-    packages="$(_ci_build_tools_packages | tr '\n' ' ')" || return 2
-    arches="$(_ci_build_tools_arches)" || return 2
-    tool="$(_ci_toolchain_target)" || return 2
-    repos="$(_ci_apk_repositories "${tool}")" || return 2
-    keys="$(_ci_apk_keys "${tool}")" || return 2
-    for arch in ${arches}; do
-        av="$(_ci_apk_resolve "${base}" "${arch}" "${packages}" "${repos}" "${keys}")" || return 2
-        if [ -z "${av//[[:space:]]/}" ]; then
-            ci_log "[CI-ERROR-BUILDTOOLS-0011]" "arch=\"${arch}\" reason=\"no apk versions; FAIL CLOSED\""
-            return 2
-        fi
-        versions="${versions}${arch}:${av} "
-    done
-    _ci_build_tools_signature "${versions}"
+    printf 'args<<\n%s\nids<<\n%s\n' "${args}" "${ids}" | sha256sum | cut -d' ' -f1
 }
 
 # What: Append one include object from key=value pairs.
@@ -9687,9 +9540,7 @@ ci_cmd_build_tools() {
     if [ "$#" -gt 0 ]; then shift; fi
     case "${sub}" in
         packages) _ci_build_tools_packages ;;
-        arches) _ci_build_tools_arches ;;
-        signature) _ci_build_tools_signature "${1:-}" ;;
-        resolve-signature) _ci_build_tools_resolve_signature ;;
+        signature) _ci_build_tools_signature ;;
         image) _ci_build_tools_image ;;
         resolve-image) _ci_build_tools_resolve_image "${1:-}" ;;
         *)
