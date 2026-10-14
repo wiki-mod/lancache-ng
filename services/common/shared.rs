@@ -63,22 +63,11 @@ pub struct WatchdogStatus {
     pub interval_secs: u64,
 }
 
-// What: 90 s stale limit when no interval is named.
-// Why: a missing field reads as 0, so it needs a limit.
-const STALE_FALLBACK: Duration = Duration::from_secs(90);
-
-// What: missed check cycles after which status is stale.
-// Why: one late cycle is no outage; three are.
-const STALE_CYCLES: u32 = 3;
-
 impl WatchdogStatus {
     // What: age beyond which the document counts as stale.
-    // Why: the limit follows the watchdog's own interval.
-    pub fn stale_after(&self) -> Duration {
-        match self.interval_secs {
-            0 => STALE_FALLBACK,
-            secs => Duration::from_secs(secs).saturating_mul(STALE_CYCLES),
-        }
+    // Why: cycles missed in a row; no interval is stale.
+    pub fn stale_after(&self, cycles: u32) -> Duration {
+        Duration::from_secs(self.interval_secs).saturating_mul(cycles)
     }
 }
 
@@ -242,32 +231,29 @@ pub fn die(tag: &str, message: &str) -> ! {
     std::process::exit(1);
 }
 
-// What: how long a plain HTTP call may take.
-// Why: a stuck peer must not hold a request forever.
-pub const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
-
-// What: how long an idle pooled connection is kept.
-// Why: a dead peer's connection is not reused for long.
-const HTTP_POOL_IDLE: Duration = Duration::from_secs(90);
-
-// What: the interval of TCP keepalive probes.
-// Why: a silently dropped peer is noticed on a pooled link.
-const HTTP_KEEPALIVE: Duration = Duration::from_secs(60);
-
-// What: the general HTTP client of several services.
-// Why: one timeout and pool setting for all callers.
-pub fn http_client() -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .pool_idle_timeout(HTTP_POOL_IDLE)
-        .tcp_keepalive(HTTP_KEEPALIVE)
-        .build()
+// What: whole seconds of one key from a reader.
+// Why: HTTP and probe times share one parse rule.
+// From: Issue #1683 | PR #1912
+pub fn need_secs(get: &dyn Fn(&str) -> Option<String>, key: &str) -> Result<Duration, String> {
+    let raw = config::need(get, key)?;
+    match raw.parse::<u64>() {
+        Ok(secs) if secs > 0 && raw.bytes().all(|b| b.is_ascii_digit()) => {
+            Ok(Duration::from_secs(secs))
+        }
+        _ => Err(format!("{key}={raw} is no whole number of seconds above 0")),
+    }
 }
 
-// What: how long one healthcheck probe may take.
-// Why: it must end before Docker's healthcheck timeout.
-// From: Issue #1683 | PR #1912
-const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+// What: the general HTTP client of several services.
+// Why: one timeout and pool setting, from the SOT.
+pub fn http_client(get: &dyn Fn(&str) -> Option<String>) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(need_secs(get, "HTTP_CLIENT_TIMEOUT")?)
+        .pool_idle_timeout(need_secs(get, "HTTP_POOL_IDLE_TIMEOUT")?)
+        .tcp_keepalive(need_secs(get, "HTTP_TCP_KEEPALIVE")?)
+        .build()
+        .map_err(|e| format!("HTTP client: {e}"))
+}
 
 // What: an error and every cause below it, one line.
 // Why: reqwest hides the TLS or socket cause in source().
@@ -303,12 +289,12 @@ async fn expect_success(client: &reqwest::Client, url: &str) -> Result<(), Strin
 // What: Ok when a loopback health URL answers 2xx.
 // Why: healthchecks run in the binary; no curl, no shell.
 // From: Issue #1683 | PR #1912
-pub async fn probe_health(url: &str) -> Result<(), String> {
+pub async fn probe_health(url: &str, timeout: Duration) -> Result<(), String> {
     if url.starts_with("https://") {
         return Err(format!("{url}: an https health URL needs probe_health_tls"));
     }
     let client = reqwest::Client::builder()
-        .timeout(HEALTH_PROBE_TIMEOUT)
+        .timeout(timeout)
         .no_proxy()
         .build()
         .map_err(|e| format!("health client: {e}"))?;
@@ -318,7 +304,12 @@ pub async fn probe_health(url: &str) -> Result<(), String> {
 // What: Ok when an https health URL answers 2xx.
 // Why: the stack CA is the only trust anchor.
 // From: Issue #1683 | PR #1912
-pub async fn probe_health_tls(url: &str, ca_pem: &[u8], name: &str) -> Result<(), String> {
+pub async fn probe_health_tls(
+    url: &str,
+    ca_pem: &[u8],
+    name: &str,
+    timeout: Duration,
+) -> Result<(), String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
     let ip: std::net::IpAddr = parsed
         .host_str()
@@ -330,7 +321,7 @@ pub async fn probe_health_tls(url: &str, ca_pem: &[u8], name: &str) -> Result<()
         .ok_or_else(|| format!("{url}: no port"))?;
     let ca = reqwest::Certificate::from_pem(ca_pem).map_err(|e| format!("CA certificate: {e}"))?;
     let client = reqwest::Client::builder()
-        .timeout(HEALTH_PROBE_TIMEOUT)
+        .timeout(timeout)
         .no_proxy()
         .tls_certs_only([ca])
         .resolve(name, std::net::SocketAddr::new(ip, port))
@@ -1264,6 +1255,22 @@ pub struct ProbeAnswer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // What: health probe limit of the tests.
+    // Why: canned servers answer at once or refuse.
+    const PROBE_WAIT: Duration = Duration::from_secs(2);
+
+    // What: HTTP client times of the tests.
+    // Why: http_client reads them from a reader.
+    pub fn test_http_env(key: &str) -> Option<String> {
+        [
+            "HTTP_CLIENT_TIMEOUT",
+            "HTTP_POOL_IDLE_TIMEOUT",
+            "HTTP_TCP_KEEPALIVE",
+        ]
+        .contains(&key)
+        .then(|| "10".to_string())
+    }
     use std::os::unix::fs::PermissionsExt;
 
     // What: stdout/stderr text joins; other frames drop.
@@ -1478,7 +1485,7 @@ mod tests {
         assert_eq!(req.expected_content, Some(vec!["192.0.2.5".to_string()]));
     }
 
-    // What: stale limit is three intervals, else 90 s.
+    // What: stale limit is cycles times the interval.
     // Why: a wrong limit shows live data as stale.
     #[test]
     fn stale_limit_follows_the_interval() {
@@ -1493,9 +1500,9 @@ mod tests {
             },
             interval_secs,
         };
-        assert_eq!(status(30).stale_after(), Duration::from_secs(90));
-        assert_eq!(status(10).stale_after(), Duration::from_secs(30));
-        assert_eq!(status(0).stale_after(), Duration::from_secs(90));
+        assert_eq!(status(30).stale_after(3), Duration::from_secs(90));
+        assert_eq!(status(10).stale_after(4), Duration::from_secs(40));
+        assert_eq!(status(0).stale_after(3), Duration::ZERO);
         let old: WatchdogStatus = serde_json::from_str(
             r#"{"updated":"x","services":{},"disk":{"cache":{"pct":1,"status":"green"}}}"#,
         )
@@ -1887,7 +1894,7 @@ mod tests {
             (404, br#"{"rrsets":[{"name":"x"}]}"#.to_vec()),
             (200, b"not json".to_vec()),
         ]);
-        let pdns = PowerDns::new(http_client().unwrap(), "k3y".to_string());
+        let pdns = PowerDns::new(http_client(&test_http_env).unwrap(), "k3y".to_string());
         assert_eq!(pdns.api_key(), "k3y");
         let root = format!("{base}/api/v1/servers/localhost");
         let rrsets = pdns.zone_rrsets(&root, "lan.").await.unwrap();
@@ -1908,7 +1915,7 @@ mod tests {
     #[tokio::test]
     async fn powerdns_call_sends_the_key_and_a_json_body() {
         let (base, server) = serve_canned(vec![(204, vec![]), (204, vec![])]);
-        let pdns = PowerDns::new(http_client().unwrap(), "k3y".to_string());
+        let pdns = PowerDns::new(http_client(&test_http_env).unwrap(), "k3y".to_string());
         let url = format!("{base}/x");
         let body = Some(r#"{"a":1}"#.to_string());
         pdns.call(reqwest::Method::PATCH, &url, body).await.unwrap();
@@ -1968,10 +1975,14 @@ mod tests {
     #[tokio::test]
     async fn probe_health_accepts_2xx_only() {
         let (base, _server) = serve_canned(vec![(200, b"ok".to_vec()), (503, vec![])]);
-        assert!(probe_health(&format!("{base}/healthz")).await.is_ok());
-        let failed = probe_health(&format!("{base}/healthz")).await;
+        assert!(
+            probe_health(&format!("{base}/healthz"), PROBE_WAIT)
+                .await
+                .is_ok()
+        );
+        let failed = probe_health(&format!("{base}/healthz"), PROBE_WAIT).await;
         assert!(failed.is_err_and(|e| e.contains("503")));
-        let closed = probe_health(&format!("{base}/healthz")).await;
+        let closed = probe_health(&format!("{base}/healthz"), PROBE_WAIT).await;
         assert!(closed.is_err());
     }
 
@@ -2138,21 +2149,25 @@ mod tests {
         let server = TlsServer::start(&dir);
         let url = server.url();
         let pem = |file: &str| fs::read(dir.join(file)).expect("pem");
-        let trusted = probe_health_tls(&url, &pem("ca.crt"), &name).await;
+        let trusted = probe_health_tls(&url, &pem("ca.crt"), &name, PROBE_WAIT).await;
         assert!(trusted.is_ok(), "{trusted:?}");
         assert!(
-            probe_health_tls(&url, &pem("other.crt"), &name)
+            probe_health_tls(&url, &pem("other.crt"), &name, PROBE_WAIT)
                 .await
                 .is_err()
         );
         assert!(
-            probe_health_tls(&url, &pem("ca.crt"), "wrong-name")
+            probe_health_tls(&url, &pem("ca.crt"), "wrong-name", PROBE_WAIT)
                 .await
                 .is_err()
         );
-        assert!(probe_health(&url).await.is_err());
+        assert!(probe_health(&url, PROBE_WAIT).await.is_err());
         drop(server);
-        assert!(probe_health_tls(&url, &pem("ca.crt"), &name).await.is_err());
+        assert!(
+            probe_health_tls(&url, &pem("ca.crt"), &name, PROBE_WAIT)
+                .await
+                .is_err()
+        );
         fs::remove_dir_all(&dir).expect("remove scratch dir");
     }
 
@@ -2194,7 +2209,7 @@ mod tests {
             drop(control);
             drop(platform);
             let stack_ca = fs::read(dir.join("ca.crt")).expect("pem");
-            let probe = probe_health_tls(&url, &stack_ca, &name).await;
+            let probe = probe_health_tls(&url, &stack_ca, &name, PROBE_WAIT).await;
             assert!(probe.is_err(), "a platform-trusted cert passed: {probe:?}");
             return;
         }

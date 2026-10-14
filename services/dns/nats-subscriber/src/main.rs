@@ -966,8 +966,7 @@ async fn main() {
         .unwrap_or_else(|e| die(TAG, &format!("failed to create consumer: {e}")));
     println!("Created durable subscriber: {consumer_name}");
 
-    let http =
-        http_client().unwrap_or_else(|e| die(TAG, &format!("cannot build HTTP client: {e}")));
+    let http = http_client(&process_env).unwrap_or_else(|e| die(TAG, &e));
     let ctx = Arc::new(Ctx {
         pdns: PowerDns::new(http, api_key),
         pdns_auth_url: required("PDNS_AUTH_API_URL"),
@@ -1047,6 +1046,18 @@ async fn main() {
 mod tests {
     use super::*;
     use std::fs;
+
+    // What: HTTP client times of the tests.
+    // Why: http_client reads them from a reader.
+    fn http_env(key: &str) -> Option<String> {
+        [
+            "HTTP_CLIENT_TIMEOUT",
+            "HTTP_POOL_IDLE_TIMEOUT",
+            "HTTP_TCP_KEEPALIVE",
+        ]
+        .contains(&key)
+        .then(|| "10".to_string())
+    }
 
     // What: builds an rrset with the given contents.
     // Why: most tests need a small literal rrset.
@@ -1298,7 +1309,7 @@ mod tests {
             .timeout(Duration::from_millis(200))
             .build(client);
         Ctx {
-            pdns: PowerDns::new(http_client().unwrap(), "k3y".to_string()),
+            pdns: PowerDns::new(http_client(&http_env).unwrap(), "k3y".to_string()),
             pdns_auth_url: format!("{pdns_base}/api/v1/servers/localhost"),
             pdns_rec_urls: vec![format!("{pdns_base}/rec")],
             pdns_auth_config_dir: "/no/such/config".to_string(),

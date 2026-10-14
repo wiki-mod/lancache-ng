@@ -24,7 +24,7 @@ use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
     ClientCheck, ConflictCheck, DesiredRunState, DesiredState, Detail, DiskHealth, DiskInfo,
     DockerApi, NetdataAlarm, Place, ProbeAnswer, ProbeReport, ServiceHealth, WatchdogStatus, df,
-    hex32, probe_health, probe_health_tls, resolve_shared_secret, sha256_hex,
+    hex32, need_secs, probe_health, probe_health_tls, resolve_shared_secret, sha256_hex,
     shared_secret_file_name, shared_secret_is_placeholder, unix_secs, write_file, write_if_changed,
 };
 use serde::{Deserialize, Serialize};
@@ -2782,7 +2782,7 @@ async fn soa_bump(
 async fn soa_upkeep() -> Result<(), String> {
     let (refresh, retry, resync) = soa_knobs()?;
     let cold = bounded("PDNS_SOA_COLD_RETRY", 1, u32::MAX.into())?;
-    let http = lancache_ng::http_client().map_err(|e| format!("HTTP client: {e}"))?;
+    let http = lancache_ng::http_client(&config::process_env)?;
     let pdns = lancache_ng::PowerDns::new(http, pdns_api_key()?);
     let root = api_root(&config::loopback()?, env_port(AUTH_API_PORT_KEY)?);
     loop {
@@ -4953,8 +4953,9 @@ async fn healthcheck() -> Result<(), String> {
     if kinds(&need("LANCACHE_PROCESSES")?)?.contains(&Kind::Nginx) {
         let https = config::need_flag(&config::process_env, "HTTPS_ENABLED")?;
         let http_url = need("PROXY_HEALTH_URL")?;
+        let wait = need_secs(&config::process_env, "HEALTH_PROBE_TIMEOUT")?;
         if !https {
-            return probe_health(&http_url).await;
+            return probe_health(&http_url, wait).await;
         }
         let https_url = need("PROXY_HEALTH_HTTPS_URL")?;
         let ca_file = Path::new(&need("NGINX_DIR")?)
@@ -4963,8 +4964,8 @@ async fn healthcheck() -> Result<(), String> {
         let ca_pem = fs::read(&ca_file).map_err(|e| format!("{}: {e}", ca_file.display()))?;
         let cert_dns = need("DEFAULT_CERT_DNS")?;
         let (http, tls) = tokio::join!(
-            probe_health(&http_url),
-            probe_health_tls(&https_url, &ca_pem, &cert_dns)
+            probe_health(&http_url, wait),
+            probe_health_tls(&https_url, &ca_pem, &cert_dns, wait)
         );
         http?;
         tls?;

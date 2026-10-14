@@ -27,9 +27,9 @@ use lancache_ng::config::{
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, DesiredRunState, DesiredState, DnsRecord, FlushRequest,
     NetdataAlarm, Place, PowerDns, ProbeAnswer, ProbeReport, SnapshotStore, WatchdogStatus, ct_eq,
-    df, die, hex32, http_client, is_placeholder, load_or_create, load_or_create_hex, probe_health,
-    resolve_shared_secret, shared_secret, shared_secret_file_name, shared_secret_is_placeholder,
-    snapshot_created_unix, unix_secs, write_file, write_if_changed,
+    df, die, hex32, http_client, is_placeholder, load_or_create, load_or_create_hex, need_secs,
+    probe_health, resolve_shared_secret, shared_secret, shared_secret_file_name,
+    shared_secret_is_placeholder, snapshot_created_unix, unix_secs, write_file, write_if_changed,
 };
 use nkeys::{KeyPair, XKey};
 use regex::Regex;
@@ -161,6 +161,7 @@ struct Config {
     auth_password_hash: Option<String>,
     allow_insecure_ui: bool,
     ui_session_ttl_seconds: u64,
+    watchdog_miss_limit: u32,
     security_headers_enabled: bool,
     hsts_mode: HstsMode,
     ui_logs_max_entries: usize,
@@ -384,6 +385,9 @@ impl Config {
                 .transpose()?,
             allow_insecure_ui: need_flag("ALLOW_INSECURE_UI")?,
             ui_session_ttl_seconds: ttl,
+            // What: missed watchdog cycles before stale.
+            // Why: one owner with the restart rule.
+            watchdog_miss_limit: knob("RESTART_AFTER", u32::MAX.into(), OutOfRange::Reject)? as u32,
             // What: security headers are on unless off.
             // Why: the ui gets none; safe is the default.
             security_headers_enabled: need_flag("UI_SECURITY_HEADERS")?,
@@ -1087,7 +1091,7 @@ fn load_templates(cfg: &Config) -> Tera {
 // What: the watchdog document as the dashboard shows it.
 // Why: fresh, stale and missing data look different.
 // From: Issue #870
-fn watchdog_json(path: &str) -> Value {
+fn watchdog_json(path: &str, cycles: u32) -> Value {
     let age = fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
@@ -1118,7 +1122,7 @@ fn watchdog_json(path: &str) -> Value {
             })
         })
         .collect();
-    if age > status.stale_after() {
+    if age > status.stale_after(cycles) {
         json!({
             "state": "stale",
             "updated": status.updated,
@@ -5196,7 +5200,10 @@ async fn dashboard(State(state): Shared, headers: HeaderMap) -> Response {
     ctx.insert("syslog_size_gb", &format!("{syslog_gb:.1}"));
     ctx.insert("syslog_max_gb", &cfg.syslog_max_gb);
     ctx.insert("syslog_stats", &syslog);
-    ctx.insert("watchdog_status", &watchdog_json(&cfg.watchdog_status_file));
+    ctx.insert(
+        "watchdog_status",
+        &watchdog_json(&cfg.watchdog_status_file, cfg.watchdog_miss_limit),
+    );
     ctx.insert("netdata_alarms", &alarm_views(&alarms));
     render(&state, "dashboard.html", &ctx)
 }
@@ -5216,7 +5223,10 @@ async fn metrics_api(State(state): Shared) -> Json<Value> {
 // Why: the dashboard polls the health lights from here.
 // From: Issue #870
 async fn watchdog_status_api(State(state): Shared) -> Json<Value> {
-    Json(watchdog_json(&state.config.watchdog_status_file))
+    Json(watchdog_json(
+        &state.config.watchdog_status_file,
+        state.config.watchdog_miss_limit,
+    ))
 }
 
 // What: the statistics page.
@@ -5985,7 +5995,7 @@ async fn run() -> anyhow::Result<()> {
         tracing::error!("Failed to write the auth_callout fragment: {e}");
     }
     let nats = connect_nats_with_retry(&cfg).await;
-    let http = http_client()?;
+    let http = http_client(&config::process_env).map_err(anyhow::Error::msg)?;
     let state = Arc::new(AppState {
         templates: load_templates(&cfg),
         http_client: http.clone(),
@@ -6018,7 +6028,8 @@ async fn run() -> anyhow::Result<()> {
 async fn healthcheck() -> Result<(), String> {
     let port = config::need(&config::process_env, "UI_LISTEN_PORT")?;
     let loopback = config::loopback()?;
-    probe_health(&format!("http://{loopback}:{port}/health")).await
+    let wait = need_secs(&config::process_env, "HEALTH_PROBE_TIMEOUT")?;
+    probe_health(&format!("http://{loopback}:{port}/health"), wait).await
 }
 
 // What: drop root, then run the server.
@@ -6610,7 +6621,8 @@ mod tests {
         "LANCACHE_SHARED_SECRET_DIR",
     ];
 
-    const NUMBER_KEYS: [(&str, &str); 16] = [
+    const NUMBER_KEYS: [(&str, &str); 17] = [
+        ("RESTART_AFTER", "3"),
         ("DHCP_LEASE_TIME_MIN", "60"),
         ("DHCP_LEASE_TIME_MAX", "604800"),
         ("DHCP_MAX_LEASE_FACTOR", "2"),
@@ -6658,6 +6670,18 @@ mod tests {
         }
         env.insert("CACHE_MAX_SIZE".to_string(), "50g".to_string());
         env
+    }
+
+    // What: HTTP client times of the ui tests.
+    // Why: http_client reads them from a reader.
+    fn http_env(key: &str) -> Option<String> {
+        [
+            "HTTP_CLIENT_TIMEOUT",
+            "HTTP_POOL_IDLE_TIMEOUT",
+            "HTTP_TCP_KEEPALIVE",
+        ]
+        .contains(&key)
+        .then(|| "10".to_string())
     }
 
     fn load_from(env: &HashMap<String, String>) -> Result<Config, String> {
@@ -6933,16 +6957,16 @@ mod tests {
         let dir = unique_temp_dir("watchdog-json");
         let file = dir.join("status.json");
         let path = file.to_string_lossy().into_owned();
-        assert_eq!(watchdog_json(&path), json!({"state": "unavailable"}));
+        assert_eq!(watchdog_json(&path, 3), json!({"state": "unavailable"}));
         fs::write(&file, "not json").unwrap();
-        assert_eq!(watchdog_json(&path), json!({"state": "unavailable"}));
+        assert_eq!(watchdog_json(&path, 3), json!({"state": "unavailable"}));
         let doc = r#"{"updated":"t1","interval_secs":30,"disk":{"cache":{"pct":10,"status":"green"}},
             "services":{"zeta":{"status":"red","health":"x","failures":2},
                         "ui":{"status":"green","health":"healthy","failures":0},
                         "alpha":{"status":"green","health":"","failures":0},
                         "proxy":{"status":"amber","health":"starting","failures":1}}}"#;
         fs::write(&file, doc).unwrap();
-        let fresh = watchdog_json(&path);
+        let fresh = watchdog_json(&path, 3);
         let names: Vec<&str> = fresh["services"]
             .as_array()
             .unwrap()
@@ -6961,7 +6985,7 @@ mod tests {
         let old = SystemTime::now() - Duration::from_secs(1000);
         let handle = OpenOptions::new().write(true).open(&file).unwrap();
         handle.set_modified(old).unwrap();
-        let stale = watchdog_json(&path);
+        let stale = watchdog_json(&path, 3);
         assert_eq!(stale["state"], "stale");
         let age = stale["age_seconds"].as_u64().unwrap();
         assert!((1000..1100).contains(&age), "age {age}");
@@ -7051,7 +7075,7 @@ mod tests {
         let page = "Active connections: 291 \nserver accepts handled requests\n \
                     16630948 16630947 31070465 \nReading: 6 Writing: 179 Waiting: 106 \n";
         let (base, server) = serve_canned(vec![(200, page.as_bytes().to_vec())]);
-        let client = http_client().unwrap();
+        let client = http_client(&http_env).unwrap();
         let status = nginx_status(&client, &base).await.expect("an answer");
         assert_eq!(
             serde_json::to_value(&status).unwrap(),
@@ -8981,7 +9005,7 @@ mod tests {
         cfg.hsts_mode = HstsMode::Auto;
         cfg.template_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/templates").to_string();
         tweak(&mut cfg);
-        let http = lancache_ng::http_client().unwrap();
+        let http = lancache_ng::http_client(&http_env).unwrap();
         let nats = async_nats::ConnectOptions::new()
             .retry_on_initial_connect()
             .connect("nats://127.0.0.1:1")
