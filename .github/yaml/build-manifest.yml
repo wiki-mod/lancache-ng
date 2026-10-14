@@ -836,6 +836,12 @@ build_identity:
   toolchain:
     inputs: [toolchain_source_sha, base_digest]
 
+# What: the events §17 names as a controlled refresh.
+# Why: such a run has no base; missing then proves BUILD.
+# From: Issue #1683 | PR #1912
+build_admission:
+  refresh_events: [workflow_dispatch, schedule]
+
 # What: apk packages every image of a build type needs.
 # Why: musl rust binaries link libgcc_s.so.1 dynamically.
 # From: Issue #1683 | PR #1858

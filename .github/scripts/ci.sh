@@ -4873,6 +4873,16 @@ _ci_trivy_scan() {
     rm -f "${report}"
 }
 
+# What: rc 0 when this run is a controlled refresh (§17).
+# Why: one owner; the SOT names the events, not ci.sh.
+# From: Issue #1683 | PR #1912
+_ci_refresh_event() {
+    local events event="${GITHUB_EVENT_NAME:-}"
+    [ -n "${event}" ] || return 1
+    events="$(_ci_required_field build_admission refresh_events blocklist)" || return 2
+    grep -qxF -- "${event}" <<< "${events}" || return 1
+}
+
 # What: Read the semantic build-impact verdict, fail-closed.
 # Why: BUILD needs proven impact; unset/failed -> UNKNOWN.
 # From: Issue #1683
@@ -4905,6 +4915,20 @@ _ci_semantic_impact() {
     fi
     read -r base head <<<"${refs}"
     if [ -z "${base}" ]; then
+        # What: a refresh run has no base; missing is BUILD.
+        # Why: §17 names it a refresh point; state decides.
+        # From: Issue #1683 | PR #1912
+        local frc=0
+        _ci_refresh_event || frc=$?
+        case "${frc}" in
+            0)
+                ci_log "[CI-INFO-IMPACT-0016]" "service=\"${service}\" platform=\"${platform}\" event=\"${GITHUB_EVENT_NAME:-}\" reason=\"controlled refresh run; the missing artifact is the proof; BUILD\""
+                printf 'BUILD\n'
+                return 0
+                ;;
+            1) ;;
+            *) printf 'UNKNOWN\n'; return 0 ;;
+        esac
         ci_log "[CI-INFO-IMPACT-0003]" "service=\"${service}\" platform=\"${platform}\" reason=\"no base ref for this event; UNKNOWN\""
         printf 'UNKNOWN\n'
         return 0
