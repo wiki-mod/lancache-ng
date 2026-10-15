@@ -28,7 +28,7 @@ use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, DesiredRunState, DesiredState, DnsRecord,
     FlushRequest, NetdataAlarm, Place, PowerDns, ProbeAnswer, ProbeReport, SnapshotStore,
     WatchdogStatus, ct_eq, df, die, error_chain, hex32, http_client, is_placeholder,
-    load_or_create, load_or_create_hex, need_secs, probe_health, resolve_shared_secret,
+    load_or_create, load_or_create_hex, need_secs, own, probe_health, resolve_shared_secret,
     shared_secret, shared_secret_file_name, shared_secret_is_placeholder, snapshot_created_unix,
     unix_secs, write_file, write_if_changed,
 };
@@ -45,7 +45,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -1311,22 +1310,33 @@ const MIB: u64 = 1_048_576;
 const GIB: u64 = 1_073_741_824;
 
 // What: size of an allowed directory in GiB, 0 if refused.
-// Why: du beats a Rust walk over hundreds of GB of files.
+// Why: bytes of regular files, links not followed; no du.
 fn du_gb(path: &str) -> f64 {
     if !path_allowed(path) {
         return 0.0;
     }
-    let bytes: u64 = Command::new("du")
-        .args(["-sb", path])
-        .output()
-        .ok()
-        .and_then(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .split_whitespace()
-                .next()
-                .and_then(|n| n.parse().ok())
-        })
-        .unwrap_or(0);
+    let mut bytes: u64 = 0;
+    let mut pending = vec![PathBuf::from(path)];
+    while let Some(dir) = pending.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!("{} not listed for its size: {e}", dir.display());
+                continue;
+            }
+        };
+        for entry in entries {
+            let meta = entry.and_then(|entry| entry.metadata().map(|meta| (entry.path(), meta)));
+            match meta {
+                Ok((sub, meta)) if meta.is_dir() => pending.push(sub),
+                Ok((_, meta)) if meta.is_file() => bytes += meta.len(),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("an entry of {} not read for its size: {e}", dir.display())
+                }
+            }
+        }
+    }
     bytes as f64 / GIB as f64
 }
 
@@ -5909,7 +5919,7 @@ fn ui_written_dirs(cfg: &Config, log_file: &Path) -> Vec<PathBuf> {
 // Why: a symlink in a volume must not redirect the chown.
 // From: Issue #1427
 fn chown_tree(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
-    std::os::unix::fs::lchown(path, Some(uid), Some(gid))?;
+    own(path, Some(uid), Some(gid), None)?;
     if fs::symlink_metadata(path)?.is_dir() {
         for entry in fs::read_dir(path)? {
             chown_tree(&entry?.path(), uid, gid)?;
@@ -5922,14 +5932,12 @@ fn chown_tree(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
 // Why: the shared log reader gid must keep read access.
 // From: Issue #1427 | PR #1670
 fn open_log_dir_to_group(dir: &Path, gid: u32) -> io::Result<()> {
-    std::os::unix::fs::lchown(dir, None, Some(gid))?;
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o2775))?;
+    own(dir, None, Some(gid), Some(0o2775))?;
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
         let meta = fs::symlink_metadata(&path)?;
         if meta.is_file() {
-            std::os::unix::fs::lchown(&path, None, Some(gid))?;
-            fs::set_permissions(&path, fs::Permissions::from_mode(meta.mode() | 0o040))?;
+            own(&path, None, Some(gid), Some(meta.mode() | 0o040))?;
         }
     }
     Ok(())

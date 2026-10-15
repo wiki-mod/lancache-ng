@@ -7,7 +7,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,7 +25,7 @@ use lancache_ng::config::{
 };
 use lancache_ng::{
     Backoff, DnsRecord, FlushRequest, PowerDns, SnapshotStore, ct_eq, die, http_client,
-    need_millis, need_secs, snapshot_created_unix, unix_nanos,
+    need_millis, need_secs, run_program, snapshot_created_unix, unix_nanos,
 };
 use reqwest::Method;
 use serde::Deserialize;
@@ -723,26 +722,23 @@ struct RollbackRequest {
 // What: pdnsutil check-zone with a 10 second limit.
 // Why: a wedged auth database must not hang the rollback.
 async fn check_zone(ctx: &Ctx, store: &SnapshotStore, zone: &str) -> bool {
-    let status = tokio::process::Command::new("pdnsutil")
-        .arg(format!("--config-dir={}", ctx.pdns_auth_config_dir))
-        .args(["check-zone", zone])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .status();
-    match tokio::time::timeout(ctx.times.zone_check, status).await {
-        Ok(Ok(status)) => status.success(),
-        Ok(Err(e)) => {
+    let config_dir = format!("--config-dir={}", ctx.pdns_auth_config_dir);
+    let (limit, zone_name) = (ctx.times.zone_check, zone.to_owned());
+    let checked = tokio::task::spawn_blocking(move || {
+        run_program(
+            "pdnsutil",
+            &[&config_dir, "check-zone", &zone_name],
+            Some(limit),
+        )
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("check-zone task failed: {e}")));
+    match checked {
+        Ok(_) => true,
+        Err(e) => {
             store.log(
                 "WARNING",
-                &format!("failed to run pdnsutil check-zone for {zone}: {e}"),
-            );
-            false
-        }
-        Err(_) => {
-            store.log(
-                "WARNING",
-                &format!("pdnsutil check-zone for {zone} timed out, killed"),
+                &format!("pdnsutil check-zone for {zone} failed: {e}"),
             );
             false
         }

@@ -22,10 +22,12 @@ use lancache_ng::config::{
 };
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
-    ClientCheck, ConflictCheck, DesiredRunState, DesiredState, Detail, DiskHealth, DiskInfo,
-    DockerApi, NetdataAlarm, Place, ProbeAnswer, ProbeReport, ServiceHealth, WatchdogStatus, df,
-    hex32, need_secs, probe_health, probe_health_tls, resolve_shared_secret, sha256_hex,
-    shared_secret_file_name, shared_secret_is_placeholder, unix_secs, write_file, write_if_changed,
+    CaFiles, CertSpec, ClientCheck, ConflictCheck, DesiredRunState, DesiredState, Detail,
+    DiskHealth, DiskInfo, DockerApi, NetdataAlarm, Place, ProbeAnswer, ProbeReport, ServiceHealth,
+    WatchdogStatus, df, hex32, need_secs, openssl_ca, openssl_leaf, openssl_x509, own,
+    probe_health, probe_health_tls, resolve_shared_secret, run_program, sha256_hex,
+    shared_secret_file_name, shared_secret_is_placeholder, terminate, unix_secs, write_file,
+    write_if_changed,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1254,7 +1256,7 @@ fn newest_write(root: &Path) -> u128 {
 // From: Issue #1428 | PR #1912
 fn log_sample(s: &Settings) -> Option<LogSample> {
     let ctl = format!("--control={}", s.syslog_ctl.display());
-    let stats = tool("syslog-ng-ctl", &["stats", &ctl]).ok()?;
+    let stats = run_program("syslog-ng-ctl", &["stats", &ctl], None).ok()?;
     Some(LogSample {
         processed: processed_count(&stats, SYSLOG_NG_DESTINATION)?,
         newest: newest_write(&s.syslog_root),
@@ -1483,9 +1485,10 @@ fn netdata(ctx: &Ctx) -> Result<Run, String> {
     own(
         &token_file,
         Some(account_id("passwd", "netdata")?),
-        account_id("group", "netdata")?,
-        0o600,
-    )?;
+        Some(account_id("group", "netdata")?),
+        Some(0o600),
+    )
+    .map_err(|e| e.to_string())?;
     put("health_alarm_notify.conf", &sender, 0o644)?;
     put("netdata.conf", NETDATA_CONF, 0o644)?;
     put("go.d/web_log.conf", &web_log, 0o644)?;
@@ -1908,7 +1911,7 @@ impl AuthConf<'_> {
 // From: Issue #1683 | PR #1912
 fn conf_ok(check: &[String]) -> bool {
     let args: Vec<&str> = check[1..].iter().map(String::as_str).collect();
-    match tool(&check[0], &args) {
+    match run_program(&check[0], &args, None) {
         Ok(_) => true,
         Err(e) => {
             log_err(&format!("ERROR: config check failed: {e}"));
@@ -2095,27 +2098,7 @@ fn pdnsutil(dir: &Path, args: &[&str]) -> Result<String, String> {
     let config_dir = pdns_config_dir(dir);
     let mut argv = vec![config_dir.as_str()];
     argv.extend_from_slice(args);
-    tool("pdnsutil", &argv)
-}
-
-// What: run a tool; its stdout and stderr, or an error.
-// Why: setup tools fail the launch with their own words.
-// From: Issue #1683
-fn tool(program: &str, args: &[&str]) -> Result<String, String> {
-    let out = std::process::Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|e| format!("cannot run {program}: {e}"))?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    if out.status.success() {
-        Ok(text)
-    } else {
-        Err(format!("{program} {}: {}", args.join(" "), text.trim()))
-    }
+    run_program("pdnsutil", &argv, None)
 }
 
 // What: true for pdnsutil's "exists already" refusal.
@@ -2159,9 +2142,10 @@ fn pdns_database(data_dir: &Path) -> Result<PathBuf, String> {
     own(
         &db,
         Some(account_id("passwd", "pdns")?),
-        account_id("group", "pdns")?,
-        mode,
-    )?;
+        Some(account_id("group", "pdns")?),
+        Some(mode),
+    )
+    .map_err(|e| e.to_string())?;
     log(&format!("Created {}", db.display()));
     Ok(db)
 }
@@ -3026,7 +3010,7 @@ fn kea_socket_dir(kea: &KeaKnobs) -> Result<(), String> {
 fn kea_snapshot_dir(dir: &Path) -> Result<(), String> {
     let gid = config::runtime_gid()?;
     fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    own(dir, None, gid, 0o775)
+    own(dir, None, Some(gid), Some(0o775)).map_err(|e| e.to_string())
 }
 
 // What: kea-dhcp4 on its checked config, else a snapshot.
@@ -3093,7 +3077,7 @@ fn kea_dhcp4(ctx: &Ctx) -> Result<Run, String> {
 fn kea_ctrl_fence(port: &str, kea: &KeaKnobs) -> Result<(), String> {
     let chain = kea.ctrl_chain.as_str();
     let jump = ["-p", "tcp", "--dport", port, "-j", chain];
-    let iptables = |args: &[&str]| tool("iptables", args).map(|_| ());
+    let iptables = |args: &[&str]| run_program("iptables", args, None).map(|_| ());
     if iptables(&["-N", chain]).is_err() {
         iptables(&["-F", chain])?;
     }
@@ -3752,15 +3736,6 @@ fn account_id(db: &str, name: &str) -> Result<u32, String> {
         .ok_or_else(|| format!("{name} is not in {path}"))
 }
 
-// What: set owner ids and mode on one path.
-// Why: nginx workers read keys only through their group.
-fn own(path: &Path, uid: Option<u32>, gid: u32, mode: u32) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt as _;
-    std::os::unix::fs::chown(path, uid, Some(gid))
-        .and_then(|()| fs::set_permissions(path, fs::Permissions::from_mode(mode)))
-        .map_err(|e| format!("cannot set owner and mode of {}: {e}", path.display()))
-}
-
 // What: sign one leaf certificate with the stack CA.
 // Why: the proxy presents it for an intercepted host.
 // From: Issue #1683
@@ -3772,59 +3747,26 @@ fn sign_leaf(
     cert: &CertKnobs,
 ) -> Result<(), String> {
     let (csr, ext) = (run.join("leaf.csr"), run.join("leaf.ext"));
-    write_file(
-        &ext,
-        format!("subjectAltName={san}\n").as_bytes(),
-        0o600,
-        Place::Replace,
-    )
-    .map_err(|e| format!("cannot write {}: {e}", ext.display()))?;
-    let path = |p: &Path| p.display().to_string();
-    let (key_s, crt_s, csr_s, ext_s) = (path(key), path(crt), path(&csr), path(&ext));
     let (ca_crt, ca_key, serial) = (
-        path(&ca.join(&cert.ca_cert_file)),
-        path(&ca.join(&cert.ca_key_file)),
-        path(&ca.join(&cert.ca_serial_file)),
+        ca.join(&cert.ca_cert_file),
+        ca.join(&cert.ca_key_file),
+        ca.join(&cert.ca_serial_file),
     );
-    let signed = tool(
-        "openssl",
-        &[
-            "req",
-            "-new",
-            "-newkey",
-            &cert.leaf_key_type,
-            "-nodes",
-            "-subj",
-            &cert.leaf_subject,
-            "-keyout",
-            &key_s,
-            "-out",
-            &csr_s,
-        ],
-    )
-    .and_then(|_| {
-        tool(
-            "openssl",
-            &[
-                "x509",
-                "-req",
-                "-days",
-                &cert.leaf_days,
-                "-in",
-                &csr_s,
-                "-CA",
-                &ca_crt,
-                "-CAkey",
-                &ca_key,
-                "-CAserial",
-                &serial,
-                "-extfile",
-                &ext_s,
-                "-out",
-                &crt_s,
-            ],
-        )
-    });
+    let signed = openssl_leaf(
+        &CaFiles {
+            crt: &ca_crt,
+            key: &ca_key,
+            serial: &serial,
+        },
+        (key, crt),
+        (&csr, &ext),
+        san,
+        &CertSpec {
+            key_type: &cert.leaf_key_type,
+            subject: &cert.leaf_subject,
+            days: &cert.leaf_days,
+        },
+    );
     // What: drop temp and failed files; log what stays.
     // Why: AG-INT-002: a left file is named, not hidden.
     // From: Issue #1683 | PR #1912
@@ -3839,7 +3781,7 @@ fn sign_leaf(
             log_err(&format!("WARNING: {} not removed: {e}", file.display()));
         }
     }
-    signed.map(|_| ())
+    signed
 }
 
 // What: drop the nginx package's stock default.conf.
@@ -3853,17 +3795,6 @@ fn remove_stock_server(nginx: &Path) -> Result<(), String> {
         }
         _ => Ok(()),
     }
-}
-
-// What: openssl x509 -noout output for one certificate.
-// Why: the CA print, the SAN read and the tests read alike.
-// From: Issue #1683 | PR #1912
-fn x509(crt: &Path, args: &[&str]) -> Result<String, String> {
-    let crt = crt.display().to_string();
-    tool(
-        "openssl",
-        &[&["x509", "-noout"], args, &["-in", &crt]].concat(),
-    )
 }
 
 // What: CA, default and per-host leaf certificates.
@@ -3882,26 +3813,16 @@ fn nginx_certs(
     let path = |p: &Path| p.display().to_string();
     if !(ca_crt.is_file() && ca_key.is_file()) {
         fs::create_dir_all(ca).map_err(|e| format!("cannot create {}: {e}", ca.display()))?;
-        tool(
-            "openssl",
-            &[
-                "req",
-                "-new",
-                "-newkey",
-                &cert.ca_key_type,
-                "-days",
-                &cert.ca_days,
-                "-nodes",
-                "-x509",
-                "-subj",
-                &cert.ca_subject,
-                "-keyout",
-                &path(&ca_key),
-                "-out",
-                &path(&ca_crt),
-            ],
+        openssl_ca(
+            &ca_key,
+            &ca_crt,
+            &CertSpec {
+                key_type: &cert.ca_key_type,
+                subject: &cert.ca_subject,
+                days: &cert.ca_days,
+            },
         )?;
-        own(&ca_key, None, 0, 0o600)?;
+        own(&ca_key, None, Some(0), Some(0o600)).map_err(|e| e.to_string())?;
         log(&format!(
             "ACTION REQUIRED: a new CA is in {}; every HTTPS client must install it \
              once (docs/install-ca-cert.md)",
@@ -3909,10 +3830,10 @@ fn nginx_certs(
         ));
     }
     fs::create_dir_all(certs).map_err(|e| format!("cannot create {}: {e}", certs.display()))?;
-    own(certs, None, gid, 0o2750)?;
+    own(certs, None, Some(gid), Some(0o2750)).map_err(|e| e.to_string())?;
     // What: drop every leaf when the CA changed.
     // Why: leaves of an old CA would fail on every client.
-    let print = x509(&ca_crt, &["-fingerprint", "-sha256"])?;
+    let print = openssl_x509(&ca_crt, &["-fingerprint", "-sha256"])?;
     let stamp = certs.join(".ca-fingerprint");
     if fs::read_to_string(&stamp).ok().as_deref() != Some(print.as_str()) {
         for entry in
@@ -3948,7 +3869,7 @@ fn nginx_certs(
     let default_crt = certs.join(format!("{}.crt", cert.default_cert_name));
     // What: no readable default cert means no SAN rows.
     // Why: a missing or broken cert is signed again below.
-    let san = x509(&default_crt, &["-ext", "subjectAltName"]).unwrap_or_else(|e| {
+    let san = openssl_x509(&default_crt, &["-ext", "subjectAltName"]).unwrap_or_else(|e| {
         if default_crt.exists() {
             log_err(&format!(
                 "WARNING: default cert not read, signed again: {e}"
@@ -3996,8 +3917,8 @@ fn nginx_certs(
     for entry in fs::read_dir(certs).map_err(|e| format!("cannot list {}: {e}", certs.display()))? {
         let file = entry.map_err(|e| e.to_string())?.path();
         match file.extension().and_then(|x| x.to_str()) {
-            Some("key") => own(&file, None, gid, 0o640)?,
-            Some("crt") => own(&file, None, gid, 0o644)?,
+            Some("key") => own(&file, None, Some(gid), Some(0o640)).map_err(|e| e.to_string())?,
+            Some("crt") => own(&file, None, Some(gid), Some(0o644)).map_err(|e| e.to_string())?,
             _ => {}
         }
     }
@@ -4737,12 +4658,10 @@ impl Slot {
         let Some(mut child) = self.child.take() else {
             return;
         };
-        if let Some(pid) = child.id() {
-            let _ = tokio::process::Command::new("kill")
-                .args(["-TERM", &pid.to_string()])
-                .status()
-                .await
-                .inspect_err(|e| log_err(&format!("WARNING: kill -TERM {pid}: {e}")));
+        if let Some(pid) = child.id()
+            && let Err(e) = terminate(pid)
+        {
+            log_err(&format!("WARNING: SIGTERM to {pid}: {e}"));
         }
         if tokio::time::timeout(self.timing.stop_grace, child.wait())
             .await
@@ -7047,7 +6966,7 @@ mod tests {
         assert_eq!(fs::metadata(&certs).expect("certs").gid(), gid);
         let ca_crt = ca.join(&cert.ca_cert_file);
         let verify = |crt: &Path| {
-            tool(
+            run_program(
                 "openssl",
                 &[
                     "verify",
@@ -7055,18 +6974,19 @@ mod tests {
                     ca_crt.to_str().expect("utf8"),
                     crt.to_str().expect("utf8"),
                 ],
+                None,
             )
         };
         verify(&leaf).expect("leaf signed by the CA");
         assert_eq!(
-            x509(&leaf, &["-subject", "-nameopt", "RFC2253"])
+            openssl_x509(&leaf, &["-subject", "-nameopt", "RFC2253"])
                 .expect("x509")
                 .trim(),
             format!("subject={}", cert.leaf_subject.trim_start_matches('/'))
         );
-        let san = x509(&leaf, &["-ext", "subjectAltName"]).expect("x509");
+        let san = openssl_x509(&leaf, &["-ext", "subjectAltName"]).expect("x509");
         assert!(san.contains(&format!("DNS:{host}, DNS:*.{host}")), "{san}");
-        let san = x509(&default, &["-ext", "subjectAltName"]).expect("x509");
+        let san = openssl_x509(&default, &["-ext", "subjectAltName"]).expect("x509");
         assert!(san.contains(&format!("IP Address:{ip_b}")), "{san}");
         assert_eq!(
             fs::read_dir(&run).expect("run").count(),
@@ -7086,10 +7006,10 @@ mod tests {
         assert_eq!(bytes(&default), default_before);
         nginx_certs(&ca, &certs, &run, &hosts, &ip_a, gid, &cert).expect("prefix ip");
         assert_ne!(bytes(&default), default_before, "a prefix IP kept the cert");
-        let san = x509(&default, &["-ext", "subjectAltName"]).expect("x509");
+        let san = openssl_x509(&default, &["-ext", "subjectAltName"]).expect("x509");
         assert!(san.contains(&format!("IP Address:{ip_a}")), "{san}");
         let serial = |crt: &Path| {
-            let text = x509(crt, &["-serial"]).expect("x509");
+            let text = openssl_x509(crt, &["-serial"]).expect("x509");
             u128::from_str_radix(text.trim().trim_start_matches("serial="), 16).expect("hex")
         };
         assert!(serial(&default) > serial(&leaf));
