@@ -25,6 +25,9 @@ AUTO_UPDATE_TIMER_UNIT="lancache-auto-update.timer"
 # Why: one owner each; rollback must find the backups
 # From: Issue #1683 | PR #1858
 BACKUP_ROOT="${LANCACHE_BACKUP_ROOT:-/var/backups/lancache-ng}"
+# What: bootstrap copy of the SOT LANCACHE_REPO_URL
+# Why: curl | bash clones before any SOT file exists
+# From: Issue #1683 | PR #1912
 LANCACHE_REPO_URL="https://github.com/wiki-mod/lancache-ng"
 # What: Docker's repo root and Docker CE package names
 # Why: apt, rpm, conflict guard and prompts share them
@@ -1736,38 +1739,32 @@ copy_volume_to_dir() {
     print_ok "Copied $volume into $dir (${#lines[@]} entries, verified)"
 }
 
-# What: default state subdir of a prod key: compose + SOT
-# Why: compose names the SOT key; the SOT owns the value
-# From: Issue #1683 | PR #1858
+# What: default state subdir of a prod key, from the SOT
+# Why: state_dir_keys names the SOT subdir entry; one owner
+# From: Issue #1683 | PR #1912
 prod_state_subdir() {
-    local key="$1" refs sub
-    refs=$(awk -v k="$key" '{
-        p = "${" k ":-${LANCACHE_STATE_DIR:?"
-        i = index($0, p)
-        if (!i) next
-        rest = substr($0, i + length(p))
-        j = index(rest, "}/")
-        if (!j) next
-        rest = substr(rest, j + 2)
-        print substr(rest, 1, index(rest, "}") - 1)
-    }' "$PROD_COMPOSE") || die "Failed to read $PROD_COMPOSE (exit $?)."
-    refs=$(sort -u <<< "$refs")
-    [[ "$refs" =~ ^\$\{SOT_[A-Z0-9_]+$ ]] \
-        || die "$PROD_COMPOSE gives no single default directory for $key: ${refs//$'\n'/ }"
-    sub=$(prod_env_default "${refs#"\${SOT_"}") || exit $?
-    [[ "$sub" =~ ^[a-z0-9-]+$ ]] \
-        || die "The SOT default of ${refs#"\${"} is no directory name: $sub"
-    printf '%s\n' "$sub"
+    local key="$1" rows row_key name sub
+    rows=$(lancache_sot_list state_dir_keys runtime) || exit $?
+    while read -r row_key name; do
+        [[ "$row_key" == "$key" ]] || continue
+        sub=$(prod_env_default "$name") || exit $?
+        [[ "$sub" =~ ^[a-z0-9-]+$ ]] \
+            || die "The SOT default of $name is no directory name: $sub"
+        printf '%s\n' "$sub"
+        return 0
+    done <<< "$rows"
+    die "The SOT runtime.state_dir_keys names no directory for $key."
 }
 
-# What: every state key the prod compose mounts
-# Why: backup must not keep a second, drifting list
-# From: Issue #1683 | PR #1858
+# What: every state key the prod stack mounts, from the SOT
+# Why: backup and update read the one list in the SOT
+# From: Issue #1683 | PR #1912
 prod_state_keys() {
-    local keys
-    keys=$(grep -oE '\$\{[A-Z0-9_]+:-\$\{LANCACHE_STATE_DIR:\?' "$PROD_COMPOSE") \
-        || die "$PROD_COMPOSE mounts no state directory (exit $?)."
-    sed -E 's/^\$\{([A-Z0-9_]+):-.*/\1/' <<< "$keys" | sort -u
+    local rows row_key name
+    rows=$(lancache_sot_list state_dir_keys runtime) || exit $?
+    while read -r row_key name; do
+        printf '%s\n' "$row_key"
+    done <<< "$rows"
 }
 
 # What: "volume dir" per row of quickstart_volume_keys
@@ -2010,8 +2007,9 @@ rollback_quickstart_migration() {
 # From: Issue #1683 | PR #1858
 write_lancache_systemd_units() {
     local stack_dir="$1" setup_sh="$SCRIPT_DIR/setup.sh" unit_dir
-    local docker_unit="docker.service" timer_target="timers.target"
+    local docker_unit="docker.service" timer_target="timers.target" converge_minutes
     unit_dir=$(lancache_sot_value unit_dir runner_host) || exit $?
+    converge_minutes=$(prod_env_default CONVERGE_TIMER_INTERVAL_MINUTES) || exit $?
     # What: units run compose through setup.sh at run time
     # Why: overrides may change after the unit is written
     # From: Issue #1683 | PR #1858
@@ -2054,7 +2052,7 @@ Description=LanCache-NG Convergence Timer
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=5min
+OnUnitActiveSec=${converge_minutes}min
 Unit=${CONVERGE_SERVICE_UNIT}
 
 [Install]
@@ -2294,18 +2292,27 @@ runtime_default_in() {
         || die "The SOT runtime.defaults holds no default for $2."
 }
 
-# What: docker compose with compose_keys as SOT_<KEY>
-# Why: compose names no path, port or default of its own
+# What: the SOT_<KEY>=value row of each compose key
+# Why: one owner; ci.sh reads it from here, not a copy
 # From: Issue #1683 | PR #1912
-sot_compose() {
+sot_compose_env() {
     local keys key value list
-    local -a sot_env=()
     keys=$(lancache_sot_value compose_keys runtime) || exit $?
     list=$(runtime_defaults_list) || exit $?
     for key in $keys; do
         value=$(runtime_default_in "$list" "$key") || exit $?
-        sot_env+=("SOT_${key}=${value}")
+        printf 'SOT_%s=%s\n' "$key" "$value"
     done
+}
+
+# What: docker compose with compose_keys as SOT_<KEY>
+# Why: compose names no path, port or default of its own
+# From: Issue #1683 | PR #1912
+sot_compose() {
+    local rows
+    local -a sot_env=()
+    rows=$(sot_compose_env) || exit $?
+    mapfile -t sot_env <<< "$rows"
     env "${sot_env[@]}" docker compose "$@"
 }
 
@@ -3383,7 +3390,7 @@ migrate_env_for_update() (
 
     # What: derives state dirs from the legacy root
     # Why: one state contract for update and upgrades
-    state_keys=$(prod_state_keys) || die "Cannot list the state keys of $PROD_COMPOSE (exit $?)."
+    state_keys=$(prod_state_keys) || die "Cannot list the state keys of the SOT (exit $?)."
     while IFS= read -r state_key; do
         state_sub=$(prod_state_subdir "$state_key") \
             || die "Cannot read the default directory of $state_key (exit $?)."
@@ -3659,7 +3666,7 @@ backup_manifest() {
     # What: every compose state dir but cache and logs
     # Why: cache: full mode only; logs are no rollback state
     # From: Issue #1683 | PR #1858
-    keys=$(prod_state_keys) || die "Cannot list the state keys of $PROD_COMPOSE (exit $?)."
+    keys=$(prod_state_keys) || die "Cannot list the state keys of the SOT (exit $?)."
     while IFS= read -r key; do
         case "$key" in CACHE_DIR|SYSLOG_NG_LOG_DIR) continue ;; esac
         dir=$(prod_state_dir_for_key "$key" "$env_file" "$state_dir") \
@@ -6981,7 +6988,10 @@ DHCP_RANGE_START=""
 DHCP_RANGE_END=""
 DHCP_SUBNET_START=""
 DHCP_DNS_PRIMARY="$IP_HTTP"
-DHCP_DNS_SECONDARY="${IP_HTTPS:-$IP_HTTP}"
+# What: secondary DNS is IP_HTTPS, with no IP_HTTP fallback.
+# Why: IP_HTTPS is asked and validated above; as config.rs.
+# From: Issue #1683 | PR #1912
+DHCP_DNS_SECONDARY="$IP_HTTPS"
 UPSTREAM_DHCP_IP="$DHCP_GATEWAY"
 # What: relay-mode local address, empty by default
 # Why: only dnsmasq-relay uses it

@@ -552,6 +552,24 @@ runtime:
     - UI_ROUTE_LAN_ADD=/domains/lan/add
     - UI_ROUTE_STATIC_ADD=/dhcp/static/add
     - UI_ROUTE_SECONDARY_REGISTER=/api/secondary/register
+    # What: ui page refresh timings, in milliseconds.
+    # Why: templates read the value; no literal in markup.
+    # From: Issue #1683 | PR #1912
+    - UI_WATCHDOG_REFRESH_MS=10000
+    - UI_DASHBOARD_REFRESH_MS=10000
+    - UI_STATS_REFRESH_MS=3000
+    # What: samples the stats page charts keep per series.
+    # Why: one value for the chart size and the query.
+    # From: Issue #1683 | PR #1912
+    - UI_STATS_POINTS=60
+    # What: minutes between host convergence runs.
+    # Why: setup.sh timer and ui texts read one value.
+    # From: Issue #1683 | PR #1912
+    - CONVERGE_TIMER_INTERVAL_MINUTES=5
+    # What: the project address the ui links to.
+    # Why: setup.sh bootstrap copy; ci.sh checks both.
+    # From: Issue #1683 | PR #1912
+    - LANCACHE_REPO_URL=https://github.com/wiki-mod/lancache-ng
     - KEA_DATA_DIR=/var/lib/kea
     - KEA_LEASE_FILE=@KEA_DATA_DIR@/kea-leases4.csv
     - KEA_SOCKET_DIR=/run/kea
@@ -724,6 +742,20 @@ runtime:
     - nats-data NATS_DATA_DIR
     - nats-conf NATS_CONF_DIR
     - logs-syslog-ng SYSLOG_NG_LOG_DIR
+  # What: prod state dir keys as "KEY STATE_SUBDIR_NAME".
+  # Why: shell reads this list, not the compose text.
+  # From: Issue #1683 | PR #1912
+  state_dir_keys:
+    - SYSLOG_NG_LOG_DIR STATE_SUBDIR_SYSLOG_NG
+    - NTP_DATA_DIR STATE_SUBDIR_NTP
+    - CACHEHAMSTER_DATA_DIR STATE_SUBDIR_CACHEHAMSTER
+    - CA_DIR STATE_SUBDIR_CA
+    - PDNS_DIR STATE_SUBDIR_PDNS
+    - PDNS_FILTER_STATE_DIR STATE_SUBDIR_PDNS_FILTER
+    - NATS_DATA_DIR STATE_SUBDIR_NATS
+    - NATS_CONF_DIR STATE_SUBDIR_NATS_CONF
+    - KEA_DATA_DIR STATE_SUBDIR_KEA
+    - CACHE_DIR STATE_SUBDIR_CACHE
   # What: archive compressors, best first: ext command args.
   # Why: logbundle takes the first present; tar writes it.
   # From: Issue #1683 | PR #1912

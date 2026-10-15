@@ -14619,8 +14619,18 @@ _ci_check_prod_state_wiring() {
         _ci_file_match "[CI-ERROR-CHECK-0181]" "key=\"${key}\" reason=\"doc not searched\"" "${doc}" "${key}" -Fw \
             || { [ "$?" -eq 1 ] || return 2; viol+=("${doc_rel} does not mention ${key}"); }
     done <<<"${keys}"
+    # What: compose mounts exactly the SOT state_dir_keys.
+    # Why: the SOT list owns the keys; compose only mounts.
+    # From: Issue #1683 | PR #1912
+    local mounted want
+    mounted="$(_ci_run -m 1 "[CI-ERROR-CHECK-0192]" "file=\"${compose}\" reason=\"state mounts not read\"" grep -oE '\$\{[A-Z0-9_]+:-\$\{LANCACHE_STATE_DIR:\?' "${compose}")" || return 2
+    mounted="${mounted//:-\$\{LANCACHE_STATE_DIR:\?/}"
+    mounted="$(sort -u <<< "${mounted//\$\{/}")"
+    want="$(sort -u <<< "${keys}")"
+    [ "${mounted}" = "${want}" ] \
+        || viol+=("${dep} state mounts differ from SOT runtime.state_dir_keys: compose=[${mounted//$'\n'/ }] sot=[${want//$'\n'/ }]")
     # What: a mount default off the state root fails.
-    # Why: AG-SETUP-001: keys come from the compose itself.
+    # Why: AG-SETUP-001: defaults stay under the state root.
     # From: Issue #1683 | PR #1912
     local off
     off="$(_ci_run -m 1 "[CI-ERROR-CHECK-0176]" "file=\"${compose}\" reason=\"mount defaults not scanned\"" grep -E '^[[:space:]]*(- |device: )\$\{[A-Z0-9_]+:-' "${compose}")" || return 2
@@ -14657,16 +14667,11 @@ _ci_validate_host_tools() {
     fi
 }
 
-# What: SOT_<KEY>=value per compose key; $1 = defaults.
-# Why: compose interpolates the SOT paths and ports.
+# What: SOT_<KEY>=value per compose key, from setup.sh.
+# Why: sot_compose_env is the one owner; no second copy.
 # From: Issue #1683 | PR #1912
 _ci_sot_compose_env() {
-    local keys k v rows="$1"
-    keys="$(_ci_required_field runtime compose_keys block)" || return 2
-    for k in ${keys}; do
-        v="$(_ci_default_in "${rows}" "${k}")" || return 2
-        printf 'SOT_%s=%s\n' "${k}" "${v}"
-    done
+    _ci_capture 0 bash -c 'source "$1" && sot_compose_env' _ "${CI_REPO_ROOT}/setup.sh"
 }
 
 # What: image coordinates of the compose images, KEY=VALUE.
@@ -14708,7 +14713,7 @@ _ci_validation_env() {
         esac
         printf '%s\n' "${v}"
     done <<< "${fx}"
-    _ci_sot_compose_env "${rows}" || return 2
+    _ci_sot_compose_env || return 2
     _ci_validation_images || return 2
     # What: a fresh value per secret key, setup.sh format.
     # Why: a fixed key in the SOT is a hardcoded credential.
@@ -14857,8 +14862,7 @@ _ci_compose_run() {
         names="$(_ci_run "[CI-ERROR-CORE-0145]" "env_file=\"${env_file}\" reason=\"compose variable names unreadable\"" \
             jq -r 'keys[]' <<< "${vars}")" || return 2
         [ -z "${names}" ] || mapfile -t unsetv <<< "${names}"
-        fx="$(_ci_runtime_defaults)" || return 2
-        fx="$(_ci_sot_compose_env "${fx}")" || return 2
+        fx="$(_ci_sot_compose_env)" || return 2
         pre=(--env-file "${env_file}")
     else
         fx="$(_ci_validation_env)" || return 2
@@ -15171,8 +15175,15 @@ _ci_check_setup_update_safety() {
     if [ -n "${restore_out}" ]; then
         viol+=("update must restore the convergence timer when the rollback backup fails")
     fi
+    # What: the bootstrap repo address equals the SOT value.
+    # Why: first run has no SOT; copies must not drift.
+    # From: Issue #1683 | PR #1912
+    local repo_url
+    repo_url="$(_ci_runtime_default LANCACHE_REPO_URL)" || return 2
+    _ci_file_match "[CI-ERROR-CHECK-0193]" "reason=\"repo address not searched\"" "${su}" "LANCACHE_REPO_URL=\"${repo_url}\"" -Fx \
+        || { [ "$?" -eq 1 ] || return 2; viol+=("setup.sh LANCACHE_REPO_URL differs from SOT runtime.defaults LANCACHE_REPO_URL (${repo_url})"); }
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0103]" "reason=\"setup.sh update-migration safety contract violated\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0103]" "reason=\"setup.sh update safety or bootstrap contract violated\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'setup-update-safety=clean\n'
