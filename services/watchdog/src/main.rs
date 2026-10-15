@@ -3185,9 +3185,7 @@ fn dnsmasq_conf(set: &dyn Fn(&str) -> String, relay: bool, log_dhcp: bool) -> St
         format!("dhcp-range={start},proxy"),
     );
     let primary = set("DHCP_DNS_PRIMARY");
-    let secondary = Some(set("DHCP_DNS_SECONDARY"))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| primary.clone());
+    let secondary = set("DHCP_DNS_SECONDARY");
     let dns = format!("dhcp-option-pxe=6,{primary},{secondary}");
     dnsmasq_line(&mut conf, "DHCP_DNS_PRIMARY", &[&primary, &secondary], dns);
     let fields = [
@@ -6941,6 +6939,7 @@ mod tests {
             ("DHCP_RELAY_LOCAL_ADDR", "10.0.0.2"),
             ("DHCP_SUBNET_START", "10.0.0.0"),
             ("DHCP_DNS_PRIMARY", "10.0.0.3"),
+            ("DHCP_DNS_SECONDARY", "10.0.0.4"),
             ("DHCP_PROXY_ROUTER", "10.0.0.1"),
             ("DHCP_PROXY_DOMAIN", "bad\nline"),
             ("DHCP_PROXY_CUSTOM_OPTIONS", "66:tftp;67:boot.0"),
@@ -6960,7 +6959,7 @@ mod tests {
         for line in [
             "log-facility=-",
             "dhcp-range=10.0.0.0,proxy",
-            "dhcp-option-pxe=6,10.0.0.3,10.0.0.3",
+            "dhcp-option-pxe=6,10.0.0.3,10.0.0.4",
             "dhcp-option-pxe=3,10.0.0.1",
             "dhcp-option-pxe=66,tftp",
             "dhcp-option-pxe=67,boot.0",
