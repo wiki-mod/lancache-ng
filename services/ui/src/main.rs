@@ -2179,16 +2179,18 @@ fn password_matches(stored_hash: &str, password: &str) -> bool {
 // What: the secondary a user and password belong to.
 // Why: a missing row and a wrong password look the same.
 fn authorize_secondary(state: &AppState, nats_user: &str, password: &str) -> Option<String> {
-    let stored: String = state
-        .db
-        .lock()
-        .ok()?
-        .query_row(
+    // What: no row is a quiet no; a DB fault is logged.
+    // Why: AG-INT-002: a lock or query error stays visible.
+    // From: Issue #1683 | PR #1912
+    let stored: String = with_db(state, |db| {
+        db.query_row(
             "SELECT nats_password_hash FROM secondaries WHERE nats_user = ?1",
             [nats_user],
             |row| row.get(0),
         )
-        .ok()?;
+        .optional()
+    })
+    .ok()??;
     let hash = PasswordHash::new(&stored).ok()?;
     Argon2::default()
         .verify_password(password.as_bytes(), &hash)
