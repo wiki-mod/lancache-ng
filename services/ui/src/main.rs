@@ -3377,6 +3377,7 @@ async fn dhcp_page(State(state): Shared, headers: HeaderMap) -> Response {
     ctx.insert("dhcp_has_kea", &cfg.dhcp_mode().is_kea());
     ctx.insert("dhcp_api_url", &cfg.dhcp_api_url);
     ctx.insert("default_lease_time", &cfg.dhcp_lease_time);
+    ctx.insert("dhcp_domain", &cfg.lan_zone);
     for (name, key) in PAGE_SETTINGS {
         ctx.insert(name, &cfg.setting(key));
     }
