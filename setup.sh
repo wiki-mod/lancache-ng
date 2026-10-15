@@ -3467,8 +3467,6 @@ migrate_env_for_update() (
     # Why: DHCP_MODE owns the choice; nothing reads the key
     # From: Issue #1683 | PR #1912
     remove_env_key DHCP_ENABLED "$env_file"
-    ip_http=$(get_env_var IP_HTTP "$env_file") || exit $?
-    ip_https=$(get_env_var IP_HTTPS "$env_file") || exit $?
     dhcp_subnet_start=$(get_env_var DHCP_SUBNET_START "$env_file") || exit $?
     dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$env_file") || exit $?
     dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file") || exit $?
@@ -3490,12 +3488,11 @@ migrate_env_for_update() (
                 || die "DHCP_MODE=dnsmasq-proxy requires a proxy-DHCP subnet start ending in .0 in $env_file. Set the subnet base for your LAN, then rerun setup.sh update."
             is_valid_ipv4 "$dhcp_dns_primary" \
                 || die "DHCP_MODE=dnsmasq-proxy requires a real DHCP_DNS_PRIMARY in $env_file. Set the DNS option that proxy-DHCP/PXE clients should receive, then rerun setup.sh update."
-            if [[ -z "$dhcp_dns_secondary" ]]; then
-                dhcp_dns_secondary="$dhcp_dns_primary"
-            else
-                is_valid_ipv4 "$dhcp_dns_secondary" \
-                    || die "DHCP_MODE=dnsmasq-proxy has invalid DHCP_DNS_SECONDARY in $env_file. Set a valid IPv4 address or leave it empty to reuse DHCP_DNS_PRIMARY."
-            fi
+            # What: an empty secondary stays empty
+            # Why: config.rs owns the rule for empty
+            # From: Issue #1683 | PR #1912
+            [[ -z "$dhcp_dns_secondary" ]] || is_valid_ipv4 "$dhcp_dns_secondary" \
+                || die "DHCP_MODE=dnsmasq-proxy has invalid DHCP_DNS_SECONDARY in $env_file. Set a valid IPv4 address or leave it empty (the services then use IP_HTTPS)."
             is_valid_ipv4 "$upstream_dhcp_ip" \
                 || die "DHCP_MODE=dnsmasq-proxy requires the real router DHCP IP in UPSTREAM_DHCP_IP in $env_file. Set it, then rerun setup.sh update."
             # What: optional fields are checked when set
@@ -3544,7 +3541,7 @@ migrate_env_for_update() (
         *)
             is_valid_ipv4 "$dhcp_subnet_start" || dhcp_subnet_start=""
             is_valid_ipv4 "$dhcp_dns_primary" || dhcp_dns_primary="$ip_http"
-            is_valid_ipv4 "$dhcp_dns_secondary" || dhcp_dns_secondary="${ip_https:-$ip_http}"
+            is_valid_ipv4 "$dhcp_dns_secondary" || dhcp_dns_secondary=""
             is_valid_ipv4 "$upstream_dhcp_ip" || upstream_dhcp_ip=""
             ;;
     esac
@@ -6995,10 +6992,10 @@ DHCP_RANGE_START=""
 DHCP_RANGE_END=""
 DHCP_SUBNET_START=""
 DHCP_DNS_PRIMARY="$IP_HTTP"
-# What: secondary DNS is IP_HTTPS, with no IP_HTTP fallback.
-# Why: IP_HTTPS is asked and validated above; as config.rs.
+# What: secondary DNS is empty unless the operator sets it.
+# Why: empty means IP_HTTPS in config.rs; one owner.
 # From: Issue #1683 | PR #1912
-DHCP_DNS_SECONDARY="$IP_HTTPS"
+DHCP_DNS_SECONDARY=""
 UPSTREAM_DHCP_IP="$DHCP_GATEWAY"
 # What: relay-mode local address, empty by default
 # Why: only dnsmasq-relay uses it
@@ -7064,7 +7061,7 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
 
     ask_checked DHCP_DNS_PRIMARY "Primary DNS option for proxy-DHCP/PXE clients" "$DHCP_DNS_PRIMARY" is_valid_ipv4 "Invalid IPv4 address"
 
-    ask_checked DHCP_DNS_SECONDARY "Secondary DNS option for proxy-DHCP/PXE clients" "$DHCP_DNS_SECONDARY" is_valid_ipv4 "Invalid IPv4 address"
+    ask_checked DHCP_DNS_SECONDARY "Secondary DNS option for proxy-DHCP/PXE clients (blank = HTTPS IP)" "$DHCP_DNS_SECONDARY" is_valid_ipv4 "Invalid IPv4 address" 1
 
     ask_checked UPSTREAM_DHCP_IP "Upstream DHCP server IP" "$DHCP_GATEWAY" is_valid_ipv4 "Invalid IPv4 address"
 
