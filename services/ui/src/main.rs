@@ -271,8 +271,8 @@ impl Config {
                 password: Some(secret(password_key)?).filter(|p| !p.is_empty()),
             })
         };
-        // What: a DHCP DNS key, else the shared LAN-address fallback.
-        // Why: config::dhcp_dns_fallback is the one owner of the rule.
+        // What: a DHCP DNS key or its shared fallback.
+        // Why: config::dhcp_dns_fallback owns the rule.
         let dhcp_dns = |key: &str| {
             set(key)
                 .or_else(|| config::dhcp_dns_fallback(env, key))
