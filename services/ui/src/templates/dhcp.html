@@ -20,16 +20,7 @@
     </p>
   </div>
 
-  <div class="flex items-center gap-2 border-b border-slate-700">
-    <a href="{{ pages.dhcp | safe }}"
-       class="px-4 py-2 text-sm font-medium border-b-2 {% if active_page == "dhcp" %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">
-      DHCP
-    </a>
-    <a href="{{ pages.secondaries | safe }}"
-       class="px-4 py-2 text-sm font-medium border-b-2 {% if active_page == "secondaries" %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">
-      Secondary
-    </a>
-  </div>
+  {{ <section_tabs main_href={pages.dhcp} main_label="DHCP" main_page="dhcp" active_page={active_page} secondaries_href={pages.secondaries}/> }}
 
   <div class="card space-y-4">
     <div class="flex flex-wrap items-center justify-between gap-3">
