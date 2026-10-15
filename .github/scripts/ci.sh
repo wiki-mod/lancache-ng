@@ -8404,23 +8404,24 @@ _ci_validate_ui_base() {
 # Why: posts send the token a browser reads from the form
 # From: Issue #1683 | PR #1858
 _ci_validate_ui_session() {
-    local jar="$1" base="$2" page csrf last
+    local jar="$1" base="$2" page csrf last url
     if [ -z "${base}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0030]" "reason=\"no ui container IP for session check\""
         return 2
     fi
+    url="${base}$(_ci_runtime_default UI_PAGE_DOMAINS)" || return 2
     # What: one try; wait_healthy already saw ui healthy.
     # Why: its healthcheck asks the same server; no poll.
     # From: Issue #1683 | PR #1912
-    if ! last="$(curl -fsS -c "${jar}" "${base}/domains" 2>&1)"; then
-        ci_error "[CI-ERROR-VALIDATE-0031]" "reason=\"ui /domains did not answer\"" "${last}"
+    if ! last="$(curl -fsS -c "${jar}" "${url}" 2>&1)"; then
+        ci_error "[CI-ERROR-VALIDATE-0031]" "url=\"${url}\" reason=\"ui page did not answer\"" "${last}"
         return 1
     fi
-    page="$(_ci_capture 0 curl -fsS -b "${jar}" -c "${jar}" "${base}/domains")" || return 2
+    page="$(_ci_capture 0 curl -fsS -b "${jar}" -c "${jar}" "${url}")" || return 2
     csrf="$(sed -n 's/.*name="csrf_token" value="\([^"]*\)".*/\1/p' <<< "${page}")"
     csrf="${csrf%%$'\n'*}"
     if [ -z "${csrf}" ]; then
-        ci_error "[CI-ERROR-VALIDATE-0032]" "url=\"${base}/domains\" reason=\"no csrf_token field on the ui page\"" "${page}"
+        ci_error "[CI-ERROR-VALIDATE-0032]" "url=\"${url}\" reason=\"no csrf_token field on the ui page\"" "${page}"
         return 1
     fi
     printf '%s' "${csrf}"
@@ -8458,13 +8459,17 @@ _ci_validate_setup_rollback() {
 # Why: drives the real UI->NATS->PowerDNS write path
 # From: Issue #1683 | PR #1858
 _ci_validate_ui_add_record() {
-    local base="$1" jar="$2" csrf="$3" zone="$4" name="$5" content="$6" ttl
+    local base="$1" jar="$2" csrf="$3" name="$4" content="$5" ttl route
     if [ -z "${base}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0033]" "reason=\"no ui container IP for add-record\""
         return 2
     fi
     ttl="$(_ci_variable CI_VALIDATE_PROBE_TTL)" || return 2
-    _ci_validate_ui_post "${base}" "${jar}" "/domains/${zone%.}/add" "csrf_token=${csrf}" \
+    # What: the LAN add route of the ui, from the SOT
+    # Why: the zone name is not part of the route path
+    # From: Issue #1683 | PR #1912
+    route="$(_ci_runtime_default UI_ROUTE_LAN_ADD)" || return 2
+    _ci_validate_ui_post "${base}" "${jar}" "${route}" "csrf_token=${csrf}" \
         "name=${name}" record_type=A "content=${content}" "ttl=${ttl}"
 }
 
@@ -8593,7 +8598,7 @@ _ci_validate_ui_nats_dns() {
     ip="$(_ci_validate_probe_ip 1)" || return 2
     dns_wait="$(_ci_variable CI_VALIDATE_DNS_WAIT)" || return 2
     _ci_validate_ui_login jar csrf "${base}" || return $?
-    _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${zone}" "${label}" "${ip}" || rc=$?
+    _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${label}" "${ip}" || rc=$?
     rm -f "${jar}"
     [ "${rc}" -eq 0 ] || return "${rc}"
     for side in IP_HTTP IP_HTTPS; do
@@ -8745,7 +8750,7 @@ _ci_validate_dns_rollback() {
     dns_wait="$(_ci_variable CI_VALIDATE_DNS_WAIT)" || return 2
     base="$(_ci_validate_ui_base "${project}" "${ucid}")" || return $?
     _ci_validate_ui_login jar csrf "${base}" || return $?
-    _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${zone}" "${label}" "${old}" || { rm -f "${jar}"; return 1; }
+    _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${label}" "${old}" || { rm -f "${jar}"; return 1; }
     _ci_validate_dns_resolves "${project}" IP_HTTP "${label}.${zone}" "${old}" "${dns_wait}" || { rm -f "${jar}"; return 1; }
     # What: capture the zone's newest snapshot (pre-change).
     # Why: target this test rolls back to after 2nd write.
@@ -8757,7 +8762,7 @@ _ci_validate_dns_rollback() {
         rm -f "${jar}"
         return 1
     fi
-    _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${zone}" "${label}" "${new}" || { rm -f "${jar}"; return 1; }
+    _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${label}" "${new}" || { rm -f "${jar}"; return 1; }
     _ci_validate_dns_resolves "${project}" IP_HTTP "${label}.${zone}" "${new}" "${dns_wait}" || { rm -f "${jar}"; return 1; }
     rm -f "${jar}"
     resp="$(_ci_capture 0 _ci_curl_secret header "X-API-Key: ${key}" -sS "${lbase}/snapshots")" || return 2
@@ -8846,9 +8851,13 @@ _ci_validate_kea_has() {
 # From: Issue #763 | PR #1858
 _ci_validate_kea_add() {
     local base="$1" jar="$2" csrf="$3" sid="$4" mac="$5" ip="$6" host="$7" dir="$8"
-    local before after new
+    local before after new route
     before="$(_ci_validate_kea_snapshots "${dir}")" || return 2
-    _ci_validate_ui_post "${base}" "${jar}" /dhcp/static/add "csrf_token=${csrf}" \
+    # What: the reservation add route, from the SOT
+    # Why: the ui path has one owner, build-manifest.yml
+    # From: Issue #1683 | PR #1912
+    route="$(_ci_runtime_default UI_ROUTE_STATIC_ADD)" || return 2
+    _ci_validate_ui_post "${base}" "${jar}" "${route}" "csrf_token=${csrf}" \
         "subnet_id=${sid}" "mac=${mac}" "ip=${ip}" "hostname=${host}" || return $?
     after="$(_ci_validate_kea_snapshots "${dir}")" || return 2
     new="${after##*$'\n'}"
@@ -8988,11 +8997,15 @@ _ci_validate_kea_rollback() {
 # Why: token-gated, no session/CSRF; reused per name.
 # From: Issue #583
 _ci_register_secondary() {
-    local base="$1" token="$2" name="$3" out code
+    local base="$1" token="$2" name="$3" out code url
+    # What: the register route from the SOT defaults
+    # Why: the ui path has one owner, build-manifest.yml
+    # From: Issue #1683 | PR #1912
+    url="${base}$(_ci_runtime_default UI_ROUTE_SECONDARY_REGISTER)" || return 2
     out="$(_ci_capture 0 _ci_curl_secret data "{\"token\":\"${token}\",\"name\":\"${name}\"}" \
         -sS -w '\n%{http_code}' -H 'Content-Type: application/json' \
-        "${base}/api/secondary/register")" || {
-        ci_log "[CI-ERROR-VALIDATE-0083]" "url=\"${base}/api/secondary/register\" name=\"${name}\" reason=\"secondary register request failed (raw above)\""
+        "${url}")" || {
+        ci_log "[CI-ERROR-VALIDATE-0083]" "url=\"${url}\" name=\"${name}\" reason=\"secondary register request failed (raw above)\""
         return 2
     }
     code="${out##*$'\n'}"

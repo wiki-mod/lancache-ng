@@ -545,6 +545,13 @@ runtime:
     - UI_LISTEN_PORT=8080
     - UI_LOGS_MAX_ENTRIES=200
     - UI_SESSION_TTL_SECONDS=86400
+    # What: URL paths of ui routes setup.sh and ci.sh call.
+    # Why: shell reads the path here; no literal copy.
+    # From: Issue #1683 | PR #1912
+    - UI_PAGE_DOMAINS=/domains
+    - UI_ROUTE_LAN_ADD=/domains/lan/add
+    - UI_ROUTE_STATIC_ADD=/dhcp/static/add
+    - UI_ROUTE_SECONDARY_REGISTER=/api/secondary/register
     - KEA_DATA_DIR=/var/lib/kea
     - KEA_LEASE_FILE=@KEA_DATA_DIR@/kea-leases4.csv
     - KEA_SOCKET_DIR=/run/kea

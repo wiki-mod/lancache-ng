@@ -6407,11 +6407,16 @@ cmd_secondary() {
     request=$(printf '%s' "$token" | jq -Rsc --arg name "$name" --arg address "$listen_ip" \
         '{token: ., name: $name, address: $address}') \
         || die "Failed to build the registration request (exit $?)."
+    # What: the register route, read from the SOT defaults
+    # Why: the ui path has one owner, build-manifest.yml
+    # From: Issue #1683 | PR #1912
+    local register_route
+    register_route=$(prod_env_default UI_ROUTE_SECONDARY_REGISTER) || exit $?
     if ! out=$(printf '%s' "$request" \
         | curl -sS -w '\n%{http_code}' -X POST \
         -H "Content-Type: application/json" \
         -d @- \
-        "${primary}/api/secondary/register"); then
+        "${primary}${register_route}"); then
         die "Failed to connect to primary server at ${primary}. Check the URL, network connectivity, and that the primary service is running."
     fi
     split_http_response response http_status "$out" \
