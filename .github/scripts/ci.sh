@@ -181,6 +181,22 @@ _ci_mktemp() {
     printf '%s\n' "${out}"
 }
 
+# What: path of a command on PATH; rc 1 when it is absent.
+# Why: one owner for command lookup; callers report absence.
+# From: Issue #1683 | PR #1912
+_ci_command_path() {
+    command -v "$1"
+}
+
+# What: true if the command resolves on PATH.
+# Why: the path is printed; callers need only the rc.
+# From: Issue #1683 | PR #1912
+_ci_command_available() {
+    local resolved
+    resolved="$(_ci_command_path "$1")" || return 1
+    [ -n "${resolved}" ]
+}
+
 # What: Enforce and create the /var/tmp CI temp root.
 # Why: bare mktemp and tools then use disk, not tmpfs.
 # From: Issue #1683 | PR #1858
@@ -974,7 +990,7 @@ _ci_codeql_run() {
     # What: CodeQL runs on the JVM of the java on PATH.
     # Why: its bundled JVM needs glibc; build-tools is musl.
     # From: Issue #1683 | PR #1858
-    if ! java="$(command -v java)"; then
+    if ! java="$(_ci_command_path java)"; then
         ci_error "[CI-ERROR-CODEQL-0017]" "language=\"${lang}\" reason=\"no java on PATH for the CodeQL CLI\"" "PATH=${PATH}"
         return 2
     fi
@@ -4487,7 +4503,7 @@ _ci_rb_distcc_off() {
 _ci_rb_remote_toolchain_id() {
     local section
     rm -f "${_CI_RB_REMOTE_ID}"
-    if command -v readelf >/dev/null; then
+    if _ci_command_available readelf; then
         if section="$(_ci_capture 0 readelf -p .comment "$1")"; then
             sed -n 's/^ *\[[^]]*\] *//p' <<<"${section}" > "${_CI_RB_REMOTE_ID}"
         fi
@@ -4699,14 +4715,14 @@ ci_cmd_rust_build() {
     # Why: wrapper and ccache call the real compiler paths.
     # From: Issue #1683 | PR #1858
     while IFS= read -r p; do
-        if ! _CI_RB_DRIVER_PATH["${p%%=*}"]="$(command -v "${p#*=}")"; then
+        if ! _CI_RB_DRIVER_PATH["${p%%=*}"]="$(_ci_command_path "${p#*=}")"; then
             ci_error "[CI-ERROR-RUSTBUILD-0046]" "driver=\"${p#*=}\" reason=\"compiler driver not on PATH\"" "PATH=${PATH}"
             return 2
         fi
         drivers+=("${p#*=}=${_CI_RB_DRIVER_PATH[${p%%=*}]}")
     done <<< "${_CI_RB_PAIRS}"
-    distcc_bin="$(command -v distcc)" || { ci_error "[CI-ERROR-RUSTBUILD-0047]" "reason=\"distcc not on PATH\"" "PATH=${PATH}"; return 2; }
-    sccache_bin="$(command -v sccache)" || { ci_error "[CI-ERROR-RUSTBUILD-0048]" "reason=\"sccache not on PATH\"" "PATH=${PATH}"; return 2; }
+    distcc_bin="$(_ci_command_path distcc)" || { ci_error "[CI-ERROR-RUSTBUILD-0047]" "reason=\"distcc not on PATH\"" "PATH=${PATH}"; return 2; }
+    sccache_bin="$(_ci_command_path sccache)" || { ci_error "[CI-ERROR-RUSTBUILD-0048]" "reason=\"sccache not on PATH\"" "PATH=${PATH}"; return 2; }
     # What: masq links each driver and distcc to the wrapper
     # Why: masq is on PATH only while distcc is on.
     # From: Issue #1533 | PR #1912
@@ -5445,7 +5461,7 @@ _ci_image_smoke() {
     # Why: a run holds spaces/pipes; stdin keeps it intact.
     # From: Issue #1683 | PR #1858
     if ! out="$(docker run --rm -i --entrypoint timeout "${image}" --kill-after="${grace}" --signal=TERM "${limit}" \
-        bash -c 'for t in "$@"; do command -v "$t" >/dev/null || { echo "missing $t"; exit 1; }; done
+        bash -c 'for t in "$@"; do [ -n "$(command -v "$t")" ] || { echo "missing $t"; exit 1; }; done
             while IFS= read -r r; do
                 [ -n "${r}" ] || continue
                 o="$(bash -o pipefail -c "${r}" 2>&1)" || { printf "failed: %s\n%s\n" "${r}" "${o}"; exit 1; }
@@ -9998,7 +10014,7 @@ _ci_daemon_merge() {
 # From: Issue #1255 | PR #1349
 _ci_daemon_validate() {
     local file="$1" out
-    if ! command -v dockerd >/dev/null; then
+    if ! _ci_command_available dockerd; then
         ci_log "[CI-WARN-DAEMON-0002]" "reason=\"dockerd not on PATH; validate preflight skipped\""
         return 0
     fi
@@ -10421,7 +10437,7 @@ _ci_rh_foreign_dir() {
         fi
         return 1
     fi
-    if ! command -v jq >/dev/null; then
+    if ! _ci_command_available jq; then
         ci_log "[CI-NOTICE-RUNNER-0015]" "dir=\"${dir}\" reason=\"jq missing; identity unprovable, treated as foreign\""
         return 0
     fi
@@ -10531,7 +10547,7 @@ _ci_rh_stop_unit() {
 _ci_rh_agent() {
     local out="" rf
     rf="$(_ci_rh_val runner_file)" || return 2
-    [ ! -f "$1/${rf}" ] || ! command -v jq >/dev/null || out="$(_ci_rh_agent_name "$1")" || return 2
+    [ ! -f "$1/${rf}" ] || ! _ci_command_available jq || out="$(_ci_rh_agent_name "$1")" || return 2
     printf '%s' "${out:-?}"
 }
 
@@ -10892,7 +10908,7 @@ _ci_rh_dedupe_identity() {
     zgen="$(_ci_rh_val zgenhostid_bin)" || return 2
     dbus="$(_ci_rh_val dbus_machine_id_file)" || return 2
     jd="$(_ci_rh_val journald_unit)" || return 2
-    command -v "${zgen}" >/dev/null || { ci_log "[CI-ERROR-RUNNER-0037]" "bin=\"${zgen}\" reason=\"hostid generator missing\""; return 2; }
+    _ci_command_available "${zgen}" || { ci_log "[CI-ERROR-RUNNER-0037]" "bin=\"${zgen}\" reason=\"hostid generator missing\""; return 2; }
     old="$(_ci_capture 0 cat "${mfile}")" || return 2
     _ci_run "[CI-ERROR-RUNNER-0038]" "file=\"${hfile}\" reason=\"hostid not removed\"" _ci_rh_root rm -f "${hfile}" || return 2
     _ci_run "[CI-ERROR-RUNNER-0039]" "bin=\"${zgen}\" reason=\"hostid not generated\"" _ci_rh_root "${zgen}" -f || return 2
@@ -11050,7 +11066,7 @@ _ci_rh_purge_pve_check() {
         1) ;;
         *) return 2 ;;
     esac
-    if ! command -v lsof >/dev/null; then
+    if ! _ci_command_available lsof; then
         ci_log "[CI-WARN-RUNNER-0119]" "dir=\"${pdir}\" reason=\"lsof not on PATH; open-file check skipped\""
     elif _ci_rh_root test -d "${pdir}"; then
         open="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0120]" "dir=\"${pdir}\" reason=\"lsof failed\"" _ci_rh_root lsof +D "${pdir}")" || return 2
@@ -14369,7 +14385,7 @@ _ci_validate_host_tools() {
         return 2
     fi
     while IFS= read -r t; do
-        [ -n "${t}" ] && ! command -v "${t}" >/dev/null && missing+=("${t}")
+        [ -n "${t}" ] && ! _ci_command_available "${t}" && missing+=("${t}")
     done <<< "${tools}"
     if [ "${#missing[@]}" -gt 0 ]; then
         ci_log "[CI-ERROR-VALIDATE-0062]" "missing=\"${missing[*]}\" reason=\"host tool missing\""

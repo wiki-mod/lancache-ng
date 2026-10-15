@@ -22,7 +22,7 @@ if [ ! -f "$script" ]; then
 fi
 
 for tool in curl yq jq; do
-  if ! command -v "$tool" >/dev/null; then
+  if [ -z "$(command -v "$tool")" ]; then
     echo "pre-push (action-node-versions): $tool not found on PATH; skipping this local check (CI still enforces it)." >&2
     exit 0
   fi
