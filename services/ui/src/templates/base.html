@@ -69,26 +69,10 @@
       --font-display: Georgia, Cambria, "Times New Roman", serif;
       --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
     }
-    /* What: light tokens if OS prefers light, no override
-       Why: the manual toggle must win over the OS setting
-       From: Issue #1437 */
-    @media (prefers-color-scheme: light) {
-      :root:not([data-theme="dark"]) {
-        --color-bg: #f6f4ec;
-        --color-surface: #ffffff;
-        --color-surface-raised: #fbf9f2;
-        --color-border: #e4e0d0;
-        --color-text: #1c2333;
-        --color-text-muted: #5b6478;
-        --color-accent-gold: #a97c1f;
-        --color-accent-gold-soft: rgba(169, 124, 31, 0.12);
-        --color-accent-coral: #c8462f;
-        --color-accent-coral-soft: rgba(200, 70, 47, 0.12);
-      }
-    }
     /* What: light tokens when data-theme is "light"
-       Why: lets the toggle force light over the OS setting
-       From: Issue #1437 */
+       Why: the head script sets data-theme from the stored
+            choice or the OS setting
+       From: Issue #1437 | PR #1912 */
     :root[data-theme="light"] {
       --color-bg: #f6f4ec;
       --color-surface: #ffffff;
@@ -124,24 +108,6 @@
     :root[data-theme="light"] .border-slate-500,
     :root[data-theme="light"] .border-slate-600,
     :root[data-theme="light"] .border-slate-700 { border-color: var(--color-border); }
-    @media (prefers-color-scheme: light) {
-      :root:not([data-theme="dark"]) .text-white,
-      :root:not([data-theme="dark"]) .text-slate-100,
-      :root:not([data-theme="dark"]) .text-slate-200,
-      :root:not([data-theme="dark"]) .text-slate-300 { color: var(--color-text); }
-      :root:not([data-theme="dark"]) .text-slate-400,
-      :root:not([data-theme="dark"]) .text-slate-500 { color: var(--color-text-muted); }
-      :root:not([data-theme="dark"]) .bg-slate-900,
-      :root:not([data-theme="dark"]) .bg-slate-950 { background-color: var(--color-bg); }
-      :root:not([data-theme="dark"]) .bg-slate-800,
-      :root:not([data-theme="dark"]) .bg-slate-750 { background-color: var(--color-surface); }
-      :root:not([data-theme="dark"]) .bg-slate-600,
-      :root:not([data-theme="dark"]) .bg-slate-700 { background-color: var(--color-surface-raised); }
-      :root:not([data-theme="dark"]) .border-slate-400,
-      :root:not([data-theme="dark"]) .border-slate-500,
-      :root:not([data-theme="dark"]) .border-slate-600,
-      :root:not([data-theme="dark"]) .border-slate-700 { border-color: var(--color-border); }
-    }
 
     .dock { background: var(--color-surface); border-right: 1px solid var(--color-border); }
     .nav-link {
@@ -234,11 +200,46 @@
     .th { text-align: left; padding: 0.5rem 0; color: #cbd5e1; }
     :root[data-theme="light"] .btn-slate { background-color: var(--color-surface-raised); color: var(--color-text); }
     :root[data-theme="light"] .th { color: var(--color-text); }
-    @media (prefers-color-scheme: light) {
-      :root:not([data-theme="dark"]) .btn-slate { background-color: var(--color-surface-raised); color: var(--color-text); }
-      :root:not([data-theme="dark"]) .th { color: var(--color-text); }
-    }
   </style>
+  <script>
+    // What: set data-theme before the first paint
+    // Why: stored choice, else OS setting; one CSS rule set
+    // From: Issue #1437 | PR #1912
+    (function () {
+      const STORAGE_KEY = 'lancache-ui-theme';
+      const root = document.documentElement;
+      const osLight = window.matchMedia('(prefers-color-scheme: light)');
+      let stored = null;
+      try {
+        stored = localStorage.getItem(STORAGE_KEY);
+      } catch (err) {
+        // What: report a storage read error, keep the OS theme
+        // Why: private browsing may block localStorage
+        // From: Issue #1437
+        reportError(err);
+      }
+      function apply() {
+        const own = stored === 'light' || stored === 'dark';
+        root.setAttribute('data-theme', own ? stored : (osLight.matches ? 'light' : 'dark'));
+      }
+      apply();
+      osLight.addEventListener('change', apply);
+      document.addEventListener('DOMContentLoaded', function () {
+        document.getElementById('theme-toggle').addEventListener('click', function () {
+          stored = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+          apply();
+          try {
+            localStorage.setItem(STORAGE_KEY, stored);
+          } catch (err) {
+            // What: report a storage write error; theme still set
+            // Why: the theme only fails to persist across reloads
+            // From: Issue #1437
+            reportError(err);
+          }
+        });
+      });
+    })();
+  </script>
 </head>
 <body class="h-full flex">
 
@@ -300,45 +301,6 @@
     // Why: sent as X-CSRF-Token header, not a form field
     // From: Issue #1437
     const CSRF_TOKEN = "{{ csrf_token }}";
-
-    // What: persists and applies the light/dark override
-    // Why: the OS setting applies while no override is set
-    // From: Issue #1437
-    (function () {
-      const STORAGE_KEY = 'lancache-ui-theme';
-      const root = document.documentElement;
-      function apply(theme) {
-        if (theme === 'light' || theme === 'dark') {
-          root.setAttribute('data-theme', theme);
-        } else {
-          root.removeAttribute('data-theme');
-        }
-      }
-      let stored = null;
-      try {
-        stored = localStorage.getItem(STORAGE_KEY);
-      } catch (err) {
-        // What: report a storage read error, keep the OS theme
-        // Why: private browsing may block localStorage
-        // From: Issue #1437
-        reportError(err);
-      }
-      apply(stored);
-      document.getElementById('theme-toggle').addEventListener('click', function () {
-        const prefersLight = window.matchMedia('(prefers-color-scheme: light)').matches;
-        const current = root.getAttribute('data-theme') || (prefersLight ? 'light' : 'dark');
-        const next = current === 'dark' ? 'light' : 'dark';
-        apply(next);
-        try {
-          localStorage.setItem(STORAGE_KEY, next);
-        } catch (err) {
-          // What: report a storage write error; theme still set
-          // Why: the theme only fails to persist across reloads
-          // From: Issue #1437
-          reportError(err);
-        }
-      });
-    })();
 
     // What: shared watchdog poll for beambar + dashboard
     // Why: one fetch/interval, not one per template
