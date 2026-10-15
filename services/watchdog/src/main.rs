@@ -1465,9 +1465,8 @@ fn netdata(ctx: &Ctx) -> Result<Run, String> {
         &ctx.need("NETDATA_ALARM_RECIPIENT")?,
     )?;
     let web_log = web_log_conf(&format!(
-        "{}/{}/{SYSLOG_FILE_GLOB}",
-        ctx.need("SYSLOG_LOG_ROOT")?,
-        ctx.need("CONTAINER_NAME_PROXY")?
+        "{}/{SYSLOG_FILE_GLOB}",
+        config::proxy_log_dir(&config::process_env)?
     ))?;
     let token = stack_secret(
         "NETDATA_ALARM_TOKEN",
@@ -1928,13 +1927,6 @@ fn conf_ok(check: &[String]) -> bool {
     }
 }
 
-// What: KEEP_KNOWN_GOOD_CONFIGS, at least 1.
-// Why: a rollback needs one good config to go back to.
-// From: Issue #415
-fn keep_known_good() -> Result<u32, String> {
-    bounded("KEEP_KNOWN_GOOD_CONFIGS", 1, u32::MAX.into()).map(|v| v as u32)
-}
-
 // What: write candidate sets; keep the first that checks.
 // Why: a bad render falls back to the newest good set.
 // From: Issue #415 | PR #1912
@@ -2069,7 +2061,10 @@ fn checked_files(
         .iter()
         .filter_map(|(path, text)| Some((name(path)?, Value::String(text.clone()))))
         .collect();
-    if let Err(e) = store.create(&Value::Object(set), keep_known_good()?) {
+    if let Err(e) = store.create(
+        &Value::Object(set),
+        config::keep_known_good(&config::process_env)?,
+    ) {
         log_err(&format!("WARNING: {what} not saved as known-good: {e:#}"));
     }
     Ok(())

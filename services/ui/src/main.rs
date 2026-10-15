@@ -18,11 +18,11 @@ use axum::routing::{MethodRouter, delete, get, post};
 use base64::Engine as _;
 use futures_util::StreamExt as _;
 use lancache_ng::config::{
-    self, AAAA_FILTER_MARKER, DDNS_UNSIGNED_MARKER, DEFAULT_RECORD_TTL, DhcpMode, LeaseLimits,
-    NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, NatsLogin, NatsRoles, OPTION_CODE_MAX,
-    OPTION_CODE_MIN, OutOfRange, PDNS_API_PATH, PROXY_ACCESS_LOG_PATTERN, Uint, canonical_zone,
-    dns_reader_publish, dns_subscribe, is_dns_name, option_code, option_data, parse_bool,
-    parse_custom_options, reverse_zones, zone_url,
+    self, AAAA_FILTER_MARKER, DDNS_UNSIGNED_MARKER, DEFAULT_RECORD_TTL, DhcpMode,
+    KEA_MANAGED_CODES, LeaseLimits, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, NatsLogin, NatsRoles,
+    OPTION_CODE_MAX, OPTION_CODE_MIN, OutOfRange, PDNS_API_PATH, PROXY_ACCESS_LOG_PATTERN, Uint,
+    canonical_zone, dns_reader_publish, dns_subscribe, is_dns_name, option_code, option_data,
+    parse_bool, parse_custom_options, reverse_zones, zone_url,
 };
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, DesiredRunState, DesiredState, DnsRecord,
@@ -322,10 +322,7 @@ impl Config {
             startup_settings.insert(key, bool_text(need_flag(key)?));
             log_programs.push(need(program_key)?);
         }
-        let proxy_log_dir = Path::new(&need("SYSLOG_LOG_ROOT")?)
-            .join(need("CONTAINER_NAME_PROXY")?)
-            .display()
-            .to_string();
+        let proxy_log_dir = config::proxy_log_dir(env)?;
 
         Ok(Self {
             template_dir: need("TEMPLATE_DIR")?,
@@ -365,11 +362,7 @@ impl Config {
             kea_config_snapshot_dir: need("KEA_CONFIG_SNAPSHOT_DIR")?,
             dhcp_probe_request_file: need("DHCP_PROBE_REQUEST_FILE")?,
             dhcp_probe_result_file: need("DHCP_PROBE_RESULT_FILE")?,
-            kea_keep_known_good_configs: knob(
-                "KEEP_KNOWN_GOOD_CONFIGS",
-                u32::MAX.into(),
-                OutOfRange::Reject,
-            )? as u32,
+            kea_keep_known_good_configs: config::keep_known_good(env)?,
             auth_user: set("UI_AUTH_USER"),
             auth_password_hash: set("UI_AUTH_PASSWORD_HASH")
                 .map(|v| decode_password_hash(&v))
@@ -897,6 +890,14 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
     let mut ctx = Context::new();
     ctx.insert("active_page", active);
     ctx.insert("csrf_token", token);
+    // What: form limits from their one Rust owner.
+    // Why: AG-CODE-011: templates repeat no number.
+    // From: Issue #1683 | PR #1912
+    ctx.insert("record_ttl_default", &DEFAULT_RECORD_TTL);
+    ctx.insert("ttl_max", &MAX_TTL);
+    ctx.insert("txt_max_bytes", &MAX_TXT_BYTES);
+    ctx.insert("option_code_min", &OPTION_CODE_MIN);
+    ctx.insert("option_code_max", &OPTION_CODE_MAX);
     ctx
 }
 
@@ -2658,10 +2659,6 @@ async fn rotate_token(
 // Why: kea_modify maps exactly these to a 404.
 const KEA_SUBNET_MISSING: &str = "subnet not found";
 const KEA_OPTION_MISSING: &str = "custom option not found";
-
-// What: option codes the dedicated subnet fields own.
-// Why: routers 3, DNS 6, domain 15, NTP 42, search 119.
-const KEA_MANAGED_CODES: [u16; 5] = [3, 6, 15, 42, 119];
 
 // What: BOOTP subnet fields shown as custom options.
 // Why: Kea keeps them top-level, not in option-data.
@@ -7833,7 +7830,7 @@ mod tests {
         ] {
             assert!(is_managed_option(&json!({"name": name})), "{name}");
         }
-        for code in [3, 6, 15, 42, 119] {
+        for code in KEA_MANAGED_CODES {
             assert!(is_managed_option(&json!({"code": code})), "{code}");
         }
         assert!(!is_managed_option(&json!({"code": 66})));

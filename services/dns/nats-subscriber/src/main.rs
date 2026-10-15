@@ -21,8 +21,8 @@ use futures::StreamExt;
 use futures::future::join_all;
 use lancache_ng::config::{
     DEFAULT_RECORD_TTL, NATS_STREAM_DNS, NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD,
-    canonical_zone, env_opt, is_dns_name, is_rollback_zone, lan_zone, need, parse_bool,
-    process_env, rollback_zones, uint, zone_url,
+    canonical_zone, env_opt, is_dns_name, is_rollback_zone, keep_known_good, lan_zone, need,
+    parse_bool, process_env, rollback_zones, zone_url,
 };
 use lancache_ng::{
     Backoff, DnsRecord, FlushRequest, PowerDns, SnapshotStore, ct_eq, die, http_client,
@@ -947,8 +947,7 @@ async fn main() {
     // Why: an unknown spelling must keep replication on.
     let record_writes = env_opt("NATS_RECORD_WRITES").is_none_or(|v| parse_bool(&v) != Some(false));
     let reconcile = env_opt("NATS_RECONCILER").is_some_and(|v| parse_bool(&v) == Some(true));
-    let keep_n = uint(&process_env, "KEEP_KNOWN_GOOD_CONFIGS", 1, u32::MAX.into())
-        .unwrap_or_else(|error| die(TAG, &error));
+    let keep_n = keep_known_good(&process_env).unwrap_or_else(|error| die(TAG, &error));
     let times = Times::load(&process_env).unwrap_or_else(|error| die(TAG, &error));
     let snapshot_dir = required("DNS_CONFIG_SNAPSHOT_DIR");
     let rollback_addr = required("DNS_ROLLBACK_LISTEN_ADDR");

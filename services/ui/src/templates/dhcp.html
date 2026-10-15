@@ -452,7 +452,7 @@
           <input type="hidden" name="subnet_id" value="{{ subnet.id }}">
           <div>
             <label class="block text-xs text-slate-400 mb-1">Options-Code</label>
-            <input type="number" name="code" min="1" max="254" placeholder="66" required
+            <input type="number" name="code" min="{{ option_code_min }}" max="{{ option_code_max }}" placeholder="66" required
               class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
           </div>
           <div>

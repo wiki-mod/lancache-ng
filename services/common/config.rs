@@ -213,6 +213,24 @@ pub fn runtime_gid() -> Result<u32, String> {
     uint(&process_env, "LANCACHE_RUNTIME_GID", 0, u32::MAX.into()).map(|g| g as u32)
 }
 
+// What: the proxy's syslog directory.
+// Why: ui stats and netdata web_log share one path rule.
+// From: Issue #1683 | PR #1912
+pub fn proxy_log_dir(get: &dyn Fn(&str) -> Option<String>) -> Result<String, String> {
+    let root = need(get, "SYSLOG_LOG_ROOT")?;
+    Ok(std::path::Path::new(&root)
+        .join(need(get, "CONTAINER_NAME_PROXY")?)
+        .display()
+        .to_string())
+}
+
+// What: KEEP_KNOWN_GOOD_CONFIGS, at least 1.
+// Why: a rollback needs one good config to go back to.
+// From: Issue #415 | PR #1912
+pub fn keep_known_good(get: &dyn Fn(&str) -> Option<String>) -> Result<u32, String> {
+    uint(get, "KEEP_KNOWN_GOOD_CONFIGS", 1, u32::MAX.into()).map(|v| v as u32)
+}
+
 // What: a port number 1 to 65535 from the env.
 // Why: ui and watchdog read the SOT ports by one rule.
 // From: Issue #1683 | PR #1912
@@ -687,10 +705,15 @@ pub fn zone_api_id(zone: &str) -> &str {
     zone.trim_end_matches('.')
 }
 
-// What: option codes dnsmasq-proxy renders itself.
-// Why: router, DNS, domain and NTP; search stays custom.
+// What: option codes the dedicated subnet fields own.
+// Why: routers 3, DNS 6, domain 15, NTP 42, search 119.
 // From: Issue #1683 | PR #1912
-pub const DNSMASQ_MANAGED_CODES: [u16; 4] = [3, 6, 15, 42];
+pub const KEA_MANAGED_CODES: [u16; 5] = [3, 6, 15, 42, 119];
+
+// What: option codes dnsmasq-proxy renders itself.
+// Why: Kea's list without search; search stays custom.
+// From: Issue #1683 | PR #1912
+pub const DNSMASQ_MANAGED_CODES: &[u16] = KEA_MANAGED_CODES.split_at(4).0;
 
 // What: lowest and highest code an operator may add.
 // Why: 0 is padding and 255 is the end marker.
