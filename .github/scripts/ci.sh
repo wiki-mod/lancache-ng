@@ -3351,17 +3351,20 @@ _ci_secret_env() {
 # From: Issue #1683 | PR #1912
 _CI_SCCACHE_MODE=""
 
-# What: debug log file of the running sccache server.
-# Why: _ci_sccache_report shows the error causes from it.
+# What: debug log file of the current sccache server.
+# Why: start and report run in different subshells.
 # From: Issue #1683 | PR #1912
-_CI_SCCACHE_LOG=""
+_ci_sccache_log() {
+    printf '%s\n' "${SCCACHE_SERVER_UDS%.sock}.log"
+}
 
 # What: start the sccache server with a debug log file.
 # Why: sccache logs cache errors at debug level only.
 # From: Issue #1683 | PR #1912
 _ci_sccache_start() {
-    _CI_SCCACHE_LOG="${SCCACHE_SERVER_UDS%.sock}.log"
-    SCCACHE_LOG=sccache=debug SCCACHE_ERROR_LOG="${_CI_SCCACHE_LOG}" sccache --start-server 2>&1
+    local log
+    log="$(_ci_sccache_log)"
+    SCCACHE_LOG=sccache=debug SCCACHE_ERROR_LOG="${log}" sccache --start-server 2>&1
 }
 
 # What: sccache as rustc wrapper on the policy chain.
@@ -4179,13 +4182,14 @@ _ci_sccache_report() {
     # What: the error lines of the sccache server log.
     # Why: AG-INT-002: the cause next to the counters.
     # From: Issue #1683 | PR #1912
-    local cause
-    cause="$(_ci_capture 1 grep -E 'Error executing cache write|Cache read error|Cache timed out|compile result: cache error' "${_CI_SCCACHE_LOG}")" || return 2
+    local cause log
+    log="$(_ci_sccache_log)"
+    cause="$(_ci_capture 1 grep -E 'Error executing cache write|Cache read error|Cache timed out|compile result: cache error' "${log}")" || return 2
     if [ "${_CI_SCCACHE_MODE}" = required ]; then
-        ci_error "[CI-ERROR-CACHE-0016]" "errors=\"${errs# }\" log=\"${_CI_SCCACHE_LOG}\" reason=\"required sccache cache level failed\"" "${cause}"
+        ci_error "[CI-ERROR-CACHE-0016]" "errors=\"${errs# }\" log=\"${log}\" reason=\"required sccache cache level failed\"" "${cause}"
         return 2
     fi
-    ci_error "[CI-WARN-CACHE-0017]" "mode=${_CI_SCCACHE_MODE} errors=\"${errs# }\" log=\"${_CI_SCCACHE_LOG}\" reason=\"sccache cache level failed\"" "${cause}"
+    ci_error "[CI-WARN-CACHE-0017]" "mode=${_CI_SCCACHE_MODE} errors=\"${errs# }\" log=\"${log}\" reason=\"sccache cache level failed\"" "${cause}"
 }
 
 # What: cargo build; drop one accelerator per outage.
