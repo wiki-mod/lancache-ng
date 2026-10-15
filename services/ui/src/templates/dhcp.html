@@ -554,7 +554,7 @@
             <td class="py-2 text-slate-300">{{ lease.hostname }}</td>
             <td class="py-2 text-slate-400">{{ lease.subnet_id }}</td>
             <td class="py-2 text-slate-400">
-              <span class="dhcp-expiry" data-epoch="{{ lease.expires }}">{{ lease.expires }}</span>
+              <span data-epoch="{{ lease.expires }}">{{ lease.expires }}</span>
             </td>
             <td class="py-2">
               <form method="POST" action="{{ routes.lease_release | safe }}" class="inline"
@@ -603,7 +603,7 @@
           {% for snapshot in kea_snapshots %}
           <tr class="border-b border-slate-700 hover:bg-slate-700">
             <td class="py-2 text-white">
-              <span class="dhcp-expiry" data-epoch="{{ snapshot.created_unix }}">{{ snapshot.created_unix }}</span>
+              <span data-epoch="{{ snapshot.created_unix }}">{{ snapshot.created_unix }}</span>
             </td>
             <td class="py-2">
               <form method="POST" action="{{ routes.kea_rollback | safe }}" class="inline"
@@ -729,25 +729,7 @@ async function checkDhcpConflict() {
   }
 }
 
-function formatDhcpExpiries() {
-  const formatter = new Intl.DateTimeFormat('de-DE', {
-    dateStyle: 'medium',
-    timeStyle: 'medium',
-  });
-
-  document.querySelectorAll('.dhcp-expiry').forEach((el) => {
-    const epoch = Number(el.dataset.epoch);
-    if (!Number.isFinite(epoch) || epoch <= 0) {
-      return;
-    }
-
-    el.textContent = formatter.format(new Date(epoch * 1000));
-    el.title = `Unix: ${el.dataset.epoch}`;
-  });
-}
-
 document.addEventListener('DOMContentLoaded', checkDhcpConflict);
-document.addEventListener('DOMContentLoaded', formatDhcpExpiries);
 </script>
 {% endif %}
 {% endblock %}

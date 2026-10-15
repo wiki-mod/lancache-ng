@@ -433,6 +433,24 @@
 
     window.LancacheWatchdog.refresh();
     setInterval(window.LancacheWatchdog.refresh, 10000);
+
+    // What: shows each [data-epoch] value as de-DE date and time
+    // Why: one owner for every page; 0 or junk stays raw
+    // From: Issue #1683 | PR #1912
+    (function () {
+      const formatter = new Intl.DateTimeFormat('de-DE', {
+        dateStyle: 'medium',
+        timeStyle: 'medium',
+      });
+      document.querySelectorAll('[data-epoch]').forEach(function (el) {
+        const epoch = Number(el.dataset.epoch);
+        if (!Number.isFinite(epoch) || epoch <= 0) {
+          return;
+        }
+        el.textContent = formatter.format(new Date(epoch * 1000));
+        el.title = 'Unix: ' + el.dataset.epoch;
+      });
+    })();
   </script>
 
   {% block scripts %}{% endblock %}

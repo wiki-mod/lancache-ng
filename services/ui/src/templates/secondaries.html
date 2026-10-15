@@ -99,11 +99,11 @@
                       class="text-blue-400 hover:text-blue-300 ml-1 text-[11px]">Prüfen</button>
             </td>
             <td class="px-3 py-2 text-slate-400 text-xs">
-              <time class="js-epoch" data-epoch="{{ secondary.registered_at }}"></time>
+              <time data-epoch="{{ secondary.registered_at }}">{{ secondary.registered_at }}</time>
             </td>
             <td class="px-3 py-2 text-slate-400 text-xs">
               {% if secondary.last_seen %}
-                <time class="js-epoch" data-epoch="{{ secondary.last_seen }}"></time>
+                <time data-epoch="{{ secondary.last_seen }}">{{ secondary.last_seen }}</time>
               {% else %}
                 <span class="text-slate-500">Noch nicht erfasst</span>
               {% endif %}
@@ -133,28 +133,6 @@
 
 {% block scripts %}
 <script>
-  function formatEpochSeconds(epochSeconds) {
-    const date = new Date(Number(epochSeconds) * 1000);
-    if (Number.isNaN(date.getTime())) {
-      return null;
-    }
-
-    return new Intl.DateTimeFormat('de-DE', {
-      dateStyle: 'medium',
-      timeStyle: 'medium',
-      hour12: false,
-    }).format(date);
-  }
-
-  function formatEpochCells() {
-    document.querySelectorAll('.js-epoch').forEach((element) => {
-      const formatted = formatEpochSeconds(element.dataset.epoch);
-      if (formatted) {
-        element.textContent = formatted;
-      }
-    });
-  }
-
   function copyCmd(btn) {
     const el = document.getElementById('install-cmd');
     const flash = () => {
@@ -292,8 +270,6 @@
       alert(`Fehler: ${error.message}`);
     }
   }
-
-  formatEpochCells();
 
   // Auto-run the health check for every listed secondary on page load, so the
   // operator sees current status without clicking each row (matching the

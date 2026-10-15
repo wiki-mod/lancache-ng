@@ -417,7 +417,7 @@
                 {% for snapshot in group.snapshots %}
                 <tr class="border-b border-slate-700 hover:bg-slate-700">
                   <td class="py-2 text-white">
-                    <time class="js-epoch" data-epoch="{{ snapshot.created_unix }}">{{ snapshot.created_unix }}</time>
+                    <time data-epoch="{{ snapshot.created_unix }}">{{ snapshot.created_unix }}</time>
                   </td>
                   <td class="py-2">
                     {# What: group.zone is a fixed zone
@@ -505,30 +505,6 @@
     }
   }
 
-  // What: formats .js-epoch cells as de-DE date and time
-  // Why: each template keeps its own copy of this helper
-  function formatEpochSeconds(epochSeconds) {
-    const date = new Date(Number(epochSeconds) * 1000);
-    if (Number.isNaN(date.getTime())) {
-      return null;
-    }
-
-    return new Intl.DateTimeFormat('de-DE', {
-      dateStyle: 'medium',
-      timeStyle: 'medium',
-      hour12: false,
-    }).format(date);
-  }
-
-  function formatEpochCells() {
-    document.querySelectorAll('.js-epoch').forEach((element) => {
-      const formatted = formatEpochSeconds(element.dataset.epoch);
-      if (formatted) {
-        element.textContent = formatted;
-      }
-    });
-  }
-
   document.querySelectorAll('.dns-tab-btn').forEach((button) => {
     button.addEventListener('click', () => setActiveDnsTab(button.dataset.dnsTab));
   });
@@ -538,6 +514,5 @@
   document.querySelector('[data-lan-record-form]').addEventListener('submit', validateLanTxtContent);
 
   setActiveDnsTab('cdn');
-  formatEpochCells();
 </script>
 {% endblock %}
