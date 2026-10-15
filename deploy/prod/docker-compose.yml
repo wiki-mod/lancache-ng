@@ -30,16 +30,20 @@ x-service: &service
   restart: always
   logging: *logging
 
-# What: tini, run tmpfs, watchdog probe: supervised images.
+# What: tini and run tmpfs of the supervised images.
 # Why: lancache-watchdog supervise is no init process.
 # From: Issue #1683 | PR #1912
 x-supervised: &supervised
   init: true
   tmpfs:
     - ${SOT_SUPERVISE_RUN_DIR}
-  healthcheck:
-    <<: *healthcheck-timing
-    test: ["CMD", "lancache-watchdog", "healthcheck"]
+
+# What: watchdog probe of the four supervised services.
+# Why: one probe text; each service merges it by name.
+# From: Issue #1683 | PR #1912
+x-watchdog-healthcheck: &watchdog-healthcheck
+  <<: *healthcheck-timing
+  test: ["CMD", "lancache-watchdog", "healthcheck"]
 
 # What: operator values; one map per set of consumers.
 # Why: a key two services read has one line to change.
@@ -86,6 +90,8 @@ services:
   # From: Issue #1683
   services:
     <<: [*service, *supervised]
+    healthcheck:
+      <<: *watchdog-healthcheck
     container_name: ${SOT_CONTAINER_NAME_SERVICES}
     image: ${LANCACHE_IMAGE_REF_SERVICES:?LANCACHE_IMAGE_REF_SERVICES is required}
     environment:
@@ -145,6 +151,8 @@ services:
   # Why: the passthrough port relays SNI; 443 intercepts.
   proxy:
     <<: [*service, *supervised]
+    healthcheck:
+      <<: *watchdog-healthcheck
     container_name: ${SOT_CONTAINER_NAME_PROXY}
     image: ${LANCACHE_IMAGE_REF_PROXY:?LANCACHE_IMAGE_REF_PROXY is required}
     environment:
@@ -180,6 +188,8 @@ services:
   # From: Issue #1683
   dns:
     <<: [*service, *supervised]
+    healthcheck:
+      <<: *watchdog-healthcheck
     container_name: ${SOT_CONTAINER_NAME_DNS}
     image: ${LANCACHE_IMAGE_REF_DNS:?LANCACHE_IMAGE_REF_DNS is required}
     environment:
@@ -220,6 +230,8 @@ services:
   # From: Issue #1683
   dhcp:
     <<: [*service, *supervised]
+    healthcheck:
+      <<: *watchdog-healthcheck
     container_name: ${SOT_CONTAINER_NAME_DHCP}
     image: ${LANCACHE_IMAGE_REF_DHCP:?LANCACHE_IMAGE_REF_DHCP is required}
     environment:
