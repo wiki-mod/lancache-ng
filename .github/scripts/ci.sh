@@ -10137,6 +10137,18 @@ _ci_rh_root() {
     fi
 }
 
+# What: write stdin to a file as root; -a appends.
+# Why: one owner for root file writes; no echoed copy.
+# From: Issue #1683 | PR #1912
+_ci_rh_put() {
+    local redirect='>'
+    if [ "${1:-}" = "-a" ]; then
+        redirect='>>'
+        shift
+    fi
+    _ci_run "[CI-ERROR-RUNNER-0129]" "file=\"$1\" reason=\"file not written\"" _ci_rh_root bash -c "cat ${redirect} \"\$1\"" _ "$1"
+}
+
 # What: epoch seconds of a docker timestamp; rc 1 if none.
 # Why: the age checks key on .Created, never on StartedAt.
 # From: Issue #1095 | PR #1426
@@ -10323,9 +10335,9 @@ _ci_rh_units() {
     dir="$(_ci_rh_val unit_dir)" || return 2
     name="$(_ci_rh_val unit_name)" || return 2
     text="$(_ci_rh_service_text)" || return 2
-    printf '%s\n' "${text}" | _ci_rh_root tee "${dir}/${name}.service" >/dev/null || return 2
+    printf '%s\n' "${text}" | _ci_rh_put "${dir}/${name}.service" || return 2
     text="$(_ci_rh_timer_text)" || return 2
-    printf '%s\n' "${text}" | _ci_rh_root tee "${dir}/${name}.timer" >/dev/null || return 2
+    printf '%s\n' "${text}" | _ci_rh_put "${dir}/${name}.timer" || return 2
     _ci_run "[CI-ERROR-RUNNER-0009]" "reason=\"systemctl daemon-reload failed\"" _ci_rh_root systemctl daemon-reload || return 2
     _ci_run "[CI-ERROR-RUNNER-0010]" "timer=\"${name}.timer\" reason=\"timer not enabled\"" _ci_rh_root systemctl enable --now "${name}.timer" || return 2
     printf 'Installed and enabled %s.timer in %s\n' "${name}" "${dir}"
@@ -10822,7 +10834,7 @@ _ci_rh_hosts_self() {
     # What: append a self-address line, no address edit.
     # Why: editing an address line would drop its aliases.
     # From: Issue #1622 | PR #1624
-    printf '%s\t%s\n' "${self}" "${host}" | _ci_rh_root tee -a "${hosts}" >/dev/null || return 2
+    printf '%s\t%s\n' "${self}" "${host}" | _ci_rh_put -a "${hosts}" || return 2
     printf '    fixed: appended a %s entry\n' "${self}"
 }
 
@@ -10915,7 +10927,7 @@ _ci_rh_dedupe_identity() {
     _ci_run "[CI-ERROR-RUNNER-0040]" "file=\"${hfile}\" reason=\"hostid is missing or empty\"" _ci_rh_root test -s "${hfile}" || return 2
     new="$(_ci_capture 0 od -An -N16 -tx1 /dev/urandom)" || return 2
     new="${new//[$' \n']/}"
-    printf '%s\n' "${new}" | _ci_rh_root tee "${mfile}" >/dev/null || return 2
+    printf '%s\n' "${new}" | _ci_rh_put "${mfile}" || return 2
     _ci_run "[CI-ERROR-RUNNER-0041]" "file=\"${dbus}\" reason=\"dbus machine-id not relinked\"" _ci_rh_root ln -sf "${mfile}" "${dbus}" || return 2
     _ci_run "[CI-ERROR-RUNNER-0042]" "unit=\"${jd}\" reason=\"journald not restarted\"" _ci_rh_root systemctl restart "${jd}" || return 2
     printf '  hostid: %s\n  machine-id: %s -> %s\n' "$(_ci_capture 0 hostid)" "${old}" "${new}"
@@ -11013,7 +11025,7 @@ _ci_rh_set_hostname() {
     elif [ "${h2}" -eq 0 ]; then
         _ci_run "[CI-ERROR-RUNNER-0053]" "file=\"${hosts}\" reason=\"stale self line not replaced\"" _ci_rh_root sed -i "s/^[0-9.]\\+[[:space:]].*\\b${old}\\b.*/${self}\\t${new}/" "${hosts}" || return 2
     else
-        printf '%s\t%s\n' "${self}" "${new}" | _ci_rh_root tee -a "${hosts}" >/dev/null || return 2
+        printf '%s\t%s\n' "${self}" "${new}" | _ci_rh_put -a "${hosts}" || return 2
     fi
     printf 'Done. Hostname: %s (nothing was rebooted or restarted)\n' "$(_ci_capture 0 hostname)"
 }
@@ -11247,9 +11259,9 @@ _ci_rh_hooks() {
     mode="$(_ci_rh_val hook_mode)" || return 2
     _ci_run "[CI-ERROR-RUNNER-0063]" "dir=\"${dir}\" reason=\"hooks dir not created\"" _ci_rh_root mkdir -p "${dir}" || return 2
     text="$(_ci_rh_hook_pre_text)" || return 2
-    printf '%s\n' "${text}" | _ci_rh_root tee "${pre}" >/dev/null || return 2
+    printf '%s\n' "${text}" | _ci_rh_put "${pre}" || return 2
     text="$(_ci_rh_hook_post_text)" || return 2
-    printf '%s\n' "${text}" | _ci_rh_root tee "${post}" >/dev/null || return 2
+    printf '%s\n' "${text}" | _ci_rh_put "${post}" || return 2
     _ci_run "[CI-ERROR-RUNNER-0064]" "dir=\"${dir}\" reason=\"hooks not owned by the runner account\"" _ci_rh_root chown "${user}:${group}" "${pre}" "${post}" || return 2
     _ci_run "[CI-ERROR-RUNNER-0065]" "dir=\"${dir}\" reason=\"hooks not executable\"" _ci_rh_root chmod "${mode}" "${pre}" "${post}" || return 2
     printf 'Installed %s and %s\n' "${pre}" "${post}"
@@ -11283,7 +11295,7 @@ _ci_rh_access() {
         fi
         printf '%s already holds the expected rule.\n' "${file}"
     else
-        printf '%s\n' "${rule}" | _ci_rh_root tee "${file}" >/dev/null || return 2
+        printf '%s\n' "${rule}" | _ci_rh_put "${file}" || return 2
         _ci_run "[CI-ERROR-RUNNER-0067]" "file=\"${file}\" reason=\"mode not set\"" _ci_rh_root chmod "${mode}" "${file}" || return 2
         if ! _ci_rh_root visudo -cf "${file}"; then
             _ci_rh_root rm -f "${file}"
@@ -11321,10 +11333,10 @@ _ci_rh_backports() {
     pin="$(_ci_block_entry_list runner_host "" backports_pin)" || return 2
     want_pref="${pin}"
     if [ "$(_ci_run -m 1 "[CI-ERROR-RUNNER-0072]" "file=\"${list}\" reason=\"unreadable\"" _ci_rh_root cat "${list}")" != "${want_list}" ]; then
-        printf '%s\n' "${want_list}" | _ci_rh_root tee "${list}" >/dev/null || return 2
+        printf '%s\n' "${want_list}" | _ci_rh_put "${list}" || return 2
     fi
     if [ "$(_ci_run -m 1 "[CI-ERROR-RUNNER-0073]" "file=\"${pref}\" reason=\"unreadable\"" _ci_rh_root cat "${pref}")" != "${want_pref}" ]; then
-        printf '%s\n' "${want_pref}" | _ci_rh_root tee "${pref}" >/dev/null || return 2
+        printf '%s\n' "${want_pref}" | _ci_rh_put "${pref}" || return 2
     fi
     printf 'Validated %s and %s.\n' "${list}" "${pref}"
     _ci_run "[CI-ERROR-RUNNER-0074]" "reason=\"apt-get update failed\"" _ci_rh_root apt-get update || return 2
@@ -11446,7 +11458,7 @@ _ci_rh_runner_fetch() {
     # What: write the lang line and both hook lines.
     # Why: env.sh (run by config.sh) truncates it again.
     # From: Issue #1622 | PR #1624
-    { printf '%s\n' "${lang}"; _ci_rh_hook_env_lines; } | _ci_rh_root tee "${dir}/${envf}" >/dev/null || return 2
+    { printf '%s\n' "${lang}"; _ci_rh_hook_env_lines; } | _ci_rh_put "${dir}/${envf}" || return 2
     _ci_run "[CI-ERROR-RUNNER-0092]" "dir=\"${dir}\" file=\"${envf}\" reason=\"env file owner not set\"" _ci_rh_root chown "${user}:${group}" "${dir}/${envf}" || return 2
     printf 'Extracted actions-runner v%s into %s and wrote its hook wiring. NOT registered.\n' "${ver}" "${dir}"
     printf "Next: config.sh by hand (token via stdin, --name \$(hostname) exactly), then runner-hook-env %s,\\nthen svc.sh install, then runner-restart-policy; start the service only after the go-ahead.\\n" "${dir}"
@@ -11474,7 +11486,7 @@ _ci_rh_runner_hook_env() {
     # Why: a stale copy must not coexist with the new pair.
     # From: Issue #1622 | PR #1624
     _ci_run "[CI-ERROR-RUNNER-0095]" "dir=\"${dir}\" reason=\"stale hook lines not removed\"" _ci_rh_root sed -i "/^${hs}=/d; /^${hc}=/d" "${dir}/${envf}" || return 2
-    printf '%s\n' "${want}" | _ci_rh_root tee -a "${dir}/${envf}" >/dev/null || return 2
+    printf '%s\n' "${want}" | _ci_rh_put -a "${dir}/${envf}" || return 2
     printf 'Wrote the hook wiring to %s/%s.\n' "${dir}" "${envf}"
 }
 
@@ -11514,7 +11526,7 @@ _ci_rh_restart_policy() {
         esac
         printf '  %s: writing %s\n' "${name}" "${dropin}"
         _ci_run "[CI-ERROR-RUNNER-0096]" "unit=\"${name}\" reason=\"drop-in dir not created\"" _ci_rh_root mkdir -p "${dropin%/*}" || return 2
-        printf '[Service]\nRestart=%s\nRestartSec=%s\n' "${policy}" "${sec}" | _ci_rh_root tee "${dropin}" >/dev/null || return 2
+        printf '[Service]\nRestart=%s\nRestartSec=%s\n' "${policy}" "${sec}" | _ci_rh_put "${dropin}" || return 2
         wrote=1
     done
     if [ "${seen}" -eq 0 ]; then
