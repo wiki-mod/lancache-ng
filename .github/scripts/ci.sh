@@ -10302,12 +10302,22 @@ _ci_rh_epoch() {
     printf '%s\n' "${out}"
 }
 
+# What: rc 0 if stamp $1 is before epoch $2; 1 if not.
+# Why: rc 2 (unparsed stamp) stays apart from rc 1 (young).
+# From: Issue #1095 | PR #1426
+_ci_rh_older_than() {
+    local epoch rc=0
+    epoch="$(_ci_rh_epoch "$1")" || rc=$?
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    [ "${epoch}" -lt "$2" ]
+}
+
 # What: remove running containers of one kind past an age.
 # Why: .Created survives a daemon restart; StartedAt resets.
 # From: Issue #1095 | PR #1426
 _ci_rh_reap_containers() {
     local label="$1" field="$2" pattern="$3" hours="$4"
-    local before ids rows id image name project created value epoch rc=0
+    local before ids rows id image name project created value rrc rc=0
     local -a idl
     before=$(( $(date +%s) - hours * 3600 ))
     printf -- '--- reap orphaned %s containers older than %sh ---\n' "${label}" "${hours}"
@@ -10323,8 +10333,10 @@ _ci_rh_reap_containers() {
             *) return 2 ;;
         esac
         [[ "${value}" == *"${pattern}"* ]] || continue
-        epoch="$(_ci_rh_epoch "${created}")" || continue
-        [ "${epoch}" -lt "${before}" ] || continue
+        rrc=0
+        _ci_rh_older_than "${created}" "${before}" || rrc=$?
+        [ "${rrc}" -le 1 ] || rc=2
+        [ "${rrc}" -eq 0 ] || continue
         printf 'reaping hung %s container %s (%s=%s, created %s)\n' "${label}" "${id}" "${field}" "${value}" "${created}"
         _ci_run "[CI-ERROR-RUNNER-0002]" "container=\"${id}\" reason=\"container not removed\"" docker rm -f "${id}" || rc=2
     done <<< "${rows}"
@@ -10335,7 +10347,7 @@ _ci_rh_reap_containers() {
 # Why: an empty network may be mid-bringup, so age decides.
 # From: Issue #1095 | PR #1426
 _ci_rh_reap_networks() {
-    local match="$1" hours="$2" before names name row count created epoch rc=0
+    local match="$1" hours="$2" before names name row count created rrc rc=0
     before=$(( $(date +%s) - hours * 3600 ))
     printf -- '--- reap empty networks named %s older than %sh ---\n' "${match}" "${hours}"
     names="$(_ci_capture 0 docker network ls --filter "name=${match}" --format '{{.Name}}')" || return 2
@@ -10344,8 +10356,10 @@ _ci_rh_reap_networks() {
         row="$(_ci_capture 0 docker network inspect "${name}" --format '{{len .Containers}}|{{.Created}}')" || { rc=2; continue; }
         count="${row%%|*}" created="${row#*|}"
         [ "${count}" = 0 ] || continue
-        epoch="$(_ci_rh_epoch "${created}")" || continue
-        [ "${epoch}" -lt "${before}" ] || continue
+        rrc=0
+        _ci_rh_older_than "${created}" "${before}" || rrc=$?
+        [ "${rrc}" -le 1 ] || rc=2
+        [ "${rrc}" -eq 0 ] || continue
         printf 'reaping empty network %s (created %s)\n' "${name}" "${created}"
         _ci_run "[CI-ERROR-RUNNER-0003]" "network=\"${name}\" reason=\"network not removed\"" docker network rm "${name}" || rc=2
     done <<< "${names}"
@@ -10729,6 +10743,7 @@ _ci_rh_archive_report() {
 # From: Issue #1622 | PR #1624
 _ci_rh_check() {
     local root user hooks utim dir dirs st agent svc units found=0 f groups rf sfile dgroup crc hpre hpost arc=0
+    _ci_rh_need_sudo || return 2
     root="$(_ci_rh_val opt_root)" || return 2
     user="$(_ci_rh_val user)" || return 2
     hooks="$(_ci_rh_val hooks_dir)" || return 2
@@ -11084,7 +11099,7 @@ _ci_rh_dedupe_identity() {
 # Why: a disk clone copies the source's server identity.
 # From: Issue #1622 | PR #1624
 _ci_rh_ssh_host_keys() {
-    local pub glob units u ok=0
+    local pub glob units u fp ok=0
     glob="$(_ci_rh_val ssh_host_key_glob)" || return 2
     units="$(_ci_block_entry_list runner_host "" ssh_units)" || return 2
     _ci_run "[CI-ERROR-RUNNER-0043]" "glob=\"${glob}\" reason=\"old host keys not removed\"" _ci_rh_root bash -c "rm -f ${glob}" || return 2
@@ -11099,7 +11114,8 @@ _ci_rh_ssh_host_keys() {
     printf '  new host key fingerprints:\n'
     for pub in ${glob}.pub; do
         [ -e "${pub}" ] || continue
-        _ci_run "[CI-ERROR-RUNNER-0046]" "key=\"${pub}\" reason=\"fingerprint not read\"" _ci_rh_root ssh-keygen -lf "${pub}" | sed 's/^/    /'
+        fp="$(_ci_run "[CI-ERROR-RUNNER-0046]" "key=\"${pub}\" reason=\"fingerprint not read\"" _ci_rh_root ssh-keygen -lf "${pub}")" || return 2
+        printf '    %s\n' "${fp//$'\n'/$'\n'    }"
     done
 }
 
@@ -11193,11 +11209,21 @@ _ci_rh_pve_keep_ere() {
     _ci_rh_ere pve_keep
 }
 
+# What: print lines of $3 matching ERE $1, else the text $2.
+# Why: a failed grep is an error, never read as "none".
+# From: Issue #1683 | PR #1912
+_ci_rh_grep_or() {
+    local hits
+    hits="$(_ci_capture 1 grep -iE "$1" <<< "$3")" || return 2
+    if [ -n "${hits}" ]; then printf '%s\n' "${hits}"; else printf '%s\n' "$2"; fi
+}
+
 # What: read-only inventory of the nested Proxmox stack.
 # Why: review it before purge-pve removes a live stack.
 # From: Issue #1622 | PR #1624
 _ci_rh_purge_pve_check() {
-    local keep pkgs pkg_raw sim families units fstab pdir procs crons d open hits rss
+    local keep pkgs pkg_raw sim families units fstab pdir procs crons d open hits rss dpkg_out unit_out
+    _ci_rh_need_sudo || return 2
     pdir="$(_ci_rh_val pve_config_dir)" || return 2
     procs="$(_ci_rh_ere pve_process_families)" || return 2
     crons="$(_ci_block_entry_list runner_host "" pve_cron_dirs)" || return 2
@@ -11211,13 +11237,17 @@ _ci_rh_purge_pve_check() {
     pkg_raw="$(_ci_required_field runner_host pve_packages blocklist)" || return 2
     mapfile -t pkgs <<< "${pkg_raw}"
     printf -- '--- Installed packages of the PVE stack ---\n'
-    dpkg -l | { grep -iE "^ii.*(${families})" || printf '  (none found; already clean)\n'; }
+    dpkg_out="$(_ci_capture 0 dpkg -l)" || return 2
+    _ci_rh_grep_or "^ii.*(${families})" '  (none found; already clean)' "${dpkg_out}" || return 2
     printf '\n--- Kept regardless (kernel, firmware) ---\n'
-    dpkg -l | { grep -iE "^ii.*(${keep})" || printf '  (none installed)\n'; }
+    _ci_rh_grep_or "^ii.*(${keep})" '  (none installed)' "${dpkg_out}" || return 2
     printf '\n--- Active units of the PVE stack ---\n'
-    systemctl list-units --all --type=service,timer --no-pager | { grep -iE "${units}" | grep -i active || printf '  (none active)\n'; }
+    unit_out="$(_ci_capture 0 systemctl list-units --all --type=service,timer --no-pager)" || return 2
+    unit_out="$(_ci_capture 1 grep -iE "${units}" <<< "${unit_out}")" || return 2
+    _ci_rh_grep_or active '  (none active)' "${unit_out}" || return 2
     printf '\n--- Mounts, fstab, open files and cron of the PVE stack ---\n'
-    mount | { grep -iE "${units}" || printf '  not currently mounted\n'; }
+    unit_out="$(_ci_capture 0 mount)" || return 2
+    _ci_rh_grep_or "${units}" '  not currently mounted' "${unit_out}" || return 2
     local frc=0
     _ci_file_match "[CI-ERROR-RUNNER-0125]" "file=\"${fstab}\"" "${fstab}" "${units}" -iE || frc=$?
     case "${frc}" in
@@ -11429,6 +11459,7 @@ _ci_rh_sudoers_file() {
 # From: Issue #1622 | PR #1624
 _ci_rh_access() {
     local user="$1" file rule groups cur mode dgroup
+    _ci_rh_need_sudo || return 2
     file="$(_ci_rh_sudoers_file "${user}")" || return 2
     rule="$(_ci_rh_val sudoers_rule)" || return 2
     rule="${rule//@USER@/${user}}"
@@ -11697,6 +11728,7 @@ _ci_rh_restart_policy() {
 # From: Issue #1622 | PR #1624
 _ci_rh_sccache_check() {
     local user root lack=0 f stale dist list bin_dir main_bin stales sum st
+    _ci_rh_need_sudo || return 2
     user="$(_ci_rh_val user)" || return 2
     root="$(_ci_rh_val opt_root)" || return 2
     dist="$(_ci_rh_val sccache_dist_dir)" || return 2
@@ -11741,6 +11773,7 @@ _ci_rh_sccache_check() {
 # From: Issue #1622 | PR #1626
 _ci_rh_sccache_fetch() {
     local src="${1:-}" user root group dist f bin_dir list main_name dist_name old dmode sfiles sdirs sf bmode staged stmpl
+    _ci_rh_need_sudo || return 2
     dmode="$(_ci_rh_val sccache_dist_mode)" || return 2
     bmode="$(_ci_rh_val sccache_bin_mode)" || return 2
     stmpl="$(_ci_rh_val sccache_staged_name)" || return 2
@@ -14352,7 +14385,10 @@ _ci_check_compose_healthchecks() {
     done <<< "${raw}"
     local -a viol=()
     for file in "${files[@]}"; do
-        [ -f "${file}" ] || continue
+        if [ ! -f "${file}" ]; then
+            viol+=("${file}: compose file missing")
+            continue
+        fi
         local produced produced_rc=0
         produced="$(awk '
             /^services:[[:space:]]*$/ { insvc = 1; next }
