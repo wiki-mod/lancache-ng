@@ -14424,21 +14424,13 @@ _ci_check_compose_healthchecks() {
             viol+=("${file}: compose file missing")
             continue
         fi
-        local produced produced_rc=0
-        produced="$(awk '
-            /^services:[[:space:]]*$/ { insvc = 1; next }
-            insvc && /^[A-Za-z]/ {
-                if (name != "") print name "\t" hc
-                insvc = 0; name = ""; next
-            }
-            insvc && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
-                if (name != "") print name "\t" hc
-                name = $1; sub(/:$/, "", name); hc = 0; next
-            }
-            insvc && name != "" && /^    healthcheck:[[:space:]]*$/ { hc = 1 }
-            END { if (name != "") print name "\t" hc }
-        ' "${file}")" || produced_rc=$?
-        _ci_producer_ok "${produced_rc}" 0 || return 2
+        # What: judge the rendered compose, not its text.
+        # Why: anchors and merge keys give healthchecks too.
+        # From: Issue #1683 | PR #1912
+        local cfg produced
+        cfg="$(_ci_compose_json "${file}")" || return 2
+        produced="$(_ci_capture 0 jq -r '.services | to_entries[]
+            | "\(.key)\t\(if .value.healthcheck then 1 else 0 end)"' <<<"${cfg}")" || return 2
         while IFS=$'\t' read -r svc hc; do
             [ -n "${svc}" ] || continue
             checked=$((checked + 1))
