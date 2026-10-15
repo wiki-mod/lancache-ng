@@ -2395,7 +2395,7 @@ _ci_lock_try() {
     cur="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
     if [ "${rc}" -eq 1 ]; then
         sha="$(_ci_cas_note_commit "${note}")" || return 3
-        rc=0; raw="$(git push "${remote}" "${sha}:${ref}" 2>&1)" || rc=$?
+        rc=0; raw="$(_ci_cas_push "${remote}" "${ref}" "${sha}" "")" || rc=$?
         [ "${rc}" -eq 0 ] && return 0
         _ci_cas_push_failed create "${ref}" "${rc}" "${raw}"
         return "$?"
@@ -2416,12 +2416,24 @@ _ci_lock_try() {
         return 3
     fi
     sha="$(_ci_cas_note_commit "${note}")" || return 3
-    rc=0; raw="$(git push --force-with-lease="${ref}:${cur}" "${remote}" "${sha}:${ref}" 2>&1)" || rc=$?
+    rc=0; raw="$(_ci_cas_push "${remote}" "${ref}" "${sha}" "${cur}")" || rc=$?
     if [ "${rc}" -eq 0 ]; then
         ci_log "[CI-INFO-CAS-0001]" "ref=\"${ref}\" note=\"lock of an ended run taken over\" prev=\"${prev}\""
         return 0
     fi
     _ci_cas_push_failed takeover "${ref}" "${rc}" "${raw}"
+}
+
+# What: push sha to ref: create, or lease over $4.
+# Why: one owner for lock and mark ref writes.
+# From: Issue #1683 | PR #1912
+_ci_cas_push() {
+    local remote="$1" ref="$2" sha="$3" cur="$4"
+    if [ -z "${cur}" ]; then
+        git push "${remote}" "${sha}:${ref}" 2>&1
+        return
+    fi
+    git push --force-with-lease="${ref}:${cur}" "${remote}" "${sha}:${ref}" 2>&1
 }
 
 # What: log a failed CAS push; rc 2 race, rc 3 failure.
@@ -2587,11 +2599,8 @@ _ci_verified_mark() {
     [ "${rc}" -eq 1 ] || return 2
     sha="$(_ci_cas_note_commit "$(_ci_verified_note "$1" "$2" "$3")")" || return 2
     rc=0; cur="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
-    case "${rc}" in
-        0) raw="$(git push --force-with-lease="${ref}:${cur}" "${remote}" "${sha}:${ref}" 2>&1)" || rc=$? ;;
-        1) rc=0; raw="$(git push "${remote}" "${sha}:${ref}" 2>&1)" || rc=$? ;;
-        *) return 2 ;;
-    esac
+    [ "${rc}" -le 1 ] || return 2
+    rc=0; raw="$(_ci_cas_push "${remote}" "${ref}" "${sha}" "${cur}")" || rc=$?
     [ "${rc}" -ne 0 ] || return 0
     # What: a lost push race with an equal mark is success.
     # Why: both runs verified the same digest.
