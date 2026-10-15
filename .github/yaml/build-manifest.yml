@@ -558,6 +558,11 @@ runtime:
     - UI_WATCHDOG_REFRESH_MS=10000
     - UI_DASHBOARD_REFRESH_MS=10000
     - UI_STATS_REFRESH_MS=3000
+    # What: restart page poll gap and first wait, in ms.
+    # Why: the page script reads them; no literal in markup.
+    # From: Issue #1683 | PR #1912
+    - UI_RESTART_POLL_INTERVAL_MS=1000
+    - UI_RESTART_POLL_FIRST_DELAY_MS=1500
     # What: samples the stats page charts keep per series.
     # Why: one value for the chart size and the query.
     # From: Issue #1683 | PR #1912
