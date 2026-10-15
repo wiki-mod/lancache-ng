@@ -14688,24 +14688,35 @@ _ci_copy_if_changed() {
     printf 'written\n'
 }
 
-# What: every stack compose renders clean in every profile.
-# Why: profiles come from the file; none is skipped.
-# From: Issue #1683 | PR #1858
-_ci_check_compose_config() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
-    local -a viol=() profiles=() tl=()
-    local deploy targets rel cf raw p label render msg count=0
-    deploy="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    targets="$(_ci_block_entry_field validation "" compose_targets)" || return 2
-    if [ -z "${targets}" ]; then
+# What: out[]: the stack compose file, then compose_targets
+# Why: one reader for the checks that walk every stack file
+# From: Issue #1683 | PR #1912
+_ci_stack_compose_files() {
+    local -n _ci_scf_out="$1"
+    local _ci_scf_dep _ci_scf_targets
+    _ci_scf_out=()
+    _ci_scf_dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    _ci_scf_targets="$(_ci_block_entry_field validation "" compose_targets)" || return 2
+    if [ -z "${_ci_scf_targets}" ]; then
         ci_error "[CI-ERROR-CHECK-0044]" "reason=\"no compose_targets in SOT\"" "manifest=${CI_MANIFEST}"
         return 1
     fi
     # What: the SOT field is a space-separated path list.
     # Why: read -a splits words without glob expansion.
     # From: Issue #1683 | PR #1912
-    read -ra tl <<< "${targets}"
-    for rel in "${deploy}" "${tl[@]}"; do
+    read -ra _ci_scf_out <<< "${_ci_scf_targets}"
+    _ci_scf_out=("${_ci_scf_dep}" "${_ci_scf_out[@]}")
+}
+
+# What: every stack compose renders clean in every profile.
+# Why: profiles come from the file; none is skipped.
+# From: Issue #1683 | PR #1858
+_ci_check_compose_config() {
+    local repo_root="${1:-${CI_REPO_ROOT}}"
+    local -a viol=() profiles=() files=()
+    local rel cf raw p label render msg count=0
+    _ci_stack_compose_files files || return $?
+    for rel in "${files[@]}"; do
         cf="${repo_root}/${rel}"
         label="${rel}"
         if [ ! -f "${cf}" ]; then
@@ -14831,8 +14842,8 @@ PROG
 # Why: the SOT owns them; Compose and nginx.conf use them.
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_cert_volume() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" dir ca cache dep targets cf cfg out line px
-    local -a viol=() tl=()
+    local repo_root="${1:-${CI_REPO_ROOT}}" dir ca cache cf cfg out line px
+    local -a viol=() files=()
     local -A seen=()
     dir="$(_ci_nginx_subdir NGINX_SUBDIR_CERTS)" || return 2
     ca="$(_ci_nginx_subdir NGINX_SUBDIR_CA)" || return 2
@@ -14840,10 +14851,8 @@ _ci_check_proxy_cert_volume() {
     px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
     grep -Eq '^[[:space:]]*proxy_cache_path[[:space:]]+\$\{NGINX_CACHE_DIR\}[[:space:]]*$' "${px%/}/nginx.conf" \
         || viol+=("${px#"${repo_root}/"}nginx.conf: proxy_cache_path is not the SOT key NGINX_CACHE_DIR")
-    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    targets="$(_ci_block_entry_field validation "" compose_targets)" || return 2
-    read -ra tl <<< "${targets}"
-    for cf in "${dep}" "${tl[@]}"; do
+    _ci_stack_compose_files files || return $?
+    for cf in "${files[@]}"; do
         [ -z "${seen[${cf}]:-}" ] || continue
         seen["${cf}"]=1
         cfg="$(_ci_compose_json "${repo_root}/${cf}")" || return 2
