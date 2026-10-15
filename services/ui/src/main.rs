@@ -2885,12 +2885,17 @@ async fn kea_post(
         .map_err(|e| error_chain(&e))
 }
 
+// What: one field of Kea's first reply.
+// Why: Kea answers a list with one reply per service.
+// From: Issue #1683 | PR #1912
+fn kea_reply<'a>(reply: &'a Value, key: &str) -> Option<&'a Value> {
+    reply.get(0)?.get(key)
+}
+
 // What: the result code of Kea's first reply; 1 if absent.
 // Why: Kea reports failures inside a 200 response.
 fn kea_code(reply: &Value) -> i64 {
-    reply
-        .get(0)
-        .and_then(|r| r.get("result"))
+    kea_reply(reply, "result")
         .and_then(Value::as_i64)
         .unwrap_or(1)
 }
@@ -2898,9 +2903,7 @@ fn kea_code(reply: &Value) -> i64 {
 // What: the text of Kea's first reply.
 // Why: it names the reason when the result code is not 0.
 fn kea_text(reply: &Value) -> &str {
-    reply
-        .get(0)
-        .and_then(|r| r.get("text"))
+    kea_reply(reply, "text")
         .and_then(Value::as_str)
         .unwrap_or("Kea error")
 }
@@ -2923,9 +2926,7 @@ async fn kea_run(
 // Why: Kea refuses its own hash key on config-test/-set.
 async fn kea_config(state: &AppState) -> Result<Value, String> {
     let reply = kea_run(state, "config-get", None).await?;
-    let mut config = reply
-        .get(0)
-        .and_then(|r| r.get("arguments"))
+    let mut config = kea_reply(&reply, "arguments")
         .cloned()
         .ok_or("config-get: missing arguments")?;
     if let Some(map) = config.as_object_mut() {
@@ -3220,9 +3221,7 @@ fn read_reservations(config: &Value) -> Vec<Reservation> {
 // Why: leases are runtime state, not part of the config.
 async fn kea_leases(state: &AppState) -> Result<Vec<Lease>, String> {
     let reply = kea_post(state, "lease4-get-all", None).await?;
-    Ok(reply
-        .get(0)
-        .and_then(|r| r.get("arguments"))
+    Ok(kea_reply(&reply, "arguments")
         .and_then(|a| a.get("leases"))
         .and_then(Value::as_array)
         .into_iter()
@@ -3978,9 +3977,7 @@ async fn release_lease(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
         .await
         .ok()
         .and_then(|reply| {
-            let name = reply
-                .get(0)?
-                .get("arguments")?
+            let name = kea_reply(&reply, "arguments")?
                 .get("hostname")?
                 .as_str()?
                 .trim();
