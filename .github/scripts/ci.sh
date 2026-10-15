@@ -5869,14 +5869,21 @@ _ci_valid_promote_target() {
 # Why: promote/validate use digests, no moving tags (§48).
 # From: Issue #1683
 _ci_stack_candidate_ledger() {
-    local service idx
+    _ci_stack_candidate_rows _ci_candidate_index
+}
+
+# What: service=<lookup "$@" service> per stack service.
+# Why: one loop for the ledger and the PR candidate.
+# From: Issue #1683 | PR #1912
+_ci_stack_candidate_rows() {
+    local service val
     local produced produced_rc=0
     produced="$(ci_services)" || produced_rc=$?
     _ci_producer_ok "${produced_rc}" 0 || return 2
     while IFS= read -r service; do
         [ -n "${service}" ] || continue
-        idx="$(_ci_candidate_index "${service}")" || return "$?"
-        printf '%s=%s\n' "${service}" "${idx}"
+        val="$("$@" "${service}")" || return "$?"
+        printf '%s=%s\n' "${service}" "${val}"
     done <<<"${produced}"
 }
 
@@ -5931,22 +5938,22 @@ _ci_toolchain_candidate() {
 # Why: no PR ledger; the stack runs on this daemon's arch.
 # From: Issue #1683 | PR #1858
 _ci_stack_candidate_pr() {
-    local service digest platform
+    local platform
     if ! platform="$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" || [ -z "${platform}" ]; then
         ci_log "[CI-ERROR-CANDIDATE-0005]" "reason=\"docker daemon platform unknown; cannot pick PR images\""
         return 2
     fi
-    local produced produced_rc=0
-    produced="$(ci_services)" || produced_rc=$?
-    _ci_producer_ok "${produced_rc}" 0 || return 2
-    while IFS= read -r service; do
-        [ -n "${service}" ] || continue
-        if ! digest="$(_ci_published_digest "${service}" "${platform}")"; then
-            ci_log "[CI-ERROR-CANDIDATE-0002]" "service=\"${service}\" reason=\"PR image not resolvable; refusing to validate a partial stack\""
-            return 2
-        fi
-        printf '%s=%s\n' "${service}" "${digest}"
-    done <<<"${produced}"
+    _ci_stack_candidate_rows _ci_pr_candidate_digest "${platform}"
+}
+
+# What: PR image digest of service $2 on platform $1.
+# Why: a missing image refuses a partial stack.
+# From: Issue #1683 | PR #1858
+_ci_pr_candidate_digest() {
+    if ! _ci_published_digest "$2" "$1"; then
+        ci_log "[CI-ERROR-CANDIDATE-0002]" "service=\"$2\" reason=\"PR image not resolvable; refusing to validate a partial stack\""
+        return 2
+    fi
 }
 
 # What: stack candidate lines, each service=sha256:<hex>.
