@@ -6981,7 +6981,10 @@ DHCP_RANGE_START=""
 DHCP_RANGE_END=""
 DHCP_SUBNET_START=""
 DHCP_DNS_PRIMARY="$IP_HTTP"
-DHCP_DNS_SECONDARY="${IP_HTTPS:-$IP_HTTP}"
+# What: secondary DNS is IP_HTTPS, with no IP_HTTP fallback.
+# Why: IP_HTTPS is asked and validated above; as config.rs.
+# From: Issue #1683 | PR #1912
+DHCP_DNS_SECONDARY="$IP_HTTPS"
 UPSTREAM_DHCP_IP="$DHCP_GATEWAY"
 # What: relay-mode local address, empty by default
 # Why: only dnsmasq-relay uses it
