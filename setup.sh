@@ -339,10 +339,10 @@ secondary_choose_listen_ip() {
             # What: port-53 holder details, raw output
             # Why: diagnostics only; exit code is no result
             # From: Issue #1683 | PR #1858
-            if command -v fuser >/dev/null; then
+            if command_available fuser; then
                 fuser -v "${dns_port}/tcp" "${dns_port}/udp" 2>&1 | sed 's/^/    /' || printf '    (fuser exit %s)\n' "$?"
             fi
-            if command -v lsof >/dev/null; then
+            if command_available lsof; then
                 lsof -nP "-iTCP:${dns_port}" "-iUDP:${dns_port}" -sTCP:LISTEN 2>&1 | sed 's/^/    /' || printf '    (lsof exit %s)\n' "$?"
             fi
         } >&2
@@ -481,13 +481,22 @@ run_kea_dhcp_activation_preflight() {
     fi
 }
 
+# What: true if the command resolves on PATH
+# Why: command -v prints the path; callers need only the rc
+# From: Issue #1683 | PR #1912
+command_available() {
+    local resolved
+    resolved=$(command -v "$1") || return 1
+    [[ -n "$resolved" ]]
+}
+
 # What: the host package manager; empty when none is known
 # Why: one detection order for every install path
 # From: Issue #1683 | PR #1858
 host_package_manager() {
     local manager
     for manager in apt-get dnf yum pacman; do
-        if [[ -n "$(command -v "$manager")" ]]; then
+        if command_available "$manager"; then
             printf '%s\n' "$manager"
             return 0
         fi
@@ -532,7 +541,7 @@ install_required_command() {
     install_packages "$reason" "$@" \
         || die "Failed to install required package(s): $*"
 
-    command -v "$command_name" >/dev/null \
+    command_available "$command_name" \
         || die "$command_name is still missing after installing package(s): $*"
 }
 
@@ -607,7 +616,7 @@ apt_buildx_package() {
 # Why: production setup must stay separate from dev builds
 verify_docker_installation() {
     local out
-    command -v docker >/dev/null \
+    command_available docker \
         || die "Docker client binary is missing after installation."
 
     out=$(docker compose version 2>&1) \
@@ -617,7 +626,7 @@ verify_docker_installation() {
 # What: installs docker-cli only if docker is still missing
 # Why: Trixie's docker.io no longer ships /usr/bin/docker
 ensure_apt_docker_client() {
-    if command -v docker >/dev/null; then
+    if command_available docker; then
         return 0
     fi
 
@@ -626,7 +635,7 @@ ensure_apt_docker_client() {
         apt_install "$APT_DOCKER_CLI" || die "Failed to install $APT_DOCKER_CLI (exit $?)."
     fi
 
-    command -v docker >/dev/null \
+    command_available docker \
         || die "Docker client binary is missing after installation. Install ${APT_DOCKER_CLI} or ${DOCKER_CE_CLI} manually, then rerun setup.sh."
 }
 
@@ -655,7 +664,7 @@ install_docker_apt_repo() {
             ;;
     esac
 
-    if [[ -z "$codename" ]] && command -v lsb_release >/dev/null; then
+    if [[ -z "$codename" ]] && command_available lsb_release; then
         codename=$(lsb_release -cs) || die "lsb_release -cs failed (exit $?)."
     fi
     [[ -n "$codename" ]] \
@@ -958,18 +967,18 @@ ensure_stack_requirements_installed() {
     # From: Issue #1683 | PR #1858
     assert_prebuilt_image_platform_supported
 
-    if ! command -v curl >/dev/null; then
+    if ! command_available curl; then
         install_curl
     fi
 
     # What: jq reads every JSON answer this script gets
     # Why: primary, Kea and DNS replies need a real parser
     # From: Issue #1683 | PR #1858
-    if ! command -v jq >/dev/null; then
+    if ! command_available jq; then
         install_required_command jq "jq is missing." jq
     fi
 
-    if ! command -v docker >/dev/null; then
+    if ! command_available docker; then
         install_docker
         print_ok "Docker installed"
     fi
@@ -2456,7 +2465,7 @@ assert_resolved_image_tag_platform_supported() {
     platform=$(host_image_platform "$arch") \
         || die "This host's architecture '${arch}' has no container image platform; LanCache-NG cannot run here."
 
-    command -v docker >/dev/null \
+    command_available docker \
         || die "docker is required to verify that image tag '${tag}' publishes a ${platform} image before continuing."
     buildx_out=$(docker buildx version 2>&1) \
         || die "docker buildx is required to verify that image tag '${tag}' publishes a ${platform} image before continuing (exit $?: ${buildx_out}). Install the ${DOCKER_BUILDX_PLUGIN} package, then rerun setup.sh."
@@ -2487,7 +2496,7 @@ assert_resolved_image_tag_platform_supported() {
 # What: true if systemctl exists and systemd runs as init
 # Why: a systemctl binary alone fails without an init
 systemd_available() {
-    command -v systemctl >/dev/null && [[ -d /run/systemd/system ]]
+    command_available systemctl && [[ -d /run/systemd/system ]]
 }
 
 # What: true if systemctl knows the unit file
@@ -2985,7 +2994,7 @@ lancache_channel_image_refs() {
         || die "Cannot read CI_PROMOTE_LOCK_REF (exit $?)."
     lock_ref="${lock_ref}/${pointer_channel}"
 
-    command -v docker >/dev/null \
+    command_available docker \
         || die "Docker is required to resolve LANCACHE_IMAGE_CHANNEL=${channel}."
     buildx_out=$(docker buildx version 2>&1) \
         || die "docker buildx is required to resolve LANCACHE_IMAGE_CHANNEL=${channel} (exit $?: ${buildx_out}). Install the ${DOCKER_BUILDX_PLUGIN} package, then rerun setup.sh."
@@ -3549,7 +3558,7 @@ install_missing_tools() {
     local -a missing=() packages=() tools=("$@")
     local tool package manager
     for tool in "${tools[@]}"; do
-        command -v "$tool" >/dev/null || missing+=("$tool")
+        command_available "$tool" || missing+=("$tool")
     done
     (( ${#missing[@]} == 0 )) && return 0
     print_warn "Missing required tool(s): ${missing[*]} — installing now..."
@@ -3562,7 +3571,7 @@ install_missing_tools() {
     apt-get update -y || die "apt-get update failed (exit $?); nothing was installed."
     apt_install "${packages[@]}" || die "Failed to install required tool(s): ${missing[*]}"
     for tool in "${missing[@]}"; do
-        command -v "$tool" >/dev/null \
+        command_available "$tool" \
             || die "$tool is still missing after installing package(s): ${packages[*]}"
     done
 }
@@ -3630,7 +3639,7 @@ die_no_stack_found() {
 # Why: backup and restore must handle damaged installs
 compose_stack_available() {
     local install_dir="$1"
-    [[ -f "$install_dir/docker-compose.yml" ]] && command -v docker >/dev/null
+    [[ -f "$install_dir/docker-compose.yml" ]] && command_available docker
 }
 
 # What: true if any compose container is running
@@ -3811,7 +3820,7 @@ restore_compose_volumes() {
 # From: Issue #456 | PR #1673
 guard_restore_shared_project_volumes() {
     local install_dir="$1" archived_install_dir="$2" project="$3" container working_dir containers
-    command -v docker >/dev/null || return 0
+    command_available docker || return 0
     containers=$(docker ps -a --filter "label=com.docker.compose.project=${project}" --format '{{.ID}}') \
         || die "Failed to list the containers of compose project $project (exit $?)."
     while IFS= read -r container; do
@@ -4461,7 +4470,7 @@ service_container_is_healthy() {
 # Why: a skipped check must not look like a pass
 require_functional_check_tool() {
     local tool="$1" probe_description="$2"
-    if ! command -v "$tool" >/dev/null; then
+    if ! command_available "$tool"; then
         print_error "Functional check failed: $probe_description requires '$tool', which is not installed"
         return 1
     fi
@@ -5014,7 +5023,7 @@ lancache_ui_cache_max_gb_override_is_valid() {
 # Why: checks the volume exists; docker run would create it
 lancache_read_ui_settings_override() {
     local install_dir="$1" env_file="$2" key="$3" project volume raw rc=0 settings_file
-    command -v docker >/dev/null || return 0
+    command_available docker || return 0
     require_helper_image
     project=$(compose_project_name "$install_dir" "$env_file") \
         || die "Cannot resolve the compose project of $install_dir (exit $?)."
@@ -5060,7 +5069,7 @@ cmd_converge_reconcile() {
     # What: a tick before the first install does nothing
     # Why: no compose file or .env exists to converge
     [[ -f "$install_dir/docker-compose.yml" ]] || return 0
-    command -v docker >/dev/null || return 0
+    command_available docker || return 0
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     [[ -f "$env_file" ]] || return 0
 
@@ -5171,7 +5180,7 @@ cmd_debug() {
     fi
 
     print_step "Health checks"
-    if ! command -v curl >/dev/null; then
+    if ! command_available curl; then
         print_warn "curl not found — health checks skipped"
     else
         local ip probe
@@ -5332,7 +5341,7 @@ logbundle_select_compressor() {
     local -a row
     rows=$(lancache_sot_list archive_compressors runtime) || exit $?
     while read -r -a row; do
-        if command -v "${row[1]}" >/dev/null; then
+        if command_available "${row[1]}"; then
             printf '%s\n' "${row[0]}"
             return 0
         fi
@@ -5344,7 +5353,7 @@ logbundle_select_compressor() {
 # Why: volumes are not host paths; ls runs in a container
 logbundle_named_volume_listing() {
     local install_dir="$1" env_file="$2" base_name="$3" subpath="$4" out="$5"
-    if ! command -v docker >/dev/null; then
+    if ! command_available docker; then
         printf 'docker not available; skipped\n' > "$out"
         return 0
     fi
@@ -6179,7 +6188,7 @@ cmd_secondary() {
     fi
 
     for cmd in curl docker jq; do
-        command -v "$cmd" >/dev/null \
+        command_available "$cmd" \
             || die "$cmd is not installed or is not in PATH; run: sudo $0 install-requirements-secondary"
     done
 
@@ -6589,7 +6598,7 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
 
     if [[ ! -f "$PROD_COMPOSE" ]]; then
         print_warn "No local repo found — cloning to ${DEFAULT_INSTALL_DIR}..."
-        if ! command -v git >/dev/null; then
+        if ! command_available git; then
             install_git
         fi
         setup_bootstrap_ref=$(resolve_setup_bootstrap_ref) || exit $?
