@@ -210,6 +210,28 @@ _ci_sha256_hex() {
     printf '%s\n' "${out%% *}"
 }
 
+# What: true if a whole line of the list equals the needle.
+# Why: one membership owner; no grep exit code to misread.
+# From: Issue #1683 | PR #1912
+_ci_list_has() {
+    local needle="$1" line
+    while IFS= read -r line; do
+        if [ "${line}" = "${needle}" ]; then return 0; fi
+    done <<< "$2"
+    return 1
+}
+
+# What: number of non-empty lines in the text.
+# Why: one counting owner; no grep exit code to misread.
+# From: Issue #1683 | PR #1912
+_ci_count_lines() {
+    local line n=0
+    while IFS= read -r line; do
+        if [ -n "${line}" ]; then n=$((n + 1)); fi
+    done <<< "$1"
+    printf '%s\n' "${n}"
+}
+
 # What: Enforce and create the /var/tmp CI temp root.
 # Why: bare mktemp and tools then use disk, not tmpfs.
 # From: Issue #1683 | PR #1858
@@ -704,7 +726,7 @@ _ci_platforms() {
         # Why: a foreign or full override drifts from SOT.
         # From: Issue #1683 | PR #1858
         while IFS= read -r p; do
-            grep -qxF -- "${p}" <<< "${global}" && continue
+            _ci_list_has "${p}" "${global}" && continue
             ci_log "[CI-ERROR-CORE-0126]" "service=\"${service}\" platform=\"${p}\" reason=\"override platform not in build_matrix\""
             return 2
         done <<< "${out}"
@@ -1048,7 +1070,7 @@ ci_cmd_codeql_analyze() {
     fi
     local langs
     langs="$(_ci_block_keys codeql_languages)" || return 2
-    if ! grep -qx -- "${lang}" <<< "${langs}"; then
+    if ! _ci_list_has "${lang}" "${langs}"; then
         ci_log "[CI-ERROR-CODEQL-0003]" "language=\"${lang}\" reason=\"not a SOT codeql_languages entry\""
         return 2
     fi
@@ -1094,7 +1116,7 @@ _ci_docs_only() {
             *.md|"${docs}"/*) ;;
             *) return 1 ;;
         esac
-        if grep -qxF -- "${f}" <<< "${named}"; then
+        if _ci_list_has "${f}" "${named}"; then
             ci_log "[CI-INFO-PLAN-0007]" "path=\"${f}\" reason=\"doc is a SOT-named input; not docs-only\""
             return 1
         fi
@@ -2822,7 +2844,7 @@ ci_cmd_aggregate() {
         n=$((n + 1))
     done
     if [ "${rc}" -eq 0 ]; then
-        printf 'aggregate records=%s\n' "$(printf '%s' "${records}" | grep -c .)"
+        printf 'aggregate records=%s\n' "$(_ci_count_lines "${records}")"
         return 0
     fi
     return "${rc}"
@@ -3008,7 +3030,7 @@ ci_cmd_changed_files() {
         ci_error "[CI-ERROR-CORE-0120]" "file=\"${out}\" reason=\"changed-file list not written\"" "${err}"
         return 2
     fi
-    ci_log "[CI-INFO-CORE-0121]" "file=\"${out}\" paths=$(grep -c . <<< "${list}") base=\"${base:-none}\""
+    ci_log "[CI-INFO-CORE-0121]" "file=\"${out}\" paths=$(_ci_count_lines "${list}") base=\"${base:-none}\""
     _ci_step_output "[CI-ERROR-CORE-0125]" file "${out}" || return 2
     printf '%s\n' "${out}"
 }
@@ -4715,7 +4737,7 @@ ci_cmd_rust_build() {
     # From: Issue #1683 | PR #1858
     local rustc_info
     rustc_info="$(rustc -vV)" || { ci_log "[CI-ERROR-RUSTBUILD-0004]" "reason=\"rustc -vV failed in build-tools\""; return 2; }
-    grep -qx "host: ${musl_target}" <<<"${rustc_info}" || { ci_error "[CI-ERROR-RUSTBUILD-0006]" "target=\"${musl_target}\" arg=\"${CI_ARG_TARGET}\" reason=\"target is not the build-tools rustc host\"" "${rustc_info}"; return 2; }
+    _ci_list_has "host: ${musl_target}" "${rustc_info}" || { ci_error "[CI-ERROR-RUSTBUILD-0006]" "target=\"${musl_target}\" arg=\"${CI_ARG_TARGET}\" reason=\"target is not the build-tools rustc host\"" "${rustc_info}"; return 2; }
     local masq p distcc_bin sccache_bin
     local -a drivers=()
     _CI_RB_DISTCC=0 _CI_RB_CCACHE=0 _CI_RB_CA=0 _CI_RB_PATH="${PATH}"
@@ -5072,7 +5094,7 @@ _ci_refresh_event() {
     local events event="${GITHUB_EVENT_NAME:-}"
     [ -n "${event}" ] || return 1
     events="$(_ci_required_field build_admission refresh_events blocklist)" || return 2
-    grep -qxF -- "${event}" <<< "${events}" || return 1
+    _ci_list_has "${event}" "${events}" || return 1
 }
 
 # What: Read the semantic build-impact verdict, fail-closed.
@@ -5461,7 +5483,7 @@ _ci_smoke_service() {
     fi
     _ci_image_smoke "[CI-ERROR-TEST-0008]" "${service}" "execute-smoke failed; missing lib?" \
         "${image}" "" "${checks}" || return "$?"
-    printf 'service=%s smoke=ok checks=%s\n' "${service}" "$(grep -c . <<< "${checks}")"
+    printf 'service=%s smoke=ok checks=%s\n' "${service}" "$(_ci_count_lines "${checks}")"
 }
 
 # What: run SOT smoke in an image: tools found, runs pass.
@@ -6211,7 +6233,7 @@ ci_cmd_promote() {
     _ci_require_ghcr_auth || return "$?"
     _ci_promote_all_current "${channel}" "${cand}" || arc=$?
     if [ "${arc}" -eq 0 ]; then
-        printf 'channel=%s result=already-promoted services=%s\n' "${channel}" "$(printf '%s\n' "${cand}" | grep -c '=')"
+        printf 'channel=%s result=already-promoted services=%s\n' "${channel}" "$(_ci_count_lines "${cand}")"
         return 0
     fi
     [ "${arc}" -eq 1 ] || return "${arc}"
@@ -6225,7 +6247,7 @@ ci_cmd_promote() {
     if _ci_promote_move_all "${channel}" "${cand}"; then rc=0; else rc=$?; fi
     _ci_promote_unlock "${channel}" || ci_log "[CI-WARN-PROMOTE-0011]" "channel=\"${channel}\" reason=\"lock release failed\""
     [ "${rc}" -eq 0 ] || return "${rc}"
-    printf 'channel=%s result=promoted services=%s\n' "${channel}" "$(printf '%s\n' "${cand}" | grep -c '=')"
+    printf 'channel=%s result=promoted services=%s\n' "${channel}" "$(_ci_count_lines "${cand}")"
 }
 
 # What: list promote targets for current git ref.
@@ -6567,10 +6589,10 @@ _ci_release_render() {
         title="$(_ci_capture 0 jq -r '.title' <<< "${pr}")" || return 2
         url="$(_ci_capture 0 jq -r '.url' <<< "${pr}")" || return 2
         text="$(_ci_capture 0 jq -r '[.labels.nodes[].name] | join("\n")' <<< "${pr}")" || return 2
-        [ -z "${skip}" ] || ! grep -qxF -- "${skip}" <<< "${text}" || continue
+        [ -z "${skip}" ] || ! _ci_list_has "${skip}" "${text}" || continue
         cat="${other}"
         while IFS= read -r body; do
-            if grep -qxF -- "${body}" <<< "${text}"; then
+            if _ci_list_has "${body}" "${text}"; then
                 cat="$(_ci_block_entry_field release_notes_categories "${body}" title)" || return 2
                 break
             fi
@@ -7318,7 +7340,7 @@ ci_cmd_gc() {
         rm -f "${CI_GC_ROOTS_FILE}"
         return 2
     fi
-    ci_log "[CI-INFO-GC-0030]" "mode=${mode} roots=$(grep -c . "${CI_GC_ROOTS_FILE}") reason=\"protected roots materialized\""
+    ci_log "[CI-INFO-GC-0030]" "mode=${mode} roots=$(_ci_count_lines "${roots}") reason=\"protected roots materialized\""
     _ci_gc_run "${mode}" || rc=$?
     rm -f "${CI_GC_ROOTS_FILE}"
     unset CI_GC_ROOTS_FILE
@@ -8769,7 +8791,7 @@ _ci_validate_kea_add() {
         "subnet_id=${sid}" "mac=${mac}" "ip=${ip}" "hostname=${host}" || return $?
     after="$(_ci_validate_kea_snapshots "${dir}")" || return 2
     new="${after##*$'\n'}"
-    if [ -z "${new}" ] || grep -qxF -- "${new}" <<< "${before}"; then
+    if [ -z "${new}" ] || _ci_list_has "${new}" "${before}"; then
         ci_log "[CI-ERROR-VALIDATE-0088]" "mac=\"${mac}\" before=\"${before//$'\n'/ }\" after=\"${after//$'\n'/ }\" reason=\"ui reservation write recorded no new Kea snapshot\""
         return 1
     fi
@@ -9346,7 +9368,7 @@ _ci_write_dist_config() {
 _ci_emit_secret_ref() {
     local dir="$1" id="$2" ids
     ids="$(_ci_runtime_secret_ids)"
-    if ! grep -qx "${id}" <<< "${ids}"; then
+    if ! _ci_list_has "${id}" "${ids}"; then
         ci_log "[CI-ERROR-VARIABLES-0014]" "id=\"${id}\" reason=\"secret id not in the central list\""
         return 2
     fi
@@ -9657,9 +9679,9 @@ ci_cmd_build_args() {
     local tools svc_list
     svc_list="$(ci_services)" || return 2
     tools="$(_ci_block_keys build_toolchain)" || return 2
-    if grep -qxF -- "${service}" <<< "${svc_list}"; then
+    if _ci_list_has "${service}" "${svc_list}"; then
         _ci_service_build_args "${service}" "${fmt}" "${platform}"
-    elif grep -qxF -- "${service}" <<< "${tools}"; then
+    elif _ci_list_has "${service}" "${tools}"; then
         _ci_build_tools_build_args "${fmt}"
     else
         ci_log "[CI-ERROR-BUILDARGS-0002]" "service=\"${service}\" reason=\"not a SOT build target\""
@@ -10761,7 +10783,7 @@ _ci_rh_clean_archive() {
     fi
     cands="$(_ci_rh_stray_archives)" || return 2
     for path in "$@"; do
-        if grep -qxF -- "${path}" <<< "${cands}"; then
+        if _ci_list_has "${path}" "${cands}"; then
             printf 'Removing confirmed stray archive: %s\n' "${path}"
             _ci_run "[CI-ERROR-RUNNER-0029]" "path=\"${path}\" reason=\"archive not removed\"" _ci_rh_root rm -f -- "${path}" || return 2
             removed=1
@@ -12806,7 +12828,7 @@ _ci_test_identity_gate() {
     for f in "$@"; do
         case "${f}" in
             *.md)
-                if grep -qxF -- "${f}" <<< "${md}"; then
+                if _ci_list_has "${f}" "${md}"; then
                     ci_log "[CI-INFO-TESTID-0005]" "path=\"${f}\" reason=\"doc is a test input; suite runs\""
                     printf 'run\n'
                     return 0
@@ -12941,7 +12963,7 @@ _ci_check_exit_evidence() {
 _ci_pr_check_exempt() {
     local authors
     authors="$(_ci_block_entry_list pr_policy "" check_exempt_authors)" || return 2
-    [ -n "${PR_AUTHOR:-}" ] && grep -qxF -- "${PR_AUTHOR}" <<< "${authors}"
+    [ -n "${PR_AUTHOR:-}" ] && _ci_list_has "${PR_AUTHOR}" "${authors}"
 }
 
 # What: Check a PR title's Conventional-Commit form.
@@ -15532,7 +15554,7 @@ PROG
             if [ -z "${id}" ]; then
                 e_secret+=("${t}: ${rel}: '${spec}' has no id or target"); continue
             fi
-            grep -qx -- "${id}" <<< "${allow}" || e_secret+=("${t}: ${rel}: mount id '${id}' is not in the central list")
+            _ci_list_has "${id}" "${allow}" || e_secret+=("${t}: ${rel}: mount id '${id}' is not in the central list")
         done <<< "${hits}"
         # What: COPY sources: the context or an edge.
         # Why: else the image identity goes stale.

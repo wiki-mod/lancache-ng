@@ -62,6 +62,16 @@ print_error(){ printf "  ${RED}✗${RESET} %s\n" "$*" >&2; }
 print_skip() { printf "  ${YELLOW}↷${RESET} SKIP: %s\n" "$*" >&2; }
 die()        { print_error "$*"; exit 1; }
 
+# What: true if a whole line of the list equals the needle
+# Why: one membership owner; no grep exit code to misread
+list_has_line() {
+    local needle="$1" line
+    while IFS= read -r line; do
+        if [[ "$line" == "$needle" ]]; then return 0; fi
+    done <<< "$2"
+    return 1
+}
+
 REPLY=""
 # What: list-prompts makes ask()/confirm() record prompts
 # Why: one shared recorder keeps the prompt walk in sync
@@ -760,7 +770,7 @@ rpm_installed_package_list() {
     installed=$(rpm -qa --qf '%{NAME}\n') \
         || die "Failed to read the rpm package database (exit $?)."
     for package in "$@"; do
-        if grep -qxF -- "$package" <<< "$installed"; then
+        if list_has_line "$package" "$installed"; then
             printf '%s\n' "$package"
         fi
     done
@@ -1144,7 +1154,7 @@ generate_secret_value() {
     # Why: an unlisted key would ship unredacted in bundles
     # From: Issue #1683 | PR #1858
     managed=$(managed_secret_env_keys)
-    grep -qxF -- "$name" <<< "$managed" \
+    list_has_line "$name" "$managed" \
         || die "Secret $name is not in managed_secret_env_keys; add it there so log bundles redact it."
 
     case "$kind" in
@@ -1552,7 +1562,7 @@ docker_volume_exists() {
         print_error "Failed to list Docker volumes (exit $?)."
         return 2
     }
-    grep -qxF -- "$1" <<< "$names"
+    list_has_line "$1" "$names"
 }
 
 # What: fills an array with the compose -f arguments
@@ -1890,7 +1900,7 @@ migrate_quickstart_install() (
     missing=""
     while IFS= read -r volume; do
         [[ -n "$volume" ]] || continue
-        grep -qxF -- "$volume" <<< "$prod_volumes" && continue
+        list_has_line "$volume" "$prod_volumes" && continue
         awk -v v="$volume" '$1 == v { f = 1 } END { exit !f }' <<< "$rows" && continue
         missing+=" $volume"
     done <<< "$old_volumes"
@@ -2660,7 +2670,7 @@ validate_lancache_image_tag() {
 # Why: AG-REL-010; hosts lack yq, so ci.sh cannot read it
 # From: Issue #1683 | PR #1858
 lancache_release_rows() {
-    local kind="$1" sot="$LANCACHE_SOT" text="$LANCACHE_SOT_TEXT" rows
+    local kind="$1" sot="$LANCACHE_SOT" text="$LANCACHE_SOT_TEXT" rows counts n_channel n_release n_pinned
     rows=$(awk '
         /^[^ #]/ { top = $0; sub(/:.*/, "", top); next }
         top != "release" || /^ *#/ || /^ *$/ { next }
@@ -2674,8 +2684,10 @@ lancache_release_rows() {
             gsub(/^\[|\] *$/, "", val); n = split(val, list, / *, */)
             for (i = 1; i <= n; i++) if (list[i] != "") print "alias", list[i], ch
         }' <<< "$text") || die "Failed to read the release block of ${sot}."
-    [[ "$(grep -c '^channel ' <<< "$rows")" -ge 1 && "$(grep -c '^release ' <<< "$rows")" -eq 1 \
-        && "$(grep -c '^pinned ' <<< "$rows")" -eq 1 ]] \
+    counts=$(awk '$1 == "channel" { c++ } $1 == "release" { r++ } $1 == "pinned" { p++ }
+        END { print c + 0, r + 0, p + 0 }' <<< "$rows") || die "Failed to count the release rows of ${sot}."
+    read -r n_channel n_release n_pinned <<< "$counts"
+    [[ "$n_channel" -ge 1 && "$n_release" -eq 1 && "$n_pinned" -eq 1 ]] \
         || die "${sot} needs release channels, one release_tags channel and pinned_channel."
     awk -v k="$kind" '$1 == k { sub(/^[^ ]+ /, ""); print }' <<< "$rows"
 }
@@ -2698,7 +2710,7 @@ validate_lancache_image_channel() {
     accepted=$(lancache_channel_words) || exit $?
     pinned=$(lancache_release_rows pinned) || exit $?
     accepted=$(printf '%s\n%s\n' "$accepted" "$pinned")
-    [[ -z "$channel" ]] || ! grep -qxF -- "$channel" <<< "$accepted" || return 0
+    [[ -z "$channel" ]] || ! list_has_line "$channel" "$accepted" || return 0
     valid=$(paste -sd' ' <<< "$accepted")
     retired=$(lancache_release_rows retired) || exit $?
     reason=$(awk -v c="$channel" '$1 == c { sub(/^[^ ]+ /, ""); print; exit }' <<< "$retired")
@@ -2837,7 +2849,7 @@ resolve_lancache_image_channel() {
     words=$(lancache_channel_words) || exit $?
     pinned=$(lancache_release_rows pinned) || exit $?
     release=$(lancache_release_rows release) || exit $?
-    if [[ -n "$tag" ]] && grep -qxF -- "$tag" <<< "$words"; then
+    if [[ -n "$tag" ]] && list_has_line "$tag" "$words"; then
         channel="${channel:-$tag}"
     elif [[ "$tag" == sha-* || "$tag" == v[0-9]* ]]; then
         channel="${channel:-$pinned}"
@@ -3052,7 +3064,7 @@ lancache_image_refs_fingerprint() {
 lancache_image_refs_for_tag() {
     local env_file="$1" tag="$2" channels registry prefix vars var slug
     channels=$(lancache_release_rows channel) || exit $?
-    if grep -qxF -- "$tag" <<< "$channels"; then
+    if list_has_line "$tag" "$channels"; then
         lancache_channel_image_refs "$env_file" "$tag"
         return
     fi
@@ -3098,7 +3110,7 @@ write_lancache_image_refs() {
 # From: Issue #1683 | PR #1912
 lancache_direct_image_tag() {
     local tag="$1" words="$2"
-    if [[ -n "$tag" ]] && grep -qxF -- "$tag" <<< "$words"; then
+    if [[ -n "$tag" ]] && list_has_line "$tag" "$words"; then
         lancache_stack_pointer_channel_for "$tag"
         return 0
     fi
@@ -3140,7 +3152,7 @@ resolve_lancache_image_tag() {
         channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$env_file") || exit $?
     fi
 
-    if [[ -n "$channel" ]] && grep -qxF -- "$channel" <<< "$words"; then
+    if [[ -n "$channel" ]] && list_has_line "$channel" "$words"; then
         lancache_stack_pointer_channel_for "$channel"
         return 0
     elif [[ -n "$channel" && "$channel" = "$pinned" ]]; then
@@ -3262,7 +3274,7 @@ migrate_env_for_update() (
         lancache_image_refs=$(lancache_image_refs_for_tag "$env_file" "$lancache_image_tag") \
             || die "Cannot name the images of ${lancache_image_tag} for ${env_file}; it stays unchanged (exit $?)."
     elif [[ "$preserve_image_tag" = "1" && -n "$existing_image_tag" && -n "$archived_refs" ]] \
-        && grep -qxF -- "$existing_image_tag" <<< "$stack_channels"; then
+        && list_has_line "$existing_image_tag" "$stack_channels"; then
         # What: a restore keeps archived channel pins
         # Why: re-resolving pulls the current stack
         # From: Issue #1683 | PR #1858
@@ -3776,7 +3788,7 @@ compose_project_has_named_volumes() {
     # Why: a live pipe can SIGPIPE under pipefail
     volume_names="$(docker volume ls --filter "label=com.docker.compose.project=${project}" --format '{{.Name}}')" \
         || die "Failed to list the volumes of compose project $project (exit $?)."
-    grep -q . <<<"$volume_names"
+    [[ -n "$volume_names" ]]
 }
 
 # What: archives named volumes; cache volume only in full
@@ -5023,7 +5035,7 @@ cmd_auto_update() {
 lancache_ui_channel_override_is_valid() {
     local selectable
     selectable=$(lancache_selectable_channels) || exit $?
-    grep -qxF -- "$1" <<< "$selectable"
+    list_has_line "$1" "$selectable"
 }
 
 # What: channels the wizard offers; first = default
@@ -6423,7 +6435,7 @@ cmd_secondary() {
         lancache_image_channel="$response_image_channel"
     fi
     if [[ -z "$lancache_image_channel" && -n "${response_image_tag:-}" ]] \
-        && grep -qxF -- "$response_image_tag" <<< "$channel_words"; then
+        && list_has_line "$response_image_tag" "$channel_words"; then
         lancache_image_channel="$response_image_tag"
     fi
     if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(sha-|v[0-9]) ]]; then
@@ -6438,7 +6450,7 @@ cmd_secondary() {
         tag_input=$(get_env_var LANCACHE_IMAGE_TAG "$existing_env_file") || exit $?
     fi
     if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "$pinned" && -z "$tag_input" && -n "$response_image_tag" ]] \
-        && ! grep -qxF -- "$response_image_tag" <<< "$channel_words"; then
+        && ! list_has_line "$response_image_tag" "$channel_words"; then
         tag_input="$response_image_tag"
     fi
     if [[ "$lancache_image_channel" != "$pinned" && -z "$explicit_lancache_image_tag" ]]; then
@@ -6851,7 +6863,7 @@ else
     channel_hint=$(paste -sd/ <<< "$selectable")
     while true; do
         ask "Release channel [$channel_hint]" "$pre_stable"
-        if grep -qxF -- "${REPLY,,}" <<< "$selectable"; then
+        if list_has_line "${REPLY,,}" "$selectable"; then
             LANCACHE_IMAGE_CHANNEL="${REPLY,,}"
             if [[ "$LANCACHE_IMAGE_CHANNEL" = "$pre_stable" ]]; then
                 print_ok "Using the $LANCACHE_IMAGE_CHANNEL channel (recommended pre-1.0)."
