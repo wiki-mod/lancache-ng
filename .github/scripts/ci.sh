@@ -10527,11 +10527,26 @@ _ci_rh_agent() {
     printf '%s' "${out:-?}"
 }
 
+# What: each stray archive with its size; rc 1 if none.
+# Why: check and clean list the archives one way.
+# From: Issue #1622 | PR #1624
+_ci_rh_archive_report() {
+    local prefix="$1" archives archive size rc=1
+    archives="$(_ci_rh_stray_archives)" || return 2
+    while IFS= read -r archive; do
+        [ -n "${archive}" ] || continue
+        rc=0
+        size="$(_ci_capture 0 du -h "${archive}")" || return 2
+        printf '%s%s (%s)\n' "${prefix}" "${archive}" "${size%%$'\t'*}"
+    done <<< "${archives}"
+    return "${rc}"
+}
+
 # What: read-only report of clone leftovers and host setup.
 # Why: review first; clean acts only on what check shows.
 # From: Issue #1622 | PR #1624
 _ci_rh_check() {
-    local root user hooks utim dir dirs st agent svc units archive archives size found=0 f groups rf sfile dgroup crc hpre hpost
+    local root user hooks utim dir dirs st agent svc units found=0 f groups rf sfile dgroup crc hpre hpost arc=0
     root="$(_ci_rh_val opt_root)" || return 2
     user="$(_ci_rh_val user)" || return 2
     hooks="$(_ci_rh_val hooks_dir)" || return 2
@@ -10571,15 +10586,12 @@ _ci_rh_check() {
     done <<< "${dirs}"
     [ "${found}" -eq 1 ] || printf '  (none found)\n'
     printf '\n--- Stray large archives under %s ---\n' "${root}"
-    found=0
-    archives="$(_ci_rh_stray_archives)" || return 2
-    while IFS= read -r archive; do
-        [ -n "${archive}" ] || continue
-        found=1
-        size="$(_ci_capture 0 du -h "${archive}")" || return 2
-        printf '  %s (%s)\n' "${archive}" "${size%%$'\t'*}"
-    done <<< "${archives}"
-    [ "${found}" -eq 1 ] || printf '  (none found)\n'
+    _ci_rh_archive_report '  ' || arc=$?
+    case "${arc}" in
+        0) ;;
+        1) printf '  (none found)\n' ;;
+        *) return 2 ;;
+    esac
     printf '\n--- Sudoers and docker group for %s ---\n' "${user}"
     if _ci_rh_root test -f "${sfile}"; then
         printf '  %s: present\n' "${sfile}"
@@ -10620,7 +10632,7 @@ _ci_rh_confirmed() {
 # Why: only identity-proven leftovers go; archives stay.
 # From: Issue #1622 | PR #1624
 _ci_rh_clean() {
-    local dir dirs st svc units all archive archives size removed=0 found=0
+    local dir dirs st svc units all removed=0 arc=0
     _ci_rh_confirmed CONFIRM_CLEAN || return 2
     dirs="$(_ci_rh_runner_dirs)" || return 2
     while IFS= read -r dir; do
@@ -10647,14 +10659,12 @@ _ci_rh_clean() {
             removed=1
         fi
     done <<< "${dirs}"
-    archives="$(_ci_rh_stray_archives)" || return 2
-    while IFS= read -r archive; do
-        [ -n "${archive}" ] || continue
-        found=1
-        size="$(_ci_capture 0 du -h "${archive}")" || return 2
-        printf 'NOT removed (size and extension cannot prove origin): %s (%s)\n' "${archive}" "${size%%$'\t'*}"
-    done <<< "${archives}"
-    [ "${found}" -eq 0 ] || printf 'Review the paths, then: ci.sh runner-host clean-archive <exact-path>...\n'
+    _ci_rh_archive_report 'NOT removed (size and extension cannot prove origin): ' || arc=$?
+    case "${arc}" in
+        0) printf 'Review the paths, then: ci.sh runner-host clean-archive <exact-path>...\n' ;;
+        1) ;;
+        *) return 2 ;;
+    esac
     if [ "${removed}" -eq 0 ]; then printf 'Nothing removed by clean.\n'; else printf 'Clean complete. Re-run check to confirm.\n'; fi
 }
 
