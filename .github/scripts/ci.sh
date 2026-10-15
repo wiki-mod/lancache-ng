@@ -2370,6 +2370,22 @@ _ci_lock_holder_ended() {
     return 1
 }
 
+# What: fetch a ref in full; print its head subject.
+# Why: lock holders and verified marks live in the subject.
+# From: Issue #1683 | PR #1912
+_ci_ref_subject() {
+    local remote="$1" ref="$2" retry="${3:-0}"
+    # What: full fetch of a one-commit ref; retry on ask.
+    # Why: shallow breaks the next push; loops retry above.
+    # From: Issue #1683 | PR #1912
+    if [ "${retry}" = 1 ]; then
+        _ci_retry git git fetch --quiet "${remote}" "${ref}" >/dev/null || return 2
+    else
+        _ci_capture 0 git fetch --quiet "${remote}" "${ref}" || return 2
+    fi
+    _ci_capture 0 git log -1 --format=%s FETCH_HEAD
+}
+
 # What: One non-blocking lock acquisition attempt.
 # Why: create, or take over the lock of an ended holder.
 # From: Issue #1683 | PR #1912
@@ -2385,11 +2401,7 @@ _ci_lock_try() {
         return "$?"
     fi
     [ "${rc}" -eq 0 ] || return 3
-    # What: no _ci_retry, full fetch; a lock has no parent.
-    # Why: acquire retries; shallow breaks the next push.
-    # From: Issue #1683 | PR #1912
-    _ci_capture 0 git fetch --quiet "${remote}" "${ref}" || return 3
-    prev="$(_ci_capture 0 git log -1 --format=%s FETCH_HEAD)" || return 3
+    prev="$(_ci_ref_subject "${remote}" "${ref}")" || return 3
     # What: run state only on ask; git-only polls between.
     # Why: AG-CI-020: run state reads stay >= 300 s apart.
     # From: Issue #1683 | PR #1912
@@ -2461,11 +2473,7 @@ _ci_lock_release() {
     # From: Issue #1683 | PR #1858
     [ "${rc}" -ne 1 ] || return 0
     [ "${rc}" -eq 0 ] || return 1
-    # What: retried here, full fetch; a lock has no parent.
-    # Why: no outer loop; shallow breaks the next push.
-    # From: Issue #1683 | PR #1912
-    _ci_retry git git fetch --quiet "${remote}" "${ref}" >/dev/null || return 1
-    held="$(_ci_capture 0 git log -1 --format=%s FETCH_HEAD)" || return 1
+    held="$(_ci_ref_subject "${remote}" "${ref}" 1)" || return 1
     if [ "${held}" != "${note}" ]; then
         ci_log "[CI-INFO-CAS-0007]" "ref=\"${ref}\" holder=\"${held}\" mine=\"${note}\" reason=\"lock reassigned; not released\""
         return 0
@@ -2523,11 +2531,7 @@ _ci_build_lock_busy() {
     _ci_cas_ref_sha "${remote}" "${ref}" >/dev/null || rc=$?
     [ "${rc}" -ne 1 ] || return 1
     [ "${rc}" -eq 0 ] || return 2
-    # What: full fetch of a one-commit ref; no shallow repo.
-    # Why: a shallow repo makes the next ref push fail.
-    # From: Issue #1683 | PR #1912
-    _ci_capture 0 git fetch --quiet "${remote}" "${ref}" || return 2
-    holder="$(_ci_capture 0 git log -1 --format=%s FETCH_HEAD)" || return 2
+    holder="$(_ci_ref_subject "${remote}" "${ref}")" || return 2
     [ "${holder}" != "$(_ci_lock_note build "$2" "$3")" ] || return 1
     rc=0; _ci_lock_holder_ended "${holder}" || rc=$?
     case "${rc}" in
@@ -2563,8 +2567,7 @@ _ci_verified_has() {
     _ci_cas_ref_sha "${remote}" "${ref}" >/dev/null || rc=$?
     [ "${rc}" -ne 1 ] || return 1
     [ "${rc}" -eq 0 ] || return 2
-    _ci_capture 0 git fetch --quiet "${remote}" "${ref}" || return 2
-    subject="$(_ci_capture 0 git log -1 --format=%s FETCH_HEAD)" || return 2
+    subject="$(_ci_ref_subject "${remote}" "${ref}")" || return 2
     [ "${subject}" = "$(_ci_verified_note "$1" "$2" "$3")" ] || return 1
 }
 
