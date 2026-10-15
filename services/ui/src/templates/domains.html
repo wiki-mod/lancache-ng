@@ -36,23 +36,23 @@
 
   <div class="flex flex-wrap items-center gap-2 border-b border-slate-700">
     <button type="button" data-dns-tab="cdn"
-            class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
+            class="tab dns-tab-btn">
       CDN-Domains
     </button>
     <button type="button" data-dns-tab="lan"
-            class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
+            class="tab dns-tab-btn">
       LAN
     </button>
     <button type="button" data-dns-tab="ptr"
-            class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
+            class="tab dns-tab-btn">
       PTR (Reverse)
     </button>
     <button type="button" data-dns-tab="settings"
-            class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
+            class="tab dns-tab-btn">
       Settings
     </button>
     <button type="button" data-dns-tab="zones"
-            class="dns-tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
+            class="tab dns-tab-btn">
       Zone-Snapshots
     </button>
   </div>
@@ -76,7 +76,7 @@
                required
                class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500">
         <button type="submit"
-                class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+                class="btn btn-blue">
           Hinzufügen
         </button>
       </form>
@@ -121,7 +121,7 @@
             <input type="hidden" name="domain" value="{{ domain.raw }}">
             <button type="submit"
                     onclick="return confirm('{{ domain.display }} aus der Domain-Liste entfernen?\nDer Proxy wird ggf. neu gestartet, falls der HTTPS-Modus aktiv ist.')"
-                    class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
+                    class="btn btn-sm btn-ghost-red">
               Entfernen
             </button>
           </form>
@@ -166,7 +166,7 @@
                  required data-lan-record-content
                  class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
           <button type="submit"
-                  class="bg-green-600 hover:bg-green-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+                  class="btn btn-green">
             Hinzufügen
           </button>
         </div>
@@ -195,7 +195,7 @@
                     data-record-name="{{ record.name }}"
                     data-record-type="{{ record.type }}"
                     onclick="return confirmRemoveRecord(this)"
-                    class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
+                    class="btn btn-sm btn-ghost-red">
               Entfernen
             </button>
           </form>
@@ -239,7 +239,7 @@
         <div class="flex gap-2">
           {{ <ttl_input ttl_default={record_ttl_default} ttl_max={ttl_max}/> }}
           <button type="submit"
-                  class="bg-green-600 hover:bg-green-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+                  class="btn btn-green">
             Hinzufügen
           </button>
         </div>
@@ -266,7 +266,7 @@
                     data-ptr-ip="{{ ptr.ip }}"
                     data-ptr-host="{{ ptr.hostname }}"
                     onclick="return confirmRemovePtr(this)"
-                    class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
+                    class="btn btn-sm btn-ghost-red">
               Entfernen
             </button>
           </form>
@@ -302,7 +302,7 @@
           </label>
         </div>
         <button type="submit"
-                class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+                class="btn btn-blue">
           Speichern
         </button>
       </form>
@@ -362,7 +362,7 @@
         </div>
         <button type="submit"
                 {% if not ddns_tsig_key_configured %}disabled{% endif %}
-                class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-blue-600">
+                class="btn btn-blue">
           Speichern &amp; DNS neu starten
         </button>
       </form>
@@ -401,8 +401,8 @@
             <table class="w-full text-sm">
               <thead class="border-b border-slate-700">
                 <tr>
-                  <th class="text-left py-2 text-slate-300">Erstellt</th>
-                  <th class="text-left py-2 text-slate-300">Aktion</th>
+                  <th class="th">Erstellt</th>
+                  <th class="th">Aktion</th>
                 </tr>
               </thead>
               <tbody>
@@ -419,7 +419,7 @@
                       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                       <input type="hidden" name="zone" value="{{ group.zone }}">
                       <input type="hidden" name="snapshot_id" value="{{ snapshot.id }}">
-                      <button type="submit" class="text-xs px-2 py-1 bg-amber-900 hover:bg-amber-800 text-amber-100 rounded">
+                      <button type="submit" class="btn btn-sm btn-warn">
                         Zurückrollen
                       </button>
                     </form>
@@ -465,12 +465,7 @@
     });
 
     document.querySelectorAll('.dns-tab-btn').forEach((button) => {
-      const isActive = button.dataset.dnsTab === tabName;
-      button.classList.toggle('border-blue-500', isActive);
-      button.classList.toggle('text-blue-300', isActive);
-      button.classList.toggle('text-slate-400', !isActive);
-      button.classList.toggle('hover:text-slate-200', !isActive);
-      button.classList.toggle('text-slate-200', isActive);
+      button.classList.toggle('active', button.dataset.dnsTab === tabName);
     });
   }
 

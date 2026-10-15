@@ -75,7 +75,7 @@
         </select>
       </div>
       <button type="submit"
-              class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+              class="btn btn-blue">
         Speichern
       </button>
     </form>
@@ -116,7 +116,7 @@
             </div>
           </div>
           <button type="submit"
-                  class="bg-amber-600 hover:bg-amber-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+                  class="btn btn-amber">
             Proxy-Werte speichern
           </button>
         </form>
@@ -139,7 +139,7 @@
             {{ <text_field label="Upstream DHCP server" name="upstream_dhcp_ip" tone="bg-slate-800 border-slate-600" value={dhcp_upstream_dhcp_ip} placeholder="10.0.0.1" required={true} hint="The real DHCP server every relayed request is forwarded to."/> }}
           </div>
           <button type="submit"
-                  class="bg-sky-600 hover:bg-sky-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+                  class="btn btn-sky">
             Relay-Werte speichern
           </button>
         </form>
@@ -175,7 +175,7 @@
         {# Why: summary above; hidden without details #}
         <ul id="check-client-details" class="text-xs text-slate-400 mt-1 ml-4 list-disc hidden"></ul>
       </div>
-      <button onclick="checkDhcpConflict()" class="px-3 py-1 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded">
+      <button onclick="checkDhcpConflict()" class="btn btn-slate">
         Erneut prüfen
       </button>
     </div>
@@ -194,9 +194,7 @@
           heißt nicht automatisch, dass auch DNS gepflegt werden soll.
         </p>
       </div>
-      <span class="text-xs px-2 py-1 rounded {% if dhcp_ddns_enabled %}bg-green-900 text-green-200{% else %}bg-slate-700 text-slate-200{% endif %}">
-        {% if dhcp_ddns_enabled %}aktiv{% else %}inaktiv{% endif %}
-      </span>
+      {{ <on_off_badge on={dhcp_ddns_enabled}/> }}
     </div>
     <form method="POST" action="{{ routes.dhcp_ddns | safe }}" class="mt-3 grid gap-3 md:grid-cols-[1fr_auto] items-end">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -209,7 +207,7 @@
         </select>
       </div>
       <button type="submit"
-              class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+              class="btn btn-blue">
         Speichern
       </button>
     </form>
@@ -218,7 +216,7 @@
   <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-lg font-semibold text-white">Subnetze</h2>
-      <button onclick="toggleAddSubnet()" class="px-3 py-1 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded">
+      <button onclick="toggleAddSubnet()" class="btn btn-blue">
         + Subnet hinzufügen
       </button>
     </div>
@@ -229,10 +227,10 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         {{ <subnet_fields tone="bg-slate-600 border-slate-500" ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.ntp} dns_primary={dhcp_dns_primary} dns_secondary={dhcp_dns_secondary} lease_time={default_lease_time} domain="lan" ntp_servers={dhcp_ntp_servers}/> }}
         <div class="flex gap-2">
-          <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-medium">
+          <button type="submit" class="btn btn-blue">
             Hinzufügen
           </button>
-          <button type="button" onclick="toggleAddSubnet()" class="px-4 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded text-sm">
+          <button type="button" onclick="toggleAddSubnet()" class="btn btn-slate">
             Abbrechen
           </button>
         </div>
@@ -254,14 +252,14 @@
           {% endif %}
         </div>
         <div class="flex gap-2">
-          <button onclick="toggleEditSubnet({{ subnet.id }})" class="text-xs px-2 py-1 bg-slate-600 hover:bg-slate-500 text-white rounded">
+          <button onclick="toggleEditSubnet({{ subnet.id }})" class="btn btn-sm btn-slate">
             Bearbeiten
           </button>
           <form method="POST" action="{{ routes.subnet_remove | safe }}" class="inline"
             onsubmit="return confirm('Subnet {{ subnet.subnet }} löschen?')">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="id" value="{{ subnet.id }}">
-            <button type="submit" class="text-xs px-2 py-1 bg-red-900 hover:bg-red-800 text-red-200 rounded">
+            <button type="submit" class="btn btn-sm btn-danger">
               Löschen
             </button>
           </form>
@@ -274,10 +272,10 @@
           <input type="hidden" name="id" value="{{ subnet.id }}">
           {{ <subnet_fields tone="bg-slate-700 border-slate-600" ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.ntp} subnet={subnet.subnet} gateway={subnet.gateway} dns_primary={subnet.dns_primary} dns_secondary={subnet.dns_secondary} pool_start={subnet.pool_start} pool_end={subnet.pool_end} lease_time={subnet.lease_time} domain={subnet.domain} ntp_servers={subnet.ntp_servers}/> }}
           <div class="flex gap-2">
-            <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-medium">
+            <button type="submit" class="btn btn-blue">
               Speichern
             </button>
-            <button type="button" onclick="toggleEditSubnet({{ subnet.id }})" class="px-4 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded text-sm">
+            <button type="button" onclick="toggleEditSubnet({{ subnet.id }})" class="btn btn-slate">
               Abbrechen
             </button>
           </div>
@@ -308,7 +306,7 @@
               <input type="hidden" name="subnet_id" value="{{ subnet.id }}">
               <input type="hidden" name="code" value="{{ option.code }}">
               <input type="hidden" name="data" value="{{ option.data }}">
-              <button type="submit" class="text-xs px-2 py-1 bg-red-900 hover:bg-red-800 text-red-200 rounded">
+              <button type="submit" class="btn btn-sm btn-danger">
                 Entfernen
               </button>
             </form>
@@ -324,7 +322,7 @@
           <input type="hidden" name="subnet_id" value="{{ subnet.id }}">
           {{ <text_field label="Options-Code" name="code" tone="bg-slate-800 border-slate-600" type="number" min={option_code_min} max={option_code_max} placeholder="66" required={true}/> }}
           {{ <text_field label="Wert" name="data" tone="bg-slate-800 border-slate-600" placeholder="192.168.1.10 oder bootfile.efi" required={true}/> }}
-          <button type="submit" class="px-4 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded text-sm font-medium">
+          <button type="submit" class="btn btn-slate">
             Option hinzufügen
           </button>
         </form>
@@ -353,7 +351,7 @@
         {{ <text_field label="Hostname" name="hostname" tone="bg-slate-600 border-slate-500" placeholder="mydevice"/> }}
       </div>
       <p class="text-xs text-slate-500">Die Reservierung nutzt einfache Felder; zusätzliche Kea-JSON-Metadaten sind in der UI bewusst ausgeblendet.</p>
-      <button type="submit" class="w-full px-3 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded text-sm font-medium">
+      <button type="submit" class="btn btn-slate w-full">
         + Hinzufügen
       </button>
     </form>
@@ -372,7 +370,7 @@
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="subnet_id" value="{{ res.subnet_id }}">
           <input type="hidden" name="mac" value="{{ res.mac }}">
-          <button type="submit" class="text-xs px-2 py-1 bg-red-900 hover:bg-red-800 text-red-200 rounded">
+          <button type="submit" class="btn btn-sm btn-danger">
             Entfernen
           </button>
         </form>
@@ -390,12 +388,12 @@
       <table class="w-full text-sm">
         <thead class="border-b border-slate-700">
           <tr>
-            <th class="text-left py-2 text-slate-300">IP-Adresse</th>
-            <th class="text-left py-2 text-slate-300">MAC-Adresse</th>
-            <th class="text-left py-2 text-slate-300">Hostname</th>
-            <th class="text-left py-2 text-slate-300">Subnet</th>
-            <th class="text-left py-2 text-slate-300">Ablauf</th>
-            <th class="text-left py-2 text-slate-300">Aktion</th>
+            <th class="th">IP-Adresse</th>
+            <th class="th">MAC-Adresse</th>
+            <th class="th">Hostname</th>
+            <th class="th">Subnet</th>
+            <th class="th">Ablauf</th>
+            <th class="th">Aktion</th>
           </tr>
         </thead>
         <tbody>
@@ -413,7 +411,7 @@
                 onsubmit="return confirm('Lease {{ lease.ip }} freigeben?')">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="ip" value="{{ lease.ip }}">
-                <button type="submit" class="text-xs px-2 py-1 bg-amber-900 hover:bg-amber-800 text-amber-100 rounded">
+                <button type="submit" class="btn btn-sm btn-warn">
                   Freigeben
                 </button>
               </form>
@@ -447,8 +445,8 @@
       <table class="w-full text-sm">
         <thead class="border-b border-slate-700">
           <tr>
-            <th class="text-left py-2 text-slate-300">Erstellt</th>
-            <th class="text-left py-2 text-slate-300">Aktion</th>
+            <th class="th">Erstellt</th>
+            <th class="th">Aktion</th>
           </tr>
         </thead>
         <tbody>
@@ -462,7 +460,7 @@
                 onsubmit="return confirm('Auf diesen Snapshot zurückrollen? Die aktuelle DHCP-Konfiguration wird ersetzt.')">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="snapshot_id" value="{{ snapshot.id }}">
-                <button type="submit" class="text-xs px-2 py-1 bg-amber-900 hover:bg-amber-800 text-amber-100 rounded">
+                <button type="submit" class="btn btn-sm btn-warn">
                   Zurückrollen
                 </button>
               </form>

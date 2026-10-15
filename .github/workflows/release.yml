@@ -30,19 +30,15 @@ concurrency:
 defaults:
   run:
     shell: bash
-# What: GHCR creds for ci.sh; one RELEASE_TAG for all jobs.
+# What: GHCR token for ci.sh; one RELEASE_TAG for all jobs.
 # Why: auth is ci.sh policy; the workflow only sets env.
 # From: Issue #1683
 env:
-  GHCR_USERNAME: ${{ github.actor }}
   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-  # What: LAN proxy inputs; ci.sh applies them self-hosted.
-  # Why: AG-CI-009; ci.sh is the one proxy policy owner.
+  # What: LAN proxy CA secret; ci.sh uses it self-hosted.
+  # Why: secrets are not in CI_VARIABLES; vars are.
   # From: Issue #1683 | PR #1858
-  PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
-  PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
-  PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
   PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
   # What: all repo/org variables once, as json, for ci.sh.
   # Why: ci.sh reads vars by name; YAML lists none of them.

@@ -41,7 +41,6 @@ defaults:
 # Why: ci.sh owns auth; workflow only wires the env
 # From: Issue #1683
 env:
-  GHCR_USERNAME: ${{ github.actor }}
   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   # What: optional Docker Hub login for ci.sh pulls.
   # Why: anonymous docker.io pulls hit the shared-IP limit.
@@ -53,12 +52,9 @@ env:
   # From: Issue #1683 | PR #1858
   BASE_SHA: ${{ github.event.pull_request.base.sha }}
   BEFORE_SHA: ${{ github.event.before }}
-  # What: wire LAN proxy for self-hosted runners
-  # Why: AG-CI-009; ci.sh is the sole proxy policy owner.
+  # What: LAN proxy CA secret; ci.sh uses it self-hosted.
+  # Why: secrets are not in CI_VARIABLES; vars are.
   # From: Issue #1683 | PR #1858
-  PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
-  PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
-  PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
   PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
   # What: all repo/org variables once, as json, for ci.sh.
   # Why: ci.sh reads vars by name; YAML lists none of them.
@@ -169,7 +165,7 @@ jobs:
     # What: contents write for the ci.sh build lock refs.
     # Why: the lock is a ci.sh git ref, no YAML group.
     # From: Issue #1683 | PR #1912
-    permissions:
+    permissions: &ship_write
       actions: read
       contents: write
       packages: write
@@ -379,7 +375,7 @@ jobs:
       credentials: *ghcr_credentials
       volumes:
         - ${{ needs.platform.outputs.validate-dir }}:${{ needs.platform.outputs.validate-dir }}
-    permissions:
+    permissions: &packages_read
       contents: read
       packages: read
     steps:
@@ -401,10 +397,7 @@ jobs:
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['promote'] }}
     container: *bt_platform
-    permissions:
-      actions: read
-      contents: write
-      packages: write
+    permissions: *ship_write
     env:
       CI_STACK_VALIDATED: SUCCESS
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -452,14 +445,16 @@ jobs:
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['project-board'] }}
     container: *bt_platform
-    permissions:
-      contents: read
-      packages: read
+    permissions: *packages_read
     env:
       ISSUE_NUMBER: ${{ github.event.issue.number }}
     steps:
       - *bootstrap
-      - name: Add the issue to the project board
+      # What: add the issue or PR to the board (step PAT).
+      # Why: GITHUB_TOKEN cannot write org Projects v2.
+      # From: Issue #1683 | PR #1858
+      - &board_add
+        name: Add the issue or PR to the project board
         env:
           GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: bash .github/scripts/ci.sh board-add
@@ -502,13 +497,7 @@ jobs:
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
         run: bash .github/scripts/ci.sh pr-labels
-      # What: add the PR to the project board (step PAT).
-      # Why: GITHUB_TOKEN cannot write org Projects v2.
-      # From: Issue #1683 | PR #1858
-      - name: Add the PR to the project board
-        env:
-          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-        run: bash .github/scripts/ci.sh board-add
+      - *board_add
       # What: PR labels, milestone and board placement
       # Why: only the board read needs the PAT
       # From: Issue #1683 | PR #1858

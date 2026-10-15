@@ -24,19 +24,15 @@ defaults:
 # Why: ci.sh owns auth; workflow only wires the env
 # From: Issue #1683
 env:
-  GHCR_USERNAME: ${{ github.actor }}
   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   # What: optional Docker Hub login for ci.sh pulls.
   # Why: anonymous docker.io pulls hit the shared-IP limit.
   # From: Issue #1095 | PR #1858
   DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
   DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-  # What: wire LAN proxy for self-hosted runners
-  # Why: AG-CI-009; ci.sh is the sole proxy policy owner.
+  # What: LAN proxy CA secret; ci.sh uses it self-hosted.
+  # Why: secrets are not in CI_VARIABLES; vars are.
   # From: Issue #1683 | PR #1858
-  PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
-  PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
-  PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
   PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
   # What: all repo/org variables once, as json, for ci.sh.
   # Why: ci.sh reads vars by name; YAML lists none of them.
@@ -84,7 +80,8 @@ jobs:
       # What: switch to the nightly source ref from the SOT
       # Why: a schedule run checks out the default branch
       # From: Issue #1683 | PR #1858
-      - name: Check out the nightly source ref
+      - &nightly_source
+        name: Check out the nightly source ref
         id: source
         run: bash .github/scripts/ci.sh channel-checkout nightly
       - name: Resolve the build-tools image
@@ -391,8 +388,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - *bootstrap
-      - name: Check out the nightly source ref
-        run: bash .github/scripts/ci.sh channel-checkout nightly
+      - *nightly_source
       - name: Report the nightly outcome
         env:
           CI_NEEDS: ${{ toJSON(needs) }}

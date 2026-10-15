@@ -25,6 +25,9 @@ AUTO_UPDATE_TIMER_UNIT="lancache-auto-update.timer"
 # Why: one owner each; rollback must find the backups
 # From: Issue #1683 | PR #1858
 BACKUP_ROOT="${LANCACHE_BACKUP_ROOT:-/var/backups/lancache-ng}"
+# What: bootstrap copy of the SOT LANCACHE_REPO_URL
+# Why: curl | bash clones before any SOT file exists
+# From: Issue #1683 | PR #1912
 LANCACHE_REPO_URL="https://github.com/wiki-mod/lancache-ng"
 # What: Docker's repo root and Docker CE package names
 # Why: apt, rpm, conflict guard and prompts share them
@@ -61,6 +64,16 @@ print_warn() { printf "  ${YELLOW}⚠${RESET} %s\n" "$*"; }
 print_error(){ printf "  ${RED}✗${RESET} %s\n" "$*" >&2; }
 print_skip() { printf "  ${YELLOW}↷${RESET} SKIP: %s\n" "$*" >&2; }
 die()        { print_error "$*"; exit 1; }
+
+# What: true if a whole line of the list equals the needle
+# Why: one membership owner; no grep exit code to misread
+list_has_line() {
+    local needle="$1" line
+    while IFS= read -r line; do
+        if [[ "$line" == "$needle" ]]; then return 0; fi
+    done <<< "$2"
+    return 1
+}
 
 REPLY=""
 # What: list-prompts makes ask()/confirm() record prompts
@@ -106,6 +119,23 @@ ask() {
     printf '  %s%s%s [%s]: ' "${BOLD}" "$prompt" "${RESET}" "$default"
     read -r REPLY < /dev/tty
     REPLY="${REPLY:-$default}"
+}
+
+# What: asks until the answer passes a check function
+# Why: one owner of the ask, check and retry loop
+# From: Issue #1683 | PR #1912
+ask_checked() {
+    local -n _ask_checked_ref="$1"
+    local prompt="$2" default="$3" check="$4" error="$5" optional="${6:-0}" retry_default="$3"
+    [[ "$optional" != 1 ]] || retry_default=""
+    ask "$prompt" "$default"
+    while true; do
+        _ask_checked_ref="$REPLY"
+        [[ "$optional" = 1 && -z "$_ask_checked_ref" ]] && break
+        "$check" "$_ask_checked_ref" && break
+        print_error "${error}: ${_ask_checked_ref}"
+        ask "$prompt" "$retry_default"
+    done
 }
 
 # What: a SOT 0/1 or true/false default as Y or N
@@ -354,10 +384,7 @@ secondary_choose_listen_ip() {
 
         suggestion=$(secondary_suggest_alternate_listen_ip "$listen_ip") \
             || (( $? == 1 )) || exit 2
-        ask "Use another Secondary bind IP" "${suggestion:-$listen_ip}"
-        listen_ip="$REPLY"
-        is_valid_ipv4 "$listen_ip" \
-            || { print_error "Invalid IPv4 address: $listen_ip"; continue; }
+        ask_checked listen_ip "Use another Secondary bind IP" "${suggestion:-$listen_ip}" is_valid_ipv4 "Invalid IPv4 address"
     done
 }
 
@@ -760,7 +787,7 @@ rpm_installed_package_list() {
     installed=$(rpm -qa --qf '%{NAME}\n') \
         || die "Failed to read the rpm package database (exit $?)."
     for package in "$@"; do
-        if grep -qxF -- "$package" <<< "$installed"; then
+        if list_has_line "$package" "$installed"; then
             printf '%s\n' "$package"
         fi
     done
@@ -1099,11 +1126,11 @@ get_env_assignment_value_raw_nonempty() {
 # Why: a read error must stop setup, never read as absent
 # From: Issue #1683 | PR #1858
 env_key_exists() {
-    local key="$1" env_file="$2" rc=0
+    local key="$1" env_file="$2" rc=0 hits
     [[ -e "$env_file" ]] || return 1
-    grep -q "^${key}=" "$env_file" || rc=$?
+    hits=$(grep "^${key}=" "$env_file") || rc=$?
     [[ "$rc" -le 1 ]] || die "Failed to read $env_file while looking up $key (exit $rc)."
-    return "$rc"
+    [[ -n "$hits" ]]
 }
 
 # What: true if the key has a non-empty parsed value
@@ -1144,7 +1171,7 @@ generate_secret_value() {
     # Why: an unlisted key would ship unredacted in bundles
     # From: Issue #1683 | PR #1858
     managed=$(managed_secret_env_keys)
-    grep -qxF -- "$name" <<< "$managed" \
+    list_has_line "$name" "$managed" \
         || die "Secret $name is not in managed_secret_env_keys; add it there so log bundles redact it."
 
     case "$kind" in
@@ -1243,10 +1270,10 @@ set_env_key() {
     fi
 }
 
-# What: sets raw value without character validation
-# Why: raw values may contain ${VAR} interpolation
-set_env_assignment() {
-    local key="$1" assignment_value="$2" env_file="$3"
+# What: dies on a bad .env key or a newline in a raw value
+# Why: one owner of the raw-assignment check
+validate_env_assignment() {
+    local key="$1" assignment_value="$2"
     case "$key" in
         ""|*[!A-Za-z0-9_]*|[0-9]*)
             die "Invalid .env key: $key"
@@ -1257,6 +1284,13 @@ set_env_assignment() {
             die "$key contains a newline and cannot be copied into .env."
             ;;
     esac
+}
+
+# What: sets raw value without character validation
+# Why: raw values may contain ${VAR} interpolation
+set_env_assignment() {
+    local key="$1" assignment_value="$2" env_file="$3"
+    validate_env_assignment "$key" "$assignment_value"
 
     if env_key_exists "$key" "$env_file"; then
         rewrite_env_key "$env_file" "$key" "$assignment_value" set
@@ -1306,16 +1340,7 @@ set_env_key_if_empty_or_missing() {
 # Why: raw values keep their interpolation
 append_env_assignment_if_missing() {
     local key="$1" assignment_value="$2" env_file="$3"
-    case "$key" in
-        ""|*[!A-Za-z0-9_]*|[0-9]*)
-            die "Invalid .env key: $key"
-            ;;
-    esac
-    case "$assignment_value" in
-        *$'\n'*)
-            die "$key contains a newline and cannot be copied into .env."
-            ;;
-    esac
+    validate_env_assignment "$key" "$assignment_value"
     # What: appends an assignment verbatim if key is missing
     # Why: keeps ${VAR:-...} interpolation intact
     env_key_exists "$key" "$env_file" \
@@ -1327,13 +1352,21 @@ append_env_assignment_if_missing() {
 # Why: an empty target is a valid, intentional state
 append_env_migrated_assignment_if_missing() {
     local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
-    local source_assignment
 
     # What: keeps an existing empty optional target as is
     # Why: an empty value keeps Compose's fallback alive
     if env_key_exists "$target_key" "$env_file"; then
         return 0
     fi
+
+    env_assign_from_source_or_fallback "$target_key" "$source_key" "$fallback_value" "$env_file"
+}
+
+# What: copies the source assignment, else the fallback
+# Why: one owner of the tail of both migrations
+env_assign_from_source_or_fallback() {
+    local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
+    local source_assignment
 
     source_assignment=$(get_env_assignment_value_raw_nonempty "$source_key" "$env_file") || exit $?
     if [[ -n "$source_assignment" ]]; then
@@ -1349,7 +1382,7 @@ append_env_migrated_assignment_if_missing() {
 # Why: Compose would turn KEY= into an invalid bind mount
 append_required_env_migrated_assignment_if_empty_or_missing() {
     local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
-    local target_assignment source_assignment
+    local target_assignment
 
     # What: keeps a non-empty duplicate target value
     # Why: updates must converge on the operator's real dir
@@ -1359,12 +1392,7 @@ append_required_env_migrated_assignment_if_empty_or_missing() {
         return 0
     fi
 
-    source_assignment=$(get_env_assignment_value_raw_nonempty "$source_key" "$env_file") || exit $?
-    if [[ -n "$source_assignment" ]]; then
-        set_env_assignment "$target_key" "$source_assignment" "$env_file"
-    elif env_key_exists "$target_key" "$env_file" || [[ -n "$fallback_value" ]]; then
-        set_env_key "$target_key" "$fallback_value" "$env_file"
-    fi
+    env_assign_from_source_or_fallback "$target_key" "$source_key" "$fallback_value" "$env_file"
 }
 
 migrate_proxy_security_mode_for_update() {
@@ -1507,6 +1535,26 @@ install_state_root() {
     printf '%s\n' "$state"
 }
 
+# What: the env file, the base .env and the state root
+# Why: backup and the log bundle resolve the same three
+stack_env_context() {
+    local install_dir="$1"
+    local -n _env_ref="$2" _base_env_ref="$3" _state_ref="$4"
+    _env_ref=$(runtime_env_file_for_install_dir "$install_dir")
+    _base_env_ref="$install_dir/.env"
+    _state_ref=$(install_state_root "$install_dir" "$_env_ref") \
+        || die "Cannot resolve the state root of $install_dir (exit $?)."
+}
+
+# What: the resolved stack dir; dies without a compose file
+# Why: backup and the log bundle share the stack lookup
+resolve_stack_dir_checked() {
+    local dir
+    dir=$(resolve_stack_dir "$(realpath -m "$1")") || exit $?
+    [[ -f "$dir/docker-compose.yml" ]] || die_no_stack_found "$dir"
+    printf '%s\n' "$dir"
+}
+
 # What: true for the manual checkout path deploy/prod
 # Why: quickstart installs live elsewhere
 is_deploy_prod_install_dir() {
@@ -1552,7 +1600,7 @@ docker_volume_exists() {
         print_error "Failed to list Docker volumes (exit $?)."
         return 2
     }
-    grep -qxF -- "$1" <<< "$names"
+    list_has_line "$1" "$names"
 }
 
 # What: fills an array with the compose -f arguments
@@ -1691,38 +1739,32 @@ copy_volume_to_dir() {
     print_ok "Copied $volume into $dir (${#lines[@]} entries, verified)"
 }
 
-# What: default state subdir of a prod key: compose + SOT
-# Why: compose names the SOT key; the SOT owns the value
-# From: Issue #1683 | PR #1858
+# What: default state subdir of a prod key, from the SOT
+# Why: state_dir_keys names the SOT subdir entry; one owner
+# From: Issue #1683 | PR #1912
 prod_state_subdir() {
-    local key="$1" refs sub
-    refs=$(awk -v k="$key" '{
-        p = "${" k ":-${LANCACHE_STATE_DIR:?"
-        i = index($0, p)
-        if (!i) next
-        rest = substr($0, i + length(p))
-        j = index(rest, "}/")
-        if (!j) next
-        rest = substr(rest, j + 2)
-        print substr(rest, 1, index(rest, "}") - 1)
-    }' "$PROD_COMPOSE") || die "Failed to read $PROD_COMPOSE (exit $?)."
-    refs=$(sort -u <<< "$refs")
-    [[ "$refs" =~ ^\$\{SOT_[A-Z0-9_]+$ ]] \
-        || die "$PROD_COMPOSE gives no single default directory for $key: ${refs//$'\n'/ }"
-    sub=$(prod_env_default "${refs#"\${SOT_"}") || exit $?
-    [[ "$sub" =~ ^[a-z0-9-]+$ ]] \
-        || die "The SOT default of ${refs#"\${"} is no directory name: $sub"
-    printf '%s\n' "$sub"
+    local key="$1" rows row_key name sub
+    rows=$(lancache_sot_list state_dir_keys runtime) || exit $?
+    while read -r row_key name; do
+        [[ "$row_key" == "$key" ]] || continue
+        sub=$(prod_env_default "$name") || exit $?
+        [[ "$sub" =~ ^[a-z0-9-]+$ ]] \
+            || die "The SOT default of $name is no directory name: $sub"
+        printf '%s\n' "$sub"
+        return 0
+    done <<< "$rows"
+    die "The SOT runtime.state_dir_keys names no directory for $key."
 }
 
-# What: every state key the prod compose mounts
-# Why: backup must not keep a second, drifting list
-# From: Issue #1683 | PR #1858
+# What: every state key the prod stack mounts, from the SOT
+# Why: backup and update read the one list in the SOT
+# From: Issue #1683 | PR #1912
 prod_state_keys() {
-    local keys
-    keys=$(grep -oE '\$\{[A-Z0-9_]+:-\$\{LANCACHE_STATE_DIR:\?' "$PROD_COMPOSE") \
-        || die "$PROD_COMPOSE mounts no state directory (exit $?)."
-    sed -E 's/^\$\{([A-Z0-9_]+):-.*/\1/' <<< "$keys" | sort -u
+    local rows row_key name
+    rows=$(lancache_sot_list state_dir_keys runtime) || exit $?
+    while read -r row_key name; do
+        printf '%s\n' "$row_key"
+    done <<< "$rows"
 }
 
 # What: "volume dir" per row of quickstart_volume_keys
@@ -1890,7 +1932,7 @@ migrate_quickstart_install() (
     missing=""
     while IFS= read -r volume; do
         [[ -n "$volume" ]] || continue
-        grep -qxF -- "$volume" <<< "$prod_volumes" && continue
+        list_has_line "$volume" "$prod_volumes" && continue
         awk -v v="$volume" '$1 == v { f = 1 } END { exit !f }' <<< "$rows" && continue
         missing+=" $volume"
     done <<< "$old_volumes"
@@ -1965,7 +2007,9 @@ rollback_quickstart_migration() {
 # From: Issue #1683 | PR #1858
 write_lancache_systemd_units() {
     local stack_dir="$1" setup_sh="$SCRIPT_DIR/setup.sh" unit_dir
+    local docker_unit="docker.service" timer_target="timers.target" converge_minutes
     unit_dir=$(lancache_sot_value unit_dir runner_host) || exit $?
+    converge_minutes=$(prod_env_default CONVERGE_TIMER_INTERVAL_MINUTES) || exit $?
     # What: units run compose through setup.sh at run time
     # Why: overrides may change after the unit is written
     # From: Issue #1683 | PR #1858
@@ -1973,8 +2017,8 @@ write_lancache_systemd_units() {
     cat > "$unit_dir/$STACK_UNIT" <<EOF || die "Failed to write $STACK_UNIT."
 [Unit]
 Description=LanCache-NG
-After=docker.service
-Requires=docker.service
+After=${docker_unit}
+Requires=${docker_unit}
 
 [Service]
 Type=oneshot
@@ -1994,7 +2038,7 @@ EOF
     cat > "$unit_dir/$CONVERGE_SERVICE_UNIT" <<EOF || die "Failed to write $CONVERGE_SERVICE_UNIT."
 [Unit]
 Description=LanCache-NG Convergence Check
-After=docker.service
+After=${docker_unit}
 
 [Service]
 Type=oneshot
@@ -2008,11 +2052,11 @@ Description=LanCache-NG Convergence Timer
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=5min
+OnUnitActiveSec=${converge_minutes}min
 Unit=${CONVERGE_SERVICE_UNIT}
 
 [Install]
-WantedBy=timers.target
+WantedBy=${timer_target}
 EOF
     # What: daily host-side update runs the on-disk setup.sh
     # Why: no container gets Docker socket write access
@@ -2020,8 +2064,8 @@ EOF
     cat > "$unit_dir/$AUTO_UPDATE_SERVICE_UNIT" <<EOF || die "Failed to write $AUTO_UPDATE_SERVICE_UNIT."
 [Unit]
 Description=LanCache-NG Scheduled Automatic Update
-After=docker.service
-Requires=docker.service
+After=${docker_unit}
+Requires=${docker_unit}
 
 [Service]
 Type=oneshot
@@ -2042,7 +2086,7 @@ Persistent=true
 Unit=${AUTO_UPDATE_SERVICE_UNIT}
 
 [Install]
-WantedBy=timers.target
+WantedBy=${timer_target}
 EOF
     systemctl daemon-reload || die "systemctl daemon-reload failed."
 }
@@ -2248,18 +2292,27 @@ runtime_default_in() {
         || die "The SOT runtime.defaults holds no default for $2."
 }
 
-# What: docker compose with compose_keys as SOT_<KEY>
-# Why: compose names no path, port or default of its own
+# What: the SOT_<KEY>=value row of each compose key
+# Why: one owner; ci.sh reads it from here, not a copy
 # From: Issue #1683 | PR #1912
-sot_compose() {
+sot_compose_env() {
     local keys key value list
-    local -a sot_env=()
     keys=$(lancache_sot_value compose_keys runtime) || exit $?
     list=$(runtime_defaults_list) || exit $?
     for key in $keys; do
         value=$(runtime_default_in "$list" "$key") || exit $?
-        sot_env+=("SOT_${key}=${value}")
+        printf 'SOT_%s=%s\n' "$key" "$value"
     done
+}
+
+# What: docker compose with compose_keys as SOT_<KEY>
+# Why: compose names no path, port or default of its own
+# From: Issue #1683 | PR #1912
+sot_compose() {
+    local rows
+    local -a sot_env=()
+    rows=$(sot_compose_env) || exit $?
+    mapfile -t sot_env <<< "$rows"
     env "${sot_env[@]}" docker compose "$@"
 }
 
@@ -2467,7 +2520,7 @@ host_image_platform() {
 # Why: a failure would surface only after .env was written
 assert_resolved_image_tag_platform_supported() {
     local registry="$1" prefix="$2" tag="$3"
-    local arch platform image single_platform inspect_text discovered_platforms buildx_out
+    local arch platform image single_platform inspect_text discovered_platforms buildx_out plat_line plat_found=0
 
     arch=$(uname -m)
     platform=$(host_image_platform "$arch") \
@@ -2494,10 +2547,13 @@ assert_resolved_image_tag_platform_supported() {
     [[ -n "$discovered_platforms" ]] \
         || die "${image} did not expose any usable platform metadata; cannot verify ${platform} support for tag '${tag}'."
 
-    # What: grep -q reads a here-string, not a live pipe.
-    # Why: avoids SIGPIPE on multi-line platform lists
+    # What: a line equal to the platform or below it counts
+    # Why: a loop reads the whole list; no early-exit pipe
     # From: Issue #1377
-    grep -Eq "^${platform}(/.*)?$" <<<"$discovered_platforms" \
+    while IFS= read -r plat_line; do
+        if [[ "$plat_line" == "$platform" || "$plat_line" == "$platform"/* ]]; then plat_found=1; fi
+    done <<<"$discovered_platforms"
+    [[ "$plat_found" -eq 1 ]] \
         || die "Image tag '${tag}' does not publish a ${platform} image for this ${arch} host (published: $(printf '%s' "$discovered_platforms" | tr '\n' ',' | sed 's/,$//')). Choose a tag or channel that publishes ${platform}, then rerun setup.sh."
 }
 
@@ -2660,7 +2716,7 @@ validate_lancache_image_tag() {
 # Why: AG-REL-010; hosts lack yq, so ci.sh cannot read it
 # From: Issue #1683 | PR #1858
 lancache_release_rows() {
-    local kind="$1" sot="$LANCACHE_SOT" text="$LANCACHE_SOT_TEXT" rows
+    local kind="$1" sot="$LANCACHE_SOT" text="$LANCACHE_SOT_TEXT" rows counts n_channel n_release n_pinned
     rows=$(awk '
         /^[^ #]/ { top = $0; sub(/:.*/, "", top); next }
         top != "release" || /^ *#/ || /^ *$/ { next }
@@ -2674,8 +2730,10 @@ lancache_release_rows() {
             gsub(/^\[|\] *$/, "", val); n = split(val, list, / *, */)
             for (i = 1; i <= n; i++) if (list[i] != "") print "alias", list[i], ch
         }' <<< "$text") || die "Failed to read the release block of ${sot}."
-    [[ "$(grep -c '^channel ' <<< "$rows")" -ge 1 && "$(grep -c '^release ' <<< "$rows")" -eq 1 \
-        && "$(grep -c '^pinned ' <<< "$rows")" -eq 1 ]] \
+    counts=$(awk '$1 == "channel" { c++ } $1 == "release" { r++ } $1 == "pinned" { p++ }
+        END { print c + 0, r + 0, p + 0 }' <<< "$rows") || die "Failed to count the release rows of ${sot}."
+    read -r n_channel n_release n_pinned <<< "$counts"
+    [[ "$n_channel" -ge 1 && "$n_release" -eq 1 && "$n_pinned" -eq 1 ]] \
         || die "${sot} needs release channels, one release_tags channel and pinned_channel."
     awk -v k="$kind" '$1 == k { sub(/^[^ ]+ /, ""); print }' <<< "$rows"
 }
@@ -2687,7 +2745,7 @@ lancache_channel_words() {
     channels=$(lancache_release_rows channel) || exit $?
     aliases=$(lancache_release_rows alias) || exit $?
     printf '%s\n' "$channels"
-    cut -d' ' -f1 <<< "$aliases"
+    awk '{ print $1 }' <<< "$aliases"
 }
 
 # What: accepts SOT channels, their aliases, pinned
@@ -2698,7 +2756,7 @@ validate_lancache_image_channel() {
     accepted=$(lancache_channel_words) || exit $?
     pinned=$(lancache_release_rows pinned) || exit $?
     accepted=$(printf '%s\n%s\n' "$accepted" "$pinned")
-    [[ -z "$channel" ]] || ! grep -qxF -- "$channel" <<< "$accepted" || return 0
+    [[ -z "$channel" ]] || ! list_has_line "$channel" "$accepted" || return 0
     valid=$(paste -sd' ' <<< "$accepted")
     retired=$(lancache_release_rows retired) || exit $?
     reason=$(awk -v c="$channel" '$1 == c { sub(/^[^ ]+ /, ""); print; exit }' <<< "$retired")
@@ -2837,7 +2895,7 @@ resolve_lancache_image_channel() {
     words=$(lancache_channel_words) || exit $?
     pinned=$(lancache_release_rows pinned) || exit $?
     release=$(lancache_release_rows release) || exit $?
-    if [[ -n "$tag" ]] && grep -qxF -- "$tag" <<< "$words"; then
+    if [[ -n "$tag" ]] && list_has_line "$tag" "$words"; then
         channel="${channel:-$tag}"
     elif [[ "$tag" == sha-* || "$tag" == v[0-9]* ]]; then
         channel="${channel:-$pinned}"
@@ -3052,7 +3110,7 @@ lancache_image_refs_fingerprint() {
 lancache_image_refs_for_tag() {
     local env_file="$1" tag="$2" channels registry prefix vars var slug
     channels=$(lancache_release_rows channel) || exit $?
-    if grep -qxF -- "$tag" <<< "$channels"; then
+    if list_has_line "$tag" "$channels"; then
         lancache_channel_image_refs "$env_file" "$tag"
         return
     fi
@@ -3098,7 +3156,7 @@ write_lancache_image_refs() {
 # From: Issue #1683 | PR #1912
 lancache_direct_image_tag() {
     local tag="$1" words="$2"
-    if [[ -n "$tag" ]] && grep -qxF -- "$tag" <<< "$words"; then
+    if [[ -n "$tag" ]] && list_has_line "$tag" "$words"; then
         lancache_stack_pointer_channel_for "$tag"
         return 0
     fi
@@ -3140,7 +3198,7 @@ resolve_lancache_image_tag() {
         channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$env_file") || exit $?
     fi
 
-    if [[ -n "$channel" ]] && grep -qxF -- "$channel" <<< "$words"; then
+    if [[ -n "$channel" ]] && list_has_line "$channel" "$words"; then
         lancache_stack_pointer_channel_for "$channel"
         return 0
     elif [[ -n "$channel" && "$channel" = "$pinned" ]]; then
@@ -3262,7 +3320,7 @@ migrate_env_for_update() (
         lancache_image_refs=$(lancache_image_refs_for_tag "$env_file" "$lancache_image_tag") \
             || die "Cannot name the images of ${lancache_image_tag} for ${env_file}; it stays unchanged (exit $?)."
     elif [[ "$preserve_image_tag" = "1" && -n "$existing_image_tag" && -n "$archived_refs" ]] \
-        && grep -qxF -- "$existing_image_tag" <<< "$stack_channels"; then
+        && list_has_line "$existing_image_tag" "$stack_channels"; then
         # What: a restore keeps archived channel pins
         # Why: re-resolving pulls the current stack
         # From: Issue #1683 | PR #1858
@@ -3332,7 +3390,7 @@ migrate_env_for_update() (
 
     # What: derives state dirs from the legacy root
     # Why: one state contract for update and upgrades
-    state_keys=$(prod_state_keys) || die "Cannot list the state keys of $PROD_COMPOSE (exit $?)."
+    state_keys=$(prod_state_keys) || die "Cannot list the state keys of the SOT (exit $?)."
     while IFS= read -r state_key; do
         state_sub=$(prod_state_subdir "$state_key") \
             || die "Cannot read the default directory of $state_key (exit $?)."
@@ -3590,10 +3648,7 @@ backup_manifest() {
     local install_dir="$1" mode="$2"
     local env_file cache_env_file
     local cache_dir state_dir keys key dir sub bundle copy
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    cache_env_file="$install_dir/.env"
-    state_dir=$(install_state_root "$install_dir" "$env_file") \
-        || die "Cannot resolve the state root of $install_dir (exit $?)."
+    stack_env_context "$install_dir" env_file cache_env_file state_dir
     cache_dir=$(get_env_var CACHE_DIR "$env_file") || exit $?
     cache_dir="${cache_dir:-$state_dir/cache}"
 
@@ -3611,7 +3666,7 @@ backup_manifest() {
     # What: every compose state dir but cache and logs
     # Why: cache: full mode only; logs are no rollback state
     # From: Issue #1683 | PR #1858
-    keys=$(prod_state_keys) || die "Cannot list the state keys of $PROD_COMPOSE (exit $?)."
+    keys=$(prod_state_keys) || die "Cannot list the state keys of the SOT (exit $?)."
     while IFS= read -r key; do
         case "$key" in CACHE_DIR|SYSLOG_NG_LOG_DIR) continue ;; esac
         dir=$(prod_state_dir_for_key "$key" "$env_file" "$state_dir") \
@@ -3697,6 +3752,15 @@ compose_stack_start() {
         || print_warn "docker compose up failed (exit $?); start it with: $SCRIPT_DIR/setup.sh compose $install_dir up -d"
 }
 
+# What: notes whether the stack ran, then stops it
+# Why: the caller's cleanup trap reads the flags set here
+stop_stack_noting_state() {
+    local install_dir="$1"
+    compose_stack_running "$install_dir" && stack_was_running=1
+    stack_stopped=1
+    compose_stack_stop "$install_dir"
+}
+
 # What: runs docker compose config as a dry-run check
 # Why: catches invalid config before containers restart
 validate_compose_config() {
@@ -3722,7 +3786,7 @@ compose_project_name() {
         local compose_name_lines
         compose_name_lines=$(sed -n 's/^name:[[:space:]]*//p' "$compose_dir/docker-compose.yml") \
             || die "Failed to read $compose_dir/docker-compose.yml (exit $?)."
-        name=$(head -1 <<<"$compose_name_lines")
+        name="${compose_name_lines%%$'\n'*}"
     fi
     name="${name:-$(basename "$compose_dir")}"
     printf '%s\n' "$name"
@@ -3776,7 +3840,17 @@ compose_project_has_named_volumes() {
     # Why: a live pipe can SIGPIPE under pipefail
     volume_names="$(docker volume ls --filter "label=com.docker.compose.project=${project}" --format '{{.Name}}')" \
         || die "Failed to list the volumes of compose project $project (exit $?)."
-    grep -q . <<<"$volume_names"
+    [[ -n "$volume_names" ]]
+}
+
+# What: runs a tar script on one volume in the helper image
+# Why: backup and restore share the mounts and the call
+helper_volume_tar() {
+    local volume="$1" root="$2" volume_mode="$3" backup_mode="$4" script="$5"
+    docker run --rm \
+        -v "${volume}:/volume${volume_mode}" \
+        -v "${root}:/backup${backup_mode}" \
+        "$LANCACHE_HELPER_IMAGE" sh -c "$script" sh "$volume"
 }
 
 # What: archives named volumes; cache volume only in full
@@ -3798,10 +3872,7 @@ backup_compose_volumes() {
             continue
         fi
         print_ok "Including Docker volume: $volume"
-        docker run --rm \
-            -v "${volume}:/volume:ro" \
-            -v "${volume_root}:/backup" \
-            "$LANCACHE_HELPER_IMAGE" sh -c 'cd /volume && tar -cpf "/backup/$1.tar" .' sh "$volume" \
+        helper_volume_tar "$volume" "$volume_root" ":ro" "" 'cd /volume && tar -cpf "/backup/$1.tar" .' \
             || die "Failed to archive Docker volume $volume (exit $?)."
     done <<< "$volumes"
 }
@@ -3827,10 +3898,7 @@ restore_compose_volumes() {
         print_ok "Restoring Docker volume: $volume"
         docker volume create "$volume" \
             || die "Failed to create Docker volume $volume (exit $?)."
-        docker run --rm \
-            -v "${volume}:/volume" \
-            -v "${volume_root}:/backup:ro" \
-            "$LANCACHE_HELPER_IMAGE" sh -c 'set -e; tar -tf "/backup/$1.tar"; rm -rf /volume/* /volume/..?* /volume/.[!.]*; cd /volume; tar -xpf "/backup/$1.tar"' sh "$volume" \
+        helper_volume_tar "$volume" "$volume_root" "" ":ro" 'set -e; tar -tf "/backup/$1.tar"; rm -rf /volume/* /volume/..?* /volume/.[!.]*; cd /volume; tar -xpf "/backup/$1.tar"' \
             || die "Failed to restore Docker volume $volume from $archive (exit $?). Rerun the restore; the archive is unchanged."
     done <<< "$archives"
 }
@@ -3905,13 +3973,13 @@ cmd_backup() (
         case "$1" in
             --full) mode="full"; shift ;;
             --config) mode="config"; shift ;;
-            --dest) backup_root="${2:?Missing value for --dest}"; shift 2 ;;
+            --dest) require_value "$1" "${2:-}"; backup_root="$2"; shift 2 ;;
             *) install_dir="$1"; shift ;;
         esac
     done
-    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
+    install_dir=$(resolve_stack_dir_checked "$install_dir") || exit $?
     backup_root=$(realpath -m "$backup_root")
-    [[ -f "$install_dir/docker-compose.yml" && -f "$(runtime_env_file_for_install_dir "$install_dir")" ]] \
+    [[ -f "$(runtime_env_file_for_install_dir "$install_dir")" ]] \
         || die_no_stack_found "$install_dir"
     install_missing_tools tar rsync
 
@@ -3961,9 +4029,7 @@ cmd_backup() (
     record_image_revisions "$install_dir" "$dest/image-revisions.txt"
     # What: records whether the stack was running
     # Why: cleanup restarts only a stack that was running
-    compose_stack_running "$install_dir" && stack_was_running=1
-    stack_stopped=1
-    compose_stack_stop "$install_dir"
+    stop_stack_noting_state "$install_dir"
 
     while IFS= read -r path; do
         [[ -e "$path" ]] || continue
@@ -4086,9 +4152,7 @@ cmd_restore() (
 
     # What: records whether the stack was running
     # Why: restore restarts only a stack that was running
-    compose_stack_running "$install_dir" && stack_was_running=1
-    stack_stopped=1
-    compose_stack_stop "$install_dir"
+    stop_stack_noting_state "$install_dir"
 
     print_step "Restoring backup"
     if [[ -d "$root/$rel_install" ]]; then
@@ -4528,6 +4592,15 @@ _proxy_container_publishes_port() {
     return 1
 }
 
+# What: the health path of the SOT PROXY_HEALTH_URL
+# Why: host probes use the one SOT path, not a literal
+proxy_health_path() {
+    local url rest
+    url=$(prod_env_default PROXY_HEALTH_URL) || exit $?
+    rest="${url#*://}"
+    printf '/%s\n' "${rest#*/}"
+}
+
 _verify_healthz_endpoint() {
     local ip="$1" proxy_container_id
 
@@ -4682,14 +4755,16 @@ wait_for_stack_health() {
 rollback_stack_update() {
     local install_dir="$1"
     local backup_root="$BACKUP_ROOT"
-    local latest_backup="" backups
+    local latest_backup="" backups sorted_backups
 
     if [[ -d "$backup_root" ]]; then
         if ! backups=$(find "$backup_root" -maxdepth 1 -name 'lancache-ng-config-*.tar.gz' -print); then
             print_error "Failed to list the backups under $backup_root; cannot roll back automatically. Manual recovery required."
             return 1
         fi
-        latest_backup=$(sort <<< "$backups" | tail -1)
+        sorted_backups=$(sort <<< "$backups") \
+            || die "Failed to sort the backups under $backup_root (exit $?)."
+        latest_backup="${sorted_backups##*$'\n'}"
     fi
     if [[ -z "$latest_backup" ]]; then
         print_error "No pre-update backup archive found under $backup_root; cannot roll back automatically. Manual recovery required."
@@ -4940,9 +5015,8 @@ cmd_update() {
 cmd_compose() {
     local install_dir
     [[ $# -ge 1 ]] || die "Usage: setup.sh compose <install-dir> <compose args>"
-    install_dir=$(resolve_stack_dir "$(realpath -m "$1")")
+    install_dir=$(resolve_stack_dir_checked "$1") || exit $?
     shift
-    [[ -f "$install_dir/docker-compose.yml" ]] || die_no_stack_found "$install_dir"
     stack_compose "$install_dir" "$(runtime_env_file_for_install_dir "$install_dir")" "$@"
 }
 
@@ -5021,7 +5095,7 @@ cmd_auto_update() {
 lancache_ui_channel_override_is_valid() {
     local selectable
     selectable=$(lancache_selectable_channels) || exit $?
-    grep -qxF -- "$1" <<< "$selectable"
+    list_has_line "$1" "$selectable"
 }
 
 # What: channels the wizard offers; first = default
@@ -5046,7 +5120,7 @@ lancache_ui_cache_max_gb_override_is_valid() {
 # What: reads one KEY from the ui-data settings file
 # Why: checks the volume exists; docker run would create it
 lancache_read_ui_settings_override() {
-    local install_dir="$1" env_file="$2" key="$3" project volume raw rc=0 settings_file
+    local install_dir="$1" env_file="$2" key="$3" project volume raw rc=0 settings_file line found=""
     if ! command_available docker; then
         print_skip "Reading the UI setting $key: docker is not available"
         return 0
@@ -5066,10 +5140,13 @@ lancache_read_ui_settings_override() {
     raw=$(docker run --rm -v "${volume}:/volume:ro" "$LANCACHE_HELPER_IMAGE" \
         sh -c "if [ -e /volume/${settings_file} ]; then cat /volume/${settings_file}; fi") \
         || die "Failed to read the UI settings from Docker volume $volume (exit $?)."
-    # What: sed reads $raw via a here-string
-    # Why: avoids SIGPIPE under pipefail
+    # What: the last KEY= line of $raw wins
+    # Why: a loop reads it all; no early-exit pipe
     # From: Issue #1377
-    sed -n "s/^${key}=//p" <<<"$raw" | tail -1
+    while IFS= read -r line; do
+        if [[ "$line" == "${key}="* ]]; then found="${line#"${key}="}"; fi
+    done <<<"$raw"
+    if [[ -n "$found" ]]; then printf '%s\n' "$found"; fi
 }
 
 # What: syncs auto-update timer with AUTO_UPDATE_ENABLED
@@ -5091,12 +5168,26 @@ reconcile_auto_update_timer_state() {
     fi
 }
 
+# What: copies a valid UI setting into .env when it differs
+# Why: channel and DHCP mode share read, check and write
+fold_ui_setting_into_env() {
+    local install_dir="$1" env_file="$2" key="$3" check="$4" label="$5" ui_value current
+    ui_value=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "$key") \
+        || die "Cannot read the UI setting $key (exit $?)."
+    if [[ -n "$ui_value" ]] && "$check" "$ui_value"; then
+        current=$(get_env_var "$key" "$env_file") || exit $?
+        if [[ "$ui_value" != "$current" ]]; then
+            set_env_key "$key" "$ui_value" "$env_file"
+            print_ok "$label updated from Admin UI: ${current:-<unset>} -> $ui_value"
+        fi
+    fi
+}
+
 cmd_converge_reconcile() {
     ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}" env_file
-    local ui_channel ui_auto_update current_channel current_auto_update
+    local ui_auto_update current_auto_update
     local ui_cache_max_gb current_cache_max_gb
-    local ui_dhcp_mode current_dhcp_mode
 
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
     # What: a tick before the first install does nothing
@@ -5115,15 +5206,7 @@ cmd_converge_reconcile() {
         return 0
     fi
 
-    ui_channel=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "LANCACHE_IMAGE_CHANNEL") \
-        || die "Cannot read the UI setting LANCACHE_IMAGE_CHANNEL (exit $?)."
-    if [[ -n "$ui_channel" ]] && lancache_ui_channel_override_is_valid "$ui_channel"; then
-        current_channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$env_file") || exit $?
-        if [[ "$ui_channel" != "$current_channel" ]]; then
-            set_env_key LANCACHE_IMAGE_CHANNEL "$ui_channel" "$env_file"
-            print_ok "Release channel updated from Admin UI: ${current_channel:-<unset>} -> $ui_channel"
-        fi
-    fi
+    fold_ui_setting_into_env "$install_dir" "$env_file" LANCACHE_IMAGE_CHANNEL lancache_ui_channel_override_is_valid "Release channel"
 
     ui_auto_update=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "AUTO_UPDATE_ENABLED") \
         || die "Cannot read the UI setting AUTO_UPDATE_ENABLED (exit $?)."
@@ -5138,15 +5221,7 @@ cmd_converge_reconcile() {
     # What: folds the Admin UI DHCP mode into .env
     # Why: the dhcp container reads DHCP_MODE at its start
     # From: Issue #1683 | PR #1912
-    ui_dhcp_mode=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "DHCP_MODE") \
-        || die "Cannot read the UI setting DHCP_MODE (exit $?)."
-    if [[ -n "$ui_dhcp_mode" ]] && is_valid_dhcp_mode "$ui_dhcp_mode"; then
-        current_dhcp_mode=$(get_env_var DHCP_MODE "$env_file") || exit $?
-        if [[ "$ui_dhcp_mode" != "$current_dhcp_mode" ]]; then
-            set_env_key DHCP_MODE "$ui_dhcp_mode" "$env_file"
-            print_ok "DHCP mode updated from Admin UI: ${current_dhcp_mode:-<unset>} -> $ui_dhcp_mode"
-        fi
-    fi
+    fold_ui_setting_into_env "$install_dir" "$env_file" DHCP_MODE is_valid_dhcp_mode "DHCP mode"
 
     # What: reconciles the timer with .env's value
     # Why: a manual .env edit must also take effect
@@ -5225,13 +5300,15 @@ cmd_debug() {
     if ! command_available curl; then
         print_warn "curl not found — health checks skipped"
     else
-        local ip probe
+        local ip probe health_path url
+        health_path=$(proxy_health_path) || exit $?
         for ip in "$ip_http" "$ip_https"; do
             [[ -z "$ip" ]] && continue
-            if probe=$(curl -sS -f "http://$ip/healthz" 2>&1); then
-                print_ok "http://$ip/healthz — OK: $probe"
+            url="http://${ip}${health_path}"
+            if probe=$(curl -sS -f "$url" 2>&1); then
+                print_ok "$url — OK: $probe"
             else
-                print_error "http://$ip/healthz — ERROR (exit $?): $probe"
+                print_error "$url — ERROR (exit $?): $probe"
             fi
         done
     fi
@@ -5322,7 +5399,7 @@ logbundle_collect_secret_values() {
     # What: sorts secrets longest first
     # Why: a shorter value would corrupt a longer one
     # From: Issue #782
-    done | sort -u | awk '{ print length, $0 }' | sort -k1,1nr | cut -d' ' -f2-
+    done | sort -u | awk '{ print length, $0 }' | sort -k1,1nr | awk '{ sub(/^[^ ]+ /, ""); print }'
 }
 
 # What: replaces every secret value with [REDACTED]
@@ -5443,21 +5520,16 @@ cmd_create_logs_for_issue() (
     local dest_root="$BACKUP_ROOT"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --dest) dest_root="${2:?Missing value for --dest}"; shift 2 ;;
+            --dest) require_value "$1" "${2:-}"; dest_root="$2"; shift 2 ;;
             *) install_dir="$1"; shift ;;
         esac
     done
-    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
+    install_dir=$(resolve_stack_dir_checked "$install_dir") || exit $?
     dest_root=$(realpath -m "$dest_root")
-    [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die_no_stack_found "$install_dir"
     install_missing_tools tar
 
     local env_file cache_env_file state_dir
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    cache_env_file="$install_dir/.env"
-    state_dir=$(install_state_root "$install_dir" "$env_file") \
-        || die "Cannot resolve the state root of $install_dir (exit $?)."
+    stack_env_context "$install_dir" env_file cache_env_file state_dir
 
     local -a env_files=("$env_file")
     [[ "$cache_env_file" != "$env_file" && -f "$cache_env_file" ]] && env_files+=("$cache_env_file")
@@ -5694,7 +5766,7 @@ compose_config_value() {
 # From: Issue #1683 | PR #1858
 kea_ctrl_post() {
     local kea_ctrl_url="$1" kea_ctrl_user="$2" kea_ctrl_token="$3" body="$4"
-    local out http_status response result_code result_text
+    local out http_status response
 
     # What: passes the Basic-Auth token to curl via -K stdin
     # Why: -u would expose the token in process argv
@@ -5714,6 +5786,15 @@ kea_ctrl_post() {
     if [[ ! "$http_status" =~ ^2 ]]; then
         die "Kea's Control Agent rejected the request with HTTP ${http_status}. Response: ${response}"
     fi
+    kea_reply_check "$response"
+    printf '%s\n' "$response"
+}
+
+# What: stops unless a Kea reply carries result 0
+# Why: setup.sh and ci.sh judge Kea replies in one place
+# From: Issue #1683 | PR #1912
+kea_reply_check() {
+    local response="$1" result_code result_text
     result_code=$(json_value 'if type == "array" then .[0] else . end | .result' "$response") \
         || die "Unrecognized response from Kea's Control Agent: ${response}"
     result_text=$(json_value 'if type == "array" then .[0] else . end | .text' "$response") \
@@ -5722,7 +5803,14 @@ kea_ctrl_post() {
     if [[ "$result_code" != "0" ]]; then
         die "Kea's Control Agent rejected the command (result=${result_code}): ${result_text:-<no message>}"
     fi
-    printf '%s\n' "$response"
+}
+
+# What: one dhcp4 command; the config is its arguments
+# Why: config-test, -set and -write share one body shape
+kea_dhcp4_command() {
+    local body="{\"command\":\"$4\",\"service\":[\"dhcp4\"]"
+    [[ $# -lt 5 ]] || body+=",\"arguments\":$5"
+    kea_ctrl_post "$1" "$2" "$3" "${body}}"
 }
 
 # What: host dir of KEA_CONFIG_SNAPSHOT_DIR via the ui mount
@@ -5808,18 +5896,15 @@ reset_kea_to_last_known_good_config() {
     config_json=$(cat "$snapshot_root/$snapshot_id/dhcp4.json")
 
     print_step "Validating snapshot $snapshot_id (config-test)"
-    kea_ctrl_post "$kea_ctrl_url" "$kea_ctrl_user" "$kea_ctrl_token" \
-        "{\"command\":\"config-test\",\"service\":[\"dhcp4\"],\"arguments\":${config_json}}"
+    kea_dhcp4_command "$kea_ctrl_url" "$kea_ctrl_user" "$kea_ctrl_token" config-test "$config_json"
     print_ok "Snapshot validated."
 
     print_step "Applying snapshot $snapshot_id (config-set)"
-    kea_ctrl_post "$kea_ctrl_url" "$kea_ctrl_user" "$kea_ctrl_token" \
-        "{\"command\":\"config-set\",\"service\":[\"dhcp4\"],\"arguments\":${config_json}}"
+    kea_dhcp4_command "$kea_ctrl_url" "$kea_ctrl_user" "$kea_ctrl_token" config-set "$config_json"
     print_ok "Snapshot applied to the running Kea server."
 
     print_step "Persisting snapshot $snapshot_id (config-write)"
-    kea_ctrl_post "$kea_ctrl_url" "$kea_ctrl_user" "$kea_ctrl_token" \
-        '{"command":"config-write","service":["dhcp4"]}'
+    kea_dhcp4_command "$kea_ctrl_url" "$kea_ctrl_user" "$kea_ctrl_token" config-write
     print_ok "Snapshot persisted to kea-dhcp4.conf."
 
     print_ok "Kea rolled back to known-good snapshot $snapshot_id (validated, applied, and persisted)."
@@ -6071,20 +6156,10 @@ cmd_update_ip() {
 
     print_step "Prompt for new IPs"
 
-    while true; do
-        ask "New HTTP mode IP" "$current_ip_http"
-        new_ip_http="$REPLY"
-        is_valid_ipv4 "$new_ip_http" && break
-        print_error "Invalid IPv4 address: $new_ip_http"
-    done
+    ask_checked new_ip_http "New HTTP mode IP" "$current_ip_http" is_valid_ipv4 "Invalid IPv4 address"
 
     printf "\n"
-    while true; do
-        ask "New HTTPS mode IP" "$current_ip_https"
-        new_ip_https="$REPLY"
-        is_valid_ipv4 "$new_ip_https" && break
-        print_error "Invalid IPv4 address: $new_ip_https"
-    done
+    ask_checked new_ip_https "New HTTPS mode IP" "$current_ip_https" is_valid_ipv4 "Invalid IPv4 address"
 
     require_separate_lan_ips "$new_ip_http" "$new_ip_https"
 
@@ -6155,20 +6230,31 @@ lancache_repo_file_text() {
     curl -fsSL "$raw" || die "Failed to download ${path} from $raw (exit $?)."
 }
 
+# What: dies naming each NAME=VALUE pair with empty value
+# Why: arguments and response fields share the check
+die_if_any_empty() {
+    local message="$1" pair
+    local -a missing=()
+    shift
+    for pair in "$@"; do
+        [[ -n "${pair#*=}" ]] || missing+=("${pair%%=*}")
+    done
+    [[ ${#missing[@]} -eq 0 ]] || die "${message}: ${missing[*]}"
+}
+
 # ── secondary subcommand ──────────────────────────────────────────────────────
 # What: secondary setup consumes primary credentials
 # Why: it must not modify the primary host
 cmd_secondary() {
     local primary="" token="" name="" ip_http="" listen_ip="" ip_https="" listen_ip_https="" rotate=0
     local out http_status response secondary_dir cmd ddns_tsig_key dns_xfr_primary tag_input
-    local -a missing_args
     local nats_url nats_user nats_password consumer_name pdns_api_key
     local response_image_registry response_image_prefix response_image_channel response_image_tag
     local existing_env_file lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
     local explicit_lancache_image_tag keep_known_good_configs
     local preflight_dir preflight_env_file preflight_registry preflight_prefix preflight_channel preflight_env_tag
     local preflight_tag preflight_verified_registry="" preflight_verified_prefix="" preflight_verified_tag=""
-    local missing_fields secondary_env_file compose_out bad_response secondary_compose
+    local secondary_env_file compose_out bad_response secondary_compose
     local channel_words pinned release dns_port
 
     while [[ $# -gt 0 ]]; do
@@ -6223,14 +6309,8 @@ cmd_secondary() {
         esac
     done
 
-    missing_args=()
-    [[ -n "$primary" ]] || missing_args+=("--primary")
-    [[ -n "$token" ]] || missing_args+=("--token")
-    [[ -n "$name" ]] || missing_args+=("--name")
-    [[ -n "$ip_http" ]] || missing_args+=("--ip-http")
-    if [[ ${#missing_args[@]} -gt 0 ]]; then
-        die "Required argument(s) missing: ${missing_args[*]}"
-    fi
+    die_if_any_empty "Required argument(s) missing" \
+        "--primary=$primary" "--token=$token" "--name=$name" "--ip-http=$ip_http"
 
     for cmd in curl docker jq; do
         command_available "$cmd" \
@@ -6342,11 +6422,16 @@ cmd_secondary() {
     request=$(printf '%s' "$token" | jq -Rsc --arg name "$name" --arg address "$listen_ip" \
         '{token: ., name: $name, address: $address}') \
         || die "Failed to build the registration request (exit $?)."
+    # What: the register route, read from the SOT defaults
+    # Why: the ui path has one owner, build-manifest.yml
+    # From: Issue #1683 | PR #1912
+    local register_route
+    register_route=$(prod_env_default UI_ROUTE_SECONDARY_REGISTER) || exit $?
     if ! out=$(printf '%s' "$request" \
         | curl -sS -w '\n%{http_code}' -X POST \
         -H "Content-Type: application/json" \
         -d @- \
-        "${primary}/api/secondary/register"); then
+        "${primary}${register_route}"); then
         die "Failed to connect to primary server at ${primary}. Check the URL, network connectivity, and that the primary service is running."
     fi
     split_http_response response http_status "$out" \
@@ -6374,17 +6459,10 @@ cmd_secondary() {
     response_image_channel=$(json_value .image_channel "$response") || die "$bad_response"
     response_image_tag=$(json_value .image_tag "$response") || die "$bad_response"
 
-    missing_fields=()
-    [[ -n "$nats_url" ]] || missing_fields+=("nats_url")
-    [[ -n "$nats_user" ]] || missing_fields+=("nats_user")
-    [[ -n "$nats_password" ]] || missing_fields+=("nats_password")
-    [[ -n "$consumer_name" ]] || missing_fields+=("consumer_name")
-    [[ -n "$pdns_api_key" ]] || missing_fields+=("pdns_api_key")
-    [[ -n "$ddns_tsig_key" ]] || missing_fields+=("ddns_tsig_key")
-    [[ -n "$dns_xfr_primary" ]] || missing_fields+=("dns_xfr_primary")
-    if [[ ${#missing_fields[@]} -gt 0 ]]; then
-        die "Invalid response from primary server; missing field(s): ${missing_fields[*]}"
-    fi
+    die_if_any_empty "Invalid response from primary server; missing field(s)" \
+        "nats_url=$nats_url" "nats_user=$nats_user" "nats_password=$nats_password" \
+        "consumer_name=$consumer_name" "pdns_api_key=$pdns_api_key" \
+        "ddns_tsig_key=$ddns_tsig_key" "dns_xfr_primary=$dns_xfr_primary"
 
     mkdir -p "$secondary_dir"
 
@@ -6418,7 +6496,7 @@ cmd_secondary() {
         lancache_image_channel="$response_image_channel"
     fi
     if [[ -z "$lancache_image_channel" && -n "${response_image_tag:-}" ]] \
-        && grep -qxF -- "$response_image_tag" <<< "$channel_words"; then
+        && list_has_line "$response_image_tag" "$channel_words"; then
         lancache_image_channel="$response_image_tag"
     fi
     if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(sha-|v[0-9]) ]]; then
@@ -6433,7 +6511,7 @@ cmd_secondary() {
         tag_input=$(get_env_var LANCACHE_IMAGE_TAG "$existing_env_file") || exit $?
     fi
     if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "$pinned" && -z "$tag_input" && -n "$response_image_tag" ]] \
-        && ! grep -qxF -- "$response_image_tag" <<< "$channel_words"; then
+        && ! list_has_line "$response_image_tag" "$channel_words"; then
         tag_input="$response_image_tag"
     fi
     if [[ "$lancache_image_channel" != "$pinned" && -z "$explicit_lancache_image_tag" ]]; then
@@ -6671,7 +6749,7 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     # From: Issue #1377
     docker_version_raw="$(docker --version)" || die "docker --version failed (exit $?)."
     if docker_version_numbers="$(grep -oP '[\d.]+' <<<"$docker_version_raw")"; then
-        print_ok "Docker $(head -1 <<<"$docker_version_numbers")"
+        print_ok "Docker ${docker_version_numbers%%$'\n'*}"
     else
         print_warn "Docker version not recognised: $docker_version_raw"
     fi
@@ -6701,12 +6779,7 @@ else
 fi
 printf "\n"
 
-while true; do
-    ask "Server IP (HTTP mode)" "$detected_ip"
-    IP_HTTP="$REPLY"
-    is_valid_ipv4 "$IP_HTTP" && break
-    print_error "Invalid IPv4 address: $IP_HTTP"
-done
+ask_checked IP_HTTP "Server IP (HTTP mode)" "$detected_ip" is_valid_ipv4 "Invalid IPv4 address"
 
 printf "\n"
 printf '  %sSecond LAN IP%s: the HTTPS DNS/proxy address, always required.\n\n' "${BOLD}" "${RESET}"
@@ -6714,12 +6787,7 @@ printf '  %sSecond LAN IP%s: the HTTPS DNS/proxy address, always required.\n\n' 
 # Why: AG-SETUP-001; prod runs dns-https on IP_HTTPS always
 # From: Issue #1683 | PR #1912
 suggested_https="${IP_HTTP%.*}.$((10#${IP_HTTP##*.} + 1))"
-while true; do
-    ask "Second LAN IP (HTTPS mode)" "$suggested_https"
-    IP_HTTPS="$REPLY"
-    is_valid_ipv4 "$IP_HTTPS" && break
-    print_error "Invalid IPv4 address: $IP_HTTPS"
-done
+ask_checked IP_HTTPS "Second LAN IP (HTTPS mode)" "$suggested_https" is_valid_ipv4 "Invalid IPv4 address"
 require_separate_lan_ips "$IP_HTTP" "$IP_HTTPS"
 # What: IP_HTTPS goes on IP_HTTP's device and prefix
 # Why: same link and subnet; no guessed device or mask
@@ -6826,8 +6894,8 @@ if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
     print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
 else
     selectable=$(lancache_selectable_channels) || exit $?
-    pre_stable=$(head -n 1 <<< "$selectable")
-    stable_name=$(tail -n 1 <<< "$selectable")
+    pre_stable="${selectable%%$'\n'*}"
+    stable_name="${selectable##*$'\n'}"
     retired=$(lancache_release_rows retired) || exit $?
     printf "  %s — the most recently built channel from active development.\n" "$pre_stable"
     printf "            Refreshes continuously from current_dev. Currently the\n"
@@ -6846,7 +6914,7 @@ else
     channel_hint=$(paste -sd/ <<< "$selectable")
     while true; do
         ask "Release channel [$channel_hint]" "$pre_stable"
-        if grep -qxF -- "${REPLY,,}" <<< "$selectable"; then
+        if list_has_line "${REPLY,,}" "$selectable"; then
             LANCACHE_IMAGE_CHANNEL="${REPLY,,}"
             if [[ "$LANCACHE_IMAGE_CHANNEL" = "$pre_stable" ]]; then
                 print_ok "Using the $LANCACHE_IMAGE_CHANNEL channel (recommended pre-1.0)."
@@ -6920,7 +6988,10 @@ DHCP_RANGE_START=""
 DHCP_RANGE_END=""
 DHCP_SUBNET_START=""
 DHCP_DNS_PRIMARY="$IP_HTTP"
-DHCP_DNS_SECONDARY="${IP_HTTPS:-$IP_HTTP}"
+# What: secondary DNS is IP_HTTPS, with no IP_HTTP fallback.
+# Why: IP_HTTPS is asked and validated above; as config.rs.
+# From: Issue #1683 | PR #1912
+DHCP_DNS_SECONDARY="$IP_HTTPS"
 UPSTREAM_DHCP_IP="$DHCP_GATEWAY"
 # What: relay-mode local address, empty by default
 # Why: only dnsmasq-relay uses it
@@ -6956,26 +7027,11 @@ if [[ "$DHCP_MODE" = "kea" ]]; then
         print_error "Invalid CIDR: $DHCP_SUBNET"
     done
 
-    while true; do
-        ask "Gateway" "$DHCP_GATEWAY_DEFAULT"
-        DHCP_GATEWAY="$REPLY"
-        is_valid_ipv4 "$DHCP_GATEWAY" && break
-        print_error "Invalid IPv4 address: $DHCP_GATEWAY"
-    done
+    ask_checked DHCP_GATEWAY "Gateway" "$DHCP_GATEWAY_DEFAULT" is_valid_ipv4 "Invalid IPv4 address"
 
-    while true; do
-        ask "IP pool start" "$DHCP_RANGE_START_DEFAULT"
-        DHCP_RANGE_START="$REPLY"
-        is_valid_ipv4 "$DHCP_RANGE_START" && break
-        print_error "Invalid IPv4 address: $DHCP_RANGE_START"
-    done
+    ask_checked DHCP_RANGE_START "IP pool start" "$DHCP_RANGE_START_DEFAULT" is_valid_ipv4 "Invalid IPv4 address"
 
-    while true; do
-        ask "IP pool end" "$DHCP_RANGE_END_DEFAULT"
-        DHCP_RANGE_END="$REPLY"
-        is_valid_ipv4 "$DHCP_RANGE_END" && break
-        print_error "Invalid IPv4 address: $DHCP_RANGE_END"
-    done
+    ask_checked DHCP_RANGE_END "IP pool end" "$DHCP_RANGE_END_DEFAULT" is_valid_ipv4 "Invalid IPv4 address"
 
     print_ok "DHCP enabled in Kea mode — Subnet: $DHCP_SUBNET, Pool: $DHCP_RANGE_START–$DHCP_RANGE_END"
     print_warn "Before Kea is activated, setup will run a non-invasive DHCP discovery preflight."
@@ -6999,50 +7055,22 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
         ask "DHCP subnet start for dnsmasq-proxy" "${DHCP_SUBNET_DEFAULT%/*}"
     done
 
-    while true; do
-        ask "Primary DNS option for proxy-DHCP/PXE clients" "$DHCP_DNS_PRIMARY"
-        DHCP_DNS_PRIMARY="$REPLY"
-        is_valid_ipv4 "$DHCP_DNS_PRIMARY" && break
-        print_error "Invalid IPv4 address: $DHCP_DNS_PRIMARY"
-    done
+    ask_checked DHCP_DNS_PRIMARY "Primary DNS option for proxy-DHCP/PXE clients" "$DHCP_DNS_PRIMARY" is_valid_ipv4 "Invalid IPv4 address"
 
-    while true; do
-        ask "Secondary DNS option for proxy-DHCP/PXE clients" "$DHCP_DNS_SECONDARY"
-        DHCP_DNS_SECONDARY="$REPLY"
-        is_valid_ipv4 "$DHCP_DNS_SECONDARY" && break
-        print_error "Invalid IPv4 address: $DHCP_DNS_SECONDARY"
-    done
+    ask_checked DHCP_DNS_SECONDARY "Secondary DNS option for proxy-DHCP/PXE clients" "$DHCP_DNS_SECONDARY" is_valid_ipv4 "Invalid IPv4 address"
 
-    while true; do
-        ask "Upstream DHCP server IP" "$DHCP_GATEWAY"
-        UPSTREAM_DHCP_IP="$REPLY"
-        is_valid_ipv4 "$UPSTREAM_DHCP_IP" && break
-        print_error "Invalid IPv4 address: $UPSTREAM_DHCP_IP"
-    done
+    ask_checked UPSTREAM_DHCP_IP "Upstream DHCP server IP" "$DHCP_GATEWAY" is_valid_ipv4 "Invalid IPv4 address"
 
     # What: optional relay/proxy options; all skippable
     # Why: a plain Enter still gives a working proxy
     # From: Issue #450
+    boot_filename_error="Invalid boot filename (no whitespace, commas, or other .env-unsafe characters like \$, \`, \", ', \\, #)"
     print_warn "Optional: additional dnsmasq relay/proxy options (router, NTP, domain, PXE/TFTP boot, listen interface, custom options)."
     print_warn "These are delivered only to PXE/network-boot-aware clients via the supplemental ProxyDHCP exchange, never to ordinary DHCP clients -- see docs/dhcp-modes.md."
     if confirm "Configure additional dnsmasq relay/proxy options now? [y/N]" "N"; then
-        ask "Listen interface (blank = listen on all interfaces)" "$DHCP_PROXY_INTERFACE"
-        while true; do
-            DHCP_PROXY_INTERFACE="$REPLY"
-            [[ -z "$DHCP_PROXY_INTERFACE" ]] && break
-            is_valid_dhcp_proxy_interface "$DHCP_PROXY_INTERFACE" && break
-            print_error "Invalid interface name: $DHCP_PROXY_INTERFACE"
-            ask "Listen interface (blank = listen on all interfaces)" ""
-        done
+        ask_checked DHCP_PROXY_INTERFACE "Listen interface (blank = listen on all interfaces)" "$DHCP_PROXY_INTERFACE" is_valid_dhcp_proxy_interface "Invalid interface name" 1
 
-        ask "Router/gateway option, PXE-scoped (blank = skip)" "$DHCP_PROXY_ROUTER"
-        while true; do
-            DHCP_PROXY_ROUTER="$REPLY"
-            [[ -z "$DHCP_PROXY_ROUTER" ]] && break
-            is_valid_ipv4 "$DHCP_PROXY_ROUTER" && break
-            print_error "Invalid IPv4 address: $DHCP_PROXY_ROUTER"
-            ask "Router/gateway option, PXE-scoped (blank = skip)" ""
-        done
+        ask_checked DHCP_PROXY_ROUTER "Router/gateway option, PXE-scoped (blank = skip)" "$DHCP_PROXY_ROUTER" is_valid_ipv4 "Invalid IPv4 address" 1
 
         ask "NTP servers, PXE-scoped, comma-separated (blank = skip)" "$DHCP_NTP_SERVERS"
         while true; do
@@ -7062,33 +7090,12 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
             ask "NTP servers, PXE-scoped, comma-separated (blank = skip)" ""
         done
 
-        ask "Domain option, PXE-scoped (blank = skip)" "$DHCP_PROXY_DOMAIN"
-        while true; do
-            DHCP_PROXY_DOMAIN="$REPLY"
-            [[ -z "$DHCP_PROXY_DOMAIN" ]] && break
-            is_valid_dhcp_proxy_domain "$DHCP_PROXY_DOMAIN" && break
-            print_error "Invalid domain name: $DHCP_PROXY_DOMAIN"
-            ask "Domain option, PXE-scoped (blank = skip)" ""
-        done
+        ask_checked DHCP_PROXY_DOMAIN "Domain option, PXE-scoped (blank = skip)" "$DHCP_PROXY_DOMAIN" is_valid_dhcp_proxy_domain "Invalid domain name" 1
 
-        ask "PXE boot filename (blank = skip PXE boot info)" "$DHCP_PROXY_BOOT_FILENAME"
-        while true; do
-            DHCP_PROXY_BOOT_FILENAME="$REPLY"
-            [[ -z "$DHCP_PROXY_BOOT_FILENAME" ]] && break
-            is_valid_dhcp_proxy_boot_filename "$DHCP_PROXY_BOOT_FILENAME" && break
-            print_error "Invalid boot filename (no whitespace, commas, or other .env-unsafe characters like \$, \`, \", ', \\, #): $DHCP_PROXY_BOOT_FILENAME"
-            ask "PXE boot filename (blank = skip PXE boot info)" ""
-        done
+        ask_checked DHCP_PROXY_BOOT_FILENAME "PXE boot filename (blank = skip PXE boot info)" "$DHCP_PROXY_BOOT_FILENAME" is_valid_dhcp_proxy_boot_filename "$boot_filename_error" 1
 
         if [[ -n "$DHCP_PROXY_BOOT_FILENAME" ]]; then
-            ask "PXE boot server address (blank = this host's own address)" "$DHCP_PROXY_BOOT_SERVER"
-            while true; do
-                DHCP_PROXY_BOOT_SERVER="$REPLY"
-                [[ -z "$DHCP_PROXY_BOOT_SERVER" ]] && break
-                is_valid_ipv4 "$DHCP_PROXY_BOOT_SERVER" && break
-                print_error "Invalid IPv4 address: $DHCP_PROXY_BOOT_SERVER"
-                ask "PXE boot server address (blank = this host's own address)" ""
-            done
+            ask_checked DHCP_PROXY_BOOT_SERVER "PXE boot server address (blank = this host's own address)" "$DHCP_PROXY_BOOT_SERVER" is_valid_ipv4 "Invalid IPv4 address" 1
         else
             DHCP_PROXY_BOOT_SERVER=""
         fi
@@ -7100,33 +7107,12 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     # Why: without pxe-service dnsmasq never replies
     print_warn "Optional: PXE boot-pointer support. This makes dnsmasq start REPLYING to every PXE-tagged client on this segment, pointing them at an EXISTING external PXE/TFTP boot server -- lancache-ng does not host boot files itself. See docs/dhcp-modes.md."
     if confirm "Configure PXE boot-pointer support now? [y/N]" "N"; then
-        ask "External PXE/TFTP boot server address (blank = skip PXE boot-pointer support)" "$DHCP_PROXY_PXE_BOOT_SERVER"
-        while true; do
-            DHCP_PROXY_PXE_BOOT_SERVER="$REPLY"
-            [[ -z "$DHCP_PROXY_PXE_BOOT_SERVER" ]] && break
-            is_valid_ipv4 "$DHCP_PROXY_PXE_BOOT_SERVER" && break
-            print_error "Invalid IPv4 address: $DHCP_PROXY_PXE_BOOT_SERVER"
-            ask "External PXE/TFTP boot server address (blank = skip PXE boot-pointer support)" ""
-        done
+        ask_checked DHCP_PROXY_PXE_BOOT_SERVER "External PXE/TFTP boot server address (blank = skip PXE boot-pointer support)" "$DHCP_PROXY_PXE_BOOT_SERVER" is_valid_ipv4 "Invalid IPv4 address" 1
 
         if [[ -n "$DHCP_PROXY_PXE_BOOT_SERVER" ]]; then
-            ask "BIOS (legacy x86PC) boot filename (blank = skip BIOS clients)" "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS"
-            while true; do
-                DHCP_PROXY_PXE_BOOT_FILENAME_BIOS="$REPLY"
-                [[ -z "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" ]] && break
-                is_valid_dhcp_proxy_boot_filename "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" && break
-                print_error "Invalid boot filename (no whitespace, commas, or other .env-unsafe characters like \$, \`, \", ', \\, #): $DHCP_PROXY_PXE_BOOT_FILENAME_BIOS"
-                ask "BIOS (legacy x86PC) boot filename (blank = skip BIOS clients)" ""
-            done
+            ask_checked DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "BIOS (legacy x86PC) boot filename (blank = skip BIOS clients)" "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" is_valid_dhcp_proxy_boot_filename "$boot_filename_error" 1
 
-            ask "UEFI (x86-64/ARM64) boot filename (blank = skip UEFI clients)" "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI"
-            while true; do
-                DHCP_PROXY_PXE_BOOT_FILENAME_UEFI="$REPLY"
-                [[ -z "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" ]] && break
-                is_valid_dhcp_proxy_boot_filename "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" && break
-                print_error "Invalid boot filename (no whitespace, commas, or other .env-unsafe characters like \$, \`, \", ', \\, #): $DHCP_PROXY_PXE_BOOT_FILENAME_UEFI"
-                ask "UEFI (x86-64/ARM64) boot filename (blank = skip UEFI clients)" ""
-            done
+            ask_checked DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "UEFI (x86-64/ARM64) boot filename (blank = skip UEFI clients)" "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" is_valid_dhcp_proxy_boot_filename "$boot_filename_error" 1
 
             if pxe_boot_pointer_answers_are_complete "$DHCP_PROXY_PXE_BOOT_SERVER" "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI"; then
                 print_ok "PXE boot-pointer support configured (external boot server: $DHCP_PROXY_PXE_BOOT_SERVER)."
@@ -7146,19 +7132,9 @@ elif [[ "$DHCP_MODE" = "dnsmasq-relay" ]]; then
     print_warn "dnsmasq-relay forwards every client's DHCP request to an upstream DHCP server on another segment."
     print_warn "The upstream server owns the whole lease and every option; LanCache injects nothing of its own here."
 
-    while true; do
-        ask "This relay's own IP on the client-facing network (giaddr)" ""
-        DHCP_RELAY_LOCAL_ADDR="$REPLY"
-        is_valid_ipv4 "$DHCP_RELAY_LOCAL_ADDR" && break
-        print_error "Invalid IPv4 address: $DHCP_RELAY_LOCAL_ADDR"
-    done
+    ask_checked DHCP_RELAY_LOCAL_ADDR "This relay's own IP on the client-facing network (giaddr)" "" is_valid_ipv4 "Invalid IPv4 address"
 
-    while true; do
-        ask "Upstream DHCP server IP" "$DHCP_GATEWAY"
-        UPSTREAM_DHCP_IP="$REPLY"
-        is_valid_ipv4 "$UPSTREAM_DHCP_IP" && break
-        print_error "Invalid IPv4 address: $UPSTREAM_DHCP_IP"
-    done
+    ask_checked UPSTREAM_DHCP_IP "Upstream DHCP server IP" "$DHCP_GATEWAY" is_valid_ipv4 "Invalid IPv4 address"
 
     print_ok "DHCP relay mode enabled — relaying ${DHCP_RELAY_LOCAL_ADDR} -> upstream ${UPSTREAM_DHCP_IP}"
 else
