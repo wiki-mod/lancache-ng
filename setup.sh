@@ -1736,38 +1736,32 @@ copy_volume_to_dir() {
     print_ok "Copied $volume into $dir (${#lines[@]} entries, verified)"
 }
 
-# What: default state subdir of a prod key: compose + SOT
-# Why: compose names the SOT key; the SOT owns the value
-# From: Issue #1683 | PR #1858
+# What: default state subdir of a prod key, from the SOT
+# Why: state_dir_keys names the SOT subdir entry; one owner
+# From: Issue #1683 | PR #1912
 prod_state_subdir() {
-    local key="$1" refs sub
-    refs=$(awk -v k="$key" '{
-        p = "${" k ":-${LANCACHE_STATE_DIR:?"
-        i = index($0, p)
-        if (!i) next
-        rest = substr($0, i + length(p))
-        j = index(rest, "}/")
-        if (!j) next
-        rest = substr(rest, j + 2)
-        print substr(rest, 1, index(rest, "}") - 1)
-    }' "$PROD_COMPOSE") || die "Failed to read $PROD_COMPOSE (exit $?)."
-    refs=$(sort -u <<< "$refs")
-    [[ "$refs" =~ ^\$\{SOT_[A-Z0-9_]+$ ]] \
-        || die "$PROD_COMPOSE gives no single default directory for $key: ${refs//$'\n'/ }"
-    sub=$(prod_env_default "${refs#"\${SOT_"}") || exit $?
-    [[ "$sub" =~ ^[a-z0-9-]+$ ]] \
-        || die "The SOT default of ${refs#"\${"} is no directory name: $sub"
-    printf '%s\n' "$sub"
+    local key="$1" rows row_key name sub
+    rows=$(lancache_sot_list state_dir_keys runtime) || exit $?
+    while read -r row_key name; do
+        [[ "$row_key" == "$key" ]] || continue
+        sub=$(prod_env_default "$name") || exit $?
+        [[ "$sub" =~ ^[a-z0-9-]+$ ]] \
+            || die "The SOT default of $name is no directory name: $sub"
+        printf '%s\n' "$sub"
+        return 0
+    done <<< "$rows"
+    die "The SOT runtime.state_dir_keys names no directory for $key."
 }
 
-# What: every state key the prod compose mounts
-# Why: backup must not keep a second, drifting list
-# From: Issue #1683 | PR #1858
+# What: every state key the prod stack mounts, from the SOT
+# Why: backup and update read the one list in the SOT
+# From: Issue #1683 | PR #1912
 prod_state_keys() {
-    local keys
-    keys=$(grep -oE '\$\{[A-Z0-9_]+:-\$\{LANCACHE_STATE_DIR:\?' "$PROD_COMPOSE") \
-        || die "$PROD_COMPOSE mounts no state directory (exit $?)."
-    sed -E 's/^\$\{([A-Z0-9_]+):-.*/\1/' <<< "$keys" | sort -u
+    local rows row_key name
+    rows=$(lancache_sot_list state_dir_keys runtime) || exit $?
+    while read -r row_key name; do
+        printf '%s\n' "$row_key"
+    done <<< "$rows"
 }
 
 # What: "volume dir" per row of quickstart_volume_keys
@@ -3384,7 +3378,7 @@ migrate_env_for_update() (
 
     # What: derives state dirs from the legacy root
     # Why: one state contract for update and upgrades
-    state_keys=$(prod_state_keys) || die "Cannot list the state keys of $PROD_COMPOSE (exit $?)."
+    state_keys=$(prod_state_keys) || die "Cannot list the state keys of the SOT (exit $?)."
     while IFS= read -r state_key; do
         state_sub=$(prod_state_subdir "$state_key") \
             || die "Cannot read the default directory of $state_key (exit $?)."
@@ -3660,7 +3654,7 @@ backup_manifest() {
     # What: every compose state dir but cache and logs
     # Why: cache: full mode only; logs are no rollback state
     # From: Issue #1683 | PR #1858
-    keys=$(prod_state_keys) || die "Cannot list the state keys of $PROD_COMPOSE (exit $?)."
+    keys=$(prod_state_keys) || die "Cannot list the state keys of the SOT (exit $?)."
     while IFS= read -r key; do
         case "$key" in CACHE_DIR|SYSLOG_NG_LOG_DIR) continue ;; esac
         dir=$(prod_state_dir_for_key "$key" "$env_file" "$state_dir") \

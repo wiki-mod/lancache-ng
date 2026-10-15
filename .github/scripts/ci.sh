@@ -14619,8 +14619,18 @@ _ci_check_prod_state_wiring() {
         _ci_file_match "[CI-ERROR-CHECK-0181]" "key=\"${key}\" reason=\"doc not searched\"" "${doc}" "${key}" -Fw \
             || { [ "$?" -eq 1 ] || return 2; viol+=("${doc_rel} does not mention ${key}"); }
     done <<<"${keys}"
+    # What: compose mounts exactly the SOT state_dir_keys.
+    # Why: the SOT list owns the keys; compose only mounts.
+    # From: Issue #1683 | PR #1912
+    local mounted want
+    mounted="$(_ci_run -m 1 "[CI-ERROR-CHECK-0192]" "file=\"${compose}\" reason=\"state mounts not read\"" grep -oE '\$\{[A-Z0-9_]+:-\$\{LANCACHE_STATE_DIR:\?' "${compose}")" || return 2
+    mounted="${mounted//:-\$\{LANCACHE_STATE_DIR:\?/}"
+    mounted="$(sort -u <<< "${mounted//\$\{/}")"
+    want="$(sort -u <<< "${keys}")"
+    [ "${mounted}" = "${want}" ] \
+        || viol+=("${dep} state mounts differ from SOT runtime.state_dir_keys: compose=[${mounted//$'\n'/ }] sot=[${want//$'\n'/ }]")
     # What: a mount default off the state root fails.
-    # Why: AG-SETUP-001: keys come from the compose itself.
+    # Why: AG-SETUP-001: defaults stay under the state root.
     # From: Issue #1683 | PR #1912
     local off
     off="$(_ci_run -m 1 "[CI-ERROR-CHECK-0176]" "file=\"${compose}\" reason=\"mount defaults not scanned\"" grep -E '^[[:space:]]*(- |device: )\$\{[A-Z0-9_]+:-' "${compose}")" || return 2

@@ -738,6 +738,20 @@ runtime:
     - nats-data NATS_DATA_DIR
     - nats-conf NATS_CONF_DIR
     - logs-syslog-ng SYSLOG_NG_LOG_DIR
+  # What: prod state dir keys as "KEY STATE_SUBDIR_NAME".
+  # Why: shell reads this list, not the compose text.
+  # From: Issue #1683 | PR #1912
+  state_dir_keys:
+    - SYSLOG_NG_LOG_DIR STATE_SUBDIR_SYSLOG_NG
+    - NTP_DATA_DIR STATE_SUBDIR_NTP
+    - CACHEHAMSTER_DATA_DIR STATE_SUBDIR_CACHEHAMSTER
+    - CA_DIR STATE_SUBDIR_CA
+    - PDNS_DIR STATE_SUBDIR_PDNS
+    - PDNS_FILTER_STATE_DIR STATE_SUBDIR_PDNS_FILTER
+    - NATS_DATA_DIR STATE_SUBDIR_NATS
+    - NATS_CONF_DIR STATE_SUBDIR_NATS_CONF
+    - KEA_DATA_DIR STATE_SUBDIR_KEA
+    - CACHE_DIR STATE_SUBDIR_CACHE
   # What: archive compressors, best first: ext command args.
   # Why: logbundle takes the first present; tar writes it.
   # From: Issue #1683 | PR #1912
