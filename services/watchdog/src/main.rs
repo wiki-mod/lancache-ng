@@ -2673,7 +2673,9 @@ async fn soa_bump(
         .map_err(|_| format!("{zone} SOA serial {serial} is no number"))?;
     let want = date_serial();
     let next = if serial < want { want } else { serial + 1 };
-    let ttl: u64 = minimum.parse().unwrap_or(3600);
+    let ttl: u64 = minimum
+        .parse()
+        .map_err(|e| format!("{zone} SOA minimum {minimum} is no number: {e}"))?;
     let name = config::canonical_zone(zone);
     let body = serde_json::json!({"rrsets": [{
         "name": name, "type": "SOA", "ttl": ttl, "changetype": "REPLACE",
@@ -3153,10 +3155,15 @@ fn dnsmasq_line(lines: &mut String, key: &str, values: &[&str], line: String) {
 // What: dnsmasq.conf of proxy or relay mode.
 // Why: values come from the ui settings, then the env.
 // From: Issue #1683 | PR #1912
-fn dnsmasq_conf(set: &dyn Fn(&str) -> String, relay: bool) -> String {
+fn dnsmasq_conf(set: &dyn Fn(&str) -> String, relay: bool, log_dhcp: bool) -> String {
     // What: DHCP-only dnsmasq: no DNS, no resolv.conf.
     // Why: avoids port 53 binding conflicts (#485).
-    let mut conf = String::from("port=0\nno-resolv\nno-poll\nlog-dhcp\nlog-facility=-\n");
+    let mut conf = String::from("port=0\nno-resolv\nno-poll\nlog-facility=-\n");
+    // What: option logging follows the DHCP logging switch.
+    // Why: every service has one switch; log-dhcp is extra.
+    if log_dhcp {
+        conf.push_str("log-dhcp\n");
+    }
     let upstream = set("UPSTREAM_DHCP_IP");
     if relay {
         let local = set("DHCP_RELAY_LOCAL_ADDR");
@@ -3257,7 +3264,12 @@ fn dnsmasq_conf(set: &dyn Fn(&str) -> String, relay: bool) -> String {
 // From: Issue #1683 | PR #1912
 fn dnsmasq(ctx: &Ctx, relay: bool) -> Result<Run, String> {
     let set = |key: &str| ctx.setting(key).unwrap_or_default();
-    let body = dnsmasq_conf(&set, relay);
+    let log_dhcp = ctx
+        .setting("LOGGING_DHCP_ENABLED")
+        .as_deref()
+        .and_then(config::parse_bool)
+        .ok_or("LOGGING_DHCP_ENABLED must be a boolean")?;
+    let body = dnsmasq_conf(&set, relay, log_dhcp);
     let path = ctx.run_dir.join("dnsmasq.conf");
     let store = lancache_ng::SnapshotStore::new(
         PathBuf::from(ctx.need("DHCP_CONFIG_SNAPSHOT_DIR")?),
@@ -6880,10 +6892,12 @@ mod tests {
         .map(|(k, v)| (k, v.to_string()))
         .collect();
         let set = |key: &str| values.get(key).cloned().unwrap_or_default();
-        let relay = dnsmasq_conf(&set, true);
+        let relay = dnsmasq_conf(&set, true, false);
+        assert!(!relay.contains("log-dhcp"), "{relay}");
+        assert!(dnsmasq_conf(&set, true, true).contains("\nlog-dhcp\n"));
         assert!(relay.ends_with("dhcp-relay=10.0.0.2,10.0.0.1\n"), "{relay}");
         assert!(!relay.contains("dhcp-range"));
-        let proxy = dnsmasq_conf(&set, false);
+        let proxy = dnsmasq_conf(&set, false, true);
         for line in [
             "log-facility=-",
             "dhcp-range=10.0.0.0,proxy",
