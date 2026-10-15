@@ -201,6 +201,15 @@ _ci_command_available() {
     [ -n "${resolved}" ]
 }
 
+# What: sha256 hex digest of stdin, without the file column.
+# Why: one hash owner; callers keep only the digest.
+# From: Issue #1683 | PR #1912
+_ci_sha256_hex() {
+    local out
+    out="$(_ci_capture 0 sha256sum)" || return 2
+    printf '%s\n' "${out%% *}"
+}
+
 # What: Enforce and create the /var/tmp CI temp root.
 # Why: bare mktemp and tools then use disk, not tmpfs.
 # From: Issue #1683 | PR #1858
@@ -1599,8 +1608,8 @@ _ci_tracked_content_ids() {
             fi
             case "${nrc}" in
                 0)
-                    norm="$(_ci_capture 0 sha256sum <<< "${norm}")" || return 2
-                    printf '%s\t%s\n' "${path}" "${norm%% *}"
+                    norm="$(_ci_sha256_hex <<< "${norm}")" || return 2
+                    printf '%s\t%s\n' "${path}" "${norm}"
                     continue
                     ;;
                 1) ;;
@@ -1651,8 +1660,8 @@ _ci_rust_content() {
     blob="$(_ci_listing_blob "${listing}" "${ref}")" || return 2
     pkgs="$(_ci_run "[CI-ERROR-IDENTITY-0011]" "path=\"${lock}\" reason=\"lock closure not read\"" awk -v roots="${crates}" "${_CI_AWK_LOCK_CLOSURE}" <<< "${blob}")" || return 2
     if [ "${mode}" != text ]; then
-        h="$(_ci_capture 0 sha256sum <<< "${pkgs}")" || return 2
-        printf '%s\t%s\n' "${lock}" "${h%% *}"
+        h="$(_ci_sha256_hex <<< "${pkgs}")" || return 2
+        printf '%s\t%s\n' "${lock}" "${h}"
     fi
     while IFS='|' read -r dir bin crate; do
         [ -z "${bin}" ] || continue
@@ -1674,8 +1683,8 @@ _ci_rust_content() {
             printf '%s\n' "${sel}"
             continue
         fi
-        h="$(_ci_capture 0 sha256sum <<< "${sel}")" || return 2
-        printf '%s\t%s\n' "${dir}" "${h%% *}"
+        h="$(_ci_sha256_hex <<< "${sel}")" || return 2
+        printf '%s\t%s\n' "${dir}" "${h}"
     done <<< "${rows}"
 }
 
@@ -1883,7 +1892,7 @@ _ci_identity_compute() {
     buf="$(printf 'service=%s\nbuild_type=%s\nplatform=%s' "${service}" "${build_type}" "${platform}")"$'\n'
     [ -z "${content}" ] || buf+="${content}"$'\n'
     buf+="${pins}"$'\n'
-    printf '%s' "${buf}" | sha256sum | cut -d' ' -f1
+    printf '%s' "${buf}" | _ci_sha256_hex
 }
 
 # What: one_fn service platform [args] per (one) platform.
@@ -2114,8 +2123,8 @@ _ci_resolve_state() {
         printf 'PRODUCED_UNVERIFIED\n'
         return 0
     fi
-    lstate="$(printf '%s' "${lrec}" | cut -f1)"
-    ldig="$(printf '%s' "${lrec}" | cut -f2)"
+    lstate="${lrec%%$'\t'*}"
+    ldig="${lrec#*$'\t'}"
     if [ "${lstate}" = ACCEPTED ]; then
         if [ "${grc}" -eq 1 ]; then
             ci_log "[CI-ERROR-RESOLVE-0006]" "service=\"${service}\" identity=\"${identity}\" reason=\"ACCEPTED in ledger but artifact missing in registry\" ledger_digest=\"${ldig}\""
@@ -4851,10 +4860,13 @@ _ci_imagetools_create() {
 # Why: a mismatch is no accepted image (convergence L5).
 # From: Issue #1683 | PR #1912
 _ci_docker_publish() {
-    local service="$1" identity="$2" platform="$3" tag out pushed seen
+    local service="$1" identity="$2" platform="$3" tag out pushed seen line
     tag="$(_ci_image_tag "${service}" "${platform}" "${identity}")" || return 2
     out="$(_ci_retry registry docker push "${tag}")" || return "$?"
-    pushed="$(sed -n 's/.*: digest: \(sha256:[0-9a-f]\{64\}\) size: .*/\1/p' <<< "${out}" | tail -n 1)"
+    pushed=""
+    while IFS= read -r line; do
+        if [[ "${line}" =~ :\ digest:\ (sha256:[0-9a-f]{64})\ size:\  ]]; then pushed="${BASH_REMATCH[1]}"; fi
+    done <<< "${out}"
     seen="$(_ci_registry_digest "${tag}")" || return "$?"
     if [ -z "${pushed}" ] || [ "${pushed}" != "${seen}" ]; then
         ci_error "[CI-ERROR-PUBLISH-0006]" "service=\"${service}\" platform=\"${platform}\" pushed=\"${pushed:-none}\" registry=\"${seen}\" reason=\"push digest and registry digest differ\"" "${out}"
@@ -6241,10 +6253,10 @@ _ci_promote_targets_for_ref() {
 # Why: one ls-remote reader for every ref tip.
 # From: Issue #1683
 _ci_ref_tip() {
-    local out remote
+    local out remote line
     remote="$(_ci_git_remote)" || return 2
     out="$(_ci_run "[CI-ERROR-PROMOTE-0016]" "ref=\"$1\" remote=\"${remote}\" reason=\"ref tip lookup failed\"" git ls-remote "${remote}" "$1")" || return 2
-    [ -z "${out}" ] || cut -f1 <<< "${out}"
+    [ -z "${out}" ] || while IFS= read -r line; do printf '%s\n' "${line%%$'\t'*}"; done <<< "${out}"
 }
 
 # What: Promote every target the current ref maps to.
@@ -6895,7 +6907,7 @@ ci_cmd_release_vex() {
 # Why: ls-remote skips deep fetch; empty pre-1.0.
 # From: Issue #1683
 _ci_last_release_tag() {
-    local below="${1:-}" refs tags="" t remote
+    local below="${1:-}" refs tags="" t remote sorted
     remote="$(_ci_git_remote)" || return 2
     refs="$(_ci_capture 0 git ls-remote --tags --refs "${remote}")" || return 2
     # What: loads the SOT once before the per-tag subshells
@@ -6914,7 +6926,8 @@ _ci_last_release_tag() {
         return 0
     fi
     if [ -z "${below}" ]; then
-        sort -V <<<"${tags}" | tail -n 1
+        sorted="$(_ci_capture 0 sort -V <<<"${tags}")" || return 2
+        printf '%s\n' "${sorted##*$'\n'}"
         return 0
     fi
     # What: an rc tag counts as its base vX.Y.Z here.
@@ -7487,7 +7500,7 @@ _ci_validate_subnet() {
     fi
     base="$(_ci_ipv4_to_int "${pool%/*}")"
     base=$(( base >> (32 - plen) << (32 - plen) ))
-    h="$(printf '%s' "${seed}" | sha256sum)"
+    h="$(printf '%s' "${seed}" | _ci_sha256_hex)" || return 2
     printf '%s/%s' "$(_ci_int_to_ipv4 $(( base + (16#${h:0:8} % (1 << (slot - plen))) * (1 << (32 - slot)) )))" "${slot}"
 }
 
@@ -8376,7 +8389,7 @@ _ci_validate_ui_add_record() {
 # Why: one owner for the CSRF form post and its 303 check.
 # From: Issue #1683 | PR #1858
 _ci_validate_ui_post() {
-    local base="$1" jar="$2" path="$3" field code body
+    local base="$1" jar="$2" path="$3" field code body raw
     shift 3
     local -a data=()
     for field in "$@"; do
@@ -8390,7 +8403,8 @@ _ci_validate_ui_post() {
         return 2
     }
     if [ "${code}" != "303" ]; then
-        ci_error "[CI-ERROR-VALIDATE-0034]" "url=\"${base}${path}\" code=\"${code}\" reason=\"ui form post did not return 303; response body in raw\"" "$(head -c 2000 "${body}")"
+        raw="$(_ci_capture 0 cat "${body}")" || { rm -f "${body}"; return 2; }
+        ci_error "[CI-ERROR-VALIDATE-0034]" "url=\"${base}${path}\" code=\"${code}\" reason=\"ui form post did not return 303; response body in raw\"" "${raw}"
         rm -f "${body}"
         return 1
     fi
@@ -8754,7 +8768,7 @@ _ci_validate_kea_add() {
     _ci_validate_ui_post "${base}" "${jar}" /dhcp/static/add "csrf_token=${csrf}" \
         "subnet_id=${sid}" "mac=${mac}" "ip=${ip}" "hostname=${host}" || return $?
     after="$(_ci_validate_kea_snapshots "${dir}")" || return 2
-    new="$(tail -n 1 <<< "${after}")"
+    new="${after##*$'\n'}"
     if [ -z "${new}" ] || grep -qxF -- "${new}" <<< "${before}"; then
         ci_log "[CI-ERROR-VALIDATE-0088]" "mac=\"${mac}\" before=\"${before//$'\n'/ }\" after=\"${after//$'\n'/ }\" reason=\"ui reservation write recorded no new Kea snapshot\""
         return 1
@@ -9756,7 +9770,7 @@ _ci_build_tools_signature() {
         ci_log "[CI-ERROR-BUILDTOOLS-0005]" "reason=\"no tracked build-tools source; FAIL CLOSED\""
         return 2
     fi
-    printf 'args<<\n%s\nids<<\n%s\n' "${args}" "${ids}" | sha256sum | cut -d' ' -f1
+    printf 'args<<\n%s\nids<<\n%s\n' "${args}" "${ids}" | _ci_sha256_hex
 }
 
 # What: Append one include object from key=value pairs.
@@ -11606,7 +11620,7 @@ _ci_rh_sccache_check() {
     done <<< "${stales}"
     if _ci_rh_root test -d "${dist}"; then printf '  %s: present\n' "${dist}"; else printf '  %s: MISSING\n' "${dist}"; lack=1; fi
     printf '\n--- Live check as %s ---\n' "${user}"
-    main_bin="${bin_dir}/$(head -n 1 <<< "${list}")"
+    main_bin="${bin_dir}/${list%%$'\n'*}"
     if [ -x "${main_bin}" ]; then
         _ci_run "[CI-ERROR-RUNNER-0098]" "user=\"${user}\" reason=\"sccache --version failed\"" _ci_rh_root sudo -u "${user}" env HOME="${root}/${user}" "${main_bin}" --version || lack=1
     else
@@ -11832,7 +11846,7 @@ CI_DOCKERFILE_SPECS=('Dockerfile' '*/Dockerfile')
 _ci_shell_sources() {
     local -n _ci_ss_out="$1"
     local -a _ci_ss_all=() _ci_ss_dock=()
-    local _ci_ss_f _ci_ss_l1 _ci_ss_re='^#![[:space:]]*/([^[:space:]]*/)?(env[[:space:]]+)?(ba)?sh([[:space:]]|$)'
+    local _ci_ss_f _ci_ss_l1 _ci_ss_rc _ci_ss_re='^#![[:space:]]*/([^[:space:]]*/)?(env[[:space:]]+)?(ba)?sh([[:space:]]|$)'
     _ci_scan_files _ci_ss_all "$2" || return 2
     _ci_ss_out=()
     for _ci_ss_f in "${_ci_ss_all[@]}"; do
@@ -11840,7 +11854,20 @@ _ci_shell_sources() {
             *.sh|*.bash|*.bats) _ci_ss_out+=("${_ci_ss_f}"); continue ;;
             *.*|Dockerfile) continue ;;
         esac
-        _ci_ss_l1="$(_ci_run "[CI-ERROR-CHECK-0164]" "file=\"${_ci_ss_f}\" reason=\"first line unreadable\"" head -n 1 -- "${_ci_ss_f}")" || return 2
+        # What: read the first line; rc 1 is EOF only.
+        # Why: an empty file is a valid input.
+        # From: Issue #1683 | PR #1912
+        _ci_ss_l1=""
+        _ci_ss_rc=0
+        if [ -r "${_ci_ss_f}" ]; then
+            IFS= read -r _ci_ss_l1 < "${_ci_ss_f}" || _ci_ss_rc=$?
+        else
+            _ci_ss_rc=2
+        fi
+        if [ "${_ci_ss_rc}" -gt 1 ]; then
+            ci_log "[CI-ERROR-CHECK-0164]" "file=\"${_ci_ss_f}\" rc=${_ci_ss_rc} reason=\"first line unreadable\""
+            return 2
+        fi
         if [[ "${_ci_ss_l1}" =~ ${_ci_ss_re} ]]; then
             _ci_ss_out+=("${_ci_ss_f}")
         fi

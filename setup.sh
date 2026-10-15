@@ -2687,7 +2687,7 @@ lancache_channel_words() {
     channels=$(lancache_release_rows channel) || exit $?
     aliases=$(lancache_release_rows alias) || exit $?
     printf '%s\n' "$channels"
-    cut -d' ' -f1 <<< "$aliases"
+    awk '{ print $1 }' <<< "$aliases"
 }
 
 # What: accepts SOT channels, their aliases, pinned
@@ -3722,7 +3722,7 @@ compose_project_name() {
         local compose_name_lines
         compose_name_lines=$(sed -n 's/^name:[[:space:]]*//p' "$compose_dir/docker-compose.yml") \
             || die "Failed to read $compose_dir/docker-compose.yml (exit $?)."
-        name=$(head -1 <<<"$compose_name_lines")
+        name="${compose_name_lines%%$'\n'*}"
     fi
     name="${name:-$(basename "$compose_dir")}"
     printf '%s\n' "$name"
@@ -4682,14 +4682,16 @@ wait_for_stack_health() {
 rollback_stack_update() {
     local install_dir="$1"
     local backup_root="$BACKUP_ROOT"
-    local latest_backup="" backups
+    local latest_backup="" backups sorted_backups
 
     if [[ -d "$backup_root" ]]; then
         if ! backups=$(find "$backup_root" -maxdepth 1 -name 'lancache-ng-config-*.tar.gz' -print); then
             print_error "Failed to list the backups under $backup_root; cannot roll back automatically. Manual recovery required."
             return 1
         fi
-        latest_backup=$(sort <<< "$backups" | tail -1)
+        sorted_backups=$(sort <<< "$backups") \
+            || die "Failed to sort the backups under $backup_root (exit $?)."
+        latest_backup="${sorted_backups##*$'\n'}"
     fi
     if [[ -z "$latest_backup" ]]; then
         print_error "No pre-update backup archive found under $backup_root; cannot roll back automatically. Manual recovery required."
@@ -5046,7 +5048,7 @@ lancache_ui_cache_max_gb_override_is_valid() {
 # What: reads one KEY from the ui-data settings file
 # Why: checks the volume exists; docker run would create it
 lancache_read_ui_settings_override() {
-    local install_dir="$1" env_file="$2" key="$3" project volume raw rc=0 settings_file
+    local install_dir="$1" env_file="$2" key="$3" project volume raw rc=0 settings_file line found=""
     if ! command_available docker; then
         print_skip "Reading the UI setting $key: docker is not available"
         return 0
@@ -5066,10 +5068,13 @@ lancache_read_ui_settings_override() {
     raw=$(docker run --rm -v "${volume}:/volume:ro" "$LANCACHE_HELPER_IMAGE" \
         sh -c "if [ -e /volume/${settings_file} ]; then cat /volume/${settings_file}; fi") \
         || die "Failed to read the UI settings from Docker volume $volume (exit $?)."
-    # What: sed reads $raw via a here-string
-    # Why: avoids SIGPIPE under pipefail
+    # What: the last KEY= line of $raw wins
+    # Why: a loop reads it all; no early-exit pipe
     # From: Issue #1377
-    sed -n "s/^${key}=//p" <<<"$raw" | tail -1
+    while IFS= read -r line; do
+        if [[ "$line" == "${key}="* ]]; then found="${line#"${key}="}"; fi
+    done <<<"$raw"
+    if [[ -n "$found" ]]; then printf '%s\n' "$found"; fi
 }
 
 # What: syncs auto-update timer with AUTO_UPDATE_ENABLED
@@ -5322,7 +5327,7 @@ logbundle_collect_secret_values() {
     # What: sorts secrets longest first
     # Why: a shorter value would corrupt a longer one
     # From: Issue #782
-    done | sort -u | awk '{ print length, $0 }' | sort -k1,1nr | cut -d' ' -f2-
+    done | sort -u | awk '{ print length, $0 }' | sort -k1,1nr | awk '{ sub(/^[^ ]+ /, ""); print }'
 }
 
 # What: replaces every secret value with [REDACTED]
@@ -6671,7 +6676,7 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     # From: Issue #1377
     docker_version_raw="$(docker --version)" || die "docker --version failed (exit $?)."
     if docker_version_numbers="$(grep -oP '[\d.]+' <<<"$docker_version_raw")"; then
-        print_ok "Docker $(head -1 <<<"$docker_version_numbers")"
+        print_ok "Docker ${docker_version_numbers%%$'\n'*}"
     else
         print_warn "Docker version not recognised: $docker_version_raw"
     fi
@@ -6826,8 +6831,8 @@ if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
     print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
 else
     selectable=$(lancache_selectable_channels) || exit $?
-    pre_stable=$(head -n 1 <<< "$selectable")
-    stable_name=$(tail -n 1 <<< "$selectable")
+    pre_stable="${selectable%%$'\n'*}"
+    stable_name="${selectable##*$'\n'}"
     retired=$(lancache_release_rows retired) || exit $?
     printf "  %s — the most recently built channel from active development.\n" "$pre_stable"
     printf "            Refreshes continuously from current_dev. Currently the\n"
