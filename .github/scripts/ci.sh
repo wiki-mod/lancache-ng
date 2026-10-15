@@ -185,6 +185,18 @@ _ci_mktemp() {
     printf '%s\n' "${out}"
 }
 
+# What: run "$@" with a fresh work dir last; then remove it.
+# Why: one cleanup owner for temp work dirs; rc is kept.
+# From: Issue #1683 | PR #1912
+_ci_with_workdir() {
+    local prefix="$1" dir rc=0
+    shift
+    dir="$(_ci_mktemp -d "${CI_TMPDIR}/${prefix}.XXXXXX")" || return 2
+    "$@" "${dir}" || rc=$?
+    rm -rf "${dir}"
+    return "${rc}"
+}
+
 # What: path of a command on PATH; rc 1 when it is absent.
 # Why: one owner for command lookup; callers report absence.
 # From: Issue #1683 | PR #1912
@@ -586,6 +598,19 @@ _ci_block_entry_field() {
     [ -z "${_CI_SOT["${kp}v:${p}"]}" ] || printf '%s\n' "${_CI_SOT["${kp}v:${p}"]}"
 }
 
+# What: read entry fields: block entry field var ... pairs.
+# Why: one owner for the field-by-field SOT read.
+# From: Issue #1683 | PR #1912
+_ci_block_entry_fields() {
+    local block="$1" entry="$2" v
+    shift 2
+    while [ "$#" -gt 0 ]; do
+        v="$(_ci_block_entry_field "${block}" "${entry}" "$1")" || return 2
+        printf -v "$2" '%s' "${v}"
+        shift 2
+    done
+}
+
 # What: Print a block->entry->field list, one item per line.
 # Why: One list reader; inline [..] and block - items alike.
 # From: Issue #1683
@@ -677,7 +702,7 @@ _ci_workspace_src_dir() {
 # From: Issue #1683 | PR #1912
 ci_service_context_paths() {
     local svc="$1" root="${2:-${CI_REPO_ROOT:-.}}" own crates manifest lock rows dir bin crate type
-    type="$(_ci_block_entry_field services "${svc}" build_type)" || return 2
+    type="$(_ci_required_field "${svc}" build_type)" || return 2
     [ "${type}" = rust ] || return 0
     own="$(_ci_required_field "${svc}" context)" || return 2
     crates=" $(_ci_required_field "${svc}" crates list | tr '\n' ' ')"
@@ -1022,10 +1047,7 @@ _ci_fetch_drop() {
 # From: Issue #1683 | PR #1858
 _ci_codeql_fetch() {
     local work="$1" repo tag asset url raw sha
-    repo="$(_ci_block_entry_field external_versions codeql repository)" || return 2
-    tag="$(_ci_block_entry_field external_versions codeql release_tag)" || return 2
-    asset="$(_ci_block_entry_field external_versions codeql asset)" || return 2
-    sha="$(_ci_block_entry_field external_versions codeql sha256)" || return 2
+    _ci_block_entry_fields external_versions codeql repository repo release_tag tag asset asset sha256 sha || return 2
     if [ -z "${repo}" ] || [ -z "${tag}" ] || [ -z "${asset}" ]; then
         ci_log "[CI-ERROR-CODEQL-0005]" "key=\"external_versions.codeql\" reason=\"repository/release_tag/asset missing; FAIL CLOSED\""
         return 2
@@ -1189,7 +1211,7 @@ ci_cmd_plan_matrix() {
         # What: path-changed rust is test candidate (§60).
         # Why: tests run on change, even build reuse (§60).
         # From: Issue #1683
-        svc_type="$(ci_service_field "${service}" build_type)" || return 2
+        svc_type="$(_ci_required_field "${service}" build_type)" || return 2
         [ "${path_cand}" = true ] && [ "${svc_type}" = rust ] \
             && test_services="${test_services} ${service}"
         # What: auth once, only when a candidate exists.
@@ -1484,20 +1506,28 @@ PROG
 )"
 readonly _CI_AWK_LOCK_CLOSURE
 
+# What: awk verdict: rc 0 print, rc 1 raw, else coded stop.
+# Why: one owner for the reader and the normalizer verdict.
+# From: Issue #1683 | PR #1912
+_ci_awk_verdict() {
+    local id="$1" ctx="$2" rc="$3" out="$4"
+    case "${rc}" in
+        0) printf '%s\n' "${out}" ;;
+        1) return 1 ;;
+        *)
+            ci_error "${id}" "${ctx}" "${out}"
+            return 2
+            ;;
+    esac
+}
+
 # What: item records of Rust text $1; $2 keep|drop tests.
 # Why: rc 1 = unterminated text; the caller keeps raw.
 # From: Issue #1683 | PR #1912
 _ci_rust_items() {
     local out rc=0
     out="$(awk -v tests="$2" "${_CI_AWK_RUST_ITEMS}" <<< "$1" 2>&1)" || rc=$?
-    case "${rc}" in
-        0) printf '%s\n' "${out}" ;;
-        1) return 1 ;;
-        *)
-            ci_error "[CI-ERROR-IDENTITY-0010]" "rc=${rc} reason=\"rust item reader failed\"" "${out}"
-            return 2
-            ;;
-    esac
+    _ci_awk_verdict "[CI-ERROR-IDENTITY-0010]" "rc=${rc} reason=\"rust item reader failed\"" "${rc}" "${out}"
 }
 
 # What: normalized Rust text: kind, name, text per item.
@@ -1592,14 +1622,7 @@ _ci_norm_content() {
         { exit 3 }
         END { if (q != "" || hd != "") exit 1 }
     ' <<< "$2" 2>&1)" || rc=$?
-    case "${rc}" in
-        0) printf '%s\n' "${out}" ;;
-        1) return 1 ;;
-        *)
-            ci_error "[CI-ERROR-IDENTITY-0008]" "grammar=\"$1\" rc=${rc} reason=\"v1 normalizer failed\"" "${out}"
-            return 2
-            ;;
-    esac
+    _ci_awk_verdict "[CI-ERROR-IDENTITY-0008]" "grammar=\"$1\" rc=${rc} reason=\"v1 normalizer failed\"" "${rc}" "${out}"
 }
 
 # What: one git call for the identity; stderr is an error.
@@ -5058,21 +5081,16 @@ _ci_trivy_db_lock_run() {
 # From: Issue #1683
 _ci_trivy_db_ensure_fresh() {
     local cache_dir="$1" rc=0
-    if _ci_trivy_db_fresh "${cache_dir}"; then
-        printf 'present=true\n'
-        return 0
+    if ! _ci_trivy_db_fresh "${cache_dir}"; then
+        _ci_trivy_db_lock_run "${cache_dir}" -- \
+            trivy image --download-db-only --cache-dir "${cache_dir}" || rc=$?
+        if [ "${rc}" -eq 2 ]; then
+            ci_log "[CI-ERROR-SCAN-0012]" "reason=\"locked DB refresh failed; refusing an unlocked concurrent write\""
+            return 2
+        fi
+        _ci_trivy_db_fresh "${cache_dir}" || { printf 'present=false\n'; return 0; }
     fi
-    _ci_trivy_db_lock_run "${cache_dir}" -- \
-        trivy image --download-db-only --cache-dir "${cache_dir}" || rc=$?
-    if [ "${rc}" -eq 2 ]; then
-        ci_log "[CI-ERROR-SCAN-0012]" "reason=\"locked DB refresh failed; refusing an unlocked concurrent write\""
-        return 2
-    fi
-    if _ci_trivy_db_fresh "${cache_dir}"; then
-        printf 'present=true\n'
-        return 0
-    fi
-    printf 'present=false\n'
+    printf 'present=true\n'
 }
 
 # What: trivy image argv for one scan, one item per line
@@ -5417,7 +5435,7 @@ _ci_verify_one() {
     # What: smoke-test every built image at its digest.
     # Why: §25 SERVICE_TESTED follows IDENTITY_VERIFIED.
     # From: Issue #1683 | PR #1858
-    verify_type="$(ci_service_field "${service}" build_type)" || return 2
+    verify_type="$(_ci_required_field "${service}" build_type)" || return 2
     if [ "${verify_type}" = toolchain ]; then
         local CI_TOOLCHAIN_IMAGE
         CI_TOOLCHAIN_IMAGE="$(_ci_image_ref "${service}" "${expected}")" || return 2
@@ -6521,8 +6539,7 @@ _ci_release_prerelease() {
 # From: Issue #1683 | PR #1912
 _ci_release_tag_kind() {
     local tag="$1" pre final
-    pre="$(_ci_block_entry_field release "" tag_prerelease)" || return 2
-    final="$(_ci_block_entry_field release "" tag_final)" || return 2
+    _ci_block_entry_fields release "" tag_prerelease pre tag_final final || return 2
     if [ -z "${pre}" ] || [ -z "${final}" ]; then
         ci_log "[CI-ERROR-RELEASE-0055]" "reason=\"no SOT release.tag_final or tag_prerelease; FAIL CLOSED\""
         return 2
@@ -6612,9 +6629,7 @@ _ci_release_pr_batch() {
 _ci_release_render() {
     local rows="$1" labels cat title skip other section pr num url text body
     labels="$(_ci_block_keys release_notes_categories)" || return 2
-    skip="$(_ci_block_entry_field release_notes "" skip_label)" || return 2
-    other="$(_ci_block_entry_field release_notes "" other_title)" || return 2
-    section="$(_ci_block_entry_field release_notes "" pr_section)" || return 2
+    _ci_block_entry_fields release_notes "" skip_label skip other_title other pr_section section || return 2
     if [ -z "${labels}" ] || [ -z "${other}" ] || [ -z "${section}" ]; then
         ci_log "[CI-ERROR-RELEASE-0030]" "reason=\"SOT release_notes or release_notes_categories incomplete\""
         return 2
@@ -6799,19 +6814,19 @@ _ci_release_asset_put() {
 # Why: the repeat check and the create read back agree
 # From: Issue #1683 | PR #1858
 _ci_release_state() {
-    local repo="$1" tag="$2" out err rc=0
+    local repo="$1" tag="$2" out err emsg rc=0
     err="$(_ci_mktemp "${CI_TMPDIR}/ci-release-view.XXXXXX")" || return 2
     out="$(gh release view "${tag}" --repo "${repo}" --json body,isPrerelease 2>"${err}")" || rc=$?
+    emsg="$(<"${err}")"
+    rm -f "${err}"
     # What: only gh's "release not found" means absent.
     # Why: auth/network errors are UNKNOWN, not "absent".
     # From: Issue #1683 | PR #1858
     if [ "${rc}" -ne 0 ]; then
-        if [[ "$(<"${err}")" == *"release not found"* ]]; then rm -f "${err}"; return 1; fi
-        ci_error "[CI-ERROR-RELEASE-0020]" "tag=\"${tag}\" reason=\"gh release view failed\"" "$(<"${err}")"
-        rm -f "${err}"
+        if [[ "${emsg}" == *"release not found"* ]]; then return 1; fi
+        ci_error "[CI-ERROR-RELEASE-0020]" "tag=\"${tag}\" reason=\"gh release view failed\"" "${emsg}"
         return 2
     fi
-    rm -f "${err}"
     _ci_capture 0 jq -r '(.isPrerelease | tostring), (.body // "")' <<< "${out}"
 }
 
@@ -6875,10 +6890,17 @@ ci_cmd_release_sbom() {
     [ -n "${service}" ] || { ci_log "[CI-ERROR-RELEASE-0007]" "reason=\"service arg required\""; return 2; }
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0008]" "reason=\"tag arg required\""; return 2; }
     _ci_require_ghcr_auth || return "$?"
-    local name digest dir out rc=0
+    local name digest
     name="$(_ci_image_ref "${service}")" || return 2
     digest="$(_ci_registry_digest "${name}:${tag}")" || return "$?"
-    dir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-sbom.XXXXXX")" || return 2
+    _ci_with_workdir ci-sbom _ci_release_sbom_in "${service}" "${tag}" "${digest}"
+}
+
+# What: reuse or make and attach one SBOM, work dir in $4.
+# Why: one owner removes the work dir, not this body.
+# From: Issue #1683 | PR #1858
+_ci_release_sbom_in() {
+    local service="$1" tag="$2" digest="$3" dir="$4" out rc=0
     out="${dir}/${service}.cdx.json"
     # What: an attached SBOM for this digest is reused
     # Why: architecture §57: one SBOM per digest, no rescan
@@ -6889,27 +6911,23 @@ ci_cmd_release_sbom() {
         _ci_file_match "[CI-ERROR-RELEASE-0056]" "service=\"${service}\" tag=\"${tag}\"" "${out}" "${digest}" -F || mrc=$?
         case "${mrc}" in
             0)
-                rm -rf "${dir}"
                 printf 'release=sbom-reused service=%s tag=%s digest=%s\n' "${service}" "${tag}" "${digest}"
                 return 0
                 ;;
             1) ;;
-            *) rm -rf "${dir}"; return 2 ;;
+            *) return 2 ;;
         esac
         ci_error "[CI-ERROR-RELEASE-0046]" "service=\"${service}\" tag=\"${tag}\" digest=\"${digest}\" reason=\"attached SBOM is not bound to this digest\"" "digests the attached SBOM names: $(grep -o -E "${CI_DIGEST_RE}" "${out}" 2>&1 | LC_ALL=C sort -u | awk '{ printf "%s ", $0; n++ } END { if (!n) printf "none" }')"
-        rm -rf "${dir}"
         return 2
     fi
-    [ "${rc}" -eq 1 ] || { rm -rf "${dir}"; return 2; }
+    [ "${rc}" -eq 1 ] || return 2
     rc=0
     _ci_trivy_sbom "${service}" "${digest}" "${out}" || rc=$?
     if [ "${rc}" -ne 0 ]; then
-        rm -rf "${dir}"
         ci_log "[CI-ERROR-RELEASE-0009]" "service=\"${service}\" reason=\"SBOM generation failed\""
         return 2
     fi
-    _ci_release_asset_put "${tag}" "${out}" || { rm -rf "${dir}"; return 2; }
-    rm -rf "${dir}"
+    _ci_release_asset_put "${tag}" "${out}" || return 2
     printf 'release=sbom service=%s tag=%s digest=%s\n' "${service}" "${tag}" "${digest}"
 }
 
@@ -6931,35 +6949,38 @@ ci_cmd_release_sbom_stack() {
 ci_cmd_release_vex() {
     local tag="${1:-}"
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0010]" "reason=\"tag arg required\""; return 2; }
-    local root="${CI_REPO_ROOT:-.}" trivyignore dir adir out rc=0
+    local root="${CI_REPO_ROOT:-.}" trivyignore
     trivyignore="$(_ci_repo_path CI_TRIVY_IGNORE "${root}")" || return 2
     [ -s "${trivyignore}" ] || { ci_log "[CI-ERROR-RELEASE-0011]" "path=\"${trivyignore}\" reason=\"trivyignore missing; cannot build release VEX\""; return 2; }
-    dir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-vex.XXXXXX")" || return 2
+    _ci_with_workdir ci-vex _ci_release_vex_in "${tag}" "${trivyignore}"
+}
+
+# What: derive, compare and attach the VEX, work dir in $3.
+# Why: one owner removes the work dir, not this body.
+# From: Issue #1683 | PR #1858
+_ci_release_vex_in() {
+    local tag="$1" trivyignore="$2" dir="$3" adir out rc=0
     out="${dir}/vex.openvex.json"
     _ci_generate_vex "${trivyignore}" > "${out}" || rc=$?
     if [ "${rc}" -ne 0 ] || [ ! -s "${out}" ]; then
-        rm -rf "${dir}"
         ci_log "[CI-ERROR-RELEASE-0012]" "tag=\"${tag}\" rc=${rc} reason=\"OpenVEX generation failed or empty (raw above)\""
         return 2
     fi
     # What: an attached VEX must equal the one derived now
     # Why: AG-REL-014: a published release is never changed
     # From: Issue #1683 | PR #1858
-    adir="$(_ci_mktemp -d "${dir}/attached.XXXXXX")" || { rm -rf "${dir}"; return 2; }
+    adir="$(_ci_mktemp -d "${dir}/attached.XXXXXX")" || return 2
     rc=0; _ci_release_asset_get "${tag}" "${out##*/}" "${adir}" || rc=$?
     if [ "${rc}" -eq 0 ]; then
         if cmp -s "${out}" "${adir}/${out##*/}"; then
-            rm -rf "${dir}"
             printf 'release=vex-unchanged tag=%s\n' "${tag}"
             return 0
         fi
         ci_error "[CI-ERROR-RELEASE-0047]" "tag=\"${tag}\" reason=\"attached VEX differs from the derived one; CI never replaces it\"" "$(diff -u "${adir}/${out##*/}" "${out}" 2>&1)"
-        rm -rf "${dir}"
         return 2
     fi
-    [ "${rc}" -eq 1 ] || { rm -rf "${dir}"; return 2; }
-    _ci_release_asset_put "${tag}" "${out}" || { rm -rf "${dir}"; return 2; }
-    rm -rf "${dir}"
+    [ "${rc}" -eq 1 ] || return 2
+    _ci_release_asset_put "${tag}" "${out}" || return 2
     printf 'release=vex tag=%s\n' "${tag}"
 }
 
@@ -7256,6 +7277,11 @@ _ci_gc_delete() {
     return 2
 }
 
+# What: the two words a reachability probe may answer.
+# Why: probe and classifier share one spelling.
+# From: Issue #1683 | PR #1912
+readonly _CI_GC_REFERENCED=referenced _CI_GC_UNREACHABLE=unreachable
+
 # What: Classify a candidate against the root digest set.
 # Why: Membership or recency floor decides; else garbage.
 # From: Issue #1683
@@ -7270,31 +7296,25 @@ _ci_gc_reachable() {
         ci_log "[CI-ERROR-GC-0027]" "candidate=\"${digest}\" roots_file=\"${CI_GC_ROOTS_FILE:-unset}\" reason=\"no materialized roots file; cannot judge\""
         return 2
     fi
-    local root_hit
-    root_hit="$(_ci_capture 1 grep -xF -- "${digest}" "${CI_GC_ROOTS_FILE}")" || return 2
-    if [ -n "${root_hit}" ]; then
-        printf 'referenced\n'
-        return 0
-    fi
     # What: An attestation is live iff its subject is.
     # Why: sha256-<subj> referrers guard live provenance.
     # From: Issue #1683
-    local tags tag subj
+    local tags tag subj root_hit
+    local -a probes=("${digest}")
     tags="$(printf '%s' "${candidate}" | awk -F'\t' '{print $4}')"
     if [ -n "${tags}" ]; then
         while IFS= read -r tag; do
             case "${tag}" in
                 sha256-*)
-                    subj="sha256:${tag#sha256-}"; subj="${subj%%.*}"
-                    root_hit="$(_ci_capture 1 grep -xF -- "${subj}" "${CI_GC_ROOTS_FILE}")" || return 2
-                    if [ -n "${root_hit}" ]; then
-                        printf 'referenced\n'
-                        return 0
-                    fi
+                    subj="sha256:${tag#sha256-}"; probes+=("${subj%%.*}")
                     ;;
             esac
         done <<< "${tags//,/$'\n'}"
     fi
+    for subj in "${probes[@]}"; do
+        root_hit="$(_ci_capture 1 grep -xF -- "${subj}" "${CI_GC_ROOTS_FILE}")" || return 2
+        [ -z "${root_hit}" ] || { printf '%s\n' "${_CI_GC_REFERENCED}"; return 0; }
+    done
     # What: Fail closed unless grace is a positive integer.
     # Why: Empty grace makes floor=now and deletes all.
     # From: Issue #1683
@@ -7322,8 +7342,8 @@ _ci_gc_reachable() {
     esac
     now="$(date +%s)"
     floor=$(( now - window * 60 ))
-    [ "${created_epoch}" -ge "${floor}" ] && { printf 'referenced\n'; return 0; }
-    printf 'unreachable\n'
+    [ "${created_epoch}" -ge "${floor}" ] && { printf '%s\n' "${_CI_GC_REFERENCED}"; return 0; }
+    printf '%s\n' "${_CI_GC_UNREACHABLE}"
 }
 
 # What: Classify one candidate KEEP / DELETE / fail.
@@ -7336,8 +7356,8 @@ _ci_gc_classify() {
         return 2
     fi
     case "${verdict}" in
-        referenced) printf 'KEEP\n' ;;
-        unreachable) printf 'DELETE\n' ;;
+        "${_CI_GC_REFERENCED}") printf 'KEEP\n' ;;
+        "${_CI_GC_UNREACHABLE}") printf 'DELETE\n' ;;
         *)
             ci_log "[CI-ERROR-GC-0005]" "candidate=\"${candidate}\" verdict=\"${verdict}\" reason=\"unknown reachability; fix probe, never delete or keep\""
             return 2
@@ -7645,7 +7665,7 @@ _ci_validate_detach() {
 # Why: Per-slot flock; runs never share a /27.
 # From: Issue #1683
 _ci_validate_slot_lock() {
-    local subnet="$1" root key holder out errf ack="" rfd wfd hrc=0
+    local subnet="$1" root key holder out errf hmsg hfail ack="" rfd wfd hrc=0
     root="$(_ci_validate_shared_dir)" || return 2
     root="${root}/locks"
     key="$(printf '%s' "${subnet}" | tr './' '__')"
@@ -7679,12 +7699,14 @@ _ci_validate_slot_lock() {
     # Why: the status and its stderr join the error raw.
     # From: Issue #1683 | PR #1858
     wait "${holder}" || hrc=$?
-    if [ -s "${errf}" ]; then
-        ci_error "[CI-ERROR-VALIDATE-0073]" "subnet=\"${subnet}\" lock=\"${root}/${key}.lock\" holder_rc=${hrc} reason=\"slot lock holder failed\"" "$(cat "${errf}")"
-        rm -f "${errf}"
+    hfail=0
+    [ ! -s "${errf}" ] || hfail=1
+    hmsg="$(cat "${errf}")"
+    rm -f "${errf}"
+    if [ "${hfail}" -eq 1 ]; then
+        ci_error "[CI-ERROR-VALIDATE-0073]" "subnet=\"${subnet}\" lock=\"${root}/${key}.lock\" holder_rc=${hrc} reason=\"slot lock holder failed\"" "${hmsg}"
         return 2
     fi
-    rm -f "${errf}"
     return 1
 }
 
@@ -8245,21 +8267,32 @@ _ci_https_dispatch_violations() {
 # Why: root literal misroutes subdomains.
 # From: Issue #1683
 _ci_validate_proxy_stream_map() {
-    local project="$1" cid map bad file port
+    local file port
     file="$(_ci_proxy_constant NGINX_STREAM_TARGETS)" || return 2
     port="$(_ci_service_port https)" || return 2
+    _ci_validate_proxy_map "$1" "${file}" _ci_stream_map_violations "${port}" \
+        "[CI-ERROR-VALIDATE-0022]" "no proxy container for stream-map check" \
+        "[CI-ERROR-VALIDATE-0019]" "could not read proxy stream-target map" \
+        "[CI-ERROR-VALIDATE-0020]" "stream-target wildcard forwards to a hardcoded root, not the requested SNI"
+}
+
+# What: read a proxy map; a filter prints its bad rows.
+# Why: both SNI map checks share one read and verdict.
+# From: Issue #1683 | PR #1912
+_ci_validate_proxy_map() {
+    local project="$1" file="$2" filter="$3" arg="$4" cid map bad
     cid="$(_ci_validate_cid "${project}" proxy)" || return 2
     if [ -z "${cid}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0022]" "reason=\"no proxy container for stream-map check\""
+        ci_log "$5" "reason=\"$6\""
         return 2
     fi
     if ! map="$(_ci_capture 0 docker exec "${cid}" cat "${file}")"; then
-        ci_log "[CI-ERROR-VALIDATE-0019]" "reason=\"could not read proxy stream-target map\""
+        ci_log "$7" "reason=\"$8\""
         return 2
     fi
-    bad="$(printf '%s\n' "${map}" | _ci_stream_map_violations "${port}")"
+    bad="$(printf '%s\n' "${map}" | "${filter}" "${arg}")"
     if [ -n "${bad}" ]; then
-        ci_error "[CI-ERROR-VALIDATE-0020]" "reason=\"stream-target wildcard forwards to a hardcoded root, not the requested SNI\"" "${bad}"
+        ci_error "$9" "reason=\"${10}\"" "${bad}"
         return 1
     fi
 }
@@ -8317,23 +8350,13 @@ _ci_validate_https_mitm() {
 # Why: depth>=2 SNI takes the passthrough relay, not MITM
 # From: Issue #1683
 _ci_validate_https_dispatch_map() {
-    local project="$1" cid map bad file relay
+    local file relay
     file="$(_ci_proxy_constant NGINX_HTTPS_DISPATCH)" || return 2
     relay="$(_ci_runtime_default NGINX_PASSTHROUGH_RELAY_PORT)" || return 2
-    cid="$(_ci_validate_cid "${project}" proxy)" || return 2
-    if [ -z "${cid}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0027]" "reason=\"no proxy container for https-dispatch-map check\""
-        return 2
-    fi
-    if ! map="$(_ci_capture 0 docker exec "${cid}" cat "${file}")"; then
-        ci_log "[CI-ERROR-VALIDATE-0028]" "reason=\"could not read proxy https-dispatch map (HTTPS_ENABLED=0?)\""
-        return 2
-    fi
-    bad="$(printf '%s\n' "${map}" | _ci_https_dispatch_violations "${relay}")"
-    if [ -n "${bad}" ]; then
-        ci_error "[CI-ERROR-VALIDATE-0029]" "reason=\"depth>=2 SNI dispatch entry routes to MITM, not passthrough relay :${relay}\"" "${bad}"
-        return 1
-    fi
+    _ci_validate_proxy_map "$1" "${file}" _ci_https_dispatch_violations "${relay}" \
+        "[CI-ERROR-VALIDATE-0027]" "no proxy container for https-dispatch-map check" \
+        "[CI-ERROR-VALIDATE-0028]" "could not read proxy https-dispatch map (HTTPS_ENABLED=0?)" \
+        "[CI-ERROR-VALIDATE-0029]" "depth>=2 SNI dispatch entry routes to MITM, not passthrough relay :${relay}"
 }
 
 # What: retry a probe; print its last raw error on fail.
@@ -9637,7 +9660,7 @@ _ci_service_build_args() {
     # Why: SOT owns ref; Dockerfile keeps none
     # From: Issue #1683
     local own_type
-    own_type="$(_ci_block_entry_field services "${service}" build_type)" || return 2
+    own_type="$(_ci_required_field "${service}" build_type)" || return 2
     if [ "${own_type}" = rust ]; then
         # What: identity omits the ref; it keys the digest.
         # Why: toolchain_digest is this ref's digest.
@@ -9990,15 +10013,23 @@ _ci_cargo_member_names() {
     done <<< "${rows}"
 }
 
+# What: set 4 caller vars: version, license, lock, manifest.
+# Why: sync and verify read the same four SOT values once.
+# From: Issue #1683 | PR #1912
+_ci_version_inputs() {
+    local -n _vi_want="$1" _vi_lic="$2" _vi_lock="$3" _vi_cargo="$4"
+    _vi_want="$(_ci_release_value version)" || return 2
+    _vi_lic="$(_ci_release_value license)" || return 2
+    _vi_lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
+    _vi_cargo="$(_ci_repo_path CI_CARGO_MANIFEST)" || return 2
+}
+
 # What: write release.version into its derived copies.
 # Why: copies are synced on demand, idempotent, not by hand.
 # From: Issue #1683 | PR #1858
 _ci_version_release_sync() {
     local want lic lock cargo names f tmp out wrote=0
-    want="$(_ci_release_value version)" || return 2
-    lic="$(_ci_release_value license)" || return 2
-    lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
-    cargo="$(_ci_repo_path CI_CARGO_MANIFEST)" || return 2
+    _ci_version_inputs want lic lock cargo || return 2
     names="$(_ci_cargo_member_names)" || return 2
     for f in "${cargo}" "${lock}"; do
         tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-vsync.XXXXXX")" || return 2
@@ -10026,10 +10057,7 @@ _ci_version_release_sync() {
 # From: Issue #1683 | PR #1858
 _ci_version_release() {
     local want lic got lock cargo members m mf n k rc=0
-    want="$(_ci_release_value version)" || return 2
-    lic="$(_ci_release_value license)" || return 2
-    lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
-    cargo="$(_ci_repo_path CI_CARGO_MANIFEST)" || return 2
+    _ci_version_inputs want lic lock cargo || return 2
     got="$(_ci_cargo_ws_value "${cargo}" version)" || return 2
     if [ "${got}" != "${want}" ]; then
         ci_log "[CI-ERROR-VERSION-0021]" "path=\"${cargo}\" got=\"${got}\" want=\"${want}\" reason=\"workspace.package.version is not SOT release.version\""
@@ -10419,27 +10447,37 @@ _ci_rh_cleanup() {
     return "${rc}"
 }
 
+# What: a runner_host unit text; fill the @KEY@ value pairs.
+# Why: service and timer text share one fill and print.
+# From: Issue #1683 | PR #1912
+_ci_rh_unit_text() {
+    local field="$1" text
+    shift
+    text="$(_ci_block_entry_list runner_host "" "${field}")" || return 2
+    while [ "$#" -gt 1 ]; do
+        text="${text//$1/$2}"
+        shift 2
+    done
+    printf '%s\n' "${text}"
+}
+
 # What: the systemd service unit text of the cleanup run.
 # Why: units are generated from ci.sh, never copied by hand.
 # From: Issue #1255 | PR #1349
 _ci_rh_service_text() {
-    local repo text
+    local repo
     repo="$(_ci_repo)" || return 2
-    text="$(_ci_block_entry_list runner_host "" service_unit)" || return 2
-    text="${text//@REPO@/${repo}}"
-    printf '%s\n' "${text//@SCRIPT_DIR@/${CI_SCRIPT_DIR}}"
+    _ci_rh_unit_text service_unit @REPO@ "${repo}" @SCRIPT_DIR@ "${CI_SCRIPT_DIR}"
 }
 
 # What: the systemd timer unit text of the cleanup run.
 # Why: schedule values come from the SOT variables.
 # From: Issue #1255 | PR #1349
 _ci_rh_timer_text() {
-    local calendar delay text
+    local calendar delay
     calendar="$(_ci_rh_val timer_calendar)" || return 2
     delay="$(_ci_rh_val timer_delay)" || return 2
-    text="$(_ci_block_entry_list runner_host "" timer_unit)" || return 2
-    text="${text//@CALENDAR@/${calendar}}"
-    printf '%s\n' "${text//@DELAY@/${delay}}"
+    _ci_rh_unit_text timer_unit @CALENDAR@ "${calendar}" @DELAY@ "${delay}"
 }
 
 # What: install the cleanup service and timer, enable it.
@@ -12214,8 +12252,7 @@ _ci_check_comments() {
     local path out line project spdx warn_only arc=0 rc=0
     _ci_scan_files files _ci_override || return 2
     _ci_prose_exempt_load || return 2
-    project="$(_ci_block_entry_field file_headers "" project)" || return 2
-    spdx="$(_ci_block_entry_field file_headers "" spdx)" || return 2
+    _ci_block_entry_fields file_headers "" project project spdx spdx || return 2
     warn_only="$(_ci_variable CHRONOLOGY_WARN_ONLY)" || return 2
     for path in "${files[@]}"; do
         _ci_prose_excluded "${path}" && continue
@@ -14235,6 +14272,17 @@ _ci_check_governance_guards() {
     printf 'governance-guards=clean\n'
 }
 
+# What: add each text line to array $1 as "<$2>: <line>".
+# Why: checks list findings per file the same way.
+# From: Issue #1683 | PR #1912
+_ci_viol_lines() {
+    local -n _vl_viol="$1"
+    local _vl_line
+    while IFS= read -r _vl_line; do
+        [ -z "${_vl_line}" ] || _vl_viol+=("$2: ${_vl_line}")
+    done <<< "$3"
+}
+
 # What: container names share one prefix + service name.
 # Why: operators find a container by its service name.
 # From: Issue #1683 | PR #1858
@@ -14243,7 +14291,7 @@ _ci_check_naming_consistency() {
     dep="$(_ci_repo_path CI_COMPOSE_FILE "${root}")" || return 2
     local -a compose_files=("${dep}")
     local -a viol=()
-    local cf cfg line msg
+    local cf cfg line
 
     for cf in "${compose_files[@]}"; do
         if [ ! -f "${cf}" ]; then
@@ -14266,9 +14314,7 @@ _ci_check_naming_consistency() {
                     | "container prefix \(.) is not the project name \($p)"))
 PROG
                     )" <<<"${cfg}")" || return 2
-        while IFS= read -r msg; do
-            [ -z "${msg}" ] || viol+=("${cf}: ${msg}")
-        done <<<"${line}"
+        _ci_viol_lines viol "${cf}" "${line}"
     done
 
     if [ "${#viol[@]}" -gt 0 ]; then
@@ -14984,7 +15030,7 @@ PROG
 # Why: the SOT owns them; Compose and nginx.conf use them.
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_cert_volume() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" dir ca cache cf cfg out line px
+    local repo_root="${1:-${CI_REPO_ROOT}}" dir ca cache cf cfg out px
     local -a viol=() files=()
     local -A seen=()
     dir="$(_ci_nginx_subdir NGINX_SUBDIR_CERTS)" || return 2
@@ -15008,9 +15054,7 @@ _ci_check_proxy_cert_volume() {
               mount($d; "volume"), mount($c; "bind"), mount($k; "volume")
 PROG
               )" <<<"${cfg}")" || return 2
-        while IFS= read -r line; do
-            [ -z "${line}" ] || viol+=("${cf}: ${line}")
-        done <<<"${out}"
+        _ci_viol_lines viol "${cf}" "${out}"
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0149]" "reason=\"proxy dirs differ from the SOT mounts\"" "$(printf '%s\n' "${viol[@]}")"
@@ -15438,28 +15482,45 @@ _ci_check_logging_matrix() {
     printf 'logging-matrix=clean rows=%s services=%s\n' "${#canonical[@]}" "${#in_compose[@]}"
 }
 
+# What: fill array $2 with the workflow files under root $1.
+# Why: both workflow scans list the files the same way.
+# From: Issue #1683 | PR #1912
+_ci_workflow_scan_files() {
+    local dir
+    dir="$(_ci_repo_path CI_WORKFLOW_DIR "$1")" || return 2
+    _ci_workflow_files "$2" "${dir}"
+}
+
+# What: read awk rows: "$2 N" count, "flag ..." findings.
+# Why: both workflow scans parse the same row format.
+# From: Issue #1683 | PR #1912
+_ci_workflow_scan_report() {
+    local root="$1" key="$2" out="$3" line
+    local -n _ws_viol="$4" _ws_count="$5"
+    while IFS= read -r line; do
+        case "${line}" in
+            "${key} "*) _ws_count="${line#"${key} "}" ;;
+            "flag "*) line="${line#flag }"; _ws_viol+=("${line#"${root}/"}") ;;
+        esac
+    done <<< "${out}"
+}
+
 # What: each workflow calling ci.sh passes CI_VARIABLES.
 # Why: else ci.sh misses repo/org vars; ids diverge.
 # From: Issue #1683 | PR #1858
 _ci_check_workflow_ci_variables() {
-    local repo_root="${1:-${CI_REPO_ROOT:-.}}" dir out line callers=0
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}" out callers=0
     local -a viol=() files=()
-    dir="$(_ci_repo_path CI_WORKFLOW_DIR "${repo_root}")" || return 2
-    _ci_workflow_files files "${dir}" || return 2
+    _ci_workflow_scan_files "${repo_root}" files || return 2
     out="$(_ci_capture 0 awk "$(cat <<'PROG'
-        function rep() { if (c) { n++; if (!w) print "unwired " f } }
+        function rep() { if (c) { n++; if (!w) print "flag " f ": calls ci.sh without top-level env CI_VARIABLES" } }
         FNR == 1 { if (f != "") rep(); f = FILENAME; c = w = 0 }
         index($0, "scripts/ci.sh") { c = 1 }
         $0 == "  CI_VARIABLES: ${{ toJSON(vars) }}" { w = 1 }
         END { if (f != "") rep(); print "callers " n + 0 }
 PROG
         )" "${files[@]}")" || return 2
-    while IFS= read -r line; do
-        case "${line}" in
-            "callers "*) callers="${line#callers }" ;;
-            "unwired "*) line="${line#unwired }"; viol+=("${line#"${repo_root}/"}: calls ci.sh without top-level env CI_VARIABLES") ;;
-        esac
-    done <<< "${out}"
+    _ci_workflow_scan_report "${repo_root}" callers "${out}" viol callers
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0158]" "scanned=${#files[@]} callers=${callers} flagged=${#viol[@]} reason=\"ci.sh caller without CI_VARIABLES\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
@@ -15471,11 +15532,10 @@ PROG
 # Why: AG-CI-006/016: one owner; every job has a timeout
 # From: Issue #1683 | PR #1858
 _ci_check_workflow_job_settings() {
-    local repo_root="${1:-${CI_REPO_ROOT:-.}}" dir out line runner job tmap="" js_count=0
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}" out runner job tmap="" js_count=0
     local -a viol=() files=() js_jobs=()
     local -A js_min=()
-    dir="$(_ci_repo_path CI_WORKFLOW_DIR "${repo_root}")" || return 2
-    _ci_workflow_files files "${dir}" || return 2
+    _ci_workflow_scan_files "${repo_root}" files || return 2
     _ci_job_settings_read runner js_jobs js_min || return 2
     for job in "${js_jobs[@]}"; do tmap+="${job}=${js_min[${job}]} "; done
     out="$(_ci_capture 0 awk -v runner="${runner}" -v tmap="${tmap}" -v q="'" "$(cat <<'PROG'
@@ -15523,12 +15583,7 @@ _ci_check_workflow_job_settings() {
         END { end_file(); print "jobs " njob + 0 }
 PROG
         )" "${files[@]}")" || return 2
-    while IFS= read -r line; do
-        case "${line}" in
-            "jobs "*) js_count="${line#jobs }" ;;
-            "flag "*) line="${line#flag }"; viol+=("${line#"${repo_root}/"}") ;;
-        esac
-    done <<< "${out}"
+    _ci_workflow_scan_report "${repo_root}" jobs "${out}" viol js_count
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0159]" "scanned=${#files[@]} jobs=${js_count} flagged=${#viol[@]} reason=\"job runner or timeout not from the SOT owner\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
@@ -15579,7 +15634,7 @@ _ci_check_dockerfiles() {
             e_secret+=("${t}: no Dockerfile at ${rel}"); continue
         fi
         n=$(( n + 1 ))
-        type="$(ci_service_field "${t}" build_type)" || return 2
+        type="$(_ci_required_field "${t}" build_type)" || return 2
         # What: ci.sh stages declare each SOT stage var.
         # Why: ARG scope is per stage; else no value.
         # From: Issue #1683 | PR #1858
