@@ -5759,7 +5759,7 @@ compose_config_value() {
 # From: Issue #1683 | PR #1858
 kea_ctrl_post() {
     local kea_ctrl_url="$1" kea_ctrl_user="$2" kea_ctrl_token="$3" body="$4"
-    local out http_status response result_code result_text
+    local out http_status response
 
     # What: passes the Basic-Auth token to curl via -K stdin
     # Why: -u would expose the token in process argv
@@ -5779,6 +5779,15 @@ kea_ctrl_post() {
     if [[ ! "$http_status" =~ ^2 ]]; then
         die "Kea's Control Agent rejected the request with HTTP ${http_status}. Response: ${response}"
     fi
+    kea_reply_check "$response"
+    printf '%s\n' "$response"
+}
+
+# What: stops unless a Kea reply carries result 0
+# Why: setup.sh and ci.sh judge Kea replies in one place
+# From: Issue #1683 | PR #1912
+kea_reply_check() {
+    local response="$1" result_code result_text
     result_code=$(json_value 'if type == "array" then .[0] else . end | .result' "$response") \
         || die "Unrecognized response from Kea's Control Agent: ${response}"
     result_text=$(json_value 'if type == "array" then .[0] else . end | .text' "$response") \
@@ -5787,7 +5796,6 @@ kea_ctrl_post() {
     if [[ "$result_code" != "0" ]]; then
         die "Kea's Control Agent rejected the command (result=${result_code}): ${result_text:-<no message>}"
     fi
-    printf '%s\n' "$response"
 }
 
 # What: one dhcp4 command; the config is its arguments

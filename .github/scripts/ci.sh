@@ -8820,6 +8820,13 @@ _ci_validate_kea_cmd() {
     _ci_curl_secret user "$2:$3" -fsS -H 'Content-Type: application/json' -d "$4" "$1/"
 }
 
+# What: fail unless a Kea reply carries result 0
+# Why: setup.sh owns the judgement; ci.sh adds none
+# From: Issue #1683 | PR #1912
+_ci_kea_reply_check() {
+    _ci_run "$1" "$2" bash -c 'source "$1" && kea_reply_check "$2"' _ "${CI_REPO_ROOT}/setup.sh" "$3"
+}
+
 # What: Kea snapshot ids under <snapshot dir>, oldest first.
 # Why: the rollback target is the id a ui write added.
 # From: Issue #763 | PR #1858
@@ -8841,6 +8848,7 @@ _ci_validate_kea_snapshots() {
 _ci_validate_kea_has() {
     local cfg
     cfg="$(_ci_capture 0 _ci_validate_kea_cmd "$1" "$2" "$3" '{"command":"config-get","service":["dhcp4"]}')" || return 2
+    _ci_kea_reply_check "[CI-ERROR-VALIDATE-0131]" "mac=\"$4\" reason=\"Kea config-get did not return result 0\"" "${cfg}" || return 2
     _ci_capture 0 jq -r --arg m "$4" \
         "[.[0].arguments.Dhcp4.subnet4[].reservations[]? | select((.\"hw-address\" | ascii_downcase) == (\$m | ascii_downcase))] | length" \
         <<< "${cfg}"
@@ -8900,10 +8908,7 @@ PROG
     # Why: the healthcheck connects to it; no poll.
     # From: Issue #1683 | PR #1912
     resp="$(_ci_capture 0 _ci_validate_kea_cmd "${kbase}" "${kuser}" "${token}" '{"command":"config-get","service":["dhcp4"]}')" || return 2
-    if ! jq -e '.[0].result == 0' <<< "${resp}"; then
-        ci_error "[CI-ERROR-VALIDATE-0090]" "ip=\"${kip}\" reason=\"Kea control agent config-get did not return result 0\"" "${resp}"
-        return 1
-    fi
+    _ci_kea_reply_check "[CI-ERROR-VALIDATE-0090]" "ip=\"${kip}\" reason=\"Kea control agent config-get did not return result 0\"" "${resp}" || return 1
     sid="$(_ci_capture 0 jq -r --arg s "${subnet}" ".[0].arguments.Dhcp4.subnet4[]? | select(.subnet == \$s) | .id" <<< "${resp}")" || return 2
     if [ -z "${sid}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0091]" "subnet=\"${subnet}\" reason=\"no Kea subnet4 entry for DHCP_SUBNET\""
