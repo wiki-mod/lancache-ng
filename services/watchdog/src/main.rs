@@ -2105,18 +2105,12 @@ fn pdns_database(data_dir: &Path) -> Result<PathBuf, String> {
         return Err(e);
     }
     // What: the owner changes; the mode SQLite chose stays.
-    // Why: own sets the mode, so the one SQLite chose is read.
-    use std::os::unix::fs::PermissionsExt as _;
-    let mode = fs::metadata(&db)
-        .map_err(|e| format!("cannot read {}: {e}", db.display()))?
-        .permissions()
-        .mode()
-        & 0o7777;
+    // Why: own with no mode leaves the mode alone.
     own(
         &db,
         Some(account_id("passwd", "pdns")?),
         Some(account_id("group", "pdns")?),
-        Some(mode),
+        None,
     )
     .map_err(|e| e.to_string())?;
     log(&format!("Created {}", db.display()));

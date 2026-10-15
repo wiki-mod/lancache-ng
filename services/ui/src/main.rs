@@ -371,8 +371,8 @@ impl Config {
             // What: missed watchdog cycles before stale.
             // Why: one owner with the restart rule.
             watchdog_miss_limit: knob("RESTART_AFTER", u32::MAX.into(), OutOfRange::Reject)? as u32,
-            // What: security headers are on unless off.
-            // Why: the ui gets none; safe is the default.
+            // What: switch for the security headers; unset stops start.
+            // Why: compose owns the value; no Rust default exists.
             security_headers_enabled: need_flag("UI_SECURITY_HEADERS")?,
             hsts_mode: hsts_mode_from(&text("UI_HSTS_MODE", "")),
             ui_logs_max_entries: knob("UI_LOGS_MAX_ENTRIES", u64::MAX, OutOfRange::Reject)?
@@ -406,8 +406,8 @@ impl Config {
             listen_port: knob("UI_LISTEN_PORT", u16::MAX.into(), OutOfRange::Reject)? as u16,
             any_bind: config::any_bind(env)?,
             ca_cert_file: need("CA_CERT_FILE")?,
-            // What: dev mode is an optional switch, off.
-            // Why: the ui gets none; prod stays off.
+            // What: switch for dev mode; unset stops start.
+            // Why: compose owns the value; no Rust default exists.
             dev_mode: need_flag("LANCACHE_DEV_MODE")?,
             syslog_log_root: need("SYSLOG_LOG_ROOT")?,
             syslog_max_gb: read(config::SYSLOG_MAX_GB)? as u32,
@@ -722,7 +722,7 @@ fn cookie_signature(secret: &[u8; 32], expires: u64, csrf_token: &str) -> String
 // What: a fresh session valid for ttl.
 // Why: every first request gets its own random CSRF token.
 fn issue_session(secret: &[u8; 32], ttl: Duration) -> Session {
-    let csrf_token = hex::encode(rand::random::<[u8; 32]>());
+    let csrf_token = hex32();
     let expires = unix_secs() + ttl.as_secs();
     let signature = cookie_signature(secret, expires, &csrf_token);
     Session {
@@ -1099,7 +1099,7 @@ fn html_escape(text: &str) -> String {
 }
 
 // What: the title and return link of one error page family.
-// Why: one error type serves cache, NTP, settings and DHCP.
+// Why: one error type serves cache, NTP, DHCP, setup, logs.
 struct ErrorArea {
     title: &'static str,
     href: &'static str,
@@ -1170,7 +1170,7 @@ impl IntoResponse for HtmlError {
 }
 
 // What: a static file response; cached ones are public.
-// Why: brand assets cache for long, the stylesheet doesn't.
+// Why: scripts and icons cache long, the css does not.
 fn asset(content_type: &'static str, cached: bool, body: &'static [u8]) -> Response {
     let headers = [(header::CONTENT_TYPE, content_type)];
     if cached {
@@ -1449,7 +1449,7 @@ struct LogStats {
 }
 
 // What: the proxy access line pattern from common.
-// Why: groups: ip time method path status bytes cache host
+// Why: two callers index the groups by number.
 fn log_regex() -> &'static Regex {
     static LOG_REGEX: OnceLock<Regex> = OnceLock::new();
     LOG_REGEX.get_or_init(|| Regex::new(PROXY_ACCESS_LOG_PATTERN).expect("log regex is valid"))
@@ -2094,7 +2094,7 @@ fn soa_query(id: u16, zone: &str) -> Vec<u8> {
     query
 }
 
-// What: ask addr:port for the lan. SOA over UDP.
+// What: ask addr:port for the LAN zone SOA over UDP.
 // Why: a silent host is a status, not an error.
 async fn probe_secondary_soa(any: &str, addr: Ipv4Addr, port: u16, lan_zone: &str) -> ProbeResult {
     const TIMEOUT: Duration = Duration::from_secs(4);
@@ -2580,10 +2580,10 @@ fn registration_token_ok(state: &AppState, presented: &str) -> bool {
     !token.is_empty() && ct_eq(presented, token)
 }
 
-// What: a fresh 32-byte hex NATS password.
+// What: a fresh NATS password.
 // Why: plaintext is shown once; only its hash is stored.
 fn new_nats_password() -> String {
-    hex::encode(rand::random::<[u8; 32]>())
+    hex32()
 }
 
 // What: render the secondaries page.
@@ -2781,7 +2781,7 @@ async fn check_secondary_health(
     .await;
     if result.status == "ok" {
         // What: a lost last_seen write is logged.
-        // Why: the sync succeeded; the reply says so.
+        // Why: the probe succeeded; the reply says so.
         // From: Issue #1683 | PR #1912
         if let Err(status) = with_db(&state, |db| {
             db.execute(
@@ -5780,7 +5780,7 @@ fn registration_token(configured: &str, token_file: &str) -> Result<String, Stri
                      persistent random token at {}",
                     path.display()
                 );
-                let token = hex::encode(rand::random::<[u8; 32]>());
+                let token = hex32();
                 (token.clone(), token)
             },
             |text| {
@@ -6080,8 +6080,8 @@ fn callout_xkey(cfg: &Config) -> Result<XKey, String> {
 // What: every route of the ui, public and protected.
 // Why: the protected layer owns auth and CSRF.
 fn router(state: Arc<AppState>) -> Router {
-    // What: routes outside the login, each gated itself.
-    // Why: no session cookie may ride on cacheable assets.
+    // What: routes outside the login layer.
+    // Why: probes, tokens and icons need no browser session.
     let public: Vec<(&str, MethodRouter<Arc<AppState>>)> = vec![
         (ROUTE_HEALTH, get(health)),
         (ROUTE_SECONDARY_REGISTER, post(register_secondary)),
@@ -7777,7 +7777,7 @@ mod tests {
     }
 
     // What: a fresh random password for one test.
-    // Why: no password literal sits in the source.
+    // Why: the hash tests need no fixed password literal.
     fn test_password() -> String {
         hex::encode(rand::random::<[u8; 16]>())
     }

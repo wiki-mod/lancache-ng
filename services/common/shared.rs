@@ -42,8 +42,8 @@ pub struct DiskHealth {
     pub status: String,
 }
 
-// What: disk section of status.json; only the cache today.
-// Why: a struct keeps room for more volumes later.
+// What: disk section of status.json; the cache volume.
+// Why: one named field per volume keeps the schema stable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskInfo {
     pub cache: DiskHealth,
@@ -169,12 +169,12 @@ pub fn run_program(
                 if std::time::Instant::now() >= deadline {
                     // What: the readers are left to end on their own.
                     // Why: a grandchild may hold the pipes open.
-                    child.kill().map_err(|e| failed("cannot kill", &e))?;
+                    let killed = child.kill().map_err(|e| failed("cannot kill", &e));
                     child.wait().map_err(|e| failed("cannot wait", &e))?;
+                    killed?;
                     return Err(format!(
-                        "{program} {}: timed out after {}s, killed",
-                        args.join(" "),
-                        limit.as_secs()
+                        "{program} {}: timed out after {limit:?}, killed",
+                        args.join(" ")
                     ));
                 }
                 std::thread::sleep(Duration::from_millis(20));
@@ -207,7 +207,7 @@ pub fn terminate(pid: u32) -> io::Result<()> {
     rustix::process::kill_process(pid, rustix::process::Signal::TERM).map_err(io::Error::from)
 }
 
-// What: set owner ids, then the mode, on one path.
+// What: set owner ids if given, then the mode.
 // Why: the one owner change; lchown never follows a link.
 // From: Issue #1683 | PR #1912
 pub fn own(path: &Path, uid: Option<u32>, gid: Option<u32>, mode: Option<u32>) -> io::Result<()> {
@@ -587,7 +587,7 @@ async fn expect_success(client: &reqwest::Client, url: &str) -> Result<(), Strin
     }
 }
 
-// What: Ok when a loopback health URL answers 2xx.
+// What: Ok when a plain-http health URL answers 2xx.
 // Why: healthchecks run in the binary; no curl, no shell.
 // From: Issue #1683 | PR #1912
 pub async fn probe_health(url: &str, timeout: Duration) -> Result<(), String> {
@@ -2448,25 +2448,12 @@ mod tests {
         }
     }
 
-    // What: a unique scratch dir under the temp dir.
-    // Why: parallel tests never share keys.
-    // From: Issue #1683 | PR #1912
-    fn scratch_dir(tag: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("{tag}-{}-{nanos}", std::process::id()));
-        fs::create_dir_all(&dir).expect("scratch dir");
-        dir
-    }
-
     // What: https passes with a cert of the given CA only.
     // Why: the stack CA is the only trust anchor.
     // From: Issue #1683 | PR #1912
     #[tokio::test]
     async fn probe_health_tls_checks_the_certificate() {
-        let dir = scratch_dir("probe-tls");
+        let dir = unique_temp_dir("probe-tls");
         let name = dir
             .file_name()
             .and_then(|n| n.to_str())
@@ -2542,7 +2529,7 @@ mod tests {
             assert!(probe.is_err(), "a platform-trusted cert passed: {probe:?}");
             return;
         }
-        let dir = scratch_dir("probe-tls-roots");
+        let dir = unique_temp_dir("probe-tls-roots");
         let name = dir
             .file_name()
             .and_then(|n| n.to_str())
