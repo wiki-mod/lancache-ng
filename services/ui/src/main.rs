@@ -3479,7 +3479,7 @@ fn parse_cidr(text: &str) -> Option<(u32, u32)> {
     let network = u32::from(ipv4(address)?);
     let prefix: u32 = prefix.parse().ok().filter(|p| *p <= 32)?;
     let mask = u32::MAX.checked_shl(32 - prefix).unwrap_or(0);
-    if prefix != 0 && network & !mask != 0 {
+    if network & !mask != 0 {
         return None;
     }
     Some((network & mask, mask))
@@ -8134,8 +8134,8 @@ mod tests {
         assert_eq!(parse_cidr(" 10.0.0.0/8"), Some((0x0A00_0000, 0xFF00_0000)));
         assert_eq!(parse_cidr("10.0.0.0/32"), Some((0x0A00_0000, u32::MAX)));
         assert_eq!(parse_cidr("0.0.0.0/0"), Some((0, 0)));
-        assert_eq!(parse_cidr("10.1.2.3/0"), Some((0, 0)));
         for bad in [
+            "10.1.2.3/0",
             "10.0.0.1/24",
             "10.0.0.0/33",
             "10.0.0.0",
