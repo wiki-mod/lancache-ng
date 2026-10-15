@@ -120,7 +120,7 @@ async function fetchChart(path) {
   const res = await fetch(`${NETDATA.replace('{*path}', path)}&points=${POINTS}&group=average&format=json`);
   // What: throws on a non-2xx netdata response.
   // Why: refresh() turns the throw into the error banner.
-  if (!res.ok) throw new Error(res.status);
+  if (!res.ok) throw new Error(`netdata ${path}: HTTP ${res.status}`);
   return res.json();
 }
 
@@ -159,11 +159,14 @@ async function refresh() {
     const usedGB = ramRow ? (ramRow[column(ram, 'used')] / 1024).toFixed(2) : 0;
     push(ramChart, parseFloat(usedGB));
 
-    // What: net from net.eth0, falls back to net.eth1.
+    // What: net.eth0; on error report it, then try net.eth1.
     // Why: interface names differ between hosts.
     let net;
     try { net = await fetchChart('data?chart=net.eth0'); }
-    catch { net = await fetchChart('data?chart=net.eth1'); }
+    catch (err) {
+      reportError(err);
+      net = await fetchChart('data?chart=net.eth1');
+    }
     // What: net kilobits/s to MB/s: divide by 8000.
     // Why: net.* units are kilobits/s; sent is negative.
     const netRow = newestRow(net);
@@ -185,6 +188,7 @@ async function refresh() {
     // From: Issue #849
     errorShown = false;
   } catch (e) {
+    reportError(e);
     if (!errorShown) {
       document.getElementById('netdata-error').classList.remove('hidden');
       errorShown = true;

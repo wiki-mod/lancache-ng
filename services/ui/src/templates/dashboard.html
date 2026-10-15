@@ -34,7 +34,6 @@
 
   <h1 class="text-xl font-bold text-white">Dashboard</h1>
 
-  <!-- DHCP Status -->
   <div class="card space-y-2">
     <div class="flex items-center justify-between">
       <h2 class="font-semibold text-slate-200">DHCP mode</h2>
@@ -187,7 +186,6 @@
     </div>
   </div>
 
-  <!-- Central syslog store: size and per-host breakdown. -->
   <div class="card">
     <div class="flex items-center justify-between mb-3">
       <div>
@@ -298,7 +296,7 @@
     try {
       const response = await fetch('{{ routes.metrics | safe }}');
       if (!response.ok) {
-        return;
+        throw new Error('metrics: HTTP ' + response.status);
       }
       const data = await response.json();
       updateMetricsSection('http', data.http);
@@ -306,8 +304,10 @@
         updateMetricsSection('https', data.https);
       }
     } catch (err) {
-      // What: keeps the last values on screen
+      // What: reports the error, keeps the last values shown
       // Why: a proxy outage is transient; retried later
+      // From: Issue #1683 | PR #1912
+      reportError(err);
     }
   }
 

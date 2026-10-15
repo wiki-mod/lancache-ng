@@ -187,7 +187,6 @@
 </head>
 <body class="h-full flex">
 
-  <!-- Dock (sidebar) -->
   <aside class="dock w-52 shrink-0 flex flex-col">
     <div class="px-4 py-5" style="border-bottom: 1px solid var(--color-border);">
       <div class="flex items-center gap-2">
@@ -272,7 +271,6 @@
     </div>
   </aside>
 
-  <!-- Main -->
   <div class="flex-1 flex flex-col overflow-hidden">
     <!-- What: health bar and theme toggle in the header
          Why: base.html renders it on every page
@@ -314,9 +312,10 @@
       try {
         stored = localStorage.getItem(STORAGE_KEY);
       } catch (err) {
-        // What: fall back silently when storage read fails
+        // What: report a storage read error, keep the OS theme
         // Why: private browsing may block localStorage
         // From: Issue #1437
+        reportError(err);
       }
       apply(stored);
       document.getElementById('theme-toggle').addEventListener('click', function () {
@@ -327,9 +326,10 @@
         try {
           localStorage.setItem(STORAGE_KEY, next);
         } catch (err) {
-          // What: ignore storage write failure
-          // Why: theme just won't persist across reloads
+          // What: report a storage write error; theme still set
+          // Why: the theme only fails to persist across reloads
           // From: Issue #1437
+          reportError(err);
         }
       });
     })();
@@ -351,13 +351,14 @@
         try {
           const response = await fetch('{{ routes.watchdog_status | safe }}');
           if (!response.ok) {
-            return;
+            throw new Error('watchdog status: HTTP ' + response.status);
           }
           data = await response.json();
         } catch (err) {
-          // What: keep last render, retry on next interval
+          // What: report the error, keep last render, retry later
           // Why: network hiccup or the UI itself restarting
           // From: Issue #1437
+          reportError(err);
           return;
         }
         listeners.forEach(function (fn) {
@@ -378,13 +379,15 @@
           headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
           body: JSON.stringify({ state: state }),
         });
-        if (response.ok) {
-          window.LancacheWatchdog.refresh();
+        if (!response.ok) {
+          throw new Error('desired state: HTTP ' + response.status);
         }
+        window.LancacheWatchdog.refresh();
       } catch (err) {
-        // What: swallows fetch errors, re-enables button
+        // What: reports the error, then re-enables the button
         // Why: a network hiccup must not strand the button
         // From: Issue #1437
+        reportError(err);
       }
       button.disabled = false;
     }
