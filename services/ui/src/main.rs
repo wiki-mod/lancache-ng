@@ -271,6 +271,13 @@ impl Config {
                 password: Some(secret(password_key)?).filter(|p| !p.is_empty()),
             })
         };
+        // What: a DHCP DNS key, else the shared LAN-address fallback.
+        // Why: config::dhcp_dns_fallback is the one owner of the rule.
+        let dhcp_dns = |key: &str| {
+            set(key)
+                .or_else(|| config::dhcp_dns_fallback(env, key))
+                .unwrap_or_default()
+        };
         let dhcp_api_token = match env("DHCP_API_TOKEN") {
             Some(v) if !shared_secret_is_placeholder(&v) => v,
             _ => secret("KEA_CTRL_TOKEN")?,
@@ -282,8 +289,8 @@ impl Config {
         let startup_settings = HashMap::from([
             ("DHCP_MODE", dhcp_mode.as_str().to_string()),
             ("DHCP_SUBNET_START", text("DHCP_SUBNET_START", "")),
-            ("DHCP_DNS_PRIMARY", text("DHCP_DNS_PRIMARY", &http_ip)),
-            ("DHCP_DNS_SECONDARY", text("DHCP_DNS_SECONDARY", &https_ip)),
+            ("DHCP_DNS_PRIMARY", dhcp_dns("DHCP_DNS_PRIMARY")),
+            ("DHCP_DNS_SECONDARY", dhcp_dns("DHCP_DNS_SECONDARY")),
             ("UPSTREAM_DHCP_IP", text("UPSTREAM_DHCP_IP", "")),
             ("DHCP_RELAY_LOCAL_ADDR", text("DHCP_RELAY_LOCAL_ADDR", "")),
             ("DHCP_NTP_SERVERS", text("DHCP_NTP_SERVERS", "")),
