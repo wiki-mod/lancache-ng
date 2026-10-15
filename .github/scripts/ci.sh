@@ -249,6 +249,16 @@ _ci_count_lines() {
     printf '%s\n' "${n}"
 }
 
+# What: line 2 of the text; nothing when it has one line.
+# Why: one second-line owner; no external line cutter.
+# From: Issue #1683 | PR #1912
+_ci_second_line() {
+    local rest
+    case "$1" in
+        *$'\n'*) rest="${1#*$'\n'}"; printf '%s\n' "${rest%%$'\n'*}" ;;
+    esac
+}
+
 # What: Enforce and create the /var/tmp CI temp root.
 # Why: bare mktemp and tools then use disk, not tmpfs.
 # From: Issue #1683 | PR #1858
@@ -9282,7 +9292,7 @@ _ci_bake_inspect() {
     while IFS= read -r line; do
         [ -n "${line}" ] && printf 'env %s\n' "${line}"
     done <<< "${envs}"
-    marker="$(sed -n '2p' <<< "${PROJECT_SELFHOSTED_PROXY_CA:-}")"
+    marker="$(_ci_second_line "${PROJECT_SELFHOSTED_PROXY_CA:-}")"
     if [ -n "${marker}" ]; then
         bundle="$(docker run --rm --network none --entrypoint cat "${image}" "${CI_SYSTEM_CA_PATH}" 2>&1)" || { printf '%s\n' "${bundle}"; return 2; }
         n="$(_ci_capture 1 grep -cF -- "${marker}" <<< "${bundle}")" || return 2
@@ -9565,8 +9575,8 @@ _ci_service_setup() {
 # Why: 64.4: a default rebuilds only images that read it.
 # From: Issue #1683 | PR #1912
 _ci_service_default_rows() {
-    local service="$1" rows type text="" paths p part field
-    local -a specs=()
+    local service="$1" rows type text="" paths p part field tracked
+    local -a specs=() files=()
     rows="$(_ci_runtime_defaults)" || return 2
     type="$(_ci_required_field "${service}" build_type)" || return 2
     if [ "${type}" = rust ]; then
@@ -9580,9 +9590,19 @@ _ci_service_default_rows() {
         [ -n "${p}" ] || continue
         specs+=("${p}")
     done <<< "${paths}"
-    part="$(_ci_run -m 1 "[CI-ERROR-BUILDARGS-0022]" "service=\"${service}\" reason=\"tracked files not read\"" \
-        git -C "${CI_REPO_ROOT}" grep --cached -I -h -o -E '[A-Z][A-Z0-9_]*' -- "${specs[@]}" ':!*.rs')" || return 2
-    text+=$'\n'"${part}"
+    # What: tracked image files without Rust sources.
+    # Why: _ci_rust_content already reads the Rust text.
+    # From: Issue #1683 | PR #1912
+    tracked="$(_ci_capture 0 git -C "${CI_REPO_ROOT}" ls-files --cached -- "${specs[@]}")" || return 2
+    while IFS= read -r p; do
+        case "${p}" in '' | *.rs) continue ;; esac
+        files+=("${p}")
+    done <<< "${tracked}"
+    if [ "${#files[@]}" -gt 0 ]; then
+        part="$(_ci_run -m 1 "[CI-ERROR-BUILDARGS-0022]" "service=\"${service}\" reason=\"tracked files not read\"" \
+            git -C "${CI_REPO_ROOT}" grep --cached -I -h -o -E '[A-Z][A-Z0-9_]*' -- "${files[@]}")" || return 2
+        text+=$'\n'"${part}"
+    fi
     for field in processes setup default_args; do
         part="$(_ci_target_list "${service}" "${field}")" || return 2
         text+=$'\n'"${part}"
@@ -11672,10 +11692,10 @@ _ci_rh_sccache_check() {
         printf '  (skipped; sccache binary lack)\n'
     fi
     if [ "${lack}" -eq 1 ]; then
-        ci_log "[CI-ERROR-RUNNER-0099]" "reason=\"sccache prerequisites lack; no files were wrote\""
+        ci_log "[CI-ERROR-RUNNER-0099]" "reason=\"sccache prerequisites lack; no files were written\""
         return 2
     fi
-    printf 'No files were wrote (sccache-check mode).\n'
+    printf 'No files were written (sccache-check mode).\n'
 }
 
 # What: install staged sccache binaries, drop old creds.
@@ -11691,7 +11711,7 @@ _ci_rh_sccache_fetch() {
     user="$(_ci_rh_val user)" || return 2
     bin_dir="$(_ci_rh_val sccache_bin_dir)" || return 2
     list="$(_ci_block_entry_list runner_host "" sccache_bins)" || return 2
-    main_name="$(sed -n 1p <<< "${list}")" dist_name="$(sed -n 2p <<< "${list}")"
+    main_name="${list%%$'\n'*}" dist_name="$(_ci_second_line "${list}")"
     root="$(_ci_rh_val opt_root)" || return 2
     dist="$(_ci_rh_val sccache_dist_dir)" || return 2
     group="$(_ci_rh_group "${user}")" || return 2
