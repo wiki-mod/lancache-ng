@@ -1907,21 +1907,11 @@ impl AuthConf<'_> {
 // Why: the pdns config checks have no side effects.
 // From: Issue #1683 | PR #1912
 fn conf_ok(check: &[String]) -> bool {
-    match std::process::Command::new(&check[0])
-        .args(&check[1..])
-        .output()
-    {
-        Ok(out) if out.status.success() => true,
-        Ok(out) => {
-            log_err(&format!(
-                "ERROR: {} rejected the config: {}",
-                check[0],
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-            false
-        }
+    let args: Vec<&str> = check[1..].iter().map(String::as_str).collect();
+    match tool(&check[0], &args) {
+        Ok(_) => true,
         Err(e) => {
-            log_err(&format!("ERROR: cannot run {}: {e}", check[0]));
+            log_err(&format!("ERROR: config check failed: {e}"));
             false
         }
     }
@@ -2085,10 +2075,24 @@ fn restamp_lines(text: &str, lines: &[(&str, String)]) -> String {
         + "\n"
 }
 
+// What: the --config-dir argument of a pdns program.
+// Why: pdnsutil, the check and the launch name one way.
+// From: Issue #1683 | PR #1912
+fn pdns_config_dir(dir: &Path) -> String {
+    format!("--config-dir={}", dir.display())
+}
+
+// What: the side-effect-free config check of a pdns program.
+// Why: the auth and the recursor checks differ by name only.
+// From: Issue #1683 | PR #1912
+fn pdns_check(program: &str, config_dir: &str) -> [String; 3] {
+    [program.into(), "--config=check".into(), config_dir.into()]
+}
+
 // What: run pdnsutil on the auth config; text or error.
 // Why: every zone and key change goes through one call.
 fn pdnsutil(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let config_dir = format!("--config-dir={}", dir.display());
+    let config_dir = pdns_config_dir(dir);
     let mut argv = vec![config_dir.as_str()];
     argv.extend_from_slice(args);
     tool("pdnsutil", &argv)
@@ -2129,40 +2133,37 @@ fn pdns_database(data_dir: &Path) -> Result<PathBuf, String> {
         return Ok(db);
     }
     let schema_file = config::need(&config::process_env, "PDNS_SCHEMA_FILE")?;
-    let schema = fs::read(&schema_file).map_err(|e| format!("cannot read {schema_file}: {e}"))?;
-    let mut child = std::process::Command::new("sqlite3")
-        .arg(&db)
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("cannot run sqlite3: {e}"))?;
-    use std::io::Write as _;
-    child
-        .stdin
-        .take()
-        .ok_or("sqlite3 has no stdin")?
-        .write_all(&schema)
-        .map_err(|e| format!("cannot feed the schema: {e}"))?;
-    let status = child.wait().map_err(|e| format!("sqlite3: {e}"))?;
-    if !status.success() {
-        return Err(format!("sqlite3 {} failed: {status}", db.display()));
+    let schema =
+        fs::read_to_string(&schema_file).map_err(|e| format!("cannot read {schema_file}: {e}"))?;
+    let created = rusqlite::Connection::open(&db)
+        .and_then(|conn| conn.execute_batch(&schema))
+        .map_err(|e| format!("cannot create {} from {schema_file}: {e}", db.display()));
+    // What: a half-made database file is removed.
+    // Why: the next start would skip a file that exists.
+    if let Err(e) = created {
+        if let Err(rm) = fs::remove_file(&db)
+            && rm.kind() != io::ErrorKind::NotFound
+        {
+            log_err(&format!("WARNING: {} not removed: {rm}", db.display()));
+        }
+        return Err(e);
     }
-    run_ok(&["chown", "pdns:pdns", &db.display().to_string()])?;
+    // What: the owner changes; the mode SQLite chose stays.
+    // Why: the former chown call never touched the mode.
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = fs::metadata(&db)
+        .map_err(|e| format!("cannot read {}: {e}", db.display()))?
+        .permissions()
+        .mode()
+        & 0o7777;
+    own(
+        &db,
+        Some(account_id("passwd", "pdns")?),
+        account_id("group", "pdns")?,
+        mode,
+    )?;
     log(&format!("Created {}", db.display()));
     Ok(db)
-}
-
-// What: run a command; a non-zero exit is an error.
-// Why: chown and friends must never fail silently.
-fn run_ok(argv: &[&str]) -> Result<(), String> {
-    let status = std::process::Command::new(argv[0])
-        .args(&argv[1..])
-        .status()
-        .map_err(|e| format!("cannot run {}: {e}", argv[0]))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{} failed: {status}", argv.join(" ")))
-    }
 }
 
 // What: TSIG rights for DDNS on every LAN zone.
@@ -2351,14 +2352,10 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
             ],
         )
     };
-    let config_dir = format!("--config-dir={}", dir.display());
+    let config_dir = pdns_config_dir(&dir);
     checked_files(
         &[(dir.join("pdns.conf"), conf.render())],
-        &[
-            "pdns_server".into(),
-            "--config=check".into(),
-            config_dir.clone(),
-        ],
+        &pdns_check("pdns_server", &config_dir),
         &store,
         &restamp,
         &no_backfill,
@@ -2588,14 +2585,10 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
         "dns-recursor",
     );
     let restamp = |old: &str| restamp_lines(old, &[("api_key:", format!("  api_key: {api_key}"))]);
-    let config_dir = format!("--config-dir={}", dir.display());
+    let config_dir = pdns_config_dir(&dir);
     checked_files(
         &[(dir.join("recursor.conf"), conf.render())],
-        &[
-            "pdns_recursor".into(),
-            "--config=check".into(),
-            config_dir.clone(),
-        ],
+        &pdns_check("pdns_recursor", &config_dir),
         &store,
         &restamp,
         &no_backfill,
@@ -3100,15 +3093,16 @@ fn kea_dhcp4(ctx: &Ctx) -> Result<Run, String> {
 fn kea_ctrl_fence(port: &str, kea: &KeaKnobs) -> Result<(), String> {
     let chain = kea.ctrl_chain.as_str();
     let jump = ["-p", "tcp", "--dport", port, "-j", chain];
-    if run_ok(&["iptables", "-N", chain]).is_err() {
-        run_ok(&["iptables", "-F", chain])?;
+    let iptables = |args: &[&str]| tool("iptables", args).map(|_| ());
+    if iptables(&["-N", chain]).is_err() {
+        iptables(&["-F", chain])?;
     }
-    while run_ok(&[&["iptables", "-D", "INPUT"][..], &jump].concat()).is_ok() {}
-    run_ok(&[&["iptables", "-I", "INPUT", "1"][..], &jump].concat())?;
+    while iptables(&[&["-D", "INPUT"][..], &jump].concat()).is_ok() {}
+    iptables(&[&["-I", "INPUT", "1"][..], &jump].concat())?;
     for net in &kea.ctrl_allow {
-        run_ok(&["iptables", "-A", chain, "-s", net, "-j", "ACCEPT"])?;
+        iptables(&["-A", chain, "-s", net, "-j", "ACCEPT"])?;
     }
-    run_ok(&["iptables", "-A", chain, "-j", "DROP"])
+    iptables(&["-A", chain, "-j", "DROP"])
 }
 
 // What: the Kea Control Agent behind its token and fence.
@@ -3861,6 +3855,17 @@ fn remove_stock_server(nginx: &Path) -> Result<(), String> {
     }
 }
 
+// What: openssl x509 -noout output for one certificate.
+// Why: the CA print, the SAN read and the tests read alike.
+// From: Issue #1683 | PR #1912
+fn x509(crt: &Path, args: &[&str]) -> Result<String, String> {
+    let crt = crt.display().to_string();
+    tool(
+        "openssl",
+        &[&["x509", "-noout"], args, &["-in", &crt]].concat(),
+    )
+}
+
 // What: CA, default and per-host leaf certificates.
 // Why: HTTPS mode intercepts TLS for every proxied host.
 // From: Issue #1683
@@ -3907,17 +3912,7 @@ fn nginx_certs(
     own(certs, None, gid, 0o2750)?;
     // What: drop every leaf when the CA changed.
     // Why: leaves of an old CA would fail on every client.
-    let print = tool(
-        "openssl",
-        &[
-            "x509",
-            "-noout",
-            "-fingerprint",
-            "-sha256",
-            "-in",
-            &path(&ca_crt),
-        ],
-    )?;
+    let print = x509(&ca_crt, &["-fingerprint", "-sha256"])?;
     let stamp = certs.join(".ca-fingerprint");
     if fs::read_to_string(&stamp).ok().as_deref() != Some(print.as_str()) {
         for entry in
@@ -3951,18 +3946,16 @@ fn nginx_certs(
     }
     let default_key = certs.join(format!("{}.key", cert.default_cert_name));
     let default_crt = certs.join(format!("{}.crt", cert.default_cert_name));
-    let san = tool(
-        "openssl",
-        &[
-            "x509",
-            "-noout",
-            "-ext",
-            "subjectAltName",
-            "-in",
-            &path(&default_crt),
-        ],
-    )
-    .unwrap_or_default();
+    // What: no readable default cert means no SAN rows.
+    // Why: a missing or broken cert is signed again below.
+    let san = x509(&default_crt, &["-ext", "subjectAltName"]).unwrap_or_else(|e| {
+        if default_crt.exists() {
+            log_err(&format!(
+                "WARNING: default cert not read, signed again: {e}"
+            ));
+        }
+        String::new()
+    });
     let has_ip = ip_https.is_empty()
         || san
             .split([',', '\n'])
@@ -7004,18 +6997,6 @@ mod tests {
         }
     }
 
-    // What: openssl x509 output for one certificate.
-    // Why: cert tests read subject, SAN, serial alike.
-    // From: Issue #1683 | PR #1912
-    fn x509(crt: &Path, args: &[&str]) -> String {
-        let crt = crt.to_str().expect("utf8 path");
-        tool(
-            "openssl",
-            &[&["x509", "-noout"], args, &["-in", crt]].concat(),
-        )
-        .expect("x509")
-    }
-
     // What: certificate values, names random, keys valid.
     // Why: a render must copy each value, not a literal.
     fn gen_cert() -> CertKnobs {
@@ -7078,12 +7059,14 @@ mod tests {
         };
         verify(&leaf).expect("leaf signed by the CA");
         assert_eq!(
-            x509(&leaf, &["-subject", "-nameopt", "RFC2253"]).trim(),
+            x509(&leaf, &["-subject", "-nameopt", "RFC2253"])
+                .expect("x509")
+                .trim(),
             format!("subject={}", cert.leaf_subject.trim_start_matches('/'))
         );
-        let san = x509(&leaf, &["-ext", "subjectAltName"]);
+        let san = x509(&leaf, &["-ext", "subjectAltName"]).expect("x509");
         assert!(san.contains(&format!("DNS:{host}, DNS:*.{host}")), "{san}");
-        let san = x509(&default, &["-ext", "subjectAltName"]);
+        let san = x509(&default, &["-ext", "subjectAltName"]).expect("x509");
         assert!(san.contains(&format!("IP Address:{ip_b}")), "{san}");
         assert_eq!(
             fs::read_dir(&run).expect("run").count(),
@@ -7103,10 +7086,10 @@ mod tests {
         assert_eq!(bytes(&default), default_before);
         nginx_certs(&ca, &certs, &run, &hosts, &ip_a, gid, &cert).expect("prefix ip");
         assert_ne!(bytes(&default), default_before, "a prefix IP kept the cert");
-        let san = x509(&default, &["-ext", "subjectAltName"]);
+        let san = x509(&default, &["-ext", "subjectAltName"]).expect("x509");
         assert!(san.contains(&format!("IP Address:{ip_a}")), "{san}");
         let serial = |crt: &Path| {
-            let text = x509(crt, &["-serial"]);
+            let text = x509(crt, &["-serial"]).expect("x509");
             u128::from_str_radix(text.trim().trim_start_matches("serial="), 16).expect("hex")
         };
         assert!(serial(&default) > serial(&leaf));
