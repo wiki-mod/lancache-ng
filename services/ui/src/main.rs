@@ -3035,19 +3035,21 @@ async fn kea_apply(
     }
 }
 
-// What: kea_apply with errors as DHCP error pages.
+// What: kea_apply, then back to the DHCP page.
 // Why: a missing subnet or option is a 404, not a failure.
+// From: Issue #1683 | PR #1912
 async fn kea_modify(
     state: &AppState,
     change: impl FnOnce(&mut Value) -> Result<(), &'static str> + Send,
-) -> Result<(), HtmlError> {
+) -> Result<Redirect, HtmlError> {
     kea_apply(state, change).await.map_err(|message| {
         let status = match message.as_str() {
             KEA_SUBNET_MISSING | KEA_OPTION_MISSING => StatusCode::NOT_FOUND,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         dhcp_error(status, message)
-    })
+    })?;
+    Ok(Redirect::to(PAGE_DHCP))
 }
 
 // What: the subnet4 entries of a config; none if malformed.
@@ -3726,8 +3728,7 @@ async fn add_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Redir
         subnets.push(entry);
         Ok(())
     })
-    .await?;
-    Ok(Redirect::to(PAGE_DHCP))
+    .await
 }
 
 // What: edit one subnet in place, found by id.
@@ -3747,8 +3748,7 @@ async fn update_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
             &limits,
         )
     })
-    .await?;
-    Ok(Redirect::to(PAGE_DHCP))
+    .await
 }
 
 // What: delete a subnet with its pools and reservations.
@@ -3760,8 +3760,7 @@ async fn remove_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
         subnets_mut(config)?.retain(|s| s["id"].as_u64() != Some(u64::from(id)));
         Ok(())
     })
-    .await?;
-    Ok(Redirect::to(PAGE_DHCP))
+    .await
 }
 
 // What: add or remove a custom option, matched by code+data
@@ -3779,8 +3778,7 @@ async fn change_subnet_option(
     kea_modify(state, move |config| {
         edit_custom_option(find_subnet_mut(config, id)?, key, &data, add)
     })
-    .await?;
-    Ok(Redirect::to(PAGE_DHCP))
+    .await
 }
 
 // What: add one custom option to a subnet.
@@ -3833,8 +3831,7 @@ async fn add_reservation(
         }
         upsert_reservation(find_subnet_mut(config, id)?, &mac, &ip, &hostname)
     })
-    .await?;
-    Ok(Redirect::to(PAGE_DHCP))
+    .await
 }
 
 // What: remove a static reservation by MAC; none is fine.
@@ -3862,8 +3859,7 @@ async fn remove_reservation(
         }
         Ok(())
     })
-    .await?;
-    Ok(Redirect::to(PAGE_DHCP))
+    .await
 }
 
 // What: switch Kea's DDNS master switch.
@@ -3887,8 +3883,7 @@ async fn update_dhcp_ddns(
         ddns.insert("enable-updates".into(), json!(enabled));
         Ok(())
     })
-    .await?;
-    Ok(Redirect::to(PAGE_DHCP))
+    .await
 }
 
 // What: roll Kea back to a chosen known-good snapshot.
