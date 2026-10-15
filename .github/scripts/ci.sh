@@ -3370,7 +3370,7 @@ _ci_sccache_env() {
     export SCCACHE_REDIS_KEY_PREFIX="${prefix}"
     sf="$(_ci_secret_file sccache_redis_url)"
     if [ -s "${sf}" ]; then url="$(<"${sf}")"; fi
-    _ci_secret_env "$(_ci_secret_file sccache_gha)" ACTIONS_RESULTS_URL ACTIONS_RUNTIME_TOKEN
+    _ci_secret_env "$(_ci_secret_file sccache_gha)" ACTIONS_RESULTS_URL ACTIONS_RUNTIME_TOKEN ACTIONS_CACHE_SERVICE_V2
     _ci_sccache_backend "${chain}" "${url}" "${mode}"
     if [ -n "${chain}" ]; then
         ci_log "[CI-INFO-CACHE-0001]" "prefix=\"${prefix}\" mode=${mode} chain=\"${chain}\" runner=\"${RUNNER_ENVIRONMENT:-unset}\""
@@ -3425,7 +3425,7 @@ ci_cmd_gha_runtime_args() {
             return 2
             ;;
     esac
-    args="-s KILL ${t} /bin/sh -c \"env | grep -E '^ACTIONS_(RESULTS_URL|RUNTIME_TOKEN)=' >> \$GITHUB_ENV\""
+    args="-s KILL ${t} /bin/sh -c \"env | grep -E '^ACTIONS_(RESULTS_URL|RUNTIME_TOKEN|CACHE_SERVICE_V2)=' >> \$GITHUB_ENV\""
     _ci_step_output "[CI-ERROR-CACHE-0010]" args "${args}" || return 2
     printf '%s\n' "${args}"
 }
@@ -9247,7 +9247,12 @@ _ci_set_runtime() {
         _ci_emit_secret "${dir}" ccache_redis_url "${SCCACHE_REDIS_URL:-}" || return "$?"
     fi
     if [[ ",${chain}," == *,gha,* ]]; then
-        _ci_emit_secret "${dir}" sccache_gha "ACTIONS_RESULTS_URL=${ACTIONS_RESULTS_URL}"$'\n'"ACTIONS_RUNTIME_TOKEN=${ACTIONS_RUNTIME_TOKEN}" || return "$?"
+        # What: the v2 flag rides with URL and token.
+        # Why: opendal ghac picks v1 without it (AG-CI-009).
+        # From: Issue #1683 | PR #1912
+        local gha="ACTIONS_RESULTS_URL=${ACTIONS_RESULTS_URL}"$'\n'"ACTIONS_RUNTIME_TOKEN=${ACTIONS_RUNTIME_TOKEN}"
+        [ -z "${ACTIONS_CACHE_SERVICE_V2:-}" ] || gha+=$'\n'"ACTIONS_CACHE_SERVICE_V2=${ACTIONS_CACHE_SERVICE_V2}"
+        _ci_emit_secret "${dir}" sccache_gha "${gha}" || return "$?"
     fi
     if [ "${sccache_enabled}" = "1" ] && [ -n "${sched}" ]; then
         if ! out="$(_ci_write_dist_config "${dir}/sccache_dist_config" "${tcs}" "${sched}" 2>&1)"; then
