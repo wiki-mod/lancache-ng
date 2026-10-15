@@ -2993,27 +2993,52 @@ async fn kea_post(
         .map_err(|e| error_chain(&e))
 }
 
-// What: one field of Kea's first reply.
-// Why: Kea answers a list with one reply per service.
+// What: the outcome of one Kea command.
+// Why: one owner reads Kea's result, text and arguments.
 // From: Issue #1683 | PR #1912
-fn kea_reply<'a>(reply: &'a Value, key: &str) -> Option<&'a Value> {
-    reply.get(0)?.get(key)
+#[derive(Debug, PartialEq)]
+enum Kea {
+    // What: result 0, with the reply's arguments.
+    Done(Value),
+    // What: result 3, Kea's "nothing found".
+    Empty(String),
+    // What: any other result, with Kea's text.
+    Refused(String),
+    // What: no answer: transport or JSON error.
+    // Why: a lost request may still have applied.
+    Lost(String),
 }
 
-// What: the result code of Kea's first reply; 1 if absent.
-// Why: Kea reports failures inside a 200 response.
-fn kea_code(reply: &Value) -> i64 {
-    kea_reply(reply, "result")
-        .and_then(Value::as_i64)
-        .unwrap_or(1)
-}
-
-// What: the text of Kea's first reply.
-// Why: it names the reason when the result code is not 0.
-fn kea_text(reply: &Value) -> &str {
-    kea_reply(reply, "text")
+// What: map Kea's first reply to one outcome.
+// Why: Kea answers a list and reports errors in a 200.
+// From: Issue #1683 | PR #1912
+fn kea_outcome(reply: &Value) -> Kea {
+    let first = reply.get(0);
+    let text = first
+        .and_then(|r| r.get("text"))
         .and_then(Value::as_str)
         .unwrap_or("Kea error")
+        .to_string();
+    match first.and_then(|r| r.get("result")).and_then(Value::as_i64) {
+        Some(0) => Kea::Done(
+            first
+                .and_then(|r| r.get("arguments"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        ),
+        Some(3) => Kea::Empty(text),
+        _ => Kea::Refused(text),
+    }
+}
+
+// What: send a command and read its outcome.
+// Why: every Kea caller branches on this one type.
+// From: Issue #1683 | PR #1912
+async fn kea_send(state: &AppState, command: &str, arguments: Option<&Value>) -> Kea {
+    match kea_post(state, command, arguments).await {
+        Ok(reply) => kea_outcome(&reply),
+        Err(e) => Kea::Lost(e),
+    }
 }
 
 // What: send a command and require result code 0.
@@ -3023,20 +3048,19 @@ async fn kea_run(
     command: &str,
     arguments: Option<&Value>,
 ) -> Result<Value, String> {
-    let reply = kea_post(state, command, arguments).await?;
-    if kea_code(&reply) != 0 {
-        return Err(kea_text(&reply).to_string());
+    match kea_send(state, command, arguments).await {
+        Kea::Done(arguments) => Ok(arguments),
+        Kea::Empty(e) | Kea::Refused(e) | Kea::Lost(e) => Err(e),
     }
-    Ok(reply)
 }
 
 // What: Kea's running config without the hash key.
 // Why: Kea refuses its own hash key on config-test/-set.
 async fn kea_config(state: &AppState) -> Result<Value, String> {
-    let reply = kea_run(state, "config-get", None).await?;
-    let mut config = kea_reply(&reply, "arguments")
-        .cloned()
-        .ok_or("config-get: missing arguments")?;
+    let mut config = kea_run(state, "config-get", None).await?;
+    if config.is_null() {
+        return Err("config-get: missing arguments".into());
+    }
     if let Some(map) = config.as_object_mut() {
         map.remove("hash");
     }
@@ -3051,24 +3075,6 @@ fn kea_store(config: &Config) -> SnapshotStore {
         "dhcp4.json",
         "kea",
     )
-}
-
-// What: the three outcomes of Kea's config-write.
-// Why: a lost request is no refusal; it may have applied.
-enum Written {
-    Done,
-    Refused(String),
-    Unknown(String),
-}
-
-// What: persist the running config to disk.
-// Why: the caller branches on the three-way outcome.
-async fn kea_write(state: &AppState) -> Written {
-    match kea_post(state, "config-write", None).await {
-        Ok(reply) if kea_code(&reply) == 0 => Written::Done,
-        Ok(reply) => Written::Refused(kea_text(&reply).to_string()),
-        Err(e) => Written::Unknown(e),
-    }
 }
 
 // What: put the old config back after a refused write.
@@ -3114,28 +3120,30 @@ async fn kea_apply(
             tracing::warn!(error = %e, "failed to record a known-good Kea snapshot");
         }
     };
-    match kea_write(state).await {
-        Written::Done => {
+    // What: persist the running config to disk.
+    // Why: a lost request may have applied; no refusal.
+    match kea_send(state, "config-write", None).await {
+        Kea::Done(_) => {
             record();
             Ok(())
         }
-        Written::Refused(e) => {
+        Kea::Empty(e) | Kea::Refused(e) => {
             tracing::warn!(error = %e, "DHCP config-write failed; rolling back");
             kea_rollback(state, &old, &e).await
         }
         // What: one retry if the write outcome is unknown.
         // Why: blind rollback could undo a landed write.
-        Written::Unknown(first) => match kea_write(state).await {
-            Written::Done => {
+        Kea::Lost(first) => match kea_send(state, "config-write", None).await {
+            Kea::Done(_) => {
                 record();
                 Ok(())
             }
-            Written::Refused(retry) => Err(format!(
+            Kea::Empty(retry) | Kea::Refused(retry) => Err(format!(
                 "Config applied at runtime but the first config-write result was ambiguous, \
                  and a retry returned a Kea failure. Runtime and persisted config may now \
                  differ. First error: {first}. Retry error: {retry}"
             )),
-            Written::Unknown(retry) => Err(format!(
+            Kea::Lost(retry) => Err(format!(
                 "Config applied at runtime but config-write could not be confirmed after \
                  retry. Runtime and persisted config may now differ. First error: {first}. \
                  Retry error: {retry}"
@@ -3328,15 +3336,16 @@ fn read_reservations(config: &Value) -> Vec<Reservation> {
 // What: all active leases from Kea's lease database.
 // Why: leases are runtime state, not part of the config.
 async fn kea_leases(state: &AppState) -> Result<Vec<Lease>, String> {
-    let reply = kea_post(state, "lease4-get-all", None).await?;
-    // What: code 3 is Kea's "0 leases found".
+    // What: Empty is Kea's "0 leases found".
     // Why: any other refusal must not look like no lease.
     // From: Issue #1683 | PR #1912
-    if !matches!(kea_code(&reply), 0 | 3) {
-        return Err(kea_text(&reply).to_string());
-    }
-    Ok(kea_reply(&reply, "arguments")
-        .and_then(|a| a.get("leases"))
+    let arguments = match kea_send(state, "lease4-get-all", None).await {
+        Kea::Done(arguments) => arguments,
+        Kea::Empty(_) => return Ok(Vec::new()),
+        Kea::Refused(e) | Kea::Lost(e) => return Err(e),
+    };
+    Ok(arguments
+        .get("leases")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -4086,36 +4095,38 @@ async fn release_lease(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
     let address = ipv4(ip).ok_or_else(|| invalid("Lease release requires a valid IPv4 address"))?;
     let arguments = json!({"ip-address": ip});
     // What: read the lease's hostname before deleting it.
-    // Why: lease4-del removes the record the name came from
-    let hostname = kea_post(&state, "lease4-get", Some(&arguments))
-        .await
-        .ok()
-        .and_then(|reply| {
-            let name = kea_reply(&reply, "arguments")?
-                .get("hostname")?
-                .as_str()?
-                .trim();
-            (!name.is_empty()).then(|| name.to_string())
-        });
-    let reply = kea_post(&state, "lease4-del", Some(&arguments))
-        .await
-        .map_err(fail)?;
-    match kea_code(&reply) {
-        0 => {
+    // Why: only the A-record cleanup below needs the name;
+    // the release and the PTR cleanup work without it.
+    let hostname = match kea_send(&state, "lease4-get", Some(&arguments)).await {
+        Kea::Done(lease) => lease
+            .get("hostname")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string),
+        // What: no lease; lease4-del answers below.
+        Kea::Empty(_) => None,
+        Kea::Refused(e) | Kea::Lost(e) => {
+            tracing::warn!(ip, error = %e, "lease hostname not read; A record kept");
+            None
+        }
+    };
+    match kea_send(&state, "lease4-del", Some(&arguments)).await {
+        Kea::Done(_) => {
             // What: clean DNS records after a release.
             // Why: best effort; the address is freed.
             cleanup_lease_records(&state, address, hostname.as_deref()).await;
             Ok(Redirect::to(PAGE_DHCP))
         }
-        // What: code 3 means no such lease.
+        // What: Empty means no such lease.
         // Why: an expired lease is a race, not a failure.
-        3 => Err(dhcp_error(
+        Kea::Empty(_) => Err(dhcp_error(
             StatusCode::NOT_FOUND,
             format!(
                 "No active lease found for {ip}; it may have already expired or been released."
             ),
         )),
-        _ => Err(fail(kea_text(&reply))),
+        Kea::Refused(e) | Kea::Lost(e) => Err(fail(e)),
     }
 }
 
@@ -7952,17 +7963,19 @@ mod tests {
         )
     }
 
-    // What: Kea replies give a result code and text.
+    // What: each Kea reply maps to one outcome.
     // Why: Kea reports failures inside a 200 response.
     #[test]
-    fn kea_replies_expose_code_and_text() {
-        let ok = json!([{"result": 0, "text": "done"}]);
-        assert_eq!((kea_code(&ok), kea_text(&ok)), (0, "done"));
+    fn kea_replies_map_to_one_outcome() {
+        let ok = json!([{"result": 0, "arguments": {"a": 1}}]);
+        assert_eq!(kea_outcome(&ok), Kea::Done(json!({"a": 1})));
+        assert_eq!(kea_outcome(&json!([{"result": 0}])), Kea::Done(Value::Null));
+        let empty = json!([{"result": 3, "text": "0 leases found"}]);
+        assert_eq!(kea_outcome(&empty), Kea::Empty("0 leases found".into()));
         let bad = json!([{"result": 2}]);
-        assert_eq!((kea_code(&bad), kea_text(&bad)), (2, "Kea error"));
+        assert_eq!(kea_outcome(&bad), Kea::Refused("Kea error".into()));
         for odd in [json!([]), json!({}), json!([{"result": "x"}]), json!(null)] {
-            assert_eq!(kea_code(&odd), 1, "{odd}");
-            assert_eq!(kea_text(&odd), "Kea error");
+            assert_eq!(kea_outcome(&odd), Kea::Refused("Kea error".into()), "{odd}");
         }
     }
 
