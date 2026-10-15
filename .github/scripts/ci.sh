@@ -5457,8 +5457,12 @@ _ci_smoke_service() {
 # Why: one executor for product and toolchain smoke.
 # From: Issue #1683 | PR #1858
 _ci_image_smoke() {
-    local code="$1" service="$2" reason="$3" image="$4" tools="$5" runs="$6" limit grace out t
+    local code="$1" service="$2" reason="$3" image="$4" tools="$5" runs="$6" limit grace out t lookup
     local -a tl=()
+    # What: the lookup owner as text for the container shell.
+    # Why: the image has no ci.sh; one owner, no second loop.
+    # From: Issue #1683 | PR #1912
+    lookup="$(declare -f _ci_command_path _ci_command_available)"
     limit="$(_ci_variable CI_SMOKE_TIMEOUT)" || return 2
     grace="$(_ci_variable CI_SMOKE_KILL_AFTER)" || return 2
     while IFS= read -r t; do [ -n "${t}" ] && tl+=("${t}"); done <<< "${tools}"
@@ -5466,7 +5470,7 @@ _ci_image_smoke() {
     # Why: a run holds spaces/pipes; stdin keeps it intact.
     # From: Issue #1683 | PR #1858
     if ! out="$(docker run --rm -i --entrypoint timeout "${image}" --kill-after="${grace}" --signal=TERM "${limit}" \
-        bash -c 'for t in "$@"; do [ -n "$(command -v "$t")" ] || { echo "missing $t"; exit 1; }; done
+        bash -c "${lookup}"$'\n''for t in "$@"; do _ci_command_available "$t" || { echo "missing $t"; exit 1; }; done
             while IFS= read -r r; do
                 [ -n "${r}" ] || continue
                 o="$(bash -o pipefail -c "${r}" 2>&1)" || { printf "failed: %s\n%s\n" "${r}" "${o}"; exit 1; }
