@@ -7692,12 +7692,11 @@ _ci_validate_project() {
 # Why: One source; every service list derives from it.
 # From: Issue #1683
 _ci_validate_config_json() {
-    local file flags
-    file="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    local file
     local -a pf=()
-    flags="$(_ci_compose_profile_flags "${file}")" || return 2
-    [ -z "${flags}" ] || mapfile -t pf <<< "${flags}"
-    _ci_run "[CI-ERROR-VALIDATE-0086]" "file=\"${file}\" profiles=\"${flags//$'\n'/ }\" reason=\"docker compose config failed\"" \
+    file="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    _ci_compose_profile_flags "${file}" pf || return 2
+    _ci_run "[CI-ERROR-VALIDATE-0086]" "file=\"${file}\" profiles=\"${pf[*]}\" reason=\"docker compose config failed\"" \
         docker compose -f "${file}" "${pf[@]}" config --format json
 }
 
@@ -7917,12 +7916,11 @@ _ci_validate_up() {
 # Why: up and run share one file, override and profile list.
 # From: Issue #763 | PR #1858
 _ci_validate_compose() {
-    local project="$1" net_override="$2" pin_override="$3" file flags
+    local project="$1" net_override="$2" pin_override="$3" file
+    local -a pf=()
     shift 3
     file="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    local -a pf=()
-    flags="$(_ci_compose_profile_flags "${file}")" || return 2
-    [ -z "${flags}" ] || mapfile -t pf <<< "${flags}"
+    _ci_compose_profile_flags "${file}" pf || return 2
     docker compose -p "${project}" -f "${file}" \
         -f "${net_override}" -f "${pin_override}" "${pf[@]}" "$@"
 }
@@ -14622,10 +14620,8 @@ _ci_compose_profiles() {
 # Why: a profiled service is checked like any other.
 # From: Issue #1683 | PR #1858
 _ci_compose_json() {
-    local flags
     local -a pf=()
-    flags="$(_ci_compose_profile_flags "$1")" || return 2
-    [ -z "${flags}" ] || mapfile -t pf <<< "${flags}"
+    _ci_compose_profile_flags "$1" pf || return 2
     _ci_compose_query "$1" "${2:-}" "${pf[@]}" config --no-env-resolution --format json
 }
 
@@ -15167,22 +15163,22 @@ _ci_logging_matrix_canonical() {
 # From: Issue #1683 | PR #1858
 _ci_compose_service_names() {
     local file="$1"
-    local flags
     local -a profile_flags=()
-    flags="$(_ci_compose_profile_flags "${file}")" || return 2
-    [ -z "${flags}" ] || mapfile -t profile_flags <<< "${flags}"
+    _ci_compose_profile_flags "${file}" profile_flags || return 2
     _ci_compose_query "${file}" "" "${profile_flags[@]}" config --services
 }
 
-# What: --profile flag pairs for every compose profile.
+# What: out[]: --profile pairs for every compose profile.
 # Why: one owner; a profiled service must not be skipped.
-# From: Issue #1683
+# From: Issue #1683 | PR #1912
 _ci_compose_profile_flags() {
-    local profiles p
-    profiles="$(_ci_compose_profiles "$1")" || return 2
-    while IFS= read -r p; do
-        [ -n "${p}" ] && printf -- '--profile\n%s\n' "${p}"
-    done <<< "${profiles}"
+    local -n _ci_pf_out="$2"
+    local _ci_pf_all _ci_pf_p
+    _ci_pf_out=()
+    _ci_pf_all="$(_ci_compose_profiles "$1")" || return 2
+    while IFS= read -r _ci_pf_p; do
+        [ -n "${_ci_pf_p}" ] && _ci_pf_out+=(--profile "${_ci_pf_p}")
+    done <<< "${_ci_pf_all}"
     return 0
 }
 
