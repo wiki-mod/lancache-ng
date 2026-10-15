@@ -3659,17 +3659,26 @@ fn subnet_id(f: &Fields, key: &str) -> Result<u32, HtmlError> {
         .ok_or_else(|| invalid("Missing subnet id."))
 }
 
+// What: limits, lease, CIDR and NTP list of a subnet form.
+// Why: NTP names resolve before the sync edit; bad = 400.
+// From: Issue #1683 | PR #1912
+async fn read_subnet_form(
+    state: &AppState,
+    f: &Fields,
+) -> Result<(LeaseLimits, u32, (u32, u32), String), HtmlError> {
+    let limits = state.config.dhcp_lease_limits;
+    let (lease, cidr) = validate_subnet(f, &limits).map_err(invalid)?;
+    let ntp = resolve_ntp_servers(f.get("ntp_servers"))
+        .await
+        .map_err(invalid)?;
+    Ok((limits, lease, cidr, ntp))
+}
+
 // What: create a subnet with the next free id.
 // Why: ids need only be unique; max plus one never clashes.
 async fn add_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Redirect, HtmlError> {
     require_kea(&state)?;
-    let limits = state.config.dhcp_lease_limits;
-    let (lease, cidr) = validate_subnet(&f, &limits).map_err(invalid)?;
-    // What: resolve NTP names before the synchronous edit.
-    // Why: the edit closure cannot await; bad name = 400.
-    let ntp = resolve_ntp_servers(f.get("ntp_servers"))
-        .await
-        .map_err(invalid)?;
+    let (limits, lease, cidr, ntp) = read_subnet_form(&state, &f).await?;
     kea_modify(&state, move |config| {
         let subnets = subnets_mut(config)?;
         let id = subnets
@@ -3691,11 +3700,7 @@ async fn add_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Redir
 async fn update_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Redirect, HtmlError> {
     require_kea(&state)?;
     let id = subnet_id(&f, "id")?;
-    let limits = state.config.dhcp_lease_limits;
-    let (lease, cidr) = validate_subnet(&f, &limits).map_err(invalid)?;
-    let ntp = resolve_ntp_servers(f.get("ntp_servers"))
-        .await
-        .map_err(invalid)?;
+    let (limits, lease, cidr, ntp) = read_subnet_form(&state, &f).await?;
     kea_modify(&state, move |config| {
         apply_subnet(
             find_subnet_mut(config, id)?,
