@@ -43,6 +43,10 @@ ARG BUILD_TOOLS_IMAGE
 # From: Issue #1683 | PR #1912
 ARG CI_TOOLCHAIN_COMPILERS
 ARG CI_CACHE_PREFIX
+# What: cargo home, root of the cargo cache mounts.
+# Why: §39 registry and git caches; the SOT owns it.
+# From: Issue #1683 | PR #1912
+ARG CI_CARGO_HOME
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -70,6 +74,8 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
+    --mount=type=cache,target=${CI_CARGO_HOME}/registry,sharing=locked \
+    --mount=type=cache,target=${CI_CARGO_HOME}/git,sharing=locked \
     bash /usr/local/bin/ci.sh rust-build ui "${RUST_CRATES}" deps
 COPY services/ui/src ./services/ui/src
 # What: ci.sh owns the rust build accel policy (one owner).
@@ -83,6 +89,8 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
+    --mount=type=cache,target=${CI_CARGO_HOME}/registry,sharing=locked \
+    --mount=type=cache,target=${CI_CARGO_HOME}/git,sharing=locked \
     bash /usr/local/bin/ci.sh rust-build ui "${RUST_CRATES}"
 
 # What: scratch only when ci.sh passed no image arg.

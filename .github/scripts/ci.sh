@@ -4676,6 +4676,11 @@ ci_cmd_rust_build() {
     _ci_rb_sccache "${service}"
     _ci_rb_distcc
     _ci_rb_ccache
+    # What: cargo home from the SOT, the cache mount root.
+    # Why: §39: registry and git caches live in the mounts.
+    # From: Issue #1683 | PR #1912
+    CARGO_HOME="$(_ci_variable CI_CARGO_HOME)" || return 2
+    export CARGO_HOME
     _ci_rb_cargo_profile || return 2
     local cargo_jobs
     cargo_jobs="$(_ci_rb_cargo_jobs)" || return 2
