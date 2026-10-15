@@ -2521,6 +2521,16 @@ _ci_build_lock_drop() {
     _ci_lock_release "${remote}" "${ref}" "$(_ci_lock_note build "$1" "$2")"
 }
 
+# What: head subject of a ref; rc 1 absent, 2 unknown.
+# Why: an absent lock or mark is a verdict, not an error.
+# From: Issue #1683 | PR #1912
+_ci_ref_note() {
+    local rc=0
+    _ci_cas_ref_sha "$1" "$2" >/dev/null || rc=$?
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    _ci_ref_subject "$1" "$2" || return 2
+}
+
 # What: rc 0 if a running other run holds the build lock.
 # Why: BUILD_IN_PROGRESS, not MISSING, while it builds.
 # From: Issue #1683 | PR #1912
@@ -2528,10 +2538,7 @@ _ci_build_lock_busy() {
     local remote ref rc=0 holder
     remote="$(_ci_git_remote)" || return 2
     ref="$(_ci_build_lock_ref "$1" "$2" "$3")" || return 2
-    _ci_cas_ref_sha "${remote}" "${ref}" >/dev/null || rc=$?
-    [ "${rc}" -ne 1 ] || return 1
-    [ "${rc}" -eq 0 ] || return 2
-    holder="$(_ci_ref_subject "${remote}" "${ref}")" || return 2
+    holder="$(_ci_ref_note "${remote}" "${ref}")" || return $?
     [ "${holder}" != "$(_ci_lock_note build "$2" "$3")" ] || return 1
     rc=0; _ci_lock_holder_ended "${holder}" || rc=$?
     case "${rc}" in
@@ -2561,13 +2568,10 @@ _ci_verified_note() {
 # Why: a pushed image is not an accepted image (B20).
 # From: Issue #1683 | PR #1912
 _ci_verified_has() {
-    local remote ref rc=0 subject
+    local remote ref subject
     remote="$(_ci_git_remote)" || return 2
     ref="$(_ci_verified_ref "$1" "$2")" || return 2
-    _ci_cas_ref_sha "${remote}" "${ref}" >/dev/null || rc=$?
-    [ "${rc}" -ne 1 ] || return 1
-    [ "${rc}" -eq 0 ] || return 2
-    subject="$(_ci_ref_subject "${remote}" "${ref}")" || return 2
+    subject="$(_ci_ref_note "${remote}" "${ref}")" || return $?
     [ "${subject}" = "$(_ci_verified_note "$1" "$2" "$3")" ] || return 1
 }
 
