@@ -72,6 +72,7 @@ declare -A CI_DISPATCH=(
     [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog
     [gc]=ci_cmd_gc [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
     [welcome]=ci_cmd_welcome [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
+    [have-command]=ci_cmd_have_command
 )
 
 # What: check name -> "scope function" for ci.sh check.
@@ -11675,6 +11676,17 @@ ci_cmd_runner_host() {
 # DISPATCH
 # =========================================================
 
+# What: ci.sh have-command NAME: rc 0 if NAME resolves on PATH, rc 1 if not, rc 2 on a wrong call.
+# Why: hooks and container scripts call this one owner instead of their own command lookup.
+# From: Issue #1683 | PR #1912
+ci_cmd_have_command() {
+    if [ "$#" -ne 1 ] || [ -z "$1" ]; then
+        ci_log "[CI-ERROR-CORE-0012]" "args=$# reason=\"have-command needs exactly one command name\""
+        return 2
+    fi
+    _ci_command_available "$1"
+}
+
 # What: Route a subcommand to its engine function.
 # Why: One table is membership and dispatch; no second list.
 # From: Issue #1683
@@ -11686,6 +11698,10 @@ ci_main() {
         ci_log "[CI-ERROR-CORE-0002]" "command=\"${command}\" reason=\"unknown subcommand\" known=\"${!CI_DISPATCH[*]}\""
         return 2
     fi
+    # What: run the command lookup before any temp, proxy or manifest setup.
+    # Why: a git hook asks it without a manifest, a temp root or a network.
+    # From: Issue #1683 | PR #1912
+    case "${command}" in have-command) "${fn}" "$@"; return "$?" ;; esac
     _ci_tmp_init || return "$?"
     _ci_proxy_init || return "$?"
     # What: skip manifest for build-only commands
