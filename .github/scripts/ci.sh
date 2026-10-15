@@ -4171,20 +4171,38 @@ _ci_sccache_report() {
         ci_error "[CI-WARN-CACHE-0015]" "mode=${_CI_SCCACHE_MODE} reason=\"sccache saw no compile request\"" "${stats}"
         return 0
     fi
-    # What: read, write, lookup errors and timeouts.
+    # What: read, lookup errors and timeouts.
     # Why: sccache turns each into a miss and compiles.
     # From: Issue #1683 | PR #1912
-    for label in "Cache errors" "Cache read errors" "Cache write errors" "Cache timeouts"; do
+    for label in "Cache errors" "Cache read errors" "Cache timeouts"; do
         n="$(_ci_sccache_count "${label}" "${stats}")"
         [ "${n}" = 0 ] || errs+=" ${label// /_}=${n:-none}"
     done
-    [ -n "${errs}" ] || return 0
+    # What: write errors by their cause in the server log.
+    # Why: 409 exists and 429 skipped keep the level alive.
+    # From: Issue #1683 | PR #1912
+    local log wr wlog wex=0 wrl=0 chk cause
+    local ok='Error executing cache write: (AlreadyExists \(permanent\)|RateLimited \(temporary\))'
+    log="$(_ci_sccache_log)"
+    wr="$(_ci_sccache_count "Cache write errors" "${stats}")"
+    if [ "${wr}" != 0 ]; then
+        wlog="$(_ci_capture 1 grep -c 'Error executing cache write:' "${log}")" || return 2
+        wex="$(_ci_capture 1 grep -c 'Error executing cache write: AlreadyExists (permanent)' "${log}")" || return 2
+        wrl="$(_ci_capture 1 grep -c 'Error executing cache write: RateLimited (temporary)' "${log}")" || return 2
+        [ "${wr}" = "${wlog}" ] && [ "${wlog}" = "$(( wex + wrl ))" ] \
+            || errs+=" Cache_write_errors=${wr:-none} exists=${wex} rate_limited=${wrl}"
+        chk="$(_ci_capture 1 grep -o 'storage check result: [A-Za-z]*' "${log}")" || return 2
+        case "${chk}" in *ReadOnly*) errs+=" storage=ReadOnly" ;; esac
+    fi
+    if [ -z "${errs}" ]; then
+        [ "${wr}" = 0 ] || ci_log "[CI-INFO-CACHE-0018]" "write_exists=${wex} write_rate_limited=${wrl} reason=\"writes skipped; entries exist or retry later\""
+        return 0
+    fi
     # What: the error lines of the sccache server log.
     # Why: AG-INT-002: the cause next to the counters.
     # From: Issue #1683 | PR #1912
-    local cause log
-    log="$(_ci_sccache_log)"
     cause="$(_ci_capture 1 grep -E 'storage check result|storage write check failed|cache storage (read check|failed to read)|Error executing cache write|Cache read error|Cache timed out|compile result: cache error' "${log}")" || return 2
+    cause="$(_ci_capture 1 grep -vE "${ok}" <<< "${cause}")" || return 2
     if [ "${_CI_SCCACHE_MODE}" = required ]; then
         ci_error "[CI-ERROR-CACHE-0016]" "errors=\"${errs# }\" log=\"${log}\" reason=\"required sccache cache level failed\"" "${cause}"
         return 2
