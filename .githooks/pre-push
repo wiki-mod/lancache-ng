@@ -22,10 +22,22 @@ if [ ! -f "$script" ]; then
 fi
 
 for tool in curl yq jq; do
-  if [ -z "$(command -v "$tool")" ]; then
-    echo "pre-push (action-node-versions): $tool not found on PATH; skipping this local check (CI still enforces it)." >&2
-    exit 0
-  fi
+  # What: tool lookup through ci.sh have-command
+  # Why: ci.sh owns the lookup; rc 2 is an error, not absent
+  # From: Issue #1683 | PR #1912
+  rc=0
+  bash "$script" have-command "$tool" || rc=$?
+  case "$rc" in
+    0) ;;
+    1)
+      echo "pre-push (action-node-versions): $tool not found on PATH; skipping this local check (CI still enforces it)." >&2
+      exit 0
+      ;;
+    *)
+      echo "pre-push (action-node-versions): ci.sh have-command $tool failed with rc=$rc (output above) -- push blocked." >&2
+      exit 1
+      ;;
+  esac
 done
 
 # What: derives owner/repo from the push remote URL
