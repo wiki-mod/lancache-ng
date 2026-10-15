@@ -450,7 +450,11 @@ jobs:
       ISSUE_NUMBER: ${{ github.event.issue.number }}
     steps:
       - *bootstrap
-      - name: Add the issue to the project board
+      # What: add the issue or PR to the board (step PAT).
+      # Why: GITHUB_TOKEN cannot write org Projects v2.
+      # From: Issue #1683 | PR #1858
+      - &board_add
+        name: Add the issue or PR to the project board
         env:
           GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: bash .github/scripts/ci.sh board-add
@@ -493,13 +497,7 @@ jobs:
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
         run: bash .github/scripts/ci.sh pr-labels
-      # What: add the PR to the project board (step PAT).
-      # Why: GITHUB_TOKEN cannot write org Projects v2.
-      # From: Issue #1683 | PR #1858
-      - name: Add the PR to the project board
-        env:
-          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-        run: bash .github/scripts/ci.sh board-add
+      - *board_add
       # What: PR labels, milestone and board placement
       # Why: only the board read needs the PAT
       # From: Issue #1683 | PR #1858

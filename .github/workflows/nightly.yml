@@ -80,7 +80,8 @@ jobs:
       # What: switch to the nightly source ref from the SOT
       # Why: a schedule run checks out the default branch
       # From: Issue #1683 | PR #1858
-      - name: Check out the nightly source ref
+      - &nightly_source
+        name: Check out the nightly source ref
         id: source
         run: bash .github/scripts/ci.sh channel-checkout nightly
       - name: Resolve the build-tools image
@@ -387,8 +388,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - *bootstrap
-      - name: Check out the nightly source ref
-        run: bash .github/scripts/ci.sh channel-checkout nightly
+      - *nightly_source
       - name: Report the nightly outcome
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
