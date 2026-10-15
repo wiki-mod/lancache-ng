@@ -2399,6 +2399,8 @@ mod tests {
                 .and_then(|l| l.local_addr())
                 .expect("a free local port")
                 .port();
+            let log_path = dir.join("s_server.log");
+            let log = fs::File::create(&log_path).expect("s_server log file");
             let child = Command::new("openssl")
                 .args([
                     "s_server",
@@ -2408,8 +2410,8 @@ mod tests {
                 ])
                 .args(["-cert", "leaf.crt", "-key", "leaf.key"])
                 .current_dir(dir)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stdout(log.try_clone().expect("s_server log handle"))
+                .stderr(log)
                 .spawn()
                 .expect("openssl s_server starts");
             let server = TlsServer { child, port };
@@ -2417,7 +2419,8 @@ mod tests {
             while std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).is_err() {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "s_server never listened"
+                    "s_server never listened: {}",
+                    fs::read_to_string(&log_path).unwrap_or_default()
                 );
                 std::thread::sleep(Duration::from_millis(50));
             }
