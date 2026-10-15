@@ -14584,7 +14584,7 @@ _ci_service_port() {
 _ci_compose_run() {
     local env_file="$1" fx kv vars names i
     shift
-    local -a fixture=() args=("$@") files=() unsetv=()
+    local -a fixture=() args=("$@") files=() unsetv=() pre=()
     if [ -n "${env_file}" ]; then
         # What: compose variables lose their shell values
         # Why: a shell value would win over the env file
@@ -14604,26 +14604,20 @@ _ci_compose_run() {
         [ -z "${names}" ] || mapfile -t unsetv <<< "${names}"
         fx="$(_ci_runtime_defaults)" || return 2
         fx="$(_ci_sot_compose_env "${fx}")" || return 2
-        mapfile -t fixture <<< "${fx}"
-        (
-            [ "${#unsetv[@]}" -eq 0 ] || unset "${unsetv[@]}"
-            for kv in "${fixture[@]}"; do
-                export "${kv?}"
-            done
-            docker compose --env-file "${env_file}" "$@"
-        )
-        return "$?"
+        pre=(--env-file "${env_file}")
+    else
+        fx="$(_ci_validation_env)" || return 2
     fi
-    fx="$(_ci_validation_env)" || return 2
     mapfile -t fixture <<< "${fx}"
     # What: export each KEY=VALUE fixture pair.
     # Why: ${kv?} is ShellCheck's pair form (SC2163).
     # From: Issue #1683 | PR #1858
     (
+        [ "${#unsetv[@]}" -eq 0 ] || unset "${unsetv[@]}"
         for kv in "${fixture[@]}"; do
             export "${kv?}"
         done
-        docker compose "$@"
+        docker compose "${pre[@]}" "$@"
     )
 }
 
