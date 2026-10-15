@@ -41,7 +41,6 @@ defaults:
 # Why: ci.sh owns auth; workflow only wires the env
 # From: Issue #1683
 env:
-  GHCR_USERNAME: ${{ github.actor }}
   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   # What: optional Docker Hub login for ci.sh pulls.
   # Why: anonymous docker.io pulls hit the shared-IP limit.
@@ -53,12 +52,9 @@ env:
   # From: Issue #1683 | PR #1858
   BASE_SHA: ${{ github.event.pull_request.base.sha }}
   BEFORE_SHA: ${{ github.event.before }}
-  # What: wire LAN proxy for self-hosted runners
-  # Why: AG-CI-009; ci.sh is the sole proxy policy owner.
+  # What: LAN proxy CA secret; ci.sh uses it self-hosted.
+  # Why: secrets are not in CI_VARIABLES; vars are.
   # From: Issue #1683 | PR #1858
-  PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
-  PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
-  PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
   PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
   # What: all repo/org variables once, as json, for ci.sh.
   # Why: ci.sh reads vars by name; YAML lists none of them.
