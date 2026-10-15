@@ -25,6 +25,9 @@ AUTO_UPDATE_TIMER_UNIT="lancache-auto-update.timer"
 # Why: one owner each; rollback must find the backups
 # From: Issue #1683 | PR #1858
 BACKUP_ROOT="${LANCACHE_BACKUP_ROOT:-/var/backups/lancache-ng}"
+# What: bootstrap copy of the SOT LANCACHE_REPO_URL
+# Why: curl | bash clones before any SOT file exists
+# From: Issue #1683 | PR #1912
 LANCACHE_REPO_URL="https://github.com/wiki-mod/lancache-ng"
 # What: Docker's repo root and Docker CE package names
 # Why: apt, rpm, conflict guard and prompts share them

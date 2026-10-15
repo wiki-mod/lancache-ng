@@ -566,6 +566,10 @@ runtime:
     # Why: setup.sh timer and ui texts read one value.
     # From: Issue #1683 | PR #1912
     - CONVERGE_TIMER_INTERVAL_MINUTES=5
+    # What: the project address the ui links to.
+    # Why: setup.sh bootstrap copy; ci.sh checks both.
+    # From: Issue #1683 | PR #1912
+    - LANCACHE_REPO_URL=https://github.com/wiki-mod/lancache-ng
     - KEA_DATA_DIR=/var/lib/kea
     - KEA_LEASE_FILE=@KEA_DATA_DIR@/kea-leases4.csv
     - KEA_SOCKET_DIR=/run/kea

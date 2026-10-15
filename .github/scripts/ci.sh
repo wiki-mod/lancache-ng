@@ -15181,8 +15181,15 @@ _ci_check_setup_update_safety() {
     if [ -n "${restore_out}" ]; then
         viol+=("update must restore the convergence timer when the rollback backup fails")
     fi
+    # What: the bootstrap repo address equals the SOT value.
+    # Why: first run has no SOT; copies must not drift.
+    # From: Issue #1683 | PR #1912
+    local repo_url
+    repo_url="$(_ci_runtime_default LANCACHE_REPO_URL)" || return 2
+    _ci_file_match "[CI-ERROR-CHECK-0193]" "reason=\"repo address not searched\"" "${su}" "LANCACHE_REPO_URL=\"${repo_url}\"" -Fx \
+        || { [ "$?" -eq 1 ] || return 2; viol+=("setup.sh LANCACHE_REPO_URL differs from SOT runtime.defaults LANCACHE_REPO_URL (${repo_url})"); }
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0103]" "reason=\"setup.sh update-migration safety contract violated\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0103]" "reason=\"setup.sh update safety or bootstrap contract violated\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'setup-update-safety=clean\n'
