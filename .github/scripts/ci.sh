@@ -2351,7 +2351,17 @@ _ci_git_as_bot() {
 # Why: A lock head carries a note, not a real tree.
 # From: Issue #1683
 _ci_cas_note_commit() {
-    _ci_capture 0 _ci_git_as_bot commit-tree "${CI_CAS_EMPTY_TREE}" -m "$1"
+    _ci_bot_commit "${CI_CAS_EMPTY_TREE}" "" "$1"
+}
+
+# What: bot commit of a tree, optional parent, message.
+# Why: one commit-tree owner for notes and the ledger.
+# From: Issue #1683 | PR #1912
+_ci_bot_commit() {
+    local tree="$1" parent="$2" msg="$3"
+    local -a pa=()
+    [ -n "${parent}" ] && pa=(-p "${parent}")
+    _ci_capture 0 _ci_git_as_bot commit-tree "${tree}" "${pa[@]}" -m "${msg}"
 }
 
 # What: rc 0 holder run ended, 1 still runs, 2 unknown.
@@ -2672,16 +2682,6 @@ _ci_ledger_read() {
     printf '%s\n' "${out}"
 }
 
-# What: Build a ledger commit over a real tree.
-# Why: The ledger carries records, not an empty tree.
-# From: Issue #1683
-_ci_ledger_commit() {
-    local tree="$1" parent="$2" msg="$3"
-    local -a pa=()
-    [ -n "${parent}" ] && pa=(-p "${parent}")
-    _ci_capture 0 _ci_git_as_bot commit-tree "${tree}" "${pa[@]}" -m "${msg}"
-}
-
 # What: Upsert record lines from stdin in one CAS write.
 # Why: §26.1 one atomic ledger write per workflow.
 # From: Issue #1683
@@ -2733,7 +2733,7 @@ _ci_ledger_upsert() {
         ci_error "[CI-ERROR-LEDGER-0003]" "ref=\"${ledger_ref}\" blob=\"${blobsha}\" reason=\"ledger tree not written\"" "${treesha}"
         return 3
     fi
-    commitsha="$(_ci_ledger_commit "${treesha}" "${parent}" "ledger aggregate")" || return 3
+    commitsha="$(_ci_bot_commit "${treesha}" "${parent}" "ledger aggregate")" || return 3
     rc=0; raw="$(_ci_cas_push "${remote}" "${ledger_ref}" "${commitsha}" "${parent}")" || rc=$?
     if [ "${rc}" -eq 0 ]; then
         ci_log "[CI-INFO-LEDGER-0004]" "ref=\"${ledger_ref}\" commit=\"${commitsha}\" parent=\"${parent:-none}\" records=$(wc -l <<< "${merged}") reason=\"ledger written\""
