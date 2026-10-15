@@ -15,7 +15,11 @@ set -euo pipefail
 # What: Absolute path of this script's directory.
 # Why: Find the SOT manifest regardless of caller CWD.
 # From: Issue #1683
-CI_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Note: no dirname; its absence hid a cd failure.
+case "${BASH_SOURCE[0]}" in
+    */*) CI_SCRIPT_DIR="$(cd -- "${BASH_SOURCE[0]%/*}" && pwd)" ;;
+    *) CI_SCRIPT_DIR="$(pwd)" ;;
+esac
 
 # What: The SOT's repo-relative path (git refs, diffs).
 # Why: base SOT reads and SOT-change detection share it.
@@ -11676,8 +11680,8 @@ ci_cmd_runner_host() {
 # DISPATCH
 # =========================================================
 
-# What: ci.sh have-command NAME: rc 0 if NAME resolves on PATH, rc 1 if not, rc 2 on a wrong call.
-# Why: hooks and container scripts call this one owner instead of their own command lookup.
+# What: have-command NAME; rc 0 found, 1 absent, 2 bad call.
+# Why: hooks ask this one owner for command lookup.
 # From: Issue #1683 | PR #1912
 ci_cmd_have_command() {
     if [ "$#" -ne 1 ] || [ -z "$1" ]; then
@@ -11698,8 +11702,8 @@ ci_main() {
         ci_log "[CI-ERROR-CORE-0002]" "command=\"${command}\" reason=\"unknown subcommand\" known=\"${!CI_DISPATCH[*]}\""
         return 2
     fi
-    # What: run the command lookup before any temp, proxy or manifest setup.
-    # Why: a git hook asks it without a manifest, a temp root or a network.
+    # What: run the lookup before temp, proxy, manifest.
+    # Why: a git hook has no manifest, temp root or network.
     # From: Issue #1683 | PR #1912
     case "${command}" in have-command) "${fn}" "$@"; return "$?" ;; esac
     _ci_tmp_init || return "$?"
