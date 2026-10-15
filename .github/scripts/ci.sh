@@ -5008,7 +5008,7 @@ _ci_trivy_args() {
     local cache_dir="$1" skip_db="$2" scanners ignore
     scanners="$(_ci_variable CI_TRIVY_SCANNERS)" || return 2
     ignore="$(_ci_repo_path CI_TRIVY_IGNORE)" || return 2
-    printf '%s\n' trivy image --severity HIGH,CRITICAL --exit-code "${_CI_TRIVY_FINDING_RC}" --ignore-unfixed \
+    printf '%s\n' trivy image --severity HIGH,CRITICAL --exit-code "${_CI_TRIVY_FINDING_RC}" \
         --scanners "${scanners}" --cache-dir "${cache_dir}"
     [ "${skip_db}" -ne 1 ] || printf '%s\n' --skip-db-update
     [ ! -f "${ignore}" ] || printf '%s\n' --ignorefile "${ignore}"
