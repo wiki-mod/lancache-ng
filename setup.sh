@@ -2434,10 +2434,11 @@ cache_size_gb_from_env() {
 # Why: published platforms are the registry's; checked later
 # From: Issue #1683 | PR #1858
 assert_prebuilt_image_platform_supported() {
-    local arch
+    local arch platform
     arch=$(uname -m)
-    host_image_platform "$arch" > /dev/null \
+    platform=$(host_image_platform "$arch") \
         || die "This host's architecture '${arch}' has no container image platform; LanCache-NG cannot run here."
+    print_ok "Host architecture ${arch} maps to image platform ${platform}"
 }
 
 # What: `uname -m` to its OCI platform name (Docker naming)
@@ -2548,7 +2549,7 @@ pause_lancache_convergence_for_update() {
 
     if [[ "$timer_exists" = "1" ]] && systemctl is-enabled --quiet "$CONVERGE_TIMER_UNIT"; then
         CONVERGENCE_TIMER_WAS_ENABLED=1
-        systemctl disable "$CONVERGE_TIMER_UNIT" >/dev/null \
+        systemctl disable "$CONVERGE_TIMER_UNIT" \
             || die "Failed to disable $CONVERGE_TIMER_UNIT before update."
     fi
 }
@@ -2570,7 +2571,7 @@ resume_lancache_convergence_after_update() {
     fi
 
     if [[ "$CONVERGENCE_TIMER_WAS_ENABLED" = "1" ]]; then
-        systemctl enable "$CONVERGE_TIMER_UNIT" >/dev/null \
+        systemctl enable "$CONVERGE_TIMER_UNIT" \
             || die "Failed to re-enable $CONVERGE_TIMER_UNIT after update."
     fi
 
@@ -2709,7 +2710,7 @@ derive_release_archive_image_tag() {
     # What: a .git entry means a real git checkout
     # Why: git errors must not read as no checkout
     if [[ -e "$SCRIPT_DIR/.git" ]]; then
-        if git_stderr=$(git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree 2>&1 1>/dev/null); then
+        if git_stderr=$(git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree 2>&1); then
             git_status=0
         else
             git_status=$?
@@ -2731,7 +2732,7 @@ derive_release_archive_image_tag() {
             fi
         fi
 
-        if git_stderr=$(git "${safe_dir_opt[@]}" -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree 2>&1 1>/dev/null); then
+        if git_stderr=$(git "${safe_dir_opt[@]}" -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree 2>&1); then
             if ! tags=$(git "${safe_dir_opt[@]}" -C "$SCRIPT_DIR" tag --points-at HEAD); then
                 printf 'Failed to list the tags at HEAD of %s.\n' "$SCRIPT_DIR" >&2
                 return 2
@@ -3805,12 +3806,12 @@ restore_compose_volumes() {
         volume="$(basename "$archive" .tar)"
         [[ -n "$volume" ]] || continue
         print_ok "Restoring Docker volume: $volume"
-        docker volume create "$volume" >/dev/null \
+        docker volume create "$volume" \
             || die "Failed to create Docker volume $volume (exit $?)."
         docker run --rm \
             -v "${volume}:/volume" \
             -v "${volume_root}:/backup:ro" \
-            "$LANCACHE_HELPER_IMAGE" sh -c 'set -e; tar -tf "/backup/$1.tar" >/dev/null; rm -rf /volume/* /volume/..?* /volume/.[!.]*; cd /volume; tar -xpf "/backup/$1.tar"' sh "$volume" \
+            "$LANCACHE_HELPER_IMAGE" sh -c 'set -e; tar -tf "/backup/$1.tar"; rm -rf /volume/* /volume/..?* /volume/.[!.]*; cd /volume; tar -xpf "/backup/$1.tar"' sh "$volume" \
             || die "Failed to restore Docker volume $volume from $archive (exit $?). Rerun the restore; the archive is unchanged."
     done <<< "$archives"
 }
@@ -4525,12 +4526,13 @@ _verify_healthz_endpoint() {
     fi
 
     require_functional_check_tool curl "the proxy-container-loopback /healthz probe" || return 1
-    local health_url
+    local health_url health_answer
     health_url=$(prod_env_default PROXY_HEALTH_URL) || exit $?
-    if ! docker exec "$proxy_container_id" curl -sSf "$health_url" >/dev/null; then
-        print_error "Functional check failed: $health_url inside the proxy container"
+    if ! health_answer=$(docker exec "$proxy_container_id" curl -sSf "$health_url" 2>&1); then
+        print_error "Functional check failed: $health_url inside the proxy container: $health_answer"
         return 1
     fi
+    print_ok "$health_url inside the proxy container answered: $health_answer"
     return 0
 }
 
@@ -5186,8 +5188,8 @@ cmd_debug() {
         local ip probe
         for ip in "$ip_http" "$ip_https"; do
             [[ -z "$ip" ]] && continue
-            if probe=$(curl -sS -f -o /dev/null "http://$ip/healthz" 2>&1); then
-                print_ok "http://$ip/healthz — OK"
+            if probe=$(curl -sS -f "http://$ip/healthz" 2>&1); then
+                print_ok "http://$ip/healthz — OK: $probe"
             else
                 print_error "http://$ip/healthz — ERROR (exit $?): $probe"
             fi
@@ -5764,17 +5766,17 @@ reset_kea_to_last_known_good_config() {
 
     print_step "Validating snapshot $snapshot_id (config-test)"
     kea_ctrl_post "$kea_ctrl_url" "$kea_ctrl_user" "$kea_ctrl_token" \
-        "{\"command\":\"config-test\",\"service\":[\"dhcp4\"],\"arguments\":${config_json}}" >/dev/null
+        "{\"command\":\"config-test\",\"service\":[\"dhcp4\"],\"arguments\":${config_json}}"
     print_ok "Snapshot validated."
 
     print_step "Applying snapshot $snapshot_id (config-set)"
     kea_ctrl_post "$kea_ctrl_url" "$kea_ctrl_user" "$kea_ctrl_token" \
-        "{\"command\":\"config-set\",\"service\":[\"dhcp4\"],\"arguments\":${config_json}}" >/dev/null
+        "{\"command\":\"config-set\",\"service\":[\"dhcp4\"],\"arguments\":${config_json}}"
     print_ok "Snapshot applied to the running Kea server."
 
     print_step "Persisting snapshot $snapshot_id (config-write)"
     kea_ctrl_post "$kea_ctrl_url" "$kea_ctrl_user" "$kea_ctrl_token" \
-        '{"command":"config-write","service":["dhcp4"]}' >/dev/null
+        '{"command":"config-write","service":["dhcp4"]}'
     print_ok "Snapshot persisted to kea-dhcp4.conf."
 
     print_ok "Kea rolled back to known-good snapshot $snapshot_id (validated, applied, and persisted)."
