@@ -24,7 +24,7 @@ use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
     CaFiles, CertSpec, ClientCheck, ConflictCheck, DesiredRunState, DesiredState, Detail,
     DiskHealth, DiskInfo, DockerApi, NetdataAlarm, Place, ProbeAnswer, ProbeReport, ServiceHealth,
-    WatchdogStatus, df, hex32, need_secs, openssl_ca, openssl_leaf, openssl_x509, own,
+    WatchdogStatus, df, files_under, hex32, need_secs, openssl_ca, openssl_leaf, openssl_x509, own,
     probe_health, probe_health_tls, resolve_shared_secret, run_program, sha256_hex,
     shared_secret_file_name, shared_secret_is_placeholder, terminate, unix_secs, write_file,
     write_if_changed,
@@ -133,7 +133,7 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
 }
 
 // What: typed Docker health plus watchdog's own outcomes.
-// Why: only Healthy and Unhealthy move a failure counter.
+// Why: restarts use Healthy/Unhealthy; alerts use is_alert_ok.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Reading {
     Healthy,
@@ -469,37 +469,6 @@ fn retention_target(name: &str, raw: &str, prefix: &Path) -> Result<PathBuf, Str
     Ok(resolved)
 }
 
-// What: regular files under root, never across mounts.
-// Why: like find -xdev -type f; no symlink is followed.
-fn files_under(root: &Path) -> io::Result<Vec<(PathBuf, fs::Metadata)>> {
-    let dev = fs::symlink_metadata(root)?.dev();
-    let (mut files, mut dirs) = (Vec::new(), vec![root.to_path_buf()]);
-    while let Some(dir) = dirs.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound && dir != root => continue,
-            other => other?,
-        };
-        for entry in entries {
-            let path = entry?.path();
-            // What: an entry gone since listing is skipped
-            // Why: cache and logs change during a scan
-            let meta = match fs::symlink_metadata(&path) {
-                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                other => other?,
-            };
-            if meta.dev() != dev {
-                continue;
-            }
-            if meta.is_dir() {
-                dirs.push(path);
-            } else if meta.is_file() {
-                files.push((path, meta));
-            }
-        }
-    }
-    Ok(files)
-}
-
 // What: a file's mtime in epoch seconds, else now.
 // Why: an unreadable mtime must never look old.
 fn mtime_secs(meta: &fs::Metadata, now: u64) -> u64 {
@@ -610,7 +579,7 @@ fn purge_cache(r: &Retention, now: u64) {
 }
 
 // What: whether a file changed since UTC midnight.
-// Why: syslog-ng still writes today's per-host files.
+// Why: syslog-ng still writes today's per-program files.
 fn written_today(meta: &fs::Metadata, now: u64) -> bool {
     mtime_secs(meta, now) >= now - now % DAY
 }
@@ -1104,7 +1073,7 @@ impl Kind {
     }
 
     // What: whether this kind should run right now.
-    // Why: NTP and DHCP follow the ui; NATS a primary only.
+    // Why: ui sets NTP, DHCP; only a primary runs nats-server, soa.
     // From: Issue #1437 | PR #1912
     fn wanted(self, ctx: &Ctx) -> bool {
         let secondary = || env_opt("DNS_REPLICATION_ROLE").as_deref() == Some("secondary");
@@ -1839,7 +1808,7 @@ fn endpoint(raw: &str, key: &'static str) -> Result<std::net::SocketAddrV4, Stri
         .ok_or_else(|| format!("{key} host {host} has no IPv4 address"))
 }
 
-// What: the comma list of DNS_XFR_NOTIFY_TARGETS.
+// What: the comma or space list of DNS_XFR_NOTIFY_TARGETS.
 // Why: a primary notifies and allows AXFR to each one.
 fn notify_targets() -> Result<Vec<std::net::SocketAddrV4>, String> {
     env_opt("DNS_XFR_NOTIFY_TARGETS")
@@ -1969,7 +1938,7 @@ fn no_backfill(_: &Value, _: &str) -> Option<String> {
     None
 }
 
-// What: file name the old shell gave the proxy map.
+// What: proxy map file name in legacy snapshots.
 // Why: its snapshots hold the map under this name.
 // From: Issue #1683 | PR #1912
 const LEGACY_PROXY_MAP: &str = "00-ssl-map.conf";
@@ -2809,7 +2778,7 @@ impl KeaKnobs {
 // Why: kea-dhcp4 sends its name change requests there.
 const KEA_NCR_PORT_KEY: &str = "KEA_NCR_PORT";
 
-// What: the shared DDNS TSIG key; empty when it fails.
+// What: the shared DDNS TSIG key, or the error.
 // Why: dns signs zones with it, Kea signs updates.
 // From: Issue #1683 | PR #1912
 fn ddns_tsig_key() -> Result<String, String> {
@@ -2920,8 +2889,8 @@ fn kea_dhcp4_first(ctx: &Ctx, kea: &KeaKnobs) -> Result<Value, String> {
     }))
 }
 
-// What: set the keys the stack owns in a kea-dhcp4 config.
-// Why: socket, hook, DDNS, logs must match the image.
+// What: force socket, hook, logs; default DDNS keys if absent.
+// Why: socket, hook, logs must match the image.
 // From: Issue #815 | PR #1912
 fn kea_dhcp4_own(
     conf: &mut Value,
@@ -3001,10 +2970,9 @@ fn kea_dhcp4_own(
 // What: the Kea socket dir, private to Kea.
 // Why: Kea refuses a socket dir others can enter.
 fn kea_socket_dir(kea: &KeaKnobs) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt as _;
     let dir = &kea.socket_dir;
     fs::create_dir_all(dir)
-        .and_then(|()| fs::set_permissions(dir, fs::Permissions::from_mode(0o750)))
+        .and_then(|()| own(Path::new(dir), None, None, Some(0o750)))
         .map_err(|e| format!("cannot prepare {dir}: {e}"))
 }
 
@@ -3018,7 +2986,7 @@ fn kea_snapshot_dir(dir: &Path) -> Result<(), String> {
 }
 
 // What: kea-dhcp4 on its checked config, else a snapshot.
-// Why: no good config means rescue, never a stop.
+// Why: a bad render falls back to the newest good snapshot.
 // From: Issue #815 | PR #1912
 fn kea_dhcp4(ctx: &Ctx) -> Result<Run, String> {
     let kea = KeaKnobs::load()?;
@@ -3487,8 +3455,8 @@ impl NginxPorts {
     }
 }
 
-// What: rendered nginx paths below NGINX_DIR.
-// Why: the CA and cert dirs come from the SOT.
+// What: stream.d paths of the two rendered nginx files.
+// Why: the render and the backfill list name the same files.
 // From: Issue #1683 | PR #1912
 const NGINX_STREAM_TARGETS: &str = "stream.d/00-stream-targets.conf";
 const NGINX_HTTPS_DISPATCH: &str = "stream.d/01-https-dispatch.conf";
@@ -3772,7 +3740,7 @@ fn sign_leaf(
         },
     );
     // What: drop temp and failed files; log what stays.
-    // Why: AG-INT-002: a left file is named, not hidden.
+    // Why: a failed sign must not leave a half key pair.
     // From: Issue #1683 | PR #1912
     let mut leftovers = vec![csr.as_path(), ext.as_path()];
     if signed.is_err() {
@@ -3945,7 +3913,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         config::parse_bool(&ctx.need("HTTPS_ENABLED")?).ok_or("HTTPS_ENABLED is no boolean")?;
     let resolver = ctx.need("NGINX_UPSTREAM_RESOLVER")?;
     // What: the upstream resolver must not be LanCache.
-    // Why: the LanCache DNS would loop back (AG-OP-002).
+    // Why: the LanCache DNS would loop back.
     for token in resolver.split_whitespace().map(resolver_host) {
         if token == ip_http || (!ip_https.is_empty() && token == ip_https) {
             return Err(format!(
@@ -4111,8 +4079,8 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         "nginx.json",
         "proxy",
     );
-    // What: dispatch and listen come from this render.
-    // Why: the old shell wrote them anew each start.
+    // What: backfill takes dispatch and listen from this render.
+    // Why: a snapshot without them gets the current files.
     // From: Issue #1683 | PR #1912
     checked_files(
         &files,
@@ -4140,7 +4108,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
 }
 
 // What: DHCP client and server UDP ports (RFC 2131).
-// Why: the probe binds the client port and talks to servers
+// Why: the protocol fixes both ports; the probe is a client.
 const DHCP_CLIENT_PORT: u16 = 68;
 const DHCP_SERVER_PORT: u16 = 67;
 
@@ -4582,7 +4550,7 @@ impl Slot {
     }
 
     // What: start the program or task once.
-    // Why: a failed start waits out the backoff first.
+    // Why: a failed start sets the backoff for the next try.
     fn start(&mut self, ctx: &Ctx) {
         let name = self.kind.name();
         let run = match self.kind.launch(ctx) {
@@ -4887,8 +4855,8 @@ fn probe_print() -> Result<(), String> {
     Ok(())
 }
 
-// What: supervise (default), healthcheck or probe.
-// Why: one binary per container, three entry points.
+// What: supervise (default), healthcheck, probe or get KEY.
+// Why: one binary per container, four entry points.
 // From: Issue #1683 | PR #1912
 #[tokio::main]
 async fn main() {
@@ -5832,7 +5800,7 @@ mod tests {
     }
 
     // What: closed files become .xz; today's stay plain.
-    // Why: syslog-ng still writes today's per-host files.
+    // Why: syslog-ng still writes today's per-program files.
     #[test]
     fn syslog_files_compress_to_xz_except_today() {
         let root = scratch();
@@ -6634,6 +6602,8 @@ mod tests {
         (addr, handle)
     }
 
+    // What: an Offer for the given server at 10.0.0.50.
+    // Why: the dry-run tests share one offer literal.
     fn offer_for(server: Ipv4Addr) -> Offer {
         Offer {
             address: Some(Ipv4Addr::new(10, 0, 0, 50)),

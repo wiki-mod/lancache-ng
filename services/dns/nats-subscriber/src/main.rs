@@ -270,7 +270,7 @@ fn canonicalize(rrsets: &Value) -> Vec<Value> {
 }
 
 // What: true if candidate equals the newest snapshot.
-// Why: the 60 s watcher must not evict history with copies.
+// Why: the tick watcher must not evict history with copies.
 fn matches_latest(store: &SnapshotStore, candidate: &Value) -> bool {
     let Ok(ids) = store.ids() else {
         return false;
@@ -581,7 +581,7 @@ fn rrset_matches_expected(
     actual == wanted
 }
 
-// What: flush the local recursor cache for one domain.
+// What: flush each local recursor cache for one domain.
 // Why: confirm the zone first, else a stale answer caches.
 // From: Issue #1095
 async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
@@ -719,7 +719,7 @@ struct RollbackRequest {
     snapshot_id: String,
 }
 
-// What: pdnsutil check-zone with a 10 second limit.
+// What: pdnsutil check-zone under the zone_check limit.
 // Why: a wedged auth database must not hang the rollback.
 async fn check_zone(ctx: &Ctx, store: &SnapshotStore, zone: &str) -> bool {
     let config_dir = format!("--config-dir={}", ctx.pdns_auth_config_dir);
@@ -952,7 +952,7 @@ async fn serve_rollback(ctx: Arc<Ctx>, addr: String) {
 }
 
 // What: a required env value, or exit with a message.
-// Why: an empty key or consumer name would start unsafely.
+// Why: an empty URL, consumer or address starts unsafely.
 fn required(name: &str) -> String {
     need(&process_env, name).unwrap_or_else(|e| die(TAG, &e))
 }
@@ -1336,10 +1336,14 @@ mod tests {
         Ctx::load(&env, times, js).expect("ctx")
     }
 
+    // What: a zone export body from the given rrsets.
+    // Why: the canned PowerDNS server answers with it.
     fn zone_export(rrsets: &[Value]) -> Vec<u8> {
         json!({"rrsets": rrsets}).to_string().into_bytes()
     }
 
+    // What: an A rrset with ttl 60 and one content.
+    // Why: tests share one short rrset literal.
     fn lan_a(name: &str, content: &str) -> Value {
         rrset(name, "A", 60, &[content])
     }
@@ -1497,6 +1501,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    // What: status and JSON body of a handler reply.
+    // Why: handlers return a Response; tests read both parts.
     async fn reply_json(response: Response) -> (StatusCode, Value) {
         let status = response.status();
         let body = axum::body::to_bytes(response.into_body(), 1 << 20)
@@ -1568,6 +1574,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    // What: a rollback request for zone lan.
+    // Why: tests share one request literal.
     fn rollback_request(id: &str) -> RollbackRequest {
         RollbackRequest {
             zone: "lan".to_string(),

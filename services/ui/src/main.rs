@@ -27,7 +27,7 @@ use lancache_ng::config::{
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, DesiredRunState, DesiredState, DnsRecord,
     FlushRequest, NetdataAlarm, Place, PowerDns, ProbeAnswer, ProbeReport, SnapshotStore,
-    WatchdogStatus, ct_eq, df, die, error_chain, hex32, http_client, is_placeholder,
+    WatchdogStatus, ct_eq, df, die, error_chain, files_under, hex32, http_client, is_placeholder,
     load_or_create, load_or_create_hex, need_secs, own, probe_health, resolve_shared_secret,
     shared_secret, shared_secret_file_name, shared_secret_is_placeholder, snapshot_created_unix,
     unix_secs, write_file, write_if_changed,
@@ -1310,34 +1310,18 @@ const MIB: u64 = 1_048_576;
 const GIB: u64 = 1_073_741_824;
 
 // What: size of an allowed directory in GiB, 0 if refused.
-// Why: bytes of regular files; links are never followed.
+// Why: the shared tree walk sums it; links are not followed.
 fn du_gb(path: &str) -> f64 {
     if !path_allowed(path) {
         return 0.0;
     }
-    let mut bytes: u64 = 0;
-    let mut pending = vec![PathBuf::from(path)];
-    while let Some(dir) = pending.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(e) => {
-                tracing::warn!("{} not listed for its size: {e}", dir.display());
-                continue;
-            }
-        };
-        for entry in entries {
-            let meta = entry.and_then(|entry| entry.metadata().map(|meta| (entry.path(), meta)));
-            match meta {
-                Ok((sub, meta)) if meta.is_dir() => pending.push(sub),
-                Ok((_, meta)) if meta.is_file() => bytes += meta.len(),
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!("an entry of {} not read for its size: {e}", dir.display())
-                }
-            }
+    match files_under(Path::new(path)) {
+        Ok(files) => files.iter().map(|(_, meta)| meta.len()).sum::<u64>() as f64 / GIB as f64,
+        Err(e) => {
+            tracing::warn!("{path} not read for its size: {e}");
+            0.0
         }
     }
-    bytes as f64 / GIB as f64
 }
 
 // What: free MiB on the cache filesystem; None if unknown.

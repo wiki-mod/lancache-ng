@@ -217,12 +217,47 @@ pub fn own(path: &Path, uid: Option<u32>, gid: Option<u32>, mode: Option<u32>) -
             format!("cannot set owner or mode of {}: {e}", path.display()),
         )
     };
-    std::os::unix::fs::lchown(path, uid, gid).map_err(context)?;
+    if uid.is_some() || gid.is_some() {
+        std::os::unix::fs::lchown(path, uid, gid).map_err(context)?;
+    }
     match mode {
         Some(mode) => fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode))
             .map_err(context),
         None => Ok(()),
     }
+}
+
+// What: regular files under root, never across mounts.
+// Why: the one tree walk; no symlink is followed.
+// From: Issue #1683 | PR #1912
+pub fn files_under(root: &Path) -> io::Result<Vec<(PathBuf, fs::Metadata)>> {
+    use std::os::unix::fs::MetadataExt as _;
+    let dev = fs::symlink_metadata(root)?.dev();
+    let (mut files, mut dirs) = (Vec::new(), vec![root.to_path_buf()]);
+    while let Some(dir) = dirs.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound && dir != root => continue,
+            other => other?,
+        };
+        for entry in entries {
+            let path = entry?.path();
+            // What: an entry gone since listing is skipped
+            // Why: cache and logs change during a scan
+            let meta = match fs::symlink_metadata(&path) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                other => other?,
+            };
+            if meta.dev() != dev {
+                continue;
+            }
+            if meta.is_dir() {
+                dirs.push(path);
+            } else if meta.is_file() {
+                files.push((path, meta));
+            }
+        }
+    }
+    Ok(files)
 }
 
 // What: key type, subject and days of one certificate.
@@ -1837,7 +1872,8 @@ mod tests {
         own(&file, None, None, Some(0o640)).expect("own");
         let mode = fs::metadata(&file).expect("meta").permissions().mode() & 0o7777;
         assert_eq!(mode, 0o640);
-        assert!(own(&dir.join("absent"), None, None, None).is_err());
+        assert!(own(&dir.join("absent"), None, None, Some(0o600)).is_err());
+        assert!(own(&dir.join("absent"), None, Some(0), None).is_err());
     }
 
     // What: snapshots list oldest first; prune to keep_n.
