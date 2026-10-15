@@ -1192,6 +1192,10 @@ runner_host:
   reap_buildx_hours: 3
   build_tools_match: build-tools
   buildx_match: buildx_buildkit_builder-
+  # What: CI 1.x validate project prefix on shared hosts.
+  # Why: AG-CI-016; 1.x runs until cutover (Arch Phase 15).
+  # From: Issue #1683 | PR #1912
+  legacy_validation_prefix: lancache-ng-validation-
   # What: CI 1.x Trivy cache root and its max age.
   # Why: dirs of dead branches are never reused.
   # From: Issue #1255 | PR #1334

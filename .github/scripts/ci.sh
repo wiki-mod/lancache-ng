@@ -10201,7 +10201,7 @@ _ci_rh_reap_trivy() {
 # From: Issue #1255 | PR #1349
 _ci_rh_cleanup_run() {
     local prefix before after rc=0 kb disk
-    local bt_hours val_hours bx_hours bt_match bx_match
+    local bt_hours val_hours bx_hours bt_match bx_match legacy
     bt_hours="$(_ci_rh_val reap_build_tools_hours)" || return 2
     bt_match="$(_ci_rh_val build_tools_match)" || return 2
     val_hours="$(_ci_rh_val reap_validation_hours)" || return 2
@@ -10209,6 +10209,7 @@ _ci_rh_cleanup_run() {
     bx_match="$(_ci_rh_val buildx_match)" || return 2
     disk="$(_ci_rh_val disk_path)" || return 2
     prefix="$(_ci_validate_project "")" || return 2
+    legacy="$(_ci_rh_val legacy_validation_prefix)" || return 2
     printf '=== %s runner-host cleanup start ===\n--- disk usage before cleanup ---\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     before="$(_ci_capture 0 df -P "${disk}")" || return 2
     printf '%s\n' "${before}"
@@ -10216,6 +10217,8 @@ _ci_rh_cleanup_run() {
     _ci_rh_reap_containers build-tools image "${bt_match}" "${bt_hours}" || rc=2
     _ci_rh_reap_containers validation project "${prefix}" "${val_hours}" || rc=2
     _ci_rh_reap_networks "${prefix}" "${val_hours}" || rc=2
+    _ci_rh_reap_containers legacy-validation project "${legacy}" "${val_hours}" || rc=2
+    _ci_rh_reap_networks "${legacy}" "${val_hours}" || rc=2
     _ci_rh_reap_containers buildx-builder name "${bx_match}" "${bx_hours}" || rc=2
     _ci_rh_reap_trivy || rc=2
     printf -- '--- prune stopped containers, build cache, images ---\n'
@@ -11137,7 +11140,7 @@ _ci_rh_hook_post_text() {
 # From: Issue #1622 | PR #1912
 set -euo pipefail
 MIN_AGE=@MIN_AGE@
-nets=$(docker network ls --filter name=@PREFIX@ --format '{{.Name}}')
+nets=$(docker network ls --filter name=@PREFIX@ --filter name=@LEGACY@ --format '{{.Name}}')
 while IFS= read -r net; do
     [ -n "$net" ] || continue
     if ! containers=$(docker network inspect "$net" --format '{{len .Containers}}' 2>&1); then
@@ -11179,6 +11182,7 @@ EOF
 )"
     text="${text//@MIN_AGE@/$(_ci_rh_val hook_network_min_age)}"
     text="${text//@PREFIX@/$(_ci_validate_project "")}"
+    text="${text//@LEGACY@/$(_ci_rh_val legacy_validation_prefix)}"
     printf '%s\n' "${text}"
 }
 
