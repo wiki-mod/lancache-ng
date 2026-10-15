@@ -631,9 +631,9 @@ _ci_required_field() {
 # Why: Cargo.toml owns the members; the SOT copies none.
 # From: Issue #1683 | PR #1912
 _ci_workspace_rows() {
-    local root="${1:-${CI_REPO_ROOT:-.}}" manifest members m row
-    manifest="$(_ci_variable CI_CARGO_MANIFEST)" || return 2
-    members="$(_ci_cargo_members "${root}/${manifest}")" || return 2
+    local root="${1:-${CI_REPO_ROOT:-.}}" manifest members m row mf
+    manifest="$(_ci_repo_path CI_CARGO_MANIFEST "${root}")" || return 2
+    members="$(_ci_cargo_members "${manifest}")" || return 2
     # What: a member without [[bin]] is a library.
     # Why: a library counts with its whole dir.
     # From: Issue #1683 | PR #1912
@@ -642,11 +642,12 @@ _ci_workspace_rows() {
         # What: a member without a manifest stays a row.
         # Why: the dir then fails the dead-path gate.
         # From: Issue #1683 | PR #1912
-        if [ ! -f "${root}/${m}/${manifest}" ]; then
+        mf="$(_ci_repo_path CI_CARGO_MANIFEST "${root}/${m}")" || return 2
+        if [ ! -f "${mf}" ]; then
             printf '%s||\n' "${m}"
             continue
         fi
-        row="$(_ci_capture 0 yq -p toml -oy '(.bin[0].path // "") + "|" + .package.name' "${root}/${m}/${manifest}")" || return 2
+        row="$(_ci_capture 0 yq -p toml -oy '(.bin[0].path // "") + "|" + .package.name' "${mf}")" || return 2
         printf '%s|%s\n' "${m}" "${row}"
     done <<< "${members}"
 }
@@ -2466,13 +2467,24 @@ _ci_ref_subject() {
     _ci_capture 0 git log -1 --format=%s FETCH_HEAD
 }
 
+# What: ref head as sha, tab, subject; 1 absent, 2 unknown.
+# Why: one owner for the sha query plus subject fetch.
+# From: Issue #1683 | PR #1912
+_ci_ref_head() {
+    local remote="$1" ref="$2" retry="${3:-0}" sha subject rc=0
+    sha="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    subject="$(_ci_ref_subject "${remote}" "${ref}" "${retry}")" || return 2
+    printf '%s\t%s\n' "${sha}" "${subject}"
+}
+
 # What: One non-blocking lock acquisition attempt.
 # Why: create, or take over the lock of an ended holder.
 # From: Issue #1683 | PR #1912
 _ci_lock_try() {
     local remote="$1" ref="$2" note="$3" ask="$4"
-    local cur="" sha raw rc=0 prev
-    cur="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
+    local cur="" sha raw rc=0 prev head
+    head="$(_ci_ref_head "${remote}" "${ref}")" || rc=$?
     if [ "${rc}" -eq 1 ]; then
         sha="$(_ci_cas_note_commit "${note}")" || return 3
         rc=0; raw="$(_ci_cas_push "${remote}" "${ref}" "${sha}" "")" || rc=$?
@@ -2481,7 +2493,7 @@ _ci_lock_try() {
         return "$?"
     fi
     [ "${rc}" -eq 0 ] || return 3
-    prev="$(_ci_ref_subject "${remote}" "${ref}")" || return 3
+    cur="${head%%$'\t'*}"; prev="${head#*$'\t'}"
     # What: run state only on ask; git-only polls between.
     # Why: AG-CI-020: run state reads stay >= 300 s apart.
     # From: Issue #1683 | PR #1912
@@ -2558,14 +2570,14 @@ _ci_lock_acquire() {
 # Why: Never delete a lock a takeover reassigned.
 # From: Issue #1683
 _ci_lock_release() {
-    local remote="$1" ref="$2" note="$3" cur="" held rc=0
-    cur="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
+    local remote="$1" ref="$2" note="$3" cur="" held rc=0 head
+    head="$(_ci_ref_head "${remote}" "${ref}" 1)" || rc=$?
     # What: an absent ref is free; an unknown state fails.
     # Why: a failed query must not report a freed lock.
     # From: Issue #1683 | PR #1858
     [ "${rc}" -ne 1 ] || return 0
     [ "${rc}" -eq 0 ] || return 1
-    held="$(_ci_ref_subject "${remote}" "${ref}" 1)" || return 1
+    cur="${head%%$'\t'*}"; held="${head#*$'\t'}"
     if [ "${held}" != "${note}" ]; then
         ci_log "[CI-INFO-CAS-0007]" "ref=\"${ref}\" holder=\"${held}\" mine=\"${note}\" reason=\"lock reassigned; not released\""
         return 0
@@ -2617,10 +2629,9 @@ _ci_build_lock_drop() {
 # Why: an absent lock or mark is a verdict, not an error.
 # From: Issue #1683 | PR #1912
 _ci_ref_note() {
-    local rc=0
-    _ci_cas_ref_sha "$1" "$2" >&2 || rc=$?
-    [ "${rc}" -eq 0 ] || return "${rc}"
-    _ci_ref_subject "$1" "$2" || return 2
+    local head
+    head="$(_ci_ref_head "$1" "$2")" || return $?
+    printf '%s\n' "${head#*$'\t'}"
 }
 
 # What: rc 0 if a running other run holds the build lock.
@@ -13046,8 +13057,8 @@ _ci_check_stable_external_images() {
     local -a dirs=("$@")
     local d line img k allowed=" " dep
     if [ "${#dirs[@]}" -eq 0 ]; then
-        dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-        dirs=("${CI_REPO_ROOT}/$(dirname "${dep}")")
+        dep="$(_ci_repo_path CI_COMPOSE_FILE)" || return 2
+        dirs=("${dep%/*}")
     fi
     local -a viol=()
     # What: the exact SOT base image pins.
@@ -14209,8 +14220,8 @@ _ci_check_governance_guards() {
 # From: Issue #1683 | PR #1858
 _ci_check_naming_consistency() {
     local root="${1:-${CI_REPO_ROOT}}" dep
-    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    local -a compose_files=("${root}/${dep}")
+    dep="$(_ci_repo_path CI_COMPOSE_FILE "${root}")" || return 2
+    local -a compose_files=("${dep}")
     local -a viol=()
     local cf cfg line msg
 
@@ -14254,9 +14265,9 @@ _ci_check_compose_healthchecks() {
     local -a files=("$@")
     if [ "${#files[@]}" -eq 0 ]; then
         local f dep top
-        dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+        dep="$(_ci_repo_path CI_COMPOSE_FILE)" || return 2
         top="${dep%/*}"; top="${top%/*}"
-        for f in "${CI_REPO_ROOT}/${top}"/*/"${dep##*/}"; do
+        for f in "${top}"/*/"${dep##*/}"; do
             [ -f "${f}" ] && files+=("${f}")
         done
     fi
@@ -14335,9 +14346,9 @@ _ci_check_proxy_cache_env_doc_drift() {
         # What: values compose gives proxy, SOT fixture env
         # Why: an empty one falls back to runtime.defaults
         # From: Issue #1683 | PR #1912
-        dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-        if ! raw="$(_ci_compose_query "${CI_REPO_ROOT}/${dep}" "" config --format json 2>&1)"; then
-            ci_error "[CI-ERROR-CHECK-0110]" "file=\"${dep}\" reason=\"deploy compose not renderable with the SOT fixture env\"" "${raw}"
+        dep="$(_ci_repo_path CI_COMPOSE_FILE)" || return 2
+        if ! raw="$(_ci_compose_query "${dep}" "" config --format json 2>&1)"; then
+            ci_error "[CI-ERROR-CHECK-0110]" "file=\"${dep#"${CI_REPO_ROOT}/"}\" reason=\"deploy compose not renderable with the SOT fixture env\"" "${raw}"
             return 2
         fi
         produced="$(_ci_capture 0 jq -r '.services.proxy.environment // {} | to_entries[]
@@ -14427,8 +14438,8 @@ _ci_dockerfile_logical_lines() {
 _ci_check_prebuilt_prod() {
     local repo_root="${1:-${CI_REPO_ROOT}}" dep
     local -a viol=()
-    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    dep="${repo_root}/$(dirname "${dep}")"
+    dep="$(_ci_repo_path CI_COMPOSE_FILE "${repo_root}")" || return 2
+    dep="${dep%/*}"
     local hit
     hit="$(_ci_capture 1 grep -RInE '^[[:space:]]+build:' "${dep}")" || return 2
     if [ -n "${hit}" ]; then
@@ -14452,9 +14463,9 @@ _ci_check_prebuilt_prod() {
 # Why: AG-SETUP-001: LANCACHE_STATE_DIR is state root.
 # From: Issue #1683 | PR #1858
 _ci_check_prod_state_wiring() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" dep
-    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    local compose="${repo_root}/${dep}"
+    local repo_root="${1:-${CI_REPO_ROOT}}" dep compose
+    compose="$(_ci_repo_path CI_COMPOSE_FILE "${repo_root}")" || return 2
+    dep="${compose#"${repo_root}/"}"
     local doc doc_rel
     doc_rel="$(_ci_variable CI_BACKUP_RESTORE_DOC)" || return 2
     doc="${repo_root}/${doc_rel}"
@@ -14862,9 +14873,10 @@ _ci_check_compose_config() {
 _ci_check_netdata_isolation() {
     local repo_root="${1:-${CI_REPO_ROOT}}" dep cfg out line nd_url
     local -a viol=()
-    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    dep="$(_ci_repo_path CI_COMPOSE_FILE "${repo_root}")" || return 2
     nd_url="$(_ci_runtime_default NETDATA_URL)" || return 2
-    cfg="$(_ci_compose_json "${repo_root}/${dep}")" || return 2
+    cfg="$(_ci_compose_json "${dep}")" || return 2
+    dep="${dep#"${repo_root}/"}"
     out="$(_ci_capture 0 jq -r --arg url "${nd_url}" "$(cat <<'PROG'
         if ($url | test(":[0-9]+$") | not)
             then "ui NETDATA_URL has no port (got: \($url))"
@@ -14889,7 +14901,7 @@ PROG
 # Why: a bare return skips the ACL; ignored headers leak.
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_nginx_policy() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp first="" blocks=0 b h a d al r px nginx_dir listen_file
+    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp first="" blocks=0 b h a d al r px
     local -a viol=()
     px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
     px="${px%/}"
@@ -14934,10 +14946,8 @@ PROG
     # What: the https.conf template includes the listen file
     # Why: a literal listen would be a second port owner.
     # From: Issue #1683 | PR #1912
-    nginx_dir="$(_ci_runtime_default NGINX_DIR)" || return 2
-    listen_file="$(_ci_runtime_default NGINX_HTTPS_LISTEN_FILE)" || return 2
     _ci_file_match "[CI-ERROR-CHECK-0182]" "reason=\"https include not searched\"" "${px}/conf.d/https.conf" "    include     \${NGINX_DIR}/\${NGINX_HTTPS_LISTEN_FILE};" -Fx \
-        || { [ "$?" -eq 1 ] || return 2; viol+=("${px#"${repo_root}/"}/conf.d/https.conf: no include of the SOT keys NGINX_DIR (${nginx_dir}) and NGINX_HTTPS_LISTEN_FILE (${listen_file})"); }
+        || { [ "$?" -eq 1 ] || return 2; viol+=("${px#"${repo_root}/"}/conf.d/https.conf: no include of the SOT keys NGINX_DIR and NGINX_HTTPS_LISTEN_FILE"); }
     if _ci_file_match "[CI-ERROR-CHECK-0183]" "reason=\"https listen not searched\"" "${px}/conf.d/https.conf" '^[[:space:]]*listen[[:space:]]'; then
         viol+=("${px#"${repo_root}/"}/conf.d/https.conf: literal listen; the watchdog renders it")
     elif [ "$?" -ne 1 ]; then
@@ -15073,8 +15083,8 @@ _ci_check_image_channel_resolution() {
     local su sec prod dep start_out
     su="$(_ci_installer "${repo_root}")" || return 2
     sec="$(_ci_service_path ui src/main.rs "${repo_root}")" || return 2
-    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    prod="${repo_root}/${dep}"
+    prod="$(_ci_repo_path CI_COMPOSE_FILE "${repo_root}")" || return 2
+    dep="${prod#"${repo_root}/"}"
     local -a viol=()
     local f
     start_out="$(_ci_capture 0 awk '/^# ── [0-9]+\. Installing systemd watchdog/{i=1;p=0} /^# ── [0-9]+\. Post-start info/{i=0} i&&/(docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?|stack_compose[[:space:]].*)[[:space:]]pull([[:space:]]|$)/{p=1} i&&!p&&/^[[:space:]]*(systemctl[[:space:]]+(enable|start)[[:space:]]+("?\$\{?(STACK_UNIT|CONVERGE_TIMER_UNIT)|lancache\.service|lancache-converge\.timer)|(docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?|stack_compose[[:space:]].*)[[:space:]]up[[:space:]]+-d)/{v=1} END{if (v) print "start"}' "${su}")" || return 2
@@ -15362,7 +15372,7 @@ _ci_compose_profile_flags() {
 # Why: a new, renamed or doubled service must not hide.
 # From: Issue #1683 | PR #1912
 _ci_check_logging_matrix() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" doc rows dep cf raw_services n
+    local repo_root="${1:-${CI_REPO_ROOT}}" doc rows cf raw_services n
     local -a canonical=() services=() viol=()
     local -A in_doc=() in_compose=()
     doc="$(_ci_repo_path CI_ARCH_DOC "${repo_root}")" || return 2
@@ -15384,8 +15394,7 @@ _ci_check_logging_matrix() {
     # What: only the primary stack compose is matched.
     # Why: the secondary dns logs locally (driver: local).
     # From: Issue #1683 | PR #1912
-    dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    cf="${repo_root}/${dep}"
+    cf="$(_ci_repo_path CI_COMPOSE_FILE "${repo_root}")" || return 2
     raw_services="$(_ci_compose_service_names "${cf}")" || {
         ci_log "[CI-ERROR-CHECK-0034]" "path=\"${cf}\" reason=\"compose service lookup failed (raw above)\""; return 2; }
     mapfile -t services <<< "${raw_services}"
