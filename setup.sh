@@ -2010,8 +2010,9 @@ rollback_quickstart_migration() {
 # From: Issue #1683 | PR #1858
 write_lancache_systemd_units() {
     local stack_dir="$1" setup_sh="$SCRIPT_DIR/setup.sh" unit_dir
-    local docker_unit="docker.service" timer_target="timers.target"
+    local docker_unit="docker.service" timer_target="timers.target" converge_minutes
     unit_dir=$(lancache_sot_value unit_dir runner_host) || exit $?
+    converge_minutes=$(prod_env_default CONVERGE_TIMER_INTERVAL_MINUTES) || exit $?
     # What: units run compose through setup.sh at run time
     # Why: overrides may change after the unit is written
     # From: Issue #1683 | PR #1858
@@ -2054,7 +2055,7 @@ Description=LanCache-NG Convergence Timer
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=5min
+OnUnitActiveSec=${converge_minutes}min
 Unit=${CONVERGE_SERVICE_UNIT}
 
 [Install]
