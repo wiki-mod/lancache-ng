@@ -58,14 +58,14 @@
     <div class="overflow-x-auto">
       <table class="w-full text-sm">
         <thead>
-          <tr class="border-b border-slate-700">
-            <th class="text-left px-3 py-2 text-slate-300 font-semibold">Name</th>
-            <th class="text-left px-3 py-2 text-slate-300 font-semibold">Consumer</th>
-            <th class="text-left px-3 py-2 text-slate-300 font-semibold">Adresse</th>
-            <th class="text-left px-3 py-2 text-slate-300 font-semibold">DNS-Status</th>
-            <th class="text-left px-3 py-2 text-slate-300 font-semibold">Registriert</th>
-            <th class="text-left px-3 py-2 text-slate-300 font-semibold">Zuletzt gesehen</th>
-            <th class="text-right px-3 py-2 text-slate-300 font-semibold">Aktionen</th>
+          <tr>
+            <th class="th px-3">Name</th>
+            <th class="th px-3">Consumer</th>
+            <th class="th px-3">Adresse</th>
+            <th class="th px-3">DNS-Status</th>
+            <th class="th px-3">Registriert</th>
+            <th class="th px-3">Zuletzt gesehen</th>
+            <th class="th px-3">Aktionen</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-slate-700">
@@ -93,7 +93,7 @@
                 <span class="text-slate-500">Noch nicht erfasst</span>
               {% endif %}
             </td>
-            <td class="px-3 py-2 text-right space-x-2">
+            <td class="px-3 py-2 space-x-2">
               <button onclick="rotateToken('{{ secondary.name }}')"
                       class="btn btn-sm btn-ghost-amber">
                 Token rotieren
