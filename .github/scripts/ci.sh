@@ -8173,7 +8173,7 @@ _ci_validate_proxy_stream_map() {
 # From: Issue #1683
 _ci_validate_https_mitm() {
     local project="$1" ip cid domain ca_subj issuer tmp out cert tls_err ca ca_file port
-    ca="$(_ci_runtime_default NGINX_DIR)/$(_ci_runtime_default NGINX_SUBDIR_CA)" || return 2
+    ca="$(_ci_nginx_subdir NGINX_SUBDIR_CA)" || return 2
     ca_file="$(_ci_runtime_default CA_CERT_FILE)" || return 2
     port="$(_ci_service_port https)" || return 2
     ip="$(_ci_validate_container_ip "${project}" proxy)"
@@ -14528,7 +14528,7 @@ _ci_file_value() {
 # Why: main.rs owns them; the SOT owns NGINX_DIR
 # From: Issue #1683 | PR #1912
 _ci_proxy_constant() {
-    local name="$1" root="${2-${CI_REPO_ROOT:-.}}" src raw rel dir re='^("([^"$]+)"|([0-9]+))$'
+    local name="$1" root="${2-${CI_REPO_ROOT:-.}}" src raw re='^("([^"$]+)"|([0-9]+))$'
     src="$(_ci_service_path services src/main.rs "${root}")" || return 2
     # What: Rust const item; other value forms fail closed.
     # Why: visibility and spacing are valid Rust grammar.
@@ -14543,9 +14543,25 @@ _ci_proxy_constant() {
         printf '%s\n' "${BASH_REMATCH[3]}"
         return 0
     fi
-    rel="${BASH_REMATCH[2]}"
+    _ci_nginx_path "${BASH_REMATCH[2]}"
+}
+
+# What: a relative path joined under the SOT NGINX_DIR.
+# Why: one join owner for proxy files and subdirs.
+# From: Issue #1683 | PR #1912
+_ci_nginx_path() {
+    local dir
     dir="$(_ci_runtime_default NGINX_DIR)" || return 2
-    printf '%s/%s\n' "${dir%/}" "${rel}"
+    printf '%s/%s\n' "${dir%/}" "$1"
+}
+
+# What: NGINX_DIR joined with the SOT subdir key $1.
+# Why: certs and CA dirs are SOT keys under NGINX_DIR.
+# From: Issue #1683 | PR #1912
+_ci_nginx_subdir() {
+    local sub
+    sub="$(_ci_runtime_default "$1")" || return 2
+    _ci_nginx_path "${sub}"
 }
 
 # What: TCP port of a service name from the services db
@@ -14815,12 +14831,11 @@ PROG
 # Why: the SOT owns them; Compose and nginx.conf use them.
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_cert_volume() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" dir ca cache base dep targets cf cfg out line px
+    local repo_root="${1:-${CI_REPO_ROOT}}" dir ca cache dep targets cf cfg out line px
     local -a viol=() tl=()
     local -A seen=()
-    base="$(_ci_runtime_default NGINX_DIR)" || return 2
-    dir="${base%/}/$(_ci_runtime_default NGINX_SUBDIR_CERTS)" || return 2
-    ca="${base%/}/$(_ci_runtime_default NGINX_SUBDIR_CA)" || return 2
+    dir="$(_ci_nginx_subdir NGINX_SUBDIR_CERTS)" || return 2
+    ca="$(_ci_nginx_subdir NGINX_SUBDIR_CA)" || return 2
     cache="$(_ci_runtime_default NGINX_CACHE_DIR)" || return 2
     px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
     grep -Eq '^[[:space:]]*proxy_cache_path[[:space:]]+\$\{NGINX_CACHE_DIR\}[[:space:]]*$' "${px%/}/nginx.conf" \
