@@ -2734,12 +2734,7 @@ _ci_ledger_upsert() {
         return 3
     fi
     commitsha="$(_ci_ledger_commit "${treesha}" "${parent}" "ledger aggregate")" || return 3
-    rc=0
-    if [ -n "${parent}" ]; then
-        raw="$(git push --force-with-lease="${ledger_ref}:${parent}" "${remote}" "${commitsha}:${ledger_ref}" 2>&1)" || rc=$?
-    else
-        raw="$(git push "${remote}" "${commitsha}:${ledger_ref}" 2>&1)" || rc=$?
-    fi
+    rc=0; raw="$(_ci_cas_push "${remote}" "${ledger_ref}" "${commitsha}" "${parent}")" || rc=$?
     if [ "${rc}" -eq 0 ]; then
         ci_log "[CI-INFO-LEDGER-0004]" "ref=\"${ledger_ref}\" commit=\"${commitsha}\" parent=\"${parent:-none}\" records=$(wc -l <<< "${merged}") reason=\"ledger written\""
         return 0
