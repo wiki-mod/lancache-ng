@@ -3935,14 +3935,7 @@ async fn rollback_kea_snapshot(
 // What: send a record delete event over NATS.
 // Why: PowerDNS applies deletes from the subject of adds.
 async fn publish_delete(state: &AppState, zone: &str, name: &str, kind: &str) {
-    let record = DnsRecord {
-        action: "delete".into(),
-        zone: zone.into(),
-        name: name.into(),
-        record_type: kind.into(),
-        ttl: None,
-        records: None,
-    };
+    let record = record_event(zone.into(), name.into(), kind.into(), None);
     if let Err(e) = publish_record(state, &record).await {
         tracing::error!(
             zone,
@@ -4605,6 +4598,99 @@ fn flush_name(domain: &str) -> FlushRequest {
     }
 }
 
+// What: a flush that names the changed record set.
+// Why: a node confirms the set (content, ttl) first.
+// From: Issue #1683 | PR #1912
+fn record_flush(
+    name: &str,
+    zone: String,
+    record_type: String,
+    value: Option<(String, u32)>,
+) -> FlushRequest {
+    let (content, ttl) = value.map(|(c, t)| (vec![c], t as i32)).unzip();
+    FlushRequest {
+        zone: Some(zone),
+        record_type: Some(record_type),
+        expected_content: content,
+        expected_ttl: ttl,
+        ..flush_name(name)
+    }
+}
+
+// What: the ttl form field, else the record default.
+// Why: one owner for the LAN and PTR add forms.
+// From: Issue #1683 | PR #1912
+fn form_ttl(f: &Fields) -> u32 {
+    f.number::<u32>("ttl").unwrap_or(DEFAULT_RECORD_TTL as u32)
+}
+
+// What: a replace (Some) or delete (None) record event.
+// Why: one owner for LAN edits and DDNS lease cleanup.
+// From: Issue #1683 | PR #1912
+fn record_event(
+    zone: String,
+    name: String,
+    kind: String,
+    value: Option<(String, u32)>,
+) -> DnsRecord {
+    DnsRecord {
+        action: if value.is_some() { "replace" } else { "delete" }.into(),
+        zone,
+        name,
+        record_type: kind,
+        ttl: value.as_ref().map(|(_, ttl)| *ttl as i32),
+        records: value.map(|(content, _)| {
+            vec![HashMap::from([
+                ("content".to_string(), json!(content)),
+                ("disabled".to_string(), json!(false)),
+            ])]
+        }),
+    }
+}
+
+// What: set (Some) or delete (None) a LAN record set.
+// Why: publish to every node, then flush the name.
+// From: Issue #1683 | PR #1912
+async fn set_lan_record(
+    state: &AppState,
+    name: String,
+    kind: String,
+    value: Option<(String, u32)>,
+) {
+    let record = record_event(state.config.lan_zone.clone(), name, kind, value.clone());
+    if let Err(e) = publish_record(state, &record).await {
+        tracing::error!("NATS publish failed: {e}");
+    }
+    let flush = record_flush(&record.name, record.zone, record.record_type, value);
+    flush_recursor_cache(state, flush).await;
+}
+
+// What: set (Some) or delete (None) the PTR of an address.
+// Why: the flush follows only an accepted write.
+// From: Issue #1683 | PR #1912
+async fn set_ptr_record(
+    state: &AppState,
+    ip: &str,
+    zone: String,
+    name: String,
+    value: Option<(String, u32)>,
+) {
+    let body = match &value {
+        Some((target, ttl)) => json!({"rrsets": [{
+            "name": name, "type": "PTR", "ttl": ttl, "changetype": "REPLACE",
+            "records": [{"content": target, "disabled": false}]
+        }]}),
+        None => json!({"rrsets": [{"name": name, "type": "PTR", "changetype": "DELETE"}]}),
+    };
+    let action = if value.is_some() { "add" } else { "delete" };
+    if patch_reverse_zone(state, &zone, body).await {
+        let flush = record_flush(&name, zone, "PTR".into(), value);
+        flush_recursor_cache(state, flush).await;
+    } else {
+        tracing::error!(ip, "PowerDNS rejected PTR {action}");
+    }
+}
+
 // What: a LAN record name as a dotted FQDN in zone lan.
 // Why: the bare name "lan" is the zone root, not lan.lan.
 fn normalize_lan_name(name: &str, lan_zone: &str) -> String {
@@ -5013,7 +5099,7 @@ async fn toggle_default_domain(
 // Why: the subscriber writes it on every DNS node.
 async fn add_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect {
     let name = normalize_lan_name(f.get("name"), &state.config.lan_zone);
-    let ttl = f.number::<u32>("ttl").unwrap_or(DEFAULT_RECORD_TTL as u32);
+    let ttl = form_ttl(&f);
     let Some((kind, content)) = validate_lan_record(
         &name,
         f.get("record_type"),
@@ -5024,28 +5110,7 @@ async fn add_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect
         tracing::warn!(name = %f.get("name"), record_type = %f.get("record_type"), "Rejected invalid LAN record");
         return Redirect::to(PAGE_DOMAINS);
     };
-    let record = DnsRecord {
-        action: "replace".into(),
-        zone: state.config.lan_zone.clone(),
-        name: name.clone(),
-        record_type: kind.into(),
-        ttl: Some(ttl as i32),
-        records: Some(vec![HashMap::from([
-            ("content".to_string(), json!(content)),
-            ("disabled".to_string(), json!(false)),
-        ])]),
-    };
-    if let Err(e) = publish_record(&state, &record).await {
-        tracing::error!("NATS publish failed: {e}");
-    }
-    let request = FlushRequest {
-        zone: Some(state.config.lan_zone.clone()),
-        record_type: Some(kind.into()),
-        expected_content: Some(vec![content]),
-        expected_ttl: Some(ttl as i32),
-        ..flush_name(&name)
-    };
-    flush_recursor_cache(&state, request).await;
+    set_lan_record(&state, name, kind.into(), Some((content, ttl))).await;
     Redirect::to(PAGE_DOMAINS)
 }
 
@@ -5060,23 +5125,7 @@ async fn remove_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redir
         tracing::warn!(name = %f.get("name"), record_type = %f.get("record_type"), "Rejected invalid LAN record delete");
         return Redirect::to(PAGE_DOMAINS);
     };
-    let record = DnsRecord {
-        action: "delete".into(),
-        zone: state.config.lan_zone.clone(),
-        name: name.clone(),
-        record_type: kind.clone(),
-        ttl: None,
-        records: None,
-    };
-    if let Err(e) = publish_record(&state, &record).await {
-        tracing::error!("NATS publish failed: {e}");
-    }
-    let request = FlushRequest {
-        zone: Some(state.config.lan_zone.clone()),
-        record_type: Some(kind),
-        ..flush_name(&name)
-    };
-    flush_recursor_cache(&state, request).await;
+    set_lan_record(&state, name, kind, None).await;
     Redirect::to(PAGE_DOMAINS)
 }
 
@@ -5128,7 +5177,7 @@ async fn toggle_ddns_allow_unsigned_updates(
 // What: set a manual PTR record in the reverse zone.
 // Why: the flush follows only an accepted write.
 async fn add_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect {
-    let ttl = f.number::<u32>("ttl").unwrap_or(DEFAULT_RECORD_TTL as u32);
+    let ttl = form_ttl(&f);
     let (Some((zone, name)), Some(target), true) = (
         ptr_location(f.get("ip")),
         normalize_ptr_target(f.get("hostname")),
@@ -5137,22 +5186,7 @@ async fn add_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect
         tracing::warn!(ip = %f.get("ip"), hostname = %f.get("hostname"), "Rejected invalid PTR record");
         return Redirect::to(PAGE_DOMAINS);
     };
-    let body = json!({"rrsets": [{
-        "name": name, "type": "PTR", "ttl": ttl, "changetype": "REPLACE",
-        "records": [{"content": target, "disabled": false}]
-    }]});
-    if patch_reverse_zone(&state, &zone, body).await {
-        let request = FlushRequest {
-            zone: Some(zone),
-            record_type: Some("PTR".into()),
-            expected_content: Some(vec![target]),
-            expected_ttl: Some(ttl as i32),
-            ..flush_name(&name)
-        };
-        flush_recursor_cache(&state, request).await;
-    } else {
-        tracing::error!(ip = %f.get("ip"), "PowerDNS rejected PTR add");
-    }
+    set_ptr_record(&state, f.get("ip"), zone, name, Some((target, ttl))).await;
     Redirect::to(PAGE_DOMAINS)
 }
 
@@ -5163,17 +5197,7 @@ async fn remove_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redir
         tracing::warn!(ip = %f.get("ip"), "Rejected invalid PTR delete");
         return Redirect::to(PAGE_DOMAINS);
     };
-    let body = json!({"rrsets": [{"name": name, "type": "PTR", "changetype": "DELETE"}]});
-    if patch_reverse_zone(&state, &zone, body).await {
-        let request = FlushRequest {
-            zone: Some(zone),
-            record_type: Some("PTR".into()),
-            ..flush_name(&name)
-        };
-        flush_recursor_cache(&state, request).await;
-    } else {
-        tracing::error!(ip = %f.get("ip"), "PowerDNS rejected PTR delete");
-    }
+    set_ptr_record(&state, f.get("ip"), zone, name, None).await;
     Redirect::to(PAGE_DOMAINS)
 }
 
