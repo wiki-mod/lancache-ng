@@ -59,6 +59,7 @@ print_step() { printf "\n${BOLD}${CYAN}▶ %s${RESET}\n" "$*"; }
 print_ok()   { printf "  ${GREEN}✓${RESET} %s\n" "$*"; }
 print_warn() { printf "  ${YELLOW}⚠${RESET} %s\n" "$*"; }
 print_error(){ printf "  ${RED}✗${RESET} %s\n" "$*" >&2; }
+print_skip() { printf "  ${YELLOW}↷${RESET} SKIP: %s\n" "$*" >&2; }
 die()        { print_error "$*"; exit 1; }
 
 REPLY=""
@@ -450,7 +451,10 @@ confirm() {
 run_kea_dhcp_activation_preflight() {
     local env_file="$1" output status server_identifier=""
 
-    [[ "$DHCP_MODE" = "kea" ]] || return 0
+    if [[ "$DHCP_MODE" != "kea" ]]; then
+        print_skip "DHCP activation preflight: DHCP_MODE is '$DHCP_MODE', not kea"
+        return 0
+    fi
 
     print_step "DHCP activation preflight"
     printf "  Probe-only check: the dhcp image runs its DHCP probe and exits without starting Kea.\n"
@@ -1645,7 +1649,10 @@ copy_volume_to_dir() {
     local -a lines
     require_helper_image
     docker_volume_exists "$volume" || rc=$?
-    [[ "$rc" -ne 1 ]] || return 0
+    if [[ "$rc" -eq 1 ]]; then
+        print_skip "Copying Docker volume $volume: the volume does not exist"
+        return 0
+    fi
     [[ "$rc" -eq 0 ]] || die "Cannot check the Docker volume $volume; nothing was copied."
     if volume_copy_recorded "$record" "$volume" "$dir"; then
         print_ok "Kept $dir: its copy of $volume is already verified"
@@ -3643,6 +3650,15 @@ compose_stack_available() {
     [[ -f "$install_dir/docker-compose.yml" ]] && command_available docker
 }
 
+# What: compose_stack_available, else prints a SKIP line
+# Why: a skipped step must say that it was skipped and why
+compose_stack_or_skip() {
+    local install_dir="$1" action="$2"
+    compose_stack_available "$install_dir" && return 0
+    print_skip "$action: no docker-compose.yml or no docker for $install_dir"
+    return 1
+}
+
 # What: true if any compose container is running
 # Why: restore only restarts a stack that was running
 compose_stack_running() {
@@ -3659,7 +3675,7 @@ compose_stack_running() {
 compose_stack_stop() {
     local install_dir="$1"
     local env_file
-    compose_stack_available "$install_dir" || return 0
+    compose_stack_or_skip "$install_dir" "Stopping the stack" || return 0
     print_step "Stopping stack for consistent backup/restore"
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     # What: a failed stop aborts before any data is copied
@@ -3674,7 +3690,7 @@ compose_stack_stop() {
 compose_stack_start() {
     local install_dir="$1"
     local env_file
-    compose_stack_available "$install_dir" || return 0
+    compose_stack_or_skip "$install_dir" "Starting the stack" || return 0
     print_step "Starting stack"
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     stack_compose "$install_dir" "$env_file" up -d \
@@ -3732,7 +3748,7 @@ compose_cache_volume_name() {
 # Why: compose down removes containers but keeps volumes
 compose_volume_names() {
     local install_dir="$1" container env_file project containers mounts volumes names=""
-    compose_stack_available "$install_dir" || return 0
+    compose_stack_or_skip "$install_dir" "Listing the Docker volumes" || return 0
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     project=$(compose_project_name "$install_dir" "$env_file") \
         || die "Cannot resolve the compose project of $install_dir (exit $?)."
@@ -3767,7 +3783,7 @@ compose_project_has_named_volumes() {
 # Why: cache payloads can be huge; config backups skip them
 backup_compose_volumes() {
     local install_dir="$1" volume_root="$2" mode="$3" volume env_file cache_volume volumes
-    compose_stack_available "$install_dir" || return 0
+    compose_stack_or_skip "$install_dir" "Archiving the Docker volumes" || return 0
     require_helper_image
     mkdir -p "$volume_root" || die "Failed to create $volume_root (exit $?)."
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
@@ -3794,7 +3810,10 @@ backup_compose_volumes() {
 # Why: skipping would restore an incomplete stack
 restore_compose_volumes() {
     local install_dir="$1" volume_root="$2" volume archive archives
-    [[ -d "$volume_root" ]] || return 0
+    if [[ ! -d "$volume_root" ]]; then
+        print_skip "Restoring Docker volumes: the backup holds no docker-volumes directory"
+        return 0
+    fi
     compose_stack_available "$install_dir" \
         || die "Backup contains Docker volume payloads, but Docker/compose is not available for $install_dir. Install Docker and restore again."
     require_helper_image
@@ -3821,7 +3840,10 @@ restore_compose_volumes() {
 # From: Issue #456 | PR #1673
 guard_restore_shared_project_volumes() {
     local install_dir="$1" archived_install_dir="$2" project="$3" container working_dir containers
-    command_available docker || return 0
+    if ! command_available docker; then
+        print_skip "Shared-volume guard: docker is not available, so no containers can share the volumes"
+        return 0
+    fi
     containers=$(docker ps -a --filter "label=com.docker.compose.project=${project}" --format '{{.ID}}') \
         || die "Failed to list the containers of compose project $project (exit $?)."
     while IFS= read -r container; do
@@ -3844,7 +3866,7 @@ guard_restore_shared_project_volumes() {
 # Why: informational only; failures warn, never restore
 record_image_revisions() {
     local install_dir="$1" output="$2" env_file revisions
-    compose_stack_available "$install_dir" || return 0
+    compose_stack_or_skip "$install_dir" "Recording the image revisions" || return 0
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     if revisions=$(stack_compose "$install_dir" "$env_file" images --format json); then
         :
@@ -5025,13 +5047,19 @@ lancache_ui_cache_max_gb_override_is_valid() {
 # Why: checks the volume exists; docker run would create it
 lancache_read_ui_settings_override() {
     local install_dir="$1" env_file="$2" key="$3" project volume raw rc=0 settings_file
-    command_available docker || return 0
+    if ! command_available docker; then
+        print_skip "Reading the UI setting $key: docker is not available"
+        return 0
+    fi
     require_helper_image
     project=$(compose_project_name "$install_dir" "$env_file") \
         || die "Cannot resolve the compose project of $install_dir (exit $?)."
     volume="${project}_ui-data"
     docker_volume_exists "$volume" || rc=$?
-    [[ "$rc" -ne 1 ]] || return 0
+    if [[ "$rc" -eq 1 ]]; then
+        print_skip "Reading the UI setting $key: Docker volume $volume does not exist yet"
+        return 0
+    fi
     [[ "$rc" -eq 0 ]] || die "Cannot check the Docker volume $volume; the UI settings were not read."
     settings_file=$(prod_env_default UI_SETTINGS_FILE) || exit $?
     settings_file="${settings_file##*/}"
@@ -5048,7 +5076,10 @@ lancache_read_ui_settings_override() {
 # Why: the .env value is the source of truth
 reconcile_auto_update_timer_state() {
     local env_file="$1" desired out
-    systemd_unit_exists "$AUTO_UPDATE_TIMER_UNIT" || return 0
+    if ! systemd_unit_exists "$AUTO_UPDATE_TIMER_UNIT"; then
+        print_skip "Syncing the auto-update timer: $AUTO_UPDATE_TIMER_UNIT is not installed"
+        return 0
+    fi
     desired=$(env_or_sot_default AUTO_UPDATE_ENABLED "$env_file") \
         || die "Cannot read AUTO_UPDATE_ENABLED from $env_file (exit $?)."
     if [[ "$desired" = "1" ]]; then
@@ -5070,10 +5101,19 @@ cmd_converge_reconcile() {
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
     # What: a tick before the first install does nothing
     # Why: no compose file or .env exists to converge
-    [[ -f "$install_dir/docker-compose.yml" ]] || return 0
-    command_available docker || return 0
+    if [[ ! -f "$install_dir/docker-compose.yml" ]]; then
+        print_skip "Converge tick: $install_dir/docker-compose.yml does not exist yet"
+        return 0
+    fi
+    if ! command_available docker; then
+        print_skip "Converge tick: docker is not available"
+        return 0
+    fi
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    [[ -f "$env_file" ]] || return 0
+    if [[ ! -f "$env_file" ]]; then
+        print_skip "Converge tick: $env_file does not exist yet"
+        return 0
+    fi
 
     ui_channel=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "LANCACHE_IMAGE_CHANNEL") \
         || die "Cannot read the UI setting LANCACHE_IMAGE_CHANNEL (exit $?)."
@@ -5322,7 +5362,10 @@ logbundle_redact_env_file() {
     local src="$1" dst="$2"
     local line key
     : > "$dst"
-    [[ -f "$src" ]] || return 0
+    if [[ ! -f "$src" ]]; then
+        print_skip "Redacting $src: the file does not exist; $dst stays empty"
+        return 0
+    fi
     while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]]; then
             key="${BASH_REMATCH[1]}"
@@ -6649,7 +6692,10 @@ detected_ip=""
 if lan_addresses=$(host_lan_addresses); then
     printf "\n  Found LAN addresses:\n"
     awk '{ print "    " $1 "/" $2 " dev " $3 }' <<< "$lan_addresses"
-    detected_ip=$(detect_lan_ip) || detected_ip=""
+    detect_rc=0
+    detected_ip=$(detect_lan_ip) || detect_rc=$?
+    [[ "$detect_rc" -eq 0 ]] \
+        || print_warn "No LAN IP detected (exit $detect_rc; see above); enter it below."
 else
     print_warn "Cannot list this host's IPv4 addresses (exit $?); enter them below."
 fi
