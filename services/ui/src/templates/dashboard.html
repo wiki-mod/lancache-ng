@@ -72,7 +72,7 @@
       <div class="flex items-center gap-2" data-service="{{ svc.name }}">
         {# What: amber is a reduced-guarantee state
            Why: title shows svc.health as the tooltip #}
-        <span class="w-2.5 h-2.5 rounded-full {% if svc.status == "green" %}bg-green-400{% elif svc.status == "amber" %}bg-amber-400{% elif svc.status == "yellow" %}bg-yellow-400{% elif svc.status == "red" %}bg-red-400{% else %}bg-slate-500{% endif %}" data-role="dot" title="{{ svc.health }}"></span>
+        <span class="beambar-dot" data-role="dot" data-dot-status="{{ svc.status }}" title="{{ svc.health }}"></span>
         <span class="text-sm text-slate-300">{{ svc.name }}</span>
         {% if svc.failures > 0 %}
         <span class="text-xs text-amber-400" data-role="failures">({{ svc.failures }} failures)</span>
@@ -80,7 +80,7 @@
       </div>
       {% endfor %}
       <div class="flex items-center gap-2" data-service="disk-cache">
-        <span class="w-2.5 h-2.5 rounded-full {% if watchdog_status.disk.cache.status == "green" %}bg-green-400{% elif watchdog_status.disk.cache.status == "yellow" %}bg-yellow-400{% elif watchdog_status.disk.cache.status == "red" %}bg-red-400{% else %}bg-slate-500{% endif %}" data-role="dot"></span>
+        <span class="beambar-dot" data-role="dot" data-dot-status="{{ watchdog_status.disk.cache.status }}"></span>
         <span class="text-sm text-slate-300">Cache disk: {{ watchdog_status.disk.cache.pct }}% used</span>
       </div>
     </div>
@@ -100,7 +100,9 @@
     <div class="space-y-2" id="netdata-alarms-list">
       {% for alarm in netdata_alarms %}
       <div class="flex items-center gap-2 text-sm" data-unique-id="{{ alarm.unique_id }}">
-        <span class="w-2.5 h-2.5 rounded-full shrink-0 {% if alarm.status == "CRITICAL" %}bg-red-400{% elif alarm.status == "WARNING" %}bg-yellow-400{% elif alarm.status == "CLEAR" %}bg-green-400{% else %}bg-slate-500{% endif %}" data-role="dot"></span>
+        {# What: Netdata alarm status to a watchdog colour token
+           Why: base.html paintDot owns token-to-colour #}
+        <span class="beambar-dot shrink-0" data-role="dot" data-dot-status="{% if alarm.status == "CRITICAL" %}red{% elif alarm.status == "WARNING" %}yellow{% elif alarm.status == "CLEAR" %}green{% endif %}"></span>
         <span class="text-xs text-slate-500 shrink-0">{{ alarm.when_display }}</span>
         <span class="text-slate-300 font-medium">{{ alarm.name }}</span>
         <span class="text-xs text-slate-500">({{ alarm.chart }})</span>
@@ -276,6 +278,11 @@
   </div>
 
 </div>
+{% endblock %}
+
+{# What: page script after base.html's script
+   Why: it uses window.LancacheWatchdog from base.html #}
+{% block scripts %}
 <script>
   // What: polls the metrics route every 10s, patches counts
   // Why: a reload also recomputes cache and log stats
@@ -313,16 +320,6 @@
 
   setInterval(refreshDashboardMetrics, 10000);
 
-  // What: bg-*-400 classes a status dot can carry
-  // Why: removed before the status class is added
-  // From: Issue #1437
-  const DASHBOARD_DOT_CLASSES = ['bg-green-400', 'bg-amber-400', 'bg-yellow-400', 'bg-red-400', 'bg-slate-500'];
-
-  function dashboardDotClass(status) {
-    const token = window.LancacheWatchdog.colorClass(status);
-    return token === 'gray' ? 'bg-slate-500' : 'bg-' + token + '-400';
-  }
-
   // What: skip title update when health is omitted
   // Why: the disk-cache dot has no health string to show
   // From: Issue #1437
@@ -330,8 +327,7 @@
     if (!dot) {
       return;
     }
-    dot.classList.remove(...DASHBOARD_DOT_CLASSES);
-    dot.classList.add(dashboardDotClass(status));
+    window.LancacheWatchdog.paintDot(dot, status);
     if (health !== undefined) {
       dot.setAttribute('title', health);
     }

@@ -347,6 +347,16 @@
       function colorClass(status) {
         return DOT_COLOR_CLASSES.includes(status) ? status : 'gray';
       }
+      // What: sets a dot's .beambar-dot colour for a status
+      // Why: one status-to-colour owner for every page's dots
+      // From: Issue #1683 | PR #1912
+      function paintDot(dot, status) {
+        dot.classList.remove(...DOT_COLOR_CLASSES);
+        dot.classList.add('beambar-dot', colorClass(status));
+      }
+      document.querySelectorAll('[data-dot-status]').forEach(function (dot) {
+        paintDot(dot, dot.dataset.dotStatus);
+      });
       const listeners = [];
       function onUpdate(fn) {
         listeners.push(fn);
@@ -370,7 +380,7 @@
           fn(data);
         });
       }
-      return { colorClass: colorClass, onUpdate: onUpdate, refresh: refresh };
+      return { colorClass: colorClass, paintDot: paintDot, onUpdate: onUpdate, refresh: refresh };
     })();
 
     // What: POSTs desired state; the watchdog applies it
@@ -459,7 +469,7 @@
         const wrap = document.createElement('span');
         wrap.title = svc.health || '';
         const dot = document.createElement('span');
-        dot.className = 'beambar-dot ' + window.LancacheWatchdog.colorClass(svc.status);
+        window.LancacheWatchdog.paintDot(dot, svc.status);
         wrap.appendChild(dot);
         wrap.appendChild(document.createTextNode(svc.name));
         const dockService = DOCK_CONTROLLABLE_SERVICES[svc.name];
