@@ -905,6 +905,25 @@ async fn basic_auth(State(state): Shared, mut req: Request, next: Next) -> Respo
     response
 }
 
+// What: the URL path of each ui page.
+// Why: router, redirects, errors, nav read one owner.
+// From: Issue #1683 | PR #1912
+const PAGE_DASHBOARD: &str = "/";
+const PAGE_DHCP: &str = "/dhcp";
+const PAGE_NTP: &str = "/ntp";
+const PAGE_DOMAINS: &str = "/domains";
+const PAGE_SECONDARIES: &str = "/secondaries";
+const PAGE_STATS: &str = "/stats";
+const PAGE_LOGS: &str = "/logs";
+const PAGE_SETUP: &str = "/setup";
+
+// What: the domains page URL with an error code.
+// Why: one owner for each domains error redirect.
+// From: Issue #1683 | PR #1912
+fn domains_error(code: &str) -> String {
+    format!("{PAGE_DOMAINS}?error={code}")
+}
+
 // What: a template context with page name and CSRF token.
 // Why: every page's forms need the live session's token.
 fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
@@ -927,6 +946,22 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
     ctx.insert("txt_max_bytes", &MAX_TXT_BYTES);
     ctx.insert("option_code_min", &OPTION_CODE_MIN);
     ctx.insert("option_code_max", &OPTION_CODE_MAX);
+    // What: each page path from its one Rust owner.
+    // Why: nav and links follow the router path.
+    // From: Issue #1683 | PR #1912
+    ctx.insert(
+        "pages",
+        &json!({
+            "dashboard": PAGE_DASHBOARD,
+            "dhcp": PAGE_DHCP,
+            "ntp": PAGE_NTP,
+            "domains": PAGE_DOMAINS,
+            "secondaries": PAGE_SECONDARIES,
+            "stats": PAGE_STATS,
+            "logs": PAGE_LOGS,
+            "setup": PAGE_SETUP,
+        }),
+    );
     ctx
 }
 
@@ -974,27 +1009,27 @@ struct ErrorArea {
 // Why: each area names its title and back link.
 const CACHE_AREA: ErrorArea = ErrorArea {
     title: "Cache Resize Error",
-    href: "/",
+    href: PAGE_DASHBOARD,
     back: "Return to dashboard",
 };
 const NTP_AREA: ErrorArea = ErrorArea {
     title: "NTP Configuration Error",
-    href: "/ntp",
+    href: PAGE_NTP,
     back: "Return to NTP settings",
 };
 const DHCP_AREA: ErrorArea = ErrorArea {
     title: "DHCP Configuration Error",
-    href: "/dhcp",
+    href: PAGE_DHCP,
     back: "Return to DHCP settings",
 };
 const SETTINGS_AREA: ErrorArea = ErrorArea {
     title: "Settings Error",
-    href: "/setup",
+    href: PAGE_SETUP,
     back: "Return to setup",
 };
 const LOGS_AREA: ErrorArea = ErrorArea {
     title: "Logging Settings Error",
-    href: "/logs",
+    href: PAGE_LOGS,
     back: "Return to logs",
 };
 
@@ -3692,7 +3727,7 @@ async fn add_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Redir
         Ok(())
     })
     .await?;
-    Ok(Redirect::to("/dhcp"))
+    Ok(Redirect::to(PAGE_DHCP))
 }
 
 // What: edit one subnet in place, found by id.
@@ -3713,7 +3748,7 @@ async fn update_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
         )
     })
     .await?;
-    Ok(Redirect::to("/dhcp"))
+    Ok(Redirect::to(PAGE_DHCP))
 }
 
 // What: delete a subnet with its pools and reservations.
@@ -3726,7 +3761,7 @@ async fn remove_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
         Ok(())
     })
     .await?;
-    Ok(Redirect::to("/dhcp"))
+    Ok(Redirect::to(PAGE_DHCP))
 }
 
 // What: add or remove a custom option, matched by code+data
@@ -3745,7 +3780,7 @@ async fn change_subnet_option(
         edit_custom_option(find_subnet_mut(config, id)?, key, &data, add)
     })
     .await?;
-    Ok(Redirect::to("/dhcp"))
+    Ok(Redirect::to(PAGE_DHCP))
 }
 
 // What: add one custom option to a subnet.
@@ -3799,7 +3834,7 @@ async fn add_reservation(
         upsert_reservation(find_subnet_mut(config, id)?, &mac, &ip, &hostname)
     })
     .await?;
-    Ok(Redirect::to("/dhcp"))
+    Ok(Redirect::to(PAGE_DHCP))
 }
 
 // What: remove a static reservation by MAC; none is fine.
@@ -3828,7 +3863,7 @@ async fn remove_reservation(
         Ok(())
     })
     .await?;
-    Ok(Redirect::to("/dhcp"))
+    Ok(Redirect::to(PAGE_DHCP))
 }
 
 // What: switch Kea's DDNS master switch.
@@ -3853,7 +3888,7 @@ async fn update_dhcp_ddns(
         Ok(())
     })
     .await?;
-    Ok(Redirect::to("/dhcp"))
+    Ok(Redirect::to(PAGE_DHCP))
 }
 
 // What: roll Kea back to a chosen known-good snapshot.
@@ -3899,7 +3934,7 @@ async fn rollback_kea_snapshot(
         "SELECT",
         &format!("selected known-good snapshot {id} for rollback"),
     );
-    Ok(Redirect::to("/dhcp"))
+    Ok(Redirect::to(PAGE_DHCP))
 }
 
 // What: send a record delete event over NATS.
@@ -3971,7 +4006,7 @@ async fn release_lease(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
             // What: clean DNS records after a release.
             // Why: best effort; the address is freed.
             cleanup_lease_records(&state, address, hostname.as_deref()).await;
-            Ok(Redirect::to("/dhcp"))
+            Ok(Redirect::to(PAGE_DHCP))
         }
         // What: code 3 means no such lease.
         // Why: an expired lease is a race, not a failure.
@@ -4037,7 +4072,7 @@ async fn update_dhcp_mode(
     {
         tracing::warn!(error = %e, "failed to push the NTP address into Kea subnets; the next NTP or DHCP save retries");
     }
-    Ok(Redirect::to("/dhcp"))
+    Ok(Redirect::to(PAGE_DHCP))
 }
 
 // What: validate and save the dnsmasq-proxy settings.
@@ -4149,7 +4184,7 @@ async fn update_dhcp_proxy(
             ("DHCP_PROXY_CUSTOM_OPTIONS", custom),
         ],
     )?;
-    Ok(Redirect::to("/dhcp"))
+    Ok(Redirect::to(PAGE_DHCP))
 }
 
 // What: validate and save the DHCP relay settings.
@@ -4179,7 +4214,7 @@ async fn update_dhcp_relay(
             ),
         ],
     )?;
-    Ok(Redirect::to("/dhcp"))
+    Ok(Redirect::to(PAGE_DHCP))
 }
 
 // What: ui wait limit for one probe answer.
@@ -4841,20 +4876,20 @@ async fn rollback_zone_snapshot(State(state): Shared, Form(f): Form<Fields>) -> 
                     "zone rollback succeeded but its response could not be decoded; flush and zone-check status unknown"
                 ),
             }
-            "/domains"
+            PAGE_DOMAINS.to_string()
         }
         // What: a refusal is known; a lost request is not.
         // Why: an unknown outcome must not invite a retry.
         Ok(response) => {
             tracing::error!(status = %response.status(), zone, snapshot_id, "zone rollback rejected by nats-subscriber");
-            "/domains?error=zone_rollback_failed"
+            domains_error("zone_rollback_failed")
         }
         Err(e) => {
             tracing::error!(error = %e, zone, snapshot_id, "zone rollback request failed to reach nats-subscriber");
-            "/domains?error=zone_rollback_unknown"
+            domains_error("zone_rollback_unknown")
         }
     };
-    Redirect::to(target)
+    Redirect::to(&target)
 }
 
 // What: the domains page with lists, records and snapshots.
@@ -4937,12 +4972,12 @@ async fn after_domain_change(state: &AppState, domain: &str) {
 async fn add_dns(State(state): Shared, Form(f): Form<Fields>) -> Result<Redirect, StatusCode> {
     let Some(entry) = parse_cdn_domain(f.get("domain")) else {
         tracing::warn!(domain = %f.get("domain"), "Rejected invalid dns domain");
-        return Ok(Redirect::to("/domains?error=invalid_domain"));
+        return Ok(Redirect::to(&domains_error("invalid_domain")));
     };
     edit_domains(&state, true, |text| with_added(text, &entry))
         .map_err(|e| write_failed("write", e))?;
     after_domain_change(&state, &entry.domain).await;
-    Ok(Redirect::to("/domains"))
+    Ok(Redirect::to(PAGE_DOMAINS))
 }
 
 // What: remove a CDN domain line, even a legacy one.
@@ -4959,7 +4994,7 @@ async fn remove_dns(State(state): Shared, Form(f): Form<Fields>) -> Result<Redir
         DeleteTarget::Raw(raw) => raw,
     };
     after_domain_change(&state, domain).await;
-    Ok(Redirect::to("/domains"))
+    Ok(Redirect::to(PAGE_DOMAINS))
 }
 
 // What: switch a shipped default entry on or off.
@@ -4976,7 +5011,7 @@ async fn toggle_default_domain(
     edit_domains(&state, false, |text| with_enabled(text, &target, enable))
         .map_err(|e| write_failed("toggle", e))?;
     after_domain_change(&state, &target.domain).await;
-    Ok(Redirect::to("/domains"))
+    Ok(Redirect::to(PAGE_DOMAINS))
 }
 
 // What: add or replace a LAN record through NATS.
@@ -4992,7 +5027,7 @@ async fn add_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect
         &state.config.lan_zone,
     ) else {
         tracing::warn!(name = %f.get("name"), record_type = %f.get("record_type"), "Rejected invalid LAN record");
-        return Redirect::to("/domains");
+        return Redirect::to(PAGE_DOMAINS);
     };
     let record = DnsRecord {
         action: "replace".into(),
@@ -5016,7 +5051,7 @@ async fn add_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect
         ..flush_name(&name)
     };
     flush_recursor_cache(&state, request).await;
-    Redirect::to("/domains")
+    Redirect::to(PAGE_DOMAINS)
 }
 
 // What: delete a LAN record set through NATS.
@@ -5028,7 +5063,7 @@ async fn remove_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redir
         is_lan_name(&name, true, &state.config.lan_zone),
     ) else {
         tracing::warn!(name = %f.get("name"), record_type = %f.get("record_type"), "Rejected invalid LAN record delete");
-        return Redirect::to("/domains");
+        return Redirect::to(PAGE_DOMAINS);
     };
     let record = DnsRecord {
         action: "delete".into(),
@@ -5047,7 +5082,7 @@ async fn remove_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redir
         ..flush_name(&name)
     };
     flush_recursor_cache(&state, request).await;
-    Redirect::to("/domains")
+    Redirect::to(PAGE_DOMAINS)
 }
 
 // What: set or clear a marker file in the DNS state dir.
@@ -5075,7 +5110,7 @@ async fn toggle_aaaa_filter(
     Form(f): Form<Fields>,
 ) -> Result<Redirect, StatusCode> {
     set_markers(&state, AAAA_FILTER_MARKER, f.get("enabled") == "1")?;
-    Ok(Redirect::to("/domains"))
+    Ok(Redirect::to(PAGE_DOMAINS))
 }
 
 // What: allow or forbid unsigned DDNS updates.
@@ -5087,12 +5122,12 @@ async fn toggle_ddns_allow_unsigned_updates(
 ) -> Result<Redirect, StatusCode> {
     let enable = f.get("enabled") == "1";
     if enable && !tsig_key_configured(&state.config) {
-        return Ok(Redirect::to("/domains?error=ddns_allow_unsigned_no_key"));
+        return Ok(Redirect::to(&domains_error("ddns_allow_unsigned_no_key")));
     }
     // What: pdns watches the marker and restarts itself.
     // Why: the ui has no Docker; the supervisor converges.
     set_markers(&state, DDNS_UNSIGNED_MARKER, enable)?;
-    Ok(Redirect::to("/domains"))
+    Ok(Redirect::to(PAGE_DOMAINS))
 }
 
 // What: set a manual PTR record in the reverse zone.
@@ -5105,7 +5140,7 @@ async fn add_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect
         (1..=MAX_TTL).contains(&ttl),
     ) else {
         tracing::warn!(ip = %f.get("ip"), hostname = %f.get("hostname"), "Rejected invalid PTR record");
-        return Redirect::to("/domains");
+        return Redirect::to(PAGE_DOMAINS);
     };
     let body = json!({"rrsets": [{
         "name": name, "type": "PTR", "ttl": ttl, "changetype": "REPLACE",
@@ -5123,7 +5158,7 @@ async fn add_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect
     } else {
         tracing::error!(ip = %f.get("ip"), "PowerDNS rejected PTR add");
     }
-    Redirect::to("/domains")
+    Redirect::to(PAGE_DOMAINS)
 }
 
 // What: delete the PTR record set of an address.
@@ -5131,7 +5166,7 @@ async fn add_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect
 async fn remove_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect {
     let Some((zone, name)) = ptr_location(f.get("ip")) else {
         tracing::warn!(ip = %f.get("ip"), "Rejected invalid PTR delete");
-        return Redirect::to("/domains");
+        return Redirect::to(PAGE_DOMAINS);
     };
     let body = json!({"rrsets": [{"name": name, "type": "PTR", "changetype": "DELETE"}]});
     if patch_reverse_zone(&state, &zone, body).await {
@@ -5144,7 +5179,7 @@ async fn remove_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redir
     } else {
         tracing::error!(ip = %f.get("ip"), "PowerDNS rejected PTR delete");
     }
-    Redirect::to("/domains")
+    Redirect::to(PAGE_DOMAINS)
 }
 
 // What: log lines the recent-activity widget shows.
@@ -5317,7 +5352,7 @@ async fn update_logging_settings(
     state.config.save_settings(&changes).map_err(|e| {
         HtmlError::new(StatusCode::INTERNAL_SERVER_ERROR, &LOGS_AREA, e.to_string())
     })?;
-    Ok(Redirect::to("/logs"))
+    Ok(Redirect::to(PAGE_LOGS))
 }
 
 // What: the refusal text for a cache size that won't fit.
@@ -5367,7 +5402,7 @@ async fn resize_cache(State(state): Shared, Form(f): Form<Fields>) -> Result<Red
         .config
         .save_settings(&[("CACHE_MAX_GB", gb.to_string())])
         .map_err(|e| area(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Redirect::to("/"))
+    Ok(Redirect::to(PAGE_DASHBOARD))
 }
 
 // What: the NTP settings page.
@@ -5443,7 +5478,7 @@ async fn update_ntp_settings(
     } else if was_auto {
         sync_subnet_ntp(&state, false).await.map_err(fail)?;
     }
-    Ok(Redirect::to("/ntp"))
+    Ok(Redirect::to(PAGE_NTP))
 }
 
 // What: the setup page with network hints and updates.
@@ -5498,7 +5533,7 @@ async fn update_stack_settings(
                 e.to_string(),
             )
         })?;
-    Ok(Redirect::to("/setup"))
+    Ok(Redirect::to(PAGE_SETUP))
 }
 
 // What: the page shown while the ui restarts itself.
@@ -5518,7 +5553,7 @@ p{font-size:.875rem;color:#94a3b8;margin:0}</style></head><body><div class="box"
 var sawDown = false;
 function pollHealth() {
   fetch('/health', { cache: 'no-store' }).then(function (res) {
-    if (res.ok && sawDown) { window.location.href = '/setup'; return; }
+    if (res.ok && sawDown) { window.location.href = '@PAGE_SETUP@'; return; }
     sawDown = sawDown || !res.ok;
     setTimeout(pollHealth, 1000);
   }).catch(function () { sawDown = true; setTimeout(pollHealth, 1000); });
@@ -5530,13 +5565,13 @@ setTimeout(pollHealth, 1500);
 // What: answer with the wait page, then end the ui.
 // Why: compose "restart: always" starts it; no Docker.
 // From: Issue #1486 | PR #1912
-async fn restart_ui_service() -> Html<&'static str> {
+async fn restart_ui_service() -> Html<String> {
     tokio::spawn(async {
         tokio::time::sleep(Duration::from_millis(750)).await;
         tracing::info!("operator-requested Admin UI restart");
         std::process::exit(0);
     });
-    Html(RESTART_UI_PAGE)
+    Html(RESTART_UI_PAGE.replace("@PAGE_SETUP@", PAGE_SETUP))
 }
 
 // What: the body of a desired-state request.
@@ -5914,8 +5949,8 @@ fn router(state: Arc<AppState>) -> Router {
         ("/static/logo-icon.png", get(logo_icon)),
     ];
     let protected: Vec<(&str, MethodRouter<Arc<AppState>>)> = vec![
-        ("/", get(dashboard)),
-        ("/dhcp", get(dhcp_page)),
+        (PAGE_DASHBOARD, get(dashboard)),
+        (PAGE_DHCP, get(dhcp_page)),
         ("/dhcp/mode", post(update_dhcp_mode)),
         ("/dhcp/ddns", post(update_dhcp_ddns)),
         ("/dhcp/proxy", post(update_dhcp_proxy)),
@@ -5930,9 +5965,9 @@ fn router(state: Arc<AppState>) -> Router {
         ("/dhcp/lease/release", post(release_lease)),
         ("/dhcp/snapshot/rollback", post(rollback_kea_snapshot)),
         ("/api/dhcp/check", post(check_dhcp_conflict)),
-        ("/ntp", get(ntp_page)),
+        (PAGE_NTP, get(ntp_page)),
         ("/ntp/settings", post(update_ntp_settings)),
-        ("/domains", get(domains_page)),
+        (PAGE_DOMAINS, get(domains_page)),
         ("/domains/dns/add", post(add_dns)),
         ("/domains/dns/remove", post(remove_dns)),
         ("/domains/dns/toggle", post(toggle_default_domain)),
@@ -5946,10 +5981,10 @@ fn router(state: Arc<AppState>) -> Router {
             post(toggle_ddns_allow_unsigned_updates),
         ),
         ("/domains/zones/rollback", post(rollback_zone_snapshot)),
-        ("/stats", get(stats_page)),
-        ("/logs", get(logs_page)),
+        (PAGE_STATS, get(stats_page)),
+        (PAGE_LOGS, get(logs_page)),
         ("/logs/settings", post(update_logging_settings)),
-        ("/setup", get(setup_page)),
+        (PAGE_SETUP, get(setup_page)),
         ("/setup/update", post(update_stack_settings)),
         ("/setup/restart-ui", post(restart_ui_service)),
         (
@@ -5962,7 +5997,7 @@ fn router(state: Arc<AppState>) -> Router {
         ("/api/netdata/{*path}", get(netdata_proxy)),
         ("/static/admin.css", get(admin_css)),
         ("/static/chart.umd.min.js", get(chart_js)),
-        ("/secondaries", get(secondaries_page)),
+        (PAGE_SECONDARIES, get(secondaries_page)),
         ("/api/secondary/{name}", delete(remove_secondary)),
         ("/api/secondary/{name}/rotate-token", post(rotate_token)),
         ("/api/secondary/{name}/health", post(check_secondary_health)),
@@ -8421,7 +8456,7 @@ mod tests {
         let bad = invalid("x");
         assert_eq!(bad.status, StatusCode::BAD_REQUEST);
         assert_eq!(bad.message, "x");
-        assert_eq!(bad.area.href, "/dhcp");
+        assert_eq!(bad.area.href, PAGE_DHCP);
         let broken = fail("y");
         assert_eq!(broken.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(broken.area.title, "DHCP Configuration Error");
@@ -9742,7 +9777,7 @@ mod tests {
         assert!(!conf.exists());
         let ok = post_form(&base, &session, "/cache/resize", "cache_gb=1").await;
         assert_eq!(ok.status(), 303);
-        assert_eq!(ok.headers()[header::LOCATION], "/");
+        assert_eq!(ok.headers()[header::LOCATION], PAGE_DASHBOARD);
         assert!(
             fs::read_to_string(&conf)
                 .unwrap()
@@ -9787,7 +9822,7 @@ mod tests {
         let body = "lancache_image_channel=nightly&auto_update_enabled=1";
         let ok = post_form(&base, &session, "/setup/update", body).await;
         assert_eq!(ok.status(), 303);
-        assert_eq!(ok.headers()[header::LOCATION], "/setup");
+        assert_eq!(ok.headers()[header::LOCATION], PAGE_SETUP);
         let saved = fs::read_to_string(&conf).unwrap();
         assert!(saved.contains("LANCACHE_IMAGE_CHANNEL=nightly\n"));
         assert!(saved.contains("AUTO_UPDATE_ENABLED=1\n"));
@@ -9825,7 +9860,7 @@ mod tests {
         let body = "LOGGING_DNS_ENABLED=1&LOGGING_UI_ENABLED=1";
         let ok = post_form(&base, &session, "/logs/settings", body).await;
         assert_eq!(ok.status(), 303);
-        assert_eq!(ok.headers()[header::LOCATION], "/logs");
+        assert_eq!(ok.headers()[header::LOCATION], PAGE_LOGS);
         let saved = fs::read_to_string(&conf).unwrap();
         for row in [
             "LOGGING_PROXY_ENABLED=0\n",
@@ -9870,7 +9905,7 @@ mod tests {
         let on = "ntp_enabled=1&ntp_upstream_servers=pool.ntp.org%2C+10.0.0.1";
         let ok = post_form(&base, &session, "/ntp/settings", on).await;
         assert_eq!(ok.status(), 303);
-        assert_eq!(ok.headers()[header::LOCATION], "/ntp");
+        assert_eq!(ok.headers()[header::LOCATION], PAGE_NTP);
         let saved = fs::read_to_string(&conf).unwrap();
         assert!(saved.contains("NTP_ENABLED=1\n"));
         assert!(saved.contains("NTP_UPSTREAM_SERVERS=pool.ntp.org 10.0.0.1\n"));
@@ -9902,7 +9937,7 @@ mod tests {
         let session = open_session(&base, &state).await;
         let on = post_form(&base, &session, "/domains/aaaa-filter", "enabled=1").await;
         assert_eq!(on.status(), 303);
-        assert_eq!(on.headers()[header::LOCATION], "/domains");
+        assert_eq!(on.headers()[header::LOCATION], PAGE_DOMAINS);
         assert_eq!(
             fs::read_to_string(dir.join(AAAA_FILTER_MARKER)).unwrap(),
             "1"
@@ -9922,7 +9957,7 @@ mod tests {
         .await;
         assert_eq!(
             blocked.headers()[header::LOCATION],
-            "/domains?error=ddns_allow_unsigned_no_key"
+            domains_error("ddns_allow_unsigned_no_key").as_str()
         );
         assert!(!dir.join(DDNS_UNSIGNED_MARKER).exists());
         fs::write(sdir.join("ddns-tsig-key"), "tsig").unwrap();
@@ -9933,7 +9968,7 @@ mod tests {
             "enabled=1",
         )
         .await;
-        assert_eq!(allowed.headers()[header::LOCATION], "/domains");
+        assert_eq!(allowed.headers()[header::LOCATION], PAGE_DOMAINS);
         assert!(dir.join(DDNS_UNSIGNED_MARKER).exists());
         let revoked = post_form(
             &base,
@@ -9942,7 +9977,7 @@ mod tests {
             "enabled=0",
         )
         .await;
-        assert_eq!(revoked.headers()[header::LOCATION], "/domains");
+        assert_eq!(revoked.headers()[header::LOCATION], PAGE_DOMAINS);
         assert!(!dir.join(DDNS_UNSIGNED_MARKER).exists());
         fs::remove_file(sdir.join("ddns-tsig-key")).unwrap();
         fs::write(sdir.join("ddns-tsig-key"), "").unwrap();
@@ -9955,7 +9990,7 @@ mod tests {
         .await;
         assert_eq!(
             empty.headers()[header::LOCATION],
-            "/domains?error=ddns_allow_unsigned_no_key"
+            domains_error("ddns_allow_unsigned_no_key").as_str()
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&sdir);
@@ -10069,7 +10104,7 @@ mod tests {
         assert!(kea_commands(&kea).is_empty());
         let ok = post_form(&base, &session, "/dhcp/subnet/add", &subnet_body()).await;
         assert_eq!(ok.status(), 303);
-        assert_eq!(ok.headers()[header::LOCATION], "/dhcp");
+        assert_eq!(ok.headers()[header::LOCATION], PAGE_DHCP);
         assert_eq!(
             kea_commands(&kea),
             ["config-get", "config-test", "config-set", "config-write"]
@@ -10378,7 +10413,7 @@ mod tests {
             let body = format!("dhcp_mode={mode}");
             let ok = post_form(&base, &session, "/dhcp/mode", &body).await;
             assert_eq!(ok.status(), 303);
-            assert_eq!(ok.headers()[header::LOCATION], "/dhcp");
+            assert_eq!(ok.headers()[header::LOCATION], PAGE_DHCP);
             let saved = fs::read_to_string(&conf).unwrap();
             let want = format!("DHCP_MODE={}\n", mode.to_lowercase());
             assert!(saved.starts_with(&want), "{saved}");
@@ -10494,7 +10529,7 @@ mod tests {
         ]);
         let ok = post_form(&base, &session, "/dhcp/proxy", &full).await;
         assert_eq!(ok.status(), 303);
-        assert_eq!(ok.headers()[header::LOCATION], "/dhcp");
+        assert_eq!(ok.headers()[header::LOCATION], PAGE_DHCP);
         let saved = fs::read_to_string(&conf).unwrap();
         for line in [
             "DHCP_SUBNET_START=192.168.1.100",

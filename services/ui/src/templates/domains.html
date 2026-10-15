@@ -26,11 +26,11 @@
   {% endif %}
 
   <div class="flex items-center gap-2 border-b border-slate-700">
-    <a href="/domains"
+    <a href="{{ pages.domains | safe }}"
        class="px-4 py-2 text-sm font-medium border-b-2 {% if active_page == "domains" %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">
       DNS
     </a>
-    <a href="/secondaries"
+    <a href="{{ pages.secondaries | safe }}"
        class="px-4 py-2 text-sm font-medium border-b-2 {% if active_page == "secondaries" %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">
       Secondary
     </a>

@@ -17,11 +17,11 @@
   </div>
 
   <div class="flex items-center gap-2 border-b border-slate-700">
-    <a href="/dhcp"
+    <a href="{{ pages.dhcp | safe }}"
        class="px-4 py-2 text-sm font-medium border-b-2 {% if active_page == "dhcp" %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">
       DHCP
     </a>
-    <a href="/secondaries"
+    <a href="{{ pages.secondaries | safe }}"
        class="px-4 py-2 text-sm font-medium border-b-2 {% if active_page == "secondaries" %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">
       Secondary
     </a>
@@ -302,7 +302,7 @@
               class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
             <p class="text-xs text-slate-500 mt-1">Kommagetrennte IPv4-Liste. Leerlassen, wenn du keinen NTP-Wert verteilen willst.</p>
             {% if ntp_auto_dhcp_active %}
-            <p class="text-xs text-amber-300 mt-1">LanCache-NG-NTP's "Als DHCP-NTP-Server automatisch eintragen" ist aktiv -- ein hier gesetzter Wert wird bei der nächsten Speicherung auf der <a href="/ntp" class="underline">NTP-Seite</a> (oder einem DHCP-Moduswechsel) wieder durch die LAN-Adresse von LanCache-NG-NTP ersetzt.</p>
+            <p class="text-xs text-amber-300 mt-1">LanCache-NG-NTP's "Als DHCP-NTP-Server automatisch eintragen" ist aktiv -- ein hier gesetzter Wert wird bei der nächsten Speicherung auf der <a href="{{ pages.ntp | safe }}" class="underline">NTP-Seite</a> (oder einem DHCP-Moduswechsel) wieder durch die LAN-Adresse von LanCache-NG-NTP ersetzt.</p>
             {% endif %}
           </div>
         </div>
@@ -397,7 +397,7 @@
                 class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
               <p class="text-xs text-slate-500 mt-1">Kommagetrennte IPv4-Adressen, z. B. <code>192.0.2.123, 192.0.2.124</code></p>
               {% if ntp_auto_dhcp_active %}
-              <p class="text-xs text-amber-300 mt-1">LanCache-NG-NTP's "Als DHCP-NTP-Server automatisch eintragen" ist aktiv -- ein hier gesetzter Wert wird bei der nächsten Speicherung auf der <a href="/ntp" class="underline">NTP-Seite</a> (oder einem DHCP-Moduswechsel) wieder durch die LAN-Adresse von LanCache-NG-NTP ersetzt.</p>
+              <p class="text-xs text-amber-300 mt-1">LanCache-NG-NTP's "Als DHCP-NTP-Server automatisch eintragen" ist aktiv -- ein hier gesetzter Wert wird bei der nächsten Speicherung auf der <a href="{{ pages.ntp | safe }}" class="underline">NTP-Seite</a> (oder einem DHCP-Moduswechsel) wieder durch die LAN-Adresse von LanCache-NG-NTP ersetzt.</p>
               {% endif %}
             </div>
           </div>

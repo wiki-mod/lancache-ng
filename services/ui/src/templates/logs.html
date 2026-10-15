@@ -27,7 +27,7 @@
        like the nginx branch's filter bar below. -->
   <div class="flex gap-3 flex-wrap">
     <select id="syslog-host-filter"
-            onchange="location.href = this.value ? ('/logs?host=' + encodeURIComponent(this.value)) : '/logs'"
+            onchange="location.href = this.value ? ('{{ pages.logs | safe }}?host=' + encodeURIComponent(this.value)) : '{{ pages.logs | safe }}'"
             class="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus:ring-blue-500">
       <option value="" {% if not selected_host %}selected{% endif %}>Alle Hosts</option>
       {% for h in syslog_hosts %}
