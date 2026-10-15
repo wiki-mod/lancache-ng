@@ -223,9 +223,9 @@ this section or the "Optional (issue #450)" one above changes.
 > wiring three new form fields through `services/ui/src/main.rs`,
 > which is a separate, larger piece of work than the setup.sh side. Until
 > that lands, changing these three values after initial setup means editing
-> the runtime env `deploy/prod/.env.local` and restarting: the dhcp-proxy
+> the runtime env `deploy/prod/.env.local` and restarting: the dhcp
 > service in `deploy/prod/docker-compose.yml` wires each of these keys as
-> `environment: - KEY=${KEY:-}`, so the running container reads the value the
+> `KEY: ${KEY:-}` in its `environment:` map, so the running container reads the value the
 > runtime env holds at `docker compose up` time. No `.env` is tracked;
 > an empty value falls back to the default in `runtime.defaults` of the SOT. A value an
 > older install set in `config/prod/dhcp-proxy.local.env` moves into the

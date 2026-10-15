@@ -687,7 +687,7 @@ rejection, the largest currently-passing value is suggested). A validated
 request does not take effect synchronously: `CACHE_MAX_SIZE` reaches the
 proxy container via the runtime env
 (`deploy/prod/docker-compose.yml`'s
-`environment: - CACHE_MAX_SIZE=${CACHE_MAX_SIZE:?...}`), which this container has
+`CACHE_MAX_SIZE: ${CACHE_MAX_SIZE:-}` in the `x-environment` map `proxy-ui`), which this container has
 no filesystem access to, and the Admin UI's Docker access deliberately has no
 exec capability to send nginx a reload signal even if it did (see
 `services/ui/src/main.rs`'s header comment). The request is instead

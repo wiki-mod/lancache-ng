@@ -14,32 +14,89 @@ x-logging: &logging
     syslog-format: rfc5424
     tag: "{{.Name}}"
 
+# What: health probe timing from the SOT for each service.
+# Why: one owner for interval, timeout, retries and start.
+# From: Issue #1683 | PR #1912
+x-healthcheck-timing: &healthcheck-timing
+  interval: ${SOT_HEALTHCHECK_INTERVAL:?SOT_HEALTHCHECK_INTERVAL is required}
+  timeout: ${SOT_HEALTHCHECK_TIMEOUT:?SOT_HEALTHCHECK_TIMEOUT is required}
+  retries: ${SOT_HEALTHCHECK_RETRIES:?SOT_HEALTHCHECK_RETRIES is required}
+  start_period: ${SOT_HEALTHCHECK_START_PERIOD:?SOT_HEALTHCHECK_START_PERIOD is required}
+
+# What: restart policy and log driver of every service.
+# Why: all five services restart and log the same way.
+# From: Issue #1683 | PR #1912
+x-service: &service
+  restart: always
+  logging: *logging
+
+# What: tini, run tmpfs, watchdog probe: supervised images.
+# Why: lancache-watchdog supervise is no init process.
+# From: Issue #1683 | PR #1912
+x-supervised: &supervised
+  init: true
+  tmpfs:
+    - ${SOT_SUPERVISE_RUN_DIR}
+  healthcheck:
+    <<: *healthcheck-timing
+    test: ["CMD", "lancache-watchdog", "healthcheck"]
+
+# What: operator values; one map per set of consumers.
+# Why: a key two services read has one line to change.
+# From: Issue #1683 | PR #1912
+x-environment:
+  stack: &env-stack
+    KEEP_KNOWN_GOOD_CONFIGS: ${KEEP_KNOWN_GOOD_CONFIGS:-}
+    IP_HTTP: ${IP_HTTP:?IP_HTTP is required}
+    IP_HTTPS: ${IP_HTTPS:?IP_HTTPS is required}
+  services-ui: &env-services-ui
+    NTP_ALLOWED_CLIENT_CIDRS: ${NTP_ALLOWED_CLIENT_CIDRS:-}
+    NETDATA_ALARM_TOKEN: ${NETDATA_ALARM_TOKEN}
+  proxy-ui: &env-proxy-ui
+    HTTPS_ENABLED: ${HTTPS_ENABLED:-}
+    CACHE_MAX_SIZE: ${CACHE_MAX_SIZE:-}
+  dns-dhcp: &env-dns-dhcp
+    DDNS_TSIG_KEY: ${DDNS_TSIG_KEY}
+  dns-dhcp-ui: &env-dns-dhcp-ui
+    DHCP_DOMAIN: ${DHCP_DOMAIN:-}
+  dns-ui: &env-dns-ui
+    PDNS_API_KEY: ${PDNS_API_KEY}
+    NATS_UI_PASSWORD: ${NATS_UI_PASSWORD:-}
+    NATS_DNS_WRITER_PASSWORD: ${NATS_DNS_WRITER_PASSWORD:-}
+    NATS_CALLOUT_PASSWORD: ${NATS_CALLOUT_PASSWORD:-}
+    NATS_SYS_PASSWORD: ${NATS_SYS_PASSWORD:-}
+  dhcp-ui: &env-dhcp-ui
+    DHCP_MODE: ${DHCP_MODE:-}
+    DHCP_NTP_SERVERS: ${DHCP_NTP_SERVERS:-}
+    DHCP_SUBNET_START: ${DHCP_SUBNET_START:-}
+    DHCP_DNS_PRIMARY: ${DHCP_DNS_PRIMARY:-}
+    DHCP_DNS_SECONDARY: ${DHCP_DNS_SECONDARY:-}
+    UPSTREAM_DHCP_IP: ${UPSTREAM_DHCP_IP:-}
+    DHCP_RELAY_LOCAL_ADDR: ${DHCP_RELAY_LOCAL_ADDR:-}
+    DHCP_PROXY_INTERFACE: ${DHCP_PROXY_INTERFACE:-}
+    DHCP_PROXY_ROUTER: ${DHCP_PROXY_ROUTER:-}
+    DHCP_PROXY_DOMAIN: ${DHCP_PROXY_DOMAIN:-}
+    DHCP_PROXY_BOOT_FILENAME: ${DHCP_PROXY_BOOT_FILENAME:-}
+    DHCP_PROXY_BOOT_SERVER: ${DHCP_PROXY_BOOT_SERVER:-}
+    DHCP_PROXY_CUSTOM_OPTIONS: ${DHCP_PROXY_CUSTOM_OPTIONS:-}
+
 services:
   # What: watchdog, syslog-ng, chronyd, netdata, retention.
   # Why: one container for every stack-wide support task.
   # From: Issue #1683
   services:
+    <<: [*service, *supervised]
     container_name: ${SOT_CONTAINER_NAME_SERVICES}
     image: ${LANCACHE_IMAGE_REF_SERVICES:?LANCACHE_IMAGE_REF_SERVICES is required}
-    # What: tini as PID 1 reaps the supervisor's children.
-    # Why: lancache-watchdog supervise is no init process.
-    # From: Issue #1683
-    init: true
     environment:
+      <<: *env-services-ui
       # What: operator values; the defaults are baked in.
       # Why: the SOT owns each default; no value copy here.
       # From: Issue #1683
-      - NTP_ENABLED=${NTP_ENABLED:-}
-      - NTP_ALLOWED_CLIENT_CIDRS=${NTP_ALLOWED_CLIENT_CIDRS:-}
-      - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
-      - CACHEHAMSTER_URLS=${CACHEHAMSTER_URLS:-}
-      - CACHE_VALID_DAYS=${CACHE_VALID_DAYS:-}
-      - NTP_UPSTREAM_SERVERS=${NTP_UPSTREAM_SERVERS:-}
-    # What: rendered syslog-ng, chrony and status files.
-    # Why: each start renders fresh; nothing survives.
-    # From: Issue #1683
-    tmpfs:
-      - ${SOT_SUPERVISE_RUN_DIR}
+      NTP_ENABLED: ${NTP_ENABLED:-}
+      CACHEHAMSTER_URLS: ${CACHEHAMSTER_URLS:-}
+      CACHE_VALID_DAYS: ${CACHE_VALID_DAYS:-}
+      NTP_UPSTREAM_SERVERS: ${NTP_UPSTREAM_SERVERS:-}
     # What: the log input on loopback; NTP for the LAN.
     # Why: only the local Docker daemon may send log lines.
     # From: Issue #1683
@@ -51,8 +108,11 @@ services:
       # Why: no socket proxy; the supervisor drops the rest.
       # From: Issue #1683
       - ${SOT_DOCKER_SOCKET}:${SOT_DOCKER_SOCKET}
-      - shared-secrets:${SOT_LANCACHE_SHARED_SECRET_DIR}
-      - ui-data:${SOT_UI_DATA_DIR}:ro
+      # What: mounts that several services share, one text each.
+      # Why: a changed path or mode has one line to change.
+      # From: Issue #1683 | PR #1912
+      - &mount-secrets shared-secrets:${SOT_LANCACHE_SHARED_SECRET_DIR}
+      - &mount-ui-data-ro ui-data:${SOT_UI_DATA_DIR}:ro
       - watchdog-status:${SOT_STATUS_DIR}
       - proxy-cache:${SOT_CACHE_DIR}
       - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_SYSLOG_NG}}:${SOT_SYSLOG_LOG_ROOT}
@@ -62,6 +122,8 @@ services:
       - netdataconfig:${SOT_NETDATA_CONFIG_DIR}
       - netdatalib:${SOT_NETDATA_LIB_DIR}
       - netdatacache:${SOT_NETDATA_CACHE_DIR}
+    # What: no capabilities except the list below.
+    # Why: the container holds the Docker socket.
     cap_drop:
       - ALL
     # What: capabilities the supervised processes need.
@@ -78,92 +140,63 @@ services:
       - NET_BIND_SERVICE
       - SYS_TIME
       - SYS_PTRACE
-    healthcheck:
-      test: ["CMD", "lancache-watchdog", "healthcheck"]
-      interval: ${SOT_HEALTHCHECK_INTERVAL:?SOT_HEALTHCHECK_INTERVAL is required}
-      timeout: ${SOT_HEALTHCHECK_TIMEOUT:?SOT_HEALTHCHECK_TIMEOUT is required}
-      retries: ${SOT_HEALTHCHECK_RETRIES:?SOT_HEALTHCHECK_RETRIES is required}
-      start_period: ${SOT_HEALTHCHECK_START_PERIOD:?SOT_HEALTHCHECK_START_PERIOD is required}
-    restart: always
-    logging: *logging
 
   # What: nginx cache; the http and https side in one.
   # Why: the passthrough port relays SNI; 443 intercepts.
   proxy:
+    <<: [*service, *supervised]
     container_name: ${SOT_CONTAINER_NAME_PROXY}
     image: ${LANCACHE_IMAGE_REF_PROXY:?LANCACHE_IMAGE_REF_PROXY is required}
-    init: true
     environment:
-      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
-      - IP_HTTP=${IP_HTTP}
-      - IP_HTTPS=${IP_HTTPS}
-      - HTTPS_ENABLED=${HTTPS_ENABLED:-}
+      <<: [*env-stack, *env-proxy-ui]
       # What: per-install values from the operator .env
       # Why: .env is the one owner of operator values.
       # From: Issue #1683
-      - CACHE_MAX_SIZE=${CACHE_MAX_SIZE:-}
-      - CACHE_MEM_MB=${CACHE_MEM_MB:-}
-      - NGINX_UPSTREAM_RESOLVER=${NGINX_UPSTREAM_RESOLVER:-}
-      - PROXY_SECURITY_MODE=${PROXY_SECURITY_MODE:-}
-      - PROXY_ALLOWED_CLIENT_CIDRS=${PROXY_ALLOWED_CLIENT_CIDRS:-}
-      - CACHE_SLICE_SIZE=${CACHE_SLICE_SIZE:-}
-      - CACHE_VALID_ANY=${CACHE_VALID_ANY:-}
-      - CACHE_VALID_HIT=${CACHE_VALID_HIT:-}
-      - CACHE_INACTIVE=${CACHE_INACTIVE:-}
-      - CACHE_MIN_FREE=${CACHE_MIN_FREE:-}
+      CACHE_MEM_MB: ${CACHE_MEM_MB:-}
+      NGINX_UPSTREAM_RESOLVER: ${NGINX_UPSTREAM_RESOLVER:-}
+      PROXY_SECURITY_MODE: ${PROXY_SECURITY_MODE:-}
+      PROXY_ALLOWED_CLIENT_CIDRS: ${PROXY_ALLOWED_CLIENT_CIDRS:-}
+      CACHE_SLICE_SIZE: ${CACHE_SLICE_SIZE:-}
+      CACHE_VALID_ANY: ${CACHE_VALID_ANY:-}
+      CACHE_VALID_HIT: ${CACHE_VALID_HIT:-}
+      CACHE_INACTIVE: ${CACHE_INACTIVE:-}
+      CACHE_MIN_FREE: ${CACHE_MIN_FREE:-}
     volumes:
       - ${CA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_CA}}:${SOT_NGINX_DIR}/${SOT_NGINX_SUBDIR_CA}
-      - ../../services/dns/cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}
+      - &mount-cdn-domains ../../services/dns/cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}
       - proxy-cache:${SOT_NGINX_CACHE_DIR}
       - proxy-certs:${SOT_NGINX_DIR}/${SOT_NGINX_SUBDIR_CERTS}
       - proxy-config-snapshots:${SOT_PROXY_SNAPSHOT_MOUNT}
-    tmpfs:
-      - ${SOT_SUPERVISE_RUN_DIR}
+    # What: port 80 on both IPs; 443 passthrough or MITM.
+    # Why: IP_HTTP relays TLS, IP_HTTPS intercepts it.
     ports:
       - "${IP_HTTP}:80:80"
       - "${IP_HTTP}:443:${SOT_NGINX_PASSTHROUGH_PORT}"
       - "${IP_HTTPS}:80:80"
       - "${IP_HTTPS}:443:443"
-    healthcheck:
-      test: ["CMD", "lancache-watchdog", "healthcheck"]
-      interval: ${SOT_HEALTHCHECK_INTERVAL:?SOT_HEALTHCHECK_INTERVAL is required}
-      timeout: ${SOT_HEALTHCHECK_TIMEOUT:?SOT_HEALTHCHECK_TIMEOUT is required}
-      retries: ${SOT_HEALTHCHECK_RETRIES:?SOT_HEALTHCHECK_RETRIES is required}
-      start_period: ${SOT_HEALTHCHECK_START_PERIOD:?SOT_HEALTHCHECK_START_PERIOD is required}
-    restart: always
-    logging: *logging
 
   # What: PowerDNS auth, dns-http, dns-https, NATS.
   # Why: one container answers on IP_HTTP and IP_HTTPS.
   # From: Issue #1683
   dns:
+    <<: [*service, *supervised]
     container_name: ${SOT_CONTAINER_NAME_DNS}
     image: ${LANCACHE_IMAGE_REF_DNS:?LANCACHE_IMAGE_REF_DNS is required}
-    init: true
     environment:
-      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
-      - IP_HTTP=${IP_HTTP:?IP_HTTP is required}
-      - IP_HTTPS=${IP_HTTPS:?IP_HTTPS is required}
-      - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
-      - PDNS_API_KEY=${PDNS_API_KEY}
-      - NATS_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-}
-      - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:-}
-      - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-}
-      - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-}
-      - NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD:-}
-      - LOG_QUERIES=${LOG_QUERIES:-}
-      - ROOT_ZONE_MIRROR=${ROOT_ZONE_MIRROR:-}
-      - DHCP_DOMAIN=${DHCP_DOMAIN:-}
+      <<: [*env-stack, *env-dns-dhcp, *env-dns-dhcp-ui, *env-dns-ui]
+      # What: the dns NATS login is the DNS writer account.
+      # Why: the subscriber publishes zone writes as writer.
+      NATS_PASSWORD: ${NATS_DNS_WRITER_PASSWORD:-}
+      LOG_QUERIES: ${LOG_QUERIES:-}
+      ROOT_ZONE_MIRROR: ${ROOT_ZONE_MIRROR:-}
     volumes:
-      - shared-secrets:${SOT_LANCACHE_SHARED_SECRET_DIR}
-      - ../../services/dns/cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}
+      - *mount-secrets
+      - *mount-cdn-domains
       - ${PDNS_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_PDNS}}:${SOT_PDNS_DATA_DIR}
-      - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_PDNS_FILTER}}:${SOT_DNS_STATE_DIR}
+      - &mount-pdns-filter ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_PDNS_FILTER}}:${SOT_DNS_STATE_DIR}
       - ${NATS_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_NATS}}:${SOT_NATS_STORE_DIR}
-      - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_NATS_CONF}}:${SOT_NATS_CONF_MOUNT}
+      - &mount-nats-conf ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_NATS_CONF}}:${SOT_NATS_CONF_MOUNT}
       - dns-config-snapshots:${SOT_DNS_SNAPSHOT_MOUNT}
-    tmpfs:
-      - ${SOT_SUPERVISE_RUN_DIR}
     # What: dns-http on IP_HTTP, dns-https on IP_HTTPS.
     # Why: one container port each keeps the caches apart.
     # From: Issue #1683
@@ -181,124 +214,71 @@ services:
       # Why: NATS_BIND_IP opts in; no second compose file.
       # From: Issue #1683 | PR #1912
       - "${NATS_BIND_IP:-${SOT_LOOPBACK_BIND_IP}}:${SOT_NATS_PORT}:${SOT_NATS_PORT}"
-    healthcheck:
-      test: ["CMD", "lancache-watchdog", "healthcheck"]
-      interval: ${SOT_HEALTHCHECK_INTERVAL:?SOT_HEALTHCHECK_INTERVAL is required}
-      timeout: ${SOT_HEALTHCHECK_TIMEOUT:?SOT_HEALTHCHECK_TIMEOUT is required}
-      retries: ${SOT_HEALTHCHECK_RETRIES:?SOT_HEALTHCHECK_RETRIES is required}
-      start_period: ${SOT_HEALTHCHECK_START_PERIOD:?SOT_HEALTHCHECK_START_PERIOD is required}
-    restart: always
-    logging: *logging
 
   # What: Kea or dnsmasq proxy/relay, one mode at a time.
   # Why: DHCP needs the host network for broadcasts.
   # From: Issue #1683
   dhcp:
+    <<: [*service, *supervised]
     container_name: ${SOT_CONTAINER_NAME_DHCP}
     image: ${LANCACHE_IMAGE_REF_DHCP:?LANCACHE_IMAGE_REF_DHCP is required}
-    init: true
     environment:
-      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
-      - DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS:-}
-      - DHCP_MODE=${DHCP_MODE:-}
-      - IP_HTTP=${IP_HTTP}
-      - IP_HTTPS=${IP_HTTPS}
-      - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
-      - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
-      - DHCP_DOMAIN=${DHCP_DOMAIN:-}
-      - DHCP_DDNS_ENABLED=${DHCP_DDNS_ENABLED:-}
-      - DHCP_SUBNET=${DHCP_SUBNET:-}
-      - DHCP_RANGE_START=${DHCP_RANGE_START:-}
-      - DHCP_RANGE_END=${DHCP_RANGE_END:-}
-      - DHCP_GATEWAY=${DHCP_GATEWAY:-}
-      - DHCP_SUBNET_START=${DHCP_SUBNET_START:-}
-      - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-}
-      - DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-}
-      - UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP:-}
-      - DHCP_RELAY_LOCAL_ADDR=${DHCP_RELAY_LOCAL_ADDR:-}
-      - DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE:-}
-      - DHCP_PROXY_ROUTER=${DHCP_PROXY_ROUTER:-}
-      - DHCP_PROXY_DOMAIN=${DHCP_PROXY_DOMAIN:-}
-      - DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME:-}
-      - DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER:-}
-      - DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}
-      - DHCP_PROXY_PXE_BOOT_SERVER=${DHCP_PROXY_PXE_BOOT_SERVER:-}
-      - DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS:-}
-      - DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI:-}
+      <<: [*env-stack, *env-dns-dhcp, *env-dns-dhcp-ui, *env-dhcp-ui]
+      # What: Kea API token, DDNS switch, pool and PXE values.
+      # Why: only the DHCP daemons read these keys.
+      KEA_CTRL_TOKEN: ${KEA_CTRL_TOKEN}
+      DHCP_DDNS_ENABLED: ${DHCP_DDNS_ENABLED:-}
+      DHCP_SUBNET: ${DHCP_SUBNET:-}
+      DHCP_RANGE_START: ${DHCP_RANGE_START:-}
+      DHCP_RANGE_END: ${DHCP_RANGE_END:-}
+      DHCP_GATEWAY: ${DHCP_GATEWAY:-}
+      DHCP_PROXY_PXE_BOOT_SERVER: ${DHCP_PROXY_PXE_BOOT_SERVER:-}
+      DHCP_PROXY_PXE_BOOT_FILENAME_BIOS: ${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS:-}
+      DHCP_PROXY_PXE_BOOT_FILENAME_UEFI: ${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI:-}
     volumes:
-      - shared-secrets:${SOT_LANCACHE_SHARED_SECRET_DIR}
-      - ui-data:${SOT_UI_DATA_DIR}:ro
-      - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_KEA}}:${SOT_KEA_DATA_DIR}
+      - *mount-secrets
+      - *mount-ui-data-ro
+      - &mount-kea-data ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_KEA}}:${SOT_KEA_DATA_DIR}
       - dhcp-config-snapshots:${SOT_DHCP_SNAPSHOT_MOUNT}
-    tmpfs:
-      - ${SOT_SUPERVISE_RUN_DIR}
     network_mode: host
+    # What: bind DHCP ports and change network settings.
+    # Why: Kea and dnsmasq run on the host network.
     cap_add:
       - NET_BIND_SERVICE
       - NET_ADMIN
-    healthcheck:
-      test: ["CMD", "lancache-watchdog", "healthcheck"]
-      interval: ${SOT_HEALTHCHECK_INTERVAL:?SOT_HEALTHCHECK_INTERVAL is required}
-      timeout: ${SOT_HEALTHCHECK_TIMEOUT:?SOT_HEALTHCHECK_TIMEOUT is required}
-      retries: ${SOT_HEALTHCHECK_RETRIES:?SOT_HEALTHCHECK_RETRIES is required}
-      start_period: ${SOT_HEALTHCHECK_START_PERIOD:?SOT_HEALTHCHECK_START_PERIOD is required}
-    restart: always
-    logging: *logging
 
   # What: Admin UI; sets desired state, never containers.
   # Why: the watchdog is the one control owner.
   # From: Issue #1683
   ui:
+    <<: *service
     container_name: ${SOT_CONTAINER_NAME_UI}
     image: ${LANCACHE_IMAGE_REF_UI:?LANCACHE_IMAGE_REF_UI is required}
     environment:
-      - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
-      - NTP_ALLOWED_CLIENT_CIDRS=${NTP_ALLOWED_CLIENT_CIDRS:-}
-      - HTTPS_ENABLED=${HTTPS_ENABLED:-}
-      - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
-      - CACHE_MAX_GB=${CACHE_MAX_GB:-}
-      - CACHE_MAX_SIZE=${CACHE_MAX_SIZE:-}
-      - IP_HTTP=${IP_HTTP}
-      - IP_HTTPS=${IP_HTTPS}
-      - LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY:?LANCACHE_IMAGE_REGISTRY is required}
-      - LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX:?LANCACHE_IMAGE_PREFIX is required}
-      - LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL:-}
-      - LANCACHE_IMAGE_TAG=${LANCACHE_IMAGE_TAG:?LANCACHE_IMAGE_TAG is required}
-      - UI_AUTH_USER=${UI_AUTH_USER:-}
-      - UI_AUTH_PASSWORD_HASH=${UI_AUTH_PASSWORD_HASH:-}
-      - ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI:-}
-      - UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS:-}
-      - DHCP_MODE=${DHCP_MODE:-}
-      - DHCP_DOMAIN=${DHCP_DOMAIN:-}
-      - DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS:-}
-      - DHCP_SUBNET_START=${DHCP_SUBNET_START:-}
-      - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-}
-      - DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-}
-      - UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP:-}
-      - DHCP_RELAY_LOCAL_ADDR=${DHCP_RELAY_LOCAL_ADDR:-}
-      - DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE:-}
-      - DHCP_PROXY_ROUTER=${DHCP_PROXY_ROUTER:-}
-      - DHCP_PROXY_DOMAIN=${DHCP_PROXY_DOMAIN:-}
-      - DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME:-}
-      - DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER:-}
-      - DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}
-      - DHCP_API_TOKEN=${KEA_CTRL_TOKEN}
-      - PDNS_API_KEY=${PDNS_API_KEY}
-      - NATS_BIND_IP=${NATS_BIND_IP:-}
-      - NATS_ADVERTISE_URL=${NATS_ADVERTISE_URL:-}
-      - NATS_UI_PASSWORD=${NATS_UI_PASSWORD:-}
-      - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-}
-      - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-}
-      - NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD:-}
-      - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
+      <<: [*env-stack, *env-services-ui, *env-proxy-ui, *env-dns-dhcp-ui, *env-dns-ui, *env-dhcp-ui]
+      # What: image identity, login, NATS and Kea API values.
+      # Why: only the Admin UI reads these keys.
+      CACHE_MAX_GB: ${CACHE_MAX_GB:-}
+      LANCACHE_IMAGE_REGISTRY: ${LANCACHE_IMAGE_REGISTRY:?LANCACHE_IMAGE_REGISTRY is required}
+      LANCACHE_IMAGE_PREFIX: ${LANCACHE_IMAGE_PREFIX:?LANCACHE_IMAGE_PREFIX is required}
+      LANCACHE_IMAGE_CHANNEL: ${LANCACHE_IMAGE_CHANNEL:-}
+      LANCACHE_IMAGE_TAG: ${LANCACHE_IMAGE_TAG:?LANCACHE_IMAGE_TAG is required}
+      UI_AUTH_USER: ${UI_AUTH_USER:-}
+      UI_AUTH_PASSWORD_HASH: ${UI_AUTH_PASSWORD_HASH:-}
+      ALLOW_INSECURE_UI: ${ALLOW_INSECURE_UI:-}
+      UI_SESSION_TTL_SECONDS: ${UI_SESSION_TTL_SECONDS:-}
+      DHCP_API_TOKEN: ${KEA_CTRL_TOKEN}
+      NATS_BIND_IP: ${NATS_BIND_IP:-}
+      NATS_ADVERTISE_URL: ${NATS_ADVERTISE_URL:-}
+      SECONDARY_REGISTRATION_TOKEN: ${SECONDARY_REGISTRATION_TOKEN}
     volumes:
-      - shared-secrets:${SOT_LANCACHE_SHARED_SECRET_DIR}
+      - *mount-secrets
       - ui-data:${SOT_UI_DATA_DIR}
-      - ../../services/dns/cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}
+      - *mount-cdn-domains
       - proxy-cache:${SOT_CACHE_DIR}:ro
-      - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_PDNS_FILTER}}:${SOT_DNS_STATE_DIR}
-      - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_NATS_CONF}}:${SOT_NATS_CONF_MOUNT}
-      - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_KEA}}:${SOT_KEA_DATA_DIR}
+      - *mount-pdns-filter
+      - *mount-nats-conf
+      - *mount-kea-data
       - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_SYSLOG_NG}}:${SOT_SYSLOG_LOG_ROOT}:ro
       - watchdog-status:${SOT_STATUS_DIR}:ro
     # What: Admin UI on UI_BIND_IP, default IP_HTTP.
@@ -311,15 +291,14 @@ services:
     # From: Issue #1683 | PR #1912
     extra_hosts:
       - "${SOT_DHCP_API_HOST}:host-gateway"
+    # What: the UI probes itself; no supervisor runs here.
+    # Why: the UI image has no lancache-watchdog binary.
     healthcheck:
+      <<: *healthcheck-timing
       test: ["CMD", "lancache-ui", "healthcheck"]
-      interval: ${SOT_HEALTHCHECK_INTERVAL:?SOT_HEALTHCHECK_INTERVAL is required}
-      timeout: ${SOT_HEALTHCHECK_TIMEOUT:?SOT_HEALTHCHECK_TIMEOUT is required}
-      retries: ${SOT_HEALTHCHECK_RETRIES:?SOT_HEALTHCHECK_RETRIES is required}
-      start_period: ${SOT_HEALTHCHECK_START_PERIOD:?SOT_HEALTHCHECK_START_PERIOD is required}
-    restart: always
-    logging: *logging
 
+# What: named volumes; proxy-cache binds the cache dir.
+# Why: the cache lives on the operator's chosen disk.
 volumes:
   shared-secrets:
   proxy-cache:
