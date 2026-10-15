@@ -8,7 +8,7 @@
 {# Why: one class string and active rule for all tabs #}
 {# From: Issue #1683 | PR #1912 #}
 {% component section_tab(href, label, active) %}<a href="{{ href | safe }}"
-       class="px-4 py-2 text-sm font-medium border-b-2 {% if active %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">{{ label }}</a>{% endcomponent section_tab %}
+       class="tab {% if active %}active{% endif %}">{{ label }}</a>{% endcomponent section_tab %}
 {# What: tab bar of the DHCP, DNS and Secondary pages #}
 {# Why: one copy; Secondary tab same on each page #}
 {# From: Issue #1683 | PR #1912 #}
@@ -28,7 +28,11 @@
 {# Why: one markup for setup and Secondary copy buttons #}
 {# From: Issue #1683 | PR #1912 #}
 {% component copy_button(target, extra_class="") %}<button type="button" onclick="copyText('{{ target }}', this)"
-                class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors {{ extra_class }}">Kopieren</button>{% endcomponent copy_button %}
+                class="btn btn-sm btn-slate absolute top-2 right-2 {{ extra_class }}">Kopieren</button>{% endcomponent copy_button %}
+{# What: on/off badge, "aktiv" or "inaktiv" #}
+{# Why: one markup for the DHCP-DDNS and NTP state #}
+{# From: Issue #1683 | PR #1912 #}
+{% component on_off_badge(on) %}<span class="{% if on %}badge-on{% else %}badge-off{% endif %}">{% if on %}aktiv{% else %}inaktiv{% endif %}</span>{% endcomponent on_off_badge %}
 {# What: one sidebar link: icon path(s), label, active #}
 {# Why: one markup and active rule for all eight links #}
 {# From: Issue #1683 | PR #1912 #}
@@ -154,11 +158,11 @@
       border-left-color: var(--color-accent-gold); font-weight: 600;
     }
     .card { background: var(--color-surface); border-radius: 0.75rem; border: 1px solid var(--color-border); padding: 1.25rem; }
-    .badge-hit     { background: rgba(16,185,129,0.2); color: #34d399; }
+    .badge-hit, .badge-on { background: rgba(16,185,129,0.2); color: #34d399; }
     .badge-miss    { background: var(--color-accent-coral-soft); color: var(--color-accent-coral); }
     .badge-expired { background: rgba(234,179,8,0.2);  color: #facc15; }
-    .badge-other   { background: rgba(100,116,139,0.2); color: var(--color-text-muted); }
-    .badge-hit, .badge-miss, .badge-expired, .badge-other {
+    .badge-other, .badge-off { background: rgba(100,116,139,0.2); color: var(--color-text-muted); }
+    .badge-hit, .badge-miss, .badge-expired, .badge-other, .badge-on, .badge-off {
       font-size: 0.7rem; font-weight: 700; padding: 0.15rem 0.45rem;
       border-radius: 0.25rem; display: inline-block; line-height: 1.4;
     }
@@ -198,6 +202,42 @@
       cursor: pointer;
     }
     .theme-toggle:hover { color: var(--color-text); border-color: var(--color-accent-gold); }
+
+    /* What: buttons (size, colour), tabs, table head cells
+       Why: one owner for styles repeated across the pages
+       From: Issue #1683 | PR #1912 */
+    .btn {
+      display: inline-block; font-size: 0.875rem; line-height: 1.25rem; font-weight: 500;
+      padding: 0.5rem 1rem; border-radius: 0.5rem; color: #ffffff;
+      transition: background-color 0.15s, color 0.15s;
+    }
+    .btn-sm { font-size: 0.75rem; line-height: 1rem; font-weight: 400; padding: 0.25rem 0.5rem; border-radius: 0.25rem; }
+    .btn-blue  { background: #2563eb; } .btn-blue:hover  { background: #3b82f6; }
+    .btn-green { background: #16a34a; } .btn-green:hover { background: #22c55e; }
+    .btn-amber { background: #d97706; } .btn-amber:hover { background: #f59e0b; }
+    .btn-sky   { background: #0284c7; } .btn-sky:hover   { background: #0ea5e9; }
+    .btn-slate { background: #475569; } .btn-slate:hover { background: #64748b; }
+    .btn-danger { background: #7f1d1d; color: #fecaca; } .btn-danger:hover { background: #991b1b; }
+    .btn-warn   { background: #78350f; color: #fef3c7; } .btn-warn:hover   { background: #92400e; }
+    .btn-ghost-red   { background: transparent; color: #f87171; }
+    .btn-ghost-red:hover   { background: rgba(239, 68, 68, 0.1); color: #fca5a5; }
+    .btn-ghost-amber { background: transparent; color: #fbbf24; }
+    .btn-ghost-amber:hover { background: rgba(245, 158, 11, 0.1); color: #fcd34d; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-blue:disabled:hover { background: #2563eb; }
+    .tab {
+      padding: 0.5rem 1rem; font-size: 0.875rem; line-height: 1.25rem; font-weight: 500;
+      border-bottom: 2px solid transparent; color: var(--color-text-muted);
+    }
+    .tab:hover { color: var(--color-text); }
+    .tab.active { border-bottom-color: #3b82f6; color: #93c5fd; }
+    .th { text-align: left; padding: 0.5rem 0; color: #cbd5e1; }
+    :root[data-theme="light"] .btn-slate { background-color: var(--color-surface-raised); color: var(--color-text); }
+    :root[data-theme="light"] .th { color: var(--color-text); }
+    @media (prefers-color-scheme: light) {
+      :root:not([data-theme="dark"]) .btn-slate { background-color: var(--color-surface-raised); color: var(--color-text); }
+      :root:not([data-theme="dark"]) .th { color: var(--color-text); }
+    }
   </style>
 </head>
 <body class="h-full flex">
