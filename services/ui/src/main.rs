@@ -631,6 +631,35 @@ struct AppState {
     ui_session_ttl: Duration,
 }
 
+impl AppState {
+    // What: state from its inputs; locks start free.
+    // Why: one owner for the server and the test server.
+    // From: Issue #1683 | PR #1912
+    fn new(
+        config: Config,
+        http_client: reqwest::Client,
+        nats: async_nats::Client,
+        db: Connection,
+        ui_session_secret: [u8; 32],
+        ui_session_ttl: Duration,
+    ) -> Self {
+        Self {
+            templates: load_templates(&config),
+            pdns: PowerDns::new(http_client.clone(), config.pdns_api_key.clone()),
+            http_client,
+            file_lock: Mutex::new(()),
+            netdata_alarms_lock: Mutex::new(()),
+            kea_config_lock: tokio::sync::Mutex::new(()),
+            dhcp_probe_lock: tokio::sync::Mutex::new(()),
+            nats,
+            db: Mutex::new(db),
+            ui_session_secret,
+            ui_session_ttl,
+            config,
+        }
+    }
+}
+
 // What: handler state extractor over the shared AppState.
 // Why: every handler takes the same Arc-wrapped state.
 type Shared = State<Arc<AppState>>;
@@ -5977,20 +6006,9 @@ async fn run() -> anyhow::Result<()> {
     }
     let nats = connect_nats_with_retry(&cfg).await;
     let http = http_client(&config::process_env).map_err(anyhow::Error::msg)?;
-    let state = Arc::new(AppState {
-        templates: load_templates(&cfg),
-        http_client: http.clone(),
-        pdns: PowerDns::new(http, cfg.pdns_api_key.clone()),
-        file_lock: Mutex::new(()),
-        netdata_alarms_lock: Mutex::new(()),
-        kea_config_lock: tokio::sync::Mutex::new(()),
-        dhcp_probe_lock: tokio::sync::Mutex::new(()),
-        nats,
-        db: Mutex::new(open_database(&cfg.database_file)?),
-        ui_session_secret: load_or_create_hex::<32>(Path::new(&cfg.session_secret_file))?,
-        ui_session_ttl,
-        config: cfg,
-    });
+    let db = open_database(&cfg.database_file)?;
+    let secret = load_or_create_hex::<32>(Path::new(&cfg.session_secret_file))?;
+    let state = Arc::new(AppState::new(cfg, http, nats, db, secret, ui_session_ttl));
     // What: answer auth-callout requests while running.
     // Why: secondaries are checked per connect; no reload.
     tokio::spawn(run_auth_callout(state.clone(), issuer, xkey));
@@ -8965,20 +8983,15 @@ mod tests {
             .connect("nats://127.0.0.1:1")
             .await
             .unwrap();
-        let state = Arc::new(AppState {
-            templates: load_templates(&cfg),
-            http_client: http.clone(),
-            pdns: PowerDns::new(http, cfg.pdns_api_key.clone()),
-            file_lock: Mutex::new(()),
-            netdata_alarms_lock: Mutex::new(()),
-            kea_config_lock: tokio::sync::Mutex::new(()),
-            dhcp_probe_lock: tokio::sync::Mutex::new(()),
+        let db = open_database(&dir.join("ui.db").to_string_lossy()).unwrap();
+        let state = Arc::new(AppState::new(
+            cfg,
+            http,
             nats,
-            db: Mutex::new(open_database(&dir.join("ui.db").to_string_lossy()).unwrap()),
-            ui_session_secret: [9u8; 32],
-            ui_session_ttl: Duration::from_secs(3600),
-            config: cfg,
-        });
+            db,
+            [9u8; 32],
+            Duration::from_secs(3600),
+        ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(axum::serve(listener, router(state.clone())).into_future());
