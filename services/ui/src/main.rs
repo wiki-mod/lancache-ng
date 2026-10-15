@@ -4237,14 +4237,10 @@ async fn update_dhcp_proxy(
             .filter(|s| !s.is_empty())
             .all(address)
     }
-    let required: [(&str, &str); 3] = [
+    let required: [(&str, &str); 2] = [
         (
             "dhcp_subnet_start",
             "Invalid relay subnet start: must be an IPv4 address.",
-        ),
-        (
-            "dhcp_dns_primary",
-            "Invalid primary DNS: must be an IPv4 address.",
         ),
         (
             "upstream_dhcp_ip",
@@ -4257,8 +4253,13 @@ async fn update_dhcp_proxy(
         }
     }
     // What: check optional fields only when filled.
-    // Why: blank means no dnsmasq.conf directive.
-    let optional: [(&str, &str, Check); 7] = [
+    // Why: blank takes config::dhcp_dns_fallback.
+    let optional: [(&str, &str, Check); 8] = [
+        (
+            "dhcp_dns_primary",
+            "Invalid primary DNS: must be an IPv4 address.",
+            address,
+        ),
         (
             "dhcp_dns_secondary",
             "Invalid secondary DNS: must be an IPv4 address.",
@@ -10698,7 +10699,7 @@ mod tests {
         };
         let cases: [(&[(&str, &str)], &str); 11] = [
             (&[("dhcp_subnet_start", "x")], "Invalid relay subnet start"),
-            (&[("dhcp_dns_primary", "")], "Invalid primary DNS"),
+            (&[("dhcp_dns_primary", "x")], "Invalid primary DNS"),
             (
                 &[("upstream_dhcp_ip", "1.2.3")],
                 "Invalid upstream DHCP server",
