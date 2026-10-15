@@ -4,9 +4,10 @@
 {# What: dashboard page: health, DHCP, cache, logs #}
 {# Why: extends base.html for the shared layout #}
 {% extends "base.html" %}
-{% component proxy_card(title, subtitle, prefix, status, enabled) %}{# What: one proxy card (HTTP or HTTPS) with its three live counters
-   Why: one copy of header, grid and fallback texts; ids stay prefix-active/-requests/-waiting for the refresh script
-   From: Issue #1683 | PR #1912 #}<div class="card">
+{# What: one proxy card (HTTP or HTTPS), three counters #}
+{# Why: one copy; ids prefix-* feed the refresh script #}
+{# From: Issue #1683 | PR #1912 #}
+{% component proxy_card(title, subtitle, prefix, status, enabled) %}<div class="card">
       <div class="flex items-center justify-between mb-3">
         <h2 class="font-semibold text-slate-200">{{ title }}</h2>
         <span class="text-xs text-slate-500">{{ subtitle }}</span>

@@ -3,19 +3,22 @@
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
 {# What: root layout: dock nav, beambar, admin.css #}
 {# Why: child templates extend it and override the blocks #}
-{% component section_tab(href, label, active) %}{# What: one link of the section tab bar
-   Why: one class string and one active rule for every tab
-   From: Issue #1683 | PR #1912 #}<a href="{{ href | safe }}"
+{# What: one link of the section tab bar #}
+{# Why: one class string and active rule for all tabs #}
+{# From: Issue #1683 | PR #1912 #}
+{% component section_tab(href, label, active) %}<a href="{{ href | safe }}"
        class="px-4 py-2 text-sm font-medium border-b-2 {% if active %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">{{ label }}</a>{% endcomponent section_tab %}
-{% component section_tabs(main_href, main_label, main_page, active_page, secondaries_href) %}{# What: section tab bar on the DHCP, DNS and Secondary pages
-   Why: one copy of the bar; the Secondary link is the same on every page
-   From: Issue #1683 | PR #1912 #}<div class="flex items-center gap-2 border-b border-slate-700">
+{# What: tab bar of the DHCP, DNS and Secondary pages #}
+{# Why: one copy; Secondary tab same on each page #}
+{# From: Issue #1683 | PR #1912 #}
+{% component section_tabs(main_href, main_label, main_page, active_page, secondaries_href) %}<div class="flex items-center gap-2 border-b border-slate-700">
     {{ <section_tab href={main_href} label={main_label} active={active_page == main_page}/> }}
     {{ <section_tab href={secondaries_href} label="Secondary" active={active_page == "secondaries"}/> }}
   </div>{% endcomponent section_tabs %}
-{% component restart_ui_form(action, csrf_token, button_class, label, title=none) %}{# What: Admin-UI restart form, asks for confirm() first
-   Why: the process exits and compose relaunches it; one copy for the top bar and the setup page
-   From: Issue #1437 | Issue #1486 | PR #1912 #}<form method="post" action="{{ action | safe }}"
+{# What: Admin-UI restart form; confirm() before submit #}
+{# Why: UI exits, compose restarts it; top bar and setup #}
+{# From: Issue #1683 | PR #1912 #}
+{% component restart_ui_form(action, csrf_token, button_class, label, title=none) %}<form method="post" action="{{ action | safe }}"
               onsubmit="return confirm('Admin-UI wirklich neu starten? Die Seite ist danach kurz nicht erreichbar.')">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button type="submit" class="{{ button_class }}"{% if title is not none %} title="{{ title }}"{% endif %}>{{ label }}</button>
@@ -444,7 +447,7 @@
     window.LancacheWatchdog.refresh();
     setInterval(window.LancacheWatchdog.refresh, 10000);
 
-    // What: shows each [data-epoch] value as de-DE date and time
+    // What: each [data-epoch] value as de-DE date and time
     // Why: one owner for every page; 0 or junk stays raw
     // From: Issue #1683 | PR #1912
     (function () {

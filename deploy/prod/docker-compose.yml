@@ -108,7 +108,7 @@ services:
       # Why: no socket proxy; the supervisor drops the rest.
       # From: Issue #1683
       - ${SOT_DOCKER_SOCKET}:${SOT_DOCKER_SOCKET}
-      # What: mounts that several services share, one text each.
+      # What: mounts several services share, one text each.
       # Why: a changed path or mode has one line to change.
       # From: Issue #1683 | PR #1912
       - &mount-secrets shared-secrets:${SOT_LANCACHE_SHARED_SECRET_DIR}
@@ -224,7 +224,7 @@ services:
     image: ${LANCACHE_IMAGE_REF_DHCP:?LANCACHE_IMAGE_REF_DHCP is required}
     environment:
       <<: [*env-stack, *env-dns-dhcp, *env-dns-dhcp-ui, *env-dhcp-ui]
-      # What: Kea API token, DDNS switch, pool and PXE values.
+      # What: Kea token, DDNS switch, pool and PXE values.
       # Why: only the DHCP daemons read these keys.
       KEA_CTRL_TOKEN: ${KEA_CTRL_TOKEN}
       DHCP_DDNS_ENABLED: ${DHCP_DDNS_ENABLED:-}
@@ -256,7 +256,7 @@ services:
     image: ${LANCACHE_IMAGE_REF_UI:?LANCACHE_IMAGE_REF_UI is required}
     environment:
       <<: [*env-stack, *env-services-ui, *env-proxy-ui, *env-dns-dhcp-ui, *env-dns-ui, *env-dhcp-ui]
-      # What: image identity, login, NATS and Kea API values.
+      # What: image identity, login, NATS and Kea values.
       # Why: only the Admin UI reads these keys.
       CACHE_MAX_GB: ${CACHE_MAX_GB:-}
       LANCACHE_IMAGE_REGISTRY: ${LANCACHE_IMAGE_REGISTRY:?LANCACHE_IMAGE_REGISTRY is required}

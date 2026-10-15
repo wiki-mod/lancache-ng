@@ -6,22 +6,25 @@
 {# Why: mode and Kea state are read on each request #}
 {% extends "base.html" %}
 
-{% component ntp_auto_hint(ntp_url) %}{# What: NTP auto-assign hint under the subnet forms
-   Why: one copy for the add form and every edit form
-   From: Issue #1683 | PR #1912 #}<p class="text-xs text-amber-300 mt-1">LanCache-NG-NTP's "Als DHCP-NTP-Server automatisch eintragen" ist aktiv -- ein hier gesetzter Wert wird bei der nächsten Speicherung auf der <a href="{{ ntp_url | safe }}" class="underline">NTP-Seite</a> (oder einem DHCP-Moduswechsel) wieder durch die LAN-Adresse von LanCache-NG-NTP ersetzt.</p>{% endcomponent ntp_auto_hint %}
+{# What: NTP auto-assign hint under the subnet forms #}
+{# Why: one copy for the add form and every edit form #}
+{# From: Issue #1683 | PR #1912 #}
+{% component ntp_auto_hint(ntp_url) %}<p class="text-xs text-amber-300 mt-1">LanCache-NG-NTP's "Als DHCP-NTP-Server automatisch eintragen" ist aktiv -- ein hier gesetzter Wert wird bei der nächsten Speicherung auf der <a href="{{ ntp_url | safe }}" class="underline">NTP-Seite</a> (oder einem DHCP-Moduswechsel) wieder durch die LAN-Adresse von LanCache-NG-NTP ersetzt.</p>{% endcomponent ntp_auto_hint %}
 
-{% component text_field(label, name, tone, value="", placeholder="", required=false, hint=none, type="text", min=none, max=none) %}{# What: one labelled input with optional hint
-   Why: one copy of the label/input/hint frame for every form on this page; tone carries the bg and border colour of the form
-   From: Issue #1683 | PR #1912 #}<div>
+{# What: one labelled input with optional hint #}
+{# Why: one frame for all forms; tone sets bg and border #}
+{# From: Issue #1683 | PR #1912 #}
+{% component text_field(label, name, tone, value="", placeholder="", required=false, hint=none, type="text", min=none, max=none) %}<div>
               <label class="block text-xs text-slate-400 mb-1">{{ label }}</label>
               <input type="{{ type }}" name="{{ name }}" value="{{ value }}"{% if placeholder %} placeholder="{{ placeholder }}"{% endif %}{% if min is not none %} min="{{ min }}"{% endif %}{% if max is not none %} max="{{ max }}"{% endif %}{% if required %} required{% endif %}
                 class="w-full px-3 py-2 border rounded text-white text-sm {{ tone }}">
               {% if hint is not none %}<p class="text-xs text-slate-500 mt-1">{{ hint | safe }}</p>{% endif %}
             </div>{% endcomponent text_field %}
 
-{% component subnet_fields(tone, ntp_auto, ntp_url, lease_time, subnet="", gateway="", dns_primary="", dns_secondary="", pool_start="", pool_end="", domain="", ntp_servers="") %}{# What: the nine fields of one Kea subnet
-   Why: the add form and every edit form show the same fields; only start values and tone differ
-   From: Issue #1683 | PR #1912 #}<div class="grid grid-cols-2 gap-3">
+{# What: the nine fields of one Kea subnet #}
+{# Why: add and edit forms differ only in values and tone #}
+{# From: Issue #1683 | PR #1912 #}
+{% component subnet_fields(tone, ntp_auto, ntp_url, lease_time, subnet="", gateway="", dns_primary="", dns_secondary="", pool_start="", pool_end="", domain="", ntp_servers="") %}<div class="grid grid-cols-2 gap-3">
             {{ <text_field label="Subnet (CIDR)" name="subnet" tone={tone} value={subnet} placeholder="192.168.2.0/24" required={true}/> }}
             {{ <text_field label="Gateway" name="gateway" tone={tone} value={gateway} placeholder="192.168.2.1" required={true}/> }}
             {{ <text_field label="DNS-Server 1" name="dns_primary" tone={tone} value={dns_primary} placeholder="192.168.2.10" required={true}/> }}
@@ -492,7 +495,7 @@ function toggleEditSubnet(id) {
 }
 
 // What: empties and hides one detail list of the DHCP check
-// Why: one owner for both lists; stale fields must not remain
+// Why: one owner for both lists; no stale field remains
 // From: Issue #1683 | PR #1912
 function clearDetails(listEl) {
   listEl.replaceChildren();

@@ -5,9 +5,10 @@
 {# Why: extends base.html; tabs switch client-side #}
 {# From: Issue #1683 | PR #1912 #}
 {% extends "base.html" %}
-{% component ttl_input(ttl_default, ttl_max) %}{# What: TTL input of the LAN and PTR record forms
-   Why: one copy of default, limits and help text
-   From: Issue #1683 | PR #1912 #}<input type="number" name="ttl" value="{{ ttl_default }}" placeholder="TTL (Sekunden)"
+{# What: TTL input of the LAN and PTR record forms #}
+{# Why: one copy of default, limits and help text #}
+{# From: Issue #1683 | PR #1912 #}
+{% component ttl_input(ttl_default, ttl_max) %}<input type="number" name="ttl" value="{{ ttl_default }}" placeholder="TTL (Sekunden)"
                  required min="1" max="{{ ttl_max }}"
                  title="TTL must be between 1 and {{ ttl_max }} seconds (RFC 2181)."
                  class="w-24 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">{% endcomponent ttl_input %}
