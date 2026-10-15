@@ -924,6 +924,13 @@ fn domains_error(code: &str) -> String {
     format!("{PAGE_DOMAINS}?error={code}")
 }
 
+// What: take a unit lock; a poisoned one is taken anyway.
+// Why: a Mutex<()> guards order only, no data to lose.
+// From: Issue #1683 | PR #1912
+fn hold(lock: &Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
+    lock.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 // What: a template context with page name and CSRF token.
 // Why: every page's forms need the live session's token.
 fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
@@ -1773,10 +1780,7 @@ async fn ingest_alarm(State(state): Shared, headers: HeaderMap, body: Bytes) -> 
     // What: hold the alarms lock over read-modify-write.
     // Why: two concurrent posts must not lose an update.
     let stored = {
-        let _guard = state
-            .netdata_alarms_lock
-            .lock()
-            .expect("alarms lock poisoned");
+        let _guard = hold(&state.netdata_alarms_lock);
         append_alarm(&state.config.netdata_alarms_file, alarm)
     };
     match stored {
@@ -4528,7 +4532,7 @@ fn edit_domains(
     create: bool,
     change: impl FnOnce(&str) -> Option<String>,
 ) -> anyhow::Result<()> {
-    let _guard = state.file_lock.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = hold(&state.file_lock);
     let path = Path::new(&state.config.cdn_domains_file);
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
@@ -5616,7 +5620,7 @@ async fn set_service_desired_state(
     let path = Path::new(&state.config.desired_state_file);
     // What: hold the lock over the read-modify-write.
     // Why: two toggles at once must not drop each other.
-    let _guard = state.file_lock.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = hold(&state.file_lock);
     let mut desired = DesiredState::read(path);
     if service == "dhcp" {
         desired.dhcp = Some(run_state);
