@@ -1497,8 +1497,8 @@ fn chrony_conf(upstreams: &str, cidrs: &str, drift: &str, port: u16) -> Result<S
     if !drift.starts_with('/') || !plain(drift) {
         return Err(format!("NTP_DRIFT_FILE={drift} is no plain absolute path"));
     }
-    // What: step the clock on large early offsets.
-    // Why: containers start with a stale clock.
+    // What: step on large early offsets; sync the RTC.
+    // Why: stale start clock; the kernel copies time to the RTC.
     let mut conf = format!("driftfile {drift}\nport {port}\nmakestep 1.0 3\nrtcsync\n");
     for entry in servers {
         let kind = if is_ip_literal(entry) {
