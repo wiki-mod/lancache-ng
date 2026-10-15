@@ -54,6 +54,10 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 # What: rusqlite with the bundled SQLite.
 # Why: SQLite is compiled in; no system libsqlite3 link.
 rusqlite = { version = "0.40", features = ["bundled"] }
+# What: rustix with fs and process, no default features.
+# Why: safe statvfs and SIGTERM; std has neither on stable.
+# From: Issue #1683 | PR #1912
+rustix = { version = "1", default-features = false, features = ["std", "fs", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

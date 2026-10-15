@@ -22,10 +22,12 @@ use lancache_ng::config::{
 };
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
-    ClientCheck, ConflictCheck, DesiredRunState, DesiredState, Detail, DiskHealth, DiskInfo,
-    DockerApi, NetdataAlarm, Place, ProbeAnswer, ProbeReport, ServiceHealth, WatchdogStatus, df,
-    hex32, need_secs, probe_health, probe_health_tls, resolve_shared_secret, sha256_hex,
-    shared_secret_file_name, shared_secret_is_placeholder, unix_secs, write_file, write_if_changed,
+    CaFiles, CertSpec, ClientCheck, ConflictCheck, DesiredRunState, DesiredState, Detail,
+    DiskHealth, DiskInfo, DockerApi, NetdataAlarm, Place, ProbeAnswer, ProbeReport, ServiceHealth,
+    WatchdogStatus, df, files_under, hex32, need_secs, openssl_ca, openssl_leaf, openssl_x509, own,
+    probe_health, probe_health_tls, resolve_shared_secret, run_program, sha256_hex,
+    shared_secret_file_name, shared_secret_is_placeholder, terminate, unix_secs, write_file,
+    write_if_changed,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -131,7 +133,7 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
 }
 
 // What: typed Docker health plus watchdog's own outcomes.
-// Why: only Healthy and Unhealthy move a failure counter.
+// Why: restarts use Healthy/Unhealthy; alerts is_alert_ok.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Reading {
     Healthy,
@@ -467,37 +469,6 @@ fn retention_target(name: &str, raw: &str, prefix: &Path) -> Result<PathBuf, Str
     Ok(resolved)
 }
 
-// What: regular files under root, never across mounts.
-// Why: like find -xdev -type f; no symlink is followed.
-fn files_under(root: &Path) -> io::Result<Vec<(PathBuf, fs::Metadata)>> {
-    let dev = fs::symlink_metadata(root)?.dev();
-    let (mut files, mut dirs) = (Vec::new(), vec![root.to_path_buf()]);
-    while let Some(dir) = dirs.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound && dir != root => continue,
-            other => other?,
-        };
-        for entry in entries {
-            let path = entry?.path();
-            // What: an entry gone since listing is skipped
-            // Why: cache and logs change during a scan
-            let meta = match fs::symlink_metadata(&path) {
-                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                other => other?,
-            };
-            if meta.dev() != dev {
-                continue;
-            }
-            if meta.is_dir() {
-                dirs.push(path);
-            } else if meta.is_file() {
-                files.push((path, meta));
-            }
-        }
-    }
-    Ok(files)
-}
-
 // What: a file's mtime in epoch seconds, else now.
 // Why: an unreadable mtime must never look old.
 fn mtime_secs(meta: &fs::Metadata, now: u64) -> u64 {
@@ -608,7 +579,7 @@ fn purge_cache(r: &Retention, now: u64) {
 }
 
 // What: whether a file changed since UTC midnight.
-// Why: syslog-ng still writes today's per-host files.
+// Why: syslog-ng still writes today's per-program files.
 fn written_today(meta: &fs::Metadata, now: u64) -> bool {
     mtime_secs(meta, now) >= now - now % DAY
 }
@@ -952,12 +923,16 @@ fn write_status(s: &Settings, services: HashMap<String, ServiceHealth>) -> Resul
 #[derive(Clone, Copy)]
 struct Timing {
     // What: how often the supervisor converges.
+    // Why: every program is re-checked once per tick.
     tick: Duration,
     // What: restart pauses, RETRY_BACKOFF_START up to _MAX.
+    // Why: a crash loop must slow down, not spin.
     backoff: Backoff,
     // What: a run this long resets the restart backoff.
+    // Why: one late crash must not keep the long pause.
     backoff_reset: Duration,
     // What: wait for a stopped program before SIGKILL.
+    // Why: TERM needs time to flush state before the kill.
     stop_grace: Duration,
 }
 
@@ -1098,7 +1073,7 @@ impl Kind {
     }
 
     // What: whether this kind should run right now.
-    // Why: NTP and DHCP follow the ui; NATS a primary only.
+    // Why: ui sets NTP, DHCP; a primary runs nats, soa.
     // From: Issue #1437 | PR #1912
     fn wanted(self, ctx: &Ctx) -> bool {
         let secondary = || env_opt("DNS_REPLICATION_ROLE").as_deref() == Some("secondary");
@@ -1254,7 +1229,7 @@ fn newest_write(root: &Path) -> u128 {
 // From: Issue #1428 | PR #1912
 fn log_sample(s: &Settings) -> Option<LogSample> {
     let ctl = format!("--control={}", s.syslog_ctl.display());
-    let stats = tool("syslog-ng-ctl", &["stats", &ctl]).ok()?;
+    let stats = run_program("syslog-ng-ctl", &["stats", &ctl], None).ok()?;
     Some(LogSample {
         processed: processed_count(&stats, SYSLOG_NG_DESTINATION)?,
         newest: newest_write(&s.syslog_root),
@@ -1483,9 +1458,10 @@ fn netdata(ctx: &Ctx) -> Result<Run, String> {
     own(
         &token_file,
         Some(account_id("passwd", "netdata")?),
-        account_id("group", "netdata")?,
-        0o600,
-    )?;
+        Some(account_id("group", "netdata")?),
+        Some(0o600),
+    )
+    .map_err(|e| e.to_string())?;
     put("health_alarm_notify.conf", &sender, 0o644)?;
     put("netdata.conf", NETDATA_CONF, 0o644)?;
     put("go.d/web_log.conf", &web_log, 0o644)?;
@@ -1521,6 +1497,8 @@ fn chrony_conf(upstreams: &str, cidrs: &str, drift: &str, port: u16) -> Result<S
     if !drift.starts_with('/') || !plain(drift) {
         return Err(format!("NTP_DRIFT_FILE={drift} is no plain absolute path"));
     }
+    // What: step on large early offsets; sync the RTC.
+    // Why: stale start clock; kernel copies time to RTC.
     let mut conf = format!("driftfile {drift}\nport {port}\nmakestep 1.0 3\nrtcsync\n");
     for entry in servers {
         let kind = if is_ip_literal(entry) {
@@ -1832,7 +1810,7 @@ fn endpoint(raw: &str, key: &'static str) -> Result<std::net::SocketAddrV4, Stri
         .ok_or_else(|| format!("{key} host {host} has no IPv4 address"))
 }
 
-// What: the comma list of DNS_XFR_NOTIFY_TARGETS.
+// What: the comma or space list of DNS_XFR_NOTIFY_TARGETS.
 // Why: a primary notifies and allows AXFR to each one.
 fn notify_targets() -> Result<Vec<std::net::SocketAddrV4>, String> {
     env_opt("DNS_XFR_NOTIFY_TARGETS")
@@ -1867,6 +1845,8 @@ struct AuthConf<'a> {
 impl AuthConf<'_> {
     fn render(&self) -> String {
         let yes = |on: bool| if on { "yes" } else { "no" };
+        // What: pdns accepts unsigned updates globally.
+        // Why: per-zone TSIG metadata is the real gate.
         format!(
             "local-address={lo},{local}\nlocal-port={auth_port}\nlaunch=gsqlite3\n\
              gsqlite3-database={db}\nprimary={primary}\nsecondary={secondary}\n\
@@ -1907,21 +1887,11 @@ impl AuthConf<'_> {
 // Why: the pdns config checks have no side effects.
 // From: Issue #1683 | PR #1912
 fn conf_ok(check: &[String]) -> bool {
-    match std::process::Command::new(&check[0])
-        .args(&check[1..])
-        .output()
-    {
-        Ok(out) if out.status.success() => true,
-        Ok(out) => {
-            log_err(&format!(
-                "ERROR: {} rejected the config: {}",
-                check[0],
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-            false
-        }
+    let args: Vec<&str> = check[1..].iter().map(String::as_str).collect();
+    match run_program(&check[0], &args, None) {
+        Ok(_) => true,
         Err(e) => {
-            log_err(&format!("ERROR: cannot run {}: {e}", check[0]));
+            log_err(&format!("ERROR: config check failed: {e}"));
             false
         }
     }
@@ -1972,7 +1942,7 @@ fn no_backfill(_: &Value, _: &str) -> Option<String> {
     None
 }
 
-// What: file name the old shell gave the proxy map.
+// What: proxy map file name in legacy snapshots.
 // Why: its snapshots hold the map under this name.
 // From: Issue #1683 | PR #1912
 const LEGACY_PROXY_MAP: &str = "00-ssl-map.conf";
@@ -2038,6 +2008,8 @@ fn checked_files(
             })
             .collect()
     };
+    // What: convert old shell snapshots before use.
+    // Why: an update keeps its rollback targets.
     store.adopt_legacy();
     let fresh = ("new".to_string(), files.to_vec());
     let used = first_good(
@@ -2085,33 +2057,27 @@ fn restamp_lines(text: &str, lines: &[(&str, String)]) -> String {
         + "\n"
 }
 
+// What: the --config-dir argument of a pdns program.
+// Why: pdnsutil, the check and the launch name one way.
+// From: Issue #1683 | PR #1912
+fn pdns_config_dir(dir: &Path) -> String {
+    format!("--config-dir={}", dir.display())
+}
+
+// What: the side-effect-free config check of pdns.
+// Why: the auth and recursor checks differ by name only.
+// From: Issue #1683 | PR #1912
+fn pdns_check(program: &str, config_dir: &str) -> [String; 3] {
+    [program.into(), "--config=check".into(), config_dir.into()]
+}
+
 // What: run pdnsutil on the auth config; text or error.
 // Why: every zone and key change goes through one call.
 fn pdnsutil(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let config_dir = format!("--config-dir={}", dir.display());
+    let config_dir = pdns_config_dir(dir);
     let mut argv = vec![config_dir.as_str()];
     argv.extend_from_slice(args);
-    tool("pdnsutil", &argv)
-}
-
-// What: run a tool; its stdout and stderr, or an error.
-// Why: setup tools fail the launch with their own words.
-// From: Issue #1683
-fn tool(program: &str, args: &[&str]) -> Result<String, String> {
-    let out = std::process::Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|e| format!("cannot run {program}: {e}"))?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    if out.status.success() {
-        Ok(text)
-    } else {
-        Err(format!("{program} {}: {}", args.join(" "), text.trim()))
-    }
+    run_program("pdnsutil", &argv, None)
 }
 
 // What: true for pdnsutil's "exists already" refusal.
@@ -2129,40 +2095,32 @@ fn pdns_database(data_dir: &Path) -> Result<PathBuf, String> {
         return Ok(db);
     }
     let schema_file = config::need(&config::process_env, "PDNS_SCHEMA_FILE")?;
-    let schema = fs::read(&schema_file).map_err(|e| format!("cannot read {schema_file}: {e}"))?;
-    let mut child = std::process::Command::new("sqlite3")
-        .arg(&db)
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("cannot run sqlite3: {e}"))?;
-    use std::io::Write as _;
-    child
-        .stdin
-        .take()
-        .ok_or("sqlite3 has no stdin")?
-        .write_all(&schema)
-        .map_err(|e| format!("cannot feed the schema: {e}"))?;
-    let status = child.wait().map_err(|e| format!("sqlite3: {e}"))?;
-    if !status.success() {
-        return Err(format!("sqlite3 {} failed: {status}", db.display()));
+    let schema =
+        fs::read_to_string(&schema_file).map_err(|e| format!("cannot read {schema_file}: {e}"))?;
+    let created = rusqlite::Connection::open(&db)
+        .and_then(|conn| conn.execute_batch(&schema))
+        .map_err(|e| format!("cannot create {} from {schema_file}: {e}", db.display()));
+    // What: a half-made database file is removed.
+    // Why: the next start would skip a file that exists.
+    if let Err(e) = created {
+        if let Err(rm) = fs::remove_file(&db)
+            && rm.kind() != io::ErrorKind::NotFound
+        {
+            log_err(&format!("WARNING: {} not removed: {rm}", db.display()));
+        }
+        return Err(e);
     }
-    run_ok(&["chown", "pdns:pdns", &db.display().to_string()])?;
+    // What: the owner changes; the mode SQLite chose stays.
+    // Why: own with no mode leaves the mode alone.
+    own(
+        &db,
+        Some(account_id("passwd", "pdns")?),
+        Some(account_id("group", "pdns")?),
+        None,
+    )
+    .map_err(|e| e.to_string())?;
     log(&format!("Created {}", db.display()));
     Ok(db)
-}
-
-// What: run a command; a non-zero exit is an error.
-// Why: chown and friends must never fail silently.
-fn run_ok(argv: &[&str]) -> Result<(), String> {
-    let status = std::process::Command::new(argv[0])
-        .args(&argv[1..])
-        .status()
-        .map_err(|e| format!("cannot run {}: {e}", argv[0]))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{} failed: {status}", argv.join(" ")))
-    }
 }
 
 // What: TSIG rights for DDNS on every LAN zone.
@@ -2235,6 +2193,8 @@ fn dns_zones(
     let targets: Vec<String> = notify.iter().map(ToString::to_string).collect();
     for zone in &zones {
         pdnsutil(dir, &["zone", "set-kind", zone, "primary"])?;
+        // What: SOA bump and NOTIFY on API and DDNS writes.
+        // Why: secondaries converge via NOTIFY and AXFR.
         pdnsutil(dir, &["set-meta", zone, "SOA-EDIT-DNSUPDATE", "INCREASE"])?;
         pdnsutil(dir, &["set-meta", zone, "SOA-EDIT-API", "INCREASE"])?;
         pdnsutil(dir, &["set-meta", zone, "NOTIFY-DNSUPDATE", "1"])?;
@@ -2351,14 +2311,10 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
             ],
         )
     };
-    let config_dir = format!("--config-dir={}", dir.display());
+    let config_dir = pdns_config_dir(&dir);
     checked_files(
         &[(dir.join("pdns.conf"), conf.render())],
-        &[
-            "pdns_server".into(),
-            "--config=check".into(),
-            config_dir.clone(),
-        ],
+        &pdns_check("pdns_server", &config_dir),
         &store,
         &restamp,
         &no_backfill,
@@ -2530,6 +2486,8 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
         .map_err(|_| format!("{}={ip} is no IPv4 address", rec.ip_key))?;
     let role = dns_role(&ctx.need("DNS_REPLICATION_ROLE")?)?;
     let knobs = DnsKnobs::load()?;
+    // What: secondary negative TTL = AXFR cycle.
+    // Why: a pre-AXFR miss must not outlive the sync.
     let negative_ttl = if role == DnsRole::Secondary {
         knobs.xfr_cycle
     } else {
@@ -2588,14 +2546,10 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
         "dns-recursor",
     );
     let restamp = |old: &str| restamp_lines(old, &[("api_key:", format!("  api_key: {api_key}"))]);
-    let config_dir = format!("--config-dir={}", dir.display());
+    let config_dir = pdns_config_dir(&dir);
     checked_files(
         &[(dir.join("recursor.conf"), conf.render())],
-        &[
-            "pdns_recursor".into(),
-            "--config=check".into(),
-            config_dir.clone(),
-        ],
+        &pdns_check("pdns_recursor", &config_dir),
         &store,
         &restamp,
         &no_backfill,
@@ -2719,7 +2673,9 @@ async fn soa_bump(
         .map_err(|_| format!("{zone} SOA serial {serial} is no number"))?;
     let want = date_serial();
     let next = if serial < want { want } else { serial + 1 };
-    let ttl: u64 = minimum.parse().unwrap_or(3600);
+    let ttl: u64 = minimum
+        .parse()
+        .map_err(|e| format!("{zone} SOA minimum {minimum} is no number: {e}"))?;
     let name = config::canonical_zone(zone);
     let body = serde_json::json!({"rrsets": [{
         "name": name, "type": "SOA", "ttl": ttl, "changetype": "REPLACE",
@@ -2828,7 +2784,7 @@ impl KeaKnobs {
 // Why: kea-dhcp4 sends its name change requests there.
 const KEA_NCR_PORT_KEY: &str = "KEA_NCR_PORT";
 
-// What: the shared DDNS TSIG key; empty when it fails.
+// What: the shared DDNS TSIG key, or the error.
 // Why: dns signs zones with it, Kea signs updates.
 // From: Issue #1683 | PR #1912
 fn ddns_tsig_key() -> Result<String, String> {
@@ -2939,8 +2895,8 @@ fn kea_dhcp4_first(ctx: &Ctx, kea: &KeaKnobs) -> Result<Value, String> {
     }))
 }
 
-// What: set the keys the stack owns in a kea-dhcp4 config.
-// Why: socket, hook, DDNS, logs must match the image.
+// What: force socket, hook, logs; default DDNS keys.
+// Why: socket, hook, logs must match the image.
 // From: Issue #815 | PR #1912
 fn kea_dhcp4_own(
     conf: &mut Value,
@@ -2971,6 +2927,8 @@ fn kea_dhcp4_own(
     });
     hooks.push(serde_json::json!({"library": hook.display().to_string()}));
     dhcp4.insert("hooks-libraries".into(), Value::Array(hooks));
+    // What: set DDNS and threading keys only if absent.
+    // Why: a saved UI choice must survive restarts.
     let defaults = [
         (
             "multi-threading",
@@ -3020,10 +2978,9 @@ fn kea_dhcp4_own(
 // What: the Kea socket dir, private to Kea.
 // Why: Kea refuses a socket dir others can enter.
 fn kea_socket_dir(kea: &KeaKnobs) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt as _;
     let dir = &kea.socket_dir;
     fs::create_dir_all(dir)
-        .and_then(|()| fs::set_permissions(dir, fs::Permissions::from_mode(0o750)))
+        .and_then(|()| own(Path::new(dir), None, None, Some(0o750)))
         .map_err(|e| format!("cannot prepare {dir}: {e}"))
 }
 
@@ -3033,11 +2990,11 @@ fn kea_socket_dir(kea: &KeaKnobs) -> Result<(), String> {
 fn kea_snapshot_dir(dir: &Path) -> Result<(), String> {
     let gid = config::runtime_gid()?;
     fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    own(dir, None, gid, 0o775)
+    own(dir, None, Some(gid), Some(0o775)).map_err(|e| e.to_string())
 }
 
 // What: kea-dhcp4 on its checked config, else a snapshot.
-// Why: no good config means rescue, never a stop.
+// Why: a bad render falls back to the newest good snapshot.
 // From: Issue #815 | PR #1912
 fn kea_dhcp4(ctx: &Ctx) -> Result<Run, String> {
     let kea = KeaKnobs::load()?;
@@ -3100,15 +3057,16 @@ fn kea_dhcp4(ctx: &Ctx) -> Result<Run, String> {
 fn kea_ctrl_fence(port: &str, kea: &KeaKnobs) -> Result<(), String> {
     let chain = kea.ctrl_chain.as_str();
     let jump = ["-p", "tcp", "--dport", port, "-j", chain];
-    if run_ok(&["iptables", "-N", chain]).is_err() {
-        run_ok(&["iptables", "-F", chain])?;
+    let iptables = |args: &[&str]| run_program("iptables", args, None).map(|_| ());
+    if iptables(&["-N", chain]).is_err() {
+        iptables(&["-F", chain])?;
     }
-    while run_ok(&[&["iptables", "-D", "INPUT"][..], &jump].concat()).is_ok() {}
-    run_ok(&[&["iptables", "-I", "INPUT", "1"][..], &jump].concat())?;
+    while iptables(&[&["-D", "INPUT"][..], &jump].concat()).is_ok() {}
+    iptables(&[&["-I", "INPUT", "1"][..], &jump].concat())?;
     for net in &kea.ctrl_allow {
-        run_ok(&["iptables", "-A", chain, "-s", net, "-j", "ACCEPT"])?;
+        iptables(&["-A", chain, "-s", net, "-j", "ACCEPT"])?;
     }
-    run_ok(&["iptables", "-A", chain, "-j", "DROP"])
+    iptables(&["-A", chain, "-j", "DROP"])
 }
 
 // What: the Kea Control Agent behind its token and fence.
@@ -3197,8 +3155,16 @@ fn dnsmasq_line(lines: &mut String, key: &str, values: &[&str], line: String) {
 // What: dnsmasq.conf of proxy or relay mode.
 // Why: values come from the ui settings, then the env.
 // From: Issue #1683 | PR #1912
-fn dnsmasq_conf(set: &dyn Fn(&str) -> String, relay: bool) -> String {
-    let mut conf = String::from("port=0\nno-resolv\nno-poll\nlog-dhcp\nlog-facility=-\n");
+fn dnsmasq_conf(set: &dyn Fn(&str) -> String, relay: bool, log_dhcp: bool) -> String {
+    // What: DHCP-only dnsmasq: no DNS, no resolv.conf.
+    // Why: avoids port 53 binding conflicts.
+    // From: Issue #485
+    let mut conf = String::from("port=0\nno-resolv\nno-poll\nlog-facility=-\n");
+    // What: option logging follows the DHCP logging switch.
+    // Why: every service has one switch; log-dhcp is extra.
+    if log_dhcp {
+        conf.push_str("log-dhcp\n");
+    }
     let upstream = set("UPSTREAM_DHCP_IP");
     if relay {
         let local = set("DHCP_RELAY_LOCAL_ADDR");
@@ -3279,6 +3245,8 @@ fn dnsmasq_conf(set: &dyn Fn(&str) -> String, relay: bool) -> String {
              dhcp-boot=tag:lancache-pxe-uefi,{uefi},,{pxe}\n"
         ));
     }
+    // What: inert pxe-service when BIOS is not set.
+    // Why: dnsmasq needs one pxe-service to reply.
     if bios.is_empty() {
         lines.push_str("pxe-service=IA64_EFI,\"lancache-ng PXE proxy active\",0\n");
     }
@@ -3297,7 +3265,12 @@ fn dnsmasq_conf(set: &dyn Fn(&str) -> String, relay: bool) -> String {
 // From: Issue #1683 | PR #1912
 fn dnsmasq(ctx: &Ctx, relay: bool) -> Result<Run, String> {
     let set = |key: &str| ctx.setting(key).unwrap_or_default();
-    let body = dnsmasq_conf(&set, relay);
+    let log_dhcp = ctx
+        .setting("LOGGING_DHCP_ENABLED")
+        .as_deref()
+        .and_then(config::parse_bool)
+        .ok_or("LOGGING_DHCP_ENABLED must be a boolean")?;
+    let body = dnsmasq_conf(&set, relay, log_dhcp);
     let path = ctx.run_dir.join("dnsmasq.conf");
     let store = lancache_ng::SnapshotStore::new(
         PathBuf::from(ctx.need("DHCP_CONFIG_SNAPSHOT_DIR")?),
@@ -3485,7 +3458,7 @@ fn nginx_refuse(loopback: &str) -> String {
 // Why: the protocol fixes it; it is no deployment value.
 const NGINX_DISCARD_PORT: u16 = 9;
 
-// What: loopback ports of the https server and relays.
+// What: loopback ports and relay timeouts of https.
 // Why: the SOT owns them; dispatch and listens use them.
 // From: Issue #1683 | PR #1912
 #[derive(Clone, Copy, Default)]
@@ -3493,20 +3466,27 @@ struct NginxPorts {
     mitm: u16,
     mitm_relay: u16,
     passthrough_relay: u16,
+    passthrough: u16,
+    connect_secs: u64,
+    idle_secs: u64,
 }
 
 impl NginxPorts {
     fn from_env() -> Result<Self, String> {
+        let secs = |key: &'static str| need_secs(&config::process_env, key).map(|d| d.as_secs());
         Ok(Self {
             mitm: env_port("NGINX_MITM_PORT")?,
             mitm_relay: env_port("NGINX_MITM_RELAY_PORT")?,
             passthrough_relay: env_port("NGINX_PASSTHROUGH_RELAY_PORT")?,
+            passthrough: env_port("NGINX_PASSTHROUGH_PORT")?,
+            connect_secs: secs("NGINX_UPSTREAM_CONNECT_TIMEOUT")?,
+            idle_secs: secs("NGINX_UPSTREAM_IDLE_TIMEOUT")?,
         })
     }
 }
 
-// What: rendered nginx paths below NGINX_DIR.
-// Why: the CA and cert dirs come from the SOT.
+// What: stream.d paths of the two rendered nginx files.
+// Why: the render and backfill list name the same files.
 // From: Issue #1683 | PR #1912
 const NGINX_STREAM_TARGETS: &str = "stream.d/00-stream-targets.conf";
 const NGINX_HTTPS_DISPATCH: &str = "stream.d/01-https-dispatch.conf";
@@ -3598,10 +3578,26 @@ fn nginx_https_map(hosts: &CdnHosts, strict: bool, cidrs: &[String], default_cer
     out
 }
 
-// What: the SNI passthrough backend map.
+// What: the two relay timeout lines of a stream server.
+// Why: all stream servers share one source for the values.
+// From: Issue #1683 | PR #1912
+fn nginx_relay_timeouts(ports: NginxPorts) -> String {
+    format!(
+        "    proxy_connect_timeout {}s;\n    proxy_timeout        {}s;\n",
+        ports.connect_secs, ports.idle_secs
+    )
+}
+
+// What: the SNI passthrough backend map and its server.
 // Why: lazy forwards any SNI; strict only listed hosts.
 // From: Issue #1683
-fn nginx_stream_targets(hosts: &CdnHosts, strict: bool, loopback: &str) -> String {
+fn nginx_stream_targets(
+    hosts: &CdnHosts,
+    strict: bool,
+    loopback: &str,
+    acl: &Path,
+    ports: NginxPorts,
+) -> String {
     let pass = "$ssl_preread_server_name:443";
     let refuse = nginx_refuse(loopback);
     let mut out = format!(
@@ -3617,6 +3613,14 @@ fn nginx_stream_targets(hosts: &CdnHosts, strict: bool, loopback: &str) -> Strin
         out.push_str(&format!("    default {pass};\n"));
     }
     out.push_str("}\n");
+    // What: the SNI passthrough server on the public port.
+    // Why: one owner renders every stream server.
+    let (port, acl) = (ports.passthrough, acl.display());
+    out.push_str(&format!(
+        "\nserver {{\n    listen {port};\n    listen [::]:{port};\n    include {acl};\n    \
+         ssl_preread on;\n    proxy_pass $stream_backend;\n{}}}\n",
+        nginx_relay_timeouts(ports)
+    ));
     out
 }
 
@@ -3707,17 +3711,18 @@ fn nginx_https_dispatch(
     // What: locals feed the template as plain captures.
     // Why: CodeQL misses captures beside named args.
     let (acl, mitm_port) = (acl.display(), ports.mitm);
+    let timeouts = nginx_relay_timeouts(ports);
     out.push_str(&format!(
         "    default {default};\n}}\n\n\
          server {{\n    listen 443;\n    listen [::]:443;\n    include {acl};\n    \
-         ssl_preread on;\n    proxy_pass $https_dispatch_backend;\n    proxy_protocol on;\n    \
-         proxy_connect_timeout 30s;\n    proxy_timeout        3600s;\n}}\n\n\
+         ssl_preread on;\n    proxy_pass $https_dispatch_backend;\n    proxy_protocol on;\n\
+         {timeouts}}}\n\n\
          server {{\n    listen {mitm} proxy_protocol;\n    set_real_ip_from {loopback};\n    \
-         proxy_protocol on;\n    proxy_pass {loopback}:{mitm_port};\n    \
-         proxy_connect_timeout 30s;\n    proxy_timeout        3600s;\n}}\n\n\
+         proxy_protocol on;\n    proxy_pass {loopback}:{mitm_port};\n\
+         {timeouts}}}\n\n\
          server {{\n    listen {passthrough} proxy_protocol;\n    set_real_ip_from {loopback};\n    \
-         ssl_preread on;\n    proxy_pass $ssl_preread_server_name:443;\n    \
-         proxy_connect_timeout 30s;\n    proxy_timeout        3600s;\n}}\n"
+         ssl_preread on;\n    proxy_pass $ssl_preread_server_name:443;\n\
+         {timeouts}}}\n"
     ));
     out
 }
@@ -3758,15 +3763,6 @@ fn account_id(db: &str, name: &str) -> Result<u32, String> {
         .ok_or_else(|| format!("{name} is not in {path}"))
 }
 
-// What: set owner ids and mode on one path.
-// Why: nginx workers read keys only through their group.
-fn own(path: &Path, uid: Option<u32>, gid: u32, mode: u32) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt as _;
-    std::os::unix::fs::chown(path, uid, Some(gid))
-        .and_then(|()| fs::set_permissions(path, fs::Permissions::from_mode(mode)))
-        .map_err(|e| format!("cannot set owner and mode of {}: {e}", path.display()))
-}
-
 // What: sign one leaf certificate with the stack CA.
 // Why: the proxy presents it for an intercepted host.
 // From: Issue #1683
@@ -3778,61 +3774,28 @@ fn sign_leaf(
     cert: &CertKnobs,
 ) -> Result<(), String> {
     let (csr, ext) = (run.join("leaf.csr"), run.join("leaf.ext"));
-    write_file(
-        &ext,
-        format!("subjectAltName={san}\n").as_bytes(),
-        0o600,
-        Place::Replace,
-    )
-    .map_err(|e| format!("cannot write {}: {e}", ext.display()))?;
-    let path = |p: &Path| p.display().to_string();
-    let (key_s, crt_s, csr_s, ext_s) = (path(key), path(crt), path(&csr), path(&ext));
     let (ca_crt, ca_key, serial) = (
-        path(&ca.join(&cert.ca_cert_file)),
-        path(&ca.join(&cert.ca_key_file)),
-        path(&ca.join(&cert.ca_serial_file)),
+        ca.join(&cert.ca_cert_file),
+        ca.join(&cert.ca_key_file),
+        ca.join(&cert.ca_serial_file),
     );
-    let signed = tool(
-        "openssl",
-        &[
-            "req",
-            "-new",
-            "-newkey",
-            &cert.leaf_key_type,
-            "-nodes",
-            "-subj",
-            &cert.leaf_subject,
-            "-keyout",
-            &key_s,
-            "-out",
-            &csr_s,
-        ],
-    )
-    .and_then(|_| {
-        tool(
-            "openssl",
-            &[
-                "x509",
-                "-req",
-                "-days",
-                &cert.leaf_days,
-                "-in",
-                &csr_s,
-                "-CA",
-                &ca_crt,
-                "-CAkey",
-                &ca_key,
-                "-CAserial",
-                &serial,
-                "-extfile",
-                &ext_s,
-                "-out",
-                &crt_s,
-            ],
-        )
-    });
+    let signed = openssl_leaf(
+        &CaFiles {
+            crt: &ca_crt,
+            key: &ca_key,
+            serial: &serial,
+        },
+        (key, crt),
+        (&csr, &ext),
+        san,
+        &CertSpec {
+            key_type: &cert.leaf_key_type,
+            subject: &cert.leaf_subject,
+            days: &cert.leaf_days,
+        },
+    );
     // What: drop temp and failed files; log what stays.
-    // Why: AG-INT-002: a left file is named, not hidden.
+    // Why: a failed sign must not leave a half key pair.
     // From: Issue #1683 | PR #1912
     let mut leftovers = vec![csr.as_path(), ext.as_path()];
     if signed.is_err() {
@@ -3845,7 +3808,7 @@ fn sign_leaf(
             log_err(&format!("WARNING: {} not removed: {e}", file.display()));
         }
     }
-    signed.map(|_| ())
+    signed
 }
 
 // What: drop the nginx package's stock default.conf.
@@ -3877,26 +3840,16 @@ fn nginx_certs(
     let path = |p: &Path| p.display().to_string();
     if !(ca_crt.is_file() && ca_key.is_file()) {
         fs::create_dir_all(ca).map_err(|e| format!("cannot create {}: {e}", ca.display()))?;
-        tool(
-            "openssl",
-            &[
-                "req",
-                "-new",
-                "-newkey",
-                &cert.ca_key_type,
-                "-days",
-                &cert.ca_days,
-                "-nodes",
-                "-x509",
-                "-subj",
-                &cert.ca_subject,
-                "-keyout",
-                &path(&ca_key),
-                "-out",
-                &path(&ca_crt),
-            ],
+        openssl_ca(
+            &ca_key,
+            &ca_crt,
+            &CertSpec {
+                key_type: &cert.ca_key_type,
+                subject: &cert.ca_subject,
+                days: &cert.ca_days,
+            },
         )?;
-        own(&ca_key, None, 0, 0o600)?;
+        own(&ca_key, None, Some(0), Some(0o600)).map_err(|e| e.to_string())?;
         log(&format!(
             "ACTION REQUIRED: a new CA is in {}; every HTTPS client must install it \
              once (docs/install-ca-cert.md)",
@@ -3904,20 +3857,10 @@ fn nginx_certs(
         ));
     }
     fs::create_dir_all(certs).map_err(|e| format!("cannot create {}: {e}", certs.display()))?;
-    own(certs, None, gid, 0o2750)?;
+    own(certs, None, Some(gid), Some(0o2750)).map_err(|e| e.to_string())?;
     // What: drop every leaf when the CA changed.
     // Why: leaves of an old CA would fail on every client.
-    let print = tool(
-        "openssl",
-        &[
-            "x509",
-            "-noout",
-            "-fingerprint",
-            "-sha256",
-            "-in",
-            &path(&ca_crt),
-        ],
-    )?;
+    let print = openssl_x509(&ca_crt, &["-fingerprint", "-sha256"])?;
     let stamp = certs.join(".ca-fingerprint");
     if fs::read_to_string(&stamp).ok().as_deref() != Some(print.as_str()) {
         for entry in
@@ -3951,18 +3894,16 @@ fn nginx_certs(
     }
     let default_key = certs.join(format!("{}.key", cert.default_cert_name));
     let default_crt = certs.join(format!("{}.crt", cert.default_cert_name));
-    let san = tool(
-        "openssl",
-        &[
-            "x509",
-            "-noout",
-            "-ext",
-            "subjectAltName",
-            "-in",
-            &path(&default_crt),
-        ],
-    )
-    .unwrap_or_default();
+    // What: no readable default cert means no SAN rows.
+    // Why: a missing or broken cert is signed again below.
+    let san = openssl_x509(&default_crt, &["-ext", "subjectAltName"]).unwrap_or_else(|e| {
+        if default_crt.exists() {
+            log_err(&format!(
+                "WARNING: default cert not read, signed again: {e}"
+            ));
+        }
+        String::new()
+    });
     let has_ip = ip_https.is_empty()
         || san
             .split([',', '\n'])
@@ -4003,8 +3944,8 @@ fn nginx_certs(
     for entry in fs::read_dir(certs).map_err(|e| format!("cannot list {}: {e}", certs.display()))? {
         let file = entry.map_err(|e| e.to_string())?.path();
         match file.extension().and_then(|x| x.to_str()) {
-            Some("key") => own(&file, None, gid, 0o640)?,
-            Some("crt") => own(&file, None, gid, 0o644)?,
+            Some("key") => own(&file, None, Some(gid), Some(0o640)).map_err(|e| e.to_string())?,
+            Some("crt") => own(&file, None, Some(gid), Some(0o644)).map_err(|e| e.to_string())?,
             _ => {}
         }
     }
@@ -4027,7 +3968,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         config::parse_bool(&ctx.need("HTTPS_ENABLED")?).ok_or("HTTPS_ENABLED is no boolean")?;
     let resolver = ctx.need("NGINX_UPSTREAM_RESOLVER")?;
     // What: the upstream resolver must not be LanCache.
-    // Why: the LanCache DNS would loop back (AG-OP-002).
+    // Why: the LanCache DNS would loop back.
     for token in resolver.split_whitespace().map(resolver_host) {
         if token == ip_http || (!ip_https.is_empty() && token == ip_https) {
             return Err(format!(
@@ -4113,13 +4054,11 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     let value = |key: &'static str| ctx.need(key).map(|v| (key, v));
     let acl = dir.join("stream.d/access.d/00-stream-client-acl.conf");
     let conf = dir.join("nginx.conf");
-    let (ports, health_port) = if https_on {
-        (
-            NginxPorts::from_env()?,
-            url_port(&ctx.need("PROXY_HEALTH_HTTPS_URL")?)?,
-        )
+    let ports = NginxPorts::from_env()?;
+    let health_port = if https_on {
+        url_port(&ctx.need("PROXY_HEALTH_HTTPS_URL")?)?
     } else {
-        (NginxPorts::default(), 0)
+        0
     };
     // What: the https listen file text.
     // Why: a rolled-back old set still needs the listener.
@@ -4139,7 +4078,6 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
                     value("CACHE_MAX_SIZE")?,
                     value("CACHE_MIN_FREE")?,
                     value("CACHE_INACTIVE")?,
-                    value("NGINX_PASSTHROUGH_PORT")?,
                     ("NGINX_UPSTREAM_RESOLVER", resolver),
                     ("NGINX_DIR", dir.display().to_string()),
                     ("NGINX_CACHE_DIR", ctx.need("NGINX_CACHE_DIR")?),
@@ -4154,6 +4092,8 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
                     value("CACHE_SLICE_SIZE")?,
                     value("CACHE_VALID_HIT")?,
                     value("CACHE_VALID_ANY")?,
+                    value("NGINX_UPSTREAM_CONNECT_TIMEOUT")?,
+                    value("NGINX_UPSTREAM_IDLE_TIMEOUT")?,
                 ],
             ),
         ),
@@ -4163,7 +4103,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         ),
         (
             dir.join(NGINX_STREAM_TARGETS),
-            nginx_stream_targets(&hosts, strict, &loopback),
+            nginx_stream_targets(&hosts, strict, &loopback, &acl, ports),
         ),
         (acl.clone(), nginx_client_acl(&cidrs)),
         (
@@ -4193,8 +4133,8 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         "nginx.json",
         "proxy",
     );
-    // What: dispatch and listen come from this render.
-    // Why: the old shell wrote them anew each start.
+    // What: backfill takes dispatch, listen from here.
+    // Why: a snapshot without them gets the current files.
     // From: Issue #1683 | PR #1912
     checked_files(
         &files,
@@ -4222,7 +4162,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
 }
 
 // What: DHCP client and server UDP ports (RFC 2131).
-// Why: the probe binds the client port and talks to servers
+// Why: the protocol fixes both ports; probe is a client.
 const DHCP_CLIENT_PORT: u16 = 68;
 const DHCP_SERVER_PORT: u16 = 67;
 
@@ -4231,10 +4171,13 @@ const DHCP_SERVER_PORT: u16 = 67;
 // From: Issue #1683 | PR #1912
 struct ProbeTiming {
     // What: how long offers are collected after a DISCOVER.
+    // Why: several servers answer; first offer is not all.
     window: Duration,
     // What: how long the REQUEST waits for an ACK or NAK.
+    // Why: a silent server must not block the probe.
     request_timeout: Duration,
     // What: DISCOVER sends in one window, spread evenly.
+    // Why: UDP loses packets; one send may vanish.
     retransmits: u32,
 }
 
@@ -4661,7 +4604,7 @@ impl Slot {
     }
 
     // What: start the program or task once.
-    // Why: a failed start waits out the backoff first.
+    // Why: a failed start sets the backoff for next try.
     fn start(&mut self, ctx: &Ctx) {
         let name = self.kind.name();
         let run = match self.kind.launch(ctx) {
@@ -4744,12 +4687,10 @@ impl Slot {
         let Some(mut child) = self.child.take() else {
             return;
         };
-        if let Some(pid) = child.id() {
-            let _ = tokio::process::Command::new("kill")
-                .args(["-TERM", &pid.to_string()])
-                .status()
-                .await
-                .inspect_err(|e| log_err(&format!("WARNING: kill -TERM {pid}: {e}")));
+        if let Some(pid) = child.id()
+            && let Err(e) = terminate(pid)
+        {
+            log_err(&format!("WARNING: SIGTERM to {pid}: {e}"));
         }
         if tokio::time::timeout(self.timing.stop_grace, child.wait())
             .await
@@ -4968,8 +4909,8 @@ fn probe_print() -> Result<(), String> {
     Ok(())
 }
 
-// What: supervise (default), healthcheck or probe.
-// Why: one binary per container, three entry points.
+// What: supervise (default), healthcheck, probe or get KEY.
+// Why: one binary per container, four entry points.
 // From: Issue #1683 | PR #1912
 #[tokio::main]
 async fn main() {
@@ -5913,7 +5854,7 @@ mod tests {
     }
 
     // What: closed files become .xz; today's stay plain.
-    // Why: syslog-ng still writes today's per-host files.
+    // Why: syslog-ng still writes today's program files.
     #[test]
     fn syslog_files_compress_to_xz_except_today() {
         let root = scratch();
@@ -6132,12 +6073,30 @@ mod tests {
         let lazy = nginx_https_map(&hosts, false, &[], &dc);
         assert_eq!(lazy.matches("    default 1;\n").count(), 2, "{lazy}");
         let lo = gen_ipv4().to_string();
+        let ports = NginxPorts {
+            passthrough: 8443,
+            connect_secs: 7,
+            idle_secs: 9,
+            ..NginxPorts::default()
+        };
+        let acl = Path::new("/acl");
+        let lazy_targets = nginx_stream_targets(&hosts, false, &lo, acl, ports);
+        assert!(lazy_targets.contains("default $ssl_preread_server_name:443;"));
+        for line in [
+            "listen 8443;\n",
+            "listen [::]:8443;\n",
+            "include /acl;\n",
+            "proxy_pass $stream_backend;\n",
+            "proxy_connect_timeout 7s;\n",
+            "proxy_timeout        9s;\n",
+        ] {
+            assert!(
+                lazy_targets.contains(line),
+                "{line} missing:\n{lazy_targets}"
+            );
+        }
         assert!(
-            nginx_stream_targets(&hosts, false, &lo)
-                .contains("default $ssl_preread_server_name:443;")
-        );
-        assert!(
-            nginx_stream_targets(&hosts, true, &lo)
+            nginx_stream_targets(&hosts, true, &lo, acl, ports)
                 .contains(&format!("default {};", nginx_refuse(&lo)))
         );
         assert_eq!(nginx_client_acl(&[]), NGINX_GENERATED);
@@ -6161,10 +6120,14 @@ mod tests {
         };
         let [mitm, mitm_relay, passthrough_relay] =
             std::array::from_fn(|_| u16::try_from(rnd(1024, 60_000)).unwrap());
+        let [connect_secs, idle_secs] = std::array::from_fn(|_| rnd(1, 7200));
         let ports = NginxPorts {
             mitm,
             mitm_relay,
             passthrough_relay,
+            passthrough: 8443,
+            connect_secs,
+            idle_secs,
         };
         let lo = gen_ipv4().to_string();
         let out = nginx_https_dispatch(&hosts, false, Path::new("/acl"), ports, &lo);
@@ -6177,6 +6140,10 @@ mod tests {
         assert!(at(&long) < at(&format!("{short}.{root}")), "{out}");
         assert!(out.contains(&format!("    default {lo}:{passthrough_relay};\n")));
         assert!(out.contains("    include /acl;\n"));
+        let timeouts = format!(
+            "proxy_connect_timeout {connect_secs}s;\n    proxy_timeout        {idle_secs}s;\n"
+        );
+        assert_eq!(out.matches(&timeouts).count(), 3, "{out}");
         let strict = nginx_https_dispatch(&hosts, true, Path::new("/acl"), ports, &lo);
         assert!(strict.contains(&format!("    default {};\n", nginx_refuse(&lo))));
     }
@@ -6715,6 +6682,8 @@ mod tests {
         (addr, handle)
     }
 
+    // What: an Offer for the given server at 10.0.0.50.
+    // Why: the dry-run tests share one offer literal.
     fn offer_for(server: Ipv4Addr) -> Offer {
         Offer {
             address: Some(Ipv4Addr::new(10, 0, 0, 50)),
@@ -6981,10 +6950,12 @@ mod tests {
         .map(|(k, v)| (k, v.to_string()))
         .collect();
         let set = |key: &str| values.get(key).cloned().unwrap_or_default();
-        let relay = dnsmasq_conf(&set, true);
+        let relay = dnsmasq_conf(&set, true, false);
+        assert!(!relay.contains("log-dhcp"), "{relay}");
+        assert!(dnsmasq_conf(&set, true, true).contains("\nlog-dhcp\n"));
         assert!(relay.ends_with("dhcp-relay=10.0.0.2,10.0.0.1\n"), "{relay}");
         assert!(!relay.contains("dhcp-range"));
-        let proxy = dnsmasq_conf(&set, false);
+        let proxy = dnsmasq_conf(&set, false, true);
         for line in [
             "log-facility=-",
             "dhcp-range=10.0.0.0,proxy",
@@ -7002,18 +6973,6 @@ mod tests {
         for conf in [&proxy, &relay] {
             assert!(!conf.lines().any(|l| l.starts_with("dhcp-proxy")), "{conf}");
         }
-    }
-
-    // What: openssl x509 output for one certificate.
-    // Why: cert tests read subject, SAN, serial alike.
-    // From: Issue #1683 | PR #1912
-    fn x509(crt: &Path, args: &[&str]) -> String {
-        let crt = crt.to_str().expect("utf8 path");
-        tool(
-            "openssl",
-            &[&["x509", "-noout"], args, &["-in", crt]].concat(),
-        )
-        .expect("x509")
     }
 
     // What: certificate values, names random, keys valid.
@@ -7066,7 +7025,7 @@ mod tests {
         assert_eq!(fs::metadata(&certs).expect("certs").gid(), gid);
         let ca_crt = ca.join(&cert.ca_cert_file);
         let verify = |crt: &Path| {
-            tool(
+            run_program(
                 "openssl",
                 &[
                     "verify",
@@ -7074,16 +7033,19 @@ mod tests {
                     ca_crt.to_str().expect("utf8"),
                     crt.to_str().expect("utf8"),
                 ],
+                None,
             )
         };
         verify(&leaf).expect("leaf signed by the CA");
         assert_eq!(
-            x509(&leaf, &["-subject", "-nameopt", "RFC2253"]).trim(),
+            openssl_x509(&leaf, &["-subject", "-nameopt", "RFC2253"])
+                .expect("x509")
+                .trim(),
             format!("subject={}", cert.leaf_subject.trim_start_matches('/'))
         );
-        let san = x509(&leaf, &["-ext", "subjectAltName"]);
+        let san = openssl_x509(&leaf, &["-ext", "subjectAltName"]).expect("x509");
         assert!(san.contains(&format!("DNS:{host}, DNS:*.{host}")), "{san}");
-        let san = x509(&default, &["-ext", "subjectAltName"]);
+        let san = openssl_x509(&default, &["-ext", "subjectAltName"]).expect("x509");
         assert!(san.contains(&format!("IP Address:{ip_b}")), "{san}");
         assert_eq!(
             fs::read_dir(&run).expect("run").count(),
@@ -7103,10 +7065,10 @@ mod tests {
         assert_eq!(bytes(&default), default_before);
         nginx_certs(&ca, &certs, &run, &hosts, &ip_a, gid, &cert).expect("prefix ip");
         assert_ne!(bytes(&default), default_before, "a prefix IP kept the cert");
-        let san = x509(&default, &["-ext", "subjectAltName"]);
+        let san = openssl_x509(&default, &["-ext", "subjectAltName"]).expect("x509");
         assert!(san.contains(&format!("IP Address:{ip_a}")), "{san}");
         let serial = |crt: &Path| {
-            let text = x509(crt, &["-serial"]);
+            let text = openssl_x509(crt, &["-serial"]).expect("x509");
             u128::from_str_radix(text.trim().trim_start_matches("serial="), 16).expect("hex")
         };
         assert!(serial(&default) > serial(&leaf));

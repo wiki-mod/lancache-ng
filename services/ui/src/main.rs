@@ -27,8 +27,8 @@ use lancache_ng::config::{
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, DesiredRunState, DesiredState, DnsRecord,
     FlushRequest, NetdataAlarm, Place, PowerDns, ProbeAnswer, ProbeReport, SnapshotStore,
-    WatchdogStatus, ct_eq, df, die, error_chain, hex32, http_client, is_placeholder,
-    load_or_create, load_or_create_hex, need_secs, probe_health, resolve_shared_secret,
+    WatchdogStatus, ct_eq, df, die, error_chain, files_under, hex32, http_client, is_placeholder,
+    load_or_create, load_or_create_hex, need_secs, own, probe_health, resolve_shared_secret,
     shared_secret, shared_secret_file_name, shared_secret_is_placeholder, snapshot_created_unix,
     unix_secs, write_file, write_if_changed,
 };
@@ -45,7 +45,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -372,8 +371,8 @@ impl Config {
             // What: missed watchdog cycles before stale.
             // Why: one owner with the restart rule.
             watchdog_miss_limit: knob("RESTART_AFTER", u32::MAX.into(), OutOfRange::Reject)? as u32,
-            // What: security headers are on unless off.
-            // Why: the ui gets none; safe is the default.
+            // What: security headers switch; unset fails.
+            // Why: compose owns the value; no Rust default.
             security_headers_enabled: need_flag("UI_SECURITY_HEADERS")?,
             hsts_mode: hsts_mode_from(&text("UI_HSTS_MODE", "")),
             ui_logs_max_entries: knob("UI_LOGS_MAX_ENTRIES", u64::MAX, OutOfRange::Reject)?
@@ -407,8 +406,8 @@ impl Config {
             listen_port: knob("UI_LISTEN_PORT", u16::MAX.into(), OutOfRange::Reject)? as u16,
             any_bind: config::any_bind(env)?,
             ca_cert_file: need("CA_CERT_FILE")?,
-            // What: dev mode is an optional switch, off.
-            // Why: the ui gets none; prod stays off.
+            // What: switch for dev mode; unset stops start.
+            // Why: compose owns the value; no Rust default.
             dev_mode: need_flag("LANCACHE_DEV_MODE")?,
             syslog_log_root: need("SYSLOG_LOG_ROOT")?,
             syslog_max_gb: read(config::SYSLOG_MAX_GB)? as u32,
@@ -723,7 +722,7 @@ fn cookie_signature(secret: &[u8; 32], expires: u64, csrf_token: &str) -> String
 // What: a fresh session valid for ttl.
 // Why: every first request gets its own random CSRF token.
 fn issue_session(secret: &[u8; 32], ttl: Duration) -> Session {
-    let csrf_token = hex::encode(rand::random::<[u8; 32]>());
+    let csrf_token = hex32();
     let expires = unix_secs() + ttl.as_secs();
     let signature = cookie_signature(secret, expires, &csrf_token);
     Session {
@@ -1100,7 +1099,7 @@ fn html_escape(text: &str) -> String {
 }
 
 // What: the title and return link of one error page family.
-// Why: one error type serves cache, NTP, settings and DHCP.
+// Why: one error type serves cache, NTP, DHCP, setup, logs.
 struct ErrorArea {
     title: &'static str,
     href: &'static str,
@@ -1171,7 +1170,7 @@ impl IntoResponse for HtmlError {
 }
 
 // What: a static file response; cached ones are public.
-// Why: brand assets cache for long, the stylesheet doesn't.
+// Why: scripts and icons cache long, the css does not.
 fn asset(content_type: &'static str, cached: bool, body: &'static [u8]) -> Response {
     let headers = [(header::CONTENT_TYPE, content_type)];
     if cached {
@@ -1311,23 +1310,18 @@ const MIB: u64 = 1_048_576;
 const GIB: u64 = 1_073_741_824;
 
 // What: size of an allowed directory in GiB, 0 if refused.
-// Why: du beats a Rust walk over hundreds of GB of files.
+// Why: the shared tree walk sums it; no links.
 fn du_gb(path: &str) -> f64 {
     if !path_allowed(path) {
         return 0.0;
     }
-    let bytes: u64 = Command::new("du")
-        .args(["-sb", path])
-        .output()
-        .ok()
-        .and_then(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .split_whitespace()
-                .next()
-                .and_then(|n| n.parse().ok())
-        })
-        .unwrap_or(0);
-    bytes as f64 / GIB as f64
+    match files_under(Path::new(path)) {
+        Ok(files) => files.iter().map(|(_, meta)| meta.len()).sum::<u64>() as f64 / GIB as f64,
+        Err(e) => {
+            tracing::warn!("{path} not read for its size: {e}");
+            0.0
+        }
+    }
 }
 
 // What: free MiB on the cache filesystem; None if unknown.
@@ -1455,7 +1449,7 @@ struct LogStats {
 }
 
 // What: the proxy access line pattern from common.
-// Why: groups: ip time method path status bytes cache host
+// Why: two callers index the groups by number.
 fn log_regex() -> &'static Regex {
     static LOG_REGEX: OnceLock<Regex> = OnceLock::new();
     LOG_REGEX.get_or_init(|| Regex::new(PROXY_ACCESS_LOG_PATTERN).expect("log regex is valid"))
@@ -2100,7 +2094,7 @@ fn soa_query(id: u16, zone: &str) -> Vec<u8> {
     query
 }
 
-// What: ask addr:port for the lan. SOA over UDP.
+// What: ask addr:port for the LAN zone SOA over UDP.
 // Why: a silent host is a status, not an error.
 async fn probe_secondary_soa(any: &str, addr: Ipv4Addr, port: u16, lan_zone: &str) -> ProbeResult {
     const TIMEOUT: Duration = Duration::from_secs(4);
@@ -2586,10 +2580,10 @@ fn registration_token_ok(state: &AppState, presented: &str) -> bool {
     !token.is_empty() && ct_eq(presented, token)
 }
 
-// What: a fresh 32-byte hex NATS password.
+// What: a fresh NATS password.
 // Why: plaintext is shown once; only its hash is stored.
 fn new_nats_password() -> String {
-    hex::encode(rand::random::<[u8; 32]>())
+    hex32()
 }
 
 // What: render the secondaries page.
@@ -2787,7 +2781,7 @@ async fn check_secondary_health(
     .await;
     if result.status == "ok" {
         // What: a lost last_seen write is logged.
-        // Why: the sync succeeded; the reply says so.
+        // Why: the probe succeeded; the reply says so.
         // From: Issue #1683 | PR #1912
         if let Err(status) = with_db(&state, |db| {
             db.execute(
@@ -2999,10 +2993,13 @@ async fn kea_post(
 #[derive(Debug, PartialEq)]
 enum Kea {
     // What: result 0, with the reply's arguments.
+    // Why: the caller reads its answer from the arguments.
     Done(Value),
     // What: result 3, Kea's "nothing found".
+    // Why: an empty search is not an error.
     Empty(String),
     // What: any other result, with Kea's text.
+    // Why: the text tells the operator what Kea rejected.
     Refused(String),
     // What: no answer: transport or JSON error.
     // Why: a lost request may still have applied.
@@ -4095,8 +4092,7 @@ async fn release_lease(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
     let address = ipv4(ip).ok_or_else(|| invalid("Lease release requires a valid IPv4 address"))?;
     let arguments = json!({"ip-address": ip});
     // What: read the lease's hostname before deleting it.
-    // Why: only the A-record cleanup below needs the name;
-    // the release and the PTR cleanup work without it.
+    // Why: only the A-record cleanup below needs the name.
     let hostname = match kea_send(&state, "lease4-get", Some(&arguments)).await {
         Kea::Done(lease) => lease
             .get("hostname")
@@ -4105,6 +4101,7 @@ async fn release_lease(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
             .filter(|name| !name.is_empty())
             .map(str::to_string),
         // What: no lease; lease4-del answers below.
+        // Why: a missing lease is not a failure here.
         Kea::Empty(_) => None,
         Kea::Refused(e) | Kea::Lost(e) => {
             tracing::warn!(ip, error = %e, "lease hostname not read; A record kept");
@@ -5328,7 +5325,7 @@ async fn remove_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redir
 const RECENT_LOGS: usize = 10;
 
 // What: run a blocking job off the async workers.
-// Why: du and log reads must not stall other requests.
+// Why: size walks and log reads must not stall requests.
 async fn blocking<T: Default + Send + 'static>(
     state: &Arc<AppState>,
     job: impl FnOnce(&AppState) -> T + Send + 'static,
@@ -5783,7 +5780,7 @@ fn registration_token(configured: &str, token_file: &str) -> Result<String, Stri
                      persistent random token at {}",
                     path.display()
                 );
-                let token = hex::encode(rand::random::<[u8; 32]>());
+                let token = hex32();
                 (token.clone(), token)
             },
             |text| {
@@ -5909,7 +5906,7 @@ fn ui_written_dirs(cfg: &Config, log_file: &Path) -> Vec<PathBuf> {
 // Why: a symlink in a volume must not redirect the chown.
 // From: Issue #1427
 fn chown_tree(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
-    std::os::unix::fs::lchown(path, Some(uid), Some(gid))?;
+    own(path, Some(uid), Some(gid), None)?;
     if fs::symlink_metadata(path)?.is_dir() {
         for entry in fs::read_dir(path)? {
             chown_tree(&entry?.path(), uid, gid)?;
@@ -5922,14 +5919,12 @@ fn chown_tree(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
 // Why: the shared log reader gid must keep read access.
 // From: Issue #1427 | PR #1670
 fn open_log_dir_to_group(dir: &Path, gid: u32) -> io::Result<()> {
-    std::os::unix::fs::lchown(dir, None, Some(gid))?;
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o2775))?;
+    own(dir, None, Some(gid), Some(0o2775))?;
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
         let meta = fs::symlink_metadata(&path)?;
         if meta.is_file() {
-            std::os::unix::fs::lchown(&path, None, Some(gid))?;
-            fs::set_permissions(&path, fs::Permissions::from_mode(meta.mode() | 0o040))?;
+            own(&path, None, Some(gid), Some(meta.mode() | 0o040))?;
         }
     }
     Ok(())
@@ -6085,8 +6080,8 @@ fn callout_xkey(cfg: &Config) -> Result<XKey, String> {
 // What: every route of the ui, public and protected.
 // Why: the protected layer owns auth and CSRF.
 fn router(state: Arc<AppState>) -> Router {
-    // What: routes outside the login, each gated itself.
-    // Why: no session cookie may ride on cacheable assets.
+    // What: routes outside the login layer.
+    // Why: probes, tokens, icons need no browser session.
     let public: Vec<(&str, MethodRouter<Arc<AppState>>)> = vec![
         (ROUTE_HEALTH, get(health)),
         (ROUTE_SECONDARY_REGISTER, post(register_secondary)),
@@ -7782,7 +7777,7 @@ mod tests {
     }
 
     // What: a fresh random password for one test.
-    // Why: no password literal sits in the source.
+    // Why: the hash tests need no fixed password literal.
     fn test_password() -> String {
         hex::encode(rand::random::<[u8; 16]>())
     }

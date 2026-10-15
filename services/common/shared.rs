@@ -13,10 +13,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use subtle::{Choice, ConstantTimeEq};
 
@@ -42,8 +42,8 @@ pub struct DiskHealth {
     pub status: String,
 }
 
-// What: disk section of status.json; only the cache today.
-// Why: a struct keeps room for more volumes later.
+// What: disk section of status.json; the cache volume.
+// Why: one named field per volume keeps the schema stable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskInfo {
     pub cache: DiskHealth,
@@ -110,24 +110,273 @@ pub struct Df {
     pub used_pct: u32,
 }
 
-// What: figures from `df -Pk <path>`; None on any failure.
-// Why: -P keeps one line per mount, so fields never shift.
+// What: figures from statvfs; None on any failure.
+// Why: std has no statvfs; used percent rounds up.
 pub fn df(path: &Path) -> Option<Df> {
-    let output = Command::new("df").arg("-Pk").arg(path).output().ok()?;
-    if !output.status.success() {
+    let stat = rustix::fs::statvfs(path).ok()?;
+    let used = stat.f_blocks.checked_sub(stat.f_bfree)?;
+    let total = used.checked_add(stat.f_bavail)?;
+    if total == 0 {
         return None;
     }
-    parse_df(&String::from_utf8_lossy(&output.stdout))
+    Some(Df {
+        avail_kib: stat.f_bavail.checked_mul(stat.f_frsize)? / 1024,
+        used_pct: u32::try_from(used.checked_mul(100)?.div_ceil(total)).ok()?,
+    })
 }
 
-// What: figures from the text of `df -Pk`; None if odd.
-// Why: the parse is pure, so a test can feed it any text.
-fn parse_df(text: &str) -> Option<Df> {
-    let fields: Vec<&str> = text.lines().nth(1)?.split_whitespace().collect();
-    Some(Df {
-        avail_kib: fields.get(3)?.parse().ok()?,
-        used_pct: fields.get(4)?.trim_end_matches('%').parse().ok()?,
+// What: read one pipe to its end on its own thread.
+// Why: a full pipe would block the program while we wait.
+// From: Issue #1683 | PR #1912
+fn drain<R: Read + Send + 'static>(
+    pipe: Option<R>,
+) -> std::thread::JoinHandle<io::Result<Vec<u8>>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        match pipe {
+            Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
+            None => Err(io::Error::other("pipe missing")),
+        }
     })
+}
+
+// What: run a program; its stdout then stderr, or an error.
+// Why: one program runner; a limit ends a hanging program.
+// From: Issue #1683 | PR #1912
+pub fn run_program(
+    program: &str,
+    args: &[&str],
+    limit: Option<Duration>,
+) -> Result<String, String> {
+    let failed = |what: &str, e: &dyn std::fmt::Display| format!("{program}: {what}: {e}");
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run {program}: {e}"))?;
+    let out = drain(child.stdout.take());
+    let err = drain(child.stderr.take());
+    let status = match limit {
+        None => child.wait().map_err(|e| failed("cannot wait", &e))?,
+        Some(limit) => {
+            let deadline = std::time::Instant::now() + limit;
+            loop {
+                if let Some(status) = child.try_wait().map_err(|e| failed("cannot wait", &e))? {
+                    break status;
+                }
+                if std::time::Instant::now() >= deadline {
+                    // What: readers end on their own.
+                    // Why: a grandchild may hold pipes.
+                    let killed = child.kill().map_err(|e| failed("cannot kill", &e));
+                    child.wait().map_err(|e| failed("cannot wait", &e))?;
+                    killed?;
+                    return Err(format!(
+                        "{program} {}: timed out after {limit:?}, killed",
+                        args.join(" ")
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    };
+    let mut text = String::new();
+    for reader in [out, err] {
+        let bytes = reader
+            .join()
+            .map_err(|_| failed("output reader", &"panicked"))?
+            .map_err(|e| failed("cannot read output", &e))?;
+        text.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    if status.success() {
+        Ok(text)
+    } else {
+        Err(format!("{program} {}: {}", args.join(" "), text.trim()))
+    }
+}
+
+// What: send SIGTERM to one process.
+// Why: std kills with SIGKILL; a daemon needs TERM.
+// From: Issue #1683 | PR #1912
+pub fn terminate(pid: u32) -> io::Result<()> {
+    let pid = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid process id"))?;
+    rustix::process::kill_process(pid, rustix::process::Signal::TERM).map_err(io::Error::from)
+}
+
+// What: set owner ids if given, then the mode.
+// Why: the one owner change; lchown never follows a link.
+// From: Issue #1683 | PR #1912
+pub fn own(path: &Path, uid: Option<u32>, gid: Option<u32>, mode: Option<u32>) -> io::Result<()> {
+    let context = |e: io::Error| {
+        io::Error::new(
+            e.kind(),
+            format!("cannot set owner or mode of {}: {e}", path.display()),
+        )
+    };
+    if uid.is_some() || gid.is_some() {
+        std::os::unix::fs::lchown(path, uid, gid).map_err(context)?;
+    }
+    match mode {
+        Some(mode) => fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode))
+            .map_err(context),
+        None => Ok(()),
+    }
+}
+
+// What: regular files under root, never across mounts.
+// Why: the one tree walk; no symlink is followed.
+// From: Issue #1683 | PR #1912
+pub fn files_under(root: &Path) -> io::Result<Vec<(PathBuf, fs::Metadata)>> {
+    use std::os::unix::fs::MetadataExt as _;
+    let dev = fs::symlink_metadata(root)?.dev();
+    let (mut files, mut dirs) = (Vec::new(), vec![root.to_path_buf()]);
+    while let Some(dir) = dirs.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound && dir != root => continue,
+            other => other?,
+        };
+        for entry in entries {
+            let path = entry?.path();
+            // What: an entry gone since listing is skipped
+            // Why: cache and logs change during a scan
+            let meta = match fs::symlink_metadata(&path) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                other => other?,
+            };
+            if meta.dev() != dev {
+                continue;
+            }
+            if meta.is_dir() {
+                dirs.push(path);
+            } else if meta.is_file() {
+                files.push((path, meta));
+            }
+        }
+    }
+    Ok(files)
+}
+
+// What: key type, subject and days of one certificate.
+// Why: CA and leaf share the openssl request flags.
+// From: Issue #1683 | PR #1912
+pub struct CertSpec<'a> {
+    pub key_type: &'a str,
+    pub subject: &'a str,
+    pub days: &'a str,
+}
+
+// What: create a self-signed CA key and certificate.
+// Why: the one openssl CA creation.
+// From: Issue #1683 | PR #1912
+pub fn openssl_ca(key: &Path, crt: &Path, spec: &CertSpec) -> Result<(), String> {
+    let (key, crt) = (key.display().to_string(), crt.display().to_string());
+    run_program(
+        "openssl",
+        &[
+            "req",
+            "-new",
+            "-newkey",
+            spec.key_type,
+            "-days",
+            spec.days,
+            "-nodes",
+            "-x509",
+            "-subj",
+            spec.subject,
+            "-keyout",
+            &key,
+            "-out",
+            &crt,
+        ],
+        None,
+    )
+    .map(|_| ())
+}
+
+// What: the CA files that sign a leaf.
+// Why: openssl needs certificate, key and serial file.
+// From: Issue #1683 | PR #1912
+pub struct CaFiles<'a> {
+    pub crt: &'a Path,
+    pub key: &'a Path,
+    pub serial: &'a Path,
+}
+
+// What: sign one leaf; csr and ext are scratch files.
+// Why: the one openssl leaf signing; the caller cleans up.
+// From: Issue #1683 | PR #1912
+pub fn openssl_leaf(
+    ca: &CaFiles,
+    (key, crt): (&Path, &Path),
+    (csr, ext): (&Path, &Path),
+    san: &str,
+    spec: &CertSpec,
+) -> Result<(), String> {
+    write_file(
+        ext,
+        format!("subjectAltName={san}\n").as_bytes(),
+        0o600,
+        Place::Replace,
+    )
+    .map_err(|e| format!("cannot write {}: {e}", ext.display()))?;
+    let path = |p: &Path| p.display().to_string();
+    let (key, crt, csr, ext) = (path(key), path(crt), path(csr), path(ext));
+    run_program(
+        "openssl",
+        &[
+            "req",
+            "-new",
+            "-newkey",
+            spec.key_type,
+            "-nodes",
+            "-subj",
+            spec.subject,
+            "-keyout",
+            &key,
+            "-out",
+            &csr,
+        ],
+        None,
+    )?;
+    run_program(
+        "openssl",
+        &[
+            "x509",
+            "-req",
+            "-days",
+            spec.days,
+            "-in",
+            &csr,
+            "-CA",
+            &path(ca.crt),
+            "-CAkey",
+            &path(ca.key),
+            "-CAserial",
+            &path(ca.serial),
+            "-extfile",
+            &ext,
+            "-out",
+            &crt,
+        ],
+        None,
+    )
+    .map(|_| ())
+}
+
+// What: openssl x509 -noout output for one certificate.
+// Why: the one certificate read; the CA print and SAN read.
+// From: Issue #1683 | PR #1912
+pub fn openssl_x509(crt: &Path, args: &[&str]) -> Result<String, String> {
+    let crt = crt.display().to_string();
+    run_program(
+        "openssl",
+        &[&["x509", "-noout"], args, &["-in", &crt]].concat(),
+        None,
+    )
 }
 
 // What: constant-time equality of two secrets.
@@ -338,7 +587,7 @@ async fn expect_success(client: &reqwest::Client, url: &str) -> Result<(), Strin
     }
 }
 
-// What: Ok when a loopback health URL answers 2xx.
+// What: Ok when a plain-http health URL answers 2xx.
 // Why: healthchecks run in the binary; no curl, no shell.
 // From: Issue #1683 | PR #1912
 pub async fn probe_health(url: &str, timeout: Duration) -> Result<(), String> {
@@ -630,7 +879,8 @@ fn legacy_id_nanos(name: &str) -> Option<u128> {
     if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
         return None;
     }
-    // days from civil (Howard Hinnant), proleptic Gregorian
+    // What: days since the epoch for a civil date.
+    // Why: Hinnant's days-from-civil, proleptic Gregorian.
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
@@ -713,7 +963,7 @@ pub fn write_file_as(
         .and_then(|mut file| {
             file.write_all(contents)?;
             if let Some((uid, gid)) = owner {
-                std::os::unix::fs::fchown(&file, uid, gid)?;
+                own(&tmp, uid, gid, None)?;
             }
             file.sync_all()
         })
@@ -752,10 +1002,8 @@ pub fn write_if_changed(
     }
     // What: converge mode and owner on unchanged files too.
     // Why: an old install may carry other rights.
-    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode))?;
-    if let Some((uid, gid)) = owner {
-        std::os::unix::fs::lchown(path, uid, gid)?;
-    }
+    let (uid, gid) = owner.unwrap_or((None, None));
+    own(path, uid, gid, Some(mode))?;
     Ok(changed)
 }
 
@@ -1531,7 +1779,8 @@ mod tests {
         assert!(ct_eq("secret-key", "secret-key") && ct_eq("", ""));
         assert!(!ct_eq("secret-key", "different-key"));
         assert!(!ct_eq("short", "muchlongerkey") && !ct_eq("", "x"));
-        // a presented value that extends or truncates the secret never matches
+        // What: longer or shorter values never match.
+        // Why: a secret prefix must not authenticate.
         assert!(!ct_eq("secret-keyX", "secret-key") && !ct_eq("secret-ke", "secret-key"));
         assert!(!ct_eq("x", ""));
     }
@@ -1581,18 +1830,50 @@ mod tests {
         assert_eq!(old.interval_secs, 0);
     }
 
-    // What: df output parses; odd output gives None.
-    // Why: a wrong field would show a wrong disk percent.
+    // What: run_program returns output, errors and kills.
+    // Why: callers map the exit; a hang ends at the limit.
+    // From: Issue #1683 | PR #1912
     #[test]
-    fn df_output_is_parsed_or_refused() {
-        let ok = "Filesystem 1024-blocks Used Available Capacity Mounted on\n\
-                  /dev/sda1 1000 400 600 40% /cache\n";
-        let parsed = parse_df(ok).expect("well-formed df output");
-        assert_eq!((parsed.avail_kib, parsed.used_pct), (600, 40));
-        assert!(parse_df("").is_none());
-        assert!(parse_df("header only\n").is_none());
-        assert!(parse_df("h\n/dev/sda1 1000 400 x 40% /\n").is_none());
-        assert!(parse_df("h\n/dev/sda1 1000 400 600 full /\n").is_none());
+    fn run_program_maps_output_failure_and_timeout() {
+        assert_eq!(
+            run_program("echo", &["a", "b"], None).as_deref(),
+            Ok("a b\n")
+        );
+        let failed = run_program("sh", &["-c", "echo out; echo err >&2; exit 3"], None)
+            .expect_err("exit 3 fails");
+        assert!(failed.contains("out") && failed.contains("err"), "{failed}");
+        assert!(run_program("lancache-no-such-program", &[], None).is_err());
+        let limit = Some(Duration::from_millis(200));
+        let slow = run_program("sleep", &["30"], limit).expect_err("sleep outlasts the limit");
+        assert!(slow.contains("timed out"), "{slow}");
+        assert_eq!(
+            run_program("echo", &["fast"], Some(Duration::from_secs(30))).as_deref(),
+            Ok("fast\n")
+        );
+    }
+
+    // What: terminate sends TERM; own sets owner, mode.
+    // Why: a stop must be a TERM; a key must get its mode.
+    // From: Issue #1683 | PR #1912
+    #[test]
+    fn terminate_sends_term_and_own_sets_the_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::process::ExitStatusExt as _;
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep starts");
+        terminate(child.id()).expect("TERM sent");
+        assert_eq!(child.wait().expect("sleep ends").signal(), Some(15));
+        assert!(terminate(0).is_err());
+        let dir = unique_temp_dir("own");
+        let file = dir.join("f");
+        fs::write(&file, b"x").expect("file");
+        own(&file, None, None, Some(0o640)).expect("own");
+        let mode = fs::metadata(&file).expect("meta").permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o640);
+        assert!(own(&dir.join("absent"), None, None, Some(0o600)).is_err());
+        assert!(own(&dir.join("absent"), None, Some(0), None).is_err());
     }
 
     // What: snapshots list oldest first; prune to keep_n.
@@ -2057,74 +2338,51 @@ mod tests {
         assert!(closed.is_err());
     }
 
-    // What: openssl in a scratch dir; failure fails.
-    // Why: the tests build a real CA, leaf and server.
+    // What: key type, subject and days of test certs.
+    // Why: one spec; the tests build a real CA and leaf.
     // From: Issue #1683 | PR #1912
-    fn openssl_in(dir: &Path, args: &[&str]) {
-        let out = Command::new("openssl")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .expect("openssl runs");
-        assert!(out.status.success(), "{args:?}: {out:?}");
+    fn test_spec(subject: &str) -> CertSpec<'_> {
+        CertSpec {
+            key_type: "rsa:2048",
+            subject,
+            days: "1",
+        }
     }
 
     // What: a self-signed CA as <name>.crt and <name>.key.
     // Why: one trust anchor per test CA.
     // From: Issue #1683 | PR #1912
     fn make_ca(dir: &Path, name: &str) {
-        openssl_in(
-            dir,
-            &[
-                "req",
-                "-x509",
-                "-newkey",
-                "rsa:2048",
-                "-nodes",
-                "-days",
-                "1",
-                "-subj",
-                "/CN=ca",
-                "-keyout",
-                &format!("{name}.key"),
-                "-out",
-                &format!("{name}.crt"),
-            ],
-        );
+        openssl_ca(
+            &dir.join(format!("{name}.key")),
+            &dir.join(format!("{name}.crt")),
+            &test_spec("/CN=ca"),
+        )
+        .expect("openssl makes the CA");
     }
 
     // What: a leaf for host signed by the CA.
     // Why: the server sends a chain the CA vouches for.
     // From: Issue #1683 | PR #1912
     fn make_leaf(dir: &Path, ca: &str, host: &str) {
-        openssl_in(
-            dir,
-            &[
-                "req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=leaf", "-keyout", "leaf.key",
-                "-out", "leaf.csr",
-            ],
+        let (crt, key, serial) = (
+            dir.join(format!("{ca}.crt")),
+            dir.join(format!("{ca}.key")),
+            dir.join(format!("{ca}.srl")),
         );
-        fs::write(dir.join("ext"), format!("subjectAltName=DNS:{host}\n")).expect("ext");
-        openssl_in(
-            dir,
-            &[
-                "x509",
-                "-req",
-                "-in",
-                "leaf.csr",
-                "-CA",
-                &format!("{ca}.crt"),
-                "-CAkey",
-                &format!("{ca}.key"),
-                "-CAcreateserial",
-                "-days",
-                "1",
-                "-extfile",
-                "ext",
-                "-out",
-                "leaf.crt",
-            ],
-        );
+        fs::write(&serial, "01\n").expect("serial");
+        openssl_leaf(
+            &CaFiles {
+                crt: &crt,
+                key: &key,
+                serial: &serial,
+            },
+            (&dir.join("leaf.key"), &dir.join("leaf.crt")),
+            (&dir.join("leaf.csr"), &dir.join("ext")),
+            &format!("DNS:{host}"),
+            &test_spec("/CN=leaf"),
+        )
+        .expect("openssl signs the leaf");
     }
 
     // What: s_server on a free port; killed on drop.
@@ -2141,6 +2399,8 @@ mod tests {
                 .and_then(|l| l.local_addr())
                 .expect("a free local port")
                 .port();
+            let log_path = dir.join("s_server.log");
+            let log = fs::File::create(&log_path).expect("s_server log file");
             let child = Command::new("openssl")
                 .args([
                     "s_server",
@@ -2150,8 +2410,8 @@ mod tests {
                 ])
                 .args(["-cert", "leaf.crt", "-key", "leaf.key"])
                 .current_dir(dir)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stdout(log.try_clone().expect("s_server log handle"))
+                .stderr(log)
                 .spawn()
                 .expect("openssl s_server starts");
             let server = TlsServer { child, port };
@@ -2159,7 +2419,8 @@ mod tests {
             while std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).is_err() {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "s_server never listened"
+                    "s_server never listened: {}",
+                    fs::read_to_string(&log_path).unwrap_or_default()
                 );
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -2190,25 +2451,12 @@ mod tests {
         }
     }
 
-    // What: a unique scratch dir under the temp dir.
-    // Why: parallel tests never share keys.
-    // From: Issue #1683 | PR #1912
-    fn scratch_dir(tag: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("{tag}-{}-{nanos}", std::process::id()));
-        fs::create_dir_all(&dir).expect("scratch dir");
-        dir
-    }
-
     // What: https passes with a cert of the given CA only.
     // Why: the stack CA is the only trust anchor.
     // From: Issue #1683 | PR #1912
     #[tokio::test]
     async fn probe_health_tls_checks_the_certificate() {
-        let dir = scratch_dir("probe-tls");
+        let dir = unique_temp_dir("probe-tls");
         let name = dir
             .file_name()
             .and_then(|n| n.to_str())
@@ -2284,7 +2532,7 @@ mod tests {
             assert!(probe.is_err(), "a platform-trusted cert passed: {probe:?}");
             return;
         }
-        let dir = scratch_dir("probe-tls-roots");
+        let dir = unique_temp_dir("probe-tls-roots");
         let name = dir
             .file_name()
             .and_then(|n| n.to_str())
