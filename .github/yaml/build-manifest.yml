@@ -1116,8 +1116,8 @@ ci_variables:
   # Why: §35: one registry cache per service and arch.
   # From: Issue #1683 | PR #1912
   CI_BUILD_CACHE_TAG: buildcache
-  # What: name stem of the per-build BuildKit builder.
-  # Why: ci.sh appends the shell pid; one owner of the name.
+  # What: BuildKit builder name; hosted runs add the pid.
+  # Why: §34: self-hosted keeps this one builder per host.
   # From: Issue #1683 | PR #1912
   CI_BUILDX_BUILDER: lancache-ci
   # What: installer tries; poll secs of every lock wait.

@@ -3763,6 +3763,22 @@ _ci_buildx_start() {
         "${opts[@]}" --bootstrap >&2
 }
 
+# What: the host's persistent builder; create if absent.
+# Why: §34: one buildkitd per self-hosted host, kept.
+# From: Issue #1683 | PR #1912
+_ci_buildx_host() {
+    local name="$1" rc=0 out
+    out="$(docker buildx inspect "${name}" 2>&1)" && return 0
+    _ci_buildx_start "${name}" || rc=$?
+    [ "${rc}" -eq 0 ] && return 0
+    # What: a parallel job may have created it first.
+    # Why: the second create fails; the builder exists.
+    # From: Issue #1683 | PR #1912
+    out="$(docker buildx inspect "${name}" 2>&1)" && return 0
+    ci_error "[CI-ERROR-BUILD-0027]" "builder=\"${name}\" rc=${rc} reason=\"persistent BuildKit builder neither found nor created\"" "${out}"
+    return 2
+}
+
 # What: buildkitd config trusting the job CA bundle.
 # Why: the daemon talks TLS through the self-hosted proxy.
 # From: Issue #1683 | PR #1912
@@ -3932,14 +3948,24 @@ _ci_docker_build() {
         ''|pull_request) ;;
         *) args+=(--cache-to "type=registry,ref=${cref},mode=max,ignore-error=true") ;;
     esac
-    builder="$(_ci_variable CI_BUILDX_BUILDER)-$$" || { _ci_clear_runtime >&2; return 2; }
-    _ci_buildx_start "${builder}" || { _ci_clear_runtime >&2; return 2; }
+    # What: self-hosted: the host builder; hosted: own one.
+    # Why: §34 keeps host state; a hosted VM ends anyway.
+    # From: Issue #1683 | PR #1912
+    local own=1
+    builder="$(_ci_variable CI_BUILDX_BUILDER)" || { _ci_clear_runtime >&2; return 2; }
+    if _ci_runner_self_hosted; then
+        own=0
+        _ci_buildx_host "${builder}" || { _ci_clear_runtime >&2; return 2; }
+    else
+        builder+="-$$"
+        _ci_buildx_start "${builder}" || { _ci_clear_runtime >&2; return 2; }
+    fi
     # What: retry buildx and capture its output once.
     # Why: ci_error already shows raw; avoid double output.
     # From: Issue #1683
     local buildlog rc=0 crc=0 brc=0
     buildlog="$(_ci_retry buildx docker buildx build --builder "${builder}" --load --platform "${platform}" --tag "${tag}" "${args[@]}" "${context}")" || rc=$?
-    _ci_buildx_stop "${builder}" || brc=$?
+    [ "${own}" -eq 0 ] || _ci_buildx_stop "${builder}" || brc=$?
     _ci_clear_runtime >&2 || crc=$?
     if [ "${rc}" -ne 0 ]; then
         ci_log "[CI-ERROR-BUILD-0019]" "service=\"${service}\" platform=\"${platform}\" tag=\"${tag}\" context=\"${context}\" rc=${rc} reason=\"docker buildx build failed (raw above)\""
