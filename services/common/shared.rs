@@ -111,7 +111,7 @@ pub struct Df {
 }
 
 // What: figures from statvfs of the path; None on any failure.
-// Why: std has no statvfs; used% rounds up, as df -P did.
+// Why: std has no statvfs; used percent rounds up.
 pub fn df(path: &Path) -> Option<Df> {
     let stat = rustix::fs::statvfs(path).ok()?;
     let used = stat.f_blocks.checked_sub(stat.f_bfree)?;
@@ -141,8 +141,7 @@ fn drain<R: Read + Send + 'static>(
 }
 
 // What: run a program; its stdout then stderr, or an error.
-// Why: the one place a service starts a program and maps
-// its exit; a limit kills a program that hangs.
+// Why: one program runner; a limit ends a hanging program.
 // From: Issue #1683 | PR #1912
 pub fn run_program(
     program: &str,
@@ -845,7 +844,8 @@ fn legacy_id_nanos(name: &str) -> Option<u128> {
     if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
         return None;
     }
-    // days from civil (Howard Hinnant), proleptic Gregorian
+    // What: days since the epoch for a civil date.
+    // Why: Hinnant's days-from-civil, proleptic Gregorian.
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
@@ -1744,7 +1744,8 @@ mod tests {
         assert!(ct_eq("secret-key", "secret-key") && ct_eq("", ""));
         assert!(!ct_eq("secret-key", "different-key"));
         assert!(!ct_eq("short", "muchlongerkey") && !ct_eq("", "x"));
-        // a presented value that extends or truncates the secret never matches
+        // What: longer or shorter values never match.
+        // Why: a prefix of the secret must not authenticate.
         assert!(!ct_eq("secret-keyX", "secret-key") && !ct_eq("secret-ke", "secret-key"));
         assert!(!ct_eq("x", ""));
     }

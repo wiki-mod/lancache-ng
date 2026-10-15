@@ -954,12 +954,16 @@ fn write_status(s: &Settings, services: HashMap<String, ServiceHealth>) -> Resul
 #[derive(Clone, Copy)]
 struct Timing {
     // What: how often the supervisor converges.
+    // Why: every program is re-checked once per tick.
     tick: Duration,
     // What: restart pauses, RETRY_BACKOFF_START up to _MAX.
+    // Why: a crash loop must slow down, not spin.
     backoff: Backoff,
     // What: a run this long resets the restart backoff.
+    // Why: one late crash must not keep the long pause.
     backoff_reset: Duration,
     // What: wait for a stopped program before SIGKILL.
+    // Why: TERM needs time to flush state before the kill.
     stop_grace: Duration,
 }
 
@@ -2132,7 +2136,7 @@ fn pdns_database(data_dir: &Path) -> Result<PathBuf, String> {
         return Err(e);
     }
     // What: the owner changes; the mode SQLite chose stays.
-    // Why: the former chown call never touched the mode.
+    // Why: own sets the mode, so the one SQLite chose is read.
     use std::os::unix::fs::PermissionsExt as _;
     let mode = fs::metadata(&db)
         .map_err(|e| format!("cannot read {}: {e}", db.display()))?
@@ -4145,10 +4149,13 @@ const DHCP_SERVER_PORT: u16 = 67;
 // From: Issue #1683 | PR #1912
 struct ProbeTiming {
     // What: how long offers are collected after a DISCOVER.
+    // Why: several servers answer; the first offer is not all.
     window: Duration,
     // What: how long the REQUEST waits for an ACK or NAK.
+    // Why: a silent server must not block the probe.
     request_timeout: Duration,
     // What: DISCOVER sends in one window, spread evenly.
+    // Why: UDP loses packets; one send may vanish.
     retransmits: u32,
 }
 

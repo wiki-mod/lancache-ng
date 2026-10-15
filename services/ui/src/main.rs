@@ -1310,7 +1310,7 @@ const MIB: u64 = 1_048_576;
 const GIB: u64 = 1_073_741_824;
 
 // What: size of an allowed directory in GiB, 0 if refused.
-// Why: bytes of regular files, links not followed; no du.
+// Why: bytes of regular files; links are never followed.
 fn du_gb(path: &str) -> f64 {
     if !path_allowed(path) {
         return 0.0;
@@ -3009,10 +3009,13 @@ async fn kea_post(
 #[derive(Debug, PartialEq)]
 enum Kea {
     // What: result 0, with the reply's arguments.
+    // Why: the caller reads its answer from the arguments.
     Done(Value),
     // What: result 3, Kea's "nothing found".
+    // Why: an empty search is not an error.
     Empty(String),
     // What: any other result, with Kea's text.
+    // Why: the text tells the operator what Kea rejected.
     Refused(String),
     // What: no answer: transport or JSON error.
     // Why: a lost request may still have applied.
@@ -4105,8 +4108,7 @@ async fn release_lease(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
     let address = ipv4(ip).ok_or_else(|| invalid("Lease release requires a valid IPv4 address"))?;
     let arguments = json!({"ip-address": ip});
     // What: read the lease's hostname before deleting it.
-    // Why: only the A-record cleanup below needs the name;
-    // the release and the PTR cleanup work without it.
+    // Why: only the A-record cleanup below needs the name.
     let hostname = match kea_send(&state, "lease4-get", Some(&arguments)).await {
         Kea::Done(lease) => lease
             .get("hostname")
@@ -4115,6 +4117,7 @@ async fn release_lease(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
             .filter(|name| !name.is_empty())
             .map(str::to_string),
         // What: no lease; lease4-del answers below.
+        // Why: a missing lease is not a failure here.
         Kea::Empty(_) => None,
         Kea::Refused(e) | Kea::Lost(e) => {
             tracing::warn!(ip, error = %e, "lease hostname not read; A record kept");
@@ -5338,7 +5341,7 @@ async fn remove_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redir
 const RECENT_LOGS: usize = 10;
 
 // What: run a blocking job off the async workers.
-// Why: du and log reads must not stall other requests.
+// Why: size walks and log reads must not stall requests.
 async fn blocking<T: Default + Send + 'static>(
     state: &Arc<AppState>,
     job: impl FnOnce(&AppState) -> T + Send + 'static,
