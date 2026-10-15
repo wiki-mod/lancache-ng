@@ -3465,6 +3465,7 @@ struct NginxPorts {
     mitm: u16,
     mitm_relay: u16,
     passthrough_relay: u16,
+    passthrough: u16,
     connect_secs: u64,
     idle_secs: u64,
 }
@@ -3476,6 +3477,7 @@ impl NginxPorts {
             mitm: env_port("NGINX_MITM_PORT")?,
             mitm_relay: env_port("NGINX_MITM_RELAY_PORT")?,
             passthrough_relay: env_port("NGINX_PASSTHROUGH_RELAY_PORT")?,
+            passthrough: env_port("NGINX_PASSTHROUGH_PORT")?,
             connect_secs: secs("NGINX_UPSTREAM_CONNECT_TIMEOUT")?,
             idle_secs: secs("NGINX_UPSTREAM_IDLE_TIMEOUT")?,
         })
@@ -3575,10 +3577,26 @@ fn nginx_https_map(hosts: &CdnHosts, strict: bool, cidrs: &[String], default_cer
     out
 }
 
-// What: the SNI passthrough backend map.
+// What: the two relay timeout lines of a stream server.
+// Why: all stream servers share one source for the values.
+// From: Issue #1683 | PR #1912
+fn nginx_relay_timeouts(ports: NginxPorts) -> String {
+    format!(
+        "    proxy_connect_timeout {}s;\n    proxy_timeout        {}s;\n",
+        ports.connect_secs, ports.idle_secs
+    )
+}
+
+// What: the SNI passthrough backend map and its server.
 // Why: lazy forwards any SNI; strict only listed hosts.
 // From: Issue #1683
-fn nginx_stream_targets(hosts: &CdnHosts, strict: bool, loopback: &str) -> String {
+fn nginx_stream_targets(
+    hosts: &CdnHosts,
+    strict: bool,
+    loopback: &str,
+    acl: &Path,
+    ports: NginxPorts,
+) -> String {
     let pass = "$ssl_preread_server_name:443";
     let refuse = nginx_refuse(loopback);
     let mut out = format!(
@@ -3594,6 +3612,14 @@ fn nginx_stream_targets(hosts: &CdnHosts, strict: bool, loopback: &str) -> Strin
         out.push_str(&format!("    default {pass};\n"));
     }
     out.push_str("}\n");
+    // What: the SNI passthrough server on the public port.
+    // Why: one owner renders every stream server.
+    let (port, acl) = (ports.passthrough, acl.display());
+    out.push_str(&format!(
+        "\nserver {{\n    listen {port};\n    listen [::]:{port};\n    include {acl};\n    \
+         ssl_preread on;\n    proxy_pass $stream_backend;\n{}}}\n",
+        nginx_relay_timeouts(ports)
+    ));
     out
 }
 
@@ -3684,18 +3710,18 @@ fn nginx_https_dispatch(
     // What: locals feed the template as plain captures.
     // Why: CodeQL misses captures beside named args.
     let (acl, mitm_port) = (acl.display(), ports.mitm);
-    let (connect, idle) = (ports.connect_secs, ports.idle_secs);
+    let timeouts = nginx_relay_timeouts(ports);
     out.push_str(&format!(
         "    default {default};\n}}\n\n\
          server {{\n    listen 443;\n    listen [::]:443;\n    include {acl};\n    \
-         ssl_preread on;\n    proxy_pass $https_dispatch_backend;\n    proxy_protocol on;\n    \
-         proxy_connect_timeout {connect}s;\n    proxy_timeout        {idle}s;\n}}\n\n\
+         ssl_preread on;\n    proxy_pass $https_dispatch_backend;\n    proxy_protocol on;\n\
+         {timeouts}}}\n\n\
          server {{\n    listen {mitm} proxy_protocol;\n    set_real_ip_from {loopback};\n    \
-         proxy_protocol on;\n    proxy_pass {loopback}:{mitm_port};\n    \
-         proxy_connect_timeout {connect}s;\n    proxy_timeout        {idle}s;\n}}\n\n\
+         proxy_protocol on;\n    proxy_pass {loopback}:{mitm_port};\n\
+         {timeouts}}}\n\n\
          server {{\n    listen {passthrough} proxy_protocol;\n    set_real_ip_from {loopback};\n    \
-         ssl_preread on;\n    proxy_pass $ssl_preread_server_name:443;\n    \
-         proxy_connect_timeout {connect}s;\n    proxy_timeout        {idle}s;\n}}\n"
+         ssl_preread on;\n    proxy_pass $ssl_preread_server_name:443;\n\
+         {timeouts}}}\n"
     ));
     out
 }
@@ -4027,13 +4053,11 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     let value = |key: &'static str| ctx.need(key).map(|v| (key, v));
     let acl = dir.join("stream.d/access.d/00-stream-client-acl.conf");
     let conf = dir.join("nginx.conf");
-    let (ports, health_port) = if https_on {
-        (
-            NginxPorts::from_env()?,
-            url_port(&ctx.need("PROXY_HEALTH_HTTPS_URL")?)?,
-        )
+    let ports = NginxPorts::from_env()?;
+    let health_port = if https_on {
+        url_port(&ctx.need("PROXY_HEALTH_HTTPS_URL")?)?
     } else {
-        (NginxPorts::default(), 0)
+        0
     };
     // What: the https listen file text.
     // Why: a rolled-back old set still needs the listener.
@@ -4054,6 +4078,8 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
                     value("CACHE_MIN_FREE")?,
                     value("CACHE_INACTIVE")?,
                     value("NGINX_PASSTHROUGH_PORT")?,
+                    value("NGINX_UPSTREAM_CONNECT_TIMEOUT")?,
+                    value("NGINX_UPSTREAM_IDLE_TIMEOUT")?,
                     ("NGINX_UPSTREAM_RESOLVER", resolver),
                     ("NGINX_DIR", dir.display().to_string()),
                     ("NGINX_CACHE_DIR", ctx.need("NGINX_CACHE_DIR")?),
@@ -4068,6 +4094,8 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
                     value("CACHE_SLICE_SIZE")?,
                     value("CACHE_VALID_HIT")?,
                     value("CACHE_VALID_ANY")?,
+                    value("NGINX_UPSTREAM_CONNECT_TIMEOUT")?,
+                    value("NGINX_UPSTREAM_IDLE_TIMEOUT")?,
                 ],
             ),
         ),
@@ -4077,7 +4105,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         ),
         (
             dir.join(NGINX_STREAM_TARGETS),
-            nginx_stream_targets(&hosts, strict, &loopback),
+            nginx_stream_targets(&hosts, strict, &loopback, &acl, ports),
         ),
         (acl.clone(), nginx_client_acl(&cidrs)),
         (
@@ -6047,12 +6075,30 @@ mod tests {
         let lazy = nginx_https_map(&hosts, false, &[], &dc);
         assert_eq!(lazy.matches("    default 1;\n").count(), 2, "{lazy}");
         let lo = gen_ipv4().to_string();
+        let ports = NginxPorts {
+            passthrough: 8443,
+            connect_secs: 7,
+            idle_secs: 9,
+            ..NginxPorts::default()
+        };
+        let acl = Path::new("/acl");
+        let lazy_targets = nginx_stream_targets(&hosts, false, &lo, acl, ports);
+        assert!(lazy_targets.contains("default $ssl_preread_server_name:443;"));
+        for line in [
+            "listen 8443;\n",
+            "listen [::]:8443;\n",
+            "include /acl;\n",
+            "proxy_pass $stream_backend;\n",
+            "proxy_connect_timeout 7s;\n",
+            "proxy_timeout        9s;\n",
+        ] {
+            assert!(
+                lazy_targets.contains(line),
+                "{line} missing:\n{lazy_targets}"
+            );
+        }
         assert!(
-            nginx_stream_targets(&hosts, false, &lo)
-                .contains("default $ssl_preread_server_name:443;")
-        );
-        assert!(
-            nginx_stream_targets(&hosts, true, &lo)
+            nginx_stream_targets(&hosts, true, &lo, acl, ports)
                 .contains(&format!("default {};", nginx_refuse(&lo)))
         );
         assert_eq!(nginx_client_acl(&[]), NGINX_GENERATED);
@@ -6081,6 +6127,7 @@ mod tests {
             mitm,
             mitm_relay,
             passthrough_relay,
+            passthrough: 8443,
             connect_secs,
             idle_secs,
         };
