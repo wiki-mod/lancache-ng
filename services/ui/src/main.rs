@@ -3651,6 +3651,14 @@ fn upsert_reservation(
     Ok(())
 }
 
+// What: the subnet id in form field key; 400 if missing.
+// Why: one owner for subnet, option, reservation forms.
+// From: Issue #1683 | PR #1912
+fn subnet_id(f: &Fields, key: &str) -> Result<u32, HtmlError> {
+    f.number::<u32>(key)
+        .ok_or_else(|| invalid("Missing subnet id."))
+}
+
 // What: create a subnet with the next free id.
 // Why: ids need only be unique; max plus one never clashes.
 async fn add_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Redirect, HtmlError> {
@@ -3682,9 +3690,7 @@ async fn add_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Redir
 // Why: custom options and fitting reservations carry over.
 async fn update_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Redirect, HtmlError> {
     require_kea(&state)?;
-    let id = f
-        .number::<u32>("id")
-        .ok_or_else(|| invalid("Missing subnet id."))?;
+    let id = subnet_id(&f, "id")?;
     let limits = state.config.dhcp_lease_limits;
     let (lease, cidr) = validate_subnet(&f, &limits).map_err(invalid)?;
     let ntp = resolve_ntp_servers(f.get("ntp_servers"))
@@ -3709,9 +3715,7 @@ async fn update_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
 // Why: the last known-good snapshot is the way back.
 async fn remove_subnet(State(state): Shared, Form(f): Form<Fields>) -> Result<Redirect, HtmlError> {
     require_kea(&state)?;
-    let id = f
-        .number::<u32>("id")
-        .ok_or_else(|| invalid("Missing subnet id."))?;
+    let id = subnet_id(&f, "id")?;
     kea_modify(&state, move |config| {
         subnets_mut(config)?.retain(|s| s["id"].as_u64() != Some(u64::from(id)));
         Ok(())
@@ -3731,9 +3735,7 @@ async fn change_subnet_option(
     let wrong = |m: &str| invalid(format!("Invalid DHCP option: {m}"));
     let key = custom_option_key(f.get("code")).map_err(wrong)?;
     let data = custom_option_data(key, f.get("data")).map_err(wrong)?;
-    let id = f
-        .number::<u32>("subnet_id")
-        .ok_or_else(|| invalid("Missing subnet id."))?;
+    let id = subnet_id(&f, "subnet_id")?;
     kea_modify(state, move |config| {
         edit_custom_option(find_subnet_mut(config, id)?, key, &data, add)
     })
@@ -3777,9 +3779,7 @@ async fn add_reservation(
             "Invalid hostname: use a plain DNS domain name (letters, digits, '-', '.').",
         ));
     }
-    let id = f
-        .number::<u32>("subnet_id")
-        .ok_or_else(|| invalid("Missing subnet id."))?;
+    let id = subnet_id(&f, "subnet_id")?;
     let (mac, ip, hostname) = (normalize_mac(mac), ip.to_string(), hostname.to_string());
     kea_modify(&state, move |config| {
         // What: refuse if Kea ignores hw-address entries.
@@ -3807,9 +3807,7 @@ async fn remove_reservation(
     if !is_valid_mac(f.get("mac")) {
         return Err(invalid("Invalid MAC address."));
     }
-    let id = f
-        .number::<u32>("subnet_id")
-        .ok_or_else(|| invalid("Missing subnet id."))?;
+    let id = subnet_id(&f, "subnet_id")?;
     let mac = normalize_mac(f.get("mac"));
     kea_modify(&state, move |config| {
         let subnet = find_subnet_mut(config, id)?;
