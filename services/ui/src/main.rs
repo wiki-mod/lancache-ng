@@ -3329,6 +3329,12 @@ fn read_reservations(config: &Value) -> Vec<Reservation> {
 // Why: leases are runtime state, not part of the config.
 async fn kea_leases(state: &AppState) -> Result<Vec<Lease>, String> {
     let reply = kea_post(state, "lease4-get-all", None).await?;
+    // What: code 3 is Kea's "0 leases found".
+    // Why: any other refusal must not look like no lease.
+    // From: Issue #1683 | PR #1912
+    if !matches!(kea_code(&reply), 0 | 3) {
+        return Err(kea_text(&reply).to_string());
+    }
     Ok(kea_reply(&reply, "arguments")
         .and_then(|a| a.get("leases"))
         .and_then(Value::as_array)
