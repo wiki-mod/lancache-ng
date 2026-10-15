@@ -14622,22 +14622,25 @@ _ci_check_prod_state_wiring() {
     # What: compose mounts exactly the SOT state_dir_keys.
     # Why: the SOT list owns the keys; compose only mounts.
     # From: Issue #1683 | PR #1912
-    local mounted="" want line
-    line="$(_ci_run -m 1 "[CI-ERROR-CHECK-0192]" "file=\"${compose}\" reason=\"state mounts not read\"" grep -oE '^[[:space:]]*(- |device: )\$\{[A-Z0-9_]+:\?' "${compose}")" || return 2
+    local mounted="" want row key off=""
+    row="$(_ci_run "[CI-ERROR-CHECK-0192]" "file=\"${compose}\" reason=\"state mounts not read\"" \
+        yq --yaml-fix-merge-anchor-to-spec=true -r '(.services[].volumes[]?, .volumes[]?.driver_opts.device?) | select(tag == "!!str") | select(test("^\$\{[A-Z0-9_]+:[?-]"))' "${compose}")" || return 2
+    # What: ":?" after the key is a mount, ":-" a default.
+    # Why: a mount default in compose is a second owner.
+    # From: Issue #1683 | PR #1912
     while IFS= read -r want; do
         [ -n "${want}" ] || continue
-        want="${want##*\$\{}"
-        mounted+="${want%:\?}"$'\n'
-    done <<< "${line}"
+        key="${want#\$\{}"
+        key="${key%%:*}"
+        case "${want:$(( ${#key} + 2 )):2}" in
+            ':?') mounted+="${key}"$'\n' ;;
+            *) off+=$'\n'"${want}" ;;
+        esac
+    done <<< "${row}"
     mounted="$(sort -u <<< "${mounted%$'\n'}")"
     want="$(sort -u <<< "${keys}")"
     [ "${mounted}" = "${want}" ] \
         || viol+=("${dep} state mounts differ from SOT runtime.state_dir_keys: compose=[${mounted//$'\n'/ }] sot=[${want//$'\n'/ }]")
-    # What: a mount names its value; no default in compose.
-    # Why: setup.sh and ci.sh pass the resolved state dirs.
-    # From: Issue #1683 | PR #1912
-    local off
-    off="$(_ci_run -m 1 "[CI-ERROR-CHECK-0176]" "file=\"${compose}\" reason=\"mount defaults not scanned\"" grep -E '^[[:space:]]*(- |device: )\$\{[A-Z0-9_]+:-' "${compose}")" || return 2
     [ -z "${off}" ] || viol+=("${dep} has a mount default in compose:${off}")
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0100]" "reason=\"prod state wiring differs from the SOT or undocumented\"" "$(printf '%s\n' "${viol[@]}")"
