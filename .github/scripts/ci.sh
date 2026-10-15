@@ -4184,7 +4184,7 @@ _ci_sccache_report() {
     # From: Issue #1683 | PR #1912
     local cause log
     log="$(_ci_sccache_log)"
-    cause="$(_ci_capture 1 grep -E 'Error executing cache write|Cache read error|Cache timed out|compile result: cache error' "${log}")" || return 2
+    cause="$(_ci_capture 1 grep -E 'storage check result|storage write check failed|cache storage (read check|failed to read)|Error executing cache write|Cache read error|Cache timed out|compile result: cache error' "${log}")" || return 2
     if [ "${_CI_SCCACHE_MODE}" = required ]; then
         ci_error "[CI-ERROR-CACHE-0016]" "errors=\"${errs# }\" log=\"${log}\" reason=\"required sccache cache level failed\"" "${cause}"
         return 2
