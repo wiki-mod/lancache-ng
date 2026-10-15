@@ -8767,7 +8767,7 @@ _ci_validate_kea_add() {
 # From: Issue #763 | PR #1858
 _ci_validate_kea_round_trip() {
     local project="$1" kip="$2" kport="$3" uname="$4" cfg token dir subnet resp sid ubase
-    local jar csrf base snap n_a n_b rc=0 kbase kuser label mac_a mac_b snapdir mount snaps
+    local jar csrf base snap snap_b n_a n_b rc=0 kbase kuser label mac_a mac_b snapdir mount snaps
     kbase="http://${kip}:${kport}"
     kuser="$(_ci_validate_kea_agent user)" || return 2
     label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
@@ -8815,8 +8815,8 @@ PROG
     base="$(_ci_ipv4_to_int "${subnet%/*}")"
     snap="$(_ci_validate_kea_add "${ubase}" "${jar}" "${csrf}" "${sid}" "${mac_a}" \
         "$(_ci_int_to_ipv4 $(( base + 2 )))" "${label}-1" "${snaps}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
-    _ci_validate_kea_add "${ubase}" "${jar}" "${csrf}" "${sid}" "${mac_b}" \
-        "$(_ci_int_to_ipv4 $(( base + 3 )))" "${label}-2" "${snaps}" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
+    snap_b="$(_ci_validate_kea_add "${ubase}" "${jar}" "${csrf}" "${sid}" "${mac_b}" \
+        "$(_ci_int_to_ipv4 $(( base + 3 )))" "${label}-2" "${snaps}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     rm -f "${jar}"
     # What: .env.local holds only this run's KEA_* values
     # Why: setup.sh reads a deploy/prod install's .env.local
@@ -8833,7 +8833,7 @@ PROG
     n_a="$(_ci_validate_kea_has "${kbase}" "${kuser}" "${token}" "${mac_a}")" || return 2
     n_b="$(_ci_validate_kea_has "${kbase}" "${kuser}" "${token}" "${mac_b}")" || return 2
     if [ "${n_a}" != 1 ] || [ "${n_b}" != 0 ]; then
-        ci_log "[CI-ERROR-VALIDATE-0095]" "snapshot=\"${snap}\" a=\"${n_a}\" b=\"${n_b}\" reason=\"live Kea config is not the snapshot state (want a=1 b=0)\""
+        ci_log "[CI-ERROR-VALIDATE-0095]" "snapshot=\"${snap}\" second=\"${snap_b}\" a=\"${n_a}\" b=\"${n_b}\" reason=\"live Kea config is not the snapshot state (want a=1 b=0)\""
         return 1
     fi
 }
@@ -9069,9 +9069,10 @@ _ci_validate_run() {
 # Why: promote needs a validated stack first (§49/§50).
 # From: Issue #1683
 ci_cmd_validate() {
-    local cand
+    local cand shared
     _ci_validate_host_tools || return 2
-    _ci_validate_shared_dir || return 2
+    shared="$(_ci_validate_shared_dir)" || return 2
+    printf 'validate shared_dir=%s\n' "${shared}"
     if ! cand="$(_ci_stack_candidate)"; then
         ci_log "[CI-ERROR-VALIDATE-0001]" "reason=\"no stack candidate (candidate read failed)\""
         return 2
@@ -13996,9 +13997,9 @@ ci_cmd_close_linked_issues() {
             return 0
         fi
         _ci_env_required CI_DEFAULT_BRANCH "[CI-ERROR-LINK-0005]" \
-            "default=\"\" reason=\"CI_DEFAULT_BRANCH is required\"" || return 2
+            "default=\"\" reason=\"CI_DEFAULT_BRANCH is required\"" >&2 || return 2
         _ci_env_required GITHUB_SHA "[CI-ERROR-LINK-0015]" \
-            "sha=\"\" reason=\"GITHUB_SHA is required\"" || return 2
+            "sha=\"\" reason=\"GITHUB_SHA is required\"" >&2 || return 2
         if [ "${branch}" = "${CI_DEFAULT_BRANCH}" ]; then
             printf 'close-linked-issues=skip reason="GitHub closes on the default branch" branch="%s"\n' "${branch}"
             return 0
@@ -14827,7 +14828,7 @@ PROG
 # Why: a bare return skips the ACL; ignored headers leak.
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_nginx_policy() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp first="" blocks=0 b h a d al r px
+    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp first="" blocks=0 b h a d al r px nginx_dir listen_file
     local -a viol=()
     px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
     px="${px%/}"
@@ -14872,10 +14873,10 @@ PROG
     # What: the https.conf template includes the listen file
     # Why: a literal listen would be a second port owner.
     # From: Issue #1683 | PR #1912
-    _ci_runtime_default NGINX_DIR || return 2
-    _ci_runtime_default NGINX_HTTPS_LISTEN_FILE || return 2
+    nginx_dir="$(_ci_runtime_default NGINX_DIR)" || return 2
+    listen_file="$(_ci_runtime_default NGINX_HTTPS_LISTEN_FILE)" || return 2
     grep -Fxq "    include     \${NGINX_DIR}/\${NGINX_HTTPS_LISTEN_FILE};" "${px}/conf.d/https.conf" \
-        || viol+=("${px#"${repo_root}/"}/conf.d/https.conf: no include of the SOT keys NGINX_DIR and NGINX_HTTPS_LISTEN_FILE")
+        || viol+=("${px#"${repo_root}/"}/conf.d/https.conf: no include of the SOT keys NGINX_DIR (${nginx_dir}) and NGINX_HTTPS_LISTEN_FILE (${listen_file})")
     grep -Eq '^[[:space:]]*listen[[:space:]]' "${px}/conf.d/https.conf" \
         && viol+=("${px#"${repo_root}/"}/conf.d/https.conf: literal listen; the watchdog renders it")
     if [ "${#viol[@]}" -gt 0 ]; then
