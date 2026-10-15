@@ -565,7 +565,7 @@ _ci_required_field() {
 _ci_workspace_rows() {
     local root="${1:-${CI_REPO_ROOT:-.}}" manifest members m row
     manifest="$(_ci_variable CI_CARGO_MANIFEST)" || return 2
-    members="$(_ci_capture 0 yq -p toml -oy '.workspace.members[]' "${root}/${manifest}")" || return 2
+    members="$(_ci_cargo_members "${root}/${manifest}")" || return 2
     # What: a member without [[bin]] is a library.
     # Why: a library counts with its whole dir.
     # From: Issue #1683 | PR #1912
@@ -4398,10 +4398,10 @@ SH
 }
 
 # What: print the workspace members of a Cargo manifest.
-# Why: one members reader for stubs and version-drift.
+# Why: one reader for rows, stubs and version-drift.
 # From: Issue #1683 | PR #1858
 _ci_cargo_members() {
-    awk '/^members *= *\[/ { on = 1; next } on && /^\]/ { exit } on { gsub(/[",[:space:]]/, ""); if ($0 != "") print }' "$1"
+    _ci_capture 0 yq -p toml -oy '.workspace.members[]' "$1"
 }
 
 # What: stub missing bin/lib targets of workspace members.
@@ -9832,21 +9832,23 @@ _ci_release_value() {
 # Why: verify reads version and license the same way.
 # From: Issue #1683 | PR #1858
 _ci_cargo_ws_value() {
-    awk -v k="$2" '/^\[workspace\.package\]/ { on = 1; next } /^\[/ { on = 0 }
-        on && $1 == k { v = $0; sub(/^[^=]*= *"/, "", v); sub(/".*$/, "", v); print v; exit }' "$1"
+    _ci_capture 0 env K="$2" yq -p toml -oy '.workspace.package[strenv(K)]' "$1"
 }
 
 # What: package names of a workspace's own members.
 # Why: their Cargo.lock entries carry release.version.
 # From: Issue #1683 | PR #1858
 _ci_cargo_member_names() {
-    local m members
-    members="$(_ci_cargo_members "$1")" || return 2
-    while IFS= read -r m; do
-        [ -n "${m}" ] || continue
-        awk '/^\[package\]/ { on = 1; next } /^\[/ { on = 0 }
-            on && /^name *=/ { v = $0; sub(/^name *= *"/, "", v); sub(/".*$/, "", v); print v; exit }' "${1%/*}/${m}/Cargo.toml" || return 2
-    done <<< "${members}"
+    local rows dir bin crate
+    rows="$(_ci_workspace_rows "${CI_REPO_ROOT:-.}")" || return 2
+    while IFS='|' read -r dir bin crate; do
+        [ -n "${dir}" ] || continue
+        if [ -z "${crate}" ]; then
+            ci_log "[CI-ERROR-VERSION-0030]" "member=\"${dir}\" bin=\"${bin}\" reason=\"member manifest missing or has no package name\""
+            return 2
+        fi
+        printf '%s\n' "${crate}"
+    done <<< "${rows}"
 }
 
 # What: write release.version into its derived copies.
@@ -9857,8 +9859,8 @@ _ci_version_release_sync() {
     want="$(_ci_release_value version)" || return 2
     lic="$(_ci_release_value license)" || return 2
     lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
-    cargo="${lock%/*}/Cargo.toml"
-    names="$(_ci_cargo_member_names "${cargo}")" || return 2
+    cargo="$(_ci_repo_path CI_CARGO_MANIFEST)" || return 2
+    names="$(_ci_cargo_member_names)" || return 2
     for f in "${cargo}" "${lock}"; do
         tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-vsync.XXXXXX")" || return 2
         case "${f}" in
@@ -9884,17 +9886,17 @@ _ci_version_release_sync() {
 # Why: one release version owner; consumers must not drift.
 # From: Issue #1683 | PR #1858
 _ci_version_release() {
-    local want lic got lock cargo members m n k rc=0
+    local want lic got lock cargo members m mf n k rc=0
     want="$(_ci_release_value version)" || return 2
     lic="$(_ci_release_value license)" || return 2
     lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
-    cargo="${lock%/*}/Cargo.toml"
-    got="$(_ci_cargo_ws_value "${cargo}" version)"
+    cargo="$(_ci_repo_path CI_CARGO_MANIFEST)" || return 2
+    got="$(_ci_cargo_ws_value "${cargo}" version)" || return 2
     if [ "${got}" != "${want}" ]; then
         ci_log "[CI-ERROR-VERSION-0021]" "path=\"${cargo}\" got=\"${got}\" want=\"${want}\" reason=\"workspace.package.version is not SOT release.version\""
         rc=1
     fi
-    got="$(_ci_cargo_ws_value "${cargo}" license)"
+    got="$(_ci_cargo_ws_value "${cargo}" license)" || return 2
     if [ "${got}" != "${lic}" ]; then
         ci_log "[CI-ERROR-VERSION-0028]" "path=\"${cargo}\" got=\"${got}\" want=\"${lic}\" reason=\"workspace.package.license is not SOT release.license\""
         rc=1
@@ -9902,9 +9904,10 @@ _ci_version_release() {
     members="$(_ci_cargo_members "${cargo}")" || return 2
     while IFS= read -r m; do
         [ -n "${m}" ] || continue
+        mf="$(_ci_repo_path CI_CARGO_MANIFEST "${CI_REPO_ROOT:-.}/${m}")" || return 2
         for k in version edition license; do
             local mrc=0
-            _ci_file_match "[CI-ERROR-VERSION-0029]" "member=\"${m}\" key=\"${k}\"" "${lock%/*}/${m}/Cargo.toml" "^${k}\.workspace *= *true$" || mrc=$?
+            _ci_file_match "[CI-ERROR-VERSION-0029]" "member=\"${m}\" key=\"${k}\"" "${mf}" "^${k}\.workspace *= *true$" || mrc=$?
             case "${mrc}" in
                 0) ;;
                 1)
@@ -9915,10 +9918,9 @@ _ci_version_release() {
             esac
         done
     done <<< "${members}"
-    m="$(_ci_cargo_member_names "${cargo}")" || return 2
+    m="$(_ci_cargo_member_names)" || return 2
     while IFS= read -r n; do
-        got="$(awk -v n="${n}" '$0 == "name = \"" n "\"" { on = 1; next }
-            on && /^version = / { v = $0; sub(/^version = "/, "", v); sub(/"$/, "", v); print v; exit }' "${lock}")"
+        got="$(_ci_capture 0 env N="${n}" yq -p toml -oy '.package[] | select(.name == strenv(N)) | .version' "${lock}")" || return 2
         if [ "${got}" != "${want}" ]; then
             ci_log "[CI-ERROR-VERSION-0025]" "path=\"${lock}\" package=\"${n}\" got=\"${got}\" want=\"${want}\" reason=\"lock entry is not SOT release.version\""
             rc=1
