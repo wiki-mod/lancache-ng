@@ -243,7 +243,7 @@ impl Config {
         };
         // What: a compose number of 1 or more; junk stops.
         // Why: as for need; the SOT owns the value.
-        let number = |key: &str| config::uint(env, key, 1, u64::MAX);
+        let number = |key: &'static str| config::uint(env, key, 1, u64::MAX);
         let read = |spec: Uint| -> Result<u64, String> {
             let (value, warning) = spec.parse(env(spec.name).as_deref())?;
             if let Some(warning) = warning {
@@ -357,7 +357,10 @@ impl Config {
                 ("dashboard_refresh_ms", number("UI_DASHBOARD_REFRESH_MS")?),
                 ("stats_refresh_ms", number("UI_STATS_REFRESH_MS")?),
                 ("stats_points", number("UI_STATS_POINTS")?),
-                ("converge_minutes", number("CONVERGE_TIMER_INTERVAL_MINUTES")?),
+                (
+                    "converge_minutes",
+                    number("CONVERGE_TIMER_INTERVAL_MINUTES")?,
+                ),
             ],
             log_programs,
             cache_dir: need("CACHE_DIR")?,
