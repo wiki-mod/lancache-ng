@@ -128,6 +128,12 @@ struct Config {
     // What: where a secondary host fetches setup.sh.
     // Why: the SOT owns host and path; the page prints it.
     setup_script_url: String,
+    // What: the repository address the pages link to.
+    // Why: the SOT owns it; templates hold no address.
+    repo_url: String,
+    // What: refresh timings, chart points, timer minutes.
+    // Why: the SOT owns them; templates hold no number.
+    page_numbers: [(&'static str, u64); 5],
     // What: the syslog program of each logging switch.
     // Why: same order as LOG_SWITCHES; the SOT names each.
     log_programs: Vec<String>,
@@ -235,6 +241,9 @@ impl Config {
         let dns_api = |port_key: &str| -> Result<String, String> {
             Ok(format!("{}:{}", need("DNS_URL")?, need(port_key)?))
         };
+        // What: a compose number of 1 or more; junk stops.
+        // Why: as for need; the SOT owns the value.
+        let number = |key: &str| config::uint(env, key, 1, u64::MAX);
         let read = |spec: Uint| -> Result<u64, String> {
             let (value, warning) = spec.parse(env(spec.name).as_deref())?;
             if let Some(warning) = warning {
@@ -342,6 +351,14 @@ impl Config {
                 need("RAW_CONTENT_URL")?,
                 need("SETUP_SCRIPT_PATH")?
             ),
+            repo_url: need("LANCACHE_REPO_URL")?,
+            page_numbers: [
+                ("watchdog_refresh_ms", number("UI_WATCHDOG_REFRESH_MS")?),
+                ("dashboard_refresh_ms", number("UI_DASHBOARD_REFRESH_MS")?),
+                ("stats_refresh_ms", number("UI_STATS_REFRESH_MS")?),
+                ("stats_points", number("UI_STATS_POINTS")?),
+                ("converge_minutes", number("CONVERGE_TIMER_INTERVAL_MINUTES")?),
+            ],
             log_programs,
             cache_dir: need("CACHE_DIR")?,
             dns_state_dir: need("DNS_STATE_DIR")?,
@@ -1076,7 +1093,14 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
 // What: render a template; a failure is a real HTTP 500.
 // Why: monitors read the status; dev mode shows the cause.
 fn render(state: &AppState, name: &str, ctx: &Context) -> Response {
-    match state.templates.render(name, ctx) {
+    // What: SOT numbers and the repo address for pages.
+    // Why: every page and base.html read them here.
+    let mut page = ctx.clone();
+    for (key, value) in &state.config.page_numbers {
+        page.insert(*key, value);
+    }
+    page.insert("repo_url", &state.config.repo_url);
+    match state.templates.render(name, &page) {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
             tracing::error!(template = name, error = %e, "template rendering failed");
@@ -6762,7 +6786,8 @@ mod tests {
         assert_eq!(fields.number::<u32>("none"), None);
     }
 
-    const TEXT_KEYS: [&str; 41] = [
+    const TEXT_KEYS: [&str; 42] = [
+        "LANCACHE_REPO_URL",
         "ANY_BIND_IP",
         "CA_CERT_FILE",
         "NTP_PORT",
@@ -6806,7 +6831,12 @@ mod tests {
         "LANCACHE_SHARED_SECRET_DIR",
     ];
 
-    const NUMBER_KEYS: [(&str, &str); 19] = [
+    const NUMBER_KEYS: [(&str, &str); 24] = [
+        ("UI_WATCHDOG_REFRESH_MS", "11"),
+        ("UI_DASHBOARD_REFRESH_MS", "12"),
+        ("UI_STATS_REFRESH_MS", "13"),
+        ("UI_STATS_POINTS", "14"),
+        ("CONVERGE_TIMER_INTERVAL_MINUTES", "15"),
         ("RESTART_AFTER", "3"),
         ("DHCP_LEASE_TIME_MIN", "60"),
         ("DHCP_LEASE_TIME_MAX", "604800"),
@@ -6924,6 +6954,17 @@ mod tests {
         assert_eq!(cfg.ui_logs_max_entries, 250);
         assert_eq!(cfg.listen_port, 8081);
         assert_eq!(cfg.syslog_max_gb, 3);
+        assert_eq!(cfg.repo_url, "v-LANCACHE_REPO_URL");
+        assert_eq!(
+            cfg.page_numbers,
+            [
+                ("watchdog_refresh_ms", 11),
+                ("dashboard_refresh_ms", 12),
+                ("stats_refresh_ms", 13),
+                ("stats_points", 14),
+                ("converge_minutes", 15),
+            ]
+        );
         assert!(cfg.https_enabled && cfg.allow_insecure_ui);
         assert!(cfg.security_headers_enabled && cfg.dev_mode);
         assert_eq!(cfg.cache_max_gb, 50.0);
