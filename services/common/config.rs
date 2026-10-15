@@ -538,9 +538,11 @@ fn nats_role_block<P: AsRef<str>, S: AsRef<str>>(
         "    {{\n      user: \"{}\"\n      password: \"{password}\"\n",
         login.user
     );
-    if !publish.is_empty() {
+    if !publish.is_empty() || !subscribe.is_empty() {
         block.push_str("      permissions = {\n");
-        block.push_str(&format!("        publish = {}\n", nats_list(publish)));
+        if !publish.is_empty() {
+            block.push_str(&format!("        publish = {}\n", nats_list(publish)));
+        }
         if !subscribe.is_empty() {
             block.push_str(&format!("        subscribe = {}\n", nats_list(subscribe)));
         }
@@ -1213,7 +1215,7 @@ mod tests {
         );
         assert_eq!(
             nats_role_block(&user, &none, &["y"]),
-            "    {\n      user: \"u\"\n      password: \"p\"\n    }\n"
+            "    {\n      user: \"u\"\n      password: \"p\"\n      permissions = {\n        subscribe = [\"y\"]\n      }\n    }\n"
         );
     }
 
