@@ -3457,7 +3457,7 @@ fn nginx_refuse(loopback: &str) -> String {
 // Why: the protocol fixes it; it is no deployment value.
 const NGINX_DISCARD_PORT: u16 = 9;
 
-// What: loopback ports of the https server and relays.
+// What: loopback ports and relay timeouts of the https server.
 // Why: the SOT owns them; dispatch and listens use them.
 // From: Issue #1683 | PR #1912
 #[derive(Clone, Copy, Default)]
@@ -3465,14 +3465,19 @@ struct NginxPorts {
     mitm: u16,
     mitm_relay: u16,
     passthrough_relay: u16,
+    connect_secs: u64,
+    idle_secs: u64,
 }
 
 impl NginxPorts {
     fn from_env() -> Result<Self, String> {
+        let secs = |key: &'static str| need_secs(&config::process_env, key).map(|d| d.as_secs());
         Ok(Self {
             mitm: env_port("NGINX_MITM_PORT")?,
             mitm_relay: env_port("NGINX_MITM_RELAY_PORT")?,
             passthrough_relay: env_port("NGINX_PASSTHROUGH_RELAY_PORT")?,
+            connect_secs: secs("NGINX_UPSTREAM_CONNECT_TIMEOUT")?,
+            idle_secs: secs("NGINX_UPSTREAM_IDLE_TIMEOUT")?,
         })
     }
 }
@@ -3679,17 +3684,18 @@ fn nginx_https_dispatch(
     // What: locals feed the template as plain captures.
     // Why: CodeQL misses captures beside named args.
     let (acl, mitm_port) = (acl.display(), ports.mitm);
+    let (connect, idle) = (ports.connect_secs, ports.idle_secs);
     out.push_str(&format!(
         "    default {default};\n}}\n\n\
          server {{\n    listen 443;\n    listen [::]:443;\n    include {acl};\n    \
          ssl_preread on;\n    proxy_pass $https_dispatch_backend;\n    proxy_protocol on;\n    \
-         proxy_connect_timeout 30s;\n    proxy_timeout        3600s;\n}}\n\n\
+         proxy_connect_timeout {connect}s;\n    proxy_timeout        {idle}s;\n}}\n\n\
          server {{\n    listen {mitm} proxy_protocol;\n    set_real_ip_from {loopback};\n    \
          proxy_protocol on;\n    proxy_pass {loopback}:{mitm_port};\n    \
-         proxy_connect_timeout 30s;\n    proxy_timeout        3600s;\n}}\n\n\
+         proxy_connect_timeout {connect}s;\n    proxy_timeout        {idle}s;\n}}\n\n\
          server {{\n    listen {passthrough} proxy_protocol;\n    set_real_ip_from {loopback};\n    \
          ssl_preread on;\n    proxy_pass $ssl_preread_server_name:443;\n    \
-         proxy_connect_timeout 30s;\n    proxy_timeout        3600s;\n}}\n"
+         proxy_connect_timeout {connect}s;\n    proxy_timeout        {idle}s;\n}}\n"
     ));
     out
 }
@@ -6070,10 +6076,13 @@ mod tests {
         };
         let [mitm, mitm_relay, passthrough_relay] =
             std::array::from_fn(|_| u16::try_from(rnd(1024, 60_000)).unwrap());
+        let [connect_secs, idle_secs] = std::array::from_fn(|_| rnd(1, 7200));
         let ports = NginxPorts {
             mitm,
             mitm_relay,
             passthrough_relay,
+            connect_secs,
+            idle_secs,
         };
         let lo = gen_ipv4().to_string();
         let out = nginx_https_dispatch(&hosts, false, Path::new("/acl"), ports, &lo);
@@ -6086,6 +6095,10 @@ mod tests {
         assert!(at(&long) < at(&format!("{short}.{root}")), "{out}");
         assert!(out.contains(&format!("    default {lo}:{passthrough_relay};\n")));
         assert!(out.contains("    include /acl;\n"));
+        let timeouts = format!(
+            "proxy_connect_timeout {connect_secs}s;\n    proxy_timeout        {idle_secs}s;\n"
+        );
+        assert_eq!(out.matches(&timeouts).count(), 3, "{out}");
         let strict = nginx_https_dispatch(&hosts, true, Path::new("/acl"), ports, &lo);
         assert!(strict.contains(&format!("    default {};\n", nginx_refuse(&lo))));
     }
