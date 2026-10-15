@@ -3511,6 +3511,14 @@ impl NginxPorts {
 const NGINX_STREAM_TARGETS: &str = "stream.d/00-stream-targets.conf";
 const NGINX_HTTPS_DISPATCH: &str = "stream.d/01-https-dispatch.conf";
 
+// What: the CA dir: NGINX_DIR joined with NGINX_SUBDIR_CA.
+// Why: one owner for the signer and the health probe.
+// From: Issue #1683 | PR #1912
+fn nginx_ca_dir() -> Result<PathBuf, String> {
+    let need = |key: &str| config::need(&config::process_env, key);
+    Ok(Path::new(&need("NGINX_DIR")?).join(need("NGINX_SUBDIR_CA")?))
+}
+
 // What: CA and leaf certificate values.
 // Why: the SOT owns each value; Rust names only keys.
 // From: Issue #1683 | PR #1912
@@ -4055,7 +4063,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     );
     let https = dir.join("conf.d/https.conf");
     let listen_file = ctx.need("NGINX_HTTPS_LISTEN_FILE")?;
-    let ca_dir = dir.join(ctx.need("NGINX_SUBDIR_CA")?);
+    let ca_dir = nginx_ca_dir()?;
     let cert_dir = dir.join(ctx.need("NGINX_SUBDIR_CERTS")?);
     if https_on {
         if ip_https.is_empty() {
@@ -4926,14 +4934,12 @@ async fn healthcheck() -> Result<(), String> {
             return probe_health(&http_url, wait).await;
         }
         let https_url = need("PROXY_HEALTH_HTTPS_URL")?;
-        let ca_file = Path::new(&need("NGINX_DIR")?)
-            .join(need("NGINX_SUBDIR_CA")?)
-            .join(need("CA_CERT_FILE")?);
+        let cert = CertKnobs::load()?;
+        let ca_file = nginx_ca_dir()?.join(&cert.ca_cert_file);
         let ca_pem = fs::read(&ca_file).map_err(|e| format!("{}: {e}", ca_file.display()))?;
-        let cert_dns = need("DEFAULT_CERT_DNS")?;
         let (http, tls) = tokio::join!(
             probe_health(&http_url, wait),
-            probe_health_tls(&https_url, &ca_pem, &cert_dns, wait)
+            probe_health_tls(&https_url, &ca_pem, &cert.default_cert_dns, wait)
         );
         http?;
         tls?;
