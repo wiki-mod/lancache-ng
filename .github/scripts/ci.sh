@@ -4127,25 +4127,47 @@ _ci_rust_build_cleanup() {
     exit 1
 }
 
-# What: log sccache requests, hits, misses of a build.
-# Why: AG-CI-011: required mode must prove real use.
+# What: one overall counter of sccache --show-stats.
+# Why: exact label; "(Rust)" and rate rows never match.
+# From: Issue #1683 | PR #1912
+_ci_sccache_count() {
+    awk -v l="$1" 'index($0, l " ") == 1 { r = substr($0, length(l) + 1); gsub(/^ +| +$/, "", r); if (r ~ /^[0-9]+$/) print r }' <<< "$2"
+}
+
+# What: log sccache use; check requests and cache errors.
+# Why: AG-CI-011, AG-CI-007: a dead level must not pass.
 # From: Issue #1683 | PR #1912
 _ci_sccache_report() {
-    local stats req hits miss
+    local stats req hits miss errs="" label n
     stats="$(_ci_run "[CI-ERROR-CACHE-0012]" "reason=\"sccache stats not readable\"" sccache --show-stats)" || return 2
-    req="$(awk '$1 == "Compile" && $2 == "requests" && NF == 3 { print $3 }' <<< "${stats}")"
-    hits="$(awk '$1 == "Cache" && $2 == "hits" && NF == 3 { print $3 }' <<< "${stats}")"
-    miss="$(awk '$1 == "Cache" && $2 == "misses" && NF == 3 { print $3 }' <<< "${stats}")"
+    req="$(_ci_sccache_count "Compile requests" "${stats}")"
+    hits="$(_ci_sccache_count "Cache hits" "${stats}")"
+    miss="$(_ci_sccache_count "Cache misses" "${stats}")"
     # What: the full stats follow the counts as raw.
     # Why: hits=0 needs the error and non-cacheable rows.
     # From: Issue #1683 | PR #1912
     ci_error "[CI-INFO-CACHE-0013]" "mode=${_CI_SCCACHE_MODE} requests=${req:-none} hits=${hits:-none} misses=${miss:-none}" "${stats}"
-    [[ "${req}" =~ ^[1-9][0-9]*$ ]] && return 0
+    if [[ ! "${req}" =~ ^[1-9][0-9]*$ ]]; then
+        if [ "${_CI_SCCACHE_MODE}" = required ]; then
+            ci_error "[CI-ERROR-CACHE-0014]" "reason=\"required sccache saw no compile request; unused\"" "${stats}"
+            return 2
+        fi
+        ci_error "[CI-WARN-CACHE-0015]" "mode=${_CI_SCCACHE_MODE} reason=\"sccache saw no compile request\"" "${stats}"
+        return 0
+    fi
+    # What: read, write, lookup errors and timeouts.
+    # Why: sccache turns each into a miss and compiles.
+    # From: Issue #1683 | PR #1912
+    for label in "Cache errors" "Cache read errors" "Cache write errors" "Cache timeouts"; do
+        n="$(_ci_sccache_count "${label}" "${stats}")"
+        [ "${n}" = 0 ] || errs+=" ${label// /_}=${n:-none}"
+    done
+    [ -n "${errs}" ] || return 0
     if [ "${_CI_SCCACHE_MODE}" = required ]; then
-        ci_error "[CI-ERROR-CACHE-0014]" "reason=\"required sccache saw no compile request; unused\"" "${stats}"
+        ci_log "[CI-ERROR-CACHE-0016]" "errors=\"${errs# }\" reason=\"required sccache cache level failed (stats above)\""
         return 2
     fi
-    ci_error "[CI-WARN-CACHE-0015]" "mode=${_CI_SCCACHE_MODE} reason=\"sccache saw no compile request\"" "${stats}"
+    ci_log "[CI-WARN-CACHE-0017]" "mode=${_CI_SCCACHE_MODE} errors=\"${errs# }\" reason=\"sccache cache level failed (stats above)\""
 }
 
 # What: cargo build; drop one accelerator per outage.
