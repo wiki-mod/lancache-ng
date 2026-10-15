@@ -1109,11 +1109,11 @@ get_env_assignment_value_raw_nonempty() {
 # Why: a read error must stop setup, never read as absent
 # From: Issue #1683 | PR #1858
 env_key_exists() {
-    local key="$1" env_file="$2" rc=0
+    local key="$1" env_file="$2" rc=0 hits
     [[ -e "$env_file" ]] || return 1
-    grep -q "^${key}=" "$env_file" || rc=$?
+    hits=$(grep "^${key}=" "$env_file") || rc=$?
     [[ "$rc" -le 1 ]] || die "Failed to read $env_file while looking up $key (exit $rc)."
-    return "$rc"
+    [[ -n "$hits" ]]
 }
 
 # What: true if the key has a non-empty parsed value
@@ -2477,7 +2477,7 @@ host_image_platform() {
 # Why: a failure would surface only after .env was written
 assert_resolved_image_tag_platform_supported() {
     local registry="$1" prefix="$2" tag="$3"
-    local arch platform image single_platform inspect_text discovered_platforms buildx_out
+    local arch platform image single_platform inspect_text discovered_platforms buildx_out plat_line plat_found=0
 
     arch=$(uname -m)
     platform=$(host_image_platform "$arch") \
@@ -2504,10 +2504,13 @@ assert_resolved_image_tag_platform_supported() {
     [[ -n "$discovered_platforms" ]] \
         || die "${image} did not expose any usable platform metadata; cannot verify ${platform} support for tag '${tag}'."
 
-    # What: grep -q reads a here-string, not a live pipe.
-    # Why: avoids SIGPIPE on multi-line platform lists
+    # What: a line equal to the platform or below it counts
+    # Why: a loop reads the whole list; no early-exit pipe
     # From: Issue #1377
-    grep -Eq "^${platform}(/.*)?$" <<<"$discovered_platforms" \
+    while IFS= read -r plat_line; do
+        if [[ "$plat_line" == "$platform" || "$plat_line" == "$platform"/* ]]; then plat_found=1; fi
+    done <<<"$discovered_platforms"
+    [[ "$plat_found" -eq 1 ]] \
         || die "Image tag '${tag}' does not publish a ${platform} image for this ${arch} host (published: $(printf '%s' "$discovered_platforms" | tr '\n' ',' | sed 's/,$//')). Choose a tag or channel that publishes ${platform}, then rerun setup.sh."
 }
 

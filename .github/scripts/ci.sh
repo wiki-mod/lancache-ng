@@ -221,6 +221,23 @@ _ci_list_has() {
     return 1
 }
 
+# What: any line of the text matches the ERE; 2 = bad ERE.
+# Why: one text-regex owner; no grep exit code to misread.
+# From: Issue #1683 | PR #1912
+_ci_text_has() {
+    local icase=0 own=0 re line r=1
+    if [ "$1" = -i ]; then icase=1; shift; fi
+    re="$1"
+    if [ "${icase}" -eq 1 ] && ! shopt -q nocasematch; then shopt -s nocasematch; own=1; fi
+    while IFS= read -r line; do
+        if [[ "${line}" =~ ${re} ]]; then r=0; else r=$?; fi
+        if [ "${r}" -ne 1 ]; then break; fi
+    done <<< "$2"
+    if [ "${own}" -eq 1 ]; then shopt -u nocasematch; fi
+    if [ "${r}" -eq 2 ]; then ci_log "[CI-ERROR-CORE-0154]" "re=\"${re}\" reason=\"invalid regular expression\""; fi
+    return "${r}"
+}
+
 # What: number of non-empty lines in the text.
 # Why: one counting owner; no grep exit code to misread.
 # From: Issue #1683 | PR #1912
@@ -3987,7 +4004,7 @@ _ci_docker_build() {
     vargs="$(_ci_build_variable_args ci_sh stage_variables)" || return 2
     while IFS= read -r sname; do
         [ -n "${sname}" ] || continue
-        grep -q "^${sname}=" <<< "${vargs}" || {
+        _ci_text_has "^${sname}=" "${vargs}" || {
             ci_log "[CI-ERROR-BUILD-0022]" "service=\"${service}\" name=\"${sname}\" reason=\"stage variable has no value\""; return 2; }
     done <<< "${snames}"
     while IFS= read -r a; do
@@ -6186,7 +6203,7 @@ _ci_promote_stack_complete() {
     svcs="$(ci_services)" || return "$?"
     while IFS= read -r svc; do
         [ -n "${svc}" ] || continue
-        if ! grep -q "^${svc}=" <<< "${cand}"; then
+        if ! _ci_text_has "^${svc}=" "${cand}"; then
             ci_log "[CI-ERROR-PROMOTE-0004]" "channel=\"${channel}\" service=\"${svc}\" reason=\"incomplete stack; no promotion (docs section 50)\""
             return 2
         fi
@@ -6848,7 +6865,7 @@ ci_cmd_release_sbom() {
     _ci_release_asset_get "${tag}" "${out##*/}" "${dir}" || rc=$?
     if [ "${rc}" -eq 0 ]; then
         local mrc=0
-        _ci_file_match "[CI-ERROR-RELEASE-0056]" "service=\"${service}\" tag=\"${tag}\"" "${out}" "${digest}" -qF || mrc=$?
+        _ci_file_match "[CI-ERROR-RELEASE-0056]" "service=\"${service}\" tag=\"${tag}\"" "${out}" "${digest}" -F || mrc=$?
         case "${mrc}" in
             0)
                 rm -rf "${dir}"
@@ -7133,7 +7150,7 @@ _ci_gh_versions() {
     # From: Issue #1683
     out="$(_ci_retry github-api gh api --paginate "/orgs/${owner}/packages/container/${pkg}/versions?per_page=100" --jq '.[] | [.name, .id, .created_at, ((.metadata.container.tags // []) | join(","))] | @tsv')" || rc=$?
     if [ "${rc}" -ne 0 ]; then
-        grep -qiE 'HTTP 404|Not Found' <<< "${out}" && return 1
+        _ci_text_has -i 'HTTP 404|Not Found' "${out}" && return 1
         ci_error "[CI-ERROR-GC-0018]" "owner=\"${owner}\" pkg=\"${pkg}\" reason=\"GHCR version listing failed\"" "${out}"
         return 2
     fi
@@ -7533,7 +7550,7 @@ _ci_validate_shared_dir() {
     local dir
     dir="$(_ci_variable CI_VALIDATE_SHARED_DIR)" || return 2
     local mrc=0
-    _ci_file_match "[CI-ERROR-VALIDATE-0130]" "dir=\"${dir}\"" /proc/self/mountinfo " ${dir} " -qF || mrc=$?
+    _ci_file_match "[CI-ERROR-VALIDATE-0130]" "dir=\"${dir}\"" /proc/self/mountinfo " ${dir} " -F || mrc=$?
     case "${mrc}" in
         0) ;;
         1)
@@ -8180,7 +8197,7 @@ _ci_validate_proxy() {
         printf 'raw:\n%s\n' "${h2}"
         return 1
     fi
-    if ! grep -qi 'X-Cache-Status:[[:space:]]*HIT' <<< "${h2}"; then
+    if ! _ci_text_has -i 'X-Cache-Status:[[:space:]]*HIT' "${h2}"; then
         ci_log "[CI-ERROR-VALIDATE-0014]" "url=\"${url}\" reason=\"second request not a cache HIT\""
         printf 'first:\n%s\nsecond:\n%s\n' "${h1}" "${h2}"
         return 1
@@ -10574,16 +10591,9 @@ _ci_rh_stray_archives() {
 # Why: a tolerant wrapper rates "no hit" as a hit (grep 1).
 # From: Issue #1683 | PR #1912
 _ci_file_match() {
-    local id="$1" ctx="$2" file="$3" pat="$4" flags="${5:--qE}" rc=0 err
-    err="$(_ci_mktemp "${CI_TMPDIR}/ci-match.XXXXXX")" || return 2
-    grep "${flags}" -- "${pat}" "${file}" 2>"${err}" || rc=$?
-    if [ "${rc}" -gt 1 ]; then
-        ci_error "${id}" "${ctx} file=\"${file}\" rc=${rc}" "$(cat "${err}")"
-        rm -f "${err}"
-        return 2
-    fi
-    rm -f "${err}"
-    return "${rc}"
+    local id="$1" ctx="$2" file="$3" pat="$4" flags="${5:--E}" out
+    out="$(_ci_run -m 1 "${id}" "${ctx} file=\"${file}\"" grep "${flags}" -- "${pat}" "${file}")" || return 2
+    [ -n "${out}" ]
 }
 
 # What: runner units that run from one dir.
@@ -10893,7 +10903,7 @@ _ci_rh_hosts_self() {
     hosts="$(_ci_rh_val hosts_file)" || return 2
     self="$(_ci_rh_val hosts_self_ip)" || return 2
     active="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0034]" "file=\"${hosts}\" reason=\"hosts file unreadable\"" _ci_rh_root grep -vE '^[[:space:]]*#' "${hosts}")" || return 2
-    if grep -qE "\\b${host}\\b" <<< "${active}"; then
+    if _ci_text_has "(^|[^[:alnum:]_])${host}([^[:alnum:]_]|\$)" "${active}"; then
         printf '  OK: %s resolves hostname %s\n' "${hosts}" "${host}"
         return 0
     fi
@@ -11140,7 +11150,7 @@ _ci_rh_purge_pve_check() {
     printf '\n--- Mounts, fstab, open files and cron of the PVE stack ---\n'
     mount | { grep -iE "${units}" || printf '  not currently mounted\n'; }
     local frc=0
-    _ci_file_match "[CI-ERROR-RUNNER-0125]" "file=\"${fstab}\"" "${fstab}" "${units}" -qiE || frc=$?
+    _ci_file_match "[CI-ERROR-RUNNER-0125]" "file=\"${fstab}\"" "${fstab}" "${units}" -iE || frc=$?
     case "${frc}" in
         0) printf '  FOUND: %s references the stack\n' "${fstab}" ;;
         1) ;;
@@ -11188,7 +11198,7 @@ _ci_rh_purge_pve() {
     # Why: the package set can drift as host images change.
     # From: Issue #1622 | PR #1624
     sim="$(_ci_run -m 100 "[CI-ERROR-RUNNER-0055]" "reason=\"simulated purge failed\"" _ci_rh_root apt-get purge --simulate "${pkgs[@]}")" || return 2
-    if grep -qiE "${keep}" <<< "${sim}"; then
+    if _ci_text_has -i "${keep}" "${sim}"; then
         ci_log "[CI-ERROR-RUNNER-0056]" "reason=\"the simulated purge touches a kernel or firmware package; refusing\""
         return 2
     fi
@@ -11226,7 +11236,7 @@ _ci_rh_pve_purge_run() {
     sim="$(_ci_run "[CI-ERROR-RUNNER-0060]" "reason=\"simulated autoremove failed\"" _ci_rh_root env "${aenv}" apt-get autoremove --simulate)" || return 2
     bad="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0117]" "reason=\"autoremove list not read\"" grep -E '^Remv ' <<< "${sim}")" || return 2
     bad="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0118]" "reason=\"autoremove list not filtered\"" grep -viE "${removable}" <<< "${bad}")" || return 2
-    if [ -n "${bad}" ] || grep -qiE "${keep}" <<< "${sim}"; then
+    if [ -n "${bad}" ] || _ci_text_has -i "${keep}" "${sim}"; then
         ci_log "[CI-ERROR-RUNNER-0061]" "reason=\"autoremove would remove packages outside the PVE set or a boot package; run it by hand if intended\""
         printf '%s\n' "${sim}" >&2
         return 2
@@ -11420,7 +11430,7 @@ _ci_rh_purge_listchanges() {
     pkg="$(_ci_rh_val apt_listchanges_pkg)" || return 2
     aenv="$(_ci_rh_val apt_env)" || return 2
     st="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0077]" "pkg=\"${pkg}\" reason=\"dpkg query failed\"" dpkg -l "${pkg}")"
-    if grep -q '^ii' <<< "${st}"; then
+    if _ci_text_has '^ii' "${st}"; then
         _ci_run "[CI-ERROR-RUNNER-0078]" "pkg=\"${pkg}\" reason=\"package not purged\"" _ci_rh_root env "${aenv}" apt-get purge -y "${pkg}" || return 2
         printf 'Purged %s.\n' "${pkg}"
     else
@@ -11562,7 +11572,7 @@ _ci_rh_runner_hook_env() {
 # Why: the installer unit never restarts a crashed runner.
 # From: Issue #1738
 _ci_rh_restart_policy() {
-    local udir sec unit name dropin seen=0 wrote=0 glob policy dname
+    local udir sec unit name dropin seen=0 wrote=0 glob policy dname restart_val restart_usec
     udir="$(_ci_rh_val unit_dir)" || return 2
     sec="$(_ci_rh_val restart_sec)" || return 2
     glob="$(_ci_rh_val runner_unit_glob)" || return 2
@@ -11607,7 +11617,9 @@ _ci_rh_restart_policy() {
     printf '\n--- Verification ---\n'
     for unit in "${udir}"/${glob}; do
         [ -e "${unit}" ] || continue
-        printf '  %s: Restart=%s, RestartUSec=%s\n' "${unit##*/}" "$(systemctl show "${unit##*/}" -p Restart --value)" "$(systemctl show "${unit##*/}" -p RestartUSec --value)"
+        restart_val="$(_ci_run "[CI-ERROR-RUNNER-0131]" "unit=\"${unit##*/}\" reason=\"Restart not read\"" systemctl show "${unit##*/}" -p Restart --value)" || return 2
+        restart_usec="$(_ci_run "[CI-ERROR-RUNNER-0130]" "unit=\"${unit##*/}\" reason=\"RestartUSec not read\"" systemctl show "${unit##*/}" -p RestartUSec --value)" || return 2
+        printf '  %s: Restart=%s, RestartUSec=%s\n' "${unit##*/}" "${restart_val}" "${restart_usec}"
     done
 }
 
@@ -13180,7 +13192,7 @@ _ci_check_pr_template() {
         stripped="$(_ci_capture 1 grep -v '^```' <<<"${stripped}")" || return 2
         trimmed="$(tr -d '[:space:]' <<<"${stripped}")"
         [ -n "${trimmed}" ] || { missing+=("${sec}: empty (only template placeholder left)"); continue; }
-        if [ "${sec}" = "${checkbox}" ] && ! grep -qE '^- \[[xX]\]' <<<"${content}"; then
+        if [ "${sec}" = "${checkbox}" ] && ! _ci_text_has '^- \[[xX]\]' "${content}"; then
             missing+=("${checkbox}: no checkbox marked (- [x] ...)")
         fi
     done
@@ -13331,8 +13343,8 @@ _ci_check_pr_tracking_metadata() {
     if [ -z "${PR_LABELS_JSON+x}" ]; then
         errs+=("PR labels not provided to the check (workflow wiring).")
     else
-        if ! label_count="$(jq -e 'length' <<<"${PR_LABELS_JSON}")"; then
-            errs+=("PR labels input is not a JSON array.")
+        if ! label_count="$(jq -e 'if type == "array" then length else error("not an array") end' <<<"${PR_LABELS_JSON}" 2>&1)"; then
+            errs+=("PR labels input is not a JSON array: ${label_count}")
         elif [ "${label_count}" -eq 0 ]; then
             errs+=("No labels set (AG-GH-008).")
         fi
@@ -14167,14 +14179,14 @@ _ci_check_governance_guards() {
     [ -n "${combined}" ] && [ -n "${body}" ] && combined+=$'\n'
     combined+="${body}"
     if [ -n "${combined}" ]; then
-        if grep -Eq '(^|[[:space:]])@/tmp/[^[:space:]]+' <<<"${combined}"; then
+        if _ci_text_has '(^|[[:space:]])@/tmp/[^[:space:]]+' "${combined}"; then
             viol+=("PR title/body: looks like a literal @/tmp/... upload path, not real body text")
         elif [[ "${combined}" == \"*\" && "${combined}" == *'\n'* && "${combined}" != *$'\n'* ]]; then
             viol+=("PR title/body: looks like JSON-quoted Markdown, not real body text")
         fi
         local stripped
         stripped="$(sed -E 's/\b(no|not|none|nothing|without)\b([[:space:]]+[[:alnum:]-]+){0,3}[[:space:]]+(scaffold|TODO|deferred|not covered|not implemented|partial|follow-up required)\b//Ig' <<<"${combined}")"
-        if grep -Eiq '(^|[^[:alnum:]])(scaffold|TODO|deferred|not covered|not implemented|partial|follow-up required)([^[:alnum:]]|$)' <<<"${stripped}"; then
+        if _ci_text_has -i '(^|[^[:alnum:]])(scaffold|TODO|deferred|not covered|not implemented|partial|follow-up required)([^[:alnum:]]|$)' "${stripped}"; then
             local open_found=0 rest="${combined}"
             while [[ "${rest}" =~ Refs[[:space:]]+#([0-9]+) ]]; do
                 issue="${BASH_REMATCH[1]}"; rest="${rest#*"${BASH_REMATCH[0]}"}"
@@ -14464,8 +14476,8 @@ _ci_check_prod_state_wiring() {
     # Why: PDNS_DIR_OLD must not satisfy PDNS_DIR.
     # From: Issue #1683 | PR #1912
     while IFS= read -r key; do
-        grep -Fqw -- "${key}" "${doc}" \
-            || viol+=("${doc_rel} does not mention ${key}")
+        _ci_file_match "[CI-ERROR-CHECK-0181]" "key=\"${key}\" reason=\"doc not searched\"" "${doc}" "${key}" -Fw \
+            || { [ "$?" -eq 1 ] || return 2; viol+=("${doc_rel} does not mention ${key}"); }
     done <<<"${keys}"
     # What: a mount default off the state root fails.
     # Why: AG-SETUP-001: keys come from the compose itself.
@@ -14737,7 +14749,7 @@ _ci_compose_config_ok() {
         printf '%s\n' "${out}"
         return 1
     fi
-    if grep -Eqi '(^|[[:space:]])(warn|warning|level=warning)' <<<"${out}"; then
+    if _ci_text_has -i '(^|[[:space:]])(warn|warning|level=warning)' "${out}"; then
         printf 'warnings treated as errors:\n%s\n' "${out}"
         return 1
     fi
@@ -14924,10 +14936,13 @@ PROG
     # From: Issue #1683 | PR #1912
     nginx_dir="$(_ci_runtime_default NGINX_DIR)" || return 2
     listen_file="$(_ci_runtime_default NGINX_HTTPS_LISTEN_FILE)" || return 2
-    grep -Fxq "    include     \${NGINX_DIR}/\${NGINX_HTTPS_LISTEN_FILE};" "${px}/conf.d/https.conf" \
-        || viol+=("${px#"${repo_root}/"}/conf.d/https.conf: no include of the SOT keys NGINX_DIR (${nginx_dir}) and NGINX_HTTPS_LISTEN_FILE (${listen_file})")
-    grep -Eq '^[[:space:]]*listen[[:space:]]' "${px}/conf.d/https.conf" \
-        && viol+=("${px#"${repo_root}/"}/conf.d/https.conf: literal listen; the watchdog renders it")
+    _ci_file_match "[CI-ERROR-CHECK-0182]" "reason=\"https include not searched\"" "${px}/conf.d/https.conf" "    include     \${NGINX_DIR}/\${NGINX_HTTPS_LISTEN_FILE};" -Fx \
+        || { [ "$?" -eq 1 ] || return 2; viol+=("${px#"${repo_root}/"}/conf.d/https.conf: no include of the SOT keys NGINX_DIR (${nginx_dir}) and NGINX_HTTPS_LISTEN_FILE (${listen_file})"); }
+    if _ci_file_match "[CI-ERROR-CHECK-0183]" "reason=\"https listen not searched\"" "${px}/conf.d/https.conf" '^[[:space:]]*listen[[:space:]]'; then
+        viol+=("${px#"${repo_root}/"}/conf.d/https.conf: literal listen; the watchdog renders it")
+    elif [ "$?" -ne 1 ]; then
+        return 2
+    fi
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0151]" "reason=\"proxy nginx policy violated\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
@@ -14946,8 +14961,8 @@ _ci_check_proxy_cert_volume() {
     ca="$(_ci_nginx_subdir NGINX_SUBDIR_CA)" || return 2
     cache="$(_ci_runtime_default NGINX_CACHE_DIR)" || return 2
     px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
-    grep -Eq '^[[:space:]]*proxy_cache_path[[:space:]]+\$\{NGINX_CACHE_DIR\}[[:space:]]*$' "${px%/}/nginx.conf" \
-        || viol+=("${px#"${repo_root}/"}nginx.conf: proxy_cache_path is not the SOT key NGINX_CACHE_DIR")
+    _ci_file_match "[CI-ERROR-CHECK-0184]" "reason=\"proxy_cache_path not searched\"" "${px%/}/nginx.conf" '^[[:space:]]*proxy_cache_path[[:space:]]+\$\{NGINX_CACHE_DIR\}[[:space:]]*$' \
+        || { [ "$?" -eq 1 ] || return 2; viol+=("${px#"${repo_root}/"}nginx.conf: proxy_cache_path is not the SOT key NGINX_CACHE_DIR"); }
     _ci_stack_compose_files files || return $?
     for cf in "${files[@]}"; do
         [ -z "${seen[${cf}]:-}" ] || continue
@@ -14993,13 +15008,13 @@ _ci_check_setup_kea_preflight() {
 # From: Issue #1683
 _ci_check_setup_update_safety() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
-    local su pause_out
+    local su pause_out restore_out
     local -a viol=()
     su="$(_ci_installer "${repo_root}")" || return 2
     # What: no flow mutates install state before its pause.
     # Why: per function; the cmd_update window went stale.
     # From: Issue #1683 | PR #1858
-    if ! pause_out="$(awk '
+    pause_out="$(_ci_capture 0 awk '
         /^[A-Za-z_][A-Za-z0-9_]*\(\) [({]/ { fn = $1; sub(/\(\).*/, "", fn); next }
         /^[[:space:]]*#/ { next }
         /pause_lancache_convergence_for_update/ { seen[fn] = 1; paused[fn] = 1; next }
@@ -15007,16 +15022,18 @@ _ci_check_setup_update_safety() {
             pend[fn] = pend[fn] NR ": " $0 "\n"
         }
         END {
-            for (f in seen) { n++; if (pend[f] != "") { printf "%s mutates before its pause:\n%s", f, pend[f]; bad = 1 } }
-            if (n == 0) { print "no update flow calls pause_lancache_convergence_for_update"; bad = 1 }
-            exit bad
-        }' "${su}")"; then
+            for (f in seen) { n++; if (pend[f] != "") { printf "%s mutates before its pause:\n%s", f, pend[f] } }
+            if (n == 0) { print "no update flow calls pause_lancache_convergence_for_update" }
+        }' "${su}")" || return 2
+    if [ -n "${pause_out}" ]; then
         viol+=("update must pause the convergence timer before mutating install state"$'\n'"${pause_out}")
     fi
-    grep -Fq "systemctl stop \"\$CONVERGE_SERVICE_UNIT\"" "${su}" \
-        || viol+=("update must stop the active convergence service before mutating install state")
-    awk '/if ! \( cmd_backup --config "\$install_dir" \); then/{b=1;next} b&&/resume_lancache_convergence_after_update true/{r=1} b&&/die "Pre-update rollback backup failed/{d=1;b=0} END{exit r&&d?0:1}' "${su}" \
-        || viol+=("update must restore the convergence timer when the rollback backup fails")
+    _ci_file_match "[CI-ERROR-CHECK-0185]" "reason=\"service stop not searched\"" "${su}" "systemctl stop \"\$CONVERGE_SERVICE_UNIT\"" -F \
+        || { [ "$?" -eq 1 ] || return 2; viol+=("update must stop the active convergence service before mutating install state"); }
+    restore_out="$(_ci_capture 0 awk '/if ! \( cmd_backup --config "\$install_dir" \); then/{b=1;next} b&&/resume_lancache_convergence_after_update true/{r=1} b&&/die "Pre-update rollback backup failed/{d=1;b=0} END{if (!(r&&d)) print "missing"}' "${su}")" || return 2
+    if [ -n "${restore_out}" ]; then
+        viol+=("update must restore the convergence timer when the rollback backup fails")
+    fi
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0103]" "reason=\"setup.sh update-migration safety contract violated\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
@@ -15028,10 +15045,14 @@ _ci_check_setup_update_safety() {
 # Why: only then do the images show which var they take
 # From: Issue #1683 | PR #1912
 _ci_compose_image_render() {
-    local file="$1" out="$2" env body
+    local file="$1" out="$2" env body line kept=""
     shift 2
     env="$(_ci_mktemp "${CI_TMPDIR}/ci-image-env.XXXXXX")" || return 2
-    body="$(_ci_validation_env | grep -v '^LANCACHE_IMAGE_')" || { rm -f "${env}"; return 2; }
+    body="$(_ci_validation_env)" || { rm -f "${env}"; return 2; }
+    while IFS= read -r line; do
+        case "${line}" in LANCACHE_IMAGE_*) ;; *) kept+="${line}"$'\n' ;; esac
+    done <<< "${body}"
+    body="${kept%$'\n'}"
     if ! printf '%s\n' "${body}" "$@" > "${env}"; then
         ci_log "[CI-ERROR-CHECK-0172]" "file=\"${env}\" reason=\"render env file not writable\""
         rm -f "${env}"
@@ -15049,18 +15070,20 @@ _ci_compose_image_render() {
 # From: Issue #1683
 _ci_check_image_channel_resolution() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
-    local su sec prod dep
+    local su sec prod dep start_out
     su="$(_ci_installer "${repo_root}")" || return 2
     sec="$(_ci_service_path ui src/main.rs "${repo_root}")" || return 2
     dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     prod="${repo_root}/${dep}"
     local -a viol=()
     local f
-    if awk '/^# ── [0-9]+\. Installing systemd watchdog/{i=1;p=0} /^# ── [0-9]+\. Post-start info/{i=0} i&&/(docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?|stack_compose[[:space:]].*)[[:space:]]pull([[:space:]]|$)/{p=1} i&&!p&&/^[[:space:]]*(systemctl[[:space:]]+(enable|start)[[:space:]]+("?\$\{?(STACK_UNIT|CONVERGE_TIMER_UNIT)|lancache\.service|lancache-converge\.timer)|(docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?|stack_compose[[:space:]].*)[[:space:]]up[[:space:]]+-d)/{v=1} END{exit v?0:1}' "${su}"; then
+    start_out="$(_ci_capture 0 awk '/^# ── [0-9]+\. Installing systemd watchdog/{i=1;p=0} /^# ── [0-9]+\. Post-start info/{i=0} i&&/(docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?|stack_compose[[:space:]].*)[[:space:]]pull([[:space:]]|$)/{p=1} i&&!p&&/^[[:space:]]*(systemctl[[:space:]]+(enable|start)[[:space:]]+("?\$\{?(STACK_UNIT|CONVERGE_TIMER_UNIT)|lancache\.service|lancache-converge\.timer)|(docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?|stack_compose[[:space:]].*)[[:space:]]up[[:space:]]+-d)/{v=1} END{if (v) print "start"}' "${su}")" || return 2
+    if [ -n "${start_out}" ]; then
         viol+=("setup.sh must not start/enable lancache services before image pull")
     fi
     while IFS= read -r f; do
-        grep -Fq "${f}" "${su}" || viol+=("setup.sh must keep image-resolution: ${f}")
+        _ci_file_match "[CI-ERROR-CHECK-0186]" "line=\"${f}\" reason=\"setup.sh not searched\"" "${su}" "${f}" -F \
+            || { [ "$?" -eq 1 ] || return 2; viol+=("setup.sh must keep image-resolution: ${f}"); }
     done <<'LIST'
 lancache_image_registry=$(resolve_lancache_image_registry "$env_file")
 lancache_image_prefix=$(resolve_lancache_image_prefix "$env_file")
@@ -15087,7 +15110,8 @@ LIST
             'image_registry: state.config.lancache_image_registry.clone()' \
             'image_prefix: state.config.lancache_image_prefix.clone()' \
             'image_channel: state.config.lancache_image_channel.clone()'; do
-            grep -Fq "${f}" "${sec}" || viol+=("ui main.rs must expose/use ${f}")
+            _ci_file_match "[CI-ERROR-CHECK-0187]" "line=\"${f}\" reason=\"ui source not searched\"" "${sec}" "${f}" -F \
+                || { [ "$?" -eq 1 ] || return 2; viol+=("ui main.rs must expose/use ${f}"); }
         done
     fi
     if [ ! -f "${prod}" ]; then
@@ -15603,25 +15627,31 @@ PROG
         # What: rust stages: build vars, build-tools image.
         # Why: one toolchain owner (AG-CI-008).
         # From: Issue #1683
-        grep -q "ARG ${CI_ARG_TOOLCHAIN_IMAGE}" "${df}" \
-            || e_bt+=("${t}: Dockerfile must declare ARG ${CI_ARG_TOOLCHAIN_IMAGE}")
+        _ci_file_match "[CI-ERROR-CHECK-0188]" "target=\"${t}\" reason=\"toolchain ARG not searched\"" "${df}" "ARG ${CI_ARG_TOOLCHAIN_IMAGE}" -F \
+            || { [ "$?" -eq 1 ] || return 2; e_bt+=("${t}: Dockerfile must declare ARG ${CI_ARG_TOOLCHAIN_IMAGE}"); }
         missing="$(_ci_dockerfile_stage_missing_args "${df}" "${bvars}" 'ci[.]sh rust-build')" || return 2
         missing="$(_ci_capture 0 sort -u <<< "${missing}")" || return 2
         while read -r bst bv; do
             [ -z "${bv}" ] || e_bt+=("${t}: Dockerfile stage ${bst} runs ci.sh rust-build without ARG ${bv} (SOT build_variables.rust)")
         done <<< "${missing}"
-        grep -Eq "^FROM \\$\\{${CI_ARG_TOOLCHAIN_IMAGE}(:-scratch)?\\}([[:space:]]|$)" "${df}" \
-            || e_bt+=("${t}: Dockerfile must build FROM \${${CI_ARG_TOOLCHAIN_IMAGE}}")
+        _ci_file_match "[CI-ERROR-CHECK-0189]" "target=\"${t}\" reason=\"FROM line not searched\"" "${df}" "^FROM \\$\\{${CI_ARG_TOOLCHAIN_IMAGE}(:-scratch)?\\}([[:space:]]|$)" \
+            || { [ "$?" -eq 1 ] || return 2; e_bt+=("${t}: Dockerfile must build FROM \${${CI_ARG_TOOLCHAIN_IMAGE}}"); }
         # What: forbid a mutable default on the ARG.
         # Why: ci.sh supplies the immutable ref (AG-CI-008).
         # From: Issue #1683
-        ! grep -Eq "^ARG ${CI_ARG_TOOLCHAIN_IMAGE}=" "${df}" \
-            || e_bt+=("${t}: ARG ${CI_ARG_TOOLCHAIN_IMAGE} must carry no default; ci.sh supplies it")
+        if _ci_file_match "[CI-ERROR-CHECK-0190]" "target=\"${t}\" reason=\"ARG default not searched\"" "${df}" "^ARG ${CI_ARG_TOOLCHAIN_IMAGE}="; then
+            e_bt+=("${t}: ARG ${CI_ARG_TOOLCHAIN_IMAGE} must carry no default; ci.sh supplies it")
+        elif [ "$?" -ne 1 ]; then
+            return 2
+        fi
         # What: reject Cargo tuning hardcode; empty ARG ok.
         # Why: jobs/lto/codegen from CI vars (AG-CI-006).
         # From: Issue #1683
-        ! grep -Eq '^[[:space:]]*(ARG[[:space:]]+SCCACHE_DIST_SCHEDULER_URL|ENV[[:space:]]+CARGO_BUILD_JOBS=|ARG[[:space:]]+PROJECT_CARGO_LTO=.+|ARG[[:space:]]+PROJECT_CARGO_CODEGENUNIT=.+|ENV[[:space:]]+PROJECT_CARGO_LTO=|ENV[[:space:]]+PROJECT_CARGO_CODEGENUNIT=)' "${df}" \
-            || e_tune+=("${t}: Dockerfile hardcodes a Cargo tuning value; source jobs/lto/codegen from CI vars")
+        if _ci_file_match "[CI-ERROR-CHECK-0191]" "target=\"${t}\" reason=\"Cargo tuning not searched\"" "${df}" '^[[:space:]]*(ARG[[:space:]]+SCCACHE_DIST_SCHEDULER_URL|ENV[[:space:]]+CARGO_BUILD_JOBS=|ARG[[:space:]]+PROJECT_CARGO_LTO=.+|ARG[[:space:]]+PROJECT_CARGO_CODEGENUNIT=.+|ENV[[:space:]]+PROJECT_CARGO_LTO=|ENV[[:space:]]+PROJECT_CARGO_CODEGENUNIT=)'; then
+            e_tune+=("${t}: Dockerfile hardcodes a Cargo tuning value; source jobs/lto/codegen from CI vars")
+        elif [ "$?" -ne 1 ]; then
+            return 2
+        fi
     done
     [ "${#e_stage[@]}" -eq 0 ] || { ci_error "[CI-ERROR-CHECK-0169]" "targets=${n} reason=\"a ci.sh build stage lacks an SOT stage variable ARG\"" "$(printf '%s\n' "${e_stage[@]}")"; rc=1; }
     [ "${#e_secret[@]}" -eq 0 ] || { ci_error "[CI-ERROR-CHECK-0156]" "targets=${n} reason=\"Dockerfile missing or mount id not central\"" "$(printf '%s\n' "${e_secret[@]}")"; rc=1; }
@@ -15796,7 +15826,7 @@ _ci_check_cargo_audit() {
     # What: advisories/warnings fail (belt+braces).
     # Why: --deny warnings catches; never pass.
     # From: Issue #1683
-    if [ "${rc}" -ne 0 ] || grep -Eiq '(^|[[:space:]])warning:' <<< "${out}"; then
+    if [ "${rc}" -ne 0 ] || _ci_text_has -i '(^|[[:space:]])warning:' "${out}"; then
         ci_error "[CI-ERROR-CHECK-0055]" "reason=\"cargo audit found advisories or warnings\"" "${out}"
         return 1
     fi
