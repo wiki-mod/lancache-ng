@@ -8292,6 +8292,34 @@ _ci_validate_ui_session() {
     printf '%s' "${csrf}"
 }
 
+# What: new cookie jar plus ui session: sets $1 and $2.
+# Why: one owner; three probes opened a session this way.
+# From: Issue #1683 | PR #1912
+_ci_validate_ui_login() {
+    local -n _ci_ul_jar="$1" _ci_ul_csrf="$2"
+    local _ci_ul_rc=0
+    _ci_ul_jar="$(_ci_mktemp "${CI_TMPDIR}/ci-ui-jar.XXXXXX")" || return 2
+    _ci_ul_csrf="$(_ci_validate_ui_session "${_ci_ul_jar}" "$3")" || _ci_ul_rc=$?
+    [ "${_ci_ul_rc}" -eq 0 ] || rm -f "${_ci_ul_jar}"
+    return "${_ci_ul_rc}"
+}
+
+# What: setup.sh rollback around a one-run .env.local.
+# Why: one owner for the dns and Kea rollback legs.
+# From: Issue #1683 | PR #1912
+_ci_validate_setup_rollback() {
+    local -n _ci_sr_out="$1" _ci_sr_rc="$2"
+    local _ci_sr_env="$3" _ci_sr_svc="$4" _ci_sr_compose _ci_sr_su _ci_sr_inst
+    shift 4
+    _ci_sr_rc=0
+    _ci_sr_compose="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    _ci_sr_su="$(_ci_installer)" || return 2
+    _ci_sr_inst="$(dirname "${_ci_sr_compose}")"
+    _ci_validate_env_local "${_ci_sr_inst}" "${_ci_sr_env}" || return 2
+    _ci_sr_out="$(bash "${_ci_sr_su}" reset-to-last-known-good-config "${_ci_sr_svc}" "${_ci_sr_inst}" "$@" --yes 2>&1)" || _ci_sr_rc=$?
+    rm -f "${_ci_sr_inst}/.env.local"
+}
+
 # What: POST one LAN A record through the ui (303 on ok)
 # Why: drives the real UI->NATS->PowerDNS write path
 # From: Issue #1683 | PR #1858
@@ -8429,8 +8457,7 @@ _ci_validate_ui_nats_dns() {
     label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
     ip="$(_ci_validate_probe_ip 1)" || return 2
     dns_wait="$(_ci_variable CI_VALIDATE_DNS_WAIT)" || return 2
-    jar="$(_ci_mktemp "${CI_TMPDIR}/ci-ui-jar.XXXXXX")" || return 2
-    csrf="$(_ci_validate_ui_session "${jar}" "${base}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
+    _ci_validate_ui_login jar csrf "${base}" || return $?
     _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${zone}" "${label}" "${ip}" || rc=$?
     rm -f "${jar}"
     [ "${rc}" -eq 0 ] || return "${rc}"
@@ -8539,8 +8566,8 @@ _ci_validate_env_local() {
 # Why: Real listener HTTP + PATCH + cache flush.
 # From: Issue #1683
 _ci_validate_dns_rollback() {
-    local project="$1" ip cid key jar csrf snap resp code rc=0 compose last inst
-    local zone label old new dns_wait ucid base lbase tries pause su
+    local project="$1" ip cid key jar csrf snap resp code rc=0 last
+    local zone label old new dns_wait ucid base lbase tries pause
     ip="$(_ci_validate_container_ip "${project}" dns)"
     cid="$(_ci_validate_cid "${project}" dns)" || return 2
     if [ -z "${ip}" ] || [ -z "${cid}" ]; then
@@ -8580,8 +8607,7 @@ _ci_validate_dns_rollback() {
     old="$(_ci_validate_probe_ip 2)" && new="$(_ci_validate_probe_ip 3)" || return 2
     dns_wait="$(_ci_variable CI_VALIDATE_DNS_WAIT)" || return 2
     base="$(_ci_validate_ui_base "${project}" "${ucid}")" || return $?
-    jar="$(_ci_mktemp "${CI_TMPDIR}/ci-rb-jar.XXXXXX")" || return 2
-    csrf="$(_ci_validate_ui_session "${jar}" "${base}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
+    _ci_validate_ui_login jar csrf "${base}" || return $?
     _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${zone}" "${label}" "${old}" || { rm -f "${jar}"; return 1; }
     _ci_validate_dns_resolves "${project}" IP_HTTP "${label}.${zone}" "${old}" "${dns_wait}" || { rm -f "${jar}"; return 1; }
     # What: capture the zone's newest snapshot (pre-change).
@@ -8599,17 +8625,11 @@ _ci_validate_dns_rollback() {
     rm -f "${jar}"
     resp="$(_ci_capture 0 _ci_curl_secret header "X-API-Key: ${key}" -sS "${lbase}/snapshots")" || return 2
     last="$(_ci_capture 0 jq -r --arg z "${zone}" ".zones[\$z][0].id // empty" <<<"${resp}")" || return 2
-    compose="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    su="$(_ci_installer)" || return 2
-    inst="$(dirname "${compose}")"
-    _ci_validate_env_local "${inst}" "" || return 2
     # What: setup.sh rollback, wrong host PDNS_API_KEY.
     # Why: the key must be resolved inside the container.
     # From: Issue #836
-    resp="$(COMPOSE_PROJECT_NAME="${project}" PDNS_API_KEY=CHANGE_ME_host_side_key_never_used \
-        bash "${su}" reset-to-last-known-good-config dns "${inst}" \
-        "${zone}" "${snap}" --yes 2>&1)" || rc=$?
-    rm -f "${inst}/.env.local"
+    COMPOSE_PROJECT_NAME="${project}" PDNS_API_KEY=CHANGE_ME_host_side_key_never_used \
+        _ci_validate_setup_rollback resp rc "" dns "${zone}" "${snap}" || return 2
     case "${rc}:${resp}" in
         *"cache-flush publishes failed"*) rc=1 ;;
         0:*"rolled back to known-good snapshot ${snap}"*"${label}.${zone}"*) ;;
@@ -8707,7 +8727,7 @@ _ci_validate_kea_add() {
 # From: Issue #763 | PR #1858
 _ci_validate_kea_round_trip() {
     local project="$1" kip="$2" kport="$3" uname="$4" cfg token dir subnet resp sid ubase
-    local jar csrf base snap inst out n_a n_b rc=0 kbase kuser label mac_a mac_b su snapdir mount snaps compose
+    local jar csrf base snap n_a n_b rc=0 kbase kuser label mac_a mac_b snapdir mount snaps
     kbase="http://${kip}:${kport}"
     kuser="$(_ci_validate_kea_agent user)" || return 2
     label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
@@ -8748,8 +8768,7 @@ PROG
         ci_log "[CI-ERROR-VALIDATE-0092]" "container=\"${uname}\" reason=\"no /27 IP for the Kea ui run container\""
         return "${rc}"
     }
-    jar="$(_ci_mktemp "${CI_TMPDIR}/ci-kea-jar.XXXXXX")" || return 2
-    csrf="$(_ci_validate_ui_session "${jar}" "${ubase}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
+    _ci_validate_ui_login jar csrf "${ubase}" || return $?
     # What: reservation IPs base+2/+3 of DHCP_SUBNET.
     # Why: Kea rejects a reservation outside its subnet.
     # From: Issue #763 | PR #1858
@@ -8759,16 +8778,11 @@ PROG
     _ci_validate_kea_add "${ubase}" "${jar}" "${csrf}" "${sid}" "${mac_b}" \
         "$(_ci_int_to_ipv4 $(( base + 3 )))" "${label}-2" "${snaps}" >/dev/null || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     rm -f "${jar}"
-    compose="$(_ci_variable CI_COMPOSE_FILE)" || return 2
-    su="$(_ci_installer)" || return 2
-    inst="$(dirname "${compose}")"
     # What: .env.local holds only this run's KEA_* values
     # Why: setup.sh reads a deploy/prod install's .env.local
     # From: Issue #763 | PR #1912
-    _ci_validate_env_local "${inst}" "$(printf 'KEA_CTRL_TOKEN=%s\nKEA_CTRL_HOST=%s\nKEA_DATA_DIR=%s\n' \
-        "${token}" "${kip}" "${dir}")" || return 2
-    resp="$(bash "${su}" reset-to-last-known-good-config kea "${inst}" "${snap}" --yes 2>&1)" || rc=$?
-    rm -f "${inst}/.env.local"
+    _ci_validate_setup_rollback resp rc "$(printf 'KEA_CTRL_TOKEN=%s\nKEA_CTRL_HOST=%s\nKEA_DATA_DIR=%s\n' \
+        "${token}" "${kip}" "${dir}")" kea "${snap}" || return 2
     case "${rc}:${resp}" in
         0:*"Kea rolled back to known-good snapshot ${snap} ("*) ;;
         *)
