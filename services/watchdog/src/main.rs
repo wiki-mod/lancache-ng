@@ -4005,7 +4005,8 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     let https = dir.join("conf.d/https.conf");
     let listen_file = ctx.need("NGINX_HTTPS_LISTEN_FILE")?;
     let ca_dir = nginx_ca_dir()?;
-    let cert_dir = dir.join(ctx.need("NGINX_SUBDIR_CERTS")?);
+    let subdir = ctx.need("NGINX_SUBDIR_CERTS")?;
+    let cert_dir = dir.join(&subdir);
     if https_on {
         if ip_https.is_empty() {
             return Err("HTTPS_ENABLED needs IP_HTTPS".into());
@@ -4033,7 +4034,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     let loopback = config::loopback()?;
     let server_values = [
         ("NGINX_DIR", dir.display().to_string()),
-        ("NGINX_SUBDIR_CERTS", ctx.need("NGINX_SUBDIR_CERTS")?),
+        ("NGINX_SUBDIR_CERTS", subdir.clone()),
         ("NGINX_HTTPS_LISTEN_FILE", listen_file.clone()),
         ("LOOPBACK_BIND_IP", loopback.clone()),
     ];
