@@ -14622,22 +14622,25 @@ _ci_check_prod_state_wiring() {
     # What: compose mounts exactly the SOT state_dir_keys.
     # Why: the SOT list owns the keys; compose only mounts.
     # From: Issue #1683 | PR #1912
-    local mounted want
-    mounted="$(_ci_run -m 1 "[CI-ERROR-CHECK-0192]" "file=\"${compose}\" reason=\"state mounts not read\"" grep -oE '\$\{[A-Z0-9_]+:-\$\{LANCACHE_STATE_DIR:\?' "${compose}")" || return 2
-    mounted="${mounted//:-\$\{LANCACHE_STATE_DIR:\?/}"
-    mounted="$(sort -u <<< "${mounted//\$\{/}")"
+    local mounted="" want line
+    line="$(_ci_run -m 1 "[CI-ERROR-CHECK-0192]" "file=\"${compose}\" reason=\"state mounts not read\"" grep -oE '^[[:space:]]*(- |device: )\$\{[A-Z0-9_]+:\?' "${compose}")" || return 2
+    while IFS= read -r want; do
+        [ -n "${want}" ] || continue
+        want="${want##*\$\{}"
+        mounted+="${want%:\?}"$'\n'
+    done <<< "${line}"
+    mounted="$(sort -u <<< "${mounted%$'\n'}")"
     want="$(sort -u <<< "${keys}")"
     [ "${mounted}" = "${want}" ] \
         || viol+=("${dep} state mounts differ from SOT runtime.state_dir_keys: compose=[${mounted//$'\n'/ }] sot=[${want//$'\n'/ }]")
-    # What: a mount default off the state root fails.
-    # Why: AG-SETUP-001: defaults stay under the state root.
+    # What: a mount names its value; no default in compose.
+    # Why: setup.sh and ci.sh pass the resolved state dirs.
     # From: Issue #1683 | PR #1912
     local off
     off="$(_ci_run -m 1 "[CI-ERROR-CHECK-0176]" "file=\"${compose}\" reason=\"mount defaults not scanned\"" grep -E '^[[:space:]]*(- |device: )\$\{[A-Z0-9_]+:-' "${compose}")" || return 2
-    off="$(_ci_run -m 1 "[CI-ERROR-CHECK-0177]" "file=\"${compose}\" reason=\"state-dir defaults not filtered\"" grep -Fv -- ":-\${LANCACHE_STATE_DIR:?" <<< "${off}")" || return 2
-    [ -z "${off}" ] || viol+=("${dep} has a mount default off LANCACHE_STATE_DIR:${off}")
+    [ -z "${off}" ] || viol+=("${dep} has a mount default in compose:${off}")
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0100]" "reason=\"prod state wiring not LANCACHE_STATE_DIR-derived or undocumented\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0100]" "reason=\"prod state wiring differs from the SOT or undocumented\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'prod-state-wiring=clean\n'
@@ -14667,11 +14670,11 @@ _ci_validate_host_tools() {
     fi
 }
 
-# What: SOT_<KEY>=value per compose key, from setup.sh.
-# Why: sot_compose_env is the one owner; no second copy.
+# What: compose env rows from setup.sh sot_compose_env.
+# Why: the one owner; $1 env file or "", $2 state root.
 # From: Issue #1683 | PR #1912
 _ci_sot_compose_env() {
-    _ci_capture 0 bash -c 'source "$1" && sot_compose_env' _ "${CI_REPO_ROOT}/setup.sh"
+    _ci_capture 0 bash -c 'source "$1" && sot_compose_env "$2" "$3"' _ "${CI_REPO_ROOT}/setup.sh" "${1:-}" "${2:-}"
 }
 
 # What: image coordinates of the compose images, KEY=VALUE.
@@ -14713,7 +14716,8 @@ _ci_validation_env() {
         esac
         printf '%s\n' "${v}"
     done <<< "${fx}"
-    _ci_sot_compose_env || return 2
+    v="$(_ci_default_in "${rows}" LANCACHE_STATE_DIR)" || return 2
+    _ci_sot_compose_env "" "${v}" || return 2
     _ci_validation_images || return 2
     # What: a fresh value per secret key, setup.sh format.
     # Why: a fixed key in the SOT is a hardcoded credential.
@@ -14862,7 +14866,7 @@ _ci_compose_run() {
         names="$(_ci_run "[CI-ERROR-CORE-0145]" "env_file=\"${env_file}\" reason=\"compose variable names unreadable\"" \
             jq -r 'keys[]' <<< "${vars}")" || return 2
         [ -z "${names}" ] || mapfile -t unsetv <<< "${names}"
-        fx="$(_ci_sot_compose_env)" || return 2
+        fx="$(_ci_sot_compose_env "${env_file}")" || return 2
         pre=(--env-file "${env_file}")
     else
         fx="$(_ci_validation_env)" || return 2

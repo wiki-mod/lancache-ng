@@ -489,7 +489,7 @@ run_kea_dhcp_activation_preflight() {
     # What: one supervisor probe run in the dhcp image
     # Why: the same probe as the Admin UI; no extra package
     # From: Issue #1683 | PR #1912
-    if ! output=$(sot_compose --env-file "$env_file" -f "$PROD_COMPOSE" run --rm --no-deps dhcp \
+    if ! output=$(sot_compose "$env_file" -f "$PROD_COMPOSE" run --rm --no-deps dhcp \
         probe) || ! status=$(json_value .status "$output") || [[ "$status" = unavailable || -z "$status" ]]; then
         print_warn "DHCP discovery preflight could not be executed inside the dhcp image."
         print_warn "Kea activation will require an explicit confirmation because the safety check did not complete."
@@ -1622,7 +1622,7 @@ stack_compose() {
     local -a stack_files
     shift 2
     compose_files_into stack_files "$install_dir"
-    sot_compose --env-file "$env_file" "${stack_files[@]}" "$@"
+    sot_compose "$env_file" "${stack_files[@]}" "$@"
 }
 
 # What: sorted entries of a volume/dir: mode, owner, hash
@@ -1780,15 +1780,16 @@ quickstart_volume_dirs() {
 }
 
 # What: a state key's dir: its value, else root/subdir
-# Why: compose falls back to LANCACHE_STATE_DIR/<subdir>
+# Why: the one owner of the default; no env file = root only
 # From: Issue #1683 | PR #1858
 prod_state_dir_for_key() {
-    local key="$1" env_file="$2" state="${3:-}" dir sub
-    dir=$(get_env_var "$key" "$env_file") || die "Cannot read $key from $env_file (exit $?)."
+    local key="$1" env_file="$2" state="${3:-}" dir="" sub
+    [[ -z "$env_file" ]] || dir=$(get_env_var "$key" "$env_file") \
+        || die "Cannot read $key from $env_file (exit $?)."
     if [[ -z "$dir" ]]; then
-        [[ -n "$state" ]] || state=$(get_env_var LANCACHE_STATE_DIR "$env_file") \
+        [[ -n "$state" || -z "$env_file" ]] || state=$(get_env_var LANCACHE_STATE_DIR "$env_file") \
             || die "Cannot read LANCACHE_STATE_DIR from $env_file (exit $?)."
-        [[ -n "$state" ]] || die "$env_file sets no LANCACHE_STATE_DIR."
+        [[ -n "$state" ]] || die "No LANCACHE_STATE_DIR for $key (env file: ${env_file:-none})."
         sub=$(prod_state_subdir "$key") || die "Cannot read the default directory of $key (exit $?)."
         dir="$state/$sub"
     fi
@@ -2292,28 +2293,34 @@ runtime_default_in() {
         || die "The SOT runtime.defaults holds no default for $2."
 }
 
-# What: the SOT_<KEY>=value row of each compose key
-# Why: one owner; ci.sh reads it from here, not a copy
+# What: compose env rows: SOT_<KEY> and each state dir
+# Why: one owner; compose and ci.sh get resolved paths
 # From: Issue #1683 | PR #1912
 sot_compose_env() {
-    local keys key value list
+    local env_file="${1:-}" state="${2:-}" keys key value list dir
     keys=$(lancache_sot_value compose_keys runtime) || exit $?
     list=$(runtime_defaults_list) || exit $?
     for key in $keys; do
         value=$(runtime_default_in "$list" "$key") || exit $?
         printf 'SOT_%s=%s\n' "$key" "$value"
     done
+    keys=$(prod_state_keys) || exit $?
+    for key in $keys; do
+        dir=$(prod_state_dir_for_key "$key" "$env_file" "$state") || exit $?
+        printf '%s=%s\n' "$key" "$dir"
+    done
 }
 
-# What: docker compose with compose_keys as SOT_<KEY>
+# What: docker compose with the env file and SOT rows
 # Why: compose names no path, port or default of its own
 # From: Issue #1683 | PR #1912
 sot_compose() {
-    local rows
+    local env_file="$1" rows
     local -a sot_env=()
-    rows=$(sot_compose_env) || exit $?
+    shift
+    rows=$(sot_compose_env "$env_file") || exit $?
     mapfile -t sot_env <<< "$rows"
-    env "${sot_env[@]}" docker compose "$@"
+    env "${sot_env[@]}" docker compose --env-file "$env_file" "$@"
 }
 
 # What: "svc KEY [TARGET]" rows moved out of config/prod
