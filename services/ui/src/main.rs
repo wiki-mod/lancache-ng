@@ -1878,11 +1878,18 @@ async fn ingest_alarm(State(state): Shared, headers: HeaderMap, body: Bytes) -> 
         let _guard = hold(&state.netdata_alarms_lock);
         append_alarm(&state.config.netdata_alarms_file, alarm)
     };
-    match stored {
-        Ok(()) => StatusCode::OK,
+    stored_status("netdata alarm", stored)
+}
+
+// What: the answer to a client write of a state file.
+// Why: senders only tell 2xx from failure; one rule.
+// From: Issue #1683 | PR #1912
+fn stored_status(what: &str, written: io::Result<()>) -> StatusCode {
+    match written {
+        Ok(()) => StatusCode::NO_CONTENT,
         Err(e) => {
-            tracing::warn!("failed to persist netdata alarm: {e}");
-            StatusCode::SERVICE_UNAVAILABLE
+            tracing::error!("failed to persist {what}: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
         }
     }
 }
@@ -5731,13 +5738,7 @@ async fn set_service_desired_state(
     let written = serde_json::to_vec_pretty(&desired)
         .map_err(io::Error::other)
         .and_then(|json| write_file(path, &json, 0o644, Place::Replace));
-    match written {
-        Ok(()) => StatusCode::NO_CONTENT,
-        Err(e) => {
-            tracing::error!("failed to persist desired state for {service}: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
+    stored_status(&format!("desired state for {service}"), written)
 }
 // What: minimum registration token length, in characters.
 // Why: this token alone gates remote registration.
@@ -9667,9 +9668,9 @@ mod tests {
         assert_eq!(malformed.status(), 400);
         assert!(read_alarms(&file).is_empty());
         let ok = send(Some("secret-token"), alarm.to_string()).await.unwrap();
-        assert_eq!(ok.status(), 200);
+        assert_eq!(ok.status(), 204);
         let again = send(Some("secret-token"), alarm.to_string()).await.unwrap();
-        assert_eq!(again.status(), 200);
+        assert_eq!(again.status(), 204);
         let stored = read_alarms(&file);
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].unique_id, 5);
@@ -9692,8 +9693,8 @@ mod tests {
         let _ = fs::remove_dir_all(&sdir);
     }
 
-    // What: an unwritable alarm file is reported as 503.
-    // Why: netdata retries instead of losing the alarm.
+    // What: an unwritable alarm file is reported as 500.
+    // Why: the sender logs any non-2xx as a lost alarm.
     #[tokio::test]
     async fn alarm_ingest_reports_a_store_failure() {
         let dir = unique_temp_dir("alarm-blocked");
@@ -9716,7 +9717,7 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), 503);
+        assert_eq!(response.status(), 500);
         let _ = fs::remove_dir_all(&dir);
     }
 
