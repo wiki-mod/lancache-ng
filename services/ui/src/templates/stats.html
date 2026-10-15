@@ -49,9 +49,9 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/chart.umd.min.js"></script>
+<script src="{{ routes.chart_js | safe }}"></script>
 <script>
-const NETDATA = '/api/netdata';
+const NETDATA = '{{ routes.netdata | safe }}';
 // What: sample count per chart and netdata request
 // Why: bounds chart array length and request size
 const POINTS  = 60;
@@ -117,7 +117,7 @@ function push(chart, ...values) {
 }
 
 async function fetchChart(path) {
-  const res = await fetch(`${NETDATA}/${path}&points=${POINTS}&group=average&format=json`);
+  const res = await fetch(`${NETDATA.replace('{*path}', path)}&points=${POINTS}&group=average&format=json`);
   // What: throws on a non-2xx netdata response.
   // Why: refresh() turns the throw into the error banner.
   if (!res.ok) throw new Error(res.status);

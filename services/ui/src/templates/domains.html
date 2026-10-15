@@ -70,7 +70,7 @@
         </p>
       </div>
 
-      <form action="/domains/dns/add" method="post" class="flex gap-2">
+      <form action="{{ routes.dns_add | safe }}" method="post" class="flex gap-2">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         {# What: one domain per submit, one input
            Why: each add runs after_domain_change #}
@@ -102,7 +102,7 @@
           {% if domain.is_default and domain.is_valid %}
           {# What: on/off switch for default rows
              Why: a "!" prefix marks a disabled row #}
-          <form action="/domains/dns/toggle" method="post" class="flex items-center gap-2 flex-shrink-0">
+          <form action="{{ routes.dns_toggle | safe }}" method="post" class="flex items-center gap-2 flex-shrink-0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="domain" value="{{ domain.display }}">
             <label class="flex items-center gap-1.5 cursor-pointer select-none">
@@ -116,7 +116,7 @@
             </label>
           </form>
           {% else %}
-          <form action="/domains/dns/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+          <form action="{{ routes.dns_remove | safe }}" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             {# What: hidden value is the raw file entry
                Why: removal keys on the raw entry #}
@@ -144,7 +144,7 @@
         <p class="text-xs text-slate-500 mt-0.5">PowerDNS Authoritative Server · Lokale DNS-Records für das LAN</p>
       </div>
 
-      <form action="/domains/lan/add" method="post" class="flex flex-col gap-3" data-lan-record-form>
+      <form action="{{ routes.lan_add | safe }}" method="post" class="flex flex-col gap-3" data-lan-record-form>
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         {# What: record name, type, content fields
            Why: type and content not parsed together #}
@@ -189,7 +189,7 @@
             </div>
             <div class="text-xs text-slate-400 mt-0.5 font-mono">{% for content in record.records %}{{ content.content }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>
           </div>
-          <form action="/domains/lan/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
+          <form action="{{ routes.lan_remove | safe }}" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             {# What: hidden name, type and joined content
                Why: removal targets the RRset #}
@@ -229,7 +229,7 @@
         </p>
       </div>
 
-      <form action="/domains/ptr/add" method="post" class="flex flex-col gap-3">
+      <form action="{{ routes.ptr_add | safe }}" method="post" class="flex flex-col gap-3">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         {# What: form takes IP and hostname; name is derived
            Why: the reverse record name comes from the IP #}
@@ -265,7 +265,7 @@
             </div>
             <div class="text-xs text-slate-400 mt-0.5 font-mono">→ {{ ptr.hostname }}</div>
           </div>
-          <form action="/domains/ptr/remove" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
+          <form action="{{ routes.ptr_remove | safe }}" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             {# What: removal deletes the PTR rrset for IP
                Why: the PTR rrset is keyed by IP #}
@@ -297,7 +297,7 @@
         </p>
       </div>
 
-      <form action="/domains/aaaa-filter" method="post" class="flex items-center gap-4">
+      <form action="{{ routes.aaaa_filter | safe }}" method="post" class="flex items-center gap-4">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         {# What: global AAAA filter, stored as a marker
            Why: the domain rows above are not edited #}
@@ -357,7 +357,7 @@
       </p>
       {% endif %}
 
-      <form action="/domains/ddns-allow-unsigned-updates" method="post" class="flex items-center gap-4">
+      <form action="{{ routes.ddns_unsigned | safe }}" method="post" class="flex items-center gap-4">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="flex items-center gap-2">
           <input type="checkbox" id="ddns-allow-unsigned-enabled" name="enabled" value="1"
@@ -422,7 +422,7 @@
                   <td class="py-2">
                     {# What: group.zone is a fixed zone
                        Why: no JS escaping needed #}
-                    <form method="POST" action="/domains/zones/rollback" class="inline"
+                    <form method="POST" action="{{ routes.zone_rollback | safe }}" class="inline"
                           onsubmit="return confirm('Zone {{ group.zone }} auf diesen Snapshot zurückrollen? Seit dem Snapshot hinzugekommene Records können dabei verloren gehen.')">
                       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                       <input type="hidden" name="zone" value="{{ group.zone }}">

@@ -917,6 +917,53 @@ const PAGE_STATS: &str = "/stats";
 const PAGE_LOGS: &str = "/logs";
 const PAGE_SETUP: &str = "/setup";
 
+// What: the URL path of each other ui route.
+// Why: router, forms, scripts, tests read one owner.
+// From: Issue #1683 | PR #1912
+const ROUTE_HEALTH: &str = "/health";
+const ROUTE_SECONDARY_REGISTER: &str = "/api/secondary/register";
+const ROUTE_FAVICON: &str = "/favicon.ico";
+const ROUTE_LOGO_ICON: &str = "/static/logo-icon.png";
+const ROUTE_DHCP_MODE: &str = "/dhcp/mode";
+const ROUTE_DHCP_DDNS: &str = "/dhcp/ddns";
+const ROUTE_DHCP_PROXY: &str = "/dhcp/proxy";
+const ROUTE_DHCP_RELAY: &str = "/dhcp/relay";
+const ROUTE_SUBNET_ADD: &str = "/dhcp/subnet/add";
+const ROUTE_SUBNET_UPDATE: &str = "/dhcp/subnet/update";
+const ROUTE_SUBNET_REMOVE: &str = "/dhcp/subnet/remove";
+const ROUTE_SUBNET_OPTION_ADD: &str = "/dhcp/subnet/option/add";
+const ROUTE_SUBNET_OPTION_REMOVE: &str = "/dhcp/subnet/option/remove";
+const ROUTE_STATIC_ADD: &str = "/dhcp/static/add";
+const ROUTE_STATIC_REMOVE: &str = "/dhcp/static/remove";
+const ROUTE_LEASE_RELEASE: &str = "/dhcp/lease/release";
+const ROUTE_KEA_ROLLBACK: &str = "/dhcp/snapshot/rollback";
+const ROUTE_DHCP_CHECK: &str = "/api/dhcp/check";
+const ROUTE_NTP_SETTINGS: &str = "/ntp/settings";
+const ROUTE_DNS_ADD: &str = "/domains/dns/add";
+const ROUTE_DNS_REMOVE: &str = "/domains/dns/remove";
+const ROUTE_DNS_TOGGLE: &str = "/domains/dns/toggle";
+const ROUTE_LAN_ADD: &str = "/domains/lan/add";
+const ROUTE_LAN_REMOVE: &str = "/domains/lan/remove";
+const ROUTE_PTR_ADD: &str = "/domains/ptr/add";
+const ROUTE_PTR_REMOVE: &str = "/domains/ptr/remove";
+const ROUTE_AAAA_FILTER: &str = "/domains/aaaa-filter";
+const ROUTE_DDNS_UNSIGNED: &str = "/domains/ddns-allow-unsigned-updates";
+const ROUTE_ZONE_ROLLBACK: &str = "/domains/zones/rollback";
+const ROUTE_LOGS_SETTINGS: &str = "/logs/settings";
+const ROUTE_SETUP_UPDATE: &str = "/setup/update";
+const ROUTE_RESTART_UI: &str = "/setup/restart-ui";
+const ROUTE_DESIRED_STATE: &str = "/api/services/{service}/desired-state";
+const ROUTE_CACHE_RESIZE: &str = "/cache/resize";
+const ROUTE_METRICS: &str = "/api/metrics";
+const ROUTE_WATCHDOG_STATUS: &str = "/api/watchdog-status";
+const ROUTE_NETDATA: &str = "/api/netdata/{*path}";
+const ROUTE_ADMIN_CSS: &str = "/static/admin.css";
+const ROUTE_CHART_JS: &str = "/static/chart.umd.min.js";
+const ROUTE_SECONDARY: &str = "/api/secondary/{name}";
+const ROUTE_SECONDARY_ROTATE: &str = "/api/secondary/{name}/rotate-token";
+const ROUTE_SECONDARY_HEALTH: &str = "/api/secondary/{name}/health";
+const ROUTE_SECONDARY_ADDRESS: &str = "/api/secondary/{name}/address";
+
 // What: the domains page URL with an error code.
 // Why: one owner for each domains error redirect.
 // From: Issue #1683 | PR #1912
@@ -956,19 +1003,67 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
     // What: each page path from its one Rust owner.
     // Why: nav and links follow the router path.
     // From: Issue #1683 | PR #1912
-    ctx.insert(
-        "pages",
-        &json!({
-            "dashboard": PAGE_DASHBOARD,
-            "dhcp": PAGE_DHCP,
-            "ntp": PAGE_NTP,
-            "domains": PAGE_DOMAINS,
-            "secondaries": PAGE_SECONDARIES,
-            "stats": PAGE_STATS,
-            "logs": PAGE_LOGS,
-            "setup": PAGE_SETUP,
-        }),
-    );
+    const PAGES: [(&str, &str); 8] = [
+        ("dashboard", PAGE_DASHBOARD),
+        ("dhcp", PAGE_DHCP),
+        ("ntp", PAGE_NTP),
+        ("domains", PAGE_DOMAINS),
+        ("secondaries", PAGE_SECONDARIES),
+        ("stats", PAGE_STATS),
+        ("logs", PAGE_LOGS),
+        ("setup", PAGE_SETUP),
+    ];
+    // What: each route path from its one Rust owner.
+    // Why: forms and scripts follow the router path.
+    // From: Issue #1683 | PR #1912
+    const ROUTES: [(&str, &str); 43] = [
+        ("health", ROUTE_HEALTH),
+        ("secondary_register", ROUTE_SECONDARY_REGISTER),
+        ("favicon", ROUTE_FAVICON),
+        ("logo_icon", ROUTE_LOGO_ICON),
+        ("dhcp_mode", ROUTE_DHCP_MODE),
+        ("dhcp_ddns", ROUTE_DHCP_DDNS),
+        ("dhcp_proxy", ROUTE_DHCP_PROXY),
+        ("dhcp_relay", ROUTE_DHCP_RELAY),
+        ("subnet_add", ROUTE_SUBNET_ADD),
+        ("subnet_update", ROUTE_SUBNET_UPDATE),
+        ("subnet_remove", ROUTE_SUBNET_REMOVE),
+        ("subnet_option_add", ROUTE_SUBNET_OPTION_ADD),
+        ("subnet_option_remove", ROUTE_SUBNET_OPTION_REMOVE),
+        ("static_add", ROUTE_STATIC_ADD),
+        ("static_remove", ROUTE_STATIC_REMOVE),
+        ("lease_release", ROUTE_LEASE_RELEASE),
+        ("kea_rollback", ROUTE_KEA_ROLLBACK),
+        ("dhcp_check", ROUTE_DHCP_CHECK),
+        ("ntp_settings", ROUTE_NTP_SETTINGS),
+        ("dns_add", ROUTE_DNS_ADD),
+        ("dns_remove", ROUTE_DNS_REMOVE),
+        ("dns_toggle", ROUTE_DNS_TOGGLE),
+        ("lan_add", ROUTE_LAN_ADD),
+        ("lan_remove", ROUTE_LAN_REMOVE),
+        ("ptr_add", ROUTE_PTR_ADD),
+        ("ptr_remove", ROUTE_PTR_REMOVE),
+        ("aaaa_filter", ROUTE_AAAA_FILTER),
+        ("ddns_unsigned", ROUTE_DDNS_UNSIGNED),
+        ("zone_rollback", ROUTE_ZONE_ROLLBACK),
+        ("logs_settings", ROUTE_LOGS_SETTINGS),
+        ("setup_update", ROUTE_SETUP_UPDATE),
+        ("restart_ui", ROUTE_RESTART_UI),
+        ("desired_state", ROUTE_DESIRED_STATE),
+        ("cache_resize", ROUTE_CACHE_RESIZE),
+        ("metrics", ROUTE_METRICS),
+        ("watchdog_status", ROUTE_WATCHDOG_STATUS),
+        ("netdata", ROUTE_NETDATA),
+        ("admin_css", ROUTE_ADMIN_CSS),
+        ("chart_js", ROUTE_CHART_JS),
+        ("secondary", ROUTE_SECONDARY),
+        ("secondary_rotate", ROUTE_SECONDARY_ROTATE),
+        ("secondary_health", ROUTE_SECONDARY_HEALTH),
+        ("secondary_address", ROUTE_SECONDARY_ADDRESS),
+    ];
+    for (name, table) in [("pages", &PAGES[..]), ("routes", &ROUTES[..])] {
+        ctx.insert(name, &table.iter().copied().collect::<BTreeMap<_, _>>());
+    }
     ctx
 }
 
@@ -5574,7 +5669,7 @@ p{font-size:.875rem;color:#94a3b8;margin:0}</style></head><body><div class="box"
 // From: PR #1610
 var sawDown = false;
 function pollHealth() {
-  fetch('/health', { cache: 'no-store' }).then(function (res) {
+  fetch('@ROUTE_HEALTH@', { cache: 'no-store' }).then(function (res) {
     if (res.ok && sawDown) { window.location.href = '@PAGE_SETUP@'; return; }
     sawDown = sawDown || !res.ok;
     setTimeout(pollHealth, 1000);
@@ -5593,7 +5688,11 @@ async fn restart_ui_service() -> Html<String> {
         tracing::info!("operator-requested Admin UI restart");
         std::process::exit(0);
     });
-    Html(RESTART_UI_PAGE.replace("@PAGE_SETUP@", PAGE_SETUP))
+    Html(
+        RESTART_UI_PAGE
+            .replace("@PAGE_SETUP@", PAGE_SETUP)
+            .replace("@ROUTE_HEALTH@", ROUTE_HEALTH),
+    )
 }
 
 // What: the body of a desired-state request.
@@ -5971,66 +6070,63 @@ fn router(state: Arc<AppState>) -> Router {
     // What: routes outside the login, each gated itself.
     // Why: no session cookie may ride on cacheable assets.
     let public: Vec<(&str, MethodRouter<Arc<AppState>>)> = vec![
-        ("/health", get(health)),
-        ("/api/secondary/register", post(register_secondary)),
+        (ROUTE_HEALTH, get(health)),
+        (ROUTE_SECONDARY_REGISTER, post(register_secondary)),
         (ALARM_INGEST_PATH, post(ingest_alarm)),
-        ("/favicon.ico", get(favicon_ico)),
-        ("/static/logo-icon.png", get(logo_icon)),
+        (ROUTE_FAVICON, get(favicon_ico)),
+        (ROUTE_LOGO_ICON, get(logo_icon)),
     ];
     let protected: Vec<(&str, MethodRouter<Arc<AppState>>)> = vec![
         (PAGE_DASHBOARD, get(dashboard)),
         (PAGE_DHCP, get(dhcp_page)),
-        ("/dhcp/mode", post(update_dhcp_mode)),
-        ("/dhcp/ddns", post(update_dhcp_ddns)),
-        ("/dhcp/proxy", post(update_dhcp_proxy)),
-        ("/dhcp/relay", post(update_dhcp_relay)),
-        ("/dhcp/subnet/add", post(add_subnet)),
-        ("/dhcp/subnet/update", post(update_subnet)),
-        ("/dhcp/subnet/remove", post(remove_subnet)),
-        ("/dhcp/subnet/option/add", post(add_subnet_option)),
-        ("/dhcp/subnet/option/remove", post(remove_subnet_option)),
-        ("/dhcp/static/add", post(add_reservation)),
-        ("/dhcp/static/remove", post(remove_reservation)),
-        ("/dhcp/lease/release", post(release_lease)),
-        ("/dhcp/snapshot/rollback", post(rollback_kea_snapshot)),
-        ("/api/dhcp/check", post(check_dhcp_conflict)),
+        (ROUTE_DHCP_MODE, post(update_dhcp_mode)),
+        (ROUTE_DHCP_DDNS, post(update_dhcp_ddns)),
+        (ROUTE_DHCP_PROXY, post(update_dhcp_proxy)),
+        (ROUTE_DHCP_RELAY, post(update_dhcp_relay)),
+        (ROUTE_SUBNET_ADD, post(add_subnet)),
+        (ROUTE_SUBNET_UPDATE, post(update_subnet)),
+        (ROUTE_SUBNET_REMOVE, post(remove_subnet)),
+        (ROUTE_SUBNET_OPTION_ADD, post(add_subnet_option)),
+        (ROUTE_SUBNET_OPTION_REMOVE, post(remove_subnet_option)),
+        (ROUTE_STATIC_ADD, post(add_reservation)),
+        (ROUTE_STATIC_REMOVE, post(remove_reservation)),
+        (ROUTE_LEASE_RELEASE, post(release_lease)),
+        (ROUTE_KEA_ROLLBACK, post(rollback_kea_snapshot)),
+        (ROUTE_DHCP_CHECK, post(check_dhcp_conflict)),
         (PAGE_NTP, get(ntp_page)),
-        ("/ntp/settings", post(update_ntp_settings)),
+        (ROUTE_NTP_SETTINGS, post(update_ntp_settings)),
         (PAGE_DOMAINS, get(domains_page)),
-        ("/domains/dns/add", post(add_dns)),
-        ("/domains/dns/remove", post(remove_dns)),
-        ("/domains/dns/toggle", post(toggle_default_domain)),
-        ("/domains/lan/add", post(add_lan_record)),
-        ("/domains/lan/remove", post(remove_lan_record)),
-        ("/domains/ptr/add", post(add_ptr_record)),
-        ("/domains/ptr/remove", post(remove_ptr_record)),
-        ("/domains/aaaa-filter", post(toggle_aaaa_filter)),
+        (ROUTE_DNS_ADD, post(add_dns)),
+        (ROUTE_DNS_REMOVE, post(remove_dns)),
+        (ROUTE_DNS_TOGGLE, post(toggle_default_domain)),
+        (ROUTE_LAN_ADD, post(add_lan_record)),
+        (ROUTE_LAN_REMOVE, post(remove_lan_record)),
+        (ROUTE_PTR_ADD, post(add_ptr_record)),
+        (ROUTE_PTR_REMOVE, post(remove_ptr_record)),
+        (ROUTE_AAAA_FILTER, post(toggle_aaaa_filter)),
         (
-            "/domains/ddns-allow-unsigned-updates",
+            ROUTE_DDNS_UNSIGNED,
             post(toggle_ddns_allow_unsigned_updates),
         ),
-        ("/domains/zones/rollback", post(rollback_zone_snapshot)),
+        (ROUTE_ZONE_ROLLBACK, post(rollback_zone_snapshot)),
         (PAGE_STATS, get(stats_page)),
         (PAGE_LOGS, get(logs_page)),
-        ("/logs/settings", post(update_logging_settings)),
+        (ROUTE_LOGS_SETTINGS, post(update_logging_settings)),
         (PAGE_SETUP, get(setup_page)),
-        ("/setup/update", post(update_stack_settings)),
-        ("/setup/restart-ui", post(restart_ui_service)),
-        (
-            "/api/services/{service}/desired-state",
-            post(set_service_desired_state),
-        ),
-        ("/cache/resize", post(resize_cache)),
-        ("/api/metrics", get(metrics_api)),
-        ("/api/watchdog-status", get(watchdog_status_api)),
-        ("/api/netdata/{*path}", get(netdata_proxy)),
-        ("/static/admin.css", get(admin_css)),
-        ("/static/chart.umd.min.js", get(chart_js)),
+        (ROUTE_SETUP_UPDATE, post(update_stack_settings)),
+        (ROUTE_RESTART_UI, post(restart_ui_service)),
+        (ROUTE_DESIRED_STATE, post(set_service_desired_state)),
+        (ROUTE_CACHE_RESIZE, post(resize_cache)),
+        (ROUTE_METRICS, get(metrics_api)),
+        (ROUTE_WATCHDOG_STATUS, get(watchdog_status_api)),
+        (ROUTE_NETDATA, get(netdata_proxy)),
+        (ROUTE_ADMIN_CSS, get(admin_css)),
+        (ROUTE_CHART_JS, get(chart_js)),
         (PAGE_SECONDARIES, get(secondaries_page)),
-        ("/api/secondary/{name}", delete(remove_secondary)),
-        ("/api/secondary/{name}/rotate-token", post(rotate_token)),
-        ("/api/secondary/{name}/health", post(check_secondary_health)),
-        ("/api/secondary/{name}/address", post(set_secondary_address)),
+        (ROUTE_SECONDARY, delete(remove_secondary)),
+        (ROUTE_SECONDARY_ROTATE, post(rotate_token)),
+        (ROUTE_SECONDARY_HEALTH, post(check_secondary_health)),
+        (ROUTE_SECONDARY_ADDRESS, post(set_secondary_address)),
     ];
     let mount = |routes: Vec<(&str, MethodRouter<Arc<AppState>>)>| {
         routes
@@ -6095,7 +6191,7 @@ async fn healthcheck() -> Result<(), String> {
     let port = config::need(&config::process_env, "UI_LISTEN_PORT")?;
     let loopback = config::loopback()?;
     let wait = need_secs(&config::process_env, "HEALTH_PROBE_TIMEOUT")?;
-    probe_health(&format!("http://{loopback}:{port}/health"), wait).await
+    probe_health(&format!("http://{loopback}:{port}{ROUTE_HEALTH}"), wait).await
 }
 
 // What: drop root, then run the server.
@@ -6607,9 +6703,11 @@ mod tests {
         let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
         assert_eq!(
             String::from_utf8(bytes.to_vec()).unwrap(),
-            "<!DOCTYPE html>\n<html>\n<head><title>NTP Configuration Error</title></head>\n\
+            format!(
+                "<!DOCTYPE html>\n<html>\n<head><title>NTP Configuration Error</title></head>\n\
              <body><h1>NTP Configuration Error</h1>\n<p>bad &lt;x&gt;</p>\n\
-             <p><a href=\"/ntp\">Return to NTP settings</a></p>\n</body>\n</html>"
+             <p><a href=\"{PAGE_NTP}\">Return to NTP settings</a></p>\n</body>\n</html>"
+            )
         );
     }
 
@@ -9068,7 +9166,7 @@ mod tests {
     // What: open a session: cookie header and CSRF token.
     // Why: protected POSTs need both, like a browser has.
     async fn open_session(base: &str, state: &AppState) -> (String, String) {
-        let response = reqwest::get(format!("{base}/static/admin.css"))
+        let response = reqwest::get(format!("{base}{ROUTE_ADMIN_CSS}"))
             .await
             .unwrap();
         let set = response.headers()[header::SET_COOKIE].to_str().unwrap();
@@ -9083,15 +9181,15 @@ mod tests {
     #[tokio::test]
     async fn public_routes_serve_health_and_assets() {
         let (base, _state, dir) = test_server(|_| {}).await;
-        let health = reqwest::get(format!("{base}/health")).await.unwrap();
+        let health = reqwest::get(format!("{base}{ROUTE_HEALTH}")).await.unwrap();
         assert_eq!(health.status(), 200);
         assert_eq!(health.text().await.unwrap(), "ok");
         let cases = [
-            ("/favicon.ico", "image/x-icon", true),
-            ("/static/logo-icon.png", "image/png", true),
-            ("/static/admin.css", "text/css; charset=utf-8", false),
+            (ROUTE_FAVICON, "image/x-icon", true),
+            (ROUTE_LOGO_ICON, "image/png", true),
+            (ROUTE_ADMIN_CSS, "text/css; charset=utf-8", false),
             (
-                "/static/chart.umd.min.js",
+                ROUTE_CHART_JS,
                 "application/javascript; charset=utf-8",
                 true,
             ),
@@ -9116,7 +9214,11 @@ mod tests {
     async fn security_headers_follow_config_and_scheme() {
         let (base, _state, dir) = test_server(|_| {}).await;
         let client = reqwest::Client::new();
-        let plain = client.get(format!("{base}/health")).send().await.unwrap();
+        let plain = client
+            .get(format!("{base}{ROUTE_HEALTH}"))
+            .send()
+            .await
+            .unwrap();
         let headers = plain.headers();
         assert_eq!(headers["content-security-policy"], ADMIN_UI_CSP);
         assert_eq!(headers["x-content-type-options"], "nosniff");
@@ -9124,7 +9226,7 @@ mod tests {
         assert_eq!(headers["referrer-policy"], "no-referrer");
         assert!(headers.get("strict-transport-security").is_none());
         let secure = client
-            .get(format!("{base}/health"))
+            .get(format!("{base}{ROUTE_HEALTH}"))
             .header("x-forwarded-proto", "https")
             .send()
             .await
@@ -9136,7 +9238,11 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
 
         let (base, _state, dir) = test_server(|cfg| cfg.security_headers_enabled = false).await;
-        let off = client.get(format!("{base}/health")).send().await.unwrap();
+        let off = client
+            .get(format!("{base}{ROUTE_HEALTH}"))
+            .send()
+            .await
+            .unwrap();
         assert!(off.headers().get("content-security-policy").is_none());
         assert!(off.headers().get("x-frame-options").is_none());
         let _ = fs::remove_dir_all(&dir);
@@ -9165,7 +9271,7 @@ mod tests {
         })
         .await;
         let client = reqwest::Client::new();
-        let url = format!("{base}/static/admin.css");
+        let url = format!("{base}{ROUTE_ADMIN_CSS}");
         let denied = client.get(&url).send().await.unwrap();
         assert_eq!(denied.status(), 401);
         assert_eq!(
@@ -9205,7 +9311,7 @@ mod tests {
         let (base, state, dir) = test_server(|_| {}).await;
         let client = reqwest::Client::new();
         let first = client
-            .get(format!("{base}/static/admin.css"))
+            .get(format!("{base}{ROUTE_ADMIN_CSS}"))
             .send()
             .await
             .unwrap();
@@ -9214,14 +9320,14 @@ mod tests {
         assert!(!set.contains("Secure"));
         let (cookie, csrf) = open_session(&base, &state).await;
         let again = client
-            .get(format!("{base}/static/admin.css"))
+            .get(format!("{base}{ROUTE_ADMIN_CSS}"))
             .header(header::COOKIE, &cookie)
             .send()
             .await
             .unwrap();
         assert!(again.headers().get(header::SET_COOKIE).is_none());
         let secure = client
-            .get(format!("{base}/static/admin.css"))
+            .get(format!("{base}{ROUTE_ADMIN_CSS}"))
             .header("x-forwarded-proto", "https")
             .send()
             .await
@@ -9233,7 +9339,7 @@ mod tests {
                 .contains("Secure")
         );
 
-        let url = format!("{base}/api/secondary/none");
+        let url = format!("{base}{}", ROUTE_SECONDARY.replace("{name}", "none"));
         let no_token = client
             .delete(&url)
             .header(header::COOKIE, &cookie)
@@ -9258,7 +9364,10 @@ mod tests {
             .unwrap();
         assert_eq!(by_header.status(), 404);
         let by_form = client
-            .post(format!("{base}/api/secondary/none/rotate-token"))
+            .post(format!(
+                "{base}{}",
+                ROUTE_SECONDARY_ROTATE.replace("{name}", "none")
+            ))
             .header(header::COOKIE, &cookie)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(format!("csrf_token={csrf}"))
@@ -9267,7 +9376,10 @@ mod tests {
             .unwrap();
         assert_eq!(by_form.status(), 415);
         let bad_form = client
-            .post(format!("{base}/api/secondary/none/rotate-token"))
+            .post(format!(
+                "{base}{}",
+                ROUTE_SECONDARY_ROTATE.replace("{name}", "none")
+            ))
             .header(header::COOKIE, &cookie)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body("csrf_token=nope")
@@ -9288,7 +9400,7 @@ mod tests {
         })
         .await;
         let client = reqwest::Client::new();
-        let url = format!("{base}/api/secondary/register");
+        let url = format!("{base}{ROUTE_SECONDARY_REGISTER}");
         let post = |token: &str, name: &str, address: Option<&str>| {
             let body = json!({"token": token, "name": name, "address": address});
             client.post(&url).json(&body).send()
@@ -9348,7 +9460,7 @@ mod tests {
         })
         .await;
         let open = reqwest::Client::new()
-            .post(format!("{base}/api/secondary/register"))
+            .post(format!("{base}{ROUTE_SECONDARY_REGISTER}"))
             .json(&json!({"token": "", "name": "sec-1"}))
             .send()
             .await
@@ -9368,7 +9480,7 @@ mod tests {
         .await;
         fs::write(dir.join("ddns-tsig-key"), "tsigkey").unwrap();
         let response = reqwest::Client::new()
-            .post(format!("{base}/api/secondary/register"))
+            .post(format!("{base}{ROUTE_SECONDARY_REGISTER}"))
             .json(&json!({"token": "tok", "name": "sec-1"}))
             .send()
             .await
@@ -9389,7 +9501,7 @@ mod tests {
         fs::write(dir.join("ddns-tsig-key"), "tsigkey").unwrap();
         let client = reqwest::Client::new();
         let register = client
-            .post(format!("{base}/api/secondary/register"))
+            .post(format!("{base}{ROUTE_SECONDARY_REGISTER}"))
             .json(&json!({"token": "tok", "name": "sec-1"}))
             .send()
             .await
@@ -9407,26 +9519,51 @@ mod tests {
         let post = reqwest::Method::POST;
 
         let page = client
-            .get(format!("{base}/secondaries"))
+            .get(format!("{base}{PAGE_SECONDARIES}"))
             .send()
             .await
             .unwrap();
         assert_eq!(page.status(), 200);
         assert!(page.text().await.unwrap().contains("sec-1"));
 
-        let none = send(post.clone(), "/api/secondary/sec-1/health", json!({})).await;
+        let none = send(
+            post.clone(),
+            &ROUTE_SECONDARY_HEALTH.replace("{name}", "sec-1"),
+            json!({}),
+        )
+        .await;
         let none: Value = none.unwrap().json().await.unwrap();
         assert_eq!(none["status"], "no_address");
-        let unknown = send(post.clone(), "/api/secondary/zzz/health", json!({})).await;
+        let unknown = send(
+            post.clone(),
+            &ROUTE_SECONDARY_HEALTH.replace("{name}", "zzz"),
+            json!({}),
+        )
+        .await;
         assert_eq!(unknown.unwrap().status(), 404);
 
         let public = json!({"address": "8.8.8.8"});
-        let refused = send(post.clone(), "/api/secondary/sec-1/address", public).await;
+        let refused = send(
+            post.clone(),
+            &ROUTE_SECONDARY_ADDRESS.replace("{name}", "sec-1"),
+            public,
+        )
+        .await;
         assert_eq!(refused.unwrap().status(), 400);
         let lost = json!({"address": "10.0.0.5"});
-        let missing = send(post.clone(), "/api/secondary/zzz/address", lost.clone()).await;
+        let missing = send(
+            post.clone(),
+            &ROUTE_SECONDARY_ADDRESS.replace("{name}", "zzz"),
+            lost.clone(),
+        )
+        .await;
         assert_eq!(missing.unwrap().status(), 404);
-        let set = send(post.clone(), "/api/secondary/sec-1/address", lost).await;
+        let set = send(
+            post.clone(),
+            &ROUTE_SECONDARY_ADDRESS.replace("{name}", "sec-1"),
+            lost,
+        )
+        .await;
         let set: Value = set.unwrap().json().await.unwrap();
         assert_eq!(set, json!({"ok": true, "address": "10.0.0.5"}));
 
@@ -9442,27 +9579,47 @@ mod tests {
         };
         let before = hash(&state);
         let bad = json!({"token": "bad"});
-        let denied = send(post.clone(), "/api/secondary/sec-1/rotate-token", bad).await;
+        let denied = send(
+            post.clone(),
+            &ROUTE_SECONDARY_ROTATE.replace("{name}", "sec-1"),
+            bad,
+        )
+        .await;
         assert_eq!(denied.unwrap().status(), 401);
         assert_eq!(hash(&state), before);
         let good = json!({"token": "tok"});
         let nobody = send(
             post.clone(),
-            "/api/secondary/zzz/rotate-token",
+            &ROUTE_SECONDARY_ROTATE.replace("{name}", "zzz"),
             good.clone(),
         )
         .await;
         assert_eq!(nobody.unwrap().status(), 404);
-        let rotated = send(post, "/api/secondary/sec-1/rotate-token", good).await;
+        let rotated = send(
+            post,
+            &ROUTE_SECONDARY_ROTATE.replace("{name}", "sec-1"),
+            good,
+        )
+        .await;
         let rotated: Value = rotated.unwrap().json().await.unwrap();
         assert_eq!(rotated["nats_user"], "sec-1");
         assert_eq!(rotated["nats_password"].as_str().unwrap().len(), 64);
         assert_ne!(hash(&state), before);
 
         let delete = reqwest::Method::DELETE;
-        let gone = send(delete.clone(), "/api/secondary/zzz", json!({})).await;
+        let gone = send(
+            delete.clone(),
+            &ROUTE_SECONDARY.replace("{name}", "zzz"),
+            json!({}),
+        )
+        .await;
         assert_eq!(gone.unwrap().status(), 404);
-        let removed = send(delete, "/api/secondary/sec-1", json!({})).await;
+        let removed = send(
+            delete,
+            &ROUTE_SECONDARY.replace("{name}", "sec-1"),
+            json!({}),
+        )
+        .await;
         let removed: Value = removed.unwrap().json().await.unwrap();
         assert_eq!(removed, json!({"ok": true}));
         let rows: i64 = with_db(&state, |db| {
@@ -9486,7 +9643,7 @@ mod tests {
         })
         .await;
         let client = reqwest::Client::new();
-        let url = format!("{base}/api/netdata-alarms");
+        let url = format!("{base}{ALARM_INGEST_PATH}");
         let alarm = json!({
             "unique_id": 5, "alarm_id": 1, "event_id": 2, "when": 100,
             "name": "disk", "chart": "c", "host": "h", "status": "CRITICAL",
@@ -9525,7 +9682,7 @@ mod tests {
         })
         .await;
         let open = client
-            .post(format!("{base}/api/netdata-alarms"))
+            .post(format!("{base}{ALARM_INGEST_PATH}"))
             .header("X-Netdata-Alarm-Token", "")
             .body(alarm.to_string())
             .send()
@@ -9548,7 +9705,7 @@ mod tests {
         })
         .await;
         let response = reqwest::Client::new()
-            .post(format!("{base}/api/netdata-alarms"))
+            .post(format!("{base}{ALARM_INGEST_PATH}"))
             .header("X-Netdata-Alarm-Token", "t")
             .body(
                 r#"{"unique_id": 1, "alarm_id": 1, "event_id": 1, "when": 1,
@@ -9571,7 +9728,11 @@ mod tests {
             serve_canned(vec![(200, b"{\"x\":1}".to_vec()), (404, b"gone".to_vec())]);
         let (base, _state, dir) = test_server(move |cfg| cfg.netdata_url = upstream).await;
         let client = reqwest::Client::new();
-        let get = |path: &str| client.get(format!("{base}/api/netdata/{path}")).send();
+        let get = |path: &str| {
+            client
+                .get(format!("{base}{}", ROUTE_NETDATA.replace("{*path}", path)))
+                .send()
+        };
         for bad in ["a..b", "a%2fb"] {
             assert_eq!(get(bad).await.unwrap().status(), 400, "{bad}");
         }
@@ -9599,7 +9760,10 @@ mod tests {
         let (base, _state, dir) = test_server(move |cfg| cfg.netdata_url = upstream).await;
         let client = reqwest::Client::new();
         let at_cap = client
-            .get(format!("{base}/api/netdata/data"))
+            .get(format!(
+                "{base}{}",
+                ROUTE_NETDATA.replace("{*path}", "data")
+            ))
             .send()
             .await
             .unwrap();
@@ -9611,7 +9775,10 @@ mod tests {
         let (upstream, seen) = serve_canned(vec![(200, vec![b'x'; CAP + 1])]);
         let (base, _state, dir) = test_server(move |cfg| cfg.netdata_url = upstream).await;
         let over = client
-            .get(format!("{base}/api/netdata/data"))
+            .get(format!(
+                "{base}{}",
+                ROUTE_NETDATA.replace("{*path}", "data")
+            ))
             .send()
             .await
             .unwrap();
@@ -9622,7 +9789,10 @@ mod tests {
         let (base, _state, dir) =
             test_server(|cfg| cfg.netdata_url = "http://127.0.0.1:1".to_string()).await;
         let down = client
-            .get(format!("{base}/api/netdata/charts"))
+            .get(format!(
+                "{base}{}",
+                ROUTE_NETDATA.replace("{*path}", "charts")
+            ))
             .send()
             .await
             .unwrap();
@@ -9750,7 +9920,10 @@ mod tests {
         let client = reqwest::Client::new();
         let put = |service: &str, value: &str| {
             client
-                .post(format!("{base}/api/services/{service}/desired-state"))
+                .post(format!(
+                    "{base}{}",
+                    ROUTE_DESIRED_STATE.replace("{service}", service)
+                ))
                 .header(header::COOKIE, &cookie)
                 .header("X-CSRF-Token", &csrf)
                 .json(&json!({"state": value}))
@@ -9785,7 +9958,7 @@ mod tests {
         .await;
         let session = open_session(&base, &state).await;
         for bad in ["cache_gb=0", "cache_gb=abc", "cache_gb="] {
-            let response = post_form(&base, &session, "/cache/resize", bad).await;
+            let response = post_form(&base, &session, ROUTE_CACHE_RESIZE, bad).await;
             assert_eq!(response.status(), 400, "{bad}");
             assert!(
                 response
@@ -9795,7 +9968,7 @@ mod tests {
                     .contains("positive whole number")
             );
         }
-        let huge = post_form(&base, &session, "/cache/resize", "cache_gb=99999999").await;
+        let huge = post_form(&base, &session, ROUTE_CACHE_RESIZE, "cache_gb=99999999").await;
         assert_eq!(huge.status(), 400);
         assert!(
             huge.text()
@@ -9804,7 +9977,7 @@ mod tests {
                 .contains("would not leave a safety buffer")
         );
         assert!(!conf.exists());
-        let ok = post_form(&base, &session, "/cache/resize", "cache_gb=1").await;
+        let ok = post_form(&base, &session, ROUTE_CACHE_RESIZE, "cache_gb=1").await;
         assert_eq!(ok.status(), 303);
         assert_eq!(ok.headers()[header::LOCATION], PAGE_DASHBOARD);
         assert!(
@@ -9818,7 +9991,7 @@ mod tests {
         let (base, state, sdir) =
             test_server(|cfg| cfg.cache_dir = "relative/cache".to_string()).await;
         let session = open_session(&base, &state).await;
-        let unknown = post_form(&base, &session, "/cache/resize", "cache_gb=1").await;
+        let unknown = post_form(&base, &session, ROUTE_CACHE_RESIZE, "cache_gb=1").await;
         assert_eq!(unknown.status(), 500);
         assert!(unknown.text().await.unwrap().contains("Refusing to resize"));
         let _ = fs::remove_dir_all(&sdir);
@@ -9836,7 +10009,7 @@ mod tests {
         let bad = post_form(
             &base,
             &session,
-            "/setup/update",
+            ROUTE_SETUP_UPDATE,
             "lancache_image_channel=edge",
         )
         .await;
@@ -9849,7 +10022,7 @@ mod tests {
         );
         assert!(!conf.exists());
         let body = "lancache_image_channel=nightly&auto_update_enabled=1";
-        let ok = post_form(&base, &session, "/setup/update", body).await;
+        let ok = post_form(&base, &session, ROUTE_SETUP_UPDATE, body).await;
         assert_eq!(ok.status(), 303);
         assert_eq!(ok.headers()[header::LOCATION], PAGE_SETUP);
         let saved = fs::read_to_string(&conf).unwrap();
@@ -9858,7 +10031,7 @@ mod tests {
         let off = post_form(
             &base,
             &session,
-            "/setup/update",
+            ROUTE_SETUP_UPDATE,
             "lancache_image_channel=stable",
         )
         .await;
@@ -9882,12 +10055,12 @@ mod tests {
         let settings = conf.to_string_lossy().to_string();
         let (base, state, sdir) = test_server(move |cfg| cfg.ui_settings_file = settings).await;
         let session = open_session(&base, &state).await;
-        let page = reqwest::get(format!("{base}/logs")).await.unwrap();
+        let page = reqwest::get(format!("{base}{PAGE_LOGS}")).await.unwrap();
         assert_eq!(page.status(), 200);
         let page = page.text().await.unwrap();
         assert!(page.contains("name=\"LOGGING_PROXY_ENABLED\""), "{page}");
         let body = "LOGGING_DNS_ENABLED=1&LOGGING_UI_ENABLED=1";
-        let ok = post_form(&base, &session, "/logs/settings", body).await;
+        let ok = post_form(&base, &session, ROUTE_LOGS_SETTINGS, body).await;
         assert_eq!(ok.status(), 303);
         assert_eq!(ok.headers()[header::LOCATION], PAGE_LOGS);
         let saved = fs::read_to_string(&conf).unwrap();
@@ -9912,7 +10085,7 @@ mod tests {
         let settings = conf.to_string_lossy().to_string();
         let (base, state, sdir) = test_server(move |cfg| cfg.ui_settings_file = settings).await;
         let session = open_session(&base, &state).await;
-        let empty = post_form(&base, &session, "/ntp/settings", "ntp_upstream_servers=").await;
+        let empty = post_form(&base, &session, ROUTE_NTP_SETTINGS, "ntp_upstream_servers=").await;
         assert_eq!(empty.status(), 400);
         assert!(
             empty
@@ -9924,7 +10097,7 @@ mod tests {
         let bad = post_form(
             &base,
             &session,
-            "/ntp/settings",
+            ROUTE_NTP_SETTINGS,
             "ntp_upstream_servers=bad%20host!",
         )
         .await;
@@ -9932,7 +10105,7 @@ mod tests {
         assert!(bad.text().await.unwrap().contains("is not a valid"));
         assert!(!conf.exists());
         let on = "ntp_enabled=1&ntp_upstream_servers=pool.ntp.org%2C+10.0.0.1";
-        let ok = post_form(&base, &session, "/ntp/settings", on).await;
+        let ok = post_form(&base, &session, ROUTE_NTP_SETTINGS, on).await;
         assert_eq!(ok.status(), 303);
         assert_eq!(ok.headers()[header::LOCATION], PAGE_NTP);
         let saved = fs::read_to_string(&conf).unwrap();
@@ -9942,7 +10115,7 @@ mod tests {
         let off = post_form(
             &base,
             &session,
-            "/ntp/settings",
+            ROUTE_NTP_SETTINGS,
             "ntp_upstream_servers=10.0.0.1",
         )
         .await;
@@ -9964,59 +10137,35 @@ mod tests {
         let path = dir.to_string_lossy().to_string();
         let (base, state, sdir) = test_server(move |cfg| cfg.dns_state_dir = path).await;
         let session = open_session(&base, &state).await;
-        let on = post_form(&base, &session, "/domains/aaaa-filter", "enabled=1").await;
+        let on = post_form(&base, &session, ROUTE_AAAA_FILTER, "enabled=1").await;
         assert_eq!(on.status(), 303);
         assert_eq!(on.headers()[header::LOCATION], PAGE_DOMAINS);
         assert_eq!(
             fs::read_to_string(dir.join(AAAA_FILTER_MARKER)).unwrap(),
             "1"
         );
-        let off = post_form(&base, &session, "/domains/aaaa-filter", "enabled=0").await;
+        let off = post_form(&base, &session, ROUTE_AAAA_FILTER, "enabled=0").await;
         assert_eq!(off.status(), 303);
         assert!(!dir.join(AAAA_FILTER_MARKER).exists());
-        let again = post_form(&base, &session, "/domains/aaaa-filter", "enabled=0").await;
+        let again = post_form(&base, &session, ROUTE_AAAA_FILTER, "enabled=0").await;
         assert_eq!(again.status(), 303);
 
-        let blocked = post_form(
-            &base,
-            &session,
-            "/domains/ddns-allow-unsigned-updates",
-            "enabled=1",
-        )
-        .await;
+        let blocked = post_form(&base, &session, ROUTE_DDNS_UNSIGNED, "enabled=1").await;
         assert_eq!(
             blocked.headers()[header::LOCATION],
             domains_error("ddns_allow_unsigned_no_key").as_str()
         );
         assert!(!dir.join(DDNS_UNSIGNED_MARKER).exists());
         fs::write(sdir.join("ddns-tsig-key"), "tsig").unwrap();
-        let allowed = post_form(
-            &base,
-            &session,
-            "/domains/ddns-allow-unsigned-updates",
-            "enabled=1",
-        )
-        .await;
+        let allowed = post_form(&base, &session, ROUTE_DDNS_UNSIGNED, "enabled=1").await;
         assert_eq!(allowed.headers()[header::LOCATION], PAGE_DOMAINS);
         assert!(dir.join(DDNS_UNSIGNED_MARKER).exists());
-        let revoked = post_form(
-            &base,
-            &session,
-            "/domains/ddns-allow-unsigned-updates",
-            "enabled=0",
-        )
-        .await;
+        let revoked = post_form(&base, &session, ROUTE_DDNS_UNSIGNED, "enabled=0").await;
         assert_eq!(revoked.headers()[header::LOCATION], PAGE_DOMAINS);
         assert!(!dir.join(DDNS_UNSIGNED_MARKER).exists());
         fs::remove_file(sdir.join("ddns-tsig-key")).unwrap();
         fs::write(sdir.join("ddns-tsig-key"), "").unwrap();
-        let empty = post_form(
-            &base,
-            &session,
-            "/domains/ddns-allow-unsigned-updates",
-            "enabled=1",
-        )
-        .await;
+        let empty = post_form(&base, &session, ROUTE_DDNS_UNSIGNED, "enabled=1").await;
         assert_eq!(
             empty.headers()[header::LOCATION],
             domains_error("ddns_allow_unsigned_no_key").as_str()
@@ -10128,10 +10277,10 @@ mod tests {
     async fn adding_a_subnet_runs_the_whole_kea_chain() {
         let (base, state, kea, dir) = kea_test_server(kea_config_sample(), vec![]).await;
         let session = open_session(&base, &state).await;
-        let bad = post_form(&base, &session, "/dhcp/subnet/add", "subnet=x").await;
+        let bad = post_form(&base, &session, ROUTE_SUBNET_ADD, "subnet=x").await;
         assert_eq!(bad.status(), 400);
         assert!(kea_commands(&kea).is_empty());
-        let ok = post_form(&base, &session, "/dhcp/subnet/add", &subnet_body()).await;
+        let ok = post_form(&base, &session, ROUTE_SUBNET_ADD, &subnet_body()).await;
         assert_eq!(ok.status(), 303);
         assert_eq!(ok.headers()[header::LOCATION], PAGE_DHCP);
         assert_eq!(
@@ -10156,7 +10305,7 @@ mod tests {
         assert!(kea_available(&state));
         fs::write(&state.config.ui_settings_file, "DHCP_MODE=disabled\n").unwrap();
         assert!(!kea_available(&state));
-        let off = post_form(&base, &session, "/dhcp/subnet/remove", "id=1").await;
+        let off = post_form(&base, &session, ROUTE_SUBNET_REMOVE, "id=1").await;
         assert_eq!(off.status(), 409);
         assert!(kea_commands(&kea).is_empty());
         let _ = fs::remove_dir_all(&dir);
@@ -10172,7 +10321,7 @@ mod tests {
         .await;
         assert!(!kea_available(&state));
         let session = open_session(&base, &state).await;
-        let none = post_form(&base, &session, "/dhcp/subnet/remove", "id=1").await;
+        let none = post_form(&base, &session, ROUTE_SUBNET_REMOVE, "id=1").await;
         assert_eq!(none.status(), 409);
         let _ = fs::remove_dir_all(&sdir);
         let _ = fs::remove_dir_all(&dir);
@@ -10190,9 +10339,9 @@ mod tests {
             .push(second);
         let (base, state, kea, dir) = kea_test_server(config, vec![]).await;
         let session = open_session(&base, &state).await;
-        let missing = post_form(&base, &session, "/dhcp/subnet/remove", "x=1").await;
+        let missing = post_form(&base, &session, ROUTE_SUBNET_REMOVE, "x=1").await;
         assert_eq!(missing.status(), 400);
-        let ok = post_form(&base, &session, "/dhcp/subnet/remove", "id=1").await;
+        let ok = post_form(&base, &session, ROUTE_SUBNET_REMOVE, "id=1").await;
         assert_eq!(ok.status(), 303);
         let config = kea.lock().unwrap().config.clone();
         let ids: Vec<u64> = config["Dhcp4"]["subnet4"]
@@ -10214,7 +10363,7 @@ mod tests {
         let add = |extra: &str| {
             let body = format!("subnet_id=1&{extra}");
             let (base, session) = (base.clone(), session.clone());
-            async move { post_form(&base, &session, "/dhcp/static/add", &body).await }
+            async move { post_form(&base, &session, ROUTE_STATIC_ADD, &body).await }
         };
         for bad in [
             "mac=zz&ip=198.51.100.50",
@@ -10226,7 +10375,7 @@ mod tests {
         let nosubnet = post_form(
             &base,
             &session,
-            "/dhcp/static/add",
+            ROUTE_STATIC_ADD,
             "mac=aa:bb:cc:dd:ee:ff&ip=198.51.100.50",
         )
         .await;
@@ -10235,7 +10384,7 @@ mod tests {
         let unknown = post_form(
             &base,
             &session,
-            "/dhcp/static/add",
+            ROUTE_STATIC_ADD,
             "subnet_id=9&mac=aa:bb:cc:dd:ee:ff&ip=198.51.100.50",
         )
         .await;
@@ -10251,7 +10400,7 @@ mod tests {
         assert_eq!(list[0]["hostname"], "");
         let remove = |body: &str| {
             let (base, session, body) = (base.clone(), session.clone(), body.to_string());
-            async move { post_form(&base, &session, "/dhcp/static/remove", &body).await }
+            async move { post_form(&base, &session, ROUTE_STATIC_REMOVE, &body).await }
         };
         assert_eq!(remove("subnet_id=1&mac=zz").await.status(), 400);
         assert_eq!(remove("mac=aa:bb:cc:dd:ee:ff").await.status(), 400);
@@ -10276,7 +10425,7 @@ mod tests {
         let refused = post_form(
             &base,
             &session,
-            "/dhcp/static/add",
+            ROUTE_STATIC_ADD,
             "subnet_id=1&mac=aa:bb:cc:dd:ee:ff&ip=198.51.100.50",
         )
         .await;
@@ -10299,7 +10448,7 @@ mod tests {
         let (base, state, kea, dir) =
             kea_test_server(kea_config_sample(), vec![("config-test", refuse.clone())]).await;
         let session = open_session(&base, &state).await;
-        let failed = post_form(&base, &session, "/dhcp/subnet/remove", "id=1").await;
+        let failed = post_form(&base, &session, ROUTE_SUBNET_REMOVE, "id=1").await;
         assert_eq!(failed.status(), 500);
         assert!(failed.text().await.unwrap().contains("boom"));
         assert_eq!(kea_commands(&kea), ["config-get", "config-test"]);
@@ -10309,7 +10458,7 @@ mod tests {
         let (base, state, kea, dir) =
             kea_test_server(kea_config_sample(), vec![("config-write", refuse)]).await;
         let session = open_session(&base, &state).await;
-        let failed = post_form(&base, &session, "/dhcp/subnet/remove", "id=1").await;
+        let failed = post_form(&base, &session, ROUTE_SUBNET_REMOVE, "id=1").await;
         assert_eq!(failed.status(), 500);
         assert!(failed.text().await.unwrap().contains("rolled back"));
         assert_eq!(
@@ -10334,10 +10483,10 @@ mod tests {
     async fn lease_release_maps_kea_result_codes() {
         let (base, state, kea, dir) = kea_test_server(kea_config_sample(), vec![]).await;
         let session = open_session(&base, &state).await;
-        let bad = post_form(&base, &session, "/dhcp/lease/release", "ip=nope").await;
+        let bad = post_form(&base, &session, ROUTE_LEASE_RELEASE, "ip=nope").await;
         assert_eq!(bad.status(), 400);
         assert!(kea_commands(&kea).is_empty());
-        let ok = post_form(&base, &session, "/dhcp/lease/release", "ip=198.51.100.20").await;
+        let ok = post_form(&base, &session, ROUTE_LEASE_RELEASE, "ip=198.51.100.20").await;
         assert_eq!(ok.status(), 303);
         assert_eq!(kea_commands(&kea), ["lease4-get", "lease4-del"]);
         assert_eq!(
@@ -10350,7 +10499,7 @@ mod tests {
         let (base, state, _kea, dir) =
             kea_test_server(kea_config_sample(), vec![("lease4-del", gone)]).await;
         let session = open_session(&base, &state).await;
-        let missing = post_form(&base, &session, "/dhcp/lease/release", "ip=198.51.100.20").await;
+        let missing = post_form(&base, &session, ROUTE_LEASE_RELEASE, "ip=198.51.100.20").await;
         assert_eq!(missing.status(), 404);
         assert!(missing.text().await.unwrap().contains("No active lease"));
         let _ = fs::remove_dir_all(&dir);
@@ -10359,7 +10508,7 @@ mod tests {
         let (base, state, _kea, dir) =
             kea_test_server(kea_config_sample(), vec![("lease4-del", broken)]).await;
         let session = open_session(&base, &state).await;
-        let failed = post_form(&base, &session, "/dhcp/lease/release", "ip=198.51.100.20").await;
+        let failed = post_form(&base, &session, ROUTE_LEASE_RELEASE, "ip=198.51.100.20").await;
         assert_eq!(failed.status(), 500);
         assert!(failed.text().await.unwrap().contains("kea broke"));
         let _ = fs::remove_dir_all(&dir);
@@ -10382,7 +10531,7 @@ mod tests {
         assert_eq!(found[0].mac, "aa:bb:cc:dd:ee:ff");
         assert_eq!(found[0].hostname, "pc1");
         assert_eq!(found[0].expires, "4600");
-        let page = reqwest::get(format!("{base}/dhcp")).await.unwrap();
+        let page = reqwest::get(format!("{base}{PAGE_DHCP}")).await.unwrap();
         assert_eq!(page.status(), 200);
         let html = page.text().await.unwrap();
         assert!(html.contains("198.51.100.20"));
@@ -10392,7 +10541,7 @@ mod tests {
 
         let (base, _state, kea, dir) = kea_test_server(kea_config_sample(), vec![]).await;
         fs::write(dir.join("ui.conf"), "DHCP_MODE=disabled\n").unwrap();
-        let page = reqwest::get(format!("{base}/dhcp")).await.unwrap();
+        let page = reqwest::get(format!("{base}{PAGE_DHCP}")).await.unwrap();
         assert_eq!(page.status(), 200);
         assert!(!page.text().await.unwrap().contains("198.51.100.0/24"));
         assert!(kea_commands(&kea).is_empty());
@@ -10409,17 +10558,11 @@ mod tests {
         let store = kea_store(&state.config);
         store.create(&snapshot, 3).unwrap();
         let id = store.ids().unwrap().remove(0);
-        let unknown = post_form(
-            &base,
-            &session,
-            "/dhcp/snapshot/rollback",
-            "snapshot_id=nope",
-        )
-        .await;
+        let unknown = post_form(&base, &session, ROUTE_KEA_ROLLBACK, "snapshot_id=nope").await;
         assert_eq!(unknown.status(), 409);
         assert!(kea_commands(&kea).is_empty());
         let body = format!("snapshot_id={id}");
-        let ok = post_form(&base, &session, "/dhcp/snapshot/rollback", &body).await;
+        let ok = post_form(&base, &session, ROUTE_KEA_ROLLBACK, &body).await;
         assert_eq!(ok.status(), 303);
         assert_eq!(kea.lock().unwrap().config, snapshot);
         let _ = fs::remove_dir_all(&dir);
@@ -10436,11 +10579,11 @@ mod tests {
         let path = conf.to_string_lossy().to_string();
         let (base, state, sdir) = test_server(move |cfg| cfg.ui_settings_file = path).await;
         let session = open_session(&base, &state).await;
-        let bad = post_form(&base, &session, "/dhcp/mode", "dhcp_mode=bogus").await;
+        let bad = post_form(&base, &session, ROUTE_DHCP_MODE, "dhcp_mode=bogus").await;
         assert_eq!(bad.status(), 409);
         for mode in ["KEA", "dnsmasq-proxy", "dnsmasq-relay"] {
             let body = format!("dhcp_mode={mode}");
-            let ok = post_form(&base, &session, "/dhcp/mode", &body).await;
+            let ok = post_form(&base, &session, ROUTE_DHCP_MODE, &body).await;
             assert_eq!(ok.status(), 303);
             assert_eq!(ok.headers()[header::LOCATION], PAGE_DHCP);
             let saved = fs::read_to_string(&conf).unwrap();
@@ -10454,7 +10597,7 @@ mod tests {
         let path = format!("{}/ui.conf", blocker.to_string_lossy());
         let (base, state, sdir) = test_server(move |cfg| cfg.ui_settings_file = path).await;
         let session = open_session(&base, &state).await;
-        let ro = post_form(&base, &session, "/dhcp/mode", "dhcp_mode=kea").await;
+        let ro = post_form(&base, &session, ROUTE_DHCP_MODE, "dhcp_mode=kea").await;
         assert_eq!(ro.status(), 500);
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&sdir);
@@ -10524,7 +10667,7 @@ mod tests {
             ),
         ];
         for (changes, message) in cases {
-            let response = post_form(&base, &session, "/dhcp/proxy", &body(changes)).await;
+            let response = post_form(&base, &session, ROUTE_DHCP_PROXY, &body(changes)).await;
             assert_eq!(response.status(), 400, "{message}");
             assert!(
                 response.text().await.unwrap().contains(message),
@@ -10535,7 +10678,7 @@ mod tests {
         let custom = post_form(
             &base,
             &session,
-            "/dhcp/proxy",
+            ROUTE_DHCP_PROXY,
             &body(&[("dhcp_proxy_custom_options", "nocolon")]),
         )
         .await;
@@ -10556,7 +10699,7 @@ mod tests {
             ("dhcp_proxy_boot_filename", "pxelinux.0"),
             ("dhcp_proxy_boot_server", "192.168.1.9"),
         ]);
-        let ok = post_form(&base, &session, "/dhcp/proxy", &full).await;
+        let ok = post_form(&base, &session, ROUTE_DHCP_PROXY, &full).await;
         assert_eq!(ok.status(), 303);
         assert_eq!(ok.headers()[header::LOCATION], PAGE_DHCP);
         let saved = fs::read_to_string(&conf).unwrap();

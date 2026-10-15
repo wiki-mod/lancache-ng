@@ -38,7 +38,7 @@
 
   <!-- What: per-service logging switches.
        Why: the ui saves; the watchdog applies. -->
-  <form method="post" action="/logs/settings" class="card space-y-3">
+  <form method="post" action="{{ routes.logs_settings | safe }}" class="card space-y-3">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div>
       <h2 class="font-semibold text-slate-200">Protokollierung je Dienst</h2>

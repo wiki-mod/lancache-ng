@@ -9,8 +9,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LanCache-NG Admin{% block title %}{% endblock %}</title>
-  <link rel="icon" type="image/x-icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/static/admin.css">
+  <link rel="icon" type="image/x-icon" href="{{ routes.favicon | safe }}">
+  <link rel="stylesheet" href="{{ routes.admin_css | safe }}">
   <style>
     /* What: CSS tokens; dark values on :root
        Why: dark is the default; light needs an override
@@ -170,7 +170,7 @@
   <aside class="dock w-52 shrink-0 flex flex-col">
     <div class="px-4 py-5" style="border-bottom: 1px solid var(--color-border);">
       <div class="flex items-center gap-2">
-        <img src="/static/logo-icon.png" alt="LanCache-NG Logo" class="w-8 h-8 rounded-full">
+        <img src="{{ routes.logo_icon | safe }}" alt="LanCache-NG Logo" class="w-8 h-8 rounded-full">
         <div>
           <p class="font-bold leading-none" style="color: var(--color-text);">LanCache-NG</p>
           <p class="text-xs mt-0.5" style="color: var(--color-text-muted);">Admin Interface</p>
@@ -264,7 +264,7 @@
         <!-- What: UI restart form, asks for confirm() first
              Why: the process exits; compose relaunches it
              From: Issue #1437 -->
-        <form method="post" action="/setup/restart-ui"
+        <form method="post" action="{{ routes.restart_ui | safe }}"
               onsubmit="return confirm('Admin-UI wirklich neu starten? Die Seite ist danach kurz nicht erreichbar.')">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button type="submit" class="theme-toggle" title="Admin-UI neu starten">⟳ UI</button>
@@ -335,7 +335,7 @@
       async function refresh() {
         let data;
         try {
-          const response = await fetch('/api/watchdog-status');
+          const response = await fetch('{{ routes.watchdog_status | safe }}');
           if (!response.ok) {
             return;
           }
@@ -359,7 +359,7 @@
     async function setDockServiceState(service, state, button) {
       button.disabled = true;
       try {
-        const response = await fetch('/api/services/' + service + '/desired-state', {
+        const response = await fetch('{{ routes.desired_state | safe }}'.replace('{service}', service), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
           body: JSON.stringify({ state: state }),

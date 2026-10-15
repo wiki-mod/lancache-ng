@@ -121,7 +121,7 @@
       proxy container.
     </div>
     {% endif %}
-    <form method="post" action="/cache/resize" class="flex flex-wrap items-end gap-3">
+    <form method="post" action="{{ routes.cache_resize | safe }}" class="flex flex-wrap items-end gap-3">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div>
         <label class="block text-xs text-slate-400 mb-1">New cache size (GB)</label>
@@ -305,7 +305,7 @@
 
 </div>
 <script>
-  // What: polls /api/metrics every 10s, patches counts
+  // What: polls the metrics route every 10s, patches counts
   // Why: a reload also recomputes cache and log stats
   // From: Issue #1683 | PR #1912
   function updateMetricsSection(prefix, status) {
@@ -322,7 +322,7 @@
 
   async function refreshDashboardMetrics() {
     try {
-      const response = await fetch('/api/metrics');
+      const response = await fetch('{{ routes.metrics | safe }}');
       if (!response.ok) {
         return;
       }

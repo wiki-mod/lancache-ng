@@ -45,7 +45,7 @@
       </span>
     </div>
 
-    <form method="post" action="/setup/update" class="grid gap-4 md:grid-cols-2 items-end">
+    <form method="post" action="{{ routes.setup_update | safe }}" class="grid gap-4 md:grid-cols-2 items-end">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div>
         <label class="block text-xs text-slate-400 mb-1">Release-Kanal</label>
@@ -249,7 +249,7 @@ sudo trust anchor --store {{ ca_cert_file }}</pre>
         überhaupt anzustoßen.
       </p>
     </div>
-    <form method="post" action="/setup/restart-ui"
+    <form method="post" action="{{ routes.restart_ui | safe }}"
           onsubmit="return confirm('Admin-UI wirklich neu starten? Die Seite ist danach kurz nicht erreichbar.')">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit"

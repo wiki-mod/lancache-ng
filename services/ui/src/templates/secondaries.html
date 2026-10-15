@@ -189,7 +189,7 @@
 
   async function rotateToken(name) {
     try {
-      const response = await fetch(`/api/secondary/${name}/rotate-token`, {
+      const response = await fetch('{{ routes.secondary_rotate | safe }}'.replace('{name}', name), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -217,7 +217,7 @@
     }
 
     try {
-      const response = await fetch(`/api/secondary/${name}`, {
+      const response = await fetch('{{ routes.secondary | safe }}'.replace('{name}', name), {
         method: 'DELETE',
         headers: {
           'X-CSRF-Token': '{{ csrf_token }}'
@@ -257,7 +257,7 @@
     const span = document.getElementById('health-' + name);
     if (span) { span.className = 'text-slate-400'; span.textContent = 'Prüfe…'; }
     try {
-      const response = await fetch(`/api/secondary/${name}/health`, {
+      const response = await fetch('{{ routes.secondary_health | safe }}'.replace('{name}', name), {
         method: 'POST',
         headers: { 'X-CSRF-Token': '{{ csrf_token }}' }
       });
@@ -276,7 +276,7 @@
     const input = prompt(`Adresse (private IPv4) für ${name}:`, current || '');
     if (input === null) return;
     try {
-      const response = await fetch(`/api/secondary/${name}/address`, {
+      const response = await fetch('{{ routes.secondary_address | safe }}'.replace('{name}', name), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': '{{ csrf_token }}' },
         body: JSON.stringify({ address: input.trim() })

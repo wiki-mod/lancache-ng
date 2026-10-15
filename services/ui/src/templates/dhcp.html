@@ -36,7 +36,7 @@
       <span class="text-xs px-2 py-1 rounded bg-slate-700 text-slate-200">{{ dhcp_mode }}</span>
     </div>
 
-    <form method="post" action="/dhcp/mode" class="grid gap-3 md:grid-cols-2 items-end">
+    <form method="post" action="{{ routes.dhcp_mode | safe }}" class="grid gap-3 md:grid-cols-2 items-end">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div>
         <label class="block text-xs text-slate-400 mb-1">Aktiver DHCP-Modus</label>
@@ -69,7 +69,7 @@
           <div><span class="text-slate-400">DNS 1:</span> <span class="text-white">{{ dhcp_dns_primary }}</span></div>
           <div><span class="text-slate-400">DNS 2:</span> <span class="text-white">{{ dhcp_dns_secondary }}</span></div>
         </div>
-        <form method="post" action="/dhcp/proxy" class="space-y-3 rounded border border-amber-500/30 bg-slate-900/50 p-4">
+        <form method="post" action="{{ routes.dhcp_proxy | safe }}" class="space-y-3 rounded border border-amber-500/30 bg-slate-900/50 p-4">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <div class="grid gap-3 md:grid-cols-2">
             <div>
@@ -150,7 +150,7 @@
           <li>Only two values are needed: this relay's own address on the client-facing network (stamped into the relayed request's <code>giaddr</code>, which the upstream server uses to pick the pool) and the upstream server address.</li>
           <li>No subnet/DNS/PXE fields here -- a relay injects nothing of its own. Use ProxyDHCP mode for PXE option injection, or Kea mode to own leases here.</li>
         </ul>
-        <form method="post" action="/dhcp/relay" class="space-y-3 rounded border border-sky-500/30 bg-slate-900/50 p-4">
+        <form method="post" action="{{ routes.dhcp_relay | safe }}" class="space-y-3 rounded border border-sky-500/30 bg-slate-900/50 p-4">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <div class="grid gap-3 md:grid-cols-2">
             <div>
@@ -187,7 +187,7 @@
   </div>
 
   {% if dhcp_has_kea %}
-  <!-- What: status card for the /api/dhcp/check probe -->
+  <!-- What: status card for the DHCP conflict probe -->
   <!-- Why: element ids are read by checkDhcpConflict() -->
   <div id="dhcp-check" class="bg-slate-800 border border-slate-700 rounded-lg p-4">
     <div class="flex items-center justify-between">
@@ -226,7 +226,7 @@
         {% if dhcp_ddns_enabled %}aktiv{% else %}inaktiv{% endif %}
       </span>
     </div>
-    <form method="POST" action="/dhcp/ddns" class="mt-3 grid gap-3 md:grid-cols-[1fr_auto] items-end">
+    <form method="POST" action="{{ routes.dhcp_ddns | safe }}" class="mt-3 grid gap-3 md:grid-cols-[1fr_auto] items-end">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div>
         <label class="block text-xs text-slate-400 mb-1">DDNS-Updates aktivieren</label>
@@ -253,7 +253,7 @@
 
     <div id="add-subnet-form" class="hidden mb-6 p-4 bg-slate-700 rounded border border-slate-600">
       <h3 class="text-sm font-medium text-white mb-3">Neues Subnet</h3>
-      <form method="POST" action="/dhcp/subnet/add" class="space-y-3">
+      <form method="POST" action="{{ routes.subnet_add | safe }}" class="space-y-3">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="grid grid-cols-2 gap-3">
           <div>
@@ -335,7 +335,7 @@
           <button onclick="toggleEditSubnet({{ subnet.id }})" class="text-xs px-2 py-1 bg-slate-600 hover:bg-slate-500 text-white rounded">
             Bearbeiten
           </button>
-          <form method="POST" action="/dhcp/subnet/remove" class="inline"
+          <form method="POST" action="{{ routes.subnet_remove | safe }}" class="inline"
             onsubmit="return confirm('Subnet {{ subnet.subnet }} löschen?')">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="id" value="{{ subnet.id }}">
@@ -347,7 +347,7 @@
       </div>
 
       <div id="edit-subnet-{{ subnet.id }}" class="hidden p-4 bg-slate-750 border-t border-slate-600">
-        <form method="POST" action="/dhcp/subnet/update" class="space-y-3">
+        <form method="POST" action="{{ routes.subnet_update | safe }}" class="space-y-3">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="id" value="{{ subnet.id }}">
           <div class="grid grid-cols-2 gap-3">
@@ -430,7 +430,7 @@
               <span class="text-slate-500 mx-2">→</span>
               <span class="text-slate-200">{{ option.data }}</span>
             </div>
-            <form method="POST" action="/dhcp/subnet/option/remove" class="inline"
+            <form method="POST" action="{{ routes.subnet_option_remove | safe }}" class="inline"
               onsubmit="return confirm('DHCP-Option {{ option.code }} aus {{ subnet.subnet }} entfernen?')">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <input type="hidden" name="subnet_id" value="{{ subnet.id }}">
@@ -447,7 +447,7 @@
         <p class="text-xs text-slate-500">Keine zusätzlichen DHCP-Optionen für dieses Subnet konfiguriert.</p>
         {% endif %}
 
-        <form method="POST" action="/dhcp/subnet/option/add" class="grid gap-3 md:grid-cols-[120px_1fr_auto] items-end">
+        <form method="POST" action="{{ routes.subnet_option_add | safe }}" class="grid gap-3 md:grid-cols-[120px_1fr_auto] items-end">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="subnet_id" value="{{ subnet.id }}">
           <div>
@@ -473,7 +473,7 @@
     <h2 class="text-lg font-semibold text-white mb-4">Statische Reservierungen</h2>
 
     {% if subnets | length > 0 %}
-    <form method="POST" action="/dhcp/static/add" class="mb-6 space-y-3 p-4 bg-slate-700 rounded">
+    <form method="POST" action="{{ routes.static_add | safe }}" class="mb-6 space-y-3 p-4 bg-slate-700 rounded">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div class="grid grid-cols-4 gap-3">
         <div>
@@ -516,7 +516,7 @@
             <span class="text-slate-500 text-xs ml-1">(Subnet {{ res.subnet_id }})</span>
           </div>
         </div>
-        <form method="POST" action="/dhcp/static/remove" class="inline">
+        <form method="POST" action="{{ routes.static_remove | safe }}" class="inline">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="subnet_id" value="{{ res.subnet_id }}">
           <input type="hidden" name="mac" value="{{ res.mac }}">
@@ -557,7 +557,7 @@
               <span class="dhcp-expiry" data-epoch="{{ lease.expires }}">{{ lease.expires }}</span>
             </td>
             <td class="py-2">
-              <form method="POST" action="/dhcp/lease/release" class="inline"
+              <form method="POST" action="{{ routes.lease_release | safe }}" class="inline"
                 onsubmit="return confirm('Lease {{ lease.ip }} freigeben?')">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="ip" value="{{ lease.ip }}">
@@ -606,7 +606,7 @@
               <span class="dhcp-expiry" data-epoch="{{ snapshot.created_unix }}">{{ snapshot.created_unix }}</span>
             </td>
             <td class="py-2">
-              <form method="POST" action="/dhcp/snapshot/rollback" class="inline"
+              <form method="POST" action="{{ routes.kea_rollback | safe }}" class="inline"
                 onsubmit="return confirm('Auf diesen Snapshot zurückrollen? Die aktuelle DHCP-Konfiguration wird ersetzt.')">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="snapshot_id" value="{{ snapshot.id }}">
@@ -661,7 +661,7 @@ async function checkDhcpConflict() {
     // What: POST with X-CSRF-Token header, not GET
     // Why: starts/stops the probe; GET is CSRF-exempt
     // From: Issue #947
-    const res = await fetch('/api/dhcp/check', {
+    const res = await fetch('{{ routes.dhcp_check | safe }}', {
       method: 'POST',
       headers: {
         'X-CSRF-Token': '{{ csrf_token }}'
