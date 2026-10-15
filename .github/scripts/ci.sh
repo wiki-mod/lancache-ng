@@ -1734,11 +1734,11 @@ _ci_identity_pins() {
     done
 }
 
-# What: normalized content ids of a target's SOT paths.
-# Why: one reader for the id and the base impact proof.
+# What: a target's SOT paths without the Rust-owned ones.
+# Why: the id and the default-key scan read one path set.
 # From: Issue #1683 | PR #1912
-_ci_identity_content() {
-    local service="$1" ref="${2:-}" paths p part buf="" skip=" " type
+_ci_target_plain_paths() {
+    local service="$1" paths p type skip=" "
     paths="$(_ci_target_paths "${service}")" || return 2
     type="$(_ci_required_field "${service}" build_type)" || return 2
     # What: lock, libs, foreign manifests come from Rust.
@@ -1750,6 +1750,19 @@ _ci_identity_content() {
     while IFS= read -r p; do
         [ -n "${p}" ] || continue
         [[ "${skip}" != *" ${p} "* ]] || continue
+        printf '%s\n' "${p}"
+    done <<< "${paths}"
+}
+
+# What: normalized content ids of a target's SOT paths.
+# Why: one reader for the id and the base impact proof.
+# From: Issue #1683 | PR #1912
+_ci_identity_content() {
+    local service="$1" ref="${2:-}" paths p part buf="" type
+    paths="$(_ci_target_plain_paths "${service}")" || return 2
+    type="$(_ci_required_field "${service}" build_type)" || return 2
+    while IFS= read -r p; do
+        [ -n "${p}" ] || continue
         part="$(_ci_tracked_content_ids "${p}" "${ref}" build)" || return 2
         [ -z "${part}" ] || buf+="${part}"$'\n'
     done <<< "${paths}"
@@ -9432,21 +9445,19 @@ _ci_service_setup() {
 # Why: 64.4: a default rebuilds only images that read it.
 # From: Issue #1683 | PR #1912
 _ci_service_default_rows() {
-    local service="$1" rows type skip=" " text="" paths p part field
+    local service="$1" rows type text="" paths p part field
     local -a specs=()
     rows="$(_ci_runtime_defaults)" || return 2
     type="$(_ci_required_field "${service}" build_type)" || return 2
     if [ "${type}" = rust ]; then
-        skip="$(_ci_rust_skip_paths "${service}")" || return 2
         text="$(_ci_rust_content "${service}" "" text)" || return 2
     fi
     # What: non-Rust files and SOT lists of the image.
     # Why: templates and processes name keys too.
     # From: Issue #1683 | PR #1912
-    paths="$(_ci_target_paths "${service}")" || return 2
+    paths="$(_ci_target_plain_paths "${service}")" || return 2
     while IFS= read -r p; do
         [ -n "${p}" ] || continue
-        [[ "${skip}" != *" ${p} "* ]] || continue
         specs+=("${p}")
     done <<< "${paths}"
     part="$(_ci_run -m 1 "[CI-ERROR-BUILDARGS-0022]" "service=\"${service}\" reason=\"tracked files not read\"" \
