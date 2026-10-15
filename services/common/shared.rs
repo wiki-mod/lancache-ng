@@ -433,6 +433,18 @@ fn is_snapshot_id(name: &str) -> bool {
     !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit())
 }
 
+// What: remove a failed staging dir; its error joins e.
+// Why: AG-INT-002: a left staging dir is named, not hidden.
+// From: Issue #1683 | PR #1912
+fn drop_staging(staging: &Path, e: anyhow::Error) -> anyhow::Error {
+    match fs::remove_dir_all(staging) {
+        Err(c) if c.kind() != std::io::ErrorKind::NotFound => {
+            e.context(format!("staging {} not removed: {c}", staging.display()))
+        }
+        _ => e,
+    }
+}
+
 impl SnapshotStore {
     // What: a store of `file` payloads under `root`.
     // Why: `service` names the log line vocabulary.
@@ -496,8 +508,8 @@ impl SnapshotStore {
             Ok(fs::rename(&staging, self.root.join(&id))?)
         };
         if let Err(e) = finish() {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(e.context(format!("failed to write known-good snapshot {id}")));
+            let e = e.context(format!("failed to write known-good snapshot {id}"));
+            return Err(drop_staging(&staging, e));
         }
         self.log("CREATE", &format!("created known-good snapshot {id}"));
         if let Err(e) = self.prune(keep_n) {
@@ -589,9 +601,7 @@ impl SnapshotStore {
             fs::rename(&staging, self.root.join(&id))?;
             Ok(fs::remove_dir_all(dir)?)
         };
-        finish().inspect_err(|_| {
-            let _ = fs::remove_dir_all(&staging);
-        })?;
+        finish().map_err(|e| drop_staging(&staging, e))?;
         Ok(id)
     }
 }

@@ -3823,11 +3823,19 @@ fn sign_leaf(
             ],
         )
     });
-    let _ = fs::remove_file(&csr);
-    let _ = fs::remove_file(&ext);
+    // What: drop temp and failed files; log what stays.
+    // Why: AG-INT-002: a left file is named, not hidden.
+    // From: Issue #1683 | PR #1912
+    let mut leftovers = vec![csr.as_path(), ext.as_path()];
     if signed.is_err() {
-        let _ = fs::remove_file(key);
-        let _ = fs::remove_file(crt);
+        leftovers.extend([key, crt]);
+    }
+    for file in leftovers {
+        if let Err(e) = fs::remove_file(file)
+            && e.kind() != io::ErrorKind::NotFound
+        {
+            log_err(&format!("WARNING: {} not removed: {e}", file.display()));
+        }
     }
     signed.map(|_| ())
 }
@@ -4472,11 +4480,13 @@ fn dry_run(
             MessageType::Release,
             vec![DhcpOption::ServerIdentifier(server)],
         );
-        let _ = send_dhcp(
+        if let Err(e) = send_dhcp(
             socket,
             &release,
             SocketAddrV4::new(server, DHCP_SERVER_PORT),
-        );
+        ) {
+            log_err(&format!("WARNING: DHCP release to {server} not sent: {e}"));
+        }
     }
     ClientCheck::Passed {
         output: match ack.address {

@@ -2328,7 +2328,9 @@ async fn kick_secondary(state: &AppState, nats_user: &str) -> Result<usize, Stri
             Err(err) => tracing::warn!("nats_kick: KICK for cid {cid} failed: {err}"),
         }
     }
-    let _ = client.drain().await;
+    if let Err(err) = client.drain().await {
+        tracing::warn!("nats_kick: drain failed: {err}");
+    }
     Ok(kicked)
 }
 
@@ -2392,11 +2394,17 @@ fn with_db<T>(
     state: &AppState,
     f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
 ) -> Result<T, StatusCode> {
-    let conn = state
-        .db
-        .lock()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    f(&conn).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    // What: log the cause before it becomes a bare 500.
+    // Why: AG-INT-002: the DB error must stay visible.
+    // From: Issue #1683 | PR #1912
+    let conn = state.db.lock().map_err(|e| {
+        tracing::error!("database lock poisoned: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    f(&conn).map_err(|e| {
+        tracing::error!("database statement failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
 }
 
 // What: true for the configured registration token.
@@ -2606,12 +2614,17 @@ async fn check_secondary_health(
     )
     .await;
     if result.status == "ok" {
-        let _ = with_db(&state, |db| {
+        // What: a lost last_seen write is logged.
+        // Why: the sync succeeded; the reply says so.
+        // From: Issue #1683 | PR #1912
+        if let Err(status) = with_db(&state, |db| {
             db.execute(
                 "UPDATE secondaries SET last_seen = ? WHERE name = ?",
                 rusqlite::params![unix_secs() as i64, name],
             )
-        });
+        }) {
+            tracing::warn!("last_seen of secondary {name} not updated: {status}");
+        }
     }
     Ok(Json(json!({
         "status": result.status,
@@ -4515,12 +4528,19 @@ async fn flush_recursor_cache(state: &AppState, request: FlushRequest) {
         .append_pair("domain", &domain)
         .finish();
     let url = format!("{}/cache/flush?{query}", state.config.pdns_rec_api);
-    // What: ignore a failed flush; entries expire anyway.
+    // What: a failed flush is logged; entries expire.
     // Why: the record change itself already happened.
-    let _ = state.pdns.call(reqwest::Method::PUT, &url, None).await;
+    if let Err(err) = state.pdns.call(reqwest::Method::PUT, &url, None).await {
+        tracing::warn!("cache flush of {url} failed: {err}");
+    }
     let request = FlushRequest { domain, ..request };
-    if let Ok(payload) = serde_json::to_vec(&request) {
-        let _ = state.nats.publish(NATS_SUBJECT_FLUSH, payload.into()).await;
+    match serde_json::to_vec(&request) {
+        Ok(payload) => {
+            if let Err(err) = state.nats.publish(NATS_SUBJECT_FLUSH, payload.into()).await {
+                tracing::warn!("flush publish failed: {err}");
+            }
+        }
+        Err(err) => tracing::warn!("flush request not encoded: {err}"),
     }
 }
 
