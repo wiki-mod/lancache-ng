@@ -188,17 +188,20 @@ async fn publish(
 
 // What: publish one record message, logging a failure.
 // Why: replication is best-effort; the next tick retries.
-async fn publish_record(js: &jetstream::Context, msg_id: &str, record: &DnsRecord) {
+// Returns true only when JetStream acknowledged the message.
+async fn publish_record(js: &jetstream::Context, msg_id: &str, record: &DnsRecord) -> bool {
     let payload = match serde_json::to_vec(record) {
         Ok(payload) => payload,
         Err(e) => {
             eprintln!("encoding of {msg_id} failed, not published: {e}");
-            return;
+            return false;
         }
     };
     if let Err(e) = publish(js, NATS_SUBJECT_RECORD, Some(msg_id), payload).await {
         eprintln!("publish of {msg_id} failed: {e}");
+        return false;
     }
+    true
 }
 
 // What: a record message from one PowerDNS rrset.
@@ -749,8 +752,10 @@ async fn check_zone(ctx: &Ctx, store: &SnapshotStore, zone: &str) -> bool {
 
 // What: republish a rollback patch for the lan zone.
 // Why: other nodes converge now, not at the next tick.
-async fn publish_patch(js: &jetstream::Context, lan_zone: &str, patch: &Value) {
+// Returns true only when every record was acknowledged.
+async fn publish_patch(js: &jetstream::Context, lan_zone: &str, patch: &Value) -> bool {
     let stamp = unix_nanos();
+    let mut all_published = true;
     for rrset in patch["rrsets"].as_array().into_iter().flatten() {
         let delete = rrset.get("changetype").and_then(Value::as_str) == Some("DELETE");
         let action = if delete { "delete" } else { "replace" };
@@ -759,9 +764,10 @@ async fn publish_patch(js: &jetstream::Context, lan_zone: &str, patch: &Value) {
             // What: a fresh message id per republish.
             // Why: the dedup window absorbs a repeated id.
             let msg_id = format!("rollback-{stamp}-{name}-{}", record.record_type);
-            publish_record(js, &msg_id, &record).await;
+            all_published &= publish_record(js, &msg_id, &record).await;
         }
     }
+    all_published
 }
 
 // What: roll one zone back to a stored snapshot.
@@ -852,10 +858,9 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
 
     // What: records go out before any flush.
     // Why: else a flushed cache refills from stale data.
-    let republished = zone == canonical_zone(&ctx.lan_zone) && patch_len > 0;
-    if republished {
-        publish_patch(&ctx.js, &ctx.lan_zone, &patch).await;
-    }
+    let republished = zone == canonical_zone(&ctx.lan_zone)
+        && patch_len > 0
+        && publish_patch(&ctx.js, &ctx.lan_zone, &patch).await;
 
     // What: all flushes at once, each DNS_FLUSH_TIMEOUT.
     // Why: serial acks would exceed the ui's HTTP timeout.
@@ -1610,7 +1615,7 @@ mod tests {
         assert_eq!(
             reply,
             json!({"applied": true, "changed_names": ["a.lan.", "b.lan."],
-                   "zone_check_passed": false, "republished_to_nats": true,
+                   "zone_check_passed": false, "republished_to_nats": false,
                    "flush_ok": false, "flush_failed_names": ["a.lan.", "b.lan."]})
         );
         let seen = server.join().unwrap();
