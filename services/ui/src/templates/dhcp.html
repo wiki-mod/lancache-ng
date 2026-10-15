@@ -637,6 +637,28 @@ function toggleEditSubnet(id) {
   el.classList.toggle('hidden');
 }
 
+// What: empties and hides one detail list of the DHCP check
+// Why: one owner for both lists; stale fields must not remain
+// From: Issue #1683 | PR #1912
+function clearDetails(listEl) {
+  listEl.replaceChildren();
+  listEl.classList.add('hidden');
+}
+
+// What: one <li> per item via textContent, never innerHTML
+// Why: values are untrusted input from a DHCP server
+// From: Issue #1683 | PR #1912
+function showDetails(listEl, details) {
+  for (const item of details) {
+    const li = document.createElement('li');
+    li.textContent = `${item.label}: ${item.value}`;
+    listEl.appendChild(li);
+  }
+  if (details.length > 0) {
+    listEl.classList.remove('hidden');
+  }
+}
+
 async function checkDhcpConflict() {
   const statusEl = document.getElementById('check-status');
   const conflictEl = document.getElementById('check-conflict-status');
@@ -645,12 +667,8 @@ async function checkDhcpConflict() {
   const clientDetailsEl = document.getElementById('check-client-details');
   statusEl.textContent = 'Prüfe...';
   conflictEl.textContent = 'Konfliktprobe läuft...';
-  // What: clears both detail lists before each run
-  // Why: stale fields from an earlier run must not remain
-  conflictDetailsEl.replaceChildren();
-  conflictDetailsEl.classList.add('hidden');
-  clientDetailsEl.replaceChildren();
-  clientDetailsEl.classList.add('hidden');
+  clearDetails(conflictDetailsEl);
+  clearDetails(clientDetailsEl);
   clientEl.textContent = 'DHCP-Client-Dry-Run läuft...';
   try {
     // What: POST with X-CSRF-Token header, not GET
@@ -680,17 +698,7 @@ async function checkDhcpConflict() {
     if (data.conflict?.status === 'found') {
       conflictEl.className = 'text-sm text-yellow-400';
       conflictEl.textContent = `Konfliktprobe: fremder DHCP-Server gefunden (${data.conflict.output ?? 'ohne Detail'})`;
-      // What: rows built with textContent, never innerHTML
-      // Why: values are untrusted input from a DHCP server
-      const details = data.conflict.details ?? [];
-      for (const item of details) {
-        const li = document.createElement('li');
-        li.textContent = `${item.label}: ${item.value}`;
-        conflictDetailsEl.appendChild(li);
-      }
-      if (details.length > 0) {
-        conflictDetailsEl.classList.remove('hidden');
-      }
+      showDetails(conflictDetailsEl, data.conflict.details ?? []);
     } else if (data.conflict?.status === 'not_found') {
       conflictEl.className = 'text-sm text-green-400';
       conflictEl.textContent = 'Konfliktprobe: kein fremder DHCP-Server im gescannten Segment gefunden';
@@ -701,17 +709,7 @@ async function checkDhcpConflict() {
     if (data.client?.status === 'passed') {
       clientEl.className = 'text-sm text-green-400';
       clientEl.textContent = `DHCP-Client-Dry-Run: erfolgreich (${data.client.output ?? 'ohne Detail'})`;
-      // What: rows built with textContent, never innerHTML
-      // Why: values may come from a foreign DHCP server
-      const clientDetails = data.client.details ?? [];
-      for (const item of clientDetails) {
-        const li = document.createElement('li');
-        li.textContent = `${item.label}: ${item.value}`;
-        clientDetailsEl.appendChild(li);
-      }
-      if (clientDetails.length > 0) {
-        clientDetailsEl.classList.remove('hidden');
-      }
+      showDetails(clientDetailsEl, data.client.details ?? []);
     } else if (data.client?.status === 'failed') {
       clientEl.className = 'text-sm text-amber-400';
       clientEl.textContent = `DHCP-Client-Dry-Run: fehlgeschlagen (${data.client.output ?? 'ohne Detail'})`;
