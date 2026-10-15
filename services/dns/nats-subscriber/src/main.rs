@@ -586,6 +586,8 @@ fn rrset_matches_expected(
 // From: Issue #1095
 async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
     let request = serde_json::from_slice::<FlushRequest>(&msg.payload).ok();
+    // What: unreadable flush message flushes name ".".
+    // Why: old publishers send no domain field.
     let domain = request.as_ref().map_or(".", |r| r.domain.as_str());
     if let Some(request) = &request
         && let (Some(zone), Some(kind)) = (&request.zone, &request.record_type)

@@ -1497,6 +1497,8 @@ fn chrony_conf(upstreams: &str, cidrs: &str, drift: &str, port: u16) -> Result<S
     if !drift.starts_with('/') || !plain(drift) {
         return Err(format!("NTP_DRIFT_FILE={drift} is no plain absolute path"));
     }
+    // What: step the clock on large early offsets.
+    // Why: containers start with a stale clock.
     let mut conf = format!("driftfile {drift}\nport {port}\nmakestep 1.0 3\nrtcsync\n");
     for entry in servers {
         let kind = if is_ip_literal(entry) {
@@ -1843,6 +1845,8 @@ struct AuthConf<'a> {
 impl AuthConf<'_> {
     fn render(&self) -> String {
         let yes = |on: bool| if on { "yes" } else { "no" };
+        // What: pdns accepts unsigned updates globally.
+        // Why: per-zone TSIG metadata is the real gate.
         format!(
             "local-address={lo},{local}\nlocal-port={auth_port}\nlaunch=gsqlite3\n\
              gsqlite3-database={db}\nprimary={primary}\nsecondary={secondary}\n\
@@ -2004,6 +2008,8 @@ fn checked_files(
             })
             .collect()
     };
+    // What: convert old shell snapshots before use.
+    // Why: an update keeps its rollback targets.
     store.adopt_legacy();
     let fresh = ("new".to_string(), files.to_vec());
     let used = first_good(
@@ -2187,6 +2193,8 @@ fn dns_zones(
     let targets: Vec<String> = notify.iter().map(ToString::to_string).collect();
     for zone in &zones {
         pdnsutil(dir, &["zone", "set-kind", zone, "primary"])?;
+        // What: SOA bump and NOTIFY on API and DDNS writes.
+        // Why: secondaries converge via NOTIFY and AXFR.
         pdnsutil(dir, &["set-meta", zone, "SOA-EDIT-DNSUPDATE", "INCREASE"])?;
         pdnsutil(dir, &["set-meta", zone, "SOA-EDIT-API", "INCREASE"])?;
         pdnsutil(dir, &["set-meta", zone, "NOTIFY-DNSUPDATE", "1"])?;
@@ -2478,6 +2486,8 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
         .map_err(|_| format!("{}={ip} is no IPv4 address", rec.ip_key))?;
     let role = dns_role(&ctx.need("DNS_REPLICATION_ROLE")?)?;
     let knobs = DnsKnobs::load()?;
+    // What: secondary negative TTL = AXFR cycle.
+    // Why: a pre-AXFR miss must not outlive the sync.
     let negative_ttl = if role == DnsRole::Secondary {
         knobs.xfr_cycle
     } else {
@@ -2915,6 +2925,8 @@ fn kea_dhcp4_own(
     });
     hooks.push(serde_json::json!({"library": hook.display().to_string()}));
     dhcp4.insert("hooks-libraries".into(), Value::Array(hooks));
+    // What: set DDNS and threading keys only if absent.
+    // Why: a saved UI choice must survive restarts.
     let defaults = [
         (
             "multi-threading",
@@ -3142,6 +3154,8 @@ fn dnsmasq_line(lines: &mut String, key: &str, values: &[&str], line: String) {
 // Why: values come from the ui settings, then the env.
 // From: Issue #1683 | PR #1912
 fn dnsmasq_conf(set: &dyn Fn(&str) -> String, relay: bool) -> String {
+    // What: DHCP-only dnsmasq: no DNS, no resolv.conf.
+    // Why: avoids port 53 binding conflicts (#485).
     let mut conf = String::from("port=0\nno-resolv\nno-poll\nlog-dhcp\nlog-facility=-\n");
     let upstream = set("UPSTREAM_DHCP_IP");
     if relay {
@@ -3223,6 +3237,8 @@ fn dnsmasq_conf(set: &dyn Fn(&str) -> String, relay: bool) -> String {
              dhcp-boot=tag:lancache-pxe-uefi,{uefi},,{pxe}\n"
         ));
     }
+    // What: inert pxe-service when BIOS is not set.
+    // Why: dnsmasq needs one pxe-service to reply.
     if bios.is_empty() {
         lines.push_str("pxe-service=IA64_EFI,\"lancache-ng PXE proxy active\",0\n");
     }
