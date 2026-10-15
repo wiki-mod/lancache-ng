@@ -24,6 +24,11 @@
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button type="submit" class="{{ button_class }}"{% if title is not none %} title="{{ title }}"{% endif %}>{{ label }}</button>
         </form>{% endcomponent restart_ui_form %}
+{# What: "Kopieren" button; copyText() copies target #}
+{# Why: one markup for setup and Secondary copy buttons #}
+{# From: Issue #1683 | PR #1912 #}
+{% component copy_button(target, extra_class="") %}<button type="button" onclick="copyText('{{ target }}', this)"
+                class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors {{ extra_class }}">Kopieren</button>{% endcomponent copy_button %}
 <!DOCTYPE html>
 <html lang="de" class="h-full">
 <head>
@@ -390,6 +395,52 @@
         reportError(err);
       }
       button.disabled = false;
+    }
+
+    // What: copies an element's text; button shows "Kopiert!"
+    // Why: navigator.clipboard needs a secure context; on
+    //      plain HTTP select the text and use execCommand
+    // From: Issue #1068 | PR #1912
+    function copyText(id, button) {
+      const el = document.getElementById(id);
+      function flash() {
+        button.textContent = 'Kopiert!';
+        button.classList.add('text-green-400');
+        setTimeout(function () {
+          button.textContent = 'Kopieren';
+          button.classList.remove('text-green-400');
+        }, 1500);
+      }
+      function selectAndCopy() {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        // What: on failure report it, keep the text selected
+        // Why: the operator can still copy it with Ctrl+C
+        let ok;
+        try {
+          ok = document.execCommand('copy');
+        } catch (err) {
+          reportError(err);
+          return;
+        }
+        if (!ok) {
+          reportError(new Error('copy: execCommand failed'));
+          return;
+        }
+        sel.removeAllRanges();
+        flash();
+      }
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(el.innerText).then(flash, function (err) {
+          reportError(err);
+          selectAndCopy();
+        });
+      } else {
+        selectAndCopy();
+      }
     }
 
     // What: dock start/stop map; only dhcp is listed

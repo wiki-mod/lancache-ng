@@ -16,7 +16,9 @@
     </p>
   </div>
 
-  <!-- ── Update-Kanal & automatische Updates (#819) ────────────────────────── -->
+  <!-- What: release channel and auto-update form
+       Why: the host convergence timer reads these values
+       From: Issue #819 -->
   <div class="card space-y-4">
     <div>
       <h2 class="font-semibold text-slate-200">Update-Kanal &amp; automatische Updates</h2>
@@ -75,7 +77,6 @@
     </form>
   </div>
 
-  <!-- ── Transparenter Proxy (Router) ─────────────────────────────────────── -->
   <div class="card space-y-4">
     <div>
       <h2 class="font-semibold text-slate-200">Transparenter HTTP-Proxy <span class="ml-2 text-xs font-normal px-2 py-0.5 rounded-full bg-green-500/20 text-green-400">Empfohlen</span></h2>
@@ -90,7 +91,6 @@
       Kein CA-Zertifikat auf den Clients nötig.
     </div>
 
-    <!-- iptables -->
     <div>
       <p class="text-xs font-medium text-slate-400 mb-2">iptables (auf dem Router/Gateway als root ausführen)</p>
       <div class="relative">
@@ -101,15 +101,11 @@ iptables -t nat -A PREROUTING -i LAN_INTERFACE -p tcp --dport 80 \
 # Beim Neustart persistent machen (Debian/Ubuntu)
 apt install iptables-persistent
 netfilter-persistent save</pre>
-        <button onclick="copyEl('cmd-iptables', this)"
-                class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
-          Kopieren
-        </button>
+        {{ <copy_button target="cmd-iptables"/> }}
       </div>
       <p class="text-xs text-slate-500 mt-1"><code class="text-slate-400">LAN_INTERFACE</code> durch das interne Netz-Interface ersetzen (z. B. <code class="text-slate-400">eth1</code>, <code class="text-slate-400">br0</code>).</p>
     </div>
 
-    <!-- nftables -->
     <div>
       <p class="text-xs font-medium text-slate-400 mb-2">nftables (moderner Ersatz für iptables)</p>
       <div class="relative">
@@ -120,28 +116,20 @@ nft add rule ip lancache prerouting \
   iifname "LAN_INTERFACE" tcp dport 80 \
   ip daddr != {{ http_ip }} \
   dnat to {{ http_ip }}:80</pre>
-        <button onclick="copyEl('cmd-nftables', this)"
-                class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
-          Kopieren
-        </button>
+        {{ <copy_button target="cmd-nftables"/> }}
       </div>
     </div>
 
-    <!-- Rückgängig machen -->
     <details class="text-xs text-slate-400">
       <summary class="cursor-pointer hover:text-slate-300">Rückgängig machen (iptables)</summary>
       <div class="relative mt-2">
         <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono" id="cmd-iptables-del">iptables -t nat -D PREROUTING -i LAN_INTERFACE -p tcp --dport 80 \
   ! -d {{ http_ip }} -j DNAT --to-destination {{ http_ip }}:80</pre>
-        <button onclick="copyEl('cmd-iptables-del', this)"
-                class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
-          Kopieren
-        </button>
+        {{ <copy_button target="cmd-iptables-del"/> }}
       </div>
     </details>
   </div>
 
-  <!-- ── Client-seitige Konfiguration ──────────────────────────────────────── -->
   <div class="card space-y-4">
     <div>
       <h2 class="font-semibold text-slate-200">Client-seitige Proxy-Einstellung <span class="ml-2 text-xs font-normal px-2 py-0.5 rounded-full bg-slate-600/50 text-slate-400">Alternativ</span></h2>
@@ -153,61 +141,44 @@ nft add rule ip lancache prerouting \
 
     <div class="grid grid-cols-1 gap-3">
 
-      <!-- apt -->
       <div>
         <p class="text-xs font-medium text-slate-400 mb-1.5">apt (Debian · Ubuntu · Pop!_OS · Mint)</p>
         <div class="relative">
           <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono" id="cmd-apt">echo 'Acquire::http::Proxy "http://{{ http_ip }}/";' \
   | sudo tee /etc/apt/apt.conf.d/01lancache</pre>
-          <button onclick="copyEl('cmd-apt', this)"
-                  class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
-            Kopieren
-          </button>
+          {{ <copy_button target="cmd-apt"/> }}
         </div>
       </div>
 
-      <!-- pacman / yay -->
       <div>
         <p class="text-xs font-medium text-slate-400 mb-1.5">pacman / yay (Arch · CachyOS · Garuda · Manjaro)</p>
         <div class="relative">
           <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono" id="cmd-pacman">echo 'http_proxy=http://{{ http_ip }}' | sudo tee -a /etc/environment
 echo 'https_proxy=http://{{ http_ip }}' | sudo tee -a /etc/environment</pre>
-          <button onclick="copyEl('cmd-pacman', this)"
-                  class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
-            Kopieren
-          </button>
+          {{ <copy_button target="cmd-pacman"/> }}
         </div>
         <p class="text-xs text-slate-500 mt-1">pacman hat keinen eingebauten Proxy — die Env-Variable wird vom Downloader (curl/wget) ausgewertet.</p>
       </div>
 
-      <!-- dnf -->
       <div>
         <p class="text-xs font-medium text-slate-400 mb-1.5">dnf (Fedora · Nobara · AlmaLinux · Rocky)</p>
         <div class="relative">
           <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono" id="cmd-dnf">echo 'proxy=http://{{ http_ip }}' | sudo tee -a /etc/dnf/dnf.conf</pre>
-          <button onclick="copyEl('cmd-dnf', this)"
-                  class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
-            Kopieren
-          </button>
+          {{ <copy_button target="cmd-dnf"/> }}
         </div>
       </div>
 
-      <!-- pip -->
       <div>
         <p class="text-xs font-medium text-slate-400 mb-1.5">pip (Python-Pakete)</p>
         <div class="relative">
           <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono" id="cmd-pip">pip config set global.proxy http://{{ http_ip }}</pre>
-          <button onclick="copyEl('cmd-pip', this)"
-                  class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
-            Kopieren
-          </button>
+          {{ <copy_button target="cmd-pip"/> }}
         </div>
       </div>
 
     </div>
   </div>
 
-  <!-- ── HTTPS-Modus ──────────────────────────────────────────────────────────── -->
   <div class="card space-y-4">
     <div>
       <h2 class="font-semibold text-slate-200">HTTPS-Modus ({{ https_ip }}) — auch HTTPS cachen</h2>
@@ -225,10 +196,7 @@ sudo update-ca-certificates
 
 # Arch / CachyOS / Garuda (trust-store)
 sudo trust anchor --store {{ ca_cert_file }}</pre>
-        <button onclick="copyEl('cmd-ca-linux', this)"
-                class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
-          Kopieren
-        </button>
+        {{ <copy_button target="cmd-ca-linux"/> }}
       </div>
       <p class="text-xs text-slate-500 mt-2">
         Vollständige Anleitung für alle Betriebssysteme:
@@ -237,7 +205,9 @@ sudo trust anchor --store {{ ca_cert_file }}</pre>
     </div>
   </div>
 
-  <!-- ── Admin-UI neu starten (#1486) ──────────────────────────────────────── -->
+  <!-- What: Admin UI restart card
+       Why: restarts only the UI container
+       From: Issue #1486 -->
   <div class="card space-y-4">
     <div>
       <h2 class="font-semibold text-slate-200">Admin-UI neu starten</h2>
@@ -253,26 +223,4 @@ sudo trust anchor --store {{ ca_cert_file }}</pre>
   </div>
 
 </div>
-{% endblock %}
-
-{% block scripts %}
-<script>
-function copyEl(id, btn) {
-  const text = document.getElementById(id).innerText;
-  navigator.clipboard.writeText(text).then(() => {
-    const orig = btn.textContent;
-    btn.textContent = 'Kopiert!';
-    btn.classList.add('text-green-400');
-    setTimeout(() => { btn.textContent = orig; btn.classList.remove('text-green-400'); }, 1800);
-  }).catch(() => {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed'; ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
-  });
-}
-</script>
 {% endblock %}
