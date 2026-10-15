@@ -1210,7 +1210,9 @@ ci_cmd_plan_matrix() {
                 promote=false
                 while IFS= read -r t; do
                     [ -n "${t}" ] || continue
-                    _ci_promote_all_current "${t}" "${cand}" || { promote=true; break; }
+                    rc=0; _ci_promote_all_current "${t}" "${cand}" || rc=$?
+                    [ "${rc}" -le 1 ] || return "${rc}"
+                    [ "${rc}" -eq 0 ] || { promote=true; break; }
                 done <<< "${ptargets}"
             fi
         fi
@@ -6042,12 +6044,18 @@ _ci_promote_move() {
     _ci_imagetools_create "${name}:${channel}" "${name}@${digest}" >&2
 }
 
-# What: Default channel readback: the channel's digest.
-# Why: one digest reader; empty output means unknown.
+# What: Channel readback; -p digest only, 1 absent.
+# Why: one digest reader; -p lets a new channel read absent.
 # From: Issue #1683
 _ci_channel_readback() {
-    local svc="$1" channel="$2" name digest
+    local probe=0 svc channel name digest
+    if [ "${1:-}" = -p ]; then probe=1; shift; fi
+    svc="$1"; channel="$2"
     name="$(_ci_image_ref "${svc}")" || return 2
+    if [ "${probe}" -eq 1 ]; then
+        _ci_registry_probe "${name}:${channel}"
+        return "$?"
+    fi
     digest="$(_ci_registry_digest "${name}:${channel}")" || return 2
     # What: a channel counts only if every child resolves.
     # Why: a present index with lost children is unpullable.
@@ -6085,20 +6093,28 @@ _ci_index_complete() {
 # Why: One locked section; the caller always unlocks.
 # From: Issue #1683
 _ci_promote_move_all() {
-    local channel="$1" cand="$2" line svc digest seen prev moved=""
+    local channel="$1" cand="$2" line svc digest seen prev moved="" prc
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
         svc="${line%%=*}"; digest="${line#*=}"
-        prev="$(_ci_channel_readback "${svc}" "${channel}")" || prev=""
+        # What: read the earlier digest; absent = first.
+        # Why: an unreadable state cannot be rolled back.
+        # From: Issue #1683 | PR #1912
+        prc=0
+        prev="$(_ci_channel_readback -p "${svc}" "${channel}")" || prc=$?
+        if [ "${prc}" -gt 1 ]; then
+            ci_log "[CI-ERROR-PROMOTE-0024]" "service=\"${svc}\" channel=\"${channel}\" rc=${prc} reason=\"earlier digest unreadable; blocking\""
+            _ci_promote_rollback "${channel}" "${moved}"
+            return 2
+        fi
         if ! _ci_promote_move "${svc}" "${channel}" "${digest}"; then
             ci_log "[CI-ERROR-PROMOTE-0007]" "service=\"${svc}\" channel=\"${channel}\" reason=\"channel ref move failed\""
             _ci_promote_rollback "${channel}" "${moved}"
             return 2
         fi
         moved="${moved}${svc}=${prev}"$'\n'
-        seen="$(_ci_channel_readback "${svc}" "${channel}")" || seen=""
-        if [ -z "${seen}" ]; then
-            ci_log "[CI-ERROR-PROMOTE-0008]" "service=\"${svc}\" channel=\"${channel}\" reason=\"readback unknown; blocking\""
+        if ! seen="$(_ci_channel_readback "${svc}" "${channel}")"; then
+            ci_log "[CI-ERROR-PROMOTE-0008]" "service=\"${svc}\" channel=\"${channel}\" reason=\"readback failed; blocking\""
             _ci_promote_rollback "${channel}" "${moved}"
             return 2
         fi
@@ -6144,15 +6160,19 @@ _ci_promote_stack_complete() {
 }
 
 # What: True if every ref already points at its digest.
-# Why: An idempotent re-run needs no lock or move.
+# Why: A re-run needs no lock or move; rc 2 unknown.
 # From: Issue #1683
 _ci_promote_all_current() {
-    local channel="$1" cand="$2" line svc digest seen
+    local channel="$1" cand="$2" line svc digest seen name rc
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
         svc="${line%%=*}"; digest="${line#*=}"
-        seen="$(_ci_channel_readback "${svc}" "${channel}")" || seen=""
+        rc=0
+        seen="$(_ci_channel_readback -p "${svc}" "${channel}")" || rc=$?
+        [ "${rc}" -le 1 ] || return 2
         [ "${seen}" = "${digest}" ] || return 1
+        name="$(_ci_image_ref "${svc}")" || return 2
+        _ci_index_complete "${name}" "${digest}" || return 2
     done <<< "${cand}"
 }
 
@@ -6166,7 +6186,7 @@ ci_cmd_promote() {
         ci_log "[CI-ERROR-PROMOTE-0002]" "channel=\"${channel}\" reason=\"not a mutable channel or a vX.Y.Z release tag\""
         return 2
     fi
-    local cand
+    local cand arc=0
     if ! cand="$(_ci_stack_candidate --with-toolchain)"; then
         ci_log "[CI-ERROR-PROMOTE-0003]" "channel=\"${channel}\" reason=\"no accepted stack candidate\""
         return 2
@@ -6177,10 +6197,12 @@ ci_cmd_promote() {
         return 2
     fi
     _ci_require_ghcr_auth || return "$?"
-    if _ci_promote_all_current "${channel}" "${cand}"; then
+    _ci_promote_all_current "${channel}" "${cand}" || arc=$?
+    if [ "${arc}" -eq 0 ]; then
         printf 'channel=%s result=already-promoted services=%s\n' "${channel}" "$(printf '%s\n' "${cand}" | grep -c '=')"
         return 0
     fi
+    [ "${arc}" -eq 1 ] || return "${arc}"
     if ! _ci_promote_lock "${channel}"; then
         ci_log "[CI-ERROR-PROMOTE-0010]" "channel=\"${channel}\" reason=\"could not acquire promotion lock\""
         return 2
