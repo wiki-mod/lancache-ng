@@ -118,6 +118,23 @@ ask() {
     REPLY="${REPLY:-$default}"
 }
 
+# What: asks until the answer passes a check function
+# Why: one owner of the ask, check and retry loop
+# From: Issue #1683 | PR #1912
+ask_checked() {
+    local -n _ask_checked_ref="$1"
+    local prompt="$2" default="$3" check="$4" error="$5" optional="${6:-0}" retry_default="$3"
+    [[ "$optional" != 1 ]] || retry_default=""
+    ask "$prompt" "$default"
+    while true; do
+        _ask_checked_ref="$REPLY"
+        [[ "$optional" = 1 && -z "$_ask_checked_ref" ]] && break
+        "$check" "$_ask_checked_ref" && break
+        print_error "${error}: ${_ask_checked_ref}"
+        ask "$prompt" "$retry_default"
+    done
+}
+
 # What: a SOT 0/1 or true/false default as Y or N
 # Why: the SOT owns each default; a prompt only shows it
 # From: Issue #1683 | PR #1912
@@ -364,10 +381,7 @@ secondary_choose_listen_ip() {
 
         suggestion=$(secondary_suggest_alternate_listen_ip "$listen_ip") \
             || (( $? == 1 )) || exit 2
-        ask "Use another Secondary bind IP" "${suggestion:-$listen_ip}"
-        listen_ip="$REPLY"
-        is_valid_ipv4 "$listen_ip" \
-            || { print_error "Invalid IPv4 address: $listen_ip"; continue; }
+        ask_checked listen_ip "Use another Secondary bind IP" "${suggestion:-$listen_ip}" is_valid_ipv4 "Invalid IPv4 address"
     done
 }
 
@@ -1253,10 +1267,10 @@ set_env_key() {
     fi
 }
 
-# What: sets raw value without character validation
-# Why: raw values may contain ${VAR} interpolation
-set_env_assignment() {
-    local key="$1" assignment_value="$2" env_file="$3"
+# What: dies on a bad .env key or a newline in a raw value
+# Why: one owner of the raw-assignment check
+validate_env_assignment() {
+    local key="$1" assignment_value="$2"
     case "$key" in
         ""|*[!A-Za-z0-9_]*|[0-9]*)
             die "Invalid .env key: $key"
@@ -1267,6 +1281,13 @@ set_env_assignment() {
             die "$key contains a newline and cannot be copied into .env."
             ;;
     esac
+}
+
+# What: sets raw value without character validation
+# Why: raw values may contain ${VAR} interpolation
+set_env_assignment() {
+    local key="$1" assignment_value="$2" env_file="$3"
+    validate_env_assignment "$key" "$assignment_value"
 
     if env_key_exists "$key" "$env_file"; then
         rewrite_env_key "$env_file" "$key" "$assignment_value" set
@@ -1316,16 +1337,7 @@ set_env_key_if_empty_or_missing() {
 # Why: raw values keep their interpolation
 append_env_assignment_if_missing() {
     local key="$1" assignment_value="$2" env_file="$3"
-    case "$key" in
-        ""|*[!A-Za-z0-9_]*|[0-9]*)
-            die "Invalid .env key: $key"
-            ;;
-    esac
-    case "$assignment_value" in
-        *$'\n'*)
-            die "$key contains a newline and cannot be copied into .env."
-            ;;
-    esac
+    validate_env_assignment "$key" "$assignment_value"
     # What: appends an assignment verbatim if key is missing
     # Why: keeps ${VAR:-...} interpolation intact
     env_key_exists "$key" "$env_file" \
@@ -1337,13 +1349,21 @@ append_env_assignment_if_missing() {
 # Why: an empty target is a valid, intentional state
 append_env_migrated_assignment_if_missing() {
     local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
-    local source_assignment
 
     # What: keeps an existing empty optional target as is
     # Why: an empty value keeps Compose's fallback alive
     if env_key_exists "$target_key" "$env_file"; then
         return 0
     fi
+
+    env_assign_from_source_or_fallback "$target_key" "$source_key" "$fallback_value" "$env_file"
+}
+
+# What: copies the source assignment, else the fallback
+# Why: one owner of the tail of both migrations
+env_assign_from_source_or_fallback() {
+    local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
+    local source_assignment
 
     source_assignment=$(get_env_assignment_value_raw_nonempty "$source_key" "$env_file") || exit $?
     if [[ -n "$source_assignment" ]]; then
@@ -1359,7 +1379,7 @@ append_env_migrated_assignment_if_missing() {
 # Why: Compose would turn KEY= into an invalid bind mount
 append_required_env_migrated_assignment_if_empty_or_missing() {
     local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
-    local target_assignment source_assignment
+    local target_assignment
 
     # What: keeps a non-empty duplicate target value
     # Why: updates must converge on the operator's real dir
@@ -1369,12 +1389,7 @@ append_required_env_migrated_assignment_if_empty_or_missing() {
         return 0
     fi
 
-    source_assignment=$(get_env_assignment_value_raw_nonempty "$source_key" "$env_file") || exit $?
-    if [[ -n "$source_assignment" ]]; then
-        set_env_assignment "$target_key" "$source_assignment" "$env_file"
-    elif env_key_exists "$target_key" "$env_file" || [[ -n "$fallback_value" ]]; then
-        set_env_key "$target_key" "$fallback_value" "$env_file"
-    fi
+    env_assign_from_source_or_fallback "$target_key" "$source_key" "$fallback_value" "$env_file"
 }
 
 migrate_proxy_security_mode_for_update() {
@@ -1515,6 +1530,26 @@ install_state_root() {
         state=$(legacy_state_root_or_default "$state") || exit $?
     fi
     printf '%s\n' "$state"
+}
+
+# What: the env file, the base .env and the state root
+# Why: backup and the log bundle resolve the same three
+stack_env_context() {
+    local install_dir="$1"
+    local -n _env_ref="$2" _base_env_ref="$3" _state_ref="$4"
+    _env_ref=$(runtime_env_file_for_install_dir "$install_dir")
+    _base_env_ref="$install_dir/.env"
+    _state_ref=$(install_state_root "$install_dir" "$_env_ref") \
+        || die "Cannot resolve the state root of $install_dir (exit $?)."
+}
+
+# What: the resolved stack dir; dies without a compose file
+# Why: backup and the log bundle share the stack lookup
+resolve_stack_dir_checked() {
+    local dir
+    dir=$(resolve_stack_dir "$(realpath -m "$1")") || exit $?
+    [[ -f "$dir/docker-compose.yml" ]] || die_no_stack_found "$dir"
+    printf '%s\n' "$dir"
 }
 
 # What: true for the manual checkout path deploy/prod
@@ -1975,6 +2010,7 @@ rollback_quickstart_migration() {
 # From: Issue #1683 | PR #1858
 write_lancache_systemd_units() {
     local stack_dir="$1" setup_sh="$SCRIPT_DIR/setup.sh" unit_dir
+    local docker_unit="docker.service" timer_target="timers.target"
     unit_dir=$(lancache_sot_value unit_dir runner_host) || exit $?
     # What: units run compose through setup.sh at run time
     # Why: overrides may change after the unit is written
@@ -1983,8 +2019,8 @@ write_lancache_systemd_units() {
     cat > "$unit_dir/$STACK_UNIT" <<EOF || die "Failed to write $STACK_UNIT."
 [Unit]
 Description=LanCache-NG
-After=docker.service
-Requires=docker.service
+After=${docker_unit}
+Requires=${docker_unit}
 
 [Service]
 Type=oneshot
@@ -2004,7 +2040,7 @@ EOF
     cat > "$unit_dir/$CONVERGE_SERVICE_UNIT" <<EOF || die "Failed to write $CONVERGE_SERVICE_UNIT."
 [Unit]
 Description=LanCache-NG Convergence Check
-After=docker.service
+After=${docker_unit}
 
 [Service]
 Type=oneshot
@@ -2022,7 +2058,7 @@ OnUnitActiveSec=5min
 Unit=${CONVERGE_SERVICE_UNIT}
 
 [Install]
-WantedBy=timers.target
+WantedBy=${timer_target}
 EOF
     # What: daily host-side update runs the on-disk setup.sh
     # Why: no container gets Docker socket write access
@@ -2030,8 +2066,8 @@ EOF
     cat > "$unit_dir/$AUTO_UPDATE_SERVICE_UNIT" <<EOF || die "Failed to write $AUTO_UPDATE_SERVICE_UNIT."
 [Unit]
 Description=LanCache-NG Scheduled Automatic Update
-After=docker.service
-Requires=docker.service
+After=${docker_unit}
+Requires=${docker_unit}
 
 [Service]
 Type=oneshot
@@ -2052,7 +2088,7 @@ Persistent=true
 Unit=${AUTO_UPDATE_SERVICE_UNIT}
 
 [Install]
-WantedBy=timers.target
+WantedBy=${timer_target}
 EOF
     systemctl daemon-reload || die "systemctl daemon-reload failed."
 }
@@ -3605,10 +3641,7 @@ backup_manifest() {
     local install_dir="$1" mode="$2"
     local env_file cache_env_file
     local cache_dir state_dir keys key dir sub bundle copy
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    cache_env_file="$install_dir/.env"
-    state_dir=$(install_state_root "$install_dir" "$env_file") \
-        || die "Cannot resolve the state root of $install_dir (exit $?)."
+    stack_env_context "$install_dir" env_file cache_env_file state_dir
     cache_dir=$(get_env_var CACHE_DIR "$env_file") || exit $?
     cache_dir="${cache_dir:-$state_dir/cache}"
 
@@ -3712,6 +3745,15 @@ compose_stack_start() {
         || print_warn "docker compose up failed (exit $?); start it with: $SCRIPT_DIR/setup.sh compose $install_dir up -d"
 }
 
+# What: notes whether the stack ran, then stops it
+# Why: the caller's cleanup trap reads the flags set here
+stop_stack_noting_state() {
+    local install_dir="$1"
+    compose_stack_running "$install_dir" && stack_was_running=1
+    stack_stopped=1
+    compose_stack_stop "$install_dir"
+}
+
 # What: runs docker compose config as a dry-run check
 # Why: catches invalid config before containers restart
 validate_compose_config() {
@@ -3794,6 +3836,16 @@ compose_project_has_named_volumes() {
     [[ -n "$volume_names" ]]
 }
 
+# What: runs a tar script on one volume in the helper image
+# Why: backup and restore share the mounts and the call
+helper_volume_tar() {
+    local volume="$1" root="$2" volume_mode="$3" backup_mode="$4" script="$5"
+    docker run --rm \
+        -v "${volume}:/volume${volume_mode}" \
+        -v "${root}:/backup${backup_mode}" \
+        "$LANCACHE_HELPER_IMAGE" sh -c "$script" sh "$volume"
+}
+
 # What: archives named volumes; cache volume only in full
 # Why: cache payloads can be huge; config backups skip them
 backup_compose_volumes() {
@@ -3813,10 +3865,7 @@ backup_compose_volumes() {
             continue
         fi
         print_ok "Including Docker volume: $volume"
-        docker run --rm \
-            -v "${volume}:/volume:ro" \
-            -v "${volume_root}:/backup" \
-            "$LANCACHE_HELPER_IMAGE" sh -c 'cd /volume && tar -cpf "/backup/$1.tar" .' sh "$volume" \
+        helper_volume_tar "$volume" "$volume_root" ":ro" "" 'cd /volume && tar -cpf "/backup/$1.tar" .' \
             || die "Failed to archive Docker volume $volume (exit $?)."
     done <<< "$volumes"
 }
@@ -3842,10 +3891,7 @@ restore_compose_volumes() {
         print_ok "Restoring Docker volume: $volume"
         docker volume create "$volume" \
             || die "Failed to create Docker volume $volume (exit $?)."
-        docker run --rm \
-            -v "${volume}:/volume" \
-            -v "${volume_root}:/backup:ro" \
-            "$LANCACHE_HELPER_IMAGE" sh -c 'set -e; tar -tf "/backup/$1.tar"; rm -rf /volume/* /volume/..?* /volume/.[!.]*; cd /volume; tar -xpf "/backup/$1.tar"' sh "$volume" \
+        helper_volume_tar "$volume" "$volume_root" "" ":ro" 'set -e; tar -tf "/backup/$1.tar"; rm -rf /volume/* /volume/..?* /volume/.[!.]*; cd /volume; tar -xpf "/backup/$1.tar"' \
             || die "Failed to restore Docker volume $volume from $archive (exit $?). Rerun the restore; the archive is unchanged."
     done <<< "$archives"
 }
@@ -3920,13 +3966,13 @@ cmd_backup() (
         case "$1" in
             --full) mode="full"; shift ;;
             --config) mode="config"; shift ;;
-            --dest) backup_root="${2:?Missing value for --dest}"; shift 2 ;;
+            --dest) require_value "$1" "${2:-}"; backup_root="$2"; shift 2 ;;
             *) install_dir="$1"; shift ;;
         esac
     done
-    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
+    install_dir=$(resolve_stack_dir_checked "$install_dir") || exit $?
     backup_root=$(realpath -m "$backup_root")
-    [[ -f "$install_dir/docker-compose.yml" && -f "$(runtime_env_file_for_install_dir "$install_dir")" ]] \
+    [[ -f "$(runtime_env_file_for_install_dir "$install_dir")" ]] \
         || die_no_stack_found "$install_dir"
     install_missing_tools tar rsync
 
@@ -3976,9 +4022,7 @@ cmd_backup() (
     record_image_revisions "$install_dir" "$dest/image-revisions.txt"
     # What: records whether the stack was running
     # Why: cleanup restarts only a stack that was running
-    compose_stack_running "$install_dir" && stack_was_running=1
-    stack_stopped=1
-    compose_stack_stop "$install_dir"
+    stop_stack_noting_state "$install_dir"
 
     while IFS= read -r path; do
         [[ -e "$path" ]] || continue
@@ -4101,9 +4145,7 @@ cmd_restore() (
 
     # What: records whether the stack was running
     # Why: restore restarts only a stack that was running
-    compose_stack_running "$install_dir" && stack_was_running=1
-    stack_stopped=1
-    compose_stack_stop "$install_dir"
+    stop_stack_noting_state "$install_dir"
 
     print_step "Restoring backup"
     if [[ -d "$root/$rel_install" ]]; then
@@ -4543,6 +4585,15 @@ _proxy_container_publishes_port() {
     return 1
 }
 
+# What: the health path of the SOT PROXY_HEALTH_URL
+# Why: host probes use the one SOT path, not a literal
+proxy_health_path() {
+    local url rest
+    url=$(prod_env_default PROXY_HEALTH_URL) || exit $?
+    rest="${url#*://}"
+    printf '/%s\n' "${rest#*/}"
+}
+
 _verify_healthz_endpoint() {
     local ip="$1" proxy_container_id
 
@@ -4957,9 +5008,8 @@ cmd_update() {
 cmd_compose() {
     local install_dir
     [[ $# -ge 1 ]] || die "Usage: setup.sh compose <install-dir> <compose args>"
-    install_dir=$(resolve_stack_dir "$(realpath -m "$1")")
+    install_dir=$(resolve_stack_dir_checked "$1") || exit $?
     shift
-    [[ -f "$install_dir/docker-compose.yml" ]] || die_no_stack_found "$install_dir"
     stack_compose "$install_dir" "$(runtime_env_file_for_install_dir "$install_dir")" "$@"
 }
 
@@ -5111,12 +5161,26 @@ reconcile_auto_update_timer_state() {
     fi
 }
 
+# What: copies a valid UI setting into .env when it differs
+# Why: channel and DHCP mode share read, check and write
+fold_ui_setting_into_env() {
+    local install_dir="$1" env_file="$2" key="$3" check="$4" label="$5" ui_value current
+    ui_value=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "$key") \
+        || die "Cannot read the UI setting $key (exit $?)."
+    if [[ -n "$ui_value" ]] && "$check" "$ui_value"; then
+        current=$(get_env_var "$key" "$env_file") || exit $?
+        if [[ "$ui_value" != "$current" ]]; then
+            set_env_key "$key" "$ui_value" "$env_file"
+            print_ok "$label updated from Admin UI: ${current:-<unset>} -> $ui_value"
+        fi
+    fi
+}
+
 cmd_converge_reconcile() {
     ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}" env_file
-    local ui_channel ui_auto_update current_channel current_auto_update
+    local ui_auto_update current_auto_update
     local ui_cache_max_gb current_cache_max_gb
-    local ui_dhcp_mode current_dhcp_mode
 
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
     # What: a tick before the first install does nothing
@@ -5135,15 +5199,7 @@ cmd_converge_reconcile() {
         return 0
     fi
 
-    ui_channel=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "LANCACHE_IMAGE_CHANNEL") \
-        || die "Cannot read the UI setting LANCACHE_IMAGE_CHANNEL (exit $?)."
-    if [[ -n "$ui_channel" ]] && lancache_ui_channel_override_is_valid "$ui_channel"; then
-        current_channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$env_file") || exit $?
-        if [[ "$ui_channel" != "$current_channel" ]]; then
-            set_env_key LANCACHE_IMAGE_CHANNEL "$ui_channel" "$env_file"
-            print_ok "Release channel updated from Admin UI: ${current_channel:-<unset>} -> $ui_channel"
-        fi
-    fi
+    fold_ui_setting_into_env "$install_dir" "$env_file" LANCACHE_IMAGE_CHANNEL lancache_ui_channel_override_is_valid "Release channel"
 
     ui_auto_update=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "AUTO_UPDATE_ENABLED") \
         || die "Cannot read the UI setting AUTO_UPDATE_ENABLED (exit $?)."
@@ -5158,15 +5214,7 @@ cmd_converge_reconcile() {
     # What: folds the Admin UI DHCP mode into .env
     # Why: the dhcp container reads DHCP_MODE at its start
     # From: Issue #1683 | PR #1912
-    ui_dhcp_mode=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "DHCP_MODE") \
-        || die "Cannot read the UI setting DHCP_MODE (exit $?)."
-    if [[ -n "$ui_dhcp_mode" ]] && is_valid_dhcp_mode "$ui_dhcp_mode"; then
-        current_dhcp_mode=$(get_env_var DHCP_MODE "$env_file") || exit $?
-        if [[ "$ui_dhcp_mode" != "$current_dhcp_mode" ]]; then
-            set_env_key DHCP_MODE "$ui_dhcp_mode" "$env_file"
-            print_ok "DHCP mode updated from Admin UI: ${current_dhcp_mode:-<unset>} -> $ui_dhcp_mode"
-        fi
-    fi
+    fold_ui_setting_into_env "$install_dir" "$env_file" DHCP_MODE is_valid_dhcp_mode "DHCP mode"
 
     # What: reconciles the timer with .env's value
     # Why: a manual .env edit must also take effect
@@ -5245,13 +5293,15 @@ cmd_debug() {
     if ! command_available curl; then
         print_warn "curl not found — health checks skipped"
     else
-        local ip probe
+        local ip probe health_path url
+        health_path=$(proxy_health_path) || exit $?
         for ip in "$ip_http" "$ip_https"; do
             [[ -z "$ip" ]] && continue
-            if probe=$(curl -sS -f "http://$ip/healthz" 2>&1); then
-                print_ok "http://$ip/healthz — OK: $probe"
+            url="http://${ip}${health_path}"
+            if probe=$(curl -sS -f "$url" 2>&1); then
+                print_ok "$url — OK: $probe"
             else
-                print_error "http://$ip/healthz — ERROR (exit $?): $probe"
+                print_error "$url — ERROR (exit $?): $probe"
             fi
         done
     fi
@@ -5463,21 +5513,16 @@ cmd_create_logs_for_issue() (
     local dest_root="$BACKUP_ROOT"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --dest) dest_root="${2:?Missing value for --dest}"; shift 2 ;;
+            --dest) require_value "$1" "${2:-}"; dest_root="$2"; shift 2 ;;
             *) install_dir="$1"; shift ;;
         esac
     done
-    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
+    install_dir=$(resolve_stack_dir_checked "$install_dir") || exit $?
     dest_root=$(realpath -m "$dest_root")
-    [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die_no_stack_found "$install_dir"
     install_missing_tools tar
 
     local env_file cache_env_file state_dir
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    cache_env_file="$install_dir/.env"
-    state_dir=$(install_state_root "$install_dir" "$env_file") \
-        || die "Cannot resolve the state root of $install_dir (exit $?)."
+    stack_env_context "$install_dir" env_file cache_env_file state_dir
 
     local -a env_files=("$env_file")
     [[ "$cache_env_file" != "$env_file" && -f "$cache_env_file" ]] && env_files+=("$cache_env_file")
@@ -5745,6 +5790,14 @@ kea_ctrl_post() {
     printf '%s\n' "$response"
 }
 
+# What: one dhcp4 command; the config is its arguments
+# Why: config-test, -set and -write share one body shape
+kea_dhcp4_command() {
+    local body="{\"command\":\"$4\",\"service\":[\"dhcp4\"]"
+    [[ $# -lt 5 ]] || body+=",\"arguments\":$5"
+    kea_ctrl_post "$1" "$2" "$3" "${body}}"
+}
+
 # What: host dir of KEA_CONFIG_SNAPSHOT_DIR via the ui mount
 # Why: the UI writes there; the dir is a SOT default
 # From: Issue #1683 | PR #1858
@@ -5828,18 +5881,15 @@ reset_kea_to_last_known_good_config() {
     config_json=$(cat "$snapshot_root/$snapshot_id/dhcp4.json")
 
     print_step "Validating snapshot $snapshot_id (config-test)"
-    kea_ctrl_post "$kea_ctrl_url" "$kea_ctrl_user" "$kea_ctrl_token" \
-        "{\"command\":\"config-test\",\"service\":[\"dhcp4\"],\"arguments\":${config_json}}"
+    kea_dhcp4_command "$kea_ctrl_url" "$kea_ctrl_user" "$kea_ctrl_token" config-test "$config_json"
     print_ok "Snapshot validated."
 
     print_step "Applying snapshot $snapshot_id (config-set)"
-    kea_ctrl_post "$kea_ctrl_url" "$kea_ctrl_user" "$kea_ctrl_token" \
-        "{\"command\":\"config-set\",\"service\":[\"dhcp4\"],\"arguments\":${config_json}}"
+    kea_dhcp4_command "$kea_ctrl_url" "$kea_ctrl_user" "$kea_ctrl_token" config-set "$config_json"
     print_ok "Snapshot applied to the running Kea server."
 
     print_step "Persisting snapshot $snapshot_id (config-write)"
-    kea_ctrl_post "$kea_ctrl_url" "$kea_ctrl_user" "$kea_ctrl_token" \
-        '{"command":"config-write","service":["dhcp4"]}'
+    kea_dhcp4_command "$kea_ctrl_url" "$kea_ctrl_user" "$kea_ctrl_token" config-write
     print_ok "Snapshot persisted to kea-dhcp4.conf."
 
     print_ok "Kea rolled back to known-good snapshot $snapshot_id (validated, applied, and persisted)."
@@ -6091,20 +6141,10 @@ cmd_update_ip() {
 
     print_step "Prompt for new IPs"
 
-    while true; do
-        ask "New HTTP mode IP" "$current_ip_http"
-        new_ip_http="$REPLY"
-        is_valid_ipv4 "$new_ip_http" && break
-        print_error "Invalid IPv4 address: $new_ip_http"
-    done
+    ask_checked new_ip_http "New HTTP mode IP" "$current_ip_http" is_valid_ipv4 "Invalid IPv4 address"
 
     printf "\n"
-    while true; do
-        ask "New HTTPS mode IP" "$current_ip_https"
-        new_ip_https="$REPLY"
-        is_valid_ipv4 "$new_ip_https" && break
-        print_error "Invalid IPv4 address: $new_ip_https"
-    done
+    ask_checked new_ip_https "New HTTPS mode IP" "$current_ip_https" is_valid_ipv4 "Invalid IPv4 address"
 
     require_separate_lan_ips "$new_ip_http" "$new_ip_https"
 
@@ -6175,20 +6215,31 @@ lancache_repo_file_text() {
     curl -fsSL "$raw" || die "Failed to download ${path} from $raw (exit $?)."
 }
 
+# What: dies naming each NAME=VALUE pair with empty value
+# Why: arguments and response fields share the check
+die_if_any_empty() {
+    local message="$1" pair
+    local -a missing=()
+    shift
+    for pair in "$@"; do
+        [[ -n "${pair#*=}" ]] || missing+=("${pair%%=*}")
+    done
+    [[ ${#missing[@]} -eq 0 ]] || die "${message}: ${missing[*]}"
+}
+
 # ── secondary subcommand ──────────────────────────────────────────────────────
 # What: secondary setup consumes primary credentials
 # Why: it must not modify the primary host
 cmd_secondary() {
     local primary="" token="" name="" ip_http="" listen_ip="" ip_https="" listen_ip_https="" rotate=0
     local out http_status response secondary_dir cmd ddns_tsig_key dns_xfr_primary tag_input
-    local -a missing_args
     local nats_url nats_user nats_password consumer_name pdns_api_key
     local response_image_registry response_image_prefix response_image_channel response_image_tag
     local existing_env_file lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
     local explicit_lancache_image_tag keep_known_good_configs
     local preflight_dir preflight_env_file preflight_registry preflight_prefix preflight_channel preflight_env_tag
     local preflight_tag preflight_verified_registry="" preflight_verified_prefix="" preflight_verified_tag=""
-    local missing_fields secondary_env_file compose_out bad_response secondary_compose
+    local secondary_env_file compose_out bad_response secondary_compose
     local channel_words pinned release dns_port
 
     while [[ $# -gt 0 ]]; do
@@ -6243,14 +6294,8 @@ cmd_secondary() {
         esac
     done
 
-    missing_args=()
-    [[ -n "$primary" ]] || missing_args+=("--primary")
-    [[ -n "$token" ]] || missing_args+=("--token")
-    [[ -n "$name" ]] || missing_args+=("--name")
-    [[ -n "$ip_http" ]] || missing_args+=("--ip-http")
-    if [[ ${#missing_args[@]} -gt 0 ]]; then
-        die "Required argument(s) missing: ${missing_args[*]}"
-    fi
+    die_if_any_empty "Required argument(s) missing" \
+        "--primary=$primary" "--token=$token" "--name=$name" "--ip-http=$ip_http"
 
     for cmd in curl docker jq; do
         command_available "$cmd" \
@@ -6394,17 +6439,10 @@ cmd_secondary() {
     response_image_channel=$(json_value .image_channel "$response") || die "$bad_response"
     response_image_tag=$(json_value .image_tag "$response") || die "$bad_response"
 
-    missing_fields=()
-    [[ -n "$nats_url" ]] || missing_fields+=("nats_url")
-    [[ -n "$nats_user" ]] || missing_fields+=("nats_user")
-    [[ -n "$nats_password" ]] || missing_fields+=("nats_password")
-    [[ -n "$consumer_name" ]] || missing_fields+=("consumer_name")
-    [[ -n "$pdns_api_key" ]] || missing_fields+=("pdns_api_key")
-    [[ -n "$ddns_tsig_key" ]] || missing_fields+=("ddns_tsig_key")
-    [[ -n "$dns_xfr_primary" ]] || missing_fields+=("dns_xfr_primary")
-    if [[ ${#missing_fields[@]} -gt 0 ]]; then
-        die "Invalid response from primary server; missing field(s): ${missing_fields[*]}"
-    fi
+    die_if_any_empty "Invalid response from primary server; missing field(s)" \
+        "nats_url=$nats_url" "nats_user=$nats_user" "nats_password=$nats_password" \
+        "consumer_name=$consumer_name" "pdns_api_key=$pdns_api_key" \
+        "ddns_tsig_key=$ddns_tsig_key" "dns_xfr_primary=$dns_xfr_primary"
 
     mkdir -p "$secondary_dir"
 
@@ -6721,12 +6759,7 @@ else
 fi
 printf "\n"
 
-while true; do
-    ask "Server IP (HTTP mode)" "$detected_ip"
-    IP_HTTP="$REPLY"
-    is_valid_ipv4 "$IP_HTTP" && break
-    print_error "Invalid IPv4 address: $IP_HTTP"
-done
+ask_checked IP_HTTP "Server IP (HTTP mode)" "$detected_ip" is_valid_ipv4 "Invalid IPv4 address"
 
 printf "\n"
 printf '  %sSecond LAN IP%s: the HTTPS DNS/proxy address, always required.\n\n' "${BOLD}" "${RESET}"
@@ -6734,12 +6767,7 @@ printf '  %sSecond LAN IP%s: the HTTPS DNS/proxy address, always required.\n\n' 
 # Why: AG-SETUP-001; prod runs dns-https on IP_HTTPS always
 # From: Issue #1683 | PR #1912
 suggested_https="${IP_HTTP%.*}.$((10#${IP_HTTP##*.} + 1))"
-while true; do
-    ask "Second LAN IP (HTTPS mode)" "$suggested_https"
-    IP_HTTPS="$REPLY"
-    is_valid_ipv4 "$IP_HTTPS" && break
-    print_error "Invalid IPv4 address: $IP_HTTPS"
-done
+ask_checked IP_HTTPS "Second LAN IP (HTTPS mode)" "$suggested_https" is_valid_ipv4 "Invalid IPv4 address"
 require_separate_lan_ips "$IP_HTTP" "$IP_HTTPS"
 # What: IP_HTTPS goes on IP_HTTP's device and prefix
 # Why: same link and subnet; no guessed device or mask
@@ -6976,26 +7004,11 @@ if [[ "$DHCP_MODE" = "kea" ]]; then
         print_error "Invalid CIDR: $DHCP_SUBNET"
     done
 
-    while true; do
-        ask "Gateway" "$DHCP_GATEWAY_DEFAULT"
-        DHCP_GATEWAY="$REPLY"
-        is_valid_ipv4 "$DHCP_GATEWAY" && break
-        print_error "Invalid IPv4 address: $DHCP_GATEWAY"
-    done
+    ask_checked DHCP_GATEWAY "Gateway" "$DHCP_GATEWAY_DEFAULT" is_valid_ipv4 "Invalid IPv4 address"
 
-    while true; do
-        ask "IP pool start" "$DHCP_RANGE_START_DEFAULT"
-        DHCP_RANGE_START="$REPLY"
-        is_valid_ipv4 "$DHCP_RANGE_START" && break
-        print_error "Invalid IPv4 address: $DHCP_RANGE_START"
-    done
+    ask_checked DHCP_RANGE_START "IP pool start" "$DHCP_RANGE_START_DEFAULT" is_valid_ipv4 "Invalid IPv4 address"
 
-    while true; do
-        ask "IP pool end" "$DHCP_RANGE_END_DEFAULT"
-        DHCP_RANGE_END="$REPLY"
-        is_valid_ipv4 "$DHCP_RANGE_END" && break
-        print_error "Invalid IPv4 address: $DHCP_RANGE_END"
-    done
+    ask_checked DHCP_RANGE_END "IP pool end" "$DHCP_RANGE_END_DEFAULT" is_valid_ipv4 "Invalid IPv4 address"
 
     print_ok "DHCP enabled in Kea mode — Subnet: $DHCP_SUBNET, Pool: $DHCP_RANGE_START–$DHCP_RANGE_END"
     print_warn "Before Kea is activated, setup will run a non-invasive DHCP discovery preflight."
@@ -7019,50 +7032,22 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
         ask "DHCP subnet start for dnsmasq-proxy" "${DHCP_SUBNET_DEFAULT%/*}"
     done
 
-    while true; do
-        ask "Primary DNS option for proxy-DHCP/PXE clients" "$DHCP_DNS_PRIMARY"
-        DHCP_DNS_PRIMARY="$REPLY"
-        is_valid_ipv4 "$DHCP_DNS_PRIMARY" && break
-        print_error "Invalid IPv4 address: $DHCP_DNS_PRIMARY"
-    done
+    ask_checked DHCP_DNS_PRIMARY "Primary DNS option for proxy-DHCP/PXE clients" "$DHCP_DNS_PRIMARY" is_valid_ipv4 "Invalid IPv4 address"
 
-    while true; do
-        ask "Secondary DNS option for proxy-DHCP/PXE clients" "$DHCP_DNS_SECONDARY"
-        DHCP_DNS_SECONDARY="$REPLY"
-        is_valid_ipv4 "$DHCP_DNS_SECONDARY" && break
-        print_error "Invalid IPv4 address: $DHCP_DNS_SECONDARY"
-    done
+    ask_checked DHCP_DNS_SECONDARY "Secondary DNS option for proxy-DHCP/PXE clients" "$DHCP_DNS_SECONDARY" is_valid_ipv4 "Invalid IPv4 address"
 
-    while true; do
-        ask "Upstream DHCP server IP" "$DHCP_GATEWAY"
-        UPSTREAM_DHCP_IP="$REPLY"
-        is_valid_ipv4 "$UPSTREAM_DHCP_IP" && break
-        print_error "Invalid IPv4 address: $UPSTREAM_DHCP_IP"
-    done
+    ask_checked UPSTREAM_DHCP_IP "Upstream DHCP server IP" "$DHCP_GATEWAY" is_valid_ipv4 "Invalid IPv4 address"
 
     # What: optional relay/proxy options; all skippable
     # Why: a plain Enter still gives a working proxy
     # From: Issue #450
+    boot_filename_error="Invalid boot filename (no whitespace, commas, or other .env-unsafe characters like \$, \`, \", ', \\, #)"
     print_warn "Optional: additional dnsmasq relay/proxy options (router, NTP, domain, PXE/TFTP boot, listen interface, custom options)."
     print_warn "These are delivered only to PXE/network-boot-aware clients via the supplemental ProxyDHCP exchange, never to ordinary DHCP clients -- see docs/dhcp-modes.md."
     if confirm "Configure additional dnsmasq relay/proxy options now? [y/N]" "N"; then
-        ask "Listen interface (blank = listen on all interfaces)" "$DHCP_PROXY_INTERFACE"
-        while true; do
-            DHCP_PROXY_INTERFACE="$REPLY"
-            [[ -z "$DHCP_PROXY_INTERFACE" ]] && break
-            is_valid_dhcp_proxy_interface "$DHCP_PROXY_INTERFACE" && break
-            print_error "Invalid interface name: $DHCP_PROXY_INTERFACE"
-            ask "Listen interface (blank = listen on all interfaces)" ""
-        done
+        ask_checked DHCP_PROXY_INTERFACE "Listen interface (blank = listen on all interfaces)" "$DHCP_PROXY_INTERFACE" is_valid_dhcp_proxy_interface "Invalid interface name" 1
 
-        ask "Router/gateway option, PXE-scoped (blank = skip)" "$DHCP_PROXY_ROUTER"
-        while true; do
-            DHCP_PROXY_ROUTER="$REPLY"
-            [[ -z "$DHCP_PROXY_ROUTER" ]] && break
-            is_valid_ipv4 "$DHCP_PROXY_ROUTER" && break
-            print_error "Invalid IPv4 address: $DHCP_PROXY_ROUTER"
-            ask "Router/gateway option, PXE-scoped (blank = skip)" ""
-        done
+        ask_checked DHCP_PROXY_ROUTER "Router/gateway option, PXE-scoped (blank = skip)" "$DHCP_PROXY_ROUTER" is_valid_ipv4 "Invalid IPv4 address" 1
 
         ask "NTP servers, PXE-scoped, comma-separated (blank = skip)" "$DHCP_NTP_SERVERS"
         while true; do
@@ -7082,33 +7067,12 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
             ask "NTP servers, PXE-scoped, comma-separated (blank = skip)" ""
         done
 
-        ask "Domain option, PXE-scoped (blank = skip)" "$DHCP_PROXY_DOMAIN"
-        while true; do
-            DHCP_PROXY_DOMAIN="$REPLY"
-            [[ -z "$DHCP_PROXY_DOMAIN" ]] && break
-            is_valid_dhcp_proxy_domain "$DHCP_PROXY_DOMAIN" && break
-            print_error "Invalid domain name: $DHCP_PROXY_DOMAIN"
-            ask "Domain option, PXE-scoped (blank = skip)" ""
-        done
+        ask_checked DHCP_PROXY_DOMAIN "Domain option, PXE-scoped (blank = skip)" "$DHCP_PROXY_DOMAIN" is_valid_dhcp_proxy_domain "Invalid domain name" 1
 
-        ask "PXE boot filename (blank = skip PXE boot info)" "$DHCP_PROXY_BOOT_FILENAME"
-        while true; do
-            DHCP_PROXY_BOOT_FILENAME="$REPLY"
-            [[ -z "$DHCP_PROXY_BOOT_FILENAME" ]] && break
-            is_valid_dhcp_proxy_boot_filename "$DHCP_PROXY_BOOT_FILENAME" && break
-            print_error "Invalid boot filename (no whitespace, commas, or other .env-unsafe characters like \$, \`, \", ', \\, #): $DHCP_PROXY_BOOT_FILENAME"
-            ask "PXE boot filename (blank = skip PXE boot info)" ""
-        done
+        ask_checked DHCP_PROXY_BOOT_FILENAME "PXE boot filename (blank = skip PXE boot info)" "$DHCP_PROXY_BOOT_FILENAME" is_valid_dhcp_proxy_boot_filename "$boot_filename_error" 1
 
         if [[ -n "$DHCP_PROXY_BOOT_FILENAME" ]]; then
-            ask "PXE boot server address (blank = this host's own address)" "$DHCP_PROXY_BOOT_SERVER"
-            while true; do
-                DHCP_PROXY_BOOT_SERVER="$REPLY"
-                [[ -z "$DHCP_PROXY_BOOT_SERVER" ]] && break
-                is_valid_ipv4 "$DHCP_PROXY_BOOT_SERVER" && break
-                print_error "Invalid IPv4 address: $DHCP_PROXY_BOOT_SERVER"
-                ask "PXE boot server address (blank = this host's own address)" ""
-            done
+            ask_checked DHCP_PROXY_BOOT_SERVER "PXE boot server address (blank = this host's own address)" "$DHCP_PROXY_BOOT_SERVER" is_valid_ipv4 "Invalid IPv4 address" 1
         else
             DHCP_PROXY_BOOT_SERVER=""
         fi
@@ -7120,33 +7084,12 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     # Why: without pxe-service dnsmasq never replies
     print_warn "Optional: PXE boot-pointer support. This makes dnsmasq start REPLYING to every PXE-tagged client on this segment, pointing them at an EXISTING external PXE/TFTP boot server -- lancache-ng does not host boot files itself. See docs/dhcp-modes.md."
     if confirm "Configure PXE boot-pointer support now? [y/N]" "N"; then
-        ask "External PXE/TFTP boot server address (blank = skip PXE boot-pointer support)" "$DHCP_PROXY_PXE_BOOT_SERVER"
-        while true; do
-            DHCP_PROXY_PXE_BOOT_SERVER="$REPLY"
-            [[ -z "$DHCP_PROXY_PXE_BOOT_SERVER" ]] && break
-            is_valid_ipv4 "$DHCP_PROXY_PXE_BOOT_SERVER" && break
-            print_error "Invalid IPv4 address: $DHCP_PROXY_PXE_BOOT_SERVER"
-            ask "External PXE/TFTP boot server address (blank = skip PXE boot-pointer support)" ""
-        done
+        ask_checked DHCP_PROXY_PXE_BOOT_SERVER "External PXE/TFTP boot server address (blank = skip PXE boot-pointer support)" "$DHCP_PROXY_PXE_BOOT_SERVER" is_valid_ipv4 "Invalid IPv4 address" 1
 
         if [[ -n "$DHCP_PROXY_PXE_BOOT_SERVER" ]]; then
-            ask "BIOS (legacy x86PC) boot filename (blank = skip BIOS clients)" "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS"
-            while true; do
-                DHCP_PROXY_PXE_BOOT_FILENAME_BIOS="$REPLY"
-                [[ -z "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" ]] && break
-                is_valid_dhcp_proxy_boot_filename "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" && break
-                print_error "Invalid boot filename (no whitespace, commas, or other .env-unsafe characters like \$, \`, \", ', \\, #): $DHCP_PROXY_PXE_BOOT_FILENAME_BIOS"
-                ask "BIOS (legacy x86PC) boot filename (blank = skip BIOS clients)" ""
-            done
+            ask_checked DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "BIOS (legacy x86PC) boot filename (blank = skip BIOS clients)" "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" is_valid_dhcp_proxy_boot_filename "$boot_filename_error" 1
 
-            ask "UEFI (x86-64/ARM64) boot filename (blank = skip UEFI clients)" "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI"
-            while true; do
-                DHCP_PROXY_PXE_BOOT_FILENAME_UEFI="$REPLY"
-                [[ -z "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" ]] && break
-                is_valid_dhcp_proxy_boot_filename "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" && break
-                print_error "Invalid boot filename (no whitespace, commas, or other .env-unsafe characters like \$, \`, \", ', \\, #): $DHCP_PROXY_PXE_BOOT_FILENAME_UEFI"
-                ask "UEFI (x86-64/ARM64) boot filename (blank = skip UEFI clients)" ""
-            done
+            ask_checked DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "UEFI (x86-64/ARM64) boot filename (blank = skip UEFI clients)" "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" is_valid_dhcp_proxy_boot_filename "$boot_filename_error" 1
 
             if pxe_boot_pointer_answers_are_complete "$DHCP_PROXY_PXE_BOOT_SERVER" "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI"; then
                 print_ok "PXE boot-pointer support configured (external boot server: $DHCP_PROXY_PXE_BOOT_SERVER)."
@@ -7166,19 +7109,9 @@ elif [[ "$DHCP_MODE" = "dnsmasq-relay" ]]; then
     print_warn "dnsmasq-relay forwards every client's DHCP request to an upstream DHCP server on another segment."
     print_warn "The upstream server owns the whole lease and every option; LanCache injects nothing of its own here."
 
-    while true; do
-        ask "This relay's own IP on the client-facing network (giaddr)" ""
-        DHCP_RELAY_LOCAL_ADDR="$REPLY"
-        is_valid_ipv4 "$DHCP_RELAY_LOCAL_ADDR" && break
-        print_error "Invalid IPv4 address: $DHCP_RELAY_LOCAL_ADDR"
-    done
+    ask_checked DHCP_RELAY_LOCAL_ADDR "This relay's own IP on the client-facing network (giaddr)" "" is_valid_ipv4 "Invalid IPv4 address"
 
-    while true; do
-        ask "Upstream DHCP server IP" "$DHCP_GATEWAY"
-        UPSTREAM_DHCP_IP="$REPLY"
-        is_valid_ipv4 "$UPSTREAM_DHCP_IP" && break
-        print_error "Invalid IPv4 address: $UPSTREAM_DHCP_IP"
-    done
+    ask_checked UPSTREAM_DHCP_IP "Upstream DHCP server IP" "$DHCP_GATEWAY" is_valid_ipv4 "Invalid IPv4 address"
 
     print_ok "DHCP relay mode enabled — relaying ${DHCP_RELAY_LOCAL_ADDR} -> upstream ${UPSTREAM_DHCP_IP}"
 else
