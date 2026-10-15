@@ -371,8 +371,8 @@ impl Config {
             // What: missed watchdog cycles before stale.
             // Why: one owner with the restart rule.
             watchdog_miss_limit: knob("RESTART_AFTER", u32::MAX.into(), OutOfRange::Reject)? as u32,
-            // What: switch for the security headers; unset stops start.
-            // Why: compose owns the value; no Rust default exists.
+            // What: security headers switch; unset fails.
+            // Why: compose owns the value; no Rust default.
             security_headers_enabled: need_flag("UI_SECURITY_HEADERS")?,
             hsts_mode: hsts_mode_from(&text("UI_HSTS_MODE", "")),
             ui_logs_max_entries: knob("UI_LOGS_MAX_ENTRIES", u64::MAX, OutOfRange::Reject)?
@@ -407,7 +407,7 @@ impl Config {
             any_bind: config::any_bind(env)?,
             ca_cert_file: need("CA_CERT_FILE")?,
             // What: switch for dev mode; unset stops start.
-            // Why: compose owns the value; no Rust default exists.
+            // Why: compose owns the value; no Rust default.
             dev_mode: need_flag("LANCACHE_DEV_MODE")?,
             syslog_log_root: need("SYSLOG_LOG_ROOT")?,
             syslog_max_gb: read(config::SYSLOG_MAX_GB)? as u32,
@@ -1310,7 +1310,7 @@ const MIB: u64 = 1_048_576;
 const GIB: u64 = 1_073_741_824;
 
 // What: size of an allowed directory in GiB, 0 if refused.
-// Why: the shared tree walk sums it; links are not followed.
+// Why: the shared tree walk sums it; no links.
 fn du_gb(path: &str) -> f64 {
     if !path_allowed(path) {
         return 0.0;
@@ -6081,7 +6081,7 @@ fn callout_xkey(cfg: &Config) -> Result<XKey, String> {
 // Why: the protected layer owns auth and CSRF.
 fn router(state: Arc<AppState>) -> Router {
     // What: routes outside the login layer.
-    // Why: probes, tokens and icons need no browser session.
+    // Why: probes, tokens, icons need no browser session.
     let public: Vec<(&str, MethodRouter<Arc<AppState>>)> = vec![
         (ROUTE_HEALTH, get(health)),
         (ROUTE_SECONDARY_REGISTER, post(register_secondary)),

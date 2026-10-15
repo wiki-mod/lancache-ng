@@ -110,7 +110,7 @@ pub struct Df {
     pub used_pct: u32,
 }
 
-// What: figures from statvfs of the path; None on any failure.
+// What: figures from statvfs; None on any failure.
 // Why: std has no statvfs; used percent rounds up.
 pub fn df(path: &Path) -> Option<Df> {
     let stat = rustix::fs::statvfs(path).ok()?;
@@ -167,8 +167,8 @@ pub fn run_program(
                     break status;
                 }
                 if std::time::Instant::now() >= deadline {
-                    // What: the readers are left to end on their own.
-                    // Why: a grandchild may hold the pipes open.
+                    // What: readers end on their own.
+                    // Why: a grandchild may hold pipes.
                     let killed = child.kill().map_err(|e| failed("cannot kill", &e));
                     child.wait().map_err(|e| failed("cannot wait", &e))?;
                     killed?;
@@ -197,7 +197,7 @@ pub fn run_program(
 }
 
 // What: send SIGTERM to one process.
-// Why: std kills with SIGKILL only; a daemon flushes on TERM.
+// Why: std kills with SIGKILL; a daemon needs TERM.
 // From: Issue #1683 | PR #1912
 pub fn terminate(pid: u32) -> io::Result<()> {
     let pid = i32::try_from(pid)
@@ -1780,7 +1780,7 @@ mod tests {
         assert!(!ct_eq("secret-key", "different-key"));
         assert!(!ct_eq("short", "muchlongerkey") && !ct_eq("", "x"));
         // What: longer or shorter values never match.
-        // Why: a prefix of the secret must not authenticate.
+        // Why: a secret prefix must not authenticate.
         assert!(!ct_eq("secret-keyX", "secret-key") && !ct_eq("secret-ke", "secret-key"));
         assert!(!ct_eq("x", ""));
     }
@@ -1831,7 +1831,7 @@ mod tests {
     }
 
     // What: run_program returns output, errors and kills.
-    // Why: callers map the exit; a hang must end at the limit.
+    // Why: callers map the exit; a hang ends at the limit.
     // From: Issue #1683 | PR #1912
     #[test]
     fn run_program_maps_output_failure_and_timeout() {
@@ -1852,7 +1852,7 @@ mod tests {
         );
     }
 
-    // What: terminate sends SIGTERM; own sets owner and mode.
+    // What: terminate sends TERM; own sets owner, mode.
     // Why: a stop must be a TERM; a key must get its mode.
     // From: Issue #1683 | PR #1912
     #[test]
@@ -2338,7 +2338,7 @@ mod tests {
         assert!(closed.is_err());
     }
 
-    // What: key type, subject and days of the test certificates.
+    // What: key type, subject and days of test certs.
     // Why: one spec; the tests build a real CA and leaf.
     // From: Issue #1683 | PR #1912
     fn test_spec(subject: &str) -> CertSpec<'_> {

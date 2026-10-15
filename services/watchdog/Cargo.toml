@@ -25,8 +25,8 @@ dhcproto = { workspace = true }
 liblzma = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
-# What: rusqlite with the bundled SQLite, from the workspace.
-# Why: creates pdns.sqlite3 from the schema; no sqlite3 binary.
+# What: rusqlite with bundled SQLite, from the workspace.
+# Why: creates pdns.sqlite3 from schema; no sqlite3 binary.
 # From: Issue #1683 | PR #1912
 rusqlite = { workspace = true }
 serde = { workspace = true }

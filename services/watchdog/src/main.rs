@@ -133,7 +133,7 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
 }
 
 // What: typed Docker health plus watchdog's own outcomes.
-// Why: restarts use Healthy/Unhealthy; alerts use is_alert_ok.
+// Why: restarts use Healthy/Unhealthy; alerts is_alert_ok.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Reading {
     Healthy,
@@ -1073,7 +1073,7 @@ impl Kind {
     }
 
     // What: whether this kind should run right now.
-    // Why: ui sets NTP, DHCP; only a primary runs nats-server, soa.
+    // Why: ui sets NTP, DHCP; a primary runs nats, soa.
     // From: Issue #1437 | PR #1912
     fn wanted(self, ctx: &Ctx) -> bool {
         let secondary = || env_opt("DNS_REPLICATION_ROLE").as_deref() == Some("secondary");
@@ -1498,7 +1498,7 @@ fn chrony_conf(upstreams: &str, cidrs: &str, drift: &str, port: u16) -> Result<S
         return Err(format!("NTP_DRIFT_FILE={drift} is no plain absolute path"));
     }
     // What: step on large early offsets; sync the RTC.
-    // Why: stale start clock; the kernel copies time to the RTC.
+    // Why: stale start clock; kernel copies time to RTC.
     let mut conf = format!("driftfile {drift}\nport {port}\nmakestep 1.0 3\nrtcsync\n");
     for entry in servers {
         let kind = if is_ip_literal(entry) {
@@ -2064,8 +2064,8 @@ fn pdns_config_dir(dir: &Path) -> String {
     format!("--config-dir={}", dir.display())
 }
 
-// What: the side-effect-free config check of a pdns program.
-// Why: the auth and the recursor checks differ by name only.
+// What: the side-effect-free config check of pdns.
+// Why: the auth and recursor checks differ by name only.
 // From: Issue #1683 | PR #1912
 fn pdns_check(program: &str, config_dir: &str) -> [String; 3] {
     [program.into(), "--config=check".into(), config_dir.into()]
@@ -2895,7 +2895,7 @@ fn kea_dhcp4_first(ctx: &Ctx, kea: &KeaKnobs) -> Result<Value, String> {
     }))
 }
 
-// What: force socket, hook, logs; default DDNS keys if absent.
+// What: force socket, hook, logs; default DDNS keys.
 // Why: socket, hook, logs must match the image.
 // From: Issue #815 | PR #1912
 fn kea_dhcp4_own(
@@ -3157,7 +3157,8 @@ fn dnsmasq_line(lines: &mut String, key: &str, values: &[&str], line: String) {
 // From: Issue #1683 | PR #1912
 fn dnsmasq_conf(set: &dyn Fn(&str) -> String, relay: bool, log_dhcp: bool) -> String {
     // What: DHCP-only dnsmasq: no DNS, no resolv.conf.
-    // Why: avoids port 53 binding conflicts (#485).
+    // Why: avoids port 53 binding conflicts.
+    // From: Issue #485
     let mut conf = String::from("port=0\nno-resolv\nno-poll\nlog-facility=-\n");
     // What: option logging follows the DHCP logging switch.
     // Why: every service has one switch; log-dhcp is extra.
@@ -3457,7 +3458,7 @@ fn nginx_refuse(loopback: &str) -> String {
 // Why: the protocol fixes it; it is no deployment value.
 const NGINX_DISCARD_PORT: u16 = 9;
 
-// What: loopback ports and relay timeouts of the https server.
+// What: loopback ports and relay timeouts of https.
 // Why: the SOT owns them; dispatch and listens use them.
 // From: Issue #1683 | PR #1912
 #[derive(Clone, Copy, Default)]
@@ -3485,7 +3486,7 @@ impl NginxPorts {
 }
 
 // What: stream.d paths of the two rendered nginx files.
-// Why: the render and the backfill list name the same files.
+// Why: the render and backfill list name the same files.
 // From: Issue #1683 | PR #1912
 const NGINX_STREAM_TARGETS: &str = "stream.d/00-stream-targets.conf";
 const NGINX_HTTPS_DISPATCH: &str = "stream.d/01-https-dispatch.conf";
@@ -4077,9 +4078,6 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
                     value("CACHE_MAX_SIZE")?,
                     value("CACHE_MIN_FREE")?,
                     value("CACHE_INACTIVE")?,
-                    value("NGINX_PASSTHROUGH_PORT")?,
-                    value("NGINX_UPSTREAM_CONNECT_TIMEOUT")?,
-                    value("NGINX_UPSTREAM_IDLE_TIMEOUT")?,
                     ("NGINX_UPSTREAM_RESOLVER", resolver),
                     ("NGINX_DIR", dir.display().to_string()),
                     ("NGINX_CACHE_DIR", ctx.need("NGINX_CACHE_DIR")?),
@@ -4135,7 +4133,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         "nginx.json",
         "proxy",
     );
-    // What: backfill takes dispatch and listen from this render.
+    // What: backfill takes dispatch, listen from here.
     // Why: a snapshot without them gets the current files.
     // From: Issue #1683 | PR #1912
     checked_files(
@@ -4164,7 +4162,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
 }
 
 // What: DHCP client and server UDP ports (RFC 2131).
-// Why: the protocol fixes both ports; the probe is a client.
+// Why: the protocol fixes both ports; probe is a client.
 const DHCP_CLIENT_PORT: u16 = 68;
 const DHCP_SERVER_PORT: u16 = 67;
 
@@ -4173,7 +4171,7 @@ const DHCP_SERVER_PORT: u16 = 67;
 // From: Issue #1683 | PR #1912
 struct ProbeTiming {
     // What: how long offers are collected after a DISCOVER.
-    // Why: several servers answer; the first offer is not all.
+    // Why: several servers answer; first offer is not all.
     window: Duration,
     // What: how long the REQUEST waits for an ACK or NAK.
     // Why: a silent server must not block the probe.
@@ -4606,7 +4604,7 @@ impl Slot {
     }
 
     // What: start the program or task once.
-    // Why: a failed start sets the backoff for the next try.
+    // Why: a failed start sets the backoff for next try.
     fn start(&mut self, ctx: &Ctx) {
         let name = self.kind.name();
         let run = match self.kind.launch(ctx) {
@@ -5856,7 +5854,7 @@ mod tests {
     }
 
     // What: closed files become .xz; today's stay plain.
-    // Why: syslog-ng still writes today's per-program files.
+    // Why: syslog-ng still writes today's program files.
     #[test]
     fn syslog_files_compress_to_xz_except_today() {
         let root = scratch();

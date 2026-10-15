@@ -1504,7 +1504,7 @@ mod tests {
     }
 
     // What: status and JSON body of a handler reply.
-    // Why: handlers return a Response; tests read both parts.
+    // Why: handlers return a Response; tests read both.
     async fn reply_json(response: Response) -> (StatusCode, Value) {
         let status = response.status();
         let body = axum::body::to_bytes(response.into_body(), 1 << 20)
