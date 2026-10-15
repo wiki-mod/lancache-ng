@@ -3557,13 +3557,6 @@ _ci_registry_login_once() {
     printf '%s' "${!token_var}" | docker login ${registry:+"${registry}"} -u "${!user_var}" --password-stdin
 }
 
-# What: compiled-binary CAS lookup; no store, always a miss.
-# Why: a miss only costs a compile, never a false reuse.
-# From: Issue #1683
-_ci_cas_lookup() {
-    return 1
-}
-
 # What: print a required runner env value; else coded fail.
 # Why: one owner; ${VAR:?} ends with no id or context.
 # From: Issue #1683 | PR #1858
@@ -5123,11 +5116,11 @@ _ci_build_ack() {
 }
 
 # What: Build one target+platform, honoring resolve + reuse.
-# Why: NOOP/reuse/CAS precede compile; UNKNOWN never builds.
+# Why: NOOP/reuse precede compile; UNKNOWN never builds.
 # From: Issue #1683
 _ci_build_one() {
     local service="$1" platform="$2"
-    local resolved action identity state build_type impact ack
+    local resolved action identity state impact ack
     # What: log in before the resolver reads GHCR.
     # Why: an anonymous probe is 403 -> UNKNOWN, no build.
     # From: Issue #1683 | PR #1858
@@ -5136,7 +5129,6 @@ _ci_build_one() {
     action="$(_ci_record_field "${resolved}" action)" || return 2
     identity="$(_ci_record_field "${resolved}" identity)" || return 2
     state="$(_ci_record_field "${resolved}" state)" || return 2
-    build_type="$(ci_service_field "${service}" build_type)" || return 2
 
     case "${action}" in
         noop)
@@ -5189,19 +5181,6 @@ _ci_build_one() {
         return 2
     }
     printf '%s\n' "${ack}"
-
-    # What: reuse a CAS binary before compiling.
-    # Why: an identical binary need not rebuild.
-    # From: Issue #1683
-    if [ "${build_type}" = "rust" ]; then
-        local crc=0
-        _ci_cas_lookup "${identity}" >/dev/null || crc=$?
-        if [ "${crc}" -eq 0 ]; then
-            printf 'service=%s platform=%s result=reuse-binary-cas identity=%s\n' "${service}" "${platform}" "${identity}"
-            return 0
-        fi
-        ci_log "[CI-INFO-BUILD-0018]" "service=\"${service}\" platform=\"${platform}\" identity=\"${identity}\" cas_rc=${crc} reason=\"no CAS binary; compiling\""
-    fi
 
     _ci_require_ghcr_auth || return "$?"
     _ci_docker_build "${service}" "${identity}" "${platform}" || return "$?"
