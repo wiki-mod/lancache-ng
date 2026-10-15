@@ -58,8 +58,8 @@ pub fn loopback() -> Result<String, String> {
 // What: the address that binds on every interface.
 // Why: the SOT owns it as ANY_BIND_IP; no literal.
 // From: Issue #1683 | PR #1912
-pub fn any_bind() -> Result<String, String> {
-    need(&process_env, "ANY_BIND_IP")
+pub fn any_bind(get: &dyn Fn(&str) -> Option<String>) -> Result<String, String> {
+    need(get, "ANY_BIND_IP")
 }
 
 // What: env var as a String; empty counts as unset.

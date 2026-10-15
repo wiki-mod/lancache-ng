@@ -405,7 +405,7 @@ impl Config {
             database_file: need("UI_DATABASE_FILE")?,
             registration_token_file: need("SECONDARY_REGISTRATION_TOKEN_FILE")?,
             listen_port: knob("UI_LISTEN_PORT", u16::MAX.into(), OutOfRange::Reject)? as u16,
-            any_bind: need("ANY_BIND_IP")?,
+            any_bind: config::any_bind(env)?,
             ca_cert_file: need("CA_CERT_FILE")?,
             // What: dev mode is an optional switch, off.
             // Why: the ui gets none; prod stays off.

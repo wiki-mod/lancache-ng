@@ -1798,7 +1798,7 @@ fn soa_knobs() -> Result<(u64, u64, u64), String> {
 fn own_address() -> Result<std::net::Ipv4Addr, String> {
     // What: a connected UDP socket names the route source.
     // Why: connect() sends no packet; no ip tool needed.
-    let any = config::any_bind()?;
+    let any = config::any_bind(&config::process_env)?;
     let target = config::need(&config::process_env, "ROUTE_PROBE_TARGET")?;
     let socket = std::net::UdpSocket::bind((any.as_str(), 0))
         .and_then(|s| s.connect(target.as_str()).map(|()| s))
@@ -2314,7 +2314,7 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
     let data_dir = PathBuf::from(ctx.need("PDNS_DATA_DIR")?);
     let database = pdns_database(&data_dir)?;
     let database = database.display().to_string();
-    let any = config::any_bind()?;
+    let any = config::any_bind(&config::process_env)?;
     let seed = date_serial().to_string();
     let conf = AuthConf {
         any: &any,
@@ -2566,7 +2566,7 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
     }
     log(&format!("{}: RPZ holds {count} records", rec.name));
     let lua_dns = ctx.need("PDNS_LUA_DNS_SCRIPT")?;
-    let any = config::any_bind()?;
+    let any = config::any_bind(&config::process_env)?;
     let loopback = config::loopback()?;
     let conf = RecursorConf {
         loopback: &loopback,
@@ -2671,7 +2671,11 @@ fn nats_subscriber(ctx: &Ctx) -> Result<Run, String> {
         ),
         (
             "DNS_ROLLBACK_LISTEN_ADDR".to_string(),
-            format!("{}:{}", config::any_bind()?, env_port(ROLLBACK_PORT_KEY)?),
+            format!(
+                "{}:{}",
+                config::any_bind(&config::process_env)?,
+                env_port(ROLLBACK_PORT_KEY)?
+            ),
         ),
     ];
     // What: writer's NATS password from the shared file.
@@ -2897,7 +2901,7 @@ fn kea_loggers(loggers: &[(&str, &str)], debuglevel: u64) -> Value {
 fn kea_dhcp4_first(ctx: &Ctx, kea: &KeaKnobs) -> Result<Value, String> {
     let limits = config::LeaseLimits::load(&config::process_env)?;
     let lease = limits.lease(&config::process_env, "DHCP_LEASE_TIME")?;
-    let domain = ctx.need("DHCP_DOMAIN")?;
+    let domain = config::lan_zone(&config::process_env)?;
     let mut options = vec![
         serde_json::json!({"name": "routers", "data": ctx.need("DHCP_GATEWAY")?}),
         serde_json::json!({
@@ -3051,7 +3055,7 @@ fn kea_dhcp4(ctx: &Ctx) -> Result<Run, String> {
             kea.lease_cmds_hook, kea.hooks_root
         )
     })?;
-    let domain = ctx.need("DHCP_DOMAIN")?;
+    let domain = config::lan_zone(&config::process_env)?;
     let ddns = env_opt("DHCP_DDNS_ENABLED")
         .as_deref()
         .and_then(config::parse_bool)
@@ -3123,7 +3127,7 @@ fn kea_ctrl_agent(ctx: &Ctx) -> Result<Run, String> {
     kea_ctrl_fence(&port, &kea)?;
     let conf = serde_json::json!({
         "Control-agent": {
-            "http-host": config::any_bind()?,
+            "http-host": config::any_bind(&config::process_env)?,
             "http-port": port_number,
             "authentication": {
                 "type": "basic",
@@ -3166,7 +3170,7 @@ fn kea_dhcp_ddns(ctx: &Ctx) -> Result<Run, String> {
             },
             "tsig-keys": [{"name": TSIG_NAME, "algorithm": TSIG_ALGORITHM, "secret": tsig}],
             "forward-ddns": {
-                "ddns-domains": [domain(config::canonical_zone(&ctx.need("DHCP_DOMAIN")?))]
+                "ddns-domains": [domain(config::canonical_zone(&config::lan_zone(&config::process_env)?))]
             },
             "reverse-ddns": {"ddns-domains": reverse},
             "loggers": kea_loggers(&[("kea-dhcp-ddns", &kea.log_severity)], kea.log_debuglevel)
