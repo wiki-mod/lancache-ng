@@ -148,7 +148,7 @@ DHCP page.
 | `UPSTREAM_DHCP_IP` | IP of the existing DHCP server (usually your router/gateway) that keeps owning leases. **Documentation only** — see the note below; ProxyDHCP mode does not need to contact this server to function. | `10.0.0.1` |
 | `DHCP_SUBNET_START` | Network base address of the LAN dnsmasq serves. Must end in `.0`. | `10.0.0.0` |
 | `DHCP_DNS_PRIMARY` | Primary DNS server offered to proxy/PXE clients — normally the LanCache NG DNS IP (`IP_HTTP`). | `10.0.0.10` |
-| `DHCP_DNS_SECONDARY` | Secondary DNS server. Leave empty to reuse `DHCP_DNS_PRIMARY`. | `10.0.0.11` |
+| `DHCP_DNS_SECONDARY` | Secondary DNS server. Leave empty to use `IP_HTTPS`. | `10.0.0.11` |
 
 > **A note on `UPSTREAM_DHCP_IP` (issue #450):** an earlier revision of
 > `services/dhcp-proxy/dnsmasq.conf.template` fed this value into dnsmasq's
