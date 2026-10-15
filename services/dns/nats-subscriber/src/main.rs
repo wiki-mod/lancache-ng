@@ -124,6 +124,31 @@ struct Ctx {
 }
 
 impl Ctx {
+    // What: the context from an env reader, times and NATS.
+    // Why: the program and the tests build it one way.
+    // From: Issue #1683 | PR #1912
+    fn load(
+        get: &dyn Fn(&str) -> Option<String>,
+        times: Times,
+        js: jetstream::Context,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            pdns: PowerDns::new(http_client(get)?, need(get, "PDNS_API_KEY")?),
+            times,
+            pdns_auth_url: need(get, "PDNS_AUTH_API_URL")?,
+            pdns_rec_urls: need(get, "PDNS_REC_API_URLS")?
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+            pdns_auth_config_dir: need(get, "PDNS_AUTH_CONFIG_DIR")?,
+            snapshot_dir: PathBuf::from(need(get, "DNS_CONFIG_SNAPSHOT_DIR")?),
+            keep_n: keep_known_good(get)?,
+            lan_zone: lan_zone(get)?,
+            lock: tokio::sync::Mutex::new(()),
+            js,
+        })
+    }
+
     // What: the snapshot store of one dotted zone.
     // Why: every zone has its own directory under zones/.
     fn store(&self, zone: &str) -> SnapshotStore {
@@ -942,14 +967,11 @@ fn required(name: &str) -> String {
 async fn main() {
     let nats_url = required("NATS_URL");
     let consumer_name = required("NATS_CONSUMER");
-    let api_key = required("PDNS_API_KEY");
     // What: only a clear "off" disables record writes.
     // Why: an unknown spelling must keep replication on.
     let record_writes = env_opt("NATS_RECORD_WRITES").is_none_or(|v| parse_bool(&v) != Some(false));
     let reconcile = env_opt("NATS_RECONCILER").is_some_and(|v| parse_bool(&v) == Some(true));
-    let keep_n = keep_known_good(&process_env).unwrap_or_else(|error| die(TAG, &error));
     let times = Times::load(&process_env).unwrap_or_else(|error| die(TAG, &error));
-    let snapshot_dir = required("DNS_CONFIG_SNAPSHOT_DIR");
     let rollback_addr = required("DNS_ROLLBACK_LISTEN_ADDR");
 
     let mut options = async_nats::ConnectOptions::new()
@@ -970,6 +992,7 @@ async fn main() {
         .unwrap_or_else(|e| die(TAG, &format!("failed to connect to NATS: {e}")));
     println!("Connected to NATS at {nats_url}");
     let js = jetstream::new(client);
+    let ctx = Arc::new(Ctx::load(&process_env, times, js).unwrap_or_else(|e| die(TAG, &e)));
 
     // What: a file-backed stream, NATS_DNS_STREAM_MAX_AGE.
     // Why: messages survive a restart; the oldest go first.
@@ -981,7 +1004,8 @@ async fn main() {
         discard: jetstream::stream::DiscardPolicy::Old,
         ..Default::default()
     };
-    let stream = js
+    let stream = ctx
+        .js
         .get_or_create_stream(stream_config)
         .await
         .unwrap_or_else(|e| die(TAG, &format!("failed to create stream: {e}")));
@@ -997,22 +1021,6 @@ async fn main() {
         .unwrap_or_else(|e| die(TAG, &format!("failed to create consumer: {e}")));
     println!("Created durable subscriber: {consumer_name}");
 
-    let http = http_client(&process_env).unwrap_or_else(|e| die(TAG, &e));
-    let ctx = Arc::new(Ctx {
-        pdns: PowerDns::new(http, api_key),
-        times,
-        pdns_auth_url: required("PDNS_AUTH_API_URL"),
-        pdns_rec_urls: required("PDNS_REC_API_URLS")
-            .split_whitespace()
-            .map(str::to_string)
-            .collect(),
-        pdns_auth_config_dir: required("PDNS_AUTH_CONFIG_DIR"),
-        snapshot_dir: PathBuf::from(snapshot_dir),
-        keep_n: keep_n as u32,
-        lan_zone: lan_zone(&process_env).unwrap_or_else(|e| die(TAG, &e)),
-        lock: tokio::sync::Mutex::new(()),
-        js,
-    });
     if reconcile {
         tokio::spawn(reconciler(ctx.clone()));
     }
@@ -1318,21 +1326,18 @@ mod tests {
         let js = jetstream::ContextBuilder::new()
             .timeout(Duration::from_millis(200))
             .build(client);
-        Ctx {
-            pdns: PowerDns::new(
-                http_client(&lancache_ng::test_http_env).unwrap(),
-                "k3y".to_string(),
-            ),
-            times: Times::load(&|_| Some("1".to_string())).expect("times"),
-            pdns_auth_url: format!("{pdns_base}/api/v1/servers/localhost"),
-            pdns_rec_urls: vec![format!("{pdns_base}/rec")],
-            pdns_auth_config_dir: "/no/such/config".to_string(),
-            snapshot_dir: dir,
-            keep_n: 3,
-            lan_zone: "lan".to_string(),
-            lock: tokio::sync::Mutex::new(()),
-            js,
-        }
+        let env = |key: &str| match key {
+            "PDNS_API_KEY" => Some("k3y".to_string()),
+            "PDNS_AUTH_API_URL" => Some(format!("{pdns_base}/api/v1/servers/localhost")),
+            "PDNS_REC_API_URLS" => Some(format!("{pdns_base}/rec")),
+            "PDNS_AUTH_CONFIG_DIR" => Some("/no/such/config".to_string()),
+            "DNS_CONFIG_SNAPSHOT_DIR" => Some(dir.display().to_string()),
+            "KEEP_KNOWN_GOOD_CONFIGS" => Some("3".to_string()),
+            "DHCP_DOMAIN" => Some("lan".to_string()),
+            _ => lancache_ng::test_http_env(key),
+        };
+        let times = Times::load(&|_| Some("1".to_string())).expect("times");
+        Ctx::load(&env, times, js).expect("ctx")
     }
 
     fn zone_export(rrsets: &[Value]) -> Vec<u8> {
