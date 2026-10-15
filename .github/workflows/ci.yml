@@ -169,7 +169,7 @@ jobs:
     # What: contents write for the ci.sh build lock refs.
     # Why: the lock is a ci.sh git ref, no YAML group.
     # From: Issue #1683 | PR #1912
-    permissions:
+    permissions: &ship_write
       actions: read
       contents: write
       packages: write
@@ -379,7 +379,7 @@ jobs:
       credentials: *ghcr_credentials
       volumes:
         - ${{ needs.platform.outputs.validate-dir }}:${{ needs.platform.outputs.validate-dir }}
-    permissions:
+    permissions: &packages_read
       contents: read
       packages: read
     steps:
@@ -401,10 +401,7 @@ jobs:
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['promote'] }}
     container: *bt_platform
-    permissions:
-      actions: read
-      contents: write
-      packages: write
+    permissions: *ship_write
     env:
       CI_STACK_VALIDATED: SUCCESS
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -452,9 +449,7 @@ jobs:
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['project-board'] }}
     container: *bt_platform
-    permissions:
-      contents: read
-      packages: read
+    permissions: *packages_read
     env:
       ISSUE_NUMBER: ${{ github.event.issue.number }}
     steps:
