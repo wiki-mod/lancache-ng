@@ -936,7 +936,7 @@ _ci_fetch_verified() {
         ci_log "[CI-ERROR-FETCH-0001]" "url=\"${url}\" reason=\"pinned sha256 missing or malformed; FAIL CLOSED\""
         return 2
     fi
-    if ! _ci_retry download _ci_http_download "${url}" "${dest}"; then
+    if ! _ci_retry download _ci_http_download "${url}" "${dest}" >&2; then
         ci_log "[CI-ERROR-FETCH-0002]" "url=\"${url}\" reason=\"download failed\""
         _ci_fetch_drop "${dest}"
         return 2
@@ -1020,7 +1020,7 @@ _ci_codeql_run() {
         return 2
     fi
     if ! _ci_retry github-api "${codeql}" github upload-results --repository="${GITHUB_REPOSITORY}" \
-            --ref="${GITHUB_REF}" --commit="${GITHUB_SHA}" --sarif="${work}/result.sarif"; then
+            --ref="${GITHUB_REF}" --commit="${GITHUB_SHA}" --sarif="${work}/result.sarif" >&2; then
         ci_log "[CI-ERROR-CODEQL-0014]" "language=\"${lang}\" reason=\"SARIF upload failed\""
         return 2
     fi
@@ -2411,7 +2411,7 @@ _ci_ref_subject() {
     # Why: shallow breaks the next push; loops retry above.
     # From: Issue #1683 | PR #1912
     if [ "${retry}" = 1 ]; then
-        _ci_retry git git fetch --quiet "${remote}" "${ref}" || return 2
+        _ci_retry git git fetch --quiet "${remote}" "${ref}" >&2 || return 2
     else
         _ci_capture 0 git fetch --quiet "${remote}" "${ref}" || return 2
     fi
@@ -2682,7 +2682,7 @@ _ci_ledger_blob() {
     # What: this fetch has no retry level.
     # Why: op=git uses shared transient-signature truth.
     # From: Issue #1683
-    _ci_retry git git fetch --quiet --depth=1 "${remote}" "${ledger_ref}" || return 2
+    _ci_retry git git fetch --quiet --depth=1 "${remote}" "${ledger_ref}" >&2 || return 2
     local blob
     if ! blob="$(git cat-file -p "FETCH_HEAD:${file}" 2>&1)"; then
         ci_error "[CI-WARN-RESOLVE-0009]" "ref=\"${ledger_ref}\" file=\"${file}\" reason=\"ledger file unreadable; UNKNOWN\"" "${blob}"
@@ -2954,7 +2954,7 @@ _ci_diff_history() {
     [ "${#deep[@]}" -gt 0 ] || [ "${#need[@]}" -gt 0 ] || return 0
     head="$(_ci_head_commit)" || return 2
     remote="$(_ci_git_remote)" || return 2
-    (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch -q --no-tags "${deep[@]}" "${remote}" "${head}" "${need[@]}") || return 2
+    (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch -q --no-tags "${deep[@]}" "${remote}" "${head}" "${need[@]}") >&2 || return 2
 }
 
 # What: This run's base and head diff refs, or empty.
@@ -3686,7 +3686,7 @@ _ci_retry() {
         n=$((n + 1))
         if raw="$("$@" 2>&1)"; then
             [ "${n}" -eq 1 ] || ci_log "[CI-INFO-BUILD-0017]" "op=${op} cmd=\"$1\" attempt=${n}/${max} reason=\"succeeded after retry\""
-            printf '%s\n' "${raw}"
+            [ -z "${raw}" ] || printf '%s\n' "${raw}"
             return 0
         fi
         cls="$(_ci_classify_failure "${raw}" "${op}")"
@@ -5845,7 +5845,7 @@ ci_cmd_channel_checkout() {
         want="${pin}"
     fi
     remote="$(_ci_git_remote)" || return 2
-    (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch -q --no-tags --depth=1 "${remote}" "${want}") || return 2
+    (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch -q --no-tags --depth=1 "${remote}" "${want}") >&2 || return 2
     _ci_run "[CI-ERROR-PROMOTE-0019]" "channel=\"${channel}\" ref=\"${want}\" reason=\"checkout of the fetched source failed\"" \
         git -C "${CI_REPO_ROOT}" checkout -q FETCH_HEAD || return 2
     sha="$(_ci_head_commit)" || return 2
@@ -6712,7 +6712,7 @@ _ci_release_asset_put() {
     local tag="$1" file="$2" repo dir rc=0
     repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
     [ -s "${file}" ] || { ci_log "[CI-ERROR-RELEASE-0004]" "file=\"${file}\" reason=\"asset file missing or empty\""; return 2; }
-    _ci_retry github-api gh release upload "${tag}" "${file}" --repo "${repo}" || return 2
+    _ci_retry github-api gh release upload "${tag}" "${file}" --repo "${repo}" >&2 || return 2
     dir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-asset.XXXXXX")" || return 2
     _ci_release_asset_get "${tag}" "${file##*/}" "${dir}" || rc=$?
     if [ "${rc}" -ne 0 ] || ! cmp -s "${file}" "${dir}/${file##*/}"; then
