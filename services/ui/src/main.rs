@@ -5899,57 +5899,64 @@ fn open_database(path: &str) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
+// What: an NKey from its env seed, else its seed file.
+// Why: one owner for the issuer key and the callout key.
+// From: Issue #1683 | PR #1912
+fn nkey_from_seed<K>(
+    (env, env_seed): (&str, Option<&String>),
+    path: &str,
+    label: &str,
+    new: fn() -> K,
+    from_seed: fn(&str) -> Result<K, nkeys::error::Error>,
+    seed_of: fn(&K) -> Result<String, nkeys::error::Error>,
+) -> Result<K, String> {
+    if let Some(seed) = env_seed {
+        return from_seed(seed).map_err(|e| format!("{env} is not a valid NKey seed: {e}"));
+    }
+    let path = Path::new(path);
+    load_or_create(
+        path,
+        || {
+            let pair = new();
+            // What: a generated key always has a seed.
+            // Why: only a public-only key lacks one.
+            let seed = seed_of(&pair).expect("a generated key has a seed");
+            (seed, pair)
+        },
+        |text| {
+            from_seed(text)
+                .map_err(|e| anyhow::anyhow!("{label} seed at {} is invalid: {e}", path.display()))
+        },
+    )
+    .map_err(|e| format!("{e:#}"))
+}
+
 // What: the issuer key, from its env seed or its file.
 // Why: the public key is needed for the callout fragment.
 // From: Issue #583
 fn issuer_keypair(cfg: &Config) -> Result<KeyPair, String> {
-    if let Some(seed) = &cfg.nats_issuer_seed {
-        return KeyPair::from_seed(seed)
-            .map_err(|e| format!("NATS_ISSUER_SEED is not a valid NKey seed: {e}"));
-    }
-    let path = Path::new(&cfg.nats_issuer_seed_path);
-    load_or_create(
-        path,
-        || {
-            let pair = KeyPair::new_account();
-            // What: a generated key always has a seed.
-            // Why: only a public-only key lacks one.
-            let seed = pair.seed().expect("a generated key has a seed");
-            (seed, pair)
-        },
-        |text| {
-            KeyPair::from_seed(text).map_err(|e| {
-                anyhow::anyhow!("issuer NKey seed at {} is invalid: {e}", path.display())
-            })
-        },
+    nkey_from_seed(
+        ("NATS_ISSUER_SEED", cfg.nats_issuer_seed.as_ref()),
+        &cfg.nats_issuer_seed_path,
+        "issuer NKey",
+        KeyPair::new_account,
+        KeyPair::from_seed,
+        KeyPair::seed,
     )
-    .map_err(|e| format!("{e:#}"))
 }
 
 // What: the callout encryption key, from env seed or file.
 // Why: a separate X25519 key; its rotation is its own.
 // From: Issue #682
 fn callout_xkey(cfg: &Config) -> Result<XKey, String> {
-    if let Some(seed) = &cfg.nats_xkey_seed {
-        return XKey::from_seed(seed)
-            .map_err(|e| format!("NATS_XKEY_SEED is not a valid NKey seed: {e}"));
-    }
-    let path = Path::new(&cfg.nats_xkey_seed_path);
-    load_or_create(
-        path,
-        || {
-            let pair = XKey::new();
-            // What: a generated key always has a seed.
-            // Why: only a public-only key lacks one.
-            let seed = pair.seed().expect("a generated key has a seed");
-            (seed, pair)
-        },
-        |text| {
-            XKey::from_seed(text)
-                .map_err(|e| anyhow::anyhow!("xkey seed at {} is invalid: {e}", path.display()))
-        },
+    nkey_from_seed(
+        ("NATS_XKEY_SEED", cfg.nats_xkey_seed.as_ref()),
+        &cfg.nats_xkey_seed_path,
+        "xkey",
+        XKey::new,
+        XKey::from_seed,
+        XKey::seed,
     )
-    .map_err(|e| format!("{e:#}"))
 }
 
 // What: every route of the ui, public and protected.
