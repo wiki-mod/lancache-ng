@@ -13,9 +13,8 @@ set -euo pipefail
 # =========================================================
 
 # What: Absolute path of this script's directory.
-# Why: Find the SOT manifest regardless of caller CWD.
+# Why: Find the SOT manifest from any CWD; no dirname.
 # From: Issue #1683
-# Note: no dirname; its absence hid a cd failure.
 case "${BASH_SOURCE[0]}" in
     */*) CI_SCRIPT_DIR="$(cd -- "${BASH_SOURCE[0]%/*}" && pwd)" ;;
     *) CI_SCRIPT_DIR="$(pwd)" ;;
@@ -937,7 +936,7 @@ _ci_fetch_verified() {
         ci_log "[CI-ERROR-FETCH-0001]" "url=\"${url}\" reason=\"pinned sha256 missing or malformed; FAIL CLOSED\""
         return 2
     fi
-    if ! _ci_retry download _ci_http_download "${url}" "${dest}" >/dev/null; then
+    if ! _ci_retry download _ci_http_download "${url}" "${dest}"; then
         ci_log "[CI-ERROR-FETCH-0002]" "url=\"${url}\" reason=\"download failed\""
         _ci_fetch_drop "${dest}"
         return 2
@@ -1021,7 +1020,7 @@ _ci_codeql_run() {
         return 2
     fi
     if ! _ci_retry github-api "${codeql}" github upload-results --repository="${GITHUB_REPOSITORY}" \
-            --ref="${GITHUB_REF}" --commit="${GITHUB_SHA}" --sarif="${work}/result.sarif" >/dev/null; then
+            --ref="${GITHUB_REF}" --commit="${GITHUB_SHA}" --sarif="${work}/result.sarif"; then
         ci_log "[CI-ERROR-CODEQL-0014]" "language=\"${lang}\" reason=\"SARIF upload failed\""
         return 2
     fi
@@ -1564,7 +1563,7 @@ _ci_tracked_listing() {
     # Why: ls-tree ignores globs; diff-tree honours them.
     # From: Issue #1683
     if [ -n "${ref}" ]; then
-        empty="$(_ci_identity_git "${root}" "${ref}" hash-object -t tree /dev/null)" || return 2
+        empty="$(printf '' | _ci_identity_git "${root}" "${ref}" hash-object -t tree --stdin)" || return 2
         raw="$(_ci_identity_git "${root}" "${ref}" diff-tree -r --raw "${empty}" "${ref}" -- "${root}")" || return 2
         listing="$(_ci_capture 0 awk -F'\t' "NF { split(\$1, a, \" \"); print \$2 \"\\t\" a[4] }" <<< "${raw}")" || return 2
     else
@@ -2410,7 +2409,7 @@ _ci_ref_subject() {
     # Why: shallow breaks the next push; loops retry above.
     # From: Issue #1683 | PR #1912
     if [ "${retry}" = 1 ]; then
-        _ci_retry git git fetch --quiet "${remote}" "${ref}" >/dev/null || return 2
+        _ci_retry git git fetch --quiet "${remote}" "${ref}" || return 2
     else
         _ci_capture 0 git fetch --quiet "${remote}" "${ref}" || return 2
     fi
@@ -2569,7 +2568,7 @@ _ci_build_lock_drop() {
 # From: Issue #1683 | PR #1912
 _ci_ref_note() {
     local rc=0
-    _ci_cas_ref_sha "$1" "$2" >/dev/null || rc=$?
+    _ci_cas_ref_sha "$1" "$2" >&2 || rc=$?
     [ "${rc}" -eq 0 ] || return "${rc}"
     _ci_ref_subject "$1" "$2" || return 2
 }
@@ -2675,13 +2674,13 @@ _ci_ledger_blob() {
     local remote="$1" rc=0 ledger_ref file
     ledger_ref="$(_ci_variable CI_LEDGER_REF)" || return 2
     file="$(_ci_variable CI_LEDGER_FILE)" || return 2
-    _ci_cas_ref_sha "${remote}" "${ledger_ref}" >/dev/null || rc=$?
+    _ci_cas_ref_sha "${remote}" "${ledger_ref}" >&2 || rc=$?
     [ "${rc}" -eq 1 ] && return 1
     [ "${rc}" -eq 0 ] || return 2
     # What: this fetch has no retry level.
     # Why: op=git uses shared transient-signature truth.
     # From: Issue #1683
-    _ci_retry git git fetch --quiet --depth=1 "${remote}" "${ledger_ref}" >/dev/null || return 2
+    _ci_retry git git fetch --quiet --depth=1 "${remote}" "${ledger_ref}" || return 2
     local blob
     if ! blob="$(git cat-file -p "FETCH_HEAD:${file}" 2>&1)"; then
         ci_error "[CI-WARN-RESOLVE-0009]" "ref=\"${ledger_ref}\" file=\"${file}\" reason=\"ledger file unreadable; UNKNOWN\"" "${blob}"
@@ -2953,8 +2952,7 @@ _ci_diff_history() {
     [ "${#deep[@]}" -gt 0 ] || [ "${#need[@]}" -gt 0 ] || return 0
     head="$(_ci_head_commit)" || return 2
     remote="$(_ci_git_remote)" || return 2
-    (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch -q --no-tags "${deep[@]}" "${remote}" "${head}" "${need[@]}") \
-        > /dev/null || return 2
+    (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch -q --no-tags "${deep[@]}" "${remote}" "${head}" "${need[@]}") || return 2
 }
 
 # What: This run's base and head diff refs, or empty.
@@ -3238,23 +3236,23 @@ _ci_status_apply() {
     if [ "${outcome}" = success ]; then
         [ -n "${open}" ] || { printf 'status=noop label=%s\n' "${label}"; return 0; }
         _ci_run "[CI-ERROR-STATUS-0004]" "${ctx} step=comment issue=${open}" gh issue comment "${open}" --repo "${repo}" \
-            --body "Green again in ${run_url} at ${sha}. Closing; a new issue opens with this label if the case turns red." >/dev/null || return 2
-        _ci_run "[CI-ERROR-STATUS-0005]" "${ctx} step=close issue=${open}" gh issue close "${open}" --repo "${repo}" >/dev/null || return 2
+            --body "Green again in ${run_url} at ${sha}. Closing; a new issue opens with this label if the case turns red." >&2 || return 2
+        _ci_run "[CI-ERROR-STATUS-0005]" "${ctx} step=close issue=${open}" gh issue close "${open}" --repo "${repo}" >&2 || return 2
         printf 'status=closed label=%s issue=%s\n' "${label}" "${open}"
         return 0
     fi
     body="$(_ci_status_body "${scope}" "${run_url}" "${sha}" "${evidence}")" || return 2
     if [ -n "${open}" ]; then
         _ci_run "[CI-ERROR-STATUS-0006]" "${ctx} step=comment issue=${open}" gh issue comment "${open}" --repo "${repo}" \
-            --body "Still red.${body:+$'\n\n'}${body}" >/dev/null || return 2
+            --body "Still red.${body:+$'\n\n'}${body}" >&2 || return 2
         printf 'status=updated label=%s issue=%s\n' "${label}" "${open}"
         return 0
     fi
     color="$(_ci_variable CI_STATUS_LABEL_COLOR)" || return 2
     _ci_run "[CI-ERROR-STATUS-0007]" "${ctx} step=label" gh label create "${label}" --repo "${repo}" --color "${color}" --force \
-        --description "${scope:0:100}" >/dev/null || return 2
+        --description "${scope:0:100}" >&2 || return 2
     _ci_run "[CI-ERROR-STATUS-0008]" "${ctx} step=create" gh issue create --repo "${repo}" --label "${label}" \
-        --title "[${label}] ${scope}" --body "${body}" >/dev/null || return 2
+        --title "[${label}] ${scope}" --body "${body}" >&2 || return 2
     printf 'status=opened label=%s\n' "${label}"
 }
 
@@ -3563,7 +3561,7 @@ _ci_dockerhub_login() {
         ci_log "[CI-ERROR-BUILD-0021]" "reason=\"only one of DOCKERHUB_USERNAME/DOCKERHUB_TOKEN is set\""
         return 2
     fi
-    _ci_retry registry _ci_registry_login_once "" DOCKERHUB_USERNAME DOCKERHUB_TOKEN >/dev/null || return 2
+    _ci_retry registry _ci_registry_login_once "" DOCKERHUB_USERNAME DOCKERHUB_TOKEN >&2 || return 2
     # What: done only after a login or anonymous on purpose.
     # Why: a failed login must fail again, never pass.
     # From: Issue #1683 | PR #1858
@@ -4778,8 +4776,7 @@ ci_cmd_rust_build() {
     # Why: a stub left behind would ship in the real build.
     # From: Issue #1683 | PR #1858
     while IFS= read -r s; do
-        [ -z "${s}" ] || _ci_run "[CI-ERROR-RUSTBUILD-0044]" "file=\"${s}\" reason=\"stub not removed\"" rm -f -- "${s}" \
-            > /dev/null || return 2
+        [ -z "${s}" ] || _ci_run "[CI-ERROR-RUSTBUILD-0044]" "file=\"${s}\" reason=\"stub not removed\"" rm -f -- "${s}" || return 2
     done <<< "${stubs}"
     # What: show ccache stats; a Redis error only warns.
     # Why: binary correct; only cache reuse degraded.
@@ -5459,8 +5456,8 @@ _ci_smoke_service() {
 _ci_image_smoke() {
     local code="$1" service="$2" reason="$3" image="$4" tools="$5" runs="$6" limit grace out t lookup
     local -a tl=()
-    # What: the lookup owner as text for the container shell.
-    # Why: the image has no ci.sh; one owner, no second loop.
+    # What: the lookup owner as text for the container.
+    # Why: the image has no ci.sh; one owner, one loop.
     # From: Issue #1683 | PR #1912
     lookup="$(declare -f _ci_command_path _ci_command_available)"
     limit="$(_ci_variable CI_SMOKE_TIMEOUT)" || return 2
@@ -5735,7 +5732,7 @@ _ci_docker_assemble() {
     for kv; do
         srcs+=("${name}@${kv#*=}")
     done
-    _ci_imagetools_create "${target}" "${srcs[@]}" >/dev/null || return "$?"
+    _ci_imagetools_create "${target}" "${srcs[@]}" >&2 || return "$?"
     _ci_registry_digest "${target}"
 }
 
@@ -5874,7 +5871,7 @@ _ci_valid_channel() {
 _ci_valid_promote_target() {
     local target="$1"
     _ci_valid_channel "${target}" && return 0
-    _ci_release_tag_kind "${target}" >/dev/null
+    _ci_release_tag_kind "${target}" >&2
 }
 
 # What: accepted multi-arch candidate: service=index-digest.
@@ -6042,7 +6039,7 @@ _ci_promote_unlock() {
 _ci_promote_move() {
     local svc="$1" channel="$2" digest="$3" name
     name="$(_ci_image_ref "${svc}")" || return 2
-    _ci_imagetools_create "${name}:${channel}" "${name}@${digest}" >/dev/null
+    _ci_imagetools_create "${name}:${channel}" "${name}@${digest}" >&2
 }
 
 # What: Default channel readback: the channel's digest.
@@ -6076,7 +6073,7 @@ _ci_index_complete() {
     while IFS= read -r child; do
         [ -n "${child}" ] || continue
         prc=0
-        _ci_registry_probe "${base}@${child}" >/dev/null || prc=$?
+        _ci_registry_probe "${base}@${child}" >&2 || prc=$?
         if [ "${prc}" -ne 0 ]; then
             ci_log "[CI-ERROR-PROMOTE-0014]" "image=\"${base}@${digest}\" child=\"${child}\" rc=${prc} reason=\"index child not resolvable; image unusable\""
             return 2
@@ -6348,7 +6345,7 @@ _ci_release_validation_valid() {
     gov="$(_ci_block_entry_list release "" governance_paths)" || return 2
     target="$(_ci_head_commit)" || return 2
     state="${CI_REPO_ROOT}/${rel}"
-    if [ -z "${rel}" ] || [ -z "${gov}" ] || ! jq -e '.subsystem_validation' "${state}" >/dev/null; then
+    if [ -z "${rel}" ] || [ -z "${gov}" ] || ! jq -e '(.subsystem_validation // false) != false' "${state}" >&2; then
         ci_log "[CI-ERROR-RELEASE-0014]" "state=\"${state}\" reason=\"no readable SOT validation record\""
         return 2
     fi
@@ -6693,7 +6690,7 @@ _ci_release_asset_put() {
     local tag="$1" file="$2" repo dir rc=0
     repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
     [ -s "${file}" ] || { ci_log "[CI-ERROR-RELEASE-0004]" "file=\"${file}\" reason=\"asset file missing or empty\""; return 2; }
-    _ci_retry github-api gh release upload "${tag}" "${file}" --repo "${repo}" > /dev/null || return 2
+    _ci_retry github-api gh release upload "${tag}" "${file}" --repo "${repo}" || return 2
     dir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-asset.XXXXXX")" || return 2
     _ci_release_asset_get "${tag}" "${file##*/}" "${dir}" || rc=$?
     if [ "${rc}" -ne 0 ] || ! cmp -s "${file}" "${dir}/${file##*/}"; then
@@ -6749,7 +6746,7 @@ ci_cmd_release_publish() {
         fi
         create=(gh release create "${tag}" --repo "${repo}" --title "${tag}" --notes-file "${body_file}" --target "${sha}")
         [ "${pre}" != true ] || create+=(--prerelease)
-        rc=0; _ci_retry github-api "${create[@]}" > /dev/null || rc=$?
+        rc=0; _ci_retry github-api "${create[@]}" >&2 || rc=$?
         rm -f "${body_file}"
         if [ "${rc}" -ne 0 ]; then
             ci_log "[CI-ERROR-RELEASE-0006]" "tag=\"${tag}\" reason=\"gh release create failed (raw above)\""
@@ -6882,7 +6879,7 @@ _ci_last_release_tag() {
     # What: loads the SOT once before the per-tag subshells
     # Why: each subshell then reuses the parsed manifest
     # From: Issue #1683 | PR #1912
-    _ci_block_entry_field release "" tag_final >/dev/null || return 2
+    _ci_block_entry_field release "" tag_final >&2 || return 2
     # What: keep plain release tags via the one tag grammar.
     # Why: no second tag pattern beside the kind owner.
     # From: Issue #1683 | PR #1858
@@ -6930,9 +6927,9 @@ _ci_push_release_tag() {
     url="${srv}/${repo}.git"
     hdr="http.${url}.extraheader=AUTHORIZATION: basic $(printf '%s' "x-access-token:${pat}" | base64 -w0)"
     _ci_run "[CI-ERROR-RELEASE-0026]" "tag=\"${tag}\" sha=\"${sha}\" reason=\"annotated tag not created\"" \
-        _ci_git_as_bot tag -a "${tag}" "${sha}" -m "Patch release ${tag}" >/dev/null || return 2
+        _ci_git_as_bot tag -a "${tag}" "${sha}" -m "Patch release ${tag}" || return 2
     _ci_run "[CI-ERROR-RELEASE-0027]" "tag=\"${tag}\" url=\"${url}\" reason=\"release tag push failed\"" \
-        git -c "${hdr}" push "${url}" "refs/tags/${tag}" >/dev/null || return 2
+        git -c "${hdr}" push "${url}" "refs/tags/${tag}" || return 2
     # What: the remote tag must peel to the cut commit
     # Why: AG-WF-031: every GitHub write is read back
     # From: Issue #1683 | PR #1858
@@ -7031,7 +7028,7 @@ _ci_gc_roots() {
             [ "${prc}" -eq 0 ] && pairs="${pairs}"$'\n'"${svc}"$'\t'"${dig}"
         done <<<"${produced}"
         # What: each layer cache tag of a target is a root.
-        # Why: §35 cache is live; §77 owns its separate GC.
+        # Why: §35 cache is live; §77 owns its GC.
         # From: Issue #1683 | PR #1912
         local plats plat cref
         plats="$(_ci_platforms "${svc}")" || return 2
@@ -7570,7 +7567,7 @@ _ci_validate_slot_lock() {
         exec 9>"${root}/${key}.lock"
         flock -n 9 || exit 1
         printf 'held\n'
-        exec sleep infinity >/dev/null
+        exec sleep infinity
     }
     holder="${HOLDER_PID}" rfd="${HOLDER[0]}" wfd="${HOLDER[1]}"
     exec {wfd}>&-
@@ -8116,12 +8113,12 @@ _ci_validate_proxy() {
         ci_error "[CI-ERROR-VALIDATE-0012]" "url=\"${url}\" reason=\"missing proxy container IP or probe host\"" "${ip_std}"
         return 2
     fi
-    if ! h1="$(curl -fsS --resolve "${host}:${port}:${ip_std}" -D - -o /dev/null "${url}" 2>&1)"; then
+    if ! h1="$(curl -fsS --resolve "${host}:${port}:${ip_std}" -D - "${url}" 2>&1)"; then
         ci_log "[CI-ERROR-VALIDATE-0013]" "url=\"${url}\" reason=\"proxy MISS request failed\""
         printf 'raw:\n%s\n' "${h1}"
         return 1
     fi
-    if ! h2="$(curl -fsS --resolve "${host}:${port}:${ip_std}" -D - -o /dev/null "${url}" 2>&1)"; then
+    if ! h2="$(curl -fsS --resolve "${host}:${port}:${ip_std}" -D - "${url}" 2>&1)"; then
         ci_log "[CI-ERROR-VALIDATE-0065]" "url=\"${url}\" reason=\"proxy repeat request failed\""
         printf 'raw:\n%s\n' "${h2}"
         return 1
@@ -8200,7 +8197,7 @@ _ci_validate_https_mitm() {
     # Why: raw evidence when the issuer read fails.
     # From: Issue #1683 | PR #1858
     tls_err="$(_ci_mktemp "${CI_TMPDIR}/ci-tls-err.XXXXXX")" || { rm -f "${tmp}"; return 2; }
-    cert="$(openssl s_client -connect "${ip}:${port}" -servername "${domain}" </dev/null 2>"${tls_err}")"
+    cert="$(printf '' | openssl s_client -connect "${ip}:${port}" -servername "${domain}" 2>"${tls_err}")"
     issuer=""
     if [ -n "${cert}" ]; then
         issuer="$(openssl x509 -noout -issuer 2>>"${tls_err}" <<<"${cert}")"
@@ -8297,7 +8294,7 @@ _ci_validate_ui_session() {
     # What: one try; wait_healthy already saw ui healthy.
     # Why: its healthcheck asks the same server; no poll.
     # From: Issue #1683 | PR #1912
-    if ! last="$(curl -fsS -c "${jar}" -o /dev/null "${base}/domains" 2>&1)"; then
+    if ! last="$(curl -fsS -c "${jar}" "${base}/domains" 2>&1)"; then
         ci_error "[CI-ERROR-VALIDATE-0031]" "reason=\"ui /domains did not answer\"" "${last}"
         return 1
     fi
@@ -8607,18 +8604,20 @@ _ci_validate_dns_rollback() {
     # What: one try; dns healthy means the listener accepts.
     # Why: the healthcheck connects to it; no poll.
     # From: Issue #1683 | PR #1912
-    if ! last="$(_ci_curl_secret header "X-API-Key: ${key}" -fsS -o /dev/null "${lbase}/snapshots" 2>&1)"; then
+    if ! last="$(_ci_curl_secret header "X-API-Key: ${key}" -fsS "${lbase}/snapshots" 2>&1)"; then
         ci_error "[CI-ERROR-VALIDATE-0039]" "url=\"${lbase}\" reason=\"rollback listener did not accept\"" "${last}"
         return 1
     fi
-    code="$(_ci_capture 0 curl -sS -o /dev/null -w '%{http_code}' "${lbase}/snapshots")" || return 2
+    resp="$(_ci_capture 0 curl -sS -w '\n%{http_code}' "${lbase}/snapshots")" || return 2
+    code="${resp##*$'\n'}"
     if [ "${code}" != "401" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0040]" "code=\"${code}\" reason=\"/snapshots without X-API-Key not 401\""
+        ci_error "[CI-ERROR-VALIDATE-0040]" "code=\"${code}\" reason=\"/snapshots without X-API-Key not 401\"" "${resp}"
         return 1
     fi
-    code="$(_ci_capture 0 _ci_curl_secret header "X-API-Key: ${key}x" -sS -o /dev/null -w '%{http_code}' "${lbase}/snapshots")" || return 2
+    resp="$(_ci_capture 0 _ci_curl_secret header "X-API-Key: ${key}x" -sS -w '\n%{http_code}' "${lbase}/snapshots")" || return 2
+    code="${resp##*$'\n'}"
     if [ "${code}" != "401" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0041]" "code=\"${code}\" reason=\"/snapshots with wrong X-API-Key not 401\""
+        ci_error "[CI-ERROR-VALIDATE-0041]" "code=\"${code}\" reason=\"/snapshots with wrong X-API-Key not 401\"" "${resp}"
         return 1
     fi
     zone="$(_ci_validate_lan_zone)" || return 2
@@ -8675,7 +8674,7 @@ _ci_validate_dns_rollback() {
 # From: Issue #836
 _ci_validate_new_snapshot() {
     _ci_curl_secret header "X-API-Key: $2" -fsS "$1/snapshots" \
-        | jq -e --arg p "$3" --arg z "$4" '(.zones[$z][0].id // "") as $i | $i != "" and $i != $p' >/dev/null
+        | jq -e --arg p "$3" --arg z "$4" '(.zones[$z][0].id // "") as $i | $i != "" and $i != $p'
 }
 
 # What: http-port or user of the Kea control agent
@@ -8773,7 +8772,7 @@ PROG
     # Why: the healthcheck connects to it; no poll.
     # From: Issue #1683 | PR #1912
     resp="$(_ci_capture 0 _ci_validate_kea_cmd "${kbase}" "${kuser}" "${token}" '{"command":"config-get","service":["dhcp4"]}')" || return 2
-    if ! jq -e '.[0].result == 0' <<< "${resp}" >/dev/null; then
+    if ! jq -e '.[0].result == 0' <<< "${resp}"; then
         ci_error "[CI-ERROR-VALIDATE-0090]" "ip=\"${kip}\" reason=\"Kea control agent config-get did not return result 0\"" "${resp}"
         return 1
     fi
@@ -8795,7 +8794,7 @@ PROG
     snap="$(_ci_validate_kea_add "${ubase}" "${jar}" "${csrf}" "${sid}" "${mac_a}" \
         "$(_ci_int_to_ipv4 $(( base + 2 )))" "${label}-1" "${snaps}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     _ci_validate_kea_add "${ubase}" "${jar}" "${csrf}" "${sid}" "${mac_b}" \
-        "$(_ci_int_to_ipv4 $(( base + 3 )))" "${label}-2" "${snaps}" >/dev/null || { rc=$?; rm -f "${jar}"; return "${rc}"; }
+        "$(_ci_int_to_ipv4 $(( base + 3 )))" "${label}-2" "${snaps}" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     rm -f "${jar}"
     # What: .env.local holds only this run's KEA_* values
     # Why: setup.sh reads a deploy/prod install's .env.local
@@ -8822,7 +8821,7 @@ PROG
 # From: Issue #763 | PR #1858
 _ci_validate_rm_run() {
     _ci_run "[CI-ERROR-VALIDATE-0099]" "container=\"$1\" reason=\"run container not removed\"" \
-        docker rm -f "$1" >/dev/null
+        docker rm -f "$1"
 }
 
 # What: Kea rollback leg on its own run containers.
@@ -8835,7 +8834,7 @@ _ci_validate_kea_rollback() {
     kport="$(_ci_validate_kea_agent http-port)" || return 2
     _ci_run "[CI-ERROR-VALIDATE-0096]" "project=\"${project}\" service=\"dhcp\" reason=\"Kea run container not started\"" \
         _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${kname}" \
-            -e DHCP_MODE=kea dhcp >/dev/null || return $?
+            -e DHCP_MODE=kea dhcp || return $?
     # What: both run containers must be healthy first.
     # Why: healthy means the Kea agent and ui accept.
     # From: Issue #1683 | PR #1912
@@ -8848,7 +8847,7 @@ _ci_validate_kea_rollback() {
         rc=2
     elif _ci_run "[CI-ERROR-VALIDATE-0098]" "project=\"${project}\" service=\"ui\" reason=\"Kea ui run container not started\"" \
         _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${uname}" \
-        -e DHCP_MODE=kea -e "DHCP_API_HOST=${kip}" ui >/dev/null; then
+        -e DHCP_MODE=kea -e "DHCP_API_HOST=${kip}" ui; then
         _ci_validate_wait_cid ui "${uname}" || rc=$?
         [ "${rc}" -ne 0 ] || _ci_validate_kea_round_trip "${project}" "${kip}" "${kport}" "${uname}" || rc=$?
         # What: a failed round trip ships both run logs.
@@ -9050,7 +9049,7 @@ _ci_validate_run() {
 ci_cmd_validate() {
     local cand
     _ci_validate_host_tools || return 2
-    _ci_validate_shared_dir > /dev/null || return 2
+    _ci_validate_shared_dir || return 2
     if ! cand="$(_ci_stack_candidate)"; then
         ci_log "[CI-ERROR-VALIDATE-0001]" "reason=\"no stack candidate (candidate read failed)\""
         return 2
@@ -10192,7 +10191,7 @@ _ci_rh_reap_containers() {
         epoch="$(_ci_rh_epoch "${created}")" || continue
         [ "${epoch}" -lt "${before}" ] || continue
         printf 'reaping hung %s container %s (%s=%s, created %s)\n' "${label}" "${id}" "${field}" "${value}" "${created}"
-        _ci_run "[CI-ERROR-RUNNER-0002]" "container=\"${id}\" reason=\"container not removed\"" docker rm -f "${id}" >/dev/null || rc=2
+        _ci_run "[CI-ERROR-RUNNER-0002]" "container=\"${id}\" reason=\"container not removed\"" docker rm -f "${id}" || rc=2
     done <<< "${rows}"
     return "${rc}"
 }
@@ -10213,7 +10212,7 @@ _ci_rh_reap_networks() {
         epoch="$(_ci_rh_epoch "${created}")" || continue
         [ "${epoch}" -lt "${before}" ] || continue
         printf 'reaping empty network %s (created %s)\n' "${name}" "${created}"
-        _ci_run "[CI-ERROR-RUNNER-0003]" "network=\"${name}\" reason=\"network not removed\"" docker network rm "${name}" >/dev/null || rc=2
+        _ci_run "[CI-ERROR-RUNNER-0003]" "network=\"${name}\" reason=\"network not removed\"" docker network rm "${name}" || rc=2
     done <<< "${names}"
     return "${rc}"
 }
@@ -10229,7 +10228,7 @@ _ci_rh_prune_volumes() {
         [ -n "${vol}" ] || continue
         users="$(_ci_capture 0 docker ps -a --filter "volume=${vol}" -q)" || { rc=2; continue; }
         [ -z "${users}" ] || continue
-        _ci_run "[CI-ERROR-RUNNER-0004]" "volume=\"${vol}\" reason=\"volume not removed\"" docker volume rm "${vol}" >/dev/null || rc=2
+        _ci_run "[CI-ERROR-RUNNER-0004]" "volume=\"${vol}\" reason=\"volume not removed\"" docker volume rm "${vol}" || rc=2
     done <<< "${vols}"
     return "${rc}"
 }
@@ -10654,10 +10653,11 @@ _ci_rh_check() {
         if [ -f "${hooks}/${f}" ]; then printf '  %s/%s: present\n' "${hooks}" "${f}"; else printf '  %s/%s: MISSING\n' "${hooks}" "${f}"; fi
     done
     printf '\n--- %s timer ---\n' "${utim}"
-    if systemctl is-enabled "${utim}.timer" >/dev/null; then
-        printf '  %s.timer: enabled/%s\n' "${utim}" "$(systemctl is-active "${utim}.timer")"
+    local tstate
+    if tstate="$(systemctl is-enabled "${utim}.timer" 2>&1)"; then
+        printf '  %s.timer: %s/%s\n' "${utim}" "${tstate}" "$(systemctl is-active "${utim}.timer")"
     else
-        printf '  %s.timer: not installed\n' "${utim}"
+        printf '  %s.timer: not installed (systemctl: %s)\n' "${utim}" "${tstate}"
     fi
     printf '\n--- Disk usage (%s) ---\n' "${root}"
     _ci_capture 0 df -h "${root}" || return 2
@@ -10804,7 +10804,7 @@ _ci_rh_orphan_homes() {
     out="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0033]" "dir=\"${home}\" reason=\"home search failed\"" _ci_rh_root find "${home}" -mindepth 1 -maxdepth 1 -type d)" || return 2
     while IFS= read -r hd; do
         [ -n "${hd}" ] || continue
-        getent passwd "${hd##*/}" >/dev/null && continue
+        getent passwd "${hd##*/}" >&2 && continue
         if mountpoint -q "${hd}"; then printf 'MOUNTPOINT %s\n' "${hd}"; else printf 'ORPHANED %s\n' "${hd}"; fi
     done <<< "${out}"
 }
@@ -11298,7 +11298,7 @@ _ci_rh_access() {
     dgroup="$(_ci_rh_val docker_group)" || return 2
     if _ci_rh_root test -f "${file}"; then
         cur="$(_ci_capture 0 _ci_rh_root cat "${file}")" || return 2
-        if [ "${cur}" != "${rule}" ] || ! _ci_rh_root visudo -cf "${file}" >/dev/null; then
+        if [ "${cur}" != "${rule}" ] || ! _ci_rh_root visudo -cf "${file}" >&2; then
             ci_log "[CI-ERROR-RUNNER-0066]" "file=\"${file}\" reason=\"exists without exactly the expected rule or fails visudo; fix it by hand\""
             return 2
         fi
@@ -11378,7 +11378,7 @@ _ci_rh_host_prep() {
     root="$(_ci_rh_val opt_root)" || return 2
     rmode="$(_ci_rh_val opt_root_mode)" || return 2
     heavy="$(_ci_rh_val heavy_host_pattern)" || return 2
-    if ! getent passwd "${user}" >/dev/null; then
+    if ! getent passwd "${user}" >&2; then
         ci_log "[CI-ERROR-RUNNER-0079]" "user=\"${user}\" reason=\"runner account does not exist\""
         return 2
     fi
@@ -11622,8 +11622,8 @@ _ci_rh_sccache_fetch() {
     # What: run the staged binaries before any install.
     # Why: a bad or foreign file must not replace tools.
     # From: Issue #1622 | PR #1626
-    _ci_run "[CI-ERROR-RUNNER-0101]" "file=\"${src}/${main_name}\" reason=\"staged binary does not run\"" _ci_rh_root sudo -u "${user}" env HOME="${root}/${user}" "${src}/${main_name}" --version >/dev/null || return 2
-    _ci_run "[CI-ERROR-RUNNER-0102]" "file=\"${src}/${dist_name}\" reason=\"staged binary does not run\"" "${src}/${dist_name}" --help >/dev/null || return 2
+    _ci_run "[CI-ERROR-RUNNER-0101]" "file=\"${src}/${main_name}\" reason=\"staged binary does not run\"" _ci_rh_root sudo -u "${user}" env HOME="${root}/${user}" "${src}/${main_name}" --version || return 2
+    _ci_run "[CI-ERROR-RUNNER-0102]" "file=\"${src}/${dist_name}\" reason=\"staged binary does not run\"" "${src}/${dist_name}" --help || return 2
     for f in ${list}; do
         staged="${bin_dir}/${stmpl//@FILE@/${f}}"
         _ci_run "[CI-ERROR-RUNNER-0103]" "file=\"${f}\" reason=\"not installed\"" _ci_rh_root install -o root -g "${group}" -m "${bmode}" "${src}/${f}" "${staged}" || { _ci_rh_root rm -f "${staged}"; return 2; }
@@ -13974,9 +13974,9 @@ ci_cmd_close_linked_issues() {
             return 0
         fi
         _ci_env_required CI_DEFAULT_BRANCH "[CI-ERROR-LINK-0005]" \
-            "default=\"\" reason=\"CI_DEFAULT_BRANCH is required\"" > /dev/null || return 2
+            "default=\"\" reason=\"CI_DEFAULT_BRANCH is required\"" || return 2
         _ci_env_required GITHUB_SHA "[CI-ERROR-LINK-0015]" \
-            "sha=\"\" reason=\"GITHUB_SHA is required\"" > /dev/null || return 2
+            "sha=\"\" reason=\"GITHUB_SHA is required\"" || return 2
         if [ "${branch}" = "${CI_DEFAULT_BRANCH}" ]; then
             printf 'close-linked-issues=skip reason="GitHub closes on the default branch" branch="%s"\n' "${branch}"
             return 0
@@ -14850,8 +14850,8 @@ PROG
     # What: the https.conf template includes the listen file
     # Why: a literal listen would be a second port owner.
     # From: Issue #1683 | PR #1912
-    _ci_runtime_default NGINX_DIR >/dev/null || return 2
-    _ci_runtime_default NGINX_HTTPS_LISTEN_FILE >/dev/null || return 2
+    _ci_runtime_default NGINX_DIR || return 2
+    _ci_runtime_default NGINX_HTTPS_LISTEN_FILE || return 2
     grep -Fxq "    include     \${NGINX_DIR}/\${NGINX_HTTPS_LISTEN_FILE};" "${px}/conf.d/https.conf" \
         || viol+=("${px#"${repo_root}/"}/conf.d/https.conf: no include of the SOT keys NGINX_DIR and NGINX_HTTPS_LISTEN_FILE")
     grep -Eq '^[[:space:]]*listen[[:space:]]' "${px}/conf.d/https.conf" \
@@ -15202,7 +15202,7 @@ _ci_check_changelog_direct_edit() {
     fi
     local label_rc=0 label_err label
     label="$(_ci_block_entry_field release_notes "" changelog_edit_label)" || return 2
-    label_err="$(jq -e --arg l "${label}" 'index($l) != null' <<<"${PR_LABELS_JSON:-[]}" 2>&1 >/dev/null)" || label_rc=$?
+    label_err="$(jq -e --arg l "${label}" 'index($l) != null' <<<"${PR_LABELS_JSON:-[]}" 2>&1)" || label_rc=$?
     case "${label_rc}" in
         0) ci_log "[CI-INFO-CHECK-0115]" "file=\"${file}\" label=\"${label}\" reason=\"changelog edited with the label; expected\"" ;;
         1) ci_log "[CI-INFO-CHECK-0116]" "file=\"${file}\" reason=\"changelog edited directly outside the release flow; warn-only\"" ;;
@@ -15658,7 +15658,7 @@ _ci_check_shellcheck() {
     # Why: shellcheck reads shell; yaml etc not input.
     # From: Issue #1683
     [ "${#changed[@]}" -eq 0 ] || _ci_shell_sources files changed || return 2
-    # What: in-file disable, source=/dev/null, no dataflow.
+    # What: in-file disable, null source, no dataflow.
     # Why: each one hides findings; AG-VAL-007 forbids it.
     # From: Issue #1683 | PR #1912
     for f in "${files[@]}"; do
