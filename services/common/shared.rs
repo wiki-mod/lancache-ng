@@ -310,7 +310,7 @@ pub fn http_client(get: &dyn Fn(&str) -> Option<String>) -> Result<reqwest::Clie
 // What: an error and every cause below it, one line.
 // Why: reqwest hides the TLS or socket cause in source().
 // From: Issue #1683 | PR #1912
-fn error_chain(error: &dyn std::error::Error) -> String {
+pub fn error_chain(error: &dyn std::error::Error) -> String {
     let mut text = error.to_string();
     let mut cause = error.source();
     while let Some(inner) = cause {
@@ -1323,6 +1323,26 @@ mod tests {
     const PROBE_WAIT: Duration = Duration::from_secs(2);
 
     use std::os::unix::fs::PermissionsExt;
+
+    // What: error_chain joins an error with each cause.
+    // Why: a builder error alone hides its serde cause.
+    #[test]
+    fn error_chain_lists_every_cause() {
+        #[derive(Debug)]
+        struct Outer(std::io::Error);
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("builder error")
+            }
+        }
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let error = Outer(std::io::Error::other("key must be a string"));
+        assert_eq!(error_chain(&error), "builder error: key must be a string");
+    }
 
     // What: stdout/stderr text joins; other frames drop.
     // Why: the probe result line must survive the headers.
