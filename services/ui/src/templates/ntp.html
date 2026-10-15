@@ -22,9 +22,8 @@
       <div>
         <h2 class="font-semibold text-slate-200">Status</h2>
         <p class="text-xs text-slate-500 mt-0.5">
-          Startet/stoppt den `ntp`-Container. Erfordert, dass das `ntp`-Compose-Profil beim
-          letzten Setup aktiviert wurde (siehe setup.sh) -- ist der Container nie erstellt
-          worden, schlägt das Aktivieren mit einer klaren Fehlermeldung fehl.
+          Schaltet chronyd im Dienst <code>services</code> ein oder aus. Die Einstellung wird
+          gespeichert; der Watchdog startet oder stoppt chronyd danach.
         </p>
       </div>
       {{ <on_off_badge on={ntp_enabled}/> }}
