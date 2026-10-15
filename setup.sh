@@ -2292,18 +2292,27 @@ runtime_default_in() {
         || die "The SOT runtime.defaults holds no default for $2."
 }
 
-# What: docker compose with compose_keys as SOT_<KEY>
-# Why: compose names no path, port or default of its own
+# What: the SOT_<KEY>=value row of each compose key
+# Why: one owner; ci.sh reads it from here, not a copy
 # From: Issue #1683 | PR #1912
-sot_compose() {
+sot_compose_env() {
     local keys key value list
-    local -a sot_env=()
     keys=$(lancache_sot_value compose_keys runtime) || exit $?
     list=$(runtime_defaults_list) || exit $?
     for key in $keys; do
         value=$(runtime_default_in "$list" "$key") || exit $?
-        sot_env+=("SOT_${key}=${value}")
+        printf 'SOT_%s=%s\n' "$key" "$value"
     done
+}
+
+# What: docker compose with compose_keys as SOT_<KEY>
+# Why: compose names no path, port or default of its own
+# From: Issue #1683 | PR #1912
+sot_compose() {
+    local rows
+    local -a sot_env=()
+    rows=$(sot_compose_env) || exit $?
+    mapfile -t sot_env <<< "$rows"
     env "${sot_env[@]}" docker compose "$@"
 }
 

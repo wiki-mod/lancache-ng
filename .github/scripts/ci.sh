@@ -14667,16 +14667,11 @@ _ci_validate_host_tools() {
     fi
 }
 
-# What: SOT_<KEY>=value per compose key; $1 = defaults.
-# Why: compose interpolates the SOT paths and ports.
+# What: SOT_<KEY>=value per compose key, from setup.sh.
+# Why: sot_compose_env is the one owner; no second copy.
 # From: Issue #1683 | PR #1912
 _ci_sot_compose_env() {
-    local keys k v rows="$1"
-    keys="$(_ci_required_field runtime compose_keys block)" || return 2
-    for k in ${keys}; do
-        v="$(_ci_default_in "${rows}" "${k}")" || return 2
-        printf 'SOT_%s=%s\n' "${k}" "${v}"
-    done
+    _ci_capture 0 bash -c 'source "$1" && sot_compose_env' _ "${CI_REPO_ROOT}/setup.sh"
 }
 
 # What: image coordinates of the compose images, KEY=VALUE.
@@ -14718,7 +14713,7 @@ _ci_validation_env() {
         esac
         printf '%s\n' "${v}"
     done <<< "${fx}"
-    _ci_sot_compose_env "${rows}" || return 2
+    _ci_sot_compose_env || return 2
     _ci_validation_images || return 2
     # What: a fresh value per secret key, setup.sh format.
     # Why: a fixed key in the SOT is a hardcoded credential.
@@ -14867,8 +14862,7 @@ _ci_compose_run() {
         names="$(_ci_run "[CI-ERROR-CORE-0145]" "env_file=\"${env_file}\" reason=\"compose variable names unreadable\"" \
             jq -r 'keys[]' <<< "${vars}")" || return 2
         [ -z "${names}" ] || mapfile -t unsetv <<< "${names}"
-        fx="$(_ci_runtime_defaults)" || return 2
-        fx="$(_ci_sot_compose_env "${fx}")" || return 2
+        fx="$(_ci_sot_compose_env)" || return 2
         pre=(--env-file "${env_file}")
     else
         fx="$(_ci_validation_env)" || return 2
