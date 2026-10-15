@@ -4,6 +4,28 @@
 {# What: dashboard page: health, DHCP, cache, logs #}
 {# Why: extends base.html for the shared layout #}
 {% extends "base.html" %}
+{% component proxy_card(title, subtitle, prefix, status, enabled) %}{# What: one proxy card (HTTP or HTTPS) with its three live counters
+   Why: one copy of header, grid and fallback texts; ids stay prefix-active/-requests/-waiting for the refresh script
+   From: Issue #1683 | PR #1912 #}<div class="card">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-semibold text-slate-200">{{ title }}</h2>
+        <span class="text-xs text-slate-500">{{ subtitle }}</span>
+      </div>
+      {% if not enabled %}
+      <p class="text-sm text-slate-500 mt-3">{{ title }} disabled</p>
+      {% elif status %}
+      <div class="grid grid-cols-3 gap-2 text-center mt-3" id="{{ prefix }}-metrics">
+        {% for cell in [["active", "Connections"], ["requests", "Requests"], ["waiting", "Waiting"]] %}
+        <div>
+          <p class="stat-num text-2xl font-bold text-white" id="{{ prefix }}-{{ cell[0] }}">{{ status[cell[0]] }}</p>
+          <p class="text-xs text-slate-400">{{ cell[1] }}</p>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="text-sm text-slate-500 mt-3">Proxy unreachable</p>
+      {% endif %}
+    </div>{% endcomponent proxy_card %}
 {% block title %} – Dashboard{% endblock %}
 
 {% block content %}
@@ -137,59 +159,10 @@
   <!-- What: per-side numbers, live via the script below
        Why: both URLs may point at one stub_status
        From: Issue #1683 | PR #1912 -->
-       (main.rs::metrics_api) every few seconds. -->
   <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-    <div class="card">
-      <div class="flex items-center justify-between mb-3">
-        <h2 class="font-semibold text-slate-200">HTTP mode</h2>
-        <span class="text-xs text-slate-500">HTTP · SNI passthrough</span>
-      </div>
-      {% if http_status %}
-      <div class="grid grid-cols-3 gap-2 text-center mt-3" id="http-metrics">
-        <div>
-          <p class="stat-num text-2xl font-bold text-white" id="http-active">{{ http_status.active }}</p>
-          <p class="text-xs text-slate-400">Connections</p>
-        </div>
-        <div>
-          <p class="stat-num text-2xl font-bold text-white" id="http-requests">{{ http_status.requests }}</p>
-          <p class="text-xs text-slate-400">Requests</p>
-        </div>
-        <div>
-          <p class="stat-num text-2xl font-bold text-white" id="http-waiting">{{ http_status.waiting }}</p>
-          <p class="text-xs text-slate-400">Waiting</p>
-        </div>
-      </div>
-      {% else %}
-      <p class="text-sm text-slate-500 mt-3">Proxy unreachable</p>
-      {% endif %}
-    </div>
+    {{ <proxy_card title="HTTP mode" subtitle="HTTP · SNI passthrough" prefix="http" status={http_status} enabled={true}/> }}
 
-    <div class="card">
-      <div class="flex items-center justify-between mb-3">
-        <h2 class="font-semibold text-slate-200">HTTPS mode</h2>
-        <span class="text-xs text-slate-500">HTTP + HTTPS · MITM</span>
-      </div>
-      {% if not https_enabled %}
-      <p class="text-sm text-slate-500 mt-3">HTTPS mode disabled</p>
-      {% elif https_status %}
-      <div class="grid grid-cols-3 gap-2 text-center mt-3" id="https-metrics">
-        <div>
-          <p class="stat-num text-2xl font-bold text-white" id="https-active">{{ https_status.active }}</p>
-          <p class="text-xs text-slate-400">Connections</p>
-        </div>
-        <div>
-          <p class="stat-num text-2xl font-bold text-white" id="https-requests">{{ https_status.requests }}</p>
-          <p class="text-xs text-slate-400">Requests</p>
-        </div>
-        <div>
-          <p class="stat-num text-2xl font-bold text-white" id="https-waiting">{{ https_status.waiting }}</p>
-          <p class="text-xs text-slate-400">Waiting</p>
-        </div>
-      </div>
-      {% else %}
-      <p class="text-sm text-slate-500 mt-3">Proxy unreachable</p>
-      {% endif %}
-    </div>
+    {{ <proxy_card title="HTTPS mode" subtitle="HTTP + HTTPS · MITM" prefix="https" status={https_status} enabled={https_enabled}/> }}
   </div>
 
   <!-- What: hit rate and totals from log_stats
