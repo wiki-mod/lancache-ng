@@ -319,15 +319,23 @@ _ci_runner_self_hosted() {
 # Why: AG-CI-009 proxy; hosted runners have no LAN route.
 # From: Issue #1683 | PR #1858
 _ci_proxy_init() {
-    local http="${PROJECT_SELFHOSTED_PROXY_HTTP:-}"
-    if ! _ci_runner_self_hosted || [ -z "${http}" ]; then
-        ci_log "[CI-INFO-CORE-0113]" "proxy=off runner=\"${RUNNER_ENVIRONMENT:-unset}\" http_set=$([ -n "${http}" ] && echo yes || echo no)"
+    local http="" https="" exclusion=""
+    # What: read the proxy values on self-hosted only.
+    # Why: CI_VARIABLES is the source; hosted needs no jq.
+    # From: Issue #1683 | PR #1912
+    if _ci_runner_self_hosted; then
+        http="$(_ci_variable_env PROJECT_SELFHOSTED_PROXY_HTTP)" || return 2
+    fi
+    if [ -z "${http}" ]; then
+        ci_log "[CI-INFO-CORE-0113]" "proxy=off runner=\"${RUNNER_ENVIRONMENT:-unset}\" http_set=no"
         return 0
     fi
+    https="$(_ci_variable_env PROJECT_SELFHOSTED_PROXY_HTTPS)" || return 2
+    exclusion="$(_ci_variable_env PROJECT_SELFHOSTED_PROXY_EXCLUSION)" || return 2
     export HTTP_PROXY="${http}" http_proxy="${http}"
-    export HTTPS_PROXY="${PROJECT_SELFHOSTED_PROXY_HTTPS:-${http}}"
+    export HTTPS_PROXY="${https:-${http}}"
     export https_proxy="${HTTPS_PROXY}"
-    export NO_PROXY="${PROJECT_SELFHOSTED_PROXY_EXCLUSION:-}" no_proxy="${PROJECT_SELFHOSTED_PROXY_EXCLUSION:-}"
+    export NO_PROXY="${exclusion}" no_proxy="${exclusion}"
     ci_log "[CI-INFO-CORE-0007]" "proxy=on runner=self-hosted no_proxy=\"${NO_PROXY}\""
     if [ -z "${PROJECT_SELFHOSTED_PROXY_CA:-}" ]; then
         ci_log "[CI-INFO-CORE-0114]" "proxy_ca=off reason=\"PROJECT_SELFHOSTED_PROXY_CA empty\""
@@ -3625,7 +3633,7 @@ _ci_sccache_reap() {
 # Why: Every GHCR action authenticates, never anonymous.
 # From: Issue #1683
 _ci_require_ghcr_auth() {
-    if [ -z "${GHCR_USERNAME:-}" ] || [ -z "${GHCR_TOKEN:-}" ]; then
+    if [ -z "${GITHUB_ACTOR:-}" ] || [ -z "${GHCR_TOKEN:-}" ]; then
         ci_log "[CI-ERROR-BUILD-0002]" "reason=\"GHCR credentials required; anonymous is rate-limited\""
         return 2
     fi
@@ -3634,7 +3642,7 @@ _ci_require_ghcr_auth() {
     # From: Issue #1683 | PR #1858
     local reg out
     reg="$(_ci_registry)" || return "$?"
-    if ! out="$(_ci_retry registry _ci_registry_login_once "${reg}" GHCR_USERNAME GHCR_TOKEN)"; then
+    if ! out="$(_ci_retry registry _ci_registry_login_once "${reg}" GITHUB_ACTOR GHCR_TOKEN)"; then
         ci_error "[CI-ERROR-BUILD-0015]" "registry=\"${reg}\" reason=\"docker login to the image registry failed\"" "${out}"
         return 2
     fi
@@ -9283,10 +9291,10 @@ _ci_variable() {
     return 2
 }
 
-# What: env, then CI_VARIABLES json, then the SOT default.
+# What: env, then CI_VARIABLES json; empty when neither.
 # Why: GitHub vars arrive once as json; no per-name YAML.
-# From: Issue #1683 | PR #1858
-_ci_variable_value() {
+# From: Issue #1683 | PR #1912
+_ci_variable_env() {
     local name="$1" val="" rc=0
     val="${!name:-}"
     if [ -z "${val}" ] && [ -n "${CI_VARIABLES:-}" ]; then
@@ -9300,6 +9308,15 @@ _ci_variable_value() {
             return 2
         fi
     fi
+    printf '%s\n' "${val}"
+}
+
+# What: env, then CI_VARIABLES json, then the SOT default.
+# Why: one value rule; the SOT is the last fallback.
+# From: Issue #1683 | PR #1858
+_ci_variable_value() {
+    local name="$1" val=""
+    val="$(_ci_variable_env "${name}")" || return 2
     [ -n "${val}" ] || val="$(_ci_block_entry_field ci_variables "" "${name}")" || return 2
     [ -n "${val}" ] || return 1
     printf '%s\n' "${val}"
