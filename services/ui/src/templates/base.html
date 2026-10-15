@@ -13,6 +13,13 @@
     {{ <section_tab href={main_href} label={main_label} active={active_page == main_page}/> }}
     {{ <section_tab href={secondaries_href} label="Secondary" active={active_page == "secondaries"}/> }}
   </div>{% endcomponent section_tabs %}
+{% component restart_ui_form(action, csrf_token, button_class, label, title=none) %}{# What: Admin-UI restart form, asks for confirm() first
+   Why: the process exits and compose relaunches it; one copy for the top bar and the setup page
+   From: Issue #1437 | Issue #1486 | PR #1912 #}<form method="post" action="{{ action | safe }}"
+              onsubmit="return confirm('Admin-UI wirklich neu starten? Die Seite ist danach kurz nicht erreichbar.')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="{{ button_class }}"{% if title is not none %} title="{{ title }}"{% endif %}>{{ label }}</button>
+        </form>{% endcomponent restart_ui_form %}
 <!DOCTYPE html>
 <html lang="de" class="h-full">
 <head>
@@ -271,14 +278,7 @@
         <span style="color: var(--color-text-muted);">Service health: laden…</span>
       </div>
       <div class="flex items-center gap-2">
-        <!-- What: UI restart form, asks for confirm() first
-             Why: the process exits; compose relaunches it
-             From: Issue #1437 -->
-        <form method="post" action="{{ routes.restart_ui | safe }}"
-              onsubmit="return confirm('Admin-UI wirklich neu starten? Die Seite ist danach kurz nicht erreichbar.')">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button type="submit" class="theme-toggle" title="Admin-UI neu starten">⟳ UI</button>
-        </form>
+        {{ <restart_ui_form action={routes.restart_ui} csrf_token={csrf_token} button_class="theme-toggle" label="⟳ UI" title="Admin-UI neu starten"/> }}
         <button type="button" class="theme-toggle" id="theme-toggle" title="Toggle light/dark theme">🌓 Theme</button>
       </div>
     </header>

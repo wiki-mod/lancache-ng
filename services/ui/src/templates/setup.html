@@ -249,14 +249,7 @@ sudo trust anchor --store {{ ca_cert_file }}</pre>
         überhaupt anzustoßen.
       </p>
     </div>
-    <form method="post" action="{{ routes.restart_ui | safe }}"
-          onsubmit="return confirm('Admin-UI wirklich neu starten? Die Seite ist danach kurz nicht erreichbar.')">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit"
-              class="bg-amber-600 hover:bg-amber-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
-        Admin-UI neu starten
-      </button>
-    </form>
+    {{ <restart_ui_form action={routes.restart_ui} csrf_token={csrf_token} button_class="bg-amber-600 hover:bg-amber-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors" label="Admin-UI neu starten"/> }}
   </div>
 
 </div>
