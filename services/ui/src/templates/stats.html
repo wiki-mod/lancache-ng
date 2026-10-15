@@ -159,7 +159,7 @@ async function refresh() {
     const usedGB = ramRow ? (ramRow[column(ram, 'used')] / 1024).toFixed(2) : 0;
     push(ramChart, parseFloat(usedGB));
 
-    // What: net.eth0; on error report it, then try net.eth1.
+    // What: net.eth0; on error report, try net.eth1.
     // Why: interface names differ between hosts.
     let net;
     try { net = await fetchChart('data?chart=net.eth0'); }
