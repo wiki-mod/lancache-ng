@@ -10,6 +10,34 @@
    Why: one copy for the add form and every edit form
    From: Issue #1683 | PR #1912 #}<p class="text-xs text-amber-300 mt-1">LanCache-NG-NTP's "Als DHCP-NTP-Server automatisch eintragen" ist aktiv -- ein hier gesetzter Wert wird bei der nächsten Speicherung auf der <a href="{{ ntp_url | safe }}" class="underline">NTP-Seite</a> (oder einem DHCP-Moduswechsel) wieder durch die LAN-Adresse von LanCache-NG-NTP ersetzt.</p>{% endcomponent ntp_auto_hint %}
 
+{% component text_field(label, name, tone, value="", placeholder="", required=false, hint=none, type="text", min=none, max=none) %}{# What: one labelled input with optional hint
+   Why: one copy of the label/input/hint frame for every form on this page; tone carries the bg and border colour of the form
+   From: Issue #1683 | PR #1912 #}<div>
+              <label class="block text-xs text-slate-400 mb-1">{{ label }}</label>
+              <input type="{{ type }}" name="{{ name }}" value="{{ value }}"{% if placeholder %} placeholder="{{ placeholder }}"{% endif %}{% if min is not none %} min="{{ min }}"{% endif %}{% if max is not none %} max="{{ max }}"{% endif %}{% if required %} required{% endif %}
+                class="w-full px-3 py-2 border rounded text-white text-sm {{ tone }}">
+              {% if hint is not none %}<p class="text-xs text-slate-500 mt-1">{{ hint | safe }}</p>{% endif %}
+            </div>{% endcomponent text_field %}
+
+{% component subnet_fields(tone, ntp_auto, ntp_url, lease_time, subnet="", gateway="", dns_primary="", dns_secondary="", pool_start="", pool_end="", domain="", ntp_servers="") %}{# What: the nine fields of one Kea subnet
+   Why: the add form and every edit form show the same fields; only start values and tone differ
+   From: Issue #1683 | PR #1912 #}<div class="grid grid-cols-2 gap-3">
+            {{ <text_field label="Subnet (CIDR)" name="subnet" tone={tone} value={subnet} placeholder="192.168.2.0/24" required={true}/> }}
+            {{ <text_field label="Gateway" name="gateway" tone={tone} value={gateway} placeholder="192.168.2.1" required={true}/> }}
+            {{ <text_field label="DNS-Server 1" name="dns_primary" tone={tone} value={dns_primary} placeholder="192.168.2.10" required={true}/> }}
+            {{ <text_field label="DNS-Server 2" name="dns_secondary" tone={tone} value={dns_secondary} placeholder="192.168.2.11"/> }}
+            {{ <text_field label="IP-Pool Start" name="pool_start" tone={tone} value={pool_start} placeholder="192.168.2.100" required={true}/> }}
+            {{ <text_field label="IP-Pool Ende" name="pool_end" tone={tone} value={pool_end} placeholder="192.168.2.200" required={true}/> }}
+            {{ <text_field label="Lease-Zeit (s)" name="lease_time" tone={tone} value={lease_time ~ ""}/> }}
+            {{ <text_field label="Domain" name="domain" tone={tone} value={domain}/> }}
+            <div class="col-span-2">
+              {{ <text_field label="NTP-Server" name="ntp_servers" tone={tone} value={ntp_servers} placeholder="192.0.2.123, 192.0.2.124" hint="Kommagetrennte IPv4-Liste, z. B. <code>192.0.2.123, 192.0.2.124</code>. Leerlassen, wenn du keinen NTP-Wert verteilen willst."/> }}
+              {% if ntp_auto %}
+              {{ <ntp_auto_hint ntp_url={ntp_url}/> }}
+              {% endif %}
+            </div>
+          </div>{% endcomponent subnet_fields %}
+
 {% block content %}
 <div class="max-w-5xl mx-auto space-y-6">
 
@@ -67,60 +95,16 @@
         <form method="post" action="{{ routes.dhcp_proxy | safe }}" class="space-y-3 rounded border border-amber-500/30 bg-slate-900/50 p-4">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <div class="grid gap-3 md:grid-cols-2">
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Proxy subnet start</label>
-              <input type="text" name="dhcp_subnet_start" value="{{ dhcp_proxy_subnet_start }}" placeholder="10.0.0.0" required
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Upstream DHCP server (documentation only)</label>
-              <input type="text" name="upstream_dhcp_ip" value="{{ dhcp_upstream_dhcp_ip }}" placeholder="10.0.0.1" required
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-              <p class="text-xs text-slate-500 mt-1">ProxyDHCP mode never needs to contact this server to work; recorded so you and the DHCP conflict check agree on which server owns real leases.</p>
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">DNS-Server 1</label>
-              <input type="text" name="dhcp_dns_primary" value="{{ dhcp_dns_primary }}" placeholder="10.0.0.10" required
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">DNS-Server 2</label>
-              <input type="text" name="dhcp_dns_secondary" value="{{ dhcp_dns_secondary }}" placeholder="10.0.0.11"
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Listen interface (optional)</label>
-              <input type="text" name="dhcp_proxy_interface" value="{{ dhcp_proxy_interface }}" placeholder="eth0"
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-              <p class="text-xs text-slate-500 mt-1">Bind dnsmasq to one host interface instead of all of them. Leave empty on a single-NIC host.</p>
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Router/gateway option (optional, PXE-scoped)</label>
-              <input type="text" name="dhcp_proxy_router" value="{{ dhcp_proxy_router }}" placeholder="10.0.0.1"
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">NTP servers (optional, PXE-scoped)</label>
-              <input type="text" name="dhcp_ntp_servers" value="{{ dhcp_ntp_servers }}" placeholder="10.0.0.20, 10.0.0.21"
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-              <p class="text-xs text-slate-500 mt-1">Comma-separated IPv4 list.</p>
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Domain option (optional, PXE-scoped)</label>
-              <input type="text" name="dhcp_proxy_domain" value="{{ dhcp_proxy_domain }}" placeholder="lan.local"
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">PXE boot filename (optional)</label>
-              <input type="text" name="dhcp_proxy_boot_filename" value="{{ dhcp_proxy_boot_filename }}" placeholder="pxelinux.0"
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">PXE boot server address (optional)</label>
-              <input type="text" name="dhcp_proxy_boot_server" value="{{ dhcp_proxy_boot_server }}" placeholder="10.0.0.5"
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-              <p class="text-xs text-slate-500 mt-1">Requires a boot filename above; defaults to this host's own address if left empty while a filename is set.</p>
-            </div>
+            {{ <text_field label="Proxy subnet start" name="dhcp_subnet_start" tone="bg-slate-800 border-slate-600" value={dhcp_proxy_subnet_start} placeholder="10.0.0.0" required={true}/> }}
+            {{ <text_field label="Upstream DHCP server (documentation only)" name="upstream_dhcp_ip" tone="bg-slate-800 border-slate-600" value={dhcp_upstream_dhcp_ip} placeholder="10.0.0.1" required={true} hint="ProxyDHCP mode never needs to contact this server to work; recorded so you and the DHCP conflict check agree on which server owns real leases."/> }}
+            {{ <text_field label="DNS-Server 1" name="dhcp_dns_primary" tone="bg-slate-800 border-slate-600" value={dhcp_dns_primary} placeholder="10.0.0.10" required={true}/> }}
+            {{ <text_field label="DNS-Server 2" name="dhcp_dns_secondary" tone="bg-slate-800 border-slate-600" value={dhcp_dns_secondary} placeholder="10.0.0.11"/> }}
+            {{ <text_field label="Listen interface (optional)" name="dhcp_proxy_interface" tone="bg-slate-800 border-slate-600" value={dhcp_proxy_interface} placeholder="eth0" hint="Bind dnsmasq to one host interface instead of all of them. Leave empty on a single-NIC host."/> }}
+            {{ <text_field label="Router/gateway option (optional, PXE-scoped)" name="dhcp_proxy_router" tone="bg-slate-800 border-slate-600" value={dhcp_proxy_router} placeholder="10.0.0.1"/> }}
+            {{ <text_field label="NTP servers (optional, PXE-scoped)" name="dhcp_ntp_servers" tone="bg-slate-800 border-slate-600" value={dhcp_ntp_servers} placeholder="10.0.0.20, 10.0.0.21" hint="Comma-separated IPv4 list."/> }}
+            {{ <text_field label="Domain option (optional, PXE-scoped)" name="dhcp_proxy_domain" tone="bg-slate-800 border-slate-600" value={dhcp_proxy_domain} placeholder="lan.local"/> }}
+            {{ <text_field label="PXE boot filename (optional)" name="dhcp_proxy_boot_filename" tone="bg-slate-800 border-slate-600" value={dhcp_proxy_boot_filename} placeholder="pxelinux.0"/> }}
+            {{ <text_field label="PXE boot server address (optional)" name="dhcp_proxy_boot_server" tone="bg-slate-800 border-slate-600" value={dhcp_proxy_boot_server} placeholder="10.0.0.5" hint="Requires a boot filename above; defaults to this host's own address if left empty while a filename is set."/> }}
             <div class="col-span-2">
               <label class="block text-xs text-slate-400 mb-1">Additional safe custom options (optional, PXE-scoped)</label>
               <textarea name="dhcp_proxy_custom_options" rows="3" placeholder="60:PXEClient&#10;93:0"
@@ -148,18 +132,8 @@
         <form method="post" action="{{ routes.dhcp_relay | safe }}" class="space-y-3 rounded border border-sky-500/30 bg-slate-900/50 p-4">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <div class="grid gap-3 md:grid-cols-2">
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Relay local address (this relay's client-facing IP)</label>
-              <input type="text" name="dhcp_relay_local_addr" value="{{ dhcp_relay_local_addr }}" placeholder="192.168.1.2" required
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-              <p class="text-xs text-slate-500 mt-1">The IP dnsmasq listens on for client DHCP broadcasts; forwarded as <code>giaddr</code> so the upstream server selects the right pool.</p>
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Upstream DHCP server</label>
-              <input type="text" name="upstream_dhcp_ip" value="{{ dhcp_upstream_dhcp_ip }}" placeholder="10.0.0.1" required
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-              <p class="text-xs text-slate-500 mt-1">The real DHCP server every relayed request is forwarded to.</p>
-            </div>
+            {{ <text_field label="Relay local address (this relay's client-facing IP)" name="dhcp_relay_local_addr" tone="bg-slate-800 border-slate-600" value={dhcp_relay_local_addr} placeholder="192.168.1.2" required={true} hint="The IP dnsmasq listens on for client DHCP broadcasts; forwarded as <code>giaddr</code> so the upstream server selects the right pool."/> }}
+            {{ <text_field label="Upstream DHCP server" name="upstream_dhcp_ip" tone="bg-slate-800 border-slate-600" value={dhcp_upstream_dhcp_ip} placeholder="10.0.0.1" required={true} hint="The real DHCP server every relayed request is forwarded to."/> }}
           </div>
           <button type="submit"
                   class="bg-sky-600 hover:bg-sky-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
@@ -250,57 +224,7 @@
       <h3 class="text-sm font-medium text-white mb-3">Neues Subnet</h3>
       <form method="POST" action="{{ routes.subnet_add | safe }}" class="space-y-3">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">Subnet (CIDR)</label>
-            <input type="text" name="subnet" placeholder="192.168.2.0/24" required
-              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">Gateway</label>
-            <input type="text" name="gateway" placeholder="192.168.2.1" required
-              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">DNS-Server 1</label>
-            <input type="text" name="dns_primary" value="{{ dhcp_dns_primary }}" placeholder="192.168.2.10" required
-              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">DNS-Server 2</label>
-            <input type="text" name="dns_secondary" value="{{ dhcp_dns_secondary }}" placeholder="192.168.2.11"
-              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">IP-Pool Start</label>
-            <input type="text" name="pool_start" placeholder="192.168.2.100" required
-              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">IP-Pool Ende</label>
-            <input type="text" name="pool_end" placeholder="192.168.2.200" required
-              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">Lease-Zeit (s)</label>
-            <input type="text" name="lease_time" value="{{ default_lease_time }}"
-              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">Domain</label>
-            <input type="text" name="domain" value="lan"
-              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-          </div>
-          <div class="col-span-2">
-            <label class="block text-xs text-slate-400 mb-1">NTP-Server</label>
-            <input type="text" name="ntp_servers" value="{{ dhcp_ntp_servers }}" placeholder="192.0.2.123, 192.0.2.124"
-              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-            <p class="text-xs text-slate-500 mt-1">Kommagetrennte IPv4-Liste. Leerlassen, wenn du keinen NTP-Wert verteilen willst.</p>
-            {% if ntp_auto_dhcp_active %}
-            {{ <ntp_auto_hint ntp_url={pages.ntp}/> }}
-            {% endif %}
-          </div>
-        </div>
+        {{ <subnet_fields tone="bg-slate-600 border-slate-500" ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.ntp} dns_primary={dhcp_dns_primary} dns_secondary={dhcp_dns_secondary} lease_time={default_lease_time} domain="lan" ntp_servers={dhcp_ntp_servers}/> }}
         <div class="flex gap-2">
           <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-medium">
             Hinzufügen
@@ -345,57 +269,7 @@
         <form method="POST" action="{{ routes.subnet_update | safe }}" class="space-y-3">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="id" value="{{ subnet.id }}">
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Subnet (CIDR)</label>
-              <input type="text" name="subnet" value="{{ subnet.subnet }}" required
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Gateway</label>
-              <input type="text" name="gateway" value="{{ subnet.gateway }}" required
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">DNS-Server 1</label>
-              <input type="text" name="dns_primary" value="{{ subnet.dns_primary }}" required
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">DNS-Server 2</label>
-              <input type="text" name="dns_secondary" value="{{ subnet.dns_secondary }}"
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Pool Start</label>
-              <input type="text" name="pool_start" value="{{ subnet.pool_start }}" required
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Pool Ende</label>
-              <input type="text" name="pool_end" value="{{ subnet.pool_end }}" required
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Lease-Zeit (s)</label>
-              <input type="text" name="lease_time" value="{{ subnet.lease_time }}"
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Domain</label>
-              <input type="text" name="domain" value="{{ subnet.domain }}"
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div class="col-span-2">
-              <label class="block text-xs text-slate-400 mb-1">NTP-Server</label>
-              <input type="text" name="ntp_servers" value="{{ subnet.ntp_servers }}"
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-              <p class="text-xs text-slate-500 mt-1">Kommagetrennte IPv4-Adressen, z. B. <code>192.0.2.123, 192.0.2.124</code></p>
-              {% if ntp_auto_dhcp_active %}
-              {{ <ntp_auto_hint ntp_url={pages.ntp}/> }}
-              {% endif %}
-            </div>
-          </div>
+          {{ <subnet_fields tone="bg-slate-700 border-slate-600" ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.ntp} subnet={subnet.subnet} gateway={subnet.gateway} dns_primary={subnet.dns_primary} dns_secondary={subnet.dns_secondary} pool_start={subnet.pool_start} pool_end={subnet.pool_end} lease_time={subnet.lease_time} domain={subnet.domain} ntp_servers={subnet.ntp_servers}/> }}
           <div class="flex gap-2">
             <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-medium">
               Speichern
@@ -445,16 +319,8 @@
         <form method="POST" action="{{ routes.subnet_option_add | safe }}" class="grid gap-3 md:grid-cols-[120px_1fr_auto] items-end">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="subnet_id" value="{{ subnet.id }}">
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">Options-Code</label>
-            <input type="number" name="code" min="{{ option_code_min }}" max="{{ option_code_max }}" placeholder="66" required
-              class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">Wert</label>
-            <input type="text" name="data" placeholder="192.168.1.10 oder bootfile.efi" required
-              class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-          </div>
+          {{ <text_field label="Options-Code" name="code" tone="bg-slate-800 border-slate-600" type="number" min={option_code_min} max={option_code_max} placeholder="66" required={true}/> }}
+          {{ <text_field label="Wert" name="data" tone="bg-slate-800 border-slate-600" placeholder="192.168.1.10 oder bootfile.efi" required={true}/> }}
           <button type="submit" class="px-4 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded text-sm font-medium">
             Option hinzufügen
           </button>
@@ -479,21 +345,9 @@
             {% endfor %}
           </select>
         </div>
-        <div>
-          <label class="block text-xs text-slate-400 mb-1">MAC-Adresse</label>
-          <input type="text" name="mac" placeholder="AA:BB:CC:DD:EE:FF"
-            class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm" required>
-        </div>
-        <div>
-          <label class="block text-xs text-slate-400 mb-1">IP-Adresse</label>
-          <input type="text" name="ip" placeholder="10.0.0.50"
-            class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm" required>
-        </div>
-        <div>
-          <label class="block text-xs text-slate-400 mb-1">Hostname</label>
-          <input type="text" name="hostname" placeholder="mydevice"
-            class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-        </div>
+        {{ <text_field label="MAC-Adresse" name="mac" tone="bg-slate-600 border-slate-500" placeholder="AA:BB:CC:DD:EE:FF" required={true}/> }}
+        {{ <text_field label="IP-Adresse" name="ip" tone="bg-slate-600 border-slate-500" placeholder="10.0.0.50" required={true}/> }}
+        {{ <text_field label="Hostname" name="hostname" tone="bg-slate-600 border-slate-500" placeholder="mydevice"/> }}
       </div>
       <p class="text-xs text-slate-500">Die Reservierung nutzt einfache Felder; zusätzliche Kea-JSON-Metadaten sind in der UI bewusst ausgeblendet.</p>
       <button type="submit" class="w-full px-3 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded text-sm font-medium">
