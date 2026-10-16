@@ -2998,11 +2998,13 @@ ci_cmd_scan_stack() {
     while read -r svc plat; do
         [ -n "${svc}" ] || continue
         drc=0; digest="$(_ci_published_digest "${svc}" "${plat}" ok)" || drc=$?
-        # What: a pair without an image is skipped
-        # Why: its build is red; the others stay valid
+        # What: a pair without an image fails; others go on
+        # Why: unscanned is no pass (AG-VAL-001)
         # From: Issue #1683 | PR #1912
         if [ "${drc}" -eq 1 ]; then
-            ci_log "[CI-WARN-SCAN-0025]" "service=\"${svc}\" platform=\"${plat}\" reason=\"no published image; its build failed, not scanned\""
+            ci_log "[CI-ERROR-SCAN-0025]" "service=\"${svc}\" platform=\"${plat}\" reason=\"no published image; its build failed, not scanned\""
+            failed="${failed} ${svc}/${plat}"
+            rc=2
             continue
         fi
         if [ "${drc}" -ne 0 ]; then
@@ -3011,12 +3013,14 @@ ci_cmd_scan_stack() {
             rc=2
             continue
         fi
-        # What: a digest no build verified is skipped
+        # What: an unverified digest fails; others go on
         # Why: its readback or smoke test failed (B20)
         # From: Issue #1683 | PR #1912
         vrc=0; _ci_verified_has "${svc}" "${plat}" "${digest}" || vrc=$?
         if [ "${vrc}" -eq 1 ]; then
-            ci_log "[CI-WARN-SCAN-0031]" "service=\"${svc}\" platform=\"${plat}\" digest=\"${digest}\" reason=\"no build verified this digest; not scanned\""
+            ci_log "[CI-ERROR-SCAN-0031]" "service=\"${svc}\" platform=\"${plat}\" digest=\"${digest}\" reason=\"no build verified this digest; not scanned\""
+            failed="${failed} ${svc}/${plat}"
+            rc=2
             continue
         fi
         if [ "${vrc}" -ne 0 ]; then
@@ -3559,7 +3563,7 @@ _ci_sccache_env() {
         return 2
     fi
     # What: optional: drop redis, then remote, then local.
-    # Why: §42: a cache outage costs speed, not the build.
+    # Why: AG-CI-011: optional mode keeps correctness.
     # From: Issue #1683 | PR #1858
     while [ -n "${chain}" ]; do
         case "${chain}" in redis,*) next="${chain#redis,}" ;; *) next="" ;; esac
@@ -3575,7 +3579,7 @@ _ci_sccache_env() {
     done
     ci_error "[CI-WARN-CACHE-0004]" "prefix=\"${prefix}\" rc=${prc} reason=\"sccache unavailable; direct rustc\"" "${probe}"
     unset RUSTC_WRAPPER
-    _ci_sccache_stop
+    _ci_sccache_stop || return 2
     unset SCCACHE_SERVER_UDS
 }
 
@@ -3600,21 +3604,25 @@ ci_cmd_gha_runtime_args() {
 # Why: a started server must not outlive its run.
 # From: Issue #1683 | PR #1858
 _ci_sccache_stop() {
-    local out rc=0
+    local out rc=0 frc=0
     [ -n "${SCCACHE_SERVER_UDS:-}" ] || return 0
     if [ -n "${RUSTC_WRAPPER:-}" ]; then
         out="$(sccache --stop-server 2>&1)" || rc=$?
-        [ "${rc}" -eq 0 ] || ci_error "[CI-WARN-CACHE-0005]" "rc=${rc} reason=\"sccache server stop failed\"" "${out}"
+        if [ "${rc}" -ne 0 ]; then
+            ci_error "[CI-ERROR-CACHE-0005]" "rc=${rc} reason=\"sccache server stop failed\"" "${out}"
+            frc=2
+        fi
     fi
-    _ci_sccache_reap "${SCCACHE_SERVER_UDS%/*}"
+    _ci_sccache_reap "${SCCACHE_SERVER_UDS%/*}" || frc=2
     rm -rf -- "${SCCACHE_SERVER_UDS%/*}"
+    return "${frc}"
 }
 
 # What: kill sccache servers under this run's socket dir.
 # Why: a server timed out on Redis keeps on running.
 # From: Issue #1683 | PR #1858
 _ci_sccache_reap() {
-    local dir="$1" p env_s out
+    local dir="$1" p env_s out rc=0
     for p in /proc/[0-9]*; do
         [ -r "${p}/environ" ] || continue
         [ "$(cat "${p}/comm" 2>&1)" = sccache ] || continue
@@ -3622,12 +3630,13 @@ _ci_sccache_reap() {
         # Why: a stopped server exits while the scan runs.
         # From: Issue #1683 | PR #1912
         if ! env_s="$( { tr '\0' '\n' < "${p}/environ"; } 2>&1)"; then
-            [ ! -e "${p}" ] || ci_error "[CI-WARN-CACHE-0011]" "pid=${p#/proc/} reason=\"sccache server environ unreadable\"" "${env_s}"
+            [ ! -e "${p}" ] || { ci_error "[CI-ERROR-CACHE-0011]" "pid=${p#/proc/} reason=\"sccache server environ unreadable\"" "${env_s}"; rc=2; }
             continue
         fi
         [[ $'\n'"${env_s}" == *$'\n'"SCCACHE_SERVER_UDS=${dir}/"* ]] || continue
-        out="$(kill "${p#/proc/}" 2>&1)" || [ ! -e "${p}" ] || ci_error "[CI-WARN-CACHE-0006]" "pid=${p#/proc/} reason=\"sccache server kill failed\"" "${out}"
+        out="$(kill "${p#/proc/}" 2>&1)" || [ ! -e "${p}" ] || { ci_error "[CI-ERROR-CACHE-0006]" "pid=${p#/proc/} reason=\"sccache server kill failed\"" "${out}"; rc=2; }
     done
+    return "${rc}"
 }
 
 # =========================================================
@@ -4231,7 +4240,6 @@ _CI_RB_CA_FILE=/usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt
 _CI_RB_ACC=""
 _CI_RB_REMOTE_ID=""
 _CI_RB_PAIRS=""
-_CI_RB_PATH=""
 declare -gA _CI_RB_DRIVER_PATH=()
 
 # What: stop the distcc pump if rust-build started it.
@@ -4353,7 +4361,7 @@ _ci_sccache_report() {
     ci_error "[CI-WARN-CACHE-0017]" "mode=${_CI_SCCACHE_MODE} errors=\"${errs# }\" log=\"${log}\" reason=\"sccache cache level failed\"" "${cause}"
 }
 
-# What: cargo build; drop one accelerator per outage.
+# What: cargo build; only optional sccache may be dropped.
 # Why: a real build error fails at once, never degrades.
 # From: Issue #1683 | PR #1912
 _ci_rust_cargo_build() {
@@ -4407,12 +4415,9 @@ _ci_rust_cargo_build() {
             return 2
         fi
         case "${layers[0]}" in
-            ccache)
-                _ci_rb_ccache_off
-                ci_log "[CI-WARN-RUSTBUILD-0011]" "reason=\"accelerator outage; retry without ccache\"" ;;
-            distcc)
-                _ci_rb_distcc_off || return 2
-                ci_log "[CI-WARN-RUSTBUILD-0012]" "reason=\"accelerator outage; retry without distcc\"" ;;
+            ccache|distcc)
+                ci_log "[CI-ERROR-RUSTBUILD-0011]" "rc=${cargo_status} layer=${layers[0]} reason=\"configured accelerator outage; no fallback (AG-CI-007)\""
+                return 2 ;;
             sccache)
                 unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX
                 ci_log "[CI-WARN-RUSTBUILD-0013]" "reason=\"accelerator outage; retry without sccache\"" ;;
@@ -4456,10 +4461,8 @@ SH
       local_compiler="$1"
       shift
     else
-      echo "[CI-WARN-RUSTBUILD-0017] argv0=$0 reason=\"distcc wrapper: unknown invocation; default driver\"" >&2
-SH
-    printf '      real_compiler="%s"; local_compiler="%s"\n' "${1%%=*}" "${1#*=}"
-    cat <<'SH'
+      echo "[CI-ERROR-RUSTBUILD-0017] argv0=$0 reason=\"distcc wrapper: unknown invocation\"" >&2
+      exit 1
     fi
     ;;
 esac
@@ -4598,15 +4601,6 @@ _ci_rb_sccache() {
     fi
 }
 
-# What: drop distcc: pump off, env unset, PATH restored.
-# Why: the next cargo run compiles C on the local host.
-# From: Issue #1683 | PR #1912
-_ci_rb_distcc_off() {
-    _ci_rust_stop_pump || return 1
-    unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_HOSTS_NO_PUMP DISTCC_FALLBACK INCLUDE_SERVER_PORT INCLUDE_SERVER_PID "${!_CI_RB_DRIVER_PATH[@]}"
-    PATH="${_CI_RB_PATH}"; export PATH
-}
-
 # What: write the farm compiler identity of a probe .o.
 # Why: ccache content-check misses a remote toolchain bump.
 # From: Issue #1683 | PR #1912
@@ -4655,8 +4649,8 @@ _ci_rb_distcc() {
             unset DISTCC_HOSTS
             local distcc_pump_env
             if ! distcc_pump_env="$(pump --startup 2>"${distcc_probe_dir}/distcc-pump.log")"; then
-                ci_error "[CI-WARN-RUSTBUILD-0023]" "reason=\"distcc pump unavailable; local C compiler\"" "$(cat "${distcc_probe_dir}/distcc-pump.log")"
-                _ci_rb_distcc_off; return 0
+                ci_error "[CI-ERROR-RUSTBUILD-0023]" "reason=\"distcc pump unavailable; no fallback (AG-CI-007)\"" "$(cat "${distcc_probe_dir}/distcc-pump.log")"
+                return 2
             fi
             eval "${distcc_pump_env}"
             local -a distcc_hosts_arr; read -ra distcc_hosts_arr <<<"${DISTCC_HOSTS:-}"
@@ -4671,22 +4665,13 @@ _ci_rb_distcc() {
         fi
         _ci_rb_write "${distcc_probe_dir}/distcc-probe.c" printf '%s\n' 'int main(void) { return 0; }' || return 2
         if ! cc -c "${distcc_probe_dir}/distcc-probe.c" -o "${distcc_probe_dir}/distcc-probe.o" >"${distcc_probe_dir}/distcc-probe.log" 2>&1; then
-            ci_error "[CI-WARN-RUSTBUILD-0024]" "reason=\"distcc probe failed; local C compiler\"" "$(cat "${distcc_probe_dir}/distcc-probe.log")"
-            _ci_rb_distcc_off; return 0
+            ci_error "[CI-ERROR-RUSTBUILD-0024]" "reason=\"distcc probe failed; no fallback (AG-CI-007)\"" "$(cat "${distcc_probe_dir}/distcc-probe.log")"
+            return 2
         fi
         _ci_rb_remote_toolchain_id "${distcc_probe_dir}/distcc-probe.o"
     else
         ci_log "[CI-INFO-RUSTBUILD-0025]" "reason=\"distcc off; no distcc_potential_hosts secret\""
     fi
-}
-
-# What: drop ccache: env unset, drivers exported plain.
-# Why: the next cargo run compiles through plain distcc.
-# From: Issue #1683 | PR #1912
-_ci_rb_ccache_off() {
-    _CI_RB_CCACHE=0
-    unset CCACHE_REMOTE_STORAGE CCACHE_DIR CCACHE_COMPILERCHECK CCACHE_PREFIX CCACHE_EXTRAFILES CCACHE_BASEDIR
-    _ci_rb_export_drivers
 }
 
 # What: wrap distcc with ccache (Redis) once distcc is up.
@@ -4725,16 +4710,16 @@ _ci_rb_ccache() {
         local ccache_probe_cache_dir="${ccache_probe_dir}/probe-cache"
         _ci_run "[CI-ERROR-RUSTBUILD-0065]" "dir=\"${ccache_probe_cache_dir}\" reason=\"ccache probe dir not created\"" mkdir -p "${ccache_probe_cache_dir}" || return 2
         if ! ( cd "${ccache_probe_dir}" && CCACHE_DIR="${ccache_probe_cache_dir}" ccache "${_CI_RB_DRIVER_PATH[${_CI_RB_PAIRS%%=*}]}" -c ccache-probe.c -o ccache-probe.o ) >"${ccache_probe_dir}/ccache-probe.log" 2>&1; then
-            ci_error "[CI-WARN-RUSTBUILD-0028]" "reason=\"ccache probe failed; plain distcc\"" "$(cat "${ccache_probe_dir}/ccache-probe.log")"
-            _ci_rb_ccache_off; return 0
+            ci_error "[CI-ERROR-RUSTBUILD-0028]" "reason=\"ccache probe failed; no fallback (AG-CI-007)\"" "$(cat "${ccache_probe_dir}/ccache-probe.log")"
+            return 2
         fi
         local stats stat_err stat_ok
         stats="$(CCACHE_DIR="${ccache_probe_cache_dir}" _ci_run "[CI-ERROR-RUSTBUILD-0057]" "reason=\"ccache probe stats not readable\"" ccache --print-stats)" || return 2
         stat_err="$(_ci_capture 1 grep -E '^remote_storage_error[[:space:]]+[1-9]' <<< "${stats}")" || return 2
         stat_ok="$(_ci_capture 1 grep -E '^remote_storage_(write|hit)[[:space:]]+[1-9]' <<< "${stats}")" || return 2
         if [ -n "${stat_err}" ] || [ -z "${stat_ok}" ]; then
-            ci_error "[CI-WARN-RUSTBUILD-0029]" "reason=\"ccache redis round trip failed; plain distcc\"" "${stats}"
-            _ci_rb_ccache_off; return 0
+            ci_error "[CI-ERROR-RUSTBUILD-0029]" "reason=\"ccache redis round trip failed; no fallback (AG-CI-007)\"" "${stats}"
+            return 2
         fi
     else
         if [ "${_CI_RB_DISTCC}" != "1" ]; then
@@ -4814,7 +4799,7 @@ ci_cmd_rust_build() {
     _ci_list_has "host: ${musl_target}" "${rustc_info}" || { ci_error "[CI-ERROR-RUSTBUILD-0006]" "target=\"${musl_target}\" arg=\"${CI_ARG_TARGET}\" reason=\"target is not the build-tools rustc host\"" "${rustc_info}"; return 2; }
     local masq p distcc_bin sccache_bin
     local -a drivers=()
-    _CI_RB_DISTCC=0 _CI_RB_CCACHE=0 _CI_RB_CA=0 _CI_RB_PATH="${PATH}"
+    _CI_RB_DISTCC=0 _CI_RB_CCACHE=0 _CI_RB_CA=0
     _CI_RB_DRIVER_PATH=()
     trap _ci_rust_build_cleanup EXIT
     _CI_RB_ACC="$(_ci_mktemp -d -p "${CI_TMPDIR}")" || return 2
@@ -4885,8 +4870,8 @@ ci_cmd_rust_build() {
     while IFS= read -r s; do
         [ -z "${s}" ] || _ci_run "[CI-ERROR-RUSTBUILD-0044]" "file=\"${s}\" reason=\"stub not removed\"" rm -f -- "${s}" || return 2
     done <<< "${stubs}"
-    # What: show ccache stats; a Redis error only warns.
-    # Why: binary correct; only cache reuse degraded.
+    # What: show ccache stats; a Redis error fails.
+    # Why: AG-CI-007: a dead cache level must not pass.
     # From: Issue #1683 | PR #1912
     if [ "${_CI_RB_CCACHE}" = 1 ]; then
         local stats final_err
@@ -4894,7 +4879,8 @@ ci_cmd_rust_build() {
         printf '%s\n' "${stats}"
         final_err="$(_ci_capture 1 grep -E '^remote_storage_error[[:space:]]+[1-9]' <<< "${stats}")" || return 2
         if [ -n "${final_err}" ]; then
-            ci_error "[CI-WARN-RUSTBUILD-0041]" "reason=\"ccache redis error during the build; binary unaffected\"" "${stats}"
+            ci_error "[CI-ERROR-RUSTBUILD-0041]" "reason=\"ccache redis error during the build\"" "${stats}"
+            return 2
         fi
     fi
     # What: copy each binary to <crate>-out in the WORKDIR.
@@ -6238,7 +6224,7 @@ _ci_promote_rollback() {
         [ -n "${line}" ] || continue
         svc="${line%%=*}"; prev="${line#*=}"
         if [ -z "${prev}" ]; then
-            ci_log "[CI-WARN-PROMOTE-0022]" "service=\"${svc}\" channel=\"${channel}\" reason=\"no earlier digest to restore; ref stays\""
+            ci_log "[CI-ERROR-PROMOTE-0022]" "service=\"${svc}\" channel=\"${channel}\" reason=\"no earlier digest to restore; ref stays, channel is mixed\""
             continue
         fi
         if ! _ci_promote_move "${svc}" "${channel}" "${prev}"; then
@@ -6411,9 +6397,8 @@ _ci_release_record_stale() {
         0) ;;
         1) printf '%s: %s is not an ancestor of %s\n' "${name}" "${commit}" "${target}"; return 0 ;;
         *)
-            ci_error "[CI-WARN-RELEASE-0019]" "commit=\"${commit}\" target=\"${target}\" reason=\"ancestry check failed\"" "${anc_err}"
-            printf '%s: diff from %s not reconstructable\n' "${name}" "${commit}"
-            return 0
+            ci_error "[CI-ERROR-RELEASE-0019]" "commit=\"${commit}\" target=\"${target}\" reason=\"ancestry check failed\"" "${anc_err}"
+            return 2
             ;;
     esac
     for p in "${gov[@]}"; do
@@ -7518,18 +7503,22 @@ _ci_validate_compose_images() {
     jq -r '.services | to_entries[] | [.key, .value.image] | @tsv' <<< "${raw}"
 }
 
-# What: Warn on candidates without a first-party image.
-# Why: Third-party images stay visible, never silent.
+# What: Fail on candidates without a first-party image.
+# Why: AG-VAL-001: an unvalidated digest is no pass.
 # From: Issue #1683 | PR #1858
 _ci_validate_report_unpinned() {
-    local candidate="$1" matched="$2" slug _digest
+    local candidate="$1" matched="$2" slug _digest rc=0
     while IFS='=' read -r slug _digest; do
         [ -n "${slug}" ] || continue
         case "${matched}" in
             *" ${slug} "*) : ;;
-            *) ci_log "[CI-WARN-VALIDATE-0008]" "unpinned=\"${slug}\" reason=\"candidate service has no first-party image in compose\"" ;;
+            *)
+                ci_log "[CI-ERROR-VALIDATE-0008]" "unpinned=\"${slug}\" reason=\"candidate service has no first-party image in compose\""
+                rc=2
+                ;;
         esac
     done <<< "${candidate}"
+    return "${rc}"
 }
 
 # What: Print a compose override pinning first-party images.
