@@ -2,7 +2,8 @@
 {# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
 {# What: tail of the central syslog-ng store, per host.
-   Why: every container logs there; one view covers all. #}
+   Why: every container logs there; one view covers all.
+   From: Issue #1683 | PR #1912 #}
 {% extends "base.html" %}
 {% block title %} – Logs{% endblock %}
 
@@ -80,7 +81,7 @@
         <tbody class="rows">
           {% if syslog_logs %}
           {% for entry in syslog_logs %}
-          <tr class="hover:bg-slate-700/20 transition-colors">
+          <tr>
             <td class="px-4 py-2 text-slate-500 font-mono">{{ entry.timestamp }}</td>
             <td class="px-4 py-2 text-blue-400 font-mono">{{ entry.host }}</td>
             <td class="px-4 py-2 text-slate-300 font-mono">{{ entry.program }}</td>

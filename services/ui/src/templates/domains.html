@@ -417,7 +417,7 @@
               </thead>
               <tbody class="rows">
                 {% for snapshot in group.snapshots %}
-                <tr class="hover:bg-slate-700">
+                <tr>
                   <td class="py-2 text-white">
                     <time data-epoch="{{ snapshot.created_unix }}">{{ snapshot.created_unix }}</time>
                   </td>

@@ -3,6 +3,7 @@
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
 {# What: root layout: dock nav, beambar, admin.css #}
 {# Why: child templates extend it and override the blocks #}
+{# From: Issue #1683 | PR #1912 #}
 
 {# What: one link of the section tab bar #}
 {# Why: one class string and active rule for all tabs #}
@@ -180,7 +181,7 @@
     }
     .theme-toggle:hover { color: var(--color-text); border-color: var(--color-accent-gold); }
 
-    /* What: buttons, tabs, table head cells, row lines
+    /* What: buttons, tabs, table head cells and rows
        Why: one owner for styles repeated across the pages
        From: Issue #1683 | PR #1912 */
     .btn {
@@ -210,9 +211,12 @@
     .tab.active { border-bottom-color: #3b82f6; color: #93c5fd; }
     .th { text-align: left; padding-top: 0.5rem; padding-bottom: 0.5rem; font-weight: 500; color: #cbd5e1; border-bottom: 1px solid #334155; }
     .rows > tr + tr { border-top: 1px solid rgba(51, 65, 85, 0.5); }
+    .rows > tr { transition: background-color 0.15s; }
+    .rows > tr:hover { background-color: rgba(51, 65, 85, 0.3); }
     :root[data-theme="light"] .btn-slate { background-color: var(--color-surface-raised); color: var(--color-text); }
     :root[data-theme="light"] .th { color: var(--color-text); border-bottom-color: var(--color-border); }
     :root[data-theme="light"] .rows > tr + tr { border-top-color: var(--color-border); }
+    :root[data-theme="light"] .rows > tr:hover { background-color: var(--color-surface-raised); }
   </style>
   <script>
     // What: set data-theme before the first paint

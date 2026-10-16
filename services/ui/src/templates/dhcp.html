@@ -417,7 +417,7 @@
         </thead>
         <tbody class="rows">
           {% for lease in leases %}
-          <tr class="hover:bg-slate-700">
+          <tr>
             <td class="py-2 text-white">{{ lease.ip }}</td>
             <td class="py-2 text-slate-300">{{ lease.mac }}</td>
             <td class="py-2 text-slate-300">{{ lease.hostname }}</td>
@@ -470,7 +470,7 @@
         </thead>
         <tbody class="rows">
           {% for snapshot in kea_snapshots %}
-          <tr class="hover:bg-slate-700">
+          <tr>
             <td class="py-2 text-white">
               <span data-epoch="{{ snapshot.created_unix }}">{{ snapshot.created_unix }}</span>
             </td>

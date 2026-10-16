@@ -3,6 +3,7 @@
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
 {# What: Secondary DNS registration and management page #}
 {# Why: second tab of the DNS section next to domains #}
+{# From: Issue #1683 | PR #1912 #}
 {% extends "base.html" %}
 {% block title %} – Secondary{% endblock %}
 
@@ -74,7 +75,7 @@
         </thead>
         <tbody class="rows">
           {% for secondary in secondaries %}
-          <tr class="hover:bg-slate-700/50 transition-colors">
+          <tr>
             <td class="px-3 py-2 text-slate-200 font-mono">{{ secondary.name }}</td>
             <td class="px-3 py-2 text-slate-300">{{ secondary.consumer_name }}</td>
             <td class="px-3 py-2 text-slate-300 text-xs">

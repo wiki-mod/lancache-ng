@@ -3,6 +3,7 @@
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
 {# What: dashboard page: health, DHCP, cache, logs #}
 {# Why: extends base.html for the shared layout #}
+{# From: Issue #1683 | PR #1912 #}
 {% extends "base.html" %}
 {# What: one proxy card (HTTP or HTTPS), three counters #}
 {# Why: one copy; ids prefix-* feed the refresh script #}
@@ -251,7 +252,7 @@
         </thead>
         <tbody class="rows">
           {% for entry in recent_logs %}
-          <tr class="hover:bg-slate-700/30 transition-colors">
+          <tr>
             <td class="py-1.5 pr-4 text-blue-400 font-mono text-xs">{{ entry.host }}</td>
             <td class="py-1.5 pr-4 text-slate-300 font-mono text-xs max-w-xs truncate">{{ entry.path }}</td>
             <td class="py-1.5 pr-4">
