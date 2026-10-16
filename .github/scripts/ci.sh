@@ -5075,33 +5075,57 @@ _ci_trivy_db_lock_run() {
     return "${rc}"
 }
 
-# What: Ensure cache-dir's Trivy DB is present and fresh.
-# Why: Freshness != presence; skip-db-update needs proof.
+# What: trivy's own DB refresh, retried when transient.
+# Why: the shared retry owner; rc 6 names a DB outage.
+# From: Issue #1683
+_ci_trivy_db_download() {
+    local rc=0
+    _ci_retry trivy trivy image --download-db-only --cache-dir "$1" || rc=$?
+    [ "${rc}" -eq 0 ] || return 6
+}
+
+# What: Refresh cache-dir's Trivy DB right before the gate.
+# Why: AG-VAL-026: trivy's own check runs on every scan.
 # From: Issue #1683
 _ci_trivy_db_ensure_fresh() {
     local cache_dir="$1" rc=0
+    _ci_trivy_db_lock_run "${cache_dir}" -- _ci_trivy_db_download "${cache_dir}" || rc=$?
+    case "${rc}" in
+        0) ;;
+        6) ci_log "[CI-ERROR-SCAN-0034]" "dir=\"${cache_dir}\" reason=\"trivy DB refresh failed; no scan without a fresh DB\""; return 6 ;;
+        *) ci_log "[CI-ERROR-SCAN-0012]" "reason=\"locked DB refresh failed; refusing an unlocked concurrent write\""; return 2 ;;
+    esac
     if ! _ci_trivy_db_fresh "${cache_dir}"; then
-        _ci_trivy_db_lock_run "${cache_dir}" -- \
-            trivy image --download-db-only --cache-dir "${cache_dir}" || rc=$?
-        if [ "${rc}" -eq 2 ]; then
-            ci_log "[CI-ERROR-SCAN-0012]" "reason=\"locked DB refresh failed; refusing an unlocked concurrent write\""
-            return 2
-        fi
-        _ci_trivy_db_fresh "${cache_dir}" || { printf 'present=false\n'; return 0; }
+        ci_log "[CI-ERROR-SCAN-0035]" "dir=\"${cache_dir}\" reason=\"trivy DB is not fresh after its refresh\""
+        return 6
     fi
-    printf 'present=true\n'
+}
+
+# What: print the DB identity: version, update time, sha256.
+# Why: AG-VAL-026: a gate result names the exact DB it used.
+# From: Issue #1683
+_ci_trivy_db_record() {
+    local cache_dir="$1" meta ver upd sum
+    meta="${cache_dir}/db/metadata.json"
+    ver="$(_ci_capture 0 jq -r '.Version // empty' "${meta}")" || return 2
+    upd="$(_ci_capture 0 jq -r '.UpdatedAt // empty' "${meta}")" || return 2
+    sum="$(_ci_sha256_hex < "${cache_dir}/db/trivy.db")" || return 2
+    if [ -z "${ver}" ] || [ -z "${upd}" ] || [ -z "${sum}" ]; then
+        ci_error "[CI-ERROR-SCAN-0033]" "dir=\"${cache_dir}\" reason=\"trivy DB identity incomplete\"" ""
+        return 2
+    fi
+    printf 'trivy-db version=%s updated_at=%s sha256=%s\n' "${ver}" "${upd}" "${sum}"
 }
 
 # What: trivy image argv for one scan, one item per line
 # Why: one owner; a test runs it through the real trivy
 # From: Issue #1683 | PR #1858
 _ci_trivy_args() {
-    local cache_dir="$1" skip_db="$2" scanners ignore
+    local cache_dir="$1" scanners ignore
     scanners="$(_ci_variable CI_TRIVY_SCANNERS)" || return 2
     ignore="$(_ci_repo_path CI_TRIVY_IGNORE)" || return 2
     printf '%s\n' trivy image --severity HIGH,CRITICAL --exit-code "${_CI_TRIVY_FINDING_RC}" \
-        --scanners "${scanners}" --cache-dir "${cache_dir}"
-    [ "${skip_db}" -ne 1 ] || printf '%s\n' --skip-db-update
+        --scanners "${scanners}" --cache-dir "${cache_dir}" --skip-db-update
     [ ! -f "${ignore}" ] || printf '%s\n' --ignorefile "${ignore}"
     [ -z "${CI_TRIVY_TIMEOUT:-}" ] || printf '%s\n' --timeout "${CI_TRIVY_TIMEOUT}"
 }
@@ -5111,15 +5135,15 @@ _ci_trivy_args() {
 # From: Issue #1683 | PR #1858
 _ci_trivy_scan() {
     local service="$1" digest="$2" ref report rc=0 out
-    local cache_rec cache_dir fresh_rec present skip_db=0
+    local cache_rec cache_dir fresh_rc=0
     local -a targs
     cache_rec="$(_ci_trivy_cache_dir)" || return 2
     cache_dir="$(_ci_record_field "${cache_rec}" dir)" || return 2
-    fresh_rec="$(_ci_trivy_db_ensure_fresh "${cache_dir}")" || return 2
-    present="$(_ci_record_field "${fresh_rec}" present)" || return 2
-    [ "${present}" = "true" ] && skip_db=1
+    _ci_trivy_db_ensure_fresh "${cache_dir}" || fresh_rc=$?
+    [ "${fresh_rc}" -eq 0 ] || return "${fresh_rc}"
+    _ci_trivy_db_record "${cache_dir}" || return 2
     ref="$(_ci_image_ref "${service}" "${digest}")" || return 2
-    out="$(_ci_trivy_args "${cache_dir}" "${skip_db}")" || return 2
+    out="$(_ci_trivy_args "${cache_dir}")" || return 2
     mapfile -t targs <<< "${out}"
     report="$(_ci_mktemp "${CI_TMPDIR}/ci-trivy.XXXXXX")" || return 2
     _ci_retry trivy _ci_trivy_scan_once "${report}" "${ref}" "${targs[@]}" || rc=$?
@@ -5621,7 +5645,7 @@ _ci_scan_outcome() {
         1) ci_error "[CI-ERROR-SCAN-0005]" "service=\"${service}\" reason=\"scan reported findings\"" "${raw}"; return 2 ;;
         2) ci_error "[CI-ERROR-SCAN-0022]" "service=\"${service}\" reason=\"scan setup failed; not a finding\"" "${raw}"; return 2 ;;
         4) ci_error "[CI-ERROR-SCAN-0021]" "service=\"${service}\" reason=\"trivy run failed without a report; not a finding, escalate\"" "${raw}"; return 3 ;;
-        6) ci_error "[CI-ERROR-SCAN-0028]" "service=\"${service}\" reason=\"trivy DB missing or stale after the run; not a finding, escalate\"" "${raw}"; return 3 ;;
+        6) ci_error "[CI-ERROR-SCAN-0028]" "service=\"${service}\" reason=\"trivy DB refresh failed or DB stale; not a finding, escalate\"" "${raw}"; return 3 ;;
         *) ci_error "[CI-ERROR-SCAN-0023]" "service=\"${service}\" rc=${status} reason=\"unexpected scan status; not a finding, escalate\"" "${raw}"; return 3 ;;
     esac
 }
@@ -5676,8 +5700,16 @@ ci_cmd_scan() {
     [ -n "${digest}" ] || { ci_log "[CI-ERROR-SCAN-0002]" "reason=\"digest arg required\""; return 2; }
     [ -n "${platform}" ] || { ci_log "[CI-ERROR-SCAN-0029]" "reason=\"platform arg required\""; return 2; }
     _ci_require_ghcr_auth || return "$?"
-    local raw status orc=0 rrc=0
+    local raw status orc=0 rrc=0 line dbrec=""
     if raw="$(TMPDIR="${CI_TMPDIR}" _ci_trivy_scan "${service}" "${digest}" 2>&1)"; then status=0; else status=$?; fi
+    # What: the DB identity line _ci_trivy_scan printed.
+    # Why: AG-VAL-026: it goes into the scan result.
+    # From: Issue #1683
+    while IFS= read -r line; do
+        case "${line}" in
+            "trivy-db "*) dbrec="${line#trivy-db }" ;;
+        esac
+    done <<< "${raw}"
     _ci_scan_outcome "${service}" "${status}" "${raw}" || orc=$?
     # What: the report follows the verdict, no more.
     # Why: a failed write must not hide a finding.
@@ -5685,7 +5717,7 @@ ci_cmd_scan() {
     _ci_scan_report "${service}" "${platform}" "${status}" "${raw}" || rrc=$?
     [ "${orc}" -eq 0 ] || return "${orc}"
     [ "${rrc}" -eq 0 ] || return "${rrc}"
-    printf 'service=%s scanned=clean digest=%s tmpdir=%s\n' "${service}" "${digest}" "${CI_TMPDIR}"
+    printf 'service=%s scanned=clean digest=%s tmpdir=%s trivy_db="%s"\n' "${service}" "${digest}" "${CI_TMPDIR}" "${dbrec}"
 }
 
 # What: scan every channel image, not only the built ones.

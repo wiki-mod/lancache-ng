@@ -491,6 +491,7 @@ a stated reason it has none (AG-VAL-029).
 | A `.trivyignore.yaml` entry not yielding a complete OpenVEX statement | `check vex-drift` |
 | Live pipe into an early-exit consumer under `pipefail` (exit 141) | `check shell-guards` |
 | Review chronology or stale line references in comments | `check comments` |
+| A comment, heredoc or YAML text block breaking the What/Why/From contract, or carrying a bare issue number (`.trivyignore.yaml` statements went unread) | `check comments` (CHECK-0128, CHECK-0078, CHECK-0080) |
 | A bats `[ ] && [ ]` check that cannot fail | `check bats-and-chain` |
 | `$?` read from an `if` instead of the command | `check shell-guards` |
 | An exit path losing its code, context or raw output | `check exit-evidence` |
@@ -515,6 +516,15 @@ recurrence:
   `_ci_head_commit`.
 - **A scheduled channel run building the default branch instead of its source ref**:
   `channel-checkout`.
+- **Validation env binding the SOT state root instead of the per-run root**
+  (compose then bound paths the runner does not have): `_ci_validation_env` takes
+  the root as its argument. No CI check detects a recurrence; only the live
+  `ci.sh validate` stack run exercises it, and a static guard would be a new
+  test, which needs a maintainer ACK.
+- **A Trivy gate reading an unrecorded or stale DB** (AG-VAL-026):
+  `_ci_trivy_db_ensure_fresh` runs trivy's own refresh before every scan and
+  `_ci_trivy_db_record` prints the DB version and sha256 into the scan result;
+  no check detects a skipped refresh.
 - **A scan of another image than the published digest**: `scan-stack` scans
   `_ci_published_digest`.
 - **Case-sensitive repository-name comparison**: `_ci_repo` lowercases.
