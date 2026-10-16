@@ -233,6 +233,11 @@ _ci_list_has() {
     return 1
 }
 
+# What: one line against an ERE: rc 0, 1 none, 2 bad ERE.
+# Why: a command rc; $? after [[ ]] is a condition (SC2319).
+# From: Issue #1683 | PR #1912
+_ci_re_test() { [[ "$1" =~ $2 ]]; }
+
 # What: any line of the text matches the ERE; 2 = bad ERE.
 # Why: one text-regex owner; no grep exit code to misread.
 # From: Issue #1683 | PR #1912
@@ -242,7 +247,7 @@ _ci_text_has() {
     re="$1"
     if [ "${icase}" -eq 1 ] && ! shopt -q nocasematch; then shopt -s nocasematch; own=1; fi
     while IFS= read -r line; do
-        if [[ "${line}" =~ ${re} ]]; then r=0; else r=$?; fi
+        if _ci_re_test "${line}" "${re}"; then r=0; else r=$?; fi
         if [ "${r}" -ne 1 ]; then break; fi
     done <<< "$2"
     if [ "${own}" -eq 1 ]; then shopt -u nocasematch; fi
@@ -6318,15 +6323,15 @@ ci_cmd_promote() {
 # Why: ref-driven policy; no channel logic in YAML.
 # From: Issue #1683
 _ci_promote_targets_for_ref() {
-    local ref="${GITHUB_REF:-}" requested="${CI_PROMOTE_REQUESTED_CHANNEL:-}" tag pre
+    local ref="${GITHUB_REF:-}" requested="${CI_PROMOTE_REQUESTED_CHANNEL:-}" tag prerelease
     {
         case "${ref}" in
             refs/heads/*) _ci_channels_where ref "${ref}" || return 2 ;;
             refs/tags/*)
                 tag="${ref#refs/tags/}"
-                pre="$(_ci_release_prerelease "${tag}")" || return "$?"
+                prerelease="$(_ci_release_prerelease "${tag}")" || return "$?"
                 printf '%s\n' "${tag}"
-                if [ "${pre}" = false ]; then _ci_channels_where release_tags true || return 2; fi
+                if [ "${prerelease}" = false ]; then _ci_channels_where release_tags true || return 2; fi
                 ;;
         esac
         if [ -n "${requested}" ] && [ "${requested}" != none ]; then
@@ -8832,7 +8837,10 @@ _ci_validate_kea_cmd() {
 # Why: setup.sh owns the judgement; ci.sh adds none
 # From: Issue #1683 | PR #1912
 _ci_kea_reply_check() {
-    _ci_run "$1" "$2" bash -c 'source "$1" && kea_reply_check "$2"' _ "${CI_REPO_ROOT}/setup.sh" "$3"
+    _ci_run "$1" "$2" bash -c "$(cat <<'PROG'
+source "$1" && kea_reply_check "$2"
+PROG
+        )" _ "${CI_REPO_ROOT}/setup.sh" "$3"
 }
 
 # What: Kea snapshot ids under <snapshot dir>, oldest first.
@@ -14677,7 +14685,10 @@ _ci_validate_host_tools() {
 # Why: the one owner; $1 env file or "", $2 state root.
 # From: Issue #1683 | PR #1912
 _ci_sot_compose_env() {
-    _ci_capture 0 bash -c 'source "$1" && sot_compose_env "$2" "$3"' _ "${CI_REPO_ROOT}/setup.sh" "${1:-}" "${2:-}"
+    _ci_capture 0 bash -c "$(cat <<'PROG'
+source "$1" && sot_compose_env "$2" "$3"
+PROG
+        )" _ "${CI_REPO_ROOT}/setup.sh" "${1:-}" "${2:-}"
 }
 
 # What: image coordinates of the compose images, KEY=VALUE.
@@ -15162,7 +15173,7 @@ _ci_check_setup_update_safety() {
     # What: no flow mutates install state before its pause.
     # Why: per function; the cmd_update window went stale.
     # From: Issue #1683 | PR #1858
-    pause_out="$(_ci_capture 0 awk '
+    pause_out="$(_ci_capture 0 awk "$(cat <<'PROG'
         /^[A-Za-z_][A-Za-z0-9_]*\(\) [({]/ { fn = $1; sub(/\(\).*/, "", fn); next }
         /^[[:space:]]*#/ { next }
         /pause_lancache_convergence_for_update/ { seen[fn] = 1; paused[fn] = 1; next }
@@ -15172,13 +15183,18 @@ _ci_check_setup_update_safety() {
         END {
             for (f in seen) { n++; if (pend[f] != "") { printf "%s mutates before its pause:\n%s", f, pend[f] } }
             if (n == 0) { print "no update flow calls pause_lancache_convergence_for_update" }
-        }' "${su}")" || return 2
+        }
+PROG
+        )" "${su}")" || return 2
     if [ -n "${pause_out}" ]; then
         viol+=("update must pause the convergence timer before mutating install state"$'\n'"${pause_out}")
     fi
     _ci_file_match "[CI-ERROR-CHECK-0185]" "reason=\"service stop not searched\"" "${su}" "systemctl stop \"\$CONVERGE_SERVICE_UNIT\"" -F \
         || { [ "$?" -eq 1 ] || return 2; viol+=("update must stop the active convergence service before mutating install state"); }
-    restore_out="$(_ci_capture 0 awk '/if ! \( cmd_backup --config "\$install_dir" \); then/{b=1;next} b&&/resume_lancache_convergence_after_update true/{r=1} b&&/die "Pre-update rollback backup failed/{d=1;b=0} END{if (!(r&&d)) print "missing"}' "${su}")" || return 2
+    restore_out="$(_ci_capture 0 awk "$(cat <<'PROG'
+/if ! \( cmd_backup --config "\$install_dir" \); then/{b=1;next} b&&/resume_lancache_convergence_after_update true/{r=1} b&&/die "Pre-update rollback backup failed/{d=1;b=0} END{if (!(r&&d)) print "missing"}
+PROG
+        )" "${su}")" || return 2
     if [ -n "${restore_out}" ]; then
         viol+=("update must restore the convergence timer when the rollback backup fails")
     fi

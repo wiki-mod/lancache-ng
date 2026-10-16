@@ -3650,8 +3650,8 @@ install_missing_tools() {
 # Why: existing state dirs; cache only in full mode
 backup_manifest() {
     local install_dir="$1" mode="$2"
-    local env_file cache_env_file
-    local cache_dir state_dir keys key dir sub bundle copy
+    local env_file="" cache_env_file="" state_dir=""
+    local cache_dir keys key dir sub bundle copy
     stack_env_context "$install_dir" env_file cache_env_file state_dir
     cache_dir=$(get_env_var CACHE_DIR "$env_file") || exit $?
     cache_dir="${cache_dir:-$state_dir/cache}"
@@ -3876,7 +3876,7 @@ backup_compose_volumes() {
             continue
         fi
         print_ok "Including Docker volume: $volume"
-        helper_volume_tar "$volume" "$volume_root" ":ro" "" 'cd /volume && tar -cpf "/backup/$1.tar" .' \
+        helper_volume_tar "$volume" "$volume_root" ":ro" "" "cd /volume && tar -cpf \"/backup/\$1.tar\" ." \
             || die "Failed to archive Docker volume $volume (exit $?)."
     done <<< "$volumes"
 }
@@ -3902,7 +3902,7 @@ restore_compose_volumes() {
         print_ok "Restoring Docker volume: $volume"
         docker volume create "$volume" \
             || die "Failed to create Docker volume $volume (exit $?)."
-        helper_volume_tar "$volume" "$volume_root" "" ":ro" 'set -e; tar -tf "/backup/$1.tar"; rm -rf /volume/* /volume/..?* /volume/.[!.]*; cd /volume; tar -xpf "/backup/$1.tar"' \
+        helper_volume_tar "$volume" "$volume_root" "" ":ro" "set -e; tar -tf \"/backup/\$1.tar\"; rm -rf /volume/* /volume/..?* /volume/.[!.]*; cd /volume; tar -xpf \"/backup/\$1.tar\"" \
             || die "Failed to restore Docker volume $volume from $archive (exit $?). Rerun the restore; the archive is unchanged."
     done <<< "$archives"
 }
@@ -5532,7 +5532,7 @@ cmd_create_logs_for_issue() (
     dest_root=$(realpath -m "$dest_root")
     install_missing_tools tar
 
-    local env_file cache_env_file state_dir
+    local env_file="" cache_env_file="" state_dir=""
     stack_env_context "$install_dir" env_file cache_env_file state_dir
 
     local -a env_files=("$env_file")
@@ -6783,6 +6783,11 @@ else
 fi
 printf "\n"
 
+# What: both LAN IPs start empty before they are asked
+# Why: ask_checked fills them by name; the init shows it
+# From: Issue #1683 | PR #1912
+IP_HTTP=""
+IP_HTTPS=""
 ask_checked IP_HTTP "Server IP (HTTP mode)" "$detected_ip" is_valid_ipv4 "Invalid IPv4 address"
 
 printf "\n"
