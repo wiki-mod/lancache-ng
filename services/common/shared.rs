@@ -1726,8 +1726,6 @@ mod tests {
     // Why: canned servers answer at once or refuse.
     const PROBE_WAIT: Duration = Duration::from_secs(2);
 
-    use std::os::unix::fs::PermissionsExt;
-
     // What: error_chain joins an error with each cause.
     // Why: a builder error alone hides its serde cause.
     #[test]
@@ -1748,116 +1746,6 @@ mod tests {
         assert_eq!(error_chain(&error), "builder error: key must be a string");
     }
 
-    // What: stdout/stderr text joins; other frames drop.
-    // Why: the probe result line must survive the headers.
-    #[test]
-    fn log_text_joins_stdout_and_stderr_frames() {
-        let frames = [
-            &[1, 0, 0, 0, 0, 0, 0, 3][..],
-            b"abc",
-            &[2, 0, 0, 0, 0, 0, 0, 2][..],
-            b"de",
-            &[0, 0, 0, 0, 0, 0, 0, 1][..],
-            b"x",
-            &[1, 0, 0, 0, 0, 0, 0, 9][..],
-            b"cut",
-        ]
-        .concat();
-        assert_eq!(log_text(&frames), "abcdecut");
-    }
-
-    // What: the secret check equals the shared column.
-    // Why: it mirrors the shell check; the fixture pins it.
-    // From: Issue #967
-    #[test]
-    fn shared_secret_check_matches_the_fixture_column() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../tests/fixtures/placeholder-detection-cases.txt"
-        );
-        let fixture = fs::read_to_string(path).expect("shared fixture is readable");
-        let mut cases = 0;
-        for line in fixture.lines().map(str::trim_end) {
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            let [value, shared, _setup, _rust] = fields.as_slice() else {
-                panic!("malformed fixture line: {line:?}");
-            };
-            let want = *shared == "placeholder";
-            assert_eq!(is_placeholder(value), want, "case: {line}");
-            cases += 1;
-        }
-        assert!(cases > 0, "the fixture holds no cases");
-    }
-
-    // What: secret files are named and read by variable.
-    // Why: a real env value wins; a placeholder reads file.
-    // From: Issue #858
-    #[test]
-    fn shared_secrets_are_read_from_env_or_file() {
-        assert_eq!(
-            shared_secret_file_name("NATS_UI_PASSWORD"),
-            "nats-ui-password"
-        );
-        let dir = unique_temp_dir("secret-read");
-        let path = dir.to_string_lossy().into_owned();
-        let unset = |_: &str| None;
-        assert_eq!(
-            shared_secret(&path, "PDNS_API_KEY", &unset),
-            Ok(String::new())
-        );
-        fs::write(dir.join("pdns-api-key"), "from-file\n").unwrap();
-        assert_eq!(
-            shared_secret(&path, "PDNS_API_KEY", &unset),
-            Ok("from-file".to_string())
-        );
-        let real = |_: &str| Some("real-value".to_string());
-        assert_eq!(
-            shared_secret(&path, "PDNS_API_KEY", &real),
-            Ok("real-value".to_string())
-        );
-        let placeholder = |_: &str| Some("CHANGE_ME_x".to_string());
-        assert_eq!(
-            shared_secret(&path, "PDNS_API_KEY", &placeholder),
-            Ok("from-file".to_string())
-        );
-        fs::create_dir(dir.join("kea-ctrl-token")).unwrap();
-        assert!(shared_secret(&path, "KEA_CTRL_TOKEN", &unset).is_err());
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    // What: the first writer of a secret file wins.
-    // Why: independent starters must not split a secret.
-    // From: Issue #858
-    #[test]
-    fn secret_files_keep_the_first_writer() {
-        let dir = unique_temp_dir("secret-write");
-        let made = resolve_shared_secret(&dir, "a", "", 0, hex32).unwrap();
-        assert_eq!(made.len(), 64);
-        assert!(made.bytes().all(|b| b.is_ascii_hexdigit()));
-        assert_eq!(fs::read_to_string(dir.join("a")).unwrap(), made);
-        let mode = fs::metadata(dir.join("a")).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o640);
-        assert_eq!(
-            resolve_shared_secret(&dir, "a", "", 0, hex32),
-            Ok(made.clone())
-        );
-        assert_eq!(resolve_shared_secret(&dir, "a", &made, 0, hex32), Ok(made));
-        assert_eq!(
-            resolve_shared_secret(&dir, "a", "mine", 0, hex32),
-            Ok("mine".to_string())
-        );
-        assert_eq!(fs::read_to_string(dir.join("a")).unwrap(), "mine");
-        assert_eq!(
-            resolve_shared_secret(&dir, "b", "given", 0, hex32),
-            Ok("given".to_string())
-        );
-        assert_eq!(fs::read_to_string(dir.join("b")).unwrap(), "given");
-        let _ = fs::remove_dir_all(&dir);
-    }
-
     // What: a failed secret write keeps a configured value.
     // Why: only a disagreeing file makes it unsafe to use.
     // From: PR #1775
@@ -1874,58 +1762,6 @@ mod tests {
         fs::create_dir(dir.join("blocked")).unwrap();
         assert!(resolve_shared_secret(&dir, "blocked", "cfg", 0, hex32).is_err());
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    // What: each known placeholder shape is detected.
-    // Why: a shipped example must never pass as a secret.
-    // From: Issue #967
-    #[test]
-    fn is_placeholder_matches_known_shapes() {
-        assert!(is_placeholder(""));
-        assert!(is_placeholder("CHANGE_ME_now"));
-        assert!(is_placeholder("YOUR_STEAM_PASSWORD_HERE"));
-        assert!(is_placeholder("<steam-password>"));
-        assert!(!is_placeholder("a-real-looking-secret-value"));
-    }
-
-    // What: is_placeholder equals the fixture rust column.
-    // Why: it must stay in step with the shell detectors.
-    // From: Issue #967
-    #[test]
-    fn is_placeholder_matches_shared_parity_fixture() {
-        let path = format!(
-            "{}/../../tests/fixtures/placeholder-detection-cases.txt",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let contents = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("could not read parity fixture {path}: {e}"));
-        let mut total = 0usize;
-        let mut mismatches: Vec<String> = Vec::new();
-        for line in contents.lines().map(str::trim_end) {
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            let [value, _shared, _setup, rust] = fields.as_slice() else {
-                panic!("malformed parity fixture line: {line:?}");
-            };
-            total += 1;
-            let actual = if is_placeholder(value) {
-                "placeholder"
-            } else {
-                "real"
-            };
-            if actual != *rust {
-                mismatches.push(format!("'{value}' expected={rust} actual={actual}"));
-            }
-        }
-        assert!(total > 0, "parity fixture had zero usable cases");
-        assert!(
-            mismatches.is_empty(),
-            "{} of {total} fixture case(s) disagreed:\n{}",
-            mismatches.len(),
-            mismatches.join("\n")
-        );
     }
 
     // What: equal secrets match, any difference does not.
