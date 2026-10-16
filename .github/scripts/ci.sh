@@ -12370,11 +12370,12 @@ _ci_check_comments() {
         ci_error "[CI-ERROR-CHECK-0128]" "scanned=${#todo[@]} reason=\"comment contract violations\"" "$(printf '%s\n' "${size[@]}")"
         rc=1
     fi
-    # What: dup #N outside From: is warn-only in every mode.
-    # Why: a genuine duplicate must warn, never block.
-    # From: Issue #1683
+    # What: a bare #N outside From: fails the check.
+    # Why: AG-VAL-001: a warning is no success.
+    # From: Issue #1683 | PR #1912
     if [ "${#dup[@]}" -gt 0 ]; then
-        ci_error "[CI-WARN-CHECK-0078]" "reason=\"bare #N duplicated outside From: (warn-only, PR #1856)\"" "$(printf '%s\n' "${dup[@]}")"
+        ci_error "[CI-ERROR-CHECK-0078]" "reason=\"bare #N duplicated outside From:\"" "$(printf '%s\n' "${dup[@]}")"
+        rc=1
     fi
     if [ "${#chron[@]}" -gt 0 ]; then
         if [ "${warn_only}" = 1 ]; then

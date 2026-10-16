@@ -4359,7 +4359,7 @@ EOF
             cat <<EOF
 Usage: ./setup.sh list-prompts [answers-file]
 
-Introspection mode for issue #1176: walks the install wizard's real,
+Introspection mode: walks the install wizard's real,
 current branch logic (the exact same code ./setup.sh install runs) and
 prints the ordered prompt sequence it would ask, one per line, as
 "PROMPT<TAB>text<TAB>default". Never touches the filesystem, network, or
@@ -4392,7 +4392,7 @@ EOF
             cat <<EOF
 Usage: ./setup.sh auto-update [install-dir]
 
-Scheduled entry point (#819), normally invoked by the lancache-auto-update
+Scheduled entry point, normally invoked by the lancache-auto-update
 systemd timer, not run directly by an operator. Does nothing unless
 AUTO_UPDATE_ENABLED=1 in .env AND the resolved release channel has actually
 moved to a new image set since the last update -- an unchanged channel is a
@@ -5123,7 +5123,7 @@ cmd_auto_update() {
     fi
 }
 
-# ── converge-reconcile subcommand (#819) ──────────────────────────────────────
+# ── converge-reconcile subcommand ─────────────────────────────────────────────
 # What: true if the UI channel is in the selectable list
 # Why: a retired or unknown name is a no-op on a tick
 lancache_ui_channel_override_is_valid() {
@@ -5683,7 +5683,7 @@ Contents:
 Every credential-shaped value (API keys, TSIG keys, passwords, tokens) has
 been replaced with [REDACTED] everywhere it could appear in this bundle.
 Review the contents before attaching this archive to a GitHub issue --
-automatic upload is intentionally not part of this tool (#762).
+automatic upload is intentionally not part of this tool.
 EOF
 
     ext=$(logbundle_select_compressor)
@@ -7359,7 +7359,7 @@ UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP}
 # DHCP_MODE=dnsmasq-relay; see docs/dhcp-modes.md.
 DHCP_RELAY_LOCAL_ADDR=${DHCP_RELAY_LOCAL_ADDR}
 
-# Issue #450: additional optional dnsmasq relay/proxy options, all empty by
+# Additional optional dnsmasq relay/proxy options, all empty by
 # default. Delivered only via the supplemental ProxyDHCP/PXE exchange to
 # PXE/network-boot-aware clients -- see docs/dhcp-modes.md.
 DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE}
