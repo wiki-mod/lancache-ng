@@ -52,7 +52,7 @@ services:
     # From: Issue #1683 | PR #1912
     description: "LanCache-NG services: supervisor for watchdog, retention, syslog-ng, chrony and Netdata."
     build_type: rust
-    # What: workspace crates (cargo -p) this image builds.
+    # What: crates (cargo -p) the services image builds.
     # Why: supervisor and cachehamster run in one container.
     # From: Issue #1683
     crates: [lancache-watchdog, lancache-cachehamster]
@@ -88,21 +88,15 @@ services:
     labels: [proxy, nginx]
     description: "LanCache-NG proxy: nginx cache for HTTP and TLS-interception traffic."
     build_type: rust
-    # What: workspace crates (cargo -p) this image builds.
+    # What: crates the proxy image builds.
     # Why: the supervisor renders, certifies and runs nginx.
     # From: Issue #1683
     crates: [lancache-watchdog]
-    # What: processes lancache-watchdog supervise runs.
-    # Why: ci.sh bakes them as LANCACHE_PROCESSES; one list.
-    # From: Issue #1683
     processes: [nginx]
     # What: runtime defaults the Dockerfile takes as args.
     # Why: the image builds with the value; it names none.
     # From: Issue #1683 | PR #1912
     default_args: [NGINX_DIR]
-    # What: accounts and dirs ci.sh image-setup creates.
-    # Why: no RUN logic in the Dockerfile; @KEY@ = default.
-    # From: Issue #1683 | PR #1912
     setup:
       - dir=@NGINX_DIR@/@NGINX_SUBDIR_CA@
       - dir=@NGINX_DIR@/@NGINX_SUBDIR_CERTS@
@@ -124,9 +118,6 @@ services:
     # From: Issue #1683 | PR #1858
     apk_keys:
       - https://nginx.org/keys/nginx_signing.rsa.pub=ff7cf138acc09f2a5029300ab713fe6a1440605fca72e2bab76a4da9206fec87
-    # What: execute-smoke checks run post-build by ci.sh.
-    # Why: prove apk binaries run, not just exist
-    # From: Issue #1613
     smoke:
       - 'v="$(nginx -V 2>&1)" && grep -q -- --with-stream_ssl_preread_module <<< "${v}"'
   dns:
@@ -134,29 +125,17 @@ services:
     labels: [dns, pdns, nats]
     description: "LanCache-NG dns: PowerDNS auth, dns-http and dns-https recursors, NATS server and subscriber."
     build_type: rust
-    # What: workspace crates (cargo -p) this image builds.
+    # What: crates the dns image builds.
     # Why: subscriber and supervisor run in one container.
     # From: Issue #1683
     crates: [nats-subscriber, lancache-watchdog]
-    # What: processes lancache-watchdog supervise runs.
-    # Why: ci.sh bakes them as LANCACHE_PROCESSES; one list.
-    # From: Issue #1683
     processes: [pdns, dns-http, dns-https, nats-server, nats-subscriber, soa]
-    # What: runtime defaults the Dockerfile takes as args.
-    # Why: the image builds with the value; it names none.
-    # From: Issue #1683 | PR #1912
     default_args: [CDN_DOMAINS_FILE, PDNS_LUA_DNS_SCRIPT, PDNS_SCHEMA_FILE]
-    # What: accounts and dirs ci.sh image-setup creates.
-    # Why: no RUN logic in the Dockerfile; @KEY@ = default.
-    # From: Issue #1683 | PR #1912
     setup:
       - dir=@PDNS_CONF_DIR@/auth
       - dir=@PDNS_DATA_DIR@:pdns
       - dir=@PDNS_RUN_DIR@:pdns
     final_base: alpine
-    # What: final-image apk packages; the SOT owns the list.
-    # Why: consumers derive; no hardcoding (AG-CI-006)
-    # From: Issue #1683
     packages:
       - pdns
       - pdns-backend-sqlite3
@@ -165,9 +144,6 @@ services:
       - bind-tools
       - sqlite
       - iproute2
-    # What: execute-smoke checks run post-build by ci.sh.
-    # Why: prove apk binaries run, not just exist
-    # From: Issue #1613
     smoke:
       - nats-server --version
   dhcp:
@@ -175,18 +151,12 @@ services:
     labels: [dhcp, kea, dnsmasq]
     description: "LanCache-NG dhcp: Kea DHCP with control agent and DDNS, or dnsmasq proxy/relay, plus the DHCP probe."
     build_type: rust
-    # What: workspace crates (cargo -p) this image builds.
+    # What: crates the dhcp image builds.
     # Why: the supervisor switches Kea and dnsmasq modes.
     # From: Issue #1683
     crates: [lancache-watchdog]
-    # What: processes lancache-watchdog supervise runs.
-    # Why: ci.sh bakes them as LANCACHE_PROCESSES; one list.
-    # From: Issue #1683
     processes: [kea-dhcp4, kea-ctrl-agent, kea-dhcp-ddns, dnsmasq, dhcp-probe]
     final_base: alpine
-    # What: final-image apk packages; the SOT owns the list.
-    # Why: consumers derive; no hardcoding (AG-CI-006)
-    # From: Issue #1683
     packages:
       - kea-dhcp4
       - kea-ctrl-agent
@@ -196,9 +166,6 @@ services:
       - dnsmasq
       - openssl
       - iptables
-    # What: execute-smoke checks run post-build by ci.sh.
-    # Why: prove apk binaries run, not just exist
-    # From: Issue #1613
     smoke:
       - kea-dhcp4 -v
       - lancache-watchdog probe
@@ -208,17 +175,11 @@ services:
     labels: [admin-ui]
     description: "lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
     build_type: rust
-    # What: workspace crates (cargo -p) this image builds.
+    # What: crates the ui image builds.
     # Why: rust checks target crates, not the build context
     # From: Issue #1683 | PR #1858
     crates: [lancache-ui]
-    # What: runtime defaults the Dockerfile takes as args.
-    # Why: the image builds with the value; it names none.
-    # From: Issue #1683 | PR #1912
     default_args: [TEMPLATE_DIR, UI_LISTEN_PORT]
-    # What: accounts and dirs ci.sh image-setup creates.
-    # Why: no RUN logic in the Dockerfile; @KEY@ = default.
-    # From: Issue #1683 | PR #1912
     setup:
       - group=@LOG_READER_GROUP@:@GID@
       - user=@LOG_READER_GROUP@:@GID@:@LOG_READER_GROUP@
@@ -1543,7 +1504,7 @@ pr_policy:
     - Do not post private keys, tokens, passwords, personal data, or private infrastructure details.
     - Security-sensitive reports should use the project's private security reporting channel.
   # What: welcome text for a first PR, one line per item
-  # Why: ci.sh welcome posts it; the text is data, not code
+  # Why: same path as welcome_issue; data, not code
   # From: Issue #1683 | PR #1858
   welcome_pr:
     - Thanks for opening your first pull request in lancache-ng.
