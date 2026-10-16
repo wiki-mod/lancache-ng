@@ -274,6 +274,12 @@ host_lan_addresses() {
     awk '$1 !~ /^127\./ && $1 !~ /^172\./' <<< "$addrs"
 }
 
+# What: reports a failed host_lan_addresses call, exit as $1
+# Why: three callers share one error text
+print_host_addresses_failed() {
+    print_error "Failed to list the IPv4 addresses of this host (exit $1)."
+}
+
 # What: internet-route source IP, else the first LAN IP
 # Why: the route source is right on multi-homed hosts
 # From: Issue #1683 | PR #1858
@@ -289,7 +295,7 @@ detect_lan_ip() {
     fi
 
     addrs=$(host_lan_addresses) \
-        || { print_error "Failed to list the IPv4 addresses of this host (exit $?)."; return 2; }
+        || { print_host_addresses_failed "$?"; return 2; }
     ip=$(awk 'NR == 1 { print $1 }' <<< "$addrs")
     if [[ -n "$ip" ]] && is_valid_ipv4 "$ip"; then
         printf '%s\n' "$ip"
@@ -327,7 +333,7 @@ secondary_suggest_alternate_listen_ip() {
     local current="$1" candidate addrs conflicts loopback_ip n count
 
     addrs=$(host_lan_addresses) \
-        || { print_error "Failed to list the IPv4 addresses of this host (exit $?)."; return 2; }
+        || { print_host_addresses_failed "$?"; return 2; }
     while read -r candidate _; do
         [[ -n "$candidate" ]] || continue
         [[ "$candidate" = "$current" ]] && continue
@@ -489,7 +495,7 @@ run_kea_dhcp_activation_preflight() {
     # What: one supervisor probe run in the dhcp image
     # Why: the same probe as the Admin UI; no extra package
     # From: Issue #1683 | PR #1912
-    if ! output=$(sot_compose --env-file "$env_file" -f "$PROD_COMPOSE" run --rm --no-deps dhcp \
+    if ! output=$(sot_compose "$env_file" -f "$PROD_COMPOSE" run --rm --no-deps dhcp \
         probe) || ! status=$(json_value .status "$output") || [[ "$status" = unavailable || -z "$status" ]]; then
         print_warn "DHCP discovery preflight could not be executed inside the dhcp image."
         print_warn "Kea activation will require an explicit confirmation because the safety check did not complete."
@@ -1141,16 +1147,23 @@ env_key_has_value() {
     [[ -n "$value" ]]
 }
 
-# What: true for empty, CHANGE_ME_* and similar placeholders
-# Why: setup replaces placeholders, not keeps them
+# What: true for empty, CHANGE_ME_*, <...> and alike
+# Why: shared.rs rule; plain sh, the dns exec embeds it
 secret_value_is_placeholder() {
-    local value="$1"
-    local normalized="${value,,}"
-    normalized="${normalized//-/_}"
+    local value="$1" normalized
+    normalized=$(printf '%s' "$value" | tr '[:upper:]-' '[:lower:]_')
     case "$normalized" in
-        ""|change_me_*|your_*_here|changeme*|*change_me*|lancache_*_secret)
+        ""|*change_me*|changeme*|your_*|*_here)
             return 0
             ;;
+        lancache_*)
+            case "$normalized" in
+                *_secret) return 0 ;;
+            esac
+            ;;
+    esac
+    case "$value" in
+        "<"*">") return 0 ;;
     esac
     return 1
 }
@@ -1622,7 +1635,7 @@ stack_compose() {
     local -a stack_files
     shift 2
     compose_files_into stack_files "$install_dir"
-    sot_compose --env-file "$env_file" "${stack_files[@]}" "$@"
+    sot_compose "$env_file" "${stack_files[@]}" "$@"
 }
 
 # What: sorted entries of a volume/dir: mode, owner, hash
@@ -1780,15 +1793,16 @@ quickstart_volume_dirs() {
 }
 
 # What: a state key's dir: its value, else root/subdir
-# Why: compose falls back to LANCACHE_STATE_DIR/<subdir>
+# Why: the one owner of the default; no env file = root only
 # From: Issue #1683 | PR #1858
 prod_state_dir_for_key() {
-    local key="$1" env_file="$2" state="${3:-}" dir sub
-    dir=$(get_env_var "$key" "$env_file") || die "Cannot read $key from $env_file (exit $?)."
+    local key="$1" env_file="$2" state="${3:-}" dir="" sub
+    [[ -z "$env_file" ]] || dir=$(get_env_var "$key" "$env_file") \
+        || die "Cannot read $key from $env_file (exit $?)."
     if [[ -z "$dir" ]]; then
-        [[ -n "$state" ]] || state=$(get_env_var LANCACHE_STATE_DIR "$env_file") \
+        [[ -n "$state" || -z "$env_file" ]] || state=$(get_env_var LANCACHE_STATE_DIR "$env_file") \
             || die "Cannot read LANCACHE_STATE_DIR from $env_file (exit $?)."
-        [[ -n "$state" ]] || die "$env_file sets no LANCACHE_STATE_DIR."
+        [[ -n "$state" ]] || die "No LANCACHE_STATE_DIR for $key (env file: ${env_file:-none})."
         sub=$(prod_state_subdir "$key") || die "Cannot read the default directory of $key (exit $?)."
         dir="$state/$sub"
     fi
@@ -2007,9 +2021,15 @@ rollback_quickstart_migration() {
 # From: Issue #1683 | PR #1858
 write_lancache_systemd_units() {
     local stack_dir="$1" setup_sh="$SCRIPT_DIR/setup.sh" unit_dir
-    local docker_unit="docker.service" timer_target="timers.target" converge_minutes
+    local docker_unit="docker.service" timer_target="timers.target" defaults
+    local converge_minutes boot_minutes restart_seconds update_calendar update_spread
     unit_dir=$(lancache_sot_value unit_dir runner_host) || exit $?
-    converge_minutes=$(prod_env_default CONVERGE_TIMER_INTERVAL_MINUTES) || exit $?
+    defaults=$(runtime_defaults_list) || exit $?
+    converge_minutes=$(runtime_default_in "$defaults" CONVERGE_TIMER_INTERVAL_MINUTES) || exit $?
+    boot_minutes=$(runtime_default_in "$defaults" CONVERGE_TIMER_BOOT_DELAY_MINUTES) || exit $?
+    restart_seconds=$(runtime_default_in "$defaults" STACK_UNIT_RESTART_SECONDS) || exit $?
+    update_calendar=$(runtime_default_in "$defaults" AUTO_UPDATE_TIMER_CALENDAR) || exit $?
+    update_spread=$(runtime_default_in "$defaults" AUTO_UPDATE_TIMER_SPREAD) || exit $?
     # What: units run compose through setup.sh at run time
     # Why: overrides may change after the unit is written
     # From: Issue #1683 | PR #1858
@@ -2027,7 +2047,7 @@ WorkingDirectory=${stack_dir}
 ExecStart=${compose} up -d
 ExecStop=${compose} down
 Restart=on-failure
-RestartSec=10
+RestartSec=${restart_seconds}
 
 [Install]
 WantedBy=multi-user.target
@@ -2051,7 +2071,7 @@ EOF
 Description=LanCache-NG Convergence Timer
 
 [Timer]
-OnBootSec=2min
+OnBootSec=${boot_minutes}min
 OnUnitActiveSec=${converge_minutes}min
 Unit=${CONVERGE_SERVICE_UNIT}
 
@@ -2080,8 +2100,8 @@ EOF
 Description=LanCache-NG Scheduled Automatic Update Timer
 
 [Timer]
-OnCalendar=daily
-RandomizedDelaySec=1h
+OnCalendar=${update_calendar}
+RandomizedDelaySec=${update_spread}
 Persistent=true
 Unit=${AUTO_UPDATE_SERVICE_UNIT}
 
@@ -2292,28 +2312,34 @@ runtime_default_in() {
         || die "The SOT runtime.defaults holds no default for $2."
 }
 
-# What: the SOT_<KEY>=value row of each compose key
-# Why: one owner; ci.sh reads it from here, not a copy
+# What: compose env rows: SOT_<KEY> and each state dir
+# Why: one owner; compose and ci.sh get resolved paths
 # From: Issue #1683 | PR #1912
 sot_compose_env() {
-    local keys key value list
+    local env_file="${1:-}" state="${2:-}" keys key value list dir
     keys=$(lancache_sot_value compose_keys runtime) || exit $?
     list=$(runtime_defaults_list) || exit $?
     for key in $keys; do
         value=$(runtime_default_in "$list" "$key") || exit $?
         printf 'SOT_%s=%s\n' "$key" "$value"
     done
+    keys=$(prod_state_keys) || exit $?
+    for key in $keys; do
+        dir=$(prod_state_dir_for_key "$key" "$env_file" "$state") || exit $?
+        printf '%s=%s\n' "$key" "$dir"
+    done
 }
 
-# What: docker compose with compose_keys as SOT_<KEY>
+# What: docker compose with the env file and SOT rows
 # Why: compose names no path, port or default of its own
 # From: Issue #1683 | PR #1912
 sot_compose() {
-    local rows
+    local env_file="$1" rows
     local -a sot_env=()
-    rows=$(sot_compose_env) || exit $?
+    shift
+    rows=$(sot_compose_env "$env_file") || exit $?
     mapfile -t sot_env <<< "$rows"
-    env "${sot_env[@]}" docker compose "$@"
+    env "${sot_env[@]}" docker compose --env-file "$env_file" "$@"
 }
 
 # What: "svc KEY [TARGET]" rows moved out of config/prod
@@ -3460,8 +3486,6 @@ migrate_env_for_update() (
     # Why: DHCP_MODE owns the choice; nothing reads the key
     # From: Issue #1683 | PR #1912
     remove_env_key DHCP_ENABLED "$env_file"
-    ip_http=$(get_env_var IP_HTTP "$env_file") || exit $?
-    ip_https=$(get_env_var IP_HTTPS "$env_file") || exit $?
     dhcp_subnet_start=$(get_env_var DHCP_SUBNET_START "$env_file") || exit $?
     dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$env_file") || exit $?
     dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file") || exit $?
@@ -3481,14 +3505,13 @@ migrate_env_for_update() (
         dnsmasq-proxy)
             is_dnsmasq_subnet_start "$dhcp_subnet_start" \
                 || die "DHCP_MODE=dnsmasq-proxy requires a proxy-DHCP subnet start ending in .0 in $env_file. Set the subnet base for your LAN, then rerun setup.sh update."
-            is_valid_ipv4 "$dhcp_dns_primary" \
-                || die "DHCP_MODE=dnsmasq-proxy requires a real DHCP_DNS_PRIMARY in $env_file. Set the DNS option that proxy-DHCP/PXE clients should receive, then rerun setup.sh update."
-            if [[ -z "$dhcp_dns_secondary" ]]; then
-                dhcp_dns_secondary="$dhcp_dns_primary"
-            else
-                is_valid_ipv4 "$dhcp_dns_secondary" \
-                    || die "DHCP_MODE=dnsmasq-proxy has invalid DHCP_DNS_SECONDARY in $env_file. Set a valid IPv4 address or leave it empty to reuse DHCP_DNS_PRIMARY."
-            fi
+            # What: an empty primary/secondary stays empty
+            # Why: config.rs owns the rule for empty
+            # From: Issue #1683 | PR #1912
+            [[ -z "$dhcp_dns_primary" ]] || is_valid_ipv4 "$dhcp_dns_primary" \
+                || die "DHCP_MODE=dnsmasq-proxy has invalid DHCP_DNS_PRIMARY in $env_file. Set a valid IPv4 address or leave it empty (the services then use IP_HTTP)."
+            [[ -z "$dhcp_dns_secondary" ]] || is_valid_ipv4 "$dhcp_dns_secondary" \
+                || die "DHCP_MODE=dnsmasq-proxy has invalid DHCP_DNS_SECONDARY in $env_file. Set a valid IPv4 address or leave it empty (the services then use IP_HTTPS)."
             is_valid_ipv4 "$upstream_dhcp_ip" \
                 || die "DHCP_MODE=dnsmasq-proxy requires the real router DHCP IP in UPSTREAM_DHCP_IP in $env_file. Set it, then rerun setup.sh update."
             # What: optional fields are checked when set
@@ -3536,8 +3559,8 @@ migrate_env_for_update() (
             ;;
         *)
             is_valid_ipv4 "$dhcp_subnet_start" || dhcp_subnet_start=""
-            is_valid_ipv4 "$dhcp_dns_primary" || dhcp_dns_primary="$ip_http"
-            is_valid_ipv4 "$dhcp_dns_secondary" || dhcp_dns_secondary="${ip_https:-$ip_http}"
+            is_valid_ipv4 "$dhcp_dns_primary" || dhcp_dns_primary=""
+            is_valid_ipv4 "$dhcp_dns_secondary" || dhcp_dns_secondary=""
             is_valid_ipv4 "$upstream_dhcp_ip" || upstream_dhcp_ip=""
             ;;
     esac
@@ -3646,8 +3669,8 @@ install_missing_tools() {
 # Why: existing state dirs; cache only in full mode
 backup_manifest() {
     local install_dir="$1" mode="$2"
-    local env_file cache_env_file
-    local cache_dir state_dir keys key dir sub bundle copy
+    local env_file="" cache_env_file="" state_dir=""
+    local cache_dir keys key dir sub bundle copy
     stack_env_context "$install_dir" env_file cache_env_file state_dir
     cache_dir=$(get_env_var CACHE_DIR "$env_file") || exit $?
     cache_dir="${cache_dir:-$state_dir/cache}"
@@ -3698,6 +3721,17 @@ die_no_stack_found() {
     die "No stack found in ${install_dir}. If this is a fresh primary install, run ./setup.sh install. If this is a secondary DNS node, run this command from its own directory instead (the one named after --name when it was registered via ./setup.sh secondary), or pass that directory explicitly, e.g.: ./setup.sh <command> /path/to/that-directory"
 }
 
+# What: prints the stack's env file; dies when it is absent
+# Why: the DNS reset and the Kea reset share one error text
+require_stack_env_file() {
+    local install_dir="$1" env_file
+    [[ -f "$install_dir/docker-compose.yml" ]] \
+        || die_no_stack_found "$install_dir"
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    [[ -f "$env_file" ]] || die "No .env found for $install_dir (expected $env_file)."
+    printf '%s\n' "$env_file"
+}
+
 # What: compose helpers return early without a stack
 # Why: backup and restore must handle damaged installs
 compose_stack_available() {
@@ -3725,17 +3759,15 @@ compose_stack_running() {
     [[ -n "$out" ]]
 }
 
-# What: stops the stack before backup or restore
-# Why: a stop failure warns, so backup can proceed
+# What: stops the stack; a failed stop aborts the copy
+# Why: files of a running stack can be torn mid-copy
+# From: Issue #1683 | PR #1858
 compose_stack_stop() {
     local install_dir="$1"
     local env_file
     compose_stack_or_skip "$install_dir" "Stopping the stack" || return 0
     print_step "Stopping stack for consistent backup/restore"
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    # What: a failed stop aborts before any data is copied
-    # Why: files of a running stack can be torn mid-copy
-    # From: Issue #1683 | PR #1858
     stack_compose "$install_dir" "$env_file" stop \
         || die "Failed to stop the stack in $install_dir (exit $?); nothing was copied."
 }
@@ -3872,7 +3904,7 @@ backup_compose_volumes() {
             continue
         fi
         print_ok "Including Docker volume: $volume"
-        helper_volume_tar "$volume" "$volume_root" ":ro" "" 'cd /volume && tar -cpf "/backup/$1.tar" .' \
+        helper_volume_tar "$volume" "$volume_root" ":ro" "" "cd /volume && tar -cpf \"/backup/\$1.tar\" ." \
             || die "Failed to archive Docker volume $volume (exit $?)."
     done <<< "$volumes"
 }
@@ -3898,7 +3930,7 @@ restore_compose_volumes() {
         print_ok "Restoring Docker volume: $volume"
         docker volume create "$volume" \
             || die "Failed to create Docker volume $volume (exit $?)."
-        helper_volume_tar "$volume" "$volume_root" "" ":ro" 'set -e; tar -tf "/backup/$1.tar"; rm -rf /volume/* /volume/..?* /volume/.[!.]*; cd /volume; tar -xpf "/backup/$1.tar"' \
+        helper_volume_tar "$volume" "$volume_root" "" ":ro" "set -e; tar -tf \"/backup/\$1.tar\"; rm -rf /volume/* /volume/..?* /volume/.[!.]*; cd /volume; tar -xpf \"/backup/\$1.tar\"" \
             || die "Failed to restore Docker volume $volume from $archive (exit $?). Rerun the restore; the archive is unchanged."
     done <<< "$archives"
 }
@@ -3922,7 +3954,7 @@ guard_restore_shared_project_volumes() {
             || die "Refusing to restore: container $container of compose project '$project' has no working directory label, so its install cannot be attributed. Remove it with 'docker rm $container', then restore again."
         working_dir=$(realpath -m "$working_dir")
         if [[ "$working_dir" != "$install_dir" ]]; then
-            die "Refusing to restore: compose project '$project' still has containers at $working_dir, which is not the restore target ($install_dir). Both installs share the same Docker-managed volumes because the compose project name is not per-install-dir (see #669). Remove the other install's containers first (cd \"$working_dir\" && docker compose down), or restore into $working_dir instead."
+            die "Refusing to restore: compose project '$project' still has containers at $working_dir, which is not the restore target ($install_dir). Both installs share the same Docker-managed volumes because the compose project name is not per-install-dir. Remove the other install's containers first (cd \"$working_dir\" && docker compose down), or restore into $working_dir instead."
         fi
     done <<< "$containers"
     if [[ "$install_dir" != "$archived_install_dir" ]] && compose_project_has_named_volumes "$project"; then
@@ -4297,7 +4329,7 @@ self-clones to ${DEFAULT_INSTALL_DIR} from the remote's default branch by
 default. Set LANCACHE_SETUP_GIT_REF to a branch, tag, or commit-ish (e.g.
 LANCACHE_SETUP_GIT_REF=vX.Y.Z) to bootstrap from that ref instead -- useful
 for validating a pre-release branch the same documented one-liner way that
-LANCACHE_IMAGE_CHANNEL already selects a specific image channel (#814).
+LANCACHE_IMAGE_CHANNEL already selects a specific image channel.
 EOF
             ;;
         install-requirements-primary)
@@ -4327,7 +4359,7 @@ EOF
             cat <<EOF
 Usage: ./setup.sh list-prompts [answers-file]
 
-Introspection mode for issue #1176: walks the install wizard's real,
+Introspection mode: walks the install wizard's real,
 current branch logic (the exact same code ./setup.sh install runs) and
 prints the ordered prompt sequence it would ask, one per line, as
 "PROMPT<TAB>text<TAB>default". Never touches the filesystem, network, or
@@ -4360,7 +4392,7 @@ EOF
             cat <<EOF
 Usage: ./setup.sh auto-update [install-dir]
 
-Scheduled entry point (#819), normally invoked by the lancache-auto-update
+Scheduled entry point, normally invoked by the lancache-auto-update
 systemd timer, not run directly by an operator. Does nothing unless
 AUTO_UPDATE_ENABLED=1 in .env AND the resolved release channel has actually
 moved to a new image set since the last update -- an unchanged channel is a
@@ -4464,7 +4496,7 @@ Usage: ./setup.sh reset-to-last-known-good-config <service> [install-dir] [snaps
        ./setup.sh reset-to-last-known-good-config dns|pdns [install-dir] <zone> [snapshot-id] [--yes]
 
 CLI fallback for when the Admin UI itself is unreachable but a service's own
-control surface still is (issue #763). Automates the exact by-hand recovery
+control surface still is. Automates the exact by-hand recovery
 sequence docs/known-good-config-snapshots.md's "Manual recovery" section
 documents: list this install's known-good config snapshots for <service> and
 apply one -- the given [snapshot-id], or the newest after an explicit
@@ -4735,13 +4767,15 @@ wait_for_stack_health() {
         print_error "Service(s) regressed from healthy to unhealthy during this update: ${regressed_services[*]}"
         # What: dumps each regressed service's recent logs
         # Why: CI and operators need the cause
+        local log_lines
+        log_lines=$(prod_env_default SETUP_REGRESSION_LOG_LINES) || exit $?
         for svc in "${regressed_services[@]}"; do
             local container_id
             # What: container id lookup is an if condition
             # Why: set -e would abort the update
             if container_id=$(service_container_id "$svc") && [[ -n "$container_id" ]]; then
-                print_warn "Last 50 log lines for regressed service '$svc' (container $container_id):"
-                docker logs --tail 50 "$container_id" 2>&1 | sed 's/^/    /' || print_warn "Could not retrieve logs for '$svc' (container may already be gone)."
+                print_warn "Last $log_lines log lines for regressed service '$svc' (container $container_id):"
+                docker logs --tail "$log_lines" "$container_id" 2>&1 | sed 's/^/    /' || print_warn "Could not retrieve logs for '$svc' (container may already be gone)."
             else
                 print_warn "No container found for regressed service '$svc'; cannot dump its logs."
             fi
@@ -5089,7 +5123,7 @@ cmd_auto_update() {
     fi
 }
 
-# ── converge-reconcile subcommand (#819) ──────────────────────────────────────
+# ── converge-reconcile subcommand ─────────────────────────────────────────────
 # What: true if the UI channel is in the selectable list
 # Why: a retired or unknown name is a no-op on a tick
 lancache_ui_channel_override_is_valid() {
@@ -5263,7 +5297,9 @@ cmd_debug() {
     print_step "Container status"
     stack_compose "$install_dir" "$env_file" ps || print_error "docker compose ps failed (exit $?)."
 
-    print_step "Logs (last 30 lines per service)"
+    local log_lines
+    log_lines=$(prod_env_default SETUP_STATUS_LOG_LINES) || exit $?
+    print_step "Logs (last $log_lines lines per service)"
     # What: logs of every service the compose files define
     # Why: a fixed list misses profile services
     # From: Issue #1683 | PR #1858
@@ -5272,7 +5308,7 @@ cmd_debug() {
         while IFS= read -r svc; do
             [[ -n "$svc" ]] || continue
             printf '\n%s--- %s ---%s\n' "${BOLD}" "$svc" "${RESET}"
-            stack_compose "$install_dir" "$env_file" logs --tail=30 "$svc" 2>&1 \
+            stack_compose "$install_dir" "$env_file" logs --tail="$log_lines" "$svc" 2>&1 \
                 || print_error "Logs of $svc failed (exit $?)."
         done <<< "$services"
     else
@@ -5293,7 +5329,7 @@ cmd_debug() {
     if addrs=$(host_lan_addresses); then
         awk '{ print "    " $1 "/" $2 " dev " $3 }' <<< "$addrs"
     else
-        print_error "Failed to list the IPv4 addresses of this host (exit $?)."
+        print_host_addresses_failed "$?"
     fi
 
     print_step "Health checks"
@@ -5528,7 +5564,7 @@ cmd_create_logs_for_issue() (
     dest_root=$(realpath -m "$dest_root")
     install_missing_tools tar
 
-    local env_file cache_env_file state_dir
+    local env_file="" cache_env_file="" state_dir=""
     stack_env_context "$install_dir" env_file cache_env_file state_dir
 
     local -a env_files=("$env_file")
@@ -5594,12 +5630,13 @@ cmd_create_logs_for_issue() (
         services_list=""
     fi
     mapfile -t services <<< "$services_list"
-    local svc
+    local svc log_lines
+    log_lines=$(prod_env_default SETUP_LOGBUNDLE_LOG_LINES) || exit $?
     for svc in "${services[@]}"; do
         [[ -n "$svc" ]] || continue
         print_ok "Logs: $svc"
         logbundle_capture "$secrets_file" "$dest/logs/$svc.log" \
-            stack_compose "$install_dir" "$env_file" logs --no-color --timestamps --tail=2000 "$svc"
+            stack_compose "$install_dir" "$env_file" logs --no-color --timestamps --tail="$log_lines" "$svc"
     done
 
     print_step "Redacting configuration"
@@ -5639,14 +5676,14 @@ Contents:
   host-facts.txt              Docker/Compose versions, kernel, disk space
   compose-ps.txt               docker compose ps
   compose-config.txt           docker compose config (resolved)
-  logs/<service>.log           docker compose logs --tail=2000 per service
+  logs/<service>.log           docker compose logs --tail=${log_lines} per service
   env/.env, env/.env.local      configuration, with secrets redacted
   known-good-snapshots/        directory listings only (no file content)
 
 Every credential-shaped value (API keys, TSIG keys, passwords, tokens) has
 been replaced with [REDACTED] everywhere it could appear in this bundle.
 Review the contents before attaching this archive to a GitHub issue --
-automatic upload is intentionally not part of this tool (#762).
+automatic upload is intentionally not part of this tool.
 EOF
 
     ext=$(logbundle_select_compressor)
@@ -5837,12 +5874,8 @@ reset_kea_to_last_known_good_config() {
     local -a snapshot_ids=()
     local sid config_json
 
-    [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die_no_stack_found "$install_dir"
+    env_file=$(require_stack_env_file "$install_dir") || exit $?
     install_missing_tools curl jq
-
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    [[ -f "$env_file" ]] || die "No .env found for $install_dir (expected $env_file)."
 
     kea_ctrl_token=$(get_env_var KEA_CTRL_TOKEN "$env_file") || exit $?
     [[ -n "$kea_ctrl_token" ]] \
@@ -5884,14 +5917,11 @@ reset_kea_to_last_known_good_config() {
 
     if [[ -z "$snapshot_id" ]]; then
         snapshot_id="${snapshot_ids[${#snapshot_ids[@]}-1]}"
-        print_warn "No snapshot id given; defaulting to the newest: $snapshot_id"
+        warn_newest_snapshot "$snapshot_id"
     fi
     [[ -f "$snapshot_root/$snapshot_id/dhcp4.json" ]] \
         || die "Snapshot '$snapshot_id' not found under $snapshot_root."
-    if [[ "$assume_yes" != "1" ]]; then
-        confirm "Roll Kea back to snapshot $snapshot_id now? This applies immediately. [y/N]" "N" \
-            || die "Cancelled."
-    fi
+    confirm_snapshot_rollback "Kea" "$snapshot_id" "$assume_yes"
 
     config_json=$(cat "$snapshot_root/$snapshot_id/dhcp4.json")
 
@@ -5922,6 +5952,21 @@ canonical_dns_zone() {
     fi
 }
 
+# What: warns that the newest snapshot id $1 is used
+# Why: the Kea and the DNS rollback share the one text
+warn_newest_snapshot() {
+    print_warn "No snapshot id given; defaulting to the newest: $1"
+}
+
+# What: asks before rolling $1 back to snapshot $2
+# Why: the Kea and the DNS rollback share one question
+confirm_snapshot_rollback() {
+    local target="$1" snapshot_id="$2" assume_yes="$3"
+    [[ "$assume_yes" != "1" ]] || return 0
+    confirm "Roll ${target} back to snapshot ${snapshot_id} now? This applies immediately. [y/N]" "N" \
+        || die "Cancelled."
+}
+
 # What: zones of a GET /snapshots body with a snapshot
 # Why: every managed zone is listed, most of them empty
 # From: Issue #1683 | PR #1858
@@ -5950,12 +5995,10 @@ dns_rollback_exec() (
     # From: Issue #1683 | PR #1858
     trap 'rm -f -- "$err_file"' EXIT
 
-    local exec_script
+    local exec_script placeholder_fn
     exec_script=$(cat <<'SCRIPT'
             key="$PDNS_API_KEY"
-            case "$key" in
-                ""|CHANGE_ME*|changeme*|change_me*|YOUR_*|*_HERE) key="" ;;
-            esac
+            ! secret_value_is_placeholder "$key" || key=""
             secrets=$(lancache-watchdog get LANCACHE_SHARED_SECRET_DIR) || exit 7
             if [ -z "$key" ] && [ -s "$secrets/pdns-api-key" ]; then
                 key=$(tr -d "\n" < "$secrets/pdns-api-key")
@@ -5977,6 +6020,9 @@ dns_rollback_exec() (
             fi
 SCRIPT
     ) || die "Cannot build the listener request script (exit $?)."
+    placeholder_fn=$(declare -f secret_value_is_placeholder) \
+        || die "Cannot read secret_value_is_placeholder (exit $?)."
+    exec_script="${placeholder_fn}"$'\n'"${exec_script}"
     stdout_val=$(stack_compose "$install_dir" "$env_file" -p "$project" exec -T "$container" sh -c "$exec_script" sh "$method" "$path" "$body" 2>"$err_file") || rc=$?
     exec_err=$(cat "$err_file") || die "Cannot read $err_file (exit $?)."
 
@@ -6012,12 +6058,8 @@ reset_dns_to_last_known_good_config() {
     local idx n entry eid ecreated found zn
     local applied zone_check_passed flush_ok republished changed_names flush_failed
 
-    [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh install first."
+    env_file=$(require_stack_env_file "$install_dir") || exit $?
     install_missing_tools jq
-
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    [[ -f "$env_file" ]] || die "No .env found for $install_dir (expected $env_file)."
 
     snapshots_body=$(dns_rollback_exec "$install_dir" "$env_file" "$container" GET /snapshots)
 
@@ -6056,7 +6098,7 @@ reset_dns_to_last_known_good_config() {
 
     if [[ -z "$snapshot_id" ]]; then
         snapshot_id="${entries[0]%% *}"
-        print_warn "No snapshot id given; defaulting to the newest: $snapshot_id"
+        warn_newest_snapshot "$snapshot_id"
     fi
 
     found=0
@@ -6067,10 +6109,7 @@ reset_dns_to_last_known_good_config() {
     [[ "$found" -eq 1 ]] \
         || die "Snapshot '$snapshot_id' not found for zone $zone_canon on $container."
 
-    if [[ "$assume_yes" != "1" ]]; then
-        confirm "Roll $container's zone $zone_canon back to snapshot $snapshot_id now? This applies immediately. [y/N]" "N" \
-            || die "Cancelled."
-    fi
+    confirm_snapshot_rollback "$container's zone $zone_canon" "$snapshot_id" "$assume_yes"
 
     # What: the request body is built by jq, not by printf
     # Why: a quote in a user-given snapshot id breaks JSON
@@ -6779,6 +6818,11 @@ else
 fi
 printf "\n"
 
+# What: both LAN IPs start empty before they are asked
+# Why: ask_checked fills them by name; the init shows it
+# From: Issue #1683 | PR #1912
+IP_HTTP=""
+IP_HTTPS=""
 ask_checked IP_HTTP "Server IP (HTTP mode)" "$detected_ip" is_valid_ipv4 "Invalid IPv4 address"
 
 printf "\n"
@@ -6987,11 +7031,11 @@ DHCP_GATEWAY="$DHCP_GATEWAY_DEFAULT"
 DHCP_RANGE_START=""
 DHCP_RANGE_END=""
 DHCP_SUBNET_START=""
-DHCP_DNS_PRIMARY="$IP_HTTP"
-# What: secondary DNS is IP_HTTPS, with no IP_HTTP fallback.
-# Why: IP_HTTPS is asked and validated above; as config.rs.
+# What: both DHCP DNS values are empty unless set.
+# Why: config.rs owns the rule for empty; one owner.
 # From: Issue #1683 | PR #1912
-DHCP_DNS_SECONDARY="$IP_HTTPS"
+DHCP_DNS_PRIMARY=""
+DHCP_DNS_SECONDARY=""
 UPSTREAM_DHCP_IP="$DHCP_GATEWAY"
 # What: relay-mode local address, empty by default
 # Why: only dnsmasq-relay uses it
@@ -7055,9 +7099,9 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
         ask "DHCP subnet start for dnsmasq-proxy" "${DHCP_SUBNET_DEFAULT%/*}"
     done
 
-    ask_checked DHCP_DNS_PRIMARY "Primary DNS option for proxy-DHCP/PXE clients" "$DHCP_DNS_PRIMARY" is_valid_ipv4 "Invalid IPv4 address"
+    ask_checked DHCP_DNS_PRIMARY "Primary DNS option for proxy-DHCP/PXE clients (blank = HTTP IP)" "$DHCP_DNS_PRIMARY" is_valid_ipv4 "Invalid IPv4 address" 1
 
-    ask_checked DHCP_DNS_SECONDARY "Secondary DNS option for proxy-DHCP/PXE clients" "$DHCP_DNS_SECONDARY" is_valid_ipv4 "Invalid IPv4 address"
+    ask_checked DHCP_DNS_SECONDARY "Secondary DNS option for proxy-DHCP/PXE clients (blank = HTTPS IP)" "$DHCP_DNS_SECONDARY" is_valid_ipv4 "Invalid IPv4 address" 1
 
     ask_checked UPSTREAM_DHCP_IP "Upstream DHCP server IP" "$DHCP_GATEWAY" is_valid_ipv4 "Invalid IPv4 address"
 
@@ -7177,7 +7221,8 @@ UI_AUTH_PASSWORD=""
 UI_AUTH_PASSWORD_HASH=""
 ALLOW_INSECURE_UI=""
 if confirm "Protect Admin-UI with password? [Y/n]" "Y"; then
-    ask "Username" "admin"
+    ui_user_default=$(prod_env_default SETUP_UI_USER_DEFAULT) || exit $?
+    ask "Username" "$ui_user_default"
     UI_AUTH_USER="$REPLY"
 
     # What: the stored user is read before it is compared
@@ -7310,11 +7355,11 @@ DHCP_SUBNET_START=${DHCP_SUBNET_START}
 DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY}
 DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY}
 UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP}
-# Issue #844: DHCP-relay-mode local address (giaddr source). Empty unless
+# DHCP-relay-mode local address (giaddr source). Empty unless
 # DHCP_MODE=dnsmasq-relay; see docs/dhcp-modes.md.
 DHCP_RELAY_LOCAL_ADDR=${DHCP_RELAY_LOCAL_ADDR}
 
-# Issue #450: additional optional dnsmasq relay/proxy options, all empty by
+# Additional optional dnsmasq relay/proxy options, all empty by
 # default. Delivered only via the supplemental ProxyDHCP/PXE exchange to
 # PXE/network-boot-aware clients -- see docs/dhcp-modes.md.
 DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE}
@@ -7350,8 +7395,8 @@ PDNS_API_KEY=${PDNS_API_KEY?}
 
 # ── Netdata alarm forwarding ────────────────────────────────────────────────────
 # Shared token for Netdata's alarm-notify.sh to authenticate to the Admin
-# UI's POST /api/netdata-alarms webhook (bug hunt #849, observability.md
-# finding #3; generated, do not change)
+# UI's POST /api/netdata-alarms webhook (see observability.md,
+# finding 3; generated, do not change)
 NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
 
 # ── NATS (DNS-record sync bus) ─────────────────────────────────────────────────
@@ -7364,7 +7409,7 @@ NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD}
 NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD}
 # System-account identity (generated, do not change). Used only by the Admin
 # UI's kicker connection (kick_secondary in services/ui) to look up and force-disconnect a
-# removed/rotated secondary's live NATS connection (issue #681).
+# removed/rotated secondary's live NATS connection.
 NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD}
 # Token for setup.sh secondary — anyone who knows this can register a secondary
 SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}

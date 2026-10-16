@@ -110,7 +110,7 @@ if [ "$workflow_changed" -eq 0 ]; then
   exit 0
 fi
 
-echo "pre-push: .github/workflows changed -- running ci.sh check action-node-versions (#801) as an early local warning (CI enforces this authoritatively either way)..." >&2
+echo "pre-push: .github/workflows changed -- running ci.sh check action-node-versions as an early local warning (CI enforces this authoritatively either way)..." >&2
 
 if ! bash "$script" check action-node-versions; then
   echo "pre-push: check action-node-versions found a problem (see above) -- push blocked." >&2

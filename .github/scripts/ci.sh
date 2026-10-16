@@ -233,6 +233,11 @@ _ci_list_has() {
     return 1
 }
 
+# What: one line against an ERE: rc 0, 1 none, 2 bad ERE.
+# Why: a command rc; $? after [[ ]] is a condition (SC2319).
+# From: Issue #1683 | PR #1912
+_ci_re_test() { [[ "$1" =~ $2 ]]; }
+
 # What: any line of the text matches the ERE; 2 = bad ERE.
 # Why: one text-regex owner; no grep exit code to misread.
 # From: Issue #1683 | PR #1912
@@ -242,7 +247,7 @@ _ci_text_has() {
     re="$1"
     if [ "${icase}" -eq 1 ] && ! shopt -q nocasematch; then shopt -s nocasematch; own=1; fi
     while IFS= read -r line; do
-        if [[ "${line}" =~ ${re} ]]; then r=0; else r=$?; fi
+        if _ci_re_test "${line}" "${re}"; then r=0; else r=$?; fi
         if [ "${r}" -ne 1 ]; then break; fi
     done <<< "$2"
     if [ "${own}" -eq 1 ]; then shopt -u nocasematch; fi
@@ -2993,11 +2998,13 @@ ci_cmd_scan_stack() {
     while read -r svc plat; do
         [ -n "${svc}" ] || continue
         drc=0; digest="$(_ci_published_digest "${svc}" "${plat}" ok)" || drc=$?
-        # What: a pair without an image is skipped
-        # Why: its build is red; the others stay valid
+        # What: a pair without an image fails; others go on
+        # Why: unscanned is no pass (AG-VAL-001)
         # From: Issue #1683 | PR #1912
         if [ "${drc}" -eq 1 ]; then
-            ci_log "[CI-WARN-SCAN-0025]" "service=\"${svc}\" platform=\"${plat}\" reason=\"no published image; its build failed, not scanned\""
+            ci_log "[CI-ERROR-SCAN-0025]" "service=\"${svc}\" platform=\"${plat}\" reason=\"no published image; its build failed, not scanned\""
+            failed="${failed} ${svc}/${plat}"
+            rc=2
             continue
         fi
         if [ "${drc}" -ne 0 ]; then
@@ -3006,12 +3013,14 @@ ci_cmd_scan_stack() {
             rc=2
             continue
         fi
-        # What: a digest no build verified is skipped
+        # What: an unverified digest fails; others go on
         # Why: its readback or smoke test failed (B20)
         # From: Issue #1683 | PR #1912
         vrc=0; _ci_verified_has "${svc}" "${plat}" "${digest}" || vrc=$?
         if [ "${vrc}" -eq 1 ]; then
-            ci_log "[CI-WARN-SCAN-0031]" "service=\"${svc}\" platform=\"${plat}\" digest=\"${digest}\" reason=\"no build verified this digest; not scanned\""
+            ci_log "[CI-ERROR-SCAN-0031]" "service=\"${svc}\" platform=\"${plat}\" digest=\"${digest}\" reason=\"no build verified this digest; not scanned\""
+            failed="${failed} ${svc}/${plat}"
+            rc=2
             continue
         fi
         if [ "${vrc}" -ne 0 ]; then
@@ -3554,7 +3563,7 @@ _ci_sccache_env() {
         return 2
     fi
     # What: optional: drop redis, then remote, then local.
-    # Why: §42: a cache outage costs speed, not the build.
+    # Why: AG-CI-011: optional mode keeps correctness.
     # From: Issue #1683 | PR #1858
     while [ -n "${chain}" ]; do
         case "${chain}" in redis,*) next="${chain#redis,}" ;; *) next="" ;; esac
@@ -3570,7 +3579,7 @@ _ci_sccache_env() {
     done
     ci_error "[CI-WARN-CACHE-0004]" "prefix=\"${prefix}\" rc=${prc} reason=\"sccache unavailable; direct rustc\"" "${probe}"
     unset RUSTC_WRAPPER
-    _ci_sccache_stop
+    _ci_sccache_stop || return 2
     unset SCCACHE_SERVER_UDS
 }
 
@@ -3595,21 +3604,25 @@ ci_cmd_gha_runtime_args() {
 # Why: a started server must not outlive its run.
 # From: Issue #1683 | PR #1858
 _ci_sccache_stop() {
-    local out rc=0
+    local out rc=0 frc=0
     [ -n "${SCCACHE_SERVER_UDS:-}" ] || return 0
     if [ -n "${RUSTC_WRAPPER:-}" ]; then
         out="$(sccache --stop-server 2>&1)" || rc=$?
-        [ "${rc}" -eq 0 ] || ci_error "[CI-WARN-CACHE-0005]" "rc=${rc} reason=\"sccache server stop failed\"" "${out}"
+        if [ "${rc}" -ne 0 ]; then
+            ci_error "[CI-ERROR-CACHE-0005]" "rc=${rc} reason=\"sccache server stop failed\"" "${out}"
+            frc=2
+        fi
     fi
-    _ci_sccache_reap "${SCCACHE_SERVER_UDS%/*}"
+    _ci_sccache_reap "${SCCACHE_SERVER_UDS%/*}" || frc=2
     rm -rf -- "${SCCACHE_SERVER_UDS%/*}"
+    return "${frc}"
 }
 
 # What: kill sccache servers under this run's socket dir.
 # Why: a server timed out on Redis keeps on running.
 # From: Issue #1683 | PR #1858
 _ci_sccache_reap() {
-    local dir="$1" p env_s out
+    local dir="$1" p env_s out rc=0
     for p in /proc/[0-9]*; do
         [ -r "${p}/environ" ] || continue
         [ "$(cat "${p}/comm" 2>&1)" = sccache ] || continue
@@ -3617,12 +3630,13 @@ _ci_sccache_reap() {
         # Why: a stopped server exits while the scan runs.
         # From: Issue #1683 | PR #1912
         if ! env_s="$( { tr '\0' '\n' < "${p}/environ"; } 2>&1)"; then
-            [ ! -e "${p}" ] || ci_error "[CI-WARN-CACHE-0011]" "pid=${p#/proc/} reason=\"sccache server environ unreadable\"" "${env_s}"
+            [ ! -e "${p}" ] || { ci_error "[CI-ERROR-CACHE-0011]" "pid=${p#/proc/} reason=\"sccache server environ unreadable\"" "${env_s}"; rc=2; }
             continue
         fi
         [[ $'\n'"${env_s}" == *$'\n'"SCCACHE_SERVER_UDS=${dir}/"* ]] || continue
-        out="$(kill "${p#/proc/}" 2>&1)" || [ ! -e "${p}" ] || ci_error "[CI-WARN-CACHE-0006]" "pid=${p#/proc/} reason=\"sccache server kill failed\"" "${out}"
+        out="$(kill "${p#/proc/}" 2>&1)" || [ ! -e "${p}" ] || { ci_error "[CI-ERROR-CACHE-0006]" "pid=${p#/proc/} reason=\"sccache server kill failed\"" "${out}"; rc=2; }
     done
+    return "${rc}"
 }
 
 # =========================================================
@@ -4226,7 +4240,6 @@ _CI_RB_CA_FILE=/usr/local/share/ca-certificates/lancache-ci-proxy-ca.crt
 _CI_RB_ACC=""
 _CI_RB_REMOTE_ID=""
 _CI_RB_PAIRS=""
-_CI_RB_PATH=""
 declare -gA _CI_RB_DRIVER_PATH=()
 
 # What: stop the distcc pump if rust-build started it.
@@ -4348,7 +4361,7 @@ _ci_sccache_report() {
     ci_error "[CI-WARN-CACHE-0017]" "mode=${_CI_SCCACHE_MODE} errors=\"${errs# }\" log=\"${log}\" reason=\"sccache cache level failed\"" "${cause}"
 }
 
-# What: cargo build; drop one accelerator per outage.
+# What: cargo build; only optional sccache may be dropped.
 # Why: a real build error fails at once, never degrades.
 # From: Issue #1683 | PR #1912
 _ci_rust_cargo_build() {
@@ -4402,12 +4415,9 @@ _ci_rust_cargo_build() {
             return 2
         fi
         case "${layers[0]}" in
-            ccache)
-                _ci_rb_ccache_off
-                ci_log "[CI-WARN-RUSTBUILD-0011]" "reason=\"accelerator outage; retry without ccache\"" ;;
-            distcc)
-                _ci_rb_distcc_off || return 2
-                ci_log "[CI-WARN-RUSTBUILD-0012]" "reason=\"accelerator outage; retry without distcc\"" ;;
+            ccache|distcc)
+                ci_log "[CI-ERROR-RUSTBUILD-0011]" "rc=${cargo_status} layer=${layers[0]} reason=\"configured accelerator outage; no fallback (AG-CI-007)\""
+                return 2 ;;
             sccache)
                 unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX
                 ci_log "[CI-WARN-RUSTBUILD-0013]" "reason=\"accelerator outage; retry without sccache\"" ;;
@@ -4451,10 +4461,8 @@ SH
       local_compiler="$1"
       shift
     else
-      echo "[CI-WARN-RUSTBUILD-0017] argv0=$0 reason=\"distcc wrapper: unknown invocation; default driver\"" >&2
-SH
-    printf '      real_compiler="%s"; local_compiler="%s"\n' "${1%%=*}" "${1#*=}"
-    cat <<'SH'
+      echo "[CI-ERROR-RUSTBUILD-0017] argv0=$0 reason=\"distcc wrapper: unknown invocation\"" >&2
+      exit 1
     fi
     ;;
 esac
@@ -4593,15 +4601,6 @@ _ci_rb_sccache() {
     fi
 }
 
-# What: drop distcc: pump off, env unset, PATH restored.
-# Why: the next cargo run compiles C on the local host.
-# From: Issue #1683 | PR #1912
-_ci_rb_distcc_off() {
-    _ci_rust_stop_pump || return 1
-    unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_HOSTS_NO_PUMP DISTCC_FALLBACK INCLUDE_SERVER_PORT INCLUDE_SERVER_PID "${!_CI_RB_DRIVER_PATH[@]}"
-    PATH="${_CI_RB_PATH}"; export PATH
-}
-
 # What: write the farm compiler identity of a probe .o.
 # Why: ccache content-check misses a remote toolchain bump.
 # From: Issue #1683 | PR #1912
@@ -4650,8 +4649,8 @@ _ci_rb_distcc() {
             unset DISTCC_HOSTS
             local distcc_pump_env
             if ! distcc_pump_env="$(pump --startup 2>"${distcc_probe_dir}/distcc-pump.log")"; then
-                ci_error "[CI-WARN-RUSTBUILD-0023]" "reason=\"distcc pump unavailable; local C compiler\"" "$(cat "${distcc_probe_dir}/distcc-pump.log")"
-                _ci_rb_distcc_off; return 0
+                ci_error "[CI-ERROR-RUSTBUILD-0023]" "reason=\"distcc pump unavailable; no fallback (AG-CI-007)\"" "$(cat "${distcc_probe_dir}/distcc-pump.log")"
+                return 2
             fi
             eval "${distcc_pump_env}"
             local -a distcc_hosts_arr; read -ra distcc_hosts_arr <<<"${DISTCC_HOSTS:-}"
@@ -4666,22 +4665,13 @@ _ci_rb_distcc() {
         fi
         _ci_rb_write "${distcc_probe_dir}/distcc-probe.c" printf '%s\n' 'int main(void) { return 0; }' || return 2
         if ! cc -c "${distcc_probe_dir}/distcc-probe.c" -o "${distcc_probe_dir}/distcc-probe.o" >"${distcc_probe_dir}/distcc-probe.log" 2>&1; then
-            ci_error "[CI-WARN-RUSTBUILD-0024]" "reason=\"distcc probe failed; local C compiler\"" "$(cat "${distcc_probe_dir}/distcc-probe.log")"
-            _ci_rb_distcc_off; return 0
+            ci_error "[CI-ERROR-RUSTBUILD-0024]" "reason=\"distcc probe failed; no fallback (AG-CI-007)\"" "$(cat "${distcc_probe_dir}/distcc-probe.log")"
+            return 2
         fi
         _ci_rb_remote_toolchain_id "${distcc_probe_dir}/distcc-probe.o"
     else
         ci_log "[CI-INFO-RUSTBUILD-0025]" "reason=\"distcc off; no distcc_potential_hosts secret\""
     fi
-}
-
-# What: drop ccache: env unset, drivers exported plain.
-# Why: the next cargo run compiles through plain distcc.
-# From: Issue #1683 | PR #1912
-_ci_rb_ccache_off() {
-    _CI_RB_CCACHE=0
-    unset CCACHE_REMOTE_STORAGE CCACHE_DIR CCACHE_COMPILERCHECK CCACHE_PREFIX CCACHE_EXTRAFILES CCACHE_BASEDIR
-    _ci_rb_export_drivers
 }
 
 # What: wrap distcc with ccache (Redis) once distcc is up.
@@ -4720,16 +4710,16 @@ _ci_rb_ccache() {
         local ccache_probe_cache_dir="${ccache_probe_dir}/probe-cache"
         _ci_run "[CI-ERROR-RUSTBUILD-0065]" "dir=\"${ccache_probe_cache_dir}\" reason=\"ccache probe dir not created\"" mkdir -p "${ccache_probe_cache_dir}" || return 2
         if ! ( cd "${ccache_probe_dir}" && CCACHE_DIR="${ccache_probe_cache_dir}" ccache "${_CI_RB_DRIVER_PATH[${_CI_RB_PAIRS%%=*}]}" -c ccache-probe.c -o ccache-probe.o ) >"${ccache_probe_dir}/ccache-probe.log" 2>&1; then
-            ci_error "[CI-WARN-RUSTBUILD-0028]" "reason=\"ccache probe failed; plain distcc\"" "$(cat "${ccache_probe_dir}/ccache-probe.log")"
-            _ci_rb_ccache_off; return 0
+            ci_error "[CI-ERROR-RUSTBUILD-0028]" "reason=\"ccache probe failed; no fallback (AG-CI-007)\"" "$(cat "${ccache_probe_dir}/ccache-probe.log")"
+            return 2
         fi
         local stats stat_err stat_ok
         stats="$(CCACHE_DIR="${ccache_probe_cache_dir}" _ci_run "[CI-ERROR-RUSTBUILD-0057]" "reason=\"ccache probe stats not readable\"" ccache --print-stats)" || return 2
         stat_err="$(_ci_capture 1 grep -E '^remote_storage_error[[:space:]]+[1-9]' <<< "${stats}")" || return 2
         stat_ok="$(_ci_capture 1 grep -E '^remote_storage_(write|hit)[[:space:]]+[1-9]' <<< "${stats}")" || return 2
         if [ -n "${stat_err}" ] || [ -z "${stat_ok}" ]; then
-            ci_error "[CI-WARN-RUSTBUILD-0029]" "reason=\"ccache redis round trip failed; plain distcc\"" "${stats}"
-            _ci_rb_ccache_off; return 0
+            ci_error "[CI-ERROR-RUSTBUILD-0029]" "reason=\"ccache redis round trip failed; no fallback (AG-CI-007)\"" "${stats}"
+            return 2
         fi
     else
         if [ "${_CI_RB_DISTCC}" != "1" ]; then
@@ -4809,7 +4799,7 @@ ci_cmd_rust_build() {
     _ci_list_has "host: ${musl_target}" "${rustc_info}" || { ci_error "[CI-ERROR-RUSTBUILD-0006]" "target=\"${musl_target}\" arg=\"${CI_ARG_TARGET}\" reason=\"target is not the build-tools rustc host\"" "${rustc_info}"; return 2; }
     local masq p distcc_bin sccache_bin
     local -a drivers=()
-    _CI_RB_DISTCC=0 _CI_RB_CCACHE=0 _CI_RB_CA=0 _CI_RB_PATH="${PATH}"
+    _CI_RB_DISTCC=0 _CI_RB_CCACHE=0 _CI_RB_CA=0
     _CI_RB_DRIVER_PATH=()
     trap _ci_rust_build_cleanup EXIT
     _CI_RB_ACC="$(_ci_mktemp -d -p "${CI_TMPDIR}")" || return 2
@@ -4880,8 +4870,8 @@ ci_cmd_rust_build() {
     while IFS= read -r s; do
         [ -z "${s}" ] || _ci_run "[CI-ERROR-RUSTBUILD-0044]" "file=\"${s}\" reason=\"stub not removed\"" rm -f -- "${s}" || return 2
     done <<< "${stubs}"
-    # What: show ccache stats; a Redis error only warns.
-    # Why: binary correct; only cache reuse degraded.
+    # What: show ccache stats; a Redis error fails.
+    # Why: AG-CI-007: a dead cache level must not pass.
     # From: Issue #1683 | PR #1912
     if [ "${_CI_RB_CCACHE}" = 1 ]; then
         local stats final_err
@@ -4889,7 +4879,8 @@ ci_cmd_rust_build() {
         printf '%s\n' "${stats}"
         final_err="$(_ci_capture 1 grep -E '^remote_storage_error[[:space:]]+[1-9]' <<< "${stats}")" || return 2
         if [ -n "${final_err}" ]; then
-            ci_error "[CI-WARN-RUSTBUILD-0041]" "reason=\"ccache redis error during the build; binary unaffected\"" "${stats}"
+            ci_error "[CI-ERROR-RUSTBUILD-0041]" "reason=\"ccache redis error during the build\"" "${stats}"
+            return 2
         fi
     fi
     # What: copy each binary to <crate>-out in the WORKDIR.
@@ -6233,7 +6224,7 @@ _ci_promote_rollback() {
         [ -n "${line}" ] || continue
         svc="${line%%=*}"; prev="${line#*=}"
         if [ -z "${prev}" ]; then
-            ci_log "[CI-WARN-PROMOTE-0022]" "service=\"${svc}\" channel=\"${channel}\" reason=\"no earlier digest to restore; ref stays\""
+            ci_log "[CI-ERROR-PROMOTE-0022]" "service=\"${svc}\" channel=\"${channel}\" reason=\"no earlier digest to restore; ref stays, channel is mixed\""
             continue
         fi
         if ! _ci_promote_move "${svc}" "${channel}" "${prev}"; then
@@ -6309,7 +6300,10 @@ ci_cmd_promote() {
     # Why: a failed move must never leak the promotion lock.
     local rc
     if _ci_promote_move_all "${channel}" "${cand}"; then rc=0; else rc=$?; fi
-    _ci_promote_unlock "${channel}" || ci_log "[CI-WARN-PROMOTE-0011]" "channel=\"${channel}\" reason=\"lock release failed\""
+    _ci_promote_unlock "${channel}" || {
+        ci_error "[CI-ERROR-PROMOTE-0011]" "channel=\"${channel}\" reason=\"lock release failed\"" "${channel}"
+        [ "${rc}" -ne 0 ] || rc=2
+    }
     [ "${rc}" -eq 0 ] || return "${rc}"
     printf 'channel=%s result=promoted services=%s\n' "${channel}" "$(_ci_count_lines "${cand}")"
 }
@@ -6318,15 +6312,15 @@ ci_cmd_promote() {
 # Why: ref-driven policy; no channel logic in YAML.
 # From: Issue #1683
 _ci_promote_targets_for_ref() {
-    local ref="${GITHUB_REF:-}" requested="${CI_PROMOTE_REQUESTED_CHANNEL:-}" tag pre
+    local ref="${GITHUB_REF:-}" requested="${CI_PROMOTE_REQUESTED_CHANNEL:-}" tag prerelease
     {
         case "${ref}" in
             refs/heads/*) _ci_channels_where ref "${ref}" || return 2 ;;
             refs/tags/*)
                 tag="${ref#refs/tags/}"
-                pre="$(_ci_release_prerelease "${tag}")" || return "$?"
+                prerelease="$(_ci_release_prerelease "${tag}")" || return "$?"
                 printf '%s\n' "${tag}"
-                if [ "${pre}" = false ]; then _ci_channels_where release_tags true || return 2; fi
+                if [ "${prerelease}" = false ]; then _ci_channels_where release_tags true || return 2; fi
                 ;;
         esac
         if [ -n "${requested}" ] && [ "${requested}" != none ]; then
@@ -6403,9 +6397,8 @@ _ci_release_record_stale() {
         0) ;;
         1) printf '%s: %s is not an ancestor of %s\n' "${name}" "${commit}" "${target}"; return 0 ;;
         *)
-            ci_error "[CI-WARN-RELEASE-0019]" "commit=\"${commit}\" target=\"${target}\" reason=\"ancestry check failed\"" "${anc_err}"
-            printf '%s: diff from %s not reconstructable\n' "${name}" "${commit}"
-            return 0
+            ci_error "[CI-ERROR-RELEASE-0019]" "commit=\"${commit}\" target=\"${target}\" reason=\"ancestry check failed\"" "${anc_err}"
+            return 2
             ;;
     esac
     for p in "${gov[@]}"; do
@@ -7510,18 +7503,22 @@ _ci_validate_compose_images() {
     jq -r '.services | to_entries[] | [.key, .value.image] | @tsv' <<< "${raw}"
 }
 
-# What: Warn on candidates without a first-party image.
-# Why: Third-party images stay visible, never silent.
+# What: Fail on candidates without a first-party image.
+# Why: AG-VAL-001: an unvalidated digest is no pass.
 # From: Issue #1683 | PR #1858
 _ci_validate_report_unpinned() {
-    local candidate="$1" matched="$2" slug _digest
+    local candidate="$1" matched="$2" slug _digest rc=0
     while IFS='=' read -r slug _digest; do
         [ -n "${slug}" ] || continue
         case "${matched}" in
             *" ${slug} "*) : ;;
-            *) ci_log "[CI-WARN-VALIDATE-0008]" "unpinned=\"${slug}\" reason=\"candidate service has no first-party image in compose\"" ;;
+            *)
+                ci_log "[CI-ERROR-VALIDATE-0008]" "unpinned=\"${slug}\" reason=\"candidate service has no first-party image in compose\""
+                rc=2
+                ;;
         esac
     done <<< "${candidate}"
+    return "${rc}"
 }
 
 # What: Print a compose override pinning first-party images.
@@ -8832,7 +8829,10 @@ _ci_validate_kea_cmd() {
 # Why: setup.sh owns the judgement; ci.sh adds none
 # From: Issue #1683 | PR #1912
 _ci_kea_reply_check() {
-    _ci_run "$1" "$2" bash -c 'source "$1" && kea_reply_check "$2"' _ "${CI_REPO_ROOT}/setup.sh" "$3"
+    _ci_run "$1" "$2" bash -c "$(cat <<'PROG'
+source "$1" && kea_reply_check "$2"
+PROG
+        )" _ "${CI_REPO_ROOT}/setup.sh" "$3"
 }
 
 # What: Kea snapshot ids under <snapshot dir>, oldest first.
@@ -8969,10 +8969,11 @@ _ci_validate_rm_run() {
 # Why: dhcp is host-mode, so up never starts a Kea.
 # From: Issue #763 | PR #1858
 _ci_validate_kea_rollback() {
-    local project="$1" net="$2" pin="$3" kname uname kip kport rc=0
+    local project="$1" net="$2" pin="$3" kname uname kip kport tail_lines rc=0
     kname="${project}-kea"
     uname="${project}-kea-ui"
     kport="$(_ci_validate_kea_agent http-port)" || return 2
+    tail_lines="$(_ci_variable CI_VALIDATE_RUN_LOG_TAIL)" || return 2
     _ci_run "[CI-ERROR-VALIDATE-0096]" "project=\"${project}\" service=\"dhcp\" reason=\"Kea run container not started\"" \
         _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${kname}" \
             -e DHCP_MODE=kea dhcp || return $?
@@ -8981,7 +8982,7 @@ _ci_validate_kea_rollback() {
     # From: Issue #1683 | PR #1912
     if ! _ci_validate_wait_cid dhcp "${kname}"; then
         ci_error "[CI-ERROR-VALIDATE-0129]" "service=\"dhcp\" container=\"${kname}\" reason=\"Kea run container not healthy (cause above)\"" \
-            "$(docker logs --tail 80 "${kname}" 2>&1)"
+            "$(docker logs --tail "${tail_lines}" "${kname}" 2>&1)"
         rc=1
     elif ! kip="$(_ci_validate_cid_ip "${project}" "${kname}")"; then
         ci_log "[CI-ERROR-VALIDATE-0097]" "container=\"${kname}\" reason=\"no /27 IP for the Kea run container\""
@@ -8996,7 +8997,7 @@ _ci_validate_kea_rollback() {
         # From: Issue #1683 | PR #1912
         if [ "${rc}" -ne 0 ]; then
             ci_error "[CI-ERROR-VALIDATE-0126]" "ui=\"${uname}\" kea=\"${kname}\" rc=${rc} reason=\"Kea round trip failed; run logs in raw\"" \
-                "$(docker logs --tail 80 "${uname}" 2>&1; docker logs --tail 80 "${kname}" 2>&1)"
+                "$(docker logs --tail "${tail_lines}" "${uname}" 2>&1; docker logs --tail "${tail_lines}" "${kname}" 2>&1)"
         fi
         _ci_validate_rm_run "${uname}" || { [ "${rc}" -ne 0 ] || rc=2; }
     else
@@ -9109,7 +9110,7 @@ _ci_validate_probes() {
 # From: Issue #1683 | PR #1858
 _ci_validate_stack() {
     local candidate="$1" reservation subnet holder project rc=0 up_out
-    local net_ovr pin_ovr shared compose_rel
+    local net_ovr pin_ovr shared compose_copy
     reservation="$(_ci_validate_reserve)" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         [ "${rc}" -eq 2 ] || ci_log "[CI-ERROR-VALIDATE-0015]" "reason=\"no free validation /27 after slot retries\""
@@ -9142,12 +9143,12 @@ _ci_validate_stack() {
     # What: compose runs on a copy in the shared dir.
     # Why: relative binds then name paths the daemon has.
     # From: Issue #1683 | PR #1912
-    compose_rel="$(_ci_variable CI_COMPOSE_FILE)" || { _ci_validate_teardown "${holder}" "${project}"; return 2; }
+    compose_copy="$(_ci_repo_path CI_COMPOSE_FILE "${LANCACHE_STATE_DIR}/repo")" || { _ci_validate_teardown "${holder}" "${project}"; return 2; }
     if ! _ci_validate_stage "${LANCACHE_STATE_DIR}/repo"; then
         _ci_validate_teardown "${holder}" "${project}"
         return 2
     fi
-    export CI_COMPOSE_FILE="${LANCACHE_STATE_DIR}/repo/${compose_rel}"
+    export CI_COMPOSE_FILE="${compose_copy}"
     if ! net_ovr="$(_ci_mktemp "${CI_TMPDIR}/ci-validate-net.XXXXXX.yml")" \
         || ! pin_ovr="$(_ci_mktemp "${CI_TMPDIR}/ci-validate-pin.XXXXXX.yml")"; then
         rm -f "${net_ovr:-}"
@@ -10193,8 +10194,8 @@ _ci_daemon_merge() {
 _ci_daemon_validate() {
     local file="$1" out
     if ! _ci_command_available dockerd; then
-        ci_log "[CI-WARN-DAEMON-0002]" "reason=\"dockerd not on PATH; validate preflight skipped\""
-        return 0
+        ci_error "[CI-ERROR-DAEMON-0002]" "reason=\"dockerd not on PATH; config not validated\"" "${file}"
+        return 2
     fi
     if ! out="$(dockerd --validate --config-file "${file}" 2>&1)"; then
         ci_error "[CI-ERROR-DAEMON-0003]" "path=\"${file}\" reason=\"dockerd --validate rejected the config\"" "${out}"
@@ -10275,7 +10276,8 @@ _ci_daemon_restart() {
     fi
     printf 'LoggingDriver (docker info): %s\n' "${driver}"
     if [ "${driver}" != "${want}" ]; then
-        ci_log "[CI-WARN-DAEMON-0006]" "driver=\"${driver}\" want=\"${want}\" reason=\"LoggingDriver is not the SOT driver; check the host\""
+        ci_error "[CI-ERROR-DAEMON-0006]" "driver=\"${driver}\" want=\"${want}\" reason=\"LoggingDriver is not the SOT driver; check the host\"" "${driver}"
+        return 1
     fi
     printf 'builder section of %s (docker info does not report it):\n' "${file}"
     _ci_capture 0 jq '.builder // "(no builder key)"' "${file}" || return 2
@@ -11291,7 +11293,8 @@ _ci_rh_purge_pve_check() {
         *) return 2 ;;
     esac
     if ! _ci_command_available lsof; then
-        ci_log "[CI-WARN-RUNNER-0119]" "dir=\"${pdir}\" reason=\"lsof not on PATH; open-file check skipped\""
+        ci_error "[CI-ERROR-RUNNER-0119]" "dir=\"${pdir}\" reason=\"lsof not on PATH; open-file check not run\"" "${pdir}"
+        return 2
     elif _ci_rh_root test -d "${pdir}"; then
         open="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0120]" "dir=\"${pdir}\" reason=\"lsof failed\"" _ci_rh_root lsof +D "${pdir}")" || return 2
         [ -z "${open}" ] || printf '  FOUND: open files under %s:\n%s\n' "${pdir}" "${open}"
@@ -12234,18 +12237,15 @@ _CI_AWK_COMMENTS='
     # What: true if a #N outside quotes is a From: number.
     # Why: a ref belongs in From: only (AG-CODE-012).
     # From: Issue #1683 | PR #1856
-    function cm_dup(s,  len, i, ch, q, pv, d) {
-        len = length(s); q = ""
+    function cm_dup(s,  len, i, ch, pv, d) {
+        len = length(s)
         for (i = 1; i <= len; i++) {
             ch = substr(s, i, 1)
-            if (q == "") {
-                if (ch == "\"") { q = ch; continue }
-                pv = (i > 1) ? substr(s, i - 1, 1) : ""
-                if (ch == sq && pv !~ /[A-Za-z0-9_]/) { q = ch; continue }
-            } else if (ch == q) { q = ""; continue }
-            if (q != "" || ch != "#" || pv ~ /[0-9]/) continue
+            if (ch != "#") continue
+            pv = (i > 1) ? substr(s, i - 1, 1) : ""
+            if (pv ~ /[A-Za-z0-9_$&{#]/) continue
             d = substr(s, i + 1)
-            if (match(d, /^[0-9]+/) && (substr(d, 1, RLENGTH) in fn)) return 1
+            if (match(d, /^[0-9]+/) && RLENGTH < 6 && substr(d, RLENGTH + 1, 1) !~ /[A-Za-z0-9_]/) return 1
         }
         return 0
     }
@@ -12288,16 +12288,12 @@ _CI_AWK_COMMENTS='
             if (rl > 3) cm_out("C", cur ":" rs ": story-telling block (" rl " lines)")
             rs = rl = 0
         }
-        delete fn; k = 0
         for (i = 1; i <= n; i++) {
             t = tolower(L[i])
             if (t ~ rc || t ~ lr) cm_out("R", cur ":" i ":" L[i])
             if (i > 1 && F[i - 1] && F[i] && tolower(T[i - 1] " " T[i]) ~ rc) cm_out("R", cur ":" i - 1 ": " T[i - 1] " " T[i])
-            if (L[i] !~ /From:/) continue
-            t = L[i]
-            while (match(t, /#[0-9]+/)) { fn[substr(t, RSTART + 1, RLENGTH - 1)] = 1; k = 1; t = substr(t, RSTART + RLENGTH) }
+            if (L[i] !~ /From:/ && cm_dup(L[i])) cm_out("W", cur ":" i ": " L[i])
         }
-        if (k) for (i = 1; i <= n; i++) if (L[i] !~ /From:/ && cm_dup(L[i])) cm_out("W", cur ":" i ": " L[i])
     }
     # What: a new file ends the last one and resets state.
     # Why: arrays of one file must not leak into the next.
@@ -12317,11 +12313,10 @@ _CI_AWK_COMMENTS='
 # From: Issue #1683 | PR #1912
 _ci_check_comments() {
     local -a _ci_override=("$@") files=() todo=() hdr=() size=() chron=() dup=() nogr=() bad=()
-    local path out line project spdx warn_only arc=0 rc=0
+    local path out line project spdx arc=0 rc=0
     _ci_scan_files files _ci_override || return 2
     _ci_prose_exempt_load || return 2
     _ci_block_entry_fields file_headers "" project project spdx spdx || return 2
-    warn_only="$(_ci_variable CHRONOLOGY_WARN_ONLY)" || return 2
     for path in "${files[@]}"; do
         _ci_prose_excluded "${path}" && continue
         if [ -s "${path}" ]; then todo+=("${path}"); else hdr+=("${path}: empty file has no header"); fi
@@ -12361,19 +12356,16 @@ _ci_check_comments() {
         ci_error "[CI-ERROR-CHECK-0128]" "scanned=${#todo[@]} reason=\"comment contract violations\"" "$(printf '%s\n' "${size[@]}")"
         rc=1
     fi
-    # What: dup #N outside From: is warn-only in every mode.
-    # Why: a genuine duplicate must warn, never block.
-    # From: Issue #1683
+    # What: a bare #N outside From: fails the check.
+    # Why: AG-VAL-001: a warning is no success.
+    # From: Issue #1683 | PR #1912
     if [ "${#dup[@]}" -gt 0 ]; then
-        ci_error "[CI-WARN-CHECK-0078]" "reason=\"bare #N duplicated outside From: (warn-only, PR #1856)\"" "$(printf '%s\n' "${dup[@]}")"
+        ci_error "[CI-ERROR-CHECK-0078]" "reason=\"bare #N duplicated outside From:\"" "$(printf '%s\n' "${dup[@]}")"
+        rc=1
     fi
     if [ "${#chron[@]}" -gt 0 ]; then
-        if [ "${warn_only}" = 1 ]; then
-            ci_error "[CI-WARN-CHECK-0079]" "reason=\"review-chronology / stale line-ref (warn-only)\"" "$(printf '%s\n' "${chron[@]}")"
-        else
-            ci_error "[CI-ERROR-CHECK-0080]" "reason=\"review-chronology / stale line-ref\"" "$(printf '%s\n' "${chron[@]}")"
-            rc=1
-        fi
+        ci_error "[CI-ERROR-CHECK-0080]" "reason=\"review-chronology / stale line-ref\"" "$(printf '%s\n' "${chron[@]}")"
+        rc=1
     fi
     [ "${rc}" -eq 0 ] || return "${rc}"
     printf 'comments=clean files=%s\n' "${#todo[@]}"
@@ -13333,10 +13325,6 @@ _ci_check_pr_template() {
         fi
     done
     if [ "${#missing[@]}" -gt 0 ]; then
-        if [ "${PR_DRAFT:-false}" = "true" ]; then
-            ci_log "[CI-ERROR-CHECK-0088]" "template=\"${template#"${CI_REPO_ROOT:-.}/"}\" reason=\"draft, non-blocking; the PR body must use the PR template, own layouts are refused\" detail=\"$(printf '%s; ' "${missing[@]}")\""
-            printf 'pr-template=warn-draft\n'; return 0
-        fi
         ci_error "[CI-ERROR-CHECK-0089]" "template=\"${template#"${CI_REPO_ROOT:-.}/"}\" reason=\"the PR body must use the PR template, own layouts are refused; missing/empty required section(s)\"" "$(printf '%s\n' "${missing[@]}")"
         return 1
     fi
@@ -13516,10 +13504,6 @@ _ci_check_pr_tracking_metadata() {
     local w
     for w in "${warns[@]:-}"; do [ -n "${w}" ] && ci_log "[CI-WARN-CHECK-0114]" "pr=\"${pr_number}\" warn=\"${w}\""; done
     if [ "${#errs[@]}" -gt 0 ]; then
-        if [ "${PR_DRAFT:-false}" = "true" ]; then
-            ci_log "[CI-ERROR-CHECK-0092]" "reason=\"draft, non-blocking\" detail=\"$(printf '%s; ' "${errs[@]}")\""
-            printf 'pr-tracking-metadata=warn-draft\n'; return 0
-        fi
         ci_error "[CI-ERROR-CHECK-0093]" "reason=\"AG-GH-008 metadata incomplete\"" "$(printf '%s\n' "${errs[@]}")"
         return 1
     fi
@@ -14444,7 +14428,7 @@ _ci_check_compose_healthchecks() {
         return 2
     fi
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0021]" "reason=\"service missing a healthcheck (issue #1169)\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0021]" "reason=\"service missing a healthcheck\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'compose-healthchecks=clean checked=%s\n' "${checked}"
@@ -14622,22 +14606,28 @@ _ci_check_prod_state_wiring() {
     # What: compose mounts exactly the SOT state_dir_keys.
     # Why: the SOT list owns the keys; compose only mounts.
     # From: Issue #1683 | PR #1912
-    local mounted want
-    mounted="$(_ci_run -m 1 "[CI-ERROR-CHECK-0192]" "file=\"${compose}\" reason=\"state mounts not read\"" grep -oE '\$\{[A-Z0-9_]+:-\$\{LANCACHE_STATE_DIR:\?' "${compose}")" || return 2
-    mounted="${mounted//:-\$\{LANCACHE_STATE_DIR:\?/}"
-    mounted="$(sort -u <<< "${mounted//\$\{/}")"
+    local mounted="" want row key off=""
+    row="$(_ci_run "[CI-ERROR-CHECK-0192]" "file=\"${compose}\" reason=\"state mounts not read\"" \
+        yq --yaml-fix-merge-anchor-to-spec=true -r '(.services[].volumes[]?, .volumes[]?.driver_opts.device?) | select(tag == "!!str") | select(test("^\$\{[A-Z0-9_]+:[?-]"))' "${compose}")" || return 2
+    # What: ":?" after the key is a mount, ":-" a default.
+    # Why: a mount default in compose is a second owner.
+    # From: Issue #1683 | PR #1912
+    while IFS= read -r want; do
+        [ -n "${want}" ] || continue
+        key="${want#\$\{}"
+        key="${key%%:*}"
+        case "${want:$(( ${#key} + 2 )):2}" in
+            ':?') mounted+="${key}"$'\n' ;;
+            *) off+=$'\n'"${want}" ;;
+        esac
+    done <<< "${row}"
+    mounted="$(sort -u <<< "${mounted%$'\n'}")"
     want="$(sort -u <<< "${keys}")"
     [ "${mounted}" = "${want}" ] \
         || viol+=("${dep} state mounts differ from SOT runtime.state_dir_keys: compose=[${mounted//$'\n'/ }] sot=[${want//$'\n'/ }]")
-    # What: a mount default off the state root fails.
-    # Why: AG-SETUP-001: defaults stay under the state root.
-    # From: Issue #1683 | PR #1912
-    local off
-    off="$(_ci_run -m 1 "[CI-ERROR-CHECK-0176]" "file=\"${compose}\" reason=\"mount defaults not scanned\"" grep -E '^[[:space:]]*(- |device: )\$\{[A-Z0-9_]+:-' "${compose}")" || return 2
-    off="$(_ci_run -m 1 "[CI-ERROR-CHECK-0177]" "file=\"${compose}\" reason=\"state-dir defaults not filtered\"" grep -Fv -- ":-\${LANCACHE_STATE_DIR:?" <<< "${off}")" || return 2
-    [ -z "${off}" ] || viol+=("${dep} has a mount default off LANCACHE_STATE_DIR:${off}")
+    [ -z "${off}" ] || viol+=("${dep} has a mount default in compose:${off}")
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0100]" "reason=\"prod state wiring not LANCACHE_STATE_DIR-derived or undocumented\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0100]" "reason=\"prod state wiring differs from the SOT or undocumented\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'prod-state-wiring=clean\n'
@@ -14667,11 +14657,14 @@ _ci_validate_host_tools() {
     fi
 }
 
-# What: SOT_<KEY>=value per compose key, from setup.sh.
-# Why: sot_compose_env is the one owner; no second copy.
+# What: compose env rows from setup.sh sot_compose_env.
+# Why: the one owner; $1 env file or "", $2 state root.
 # From: Issue #1683 | PR #1912
 _ci_sot_compose_env() {
-    _ci_capture 0 bash -c 'source "$1" && sot_compose_env' _ "${CI_REPO_ROOT}/setup.sh"
+    _ci_capture 0 bash -c "$(cat <<'PROG'
+source "$1" && sot_compose_env "$2" "$3"
+PROG
+        )" _ "${CI_REPO_ROOT}/setup.sh" "${1:-}" "${2:-}"
 }
 
 # What: image coordinates of the compose images, KEY=VALUE.
@@ -14713,7 +14706,8 @@ _ci_validation_env() {
         esac
         printf '%s\n' "${v}"
     done <<< "${fx}"
-    _ci_sot_compose_env || return 2
+    v="$(_ci_default_in "${rows}" LANCACHE_STATE_DIR)" || return 2
+    _ci_sot_compose_env "" "${v}" || return 2
     _ci_validation_images || return 2
     # What: a fresh value per secret key, setup.sh format.
     # Why: a fixed key in the SOT is a hardcoded credential.
@@ -14862,7 +14856,7 @@ _ci_compose_run() {
         names="$(_ci_run "[CI-ERROR-CORE-0145]" "env_file=\"${env_file}\" reason=\"compose variable names unreadable\"" \
             jq -r 'keys[]' <<< "${vars}")" || return 2
         [ -z "${names}" ] || mapfile -t unsetv <<< "${names}"
-        fx="$(_ci_sot_compose_env)" || return 2
+        fx="$(_ci_sot_compose_env "${env_file}")" || return 2
         pre=(--env-file "${env_file}")
     else
         fx="$(_ci_validation_env)" || return 2
@@ -15155,7 +15149,7 @@ _ci_check_setup_update_safety() {
     # What: no flow mutates install state before its pause.
     # Why: per function; the cmd_update window went stale.
     # From: Issue #1683 | PR #1858
-    pause_out="$(_ci_capture 0 awk '
+    pause_out="$(_ci_capture 0 awk "$(cat <<'PROG'
         /^[A-Za-z_][A-Za-z0-9_]*\(\) [({]/ { fn = $1; sub(/\(\).*/, "", fn); next }
         /^[[:space:]]*#/ { next }
         /pause_lancache_convergence_for_update/ { seen[fn] = 1; paused[fn] = 1; next }
@@ -15165,13 +15159,18 @@ _ci_check_setup_update_safety() {
         END {
             for (f in seen) { n++; if (pend[f] != "") { printf "%s mutates before its pause:\n%s", f, pend[f] } }
             if (n == 0) { print "no update flow calls pause_lancache_convergence_for_update" }
-        }' "${su}")" || return 2
+        }
+PROG
+        )" "${su}")" || return 2
     if [ -n "${pause_out}" ]; then
         viol+=("update must pause the convergence timer before mutating install state"$'\n'"${pause_out}")
     fi
     _ci_file_match "[CI-ERROR-CHECK-0185]" "reason=\"service stop not searched\"" "${su}" "systemctl stop \"\$CONVERGE_SERVICE_UNIT\"" -F \
         || { [ "$?" -eq 1 ] || return 2; viol+=("update must stop the active convergence service before mutating install state"); }
-    restore_out="$(_ci_capture 0 awk '/if ! \( cmd_backup --config "\$install_dir" \); then/{b=1;next} b&&/resume_lancache_convergence_after_update true/{r=1} b&&/die "Pre-update rollback backup failed/{d=1;b=0} END{if (!(r&&d)) print "missing"}' "${su}")" || return 2
+    restore_out="$(_ci_capture 0 awk "$(cat <<'PROG'
+/if ! \( cmd_backup --config "\$install_dir" \); then/{b=1;next} b&&/resume_lancache_convergence_after_update true/{r=1} b&&/die "Pre-update rollback backup failed/{d=1;b=0} END{if (!(r&&d)) print "missing"}
+PROG
+        )" "${su}")" || return 2
     if [ -n "${restore_out}" ]; then
         viol+=("update must restore the convergence timer when the rollback backup fails")
     fi
@@ -15430,8 +15429,8 @@ _ci_check_vex_drift() {
     printf 'vex-drift=clean statements=%s\n' "${statement_count}"
 }
 
-# What: Warn (never fail) on editing CHANGELOG.md directly.
-# Why: usually unintended; risks a merge-conflict cascade.
+# What: Fail on editing CHANGELOG.md without the label.
+# Why: AG-VAL-001: a warning is no success; conflict risk.
 # From: Issue #893 | PR #1858
 _ci_check_changelog_direct_edit() {
     local -a changed=("$@")
@@ -15449,13 +15448,16 @@ _ci_check_changelog_direct_edit() {
     label_err="$(jq -e --arg l "${label}" 'index($l) != null' <<<"${PR_LABELS_JSON:-[]}" 2>&1)" || label_rc=$?
     case "${label_rc}" in
         0) ci_log "[CI-INFO-CHECK-0115]" "file=\"${file}\" label=\"${label}\" reason=\"changelog edited with the label; expected\"" ;;
-        1) ci_log "[CI-INFO-CHECK-0116]" "file=\"${file}\" reason=\"changelog edited directly outside the release flow; warn-only\"" ;;
+        1)
+            ci_error "[CI-ERROR-CHECK-0116]" "file=\"${file}\" label=\"${label}\" reason=\"changelog edited directly outside the release flow\"" "${file}"
+            return 1
+            ;;
         *)
             ci_error "[CI-ERROR-CHECK-0112]" "reason=\"PR_LABELS_JSON unreadable\"" "${label_err}"
             return 2
             ;;
     esac
-    printf 'changelog-direct-edit=warn\n'
+    printf 'changelog-direct-edit=labelled\n'
 }
 
 # What: print each logging-matrix row's service, dupes kept.

@@ -13,7 +13,7 @@ vulnerabilities:
       itself, present regardless of any image's own TLS/QUIC usage).
 
       Why: Time-boxed maintainer-authorized exception while the
-      apk-upgrade cache-bust fix (PR #1680, merged 2026-08-26T12:01:29Z)
+      apk-upgrade cache-bust fix (merged 2026-08-26T12:01:29Z)
       propagates through every affected image's next rebuild; no
       `paths:` scoping applies since Trivy's Alpine os-pkgs finding
       class carries no PkgPath. None of this project's services run a
@@ -26,8 +26,8 @@ vulnerabilities:
       confirms `lancache-ng/netdata` is not among this org's published
       GHCR packages, so it isn't a first-party image to check here) has
       a `docker inspect` `.Created`
-      timestamp between 2026-08-10 and 2026-08-16, all before the PR
-      #1680 merge -- no rebuild has propagated the fix yet. A live
+      timestamp between 2026-08-10 and 2026-08-16, all before the
+      fix merge -- no rebuild has propagated the fix yet. A live
       Trivy scan of `ui:nightly` (Alpine 3.24.1) without `--ignore-
       unfixed`/`--trivyignores` confirms the finding is real and fixed
       upstream but not yet in the built image: `CVE-2026-14456`
@@ -41,8 +41,8 @@ vulnerabilities:
       `openssl-provider-legacy`/`libssl-dev` packages (`FixedVersion:
       3.5.7-1~deb13u2`, confirmed via a live Trivy scan of
       `build-tools:nightly` without `--ignore-unfixed`/`--trivyignores`)
-      and is being suppressed by this same entry as a side effect. PR
-      #1680 fixed only the Alpine `apk`-upgrade cache-bust; whether
+      and is being suppressed by this same entry as a side effect. The
+      fix merge fixed only the Alpine `apk`-upgrade cache-bust; whether
       `.github/build-tools`'s Debian `apt`-upgrade path has an equivalent
       staleness problem remains unverified and needs its own check.
 
@@ -778,8 +778,8 @@ vulnerabilities:
       invocation never opens a TLS/HTTP connection, resolves DNS, or
       parses an attacker-supplied email/MIME/XML/HTML document, so none
       of this group's vulnerable code paths is reachable from how this
-      project actually runs the tool. Per the rewritten AG-KD-003 (PR
-      #1744), actionlint no longer qualifies for the source-build
+      project actually runs the tool. Per the rewritten AG-KD-003,
+      actionlint no longer qualifies for the source-build
       exemption precisely because its vulnerable code is unreachable in
       this invocation -- this is a reachability finding, not a general
       accepted-risk waiver.
