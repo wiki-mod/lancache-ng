@@ -1021,6 +1021,7 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
     // What: form limits from their one Rust owner.
     // Why: AG-CODE-011: templates repeat no number.
     // From: Issue #1683 | PR #1912
+    ctx.insert("lan_record_types", &LAN_RECORD_TYPES);
     ctx.insert("record_ttl_default", &DEFAULT_RECORD_TTL);
     ctx.insert("ttl_max", &MAX_TTL);
     ctx.insert("txt_max_bytes", &MAX_TXT_BYTES);
@@ -4865,6 +4866,10 @@ fn is_lan_name(name: &str, underscore: bool, lan_zone: &str) -> bool {
     is_fqdn(name, underscore, true) && (name == zone || name.ends_with(&format!(".{zone}")))
 }
 
+// What: the record types the LAN forms accept.
+// Why: validation and the type list of the page share it.
+const LAN_RECORD_TYPES: [&str; 5] = ["A", "AAAA", "CNAME", "MX", "TXT"];
+
 // What: type and content of a valid LAN record, or None.
 // Why: each record type has its own content syntax.
 fn validate_lan_record(
@@ -4877,14 +4882,8 @@ fn validate_lan_record(
     if !(1..=MAX_TTL).contains(&ttl) {
         return None;
     }
-    let kind = match record_type.trim().to_ascii_uppercase().as_str() {
-        "A" => "A",
-        "AAAA" => "AAAA",
-        "CNAME" => "CNAME",
-        "MX" => "MX",
-        "TXT" => "TXT",
-        _ => return None,
-    };
+    let wanted = record_type.trim().to_ascii_uppercase();
+    let kind = LAN_RECORD_TYPES.into_iter().find(|t| *t == wanted)?;
     if !is_lan_name(name, kind == "TXT", lan_zone) {
         return None;
     }
