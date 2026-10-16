@@ -12253,6 +12253,32 @@ _CI_AWK_COMMENTS='
     # Why: bash sorts the rows into one report per rule.
     # From: Issue #1683 | PR #1912
     function cm_out(k, t) { printf "%s\t%s\n", k, t }
+    # What: YAML text blocks led by What: are strict.
+    # Why: AG-CODE-012 holds for text fields too.
+    # From: Issue #1683 | PR #1912
+    function cm_stmt(  i, b, t, cw, cy, cf, st, pb) {
+        b = 0; pb = 0
+        for (i = 1; i <= n + 1; i++) {
+            if (i <= n && S[i] && S[i] == b) { st = 1 } else st = 0
+            if (!st && b) {
+                if (cw != 1 || cy != 1 || cf > 1) cm_out("C", cur ":" ss ": text block needs one What:, one Why:, at most one From:")
+                b = 0
+            }
+            if (i > n || !S[i]) continue
+            if (!st) { b = S[i]; ss = i; cw = cy = cf = 0; pb = 0 }
+            t = ST[i]
+            if (t == "") { if (!pb) pb = i; continue }
+            if (pb) { cm_out("C", cur ":" pb ": blank line inside a text block (stacked blocks)"); pb = 0 }
+            if (length(L[i]) > 60) cm_out("C", cur ":" i ": " length(L[i]) " chars (max 60): " L[i])
+            if (t ~ /^What:/) cw++
+            else if (t ~ /^Why:/) cy++
+            else if (t ~ /^From:/) {
+                cf++
+                if (t !~ /^From: (Issue #[0-9]+|PR #[0-9]+|Issue #[0-9]+ \| PR #[0-9]+)$/) cm_out("C", cur ":" i ": From: allows one Issue and one PR only: " L[i])
+            } else cm_out("C", cur ":" i ": text block line is not What:, Why: or From: (no continuation): " L[i])
+            if (t ~ /^(What|Why):/ && t ~ /#[0-9]/) cm_out("C", cur ":" i ": issue/PR ref in What/Why (use From:): " L[i])
+        }
+    }
     # What: all rules for the file held in L[1..n].
     # Why: the lexer runs once; every rule reads its arrays.
     # From: Issue #1683 | PR #1912
@@ -12288,6 +12314,7 @@ _CI_AWK_COMMENTS='
             if (rl > 3) cm_out("C", cur ":" rs ": story-telling block (" rl " lines)")
             rs = rl = 0
         }
+        cm_stmt()
         for (i = 1; i <= n; i++) {
             t = tolower(L[i])
             if (t ~ rc || t ~ lr) cm_out("R", cur ":" i ":" L[i])
@@ -12300,7 +12327,7 @@ _CI_AWK_COMMENTS='
     # From: Issue #1683 | PR #1912
     FNR == 1 {
         if (cur != "") cm_file()
-        delete L; delete F; delete C; delete D; delete T; delete H; delete K; delete IB
+        delete L; delete F; delete C; delete D; delete T; delete H; delete K; delete IB; delete S; delete ST
         cur = FILENAME; style = cm_style(cur)
         if (style == "") { cm_out("G", cur); cur = ""; nextfile }
         h2 = cm_hdr(hp); h3 = cm_hdr(hs)
@@ -12405,8 +12432,8 @@ _CI_AWK_COMMENT_LEX="$(cat <<'PROG'
     # What: hash/yaml lines; heredoc=0 tracks YAML blocks.
     # Why: heredoc/block-scalar bodies are data, not runs.
     # From: Issue #1683 | PR #1858
-    function cl_hash(heredoc,  i, line, chk, iny, ind) {
-        hh = 1; ht = 0
+    function cl_hash(heredoc,  i, line, chk, iny, ind, t, sf, sb) {
+        hh = 1; ht = 0; sn = 0
         for (i = 1; i <= n; i++) {
             line = L[i]
             if (line ~ /^[[:space:]]*#/) { F[i] = 1; T[i] = line; sub(/^[[:space:]]*#[[:space:]]*/, "", T[i]) }
@@ -12417,14 +12444,20 @@ _CI_AWK_COMMENT_LEX="$(cat <<'PROG'
                 continue
             }
             if (!heredoc && iny) {
-                if (line ~ /^[[:space:]]*$/) continue
-                match(line, /[^ ]/); if (RSTART - 1 > ind) continue
+                if (line ~ /^[[:space:]]*$/) { if (sb) { S[i] = sb; ST[i] = "" } continue }
+                match(line, /[^ ]/)
+                if (RSTART - 1 > ind) {
+                    t = substr(line, RSTART)
+                    if (sf) { sf = 0; if (t ~ /^What:/) sb = ++sn }
+                    if (sb) { S[i] = sb; ST[i] = t }
+                    continue
+                }
                 iny = 0
             }
             if (line ~ /^[[:space:]]*#/) { C[i] = 1; continue }
             if (heredoc) cl_heredocs(line)
             else if (line ~ /^[[:space:]]*(-[[:space:]]+)?[A-Za-z0-9_.-]+:[[:space:]]*[|>][+-]?[0-9]?[[:space:]]*$/) {
-                match(line, /[^ ]/); ind = RSTART - 1; iny = 1
+                match(line, /[^ ]/); ind = RSTART - 1; iny = 1; sf = 1; sb = 0
             }
         }
     }
