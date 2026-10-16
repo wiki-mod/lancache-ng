@@ -18,6 +18,8 @@
 
   {{ <section_tabs main_href={pages.domains} main_label="DNS" main_page="domains" active_page={active_page} secondaries_href={pages.secondaries}/> }}
 
+  {# What: install command for a new secondary, copyable #}
+  {# Why: token and primary URL are rendered by main.rs #}
   <div class="card flex flex-col gap-4">
     <div>
       <h2 class="font-semibold text-slate-200">Neuen Secondary registrieren</h2>
@@ -48,6 +50,8 @@
     </p>
   </div>
 
+  {# What: table of registered secondaries with actions #}
+  {# Why: health, address, token and removal per row #}
   <div class="card flex flex-col gap-4">
     <div>
       <h2 class="font-semibold text-slate-200">Registrierte Secondaries</h2>
@@ -68,7 +72,7 @@
             <th class="th px-3">Aktionen</th>
           </tr>
         </thead>
-        <tbody class="divide-y divide-slate-700">
+        <tbody class="rows">
           {% for secondary in secondaries %}
           <tr class="hover:bg-slate-700/50 transition-colors">
             <td class="px-3 py-2 text-slate-200 font-mono">{{ secondary.name }}</td>

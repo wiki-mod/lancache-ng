@@ -64,6 +64,8 @@
     </button>
   </form>
 
+  <!-- What: syslog lines of the selected host or all hosts
+       Why: rendered server-side; reload shows new lines -->
   <div class="card p-0 overflow-hidden">
     <div class="overflow-x-auto">
       <table class="w-full text-xs" id="syslog-table">
@@ -75,7 +77,7 @@
             <th class="th px-4">Nachricht</th>
           </tr>
         </thead>
-        <tbody class="divide-y divide-slate-700/50">
+        <tbody class="rows">
           {% if syslog_logs %}
           {% for entry in syslog_logs %}
           <tr class="hover:bg-slate-700/20 transition-colors">

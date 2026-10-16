@@ -213,7 +213,7 @@
             <th class="th">Size</th>
           </tr>
         </thead>
-        <tbody class="divide-y divide-slate-700/30">
+        <tbody class="rows">
           {% for host in syslog_stats.hosts %}
           <tr>
             <td class="py-1 pr-4 text-blue-400 font-mono">{{ host.host }}</td>
@@ -249,7 +249,7 @@
             <th class="th">Cache</th>
           </tr>
         </thead>
-        <tbody class="divide-y divide-slate-700/50">
+        <tbody class="rows">
           {% for entry in recent_logs %}
           <tr class="hover:bg-slate-700/30 transition-colors">
             <td class="py-1.5 pr-4 text-blue-400 font-mono text-xs">{{ entry.host }}</td>

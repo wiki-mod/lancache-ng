@@ -60,6 +60,8 @@
   </div>
 
   <div class="space-y-6">
+    {# What: CDN domain list: add, switch, remove
+       Why: one list cdn-domains.txt; certs derive from it #}
     <section data-dns-panel="cdn" class="card flex flex-col gap-4">
       <div>
         <h2 class="font-semibold text-slate-200">CDN-Domains</h2>
@@ -138,6 +140,8 @@
       <p class="text-xs text-slate-500">{{ dns_domains | length }} Einträge</p>
     </section>
 
+    {# What: LAN records in PowerDNS: add form and list
+       Why: changes apply live, no container restart #}
     <section data-dns-panel="lan" class="card flex flex-col gap-4 hidden">
       <div>
         <h2 class="font-semibold text-slate-200">LAN-Einträge</h2>
@@ -211,6 +215,8 @@
       <p class="text-xs text-slate-500">{% if lan_records %}{{ lan_records | length }} Einträge{% else %}0 Einträge{% endif %}</p>
     </section>
 
+    {# What: PTR records of the private reverse zones
+       Why: Kea DDNS and manual entries share one list #}
     <section data-dns-panel="ptr" class="card flex flex-col gap-4 hidden">
       <div>
         <h2 class="font-semibold text-slate-200">PTR / Reverse-DNS</h2>
@@ -282,6 +288,8 @@
       <p class="text-xs text-slate-500">{% if ptr_records %}{{ ptr_records | length }} Einträge{% else %}0 Einträge{% endif %}</p>
     </section>
 
+    {# What: global IPv4-only switch (AAAA filter)
+       Why: clients then use IPv4 and reach the cache #}
     <section data-dns-panel="settings" class="card flex flex-col gap-4 hidden">
       <div>
         <h2 class="font-semibold text-slate-200">Settings / IPv4-only Modus</h2>
@@ -407,9 +415,9 @@
                   <th class="th">Aktion</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody class="rows">
                 {% for snapshot in group.snapshots %}
-                <tr class="border-b border-slate-700 hover:bg-slate-700">
+                <tr class="hover:bg-slate-700">
                   <td class="py-2 text-white">
                     <time data-epoch="{{ snapshot.created_unix }}">{{ snapshot.created_unix }}</time>
                   </td>
