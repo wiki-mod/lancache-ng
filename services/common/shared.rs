@@ -156,6 +156,8 @@ pub fn run_program(
     limit: Option<Duration>,
 ) -> Result<String, String> {
     let failed = |what: &str, e: &dyn std::fmt::Display| format!("{program}: {what}: {e}");
+    // What: start it with no stdin and piped outputs.
+    // Why: it must not wait for input; we capture both.
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
@@ -163,8 +165,12 @@ pub fn run_program(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("cannot run {program}: {e}"))?;
+    // What: read both outputs on their own threads.
+    // Why: one full pipe would block the program.
     let out = drain(child.stdout.take());
     let err = drain(child.stderr.take());
+    // What: the end of the limit, with the limit for messages.
+    // Why: the wait and the readers share one deadline.
     let deadline = limit.map(|limit| (std::time::Instant::now() + limit, limit));
     let status = match deadline {
         None => child.wait().map_err(|e| failed("cannot wait", &e))?,
@@ -183,6 +189,8 @@ pub fn run_program(
                     args.join(" ")
                 ));
             }
+            // What: poll the exit every 20 ms.
+            // Why: std has no wait with a timeout.
             std::thread::sleep(Duration::from_millis(20));
         },
     };
@@ -207,6 +215,8 @@ pub fn run_program(
                 }),
         };
         let bytes = received?.map_err(|e| failed("cannot read output", &e))?;
+        // What: append the output, stdout first.
+        // Why: callers read the result stdout then stderr.
         text.push_str(&String::from_utf8_lossy(&bytes));
     }
     if status.success() {
@@ -286,9 +296,13 @@ fn own_with(
             format!("cannot set owner or mode of {}: {e}", name.display()),
         )
     };
+    // What: set the owner ids only when one is given.
+    // Why: no id leaves the file's owner as it is.
     if owner.0.is_some() || owner.1.is_some() {
         chown(owner).map_err(context)?;
     }
+    // What: set the mode only when one is given.
+    // Why: no mode leaves the rights as they are.
     match mode {
         Some(mode) => chmod(mode).map_err(context),
         None => Ok(()),
@@ -1012,15 +1026,21 @@ pub fn write_file_as(
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
+    // What: take the file name of the target.
+    // Why: the temp name derives from it; no name, no file.
     let name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
     let stamp = unix_nanos();
+    // What: a unique temp name beside the target.
+    // Why: link and rename need the same filesystem.
     let tmp = path.with_file_name(format!(
         ".{}.tmp-{}-{stamp}",
         name.to_string_lossy(),
         std::process::id()
     ));
+    // What: create the temp file with its final mode.
+    // Why: the content is never visible with wider rights.
     let placed = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1028,9 +1048,13 @@ pub fn write_file_as(
         .open(&tmp)
         .and_then(|mut file| {
             file.write_all(contents)?;
+            // What: set the owner on the open file.
+            // Why: the name could be swapped before the chown.
             if let Some(owner) = owner {
                 own_file(&file, &tmp, owner, None)?;
             }
+            // What: flush the content to disk before placing.
+            // Why: a crash must not leave an empty target.
             file.sync_all()
         })
         .and_then(|()| match place {
