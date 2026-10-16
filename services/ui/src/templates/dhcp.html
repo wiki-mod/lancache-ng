@@ -53,6 +53,8 @@
 
   {{ <section_tabs main_href={pages.dhcp} main_label="DHCP" main_page="dhcp" active_page={active_page} secondaries_href={pages.secondaries}/> }}
 
+  {# What: DHCP mode select and the form of the active mode #}
+  {# Why: proxy and relay values exist only in their mode #}
   <div class="card space-y-4">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div>
@@ -63,7 +65,7 @@
     </div>
 
     <form method="post" action="{{ routes.dhcp_mode | safe }}" class="grid gap-3 md:grid-cols-2 items-end">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {{ <csrf_field csrf_token={csrf_token}/> }}
       <div>
         <label class="block text-xs text-slate-400 mb-1">Aktiver DHCP-Modus</label>
         <select name="dhcp_mode"
@@ -81,6 +83,8 @@
     </form>
 
     {% if dhcp_mode == "dnsmasq-proxy" %}
+      {# What: ProxyDHCP values and their edit form #}
+      {# Why: options reach only PXE clients in this mode #}
       <div class="text-sm text-amber-300 space-y-2">
         <p>dnsmasq proxy mode is active. This page shows the live proxy values and lets you edit them directly as simple fields.</p>
         <ul class="list-disc pl-5 space-y-1 text-amber-200">
@@ -96,7 +100,7 @@
           <div><span class="text-slate-400">DNS 2:</span> <span class="text-white">{{ dhcp_dns_secondary }}</span></div>
         </div>
         <form method="post" action="{{ routes.dhcp_proxy | safe }}" class="space-y-3 rounded border border-amber-500/30 bg-slate-900/50 p-4">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {{ <csrf_field csrf_token={csrf_token}/> }}
           <div class="grid gap-3 md:grid-cols-2">
             {{ <text_field label="Proxy subnet start" name="dhcp_subnet_start" tone="bg-slate-800 border-slate-600" value={dhcp_proxy_subnet_start} placeholder="10.0.0.0" required={true}/> }}
             {{ <text_field label="Upstream DHCP server (documentation only)" name="upstream_dhcp_ip" tone="bg-slate-800 border-slate-600" value={dhcp_upstream_dhcp_ip} placeholder="10.0.0.1" required={true} hint="ProxyDHCP mode never needs to contact this server to work; recorded so you and the DHCP conflict check agree on which server owns real leases."/> }}
@@ -133,7 +137,7 @@
           <li>No subnet/DNS/PXE fields here -- a relay injects nothing of its own. Use ProxyDHCP mode for PXE option injection, or Kea mode to own leases here.</li>
         </ul>
         <form method="post" action="{{ routes.dhcp_relay | safe }}" class="space-y-3 rounded border border-sky-500/30 bg-slate-900/50 p-4">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {{ <csrf_field csrf_token={csrf_token}/> }}
           <div class="grid gap-3 md:grid-cols-2">
             {{ <text_field label="Relay local address (this relay's client-facing IP)" name="dhcp_relay_local_addr" tone="bg-slate-800 border-slate-600" value={dhcp_relay_local_addr} placeholder="192.168.1.2" required={true} hint="The IP dnsmasq listens on for client DHCP broadcasts; forwarded as <code>giaddr</code> so the upstream server selects the right pool."/> }}
             {{ <text_field label="Upstream DHCP server" name="upstream_dhcp_ip" tone="bg-slate-800 border-slate-600" value={dhcp_upstream_dhcp_ip} placeholder="10.0.0.1" required={true} hint="The real DHCP server every relayed request is forwarded to."/> }}
@@ -145,6 +149,8 @@
         </form>
       </div>
     {% elif dhcp_mode == "kea" %}
+      {# What: Kea mode summary of the managed values #}
+      {# Why: lists what the subnet editor below manages #}
       <div class="text-sm text-green-400 space-y-2">
         <p>Kea mode is active. The configuration area below is visible and editable with direct fields for gateway, DNS, NTP, reservations, and subnet details.</p>
         <ul class="list-disc pl-5 space-y-1 text-green-300">
@@ -197,7 +203,7 @@
       {{ <on_off_badge on={dhcp_ddns_enabled}/> }}
     </div>
     <form method="POST" action="{{ routes.dhcp_ddns | safe }}" class="mt-3 grid gap-3 md:grid-cols-[1fr_auto] items-end">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {{ <csrf_field csrf_token={csrf_token}/> }}
       <div>
         <label class="block text-xs text-slate-400 mb-1">DDNS-Updates aktivieren</label>
         <select name="enabled"
@@ -213,6 +219,8 @@
     </form>
   </div>
 
+  {# What: Kea subnet list with add, edit, remove forms #}
+  {# Why: add form stays hidden until toggleAddSubnet() #}
   <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-lg font-semibold text-white">Subnetze</h2>
@@ -224,7 +232,7 @@
     <div id="add-subnet-form" class="hidden mb-6 p-4 bg-slate-700 rounded border border-slate-600">
       <h3 class="text-sm font-medium text-white mb-3">Neues Subnet</h3>
       <form method="POST" action="{{ routes.subnet_add | safe }}" class="space-y-3">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {{ <csrf_field csrf_token={csrf_token}/> }}
         {{ <subnet_fields tone="bg-slate-600 border-slate-500" ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.ntp} dns_primary={dhcp_dns_primary} dns_secondary={dhcp_dns_secondary} lease_time={default_lease_time} domain="lan" ntp_servers={dhcp_ntp_servers}/> }}
         <div class="flex gap-2">
           <button type="submit" class="btn btn-blue">
@@ -257,7 +265,7 @@
           </button>
           <form method="POST" action="{{ routes.subnet_remove | safe }}" class="inline"
             onsubmit="return confirm('Subnet {{ subnet.subnet }} löschen?')">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {{ <csrf_field csrf_token={csrf_token}/> }}
             <input type="hidden" name="id" value="{{ subnet.id }}">
             <button type="submit" class="btn btn-sm btn-danger">
               Löschen
@@ -268,7 +276,7 @@
 
       <div id="edit-subnet-{{ subnet.id }}" class="hidden p-4 bg-slate-750 border-t border-slate-600">
         <form method="POST" action="{{ routes.subnet_update | safe }}" class="space-y-3">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {{ <csrf_field csrf_token={csrf_token}/> }}
           <input type="hidden" name="id" value="{{ subnet.id }}">
           {{ <subnet_fields tone="bg-slate-700 border-slate-600" ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.ntp} subnet={subnet.subnet} gateway={subnet.gateway} dns_primary={subnet.dns_primary} dns_secondary={subnet.dns_secondary} pool_start={subnet.pool_start} pool_end={subnet.pool_end} lease_time={subnet.lease_time} domain={subnet.domain} ntp_servers={subnet.ntp_servers}/> }}
           <div class="flex gap-2">
@@ -282,6 +290,8 @@
         </form>
       </div>
 
+      {# What: free DHCPv4 code/value options of one subnet #}
+      {# Why: fixed fields own router, DNS, domain and NTP #}
       <div class="p-4 bg-slate-900/40 border-t border-slate-700 space-y-3">
         <div>
           <h3 class="text-sm font-medium text-slate-200">Zusätzliche DHCP-Optionen</h3>
@@ -302,7 +312,7 @@
             </div>
             <form method="POST" action="{{ routes.subnet_option_remove | safe }}" class="inline"
               onsubmit="return confirm('DHCP-Option {{ option.code }} aus {{ subnet.subnet }} entfernen?')">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              {{ <csrf_field csrf_token={csrf_token}/> }}
               <input type="hidden" name="subnet_id" value="{{ subnet.id }}">
               <input type="hidden" name="code" value="{{ option.code }}">
               <input type="hidden" name="data" value="{{ option.data }}">
@@ -318,7 +328,7 @@
         {% endif %}
 
         <form method="POST" action="{{ routes.subnet_option_add | safe }}" class="grid gap-3 md:grid-cols-[120px_1fr_auto] items-end">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {{ <csrf_field csrf_token={csrf_token}/> }}
           <input type="hidden" name="subnet_id" value="{{ subnet.id }}">
           {{ <text_field label="Options-Code" name="code" tone="bg-slate-800 border-slate-600" type="number" min={option_code_min} max={option_code_max} placeholder="66" required={true}/> }}
           {{ <text_field label="Wert" name="data" tone="bg-slate-800 border-slate-600" placeholder="192.168.1.10 oder bootfile.efi" required={true}/> }}
@@ -331,12 +341,14 @@
     {% endfor %}
   </div>
 
+  {# What: static reservations: add form and list #}
+  {# Why: the add form needs a subnet; hidden without one #}
   <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
     <h2 class="text-lg font-semibold text-white mb-4">Statische Reservierungen</h2>
 
     {% if subnets | length > 0 %}
     <form method="POST" action="{{ routes.static_add | safe }}" class="mb-6 space-y-3 p-4 bg-slate-700 rounded">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {{ <csrf_field csrf_token={csrf_token}/> }}
       <div class="grid grid-cols-4 gap-3">
         <div>
           <label class="block text-xs text-slate-400 mb-1">Subnet</label>
@@ -367,7 +379,7 @@
           </div>
         </div>
         <form method="POST" action="{{ routes.static_remove | safe }}" class="inline">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {{ <csrf_field csrf_token={csrf_token}/> }}
           <input type="hidden" name="subnet_id" value="{{ res.subnet_id }}">
           <input type="hidden" name="mac" value="{{ res.mac }}">
           <button type="submit" class="btn btn-sm btn-danger">
@@ -382,6 +394,8 @@
     </div>
   </div>
 
+  {# What: active Kea leases with a release form each #}
+  {# Why: expiry is epoch; base.html formats [data-epoch] #}
   <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
     <h2 class="text-lg font-semibold text-white mb-4">Aktive DHCP-Leases</h2>
     <div class="overflow-x-auto">
@@ -409,7 +423,7 @@
             <td class="py-2">
               <form method="POST" action="{{ routes.lease_release | safe }}" class="inline"
                 onsubmit="return confirm('Lease {{ lease.ip }} freigeben?')">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                {{ <csrf_field csrf_token={csrf_token}/> }}
                 <input type="hidden" name="ip" value="{{ lease.ip }}">
                 <button type="submit" class="btn btn-sm btn-warn">
                   Freigeben
@@ -458,7 +472,7 @@
             <td class="py-2">
               <form method="POST" action="{{ routes.kea_rollback | safe }}" class="inline"
                 onsubmit="return confirm('Auf diesen Snapshot zurückrollen? Die aktuelle DHCP-Konfiguration wird ersetzt.')">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                {{ <csrf_field csrf_token={csrf_token}/> }}
                 <input type="hidden" name="snapshot_id" value="{{ snapshot.id }}">
                 <button type="submit" class="btn btn-sm btn-warn">
                   Zurückrollen
@@ -581,6 +595,8 @@ async function checkDhcpConflict() {
       clientEl.textContent = `DHCP-Client-Dry-Run: nicht verfügbar (${data.client?.reason ?? 'unbekannt'})`;
     }
   } catch (e) {
+    // What: writes the fetch or JSON error into the card
+    // Why: the operator sees the failure, not a stale text
     statusEl.textContent = 'Fehler beim Prüfen: ' + e.message;
   }
 }

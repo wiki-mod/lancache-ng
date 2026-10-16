@@ -16,12 +16,16 @@
     {{ <section_tab href={main_href} label={main_label} active={active_page == main_page}/> }}
     {{ <section_tab href={secondaries_href} label="Secondary" active={active_page == "secondaries"}/> }}
   </div>{% endcomponent section_tabs %}
+{# What: hidden csrf_token field of every POST form #}
+{# Why: one markup; main.rs CSRF_FORM_FIELD reads it #}
+{# From: Issue #1683 | PR #1912 #}
+{% component csrf_field(csrf_token) %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endcomponent csrf_field %}
 {# What: Admin-UI restart form; confirm() before submit #}
 {# Why: UI exits, compose restarts it; top bar and setup #}
 {# From: Issue #1683 | PR #1912 #}
 {% component restart_ui_form(action, csrf_token, button_class, label, title=none) %}<form method="post" action="{{ action | safe }}"
               onsubmit="return confirm('Admin-UI wirklich neu starten? Die Seite ist danach kurz nicht erreichbar.')">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {{ <csrf_field csrf_token={csrf_token}/> }}
           <button type="submit" class="{{ button_class }}"{% if title is not none %} title="{{ title }}"{% endif %}>{{ label }}</button>
         </form>{% endcomponent restart_ui_form %}
 {# What: "Kopieren" button; copyText() copies target #}
@@ -84,6 +88,8 @@
       --color-accent-coral: #c8462f;
       --color-accent-coral-soft: rgba(200, 70, 47, 0.12);
     }
+    /* What: body font and colours, display font for titles
+       Why: fonts and colours come from the :root tokens */
     body { font-family: var(--font-body); background: var(--color-bg); color: var(--color-text); }
     main h1 { font-family: var(--font-display); }
     .stat-num { font-family: var(--font-display); }
@@ -108,6 +114,8 @@
     :root[data-theme="light"] .border-slate-600,
     :root[data-theme="light"] .border-slate-700 { border-color: var(--color-border); }
 
+    /* What: dock, nav link, card, badge, scrollbar styles
+       Why: same look on every page; colours via the tokens */
     .dock { background: var(--color-surface); border-right: 1px solid var(--color-border); }
     .nav-link {
       display: flex; align-items: center; gap: 0.625rem;
@@ -242,6 +250,8 @@
 </head>
 <body class="h-full flex">
 
+  <!-- What: sidebar with logo, nav links and image info
+       Why: same navigation on every page from one layout -->
   <aside class="dock w-52 shrink-0 flex flex-col">
     <div class="px-4 py-5" style="border-bottom: 1px solid var(--color-border);">
       <div class="flex items-center gap-2">
@@ -316,6 +326,8 @@
         dot.classList.remove(...DOT_COLOR_CLASSES);
         dot.classList.add('beambar-dot', colorClass(status));
       }
+      // What: paints the server-rendered [data-dot-status] dots
+      // Why: setup and dashboard dots get the same colours
       document.querySelectorAll('[data-dot-status]').forEach(function (dot) {
         paintDot(dot, dot.dataset.dotStatus);
       });
@@ -470,6 +482,8 @@
       window.LancacheWatchdog.onUpdate(render);
     })();
 
+    // What: loads watchdog status now, then every 10s
+    // Why: beambar and dashboard dots read the same data
     window.LancacheWatchdog.refresh();
     setInterval(window.LancacheWatchdog.refresh, 10000);
 

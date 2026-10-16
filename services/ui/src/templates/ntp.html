@@ -29,8 +29,10 @@
       {{ <on_off_badge on={ntp_enabled}/> }}
     </div>
 
+    {# What: saves chronyd switch, upstream list, DHCP switch
+       Why: the watchdog starts or stops chronyd from it #}
     <form method="post" action="{{ routes.ntp_settings | safe }}" class="space-y-4">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {{ <csrf_field csrf_token={csrf_token}/> }}
 
       <div class="flex items-center gap-2">
         <input type="checkbox" id="ntp_enabled" name="ntp_enabled" value="1"
@@ -52,6 +54,8 @@
         </p>
       </div>
 
+      {# What: auto DHCP-NTP switch; disabled without Kea
+         Why: the setting only applies to Kea subnets #}
       <div class="rounded border border-slate-700 bg-slate-900/50 p-3 space-y-2">
         <div class="flex items-center gap-2">
           <input type="checkbox" id="ntp_auto_dhcp" name="ntp_auto_dhcp" value="1"

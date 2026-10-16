@@ -34,6 +34,8 @@
 
   {{ <section_tabs main_href={pages.domains} main_label="DNS" main_page="domains" active_page={active_page} secondaries_href={pages.secondaries}/> }}
 
+  {# What: one tab button per data-dns-panel section below
+     Why: setActiveDnsTab maps data-dns-tab to the panel #}
   <div class="flex flex-wrap items-center gap-2 border-b border-slate-700">
     <button type="button" data-dns-tab="cdn"
             class="tab dns-tab-btn">
@@ -69,7 +71,7 @@
       </div>
 
       <form action="{{ routes.dns_add | safe }}" method="post" class="flex gap-2">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {{ <csrf_field csrf_token={csrf_token}/> }}
         {# What: one domain per submit, one input
            Why: each add runs after_domain_change #}
         <input type="text" name="domain" placeholder="z.B. steamcontent.com"
@@ -101,7 +103,7 @@
           {# What: on/off switch for default rows
              Why: a "!" prefix marks a disabled row #}
           <form action="{{ routes.dns_toggle | safe }}" method="post" class="flex items-center gap-2 flex-shrink-0">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {{ <csrf_field csrf_token={csrf_token}/> }}
             <input type="hidden" name="domain" value="{{ domain.display }}">
             <label class="flex items-center gap-1.5 cursor-pointer select-none">
               <input type="checkbox" name="enabled" value="1"
@@ -115,7 +117,7 @@
           </form>
           {% else %}
           <form action="{{ routes.dns_remove | safe }}" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {{ <csrf_field csrf_token={csrf_token}/> }}
             {# What: hidden value is the raw file entry
                Why: removal keys on the raw entry #}
             <input type="hidden" name="domain" value="{{ domain.raw }}">
@@ -143,7 +145,7 @@
       </div>
 
       <form action="{{ routes.lan_add | safe }}" method="post" class="flex flex-col gap-3" data-lan-record-form>
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {{ <csrf_field csrf_token={csrf_token}/> }}
         {# What: record name, type, content fields
            Why: type and content not parsed together #}
         <div class="flex gap-2">
@@ -185,7 +187,7 @@
             <div class="text-xs text-slate-400 mt-0.5 font-mono">{% for content in record.records %}{{ content.content }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>
           </div>
           <form action="{{ routes.lan_remove | safe }}" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {{ <csrf_field csrf_token={csrf_token}/> }}
             {# What: hidden name, type and joined content
                Why: removal targets the RRset #}
             <input type="hidden" name="name" value="{{ record.name }}">
@@ -225,7 +227,7 @@
       </div>
 
       <form action="{{ routes.ptr_add | safe }}" method="post" class="flex flex-col gap-3">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {{ <csrf_field csrf_token={csrf_token}/> }}
         {# What: form takes IP and hostname; name is derived
            Why: the reverse record name comes from the IP #}
         <div class="flex gap-2">
@@ -258,7 +260,7 @@
             <div class="text-xs text-slate-400 mt-0.5 font-mono">→ {{ ptr.hostname }}</div>
           </div>
           <form action="{{ routes.ptr_remove | safe }}" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {{ <csrf_field csrf_token={csrf_token}/> }}
             {# What: removal deletes the PTR rrset for IP
                Why: the PTR rrset is keyed by IP #}
             <input type="hidden" name="ip" value="{{ ptr.ip }}">
@@ -290,7 +292,7 @@
       </div>
 
       <form action="{{ routes.aaaa_filter | safe }}" method="post" class="flex items-center gap-4">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {{ <csrf_field csrf_token={csrf_token}/> }}
         {# What: global AAAA filter, stored as a marker
            Why: the domain rows above are not edited #}
         <div class="flex items-center gap-2">
@@ -350,7 +352,7 @@
       {% endif %}
 
       <form action="{{ routes.ddns_unsigned | safe }}" method="post" class="flex items-center gap-4">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {{ <csrf_field csrf_token={csrf_token}/> }}
         <div class="flex items-center gap-2">
           <input type="checkbox" id="ddns-allow-unsigned-enabled" name="enabled" value="1"
                  {% if ddns_unsigned_updates_allowed %}checked{% endif %}
@@ -416,7 +418,7 @@
                        Why: no JS escaping needed #}
                     <form method="POST" action="{{ routes.zone_rollback | safe }}" class="inline"
                           onsubmit="return confirm('Zone {{ group.zone }} auf diesen Snapshot zurückrollen? Seit dem Snapshot hinzugekommene Records können dabei verloren gehen.')">
-                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      {{ <csrf_field csrf_token={csrf_token}/> }}
                       <input type="hidden" name="zone" value="{{ group.zone }}">
                       <input type="hidden" name="snapshot_id" value="{{ snapshot.id }}">
                       <button type="submit" class="btn btn-sm btn-warn">
@@ -459,6 +461,8 @@
 
 {% block scripts %}
 <script>
+  // What: shows one DNS panel and marks its tab button
+  // Why: tabs switch client-side; no reload per tab
   function setActiveDnsTab(tabName) {
     document.querySelectorAll('[data-dns-panel]').forEach((panel) => {
       panel.classList.toggle('hidden', panel.dataset.dnsPanel !== tabName);
@@ -469,10 +473,14 @@
     });
   }
 
+  // What: confirm() with record name and type
+  // Why: values come from data-*, not inline JS strings
   function confirmRemoveRecord(btn) {
     return confirm(btn.dataset.recordName + ' (' + btn.dataset.recordType + ') entfernen?');
   }
 
+  // What: confirm() with PTR IP and hostname
+  // Why: values come from data-*, not inline JS strings
   function confirmRemovePtr(btn) {
     return confirm('PTR ' + btn.dataset.ptrIp + ' → ' + btn.dataset.ptrHost + ' entfernen?');
   }
@@ -492,6 +500,8 @@
     }
   }
 
+  // What: wires the tab buttons and the TXT length check
+  // Why: the check reruns on type change, input and submit
   document.querySelectorAll('.dns-tab-btn').forEach((button) => {
     button.addEventListener('click', () => setActiveDnsTab(button.dataset.dnsTab));
   });
@@ -500,6 +510,8 @@
   document.querySelector('[data-lan-record-content]').addEventListener('input', validateLanTxtContent);
   document.querySelector('[data-lan-record-form]').addEventListener('submit', validateLanTxtContent);
 
+  // What: opens the CDN tab on page load
+  // Why: marks its button active; markup sets no active class
   setActiveDnsTab('cdn');
 </script>
 {% endblock %}

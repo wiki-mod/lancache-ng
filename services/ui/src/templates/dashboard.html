@@ -34,6 +34,8 @@
 
   <h1 class="text-xl font-bold text-white">Dashboard</h1>
 
+  <!-- What: active DHCP mode and what the UI controls in it
+       Why: Kea settings apply only in Kea mode -->
   <div class="card space-y-2">
     <div class="flex items-center justify-between">
       <h2 class="font-semibold text-slate-200">DHCP mode</h2>
@@ -146,7 +148,7 @@
     </div>
     {% endif %}
     <form method="post" action="{{ routes.cache_resize | safe }}" class="flex flex-wrap items-end gap-3">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {{ <csrf_field csrf_token={csrf_token}/> }}
       <div>
         <label class="block text-xs text-slate-400 mb-1">New cache size (GB)</label>
         <input type="number" name="cache_gb" min="1" step="1" placeholder="{{ cache_max_gb }}"
@@ -188,6 +190,8 @@
     </div>
   </div>
 
+  <!-- What: size and file totals of the central syslog store
+       Why: watchdog owns retention; this card only reports -->
   <div class="card">
     <div class="flex items-center justify-between mb-3">
       <div>
@@ -284,8 +288,8 @@
    Why: it uses window.LancacheWatchdog from base.html #}
 {% block scripts %}
 <script>
-  // What: polls the metrics route every 10s, patches counts
-  // Why: a reload also recomputes cache and log stats
+  // What: writes the three counters of one proxy card
+  // Why: http and https cards share one id scheme
   // From: Issue #1683 | PR #1912
   function updateMetricsSection(prefix, status) {
     if (!status) {
@@ -299,6 +303,9 @@
     if (waiting) waiting.textContent = status.waiting;
   }
 
+  // What: polls the metrics route every 10s, patches counts
+  // Why: a reload also recomputes cache and log stats
+  // From: Issue #1683 | PR #1912
   async function refreshDashboardMetrics() {
     try {
       const response = await fetch('{{ routes.metrics | safe }}');
@@ -333,6 +340,8 @@
     }
   }
 
+  // What: repaints note and dots on each watchdog update
+  // Why: base.html polls; this page only renders the data
   window.LancacheWatchdog.onUpdate(function (data) {
     const note = document.getElementById('watchdog-status-note');
     if (note) {

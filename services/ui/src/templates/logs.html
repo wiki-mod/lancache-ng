@@ -16,15 +16,16 @@
         Letzte {{ logs_max_entries }} Einträge aus dem zentralen Syslog-Speicher
       </p>
     </div>
+    <!-- What: reloads the page for new log lines
+         Why: the table below is rendered server-side -->
     <button onclick="location.reload()"
             class="text-sm text-slate-400 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors">
       Aktualisieren
     </button>
   </div>
 
-  <!-- Host filter bar: server-side, since parse_syslog_tail's host arg
-       restricts which files are even opened, not a client-side row hider
-       like the nginx branch's filter bar below. -->
+  <!-- What: host filter reloads the page with ?host=
+       Why: parse_syslog_tail opens only that host's files -->
   <div class="flex gap-3 flex-wrap">
     <select id="syslog-host-filter"
             onchange="location.href = this.value ? ('{{ pages.logs | safe }}?host=' + encodeURIComponent(this.value)) : '{{ pages.logs | safe }}'"
@@ -39,7 +40,7 @@
   <!-- What: per-service logging switches.
        Why: the ui saves; the watchdog applies. -->
   <form method="post" action="{{ routes.logs_settings | safe }}" class="card space-y-3">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {{ <csrf_field csrf_token={csrf_token}/> }}
     <div>
       <h2 class="font-semibold text-slate-200">Protokollierung je Dienst</h2>
       <p class="text-xs text-slate-400 mt-1">
