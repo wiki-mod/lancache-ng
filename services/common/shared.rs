@@ -916,7 +916,7 @@ pub fn snapshot_created_unix(id: &str) -> Option<u64> {
 }
 
 // What: true for empty or a checked-in secret placeholder.
-// Why: one rule for every secret; any shape counts (fail-closed).
+// Why: one rule for all secrets; any shape counts.
 // From: Issue #967
 pub fn is_placeholder(value: &str) -> bool {
     let normalized = value.to_lowercase().replace('-', "_");
