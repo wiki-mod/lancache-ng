@@ -1342,10 +1342,14 @@ impl PowerDns {
         url: &str,
         body: Option<String>,
     ) -> Result<reqwest::Response, String> {
+        // What: send the API key in every request.
+        // Why: PowerDNS refuses a call without the key.
         let mut request = self
             .http
             .request(method, url)
             .header("X-API-Key", &self.api_key);
+        // What: add a JSON content type only with a body.
+        // Why: a bodiless GET must not claim a content type.
         if let Some(body) = body {
             request = request
                 .header("Content-Type", "application/json")
@@ -1359,6 +1363,8 @@ impl PowerDns {
     pub async fn zone_rrsets(&self, api_root: &str, zone: &str) -> Result<Vec<Value>, String> {
         let url = config::zone_url(api_root, zone);
         let response = self.call(reqwest::Method::GET, &url, None).await?;
+        // What: refuse a non-2xx answer.
+        // Why: an error body has no rrsets and looks empty.
         if !response.status().is_success() {
             return Err(format!("PowerDNS returned {}", response.status()));
         }
@@ -1366,6 +1372,8 @@ impl PowerDns {
             .json()
             .await
             .map_err(|e| format!("cannot decode the zone export: {e}"))?;
+        // What: a 2xx answer without rrsets is an empty zone.
+        // Why: a new zone exports no rrsets key yet.
         Ok(body
             .get("rrsets")
             .and_then(Value::as_array)
@@ -1406,6 +1414,8 @@ impl DockerApi {
         // What: never follow a redirect.
         // Why: a 3xx could reach an unexpected path.
         let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+        // What: a unix socket gets a fixed dummy host name.
+        // Why: HTTP over a socket needs a host; none is real.
         let (builder, base_url) = match endpoint.strip_prefix(DOCKER_UNIX_PREFIX) {
             Some(socket) => (
                 builder.unix_socket(PathBuf::from(socket)),
@@ -1413,6 +1423,8 @@ impl DockerApi {
             ),
             None => (builder, endpoint.trim_end_matches('/').to_string()),
         };
+        // What: build the client; a failure is a bug.
+        // Why: no custom TLS is set, so the builder cannot fail.
         let client = builder
             .build()
             .expect("a client without custom TLS settings always builds");
@@ -1459,6 +1471,8 @@ impl DockerApi {
         path: &str,
         timeout: Option<Duration>,
     ) -> Result<Vec<u8>, DockerError> {
+        // What: map a reqwest error to Timeout or Transport.
+        // Why: callers act on a timeout apart from other faults.
         let failed = |e: reqwest::Error| match e.is_timeout() {
             true => DockerError::Timeout,
             false => DockerError::Transport(e.to_string()),
@@ -1473,6 +1487,8 @@ impl DockerApi {
         }
         let response = request.send().await.map_err(failed)?;
         let status = response.status();
+        // What: accept 2xx and 304, refuse everything else.
+        // Why: 304 means the container is in that state already.
         if !status.is_success() && status != reqwest::StatusCode::NOT_MODIFIED {
             return Err(DockerError::Status(status.as_u16()));
         }
