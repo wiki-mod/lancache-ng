@@ -383,11 +383,10 @@ CI covers the Admin UI → NATS → `nats-subscriber` → PowerDNS write path
 - With the proxy switch off the proxy access log gets no new lines; the Admin
   UI statistics and dashboard show no new traffic. Confirm the `/logs` page
   says so.
-- **Standing checks (AG-VAL-029):** the Rust tests
-  `logging_switches_filter_their_programs` (watchdog) and
-  `logging_switches_are_saved_per_service` (ui). The four keys in a fresh
-  `.env`, the migration of an old `LOGGING_ENABLED` and a UI switch reaching
-  `.env` have no CI check (Coverage Assessment).
+- **Standing checks (AG-VAL-029):** none. The Rust tests of the logging
+  switches were removed. The four keys in a fresh `.env`, the migration of
+  an old `LOGGING_ENABLED`, a UI switch reaching `.env` and the watchdog's
+  syslog-ng filter per switch have no CI check (Coverage Assessment).
 - **Known gap:** the silent-data-loss detector of the former combined `syslog`
   container is gone with that container; a log root that syslog-ng cannot
   write to is not detected by a dedicated check. `setup.sh` pre-creates and
