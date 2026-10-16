@@ -9110,7 +9110,7 @@ _ci_validate_probes() {
 # From: Issue #1683 | PR #1858
 _ci_validate_stack() {
     local candidate="$1" reservation subnet holder project rc=0 up_out
-    local net_ovr pin_ovr shared compose_copy
+    local net_ovr pin_ovr shared compose_copy state
     reservation="$(_ci_validate_reserve)" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         [ "${rc}" -eq 2 ] || ci_log "[CI-ERROR-VALIDATE-0015]" "reason=\"no free validation /27 after slot retries\""
@@ -9128,13 +9128,14 @@ _ci_validate_stack() {
     # From: Issue #1683 | PR #1912
     local -a venv=()
     local vfx
-    vfx="$(_ci_validation_env)" || { _ci_validate_release "${holder}"; return 2; }
+    state="${shared}/state/${project}"
+    vfx="$(_ci_validation_env "${state}")" || { _ci_validate_release "${holder}"; return 2; }
     mapfile -t venv <<< "${vfx}"
     export "${venv[@]}"
-    # What: the per-run root wins over the fixture default.
-    # Why: the fixture carries the SOT root, a host path.
+    # What: the per-run root is the env state root.
+    # Why: derived dirs must follow it, not the SOT root.
     # From: Issue #1683 | PR #1912
-    export LANCACHE_STATE_DIR="${shared}/state/${project}"
+    export LANCACHE_STATE_DIR="${state}"
     if ! up_out="$(mkdir -p "${LANCACHE_STATE_DIR}/cache" 2>&1)"; then
         ci_error "[CI-ERROR-VALIDATE-0052]" "dir=\"${LANCACHE_STATE_DIR}/cache\" project=\"${project}\" reason=\"per-run state root not creatable\"" "${up_out}"
         _ci_validate_release "${holder}"
@@ -14717,7 +14718,7 @@ _ci_validation_images() {
 }
 
 # What: SOT validation env plus fresh secrets, KEY=VALUE.
-# Why: config check and live validate share one owner.
+# Why: one owner for check and validate; $1 = state root.
 # From: Issue #1683 | PR #1858
 _ci_validation_env() {
     local fx kind owner secrets k v n=0 rows
@@ -14739,7 +14740,8 @@ _ci_validation_env() {
         esac
         printf '%s\n' "${v}"
     done <<< "${fx}"
-    v="$(_ci_default_in "${rows}" LANCACHE_STATE_DIR)" || return 2
+    v="${1:-}"
+    [ -n "${v}" ] || v="$(_ci_default_in "${rows}" LANCACHE_STATE_DIR)" || return 2
     _ci_sot_compose_env "" "${v}" || return 2
     _ci_validation_images || return 2
     # What: a fresh value per secret key, setup.sh format.
