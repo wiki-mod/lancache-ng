@@ -2061,7 +2061,7 @@ fn restamp_lines(text: &str, lines: &[(&str, String)]) -> String {
 // Why: pdnsutil, the check and the launch name one way.
 // From: Issue #1683 | PR #1912
 fn pdns_config_dir(dir: &Path) -> String {
-    format!("--config-dir={}", dir.display())
+    lancache_ng::pdns_config_dir_arg(&dir.display().to_string())
 }
 
 // What: the side-effect-free config check of pdns.
@@ -2074,10 +2074,7 @@ fn pdns_check(program: &str, config_dir: &str) -> [String; 3] {
 // What: run pdnsutil on the auth config; text or error.
 // Why: every zone and key change goes through one call.
 fn pdnsutil(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let config_dir = pdns_config_dir(dir);
-    let mut argv = vec![config_dir.as_str()];
-    argv.extend_from_slice(args);
-    run_program("pdnsutil", &argv, None)
+    lancache_ng::pdnsutil(&dir.display().to_string(), args, None)
 }
 
 // What: true for pdnsutil's "exists already" refusal.

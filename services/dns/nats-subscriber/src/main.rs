@@ -25,7 +25,7 @@ use lancache_ng::config::{
 };
 use lancache_ng::{
     Backoff, DnsRecord, FlushRequest, PowerDns, SnapshotStore, ct_eq, die, http_client,
-    need_millis, need_secs, run_program, snapshot_created_unix, unix_nanos,
+    need_millis, need_secs, snapshot_created_unix, unix_nanos,
 };
 use reqwest::Method;
 use serde::Deserialize;
@@ -727,14 +727,10 @@ struct RollbackRequest {
 // What: pdnsutil check-zone under the zone_check limit.
 // Why: a wedged auth database must not hang the rollback.
 async fn check_zone(ctx: &Ctx, store: &SnapshotStore, zone: &str) -> bool {
-    let config_dir = format!("--config-dir={}", ctx.pdns_auth_config_dir);
+    let config_dir = ctx.pdns_auth_config_dir.clone();
     let (limit, zone_name) = (ctx.times.zone_check, zone.to_owned());
     let checked = tokio::task::spawn_blocking(move || {
-        run_program(
-            "pdnsutil",
-            &[&config_dir, "check-zone", &zone_name],
-            Some(limit),
-        )
+        lancache_ng::pdnsutil(&config_dir, &["check-zone", &zone_name], Some(limit))
     })
     .await
     .unwrap_or_else(|e| Err(format!("check-zone task failed: {e}")));

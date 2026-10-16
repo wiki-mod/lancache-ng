@@ -196,6 +196,23 @@ pub fn run_program(
     }
 }
 
+// What: the --config-dir argument of a pdns program.
+// Why: watchdog and subscriber name the config alike.
+// From: Issue #1683 | PR #1912
+pub fn pdns_config_dir_arg(dir: &str) -> String {
+    format!("--config-dir={dir}")
+}
+
+// What: run pdnsutil on a pdns config dir; text or error.
+// Why: both programs call pdnsutil through one function.
+// From: Issue #1683 | PR #1912
+pub fn pdnsutil(dir: &str, args: &[&str], limit: Option<Duration>) -> Result<String, String> {
+    let config_dir = pdns_config_dir_arg(dir);
+    let mut argv = vec![config_dir.as_str()];
+    argv.extend_from_slice(args);
+    run_program("pdnsutil", &argv, limit)
+}
+
 // What: send SIGTERM to one process.
 // Why: std kills with SIGKILL; a daemon needs TERM.
 // From: Issue #1683 | PR #1912
