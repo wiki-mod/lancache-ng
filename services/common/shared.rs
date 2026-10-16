@@ -248,18 +248,49 @@ pub fn terminate(pid: u32) -> io::Result<()> {
 // Why: the one owner change; lchown never follows a link.
 // From: Issue #1683 | PR #1912
 pub fn own(path: &Path, uid: Option<u32>, gid: Option<u32>, mode: Option<u32>) -> io::Result<()> {
+    own_with(
+        path,
+        (uid, gid),
+        mode,
+        |(uid, gid)| std::os::unix::fs::lchown(path, uid, gid),
+        |mode| fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode)),
+    )
+}
+
+// What: own on an open file; the name is only for messages.
+// Why: the name could be swapped between open and chown.
+// From: Issue #1683 | PR #1912
+pub fn own_file(file: &fs::File, name: &Path, owner: Owner, mode: Option<u32>) -> io::Result<()> {
+    own_with(
+        name,
+        owner,
+        mode,
+        |(uid, gid)| std::os::unix::fs::fchown(file, uid, gid),
+        |mode| file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(mode)),
+    )
+}
+
+// What: the one owner and mode logic for a path or a file.
+// Why: own and own_file differ only in how they reach it.
+// From: Issue #1683 | PR #1912
+fn own_with(
+    name: &Path,
+    owner: Owner,
+    mode: Option<u32>,
+    chown: impl FnOnce(Owner) -> io::Result<()>,
+    chmod: impl FnOnce(u32) -> io::Result<()>,
+) -> io::Result<()> {
     let context = |e: io::Error| {
         io::Error::new(
             e.kind(),
-            format!("cannot set owner or mode of {}: {e}", path.display()),
+            format!("cannot set owner or mode of {}: {e}", name.display()),
         )
     };
-    if uid.is_some() || gid.is_some() {
-        std::os::unix::fs::lchown(path, uid, gid).map_err(context)?;
+    if owner.0.is_some() || owner.1.is_some() {
+        chown(owner).map_err(context)?;
     }
     match mode {
-        Some(mode) => fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode))
-            .map_err(context),
+        Some(mode) => chmod(mode).map_err(context),
         None => Ok(()),
     }
 }
@@ -997,10 +1028,8 @@ pub fn write_file_as(
         .open(&tmp)
         .and_then(|mut file| {
             file.write_all(contents)?;
-            // What: set the owner on the open file, not the path.
-            // Why: the name could be swapped between open and chown.
-            if let Some((uid, gid)) = owner {
-                std::os::unix::fs::fchown(&file, uid, gid)?;
+            if let Some(owner) = owner {
+                own_file(&file, &tmp, owner, None)?;
             }
             file.sync_all()
         })
