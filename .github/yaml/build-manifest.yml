@@ -1183,11 +1183,10 @@ ci_variables:
   # Why: only a digest a build verified may be accepted.
   # From: Issue #1683 | PR #1912
   CI_VERIFIED_REF: refs/ci/verified
-  # What: PR title lint mode (warn|block), chronology mode.
-  # Why: AG-CI-006: check modes are values with one owner.
+  # What: PR title lint mode (warn|block).
+  # Why: AG-GH-018: the mode is a value, default warn.
   # From: Issue #1683 | PR #1858
   PR_TITLE_LINT_MODE: warn
-  CHRONOLOGY_WARN_ONLY: 0
 
 # What: runner host values: paths, ages, units, packages.
 # Why: AG-CI-016: ci.sh runner-host reads them; no copy.

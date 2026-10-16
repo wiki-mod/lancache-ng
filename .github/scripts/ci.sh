@@ -6314,7 +6314,10 @@ ci_cmd_promote() {
     # Why: a failed move must never leak the promotion lock.
     local rc
     if _ci_promote_move_all "${channel}" "${cand}"; then rc=0; else rc=$?; fi
-    _ci_promote_unlock "${channel}" || ci_log "[CI-WARN-PROMOTE-0011]" "channel=\"${channel}\" reason=\"lock release failed\""
+    _ci_promote_unlock "${channel}" || {
+        ci_error "[CI-ERROR-PROMOTE-0011]" "channel=\"${channel}\" reason=\"lock release failed\"" "${channel}"
+        [ "${rc}" -ne 0 ] || rc=2
+    }
     [ "${rc}" -eq 0 ] || return "${rc}"
     printf 'channel=%s result=promoted services=%s\n' "${channel}" "$(_ci_count_lines "${cand}")"
 }
@@ -10202,8 +10205,8 @@ _ci_daemon_merge() {
 _ci_daemon_validate() {
     local file="$1" out
     if ! _ci_command_available dockerd; then
-        ci_log "[CI-WARN-DAEMON-0002]" "reason=\"dockerd not on PATH; validate preflight skipped\""
-        return 0
+        ci_error "[CI-ERROR-DAEMON-0002]" "reason=\"dockerd not on PATH; config not validated\"" "${file}"
+        return 2
     fi
     if ! out="$(dockerd --validate --config-file "${file}" 2>&1)"; then
         ci_error "[CI-ERROR-DAEMON-0003]" "path=\"${file}\" reason=\"dockerd --validate rejected the config\"" "${out}"
@@ -10284,7 +10287,8 @@ _ci_daemon_restart() {
     fi
     printf 'LoggingDriver (docker info): %s\n' "${driver}"
     if [ "${driver}" != "${want}" ]; then
-        ci_log "[CI-WARN-DAEMON-0006]" "driver=\"${driver}\" want=\"${want}\" reason=\"LoggingDriver is not the SOT driver; check the host\""
+        ci_error "[CI-ERROR-DAEMON-0006]" "driver=\"${driver}\" want=\"${want}\" reason=\"LoggingDriver is not the SOT driver; check the host\"" "${driver}"
+        return 1
     fi
     printf 'builder section of %s (docker info does not report it):\n' "${file}"
     _ci_capture 0 jq '.builder // "(no builder key)"' "${file}" || return 2
@@ -11300,7 +11304,8 @@ _ci_rh_purge_pve_check() {
         *) return 2 ;;
     esac
     if ! _ci_command_available lsof; then
-        ci_log "[CI-WARN-RUNNER-0119]" "dir=\"${pdir}\" reason=\"lsof not on PATH; open-file check skipped\""
+        ci_error "[CI-ERROR-RUNNER-0119]" "dir=\"${pdir}\" reason=\"lsof not on PATH; open-file check not run\"" "${pdir}"
+        return 2
     elif _ci_rh_root test -d "${pdir}"; then
         open="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0120]" "dir=\"${pdir}\" reason=\"lsof failed\"" _ci_rh_root lsof +D "${pdir}")" || return 2
         [ -z "${open}" ] || printf '  FOUND: open files under %s:\n%s\n' "${pdir}" "${open}"
@@ -12326,11 +12331,10 @@ _CI_AWK_COMMENTS='
 # From: Issue #1683 | PR #1912
 _ci_check_comments() {
     local -a _ci_override=("$@") files=() todo=() hdr=() size=() chron=() dup=() nogr=() bad=()
-    local path out line project spdx warn_only arc=0 rc=0
+    local path out line project spdx arc=0 rc=0
     _ci_scan_files files _ci_override || return 2
     _ci_prose_exempt_load || return 2
     _ci_block_entry_fields file_headers "" project project spdx spdx || return 2
-    warn_only="$(_ci_variable CHRONOLOGY_WARN_ONLY)" || return 2
     for path in "${files[@]}"; do
         _ci_prose_excluded "${path}" && continue
         if [ -s "${path}" ]; then todo+=("${path}"); else hdr+=("${path}: empty file has no header"); fi
@@ -12378,12 +12382,8 @@ _ci_check_comments() {
         rc=1
     fi
     if [ "${#chron[@]}" -gt 0 ]; then
-        if [ "${warn_only}" = 1 ]; then
-            ci_error "[CI-WARN-CHECK-0079]" "reason=\"review-chronology / stale line-ref (warn-only)\"" "$(printf '%s\n' "${chron[@]}")"
-        else
-            ci_error "[CI-ERROR-CHECK-0080]" "reason=\"review-chronology / stale line-ref\"" "$(printf '%s\n' "${chron[@]}")"
-            rc=1
-        fi
+        ci_error "[CI-ERROR-CHECK-0080]" "reason=\"review-chronology / stale line-ref\"" "$(printf '%s\n' "${chron[@]}")"
+        rc=1
     fi
     [ "${rc}" -eq 0 ] || return "${rc}"
     printf 'comments=clean files=%s\n' "${#todo[@]}"
@@ -13343,10 +13343,6 @@ _ci_check_pr_template() {
         fi
     done
     if [ "${#missing[@]}" -gt 0 ]; then
-        if [ "${PR_DRAFT:-false}" = "true" ]; then
-            ci_log "[CI-ERROR-CHECK-0088]" "template=\"${template#"${CI_REPO_ROOT:-.}/"}\" reason=\"draft, non-blocking; the PR body must use the PR template, own layouts are refused\" detail=\"$(printf '%s; ' "${missing[@]}")\""
-            printf 'pr-template=warn-draft\n'; return 0
-        fi
         ci_error "[CI-ERROR-CHECK-0089]" "template=\"${template#"${CI_REPO_ROOT:-.}/"}\" reason=\"the PR body must use the PR template, own layouts are refused; missing/empty required section(s)\"" "$(printf '%s\n' "${missing[@]}")"
         return 1
     fi
@@ -13526,10 +13522,6 @@ _ci_check_pr_tracking_metadata() {
     local w
     for w in "${warns[@]:-}"; do [ -n "${w}" ] && ci_log "[CI-WARN-CHECK-0114]" "pr=\"${pr_number}\" warn=\"${w}\""; done
     if [ "${#errs[@]}" -gt 0 ]; then
-        if [ "${PR_DRAFT:-false}" = "true" ]; then
-            ci_log "[CI-ERROR-CHECK-0092]" "reason=\"draft, non-blocking\" detail=\"$(printf '%s; ' "${errs[@]}")\""
-            printf 'pr-tracking-metadata=warn-draft\n'; return 0
-        fi
         ci_error "[CI-ERROR-CHECK-0093]" "reason=\"AG-GH-008 metadata incomplete\"" "$(printf '%s\n' "${errs[@]}")"
         return 1
     fi
@@ -15455,8 +15447,8 @@ _ci_check_vex_drift() {
     printf 'vex-drift=clean statements=%s\n' "${statement_count}"
 }
 
-# What: Warn (never fail) on editing CHANGELOG.md directly.
-# Why: usually unintended; risks a merge-conflict cascade.
+# What: Fail on editing CHANGELOG.md without the label.
+# Why: AG-VAL-001: a warning is no success; conflict risk.
 # From: Issue #893 | PR #1858
 _ci_check_changelog_direct_edit() {
     local -a changed=("$@")
@@ -15474,13 +15466,16 @@ _ci_check_changelog_direct_edit() {
     label_err="$(jq -e --arg l "${label}" 'index($l) != null' <<<"${PR_LABELS_JSON:-[]}" 2>&1)" || label_rc=$?
     case "${label_rc}" in
         0) ci_log "[CI-INFO-CHECK-0115]" "file=\"${file}\" label=\"${label}\" reason=\"changelog edited with the label; expected\"" ;;
-        1) ci_log "[CI-INFO-CHECK-0116]" "file=\"${file}\" reason=\"changelog edited directly outside the release flow; warn-only\"" ;;
+        1)
+            ci_error "[CI-ERROR-CHECK-0116]" "file=\"${file}\" label=\"${label}\" reason=\"changelog edited directly outside the release flow\"" "${file}"
+            return 1
+            ;;
         *)
             ci_error "[CI-ERROR-CHECK-0112]" "reason=\"PR_LABELS_JSON unreadable\"" "${label_err}"
             return 2
             ;;
     esac
-    printf 'changelog-direct-edit=warn\n'
+    printf 'changelog-direct-edit=labelled\n'
 }
 
 # What: print each logging-matrix row's service, dupes kept.
