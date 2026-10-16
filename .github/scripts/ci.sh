@@ -4957,6 +4957,59 @@ _ci_docker_publish() {
     printf '%s\n' "${seen}"
 }
 
+# What: platform_arch key of the machine this runs on.
+# Why: an external binary must fit the host, not the image.
+# From: Issue #1683
+_ci_host_arch() {
+    local machine key keys apk
+    machine="$(_ci_capture 0 uname -m)" || return 2
+    keys="$(_ci_block_keys platform_arch)" || return 2
+    while IFS= read -r key; do
+        [ -n "${key}" ] || continue
+        apk="$(_ci_block_entry_field platform_arch "${key}" apk)" || return 2
+        if [ "${apk}" = "${machine}" ]; then
+            printf '%s\n' "${key}"
+            return 0
+        fi
+    done <<< "${keys}"
+    ci_log "[CI-ERROR-SCAN-0036]" "machine=\"${machine}\" reason=\"no platform_arch apk value matches this host\""
+    return 2
+}
+
+# What: Fetch the SOT-pinned trivy once per run; print path.
+# Why: AG-VAL-017: trivy is external; the SOT owns the pin.
+# From: Issue #1683
+_ci_trivy_bin() {
+    local dir="${CI_TMPDIR}/trivy-bin" bin err arch repo tag asset sha url
+    bin="${dir}/trivy"
+    if [ -x "${bin}" ]; then
+        printf '%s\n' "${bin}"
+        return 0
+    fi
+    arch="$(_ci_host_arch)" || return 2
+    _ci_block_entry_fields external_versions "trivy-${arch}" repository repo release_tag tag asset asset sha256 sha || return 2
+    if [ -z "${repo}" ] || [ -z "${tag}" ] || [ -z "${asset}" ]; then
+        ci_log "[CI-ERROR-SCAN-0037]" "key=\"external_versions.trivy-${arch}\" reason=\"repository/release_tag/asset missing; FAIL CLOSED\""
+        return 2
+    fi
+    url="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
+    url="${url}/${repo}/releases/download/${tag}/${asset}"
+    if ! err="$(mkdir -p "${dir}" 2>&1)"; then
+        ci_error "[CI-ERROR-SCAN-0038]" "dir=\"${dir}\" reason=\"trivy dir not created\"" "${err}"
+        return 2
+    fi
+    _ci_fetch_verified "${url}" "${sha}" "${dir}/${asset}" || return 2
+    if ! err="$(tar --no-same-owner -xzf "${dir}/${asset}" -C "${dir}" trivy 2>&1)"; then
+        ci_error "[CI-ERROR-SCAN-0039]" "asset=\"${asset}\" reason=\"trivy extract failed\"" "${err}"
+        return 2
+    fi
+    if [ ! -x "${bin}" ]; then
+        ci_log "[CI-ERROR-SCAN-0040]" "asset=\"${asset}\" reason=\"archive has no executable trivy\""
+        return 2
+    fi
+    printf '%s\n' "${bin}"
+}
+
 # What: the trivy exit code that means findings.
 # Why: trivy's own errors exit 1; a finding must differ.
 # From: Issue #1683 | PR #1912
@@ -5079,8 +5132,9 @@ _ci_trivy_db_lock_run() {
 # Why: the shared retry owner; rc 6 names a DB outage.
 # From: Issue #1683
 _ci_trivy_db_download() {
-    local rc=0
-    _ci_retry trivy trivy image --download-db-only --cache-dir "$1" || rc=$?
+    local rc=0 bin
+    bin="$(_ci_trivy_bin)" || return 2
+    _ci_retry trivy "${bin}" image --download-db-only --cache-dir "$1" || rc=$?
     [ "${rc}" -eq 0 ] || return 6
 }
 
@@ -5121,10 +5175,11 @@ _ci_trivy_db_record() {
 # Why: one owner; a test runs it through the real trivy
 # From: Issue #1683 | PR #1858
 _ci_trivy_args() {
-    local cache_dir="$1" scanners ignore
+    local cache_dir="$1" scanners ignore bin
+    bin="$(_ci_trivy_bin)" || return 2
     scanners="$(_ci_variable CI_TRIVY_SCANNERS)" || return 2
     ignore="$(_ci_repo_path CI_TRIVY_IGNORE)" || return 2
-    printf '%s\n' trivy image --severity HIGH,CRITICAL --exit-code "${_CI_TRIVY_FINDING_RC}" \
+    printf '%s\n' "${bin}" image --severity HIGH,CRITICAL --exit-code "${_CI_TRIVY_FINDING_RC}" \
         --scanners "${scanners}" --cache-dir "${cache_dir}" --skip-db-update
     [ ! -f "${ignore}" ] || printf '%s\n' --ignorefile "${ignore}"
     [ -z "${CI_TRIVY_TIMEOUT:-}" ] || printf '%s\n' --timeout "${CI_TRIVY_TIMEOUT}"
@@ -5139,11 +5194,11 @@ _ci_trivy_scan() {
     local -a targs
     cache_rec="$(_ci_trivy_cache_dir)" || return 2
     cache_dir="$(_ci_record_field "${cache_rec}" dir)" || return 2
+    out="$(_ci_trivy_args "${cache_dir}")" || return 2
     _ci_trivy_db_ensure_fresh "${cache_dir}" || fresh_rc=$?
     [ "${fresh_rc}" -eq 0 ] || return "${fresh_rc}"
     _ci_trivy_db_record "${cache_dir}" || return 2
     ref="$(_ci_image_ref "${service}" "${digest}")" || return 2
-    out="$(_ci_trivy_args "${cache_dir}")" || return 2
     mapfile -t targs <<< "${out}"
     report="$(_ci_mktemp "${CI_TMPDIR}/ci-trivy.XXXXXX")" || return 2
     _ci_retry trivy _ci_trivy_scan_once "${report}" "${ref}" "${targs[@]}" || rc=$?
@@ -5625,11 +5680,12 @@ ci_cmd_test() {
 # Why: SBOM generate != vuln gate; shares the trivy cache.
 # From: Issue #1683
 _ci_trivy_sbom() {
-    local service="$1" digest="$2" out="$3" ref cache_rec cache_dir raw rc=0
+    local service="$1" digest="$2" out="$3" ref cache_rec cache_dir raw rc=0 bin
     ref="$(_ci_image_ref "${service}" "${digest}")" || return 2
+    bin="$(_ci_trivy_bin)" || return 2
     cache_rec="$(_ci_trivy_cache_dir)" || return 2
     cache_dir="$(_ci_record_field "${cache_rec}" dir)" || return 2
-    raw="$(trivy image --format cyclonedx --cache-dir "${cache_dir}" --output "${out}" "${ref}" 2>&1)" || rc=$?
+    raw="$("${bin}" image --format cyclonedx --cache-dir "${cache_dir}" --output "${out}" "${ref}" 2>&1)" || rc=$?
     { [ "${rc}" -eq 0 ] && [ -s "${out}" ]; } && return 0
     printf '%s\n' "${raw}" >&2
     return 1
