@@ -3045,7 +3045,38 @@ ci_cmd_scan_stack() {
         _ci_step_output "[CI-ERROR-SCAN-0026]" passed "$(_ci_matrix_doc "${passed}")" || return 2
     fi
     [ "${rc}" -eq 0 ] || ci_log "[CI-ERROR-SCAN-0024]" "failed=\"${failed# }\" reason=\"scan failed for these pairs; the others were scanned\""
+    # What: a full clean run checks for dead ignore ids.
+    # Why: what no scan needs any more must go (DoMe)
+    # From: Issue #1683 | PR #1912
+    if [ "${CI_SCAN_FULL:-}" = 1 ]; then
+        if [ "${rc}" -eq 0 ]; then
+            _ci_trivyignore_stale || rc=$?
+        else
+            ci_log "[CI-WARN-SCAN-0042]" "ignore-stale=NOT-RUN reason=\"a pair failed, so not every image was scanned\""
+        fi
+    fi
     return "${rc}"
+}
+
+# What: fail on ignore-file ids no scan of the run matched
+# Why: an entry that hides nothing is not valid any more
+# From: Issue #1683 | PR #1912
+_ci_trivyignore_stale() {
+    local ignore fields matched="" n kind id stale="" count=0 file="${CI_TMPDIR}/${_CI_TRIVY_MATCHED}"
+    ignore="$(_ci_repo_path CI_TRIVY_IGNORE)" || return 2
+    [ -f "${ignore}" ] || return 0
+    fields="$(_ci_trivyignore_fields "${ignore}")" || return 2
+    [ ! -f "${file}" ] || matched="$(< "${file}")"
+    while IFS=$'\t' read -r n kind id; do
+        [ "${kind}" = id ] || continue
+        count=$((count + 1))
+        _ci_list_has "${id}" "${matched}" || stale="${stale} ${id}"
+    done <<< "${fields}"
+    if [ -n "${stale}" ]; then
+        ci_log "[CI-ERROR-SCAN-0041]" "path=\"${ignore}\" stale=\"${stale# }\" reason=\"no scan of this run matched these entries; remove them\""
+        return 1
+    fi
+    printf 'ignore-stale=clean entries=%s\n' "${count}"
 }
 
 # What: load the history a diff needs, plus refs named
@@ -5185,6 +5216,29 @@ _ci_trivy_args() {
     [ -z "${CI_TRIVY_TIMEOUT:-}" ] || printf '%s\n' --timeout "${CI_TRIVY_TIMEOUT}"
 }
 
+# What: file name of the ignore ids a full run matched
+# Why: writer and reader share one name
+# From: Issue #1683 | PR #1912
+_CI_TRIVY_MATCHED=trivy-ignore-matched.txt
+
+# What: append the ids the ignore file hid in one image
+# Why: an id never hidden is stale; trivy lists the hidden
+# From: Issue #1683 | PR #1912
+_ci_trivy_suppressed_ids() {
+    local ref="$1" json ids rc=0
+    shift
+    json="$(_ci_mktemp "${CI_TMPDIR}/ci-trivy-sup.XXXXXX")" || return 2
+    "$@" --exit-code 0 --show-suppressed --format json --output "${json}" "${ref}" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        rm -f "${json}"
+        return "${rc}"
+    fi
+    ids="$(_ci_capture 0 jq -r '[.Results[]? | .ExperimentalModifiedFindings[]?
+        | select(.Status == "ignored") | .Finding.VulnerabilityID] | unique[]' "${json}")" || return 2
+    rm -f "${json}"
+    [ -z "${ids}" ] || printf '%s\n' "${ids}" >> "${CI_TMPDIR}/${_CI_TRIVY_MATCHED}"
+}
+
 # What: Scan a digest; rc 1 finding, 2 setup, 4 run, 6 DB
 # Why: a failed run or setup is never read as a finding
 # From: Issue #1683 | PR #1858
@@ -5209,6 +5263,12 @@ _ci_trivy_scan() {
         # From: Issue #1683 | PR #1912
         _ci_trivy_db_fresh "${cache_dir}" || return 6
         return 4
+    fi
+    # What: a full run also records which ignores matched.
+    # Why: the stale-entry gate reads them after all pairs.
+    # From: Issue #1683 | PR #1912
+    if [ "${CI_SCAN_FULL:-}" = 1 ]; then
+        _ci_retry trivy _ci_trivy_suppressed_ids "${ref}" "${targs[@]}" || { rm -f "${report}"; return 4; }
     fi
     # What: A written report means trivy scanned.
     # Why: A finding is deterministic; no retry.
@@ -5782,7 +5842,7 @@ ci_cmd_scan() {
 ci_cmd_scan_channel() {
     local include='[]'
     _ci_for_all_pairs _ci_scan_channel_pair || return "$?"
-    CI_BUILD_MATRIX="$(_ci_matrix_doc "${include}")" ci_cmd_scan_stack
+    CI_SCAN_FULL=1 CI_BUILD_MATRIX="$(_ci_matrix_doc "${include}")" ci_cmd_scan_stack
 }
 
 # What: add one pair to the scan-channel matrix.
