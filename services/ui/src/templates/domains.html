@@ -88,7 +88,7 @@
       <div class="space-y-1 max-h-[28rem] overflow-y-auto">
         {% if dns_domains %}
         {% for domain in dns_domains %}
-        <div class="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-700/50 group {% if not domain.enabled %}opacity-50{% endif %}">
+        <div class="list-row group {% if not domain.enabled %}opacity-50{% endif %}">
           <div class="flex items-center gap-2 min-w-0">
             <span class="font-mono text-sm text-slate-300 truncate">{{ domain.display }}</span>
             {% if domain.is_default %}
@@ -181,7 +181,7 @@
       <div class="space-y-1 max-h-[28rem] overflow-y-auto">
         {% if lan_records %}
         {% for record in lan_records %}
-        <div class="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-700/50 group">
+        <div class="list-row group">
           <div class="flex-1 min-w-0">
             <div class="flex gap-2 items-center">
               <span class="font-mono text-sm text-slate-300">{{ record.name }}</span>
@@ -256,7 +256,7 @@
       <div class="space-y-1 max-h-[28rem] overflow-y-auto">
         {% if ptr_records %}
         {% for ptr in ptr_records %}
-        <div class="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-700/50 group">
+        <div class="list-row group">
           <div class="flex-1 min-w-0">
             <div class="flex gap-2 items-center">
               <span class="font-mono text-sm text-slate-300">{{ ptr.ip }}</span>

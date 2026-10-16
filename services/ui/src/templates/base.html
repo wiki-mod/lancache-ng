@@ -181,7 +181,7 @@
     }
     .theme-toggle:hover { color: var(--color-text); border-color: var(--color-accent-gold); }
 
-    /* What: buttons, tabs, table head cells and rows
+    /* What: buttons, tabs, table head cells, rows, list rows
        Why: one owner for styles repeated across the pages
        From: Issue #1683 | PR #1912 */
     .btn {
@@ -213,10 +213,16 @@
     .rows > tr + tr { border-top: 1px solid rgba(51, 65, 85, 0.5); }
     .rows > tr { transition: background-color 0.15s; }
     .rows > tr:hover { background-color: rgba(51, 65, 85, 0.3); }
+    .list-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.5rem 0.75rem; border-radius: 0.5rem;
+    }
+    .list-row:hover { background-color: rgba(51, 65, 85, 0.5); }
     :root[data-theme="light"] .btn-slate { background-color: var(--color-surface-raised); color: var(--color-text); }
     :root[data-theme="light"] .th { color: var(--color-text); border-bottom-color: var(--color-border); }
     :root[data-theme="light"] .rows > tr + tr { border-top-color: var(--color-border); }
-    :root[data-theme="light"] .rows > tr:hover { background-color: var(--color-surface-raised); }
+    :root[data-theme="light"] .rows > tr:hover,
+    :root[data-theme="light"] .list-row:hover { background-color: var(--color-surface-raised); }
   </style>
   <script>
     // What: set data-theme before the first paint
