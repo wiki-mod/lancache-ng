@@ -697,6 +697,19 @@ fn failure(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<
     (status, Json(json!({"error": message.into()})))
 }
 
+// What: a REJECT audit line plus the JSON error reply.
+// Why: log and reply of a refusal come from one place.
+// From: Issue #628 | PR #1912
+fn rejected(
+    store: &SnapshotStore,
+    status: StatusCode,
+    log: &str,
+    message: impl Into<String>,
+) -> (StatusCode, Json<Value>) {
+    store.log("REJECT", log);
+    failure(status, message)
+}
+
 // What: GET /snapshots: ids and times per managed zone.
 // Why: the ui lists them newest first for the operator.
 async fn list_snapshots(State(ctx): State<Arc<Ctx>>, headers: HeaderMap) -> Response {
@@ -791,15 +804,14 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
         ));
     }
     let snapshot = store.read(&request.snapshot_id).map_err(|e| {
-        store.log(
-            "REJECT",
-            &format!(
-                "rejected known-good snapshot {} for zone {zone}: unreadable ({e})",
-                request.snapshot_id
-            ),
+        let log = format!(
+            "rejected known-good snapshot {} for zone {zone}: unreadable ({e})",
+            request.snapshot_id
         );
-        failure(
+        rejected(
+            &store,
             StatusCode::INTERNAL_SERVER_ERROR,
+            &log,
             format!("stored snapshot could not be read: {e}"),
         )
     })?;
@@ -834,14 +846,11 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
             Err(e) => Some(format!("failed to apply rollback PATCH: {e}")),
         };
         if let Some(message) = rejected {
-            store.log(
-                "REJECT",
-                &format!(
-                    "rollback PATCH for zone {zone} snapshot {} failed: {message}",
-                    request.snapshot_id
-                ),
+            let log = format!(
+                "rollback PATCH for zone {zone} snapshot {} failed: {message}",
+                request.snapshot_id
             );
-            return Err(failure(StatusCode::BAD_GATEWAY, message));
+            return Err(rejected(&store, StatusCode::BAD_GATEWAY, &log, message));
         }
     }
     store.log("SELECT", &format!("selected known-good snapshot {} for rollback of zone {zone} ({patch_len} rrset(s) changed)", request.snapshot_id));
