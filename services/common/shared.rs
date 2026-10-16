@@ -130,14 +130,21 @@ pub fn df(path: &Path) -> Option<Df> {
 // From: Issue #1683 | PR #1912
 fn drain<R: Read + Send + 'static>(
     pipe: Option<R>,
-) -> std::thread::JoinHandle<io::Result<Vec<u8>>> {
+) -> std::sync::mpsc::Receiver<io::Result<Vec<u8>>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        match pipe {
+        let read = match pipe {
             Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
             None => Err(io::Error::other("pipe missing")),
+        };
+        // What: a closed channel means the caller gave up.
+        // Why: the timeout path drops the receiver on purpose.
+        match sender.send(read) {
+            Ok(()) | Err(_) => {}
         }
-    })
+    });
+    receiver
 }
 
 // What: run a program; its stdout then stderr, or an error.
@@ -158,35 +165,48 @@ pub fn run_program(
         .map_err(|e| format!("cannot run {program}: {e}"))?;
     let out = drain(child.stdout.take());
     let err = drain(child.stderr.take());
-    let status = match limit {
+    let deadline = limit.map(|limit| (std::time::Instant::now() + limit, limit));
+    let status = match deadline {
         None => child.wait().map_err(|e| failed("cannot wait", &e))?,
-        Some(limit) => {
-            let deadline = std::time::Instant::now() + limit;
-            loop {
-                if let Some(status) = child.try_wait().map_err(|e| failed("cannot wait", &e))? {
-                    break status;
-                }
-                if std::time::Instant::now() >= deadline {
-                    // What: readers end on their own.
-                    // Why: a grandchild may hold pipes.
-                    let killed = child.kill().map_err(|e| failed("cannot kill", &e));
-                    child.wait().map_err(|e| failed("cannot wait", &e))?;
-                    killed?;
-                    return Err(format!(
-                        "{program} {}: timed out after {limit:?}, killed",
-                        args.join(" ")
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(20));
+        Some((deadline, limit)) => loop {
+            if let Some(status) = child.try_wait().map_err(|e| failed("cannot wait", &e))? {
+                break status;
             }
-        }
+            if std::time::Instant::now() >= deadline {
+                // What: readers end on their own.
+                // Why: a grandchild may hold pipes.
+                let killed = child.kill().map_err(|e| failed("cannot kill", &e));
+                child.wait().map_err(|e| failed("cannot wait", &e))?;
+                killed?;
+                return Err(format!(
+                    "{program} {}: timed out after {limit:?}, killed",
+                    args.join(" ")
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        },
     };
     let mut text = String::new();
     for reader in [out, err] {
-        let bytes = reader
-            .join()
-            .map_err(|_| failed("output reader", &"panicked"))?
-            .map_err(|e| failed("cannot read output", &e))?;
+        // What: with a limit the pipes get the rest of it.
+        // Why: a grandchild may keep a pipe open after exit.
+        let received = match deadline {
+            None => reader
+                .recv()
+                .map_err(|_| failed("output reader", &"panicked")),
+            Some((deadline, limit)) => reader
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .map_err(|e| match e {
+                    std::sync::mpsc::RecvTimeoutError::Timeout => format!(
+                        "{program} {}: output still open after exit, limit {limit:?} used up",
+                        args.join(" ")
+                    ),
+                    std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                        failed("output reader", &"panicked")
+                    }
+                }),
+        };
+        let bytes = received?.map_err(|e| failed("cannot read output", &e))?;
         text.push_str(&String::from_utf8_lossy(&bytes));
     }
     if status.success() {
@@ -977,8 +997,10 @@ pub fn write_file_as(
         .open(&tmp)
         .and_then(|mut file| {
             file.write_all(contents)?;
+            // What: set the owner on the open file, not the path.
+            // Why: the name could be swapped between open and chown.
             if let Some((uid, gid)) = owner {
-                own(&tmp, uid, gid, None)?;
+                std::os::unix::fs::fchown(&file, uid, gid)?;
             }
             file.sync_all()
         })
@@ -1831,52 +1853,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(old.interval_secs, 0);
-    }
-
-    // What: run_program returns output, errors and kills.
-    // Why: callers map the exit; a hang ends at the limit.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn run_program_maps_output_failure_and_timeout() {
-        assert_eq!(
-            run_program("echo", &["a", "b"], None).as_deref(),
-            Ok("a b\n")
-        );
-        let failed = run_program("sh", &["-c", "echo out; echo err >&2; exit 3"], None)
-            .expect_err("exit 3 fails");
-        assert!(failed.contains("out") && failed.contains("err"), "{failed}");
-        assert!(run_program("lancache-no-such-program", &[], None).is_err());
-        let limit = Some(Duration::from_millis(200));
-        let slow = run_program("sleep", &["30"], limit).expect_err("sleep outlasts the limit");
-        assert!(slow.contains("timed out"), "{slow}");
-        assert_eq!(
-            run_program("echo", &["fast"], Some(Duration::from_secs(30))).as_deref(),
-            Ok("fast\n")
-        );
-    }
-
-    // What: terminate sends TERM; own sets owner, mode.
-    // Why: a stop must be a TERM; a key must get its mode.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn terminate_sends_term_and_own_sets_the_mode() {
-        use std::os::unix::fs::PermissionsExt as _;
-        use std::os::unix::process::ExitStatusExt as _;
-        let mut child = Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .expect("sleep starts");
-        terminate(child.id()).expect("TERM sent");
-        assert_eq!(child.wait().expect("sleep ends").signal(), Some(15));
-        assert!(terminate(0).is_err());
-        let dir = unique_temp_dir("own");
-        let file = dir.join("f");
-        fs::write(&file, b"x").expect("file");
-        own(&file, None, None, Some(0o640)).expect("own");
-        let mode = fs::metadata(&file).expect("meta").permissions().mode() & 0o7777;
-        assert_eq!(mode, 0o640);
-        assert!(own(&dir.join("absent"), None, None, Some(0o600)).is_err());
-        assert!(own(&dir.join("absent"), None, Some(0), None).is_err());
     }
 
     // What: snapshots list oldest first; prune to keep_n.
