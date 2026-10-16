@@ -4217,6 +4217,10 @@ async fn update_dhcp_mode(
     Ok(Redirect::to(PAGE_DHCP))
 }
 
+// What: the error text of a bad upstream DHCP server.
+// Why: proxy and relay forms check the same field alike.
+const UPSTREAM_DHCP_INVALID: &str = "Invalid upstream DHCP server: must be an IPv4 address.";
+
 // What: validate and save the dnsmasq-proxy settings.
 // Why: a typo should fail here, not at dnsmasq start.
 // From: Issue #450
@@ -4242,10 +4246,7 @@ async fn update_dhcp_proxy(
             "dhcp_subnet_start",
             "Invalid relay subnet start: must be an IPv4 address.",
         ),
-        (
-            "upstream_dhcp_ip",
-            "Invalid upstream DHCP server: must be an IPv4 address.",
-        ),
+        ("upstream_dhcp_ip", UPSTREAM_DHCP_INVALID),
     ];
     for (key, message) in required {
         if !address(f.get(key)) {
@@ -4343,9 +4344,7 @@ async fn update_dhcp_relay(
         ));
     }
     if ipv4(f.get("upstream_dhcp_ip")).is_none() {
-        return Err(invalid(
-            "Upstream DHCP server must be a valid IPv4 address.",
-        ));
+        return Err(invalid(UPSTREAM_DHCP_INVALID));
     }
     save_dhcp_settings(
         &state,
