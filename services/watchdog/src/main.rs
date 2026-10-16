@@ -24,10 +24,9 @@ use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
     CaFiles, CertSpec, ClientCheck, ConflictCheck, DesiredRunState, DesiredState, Detail,
     DiskHealth, DiskInfo, DockerApi, NetdataAlarm, Place, ProbeAnswer, ProbeReport, ServiceHealth,
-    WatchdogStatus, df, files_under, hex32, need_secs, openssl_ca, openssl_leaf, openssl_x509, own,
-    probe_health, probe_health_tls, resolve_shared_secret, run_program, sha256_hex,
-    shared_secret_file_name, shared_secret_is_placeholder, terminate, unix_secs, write_file,
-    write_if_changed,
+    WatchdogStatus, df, files_under, hex32, is_placeholder, need_secs, openssl_ca, openssl_leaf,
+    openssl_x509, own, probe_health, probe_health_tls, resolve_shared_secret, run_program,
+    sha256_hex, shared_secret_file_name, terminate, unix_secs, write_file, write_if_changed,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1726,7 +1725,7 @@ fn stack_secret(var: &str, file: &str, make: fn() -> String) -> Result<String, S
     let dir = need("LANCACHE_SHARED_SECRET_DIR")?;
     let gid = config::runtime_gid()?;
     let configured = env_opt(var).unwrap_or_default();
-    let current = if shared_secret_is_placeholder(&configured) {
+    let current = if is_placeholder(&configured) {
         ""
     } else {
         configured.as_str()

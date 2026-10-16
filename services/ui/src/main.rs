@@ -29,8 +29,8 @@ use lancache_ng::{
     FlushRequest, NetdataAlarm, Place, PowerDns, ProbeAnswer, ProbeReport, SnapshotStore,
     WatchdogStatus, ct_eq, df, die, error_chain, files_under, hex32, http_client, is_placeholder,
     load_or_create, load_or_create_hex, need_secs, own, probe_health, resolve_shared_secret,
-    shared_secret, shared_secret_file_name, shared_secret_is_placeholder, snapshot_created_unix,
-    unix_secs, write_file, write_if_changed,
+    shared_secret, shared_secret_file_name, snapshot_created_unix, unix_secs, write_file,
+    write_if_changed,
 };
 use nkeys::{KeyPair, XKey};
 use regex::Regex;
@@ -288,7 +288,7 @@ impl Config {
                 .unwrap_or_default()
         };
         let dhcp_api_token = match env("DHCP_API_TOKEN") {
-            Some(v) if !shared_secret_is_placeholder(&v) => v,
+            Some(v) if !is_placeholder(&v) => v,
             _ => secret("KEA_CTRL_TOKEN")?,
         };
         let dhcp_lease_limits = LeaseLimits::load(env)?;
@@ -594,7 +594,7 @@ fn nats_port(nats_url: &str) -> Option<&str> {
 fn ensure_shared_secrets(dir: &str, gid: u32, prefix: &str) -> Result<(), String> {
     for var in SHARED_SECRET_VARS.iter().filter(|v| v.starts_with(prefix)) {
         let configured = config::env_opt(var).unwrap_or_default();
-        let current = if shared_secret_is_placeholder(&configured) {
+        let current = if is_placeholder(&configured) {
             ""
         } else {
             configured.as_str()

@@ -916,17 +916,15 @@ pub fn snapshot_created_unix(id: &str) -> Option<u64> {
 }
 
 // What: true for empty or a checked-in secret placeholder.
-// Why: a public example value must never act as a secret.
+// Why: one rule for every secret; any shape counts (fail-closed).
 // From: Issue #967
 pub fn is_placeholder(value: &str) -> bool {
-    if value.is_empty() {
-        return true;
-    }
     let normalized = value.to_lowercase().replace('-', "_");
-    normalized.starts_with("change_me_")
-        || (normalized.starts_with("your_") && normalized.ends_with("_here"))
-        || normalized.starts_with("changeme")
+    normalized.is_empty()
         || normalized.contains("change_me")
+        || normalized.starts_with("changeme")
+        || normalized.starts_with("your_")
+        || normalized.ends_with("_here")
         || (normalized.starts_with("lancache_") && normalized.ends_with("_secret"))
         || (value.starts_with('<') && value.ends_with('>'))
 }
@@ -1050,18 +1048,6 @@ pub fn load_or_create<T>(
     }
 }
 
-// What: true for empty or a shared-secret placeholder.
-// Why: mirrors the shell library; dev secrets stay real.
-// From: Issue #967
-pub fn shared_secret_is_placeholder(value: &str) -> bool {
-    let normalized = value.to_ascii_lowercase().replace('-', "_");
-    normalized.is_empty()
-        || normalized.starts_with("change_me")
-        || normalized.starts_with("changeme")
-        || normalized.starts_with("your_")
-        || normalized.ends_with("_here")
-}
-
 // What: shared-secret file name of a variable (A_B -> a-b).
 // Why: every secret name derives from its variable name.
 // From: Issue #858
@@ -1078,7 +1064,7 @@ pub fn shared_secret(
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<String, String> {
     let configured = env(var).unwrap_or_default();
-    if !shared_secret_is_placeholder(&configured) {
+    if !is_placeholder(&configured) {
         return Ok(configured);
     }
     let path = Path::new(dir).join(shared_secret_file_name(var));
@@ -1647,7 +1633,7 @@ mod tests {
                 panic!("malformed fixture line: {line:?}");
             };
             let want = *shared == "placeholder";
-            assert_eq!(shared_secret_is_placeholder(value), want, "case: {line}");
+            assert_eq!(is_placeholder(value), want, "case: {line}");
             cases += 1;
         }
         assert!(cases > 0, "the fixture holds no cases");
@@ -2098,7 +2084,7 @@ mod tests {
         assert!(df(Path::new("/nonexistent-lancache-test-dir")).is_none());
     }
 
-    // What: each placeholder rule needs both of its halves.
+    // What: two-half shapes need both halves.
     // Why: a real secret must not pass as an example value.
     // From: Issue #967
     #[test]
@@ -2109,8 +2095,8 @@ mod tests {
         assert!(is_placeholder("<steam>"));
         assert!(!is_placeholder("<steam"));
         assert!(!is_placeholder("steam>"));
-        assert!(!is_placeholder("your_value_there"));
-        assert!(!is_placeholder("value_here"));
+        assert!(is_placeholder("your_value_there"));
+        assert!(is_placeholder("value_here"));
     }
 
     // What: DockerError renders one short line per kind.

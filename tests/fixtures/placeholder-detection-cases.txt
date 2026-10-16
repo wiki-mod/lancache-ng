@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # What: <value> <shared> <setup> <rust>, placeholder|real
-# Why: setup.sh and shared.rs detectors must agree
+# Why: all detectors follow shared.rs is_placeholder
 # From: Issue #967
 
 # What: universal placeholders; all columns agree
@@ -20,32 +20,32 @@ YOUR_SECONDARY_REGISTRATION_TOKEN_HERE placeholder placeholder placeholder
 CHANGE_ME placeholder placeholder placeholder
 CHANGE_MEXYZ placeholder placeholder placeholder
 
-# What: shared check: bare YOUR_* is a placeholder
-# Why: setup and rust need the _HERE suffix too
-YOUR_API_TOKEN placeholder real real
-your-token placeholder real real
+# What: bare YOUR_* is a placeholder
+# Why: one rule: a shape in any detector counts for all
+YOUR_API_TOKEN placeholder placeholder placeholder
+your-token placeholder placeholder placeholder
 
-# What: shared check: any *_HERE is a placeholder
-# Why: setup and rust need the YOUR_ prefix too
-anything_HERE placeholder real real
-anything-HERE placeholder real real
+# What: any *_HERE is a placeholder
+# Why: one rule: a shape in any detector counts for all
+anything_HERE placeholder placeholder placeholder
+anything-HERE placeholder placeholder placeholder
 
-# What: setup and rust: lancache-*-secret is placeholder
+# What: lancache-*-secret is a placeholder
 # Why: old template defaults must never be kept
-lancache-nats-ui-dev-secret real placeholder placeholder
-lancache-pdns-dev-secret real placeholder placeholder
-LANCACHE-NATS-UI-DEV-SECRET real placeholder placeholder
+lancache-nats-ui-dev-secret placeholder placeholder placeholder
+lancache-pdns-dev-secret placeholder placeholder placeholder
+LANCACHE-NATS-UI-DEV-SECRET placeholder placeholder placeholder
 
-# What: setup and rust: change-me anywhere is placeholder
+# What: change-me anywhere is a placeholder
 # Why: typed placeholders like please-change-me-now
-please-change-me-now real placeholder placeholder
-PLEASE-CHANGE-ME-NOW real placeholder placeholder
+please-change-me-now placeholder placeholder placeholder
+PLEASE-CHANGE-ME-NOW placeholder placeholder placeholder
 
-# What: rust only: <generate-a-secret> is placeholder
+# What: <generate-a-secret> is a placeholder
 # Why: README.md example token is pasteable verbatim
 # From: PR #743
-<generate-a-secret> real real placeholder
-<REPLACE_ME> real real placeholder
+<generate-a-secret> placeholder placeholder placeholder
+<REPLACE_ME> placeholder placeholder placeholder
 
 # What: real-looking secrets; all columns say real
 # Why: normalization must not swallow real secrets
