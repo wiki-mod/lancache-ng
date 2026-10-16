@@ -3702,6 +3702,17 @@ die_no_stack_found() {
     die "No stack found in ${install_dir}. If this is a fresh primary install, run ./setup.sh install. If this is a secondary DNS node, run this command from its own directory instead (the one named after --name when it was registered via ./setup.sh secondary), or pass that directory explicitly, e.g.: ./setup.sh <command> /path/to/that-directory"
 }
 
+# What: prints the stack's env file; dies when it is absent
+# Why: the DNS reset and the Kea reset share one error text
+require_stack_env_file() {
+    local install_dir="$1" env_file
+    [[ -f "$install_dir/docker-compose.yml" ]] \
+        || die_no_stack_found "$install_dir"
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    [[ -f "$env_file" ]] || die "No .env found for $install_dir (expected $env_file)."
+    printf '%s\n' "$env_file"
+}
+
 # What: compose helpers return early without a stack
 # Why: backup and restore must handle damaged installs
 compose_stack_available() {
@@ -5841,12 +5852,8 @@ reset_kea_to_last_known_good_config() {
     local -a snapshot_ids=()
     local sid config_json
 
-    [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die_no_stack_found "$install_dir"
+    env_file=$(require_stack_env_file "$install_dir") || exit $?
     install_missing_tools curl jq
-
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    [[ -f "$env_file" ]] || die "No .env found for $install_dir (expected $env_file)."
 
     kea_ctrl_token=$(get_env_var KEA_CTRL_TOKEN "$env_file") || exit $?
     [[ -n "$kea_ctrl_token" ]] \
@@ -6016,12 +6023,8 @@ reset_dns_to_last_known_good_config() {
     local idx n entry eid ecreated found zn
     local applied zone_check_passed flush_ok republished changed_names flush_failed
 
-    [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh install first."
+    env_file=$(require_stack_env_file "$install_dir") || exit $?
     install_missing_tools jq
-
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    [[ -f "$env_file" ]] || die "No .env found for $install_dir (expected $env_file)."
 
     snapshots_body=$(dns_rollback_exec "$install_dir" "$env_file" "$container" GET /snapshots)
 
