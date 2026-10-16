@@ -30,7 +30,7 @@ is authoritative and this document should be corrected.
 | Admin UI           | Web control plane and configuration management                    | Rust                      | Production               |
 | Watchdog           | Service health monitoring and recovery                            | Rust                      | Production               |
 | Netdata            | Runtime metrics and system observability                          | Netdata                   | Production               |
-| Central Logging    | Log collection, normalization and retention                       | syslog-ng, Fluent Bit     | Production               |
+| Central Logging    | Log collection, normalization and retention                       | syslog-ng                | Production               |
 | NTP                | LAN time service and optional host clock discipline               | chrony                    | Optional production mode |
 | CacheHamster       | Future Steam cache-prefill engine                                 | Rust                      | Scaffold only            |
 | setup.sh           | Installation and lifecycle orchestration                          | Bash                      | Production               |
@@ -50,8 +50,8 @@ than being implemented as separate proxy images.
 The proxy provides:
 
 * HTTP content caching.
-* Standard-mode HTTPS forwarding through nginx stream and SNI inspection.
-* SSL-mode TLS interception using the LanCache-NG local certificate authority.
+* HTTP-mode HTTPS forwarding through nginx stream and SNI inspection.
+* HTTPS-mode TLS interception using the LanCache-NG local certificate authority.
 * Automatic certificate generation for configured cache domains.
 * Cache-domain matching based on `services/dns/cdn-domains.txt`.
 * Public-suffix-aware certificate and domain handling.
@@ -66,12 +66,12 @@ The proxy provides:
 * Admin UI visibility for cache status, requests and cache utilization.
 
 The current image uses Alpine and nginx.org's mainline nginx package. The
-stream and SSL preread modules required by standard mode are compiled directly
+stream and SSL preread modules required by HTTP mode are compiled directly
 into that nginx build.
 
-### Standard mode
+### HTTP mode
 
-Standard mode does not terminate the client TLS connection.
+HTTP mode does not terminate the client TLS connection.
 
 nginx inspects the requested SNI name and forwards the encrypted connection to
 the requested upstream host. No locally generated certificate is presented to
@@ -81,9 +81,9 @@ This mode avoids installing the LanCache-NG CA on clients but can only cache
 traffic that is available through non-intercepted HTTP paths or other supported
 cache flows.
 
-### SSL mode
+### HTTPS mode
 
-SSL mode terminates client TLS using certificates generated from the local
+HTTPS mode terminates client TLS using certificates generated from the local
 LanCache-NG CA.
 
 The client must trust that CA.
@@ -125,14 +125,15 @@ The service combines:
 
 ### DNS instances
 
-The normal deployment contains two logical DNS instances:
+The normal deployment contains one DNS container:
 
-* `dns-standard`
-* `dns-ssl`
+* `dns`
 
-`dns-standard` is the writable authoritative primary.
+`dns` is the writable authoritative primary. It serves the http and the https
+side from the same container.
 
-`dns-ssl` operates as a PowerDNS secondary for replicated authoritative data.
+Remote secondary nodes (`setup.sh secondary`) operate as PowerDNS secondaries
+for the replicated authoritative data.
 
 This replaces the older model where both instances independently received and
 applied the same record mutations.
@@ -145,8 +146,8 @@ operation.
 The implementation includes:
 
 * TSIG-protected AXFR and NOTIFY.
-* `dns-standard` as the single writable primary.
-* `dns-ssl` as a secondary.
+* `dns` as the single writable primary.
+* Remote `dns` nodes as secondaries.
 * Kea DDNS writes directed to the primary.
 * Secondary-side NATS record writes disabled to maintain the single-writer
   model.
@@ -579,11 +580,9 @@ treated as a general public API.
 
 ### Purpose
 
-`services/syslog` provides centralized collection and processing of logs from
-LanCache-NG services.
-
-The service combines syslog-ng and Fluent Bit related functionality with
-health and data-loss detection.
+syslog-ng inside the `services` container provides centralized collection of
+logs from LanCache-NG services. The watchdog renders its configuration and
+supervises it.
 
 ### Current capabilities
 
@@ -594,9 +593,8 @@ The logging path provides:
 * Proxy request log processing.
 * Inputs used by the Admin UI log viewer.
 * Input for Netdata's nginx `web_log` collector.
-* Health checking.
-* Detection of logging-path data loss.
-* Log retention and compression support.
+* Logging switches per service (proxy, dns, dhcp, ui) in the Admin UI.
+* Log retention (age and size budget).
 
 Service logs remain useful through their normal container output as well. The
 central logging path is an additional consolidated operator view rather than a
@@ -789,9 +787,9 @@ upstream source and stores eligible content.
 Client
   -> Kea DHCPv4
   -> Kea DDNS
-  -> dns-standard
+  -> dns
   -> PowerDNS native replication
-  -> dns-ssl / secondary DNS nodes
+  -> remote secondary DNS nodes
 ```
 
 The writable DNS primary is the single authority for replicated zone changes.
@@ -802,7 +800,7 @@ The writable DNS primary is the single authority for replicated zone changes.
 Operator
   -> Admin UI
   -> DNS control plane
-  -> dns-standard
+  -> dns
   -> PowerDNS replication
   -> DNS secondaries
 ```
@@ -880,7 +878,6 @@ alone is not sufficient evidence that a network service works.
 Representative validation includes:
 
 * Rust unit and integration tests.
-* Bats tests for shell and configuration behavior.
 * Compose configuration validation.
 * Real nginx configuration validation.
 * Real HTTP cache simulations.

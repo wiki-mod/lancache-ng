@@ -13,12 +13,12 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use subtle::ConstantTimeEq;
+use subtle::{Choice, ConstantTimeEq};
 
 // What: health of one service in watchdog's status.json.
 // Why: watchdog writes it and the ui reads it; one schema.
@@ -42,15 +42,15 @@ pub struct DiskHealth {
     pub status: String,
 }
 
-// What: disk section of status.json; only the cache today.
-// Why: a struct keeps room for more volumes later.
+// What: disk section of status.json; the cache volume.
+// Why: one named field per volume keeps the schema stable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskInfo {
     pub cache: DiskHealth,
 }
 
 // What: the whole status.json document.
-// Why: a map; its keys show whether SSL mode is off.
+// Why: a map; its keys show whether HTTPS mode is off.
 // From: Issue #870
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchdogStatus {
@@ -63,22 +63,11 @@ pub struct WatchdogStatus {
     pub interval_secs: u64,
 }
 
-// What: stale limit when the document names no interval.
-// Why: an older watchdog wrote none; 90 s was its limit.
-const STALE_FALLBACK: Duration = Duration::from_secs(90);
-
-// What: missed check cycles after which status is stale.
-// Why: one late cycle is no outage; three are.
-const STALE_CYCLES: u32 = 3;
-
 impl WatchdogStatus {
     // What: age beyond which the document counts as stale.
-    // Why: the limit follows the watchdog's own interval.
-    pub fn stale_after(&self) -> Duration {
-        match self.interval_secs {
-            0 => STALE_FALLBACK,
-            secs => Duration::from_secs(secs).saturating_mul(STALE_CYCLES),
-        }
+    // Why: cycles missed in a row; no interval is stale.
+    pub fn stale_after(&self, cycles: u32) -> Duration {
+        Duration::from_secs(self.interval_secs).saturating_mul(cycles)
     }
 }
 
@@ -121,31 +110,382 @@ pub struct Df {
     pub used_pct: u32,
 }
 
-// What: figures from `df -Pk <path>`; None on any failure.
-// Why: -P keeps one line per mount, so fields never shift.
+// What: figures from statvfs; None on any failure.
+// Why: std has no statvfs; used percent rounds up.
 pub fn df(path: &Path) -> Option<Df> {
-    let output = Command::new("df").arg("-Pk").arg(path).output().ok()?;
-    if !output.status.success() {
+    let stat = rustix::fs::statvfs(path).ok()?;
+    // What: used = blocks - free; total = used + avail.
+    // Why: df counts reserved blocks as used, not as total.
+    let used = stat.f_blocks.checked_sub(stat.f_bfree)?;
+    let total = used.checked_add(stat.f_bavail)?;
+    // What: no figures for a filesystem without blocks.
+    // Why: a division by zero must not read as 0 percent.
+    if total == 0 {
         return None;
     }
-    parse_df(&String::from_utf8_lossy(&output.stdout))
-}
-
-// What: figures from the text of `df -Pk`; None if odd.
-// Why: the parse is pure, so a test can feed it any text.
-fn parse_df(text: &str) -> Option<Df> {
-    let fields: Vec<&str> = text.lines().nth(1)?.split_whitespace().collect();
     Some(Df {
-        avail_kib: fields.get(3)?.parse().ok()?,
-        used_pct: fields.get(4)?.trim_end_matches('%').parse().ok()?,
+        avail_kib: stat.f_bavail.checked_mul(stat.f_frsize)? / 1024,
+        used_pct: u32::try_from(used.checked_mul(100)?.div_ceil(total)).ok()?,
     })
 }
 
+// What: read one pipe to its end on its own thread.
+// Why: a full pipe would block the program while we wait.
+// From: Issue #1683 | PR #1912
+fn drain<R: Read + Send + 'static>(
+    pipe: Option<R>,
+) -> std::sync::mpsc::Receiver<io::Result<Vec<u8>>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = match pipe {
+            Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
+            None => Err(io::Error::other("pipe missing")),
+        };
+        // What: a closed channel means the caller gave up.
+        // Why: the timeout path drops the receiver.
+        match sender.send(read) {
+            Ok(()) | Err(_) => {}
+        }
+    });
+    receiver
+}
+
+// What: run a program; its stdout then stderr, or an error.
+// Why: one program runner; a limit ends a hanging program.
+// From: Issue #1683 | PR #1912
+pub fn run_program(
+    program: &str,
+    args: &[&str],
+    limit: Option<Duration>,
+) -> Result<String, String> {
+    let failed = |what: &str, e: &dyn std::fmt::Display| format!("{program}: {what}: {e}");
+    // What: start it with no stdin and piped outputs.
+    // Why: it must not wait for input; we capture both.
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run {program}: {e}"))?;
+    // What: read both outputs on their own threads.
+    // Why: one full pipe would block the program.
+    let out = drain(child.stdout.take());
+    let err = drain(child.stderr.take());
+    // What: the deadline and limit of the program.
+    // Why: the wait and the readers share one deadline.
+    let deadline = limit.map(|limit| (std::time::Instant::now() + limit, limit));
+    let status = match deadline {
+        None => child.wait().map_err(|e| failed("cannot wait", &e))?,
+        Some((deadline, limit)) => loop {
+            if let Some(status) = child.try_wait().map_err(|e| failed("cannot wait", &e))? {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                // What: readers end on their own.
+                // Why: a grandchild may hold pipes.
+                let killed = child.kill().map_err(|e| failed("cannot kill", &e));
+                child.wait().map_err(|e| failed("cannot wait", &e))?;
+                killed?;
+                return Err(format!(
+                    "{program} {}: timed out after {limit:?}, killed",
+                    args.join(" ")
+                ));
+            }
+            // What: poll the exit every 20 ms.
+            // Why: std has no wait with a timeout.
+            std::thread::sleep(Duration::from_millis(20));
+        },
+    };
+    let mut text = String::new();
+    for reader in [out, err] {
+        // What: with a limit the pipes get the rest of it.
+        // Why: a grandchild may hold a pipe after exit.
+        let received = match deadline {
+            None => reader
+                .recv()
+                .map_err(|_| failed("output reader", &"panicked")),
+            Some((deadline, limit)) => reader
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .map_err(|e| match e {
+                    std::sync::mpsc::RecvTimeoutError::Timeout => format!(
+                        "{program} {}: output still open after exit, limit {limit:?} used up",
+                        args.join(" ")
+                    ),
+                    std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                        failed("output reader", &"panicked")
+                    }
+                }),
+        };
+        let bytes = received?.map_err(|e| failed("cannot read output", &e))?;
+        // What: append the output, stdout first.
+        // Why: callers read the result stdout then stderr.
+        text.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    if status.success() {
+        Ok(text)
+    } else {
+        Err(format!("{program} {}: {}", args.join(" "), text.trim()))
+    }
+}
+
+// What: the --config-dir argument of a pdns program.
+// Why: watchdog and subscriber name the config alike.
+// From: Issue #1683 | PR #1912
+pub fn pdns_config_dir_arg(dir: &str) -> String {
+    format!("--config-dir={dir}")
+}
+
+// What: run pdnsutil on a pdns config dir; text or error.
+// Why: both programs call pdnsutil through one function.
+// From: Issue #1683 | PR #1912
+pub fn pdnsutil(dir: &str, args: &[&str], limit: Option<Duration>) -> Result<String, String> {
+    let config_dir = pdns_config_dir_arg(dir);
+    let mut argv = vec![config_dir.as_str()];
+    argv.extend_from_slice(args);
+    run_program("pdnsutil", &argv, limit)
+}
+
+// What: send SIGTERM to one process.
+// Why: std kills with SIGKILL; a daemon needs TERM.
+// From: Issue #1683 | PR #1912
+pub fn terminate(pid: u32) -> io::Result<()> {
+    let pid = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid process id"))?;
+    rustix::process::kill_process(pid, rustix::process::Signal::TERM).map_err(io::Error::from)
+}
+
+// What: set owner ids if given, then the mode.
+// Why: the one owner change; lchown never follows a link.
+// From: Issue #1683 | PR #1912
+pub fn own(path: &Path, uid: Option<u32>, gid: Option<u32>, mode: Option<u32>) -> io::Result<()> {
+    own_with(
+        path,
+        (uid, gid),
+        mode,
+        |(uid, gid)| std::os::unix::fs::lchown(path, uid, gid),
+        |mode| fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode)),
+    )
+}
+
+// What: own on an open file; the name is only for messages.
+// Why: the name could be swapped between open and chown.
+// From: Issue #1683 | PR #1912
+pub fn own_file(file: &fs::File, name: &Path, owner: Owner, mode: Option<u32>) -> io::Result<()> {
+    own_with(
+        name,
+        owner,
+        mode,
+        |(uid, gid)| std::os::unix::fs::fchown(file, uid, gid),
+        |mode| file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(mode)),
+    )
+}
+
+// What: the one owner and mode logic for a path or a file.
+// Why: own and own_file differ only in how they reach it.
+// From: Issue #1683 | PR #1912
+fn own_with(
+    name: &Path,
+    owner: Owner,
+    mode: Option<u32>,
+    chown: impl FnOnce(Owner) -> io::Result<()>,
+    chmod: impl FnOnce(u32) -> io::Result<()>,
+) -> io::Result<()> {
+    let context = |e: io::Error| {
+        io::Error::new(
+            e.kind(),
+            format!("cannot set owner or mode of {}: {e}", name.display()),
+        )
+    };
+    // What: set the owner ids only when one is given.
+    // Why: no id leaves the file's owner as it is.
+    if owner.0.is_some() || owner.1.is_some() {
+        chown(owner).map_err(context)?;
+    }
+    // What: set the mode only when one is given.
+    // Why: no mode leaves the rights as they are.
+    match mode {
+        Some(mode) => chmod(mode).map_err(context),
+        None => Ok(()),
+    }
+}
+
+// What: regular files under root, never across mounts.
+// Why: the one tree walk; no symlink is followed.
+// From: Issue #1683 | PR #1912
+pub fn files_under(root: &Path) -> io::Result<Vec<(PathBuf, fs::Metadata)>> {
+    use std::os::unix::fs::MetadataExt as _;
+    // What: remember the device id of the root.
+    // Why: a mount below the root is not part of the scan.
+    let dev = fs::symlink_metadata(root)?.dev();
+    let (mut files, mut dirs) = (Vec::new(), vec![root.to_path_buf()]);
+    while let Some(dir) = dirs.pop() {
+        // What: skip a directory gone since listing.
+        // Why: cache and logs change during a scan.
+        let entries = match fs::read_dir(&dir) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound && dir != root => continue,
+            other => other?,
+        };
+        for entry in entries {
+            let path = entry?.path();
+            // What: an entry gone since listing is skipped
+            // Why: cache and logs change during a scan
+            let meta = match fs::symlink_metadata(&path) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                other => other?,
+            };
+            // What: skip an entry on another device.
+            // Why: the scan must not cross into a mount.
+            if meta.dev() != dev {
+                continue;
+            }
+            // What: walk dirs, collect regular files.
+            // Why: a link or device node is no cache file.
+            if meta.is_dir() {
+                dirs.push(path);
+            } else if meta.is_file() {
+                files.push((path, meta));
+            }
+        }
+    }
+    Ok(files)
+}
+
+// What: key type, subject and days of one certificate.
+// Why: CA and leaf share the openssl request flags.
+// From: Issue #1683 | PR #1912
+pub struct CertSpec<'a> {
+    pub key_type: &'a str,
+    pub subject: &'a str,
+    pub days: &'a str,
+}
+
+// What: create a self-signed CA key and certificate.
+// Why: the one openssl CA creation.
+// From: Issue #1683 | PR #1912
+pub fn openssl_ca(key: &Path, crt: &Path, spec: &CertSpec) -> Result<(), String> {
+    let (key, crt) = (key.display().to_string(), crt.display().to_string());
+    run_program(
+        "openssl",
+        &[
+            "req",
+            "-new",
+            "-newkey",
+            spec.key_type,
+            "-days",
+            spec.days,
+            "-nodes",
+            "-x509",
+            "-subj",
+            spec.subject,
+            "-keyout",
+            &key,
+            "-out",
+            &crt,
+        ],
+        None,
+    )
+    .map(|_| ())
+}
+
+// What: the CA files that sign a leaf.
+// Why: openssl needs certificate, key and serial file.
+// From: Issue #1683 | PR #1912
+pub struct CaFiles<'a> {
+    pub crt: &'a Path,
+    pub key: &'a Path,
+    pub serial: &'a Path,
+}
+
+// What: sign one leaf; csr and ext are scratch files.
+// Why: the one openssl leaf signing; the caller cleans up.
+// From: Issue #1683 | PR #1912
+pub fn openssl_leaf(
+    ca: &CaFiles,
+    (key, crt): (&Path, &Path),
+    (csr, ext): (&Path, &Path),
+    san: &str,
+    spec: &CertSpec,
+) -> Result<(), String> {
+    write_file(
+        ext,
+        format!("subjectAltName={san}\n").as_bytes(),
+        0o600,
+        Place::Replace,
+    )
+    .map_err(|e| format!("cannot write {}: {e}", ext.display()))?;
+    let path = |p: &Path| p.display().to_string();
+    let (key, crt, csr, ext) = (path(key), path(crt), path(csr), path(ext));
+    run_program(
+        "openssl",
+        &[
+            "req",
+            "-new",
+            "-newkey",
+            spec.key_type,
+            "-nodes",
+            "-subj",
+            spec.subject,
+            "-keyout",
+            &key,
+            "-out",
+            &csr,
+        ],
+        None,
+    )?;
+    run_program(
+        "openssl",
+        &[
+            "x509",
+            "-req",
+            "-days",
+            spec.days,
+            "-in",
+            &csr,
+            "-CA",
+            &path(ca.crt),
+            "-CAkey",
+            &path(ca.key),
+            "-CAserial",
+            &path(ca.serial),
+            "-extfile",
+            &ext,
+            "-out",
+            &crt,
+        ],
+        None,
+    )
+    .map(|_| ())
+}
+
+// What: openssl x509 -noout output for one certificate.
+// Why: the one certificate read; the CA print and SAN read.
+// From: Issue #1683 | PR #1912
+pub fn openssl_x509(crt: &Path, args: &[&str]) -> Result<String, String> {
+    let crt = crt.display().to_string();
+    run_program(
+        "openssl",
+        &[&["x509", "-noout"], args, &["-in", &crt]].concat(),
+        None,
+    )
+}
+
 // What: constant-time equality of two secrets.
-// Why: digests first, so a length difference leaks nothing.
-pub fn ct_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (Sha256::digest(a.as_bytes()), Sha256::digest(b.as_bytes()));
-    a.ct_eq(&b).into()
+// Why: no hash; the loop runs over the expected length.
+pub fn ct_eq(presented: &str, expected: &str) -> bool {
+    let (presented, expected) = (presented.as_bytes(), expected.as_bytes());
+    // What: compare every expected byte, never stop early.
+    // Why: the run time must not reveal the first mismatch.
+    let mut same = Choice::from(1);
+    for (i, want) in expected.iter().enumerate() {
+        same &= presented.get(i).copied().unwrap_or(!want).ct_eq(want);
+    }
+    // What: also require equal length.
+    // Why: a longer input with the same prefix must fail.
+    bool::from(same & (presented.len() as u64).ct_eq(&(expected.len() as u64)))
 }
 
 // What: nanoseconds since the epoch; 0 for a broken clock.
@@ -173,6 +513,19 @@ pub fn unique_temp_dir(tag: &str) -> PathBuf {
     ));
     fs::create_dir_all(&dir).expect("scratch directory");
     dir
+}
+
+// What: HTTP client times for tests, 10 s each.
+// Why: tests of several crates build an http_client.
+// From: Issue #1683 | PR #1912
+pub fn test_http_env(key: &str) -> Option<String> {
+    [
+        "HTTP_CLIENT_TIMEOUT",
+        "HTTP_POOL_IDLE_TIMEOUT",
+        "HTTP_TCP_KEEPALIVE",
+    ]
+    .contains(&key)
+    .then(|| "10".to_string())
 }
 
 // What: a local HTTP server that answers canned replies.
@@ -238,26 +591,142 @@ pub fn die(tag: &str, message: &str) -> ! {
     std::process::exit(1);
 }
 
-// What: how long a plain HTTP call may take.
-// Why: a stuck peer must not hold a request forever.
-pub const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+// What: whole seconds above 0 of one key from a reader.
+// Why: a zero wait would end every call at once.
+// From: Issue #1683 | PR #1912
+pub fn need_secs(
+    get: &dyn Fn(&str) -> Option<String>,
+    key: &'static str,
+) -> Result<Duration, String> {
+    config::uint(get, key, 1, u64::MAX).map(Duration::from_secs)
+}
 
-// What: how long an idle pooled connection is kept.
-// Why: a dead peer's connection is not reused for long.
-const HTTP_POOL_IDLE: Duration = Duration::from_secs(90);
+// What: whole milliseconds above 0 of one _MS key.
+// Why: sub-second waits take the same Uint rule.
+// From: Issue #1683 | PR #1912
+pub fn need_millis(
+    get: &dyn Fn(&str) -> Option<String>,
+    key: &'static str,
+) -> Result<Duration, String> {
+    config::uint(get, key, 1, u64::MAX).map(Duration::from_millis)
+}
 
-// What: the interval of TCP keepalive probes.
-// Why: a silently dropped peer is noticed on a pooled link.
-const HTTP_KEEPALIVE: Duration = Duration::from_secs(60);
+// What: retry delays: start, then doubled up to max.
+// Why: ui, nats-subscriber and watchdog back off alike.
+// From: Issue #1683 | PR #1912
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Backoff {
+    pub start: Duration,
+    pub max: Duration,
+}
 
-// What: the general HTTP client of ui and nats-subscriber.
-// Why: one timeout and pool setting for both callers.
-pub fn http_client() -> reqwest::Result<reqwest::Client> {
+impl Backoff {
+    // What: RETRY_BACKOFF_START and _MAX from a reader.
+    // Why: the SOT owns both; a start above max fails.
+    // From: Issue #1683 | PR #1912
+    pub fn load(get: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let start = need_secs(get, "RETRY_BACKOFF_START")?;
+        let max = need_secs(get, "RETRY_BACKOFF_MAX")?;
+        if start > max {
+            return Err(format!(
+                "RETRY_BACKOFF_START {start:?} is above RETRY_BACKOFF_MAX {max:?}"
+            ));
+        }
+        Ok(Self { start, max })
+    }
+
+    // What: the delay after this one: doubled, at most max.
+    // Why: a failing call must not spin nor wait forever.
+    // From: Issue #1683 | PR #1912
+    pub fn next(&self, delay: Duration) -> Duration {
+        delay.saturating_mul(2).min(self.max)
+    }
+}
+
+// What: the general HTTP client of several services.
+// Why: one timeout and pool setting, from the SOT.
+pub fn http_client(get: &dyn Fn(&str) -> Option<String>) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .pool_idle_timeout(HTTP_POOL_IDLE)
-        .tcp_keepalive(HTTP_KEEPALIVE)
+        .timeout(need_secs(get, "HTTP_CLIENT_TIMEOUT")?)
+        .pool_idle_timeout(need_secs(get, "HTTP_POOL_IDLE_TIMEOUT")?)
+        .tcp_keepalive(need_secs(get, "HTTP_TCP_KEEPALIVE")?)
         .build()
+        .map_err(|e| format!("HTTP client: {e}"))
+}
+
+// What: an error and every cause below it, one line.
+// Why: reqwest hides the TLS or socket cause in source().
+// From: Issue #1683 | PR #1912
+pub fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(inner) = cause {
+        text.push_str(": ");
+        text.push_str(&inner.to_string());
+        cause = inner.source();
+    }
+    text
+}
+
+// What: Ok when a client's GET of a URL answers 2xx.
+// Why: http and https health probes judge the same way.
+// From: Issue #1683 | PR #1912
+async fn expect_success(client: &reqwest::Client, url: &str) -> Result<(), String> {
+    let status = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("{url}: {}", error_chain(&e)))?
+        .status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(format!("{url}: HTTP {status}"))
+    }
+}
+
+// What: Ok when a plain-http health URL answers 2xx.
+// Why: healthchecks run in the binary; no curl, no shell.
+// From: Issue #1683 | PR #1912
+pub async fn probe_health(url: &str, timeout: Duration) -> Result<(), String> {
+    if url.starts_with("https://") {
+        return Err(format!("{url}: an https health URL needs probe_health_tls"));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .no_proxy()
+        .build()
+        .map_err(|e| format!("health client: {e}"))?;
+    expect_success(&client, url).await
+}
+
+// What: Ok when an https health URL answers 2xx.
+// Why: the stack CA is the only trust anchor.
+// From: Issue #1683 | PR #1912
+pub async fn probe_health_tls(
+    url: &str,
+    ca_pem: &[u8],
+    name: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
+    let ip: std::net::IpAddr = parsed
+        .host_str()
+        .ok_or_else(|| format!("{url}: no host"))?
+        .parse()
+        .map_err(|e| format!("{url}: the host is no IP address: {e}"))?;
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| format!("{url}: no port"))?;
+    let ca = reqwest::Certificate::from_pem(ca_pem).map_err(|e| format!("CA certificate: {e}"))?;
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .no_proxy()
+        .tls_certs_only([ca])
+        .resolve(name, std::net::SocketAddr::new(ip, port))
+        .build()
+        .map_err(|e| format!("health client: {e}"))?;
+    expect_success(&client, &format!("https://{name}:{port}{}", parsed.path())).await
 }
 
 // What: one lancache.dns.record message on NATS.
@@ -300,12 +769,28 @@ pub struct SnapshotStore {
     service: &'static str,
 }
 
-// What: snapshots kept when the setting is 0.
-// Why: a bad setting must never disable retention.
-const DEFAULT_KEEP: u32 = 3;
 // What: marker prefix of a snapshot still being written.
 // Why: listing must never show a half-written snapshot.
 const STAGING: &str = ".staging.";
+
+// What: true for a purely numeric snapshot id.
+// Why: old shell ids carry T and a dot; none is readable.
+// From: Issue #1683 | PR #1912
+fn is_snapshot_id(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit())
+}
+
+// What: remove a failed staging dir; its error joins e.
+// Why: AG-INT-002: a left staging dir is named, not hidden.
+// From: Issue #1683 | PR #1912
+fn drop_staging(staging: &Path, e: anyhow::Error) -> anyhow::Error {
+    match fs::remove_dir_all(staging) {
+        Err(c) if c.kind() != std::io::ErrorKind::NotFound => {
+            e.context(format!("staging {} not removed: {c}", staging.display()))
+        }
+        _ => e,
+    }
+}
 
 impl SnapshotStore {
     // What: a store of `file` payloads under `root`.
@@ -334,8 +819,10 @@ impl SnapshotStore {
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
+            // What: count dirs with a numeric id, payload.
+            // Why: staging or empty dirs are no target.
             let complete = entry.file_type()?.is_dir()
-                && !name.starts_with(STAGING)
+                && is_snapshot_id(&name)
                 && entry.path().join(self.file).is_file();
             if complete {
                 ids.push(name);
@@ -349,7 +836,7 @@ impl SnapshotStore {
     // Why: the id joins onto a path, so it must be safe.
     pub fn read(&self, id: &str) -> anyhow::Result<Value> {
         anyhow::ensure!(
-            !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()),
+            is_snapshot_id(id),
             "rejected known-good snapshot id {id:?}: must be a purely numeric snapshot id"
         );
         let raw = fs::read_to_string(self.root.join(id).join(self.file))
@@ -362,6 +849,8 @@ impl SnapshotStore {
     // Why: staging plus rename; a crash leaves no partial.
     pub fn create(&self, data: &Value, keep_n: u32) -> anyhow::Result<String> {
         let id = format!("{:020}", unix_nanos());
+        // What: write into a staging dir under the root.
+        // Why: only the rename makes a snapshot visible.
         let staging = self.root.join(format!("{STAGING}{id}"));
         fs::create_dir_all(&staging)
             .with_context(|| format!("cannot create staging directory {}", staging.display()))?;
@@ -370,10 +859,12 @@ impl SnapshotStore {
             Ok(fs::rename(&staging, self.root.join(&id))?)
         };
         if let Err(e) = finish() {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(e.context(format!("failed to write known-good snapshot {id}")));
+            let e = e.context(format!("failed to write known-good snapshot {id}"));
+            return Err(drop_staging(&staging, e));
         }
         self.log("CREATE", &format!("created known-good snapshot {id}"));
+        // What: a failed prune is logged only.
+        // Why: the snapshot is written; prune is upkeep.
         if let Err(e) = self.prune(keep_n) {
             self.log(
                 "FATAL",
@@ -386,7 +877,14 @@ impl SnapshotStore {
     // What: delete the oldest snapshots beyond keep_n.
     // Why: a failed removal is logged, not a write failure.
     pub fn prune(&self, keep_n: u32) -> io::Result<()> {
-        let keep_n = if keep_n == 0 { DEFAULT_KEEP } else { keep_n };
+        // What: refuse a retention of zero.
+        // Why: zero would delete every known-good snapshot.
+        if keep_n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "keep_n must be at least 1; the SOT owns the default",
+            ));
+        }
         let ids = self.ids()?;
         let excess = ids.len().saturating_sub(keep_n as usize);
         for id in ids.into_iter().take(excess) {
@@ -398,8 +896,114 @@ impl SnapshotStore {
                 Err(e) => self.log("FATAL", &format!("failed to prune snapshot {id}: {e}")),
             }
         }
+        // What: convert old shell snapshots after prune.
+        // Why: an update keeps its rollback targets.
+        self.adopt_legacy();
         Ok(())
     }
+
+    // What: turn old shell-format snapshots into new ones.
+    // Why: an update keeps rollback targets (AG-OP-007).
+    // From: Issue #1683 | PR #1912
+    pub fn adopt_legacy(&self) {
+        let Ok(entries) = fs::read_dir(&self.root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let old = entry.file_type().is_ok_and(|t| t.is_dir())
+                && !name.starts_with(STAGING)
+                && !is_snapshot_id(&name);
+            if !old {
+                continue;
+            }
+            match self.adopt_one(&entry.path(), &name) {
+                Ok(id) => self.log("ADOPT", &format!("old snapshot {name} is now {id}")),
+                Err(e) => self.log("FATAL", &format!("cannot adopt old snapshot {name}: {e:#}")),
+            }
+        }
+    }
+
+    // What: one old snapshot dir as a new snapshot.
+    // Why: its files become the {name: text} payload.
+    // From: Issue #1683 | PR #1912
+    fn adopt_one(&self, dir: &Path, name: &str) -> anyhow::Result<String> {
+        let nanos = legacy_id_nanos(name)
+            .with_context(|| format!("{name} is no old snapshot id (YYYYmmddTHHMMSS.N)"))?;
+        let id = format!("{nanos:020}");
+        // What: refuse an id that already exists.
+        // Why: the rename must not replace a snapshot.
+        anyhow::ensure!(
+            !self.root.join(&id).exists(),
+            "a snapshot {id} exists already"
+        );
+        let mut set = serde_json::Map::new();
+        for file in fs::read_dir(dir)? {
+            let file = file?;
+            if file.file_type()?.is_file() {
+                let text = fs::read_to_string(file.path())
+                    .with_context(|| format!("cannot read {}", file.path().display()))?;
+                set.insert(
+                    file.file_name().to_string_lossy().into_owned(),
+                    Value::String(text),
+                );
+            }
+        }
+        // What: refuse an old snapshot without files.
+        // Why: an empty payload hides a broken rollback.
+        anyhow::ensure!(!set.is_empty(), "{name} holds no file");
+        let staging = self.root.join(format!("{STAGING}{id}"));
+        fs::create_dir_all(&staging)?;
+        let finish = || -> anyhow::Result<()> {
+            fs::write(
+                staging.join(self.file),
+                serde_json::to_vec_pretty(&Value::Object(set))?,
+            )?;
+            fs::rename(&staging, self.root.join(&id))?;
+            // What: remove the old dir after the new one.
+            // Why: a crash in between keeps the old copy.
+            Ok(fs::remove_dir_all(dir)?)
+        };
+        finish().map_err(|e| drop_staging(&staging, e))?;
+        Ok(id)
+    }
+}
+
+// What: epoch nanoseconds of an old id (UTC).
+// Why: old ids are date +%Y%m%dT%H%M%S.%N output.
+// From: Issue #1683 | PR #1912
+fn legacy_id_nanos(name: &str) -> Option<u128> {
+    let (date, rest) = name.split_once('T')?;
+    let (time, frac) = rest.split_once('.')?;
+    let digits =
+        |t: &str, n: usize| (t.len() == n && is_snapshot_id(t)).then(|| t.parse::<i64>().ok())?;
+    let (y, m, d) = (
+        digits(&date[..4.min(date.len())], 4)?,
+        digits(date.get(4..6)?, 2)?,
+        digits(date.get(6..)?, 2)?,
+    );
+    let (hh, mm, ss) = (
+        digits(time.get(..2)?, 2)?,
+        digits(time.get(2..4)?, 2)?,
+        digits(time.get(4..)?, 2)?,
+    );
+    if date.len() != 8 || frac.is_empty() || frac.len() > 9 || !is_snapshot_id(frac) {
+        return None;
+    }
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    // What: days since the epoch for a civil date.
+    // Why: Hinnant's days-from-civil, proleptic Gregorian.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = u128::try_from(days * 86_400 + hh * 3600 + mm * 60 + ss).ok()?;
+    let nanos: u128 = format!("{frac:0<9}").parse().ok()?;
+    Some(secs * 1_000_000_000 + nanos)
 }
 
 // What: creation time (Unix seconds) encoded in an id.
@@ -409,17 +1013,17 @@ pub fn snapshot_created_unix(id: &str) -> Option<u64> {
 }
 
 // What: true for empty or a checked-in secret placeholder.
-// Why: a public example value must never act as a secret.
+// Why: one rule for all secrets; any shape counts.
 // From: Issue #967
 pub fn is_placeholder(value: &str) -> bool {
-    if value.is_empty() {
-        return true;
-    }
+    // What: lowercase; turn dashes to underscores.
+    // Why: CHANGE-ME and change_me are one placeholder.
     let normalized = value.to_lowercase().replace('-', "_");
-    normalized.starts_with("change_me_")
-        || (normalized.starts_with("your_") && normalized.ends_with("_here"))
-        || normalized.starts_with("changeme")
+    normalized.is_empty()
         || normalized.contains("change_me")
+        || normalized.starts_with("changeme")
+        || normalized.starts_with("your_")
+        || normalized.ends_with("_here")
         || (normalized.starts_with("lancache_") && normalized.ends_with("_secret"))
         || (value.starts_with('<') && value.ends_with('>'))
 }
@@ -456,15 +1060,21 @@ pub fn write_file_as(
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
+    // What: take the file name of the target.
+    // Why: the temp name derives from it; no name, no file.
     let name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
     let stamp = unix_nanos();
+    // What: a unique temp name beside the target.
+    // Why: link and rename need the same filesystem.
     let tmp = path.with_file_name(format!(
         ".{}.tmp-{}-{stamp}",
         name.to_string_lossy(),
         std::process::id()
     ));
+    // What: create the temp file with its final mode.
+    // Why: the content is never visible with wider rights.
     let placed = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -472,9 +1082,13 @@ pub fn write_file_as(
         .open(&tmp)
         .and_then(|mut file| {
             file.write_all(contents)?;
-            if let Some((uid, gid)) = owner {
-                std::os::unix::fs::fchown(&file, uid, gid)?;
+            // What: set the owner on the open file.
+            // Why: the name could be swapped before chown.
+            if let Some(owner) = owner {
+                own_file(&file, &tmp, owner, None)?;
             }
+            // What: flush the content before placing.
+            // Why: a crash must not leave an empty target.
             file.sync_all()
         })
         .and_then(|()| match place {
@@ -506,16 +1120,16 @@ pub fn write_if_changed(
     mode: u32,
     owner: Option<Owner>,
 ) -> io::Result<bool> {
+    // What: compare bytes; unreadable = changed.
+    // Why: a missing or broken file must be written again.
     let changed = fs::read(path).ok().as_deref() != Some(contents);
     if changed {
         write_file_as(path, contents, mode, Place::Replace, owner)?;
     }
     // What: converge mode and owner on unchanged files too.
     // Why: an old install may carry other rights.
-    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode))?;
-    if let Some((uid, gid)) = owner {
-        std::os::unix::fs::lchown(path, uid, gid)?;
-    }
+    let (uid, gid) = owner.unwrap_or((None, None));
+    own(path, uid, gid, Some(mode))?;
     Ok(changed)
 }
 
@@ -528,6 +1142,8 @@ pub fn load_or_create<T>(
     parse: impl Fn(&str) -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
     match fs::read_to_string(path) {
+        // What: parse the stored text, trimmed.
+        // Why: the trailing newline is no part of a secret.
         Ok(contents) => parse(contents.trim()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             let (text, value) = create();
@@ -541,8 +1157,161 @@ pub fn load_or_create<T>(
                 Err(e) => Err(e.into()),
             }
         }
+        // What: every other read error fails the call.
+        // Why: an unreadable file must not rotate it.
         Err(err) => Err(err.into()),
     }
+}
+
+// What: shared-secret file name of a variable (A_B -> a-b).
+// Why: every secret name derives from its variable name.
+// From: Issue #858
+pub fn shared_secret_file_name(var: &str) -> String {
+    var.to_ascii_lowercase().replace('_', "-")
+}
+
+// What: a real env value, else its shared-secret file.
+// Why: backends write the file; the ui only reads it.
+// From: Issue #858
+pub fn shared_secret(
+    dir: &str,
+    var: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, String> {
+    // What: a real env value wins over the file.
+    // Why: an operator's explicit value is intended.
+    let configured = env(var).unwrap_or_default();
+    if !is_placeholder(&configured) {
+        return Ok(configured);
+    }
+    let path = Path::new(dir).join(shared_secret_file_name(var));
+    match fs::read_to_string(&path) {
+        // What: drop newlines from the file text.
+        // Why: the file ends in a newline; secret has none.
+        Ok(value) => Ok(value.replace('\n', "")),
+        // What: a missing file gives an empty secret.
+        // Why: the backend writes it later.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("cannot read {var} from {}: {e}", path.display())),
+    }
+}
+
+// What: 32 random bytes as hex; the usual secret form.
+// Why: tokens, keys and passwords share one generator.
+// From: Issue #858
+pub fn hex32() -> String {
+    hex::encode(rand::random::<[u8; 32]>())
+}
+
+// What: lowercase hex SHA-256 of a text.
+// Why: bounded, stable file names from long host names.
+// From: Issue #1683
+pub fn sha256_hex(text: &str) -> String {
+    hex::encode(Sha256::digest(text.as_bytes()))
+}
+
+// What: header and path of the netdata alarm webhook.
+// Why: the sender and the ui must spell both the same way.
+// From: Issue #858
+pub const ALARM_TOKEN_HEADER: &str = "X-Netdata-Alarm-Token";
+pub const ALARM_INGEST_PATH: &str = "/api/netdata-alarms";
+
+// What: one alarm; the names are custom_sender's variables.
+// Why: the sender script is rendered from these fields.
+// From: Issue #849
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct NetdataAlarm {
+    pub unique_id: i64,
+    pub alarm_id: i64,
+    pub event_id: i64,
+    pub when: i64,
+    pub name: String,
+    pub chart: String,
+    pub host: String,
+    pub status: String,
+    pub old_status: String,
+    pub value_string: String,
+    pub units: String,
+    pub info: String,
+    pub duration: i64,
+}
+
+// What: first-writer-wins read-or-create of a secret file.
+// Why: independent starters must not split-brain a secret.
+// From: Issue #858
+pub fn resolve_shared_secret(
+    dir: &Path,
+    name: &str,
+    current: &str,
+    gid: u32,
+    make: fn() -> String,
+) -> Result<String, String> {
+    let file = dir.join(name);
+    // What: the file text without newlines; empty is none.
+    // Why: an empty file counts as no secret yet.
+    let on_disk = || {
+        fs::read_to_string(&file)
+            .ok()
+            .map(|v| v.replace('\n', ""))
+            .filter(|v| !v.is_empty())
+    };
+    // What: reuse the file when it fits the current value.
+    // Why: the first writer's secret must stay.
+    if let Some(existing) = on_disk()
+        && (current.is_empty() || existing == current)
+    {
+        return Ok(existing);
+    }
+    // What: a configured value survives a failed write.
+    // Why: only a disagreeing file makes it unsafe to use.
+    // From: PR #1775
+    let keep_current = || {
+        let conflict = match on_disk() {
+            Some(v) => v != current,
+            None => file.exists(),
+        };
+        !current.is_empty() && !conflict
+    };
+    // What: generate a value only when none is configured.
+    // Why: a configured value is the operator's choice.
+    let value = if current.is_empty() {
+        make()
+    } else {
+        current.to_string()
+    };
+    // What: create exclusively for a new value.
+    // Why: two starters must not both create a new secret.
+    let place = if current.is_empty() {
+        Place::Exclusive
+    } else {
+        Place::Replace
+    };
+    // What: try with the reader group, then without it.
+    // Why: some volumes refuse chgrp; 0640 stays anyway.
+    let written = write_file_as(
+        &file,
+        value.as_bytes(),
+        0o640,
+        place,
+        Some((None, Some(gid))),
+    )
+    .or_else(|_| write_file_as(&file, value.as_bytes(), 0o640, place, None));
+    if written.is_ok() {
+        return Ok(value);
+    }
+    // What: after a lost race, take the winner's file.
+    // Why: only one secret may exist for all starters.
+    if current.is_empty()
+        && let Some(existing) = on_disk()
+    {
+        return Ok(existing);
+    }
+    // What: fall back to the configured value if safe.
+    // Why: a failed write must not stop a valid setup.
+    if keep_current() {
+        return Ok(current.to_string());
+    }
+    Err(format!("cannot place {}", file.display()))
 }
 
 // What: N-byte hex secret, persisted with load_or_create.
@@ -592,9 +1361,13 @@ impl std::error::Error for DockerError {}
 // Why: a container without a tty multiplexes its streams.
 fn log_text(mut bytes: &[u8]) -> String {
     let mut text = String::new();
+    // What: cut frames of 8 byte header, payload.
+    // Why: the header holds stream id and size.
     while bytes.len() >= 8 {
         let size = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
         let end = bytes.len().min(8usize.saturating_add(size));
+        // What: keep stdout (1) and stderr (2) frames only.
+        // Why: other stream ids carry no log text.
         if matches!(bytes[0], 1 | 2) {
             text.push_str(&String::from_utf8_lossy(&bytes[8..end]));
         }
@@ -604,7 +1377,7 @@ fn log_text(mut bytes: &[u8]) -> String {
 }
 
 // What: client of PowerDNS's HTTP API with the API key.
-// Why: ui and nats-subscriber call the API the same way.
+// Why: ui, watchdog and nats-subscriber share it.
 pub struct PowerDns {
     http: reqwest::Client,
     api_key: String,
@@ -631,10 +1404,14 @@ impl PowerDns {
         url: &str,
         body: Option<String>,
     ) -> Result<reqwest::Response, String> {
+        // What: send the API key in every request.
+        // Why: PowerDNS refuses a call without the key.
         let mut request = self
             .http
             .request(method, url)
             .header("X-API-Key", &self.api_key);
+        // What: add a JSON content type only with a body.
+        // Why: a bodiless GET claims no content type.
         if let Some(body) = body {
             request = request
                 .header("Content-Type", "application/json")
@@ -648,6 +1425,8 @@ impl PowerDns {
     pub async fn zone_rrsets(&self, api_root: &str, zone: &str) -> Result<Vec<Value>, String> {
         let url = config::zone_url(api_root, zone);
         let response = self.call(reqwest::Method::GET, &url, None).await?;
+        // What: refuse a non-2xx answer.
+        // Why: an error body has no rrsets and looks empty.
         if !response.status().is_success() {
             return Err(format!("PowerDNS returned {}", response.status()));
         }
@@ -655,6 +1434,8 @@ impl PowerDns {
             .json()
             .await
             .map_err(|e| format!("cannot decode the zone export: {e}"))?;
+        // What: a 2xx answer without rrsets is empty.
+        // Why: a new zone exports no rrsets key yet.
         Ok(body
             .get("rrsets")
             .and_then(Value::as_array)
@@ -663,28 +1444,85 @@ impl PowerDns {
     }
 }
 
-// What: client of the proxy's allowlisted Docker calls.
-// Why: ui and watchdog drive containers; one owner.
-// From: Issue #1683 | PR #1858
-pub struct DockerProxy {
+// What: the label compose sets to the project name.
+// Why: the watchdog finds its stack by this label.
+// From: Issue #1683
+pub const COMPOSE_PROJECT_LABEL: &str = "com.docker.compose.project";
+
+// What: the label compose sets to the service name.
+// Why: status.json names each container by its service.
+// From: Issue #1683
+pub const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
+
+// What: the endpoint prefix of a local Docker socket.
+// Why: unix:///path talks HTTP over that socket file.
+// From: Issue #1683
+pub const DOCKER_UNIX_PREFIX: &str = "unix://";
+
+// What: client of the Docker Engine API.
+// Why: only the watchdog drives containers; one owner.
+// From: Issue #1683
+pub struct DockerApi {
     client: reqwest::Client,
     base_url: String,
 }
 
-impl DockerProxy {
-    // What: build a client for one proxy base URL.
-    // Why: redirects and timeouts must stay under control.
-    pub fn new(base_url: &str) -> Self {
-        let client = reqwest::Client::builder()
-            // What: never follow a redirect.
-            // Why: a 3xx could reach an ungranted path.
-            .redirect(reqwest::redirect::Policy::none())
+impl DockerApi {
+    // What: a client for unix:///socket or an http:// URL.
+    // Why: redirects are refused; timeouts apply per call.
+    // From: Issue #1683 | PR #1912
+    pub fn new(endpoint: &str) -> Self {
+        let endpoint = endpoint.trim();
+        // What: never follow a redirect.
+        // Why: a 3xx could reach an unexpected path.
+        let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+        // What: a unix socket gets a fixed dummy host name.
+        // Why: HTTP over a socket needs a host name.
+        let (builder, base_url) = match endpoint.strip_prefix(DOCKER_UNIX_PREFIX) {
+            Some(socket) => (
+                builder.unix_socket(PathBuf::from(socket)),
+                "http://docker".to_string(),
+            ),
+            None => (builder, endpoint.trim_end_matches('/').to_string()),
+        };
+        // What: build the client; a failure is a bug.
+        // Why: no custom TLS is set; the build works.
+        let client = builder
             .build()
             .expect("a client without custom TLS settings always builds");
-        Self {
-            client,
-            base_url: base_url.trim().trim_end_matches('/').to_string(),
-        }
+        Self { client, base_url }
+    }
+
+    // What: containers carrying one compose project label.
+    // Why: the stack is whatever compose started; no list.
+    // From: Issue #1683
+    pub async fn project_containers(
+        &self,
+        project: &str,
+        timeout: Option<Duration>,
+    ) -> Option<Vec<Value>> {
+        let filter = serde_json::json!({ "label": [format!("{COMPOSE_PROJECT_LABEL}={project}")] });
+        let url = reqwest::Url::parse_with_params(
+            "http://docker/containers/json",
+            [("all", "1"), ("filters", filter.to_string().as_str())],
+        )
+        .ok()?;
+        let path = format!("{}?{}", url.path(), url.query()?);
+        let body = self.call(reqwest::Method::GET, &path, timeout).await.ok()?;
+        serde_json::from_slice(&body).ok()
+    }
+
+    // What: send one signal to a container's main process.
+    // Why: nginx reopens its access log on USR1.
+    // From: Issue #1683
+    pub async fn signal(
+        &self,
+        name: &str,
+        signal: &str,
+        timeout: Option<Duration>,
+    ) -> Result<(), DockerError> {
+        self.act(name, &format!("kill?signal={signal}"), timeout)
+            .await
     }
 
     // What: one call; the body of a 2xx or 304 answer.
@@ -695,6 +1533,8 @@ impl DockerProxy {
         path: &str,
         timeout: Option<Duration>,
     ) -> Result<Vec<u8>, DockerError> {
+        // What: map a reqwest error to Timeout/Transport.
+        // Why: callers treat a timeout apart.
         let failed = |e: reqwest::Error| match e.is_timeout() {
             true => DockerError::Timeout,
             false => DockerError::Transport(e.to_string()),
@@ -709,6 +1549,8 @@ impl DockerProxy {
         }
         let response = request.send().await.map_err(failed)?;
         let status = response.status();
+        // What: accept 2xx and 304, refuse everything else.
+        // Why: 304 means the state is set already.
         if !status.is_success() && status != reqwest::StatusCode::NOT_MODIFIED {
             return Err(DockerError::Status(status.as_u16()));
         }
@@ -783,78 +1625,139 @@ impl DockerProxy {
     }
 }
 
+// What: one label and value row of an offer or ACK.
+// Why: servers differ in fields; the page lists what exists
+#[derive(Clone, Deserialize, Serialize)]
+pub struct Detail {
+    pub label: String,
+    pub value: String,
+}
+
+// What: result of the rogue DHCP server check.
+// Why: the status tag is the shape the page script reads.
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ConflictCheck {
+    Found {
+        output: String,
+        details: Vec<Detail>,
+    },
+    NotFound,
+    Unavailable {
+        reason: String,
+    },
+}
+
+// What: result of the client dry run.
+// Why: a failed run has no lease data, so no details.
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ClientCheck {
+    Passed {
+        output: String,
+        details: Vec<Detail>,
+    },
+    Failed {
+        output: String,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+// What: both checks of one probe run.
+// Why: the probe prints it as JSON, the ui reads it back.
+#[derive(Deserialize, Serialize)]
+pub struct ProbeReport {
+    pub conflict: ConflictCheck,
+    pub client: ClientCheck,
+}
+
+impl ProbeReport {
+    // What: a report where neither check could run.
+    // Why: both checks share the reason they did not run.
+    pub fn unavailable(reason: String) -> Self {
+        Self {
+            conflict: ConflictCheck::Unavailable {
+                reason: reason.clone(),
+            },
+            client: ClientCheck::Unavailable { reason },
+        }
+    }
+
+    // What: one status word for the whole report.
+    // Why: severity order; a found server beats everything.
+    pub fn overall(&self) -> &'static str {
+        match (&self.conflict, &self.client) {
+            (ConflictCheck::Found { .. }, _) => "conflict_found",
+            (ConflictCheck::Unavailable { .. }, _) | (_, ClientCheck::Unavailable { .. }) => {
+                "unavailable"
+            }
+            (_, ClientCheck::Failed { .. }) => "client_failed",
+            (_, ClientCheck::Passed { .. }) => "verified",
+        }
+    }
+
+    // What: the page's JSON: one status plus both checks.
+    // Why: the dhcp page script reads exactly this shape.
+    pub fn page(&self) -> Value {
+        serde_json::json!({
+            "status": self.overall(),
+            "conflict": self.conflict,
+            "client": self.client,
+        })
+    }
+}
+
+// What: one probe answer, keyed by the request it answers.
+// Why: the ui waits for its own id, never an older run.
+// From: Issue #947 | PR #1912
+#[derive(Deserialize, Serialize)]
+pub struct ProbeAnswer {
+    pub id: String,
+    pub page: Value,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // What: log frames join; other streams, cut tails drop.
-    // Why: the probe result line must survive the headers.
+    // What: error_chain joins an error with each cause.
+    // Why: a builder error alone hides its serde cause.
     #[test]
-    fn log_text_joins_stdout_and_stderr_frames() {
-        let frames = [
-            &[1, 0, 0, 0, 0, 0, 0, 3][..],
-            b"abc",
-            &[2, 0, 0, 0, 0, 0, 0, 2][..],
-            b"de",
-            &[0, 0, 0, 0, 0, 0, 0, 1][..],
-            b"x",
-            &[1, 0, 0, 0, 0, 0, 0, 9][..],
-            b"cut",
-        ]
-        .concat();
-        assert_eq!(log_text(&frames), "abcdecut");
-    }
-
-    // What: each known placeholder shape is detected.
-    // Why: a shipped example must never pass as a secret.
-    // From: Issue #967
-    #[test]
-    fn is_placeholder_matches_known_shapes() {
-        assert!(is_placeholder(""));
-        assert!(is_placeholder("CHANGE_ME_now"));
-        assert!(is_placeholder("YOUR_STEAM_PASSWORD_HERE"));
-        assert!(is_placeholder("<steam-password>"));
-        assert!(!is_placeholder("a-real-looking-secret-value"));
-    }
-
-    // What: is_placeholder equals the fixture rust column.
-    // Why: it must stay in step with the shell detectors.
-    // From: Issue #967
-    #[test]
-    fn is_placeholder_matches_shared_parity_fixture() {
-        let path = format!(
-            "{}/../../tests/fixtures/placeholder-detection-cases.txt",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let contents = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("could not read parity fixture {path}: {e}"));
-        let mut total = 0usize;
-        let mut mismatches: Vec<String> = Vec::new();
-        for line in contents.lines().map(str::trim_end) {
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            let [value, _shared, _setup, rust] = fields.as_slice() else {
-                panic!("malformed parity fixture line: {line:?}");
-            };
-            total += 1;
-            let actual = if is_placeholder(value) {
-                "placeholder"
-            } else {
-                "real"
-            };
-            if actual != *rust {
-                mismatches.push(format!("'{value}' expected={rust} actual={actual}"));
+    fn error_chain_lists_every_cause() {
+        #[derive(Debug)]
+        struct Outer(std::io::Error);
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("builder error")
             }
         }
-        assert!(total > 0, "parity fixture had zero usable cases");
-        assert!(
-            mismatches.is_empty(),
-            "{} of {total} fixture case(s) disagreed:\n{}",
-            mismatches.len(),
-            mismatches.join("\n")
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let error = Outer(std::io::Error::other("key must be a string"));
+        assert_eq!(error_chain(&error), "builder error: key must be a string");
+    }
+
+    // What: a failed secret write keeps a configured value.
+    // Why: only a disagreeing file makes it unsafe to use.
+    // From: PR #1775
+    #[test]
+    fn failed_secret_writes_keep_or_refuse() {
+        let dir = unique_temp_dir("secret-fail");
+        fs::write(dir.join("not-a-dir"), "x").unwrap();
+        let gone = dir.join("not-a-dir");
+        assert_eq!(
+            resolve_shared_secret(&gone, "a", "cfg", 0, hex32),
+            Ok("cfg".to_string())
         );
+        assert!(resolve_shared_secret(&gone, "a", "", 0, hex32).is_err());
+        fs::create_dir(dir.join("blocked")).unwrap();
+        assert!(resolve_shared_secret(&dir, "blocked", "cfg", 0, hex32).is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // What: equal secrets match, any difference does not.
@@ -864,6 +1767,10 @@ mod tests {
         assert!(ct_eq("secret-key", "secret-key") && ct_eq("", ""));
         assert!(!ct_eq("secret-key", "different-key"));
         assert!(!ct_eq("short", "muchlongerkey") && !ct_eq("", "x"));
+        // What: longer or shorter values never match.
+        // Why: a secret prefix must not authenticate.
+        assert!(!ct_eq("secret-keyX", "secret-key") && !ct_eq("secret-ke", "secret-key"));
+        assert!(!ct_eq("x", ""));
     }
 
     // What: record and flush messages keep the wire shape.
@@ -886,7 +1793,7 @@ mod tests {
         assert_eq!(req.expected_content, Some(vec!["192.0.2.5".to_string()]));
     }
 
-    // What: stale limit is three intervals, else 90 s.
+    // What: stale limit is cycles times the interval.
     // Why: a wrong limit shows live data as stale.
     #[test]
     fn stale_limit_follows_the_interval() {
@@ -901,119 +1808,14 @@ mod tests {
             },
             interval_secs,
         };
-        assert_eq!(status(30).stale_after(), Duration::from_secs(90));
-        assert_eq!(status(10).stale_after(), Duration::from_secs(30));
-        assert_eq!(status(0).stale_after(), Duration::from_secs(90));
+        assert_eq!(status(30).stale_after(3), Duration::from_secs(90));
+        assert_eq!(status(10).stale_after(4), Duration::from_secs(40));
+        assert_eq!(status(0).stale_after(3), Duration::ZERO);
         let old: WatchdogStatus = serde_json::from_str(
             r#"{"updated":"x","services":{},"disk":{"cache":{"pct":1,"status":"green"}}}"#,
         )
         .unwrap();
         assert_eq!(old.interval_secs, 0);
-    }
-
-    // What: df output parses; odd output gives None.
-    // Why: a wrong field would show a wrong disk percent.
-    #[test]
-    fn df_output_is_parsed_or_refused() {
-        let ok = "Filesystem 1024-blocks Used Available Capacity Mounted on\n\
-                  /dev/sda1 1000 400 600 40% /cache\n";
-        let parsed = parse_df(ok).expect("well-formed df output");
-        assert_eq!((parsed.avail_kib, parsed.used_pct), (600, 40));
-        assert!(parse_df("").is_none());
-        assert!(parse_df("header only\n").is_none());
-        assert!(parse_df("h\n/dev/sda1 1000 400 x 40% /\n").is_none());
-        assert!(parse_df("h\n/dev/sda1 1000 400 600 full /\n").is_none());
-    }
-
-    // What: snapshots list oldest first; prune to keep_n.
-    // Why: a wrong prune loses the last known-good state.
-    // From: Issue #628
-    #[test]
-    fn snapshot_store_creates_lists_reads_and_prunes() {
-        let root = unique_temp_dir("snap");
-        let store = SnapshotStore::new(root.join("store"), "data.json", "test");
-        assert_eq!(store.ids().unwrap(), Vec::<String>::new());
-        let mut made = Vec::new();
-        for n in 0..5 {
-            made.push(store.create(&serde_json::json!({ "n": n }), 3).unwrap());
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        let kept = store.ids().unwrap();
-        assert_eq!(kept, made[2..].to_vec());
-        assert_eq!(store.read(&kept[0]).unwrap(), serde_json::json!({ "n": 2 }));
-        fs::create_dir_all(root.join("store/.staging.1")).unwrap();
-        fs::create_dir_all(root.join("store/00000000000000000009")).unwrap();
-        assert_eq!(store.ids().unwrap(), kept);
-        for bad in ["", "../x", "12a", "1/2"] {
-            assert!(store.read(bad).is_err(), "id {bad:?} must be refused");
-        }
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    // What: keep_n 0 keeps three, never none.
-    // Why: a bad retention value must not erase snapshots.
-    #[test]
-    fn snapshot_store_zero_retention_keeps_three() {
-        let root = unique_temp_dir("keep");
-        let store = SnapshotStore::new(root.join("store"), "data.json", "test");
-        for _ in 0..5 {
-            store.create(&serde_json::json!({}), 0).unwrap();
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        assert_eq!(store.ids().unwrap().len(), 3);
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    // What: Exclusive keeps the first file; Replace swaps.
-    // Why: secrets are created once; settings are replaced.
-    #[test]
-    fn write_file_exclusive_keeps_first_and_replace_swaps() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = unique_temp_dir("write");
-        let file = root.join("sub/secret");
-        write_file(&file, b"first", 0o600, Place::Exclusive).unwrap();
-        let again = write_file(&file, b"second", 0o600, Place::Exclusive);
-        assert_eq!(again.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(fs::read(&file).unwrap(), b"first");
-        write_file(&file, b"third", 0o600, Place::Replace).unwrap();
-        assert_eq!(fs::read(&file).unwrap(), b"third");
-        let mode = fs::metadata(&file).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-        assert_eq!(fs::read_dir(root.join("sub")).unwrap().count(), 1);
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    // What: write_if_changed writes once, then fixes mode.
-    // Why: reruns write nothing; rights still converge.
-    #[test]
-    fn write_if_changed_writes_once_and_converges_mode() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = unique_temp_dir("changed");
-        let file = root.join("conf");
-        assert!(write_if_changed(&file, b"a", 0o644, None).unwrap());
-        assert!(!write_if_changed(&file, b"a", 0o644, None).unwrap());
-        assert!(write_if_changed(&file, b"b", 0o644, None).unwrap());
-        fs::set_permissions(&file, fs::Permissions::from_mode(0o666)).unwrap();
-        assert!(!write_if_changed(&file, b"b", 0o600, None).unwrap());
-        let mode = fs::metadata(&file).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    // What: a secret persists; a bad file is an error.
-    // Why: restarts must not rotate it or accept junk.
-    #[test]
-    fn load_or_create_persists_and_rejects_bad_files() {
-        let root = unique_temp_dir("secret");
-        let file = root.join("key");
-        let first = load_or_create_hex::<4>(&file).unwrap();
-        assert_eq!(fs::read_to_string(&file).unwrap().len(), 8);
-        assert_eq!(load_or_create_hex::<4>(&file).unwrap(), first);
-        fs::write(&file, "zz").unwrap();
-        assert!(load_or_create_hex::<4>(&file).is_err());
-        fs::write(&file, "0011").unwrap();
-        assert!(load_or_create_hex::<4>(&file).is_err());
-        let _ = fs::remove_dir_all(&root);
     }
 
     // What: desired state reads, or no opinion on failure.
@@ -1035,12 +1837,14 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    // What: the proxy client builds and trims its base URL.
+    // What: both endpoint forms build; URLs are trimmed.
     // Why: new() unwraps the builder; this shows it builds.
     #[test]
-    fn docker_proxy_builds_and_trims_the_base_url() {
-        let proxy = DockerProxy::new(" http://proxy:2375/ ");
-        assert_eq!(proxy.base_url, "http://proxy:2375");
+    fn docker_api_builds_for_a_socket_and_a_url() {
+        let tcp = DockerApi::new(" http://engine:2375/ ");
+        assert_eq!(tcp.base_url, "http://engine:2375");
+        let unix = DockerApi::new(" unix:///var/run/docker.sock ");
+        assert_eq!(unix.base_url, "http://docker");
     }
 
     // What: an id yields its second; non-numbers none.
@@ -1062,30 +1866,6 @@ mod tests {
         assert!(unix_secs().abs_diff(now.as_secs()) <= 2);
     }
 
-    // What: df reads a real dir, refuses a missing one.
-    // Why: a failed df must not read as free space.
-    #[test]
-    fn df_reads_a_real_directory_and_refuses_a_missing_one() {
-        let figures = df(&std::env::temp_dir()).unwrap();
-        assert!(figures.used_pct <= 100);
-        assert!(df(Path::new("/nonexistent-lancache-test-dir")).is_none());
-    }
-
-    // What: each placeholder rule needs both of its halves.
-    // Why: a real secret must not pass as an example value.
-    // From: Issue #967
-    #[test]
-    fn is_placeholder_needs_both_halves_of_a_shape() {
-        assert!(is_placeholder("LANCACHE_DB_SECRET"));
-        assert!(!is_placeholder("lancache_db_token"));
-        assert!(!is_placeholder("db_secret"));
-        assert!(is_placeholder("<steam>"));
-        assert!(!is_placeholder("<steam"));
-        assert!(!is_placeholder("steam>"));
-        assert!(!is_placeholder("your_value_there"));
-        assert!(!is_placeholder("value_here"));
-    }
-
     // What: DockerError renders one short line per kind.
     // Why: logs and watchdog output show this text.
     #[test]
@@ -1101,163 +1881,43 @@ mod tests {
         );
     }
 
-    // What: the first writer's secret wins; errors stay.
-    // Why: a second start must not replace the secret.
-    // From: Issue #871
+    // What: the probe report has one overall word.
+    // Why: severity order; a found server beats everything.
     #[test]
-    fn load_or_create_keeps_the_first_writer_and_fails_on_read_errors() {
-        let dir = unique_temp_dir("load-or-create");
-        let raced = dir.join("raced");
-        let value = load_or_create(
-            &raced,
-            || {
-                fs::write(&raced, "first\n").unwrap();
-                ("second".to_string(), "second".to_string())
-            },
-            |text| Ok(text.to_string()),
-        )
-        .unwrap();
-        assert_eq!(value, "first");
-
-        let mut created = false;
-        let broken = load_or_create(
-            &dir,
-            || {
-                created = true;
-                ("x".to_string(), "x".to_string())
-            },
-            |text| Ok(text.to_string()),
-        );
-        assert!(broken.is_err());
-        assert!(!created);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    // What: Docker calls use the allowed paths, decode.
-    // Why: the proxy grants exactly these calls.
-    // From: Issue #1683 | PR #1858
-    #[tokio::test]
-    async fn docker_calls_use_the_allowlisted_paths_and_decode_answers() {
-        let frames = [&[1, 0, 0, 0, 0, 0, 0, 2][..], b"hi"].concat();
-        let (base, server) = serve_canned(vec![
-            (200, br#"{"State":{"Running":true}}"#.to_vec()),
-            (204, vec![]),
-            (204, vec![]),
-            (200, b"OK\n".to_vec()),
-            (200, br#"{"StatusCode":3}"#.to_vec()),
-            (200, frames),
-        ]);
-        let docker = DockerProxy::new(&format!(" {base}/ "));
-        let state = docker.inspect("web", None).await.unwrap();
-        assert_eq!(state["State"]["Running"], true);
-        docker.act("web", "stop", None).await.unwrap();
-        docker.restart("web", 2, None).await.unwrap();
-        assert!(docker.ping(None).await);
-        assert_eq!(docker.wait("web", None).await.unwrap(), 3);
-        assert_eq!(docker.logs("web", 7, None).await.unwrap(), "hi");
-        let seen = server.join().unwrap();
-        let lines: Vec<&str> = seen.iter().filter_map(|r| r.lines().next()).collect();
+    fn probe_reports_rank_their_checks() {
+        let found = || ConflictCheck::Found {
+            output: "10.0.0.1".into(),
+            details: vec![],
+        };
+        let passed = || ClientCheck::Passed {
+            output: String::new(),
+            details: vec![],
+        };
+        let failed = || ClientCheck::Failed {
+            output: String::new(),
+        };
+        let gone = || ClientCheck::Unavailable {
+            reason: String::new(),
+        };
+        let no_conflict = || ConflictCheck::Unavailable {
+            reason: String::new(),
+        };
+        let overall = |conflict, client| ProbeReport { conflict, client }.overall();
+        assert_eq!(overall(found(), gone()), "conflict_found");
+        assert_eq!(overall(found(), passed()), "conflict_found");
+        assert_eq!(overall(no_conflict(), passed()), "unavailable");
+        assert_eq!(overall(ConflictCheck::NotFound, gone()), "unavailable");
+        assert_eq!(overall(ConflictCheck::NotFound, failed()), "client_failed");
+        assert_eq!(overall(ConflictCheck::NotFound, passed()), "verified");
+        let report = ProbeReport::unavailable("why".to_string());
         assert_eq!(
-            lines,
-            [
-                "GET /containers/web/json HTTP/1.1",
-                "POST /containers/web/stop HTTP/1.1",
-                "POST /containers/web/restart?t=2 HTTP/1.1",
-                "GET /_ping HTTP/1.1",
-                "POST /containers/web/wait?condition=not-running HTTP/1.1",
-                "GET /containers/web/logs?stdout=1&stderr=1&since=7 HTTP/1.1",
-            ]
+            serde_json::to_value(&report).unwrap(),
+            serde_json::json!({
+            "conflict": {"status": "unavailable", "reason": "why"},
+            "client": {"status": "unavailable", "reason": "why"}})
         );
-    }
-
-    // What: status codes map to errors; 304 counts as done.
-    // Why: a redirect must never reach an ungranted path.
-    // From: Issue #1683 | PR #1858
-    #[tokio::test]
-    async fn docker_status_codes_map_to_errors_and_304_is_done() {
-        let (base, _server) = serve_canned(vec![
-            (500, vec![]),
-            (404, vec![]),
-            (302, vec![]),
-            (304, vec![]),
-        ]);
-        let docker = DockerProxy::new(&base);
-        let act = |name: &'static str| docker.act(name, "stop", None);
-        assert!(matches!(act("a").await, Err(DockerError::Status(500))));
-        assert!(matches!(act("b").await, Err(DockerError::Status(404))));
-        assert!(matches!(act("c").await, Err(DockerError::Status(302))));
-        assert!(act("d").await.is_ok());
-    }
-
-    // What: Docker reads refuse bad answers.
-    // Why: a bad answer is not a healthy container.
-    #[tokio::test]
-    async fn docker_reads_refuse_bad_answers() {
-        let (base, _server) = serve_canned(vec![
-            (200, b"NOPE".to_vec()),
-            (500, b"OK".to_vec()),
-            (500, br#"{"a":1}"#.to_vec()),
-            (200, b"not json".to_vec()),
-            (200, br#"{"x":1}"#.to_vec()),
-            (500, vec![]),
-        ]);
-        let docker = DockerProxy::new(&base);
-        assert!(!docker.ping(None).await);
-        assert!(!docker.ping(None).await);
-        assert!(docker.inspect("a", None).await.is_none());
-        assert!(docker.inspect("a", None).await.is_none());
-        assert!(matches!(
-            docker.wait("a", None).await,
-            Err(DockerError::Transport(_))
-        ));
-        assert!(matches!(
-            docker.logs("a", 0, None).await,
-            Err(DockerError::Status(500))
-        ));
-    }
-
-    // What: PowerDNS exports rrsets, reports failures.
-    // Why: an error body must not read as an empty zone.
-    #[tokio::test]
-    async fn powerdns_exports_rrsets_and_reports_failures() {
-        let (base, server) = serve_canned(vec![
-            (200, br#"{"rrsets":[{"name":"a.lan."}]}"#.to_vec()),
-            (200, br#"{"error":"none"}"#.to_vec()),
-            (404, br#"{"rrsets":[{"name":"x"}]}"#.to_vec()),
-            (200, b"not json".to_vec()),
-        ]);
-        let pdns = PowerDns::new(http_client().unwrap(), "k3y".to_string());
-        assert_eq!(pdns.api_key(), "k3y");
-        let root = format!("{base}/api/v1/servers/localhost");
-        let rrsets = pdns.zone_rrsets(&root, "lan.").await.unwrap();
-        assert_eq!(rrsets.len(), 1);
-        assert_eq!(rrsets[0]["name"], "a.lan.");
-        assert!(pdns.zone_rrsets(&root, "lan.").await.unwrap().is_empty());
-        let missing = pdns.zone_rrsets(&root, "lan.").await.unwrap_err();
-        assert_eq!(missing, "PowerDNS returned 404 Not Found");
-        let junk = pdns.zone_rrsets(&root, "lan.").await.unwrap_err();
-        assert!(junk.starts_with("cannot decode the zone export"));
-        let seen = server.join().unwrap();
-        assert!(seen[0].starts_with("GET /api/v1/servers/localhost/zones/lan HTTP/1.1"));
-        assert!(seen[0].to_lowercase().contains("x-api-key: k3y"));
-    }
-
-    // What: a PowerDNS call sends the key and a JSON body.
-    // Why: every call site shares auth and JSON headers.
-    #[tokio::test]
-    async fn powerdns_call_sends_the_key_and_a_json_body() {
-        let (base, server) = serve_canned(vec![(204, vec![]), (204, vec![])]);
-        let pdns = PowerDns::new(http_client().unwrap(), "k3y".to_string());
-        let url = format!("{base}/x");
-        let body = Some(r#"{"a":1}"#.to_string());
-        pdns.call(reqwest::Method::PATCH, &url, body).await.unwrap();
-        pdns.call(reqwest::Method::PUT, &url, None).await.unwrap();
-        let seen = server.join().unwrap();
-        let first = seen[0].to_lowercase();
-        assert!(first.starts_with("patch /x http/1.1"));
-        assert!(first.contains("content-type: application/json"));
-        assert!(first.contains("x-api-key: k3y"));
-        assert!(first.ends_with(r#"{"a":1}"#));
-        assert!(!seen[1].to_lowercase().contains("content-type"));
+        assert_eq!(report.overall(), "unavailable");
+        assert_eq!(report.page()["status"], "unavailable");
+        assert_eq!(report.page()["client"]["reason"], "why");
     }
 }

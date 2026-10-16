@@ -16,7 +16,7 @@ lancache-ng provides a Docker based LAN cache stack with:
 
 - DNS based cache routing
 - an nginx cache proxy
-- optional SSL caching with a locally trusted CA
+- optional HTTPS caching with a locally trusted CA
 - an Admin UI
 - optional DHCP and secondary DNS features
 - setup and update automation for first-time users
@@ -151,13 +151,9 @@ the remaining operator risk and any rollback or follow-up notes.
 All actionable static analysis warnings are treated as build failures under the warnings-as-errors rule:
 
 **Hard failures (block a PR):**
-- `cargo clippy` warnings — denied in the `dns_rust_quality` and `ui_rust_quality` jobs
-- `cargo clippy` warnings — enforced via `cargo clippy -- -D warnings` in the same jobs
-- `shellcheck` warnings — enforced via `shellcheck --severity=warning` in the `shellcheck` job
-- `actionlint` warnings — enforced via `actionlint .github/workflows/*.yml`
-- `docker compose config` warnings — enforce via pattern matching for `warn|warning` in `validate-compose` job
-- File header checks — enforced via `bash scripts/tracked/check-file-headers.sh`
-- SPDX license identifier — enforced for files a PR changes via `bash scripts/tracked/check-pr-diff-file-headers.sh`
+- `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` of each changed crate, run by `ci.sh test-stack` in the `test` job
+- `shellcheck` and `actionlint` findings, run by `ci.sh check shellcheck` and `ci.sh check actionlint` in the `lint` job
+- every repository check in `ci.sh check all` (file headers, comment contract, compose config and the rest of the `CI_CHECKS` table) in the `checks` job
 
 **Known exception (tracked in issue #394):**
 GitHub's CodeQL Rust extractor emits `macro expansion failed` warnings for ordinary macros (`format!`, `assert_eq!`, `vec!`, `json!`, `tracing::*`, etc.) as a documented upstream limitation, not due to code defects in this repository. This exception is **scoped to CodeQL Rust macro-expansion extraction warnings only** and does not extend to `cargo clippy` warnings, which remain hard failures. Every instance of a CodeQL macro-expansion warning must stay tracked in #394, and #394 must be periodically reevaluated to monitor upstream status rather than being left as a permanent blanket excuse.
@@ -168,8 +164,9 @@ A **major change** is any pull request that adds a new feature, changes
 existing runtime/setup/update behavior, or fixes a bug in code that did not
 already have a regression test covering that behavior. A major change must
 add or update an automated test in the relevant test suite (Rust `#[test]`
-functions for `services/ui`/`services/dns/nats-subscriber`, a `.bats` fixture
-under `tests/bats/` for shell/setup logic, or a real end-to-end simulation
+functions for `services/ui`/`services/dns/nats-subscriber`, a test in
+`.github/scripts/ci.bats` for shell/setup logic only with a prior maintainer ACK
+documented on the PR (issue #1683 comment 6145242213), or a real end-to-end simulation
 script wired into a CI workflow for full-stack behavior) that exercises the
 new or changed behavior. A pull request that changes behavior with no
 corresponding test change should explain why in the PR body (for example,
@@ -191,9 +188,8 @@ Because of this limitation, **a green CodeQL Rust job must not be read as full s
 
 These are required, not stylistic suggestions — a PR missing them will fail CI or get flagged in review.
 
-- **File headers.** Every source/config file you add or touch (Rust, shell, YAML, Dockerfiles, `.conf`/template files, HTML/CSS/JS) must open with a short header: the project name and repo URL in the exact form `lancache-ng (https://github.com/wiki-mod/lancache-ng)`, followed by a purpose description of that specific file, using the comment syntax valid for that file's language (`//!` for Rust, `#` for shell/YAML/Dockerfiles, Tera's `{# ... #}` for HTML templates under `services/ui/src/templates/`, `/* ... */` for CSS, `//` for JS). `scripts/tracked/check-file-headers.sh` enforces this in CI (`file-headers` job in `build-push.yml`) — it fails a PR if any non-excluded tracked file is missing the exact header string. A short list of files are excluded (`.md` files, the root `.env`/`.env.example`, lockfiles, `.gitkeep`, the `VERSION` file, JSON-backed `.conf` files, vendored/generated build artifacts) — see `scripts/tracked/check-file-headers.sh`'s `is_excluded()` function for the exact list, and AGENTS.md's "File Headers" section for the full rationale (why each exclusion exists, how to scale header detail to a file's complexity, and what NOT to invent in a header).
-- **SPDX license identifier.** Every file in scope for the header above also carries a `SPDX-License-Identifier: AGPL-3.0-or-later` line, placed immediately after the shebang (if any) and before the `lancache-ng (...)` header line, in that file's own comment syntax. `scripts/tracked/check-pr-diff-file-headers.sh` enforces this in CI (same `file-headers` job) against every file a pull request actually changes; the repo-wide backfill for files a PR doesn't touch is tracked separately and not yet a hard failure. See AGENTS.md's Rule-Ref: AG-HDR-008.
-- **Code comments.** Comment only when the WHY would not be obvious from well-named identifiers and the surrounding code — not what the code does, which should be readable from the code itself. Do comment: complex logic, guards, fallbacks, security decisions, non-obvious side effects, a workaround for a specific bug, or a deliberate deviation from the obvious approach. A missing WHY-comment on code that clearly needs one is treated as a defect, whether or not it predates your change — if you're already touching that code, add the missing comment as part of your PR rather than leaving the gap. Do not reference the current task, PR number, or fix in a comment (e.g. "fixed for #123") — that belongs in the PR description, not in code that outlives the change. See AGENTS.md's "Comment Style" section for the full guidance, including how to document a deliberately deferred fix versus a straightforward WHY-comment.
+- **File headers.** Every file outside the exclusion list starts with the header that AGENTS.md `[AG-HDR-*]` defines: line 1 empty or the interpreter marker, then `LanCache-NG (https://github.com/wiki-mod/lancache-ng)` and `SPDX-License-Identifier: AGPL-3.0-or-later` in the file's own comment syntax. `ci.sh check comments` enforces it; the header text and the exclusion globs live in the SOT `.github/yaml/build-manifest.yml` (`file_headers`).
+- **Code comments.** Every comment block follows AGENTS.md `[AG-CODE-012]`: `What:` and `Why:` on one line each, at most 60 characters, and `From: Issue #N | PR #N` when a source is known. `ci.sh check comments` enforces it.
 
 ## Building from source
 
@@ -229,21 +225,13 @@ images.
 
 ### Building the full stack
 
-There is only one *production* deployment profile, `deploy/prod/docker-compose.yml` (the
-former `deploy/dev/` stack was retired in v0.3.0, #766 — see `AGENTS.md`'s `AG-KD-008`;
-**corrected 2026-08-05, issue #1391 doc-sweep audit** — a prior version of this section said
-"there is only one deployment profile" outright, then immediately named two more
-[`deploy/quickstart/`, `deploy/full-setup/`] as siblings in the very next sentence, and
-pointed at `CLAUDE.md`'s "No Separate Dev Environment" section, which no longer exists there
-— that content moved into `AGENTS.md`'s `## Architecture` section on 2026-07-31, per
-`CLAUDE.md`'s own current text). The profiles `deploy/prod/` and `deploy/full-setup/`
-reference every service by
-`image:` rather than `build:`, so there is no compose-level `--build` shortcut to rebuild every
-service from source in one command. This matches how CI itself builds first
--party images: `docker buildx build` directly against each
-`services/<name>/Dockerfile` (see `.github/workflows/build-push.yml`), then
-whatever compose file is in use pulls (or, if a matching tag already exists
-locally, simply reuses) the resulting image.
+There is one deployment profile, `deploy/prod/docker-compose.yml` (`AGENTS.md`
+`AG-KD-008`). It references every service by `image:` rather than `build:`, so
+there is no compose-level `--build` shortcut to rebuild every service from
+source in one command. This matches how CI builds first-party images:
+`ci.sh build` runs `docker buildx build` against each
+`services/<name>/Dockerfile`, then compose pulls (or, if a matching tag already
+exists locally, simply reuses) the resulting image.
 
 To exercise the full stack against local source changes, build and tag each
 service you changed the same way (see "Building a single service image"
@@ -277,7 +265,7 @@ argument explicitly instead of relying on that default).
 update safety" below) and does not build images from source. To run a
 locally-built image in a production-shaped deployment, build the image
 as shown above, tag it to match `LANCACHE_IMAGE_REGISTRY`/
-`LANCACHE_IMAGE_PREFIX`/`LANCACHE_IMAGE_TAG` in `deploy/prod/.env`, and
+`LANCACHE_IMAGE_PREFIX`/`LANCACHE_IMAGE_TAG` in `deploy/prod/.env.local`, and
 push it to a registry the deployment can pull from (or load it directly
 into the target Docker daemon) before running `setup.sh`/`docker compose
 up`.
@@ -344,7 +332,7 @@ For shell scripts, run the checks inside the build-tools container:
 ```bash
 BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
-  bash -lc 'set -euo pipefail; find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning'
+  bash -lc 'set -euo pipefail; find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --norc'
 ```
 
 For Compose changes, you can validate locally (this does not depend on build-tools):
@@ -369,15 +357,15 @@ docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS
   actionlint .github/workflows/*.yml
 ```
 
-Also run `scripts/tracked/check-action-node-versions.sh` (issue #801) if you changed or re-pinned any `uses:` action reference -- it scans every pinned action across all workflows and fails if any of them declares a deprecated Node runtime in its own `action.yml`/`action.yaml`:
+Also run the `action-node-versions` check (issue #801) if you changed or re-pinned any `uses:` action reference -- it scans every pinned action across all workflows and fails if any of them declares a deprecated Node runtime in its own `action.yml`/`action.yaml`:
 
 ```bash
-bash scripts/tracked/check-action-node-versions.sh
+bash .github/scripts/ci.sh check action-node-versions
 ```
 
 #### Optional: a local pre-push hook for this same check
 
-`.githooks/pre-push` runs `scripts/tracked/check-action-node-versions.sh` automatically before a push that touches any `.github/workflows/*.yml`/`*.yaml` file, so a deprecated-runtime pin surfaces before you push, not only after CI comes back red. This is an **optional, best-effort local convenience layer only** -- the build-push.yml `shellcheck` job is the actual, non-bypassable enforcement (it runs the same script inside the pinned build-tools container). The hook degrades cleanly (never blocks a push) if it can't run in your environment at all (e.g. no `curl` on `PATH`), but does block the push if it actually runs and finds a real deprecated-runtime pin -- bypass with `git push --no-verify` if needed, same as any other pre-push hook.
+`.githooks/pre-push` runs `ci.sh check action-node-versions` automatically before a push that touches any `.github/workflows/*.yml`/`*.yaml` file, so a deprecated-runtime pin (node20 and older) surfaces before you push, not only after CI comes back red. This is an **optional, best-effort local convenience layer only** -- the CI `validate` job runs the same check authoritatively. The hook degrades cleanly (never blocks a push) if it can't run in your environment at all (e.g. no `curl`, `yq` or `jq` on `PATH`), but does block the push if it actually runs and finds a real deprecated-runtime pin -- bypass with `git push --no-verify` if needed, same as any other pre-push hook.
 
 Enable it once per checkout:
 

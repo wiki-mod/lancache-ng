@@ -92,7 +92,7 @@ otherwise-anonymous depots — if so, real per-operator Steam credentials will
 likely be needed for anything beyond free-to-play test apps (see open
 decisions below).
 
-## HTTP vs HTTPS, and why this deploys via standard mode
+## HTTP vs HTTPS, and why this deploys via HTTP mode
 
 Steam depot/chunk/manifest downloads are served over **plain HTTP**
 (`http://<cdn-host>/depot/<depot-id>/chunk/<hash>` across Valve's own CDN
@@ -106,9 +106,9 @@ already work against real lancache/lancachenet deployments today, and
 lancachenet only caches HTTP.
 
 **Implication for this project**: prefill traffic lands in cache via
-**standard mode** (SNI-passthrough proxy path) — no CA cert trust needed on
+**HTTP mode** (SNI-passthrough proxy path) — no CA cert trust needed on
 whatever host runs the prefill tool, exactly like a real Steam client
-today. SSL mode would also work (it's a superset for HTTP) but standard
+today. HTTPS mode would also work (it's a superset for HTTP) but http
 mode is sufficient and simpler to require.
 
 **Wiring check, verified against this repo's actual code as of this
@@ -239,10 +239,10 @@ authors could resolve unilaterally.** Two honest framings were possible:
    project's decision to make at all: whether an operator's own
    lancache-ng instance persists a Steam credential across restarts, or
    never writes it to disk (re-entered every run), is that operator's own
-   choice, configurable per instance (`services/cachehamster`'s
-   `CACHEHAMSTER_CREDENTIAL_PERSISTENCE=none|persistent`). If an operator
-   chooses persistence, the credential is never stored in a
-   plaintext-readable form: `services/cachehamster/src/main.rs`
+   choice. An operator who stores it runs
+   `docker compose exec -T services lancache-cachehamster seal` with the
+   credential on stdin: no env file, env variable or argument ever holds it.
+   The credential is never stored in a plaintext-readable form: `services/cachehamster/src/main.rs`
    derives a symmetric key from a locally-generated master secret via
    Argon2id (already an established project dependency, issue #680 —
    reused here as a raw KDF rather than its one-way password-hash form)
@@ -250,8 +250,8 @@ authors could resolve unilaterally.** Two honest framings were possible:
    XChaCha20-Poly1305 (AEAD, random 192-bit nonce per encryption). At
    rest, only salt + nonce + ciphertext exist; the plaintext is
    recoverable only by the running process, for internal use, and is
-   never returned by any Admin-UI/API surface (mirrors how
-   `UI_AUTH_PASSWORD` is compared but never echoed back).
+   never returned by any Admin-UI/API surface (the Admin UI password is
+   likewise kept only as an Argon2id hash in `UI_AUTH_PASSWORD_HASH`).
 2. ~~**Which service houses the engine**~~ — resolved 2026-08-29: a new
    `services/cachehamster` service, not a `services/ui` module.
    Maintainer's stated reasoning: the service must be independently,
@@ -283,7 +283,7 @@ authors could resolve unilaterally.** Two honest framings were possible:
    needed for this in-process design). Use bounded concurrent fetches
    (multiple chunks in flight), not a single serial stream, to have any
    realistic chance of approaching multi-Gbit/s line rates. Verify
-   end-to-end against a running dev `docker compose` stack in **standard
+   end-to-end against a running dev `docker compose` stack in **http
    mode**: first request MISS through lancache, second identical request
    HIT — confirming the proxy (not the prefill tool) holds the cached
    bytes.
@@ -291,7 +291,7 @@ authors could resolve unilaterally.** Two honest framings were possible:
    configurable list of AppIDs to prefill.
 6. Package per decision 2.
 7. Document operator usage: point the prefill host's DNS at the
-   standard-mode IP, no CA cert install required, expected AppID config
+   http-mode IP, no CA cert install required, expected AppID config
    format. No DNS changes are needed for the `lancache.steamcontent.com`
    sentinel (see above).
 8. Future/stretch, not v0.3.0 scope: generalize the "data-plane

@@ -1,9 +1,8 @@
 
 {# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
-{#
-
-   Secondary DNS registration and management page in the shared DNS section. #}
+{# What: Secondary DNS registration and management page #}
+{# Why: second tab of the DNS section next to domains #}
 {% extends "base.html" %}
 {% block title %} – Secondary{% endblock %}
 
@@ -17,34 +16,21 @@
     </p>
   </div>
 
-  <div class="flex items-center gap-2 border-b border-slate-700">
-    <a href="/domains"
-       class="px-4 py-2 text-sm font-medium border-b-2 {% if active_page == "domains" %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">
-      DNS
-    </a>
-    <a href="/secondaries"
-       class="px-4 py-2 text-sm font-medium border-b-2 {% if active_page == "secondaries" %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">
-      Secondary
-    </a>
-  </div>
+  {{ <section_tabs main_href={pages.domains} main_label="DNS" main_page="domains" active_page={active_page} secondaries_href={pages.secondaries}/> }}
 
-  <!-- Registration Instructions Card -->
   <div class="card flex flex-col gap-4">
     <div>
       <h2 class="font-semibold text-slate-200">Neuen Secondary registrieren</h2>
-      <p class="text-xs text-slate-500 mt-0.5">Befehl auf dem Secondary-Host ausführen — ersetzt <code class="text-slate-300">myname</code> durch einen eindeutigen Namen. Der Installer bindet standardmäßig an die erkannte LAN-IP des Hosts; wenn Port 53 dort bereits belegt ist, zeigt er den belegenden Socket an und fragt nach einer alternativen <code class="text-slate-300">--listen-ip</code>.</p>
+      <p class="text-xs text-slate-500 mt-0.5">Befehl auf dem Secondary-Host ausführen — ersetzt <code class="text-slate-300">myname</code> durch einen eindeutigen Namen. Der Installer bindet standardmäßig an die erkannte LAN-IP des Hosts; wenn Port 53 dort bereits belegt ist, zeigt er den belegenden Socket an und fragt nach einer alternativen <code class="text-slate-300">--listen-ip</code>. Optional für HTTPS-DNS: <code class="text-slate-300">--ip-https</code> und <code class="text-slate-300">--listen-ip-https</code> zusammen angeben (zweite Bind-IP, derselbe Container).</p>
     </div>
 
     <div class="relative group">
-      <div id="install-cmd" class="bg-slate-900 rounded-lg p-4 font-mono text-xs text-slate-300 overflow-x-auto whitespace-pre select-all">bash &lt;(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh) secondary \
+      <div id="install-cmd" class="bg-slate-900 rounded-lg p-4 font-mono text-xs text-slate-300 overflow-x-auto whitespace-pre select-all">bash &lt;(curl -fsSL {{ setup_script_url }}) secondary \
   --primary {{ primary_url }} \
   --token {{ registration_token }} \
   --name myname \
-  --proxy-ip {{ primary_url | replace(from="http://", to="") | replace(from=":8080", to="") }}</div>
-      <button onclick="copyCmd(this)"
-              class="absolute top-2 right-2 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white transition-colors opacity-0 group-hover:opacity-100">
-        Kopieren
-      </button>
+  --ip-http {{ primary_ip }}</div>
+      {{ <copy_button target="install-cmd" extra_class="hover:text-white opacity-0 group-hover:opacity-100"/> }}
     </div>
 
     <p class="text-xs text-slate-500">
@@ -62,7 +48,6 @@
     </p>
   </div>
 
-  <!-- Existing Secondaries Card -->
   <div class="card flex flex-col gap-4">
     <div>
       <h2 class="font-semibold text-slate-200">Registrierte Secondaries</h2>
@@ -73,14 +58,14 @@
     <div class="overflow-x-auto">
       <table class="w-full text-sm">
         <thead>
-          <tr class="border-b border-slate-700">
-            <th class="text-left px-3 py-2 text-slate-300 font-semibold">Name</th>
-            <th class="text-left px-3 py-2 text-slate-300 font-semibold">Consumer</th>
-            <th class="text-left px-3 py-2 text-slate-300 font-semibold">Adresse</th>
-            <th class="text-left px-3 py-2 text-slate-300 font-semibold">DNS-Status</th>
-            <th class="text-left px-3 py-2 text-slate-300 font-semibold">Registriert</th>
-            <th class="text-left px-3 py-2 text-slate-300 font-semibold">Zuletzt gesehen</th>
-            <th class="text-right px-3 py-2 text-slate-300 font-semibold">Aktionen</th>
+          <tr>
+            <th class="th px-3">Name</th>
+            <th class="th px-3">Consumer</th>
+            <th class="th px-3">Adresse</th>
+            <th class="th px-3">DNS-Status</th>
+            <th class="th px-3">Registriert</th>
+            <th class="th px-3">Zuletzt gesehen</th>
+            <th class="th px-3">Aktionen</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-slate-700">
@@ -99,22 +84,22 @@
                       class="text-blue-400 hover:text-blue-300 ml-1 text-[11px]">Prüfen</button>
             </td>
             <td class="px-3 py-2 text-slate-400 text-xs">
-              <time class="js-epoch" data-epoch="{{ secondary.registered_at }}"></time>
+              <time data-epoch="{{ secondary.registered_at }}">{{ secondary.registered_at }}</time>
             </td>
             <td class="px-3 py-2 text-slate-400 text-xs">
               {% if secondary.last_seen %}
-                <time class="js-epoch" data-epoch="{{ secondary.last_seen }}"></time>
+                <time data-epoch="{{ secondary.last_seen }}">{{ secondary.last_seen }}</time>
               {% else %}
                 <span class="text-slate-500">Noch nicht erfasst</span>
               {% endif %}
             </td>
-            <td class="px-3 py-2 text-right space-x-2">
+            <td class="px-3 py-2 space-x-2">
               <button onclick="rotateToken('{{ secondary.name }}')"
-                      class="text-amber-400 hover:text-amber-300 text-xs px-2 py-1 rounded hover:bg-amber-500/10 transition-colors">
+                      class="btn btn-sm btn-ghost-amber">
                 Token rotieren
               </button>
               <button onclick="removeSecondary('{{ secondary.name }}')"
-                      class="text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/10 transition-colors">
+                      class="btn btn-sm btn-ghost-red">
                 Entfernen
               </button>
             </td>
@@ -133,67 +118,9 @@
 
 {% block scripts %}
 <script>
-  function formatEpochSeconds(epochSeconds) {
-    const date = new Date(Number(epochSeconds) * 1000);
-    if (Number.isNaN(date.getTime())) {
-      return null;
-    }
-
-    return new Intl.DateTimeFormat('de-DE', {
-      dateStyle: 'medium',
-      timeStyle: 'medium',
-      hour12: false,
-    }).format(date);
-  }
-
-  function formatEpochCells() {
-    document.querySelectorAll('.js-epoch').forEach((element) => {
-      const formatted = formatEpochSeconds(element.dataset.epoch);
-      if (formatted) {
-        element.textContent = formatted;
-      }
-    });
-  }
-
-  function copyCmd(btn) {
-    const el = document.getElementById('install-cmd');
-    const flash = () => {
-      btn.textContent = 'Kopiert!';
-      setTimeout(() => { btn.textContent = 'Kopieren'; }, 1500);
-    };
-    // navigator.clipboard exists only in a secure context (HTTPS or
-    // localhost). The Admin UI is commonly served over plain HTTP on a LAN
-    // IP, where navigator.clipboard is undefined and calling it throws --
-    // #1068 item 19's "Copy button non-functional". Fall back to selecting
-    // the command text and the legacy execCommand('copy') in that case, and
-    // pass the button element in explicitly (btn) rather than reading the
-    // global `event`, which is unreliable inside the async .then() callback.
-    if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(el.innerText).then(flash).catch(() => selectAndCopy(el, flash));
-    } else {
-      selectAndCopy(el, flash);
-    }
-  }
-
-  function selectAndCopy(el, onCopied) {
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
-    let ok = false;
-    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
-    if (ok) {
-      sel.removeAllRanges();
-      onCopied();
-    }
-    // On failure, deliberately leave the text selected so the operator can
-    // still copy it manually with Ctrl+C.
-  }
-
   async function rotateToken(name) {
     try {
-      const response = await fetch(`/api/secondary/${name}/rotate-token`, {
+      const response = await fetch('{{ routes.secondary_rotate | safe }}'.replace('{name}', name), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -221,7 +148,7 @@
     }
 
     try {
-      const response = await fetch(`/api/secondary/${name}`, {
+      const response = await fetch('{{ routes.secondary | safe }}'.replace('{name}', name), {
         method: 'DELETE',
         headers: {
           'X-CSRF-Token': '{{ csrf_token }}'
@@ -239,7 +166,9 @@
     }
   }
 
-  // #1084: map a health-probe status code to a German label + colour class.
+  // What: probe status code to German label and colour
+  // Why: renderHealth() shows one label per probe result
+  // From: Issue #1084
   const HEALTH_LABELS = {
     ok: ['OK (autoritativ)', 'text-green-400'],
     not_authoritative: ['Nicht autoritativ', 'text-amber-400'],
@@ -261,7 +190,7 @@
     const span = document.getElementById('health-' + name);
     if (span) { span.className = 'text-slate-400'; span.textContent = 'Prüfe…'; }
     try {
-      const response = await fetch(`/api/secondary/${name}/health`, {
+      const response = await fetch('{{ routes.secondary_health | safe }}'.replace('{name}', name), {
         method: 'POST',
         headers: { 'X-CSRF-Token': '{{ csrf_token }}' }
       });
@@ -280,7 +209,7 @@
     const input = prompt(`Adresse (private IPv4) für ${name}:`, current || '');
     if (input === null) return;
     try {
-      const response = await fetch(`/api/secondary/${name}/address`, {
+      const response = await fetch('{{ routes.secondary_address | safe }}'.replace('{name}', name), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': '{{ csrf_token }}' },
         body: JSON.stringify({ address: input.trim() })
@@ -297,11 +226,8 @@
     }
   }
 
-  formatEpochCells();
-
-  // Auto-run the health check for every listed secondary on page load, so the
-  // operator sees current status without clicking each row (matching the
-  // DHCP-Precheck tab's proactive-probe UX).
+  // What: runs the health check of every row on page load
+  // Why: status shows without a click per row
   document.querySelectorAll('[id^="health-"]').forEach((span) => {
     checkSecondaryHealth(span.id.slice('health-'.length));
   });

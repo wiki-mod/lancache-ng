@@ -147,8 +147,8 @@ DHCP page.
 |---|---|---|
 | `UPSTREAM_DHCP_IP` | IP of the existing DHCP server (usually your router/gateway) that keeps owning leases. **Documentation only** — see the note below; ProxyDHCP mode does not need to contact this server to function. | `10.0.0.1` |
 | `DHCP_SUBNET_START` | Network base address of the LAN dnsmasq serves. Must end in `.0`. | `10.0.0.0` |
-| `DHCP_DNS_PRIMARY` | Primary DNS server offered to proxy/PXE clients — normally the LanCache NG standard DNS IP. | `10.0.0.10` |
-| `DHCP_DNS_SECONDARY` | Secondary DNS server. Leave empty to reuse `DHCP_DNS_PRIMARY`. | `10.0.0.11` |
+| `DHCP_DNS_PRIMARY` | Primary DNS server offered to proxy/PXE clients — normally the LanCache NG DNS IP (`IP_HTTP`). | `10.0.0.10` |
+| `DHCP_DNS_SECONDARY` | Secondary DNS server. Leave empty to use `IP_HTTPS`. | `10.0.0.11` |
 
 > **A note on `UPSTREAM_DHCP_IP` (issue #450):** an earlier revision of
 > `services/dhcp-proxy/dnsmasq.conf.template` fed this value into dnsmasq's
@@ -223,11 +223,11 @@ this section or the "Optional (issue #450)" one above changes.
 > wiring three new form fields through `services/ui/src/main.rs`,
 > which is a separate, larger piece of work than the setup.sh side. Until
 > that lands, changing these three values after initial setup means editing
-> the runtime env `deploy/prod/.env.local` and restarting: the dhcp-proxy
+> the runtime env `deploy/prod/.env.local` and restarting: the dhcp
 > service in `deploy/prod/docker-compose.yml` wires each of these keys as
-> `environment: - KEY=${KEY:-}`, so the running container reads the value the
-> runtime env holds at `docker compose up` time. `deploy/prod/.env` is the
-> committed template and keeps every key with an empty default. A value an
+> `KEY: ${KEY:-}` in its `environment:` map, so the running container reads the value the
+> runtime env holds at `docker compose up` time. No `.env` is tracked;
+> an empty value falls back to the default in `runtime.defaults` of the SOT. A value an
 > older install set in `config/prod/dhcp-proxy.local.env` moves into the
 > runtime env on the next `setup.sh update`: it is copied during the update and
 > removed from the local file only after the update succeeded. The
@@ -365,7 +365,7 @@ None run on the host's real network interface by default:
 
 | Check | What it answers | Where it runs | Invasive? |
 |---|---|---|---|
-| **Conflict discovery** (`services/ui/src/main.rs`, `lancache-ui --dhcp-probe`) | Does *any* DHCP server answer on this LAN segment (a native broadcast DHCPDISCOVER, no external tool), and does a client dry-run (a real DISCOVER/OFFER/REQUEST/ACK exchange against the first offer) also succeed? Replaced the former `nmap --script broadcast-dhcp-discover` + `dhclient -1` invocations (issue #1288: both EOL/no longer packaged on current Alpine) with a from-scratch DHCPv4 client. | Admin UI DHCP page, on demand | The client dry-run leg never binds/applies the negotiated lease to any interface (only UDP socket bytes are read/written) and releases the lease (DHCPRELEASE) immediately after confirming it, rather than leaving it allocated for its full lease time as the former `dhclient -1` dry-run did. It does still run against the host's own network (bound to the well-known DHCP client port, broadcasting on the real LAN segment). |
+| **Conflict discovery** (`services/watchdog/src/main.rs`, the `dhcp-probe` process of the `dhcp` container; the Admin UI asks for a run through `DHCP_PROBE_REQUEST_FILE`) | Does *any* DHCP server answer on this LAN segment (a native broadcast DHCPDISCOVER, no external tool), and does a client dry-run (a real DISCOVER/OFFER/REQUEST/ACK exchange against the first offer) also succeed? Replaced the former `nmap --script broadcast-dhcp-discover` + `dhclient -1` invocations (issue #1288: both EOL/no longer packaged on current Alpine) with a from-scratch DHCPv4 client. | Admin UI DHCP page, on demand | The client dry-run leg never binds/applies the negotiated lease to any interface (only UDP socket bytes are read/written) and releases the lease (DHCPRELEASE) immediately after confirming it, rather than leaving it allocated for its full lease time as the former `dhclient -1` dry-run did. It does still run against the host's own network (bound to the well-known DHCP client port, broadcasting on the real LAN segment). |
 | **Kea lease-flow simulation** (`scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh`) | Does *our own* Kea service complete a real Discover/Offer/Request/Ack and return the address range, router, DNS, NTP, lease-time, and domain-name options actually configured? Also: does a static host reservation, added directly through Kea's Control Agent API, actually get honored by a subsequent real lease request for the reserved MAC, and does it stay isolated to that MAC (a different, unrelated MAC still gets an ordinary pool address)? And does a granted lease produce a matching PowerDNS **forward (A record)** AND **reverse (PTR record)** DDNS update? | `dhcp-kea-lease-flow-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway Kea container, a throwaway PowerDNS container, and throwaway client containers, all on a dedicated Docker bridge network the script creates and destroys itself. No container's interface, nor any host interface, is ever configured with the negotiated lease. |
 | **Kea Control Agent mutation round-trip** (`scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh`) | Does a real static host reservation added/removed through the actual Admin UI HTTP route (`kea_config_modify()`'s config-get/config-test/config-set/config-write sequence) against a real Kea Control Agent actually change what a *subsequent* real DHCP lease request receives -- not just that the API call returned success? | `dhcp-kea-ctrl-agent-mutation-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- real Kea and Admin UI containers on the throwaway compose project's own bridge network; DHCP clients again use `dhclient -sf /bin/true`, never applying the negotiated lease to any interface. |
 | **dnsmasq-proxy PXE simulation** (`scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh`) | Does *our own* dnsmasq-proxy ProxyDHCP mode reply to a real, synthetically-crafted PXE-tagged DHCPDISCOVER with the correct external boot server address, architecture-appropriate boot filename, and LanCache NG DNS servers -- for both legacy BIOS and UEFI clients -- while still ignoring an ordinary, non-PXE-tagged DISCOVER? | `dhcp-proxy-pxe-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway dnsmasq-proxy container and a throwaway synthetic-PXE-client container (the Rust `tools/pxe-client-probe` binary, compiled with the build-tools image), both on a dedicated Docker bridge network the script creates and destroys itself. No host interface is ever involved, and the external PXE boot server it asserts against is never a real listening service -- just a configured address, per issue #705's scope of pointing at operator infrastructure this project does not itself run. |
@@ -399,9 +399,9 @@ every asserted value explicitly (to the job log and, in CI,
 **What the Kea lease-flow simulation does NOT verify** (documented here per
 its own design -- see the script's header comment for the full rationale):
 
-- Native PowerDNS AXFR/NOTIFY convergence from `dns-standard` to `dns-ssl`
-  or remote DNS secondaries. The simulation proves Kea's D2 daemon sends
-  TSIG-signed DDNS updates to the single intended writer (`dns-standard`);
+- Native PowerDNS AXFR/NOTIFY convergence from `dns` to remote DNS
+  secondaries. The simulation proves Kea's D2 daemon sends
+  TSIG-signed DDNS updates to the single intended writer (`dns`);
   #1164's replication path is a separate PowerDNS primary/secondary concern
   and needs its own live transfer/convergence proof.
 - The `dnsmasq-proxy` DHCP mode -- entirely different code path

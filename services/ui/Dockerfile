@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 # What: Admin UI Rust binary plus Tera templates, Alpine.
-# Why: the binary reads its templates from /templates.
+# Why: the binary reads its templates from TEMPLATE_DIR.
 
 # What: base image pin, supplied by ci.sh from the SOT.
 # Why: SOT base_images.alpine is the sole owner (AG-CI-006).
@@ -26,7 +26,7 @@ ARG MUSL_TARGET
 # What: workspace crate, supplied by ci.sh from the SOT.
 # Why: the SOT owns the crate; rust-build receives it.
 # From: Issue #1683 | PR #1858
-ARG RUST_CRATE
+ARG RUST_CRATES
 
 # What: cargo tuning args, consumed by ci.sh rust-build.
 # Why: PROJECT_CARGO_*/CARGO_BUILD_JOBS own these.
@@ -38,10 +38,15 @@ ARG PROJECT_CARGO_CODEGENUNIT=
 # Why: ci.sh rust-build folds it into the ccache key.
 # From: Issue #1683
 ARG BUILD_TOOLS_IMAGE
-# What: compiler VAR=driver pairs, supplied by ci.sh.
+# What: compiler pairs and cache key prefix, from ci.sh.
 # Why: the builder has no SOT; rust-build reads the env.
-# From: Issue #1683 | PR #1858
+# From: Issue #1683 | PR #1912
 ARG CI_TOOLCHAIN_COMPILERS
+ARG CI_CACHE_PREFIX
+# What: cargo home, root of the cargo cache mounts.
+# Why: §39 registry and git caches; the SOT owns it.
+# From: Issue #1683 | PR #1912
+ARG CI_CARGO_HOME
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -69,7 +74,9 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
-    bash /usr/local/bin/ci.sh rust-build ui "${RUST_CRATE}" deps
+    --mount=type=cache,target=${CI_CARGO_HOME}/registry,sharing=locked \
+    --mount=type=cache,target=${CI_CARGO_HOME}/git,sharing=locked \
+    bash /usr/local/bin/ci.sh rust-build ui "${RUST_CRATES}" deps
 COPY services/ui/src ./services/ui/src
 # What: ci.sh owns the rust build accel policy (one owner).
 # Why: AG-CI-005/022/023; bind-mounted, never baked in.
@@ -82,14 +89,14 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
-    bash /usr/local/bin/ci.sh rust-build ui "${RUST_CRATE}"
+    --mount=type=cache,target=${CI_CARGO_HOME}/registry,sharing=locked \
+    --mount=type=cache,target=${CI_CARGO_HOME}/git,sharing=locked \
+    bash /usr/local/bin/ci.sh rust-build ui "${RUST_CRATES}"
 
 # What: scratch only when ci.sh passed no image arg.
 # Why: no baked image; a missing arg fails the build.
 # From: Issue #1683 | PR #1858
 FROM ${ALPINE_IMAGE:-scratch}
-
-LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
 
 # What: build identity keys the cache of later layers.
 # Why: a new package set must not reuse a stale apk layer.
@@ -99,10 +106,11 @@ ARG BUILD_IDENTITY
 # Why: the SOT owns the list; this stage only consumes it.
 # From: Issue #1683
 ARG APK_PACKAGES
-# What: Install bash before SHELL directive
-# Why: AG-REL-001 forbids ash; RUN needs bash
-# From: Issue #1683
-RUN apk add --no-cache bash
+# What: bootstrap apk list, supplied from the SOT.
+# Why: AG-REL-001 forbids ash; ci.sh apk-setup needs bash.
+# From: Issue #1683 | PR #1912
+ARG APK_BOOTSTRAP
+RUN apk add --no-cache ${APK_BOOTSTRAP}
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # What: retry policy for ci.sh, from SOT stage_variables
 # Why: this stage has no SOT; ci.sh reads them from env
@@ -116,34 +124,36 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
+# What: accounts and dirs of this image, from the SOT.
+# Why: ci.sh creates them; the Dockerfile names none.
+# From: Issue #1683 | PR #1912
+ARG IMAGE_SETUP
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    bash /usr/local/bin/ci.sh image-setup
+
 COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
-COPY services/ui/src/templates /templates
+# What: the templates dir, from the SOT.
+# Why: the COPY fills it; the binary reads the same value.
+# From: Issue #1683 | PR #1912
+ARG TEMPLATE_DIR
+COPY services/ui/src/templates ${TEMPLATE_DIR}
 
-# What: the ui's file layout, handed over as environment.
-# Why: this image creates these paths; Rust keeps no copy.
-# From: Issue #1683
-ENV TEMPLATE_DIR=/templates \
-    CDN_DOMAINS_FILE=/data/cdn-domains.txt \
-    UI_SETTINGS_FILE=/data/lancache-ui-settings.env \
-    NETDATA_ALARMS_FILE=/data/netdata-alarms.json \
-    NATS_ISSUER_SEED_PATH=/data/lancache-nats-issuer.seed \
-    NATS_XKEY_SEED_PATH=/data/lancache-nats-xkey.seed \
-    NATS_CONF_PATH=/etc/nats/nats.conf \
-    UI_DATABASE_FILE=/data/lancache-ui.db \
-    UI_LOG_FILE=/var/log/lancache-ui/ui.log \
-    UI_LISTEN_PORT=8080
-
-# What: one ui runtime uid/gid for user and binary.
+# What: one runtime uid/gid for the user and the binary.
 # Why: nginx logs share it; the root start drops to it.
-# From: Issue #1427 | PR #1858
-ARG UI_RUNTIME_ID=10001
-ENV UI_RUNTIME_UID=${UI_RUNTIME_ID} \
-    UI_RUNTIME_GID=${UI_RUNTIME_ID}
-RUN addgroup -g "${UI_RUNTIME_ID}" lancache \
-    && adduser -D -H -u "${UI_RUNTIME_ID}" -G lancache -s /sbin/nologin lancache \
-    && mkdir -p /data /etc/nats \
-    && chown -R lancache:lancache /data /etc/nats
+# From: Issue #1427 | PR #1912
+ARG LANCACHE_RUNTIME_GID
+ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID}
 
+# What: the SOT default values, one pipe-joined list.
+# Why: ci.sh passes the list; binaries read it as env.
+# From: Issue #1683 | PR #1912
+ARG LANCACHE_RUNTIME_DEFAULTS
+ENV LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS}
+
+# What: the UI listen port, from the SOT.
+# Why: the validate step needs one exposed TCP port.
+# From: Issue #1683 | PR #1912
+ARG UI_LISTEN_PORT
 EXPOSE ${UI_LISTEN_PORT}
 
 # What: the binary, via PATH; it does the root start itself.

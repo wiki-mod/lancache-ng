@@ -53,7 +53,7 @@ the top is a signal that its threats need re-checking.
    poisoned entry is served to every subsequent client.
 2. **WAN bandwidth / download speed** — the reason the appliance exists; a
    bypass or DoS that defeats caching degrades the service.
-3. **Client trust in the local CA (SSL mode only)** — the CA private key can mint
+3. **Client trust in the local CA (HTTPS mode only)** — the CA private key can mint
    certificates every client trusts. Its compromise is the highest-impact event
    in the whole system.
 4. **Control-plane integrity** — the Admin UI, PowerDNS API, Kea Control Agent
@@ -62,7 +62,7 @@ the top is a signal that its threats need re-checking.
 5. **Deployment confidentiality** — the appliance must not be reachable from
    untrusted networks.
 
-Note on **client privacy**: in SSL mode the proxy decrypts client HTTPS
+Note on **client privacy**: in HTTPS mode the proxy decrypts client HTTPS
 downloads by design. This is an intentional capability, not an asset the system
 protects *from the operator*. It is called out again in "Out of scope".
 
@@ -85,16 +85,16 @@ protects *from the operator*. It is called out again in "Out of scope".
 │  ┌──────────────── lancache-ng appliance (single Docker host) ──────┐ │
 │  │  DATA PLANE                          CONTROL PLANE                │ │
 │  │   - proxy (nginx): HTTP cache,        - Admin UI (auth-gated)     │ │
-│  │     SSL-mode MITM cache, standard-     - PowerDNS HTTP API        │ │
+│  │     HTTPS-mode MITM cache, HTTP-       - PowerDNS HTTP API        │ │
 │  │     mode SNI passthrough              - Kea Control Agent API     │ │
 │  │   - DNS (PowerDNS auth + recursor)      (port 8000, host-net)     │ │
 │  │   - DHCP (Kea) OR dnsmasq-proxy       - NATS event bus (4222)     │ │
 │  │                                       - docker-socket-proxy       │ │
-│  │  Local CA key (SSL mode) lives on       (HAProxy allowlist) ──────┼─┼─► Docker
-│  │  host: <install>/certs/ca.key                                    │ │   daemon
+│  │  Local CA key (HTTPS mode) lives on     (HAProxy allowlist) ──────┼─┼─► Docker
+│  │  host: <CA_DIR>/ca.key                                           │ │   daemon
 │  └──────────────────────────────────────────────────────────────────┘ │
 │                                                                        │
-│  LAN clients: PCs, Steam Deck, phones (install CA for SSL mode)        │
+│  LAN clients: PCs, Steam Deck, phones (install CA for HTTPS mode)      │
 │  Consoles (PS5/Xbox/Switch): cannot install CA → excluded from spoof   │
 │    list → use appliance purely as an unrestricted DNS resolver         │
 └────────────────────────────────────────────────────────────────────────┘
@@ -124,19 +124,20 @@ architecture content as of 2026-07-31 — that content moved into `AGENTS.md`).
   at the proxy IP via A/AAAA records. Everything *not* listed is resolved
   normally by the recursor against real upstream DNS.
 - **Two proxy modes** (one nginx container, selected by which DNS IP the client
-  uses): **standard mode** reads SNI via `ssl_preread` and forwards HTTPS blind
-  to the real CDN (no CA needed); **SSL mode** terminates TLS using a per-domain
+  uses): **HTTP mode** reads SNI via `ssl_preread` and forwards HTTPS blind
+  to the real CDN (no CA needed); **HTTPS mode** terminates TLS using a per-domain
   wildcard cert signed by the local CA, caches, then re-fetches from the origin
   over verified TLS.
-- **Local CA (SSL mode)** — generated on first start (RSA-4096, 10-year) into
-  `<install>/certs/`. `ca.key` is the crown jewel and is gitignored; `ca.crt` is
+- **Local CA (HTTPS mode)** — generated on first start (RSA-4096, 10-year) into
+  the CA state directory (`CA_DIR`). `ca.key` is the crown jewel and stays
+  outside the checkout; `ca.crt` is
   a public certificate distributed to clients.
 - **Proxy request policy** — `PROXY_SECURITY_MODE` (`lazy` default / `strict`)
   controls whether only listed CDN hosts may be proxied; `PROXY_ALLOWED_CLIENT_CIDRS`
   optionally restricts which client source networks the proxy answers at all.
   For HTTP/HTTPS traffic this is an `http{}`/`https{}` control (returns 403
-  otherwise). The standard-mode `stream{}` SNI-passthrough listener (`:8443`)
-  and the SSL-mode stream-level SNI dispatcher (`:443`) enforce
+  otherwise). The http-mode `stream{}` SNI-passthrough listener (`:8443`)
+  and the HTTPS-mode stream-level SNI dispatcher (`:443`) enforce
   `PROXY_SECURITY_MODE=strict`'s domain allowlist differently (an unlisted
   SNI is routed to a closed `127.0.0.1:9`, not a 403), and enforce
   `PROXY_ALLOWED_CLIENT_CIDRS` separately via `ngx_stream_access_module`
@@ -197,13 +198,13 @@ proxy into caching attacker-controlled content under a legitimate key.
   vendored Public Suffix List — see `services/proxy/entrypoint.sh`),
   removing the "proxy anything" behaviour of the default `lazy` mode. This
   enforcement applies to the `http{}`/`https{}` `location /` blocks (HTTP
-  403 response); the standard-mode `stream{}` SNI-passthrough listener
+  403 response); the http-mode `stream{}` SNI-passthrough listener
   enforces the same domain list differently — an unlisted SNI is routed to
   a closed `127.0.0.1:9`, not a 403.
 - `PROXY_ALLOWED_CLIENT_CIDRS` optionally restricts which client networks the
   proxy will answer at all for HTTP/HTTPS traffic (`$lancache_client_allowed`
   → 403 in `conf.d/http.conf`/`https.conf`). The externally-facing stream-level
-  SNI-passthrough listeners (`:8443` standard mode, `:443` SSL-mode dispatch)
+  SNI-passthrough listeners (`:8443` HTTP mode, `:443` HTTPS-mode dispatch)
   enforce the same CIDR list independently, via `ngx_stream_access_module`
   `allow`/`deny` directives generated into
   `stream.d/access.d/00-stream-client-acl.conf` (a TCP-level accept/reject
@@ -228,7 +229,8 @@ untrusted network · **Impact**: High
 
 **Mitigations** (verified in `services/ui/src/main.rs` / `config.rs`):
 - **Authentication is fail-closed by default.** `resolve_admin_ui_auth_mode`
-  requires *both* `UI_AUTH_USER` and `UI_AUTH_PASSWORD`. If both are unset the UI
+  requires *both* `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH` (an Argon2id hash;
+  the password itself is never stored). If both are unset the UI
   **refuses to start** unless the operator has *explicitly* set
   `ALLOW_INSECURE_UI=true`. A partial config (only one of the two) is a hard
   startup error. There is no silent unauthenticated default.
@@ -256,7 +258,7 @@ untrusted network · **Impact**: High
 **Residual risk**: Low, and entirely operator-controlled: it exists only if the
 operator sets `ALLOW_INSECURE_UI=true` *and* exposes the UI beyond the trusted
 LAN. `deploy/prod` binds the UI to `UI_BIND_IP`, which defaults to
-`IP_STANDARD`; `UI_BIND_IP=127.0.0.1` restricts it further. Separately, `POST
+`IP_HTTP`; `UI_BIND_IP=127.0.0.1` restricts it further. Separately, `POST
 /api/netdata-alarms`'s token check is scoped to *this* endpoint only — it does
 not change finding #20's underlying fact that Netdata's own API (port 19999,
 reachable from containers on the `netdata-net` bridge and from every service
@@ -282,7 +284,7 @@ appliance spoofs.
   arbitrary clients.
 - **Zone/record rollback listener (issue #628, added since v0.2.0)**:
   `services/dns/nats-subscriber/src/main.rs` exposes a local HTTP
-  API (`DNS_ROLLBACK_LISTEN_ADDR`, default `0.0.0.0:8083`) the Admin UI calls to
+  API (`DNS_ROLLBACK_LISTEN_ADDR`, port `DNS_ROLLBACK_PORT` in `runtime.defaults`, 8083) the Admin UI calls to
   list known-good zone/record snapshots and trigger an operator-selected
   rollback — another path, besides NATS and the PowerDNS API, that can mutate
   live DNS record data. It is not published to the host/LAN (`deploy/*/
@@ -330,42 +332,22 @@ record changes, or subscribes to read cache/DNS metadata.
 - Access is **credentialled and role-scoped**, not a single shared account.
   Four static identities exist with least-privilege permissions:
   - **UI writer** — may only `publish` `lancache.dns.record` / `lancache.dns.flush`.
-  - **DNS writer** (standard node / reconciler) — publish DNS records,
-    `lancache.dns.flush` (the same post-rollback cache-flush signal as the
-    DNS replica, above), and the specific JetStream stream/consumer subjects
-    it needs; subscribe to `lancache.dns.>`.
-  - **DNS replica** (the primary's own co-located dns-ssl container only —
-    there is always exactly one) — consume-only JetStream permissions, plus
-    three narrow exceptions on top: `publish` on `lancache.dns.flush`, so its
-    own `nats-subscriber` can signal a post-rollback recursor cache-flush;
-    (issue #906, a deliberate widening beyond the original least-
-    privilege scope) `publish` on `lancache.dns.record`, so the same
-    `main.rs`'s `publish_patch` can republish
-    restored `lan.` records if `DNS_ROLLBACK_URL` is ever pointed at
-    dns-ssl instead of its default `dns-standard:8083` (not the case in any
-    shipped deployment today, but the identity's permissions must hold
-    regardless of which URL an operator configures); and (the earlier NATS
-    audit's Finding D) `publish` on `$JS.API.STREAM.CREATE.LANCACHE_DNS`,
-    so this identity's own `nats-subscriber` process can create the
-    `LANCACHE_DNS` stream itself if it is ever the first of the two
-    `nats-subscriber` processes (writer or replica) to connect after a cold
-    start — without it, that race silently denied the replica's
-    `create_stream` fallback and crash-looped the container until the
-    writer's own stream creation eventually succeeded (self-healing, but a
-    real, reproducible, previously-untested window). **Accepted tradeoff**:
-    unlike the narrower flush-only grant this replaces, a compromised
-    dns-ssl NATS credential can now forge or replicate `lan.` DNS record
-    changes too, not merely trigger a cache-flush signal, and can also
-    administratively create the shared `LANCACHE_DNS` stream — this was a
-    conscious maintainer decision (widen the permission) over the
-    alternative of making the rollback listener itself fail closed when it
-    lacks this permission, made explicitly to keep the rollback path
-    working correctly regardless of which DNS node runs it, rather than
-    depending on `DNS_ROLLBACK_URL`'s default never changing. The
-    stream-create grant carries no equivalent alternative: gating
-    `nats-subscriber`'s own startup on which of the two nodes boots first
-    would reintroduce the same ordering dependency this permission exists
-    to remove.
+  - **DNS writer** (the one `dns` container) — publish DNS records and
+    `lancache.dns.flush` (the post-rollback recursor cache-flush signal),
+    and the specific JetStream stream/consumer subjects it needs;
+    subscribe to `lancache.dns.>`. Two of these grants are deliberate
+    widenings beyond the original least-privilege scope: `publish` on
+    `lancache.dns.record` (issue #906), so `main.rs`'s `publish_patch` can
+    republish restored `lan.` records, and `publish` on
+    `$JS.API.STREAM.CREATE.LANCACHE_DNS`, so its own `nats-subscriber` can
+    create the `LANCACHE_DNS` stream on a cold start. **Accepted
+    tradeoff**: a compromised dns NATS credential can forge or replicate
+    `lan.` DNS record changes, not merely trigger a cache-flush signal, and
+    can administratively create the shared `LANCACHE_DNS` stream. This was a
+    conscious maintainer decision (widen the permission) over making the
+    rollback listener fail closed when it lacks the permission. The earlier
+    separate replica identity is gone: one `dns` container needs one
+    identity.
   - **Auth-callout responder** (the Admin UI itself) — no subject permissions
     of its own; only recognized by name so its own connection to answer
     `$SYS.REQ.USER.AUTH` doesn't recursively trigger the callout it exists to
@@ -495,16 +477,16 @@ trade-off.
 
 ---
 
-### T7: TLS impersonation of the proxy (SSL mode)
+### T7: TLS impersonation of the proxy (HTTPS mode)
 
 **Threat**: An on-path LAN attacker impersonates the cache to a client.
 
 **Likelihood**: Low · **Impact**: High
 
 **Mitigations**:
-- SSL-mode clients validate the proxy certificate against the locally-installed
+- HTTPS-mode clients validate the proxy certificate against the locally-installed
   CA; an impostor without the CA key cannot present a trusted cert.
-- Standard mode performs no local TLS termination (SNI passthrough), so this
+- HTTP mode performs no local TLS termination (SNI passthrough), so this
   vector does not apply there.
 
 **Residual risk**: Low — bounded by client trust of the CA and by the CA key
@@ -541,8 +523,8 @@ or saturating the proxy.
   pressure.
 - `PROXY_ALLOWED_CLIENT_CIDRS` can restrict which clients may drive the proxy
   over HTTP/HTTPS, and is now also enforced (via a separate `ngx_stream_
-  access_module` check) for the standard-mode `stream{}` SNI-passthrough
-  listener (`:8443`) and the SSL-mode stream-level SNI dispatcher (`:443`),
+  access_module` check) for the http-mode `stream{}` SNI-passthrough
+  listener (`:8443`) and the HTTPS-mode stream-level SNI dispatcher (`:443`),
   so a flood over either stream-level listener is rejected at the TCP level
   before it can reach any relay or backend (see T2).
 - Disk-usage warnings/alarms via the watchdog: since issue #870, the
@@ -573,16 +555,16 @@ direct Netdata access.
 
 ---
 
-### T10: Client connects to SSL mode without the CA (expected failure)
+### T10: Client connects to HTTPS mode without the CA (expected failure)
 
-**Threat**: A client uses SSL mode without installing the CA and downloads fail.
+**Threat**: A client uses HTTPS mode without installing the CA and downloads fail.
 
 **Likelihood**: High (user error) · **Impact**: Low (fails safe, no compromise)
 
 **Mitigations**:
 - Clear per-OS install docs (`docs/install-ca-cert.md`) and, in future, an
   easier distribution path (see that doc's distribution section).
-- Standard mode is the CA-free alternative.
+- HTTP mode is the CA-free alternative.
 - Devices that *cannot* install a CA (consoles) are intentionally excluded from
   the spoof list, so they never hit this failure — see T4 and the console note in
   `docs/install-ca-cert.md`.
@@ -593,15 +575,15 @@ direct Netdata access.
 
 ### T11: Console breakage from over-broad DNS spoofing
 
-**Threat**: This threat is specific to **ssl-mode DNS** (the mode that performs
+**Threat**: This threat is specific to **https-mode DNS** (the mode that performs
 TLS interception). If console CDN domains were added to the spoof list *and* the
-console were pointed at ssl-mode DNS, the console (which cannot trust the local
+console were pointed at https-mode DNS, the console (which cannot trust the local
 CA) would fail the TLS handshake to the proxy — and because the appliance's DNS
 would keep returning the proxy IP on every retry, the console could not fall back
 to the real CDN. The failure is immediate and obvious (the console cannot reach
 that CDN at all), not a silent degradation.
 
-Pointed at **standard-mode DNS** instead, the same spoofed domain is harmless for
+Pointed at **http-mode DNS** instead, the same spoofed domain is harmless for
 HTTPS: the unified `services/proxy`'s `ssl_preread`-based SNI passthrough
 (`stream{}` block, `:8443` — `services/proxy-standard` was retired and merged
 into this single service in the v0.2.0 refactor) forwards the TLS connection
@@ -611,8 +593,8 @@ that domain would be cached — the default, low-impact behavior this appliance 
 built around, with no other restriction on the console.
 
 **Likelihood**: Low (requires the operator to add console domains) · **Impact**:
-Medium on ssl-mode DNS (console downloads for that CDN break, though the cause is
-immediately obvious); negligible on standard-mode DNS (HTTPS passes through
+Medium on https-mode DNS (console downloads for that CDN break, though the cause is
+immediately obvious); negligible on http-mode DNS (HTTPS passes through
 unaffected, only HTTP gets cached).
 
 **Mitigations**:
@@ -620,11 +602,12 @@ unaffected, only HTTP gets cached).
   from `cdn-domains.txt`, with an in-file explanation. Consoles keep using the
   appliance as an ordinary, unrestricted DNS resolver; their CDN names resolve to
   the real internet and work normally (no caching benefit, no breakage).
-- The file documents how to *opt in* to Xbox-PC (Game Pass) caching only on a LAN
-  known to have no consoles.
+- `docs/install-ca-cert.md` (named in the in-file explanation) lists the
+  hosts to *opt in* to Xbox-PC (Game Pass) or Nintendo caching only on a LAN
+  known to have no such consoles.
 
 **Residual risk**: Low — safe by default; only an explicit operator opt-in, and
-even then only ssl-mode DNS carries real breakage risk. Opting into Xbox-PC
+even then only https-mode DNS carries real breakage risk. Opting into Xbox-PC
 (Game Pass) caching on a LAN that still has consoles present re-introduces
 the risk for that specific CDN.
 
@@ -755,7 +738,7 @@ The following are **not** addressed by lancache-ng:
    breaks the core assumption.
 2. **Inter-client isolation / multi-tenancy.** Any LAN client can receive any
    cached content. There is no per-user separation.
-3. **Operator-side privacy in SSL mode.** SSL mode decrypts client HTTPS by
+3. **Operator-side privacy in HTTPS mode.** HTTPS mode decrypts client HTTPS by
    design; the operator can see decrypted download traffic. This is the point of
    the feature, not a defect.
 4. **Encrypted-response replay across clients.** Content cached under a shared
@@ -774,7 +757,7 @@ The following are **not** addressed by lancache-ng:
 ### Low risk
 - Private, firewalled LAN; control-plane ports unreachable from untrusted
   segments.
-- Admin UI authenticated (`UI_AUTH_USER`/`UI_AUTH_PASSWORD` set — the default
+- Admin UI authenticated (`UI_AUTH_USER`/`UI_AUTH_PASSWORD_HASH` set — the default
   posture) or bound to `127.0.0.1`.
 - NATS unpublished (default) or its optional secondary binding firewalled.
 - Kea Control Agent reachable only on Docker-internal ranges (default).
@@ -848,7 +831,7 @@ tagging each release, then update the top marker and the
 ## Conclusion
 
 lancache-ng is designed for **trusted, isolated LAN environments only**. It
-deliberately trades some guarantees (it MITMs client HTTPS in SSL mode; it trusts
+deliberately trades some guarantees (it MITMs client HTTPS in HTTPS mode; it trusts
 every LAN device) for caching performance, while keeping the *control plane*
 fail-closed: the Admin UI, NATS credentials, the PowerDNS API key, the Kea Control Agent,
 DDNS updates, and secondary registration all refuse to start in an
@@ -863,7 +846,7 @@ The operator remains responsible for:
 2. Leaving auth enabled (never `ALLOW_INSECURE_UI=true` on anything reachable).
 3. Choosing `strict` proxy mode and client CIDR limits when the LAN is not fully
    trusted.
-4. Protecting the local CA private key (`<install>/certs/ca.key`) in SSL mode.
+4. Protecting the local CA private key (`<CA_DIR>/ca.key`) in HTTPS mode.
 5. Monitoring disk and activity, and keeping images updated.
 
 For security concerns, use the project's private security reporting channel

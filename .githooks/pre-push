@@ -1,101 +1,104 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# Optional local pre-push hook (issue #801): runs
-# scripts/tracked/check-action-node-versions.sh before a push that touches any
-# .github/workflows/*.yml (or *.yaml) file, so a pinned action declaring a
-# deprecated Node runtime surfaces to the person pushing before CI does, not
-# only after a run comes back red.
-#
-# This is an ADDITIONAL, OPTIONAL local convenience layer, not the actual
-# enforcement -- the real, non-bypassable gate is the "Check pinned GitHub
-# Actions for deprecated Node runtimes (#801)" step wired into
-# build-push.yml's shellcheck job, which runs the exact
-# same script inside the pinned build-tools container (per AG-VAL-016). This
-# hook deliberately calls the script with whatever curl/bash happen to be on
-# the local machine instead of the containerized toolchain: it is an opt-in
-# nicety, not required for correctness, and a lot of this project's actual
-# contributors are AI agents working in freshly created worktrees with no
-# persistent `core.hooksPath` configured at all -- for that audience,
-# reusing the same logic locally is more valuable than perfectly matching
-# CI's environment.
-#
-# Enable it once per checkout with:
-#   git config core.hooksPath .githooks
-#
-# Degrades cleanly -- never blocking the push -- when the hook simply cannot
-# run in the current environment (repo root not discoverable, no bash/curl
-# on PATH, etc.), printing a clear message either way. It DOES block the
-# push (non-zero exit) when the check actually runs and finds a real
-# deprecated-runtime pin, since catching that before push is this hook's
-# entire reason to exist; that can be bypassed the normal git way
-# (`git push --no-verify`) same as any other pre-push hook, and CI still
-# enforces it either way.
+
+# What: runs the node-version check on workflow changes
+# Why: optional early warning; CI runs the same check
+# From: Issue #801 | PR #1912
 set -uo pipefail
 
 remote_name="${1:-origin}"
+remote_url="${2:-}"
 
-repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
-  echo "pre-push (check-action-node-versions): could not determine repo root; skipping this local check (not blocking push)." >&2
+repo_root=$(git rev-parse --show-toplevel 2>&1) || {
+  echo "pre-push (action-node-versions): could not determine repo root ($repo_root); skipping this local check (not blocking push)." >&2
   exit 0
 }
 
-script="$repo_root/scripts/tracked/check-action-node-versions.sh"
+script="$repo_root/.github/scripts/ci.sh"
 if [ ! -f "$script" ]; then
-  echo "pre-push (check-action-node-versions): $script not found; skipping this local check (not blocking push)." >&2
+  echo "pre-push (action-node-versions): $script not found; skipping this local check (not blocking push)." >&2
   exit 0
 fi
 
-if ! command -v curl >/dev/null 2>&1; then
-  echo "pre-push (check-action-node-versions): curl not found on PATH; skipping this local check (CI still enforces it)." >&2
-  exit 0
+for tool in curl yq jq; do
+  # What: tool lookup through ci.sh have-command
+  # Why: ci.sh owns the lookup; rc 2 is an error, not absent
+  # From: Issue #1683 | PR #1912
+  rc=0
+  bash "$script" have-command "$tool" || rc=$?
+  case "$rc" in
+    0) ;;
+    1)
+      echo "pre-push (action-node-versions): $tool not found on PATH; skipping this local check (CI still enforces it)." >&2
+      exit 0
+      ;;
+    *)
+      echo "pre-push (action-node-versions): ci.sh have-command $tool failed with rc=$rc (output above) -- push blocked." >&2
+      exit 1
+      ;;
+  esac
+done
+
+# What: derives owner/repo from the push remote URL
+# Why: ci.sh reads GITHUB_REPOSITORY; a local run has none
+if [ -z "${GITHUB_REPOSITORY:-}" ]; then
+  if [ -z "$remote_url" ]; then
+    remote_url=$(git remote get-url "$remote_name" 2>&1) || {
+      echo "pre-push (action-node-versions): no URL for remote '$remote_name' ($remote_url); skipping this local check (not blocking push)." >&2
+      exit 0
+    }
+  fi
+  github_repo="${remote_url%.git}"
+  case "$github_repo" in
+    *github.com[:/]*/*) GITHUB_REPOSITORY="${github_repo#*github.com[:/]}" ;;
+    *)
+      echo "pre-push (action-node-versions): remote '$remote_name' is not a github.com URL; skipping this local check (not blocking push)." >&2
+      exit 0
+      ;;
+  esac
+  export GITHUB_REPOSITORY
 fi
 
+# What: tells whether a sha is the all-zero null sha
+# Why: git sends 40 zeros for a deleted or a new ref
 is_zero_sha() {
   [ "$1" = "0000000000000000000000000000000000000000" ]
 }
 
-# Only bother running the (network-calling) check if this push actually
-# touches a workflow file -- every other push is a guaranteed no-op for it,
-# and this hook otherwise runs synchronously before every single push.
+# What: sets workflow_changed if a workflow file changed
+# Why: the check needs network; most pushes skip it
 workflow_changed=0
-# local_ref (the first of git's four pre-push stdin fields per updated ref:
-# local ref, local sha1, remote ref, remote sha1) is read but never used --
-# it must still be named here so `read` assigns the remaining three fields
-# to the correct variables; dropping it would shift local_sha into the
-# local_ref slot instead.
-# shellcheck disable=SC2034
-while read -r local_ref local_sha remote_ref remote_sha; do
+# What: reads the 4 pre-push stdin fields per ref
+# Why: "_" holds the unused local ref; the slots stay right
+while read -r _ local_sha remote_ref remote_sha; do
   [ -n "${local_sha:-}" ] || continue
-  is_zero_sha "$local_sha" && continue # branch/tag deletion: nothing to scan
+  # What: skips deleted refs (all-zero local sha)
+  # Why: a deleted ref has no commits to scan
+  is_zero_sha "$local_sha" && continue
 
   if is_zero_sha "${remote_sha:-}"; then
-    # New branch/ref on the remote: there is no remote_sha to diff against.
-    # Fall back to the merge-base with that same branch name on the remote
-    # we're pushing to (covers the common "already exists upstream under
-    # another name, this is just a new local branch for it" case), or --
-    # failing that -- this branch's own root commit. If neither can be
-    # found, err toward running the check rather than silently skipping it;
-    # this is a soft convenience check, not the authoritative gate.
-    base=$(git merge-base HEAD "${remote_name}/${remote_ref#refs/heads/}" 2>/dev/null) || base=""
-    if [ -z "$base" ]; then
-      base=$(git rev-list --max-parents=0 "$local_sha" 2>/dev/null | tail -n1) || base=""
+    # What: base is merge-base with remote branch or root
+    # Why: a new remote ref has no remote sha to diff
+    if ! base=$(git merge-base HEAD "${remote_name}/${remote_ref#refs/heads/}" 2>&1); then
+      echo "pre-push: no merge-base with the remote branch ($base); using the root commit." >&2
+      roots=$(git rev-list --max-parents=0 "$local_sha" 2>&1) || {
+        echo "pre-push: git rev-list failed ($roots); running the check." >&2
+        roots=""
+      }
+      base=$(printf '%s\n' "$roots" | tail -n1)
     fi
   else
     base="$remote_sha"
   fi
 
   if [ -n "$base" ]; then
-    # Capture into a variable first, then test for non-empty output instead
-    # of piping git diff directly into `grep -q .` (AG-VAL-032): grep -q can
-    # exit the instant it sees the first output line while git diff is still
-    # writing further changed paths, which under `set -o pipefail` (this
-    # hook enables it above) can make the pipeline report git diff's own
-    # SIGPIPE exit (141) instead of grep's successful match -- silently
-    # taking the "no workflow file changed" branch even when one did.
-    changed_workflow_files=$(git diff --name-only "$base" "$local_sha" -- '.github/workflows/*.yml' '.github/workflows/*.yaml' 2>/dev/null) || changed_workflow_files=""
-    if [ -n "$changed_workflow_files" ]; then
+    # What: diff output goes to a variable, not a pipe
+    # Why: [AG-VAL-032] grep -q can mask SIGPIPE status
+    if ! changed_workflow_files=$(git diff --name-only "$base" "$local_sha" -- '.github/workflows/*.yml' '.github/workflows/*.yaml' 2>&1); then
+      echo "pre-push: git diff failed ($changed_workflow_files); running the check." >&2
+      workflow_changed=1
+    elif [ -n "$changed_workflow_files" ]; then
       workflow_changed=1
     fi
   else
@@ -107,10 +110,10 @@ if [ "$workflow_changed" -eq 0 ]; then
   exit 0
 fi
 
-echo "pre-push: .github/workflows changed -- running scripts/tracked/check-action-node-versions.sh (#801) as an early local warning (CI enforces this authoritatively either way)..." >&2
+echo "pre-push: .github/workflows changed -- running ci.sh check action-node-versions as an early local warning (CI enforces this authoritatively either way)..." >&2
 
-if ! bash "$script" "$repo_root"; then
-  echo "pre-push: check-action-node-versions.sh found a problem (see above) -- push blocked." >&2
+if ! bash "$script" check action-node-versions; then
+  echo "pre-push: check action-node-versions found a problem (see above) -- push blocked." >&2
   echo "This is an optional local check; if you believe this is a false positive or an infrastructure hiccup (rate limit, network), you can bypass it with 'git push --no-verify' -- CI runs the same check authoritatively regardless." >&2
   exit 1
 fi

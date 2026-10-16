@@ -20,9 +20,18 @@ path = "src/main.rs"
 
 [dependencies]
 LanCache-NG = { path = "../common" }
+base64 = { workspace = true }
+dhcproto = { workspace = true }
+liblzma = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+# What: rusqlite with bundled SQLite, from the workspace.
+# Why: creates pdns.sqlite3 from schema; no sqlite3 binary.
+# From: Issue #1683 | PR #1912
+rusqlite = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-zstd = { workspace = true }
 # What: time with the macros feature.
 # Why: status.json timestamps use format_description!.
 # From: Issue #1683 | PR #1858

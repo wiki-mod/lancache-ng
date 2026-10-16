@@ -2,7 +2,7 @@
 
 This is the written decision issue #645 asked for: a single place that says
 what the Admin UI is intended to let an operator configure/manage for DNS
-(PowerDNS authoritative + recursor, both standard and SSL mode), so that code
+(PowerDNS authoritative + recursor, both http and https mode), so that code
 which looks unused or half-finished is not misread as dead/removable by a
 future contributor or agent. DNS/PowerDNS feature work has happened
 incrementally (domain list management, LAN records, DDNS, secondary
@@ -38,13 +38,13 @@ runtime state with no corresponding env var at all.
 These are read once at container start by `services/dns/entrypoint.sh` and
 baked into `pdns.conf` / `recursor.conf` via `render_template_atomic()`. The
 Admin UI has no route that writes any of them. Changing one means editing the
-compose `.env` file and restarting the `dns-standard`/`dns-ssl` containers —
+compose `.env` file and restarting the `dns` container —
 **except `PDNS_API_KEY`, which is a shared value with more than one
 consumer**: the `ui` container reads the same env var once at startup via
 `Config::from_env()` (`services/ui/src/main.rs`) and uses it as the
 `X-API-Key` header for every PowerDNS authoritative/recursor API call the
 Admin UI makes (`services/ui/src/main.rs`). Restarting only
-`dns-standard`/`dns-ssl` after rotating `PDNS_API_KEY` leaves the `ui`
+`dns` after rotating `PDNS_API_KEY` leaves the `ui`
 container running with the stale key, so its `/domains` fetch/flush calls
 start failing with 401 until `ui` is restarted/recreated too. As a rule,
 restart every consumer of a shared env var, not just the DNS containers.
@@ -70,11 +70,11 @@ made once at deploy time, not tuned routinely.
 
 | Setting | Route | Mechanism |
 |---|---|---|
-| CDN domain list (`cdn-domains.txt`) — add/remove, plain or wildcard-only (`.domain.com`) entries | `POST /domains/dns/add`, `POST /domains/dns/remove` (`services/ui/src/main.rs`) | `write_domain_file_atomic()` writes via a temp-file-plus-rename, which is atomic — **except in the default Compose deployments**, which bind-mount `cdn-domains.txt` as an individual file (not a directory). Replacing an individual file bind mount by rename fails with `EBUSY`, so on that (default) path the function falls back to `write_domain_file_in_place()`: a non-atomic truncate-then-write that can leave the file partially written if the process is killed mid-write. Directory-mount deployments stay on the atomic rename path. Plus a per-domain recursor cache flush and (SSL mode only) an SSL proxy restart. **The RPZ zone itself is not live-reloaded by this route**: `services/dns/entrypoint.sh` regenerates `/var/lib/powerdns/rpz.zone` from `cdn-domains.txt` only at DNS container startup, and `recursor.lua`'s `rpzFile(...)` call has no `refresh` polling configured, so the recursor only picks up an added/removed domain's RPZ policy after the `dns-standard`/`dns-ssl` container is restarted — the cache flush alone does not make a newly added domain resolve to the proxy |
-| CDN domain list — per-entry enable/disable toggle for pre-shipped "Default CDN" entries (#1073), distinct from the add/remove flow above | `POST /domains/dns/toggle` (`services/ui/src/main.rs`'s `toggle_default_domain`) | Flips a leading `!` disabled marker on the matching line in place (`set_domain_enabled()`) instead of adding/removing it — the entry stays in the file and in the UI list, just skipped by both `services/dns/entrypoint.sh`'s RPZ generation and `services/proxy/entrypoint.sh`'s `_collect_domain_rows` cert/nginx-map generation. A file with no entries added via the Admin UI yet has no `# ==== ... ====` boundary marker; `append_domain()` inserts that marker (once, idempotently) the first time a custom domain is added, and `read_domain_entries()` uses it to classify each line as a pre-shipped default (toggle-able) or an operator-added custom entry (add/remove-able only — the UI does not expose a toggle for those). Same recursor-flush/SSL-proxy-restart wiring as add/remove, and the exact same **RPZ-not-live-reloaded** limitation described in the row above applies here too: disabling/enabling a default only takes live effect after the next `dns-standard`/`dns-ssl` restart |
+| CDN domain list (`cdn-domains.txt`) — add/remove, plain or wildcard-only (`.domain.com`) entries | `POST /domains/dns/add`, `POST /domains/dns/remove` (`services/ui/src/main.rs`) | `write_domain_file_atomic()` writes via a temp-file-plus-rename, which is atomic — **except in the default Compose deployments**, which bind-mount `cdn-domains.txt` as an individual file (not a directory). Replacing an individual file bind mount by rename fails with `EBUSY`, so on that (default) path the function falls back to `write_domain_file_in_place()`: a non-atomic truncate-then-write that can leave the file partially written if the process is killed mid-write. Directory-mount deployments stay on the atomic rename path. Plus a per-domain recursor cache flush and (HTTPS mode only) an HTTPS proxy restart. **The RPZ zone itself is not live-reloaded by this route**: `services/dns/entrypoint.sh` regenerates `/var/lib/powerdns/rpz.zone` from `cdn-domains.txt` only at DNS container startup, and `recursor.lua`'s `rpzFile(...)` call has no `refresh` polling configured, so the recursor only picks up an added/removed domain's RPZ policy after the `dns` container is restarted — the cache flush alone does not make a newly added domain resolve to the proxy |
+| CDN domain list — per-entry enable/disable toggle for pre-shipped "Default CDN" entries (#1073), distinct from the add/remove flow above | `POST /domains/dns/toggle` (`services/ui/src/main.rs`'s `toggle_default_domain`) | Flips a leading `!` disabled marker on the matching line in place (`set_domain_enabled()`) instead of adding/removing it — the entry stays in the file and in the UI list, just skipped by both `services/dns/entrypoint.sh`'s RPZ generation and `services/proxy/entrypoint.sh`'s `_collect_domain_rows` cert/nginx-map generation. A file with no entries added via the Admin UI yet has no `# ==== ... ====` boundary marker; `append_domain()` inserts that marker (once, idempotently) the first time a custom domain is added, and `read_domain_entries()` uses it to classify each line as a pre-shipped default (toggle-able) or an operator-added custom entry (add/remove-able only — the UI does not expose a toggle for those). Same recursor-flush/SSL-proxy-restart wiring as add/remove, and the exact same **RPZ-not-live-reloaded** limitation described in the row above applies here too: disabling/enabling a default only takes live effect after the next `dns` restart |
 | LAN records in the `lan.` zone (A/AAAA/CNAME/MX/TXT) — add/remove | `POST /domains/lan/add`, `POST /domains/lan/remove` | Publishes a `lancache.dns.record` NATS message to the `LANCACHE_DNS` JetStream stream (durability comes from JetStream persisting the publish itself); every node's `nats-subscriber` consumes that message and applies it to its own local PowerDNS instance via the PowerDNS API — the subscriber does not re-publish the message, so JetStream's own replay/redelivery is what secondaries rely on for replication, not a subscriber-side re-publish |
 | Global AAAA-response filter (suppress all AAAA answers) | `POST /domains/aaaa-filter` | Writes/removes a marker file on the shared `powerdns-state` volume, read live (no caching, `dq.variable=true`) by `filter-aaaa.lua`'s recursor `preresolve` hook — takes effect immediately, no restart |
-| `ddns-allow-unsigned-updates` toggle (issue #815 follow-up, default off; SUPERSEDES an earlier "global `dnsupdate-require-tsig` toggle" design documented in this row until 2026-08-06) | `POST /domains/ddns-allow-unsigned-updates` (`toggle_ddns_allow_unsigned_updates`) | **History**: the superseded design turned PowerDNS's global `dnsupdate-require-tsig` setting on via `entrypoint.sh`'s `render_template_atomic` extra-sed mechanism, framed as closing an open hole. Real live `nsupdate` testing (both toggle states, signed and unsigned packets) proved that a no-op in the common case: `configure_ddns_tsig()` already sets per-zone `TSIG-ALLOW-DNSUPDATE` metadata whenever a real `DDNS_TSIG_KEY` exists (essentially always, via `resolve_shared_secret`'s auto-generation), and PowerDNS enforces TSIG for those zones off that metadata alone, independent of the global setting — toggling it produced no observable behavior difference against `lan.`/the reverse zones. **Current design (maintainer correction)**: TSIG enforcement is already active by default (unchanged); this toggle instead lets an operator explicitly *relax* it. Writes/removes a marker file on the shared `powerdns-state` volume (deliberately a new filename, `ddns-allow-unsigned-updates`, not the old toggle's marker name — reusing that name with inverted meaning would have silently flipped any pre-existing deployment's marker into the opposite behavior after an upgrade). `configure_ddns_tsig()` reads the marker on every start and either sets (marker absent, default) or clears (marker present) `TSIG-ALLOW-DNSUPDATE` metadata for each DDNS-eligible zone accordingly; the route restarts both `dns-standard` and `dns-ssl` (`docker_client::restart_service`) so the change takes effect immediately. The global `dnsupdate-require-tsig` line in `pdns.conf` is no longer operator-controlled at all and stays a fixed `no` (see `services/dns/pdns.conf.template`'s header comment). The route still refuses to enable the "allow unsigned" toggle (redirects with an error instead) when no real `DDNS_TSIG_KEY` is configured — not as a fail-closed safety gate anymore (there is no dangerous state to guard against with this polarity), but because there would be no active enforcement to relax yet |
+| `ddns-allow-unsigned-updates` toggle (issue #815 follow-up, default off; SUPERSEDES an earlier "global `dnsupdate-require-tsig` toggle" design documented in this row until 2026-08-06) | `POST /domains/ddns-allow-unsigned-updates` (`toggle_ddns_allow_unsigned_updates`) | **History**: the superseded design turned PowerDNS's global `dnsupdate-require-tsig` setting on via `entrypoint.sh`'s `render_template_atomic` extra-sed mechanism, framed as closing an open hole. Real live `nsupdate` testing (both toggle states, signed and unsigned packets) proved that a no-op in the common case: `configure_ddns_tsig()` already sets per-zone `TSIG-ALLOW-DNSUPDATE` metadata whenever a real `DDNS_TSIG_KEY` exists (essentially always, via `resolve_shared_secret`'s auto-generation), and PowerDNS enforces TSIG for those zones off that metadata alone, independent of the global setting — toggling it produced no observable behavior difference against `lan.`/the reverse zones. **Current design (maintainer correction)**: TSIG enforcement is already active by default (unchanged); this toggle instead lets an operator explicitly *relax* it. Writes/removes a marker file on the shared `powerdns-state` volume (deliberately a new filename, `ddns-allow-unsigned-updates`, not the old toggle's marker name — reusing that name with inverted meaning would have silently flipped any pre-existing deployment's marker into the opposite behavior after an upgrade). `configure_ddns_tsig()` reads the marker on every start and either sets (marker absent, default) or clears (marker present) `TSIG-ALLOW-DNSUPDATE` metadata for each DDNS-eligible zone accordingly; the route restarts both `dns` (`docker_client::restart_service`) so the change takes effect immediately. The global `dnsupdate-require-tsig` line in `pdns.conf` is no longer operator-controlled at all and stays a fixed `no` (see `services/dns/pdns.conf.template`'s header comment). The route still refuses to enable the "allow unsigned" toggle (redirects with an error instead) when no real `DDNS_TSIG_KEY` is configured — not as a fail-closed safety gate anymore (there is no dangerous state to guard against with this polarity), but because there would be no active enforcement to relax yet |
 | Secondary node registration, credential rotation, removal | `services/ui/src/main.rs` (`/secondaries` page + `POST /api/secondary/register`, `POST /api/secondary/{name}/rotate-token`, `DELETE /api/secondary/{name}`) | Per-secondary NATS auth-callout credential (issue #583); `nats.conf` itself is static and never rewritten per secondary, so revocation works by `authorize_secondary` re-checking the `secondaries` table on every connection attempt — a removed/rotated credential is rejected starting from that node's *next* reconnect, not on its already-established connection (see `services/ui/src/main.rs` module docs) |
 | Recursor cache flush for a specific name | Internal helper (`flush_recursor_cache`, called by the add/remove routes above) | PowerDNS Recursor `cache/flush?domain=` API call, plus a NATS `lancache.dns.flush` broadcast so every recursor instance (not just the one this UI process talks to) drops its cached answer for that exact name. The broadcast now also carries the changed record's expected state (`zone`/`record_type`/`expected_content`, plus `expected_ttl` when the publisher knows it); each subscriber confirms its local PowerDNS has converged to that state — content canonicalized per record type and, when given, the TTL matched — (AXFR landed) before flushing, deferring via NATS redelivery (up to a delivery ceiling of 100) if not yet converged, so a flush avoids re-caching a stale answer ahead of propagation; once that ceiling is reached it flushes anyway rather than defer forever, so a stale re-cache is narrowed but not fully impossible (issue #1095) |
 
@@ -128,8 +128,8 @@ instance here ever created (only the narrower per-octet
 rejected with NOTAUTH — see #768 for the live-verified failure, root cause,
 and fix (one `ddns-domains` entry per real `PRIVATE_REVERSE_ZONES` subzone,
 instead of the one non-existent catch-all). Reverse/PTR DDNS updates now
-succeed against the correct per-octet zone. `dns-standard` is the only DDNS
-write target; `dns-ssl` and remote DNS secondaries receive the same forward
+succeed against the correct per-octet zone. `dns` is the only DDNS
+write target; remote DNS secondaries receive the same forward
 and reverse zone state through native PowerDNS AXFR/NOTIFY.
 
 **Intentionally out of scope (not planned):**
@@ -185,13 +185,13 @@ and reverse zone state through native PowerDNS AXFR/NOTIFY.
 
 ### 3a. PowerDNS-native secondary/AXFR
 
-**Current state (implemented for the fixed project zones):** `dns-standard`
+**Current state (implemented for the fixed project zones):** `dns`
 is the only writer for LAN/reverse zone data in the shipped production and
 validation topologies. `services/dns/entrypoint.sh` turns
 those zones into PowerDNS primary zones, enables SOA serial edits for
 DDNS/API writes, activates the shared TSIG key for transfer authorization,
-and configures `ALSO-NOTIFY` for configured local targets. `dns-ssl` and
-registered remote DNS nodes run the same image with `DNS_REPLICATION_ROLE=
+and configures `ALSO-NOTIFY` for configured local targets. Registered
+remote DNS nodes run the same image with `DNS_REPLICATION_ROLE=
 secondary`, create the fixed zones as PowerDNS secondaries of
 `DNS_XFR_PRIMARY`, and authenticate transfers with the same shared TSIG key.
 
@@ -267,8 +267,8 @@ snapshots the data rrsets (SOA/NS excluded) of `lan.`, `local.lan.`, and the
 private reverse zones after every NATS-applied write and on a 60-second
 periodic watcher (covering Kea's direct-to-PowerDNS DDNS writes, which bypass
 NATS entirely); a new `X-API-Key`-authenticated HTTP listener
-(`serve_rollback` in `main.rs`, `DNS_ROLLBACK_LISTEN_ADDR`, default
-`0.0.0.0:8083`) exposes `GET /snapshots` and `POST /rollback`;
+(`serve_rollback` in `main.rs`, `DNS_ROLLBACK_LISTEN_ADDR`, port
+`DNS_ROLLBACK_PORT` in `runtime.defaults`, 8083) exposes `GET /snapshots` and `POST /rollback`;
 `services/ui/src/main.rs` is a thin HTTP forwarder to that
 listener; and `/domains`' "Zone-Snapshots & Rollback" tab
 (`templates/domains.html`) is the operator-facing picker. This closed the
@@ -299,14 +299,14 @@ UI-visible PowerDNS zone rollback" should eventually look like.
 | Area | State | Where |
 |---|---|---|
 | Static `pdns.conf`/`recursor.conf` settings (API key, TSIG, DDNS allow-from, query logging, root mirror) | Config-file-only, implemented | `services/dns/entrypoint.sh`, `docs/architecture-ng.md` |
-| CDN domain list (RPZ + SSL cert scope) | Admin UI, implemented; **DNS side requires a `dns-standard`/`dns-ssl` restart to take effect** (RPZ is regenerated only at container startup, no live reload) | `services/ui/src/main.rs`, `/domains` |
+| CDN domain list (RPZ + HTTPS cert scope) | Admin UI, implemented; **DNS side requires a `dns` restart to take effect** (RPZ is regenerated only at container startup, no live reload) | `services/ui/src/main.rs`, `/domains` |
 | `lan.` zone records (A/AAAA/CNAME/MX/TXT) | Admin UI, implemented | `services/ui/src/main.rs`, `/domains` |
 | `local.lan.` / reverse zone records | No Admin UI route | Planned, v0.3.0 candidate |
 | PTR checkbox on LAN A records | Not built (doc claimed it; code doesn't have it) | Planned, v0.3.0 candidate |
 | Global AAAA filter | Admin UI, implemented | `services/ui/src/main.rs`, `filter-aaaa.lua` |
 | Arbitrary zone create/delete | Not planned | Deliberately out of scope |
 | RPZ direct record editor | Not planned | Deliberately out of scope (edit via CDN domain list instead) |
-| PowerDNS-native secondary/AXFR | Implemented for local `dns-ssl` and registered remote DNS secondaries; `dns-standard` remains the only zone writer | `services/dns/entrypoint.sh`, `deploy/*/docker-compose.yml`, `setup.sh secondary` |
+| PowerDNS-native secondary/AXFR | Implemented for registered remote DNS secondaries; `dns` remains the only zone writer | `services/dns/entrypoint.sh`, `deploy/*/docker-compose.yml`, `setup.sh secondary` |
 | NATS-based secondary registration/rotate/remove | Admin UI, implemented; registration now also returns AXFR endpoint and shared TSIG material for native zone transfer | `services/ui/src/main.rs`, `/secondaries` |
 | NATS secondary replication-health indicator | Not built | Planned, v0.3.0 candidate |
 | Static config snapshot/rollback status indicator | Not built (log-only today) | Planned, v0.3.0 candidate, not DNS-specific |

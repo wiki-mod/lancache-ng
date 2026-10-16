@@ -7,7 +7,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,13 +19,13 @@ use axum::{Json, Router};
 use futures::StreamExt;
 use futures::future::join_all;
 use lancache_ng::config::{
-    DEFAULT_RECORD_TTL, LAN_ZONE, NATS_STREAM_DNS, NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH,
-    NATS_SUBJECT_RECORD, OutOfRange, Uint, canonical_zone, env_opt, is_dns_name, is_rollback_zone,
-    need, parse_bool, process_env, rollback_zones, zone_url,
+    DEFAULT_RECORD_TTL, NATS_STREAM_DNS, NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD,
+    canonical_zone, env_opt, is_dns_name, is_rollback_zone, keep_known_good, lan_zone, need,
+    parse_bool, process_env, rollback_zones, zone_url,
 };
 use lancache_ng::{
-    DnsRecord, FlushRequest, PowerDns, SnapshotStore, ct_eq, die, http_client,
-    snapshot_created_unix, unix_nanos,
+    Backoff, DnsRecord, FlushRequest, PowerDns, SnapshotStore, ct_eq, die, http_client,
+    need_millis, need_secs, snapshot_created_unix, unix_nanos,
 };
 use reqwest::Method;
 use serde::Deserialize;
@@ -35,22 +34,9 @@ use serde_json::{Value, json};
 // What: log tag of start errors.
 // Why: the log shows which service refused to start.
 const TAG: &str = "nats-subscriber";
-// What: wait between NATS reconnect attempts.
-// Why: a restarting server is retried without a busy loop.
-const RECONNECT_DELAY: Duration = Duration::from_secs(3);
-// What: delay before a Nak'd message is redelivered.
-// Why: a retry must not spin at full speed.
-const NAK_DELAY: Duration = Duration::from_millis(100);
-// What: pause between two confirmation reads of a zone.
-// Why: AXFR needs a moment to land on this node.
-const CONFIRM_PAUSE: Duration = Duration::from_millis(100);
-// What: messages per fetch, and how long a fetch waits.
-// Why: bounds a batch; an idle fetch ends after the wait.
+// What: messages per fetch.
+// Why: bounds a batch; NATS_FETCH_WAIT ends an idle fetch.
 const FETCH_BATCH: usize = 10;
-const FETCH_WAIT: Duration = Duration::from_secs(5);
-// What: period of the snapshot watcher and the reconciler.
-// Why: a missed message converges within a minute.
-const TICK: Duration = Duration::from_secs(60);
 // What: in-process confirmation tries before a Nak.
 // Why: a longer sleep holds the message past ack_wait.
 // From: Issue #1095
@@ -60,22 +46,108 @@ const CONFIRM_TRIES: u32 = 3;
 // From: Issue #1095
 const CONFIRM_MAX_DELIVERIES: i64 = 100;
 
+// What: the subscriber's waits, from the SOT defaults.
+// Why: no wait is a literal; the image bakes each value.
+// From: Issue #1683 | PR #1912
+#[derive(Clone, Copy, Debug)]
+struct Times {
+    // What: pause between two NATS reconnect attempts.
+    // Why: a restarting server is retried, no busy loop.
+    // From: Issue #1683 | PR #1912
+    reconnect: Duration,
+    // What: delay before a Nak'd message is redelivered.
+    // Why: a retry must not spin at full speed.
+    // From: Issue #1683 | PR #1912
+    nak: Duration,
+    // What: pause between two confirmation reads of a zone.
+    // Why: AXFR needs a moment to land on this node.
+    // From: Issue #1683 | PR #1912
+    confirm_pause: Duration,
+    // What: how long one fetch waits for messages.
+    // Why: an idle fetch ends after the wait.
+    // From: Issue #1683 | PR #1912
+    fetch_wait: Duration,
+    // What: period of the snapshot watcher and reconciler.
+    // Why: a missed message converges on the next tick.
+    // From: Issue #1683 | PR #1912
+    tick: Duration,
+    // What: limit of one pdnsutil check-zone run.
+    // Why: a hung pdnsutil must not stall the subscriber.
+    // From: Issue #1683 | PR #1912
+    zone_check: Duration,
+    // What: limit of one cache-flush publish.
+    // Why: serial acks would exceed the ui's HTTP timeout.
+    // From: Issue #1683 | PR #1912
+    flush: Duration,
+    // What: age after which the DNS stream drops messages.
+    // Why: messages survive a restart; the oldest go first.
+    // From: Issue #1683 | PR #1912
+    stream_max_age: Duration,
+}
+
+impl Times {
+    // What: every subscriber wait from a reader.
+    // Why: a missing or junk value stops the start.
+    // From: Issue #1683 | PR #1912
+    fn load(get: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
+        Ok(Self {
+            reconnect: need_secs(get, "NATS_RECONNECT_DELAY")?,
+            nak: need_millis(get, "NATS_NAK_DELAY_MS")?,
+            confirm_pause: need_millis(get, "DNS_CONFIRM_PAUSE_MS")?,
+            fetch_wait: need_secs(get, "NATS_FETCH_WAIT")?,
+            tick: need_secs(get, "DNS_SYNC_TICK")?,
+            zone_check: need_secs(get, "PDNS_ZONE_CHECK_TIMEOUT")?,
+            flush: need_secs(get, "DNS_FLUSH_TIMEOUT")?,
+            stream_max_age: need_secs(get, "NATS_DNS_STREAM_MAX_AGE")?,
+        })
+    }
+}
+
 // What: state shared by the consumer and the helper tasks.
 // Why: one lock orders zone writes, snapshots, rollbacks.
 struct Ctx {
     pdns: PowerDns,
+    times: Times,
     // What: auth and recursor API roots, auth config dir.
-    // Why: dns/entrypoint.sh owns the layout, exports it.
+    // Why: the dns supervisor owns the layout, passes it.
     pdns_auth_url: String,
-    pdns_rec_url: String,
+    pdns_rec_urls: Vec<String>,
     pdns_auth_config_dir: String,
     snapshot_dir: PathBuf,
     keep_n: u32,
+    // What: the local zone name, from DHCP_DOMAIN.
+    // Why: the SOT owns it; no literal in this crate.
+    lan_zone: String,
     lock: tokio::sync::Mutex<()>,
     js: jetstream::Context,
 }
 
 impl Ctx {
+    // What: the context from an env reader, times and NATS.
+    // Why: the program and the tests build it one way.
+    // From: Issue #1683 | PR #1912
+    fn load(
+        get: &dyn Fn(&str) -> Option<String>,
+        times: Times,
+        js: jetstream::Context,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            pdns: PowerDns::new(http_client(get)?, need(get, "PDNS_API_KEY")?),
+            times,
+            pdns_auth_url: need(get, "PDNS_AUTH_API_URL")?,
+            pdns_rec_urls: need(get, "PDNS_REC_API_URLS")?
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+            pdns_auth_config_dir: need(get, "PDNS_AUTH_CONFIG_DIR")?,
+            snapshot_dir: PathBuf::from(need(get, "DNS_CONFIG_SNAPSHOT_DIR")?),
+            keep_n: keep_known_good(get)?,
+            lan_zone: lan_zone(get)?,
+            lock: tokio::sync::Mutex::new(()),
+            js,
+        })
+    }
+
     // What: the snapshot store of one dotted zone.
     // Why: every zone has its own directory under zones/.
     fn store(&self, zone: &str) -> SnapshotStore {
@@ -116,17 +188,20 @@ async fn publish(
 
 // What: publish one record message, logging a failure.
 // Why: replication is best-effort; the next tick retries.
-async fn publish_record(js: &jetstream::Context, msg_id: &str, record: &DnsRecord) {
+// Returns true only when JetStream acknowledged the message.
+async fn publish_record(js: &jetstream::Context, msg_id: &str, record: &DnsRecord) -> bool {
     let payload = match serde_json::to_vec(record) {
         Ok(payload) => payload,
         Err(e) => {
             eprintln!("encoding of {msg_id} failed, not published: {e}");
-            return;
+            return false;
         }
     };
     if let Err(e) = publish(js, NATS_SUBJECT_RECORD, Some(msg_id), payload).await {
         eprintln!("publish of {msg_id} failed: {e}");
+        return false;
     }
+    true
 }
 
 // What: a record message from one PowerDNS rrset.
@@ -198,7 +273,7 @@ fn canonicalize(rrsets: &Value) -> Vec<Value> {
 }
 
 // What: true if candidate equals the newest snapshot.
-// Why: the 60 s watcher must not evict history with copies.
+// Why: the tick watcher must not evict history with copies.
 fn matches_latest(store: &SnapshotStore, candidate: &Value) -> bool {
     let Ok(ids) = store.ids() else {
         return false;
@@ -250,7 +325,7 @@ fn changed_names(patch: &Value) -> Vec<String> {
 // Why: also covers Kea DDNS writes that bypass NATS.
 // From: Issue #628
 async fn snapshot_zone(ctx: &Ctx, zone: &str) {
-    if !is_rollback_zone(zone) {
+    if !is_rollback_zone(&ctx.lan_zone, zone) {
         return;
     }
     let store = ctx.store(zone);
@@ -273,25 +348,25 @@ async fn snapshot_zone(ctx: &Ctx, zone: &str) {
     }
 }
 
-// What: every minute, snapshot all managed zones.
+// What: every DNS_SYNC_TICK, snapshot all managed zones.
 // Why: runs on every node, unlike the NATS reconciler.
 async fn snapshot_watcher(ctx: Arc<Ctx>) {
-    let mut interval = tokio::time::interval(TICK);
+    let mut interval = tokio::time::interval(ctx.times.tick);
     loop {
         interval.tick().await;
-        for zone in rollback_zones() {
+        for zone in rollback_zones(&ctx.lan_zone) {
             snapshot_zone(&ctx, &zone).await;
         }
     }
 }
 
-// What: every minute, republish the lan zone to NATS.
+// What: every DNS_SYNC_TICK, republish the lan zone.
 // Why: a node that missed messages converges again.
 async fn reconciler(ctx: Arc<Ctx>) {
-    let mut interval = tokio::time::interval(TICK);
+    let mut interval = tokio::time::interval(ctx.times.tick);
     loop {
         interval.tick().await;
-        let rrsets = match ctx.zone_rrsets(LAN_ZONE).await {
+        let rrsets = match ctx.zone_rrsets(&ctx.lan_zone).await {
             Ok(rrsets) => data_rrsets(&rrsets),
             Err(e) => {
                 eprintln!("Reconciler: cannot read the lan zone: {e}");
@@ -302,7 +377,7 @@ async fn reconciler(ctx: Arc<Ctx>) {
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|rrset| rrset_record("replace", LAN_ZONE, rrset))
+            .filter_map(|rrset| rrset_record("replace", &ctx.lan_zone, rrset))
             .collect();
         for record in &records {
             let name = record.name.trim_end_matches('.');
@@ -479,7 +554,7 @@ fn rrset_matches_expected(
     let (Some(rrset), Some(expected)) = (found, expected) else {
         return found.is_none() && expected.is_none();
     };
-    // What: a TTL-only replace keeps content, changes TTL.
+    // What: false if the TTL differs from expected_ttl.
     // Why: content alone confirms before AXFR lands it.
     if let Some(ttl) = expected_ttl
         && rrset.get("ttl").and_then(Value::as_i64) != Some(i64::from(ttl))
@@ -509,11 +584,13 @@ fn rrset_matches_expected(
     actual == wanted
 }
 
-// What: flush the local recursor cache for one domain.
+// What: flush each local recursor cache for one domain.
 // Why: confirm the zone first, else a stale answer caches.
 // From: Issue #1095
 async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
     let request = serde_json::from_slice::<FlushRequest>(&msg.payload).ok();
+    // What: unreadable flush message flushes name ".".
+    // Why: old publishers send no domain field.
     let domain = request.as_ref().map_or(".", |r| r.domain.as_str());
     if let Some(request) = &request
         && let (Some(zone), Some(kind)) = (&request.zone, &request.record_type)
@@ -538,7 +615,7 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
             if confirmed {
                 break;
             }
-            tokio::time::sleep(CONFIRM_PAUSE).await;
+            tokio::time::sleep(ctx.times.confirm_pause).await;
         }
         if !confirmed {
             let delivered = msg.info().map_or(0, |info| info.delivered);
@@ -553,27 +630,33 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
             );
         }
     }
-    let url = match flush_url(&ctx.pdns_rec_url, domain) {
-        Ok(url) => url,
-        Err(e) => {
-            eprintln!("Acking recursor flush, bad PDNS_REC_API_URL: {e}");
-            return Outcome::Ack;
-        }
-    };
-    match ctx.pdns.call(Method::PUT, url.as_str(), None).await {
-        Ok(response) if response.status().is_success() => {
-            println!("Flushed PDNS cache");
-            Outcome::Ack
-        }
-        Ok(response) => {
-            eprintln!("PDNS flush error: {}", response.status());
-            Outcome::Retry
-        }
-        Err(e) => {
-            eprintln!("Error sending flush request: {e}");
-            Outcome::Retry
+    // What: flush every recursor; one failure retries all.
+    // Why: each recursor caches apart; retries are safe.
+    // From: Issue #1683 | PR #1912
+    let mut outcome = Outcome::Ack;
+    for rec_url in &ctx.pdns_rec_urls {
+        let url = match flush_url(rec_url, domain) {
+            Ok(url) => url,
+            Err(e) => {
+                eprintln!("Skipping recursor flush, bad PDNS_REC_API_URLS entry: {e}");
+                continue;
+            }
+        };
+        match ctx.pdns.call(Method::PUT, url.as_str(), None).await {
+            Ok(response) if response.status().is_success() => {
+                println!("Flushed PDNS cache at {rec_url}");
+            }
+            Ok(response) => {
+                eprintln!("PDNS flush error at {rec_url}: {}", response.status());
+                outcome = Outcome::Retry;
+            }
+            Err(e) => {
+                eprintln!("Error sending flush request to {rec_url}: {e}");
+                outcome = Outcome::Retry;
+            }
         }
     }
+    outcome
 }
 
 // What: route one message by subject.
@@ -614,6 +697,19 @@ fn failure(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<
     (status, Json(json!({"error": message.into()})))
 }
 
+// What: a REJECT audit line plus the JSON error reply.
+// Why: log and reply of a refusal come from one place.
+// From: Issue #628 | PR #1912
+fn rejected(
+    store: &SnapshotStore,
+    status: StatusCode,
+    log: &str,
+    message: impl Into<String>,
+) -> (StatusCode, Json<Value>) {
+    store.log("REJECT", log);
+    failure(status, message)
+}
+
 // What: GET /snapshots: ids and times per managed zone.
 // Why: the ui lists them newest first for the operator.
 async fn list_snapshots(State(ctx): State<Arc<Ctx>>, headers: HeaderMap) -> Response {
@@ -621,7 +717,7 @@ async fn list_snapshots(State(ctx): State<Arc<Ctx>>, headers: HeaderMap) -> Resp
         return failure(StatusCode::UNAUTHORIZED, "missing or invalid X-API-Key").into_response();
     }
     let mut zones = HashMap::new();
-    for zone in rollback_zones() {
+    for zone in rollback_zones(&ctx.lan_zone) {
         let ids = ctx.store(&zone).ids().unwrap_or_default();
         let list: Vec<Value> = ids
             .into_iter()
@@ -641,29 +737,22 @@ struct RollbackRequest {
     snapshot_id: String,
 }
 
-// What: pdnsutil check-zone with a 10 second limit.
+// What: pdnsutil check-zone under the zone_check limit.
 // Why: a wedged auth database must not hang the rollback.
 async fn check_zone(ctx: &Ctx, store: &SnapshotStore, zone: &str) -> bool {
-    let status = tokio::process::Command::new("pdnsutil")
-        .arg(format!("--config-dir={}", ctx.pdns_auth_config_dir))
-        .args(["check-zone", zone])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .status();
-    match tokio::time::timeout(Duration::from_secs(10), status).await {
-        Ok(Ok(status)) => status.success(),
-        Ok(Err(e)) => {
+    let config_dir = ctx.pdns_auth_config_dir.clone();
+    let (limit, zone_name) = (ctx.times.zone_check, zone.to_owned());
+    let checked = tokio::task::spawn_blocking(move || {
+        lancache_ng::pdnsutil(&config_dir, &["check-zone", &zone_name], Some(limit))
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("check-zone task failed: {e}")));
+    match checked {
+        Ok(_) => true,
+        Err(e) => {
             store.log(
                 "WARNING",
-                &format!("failed to run pdnsutil check-zone for {zone}: {e}"),
-            );
-            false
-        }
-        Err(_) => {
-            store.log(
-                "WARNING",
-                &format!("pdnsutil check-zone for {zone} timed out, killed"),
+                &format!("pdnsutil check-zone for {zone} failed: {e}"),
             );
             false
         }
@@ -672,19 +761,22 @@ async fn check_zone(ctx: &Ctx, store: &SnapshotStore, zone: &str) -> bool {
 
 // What: republish a rollback patch for the lan zone.
 // Why: other nodes converge now, not at the next tick.
-async fn publish_patch(js: &jetstream::Context, patch: &Value) {
+// Returns true only when every record was acknowledged.
+async fn publish_patch(js: &jetstream::Context, lan_zone: &str, patch: &Value) -> bool {
     let stamp = unix_nanos();
+    let mut all_published = true;
     for rrset in patch["rrsets"].as_array().into_iter().flatten() {
         let delete = rrset.get("changetype").and_then(Value::as_str) == Some("DELETE");
         let action = if delete { "delete" } else { "replace" };
-        if let Some(record) = rrset_record(action, LAN_ZONE, rrset) {
+        if let Some(record) = rrset_record(action, lan_zone, rrset) {
             let name = record.name.trim_end_matches('.');
             // What: a fresh message id per republish.
             // Why: the dedup window absorbs a repeated id.
             let msg_id = format!("rollback-{stamp}-{name}-{}", record.record_type);
-            publish_record(js, &msg_id, &record).await;
+            all_published &= publish_record(js, &msg_id, &record).await;
         }
     }
+    all_published
 }
 
 // What: roll one zone back to a stored snapshot.
@@ -692,7 +784,7 @@ async fn publish_patch(js: &jetstream::Context, patch: &Value) {
 // From: Issue #628
 async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusCode, Json<Value>)> {
     let zone = canonical_zone(&request.zone);
-    if !is_rollback_zone(&zone) {
+    if !is_rollback_zone(&ctx.lan_zone, &zone) {
         let message = format!("zone {zone} is not managed by this rollback mechanism");
         return Err(failure(StatusCode::BAD_REQUEST, message));
     }
@@ -712,15 +804,14 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
         ));
     }
     let snapshot = store.read(&request.snapshot_id).map_err(|e| {
-        store.log(
-            "REJECT",
-            &format!(
-                "rejected known-good snapshot {} for zone {zone}: unreadable ({e})",
-                request.snapshot_id
-            ),
+        let log = format!(
+            "rejected known-good snapshot {} for zone {zone}: unreadable ({e})",
+            request.snapshot_id
         );
-        failure(
+        rejected(
+            &store,
             StatusCode::INTERNAL_SERVER_ERROR,
+            &log,
             format!("stored snapshot could not be read: {e}"),
         )
     })?;
@@ -746,7 +837,7 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
                 Some(patch.to_string()),
             )
             .await;
-        let rejected = match sent {
+        let refusal = match sent {
             Ok(response) if response.status().is_success() => None,
             Ok(response) => Some(format!(
                 "PowerDNS rejected rollback PATCH: {}",
@@ -754,15 +845,12 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
             )),
             Err(e) => Some(format!("failed to apply rollback PATCH: {e}")),
         };
-        if let Some(message) = rejected {
-            store.log(
-                "REJECT",
-                &format!(
-                    "rollback PATCH for zone {zone} snapshot {} failed: {message}",
-                    request.snapshot_id
-                ),
+        if let Some(message) = refusal {
+            let log = format!(
+                "rollback PATCH for zone {zone} snapshot {} failed: {message}",
+                request.snapshot_id
             );
-            return Err(failure(StatusCode::BAD_GATEWAY, message));
+            return Err(rejected(&store, StatusCode::BAD_GATEWAY, &log, message));
         }
     }
     store.log("SELECT", &format!("selected known-good snapshot {} for rollback of zone {zone} ({patch_len} rrset(s) changed)", request.snapshot_id));
@@ -775,18 +863,17 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
 
     // What: records go out before any flush.
     // Why: else a flushed cache refills from stale data.
-    let republished = zone == canonical_zone(LAN_ZONE) && patch_len > 0;
-    if republished {
-        publish_patch(&ctx.js, &patch).await;
-    }
+    let republished = zone == canonical_zone(&ctx.lan_zone)
+        && patch_len > 0
+        && publish_patch(&ctx.js, &ctx.lan_zone, &patch).await;
 
-    // What: all flushes run at once, 3 s each.
-    // Why: serial acks would exceed the ui's 10 s timeout.
+    // What: all flushes at once, each DNS_FLUSH_TIMEOUT.
+    // Why: serial acks would exceed the ui's HTTP timeout.
     let logger = &store;
     let flushes = changed.iter().map(|name| async move {
         let payload = json!({"domain": name}).to_string().into_bytes();
         let sent = publish(&ctx.js, NATS_SUBJECT_FLUSH, None, payload);
-        match tokio::time::timeout(Duration::from_secs(3), sent).await {
+        match tokio::time::timeout(ctx.times.flush, sent).await {
             Ok(Ok(())) => None,
             Ok(Err(e)) => {
                 logger.log(
@@ -798,7 +885,10 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
             Err(_) => {
                 logger.log(
                     "WARNING",
-                    &format!("cache-flush for {name} did not complete within 3s"),
+                    &format!(
+                        "cache-flush for {name} did not complete within {:?}",
+                        ctx.times.flush
+                    ),
                 );
                 Some(name.clone())
             }
@@ -852,7 +942,7 @@ async fn rollback_handler(
 }
 
 // What: the rollback listener on DNS_ROLLBACK_LISTEN_ADDR.
-// Why: 0.0.0.0, as the ui is in another network namespace.
+// Why: ANY_BIND_IP, as the ui is in another namespace.
 async fn serve_rollback(ctx: Arc<Ctx>, addr: String) {
     let router = Router::new()
         .route("/snapshots", get(list_snapshots))
@@ -873,14 +963,8 @@ async fn serve_rollback(ctx: Arc<Ctx>, addr: String) {
     }
 }
 
-// What: next retry delay, doubled, at most 30 seconds.
-// Why: a failing fetch must neither spin nor wait forever.
-fn grow(backoff: u64) -> u64 {
-    (backoff * 2).min(30)
-}
-
 // What: a required env value, or exit with a message.
-// Why: an empty key or consumer name would start unsafely.
+// Why: an empty URL, consumer or address starts unsafely.
 fn required(name: &str) -> String {
     need(&process_env, name).unwrap_or_else(|e| die(TAG, &e))
 }
@@ -891,31 +975,21 @@ fn required(name: &str) -> String {
 async fn main() {
     let nats_url = required("NATS_URL");
     let consumer_name = required("NATS_CONSUMER");
-    let api_key = required("PDNS_API_KEY");
     // What: only a clear "off" disables record writes.
     // Why: an unknown spelling must keep replication on.
     let record_writes = env_opt("NATS_RECORD_WRITES").is_none_or(|v| parse_bool(&v) != Some(false));
     let reconcile = env_opt("NATS_RECONCILER").is_some_and(|v| parse_bool(&v) == Some(true));
-    let keep = Uint {
-        name: "KEEP_KNOWN_GOOD_CONFIGS",
-        min: 1,
-        max: u32::MAX.into(),
-        below: OutOfRange::Reject,
-        above: OutOfRange::Reject,
-    };
-    let (keep_n, warning) = keep
-        .parse(env_opt("KEEP_KNOWN_GOOD_CONFIGS").as_deref())
-        .unwrap_or_else(|error| die(TAG, &error));
-    if let Some(warning) = warning {
-        eprintln!("{warning}");
-    }
-    let snapshot_dir = required("DNS_CONFIG_SNAPSHOT_DIR");
+    let times = Times::load(&process_env).unwrap_or_else(|error| die(TAG, &error));
     let rollback_addr = required("DNS_ROLLBACK_LISTEN_ADDR");
 
     let mut options = async_nats::ConnectOptions::new()
         .max_reconnects(None)
-        .reconnect_delay_callback(|_| RECONNECT_DELAY);
-    if let (Some(user), Some(password)) = (env_opt("NATS_USER"), env_opt("NATS_PASSWORD")) {
+        .reconnect_delay_callback(move |_| times.reconnect);
+    // What: the secondary login, else the dns writer login.
+    // Why: the writer name has one owner, the SOT default.
+    // From: Issue #1683 | PR #1912
+    let user = env_opt("NATS_USER").or_else(|| env_opt("NATS_DNS_WRITER_USER"));
+    if let (Some(user), Some(password)) = (user, env_opt("NATS_PASSWORD")) {
         options = options.user_and_password(user, password);
     } else if let Some(token) = env_opt("NATS_TOKEN") {
         options = options.token(token);
@@ -926,18 +1000,20 @@ async fn main() {
         .unwrap_or_else(|e| die(TAG, &format!("failed to connect to NATS: {e}")));
     println!("Connected to NATS at {nats_url}");
     let js = jetstream::new(client);
+    let ctx = Arc::new(Ctx::load(&process_env, times, js).unwrap_or_else(|e| die(TAG, &e)));
 
-    // What: a file-backed stream keeping messages 7 days.
+    // What: a file-backed stream, NATS_DNS_STREAM_MAX_AGE.
     // Why: messages survive a restart; the oldest go first.
     let stream_config = jetstream::stream::Config {
         name: NATS_STREAM_DNS.to_string(),
         subjects: vec![NATS_SUBJECT_DNS.to_string()],
         storage: jetstream::stream::StorageType::File,
-        max_age: Duration::from_secs(7 * 24 * 60 * 60),
+        max_age: times.stream_max_age,
         discard: jetstream::stream::DiscardPolicy::Old,
         ..Default::default()
     };
-    let stream = js
+    let stream = ctx
+        .js
         .get_or_create_stream(stream_config)
         .await
         .unwrap_or_else(|e| die(TAG, &format!("failed to create stream: {e}")));
@@ -953,18 +1029,6 @@ async fn main() {
         .unwrap_or_else(|e| die(TAG, &format!("failed to create consumer: {e}")));
     println!("Created durable subscriber: {consumer_name}");
 
-    let http =
-        http_client().unwrap_or_else(|e| die(TAG, &format!("cannot build HTTP client: {e}")));
-    let ctx = Arc::new(Ctx {
-        pdns: PowerDns::new(http, api_key),
-        pdns_auth_url: required("PDNS_AUTH_API_URL"),
-        pdns_rec_url: required("PDNS_REC_API_URL"),
-        pdns_auth_config_dir: required("PDNS_AUTH_CONFIG_DIR"),
-        snapshot_dir: PathBuf::from(snapshot_dir),
-        keep_n: keep_n as u32,
-        lock: tokio::sync::Mutex::new(()),
-        js,
-    });
     if reconcile {
         tokio::spawn(reconciler(ctx.clone()));
     }
@@ -974,20 +1038,21 @@ async fn main() {
     // What: this loop alone applies records.
     // Why: so `applied` needs no lock.
     let mut applied = AppliedSequences::default();
-    let mut backoff = 1u64;
+    let policy = Backoff::load(&process_env).unwrap_or_else(|error| die(TAG, &error));
+    let mut backoff = policy.start;
     loop {
         let fetched = consumer
             .fetch()
             .max_messages(FETCH_BATCH)
-            .expires(FETCH_WAIT)
+            .expires(times.fetch_wait)
             .messages()
             .await;
         let mut messages = match fetched {
             Ok(messages) => messages,
             Err(e) => {
-                eprintln!("Fetch error: {e} (backing off for {backoff} second(s))");
-                tokio::time::sleep(Duration::from_secs(backoff)).await;
-                backoff = grow(backoff);
+                eprintln!("Fetch error: {e} (backing off for {backoff:?})");
+                tokio::time::sleep(backoff).await;
+                backoff = policy.next(backoff);
                 continue;
             }
         };
@@ -1004,7 +1069,7 @@ async fn main() {
             let outcome = handle(&ctx, &msg, &mut applied, record_writes).await;
             let settled = match outcome {
                 Outcome::Ack => msg.ack().await,
-                _ => msg.ack_with(jetstream::AckKind::Nak(Some(NAK_DELAY))).await,
+                _ => msg.ack_with(jetstream::AckKind::Nak(Some(times.nak))).await,
             };
             if let Err(e) = settled {
                 eprintln!("Error settling message: {e}");
@@ -1015,13 +1080,11 @@ async fn main() {
             }
         }
         if failed {
-            eprintln!(
-                "Stream error or retryable PDNS failure; backing off for {backoff} second(s)"
-            );
-            tokio::time::sleep(Duration::from_secs(backoff)).await;
-            backoff = grow(backoff);
+            eprintln!("Stream error or retryable PDNS failure; backing off for {backoff:?}");
+            tokio::time::sleep(backoff).await;
+            backoff = policy.next(backoff);
         } else {
-            backoff = 1;
+            backoff = policy.start;
         }
     }
 }
@@ -1029,9 +1092,8 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
-    // What: build one rrset with a single record content.
+    // What: builds an rrset with the given contents.
     // Why: most tests need a small literal rrset.
     fn rrset(name: &str, kind: &str, ttl: i64, contents: &[&str]) -> Value {
         let records: Vec<Value> = contents
@@ -1052,35 +1114,8 @@ mod tests {
         assert!(flush_url("not a url", "a.lan.").is_err());
     }
 
-    // What: only the exact API key passes the header check.
-    // Why: the key is the only gate of zone changes.
-    #[test]
-    fn authorized_requires_the_exact_key() {
-        let with = |value: &str| {
-            let mut headers = HeaderMap::new();
-            headers.insert("X-API-Key", value.parse().unwrap());
-            headers
-        };
-        assert!(authorized(&with("k1"), "k1"));
-        assert!(!authorized(&with("k2"), "k1"));
-        assert!(!authorized(&with(""), "k1"));
-        assert!(!authorized(&HeaderMap::new(), "k1"));
-    }
-
-    // What: only plain zone names reach an API URL path.
-    // Why: a NATS message must not steer the request path.
-    #[test]
-    fn zone_names_from_messages_must_be_plain() {
-        for good in ["lan", "lan.", "10.in-addr.arpa.", "c.f.ip6.arpa."] {
-            assert!(zone_is_safe(good), "{good:?} must pass");
-        }
-        for bad in ["", ".", "../x", "lan/../x", "a?b=1", "a#b", "a b", "lan%2F"] {
-            assert!(!zone_is_safe(bad), "{bad:?} must fail");
-        }
-    }
-
-    // What: a replace message with the TTL and records.
-    // Why: patch_body tests share the same record literal.
+    // What: builds an A record message for host.lan.
+    // Why: the record_key test reuses one record literal.
     fn message(
         action: &str,
         ttl: Option<i32>,
@@ -1094,32 +1129,6 @@ mod tests {
             ttl,
             records,
         }
-    }
-
-    // What: actions map to PATCH bodies; unknown ones fail.
-    // Why: an unknown action must not reach PowerDNS.
-    #[test]
-    fn patch_body_covers_replace_delete_and_unknown() {
-        let content = HashMap::from([("content".to_string(), json!("192.0.2.5"))]);
-        let replace = patch_body(&message("replace", Some(3600), Some(vec![content]))).unwrap();
-        let first = &replace["rrsets"][0];
-        assert_eq!(first["changetype"], "REPLACE");
-        assert_eq!(
-            (
-                first["ttl"].as_i64(),
-                first["records"][0]["content"].as_str()
-            ),
-            (Some(3600), Some("192.0.2.5"))
-        );
-        let defaulted = patch_body(&message("replace", None, Some(vec![]))).unwrap();
-        assert_eq!(defaulted["rrsets"][0]["ttl"], 300);
-        assert_eq!(defaulted["rrsets"][0]["records"], json!([]));
-        let bare = patch_body(&message("replace", Some(60), None)).unwrap();
-        assert!(bare["rrsets"][0].get("records").is_none());
-        let delete = patch_body(&message("delete", None, None)).unwrap();
-        assert_eq!(delete["rrsets"][0]["changetype"], "DELETE");
-        assert!(delete["rrsets"][0].get("ttl").is_none());
-        assert!(patch_body(&message("bogus", None, None)).is_err());
     }
 
     // What: keys fold case and dots; marks never go down.
@@ -1181,66 +1190,6 @@ mod tests {
         assert!(rrset_matches_expected(Some(&v6), Some(&long), "AAAA", None));
     }
 
-    // What: SOA/NS drop out; reordered zones compare equal.
-    // Why: rollback must not touch SOA/NS or see drift.
-    #[test]
-    fn data_rrsets_and_canonical_order() {
-        let all = json!([
-            rrset("lan.", "SOA", 3600, &["x"]),
-            rrset("lan.", "NS", 3600, &["ns."]),
-            rrset("b.lan.", "A", 60, &["2", "1"]),
-            rrset("a.lan.", "A", 60, &["1"]),
-        ]);
-        let data = data_rrsets(&all);
-        assert_eq!(data.as_array().map(Vec::len), Some(2));
-        let reordered = json!([
-            rrset("a.lan.", "A", 60, &["1"]),
-            rrset("b.lan.", "A", 60, &["1", "2"])
-        ]);
-        assert_eq!(canonicalize(&data), canonicalize(&reordered));
-        assert_ne!(
-            canonicalize(&data),
-            canonicalize(&json!([rrset("a.lan.", "A", 60, &["9"])]))
-        );
-    }
-
-    // What: rollback replaces changed, deletes extras only.
-    // Why: unchanged rrsets stay out; flush names precise.
-    #[test]
-    fn rollback_patch_replaces_deletes_and_omits_unchanged() {
-        let snapshot = json!([
-            rrset("same.lan.", "A", 60, &["1"]),
-            rrset("old.lan.", "A", 60, &["1"]),
-            rrset("gone.lan.", "A", 60, &["3"])
-        ]);
-        let current = json!([
-            rrset("same.lan.", "A", 60, &["1"]),
-            rrset("old.lan.", "A", 60, &["2"]),
-            rrset("new.lan.", "A", 60, &["4"])
-        ]);
-        let patch = rollback_patch(&snapshot, &current);
-        let list = patch["rrsets"].as_array().unwrap();
-        let find = |name: &str| list.iter().find(|r| r["name"] == name);
-        assert_eq!(list.len(), 3);
-        assert!(find("same.lan.").is_none());
-        assert_eq!(find("old.lan.").unwrap()["changetype"], "REPLACE");
-        assert_eq!(find("gone.lan.").unwrap()["changetype"], "REPLACE");
-        assert_eq!(find("new.lan.").unwrap()["changetype"], "DELETE");
-        assert!(find("new.lan.").unwrap().get("records").is_none());
-        let restore = rollback_patch(&snapshot, &json!([]));
-        assert_eq!(restore["rrsets"].as_array().map(Vec::len), Some(3));
-    }
-
-    // What: changed names are unique, in first-seen order.
-    // Why: each name is flushed from the caches once.
-    #[test]
-    fn changed_names_deduplicates_in_order() {
-        let patch = json!({"rrsets": [
-            {"name": "a.lan.", "type": "A"}, {"name": "b.lan.", "type": "A"}, {"name": "a.lan.", "type": "AAAA"}]});
-        assert_eq!(changed_names(&patch), ["a.lan.", "b.lan."]);
-        assert!(changed_names(&json!({})).is_empty());
-    }
-
     // What: an rrset becomes a record message when keyed.
     // Why: reconciler and rollback republish through this.
     #[test]
@@ -1258,407 +1207,5 @@ mod tests {
         .unwrap();
         assert!(delete.ttl.is_none() && delete.records.is_none());
         assert!(rrset_record("replace", "lan", &json!({"name": "h.lan."})).is_none());
-    }
-
-    // What: the retry delay doubles up to 30 seconds.
-    // Why: bounded backoff stops a dead stream spinning.
-    #[test]
-    fn backoff_doubles_and_caps() {
-        assert_eq!(grow(1), 2);
-        assert_eq!(grow(16), 30);
-        assert_eq!(grow(30), 30);
-    }
-
-    // What: a Ctx with an offline NATS client.
-    // Why: publishes fail fast; the rest runs for real.
-    async fn offline_ctx(pdns_base: &str, dir: PathBuf) -> Ctx {
-        let client = async_nats::ConnectOptions::new()
-            .retry_on_initial_connect()
-            .connect("nats://127.0.0.1:1")
-            .await
-            .expect("a client that retries in the background");
-        let js = jetstream::ContextBuilder::new()
-            .timeout(Duration::from_millis(200))
-            .build(client);
-        Ctx {
-            pdns: PowerDns::new(http_client().unwrap(), "k3y".to_string()),
-            pdns_auth_url: format!("{pdns_base}/api/v1/servers/localhost"),
-            pdns_rec_url: format!("{pdns_base}/rec"),
-            pdns_auth_config_dir: "/no/such/config".to_string(),
-            snapshot_dir: dir,
-            keep_n: 3,
-            lock: tokio::sync::Mutex::new(()),
-            js,
-        }
-    }
-
-    fn zone_export(rrsets: &[Value]) -> Vec<u8> {
-        json!({"rrsets": rrsets}).to_string().into_bytes()
-    }
-
-    fn lan_a(name: &str, content: &str) -> Value {
-        rrset(name, "A", 60, &[content])
-    }
-
-    // What: the newest snapshot decides what is unchanged.
-    // Why: the watcher must not evict history with copies.
-    #[test]
-    fn matches_latest_compares_with_the_newest_snapshot() {
-        let dir = lancache_ng::unique_temp_dir("latest");
-        let store = SnapshotStore::new(dir.join("zones/lan."), "zone.json", "dns");
-        assert!(matches_latest(&store, &json!([])));
-        assert!(!matches_latest(&store, &json!([lan_a("a.lan.", "1")])));
-        let first = json!([lan_a("a.lan.", "1")]);
-        store.create(&first, 3).unwrap();
-        assert!(matches_latest(&store, &first));
-        assert!(matches_latest(
-            &store,
-            &json!([rrset("a.lan.", "A", 60, &["1"])])
-        ));
-        assert!(!matches_latest(&store, &json!([lan_a("a.lan.", "2")])));
-        assert!(!matches_latest(&store, &json!([])));
-        let second = json!([lan_a("a.lan.", "2")]);
-        store.create(&second, 3).unwrap();
-        assert!(matches_latest(&store, &second));
-        assert!(!matches_latest(&store, &first));
-        let latest = store.ids().unwrap().pop().unwrap();
-        fs::write(
-            dir.join("zones/lan.").join(&latest).join("zone.json"),
-            "junk",
-        )
-        .unwrap();
-        assert!(!matches_latest(&store, &second));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    // What: the zone export is a JSON array or an error.
-    // Why: snapshots, rollback and the reconciler read it.
-    #[tokio::test]
-    async fn the_zone_export_is_an_array_or_an_error() {
-        let dir = lancache_ng::unique_temp_dir("export");
-        let rrsets = [lan_a("a.lan.", "1")];
-        let (base, server) =
-            lancache_ng::serve_canned(vec![(200, zone_export(&rrsets)), (404, vec![])]);
-        let ctx = offline_ctx(&base, dir.clone()).await;
-        assert_eq!(ctx.zone_rrsets("lan.").await, Ok(json!(rrsets)));
-        assert!(ctx.zone_rrsets("lan.").await.is_err());
-        let seen = server.join().unwrap();
-        assert!(seen[0].starts_with("GET /api/v1/servers/localhost/zones/lan HTTP/1.1"));
-        assert_eq!(ctx.store("lan.").ids().unwrap(), Vec::<String>::new());
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    // What: a zone is snapshotted only on change.
-    // Why: also covers Kea DDNS writes that bypass NATS.
-    // From: Issue #628
-    #[tokio::test]
-    async fn zones_are_snapshotted_on_change_only() {
-        let dir = lancache_ng::unique_temp_dir("snapshot");
-        let soa = rrset("lan.", "SOA", 3600, &["x"]);
-        let one = zone_export(&[soa.clone(), lan_a("a.lan.", "1")]);
-        let two = zone_export(&[soa, lan_a("a.lan.", "2")]);
-        let (base, server) = lancache_ng::serve_canned(vec![
-            (200, one.clone()),
-            (200, one),
-            (200, two),
-            (500, vec![]),
-        ]);
-        let ctx = offline_ctx(&base, dir.clone()).await;
-        snapshot_zone(&ctx, "example.com.").await;
-        assert!(ctx.store("example.com.").ids().unwrap().is_empty());
-        snapshot_zone(&ctx, "lan.").await;
-        let ids = ctx.store("lan.").ids().unwrap();
-        assert_eq!(ids.len(), 1);
-        assert_eq!(
-            ctx.store("lan.").read(&ids[0]).unwrap(),
-            json!([lan_a("a.lan.", "1")])
-        );
-        snapshot_zone(&ctx, "lan.").await;
-        assert_eq!(ctx.store("lan.").ids().unwrap().len(), 1);
-        snapshot_zone(&ctx, "lan.").await;
-        assert_eq!(ctx.store("lan.").ids().unwrap().len(), 2);
-        snapshot_zone(&ctx, "lan.").await;
-        assert_eq!(ctx.store("lan.").ids().unwrap().len(), 2);
-        assert_eq!(server.join().unwrap().len(), 4);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    // What: publishing fails when no stream acks it.
-    // Why: a permission denial only shows as a missing ack.
-    #[tokio::test]
-    async fn publishing_without_an_ack_is_an_error() {
-        let dir = lancache_ng::unique_temp_dir("publish");
-        let ctx = offline_ctx("http://127.0.0.1:1", dir.clone()).await;
-        assert!(
-            publish(&ctx.js, "lancache.dns.record", Some("id-1"), b"{}".to_vec())
-                .await
-                .is_err()
-        );
-        assert!(
-            publish(&ctx.js, "lancache.dns.flush", None, b"{}".to_vec())
-                .await
-                .is_err()
-        );
-        let record = rrset_record("replace", "lan", &lan_a("a.lan.", "1")).unwrap();
-        publish_record(&ctx.js, "id-2", &record).await;
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    // What: the listener needs the key; newest first.
-    // Why: the ui lists snapshots for the operator.
-    #[tokio::test]
-    async fn the_snapshot_list_needs_the_key() {
-        let dir = lancache_ng::unique_temp_dir("list");
-        let ctx = Arc::new(offline_ctx("http://127.0.0.1:1", dir.clone()).await);
-        let first = ctx.store("lan.").create(&json!([]), 3).unwrap();
-        let second = ctx
-            .store("lan.")
-            .create(&json!([lan_a("a.lan.", "1")]), 3)
-            .unwrap();
-        let key = |value: &'static str| {
-            let mut headers = HeaderMap::new();
-            headers.insert("X-API-Key", value.parse().unwrap());
-            headers
-        };
-        let denied = list_snapshots(State(ctx.clone()), key("wrong")).await;
-        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
-        let body = axum::body::to_bytes(denied.into_body(), 1 << 20)
-            .await
-            .unwrap();
-        assert_eq!(
-            serde_json::from_slice::<Value>(&body).unwrap(),
-            json!({"error": "missing or invalid X-API-Key"})
-        );
-        let none = list_snapshots(State(ctx.clone()), HeaderMap::new()).await;
-        assert_eq!(none.status(), StatusCode::UNAUTHORIZED);
-        let allowed = list_snapshots(State(ctx), key("k3y")).await;
-        assert_eq!(allowed.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(allowed.into_body(), 1 << 20)
-            .await
-            .unwrap();
-        let listed: Value = serde_json::from_slice(&body).unwrap();
-        let ids: Vec<&str> = listed["zones"]["lan."]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|e| e["id"].as_str().unwrap())
-            .collect();
-        assert_eq!(ids, [second.as_str(), first.as_str()]);
-        assert!(listed["zones"]["lan."][0]["created_unix"].as_u64().unwrap() > 1_700_000_000);
-        assert_eq!(listed["zones"]["10.in-addr.arpa."], json!([]));
-        assert_eq!(
-            listed["zones"].as_object().unwrap().len(),
-            rollback_zones().len()
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    async fn reply_json(response: Response) -> (StatusCode, Value) {
-        let status = response.status();
-        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
-            .await
-            .unwrap();
-        (status, serde_json::from_slice(&body).unwrap())
-    }
-
-    // What: rollback checks key, body, zone and id.
-    // Why: unauthenticated callers reach no parse errors.
-    #[tokio::test]
-    async fn rollback_requests_are_refused_before_any_write() {
-        let dir = lancache_ng::unique_temp_dir("refuse");
-        let ctx = Arc::new(offline_ctx("http://127.0.0.1:1", dir.clone()).await);
-        let id = ctx.store("lan.").create(&json!([]), 3).unwrap();
-        let mut ok_key = HeaderMap::new();
-        ok_key.insert("X-API-Key", "k3y".parse().unwrap());
-        let call = |headers: HeaderMap, body: String| {
-            let ctx = ctx.clone();
-            async move { reply_json(rollback_handler(State(ctx), headers, body.into()).await).await }
-        };
-        let (status, body) = call(HeaderMap::new(), "{}".to_string()).await;
-        assert_eq!(
-            (status, body["error"].as_str()),
-            (
-                StatusCode::UNAUTHORIZED,
-                Some("missing or invalid X-API-Key")
-            )
-        );
-        let (status, body) = call(ok_key.clone(), "not json".to_string()).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(
-            body["error"]
-                .as_str()
-                .unwrap()
-                .starts_with("invalid request body:")
-        );
-        let other = json!({"zone": "example.com", "snapshot_id": id}).to_string();
-        let (status, body) = call(ok_key.clone(), other).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            body["error"],
-            "zone example.com. is not managed by this rollback mechanism"
-        );
-        let unknown = json!({"zone": "lan", "snapshot_id": "123"}).to_string();
-        let (status, body) = call(ok_key.clone(), unknown).await;
-        assert_eq!(
-            (status, body["error"].as_str()),
-            (
-                StatusCode::NOT_FOUND,
-                Some("unknown or no-longer-available snapshot")
-            )
-        );
-        let traversal = json!({"zone": "lan", "snapshot_id": "../x"}).to_string();
-        assert_eq!(
-            call(ok_key.clone(), traversal).await.0,
-            StatusCode::NOT_FOUND
-        );
-        fs::write(dir.join("zones/lan.").join(&id).join("zone.json"), "junk").unwrap();
-        let broken = json!({"zone": "lan", "snapshot_id": id}).to_string();
-        let (status, body) = call(ok_key, broken).await;
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(
-            body["error"]
-                .as_str()
-                .unwrap()
-                .starts_with("stored snapshot could not be read:")
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    fn rollback_request(id: &str) -> RollbackRequest {
-        RollbackRequest {
-            zone: "lan".to_string(),
-            snapshot_id: id.to_string(),
-        }
-    }
-
-    // What: a rollback patches only what differs.
-    // Why: unchanged rrsets stay out; flush names precise.
-    // From: Issue #628
-    #[tokio::test]
-    async fn a_rollback_patches_republishes_and_records_a_snapshot() {
-        let dir = lancache_ng::unique_temp_dir("rollback");
-        let target = json!([lan_a("a.lan.", "1.1.1.1")]);
-        let current = zone_export(&[
-            rrset("lan.", "SOA", 3600, &["x"]),
-            lan_a("a.lan.", "2.2.2.2"),
-            lan_a("b.lan.", "3.3.3.3"),
-        ]);
-        let (base, server) = lancache_ng::serve_canned(vec![(200, current), (204, vec![])]);
-        let ctx = offline_ctx(&base, dir.clone()).await;
-        let target_id = ctx.store("lan.").create(&target, 3).unwrap();
-        ctx.store("lan.")
-            .create(&json!([lan_a("a.lan.", "9.9.9.9")]), 3)
-            .unwrap();
-        let reply = rollback(&ctx, rollback_request(&target_id))
-            .await
-            .ok()
-            .unwrap();
-        assert_eq!(
-            reply,
-            json!({"applied": true, "changed_names": ["a.lan.", "b.lan."],
-                   "zone_check_passed": false, "republished_to_nats": true,
-                   "flush_ok": false, "flush_failed_names": ["a.lan.", "b.lan."]})
-        );
-        let seen = server.join().unwrap();
-        assert!(seen[0].starts_with("GET /api/v1/servers/localhost/zones/lan HTTP/1.1"));
-        assert!(seen[1].starts_with("PATCH /api/v1/servers/localhost/zones/lan HTTP/1.1"));
-        let body: Value = serde_json::from_str(seen[1].split("\r\n\r\n").nth(1).unwrap()).unwrap();
-        assert_eq!(
-            body,
-            json!({"rrsets": [
-                {"name": "a.lan.", "type": "A", "ttl": 60, "changetype": "REPLACE",
-                 "records": [{"content": "1.1.1.1", "disabled": false}]},
-                {"name": "b.lan.", "type": "A", "changetype": "DELETE"}]})
-        );
-        assert_eq!(ctx.store("lan.").ids().unwrap().len(), 3);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    // What: a rollback to the live state changes nothing.
-    // Why: no PATCH, no flush, no extra snapshot.
-    #[tokio::test]
-    async fn a_rollback_to_the_live_state_changes_nothing() {
-        let dir = lancache_ng::unique_temp_dir("noop");
-        let live = [lan_a("a.lan.", "1.1.1.1")];
-        let (base, server) = lancache_ng::serve_canned(vec![(200, zone_export(&live))]);
-        let ctx = offline_ctx(&base, dir.clone()).await;
-        let id = ctx.store("lan.").create(&json!(live), 3).unwrap();
-        let reply = rollback(&ctx, rollback_request(&id)).await.ok().unwrap();
-        assert_eq!(
-            reply,
-            json!({"applied": true, "changed_names": [], "zone_check_passed": false,
-                   "republished_to_nats": false, "flush_ok": true, "flush_failed_names": []})
-        );
-        assert_eq!(server.join().unwrap().len(), 1);
-        assert_eq!(ctx.store("lan.").ids().unwrap().len(), 1);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    // What: a failed PATCH or zone read fails the rollback.
-    // Why: the operator sees why; nothing is half-recorded.
-    #[tokio::test]
-    async fn a_rollback_reports_powerdns_failures() {
-        let dir = lancache_ng::unique_temp_dir("rollback-fail");
-        let current = zone_export(&[lan_a("a.lan.", "2.2.2.2")]);
-        let (base, _server) = lancache_ng::serve_canned(vec![(200, current), (500, vec![])]);
-        let ctx = offline_ctx(&base, dir.clone()).await;
-        let id = ctx
-            .store("lan.")
-            .create(&json!([lan_a("a.lan.", "1.1.1.1")]), 3)
-            .unwrap();
-        let (status, body) = reply_json(
-            rollback(&ctx, rollback_request(&id))
-                .await
-                .err()
-                .unwrap()
-                .into_response(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_GATEWAY);
-        assert_eq!(
-            body["error"],
-            "PowerDNS rejected rollback PATCH: 500 Internal Server Error"
-        );
-        assert_eq!(ctx.store("lan.").ids().unwrap().len(), 1);
-        let (base, _server) = lancache_ng::serve_canned(vec![(500, vec![])]);
-        let ctx = offline_ctx(&base, dir.clone()).await;
-        let (status, body) = reply_json(
-            rollback(&ctx, rollback_request(&id))
-                .await
-                .err()
-                .unwrap()
-                .into_response(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_GATEWAY);
-        assert!(
-            body["error"]
-                .as_str()
-                .unwrap()
-                .starts_with("failed to fetch current zone state:")
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    // What: the zone check fails when pdnsutil is absent.
-    // Why: a wedged or missing tool is never a pass.
-    #[tokio::test]
-    async fn the_zone_check_fails_without_pdnsutil() {
-        let dir = lancache_ng::unique_temp_dir("check");
-        let ctx = offline_ctx("http://127.0.0.1:1", dir.clone()).await;
-        let store = ctx.store("lan.");
-        assert!(!check_zone(&ctx, &store, "lan.").await);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    // What: the retry delay doubles and stops at 30.
-    // Why: a down server must not be hammered or ignored.
-    #[test]
-    fn retry_delay_grows_to_the_cap() {
-        assert_eq!(grow(0), 0);
-        assert_eq!(grow(1), 2);
-        assert_eq!(grow(14), 28);
-        assert_eq!(grow(15), 30);
-        assert_eq!(grow(16), 30);
     }
 }
