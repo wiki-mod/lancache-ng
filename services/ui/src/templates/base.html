@@ -70,8 +70,7 @@
       --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
     }
     /* What: light tokens when data-theme is "light"
-       Why: the head script sets data-theme from the stored
-            choice or the OS setting
+       Why: the head script sets it from storage or OS
        From: Issue #1437 | PR #1912 */
     :root[data-theme="light"] {
       --color-bg: #f6f4ec;
@@ -213,7 +212,7 @@
       try {
         stored = localStorage.getItem(STORAGE_KEY);
       } catch (err) {
-        // What: report a storage read error, keep the OS theme
+        // What: report read error, keep the OS theme
         // Why: private browsing may block localStorage
         // From: Issue #1437
         reportError(err);
@@ -231,8 +230,8 @@
           try {
             localStorage.setItem(STORAGE_KEY, stored);
           } catch (err) {
-            // What: report a storage write error; theme still set
-            // Why: the theme only fails to persist across reloads
+            // What: report write error; theme still set
+            // Why: the choice only fails to persist
             // From: Issue #1437
             reportError(err);
           }
@@ -311,7 +310,7 @@
         return DOT_COLOR_CLASSES.includes(status) ? status : 'gray';
       }
       // What: sets a dot's .beambar-dot colour for a status
-      // Why: one status-to-colour owner for every page's dots
+      // Why: one status-to-colour owner for all dots
       // From: Issue #1683 | PR #1912
       function paintDot(dot, status) {
         dot.classList.remove(...DOT_COLOR_CLASSES);
@@ -333,7 +332,7 @@
           }
           data = await response.json();
         } catch (err) {
-          // What: report the error, keep last render, retry later
+          // What: report it, keep last render, retry
           // Why: network hiccup or the UI itself restarting
           // From: Issue #1437
           reportError(err);
@@ -362,7 +361,7 @@
         }
         window.LancacheWatchdog.refresh();
       } catch (err) {
-        // What: reports the error, then re-enables the button
+        // What: reports the error, re-enables button
         // Why: a network hiccup must not strand the button
         // From: Issue #1437
         reportError(err);
@@ -370,9 +369,8 @@
       button.disabled = false;
     }
 
-    // What: copies an element's text; button shows "Kopiert!"
-    // Why: navigator.clipboard needs a secure context; on
-    //      plain HTTP select the text and use execCommand
+    // What: copies an element's text to the clipboard
+    // Why: no clipboard API on HTTP; use execCommand
     // From: Issue #1068 | PR #1912
     function copyText(id, button) {
       const el = document.getElementById(id);
@@ -390,7 +388,7 @@
         const sel = window.getSelection();
         sel.removeAllRanges();
         sel.addRange(range);
-        // What: on failure report it, keep the text selected
+        // What: on failure report it, keep selection
         // Why: the operator can still copy it with Ctrl+C
         let ok;
         try {

@@ -100,7 +100,7 @@
     <div class="space-y-2" id="netdata-alarms-list">
       {% for alarm in netdata_alarms %}
       <div class="flex items-center gap-2 text-sm" data-unique-id="{{ alarm.unique_id }}">
-        {# What: Netdata alarm status to a watchdog colour token
+        {# What: Netdata alarm status to a colour token
            Why: base.html paintDot owns token-to-colour #}
         <span class="beambar-dot shrink-0" data-role="dot" data-dot-status="{% if alarm.status == "CRITICAL" %}red{% elif alarm.status == "WARNING" %}yellow{% elif alarm.status == "CLEAR" %}green{% endif %}"></span>
         <span class="text-xs text-slate-500 shrink-0">{{ alarm.when_display }}</span>
@@ -311,7 +311,7 @@
         updateMetricsSection('https', data.https);
       }
     } catch (err) {
-      // What: reports the error, keeps the last values shown
+      // What: reports the error, keeps last values
       // Why: a proxy outage is transient; retried later
       // From: Issue #1683 | PR #1912
       reportError(err);
