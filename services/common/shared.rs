@@ -1016,6 +1016,8 @@ pub fn snapshot_created_unix(id: &str) -> Option<u64> {
 // Why: one rule for all secrets; any shape counts.
 // From: Issue #967
 pub fn is_placeholder(value: &str) -> bool {
+    // What: lowercase the value and turn dashes to underscores.
+    // Why: CHANGE-ME and change_me are one placeholder.
     let normalized = value.to_lowercase().replace('-', "_");
     normalized.is_empty()
         || normalized.contains("change_me")
@@ -1118,6 +1120,8 @@ pub fn write_if_changed(
     mode: u32,
     owner: Option<Owner>,
 ) -> io::Result<bool> {
+    // What: compare bytes; an unreadable file counts as changed.
+    // Why: a missing or broken file must be written again.
     let changed = fs::read(path).ok().as_deref() != Some(contents);
     if changed {
         write_file_as(path, contents, mode, Place::Replace, owner)?;
@@ -1138,6 +1142,8 @@ pub fn load_or_create<T>(
     parse: impl Fn(&str) -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
     match fs::read_to_string(path) {
+        // What: parse the stored text without outer whitespace.
+        // Why: the trailing newline is no part of a secret.
         Ok(contents) => parse(contents.trim()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             let (text, value) = create();
@@ -1151,6 +1157,8 @@ pub fn load_or_create<T>(
                 Err(e) => Err(e.into()),
             }
         }
+        // What: every other read error fails the call.
+        // Why: an unreadable file must not rotate the secret.
         Err(err) => Err(err.into()),
     }
 }
@@ -1170,13 +1178,19 @@ pub fn shared_secret(
     var: &str,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<String, String> {
+    // What: a real env value wins over the file.
+    // Why: an operator's explicit value is the intended one.
     let configured = env(var).unwrap_or_default();
     if !is_placeholder(&configured) {
         return Ok(configured);
     }
     let path = Path::new(dir).join(shared_secret_file_name(var));
     match fs::read_to_string(&path) {
+        // What: drop newlines from the file text.
+        // Why: the file ends in a newline; the secret has none.
         Ok(value) => Ok(value.replace('\n', "")),
+        // What: a missing file gives an empty secret.
+        // Why: the backend writes it later; the caller decides.
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
         Err(e) => Err(format!("cannot read {var} from {}: {e}", path.display())),
     }
@@ -1233,12 +1247,16 @@ pub fn resolve_shared_secret(
     make: fn() -> String,
 ) -> Result<String, String> {
     let file = dir.join(name);
+    // What: the file text without newlines; empty is none.
+    // Why: an empty file counts as no secret yet.
     let on_disk = || {
         fs::read_to_string(&file)
             .ok()
             .map(|v| v.replace('\n', ""))
             .filter(|v| !v.is_empty())
     };
+    // What: reuse the file when it fits the current value.
+    // Why: the first writer's secret must stay.
     if let Some(existing) = on_disk()
         && (current.is_empty() || existing == current)
     {
@@ -1254,11 +1272,15 @@ pub fn resolve_shared_secret(
         };
         !current.is_empty() && !conflict
     };
+    // What: generate a value only when none is configured.
+    // Why: a configured value is the operator's choice.
     let value = if current.is_empty() {
         make()
     } else {
         current.to_string()
     };
+    // What: create exclusively for a new value, else replace.
+    // Why: two starters must not both create a new secret.
     let place = if current.is_empty() {
         Place::Exclusive
     } else {
@@ -1277,11 +1299,15 @@ pub fn resolve_shared_secret(
     if written.is_ok() {
         return Ok(value);
     }
+    // What: after a lost race, take the winner's file.
+    // Why: only one secret may exist for all starters.
     if current.is_empty()
         && let Some(existing) = on_disk()
     {
         return Ok(existing);
     }
+    // What: fall back to the configured value if safe.
+    // Why: a failed write must not stop a valid setup.
     if keep_current() {
         return Ok(current.to_string());
     }
@@ -1335,9 +1361,13 @@ impl std::error::Error for DockerError {}
 // Why: a container without a tty multiplexes its streams.
 fn log_text(mut bytes: &[u8]) -> String {
     let mut text = String::new();
+    // What: cut the stream into frames of 8 byte header, payload.
+    // Why: the header holds the stream id and the payload size.
     while bytes.len() >= 8 {
         let size = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
         let end = bytes.len().min(8usize.saturating_add(size));
+        // What: keep stdout (1) and stderr (2) frames only.
+        // Why: stdin and other stream ids carry no log text.
         if matches!(bytes[0], 1 | 2) {
             text.push_str(&String::from_utf8_lossy(&bytes[8..end]));
         }
