@@ -274,6 +274,12 @@ host_lan_addresses() {
     awk '$1 !~ /^127\./ && $1 !~ /^172\./' <<< "$addrs"
 }
 
+# What: reports a failed host_lan_addresses call, exit as $1
+# Why: three callers share one error text
+print_host_addresses_failed() {
+    print_error "Failed to list the IPv4 addresses of this host (exit $1)."
+}
+
 # What: internet-route source IP, else the first LAN IP
 # Why: the route source is right on multi-homed hosts
 # From: Issue #1683 | PR #1858
@@ -289,7 +295,7 @@ detect_lan_ip() {
     fi
 
     addrs=$(host_lan_addresses) \
-        || { print_error "Failed to list the IPv4 addresses of this host (exit $?)."; return 2; }
+        || { print_host_addresses_failed "$?"; return 2; }
     ip=$(awk 'NR == 1 { print $1 }' <<< "$addrs")
     if [[ -n "$ip" ]] && is_valid_ipv4 "$ip"; then
         printf '%s\n' "$ip"
@@ -327,7 +333,7 @@ secondary_suggest_alternate_listen_ip() {
     local current="$1" candidate addrs conflicts loopback_ip n count
 
     addrs=$(host_lan_addresses) \
-        || { print_error "Failed to list the IPv4 addresses of this host (exit $?)."; return 2; }
+        || { print_host_addresses_failed "$?"; return 2; }
     while read -r candidate _; do
         [[ -n "$candidate" ]] || continue
         [[ "$candidate" = "$current" ]] && continue
@@ -3753,17 +3759,15 @@ compose_stack_running() {
     [[ -n "$out" ]]
 }
 
-# What: stops the stack before backup or restore
-# Why: a stop failure warns, so backup can proceed
+# What: stops the stack; a failed stop aborts the copy
+# Why: files of a running stack can be torn mid-copy
+# From: Issue #1683 | PR #1858
 compose_stack_stop() {
     local install_dir="$1"
     local env_file
     compose_stack_or_skip "$install_dir" "Stopping the stack" || return 0
     print_step "Stopping stack for consistent backup/restore"
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
-    # What: a failed stop aborts before any data is copied
-    # Why: files of a running stack can be torn mid-copy
-    # From: Issue #1683 | PR #1858
     stack_compose "$install_dir" "$env_file" stop \
         || die "Failed to stop the stack in $install_dir (exit $?); nothing was copied."
 }
@@ -4763,13 +4767,15 @@ wait_for_stack_health() {
         print_error "Service(s) regressed from healthy to unhealthy during this update: ${regressed_services[*]}"
         # What: dumps each regressed service's recent logs
         # Why: CI and operators need the cause
+        local log_lines
+        log_lines=$(prod_env_default SETUP_REGRESSION_LOG_LINES) || exit $?
         for svc in "${regressed_services[@]}"; do
             local container_id
             # What: container id lookup is an if condition
             # Why: set -e would abort the update
             if container_id=$(service_container_id "$svc") && [[ -n "$container_id" ]]; then
-                print_warn "Last 50 log lines for regressed service '$svc' (container $container_id):"
-                docker logs --tail 50 "$container_id" 2>&1 | sed 's/^/    /' || print_warn "Could not retrieve logs for '$svc' (container may already be gone)."
+                print_warn "Last $log_lines log lines for regressed service '$svc' (container $container_id):"
+                docker logs --tail "$log_lines" "$container_id" 2>&1 | sed 's/^/    /' || print_warn "Could not retrieve logs for '$svc' (container may already be gone)."
             else
                 print_warn "No container found for regressed service '$svc'; cannot dump its logs."
             fi
@@ -5291,7 +5297,9 @@ cmd_debug() {
     print_step "Container status"
     stack_compose "$install_dir" "$env_file" ps || print_error "docker compose ps failed (exit $?)."
 
-    print_step "Logs (last 30 lines per service)"
+    local log_lines
+    log_lines=$(prod_env_default SETUP_STATUS_LOG_LINES) || exit $?
+    print_step "Logs (last $log_lines lines per service)"
     # What: logs of every service the compose files define
     # Why: a fixed list misses profile services
     # From: Issue #1683 | PR #1858
@@ -5300,7 +5308,7 @@ cmd_debug() {
         while IFS= read -r svc; do
             [[ -n "$svc" ]] || continue
             printf '\n%s--- %s ---%s\n' "${BOLD}" "$svc" "${RESET}"
-            stack_compose "$install_dir" "$env_file" logs --tail=30 "$svc" 2>&1 \
+            stack_compose "$install_dir" "$env_file" logs --tail="$log_lines" "$svc" 2>&1 \
                 || print_error "Logs of $svc failed (exit $?)."
         done <<< "$services"
     else
@@ -5321,7 +5329,7 @@ cmd_debug() {
     if addrs=$(host_lan_addresses); then
         awk '{ print "    " $1 "/" $2 " dev " $3 }' <<< "$addrs"
     else
-        print_error "Failed to list the IPv4 addresses of this host (exit $?)."
+        print_host_addresses_failed "$?"
     fi
 
     print_step "Health checks"
@@ -5622,12 +5630,13 @@ cmd_create_logs_for_issue() (
         services_list=""
     fi
     mapfile -t services <<< "$services_list"
-    local svc
+    local svc log_lines
+    log_lines=$(prod_env_default SETUP_LOGBUNDLE_LOG_LINES) || exit $?
     for svc in "${services[@]}"; do
         [[ -n "$svc" ]] || continue
         print_ok "Logs: $svc"
         logbundle_capture "$secrets_file" "$dest/logs/$svc.log" \
-            stack_compose "$install_dir" "$env_file" logs --no-color --timestamps --tail=2000 "$svc"
+            stack_compose "$install_dir" "$env_file" logs --no-color --timestamps --tail="$log_lines" "$svc"
     done
 
     print_step "Redacting configuration"
@@ -5667,7 +5676,7 @@ Contents:
   host-facts.txt              Docker/Compose versions, kernel, disk space
   compose-ps.txt               docker compose ps
   compose-config.txt           docker compose config (resolved)
-  logs/<service>.log           docker compose logs --tail=2000 per service
+  logs/<service>.log           docker compose logs --tail=${log_lines} per service
   env/.env, env/.env.local      configuration, with secrets redacted
   known-good-snapshots/        directory listings only (no file content)
 
@@ -5908,14 +5917,11 @@ reset_kea_to_last_known_good_config() {
 
     if [[ -z "$snapshot_id" ]]; then
         snapshot_id="${snapshot_ids[${#snapshot_ids[@]}-1]}"
-        print_warn "No snapshot id given; defaulting to the newest: $snapshot_id"
+        warn_newest_snapshot "$snapshot_id"
     fi
     [[ -f "$snapshot_root/$snapshot_id/dhcp4.json" ]] \
         || die "Snapshot '$snapshot_id' not found under $snapshot_root."
-    if [[ "$assume_yes" != "1" ]]; then
-        confirm "Roll Kea back to snapshot $snapshot_id now? This applies immediately. [y/N]" "N" \
-            || die "Cancelled."
-    fi
+    confirm_snapshot_rollback "Kea" "$snapshot_id" "$assume_yes"
 
     config_json=$(cat "$snapshot_root/$snapshot_id/dhcp4.json")
 
@@ -5944,6 +5950,21 @@ canonical_dns_zone() {
     else
         printf '%s.\n' "$zone"
     fi
+}
+
+# What: warns that the newest snapshot id $1 is used
+# Why: the Kea and the DNS rollback share the one text
+warn_newest_snapshot() {
+    print_warn "No snapshot id given; defaulting to the newest: $1"
+}
+
+# What: asks before rolling $1 back to snapshot $2
+# Why: the Kea and the DNS rollback share one question
+confirm_snapshot_rollback() {
+    local target="$1" snapshot_id="$2" assume_yes="$3"
+    [[ "$assume_yes" != "1" ]] || return 0
+    confirm "Roll ${target} back to snapshot ${snapshot_id} now? This applies immediately. [y/N]" "N" \
+        || die "Cancelled."
 }
 
 # What: zones of a GET /snapshots body with a snapshot
@@ -6077,7 +6098,7 @@ reset_dns_to_last_known_good_config() {
 
     if [[ -z "$snapshot_id" ]]; then
         snapshot_id="${entries[0]%% *}"
-        print_warn "No snapshot id given; defaulting to the newest: $snapshot_id"
+        warn_newest_snapshot "$snapshot_id"
     fi
 
     found=0
@@ -6088,10 +6109,7 @@ reset_dns_to_last_known_good_config() {
     [[ "$found" -eq 1 ]] \
         || die "Snapshot '$snapshot_id' not found for zone $zone_canon on $container."
 
-    if [[ "$assume_yes" != "1" ]]; then
-        confirm "Roll $container's zone $zone_canon back to snapshot $snapshot_id now? This applies immediately. [y/N]" "N" \
-            || die "Cancelled."
-    fi
+    confirm_snapshot_rollback "$container's zone $zone_canon" "$snapshot_id" "$assume_yes"
 
     # What: the request body is built by jq, not by printf
     # Why: a quote in a user-given snapshot id breaks JSON
@@ -7203,7 +7221,8 @@ UI_AUTH_PASSWORD=""
 UI_AUTH_PASSWORD_HASH=""
 ALLOW_INSECURE_UI=""
 if confirm "Protect Admin-UI with password? [Y/n]" "Y"; then
-    ask "Username" "admin"
+    ui_user_default=$(prod_env_default SETUP_UI_USER_DEFAULT) || exit $?
+    ask "Username" "$ui_user_default"
     UI_AUTH_USER="$REPLY"
 
     # What: the stored user is read before it is compared
