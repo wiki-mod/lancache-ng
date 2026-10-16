@@ -12237,18 +12237,15 @@ _CI_AWK_COMMENTS='
     # What: true if a #N outside quotes is a From: number.
     # Why: a ref belongs in From: only (AG-CODE-012).
     # From: Issue #1683 | PR #1856
-    function cm_dup(s,  len, i, ch, q, pv, d) {
-        len = length(s); q = ""
+    function cm_dup(s,  len, i, ch, pv, d) {
+        len = length(s)
         for (i = 1; i <= len; i++) {
             ch = substr(s, i, 1)
-            if (q == "") {
-                if (ch == "\"") { q = ch; continue }
-                pv = (i > 1) ? substr(s, i - 1, 1) : ""
-                if (ch == sq && pv !~ /[A-Za-z0-9_]/) { q = ch; continue }
-            } else if (ch == q) { q = ""; continue }
-            if (q != "" || ch != "#" || pv ~ /[0-9]/) continue
+            if (ch != "#") continue
+            pv = (i > 1) ? substr(s, i - 1, 1) : ""
+            if (pv ~ /[A-Za-z0-9_$&{#]/) continue
             d = substr(s, i + 1)
-            if (match(d, /^[0-9]+/) && (substr(d, 1, RLENGTH) in fn)) return 1
+            if (match(d, /^[0-9]+/) && RLENGTH < 6 && substr(d, RLENGTH + 1, 1) !~ /[A-Za-z0-9_]/) return 1
         }
         return 0
     }
@@ -12291,16 +12288,12 @@ _CI_AWK_COMMENTS='
             if (rl > 3) cm_out("C", cur ":" rs ": story-telling block (" rl " lines)")
             rs = rl = 0
         }
-        delete fn; k = 0
         for (i = 1; i <= n; i++) {
             t = tolower(L[i])
             if (t ~ rc || t ~ lr) cm_out("R", cur ":" i ":" L[i])
             if (i > 1 && F[i - 1] && F[i] && tolower(T[i - 1] " " T[i]) ~ rc) cm_out("R", cur ":" i - 1 ": " T[i - 1] " " T[i])
-            if (L[i] !~ /From:/) continue
-            t = L[i]
-            while (match(t, /#[0-9]+/)) { fn[substr(t, RSTART + 1, RLENGTH - 1)] = 1; k = 1; t = substr(t, RSTART + RLENGTH) }
+            if (L[i] !~ /From:/ && cm_dup(L[i])) cm_out("W", cur ":" i ": " L[i])
         }
-        if (k) for (i = 1; i <= n; i++) if (L[i] !~ /From:/ && cm_dup(L[i])) cm_out("W", cur ":" i ": " L[i])
     }
     # What: a new file ends the last one and resets state.
     # Why: arrays of one file must not leak into the next.
@@ -14435,7 +14428,7 @@ _ci_check_compose_healthchecks() {
         return 2
     fi
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0021]" "reason=\"service missing a healthcheck (issue #1169)\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0021]" "reason=\"service missing a healthcheck\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'compose-healthchecks=clean checked=%s\n' "${checked}"

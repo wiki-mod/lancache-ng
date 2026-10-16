@@ -3954,7 +3954,7 @@ guard_restore_shared_project_volumes() {
             || die "Refusing to restore: container $container of compose project '$project' has no working directory label, so its install cannot be attributed. Remove it with 'docker rm $container', then restore again."
         working_dir=$(realpath -m "$working_dir")
         if [[ "$working_dir" != "$install_dir" ]]; then
-            die "Refusing to restore: compose project '$project' still has containers at $working_dir, which is not the restore target ($install_dir). Both installs share the same Docker-managed volumes because the compose project name is not per-install-dir (see #669). Remove the other install's containers first (cd \"$working_dir\" && docker compose down), or restore into $working_dir instead."
+            die "Refusing to restore: compose project '$project' still has containers at $working_dir, which is not the restore target ($install_dir). Both installs share the same Docker-managed volumes because the compose project name is not per-install-dir. Remove the other install's containers first (cd \"$working_dir\" && docker compose down), or restore into $working_dir instead."
         fi
     done <<< "$containers"
     if [[ "$install_dir" != "$archived_install_dir" ]] && compose_project_has_named_volumes "$project"; then
@@ -4329,7 +4329,7 @@ self-clones to ${DEFAULT_INSTALL_DIR} from the remote's default branch by
 default. Set LANCACHE_SETUP_GIT_REF to a branch, tag, or commit-ish (e.g.
 LANCACHE_SETUP_GIT_REF=vX.Y.Z) to bootstrap from that ref instead -- useful
 for validating a pre-release branch the same documented one-liner way that
-LANCACHE_IMAGE_CHANNEL already selects a specific image channel (#814).
+LANCACHE_IMAGE_CHANNEL already selects a specific image channel.
 EOF
             ;;
         install-requirements-primary)
@@ -4496,7 +4496,7 @@ Usage: ./setup.sh reset-to-last-known-good-config <service> [install-dir] [snaps
        ./setup.sh reset-to-last-known-good-config dns|pdns [install-dir] <zone> [snapshot-id] [--yes]
 
 CLI fallback for when the Admin UI itself is unreachable but a service's own
-control surface still is (issue #763). Automates the exact by-hand recovery
+control surface still is. Automates the exact by-hand recovery
 sequence docs/known-good-config-snapshots.md's "Manual recovery" section
 documents: list this install's known-good config snapshots for <service> and
 apply one -- the given [snapshot-id], or the newest after an explicit
@@ -7355,7 +7355,7 @@ DHCP_SUBNET_START=${DHCP_SUBNET_START}
 DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY}
 DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY}
 UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP}
-# Issue #844: DHCP-relay-mode local address (giaddr source). Empty unless
+# DHCP-relay-mode local address (giaddr source). Empty unless
 # DHCP_MODE=dnsmasq-relay; see docs/dhcp-modes.md.
 DHCP_RELAY_LOCAL_ADDR=${DHCP_RELAY_LOCAL_ADDR}
 
@@ -7395,8 +7395,8 @@ PDNS_API_KEY=${PDNS_API_KEY?}
 
 # ── Netdata alarm forwarding ────────────────────────────────────────────────────
 # Shared token for Netdata's alarm-notify.sh to authenticate to the Admin
-# UI's POST /api/netdata-alarms webhook (bug hunt #849, observability.md
-# finding #3; generated, do not change)
+# UI's POST /api/netdata-alarms webhook (see observability.md,
+# finding 3; generated, do not change)
 NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
 
 # ── NATS (DNS-record sync bus) ─────────────────────────────────────────────────
@@ -7409,7 +7409,7 @@ NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD}
 NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD}
 # System-account identity (generated, do not change). Used only by the Admin
 # UI's kicker connection (kick_secondary in services/ui) to look up and force-disconnect a
-# removed/rotated secondary's live NATS connection (issue #681).
+# removed/rotated secondary's live NATS connection.
 NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD}
 # Token for setup.sh secondary — anyone who knows this can register a secondary
 SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}

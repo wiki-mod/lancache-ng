@@ -949,8 +949,8 @@ release:
   # Why: release-versioning: a clear error, no fallback.
   # From: Issue #1683 | PR #1858
   retired_channels:
-    edge: "renamed to nightly in v0.3.0 (#1056)"
-    dev: "retired in v0.3.0 (#825/#1141)"
+    edge: "renamed to nightly in v0.3.0"
+    dev: "retired in v0.3.0"
   # What: channel a ref without its own channel uses.
   # Why: AG-REL-009 pre-stable default; no ci.sh literal.
   # From: Issue #1683
