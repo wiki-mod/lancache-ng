@@ -8977,10 +8977,11 @@ _ci_validate_rm_run() {
 # Why: dhcp is host-mode, so up never starts a Kea.
 # From: Issue #763 | PR #1858
 _ci_validate_kea_rollback() {
-    local project="$1" net="$2" pin="$3" kname uname kip kport rc=0
+    local project="$1" net="$2" pin="$3" kname uname kip kport tail_lines rc=0
     kname="${project}-kea"
     uname="${project}-kea-ui"
     kport="$(_ci_validate_kea_agent http-port)" || return 2
+    tail_lines="$(_ci_variable CI_VALIDATE_RUN_LOG_TAIL)" || return 2
     _ci_run "[CI-ERROR-VALIDATE-0096]" "project=\"${project}\" service=\"dhcp\" reason=\"Kea run container not started\"" \
         _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${kname}" \
             -e DHCP_MODE=kea dhcp || return $?
@@ -8989,7 +8990,7 @@ _ci_validate_kea_rollback() {
     # From: Issue #1683 | PR #1912
     if ! _ci_validate_wait_cid dhcp "${kname}"; then
         ci_error "[CI-ERROR-VALIDATE-0129]" "service=\"dhcp\" container=\"${kname}\" reason=\"Kea run container not healthy (cause above)\"" \
-            "$(docker logs --tail 80 "${kname}" 2>&1)"
+            "$(docker logs --tail "${tail_lines}" "${kname}" 2>&1)"
         rc=1
     elif ! kip="$(_ci_validate_cid_ip "${project}" "${kname}")"; then
         ci_log "[CI-ERROR-VALIDATE-0097]" "container=\"${kname}\" reason=\"no /27 IP for the Kea run container\""
@@ -9004,7 +9005,7 @@ _ci_validate_kea_rollback() {
         # From: Issue #1683 | PR #1912
         if [ "${rc}" -ne 0 ]; then
             ci_error "[CI-ERROR-VALIDATE-0126]" "ui=\"${uname}\" kea=\"${kname}\" rc=${rc} reason=\"Kea round trip failed; run logs in raw\"" \
-                "$(docker logs --tail 80 "${uname}" 2>&1; docker logs --tail 80 "${kname}" 2>&1)"
+                "$(docker logs --tail "${tail_lines}" "${uname}" 2>&1; docker logs --tail "${tail_lines}" "${kname}" 2>&1)"
         fi
         _ci_validate_rm_run "${uname}" || { [ "${rc}" -ne 0 ] || rc=2; }
     else

@@ -1063,6 +1063,10 @@ ci_variables:
   # Why: GitHub caps a body; the run log holds the rest.
   # From: Issue #1683 | PR #1912
   CI_STATUS_EVIDENCE_BYTES: 20000
+  # What: log lines a failed validation run container ships.
+  # Why: the cause sits at the log end; the rest is run log.
+  # From: Issue #1683 | PR #1912
+  CI_VALIDATE_RUN_LOG_TAIL: 80
   # What: PR actors whose token cannot write issues.
   # Why: a status write would fail; the report says NOT-RUN.
   # From: Issue #1683 | PR #1912
