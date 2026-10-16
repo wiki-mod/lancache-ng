@@ -8600,6 +8600,14 @@ _ci_validate_setup_rollback() {
     local _ci_sr_env="$3" _ci_sr_svc="$4" _ci_sr_compose _ci_sr_su _ci_sr_inst
     shift 4
     _ci_sr_rc=0
+    # What: the run's state root leads the one-run env file
+    # Why: setup.sh reads the state root only from that file
+    # From: Issue #1683 | PR #1912
+    if [ -z "${LANCACHE_STATE_DIR:-}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0132]" "svc=\"${_ci_sr_svc}\" reason=\"no per-run LANCACHE_STATE_DIR to hand setup.sh\""
+        return 2
+    fi
+    _ci_sr_env="LANCACHE_STATE_DIR=${LANCACHE_STATE_DIR}${_ci_sr_env:+$'\n'${_ci_sr_env}}"
     _ci_sr_compose="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     _ci_sr_su="$(_ci_installer)" || return 2
     _ci_sr_inst="$(dirname "${_ci_sr_compose}")"
@@ -9085,7 +9093,7 @@ PROG
     snap_b="$(_ci_validate_kea_add "${ubase}" "${jar}" "${csrf}" "${sid}" "${mac_b}" \
         "$(_ci_int_to_ipv4 $(( base + 3 )))" "${label}-2" "${snaps}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     rm -f "${jar}"
-    # What: .env.local holds only this run's KEA_* values
+    # What: .env.local holds this run's KEA_* values
     # Why: setup.sh reads a deploy/prod install's .env.local
     # From: Issue #763 | PR #1912
     _ci_validate_setup_rollback resp rc "$(printf 'KEA_CTRL_TOKEN=%s\nKEA_CTRL_HOST=%s\nKEA_DATA_DIR=%s\n' \

@@ -525,6 +525,13 @@ recurrence:
   `_ci_trivy_db_ensure_fresh` runs trivy's own refresh before every scan and
   `_ci_trivy_db_record` prints the DB version and sha256 into the scan result;
   no check detects a skipped refresh.
+- **A rollback leg handing setup.sh no per-run state root** (VALIDATE-0043 at
+  run time): `_ci_validate_setup_rollback` writes `LANCACHE_STATE_DIR` first into
+  the one-run `.env.local` and fails without it; only the live `ci.sh validate`
+  stack run exercises it.
+- **A Trivy ignore entry matching nothing** (AG-VAL-007): `scan-channel` runs the
+  second `--show-suppressed` pass and `_ci_trivyignore_stale` fails; a subset run
+  prints `ignore-stale=NOT-RUN`, so a partial scan never finds a stale entry.
 - **A scan of another image than the published digest**: `scan-stack` scans
   `_ci_published_digest`.
 - **Case-sensitive repository-name comparison**: `_ci_repo` lowercases.
