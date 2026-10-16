@@ -9117,7 +9117,7 @@ _ci_validate_probes() {
 # From: Issue #1683 | PR #1858
 _ci_validate_stack() {
     local candidate="$1" reservation subnet holder project rc=0 up_out
-    local net_ovr pin_ovr shared compose_rel
+    local net_ovr pin_ovr shared compose_copy
     reservation="$(_ci_validate_reserve)" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         [ "${rc}" -eq 2 ] || ci_log "[CI-ERROR-VALIDATE-0015]" "reason=\"no free validation /27 after slot retries\""
@@ -9150,12 +9150,12 @@ _ci_validate_stack() {
     # What: compose runs on a copy in the shared dir.
     # Why: relative binds then name paths the daemon has.
     # From: Issue #1683 | PR #1912
-    compose_rel="$(_ci_variable CI_COMPOSE_FILE)" || { _ci_validate_teardown "${holder}" "${project}"; return 2; }
+    compose_copy="$(_ci_repo_path CI_COMPOSE_FILE "${LANCACHE_STATE_DIR}/repo")" || { _ci_validate_teardown "${holder}" "${project}"; return 2; }
     if ! _ci_validate_stage "${LANCACHE_STATE_DIR}/repo"; then
         _ci_validate_teardown "${holder}" "${project}"
         return 2
     fi
-    export CI_COMPOSE_FILE="${LANCACHE_STATE_DIR}/repo/${compose_rel}"
+    export CI_COMPOSE_FILE="${compose_copy}"
     if ! net_ovr="$(_ci_mktemp "${CI_TMPDIR}/ci-validate-net.XXXXXX.yml")" \
         || ! pin_ovr="$(_ci_mktemp "${CI_TMPDIR}/ci-validate-pin.XXXXXX.yml")"; then
         rm -f "${net_ovr:-}"
