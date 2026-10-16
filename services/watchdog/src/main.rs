@@ -1181,6 +1181,11 @@ const SYSLOG_FILE_GLOB: &str = "*.log";
 // From: Issue #1428 | PR #1912
 const SYSLOG_NG_CTL: &str = "syslog-ng.ctl";
 
+// What: file name of the supervisor status in the run dir.
+// Why: supervisor writes it and the health check reads it.
+// From: Issue #1683 | PR #1912
+const SUPERVISE_STATUS_FILE: &str = "supervise.json";
+
 // What: the status row name of syslog-ng log writing.
 // Why: the dashboard lists every row of the status file.
 // From: Issue #1428 | PR #1912
@@ -4749,7 +4754,7 @@ async fn supervise() -> Result<(), String> {
         settings_file: env_opt("UI_SETTINGS_FILE").map(PathBuf::from),
         desired_file: env_opt("DESIRED_STATE_FILE").map(PathBuf::from),
     };
-    let status_file = ctx.run_dir.join("supervise.json");
+    let status_file = ctx.run_dir.join(SUPERVISE_STATUS_FILE);
     fs::create_dir_all(&ctx.run_dir)
         .map_err(|e| format!("cannot create {}: {e}", ctx.run_dir.display()))?;
     let mut term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
@@ -4826,7 +4831,7 @@ async fn supervise() -> Result<(), String> {
 async fn healthcheck() -> Result<(), String> {
     let need = |key: &str| config::need(&config::process_env, key);
     let dir = need("SUPERVISE_RUN_DIR")?;
-    let path = Path::new(&dir).join("supervise.json");
+    let path = Path::new(&dir).join(SUPERVISE_STATUS_FILE);
     let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let status: SuperviseStatus =
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
