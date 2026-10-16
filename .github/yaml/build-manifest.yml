@@ -532,6 +532,13 @@ runtime:
     # Why: setup.sh timer and ui texts read one value.
     # From: Issue #1683 | PR #1912
     - CONVERGE_TIMER_INTERVAL_MINUTES=5
+    # What: other timings of the host units setup.sh writes.
+    # Why: setup.sh reads them here; no unit text literal.
+    # From: Issue #819 | PR #1912
+    - CONVERGE_TIMER_BOOT_DELAY_MINUTES=2
+    - STACK_UNIT_RESTART_SECONDS=10
+    - AUTO_UPDATE_TIMER_CALENDAR=daily
+    - AUTO_UPDATE_TIMER_SPREAD=1h
     # What: the project address the ui links to.
     # Why: setup.sh bootstrap copy; ci.sh checks both.
     # From: Issue #1683 | PR #1912

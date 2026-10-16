@@ -2008,9 +2008,15 @@ rollback_quickstart_migration() {
 # From: Issue #1683 | PR #1858
 write_lancache_systemd_units() {
     local stack_dir="$1" setup_sh="$SCRIPT_DIR/setup.sh" unit_dir
-    local docker_unit="docker.service" timer_target="timers.target" converge_minutes
+    local docker_unit="docker.service" timer_target="timers.target" defaults
+    local converge_minutes boot_minutes restart_seconds update_calendar update_spread
     unit_dir=$(lancache_sot_value unit_dir runner_host) || exit $?
-    converge_minutes=$(prod_env_default CONVERGE_TIMER_INTERVAL_MINUTES) || exit $?
+    defaults=$(runtime_defaults_list) || exit $?
+    converge_minutes=$(runtime_default_in "$defaults" CONVERGE_TIMER_INTERVAL_MINUTES) || exit $?
+    boot_minutes=$(runtime_default_in "$defaults" CONVERGE_TIMER_BOOT_DELAY_MINUTES) || exit $?
+    restart_seconds=$(runtime_default_in "$defaults" STACK_UNIT_RESTART_SECONDS) || exit $?
+    update_calendar=$(runtime_default_in "$defaults" AUTO_UPDATE_TIMER_CALENDAR) || exit $?
+    update_spread=$(runtime_default_in "$defaults" AUTO_UPDATE_TIMER_SPREAD) || exit $?
     # What: units run compose through setup.sh at run time
     # Why: overrides may change after the unit is written
     # From: Issue #1683 | PR #1858
@@ -2028,7 +2034,7 @@ WorkingDirectory=${stack_dir}
 ExecStart=${compose} up -d
 ExecStop=${compose} down
 Restart=on-failure
-RestartSec=10
+RestartSec=${restart_seconds}
 
 [Install]
 WantedBy=multi-user.target
@@ -2052,7 +2058,7 @@ EOF
 Description=LanCache-NG Convergence Timer
 
 [Timer]
-OnBootSec=2min
+OnBootSec=${boot_minutes}min
 OnUnitActiveSec=${converge_minutes}min
 Unit=${CONVERGE_SERVICE_UNIT}
 
@@ -2081,8 +2087,8 @@ EOF
 Description=LanCache-NG Scheduled Automatic Update Timer
 
 [Timer]
-OnCalendar=daily
-RandomizedDelaySec=1h
+OnCalendar=${update_calendar}
+RandomizedDelaySec=${update_spread}
 Persistent=true
 Unit=${AUTO_UPDATE_SERVICE_UNIT}
 
