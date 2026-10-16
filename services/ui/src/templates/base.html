@@ -94,13 +94,15 @@
     main h1 { font-family: var(--font-display); }
     .stat-num { font-family: var(--font-display); }
 
-    /* What: slate classes mapped to theme tokens in light
+    /* What: slate classes and hovers to light theme tokens
        Why: admin.css colors are fixed, not theme variables
-       From: Issue #1437 */
+       From: Issue #1437 | PR #1912 */
     :root[data-theme="light"] .text-white,
     :root[data-theme="light"] .text-slate-100,
     :root[data-theme="light"] .text-slate-200,
-    :root[data-theme="light"] .text-slate-300 { color: var(--color-text); }
+    :root[data-theme="light"] .text-slate-300,
+    :root[data-theme="light"] .hover\:text-white:hover,
+    :root[data-theme="light"] .hover\:text-slate-300:hover { color: var(--color-text); }
     :root[data-theme="light"] .text-slate-400,
     :root[data-theme="light"] .text-slate-500 { color: var(--color-text-muted); }
     :root[data-theme="light"] .bg-slate-900,
@@ -108,11 +110,13 @@
     :root[data-theme="light"] .bg-slate-800,
     :root[data-theme="light"] .bg-slate-750 { background-color: var(--color-surface); }
     :root[data-theme="light"] .bg-slate-600,
-    :root[data-theme="light"] .bg-slate-700 { background-color: var(--color-surface-raised); }
+    :root[data-theme="light"] .bg-slate-700,
+    :root[data-theme="light"] .hover\:bg-slate-600:hover { background-color: var(--color-surface-raised); }
     :root[data-theme="light"] .border-slate-400,
     :root[data-theme="light"] .border-slate-500,
     :root[data-theme="light"] .border-slate-600,
-    :root[data-theme="light"] .border-slate-700 { border-color: var(--color-border); }
+    :root[data-theme="light"] .border-slate-700,
+    :root[data-theme="light"] .hover\:border-slate-400:hover { border-color: var(--color-border); }
 
     /* What: dock, nav link, card, badge, scrollbar styles
        Why: same look on every page; colours via the tokens */
