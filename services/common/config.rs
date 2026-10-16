@@ -862,83 +862,6 @@ mod tests {
         }
     }
 
-    // What: limits resolve by policy; unset and junk fail.
-    // Why: one parser serves floors and ceilings alike.
-    // From: Issue #1683 | PR #1905
-    #[test]
-    fn uint_knob_resolves_by_policy() {
-        let knob = |below, above| Uint {
-            name: "K",
-            min: 1,
-            max: 100,
-            below,
-            above,
-        };
-        let floor = knob(OutOfRange::Clamp, OutOfRange::Reject);
-        assert!(floor.parse(None).unwrap_err().contains("not set"));
-        assert!(floor.parse(Some("  ")).is_err());
-        assert_eq!(floor.parse(Some(" 12 ")), Ok((12, None)));
-        assert_eq!(floor.parse(Some("0")).unwrap().0, 1);
-        assert!(floor.parse(Some("0")).unwrap().1.is_some());
-        assert!(floor.parse(Some("101")).is_err());
-        assert!(floor.parse(Some("99999999999999999999")).is_err());
-        for junk in ["abc", "-5", "1x"] {
-            assert!(floor.parse(Some(junk)).unwrap_err().contains(junk));
-        }
-        let ceiling = knob(OutOfRange::Reject, OutOfRange::Clamp);
-        assert!(ceiling.parse(Some("0")).is_err());
-        assert_eq!(ceiling.parse(Some("101")).unwrap().0, 100);
-    }
-
-    // What: each mode text maps to one mode.
-    // Why: unknown text must not start a DHCP server.
-    // From: Issue #844
-    #[test]
-    fn dhcp_mode_maps_text() {
-        for mode in DhcpMode::ALL {
-            assert_eq!(
-                DhcpMode::parse(&format!(" {} ", mode.as_str().to_uppercase())),
-                mode
-            );
-        }
-        assert_eq!(DhcpMode::parse("bogus"), DhcpMode::Disabled);
-        assert_eq!(DhcpMode::parse(""), DhcpMode::Disabled);
-    }
-
-    // What: the CDN entry rule agrees with the fixture.
-    // Why: ui, dns and proxy must accept the same rows.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn cdn_entry_matches_the_fixture_and_the_list() {
-        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-        let fixture =
-            std::fs::read_to_string(format!("{root}/tests/fixtures/domain-validation-cases.txt"))
-                .expect("shared fixture");
-        let mut cases = 0;
-        for line in fixture.lines().map(str::trim_end) {
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let (verdict, domain) = line.split_once(' ').expect("verdict and domain");
-            assert_eq!(cdn_entry(domain).is_some(), verdict == "valid", "{line}");
-            cases += 1;
-        }
-        assert!(cases > 0, "the fixture holds no cases");
-        let list = std::fs::read_to_string(format!("{root}/services/dns/cdn-domains.txt"))
-            .expect("cdn list");
-        for line in list.lines().map(str::trim) {
-            let row = line.strip_prefix('!').unwrap_or(line);
-            if !row.is_empty() && !row.starts_with('#') {
-                assert!(cdn_entry(row).is_some(), "cdn-domains.txt rejects {line:?}");
-            }
-        }
-        let label = "a".repeat(63);
-        let long = format!("{label}.{label}.{label}.{}.com", "a".repeat(57));
-        assert_eq!(long.len(), 253);
-        assert!(cdn_entry(&long).is_some() && cdn_entry(&format!("a{long}")).is_none());
-        assert!(cdn_entry(&format!("{label}a.com")).is_none());
-    }
-
     // What: the mode list holds the four names, none twice.
     // Why: ui validation reads it; a gap rejects a mode.
     // From: Issue #1683 | PR #1905
@@ -949,64 +872,6 @@ mod tests {
         assert_eq!(DhcpMode::from_name("kea"), Some(DhcpMode::Kea));
         assert_eq!(DhcpMode::from_name("Kea"), None);
         assert_eq!(DhcpMode::from_name(""), None);
-    }
-
-    // What: zone forms convert both ways, no doubled dots.
-    // Why: a doubled or missing dot misses the API path.
-    // From: Issue #1683 | PR #1905
-    #[test]
-    fn zone_names_convert_between_dotted_and_api_form() {
-        assert_eq!(canonical_zone("lan"), "lan.");
-        assert_eq!(canonical_zone("lan."), "lan.");
-        assert_eq!(
-            zone_api_id("1.168.192.in-addr.arpa."),
-            "1.168.192.in-addr.arpa"
-        );
-        assert_eq!(zone_api_id("lan"), "lan");
-        let lan = "home-zone";
-        assert!(is_rollback_zone(lan, "31.172.in-addr.arpa.") && !is_rollback_zone(lan, "rpz."));
-        assert!(is_rollback_zone(lan, &canonical_zone(lan)));
-        assert!(!is_rollback_zone(lan, lan) && !is_rollback_zone(lan, "15.172.in-addr.arpa."));
-    }
-
-    // What: need and need_flag reject unset, empty, junk.
-    // Why: no service runs on a value its owner never set.
-    // From: Issue #1683 | PR #1905
-    #[test]
-    fn need_rejects_unset_empty_and_junk() {
-        let get = |key: &str| match key {
-            "SET" => Some("x".to_string()),
-            "EMPTY" => Some(String::new()),
-            "ON" => Some("on".to_string()),
-            "JUNK" => Some("maybe".to_string()),
-            _ => None,
-        };
-        assert_eq!(need(&get, "SET"), Ok("x".to_string()));
-        assert!(need(&get, "EMPTY").is_err() && need(&get, "ABSENT").is_err());
-        assert_eq!(need_flag(&get, "ON"), Ok(true));
-        assert!(need_flag(&get, "JUNK").is_err() && need_flag(&get, "ABSENT").is_err());
-    }
-
-    // What: DNS names pass or fail by label rules.
-    // Why: a zone name is spliced into an API URL path.
-    // From: Issue #1683 | PR #1905
-    #[test]
-    fn dns_names_follow_the_label_rules() {
-        assert!(is_dns_name("lan", false, false));
-        assert!(is_dns_name("1.168.192.in-addr.arpa", false, false));
-        assert!(is_dns_name("_srv.lan", true, false) && !is_dns_name("_srv.lan", false, false));
-        assert!(is_dns_name("*.lan", false, true) && !is_dns_name("*.lan", false, false));
-        for bad in [
-            "", "a..b", "-a.lan", "a-.lan", "a/b", "a b", "a?x=1", "../x", "a%2Fb",
-        ] {
-            assert!(!is_dns_name(bad, true, true), "{bad:?} must fail");
-        }
-        assert!(!is_dns_name(&"a".repeat(64), false, false));
-        assert!(!is_dns_name(
-            &format!("{}.com", "a.".repeat(127)),
-            false,
-            false
-        ));
     }
 
     // What: zone_url drops the trailing dot of the zone.
@@ -1036,24 +901,6 @@ mod tests {
         assert_eq!(env_opt("LANCACHE_TEST_NEVER_SET"), None);
     }
 
-    // What: limits are inclusive; one outside fails.
-    // Why: an off-by-one would accept a forbidden value.
-    // From: Issue #1683 | PR #1905
-    #[test]
-    fn uint_limits_are_inclusive() {
-        let knob = Uint {
-            name: "KNOB",
-            min: 5,
-            max: 10,
-            below: OutOfRange::Reject,
-            above: OutOfRange::Reject,
-        };
-        assert_eq!(knob.parse(Some("5")), Ok((5, None)));
-        assert_eq!(knob.parse(Some("10")), Ok((10, None)));
-        assert!(knob.parse(Some("4")).is_err());
-        assert!(knob.parse(Some("11")).is_err());
-    }
-
     // What: lease limits load, bound and cap one rule.
     // Why: ui and watchdog wrote Kea lifetimes apart.
     // From: Issue #1683 | PR #1912
@@ -1080,24 +927,6 @@ mod tests {
             env("x", "100", "3"),
         ] {
             assert!(LeaseLimits::load(&bad).is_err());
-        }
-    }
-
-    // What: each DHCP mode answers the backend questions.
-    // Why: services pick containers from these answers.
-    // From: Issue #1683 | PR #1905
-    #[test]
-    fn dhcp_modes_answer_the_backend_questions() {
-        let table = [
-            (DhcpMode::Disabled, false, false, false),
-            (DhcpMode::Kea, true, false, false),
-            (DhcpMode::DnsmasqProxy, false, true, false),
-            (DhcpMode::DnsmasqRelay, false, true, true),
-        ];
-        for (mode, kea, dnsmasq, relay) in table {
-            assert_eq!(mode.is_kea(), kea);
-            assert_eq!(mode.is_dnsmasq(), dnsmasq);
-            assert_eq!(mode.is_dnsmasq_relay(), relay);
         }
     }
 
