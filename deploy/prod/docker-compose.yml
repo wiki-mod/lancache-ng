@@ -121,10 +121,10 @@ services:
       - &mount-ui-data-ro ui-data:${SOT_UI_DATA_DIR}:ro
       - watchdog-status:${SOT_STATUS_DIR}
       - proxy-cache:${SOT_CACHE_DIR}
-      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_SYSLOG_NG}}:${SOT_SYSLOG_LOG_ROOT}
+      - ${SYSLOG_NG_LOG_DIR:?SYSLOG_NG_LOG_DIR is required}:${SOT_SYSLOG_LOG_ROOT}
       - retention-state:${SOT_RETENTION_STATE_DIR}
-      - ${NTP_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_NTP}}:${SOT_NTP_STATE_DIR}
-      - ${CACHEHAMSTER_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_CACHEHAMSTER}}:${SOT_CACHEHAMSTER_DATA_DIR}
+      - ${NTP_DATA_DIR:?NTP_DATA_DIR is required}:${SOT_NTP_STATE_DIR}
+      - ${CACHEHAMSTER_DATA_DIR:?CACHEHAMSTER_DATA_DIR is required}:${SOT_CACHEHAMSTER_DATA_DIR}
       - netdataconfig:${SOT_NETDATA_CONFIG_DIR}
       - netdatalib:${SOT_NETDATA_LIB_DIR}
       - netdatacache:${SOT_NETDATA_CACHE_DIR}
@@ -170,7 +170,7 @@ services:
       CACHE_INACTIVE: ${CACHE_INACTIVE:-}
       CACHE_MIN_FREE: ${CACHE_MIN_FREE:-}
     volumes:
-      - ${CA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_CA}}:${SOT_NGINX_DIR}/${SOT_NGINX_SUBDIR_CA}
+      - ${CA_DIR:?CA_DIR is required}:${SOT_NGINX_DIR}/${SOT_NGINX_SUBDIR_CA}
       - &mount-cdn-domains ../../services/dns/cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}
       - proxy-cache:${SOT_NGINX_CACHE_DIR}
       - proxy-certs:${SOT_NGINX_DIR}/${SOT_NGINX_SUBDIR_CERTS}
@@ -202,10 +202,10 @@ services:
     volumes:
       - *mount-secrets
       - *mount-cdn-domains
-      - ${PDNS_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_PDNS}}:${SOT_PDNS_DATA_DIR}
-      - &mount-pdns-filter ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_PDNS_FILTER}}:${SOT_DNS_STATE_DIR}
-      - ${NATS_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_NATS}}:${SOT_NATS_STORE_DIR}
-      - &mount-nats-conf ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_NATS_CONF}}:${SOT_NATS_CONF_MOUNT}
+      - ${PDNS_DIR:?PDNS_DIR is required}:${SOT_PDNS_DATA_DIR}
+      - &mount-pdns-filter ${PDNS_FILTER_STATE_DIR:?PDNS_FILTER_STATE_DIR is required}:${SOT_DNS_STATE_DIR}
+      - ${NATS_DATA_DIR:?NATS_DATA_DIR is required}:${SOT_NATS_STORE_DIR}
+      - &mount-nats-conf ${NATS_CONF_DIR:?NATS_CONF_DIR is required}:${SOT_NATS_CONF_MOUNT}
       - dns-config-snapshots:${SOT_DNS_SNAPSHOT_MOUNT}
     # What: dns-http on IP_HTTP, dns-https on IP_HTTPS.
     # Why: one container port each keeps the caches apart.
@@ -250,7 +250,7 @@ services:
     volumes:
       - *mount-secrets
       - *mount-ui-data-ro
-      - &mount-kea-data ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_KEA}}:${SOT_KEA_DATA_DIR}
+      - &mount-kea-data ${KEA_DATA_DIR:?KEA_DATA_DIR is required}:${SOT_KEA_DATA_DIR}
       - dhcp-config-snapshots:${SOT_DHCP_SNAPSHOT_MOUNT}
     network_mode: host
     # What: bind DHCP ports and change network settings.
@@ -291,7 +291,7 @@ services:
       - *mount-pdns-filter
       - *mount-nats-conf
       - *mount-kea-data
-      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_SYSLOG_NG}}:${SOT_SYSLOG_LOG_ROOT}:ro
+      - ${SYSLOG_NG_LOG_DIR:?SYSLOG_NG_LOG_DIR is required}:${SOT_SYSLOG_LOG_ROOT}:ro
       - watchdog-status:${SOT_STATUS_DIR}:ro
     # What: Admin UI on UI_BIND_IP, default IP_HTTP.
     # Why: UI_BIND_IP narrows the LAN exposure of the UI.
@@ -318,7 +318,7 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: ${CACHE_DIR:-${LANCACHE_STATE_DIR:?LANCACHE_STATE_DIR is required}/${SOT_STATE_SUBDIR_CACHE}}
+      device: ${CACHE_DIR:?CACHE_DIR is required}
   proxy-certs:
   proxy-config-snapshots:
   dns-config-snapshots:
