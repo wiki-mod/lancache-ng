@@ -118,13 +118,15 @@
 
 {% block scripts %}
 <script>
+  // What: POST to the rotate route of one secondary
+  // Why: rotation runs on the server; alert shows the result
   async function rotateToken(name) {
     try {
       const response = await fetch('{{ routes.secondary_rotate | safe }}'.replace('{name}', name), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-CSRF-Token': '{{ csrf_token }}'
+          'X-CSRF-Token': CSRF_TOKEN
         },
         body: JSON.stringify({
           token: "{{ registration_token }}"
@@ -142,6 +144,8 @@
     }
   }
 
+  // What: DELETE of one secondary after confirm()
+  // Why: removal cannot be undone; the page then reloads
   async function removeSecondary(name) {
     if (!confirm(`${name} wirklich entfernen?`)) {
       return;
@@ -151,7 +155,7 @@
       const response = await fetch('{{ routes.secondary | safe }}'.replace('{name}', name), {
         method: 'DELETE',
         headers: {
-          'X-CSRF-Token': '{{ csrf_token }}'
+          'X-CSRF-Token': CSRF_TOKEN
         }
       });
 
@@ -179,6 +183,8 @@
     error: ['Unerwartete Antwort', 'text-amber-400'],
   };
 
+  // What: writes label, serial and detail of one probe
+  // Why: one renderer for the click and the page-load run
   function renderHealth(span, data) {
     const [label, cls] = HEALTH_LABELS[data.status] || ['Unbekannt', 'text-slate-500'];
     span.className = cls;
@@ -186,13 +192,15 @@
     if (data.detail) span.title = data.detail;
   }
 
+  // What: POST health probe of one secondary, shows status
+  // Why: the DNS probe runs on the server, not in the page
   async function checkSecondaryHealth(name) {
     const span = document.getElementById('health-' + name);
     if (span) { span.className = 'text-slate-400'; span.textContent = 'Prüfe…'; }
     try {
       const response = await fetch('{{ routes.secondary_health | safe }}'.replace('{name}', name), {
         method: 'POST',
-        headers: { 'X-CSRF-Token': '{{ csrf_token }}' }
+        headers: { 'X-CSRF-Token': CSRF_TOKEN }
       });
       if (response.ok) {
         renderHealth(span, await response.json());
@@ -205,13 +213,15 @@
     }
   }
 
+  // What: prompt() for a new address, POST, then reload
+  // Why: the server checks it; 400 means not a private IPv4
   async function editSecondaryAddress(name, current) {
     const input = prompt(`Adresse (private IPv4) für ${name}:`, current || '');
     if (input === null) return;
     try {
       const response = await fetch('{{ routes.secondary_address | safe }}'.replace('{name}', name), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': '{{ csrf_token }}' },
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
         body: JSON.stringify({ address: input.trim() })
       });
       if (response.ok) {

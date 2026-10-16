@@ -479,14 +479,20 @@
 
   {% endif %}
 </div>
+{% endblock %}
 
+{% block scripts %}
 {% if dhcp_has_kea %}
 <script>
+// What: shows or hides the new-subnet form
+// Why: the form stays hidden until the button is pressed
 function toggleAddSubnet() {
   const el = document.getElementById('add-subnet-form');
   el.classList.toggle('hidden');
 }
 
+// What: shows or hides the edit form of subnet id
+// Why: each subnet row has its own hidden edit form
 function toggleEditSubnet(id) {
   const el = document.getElementById('edit-subnet-' + id);
   el.classList.toggle('hidden');
@@ -514,6 +520,8 @@ function showDetails(listEl, details) {
   }
 }
 
+// What: runs the DHCP check and fills the status card
+// Why: the probe runs on the server; the page shows it
 async function checkDhcpConflict() {
   const statusEl = document.getElementById('check-status');
   const conflictEl = document.getElementById('check-conflict-status');
@@ -532,7 +540,7 @@ async function checkDhcpConflict() {
     const res = await fetch('{{ routes.dhcp_check | safe }}', {
       method: 'POST',
       headers: {
-        'X-CSRF-Token': '{{ csrf_token }}'
+        'X-CSRF-Token': CSRF_TOKEN
       }
     });
     const data = await res.json();
@@ -577,6 +585,8 @@ async function checkDhcpConflict() {
   }
 }
 
+// What: runs the DHCP check once after the page loads
+// Why: status shows without a click on "Erneut prüfen"
 document.addEventListener('DOMContentLoaded', checkDhcpConflict);
 </script>
 {% endif %}
