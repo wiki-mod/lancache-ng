@@ -837,7 +837,7 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
                 Some(patch.to_string()),
             )
             .await;
-        let rejected = match sent {
+        let refusal = match sent {
             Ok(response) if response.status().is_success() => None,
             Ok(response) => Some(format!(
                 "PowerDNS rejected rollback PATCH: {}",
@@ -845,7 +845,7 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
             )),
             Err(e) => Some(format!("failed to apply rollback PATCH: {e}")),
         };
-        if let Some(message) = rejected {
+        if let Some(message) = refusal {
             let log = format!(
                 "rollback PATCH for zone {zone} snapshot {} failed: {message}",
                 request.snapshot_id
