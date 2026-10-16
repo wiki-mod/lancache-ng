@@ -114,7 +114,7 @@ pub struct Df {
 // Why: std has no statvfs; used percent rounds up.
 pub fn df(path: &Path) -> Option<Df> {
     let stat = rustix::fs::statvfs(path).ok()?;
-    // What: used = blocks minus free; total = used plus avail.
+    // What: used = blocks - free; total = used + avail.
     // Why: df counts reserved blocks as used, not as total.
     let used = stat.f_blocks.checked_sub(stat.f_bfree)?;
     let total = used.checked_add(stat.f_bavail)?;
@@ -143,7 +143,7 @@ fn drain<R: Read + Send + 'static>(
             None => Err(io::Error::other("pipe missing")),
         };
         // What: a closed channel means the caller gave up.
-        // Why: the timeout path drops the receiver on purpose.
+        // Why: the timeout path drops the receiver.
         match sender.send(read) {
             Ok(()) | Err(_) => {}
         }
@@ -173,7 +173,7 @@ pub fn run_program(
     // Why: one full pipe would block the program.
     let out = drain(child.stdout.take());
     let err = drain(child.stderr.take());
-    // What: the end of the limit, with the limit for messages.
+    // What: the deadline and limit of the program.
     // Why: the wait and the readers share one deadline.
     let deadline = limit.map(|limit| (std::time::Instant::now() + limit, limit));
     let status = match deadline {
@@ -201,7 +201,7 @@ pub fn run_program(
     let mut text = String::new();
     for reader in [out, err] {
         // What: with a limit the pipes get the rest of it.
-        // Why: a grandchild may keep a pipe open after exit.
+        // Why: a grandchild may hold a pipe after exit.
         let received = match deadline {
             None => reader
                 .recv()
@@ -323,7 +323,7 @@ pub fn files_under(root: &Path) -> io::Result<Vec<(PathBuf, fs::Metadata)>> {
     let dev = fs::symlink_metadata(root)?.dev();
     let (mut files, mut dirs) = (Vec::new(), vec![root.to_path_buf()]);
     while let Some(dir) = dirs.pop() {
-        // What: a vanished directory below the root is skipped.
+        // What: skip a directory gone since listing.
         // Why: cache and logs change during a scan.
         let entries = match fs::read_dir(&dir) {
             Err(e) if e.kind() == io::ErrorKind::NotFound && dir != root => continue,
@@ -342,8 +342,8 @@ pub fn files_under(root: &Path) -> io::Result<Vec<(PathBuf, fs::Metadata)>> {
             if meta.dev() != dev {
                 continue;
             }
-            // What: walk directories, collect regular files only.
-            // Why: a symlink or device node is no cache content.
+            // What: walk dirs, collect regular files.
+            // Why: a link or device node is no cache file.
             if meta.is_dir() {
                 dirs.push(path);
             } else if meta.is_file() {
@@ -819,8 +819,8 @@ impl SnapshotStore {
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            // What: count a dir with a numeric id and its payload.
-            // Why: staging or empty dirs are no rollback target.
+            // What: count dirs with a numeric id, payload.
+            // Why: staging or empty dirs are no target.
             let complete = entry.file_type()?.is_dir()
                 && is_snapshot_id(&name)
                 && entry.path().join(self.file).is_file();
@@ -850,7 +850,7 @@ impl SnapshotStore {
     pub fn create(&self, data: &Value, keep_n: u32) -> anyhow::Result<String> {
         let id = format!("{:020}", unix_nanos());
         // What: write into a staging dir under the root.
-        // Why: only the rename below makes a snapshot visible.
+        // Why: only the rename makes a snapshot visible.
         let staging = self.root.join(format!("{STAGING}{id}"));
         fs::create_dir_all(&staging)
             .with_context(|| format!("cannot create staging directory {}", staging.display()))?;
@@ -863,8 +863,8 @@ impl SnapshotStore {
             return Err(drop_staging(&staging, e));
         }
         self.log("CREATE", &format!("created known-good snapshot {id}"));
-        // What: a failed prune is logged, the snapshot stays.
-        // Why: the new snapshot is written; pruning is upkeep.
+        // What: a failed prune is logged only.
+        // Why: the snapshot is written; prune is upkeep.
         if let Err(e) = self.prune(keep_n) {
             self.log(
                 "FATAL",
@@ -896,7 +896,7 @@ impl SnapshotStore {
                 Err(e) => self.log("FATAL", &format!("failed to prune snapshot {id}: {e}")),
             }
         }
-        // What: convert old shell snapshots after each prune.
+        // What: convert old shell snapshots after prune.
         // Why: an update keeps its rollback targets.
         self.adopt_legacy();
         Ok(())
@@ -950,7 +950,7 @@ impl SnapshotStore {
             }
         }
         // What: refuse an old snapshot without files.
-        // Why: an empty payload would hide a broken rollback.
+        // Why: an empty payload hides a broken rollback.
         anyhow::ensure!(!set.is_empty(), "{name} holds no file");
         let staging = self.root.join(format!("{STAGING}{id}"));
         fs::create_dir_all(&staging)?;
@@ -960,8 +960,8 @@ impl SnapshotStore {
                 serde_json::to_vec_pretty(&Value::Object(set))?,
             )?;
             fs::rename(&staging, self.root.join(&id))?;
-            // What: remove the old dir after the new one exists.
-            // Why: a crash in between keeps the old snapshot.
+            // What: remove the old dir after the new one.
+            // Why: a crash in between keeps the old copy.
             Ok(fs::remove_dir_all(dir)?)
         };
         finish().map_err(|e| drop_staging(&staging, e))?;
@@ -1016,7 +1016,7 @@ pub fn snapshot_created_unix(id: &str) -> Option<u64> {
 // Why: one rule for all secrets; any shape counts.
 // From: Issue #967
 pub fn is_placeholder(value: &str) -> bool {
-    // What: lowercase the value and turn dashes to underscores.
+    // What: lowercase; turn dashes to underscores.
     // Why: CHANGE-ME and change_me are one placeholder.
     let normalized = value.to_lowercase().replace('-', "_");
     normalized.is_empty()
@@ -1083,11 +1083,11 @@ pub fn write_file_as(
         .and_then(|mut file| {
             file.write_all(contents)?;
             // What: set the owner on the open file.
-            // Why: the name could be swapped before the chown.
+            // Why: the name could be swapped before chown.
             if let Some(owner) = owner {
                 own_file(&file, &tmp, owner, None)?;
             }
-            // What: flush the content to disk before placing.
+            // What: flush the content before placing.
             // Why: a crash must not leave an empty target.
             file.sync_all()
         })
@@ -1120,7 +1120,7 @@ pub fn write_if_changed(
     mode: u32,
     owner: Option<Owner>,
 ) -> io::Result<bool> {
-    // What: compare bytes; an unreadable file counts as changed.
+    // What: compare bytes; unreadable = changed.
     // Why: a missing or broken file must be written again.
     let changed = fs::read(path).ok().as_deref() != Some(contents);
     if changed {
@@ -1142,7 +1142,7 @@ pub fn load_or_create<T>(
     parse: impl Fn(&str) -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
     match fs::read_to_string(path) {
-        // What: parse the stored text without outer whitespace.
+        // What: parse the stored text, trimmed.
         // Why: the trailing newline is no part of a secret.
         Ok(contents) => parse(contents.trim()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
@@ -1158,7 +1158,7 @@ pub fn load_or_create<T>(
             }
         }
         // What: every other read error fails the call.
-        // Why: an unreadable file must not rotate the secret.
+        // Why: an unreadable file must not rotate it.
         Err(err) => Err(err.into()),
     }
 }
@@ -1179,7 +1179,7 @@ pub fn shared_secret(
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<String, String> {
     // What: a real env value wins over the file.
-    // Why: an operator's explicit value is the intended one.
+    // Why: an operator's explicit value is intended.
     let configured = env(var).unwrap_or_default();
     if !is_placeholder(&configured) {
         return Ok(configured);
@@ -1187,10 +1187,10 @@ pub fn shared_secret(
     let path = Path::new(dir).join(shared_secret_file_name(var));
     match fs::read_to_string(&path) {
         // What: drop newlines from the file text.
-        // Why: the file ends in a newline; the secret has none.
+        // Why: the file ends in a newline; secret has none.
         Ok(value) => Ok(value.replace('\n', "")),
         // What: a missing file gives an empty secret.
-        // Why: the backend writes it later; the caller decides.
+        // Why: the backend writes it later.
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
         Err(e) => Err(format!("cannot read {var} from {}: {e}", path.display())),
     }
@@ -1279,7 +1279,7 @@ pub fn resolve_shared_secret(
     } else {
         current.to_string()
     };
-    // What: create exclusively for a new value, else replace.
+    // What: create exclusively for a new value.
     // Why: two starters must not both create a new secret.
     let place = if current.is_empty() {
         Place::Exclusive
@@ -1361,13 +1361,13 @@ impl std::error::Error for DockerError {}
 // Why: a container without a tty multiplexes its streams.
 fn log_text(mut bytes: &[u8]) -> String {
     let mut text = String::new();
-    // What: cut the stream into frames of 8 byte header, payload.
-    // Why: the header holds the stream id and the payload size.
+    // What: cut frames of 8 byte header, payload.
+    // Why: the header holds stream id and size.
     while bytes.len() >= 8 {
         let size = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
         let end = bytes.len().min(8usize.saturating_add(size));
         // What: keep stdout (1) and stderr (2) frames only.
-        // Why: stdin and other stream ids carry no log text.
+        // Why: other stream ids carry no log text.
         if matches!(bytes[0], 1 | 2) {
             text.push_str(&String::from_utf8_lossy(&bytes[8..end]));
         }
@@ -1411,7 +1411,7 @@ impl PowerDns {
             .request(method, url)
             .header("X-API-Key", &self.api_key);
         // What: add a JSON content type only with a body.
-        // Why: a bodiless GET must not claim a content type.
+        // Why: a bodiless GET claims no content type.
         if let Some(body) = body {
             request = request
                 .header("Content-Type", "application/json")
@@ -1434,7 +1434,7 @@ impl PowerDns {
             .json()
             .await
             .map_err(|e| format!("cannot decode the zone export: {e}"))?;
-        // What: a 2xx answer without rrsets is an empty zone.
+        // What: a 2xx answer without rrsets is empty.
         // Why: a new zone exports no rrsets key yet.
         Ok(body
             .get("rrsets")
@@ -1477,7 +1477,7 @@ impl DockerApi {
         // Why: a 3xx could reach an unexpected path.
         let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
         // What: a unix socket gets a fixed dummy host name.
-        // Why: HTTP over a socket needs a host; none is real.
+        // Why: HTTP over a socket needs a host name.
         let (builder, base_url) = match endpoint.strip_prefix(DOCKER_UNIX_PREFIX) {
             Some(socket) => (
                 builder.unix_socket(PathBuf::from(socket)),
@@ -1486,7 +1486,7 @@ impl DockerApi {
             None => (builder, endpoint.trim_end_matches('/').to_string()),
         };
         // What: build the client; a failure is a bug.
-        // Why: no custom TLS is set, so the builder cannot fail.
+        // Why: no custom TLS is set; the build works.
         let client = builder
             .build()
             .expect("a client without custom TLS settings always builds");
@@ -1533,8 +1533,8 @@ impl DockerApi {
         path: &str,
         timeout: Option<Duration>,
     ) -> Result<Vec<u8>, DockerError> {
-        // What: map a reqwest error to Timeout or Transport.
-        // Why: callers act on a timeout apart from other faults.
+        // What: map a reqwest error to Timeout/Transport.
+        // Why: callers treat a timeout apart.
         let failed = |e: reqwest::Error| match e.is_timeout() {
             true => DockerError::Timeout,
             false => DockerError::Transport(e.to_string()),
@@ -1550,7 +1550,7 @@ impl DockerApi {
         let response = request.send().await.map_err(failed)?;
         let status = response.status();
         // What: accept 2xx and 304, refuse everything else.
-        // Why: 304 means the container is in that state already.
+        // Why: 304 means the state is set already.
         if !status.is_success() && status != reqwest::StatusCode::NOT_MODIFIED {
             return Err(DockerError::Status(status.as_u16()));
         }
