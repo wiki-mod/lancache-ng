@@ -1141,16 +1141,23 @@ env_key_has_value() {
     [[ -n "$value" ]]
 }
 
-# What: true for empty, CHANGE_ME_* and similar placeholders
-# Why: setup replaces placeholders, not keeps them
+# What: true for empty, CHANGE_ME_*, <...> and alike
+# Why: shared.rs rule; plain sh, the dns exec embeds it
 secret_value_is_placeholder() {
-    local value="$1"
-    local normalized="${value,,}"
-    normalized="${normalized//-/_}"
+    local value="$1" normalized
+    normalized=$(printf '%s' "$value" | tr '[:upper:]-' '[:lower:]_')
     case "$normalized" in
-        ""|change_me_*|your_*_here|changeme*|*change_me*|lancache_*_secret)
+        ""|*change_me*|changeme*|your_*|*_here)
             return 0
             ;;
+        lancache_*)
+            case "$normalized" in
+                *_secret) return 0 ;;
+            esac
+            ;;
+    esac
+    case "$value" in
+        "<"*">") return 0 ;;
     esac
     return 1
 }
@@ -5967,12 +5974,10 @@ dns_rollback_exec() (
     # From: Issue #1683 | PR #1858
     trap 'rm -f -- "$err_file"' EXIT
 
-    local exec_script
+    local exec_script placeholder_fn
     exec_script=$(cat <<'SCRIPT'
             key="$PDNS_API_KEY"
-            case "$key" in
-                ""|CHANGE_ME*|changeme*|change_me*|YOUR_*|*_HERE) key="" ;;
-            esac
+            ! secret_value_is_placeholder "$key" || key=""
             secrets=$(lancache-watchdog get LANCACHE_SHARED_SECRET_DIR) || exit 7
             if [ -z "$key" ] && [ -s "$secrets/pdns-api-key" ]; then
                 key=$(tr -d "\n" < "$secrets/pdns-api-key")
@@ -5994,6 +5999,9 @@ dns_rollback_exec() (
             fi
 SCRIPT
     ) || die "Cannot build the listener request script (exit $?)."
+    placeholder_fn=$(declare -f secret_value_is_placeholder) \
+        || die "Cannot read secret_value_is_placeholder (exit $?)."
+    exec_script="${placeholder_fn}"$'\n'"${exec_script}"
     stdout_val=$(stack_compose "$install_dir" "$env_file" -p "$project" exec -T "$container" sh -c "$exec_script" sh "$method" "$path" "$body" 2>"$err_file") || rc=$?
     exec_err=$(cat "$err_file") || die "Cannot read $err_file (exit $?)."
 
