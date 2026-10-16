@@ -114,8 +114,12 @@ pub struct Df {
 // Why: std has no statvfs; used percent rounds up.
 pub fn df(path: &Path) -> Option<Df> {
     let stat = rustix::fs::statvfs(path).ok()?;
+    // What: used = blocks minus free; total = used plus avail.
+    // Why: df counts reserved blocks as used, not as total.
     let used = stat.f_blocks.checked_sub(stat.f_bfree)?;
     let total = used.checked_add(stat.f_bavail)?;
+    // What: no figures for a filesystem without blocks.
+    // Why: a division by zero must not read as 0 percent.
     if total == 0 {
         return None;
     }
@@ -314,9 +318,13 @@ fn own_with(
 // From: Issue #1683 | PR #1912
 pub fn files_under(root: &Path) -> io::Result<Vec<(PathBuf, fs::Metadata)>> {
     use std::os::unix::fs::MetadataExt as _;
+    // What: remember the device id of the root.
+    // Why: a mount below the root is not part of the scan.
     let dev = fs::symlink_metadata(root)?.dev();
     let (mut files, mut dirs) = (Vec::new(), vec![root.to_path_buf()]);
     while let Some(dir) = dirs.pop() {
+        // What: a vanished directory below the root is skipped.
+        // Why: cache and logs change during a scan.
         let entries = match fs::read_dir(&dir) {
             Err(e) if e.kind() == io::ErrorKind::NotFound && dir != root => continue,
             other => other?,
@@ -329,9 +337,13 @@ pub fn files_under(root: &Path) -> io::Result<Vec<(PathBuf, fs::Metadata)>> {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
                 other => other?,
             };
+            // What: skip an entry on another device.
+            // Why: the scan must not cross into a mount.
             if meta.dev() != dev {
                 continue;
             }
+            // What: walk directories, collect regular files only.
+            // Why: a symlink or device node is no cache content.
             if meta.is_dir() {
                 dirs.push(path);
             } else if meta.is_file() {
@@ -465,10 +477,14 @@ pub fn openssl_x509(crt: &Path, args: &[&str]) -> Result<String, String> {
 // Why: no hash; the loop runs over the expected length.
 pub fn ct_eq(presented: &str, expected: &str) -> bool {
     let (presented, expected) = (presented.as_bytes(), expected.as_bytes());
+    // What: compare every expected byte, never stop early.
+    // Why: the run time must not reveal the first mismatch.
     let mut same = Choice::from(1);
     for (i, want) in expected.iter().enumerate() {
         same &= presented.get(i).copied().unwrap_or(!want).ct_eq(want);
     }
+    // What: also require equal length.
+    // Why: a longer input with the same prefix must fail.
     bool::from(same & (presented.len() as u64).ct_eq(&(expected.len() as u64)))
 }
 
@@ -803,6 +819,8 @@ impl SnapshotStore {
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
+            // What: count a dir with a numeric id and its payload.
+            // Why: staging or empty dirs are no rollback target.
             let complete = entry.file_type()?.is_dir()
                 && is_snapshot_id(&name)
                 && entry.path().join(self.file).is_file();
@@ -831,6 +849,8 @@ impl SnapshotStore {
     // Why: staging plus rename; a crash leaves no partial.
     pub fn create(&self, data: &Value, keep_n: u32) -> anyhow::Result<String> {
         let id = format!("{:020}", unix_nanos());
+        // What: write into a staging dir under the root.
+        // Why: only the rename below makes a snapshot visible.
         let staging = self.root.join(format!("{STAGING}{id}"));
         fs::create_dir_all(&staging)
             .with_context(|| format!("cannot create staging directory {}", staging.display()))?;
@@ -843,6 +863,8 @@ impl SnapshotStore {
             return Err(drop_staging(&staging, e));
         }
         self.log("CREATE", &format!("created known-good snapshot {id}"));
+        // What: a failed prune is logged, the snapshot stays.
+        // Why: the new snapshot is written; pruning is upkeep.
         if let Err(e) = self.prune(keep_n) {
             self.log(
                 "FATAL",
@@ -855,6 +877,8 @@ impl SnapshotStore {
     // What: delete the oldest snapshots beyond keep_n.
     // Why: a failed removal is logged, not a write failure.
     pub fn prune(&self, keep_n: u32) -> io::Result<()> {
+        // What: refuse a retention of zero.
+        // Why: zero would delete every known-good snapshot.
         if keep_n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -872,6 +896,8 @@ impl SnapshotStore {
                 Err(e) => self.log("FATAL", &format!("failed to prune snapshot {id}: {e}")),
             }
         }
+        // What: convert old shell snapshots after each prune.
+        // Why: an update keeps its rollback targets.
         self.adopt_legacy();
         Ok(())
     }
@@ -905,6 +931,8 @@ impl SnapshotStore {
         let nanos = legacy_id_nanos(name)
             .with_context(|| format!("{name} is no old snapshot id (YYYYmmddTHHMMSS.N)"))?;
         let id = format!("{nanos:020}");
+        // What: refuse an id that already exists.
+        // Why: the rename must not replace a snapshot.
         anyhow::ensure!(
             !self.root.join(&id).exists(),
             "a snapshot {id} exists already"
@@ -921,6 +949,8 @@ impl SnapshotStore {
                 );
             }
         }
+        // What: refuse an old snapshot without files.
+        // Why: an empty payload would hide a broken rollback.
         anyhow::ensure!(!set.is_empty(), "{name} holds no file");
         let staging = self.root.join(format!("{STAGING}{id}"));
         fs::create_dir_all(&staging)?;
@@ -930,6 +960,8 @@ impl SnapshotStore {
                 serde_json::to_vec_pretty(&Value::Object(set))?,
             )?;
             fs::rename(&staging, self.root.join(&id))?;
+            // What: remove the old dir after the new one exists.
+            // Why: a crash in between keeps the old snapshot.
             Ok(fs::remove_dir_all(dir)?)
         };
         finish().map_err(|e| drop_staging(&staging, e))?;
