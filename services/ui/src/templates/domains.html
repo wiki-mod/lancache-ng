@@ -61,7 +61,7 @@
 
   <div class="space-y-6">
     {# What: CDN domain list: add, switch, remove
-       Why: one list cdn-domains.txt; certs derive from it #}
+       Why: one list cdn-domains.txt; certs follow it #}
     <section data-dns-panel="cdn" class="card flex flex-col gap-4">
       <div>
         <h2 class="font-semibold text-slate-200">CDN-Domains</h2>
@@ -519,7 +519,7 @@
   document.querySelector('[data-lan-record-form]').addEventListener('submit', validateLanTxtContent);
 
   // What: opens the CDN tab on page load
-  // Why: marks its button active; markup sets no active class
+  // Why: marks its button; markup sets no active class
   setActiveDnsTab('cdn');
 </script>
 {% endblock %}

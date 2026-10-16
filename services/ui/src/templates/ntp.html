@@ -29,7 +29,7 @@
       {{ <on_off_badge on={ntp_enabled}/> }}
     </div>
 
-    {# What: saves chronyd switch, upstream list, DHCP switch
+    {# What: saves chronyd, upstream and DHCP switches
        Why: the watchdog starts or stops chronyd from it #}
     <form method="post" action="{{ routes.ntp_settings | safe }}" class="space-y-4">
       {{ <csrf_field csrf_token={csrf_token}/> }}

@@ -78,7 +78,7 @@
   </div>
 
   <!-- What: router DNAT commands for port 80 to http_ip
-       Why: caches HTTP of every LAN device, no client setup -->
+       Why: caches all LAN devices, no client setup -->
   <div class="card space-y-4">
     <div>
       <h2 class="font-semibold text-slate-200">Transparenter HTTP-Proxy <span class="ml-2 text-xs font-normal px-2 py-0.5 rounded-full bg-green-500/20 text-green-400">Empfohlen</span></h2>
@@ -133,7 +133,7 @@ nft add rule ip lancache prerouting \
   </div>
 
   <!-- What: per-client proxy commands for package managers
-       Why: alternative when the router cannot be changed -->
+       Why: for when the router cannot be changed -->
   <div class="card space-y-4">
     <div>
       <h2 class="font-semibold text-slate-200">Client-seitige Proxy-Einstellung <span class="ml-2 text-xs font-normal px-2 py-0.5 rounded-full bg-slate-600/50 text-slate-400">Alternativ</span></h2>

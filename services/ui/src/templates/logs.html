@@ -25,7 +25,7 @@
   </div>
 
   <!-- What: host filter reloads the page with ?host=
-       Why: parse_syslog_tail opens only that host's files -->
+       Why: parse_syslog_tail reads that host only -->
   <div class="flex gap-3 flex-wrap">
     <select id="syslog-host-filter"
             onchange="location.href = this.value ? ('{{ pages.logs | safe }}?host=' + encodeURIComponent(this.value)) : '{{ pages.logs | safe }}'"

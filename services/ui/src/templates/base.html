@@ -119,7 +119,7 @@
     :root[data-theme="light"] .hover\:border-slate-400:hover { border-color: var(--color-border); }
 
     /* What: dock, nav link, card, badge, scrollbar styles
-       Why: same look on every page; colours via the tokens */
+       Why: same look on every page; tokens set colours */
     .dock { background: var(--color-surface); border-right: 1px solid var(--color-border); }
     .nav-link {
       display: flex; align-items: center; gap: 0.625rem;
@@ -257,7 +257,7 @@
 <body class="h-full flex">
 
   <!-- What: sidebar with logo, nav links and image info
-       Why: same navigation on every page from one layout -->
+       Why: one layout, same navigation on every page -->
   <aside class="dock w-52 shrink-0 flex flex-col">
     <div class="px-4 py-5" style="border-bottom: 1px solid var(--color-border);">
       <div class="flex items-center gap-2">
@@ -332,7 +332,7 @@
         dot.classList.remove(...DOT_COLOR_CLASSES);
         dot.classList.add('beambar-dot', colorClass(status));
       }
-      // What: paints the server-rendered [data-dot-status] dots
+      // What: paints server-rendered [data-dot-status]
       // Why: setup and dashboard dots get the same colours
       document.querySelectorAll('[data-dot-status]').forEach(function (dot) {
         paintDot(dot, dot.dataset.dotStatus);

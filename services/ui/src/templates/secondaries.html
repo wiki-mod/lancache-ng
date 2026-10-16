@@ -123,7 +123,7 @@
 {% block scripts %}
 <script>
   // What: POST to the rotate route of one secondary
-  // Why: rotation runs on the server; alert shows the result
+  // Why: server rotates; alert shows the result
   async function rotateToken(name) {
     try {
       const response = await fetch('{{ routes.secondary_rotate | safe }}'.replace('{name}', name), {
