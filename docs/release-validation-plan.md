@@ -536,6 +536,9 @@ recurrence:
   (AG-CI-002/003, AG-CI-011): `_ci_set_runtime` reads both only when
   `_ci_runner_self_hosted` and otherwise logs `VARIABLES-0024`; no CI check
   detects a recurrence, only a build on a hosted runner exercises it.
+- **A build-identity tag starting with `sha-`** (AG-REL-015): `_ci_image_tag`
+  renders `release.tag_identity_prefix` (`identity-`); no CI check detects a
+  recurrence of the old `sha-<identity>-<arch>` form.
 - **A scan of another image than the published digest**: `scan-stack` scans
   `_ci_published_digest`.
 - **Case-sensitive repository-name comparison**: `_ci_repo` lowercases.
