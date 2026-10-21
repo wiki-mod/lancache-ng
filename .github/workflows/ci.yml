@@ -281,7 +281,7 @@ jobs:
         run: bash .github/scripts/ci.sh check actionlint
 
   # What: scan all built images before ACCEPT
-  # Why: scanner lives in image; gates ACCEPT
+  # Why: ci.sh fetches trivy at its pin; gates ACCEPT
   # From: Issue #1683
   scan:
     name: scan

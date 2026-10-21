@@ -3045,7 +3045,38 @@ ci_cmd_scan_stack() {
         _ci_step_output "[CI-ERROR-SCAN-0026]" passed "$(_ci_matrix_doc "${passed}")" || return 2
     fi
     [ "${rc}" -eq 0 ] || ci_log "[CI-ERROR-SCAN-0024]" "failed=\"${failed# }\" reason=\"scan failed for these pairs; the others were scanned\""
+    # What: a full clean run checks for dead ignore ids.
+    # Why: what no scan needs any more must go (DoMe)
+    # From: Issue #1683 | PR #1912
+    if [ "${CI_SCAN_FULL:-}" = 1 ]; then
+        if [ "${rc}" -eq 0 ]; then
+            _ci_trivyignore_stale || rc=$?
+        else
+            ci_log "[CI-WARN-SCAN-0042]" "ignore-stale=NOT-RUN reason=\"a pair failed, so not every image was scanned\""
+        fi
+    fi
     return "${rc}"
+}
+
+# What: fail on ignore-file ids no scan of the run matched
+# Why: an entry that hides nothing is not valid any more
+# From: Issue #1683 | PR #1912
+_ci_trivyignore_stale() {
+    local ignore fields matched="" n kind id stale="" count=0 file="${CI_TMPDIR}/${_CI_TRIVY_MATCHED}"
+    ignore="$(_ci_repo_path CI_TRIVY_IGNORE)" || return 2
+    [ -f "${ignore}" ] || return 0
+    fields="$(_ci_trivyignore_fields "${ignore}")" || return 2
+    [ ! -f "${file}" ] || matched="$(< "${file}")"
+    while IFS=$'\t' read -r n kind id; do
+        [ "${kind}" = id ] || continue
+        count=$((count + 1))
+        _ci_list_has "${id}" "${matched}" || stale="${stale} ${id}"
+    done <<< "${fields}"
+    if [ -n "${stale}" ]; then
+        ci_log "[CI-ERROR-SCAN-0041]" "path=\"${ignore}\" stale=\"${stale# }\" reason=\"no scan of this run matched these entries; remove them\""
+        return 1
+    fi
+    printf 'ignore-stale=clean entries=%s\n' "${count}"
 }
 
 # What: load the history a diff needs, plus refs named
@@ -4957,6 +4988,59 @@ _ci_docker_publish() {
     printf '%s\n' "${seen}"
 }
 
+# What: platform_arch key of the machine this runs on.
+# Why: an external binary must fit the host, not the image.
+# From: Issue #1683
+_ci_host_arch() {
+    local machine key keys apk
+    machine="$(_ci_capture 0 uname -m)" || return 2
+    keys="$(_ci_block_keys platform_arch)" || return 2
+    while IFS= read -r key; do
+        [ -n "${key}" ] || continue
+        apk="$(_ci_block_entry_field platform_arch "${key}" apk)" || return 2
+        if [ "${apk}" = "${machine}" ]; then
+            printf '%s\n' "${key}"
+            return 0
+        fi
+    done <<< "${keys}"
+    ci_log "[CI-ERROR-SCAN-0036]" "machine=\"${machine}\" reason=\"no platform_arch apk value matches this host\""
+    return 2
+}
+
+# What: Fetch the SOT-pinned trivy once per run; print path.
+# Why: AG-VAL-017: trivy is external; the SOT owns the pin.
+# From: Issue #1683
+_ci_trivy_bin() {
+    local dir="${CI_TMPDIR}/trivy-bin" bin err arch repo tag asset sha url
+    bin="${dir}/trivy"
+    if [ -x "${bin}" ]; then
+        printf '%s\n' "${bin}"
+        return 0
+    fi
+    arch="$(_ci_host_arch)" || return 2
+    _ci_block_entry_fields external_versions "trivy-${arch}" repository repo release_tag tag asset asset sha256 sha || return 2
+    if [ -z "${repo}" ] || [ -z "${tag}" ] || [ -z "${asset}" ]; then
+        ci_log "[CI-ERROR-SCAN-0037]" "key=\"external_versions.trivy-${arch}\" reason=\"repository/release_tag/asset missing; FAIL CLOSED\""
+        return 2
+    fi
+    url="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
+    url="${url}/${repo}/releases/download/${tag}/${asset}"
+    if ! err="$(mkdir -p "${dir}" 2>&1)"; then
+        ci_error "[CI-ERROR-SCAN-0038]" "dir=\"${dir}\" reason=\"trivy dir not created\"" "${err}"
+        return 2
+    fi
+    _ci_fetch_verified "${url}" "${sha}" "${dir}/${asset}" || return 2
+    if ! err="$(tar --no-same-owner -xzf "${dir}/${asset}" -C "${dir}" trivy 2>&1)"; then
+        ci_error "[CI-ERROR-SCAN-0039]" "asset=\"${asset}\" reason=\"trivy extract failed\"" "${err}"
+        return 2
+    fi
+    if [ ! -x "${bin}" ]; then
+        ci_log "[CI-ERROR-SCAN-0040]" "asset=\"${asset}\" reason=\"archive has no executable trivy\""
+        return 2
+    fi
+    printf '%s\n' "${bin}"
+}
+
 # What: the trivy exit code that means findings.
 # Why: trivy's own errors exit 1; a finding must differ.
 # From: Issue #1683 | PR #1912
@@ -5075,35 +5159,84 @@ _ci_trivy_db_lock_run() {
     return "${rc}"
 }
 
-# What: Ensure cache-dir's Trivy DB is present and fresh.
-# Why: Freshness != presence; skip-db-update needs proof.
+# What: trivy's own DB refresh, retried when transient.
+# Why: the shared retry owner; rc 6 names a DB outage.
+# From: Issue #1683
+_ci_trivy_db_download() {
+    local rc=0 bin
+    bin="$(_ci_trivy_bin)" || return 2
+    _ci_retry trivy "${bin}" image --download-db-only --cache-dir "$1" || rc=$?
+    [ "${rc}" -eq 0 ] || return 6
+}
+
+# What: Refresh cache-dir's Trivy DB right before the gate.
+# Why: AG-VAL-026: trivy's own check runs on every scan.
 # From: Issue #1683
 _ci_trivy_db_ensure_fresh() {
     local cache_dir="$1" rc=0
+    _ci_trivy_db_lock_run "${cache_dir}" -- _ci_trivy_db_download "${cache_dir}" || rc=$?
+    case "${rc}" in
+        0) ;;
+        6) ci_log "[CI-ERROR-SCAN-0034]" "dir=\"${cache_dir}\" reason=\"trivy DB refresh failed; no scan without a fresh DB\""; return 6 ;;
+        *) ci_log "[CI-ERROR-SCAN-0012]" "reason=\"locked DB refresh failed; refusing an unlocked concurrent write\""; return 2 ;;
+    esac
     if ! _ci_trivy_db_fresh "${cache_dir}"; then
-        _ci_trivy_db_lock_run "${cache_dir}" -- \
-            trivy image --download-db-only --cache-dir "${cache_dir}" || rc=$?
-        if [ "${rc}" -eq 2 ]; then
-            ci_log "[CI-ERROR-SCAN-0012]" "reason=\"locked DB refresh failed; refusing an unlocked concurrent write\""
-            return 2
-        fi
-        _ci_trivy_db_fresh "${cache_dir}" || { printf 'present=false\n'; return 0; }
+        ci_log "[CI-ERROR-SCAN-0035]" "dir=\"${cache_dir}\" reason=\"trivy DB is not fresh after its refresh\""
+        return 6
     fi
-    printf 'present=true\n'
+}
+
+# What: print the DB identity: version, update time, sha256.
+# Why: AG-VAL-026: a gate result names the exact DB it used.
+# From: Issue #1683
+_ci_trivy_db_record() {
+    local cache_dir="$1" meta ver upd sum
+    meta="${cache_dir}/db/metadata.json"
+    ver="$(_ci_capture 0 jq -r '.Version // empty' "${meta}")" || return 2
+    upd="$(_ci_capture 0 jq -r '.UpdatedAt // empty' "${meta}")" || return 2
+    sum="$(_ci_sha256_hex < "${cache_dir}/db/trivy.db")" || return 2
+    if [ -z "${ver}" ] || [ -z "${upd}" ] || [ -z "${sum}" ]; then
+        ci_error "[CI-ERROR-SCAN-0033]" "dir=\"${cache_dir}\" reason=\"trivy DB identity incomplete\"" ""
+        return 2
+    fi
+    printf 'trivy-db version=%s updated_at=%s sha256=%s\n' "${ver}" "${upd}" "${sum}"
 }
 
 # What: trivy image argv for one scan, one item per line
 # Why: one owner; a test runs it through the real trivy
 # From: Issue #1683 | PR #1858
 _ci_trivy_args() {
-    local cache_dir="$1" skip_db="$2" scanners ignore
+    local cache_dir="$1" scanners ignore bin
+    bin="$(_ci_trivy_bin)" || return 2
     scanners="$(_ci_variable CI_TRIVY_SCANNERS)" || return 2
     ignore="$(_ci_repo_path CI_TRIVY_IGNORE)" || return 2
-    printf '%s\n' trivy image --severity HIGH,CRITICAL --exit-code "${_CI_TRIVY_FINDING_RC}" \
-        --scanners "${scanners}" --cache-dir "${cache_dir}"
-    [ "${skip_db}" -ne 1 ] || printf '%s\n' --skip-db-update
+    printf '%s\n' "${bin}" image --severity HIGH,CRITICAL --exit-code "${_CI_TRIVY_FINDING_RC}" \
+        --scanners "${scanners}" --cache-dir "${cache_dir}" --skip-db-update
     [ ! -f "${ignore}" ] || printf '%s\n' --ignorefile "${ignore}"
     [ -z "${CI_TRIVY_TIMEOUT:-}" ] || printf '%s\n' --timeout "${CI_TRIVY_TIMEOUT}"
+}
+
+# What: file name of the ignore ids a full run matched
+# Why: writer and reader share one name
+# From: Issue #1683 | PR #1912
+_CI_TRIVY_MATCHED=trivy-ignore-matched.txt
+
+# What: append the ids the ignore file hid in one image
+# Why: an id never hidden is stale; trivy lists the hidden
+# From: Issue #1683 | PR #1912
+_ci_trivy_suppressed_ids() {
+    local ref="$1" json ids rc=0
+    shift
+    json="$(_ci_mktemp "${CI_TMPDIR}/ci-trivy-sup.XXXXXX")" || return 2
+    "$@" --exit-code 0 --show-suppressed --format json --output "${json}" "${ref}" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        rm -f "${json}"
+        return "${rc}"
+    fi
+    ids="$(_ci_capture 0 jq -r '[.Results[]? | .ExperimentalModifiedFindings[]?
+        | select(.Status == "ignored") | .Finding.VulnerabilityID] | unique[]' "${json}")" || return 2
+    rm -f "${json}"
+    [ -z "${ids}" ] || printf '%s\n' "${ids}" >> "${CI_TMPDIR}/${_CI_TRIVY_MATCHED}"
 }
 
 # What: Scan a digest; rc 1 finding, 2 setup, 4 run, 6 DB
@@ -5111,15 +5244,15 @@ _ci_trivy_args() {
 # From: Issue #1683 | PR #1858
 _ci_trivy_scan() {
     local service="$1" digest="$2" ref report rc=0 out
-    local cache_rec cache_dir fresh_rec present skip_db=0
+    local cache_rec cache_dir fresh_rc=0
     local -a targs
     cache_rec="$(_ci_trivy_cache_dir)" || return 2
     cache_dir="$(_ci_record_field "${cache_rec}" dir)" || return 2
-    fresh_rec="$(_ci_trivy_db_ensure_fresh "${cache_dir}")" || return 2
-    present="$(_ci_record_field "${fresh_rec}" present)" || return 2
-    [ "${present}" = "true" ] && skip_db=1
+    out="$(_ci_trivy_args "${cache_dir}")" || return 2
+    _ci_trivy_db_ensure_fresh "${cache_dir}" || fresh_rc=$?
+    [ "${fresh_rc}" -eq 0 ] || return "${fresh_rc}"
+    _ci_trivy_db_record "${cache_dir}" || return 2
     ref="$(_ci_image_ref "${service}" "${digest}")" || return 2
-    out="$(_ci_trivy_args "${cache_dir}" "${skip_db}")" || return 2
     mapfile -t targs <<< "${out}"
     report="$(_ci_mktemp "${CI_TMPDIR}/ci-trivy.XXXXXX")" || return 2
     _ci_retry trivy _ci_trivy_scan_once "${report}" "${ref}" "${targs[@]}" || rc=$?
@@ -5130,6 +5263,12 @@ _ci_trivy_scan() {
         # From: Issue #1683 | PR #1912
         _ci_trivy_db_fresh "${cache_dir}" || return 6
         return 4
+    fi
+    # What: a full run also records which ignores matched.
+    # Why: the stale-entry gate reads them after all pairs.
+    # From: Issue #1683 | PR #1912
+    if [ "${CI_SCAN_FULL:-}" = 1 ]; then
+        _ci_retry trivy _ci_trivy_suppressed_ids "${ref}" "${targs[@]}" || { rm -f "${report}"; return 4; }
     fi
     # What: A written report means trivy scanned.
     # Why: A finding is deterministic; no retry.
@@ -5601,11 +5740,12 @@ ci_cmd_test() {
 # Why: SBOM generate != vuln gate; shares the trivy cache.
 # From: Issue #1683
 _ci_trivy_sbom() {
-    local service="$1" digest="$2" out="$3" ref cache_rec cache_dir raw rc=0
+    local service="$1" digest="$2" out="$3" ref cache_rec cache_dir raw rc=0 bin
     ref="$(_ci_image_ref "${service}" "${digest}")" || return 2
+    bin="$(_ci_trivy_bin)" || return 2
     cache_rec="$(_ci_trivy_cache_dir)" || return 2
     cache_dir="$(_ci_record_field "${cache_rec}" dir)" || return 2
-    raw="$(trivy image --format cyclonedx --cache-dir "${cache_dir}" --output "${out}" "${ref}" 2>&1)" || rc=$?
+    raw="$("${bin}" image --format cyclonedx --cache-dir "${cache_dir}" --output "${out}" "${ref}" 2>&1)" || rc=$?
     { [ "${rc}" -eq 0 ] && [ -s "${out}" ]; } && return 0
     printf '%s\n' "${raw}" >&2
     return 1
@@ -5621,7 +5761,7 @@ _ci_scan_outcome() {
         1) ci_error "[CI-ERROR-SCAN-0005]" "service=\"${service}\" reason=\"scan reported findings\"" "${raw}"; return 2 ;;
         2) ci_error "[CI-ERROR-SCAN-0022]" "service=\"${service}\" reason=\"scan setup failed; not a finding\"" "${raw}"; return 2 ;;
         4) ci_error "[CI-ERROR-SCAN-0021]" "service=\"${service}\" reason=\"trivy run failed without a report; not a finding, escalate\"" "${raw}"; return 3 ;;
-        6) ci_error "[CI-ERROR-SCAN-0028]" "service=\"${service}\" reason=\"trivy DB missing or stale after the run; not a finding, escalate\"" "${raw}"; return 3 ;;
+        6) ci_error "[CI-ERROR-SCAN-0028]" "service=\"${service}\" reason=\"trivy DB refresh failed or DB stale; not a finding, escalate\"" "${raw}"; return 3 ;;
         *) ci_error "[CI-ERROR-SCAN-0023]" "service=\"${service}\" rc=${status} reason=\"unexpected scan status; not a finding, escalate\"" "${raw}"; return 3 ;;
     esac
 }
@@ -5676,8 +5816,16 @@ ci_cmd_scan() {
     [ -n "${digest}" ] || { ci_log "[CI-ERROR-SCAN-0002]" "reason=\"digest arg required\""; return 2; }
     [ -n "${platform}" ] || { ci_log "[CI-ERROR-SCAN-0029]" "reason=\"platform arg required\""; return 2; }
     _ci_require_ghcr_auth || return "$?"
-    local raw status orc=0 rrc=0
+    local raw status orc=0 rrc=0 line dbrec=""
     if raw="$(TMPDIR="${CI_TMPDIR}" _ci_trivy_scan "${service}" "${digest}" 2>&1)"; then status=0; else status=$?; fi
+    # What: the DB identity line _ci_trivy_scan printed.
+    # Why: AG-VAL-026: it goes into the scan result.
+    # From: Issue #1683
+    while IFS= read -r line; do
+        case "${line}" in
+            "trivy-db "*) dbrec="${line#trivy-db }" ;;
+        esac
+    done <<< "${raw}"
     _ci_scan_outcome "${service}" "${status}" "${raw}" || orc=$?
     # What: the report follows the verdict, no more.
     # Why: a failed write must not hide a finding.
@@ -5685,7 +5833,7 @@ ci_cmd_scan() {
     _ci_scan_report "${service}" "${platform}" "${status}" "${raw}" || rrc=$?
     [ "${orc}" -eq 0 ] || return "${orc}"
     [ "${rrc}" -eq 0 ] || return "${rrc}"
-    printf 'service=%s scanned=clean digest=%s tmpdir=%s\n' "${service}" "${digest}" "${CI_TMPDIR}"
+    printf 'service=%s scanned=clean digest=%s tmpdir=%s trivy_db="%s"\n' "${service}" "${digest}" "${CI_TMPDIR}" "${dbrec}"
 }
 
 # What: scan every channel image, not only the built ones.
@@ -5694,7 +5842,7 @@ ci_cmd_scan() {
 ci_cmd_scan_channel() {
     local include='[]'
     _ci_for_all_pairs _ci_scan_channel_pair || return "$?"
-    CI_BUILD_MATRIX="$(_ci_matrix_doc "${include}")" ci_cmd_scan_stack
+    CI_SCAN_FULL=1 CI_BUILD_MATRIX="$(_ci_matrix_doc "${include}")" ci_cmd_scan_stack
 }
 
 # What: add one pair to the scan-channel matrix.
@@ -8452,6 +8600,14 @@ _ci_validate_setup_rollback() {
     local _ci_sr_env="$3" _ci_sr_svc="$4" _ci_sr_compose _ci_sr_su _ci_sr_inst
     shift 4
     _ci_sr_rc=0
+    # What: the run's state root leads the one-run env file
+    # Why: setup.sh reads the state root only from that file
+    # From: Issue #1683 | PR #1912
+    if [ -z "${LANCACHE_STATE_DIR:-}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0132]" "svc=\"${_ci_sr_svc}\" reason=\"no per-run LANCACHE_STATE_DIR to hand setup.sh\""
+        return 2
+    fi
+    _ci_sr_env="LANCACHE_STATE_DIR=${LANCACHE_STATE_DIR}${_ci_sr_env:+$'\n'${_ci_sr_env}}"
     _ci_sr_compose="$(_ci_variable CI_COMPOSE_FILE)" || return 2
     _ci_sr_su="$(_ci_installer)" || return 2
     _ci_sr_inst="$(dirname "${_ci_sr_compose}")"
@@ -8937,7 +9093,7 @@ PROG
     snap_b="$(_ci_validate_kea_add "${ubase}" "${jar}" "${csrf}" "${sid}" "${mac_b}" \
         "$(_ci_int_to_ipv4 $(( base + 3 )))" "${label}-2" "${snaps}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     rm -f "${jar}"
-    # What: .env.local holds only this run's KEA_* values
+    # What: .env.local holds this run's KEA_* values
     # Why: setup.sh reads a deploy/prod install's .env.local
     # From: Issue #763 | PR #1912
     _ci_validate_setup_rollback resp rc "$(printf 'KEA_CTRL_TOKEN=%s\nKEA_CTRL_HOST=%s\nKEA_DATA_DIR=%s\n' \
@@ -9496,18 +9652,23 @@ _ci_set_runtime() {
     # Why: repo variables reach ci.sh only as that json.
     # From: Issue #1683 | PR #1858
     local sched="" hosts="" vrc=0
-    if [ "${kind}" = rust ]; then
+    # What: dist farm is read on self-hosted runners only.
+    # Why: its scheduler and distcc hosts are LAN-only.
+    # From: Issue #1683 | PR #1912
+    if [ "${kind}" = rust ] && _ci_runner_self_hosted; then
         sched="$(_ci_variable_value SCCACHE_DIST_SCHEDULER_URL)" || vrc=$?
         [ "${vrc}" -le 1 ] || return 2
         vrc=0
         hosts="$(_ci_variable_value DISTCC_POTENTIAL_HOSTS)" || vrc=$?
         [ "${vrc}" -le 1 ] || return 2
+    elif [ "${kind}" = rust ]; then
+        ci_log "[CI-INFO-VARIABLES-0024]" "dist=off distcc=off runner=\"${RUNNER_ENVIRONMENT:-unset}\" reason=\"LAN-only farm needs a self-hosted runner\""
     fi
-    if [ "${sccache_enabled}" = "1" ] && [ -n "${sched}" ] && [ -z "${SCCACHE_DIST_AUTH_TOKEN:-}" ]; then
+    if _ci_runner_self_hosted && [ "${sccache_enabled}" = "1" ] && [ -n "${sched}" ] && [ -z "${SCCACHE_DIST_AUTH_TOKEN:-}" ]; then
         ci_log "[CI-ERROR-VARIABLES-0011]" "reason=\"scheduler set without auth token\""
         return 2
     fi
-    if [ "${sccache_enabled}" = "1" ] && [ -z "${sched}" ] && [ -n "${SCCACHE_DIST_AUTH_TOKEN:-}" ]; then
+    if _ci_runner_self_hosted && [ "${sccache_enabled}" = "1" ] && [ -z "${sched}" ] && [ -n "${SCCACHE_DIST_AUTH_TOKEN:-}" ]; then
         ci_log "[CI-ERROR-VARIABLES-0017]" "reason=\"auth token set without scheduler\""
         return 2
     fi

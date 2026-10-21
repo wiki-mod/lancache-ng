@@ -490,6 +490,7 @@ a stated reason it has none (AG-VAL-029).
 | A `.trivyignore.yaml` entry not yielding a complete OpenVEX statement | `check vex-drift` |
 | Live pipe into an early-exit consumer under `pipefail` (exit 141) | `check shell-guards` |
 | Review chronology or stale line references in comments | `check comments` |
+| A comment, heredoc or YAML text block breaking the What/Why/From contract, or carrying a bare issue number (`.trivyignore.yaml` statements went unread) | `check comments` (CHECK-0128, CHECK-0078, CHECK-0080) |
 | A bats `[ ] && [ ]` check that cannot fail | `check bats-and-chain` |
 | `$?` read from an `if` instead of the command | `check shell-guards` |
 | An exit path losing its code, context or raw output | `check exit-evidence` |
@@ -514,6 +515,26 @@ recurrence:
   `_ci_head_commit`.
 - **A scheduled channel run building the default branch instead of its source ref**:
   `channel-checkout`.
+- **Validation env binding the SOT state root instead of the per-run root**
+  (compose then bound paths the runner does not have): `_ci_validation_env` takes
+  the root as its argument. No CI check detects a recurrence; only the live
+  `ci.sh validate` stack run exercises it, and a static guard would be a new
+  test, which needs a maintainer ACK.
+- **A Trivy gate reading an unrecorded or stale DB** (AG-VAL-026):
+  `_ci_trivy_db_ensure_fresh` runs trivy's own refresh before every scan and
+  `_ci_trivy_db_record` prints the DB version and sha256 into the scan result;
+  no check detects a skipped refresh.
+- **A rollback leg handing setup.sh no per-run state root** (VALIDATE-0043 at
+  run time): `_ci_validate_setup_rollback` writes `LANCACHE_STATE_DIR` first into
+  the one-run `.env.local` and fails without it; only the live `ci.sh validate`
+  stack run exercises it.
+- **A Trivy ignore entry matching nothing** (AG-VAL-007): `scan-channel` runs the
+  second `--show-suppressed` pass and `_ci_trivyignore_stale` fails; a subset run
+  prints `ignore-stale=NOT-RUN`, so a partial scan never finds a stale entry.
+- **LAN-only dist scheduler or distcc hosts reaching a GitHub-hosted build**
+  (AG-CI-002/003, AG-CI-011): `_ci_set_runtime` reads both only when
+  `_ci_runner_self_hosted` and otherwise logs `VARIABLES-0024`; no CI check
+  detects a recurrence, only a build on a hosted runner exercises it.
 - **A scan of another image than the published digest**: `scan-stack` scans
   `_ci_published_digest`.
 - **Case-sensitive repository-name comparison**: `_ci_repo` lowercases.

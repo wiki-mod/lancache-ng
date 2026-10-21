@@ -249,17 +249,11 @@ build_toolchain:
       - shfmt
       - sqlite
       - tcpdump
-      - trivy@testing
       - tzdata
       - xz
       - yq-go
       - zlib-dev
       - zlib-static
-    # What: apk repos (tag=url) added by build and resolver
-    # Why: trivy is only in edge/testing; @testing scopes it
-    # From: Issue #1683 | PR #1858
-    apk_repositories:
-      - testing=http://dl-cdn.alpinelinux.org/alpine/edge/testing
     # What: tools only checked on PATH, with no run.
     # Why: a tool has one smoke entry, here or in runs.
     # From: Issue #1683
@@ -336,7 +330,6 @@ build_toolchain:
       - docker compose version
       - docker buildx version
       - 'm="$(gcc -dumpmachine)" && [[ "${m}" == *-musl ]]'
-      - trivy --version
       - java -version
 
 # What: Pinned external base images by full digest.
@@ -756,6 +749,22 @@ external_versions:
     release_tag: codeql-bundle-v2.27.1
     asset: codeql-bundle-linux64.tar.gz
     sha256: 1d380f79896ededc654c7b21fafb3360136f1aeb678ad4df4df9af3910c6b815
+  # What: Trivy CLI for amd64 hosts, fetched by ci.sh.
+  # Why: AG-VAL-017: external, never bundled; one pin owner.
+  # From: Issue #1683
+  trivy-amd64:
+    repository: aquasecurity/trivy
+    release_tag: v0.74.0
+    asset: trivy_0.74.0_Linux-64bit.tar.gz
+    sha256: 2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
+  # What: Trivy CLI for arm64 hosts, fetched by ci.sh.
+  # Why: same release as trivy-amd64; the asset differs.
+  # From: Issue #1683
+  trivy-arm64:
+    repository: aquasecurity/trivy
+    release_tag: v0.74.0
+    asset: trivy_0.74.0_Linux-ARM64.tar.gz
+    sha256: b94ce1976bbf3c15b514b605ee88be7c6d94a29be2302847ff01cb794d47aad5
 
 # What: The one authoritative platform list for all targets.
 # Why: Platform is a parameter, not a twin/list.
