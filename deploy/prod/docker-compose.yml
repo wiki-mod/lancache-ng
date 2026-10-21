@@ -89,6 +89,7 @@ services:
       # From: Issue #1918
       - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
       - DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES:-.}
+      - DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES:-}
       - DNS_LISTEN_IPS=${IP_STANDARD},${IP_SSL}
     volumes:
       # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY.
@@ -172,6 +173,7 @@ services:
       # From: Issue #1918
       - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
       - DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES:-.}
+      - DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES:-}
       - DNS_LISTEN_IPS=${IP_STANDARD},${IP_SSL}
     volumes:
       # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY.

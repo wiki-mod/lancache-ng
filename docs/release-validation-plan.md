@@ -326,14 +326,14 @@ use a real Linux host, e.g. over SSH to a self-hosted runner, per
   `AG-VAL-020`) — a real query/response or a real TLS handshake is required.
 - **Upstream resolver (issue #1918):** with `DNS_UPSTREAM_SERVERS` empty, a name that
   only a LAN resolver knows must give `NXDOMAIN` and `recursor.conf` must hold no
-  `forward_zones_recurse`. With it set to that resolver's IP, `dig @<IP_STANDARD> <private
-  name>` must return the resolver's answer, a CDN domain must still resolve to the proxy
-  IP (RPZ), and an invalid value (host name, loopback, a LanCache address, a zone served
-  locally) must stop the dns container at start with a `FATAL` line. While `.` is
-  forwarded, DNSSEC validation is off for every forwarded name; check with a
-  deliberately broken signed domain (it answers instead of `SERVFAIL`). Reverse lookups
-  of LAN addresses stay with the local authoritative server and are not answered by the
-  upstream resolver.
+  `forward_zones_recurse`. With it set to that resolver's IP, a public name must resolve,
+  a deliberately broken signed domain must still give `SERVFAIL`, a CDN domain must still
+  resolve to the proxy IP (RPZ), and a private name must give `SERVFAIL` until its zone is
+  listed in `DNS_UPSTREAM_UNSIGNED_ZONES`, after which `dig @<IP_STANDARD> <private name>`
+  returns the resolver's answer. An invalid value (host name, loopback, a LanCache
+  address, a zone served locally, an unsigned zone outside the forwarded zones) must stop
+  the dns container at start with a `FATAL` line. Reverse lookups of LAN addresses stay
+  with the local authoritative server and are not answered by the upstream resolver.
 
 ### 3. DHCP — all three modes
 

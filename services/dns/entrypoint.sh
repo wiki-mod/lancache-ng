@@ -233,6 +233,10 @@ DNS_UPSTREAM_SERVERS="${DNS_UPSTREAM_SERVERS:-}"
 # Why: "." forwards every name; a list scopes the forward.
 # From: Issue #1918
 DNS_UPSTREAM_ZONES="${DNS_UPSTREAM_ZONES:-.}"
+# What: forwarded zones whose answers carry no DNSSEC.
+# Why: validation stays on for every other name.
+# From: Issue #1918
+DNS_UPSTREAM_UNSIGNED_ZONES="${DNS_UPSTREAM_UNSIGNED_ZONES:-}"
 # What: LanCache addresses that clients use to reach DNS.
 # Why: an upstream on one of them would loop back to us.
 # From: Issue #1918
@@ -1014,36 +1018,24 @@ dns_upstream_yaml() {
     done
 }
 
-# What: build the upstream forward block and zone list.
-# Why: the template and recursor.lua both read the result.
+# What: check a zone list, print it normalized on one line.
+# Why: both zone lists share one name and local-zone check.
 # From: Issue #1918
-dns_upstream_setup() {
-    local entry zone forwarders="" local_zones
-    local -a servers=() requested=() zones=()
-    PDNS_RECURSOR_UPSTREAM_ZONES=""
-    read -r -a servers <<< "${DNS_UPSTREAM_SERVERS//,/ }"
-    if [ "${#servers[@]}" -eq 0 ]; then
-        DNS_UPSTREAM_ZONES=""
-        return 0
-    fi
-    for entry in "${servers[@]}"; do
-        entry="$(dns_upstream_forwarder "$entry")" || return 1
-        forwarders+="${forwarders:+, }${entry}"
-    done
-    local_zones="$(dns_local_forward_zones)" || return 1
-    read -r -a requested <<< "${DNS_UPSTREAM_ZONES//,/ }"
-    [ "${#requested[@]}" -gt 0 ] || requested=(.)
+dns_upstream_zone_list() {
+    local name="$1" list="$2" local_zones="$3" zone
+    local -a requested=() zones=()
+    read -r -a requested <<< "${list//,/ }"
     for zone in "${requested[@]}"; do
         if [ "$zone" != "." ]; then
             zone="${zone,,}"
             zone="${zone%.}"
             if [ "${#zone}" -gt 253 ] || ! [[ "$zone" =~ ^[a-z0-9_]([a-z0-9_-]*)(\.[a-z0-9_]([a-z0-9_-]*))*$ ]]; then
-                echo "[lancache-dns] FATAL: DNS_UPSTREAM_ZONES entry '$zone' is no DNS zone name." >&2
+                echo "[lancache-dns] FATAL: $name entry '$zone' is no DNS zone name." >&2
                 return 1
             fi
         fi
         if grep -qxF -- "$zone" <<< "$local_zones"; then
-            echo "[lancache-dns] FATAL: DNS_UPSTREAM_ZONES entry '$zone' is served by the local authoritative server." >&2
+            echo "[lancache-dns] FATAL: $name entry '$zone' is served by the local authoritative server." >&2
             return 1
         fi
         case " ${zones[*]:-} " in
@@ -1051,14 +1043,58 @@ dns_upstream_setup() {
             *) zones+=("$zone") ;;
         esac
     done
+    printf '%s\n' "${zones[*]:-}"
+}
+
+# What: build the upstream forward block and zone lists.
+# Why: the template and recursor.lua both read the result.
+# From: Issue #1918
+dns_upstream_setup() {
+    local entry zone forward local_zones covered
+    local forwarders="" zone_out
+    local -a servers=() zones=() unsigned=()
+    PDNS_RECURSOR_UPSTREAM_ZONES=""
+    read -r -a servers <<< "${DNS_UPSTREAM_SERVERS//,/ }"
+    if [ "${#servers[@]}" -eq 0 ]; then
+        DNS_UPSTREAM_ZONES=""
+        DNS_UPSTREAM_UNSIGNED_ZONES=""
+        return 0
+    fi
+    for entry in "${servers[@]}"; do
+        entry="$(dns_upstream_forwarder "$entry")" || return 1
+        forwarders+="${forwarders:+, }${entry}"
+    done
+    local_zones="$(dns_local_forward_zones)" || return 1
+    zone_out="$(dns_upstream_zone_list DNS_UPSTREAM_ZONES "${DNS_UPSTREAM_ZONES:-.}" "$local_zones")" || return 1
+    read -r -a zones <<< "$zone_out"
+    [ "${#zones[@]}" -gt 0 ] || zones=(.)
+    zone_out="$(dns_upstream_zone_list DNS_UPSTREAM_UNSIGNED_ZONES "$DNS_UPSTREAM_UNSIGNED_ZONES" "$local_zones")" || return 1
+    read -r -a unsigned <<< "$zone_out"
+    for zone in "${unsigned[@]}"; do
+        [ -n "$zone" ] || continue
+        covered=0
+        for forward in "${zones[@]}"; do
+            if [ "$forward" = "." ] || [ "$zone" = "$forward" ] || [[ "$zone" == *".$forward" ]]; then
+                covered=1
+            fi
+        done
+        if [ "$zone" = "." ] || [ "$covered" -ne 1 ]; then
+            echo "[lancache-dns] FATAL: DNS_UPSTREAM_UNSIGNED_ZONES entry '$zone' must lie inside DNS_UPSTREAM_ZONES and must not be '.'." >&2
+            return 1
+        fi
+    done
     PDNS_RECURSOR_UPSTREAM_ZONES="$(dns_upstream_yaml "$forwarders" "${zones[@]}")" || return 1
     DNS_UPSTREAM_ZONES="${zones[*]}"
+    DNS_UPSTREAM_UNSIGNED_ZONES="${unsigned[*]:-}"
     echo "[lancache-dns] Forwarding zones '${DNS_UPSTREAM_ZONES}' to upstream resolvers: ${forwarders//\"/}"
+    if [ -n "$DNS_UPSTREAM_UNSIGNED_ZONES" ]; then
+        echo "[lancache-dns] DNSSEC validation is off only for: ${DNS_UPSTREAM_UNSIGNED_ZONES}"
+    fi
 }
 
 # ── 1. Generate Recursor Config ──────────────────────────────────────────────
 dns_upstream_setup || exit 1
-export PDNS_RECURSOR_UPSTREAM_ZONES DNS_UPSTREAM_ZONES
+export PDNS_RECURSOR_UPSTREAM_ZONES DNS_UPSTREAM_ZONES DNS_UPSTREAM_UNSIGNED_ZONES
 echo "[lancache-dns] Generating recursor.conf..."
 # shellcheck disable=SC2016 # envsubst needs the literal variable name.
 if [ "$LOG_QUERIES" = "1" ]; then
@@ -1073,7 +1109,8 @@ _dns_recursor_validate_snapshot_or_rollback "$RECURSOR_CONF_FILE" || _dns_enter_
 if [ -n "$DNS_UPSTREAM_ZONES" ] && ! grep -q '^  forward_zones_recurse:' "$RECURSOR_CONF_FILE"; then
     echo "[lancache-dns] WARNING: recursor.conf has no upstream forward after the rollback; DNS_UPSTREAM_SERVERS is ignored until a config validates." >&2
     DNS_UPSTREAM_ZONES=""
-    export DNS_UPSTREAM_ZONES
+    DNS_UPSTREAM_UNSIGNED_ZONES=""
+    export DNS_UPSTREAM_ZONES DNS_UPSTREAM_UNSIGNED_ZONES
 fi
 
 # ── 2. Generate Authoritative Config ─────────────────────────────────────────
