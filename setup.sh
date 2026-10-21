@@ -7534,6 +7534,11 @@ if [[ "$AUTO_UPDATE_ENABLED" = "1" ]]; then
 else
     printf "  %-26s %s\n" "Scheduled updates:"        "disabled — manual: ./setup.sh update"
 fi
+if [[ -n "$DNS_UPSTREAM_SERVERS" ]]; then
+    printf "  %-26s %s\n" "External DNS:"            "${DNS_UPSTREAM_SERVERS} (domains: ${DNS_UPSTREAM_ZONES}; no DNSSEC: ${DNS_UPSTREAM_UNSIGNED_ZONES:-none})"
+else
+    printf "  %-26s %s\n" "External DNS:"            "none — LanCache-NG resolves names itself"
+fi
 if [[ -n "$UI_AUTH_USER" ]]; then
     printf "  %-26s %s\n" "Admin-UI auth:"           "enabled (user: $UI_AUTH_USER)"
 else
