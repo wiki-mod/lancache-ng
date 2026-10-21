@@ -31,6 +31,7 @@ services:
       # From: Issue #1918
       - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
       - DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES:-.}
+      - DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES:-}
       - DNS_LISTEN_IPS=${LISTEN_IP:-}
     volumes:
       - pdns-data:/var/lib/powerdns

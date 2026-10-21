@@ -34,12 +34,18 @@ for _, zone in ipairs({
   addNTA(zone, "lancache-ng: locally forwarded, intentionally unsigned zone")
 end
 
--- What: zones the entrypoint forwards upstream.
+-- What: zones the operator marked as unsigned.
 -- Why: their answers carry no DNSSEC and would be SERVFAIL.
+-- From: Issue #1918
+for zone in string.gmatch(os.getenv("DNS_UPSTREAM_UNSIGNED_ZONES") or "", "%S+") do
+  addNTA(zone, "lancache-ng: unsigned zone of the upstream resolver")
+end
+
+-- What: note whether the entrypoint forwards ".".
+-- Why: the root mirror is idle while every name is forwarded.
 -- From: Issue #1918
 local upstream_root = false
 for zone in string.gmatch(os.getenv("DNS_UPSTREAM_ZONES") or "", "%S+") do
-  addNTA(zone, "lancache-ng: answered by the configured upstream resolver")
   if zone == "." then
     upstream_root = true
   end

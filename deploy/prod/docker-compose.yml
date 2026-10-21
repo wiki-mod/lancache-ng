@@ -66,6 +66,7 @@ services:
       # From: Issue #1918
       - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
       - DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES:-.}
+      - DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES:-}
       - DNS_LISTEN_IPS=${IP_STANDARD},${IP_SSL}
     volumes:
       - shared-secrets:/var/lib/lancache-secrets
@@ -123,6 +124,7 @@ services:
       # From: Issue #1918
       - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
       - DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES:-.}
+      - DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES:-}
       - DNS_LISTEN_IPS=${IP_STANDARD},${IP_SSL}
     volumes:
       # What: shared-secrets volume, first-writer-wins for PDNS_API_KEY/DDNS_TSIG_KEY.
