@@ -3484,11 +3484,13 @@ impl NginxPorts {
     }
 }
 
-// What: stream.d paths of the two rendered nginx files.
-// Why: the render and backfill list name the same files.
+// What: NGINX_DIR paths of the rendered nginx files.
+// Why: render, dir setup and backfill name the same files.
 // From: Issue #1683 | PR #1912
 const NGINX_STREAM_TARGETS: &str = "stream.d/00-stream-targets.conf";
 const NGINX_HTTPS_DISPATCH: &str = "stream.d/01-https-dispatch.conf";
+const NGINX_HTTPS_MAP: &str = "conf.d/00-https-map.conf";
+const NGINX_CLIENT_ACL: &str = "stream.d/access.d/00-stream-client-acl.conf";
 
 // What: the CA dir: NGINX_DIR joined with NGINX_SUBDIR_CA.
 // Why: one owner for the signer and the health probe.
@@ -4022,9 +4024,10 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     } else if https.exists() {
         fs::remove_file(&https).map_err(|e| format!("cannot remove {}: {e}", https.display()))?;
     }
-    for sub in ["conf.d", "stream.d/access.d"] {
-        fs::create_dir_all(dir.join(sub))
-            .map_err(|e| format!("cannot create {}: {e}", dir.join(sub).display()))?;
+    for file in [NGINX_HTTPS_MAP, NGINX_CLIENT_ACL] {
+        let sub = dir.join(file);
+        let sub = sub.parent().unwrap_or(&dir);
+        fs::create_dir_all(sub).map_err(|e| format!("cannot create {}: {e}", sub.display()))?;
     }
     remove_stock_server(&dir)?;
     // What: render the server confs from image templates.
@@ -4052,7 +4055,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     write_file(&healthz, b"ok\n", 0o644, Place::Replace)
         .map_err(|e| format!("cannot write {}: {e}", healthz.display()))?;
     let value = |key: &'static str| ctx.need(key).map(|v| (key, v));
-    let acl = dir.join("stream.d/access.d/00-stream-client-acl.conf");
+    let acl = dir.join(NGINX_CLIENT_ACL);
     let conf = dir.join("nginx.conf");
     let ports = NginxPorts::from_env()?;
     let health_port = if https_on {
@@ -4098,7 +4101,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
             ),
         ),
         (
-            dir.join("conf.d/00-https-map.conf"),
+            dir.join(NGINX_HTTPS_MAP),
             nginx_https_map(&hosts, strict, &cidrs, &cert.default_cert_name),
         ),
         (
@@ -4120,7 +4123,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     // Why: only a snapshot with none of them is old.
     // From: Issue #1683 | PR #1912
     let new_files: Vec<String> = [
-        "conf.d/00-https-map.conf",
+        NGINX_HTTPS_MAP,
         NGINX_HTTPS_DISPATCH,
         listen_file.as_str(),
     ]
