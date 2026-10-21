@@ -110,7 +110,7 @@ commit (`_ci_head_commit`).
 | Images and supply chain | `scan-stack` scans the published digest; `check vex-drift`; `check mutable-refs`; `check stable-external-images`; `check cargo-audit` | `.trivyignore.yaml` does not yield a complete OpenVEX document, a reference is mutable, or a dependency is vulnerable or yanked |
 | Channels and release | `promote-ref` supersede check and the AG-REL-011 gate | a moved branch tip is promoted, or a stale record releases |
 | Rust services | `test-stack` runs `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` per crate only when enabled; off by default (AG-VAL-008); `cargo check` is a manual developer step | a Rust check fails when enabled |
-| Repository guards | `ci.sh check all` runs every guard; `ci.sh check <name>` runs one; the guard list is `ci_cmd_check` in `ci.sh` | a guard reports a finding |
+| Repository guards | `ci.sh check all` runs the diff and repo guards and, with `PR_NUMBER` set, the pr guards; the job guards (`cargo-audit`, `shellcheck`, `actionlint`, `orphaned-branches`, `pr-tracking-metadata`) run in the workflow step of their own job. Each guard `check all` does not run prints `<name>=NOT-RUN` with its reason, and the final `check-all=` line counts the guards it invoked and names those it did not; a guard may still report `NOT-RUN` itself (for example `ci-bats`). `ci.sh check <name>` runs one; the guard list is the `CI_CHECKS` table in `ci.sh` | a guard reports a finding |
 
 ---
 
@@ -627,6 +627,6 @@ The Rust checks of Part A are off by default (AG-VAL-008).
 |---|---|
 | `bash .github/scripts/ci.sh validate` | the running-stack validation of Part A for the accepted stack candidate, inside the `build-tools` container (AG-VAL-016) |
 | `bash .github/scripts/ci.sh release-validation` | the AG-REL-011 gate over `docs/validation-state.json` for the checked-out commit |
-| `bash .github/scripts/ci.sh check all`, `check <name>` | every repository guard, or one |
+| `bash .github/scripts/ci.sh check all`, `check <name>` | the guards of the diff, repo and (with `PR_NUMBER`) pr scope, or one named guard; the guards it skips print `NOT-RUN` |
 | `bats .github/scripts/ci.bats` in the `build-tools` image (AG-VAL-016) | the regression suite; it holds no test, so `check ci-bats` reports `NOT-RUN` |
 | `docker compose -f deploy/prod/docker-compose.yml run --rm dhcp-probe` | the DHCP conflict and client probe (§3) |

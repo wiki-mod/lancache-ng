@@ -16236,26 +16236,48 @@ _ci_check_cargo_audit() {
 # Why: a stop (2) must not read as a finding (1) (§68).
 # From: Issue #1683 | PR #1912
 ci_cmd_check_all() {
-    local -a changed=() names=()
+    local -a changed=() names=() skipped=()
     _ci_collect_changed changed "$@" || return 2
-    local raw sub r rc=0
+    local raw sub r rc=0 scope why state invoked=0 diff_seen="all files"
     raw="$(printf '%s\n' "${!CI_CHECKS[@]}" | LC_ALL=C sort)" || return 2
     mapfile -t names <<< "${raw}"
+    [ "${#changed[@]}" -eq 0 ] || diff_seen="${#changed[@]} changed paths"
     for sub in "${names[@]}"; do
-        r=0
+        r=0 why=""
+        scope="${CI_CHECKS[${sub}]%% *}"
         # What: diff sees changed files; pr needs a real PR.
         # Why: no PR context on push; job has its own step.
         # From: Issue #1683 | PR #1912
-        case "${CI_CHECKS[${sub}]%% *}" in
+        case "${scope}" in
             diff) CI_SCAN_SCOPE_FILTER=1 ci_cmd_check "${sub}" "${changed[@]}" || r=$? ;;
             repo) ci_cmd_check "${sub}" || r=$? ;;
-            pr) [ -z "${PR_NUMBER:-}" ] || ci_cmd_check "${sub}" || r=$? ;;
-            job) ;;
+            pr)
+                if [ -n "${PR_NUMBER:-}" ]; then
+                    ci_cmd_check "${sub}" || r=$?
+                else
+                    why="PR_NUMBER unset, so this run has no pull request; it runs when PR_NUMBER is set"
+                fi
+                ;;
+            job) why="job scope: the workflow step of its own job runs it; run it by name, check all does not" ;;
             *) ci_log "[CI-ERROR-CHECK-0173]" "sub=\"${sub}\" entry=\"${CI_CHECKS[${sub}]}\" reason=\"scope must be diff, repo, pr or job\""; r=2 ;;
         esac
+        # What: a check check all did not run says NOT-RUN.
+        # Why: AG-INT-002: a skip is stated with its reason.
+        # From: Issue #1683 | PR #1912
+        if [ -n "${why}" ]; then
+            printf '%s=NOT-RUN scope=%s reason="%s"\n' "${sub}" "${scope}" "${why}"
+            skipped+=("${sub}")
+        else
+            invoked=$((invoked + 1))
+        fi
         [ "${r}" -le "${rc}" ] || rc="${r}"
     done
-    [ "${rc}" -eq 0 ] && printf 'check-all=clean\n'
+    case "${rc}" in
+        0) state=clean ;;
+        1) state=findings ;;
+        *) state=stopped ;;
+    esac
+    printf 'check-all=%s rc=%s invoked=%s not-run=%s diff-scope="%s" not-run-checks="%s"\n' "${state}" "${rc}" "${invoked}" "${#skipped[@]}" "${diff_seen}" "${skipped[*]:-}"
     return "${rc}"
 }
 
