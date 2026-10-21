@@ -15293,8 +15293,8 @@ PROG
 # Why: a bare return skips the ACL; ignored headers leak.
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_nginx_policy() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp first="" blocks=0 b h a d al r px hk hu hp="" hq
-    local -a viol=()
+    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp first="" blocks=0 b h a d al r px hk hu hp="" hq pn lb p
+    local -a viol=() parts
     px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
     px="${px%/}"
     # What: the health path both SOT health URLs name.
@@ -15314,6 +15314,11 @@ _ci_check_proxy_nginx_policy() {
         fi
         hp="${hq}"
     done
+    # What: the allow targets a health block may carry.
+    # Why: the SOT owns the ranges; a template follows it.
+    # From: Issue #1683 | PR #1912
+    pn="$(_ci_runtime_default PRIVATE_NETS)" || return 2
+    lb="\${LOOPBACK_BIND_IP}/32"
     for f in "${px}"/conf.d/*.conf; do
         out="$(_ci_capture 0 awk -v "P=${hp}" "$(cat <<'PROG'
             $1 == "location" && $2 == "=" && $3 == P && $4 == "{" { inb = 1; n++; body = ""; a = 0; d = 0; al = 0; r = 0; next }
@@ -15335,6 +15340,12 @@ PROG
             [ "${al}" -eq 1 ] && [ "${r}" -eq 0 ] || viol+=("${f#"${repo_root}/"}: ${hp} must serve via alias, never return (return skips the ACL)")
             [ -n "${first}" ] || first="${b}"
             [ "${b}" = "${first}" ] || viol+=("${f#"${repo_root}/"}: ${hp} differs from the first block")
+            IFS=';' read -ra parts <<<"${b}"
+            for p in "${parts[@]}"; do
+                [[ "${p}" == "allow "* ]] || continue
+                [[ " ${pn} ${lb} " == *" ${p#allow } "* ]] \
+                    || viol+=("${f#"${repo_root}/"}: ${hp} allows ${p#allow }, neither the loopback bind nor a PRIVATE_NETS member")
+            done
         done <<<"${out}"
     done
     [ "${blocks}" -gt 0 ] || viol+=("${px#"${repo_root}/"}/conf.d: no ${hp} block found")
