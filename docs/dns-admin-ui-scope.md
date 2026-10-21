@@ -55,7 +55,8 @@ restart every consumer of a shared env var, not just the DNS containers.
 | `DDNS_ALLOW_FROM` | CIDR allow-list for RFC 2136 dynamic updates |
 | `DDNS_TSIG_KEY` / `DDNS_TSIG_NAME` / `DDNS_TSIG_ALGORITHM` | TSIG key material and metadata re-applied to every DDNS-eligible zone on every start via `configure_ddns_tsig()` |
 | `LOG_QUERIES` | Query logging on/off |
-| `ROOT_ZONE_MIRROR` (`ENABLE_ROOT_MIRROR` in `docs/architecture-ng.md`) | AXFR root zone mirror |
+| `ROOT_ZONE_MIRROR` (`ENABLE_ROOT_MIRROR` in `docs/architecture-ng.md`) | AXFR root zone mirror; stays off while `DNS_UPSTREAM_ZONES` forwards `.` |
+| `DNS_UPSTREAM_SERVERS` / `DNS_UPSTREAM_ZONES` / `DNS_LISTEN_IPS` | Upstream resolvers (and the zones sent to them) for names outside the LAN zones; `DNS_LISTEN_IPS` is the compose-set list of LanCache addresses an upstream must not use (issue #1918). An install-topology decision like the root mirror, so config-file-only; not yet exposed in the Admin UI (UI delivery debt, `[AG-FEAT-002]`) |
 | `ENABLE_SECONDARY` / `NATS_BIND_IP` | **Not PowerDNS-native secondary/AXFR wiring — see 3a below.** `ENABLE_SECONDARY` is documentation-only narrative in `docs/architecture-ng.md` for when to include `deploy/prod/docker-compose.nats-secondary.yml`; no script reads it. `NATS_BIND_IP` is the one real env var here, consumed directly by that compose override to bind NATS to a trusted interface for the NATS-based secondary sync (3b) |
 | `NATS_URL` / `NATS_USER` / `NATS_PASSWORD` / `NATS_TOKEN` / `NATS_CONSUMER` / `NATS_RECONCILER` | This node's own NATS connection identity for the `nats-subscriber` process |
 | `KEEP_KNOWN_GOOD_CONFIGS` / `DNS_CONFIG_SNAPSHOT_DIR` | Known-good config snapshot retention/location (see #415) |
