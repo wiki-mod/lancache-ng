@@ -15293,7 +15293,7 @@ PROG
 # Why: a bare return skips the ACL; ignored headers leak.
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_nginx_policy() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp first="" blocks=0 b h a d al r px hk hu hp="" hq pn lb
+    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp first="" blocks=0 b h a d al r px hk hu hp="" hq pn lb fb
     local -a viol=()
     px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
     px="${px%/}"
@@ -15332,15 +15332,18 @@ _ci_check_proxy_nginx_policy() {
                 if (line ~ /^return /) r = 1 }
 PROG
                 )" "${f}")" || return 2
+        fb=0
         while IFS='|' read -r b line; do
             [ -n "${b}" ] || continue
             blocks=$((blocks + 1))
+            fb=$((fb + 1))
             IFS='|' read -r a d al r <<<"${line}"
             [ "${a}" -ge 1 ] && [ "${d}" -eq 1 ] || viol+=("${f#"${repo_root}/"}: ${hp} needs allow lines followed by deny all")
             [ "${al}" -eq 1 ] && [ "${r}" -eq 0 ] || viol+=("${f#"${repo_root}/"}: ${hp} must serve via alias, never return (return skips the ACL)")
             [ -n "${first}" ] || first="${b}"
             [ "${b}" = "${first}" ] || viol+=("${f#"${repo_root}/"}: ${hp} differs from the first block")
         done <<<"${out}"
+        [ "${fb}" -gt 0 ] || viol+=("${f#"${repo_root}/"}: no ${hp} block found")
         # What: the allow lines of every location.
         # Why: a location with allow lines is an ACL.
         # From: Issue #1683 | PR #1912
@@ -15365,7 +15368,6 @@ PROG
             fi
         done <<<"${out}"
     done
-    [ "${blocks}" -gt 0 ] || viol+=("${px#"${repo_root}/"}/conf.d: no ${hp} block found")
     pp="${px}/proxy-params.conf"
     out="$(_ci_capture 0 awk "$(cat <<'PROG'
         $1 == "proxy_ignore_headers" { for (i = 2; i <= NF; i++) { h = $i; sub(/;$/, "", h); ign[h] = 1 } }
