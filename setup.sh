@@ -171,6 +171,16 @@ is_valid_dns_upstream_zone() {
     [[ "$zone" =~ ^(${label}\.)*${label}$ ]]
 }
 
+# What: true if the DNS template serves this zone locally.
+# Why: LanCache-NG keeps those zones and cannot forward them.
+# From: Issue #1918
+dns_upstream_zone_is_local() {
+    local zone="${1,,}" template="$SCRIPT_DIR/services/dns/recursor.conf.template"
+
+    [[ -f "$template" ]] || return 1
+    grep -qxF -- "    - zone: ${zone%.}" "$template"
+}
+
 # What: prints a comma/space list as lower-case, comma-joined.
 # Why: .env keeps one stable spelling, so reruns compare equal.
 # From: Issue #1918
@@ -272,7 +282,11 @@ prompt_dns_upstream() {
                     bad=""
                     [[ ${#zone_entries[@]} -gt 0 ]] || bad="enter at least one domain"
                     for zone in "${zone_entries[@]}"; do
-                        is_valid_dns_upstream_zone "${zone%.}" || bad="'$zone' is not a valid domain name"
+                        if ! is_valid_dns_upstream_zone "${zone%.}"; then
+                            bad="'$zone' is not a valid domain name"
+                        elif dns_upstream_zone_is_local "$zone"; then
+                            bad="'$zone' is answered by LanCache-NG itself and cannot be forwarded"
+                        fi
                     done
                     [[ -z "$bad" ]] && break
                     print_error "Invalid domain: $bad"
@@ -299,6 +313,10 @@ prompt_dns_upstream() {
         for entry in "${entries[@]}"; do
             if ! is_valid_dns_upstream_zone "${entry%.}"; then
                 bad="'$entry' is not a valid domain name"
+                continue
+            fi
+            if dns_upstream_zone_is_local "$entry"; then
+                bad="'$entry' is answered by LanCache-NG itself and cannot be listed"
                 continue
             fi
             [[ "$DNS_UPSTREAM_ZONES" = "." ]] && continue
