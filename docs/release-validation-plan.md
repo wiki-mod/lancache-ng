@@ -543,6 +543,10 @@ recurrence:
   `release.tag_commit` is `sha-` plus 40 hex and `validate_lancache_image_tag`
   has no `pr-*` branch; a stored short pin stops `setup.sh` with an error that
   names the valid forms. No CI check detects a recurrence.
+- **Two readers of the needs object classifying results differently**
+  (AG-CODE-011): `ci_cmd_result_gate` and `ci_cmd_nightly_report` both read
+  `CI_NEEDS` through `_ci_needs_pairs` and `_ci_needs_class`; no CI check
+  detects a reader that parses it again.
 - **A scan of another image than the published digest**: `scan-stack` scans
   `_ci_published_digest`.
 - **Case-sensitive repository-name comparison**: `_ci_repo` lowercases.

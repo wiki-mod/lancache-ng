@@ -3408,24 +3408,42 @@ _ci_status_case() {
     _ci_status_apply "${outcome}" "${label}" "${scope}" "${evidence}"
 }
 
-# What: the jobs of the needs object that did not succeed.
-# Why: the issue names every red job, not the first.
+# What: job and result of a needs object, one line per job.
+# Why: one parser for the result gate and the nightly report.
 # From: Issue #1683 | PR #1912
-_ci_needs_not_green() {
-    _ci_run "[CI-ERROR-STATUS-0009]" "reason=\"CI_NEEDS is not a needs object\"" \
-        jq -r 'to_entries[] | select(.value.result != "success") | "\(.key)=\(.value.result)"' <<< "$1"
+_ci_needs_pairs() {
+    _ci_run "[CI-ERROR-CORE-0133]" "reason=\"CI_NEEDS is not a needs object\"" \
+        jq -r 'to_entries[] | "\(.key) \(.value.result)"' <<< "$1"
+}
+
+# What: success, skipped or failed for one needs result.
+# Why: one class rule; cancelled, null and the rest fail.
+# From: Issue #1683 | PR #1912
+_ci_needs_class() {
+    case "$1" in
+        success|skipped) printf '%s\n' "$1" ;;
+        *) printf 'failed\n' ;;
+    esac
 }
 
 # What: report the nightly kinds from the needs results.
 # Why: runs in its own always-job; a red job still reports.
 # From: Issue #1683 | PR #1912
 ci_cmd_nightly_report() {
-    local needs="${CI_NEEDS:-}" kind kinds jobs job red="" rc=0 verdict states seen
+    local needs="${CI_NEEDS:-}" kind kinds jobs job red="" rc=0 verdict states seen pairs
+    local -A got=()
     if [ -z "${needs}" ]; then
         ci_log "[CI-ERROR-STATUS-0001]" "reason=\"CI_NEEDS required\""
         return 2
     fi
-    red="$(_ci_needs_not_green "${needs}")" || return 2
+    pairs="$(_ci_needs_pairs "${needs}")" || return 2
+    while read -r job seen; do
+        [ -n "${job}" ] || continue
+        got["${job}"]="${seen}"
+        if [ "$(_ci_needs_class "${seen}")" != success ]; then
+            red+="${red:+$'\n'}${job}=${seen}"
+        fi
+    done <<< "${pairs}"
     kinds="$(_ci_block_keys status_reports)" || return 2
     while IFS= read -r kind; do
         [ -n "${kind}" ] || continue
@@ -3433,10 +3451,13 @@ ci_cmd_nightly_report() {
         [ -n "${jobs}" ] || continue
         verdict=success states=""
         while IFS= read -r job; do
-            seen="$(_ci_run "[CI-ERROR-STATUS-0011]" "kind=\"${kind}\" job=\"${job}\" reason=\"job missing in needs\"" \
-                jq -er --arg j "${job}" ".[\$j].result" <<< "${needs}")" || return 2
+            if [ -z "${got[${job}]+set}" ]; then
+                ci_log "[CI-ERROR-STATUS-0011]" "kind=\"${kind}\" job=\"${job}\" reason=\"job missing in needs\""
+                return 2
+            fi
+            seen="${got[${job}]}"
             states+="${states:+ }${job}=${seen}"
-            case "${seen}" in
+            case "$(_ci_needs_class "${seen}")" in
                 success) ;;
                 skipped) [ "${verdict}" = failure ] || verdict=unknown ;;
                 *) verdict=failure ;;
@@ -9384,8 +9405,7 @@ ci_cmd_result_gate() {
         ci_log "[CI-ERROR-CORE-0101]" "reason=\"CI_NEEDS empty\""
         return 2
     fi
-    pairs="$(_ci_run "[CI-ERROR-CORE-0133]" "reason=\"CI_NEEDS is not a needs object\"" \
-        jq -r 'to_entries[] | "\(.key) \(.value.result)"' <<< "${needs}")" || return 2
+    pairs="$(_ci_needs_pairs "${needs}")" || return 2
     required="$(_ci_block_entry_list ci_result_gate "" required)" || return 2
     if [ -z "${required}" ]; then
         ci_log "[CI-ERROR-CORE-0134]" "manifest=\"${CI_MANIFEST}\" reason=\"no SOT ci_result_gate.required phase\""
@@ -9416,7 +9436,7 @@ ci_cmd_result_gate() {
     while read -r phase state; do
         [ -n "${phase}" ] || continue
         [ -n "${result[${phase}]+set}" ] || continue
-        case "${state}" in
+        case "$(_ci_needs_class "${state}")" in
             success) ;;
             skipped) not_run+="${not_run:+ }${phase}" ;;
             *)
