@@ -532,6 +532,10 @@ recurrence:
 - **A Trivy ignore entry matching nothing** (AG-VAL-007): `scan-channel` runs the
   second `--show-suppressed` pass and `_ci_trivyignore_stale` fails; a subset run
   prints `ignore-stale=NOT-RUN`, so a partial scan never finds a stale entry.
+- **LAN-only dist scheduler or distcc hosts reaching a GitHub-hosted build**
+  (AG-CI-002/003, AG-CI-011): `_ci_set_runtime` reads both only when
+  `_ci_runner_self_hosted` and otherwise logs `VARIABLES-0024`; no CI check
+  detects a recurrence, only a build on a hosted runner exercises it.
 - **A scan of another image than the published digest**: `scan-stack` scans
   `_ci_published_digest`.
 - **Case-sensitive repository-name comparison**: `_ci_repo` lowercases.

@@ -9652,18 +9652,23 @@ _ci_set_runtime() {
     # Why: repo variables reach ci.sh only as that json.
     # From: Issue #1683 | PR #1858
     local sched="" hosts="" vrc=0
-    if [ "${kind}" = rust ]; then
+    # What: dist farm is read on self-hosted runners only.
+    # Why: its scheduler and distcc hosts are LAN-only.
+    # From: Issue #1683 | PR #1912
+    if [ "${kind}" = rust ] && _ci_runner_self_hosted; then
         sched="$(_ci_variable_value SCCACHE_DIST_SCHEDULER_URL)" || vrc=$?
         [ "${vrc}" -le 1 ] || return 2
         vrc=0
         hosts="$(_ci_variable_value DISTCC_POTENTIAL_HOSTS)" || vrc=$?
         [ "${vrc}" -le 1 ] || return 2
+    elif [ "${kind}" = rust ]; then
+        ci_log "[CI-INFO-VARIABLES-0024]" "dist=off distcc=off runner=\"${RUNNER_ENVIRONMENT:-unset}\" reason=\"LAN-only farm needs a self-hosted runner\""
     fi
-    if [ "${sccache_enabled}" = "1" ] && [ -n "${sched}" ] && [ -z "${SCCACHE_DIST_AUTH_TOKEN:-}" ]; then
+    if _ci_runner_self_hosted && [ "${sccache_enabled}" = "1" ] && [ -n "${sched}" ] && [ -z "${SCCACHE_DIST_AUTH_TOKEN:-}" ]; then
         ci_log "[CI-ERROR-VARIABLES-0011]" "reason=\"scheduler set without auth token\""
         return 2
     fi
-    if [ "${sccache_enabled}" = "1" ] && [ -z "${sched}" ] && [ -n "${SCCACHE_DIST_AUTH_TOKEN:-}" ]; then
+    if _ci_runner_self_hosted && [ "${sccache_enabled}" = "1" ] && [ -z "${sched}" ] && [ -n "${SCCACHE_DIST_AUTH_TOKEN:-}" ]; then
         ci_log "[CI-ERROR-VARIABLES-0017]" "reason=\"auth token set without scheduler\""
         return 2
     fi
