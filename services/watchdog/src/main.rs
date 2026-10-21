@@ -4127,15 +4127,11 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     // What: names of the files older snapshots lack.
     // Why: only a snapshot with none of them is old.
     // From: Issue #1683 | PR #1912
-    let new_files: Vec<String> = [
-        NGINX_HTTPS_MAP,
-        NGINX_HTTPS_DISPATCH,
-        listen_file.as_str(),
-    ]
-    .iter()
-    .filter_map(|p| Path::new(p).file_name())
-    .map(|n| n.to_string_lossy().into_owned())
-    .collect();
+    let new_files: Vec<String> = [NGINX_HTTPS_MAP, NGINX_HTTPS_DISPATCH, listen_file.as_str()]
+        .iter()
+        .filter_map(|p| Path::new(p).file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .collect();
     let store = lancache_ng::SnapshotStore::new(
         PathBuf::from(ctx.need("PROXY_CONFIG_SNAPSHOT_DIR")?),
         "nginx.json",
