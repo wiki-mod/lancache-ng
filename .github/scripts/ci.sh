@@ -15293,8 +15293,8 @@ PROG
 # Why: a bare return skips the ACL; ignored headers leak.
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_nginx_policy() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp first="" blocks=0 b h a d al r px hk hu hp="" hq pn lb p
-    local -a viol=() parts
+    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp first="" blocks=0 b h a d al r px hk hu hp="" hq pn lb
+    local -a viol=()
     px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
     px="${px%/}"
     # What: the health path both SOT health URLs name.
@@ -15340,12 +15340,29 @@ PROG
             [ "${al}" -eq 1 ] && [ "${r}" -eq 0 ] || viol+=("${f#"${repo_root}/"}: ${hp} must serve via alias, never return (return skips the ACL)")
             [ -n "${first}" ] || first="${b}"
             [ "${b}" = "${first}" ] || viol+=("${f#"${repo_root}/"}: ${hp} differs from the first block")
-            IFS=';' read -ra parts <<<"${b}"
-            for p in "${parts[@]}"; do
-                [[ "${p}" == "allow "* ]] || continue
-                [[ " ${pn} ${lb} " == *" ${p#allow } "* ]] \
-                    || viol+=("${f#"${repo_root}/"}: ${hp} allows ${p#allow }, neither the loopback bind nor a PRIVATE_NETS member")
-            done
+        done <<<"${out}"
+        # What: the allow lines of every location.
+        # Why: a location with allow lines is an ACL.
+        # From: Issue #1683 | PR #1912
+        out="$(_ci_capture 0 awk "$(cat <<'PROG'
+            $1 == "location" { loc = $0; sub(/^[[:space:]]+/, "", loc); sub(/[[:space:]]*\{.*$/, "", loc); gsub(/[[:space:]]+/, " ", loc)
+                inb = 1; depth = 0; a = 0; d = 0 }
+            inb { line = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", line); gsub(/[[:space:]]+/, " ", line)
+                if (line ~ /^allow /) { t = line; sub(/^allow /, "", t); sub(/;$/, "", t); print loc "|T|" t; a++; if (d) d = -1 }
+                if (line == "deny all;" && d == 0) d = 1
+                o = $0; c = $0
+                depth += gsub(/\{/, "", o) - gsub(/\}/, "", c)
+                if (depth <= 0) { if (a > 0 && d != 1) print loc "|D|"; inb = 0 } }
+PROG
+            )" "${f}")" || return 2
+        while IFS='|' read -r line b h; do
+            [ -n "${line}" ] || continue
+            if [ "${b}" = "T" ]; then
+                [[ " ${pn} ${lb} " == *" ${h} "* ]] \
+                    || viol+=("${f#"${repo_root}/"}: ${line} allows ${h}, neither the loopback bind nor a PRIVATE_NETS member")
+            elif [ "${line}" != "location = ${hp}" ]; then
+                viol+=("${f#"${repo_root}/"}: ${line} needs allow lines followed by deny all")
+            fi
         done <<<"${out}"
     done
     [ "${blocks}" -gt 0 ] || viol+=("${px#"${repo_root}/"}/conf.d: no ${hp} block found")
