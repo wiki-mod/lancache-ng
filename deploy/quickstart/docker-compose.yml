@@ -371,6 +371,13 @@ services:
       # From: Issue #1095
       - DNS_XFR_NOTIFY_TARGETS=${DNS_XFR_NOTIFY_TARGETS:-}
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
+      # What: upstream resolvers for non-LAN names.
+      # Why: one .env value feeds both recursors.
+      # From: Issue #1918
+      - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
+      - DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES:-.}
+      - DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES:-}
+      - DNS_LISTEN_IPS=${IP_STANDARD},${IP_SSL:-}
     volumes:
       # What: shared-secrets volume, first-writer-wins for PDNS_API_KEY/DDNS_TSIG_KEY.
       # Why: every consumer of these secrets must agree on the same value.
@@ -426,6 +433,13 @@ services:
       - DNS_REPLICATION_ROLE=secondary
       - DNS_XFR_PRIMARY=dns-standard:5300
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
+      # What: upstream resolvers for non-LAN names.
+      # Why: one .env value feeds both recursors.
+      # From: Issue #1918
+      - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
+      - DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES:-.}
+      - DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES:-}
+      - DNS_LISTEN_IPS=${IP_STANDARD},${IP_SSL:-}
     volumes:
       # What: shared-secrets volume, first-writer-wins for PDNS_API_KEY/DDNS_TSIG_KEY.
       # Why: every consumer of these secrets must agree on the same value.

@@ -152,6 +152,145 @@ is_dnsmasq_subnet_start() {
     is_valid_ipv4 "$ip" && [[ "$ip" == *".0" ]]
 }
 
+# What: true for an IPv4 or IPv6 address of an upstream resolver.
+# Why: the value reaches recursor.conf, so a typo must stop here.
+# From: Issue #1918
+is_valid_dns_upstream_address() {
+    local addr="$1"
+
+    is_valid_ipv4 "$addr" && return 0
+    [[ "$addr" == *:*:* && "$addr" =~ ^[0-9A-Fa-f:]+$ ]]
+}
+
+# What: true for a DNS zone name such as corp.example.
+# Why: zone names become YAML values in recursor.conf.
+# From: Issue #1918
+is_valid_dns_upstream_zone() {
+    local zone="$1"
+    local label='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+
+    [[ "$zone" =~ ^(${label}\.)*${label}$ ]]
+}
+
+# What: prints a comma/space list as lower-case, comma-joined.
+# Why: .env keeps one stable spelling, so reruns compare equal.
+# From: Issue #1918
+normalize_dns_upstream_list() {
+    local item out="" list_items
+    read -r -a list_items <<< "${1//,/ }"
+    for item in "${list_items[@]}"; do
+        item="${item,,}"
+        [[ "$item" != "." ]] && item="${item%.}"
+        out+="${out:+,}${item}"
+    done
+    printf '%s' "$out"
+}
+
+# What: asks the optional upstream-resolver questions.
+# Why: install and configure-dns must ask identical questions.
+# From: Issue #1918
+# Args: current servers, zones, unsigned zones, own LanCache IPs.
+# Sets: DNS_UPSTREAM_SERVERS, DNS_UPSTREAM_ZONES, DNS_UPSTREAM_UNSIGNED_ZONES.
+prompt_dns_upstream() {
+    local cur_servers="$1" cur_zones="$2" cur_unsigned="$3" own_ips="$4"
+    local default_use="N" default_scope="all" entry zone covered bad
+    local -a entries=() zone_entries=()
+
+    [[ -n "$cur_servers" ]] && default_use="Y"
+    [[ -n "$cur_zones" && "$cur_zones" != "." ]] && default_scope="zones"
+
+    printf "  LanCache-NG answers DNS for your clients. Names it does not know\n"
+    printf "  (for example your NAS) are looked up on the internet by default.\n"
+    printf "  If your router or firewall (OPNsense, pfSense, ...) knows those\n"
+    printf "  names, LanCache-NG can ask it instead. CDN names for game\n"
+    printf "  downloads are still answered by LanCache-NG itself.\n"
+    printf "  Default: no external DNS server.\n\n"
+
+    ask "Use an external DNS server? [y/N]" "$default_use"
+    if [[ "${REPLY,,}" != "y" ]]; then
+        DNS_UPSTREAM_SERVERS=""
+        DNS_UPSTREAM_ZONES="."
+        DNS_UPSTREAM_UNSIGNED_ZONES=""
+        return 0
+    fi
+
+    while true; do
+        ask "DNS server IP addresses (several: separate with space or comma)" "$cur_servers"
+        read -r -a entries <<< "${REPLY//,/ }"
+        bad=""
+        [[ ${#entries[@]} -gt 0 ]] || bad="enter at least one IP address"
+        for entry in "${entries[@]}"; do
+            if ! is_valid_dns_upstream_address "$entry"; then
+                bad="'$entry' is not a valid IPv4/IPv6 address"
+            elif [[ "$entry" == 127.* || "$entry" == "::1" || "$entry" == "0.0.0.0" || "$entry" == "::" ]]; then
+                bad="'$entry' is this host itself, not an external DNS server"
+            elif [[ ",${own_ips}," == *",${entry},"* ]]; then
+                bad="'$entry' is a LanCache-NG address; forwarding to it would loop"
+            fi
+        done
+        [[ -z "$bad" ]] && break
+        print_error "Invalid DNS server: $bad"
+        [[ "$WIZARD_INTROSPECT_MODE" = "1" ]] && die "Invalid DNS server answer: $bad"
+    done
+    DNS_UPSTREAM_SERVERS=$(normalize_dns_upstream_list "${entries[*]}")
+
+    printf "\n  Forward all normal DNS requests to it, or only certain internal\n"
+    printf "  domains (for example lan.example)? Forwarding all is simplest.\n"
+    while true; do
+        ask "Forward which requests? [all/zones]" "$default_scope"
+        case "${REPLY,,}" in
+            all) DNS_UPSTREAM_ZONES="."; break ;;
+            zones)
+                while true; do
+                    ask "Internal domains to forward (separate with space or comma)" "${cur_zones#.}"
+                    read -r -a zone_entries <<< "${REPLY//,/ }"
+                    bad=""
+                    [[ ${#zone_entries[@]} -gt 0 ]] || bad="enter at least one domain"
+                    for zone in "${zone_entries[@]}"; do
+                        is_valid_dns_upstream_zone "${zone%.}" || bad="'$zone' is not a valid domain name"
+                    done
+                    [[ -z "$bad" ]] && break
+                    print_error "Invalid domain: $bad"
+                    [[ "$WIZARD_INTROSPECT_MODE" = "1" ]] && die "Invalid domain answer: $bad"
+                done
+                DNS_UPSTREAM_ZONES=$(normalize_dns_upstream_list "${zone_entries[*]}")
+                break
+                ;;
+            *) print_error "Please answer 'all' or 'zones'." ;;
+        esac
+    done
+
+    printf "\n  LanCache-NG checks DNSSEC signatures and keeps doing so. Private\n"
+    printf "  domains of your own network have no signature, so name them here\n"
+    printf "  (for example corp.example) or they fail. Public names stay\n"
+    printf "  checked. Type 'none' for no private domain.\n"
+    while true; do
+        ask "Private domains without DNSSEC (space/comma, or 'none')" "${cur_unsigned:-none}"
+        bad=""
+        entries=()
+        if [[ "${REPLY,,}" != "none" ]]; then
+            read -r -a entries <<< "${REPLY//,/ }"
+        fi
+        for entry in "${entries[@]}"; do
+            if ! is_valid_dns_upstream_zone "${entry%.}"; then
+                bad="'$entry' is not a valid domain name"
+                continue
+            fi
+            [[ "$DNS_UPSTREAM_ZONES" = "." ]] && continue
+            covered=0
+            for zone in "${zone_entries[@]}"; do
+                zone="${zone,,}"; zone="${zone%.}"; entry="${entry,,}"; entry="${entry%.}"
+                [[ "$entry" == "$zone" || "$entry" == *".${zone}" ]] && covered=1
+            done
+            [[ "$covered" = "1" ]] || bad="'$entry' is not inside a forwarded domain"
+        done
+        [[ -z "$bad" ]] && break
+        print_error "Invalid private domain: $bad"
+        [[ "$WIZARD_INTROSPECT_MODE" = "1" ]] && die "Invalid private-domain answer: $bad"
+    done
+    DNS_UPSTREAM_UNSIGNED_ZONES=$(normalize_dns_upstream_list "${entries[*]:-}")
+}
+
 # Issue #450: light shape validation for the optional dnsmasq relay/proxy
 # fields, mirroring services/ui/src/routes/dhcp.rs's Rust-side validators of
 # the same name/intent (is_valid_interface_name, is_valid_domain_name,
@@ -4826,8 +4965,13 @@ perform_stack_update_flow() {
     # Quickstart installs keep a copied compose bundle under the install tree.
     # Refresh those assets before any backup-driven restart so even copied
     # installs use the current container wiring during the whole update.
-    install_quickstart_compose_assets "$install_dir"
-    print_ok "quickstart compose assets updated"
+    # What: copy quickstart assets only into non-prod dirs.
+    # Why: the copy replaced deploy/prod/docker-compose.yml.
+    # From: Issue #1918
+    if ! is_deploy_prod_install_dir "$install_dir"; then
+        install_quickstart_compose_assets "$install_dir"
+        print_ok "quickstart compose assets updated"
+    fi
 
     print_step "Creating pre-update rollback backup"
     if ! ( cmd_backup --config "$install_dir" ); then
