@@ -654,6 +654,7 @@ runtime:
     - NGINX_UPSTREAM_IDLE_TIMEOUT=3600
     - KEA_NCR_PORT=53001
     - NGINX_HTTPS_LISTEN_FILE=conf.d/https-listen.inc
+    - NGINX_HEALTHZ_FILE=lancache-healthz-body.txt
     - DNS_PORT=53
     - DNS_HTTPS_PORT=1053
     - PDNS_AUTH_PORT=5300

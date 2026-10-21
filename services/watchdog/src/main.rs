@@ -4005,6 +4005,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     );
     let https = dir.join("conf.d/https.conf");
     let listen_file = ctx.need("NGINX_HTTPS_LISTEN_FILE")?;
+    let healthz_file = ctx.need("NGINX_HEALTHZ_FILE")?;
     let ca_dir = nginx_ca_dir()?;
     let subdir = ctx.need("NGINX_SUBDIR_CERTS")?;
     let cert_dir = dir.join(&subdir);
@@ -4038,6 +4039,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         ("NGINX_DIR", dir.display().to_string()),
         ("NGINX_SUBDIR_CERTS", subdir.clone()),
         ("NGINX_HTTPS_LISTEN_FILE", listen_file.clone()),
+        ("NGINX_HEALTHZ_FILE", healthz_file.clone()),
         ("LOOPBACK_BIND_IP", loopback.clone()),
     ];
     for (template, out, on) in [
@@ -4051,7 +4053,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         write_file(&out, text.as_bytes(), 0o640, Place::Replace)
             .map_err(|e| format!("cannot write {}: {e}", out.display()))?;
     }
-    let healthz = dir.join("lancache-healthz-body.txt");
+    let healthz = dir.join(&healthz_file);
     write_file(&healthz, b"ok\n", 0o644, Place::Replace)
         .map_err(|e| format!("cannot write {}: {e}", healthz.display()))?;
     let value = |key: &'static str| ctx.need(key).map(|v| (key, v));
